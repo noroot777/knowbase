@@ -1,0 +1,191 @@
+# -*- coding: utf-8 -*-
+"""知识库 Web 服务:检索 API + 静态前端。
+
+    uv run kb-web            # http://127.0.0.1:8787
+
+只读服务(除 /api/ask 会调 claude CLI),索引更新仍走 kb index / kb extract。
+每个请求独立开 SQLite 连接(WAL 模式),与后台索引/提取进程并存无碍。
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from kb import store
+from kb.config import VAULT_ROOT
+from kb.search import Filters, search
+
+app = FastAPI(title="knowledge-base")
+
+_STATIC = Path(__file__).resolve().parent / "static"
+
+# obsidian://open 深链需要 vault 名(obs 目录名)
+VAULT_NAME = VAULT_ROOT.name
+
+
+@app.get("/")
+def index_page():
+    return FileResponse(_STATIC / "index.html")
+
+
+@app.get("/api/search")
+def api_search(
+    q: str = Query(..., min_length=1),
+    source: str | None = None,
+    account: str | None = None,
+    tag: list[str] = Query(default=[]),
+    entity: list[str] = Query(default=[]),
+    top: int = 20,
+    vector: bool = True,
+):
+    conn = store.connect()
+    try:
+        hits = search(
+            conn, q,
+            Filters(source=source, account=account, tags=tag, entities=entity),
+            top_k=min(top, 50), use_vector=vector,
+        )
+        out = []
+        for h in hits:
+            d = conn.execute(
+                "SELECT summary FROM documents WHERE path=?", (h.path,)
+            ).fetchone()
+            ents = [r["entity"] for r in conn.execute(
+                "SELECT entity FROM entities WHERE path=? LIMIT 8", (h.path,)
+            )]
+            out.append({
+                **h.__dict__,
+                "summary": d["summary"] if d else "",
+                "entities": ents,
+                "vault": VAULT_NAME,
+            })
+        return {"hits": out}
+    finally:
+        conn.close()
+
+
+@app.get("/api/facets")
+def api_facets():
+    """给前端过滤器下拉用:来源/账号/topic/热门实体。"""
+    conn = store.connect()
+    try:
+        sources = [dict(r) for r in conn.execute(
+            "SELECT source AS value, COUNT(*) AS n FROM documents GROUP BY source ORDER BY n DESC"
+        )]
+        accounts = [dict(r) for r in conn.execute(
+            "SELECT account AS value, COUNT(*) AS n FROM documents "
+            "WHERE account != '' GROUP BY account ORDER BY n DESC LIMIT 40"
+        )]
+        topics = [dict(r) for r in conn.execute(
+            "SELECT tag AS value, COUNT(*) AS n FROM doc_tags "
+            "WHERE tag LIKE 'topic/%' GROUP BY tag ORDER BY n DESC LIMIT 30"
+        )]
+        entities = [dict(r) for r in conn.execute(
+            "SELECT entity AS value, COUNT(*) AS n FROM entities "
+            "GROUP BY entity ORDER BY n DESC LIMIT 50"
+        )]
+        return {"sources": sources, "accounts": accounts,
+                "topics": topics, "entities": entities}
+    finally:
+        conn.close()
+
+
+@app.get("/api/stats")
+def api_stats():
+    conn = store.connect()
+    try:
+        one = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
+        return {
+            "documents": one("SELECT COUNT(*) FROM documents"),
+            "chunks": one("SELECT COUNT(*) FROM chunks"),
+            "vectors": one("SELECT COUNT(*) FROM chunk_vec"),
+            "entities": one("SELECT COUNT(DISTINCT entity) FROM entities"),
+            "extracted": one("SELECT COUNT(*) FROM documents WHERE extracted_at IS NOT NULL"),
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/doc")
+def api_doc(path: str):
+    """读一篇文档全文(md 原文),给前端预览面板。"""
+    conn = store.connect()
+    try:
+        row = conn.execute("SELECT * FROM documents WHERE path=?", (path,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(404, "文档不在索引里")
+    full = VAULT_ROOT / path
+    try:
+        text = full.read_text(encoding="utf-8")
+    except OSError:
+        raise HTTPException(404, "文件读取失败(可能已移动)")
+    return {"path": path, "title": row["title"], "content": text, "vault": VAULT_NAME}
+
+
+class AskRequest(BaseModel):
+    query: str
+    source: str | None = None
+    tags: list[str] = []
+    entities: list[str] = []
+    model: str = "sonnet"
+
+
+@app.post("/api/ask")
+def api_ask(body: AskRequest):
+    """检索 top-8 → claude CLI 综合回答。同步阻塞(20-60s),前端转圈等待。"""
+    conn = store.connect()
+    try:
+        hits = search(
+            conn, body.query,
+            Filters(source=body.source, tags=body.tags, entities=body.entities),
+            top_k=8,
+        )
+        if not hits:
+            return {"answer": "知识库里没有找到相关内容。", "refs": []}
+        ctx_parts, refs = [], []
+        for i, h in enumerate(hits, 1):
+            full = conn.execute(
+                "SELECT group_concat(text, char(10)) AS body FROM chunks WHERE path=?",
+                (h.path,),
+            ).fetchone()
+            ctx_parts.append(
+                f"[{i}] {h.title} ({h.account}, {h.published[:10]})\n"
+                f"{(full['body'] or '')[:2500]}"
+            )
+            refs.append({"n": i, "title": h.title, "path": h.path,
+                         "account": h.account, "url": h.url, "vault": VAULT_NAME})
+    finally:
+        conn.close()
+
+    prompt = (
+        "根据下面知识库文章回答用户问题。要求:\n"
+        "- 只基于给出的文章,不要编造;文章里没有就明说没有\n"
+        "- 引用时标注 [编号]\n\n"
+        f"用户问题: {body.query}\n\n" + "\n\n---\n\n".join(ctx_parts)
+    )
+    try:
+        proc = subprocess.run(
+            ["claude", "-p", prompt, "--model", body.model],
+            capture_output=True, text=True, timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "claude 调用超时")
+    if proc.returncode != 0:
+        raise HTTPException(502, f"claude 调用失败: {proc.stderr[:300]}")
+    return {"answer": proc.stdout.strip(), "refs": refs}
+
+
+def main() -> None:
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8787)
+
+
+if __name__ == "__main__":
+    main()

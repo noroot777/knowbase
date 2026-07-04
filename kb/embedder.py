@@ -19,9 +19,14 @@ def _get_model():
             from sentence_transformers import SentenceTransformer
         except ImportError as e:
             raise RuntimeError(
-                "未安装向量依赖。运行: uv sync --extra vector"
+                "未安装向量依赖。运行: uv sync"
             ) from e
-        _model = SentenceTransformer(EMBEDDING_MODEL)
+        # 模型已缓存时离线加载:跳过 HuggingFace 的一堆 HEAD 校验请求,
+        # 启动快好几秒且断网可用;没缓存(首次)再走在线下载
+        try:
+            _model = SentenceTransformer(EMBEDDING_MODEL, local_files_only=True)
+        except Exception:
+            _model = SentenceTransformer(EMBEDDING_MODEL)
     return _model
 
 

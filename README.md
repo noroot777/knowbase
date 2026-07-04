@@ -38,7 +38,18 @@ uv run kb search "xxx" --source dr-gzh --json   # 来源过滤 / JSON 输出
 
 uv run kb ask "有没有能自动生成架构图的开源工具?"  # 检索+Claude 带引用回答
 uv run kb stats
+
+uv run kb-web                  # Web 界面: http://127.0.0.1:8787
 ```
+
+## MCP(在 Claude Code / Desktop 里直接问知识库)
+
+```bash
+claude mcp add kb --scope user -- uv run --directory ~/code/knowledge-base kb-mcp
+```
+
+注册后对话里可用三个工具:`kb_search`(混合检索)、`kb_read`(读全文)、
+`kb_entities`(列实体)。不提供 ask —— 调用方本身是 LLM,检索完自己综合。
 
 ## 日常流程
 

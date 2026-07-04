@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>知识库</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<style>
+  :root {
+    --bg: #faf9f7; --card: #ffffff; --ink: #1a1a1a; --muted: #8a8578;
+    --line: #e8e4dc; --accent: #b3541e; --accent-soft: #f6e8de;
+    --tag-bg: #f0ede6; --ok: #4a7c59;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font: 15px/1.7 -apple-system, "PingFang SC", "Noto Sans SC", sans-serif;
+    background: var(--bg); color: var(--ink);
+    max-width: 860px; margin: 0 auto; padding: 40px 20px 80px;
+  }
+  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 24px; }
+  h1 { font-size: 22px; letter-spacing: .02em; }
+  #stats { color: var(--muted); font-size: 12.5px; }
+
+  .searchbar { display: flex; gap: 8px; margin-bottom: 12px; }
+  #q {
+    flex: 1; padding: 12px 16px; font-size: 15px; border: 1.5px solid var(--line);
+    border-radius: 12px; background: var(--card); outline: none; transition: border-color .15s;
+  }
+  #q:focus { border-color: var(--accent); }
+  button {
+    padding: 0 18px; border: none; border-radius: 12px; cursor: pointer;
+    font-size: 14px; font-weight: 500; background: var(--accent); color: #fff;
+  }
+  button:hover { opacity: .9; }
+  button.ghost { background: var(--tag-bg); color: var(--ink); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; align-items: center; }
+  select {
+    padding: 6px 10px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--card); font-size: 13px; color: var(--ink); outline: none; max-width: 200px;
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px;
+    background: var(--accent-soft); border-radius: 99px; font-size: 12.5px; color: var(--accent);
+  }
+  .chip b { cursor: pointer; font-weight: 700; }
+
+  .hit {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px 18px; margin-bottom: 12px;
+  }
+  .hit h3 { font-size: 16px; margin-bottom: 4px; }
+  .hit h3 a { color: var(--ink); text-decoration: none; }
+  .hit h3 a:hover { color: var(--accent); }
+  .meta { font-size: 12px; color: var(--muted); margin-bottom: 6px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .badge { padding: 1px 7px; border-radius: 6px; background: var(--tag-bg); font-size: 11px; }
+  .badge.vec { background: #e4eee7; color: var(--ok); }
+  .summary { color: #444; font-size: 13.5px; margin-bottom: 6px; }
+  .snippet { color: var(--muted); font-size: 13px; }
+  .ents { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .ent {
+    font-size: 11.5px; padding: 2px 9px; background: var(--tag-bg);
+    border-radius: 99px; cursor: pointer; color: #555;
+  }
+  .ent:hover { background: var(--accent-soft); color: var(--accent); }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+  .tabs button { background: transparent; color: var(--muted); padding: 8px 14px; border-radius: 9px; }
+  .tabs button.on { background: var(--tag-bg); color: var(--ink); }
+
+  #askpanel textarea {
+    width: 100%; min-height: 76px; padding: 12px 16px; font: inherit; font-size: 15px;
+    border: 1.5px solid var(--line); border-radius: 12px; background: var(--card);
+    outline: none; resize: vertical;
+  }
+  #askpanel textarea:focus { border-color: var(--accent); }
+  #answer {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 20px 22px; margin-top: 14px; font-size: 14.5px;
+  }
+  #answer h1, #answer h2, #answer h3 { font-size: 15.5px; margin: 14px 0 6px; }
+  #answer p, #answer ul, #answer ol { margin-bottom: 10px; }
+  #answer code { background: var(--tag-bg); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  #answer pre { background: var(--tag-bg); padding: 12px; border-radius: 9px; overflow-x: auto; margin-bottom: 10px; }
+  .refs { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); font-size: 13px; }
+  .refs a { color: var(--accent); text-decoration: none; }
+
+  .empty { text-align: center; color: var(--muted); padding: 60px 0; font-size: 14px; }
+  .spin {
+    display: inline-block; width: 16px; height: 16px; border: 2px solid var(--line);
+    border-top-color: var(--accent); border-radius: 50%; animation: r .7s linear infinite;
+    vertical-align: -3px; margin-right: 8px;
+  }
+  @keyframes r { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>知识库</h1>
+  <span id="stats"></span>
+</header>
+
+<div class="tabs">
+  <button id="tab-search" class="on" onclick="switchTab('search')">搜索</button>
+  <button id="tab-ask" onclick="switchTab('ask')">问答</button>
+</div>
+
+<div id="searchpanel">
+  <div class="searchbar">
+    <input id="q" placeholder="关键词或一句话描述,如:把书变成 skill 的工具" autofocus
+           onkeydown="if(event.key==='Enter')doSearch()">
+    <button onclick="doSearch()">搜索</button>
+  </div>
+  <div class="filters">
+    <select id="f-source" onchange="doSearch()"><option value="">全部来源</option></select>
+    <select id="f-account" onchange="doSearch()"><option value="">全部账号</option></select>
+    <select id="f-topic" onchange="addTopic(this.value)"><option value="">加主题过滤…</option></select>
+    <select id="f-entity" onchange="addEntity(this.value)"><option value="">加实体过滤…</option></select>
+    <span id="chips"></span>
+  </div>
+  <div id="results"><div class="empty">输入点什么开始搜</div></div>
+</div>
+
+<div id="askpanel" style="display:none">
+  <textarea id="ask-q" placeholder="描述你的意图,如:有没有能自动画架构图的开源工具?"></textarea>
+  <div style="margin-top:10px; display:flex; gap:8px; align-items:center">
+    <button id="ask-btn" onclick="doAsk()">提问</button>
+    <span style="font-size:12.5px;color:var(--muted)">检索 top-8 后由 Claude 综合回答,约 20-60 秒</span>
+  </div>
+  <div id="answer" style="display:none"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let tagFilters = [], entityFilters = [];
+
+function switchTab(t) {
+  $('searchpanel').style.display = t === 'search' ? '' : 'none';
+  $('askpanel').style.display = t === 'ask' ? '' : 'none';
+  $('tab-search').classList.toggle('on', t === 'search');
+  $('tab-ask').classList.toggle('on', t === 'ask');
+}
+
+async function loadMeta() {
+  const [stats, facets] = await Promise.all([
+    fetch('/api/stats').then(r => r.json()),
+    fetch('/api/facets').then(r => r.json()),
+  ]);
+  $('stats').textContent =
+    `${stats.documents} 篇 · ${stats.vectors} 向量 · ${stats.entities} 实体 · 已提取 ${stats.extracted}`;
+  const fill = (sel, items, label) => {
+    for (const it of items) {
+      const o = document.createElement('option');
+      o.value = it.value;
+      o.textContent = `${label ? it.value.replace(label, '') : it.value} (${it.n})`;
+      sel.appendChild(o);
+    }
+  };
+  fill($('f-source'), facets.sources);
+  fill($('f-account'), facets.accounts);
+  fill($('f-topic'), facets.topics, '');
+  fill($('f-entity'), facets.entities);
+}
+
+function renderChips() {
+  $('chips').innerHTML =
+    tagFilters.map(t => `<span class="chip">${t}<b onclick="rmTopic('${t}')">×</b></span>`).join('') +
+    entityFilters.map(e => `<span class="chip">${e}<b onclick="rmEntity('${e}')">×</b></span>`).join('');
+}
+function addTopic(v) { if (v && !tagFilters.includes(v)) tagFilters.push(v); $('f-topic').value=''; renderChips(); doSearch(); }
+function rmTopic(v) { tagFilters = tagFilters.filter(x => x !== v); renderChips(); doSearch(); }
+function addEntity(v) { if (v && !entityFilters.includes(v)) entityFilters.push(v); $('f-entity').value=''; renderChips(); doSearch(); }
+function rmEntity(v) { entityFilters = entityFilters.filter(x => x !== v); renderChips(); doSearch(); }
+
+function obsLink(h) {
+  return `obsidian://open?vault=${encodeURIComponent(h.vault)}&file=${encodeURIComponent(h.path.replace(/\.md$/, ''))}`;
+}
+
+async function doSearch() {
+  const q = $('q').value.trim();
+  if (!q && !tagFilters.length && !entityFilters.length) return;
+  $('results').innerHTML = '<div class="empty"><span class="spin"></span>搜索中…</div>';
+  const p = new URLSearchParams({ q: q || '*' });
+  if ($('f-source').value) p.set('source', $('f-source').value);
+  if ($('f-account').value) p.set('account', $('f-account').value);
+  tagFilters.forEach(t => p.append('tag', t));
+  entityFilters.forEach(e => p.append('entity', e));
+  const res = await fetch('/api/search?' + p).then(r => r.json()).catch(() => ({hits: []}));
+  if (!res.hits.length) { $('results').innerHTML = '<div class="empty">没有结果</div>'; return; }
+  $('results').innerHTML = res.hits.map(h => `
+    <div class="hit">
+      <h3><a href="${obsLink(h)}" title="在 Obsidian 中打开">${h.title}</a></h3>
+      <div class="meta">
+        <span>${h.account}</span><span>${(h.published || '').slice(0, 10)}</span>
+        <span class="badge">${h.source}</span>
+        ${h.matched_by.map(m => `<span class="badge ${m === 'vec' ? 'vec' : ''}">${m === 'vec' ? '语义' : '关键词'}</span>`).join('')}
+        ${h.url ? `<a href="${h.url}" target="_blank" style="color:var(--muted)">原文↗</a>` : ''}
+      </div>
+      ${h.summary ? `<div class="summary">${h.summary}</div>` : ''}
+      <div class="snippet">${h.best_chunk.slice(0, 160)}…</div>
+      ${h.entities.length ? `<div class="ents">${h.entities.map(e =>
+        `<span class="ent" onclick="addEntity('${e.replace(/'/g, "\\'")}')">${e}</span>`).join('')}</div>` : ''}
+    </div>`).join('');
+}
+
+async function doAsk() {
+  const q = $('ask-q').value.trim();
+  if (!q) return;
+  const btn = $('ask-btn');
+  btn.disabled = true;
+  $('answer').style.display = '';
+  $('answer').innerHTML = '<span class="spin"></span>检索并生成回答中…';
+  try {
+    const res = await fetch('/api/ask', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ query: q }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.status);
+    $('answer').innerHTML = marked.parse(data.answer) +
+      (data.refs.length ? `<div class="refs">来源:<br>${data.refs.map(r =>
+        `[${r.n}] <a href="obsidian://open?vault=${encodeURIComponent(r.vault)}&file=${encodeURIComponent(r.path.replace(/\.md$/, ''))}">${r.title}</a> — ${r.account}`
+      ).join('<br>')}</div>` : '');
+  } catch (e) {
+    $('answer').innerHTML = `<span style="color:#b33">出错了: ${e.message}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+loadMeta();
+</script>
+</body>
+</html>
