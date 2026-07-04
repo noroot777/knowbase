@@ -1,0 +1,172 @@
+# -*- coding: utf-8 -*-
+"""混合检索:FTS(关键词) + 向量(语义) → RRF 融合 → doc 级聚合。
+
+RRF(Reciprocal Rank Fusion):score = Σ 1/(k + rank),k=60。
+不依赖两路打分的量纲,免调参,是混合检索的稳妥默认。
+
+过滤条件(source/account/tag/entity)编译成 SQL 子查询,
+作用在两路召回上,保证过滤后仍有完整的 top-N。
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass, field
+
+from kb.store import tokenize
+
+RRF_K = 60
+CANDIDATES_PER_LEG = 50   # 每路召回数,融合后再截断
+
+
+@dataclass
+class Hit:
+    path: str
+    title: str
+    source: str
+    account: str
+    published: str
+    url: str
+    score: float
+    best_chunk: str        # 得分最高 chunk 的文本(用于展示/引用)
+    heading: str
+    matched_by: list[str] = field(default_factory=list)  # ["fts", "vec"]
+
+
+@dataclass
+class Filters:
+    source: str | None = None
+    account: str | None = None
+    tags: list[str] = field(default_factory=list)      # AND 关系
+    entities: list[str] = field(default_factory=list)  # AND 关系
+
+
+def _filter_sql(f: Filters) -> tuple[str, list]:
+    """把过滤条件编译成作用于 documents 的 WHERE 片段。"""
+    clauses, params = [], []
+    if f.source:
+        clauses.append("d.source = ?")
+        params.append(f.source)
+    if f.account:
+        clauses.append("d.account = ?")
+        params.append(f.account)
+    for t in f.tags:
+        clauses.append(
+            "d.path IN (SELECT path FROM doc_tags WHERE tag = ? OR tag LIKE ?)"
+        )
+        params.extend([t, f"{t}/%"])
+    for e in f.entities:
+        clauses.append(
+            "d.path IN (SELECT path FROM entities WHERE entity = ? COLLATE NOCASE)"
+        )
+        params.append(e)
+    where = (" AND " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
+def _fts_leg(conn: sqlite3.Connection, query: str, f: Filters) -> list[tuple[int, str]]:
+    """FTS 召回:返回 [(chunk_id, path)] 按相关性排序。"""
+    tok = tokenize(query)
+    if not tok.strip():
+        return []
+    # OR 连接:意图式长 query 不要求全部词命中
+    match_expr = " OR ".join(f'"{t}"' for t in tok.split())
+    where, params = _filter_sql(f)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT c.id AS chunk_id, c.path
+            FROM chunks_fts ft
+            JOIN chunks c ON c.id = ft.chunk_id
+            JOIN documents d ON d.path = c.path
+            WHERE chunks_fts MATCH ? {where}
+            ORDER BY bm25(chunks_fts, 0, 3.0, 1.0)
+            LIMIT ?
+            """,
+            [match_expr, *params, CANDIDATES_PER_LEG],
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []  # 特殊字符导致 MATCH 语法错误时放弃这一路
+    return [(r["chunk_id"], r["path"]) for r in rows]
+
+
+def _vec_leg(conn: sqlite3.Connection, query: str, f: Filters) -> list[tuple[int, str]]:
+    """向量召回。向量表为空或依赖缺失时返回 []。"""
+    n = conn.execute("SELECT COUNT(*) AS c FROM chunk_vec").fetchone()["c"]
+    if n == 0:
+        return []
+    try:
+        from kb.embedder import embed_query
+        qv = embed_query(query)
+    except RuntimeError:
+        return []
+    import struct
+    where, params = _filter_sql(f)
+    # vec0 的 KNN 查询先取 top-N,再 join 过滤(过滤在外层,故多取一些候选)
+    rows = conn.execute(
+        f"""
+        SELECT v.chunk_id, c.path
+        FROM (
+          SELECT chunk_id, distance FROM chunk_vec
+          WHERE embedding MATCH ? AND k = ?
+        ) v
+        JOIN chunks c ON c.id = v.chunk_id
+        JOIN documents d ON d.path = c.path
+        WHERE 1=1 {where}
+        ORDER BY v.distance
+        LIMIT ?
+        """,
+        [struct.pack(f"{len(qv)}f", *qv), CANDIDATES_PER_LEG * 3,
+         *params, CANDIDATES_PER_LEG],
+    ).fetchall()
+    return [(r["chunk_id"], r["path"]) for r in rows]
+
+
+def search(
+    conn: sqlite3.Connection,
+    query: str,
+    filters: Filters | None = None,
+    top_k: int = 10,
+    use_vector: bool = True,
+) -> list[Hit]:
+    f = filters or Filters()
+    legs: dict[str, list[tuple[int, str]]] = {"fts": _fts_leg(conn, query, f)}
+    if use_vector:
+        legs["vec"] = _vec_leg(conn, query, f)
+
+    # RRF:chunk 级融合
+    chunk_score: dict[int, float] = {}
+    chunk_legs: dict[int, set[str]] = {}
+    chunk_path: dict[int, str] = {}
+    for leg_name, results in legs.items():
+        for rank, (cid, path) in enumerate(results):
+            chunk_score[cid] = chunk_score.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
+            chunk_legs.setdefault(cid, set()).add(leg_name)
+            chunk_path[cid] = path
+
+    if not chunk_score:
+        return []
+
+    # doc 级聚合:文档分 = 其最高 chunk 分(避免长文靠 chunk 数量刷分)
+    doc_best: dict[str, tuple[float, int]] = {}
+    for cid, s in chunk_score.items():
+        p = chunk_path[cid]
+        if p not in doc_best or s > doc_best[p][0]:
+            doc_best[p] = (s, cid)
+
+    ranked = sorted(doc_best.items(), key=lambda kv: kv[1][0], reverse=True)[:top_k]
+
+    hits: list[Hit] = []
+    for path, (score, cid) in ranked:
+        d = conn.execute("SELECT * FROM documents WHERE path=?", (path,)).fetchone()
+        c = conn.execute("SELECT heading, text FROM chunks WHERE id=?", (cid,)).fetchone()
+        if d is None:
+            continue
+        hits.append(Hit(
+            path=path, title=d["title"], source=d["source"], account=d["account"],
+            published=d["published"], url=d["url"], score=round(score, 5),
+            best_chunk=(c["text"][:300] if c else ""),
+            heading=(c["heading"] if c else ""),
+            matched_by=sorted(chunk_legs.get(cid, set())),
+        ))
+    return hits
