@@ -139,6 +139,19 @@ def writeback_tags(doc_path: str, new_tags: list[str]) -> bool:
     return True
 
 
+def refresh_content_hash(conn, doc_path: str) -> None:
+    """writeback 改了 frontmatter 后刷新库里的 hash,避免下次 index 无谓重建。
+    正文没变(chunker 只看 body),chunks/FTS/向量都无需动。"""
+    import hashlib
+    full = VAULT_ROOT / doc_path
+    try:
+        text = full.read_text(encoding="utf-8")
+    except OSError:
+        return
+    h = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    conn.execute("UPDATE documents SET content_hash=? WHERE path=?", (h, doc_path))
+
+
 def pending_docs(conn, limit: int = 0) -> list:
     """还没提取过的、需要走 LLM 的文档(pre_tagged 来源除外)。"""
     pre_tagged_sources = {s.name for s in SOURCES if s.pre_tagged}

@@ -187,6 +187,34 @@ def mcp_unregister():
     return {"ok": True, "message": proc.stdout.strip()}
 
 
+# ── 数据管道 ────────────────────────────────────────────────────────────────────
+
+from kb import pipeline as pl  # noqa: E402
+
+
+@app.get("/api/pipeline/status")
+def pipeline_status(pending: bool = False):
+    state = dict(pl.get_state())
+    state["wechatoa"] = pl.wechatoa_status()
+    state["last_run"] = pl.load_last_run()
+    # 待处理数要扫文件,只有显式要求且空闲时才算
+    if pending and not state["running"]:
+        state["pending"] = pl.pending_counts()
+    return state
+
+
+class PipelineRunRequest(BaseModel):
+    stages: list[str] | None = None  # None = 全部
+
+
+@app.post("/api/pipeline/run")
+def pipeline_run(body: PipelineRunRequest | None = None):
+    stages = body.stages if body else None
+    if not pl.start_pipeline(stages):
+        raise HTTPException(409, "管道已在运行中")
+    return {"ok": True}
+
+
 @app.post("/api/ask")
 def api_ask(body: AskRequest):
     """意图规划(枚举 vs 检索)→ 执行 → Claude 综合。同步阻塞 20-90s。"""

@@ -124,6 +124,7 @@
 <div class="tabs">
   <button id="tab-search" class="on" onclick="switchTab('search')">搜索</button>
   <button id="tab-ask" onclick="switchTab('ask')">问答</button>
+  <button id="tab-pipe" onclick="switchTab('pipe')">管道</button>
 </div>
 
 <div id="searchpanel">
@@ -156,6 +157,35 @@
   <div id="answer" style="display:none"></div>
 </div>
 
+<div id="pipepanel" style="display:none">
+  <!-- WeChatOA 连接状态 -->
+  <div class="hit" id="pipe-wechatoa" style="display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <b>WeChatOA 后端</b>
+      <span id="wo-status" class="badge">检查中…</span>
+      <span id="wo-auth" style="font-size:12.5px;color:var(--muted);margin-left:8px"></span>
+    </div>
+    <a href="http://localhost:5173/#/config" target="_blank"
+       style="font-size:12.5px;color:var(--accent)">打开 WeChatOA 配置(扫码/账号管理)↗</a>
+  </div>
+
+  <!-- 阶段卡片 -->
+  <div id="pipe-stages" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:12px 0"></div>
+
+  <!-- 操作区 -->
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+    <button id="pipe-run" onclick="runPipe()">全流程同步</button>
+    <span id="pipe-hint" style="font-size:12.5px;color:var(--muted)">
+      抓取(WeChatOA 不在线则跳过)→ 导出 obs → 索引+向量 → 提取打标(tag 自动回写 obs)
+    </span>
+  </div>
+
+  <!-- 日志 -->
+  <div class="hit" style="max-height:300px;overflow-y:auto">
+    <div id="pipe-log" style="font-family:ui-monospace,monospace;font-size:12px;color:#555;white-space:pre-wrap">(暂无日志)</div>
+  </div>
+</div>
+
 <div id="mcp-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeMcp()">
   <div class="modal">
     <h2>MCP 服务管理</h2>
@@ -185,8 +215,11 @@ let tagFilters = [], entityFilters = [];
 function switchTab(t) {
   $('searchpanel').style.display = t === 'search' ? '' : 'none';
   $('askpanel').style.display = t === 'ask' ? '' : 'none';
+  $('pipepanel').style.display = t === 'pipe' ? '' : 'none';
   $('tab-search').classList.toggle('on', t === 'search');
   $('tab-ask').classList.toggle('on', t === 'ask');
+  $('tab-pipe').classList.toggle('on', t === 'pipe');
+  if (t === 'pipe') refreshPipe(true);
 }
 
 async function loadMeta() {
@@ -328,6 +361,77 @@ function copyCmd() {
   navigator.clipboard.writeText(mcpCmd).then(() => {
     $('mcp-msg').textContent = '✓ 命令已复制';
   });
+}
+
+// ── 数据管道 ──────────────────────────────────────────────────────────────
+const STAGE_META = {
+  crawl:   { name: '抓取',  desc: '微信 → WeChatOA 库' },
+  export:  { name: '导出',  desc: 'WeChatOA → obs md' },
+  index:   { name: '索引',  desc: 'obs → FTS + 向量' },
+  extract: { name: '提取',  desc: 'entity/topic/摘要' },
+};
+const STATUS_ICON = { pending: '⋯', running: '<span class="spin"></span>',
+                      ok: '✓', skipped: '⊘', error: '✗', '': '—' };
+let pipeTimer = null;
+
+async function refreshPipe(withPending = false) {
+  const s = await fetch('/api/pipeline/status' + (withPending ? '?pending=1' : ''))
+    .then(r => r.json()).catch(() => null);
+  if (!s) return;
+
+  // WeChatOA 状态
+  $('wo-status').textContent = s.wechatoa.online ? '在线' : '不在线(抓取将跳过)';
+  $('wo-status').style.color = s.wechatoa.online ? 'var(--ok)' : '#c33';
+  const auth = s.wechatoa.auth;
+  $('wo-auth').textContent = auth
+    ? (auth.valid ? `凭证有效 · ${auth.credential_expiry_label || ''}`
+                  : '凭证已失效,需要扫码续期')
+    : '';
+
+  // 阶段卡片(空闲时叠加 last_run 和待处理数)
+  const stages = s.running ? s.stages : (s.last_run ? s.last_run.stages : s.stages);
+  $('pipe-stages').innerHTML = Object.entries(STAGE_META).map(([k, m]) => {
+    const st = stages[k] || { status: '', detail: '' };
+    const pend = s.pending && s.pending[k] != null ? `待处理 ${s.pending[k]}` : '';
+    return `<div class="hit" style="margin:0;padding:12px 14px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <b style="font-size:14px">${m.name}</b>
+        <span style="font-size:14px">${STATUS_ICON[st.status] ?? st.status}</span>
+      </div>
+      <div style="font-size:11.5px;color:var(--muted);margin:2px 0 6px">${m.desc}</div>
+      <div style="font-size:12px;color:#555;min-height:18px">${st.detail || pend || ''}</div>
+    </div>`;
+  }).join('');
+
+  // 日志 + 按钮态
+  $('pipe-log').textContent = (s.log && s.log.length) ? s.log.join('\n')
+    : (s.last_run ? `上次运行完成于 ${s.last_run.finished_at}` : '(暂无日志)');
+  const logBox = $('pipe-log').parentElement;
+  logBox.scrollTop = logBox.scrollHeight;
+  $('pipe-run').disabled = s.running;
+  $('pipe-run').textContent = s.running ? '同步中…' : '全流程同步';
+
+  // 运行中自动轮询
+  if (s.running && !pipeTimer) {
+    pipeTimer = setInterval(() => refreshPipe(false), 1500);
+  } else if (!s.running && pipeTimer) {
+    clearInterval(pipeTimer);
+    pipeTimer = null;
+    refreshPipe(true);   // 结束后刷一次待处理数
+    loadMeta();          // 文档/实体数可能变了
+  }
+}
+
+async function runPipe() {
+  const r = await fetch('/api/pipeline/run', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    alert(d.detail || '启动失败');
+    return;
+  }
+  refreshPipe(false);
 }
 
 loadMeta();

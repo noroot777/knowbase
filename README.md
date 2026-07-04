@@ -62,6 +62,15 @@ claude mcp add kb --scope user -- uv run --directory ~/code/knowledge-base kb-mc
 
 ## 日常流程
 
+web 界面(`uv run kb-web` → http://127.0.0.1:8787)的"管道"tab 一键搞定:
+
+**抓取**(调 WeChatOA 后端,不在线则跳过)→ **导出**(WeChatOA 库 → obs md)
+→ **索引**(FTS + 向量,增量)→ **提取**(entity/topic/摘要,tag 自动回写 obs frontmatter)
+
+面板显示各阶段进度/待处理数/WeChatOA 凭证有效期。唯一剩下的人工:
+微信凭证 ~4 天过期,去 WeChatOA 配置页扫码续期(面板有入口和提醒)。
+
+等价的 CLI:
 1. WeChatOA_Aggregation 抓新文章 → `export_obsidian.py` 增量导出到 obs
 2. `kb index` 增量索引新文档(内容 hash 判断,秒级)
 3. `kb extract` 给新文章打标
