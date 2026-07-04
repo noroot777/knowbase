@@ -48,8 +48,17 @@ uv run kb-web                  # Web 界面: http://127.0.0.1:8787
 claude mcp add kb --scope user -- uv run --directory ~/code/knowledge-base kb-mcp
 ```
 
-注册后对话里可用三个工具:`kb_search`(混合检索)、`kb_read`(读全文)、
+注册后对话里可用工具:`kb_search`(混合检索,支持 since/until 时间过滤)、
+`kb_enumerate`(全量枚举实体/文章,穷举类问题用这个,不漏)、`kb_read`(读全文)、
 `kb_entities`(列实体)。不提供 ask —— 调用方本身是 LLM,检索完自己综合。
+
+## 问答的意图规划
+
+`kb ask` / web 问答不是单纯 RAG:先用 haiku 把问题解析成查询计划——
+- **穷举类**("最近一周都提过哪些开源项目")→ `mode=enumerate_entities`,
+  SQL 全量聚合(时间/来源/实体类型过滤),一篇不漏,再由 Claude 分类整理
+- **内容类**("X 怎么用/哪篇讲了 X")→ `mode=retrieve`,top-8 混合检索后综合
+解析失败自动退回 retrieve,保底可用。
 
 ## 日常流程
 

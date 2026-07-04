@@ -25,17 +25,22 @@ def kb_search(
     source: str | None = None,
     tag: str | None = None,
     entity: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
     top: int = 10,
 ) -> list[dict]:
     """搜索个人知识库(微信公众号文章 + YouTube 视频摘要)。
 
     混合检索:关键词(FTS) + 语义(向量),适合精确名词和意图描述两类查询。
+    注意:这是 top-K 相关性检索;"都提过哪些 XX"类穷举问题请用 kb_enumerate。
 
     Args:
         query: 关键词或一句话意图,如 "book-to-skill" 或 "把书变成技能的工具"
         source: 限定来源,可选 dr-gzh(公众号) / dr-youtube-dig(YouTube)
         tag: 限定主题标签,如 topic/skill工具、topic/ai-coding
         entity: 限定实体(项目/产品/公司名),如 "Claude Code"
+        since: 只看这天之后发布的,格式 YYYY-MM-DD
+        until: 只看这天之前发布的(含当天),格式 YYYY-MM-DD
         top: 返回条数,默认 10
 
     Returns:
@@ -47,7 +52,8 @@ def kb_search(
         hits = search(
             conn, query,
             Filters(source=source, tags=[tag] if tag else [],
-                    entities=[entity] if entity else []),
+                    entities=[entity] if entity else [],
+                    since=since, until=until),
             top_k=min(top, 30),
         )
         out = []
@@ -64,6 +70,37 @@ def kb_search(
                 "matched_by": h.matched_by,
             })
         return out
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def kb_enumerate(
+    what: str = "entities",
+    since: str | None = None,
+    until: str | None = None,
+    source: str | None = None,
+    kind: str | None = None,
+) -> list[dict]:
+    """全量枚举知识库内容(不是 top-K,保证不漏)。
+
+    适合"最近一周公众号都提过哪些开源项目"这类穷举问题:
+    kb_enumerate(what="entities", since="2026-06-27", source="dr-gzh", kind="project")
+
+    Args:
+        what: "entities"(枚举实体,带出处文章) 或 "docs"(枚举文章)
+        since: 只看这天之后发布的,格式 YYYY-MM-DD
+        until: 只看这天之前发布的(含当天)
+        source: dr-gzh(公众号) / dr-youtube-dig(YouTube),None=全部
+        kind: 实体类型 project(开源项目)/product/org(公司)/model(模型),仅 what=entities 有效
+    """
+    from kb.aggregate import enumerate_documents, enumerate_entities
+    conn = store.connect()
+    try:
+        if what == "docs":
+            return enumerate_documents(conn, since=since, until=until, source=source)
+        return enumerate_entities(conn, since=since, until=until,
+                                  source=source, kind=kind)
     finally:
         conn.close()
 

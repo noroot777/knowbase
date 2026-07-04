@@ -39,6 +39,8 @@ class Filters:
     account: str | None = None
     tags: list[str] = field(default_factory=list)      # AND 关系
     entities: list[str] = field(default_factory=list)  # AND 关系
+    since: str | None = None   # published >= "YYYY-MM-DD"
+    until: str | None = None   # published <= "YYYY-MM-DD"(含当天)
 
 
 def _filter_sql(f: Filters) -> tuple[str, list]:
@@ -50,6 +52,13 @@ def _filter_sql(f: Filters) -> tuple[str, list]:
     if f.account:
         clauses.append("d.account = ?")
         params.append(f.account)
+    if f.since:
+        clauses.append("d.published >= ?")
+        params.append(f.since)
+    if f.until:
+        # published 是 "YYYY-MM-DD HH:MM" 字符串,补一天的尾巴使其含当天
+        clauses.append("d.published <= ?")
+        params.append(f.until + " 23:59")
     for t in f.tags:
         clauses.append(
             "d.path IN (SELECT path FROM doc_tags WHERE tag = ? OR tag LIKE ?)"

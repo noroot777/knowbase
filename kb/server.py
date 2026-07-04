@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from kb import store
+from kb.askflow import run_ask
 from kb.config import VAULT_ROOT
 from kb.search import Filters, search
 
@@ -188,47 +189,19 @@ def mcp_unregister():
 
 @app.post("/api/ask")
 def api_ask(body: AskRequest):
-    """检索 top-8 → claude CLI 综合回答。同步阻塞(20-60s),前端转圈等待。"""
+    """意图规划(枚举 vs 检索)→ 执行 → Claude 综合。同步阻塞 20-90s。"""
     conn = store.connect()
     try:
-        hits = search(
-            conn, body.query,
-            Filters(source=body.source, tags=body.tags, entities=body.entities),
-            top_k=8,
-        )
-        if not hits:
-            return {"answer": "知识库里没有找到相关内容。", "refs": []}
-        ctx_parts, refs = [], []
-        for i, h in enumerate(hits, 1):
-            full = conn.execute(
-                "SELECT group_concat(text, char(10)) AS body FROM chunks WHERE path=?",
-                (h.path,),
-            ).fetchone()
-            ctx_parts.append(
-                f"[{i}] {h.title} ({h.account}, {h.published[:10]})\n"
-                f"{(full['body'] or '')[:2500]}"
-            )
-            refs.append({"n": i, "title": h.title, "path": h.path,
-                         "account": h.account, "url": h.url, "vault": VAULT_NAME})
-    finally:
-        conn.close()
-
-    prompt = (
-        "根据下面知识库文章回答用户问题。要求:\n"
-        "- 只基于给出的文章,不要编造;文章里没有就明说没有\n"
-        "- 引用时标注 [编号]\n\n"
-        f"用户问题: {body.query}\n\n" + "\n\n---\n\n".join(ctx_parts)
-    )
-    try:
-        proc = subprocess.run(
-            ["claude", "-p", prompt, "--model", body.model],
-            capture_output=True, text=True, timeout=180,
-        )
+        result = run_ask(conn, body.query, model=body.model)
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
     except subprocess.TimeoutExpired:
         raise HTTPException(504, "claude 调用超时")
-    if proc.returncode != 0:
-        raise HTTPException(502, f"claude 调用失败: {proc.stderr[:300]}")
-    return {"answer": proc.stdout.strip(), "refs": refs}
+    finally:
+        conn.close()
+    for r in result["refs"]:
+        r["vault"] = VAULT_NAME
+    return result
 
 
 def main() -> None:

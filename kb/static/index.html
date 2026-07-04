@@ -151,7 +151,7 @@
       <option value="haiku">haiku (快/省)</option>
       <option value="opus">opus (最强)</option>
     </select>
-    <span style="font-size:12.5px;color:var(--muted)">检索 top-8 后由 Claude 综合回答(走 Claude Code 订阅),约 20-60 秒</span>
+    <span style="font-size:12.5px;color:var(--muted)">先解析意图:穷举类问题("都提过哪些")走全量聚合不漏项,内容类问题走 top-8 检索;由 Claude 综合回答(走 Claude Code 订阅)</span>
   </div>
   <div id="answer" style="display:none"></div>
 </div>
