@@ -137,6 +137,55 @@ class AskRequest(BaseModel):
     model: str = "sonnet"
 
 
+# ── MCP 注册管理 ────────────────────────────────────────────────────────────────
+# MCP server 是 stdio 服务,由 Claude Code 按需拉起,没有"启动/停止"概念;
+# 这里管理的是它在 claude CLI 里的注册(claude mcp add/remove)。
+
+MCP_NAME = "kb"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_MCP_ADD_CMD = [
+    "claude", "mcp", "add", MCP_NAME, "--scope", "user", "--",
+    "uv", "run", "--directory", str(_PROJECT_ROOT), "kb-mcp",
+]
+
+
+@app.get("/api/mcp/status")
+def mcp_status():
+    try:
+        proc = subprocess.run(
+            ["claude", "mcp", "get", MCP_NAME],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        return {"registered": False, "error": f"claude CLI 不可用: {e}",
+                "command": " ".join(_MCP_ADD_CMD)}
+    return {
+        "registered": proc.returncode == 0,
+        "detail": proc.stdout.strip() if proc.returncode == 0 else "",
+        "command": " ".join(_MCP_ADD_CMD),
+        "tools": ["kb_search", "kb_read", "kb_entities"],
+    }
+
+
+@app.post("/api/mcp/register")
+def mcp_register():
+    proc = subprocess.run(_MCP_ADD_CMD, capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0:
+        raise HTTPException(500, f"注册失败: {(proc.stderr or proc.stdout)[:300]}")
+    return {"ok": True, "message": proc.stdout.strip()}
+
+
+@app.post("/api/mcp/unregister")
+def mcp_unregister():
+    proc = subprocess.run(
+        ["claude", "mcp", "remove", MCP_NAME, "--scope", "user"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        raise HTTPException(500, f"取消注册失败: {(proc.stderr or proc.stdout)[:300]}")
+    return {"ok": True, "message": proc.stdout.strip()}
+
+
 @app.post("/api/ask")
 def api_ask(body: AskRequest):
     """检索 top-8 → claude CLI 综合回答。同步阻塞(20-60s),前端转圈等待。"""

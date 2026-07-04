@@ -20,6 +20,24 @@
   header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 24px; }
   h1 { font-size: 22px; letter-spacing: .02em; }
   #stats { color: var(--muted); font-size: 12.5px; }
+  #mcp-dot.on { color: var(--ok); opacity: 1 !important; }
+  #mcp-dot.off { color: #c33; opacity: 1 !important; }
+
+  .modal-mask {
+    position: fixed; inset: 0; background: rgba(0,0,0,.35); display: flex;
+    align-items: center; justify-content: center; z-index: 50;
+  }
+  .modal {
+    background: var(--card); border-radius: 16px; padding: 24px 26px;
+    width: min(560px, 92vw); box-shadow: 0 20px 60px rgba(0,0,0,.2);
+  }
+  .modal h2 { font-size: 17px; margin-bottom: 14px; }
+  .modal .row { margin-bottom: 12px; font-size: 14px; }
+  .modal code {
+    display: block; background: var(--tag-bg); padding: 10px 12px; border-radius: 9px;
+    font-size: 12px; word-break: break-all; margin-top: 6px; cursor: pointer;
+  }
+  .modal .hint { font-size: 12.5px; color: var(--muted); line-height: 1.6; }
 
   .searchbar { display: flex; gap: 8px; margin-bottom: 12px; }
   #q {
@@ -99,6 +117,8 @@
 <header>
   <h1>知识库</h1>
   <span id="stats"></span>
+  <button class="ghost" id="mcp-btn" style="margin-left:auto;padding:6px 14px;font-size:13px"
+          onclick="openMcp()">MCP <span id="mcp-dot" style="opacity:.5">●</span></button>
 </header>
 
 <div class="tabs">
@@ -126,9 +146,36 @@
   <textarea id="ask-q" placeholder="描述你的意图,如:有没有能自动画架构图的开源工具?"></textarea>
   <div style="margin-top:10px; display:flex; gap:8px; align-items:center">
     <button id="ask-btn" onclick="doAsk()">提问</button>
-    <span style="font-size:12.5px;color:var(--muted)">检索 top-8 后由 Claude 综合回答,约 20-60 秒</span>
+    <select id="ask-model">
+      <option value="sonnet" selected>sonnet (均衡)</option>
+      <option value="haiku">haiku (快/省)</option>
+      <option value="opus">opus (最强)</option>
+    </select>
+    <span style="font-size:12.5px;color:var(--muted)">检索 top-8 后由 Claude 综合回答(走 Claude Code 订阅),约 20-60 秒</span>
   </div>
   <div id="answer" style="display:none"></div>
+</div>
+
+<div id="mcp-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeMcp()">
+  <div class="modal">
+    <h2>MCP 服务管理</h2>
+    <div class="row">状态: <b id="mcp-status">检查中…</b></div>
+    <div class="row hint">
+      MCP server 是 stdio 服务,由 Claude Code 在对话时按需拉起,无需常驻。
+      注册后在任何 Claude Code / Desktop 对话里可用工具:
+      <b>kb_search</b>(混合检索)、<b>kb_read</b>(读全文)、<b>kb_entities</b>(列实体)。
+    </div>
+    <div class="row">
+      <div class="hint">手动注册命令(点击复制):</div>
+      <code id="mcp-cmd" onclick="copyCmd()" title="点击复制"></code>
+    </div>
+    <div style="display:flex; gap:8px; margin-top:16px">
+      <button id="mcp-reg" onclick="mcpRegister()" style="display:none">一键注册</button>
+      <button id="mcp-unreg" class="ghost" onclick="mcpUnregister()" style="display:none">取消注册</button>
+      <button class="ghost" onclick="closeMcp()" style="margin-left:auto">关闭</button>
+    </div>
+    <div id="mcp-msg" class="hint" style="margin-top:10px"></div>
+  </div>
 </div>
 
 <script>
@@ -214,7 +261,7 @@ async function doAsk() {
   try {
     const res = await fetch('/api/ask', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ query: q }),
+      body: JSON.stringify({ query: q, model: $('ask-model').value }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || res.status);
@@ -229,7 +276,62 @@ async function doAsk() {
   }
 }
 
+// ── MCP 管理 ──────────────────────────────────────────────────────────────
+let mcpCmd = '';
+
+async function refreshMcp() {
+  try {
+    const s = await fetch('/api/mcp/status').then(r => r.json());
+    mcpCmd = s.command || '';
+    $('mcp-dot').className = s.registered ? 'on' : 'off';
+    $('mcp-status').textContent = s.error ? `不可用(${s.error})`
+      : s.registered ? '已注册 ✓ (Claude Code 对话中可直接用)' : '未注册';
+    $('mcp-cmd').textContent = mcpCmd;
+    $('mcp-reg').style.display = s.registered || s.error ? 'none' : '';
+    $('mcp-unreg').style.display = s.registered ? '' : 'none';
+    return s;
+  } catch {
+    $('mcp-status').textContent = '状态获取失败';
+  }
+}
+
+function openMcp() { $('mcp-modal').style.display = ''; $('mcp-msg').textContent = ''; refreshMcp(); }
+function closeMcp() { $('mcp-modal').style.display = 'none'; }
+
+async function mcpRegister() {
+  $('mcp-msg').textContent = '注册中…';
+  try {
+    const r = await fetch('/api/mcp/register', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.status);
+    $('mcp-msg').textContent = '✓ ' + (d.message || '注册成功');
+  } catch (e) {
+    $('mcp-msg').textContent = '注册失败: ' + e.message;
+  }
+  refreshMcp();
+}
+
+async function mcpUnregister() {
+  $('mcp-msg').textContent = '取消注册中…';
+  try {
+    const r = await fetch('/api/mcp/unregister', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.status);
+    $('mcp-msg').textContent = '✓ ' + (d.message || '已取消注册');
+  } catch (e) {
+    $('mcp-msg').textContent = '失败: ' + e.message;
+  }
+  refreshMcp();
+}
+
+function copyCmd() {
+  navigator.clipboard.writeText(mcpCmd).then(() => {
+    $('mcp-msg').textContent = '✓ 命令已复制';
+  });
+}
+
 loadMeta();
+refreshMcp();
 </script>
 </body>
 </html>
