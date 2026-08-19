@@ -79,7 +79,9 @@ def api_keys_set(body: KeysRequest):
 # 按需拉起。首选给出通用 stdio 配置(任何客户端都能粘),同时保留 claude CLI 一键注册。
 
 MCP_NAME = "kb"
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# 仓库根(pyproject 所在):本文件在 kb/web/ 下,要往上两级 —— 少一级会指到 kb/,
+# 弹窗里给出的 `uv run --directory .../kb kb-mcp` 是跑不起来的
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # 通用 stdio 启动命令(与具体客户端无关)
 _MCP_COMMAND = "uv"
 _MCP_ARGS = ["run", "--directory", str(_PROJECT_ROOT), "kb-mcp"]
@@ -92,13 +94,30 @@ _MCP_ADD_CMD = [
 ]
 
 
+def _mcp_tools() -> list[dict]:
+    """工具清单从真正的 MCP server 上取,不在这里手写一份。
+
+    手写的那份漏了 kb_enumerate(全量枚举),面板上就看不到这个能力 ——
+    以后加删工具也不用记着同步两处。取不到时给空表,弹窗少一行说明而已。
+    """
+    try:
+        from kb.mcp_server import mcp
+        out = []
+        for t in mcp._tool_manager.list_tools():
+            head = (t.description or "").strip().splitlines()
+            out.append({"name": t.name, "desc": head[0].strip() if head else ""})
+        return out
+    except Exception:
+        return []
+
+
 @router.get("/api/mcp/status")
 def mcp_status():
     # 通用配置永远可给出;registered 只反映 claude CLI 里的注册态(便捷项,失败不影响通用用法)
     base = {
         "config": json.dumps(_MCP_CONFIG, ensure_ascii=False, indent=2),
         "command": " ".join(_MCP_ADD_CMD),
-        "tools": ["kb_search", "kb_read", "kb_entities"],
+        "tools": _mcp_tools(),
     }
     try:
         proc = subprocess.run(

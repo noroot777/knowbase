@@ -8,6 +8,11 @@ async function refreshMcp() {
     mcpConfig = s.config || '';
     $('mcp-config').textContent = mcpConfig;
     $('mcp-cmd').textContent = mcpCmd;
+    // 工具清单由后端从 MCP server 现取,前端不写死(写死过一次,漏了 kb_enumerate)
+    const tools = s.tools || [];
+    $('mcp-tools').innerHTML = tools.length
+      ? tools.map(t => `<b title="${esc(t.desc || '')}">${esc(t.name)}</b>`).join('、') + '。'
+      : '(取不到工具清单)';
     // 圆点/文案跟随 claude CLI 注册态;CLI 不可用不算错误(通用配置照样能用)
     $('mcp-dot').className = s.registered ? 'on' : 'off';
     $('mcp-status').textContent = !s.cli_available ? '通用配置就绪(未检测到 claude CLI)'
