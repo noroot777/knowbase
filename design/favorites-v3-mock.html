@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>收藏 v3 示意稿 — 分诊 + 行动卡</title>
+<style>
+  :root {
+    --bg: #faf9f7; --card: #ffffff; --ink: #1a1a1a; --muted: #8a8578;
+    --line: #e8e4dc; --accent: #b3541e; --accent-soft: #f6e8de;
+    --tag-bg: #f0ede6; --ok: #4a7c59;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font: 15px/1.7 -apple-system, "PingFang SC", "Noto Sans SC", sans-serif;
+    background: var(--bg); color: var(--ink);
+    max-width: 860px; margin: 0 auto; padding: 32px 20px 80px;
+  }
+  .mock-note {
+    background: #fdf6e3; border: 1px dashed #d9c58a; border-radius: 10px;
+    padding: 8px 14px; font-size: 12.5px; color: #8a6d1a; margin-bottom: 20px;
+  }
+  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; }
+  h1 { font-size: 22px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 14px; }
+  .tabs span { color: var(--muted); padding: 8px 14px; border-radius: 9px; font-size: 14px; }
+  .tabs span.on { background: var(--tag-bg); color: var(--ink); }
+  .fav-sub { display: flex; gap: 4px; margin-bottom: 16px; align-items: center; }
+  .fav-sub span { color: var(--muted); padding: 7px 13px; border-radius: 9px; font-size: 13px; }
+  .fav-sub span.on { background: var(--tag-bg); color: var(--ink); }
+  .fav-sub .list-toggle { margin-left: auto; font-size: 12.5px; cursor: pointer; }
+  .fav-sub .list-toggle:hover { color: var(--accent); }
+
+  /* 置顶推荐 */
+  .hero {
+    background: linear-gradient(135deg, var(--accent-soft), #fdf3ec);
+    border: 1px solid #eeddd0; border-radius: 16px; padding: 18px 20px; margin-bottom: 22px;
+  }
+  .hero .k { font-size: 12px; color: var(--accent); font-weight: 600; letter-spacing: .05em; margin-bottom: 6px; }
+  .hero b { font-size: 17px; }
+  .hero .why { font-size: 13px; color: #6b3413; margin: 4px 0 10px; }
+  .hero .cmdline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  code.cmd {
+    background: #1a1a1a; color: #7fd88f; padding: 7px 14px; border-radius: 8px;
+    font-size: 13px; font-family: ui-monospace, monospace; cursor: pointer;
+  }
+  code.cmd:hover { background: #2a2a2a; }
+  .ghostbtn {
+    background: var(--tag-bg); color: var(--ink); border: none; border-radius: 8px;
+    padding: 6px 13px; font-size: 12.5px; cursor: pointer;
+  }
+  .ghostbtn:hover { background: var(--accent-soft); color: var(--accent); }
+
+  /* 分诊抽屉 */
+  .drawer { margin-bottom: 22px; }
+  .drawer-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 9px; }
+  .drawer-head b { font-size: 14px; }
+  .drawer-head .n { font-size: 12px; color: var(--muted); }
+  .drawer-head .hint { font-size: 12px; color: var(--muted); margin-left: 4px; }
+  .drawer-head .act { margin-left: auto; font-size: 12.5px; color: var(--accent); cursor: pointer; }
+
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .acard {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 14px 16px;
+  }
+  .acard .top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 3px; }
+  .acard .name { font-size: 15px; font-weight: 650; }
+  .acard .eta {
+    margin-left: auto; font-size: 11px; padding: 1px 8px; border-radius: 99px;
+    background: #e4eee7; color: var(--ok); white-space: nowrap;
+  }
+  .acard .eta.long { background: var(--tag-bg); color: var(--muted); }
+  .acard .what { font-size: 13px; color: #444; margin-bottom: 8px; }
+  .acard .cmdline { margin-bottom: 8px; }
+  .acard code.cmd { font-size: 12px; padding: 5px 10px; display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .acard .src { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+  .acard .src a { color: var(--muted); text-decoration: none; }
+  .acard .src a:hover { color: var(--accent); }
+  .acard .ops { display: flex; gap: 6px; }
+
+  /* 重复合并 */
+  .dup {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px;
+  }
+  .dup .verdict { font-size: 13px; color: #6b3413; background: var(--accent-soft);
+    border-radius: 8px; padding: 7px 12px; margin-bottom: 10px; }
+  .dup .pair { display: flex; gap: 10px; flex-wrap: wrap; }
+  .dup .opt { flex: 1; min-width: 240px; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .dup .opt.win { border-color: #cfe3d5; background: #f7fbf8; }
+  .dup .opt b { font-size: 13.5px; }
+  .dup .opt .why { font-size: 12px; color: var(--muted); margin: 2px 0 8px; }
+
+  /* 凉了 + 摘抄 */
+  .rowline {
+    display: flex; align-items: baseline; gap: 10px; background: var(--card);
+    border: 1px solid var(--line); border-radius: 12px; padding: 9px 14px; margin-bottom: 6px;
+  }
+  .rowline .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-size: 13.5px; }
+  .rowline .why { font-size: 12px; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
+  .rowline .ops { margin-left: auto; flex-shrink: 0; }
+  .quote-row { border-left: 3px solid var(--accent); }
+  .quote-row .t { color: #555; }
+  .foot { text-align: center; margin-top: 26px; }
+</style>
+</head>
+<body>
+<div class="mock-note">⚠ 交互示意稿 — 数据是你真实的 7 条收藏,但分诊结论、命令、耗时是我手工模拟 LLM 输出的样例,正式版由收藏时的异步 LLM 生成</div>
+
+<header><h1>知识库</h1></header>
+<div class="tabs"><span>搜索</span><span>问答</span><span class="on">收藏</span><span>管道</span></div>
+<div class="fav-sub">
+  <span class="on">待试 7</span><span>已处理</span><span>沉底</span>
+  <span class="list-toggle">以完整列表查看 ▾</span>
+</div>
+
+<div class="hero">
+  <div class="k">⚡ 现在有 10 分钟?</div>
+  <b>OpenWiki</b>
+  <div class="why">一条命令给任意仓库生成 wiki 文档,带 --update 增量同步 — 和你正在折腾的 wiki 管道同方向,昨天刚收藏,趁热。</div>
+  <div class="cmdline">
+    <code class="cmd">npx openwiki ./你的仓库 —— 点击复制</code>
+    <button class="ghostbtn">✓ 试过了</button>
+    <button class="ghostbtn">换一个</button>
+  </div>
+</div>
+
+<div class="drawer">
+  <div class="drawer-head"><b>⚡ 十分钟能试</b><span class="n">2 个</span><span class="hint">一条命令的事</span></div>
+  <div class="cards">
+    <div class="acard">
+      <div class="top"><span class="name">OpenWiki</span><span class="eta">~10 分钟</span></div>
+      <div class="what">AI 分析代码自动生成规范文档,支持多模型、GitHub workflow 持续更新</div>
+      <div class="cmdline"><code class="cmd">npx openwiki ./repo</code></div>
+      <div class="src">来源:<a href="#">又一个 AI 文档神器,终于省事了。</a> · 开源日记 · 收藏于 7-11</div>
+      <div class="ops"><button class="ghostbtn">✓ 试过了</button><button class="ghostbtn">沉底</button></div>
+    </div>
+    <div class="acard">
+      <div class="top"><span class="name">AI Website Cloner</span><span class="eta">~15 分钟</span></div>
+      <div class="what">克隆任意网站设计细节的开源 Skill 模板,配 Claude Code 多 Agent 并行复刻</div>
+      <div class="cmdline"><code class="cmd">git clone …cloner-template && claude</code></div>
+      <div class="src">来源:<a href="#">一个能克隆任意网站 Skill,暴涨 2.6 万 Star!</a> · GitHubDaily · 收藏于 7-09</div>
+      <div class="ops"><button class="ghostbtn">✓ 试过了</button><button class="ghostbtn">沉底</button></div>
+    </div>
+  </div>
+</div>
+
+<div class="drawer">
+  <div class="drawer-head"><b>🕐 要留整块时间</b><span class="n">2 个</span><span class="hint">周末或空闲晚上</span></div>
+  <div class="cards">
+    <div class="acard">
+      <div class="top"><span class="name">淘金小镇.Skill</span><span class="eta long">半天+</span></div>
+      <div class="what">让 Agent 从各类排行榜挖信息差,需要配置 Agent 环境和数据源</div>
+      <div class="src">来源:<a href="#">开源「淘金小镇.Skill」…</a> · 卡尔的AI沃茨 · 收藏于 7-06</div>
+      <div class="ops"><button class="ghostbtn">✓ 试过了</button><button class="ghostbtn">沉底</button></div>
+    </div>
+    <div class="acard">
+      <div class="top"><span class="name">Skill-Omni</span><span class="eta long">研究向</span></div>
+      <div class="what">多模态 Skill 范式:把网页/视频关键帧转成可复用 Skill,偏概念,先读 repo</div>
+      <div class="src">来源:<a href="#">让Skill"有图可依"…</a> · 量子位 · 收藏于 7-08</div>
+      <div class="ops"><button class="ghostbtn">✓ 试过了</button><button class="ghostbtn">沉底</button></div>
+    </div>
+  </div>
+</div>
+
+<div class="drawer">
+  <div class="drawer-head"><b>♻ 疑似重复,试一个就够</b><span class="n">2 个</span></div>
+  <div class="dup">
+    <div class="verdict">这两条都是「AI 生成界面太丑 → 用开源方案美化」,方向重合,建议留下评价更好的那个:</div>
+    <div class="pair">
+      <div class="opt win">
+        <b>5 万 Star 的 UI 组件仓库</b>
+        <div class="why">开源日记 3-26 · 星标更高、社区活跃</div>
+        <button class="ghostbtn">留这个试</button>
+      </div>
+      <div class="opt">
+        <b>秒变资深设计师的插件</b>
+        <div class="why">HelloGitHub 1-06 · 与左侧功能重合</div>
+        <button class="ghostbtn">沉底</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="drawer">
+  <div class="drawer-head"><b>🍂 可能凉了</b><span class="n">1 个</span><span class="act">全部沉底</span></div>
+  <div class="rowline">
+    <span class="t">从零开始玩转循环 (Getting started with loops)【译】</span>
+    <span class="why">长教程 · 收藏 3 天未动,教程类历史回看率低</span>
+    <span class="ops"><button class="ghostbtn">还是想看</button><button class="ghostbtn">沉底</button></span>
+  </div>
+</div>
+
+<div class="drawer">
+  <div class="drawer-head"><b>📌 摘抄</b><span class="n">1 条</span><span class="hint">不用试,留着引用,不算欠债</span></div>
+  <div class="rowline quote-row">
+    <span class="t">❝ 更麻烦的是,代码改了几次,文档很快又跟不上了…</span>
+    <span class="why">又一个 AI 文档神器 · 7-11</span>
+    <span class="ops"><button class="ghostbtn">回看原文</button></span>
+  </div>
+</div>
+
+<div class="foot"><button class="ghostbtn">以完整列表查看全部 7 条 ▾</button></div>
+</body>
+</html>

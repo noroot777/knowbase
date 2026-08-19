@@ -1,0 +1,271 @@
+// ── 数据管道 ──────────────────────────────────────────────────────────────
+const STAGE_META = {
+  crawl:   { name: '抓取',  desc: '微信 → WeChatOA 库' },
+  export:  { name: '导出',  desc: 'WeChatOA → obs md' },
+  index:   { name: '索引',  desc: 'obs → FTS + 向量' },
+  extract: { name: '提取',  desc: 'entity/topic/摘要' },
+  projects:{ name: '条目化', desc: '工具/项目拆条目' },
+  wiki:    { name: 'Wiki',  desc: '双链/实体页/日摘要' },
+};
+const STATUS_ICON = { pending: '⋯', running: '<span class="spin"></span>',
+                      ok: '✓', skipped: '⊘', error: '✗', '': '—' };
+let pipeTimer = null;
+
+// ── 全流程同步弹窗(时间段 + 公众号多选,交互对齐 WeChatOA 的批量抓取) ──────
+let pipeAcctList = [];                                 // 全部订阅号
+let pipeSel = new Set();                               // 选中的号
+let pipeRange = { label: '不限时间', from: '', to: '' };
+
+function isoDay(offset) {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  return d.toISOString().slice(0, 10);
+}
+function pipePresets() {
+  const today = isoDay(0);
+  const m3 = new Date(); m3.setMonth(m3.getMonth() - 3);
+  return [
+    { label: '不限时间', from: '', to: '' },
+    { label: '今天', from: today, to: today },
+    { label: '近 7 天', from: isoDay(-7), to: today },
+    { label: '近 30 天', from: isoDay(-30), to: today },
+    { label: '近 3 个月', from: m3.toISOString().slice(0, 10), to: today },
+    { label: '今年', from: today.slice(0, 4) + '-01-01', to: today },
+  ];
+}
+
+async function openPipeModal() {
+  // 账号列表每次打开都拉一次(可能刚在 WeChatOA 加了号)
+  const d = await fetch('/api/pipeline/accounts').then(r => r.json()).catch(() => null);
+  pipeAcctList = (d && d.accounts) || [];
+  pipeSel = new Set(pipeAcctList);                     // 默认全选
+  pipeRange = { label: '不限时间', from: '', to: '' };
+  $('pipe-acct-search').value = '';
+  $('pipe-modal').style.display = '';
+  renderPipeRange();
+  renderPipeAcctList();
+}
+function closePipeModal() {
+  $('pipe-modal').style.display = 'none';
+  $('pipe-range-pop').style.display = 'none';
+}
+
+function togglePipeRangePop(e) {
+  e.stopPropagation();
+  const pop = $('pipe-range-pop');
+  const show = pop.style.display === 'none';
+  if (show) renderPipePresets();
+  pop.style.display = show ? '' : 'none';
+}
+function renderPipePresets() {
+  $('pipe-range-presets').innerHTML = pipePresets().map((p, i) => `
+    <div onclick="applyPipePreset(${i})"
+         style="display:flex;align-items:center;gap:8px;padding:8px 14px;cursor:pointer;font-size:13.5px"
+         onmouseover="this.style.background='var(--tag-bg)'" onmouseout="this.style.background=''">
+      <span style="width:14px;color:var(--accent)">${p.label === pipeRange.label ? '✓' : ''}</span>${p.label}
+    </div>`).join('');
+  $('pipe-custom-from').value = pipeRange.from;
+  $('pipe-custom-to').value = pipeRange.to;
+  $('pipe-custom-err').textContent = '';
+}
+function applyPipePreset(i) {
+  pipeRange = { ...pipePresets()[i] };
+  $('pipe-range-pop').style.display = 'none';
+  renderPipeRange();
+}
+function applyPipeCustomRange() {
+  const from = $('pipe-custom-from').value, to = $('pipe-custom-to').value;
+  const err = m => { $('pipe-custom-err').textContent = m; };
+  if (!from || !to) { err('起止日期都要填'); return; }
+  if (from > to) { err('起始日期不能晚于结束日期'); return; }
+  err('');
+  pipeRange = { label: `${from} ~ ${to}`, from, to };
+  $('pipe-range-pop').style.display = 'none';
+  renderPipeRange();
+}
+
+function renderPipeRange() {
+  $('pipe-range-label').textContent = pipeRange.label;
+  const ranged = !!pipeRange.from;
+  $('pipe-range-hint').textContent = ranged
+    ? '提示:微信服务端一般只保留近 30 天可翻页的历史,跨度过大的旧文章可能拉不到。'
+    : '不限时间 = 增量同步各号的新文章(当天已抓过的号自动跳过),固定同步全部订阅号。';
+  // 增量模式后端不支持按号过滤,账号区置灰
+  const blk = $('pipe-acct-block');
+  blk.style.opacity = ranged ? '' : '.45';
+  blk.style.pointerEvents = ranged ? '' : 'none';
+  renderPipeEst();
+}
+
+function renderPipeAcctList() {
+  const q = $('pipe-acct-search').value.trim().toLowerCase();
+  const items = q ? pipeAcctList.filter(n => n.toLowerCase().includes(q)) : pipeAcctList;
+  $('pipe-acct-count').textContent = `${pipeSel.size}/${pipeAcctList.length}`;
+  $('pipe-acct-list').innerHTML = items.length ? items.map(n => `
+    <div onclick="togglePipeAcct('${n.replace(/'/g, "\\'")}')"
+         style="display:flex;align-items:center;gap:9px;padding:9px 13px;cursor:pointer;
+                border-bottom:1px solid var(--line);font-size:13.5px"
+         onmouseover="this.style.background='var(--tag-bg)'" onmouseout="this.style.background=''">
+      <span style="color:${pipeSel.has(n) ? 'var(--accent)' : 'var(--muted)'}">${pipeSel.has(n) ? '☑' : '☐'}</span>
+      <span>${esc(n)}</span>
+    </div>`).join('')
+    : `<div style="padding:22px;text-align:center;font-size:12.5px;color:var(--muted)">${
+        pipeAcctList.length ? '没有匹配的公众号' : 'WeChatOA 不在线或还没订阅任何号'}</div>`;
+  renderPipeEst();
+}
+function togglePipeAcct(n) {
+  pipeSel.has(n) ? pipeSel.delete(n) : pipeSel.add(n);
+  renderPipeAcctList();
+}
+function pipeSelectAll() { pipeSel = new Set(pipeAcctList); renderPipeAcctList(); }
+function pipeSelectNone() { pipeSel = new Set(); renderPipeAcctList(); }
+
+function renderPipeEst() {
+  const ranged = !!pipeRange.from;
+  const n = pipeSel.size;
+  if (ranged) {
+    const s = n * 12;
+    const t = s < 60 ? `~${s}s` : `~${Math.round(s / 60)} 分钟`;
+    $('pipe-est').innerHTML =
+      `抓取预计耗时 <b>${t}</b>(${n} 个号 × 平均 12s,含反爬间隔:页间 2.5-4s、号间 4-7s)。<br>` +
+      `提取阶段与抓取并行、claude 3 路并发,管道总时长 ≈ 抓取和提取里较长的那个。`;
+    $('pipe-start').disabled = n === 0;
+    $('pipe-start').textContent = `开始同步 (${n} 个)`;
+  } else {
+    $('pipe-est').innerHTML =
+      `增量抓各号新文章,耗时视更新量而定。<br>` +
+      `提取阶段与抓取并行、claude 3 路并发,管道总时长 ≈ 抓取和提取里较长的那个。`;
+    $('pipe-start').disabled = false;
+    $('pipe-start').textContent = '开始同步';
+  }
+}
+
+async function refreshPipe(withPending = false) {
+  const s = await fetch('/api/pipeline/status' + (withPending ? '?pending=1' : ''))
+    .then(r => r.json()).catch(() => null);
+  if (!s) return;
+
+  // WeChatOA 状态
+  $('wo-status').textContent = s.wechatoa.online ? '在线' : '不在线(抓取将跳过)';
+  $('wo-status').style.color = s.wechatoa.online ? 'var(--ok)' : '#c33';
+  const auth = s.wechatoa.auth;
+  $('wo-auth').textContent = auth
+    ? (auth.valid ? `凭证有效 · ${auth.credential_expiry_label || ''}`
+                  : '凭证已失效,需要扫码续期')
+    : '';
+
+  // 阶段卡片(空闲时叠加 last_run 和待处理数)
+  const stages = s.running ? s.stages : (s.last_run ? s.last_run.stages : s.stages);
+  $('pipe-stages').innerHTML = Object.entries(STAGE_META).map(([k, m]) => {
+    const st = stages[k] || { status: '', detail: '' };
+    const pend = s.pending && s.pending[k] != null ? `待处理 ${s.pending[k]}` : '';
+    // 失败明细(后端 _stage 的 failures):卡片内可展开,不用翻日志
+    const fails = st.failures || [];
+    const failHtml = fails.length ? `
+      <details style="margin-top:5px">
+        <summary style="cursor:pointer;font-size:11.5px;color:#c33">失败明细 ${fails.length}</summary>
+        <div style="font-size:11.5px;margin-top:3px;max-height:130px;overflow:auto">
+          ${fails.map(f => `<div style="margin-bottom:4px">· ${esc(f.title)}<br>
+            <span style="color:var(--muted)">${esc(f.reason)}</span></div>`).join('')}
+        </div>
+      </details>` : '';
+    return `<div class="hit" style="margin:0;padding:12px 14px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <b style="font-size:14px">${m.name}</b>
+        <span style="font-size:14px">${STATUS_ICON[st.status] ?? st.status}</span>
+      </div>
+      <div style="font-size:11.5px;color:var(--muted);margin:2px 0 6px">${m.desc}</div>
+      <div style="font-size:12px;color:#4A565F;min-height:18px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden"
+           title="${esc(st.detail || pend || '')}">${esc(st.detail || pend || '')}</div>
+      ${failHtml}
+    </div>`;
+  }).join('');
+
+  // 日志 + 按钮态
+  $('pipe-log').textContent = (s.log && s.log.length) ? s.log.join('\n')
+    : (s.last_run ? `上次运行完成于 ${s.last_run.finished_at}` : '(暂无日志)');
+  const logBox = $('pipe-log').parentElement;
+  logBox.scrollTop = logBox.scrollHeight;
+  $('pipe-run').disabled = s.running;
+  $('pipe-run').textContent = s.running ? '同步中…' : '全流程同步';
+  // 任一阶段有失败(或提取有积压)且空闲时,亮出全局重试按钮
+  const hasFail = Object.values(stages).some(st =>
+    st && (st.status === 'error' || /失败 [1-9]/.test(st.detail || '') ||
+           /\d+ 个账号失败/.test(st.detail || '')));
+  const hasPend = s.pending && s.pending.extract > 0;
+  $('pipe-retry').style.display = (!s.running && (hasFail || hasPend)) ? '' : 'none';
+
+  // 运行中自动轮询
+  if (s.running && !pipeTimer) {
+    pipeTimer = setInterval(() => refreshPipe(false), 1500);
+  } else if (!s.running && pipeTimer) {
+    clearInterval(pipeTimer);
+    pipeTimer = null;
+    refreshPipe(true);   // 结束后刷一次待处理数
+    loadMeta();          // 文档/实体数可能变了
+  }
+}
+
+async function retryFailed() {
+  const btn = $('pipe-retry');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/pipeline/retry-failed', { method: 'POST' });
+    if (await toastIfFail(r, '重试没能启动')) return;
+    const d = await r.json().catch(() => ({}));
+    toast('已开始重试失败项', { type: 'ok', detail: d.plan ? '阶段:' + d.plan : '' });
+    refreshPipe(false);
+  } catch (e) {
+    toast('重试没能启动', { detail: e.message });
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── 每日定时同步 ──────────────────────────────────────────────────────────
+async function loadSched() {
+  try {
+    const s = await fetch('/api/pipeline/schedule').then(r => r.json());
+    $('sched-on').checked = !!s.enabled;
+    if (s.time) $('sched-time').value = s.time;
+  } catch {}
+}
+
+async function saveSched() {
+  const body = { enabled: $('sched-on').checked, time: $('sched-time').value || '07:30' };
+  try {
+    const r = await fetch('/api/pipeline/schedule', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+    $('sched-msg').textContent = body.enabled ? `✓ 每天 ${body.time} 自动同步` : '已关闭';
+  } catch (e) {
+    $('sched-msg').textContent = '保存失败: ' + e.message;
+  }
+  setTimeout(() => { $('sched-msg').textContent = ''; }, 5000);
+}
+
+async function startPipeFromModal() {
+  const body = {};
+  if (pipeRange.from) {
+    body.since_date = pipeRange.from;
+    body.until_date = pipeRange.to;
+    body.accounts = Array.from(pipeSel);
+  }
+  const btn = $('pipe-start');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/pipeline/run', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (await toastIfFail(r, '同步没能启动')) return;
+    closePipeModal();
+    refreshPipe(false);
+  } catch (e) {
+    toast('同步没能启动', { detail: e.message });
+  } finally {
+    btn.disabled = false;
+  }
+}
