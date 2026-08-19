@@ -77,14 +77,20 @@ def cmd_extract(args) -> int:
     conn = store.connect()
     todo = pending_docs(conn, args.limit)
     print(f"[extract] 待提取 {len(todo)} 篇 (model=haiku)")
-    ok = failed = 0
+    ok = failed = empty = 0
     for i, row in enumerate(todo, 1):
         body_row = conn.execute(
             "SELECT group_concat(text, char(10)) AS body FROM chunks WHERE path=? ORDER BY seq",
             (row["path"],),
         ).fetchone()
+        body = body_row["body"] or ""
+        if not body.strip():
+            empty += 1
+            print(f"[{i}/{len(todo)}] SKIP {row['title'][:28]}: 正文为空"
+                  f"(先跑 gzh_refill_body.py 回填,再 kb index)")
+            continue
         try:
-            data = extract_with_claude(row["title"], body_row["body"] or "")
+            data = extract_with_claude(row["title"], body)
             save_extraction(conn, row["path"], data)
             conn.commit()
             ok += 1
@@ -99,7 +105,10 @@ def cmd_extract(args) -> int:
         except Exception as e:
             failed += 1
             print(f"[{i}/{len(todo)}] FAIL {row['title'][:28]}: {e}")
-    print(f"[extract] 完成: 成功 {ok}, 失败 {failed}")
+    line = f"[extract] 完成: 成功 {ok}, 失败 {failed}"
+    if empty:
+        line += f", 跳过 {empty}(正文空)"
+    print(line)
     conn.close()
     return 0
 
@@ -184,7 +193,7 @@ def cmd_stats(args) -> int:
         print(f"  {r['source']}: {r['c']}")
     print(f"chunks: {q('SELECT COUNT(*) FROM chunks')}")
     print(f"向量:   {q('SELECT COUNT(*) FROM chunk_vec')}")
-    print(f"实体:   {q('SELECT COUNT(DISTINCT entity) FROM entities')}")
+    print(f"实体:   {q('SELECT COUNT(DISTINCT norm) FROM entities')}")
     print(f"已提取: {q('SELECT COUNT(*) FROM documents WHERE extracted_at IS NOT NULL')}"
           f" / 待提取: {len(__import__('kb.extract', fromlist=['pending_docs']).pending_docs(conn))}")
     conn.close()

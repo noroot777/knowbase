@@ -13,10 +13,16 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 
+from kb.config import expand_sources
+from kb.norm import entity_norm
 from kb.store import tokenize
 
 RRF_K = 60
 CANDIDATES_PER_LEG = 50   # 每路召回数,融合后再截断
+# 向量 KNN 带过滤时的候选数:vec0 只能先全局 KNN 再 join 过滤,小来源(如视频系
+# 只占全库 chunk ~2%)在全局 top-150 里几乎不出现,过滤后向量腿必然为空。
+# vec0 的 KNN 本来就是全表暴力扫,k 放大只多付堆维护成本,几乎不影响耗时。
+KNN_K_FILTERED = 4000
 
 
 @dataclass
@@ -35,7 +41,8 @@ class Hit:
 
 @dataclass
 class Filters:
-    source: str | None = None
+    # 来源:单个来源名 / 组名或别名("视频"→dig+video-projects) / 列表,None=全部
+    source: str | list[str] | None = None
     account: str | None = None
     tags: list[str] = field(default_factory=list)      # AND 关系
     entities: list[str] = field(default_factory=list)  # AND 关系
@@ -46,9 +53,10 @@ class Filters:
 def _filter_sql(f: Filters) -> tuple[str, list]:
     """把过滤条件编译成作用于 documents 的 WHERE 片段。"""
     clauses, params = [], []
-    if f.source:
-        clauses.append("d.source = ?")
-        params.append(f.source)
+    srcs = expand_sources(f.source)
+    if srcs:
+        clauses.append(f"d.source IN ({','.join('?' * len(srcs))})")
+        params.extend(srcs)
     if f.account:
         clauses.append("d.account = ?")
         params.append(f.account)
@@ -65,10 +73,11 @@ def _filter_sql(f: Filters) -> tuple[str, list]:
         )
         params.extend([t, f"{t}/%"])
     for e in f.entities:
+        # 按归一键匹配:输入 "Vibe Kanban" 也能命中库里的 "vibe-kanban"
         clauses.append(
-            "d.path IN (SELECT path FROM entities WHERE entity = ? COLLATE NOCASE)"
+            "d.path IN (SELECT path FROM entities WHERE norm = ?)"
         )
-        params.append(e)
+        params.append(entity_norm(e))
     where = (" AND " + " AND ".join(clauses)) if clauses else ""
     return where, params
 
@@ -111,7 +120,9 @@ def _vec_leg(conn: sqlite3.Connection, query: str, f: Filters) -> list[tuple[int
         return []
     import struct
     where, params = _filter_sql(f)
-    # vec0 的 KNN 查询先取 top-N,再 join 过滤(过滤在外层,故多取一些候选)
+    # vec0 的 KNN 查询先取 top-N,再 join 过滤。有过滤条件时把 KNN 候选放大
+    # (KNN_K_FILTERED),否则被过滤到小子集(如单一小来源)后向量腿会空
+    knn_k = KNN_K_FILTERED if where else CANDIDATES_PER_LEG * 3
     rows = conn.execute(
         f"""
         SELECT v.chunk_id, c.path
@@ -125,7 +136,7 @@ def _vec_leg(conn: sqlite3.Connection, query: str, f: Filters) -> list[tuple[int
         ORDER BY v.distance
         LIMIT ?
         """,
-        [struct.pack(f"{len(qv)}f", *qv), CANDIDATES_PER_LEG * 3,
+        [struct.pack(f"{len(qv)}f", *qv), knn_k,
          *params, CANDIDATES_PER_LEG],
     ).fetchall()
     return [(r["chunk_id"], r["path"]) for r in rows]

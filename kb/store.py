@@ -43,11 +43,13 @@ CREATE INDEX IF NOT EXISTS idx_doc_tags_tag ON doc_tags(tag);
 -- LLM 提取出的实体(比 tag 结构化:带类型)
 CREATE TABLE IF NOT EXISTS entities (
   path    TEXT NOT NULL REFERENCES documents(path) ON DELETE CASCADE,
-  entity  TEXT NOT NULL,      -- 规范名,如 book-to-skill
-  kind    TEXT NOT NULL DEFAULT '',  -- project/product/org/model/other
+  entity  TEXT NOT NULL,      -- 原始名,如 Claude Code
+  kind    TEXT NOT NULL DEFAULT '',  -- project/product/org/model/research/other
+  norm    TEXT NOT NULL DEFAULT '',  -- entity_norm 归一键,变体聚合/过滤用
   PRIMARY KEY (path, entity)
 );
 CREATE INDEX IF NOT EXISTS idx_entities_entity ON entities(entity);
+-- idx_entities_norm 在 _migrate_entities 里建(老库先补列才能建索引)
 
 CREATE TABLE IF NOT EXISTS chunks (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,6 +66,45 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   text_tok,
   tokenize='unicode61'
 );
+
+-- 问答会话(web UI 的 chatbox,与索引数据同库但互不相干)
+CREATE TABLE IF NOT EXISTS conversations (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  title       TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id  INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role             TEXT NOT NULL,               -- user / assistant
+  content          TEXT NOT NULL,
+  refs_json        TEXT NOT NULL DEFAULT '[]',  -- assistant 消息的引用来源
+  plan_json        TEXT NOT NULL DEFAULT '',    -- assistant 消息的查询计划
+  model            TEXT NOT NULL DEFAULT '',
+  created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
+"""
+
+# 收藏(web UI;整篇或片段,语义是"待试备忘"而非典藏,所以带状态流转。
+# 文档从索引移除时级联清掉,重索引 upsert 不影响)。
+# 单独抽出来:favorites v1→v2 迁移时要独立重建这张表。
+_FAVORITES_DDL = """
+CREATE TABLE IF NOT EXISTS favorites (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  path        TEXT NOT NULL REFERENCES documents(path) ON DELETE CASCADE,
+  quote       TEXT NOT NULL DEFAULT '',      -- 片段原文;'' = 整篇收藏
+  prefix      TEXT NOT NULL DEFAULT '',      -- 片段定位锚:前文
+  suffix      TEXT NOT NULL DEFAULT '',      -- 片段定位锚:后文
+  note        TEXT NOT NULL DEFAULT '',      -- 一句话:当时为什么收
+  status      TEXT NOT NULL DEFAULT 'inbox', -- inbox 待试 / done 已处理 / archived 沉底
+  action_json TEXT NOT NULL DEFAULT '',      -- LLM 行动卡 {name,what,cmd,eta,kind},收藏时异步生成
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL                  -- 状态/备注最后一次变动,陈旧判断基于它
+);
+CREATE INDEX IF NOT EXISTS idx_favorites_path ON favorites(path);
 """
 
 _VEC_SCHEMA = f"""
@@ -79,6 +120,42 @@ def tokenize(text: str) -> str:
     return " ".join(t for t in jieba.cut_for_search(text) if t.strip())
 
 
+def _migrate_favorites(conn: sqlite3.Connection) -> None:
+    """favorites 结构升级,幂等。
+    v1(path 主键、仅整篇星标)→ v2(id 主键 + 片段/状态)→ v3(+action_json)。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(favorites)").fetchall()}
+    if not cols:
+        return
+    if "id" not in cols:  # v1 → 重建
+        conn.execute("ALTER TABLE favorites RENAME TO favorites_v1")
+        conn.executescript(_FAVORITES_DDL)
+        conn.execute(
+            "INSERT INTO favorites (path, created_at, updated_at)"
+            " SELECT path, created_at, created_at FROM favorites_v1"
+        )
+        conn.execute("DROP TABLE favorites_v1")
+        conn.commit()
+    elif "action_json" not in cols:  # v2 → 加列
+        conn.execute("ALTER TABLE favorites ADD COLUMN action_json TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+
+
+def _migrate_entities(conn: sqlite3.Connection) -> None:
+    """entities 加 norm 归一列并回填,顺手把历史野生 kind 归一。幂等。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(entities)").fetchall()}
+    if "norm" not in cols:
+        from kb.norm import entity_norm, kind_norm
+        conn.execute("ALTER TABLE entities ADD COLUMN norm TEXT NOT NULL DEFAULT ''")
+        rows = conn.execute("SELECT path, entity, kind FROM entities").fetchall()
+        for r in rows:
+            conn.execute(
+                "UPDATE entities SET norm=?, kind=? WHERE path=? AND entity=?",
+                (entity_norm(r["entity"]), kind_norm(r["kind"]), r["path"], r["entity"]),
+            )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_norm ON entities(norm)")
+    conn.commit()
+
+
 def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=30)
@@ -88,8 +165,11 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
+    _migrate_favorites(conn)
     conn.executescript(_SCHEMA)
+    conn.executescript(_FAVORITES_DDL)
     conn.executescript(_VEC_SCHEMA)
+    _migrate_entities(conn)
     return conn
 
 

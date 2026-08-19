@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 from kb.config import SOURCES, VAULT_ROOT
+from kb.norm import entity_norm, kind_norm
 
 EXTRACT_MODEL = "haiku"
 
@@ -37,6 +38,7 @@ _PROMPT = """\
 - topics 从这个固定候选里选,最多 4 个:AI编程, AI Agent, skill工具, 开源项目, 大模型,
   提示词工程, 知识管理, AI资讯, 效率工具, 机器人, AI视频图像, 其他
 - summary 说清楚"是什么+能干什么",让人不点开也知道要不要看。
+- JSON 字符串值里不要出现英文双引号,引用词一律用中文引号「」。
 
 标题: {title}
 
@@ -51,20 +53,45 @@ def _tag_slug(name: str) -> str:
 
 
 def parse_pretagged(doc) -> dict | None:
-    """从已有 tags 解析 entity/topic(dr-youtube-dig 管线的产物)。"""
+    """从已有 tags 解析 entity/topic(pre_tagged 来源的管线产物)。
+
+    条目化来源(dr-video-projects / dr-gzh-projects)的 frontmatter 还带
+    project/kind/summary:主实体的 kind、文档 summary 一并取用。"""
     entities, topics = [], []
+    meta = getattr(doc, "meta", None) or {}
+    proj = str(meta.get("project") or "").strip()
+    proj_norm = entity_norm(proj) if proj else None
+    proj_kind = kind_norm(str(meta.get("kind") or "")) if meta.get("kind") else None
     for t in doc.tags:
         if t.startswith("entity/"):
-            entities.append({"name": t.split("/", 1)[1], "kind": "other"})
+            name = t.split("/", 1)[1]
+            kind = "other"
+            if proj_norm and proj_kind and entity_norm(name) == proj_norm:
+                kind = proj_kind
+            entities.append({"name": name, "kind": kind})
         elif t.startswith("topic/"):
             topics.append(t.split("/", 1)[1])
     if not entities and not topics:
         return None
-    return {"entities": entities, "topics": topics, "summary": ""}
+    return {"entities": entities, "topics": topics,
+            "summary": str(meta.get("summary") or "")}
 
 
 def extract_with_claude(title: str, body: str, timeout: int = 120) -> dict:
-    """调 claude CLI 提取。异常往上抛,由调用方决定跳过还是中止。"""
+    """调 claude CLI 提取。异常往上抛,由调用方决定跳过还是中止。
+
+    模型偶发在字符串值里输出未转义双引号产生坏 JSON(概率性,同文重跑
+    通常就好),解析失败原地重试一次;CLI 报错/超时不重试,留给下轮管道。"""
+    last_err: Exception | None = None
+    for _ in range(2):
+        try:
+            return _extract_once(title, body, timeout)
+        except (json.JSONDecodeError, ValueError) as e:
+            last_err = e
+    raise last_err
+
+
+def _extract_once(title: str, body: str, timeout: int) -> dict:
     prompt = _PROMPT.format(title=title, body=body[:6000])
     proc = subprocess.run(
         ["claude", "-p", prompt, "--model", EXTRACT_MODEL, "--output-format", "text"],
@@ -91,8 +118,9 @@ def save_extraction(conn, path: str, data: dict) -> None:
         name = str(e.get("name") or "").strip()
         if name:
             conn.execute(
-                "INSERT OR IGNORE INTO entities (path, entity, kind) VALUES (?, ?, ?)",
-                (path, name, str(e.get("kind") or "other")),
+                "INSERT OR IGNORE INTO entities (path, entity, kind, norm)"
+                " VALUES (?, ?, ?, ?)",
+                (path, name, kind_norm(str(e.get("kind") or "")), entity_norm(name)),
             )
     # topic 以 tag 形式统一存(和 pre_tagged 来源对齐)
     for t in data["topics"]:

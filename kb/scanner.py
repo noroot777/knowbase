@@ -29,9 +29,22 @@ class Doc:
     tags: list[str] = field(default_factory=list)
     body: str = ""           # 去 frontmatter 后的正文
     content_hash: str = ""
+    meta: dict = field(default_factory=dict)  # 完整 frontmatter(project/kind/summary 等)
 
 
 _FM_RE = re.compile(r"\A---\n(.*?)\n---\n?", re.S)
+
+# wiki 双链与图谱尾区只是阅读层装饰(linkify 后处理产物),索引/向量必须
+# 看到与 linkify 前完全一致的正文:[[页|原文]]→原文,[[页]]→页,
+# <!-- kb-graph --> 之后整段丢弃。这保证 linkify 不改变 chunk 与 embedding。
+_GRAPH_FOOTER_RE = re.compile(r"\n<!-- kb-graph -->.*\Z", re.S)
+_WIKILINK_RE = re.compile(r"\[\[([^\[\]|]+)\|([^\[\]]+)\]\]|\[\[([^\[\]|]+)\]\]")
+
+
+def normalize_body(body: str) -> str:
+    """索引视角的正文:剥掉双链语法与图谱尾区。"""
+    body = _GRAPH_FOOTER_RE.sub("", body)
+    return _WIKILINK_RE.sub(lambda m: m.group(2) or m.group(3), body)
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -74,8 +87,9 @@ def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
         published=published,
         url=url,
         tags=tags,
-        body=body,
+        body=normalize_body(body),
         content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+        meta=fm,
     )
 
 
