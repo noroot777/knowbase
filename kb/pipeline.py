@@ -1,271 +1,127 @@
 # -*- coding: utf-8 -*-
-"""数据管道:抓取 → 导出 → 索引 → 提取,一键串行跑。
+"""数据管道编排:抓取 → 导出 → 索引 → 提取 → 条目化 → wiki,一键串行跑。
 
-各阶段实现方式:
-- 抓取: HTTP 调 WeChatOA 后端(:8000),不在线则跳过 —— 凭证/反爬都归它管
-- 导出: 子进程跑 WeChatOA 的 export_obsidian.py
-- 索引: 进程内(复用已加载的 embedding 模型)
-- 提取: 进程内逐篇调 claude CLI,tag 自动回写 obs frontmatter
+本模块只管「谁先谁后」与对外门面;拆分如下:
+    kb.pipeline_state   运行状态、阶段进度、日志
+    kb.pipeline_stages  各阶段的实际实现
+    kb.pipeline_retry   失败项重试链
 
-状态放模块级 dict(单进程单管道,与 WeChatOA 的 _crawl_state 同套路),
-前端轮询 /api/pipeline/status 展示进度。
+Web 层统一 `from kb import pipeline as pl` 调用,所以这里把三个模块里
+对外要用的名字重新导出,拆分对调用方透明。
 """
 
 from __future__ import annotations
 
 import json
-import subprocess
+import re
 import threading
 import time
-import urllib.request
 from datetime import datetime
-from pathlib import Path
 
 from kb.config import DATA_DIR
+from kb.pipeline_retry import retry_failed_plan, start_retry_failed
+from kb.pipeline_stages import (
+    WECHATOA_DIR,
+    _extract_pass,
+    _finish_extract_stage,
+    _new_extract_stats,
+    _run_crawl,
+    _run_export,
+    _run_extract,
+    _run_index,
+    _run_projects,
+    _run_wiki,
+    wechatoa_accounts,
+    wechatoa_status,
+)
+from kb.pipeline_state import (
+    STAGES,
+    _end_run,
+    _lock,
+    _log,
+    _now,
+    _stage,
+    _state,
+    get_state,
+    load_last_run,
+)
 
-# WeChatOA 项目位置与后端地址
-WECHATOA_DIR = Path.home() / "code" / "gongzhonghao" / "WeChatOA_Aggregation"
-WECHATOA_API = "http://127.0.0.1:8000"
-
-_STATE_FILE = DATA_DIR / "pipeline_state.json"
-
-STAGES = ("crawl", "export", "index", "extract")
-
-_state: dict = {
-    "running": False,
-    "current_stage": "",
-    "started_at": "",
-    "finished_at": "",
-    # 每阶段: {status: pending/running/ok/skipped/error, detail: str}
-    "stages": {s: {"status": "", "detail": ""} for s in STAGES},
-    "log": [],          # 最近若干条进度行
-}
-_lock = threading.Lock()
-
-
-def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _log(msg: str) -> None:
-    _state["log"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-    del _state["log"][:-80]
-
-
-def _stage(name: str, status: str, detail: str = "") -> None:
-    _state["stages"][name] = {"status": status, "detail": detail}
-    if status == "running":
-        _state["current_stage"] = name
-    if detail:
-        _log(f"{name}: {detail}")
-
-
-def _save_last_run() -> None:
-    """持久化最近一次结果,重启 kb-web 后仍能看到。"""
-    try:
-        _STATE_FILE.write_text(json.dumps({
-            "finished_at": _state["finished_at"],
-            "stages": _state["stages"],
-        }, ensure_ascii=False, indent=1), encoding="utf-8")
-    except OSError:
-        pass
-
-
-def load_last_run() -> dict | None:
-    try:
-        return json.loads(_STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def get_state() -> dict:
-    return _state
-
-
-# ── 各阶段 ──────────────────────────────────────────────────────────────────────
-
-def _http_json(url: str, method: str = "GET", timeout: int = 10) -> dict | None:
-    try:
-        req = urllib.request.Request(url, method=method)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return None
-
-
-def wechatoa_status() -> dict:
-    """WeChatOA 在线状态 + 凭证状态,给状态面板用。"""
-    auth = _http_json(f"{WECHATOA_API}/api/auth/status")
-    if auth is None:
-        return {"online": False}
-    return {"online": True, "auth": auth}
-
-
-def _run_crawl() -> None:
-    if _http_json(f"{WECHATOA_API}/api/crawl/status") is None:
-        _stage("crawl", "skipped", "WeChatOA 后端不在线,跳过抓取")
-        return
-    _stage("crawl", "running", "触发全量爬取")
-    started = _http_json(f"{WECHATOA_API}/api/crawl", method="POST")
-    if started is None:
-        # 409(已有任务在跑)也会走到这:继续轮询即可
-        _log("crawl: 启动返回异常(可能已在跑),继续轮询状态")
-    # WeChatOA 的爬取线程把 running 置 true 有个短暂窗口,先等一拍;
-    # 且 running=false 时连续确认三次再收工,避免拿上一轮的旧状态提前结束
-    time.sleep(2)
-    deadline = time.time() + 30 * 60
-    idle_polls = 0
-    while time.time() < deadline:
-        st = _http_json(f"{WECHATOA_API}/api/crawl/status")
-        if st is None:
-            _stage("crawl", "error", "轮询状态失败(后端掉线?)")
-            return
-        if not st.get("running"):
-            idle_polls += 1
-            if idle_polls < 3:
-                time.sleep(1)
-                continue
-            errs = st.get("errors") or []
-            if st.get("auth_error"):
-                _stage("crawl", "error",
-                       "凭证失效,请到 WeChatOA 配置页扫码续期后重跑")
-            else:
-                _stage("crawl", "ok",
-                       f"新增 {st.get('new_articles', 0)} 篇"
-                       + (f",{len(errs)} 个账号失败" if errs else ""))
-            return
-        idle_polls = 0
-        _stage("crawl", "running",
-               f"爬取中 {st.get('done', 0)}/{st.get('total', 0)} — {st.get('current', '')}")
-        time.sleep(2)
-    _stage("crawl", "error", "爬取超时(30分钟)")
-
-
-def _run_export() -> None:
-    _stage("export", "running", "导出到 obs")
-    try:
-        proc = subprocess.run(
-            ["uv", "run", "python", "scripts/export_obsidian.py"],
-            cwd=WECHATOA_DIR, capture_output=True, text=True, timeout=30 * 60,
-        )
-    except subprocess.TimeoutExpired:
-        _stage("export", "error", "导出超时")
-        return
-    if proc.returncode != 0:
-        _stage("export", "error", f"导出失败: {(proc.stderr or proc.stdout)[-300:]}")
-        return
-    # 取脚本的完成行作为 detail
-    tail = [l for l in proc.stdout.splitlines() if "完成" in l]
-    _stage("export", "ok", tail[-1].replace("[export] ", "") if tail else "完成")
-
-
-def _run_index() -> None:
-    from kb import store
-    from kb.chunker import split_chunks
-    from kb.extract import parse_pretagged, save_extraction
-    from kb.scanner import scan_all
-
-    _stage("index", "running", "扫描 vault")
-    conn = store.connect()
-    try:
-        now = _now()
-        seen: set[str] = set()
-        new = 0
-        for doc in scan_all():
-            seen.add(doc.path)
-            if not store.doc_needs_reindex(conn, doc.path, doc.content_hash):
-                continue
-            store.upsert_document(conn, doc, split_chunks(doc.body), now)
-            pre = parse_pretagged(doc)
-            if pre is not None:
-                save_extraction(conn, doc.path, pre)
-            new += 1
-            if new % 25 == 0:
-                conn.commit()
-                _stage("index", "running", f"已索引 {new} 篇")
-        removed = store.remove_missing_documents(conn, seen)
-        conn.commit()
-
-        rows = store.chunks_without_vectors(conn)
-        if rows:
-            _stage("index", "running", f"编码 {len(rows)} 个新 chunk")
-            from kb.embedder import embed_texts
-            B = 128
-            for i in range(0, len(rows), B):
-                batch = rows[i:i + B]
-                store.insert_vectors(conn, [r["id"] for r in batch],
-                                     embed_texts([r["text"] for r in batch]))
-                conn.commit()
-        _stage("index", "ok", f"新增/更新 {new},移除 {removed},新向量 {len(rows)}")
-    except Exception as e:
-        _stage("index", "error", f"索引失败: {e}")
-    finally:
-        conn.close()
-
-
-def _run_extract() -> None:
-    from kb import store
-    from kb.extract import (_tag_slug, extract_with_claude, pending_docs,
-                            refresh_content_hash, save_extraction,
-                            writeback_tags)
-
-    conn = store.connect()
-    try:
-        todo = pending_docs(conn)
-        if not todo:
-            _stage("extract", "ok", "没有待提取的文档")
-            return
-        ok = failed = 0
-        for i, row in enumerate(todo, 1):
-            _stage("extract", "running", f"提取 {i}/{len(todo)} — {row['title'][:24]}")
-            body = conn.execute(
-                "SELECT group_concat(text, char(10)) AS b FROM chunks WHERE path=?",
-                (row["path"],),
-            ).fetchone()["b"] or ""
-            try:
-                data = extract_with_claude(row["title"], body)
-                save_extraction(conn, row["path"], data)
-                conn.commit()
-                # tag 回写 obs frontmatter(决策:自动回写);回写改了文件,
-                # 同步刷新 hash 免得下次 index 白白重建这批文档
-                tags = [f"topic/{_tag_slug(t)}" for t in data["topics"]] + \
-                       [f"entity/{_tag_slug(e['name'])}" for e in data["entities"]]
-                if writeback_tags(row["path"], tags):
-                    refresh_content_hash(conn, row["path"])
-                    conn.commit()
-                ok += 1
-            except Exception as e:
-                failed += 1
-                _log(f"extract: FAIL {row['title'][:24]}: {e}")
-        _stage("extract", "ok" if failed == 0 else "error",
-               f"成功 {ok},失败 {failed}")
-    finally:
-        conn.close()
+# 对外门面:Web 层只 import 本模块,不直接碰拆出去的三个子模块
+__all__ = [
+    "STAGES",
+    "get_state",
+    "load_last_run",
+    "load_schedule",
+    "pending_counts",
+    "retry_failed_plan",
+    "save_schedule",
+    "start_pipeline",
+    "start_retry_failed",
+    "start_scheduler",
+    "wechatoa_accounts",
+    "wechatoa_status",
+]
 
 
 # ── 编排 ────────────────────────────────────────────────────────────────────────
 
 _RUNNERS = {"crawl": _run_crawl, "export": _run_export,
-            "index": _run_index, "extract": _run_extract}
+            "index": _run_index, "extract": _run_extract,
+            "projects": _run_projects, "wiki": _run_wiki}
 
 
-def _run_pipeline(stages: list[str]) -> None:
+def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
     try:
+        # 抓取被反爬间隔限速(页间/号间随机 sleep),期间 CPU 和网络全闲着:
+        # 先并行开跑一轮"存量"提取,消化上一轮已索引但没提取的积压。
+        # 安全边界:提取只写 kb.db(WAL)和 obs frontmatter,与抓取(WeChatOA HTTP)、
+        # 导出(幂等,已存在的文件跳过、不覆盖)互不冲突;索引前 join,保持库的单写者。
+        ex_stats = _new_extract_stats()
+        pre_thread = None
+        if "extract" in stages and "crawl" in stages:
+            def _pre_extract():
+                try:
+                    _extract_pass("存量", ex_stats)
+                    # 管道还没走到 extract 阶段:别让卡片停在"running"误导人
+                    if ex_stats["ok"] + len(ex_stats["failed_paths"]) \
+                            + len(ex_stats["empty_paths"]) > 0:
+                        _state["stages"]["extract"] = {
+                            "status": "pending",
+                            "detail": f"存量已提取 {ex_stats['ok']} 篇,等索引后做增量"}
+                except Exception as e:
+                    _log(f"extract(存量): {e}")
+            pre_thread = threading.Thread(target=_pre_extract, daemon=True)
+            pre_thread.start()
+
         for s in STAGES:
-            if s in stages:
-                _RUNNERS[s]()
-            else:
+            if s not in stages:
                 _state["stages"][s] = {"status": "skipped", "detail": "未选择"}
+            elif s == "crawl":
+                _run_crawl(crawl_filter)
+            elif s == "index":
+                if pre_thread and pre_thread.is_alive():
+                    _stage("index", "running", "等存量提取收尾(避免并发写库)")
+                    pre_thread.join()
+                _run_index()
+            elif s == "extract":
+                if pre_thread:
+                    pre_thread.join()
+                    _extract_pass("增量", ex_stats)
+                    _finish_extract_stage(ex_stats)
+                else:
+                    _run_extract()
+            else:
+                _RUNNERS[s]()
     finally:
-        _state["running"] = False
-        _state["current_stage"] = ""
-        _state["finished_at"] = _now()
-        _log("管道结束")
-        _save_last_run()
+        _end_run()
 
 
-def start_pipeline(stages: list[str] | None = None) -> bool:
-    """启动管道线程。已在跑返回 False。"""
+def start_pipeline(stages: list[str] | None = None,
+                   crawl_filter: dict | None = None) -> bool:
+    """启动管道线程。已在跑返回 False。
+
+    crawl_filter 见 _run_crawl:限定公众号 + 时间段的范围抓取。
+    """
     wanted = [s for s in (stages or list(STAGES)) if s in STAGES]
     with _lock:
         if _state["running"]:
@@ -276,8 +132,71 @@ def start_pipeline(stages: list[str] | None = None) -> bool:
             "stages": {s: {"status": "pending" if s in wanted else "skipped",
                            "detail": ""} for s in STAGES},
         })
-    threading.Thread(target=_run_pipeline, args=(wanted,), daemon=True).start()
+    threading.Thread(target=_run_pipeline, args=(wanted, crawl_filter),
+                     daemon=True).start()
     return True
+
+
+# ── 定时同步 ────────────────────────────────────────────────────────────────────
+# 每天固定时刻自动触发全流程同步(全部五个阶段)。配置持久化在 data/,
+# 调度线程跟随 kb-web 进程存活;kb-web 不在跑时到点不会触发(无守护进程)。
+
+_SCHED_FILE = DATA_DIR / "pipeline_schedule.json"
+_sched_started = False
+
+
+def load_schedule() -> dict:
+    try:
+        d = json.loads(_SCHED_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        d = {}
+    return {"enabled": bool(d.get("enabled")),
+            "time": d.get("time") or "07:30",
+            "last_fired": d.get("last_fired") or ""}
+
+
+def save_schedule(enabled: bool, time_str: str) -> dict:
+    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", time_str or ""):
+        raise ValueError(f"时间格式应为 HH:MM,收到 {time_str!r}")
+    cur = load_schedule()
+    cur.update({"enabled": bool(enabled), "time": time_str})
+    _SCHED_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+    return cur
+
+
+def _mark_fired(day: str) -> None:
+    cur = load_schedule()
+    cur["last_fired"] = day
+    _SCHED_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+
+
+def _scheduler_loop() -> None:
+    while True:
+        time.sleep(30)
+        try:
+            s = load_schedule()
+            if not s["enabled"]:
+                continue
+            now = datetime.now()
+            today = now.strftime("%Y-%m-%d")
+            if now.strftime("%H:%M") != s["time"] or s["last_fired"] == today:
+                continue
+            # 已在跑也标记今天已触发,避免同一分钟内反复尝试
+            _mark_fired(today)
+            if start_pipeline(None):
+                _log(f"定时任务触发全流程同步(每日 {s['time']})")
+        except Exception:
+            pass          # 调度线程绝不能死
+
+
+def start_scheduler() -> None:
+    global _sched_started
+    if _sched_started:
+        return
+    _sched_started = True
+    threading.Thread(target=_scheduler_loop, daemon=True).start()
 
 
 # ── 待处理数(空闲时给面板显示)────────────────────────────────────────────────
@@ -312,4 +231,14 @@ def pending_counts() -> dict:
         conn.close()
     except Exception:
         out["index"] = out["extract"] = None
+    # 条目化待处理:gate 通过但还没拆条目的(含存量积压,手动分批消化)
+    try:
+        st = json.loads((DATA_DIR / "gzh_projects_state.json")
+                        .read_text(encoding="utf-8"))
+        out["projects"] = sum(
+            1 for r in st.get("docs", {}).values()
+            if r.get("gate", {}).get("project_article")
+            and not r.get("transcribed_at"))
+    except Exception:
+        out["projects"] = None
     return out
