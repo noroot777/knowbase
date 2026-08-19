@@ -20,7 +20,7 @@ from datetime import date
 from kb import llm
 from kb import askagent
 from kb.aggregate import enumerate_documents, enumerate_entities
-from kb.search import Filters, search
+from kb.search import Filters, _filter_sql, search
 
 _PLAN_PROMPT = """\
 今天是 {today}。把用户的知识库问题解析成查询计划,只输出 JSON,不要其他文字:
@@ -106,7 +106,19 @@ def plan_query(question: str, history: list[dict] | None = None,
     return plan
 
 
-def _prepare_ask(conn, question: str, model: str, history: list[dict]) -> dict:
+def _hard_filter_paths(conn, f: Filters) -> set[str]:
+    """把调用方显式给的硬过滤编译成"允许出现的文档 path"集合。
+
+    枚举那两条路(aggregate)只认 since/until/source/kind/topic,表达不了
+    account/tag/entity;拿这个集合做后置交集,硬过滤才在所有模式下都真生效。
+    """
+    where, params = _filter_sql(f)
+    rows = conn.execute(f"SELECT d.path FROM documents d WHERE 1=1{where}", params)
+    return {r["path"] for r in rows}
+
+
+def _prepare_ask(conn, question: str, model: str, history: list[dict],
+                 filters: Filters | None = None) -> dict:
     """规划意图 + 取资料 + 拼提示词。返回 {plan, refs, prompt, answer}:
 
     - answer 非 None:空结果等短路情形,已有现成回答,prompt 为 None,无需调 LLM。
@@ -114,9 +126,25 @@ def _prepare_ask(conn, question: str, model: str, history: list[dict]) -> dict:
       流式 llm.chat_stream)综合。
 
     抽出这层是为了让非流式 run_ask 与流式 run_ask_stream 共用同一套规划/取数逻辑。
+
+    filters: 调用方(如 kb ask --source/--tag/--entity/--account)给的硬过滤,
+    与规划结果合并,显式项覆盖规划猜的;枚举路径用 path 集合做交集。
     """
     plan = plan_query(question, history, plan_model=llm.get_plan_model(model))
     refs: list[dict] = []
+
+    allowed: set[str] | None = None
+    if filters is not None:
+        # 显式过滤优先于规划猜的,免得两边打架把结果掐成空
+        if filters.source:
+            plan["source"] = filters.source
+        if filters.since:
+            plan["since"] = filters.since
+        if filters.until:
+            plan["until"] = filters.until
+        # path 集合只有枚举那两条路要用(retrieve 走 search 直接编进 SQL),按需算
+        if plan["mode"] in ("enumerate_entities", "enumerate_docs"):
+            allowed = _hard_filter_paths(conn, filters)
 
     hist_text = _fmt_history(history)
     hist_block = f"之前的对话(供衔接上下文):\n{hist_text}\n\n" if hist_text else ""
@@ -142,6 +170,10 @@ def _prepare_ask(conn, question: str, model: str, history: list[dict]) -> dict:
             conn, since=plan["since"], until=plan["until"],
             source=plan["source"], kind=plan["kind"], topic=plan["topic"],
         )
+        if allowed is not None:   # 硬过滤:只留还剩出处的实体
+            items = [it for it in
+                     ({**it, "docs": [d for d in it["docs"] if d["path"] in allowed]}
+                      for it in items) if it["docs"]]
         if not items:
             return {"plan": plan, "refs": [], "prompt": None,
                     "answer": "该条件下知识库里没有找到任何实体。"}
@@ -175,6 +207,8 @@ def _prepare_ask(conn, question: str, model: str, history: list[dict]) -> dict:
             conn, since=plan["since"], until=plan["until"], source=plan["source"],
             topic=plan["topic"],
         )
+        if allowed is not None:
+            docs = [d for d in docs if d["path"] in allowed]
         if not docs:
             return {"plan": plan, "refs": [], "prompt": None,
                     "answer": "该条件下没有文章。"}
@@ -195,7 +229,10 @@ def _prepare_ask(conn, question: str, model: str, history: list[dict]) -> dict:
     else:  # retrieve
         hits = search(
             conn, plan["query"] or question,
-            Filters(source=plan["source"], since=plan["since"], until=plan["until"]),
+            Filters(source=plan["source"], since=plan["since"], until=plan["until"],
+                    account=filters.account if filters else None,
+                    tags=list(filters.tags) if filters else [],
+                    entities=list(filters.entities) if filters else []),
             top_k=8,
         )
         if not hits:
@@ -233,7 +270,8 @@ def filter_refs_to_cited(answer: str, refs: list[dict],
 
 
 def run_ask(conn, question: str, model: str = None,
-            history: list[dict] | None = None) -> dict:
+            history: list[dict] | None = None,
+            filters: Filters | None = None) -> dict:
     """完整问答(非流式)。返回 {answer, refs, plan}。refs 的 path 相对 vault 根。
 
     优先走 agentic 模式(kb.askagent:模型自选工具多轮查库);
@@ -241,15 +279,19 @@ def run_ask(conn, question: str, model: str = None,
 
     history: 同一会话里之前的消息 [{"role": "user"|"assistant", "content": str}],
     按时间序。用于意图规划的指代消解和综合回答的上下文衔接。
+
+    filters: 调用方给的硬过滤(kb ask --source/--account/--tag/--entity)。
+    给了就不走 agent —— agent 自己规划检索,约束只能靠提示词"求"它遵守;
+    走规划管线才能把过滤真正编进 SQL,任何兜底分支都不会漏掉。
     """
     history = history or []
     model = model or llm.get_default_model()
-    if askagent.agent_available(model):
+    if filters is None and askagent.agent_available(model):
         try:
             return askagent.run_agent(conn, question, model, history)
         except RuntimeError:
             pass   # 研究/综合失败 → 退回旧管线重来(非流式无半截输出问题)
-    prep = _prepare_ask(conn, question, model, history)
+    prep = _prepare_ask(conn, question, model, history, filters)
     if prep["answer"] is not None:
         return {"answer": prep["answer"], "refs": prep["refs"], "plan": prep["plan"]}
     answer = _run_claude(prep["prompt"], model=model)

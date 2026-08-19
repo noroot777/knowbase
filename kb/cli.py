@@ -154,26 +154,17 @@ def cmd_ask(args) -> int:
 
     旧实现是自己 top-8 检索 + 拼 prompt 调本机 claude CLI,既吃不到 agentic/
     枚举(“都有哪些”会被 top-K 截断),也用不上设置面板里配的 API key。
-    过滤参数不走 run_ask(它自己规划检索),改成写进问题里的限定条件交给模型。
+    --source/--account/--tag/--entity 作为硬过滤原样传下去(和 kb search 同语义),
+    run_ask 收到它就走规划管线把过滤编进 SQL,不靠提示词求模型遵守。
     """
     from kb.askflow import filter_refs_to_cited, run_ask
 
-    limits = []
-    if args.source:
-        limits.append(f"来源={args.source}")
-    if args.account:
-        limits.append(f"公众号={args.account}")
-    for t in args.tag or []:
-        limits.append(f"标签={t}")
-    for e in args.entity or []:
-        limits.append(f"实体={e}")
-    question = args.query
-    if limits:
-        question += "\n(检索时请限定: " + "、".join(limits) + ")"
+    f = _build_filters(args)
+    hard = f if (f.source or f.account or f.tags or f.entities) else None
 
     conn = store.connect()
     try:
-        res = run_ask(conn, question, model=args.model)
+        res = run_ask(conn, args.query, model=args.model, filters=hard)
     except RuntimeError as e:
         print(f"问答失败: {e}", file=sys.stderr)
         return 1
@@ -225,7 +216,7 @@ def main() -> int:
     for name in ("search", "ask"):
         sp = sub.add_parser(name, help="混合检索" if name == "search" else "意图问答")
         sp.add_argument("query")
-        # ask 的过滤参数不直接生效:run_ask 自己规划检索,这些值会作为限定条件写进问题
+        # ask 的过滤参数与 search 同语义(硬过滤),给了就走规划管线而非 agent
         sp.add_argument("--source", default=None)
         sp.add_argument("--account", default=None)
         sp.add_argument("--tag", action="append", help="可多次,AND 关系(前缀匹配)")
