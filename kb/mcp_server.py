@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import re
+
 from mcp.server.fastmcp import FastMCP
 
 from kb import store
@@ -29,14 +31,16 @@ def kb_search(
     until: str | None = None,
     top: int = 10,
 ) -> list[dict]:
-    """搜索个人知识库(微信公众号文章 + YouTube 视频摘要)。
+    """搜索个人知识库(微信公众号文章 + YouTube 视频摘要 + 工具条目树)。
 
     混合检索:关键词(FTS) + 语义(向量),适合精确名词和意图描述两类查询。
     注意:这是 top-K 相关性检索;"都提过哪些 XX"类穷举问题请用 kb_enumerate。
 
     Args:
         query: 关键词或一句话意图,如 "book-to-skill" 或 "把书变成技能的工具"
-        source: 限定来源,可选 dr-gzh(公众号) / dr-youtube-dig(YouTube)
+        source: 限定来源。推荐用来源组:gzh/公众号(dr-gzh+dr-gzh-projects)、
+            video/视频(dr-youtube-dig+dr-video-projects)、dr/日报;
+            也可给具体来源名(dr-gzh、dr-youtube-dig、dr-video-projects 等)
         tag: 限定主题标签,如 topic/skill工具、topic/ai-coding
         entity: 限定实体(项目/产品/公司名),如 "Claude Code"
         since: 只看这天之后发布的,格式 YYYY-MM-DD
@@ -46,6 +50,8 @@ def kb_search(
     Returns:
         文档列表,含 title/account/published/url/path/summary/best_chunk。
         用 kb_read(path) 读某篇全文。
+        向用户展示结果时:标题写成 markdown 链接 [标题](url),
+        并附公众号名与发布日期,引用原文内容时标注来源编号。
     """
     conn = store.connect()
     try:
@@ -81,26 +87,33 @@ def kb_enumerate(
     until: str | None = None,
     source: str | None = None,
     kind: str | None = None,
+    topic: str | None = None,
 ) -> list[dict]:
     """全量枚举知识库内容(不是 top-K,保证不漏)。
 
     适合"最近一周公众号都提过哪些开源项目"这类穷举问题:
-    kb_enumerate(what="entities", since="2026-06-27", source="dr-gzh", kind="project")
+    kb_enumerate(what="entities", since="2026-06-27", source="gzh", kind="project")
 
     Args:
         what: "entities"(枚举实体,带出处文章) 或 "docs"(枚举文章)
         since: 只看这天之后发布的,格式 YYYY-MM-DD
         until: 只看这天之前发布的(含当天)
-        source: dr-gzh(公众号) / dr-youtube-dig(YouTube),None=全部
+        source: 来源组或来源名,None=全部。推荐用组:gzh/公众号、video/视频、dr/日报
+            (组包含对应的条目化衍生树,查工具/项目类信息最全)。
+            what=docs 且 None 时只扫原始来源(不含条目化衍生树,避免内容重复)
         kind: 实体类型 project(开源项目)/product/org(公司)/model(模型),仅 what=entities 有效
+        topic: 主题过滤词,可给多个近义变体用逗号分隔(如 "文生图,图像生成,text-to-image",
+            OR 关系)。库里措辞和问题措辞常不一致,多给变体防漏
     """
     from kb.aggregate import enumerate_documents, enumerate_entities
+    topics = [t for t in re.split(r"[,，、/]", topic or "") if t.strip()] or None
     conn = store.connect()
     try:
         if what == "docs":
-            return enumerate_documents(conn, since=since, until=until, source=source)
+            return enumerate_documents(conn, since=since, until=until, source=source,
+                                       topics=topics)
         return enumerate_entities(conn, since=since, until=until,
-                                  source=source, kind=kind)
+                                  source=source, kind=kind, topics=topics)
     finally:
         conn.close()
 
@@ -132,18 +145,22 @@ def kb_entities(prefix: str = "", top: int = 30) -> list[dict]:
     """
     conn = store.connect()
     try:
+        # 按 norm 聚合写法变体,展示名取出现最多的写法
+        totals: dict[str, int] = {}
+        best_name: dict[str, tuple[int, str]] = {}
+        for r in conn.execute(
+            "SELECT norm, entity, COUNT(DISTINCT path) AS n FROM entities "
+            "GROUP BY norm, entity"
+        ):
+            totals[r["norm"]] = totals.get(r["norm"], 0) + r["n"]
+            if r["norm"] not in best_name or r["n"] > best_name[r["norm"]][0]:
+                best_name[r["norm"]] = (r["n"], r["entity"])
+        items = [{"entity": best_name[n][1], "docs": c} for n, c in totals.items()]
         if prefix:
-            rows = conn.execute(
-                "SELECT entity, COUNT(*) n FROM entities WHERE entity LIKE ? COLLATE NOCASE "
-                "GROUP BY entity ORDER BY n DESC LIMIT ?",
-                (f"{prefix}%", top),
-            )
-        else:
-            rows = conn.execute(
-                "SELECT entity, COUNT(*) n FROM entities GROUP BY entity ORDER BY n DESC LIMIT ?",
-                (top,),
-            )
-        return [{"entity": r["entity"], "docs": r["n"]} for r in rows]
+            p = prefix.lower()
+            items = [it for it in items if it["entity"].lower().startswith(p)]
+        items.sort(key=lambda x: x["docs"], reverse=True)
+        return items[:top]
     finally:
         conn.close()
 
