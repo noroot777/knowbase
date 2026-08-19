@@ -158,7 +158,12 @@ async function refreshPipe(withPending = false) {
   const stages = s.running ? s.stages : (s.last_run ? s.last_run.stages : s.stages);
   $('pipe-stages').innerHTML = Object.entries(STAGE_META).map(([k, m]) => {
     const st = stages[k] || { status: '', detail: '' };
-    const pend = s.pending && s.pending[k] != null ? `待处理 ${s.pending[k]}` : '';
+    const pendN = s.pending && s.pending[k] != null ? s.pending[k] : null;
+    const pend = pendN != null ? `待处理 ${pendN}` : '';
+    // 卡片正文 = 上次运行结果 + 当前积压。两者都有就并排显示:只认 detail 的话,
+    // 「本次无需重试」这类重试链留下的通用文案会把真正待办的积压数盖掉
+    // (重试跳过 projects 时,169 篇待条目化在卡片上就消失了)。
+    const body = [st.detail, pendN ? pend : ''].filter(Boolean).join(' · ') || pend;
     // 失败明细(后端 _stage 的 failures):卡片内可展开,不用翻日志
     const fails = st.failures || [];
     const failHtml = fails.length ? `
@@ -176,7 +181,7 @@ async function refreshPipe(withPending = false) {
       </div>
       <div style="font-size:11.5px;color:var(--muted);margin:2px 0 6px">${m.desc}</div>
       <div style="font-size:12px;color:#4A565F;min-height:18px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden"
-           title="${esc(st.detail || pend || '')}">${esc(st.detail || pend || '')}</div>
+           title="${esc(body)}">${esc(body)}</div>
       ${failHtml}
     </div>`;
   }).join('');
