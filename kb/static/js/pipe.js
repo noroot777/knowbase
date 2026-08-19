@@ -16,10 +16,16 @@ let pipeAcctList = [];                                 // 全部订阅号
 let pipeSel = new Set();                               // 选中的号
 let pipeRange = { label: '不限时间', from: '', to: '' };
 
+// 本地日期 YYYY-MM-DD。不能用 toISOString() —— 那给的是 UTC 日期,
+// 东八区 00:00-07:59 会算成前一天,整套预设范围跟着错开一天(当天文章漏抓)。
+function localDay(d) {
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 function isoDay(offset) {
   const d = new Date();
   d.setDate(d.getDate() + offset);
-  return d.toISOString().slice(0, 10);
+  return localDay(d);
 }
 function pipePresets() {
   const today = isoDay(0);
@@ -29,7 +35,7 @@ function pipePresets() {
     { label: '今天', from: today, to: today },
     { label: '近 7 天', from: isoDay(-7), to: today },
     { label: '近 30 天', from: isoDay(-30), to: today },
-    { label: '近 3 个月', from: m3.toISOString().slice(0, 10), to: today },
+    { label: '近 3 个月', from: localDay(m3), to: today },
     { label: '今年', from: today.slice(0, 4) + '-01-01', to: today },
   ];
 }
