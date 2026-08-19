@@ -22,9 +22,19 @@ from kb.pipeline_state import (
     _state,
     load_last_run,
 )
-from kb.pipeline_stages import _run_crawl, _run_export, _run_extract, _run_index
+from kb.pipeline_stages import (
+    _run_crawl,
+    _run_export,
+    _run_extract,
+    _run_index,
+    _run_projects,
+    _run_wiki,
+)
 
 REFILL_SCRIPT = Path.home() / "code" / "gongzhonghao" / "gzh_refill_body.py"
+
+# 阶段 detail 里写了失败条数就算失败(状态本身是 ok 也算),与面板按钮同一套判定
+_FAIL_DETAIL_RE = re.compile(r"失败 [1-9]|\d+ 个账号失败")
 
 
 def _run_refill() -> None:
@@ -86,29 +96,44 @@ def retry_failed_plan() -> list[str]:
     - crawl 有账号失败/出错 → 重抓(增量爬取,便宜)
     - export 有失败/出错、或链里重抓过 → 重导出
     - extract 有"正文空"跳过 → 先回填(refill)
-    - export/refill 可能补了数据 → 重建索引
+    - export/refill 可能补了数据、或 index 自己出错 → 重建索引
     - extract 出过错、或前面补了新文章 → 重提取
+    - projects/wiki 出过错 → 重跑(它们在链尾,不牵连别人)
+
+    「算失败」的判定必须和面板按钮(kb/static/js/pipe.js)保持同一套规则:
+    status=error,或 detail 里写了失败条数。两边不一致的话按钮会亮着但这里
+    返回空计划,用户点下去只收到 409。
     """
     prev = (load_last_run() or {}).get("stages", {})
 
     def _detail(name: str) -> str:
         return (prev.get(name) or {}).get("detail") or ""
 
-    def _err(name: str) -> bool:
-        return (prev.get(name) or {}).get("status") == "error"
+    def _failed(name: str) -> bool:
+        return ((prev.get(name) or {}).get("status") == "error"
+                or bool(_FAIL_DETAIL_RE.search(_detail(name))))
+
+    # projects 的"入库失败"卡在最后的 chunk 入库/编码那步 —— gate/transcribe 的
+    # 大模型调用其实已经成功了。而 index 扫的是整个 vault,dr-*-projects 只是它的
+    # 子集,交给 index 重建就够,不必再烧一遍额度重跑条目化。
+    projects_ingest_only = (_failed("projects")
+                            and _detail("projects").startswith("入库失败"))
 
     plan: list[str] = []
-    if _err("crawl") or re.search(r"\d+ 个账号失败", _detail("crawl")):
+    if _failed("crawl"):
         plan.append("crawl")
-    if _err("export") or re.search(r"失败 [1-9]", _detail("export")) \
-            or "crawl" in plan:
+    if _failed("export") or "crawl" in plan:
         plan.append("export")
     if "正文空" in _detail("extract"):
         plan.append("refill")
-    if plan:
+    if plan or _failed("index") or projects_ingest_only:
         plan.append("index")
-    if _err("extract") or "index" in plan:
+    if _failed("extract") or "index" in plan:
         plan.append("extract")
+    if _failed("projects") and not projects_ingest_only:
+        plan.append("projects")
+    if _failed("wiki"):
+        plan.append("wiki")
     if not plan:
         # 上次没记录失败,但可能还有提取积压(如手动往 vault 放过文档)
         from kb import store
@@ -134,6 +159,10 @@ def _run_retry_failed(plan: list[str]) -> None:
             _run_index()
         if "extract" in plan:
             _run_extract()
+        if "projects" in plan:
+            _run_projects()
+        if "wiki" in plan:
+            _run_wiki()
     finally:
         _end_run()
 
@@ -146,17 +175,15 @@ def start_retry_failed() -> tuple[bool, str]:
     with _lock:
         if _state["running"]:
             return False, "管道已在运行中"
-        # card 只列重试链会碰的阶段;STAGES 后来新增的(projects/wiki)按"无需重试"处理。
-        # 这里必须 .get 兜底 —— 写死 key 的话,STAGES 一加新阶段就 KeyError 500。
-        card = {"crawl": "crawl" in plan,
-                "export": "export" in plan or "refill" in plan,
-                "index": "index" in plan,
-                "extract": "extract" in plan}
+        # card 标记这一轮会碰哪些阶段:按 STAGES 生成,STAGES 加新阶段也不会漏 key。
+        # refill 不是独立卡片,占用 export 那张展示进度。
+        card = {s: s in plan for s in STAGES}
+        card["export"] = card["export"] or "refill" in plan
         _state.update({
             "running": True, "current_stage": "", "log": [],
             "started_at": _now(), "finished_at": "",
-            "stages": {s: {"status": "pending" if card.get(s) else "skipped",
-                           "detail": "" if card.get(s) else "本次无需重试"}
+            "stages": {s: {"status": "pending" if card[s] else "skipped",
+                           "detail": "" if card[s] else "本次无需重试"}
                        for s in STAGES},
         })
     _log("重试失败项: " + " → ".join(plan))
