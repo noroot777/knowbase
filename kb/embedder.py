@@ -30,14 +30,36 @@ def _get_model():
     return _model
 
 
+# 一批的注意力张量约 B × heads × L² × 4 字节,随文本长度平方涨。Apple 的 MPS
+# 后端对单个 buffer 有上限(约 2/3 统一内存),一条 3566 token 的 chunk 混进
+# 32 条的批就要 24.25 GiB,直接 RuntimeError: Invalid buffer size。
+# 所以按 B × L² 控预算动态缩批:短文本仍然满批,长文本自动降到一两条。
+# 预算取「32 条 768 长度」的规模,与原先常见批次的开销持平。
+# 长度用字符数估:中文约 1 字 1 token,英文/代码的 token 数远少于字符数,
+# 即这个估计只会偏保守(批切得比必要的更小),不会漏判。
+_BATCH_BUDGET = 32 * 768 * 768
+
+
 def embed_texts(texts: list[str], batch_size: int = 32) -> list[list[float]]:
     """文档 chunk 批量编码(索引时用)。"""
+    if not texts:
+        return []
     model = _get_model()
-    vecs = model.encode(
-        texts, batch_size=batch_size, normalize_embeddings=True,
-        show_progress_bar=len(texts) > 64,
-    )
-    return [v.tolist() for v in vecs]
+    # 按长度降序分批,批内长度接近 → padding 浪费小,且批首即批内最长,
+    # 可以直接用它估这一批的显存规模
+    order = sorted(range(len(texts)), key=lambda i: len(texts[i]), reverse=True)
+    out: list[list[float]] = [None] * len(texts)  # type: ignore[list-item]
+    i = 0
+    while i < len(order):
+        longest = max(len(texts[order[i]]), 1)
+        n = max(1, min(batch_size, _BATCH_BUDGET // (longest * longest)))
+        idx = order[i:i + n]
+        vecs = model.encode([texts[j] for j in idx], batch_size=len(idx),
+                            normalize_embeddings=True)
+        for j, v in zip(idx, vecs):
+            out[j] = v.tolist()
+        i += n
+    return out
 
 
 def embed_query(query: str) -> list[float]:

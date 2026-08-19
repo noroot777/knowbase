@@ -29,6 +29,33 @@ _LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _HEADING_RE = re.compile(r"^(#{1,6})\s*(.+?)\s*$", re.M)
 
 
+def _split_long(para: str) -> list[str]:
+    """把超过 CHUNK_MAX 的单个段落再切开。
+
+    技术文里的代码块常常整块没有空行,按 \\n{2,} 拆段拆不动它;不切开的话
+    这一段会原样成为一个 chunk,把 embedding 的注意力显存按长度平方顶爆。
+    优先按行切,单行还超长(压缩过的 json/minified 代码)就硬切。
+    """
+    if len(para) <= CHUNK_MAX:
+        return [para]
+    out: list[str] = []
+    buf = ""
+    for line in para.split("\n"):
+        while len(line) > CHUNK_MAX:
+            if buf:
+                out.append(buf)
+                buf = ""
+            out.append(line[:CHUNK_MAX])
+            line = line[CHUNK_MAX:]
+        if buf and len(buf) + len(line) + 1 > CHUNK_MAX:
+            out.append(buf)
+            buf = ""
+        buf += line + "\n"
+    if buf.strip():
+        out.append(buf)
+    return out
+
+
 def _clean(text: str) -> str:
     text = _IMG_RE.sub("", text)
     text = _LINK_RE.sub(r"\1", text)       # 链接保留文字
@@ -72,10 +99,11 @@ def split_chunks(body: str) -> list[Chunk]:
             flush()
             buf_head = heading
             for para in re.split(r"\n{2,}", seg):
-                if len(buf) + len(para) > CHUNK_MAX and buf:
-                    flush()
-                    buf_head = heading
-                buf += para + "\n\n"
+                for piece in _split_long(para):
+                    if len(buf) + len(piece) > CHUNK_MAX and buf:
+                        flush()
+                        buf_head = heading
+                    buf += piece + "\n\n"
             flush()
             continue
         # 正常节:凑到目标大小再切
