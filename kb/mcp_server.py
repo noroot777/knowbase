@@ -125,9 +125,11 @@ def kb_read(path: str) -> str:
     Args:
         path: kb_search 返回的 path 字段(相对 vault 根的路径)
     """
-    full = (VAULT_ROOT / path).resolve()
-    # 防目录穿越:必须落在 vault 内
-    if not str(full).startswith(str(VAULT_ROOT.resolve())):
+    root = VAULT_ROOT.resolve()
+    full = (root / path).resolve()
+    # 防目录穿越:必须落在 vault 内。按路径层级比,不能比字符串前缀 ——
+    # 前缀判定会把同前缀的兄弟目录(new-start-private)当成 vault 内部。
+    if full != root and root not in full.parents:
         raise ValueError("path 越界")
     try:
         return full.read_text(encoding="utf-8")
