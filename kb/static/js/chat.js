@@ -12,7 +12,7 @@ let chatAbort = null;       // 进行中请求的 AbortController;点停止即 a
 // 生成中的气泡:顶部标模型 + 阶段(agent 研究步骤/生成中),body 承载流式渲染的 markdown。
 // partial 有内容(切回来恢复时)则直接渲染,否则先转圈。
 function pendingHtml(model, partial, phase) {
-  const body = partial ? marked.parse(partial) : '<span class="spin"></span>';
+  const body = partial ? mdHtml(partial) : '<span class="spin"></span>';
   const ph = partial ? '生成中…' : (phase || '检索中…');
   return `<div class="msg assistant" id="chat-pending">` +
     `<div class="gen-head">模型 · ${esc(model || '默认')} · <span id="chat-gen-phase">${esc(ph)}</span></div>` +
@@ -22,7 +22,7 @@ function pendingHtml(model, partial, phase) {
 // 把已累计的 inflight.partial 渲染进当前视图的 pending body(切走了则找不到,自动跳过)
 function paintPending() {
   const b = document.getElementById('chat-pending-body');
-  if (b && inflight) b.innerHTML = marked.parse(inflight.partial || '');
+  if (b && inflight) b.innerHTML = mdHtml(inflight.partial || '');
   const ph = document.getElementById('chat-gen-phase');
   if (ph) ph.textContent = '生成中…';
 }
@@ -162,13 +162,14 @@ function renderMsg(m) {
   }
   const refMap = {};
   (m.refs || []).forEach(r => { refMap[r.n] = r; });
-  const html = marked.parse(m.content).replace(/\[(\d+)\]/g, (s, n) =>
+  // 先净化模型输出,再把 [n] 换成我们自己拼的引用链接(顺序反了会被 sanitizer 洗掉 data-doc)
+  const html = mdHtml(m.content).replace(/\[(\d+)\]/g, (s, n) =>
     refMap[n] ? docA(refMap[n], `[${n}]`, 'cite') : s);
   const refsHtml = (m.refs || []).length ? `
     <details class="refs"><summary>来源 ${m.refs.length} 篇</summary>${m.refs.map(r =>
       `[${r.n}] ${docA(r, r.title)} — ${esc(r.account || '')}` +
-      ` · <a href="${obsLink(r)}" style="color:var(--muted)" title="在 Obsidian 中打开">Obsidian</a>` +
-      (r.url ? ` · <a href="${esc(r.url)}" target="_blank" rel="noopener" style="color:var(--muted)">原文↗</a>` : '')
+      ` · <a href="${esc(obsLink(r))}" style="color:var(--muted)" title="在 Obsidian 中打开">Obsidian</a>` +
+      (r.url ? ` · <a href="${esc(safeUrl(r.url))}" target="_blank" rel="noopener" style="color:var(--muted)">原文↗</a>` : '')
     ).join('<br>')}</details>` : '';
   const meta = m.model ? `<div class="msg-meta">${esc(m.model)}${m.created_at ? ' · ' + timeAgo(m.created_at) : ''}` +
     ` · <button class="ghost note-btn" style="padding:2px 10px;font-size:12px" ` +

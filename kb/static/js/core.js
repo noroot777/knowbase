@@ -56,6 +56,16 @@ const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 // 只放行安全协议:被索引的 url 来自外部内容,javascript: 之类点一下就执行
 const safeUrl = u => /^(https?:|obsidian:|\/|#)/i.test(String(u || '')) ? String(u) : '#';
+// Markdown → HTML 的唯一出口。条目正文、模型回答都是外部内容,而 marked 从 v5 起
+// 不带 sanitizer:原始 <img onerror> 和 javascript: 链接会被原样输出。一律过 DOMPurify。
+// 兜底是"失败关闭":sanitizer 没加载出来就退化成纯文本,绝不放行未净化的 HTML。
+function mdHtml(src) {
+  const md = String(src || '');
+  if (!window.DOMPurify || !window.marked) {
+    return `<div style="white-space:pre-wrap">${esc(md)}</div>`;
+  }
+  return DOMPurify.sanitize(marked.parse(md));
+}
 // 页内阅读链接:点击滑出面板,href 保留 /doc 路径,中键/Cmd 点仍可新标签打开
 // hash 传 #kbq=…(片段定位锚点),doc 页加载后据此高亮滚动
 // label 一律当纯文本转义(标题来自公众号/LLM,不能当 HTML 拼);

@@ -50,6 +50,7 @@ _DOC_TMPL = """<!DOCTYPE html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="/static/vendor/purify.min.js"></script>
 <style>
   body {{ font: 16px/1.8 -apple-system, "PingFang SC", "Noto Sans SC", sans-serif;
          background: #F2F4F3; color: #1a1a1a; max-width: 760px;
@@ -71,7 +72,12 @@ _DOC_TMPL = """<!DOCTYPE html>
 <script>
 const MD = {md_json};
 const DOC_PATH = {path_json};
-document.getElementById('content').innerHTML = marked.parse(MD);
+// 本地保存的文章正文是外部内容,marked 不做 sanitize,渲染前一律过 DOMPurify;
+// sanitizer 没加载出来就退化成纯文本(失败关闭),不给未净化的 HTML 放行
+document.getElementById('content').innerHTML = window.DOMPurify
+  ? DOMPurify.sanitize(marked.parse(MD))
+  : '<div style="white-space:pre-wrap"></div>';
+if (!window.DOMPurify) document.querySelector('#content div').textContent = MD;
 {snip_js}
 </script>
 </body></html>"""
@@ -246,8 +252,10 @@ def doc_page(doc_path: str):
         if row["published"]:
             meta_parts.append(html_mod.escape(row["published"][:10]))
         if row["url"]:
+            # url 来自被索引的外部内容,只放行 http(s):javascript: 之类点一下就执行
+            safe = row["url"] if re.match(r"^https?://", row["url"], re.I) else "#"
             meta_parts.append(
-                f'<a href="{html_mod.escape(row["url"])}" target="_blank" rel="noopener">微信原文↗</a>'
+                f'<a href="{html_mod.escape(safe)}" target="_blank" rel="noopener">微信原文↗</a>'
             )
     obs = (f"obsidian://open?vault={quote(VAULT_NAME)}"
            f"&file={quote(doc_path.removesuffix('.md'))}")

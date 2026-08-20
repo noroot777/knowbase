@@ -260,9 +260,9 @@ function renderToolEntries(d) {
       <summary>${srcGlyph(e.source)}<span class="acct">${esc(e.account || '')}</span>
         <span class="date">${esc(String(e.published || '').slice(0, 10))}</span>
         <span class="atitle">${esc(e.article_title || '')}</span></summary>
-      <div class="body md">${marked.parse(e.body || '')}</div>
+      <div class="body md">${mdHtml(e.body)}</div>
       <div class="elinks">
-        ${e.url ? `<a href="${esc(e.url)}" target="_blank" rel="noopener">${
+        ${e.url ? `<a href="${esc(safeUrl(e.url))}" target="_blank" rel="noopener">${
           e.source === 'dr-video-projects' ? '视频' : '原文'}${EXT_ARROW}</a>` : ''}
         <a href="${esc(obsLink(h))}">Obsidian</a>
         ${docA(h, '在阅读器打开')}
@@ -330,7 +330,7 @@ async function doSendToolChat(q) {
           const now = Date.now();
           if (now - lastPaint > 40) {
             const b = document.getElementById('td-pending-body');
-            if (b) b.innerHTML = marked.parse(partial);
+            if (b) b.innerHTML = mdHtml(partial);
             lastPaint = now;
           }
         } else if (f.type === 'done') { doneCid = f.conversation_id; if (f.refs) refs = f.refs; }

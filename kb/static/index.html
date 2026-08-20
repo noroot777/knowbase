@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>知识库</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<!-- marked 不做 sanitize,条目正文/模型回答是外部内容,渲染前必须过 DOMPurify(本地随包,不依赖 CDN 可达) -->
+<script src="/static/vendor/purify.min.js"></script>
 <link rel="stylesheet" href="/static/css/base.css">
 <link rel="stylesheet" href="/static/css/panels.css">
 <link rel="stylesheet" href="/static/css/gallery.css">
