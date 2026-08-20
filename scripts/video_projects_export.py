@@ -34,7 +34,8 @@ STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "video_projects_s
 TZ = timezone(timedelta(hours=8))
 
 GATE_MODEL = "haiku"
-TRANSCRIBE_MODEL = "sonnet"
+# 钉死模型代,理由同 gzh_projects_export.py
+TRANSCRIBE_MODEL = "claude-sonnet-4-5"
 GATE_WORKERS = 6
 TRANSCRIBE_WORKERS = 4
 

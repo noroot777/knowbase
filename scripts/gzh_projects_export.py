@@ -47,7 +47,9 @@ STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "gzh_projects_sta
 TZ = timezone(timedelta(hours=8))
 
 GATE_MODEL = "haiku"
-TRANSCRIBE_MODEL = "sonnet"
+# 钉死模型代:别名("sonnet")永远指向当代最新版,新一代发布当天这条批量管道
+# 就会静默换模型(贵一截,风格也变)。要升代在这里改字面量,或临时传 --model。
+TRANSCRIBE_MODEL = "claude-sonnet-4-5"
 GATE_WORKERS = 8
 TRANSCRIBE_WORKERS = 6
 MIN_BODY = 200          # 正文太短(空壳/纯图文)不进管道
@@ -507,8 +509,8 @@ def main() -> int:
     t.add_argument("--out", help="输出根目录(默认正式树,试跑可指到 staging)")
     t.add_argument("--force", action="store_true", help="已条目化的也重跑")
     t.add_argument("--model", default=TRANSCRIBE_MODEL,
-                   help="转写模型,传给 claude CLI 的 --model。别名(sonnet)会解析到"
-                        "当代最新版,要钉死某一代就写全名(如 claude-sonnet-4-5)")
+                   help=f"转写模型,传给 claude CLI 的 --model(默认 {TRANSCRIBE_MODEL})。"
+                        "别名(sonnet)会解析到当代最新版,想钉死某一代就写全名")
     args = ap.parse_args()
     if args.cmd in ("gate", "transcribe"):
         _acquire_lock()

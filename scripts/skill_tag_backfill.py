@@ -38,7 +38,7 @@ SOURCES = ("dr-gzh-projects", "dr-video-projects")
 TAG = "topic/skill工具"
 TAG_LINE = f"  - {TAG}"
 KEYWORD = re.compile(r"skill|技能", re.I)
-JUDGE_MODEL = "sonnet"
+JUDGE_MODEL = "claude-sonnet-4-5"   # 钉死模型代,别名会随新一代发布静默漂移
 BATCH = 40
 SUMMARIES_PER_ENTITY = 3
 

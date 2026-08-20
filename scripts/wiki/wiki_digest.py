@@ -110,7 +110,7 @@ def main():
     ap.add_argument("--date")
     ap.add_argument("--since")
     ap.add_argument("--until")
-    ap.add_argument("--model", default="sonnet")
+    ap.add_argument("--model", default=W.SONNET)
     a = ap.parse_args()
     if a.date:
         dates = [a.date]

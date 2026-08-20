@@ -27,6 +27,10 @@ VAULT = Path.home() / "obs" / "new-start"
 EPOCH = "2026-06-30"          # digest/synthesis 等 LLM 环节只处理这之后的日期
 SOURCE = "dr-gzh"
 
+# 调 claude CLI 时钉死的模型代。别名("sonnet")永远指向当代最新版,新一代发布
+# 当天所有批量任务就会静默换模型——贵一截,风格也变。要升代在这里改一个字面量。
+SONNET = "claude-sonnet-4-5"
+
 GRAPH_MARK = "<!-- kb-graph -->"
 SYN_S, SYN_E = "<!-- synthesis:start -->", "<!-- synthesis:end -->"
 

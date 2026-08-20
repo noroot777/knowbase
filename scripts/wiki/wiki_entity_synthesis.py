@@ -90,7 +90,7 @@ def select_targets(u: W.Universe, window_days: int = 14, min_docs: int = 3,
     return out
 
 
-def run_targets(u: W.Universe, targets: list[dict], model: str = "sonnet",
+def run_targets(u: W.Universe, targets: list[dict], model: str = W.SONNET,
                 workers: int = 3) -> list[str]:
     if not targets:
         return []
@@ -131,7 +131,7 @@ def main():
     ap.add_argument("--window-days", type=int, default=14)
     ap.add_argument("--growth", type=int, default=3)
     ap.add_argument("--force", action="store_true", help="忽略增量条件,强制重写")
-    ap.add_argument("--model", default="sonnet")
+    ap.add_argument("--model", default=W.SONNET)
     ap.add_argument("--workers", type=int, default=3)
     a = ap.parse_args()
     u = W.Universe(W.connect_ro())
