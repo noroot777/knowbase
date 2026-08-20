@@ -78,11 +78,15 @@ function renderFavEmpty() {
   $('fav-list').innerHTML = `<div class="empty">${msg}</div>`;
 }
 
-// docA 的收藏版:片段自动带 #kbq= 定位锚
+// docA 的收藏版:片段自动带 #kbq= 定位锚。label 当纯文本(与 docA 一致),
+// 要塞 HTML 片段用 favDocAHtml
 function favDocA(f, label, cls = '') {
+  return favDocAHtml(f, esc(label), cls);
+}
+function favDocAHtml(f, labelHtml, cls = '') {
   const hash = f.quote ? '#kbq=' + encodeURIComponent(
     JSON.stringify({ q: f.quote, p: f.prefix || '', s: f.suffix || '' })) : '';
-  return docA(f, label, cls, hash);
+  return docAHtml(f, labelHtml, cls, hash);
 }
 
 function favOps(h) {
@@ -102,18 +106,18 @@ function favGroupCard(g) {
   const meta =
     `<span class="fav-row-meta">${esc(h.account || '')} · ${(h.published || '').slice(5, 10)}` +
     ` · 收藏于 ${(g.latest || '').slice(5, 10)}` +
-    ` · <a href="${obsLink(h)}" title="在 Obsidian 中打开">Obsidian</a>` +
-    (h.url ? ` · <a href="${esc(h.url)}" target="_blank">原文↗</a>` : '') + `</span>`;
+    ` · <a href="${esc(obsLink(h))}" title="在 Obsidian 中打开">Obsidian</a>` +
+    (h.url ? ` · <a href="${esc(safeUrl(h.url))}" target="_blank" rel="noopener">原文↗</a>` : '') + `</span>`;
   const snipRows = g.snips.map(s => `
       <div class="fav-row fav-snip-row" title="${esc(s.quote.slice(0, 200))}">
-        ${favDocA(s, `<span class="fav-snip-q">❝ ${esc(s.quote)}</span>`, 'fav-snip-link')}
+        ${favDocAHtml(s, `<span class="fav-snip-q">❝ ${esc(s.quote)}</span>`, 'fav-snip-link')}
         ${favOps(s)}
       </div>
       ${s.note ? `<div class="fav-note">✎ ${esc(s.note)}</div>` : ''}`).join('');
   return `
     <div class="hit fav-group" data-fav-card="1">
       <div class="fav-row">
-        <span class="fav-title">${docA(h, esc(h.title))}</span>
+        <span class="fav-title">${docA(h, h.title)}</span>
         ${meta}
         ${g.whole ? favOps(g.whole) : ''}
       </div>
@@ -153,7 +157,7 @@ function favHeroHtml(f, why) {
   const a = f.action || {};
   return `<div class="fav-hero">
     <div class="k">⚡ 现在有一会儿?先试这个</div>
-    <b>${favDocA(f, esc(a.name || f.title))}</b>
+    <b>${favDocA(f, a.name || f.title)}</b>
     <div class="why">${esc(why || a.what || f.summary || '')}</div>
     <div class="cmdline">
       ${a.cmd ? favCmdHtml(a.cmd) : ''}
@@ -166,11 +170,11 @@ function favAcardHtml(f) {
   const a = f.action || {};
   const etaLong = /小时|半天|天|周|研究|阅读/.test(a.eta || '');
   return `<div class="fav-acard">
-    <div class="top"><span class="name">${favDocA(f, esc(a.name || f.title))}</span>
+    <div class="top"><span class="name">${favDocA(f, a.name || f.title)}</span>
       ${a.eta ? `<span class="eta${etaLong ? ' long' : ''}">${esc(a.eta)}</span>` : ''}</div>
     <div class="what">${esc(a.what || f.summary || '')}</div>
     ${a.cmd ? `<div class="cmdline">${favCmdHtml(a.cmd)}</div>` : ''}
-    <div class="src">来源:${favDocA(f, esc(f.title))} · ${esc(f.account || '')} · 收藏于 ${(f.created_at || '').slice(5, 10)}</div>
+    <div class="src">来源:${favDocA(f, f.title)} · ${esc(f.account || '')} · 收藏于 ${(f.created_at || '').slice(5, 10)}</div>
     <div class="ops"><button class="ghost" onclick="favMark(${f.id},'done')">✓ 试过了</button>
       <button class="ghost" onclick="favMark(${f.id},'archived')">沉底</button></div>
   </div>`;
@@ -182,7 +186,7 @@ function favDupHtml(g, byId) {
     const win = id === g.keep;
     const others = g.ids.filter(i => i !== id);
     return `<div class="opt${win ? ' win' : ''}">
-      <b>${favDocA(f, esc((f.action && f.action.name) || f.title))}</b>
+      <b>${favDocA(f, (f.action && f.action.name) || f.title)}</b>
       <div class="why">${esc(f.account || '')} · ${(f.published || '').slice(5, 10)}</div>
       ${win ? `<button class="ghost" onclick="favMarkMany([${others}],'archived')">留这个,其余沉底</button>`
             : `<button class="ghost" onclick="favMark(${id},'archived')">沉底</button>`}
@@ -194,18 +198,18 @@ function favDupHtml(g, byId) {
 }
 
 function favColdRow(f, why) {
-  return `<div class="fav-rowline"><span class="t">${favDocA(f, esc(f.title))}</span>
+  return `<div class="fav-rowline"><span class="t">${favDocA(f, f.title)}</span>
     <span class="why">${esc(why || '')}</span>
     <span class="rops"><button class="ghost" onclick="favMark(${f.id},'archived')">沉底</button></span></div>`;
 }
 function favQuoteRow(f) {
   return `<div class="fav-rowline q" title="${esc((f.quote || '').slice(0, 200))}">
-    <span class="t">${favDocA(f, '❝ ' + esc(f.quote || ''))}</span>
+    <span class="t">${favDocA(f, '❝ ' + (f.quote || ''))}</span>
     <span class="why">${esc((f.title || '').slice(0, 18))} · ${(f.created_at || '').slice(5, 10)}</span>
     <span class="rops"><button class="ghost" onclick="favDel(${f.id})">删除</button></span></div>`;
 }
 function favFreshRow(f) {
-  return `<div class="fav-rowline"><span class="t">${favDocA(f, esc(f.quote ? '❝ ' + f.quote : f.title))}</span>
+  return `<div class="fav-rowline"><span class="t">${favDocA(f, f.quote ? '❝ ' + f.quote : f.title)}</span>
     <span class="why">收藏于 ${(f.created_at || '').slice(5, 10)}</span>
     <span class="rops"><button class="ghost" onclick="favMark(${f.id},'done')">✓ 试过了</button>
       <button class="ghost" onclick="favMark(${f.id},'archived')">沉底</button></span></div>`;

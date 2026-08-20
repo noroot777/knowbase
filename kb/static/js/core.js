@@ -35,9 +35,11 @@ async function loadMeta() {
 }
 
 function renderChips() {
+  // chip 文案是被索引的外部内容(实体名来自公众号原文/LLM 提取),一律转义;
+  // 删除按钮走 data 属性 + 事件委托,不再把值拼进 onclick 的 JS 字符串里
   $('chips').innerHTML =
-    tagFilters.map(t => `<span class="chip">${t}<b onclick="rmTopic('${t}')">×</b></span>`).join('') +
-    entityFilters.map(e => `<span class="chip">${e}<b onclick="rmEntity('${e}')">×</b></span>`).join('');
+    tagFilters.map(t => `<span class="chip">${esc(t)}<b data-rm-tag="${esc(t)}">×</b></span>`).join('') +
+    entityFilters.map(e => `<span class="chip">${esc(e)}<b data-rm-ent="${esc(e)}">×</b></span>`).join('');
 }
 function addTopic(v) { if (v && !tagFilters.includes(v)) tagFilters.push(v); $('f-topic').value=''; renderChips(); doSearch(); }
 function rmTopic(v) { tagFilters = tagFilters.filter(x => x !== v); renderChips(); doSearch(); }
@@ -50,14 +52,22 @@ function obsLink(h) {
 function docLink(h) {
   return '/doc/' + h.path.split('/').map(encodeURIComponent).join('/');
 }
-const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+// 只放行安全协议:被索引的 url 来自外部内容,javascript: 之类点一下就执行
+const safeUrl = u => /^(https?:|obsidian:|\/|#)/i.test(String(u || '')) ? String(u) : '#';
 // 页内阅读链接:点击滑出面板,href 保留 /doc 路径,中键/Cmd 点仍可新标签打开
 // hash 传 #kbq=…(片段定位锚点),doc 页加载后据此高亮滚动
+// label 一律当纯文本转义(标题来自公众号/LLM,不能当 HTML 拼);
+// 确实要塞 HTML 片段的调用方用 docAHtml()
 function docA(h, label, cls = '', hash = '') {
+  return docAHtml(h, esc(label), cls, hash);
+}
+function docAHtml(h, labelHtml, cls = '', hash = '') {
   return `<a ${cls ? `class="${cls}"` : ''} href="${docLink(h)}${hash}" data-doc="1"` +
     ` data-path="${encodeURIComponent(h.path)}"` +
-    ` data-title="${esc(h.title)}" data-url="${esc(h.url || '')}" data-obs="${esc(obsLink(h))}"` +
-    ` title="${esc(h.title)}${h.account ? ' — ' + esc(h.account) : ''}">${label}</a>`;
+    ` data-title="${esc(h.title)}" data-url="${esc(safeUrl(h.url || ''))}" data-obs="${esc(obsLink(h))}"` +
+    ` title="${esc(h.title)}${h.account ? ' — ' + esc(h.account) : ''}">${labelHtml}</a>`;
 }
 
 function openReader(a) {
@@ -89,6 +99,15 @@ document.addEventListener('click', e => {
   e.preventDefault();
   openReader(a);
 });
+// 实体/过滤 chip 的点击走事件委托:值从 data 属性读,不经过 JS 字符串拼接
+document.addEventListener('click', e => {
+  const ent = e.target.closest('[data-ent]');
+  if (ent) { addEntity(ent.dataset.ent); return; }
+  const rmT = e.target.closest('[data-rm-tag]');
+  if (rmT) { rmTopic(rmT.dataset.rmTag); return; }
+  const rmE = e.target.closest('[data-rm-ent]');
+  if (rmE) rmEntity(rmE.dataset.rmEnt);
+});
 // Escape 逐层关:阅读器(最高)→ 工具详情抽屉 → 管道时间段弹层 / 管道弹窗
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
@@ -116,21 +135,22 @@ async function doSearch() {
   entityFilters.forEach(e => p.append('entity', e));
   const res = await fetch('/api/search?' + p).then(r => r.json()).catch(() => ({hits: []}));
   if (!res.hits.length) { $('results').innerHTML = '<div class="empty">没有结果</div>'; return; }
+  // 命中里的标题/账号/摘要/片段/实体都是被索引的外部内容,拼进 innerHTML 前一律转义
   $('results').innerHTML = res.hits.map(h => `
     <div class="hit">
       <h3>${docA(h, h.title)}</h3>
       <div class="meta">
-        <span>${h.account}</span><span>${(h.published || '').slice(0, 10)}</span>
-        <span class="badge">${h.source}</span>
+        <span>${esc(h.account || '')}</span><span>${esc((h.published || '').slice(0, 10))}</span>
+        <span class="badge">${esc(h.source || '')}</span>
         ${h.matched_by.map(m => `<span class="badge ${m === 'vec' ? 'vec' : ''}">${m === 'vec' ? '语义' : '关键词'}</span>`).join('')}
-        <a href="${obsLink(h)}" style="color:var(--muted)" title="在 Obsidian 中打开">Obsidian</a>
-        ${h.url ? `<a href="${h.url}" target="_blank" style="color:var(--muted)">原文↗</a>` : ''}
+        <a href="${esc(obsLink(h))}" style="color:var(--muted)" title="在 Obsidian 中打开">Obsidian</a>
+        ${h.url ? `<a href="${esc(safeUrl(h.url))}" target="_blank" rel="noopener" style="color:var(--muted)">原文↗</a>` : ''}
         <span class="favbtn ${favSet.has(h.path) ? 'on' : ''}" data-path="${encodeURIComponent(h.path)}"
               onclick="toggleFav(this)">${favSet.has(h.path) ? '★ 已收藏' : '☆ 收藏'}</span>
       </div>
-      ${h.summary ? `<div class="summary">${h.summary}</div>` : ''}
-      <div class="snippet">${h.best_chunk.slice(0, 160)}…</div>
+      ${h.summary ? `<div class="summary">${esc(h.summary)}</div>` : ''}
+      <div class="snippet">${esc((h.best_chunk || '').slice(0, 160))}…</div>
       ${h.entities.length ? `<div class="ents">${h.entities.map(e =>
-        `<span class="ent" onclick="addEntity('${e.replace(/'/g, "\\'")}')">${e}</span>`).join('')}</div>` : ''}
+        `<span class="ent" data-ent="${esc(e)}">${esc(e)}</span>`).join('')}</div>` : ''}
     </div>`).join('');
 }
