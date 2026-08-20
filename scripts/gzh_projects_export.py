@@ -20,7 +20,7 @@ gate/transcribe 不要与自身并发跑(state 文件互相覆盖)。
   uv run python scripts/gzh_projects_export.py scan
   uv run python scripts/gzh_projects_export.py gate [--limit N]
   uv run python scripts/gzh_projects_export.py report
-  uv run python scripts/gzh_projects_export.py transcribe [--limit N] [--doc PATH] [--out DIR] [--force]
+  uv run python scripts/gzh_projects_export.py transcribe [--limit N] [--doc PATH] [--out DIR] [--force] [--model NAME]
 """
 from __future__ import annotations
 
@@ -403,7 +403,7 @@ def write_entry(entry: dict, uid: str, info: dict, out_root: Path) -> Path:
     return path
 
 
-def transcribe_one(info: dict) -> list[dict]:
+def transcribe_one(info: dict, model: str = TRANSCRIBE_MODEL) -> list[dict]:
     prompt = TRANSCRIBE_PROMPT.format(
         topic_candidates=TOPIC_CANDIDATES,
         title=info["title"], account=info["account"],
@@ -411,7 +411,7 @@ def transcribe_one(info: dict) -> list[dict]:
         url=info.get("url") or "(无)",
         body=info["body"][:TRANSCRIBE_BODY_CAP],
     )
-    out = _claude(prompt, TRANSCRIBE_MODEL, timeout=900)
+    out = _claude(prompt, model, timeout=900)
     return _parse_entries(out)
 
 
@@ -437,10 +437,11 @@ def cmd_transcribe(args) -> int:
     todo.sort(key=lambda x: x[2].get("published") or "", reverse=True)
     if args.limit:
         todo = todo[: args.limit]
-    print(f"[transcribe] 待条目化 {len(todo)},{TRANSCRIBE_WORKERS} 并发 → {out_root}", flush=True)
+    model = getattr(args, "model", None) or TRANSCRIBE_MODEL
+    print(f"[transcribe] 待条目化 {len(todo)},{TRANSCRIBE_WORKERS} 并发,模型 {model} → {out_root}", flush=True)
     ok = failed = empty = 0
     with ThreadPoolExecutor(max_workers=TRANSCRIBE_WORKERS) as pool:
-        futs = {pool.submit(transcribe_one, info): (p, rec, info)
+        futs = {pool.submit(transcribe_one, info, model): (p, rec, info)
                 for p, rec, info in todo}
         for i, fut in enumerate(as_completed(futs), 1):
             p, rec, info = futs[fut]
@@ -464,7 +465,7 @@ def cmd_transcribe(args) -> int:
                 rec["transcribed_at"] = datetime.now(TZ).isoformat(timespec="seconds")
                 rec["n_projects"] = len(entries)
                 rec["files"] = files
-                rec["model"] = TRANSCRIBE_MODEL
+                rec["model"] = model
                 save_state(state)
             except Exception as e:
                 failed += 1
@@ -505,6 +506,9 @@ def main() -> int:
     t.add_argument("--since", help="只处理 published >= 此日期(YYYY-MM-DD)的文章(管道增量用,避开存量积压)")
     t.add_argument("--out", help="输出根目录(默认正式树,试跑可指到 staging)")
     t.add_argument("--force", action="store_true", help="已条目化的也重跑")
+    t.add_argument("--model", default=TRANSCRIBE_MODEL,
+                   help="转写模型,传给 claude CLI 的 --model。别名(sonnet)会解析到"
+                        "当代最新版,要钉死某一代就写全名(如 claude-sonnet-4-5)")
     args = ap.parse_args()
     if args.cmd in ("gate", "transcribe"):
         _acquire_lock()
