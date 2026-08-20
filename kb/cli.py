@@ -78,11 +78,7 @@ def cmd_extract(args) -> int:
     print(f"[extract] 待提取 {len(todo)} 篇 (model=haiku)")
     ok = failed = empty = 0
     for i, row in enumerate(todo, 1):
-        body_row = conn.execute(
-            "SELECT group_concat(text, char(10)) AS body FROM chunks WHERE path=? ORDER BY seq",
-            (row["path"],),
-        ).fetchone()
-        body = body_row["body"] or ""
+        body = store.doc_body(conn, row["path"])
         if not body.strip():
             empty += 1
             print(f"[{i}/{len(todo)}] SKIP {row['title'][:28]}: 正文为空"

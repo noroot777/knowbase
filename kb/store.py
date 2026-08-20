@@ -260,3 +260,21 @@ def insert_vectors(conn: sqlite3.Connection, ids: list[int], vecs) -> None:
             "INSERT OR REPLACE INTO chunk_vec (chunk_id, embedding) VALUES (?, ?)",
             (cid, struct.pack(f"{len(v)}f", *v)),
         )
+
+
+# ── 读取 ──────────────────────────────────────────────────────────────────────
+
+def doc_body(conn: sqlite3.Connection, path: str) -> str:
+    """把一篇文章的 chunk 按正文顺序拼回全文。
+
+    ORDER BY 必须写在子查询里:group_concat 的拼接顺序取决于聚合看到行的顺序,
+    外层 ORDER BY 只排最终那一行结果,约束不到聚合输入。之前重建索引恰好按
+    seq 插入所以看不出问题,一旦经历重写/VACUUM/查询计划变化就会错序,
+    喂给 LLM 的正文段落顺序被打乱。
+    """
+    row = conn.execute(
+        "SELECT group_concat(text, char(10)) AS body FROM "
+        "(SELECT text FROM chunks WHERE path=? ORDER BY seq)",
+        (path,),
+    ).fetchone()
+    return (row["body"] if row and row["body"] else "") or ""

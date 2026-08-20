@@ -22,11 +22,7 @@ def main():
     # 预取正文,worker 不碰数据库
     jobs = []
     for row in todo:
-        body_row = conn.execute(
-            "SELECT group_concat(text, char(10)) AS body FROM chunks WHERE path=? ORDER BY seq",
-            (row["path"],),
-        ).fetchone()
-        jobs.append((row["path"], row["title"], body_row["body"] or ""))
+        jobs.append((row["path"], row["title"], store.doc_body(conn, row["path"])))
 
     ok = failed = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:

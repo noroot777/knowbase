@@ -253,10 +253,7 @@ def _extract_one(path: str, title: str) -> dict | None:
 
     conn = store.connect()
     try:
-        body = conn.execute(
-            "SELECT group_concat(text, char(10)) AS b FROM chunks WHERE path=?",
-            (path,),
-        ).fetchone()["b"] or ""
+        body = store.doc_body(conn, path)
     finally:
         conn.close()
     if not body.strip():

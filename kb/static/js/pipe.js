@@ -107,8 +107,10 @@ function renderPipeAcctList() {
   const q = $('pipe-acct-search').value.trim().toLowerCase();
   const items = q ? pipeAcctList.filter(n => n.toLowerCase().includes(q)) : pipeAcctList;
   $('pipe-acct-count').textContent = `${pipeSel.size}/${pipeAcctList.length}`;
+  // 公众号名来自 WeChatOA 的外部数据,不拼进 inline onclick 的 JS 字符串:
+  // 只转义单引号挡不住双引号/尖括号破坏属性。值走 data-acct + 事件委托。
   $('pipe-acct-list').innerHTML = items.length ? items.map(n => `
-    <div onclick="togglePipeAcct('${n.replace(/'/g, "\\'")}')"
+    <div data-acct="${esc(n)}"
          style="display:flex;align-items:center;gap:9px;padding:9px 13px;cursor:pointer;
                 border-bottom:1px solid var(--line);font-size:13.5px"
          onmouseover="this.style.background='var(--tag-bg)'" onmouseout="this.style.background=''">
@@ -119,6 +121,10 @@ function renderPipeAcctList() {
         pipeAcctList.length ? '没有匹配的公众号' : 'WeChatOA 不在线或还没订阅任何号'}</div>`;
   renderPipeEst();
 }
+$('pipe-acct-list').addEventListener('click', e => {
+  const row = e.target.closest('[data-acct]');
+  if (row) togglePipeAcct(row.dataset.acct);
+});
 function togglePipeAcct(n) {
   pipeSel.has(n) ? pipeSel.delete(n) : pipeSel.add(n);
   renderPipeAcctList();

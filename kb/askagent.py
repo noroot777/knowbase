@@ -22,6 +22,7 @@ from collections.abc import Iterator
 from datetime import date
 
 from kb import llm
+from kb import store
 from kb.aggregate import enumerate_documents, enumerate_entities
 from kb.search import Filters, search
 
@@ -212,11 +213,9 @@ class _Tools:
                               (path,)).fetchone()
         if d is None:
             return "没有这篇文档(path 要来自其他工具的结果)。", "读原文:未找到"
-        full = self.conn.execute(
-            "SELECT group_concat(text, char(10)) AS body FROM chunks WHERE path=?",
-            (path,)).fetchone()
+        full = store.doc_body(self.conn, path)
         n = self._ref(path, d["title"], d["account"], d["url"])
-        return (f"[{n}] {d['title']}\n{(full['body'] or '')[:5000]}",
+        return (f"[{n}] {d['title']}\n{full[:5000]}",
                 f"读原文《{d['title'][:24]}》")
 
 

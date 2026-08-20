@@ -19,6 +19,7 @@ from datetime import date
 
 from kb import llm
 from kb import askagent
+from kb import store
 from kb.aggregate import enumerate_documents, enumerate_entities
 from kb.search import Filters, _filter_sql, search
 
@@ -240,12 +241,9 @@ def _prepare_ask(conn, question: str, model: str, history: list[dict],
                     "answer": "知识库里没有找到相关内容。"}
         parts = []
         for i, h in enumerate(hits, 1):
-            full = conn.execute(
-                "SELECT group_concat(text, char(10)) AS body FROM chunks WHERE path=?",
-                (h.path,),
-            ).fetchone()
+            full = store.doc_body(conn, h.path)
             parts.append(f"[{i}] {h.title} ({h.account}, {h.published[:10]})\n"
-                         f"{(full['body'] or '')[:2500]}")
+                         f"{full[:2500]}")
             refs.append({"n": i, "title": h.title, "path": h.path,
                          "account": h.account, "url": h.url})
         prompt = (
