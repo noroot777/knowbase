@@ -21,9 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
-import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -38,7 +36,8 @@ SOURCES = ("dr-gzh-projects", "dr-video-projects")
 TAG = "topic/skill工具"
 TAG_LINE = f"  - {TAG}"
 KEYWORD = re.compile(r"skill|技能", re.I)
-JUDGE_MODEL = "claude-sonnet-4-5"   # 钉死模型代,别名会随新一代发布静默漂移
+# 走 kb.llm 的 API 通道,模型 id 写全名钉死(别名会随新一代发布静默漂移)
+JUDGE_MODEL = "gpt-5.6-luna"
 BATCH = 40
 SUMMARIES_PER_ENTITY = 3
 
@@ -89,25 +88,14 @@ class Entity:
     summaries: list[str]
 
 
-def _clean_env() -> dict:
-    """claude CLI 子进程要干净环境:宿主可能带 ANTHROPIC_BASE_URL 等托管变量。"""
-    env = {"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
-    for k in ("HOME", "USER", "LOGNAME", "TZ", "LANG", "LC_ALL"):
-        v = os.environ.get(k)
-        if v:
-            env[k] = v
-    return env
+def _llm(prompt: str, timeout: int = 300, max_tokens: int = 8192) -> str:
+    """走 kb.llm 的 API 通道调模型。
 
+    key/base_url 由 kb.llm 统一解析(环境变量优先,其次 data/secrets.json);
+    失败抛 RuntimeError,judge 把该批次计入 missing 下一轮重试。"""
+    from kb.llm import chat
 
-def _claude(prompt: str, timeout: int = 300) -> str:
-    proc = subprocess.run(
-        ["claude", "-p", "--model", JUDGE_MODEL, "--output-format", "text"],
-        input=prompt, capture_output=True, text=True, timeout=timeout,
-        env=_clean_env(),
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"claude CLI 退出码 {proc.returncode}: {proc.stderr[:200]}")
-    return proc.stdout.strip()
+    return chat(prompt, JUDGE_MODEL, max_tokens=max_tokens, timeout=timeout)
 
 
 def _fm_field(fm: str, key: str) -> str:
@@ -169,7 +157,7 @@ def judge(ents: list[Entity]) -> dict[int, bool]:
             lines = "\n".join(
                 f"{i}. {ents[i].name} :: {' ⁄ '.join(ents[i].summaries) or '(无简介)'}"
                 for i in batch)
-            out = _claude(JUDGE_PROMPT.format(items=lines))
+            out = _llm(JUDGE_PROMPT.format(items=lines))
             out = re.sub(r"^```(json)?|```$", "", out.strip(), flags=re.M).strip()
             try:
                 arr = json.loads(out)
