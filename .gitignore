@@ -16,3 +16,6 @@ collector/.run/
 
 .run/
 runtime_logs/
+
+# macOS Finder 到处撒的元数据文件
+.DS_Store
