@@ -106,10 +106,15 @@ class Target:
     name: str                               # 显示名,也是各处引用它的键
     enabled: bool = True                    # 是否参与采集
     detail: str = ""                        # 副标题(最近采集时间 / 简介),成品文案
+    # 现在能不能采到它。None = 这种来源没有"逐个目标就绪"的概念(RSS 拉就完了),
+    # 面板据此完全不显示就绪那一列;有的来源则是逐个授权的(微信要每个号
+    # 各自的文章凭证),差哪几个必须能一眼看出来,否则只能抓完看谁失败。
+    ready: bool | None = None
+    state: str = ""                         # 就绪状态的成品文案("凭证有效"/"缺凭证")
 
     def as_dict(self) -> dict:
-        return {"id": self.id, "name": self.name,
-                "enabled": self.enabled, "detail": self.detail}
+        return {"id": self.id, "name": self.name, "enabled": self.enabled,
+                "detail": self.detail, "ready": self.ready, "state": self.state}
 
 
 @runtime_checkable
@@ -136,6 +141,15 @@ class TargetManager(Protocol):
     def remove_target(self, name: str) -> str: ...
 
     def set_target_enabled(self, name: str, enabled: bool) -> str: ...
+
+    def refresh_readiness(self) -> str:
+        """重新探测各目标的就绪状态,返回一句成品结果文案。
+
+        对逐个目标授权的来源,授权是在采集器外面拿到的(微信是人去 Mac 微信里
+        打开文章、由抓包工具截下凭证),知识库这边只能"再看一眼有没有变"。
+        不区分目标就绪与否的来源直接返回空串即可。
+        """
+        ...
 
 
 def target_manager(collector: SourceCollector | None = None) -> TargetManager | None:

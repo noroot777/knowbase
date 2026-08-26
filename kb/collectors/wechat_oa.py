@@ -33,6 +33,11 @@ BACKEND_PY = BACKEND_DIR / ".venv" / "bin" / "python"
 # 采集产物落在 vault 里的 source 名(历史上换过两次,一并认)
 VAULT_SOURCES = ("dr-gzh", "wechat", "gzh")
 
+# CLI 的凭证三态 → 契约的 ready/文案。缺凭证和凭证失效对用户是两回事:
+# 前者"这个号还没去点过文章",后者"点过但已经废了,得重点一次"。
+_CRED_READY = {"valid": True, "expired": False, "missing": False}
+_CRED_TEXT = {"valid": "凭证就绪", "expired": "凭证已失效", "missing": "还没有凭证"}
+
 # CLI 的退出码约定,见采集器仓库的 cli.py
 EXIT_AUTH, EXIT_FREQ = 2, 3
 
@@ -256,10 +261,22 @@ class WeChatOACollector:
                 name=str(row.get("name") or ""),
                 enabled=bool(row.get("in_crawl_config")),
                 detail=f"最近采集 {row.get('latest_crawl_at') or '—'}",
+                ready=_CRED_READY.get(str(row.get("cred_state") or "")),
+                state=_CRED_TEXT.get(str(row.get("cred_state") or ""), ""),
             )
             for row in (data.get("accounts") or [])
             if row.get("name")
         ]
+
+    def refresh_readiness(self) -> str:
+        """从 wxdown 抓包结果里把新拿到的文章凭证并进来,再报一句就绪情况。"""
+        data = self._accounts_raw("creds", timeout=60)
+        if data.get("warning"):
+            raise CollectorError(str(data["warning"]))
+        got, ready, total = (data.get("imported", 0),
+                             data.get("ready", 0), data.get("total", 0))
+        return (f"新拿到 {got} 个号的凭证," if got else "没有新凭证,") + \
+               f"当前 {ready}/{total} 个号可采"
 
     def search_targets(self, query: str) -> list[Target]:
         data = self._accounts("search", query, timeout=60)
@@ -292,9 +309,14 @@ class WeChatOACollector:
     def _accounts(action: str, name: str = "", *extra: str,
                   timeout: int = 20) -> dict:
         """跑 `cli accounts ...` 并解析它最后一行 JSON。"""
-        argv = ["accounts", action] + ([name] if name else []) + list(extra) + ["--json"]
+        argv = ["accounts", action] + ([name] if name else []) + list(extra)
+        return WeChatOACollector._accounts_raw(*argv, timeout=timeout)
+
+    @staticmethod
+    def _accounts_raw(*argv: str, timeout: int = 20) -> dict:
+        """跑任意子命令(都加 --json)并解析最后一行 JSON。"""
         try:
-            proc = _run_cli(*argv, timeout=timeout)
+            proc = _run_cli(*argv, "--json", timeout=timeout)
         except subprocess.TimeoutExpired:
             raise CollectorError(f"采集器无响应(超过 {timeout} 秒)") from None
         except OSError as e:

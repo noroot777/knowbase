@@ -6,6 +6,7 @@
     python -m cli collect                          日常增量采集
     python -m cli collect --since 2026-08-01 --until 2026-08-26 [--targets a,b]
     python -m cli export [--no-images]             导出到 obsidian
+    python -m cli creds [--missing-only]           看每个号的文章凭证够不够
     python -m cli accounts list                    看订阅的公众号
     python -m cli accounts search <关键词>         搜候选(需要扫码凭证)
     python -m cli accounts add <名字> [--fakeid X] 加入订阅;给了 fakeid 就不再搜
@@ -129,6 +130,128 @@ def cmd_export(args) -> int:
     return EXIT_OK
 
 
+# ── creds:每个公众号的文章凭证 ──────────────────────────────────────────────────
+#
+# 这套凭证跟 `login` 那个扫码 token 是两回事:扫码 token 只用来搜索/翻列表,
+# 抓正文要的是每个号各自的 profile 凭证,由 Mac 微信里打开一篇文章时经
+# wxdown-service 的 mitm 抓下来。
+#
+# wxdown 把抓到的凭证写成一个普通 JSON 文件,所以这里直接读它——原来那条
+# "wxdown WebSocket → 前端 :5173 → 后端 :8000 POST" 的转发链路,两头的常驻
+# 服务都只是为了搬运这个文件,去掉即可。
+
+def _wxdown_cred_file() -> Path:
+    """wxdown-service 的凭证文件位置。装到别处就设 WXDOWN_DIR 或 WXDOWN_CRED_FILE。"""
+    import os
+
+    explicit = os.getenv("WXDOWN_CRED_FILE", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    base = os.getenv("WXDOWN_DIR", "").strip()
+    root = Path(base).expanduser() if base else \
+        Path.home() / "code" / "gongzhonghao" / "wxdown-service"
+    return root / "resources" / "data" / "credentials.json"
+
+
+def _import_wxdown_creds() -> tuple[int, str]:
+    """把 wxdown 文件里的凭证并进本地库。返回 (真正新增/更新的条数, 说明)。"""
+    import json as _json
+
+    from src.crawler.profile_ext import profile_credential_store
+
+    path = _wxdown_cred_file()
+    if not path.exists():
+        return 0, f"没找到 wxdown 凭证文件({path})"
+    try:
+        items = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return 0, f"读不了 wxdown 凭证文件:{e}"
+    if not isinstance(items, list):
+        return 0, "wxdown 凭证文件格式不对(顶层不是数组)"
+
+    # save_wxdown_items 对"时间戳一样"的条目也算保存,直接用它的返回数,
+    # 每次重跑都报同一个数字——边点文章边刷新时就看不出这轮新增了几个。
+    # 自己比对前后快照,只数真正变新的。
+    before = {biz: c.captured_at for biz, c in profile_credential_store.records().items()}
+    profile_credential_store.save_wxdown_items(items)
+    after = profile_credential_store.records()
+    fresh = sum(1 for biz, c in after.items()
+                if biz not in before or c.captured_at > before[biz])
+    return fresh, ""
+
+
+def cmd_creds(args) -> int:
+    from src.crawler.profile_ext import (
+        credential_public_status,
+        profile_credential_store,
+    )
+    from src.db.repository import ArticleRepository
+
+    imported, warn = (0, "") if args.no_import else _import_wxdown_creds()
+
+    records = profile_credential_store.records()
+    status = {biz: credential_public_status(c) for biz, c in records.items()}
+    with ArticleRepository() as repo:
+        rows = repo.conn.execute(
+            "SELECT name, fakeid FROM accounts WHERE in_crawl_config=1 ORDER BY name"
+        ).fetchall()
+
+    accounts = []
+    for r in rows:
+        cur = status.get(r["fakeid"])
+        if cur is None:
+            state, captured = "missing", ""
+        else:
+            state = "valid" if cur["valid"] else "expired"
+            captured = cur["captured_at"]
+        accounts.append({"name": r["name"], "fakeid": r["fakeid"],
+                         "state": state, "captured_at": captured})
+
+    ready = sum(1 for a in accounts if a["state"] == "valid")
+    if args.json:
+        emit({"ready": ready, "total": len(accounts), "imported": imported,
+              "warning": warn, "source": str(_wxdown_cred_file()),
+              "accounts": accounts})
+        return EXIT_OK
+
+    if warn:
+        info(f"注意:{warn}")
+    elif imported:
+        info(f"从 wxdown 导入 {imported} 条新凭证")
+    info(f"{ready}/{len(accounts)} 个公众号已就绪:")
+    label = {"valid": "✓ 有效", "expired": "✗ 已失效", "missing": "· 没凭证"}
+    for a in accounts:
+        if args.missing_only and a["state"] == "valid":
+            continue
+        info(f"  {label[a['state']]}  {_pad(a['name'], 26)}{a['captured_at']}")
+    return EXIT_OK
+
+
+# ── route:让微信文章流量走 wxdown 的代理 ─────────────────────────────────────────
+
+def cmd_route(args) -> int:
+    """看/切 Clash 上那条把微信文章流量交给 wxdown 的规则。
+
+    不切的话,在微信里点文章 wxdown 截不到,凭证就一直是"没有"。
+    """
+    from src.services.clash_wxdown_route import ClashRouteError, clash_wxdown_route
+
+    try:
+        data = clash_wxdown_route.activate() if args.activate \
+            else clash_wxdown_route.status()
+    except ClashRouteError as e:
+        if args.json:
+            emit({"ok": False, "detail": str(e)})
+        else:
+            info(f"错误:{e}")
+        return EXIT_ERROR
+    if args.json:
+        emit({"ok": True, **data})
+    else:
+        info(json.dumps(data, ensure_ascii=False, indent=2))
+    return EXIT_OK
+
+
 # ── accounts ────────────────────────────────────────────────────────────────────
 
 def cmd_accounts(args) -> int:
@@ -136,19 +259,33 @@ def cmd_accounts(args) -> int:
 
     action = args.action
     if action == "list":
+        # 顺带把每个号的文章凭证状态带上:面板要按"哪些还没就绪"来提示,
+        # 分两条命令拿就得起两个子进程。这里只读本地凭证文件,不碰 wxdown、
+        # 不走网络,够便宜——从 wxdown 导入是 `creds` 的活。
+        from src.crawler.profile_ext import profile_credential_store
+
+        creds = {biz: c.is_valid() for biz, c in profile_credential_store.records().items()}
         with ArticleRepository() as repo:
             rows = repo.conn.execute(
                 "SELECT name, fakeid, in_crawl_config, latest_crawl_at "
                 "FROM accounts ORDER BY in_crawl_config DESC, name"
             ).fetchall()
+        out = []
+        for r in rows:
+            valid = creds.get(r["fakeid"])
+            out.append({**dict(r),
+                        "cred_state": "missing" if valid is None
+                        else ("valid" if valid else "expired")})
         if args.json:
-            emit({"accounts": [dict(r) for r in rows]})
+            emit({"accounts": out})
         else:
-            info(f"共 {len(rows)} 个公众号(✓ = 参与采集):")
-            for r in rows:
-                mark = "✓" if r["in_crawl_config"] else "·"
-                info(f"  {mark} {_pad(r['name'], 26)}"
-                     f"最近采集 {r['latest_crawl_at'] or '-'}")
+            ready = sum(1 for a in out if a["cred_state"] == "valid")
+            info(f"共 {len(out)} 个公众号(✓ = 参与采集),{ready} 个凭证就绪:")
+            mark_cred = {"valid": "凭证✓", "expired": "凭证✗", "missing": "无凭证"}
+            for a in out:
+                mark = "✓" if a["in_crawl_config"] else "·"
+                info(f"  {mark} {_pad(a['name'], 26)}{mark_cred[a['cred_state']]}"
+                     f"  最近采集 {a['latest_crawl_at'] or '-'}")
         return EXIT_OK
 
     if not args.name:
@@ -329,6 +466,15 @@ def build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("export", help="把本地库导出成 obsidian md")
     e.add_argument("--no-images", action="store_true", help="不下图,保留远程 URL")
 
+    r = sub.add_parser("creds", help="每个公众号的文章凭证状态(自动从 wxdown 导入)")
+    r.add_argument("--json", action="store_true", help="输出 JSON 而不是人话")
+    r.add_argument("--no-import", action="store_true", help="只看现状,不从 wxdown 导入")
+    r.add_argument("--missing-only", action="store_true", help="只列还没就绪的")
+
+    rt = sub.add_parser("route", help="微信文章流量是否走 wxdown 代理")
+    rt.add_argument("--activate", action="store_true", help="立即切过去")
+    rt.add_argument("--json", action="store_true", help="输出 JSON")
+
     a = sub.add_parser("accounts", help="维护订阅的公众号")
     a.add_argument("action",
                    choices=["list", "search", "add", "remove", "enable", "disable"])
@@ -347,7 +493,8 @@ def main(argv: list[str] | None = None) -> int:
     install()          # profile_ext 通道 + 微信域名绕过代理,不装会静默走错路
     handlers = {
         "status": cmd_status, "collect": cmd_collect, "export": cmd_export,
-        "accounts": cmd_accounts, "login": cmd_login,
+        "accounts": cmd_accounts, "login": cmd_login, "creds": cmd_creds,
+        "route": cmd_route,
     }
     try:
         return handlers[args.cmd](args)

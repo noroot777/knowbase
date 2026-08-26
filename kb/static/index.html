@@ -211,7 +211,25 @@
 <div id="tgt-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeTargets()">
   <div class="modal" style="width:min(600px,92vw);max-height:88vh;display:flex;flex-direction:column">
     <h2 id="tgt-title">订阅列表</h2>
-    <p class="hint" style="margin:-8px 0 14px" id="tgt-count"></p>
+    <p class="hint" style="margin:-8px 0 12px" id="tgt-count"></p>
+
+    <!-- 凭证就绪(逐个目标授权的来源才显示) -->
+    <div id="tgt-ready-bar" style="display:none;background:var(--tag-bg);border-radius:10px;
+         padding:9px 14px;margin-bottom:12px;display:flex;justify-content:space-between;
+         align-items:center;gap:10px;flex-wrap:wrap">
+      <span id="tgt-ready-text" style="font-size:12.5px"></span>
+      <span style="display:flex;gap:10px;align-items:center;flex:none">
+        <label style="font-size:12px;color:var(--muted);display:flex;gap:4px;align-items:center">
+          <input type="checkbox" onchange="toggleOnlyPending(this)"> 只看未就绪
+        </label>
+        <label style="font-size:12px;color:var(--muted);display:flex;gap:4px;align-items:center">
+          <input type="checkbox" id="tgt-auto" checked
+                 onchange="this.checked ? startTgtAutoRefresh() : stopTgtAutoRefresh()"> 自动刷新
+        </label>
+        <button class="ghost" id="tgt-refresh" onclick="refreshReadiness()"
+                style="padding:3px 12px;font-size:12px">刷新凭证</button>
+      </span>
+    </div>
 
     <!-- 搜索添加 -->
     <div class="row" style="margin-bottom:10px">

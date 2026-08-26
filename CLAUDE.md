@@ -14,6 +14,18 @@
 - 知识库主干不认识任何具体来源,只认 `kb/collectors/` 的采集器契约;微信特有的
   东西全在 `kb/collectors/wechat_oa.py` 与 `collector/` 里。新增来源写个实现即可。
 
+## 操作入口
+
+- **`./kb.sh` 是唯一的操作入口**(取代原 WeChatOA 的 start_all.sh)。`./kb.sh` 不带参数
+  打印全部命令。日常两条:`./kb.sh prep`(同步前起 wxdown + 切路由 + 盯凭证)、
+  `./kb.sh status`(服务/路由/凭证/订阅一屏看全)。
+- **两套凭证别搞混**:`login` 那套是扫码拿的、全局一份,用来搜公众号和翻文章列表;
+  `creds` 那套是每个号各一份的文章凭证,只能靠在 Mac 微信里打开该号一篇文章、
+  由 wxdown-service 的 mitm 截下来。抓正文缺的是后者,续期方式完全不同。
+- wxdown 把抓到的凭证写在 `wxdown-service/resources/data/credentials.json`,
+  `cli creds` 直接读这个文件导入。原来那条 "wxdown WebSocket → 前端 :5173 →
+  后端 :8000 POST" 的转发链路只是在搬运这个文件,两个常驻服务都已不需要。
+
 ## collector 采集器
 
 - **新开的 worktree 要先跑一次 `./collector/setup.sh`**。`collector/data`(592M 文章库

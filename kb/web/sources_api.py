@@ -44,7 +44,21 @@ def list_targets():
         targets = [t.as_dict() for t in mgr.list_targets()]
     except CollectorError as e:
         raise HTTPException(400, str(e))
-    return {"manageable": True, "label": collector.label, "targets": targets}
+    scored = [t for t in targets if t["ready"] is not None]
+    return {
+        "manageable": True,
+        "label": collector.label,
+        "targets": targets,
+        # 有"逐个目标就绪"这回事的来源才给计数,前端据此决定显不显示那一栏
+        "readiness": ({"ready": sum(1 for t in scored if t["ready"]),
+                       "total": len(scored)} if scored else None),
+    }
+
+
+@router.post("/api/sources/targets/refresh")
+def refresh_readiness():
+    """重新探测各目标的就绪状态(微信:把 wxdown 抓到的新凭证并进来)。"""
+    return _guard(_manager().refresh_readiness)
 
 
 @router.get("/api/sources/targets/search")

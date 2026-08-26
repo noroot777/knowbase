@@ -13,3 +13,6 @@ collector/.venv
 collector/runtime_logs/
 collector/nohup.out
 collector/.run/
+
+.run/
+runtime_logs/
