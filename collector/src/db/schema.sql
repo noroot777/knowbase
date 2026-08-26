@@ -12,9 +12,13 @@ CREATE TABLE IF NOT EXISTS accounts (
   fakeid            TEXT NOT NULL DEFAULT '',
   latest_crawl_at   TEXT,
   in_crawl_config   INTEGER NOT NULL DEFAULT 1,
+  -- 已移出订阅列表。不真删这一行:articles.account_name 是指向它的外键,
+  -- 删掉父行、留下已采集的文章就是一堆孤儿(见 remove_account_from_list)
+  removed           INTEGER NOT NULL DEFAULT 0,
   created_at        TEXT,
   updated_at        TEXT,
-  CHECK (in_crawl_config IN (0, 1))
+  CHECK (in_crawl_config IN (0, 1)),
+  CHECK (removed IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS articles (

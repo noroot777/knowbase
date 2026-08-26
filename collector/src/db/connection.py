@@ -45,8 +45,15 @@ def get_connection(*, readonly: bool = False) -> sqlite3.Connection:
 def _apply_schema_and_migrations(conn: sqlite3.Connection) -> None:
     from src.db.migrations import apply_migrations
 
-    # 旧库先迁移（补列），再跑 schema.sql；否则 CREATE INDEX 可能因列不存在而失败
-    apply_migrations(conn)
+    # 旧库先迁移（补列），再跑 schema.sql；否则 CREATE INDEX 可能因列不存在而失败。
+    # 但全新库不能走这一步:那时一张表都没有,每个 _migrate_to_* 都会因为目标表不
+    # 存在而直接返回,版本号却照样被记成最新——等 schema.sql 把表建出来,第二遍迁移
+    # 看到"已经最新"就什么都不做,该补的列永远补不上。新库直接建全再迁移。
+    fresh = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='articles'"
+    ).fetchone() is None
+    if not fresh:
+        apply_migrations(conn)
     schema_sql = _SCHEMA_FILE.read_text(encoding="utf-8")
     conn.executescript(schema_sql)
     apply_migrations(conn)

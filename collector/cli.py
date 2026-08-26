@@ -193,7 +193,8 @@ def cmd_creds(args) -> int:
     status = {biz: credential_public_status(c) for biz, c in records.items()}
     with ArticleRepository() as repo:
         rows = repo.conn.execute(
-            "SELECT name, fakeid FROM accounts WHERE in_crawl_config=1 ORDER BY name"
+            "SELECT name, fakeid FROM accounts "
+            "WHERE removed=0 AND in_crawl_config=1 ORDER BY name"
         ).fetchall()
 
     accounts = []
@@ -268,7 +269,7 @@ def cmd_accounts(args) -> int:
         with ArticleRepository() as repo:
             rows = repo.conn.execute(
                 "SELECT name, fakeid, in_crawl_config, latest_crawl_at "
-                "FROM accounts ORDER BY in_crawl_config DESC, name"
+                "FROM accounts WHERE removed=0 ORDER BY in_crawl_config DESC, name"
             ).fetchall()
         out = []
         for r in rows:
@@ -299,7 +300,8 @@ def cmd_accounts(args) -> int:
 
     with ArticleRepository() as repo:
         exists = repo.conn.execute(
-            "SELECT 1 FROM accounts WHERE name=?", (args.name,)).fetchone()
+            "SELECT 1 FROM accounts WHERE name=? AND removed=0",
+            (args.name,)).fetchone()
         if not exists:
             return _fail(f"订阅列表里没有「{args.name}」", args.json)
         if action == "remove":
@@ -308,7 +310,8 @@ def cmd_accounts(args) -> int:
         else:
             flag = 1 if action == "enable" else 0
             repo.conn.execute(
-                "UPDATE accounts SET in_crawl_config=? WHERE name=?", (flag, args.name))
+                "UPDATE accounts SET in_crawl_config=? WHERE name=? AND removed=0",
+                (flag, args.name))
             detail = f"{'启用' if flag else '停用'}采集:{args.name}"
         repo.commit()
     if args.json:

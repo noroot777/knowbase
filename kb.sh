@@ -12,11 +12,15 @@ PY="$COLLECTOR/.venv/bin/python"
 WXDOWN_DIR="${WXDOWN_DIR:-$HOME/code/gongzhonghao/wxdown-service}"
 RUN_DIR="$ROOT/.run"
 LOG_DIR="$ROOT/runtime_logs"
-WXDOWN_PID="$RUN_DIR/wxdown.pid"
-WEB_PID="$RUN_DIR/web.pid"
 WEB_PORT="${KB_WEB_PORT:-8787}"
 WXDOWN_PORT="${WXDOWN_PROXY_PORT:-65000}"   # 跟 clash_wxdown_route 认同一个变量
 WXDOWN_WS_PORT="${WXDOWN_WS_PORT:-65001}"
+# pidfile 名字里带端口。脚本自己在端口冲突时就会劝你 KB_WEB_PORT=8788 换个端口跑,
+# 要是所有端口共用一个 .run/web.pid,临时端口起过一次之后,默认 8787 的
+# status/stop/restart 就会把临时端口那份也当成自己的——上一轮 pgrep 跨端口误杀
+# 是同一个病根。
+WXDOWN_PID="$RUN_DIR/wxdown-$WXDOWN_PORT.pid"
+WEB_PID="$RUN_DIR/web-$WEB_PORT.pid"
 API="http://127.0.0.1:$WEB_PORT"
 # 所有 curl 都带超时。没有超时的话,旧实例端口还在监听但 HTTP 卡住时,
 # stop/restart 会跟着一起卡死——恰好是最需要它把旧实例杀掉的场景。
@@ -73,12 +77,21 @@ os.execvp(cmd[0], cmd)
 # 实际 server、wxdown 的 multiprocessing worker 都是——而 kill_tree 只往下走,
 # 从子进程动手会把父进程剩在那儿(端口没释放,restart 于是失败)。
 # 一路向上,直到父进程不再长得像这个服务为止。
+#
+# 碰到 shell 就停:交互 shell 和 `bash -c '...'` 的命令行里可能正好带着这个字样
+# (比如你在一条命令里提到 kb-web),再往上走就会把自己的终端当成服务杀掉。
 top_owner() {   # top_owner <pid> <pattern>
-  local pid="$1" pattern="$2" parent
+  local pid="$1" pattern="$2" parent pcmd prog
   while :; do
     parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
     { [ -n "$parent" ] && [ "$parent" != "1" ] && [ "$parent" != "0" ]; } || break
-    ps -o command= -p "$parent" 2>/dev/null | grep -qF -- "$pattern" || break
+    pcmd="$(ps -o command= -p "$parent" 2>/dev/null)"
+    printf '%s' "$pcmd" | grep -qF -- "$pattern" || break
+    prog="${pcmd%% *}"      # 第一个词才是可执行文件,后面是参数
+    prog="${prog##*/}"      # 取 basename;参数里的路径不能参与判断
+    case "$prog" in
+      bash|zsh|sh|dash|fish|ksh|-bash|-zsh|-sh|login) break ;;
+    esac
     pid="$parent"
   done
   echo "$pid"
@@ -87,30 +100,27 @@ top_owner() {   # top_owner <pid> <pattern>
 # 这个 pid 的命令行像不像目标服务
 pid_matches() { ps -o command= -p "${1:-0}" 2>/dev/null | grep -qF -- "$2"; }
 
-# 一个服务当前的进程:pidfile 记的 + 占着端口的,各自往上找到头,去重。
+# 一个服务当前的进程。
 #
 # 刻意【不】用 `pgrep -f <名字>` 兜底:名字是全局匹配的,分不清端口。实测
 # `pgrep -f kb-web` 会把跑在别的端口上的另一份实例也捞进来——8799 上做一次
 # restart,把 8787 上的生产实例一起杀了。端口是唯一能把实例分开的东西。
 #
-# pidfile 里的 pid 必须核命令行才认:那个文件可能是上次异常退出留下的陈迹,
-# 号早被系统回收给了别的进程,照着杀就是杀无辜。
+# 所以端口说了算:有人占着这个端口,就以占着的那个为准,pidfile 不插话——它
+# 可能是上次异常退出留下的陈迹,号早被系统回收给了别的进程。只有端口上一个人
+# 都没有时才回头看 pidfile:那说明服务要么还在启动、要么挂住了没释放端口,
+# 那份记录(pidfile 名字里带端口,只可能是本端口这一份写的)才有用。
 #
-# 端口来的也得核,只是要核【往上走到头】的那个:lsof 给的常常是子进程,命令行
-# 未必带服务的字样(wxdown 的 multiprocessing worker 就只是个 `python -c ...`),
-# 直接核会把真进程漏掉。不核则更糟——65000 被别的东西占着时 start 会说"已在
-# 运行"却什么都没起,接着 route --activate 把微信流量导到一个不是 wxdown 的
-# 端口上,凭证于是永远抓不到,而面板一切正常。
+# 两条路来的 pid 都要核命令行,而且核的是【往上走到头】的那个:lsof 给的常常是
+# 子进程,命令行未必带服务的字样(wxdown 的 multiprocessing worker 就只是个
+# `python -c ...`)。不核则更糟——65000 被别的东西占着时 start 会说"已在运行"
+# 却什么都没起,接着 route --activate 把微信流量导到一个不是 wxdown 的端口上,
+# 凭证于是永远抓不到,而面板一切正常。
 service_pids() {   # service_pids <pidfile> <port> <pattern>
-  local pidfile="${1:-}" port="${2:-}" pattern="${3:-}" pid recorded owner
-  recorded="$(read_pid "$pidfile")"
-  if [ -n "$recorded" ] && ! pid_matches "$recorded" "$pattern"; then
-    recorded=""
-  fi
-  { [ -n "$recorded" ] && echo "$recorded"
-    [ -n "$port" ] && lsof -ti tcp:"$port" 2>/dev/null
-    true
-  } | grep -E '^[0-9]+$' | sort -un | while read -r pid; do
+  local pidfile="${1:-}" port="${2:-}" pattern="${3:-}" pid owner raw=""
+  [ -n "$port" ] && raw="$(lsof -ti tcp:"$port" 2>/dev/null || true)"
+  [ -n "$raw" ] || raw="$(read_pid "$pidfile")"
+  printf '%s\n' "$raw" | grep -E '^[0-9]+$' | sort -un | while read -r pid; do
     alive "$pid" || continue
     owner="$(top_owner "$pid" "$pattern")"
     pid_matches "$owner" "$pattern" && echo "$owner"

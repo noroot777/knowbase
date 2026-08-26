@@ -8,10 +8,23 @@ import re
 
 from src.utils.helpers import time_now
 
-LATEST_SCHEMA_VERSION = 10
+LATEST_SCHEMA_VERSION = 11
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
+    # schema_migrations 是本函数自己的记账本,不能指望调用方先建好。connection.py
+    # 那边是"旧库先补列、再跑 schema.sql",于是本函数会在 schema.sql 之前先跑一次
+    # ——而 schema.sql 才是建这张表的地方。全新数据目录、或旧 WeChatOA 库里没有
+    # 这张表时,下面第一句 SELECT 就抛 no such table,cli status/accounts/collect
+    # 全卡在仓储初始化上。
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version     INTEGER PRIMARY KEY,
+          applied_at  TEXT NOT NULL
+        )
+        """
+    )
     row = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
     current = int(row["v"]) if row and row["v"] is not None else 0
 
@@ -92,6 +105,15 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (10, time_now()),
+        )
+        conn.commit()
+        current = 10
+
+    if current < 11:
+        _migrate_to_v11(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (11, time_now()),
         )
         conn.commit()
 
@@ -327,3 +349,26 @@ def _migrate_to_v10(conn: sqlite3.Connection) -> None:
           )
         """
     )
+
+
+def _migrate_to_v11(conn: sqlite3.Connection) -> None:
+    """accounts 加"已移出订阅列表"标记。
+
+    在这之前"移除"是 PRAGMA foreign_keys=OFF 之后直接 DELETE 掉 accounts 那一行,
+    而 articles.account_name 是指向它的外键——已采集的文章于是全成了孤儿。
+    改成标记后,行还在(外键成立),列表查询按 removed=0 过滤把它藏起来。
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts'"
+    ).fetchone()
+    if not row:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+    if "removed" not in cols:
+        conn.execute(
+            """
+            ALTER TABLE accounts
+            ADD COLUMN removed INTEGER NOT NULL DEFAULT 0
+            CHECK (removed IN (0, 1))
+            """
+        )
