@@ -9,4 +9,4 @@ from .blog_generator import generate_single_posts, generate_summary_markdown
 __all__ = [
     'generate_summary_markdown',
     'generate_single_posts',
-] 
+]

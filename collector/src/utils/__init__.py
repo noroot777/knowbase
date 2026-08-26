@@ -14,11 +14,11 @@ __all__ = [
     'Message_Info',
     'headers',
     'time_now',
-    'time_delta', 
+    'time_delta',
     'jstime2realtime',
     'realtime2jstime',
     'url2text',
     'message_is_delete',
     'check_text_ratio',
     'nunjucks_escape',
-] 
+]

@@ -22,7 +22,7 @@ from ..utils.data_manager import data_manager, headers
 def generate_summary_markdown():
     """生成汇总Markdown文件（按时间和按公众号区分）"""
     md_dict_by_date, md_dict_by_blogger = get_valid_message()
-    
+
     # 1. 写入按日期区分的md文件
     md_by_date = '''---
 layout: post
@@ -30,7 +30,7 @@ title: "微信公众号聚合平台_按时间区分"
 date: 2024-07-29 01:36
 top: true
 hide: true
-tags: 
+tags:
     - 开源项目
     - 微信公众号聚合平台
 ---
@@ -57,7 +57,7 @@ title: "微信公众号聚合平台_按公众号区分"
 date: 2024-08-31 02:16
 top: true
 hide: true
-tags: 
+tags:
     - 开源项目
     - 微信公众号聚合平台
 ---
@@ -79,7 +79,7 @@ tags:
 def generate_single_posts():
     """生成单个文章的Markdown文件并下载封面图片"""
     md_dict_by_date, _ = get_valid_message()
-    
+
     # hexo路径 - 这些路径应该配置化
     img_path = r"D:\learning\zejun'blog\Hexo\themes\hexo-theme-matery\source\medias\frontcover"
     md_path = r"D:\learning\zejun'blog\Hexo\source\_posts"
@@ -150,7 +150,7 @@ date: {d['create_time']}
 top: false
 hide: false
 img: /medias/frontcover/{_id.replace('/', '_')}.jpg
-tags: 
+tags:
     - {d['oaname']}
 ---
 '''
@@ -175,7 +175,7 @@ tags:
 def _cleanup_old_files(id2message_info, md_path, img_path):
     """清理多余的文件"""
     valid_id = [id for id in id2message_info.keys()]
-    
+
     # 删除多余的md文件
     for filename in os.listdir(md_path):
         if filename in ["微信公众号聚合平台.md", "微信公众号聚合平台_byname.md"]:

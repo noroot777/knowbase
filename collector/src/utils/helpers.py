@@ -38,11 +38,11 @@ def realtime2jstime(realtime):
 
 def time_delta(time1, time2):
     """计算时间差
-    
+
     Args:
         time1: 第一个时间，格式为"YYYY-MM-DD HH:MM"
         time2: 第二个时间，格式为"YYYY-MM-DD HH:MM"
-    
+
     Returns:
         返回时间差对象，可以通过：
         - result.days 获取天数
@@ -114,7 +114,7 @@ def nunjucks_escape(text):
     text = text.replace('#}', '# }')  # 补充注释标签
     text = text.replace('https:', 'https :')
     text = text.replace('http:', 'http :')
-    
+
     # 新增：处理可能引起解析错误的特殊字符组合
     text = text.replace('{-', '{ -')
     text = text.replace('-}', '- }')
@@ -122,36 +122,36 @@ def nunjucks_escape(text):
     text = text.replace('-}}', '- } }')
     text = text.replace('{%-', '{ % -')
     text = text.replace('-%}', '- % }')
-    
+
     # 处理可能的变量访问语法
     text = re.sub(r'(\w+)\.(\w+)', r'\1\. \2', text)  # 处理点号访问
     text = re.sub(r'(\w+)\[(\w+)\]', r'\1\[ \2\]', text)  # 处理方括号访问
-    
+
     # 处理管道符（Nunjucks 过滤器语法）
     text = text.replace('|', '\\|')
-    
+
     # 处理反引号和特殊引号
     text = text.replace('`', '\\`')
     text = text.replace('"', '\\"')
     text = text.replace('"', '\\"')
-    
+
     # 处理可能的数学表达式或特殊符号
     text = text.replace('&lt;', '< ')
     text = text.replace('&gt;', '> ')
     text = text.replace('&amp;', '& ')
     text = text.replace('&quot;', '\\" ')
-    
+
     # 处理HTML实体编码中的特殊字符
     text = re.sub(r'&#x([0-9A-Fa-f]+);', r'&# x\1;', text)
     text = re.sub(r'&#(\d+);', r'&# \1;', text)
-    
+
     # 处理可能被误认为是 Nunjucks 语法的其他字符组合
     text = text.replace('\\n\\n\\n', '\\n \\n \\n')  # 根据你的错误可能相关
-    
+
     for ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
         text = text.replace(ext, '')
-    
+
     # 去掉html标签，防止转义失败
     text = re.sub(r'<[^>]*>', '', text)
-    
+
     return text

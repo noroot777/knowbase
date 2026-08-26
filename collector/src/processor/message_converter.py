@@ -14,7 +14,7 @@ from ..utils.data_manager import data_manager
 
 def get_valid_message():
     """获取有效的消息数据，过滤已删除和重复的文章
-    
+
     Returns:
         tuple: (md_dict_by_date, md_dict_by_blogger)
             - md_dict_by_date: 按日期分组的文章字典
@@ -26,7 +26,7 @@ def get_valid_message():
     dup_count = 0
     md_dict_by_date = defaultdict(list)  # 按日期分割，key=时间，年月日，value=文章
     md_dict_by_blogger = defaultdict(list)  # 按博主分割，key=博主名，value=文章
-    
+
     for k, v in data_manager.message_info.items():
         # 由name2fakeid决定哪些公众号需要展示，如果从name2fakeid中删除了公众号但历史的message_info中存在，则跳过
         if k not in data_manager.name2fakeid.keys():
@@ -48,4 +48,4 @@ def get_valid_message():
 
     print(f'{delete_count} messages have been deleted')
     print(f'{dup_count} messages have been deduplicated')
-    return md_dict_by_date, md_dict_by_blogger 
+    return md_dict_by_date, md_dict_by_blogger

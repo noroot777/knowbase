@@ -10,4 +10,4 @@ from .message_converter import get_valid_message
 __all__ = [
     'minHashLSH',
     'get_valid_message',
-] 
+]

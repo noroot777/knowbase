@@ -33,4 +33,4 @@ __all__ = [
     # 从web模块导入
     'generate_summary_markdown',
     'generate_single_posts',
-] 
+]
