@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -20,8 +21,13 @@ from pathlib import Path
 from kb.collectors import FetchScope, SourceStatus
 from kb.pipeline_state import _log, _stage
 
-# 采集器所在目录。它自带 venv,用它自己的解释器跑,免得依赖污染知识库这边。
-BACKEND_DIR = Path.home() / "code" / "gongzhonghao" / "WeChatOA_Aggregation"
+# 采集器在本仓库内(<repo>/collector)。刻意用相对于本文件的路径而不是绝对路径:
+# 开 worktree 时它会自动指向那个 worktree 里的 collector,改采集器的代码
+# 才真的被隔离——写死绝对路径的话,worktree 里跑的仍是主仓库那一份。
+# 数据与 venv 不在版本库里(见根 .gitignore),新 worktree 要先跑一次
+# collector/setup.sh 把它们链过去。
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+BACKEND_DIR = Path(os.getenv("KB_COLLECTOR_DIR", "").strip() or _REPO_ROOT / "collector")
 BACKEND_PY = BACKEND_DIR / ".venv" / "bin" / "python"
 
 # 采集产物落在 vault 里的 source 名(历史上换过两次,一并认)

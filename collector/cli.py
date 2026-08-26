@@ -1,0 +1,319 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""公众号采集器命令行入口 —— 一次性任务,跑完就退,不常驻。
+
+    python -m cli status                          健康状况(JSON)
+    python -m cli collect                          日常增量采集
+    python -m cli collect --since 2026-08-01 --until 2026-08-26 [--targets a,b]
+    python -m cli export [--no-images]             导出到 obsidian
+    python -m cli accounts list                    看订阅的公众号
+    python -m cli accounts add <名字>              搜索并添加(需要扫码凭证)
+    python -m cli accounts remove <名字>
+    python -m cli accounts enable|disable <名字>   是否参与采集
+
+输出协议:stdout 只出 NDJSON(每行一个事件),给上游程序解析;
+人类可读的提示一律走 stderr。这样同一个命令既能给知识库管道调,也能手敲。
+
+退出码:0 正常 / 1 一般错误 / 2 凭证失效 / 3 微信频率限制
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+EXIT_OK, EXIT_ERROR, EXIT_AUTH, EXIT_FREQ = 0, 1, 2, 3
+
+
+def emit(event: dict) -> None:
+    """一个事件一行,立即 flush——上游是边读边显示进度的。"""
+    print(json.dumps(event, ensure_ascii=False), flush=True)
+
+
+def info(*parts) -> None:
+    print(*parts, file=sys.stderr, flush=True)
+
+
+def _pad(text: str, width: int) -> str:
+    """按显示宽度补空格。中日韩字符占两格,用 len() 对齐会歪。"""
+    shown = sum(2 if ord(c) > 0x2E80 else 1 for c in text)
+    return text + " " * max(1, width - shown)
+
+
+# ── status ──────────────────────────────────────────────────────────────────────
+
+def cmd_status(args) -> int:
+    import api
+    from src.db.repository import ArticleRepository
+
+    auth = api._build_auth_status().model_dump()
+    with ArticleRepository() as repo:
+        targets = sorted(repo.get_name2fakeid().keys())
+
+    # 一次性任务,每次实测,不吃 _auth_state 的缓存:那个 dict 在没探测过时
+    # valid 恒为 true,读它会把"没查过"说成"有效"。
+    # credential_expired 是另一回事——它按 saved_at + 4 天 TTL 本地估算,
+    # 偏保守,实测有效时以实测为准(实测过 8-26:估算已超期 4 天但 cookie 仍活)。
+    ok, reason = api._check_auth_valid()
+    expired = bool(auth.get("credential_expired"))
+    label = auth.get("credential_expiry_label") or ""
+    if ok:
+        message = "凭证有效" + (f"(本地估算{label},实测仍可用)" if expired else "")
+    else:
+        message = f"凭证失效:{reason}"
+    emit({
+        "ready": ok,
+        "message": message,
+        "hint": "" if ok else "跑 `python -m cli login` 重新扫码",
+        "credential_expiry_label": label,
+        "credential_days_remaining": auth.get("credential_days_remaining"),
+        "targets": targets,
+    })
+    return EXIT_OK
+
+
+# ── collect ─────────────────────────────────────────────────────────────────────
+
+def cmd_collect(args) -> int:
+    from src.collect.runner import collect
+
+    since, until = args.since or "", args.until or ""
+    if bool(since) != bool(until):
+        info("错误:--since 和 --until 必须同时给")
+        return EXIT_ERROR
+    targets = [t.strip() for t in (args.targets or "").split(",") if t.strip()]
+
+    result = collect(emit, targets=targets or None, since=since, until=until)
+    if result["auth_error"]:
+        info("凭证失效,采集中止。跑 `python -m cli login` 续期后重试")
+        return EXIT_AUTH
+    if result["freq_control"]:
+        info("触发微信频率限制,已中止。等 30-60 分钟再跑")
+        return EXIT_FREQ
+    info(f"采集完成:新增 {result['new_articles']} 篇"
+         + (f",{len(result['errors'])} 个号失败" if result["errors"] else ""))
+    return EXIT_OK
+
+
+# ── export ──────────────────────────────────────────────────────────────────────
+
+def cmd_export(args) -> int:
+    """导出到 obsidian。转调现成脚本,它自己会打进度。"""
+    argv = [sys.executable, str(ROOT / "scripts" / "export_obsidian.py")]
+    if args.no_images:
+        argv.append("--no-images")
+    proc = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True)
+    # 脚本的输出是人类可读的行,原样转到 stderr;结构化结果自己 emit
+    if proc.stdout:
+        info(proc.stdout.rstrip())
+    if proc.returncode != 0:
+        info(proc.stderr.rstrip()[-500:])
+        emit({"stage": "export", "status": "error",
+              "detail": (proc.stderr or proc.stdout).rstrip()[-300:]})
+        return EXIT_ERROR
+    fails = []
+    for line in proc.stdout.splitlines():
+        if "无正文,跳过" in line:
+            fails.append(line.split("无正文,跳过", 1)[1].strip())
+    tail = [l for l in proc.stdout.splitlines() if "完成" in l]
+    emit({"stage": "export", "status": "ok",
+          "detail": tail[-1].replace("[export] ", "") if tail else "完成",
+          "no_body": fails})
+    return EXIT_OK
+
+
+# ── accounts ────────────────────────────────────────────────────────────────────
+
+def cmd_accounts(args) -> int:
+    from src.db.repository import ArticleRepository
+
+    action = args.action
+    if action == "list":
+        with ArticleRepository() as repo:
+            rows = repo.conn.execute(
+                "SELECT name, fakeid, in_crawl_config, latest_crawl_at "
+                "FROM accounts ORDER BY in_crawl_config DESC, name"
+            ).fetchall()
+        if args.json:
+            emit({"accounts": [dict(r) for r in rows]})
+        else:
+            info(f"共 {len(rows)} 个公众号(✓ = 参与采集):")
+            for r in rows:
+                mark = "✓" if r["in_crawl_config"] else "·"
+                info(f"  {mark} {_pad(r['name'], 26)}"
+                     f"最近采集 {r['latest_crawl_at'] or '-'}")
+        return EXIT_OK
+
+    if not args.name:
+        info(f"错误:{action} 需要给公众号名字")
+        return EXIT_ERROR
+
+    if action == "add":
+        return _accounts_add(args.name)
+
+    with ArticleRepository() as repo:
+        exists = repo.conn.execute(
+            "SELECT 1 FROM accounts WHERE name=?", (args.name,)).fetchone()
+        if not exists:
+            info(f"错误:订阅列表里没有「{args.name}」")
+            return EXIT_ERROR
+        if action == "remove":
+            repo.remove_account_from_list(args.name)
+            info(f"已移出订阅列表(已采集的文章保留):{args.name}")
+        else:
+            flag = 1 if action == "enable" else 0
+            repo.conn.execute(
+                "UPDATE accounts SET in_crawl_config=? WHERE name=?", (flag, args.name))
+            info(f"{'启用' if flag else '停用'}采集:{args.name}")
+        repo.commit()
+    return EXIT_OK
+
+
+def _accounts_add(name: str) -> int:
+    """搜名字 → 拿 fakeid → 写入订阅列表。搜索走公众平台接口,需要扫码凭证。"""
+    import api
+    from src.db.repository import ArticleRepository
+
+    try:
+        candidates = api._search_biz(name)
+    except Exception as e:
+        info(f"搜索失败(凭证可能已过期,试试 `python -m cli login`):{e}")
+        return EXIT_AUTH
+    if not candidates:
+        info(f"没搜到叫「{name}」的公众号")
+        return EXIT_ERROR
+
+    exact = [c for c in candidates if c.nickname == name]
+    if not exact:
+        info(f"没有完全同名的,搜到这些(请用准确名字重试):")
+        for c in candidates[:8]:
+            info(f"  - {c.nickname}")
+        return EXIT_ERROR
+
+    hit = exact[0]
+    with ArticleRepository() as repo:
+        repo.upsert_account(hit.nickname, hit.fakeid)
+        repo.commit()
+    info(f"已添加:{hit.nickname} ({hit.fakeid})")
+    return EXIT_OK
+
+
+# ── login ───────────────────────────────────────────────────────────────────────
+
+def cmd_login(args) -> int:
+    """扫码登录公众平台:二维码存成图片,路径打在 stderr 上,自己打开扫。
+
+    过期会自动换一张(微信的二维码大约两分钟就废),整体等 5 分钟不确认就放弃。
+    """
+    import time
+    from datetime import datetime
+
+    from src.auth.mp_scan_login import (
+        SCAN_STATUS_CONFIRMED,
+        SCAN_STATUS_EXPIRED,
+        MpScanLogin,
+        scan_status_message,
+    )
+    from src.utils.data_manager import data_manager
+
+    qr_path = ROOT / "data" / "login_qrcode.png"
+    login = MpScanLogin()
+    try:
+        login.start_session()
+        qr_path.write_bytes(login.fetch_qrcode_bytes())
+    except Exception as e:
+        info(f"取二维码失败:{e}")
+        return EXIT_ERROR
+    info(f"二维码已存到 {qr_path}\n用微信扫它,然后在手机上确认登录。")
+
+    deadline = time.time() + 300
+    last_msg = ""
+    while time.time() < deadline:
+        try:
+            result = login.poll_scan()
+        except Exception as e:
+            info(f"轮询扫码状态失败:{e}")
+            return EXIT_ERROR
+        if result.status == SCAN_STATUS_CONFIRMED:
+            break
+        if result.status in SCAN_STATUS_EXPIRED:
+            try:
+                qr_path.write_bytes(login.fetch_qrcode_bytes())
+                info("二维码过期,已换一张,重新扫")
+            except Exception as e:
+                info(f"刷新二维码失败:{e}")
+                return EXIT_ERROR
+        else:
+            msg = scan_status_message(result.status, result.raw)
+            if msg != last_msg:            # 同一状态别刷屏
+                info(msg)
+                last_msg = msg
+        time.sleep(2)
+    else:
+        info("等待扫码超时(5 分钟),放弃")
+        return EXIT_ERROR
+
+    try:
+        token, cookie_str = login.complete_login()
+    except Exception as e:
+        info(f"完成登录失败:{e}")
+        return EXIT_ERROR
+    data_manager.id_info["token"] = token
+    data_manager.id_info["cookie"] = cookie_str
+    data_manager.id_info["saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    data_manager.write("id_info")
+    qr_path.unlink(missing_ok=True)
+    info("登录成功,凭证已写入 data/id_info.json")
+    return EXIT_OK
+
+
+# ── 入口 ────────────────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="cli", description="公众号采集器(一次性任务,不常驻)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("status", help="健康状况与订阅列表(JSON)")
+
+    c = sub.add_parser("collect", help="采集文章到本地库")
+    c.add_argument("--since", help="起始日期 YYYY-MM-DD(与 --until 同时给)")
+    c.add_argument("--until", help="结束日期 YYYY-MM-DD")
+    c.add_argument("--targets", help="逗号分隔的公众号名,默认全部订阅号")
+
+    e = sub.add_parser("export", help="把本地库导出成 obsidian md")
+    e.add_argument("--no-images", action="store_true", help="不下图,保留远程 URL")
+
+    a = sub.add_parser("accounts", help="维护订阅的公众号")
+    a.add_argument("action", choices=["list", "add", "remove", "enable", "disable"])
+    a.add_argument("name", nargs="?", help="公众号名字")
+    a.add_argument("--json", action="store_true", help="list 时输出 JSON")
+
+    sub.add_parser("login", help="扫码登录公众平台(添加公众号时需要)")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    from src.collect.bootstrap import install
+
+    install()          # profile_ext 通道 + 微信域名绕过代理,不装会静默走错路
+    handlers = {
+        "status": cmd_status, "collect": cmd_collect, "export": cmd_export,
+        "accounts": cmd_accounts, "login": cmd_login,
+    }
+    try:
+        return handlers[args.cmd](args)
+    except KeyboardInterrupt:
+        info("\n已中断")
+        return EXIT_ERROR
+
+
+if __name__ == "__main__":
+    sys.exit(main())

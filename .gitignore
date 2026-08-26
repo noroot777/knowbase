@@ -2,3 +2,14 @@ data/
 __pycache__/
 *.egg-info/
 .venv/
+
+# 采集器:数据与虚拟环境不进版本库。
+# 单列一份不带斜杠的规则,因为这两项目前是指向仓库外的符号链接,而上面
+# `data/` `.venv/` 带斜杠只匹配真目录,挡不住符号链接——不写死这几行,
+# 一次 `git add -A` 就会把 592M 的库、264M 封面和含凭证的 id_info.json
+# 的路径写进历史。
+collector/data
+collector/.venv
+collector/runtime_logs/
+collector/nohup.out
+collector/.run/

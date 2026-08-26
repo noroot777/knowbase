@@ -7,7 +7,7 @@
 
 ```
 obs vault (事实来源, Markdown + frontmatter)
-  ├── source/dr-gzh/          公众号文章 (WeChatOA_Aggregation 导出)
+  ├── source/dr-gzh/          公众号文章 (collector/ 导出)
   ├── source/dr-youtube-dig/  YouTube 摘要 (自带 entity/topic 标签)
   └── source/gzh/             公众号实时保存 (gzh_saver)
         ↓ kb index                      ↓ kb extract
@@ -68,15 +68,16 @@ web 界面(`uv run kb-web` → http://127.0.0.1:8787)的"管道"tab 一键搞定
 → **索引**(FTS + 向量,增量)→ **提取**(entity/topic/摘要,tag 自动回写 obs frontmatter)
 
 抓取/导出两阶段只跟 `kb/collectors/` 的采集器契约打交道,知识库自身不认识
-任何具体来源。当前唯一实现是公众号采集器(`kb/collectors/wechat_oa.py`),
+任何具体来源。当前唯一实现是公众号采集器(`kb/collectors/wechat_oa.py` + `collector/`),
 微信特有的一切——凭证怎么过期、反爬要等多久、文章先落哪个库——都关在
 那个文件里;换来源或换抓取方式只写一个新实现,管道一行不改。
 
 面板显示各阶段进度/待处理数/采集器健康状况(文案由采集器给,面板只渲染)。
-唯一剩下的人工:微信凭证 ~4 天过期,去采集器配置页扫码续期(面板有入口和提醒)。
+唯一剩下的人工:微信凭证过期时到 collector/ 跑一次 `python -m cli login` 扫码续期
+(面板会提示)。采集器是一次性 CLI,平时不占常驻进程。
 
 等价的 CLI:
-1. 采集器抓新文章 → 导出到 obs(当前实现:WeChatOA_Aggregation + `export_obsidian.py`)
+1. `cd collector && ./.venv/bin/python -m cli collect` 抓新文章,再 `... -m cli export` 导出到 obs
 2. `kb index` 增量索引新文档(内容 hash 判断,秒级)
 3. `kb extract` 给新文章打标
 4. 随便搜
