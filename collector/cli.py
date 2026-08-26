@@ -65,14 +65,26 @@ def cmd_status(args) -> int:
     ok, reason = api._check_auth_valid()
     expired = bool(auth.get("credential_expired"))
     label = auth.get("credential_expiry_label") or ""
-    if ok:
-        message = "凭证有效" + (f"(本地估算{label},实测仍可用)" if expired else "")
-    else:
+    if not ok:
         message = f"凭证失效:{reason}"
+        hint = "跑 `python -m cli login` 重新扫码"
+    elif reason:
+        # ok=True 但 reason 非空,按 _check_auth_valid 的约定是"没测出来",不是
+        # "测过没问题":要么网络异常,要么 bootstrap 把它降级成了 Mac 微信的
+        # profile_ext 凭证(采集照常,但搜号/翻列表用的仍是扫码那套)。
+        # 以前这两种也一律说成"实测仍可用"——于是扫码 token 早就 invalid session
+        # 了,这一栏还在报平安,而它恰恰是用户用来决定跑不跑 login 的地方。
+        message = f"没能实测({reason})" + (f";本地估算{label}" if expired else "")
+        hint = "搜号/翻列表要用它,不放心就跑一次 `python -m cli login`"
+    else:
+        message = "凭证有效" + (f"(本地估算{label},实测仍可用)" if expired else "")
+        hint = ""
     emit({
+        # ready 仍看 ok:降级到 profile_ext 时采集是能继续的,这里报不可用会
+        # 让面板把整个来源判成离线,反而拦住本来跑得通的同步。
         "ready": ok,
         "message": message,
-        "hint": "" if ok else "跑 `python -m cli login` 重新扫码",
+        "hint": hint,
         "credential_expiry_label": label,
         "credential_days_remaining": auth.get("credential_days_remaining"),
         "targets": targets,

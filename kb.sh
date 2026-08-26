@@ -358,7 +358,10 @@ else:
   echo
   echo "── 扫码凭证(搜号/翻列表用)──"
   cli status 2>/dev/null | tail -1 \
-    | "$PY" -c 'import json,sys; print(json.load(sys.stdin).get("message",""))' \
+    | "$PY" -c 'import json,sys
+d = json.load(sys.stdin)
+print(d.get("message", ""))
+if d.get("hint"): print("  " + d["hint"])' \
     || echo "(采集器起不来)"
   echo
   echo "── 文章凭证(每个号各一份)──"
