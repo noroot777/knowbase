@@ -21,7 +21,6 @@ from datetime import datetime
 from kb.config import DATA_DIR
 from kb.pipeline_retry import retry_failed_plan, start_retry_failed
 from kb.pipeline_stages import (
-    WECHATOA_DIR,
     _extract_pass,
     _finish_extract_stage,
     _new_extract_stats,
@@ -31,8 +30,9 @@ from kb.pipeline_stages import (
     _run_index,
     _run_projects,
     _run_wiki,
-    wechatoa_accounts,
-    wechatoa_status,
+    source_pending,
+    source_status,
+    source_targets,
 )
 from kb.pipeline_state import (
     STAGES,
@@ -55,11 +55,11 @@ __all__ = [
     "pending_counts",
     "retry_failed_plan",
     "save_schedule",
+    "source_status",
+    "source_targets",
     "start_pipeline",
     "start_retry_failed",
     "start_scheduler",
-    "wechatoa_accounts",
-    "wechatoa_status",
 ]
 
 
@@ -74,7 +74,7 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
     try:
         # 抓取被反爬间隔限速(页间/号间随机 sleep),期间 CPU 和网络全闲着:
         # 先并行开跑一轮"存量"提取,消化上一轮已索引但没提取的积压。
-        # 安全边界:提取只写 kb.db(WAL)和 obs frontmatter,与抓取(WeChatOA HTTP)、
+        # 安全边界:提取只写 kb.db(WAL)和 obs frontmatter,与抓取(采集器进程外)、
         # 导出(幂等,已存在的文件跳过、不覆盖)互不冲突;索引前 join,保持库的单写者。
         ex_stats = _new_extract_stats()
         pre_thread = None
@@ -120,7 +120,7 @@ def start_pipeline(stages: list[str] | None = None,
                    crawl_filter: dict | None = None) -> bool:
     """启动管道线程。已在跑返回 False。
 
-    crawl_filter 见 _run_crawl:限定公众号 + 时间段的范围抓取。
+    crawl_filter 见 _run_crawl:限定来源目标 + 时间段的范围抓取。
     """
     wanted = [s for s in (stages or list(STAGES)) if s in STAGES]
     with _lock:
@@ -204,19 +204,8 @@ def start_scheduler() -> None:
 def pending_counts() -> dict:
     """各阶段待处理数。文件扫描有成本,管道运行中不要调。"""
     out: dict = {}
-    # 导出待处理:WeChatOA 库里的文章数 - obs 树里已有的 URL 数(近似)
-    try:
-        import sqlite3
-        from kb.scanner import scan_all as _scan
-        wdb = sqlite3.connect(WECHATOA_DIR / "data" / "wechatoa.db")
-        total = wdb.execute(
-            "SELECT COUNT(*) FROM articles WHERE is_user_deleted=0 AND is_wx_deleted=0"
-        ).fetchone()[0]
-        wdb.close()
-        exported = sum(1 for d in _scan() if d.source in ("dr-gzh", "wechat", "gzh"))
-        out["export"] = max(0, total - exported)
-    except Exception:
-        out["export"] = None
+    # 导出待处理:采集器那边已有、但还没落进 vault 的条数(采集器自己算)
+    out["export"] = source_pending()
     # 索引/提取待处理
     try:
         from kb import store

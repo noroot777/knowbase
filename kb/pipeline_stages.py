@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """管道各阶段的实现:抓取 → 导出 → 索引 → 提取 → 条目化 → wiki。
 
-- 抓取: HTTP 调 WeChatOA 后端(:8000),不在线则跳过 —— 凭证/反爬都归它管
-- 导出: 子进程跑 WeChatOA 的 export_obsidian.py
+- 抓取/导出: 委托给来源采集器(kb.collectors),本模块不知道来源是什么
 - 索引: 进程内(复用已加载的 embedding 模型)
 - 提取: 进程内并发调 LLM,tag 自动回写 obs frontmatter
 - 条目化: 子进程跑 scripts/*_projects_export.py,产物回灌 pre_tagged 来源
@@ -13,155 +12,56 @@
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
-import time
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+from kb.collectors import FetchScope, active_collector
 from kb.pipeline_state import _log, _now, _stage
 
-# WeChatOA 项目位置与后端地址
-WECHATOA_DIR = Path.home() / "code" / "gongzhonghao" / "WeChatOA_Aggregation"
-WECHATOA_API = "http://127.0.0.1:8000"
 
-def _http_json(url: str, method: str = "GET", payload: dict | None = None,
-               timeout: int = 10) -> dict | None:
-    try:
-        data = None
-        headers = {}
-        if payload is not None:
-            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, method=method, headers=headers)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return None
+# ── 采集:抓取 + 导出,两阶段都只跟采集器契约打交道 ────────────────────────────
+
+def source_status() -> dict:
+    """当前来源的健康状况,给状态面板用。"""
+    collector = active_collector()
+    payload = collector.status().as_dict()
+    payload["label"] = collector.label
+    payload["range_hint"] = getattr(collector, "range_hint", "")
+    return payload
 
 
-def wechatoa_status() -> dict:
-    """WeChatOA 在线状态 + 凭证状态,给状态面板用。"""
-    auth = _http_json(f"{WECHATOA_API}/api/auth/status")
-    if auth is None:
-        return {"online": False}
-    return {"online": True, "auth": auth}
+def source_targets() -> list[str]:
+    """来源里可筛选的子集(公众号名等),给面板的筛选下拉用。"""
+    return list(active_collector().status().targets)
 
 
-def wechatoa_accounts() -> list[str]:
-    """订阅的公众号名列表(WeChatOA 不在线返回空)。"""
-    n2f = _http_json(f"{WECHATOA_API}/api/name2fakeid")
-    return sorted(n2f.keys()) if isinstance(n2f, dict) else []
+def source_pending() -> int | None:
+    """采集器那边已有、但还没落进 vault 的条数。算不出返回 None。"""
+    return active_collector().pending()
 
 
 def _run_crawl(crawl_filter: dict | None = None) -> None:
-    """触发 WeChatOA 抓取并轮询到结束。
+    """让采集器把远端内容拉到它本地。
 
-    crawl_filter 为 None 走全量增量爬取(/api/crawl);
-    否则走范围抓取(/api/crawl/range),形如
-    {"accounts": [...], "since_date": "YYYY-MM-DD", "until_date": "YYYY-MM-DD"},
-    accounts 为空 = 全部订阅号。
+    crawl_filter 为 None 走增量;否则形如
+    {"accounts": [...], "since_date": "YYYY-MM-DD", "until_date": "YYYY-MM-DD"}
+    的区间补抓,accounts 为空 = 该来源的全部订阅目标。
     """
-    if _http_json(f"{WECHATOA_API}/api/crawl/status") is None:
-        _stage("crawl", "skipped", "WeChatOA 后端不在线,跳过抓取")
-        return
+    scope = FetchScope()
     if crawl_filter:
-        accounts = crawl_filter.get("accounts") or wechatoa_accounts()
-        if not accounts:
-            _stage("crawl", "error", "拿不到公众号列表,无法范围抓取")
-            return
-        since, until = crawl_filter["since_date"], crawl_filter["until_date"]
-        _stage("crawl", "running",
-               f"触发范围抓取:{len(accounts)} 个号 [{since} ~ {until}]")
-        started = _http_json(f"{WECHATOA_API}/api/crawl/range", method="POST",
-                             payload={"accounts": accounts,
-                                      "since_date": since, "until_date": until})
-        # 范围抓取页间/号间等待比全量爬取长得多,超时相应放宽
-        timeout_min = 120
-    else:
-        _stage("crawl", "running", "触发全量爬取")
-        started = _http_json(f"{WECHATOA_API}/api/crawl", method="POST")
-        timeout_min = 30
-    if started is None:
-        # 409(已有任务在跑)也会走到这:继续轮询即可
-        _log("crawl: 启动返回异常(可能已在跑),继续轮询状态")
-    # WeChatOA 的爬取线程把 running 置 true 有个短暂窗口,先等一拍;
-    # 且 running=false 时连续确认三次再收工,避免拿上一轮的旧状态提前结束
-    time.sleep(2)
-    deadline = time.time() + timeout_min * 60
-    idle_polls = 0
-    while time.time() < deadline:
-        st = _http_json(f"{WECHATOA_API}/api/crawl/status")
-        if st is None:
-            _stage("crawl", "error", "轮询状态失败(后端掉线?)")
-            return
-        if not st.get("running"):
-            idle_polls += 1
-            if idle_polls < 3:
-                time.sleep(1)
-                continue
-            errs = st.get("errors") or []
-            if st.get("auth_error"):
-                _stage("crawl", "error",
-                       "凭证失效,请到 WeChatOA 配置页扫码续期后重跑")
-            elif st.get("freq_control"):
-                # 账号级限流:已抓到的部分照常进入后续阶段,但要明确提示等待
-                done, total = st.get("done", 0), st.get("total", 0)
-                _stage("crawl", "error",
-                       f"微信频率限制,已中断(完成 {done}/{total} 个号,新增 "
-                       f"{st.get('new_articles', 0)} 篇)。等 30-60 分钟后重跑抓取",
-                       failures=[{"title": str(e), "reason": "触发频率限制"}
-                                 for e in errs])
-            else:
-                _stage("crawl", "ok",
-                       f"新增 {st.get('new_articles', 0)} 篇"
-                       + (f",{len(errs)} 个账号失败" if errs else ""),
-                       failures=[{"title": str(e), "reason": "账号抓取失败"}
-                                 for e in errs])
-            return
-        idle_polls = 0
-        _stage("crawl", "running",
-               f"爬取中 {st.get('done', 0)}/{st.get('total', 0)} — {st.get('current', '')}")
-        time.sleep(2)
-    _stage("crawl", "error", f"爬取超时({timeout_min}分钟)")
+        scope = FetchScope(
+            targets=tuple(crawl_filter.get("accounts") or ()),
+            since=crawl_filter.get("since_date", ""),
+            until=crawl_filter.get("until_date", ""),
+        )
+    active_collector().fetch(scope)
 
 
 def _run_export() -> None:
-    _stage("export", "running", "导出到 obs")
-
-    def _do_export(extra_args, tmo):
-        return subprocess.run(
-            ["uv", "run", "python", "scripts/export_obsidian.py", *extra_args],
-            cwd=WECHATOA_DIR, capture_output=True, text=True, timeout=tmo,
-        )
-
-    try:
-        proc = _do_export([], 30 * 60)
-    except subprocess.TimeoutExpired:
-        # 逐篇下图太慢导致超时:降级为 --no-images 重跑(保留远程图片 URL),
-        # 保证正文仍能导出,不把新文章卡在库外每天复发"导出超时"。
-        # export 幂等,重跑只补上次没导完的剩余篇。见 gzh-full-pipeline 记忆。
-        _stage("export", "running", "导出超时,降级 --no-images 重跑")
-        try:
-            proc = _do_export(["--no-images"], 30 * 60)
-        except subprocess.TimeoutExpired:
-            _stage("export", "error", "导出超时(降级 --no-images 仍超时)")
-            return
-    if proc.returncode != 0:
-        _stage("export", "error", f"导出失败: {(proc.stderr or proc.stdout)[-300:]}")
-        return
-    # 取脚本的完成行作为 detail;失败行(无正文)解析成明细供面板展开
-    fails = []
-    for l in proc.stdout.splitlines():
-        m = re.search(r"无正文,跳过 (\S+) (.*)", l)
-        if m:
-            fails.append({"title": m.group(2).strip() or m.group(1),
-                          "reason": "无正文(转载stub或已删),导不出;持续多轮可标 is_wx_deleted"})
-    tail = [l for l in proc.stdout.splitlines() if "完成" in l]
-    _stage("export", "ok", tail[-1].replace("[export] ", "") if tail else "完成",
-           failures=fails)
+    """让采集器把它本地的内容落成 obs md。"""
+    active_collector().materialize()
 
 
 def _run_index() -> None:

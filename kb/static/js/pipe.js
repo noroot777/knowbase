@@ -1,7 +1,7 @@
 // ── 数据管道 ──────────────────────────────────────────────────────────────
 const STAGE_META = {
-  crawl:   { name: '抓取',  desc: '微信 → WeChatOA 库' },
-  export:  { name: '导出',  desc: 'WeChatOA → obs md' },
+  crawl:   { name: '抓取',  desc: '来源 → 采集器本地' },
+  export:  { name: '导出',  desc: '采集器 → obs md' },
   index:   { name: '索引',  desc: 'obs → FTS + 向量' },
   extract: { name: '提取',  desc: 'entity/topic/摘要' },
   projects:{ name: '条目化', desc: '工具/项目拆条目' },
@@ -11,10 +11,13 @@ const STATUS_ICON = { pending: '⋯', running: '<span class="spin"></span>',
                       ok: '✓', skipped: '⊘', error: '✗', '': '—' };
 let pipeTimer = null;
 
-// ── 全流程同步弹窗(时间段 + 公众号多选,交互对齐 WeChatOA 的批量抓取) ──────
-let pipeAcctList = [];                                 // 全部订阅号
-let pipeSel = new Set();                               // 选中的号
+// ── 全流程同步弹窗(时间段 + 目标多选) ──────────────────────────────────────
+let pipeAcctList = [];                                 // 来源的全部可选目标
+let pipeSel = new Set();                               // 选中的目标
 let pipeRange = { label: '不限时间', from: '', to: '' };
+// 采集器给的区间补抓注意事项(如"微信只保留近 30 天可翻页历史")。
+// 由 refreshPipe 从 /api/pipeline/status 带回,面板本身不预设任何来源知识。
+let pipeRangeHint = '';
 
 // 本地日期 YYYY-MM-DD。不能用 toISOString() —— 那给的是 UTC 日期,
 // 东八区 00:00-07:59 会算成前一天,整套预设范围跟着错开一天(当天文章漏抓)。
@@ -41,7 +44,7 @@ function pipePresets() {
 }
 
 async function openPipeModal() {
-  // 账号列表每次打开都拉一次(可能刚在 WeChatOA 加了号)
+  // 目标列表每次打开都拉一次(可能刚在采集器那边加了新目标)
   const d = await fetch('/api/pipeline/accounts').then(r => r.json()).catch(() => null);
   pipeAcctList = (d && d.accounts) || [];
   pipeSel = new Set(pipeAcctList);                     // 默认全选
@@ -94,9 +97,9 @@ function renderPipeRange() {
   $('pipe-range-label').textContent = pipeRange.label;
   const ranged = !!pipeRange.from;
   $('pipe-range-hint').textContent = ranged
-    ? '提示:微信服务端一般只保留近 30 天可翻页的历史,跨度过大的旧文章可能拉不到。'
-    : '不限时间 = 增量同步各号的新文章(当天已抓过的号自动跳过),固定同步全部订阅号。';
-  // 增量模式后端不支持按号过滤,账号区置灰
+    ? pipeRangeHint
+    : '不限时间 = 增量同步各目标的新内容(当天已抓过的自动跳过),固定同步全部目标。';
+  // 增量模式后端不支持按目标过滤,目标区置灰
   const blk = $('pipe-acct-block');
   blk.style.opacity = ranged ? '' : '.45';
   blk.style.pointerEvents = ranged ? '' : 'none';
@@ -107,7 +110,7 @@ function renderPipeAcctList() {
   const q = $('pipe-acct-search').value.trim().toLowerCase();
   const items = q ? pipeAcctList.filter(n => n.toLowerCase().includes(q)) : pipeAcctList;
   $('pipe-acct-count').textContent = `${pipeSel.size}/${pipeAcctList.length}`;
-  // 公众号名来自 WeChatOA 的外部数据,不拼进 inline onclick 的 JS 字符串:
+  // 目标名来自采集器的外部数据,不拼进 inline onclick 的 JS 字符串:
   // 只转义单引号挡不住双引号/尖括号破坏属性。值走 data-acct + 事件委托。
   $('pipe-acct-list').innerHTML = items.length ? items.map(n => `
     <div data-acct="${esc(n)}"
@@ -118,7 +121,7 @@ function renderPipeAcctList() {
       <span>${esc(n)}</span>
     </div>`).join('')
     : `<div style="padding:22px;text-align:center;font-size:12.5px;color:var(--muted)">${
-        pipeAcctList.length ? '没有匹配的公众号' : 'WeChatOA 不在线或还没订阅任何号'}</div>`;
+        pipeAcctList.length ? '没有匹配的目标' : '采集器不在线或还没有可选目标'}</div>`;
   renderPipeEst();
 }
 $('pipe-acct-list').addEventListener('click', e => {
@@ -157,14 +160,18 @@ async function refreshPipe(withPending = false) {
     .then(r => r.json()).catch(() => null);
   if (!s) return;
 
-  // WeChatOA 状态
-  $('wo-status').textContent = s.wechatoa.online ? '在线' : '不在线(抓取将跳过)';
-  $('wo-status').style.color = s.wechatoa.online ? 'var(--ok)' : '#c33';
-  const auth = s.wechatoa.auth;
-  $('wo-auth').textContent = auth
-    ? (auth.valid ? `凭证有效 · ${auth.credential_expiry_label || ''}`
-                  : '凭证已失效,需要扫码续期')
-    : '';
+  // 来源采集器状态。message/hint 都是采集器给的成品文案,这里只负责显示
+  // ——换来源(RSS、播客…)不用改这段。
+  const src = s.source || { online: false, message: '' };
+  $('src-label').textContent = src.label ? `来源 · ${src.label}` : '来源采集器';
+  $('src-status').textContent = src.online ? '在线' : '不在线(抓取将跳过)';
+  $('src-status').style.color = src.online ? 'var(--ok)' : '#c33';
+  $('src-detail').textContent =
+    [src.message, src.hint].filter(Boolean).join(' · ');
+  const console_ = $('src-console');
+  console_.style.display = src.console_url ? '' : 'none';
+  if (src.console_url) console_.href = src.console_url;
+  pipeRangeHint = src.range_hint || '';
 
   // 阶段卡片(空闲时叠加 last_run 和待处理数)
   const stages = s.running ? s.stages : (s.last_run ? s.last_run.stages : s.stages);

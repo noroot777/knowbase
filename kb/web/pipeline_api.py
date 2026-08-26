@@ -35,7 +35,7 @@ def pipeline_schedule_set(body: ScheduleRequest):
 @router.get("/api/pipeline/status")
 def pipeline_status(pending: bool = False):
     state = dict(pl.get_state())
-    state["wechatoa"] = pl.wechatoa_status()
+    state["source"] = pl.source_status()
     state["last_run"] = pl.load_last_run()
     # 待处理数要扫文件,只有显式要求且空闲时才算
     if pending and not state["running"]:
@@ -46,7 +46,7 @@ def pipeline_status(pending: bool = False):
 class PipelineRunRequest(BaseModel):
     stages: list[str] | None = None  # None = 全部
     # 以下三个用于范围抓取(只影响 crawl 阶段):
-    # 填了日期区间则按 [since_date, until_date] 补抓;accounts 空/None = 全部订阅号
+    # 填了日期区间则按 [since_date, until_date] 补抓;accounts 空/None = 来源的全部目标
     accounts: list[str] | None = None
     since_date: str | None = None   # "YYYY-MM-DD"
     until_date: str | None = None   # "YYYY-MM-DD"
@@ -81,5 +81,5 @@ def pipeline_retry_failed():
 
 @router.get("/api/pipeline/accounts")
 def pipeline_accounts():
-    """WeChatOA 订阅的公众号列表,给管道面板的账号筛选下拉用。"""
-    return {"accounts": pl.wechatoa_accounts()}
+    """来源里可筛选的目标列表(公众号名等),给管道面板的筛选下拉用。"""
+    return {"accounts": pl.source_targets()}

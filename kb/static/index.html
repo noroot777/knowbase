@@ -107,15 +107,15 @@
 </div>
 
 <div id="pipepanel" style="display:none">
-  <!-- WeChatOA 连接状态 -->
-  <div class="hit" id="pipe-wechatoa" style="display:flex;justify-content:space-between;align-items:center">
+  <!-- 来源采集器连接状态 -->
+  <div class="hit" id="pipe-source" style="display:flex;justify-content:space-between;align-items:center">
     <div>
-      <b>WeChatOA 后端</b>
-      <span id="wo-status" class="badge">检查中…</span>
-      <span id="wo-auth" style="font-size:12.5px;color:var(--muted);margin-left:8px"></span>
+      <b id="src-label">来源采集器</b>
+      <span id="src-status" class="badge">检查中…</span>
+      <span id="src-detail" style="font-size:12.5px;color:var(--muted);margin-left:8px"></span>
     </div>
-    <a href="http://localhost:5173/#/config" target="_blank"
-       style="font-size:12.5px;color:var(--accent)">打开 WeChatOA 配置(扫码/账号管理)↗</a>
+    <a id="src-console" href="#" target="_blank"
+       style="font-size:12.5px;color:var(--accent);display:none">打开采集器配置 ↗</a>
   </div>
 
   <!-- 阶段卡片 -->

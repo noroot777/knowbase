@@ -64,14 +64,19 @@ claude mcp add kb --scope user -- uv run --directory ~/code/knowledge-base kb-mc
 
 web 界面(`uv run kb-web` → http://127.0.0.1:8787)的"管道"tab 一键搞定:
 
-**抓取**(调 WeChatOA 后端,不在线则跳过)→ **导出**(WeChatOA 库 → obs md)
+**抓取**(委托来源采集器,不在线则跳过)→ **导出**(采集器 → obs md)
 → **索引**(FTS + 向量,增量)→ **提取**(entity/topic/摘要,tag 自动回写 obs frontmatter)
 
-面板显示各阶段进度/待处理数/WeChatOA 凭证有效期。唯一剩下的人工:
-微信凭证 ~4 天过期,去 WeChatOA 配置页扫码续期(面板有入口和提醒)。
+抓取/导出两阶段只跟 `kb/collectors/` 的采集器契约打交道,知识库自身不认识
+任何具体来源。当前唯一实现是公众号采集器(`kb/collectors/wechat_oa.py`),
+微信特有的一切——凭证怎么过期、反爬要等多久、文章先落哪个库——都关在
+那个文件里;换来源或换抓取方式只写一个新实现,管道一行不改。
+
+面板显示各阶段进度/待处理数/采集器健康状况(文案由采集器给,面板只渲染)。
+唯一剩下的人工:微信凭证 ~4 天过期,去采集器配置页扫码续期(面板有入口和提醒)。
 
 等价的 CLI:
-1. WeChatOA_Aggregation 抓新文章 → `export_obsidian.py` 增量导出到 obs
+1. 采集器抓新文章 → 导出到 obs(当前实现:WeChatOA_Aggregation + `export_obsidian.py`)
 2. `kb index` 增量索引新文档(内容 hash 判断,秒级)
 3. `kb extract` 给新文章打标
 4. 随便搜
