@@ -3,8 +3,8 @@
 
 从 ~/code/daily-report/videos 的视频目录读原字幕(subtitles/source.srt),
 两阶段处理:
-  1. gate:      haiku 判断视频是否「项目/产品介绍型」(单项目深度介绍或多项目速览)
-  2. transcribe: sonnet 按项目切分,把字幕文章化转写成中文条目,一个项目一个 md
+  1. gate:      gpt-5.4-mini 判断视频是否「项目/产品介绍型」(单项目深度介绍或多项目速览)
+  2. transcribe: gpt-5.6-luna 按项目切分,把字幕文章化转写成中文条目,一个项目一个 md
 
 产物落 ~/obs/new-start/source/dr-video-projects/YYYY-MM-DD/<videoid>-<slug>.md,
 frontmatter 自带 entity/topic 标签(pre_tagged 路线,kb index 后无需再 extract)。
@@ -20,22 +20,22 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
-import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 VIDEOS_ROOT = Path.home() / "code" / "daily-report" / "videos"
 OUT_ROOT = Path.home() / "obs" / "new-start" / "source" / "dr-video-projects"
 STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "video_projects_state.json"
 TZ = timezone(timedelta(hours=8))
 
-GATE_MODEL = "haiku"
-# 钉死模型代,理由同 gzh_projects_export.py
-TRANSCRIBE_MODEL = "claude-sonnet-4-5"
+# 两步都走 kb.llm 的 API 通道,模型 id 写全名钉死,理由同 gzh_projects_export.py
+GATE_MODEL = "gpt-5.4-mini"
+TRANSCRIBE_MODEL = "gpt-5.6-luna"
 GATE_WORKERS = 6
 TRANSCRIBE_WORKERS = 4
 
@@ -121,28 +121,14 @@ benchmark、价格、硬件要求、演示中看到的效果、作者的评价�
 
 # ---------------------------------------------------------------- 基础设施
 
-def _clean_env() -> dict:
-    """给 claude CLI 子进程一个干净环境。
+def _llm(prompt: str, model: str, timeout: int, max_tokens: int = 8192) -> str:
+    """走 kb.llm 的 API 通道调模型。
 
-    宿主(会话/kb-web)可能带 ANTHROPIC_BASE_URL 等托管变量,claude 子进程
-    继承后会走错凭据全部失败,必须从零构造。"""
-    env = {"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
-    for k in ("HOME", "USER", "LOGNAME", "TZ", "LANG", "LC_ALL"):
-        v = os.environ.get(k)
-        if v:
-            env[k] = v
-    return env
+    key/base_url 由 kb.llm 统一解析(环境变量优先,其次 data/secrets.json);
+    调用失败统一抛 RuntimeError,由各 worker 计入失败、留给下轮重跑。"""
+    from kb.llm import chat
 
-
-def _claude(prompt: str, model: str, timeout: int) -> str:
-    proc = subprocess.run(
-        ["claude", "-p", "--model", model, "--output-format", "text"],
-        input=prompt, capture_output=True, text=True, timeout=timeout,
-        env=_clean_env(),
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"claude CLI 退出码 {proc.returncode}: {proc.stderr[:200]}")
-    return proc.stdout.strip()
+    return chat(prompt, model, max_tokens=max_tokens, timeout=timeout)
 
 
 def load_state() -> dict:
@@ -288,7 +274,7 @@ def gate_one(info: dict) -> dict:
         chapters=ch_lines[:1500],
         summary=_read_summary(vdir)[:1200] or "(无)",
     )
-    out = _claude(prompt, GATE_MODEL, timeout=120)
+    out = _llm(prompt, GATE_MODEL, timeout=120, max_tokens=2048)
     m = re.search(r"\{.*\}", out, re.S)
     if not m:
         raise ValueError(f"gate 输出无 JSON: {out[:200]}")
@@ -448,7 +434,7 @@ def transcribe_one(vid: str, rec: dict, info: dict) -> tuple[list[dict], str]:
         links=link_lines[:4000], chapters=ch_lines[:3000],
         transcript=transcript[:180000],
     )
-    out = _claude(prompt, TRANSCRIBE_MODEL, timeout=900)
+    out = _llm(prompt, TRANSCRIBE_MODEL, timeout=900, max_tokens=32000)
     return _parse_entries(out), out
 
 

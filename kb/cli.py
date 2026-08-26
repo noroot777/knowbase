@@ -71,11 +71,11 @@ def cmd_index(args) -> int:
 
 
 def cmd_extract(args) -> int:
-    from kb.extract import (extract_with_claude, pending_docs,
+    from kb.extract import (EXTRACT_MODEL, extract_with_llm, pending_docs,
                             save_extraction, writeback_tags)
     conn = store.connect()
     todo = pending_docs(conn, args.limit)
-    print(f"[extract] 待提取 {len(todo)} 篇 (model=haiku)")
+    print(f"[extract] 待提取 {len(todo)} 篇 (model={EXTRACT_MODEL})")
     ok = failed = empty = 0
     for i, row in enumerate(todo, 1):
         body = store.doc_body(conn, row["path"])
@@ -85,7 +85,7 @@ def cmd_extract(args) -> int:
                   f"(先跑 gzh_refill_body.py 回填,再 kb index)")
             continue
         try:
-            data = extract_with_claude(row["title"], body)
+            data = extract_with_llm(row["title"], body)
             save_extraction(conn, row["path"], data)
             conn.commit()
             ok += 1

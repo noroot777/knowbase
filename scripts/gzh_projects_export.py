@@ -5,8 +5,8 @@ dr-gzh 里大量「N 个开源项目推荐」「工具介绍/评测」文章一�
 LLM extract 的实体反链有上限截断,也没有每个工具的独立介绍页。这条管道
 把它们按工具拆成独立条目(与 scripts/video_projects_export.py 同构):
 
-  1. gate:       haiku 判断文章是否「工具/项目介绍型」(single/multi)
-  2. transcribe: sonnet 按工具切分,每个工具一篇独立条目 md
+  1. gate:       gpt-5.4-mini 判断文章是否「工具/项目介绍型」(single/multi)
+  2. transcribe: gpt-5.6-luna 按工具切分,每个工具一篇独立条目 md
 
 产物落 ~/obs/new-start/source/dr-gzh-projects/YYYY-MM-DD/<uid>-<slug>.md,
 frontmatter 自带 entity/topic 标签(pre_tagged 路线,kb index 后无需 extract)。
@@ -27,10 +27,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import sqlite3
-import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
@@ -46,10 +44,11 @@ OUT_ROOT = VAULT_ROOT / "source" / "dr-gzh-projects"
 STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "gzh_projects_state.json"
 TZ = timezone(timedelta(hours=8))
 
-GATE_MODEL = "haiku"
-# 钉死模型代:别名("sonnet")永远指向当代最新版,新一代发布当天这条批量管道
-# 就会静默换模型(贵一截,风格也变)。要升代在这里改字面量,或临时传 --model。
-TRANSCRIBE_MODEL = "claude-sonnet-4-5"
+# 两步都走 kb.llm 的 API 通道(OpenAI 侧),不再是本地 claude CLI 子进程。
+# 模型 id 一律写全名钉死:别名会随新一代发布静默漂移,批量管道换模型
+# (价格、输出风格都变)不该无声无息。要升代在这里改字面量,或临时传 --model。
+GATE_MODEL = "gpt-5.4-mini"
+TRANSCRIBE_MODEL = "gpt-5.6-luna"
 GATE_WORKERS = 8
 TRANSCRIBE_WORKERS = 6
 MIN_BODY = 200          # 正文太短(空壳/纯图文)不进管道
@@ -127,28 +126,14 @@ summary: 一句话(<=60 字)说清「是什么+能干什么」,不要英文双�
 
 # ---------------------------------------------------------------- 基础设施
 
-def _clean_env() -> dict:
-    """给 claude CLI 子进程一个干净环境。
+def _llm(prompt: str, model: str, timeout: int, max_tokens: int = 8192) -> str:
+    """走 kb.llm 的 API 通道调模型。
 
-    宿主(会话/kb-web)可能带 ANTHROPIC_BASE_URL 等托管变量,claude 子进程
-    继承后会走错凭据全部失败,必须从零构造。"""
-    env = {"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
-    for k in ("HOME", "USER", "LOGNAME", "TZ", "LANG", "LC_ALL"):
-        v = os.environ.get(k)
-        if v:
-            env[k] = v
-    return env
+    key/base_url 由 kb.llm 统一解析(环境变量优先,其次 data/secrets.json);
+    调用失败统一抛 RuntimeError,由各 worker 计入失败、留给下轮重跑。"""
+    from kb.llm import chat
 
-
-def _claude(prompt: str, model: str, timeout: int) -> str:
-    proc = subprocess.run(
-        ["claude", "-p", "--model", model, "--output-format", "text"],
-        input=prompt, capture_output=True, text=True, timeout=timeout,
-        env=_clean_env(),
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"claude CLI 退出码 {proc.returncode}: {proc.stderr[:200]}")
-    return proc.stdout.strip()
+    return chat(prompt, model, max_tokens=max_tokens, timeout=timeout)
 
 
 def load_state() -> dict:
@@ -253,7 +238,7 @@ def gate_one(info: dict) -> dict:
         summary=info["summary"] or "(无)",
         body_head=info["body"][:GATE_HEAD],
     )
-    out = _claude(prompt, GATE_MODEL, timeout=120)
+    out = _llm(prompt, GATE_MODEL, timeout=120, max_tokens=2048)
     m = re.search(r"\{.*\}", out, re.S)
     if not m:
         raise ValueError(f"gate 输出无 JSON: {out[:200]}")
@@ -413,7 +398,7 @@ def transcribe_one(info: dict, model: str = TRANSCRIBE_MODEL) -> list[dict]:
         url=info.get("url") or "(无)",
         body=info["body"][:TRANSCRIBE_BODY_CAP],
     )
-    out = _claude(prompt, model, timeout=900)
+    out = _llm(prompt, model, timeout=900, max_tokens=32000)
     return _parse_entries(out)
 
 
@@ -509,8 +494,8 @@ def main() -> int:
     t.add_argument("--out", help="输出根目录(默认正式树,试跑可指到 staging)")
     t.add_argument("--force", action="store_true", help="已条目化的也重跑")
     t.add_argument("--model", default=TRANSCRIBE_MODEL,
-                   help=f"转写模型,传给 claude CLI 的 --model(默认 {TRANSCRIBE_MODEL})。"
-                        "别名(sonnet)会解析到当代最新版,想钉死某一代就写全名")
+                   help=f"转写模型 id,走 kb.llm 通道(默认 {TRANSCRIBE_MODEL})。"
+                        "写全名钉死某一代,别名会随新一代发布静默漂移")
     args = ap.parse_args()
     if args.cmd in ("gate", "transcribe"):
         _acquire_lock()

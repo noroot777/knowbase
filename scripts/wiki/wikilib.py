@@ -27,9 +27,27 @@ VAULT = Path.home() / "obs" / "new-start"
 EPOCH = "2026-06-30"          # digest/synthesis 等 LLM 环节只处理这之后的日期
 SOURCE = "dr-gzh"
 
-# 调 claude CLI 时钉死的模型代。别名("sonnet")永远指向当代最新版,新一代发布
-# 当天所有批量任务就会静默换模型——贵一截,风格也变。要升代在这里改一个字面量。
-SONNET = "claude-sonnet-4-5"
+# wiki 层 LLM 环节(digest / synthesis)统一的模型与调用出口。
+# 走 kb.llm 的 API 通道(OpenAI 侧),不再是本地 claude CLI 子进程。
+# 模型 id 写全名钉死:别名会随新一代发布静默漂移,批量任务换模型
+# (贵一截,风格也变)不该无声无息。要升代在这里改一个字面量。
+LLM_MODEL = "gpt-5.6-luna"
+
+
+def call_llm(prompt: str, model: str, timeout: int = 240,
+             max_tokens: int = 8192) -> str:
+    """调模型并剥掉可能的 markdown 围栏。失败抛 RuntimeError,由调用方计失败。
+
+    kb 不在 sys.path 时(wiki_digest / wiki_entity_synthesis 单独跑只加了
+    自身目录)先把 repo 根插进去,三个 wiki 脚本因此共用同一个调用出口。"""
+    import sys
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    from kb.llm import chat
+
+    out = chat(prompt, model, max_tokens=max_tokens, timeout=timeout)
+    return re.sub(r"^```(?:markdown)?\s*|\s*```$", "", out).strip()
+
 
 GRAPH_MARK = "<!-- kb-graph -->"
 SYN_S, SYN_E = "<!-- synthesis:start -->", "<!-- synthesis:end -->"

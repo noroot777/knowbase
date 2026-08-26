@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""统一 LLM 调用层:问答的意图规划与综合回答都走这里。
+"""统一 LLM 调用层:问答的意图规划与综合回答、同步管道的批量提取都走这里。
 
 不再调本地 `claude` CLI,两家都用 API key:
 - Anthropic(Claude):官方 anthropic SDK,读环境变量 ANTHROPIC_API_KEY
@@ -30,7 +30,7 @@ class Model:
 # 内置兜底模型 id:面板没配 / 没从中转站拉取时用这些。面板里配置会覆盖它们。
 _DEFAULT_MODELS = {
     "anthropic": ["claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-8"],
-    "openai": ["gpt-5.5", "gpt-5.4-mini"],
+    "openai": ["gpt-5.5", "gpt-5.6-luna", "gpt-5.4-mini"],
 }
 
 # ── API key / base_url 存取 ───────────────────────────────────────────────────

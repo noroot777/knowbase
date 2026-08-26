@@ -236,20 +236,20 @@ def _finish_extract_stage(stats: dict) -> None:
            failures=list(stats["failures"].values()))
 
 
-# claude CLI 并发数。提取的瓶颈是逐篇几十秒的 LLM 调用,与微信反爬无关,
-# 可以放心并发。每个 worker = 一个 claude CLI(Node)子进程,共用订阅用量窗口:
-# 6 与 scripts/extract_parallel.py 一致(实测 ~12 篇/分),再高会抢本机 RAM/CPU
-# 且更快烧订阅额度、可能反噬交互用的 Claude Code。2026-07-08 从 3 上调到 6 试。
+# 提取并发数。瓶颈是逐篇几十秒的 LLM 调用,与微信反爬无关,可以放心并发。
+# 2026-08-26 起提取走 kb.llm 的 API 通道(gpt-5.4-mini),每个 worker 只是一个
+# HTTP 请求,不再是 claude CLI(Node)子进程,本机 RAM/CPU 不再是上限;真正的
+# 约束变成中转站的并发/速率限制与按 token 计费,故沿用实测稳定的 6 不上调。
 EXTRACT_WORKERS = 6
 
 
 def _extract_one(path: str, title: str) -> dict | None:
-    """工作线程:读正文(独立连接,WAL 下并发读安全)→ 调 claude。不碰共享连接。
+    """工作线程:读正文(独立连接,WAL 下并发读安全)→ 调 LLM。不碰共享连接。
 
     正文为空(转载 stub 等导致 md 没有正文)时返回 None——调 LLM 必然失败或
     产出只凭标题的劣质结果,直接跳过留给"重试失败项"回填后再提。"""
     from kb import store
-    from kb.extract import extract_with_claude
+    from kb.extract import extract_with_llm
 
     conn = store.connect()
     try:
@@ -258,13 +258,13 @@ def _extract_one(path: str, title: str) -> dict | None:
         conn.close()
     if not body.strip():
         return None
-    return extract_with_claude(title, body)
+    return extract_with_llm(title, body)
 
 
 def _extract_pass(label: str, stats: dict) -> None:
     """跑一轮提取,结果累加进 stats。label 用于进度展示("存量"/"增量")。
 
-    claude 调用在线程池里并发,DB 写全部留在本线程串行,避免多写者竞争。
+    LLM 调用在线程池里并发,DB 写全部留在本线程串行,避免多写者竞争。
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -410,7 +410,7 @@ def _ingest_pretagged_sources() -> tuple[int, int]:
 
 
 def _run_projects() -> None:
-    """条目化:gate(haiku)判「工具/项目介绍型」→ transcribe(sonnet)按工具拆条目。
+    """条目化:gate(gpt-5.4-mini)判「工具/项目介绍型」→ transcribe(gpt-5.6-luna)按工具拆条目。
 
     公众号侧 transcribe 只处理最近 3 天发布的文章——存量积压(数千篇)由用户
     手动分批消化(scripts/gzh_projects_export.py transcribe --limit N),

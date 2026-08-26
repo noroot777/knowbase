@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
@@ -54,16 +53,6 @@ def body_excerpt(p: str, limit: int = 500) -> str:
     return re.sub(r"\n{2,}", "\n", body).strip()[:limit]
 
 
-def call_claude(prompt: str, model: str, timeout: int = 240) -> str:
-    proc = subprocess.run(
-        ["claude", "-p", prompt, "--model", model, "--output-format", "text"],
-        capture_output=True, text=True, timeout=timeout)
-    if proc.returncode != 0:
-        raise RuntimeError(f"claude CLI {proc.returncode}: {proc.stderr[:300]}")
-    out = proc.stdout.strip()
-    return re.sub(r"^```(?:markdown)?\s*|\s*```$", "", out).strip()
-
-
 def select_targets(u: W.Universe, window_days: int = 14, min_docs: int = 3,
                    growth: int = 3, only: str | None = None,
                    force: bool = False) -> list[dict]:
@@ -90,7 +79,7 @@ def select_targets(u: W.Universe, window_days: int = 14, min_docs: int = 3,
     return out
 
 
-def run_targets(u: W.Universe, targets: list[dict], model: str = W.SONNET,
+def run_targets(u: W.Universe, targets: list[dict], model: str = W.LLM_MODEL,
                 workers: int = 3) -> list[str]:
     if not targets:
         return []
@@ -105,7 +94,7 @@ def run_targets(u: W.Universe, targets: list[dict], model: str = W.SONNET,
             for p in picked)
         wl = "、".join(dict.fromkeys(n for n in wl_all if n != t["name"]))
         try:
-            text = call_claude(PROMPT.format(
+            text = W.call_llm(PROMPT.format(
                 name=t["name"], n=len(picked),
                 window=f"{t['cutoff']} 起", whitelist=wl, items=items), model)
             page_text = t["page"].read_text(encoding="utf-8")
@@ -131,7 +120,7 @@ def main():
     ap.add_argument("--window-days", type=int, default=14)
     ap.add_argument("--growth", type=int, default=3)
     ap.add_argument("--force", action="store_true", help="忽略增量条件,强制重写")
-    ap.add_argument("--model", default=W.SONNET)
+    ap.add_argument("--model", default=W.LLM_MODEL)
     ap.add_argument("--workers", type=int, default=3)
     a = ap.parse_args()
     u = W.Universe(W.connect_ro())

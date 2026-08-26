@@ -105,7 +105,7 @@ def step_synthesis(u: W.Universe, model: str, workers: int) -> list[str]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--recent-days", type=int, default=2, help="digest 回看天数")
-    ap.add_argument("--model", default=W.SONNET)
+    ap.add_argument("--model", default=W.LLM_MODEL)
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--skip-linkify", action="store_true")
     ap.add_argument("--skip-llm", action="store_true", help="只做机械部分(1/2/3/6)")

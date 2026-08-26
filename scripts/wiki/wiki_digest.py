@@ -10,8 +10,6 @@
 from __future__ import annotations
 
 import argparse
-import re
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -68,16 +66,6 @@ def docs_of_day(con, dt: str):
     return out
 
 
-def call_claude(prompt: str, model: str, timeout: int = 240) -> str:
-    proc = subprocess.run(
-        ["claude", "-p", prompt, "--model", model, "--output-format", "text"],
-        capture_output=True, text=True, timeout=timeout)
-    if proc.returncode != 0:
-        raise RuntimeError(f"claude CLI 退出码 {proc.returncode}: {proc.stderr[:300]}")
-    out = proc.stdout.strip()
-    return re.sub(r"^```(?:markdown)?\s*|\s*```$", "", out).strip()
-
-
 def build_digest(con, vault: Path, dt: str, model: str) -> bool:
     docs = docs_of_day(con, dt)
     if not docs:
@@ -89,7 +77,7 @@ def build_digest(con, vault: Path, dt: str, model: str) -> bool:
         for i, d in enumerate(docs))
     prompt = PROMPT.format(date=dt, n=len(docs),
                            whitelist="、".join(entity_whitelist(vault)), items=items)
-    body = call_claude(prompt, model)
+    body = W.call_llm(prompt, model)
 
     ref = "\n".join(f"{i+1}. [[{d['path'][:-3]}|{d['title']}]] — {d['account']}"
                     for i, d in enumerate(docs))
@@ -110,7 +98,7 @@ def main():
     ap.add_argument("--date")
     ap.add_argument("--since")
     ap.add_argument("--until")
-    ap.add_argument("--model", default=W.SONNET)
+    ap.add_argument("--model", default=W.LLM_MODEL)
     a = ap.parse_args()
     if a.date:
         dates = [a.date]

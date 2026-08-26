@@ -4,7 +4,7 @@
 两条路:
 - pre_tagged 来源(dr-youtube-dig):frontmatter 里已有 entity/xxx、topic/xxx
   标签,直接解析进 entities 表,零成本。
-- 其他来源(dr-gzh、gzh):调 claude CLI(haiku)读正文提取,结果进 DB;
+- 其他来源(dr-gzh、gzh):调 LLM API(gpt-5.4-mini)读正文提取,结果进 DB;
   --writeback 时同步回写 md frontmatter 的 tags(obs 里可见可点)。
 
 回写只动 frontmatter 的 tags 列表,正文一个字节不碰。
@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from datetime import datetime
-from pathlib import Path
 
 from kb.config import SOURCES, VAULT_ROOT
 from kb.norm import entity_norm, kind_norm
 
-EXTRACT_MODEL = "haiku"
+# 提取走 kb.llm 的 API 通道(OpenAI 侧),不再是本地 claude CLI 子进程。
+# 模型 id 写全名钉死:别名会随新一代发布静默漂移,批量管道换模型不该无声无息。
+EXTRACT_MODEL = "gpt-5.4-mini"
 
 _PROMPT = """\
 你是知识库索引员。读下面这篇文章,提取检索用元数据,只输出一个 JSON 对象,不要任何其他文字:
@@ -77,11 +77,11 @@ def parse_pretagged(doc) -> dict | None:
             "summary": str(meta.get("summary") or "")}
 
 
-def extract_with_claude(title: str, body: str, timeout: int = 120) -> dict:
-    """调 claude CLI 提取。异常往上抛,由调用方决定跳过还是中止。
+def extract_with_llm(title: str, body: str, timeout: int = 120) -> dict:
+    """调 LLM API 提取。异常往上抛,由调用方决定跳过还是中止。
 
     模型偶发在字符串值里输出未转义双引号产生坏 JSON(概率性,同文重跑
-    通常就好),解析失败原地重试一次;CLI 报错/超时不重试,留给下轮管道。"""
+    通常就好),解析失败原地重试一次;API 报错/超时不重试,留给下轮管道。"""
     last_err: Exception | None = None
     for _ in range(2):
         try:
@@ -92,14 +92,11 @@ def extract_with_claude(title: str, body: str, timeout: int = 120) -> dict:
 
 
 def _extract_once(title: str, body: str, timeout: int) -> dict:
+    from kb.llm import chat
+
     prompt = _PROMPT.format(title=title, body=body[:6000])
-    proc = subprocess.run(
-        ["claude", "-p", prompt, "--model", EXTRACT_MODEL, "--output-format", "text"],
-        capture_output=True, text=True, timeout=timeout,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"claude CLI 退出码 {proc.returncode}: {proc.stderr[:200]}")
-    out = proc.stdout.strip()
+    # 产物是一个小 JSON 对象,2048 足够;OpenAI 侧推理 token 另有内部下限兜底
+    out = chat(prompt, EXTRACT_MODEL, max_tokens=2048, timeout=timeout)
     # 容错:模型可能包 ```json 围栏
     m = re.search(r"\{.*\}", out, re.S)
     if not m:
