@@ -22,7 +22,10 @@
 - 采集器是**一次性 CLI,不是常驻服务**:`cd collector && ./.venv/bin/python -m cli <命令>`。
   常用 `status`(健康+订阅列表) / `collect` / `export` / `accounts list|add|remove` / `login`。
   stdout 只出 NDJSON 给程序读,人看的提示走 stderr。
-- **公众号列表在 `collector/data/wechatoa.db` 的 `accounts` 表**,用 `cli accounts` 维护。
+- **公众号列表**存在 `collector/data/wechatoa.db` 的 `accounts` 表,日常维护走
+  kb-web 管道 tab 的「管理公众号」弹窗(搜索添加 / 停用 / 移除),不要直接改库。
+  终端等价物是 `cli accounts list|search|add|remove|enable|disable`;面板走的就是它。
+  搜索添加需要扫码凭证(`cli login`),停用/移除只动本地库,凭证过期也能用。
 - 别把 `collector/data` 或 `collector/.venv` 加进版本库:前者含 592M 库、264M 封面和
   带 token/cookie 的 `id_info.json`。它们现在是符号链接,`data/` 那条带斜杠的规则
   挡不住,所以 .gitignore 里另有不带斜杠的显式两行,别删。

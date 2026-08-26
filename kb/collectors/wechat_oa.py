@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-from kb.collectors import FetchScope, SourceStatus
+from kb.collectors import CollectorError, FetchScope, SourceStatus, Target
 from kb.pipeline_state import _log, _stage
 
 # 采集器在本仓库内(<repo>/collector)。刻意用相对于本文件的路径而不是绝对路径:
@@ -245,6 +245,82 @@ class WeChatOACollector:
             return max(0, total - exported)
         except Exception:
             return None
+
+    # ── 订阅的公众号(TargetManager 契约)────────────────────────────────────
+
+    def list_targets(self) -> list[Target]:
+        data = self._accounts("list")
+        return [
+            Target(
+                id=str(row.get("fakeid") or ""),
+                name=str(row.get("name") or ""),
+                enabled=bool(row.get("in_crawl_config")),
+                detail=f"最近采集 {row.get('latest_crawl_at') or '—'}",
+            )
+            for row in (data.get("accounts") or [])
+            if row.get("name")
+        ]
+
+    def search_targets(self, query: str) -> list[Target]:
+        data = self._accounts("search", query, timeout=60)
+        return [
+            Target(
+                id=str(row.get("fakeid") or ""),
+                name=str(row.get("name") or ""),
+                detail=" · ".join(x for x in (row.get("alias"),
+                                              row.get("signature")) if x)[:80],
+            )
+            for row in (data.get("candidates") or [])
+            if row.get("name")
+        ]
+
+    def add_target(self, name: str, target_id: str = "") -> str:
+        extra = ["--fakeid", target_id] if target_id else []
+        # 没给 fakeid 时要先搜一次微信,比纯写库慢得多
+        return self._mutate("add", name, *extra,
+                            timeout=20 if target_id else 60)
+
+    def remove_target(self, name: str) -> str:
+        return self._mutate("remove", name)
+
+    def set_target_enabled(self, name: str, enabled: bool) -> str:
+        return self._mutate("enable" if enabled else "disable", name)
+
+    # ── 上面几个共用的 CLI 调用 ─────────────────────────────────────────────
+
+    @staticmethod
+    def _accounts(action: str, name: str = "", *extra: str,
+                  timeout: int = 20) -> dict:
+        """跑 `cli accounts ...` 并解析它最后一行 JSON。"""
+        argv = ["accounts", action] + ([name] if name else []) + list(extra) + ["--json"]
+        try:
+            proc = _run_cli(*argv, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise CollectorError(f"采集器无响应(超过 {timeout} 秒)") from None
+        except OSError as e:
+            raise CollectorError(f"采集器起不来:{e}") from None
+
+        data: dict = {}
+        for line in proc.stdout.splitlines():
+            try:
+                data = json.loads(line)
+            except ValueError:
+                continue
+        if proc.returncode != 0 or data.get("ok") is False:
+            # CLI 的 detail 已经是带处置建议的成品文案,优先用它
+            raise CollectorError(
+                str(data.get("detail") or "").strip()
+                or (proc.stderr or "").strip()[-200:]
+                or f"操作失败(退出码 {proc.returncode})"
+            )
+        return data
+
+    def _mutate(self, action: str, name: str, *extra: str, timeout: int = 20) -> str:
+        data = self._accounts(action, name, *extra, timeout=timeout)
+        # 订阅列表变了,面板下次要拿到新的 targets
+        global _status_cache
+        _status_cache = None
+        return str(data.get("detail") or "已完成")
 
 
 collector = WeChatOACollector()

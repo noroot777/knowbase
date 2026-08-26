@@ -1,0 +1,162 @@
+/* 采集目标(订阅了哪些公众号 / RSS 源…)的管理弹窗。
+ *
+ * 只认 /api/sources/targets 这套通用接口,文案里的"公众号"来自后端给的 label
+ * ——换来源时这个文件不用改。后端说 manageable=false 就整个入口不显示。
+ */
+
+let tgtList = [];        // 已订阅
+let tgtCands = [];       // 上次搜索的候选
+let tgtLabel = '目标';
+let tgtBusy = false;     // 有请求在飞:防连点造成重复添加/删除
+
+/** 面板加载时调用:决定要不要显示"管理订阅"入口 */
+async function initTargets() {
+  const btn = $('src-manage');
+  if (!btn) return;
+  const d = await fetch('/api/sources/targets').then(r => r.ok ? r.json() : null)
+    .catch(() => null);
+  if (!d || !d.manageable) { btn.style.display = 'none'; return; }
+  tgtLabel = d.label || '目标';
+  tgtList = d.targets || [];
+  btn.textContent = `管理${tgtLabel}`;
+  btn.style.display = '';
+}
+
+async function openTargets() {
+  $('tgt-modal').style.display = 'flex';
+  $('tgt-search').value = '';
+  tgtCands = [];
+  renderTgtCands();
+  await reloadTargets();
+  $('tgt-search').focus();
+}
+
+function closeTargets() { $('tgt-modal').style.display = 'none'; }
+
+async function reloadTargets() {
+  const r = await fetch('/api/sources/targets');
+  if (await toastIfFail(r, `读取${tgtLabel}列表失败`)) return;
+  const d = await r.json();
+  tgtList = d.targets || [];
+  tgtLabel = d.label || tgtLabel;
+  renderTargets();
+}
+
+function renderTargets() {
+  const on = tgtList.filter(t => t.enabled).length;
+  $('tgt-title').textContent = `订阅的${tgtLabel}`;
+  $('tgt-count').textContent = `共 ${tgtList.length} 个,${on} 个参与采集`;
+  // 按名字排,不按启用状态:后端是"启用的在前",那样一点停用行就沉底、
+  // 下一行顶上来接住第二次点击——连着停用几个时会误伤。位置稳定才点得准。
+  const rows = [...tgtList].sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+  const box = $('tgt-list');
+  const keepScroll = box.scrollTop;      // 整块重渲染会把长列表弹回顶部
+  box.innerHTML = rows.length
+    ? rows.map(t => `
+      <div class="tgt-row">
+        <div style="min-width:0">
+          <div class="tgt-name${t.enabled ? '' : ' off'}">${esc(t.name)}</div>
+          <div class="tgt-detail">${esc(t.detail || '')}</div>
+        </div>
+        <div style="display:flex;gap:6px;flex:none">
+          <button class="ghost" data-tgt-toggle="${esc(t.name)}"
+                  style="padding:3px 10px;font-size:12px">
+            ${t.enabled ? '停用' : '启用'}
+          </button>
+          <button class="ghost" data-tgt-remove="${esc(t.name)}"
+                  style="padding:3px 10px;font-size:12px;color:#c33">移除</button>
+        </div>
+      </div>`).join('')
+    : `<div class="empty">还没有订阅任何${esc(tgtLabel)}</div>`;
+  box.scrollTop = keepScroll;
+}
+
+function renderTgtCands() {
+  const box = $('tgt-cands');
+  if (!tgtCands.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const have = new Set(tgtList.map(t => t.name));
+  box.style.display = '';
+  box.innerHTML = tgtCands.map(c => {
+    const added = have.has(c.name);
+    return `
+      <div class="tgt-row">
+        <div style="min-width:0">
+          <div class="tgt-name">${esc(c.name)}</div>
+          <div class="tgt-detail">${esc(c.detail || '')}</div>
+        </div>
+        <button class="ghost" data-tgt-add="${esc(c.name)}" data-tgt-id="${esc(c.id)}"
+                style="padding:3px 12px;font-size:12px;flex:none" ${added ? 'disabled' : ''}>
+          ${added ? '已订阅' : '添加'}
+        </button>
+      </div>`;
+  }).join('');
+}
+
+async function searchTargets() {
+  const q = $('tgt-search').value.trim();
+  if (!q || tgtBusy) return;
+  tgtBusy = true;
+  $('tgt-search-btn').textContent = '搜索中…';
+  try {
+    const r = await fetch('/api/sources/targets/search?q=' + encodeURIComponent(q));
+    if (await toastIfFail(r, '搜索失败')) return;
+    tgtCands = (await r.json()).candidates || [];
+    renderTgtCands();
+    if (!tgtCands.length) toast(`没搜到「${q}」`, { type: 'info' });
+  } finally {
+    tgtBusy = false;
+    $('tgt-search-btn').textContent = '搜索';
+  }
+}
+
+/** 增删改共用:发请求 → 成功就刷新列表并 toast 后端给的文案 */
+async function tgtAction(path, body, fallback) {
+  if (tgtBusy) return;
+  tgtBusy = true;
+  try {
+    const r = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (await toastIfFail(r, fallback)) return;
+    toast((await r.json()).detail || '已完成', { type: 'ok' });
+    await reloadTargets();
+    renderTgtCands();          // 候选里的"添加"要变成"已订阅"
+    if (typeof refreshPipe === 'function') refreshPipe(false);
+  } finally {
+    tgtBusy = false;
+  }
+}
+
+document.addEventListener('click', async e => {
+  const add = e.target.closest('[data-tgt-add]');
+  if (add) {
+    return tgtAction('/api/sources/targets/add',
+      { name: add.dataset.tgtAdd, id: add.dataset.tgtId || '' }, '添加失败');
+  }
+  const toggle = e.target.closest('[data-tgt-toggle]');
+  if (toggle) {
+    const name = toggle.dataset.tgtToggle;
+    const cur = tgtList.find(t => t.name === name);
+    return tgtAction('/api/sources/targets/toggle',
+      { name, enabled: !(cur && cur.enabled) }, '切换失败');
+  }
+  const rm = e.target.closest('[data-tgt-remove]');
+  if (rm) {
+    const name = rm.dataset.tgtRemove;
+    const ok = await confirmBox({
+      title: `移除「${name}」?`,
+      body: '之后不再采集它的新文章。已经采集过的文章不受影响,仍留在知识库里。',
+      ok: '移除', danger: true,
+    });
+    if (ok) await tgtAction('/api/sources/targets/remove', { name }, '移除失败');
+  }
+});
+
+document.addEventListener('keydown', e => {
+  if ($('tgt-modal') && $('tgt-modal').style.display !== 'none') {
+    if (e.key === 'Escape') closeTargets();
+    if (e.key === 'Enter' && e.target.id === 'tgt-search') searchTargets();
+  }
+});

@@ -28,12 +28,14 @@ from kb.web import (
     pages,
     pipeline_api,
     settings_api,
+    sources_api,
 )
 
 app = FastAPI(title="knowledge-base")
 
 for _r in (pages.router, library_api.router, chat_api.router,
-           favorites_api.router, settings_api.router, pipeline_api.router):
+           favorites_api.router, settings_api.router, pipeline_api.router,
+           sources_api.router):
     app.include_router(_r)
 
 pl.start_scheduler()   # 定时同步调度线程(跟随 kb-web 进程存活)

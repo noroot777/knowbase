@@ -7,7 +7,8 @@
     python -m cli collect --since 2026-08-01 --until 2026-08-26 [--targets a,b]
     python -m cli export [--no-images]             导出到 obsidian
     python -m cli accounts list                    看订阅的公众号
-    python -m cli accounts add <名字>              搜索并添加(需要扫码凭证)
+    python -m cli accounts search <关键词>         搜候选(需要扫码凭证)
+    python -m cli accounts add <名字> [--fakeid X] 加入订阅;给了 fakeid 就不再搜
     python -m cli accounts remove <名字>
     python -m cli accounts enable|disable <名字>   是否参与采集
 
@@ -154,53 +155,91 @@ def cmd_accounts(args) -> int:
         info(f"错误:{action} 需要给公众号名字")
         return EXIT_ERROR
 
+    if action == "search":
+        return _accounts_search(args.name, args.json)
     if action == "add":
-        return _accounts_add(args.name)
+        return _accounts_add(args.name, args.fakeid, args.json)
 
     with ArticleRepository() as repo:
         exists = repo.conn.execute(
             "SELECT 1 FROM accounts WHERE name=?", (args.name,)).fetchone()
         if not exists:
-            info(f"错误:订阅列表里没有「{args.name}」")
-            return EXIT_ERROR
+            return _fail(f"订阅列表里没有「{args.name}」", args.json)
         if action == "remove":
             repo.remove_account_from_list(args.name)
-            info(f"已移出订阅列表(已采集的文章保留):{args.name}")
+            detail = f"已移出订阅列表(已采集的文章保留):{args.name}"
         else:
             flag = 1 if action == "enable" else 0
             repo.conn.execute(
                 "UPDATE accounts SET in_crawl_config=? WHERE name=?", (flag, args.name))
-            info(f"{'启用' if flag else '停用'}采集:{args.name}")
+            detail = f"{'启用' if flag else '停用'}采集:{args.name}"
         repo.commit()
+    if args.json:
+        emit({"ok": True, "detail": detail})
+    else:
+        info(detail)
     return EXIT_OK
 
 
-def _accounts_add(name: str) -> int:
-    """搜名字 → 拿 fakeid → 写入订阅列表。搜索走公众平台接口,需要扫码凭证。"""
+def _fail(detail: str, as_json: bool, code: int = EXIT_ERROR) -> int:
+    """失败的统一出口。detail 是成品文案,上游原样显示,不再自己拼错误话术。"""
+    if as_json:
+        emit({"ok": False, "detail": detail})
+    else:
+        info(f"错误:{detail}")
+    return code
+
+
+def _accounts_search(query: str, as_json: bool) -> int:
+    """搜公众号候选。走公众平台接口,需要扫码凭证。"""
     import api
-    from src.db.repository import ArticleRepository
 
     try:
-        candidates = api._search_biz(name)
+        candidates = api._search_biz(query)
     except Exception as e:
-        info(f"搜索失败(凭证可能已过期,试试 `python -m cli login`):{e}")
-        return EXIT_AUTH
-    if not candidates:
-        info(f"没搜到叫「{name}」的公众号")
-        return EXIT_ERROR
+        return _fail(f"搜索失败,凭证可能已过期(跑 `python -m cli login` 续期):"
+                     f"{str(e)[:120]}", as_json, EXIT_AUTH)
+    rows = [{"name": c.nickname, "fakeid": c.fakeid,
+             "alias": c.alias, "signature": c.signature}
+            for c in candidates]
+    if as_json:
+        emit({"candidates": rows})
+    elif not rows:
+        info(f"没搜到「{query}」")
+    else:
+        info(f"搜到 {len(rows)} 个:")
+        for r in rows:
+            info(f"  {_pad(r['name'], 26)}{r['alias'] or '-'}")
+    return EXIT_OK
 
-    exact = [c for c in candidates if c.nickname == name]
-    if not exact:
-        info(f"没有完全同名的,搜到这些(请用准确名字重试):")
-        for c in candidates[:8]:
-            info(f"  - {c.nickname}")
-        return EXIT_ERROR
 
-    hit = exact[0]
+def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
+    """写入订阅列表。给了 fakeid 就直接落库——面板上是先搜后点,那一步已经
+    定死了是哪个号,再搜一次既慢又可能因为微信排序变化选中另一个同名号。"""
+    from src.db.repository import ArticleRepository
+
+    if not fakeid:
+        import api
+        try:
+            candidates = api._search_biz(name)
+        except Exception as e:
+            return _fail(f"搜索失败,凭证可能已过期(跑 `python -m cli login` 续期):"
+                         f"{str(e)[:120]}", as_json, EXIT_AUTH)
+        exact = [c for c in candidates if c.nickname == name]
+        if not exact:
+            near = "、".join(c.nickname for c in candidates[:5])
+            return _fail(f"没有完全同名的公众号" + (f",搜到:{near}" if near else ""),
+                         as_json)
+        name, fakeid = exact[0].nickname, exact[0].fakeid
+
     with ArticleRepository() as repo:
-        repo.upsert_account(hit.nickname, hit.fakeid)
+        repo.upsert_account(name, fakeid)
         repo.commit()
-    info(f"已添加:{hit.nickname} ({hit.fakeid})")
+    detail = f"已添加:{name} ({fakeid})"
+    if as_json:
+        emit({"ok": True, "detail": detail, "name": name, "fakeid": fakeid})
+    else:
+        info(detail)
     return EXIT_OK
 
 
@@ -291,9 +330,11 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--no-images", action="store_true", help="不下图,保留远程 URL")
 
     a = sub.add_parser("accounts", help="维护订阅的公众号")
-    a.add_argument("action", choices=["list", "add", "remove", "enable", "disable"])
-    a.add_argument("name", nargs="?", help="公众号名字")
-    a.add_argument("--json", action="store_true", help="list 时输出 JSON")
+    a.add_argument("action",
+                   choices=["list", "search", "add", "remove", "enable", "disable"])
+    a.add_argument("name", nargs="?", help="公众号名字(search 时是关键词)")
+    a.add_argument("--fakeid", default="", help="add 时直接指定,跳过搜索")
+    a.add_argument("--json", action="store_true", help="输出 JSON 而不是人话")
 
     sub.add_parser("login", help="扫码登录公众平台(添加公众号时需要)")
     return p

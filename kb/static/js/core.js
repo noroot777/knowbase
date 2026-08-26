@@ -8,7 +8,7 @@ function switchTab(t) {
     $('tab-' + k).classList.toggle('on', t === k);
   }
   document.body.classList.toggle('chat-mode', t === 'ask');
-  if (t === 'pipe') refreshPipe(true);
+  if (t === 'pipe') { refreshPipe(true); initTargets(); }
   if (t === 'ask') initChat();
   if (t === 'fav') loadFavPanel();
 }

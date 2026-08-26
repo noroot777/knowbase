@@ -16,7 +16,8 @@
 返回值没有意义,失败通过 _stage(..., "error", ...) 表达而不是抛异常
 ——管道要的是"这一阶段红了但后面接着跑",不是整条链断掉。
 
-新增来源 = 写一个实现 + 在 _REGISTRY 里注册。
+新增来源 = 写一个实现 + 在 _REGISTRY 里注册。想让"订阅了哪些号/源"能在
+面板上增删,再实现一份 TargetManager(可选,见下)。
 """
 
 from __future__ import annotations
@@ -83,6 +84,64 @@ class SourceCollector(Protocol):
     def pending(self) -> int | None:
         """还有多少条没落进 vault。算不出返回 None(面板显示空白而非 0)。"""
         ...
+
+
+# ── 目标管理(可选能力)────────────────────────────────────────────────────────
+
+
+class CollectorError(RuntimeError):
+    """采集器操作失败。
+
+    message 已经是给用户看的成品文案(带处置建议),HTTP 层原样透传、
+    前端原样显示——知识库不解读来源的失败原因,否则"凭证怎么续期"
+    这类只有采集器知道的知识又会渗回主干。
+    """
+
+
+@dataclass(frozen=True)
+class Target:
+    """来源里的一个采集目标:一个公众号、一个 RSS 源、一个频道…"""
+
+    id: str                                 # 采集器内部标识(fakeid / feed url…)
+    name: str                               # 显示名,也是各处引用它的键
+    enabled: bool = True                    # 是否参与采集
+    detail: str = ""                        # 副标题(最近采集时间 / 简介),成品文案
+
+    def as_dict(self) -> dict:
+        return {"id": self.id, "name": self.name,
+                "enabled": self.enabled, "detail": self.detail}
+
+
+@runtime_checkable
+class TargetManager(Protocol):
+    """采集器可以额外实现这套方法,把"订阅了哪些号"变成面板上可维护的东西。
+
+    没实现的采集器一样能用(面板不显示管理入口)——目标集合本来就不是每种
+    来源都有的概念,比如"抓某个固定 API"就只有一个隐含目标。
+
+    失败一律抛 CollectorError,不返回错误码:这几个是用户点一下等结果的
+    同步操作,与 fetch/materialize 那种"红一格但管道接着跑"的语义不同。
+    """
+
+    def list_targets(self) -> list[Target]: ...
+
+    def search_targets(self, query: str) -> list[Target]:
+        """按关键词找还没订阅的候选。不支持搜索的来源返回空列表。"""
+        ...
+
+    def add_target(self, name: str, target_id: str = "") -> str:
+        """加入订阅,返回一句成品结果文案。target_id 来自 search_targets。"""
+        ...
+
+    def remove_target(self, name: str) -> str: ...
+
+    def set_target_enabled(self, name: str, enabled: bool) -> str: ...
+
+
+def target_manager(collector: SourceCollector | None = None) -> TargetManager | None:
+    """当前采集器支持目标管理就返回它,否则 None。"""
+    c = collector or active_collector()
+    return c if isinstance(c, TargetManager) else None
 
 
 # ── 注册表 ──────────────────────────────────────────────────────────────────────
