@@ -86,6 +86,7 @@ web 界面(`uv run kb-web` → http://127.0.0.1:8787)的"管道"tab 一键搞定
 
 所有操作走 `./kb.sh`(不带参数看命令列表):`prep` / `status` / `creds` /
 `collect` / `export` / `accounts` / `web start|stop` / `wxdown start|stop`。
+服务都是后台守护进程(自成会话),起完终端就能关,不占前台。
 
 等价的 CLI:
 1. `cd collector && ./.venv/bin/python -m cli collect` 抓新文章,再 `... -m cli export` 导出到 obs

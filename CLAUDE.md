@@ -19,6 +19,11 @@
 - **`./kb.sh` 是唯一的操作入口**(取代原 WeChatOA 的 start_all.sh)。`./kb.sh` 不带参数
   打印全部命令。日常两条:`./kb.sh prep`(同步前起 wxdown + 切路由 + 盯凭证)、
   `./kb.sh status`(服务/路由/凭证/订阅一屏看全)。
+- **服务一律用 `daemonize()` 起,不用 `nohup ... &`**。后者起出来的进程跟脚本同一个
+  进程组,非交互 shell 会给它把 SIGINT 设成 SIG_IGN,而这个 SIG_IGN 被子进程继承——
+  于是 stop 时的 `kill -INT` 也被忽略,只能降级 SIGTERM,恰好会把 wxdown 的
+  multiprocessing 子进程丢成孤儿。daemonize 借 python 做 fork+setsid(macOS 没有
+  setsid 命令)并把 SIGINT 恢复默认:自成会话不受终端影响,同时 stop 能优雅收尾。
 - **两套凭证别搞混**:`login` 那套是扫码拿的、全局一份,用来搜公众号和翻文章列表;
   `creds` 那套是每个号各一份的文章凭证,只能靠在 Mac 微信里打开该号一篇文章、
   由 wxdown-service 的 mitm 截下来。抓正文缺的是后者,续期方式完全不同。
