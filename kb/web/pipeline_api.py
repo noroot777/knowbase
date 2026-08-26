@@ -33,9 +33,13 @@ def pipeline_schedule_set(body: ScheduleRequest):
 
 
 @router.get("/api/pipeline/status")
-def pipeline_status(pending: bool = False):
+def pipeline_status(pending: bool = False, source: bool = True):
     state = dict(pl.get_state())
-    state["source"] = pl.source_status()
+    # 来源状态要起采集器 CLI 并触网探测,冷缓存时几十秒都可能。只想知道
+    # "管道在不在跑"的调用方(kb.sh 的停机保护就是)带 source=false 跳过它,
+    # 否则一个慢探测会把"在不在跑"这个本来一读内存就有的答案也拖到超时。
+    if source:
+        state["source"] = pl.source_status()
     state["last_run"] = pl.load_last_run()
     # 待处理数要扫文件,只有显式要求且空闲时才算
     if pending and not state["running"]:

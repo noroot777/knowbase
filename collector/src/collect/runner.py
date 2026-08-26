@@ -149,12 +149,15 @@ def _collect_one_ranged(repo, wechat, name: str, fakeid: str,
             if not a.get("is_deleted")
             and int(a.get("item_show_type") or 0) not in (5, 8, 10)
         ]
+        # create_time 是 "YYYY-MM-DD HH:MM",since/until 只有日期。整串比大小会把
+        # 结束日当天全漏掉——"2026-08-26 12:00" 字符串上大于 "2026-08-26"。面板上
+        # 「今天」「近 7 天」「自定义到今天」抓回来的都会静默少一天,只比日期部分。
         for article in candidates:
-            if since <= str(article.get("create_time") or "") <= until:
+            if since <= str(article.get("create_time") or "")[:10] <= until:
                 api._ingest_crawl_article(repo, name, article)
                 got += 1
 
-        oldest = min(str(a.get("create_time") or "") for a in articles)
+        oldest = min(str(a.get("create_time") or "")[:10] for a in articles)
         if oldest and oldest < since:
             break
         if page < api._RANGE_MAX_PAGES_PER_ACCOUNT - 1:

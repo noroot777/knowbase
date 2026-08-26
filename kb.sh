@@ -93,11 +93,16 @@ pid_matches() { ps -o command= -p "${1:-0}" 2>/dev/null | grep -qF -- "$2"; }
 # `pgrep -f kb-web` 会把跑在别的端口上的另一份实例也捞进来——8799 上做一次
 # restart,把 8787 上的生产实例一起杀了。端口是唯一能把实例分开的东西。
 #
-# pidfile 里的 pid 必须再核一遍命令行才认:那个文件可能是上次异常退出留下的陈迹,
-# 号早被系统回收给了别的进程,照着杀就是杀无辜。端口来的不用核——正占着我们
-# 端口的那个,本来就是要让路的。
+# pidfile 里的 pid 必须核命令行才认:那个文件可能是上次异常退出留下的陈迹,
+# 号早被系统回收给了别的进程,照着杀就是杀无辜。
+#
+# 端口来的也得核,只是要核【往上走到头】的那个:lsof 给的常常是子进程,命令行
+# 未必带服务的字样(wxdown 的 multiprocessing worker 就只是个 `python -c ...`),
+# 直接核会把真进程漏掉。不核则更糟——65000 被别的东西占着时 start 会说"已在
+# 运行"却什么都没起,接着 route --activate 把微信流量导到一个不是 wxdown 的
+# 端口上,凭证于是永远抓不到,而面板一切正常。
 service_pids() {   # service_pids <pidfile> <port> <pattern>
-  local pidfile="${1:-}" port="${2:-}" pattern="${3:-}" pid recorded
+  local pidfile="${1:-}" port="${2:-}" pattern="${3:-}" pid recorded owner
   recorded="$(read_pid "$pidfile")"
   if [ -n "$recorded" ] && ! pid_matches "$recorded" "$pattern"; then
     recorded=""
@@ -106,7 +111,9 @@ service_pids() {   # service_pids <pidfile> <port> <pattern>
     [ -n "$port" ] && lsof -ti tcp:"$port" 2>/dev/null
     true
   } | grep -E '^[0-9]+$' | sort -un | while read -r pid; do
-    alive "$pid" && top_owner "$pid" "$pattern"
+    alive "$pid" || continue
+    owner="$(top_owner "$pid" "$pattern")"
+    pid_matches "$owner" "$pattern" && echo "$owner"
   done | sort -un || true
 }
 
@@ -137,28 +144,51 @@ kill_tree() {
 stop_service() {   # stop_service <名字> <pidfile> <port> <pattern>
   local label="$1" pidfile="$2" port="$3" pattern="$4" pids pid
   pids="$(service_pids "$pidfile" "$port" "$pattern")"
-  if [ -z "$pids" ]; then say "[$label] 本来就没在跑"; rm -f "$pidfile"; return 0; fi
+  if [ -z "$pids" ]; then
+    if [ -n "$port" ] && port_busy "$port"; then
+      # 端口有人占,但不是我们的进程。不动它:这条路径以前是无差别 kill -9,
+      # 而占着 8787 的完全可能是另一个人的东西。
+      say "[$label] 没在跑。端口 $port 被别的进程占着,没动它:"
+      lsof -ti tcp:"$port" 2>/dev/null | while read -r pid; do
+        ps -o pid=,command= -p "$pid" 2>/dev/null | sed 's/^/       /' >&2
+      done
+    else
+      say "[$label] 本来就没在跑"
+    fi
+    rm -f "$pidfile"; return 0
+  fi
   say "[$label] 停止 $(echo "$pids" | tr '\n' ' ')"
   for pid in $pids; do kill_tree "$pid"; done
   rm -f "$pidfile"
   local n=0
   while [ -n "$port" ] && port_busy "$port" && [ "$n" -lt 20 ]; do sleep 0.2; n=$((n+1)); done
   if [ -n "$port" ] && port_busy "$port"; then
-    say "[$label] 端口 $port 仍被占用,强杀"
-    lsof -ti tcp:"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
-    sleep 1
+    # 还占着就再查一遍是不是我们的残留;是才强杀,不是就放着(见上)。
+    pids="$(service_pids "" "$port" "$pattern")"
+    if [ -n "$pids" ]; then
+      say "[$label] 端口 $port 仍被占用,强杀"
+      echo "$pids" | xargs kill -9 2>/dev/null || true
+      sleep 1
+    fi
   fi
 }
 
 # ── wxdown:抓文章凭证的本地代理 ───────────────────────────────────────────────
 
-WXDOWN_PAT="$WXDOWN_DIR/main.py"
+# 认这个 wxdown 安装目录,而不是只认 main.py:它的 multiprocessing worker 命令行里
+# 只有 `.venv/bin/python -c ...`,不带 main.py 字样。父进程要是先死了,worker 变成
+# 孤儿,只认 main.py 就再也认不出它、也就清不掉。
+WXDOWN_PAT="$WXDOWN_DIR/"
 
 wxdown_start() {
   if [ -n "$(service_pids "$WXDOWN_PID" "$WXDOWN_PORT" "$WXDOWN_PAT")" ]; then
     say "[wxdown] 已在运行"; return 0
   fi
   [ -x "$WXDOWN_DIR/.venv/bin/python" ] || die "找不到 wxdown-service($WXDOWN_DIR)"
+  if port_busy "$WXDOWN_PORT"; then
+    die "端口 $WXDOWN_PORT 被别的进程占着(不是 wxdown),它起不来。
+     换个端口:WXDOWN_PROXY_PORT=65010 ./kb.sh wxdown start"
+  fi
   # 端口要显式传给它。只用 WXDOWN_PORT 做探测和 Clash 路由、却让 wxdown 按默认的
   # 65000/65001 起,改了端口就会一边按新端口找、一边在老端口上跑。
   daemonize "$WXDOWN_PID" "$LOG_DIR/wxdown.log" "$WXDOWN_DIR" \
@@ -175,8 +205,10 @@ wxdown_restart() { wxdown_stop; wxdown_start; }
 
 wxdown_status() {
   local pids; pids="$(service_pids "$WXDOWN_PID" "$WXDOWN_PORT" "$WXDOWN_PAT")"
-  [ -n "$pids" ] && echo "wxdown    运行中 (PID $(echo "$pids" | tr '\n' ' '))" \
-                 || echo "wxdown    未运行"
+  if [ -n "$pids" ]; then echo "wxdown    运行中 (PID $(echo "$pids" | tr '\n' ' '))"
+  elif port_busy "$WXDOWN_PORT"; then
+    echo "wxdown    未运行(端口 $WXDOWN_PORT 被别的进程占着)"
+  else echo "wxdown    未运行"; fi
 }
 
 # ── kb-web:知识库面板(耗时的活都在它进程里跑)────────────────────────────────
@@ -184,7 +216,14 @@ wxdown_status() {
 WEB_PAT="kb-web"
 
 web_start() {
-  if port_busy "$WEB_PORT"; then say "[web] 已在 $API"; return 0; fi
+  if [ -n "$(service_pids "$WEB_PID" "$WEB_PORT" "$WEB_PAT")" ]; then
+    say "[web] 已在 $API"; return 0
+  fi
+  # 端口有人占但不是 kb-web:说清楚,别等它"起完"再报一个莫名其妙的超时。
+  if port_busy "$WEB_PORT"; then
+    die "端口 $WEB_PORT 被别的进程占着,kb-web 起不来。
+     换个端口:KB_WEB_PORT=8788 ./kb.sh web start"
+  fi
   # env -i 干净环境:继承外层(尤其是嵌套 claude)的环境变量会导致 Not logged in
   daemonize "$WEB_PID" "$LOG_DIR/web.log" "$ROOT" \
     env -i HOME="$HOME" PATH="$PATH" PORT="$WEB_PORT" uv run kb-web
@@ -198,9 +237,17 @@ web_start() {
 FORCE=""
 
 web_stop() {
-  if [ -z "$FORCE" ] && pipeline_running; then
-    die "同步正在跑,现在停会把它断在半路。
+  if [ -z "$FORCE" ]; then
+    local st=0
+    pipeline_running || st=$?
+    if [ "$st" = 0 ]; then
+      die "同步正在跑,现在停会把它断在半路。
      等它跑完(./kb.sh status 看进度),或者确实要停就加 --force"
+    fi
+    if [ "$st" = 2 ]; then
+      die "问不出同步在不在跑($API 没应答),不敢就这么停——它可能正跑到一半。
+     过一会儿再试,或者确实要停就加 --force"
+    fi
   fi
   stop_service kb-web "$WEB_PID" "$WEB_PORT" "$WEB_PAT"
 }
@@ -208,17 +255,30 @@ web_stop() {
 web_restart() { web_stop; web_start; }
 
 web_status() {
-  port_busy "$WEB_PORT" && echo "kb-web    运行中 ($API)" || echo "kb-web    未运行"
+  local pids; pids="$(service_pids "$WEB_PID" "$WEB_PORT" "$WEB_PAT")"
+  if [ -n "$pids" ]; then echo "kb-web    运行中 ($API)"
+  elif port_busy "$WEB_PORT"; then echo "kb-web    未运行(端口 $WEB_PORT 被别的进程占着)"
+  else echo "kb-web    未运行"; fi
 }
 
 # ── 管道:把耗时的活丢给 kb-web,命令立刻返回 ──────────────────────────────────
 
+# 0 = 在跑,1 = 确定空闲,2 = 问不出来(超时 / 没应答 / 返回的不是 JSON)。
+#
+# 三态是必须的:停机保护只有在"确定空闲"时才该放行。以前问不出来一律当空闲,
+# 于是状态接口慢一点,stop 就把正在跑的同步砍了——而它天然就会慢,因为要顺带
+# 探采集器(冷缓存时几十秒),恰好超过 curl 那 5 秒。所以这里还要 source=false:
+# 只问"在不在跑",那是内存里现成的一个布尔值,不该被来源探测拖下水。
 pipeline_running() {
   port_busy "$WEB_PORT" || return 1
-  "${CURL[@]}" "$API/api/pipeline/status" 2>/dev/null | "$BOOT_PY" -c '
+  local out
+  out="$("${CURL[@]}" "$API/api/pipeline/status?source=false" 2>/dev/null)" || return 2
+  [ -n "$out" ] || return 2
+  printf '%s' "$out" | "$BOOT_PY" -c '
 import json, sys
-try: sys.exit(0 if json.load(sys.stdin).get("running") else 1)
-except Exception: sys.exit(1)'
+try: d = json.load(sys.stdin)
+except Exception: sys.exit(2)
+sys.exit(0 if d.get("running") else 1)'
 }
 
 # 组装 /api/pipeline/run 的请求体。stages 为空 = 全流程
