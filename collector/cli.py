@@ -373,7 +373,12 @@ def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
         name, fakeid = exact[0].nickname, exact[0].fakeid
 
     with ArticleRepository() as repo:
-        repo.upsert_account(name, fakeid)
+        # 走 enable_crawl_account 而不是 upsert_account:add 是"用户主动订阅",
+        # 得把 removed 标记一并清掉。之前用 upsert_account,重新订阅一个移除过、
+        # 且有历史文章的号会提示"已添加",但它 removed 还是 1——列表、同步目标、
+        # 默认采集里统统看不到它。upsert_account 留给采集过程更新用,那条路上
+        # 不该有把已移除的号悄悄复活的能力。
+        repo.enable_crawl_account(name, fakeid)
         repo.commit()
     detail = f"已添加:{name} ({fakeid})"
     if as_json:
