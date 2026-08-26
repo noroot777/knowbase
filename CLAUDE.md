@@ -39,6 +39,11 @@
 - 采集器是**一次性 CLI,不是常驻服务**:`cd collector && ./.venv/bin/python -m cli <命令>`。
   常用 `status`(健康+订阅列表) / `collect` / `export` / `accounts list|add|remove` / `login`。
   stdout 只出 NDJSON 给程序读,人看的提示走 stderr。
+- `collector/api.py` **不再是 API**。它原来是跑在 :8000 的 FastAPI 后端(53 个路由),
+  给 `collector/frontend` 那套 Vue UI 用;前端和常驻服务撤掉后一个路由都没人调,
+  已经连同 `server.py` / `web_app.py` / `src/api/` 一起删了。现在只剩 CLI 和采集
+  流程共用的底层(抓正文、下封面、搜号、查扫码凭证)。文件名没改,是因为
+  `cli.py` 和 `src/collect/` 里的 `import api` 还指着它。要看旧服务翻 git 历史。
 - **公众号列表**存在 `collector/data/wechatoa.db` 的 `accounts` 表,日常维护走
   kb-web 管道 tab 的「管理公众号」弹窗(搜索添加 / 停用 / 移除),不要直接改库。
   终端等价物是 `cli accounts list|search|add|remove|enable|disable`;面板走的就是它。
