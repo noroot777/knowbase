@@ -4,8 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>知识库</title>
-<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
-<!-- marked 不做 sanitize,条目正文/模型回答是外部内容,渲染前必须过 DOMPurify(本地随包,不依赖 CDN 可达) -->
+<!-- marked / DOMPurify 都随包放本地:走 CDN 时一次外网抖动或拦截插件就让 marked 缺席,
+     mdHtml 的失败关闭兜底会把回答静默降级成纯文本,看起来就是"markdown 没了" -->
+<script src="/static/vendor/marked.min.js"></script>
+<!-- marked 不做 sanitize,条目正文/模型回答是外部内容,渲染前必须过 DOMPurify -->
 <script src="/static/vendor/purify.min.js"></script>
 <link rel="stylesheet" href="/static/css/base.css">
 <link rel="stylesheet" href="/static/css/panels.css">

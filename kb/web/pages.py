@@ -49,7 +49,7 @@ _DOC_TMPL = """<!DOCTYPE html>
 <html lang="zh"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
-<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="/static/vendor/marked.min.js"></script>
 <script src="/static/vendor/purify.min.js"></script>
 <style>
   body {{ font: 16px/1.8 -apple-system, "PingFang SC", "Noto Sans SC", sans-serif;
@@ -73,11 +73,13 @@ _DOC_TMPL = """<!DOCTYPE html>
 const MD = {md_json};
 const DOC_PATH = {path_json};
 // 本地保存的文章正文是外部内容,marked 不做 sanitize,渲染前一律过 DOMPurify;
-// sanitizer 没加载出来就退化成纯文本(失败关闭),不给未净化的 HTML 放行
-document.getElementById('content').innerHTML = window.DOMPurify
+// 两个库任一没加载出来就退化成纯文本(失败关闭),不给未净化的 HTML 放行
+// (漏判 marked 的话 marked.parse 直接抛 ReferenceError,正文整个空白)
+const MD_OK = !!(window.DOMPurify && window.marked);
+document.getElementById('content').innerHTML = MD_OK
   ? DOMPurify.sanitize(marked.parse(MD))
   : '<div style="white-space:pre-wrap"></div>';
-if (!window.DOMPurify) document.querySelector('#content div').textContent = MD;
+if (!MD_OK) document.querySelector('#content div').textContent = MD;
 {snip_js}
 </script>
 </body></html>"""

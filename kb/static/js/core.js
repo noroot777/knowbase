@@ -59,9 +59,17 @@ const safeUrl = u => /^(https?:|obsidian:|\/|#)/i.test(String(u || '')) ? String
 // Markdown → HTML 的唯一出口。条目正文、模型回答都是外部内容,而 marked 从 v5 起
 // 不带 sanitizer:原始 <img onerror> 和 javascript: 链接会被原样输出。一律过 DOMPurify。
 // 兜底是"失败关闭":sanitizer 没加载出来就退化成纯文本,绝不放行未净化的 HTML。
+// 两个库都随包在 /static/vendor/,正常不会走到兜底;真走到了在 console 留一句,
+// 否则"回答变纯文本"这种静默降级根本查不出是脚本没加载。
+let _mdWarned = false;
 function mdHtml(src) {
   const md = String(src || '');
   if (!window.DOMPurify || !window.marked) {
+    if (!_mdWarned) {
+      _mdWarned = true;
+      console.warn('[kb] marked/DOMPurify 未加载(marked=%s, DOMPurify=%s),Markdown 降级为纯文本',
+        typeof window.marked, typeof window.DOMPurify);
+    }
     return `<div style="white-space:pre-wrap">${esc(md)}</div>`;
   }
   return DOMPurify.sanitize(marked.parse(md));
