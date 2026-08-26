@@ -193,7 +193,12 @@ class ProfileCredentialStore:
                     rejected.append(f"第 {index} 条: {exc}")
                     continue
                 previous = records.get(credential.biz)
-                if previous and previous.captured_at > credential.captured_at:
+                # 用 >= 而不是 >:时间戳一样就是同一次抓包,重新导入它没有任何新信息,
+                # 却会把记录整个换掉——包括把 invalidated_at 清零。采集时服务端返回
+                # no session 会 mark_invalid,而 wxdown 的 JSON 文件里那条旧凭证还在,
+                # 下一次导入(面板每 5 秒就导一次)就把它刷回"就绪",绿点是假的,
+                # 一采集又失败。只有真正更新的抓包才该覆盖。
+                if previous and previous.captured_at >= credential.captured_at:
                     continue
                 records[credential.biz] = credential
                 saved.append(credential)

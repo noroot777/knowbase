@@ -59,10 +59,14 @@ def pipeline_run(body: PipelineRunRequest | None = None):
     if body and (body.since_date or body.until_date):
         if not (body.since_date and body.until_date):
             raise HTTPException(400, "起始和结束日期必须同时提供")
+    # 只限定目标、不限定时间也要成立(「就把这几个号的新文章抓一下」)。
+    # 以前的条件只看日期,给了 accounts 却没给日期就退回 crawl_filter=None,
+    # 于是全部订阅目标照抓——筛选被静默忽略,比报错更难发现。
+    if body and (body.since_date or body.until_date or body.accounts):
         crawl_filter = {
             "accounts": body.accounts or [],
-            "since_date": body.since_date,
-            "until_date": body.until_date,
+            "since_date": body.since_date or "",
+            "until_date": body.until_date or "",
         }
     if not pl.start_pipeline(stages, crawl_filter=crawl_filter):
         raise HTTPException(409, "管道已在运行中")

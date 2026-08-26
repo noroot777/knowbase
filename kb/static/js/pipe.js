@@ -98,11 +98,7 @@ function renderPipeRange() {
   const ranged = !!pipeRange.from;
   $('pipe-range-hint').textContent = ranged
     ? pipeRangeHint
-    : '不限时间 = 增量同步各目标的新内容(当天已抓过的自动跳过),固定同步全部目标。';
-  // 增量模式后端不支持按目标过滤,目标区置灰
-  const blk = $('pipe-acct-block');
-  blk.style.opacity = ranged ? '' : '.45';
-  blk.style.pointerEvents = ranged ? '' : 'none';
+    : '不限时间 = 增量同步各目标的新内容(当天已抓过的自动跳过)。';
   renderPipeEst();
 }
 
@@ -147,11 +143,12 @@ function renderPipeEst() {
     $('pipe-start').disabled = n === 0;
     $('pipe-start').textContent = `开始同步 (${n} 个)`;
   } else {
+    const all = n === pipeAcctList.length;
     $('pipe-est').innerHTML =
-      `增量抓各号新文章,耗时视更新量而定。<br>` +
+      `增量抓${all ? '各号' : `选中的 ${n} 个号的`}新文章,耗时视更新量而定。<br>` +
       `提取阶段与抓取并行、claude 3 路并发,管道总时长 ≈ 抓取和提取里较长的那个。`;
-    $('pipe-start').disabled = false;
-    $('pipe-start').textContent = '开始同步';
+    $('pipe-start').disabled = n === 0;
+    $('pipe-start').textContent = all ? '开始同步' : `开始同步 (${n} 个)`;
   }
 }
 
@@ -275,6 +272,10 @@ async function startPipeFromModal() {
   if (pipeRange.from) {
     body.since_date = pipeRange.from;
     body.until_date = pipeRange.to;
+    body.accounts = Array.from(pipeSel);
+  } else if (pipeSel.size && pipeSel.size < pipeAcctList.length) {
+    // 增量也能只抓选中的几个号。全选时不传:那跟不过滤等价,还省得把
+    // 几十个名字塞进请求和采集器的命令行
     body.accounts = Array.from(pipeSel);
   }
   const btn = $('pipe-start');

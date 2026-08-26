@@ -16,7 +16,11 @@ WXDOWN_PID="$RUN_DIR/wxdown.pid"
 WEB_PID="$RUN_DIR/web.pid"
 WEB_PORT="${KB_WEB_PORT:-8787}"
 WXDOWN_PORT="${WXDOWN_PROXY_PORT:-65000}"   # 跟 clash_wxdown_route 认同一个变量
+WXDOWN_WS_PORT="${WXDOWN_WS_PORT:-65001}"
 API="http://127.0.0.1:$WEB_PORT"
+# 所有 curl 都带超时。没有超时的话,旧实例端口还在监听但 HTTP 卡住时,
+# stop/restart 会跟着一起卡死——恰好是最需要它把旧实例杀掉的场景。
+CURL=(curl -s --connect-timeout 2 --max-time 5)
 
 BOOT_PY="$PY"
 [ -x "$BOOT_PY" ] || BOOT_PY="$(command -v python3 || echo /usr/bin/python3)"
@@ -80,14 +84,25 @@ top_owner() {   # top_owner <pid> <pattern>
   echo "$pid"
 }
 
+# 这个 pid 的命令行像不像目标服务
+pid_matches() { ps -o command= -p "${1:-0}" 2>/dev/null | grep -qF -- "$2"; }
+
 # 一个服务当前的进程:pidfile 记的 + 占着端口的,各自往上找到头,去重。
 #
 # 刻意【不】用 `pgrep -f <名字>` 兜底:名字是全局匹配的,分不清端口。实测
 # `pgrep -f kb-web` 会把跑在别的端口上的另一份实例也捞进来——8799 上做一次
 # restart,把 8787 上的生产实例一起杀了。端口是唯一能把实例分开的东西。
+#
+# pidfile 里的 pid 必须再核一遍命令行才认:那个文件可能是上次异常退出留下的陈迹,
+# 号早被系统回收给了别的进程,照着杀就是杀无辜。端口来的不用核——正占着我们
+# 端口的那个,本来就是要让路的。
 service_pids() {   # service_pids <pidfile> <port> <pattern>
-  local pidfile="${1:-}" port="${2:-}" pattern="${3:-}" pid
-  { [ -n "$pidfile" ] && read_pid "$pidfile"
+  local pidfile="${1:-}" port="${2:-}" pattern="${3:-}" pid recorded
+  recorded="$(read_pid "$pidfile")"
+  if [ -n "$recorded" ] && ! pid_matches "$recorded" "$pattern"; then
+    recorded=""
+  fi
+  { [ -n "$recorded" ] && echo "$recorded"
     [ -n "$port" ] && lsof -ti tcp:"$port" 2>/dev/null
     true
   } | grep -E '^[0-9]+$' | sort -un | while read -r pid; do
@@ -144,8 +159,11 @@ wxdown_start() {
     say "[wxdown] 已在运行"; return 0
   fi
   [ -x "$WXDOWN_DIR/.venv/bin/python" ] || die "找不到 wxdown-service($WXDOWN_DIR)"
+  # 端口要显式传给它。只用 WXDOWN_PORT 做探测和 Clash 路由、却让 wxdown 按默认的
+  # 65000/65001 起,改了端口就会一边按新端口找、一边在老端口上跑。
   daemonize "$WXDOWN_PID" "$LOG_DIR/wxdown.log" "$WXDOWN_DIR" \
-    "$WXDOWN_DIR/.venv/bin/python" "$WXDOWN_DIR/main.py"
+    "$WXDOWN_DIR/.venv/bin/python" "$WXDOWN_DIR/main.py" \
+    -p "$WXDOWN_PORT" -w "$WXDOWN_WS_PORT"
   sleep 3
   alive "$(read_pid "$WXDOWN_PID")" \
     && say "[wxdown] 已启动(PID $(read_pid "$WXDOWN_PID"))" \
@@ -197,7 +215,7 @@ web_status() {
 
 pipeline_running() {
   port_busy "$WEB_PORT" || return 1
-  curl -s "$API/api/pipeline/status" 2>/dev/null | "$BOOT_PY" -c '
+  "${CURL[@]}" "$API/api/pipeline/status" 2>/dev/null | "$BOOT_PY" -c '
 import json, sys
 try: sys.exit(0 if json.load(sys.stdin).get("running") else 1)
 except Exception: sys.exit(1)'
@@ -233,7 +251,7 @@ if targets: b["accounts"] = [t for t in targets.split(",") if t]
 print(json.dumps(b))' "$stages" "$since" "$until" "$targets")"
 
   local out
-  out="$(curl -s -w '\n%{http_code}' -X POST "$API/api/pipeline/run" \
+  out="$("${CURL[@]}" -w '\n%{http_code}' -X POST "$API/api/pipeline/run" \
     -H 'Content-Type: application/json' -d "$body")"
   case "$(echo "$out" | tail -1)" in
     200) say "已在后台开始。进度看 $API 管道 tab,或跑 ./kb.sh status" ;;
@@ -250,7 +268,7 @@ cmd_status() {
   echo
   echo "── 同步进度 ──"
   if port_busy "$WEB_PORT"; then
-    curl -s "$API/api/pipeline/status" 2>/dev/null | "$BOOT_PY" -c '
+    "${CURL[@]}" "$API/api/pipeline/status" 2>/dev/null | "$BOOT_PY" -c '
 import json, sys
 try: d = json.load(sys.stdin)
 except Exception: print("(读不到)"); raise SystemExit
