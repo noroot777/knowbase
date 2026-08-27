@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from html import unescape as html_unescape
 from urllib.parse import quote, urlparse
 
 import requests
@@ -118,29 +119,70 @@ def _div_to_html(div: etree._Element) -> str:
     )
 
 
-def fetch_article_body(url: str, num: int = 0) -> tuple[Any, str | None]:
-    """
-    一次请求同时解析纯文本与 HTML。
+# 正文页里公众号当前昵称的位置。按可靠度排序:
+# - `var nickname = htmlDecode("…")` 是页面自己给本号用的,三篇实测页都有;
+# - `id="js_name"` 是页头那个署名链接,同样只指本号;
+# - 不要用裸的 `nickname: '…'` ——页里还塞着推荐位/关联号的昵称,实测
+#   GitHub猿 那篇的第一个 `nickname:` 是"编程技术圈",抓到的是别人家的号。
+_NICKNAME_PATTERNS = (
+    r'var\s+nickname\s*=\s*htmlDecode\(\s*(["\'])(?P<v>.*?)\1\s*\)',
+    r'var\s+nickname\s*=\s*(["\'])(?P<v>.*?)\1',
+    r'id=["\']js_name["\'][^>]*>\s*(?P<v>[^<]{1,64}?)\s*<',
+)
 
-    返回 (text, html)：
+
+def extract_account_nickname(raw_html: str) -> str:
+    """从正文页里读出这篇文章所属公众号的当前昵称。读不到返回空串。"""
+    if not raw_html:
+        return ""
+    for pattern in _NICKNAME_PATTERNS:
+        m = re.search(pattern, raw_html, re.S)
+        if m:
+            value = html_unescape(m.group("v")).strip()
+            if value:
+                return value
+    return ""
+
+
+def fetch_article_body_full(url: str, num: int = 0) -> tuple[Any, str | None, str]:
+    """一次请求解析纯文本、HTML 和公众号当前昵称。
+
+    返回 (text, html, nickname):
     - text: list[str] 或 '已删除' / '请求错误'
     - html: 正文 HTML；失败时为 None
+    - nickname: 公众号当前昵称；读不到为空串
+
+    昵称是顺手捡的:抓正文本来就要把整页拉下来,而公众号改名后只有这一页
+    带着新名字(列表接口 getmsg 的返回里没有,wxdown 截的凭证里 name 恒为 null)。
     """
     try:
         response, div = _fetch_page(url)
     except Exception:
         if num >= 3:
-            return "请求错误", None
-        return fetch_article_body(url, num=num + 1)
+            return "请求错误", None, ""
+        return fetch_article_body_full(url, num=num + 1)
 
+    nickname = extract_account_nickname(response)
     if div is None:
         if message_is_delete(response=response):
-            return "已删除", None
+            return "已删除", None, nickname
         if num >= 3:
-            return "请求错误", None
-        return fetch_article_body(url, num=num + 1)
+            return "请求错误", None, nickname
+        return fetch_article_body_full(url, num=num + 1)
 
-    return _div_to_text_list(div), _div_to_html(div)
+    return _div_to_text_list(div), _div_to_html(div), nickname
+
+
+def fetch_article_body(url: str, num: int = 0) -> tuple[Any, str | None]:
+    """
+    一次请求同时解析纯文本与 HTML。
+
+    返回 (text, html):
+    - text: list[str] 或 '已删除' / '请求错误'
+    - html: 正文 HTML；失败时为 None
+    """
+    text, body_html, _nickname = fetch_article_body_full(url, num=num)
+    return text, body_html
 
 
 def url2html(url: str, num: int = 0) -> str | None:

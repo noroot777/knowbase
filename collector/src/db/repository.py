@@ -131,13 +131,14 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             where += " AND a.in_crawl_config = 1"
         rows = self.conn.execute(
             f"""
-            SELECT a.name, a.fakeid, a.latest_crawl_at, a.in_crawl_config,
-                   COUNT(ar.id) AS article_count
+            SELECT a.name, a.fakeid, a.display_name, a.latest_crawl_at,
+                   a.in_crawl_config, COUNT(ar.id) AS article_count
             FROM accounts a
             LEFT JOIN articles ar ON ar.account_name = a.name
               AND ar.is_wx_deleted = 0 AND ar.is_user_deleted = 0
             {where}
-            GROUP BY a.name, a.fakeid, a.latest_crawl_at, a.in_crawl_config
+            GROUP BY a.name, a.fakeid, a.display_name, a.latest_crawl_at,
+                     a.in_crawl_config
             ORDER BY a.name
             """
         ).fetchall()
@@ -145,6 +146,7 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             {
                 "name": r["name"],
                 "fakeid": r["fakeid"],
+                "display_name": r["display_name"] or "",
                 "latest_update_time": r["latest_crawl_at"] or "",
                 "article_count": r["article_count"],
                 "in_crawl_config": int(r["in_crawl_config"] or 0),
@@ -169,6 +171,28 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             "UPDATE accounts SET latest_crawl_at=?, updated_at=? WHERE name=?",
             (t, time_now(), name),
         )
+
+    def set_account_display_name(self, name: str, display: str) -> bool:
+        """记下公众号在微信上的当前昵称。改了返回 True,没变或读不到返回 False。
+
+        不动 name:它是主键,articles.account_name 是指向它的外键(没有
+        ON UPDATE CASCADE),已导出的 vault markdown 也按它归档。改名只改这一列。
+        """
+        display = (display or "").strip()
+        if not display:
+            return False
+        row = self.conn.execute(
+            "SELECT display_name FROM accounts WHERE name=?", (name,)
+        ).fetchone()
+        # 没这个号(链接导入的占位号就不在订阅列表里)或者昵称没变:不写,
+        # 免得每篇文章都白白翻一次 updated_at
+        if row is None or (row["display_name"] or "") == display:
+            return False
+        self.conn.execute(
+            "UPDATE accounts SET display_name=?, updated_at=? WHERE name=?",
+            (display, time_now(), name),
+        )
+        return True
 
     def remove_account_from_list(self, name: str) -> None:
         """仅从订阅列表移除，保留已爬文章。

@@ -8,7 +8,7 @@ import re
 
 from src.utils.helpers import time_now
 
-LATEST_SCHEMA_VERSION = 11
+LATEST_SCHEMA_VERSION = 12
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -114,6 +114,15 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (11, time_now()),
+        )
+        conn.commit()
+        current = 11
+
+    if current < 12:
+        _migrate_to_v12(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (12, time_now()),
         )
         conn.commit()
 
@@ -371,4 +380,23 @@ def _migrate_to_v11(conn: sqlite3.Connection) -> None:
             ADD COLUMN removed INTEGER NOT NULL DEFAULT 0
             CHECK (removed IN (0, 1))
             """
+        )
+
+
+def _migrate_to_v12(conn: sqlite3.Connection) -> None:
+    """accounts 加"微信上的当前昵称"。
+
+    公众号会改名,而 name 是主键、还被 articles.account_name(外键)和已导出的
+    vault 目录名引用着——改它要么被外键拒绝,要么让 6000 多篇文章和磁盘上的
+    markdown 对不上。所以改名只更新这一列,name 继续当不变的档案键。
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts'"
+    ).fetchone()
+    if not row:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+    if "display_name" not in cols:
+        conn.execute(
+            "ALTER TABLE accounts ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"
         )

@@ -54,6 +54,13 @@
   kb-web 管道 tab 的「管理公众号」弹窗(搜索添加 / 停用 / 移除),不要直接改库。
   终端等价物是 `cli accounts list|search|add|remove|enable|disable`;面板走的就是它。
   搜索添加需要扫码凭证(`cli login`),停用/移除只动本地库,凭证过期也能用。
+- **公众号改名只更新 `accounts.display_name`,永远不动 `name`。** `name` 是主键,
+  `articles.account_name` 是指向它的外键(没有 ON UPDATE CASCADE),已导出的
+  vault markdown 也按它归档——改它要么被外键拒绝,要么让 6000 多篇文章和磁盘
+  上的文件对不上。新名字从正文页的 `var nickname = htmlDecode(...)` 里读,
+  抓正文时顺手记下(见 `extract_account_nickname`)。别用页里裸的 `nickname:`,
+  那可能是推荐位里别人家的号。列表接口 getmsg 和 wxdown 的凭证都不带昵称,
+  所以**一个号不发新文章就不会更新名字**。
 - 别把 `collector/data` 或 `collector/.venv` 加进版本库:前者含 592M 库、264M 封面和
   带 token/cookie 的 `id_info.json`。它们现在是符号链接,`data/` 那条带斜杠的规则
   挡不住,所以 .gitignore 里另有不带斜杠的显式两行,别删。

@@ -97,6 +97,11 @@ async function reloadTargets() {
   renderTargets();
 }
 
+/* 显示名 vs 档案键:来源那边改了名,列表要显示新的那个,否则你在微信里
+ * 按看到的名字去搜会搜不着。但增删改一律还得用 name——它是后端的键。 */
+function tgtShown(t) { return t.display_name || t.name; }
+function tgtRenamed(t) { return !!t.display_name && t.display_name !== t.name; }
+
 function renderTargets() {
   const on = tgtList.filter(t => t.enabled).length;
   $('tgt-title').textContent = `订阅的${tgtLabel}`;
@@ -116,7 +121,9 @@ function renderTargets() {
 
   // 按名字排,不按启用状态:后端是"启用的在前",那样一点停用行就沉底、
   // 下一行顶上来接住第二次点击——连着停用几个时会误伤。位置稳定才点得准。
-  let rows = [...tgtList].sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+  // 排序用看得见的那个名字,否则改过名的行会排在一个没显示出来的键上。
+  let rows = [...tgtList].sort(
+    (a, b) => tgtShown(a).localeCompare(tgtShown(b), 'zh'));
   if (tgtOnlyPending) rows = rows.filter(t => t.ready === false);
   const box = $('tgt-list');
   const keepScroll = box.scrollTop;      // 整块重渲染会把长列表弹回顶部
@@ -126,9 +133,11 @@ function renderTargets() {
         <div style="min-width:0">
           <div class="tgt-name${t.enabled ? '' : ' off'}">
             ${t.ready === null || t.ready === undefined ? ''
-              : `<span class="tgt-dot ${t.ready ? 'on' : 'off'}"></span>`}${esc(t.name)}
+              : `<span class="tgt-dot ${t.ready ? 'on' : 'off'}"></span>`}${esc(tgtShown(t))}
           </div>
           <div class="tgt-detail">${esc([t.state, t.detail].filter(Boolean).join(' · '))}</div>
+          ${tgtRenamed(t)
+            ? `<div class="tgt-was">已改名,库里存作「${esc(t.name)}」</div>` : ''}
         </div>
         <div style="display:flex;gap:6px;flex:none">
           <button class="ghost" data-tgt-toggle="${esc(t.name)}"

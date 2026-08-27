@@ -103,7 +103,10 @@ class Target:
     """来源里的一个采集目标:一个公众号、一个 RSS 源、一个频道…"""
 
     id: str                                 # 采集器内部标识(fakeid / feed url…)
-    name: str                               # 显示名,也是各处引用它的键
+    name: str                               # 档案键:各处引用它,不随对方改名而变
+    # 目标在来源那边的当前名字。跟 name 分开是因为对方会改名(公众号尤其常见),
+    # 而 name 一旦被文章、导出目录引用就动不了了。空 = 没核对过或就等于 name。
+    display_name: str = ""
     enabled: bool = True                    # 是否参与采集
     detail: str = ""                        # 副标题(最近采集时间 / 简介),成品文案
     # 现在能不能采到它。None = 这种来源没有"逐个目标就绪"的概念(RSS 拉就完了),
@@ -113,7 +116,8 @@ class Target:
     state: str = ""                         # 就绪状态的成品文案("凭证有效"/"缺凭证")
 
     def as_dict(self) -> dict:
-        return {"id": self.id, "name": self.name, "enabled": self.enabled,
+        return {"id": self.id, "name": self.name,
+                "display_name": self.display_name, "enabled": self.enabled,
                 "detail": self.detail, "ready": self.ready, "state": self.state}
 
 

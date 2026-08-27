@@ -10,6 +10,10 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE TABLE IF NOT EXISTS accounts (
   name              TEXT PRIMARY KEY,
   fakeid            TEXT NOT NULL DEFAULT '',
+  -- 公众号在微信上的当前昵称,采集正文时顺手更新。它跟 name 分开存是因为
+  -- name 是主键、又被 articles.account_name 和已导出的 vault 目录引用着,
+  -- 改不动;能改的只有"显示成什么"。为空表示还没核对过。
+  display_name      TEXT NOT NULL DEFAULT '',
   latest_crawl_at   TEXT,
   in_crawl_config   INTEGER NOT NULL DEFAULT 1,
   -- 已移出订阅列表。不真删这一行:articles.account_name 是指向它的外键,

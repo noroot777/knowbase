@@ -256,6 +256,7 @@ class WeChatOACollector:
             Target(
                 id=str(row.get("fakeid") or ""),
                 name=str(row.get("name") or ""),
+                display_name=str(row.get("display_name") or ""),
                 enabled=bool(row.get("in_crawl_config")),
                 detail=f"最近采集 {row.get('latest_crawl_at') or '—'}",
                 ready=_CRED_READY.get(str(row.get("cred_state") or "")),

@@ -16,7 +16,7 @@
 输出协议:stdout 只出 NDJSON(每行一个事件),给上游程序解析;
 人类可读的提示一律走 stderr。这样同一个命令既能给知识库管道调,也能手敲。
 
-退出码:0 正常 / 1 一般错误 / 2 凭证失效 / 3 微信频率限制
+退出码:0 正常 / 1 一般错误 / 2 凭证失效
 """
 
 from __future__ import annotations
@@ -277,7 +277,7 @@ def cmd_accounts(args) -> int:
         creds = {biz: c.is_valid() for biz, c in profile_credential_store.records().items()}
         with ArticleRepository() as repo:
             rows = repo.conn.execute(
-                "SELECT name, fakeid, in_crawl_config, latest_crawl_at "
+                "SELECT name, fakeid, display_name, in_crawl_config, latest_crawl_at "
                 "FROM accounts WHERE removed=0 ORDER BY in_crawl_config DESC, name"
             ).fetchall()
         out = []
@@ -294,7 +294,11 @@ def cmd_accounts(args) -> int:
             mark_cred = {"valid": "凭证✓", "expired": "凭证✗", "missing": "无凭证"}
             for a in out:
                 mark = "✓" if a["in_crawl_config"] else "·"
-                info(f"  {mark} {_pad(a['name'], 26)}{mark_cred[a['cred_state']]}"
+                # 微信上已经改了名的,把新名字跟在后面——库里的键还是旧的那个
+                shown = a["name"]
+                if a["display_name"] and a["display_name"] != a["name"]:
+                    shown = f"{a['name']} →{a['display_name']}"
+                info(f"  {mark} {_pad(shown, 32)}{mark_cred[a['cred_state']]}"
                      f"  最近采集 {a['latest_crawl_at'] or '-'}")
         return EXIT_OK
 

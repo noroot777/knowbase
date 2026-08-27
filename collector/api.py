@@ -97,7 +97,13 @@ def _ingest_crawl_article(repo, account_name: str, article: dict) -> None:
     )
     repo.update_cover_path(article_id)
     repo.commit()
-    _fetch_article_detail_text(article_id, str(article.get("link") or ""), repo=repo)
+    nickname = _fetch_article_detail_text(
+        article_id, str(article.get("link") or ""), repo=repo
+    )
+    # 公众号改名后,只有正文页带着新名字。这里顺手记下来,面板才不会一直显示
+    # 一个在微信里已经搜不到的旧名字。改的是 display_name,不动主键 name。
+    if nickname and repo.set_account_display_name(account_name, nickname):
+        repo.commit()
     body_raw = repo.get_body_text(article_id) or ""
     if isinstance(body_raw, list):
         body_for_fts = "\n".join(str(x) for x in body_raw)
@@ -120,28 +126,31 @@ def _fetch_article_detail_text(
     link: str,
     *,
     repo=None,
-) -> bool:
+) -> str:
     """
     根据文章链接拉取正文：纯文本（LLM/检索）+ HTML（预览排版），写入 article_bodies。
     传入 repo 时复用同一连接；调用方应在网络抓取前 commit 元数据，避免长事务占锁。
+
+    返回这篇文章所属公众号的当前昵称（读不到、或本来就没抓时为空串）——它是
+    这一趟请求顺手捡的，调用方拿去更新订阅列表上的显示名。
     """
     if not link or not article_id:
-        return False
+        return ""
     from src.db.connection import db_write_with_retry
     from src.db.repository import ArticleRepository
-    from src.utils.wechat_body import fetch_article_body
+    from src.utils.wechat_body import fetch_article_body_full
 
     own_repo = repo is None
     if own_repo:
         repo = ArticleRepository()
     try:
         if repo.has_body(article_id):
-            return False
-        text, html = fetch_article_body(link)
+            return ""
+        text, html, nickname = fetch_article_body_full(link)
         if not text:
-            return False
+            return nickname
         if isinstance(text, str) and text in ("已删除", "请求错误"):
-            return False
+            return nickname
 
         def _persist() -> None:
             repo.set_body_text(article_id, text)
@@ -151,10 +160,10 @@ def _fetch_article_detail_text(
             repo.commit()
 
         db_write_with_retry(_persist)
-        return True
+        return nickname
     except Exception as e:
         print(f"[detail] 抓取正文失败 {article_id}: {e}")
-        return False
+        return ""
     finally:
         if own_repo:
             repo.close()
