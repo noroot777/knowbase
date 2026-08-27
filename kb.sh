@@ -356,7 +356,7 @@ else:
   echo "── 微信流量路由 ──"
   cli route 2>&1 | grep -o '"message": "[^"]*"' | cut -d'"' -f4 || echo "(读不到 Clash)"
   echo
-  echo "── 扫码凭证(搜号/翻列表用)──"
+  echo "── 扫码凭证(只用来搜号加号)──"
   cli status 2>/dev/null | tail -1 \
     | "$PY" -c 'import json,sys
 d = json.load(sys.stdin)
@@ -433,12 +433,12 @@ knowledge-base 操作入口 —— 每条命令跑完就还你终端,不用挂�
     ./kb.sh setup                   新 worktree 首次准备
 
   这两条会占着终端,因为它们本来就是要你盯着的:
-    ./kb.sh login                   扫码续期(搜号/翻列表用的那套凭证)
+    ./kb.sh login                   扫码续期(只有搜号加号用得到)
     ./kb.sh watch                   每 5 秒刷新,只列还没拿到凭证的号
 
-  两套凭证别搞混:login 那套是扫码拿的、全局一份,用来搜号和翻列表;
-  creds 那套是每个号各一份的文章凭证,只能靠在 Mac 微信里打开该号一篇文章、
-  由 wxdown 截下来。抓正文缺的是后者。
+  两套凭证别搞混:login 那套是扫码拿的、全局一份,现在只剩「搜公众号加号」
+  一个用途;creds 那套是每个号各一份的文章凭证,只能靠在 Mac 微信里打开该号
+  一篇文章、由 wxdown 截下来。抓文章(列表和正文)全靠后者,login 救不了。
 EOF
 }
 

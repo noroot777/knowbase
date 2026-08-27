@@ -10,6 +10,11 @@
 > - 采集器现在是**一次性 CLI**:`cd collector && ./.venv/bin/python -m cli <命令>`。
 >   日常不必直接碰它,仓库根目录的 `./kb.sh` 就是入口。
 > - `api.py` 只剩采集流程共用的底层(抓正文、下封面、搜号、查扫码凭证)。
+> - **文章列表也不走公众平台后台了**。微信关掉 `appmsgpublish` 之后,列表和
+>   正文都从 Mac 微信客户端的 `profile_ext` 通道拿(凭证由 wxdown 截)。旧的
+>   `appmsgpublish` 抓取链路——`main.py`、`src/processor/`、`src/web/`——已删除。
+>   扫码登录(`cli login`)只剩「搜公众号加号」一个用途,下文凡说"扫码续期就能
+>   继续抓文章"的地方都已经不成立。
 >
 > 下面「快速开始」「Docker 部署」「仓库结构」几节讲的是旧形态,当历史读。
 

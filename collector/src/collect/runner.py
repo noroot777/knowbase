@@ -1,15 +1,12 @@
 # -*- coding: utf-8 -*-
 """采集循环:一次性任务的实现,不依赖任何常驻状态。
 
-与 api.py 里那两个后台线程版本(_run_crawl_sqlite / _run_ranged_crawl)的区别:
+进度不写模块级状态,而是逐条 emit 出去,由调用方决定怎么呈现(CLI 打成 NDJSON
+给上游读)。没有全局状态 = 可以放心并发跑多个实例。不做 LLM 打标/摘要,那是
+WeChatOA 自家阅读器的事,知识库侧另有提取阶段。
 
-- 进度不写模块级 _crawl_state,而是逐条 emit 出去,由调用方决定怎么呈现
-  (CLI 打成 NDJSON 给上游读)。没有全局状态 = 可以放心并发跑多个实例。
-- 不做 LLM 打标/摘要。那是给 WeChatOA 自家阅读器用的,知识库侧另有提取阶段。
-- 不写 operation_logs.jsonl。日志归调用方。
-
-入库单篇仍复用 api.py 里久经验证的 _ingest_crawl_article(封面下载、正文抓取、
-FTS、字数一条龙),那部分逻辑与是不是常驻服务无关。
+入库单篇复用 api.py 里久经验证的 _ingest_crawl_article(封面下载、正文抓取、
+FTS、字数一条龙)。
 """
 
 from __future__ import annotations
@@ -32,8 +29,7 @@ def _new_result() -> dict[str, Any]:
     return {
         "new_articles": 0,
         "errors": [],
-        "auth_error": False,      # 凭证失效,整轮中止
-        "freq_control": False,    # 微信频率限制,整轮中止
+        "auth_error": False,      # 一份文章凭证都没有,整轮没必要跑
         "done": 0,
         "total": 0,
     }
@@ -58,15 +54,12 @@ def collect(
 ) -> dict[str, Any]:
     """采集入口。给了 since+until 走区间补抓,否则走日常增量。
 
-    返回汇总 dict;致命中断(凭证/限流)通过 auth_error / freq_control 标记,
-    不抛异常——已经抓到的部分仍然有效,调用方该让它进入后续阶段。
+    返回汇总 dict;一份文章凭证都没有时通过 auth_error 标记并直接收工,
+    单个号的失败只记进 errors,不影响其余的号。
     """
     import api
-    from src.crawler.wechat_request import (
-        CredentialExpiredError,
-        FreqControlError,
-        WechatRequest,
-    )
+    from src.crawler.profile_ext import profile_credential_store
+    from src.crawler.wechat_request import WechatRequest
     from src.db.repository import ArticleRepository
     from src.utils.data_manager import data_manager
     from src.utils.helpers import time_now
@@ -76,6 +69,15 @@ def collect(
     data_manager.reload("issues_message")
 
     result = _new_result()
+    if not profile_credential_store.has_records():
+        # 文章列表和正文都靠 wxdown 截下来的 profile_ext 凭证。一份都没有时照常
+        # 开跑的话,44 个号会挨个失败,中间还各睡 2.5-4 秒——白打一遍微信接口,
+        # 换来一屏一模一样的报错。
+        result["auth_error"] = True
+        result["errors"].append("一份文章凭证都没有,wxdown 没在跑或还没截到")
+        emit({"stage": "crawl", "status": "done", **result})
+        return result
+
     with ArticleRepository() as repo:
         pairs, missing = _resolve_targets(repo, targets)
         for name in missing:
@@ -98,15 +100,6 @@ def collect(
                 result["new_articles"] += got
                 repo.set_account_latest_crawl(name, time_now())
                 repo.commit()
-            except CredentialExpiredError as e:
-                result["auth_error"] = True
-                result["errors"].append(str(e))
-                break
-            except FreqControlError as e:
-                # 账号级限流:继续打剩下的号只会延长封禁窗口,立即收工
-                result["freq_control"] = True
-                result["errors"].append(str(e))
-                break
             except Exception as e:
                 result["errors"].append(f"{name}: {e}")
             finally:
@@ -122,7 +115,7 @@ def _collect_one_incremental(repo, wechat, name: str, fakeid: str) -> int:
     import api
 
     existing = repo.get_blogs_for_account(name)
-    fresh = wechat.fakeid2message_update(fakeid, existing)
+    fresh = wechat.fetch_new_articles(fakeid, existing)
     for article in fresh:
         api._ingest_crawl_article(repo, name, article)
     return len(fresh)
@@ -138,7 +131,7 @@ def _collect_one_ranged(repo, wechat, name: str, fakeid: str,
 
     got = 0
     for page in range(api._RANGE_MAX_PAGES_PER_ACCOUNT):
-        articles = wechat.fetch_appmsg_preview_list(
+        articles = wechat.fetch_article_page(
             fakeid, begin=page * api._RANGE_PAGE_SIZE, count=api._RANGE_PAGE_SIZE)
         if not articles:
             break

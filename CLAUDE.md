@@ -24,9 +24,15 @@
   于是 stop 时的 `kill -INT` 也被忽略,只能降级 SIGTERM,恰好会把 wxdown 的
   multiprocessing 子进程丢成孤儿。daemonize 借 python 做 fork+setsid(macOS 没有
   setsid 命令)并把 SIGINT 恢复默认:自成会话不受终端影响,同时 stop 能优雅收尾。
-- **两套凭证别搞混**:`login` 那套是扫码拿的、全局一份,用来搜公众号和翻文章列表;
-  `creds` 那套是每个号各一份的文章凭证,只能靠在 Mac 微信里打开该号一篇文章、
-  由 wxdown-service 的 mitm 截下来。抓正文缺的是后者,续期方式完全不同。
+- **两套凭证别搞混**:`login` 那套是扫码拿的、全局一份,微信关掉 `appmsgpublish`
+  之后它只剩「搜公众号加号」一个用途;`creds` 那套是每个号各一份的文章凭证,
+  只能靠在 Mac 微信里打开该号一篇文章、由 wxdown-service 的 mitm 截下来。
+  **抓文章——列表和正文都算——全靠后者**,`login` 救不了,续期方式也完全不同。
+- 公众平台后台那套采集(`appmsgpublish` 翻列表)的代码已经删干净了,包括
+  `main.py`、`src/processor/`、`src/web/` 和 `profile_adapter` 的 monkey-patch。
+  留着它不是无害的:原来"某个号没有 profile_ext 凭证 → 悄悄退回旧接口 →
+  invalid session → 整轮采集中止 → 提示去跑 login"这条路,每一步都是错的。
+  现在 `WechatRequest` 本身就是 profile_ext 实现,缺凭证只影响那一个号。
 - wxdown 把抓到的凭证写在 `wxdown-service/resources/data/credentials.json`,
   `cli creds` 直接读这个文件导入。原来那条 "wxdown WebSocket → 前端 :5173 →
   后端 :8000 POST" 的转发链路只是在搬运这个文件,两个常驻服务都已不需要。

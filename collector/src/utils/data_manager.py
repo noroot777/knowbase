@@ -2,24 +2,11 @@ import json
 import os
 import shutil
 import threading
-from dataclasses import dataclass
 from pathlib import Path
 
 headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.198 Safari/537.36',
 }
-
-
-@dataclass
-class Message_Info:
-    id: str
-    title: str
-    digest: str
-    link: str
-    cover: str
-    create_time: str
-    is_deleted: bool
-    item_show_type: int
 
 
 class JsonFileManager:

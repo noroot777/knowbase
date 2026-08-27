@@ -30,7 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-EXIT_OK, EXIT_ERROR, EXIT_AUTH, EXIT_FREQ = 0, 1, 2, 3
+EXIT_OK, EXIT_ERROR, EXIT_AUTH = 0, 1, 2
 
 
 def emit(event: dict) -> None:
@@ -65,23 +65,23 @@ def cmd_status(args) -> int:
     ok, reason = api._check_auth_valid()
     expired = bool(auth.get("credential_expired"))
     label = auth.get("credential_expiry_label") or ""
+    # 这套扫码凭证现在只剩搜号一个用途:文章列表和正文都走 wxdown 截下来的
+    # profile_ext 凭证。所以它失效不影响同步,文案别吓人。
     if not ok:
-        message = f"凭证失效:{reason}"
-        hint = "跑 `python -m cli login` 重新扫码"
+        message = f"扫码凭证失效:{reason}"
+        hint = "只影响搜号加号,抓文章不用它;要加号就跑 `python -m cli login`"
     elif reason:
-        # ok=True 但 reason 非空,按 _check_auth_valid 的约定是"没测出来",不是
-        # "测过没问题":要么网络异常,要么 bootstrap 把它降级成了 Mac 微信的
-        # profile_ext 凭证(采集照常,但搜号/翻列表用的仍是扫码那套)。
-        # 以前这两种也一律说成"实测仍可用"——于是扫码 token 早就 invalid session
-        # 了,这一栏还在报平安,而它恰恰是用户用来决定跑不跑 login 的地方。
+        # ok=True 但 reason 非空,按 _check_auth_valid 的约定是"没测出来"(网络异常),
+        # 不是"测过没问题"。以前这种也说成"实测仍可用",于是 token 早就 invalid
+        # session 了这一栏还在报平安。
         message = f"没能实测({reason})" + (f";本地估算{label}" if expired else "")
-        hint = "搜号/翻列表要用它,不放心就跑一次 `python -m cli login`"
+        hint = "只有搜号加号要用它,不放心就跑一次 `python -m cli login`"
     else:
         message = "凭证有效" + (f"(本地估算{label},实测仍可用)" if expired else "")
         hint = ""
     emit({
-        # ready 仍看 ok:降级到 profile_ext 时采集是能继续的,这里报不可用会
-        # 让面板把整个来源判成离线,反而拦住本来跑得通的同步。
+        # ready 说的是"这套扫码凭证能不能搜号"。它不拦抓取——抓取只认文章凭证,
+        # 那个由 creds 那栏单独报。
         "ready": ok,
         "message": message,
         "hint": hint,
@@ -105,11 +105,8 @@ def cmd_collect(args) -> int:
 
     result = collect(emit, targets=targets or None, since=since, until=until)
     if result["auth_error"]:
-        info("凭证失效,采集中止。跑 `python -m cli login` 续期后重试")
+        info("一份文章凭证都没有,没开跑。先起 wxdown,再在 Mac 微信里打开各号的一篇文章")
         return EXIT_AUTH
-    if result["freq_control"]:
-        info("触发微信频率限制,已中止。等 30-60 分钟再跑")
-        return EXIT_FREQ
     info(f"采集完成:新增 {result['new_articles']} 篇"
          + (f",{len(result['errors'])} 个号失败" if result["errors"] else ""))
     return EXIT_OK

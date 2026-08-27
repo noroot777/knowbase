@@ -39,7 +39,7 @@ _CRED_READY = {"valid": True, "expired": False, "missing": False}
 _CRED_TEXT = {"valid": "凭证就绪", "expired": "凭证已失效", "missing": "还没有凭证"}
 
 # CLI 的退出码约定,见采集器仓库的 cli.py
-EXIT_AUTH, EXIT_FREQ = 2, 3
+EXIT_AUTH = 2
 
 # 状态缓存时长。面板每 1.5 秒轮询一次,而每次 status 都要起一个 Python 子进程、
 # 并向微信发一次凭证探测请求——不缓存就是每秒起进程 + 高频打微信接口(风控)。
@@ -174,14 +174,11 @@ class WeChatOACollector:
         failures = [{"title": str(e), "reason": "账号采集失败"} for e in errors]
         new = last.get("new_articles", 0)
         if code == EXIT_AUTH:
+            # 一份文章凭证都没有,采集器直接没开跑。login 那套扫码凭证救不了它
             _stage("crawl", "error",
-                   "凭证失效,到采集器目录跑 `python -m cli login` 扫码续期",
+                   "一份文章凭证都没有:先 `./kb.sh prep` 起 wxdown,"
+                   "再在 Mac 微信里打开各号的一篇文章",
                    failures=failures)
-        elif code == EXIT_FREQ:
-            _stage("crawl", "error",
-                   f"微信频率限制,已中断(新增 {new} 篇)。等 30-60 分钟后重跑",
-                   failures=[{"title": str(e), "reason": "触发频率限制"}
-                             for e in errors])
         elif code != 0:
             _stage("crawl", "error", f"采集失败(退出码 {code})", failures=failures)
         else:

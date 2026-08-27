@@ -415,7 +415,7 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         return row is not None
 
     def get_blogs_for_account(self, account_name: str) -> list[dict[str, Any]]:
-        """供 fakeid2message_update 去重用的现有文章列表。"""
+        """供增量抓取去重用的现有文章列表。"""
         rows = self.conn.execute(
             """
             SELECT * FROM articles
