@@ -129,6 +129,7 @@ function renderTargets() {
               : `<span class="tgt-dot ${t.ready ? 'on' : 'off'}"></span>`}${esc(t.name)}
           </div>
           <div class="tgt-detail">${esc([t.state, t.detail].filter(Boolean).join(' · '))}</div>
+          ${t.id ? `<div class="tgt-id" title="点一下全选,可直接复制">${esc(t.id)}</div>` : ''}
         </div>
         <div style="display:flex;gap:6px;flex:none">
           <button class="ghost" data-tgt-toggle="${esc(t.name)}"
@@ -161,6 +162,7 @@ function renderTgtCands() {
         <div style="min-width:0">
           <div class="tgt-name">${esc(c.name)}</div>
           <div class="tgt-detail">${esc(c.detail || '')}</div>
+          ${c.id ? `<div class="tgt-id">${esc(c.id)}</div>` : ''}
         </div>
         <button class="ghost" data-tgt-add="${esc(c.name)}" data-tgt-id="${esc(c.id)}"
                 style="padding:3px 12px;font-size:12px;flex:none" ${added ? 'disabled' : ''}>

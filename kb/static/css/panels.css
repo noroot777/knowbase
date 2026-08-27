@@ -213,6 +213,12 @@ body.chat-mode { padding-bottom: 28px; }
 }
 .tgt-name.off { color: var(--muted); text-decoration: line-through; }
 .tgt-detail { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+/* fakeid:等宽 + 可选中,它的用处就是拿去跟 wxdown 的抓包结果对号 */
+.tgt-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px; color: var(--muted); opacity: .75; margin-top: 2px;
+  user-select: all; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 #tgt-list .empty { padding: 36px 0; }
 .tgt-dot {
   display: inline-block; width: 7px; height: 7px; border-radius: 50%;
