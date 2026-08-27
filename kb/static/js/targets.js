@@ -102,6 +102,13 @@ async function reloadTargets() {
 function tgtShown(t) { return t.display_name || t.name; }
 function tgtRenamed(t) { return !!t.display_name && t.display_name !== t.name; }
 
+/* 小圆点的颜色。后端给 tone 就照它来(ok 绿 / warn 黄 / bad 红),
+ * 没给就退回"能采=绿,不能采=红"——tone 是后加的,别让老来源渲染成没颜色。*/
+function tgtTone(t) {
+  if (t.tone) return t.tone;
+  return t.ready ? 'ok' : 'bad';
+}
+
 function renderTargets() {
   const on = tgtList.filter(t => t.enabled).length;
   $('tgt-title').textContent = `订阅的${tgtLabel}`;
@@ -114,7 +121,8 @@ function renderTargets() {
   if (tgtReadiness) {
     const left = tgtReadiness.total - tgtReadiness.ready;
     $('tgt-ready-text').textContent = left
-      ? `还有 ${left} 个没拿到凭证——在 Mac 微信里打开它们各一篇文章即可`
+      ? `还有 ${left} 个凭证不新鲜(黄=放太久,红=没有或已失效)`
+        + '——去 Mac 微信里各点开一篇文章'
       : '全部就绪,可以同步了';
     $('tgt-ready-text').style.color = left ? 'var(--muted)' : 'var(--ok)';
   }
@@ -133,7 +141,7 @@ function renderTargets() {
         <div style="min-width:0">
           <div class="tgt-name${t.enabled ? '' : ' off'}">
             ${t.ready === null || t.ready === undefined ? ''
-              : `<span class="tgt-dot ${t.ready ? 'on' : 'off'}"></span>`}${esc(tgtShown(t))}
+              : `<span class="tgt-dot ${tgtTone(t)}"></span>`}${esc(tgtShown(t))}
           </div>
           <div class="tgt-detail">${esc([t.state, t.detail].filter(Boolean).join(' · '))}</div>
           ${tgtRenamed(t)

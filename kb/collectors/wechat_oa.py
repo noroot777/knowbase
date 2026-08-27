@@ -33,10 +33,14 @@ BACKEND_PY = BACKEND_DIR / ".venv" / "bin" / "python"
 # 采集产物落在 vault 里的 source 名(历史上换过两次,一并认)
 VAULT_SOURCES = ("dr-gzh", "wechat", "gzh")
 
-# CLI 的凭证三态 → 契约的 ready/文案。缺凭证和凭证失效对用户是两回事:
-# 前者"这个号还没去点过文章",后者"点过但已经废了,得重点一次"。
-_CRED_READY = {"valid": True, "expired": False, "missing": False}
-_CRED_TEXT = {"valid": "凭证就绪", "expired": "凭证已失效", "missing": "还没有凭证"}
+# CLI 的凭证四态 → 契约的 ready/文案/色调。三种"不绿"对用户是三回事:
+# missing 这个号还没去点过文章;expired 点过但服务端已经否了,得重点一次;
+# stale 点过、还没被否掉,但截下来有一阵子了——微信这凭证撑不了多久,
+# 采集时照样会拿它去试,只是别再当成"已就绪"骗自己。
+_CRED_READY = {"valid": True, "stale": False, "expired": False, "missing": False}
+_CRED_TEXT = {"valid": "凭证就绪", "stale": "凭证放太久,可能已失效",
+              "expired": "凭证已失效", "missing": "还没有凭证"}
+_CRED_TONE = {"valid": "ok", "stale": "warn", "expired": "bad", "missing": "bad"}
 
 # CLI 的退出码约定,见采集器仓库的 cli.py
 EXIT_AUTH = 2
@@ -261,6 +265,7 @@ class WeChatOACollector:
                 detail=f"最近采集 {row.get('latest_crawl_at') or '—'}",
                 ready=_CRED_READY.get(str(row.get("cred_state") or "")),
                 state=_CRED_TEXT.get(str(row.get("cred_state") or ""), ""),
+                tone=_CRED_TONE.get(str(row.get("cred_state") or ""), ""),
             )
             for row in (data.get("accounts") or [])
             if row.get("name")
@@ -274,7 +279,7 @@ class WeChatOACollector:
         got, ready, total = (data.get("imported", 0),
                              data.get("ready", 0), data.get("total", 0))
         return (f"新拿到 {got} 个号的凭证," if got else "没有新凭证,") + \
-               f"当前 {ready}/{total} 个号可采"
+               f"当前 {ready}/{total} 个号凭证新鲜"
 
     def search_targets(self, query: str) -> list[Target]:
         data = self._accounts("search", query, timeout=60)

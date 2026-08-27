@@ -20,6 +20,27 @@ import requests
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 DEFAULT_CREDENTIAL_FILE = ROOT_DIR / "data" / "profile_credentials.json"
 PROFILE_ENDPOINT = "https://mp.weixin.qq.com/mp/profile_ext"
+
+# 凭证截下来多久之内算"新鲜"。这不是微信的真实 TTL——实测同一批 30 分钟前
+# 截的凭证,三个里两个还能用、一个已经 no session,微信那边没有整齐的过期点。
+# 它的用途只有一个:别再把昨天的存货显示成绿点。超过这个时长只是"没把握",
+# 采集照样会拿它去试(fetch_article_page 用的是 allow_invalid=True),
+# 试通了会自动标回有效。嫌误报就调 WXDOWN_CRED_FRESH_MINUTES。
+def _fresh_seconds() -> int:
+    raw = os.getenv("WXDOWN_CRED_FRESH_MINUTES", "").strip()
+    try:
+        minutes = int(raw) if raw else 20
+    except ValueError:
+        minutes = 20
+    return max(1, minutes) * 60
+
+
+# 凭证的三种上报状态(还有个 "missing" 是压根没这条记录,由调用方给):
+#   valid   截得新,大概率能用
+#   stale   超过 _fresh_seconds() 了,没实测过,可能还行
+#   expired 服务端明确回过 no session
+CRED_VALID, CRED_STALE, CRED_EXPIRED = "valid", "stale", "expired"
+
 WECHAT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 "
@@ -55,8 +76,27 @@ class ProfileCredential:
     invalidated_at: int = 0
 
     def is_valid(self, now: int | None = None) -> bool:
-        """只采用服务端结论；不再按本地固定时长提前判过期。"""
+        """只采用服务端结论；不再按本地固定时长提前判过期。
+
+        别在这里加时长判断:它是 ``get(allow_invalid=False)`` 的闸门,
+        收紧了就等于"过了 20 分钟不许再采集",而实测超时的凭证多半还能用。
+        年龄是另一回事,看 :meth:`is_fresh`。
+        """
         return self.invalidated_at <= 0
+
+    def age_seconds(self, now: int | None = None) -> int:
+        return max(0, int(now if now is not None else time.time()) - self.captured_at)
+
+    def is_fresh(self, now: int | None = None) -> bool:
+        """截下来还没多久——只用来上报"有没有把握",不参与放行。"""
+        return self.age_seconds(now) < _fresh_seconds()
+
+
+def credential_state(credential: ProfileCredential, now: int | None = None) -> str:
+    """给一条凭证定性:CRED_EXPIRED / CRED_STALE / CRED_VALID。"""
+    if not credential.is_valid(now):
+        return CRED_EXPIRED
+    return CRED_VALID if credential.is_fresh(now) else CRED_STALE
 
 
 def _first(query: dict[str, list[str]], name: str) -> str:
@@ -268,7 +308,8 @@ def _format_article_time(timestamp: int) -> str:
 
 
 def credential_public_status(credential: ProfileCredential) -> dict[str, Any]:
-    valid = credential.is_valid()
+    now = int(time.time())
+    valid = credential.is_valid(now)
     return {
         "biz": credential.biz,
         "captured_name": credential.name,
@@ -276,6 +317,10 @@ def credential_public_status(credential: ProfileCredential) -> dict[str, Any]:
         "expires_at": "",
         "seconds_remaining": -1 if valid else 0,
         "valid": valid,
+        # state 比 valid 细一档:valid 只说"服务端还没否掉它",state 会把
+        # 放了太久、没人验证过的那批单拎出来标成 stale(见 credential_state)
+        "state": credential_state(credential, now),
+        "age_seconds": credential.age_seconds(now),
         "invalidated_at": _format_time(credential.invalidated_at),
     }
 

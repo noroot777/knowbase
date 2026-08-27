@@ -369,7 +369,10 @@ if d.get("hint"): print("  " + d["hint"])' \
     | "$PY" -c 'import json,sys
 d = json.load(sys.stdin)
 extra = "(本次新导入 %d 条)" % d["imported"] if d["imported"] else ""
-print("%d/%d 个号可采%s" % (d["ready"], d["total"], extra))' \
+n = lambda s: sum(1 for a in d["accounts"] if a["state"] == s)
+print("%d/%d 个号凭证新鲜%s" % (d["ready"], d["total"], extra))
+print("  放太久 %d · 已失效 %d · 没凭证 %d(前两类采集时照样会试一把)"
+      % (n("stale"), n("expired"), n("missing")))' \
     || echo "(读不到)"
 }
 

@@ -48,6 +48,17 @@ def _pad(text: str, width: int) -> str:
     return text + " " * max(1, width - shown)
 
 
+def _ago(seconds: int) -> str:
+    """"多久以前"的粗略说法。隔夜的存货写成 1396 分钟前没人读得出是昨天。"""
+    if seconds < 0:
+        return ""
+    if seconds < 3600:
+        return f"{seconds // 60} 分钟前"
+    if seconds < 48 * 3600:
+        return f"{seconds // 3600} 小时前"
+    return f"{seconds // 86400} 天前"
+
+
 # ── status ──────────────────────────────────────────────────────────────────────
 
 def cmd_status(args) -> int:
@@ -210,12 +221,13 @@ def cmd_creds(args) -> int:
     for r in rows:
         cur = status.get(r["fakeid"])
         if cur is None:
-            state, captured = "missing", ""
+            state, captured, age = "missing", "", -1
         else:
-            state = "valid" if cur["valid"] else "expired"
-            captured = cur["captured_at"]
+            state, captured = cur["state"], cur["captured_at"]
+            age = cur["age_seconds"]
         accounts.append({"name": r["name"], "fakeid": r["fakeid"],
-                         "state": state, "captured_at": captured})
+                         "state": state, "captured_at": captured,
+                         "age_seconds": age})
 
     ready = sum(1 for a in accounts if a["state"] == "valid")
     if args.json:
@@ -229,11 +241,13 @@ def cmd_creds(args) -> int:
     elif imported:
         info(f"从 wxdown 导入 {imported} 条新凭证")
     info(f"{ready}/{len(accounts)} 个公众号已就绪:")
-    label = {"valid": "✓ 有效", "expired": "✗ 已失效", "missing": "· 没凭证"}
+    label = {"valid": "✓ 有效", "stale": "~ 放太久", "expired": "✗ 已失效",
+             "missing": "· 没凭证"}
     for a in accounts:
         if args.missing_only and a["state"] == "valid":
             continue
-        info(f"  {label[a['state']]}  {_pad(a['name'], 26)}{a['captured_at']}")
+        aged = f"({_ago(a['age_seconds'])})" if a["state"] == "stale" else ""
+        info(f"  {label[a['state']]}  {_pad(a['name'], 26)}{a['captured_at']} {aged}")
     return EXIT_OK
 
 
@@ -272,9 +286,10 @@ def cmd_accounts(args) -> int:
         # 顺带把每个号的文章凭证状态带上:面板要按"哪些还没就绪"来提示,
         # 分两条命令拿就得起两个子进程。这里只读本地凭证文件,不碰 wxdown、
         # 不走网络,够便宜——从 wxdown 导入是 `creds` 的活。
-        from src.crawler.profile_ext import profile_credential_store
+        from src.crawler.profile_ext import credential_state, profile_credential_store
 
-        creds = {biz: c.is_valid() for biz, c in profile_credential_store.records().items()}
+        creds = {biz: credential_state(c)
+                 for biz, c in profile_credential_store.records().items()}
         with ArticleRepository() as repo:
             rows = repo.conn.execute(
                 "SELECT name, fakeid, display_name, in_crawl_config, latest_crawl_at "
@@ -282,16 +297,15 @@ def cmd_accounts(args) -> int:
             ).fetchall()
         out = []
         for r in rows:
-            valid = creds.get(r["fakeid"])
             out.append({**dict(r),
-                        "cred_state": "missing" if valid is None
-                        else ("valid" if valid else "expired")})
+                        "cred_state": creds.get(r["fakeid"], "missing")})
         if args.json:
             emit({"accounts": out})
         else:
             ready = sum(1 for a in out if a["cred_state"] == "valid")
             info(f"共 {len(out)} 个公众号(✓ = 参与采集),{ready} 个凭证就绪:")
-            mark_cred = {"valid": "凭证✓", "expired": "凭证✗", "missing": "无凭证"}
+            mark_cred = {"valid": "凭证✓", "stale": "凭证~", "expired": "凭证✗",
+                         "missing": "无凭证"}
             for a in out:
                 mark = "✓" if a["in_crawl_config"] else "·"
                 # 微信上已经改了名的,把新名字跟在后面——库里的键还是旧的那个

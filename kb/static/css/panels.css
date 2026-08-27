@@ -223,5 +223,7 @@ body.chat-mode { padding-bottom: 28px; }
   display: inline-block; width: 7px; height: 7px; border-radius: 50%;
   margin-right: 7px; vertical-align: middle;
 }
-.tgt-dot.on { background: var(--ok); }
-.tgt-dot.off { background: #d9a03c; }
+/* 绿=凭证新鲜可采;黄=还在但放太久了,采集会去试、不算就绪;红=没有或已失效 */
+.tgt-dot.ok { background: var(--ok); }
+.tgt-dot.warn { background: #d9a03c; }
+.tgt-dot.bad { background: #c33; }

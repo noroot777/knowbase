@@ -114,11 +114,16 @@ class Target:
     # 各自的文章凭证),差哪几个必须能一眼看出来,否则只能抓完看谁失败。
     ready: bool | None = None
     state: str = ""                         # 就绪状态的成品文案("凭证有效"/"缺凭证")
+    # 就绪状态的色调,给面板上那颗小圆点用:ok 绿 / warn 黄 / bad 红。
+    # 跟 ready 分开是因为 ready 要参与"多少个可采"的计数,只能是是非题,
+    # 而中间状态(凭证放太久、没验证过)既不该计入可采、也不该跟"压根没有"同色。
+    tone: str = ""
 
     def as_dict(self) -> dict:
         return {"id": self.id, "name": self.name,
                 "display_name": self.display_name, "enabled": self.enabled,
-                "detail": self.detail, "ready": self.ready, "state": self.state}
+                "detail": self.detail, "ready": self.ready,
+                "state": self.state, "tone": self.tone}
 
 
 @runtime_checkable

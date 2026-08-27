@@ -33,6 +33,14 @@
   留着它不是无害的:原来"某个号没有 profile_ext 凭证 → 悄悄退回旧接口 →
   invalid session → 整轮采集中止 → 提示去跑 login"这条路,每一步都是错的。
   现在 `WechatRequest` 本身就是 profile_ext 实现,缺凭证只影响那一个号。
+- **文章凭证有四态,别再只分"有/没有"**:`missing`(没截到)、`expired`(服务端
+  回过 no session,`invalidated_at>0`)、`stale`(还没被否掉,但截下来超过
+  `WXDOWN_CRED_FRESH_MINUTES`,默认 20 分钟)、`valid`。判定在
+  `profile_ext.credential_state()`。**stale 只影响上报,不影响放行**——
+  `is_valid()` 是 `get(allow_invalid=False)` 的闸门,按年龄收紧它就等于
+  "过了 20 分钟不许采",而实测 30 分钟的凭证三个里两个还能用。stale 不计入
+  「几个就绪」,面板上是黄点;采集照样拿它去试,试通了 `mark_valid` 转绿。
+  没有这一档的话,昨天截的 44 条今天全是绿点,面板报 44/44 就绪。
 - wxdown 把抓到的凭证写在 `wxdown-service/resources/data/credentials.json`,
   `cli creds` 直接读这个文件导入。原来那条 "wxdown WebSocket → 前端 :5173 →
   后端 :8000 POST" 的转发链路只是在搬运这个文件,两个常驻服务都已不需要。
