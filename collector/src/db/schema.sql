@@ -14,6 +14,10 @@ CREATE TABLE IF NOT EXISTS accounts (
   -- name 是主键、又被 articles.account_name 和已导出的 vault 目录引用着,
   -- 改不动;能改的只有"显示成什么"。为空表示还没核对过。
   display_name      TEXT NOT NULL DEFAULT '',
+  -- 上次去正文页核对昵称的时间。跟 display_name 分开是因为"核对过、名字没变"
+  -- 和"还没核对过"是两回事:只看 display_name 空不空的话,补上一次之后就再也
+  -- 不会去看第二眼,这个号以后再改名就永远发现不了。
+  display_checked_at TEXT,
   latest_crawl_at   TEXT,
   in_crawl_config   INTEGER NOT NULL DEFAULT 1,
   -- 已移出订阅列表。不真删这一行:articles.account_name 是指向它的外键,

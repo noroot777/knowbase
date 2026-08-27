@@ -8,7 +8,7 @@ import re
 
 from src.utils.helpers import time_now
 
-LATEST_SCHEMA_VERSION = 12
+LATEST_SCHEMA_VERSION = 13
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -123,6 +123,15 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (12, time_now()),
+        )
+        conn.commit()
+        current = 12
+
+    if current < 13:
+        _migrate_to_v13(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (13, time_now()),
         )
         conn.commit()
 
@@ -400,3 +409,21 @@ def _migrate_to_v12(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE accounts ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"
         )
+
+
+def _migrate_to_v13(conn: sqlite3.Connection) -> None:
+    """accounts 加"上次核对昵称的时间"。
+
+    v12 的 display_name 只回答"当前叫什么",回答不了"这个名字什么时候核对的"。
+    补名字那条路径原来靠 display_name 空不空来决定要不要抓——补上一次之后
+    就再也不看第二眼,停更号后续再改名就永远发现不了。有了这一列才能按
+    间隔重新核对(见 runner._refresh_display_name)。
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts'"
+    ).fetchone()
+    if not row:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+    if "display_checked_at" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN display_checked_at TEXT")

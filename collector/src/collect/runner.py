@@ -11,8 +11,10 @@ FTS、字数一条龙)。
 
 from __future__ import annotations
 
+import os
 import random
 import time
+from datetime import datetime
 from typing import Any, Callable
 
 Emit = Callable[[dict[str, Any]], None]
@@ -111,21 +113,40 @@ def collect(
     return result
 
 
-def _refresh_display_name(repo, name: str) -> None:
-    """给还没核对过显示名的号补一次昵称,失败就算了。
+def _display_recheck_seconds() -> int:
+    """隔多久重新核对一次昵称。调小=改名发现得快,调大=省请求。"""
+    raw = os.getenv("GZH_DISPLAY_RECHECK_DAYS", "").strip()
+    try:
+        days = int(raw) if raw else 7
+    except ValueError:
+        days = 7
+    return max(1, days) * 86400
 
-    改名本来只在抓**新文章正文**时顺手记下来,可"改了名"和"不发新文章"常常
+
+def _checked_recently(stamp: str, now: float) -> bool:
+    if not stamp:
+        return False
+    try:
+        checked = datetime.strptime(stamp, "%Y-%m-%d %H:%M").timestamp()
+    except ValueError:
+        return False                # 时间戳读不懂就当没核对过,重抓一次不亏
+    return 0 <= now - checked < _display_recheck_seconds()
+
+
+def _refresh_display_name(repo, name: str) -> None:
+    """核对一次这个号在微信上的昵称,失败就算了。
+
+    改名本来只搭在"抓新文章正文"这趟车上,可"改了名"和"不发新文章"常常
     是同一批号——而那恰恰是用户在微信里搜不到、最需要看见新名字的那批。
-    所以每个号补一次:从库里挑一篇已有文章,单独抓一次正文页只读
+    所以隔一阵子补一次:从库里挑一篇已有文章,单独抓一次正文页只读
     `var nickname`(见 extract_account_nickname),不写正文、不动文章表。
 
-    只在 display_name 还空着时做。核对完哪怕昵称跟主键一模一样也照样写进去,
-    这样下一轮就不会再抓——否则没改过名的号每次采集都要白抓一篇。
+    节流看的是 `display_checked_at` 而不是 display_name 空不空:后者只能
+    回答"当前叫什么",补上一次之后就再也不会看第二眼,这个号以后再改名
+    就永远发现不了。核对完无论名字变没变都记一笔时间,所以稳定状态下
+    每个号 `GZH_DISPLAY_RECHECK_DAYS` 天才多花一次请求。
     """
-    row = repo.conn.execute(
-        "SELECT display_name FROM accounts WHERE name=?", (name,)
-    ).fetchone()
-    if row is None or (row["display_name"] or "").strip():
+    if _checked_recently(repo.display_name_checked_at(name), time.time()):
         return
     article = repo.conn.execute(
         "SELECT link FROM articles WHERE account_name=? AND is_user_deleted=0 "
@@ -139,8 +160,10 @@ def _refresh_display_name(repo, name: str) -> None:
         _text, _html, nickname = fetch_article_body_full(str(article["link"]))
     except Exception:
         return                      # 网络/凭证的问题不该拖累这一轮采集
-    if nickname:
-        repo.set_account_display_name(name, nickname)
+    if not nickname:
+        return                      # 没读到就不算核对过,下一轮再来
+    repo.set_account_display_name(name, nickname)
+    repo.mark_display_name_checked(name)
 
 
 def _collect_one_incremental(repo, wechat, name: str, fakeid: str) -> int:

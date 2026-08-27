@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -239,6 +241,13 @@ class RefreshDisplayNameTests(unittest.TestCase):
         return self.repo.conn.execute(
             "SELECT display_name FROM accounts WHERE name='旧名字'").fetchone()[0]
 
+    def _age_the_check(self, days: int = 8) -> None:
+        """把"上次核对时间"往前推,模拟节流窗口已经过去。"""
+        old = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
+        self.repo.conn.execute(
+            "UPDATE accounts SET display_checked_at=? WHERE name='旧名字'", (old,))
+        self.repo.commit()
+
     def _run(self, nickname: str = "新名字", *, boom: bool = False):
         from src.collect import runner
 
@@ -264,11 +273,48 @@ class RefreshDisplayNameTests(unittest.TestCase):
         self._run()
         self.assertEqual([], self._run())
 
-    def test_unchanged_name_is_still_recorded(self) -> None:
-        """昵称跟主键一样也要写进去,否则这个号每轮都会重新抓一遍。"""
+    def test_recheck_finds_a_later_rename(self) -> None:
+        """节流到期后要能发现第二次改名。
+
+        只看 display_name 空不空的话,补上一次之后就再也不抓第二次——停更号
+        以后再改名就永远停在旧显示名上,而停更号正是这条路径要救的对象。
+        """
+        self._run(nickname="第一次改名")
+        self.assertEqual("第一次改名", self._display())
+        self.assertEqual([], self._run())            # 还在节流窗口里
+
+        self._age_the_check()
+        self.assertEqual(1, len(self._run(nickname="第二次改名")))
+        self.assertEqual("第二次改名", self._display())
+
+    def test_recheck_interval_is_tunable(self) -> None:
+        self._run()
+        with mock.patch.dict(os.environ, {"GZH_DISPLAY_RECHECK_DAYS": "0"}):
+            # 下限是 1 天,乱填/填 0 都不会退化成每轮都抓
+            self.assertEqual([], self._run())
+        self._age_the_check()
+        with mock.patch.dict(os.environ, {"GZH_DISPLAY_RECHECK_DAYS": "30"}):
+            self.assertEqual([], self._run())        # 30 天窗口里,8 天前核对过不算过期
+
+    def test_unreadable_timestamp_is_treated_as_never_checked(self) -> None:
+        self._run()
+        self.repo.conn.execute(
+            "UPDATE accounts SET display_checked_at='不是时间' WHERE name='旧名字'")
+        self.repo.commit()
+        self.assertEqual(1, len(self._run(nickname="又改了")))
+        self.assertEqual("又改了", self._display())
+
+    def test_unchanged_name_is_still_throttled(self) -> None:
+        """昵称跟主键一样也要记一笔核对时间,否则这个号每轮都会重新抓。"""
         self._run(nickname="旧名字")
         self.assertEqual("旧名字", self._display())
         self.assertEqual([], self._run())
+
+    def test_unreadable_nickname_does_not_count_as_checked(self) -> None:
+        """页面读不出昵称就不算核对过,下一轮还要再试。"""
+        self._run(nickname="")
+        self.assertEqual("", self._display())
+        self.assertEqual(1, len(self._run(nickname="新名字")))
 
     def test_failure_is_swallowed(self) -> None:
         """抓不动是常事(凭证过期/限流),不能让它把这一轮采集带崩。"""

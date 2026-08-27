@@ -44,7 +44,12 @@ def list_targets():
         targets = [t.as_dict() for t in mgr.list_targets()]
     except CollectorError as e:
         raise HTTPException(400, str(e))
-    scored = [t for t in targets if t["ready"] is not None]
+    # 停用的目标不参与采集,自然也不该要求它有凭证。把它算进总数的话,
+    # 用户停用一个号之后「全部就绪」就永远到不了,弹窗还一直催他去 Mac 微信里
+    # 点那个号的文章。口径也要和 CLI 的 `creds` 对齐——那边的 SQL 本来就是
+    # `WHERE removed=0 AND in_crawl_config=1`,不统一就是两个数各说各话。
+    scored = [t for t in targets
+              if t["ready"] is not None and t.get("enabled", True)]
     return {
         "manageable": True,
         "label": collector.label,

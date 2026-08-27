@@ -219,6 +219,25 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         )
         return True
 
+    def display_name_checked_at(self, name: str) -> str:
+        """上次去正文页核对昵称是什么时候(没核对过是空串)。"""
+        row = self.conn.execute(
+            "SELECT display_checked_at FROM accounts WHERE name=?", (name,)
+        ).fetchone()
+        return "" if row is None else str(row["display_checked_at"] or "")
+
+    def mark_display_name_checked(self, name: str) -> None:
+        """记下"这个号的昵称刚核对过"。
+
+        跟 set_account_display_name 分开写:名字没变时那个方法不落任何痕迹,
+        只看它的话就分不清"核对过、没变"和"压根没核对过"——于是要么每轮都
+        重抓一遍,要么补上一次之后永远不再看第二眼。
+        """
+        self.conn.execute(
+            "UPDATE accounts SET display_checked_at=? WHERE name=?",
+            (time_now(), name),
+        )
+
     def remove_account_from_list(self, name: str) -> None:
         """仅从订阅列表移除，保留已爬文章。
 

@@ -132,7 +132,8 @@ function renderTargets() {
   // 排序用看得见的那个名字,否则改过名的行会排在一个没显示出来的键上。
   let rows = [...tgtList].sort(
     (a, b) => tgtShown(a).localeCompare(tgtShown(b), 'zh'));
-  if (tgtOnlyPending) rows = rows.filter(t => t.ready === false);
+  // 「只看未就绪」是给"还差谁要去微信里点"用的,停用的号不用点,别混进来
+  if (tgtOnlyPending) rows = rows.filter(t => t.ready === false && t.enabled);
   const box = $('tgt-list');
   const keepScroll = box.scrollTop;      // 整块重渲染会把长列表弹回顶部
   box.innerHTML = rows.length
