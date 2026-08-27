@@ -113,6 +113,11 @@ def collect(
     return result
 
 
+# 核对昵称时最多回退几篇文章。正常一篇就够,备着是为了最新那几篇恰好都
+# 读不出名字(被删、被限制)的号——只取一篇的话它们就永远改不了名。
+_NICKNAME_CANDIDATES = 3
+
+
 def _display_recheck_seconds() -> int:
     """隔多久重新核对一次昵称。调小=改名发现得快,调大=省请求。"""
     raw = os.getenv("GZH_DISPLAY_RECHECK_DAYS", "").strip()
@@ -148,22 +153,30 @@ def _refresh_display_name(repo, name: str) -> None:
     """
     if _checked_recently(repo.display_name_checked_at(name), time.time()):
         return
-    article = repo.conn.execute(
+    # 排掉微信那边已经删掉的文章:它的链接打开是一张"该内容已被发布者删除"的
+    # 提示页,上面没有 var nickname。只取一篇的话,一个号最新那篇恰好被删
+    # (多图文里的次条尤其常见)就永远读不出名字了——真实库里就有这么一个号。
+    # 再多备几篇兜底:读不到就往下一篇退,而不是这一轮直接放弃。
+    articles = repo.conn.execute(
         "SELECT link FROM articles WHERE account_name=? AND is_user_deleted=0 "
-        "AND link<>'' ORDER BY create_time DESC LIMIT 1", (name,)
-    ).fetchone()
-    if article is None:
+        "AND is_wx_deleted=0 AND link<>'' ORDER BY create_time DESC LIMIT ?",
+        (name, _NICKNAME_CANDIDATES),
+    ).fetchall()
+    if not articles:
         return
     from src.utils.wechat_body import fetch_article_body_full
 
-    try:
-        _text, _html, nickname = fetch_article_body_full(str(article["link"]))
-    except Exception:
-        return                      # 网络/凭证的问题不该拖累这一轮采集
-    if not nickname:
-        return                      # 没读到就不算核对过,下一轮再来
-    repo.set_account_display_name(name, nickname)
-    repo.mark_display_name_checked(name)
+    for article in articles:
+        try:
+            _text, _html, nickname = fetch_article_body_full(str(article["link"]))
+        except Exception:
+            return    # 抓不动多半是网络/凭证,换一篇也是白换,别拖累这一轮采集
+        if nickname:
+            repo.set_account_display_name(name, nickname)
+            repo.mark_display_name_checked(name)
+            return
+        # 打开了但没昵称:这一篇不作数(可能刚被删还没标上),试下一篇
+    # 备选全试完还是读不到:不记核对时间,下一轮再来
 
 
 def _collect_one_incremental(repo, wechat, name: str, fakeid: str) -> int:

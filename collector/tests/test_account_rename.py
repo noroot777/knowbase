@@ -248,21 +248,66 @@ class RefreshDisplayNameTests(unittest.TestCase):
             "UPDATE accounts SET display_checked_at=? WHERE name='旧名字'", (old,))
         self.repo.commit()
 
-    def _run(self, nickname: str = "新名字", *, boom: bool = False):
+    def _run(self, nickname: str = "新名字", *, boom: bool = False, by_link=None):
+        """跑一次核对。by_link 给"哪条链接返回什么昵称",没给就一律返回 nickname。"""
         from src.collect import runner
 
         calls = []
 
-        def fake_fetch(link, num=0):
+        def fetch(link, num=0):
             calls.append(link)
             if boom:
                 raise RuntimeError("凭证没了")
-            return "正文", "<p>正文</p>", nickname
+            got = (by_link or {}).get(link, nickname) if by_link else nickname
+            return "正文", "<p>正文</p>", got
 
-        with mock.patch("src.utils.wechat_body.fetch_article_body_full", fake_fetch):
+        with mock.patch("src.utils.wechat_body.fetch_article_body_full", fetch):
             runner._refresh_display_name(self.repo, "旧名字")
         self.repo.commit()
         return calls
+
+    def _add_article(self, aid: str, link: str, when: str, *,
+                     wx_deleted: int = 0, user_deleted: int = 0) -> None:
+        self.repo.conn.execute(
+            "INSERT INTO articles (id, account_name, title, link, create_time, "
+            "is_wx_deleted, is_user_deleted) VALUES (?, '旧名字', 't', ?, ?, ?, ?)",
+            (aid, link, when, wx_deleted, user_deleted))
+        self.repo.commit()
+
+    def test_deleted_article_does_not_block_the_refresh(self) -> None:
+        """最新那篇被微信删了,不能就此卡住——真实库里就有这么一个号。
+
+        已删文章的链接打开是"该内容已被发布者删除",页面上没有 var nickname。
+        多图文的次条被删尤其常见,而它和头条 create_time 一样、排在头条前面。
+        """
+        self._add_article("a2", "https://bad.example", "2026-08-28 12:00",
+                          wx_deleted=1)
+        self._add_article("a3", "https://good.example", "2026-08-28 11:00")
+
+        calls = self._run(nickname="新名字")
+        self.assertNotIn("https://bad.example", calls)   # 压根不该去请求它
+        self.assertEqual("新名字", self._display())
+
+    def test_falls_back_to_an_older_article_when_the_page_has_no_nickname(self) -> None:
+        """打开了但读不出昵称(刚被删还没标上),往下一篇退,而不是这轮放弃。"""
+        self._add_article("a2", "https://blank.example", "2026-08-28 12:00")
+        self._add_article("a3", "https://good.example", "2026-08-28 11:00")
+
+        calls = self._run(by_link={"https://blank.example": "",
+                                   "https://good.example": "新名字"})
+        self.assertEqual(["https://blank.example", "https://good.example"], calls)
+        self.assertEqual("新名字", self._display())
+
+    def test_fallback_is_bounded(self) -> None:
+        """备选有上限,不能一个号把整本历史翻一遍。"""
+        from src.collect import runner
+
+        for i in range(6):
+            self._add_article(f"b{i}", f"https://blank{i}.example",
+                              f"2026-08-2{i} 12:00")
+        calls = self._run(nickname="")
+        self.assertEqual(runner._NICKNAME_CANDIDATES, len(calls))
+        self.assertEqual("", self._display())            # 全没读到,不记核对时间
 
     def test_picks_up_the_new_name_without_a_new_article(self) -> None:
         self.assertEqual(1, len(self._run()))
