@@ -302,8 +302,14 @@ def cmd_accounts(args) -> int:
         if args.json:
             emit({"accounts": out})
         else:
-            ready = sum(1 for a in out if a["cred_state"] == "valid")
-            info(f"共 {len(out)} 个公众号(✓ = 参与采集),{ready} 个凭证就绪:")
+            # 就绪只数参与采集的号,跟 `creds` 和面板一个口径。拿全量 out 算的话,
+            # 停用一个号就永远到不了「全部就绪」,而同一件事在另外两处是另一个
+            # 数字——用户对着命令表看,三个地方三套账。停用号照样列出来(得能
+            # 看见、能重新启用),只是不进这行摘要。
+            active = [a for a in out if a["in_crawl_config"]]
+            ready = sum(1 for a in active if a["cred_state"] == "valid")
+            info(f"共 {len(out)} 个公众号,{len(active)} 个参与采集(✓),"
+                 f"其中 {ready}/{len(active)} 个凭证就绪:")
             mark_cred = {"valid": "凭证✓", "stale": "凭证~", "expired": "凭证✗",
                          "missing": "无凭证"}
             for a in out:
