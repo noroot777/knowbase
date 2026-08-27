@@ -101,9 +101,33 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             (name, fakeid, now, now),
         )
 
-    def enable_crawl_account(self, name: str, fakeid: str) -> None:
-        """用户主动添加：加入批量爬取配置。"""
+    def enable_crawl_account(self, name: str, fakeid: str) -> str:
+        """用户主动添加:加入批量爬取配置。返回**实际入库的档案键**。
+
+        先按 fakeid 认号,认出来了就只更新那一行、把用户给的新名字记进
+        display_name,不再插新行。公众号改名后用户就是拿新名字来添加的
+        (列表上还是旧名、微信里搜不到旧名,这条路几乎必走),而 name 是主键、
+        `articles.account_name` 指着它、导出的 vault 目录也按它归档——照新名字
+        再插一行,库里就有两条同 fakeid 的订阅:同一个号的新文章会被分别写进
+        两套主键,vault 目录跟着裂开,外键还全都合法,面板上像订了两个号。
+        """
         now = time_now()
+        fakeid = (fakeid or "").strip()
+        if fakeid:
+            # removed=0 的优先:一个号被移除过又重新订阅时,该复活旧行而不是另起一行
+            row = self.conn.execute(
+                "SELECT name FROM accounts WHERE fakeid=? ORDER BY removed, created_at "
+                "LIMIT 1", (fakeid,)
+            ).fetchone()
+            if row is not None and row["name"] != name:
+                existing = str(row["name"])
+                self.conn.execute(
+                    "UPDATE accounts SET in_crawl_config=1, removed=0, updated_at=? "
+                    "WHERE name=?", (now, existing),
+                )
+                # 用户搜到的这个名字就是微信当前昵称,顺手把改名记下来
+                self.set_account_display_name(existing, name)
+                return existing
         self.conn.execute(
             """
             INSERT INTO accounts (name, fakeid, latest_crawl_at, in_crawl_config, created_at, updated_at)
@@ -116,6 +140,7 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             """,
             (name, fakeid, now, now),
         )
+        return name
 
     def account_in_crawl_config(self, name: str) -> bool:
         row = self.conn.execute(

@@ -98,6 +98,7 @@ def collect(
                 else:
                     got = _collect_one_incremental(repo, wechat, name, fakeid)
                 result["new_articles"] += got
+                _refresh_display_name(repo, name)
                 repo.set_account_latest_crawl(name, time_now())
                 repo.commit()
             except Exception as e:
@@ -108,6 +109,38 @@ def collect(
 
     emit({"stage": "crawl", "status": "done", **result})
     return result
+
+
+def _refresh_display_name(repo, name: str) -> None:
+    """给还没核对过显示名的号补一次昵称,失败就算了。
+
+    改名本来只在抓**新文章正文**时顺手记下来,可"改了名"和"不发新文章"常常
+    是同一批号——而那恰恰是用户在微信里搜不到、最需要看见新名字的那批。
+    所以每个号补一次:从库里挑一篇已有文章,单独抓一次正文页只读
+    `var nickname`(见 extract_account_nickname),不写正文、不动文章表。
+
+    只在 display_name 还空着时做。核对完哪怕昵称跟主键一模一样也照样写进去,
+    这样下一轮就不会再抓——否则没改过名的号每次采集都要白抓一篇。
+    """
+    row = repo.conn.execute(
+        "SELECT display_name FROM accounts WHERE name=?", (name,)
+    ).fetchone()
+    if row is None or (row["display_name"] or "").strip():
+        return
+    article = repo.conn.execute(
+        "SELECT link FROM articles WHERE account_name=? AND is_user_deleted=0 "
+        "AND link<>'' ORDER BY create_time DESC LIMIT 1", (name,)
+    ).fetchone()
+    if article is None:
+        return
+    from src.utils.wechat_body import fetch_article_body_full
+
+    try:
+        _text, _html, nickname = fetch_article_body_full(str(article["link"]))
+    except Exception:
+        return                      # 网络/凭证的问题不该拖累这一轮采集
+    if nickname:
+        repo.set_account_display_name(name, nickname)
 
 
 def _collect_one_incremental(repo, wechat, name: str, fakeid: str) -> int:

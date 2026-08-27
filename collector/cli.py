@@ -405,11 +405,15 @@ def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
         # 且有历史文章的号会提示"已添加",但它 removed 还是 1——列表、同步目标、
         # 默认采集里统统看不到它。upsert_account 留给采集过程更新用,那条路上
         # 不该有把已移除的号悄悄复活的能力。
-        repo.enable_crawl_account(name, fakeid)
+        stored = repo.enable_crawl_account(name, fakeid)
         repo.commit()
-    detail = f"已添加:{name} ({fakeid})"
+    if stored != name:
+        # 同一个号改了名:认出来了,没有再插一行
+        detail = f"「{stored}」就是这个号(已改名为「{name}」),已更新显示名并确保在采集列表里"
+    else:
+        detail = f"已添加:{name} ({fakeid})"
     if as_json:
-        emit({"ok": True, "detail": detail, "name": name, "fakeid": fakeid})
+        emit({"ok": True, "detail": detail, "name": stored, "fakeid": fakeid})
     else:
         info(detail)
     return EXIT_OK

@@ -169,19 +169,26 @@ function toggleOnlyPending(el) {
 function renderTgtCands() {
   const box = $('tgt-cands');
   if (!tgtCands.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
-  const have = new Set(tgtList.map(t => t.name));
+  /* 「已订阅」优先按 id(公众号是 fakeid)判,名字只是兜底。
+   * 只比名字的话,改过名的号在这里永远显示成「添加」——而用户来搜新名字,
+   * 正是因为列表上那个旧名字他已经认不出来了。点下去就会多出一条同 id 的订阅。 */
+  const byId = new Map(tgtList.filter(t => t.id).map(t => [t.id, t]));
+  const byName = new Map(tgtList.map(t => [t.name, t]));
   box.style.display = '';
   box.innerHTML = tgtCands.map(c => {
-    const added = have.has(c.name);
+    const own = (c.id && byId.get(c.id)) || byName.get(c.name);
+    // 认出是同一个号、但库里存的是另一个名字:说清楚,否则"已订阅"看着像认错了
+    const renamed = own && own.name !== c.name;
     return `
       <div class="tgt-row">
         <div style="min-width:0">
           <div class="tgt-name">${esc(c.name)}</div>
           <div class="tgt-detail">${esc(c.detail || '')}</div>
+          ${renamed ? `<div class="tgt-was">已订阅,库里存作「${esc(own.name)}」</div>` : ''}
         </div>
         <button class="ghost" data-tgt-add="${esc(c.name)}" data-tgt-id="${esc(c.id)}"
-                style="padding:3px 12px;font-size:12px;flex:none" ${added ? 'disabled' : ''}>
-          ${added ? '已订阅' : '添加'}
+                style="padding:3px 12px;font-size:12px;flex:none" ${own ? 'disabled' : ''}>
+          ${own ? '已订阅' : '添加'}
         </button>
       </div>`;
   }).join('');

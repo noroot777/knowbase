@@ -170,6 +170,64 @@ class CredentialFreshnessTests(unittest.TestCase):
         self.assertTrue(status["valid"])                     # 服务端还没否它
         self.assertGreaterEqual(status["age_seconds"], 25 * 60)
 
+    def _store_with_old_credential(self, directory: str) -> ProfileCredentialStore:
+        store = ProfileCredentialStore(Path(directory) / "c.json")
+        store.save_wxdown_items([{
+            "url": ("https://mp.weixin.qq.com/s?__biz=MzExample%3D%3D"
+                    "&uin=1&key=k&pass_ticket=p"),
+            "set_cookie": "wap_sid2=s; Path=/",
+            "timestamp": int(time.time()) - 3 * 3600,
+        }])
+        return store
+
+    def test_successful_fetch_turns_a_stale_credential_green(self) -> None:
+        """采集刚拿它成功抓到东西,就别再报"放太久"了。
+
+        没有这条,mark_valid 只会清 invalidated_at:三小时前截的凭证明明刚
+        采成功,面板照样黄点、照样不计入就绪,和注释里写的"试通了转绿"打架。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store_with_old_credential(directory)
+            self.assertEqual(CRED_STALE, credential_state(store.get("MzExample==")))
+
+            store.mark_valid("MzExample==")                   # 采集成功后调的就是它
+            self.assertEqual(CRED_VALID, credential_state(store.get("MzExample==")))
+
+    def test_verified_at_does_not_overwrite_captured_at(self) -> None:
+        """续的是"最后一次可信",不是"什么时候截的"——后者是事实,不能改。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store_with_old_credential(directory)
+            before = store.get("MzExample==").captured_at
+            store.mark_valid("MzExample==")
+            after = store.get("MzExample==")
+            self.assertEqual(before, after.captured_at)
+            self.assertGreater(after.verified_at, after.captured_at)
+
+    def test_marking_valid_clears_the_server_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store_with_old_credential(directory)
+            store.mark_invalid("MzExample==")
+            self.assertEqual(CRED_EXPIRED,
+                             credential_state(store.get("MzExample==", allow_invalid=True)))
+            store.mark_valid("MzExample==")
+            self.assertEqual(CRED_VALID, credential_state(store.get("MzExample==")))
+
+    def test_a_newer_capture_resets_the_verification(self) -> None:
+        """重新截到的凭证按它自己的截取时间算新鲜度,不该继承上一条的实测记录。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store_with_old_credential(directory)
+            store.mark_valid("MzExample==")
+            store.save_wxdown_items([{
+                "url": ("https://mp.weixin.qq.com/s?__biz=MzExample%3D%3D"
+                        "&uin=1&key=k2&pass_ticket=p2"),
+                "set_cookie": "wap_sid2=s2; Path=/",
+                "timestamp": int(time.time()),
+            }])
+            fresh = store.get("MzExample==")
+            self.assertEqual("k2", fresh.key)
+            self.assertEqual(0, fresh.verified_at)
+            self.assertEqual(CRED_VALID, credential_state(fresh))
+
 
 if __name__ == "__main__":
     unittest.main()

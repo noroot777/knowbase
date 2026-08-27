@@ -74,6 +74,8 @@ class ProfileCredential:
     name: str = ""
     avatar: str = ""
     invalidated_at: int = 0
+    # 最后一次实测通过的时刻(0=没测过)。见 age_seconds 为什么不写回 captured_at。
+    verified_at: int = 0
 
     def is_valid(self, now: int | None = None) -> bool:
         """只采用服务端结论；不再按本地固定时长提前判过期。
@@ -85,10 +87,18 @@ class ProfileCredential:
         return self.invalidated_at <= 0
 
     def age_seconds(self, now: int | None = None) -> int:
-        return max(0, int(now if now is not None else time.time()) - self.captured_at)
+        """距离"最后一次有理由相信它还活着"过了多久。
+
+        基准取 `captured_at` 和 `verified_at` 里靠后的那个:采集刚拿它成功抓到
+        一页,就是比"三小时前截下来的"更强的证据,没道理还按截取时间报黄。
+        两个字段分开存,是因为它们是两件事——verified_at 冒充 captured_at 会把
+        "什么时候截的"这个事实改掉,面板上那一列就再也说不准了。
+        """
+        base = max(self.captured_at, self.verified_at)
+        return max(0, int(now if now is not None else time.time()) - base)
 
     def is_fresh(self, now: int | None = None) -> bool:
-        """截下来还没多久——只用来上报"有没有把握",不参与放行。"""
+        """新鲜——只用来上报"有没有把握",不参与放行。"""
         return self.age_seconds(now) < _fresh_seconds()
 
 
@@ -278,12 +288,23 @@ class ProfileCredentialStore:
             self._write_unlocked(records)
 
     def mark_valid(self, biz: str) -> None:
+        """采集刚拿它成功抓到东西:清掉失效标记,并把新鲜度续上。
+
+        续新鲜度不是锦上添花:没有它,`mark_valid` 只会清 `invalidated_at`,
+        一条三小时前截的凭证明明刚采成功,面板照样黄点、照样不计入就绪。
+        写盘做了节流——`fetch_article_page` 每翻一页都会调这里,一个号十几页,
+        不节流就是十几次全量重写凭证文件。
+        """
+        now = int(time.time())
         with self._lock:
             records = self._load_unlocked()
             credential = records.get(str(biz).strip())
-            if credential is None or credential.invalidated_at <= 0:
+            if credential is None:
+                return
+            if credential.invalidated_at <= 0 and now - credential.verified_at < 60:
                 return
             credential.invalidated_at = 0
+            credential.verified_at = now
             self._write_unlocked(records)
 
     def clear(self) -> None:
@@ -321,6 +342,7 @@ def credential_public_status(credential: ProfileCredential) -> dict[str, Any]:
         # 放了太久、没人验证过的那批单拎出来标成 stale(见 credential_state)
         "state": credential_state(credential, now),
         "age_seconds": credential.age_seconds(now),
+        "verified_at": _format_time(credential.verified_at),
         "invalidated_at": _format_time(credential.invalidated_at),
     }
 
