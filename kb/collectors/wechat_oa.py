@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -52,9 +51,34 @@ _STATUS_TTL = 60.0
 _status_cache: tuple[float, SourceStatus] | None = None
 
 
+def _backend_problem() -> str:
+    """采集器没装好就返回一句"缺什么、怎么补",装好了返回空串。
+
+    `collector/data`(库+凭证)和 `collector/.venv` 都在 .gitignore 里,是
+    `collector/setup.sh` 链到仓库外那份真实目录的软链接——`git worktree add`
+    出来的新工作树只有源码,清过一次 untracked 文件的旧目录也会把它们清掉。
+    缺哪个都不是"配置不全"而是根本跑不了:没 .venv 就没有 requests/lxml,
+    没 data 就没有文章库和凭证。
+    """
+    if not BACKEND_DIR.is_dir():
+        return f"找不到采集器目录,预期在 {BACKEND_DIR}"
+    missing = [shown for shown, probe in ((".venv", ".venv/bin/python"), ("data", "data"))
+               if not (BACKEND_DIR / probe).exists()]
+    if missing:
+        return (f"缺 {'、'.join(missing)}——在仓库根目录跑一次 "
+                f"./collector/setup.sh 把它们链好")
+    return ""
+
+
 def _python() -> str:
-    """采集器自己的解释器;没装 venv 就退回当前解释器。"""
-    return str(BACKEND_PY) if BACKEND_PY.exists() else sys.executable
+    """采集器自己的解释器。
+
+    别在这里退回 `sys.executable`:那是知识库的解释器,装的是 kb 的依赖,
+    拿它跑 `-m cli` 一定死在 `import requests` 上——用户看到的是一句
+    ModuleNotFoundError 的 traceback 尾巴,而真正该说的是"跑一次 setup.sh"。
+    缺 venv 由 _backend_problem() 在起进程之前拦下并说清楚。
+    """
+    return str(BACKEND_PY)
 
 
 def _run_cli(*argv: str, timeout: int) -> subprocess.CompletedProcess:
@@ -84,12 +108,9 @@ class WeChatOACollector:
         return result
 
     def _probe(self) -> SourceStatus:
-        if not BACKEND_DIR.is_dir():
-            return SourceStatus(
-                online=False,
-                message="找不到采集器",
-                hint=f"预期在 {BACKEND_DIR}",
-            )
+        problem = _backend_problem()
+        if problem:
+            return SourceStatus(online=False, message="采集器还没装好", hint=problem)
         try:
             proc = _run_cli("status", timeout=60)
         except subprocess.TimeoutExpired:
@@ -117,6 +138,10 @@ class WeChatOACollector:
 
     def fetch(self, scope: FetchScope) -> None:
         """跑采集子进程,把它 stdout 的进度事件转成管道的阶段状态。"""
+        problem = _backend_problem()
+        if problem:
+            _stage("crawl", "skipped", f"采集器还没装好,跳过抓取:{problem}")
+            return
         argv = ["collect"]
         if scope.ranged:
             argv += ["--since", scope.since, "--until", scope.until]
@@ -193,6 +218,10 @@ class WeChatOACollector:
     # ── 落地:采集器本地库 → obs md ───────────────────────────────────────────
 
     def materialize(self) -> None:
+        problem = _backend_problem()
+        if problem:
+            _stage("export", "skipped", f"采集器还没装好,跳过导出:{problem}")
+            return
         _stage("export", "running", "导出到 obs")
 
         def _export(extra: list[str], tmo: int):
@@ -318,6 +347,9 @@ class WeChatOACollector:
     @staticmethod
     def _accounts_raw(*argv: str, timeout: int = 20) -> dict:
         """跑任意子命令(都加 --json)并解析最后一行 JSON。"""
+        problem = _backend_problem()
+        if problem:
+            raise CollectorError(f"采集器还没装好:{problem}")
         try:
             proc = _run_cli(*argv, "--json", timeout=timeout)
         except subprocess.TimeoutExpired:

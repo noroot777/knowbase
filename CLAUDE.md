@@ -47,9 +47,14 @@
 
 ## collector 采集器
 
-- **新开的 worktree 要先跑一次 `./collector/setup.sh`**。`collector/data`(592M 文章库
-  + 凭证)和 `collector/.venv` 都在 .gitignore 里,worktree 只会带源码,不跑这一步
-  采集阶段会报"采集器起不来"。脚本幂等,链的是仓库外的同一份真实数据。
+- **`collector/data` 和 `collector/.venv` 丢了就跑 `./collector/setup.sh`**。两者都在
+  .gitignore 里、都是链到仓库外那份真实目录的软链接,所以新开的 worktree 只带源码,
+  主检出被 `git clean -xd` 之类扫过一次也会没。脚本幂等,链的是同一份真实数据。
+  缺链时面板顶栏报「采集器还没装好 · 缺 .venv、data——跑一次 ./collector/setup.sh」,
+  抓取/导出两阶段落 skipped 而不是 error。**别再让它退回 `sys.executable`**:
+  那是知识库自己的解释器,拿它跑 `-m cli` 必死在 `import requests`,用户看到的是
+  一句 ModuleNotFoundError 的 traceback 尾巴,完全指不到 setup.sh 上去
+  (2026-08-27 修,判定在 `wechat_oa._backend_problem()`)。
 - 采集器是**一次性 CLI,不是常驻服务**:`cd collector && ./.venv/bin/python -m cli <命令>`。
   常用 `status`(健康+订阅列表) / `collect` / `export` / `accounts list|add|remove` / `login`。
   stdout 只出 NDJSON 给程序读,人看的提示走 stderr。
