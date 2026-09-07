@@ -3,7 +3,7 @@
 
 从 ~/code/daily-report/videos 的视频目录读原字幕(subtitles/source.srt),
 两阶段处理:
-  1. gate:      gpt-5.4-mini 判断视频是否「项目/产品介绍型」(单项目深度介绍或多项目速览)
+  1. gate:      gpt-5.3-codex-spark 判断视频是否「项目/产品介绍型」(单项目深度介绍或多项目速览)
   2. transcribe: gpt-5.6-luna 按项目切分,把字幕文章化转写成中文条目,一个项目一个 md
 
 产物落 ~/obs/new-start/source/dr-video-projects/YYYY-MM-DD/<videoid>-<slug>.md,
@@ -34,7 +34,7 @@ STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "video_projects_s
 TZ = timezone(timedelta(hours=8))
 
 # 两步都走 kb.llm 的 API 通道,模型 id 写全名钉死,理由同 gzh_projects_export.py
-GATE_MODEL = "gpt-5.4-mini"
+GATE_MODEL = "gpt-5.3-codex-spark"
 TRANSCRIBE_MODEL = "gpt-5.6-luna"
 GATE_WORKERS = 6
 TRANSCRIBE_WORKERS = 4

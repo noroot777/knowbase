@@ -30,7 +30,7 @@ class Model:
 # 内置兜底模型 id:面板没配 / 没从中转站拉取时用这些。面板里配置会覆盖它们。
 _DEFAULT_MODELS = {
     "anthropic": ["claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-8"],
-    "openai": ["gpt-5.5", "gpt-5.6-luna", "gpt-5.4-mini"],
+    "openai": ["gpt-5.5", "gpt-5.6-luna", "gpt-5.3-codex-spark"],
 }
 
 # ── API key / base_url 存取 ───────────────────────────────────────────────────
