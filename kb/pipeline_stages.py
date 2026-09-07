@@ -137,7 +137,7 @@ def _finish_extract_stage(stats: dict) -> None:
 
 
 # 提取并发数。瓶颈是逐篇几十秒的 LLM 调用,与微信反爬无关,可以放心并发。
-# 2026-08-26 起提取走 kb.llm 的 API 通道(gpt-5.3-codex-spark),每个 worker 只是一个
+# 2026-08-26 起提取走 kb.llm 的 API 通道(gpt-5.5),每个 worker 只是一个
 # HTTP 请求,不再是 claude CLI(Node)子进程,本机 RAM/CPU 不再是上限;真正的
 # 约束变成中转站的并发/速率限制与按 token 计费,故沿用实测稳定的 6 不上调。
 EXTRACT_WORKERS = 6
@@ -310,7 +310,7 @@ def _ingest_pretagged_sources() -> tuple[int, int]:
 
 
 def _run_projects() -> None:
-    """条目化:gate(gpt-5.3-codex-spark)判「工具/项目介绍型」→ transcribe(gpt-5.6-luna)按工具拆条目。
+    """条目化:gate(gpt-5.5)判「工具/项目介绍型」→ transcribe(gpt-5.6-luna)按工具拆条目。
 
     公众号侧 transcribe 只处理最近 3 天发布的文章——存量积压(数千篇)由用户
     手动分批消化(scripts/gzh_projects_export.py transcribe --limit N),

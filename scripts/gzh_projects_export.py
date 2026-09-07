@@ -5,7 +5,7 @@ dr-gzh 里大量「N 个开源项目推荐」「工具介绍/评测」文章一�
 LLM extract 的实体反链有上限截断,也没有每个工具的独立介绍页。这条管道
 把它们按工具拆成独立条目(与 scripts/video_projects_export.py 同构):
 
-  1. gate:       gpt-5.3-codex-spark 判断文章是否「工具/项目介绍型」(single/multi)
+  1. gate:       gpt-5.5 判断文章是否「工具/项目介绍型」(single/multi)
   2. transcribe: gpt-5.6-luna 按工具切分,每个工具一篇独立条目 md
 
 产物落 ~/obs/new-start/source/dr-gzh-projects/YYYY-MM-DD/<uid>-<slug>.md,
@@ -47,7 +47,7 @@ TZ = timezone(timedelta(hours=8))
 # 两步都走 kb.llm 的 API 通道(OpenAI 侧),不再是本地 claude CLI 子进程。
 # 模型 id 一律写全名钉死:别名会随新一代发布静默漂移,批量管道换模型
 # (价格、输出风格都变)不该无声无息。要升代在这里改字面量,或临时传 --model。
-GATE_MODEL = "gpt-5.3-codex-spark"
+GATE_MODEL = "gpt-5.5"
 TRANSCRIBE_MODEL = "gpt-5.6-luna"
 GATE_WORKERS = 8
 TRANSCRIBE_WORKERS = 6

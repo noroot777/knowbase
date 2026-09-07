@@ -4,7 +4,7 @@
 两条路:
 - pre_tagged 来源(dr-youtube-dig):frontmatter 里已有 entity/xxx、topic/xxx
   标签,直接解析进 entities 表,零成本。
-- 其他来源(dr-gzh、gzh):调 LLM API(gpt-5.3-codex-spark)读正文提取,结果进 DB;
+- 其他来源(dr-gzh、gzh):调 LLM API(gpt-5.5)读正文提取,结果进 DB;
   --writeback 时同步回写 md frontmatter 的 tags(obs 里可见可点)。
 
 回写只动 frontmatter 的 tags 列表,正文一个字节不碰。
@@ -21,7 +21,7 @@ from kb.norm import entity_norm, kind_norm
 
 # 提取走 kb.llm 的 API 通道(OpenAI 侧),不再是本地 claude CLI 子进程。
 # 模型 id 写全名钉死:别名会随新一代发布静默漂移,批量管道换模型不该无声无息。
-EXTRACT_MODEL = "gpt-5.3-codex-spark"
+EXTRACT_MODEL = "gpt-5.5"
 
 _PROMPT = """\
 你是知识库索引员。读下面这篇文章,提取检索用元数据,只输出一个 JSON 对象,不要任何其他文字:
