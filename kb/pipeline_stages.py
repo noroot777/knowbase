@@ -91,17 +91,13 @@ def _run_index() -> None:
         removed = store.remove_missing_documents(conn, seen)
         conn.commit()
 
-        rows = store.chunks_without_vectors(conn)
-        if rows:
-            _stage("index", "running", f"编码 {len(rows)} 个新 chunk")
-            from kb.embedder import embed_texts
-            B = 128
-            for i in range(0, len(rows), B):
-                batch = rows[i:i + B]
-                store.insert_vectors(conn, [r["id"] for r in batch],
-                                     embed_texts([r["text"] for r in batch]))
-                conn.commit()
-        _stage("index", "ok", f"新增/更新 {new},移除 {removed},新向量 {len(rows)}")
+        def _report(done: int, total: int) -> None:
+            _stage("index", "running",
+                   f"编码 {total} 个新 chunk" if done == 0 else f"编码 {done}/{total}")
+
+        from kb.embedder import embed_pending_chunks
+        n = embed_pending_chunks(conn, _report)
+        _stage("index", "ok", f"新增/更新 {new},移除 {removed},新向量 {n}")
     except Exception as e:
         _stage("index", "error", f"索引失败: {e}")
     finally:
@@ -295,16 +291,8 @@ def _ingest_pretagged_sources() -> tuple[int, int]:
                 save_extraction(conn, doc.path, pre)
             new += 1
         conn.commit()
-        rows = store.chunks_without_vectors(conn)
-        if rows:
-            from kb.embedder import embed_texts
-            B = 128
-            for i in range(0, len(rows), B):
-                batch = rows[i:i + B]
-                store.insert_vectors(conn, [r["id"] for r in batch],
-                                     embed_texts([r["text"] for r in batch]))
-                conn.commit()
-        return new, len(rows)
+        from kb.embedder import embed_pending_chunks
+        return new, embed_pending_chunks(conn)
     finally:
         conn.close()
 

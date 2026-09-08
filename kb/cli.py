@@ -49,22 +49,20 @@ def cmd_index(args) -> int:
     print(f"[index] 完成: 新增/更新 {new}, 未变 {unchanged}, 移除 {removed}")
 
     if not args.no_vector:
-        rows = store.chunks_without_vectors(conn)
-        if rows:
-            print(f"[embed] {len(rows)} 个 chunk 待编码(首次运行会下载 bge-m3 模型,~2GB)")
-            try:
-                from kb.embedder import embed_texts
-            except Exception as e:
-                print(f"[embed] 跳过: {e}")
-                return 0
-            B = 128
-            for i in range(0, len(rows), B):
-                batch = rows[i:i + B]
-                vecs = embed_texts([r["text"] for r in batch])
-                store.insert_vectors(conn, [r["id"] for r in batch], vecs)
-                conn.commit()
-                print(f"[embed] {min(i + B, len(rows))}/{len(rows)}")
-        else:
+        try:
+            from kb.embedder import embed_pending_chunks
+        except Exception as e:
+            print(f"[embed] 跳过: {e}")
+            return 0
+
+        def _report(done: int, total: int) -> None:
+            if done == 0:
+                print(f"[embed] {total} 个 chunk 待编码"
+                      f"(首次运行会下载 bge-m3 模型,~2GB)")
+            else:
+                print(f"[embed] {done}/{total}")
+
+        if embed_pending_chunks(conn, _report) == 0:
             print("[embed] 向量已是最新")
     conn.close()
     return 0

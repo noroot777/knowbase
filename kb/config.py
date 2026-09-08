@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,6 +21,27 @@ DB_PATH = DATA_DIR / "kb.db"
 # 本地 embedding 模型(bge-m3:中英混合效果好,1024 维 dense)
 EMBEDDING_MODEL = "BAAI/bge-m3"
 EMBEDDING_DIM = 1024
+
+# 模型跑在子进程里(见 kb/embed_worker.py:MPS 显存池只涨不退,进程内收不回)。
+# 空闲这么多秒后子进程自杀,把 ~3.7 GB 还给系统;下次要用重新起,冷启动 3.2 秒。
+# 设 0 或负数 = 不自动回收(worker 一直留着)。
+EMBED_IDLE_SECONDS = int(os.environ.get("KB_EMBED_IDLE_SECONDS", "600"))
+# 应急开关:置 1 退回「模型直接加载在本进程」的老行为。子进程路径出问题时能
+# 保住检索可用,代价是这个进程的内存再也降不下来。
+EMBED_IN_PROCESS = os.environ.get("KB_EMBED_IN_PROCESS", "") == "1"
+# 一批编码的「B × 字符数²」预算,决定批量索引的峰值内存(注意力张量随长度平方涨,
+# MPS 显存池会涨到见过的最大批次那个规模)。单位是 B×L² 的乘积,写成
+# 「几条 × 多长 × 多长」便于估算。
+# 2026-09-08 实测(1536 条真实 chunk,p50 长度 632):
+#   32×768²(原值) 峰值 17.0 GB  14.7 chunk/s   ← 36 GB 的机器上会打到 swap
+#    8×768²        峰值  8.7 GB   9.0 chunk/s   ← 曲线拐点,取它
+#    4×768²        峰值  8.0 GB   8.8 chunk/s   ← 再降换不来多少内存了
+# 短 chunk 不受影响(200 字以内三档都是满批 32);预算只在长 chunk 上收紧批次。
+EMBED_BATCH_BUDGET = int(os.environ.get("KB_EMBED_BATCH_BUDGET",
+                                        str(8 * 768 * 768)))
+# 单次编码请求最多等多久。宽到正常绝不会碰到(一批 128 条实测 ~15 秒),它防的是
+# worker 卡死或管道错位——那种情况下父进程会攥着锁永久阻塞,搜索和索引一起冻住。
+EMBED_REQUEST_TIMEOUT = float(os.environ.get("KB_EMBED_REQUEST_TIMEOUT", "600"))
 
 
 @dataclass

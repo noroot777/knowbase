@@ -254,11 +254,18 @@ def chunks_without_vectors(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def insert_vectors(conn: sqlite3.Connection, ids: list[int], vecs) -> None:
+    """vecs 每项可以是 float 列表,也可以是已经打好包的 float32 裸字节。
+
+    走子进程编码时向量本来就是裸字节回来的(见 kb/embedder.py),再拆成 Python
+    float 列表、转头又 struct.pack 回去纯属白烧 CPU——一批 128×1024 个 float。
+    """
     import struct
     for cid, v in zip(ids, vecs):
+        blob = (bytes(v) if isinstance(v, (bytes, bytearray, memoryview))
+                else struct.pack(f"{len(v)}f", *v))
         conn.execute(
             "INSERT OR REPLACE INTO chunk_vec (chunk_id, embedding) VALUES (?, ?)",
-            (cid, struct.pack(f"{len(v)}f", *v)),
+            (cid, blob),
         )
 
 
