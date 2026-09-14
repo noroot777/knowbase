@@ -54,6 +54,9 @@ function docLink(h) {
 }
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+// 模型标识给人看的形式:接口里传的是带家的 "openai:gpt-5.5"(同一个 id 两家中转站
+// 都可能有,裸 id 会被后端猜错家),但界面上只想看见模型名。老数据是裸 id,原样显示。
+const modelLabel = s => String(s || '').replace(/^(anthropic|openai):/, '');
 // 只放行安全协议:被索引的 url 来自外部内容,javascript: 之类点一下就执行
 const safeUrl = u => /^(https?:|obsidian:|\/|#)/i.test(String(u || '')) ? String(u) : '#';
 // Markdown → HTML 的唯一出口。条目正文、模型回答都是外部内容,而 marked 从 v5 起
@@ -126,13 +129,14 @@ document.addEventListener('click', e => {
   const rmE = e.target.closest('[data-rm-ent]');
   if (rmE) rmEntity(rmE.dataset.rmEnt);
 });
-// Escape 逐层关:阅读器(最高)→ 工具详情抽屉 → 管道时间段弹层 / 管道弹窗
+// Escape 逐层关:阅读器(最高)→ 工具详情抽屉 → 管道时间段弹层 / 管道弹窗 / 模型分配弹窗
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
   if ($('reader').style.display !== 'none') { closeReader(); return; }
   if ($('tool-drawer').style.display !== 'none') { closeToolDrawer(); return; }
   if ($('pipe-range-pop').style.display !== 'none') $('pipe-range-pop').style.display = 'none';
   else if ($('pipe-modal').style.display !== 'none') closePipeModal();
+  else if ($('stages-modal').style.display !== 'none') closeStages();
 });
 // 时间段弹层点外面收起(弹窗本体不关)
 document.addEventListener('click', e => {

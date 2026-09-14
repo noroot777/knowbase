@@ -72,7 +72,7 @@ def step_pages(u: W.Universe) -> tuple[int, int]:
     return n_e, n_t
 
 
-def step_digest(con, recent_days: int, model: str) -> list[str]:
+def step_digest(con, recent_days: int, model) -> list[str]:
     import wiki_digest as D
     made = []
     today = date.today()
@@ -96,7 +96,7 @@ def step_digest(con, recent_days: int, model: str) -> list[str]:
     return made
 
 
-def step_synthesis(u: W.Universe, model: str, workers: int) -> list[str]:
+def step_synthesis(u: W.Universe, model, workers: int) -> list[str]:
     import wiki_entity_synthesis as S
     targets = S.select_targets(u, window_days=14, min_docs=3, growth=3)
     return S.run_targets(u, targets, model=model, workers=workers)
@@ -105,7 +105,7 @@ def step_synthesis(u: W.Universe, model: str, workers: int) -> list[str]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--recent-days", type=int, default=2, help="digest 回看天数")
-    ap.add_argument("--model", default=W.LLM_MODEL)
+    ap.add_argument("--model", default=None, help="临时覆盖模型 id;默认用设置面板的「管道 · wiki 摘要与综述」阶段")
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--skip-linkify", action="store_true")
     ap.add_argument("--skip-llm", action="store_true", help="只做机械部分(1/2/3/6)")
@@ -127,9 +127,11 @@ def main():
 
     made, syn = [], []
     if not a.skip_llm:
-        made = step_digest(con, a.recent_days, a.model)
+        model = a.model or W.llm_model()   # 整轮定一次,digest 和 synthesis 用同一个
+        print(f"llm: 本轮用 {model}")
+        made = step_digest(con, a.recent_days, model)
         print(f"digest: 生成 {len(made)} 天 {made}")
-        syn = step_synthesis(u, a.model, a.workers)
+        syn = step_synthesis(u, model, a.workers)
         print(f"synthesis: 更新 {len(syn)} 个实体 {syn[:8]}")
 
     (W.VAULT / "index.md").write_text(W.render_index(u, W.VAULT), encoding="utf-8")

@@ -3,8 +3,9 @@
 
 从 ~/code/daily-report/videos 的视频目录读原字幕(subtitles/source.srt),
 两阶段处理:
-  1. gate:      gpt-5.5 判断视频是否「项目/产品介绍型」(单项目深度介绍或多项目速览)
-  2. transcribe: gpt-5.6-luna 按项目切分,把字幕文章化转写成中文条目,一个项目一个 md
+  1. gate:      判断视频是否「项目/产品介绍型」(单项目深度介绍或多项目速览)
+  2. transcribe: 按项目切分,把字幕文章化转写成中文条目,一个项目一个 md
+  两步各用哪个模型看 kb-web 设置面板的「模型分配」(kb.llm_stages 的 gate / transcribe)
 
 产物落 ~/obs/new-start/source/dr-video-projects/YYYY-MM-DD/<videoid>-<slug>.md,
 frontmatter 自带 entity/topic 标签(pre_tagged 路线,kb index 后无需再 extract)。
@@ -33,9 +34,8 @@ OUT_ROOT = Path.home() / "obs" / "new-start" / "source" / "dr-video-projects"
 STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "video_projects_state.json"
 TZ = timezone(timedelta(hours=8))
 
-# 两步都走 kb.llm 的 API 通道,模型 id 写全名钉死,理由同 gzh_projects_export.py
-GATE_MODEL = "gpt-5.5"
-TRANSCRIBE_MODEL = "gpt-5.6-luna"
+# 两步都走 kb.llm 的 API 通道;用哪家的哪个模型由设置面板的
+# 「管道 · 条目化判定」/「管道 · 条目化拆条目」两个阶段决定,理由同 gzh_projects_export.py
 GATE_WORKERS = 6
 TRANSCRIBE_WORKERS = 4
 
@@ -121,7 +121,16 @@ benchmark、价格、硬件要求、演示中看到的效果、作者的评价�
 
 # ---------------------------------------------------------------- 基础设施
 
-def _llm(prompt: str, model: str, timeout: int, max_tokens: int = 8192) -> str:
+def _stage_model(stage: str):
+    """该阶段当前该用哪家的哪个模型(设置面板里配的,kb.llm_stages)。
+
+    每次调用现取:面板改完不用重启管道,下一个视频就换过来了。"""
+    from kb.llm_stages import stage_model
+
+    return stage_model(stage)
+
+
+def _llm(prompt: str, model, timeout: int, max_tokens: int = 8192) -> str:
     """走 kb.llm 的 API 通道调模型。
 
     key/base_url 由 kb.llm 统一解析(环境变量优先,其次 data/secrets.json);
@@ -274,7 +283,7 @@ def gate_one(info: dict) -> dict:
         chapters=ch_lines[:1500],
         summary=_read_summary(vdir)[:1200] or "(无)",
     )
-    out = _llm(prompt, GATE_MODEL, timeout=120, max_tokens=2048)
+    out = _llm(prompt, _stage_model("gate"), timeout=120, max_tokens=2048)
     m = re.search(r"\{.*\}", out, re.S)
     if not m:
         raise ValueError(f"gate 输出无 JSON: {out[:200]}")
@@ -419,7 +428,8 @@ def write_entry(entry: dict, vid: str, info: dict, out_root: Path) -> Path:
     return path
 
 
-def transcribe_one(vid: str, rec: dict, info: dict) -> tuple[list[dict], str]:
+def transcribe_one(vid: str, rec: dict, info: dict, model=None) -> tuple[list[dict], str]:
+    model = model or _stage_model("transcribe")
     vdir = VIDEOS_ROOT / info["dir"]
     transcript = srt_to_text(vdir / "subtitles" / "source.srt")
     chapters = _read_chapters(vdir)
@@ -434,7 +444,7 @@ def transcribe_one(vid: str, rec: dict, info: dict) -> tuple[list[dict], str]:
         links=link_lines[:4000], chapters=ch_lines[:3000],
         transcript=transcript[:180000],
     )
-    out = _llm(prompt, TRANSCRIBE_MODEL, timeout=900, max_tokens=32000)
+    out = _llm(prompt, model, timeout=900, max_tokens=32000)
     return _parse_entries(out), out
 
 
@@ -456,10 +466,12 @@ def cmd_transcribe(args) -> int:
         todo.append((vid, rec, cands[vid]))
     if args.limit:
         todo = todo[: args.limit]
-    print(f"[transcribe] 待转写 {len(todo)},{TRANSCRIBE_WORKERS} 并发 → {out_root}", flush=True)
+    # 模型在这里定一次,整批用同一个:面板中途改了也不会出现半批新半批旧
+    model = _stage_model("transcribe")
+    print(f"[transcribe] 待转写 {len(todo)},{TRANSCRIBE_WORKERS} 并发,模型 {model} → {out_root}", flush=True)
     ok = failed = empty = 0
     with ThreadPoolExecutor(max_workers=TRANSCRIBE_WORKERS) as pool:
-        futs = {pool.submit(transcribe_one, vid, rec, info): (vid, rec, info)
+        futs = {pool.submit(transcribe_one, vid, rec, info, model): (vid, rec, info)
                 for vid, rec, info in todo}
         for i, fut in enumerate(as_completed(futs), 1):
             vid, rec, info = futs[fut]
@@ -482,7 +494,7 @@ def cmd_transcribe(args) -> int:
                 rec["transcribed_at"] = datetime.now(TZ).isoformat(timespec="seconds")
                 rec["n_projects"] = len(entries)
                 rec["files"] = files
-                rec["model"] = TRANSCRIBE_MODEL
+                rec["model"] = str(model)
                 save_state(state)
             except Exception as e:
                 failed += 1

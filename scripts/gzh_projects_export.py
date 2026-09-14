@@ -5,8 +5,9 @@ dr-gzh 里大量「N 个开源项目推荐」「工具介绍/评测」文章一�
 LLM extract 的实体反链有上限截断,也没有每个工具的独立介绍页。这条管道
 把它们按工具拆成独立条目(与 scripts/video_projects_export.py 同构):
 
-  1. gate:       gpt-5.5 判断文章是否「工具/项目介绍型」(single/multi)
-  2. transcribe: gpt-5.6-luna 按工具切分,每个工具一篇独立条目 md
+  1. gate:       判断文章是否「工具/项目介绍型」(single/multi)
+  2. transcribe: 按工具切分,每个工具一篇独立条目 md
+  两步各用哪个模型看 kb-web 设置面板的「模型分配」(kb.llm_stages 的 gate / transcribe)
 
 产物落 ~/obs/new-start/source/dr-gzh-projects/YYYY-MM-DD/<uid>-<slug>.md,
 frontmatter 自带 entity/topic 标签(pre_tagged 路线,kb index 后无需 extract)。
@@ -44,11 +45,9 @@ OUT_ROOT = VAULT_ROOT / "source" / "dr-gzh-projects"
 STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "gzh_projects_state.json"
 TZ = timezone(timedelta(hours=8))
 
-# 两步都走 kb.llm 的 API 通道(OpenAI 侧),不再是本地 claude CLI 子进程。
-# 模型 id 一律写全名钉死:别名会随新一代发布静默漂移,批量管道换模型
-# (价格、输出风格都变)不该无声无息。要升代在这里改字面量,或临时传 --model。
-GATE_MODEL = "gpt-5.5"
-TRANSCRIBE_MODEL = "gpt-5.6-luna"
+# 两步都走 kb.llm 的 API 通道,用哪家的哪个模型由设置面板的
+# 「管道 · 条目化判定」/「管道 · 条目化拆条目」两个阶段决定(kb.llm_stages 的
+# gate / transcribe);没配就用那里登记的内置默认。--model 仍可临时覆盖 transcribe。
 GATE_WORKERS = 8
 TRANSCRIBE_WORKERS = 6
 MIN_BODY = 200          # 正文太短(空壳/纯图文)不进管道
@@ -126,7 +125,17 @@ summary: 一句话(<=60 字)说清「是什么+能干什么」,不要英文双�
 
 # ---------------------------------------------------------------- 基础设施
 
-def _llm(prompt: str, model: str, timeout: int, max_tokens: int = 8192) -> str:
+def _stage_model(stage: str):
+    """该阶段当前该用哪家的哪个模型(设置面板里配的,kb.llm_stages)。
+
+    每次调用现取:面板改完不用重启管道,下一篇就换过来了。返回的是 Model,
+    直接丢给 _llm;打进日志时 __str__ 出的是模型 id。"""
+    from kb.llm_stages import stage_model
+
+    return stage_model(stage)
+
+
+def _llm(prompt: str, model, timeout: int, max_tokens: int = 8192) -> str:
     """走 kb.llm 的 API 通道调模型。
 
     key/base_url 由 kb.llm 统一解析(环境变量优先,其次 data/secrets.json);
@@ -238,7 +247,7 @@ def gate_one(info: dict) -> dict:
         summary=info["summary"] or "(无)",
         body_head=info["body"][:GATE_HEAD],
     )
-    out = _llm(prompt, GATE_MODEL, timeout=120, max_tokens=2048)
+    out = _llm(prompt, _stage_model("gate"), timeout=120, max_tokens=2048)
     m = re.search(r"\{.*\}", out, re.S)
     if not m:
         raise ValueError(f"gate 输出无 JSON: {out[:200]}")
@@ -390,7 +399,8 @@ def write_entry(entry: dict, uid: str, info: dict, out_root: Path) -> Path:
     return path
 
 
-def transcribe_one(info: dict, model: str = TRANSCRIBE_MODEL) -> list[dict]:
+def transcribe_one(info: dict, model=None) -> list[dict]:
+    model = model or _stage_model("transcribe")
     prompt = TRANSCRIBE_PROMPT.format(
         topic_candidates=TOPIC_CANDIDATES,
         title=info["title"], account=info["account"],
@@ -424,7 +434,7 @@ def cmd_transcribe(args) -> int:
     todo.sort(key=lambda x: x[2].get("published") or "", reverse=True)
     if args.limit:
         todo = todo[: args.limit]
-    model = getattr(args, "model", None) or TRANSCRIBE_MODEL
+    model = getattr(args, "model", None) or _stage_model("transcribe")
     print(f"[transcribe] 待条目化 {len(todo)},{TRANSCRIBE_WORKERS} 并发,模型 {model} → {out_root}", flush=True)
     ok = failed = empty = 0
     with ThreadPoolExecutor(max_workers=TRANSCRIBE_WORKERS) as pool:
@@ -452,7 +462,7 @@ def cmd_transcribe(args) -> int:
                 rec["transcribed_at"] = datetime.now(TZ).isoformat(timespec="seconds")
                 rec["n_projects"] = len(entries)
                 rec["files"] = files
-                rec["model"] = model
+                rec["model"] = str(model)   # Model 对象进不了 json,存 id 字符串
                 save_state(state)
             except Exception as e:
                 failed += 1
@@ -493,9 +503,10 @@ def main() -> int:
     t.add_argument("--since", help="只处理 published >= 此日期(YYYY-MM-DD)的文章(管道增量用,避开存量积压)")
     t.add_argument("--out", help="输出根目录(默认正式树,试跑可指到 staging)")
     t.add_argument("--force", action="store_true", help="已条目化的也重跑")
-    t.add_argument("--model", default=TRANSCRIBE_MODEL,
-                   help=f"转写模型 id,走 kb.llm 通道(默认 {TRANSCRIBE_MODEL})。"
-                        "写全名钉死某一代,别名会随新一代发布静默漂移")
+    t.add_argument("--model", default=None,
+                   help="临时覆盖转写模型 id(走 kb.llm 通道);默认用设置面板里"
+                        "「管道 · 条目化拆条目」阶段配的那个。想指定供应商写成"
+                        "openai:xxx / anthropic:xxx")
     args = ap.parse_args()
     if args.cmd in ("gate", "transcribe"):
         _acquire_lock()

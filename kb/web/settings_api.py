@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""设置面板后端:问答模型选择、各家 API key、MCP server 注册。
+"""设置面板后端:各阶段的模型分配、各家 API key、MCP server 注册。
 
 key 只落 kb.llm 的配置文件,读接口一律脱敏,绝不回传明文。
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from kb import llm
+from kb import llm, llm_stages
 
 router = APIRouter()
 
@@ -22,6 +22,42 @@ router = APIRouter()
 def api_models():
     """问答可选模型列表(含各 provider 是否已配 API key),给前端下拉用。"""
     return {"models": llm.available_models(), "default": llm.get_default_model()}
+
+
+# ── 各阶段用哪个模型 ──────────────────────────────────────────────────────────
+# 「阶段」= 代码里一处会调大模型的活,注册表在 kb.llm_stages。这里只做读写转发。
+
+@router.get("/api/stages")
+def api_stages():
+    """所有阶段 + 当前取值 + 可选模型(按供应商分组),给「模型分配」面板用。
+
+    可选模型走 llm.model_pool():除了「API Key」面板里勾选的候选,还带上各阶段
+    当前实际指向的模型——不然一个没被勾选的阶段模型在下拉里根本没有对应项。
+    """
+    pool = llm.model_pool()
+    return {
+        "stages": llm_stages.describe(),
+        "providers": [{"key": p, "label": llm.PROVIDER_LABEL.get(p, p),
+                       "has_key": llm.has_key(p),
+                       "models": pool.get(p, [])} for p in llm.PROVIDERS],
+    }
+
+
+class StageRequest(BaseModel):
+    key: str
+    provider: str = ""   # 显式指定供应商:同一个 id 两家都可能有,猜错就是用错 key
+    model: str = ""      # 空 = 清除该阶段的配置,回落内置默认
+
+
+@router.post("/api/stages")
+def api_stage_set(body: StageRequest):
+    try:
+        llm_stages.set_stage(body.key, body.provider, body.model)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return api_stages()
 
 
 @router.get("/api/models/remote")

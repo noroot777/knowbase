@@ -51,10 +51,13 @@ async function initFavTools() {
       fetch('/api/favorites/settings').then(r => r.json()),
     ]);
     const sel = $('fav-model');
+    // option 的 value 是带家的 "provider:model_id"(同名 id 两家都有时才分得开),
+    // 显示只留模型名。这个下拉和设置面板的「收藏 · 分诊与行动卡」是同一处配置。
     sel.innerHTML = ms.models.map(m =>
       `<option value="${esc(m.key)}"${m.enabled ? '' : ' disabled'}>${esc(m.label)}</option>`).join('');
     if (![...sel.options].some(o => o.value === st.model)) {
-      sel.insertAdjacentHTML('afterbegin', `<option value="${esc(st.model)}">${esc(st.model)}</option>`);
+      sel.insertAdjacentHTML('afterbegin',
+        `<option value="${esc(st.model)}">${esc(modelLabel(st.model))}</option>`);
     }
     sel.value = st.model;
   } catch {}
@@ -257,7 +260,7 @@ function renderTriage(d, tri) {
     html += `<div class="fav-triage-note">上次分诊失败:${esc(tri.error)}
       <button onclick="runTriage()">重试</button></div>`;
   } else if (!tri.fresh) {
-    html += `<div class="fav-triage-note">收藏有变动,以下结果生成于 ${esc((tri.generated_at || '').slice(5, 16))}(${esc(tri.model || '')}),可能过时
+    html += `<div class="fav-triage-note">收藏有变动,以下结果生成于 ${esc((tri.generated_at || '').slice(5, 16))}(${esc(modelLabel(tri.model))}),可能过时
       <button onclick="runTriage()">✨ 重新分诊</button></div>`;
   }
   if (heroId) html += favHeroHtml(byId.get(heroId),

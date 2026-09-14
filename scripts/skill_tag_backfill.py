@@ -36,8 +36,8 @@ SOURCES = ("dr-gzh-projects", "dr-video-projects")
 TAG = "topic/skill工具"
 TAG_LINE = f"  - {TAG}"
 KEYWORD = re.compile(r"skill|技能", re.I)
-# 走 kb.llm 的 API 通道,模型 id 写全名钉死(别名会随新一代发布静默漂移)
-JUDGE_MODEL = "gpt-5.6-luna"
+# 走 kb.llm 的 API 通道;用哪家的哪个模型由设置面板的「脚本 · skill 标签回填」
+# 阶段决定(kb.llm_stages 的 "skill_tag"),没配就用那里登记的内置默认
 BATCH = 40
 SUMMARIES_PER_ENTITY = 3
 
@@ -94,8 +94,9 @@ def _llm(prompt: str, timeout: int = 300, max_tokens: int = 8192) -> str:
     key/base_url 由 kb.llm 统一解析(环境变量优先,其次 data/secrets.json);
     失败抛 RuntimeError,judge 把该批次计入 missing 下一轮重试。"""
     from kb.llm import chat
+    from kb.llm_stages import stage_model
 
-    return chat(prompt, JUDGE_MODEL, max_tokens=max_tokens, timeout=timeout)
+    return chat(prompt, stage_model("skill_tag"), max_tokens=max_tokens, timeout=timeout)
 
 
 def _fm_field(fm: str, key: str) -> str:

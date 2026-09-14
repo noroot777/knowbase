@@ -79,10 +79,11 @@ def select_targets(u: W.Universe, window_days: int = 14, min_docs: int = 3,
     return out
 
 
-def run_targets(u: W.Universe, targets: list[dict], model: str = W.LLM_MODEL,
+def run_targets(u: W.Universe, targets: list[dict], model=None,
                 workers: int = 3) -> list[str]:
     if not targets:
         return []
+    model = model or W.llm_model()
     wl_all = [t["name"] for t in targets] + \
              [u.page_file[k][1] for k in u.page_keys[:40]]
 
@@ -120,14 +121,15 @@ def main():
     ap.add_argument("--window-days", type=int, default=14)
     ap.add_argument("--growth", type=int, default=3)
     ap.add_argument("--force", action="store_true", help="忽略增量条件,强制重写")
-    ap.add_argument("--model", default=W.LLM_MODEL)
+    ap.add_argument("--model", default=None, help="临时覆盖模型 id;默认用设置面板的「管道 · wiki 摘要与综述」阶段")
     ap.add_argument("--workers", type=int, default=3)
     a = ap.parse_args()
     u = W.Universe(W.connect_ro())
     targets = select_targets(u, a.window_days, a.min_docs, a.growth,
                              only=a.entity, force=a.force)
-    print(f"待综合 {len(targets)} 个实体 (model={a.model})")
-    done = run_targets(u, targets, a.model, a.workers)
+    model = a.model or W.llm_model()
+    print(f"待综合 {len(targets)} 个实体 (model={model})")
+    done = run_targets(u, targets, model, a.workers)
     for n in done:
         print(f"  ok {n}")
 

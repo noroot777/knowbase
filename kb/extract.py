@@ -4,8 +4,9 @@
 两条路:
 - pre_tagged 来源(dr-youtube-dig):frontmatter 里已有 entity/xxx、topic/xxx
   标签,直接解析进 entities 表,零成本。
-- 其他来源(dr-gzh、gzh):调 LLM API(gpt-5.5)读正文提取,结果进 DB;
-  --writeback 时同步回写 md frontmatter 的 tags(obs 里可见可点)。
+- 其他来源(dr-gzh、gzh):调 LLM API 读正文提取,结果进 DB;用哪个模型看设置
+  面板的「管道 · 提取打标」阶段;--writeback 时同步回写 md frontmatter 的
+  tags(obs 里可见可点)。
 
 回写只动 frontmatter 的 tags 列表,正文一个字节不碰。
 """
@@ -19,9 +20,9 @@ from datetime import datetime
 from kb.config import SOURCES, VAULT_ROOT
 from kb.norm import entity_norm, kind_norm
 
-# 提取走 kb.llm 的 API 通道(OpenAI 侧),不再是本地 claude CLI 子进程。
-# 模型 id 写全名钉死:别名会随新一代发布静默漂移,批量管道换模型不该无声无息。
-EXTRACT_MODEL = "gpt-5.5"
+# 提取走 kb.llm 的 API 通道,用哪家的哪个模型由设置面板的「管道 · 提取打标」
+# 阶段决定(kb.llm_stages 的 "extract");没配就用那里登记的内置默认 gpt-5.5。
+# 别在这里写死字面量:改模型要能在面板上看见、也能按供应商分开选。
 
 _PROMPT = """\
 你是知识库索引员。读下面这篇文章,提取检索用元数据,只输出一个 JSON 对象,不要任何其他文字:
@@ -93,10 +94,11 @@ def extract_with_llm(title: str, body: str, timeout: int = 120) -> dict:
 
 def _extract_once(title: str, body: str, timeout: int) -> dict:
     from kb.llm import chat
+    from kb.llm_stages import stage_model
 
     prompt = _PROMPT.format(title=title, body=body[:6000])
     # 产物是一个小 JSON 对象,2048 足够;OpenAI 侧推理 token 另有内部下限兜底
-    out = chat(prompt, EXTRACT_MODEL, max_tokens=2048, timeout=timeout)
+    out = chat(prompt, stage_model("extract"), max_tokens=2048, timeout=timeout)
     # 容错:模型可能包 ```json 围栏
     m = re.search(r"\{.*\}", out, re.S)
     if not m:

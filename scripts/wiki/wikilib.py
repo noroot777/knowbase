@@ -27,14 +27,23 @@ VAULT = Path.home() / "obs" / "new-start"
 EPOCH = "2026-06-30"          # digest/synthesis 等 LLM 环节只处理这之后的日期
 SOURCE = "dr-gzh"
 
-# wiki 层 LLM 环节(digest / synthesis)统一的模型与调用出口。
-# 走 kb.llm 的 API 通道(OpenAI 侧),不再是本地 claude CLI 子进程。
-# 模型 id 写全名钉死:别名会随新一代发布静默漂移,批量任务换模型
-# (贵一截,风格也变)不该无声无息。要升代在这里改一个字面量。
-LLM_MODEL = "gpt-5.6-luna"
+# wiki 层 LLM 环节(digest / synthesis)统一的调用出口。走 kb.llm 的 API 通道;
+# 用哪家的哪个模型由设置面板的「管道 · wiki 摘要与综述」阶段决定
+# (kb.llm_stages 的 "wiki"),没配就用那里登记的内置默认。三个 wiki 脚本的
+# --model 仍可临时覆盖。
 
 
-def call_llm(prompt: str, model: str, timeout: int = 240,
+def llm_model():
+    """本阶段当前该用的模型(Model 对象,打日志时 __str__ 出模型 id)。"""
+    import sys
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    from kb.llm_stages import stage_model
+
+    return stage_model("wiki")
+
+
+def call_llm(prompt: str, model, timeout: int = 240,
              max_tokens: int = 8192) -> str:
     """调模型并剥掉可能的 markdown 围栏。失败抛 RuntimeError,由调用方计失败。
 

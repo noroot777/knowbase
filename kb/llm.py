@@ -8,23 +8,40 @@
 前端下拉里的模型 = 中转站实际能调的 id。给了内置兜底 id,但更推荐在「API Key」面板
 点「拉取可用模型」,从各自中转站的 /v1/models 拉取并勾选(见 list_remote_models)。
 GPT 侧走 chat.completions,用 max_completion_tokens、不传 temperature,兼容 gpt-5 推理系。
+
+**哪一步用哪个模型不在这里决定**:提取、条目化、wiki、问答各阶段的分配在
+`kb.llm_stages`(面板「模型」),本模块只管解析 + 真正发请求。chat/chat_stream
+既收模型 id 字符串,也收 llm_stages 给的 Model(供应商已定死)。
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import tempfile
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 from kb.config import DATA_DIR
+
+try:                                     # POSIX 才有;非 POSIX 上退化成只有进程内锁
+    import fcntl
+except ImportError:                      # pragma: no cover - 本项目只跑 macOS
+    fcntl = None                         # type: ignore[assignment]
 
 
 @dataclass(frozen=True)
 class Model:
     provider: str   # "anthropic" | "openai"
     model_id: str   # 传给对应 SDK 的完整模型 id
-    label: str      # 前端显示名(这里用 id 本身)
+    label: str = ""  # 前端显示名(留空=用 id 本身)
+
+    def __str__(self) -> str:
+        # 脚本里有 f"…({model})" 这样的日志,直接打出 id 而不是 dataclass repr
+        return self.model_id
 
 
 # 内置兜底模型 id:面板没配 / 没从中转站拉取时用这些。面板里配置会覆盖它们。
@@ -40,6 +57,8 @@ _DEFAULT_MODELS = {
 #   OpenAI 侧:base_url 一般带 /v1(SDK 自动补 /chat/completions)
 _ENV_KEY = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 _ENV_URL = {"anthropic": "ANTHROPIC_BASE_URL", "openai": "OPENAI_BASE_URL"}
+PROVIDERS = tuple(_ENV_KEY)          # 供应商全集,面板与 llm_stages 都按它遍历
+PROVIDER_LABEL = {"anthropic": "Anthropic / Claude", "openai": "OpenAI / GPT"}
 _SECRETS_PATH = DATA_DIR / "secrets.json"
 
 _clients: dict[str, object] = {}
@@ -75,43 +94,128 @@ def has_key(provider: str) -> bool:
 
 
 def _save_secrets(data: dict) -> None:
+    """写盘。**原子替换**:先写同目录的临时文件再 rename。
+
+    直接 write_text 是截断后再写,中间有一段时间文件是空的或半截的——并发的
+    读者(另一个请求、另一个进程)这时读到的是坏 JSON,`_file_secrets` 把它
+    吞成 `{}`,接着那边一存盘就把整份 key 抹了。rename 在同一文件系统上是原子的,
+    读者要么看到旧的完整文件,要么看到新的。
+
+    临时文件名必须是唯一的:固定叫 `secrets.json.tmp` 的话,两个并发写者会写
+    同一个文件,先 rename 的那个把它搬走,后一个当场 FileNotFoundError。进程内
+    的锁挡得住同进程的并发,挡不住 kb-web 和一个命令行脚本同时存盘。
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _SECRETS_PATH.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    fd, tmp_name = tempfile.mkstemp(dir=str(_SECRETS_PATH.parent),
+                                    prefix=_SECRETS_PATH.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
     try:
-        _SECRETS_PATH.chmod(0o600)  # 只有本人可读
-    except OSError:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        tmp.chmod(0o600)   # 先收权限再就位,别留一个短暂可读的窗口
+        tmp.replace(_SECRETS_PATH)
+    except BaseException:
+        tmp.unlink(missing_ok=True)   # 失败不留垃圾文件
+        raise
     _clients.clear()
+
+
+# secrets.json 不只装 key:各阶段的模型分配(见 kb.llm_stages)也落在这里。
+# 读随便读,**改一律走 update_settings**(见下),别在外面 read → 改 → write。
+def read_settings() -> dict:
+    return _file_secrets()
+
+
+# 所有改写共用一把进程内锁。secrets.json 是整文件读改写:两个请求(面板里连着
+# 改两个阶段、或者一边存 key 一边改阶段)各自基于同一份旧内容写回,后写的那次
+# 就把前一次的改动整个吃掉——两个请求都返回成功,用户只看到一个生效
+# (2026-09-14 第 3 轮审查发现)。锁住「读→改→写」这一整段,而不只是写。
+_settings_lock = threading.RLock()
+_lock_depth = 0                       # >0 = 本进程已持着 flock(同线程重入别再抢)
+
+
+@contextlib.contextmanager
+def _settings_guard() -> Iterator[None]:
+    """把「读→改→写」圈成临界区,**同进程内和跨进程都互斥**。
+
+    进程内锁只挡得住同一个 kb-web 里的并发。两个独立进程(两个 kb-web 实例、
+    或一个服务进程 + 一条命令行)同时保存时,各自读到同一份旧 JSON、各自整文件
+    写回,后写的照样把前一次的阶段/key/base_url 吃掉,两边还都返回成功
+    (2026-09-14 第 4 轮审查发现)。所以另加一把 `secrets.json.lock` 上的 flock:
+    锁在独立的 lockfile 上而不是 secrets.json 自己,因为写盘是 rename 换文件,
+    锁着的那个 inode 会被换走,后来者锁到的就是另一个对象了。
+
+    lockfile 只创建不删除:unlink 会让「A 拿到锁 → B 删文件 → C 新建并拿到锁」
+    这种交错出现两个持锁者,留一个空文件在那儿的代价则是零。
+    """
+    global _lock_depth
+    with _settings_lock:                  # 先把同进程的并发挡在外面
+        if _lock_depth or fcntl is None:  # 重入(外层已持锁)/ 无 flock:只靠进程内锁
+            _lock_depth += 1
+            try:
+                yield
+            finally:
+                _lock_depth -= 1
+            return
+        lock_path = _SECRETS_PATH.with_name(_SECRETS_PATH.name + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            _lock_depth += 1
+            try:
+                yield
+            finally:
+                _lock_depth -= 1
+        finally:
+            os.close(fd)                  # 关 fd 即释放 flock
+
+
+def update_settings(mutate) -> dict:
+    """在锁内重新读盘 → 交给 mutate 就地改 → 原子写回,返回写进去的那份。
+
+    mutate 收到的是**临界区里刚读出来的**最新内容,所以并发的两次改动会叠加,
+    不会互相覆盖。校验之类的活在调用前做完,别放进 mutate 里拖长临界区,
+    更别在 mutate 里再调一次 update_settings(临界区里干等自己)。
+    """
+    with _settings_guard():
+        data = _file_secrets()
+        mutate(data)
+        _save_secrets(data)
+        return data
 
 
 def set_config(updates: dict) -> None:
     """写 secrets.json。updates 形如 {"openai": {"key": "sk-...", "base_url": "..."}}。
     只改传入的子字段;某子字段传空串=清除它;整家清空则删掉该家。
     写完清缓存 client,新配置立即生效,无需重启。"""
-    data = _file_secrets()
-    for prov, fields in updates.items():
-        if prov not in _ENV_KEY or not isinstance(fields, dict):
-            continue
-        entry = _file_entry(prov)  # 已归一成 dict
-        for sub in ("key", "base_url"):
-            if sub not in fields:
+    def mutate(data: dict) -> None:
+        for prov, fields in updates.items():
+            if prov not in _ENV_KEY or not isinstance(fields, dict):
                 continue
-            val = (fields[sub] or "").strip()
-            if val:
-                entry[sub] = val
+            cur = data.get(prov)
+            entry = {"key": cur} if isinstance(cur, str) else (
+                dict(cur) if isinstance(cur, dict) else {})   # 兼容旧格式(值直接是 key)
+            for sub in ("key", "base_url"):
+                if sub not in fields:
+                    continue
+                val = (fields[sub] or "").strip()
+                if val:
+                    entry[sub] = val
+                else:
+                    entry.pop(sub, None)
+            if "models" in fields:  # 下拉可选模型 id 列表
+                cleaned = [s for s in (str(x).strip() for x in (fields["models"] or [])) if s]
+                if cleaned:
+                    entry["models"] = cleaned
+                else:
+                    entry.pop("models", None)
+            if entry:
+                data[prov] = entry
             else:
-                entry.pop(sub, None)
-        if "models" in fields:  # 下拉可选模型 id 列表
-            cleaned = [s for s in (str(x).strip() for x in (fields["models"] or [])) if s]
-            if cleaned:
-                entry["models"] = cleaned
-            else:
-                entry.pop("models", None)
-        if entry:
-            data[prov] = entry
-        else:
-            data.pop(prov, None)
-    _save_secrets(data)
+                data.pop(prov, None)
+
+    update_settings(mutate)
 
 
 def _mask(k: str) -> str:
@@ -171,7 +275,11 @@ def set_models(provider: str, models: list[str]) -> None:
 
 
 def _provider_of(model_id: str) -> str | None:
-    """判断一个模型 id 属于哪家:先查配置列表,再按前缀兜底。"""
+    """判断一个模型 id 属于哪家:先查配置列表,再按前缀兜底。
+
+    注意这是**猜**:同一个 id 在两家中转站都可能存在。要确定性地指定供应商,
+    用 "openai:gpt-5.5" 这种带前缀的写法,或直接传 Model(见 resolve)。
+    """
     for prov in _ENV_KEY:
         if model_id in configured_models(prov):
             return prov
@@ -183,64 +291,128 @@ def _provider_of(model_id: str) -> str | None:
     return None
 
 
+def provider_of(model_id: str) -> str | None:
+    """_provider_of 的公开名(llm_stages / 设置面板用)。"""
+    return _provider_of(model_id)
+
+
+def _split_prefix(model: str) -> tuple[str | None, str]:
+    """拆 "openai:gpt-5.5" 这种显式写法;冒号前不是已知供应商则原样返回。"""
+    head, sep, rest = model.partition(":")
+    if sep and head in _ENV_KEY and rest.strip():
+        return head, rest.strip()
+    return None, model
+
+
+def qualify(m: Model) -> str:
+    """Model → "provider:model_id" 的字符串形式。
+
+    凡是模型标识要出 Python 的边界(HTTP 响应、前端下拉的 value、落进
+    messages 表),都得用这个带家的形式:裸 id 一旦回到 resolve() 就只能靠
+    前缀猜,而同一个 id 两家中转站都可能有——面板明明选了 openai,问答却按
+    遍历顺序打到 anthropic 去(2026-09-14 审查抓到的就是这条)。
+    """
+    return f"{m.provider}:{m.model_id}"
+
+
+def _default_model() -> Model:
+    """问答回答阶段的模型(= llm_stages 的 "ask" 阶段),带供应商。"""
+    from kb import llm_stages
+    return llm_stages.resolve_stage("ask") or Model(
+        "anthropic", "claude-sonnet-4-5", "claude-sonnet-4-5")
+
+
 def get_default_model() -> str:
-    """请求未指定模型时的兜底:显式配置 > 环境变量 > 第一个有 key 的模型 > 第一个模型。"""
-    cfg = _file_secrets().get("default_model") or os.environ.get("KB_ASK_MODEL")
-    if cfg:
-        return cfg
-    with_key = [m for prov in _ENV_KEY for m in configured_models(prov) if has_key(prov)]
-    if with_key:
-        return with_key[0]
-    allm = [m for prov in _ENV_KEY for m in configured_models(prov)]
-    return allm[0] if allm else "claude-sonnet-4-5"
+    """问答未指定模型时的兜底,形如 "openai:gpt-5.5"(带家,见 qualify)。"""
+    return qualify(_default_model())
 
 
 def get_plan_model(fallback: str) -> str:
-    """规划步骤用的模型:显式配置 > 环境变量 > 自动挑个便宜的(haiku/mini 等)
+    """规划步骤用的模型:阶段配置 > 环境变量 > 自动挑个便宜的(haiku/mini 等)
     > 传入的回答模型。规划只是解析意图,用便宜模型省钱,且一定要有 key。"""
-    cfg = _file_secrets().get("plan_model") or os.environ.get("KB_PLAN_MODEL")
-    if cfg:
-        return cfg
-    cheap = [m for prov in _ENV_KEY if has_key(prov) for m in configured_models(prov)
-             if any(t in m.lower() for t in ("haiku", "mini", "flash", "lite", "nano"))]
-    return cheap[0] if cheap else fallback
+    from kb import llm_stages
+    m = llm_stages.resolve_stage("plan", prefer=fallback)
+    return qualify(m) if m else fallback
 
 
 def get_fav_model() -> str:
-    """收藏整理(行动卡提取/分诊)用的模型:显式配置 > 环境变量 > 默认问答模型。"""
-    return (_file_secrets().get("fav_model")
-            or os.environ.get("KB_FAV_MODEL")
-            or get_default_model())
+    """收藏整理(行动卡提取/分诊)用的模型,同样带家。"""
+    from kb import llm_stages
+    m = llm_stages.resolve_stage("fav")
+    return qualify(m) if m else get_default_model()
 
 
 def set_fav_model(model: str) -> None:
-    """保存收藏整理模型(设置面板下拉);传空 = 清除,回落默认问答模型。"""
-    data = _file_secrets()
+    """保存收藏整理模型(收藏页下拉);传空 = 清除,回落默认问答模型。
+
+    和设置面板里的「收藏 · 分诊与行动卡」写的是同一处,两边不会各存一份。
+    收藏页传来的就是 "provider:model_id",set_stage 认这个前缀。
+    """
+    from kb import llm_stages
+    llm_stages.set_stage("fav", None, model)
+
+
+def parse_model(model: str, provider: str | None = None) -> Model | None:
+    """和 resolve 同样的解析,但**认不出供应商时返回 None 而不是回退默认**。
+
+    llm_stages 逐条试「环境变量 / 旧配置 / 内置默认」时必须用这个:用 resolve
+    的话,一个认不出的 id 会去问默认模型,而默认模型自己也在走这套解析 —— 死循环。
+    """
     model = (model or "").strip()
-    if model:
-        data["fav_model"] = model
-    else:
-        data.pop("fav_model", None)
-    _save_secrets(data)
+    if not model:
+        return None
+    pre, mid = _split_prefix(model)
+    prov = provider or pre or _provider_of(mid)
+    return Model(prov, mid, mid) if prov in _ENV_KEY and mid else None
 
 
-def resolve(model: str) -> Model:
-    """把下拉传来的模型 id 解析成 Model,未知则回退默认。"""
-    prov = _provider_of(model) if model else None
-    if prov:
-        return Model(prov, model, model)
-    d = get_default_model()
-    return Model(_provider_of(d) or "anthropic", d, d)
+def resolve(model, provider: str | None = None) -> Model:
+    """把模型标识解析成 Model。接受三种写法:
+
+    - Model 实例:原样返回(阶段配置走这条,供应商已经定死)
+    - "openai:gpt-5.5":显式带家(接口/下拉传回来的都是这种)
+    - "gpt-5.5":按 _provider_of 猜(命令行手敲、老数据);猜不出来回退默认模型
+    """
+    if isinstance(model, Model):
+        return model
+    return parse_model(model, provider) or _default_model()
+
+
+def model_pool() -> dict[str, list[str]]:
+    """每家在下拉里该出现的模型 id:面板勾选的候选 + **各阶段当前实际指向的**。
+
+    后半截不能少。阶段模型不要求出现在候选列表里(API/命令行写进来的、老配置
+    迁移过来的、或者用户先选了它、之后在「API Key」面板重新拉取时没再勾它),
+    而问答下拉只要没有一个 option 匹配当前默认,浏览器就会自动选中第一个候选,
+    chat.js 每次发送又都把下拉的值带上——用户在「模型分配」里配好的问答模型
+    当场被顶掉,还看不出是谁改的(2026-09-14 第 2 轮审查发现)。
+    """
+    from kb import llm_stages
+    pool = {p: list(configured_models(p)) for p in _ENV_KEY}
+    for st in llm_stages.STAGES:
+        m = llm_stages.resolve_stage(st.key)
+        if m and m.provider in pool and m.model_id not in pool[m.provider]:
+            pool[m.provider].append(m.model_id)
+    return pool
 
 
 def available_models() -> list[dict]:
-    """给前端下拉用:每家 configured_models 展开,标注 provider 是否已配 key。"""
+    """给前端下拉用:model_pool 展开,标注 provider 是否已配 key。
+
+    key 带家("openai:gpt-5.5")且全局唯一——两家有同名 id 时,裸 id 当 value
+    会撞成两个一模一样的选项,连"哪个是默认"都会两边同时为真。
+    label 只给人看,同名时补上供应商以示区分。
+    """
     default = get_default_model()
+    pool = model_pool()
+    dupes = {mid for mid in pool["anthropic"] if mid in pool["openai"]}
     out = []
-    for prov in _ENV_KEY:
-        for mid in configured_models(prov):
-            out.append({"key": mid, "label": mid, "provider": prov,
-                        "enabled": has_key(prov), "default": mid == default})
+    for prov, mids in pool.items():
+        for mid in mids:
+            key = f"{prov}:{mid}"
+            out.append({"key": key, "label": mid + (f"({prov})" if mid in dupes else ""),
+                        "model": mid, "provider": prov,
+                        "enabled": has_key(prov), "default": key == default})
     return out
 
 
@@ -264,10 +436,11 @@ def list_remote_models(provider: str) -> list[str]:
     return sorted(ids)
 
 
-def chat(prompt: str, model: str, max_tokens: int = 8192, timeout: int = 180) -> str:
+def chat(prompt: str, model, max_tokens: int = 8192, timeout: int = 180) -> str:
     """单轮补全。prompt 已是完整提示词(资料都拼进去了),返回纯文本答案。
 
-    失败统一抛 RuntimeError(上层转 502),含 provider 便于定位。
+    model 可以是下拉传来的 id 字符串,也可以是 llm_stages.stage_model() 给的
+    Model(供应商已定死)。失败统一抛 RuntimeError(上层转 502),含 provider 便于定位。
     """
     m = resolve(model)
     if not has_key(m.provider):
@@ -312,7 +485,7 @@ def _chat_openai(model_id: str, prompt: str, max_tokens: int, timeout: int) -> s
     return (resp.choices[0].message.content or "").strip()
 
 
-def chat_stream(prompt: str, model: str, max_tokens: int = 8192,
+def chat_stream(prompt: str, model, max_tokens: int = 8192,
                 timeout: int = 180) -> Iterator[str]:
     """流式补全:逐块 yield 文本增量,供问答边生成边推给前端。
 
@@ -367,22 +540,17 @@ def anthropic_tool_turn(model_id: str, system: str, messages: list[dict],
 
 
 def anthropic_model_for_tools(prefer: str | None = None) -> str | None:
-    """研究阶段(工具循环)用的 Anthropic 模型。
+    """研究阶段(工具循环)用的 Anthropic 模型 id(= llm_stages 的 "agent" 阶段)。
 
-    选择顺序:显式配置 agent_model > 用户所选模型(若本就是 Anthropic 的)
-    > 配置列表里第一个 sonnet > 第一个 Anthropic 模型。没配 anthropic key
-    返回 None(上层退回旧的规划管线)。
+    选择顺序:阶段配置 > 环境变量/旧 agent_model > 用户所选模型(若本就是
+    Anthropic 的)> 配置列表里第一个 sonnet > 第一个 Anthropic 模型。
+    没配 anthropic key 返回 None(上层退回旧的规划管线)。
     """
     if not has_key("anthropic"):
         return None
-    cfg = _file_secrets().get("agent_model") or os.environ.get("KB_AGENT_MODEL")
-    if cfg:
-        return cfg
-    if prefer and _provider_of(prefer) == "anthropic":
-        return prefer
-    models = configured_models("anthropic")
-    return next((m for m in models if "sonnet" in m.lower()),
-                models[0] if models else None)
+    from kb import llm_stages
+    m = llm_stages.resolve_stage("agent", prefer=prefer)
+    return m.model_id if m else None
 
 
 def _stream_openai(model_id: str, prompt: str, max_tokens: int,

@@ -66,7 +66,7 @@ def docs_of_day(con, dt: str):
     return out
 
 
-def build_digest(con, vault: Path, dt: str, model: str) -> bool:
+def build_digest(con, vault: Path, dt: str, model) -> bool:
     docs = docs_of_day(con, dt)
     if not docs:
         print(f"[{dt}] 无文章,跳过")
@@ -98,7 +98,7 @@ def main():
     ap.add_argument("--date")
     ap.add_argument("--since")
     ap.add_argument("--until")
-    ap.add_argument("--model", default=W.LLM_MODEL)
+    ap.add_argument("--model", default=None, help="临时覆盖模型 id;默认用设置面板的「管道 · wiki 摘要与综述」阶段")
     a = ap.parse_args()
     if a.date:
         dates = [a.date]
@@ -109,7 +109,8 @@ def main():
     else:
         ap.error("需要 --date 或 --since/--until")
     con = W.connect_ro()
-    made = [d for d in dates if build_digest(con, W.VAULT, d, a.model)]
+    model = a.model or W.llm_model()   # 整批定一次,免得中途改面板出现半批新半批旧
+    made = [d for d in dates if build_digest(con, W.VAULT, d, model)]
     print(f"完成 {len(made)}/{len(dates)}(index 由 wiki_daily 统一重渲染)")
 
 

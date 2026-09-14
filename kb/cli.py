@@ -69,11 +69,12 @@ def cmd_index(args) -> int:
 
 
 def cmd_extract(args) -> int:
-    from kb.extract import (EXTRACT_MODEL, extract_with_llm, pending_docs,
+    from kb.extract import (extract_with_llm, pending_docs,
                             save_extraction, writeback_tags)
+    from kb.llm_stages import stage_model
     conn = store.connect()
     todo = pending_docs(conn, args.limit)
-    print(f"[extract] 待提取 {len(todo)} 篇 (model={EXTRACT_MODEL})")
+    print(f"[extract] 待提取 {len(todo)} 篇 (model={stage_model('extract')})")
     ok = failed = empty = 0
     for i, row in enumerate(todo, 1):
         body = store.doc_body(conn, row["path"])

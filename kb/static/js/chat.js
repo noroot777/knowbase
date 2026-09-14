@@ -15,7 +15,7 @@ function pendingHtml(model, partial, phase) {
   const body = partial ? mdHtml(partial) : '<span class="spin"></span>';
   const ph = partial ? '生成中…' : (phase || '检索中…');
   return `<div class="msg assistant" id="chat-pending">` +
-    `<div class="gen-head">模型 · ${esc(model || '默认')} · <span id="chat-gen-phase">${esc(ph)}</span></div>` +
+    `<div class="gen-head">模型 · ${esc(modelLabel(model) || '默认')} · <span id="chat-gen-phase">${esc(ph)}</span></div>` +
     `<div class="bubble md" id="chat-pending-body">${body}</div></div>`;
 }
 
@@ -171,7 +171,7 @@ function renderMsg(m) {
       ` · <a href="${esc(obsLink(r))}" style="color:var(--muted)" title="在 Obsidian 中打开">Obsidian</a>` +
       (r.url ? ` · <a href="${esc(safeUrl(r.url))}" target="_blank" rel="noopener" style="color:var(--muted)">原文↗</a>` : '')
     ).join('<br>')}</details>` : '';
-  const meta = m.model ? `<div class="msg-meta">${esc(m.model)}${m.created_at ? ' · ' + timeAgo(m.created_at) : ''}` +
+  const meta = m.model ? `<div class="msg-meta">${esc(modelLabel(m.model))}${m.created_at ? ' · ' + timeAgo(m.created_at) : ''}` +
     ` · <button class="ghost note-btn" style="padding:2px 10px;font-size:12px" ` +
     `data-payload="${encodeURIComponent(JSON.stringify({ content: m.content, refs: m.refs || [] }))}" ` +
     `onclick="saveNote(this)" title="把这条回答回填到 vault 的 wiki/notes/(知识复利)">存为笔记</button></div>` : '';

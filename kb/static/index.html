@@ -27,6 +27,8 @@
   <span id="stats"></span>
   <span class="topbar-act">
     <a class="tb-link" href="/graph" target="_blank" rel="noopener">图谱 ↗</a>
+    <button class="ghost" id="stages-btn" style="padding:6px 13px;font-size:13px"
+            onclick="openStages()">模型</button>
     <button class="ghost" id="keys-btn" style="padding:6px 13px;font-size:13px"
             onclick="openKeys()">API Key <span id="keys-dot" style="opacity:.5">●</span></button>
     <button class="ghost" id="mcp-btn" style="padding:6px 13px;font-size:13px"
@@ -250,6 +252,24 @@
 
     <div style="display:flex;justify-content:flex-end;margin-top:14px">
       <button class="ghost" onclick="closeTargets()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div id="stages-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeStages()">
+  <div class="modal" style="width:min(680px,94vw);max-height:88vh;display:flex;flex-direction:column">
+    <h2>模型分配</h2>
+    <div class="row hint" style="margin:-8px 0 6px">
+      每个用到大模型的阶段各自选一家供应商的一个模型,改完即时生效(管道下一篇就换过来)。
+      选项按供应商分组,<b>选的是哪家就用哪家的 key</b>,不按模型名去猜。
+      候选来自「API Key」面板里勾选的模型;没选过就用内置默认。
+    </div>
+    <div id="stages-list" style="overflow-y:auto;flex:1;min-height:0">
+      <div class="empty">加载中…</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px;align-items:center">
+      <span id="stages-msg" class="hint"></span>
+      <button class="ghost" onclick="closeStages()" style="margin-left:auto">关闭</button>
     </div>
   </div>
 </div>

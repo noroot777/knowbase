@@ -12,7 +12,7 @@
     library_api    /api/search、/api/facets、/api/stats、/api/doc、/api/projects
     chat_api       /api/ask*、/api/conversations*、/api/notes
     favorites_api  /api/favorites*
-    settings_api   /api/models*、/api/keys、/api/mcp/*
+    settings_api   /api/models*、/api/stages、/api/keys、/api/mcp/*
     pipeline_api   /api/pipeline/*
 """
 

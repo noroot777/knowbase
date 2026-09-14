@@ -67,6 +67,8 @@ function copyMcpConfig() {
 }
 
 // ── 问答模型下拉 ──────────────────────────────────────────────────────────
+// option 的 value 是带家的 "provider:model_id":裸 id 传回后端只能靠前缀猜家,
+// 同一个 id 两家中转站都可能有,猜错就是拿 A 家 key 打 B 家的站。
 async function loadModels() {
   try {
     const d = await fetch('/api/models').then(r => r.json());
@@ -80,12 +82,129 @@ async function loadModels() {
       if (m.key === d.default) o.selected = true;
       sel.appendChild(o);
     }
+    // 后端已经把各阶段当前指向的模型并进候选了;真要是还对不上(接口版本不一致、
+    // 刚被别处改掉),这里补一条并选中它。不补的话浏览器会默认选中第一个 option,
+    // 而发送时总是带上下拉的值 —— 面板里配好的问答模型就被静默换掉了
+    if (d.default && ![...sel.options].some(o => o.value === d.default)) {
+      sel.insertAdjacentHTML('afterbegin',
+        `<option value="${esc(d.default)}">${esc(modelLabel(d.default))}</option>`);
+      sel.value = d.default;
+    }
     // 默认项若未配 key,退到第一个可用的
     if (sel.selectedOptions[0]?.disabled) {
       const first = [...sel.options].find(o => !o.disabled);
       if (first) first.selected = true;
     }
   } catch { /* 保底:留空下拉,发送时后端用默认模型 */ }
+}
+
+// ── 模型分配:每个用到大模型的阶段各选一家一模型 ──────────────────────────
+// 下拉的 value 是 "provider:model_id",供应商跟着选项一起存下去——只存模型名的话,
+// 同一个 id 在两家中转站都可能有,后端只能按前缀猜,猜错就是拿 A 家 key 打 B 家的站。
+const STAGE_SRC_NOTE = {
+  default: '内置默认', env: '环境变量', legacy: '旧配置', auto: '自动挑选', config: '',
+};
+
+function stageOptions(st, providers) {
+  const allow = st.providers.length ? st.providers : providers.map(p => p.key);
+  const cur = st.configured;
+  let seen = false, html = '';
+  for (const p of providers) {
+    if (!allow.includes(p.key)) continue;
+    let ids = p.models.slice();
+    // 当前配的 id 可能没在「API Key」面板里勾选(比如老配置、内置默认),补进来免得一存就丢
+    if (cur && cur.provider === p.key && !ids.includes(cur.model)) ids.unshift(cur.model);
+    if (!ids.length) continue;
+    html += `<optgroup label="${esc(p.label)}${p.has_key ? '' : '(未配 key)'}">`;
+    for (const id of ids) {
+      const v = `${p.key}:${id}`;
+      const on = cur && cur.provider === p.key && cur.model === id;
+      if (on) seen = true;
+      html += `<option value="${esc(v)}"${on ? ' selected' : ''}>${esc(id)}</option>`;
+    }
+    html += '</optgroup>';
+  }
+  const auto = `<option value=""${seen ? '' : ' selected'}>跟随默认</option>`;
+  return auto + html;
+}
+
+function stageNow(st) {
+  if (!st.model) {
+    return `<div class="stage-now warn">没有可用模型:这步只能用 ${esc(st.providers.join('/'))},那家还没配 key</div>`;
+  }
+  const note = st.source === 'config' ? '已指定'
+    : `跟随${STAGE_SRC_NOTE[st.source] || st.source}`
+      + (st.source === 'env' ? `(${esc(st.env)})` : '');
+  const warn = st.ready ? '' : ' warn';
+  const tail = st.ready ? '' : ' · 该供应商还没配 API key,这步会报错';
+  return `<div class="stage-now${warn}">当前:<b>${esc(st.model)}</b>`
+    + ` · ${esc(st.provider)} · ${note}${tail}</div>`;
+}
+
+function stageRow(st, providers) {
+  const locked = st.source === 'env' && !st.configured;
+  return `<div class="stage-row">
+    <div>
+      <div class="stage-name">${esc(st.label)}</div>
+      <div class="stage-hint">${esc(st.hint)}</div>
+    </div>
+    <select onchange="saveStage('${esc(st.key)}', this.value)"
+            title="${locked ? '环境变量已指定,选了也会被它压过' : ''}">
+      ${stageOptions(st, providers)}
+    </select>
+    ${stageNow(st)}
+  </div>`;
+}
+
+async function refreshStages() {
+  try {
+    const d = await fetch('/api/stages').then(r => r.json());
+    $('stages-list').innerHTML = d.stages.map(s => stageRow(s, d.providers)).join('');
+  } catch (e) {
+    $('stages-list').innerHTML = '<div class="empty">状态获取失败</div>';
+  }
+}
+
+function openStages() {
+  $('stages-modal').style.display = '';
+  $('stages-msg').textContent = '';
+  refreshStages();
+}
+function closeStages() { $('stages-modal').style.display = 'none'; }
+
+// 连着改两个下拉时,两次保存排队走,不并发:后端已经有锁保证不会互相覆盖,
+// 这里只是免得两个请求的响应交错回来、把列表渲染成旧的那一份。
+let stageSaveChain = Promise.resolve();
+
+function saveStage(key, value) {
+  stageSaveChain = stageSaveChain.then(() => _saveStage(key, value)).catch(() => {});
+  return stageSaveChain;
+}
+
+async function _saveStage(key, value) {
+  // value 空 = 清除该阶段配置,回落内置默认/自动挑选
+  const i = value.indexOf(':');
+  const body = i < 0 ? { key, provider: '', model: '' }
+    : { key, provider: value.slice(0, i), model: value.slice(i + 1) };
+  $('stages-msg').textContent = '保存中…';
+  try {
+    const r = await fetch('/api/stages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (await toastIfFail(r, '保存失败')) { $('stages-msg').textContent = ''; return; }
+    const d = await r.json();
+    $('stages-list').innerHTML = d.stages.map(s => stageRow(s, d.providers)).join('');
+    $('stages-msg').textContent = '✓ 已保存,即时生效';
+    loadModels();       // 问答下拉的默认项跟着「问答 · 回答」阶段走
+    if (key === 'fav') { // 收藏页那个下拉和「收藏 · 分诊与行动卡」是同一处配置
+      favToolsInited = false;
+      initFavTools();
+    }
+  } catch (e) {
+    $('stages-msg').textContent = '';
+    toast('保存失败', { detail: e.message });
+  }
 }
 
 // ── API Key 设置 ──────────────────────────────────────────────────────────
