@@ -6,7 +6,7 @@ import contextlib
 import io
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 from xml.sax.saxutils import escape
 
 from src.crawler.local_wechat import LocalReader, LocalReaderError, parse_push, resolve_accounts
@@ -89,17 +89,42 @@ class PushTests(unittest.TestCase):
         self.assertEqual(500, reader.messages.call_args.kwargs["offset"])
 
     def test_mapping_uses_biz_even_when_names_collide_or_change(self):
-        reader = Mock()
-        reader.accounts.return_value = [{"username": "gh_wrong", "display_name": "档案名"},
-                                        {"username": "gh_right", "display_name": "改名后的号"}]
-        reader.messages.side_effect = lambda u, **kw: [push(biz="other" if u == "gh_wrong" else "biz-a")]
+        reader = LocalReader()
+        reader.accounts = Mock(return_value=[{"username": "gh_wrong", "display_name": "档案名"},
+                                            {"username": "gh_right", "display_name": "改名后的号"}])
+        reader.messages = Mock(side_effect=lambda u, **kw: [push(biz="other" if u == "gh_wrong" else "biz-a")])
         result = resolve_accounts(reader, [{"name": "档案名", "fakeid": "biz-a"}], {})
         self.assertEqual({"biz-a": "gh_right"}, result)
 
+    def test_mapping_finds_older_push_across_message_and_page_boundaries(self):
+        for recent_count in (20, 499, 500, 1000):
+            with self.subTest(recent_count=recent_count):
+                reader = LocalReader()
+                reader.accounts = Mock(return_value=[{"username": "gh_test", "display_name": "档案名"}])
+                history = [{"text": "服务通知"}] * recent_count + [push()]
+                # 匹配后还有整页历史；所有目标已找到时不应继续读取。
+                history += [{"text": "服务通知"}] * 1000
+                reader.messages = Mock(side_effect=lambda u, limit=500, offset=0: history[offset:offset + limit])
+                found = resolve_accounts(reader, [{"name": "档案名", "fakeid": "biz-a"}], {})
+                self.assertEqual({"biz-a": "gh_test"}, found)
+                self.assertEqual([call("gh_test", offset=offset)
+                                  for offset in range(0, recent_count + 1, 500)],
+                                 reader.messages.call_args_list)
+
+    def test_mapping_exhausts_history_before_reporting_no_match(self):
+        reader = LocalReader()
+        reader.accounts = Mock(return_value=[{"username": "gh_test", "display_name": "档案名"}])
+        reader.messages = Mock(side_effect=[[{"text": "服务通知"}] * 500, []])
+        found = resolve_accounts(reader, [{"name": "档案名", "fakeid": "biz-a"}], {})
+        self.assertEqual({}, found)
+        self.assertEqual([call("gh_test", offset=0), call("gh_test", offset=500)],
+                         reader.messages.call_args_list)
+
     def test_one_unreadable_account_does_not_block_other_matches(self):
-        reader = Mock()
-        reader.accounts.return_value = [{"username": "gh_bad"}, {"username": "gh_ok"}]
-        reader.messages.side_effect = [LocalReaderError("读取失败"), [push()]]
+        reader = LocalReader()
+        reader.accounts = Mock(return_value=[{"username": "gh_bad"}, {"username": "gh_ok"}])
+        reader.messages = Mock(side_effect=[[{"text": "服务通知"}] * 500,
+                                           LocalReaderError("读取失败"), [push()]])
         errors = []
         found = resolve_accounts(reader, [{"name": "档案名", "fakeid": "biz-a"}], {}, on_error=errors.append)
         self.assertEqual({"biz-a": "gh_ok"}, found)
@@ -119,10 +144,10 @@ class LocalCollectionTests(unittest.TestCase):
         self.repo.enable_crawl_account("停用号", "biz-off")
         self.repo.conn.execute("UPDATE accounts SET in_crawl_config=0 WHERE name='停用号'")
         self.repo.commit()
-        self.reader = Mock()
-        self.reader.accounts.return_value = [{"username": "gh_test", "display_name": "档案名"}]
-        self.reader.messages.return_value = [push()]
-        self.reader.articles.side_effect = lambda u: iter(parse_push(push()))
+        self.reader = LocalReader()
+        self.reader.check = Mock()
+        self.reader.accounts = Mock(return_value=[{"username": "gh_test", "display_name": "档案名"}])
+        self.reader.messages = Mock(return_value=[push()])
 
         def fill_body(aid, link, *, repo):
             repo.set_body_text(aid, ["真实正文测试内容"])
@@ -151,6 +176,16 @@ class LocalCollectionTests(unittest.TestCase):
         self.assertEqual(1, first["total"])
         self.assertEqual(1, self.fill.call_count)
         self.assertEqual(1, self.repo.conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0])
+
+    def test_local_collect_discovers_and_ingests_older_push_without_cached_mapping(self):
+        history = [{"text": "服务通知"}] * 500 + [push()]
+        self.reader.messages.side_effect = lambda u, limit=500, offset=0: history[offset:offset + limit]
+        result = self.collect()
+        self.assertEqual([], result["errors"])
+        self.assertEqual(1, result["new_articles"])
+        self.assertEqual(1, self.fill.call_count)
+        self.assertEqual(stable_article_id(parse_push(push())[0]["link"]),
+                         self.repo.conn.execute("SELECT id FROM articles").fetchone()[0])
 
     def test_remote_then_local_then_remote_reuses_original_id(self):
         import api
@@ -196,10 +231,9 @@ class LocalCollectionTests(unittest.TestCase):
         self.assertEqual(1, self.fill.call_count)
 
     def test_date_range_includes_entire_end_day_and_uses_publish_time(self):
-        self.reader.articles.side_effect = lambda u: iter(
-            parse_push(push(idx="1", published="2026-09-14 23:59"))
-            + parse_push(push(idx="2", published="2026-09-15 23:59"))
-            + parse_push(push(idx="3", published="2026-09-16 00:00")))
+        self.reader.messages.return_value = [push(idx="1", published="2026-09-14 23:59"),
+                                             push(idx="2", published="2026-09-15 23:59"),
+                                             push(idx="3", published="2026-09-16 00:00")]
         result = self.collect(since="2026-09-15", until="2026-09-15")
         self.assertEqual(1, result["new_articles"])
         self.assertIn("idx=2", self.repo.conn.execute("SELECT link FROM articles").fetchone()[0])

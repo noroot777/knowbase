@@ -150,11 +150,13 @@ def resolve_accounts(reader: LocalReader, accounts: list[dict], cached: dict,
         username = session["username"]
         progress(session.get("display_name") or "公众号")
         try:
-            for row in reader.messages(username, limit=20):
-                for article in parse_push(row):
-                    # 不能仅因同名认号，也不能从公众号的普通分享卡片认号。
-                    if article["biz"] in wanted:
-                        found[article["biz"]] = username
+            # 近期可能只有服务通知；复用分页读取，继续从已同步历史中核实身份。
+            for article in reader.articles(username):
+                # 不能仅因同名认号，也不能从公众号的普通分享卡片认号。
+                if article["biz"] in wanted:
+                    found[article["biz"]] = username
+                if wanted <= found.keys():
+                    break
         except LocalReaderError as e:
             if on_error is None:
                 raise
