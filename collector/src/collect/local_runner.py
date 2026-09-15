@@ -27,7 +27,8 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
               "missing_accounts": [], "deferred_articles": 0, "unavailable_articles": 0,
               "matched_articles": 0, "download_done": 0, "download_total": 0,
               "download_succeeded": 0, "download_failed": 0, "existing_articles": 0,
-              "body_failures": [], "unreadable_messages": 0, "unreadable_accounts": []}
+              "body_failures": [], "unreadable_messages": 0, "unreadable_accounts": [],
+              "unattributed_messages": 0, "coverage_unknown_accounts": []}
     reader = reader or LocalReader()
 
     def progress(event):
@@ -49,11 +50,9 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
                 covered = index.covered_accounts(accounts, active)
                 result.update(index.discovery_issues(accounts, active))
                 unreadable = {a["name"] for a in result["unreadable_accounts"]}
-                result["missing_accounts"] = [a["name"] for a in accounts
-                                              if a["name"] not in covered | unreadable]
                 # 最近采集记录文章发现；正文独立重试，不能成为所有账号的全局闸门。
                 incomplete = index.covered_accounts(accounts, list(index.failed_sources))
-                for name in covered - incomplete:
+                for name in covered - incomplete - unreadable:
                     repo.set_account_latest_crawl(name, time_now())
                 repo.commit()
                 articles = index.query(accounts, active, since, until)

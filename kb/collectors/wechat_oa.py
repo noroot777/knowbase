@@ -220,21 +220,25 @@ class WeChatOACollector:
         is_local = "download_succeeded" in last
         failures = [{"title": str(e), "reason": "文章发现或入库失败" if is_local else "账号采集失败"}
                     for e in errors]
-        failures += [{**item, "pending": True} for item in (last.get("body_failures") or [])]
         for item in last.get("unreadable_accounts") or []:
-            reason = (f"本机有 {item['messages']} 条推送无法解析，尚未发现可采集文章"
+            reason = (f"本机现有 {item['messages']} 条推送无法解析"
                       if item["identity_confirmed"] else
                       f"同名本机会话有 {item['messages']} 条推送无法解析，公众号归属待核实")
             failures.append({"title": item["name"], "reason": reason + "；请检查读取器或推送格式", "pending": True})
-        failures += [{"title": name, "pending": True,
-                      "reason": "尚未发现可采集文章；请核实本机推送及读取器覆盖情况"}
-                     for name in (last.get("missing_accounts") or [])]
+        if last.get("unattributed_messages"):
+            failures.append({"title": "推送归属待核实", "pending": True,
+                             "reason": f"另有 {last['unattributed_messages']} 条本机推送无法解析，"
+                                       "无法确认所属公众号，未计入各号条数；请检查读取器或推送格式"})
+        # 账号级诊断先于正文条目，避免首次大量正文待补挤掉账号提示（面板最多 50 条）。
+        failures += [{**item, "pending": True} for item in (last.get("body_failures") or [])]
         new = last.get("new_articles", 0)
         coverage = ""
         if "download_succeeded" in last:
             coverage += f",补齐正文 {last['download_succeeded']} 篇"
         if last.get("missing_accounts"):
-            coverage += f",尚未发现可采集文章 {len(last['missing_accounts'])} 个号（覆盖待核实）"
+            coverage += f",本机暂无推送 {len(last['missing_accounts'])} 个号（在微信关注并同步后可采集）"
+        if last.get("coverage_unknown_accounts"):
+            coverage += f",推送覆盖待核实 {len(last['coverage_unknown_accounts'])} 个号"
         if last.get("unreadable_accounts"):
             coverage += f",推送解析待核查 {len(last['unreadable_accounts'])} 个号"
         if last.get("deferred_articles"):
@@ -242,7 +246,9 @@ class WeChatOACollector:
         if last.get("body_failures"):
             coverage += f",正文待重试 {len(last['body_failures'])} 篇"
         if last.get("unreadable_messages"):
-            coverage += f",已记录不可读推送 {last['unreadable_messages']} 条"
+            coverage += f",所选公众号现存不可读推送 {last['unreadable_messages']} 条"
+        if last.get("unattributed_messages"):
+            coverage += f",另有归属待核实的不可读推送 {last['unattributed_messages']} 条（存量）"
         if last.get("unavailable_articles"):
             coverage += f",原文暂不可用 {last['unavailable_articles']} 篇（一周后复查）"
         if code == EXIT_AUTH:

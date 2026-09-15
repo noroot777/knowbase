@@ -11,7 +11,8 @@ def discovery_issues(conn, accounts, snapshots, active, covered):
             source_biz[row["source_key"]].add(row["biz"])
     session_names = {s["source_key"]: s.get("session_name") for s in snapshots}
     per_account = defaultdict(dict)
-    matched = set()
+    matched, unattributed, uncertain = set(), set(), set()
+    names = {a["name"] for a in accounts}
     rows = conn.execute(
         "SELECT i.source_key,i.local_id,b.biz FROM local_wechat_message_issues i "
         "LEFT JOIN local_wechat_issue_biz b USING (source_key,local_id)")
@@ -21,18 +22,28 @@ def discovery_issues(conn, accounts, snapshots, active, covered):
             continue
         known = {row["biz"]} if row["biz"] else source_biz[source]
         key = source, row["local_id"]
-        for account in accounts:
-            identified = account["fakeid"] in known
-            same_name = (not known and session_names.get(source)
-                         and session_names[source] in {account["name"], account.get("display_name")})
-            if identified or same_name:
-                per_account[account["name"]][key] = bool(identified)
-                matched.add(key)
+        candidates = [a for a in accounts if a["fakeid"] in known] if known else [
+            a for a in accounts if session_names.get(source)
+            and session_names[source] in {a["name"], a.get("display_name")}]
+        if known and not candidates:
+            continue  # 能确认属于未选公众号，保持静默。
+        if len(candidates) == 1 and len(known) <= 1:
+            per_account[candidates[0]["name"]][key] = bool(known)
+            matched.add(key)
+        else:
+            # 不把同一条异常重复分给同名账号，也不猜测改名/解码失败消息的归属。
+            unattributed.add(key)
+            uncertain.update({a["name"] for a in candidates} if candidates else names)
+    uncertain -= covered | per_account.keys()
     return {
         "unreadable_messages": len(matched),
+        "unattributed_messages": len(unattributed),
+        "coverage_unknown_accounts": [a["name"] for a in accounts if a["name"] in uncertain],
+        "missing_accounts": [a["name"] for a in accounts
+                             if a["name"] not in covered | per_account.keys() | uncertain],
         "unreadable_accounts": [
             {"name": a["name"], "messages": len(per_account[a["name"]]),
              "identity_confirmed": all(per_account[a["name"]].values())}
-            for a in accounts if a["name"] not in covered and per_account[a["name"]]
+            for a in accounts if a["name"] in per_account
         ],
     }

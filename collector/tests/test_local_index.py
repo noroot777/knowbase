@@ -212,7 +212,9 @@ class IndexTests(unittest.TestCase):
         self.reader.add("gh_unknown", [{"text": "<mmreader>"}])
         result = collect(lambda e: None, reader=self.reader)
         self.assertEqual([], result["errors"])
-        self.assertEqual(["目标"], result["missing_accounts"])
+        self.assertEqual([], result["missing_accounts"])
+        self.assertEqual(["目标"], result["coverage_unknown_accounts"])
+        self.assertEqual(1, result["unattributed_messages"])
         self.assertEqual([], result["unreadable_accounts"])
 
     def test_unselected_biz_hint_overrides_name_collision_and_is_not_reported(self):

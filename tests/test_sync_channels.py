@@ -132,11 +132,59 @@ class ChannelDispatchTests(unittest.TestCase):
         with patch.object(wechat_oa, "_stage") as stage:
             wechat_oa.WeChatOACollector._report(0, result)
         self.assertEqual(("crawl", "ok"), stage.call_args.args[:2])
-        self.assertIn("尚未发现可采集文章 1 个号", stage.call_args.args[2])
+        self.assertIn("本机暂无推送 1 个号（在微信关注并同步后可采集）", stage.call_args.args[2])
         self.assertIn("等待重试 3 篇", stage.call_args.args[2])
-        self.assertEqual("未订阅", stage.call_args.kwargs["failures"][0]["title"])
-        self.assertTrue(stage.call_args.kwargs["failures"][0]["pending"])
-        self.assertNotIn("订阅并同步", stage.call_args.args[2])
+        self.assertEqual([], stage.call_args.kwargs["failures"])
+        self.assertNotIn("覆盖待核实", stage.call_args.args[2])
+
+    def test_missing_fourteen_accounts_do_not_become_permanent_pending_details(self):
+        from kb.collectors import wechat_oa
+
+        result = {"new_articles": 0, "errors": [], "download_succeeded": 0,
+                  "missing_accounts": [f"未同步{i}" for i in range(14)]}
+        for _ in range(2):
+            with patch.object(wechat_oa, "_stage") as stage:
+                wechat_oa.WeChatOACollector._report(0, result)
+            self.assertEqual(("crawl", "ok"), stage.call_args.args[:2])
+            self.assertIn("本机暂无推送 14 个号", stage.call_args.args[2])
+            self.assertEqual([], stage.call_args.kwargs["failures"])
+
+    def test_unattributed_messages_are_one_pending_total_not_per_account_counts(self):
+        from kb.collectors import wechat_oa
+
+        result = {"errors": [], "download_succeeded": 0, "unattributed_messages": 2,
+                  "coverage_unknown_accounts": ["甲", "乙"]}
+        with patch.object(wechat_oa, "_stage") as stage:
+            wechat_oa.WeChatOACollector._report(0, result)
+        self.assertEqual(("crawl", "ok"), stage.call_args.args[:2])
+        self.assertIn("另有归属待核实的不可读推送 2 条（存量）", stage.call_args.args[2])
+        self.assertNotIn("本机暂无推送", stage.call_args.args[2])
+        self.assertNotIn("推送解析待核查 2 个号", stage.call_args.args[2])
+        items = stage.call_args.kwargs["failures"]
+        self.assertEqual(1, len(items))
+        self.assertTrue(items[0]["pending"])
+        self.assertIn("未计入各号条数", items[0]["reason"])
+
+    def test_account_diagnostics_survive_fifty_body_failures_and_errors_stay_first(self):
+        from kb.collectors import wechat_oa
+
+        saved = deepcopy(pipeline_state._state)
+        try:
+            result = {"errors": ["真实读取失败"], "download_succeeded": 0,
+                      "unreadable_messages": 3, "unattributed_messages": 2,
+                      "unreadable_accounts": [{"name": "甲", "messages": 3, "identity_confirmed": True}],
+                      "body_failures": [{"title": f"正文{i}", "reason": "等待自动重试"} for i in range(60)]}
+            wechat_oa.WeChatOACollector._report(0, result)
+            entry = pipeline_state._state["stages"]["crawl"]
+            self.assertEqual("error", entry["status"])
+            self.assertEqual(50, len(entry["failures"]))
+            self.assertEqual(["真实读取失败", "甲", "推送归属待核实"],
+                             [item["title"] for item in entry["failures"][:3]])
+            self.assertIn("所选公众号现存不可读推送 3 条", entry["detail"])
+            self.assertNotIn("尚未发现可采集文章", entry["failures"][1]["reason"])
+        finally:
+            pipeline_state._state.clear()
+            pipeline_state._state.update(saved)
 
     def test_all_unreadable_account_is_named_with_correct_remedy_and_no_immediate_retry(self):
         from kb.collectors import wechat_oa
