@@ -191,9 +191,7 @@ class WeChatOACollector:
                     continue
                 last = event
                 if event.get("status") == "running":
-                    _stage("crawl", "running",
-                           f"采集中 {event.get('done', 0)}/{event.get('total', 0)}"
-                           f" — {event.get('current', '')}")
+                    _stage("crawl", "running", self._progress_detail(event))
             proc.wait(timeout=timeout)
         finally:
             if proc.poll() is None:
@@ -201,11 +199,29 @@ class WeChatOACollector:
         return proc.returncode, last
 
     @staticmethod
+    def _progress_detail(event: dict) -> str:
+        if event.get("phase") == "discovery":
+            label = "发现文章 · 首次建立索引" if event.get("initial_index") else "发现文章 · 更新索引"
+            return (f"{label} · 已读推送 {event.get('scanned_messages', 0)}/"
+                    f"{event.get('message_total', 0)} 条 · 图文 {event.get('indexed_articles', 0)} 篇")
+        if event.get("phase") == "download":
+            detail = (f"下载正文 {event.get('download_done', 0)}/{event.get('download_total', 0)} 篇"
+                      f" · 成功 {event.get('download_succeeded', 0)}"
+                      f" · 失败 {event.get('download_failed', 0)}"
+                      f" · 已有正文 {event.get('existing_articles', 0)}"
+                      f" · 等待重试 {event.get('deferred_articles', 0)}")
+            return detail + (f" — {event['current']}" if event.get("current") else "")
+        return (f"采集中 {event.get('done', 0)}/{event.get('total', 0)}"
+                f" — {event.get('current', '')}")
+
+    @staticmethod
     def _report(code: int, last: dict) -> None:
         errors = last.get("errors") or []
         failures = [{"title": str(e), "reason": "账号采集失败"} for e in errors]
         new = last.get("new_articles", 0)
         coverage = ""
+        if "download_succeeded" in last:
+            coverage += f",补齐正文 {last['download_succeeded']} 篇"
         if last.get("missing_accounts"):
             coverage += f",本机暂无推送 {len(last['missing_accounts'])} 个号（订阅并同步后可采集）"
         if last.get("deferred_articles"):

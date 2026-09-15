@@ -87,6 +87,26 @@ CREATE TABLE IF NOT EXISTS article_fetch_state (
   reason        TEXT NOT NULL
 );
 
+-- 本机公众号发现索引，不是已采集文章；不存原始消息或联系人。
+CREATE TABLE IF NOT EXISTS local_wechat_sources (
+  source_key TEXT PRIMARY KEY,
+  checkpoint TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS local_wechat_articles (
+  source_key TEXT NOT NULL,
+  id TEXT NOT NULL,
+  biz TEXT NOT NULL,
+  create_time TEXT NOT NULL,
+  message_time INTEGER NOT NULL,
+  local_id INTEGER NOT NULL,
+  article_json TEXT NOT NULL,
+  PRIMARY KEY (source_key, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_local_wechat_articles_scope
+  ON local_wechat_articles (biz, create_time);
+
 CREATE TABLE IF NOT EXISTS article_llm_tags (
   article_id  TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
   tag         TEXT NOT NULL,

@@ -61,6 +61,20 @@ class ChannelAPITests(unittest.TestCase):
 
 
 class ChannelDispatchTests(unittest.TestCase):
+    def test_local_progress_renders_discovery_and_body_counts_without_changing_old_channel(self):
+        from kb.collectors.wechat_oa import WeChatOACollector
+
+        detail = WeChatOACollector._progress_detail
+        self.assertIn("首次建立索引", detail({"phase": "discovery", "initial_index": True}))
+        self.assertIn("已读推送 500/501 条", detail({"phase": "discovery",
+                                              "scanned_messages": 500, "message_total": 501}))
+        text = detail({"phase": "download", "download_done": 2, "download_total": 3,
+                       "download_succeeded": 1, "download_failed": 1,
+                       "existing_articles": 4, "current": "目标 · 标题"})
+        for expected in ("下载正文 2/3 篇", "成功 1", "失败 1", "已有正文 4", "目标 · 标题"):
+            self.assertIn(expected, text)
+        self.assertEqual("采集中 2/44 — 目标", detail({"done": 2, "total": 44, "current": "目标"}))
+
     def test_local_fetch_invalidates_its_own_status_cache(self):
         import subprocess
         from kb.collectors import wechat_oa

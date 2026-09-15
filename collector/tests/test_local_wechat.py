@@ -226,6 +226,10 @@ class LocalCollectionTests(unittest.TestCase):
         self.reader.check = Mock()
         self.reader.accounts = Mock(return_value=[{"username": "gh_test", "display_name": "档案名"}])
         self.reader.messages = Mock(return_value=[push()])
+        from local_source_fixture import TimelineFixture
+
+        self.sql_fixture = TimelineFixture(self.reader)
+        self.reader.call = self.sql_fixture.call
 
         self.fill = patch("src.utils.wechat_body.fetch_article_body_full", return_value=(
             ["真实正文测试内容"], "<p>真实正文测试内容</p>", "")).start()
@@ -233,6 +237,7 @@ class LocalCollectionTests(unittest.TestCase):
         patch("src.utils.request_pacing.RequestPacer.wait").start()
 
     def tearDown(self):
+        self.sql_fixture.close()
         patch.stopall()
         self.repo.close()
         conn_mod.DEFAULT_DB_PATH, conn_mod.DATA_DIR, conn_mod._db_ready = self.saved
