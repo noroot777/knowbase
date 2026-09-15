@@ -174,13 +174,31 @@ class ChannelDispatchTests(unittest.TestCase):
                   "coverage_unknown_accounts": []}
         with patch.object(wechat_oa, "_stage") as stage:
             wechat_oa.WeChatOACollector._report(0, result)
-        self.assertIn("本机暂无推送 14 个号（在微信关注并同步后可采集）", stage.call_args.args[2])
+        self.assertIn("未匹配到本机推送 14 个号", stage.call_args.args[2])
+        self.assertIn("若未关注或未同步，请在微信关注并同步", stage.call_args.args[2])
+        self.assertIn("另有 1 条无法确认归属的推送，可能属于其中某个号", stage.call_args.args[2])
         self.assertNotIn("推送覆盖待核实", stage.call_args.args[2])
         items = stage.call_args.kwargs["failures"]
         self.assertEqual(1, len(items))
         self.assertIn("另有 1 条本机推送无法解析", items[0]["reason"])
         self.assertNotIn("可能相关账号", items[0]["reason"])
         self.assertNotIn("未同步", str(items))
+
+    def test_renamed_unreadable_account_gets_qualification_not_unconditional_subscribe_advice(self):
+        from kb.collectors import wechat_oa
+
+        result = {"errors": [], "download_succeeded": 0, "unattributed_messages": 3,
+                  "missing_accounts": ["旧名"], "coverage_unknown_accounts": []}
+        with patch.object(wechat_oa, "_stage") as stage:
+            wechat_oa.WeChatOACollector._report(0, result)
+        detail = stage.call_args.args[2]
+        self.assertIn("未匹配到本机推送 1 个号", detail)
+        self.assertIn("另有 3 条无法确认归属的推送，可能属于其中某个号", detail)
+        self.assertNotIn("本机暂无推送", detail)
+        self.assertNotIn("关注并同步后可采集", detail)
+        items = stage.call_args.kwargs["failures"]
+        self.assertEqual(1, len(items))
+        self.assertIn("这些推送也可能来自未匹配到推送的账号", items[0]["reason"])
 
     def test_account_diagnostics_survive_fifty_body_failures_and_errors_stay_first(self):
         from kb.collectors import wechat_oa

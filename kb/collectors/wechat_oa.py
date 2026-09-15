@@ -228,6 +228,8 @@ class WeChatOACollector:
         if last.get("unattributed_messages"):
             candidates = last.get("coverage_unknown_accounts") or []
             hint = f"；可能相关账号：{'、'.join(candidates)}（归属待核实）" if candidates else ""
+            if last.get("missing_accounts"):
+                hint += "；这些推送也可能来自未匹配到推送的账号"
             failures.append({"title": "推送归属待核实", "pending": True,
                              "reason": f"另有 {last['unattributed_messages']} 条本机推送无法解析，"
                                        "无法确认所属公众号，未计入各号条数"
@@ -239,7 +241,12 @@ class WeChatOACollector:
         if "download_succeeded" in last:
             coverage += f",补齐正文 {last['download_succeeded']} 篇"
         if last.get("missing_accounts"):
-            coverage += f",本机暂无推送 {len(last['missing_accounts'])} 个号（在微信关注并同步后可采集）"
+            count = len(last["missing_accounts"])
+            if last.get("unattributed_messages"):
+                coverage += (f",未匹配到本机推送 {count} 个号（若未关注或未同步，请在微信关注并同步；"
+                             f"另有 {last['unattributed_messages']} 条无法确认归属的推送，可能属于其中某个号）")
+            else:
+                coverage += f",本机暂无推送 {count} 个号（在微信关注并同步后可采集）"
         if last.get("coverage_unknown_accounts"):
             coverage += f",推送覆盖待核实 {len(last['coverage_unknown_accounts'])} 个号"
         if last.get("unreadable_accounts"):

@@ -49,12 +49,9 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
                 active = index.refresh(reader, progress, result["errors"].append)
                 covered = index.covered_accounts(accounts, active)
                 result.update(index.discovery_issues(accounts, active))
-                unreadable = {a["name"] for a in result["unreadable_accounts"]}
-                # 最近采集记录文章发现；正文独立重试，不能成为所有账号的全局闸门。
-                incomplete = index.covered_accounts(accounts, list(index.failed_sources))
-                progressed = {a["name"] for a in accounts if a["fakeid"] in index.discovered_biz}
-                # 旧坏推送继续提示，但不能冻结后续正常文章发现的时间。
-                for name in covered - incomplete - (unreadable - progressed):
+                # 已有覆盖的账号统一记录最近完成发现检查的时间；坏推送单独诊断。
+                incomplete = index.failed_accounts(accounts)
+                for name in covered - incomplete:
                     repo.set_account_latest_crawl(name, time_now())
                 repo.commit()
                 articles = index.query(accounts, active, since, until)

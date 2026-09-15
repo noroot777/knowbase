@@ -3,6 +3,30 @@
 from collections import defaultdict
 
 
+def failed_accounts(conn, accounts, snapshots, failed_sources):
+    """同一 gh_ 会话的 Msg 表名跨分片稳定；新分片不必先存下文章才能识别失败归属。"""
+    if not failed_sources:
+        return set()
+    failed = [s for s in snapshots if s["source_key"] in failed_sources]
+    tables = {s["table"] for s in failed}
+    table_biz = defaultdict(set)
+    for row in conn.execute(
+            "SELECT source_key,biz FROM local_wechat_articles UNION "
+            "SELECT source_key,biz FROM local_wechat_issue_biz"):
+        table = row["source_key"].partition(":")[2]
+        if table in tables:
+            table_biz[table].add(row["biz"])
+    affected = set()
+    for snapshot in failed:
+        known = table_biz[snapshot["table"]]
+        for account in accounts:
+            if account["fakeid"] in known or (not known and snapshot.get("session_name")
+                    in {account["name"], account.get("display_name")} - {None, ""}):
+                # 同名仅保守阻止更新时间，不建立文章归属映射。
+                affected.add(account["name"])
+    return affected
+
+
 def discovery_issues(conn, accounts, snapshots, active, covered):
     active = set(active)
     source_biz = defaultdict(set)

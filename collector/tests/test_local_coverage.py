@@ -52,7 +52,7 @@ class CoverageTests(unittest.TestCase):
             self.assertEqual([{"name": "甲", "messages": 1, "identity_confirmed": True}],
                              result["unreadable_accounts"])
 
-    def test_history_does_not_hide_bad_pushes_and_no_new_article_keeps_previous_timestamp(self):
+    def test_completed_discovery_updates_both_normal_and_unreadable_accounts_without_new_articles(self):
         self.repo.enable_crawl_account("乙", "biz-b")
         self.repo.commit()
         self.reader.add("gh_a", [push()])
@@ -61,18 +61,19 @@ class CoverageTests(unittest.TestCase):
         self.repo.conn.execute("UPDATE accounts SET latest_crawl_at='2020-01-01 00:00'")
         self.repo.commit()
         self.reader.add("gh_a", [{"text": "<mmreader>"}] * 5)
-        for _ in range(2):
-            result = self.run_collect(since="2026-09-16", until="2026-09-16")
+        for i in range(2):
+            now = f"2026-09-16 1{i}:00"
+            with patch("src.utils.helpers.time_now", return_value=now):
+                result = self.run_collect(since="2026-09-16", until="2026-09-16")
             self.assertEqual([], result["errors"])
             self.assertEqual(5, result["unreadable_messages"])
             self.assertEqual([{"name": "甲", "messages": 5, "identity_confirmed": True}],
                              result["unreadable_accounts"])
             times = dict(self.repo.conn.execute("SELECT name,latest_crawl_at FROM accounts"))
-            self.assertEqual("2020-01-01 00:00", times["甲"])
-            self.assertNotEqual("2020-01-01 00:00", times["乙"])
+            self.assertEqual({"甲": now, "乙": now}, times)
         self.assertEqual(0, next(e for e in reversed(self.events)
                                 if e.get("phase") == "discovery")["scanned_messages"])
-        # 修复这些消息后，恢复正常覆盖和采集时间。
+        # 修复这些消息后清除诊断，时间仍按本次完成检查更新。
         self.reader.add("gh_a", [{**push(idx=str(i)), "local_id": i} for i in range(2, 7)])
         result = self.run_collect()
         self.assertEqual([], result["unreadable_accounts"])
@@ -133,20 +134,75 @@ class CoverageTests(unittest.TestCase):
         with patch("src.utils.helpers.time_now", return_value="2026-09-16 00:04"):
             result = self.run_collect()
         self.assertEqual(8, result["matched_articles"])
-        self.assertEqual("2026-09-16 00:03", self.repo.conn.execute(
+        self.assertEqual("2026-09-16 00:04", self.repo.conn.execute(
             "SELECT latest_crawl_at FROM accounts WHERE name='甲'").fetchone()[0])
 
-    def test_rescanned_history_and_cross_shard_duplicate_are_not_new_discoveries(self):
+    def test_completed_history_rescan_updates_timestamp_without_duplicating_articles(self):
         self.reader.add("gh_a", [push(), {"text": "<mmreader>"}])
         self.run_collect()
         self.repo.set_account_latest_crawl("甲", "2020-01-01 00:00")
         self.repo.commit()
         self.reader.add("gh_a", [{"text": "<mmreader><broken>", "local_id": 2}])
         self.reader.add("gh_a", [push()], "biz_message_1.db")
-        result = self.run_collect()
+        with patch("src.utils.helpers.time_now", return_value="2026-09-16 11:00"):
+            result = self.run_collect()
         self.assertEqual(1, result["matched_articles"])
         self.assertEqual(1, result["unreadable_messages"])
-        self.assertEqual("2020-01-01 00:00", self.repo.conn.execute(
+        self.assertEqual("2026-09-16 11:00", self.repo.conn.execute(
+            "SELECT latest_crawl_at FROM accounts WHERE name='甲'").fetchone()[0])
+
+    def test_first_page_failure_in_new_shard_uses_session_identity_from_old_shard(self):
+        self.repo.enable_crawl_account("乙", "biz-b")
+        self.repo.commit()
+        self.reader.add("gh_a", [push()], "biz_message_0.db")
+        self.reader.add("gh_b", [push(biz="biz-b")], "biz_message_0.db")
+        with patch("src.utils.helpers.time_now", return_value="2026-09-16 10:00"):
+            self.run_collect()
+        # 表名由稳定的 gh_ 身份生成，改名也不能丢失跨分片关联。
+        self.reader.sessions[0]["display_name"] = "改名后的甲"
+        self.reader.add("gh_a", [push(mid=str(i)) for i in range(1000, 1501)], "biz_message_1.db")
+        original = self.reader._call
+
+        def fail_new_shard(command, *args):
+            if command == "sql" and "content_hex" in args[0] and "biz_message_1.db" in args:
+                raise LocalReaderError("新分片读取失败")
+            return original(command, *args)
+
+        self.reader.call.side_effect = fail_new_shard
+        for hour in (11, 12):
+            now = f"2026-09-16 {hour}:00"
+            with patch("src.utils.helpers.time_now", return_value=now):
+                result = self.run_collect()
+            self.assertEqual(["新分片读取失败"], result["errors"])
+            self.assertEqual({"甲": "2026-09-16 10:00", "乙": now}, dict(self.repo.conn.execute(
+                "SELECT name,latest_crawl_at FROM accounts")))
+            self.assertEqual(0, self.repo.conn.execute(
+                "SELECT COUNT(*) FROM local_wechat_articles WHERE source_key LIKE 'biz_message_1.db:%'").fetchone()[0])
+        self.reader.call.side_effect = original
+        with patch("src.utils.helpers.time_now", return_value="2026-09-16 13:00"):
+            result = self.run_collect()
+        self.assertEqual([], result["errors"])
+        self.assertEqual(503, result["matched_articles"])
+        self.assertEqual({"甲": "2026-09-16 13:00", "乙": "2026-09-16 13:00"},
+                         dict(self.repo.conn.execute("SELECT name,latest_crawl_at FROM accounts")))
+
+    def test_unrelated_failed_session_does_not_freeze_covered_account(self):
+        self.reader.add("gh_a", [push()])
+        self.run_collect()
+        self.reader.add("gh_stranger", [push(biz="other")], "biz_message_1.db")
+        self.reader.sessions[-1]["display_name"] = "无关的陌生号"
+        original = self.reader._call
+
+        def fail_stranger(command, *args):
+            if command == "sql" and "content_hex" in args[0] and "biz_message_1.db" in args:
+                raise LocalReaderError("陌生会话读取失败")
+            return original(command, *args)
+
+        self.reader.call.side_effect = fail_stranger
+        with patch("src.utils.helpers.time_now", return_value="2026-09-16 11:00"):
+            result = self.run_collect()
+        self.assertEqual(["陌生会话读取失败"], result["errors"])
+        self.assertEqual("2026-09-16 11:00", self.repo.conn.execute(
             "SELECT latest_crawl_at FROM accounts WHERE name='甲'").fetchone()[0])
 
     def test_new_discovery_does_not_override_a_real_reader_failure(self):
