@@ -147,6 +147,7 @@ def _fetch_article_detail_text(
     from src.db.repository import ArticleRepository
     from src.utils.wechat_body import fetch_article_body_full
     from src.utils.article_identity import has_readable_body
+    from src.utils import body_retry
 
     own_repo = repo is None
     if own_repo:
@@ -154,10 +155,15 @@ def _fetch_article_detail_text(
     try:
         if has_readable_body(repo, article_id):
             return ""
+        if body_retry.deferred(repo, article_id, link):
+            return ""
         text, html, nickname = fetch_article_body_full(link)
-        if not text:
-            return nickname
         if isinstance(text, str) and text in ("已删除", "请求错误"):
+            body_retry.failed(repo, article_id, link, unavailable=text == "已删除")
+            return nickname
+        paragraphs = text if isinstance(text, list) else [text]
+        if not any(str(p or "").strip() for p in paragraphs) and not (html or "").strip():
+            body_retry.failed(repo, article_id, link)
             return nickname
 
         def _persist() -> None:
@@ -165,11 +171,13 @@ def _fetch_article_detail_text(
             # HTML 一并落库：Markdown 导出和预览都依赖它，抓取时不存后面就得重抓
             if html:
                 repo.set_body_html(article_id, html)
+            body_retry.succeeded(repo, article_id)
             repo.commit()
 
         db_write_with_retry(_persist)
         return nickname
     except Exception as e:
+        body_retry.failed(repo, article_id, link)
         print(f"[detail] 抓取正文失败 {article_id}: {e}")
         return ""
     finally:

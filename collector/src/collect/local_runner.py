@@ -22,10 +22,10 @@ def local_status() -> dict:
             "hint": "只采集本机已同步的公众号推送；完整正文仍通过原文链接获取", "targets": targets}
 
 
-def _cache_path():
+def _cache_path(kind="accounts"):
     from src.db.connection import DATA_DIR
 
-    return DATA_DIR / "local_wechat_accounts.json"
+    return DATA_DIR / f"local_wechat_{kind}.json"
 
 
 def _load_mapping() -> dict:
@@ -36,8 +36,18 @@ def _load_mapping() -> dict:
         return {}
 
 
-def _save_mapping(mapping: dict) -> None:
-    path = _cache_path()
+def _load_discovery() -> dict:
+    try:
+        data = json.loads(_cache_path("discovery").read_text())
+        return {k: v for k, v in data.items() if isinstance(v, dict)
+                and isinstance(v.get("checked_at"), (int, float))
+                and (v.get("biz") is None or isinstance(v["biz"], str))}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _save_mapping(mapping: dict, kind="accounts") -> None:
+    path = _cache_path(kind)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".local-wechat-")
     try:
@@ -53,10 +63,14 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
     import api
     from src.db.repository import ArticleRepository
     from src.utils.article_identity import has_readable_body, prepare_article
+    from src.utils import body_retry
+    from src.utils.request_pacing import RequestPacer
     from src.utils.helpers import time_now
 
-    result = {"new_articles": 0, "errors": [], "auth_error": False, "done": 0, "total": 0}
+    result = {"new_articles": 0, "errors": [], "auth_error": False, "done": 0, "total": 0,
+              "missing_accounts": [], "deferred_articles": 0, "unavailable_articles": 0}
     reader = reader or LocalReader()
+    pacer = RequestPacer()
     try:
         reader.check()
         with ArticleRepository() as repo:
@@ -69,18 +83,23 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
             result["total"] = len(accounts)
 
             cached = _load_mapping()
+            discovery = _load_discovery()
             # 静默匹配身份；进度只显示本次实际采集的目标，读取错误仍照常报告。
-            mapping = resolve_accounts(reader, accounts, cached, on_error=result["errors"].append)
+            mapping = resolve_accounts(reader, accounts, cached, on_error=result["errors"].append,
+                                       discovery=discovery)
             _save_mapping({**cached, **mapping})
+            _save_mapping(discovery, "discovery")
             for account in accounts:
                 name, biz = account["name"], account["fakeid"]
                 emit({"stage": "crawl", "status": "running", **result, "current": name})
                 try:
                     username = mapping.get(biz)
                     if not username:
-                        raise LocalReaderError("未找到该公众号的本机图文推送；请订阅并同步到 Mac 微信")
+                        result["missing_accounts"].append(name)
+                        continue
                     matched = False
-                    for article in reader.articles(username):
+                    for article in reader.articles(username, on_error=lambda error:
+                                                   result["errors"].append(f"{name}: {error}")):
                         if article["biz"] != biz:
                             continue
                         matched = True
@@ -92,12 +111,21 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
                         owner, normalized, is_new = prepared
                         if not is_new and has_readable_body(repo, normalized["id"]):
                             continue
+                        if body_retry.deferred(repo, normalized["id"], normalized["link"]):
+                            result["deferred_articles"] += 1
+                            continue
+                        pacer.wait()
                         api._ingest_crawl_article(repo, owner, normalized)
                         result["new_articles"] += int(is_new)
                         if not has_readable_body(repo, normalized["id"]):
-                            result["errors"].append(f"{name} · {article['title']}: 正文获取失败，重试将补抓")
+                            state = body_retry.state(repo, normalized["id"])
+                            if state and state["reason"] == "unavailable":
+                                result["unavailable_articles"] += 1
+                            else:
+                                result["errors"].append(f"{name} · {article['title']}: 正文获取失败，稍后自动重试")
                     if not matched:
-                        raise LocalReaderError("本机尚无可识别的该公众号图文推送")
+                        result["missing_accounts"].append(name)
+                        continue
                     repo.set_account_latest_crawl(name, time_now())
                     repo.commit()
                 except Exception as e:
@@ -106,5 +134,6 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
                     result["done"] += 1
     except LocalReaderError as e:
         result["errors"].append(str(e))
+    result["errors"] = list(dict.fromkeys(result["errors"]))
     emit({"stage": "crawl", "status": "done", **result})
     return result

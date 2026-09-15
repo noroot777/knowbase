@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import re
+import random
+import time
 from typing import Any
 from html import unescape as html_unescape
 from urllib.parse import quote, urlparse
@@ -160,6 +162,7 @@ def fetch_article_body_full(url: str, num: int = 0) -> tuple[Any, str | None, st
     except Exception:
         if num >= 3:
             return "请求错误", None, ""
+        time.sleep(random.uniform(2.5, 4.0))
         return fetch_article_body_full(url, num=num + 1)
 
     nickname = extract_account_nickname(response)
@@ -168,6 +171,7 @@ def fetch_article_body_full(url: str, num: int = 0) -> tuple[Any, str | None, st
             return "已删除", None, nickname
         if num >= 3:
             return "请求错误", None, nickname
+        time.sleep(random.uniform(2.5, 4.0))
         return fetch_article_body_full(url, num=num + 1)
 
     return _div_to_text_list(div), _div_to_html(div), nickname

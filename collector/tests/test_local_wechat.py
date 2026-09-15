@@ -6,6 +6,7 @@ import contextlib
 import io
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import Mock, call, patch
 from xml.sax.saxutils import escape
 
@@ -15,7 +16,7 @@ from src.utils.article_identity import article_identity, stable_article_id
 
 
 def push(biz="biz-a", mid="101", idx="1", published="2026-09-15 18:30", **extra):
-    url = f"https://mp.weixin.qq.com/s?__biz={biz}&mid={mid}&idx={idx}&sn=signature&scene=123"
+    url = f"https://mp.weixin.qq.com/s?__biz={biz}&mid={mid}&idx={idx}&sn=signature&chksm=checksum&scene=123&xtrack=1"
     fields = {"title": "测试文章", "url": url, "digest": "摘要", "cover": "",
               "pub_time": str(int(datetime.strptime(published, "%Y-%m-%d %H:%M").timestamp())),
               **extra}
@@ -44,6 +45,8 @@ class PushTests(unittest.TestCase):
         self.assertEqual(article["id"], changed["id"])
         self.assertNotIn("scene", article["link"])
         self.assertIn("sn=signature", article["link"])
+        self.assertIn("chksm=checksum", article["link"])
+        self.assertNotIn("xtrack", article["link"])
         self.assertEqual("2026-09-15 18:30", article["create_time"])
         self.assertEqual(article_identity(article["link"]), article_identity(
             "http://mp.weixin.qq.com/s?idx=1&mid=101&__biz=biz-a&scene=99"))
@@ -130,6 +133,81 @@ class PushTests(unittest.TestCase):
         self.assertEqual({"biz-a": "gh_ok"}, found)
         self.assertEqual(1, len(errors))
 
+    def test_checksum_reaches_the_body_request(self):
+        from src.utils.wechat_body import fetch_article_body_full
+
+        def response(url, **kwargs):
+            self.assertEqual(["checksum"], parse_qs(urlparse(url).query)["chksm"])
+            return Mock(text='<div class="rich_media_content"><p>正文内容</p></div>')
+
+        with patch("src.utils.wechat_body.requests.get", side_effect=response) as request:
+            text, html, _ = fetch_article_body_full(parse_push(push())[0]["link"])
+        self.assertEqual(["正文内容"], text)
+        self.assertIn("正文内容", html)
+        self.assertEqual(1, request.call_count)
+
+    def test_discovery_stops_after_identifying_unrelated_session(self):
+        reader = LocalReader()
+        reader.accounts = Mock(return_value=[{"username": "gh_known"}, {"username": "gh_other"}])
+        reader.messages = Mock(return_value=[push(biz="other")] * 500)
+        accounts = [{"name": "已找到", "fakeid": "biz-a"}, {"name": "未订阅", "fakeid": "missing"}]
+        found = resolve_accounts(reader, accounts, {"biz-a": "gh_known"})
+        self.assertEqual({"biz-a": "gh_known"}, found)
+        reader.messages.assert_called_once_with("gh_other", offset=0)
+
+    def test_discovery_caches_absence_and_invalidates_on_new_push_or_expiry(self):
+        for changed_timestamp in (True, False):
+            with self.subTest(changed_timestamp=changed_timestamp):
+                reader = LocalReader()
+                sessions = [{"username": "gh_other", "last_timestamp": 1},
+                            {"username": "gh_empty", "last_timestamp": 1}]
+                reader.accounts = Mock(return_value=sessions)
+                reader.messages = Mock(side_effect=lambda u, **kw: [push(biz="other")] if u == "gh_other" else [])
+                discovery = {}
+                accounts = [{"name": "目标", "fakeid": "biz-a"}]
+                with patch("src.crawler.local_wechat.time.time", return_value=1000):
+                    self.assertEqual({}, resolve_accounts(reader, accounts, {}, discovery=discovery))
+                    self.assertEqual({}, resolve_accounts(reader, accounts, {}, discovery=discovery))
+                self.assertEqual(2, reader.messages.call_count)
+                sessions[1]["last_timestamp"] = 2 if changed_timestamp else 1
+                reader.messages.return_value = [push()]
+                reader.messages.side_effect = None
+                with patch("src.crawler.local_wechat.time.time", return_value=1001 if changed_timestamp else 1301):
+                    self.assertEqual({"biz-a": "gh_empty"},
+                                     resolve_accounts(reader, accounts, {}, discovery=discovery))
+                self.assertEqual(3, reader.messages.call_count)
+
+    def test_bad_push_does_not_block_later_history_and_is_reported(self):
+        reader = LocalReader()
+        reader.messages = Mock(side_effect=[[{"text": "<mmreader>"}] + [{"text": "通知"}] * 499,
+                                           [push()]])
+        errors = []
+        self.assertEqual(1, len(list(reader.articles("gh_test", on_error=errors.append))))
+        self.assertEqual(1, len(errors))
+
+    def test_xml_declaration_literal_in_cdata_is_ordinary_content(self):
+        message = push()
+        message["text"] = message["text"].replace("<digest>摘要</digest>",
+            "<digest><![CDATA[讲解 <!DOCTYPE html> 和 <!ENTITY> 字面量]]></digest>")
+        self.assertEqual(1, len(parse_push(message)))
+
+    def test_pacer_waits_between_requests_and_body_retry_waits_between_attempts(self):
+        from src.utils.request_pacing import RequestPacer
+        from src.utils.wechat_body import fetch_article_body_full
+
+        with patch("src.utils.request_pacing.time.monotonic", return_value=100), \
+             patch("src.utils.request_pacing.random.uniform", return_value=3), \
+             patch("src.utils.request_pacing.time.sleep") as sleep:
+            pacer = RequestPacer()
+            pacer.wait()
+            sleep.assert_not_called()
+            pacer.wait()
+            sleep.assert_called_once_with(3)
+        with patch("src.utils.wechat_body._fetch_page", side_effect=OSError), \
+             patch("src.utils.wechat_body.time.sleep") as sleep:
+            self.assertEqual("请求错误", fetch_article_body_full("https://mp.weixin.qq.com/s")[0])
+            self.assertEqual(3, sleep.call_count)
+
 
 class LocalCollectionTests(unittest.TestCase):
     def setUp(self):
@@ -149,14 +227,10 @@ class LocalCollectionTests(unittest.TestCase):
         self.reader.accounts = Mock(return_value=[{"username": "gh_test", "display_name": "档案名"}])
         self.reader.messages = Mock(return_value=[push()])
 
-        def fill_body(aid, link, *, repo):
-            repo.set_body_text(aid, ["真实正文测试内容"])
-            repo.set_body_html(aid, "<p>真实正文测试内容</p>")
-            repo.commit()
-            return ""
-
-        self.fill = patch("api._fetch_article_detail_text", side_effect=fill_body).start()
+        self.fill = patch("src.utils.wechat_body.fetch_article_body_full", return_value=(
+            ["真实正文测试内容"], "<p>真实正文测试内容</p>", "")).start()
         patch("api.download_cover").start()
+        patch("src.utils.request_pacing.RequestPacer.wait").start()
 
     def tearDown(self):
         patch.stopall()
@@ -213,12 +287,21 @@ class LocalCollectionTests(unittest.TestCase):
         self.assertEqual(0, self.repo.conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0])
 
     def test_failed_body_is_reported_and_retried_without_new_metadata(self):
-        self.fill.side_effect = lambda *args, **kwargs: ""
+        self.fill.return_value = ("请求错误", None, "")
         first = self.collect()
         self.assertIn("正文获取失败", first["errors"][0])
         second = self.collect()
         self.assertEqual(0, second["new_articles"])
+        self.assertEqual([], second["errors"])
+        self.assertEqual(1, second["deferred_articles"])
+        self.assertEqual(1, self.fill.call_count)
+        self.repo.conn.execute("UPDATE article_fetch_state SET retry_at=0")
+        self.repo.commit()
+        self.fill.return_value = (["恢复正文"], "<p>恢复正文</p>", "")
+        third = self.collect()
+        self.assertEqual([], third["errors"])
         self.assertEqual(2, self.fill.call_count)
+        self.assertEqual(0, self.repo.conn.execute("SELECT COUNT(*) FROM article_fetch_state").fetchone()[0])
 
     def test_empty_body_row_does_not_prevent_refill(self):
         article = parse_push(push())[0]
@@ -241,7 +324,8 @@ class LocalCollectionTests(unittest.TestCase):
     def test_unmatched_account_and_disabled_selection_are_not_silent_success(self):
         self.reader.messages.return_value = []
         result = self.collect(targets=["档案名", "停用号"])
-        self.assertEqual(2, len(result["errors"]))
+        self.assertEqual(1, len(result["errors"]))
+        self.assertEqual(["档案名"], result["missing_accounts"])
         self.assertEqual(0, result["new_articles"])
 
     def test_unavailable_reader_never_starts_discovery_or_ingest(self):
@@ -250,6 +334,92 @@ class LocalCollectionTests(unittest.TestCase):
         self.assertEqual(["未就绪"], result["errors"])
         self.reader.accounts.assert_not_called()
         self.fill.assert_not_called()
+
+    def test_new_checksum_bypasses_old_failed_link_cooldown(self):
+        self.fill.return_value = ("请求错误", None, "")
+        self.collect()
+        self.reader.messages.return_value = [push(url=(parse_push(push())[0]["link"] + "-new"))]
+        self.fill.return_value = (["正文"], "<p>正文</p>", "")
+        result = self.collect()
+        self.assertEqual([], result["errors"])
+        self.assertEqual(2, self.fill.call_count)
+
+    def test_confirmed_unavailable_body_is_deferred_without_permanent_deletion(self):
+        self.fill.return_value = ("已删除", None, "")
+        first, second = self.collect(), self.collect()
+        self.assertEqual([], first["errors"])
+        self.assertEqual(1, first["unavailable_articles"])
+        self.assertEqual(1, second["deferred_articles"])
+        self.assertEqual(1, self.fill.call_count)
+        self.assertEqual(0, self.repo.conn.execute("SELECT is_wx_deleted FROM articles").fetchone()[0])
+
+    def test_auto_retired_article_can_recover_in_either_channel(self):
+        import api
+
+        article = parse_push(push())[0]
+        self.repo.upsert_article_from_blog("档案名", article)
+        self.repo.conn.execute("UPDATE articles SET is_wx_deleted=1")
+        self.repo.commit()
+        self.assertEqual([], self.collect()["errors"])
+        self.assertEqual(0, self.repo.conn.execute("SELECT is_wx_deleted FROM articles").fetchone()[0])
+        self.repo.conn.execute("DELETE FROM article_bodies")
+        self.repo.conn.execute("UPDATE articles SET is_wx_deleted=1")
+        self.repo.commit()
+        article["id"] = "remote-profile-id"
+        self.assertFalse(api._ingest_crawl_article(self.repo, "档案名", article))
+        self.assertEqual(0, self.repo.conn.execute("SELECT is_wx_deleted FROM articles").fetchone()[0])
+        self.assertEqual(1, self.repo.conn.execute("SELECT COUNT(*) FROM article_bodies").fetchone()[0])
+
+    def test_bad_push_is_reported_while_valid_article_is_ingested(self):
+        self.reader.messages.return_value = [{"text": "<mmreader>"}, push()]
+        result = self.collect()
+        self.assertTrue(result["errors"])
+        self.assertEqual(1, result["new_articles"])
+
+    def test_export_keeps_old_empty_article_retryable(self):
+        from scripts import export_obsidian
+        import sys
+
+        self.reader.messages.return_value = [push(published="2020-01-01 12:00")]
+        self.fill.return_value = ("请求错误", None, "")
+        self.collect()
+        out = str(Path(self.tmp.name) / "export")
+        with patch.object(sys, "argv", ["export", "--out", out, "--dedup-root", out, "--no-images"]), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(0, export_obsidian.main())
+        self.assertIn("待补正文 1", output.getvalue())
+        self.assertEqual(0, self.repo.conn.execute("SELECT is_wx_deleted FROM articles").fetchone()[0])
+        self.repo.conn.execute("UPDATE article_fetch_state SET retry_at=0")
+        self.repo.commit()
+        self.fill.return_value = (["恢复正文"], "<p>恢复正文</p>", "")
+        self.assertEqual([], self.collect()["errors"])
+        self.assertEqual(1, self.repo.conn.execute("SELECT COUNT(*) FROM article_bodies").fetchone()[0])
+
+    def test_recovery_only_resets_affected_local_articles_and_creates_backup(self):
+        from scripts.recover_local_articles import recover
+        import sqlite3
+
+        for idx in range(1, 6):
+            article = parse_push(push(idx=str(idx)))[0]
+            if idx != 5:
+                article["link"] = article["link"].replace("&chksm=checksum", "")
+            if idx == 4:
+                article["id"] = "legacy-id"
+            self.repo.upsert_article_from_blog("档案名", article)
+            if idx == 2:
+                self.repo.set_body_text(article["id"], ["已有正文"])
+            if idx == 3:
+                self.repo.add_deleted_blacklist(article["id"])
+        self.repo.conn.execute("UPDATE articles SET is_wx_deleted=1")
+        self.repo.commit()
+        db = conn_mod.DEFAULT_DB_PATH
+        self.assertEqual({"candidates": 1, "restored": 0}, recover(db))
+        backup = Path(self.tmp.name) / "before.db"
+        self.assertEqual({"candidates": 1, "restored": 1}, recover(db, backup=backup))
+        with sqlite3.connect(backup) as saved:
+            self.assertEqual(5, saved.execute("SELECT SUM(is_wx_deleted) FROM articles").fetchone()[0])
+        self.assertEqual(4, self.repo.conn.execute("SELECT SUM(is_wx_deleted) FROM articles").fetchone()[0])
+        self.assertEqual({"candidates": 0, "restored": 0}, recover(db))
 
 
 if __name__ == "__main__":

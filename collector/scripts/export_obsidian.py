@@ -47,12 +47,6 @@ OBS_ROOT = Path.home() / "obs" / "new-start" / "source"
 DEFAULT_OUT = OBS_ROOT / "dr-gzh"
 DEFAULT_DEDUP_ROOTS = [OBS_ROOT / "gzh", DEFAULT_OUT]
 
-# 空正文文章:发布"超过"这么多天(即第 N+1 天起)仍抓不到正文,判定为已删/转载
-# stub,自动标 is_wx_deleted=1 退出导出候选,不再每轮复发"失败"。给前几天留窗口
-# 是因为部分空正文会被后续抓取轮次补上(重抓/回填)。
-RETIRE_AFTER_DAYS = 3
-
-
 def collect_existing_urls(roots: list[Path]) -> set[str]:
     """扫描已有 md 的 frontmatter url,构建去重集合。"""
     urls: set[str] = set()
@@ -98,32 +92,6 @@ def body_text_to_markdown(body_text: str) -> str:
     return body_text.strip() + "\n"
 
 
-def _article_age_days(create_time: str | None) -> int | None:
-    """按发布日期算文章距今天数;无法解析返回 None(不解析=不退休,保守)。"""
-    s = (create_time or "").strip()[:10]
-    if not s:
-        return None
-    try:
-        pub = datetime.strptime(s, "%Y-%m-%d").date()
-    except ValueError:
-        return None
-    return (datetime.now().date() - pub).days
-
-
-def retire_empty_body(article_ids: list[str], saved_time: str) -> int:
-    """把超期空正文文章标 is_wx_deleted=1,退出后续导出候选。返回实际标记数。"""
-    if not article_ids:
-        return 0
-    with ArticleRepository() as repo:
-        repo.conn.executemany(
-            "UPDATE articles SET is_wx_deleted=1, updated_at=? "
-            "WHERE id=? AND is_wx_deleted=0",
-            [(saved_time, aid) for aid in article_ids],
-        )
-        repo.commit()
-    return len(article_ids)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="导出根目录")
@@ -150,8 +118,7 @@ def main() -> int:
     print(f"[export] 库内候选 {len(articles)} 篇")
 
     saved_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    exported = skipped = degraded = failed = retired = 0
-    retire_ids: list[str] = []
+    exported = skipped = degraded = failed = pending = 0
 
     for row in articles:
         if args.limit > 0 and exported >= args.limit:
@@ -175,29 +142,22 @@ def main() -> int:
         # 1. 正文:优先 HTML 转 md,缺 HTML 用纯文本降级
         body_html = row["body_html"] or ""
         body_text = row["body_text"] or ""
+        text_md = body_text_to_markdown(body_text) if body_text else ""
         images: list[str] = []
+        if not body_html.strip() and not text_md.strip():
+            # 发布得早不代表读取已多次失败；留在候选中，由抓取阶段按退避时间补正文。
+            pending += 1
+            continue
         if body_html.strip():
             try:
                 md_body, images = html_to_markdown(body_html)
             except Exception as e:
                 print(f"  [export] HTML 解析失败,降级纯文本 {row['id']}: {e}")
-                md_body = body_text_to_markdown(body_text)
+                md_body = text_md
                 degraded += 1
-        elif body_text.strip():
-            md_body = body_text_to_markdown(body_text)
-            degraded += 1
         else:
-            age = _article_age_days(row["create_time"])
-            if age is not None and age > RETIRE_AFTER_DAYS:
-                # 超过窗口仍无正文 = 已删/转载 stub,自动退休不再复发失败
-                print(f"  [export] 无正文超期{age}天,自动退休 {row['id']} {title[:30]}")
-                retire_ids.append(row["id"])
-                retired += 1
-            else:
-                # 仍在窗口内,可能后续抓取会补上正文,暂记失败留待重试
-                print(f"  [export] 无正文,跳过 {row['id']} {title[:30]}")
-                failed += 1
-            continue
+            md_body = text_md
+            degraded += 1
 
         # 2. 图片:下到当天 assets/,替换为相对路径
         if images and not args.no_images:
@@ -228,13 +188,9 @@ def main() -> int:
         exported += 1
         print(f"  [ok] {day}/{os.path.basename(path)}")
 
-    marked = retire_empty_body(retire_ids, saved_time)
-    if marked:
-        print(f"[export] 自动退休(空正文超{RETIRE_AFTER_DAYS}天) {marked} 篇,标 is_wx_deleted=1")
-
     print(
         f"[export] 完成: 导出 {exported}, 跳过(已存在) {skipped}, "
-        f"降级纯文本 {degraded}, 失败 {failed}, 退休 {retired}"
+        f"降级纯文本 {degraded}, 失败 {failed}, 待补正文 {pending}"
     )
     return 0
 

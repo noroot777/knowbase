@@ -153,12 +153,8 @@ async function refreshPipe(withPending = false) {
     .then(r => r.json()).catch(() => null);
   if (!s || requestedChannel !== pipeChannel) return;
   const runningChannel = s.running && s.crawl_filter?.channel;
-  if (runningChannel && runningChannel !== pipeChannel) {
-    pipeChannel = runningChannel;
-    renderPipeChannel();
-    initTargets();
-    return refreshPipe(withPending);
-  }
+  const runningLabel = pipeChannels.find(c => c.id === runningChannel)?.label || runningChannel;
+  $('pipe-running-channel').textContent = runningChannel ? `正在通过${runningLabel}同步` : '';
 
   // 来源采集器状态。message/hint 都是采集器给的成品文案,这里只负责显示
   // ——换来源(RSS、播客…)不用改这段。

@@ -32,7 +32,7 @@ def has_readable_body(repo, article_id: str) -> bool:
 
 
 def prepare_article(repo, account_name: str, article: dict) -> tuple[str, dict, bool] | None:
-    """沿用已有档案 ID/归属，不复活删除项。返回是否新文章。"""
+    """沿用已有档案 ID/归属，尊重用户删除，允许自动退休项重试。"""
     article = dict(article)
     identity = article_identity(article.get("link", ""))
     if not hasattr(repo, "_article_identity_index"):
@@ -51,7 +51,7 @@ def prepare_article(repo, account_name: str, article: dict) -> tuple[str, dict, 
         (existing_id,),
     ).fetchone()
     if row:
-        if row["is_user_deleted"] or row["is_wx_deleted"]:
+        if row["is_user_deleted"] or repo.is_deleted_blacklist(row["id"]):
             return None
         article["id"] = row["id"]
         account_name = row["account_name"]

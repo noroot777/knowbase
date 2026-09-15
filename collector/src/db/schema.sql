@@ -78,6 +78,15 @@ CREATE TABLE IF NOT EXISTS article_bodies (
   updated_at   TEXT
 );
 
+-- 正文读取失败是有期限的重试状态，不是用户删除或微信删除。
+CREATE TABLE IF NOT EXISTS article_fetch_state (
+  article_id    TEXT PRIMARY KEY REFERENCES articles(id) ON DELETE CASCADE,
+  link_hash     TEXT NOT NULL,
+  failures      INTEGER NOT NULL,
+  retry_at      REAL NOT NULL,
+  reason        TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS article_llm_tags (
   article_id  TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
   tag         TEXT NOT NULL,

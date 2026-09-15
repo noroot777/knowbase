@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime
 from html import unescape
 from pathlib import Path
@@ -77,13 +78,20 @@ class LocalReader:
             raise LocalReaderError("微信读取器缺少推送记录")
         return rows
 
-    def articles(self, username: str):
+    def articles(self, username: str, *, on_error=None):
         # 时间范围按文章 pub_time 筛选，不能用消息接收时间排除补同步的旧文章。
         seen = set()
         for offset in range(0, 100000, 500):
             rows = self.messages(username, offset=offset)
             for row in rows:
-                for article in parse_push(row):
+                try:
+                    articles = parse_push(row)
+                except LocalReaderError as e:
+                    if on_error is None:
+                        raise
+                    on_error(str(e))
+                    continue
+                for article in articles:
                     if article["id"] not in seen:
                         seen.add(article["id"])
                         yield article
@@ -92,15 +100,18 @@ class LocalReader:
         raise LocalReaderError("公众号推送超过单次读取上限，未标记本次采集成功")
 
 
+class _PushTreeBuilder(ET.TreeBuilder):
+    def doctype(self, name, pubid, system):
+        raise LocalReaderError("公众号推送 XML 含不支持的声明")
+
+
 def parse_push(message: dict) -> list[dict]:
     """只解析公众号 mmreader 图文项；服务通知及转发卡片不作文章。"""
     raw = message.get("text") or message.get("content") or ""
     if not isinstance(raw, str) or "<mmreader" not in raw:
         return []
-    if "<!DOCTYPE" in raw.upper() or "<!ENTITY" in raw.upper():
-        raise LocalReaderError("公众号推送 XML 含不支持的声明")
     try:
-        root = ET.fromstring(raw)
+        root = ET.fromstring(raw, parser=ET.XMLParser(target=_PushTreeBuilder()))
     except ET.ParseError:
         raise LocalReaderError("公众号图文推送格式无法解析，未跳过此错误") from None
     result = []
@@ -122,7 +133,8 @@ def parse_push(message: dict) -> list[dict]:
         if stamp <= 0 or deleted or kind in (5, 8, 10):
             continue
         # 原文所需的公开文章身份保留；不导出消息里的追踪参数或客户端访问材料。
-        public_q = {k: q[k][0] for k in ("__biz", "mid", "idx", "sn") if q.get(k)}
+        # chksm 是正文校验参数，不能像 xtrack 一样丢掉。
+        public_q = {k: q[k][0] for k in ("__biz", "mid", "idx", "sn", "chksm") if q.get(k)}
         link = "https://mp.weixin.qq.com/s?" + urlencode(public_q)
         title = unescape(item.findtext("title") or "").strip()
         if title:
@@ -134,7 +146,7 @@ def parse_push(message: dict) -> list[dict]:
 
 
 def resolve_accounts(reader: LocalReader, accounts: list[dict], cached: dict,
-                     progress=lambda name: None, on_error=None) -> dict[str, str]:
+                     progress=lambda name: None, on_error=None, *, discovery=None) -> dict[str, str]:
     """名字只用于加速找候选；最终始终用推送 URL 的 __biz 核实。"""
     sessions = reader.accounts()
     by_username = {s["username"]: s for s in sessions}
@@ -144,21 +156,40 @@ def resolve_accounts(reader: LocalReader, accounts: list[dict], cached: dict,
         s["username"] not in set(cached.values()), s.get("display_name") not in names))
     found = {biz: username for biz, username in cached.items()
              if biz in wanted and username in by_username}
+    discovery = discovery if discovery is not None else {}
+    now = time.time()
     for session in ordered:
         if wanted <= found.keys():
             break
         username = session["username"]
+        if username in found.values():
+            continue
+        # 空会话缓存五分钟；有图文的会话身份缓存一天。新推送到达立即失效。
+        stamp = session.get("last_timestamp")
+        previous = discovery.get(username, {})
+        ttl = 86400 if previous.get("biz") else 300
+        if (previous.get("stamp") == stamp
+                and 0 <= now - previous.get("checked_at", 0) < ttl):
+            biz = previous.get("biz")
+            if biz in wanted:
+                found[biz] = username
+            continue
         progress(session.get("display_name") or "公众号")
+        parse_errors = []
         try:
             # 近期可能只有服务通知；复用分页读取，继续从已同步历史中核实身份。
-            for article in reader.articles(username):
-                # 不能仅因同名认号，也不能从公众号的普通分享卡片认号。
-                if article["biz"] in wanted:
-                    found[article["biz"]] = username
-                if wanted <= found.keys():
-                    break
+            first = next(reader.articles(username, on_error=parse_errors.append), None)
+            biz = first["biz"] if first else None
+            # gh_ 会话对应一个公众号，首篇有效图文即可确认，无需翻完该号历史。
+            if biz in wanted:
+                found[biz] = username
+            if first or not parse_errors:
+                discovery[username] = {"biz": biz, "stamp": stamp, "checked_at": now}
         except LocalReaderError as e:
+            parse_errors.append(str(e))
+        for error in dict.fromkeys(parse_errors):
+            message = f"匹配公众号 {session.get('display_name') or username}: {error}"
             if on_error is None:
-                raise
-            on_error(f"匹配公众号 {session.get('display_name') or username}: {e}")
+                raise LocalReaderError(message)
+            on_error(message)
     return found

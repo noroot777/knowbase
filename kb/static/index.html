@@ -133,6 +133,7 @@
   <!-- 操作区 -->
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
     <button id="pipe-run" onclick="openPipeModal()">全流程同步</button>
+    <span id="pipe-running-channel" class="hint" role="status"></span>
     <button id="pipe-retry" class="ghost" onclick="retryFailed()" style="display:none"
             title="按上次失败的阶段自动编排:抓取(账号失败)→ 导出 → 回填空正文 → 索引 → 提取">重试失败项</button>
     <span id="pipe-hint" style="flex:1;min-width:0;font-size:12.5px;color:var(--muted)">

@@ -7,7 +7,7 @@ import subprocess
 import time
 from dataclasses import replace
 
-from kb.collectors import SourceStatus
+from kb.collectors import FetchScope, SourceStatus
 from kb.collectors.wechat_oa import WeChatOACollector, _backend_problem, _run_cli
 
 
@@ -18,6 +18,12 @@ class WeChatLocalCollector(WeChatOACollector):
     channel_hint = "读取本机已同步的公众号推送，再获取原文；无需 wxdown 或逐号文章凭证。"
     range_hint = "只能覆盖本机已同步的推送，按文章发布时间筛选；新订阅不能保证补齐历史。"
     _local_cache = None
+
+    def fetch(self, scope: FetchScope) -> None:
+        try:
+            super().fetch(scope)
+        finally:
+            self._local_cache = None
 
     def status(self) -> SourceStatus:
         if self._local_cache and time.monotonic() - self._local_cache[0] < 30:

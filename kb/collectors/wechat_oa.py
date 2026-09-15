@@ -205,6 +205,13 @@ class WeChatOACollector:
         errors = last.get("errors") or []
         failures = [{"title": str(e), "reason": "账号采集失败"} for e in errors]
         new = last.get("new_articles", 0)
+        coverage = ""
+        if last.get("missing_accounts"):
+            coverage += f",本机暂无推送 {len(last['missing_accounts'])} 个号（订阅并同步后可采集）"
+        if last.get("deferred_articles"):
+            coverage += f",等待重试 {last['deferred_articles']} 篇"
+        if last.get("unavailable_articles"):
+            coverage += f",原文暂不可用 {last['unavailable_articles']} 篇（一周后复查）"
         if code == EXIT_AUTH:
             # 一份文章凭证都没有,采集器直接没开跑。login 那套扫码凭证救不了它
             _stage("crawl", "error",
@@ -214,10 +221,10 @@ class WeChatOACollector:
         elif code != 0:
             detail = (f"新增 {new} 篇,失败 {len(errors)} 项" if errors
                       else f"采集失败(退出码 {code})")
-            _stage("crawl", "error", detail, failures=failures)
+            _stage("crawl", "error", detail + coverage, failures=failures)
         else:
             _stage("crawl", "error" if errors else "ok",
-                   f"新增 {new} 篇" + (f",失败 {len(errors)} 项" if errors else ""),
+                   f"新增 {new} 篇" + (f",失败 {len(errors)} 项" if errors else "") + coverage,
                    failures=failures)
 
     # ── 落地:采集器本地库 → obs md ───────────────────────────────────────────
