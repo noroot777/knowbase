@@ -68,12 +68,9 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
                 accounts = [a for a in accounts if a["name"] in targets]
             result["total"] = len(accounts)
 
-            def progress(name):
-                emit({"stage": "crawl", "status": "running", **result,
-                      "current": f"匹配本机推送 · {name}"})
-
             cached = _load_mapping()
-            mapping = resolve_accounts(reader, accounts, cached, progress, result["errors"].append)
+            # 静默匹配身份；进度只显示本次实际采集的目标，读取错误仍照常报告。
+            mapping = resolve_accounts(reader, accounts, cached, on_error=result["errors"].append)
             _save_mapping({**cached, **mapping})
             for account in accounts:
                 name, biz = account["name"], account["fakeid"]
