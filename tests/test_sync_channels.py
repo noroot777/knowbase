@@ -164,6 +164,23 @@ class ChannelDispatchTests(unittest.TestCase):
         self.assertEqual(1, len(items))
         self.assertTrue(items[0]["pending"])
         self.assertIn("未计入各号条数", items[0]["reason"])
+        self.assertIn("可能相关账号：甲、乙（归属待核实）", items[0]["reason"])
+
+    def test_unknown_push_summary_preserves_missing_account_advice_without_naming_them(self):
+        from kb.collectors import wechat_oa
+
+        result = {"errors": [], "download_succeeded": 0, "unattributed_messages": 1,
+                  "missing_accounts": [f"未同步{i}" for i in range(14)],
+                  "coverage_unknown_accounts": []}
+        with patch.object(wechat_oa, "_stage") as stage:
+            wechat_oa.WeChatOACollector._report(0, result)
+        self.assertIn("本机暂无推送 14 个号（在微信关注并同步后可采集）", stage.call_args.args[2])
+        self.assertNotIn("推送覆盖待核实", stage.call_args.args[2])
+        items = stage.call_args.kwargs["failures"]
+        self.assertEqual(1, len(items))
+        self.assertIn("另有 1 条本机推送无法解析", items[0]["reason"])
+        self.assertNotIn("可能相关账号", items[0]["reason"])
+        self.assertNotIn("未同步", str(items))
 
     def test_account_diagnostics_survive_fifty_body_failures_and_errors_stay_first(self):
         from kb.collectors import wechat_oa

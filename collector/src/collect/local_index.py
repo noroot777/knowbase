@@ -31,6 +31,10 @@ class ArticleIndex:
 
     def refresh(self, reader, progress, on_error):
         self.failed_sources = set()
+        self.discovered_biz = set()
+        # 本地索引一次取身份集合，区别新发现与重扫历史；跨分片重复文章不算新发现。
+        self._known_articles = {(r["biz"], r["id"]) for r in self.conn.execute(
+            "SELECT biz,id FROM local_wechat_articles")}
         self.issues = MessageIssues(self.conn)
         checkpoints = {r["source_key"]: json.loads(r["checkpoint"]) for r in self.conn.execute(
             "SELECT source_key, checkpoint FROM local_wechat_sources")}
@@ -76,6 +80,10 @@ class ArticleIndex:
                     " WHERE excluded.local_id >= local_wechat_articles.local_id"),
                 (row["source_key"], article["id"], article["biz"], article["create_time"],
                  row.get("create_time") or 0, row["local_id"], json.dumps(article, ensure_ascii=False)))
+            identity = article["biz"], article["id"]
+            if identity not in self._known_articles:
+                self._known_articles.add(identity)
+                self.discovered_biz.add(article["biz"])
 
     def _read_group(self, source, plans, stats, progress, on_error):
         by_key = {p["source_key"]: p for p in plans}

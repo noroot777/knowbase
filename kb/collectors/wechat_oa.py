@@ -226,9 +226,12 @@ class WeChatOACollector:
                       f"同名本机会话有 {item['messages']} 条推送无法解析，公众号归属待核实")
             failures.append({"title": item["name"], "reason": reason + "；请检查读取器或推送格式", "pending": True})
         if last.get("unattributed_messages"):
+            candidates = last.get("coverage_unknown_accounts") or []
+            hint = f"；可能相关账号：{'、'.join(candidates)}（归属待核实）" if candidates else ""
             failures.append({"title": "推送归属待核实", "pending": True,
                              "reason": f"另有 {last['unattributed_messages']} 条本机推送无法解析，"
-                                       "无法确认所属公众号，未计入各号条数；请检查读取器或推送格式"})
+                                       "无法确认所属公众号，未计入各号条数"
+                                       + hint + "；请检查读取器或推送格式"})
         # 账号级诊断先于正文条目，避免首次大量正文待补挤掉账号提示（面板最多 50 条）。
         failures += [{**item, "pending": True} for item in (last.get("body_failures") or [])]
         new = last.get("new_articles", 0)

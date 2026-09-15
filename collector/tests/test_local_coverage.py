@@ -8,6 +8,7 @@ from unittest.mock import patch
 from tests.local_source_fixture import SqlReader
 from tests.test_local_wechat import push
 from src.collect.local_runner import collect
+from src.crawler.local_wechat import LocalReaderError
 from src.db import connection
 from src.db.repository import ArticleRepository
 
@@ -51,7 +52,7 @@ class CoverageTests(unittest.TestCase):
             self.assertEqual([{"name": "甲", "messages": 1, "identity_confirmed": True}],
                              result["unreadable_accounts"])
 
-    def test_history_does_not_hide_new_bad_pushes_or_refresh_affected_timestamp(self):
+    def test_history_does_not_hide_bad_pushes_and_no_new_article_keeps_previous_timestamp(self):
         self.repo.enable_crawl_account("乙", "biz-b")
         self.repo.commit()
         self.reader.add("gh_a", [push()])
@@ -86,16 +87,96 @@ class CoverageTests(unittest.TestCase):
         for _ in range(2):
             result = self.run_collect()
             self.assertEqual([], result["errors"])
-            self.assertEqual([], result["missing_accounts"])
-            self.assertEqual(["甲"], result["coverage_unknown_accounts"])
+            self.assertEqual(["甲"], result["missing_accounts"])
+            self.assertEqual([], result["coverage_unknown_accounts"])
             self.assertEqual([], result["unreadable_accounts"])
             self.assertEqual(0, result["unreadable_messages"])
             self.assertEqual(3, result["unattributed_messages"])
             self.assertNotIn("未核实的新名字", str(self.events))
 
+    def test_unknown_stranger_push_does_not_change_fourteen_missing_accounts(self):
+        for i in range(14):
+            self.repo.enable_crawl_account(f"未同步{i}", f"absent-{i}")
+        self.repo.commit()
+        self.reader.add("gh_a", [push()])
+        baseline = self.run_collect()
+        self.assertEqual(14, len(baseline["missing_accounts"]))
+        self.reader.add("gh_stranger", [{"text": b"\xff"}])
+        self.reader.sessions[-1]["display_name"] = "无关的陌生号"
+        for _ in range(2):
+            result = self.run_collect()
+            self.assertEqual([], result["errors"])
+            self.assertEqual(baseline["missing_accounts"], result["missing_accounts"])
+            self.assertEqual([], result["coverage_unknown_accounts"])
+            self.assertEqual([], result["unreadable_accounts"])
+            self.assertEqual(1, result["unattributed_messages"])
+            self.assertNotIn("无关的陌生号", str(self.events))
+
+    def test_permanent_issue_does_not_freeze_later_successful_article_discovery(self):
+        self.repo.enable_crawl_account("乙", "biz-b")
+        self.repo.commit()
+        self.reader.add("gh_a", [push(), {"text": "<mmreader>"}])
+        self.reader.add("gh_b", [push(biz="biz-b")])
+        self.run_collect()
+        for i in range(1, 4):
+            self.reader.add("gh_a", [push(mid=str(1000 + i))])
+            self.reader.add("gh_b", [push(biz="biz-b", mid=str(1000 + i))])
+            now = f"2026-09-16 00:0{i}"
+            with patch("src.utils.helpers.time_now", return_value=now):
+                result = self.run_collect()
+            self.assertEqual(2 + 2 * i, result["matched_articles"])
+            self.assertEqual(1, result["unreadable_messages"])
+            self.assertEqual([{"name": "甲", "messages": 1, "identity_confirmed": True}],
+                             result["unreadable_accounts"])
+            self.assertEqual({"甲": now, "乙": now}, dict(self.repo.conn.execute(
+                "SELECT name,latest_crawl_at FROM accounts")))
+        with patch("src.utils.helpers.time_now", return_value="2026-09-16 00:04"):
+            result = self.run_collect()
+        self.assertEqual(8, result["matched_articles"])
+        self.assertEqual("2026-09-16 00:03", self.repo.conn.execute(
+            "SELECT latest_crawl_at FROM accounts WHERE name='甲'").fetchone()[0])
+
+    def test_rescanned_history_and_cross_shard_duplicate_are_not_new_discoveries(self):
+        self.reader.add("gh_a", [push(), {"text": "<mmreader>"}])
+        self.run_collect()
+        self.repo.set_account_latest_crawl("甲", "2020-01-01 00:00")
+        self.repo.commit()
+        self.reader.add("gh_a", [{"text": "<mmreader><broken>", "local_id": 2}])
+        self.reader.add("gh_a", [push()], "biz_message_1.db")
+        result = self.run_collect()
+        self.assertEqual(1, result["matched_articles"])
+        self.assertEqual(1, result["unreadable_messages"])
+        self.assertEqual("2020-01-01 00:00", self.repo.conn.execute(
+            "SELECT latest_crawl_at FROM accounts WHERE name='甲'").fetchone()[0])
+
+    def test_new_discovery_does_not_override_a_real_reader_failure(self):
+        self.reader.add("gh_a", [push(), {"text": "<mmreader>"}])
+        self.run_collect()
+        self.repo.set_account_latest_crawl("甲", "2020-01-01 00:00")
+        self.repo.commit()
+        self.reader.add("gh_a", [push(mid=str(i)) for i in range(1000, 1501)])
+        pages = 0
+        original = self.reader._call
+
+        def fail_second_page(command, *args):
+            nonlocal pages
+            if command == "sql" and "content_hex" in args[0]:
+                pages += 1
+                if pages == 2:
+                    raise LocalReaderError("第二页读取失败")
+            return original(command, *args)
+
+        self.reader.call.side_effect = fail_second_page
+        result = self.run_collect()
+        self.assertEqual(["第二页读取失败"], result["errors"])
+        self.assertEqual(501, result["matched_articles"])
+        self.assertEqual("2020-01-01 00:00", self.repo.conn.execute(
+            "SELECT latest_crawl_at FROM accounts WHERE name='甲'").fetchone()[0])
+
     def test_duplicate_display_names_do_not_duplicate_messages_or_account_counts(self):
         self.repo.enable_crawl_account("乙", "biz-b")
         self.repo.conn.execute("UPDATE accounts SET display_name='重名'")
+        self.repo.enable_crawl_account("丙", "biz-c")
         self.repo.commit()
         self.reader.add("gh_shared", [{"text": "<mmreader>"}] * 2)
         self.reader.sessions[0]["display_name"] = "重名"
@@ -104,7 +185,7 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(0, result["unreadable_messages"])
         self.assertEqual([], result["unreadable_accounts"])
         self.assertEqual({"甲", "乙"}, set(result["coverage_unknown_accounts"]))
-        self.assertEqual([], result["missing_accounts"])
+        self.assertEqual(["丙"], result["missing_accounts"])
 
     def test_known_unselected_issue_remains_silent_and_does_not_make_missing_uncertain(self):
         self.reader.add("gh_other", [push(biz="other", pub_time="invalid")])

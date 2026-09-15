@@ -12,7 +12,6 @@ def discovery_issues(conn, accounts, snapshots, active, covered):
     session_names = {s["source_key"]: s.get("session_name") for s in snapshots}
     per_account = defaultdict(dict)
     matched, unattributed, uncertain = set(), set(), set()
-    names = {a["name"] for a in accounts}
     rows = conn.execute(
         "SELECT i.source_key,i.local_id,b.biz FROM local_wechat_message_issues i "
         "LEFT JOIN local_wechat_issue_biz b USING (source_key,local_id)")
@@ -33,7 +32,8 @@ def discovery_issues(conn, accounts, snapshots, active, covered):
         else:
             # 不把同一条异常重复分给同名账号，也不猜测改名/解码失败消息的归属。
             unattributed.add(key)
-            uncertain.update({a["name"] for a in candidates} if candidates else names)
+            # 没有关联线索的消息只留汇总，不能据此改变全部未覆盖账号的状态。
+            uncertain.update(a["name"] for a in candidates)
     uncertain -= covered | per_account.keys()
     return {
         "unreadable_messages": len(matched),
