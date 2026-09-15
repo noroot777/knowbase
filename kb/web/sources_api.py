@@ -19,8 +19,15 @@ from kb.collectors import CollectorError, active_collector, target_manager
 router = APIRouter()
 
 
-def _manager():
-    mgr = target_manager()
+def _collector(channel=None):
+    try:
+        return active_collector(channel)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+def _manager(channel=None):
+    mgr = target_manager(_collector(channel))
     if mgr is None:
         raise HTTPException(400, "当前采集器不支持在这里维护订阅列表")
     return mgr
@@ -35,8 +42,8 @@ def _guard(fn, *args, **kwargs) -> dict:
 
 
 @router.get("/api/sources/targets")
-def list_targets():
-    collector = active_collector()
+def list_targets(channel: str | None = None):
+    collector = _collector(channel)
     mgr = target_manager(collector)
     if mgr is None:
         return {"manageable": False, "label": collector.label, "targets": []}

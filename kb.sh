@@ -294,12 +294,13 @@ sys.exit(0 if d.get("running") else 1)'
 # 组装 /api/pipeline/run 的请求体。stages 为空 = 全流程
 pipeline_run() {   # pipeline_run <stages-json|""> [--since d --until d --targets a,b]
   local stages="$1"; shift
-  local since="" until="" targets=""
+  local since="" until="" targets="" channel=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --since)   since="${2:-}"; shift 2 ;;
       --until)   until="${2:-}"; shift 2 ;;
       --targets) targets="${2:-}"; shift 2 ;;
+      --channel) channel="${2:-}"; shift 2 ;;
       *) die "不认识的参数 $1" ;;
     esac
   done
@@ -312,13 +313,14 @@ pipeline_run() {   # pipeline_run <stages-json|""> [--since d --until d --target
   local body
   body="$("$BOOT_PY" -c '
 import json, sys
-stages, since, until, targets = sys.argv[1:5]
+stages, since, until, targets, channel = sys.argv[1:6]
 b = {}
 if stages:  b["stages"] = json.loads(stages)
 if since:   b["since_date"] = since
 if until:   b["until_date"] = until
 if targets: b["accounts"] = [t for t in targets.split(",") if t]
-print(json.dumps(b))' "$stages" "$since" "$until" "$targets")"
+if channel: b["channel"] = channel
+print(json.dumps(b))' "$stages" "$since" "$until" "$targets" "$channel")"
 
   local out
   out="$("${CURL[@]}" -w '\n%{http_code}' -X POST "$API/api/pipeline/run" \
@@ -415,6 +417,8 @@ knowledge-base 操作入口 —— 每条命令跑完就还你终端,不用挂�
   日常
     ./kb.sh prep                    同步前:重起 wxdown + 切路由 + 起面板
     ./kb.sh sync                    跑全流程(采集→导出→索引→打标),后台跑
+    ./kb.sh sync --channel wechat_local  用微信本地数据库发现文章
+    ./kb.sh sync --channel wechat_oa     用原凭证通道(默认)
     ./kb.sh status                  服务 / 同步进度 / 路由 / 凭证 一屏看全
 
   服务(都是后台守护进程;restart 会先杀掉在跑的那份,不管是谁起的)
@@ -426,6 +430,7 @@ knowledge-base 操作入口 —— 每条命令跑完就还你终端,不用挂�
 
   单跑某一步(都是后台跑,立刻返回)
     ./kb.sh collect [--since 2026-08-01 --until 2026-08-26] [--targets a,b]
+                   [--channel wechat_local|wechat_oa]
     ./kb.sh export
     ./kb.sh index
     ./kb.sh extract
@@ -442,7 +447,8 @@ knowledge-base 操作入口 —— 每条命令跑完就还你终端,不用挂�
 
   两套凭证别搞混:login 那套是扫码拿的、全局一份,现在只剩「搜公众号加号」
   一个用途;creds 那套是每个号各一份的文章凭证,只能靠在 Mac 微信里打开该号
-  一篇文章、由 wxdown 截下来。抓文章(列表和正文)全靠后者,login 救不了。
+  一篇文章、由 wxdown 截下来。原通道取列表靠后者,login 救不了;
+  本地数据库通道无需它,两通道都按文章链接获取正文。
 EOF
 }
 

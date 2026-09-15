@@ -185,9 +185,7 @@ def _collect_one_incremental(repo, wechat, name: str, fakeid: str) -> int:
 
     existing = repo.get_blogs_for_account(name)
     fresh = wechat.fetch_new_articles(fakeid, existing)
-    for article in fresh:
-        api._ingest_crawl_article(repo, name, article)
-    return len(fresh)
+    return sum(bool(api._ingest_crawl_article(repo, name, article)) for article in fresh)
 
 
 def _collect_one_ranged(repo, wechat, name: str, fakeid: str,
@@ -216,8 +214,7 @@ def _collect_one_ranged(repo, wechat, name: str, fakeid: str,
         # 「今天」「近 7 天」「自定义到今天」抓回来的都会静默少一天,只比日期部分。
         for article in candidates:
             if since <= str(article.get("create_time") or "")[:10] <= until:
-                api._ingest_crawl_article(repo, name, article)
-                got += 1
+                got += int(bool(api._ingest_crawl_article(repo, name, article)))
 
         oldest = min(str(a.get("create_time") or "")[:10] for a in articles)
         if oldest and oldest < since:

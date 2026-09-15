@@ -15,6 +15,9 @@
 >   `appmsgpublish` 抓取链路——`main.py`、`src/processor/`、`src/web/`——已删除。
 >   扫码登录(`cli login`)只剩「搜公众号加号」一个用途,下文凡说"扫码续期就能
 >   继续抓文章"的地方都已经不成立。
+> - 新增 `collect --channel local`：通过已配置的 `wechat-cli` 只读本机公众号推送，
+>   与默认的 `--channel profile_ext` 共用文章库、正文抓取与导出。面板和根目录
+>   `kb.sh` 使用 `wechat_local` / `wechat_oa` 选择通道，详见根目录 README。
 >
 > 下面「快速开始」「Docker 部署」「仓库结构」几节讲的是旧形态,当历史读。
 

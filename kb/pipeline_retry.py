@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import subprocess
 import threading
+from copy import deepcopy
 from pathlib import Path
 
 from kb.pipeline_state import (
@@ -147,12 +148,12 @@ def retry_failed_plan() -> list[str]:
     return plan
 
 
-def _run_retry_failed(plan: list[str]) -> None:
+def _run_retry_failed(plan: list[str], crawl_filter: dict | None = None) -> None:
     try:
         if "crawl" in plan:
-            _run_crawl(None)
+            _run_crawl(crawl_filter)
         if "export" in plan:
-            _run_export()
+            _run_export((crawl_filter or {}).get("channel"))
         if "refill" in plan:
             _run_refill()
         if "index" in plan:
@@ -170,6 +171,7 @@ def _run_retry_failed(plan: list[str]) -> None:
 def start_retry_failed() -> tuple[bool, str]:
     """一键重试所有失败项。返回 (started, msg);无失败项或已在跑时 False。"""
     plan = retry_failed_plan()
+    crawl_filter = deepcopy((load_last_run() or {}).get("crawl_filter") or {})
     if not plan:
         return False, "上次运行没有失败项,也没有提取积压"
     with _lock:
@@ -182,10 +184,11 @@ def start_retry_failed() -> tuple[bool, str]:
         _state.update({
             "running": True, "current_stage": "", "log": [],
             "started_at": _now(), "finished_at": "",
+            "crawl_filter": crawl_filter,
             "stages": {s: {"status": "pending" if card[s] else "skipped",
                            "detail": "" if card[s] else "本次无需重试"}
                        for s in STAGES},
         })
     _log("重试失败项: " + " → ".join(plan))
-    threading.Thread(target=_run_retry_failed, args=(plan,), daemon=True).start()
+    threading.Thread(target=_run_retry_failed, args=(plan, crawl_filter), daemon=True).start()
     return True, " → ".join(plan)

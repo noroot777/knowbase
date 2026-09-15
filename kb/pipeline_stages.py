@@ -23,18 +23,26 @@ from kb.pipeline_state import _log, _now, _stage
 
 # ── 采集:抓取 + 导出,两阶段都只跟采集器契约打交道 ────────────────────────────
 
-def source_status() -> dict:
+def source_status(channel: str | None = None) -> dict:
     """当前来源的健康状况,给状态面板用。"""
-    collector = active_collector()
+    collector = active_collector(channel)
     payload = collector.status().as_dict()
     payload["label"] = collector.label
     payload["range_hint"] = getattr(collector, "range_hint", "")
+    payload["channel"] = collector.name
+    payload["channel_label"] = getattr(collector, "channel_label", collector.label)
     return payload
 
 
-def source_targets() -> list[str]:
+def source_targets(channel: str | None = None) -> list[str]:
     """来源里可筛选的子集(公众号名等),给面板的筛选下拉用。"""
-    return list(active_collector().status().targets)
+    from kb.collectors import target_manager
+
+    collector = active_collector(channel)
+    manager = target_manager(collector)
+    if manager:
+        return [t.name for t in manager.list_targets() if t.enabled]
+    return list(collector.status().targets)
 
 
 def source_pending() -> int | None:
@@ -56,12 +64,14 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
             since=crawl_filter.get("since_date", ""),
             until=crawl_filter.get("until_date", ""),
         )
-    active_collector().fetch(scope)
+    collector = active_collector((crawl_filter or {}).get("channel"))
+    _log(f"采集通道: {getattr(collector, 'channel_label', collector.label)}")
+    collector.fetch(scope)
 
 
-def _run_export() -> None:
+def _run_export(channel: str | None = None) -> None:
     """让采集器把它本地的内容落成 obs md。"""
-    active_collector().materialize()
+    active_collector(channel).materialize()
 
 
 def _run_index() -> None:
@@ -342,4 +352,3 @@ def _run_projects() -> None:
         return
     summaries.append(f"入库 {n_new} 条目")
     _stage("projects", "ok", " · ".join(summaries)[:200] or "无新增")
-

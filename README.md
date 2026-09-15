@@ -68,7 +68,7 @@ web 界面(`uv run kb-web` → http://127.0.0.1:8787)的"管道"tab 一键搞定
 → **索引**(FTS + 向量,增量)→ **提取**(entity/topic/摘要,tag 自动回写 obs frontmatter)
 
 抓取/导出两阶段只跟 `kb/collectors/` 的采集器契约打交道,知识库自身不认识
-任何具体来源。当前唯一实现是公众号采集器(`kb/collectors/wechat_oa.py` + `collector/`),
+任何具体来源。当前公众号采集器有凭证和本地数据库两条通道(`kb/collectors/` + `collector/`),
 微信特有的一切——凭证怎么过期、反爬要等多久、文章先落哪个库——都关在
 那个文件里;换来源或换抓取方式只写一个新实现,管道一行不改。
 
@@ -76,7 +76,7 @@ web 界面(`uv run kb-web` → http://127.0.0.1:8787)的"管道"tab 一键搞定
 「管理公众号」弹窗可以搜索添加、停用、移除订阅,并实时显示每个号的文章凭证
 够不够——采集器实现了 `TargetManager` 契约才显示这些,没实现的来源自动隐藏。
 
-微信这个来源要逐个号授权:抓正文用的凭证得在 Mac 微信里打开该号一篇文章、
+原凭证通道要逐个号授权:获取列表用的凭证得在 Mac 微信里打开该号一篇文章、
 由 wxdown-service 截下来。所以同步前先 `./kb.sh prep`,它把 wxdown 起好、
 切好路由,然后一边等你点文章一边显示还差谁;面板那个弹窗也会每 5 秒自动刷新。
 
@@ -93,6 +93,30 @@ web 界面(`uv run kb-web` → http://127.0.0.1:8787)的"管道"tab 一键搞定
 2. `kb index` 增量索引新文档(内容 hash 判断,秒级)
 3. `kb extract` 给新文章打标
 4. 随便搜
+
+### 公众号双通道同步
+
+在「管道 → 全流程同步」中选择「同步通道」，再选择时间段和公众号：
+
+- **凭证抓取（原通道）**：默认选项，继续用 wxdown 获取每个公众号的文章凭证。
+- **微信本地数据库**：通过 `wechat-cli` 只读本机已同步的公众号图文推送，提取文章链接后复用正文抓取。无需 wxdown 或逐号文章凭证，但需已有可用的微信数据库接入；不可读时显示错误，不自动获取密钥或切换通道。
+
+两通道共用知识库中的公众号订阅列表和文章库。请在 Mac 微信订阅并同步需要采集的公众号；本机没有推送的号会单独报出。微信数据库通道的「不限时间」会扫描本机已有推送、去重后只抓新文章及缺失正文；指定区间按文章发布时间筛选，包含结束日全天。订阅前的历史和未同步消息不能保证补齐。
+
+手动选择会保存在当前浏览器；「每日定时」旁可单独设置定时通道。失败重试沿用上次运行的通道、公众号和时间范围。文章按 `__biz + mid + idx` 去重并保留原档案 ID，切换通道不会重新创建同一篇文章。
+
+```bash
+./kb.sh sync --channel wechat_local
+./kb.sh collect --channel wechat_local --since 2026-09-01 --until 2026-09-15 --targets 公众号名
+./kb.sh sync --channel wechat_oa
+
+# 采集器 CLI 对应选项（用于直接排查）
+cd collector
+./.venv/bin/python -m cli status --channel local
+./.venv/bin/python -m cli collect --channel local --targets 公众号名
+```
+
+默认复用 `${CODEX_HOME:-~/.codex}/skills/wechat-cli/scripts/reader.sh` 或已安装的 `rion-wechat-cli`；自定义安装可通过 `RION_WECHAT_CLI_BIN` 指定可执行文件。只保存公众号 ID 映射到采集器的私有 `data/local_wechat_accounts.json`，不持久化原始推送 XML、私聊或数据库密钥。
 
 ## 设计决策备忘
 

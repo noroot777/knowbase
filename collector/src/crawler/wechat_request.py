@@ -39,9 +39,10 @@ def _canonical_link(link: str) -> str:
     if not link:
         return ""
     try:
+        from src.utils.article_identity import article_identity
         from src.utils.article_import import canonical_article_link
 
-        return canonical_article_link(link)
+        return article_identity(link) or canonical_article_link(link)
     except Exception:
         return link.split("#", 1)[0]
 

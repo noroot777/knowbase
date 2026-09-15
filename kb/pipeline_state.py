@@ -23,6 +23,7 @@ _state: dict = {
     "current_stage": "",
     "started_at": "",
     "finished_at": "",
+    "crawl_filter": {},
     # 每阶段: {status: pending/running/ok/skipped/error, detail: str}
     "stages": {s: {"status": "", "detail": ""} for s in STAGES},
     "log": [],          # 最近若干条进度行
@@ -57,9 +58,11 @@ def _stage(name: str, status: str, detail: str = "",
 def _save_last_run() -> None:
     """持久化最近一次结果,重启 kb-web 后仍能看到。"""
     try:
+        _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         _STATE_FILE.write_text(json.dumps({
             "finished_at": _state["finished_at"],
             "stages": _state["stages"],
+            "crawl_filter": _state["crawl_filter"],
         }, ensure_ascii=False, indent=1), encoding="utf-8")
     except OSError:
         pass

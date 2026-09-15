@@ -14,10 +14,13 @@ let tgtTimer = null;     // 自动刷新:边在微信里点文章边看着它变
 
 /** 面板加载时调用:决定要不要显示"管理订阅"入口 */
 async function initTargets() {
+  try { await loadPipeChannels(); } catch { return; }
+  const requestedChannel = pipeChannel;
   const btn = $('src-manage');
   if (!btn) return;
-  const d = await fetch('/api/sources/targets').then(r => r.ok ? r.json() : null)
+  const d = await fetch(channelUrl('/api/sources/targets')).then(r => r.ok ? r.json() : null)
     .catch(() => null);
+  if (requestedChannel !== pipeChannel) return;
   if (!d || !d.manageable) { btn.style.display = 'none'; return; }
   tgtLabel = d.label || '目标';
   tgtList = d.targets || [];
@@ -48,6 +51,7 @@ function closeTargets() {
  * 新抓到的凭证并进来。全部就绪就自动停——没什么可等的时候不该一直起子进程。*/
 function startTgtAutoRefresh() {
   stopTgtAutoRefresh();
+  if (!tgtReadiness) return;
   if (!$('tgt-auto') || !$('tgt-auto').checked) return;
   if (tgtReadiness && tgtReadiness.ready >= tgtReadiness.total) return;
   tgtTimer = setInterval(() => {
@@ -88,7 +92,7 @@ async function refreshReadiness(silent = false) {
 }
 
 async function reloadTargets() {
-  const r = await fetch('/api/sources/targets');
+  const r = await fetch(channelUrl('/api/sources/targets'));
   if (await toastIfFail(r, `读取${tgtLabel}列表失败`)) return;
   const d = await r.json();
   tgtList = d.targets || [];

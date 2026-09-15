@@ -62,6 +62,11 @@ def _ago(seconds: int) -> str:
 # ── status ──────────────────────────────────────────────────────────────────────
 
 def cmd_status(args) -> int:
+    if getattr(args, "channel", "profile_ext") == "local":
+        from src.collect.local_runner import local_status
+
+        emit(local_status())
+        return EXIT_OK
     import api
     from src.db.repository import ArticleRepository
 
@@ -106,12 +111,24 @@ def cmd_status(args) -> int:
 # ── collect ─────────────────────────────────────────────────────────────────────
 
 def cmd_collect(args) -> int:
-    from src.collect.runner import collect
+    if getattr(args, "channel", "profile_ext") == "local":
+        from src.collect.local_runner import collect
+    else:
+        from src.collect.runner import collect
 
     since, until = args.since or "", args.until or ""
     if bool(since) != bool(until):
         info("错误:--since 和 --until 必须同时给")
         return EXIT_ERROR
+    if since:
+        from datetime import date
+        try:
+            dates = [date.fromisoformat(d) for d in (since, until)]
+            if dates[0] > dates[1] or [d.isoformat() for d in dates] != [since, until]:
+                raise ValueError
+        except ValueError:
+            info("错误:日期须为 YYYY-MM-DD，且起始日期不能晚于结束日期")
+            return EXIT_ERROR
     targets = [t.strip() for t in (args.targets or "").split(",") if t.strip()]
 
     result = collect(emit, targets=targets or None, since=since, until=until)
@@ -120,6 +137,8 @@ def cmd_collect(args) -> int:
         return EXIT_AUTH
     info(f"采集完成:新增 {result['new_articles']} 篇"
          + (f",{len(result['errors'])} 个号失败" if result["errors"] else ""))
+    if getattr(args, "channel", "profile_ext") == "local" and result["errors"]:
+        return EXIT_ERROR
     return EXIT_OK
 
 
@@ -501,12 +520,15 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cli", description="公众号采集器(一次性任务,不常驻)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("status", help="健康状况与订阅列表(JSON)")
+    status = sub.add_parser("status", help="健康状况与订阅列表(JSON)")
+    status.add_argument("--channel", choices=["profile_ext", "local"], default="profile_ext")
 
     c = sub.add_parser("collect", help="采集文章到本地库")
     c.add_argument("--since", help="起始日期 YYYY-MM-DD(与 --until 同时给)")
     c.add_argument("--until", help="结束日期 YYYY-MM-DD")
     c.add_argument("--targets", help="逗号分隔的公众号名,默认全部订阅号")
+    c.add_argument("--channel", choices=["profile_ext", "local"], default="profile_ext",
+                   help="profile_ext=原凭证通道；local=本机微信数据库推送")
 
     e = sub.add_parser("export", help="把本地库导出成 obsidian md")
     e.add_argument("--no-images", action="store_true", help="不下图,保留远程 URL")

@@ -93,6 +93,9 @@ class WeChatOACollector:
 
     name = "wechat_oa"
     label = "公众号"
+    channel_label = "凭证抓取（原通道）"
+    cli_channel = "profile_ext"
+    channel_hint = "用各公众号的文章凭证获取列表；同步前通过 wxdown 准备凭证。"
     range_hint = ("提示:微信服务端一般只保留近 30 天可翻页的历史,"
                   "跨度过大的旧文章可能拉不到。")
 
@@ -142,7 +145,7 @@ class WeChatOACollector:
         if problem:
             _stage("crawl", "skipped", f"采集器还没装好,跳过抓取:{problem}")
             return
-        argv = ["collect"]
+        argv = ["collect", "--channel", self.cli_channel]
         if scope.ranged:
             argv += ["--since", scope.since, "--until", scope.until]
             timeout_min = 120        # 区间补抓页间/号间等待远长于日常增量
@@ -209,10 +212,12 @@ class WeChatOACollector:
                    "再在 Mac 微信里打开各号的一篇文章",
                    failures=failures)
         elif code != 0:
-            _stage("crawl", "error", f"采集失败(退出码 {code})", failures=failures)
+            detail = (f"新增 {new} 篇,失败 {len(errors)} 项" if errors
+                      else f"采集失败(退出码 {code})")
+            _stage("crawl", "error", detail, failures=failures)
         else:
-            _stage("crawl", "ok",
-                   f"新增 {new} 篇" + (f",{len(errors)} 个号失败" if errors else ""),
+            _stage("crawl", "error" if errors else "ok",
+                   f"新增 {new} 篇" + (f",失败 {len(errors)} 项" if errors else ""),
                    failures=failures)
 
     # ── 落地:采集器本地库 → obs md ───────────────────────────────────────────

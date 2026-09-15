@@ -44,13 +44,19 @@ function pipePresets() {
 }
 
 async function openPipeModal() {
+  try { await loadPipeChannels(); }
+  catch (e) { toast('同步通道读取失败', { detail: e.message }); return; }
   // 目标列表每次打开都拉一次(可能刚在采集器那边加了新目标)
-  const d = await fetch('/api/pipeline/accounts').then(r => r.json()).catch(() => null);
+  const r = await fetch(channelUrl('/api/pipeline/accounts')).catch(() => null);
+  if (!r) { toast('公众号列表读取失败'); return; }
+  if (await toastIfFail(r, '公众号列表读取失败')) return;
+  const d = await r.json();
   pipeAcctList = (d && d.accounts) || [];
   pipeSel = new Set(pipeAcctList);                     // 默认全选
   pipeRange = { label: '不限时间', from: '', to: '' };
   $('pipe-acct-search').value = '';
   $('pipe-modal').style.display = '';
+  renderPipeChannel();
   renderPipeRange();
   renderPipeAcctList();
 }
@@ -98,7 +104,7 @@ function renderPipeRange() {
   const ranged = !!pipeRange.from;
   $('pipe-range-hint').textContent = ranged
     ? pipeRangeHint
-    : '不限时间 = 增量同步各目标的新内容(当天已抓过的自动跳过)。';
+    : '不限时间 = 扫描所选通道可提供的文章列表，已有文章按身份去重。';
   renderPipeEst();
 }
 
@@ -132,35 +138,32 @@ function pipeSelectAll() { pipeSel = new Set(pipeAcctList); renderPipeAcctList()
 function pipeSelectNone() { pipeSel = new Set(); renderPipeAcctList(); }
 
 function renderPipeEst() {
-  const ranged = !!pipeRange.from;
   const n = pipeSel.size;
-  if (ranged) {
-    const s = n * 12;
-    const t = s < 60 ? `~${s}s` : `~${Math.round(s / 60)} 分钟`;
-    $('pipe-est').innerHTML =
-      `抓取预计耗时 <b>${t}</b>(${n} 个号 × 平均 12s,含反爬间隔:页间 2.5-4s、号间 4-7s)。<br>` +
-      `提取阶段与抓取并行、claude 3 路并发,管道总时长 ≈ 抓取和提取里较长的那个。`;
-    $('pipe-start').disabled = n === 0;
-    $('pipe-start').textContent = `开始同步 (${n} 个)`;
-  } else {
-    const all = n === pipeAcctList.length;
-    $('pipe-est').innerHTML =
-      `增量抓${all ? '各号' : `选中的 ${n} 个号的`}新文章,耗时视更新量而定。<br>` +
-      `提取阶段与抓取并行、claude 3 路并发,管道总时长 ≈ 抓取和提取里较长的那个。`;
-    $('pipe-start').disabled = n === 0;
-    $('pipe-start').textContent = all ? '开始同步' : `开始同步 (${n} 个)`;
-  }
+  const channel = pipeChannels.find(c => c.id === pipeChannel);
+  $('pipe-est').textContent = `使用${channel?.label || '所选通道'}同步 ${n} 个公众号。`
+    + '耗时取决于新文章数量和正文获取速度；两个通道共用已采集文章，不会因切换重复入库。';
+  $('pipe-start').disabled = n === 0;
+  $('pipe-start').textContent = `开始同步 (${n} 个)`;
 }
 
 async function refreshPipe(withPending = false) {
-  const s = await fetch('/api/pipeline/status' + (withPending ? '?pending=1' : ''))
+  try { await loadPipeChannels(); } catch { return; }
+  const requestedChannel = pipeChannel;
+  const s = await fetch(channelUrl('/api/pipeline/status' + (withPending ? '?pending=1' : '')))
     .then(r => r.json()).catch(() => null);
-  if (!s) return;
+  if (!s || requestedChannel !== pipeChannel) return;
+  const runningChannel = s.running && s.crawl_filter?.channel;
+  if (runningChannel && runningChannel !== pipeChannel) {
+    pipeChannel = runningChannel;
+    renderPipeChannel();
+    initTargets();
+    return refreshPipe(withPending);
+  }
 
   // 来源采集器状态。message/hint 都是采集器给的成品文案,这里只负责显示
   // ——换来源(RSS、播客…)不用改这段。
   const src = s.source || { online: false, message: '' };
-  $('src-label').textContent = src.label ? `来源 · ${src.label}` : '来源采集器';
+  $('src-label').textContent = src.channel_label || src.label || '来源采集器';
   $('src-status').textContent = src.online ? '在线' : '不在线(抓取将跳过)';
   $('src-status').style.color = src.online ? 'var(--ok)' : '#c33';
   $('src-detail').textContent =
@@ -208,6 +211,7 @@ async function refreshPipe(withPending = false) {
   const logBox = $('pipe-log').parentElement;
   logBox.scrollTop = logBox.scrollHeight;
   $('pipe-run').disabled = s.running;
+  $('pipe-channel-current').disabled = s.running;
   $('pipe-run').textContent = s.running ? '同步中…' : '全流程同步';
   // 任一阶段有失败(或提取有积压)且空闲时,亮出全局重试按钮
   const hasFail = Object.values(stages).some(st =>
@@ -246,20 +250,23 @@ async function retryFailed() {
 // ── 每日定时同步 ──────────────────────────────────────────────────────────
 async function loadSched() {
   try {
+    await loadPipeChannels();
     const s = await fetch('/api/pipeline/schedule').then(r => r.json());
     $('sched-on').checked = !!s.enabled;
     if (s.time) $('sched-time').value = s.time;
+    if (s.channel) $('sched-channel').value = s.channel;
   } catch {}
 }
 
 async function saveSched() {
-  const body = { enabled: $('sched-on').checked, time: $('sched-time').value || '07:30' };
+  const body = { enabled: $('sched-on').checked, time: $('sched-time').value || '07:30',
+                 channel: $('sched-channel').value };
   try {
     const r = await fetch('/api/pipeline/schedule', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+    if (!r.ok) throw new Error(await apiFail(r, '定时同步配置保存失败'));
     $('sched-msg').textContent = body.enabled ? `✓ 每天 ${body.time} 自动同步` : '已关闭';
   } catch (e) {
     $('sched-msg').textContent = '保存失败: ' + e.message;
@@ -268,7 +275,8 @@ async function saveSched() {
 }
 
 async function startPipeFromModal() {
-  const body = {};
+  if (!pipeSel.size) { toast('请至少选择一个公众号'); return; }
+  const body = { channel: pipeChannel };
   if (pipeRange.from) {
     body.since_date = pipeRange.from;
     body.until_date = pipeRange.to;
