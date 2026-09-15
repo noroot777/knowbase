@@ -181,9 +181,10 @@ async function refreshPipe(withPending = false) {
     const body = [st.detail, pendN ? pend : ''].filter(Boolean).join(' · ') || pend;
     // 失败明细(后端 _stage 的 failures):卡片内可展开,不用翻日志
     const fails = st.failures || [];
+    const onlyPending = fails.every(f => f.pending);
     const failHtml = fails.length ? `
       <details style="margin-top:5px">
-        <summary style="cursor:pointer;font-size:11.5px;color:#c33">失败明细 ${fails.length}</summary>
+        <summary style="cursor:pointer;font-size:11.5px;color:${onlyPending ? 'var(--muted)' : '#c33'}">${onlyPending ? '待处理' : '失败'}明细 ${fails.length}</summary>
         <div style="font-size:11.5px;margin-top:3px;max-height:130px;overflow:auto">
           ${fails.map(f => `<div style="margin-bottom:4px">· ${esc(f.title)}<br>
             <span style="color:var(--muted)">${esc(f.reason)}</span></div>`).join('')}

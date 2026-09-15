@@ -26,7 +26,8 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
     result = {"new_articles": 0, "errors": [], "auth_error": False, "done": 0, "total": 0,
               "missing_accounts": [], "deferred_articles": 0, "unavailable_articles": 0,
               "matched_articles": 0, "download_done": 0, "download_total": 0,
-              "download_succeeded": 0, "download_failed": 0, "existing_articles": 0}
+              "download_succeeded": 0, "download_failed": 0, "existing_articles": 0,
+              "body_failures": [], "unreadable_messages": 0}
     reader = reader or LocalReader()
 
     def progress(event):
@@ -47,13 +48,15 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
                 active = index.refresh(reader, progress, result["errors"].append)
                 covered = index.covered_accounts(accounts, active)
                 result["missing_accounts"] = [a["name"] for a in accounts if a["name"] not in covered]
+                result["unreadable_messages"] = index.unreadable_messages(accounts, active)
+                # 最近采集记录文章发现；正文独立重试，不能成为所有账号的全局闸门。
+                incomplete = index.covered_accounts(accounts, list(index.failed_sources))
+                for name in covered - incomplete:
+                    repo.set_account_latest_crawl(name, time_now())
+                repo.commit()
                 articles = index.query(accounts, active, since, until)
                 result["matched_articles"] = len(articles)
                 _download(repo, articles, result, progress)
-                # 数据库读取失败不得把覆盖缺口写成一次成功采集。
-                if not result["errors"]:
-                    for name in covered:
-                        repo.set_account_latest_crawl(name, time_now())
                 repo.commit()
                 result["done"] = len(accounts)
     except LocalReaderError as exc:
@@ -100,7 +103,8 @@ def _download(repo, articles, result, progress):
                 if state and state["reason"] == "unavailable":
                     result["unavailable_articles"] += 1
                 else:
-                    result["errors"].append(f"{current}: 正文获取失败，稍后自动重试")
+                    result["body_failures"].append({"title": current,
+                        "reason": "正文暂未获取，已安排自动重试"})
         except Exception as exc:
             result["errors"].append(f"{current}: {exc}")
         finally:

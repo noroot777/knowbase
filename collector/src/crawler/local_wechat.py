@@ -21,6 +21,10 @@ class LocalReaderError(RuntimeError):
     pass
 
 
+class LocalPushContentError(LocalReaderError):
+    """单条推送内容异常，可隔离；不是读取器/数据库接入失败。"""
+
+
 def reader_command() -> str:
     explicit = os.getenv("RION_WECHAT_CLI_BIN") or os.getenv("RION_WECHAT_READER_BIN")
     if explicit:
@@ -102,7 +106,7 @@ class LocalReader:
 
 class _PushTreeBuilder(ET.TreeBuilder):
     def doctype(self, name, pubid, system):
-        raise LocalReaderError("公众号推送 XML 含不支持的声明")
+        raise LocalPushContentError("公众号推送 XML 含不支持的声明")
 
 
 def parse_push(message: dict) -> list[dict]:
@@ -113,7 +117,7 @@ def parse_push(message: dict) -> list[dict]:
     try:
         root = ET.fromstring(raw, parser=ET.XMLParser(target=_PushTreeBuilder()))
     except ET.ParseError:
-        raise LocalReaderError("公众号图文推送格式无法解析，未跳过此错误") from None
+        raise LocalPushContentError("公众号图文推送格式无法解析") from None
     result = []
     for item in root.findall(".//mmreader/category/item"):
         url = unescape(item.findtext("url") or "").strip()
@@ -129,7 +133,7 @@ def parse_push(message: dict) -> list[dict]:
             deleted = int(item.findtext("del_flag") or 0)
             published = datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M")
         except (ValueError, OverflowError, OSError):
-            raise LocalReaderError("公众号推送的发布时间或类型无效") from None
+            raise LocalPushContentError("公众号推送的发布时间或类型无效") from None
         if stamp <= 0 or deleted or kind in (5, 8, 10):
             continue
         # 原文所需的公开文章身份保留；不导出消息里的追踪参数或客户端访问材料。

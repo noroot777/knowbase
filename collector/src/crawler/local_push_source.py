@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 
-from src.crawler.local_wechat import LocalReaderError
+from src.crawler.local_wechat import LocalReaderError, LocalPushContentError
 
 PAGE_SIZE = 500
 TABLE_BATCH = 80  # 避免 SQLite UNION / 系统命令行长度上限。
@@ -76,13 +76,17 @@ class LocalPushSource:
     def page(self, plans):
         queries = []
         for plan in plans:
-            if plan["after"] >= plan["max_id"]:
-                continue
+            if "ids" in plan:
+                where = "local_id IN (" + ",".join(str(int(i)) for i in plan["ids"]) + ")"
+            else:
+                if plan["after"] >= plan["max_id"]:
+                    continue
+                where = f"local_id>{int(plan['after'])} AND local_id<={int(plan['max_id'])}"
             queries.append(
                 f"SELECT '{plan['source_key']}' AS source_key, local_id, create_time, "
                 f"hex(message_content) AS content_hex, hex(compress_content) AS compressed_hex, "
                 f'WCDB_CT_message_content AS compression FROM "{plan["table"]}" '
-                f"WHERE local_id>{int(plan['after'])} AND local_id<={int(plan['max_id'])}")
+                f"WHERE {where}")
         if not queries:
             return []
         return self.sql(plans[0]["file"], " UNION ALL ".join(queries)
@@ -101,4 +105,4 @@ def decode_push(row):
     except ImportError:
         raise LocalReaderError("缺少 zstandard 依赖，请在 collector 运行 uv sync") from None
     except Exception:
-        raise LocalReaderError("公众号推送内容解码失败，未推进该来源游标") from None
+        raise LocalPushContentError("公众号推送内容解码失败") from None

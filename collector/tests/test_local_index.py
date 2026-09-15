@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from local_source_fixture import SqlReader
-from test_local_wechat import push
+from tests.local_source_fixture import SqlReader
+from tests.test_local_wechat import push
 from src.collect.local_index import ArticleIndex
 from src.collect.local_runner import collect
 from src.crawler.local_wechat import LocalReaderError, parse_push
@@ -113,15 +113,17 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(501, len(self.query(self.refresh())))
         self.assertEqual([], self.errors)
 
-    def test_malformed_push_reports_error_without_losing_valid_or_future_repaired_message(self):
+    def test_malformed_push_is_recorded_without_losing_valid_or_future_repaired_message(self):
         self.reader.add("gh_target", [{"text": "<mmreader>", "local_id": 1}, push()])
         active = self.refresh()
         self.assertEqual(1, len(self.query(active)))
-        self.assertTrue(self.errors)
-        self.assertEqual(0, self.repo.conn.execute("SELECT COUNT(*) FROM local_wechat_sources").fetchone()[0])
+        self.assertEqual([], self.errors)
+        self.assertEqual(1, self.repo.conn.execute("SELECT COUNT(*) FROM local_wechat_sources").fetchone()[0])
+        self.assertEqual(1, self.repo.conn.execute("SELECT COUNT(*) FROM local_wechat_message_issues").fetchone()[0])
         self.reader.add("gh_target", [{**push(idx="2"), "local_id": 1}])
         self.assertEqual(2, len(self.query(self.refresh())))
         self.assertEqual([], self.errors)
+        self.assertEqual(0, self.repo.conn.execute("SELECT COUNT(*) FROM local_wechat_message_issues").fetchone()[0])
 
     def test_insert_below_cursor_and_source_reset_trigger_reconciliation(self):
         db, table = self.reader.add("gh_target", [{**push(), "local_id": 1},
@@ -136,6 +138,103 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(3, len(result))
         self.assertTrue(all("idx=1" in a["link"] for _, a in result))
         self.assertEqual(3, self.events[-1]["scanned_messages"])
+
+    def test_permanent_bad_push_does_not_repeat_full_scan_or_error(self):
+        for tail in (False, True):
+            with self.subTest(after_checkpoint=tail):
+                username = "gh_tail" if tail else "gh_initial"
+                self.reader.add(username, [push(mid=str(i)) for i in range(300)])
+                if tail:
+                    self.refresh()
+                self.reader.add(username, [{"text": "<mmreader>"}])
+                self.refresh()
+                self.assertEqual([], self.errors)
+                self.assertEqual(1 if tail else 301, self.events[-1]["scanned_messages"])
+                for _ in range(2):
+                    with patch("src.collect.local_message_issues.parse_push") as parse:
+                        self.refresh()
+                    parse.assert_not_called()
+                    self.assertEqual([], self.errors)
+                    self.assertEqual(0, self.events[-1]["scanned_messages"])
+                self.assertEqual(1 + int(tail), self.repo.conn.execute(
+                    "SELECT COUNT(*) FROM local_wechat_sources").fetchone()[0])
+
+    def test_repaired_middle_message_is_rechecked_without_rebuilding_source(self):
+        self.reader.add("gh_target", [push(), {"text": "<mmreader>", "local_id": 2}, push(idx="3")])
+        self.refresh()
+        self.reader.add("gh_target", [{**push(idx="2"), "local_id": 2}])
+        self.assertEqual(3, len(self.query(self.refresh())))
+        self.assertEqual(0, self.events[-1]["scanned_messages"])
+        self.assertEqual(0, self.repo.conn.execute("SELECT COUNT(*) FROM local_wechat_message_issues").fetchone()[0])
+
+    def test_bad_encoding_is_isolated_but_reader_dependency_failure_is_not(self):
+        self.reader.add("gh_target", [push(), {"text": b"\xff"},
+                                      {"text": b"broken zstd", "compression": 4}])
+        self.refresh()
+        self.assertEqual([], self.errors)
+        self.assertEqual(2, self.repo.conn.execute("SELECT COUNT(*) FROM local_wechat_message_issues").fetchone()[0])
+        self.reader.add("gh_target", [push(idx="2")])
+        with patch("src.collect.local_message_issues.decode_push", side_effect=LocalReaderError("缺少依赖")):
+            self.refresh()
+        self.assertEqual(["缺少依赖"], self.errors)
+        self.assertEqual(2, self.repo.conn.execute("SELECT COUNT(*) FROM local_wechat_message_issues").fetchone()[0])
+        self.assertEqual(3, json.loads(self.repo.conn.execute(
+            "SELECT checkpoint FROM local_wechat_sources").fetchone()[0])["max_id"])
+
+    def test_unselected_bad_source_does_not_affect_selected_account(self):
+        self.reader.add("gh_target", [push()])
+        self.reader.add("gh_stranger", [{"text": "<mmreader>"}])
+        with patch("src.utils.request_pacing.RequestPacer.wait"), patch("api.download_cover"), \
+             patch("src.utils.wechat_body.fetch_article_body_full", return_value=(["正文"], "<p>正文</p>", "")):
+            for _ in range(3):
+                result = collect(lambda e: None, reader=self.reader)
+                self.assertEqual([], result["errors"])
+                self.assertEqual(0, result["unreadable_messages"])
+                self.assertTrue(self.repo.conn.execute("SELECT latest_crawl_at FROM accounts").fetchone()[0])
+
+    def test_mixed_body_results_update_both_accounts_and_cli_returns_success(self):
+        import cli
+        import contextlib
+        import io
+
+        self.repo.enable_crawl_account("其他", "biz-b")
+        self.repo.commit()
+        self.reader.add("gh_target", [push()])
+        self.reader.add("gh_other", [push(biz="biz-b")])
+        with patch("src.utils.request_pacing.RequestPacer.wait"), patch("api.download_cover"), \
+             patch("src.utils.wechat_body.fetch_article_body_full", side_effect=[
+                 ("请求错误", None, ""), (["正文"], "<p>正文</p>", "")]):
+            result = collect(lambda e: None, reader=self.reader)
+        self.assertEqual([], result["errors"])
+        self.assertEqual(1, len(result["body_failures"]))
+        self.assertEqual((1, 1), (result["download_succeeded"], result["download_failed"]))
+        self.assertTrue(all(r[0] for r in self.repo.conn.execute("SELECT latest_crawl_at FROM accounts")))
+        with patch("src.collect.local_runner.collect", return_value=result), \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.EXIT_OK, cli.main(["collect", "--channel", "local"]))
+
+    def test_database_failure_does_not_prevent_other_source_timestamp(self):
+        self.repo.enable_crawl_account("其他", "biz-b")
+        self.repo.commit()
+        self.reader.add("gh_target", [push()], "message_0.db")
+        self.reader.add("gh_other", [push(biz="biz-b")], "message_1.db")
+        self.refresh()
+        self.reader.add("gh_target", [push(idx="2")], "message_0.db")
+        self.reader.add("gh_other", [push(biz="biz-b", idx="2")], "message_1.db")
+        original = self.reader._call
+
+        def fail_one_file(command, *args):
+            if command == "sql" and "content_hex" in args[0] and "message_1.db" in args:
+                raise LocalReaderError("分片读取失败")
+            return original(command, *args)
+
+        self.reader.call.side_effect = fail_one_file
+        with patch("src.collect.local_runner._download"):
+            result = collect(lambda e: None, reader=self.reader)
+        self.assertEqual(["分片读取失败"], result["errors"])
+        times = dict(self.repo.conn.execute("SELECT name,latest_crawl_at FROM accounts"))
+        self.assertTrue(times["目标"])
+        self.assertFalse(times["其他"])
 
     def test_rewritten_boundary_checksum_updates_index(self):
         self.reader.add("gh_target", [{**push(), "local_id": 1}])

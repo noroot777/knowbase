@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 
-from src.crawler.local_push_source import LocalPushSource, TABLE_BATCH, decode_push
-from src.crawler.local_wechat import LocalReaderError, parse_push
+from src.collect.local_message_issues import MessageIssues
+from src.crawler.local_push_source import LocalPushSource, TABLE_BATCH
+from src.crawler.local_wechat import LocalReaderError
 
 
 def _checkpoint(snapshot):
@@ -26,8 +27,11 @@ def _start(snapshot, old):
 class ArticleIndex:
     def __init__(self, repo):
         self.conn = repo.conn
+        self.failed_sources = set()
 
     def refresh(self, reader, progress, on_error):
+        self.failed_sources = set()
+        self.issues = MessageIssues(self.conn)
         checkpoints = {r["source_key"]: json.loads(r["checkpoint"]) for r in self.conn.execute(
             "SELECT source_key, checkpoint FROM local_wechat_sources")}
         source = LocalPushSource(reader)
@@ -54,7 +58,23 @@ class ArticleIndex:
             for filename in dict.fromkeys(p["file"] for p in batch):
                 group = [p for p in batch if p["file"] == filename]
                 self._read_group(source, group, stats, progress, on_error)
+        self.issues.recheck(source, snapshots, self.failed_sources,
+                            lambda row, articles: self._store_articles(row, articles, allow_older=False),
+                            on_error)
         return active
+
+    def _store_articles(self, row, articles, *, allow_older=True):
+        for article in articles:
+            self.conn.execute(
+                "INSERT INTO local_wechat_articles "
+                "(source_key,id,biz,create_time,message_time,local_id,article_json) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(source_key,id) DO UPDATE SET "
+                "biz=excluded.biz, create_time=excluded.create_time, "
+                "message_time=excluded.message_time, local_id=excluded.local_id, "
+                "article_json=excluded.article_json" + ("" if allow_older else
+                    " WHERE excluded.local_id >= local_wechat_articles.local_id"),
+                (row["source_key"], article["id"], article["biz"], article["create_time"],
+                 row.get("create_time") or 0, row["local_id"], json.dumps(article, ensure_ascii=False)))
 
     def _read_group(self, source, plans, stats, progress, on_error):
         by_key = {p["source_key"]: p for p in plans}
@@ -72,29 +92,19 @@ class ArticleIndex:
                     plan["read"] += 1
                     stats["scanned_messages"] += 1
                     try:
-                        articles = parse_push(decode_push(row))
-                    except LocalReaderError as exc:
+                        articles = self.issues.parse(row)
+                    except LocalReaderError:
                         plan["failed"] = True
-                        on_error(str(exc))
-                        continue
-                    for article in articles:
-                        plan["seen"].add(article["id"])
-                        self.conn.execute(
-                            "INSERT INTO local_wechat_articles "
-                            "(source_key,id,biz,create_time,message_time,local_id,article_json) "
-                            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(source_key,id) DO UPDATE SET "
-                            "biz=excluded.biz, create_time=excluded.create_time, "
-                            "message_time=excluded.message_time, local_id=excluded.local_id, "
-                            "article_json=excluded.article_json",
-                            (row["source_key"], article["id"], article["biz"], article["create_time"],
-                             row.get("create_time") or 0, local_id, json.dumps(article, ensure_ascii=False)))
-                        stats["indexed_articles"] += 1
+                        raise
+                    plan["seen"].update(a["id"] for a in articles)
+                    self._store_articles(row, articles)
+                    stats["indexed_articles"] += len(articles)
                 # 文章索引与正文失败分离。半途失败可留下有效元数据，但不推进失败来源。
                 self.conn.commit()
                 progress(dict(stats))
         except LocalReaderError as exc:
             for plan in plans:
-                plan["failed"] = True
+                plan["failed"] |= plan["read"] != plan["expected"]
             on_error(str(exc))
         for plan in plans:
             if not plan["failed"] and plan["read"] == plan["expected"]:
@@ -108,7 +118,10 @@ class ArticleIndex:
                     "INSERT OR REPLACE INTO local_wechat_sources VALUES (?,?)",
                     (plan["source_key"], json.dumps(_checkpoint(plan))))
             elif not plan["failed"]:
+                plan["failed"] = True
                 on_error("公众号推送数量在读取期间变化，下一次同步将重新校验")
+            if plan["failed"]:
+                self.failed_sources.add(plan["source_key"])
         self.conn.commit()
 
     def covered_accounts(self, accounts, active):
@@ -119,6 +132,13 @@ class ArticleIndex:
             + ",".join("?" for _ in active) + ")", active)
         known = {r["biz"] for r in rows}
         return {a["name"] for a in accounts if a["fakeid"] in known}
+
+    def unreadable_messages(self, accounts, active):
+        wanted = {a["fakeid"] for a in accounts}
+        sources = {r["source_key"] for r in self.conn.execute(
+            "SELECT DISTINCT source_key,biz FROM local_wechat_articles")
+            if r["source_key"] in active and r["biz"] in wanted}
+        return self.issues.count(sources)
 
     def query(self, accounts, active, since="", until=""):
         if not accounts or not active:

@@ -93,6 +93,15 @@ CREATE TABLE IF NOT EXISTS local_wechat_sources (
   checkpoint TEXT NOT NULL
 );
 
+-- 内容异常单独记账，不阻塞增量游标；只存指纹/位置，不存原始推送。
+CREATE TABLE IF NOT EXISTS local_wechat_message_issues (
+  source_key TEXT NOT NULL,
+  local_id INTEGER NOT NULL,
+  content_hash TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  PRIMARY KEY (source_key, local_id)
+);
+
 CREATE TABLE IF NOT EXISTS local_wechat_articles (
   source_key TEXT NOT NULL,
   id TEXT NOT NULL,

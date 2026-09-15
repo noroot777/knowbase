@@ -217,7 +217,10 @@ class WeChatOACollector:
     @staticmethod
     def _report(code: int, last: dict) -> None:
         errors = last.get("errors") or []
-        failures = [{"title": str(e), "reason": "账号采集失败"} for e in errors]
+        is_local = "download_succeeded" in last
+        failures = [{"title": str(e), "reason": "文章发现或入库失败" if is_local else "账号采集失败"}
+                    for e in errors]
+        failures += [{**item, "pending": True} for item in (last.get("body_failures") or [])]
         new = last.get("new_articles", 0)
         coverage = ""
         if "download_succeeded" in last:
@@ -226,6 +229,10 @@ class WeChatOACollector:
             coverage += f",本机暂无推送 {len(last['missing_accounts'])} 个号（订阅并同步后可采集）"
         if last.get("deferred_articles"):
             coverage += f",等待重试 {last['deferred_articles']} 篇"
+        if last.get("body_failures"):
+            coverage += f",正文待重试 {len(last['body_failures'])} 篇"
+        if last.get("unreadable_messages"):
+            coverage += f",已记录不可读推送 {last['unreadable_messages']} 条"
         if last.get("unavailable_articles"):
             coverage += f",原文暂不可用 {last['unavailable_articles']} 篇（一周后复查）"
         if code == EXIT_AUTH:
@@ -282,8 +289,8 @@ class WeChatOACollector:
                    event.get("detail") or (proc.stderr or "").strip()[-300:] or "导出失败")
             return
         fails = [{"title": t,
-                  "reason": "无正文(转载stub或已删),导不出;"
-                            "持续多轮可标 is_wx_deleted"}
+                  "reason": "缺少正文，暂未导出；保留待补，后续同步会按退避时间重试",
+                  "pending": True}
                  for t in (event.get("no_body") or [])]
         _stage("export", "ok", event.get("detail") or "完成", failures=fails)
 

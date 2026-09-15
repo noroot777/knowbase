@@ -68,10 +68,15 @@
   的 after-local-id 做增量分页（读取器是在 LIMIT 后过滤 ID），也不能拿发布时间
   当消息水位。先维护 `local_wechat_articles`，再按发布时间和启用/所选 biz 查询。
   未选公众号只进入本地发现索引，不下载正文、不写共享 articles、不导出，匹配不打印名称。
-  `local_wechat_sources` 保存数量及首尾指纹，检测源变化后重扫；分页/解析失败不推进
-  对应游标。原始 XML 只在内存中解码；压缩消息用锁定依赖 zstandard。旧 JSON 映射
+  `local_wechat_sources` 保存数量及首尾指纹，检测源变化后重扫；分页/读取失败不推进
+  对应游标。内容异常保存在 `local_wechat_message_issues`（位置、指纹、原因），不阻塞
+  游标；后续定向核对异常行，变化后再解析。未选公众号的内容异常不进入同步提示。
+  原始 XML 只在内存中解码；压缩消息用锁定依赖 zstandard。旧 JSON 映射
   不再用于同步。进度 phase=discovery/download，正文以篇数计数，保留原通道事件兼容。
   正文失败存 `article_fetch_state`，以退避控制重试，不能用文章发布日期判断删除。
+  本地正文暂不可读走 `body_failures` 待处理明细，不进 `errors`、不使抓取阶段判红；
+  `latest_crawl_at` 按账号文章发现结果更新，不受别的账号或正文待补影响。导出保留
+  `无正文,跳过` 明细协议供 CLI 生成 `no_body`，正文缺失不建议标记微信删除。
   `is_wx_deleted` 的历史自动退休记录允许重新入库，用户删除及身份黑名单仍拦截。
 
 - **`collector/data` 和 `collector/.venv` 丢了就跑 `./collector/setup.sh`**。两者都在

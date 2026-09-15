@@ -226,7 +226,7 @@ class LocalCollectionTests(unittest.TestCase):
         self.reader.check = Mock()
         self.reader.accounts = Mock(return_value=[{"username": "gh_test", "display_name": "档案名"}])
         self.reader.messages = Mock(return_value=[push()])
-        from local_source_fixture import TimelineFixture
+        from tests.local_source_fixture import TimelineFixture
 
         self.sql_fixture = TimelineFixture(self.reader)
         self.reader.call = self.sql_fixture.call
@@ -294,7 +294,8 @@ class LocalCollectionTests(unittest.TestCase):
     def test_failed_body_is_reported_and_retried_without_new_metadata(self):
         self.fill.return_value = ("请求错误", None, "")
         first = self.collect()
-        self.assertIn("正文获取失败", first["errors"][0])
+        self.assertEqual([], first["errors"])
+        self.assertIn("自动重试", first["body_failures"][0]["reason"])
         second = self.collect()
         self.assertEqual(0, second["new_articles"])
         self.assertEqual([], second["errors"])
@@ -375,10 +376,11 @@ class LocalCollectionTests(unittest.TestCase):
         self.assertEqual(0, self.repo.conn.execute("SELECT is_wx_deleted FROM articles").fetchone()[0])
         self.assertEqual(1, self.repo.conn.execute("SELECT COUNT(*) FROM article_bodies").fetchone()[0])
 
-    def test_bad_push_is_reported_while_valid_article_is_ingested(self):
+    def test_bad_push_is_recorded_while_valid_article_is_ingested(self):
         self.reader.messages.return_value = [{"text": "<mmreader>"}, push()]
         result = self.collect()
-        self.assertTrue(result["errors"])
+        self.assertEqual([], result["errors"])
+        self.assertEqual(1, result["unreadable_messages"])
         self.assertEqual(1, result["new_articles"])
 
     def test_export_keeps_old_empty_article_retryable(self):
@@ -393,6 +395,19 @@ class LocalCollectionTests(unittest.TestCase):
              contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(0, export_obsidian.main())
         self.assertIn("待补正文 1", output.getvalue())
+        self.assertIn("无正文,跳过 档案名 · 测试文章", output.getvalue())
+        self.assertNotIn("失败 0", output.getvalue())
+        import cli
+        import subprocess
+
+        with patch("cli.subprocess.run", return_value=subprocess.CompletedProcess(
+                [], 0, stdout=output.getvalue(), stderr="")), \
+             contextlib.redirect_stdout(io.StringIO()) as event_output, \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
+        import json
+
+        self.assertEqual(["档案名 · 测试文章"], json.loads(event_output.getvalue())["no_body"])
         self.assertEqual(0, self.repo.conn.execute("SELECT is_wx_deleted FROM articles").fetchone()[0])
         self.repo.conn.execute("UPDATE article_fetch_state SET retry_at=0")
         self.repo.commit()

@@ -61,6 +61,39 @@ class ChannelAPITests(unittest.TestCase):
 
 
 class ChannelDispatchTests(unittest.TestCase):
+    def test_pending_bodies_are_visible_without_red_stage_or_immediate_retry(self):
+        from kb.collectors import wechat_oa
+
+        body = {"title": "目标 · 测试文章", "reason": "正文暂未获取，已安排自动重试"}
+        result = {"new_articles": 2, "errors": [], "download_succeeded": 1,
+                  "body_failures": [body], "unreadable_messages": 1}
+        with patch.object(wechat_oa, "_stage") as stage:
+            wechat_oa.WeChatOACollector._report(0, result)
+        self.assertEqual(("crawl", "ok"), stage.call_args.args[:2])
+        self.assertEqual([{**body, "pending": True}], stage.call_args.kwargs["failures"])
+        detail = stage.call_args.args[2]
+        self.assertIn("正文待重试 1 篇", detail)
+        self.assertNotIn("失败", detail)
+        with patch.object(pipeline_retry, "load_last_run", return_value={
+                "stages": {"crawl": {"status": "ok", "detail": detail, "failures": [body]}}}):
+            self.assertEqual([], pipeline_retry.retry_failed_plan())
+
+    def test_export_missing_bodies_reach_panel_as_pending_details(self):
+        import subprocess
+        from kb.collectors import wechat_oa
+
+        payload = {"detail": "完成: 导出 0, 待补正文 2", "no_body": ["号甲 · 文甲", "号乙 · 文乙"]}
+        with patch.object(wechat_oa, "_backend_problem", return_value=""), \
+             patch.object(wechat_oa, "_run_cli", return_value=subprocess.CompletedProcess(
+                 [], 0, stdout=json.dumps(payload), stderr="")), patch.object(wechat_oa, "_stage") as stage:
+            wechat_oa.WeChatOACollector().materialize()
+        self.assertEqual(("export", "ok"), stage.call_args.args[:2])
+        items = stage.call_args.kwargs["failures"]
+        self.assertEqual(2, len(items))
+        self.assertTrue(all(item["pending"] for item in items))
+        self.assertIn("保留待补", items[0]["reason"])
+        self.assertNotIn("is_wx_deleted", items[0]["reason"])
+
     def test_local_progress_renders_discovery_and_body_counts_without_changing_old_channel(self):
         from kb.collectors.wechat_oa import WeChatOACollector
 

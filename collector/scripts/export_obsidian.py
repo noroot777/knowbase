@@ -118,7 +118,7 @@ def main() -> int:
     print(f"[export] 库内候选 {len(articles)} 篇")
 
     saved_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    exported = skipped = degraded = failed = pending = 0
+    exported = skipped = degraded = pending = 0
 
     for row in articles:
         if args.limit > 0 and exported >= args.limit:
@@ -147,6 +147,7 @@ def main() -> int:
         if not body_html.strip() and not text_md.strip():
             # 发布得早不代表读取已多次失败；留在候选中，由抓取阶段按退避时间补正文。
             pending += 1
+            print(f"  [export] 无正文,跳过 {account} · {title}")
             continue
         if body_html.strip():
             try:
@@ -190,7 +191,7 @@ def main() -> int:
 
     print(
         f"[export] 完成: 导出 {exported}, 跳过(已存在) {skipped}, "
-        f"降级纯文本 {degraded}, 失败 {failed}, 待补正文 {pending}"
+        f"降级纯文本 {degraded}, 待补正文 {pending}"
     )
     return 0
 
