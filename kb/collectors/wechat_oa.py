@@ -221,12 +221,22 @@ class WeChatOACollector:
         failures = [{"title": str(e), "reason": "文章发现或入库失败" if is_local else "账号采集失败"}
                     for e in errors]
         failures += [{**item, "pending": True} for item in (last.get("body_failures") or [])]
+        for item in last.get("unreadable_accounts") or []:
+            reason = (f"本机有 {item['messages']} 条推送无法解析，尚未发现可采集文章"
+                      if item["identity_confirmed"] else
+                      f"同名本机会话有 {item['messages']} 条推送无法解析，公众号归属待核实")
+            failures.append({"title": item["name"], "reason": reason + "；请检查读取器或推送格式", "pending": True})
+        failures += [{"title": name, "pending": True,
+                      "reason": "尚未发现可采集文章；请核实本机推送及读取器覆盖情况"}
+                     for name in (last.get("missing_accounts") or [])]
         new = last.get("new_articles", 0)
         coverage = ""
         if "download_succeeded" in last:
             coverage += f",补齐正文 {last['download_succeeded']} 篇"
         if last.get("missing_accounts"):
-            coverage += f",本机暂无推送 {len(last['missing_accounts'])} 个号（订阅并同步后可采集）"
+            coverage += f",尚未发现可采集文章 {len(last['missing_accounts'])} 个号（覆盖待核实）"
+        if last.get("unreadable_accounts"):
+            coverage += f",推送解析待核查 {len(last['unreadable_accounts'])} 个号"
         if last.get("deferred_articles"):
             coverage += f",等待重试 {last['deferred_articles']} 篇"
         if last.get("body_failures"):

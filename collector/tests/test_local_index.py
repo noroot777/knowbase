@@ -181,6 +181,72 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(3, json.loads(self.repo.conn.execute(
             "SELECT checkpoint FROM local_wechat_sources").fetchone()[0])["max_id"])
 
+    def test_all_bad_pushes_are_counted_from_article_urls_without_successful_articles(self):
+        self.reader.add("gh_target", [push(idx=str(i), pub_time="invalid") for i in range(3)])
+        with patch("api._ingest_crawl_article") as ingest:
+            for _ in range(2):
+                result = collect(lambda e: None, reader=self.reader)
+                self.assertEqual([], result["errors"])
+                self.assertEqual([], result["missing_accounts"])
+                self.assertEqual(3, result["unreadable_messages"])
+                self.assertEqual([{"name": "目标", "messages": 3, "identity_confirmed": True}],
+                                 result["unreadable_accounts"])
+            ingest.assert_not_called()
+        self.assertEqual(0, self.repo.conn.execute("SELECT COUNT(*) FROM local_wechat_articles").fetchone()[0])
+        self.assertFalse(self.repo.conn.execute("SELECT latest_crawl_at FROM accounts").fetchone()[0])
+
+    def test_all_bad_same_name_session_is_visible_as_unverified_not_as_identity(self):
+        self.reader.add("gh_target", [{"text": "<mmreader>"}] * 3)
+        self.reader.sessions[0]["display_name"] = "目标"
+        result = collect(lambda e: None, reader=self.reader)
+        self.assertEqual([], result["errors"])
+        self.assertEqual([], result["missing_accounts"])
+        self.assertEqual(3, result["unreadable_messages"])
+        self.assertEqual([{"name": "目标", "messages": 3, "identity_confirmed": False}],
+                         result["unreadable_accounts"])
+        self.assertEqual(0, result["matched_articles"])
+        self.assertEqual(0, self.repo.conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0])
+        self.assertFalse(self.repo.conn.execute("SELECT latest_crawl_at FROM accounts").fetchone()[0])
+
+    def test_unidentifiable_bad_push_is_not_assigned_to_an_arbitrary_selected_account(self):
+        self.reader.add("gh_unknown", [{"text": "<mmreader>"}])
+        result = collect(lambda e: None, reader=self.reader)
+        self.assertEqual([], result["errors"])
+        self.assertEqual(["目标"], result["missing_accounts"])
+        self.assertEqual([], result["unreadable_accounts"])
+
+    def test_unselected_biz_hint_overrides_name_collision_and_is_not_reported(self):
+        self.reader.add("gh_other", [push(biz="other", pub_time="invalid")])
+        self.reader.sessions[0]["display_name"] = "目标"
+        result = collect(lambda e: None, reader=self.reader)
+        self.assertEqual([], result["errors"])
+        self.assertEqual(["目标"], result["missing_accounts"])
+        self.assertEqual(0, result["unreadable_messages"])
+        self.assertEqual([], result["unreadable_accounts"])
+
+    def test_legacy_issue_hints_are_backfilled_and_removed_when_message_recovers(self):
+        self.reader.add("gh_target", [{**push(pub_time="invalid"), "local_id": 1}])
+        self.refresh()
+        self.repo.conn.execute("DELETE FROM local_wechat_issue_biz")
+        self.repo.conn.execute("UPDATE local_wechat_message_issues SET content_hash='old-parser'")
+        self.repo.commit()
+        active = self.refresh()
+        self.assertEqual(0, self.events[-1]["scanned_messages"])
+        self.assertEqual(1, self.index.unreadable_messages(self.repo.list_accounts(), active))
+        self.reader.add("gh_target", [{**push(), "local_id": 1}])
+        self.refresh()
+        self.assertEqual(0, self.repo.conn.execute("SELECT COUNT(*) FROM local_wechat_issue_biz").fetchone()[0])
+
+    def test_malformed_xml_hint_requires_a_unique_complete_wechat_article_url(self):
+        from src.collect.local_message_issues import _biz_hint
+
+        message = push()
+        message["text"] = message["text"].removesuffix("</msg>")
+        self.assertEqual("biz-a", _biz_hint(message))
+        self.assertEqual("", _biz_hint({"text": message["text"] + push(biz="other")["text"]}))
+        self.assertEqual("", _biz_hint(push(url="https://example.com/s?__biz=biz-a&mid=1&idx=1")))
+        self.assertEqual("", _biz_hint(push(url="http://[broken")))
+
     def test_unselected_bad_source_does_not_affect_selected_account(self):
         self.reader.add("gh_target", [push()])
         self.reader.add("gh_stranger", [{"text": "<mmreader>"}])

@@ -36,7 +36,7 @@ class LocalPushSource:
 
     def snapshots(self, checkpoints):
         # 只列公众号对应的 Msg 表，绝不读取私人或群聊内容。
-        tables = {"Msg_" + hashlib.md5(s["username"].encode()).hexdigest()
+        tables = {"Msg_" + hashlib.md5(s["username"].encode()).hexdigest(): s
                   for s in self.reader.accounts()
                   if re.fullmatch(r"gh_[A-Za-z0-9_]+", s.get("username", ""))}
         databases = self.reader.call("schema", "--subdir", "message").get("databases")
@@ -71,6 +71,8 @@ class LocalPushSource:
                         row[field + "_hash"] = _digest(row.pop(field + "_anchor"))
                     row["file"] = filename
                     row["table"] = row["source_key"].split(":", 1)[1]
+                    # 名称仅供覆盖诊断，不能作为采集文章的身份映射。
+                    row["session_name"] = tables[row["table"]].get("display_name", "")
                     yield row
 
     def page(self, plans):

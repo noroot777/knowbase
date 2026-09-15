@@ -132,9 +132,34 @@ class ChannelDispatchTests(unittest.TestCase):
         with patch.object(wechat_oa, "_stage") as stage:
             wechat_oa.WeChatOACollector._report(0, result)
         self.assertEqual(("crawl", "ok"), stage.call_args.args[:2])
-        self.assertIn("本机暂无推送 1 个号", stage.call_args.args[2])
+        self.assertIn("尚未发现可采集文章 1 个号", stage.call_args.args[2])
         self.assertIn("等待重试 3 篇", stage.call_args.args[2])
-        self.assertEqual([], stage.call_args.kwargs["failures"])
+        self.assertEqual("未订阅", stage.call_args.kwargs["failures"][0]["title"])
+        self.assertTrue(stage.call_args.kwargs["failures"][0]["pending"])
+        self.assertNotIn("订阅并同步", stage.call_args.args[2])
+
+    def test_all_unreadable_account_is_named_with_correct_remedy_and_no_immediate_retry(self):
+        from kb.collectors import wechat_oa
+
+        for confirmed in (True, False):
+            result = {"new_articles": 0, "errors": [], "download_succeeded": 0,
+                      "missing_accounts": [], "unreadable_messages": 3,
+                      "unreadable_accounts": [{"name": "目标", "messages": 3,
+                                               "identity_confirmed": confirmed}]}
+            with patch.object(wechat_oa, "_stage") as stage:
+                wechat_oa.WeChatOACollector._report(0, result)
+            self.assertEqual(("crawl", "ok"), stage.call_args.args[:2])
+            detail = stage.call_args.args[2]
+            self.assertIn("推送解析待核查 1 个号", detail)
+            self.assertNotIn("本机暂无推送", detail)
+            items = stage.call_args.kwargs["failures"]
+            self.assertEqual("目标", items[0]["title"])
+            self.assertIn("3 条推送无法解析", items[0]["reason"])
+            self.assertIn("请检查读取器或推送格式", items[0]["reason"])
+            self.assertEqual(not confirmed, "归属待核实" in items[0]["reason"])
+            with patch.object(pipeline_retry, "load_last_run", return_value={"stages": {
+                    "crawl": {"status": "ok", "detail": detail, "failures": items}}}):
+                self.assertEqual([], pipeline_retry.retry_failed_plan())
 
     def test_collector_cli_gets_selected_channel_and_reports_read_failures(self):
         from kb.collectors import wechat_oa

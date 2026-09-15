@@ -2,12 +2,35 @@
 
 import hashlib
 import json
+import re
+from html import unescape
+from urllib.parse import parse_qs, urlparse
 
 from src.crawler.local_push_source import TABLE_BATCH, decode_push
 from src.crawler.local_wechat import LocalPushContentError, LocalReaderError, parse_push
 
 # 解析器升级需要重新尝试旧异常内容时递增此版本。
-PARSER_VERSION = 1
+PARSER_VERSION = 2
+
+
+def _biz_hint(message):
+    """只从 mmreader 内完整的文章 URL 提取唯一 biz，不要求整份 XML 合法。"""
+    raw = (message or {}).get("text", "")
+    start = raw.find("<mmreader")
+    if start < 0:
+        return ""
+    values = set()
+    for value in re.findall(r"<url\b[^>]*>(.*?)</url\s*>", raw[start:], re.S):
+        value = unescape(value.strip().removeprefix("<![CDATA[").removesuffix("]]>")).strip()
+        try:
+            parsed = urlparse(value)
+            query = parse_qs(parsed.query)
+        except ValueError:
+            continue
+        if (parsed.scheme in ("http", "https") and parsed.hostname == "mp.weixin.qq.com"
+                and parsed.path == "/s" and all(query.get(k, [""])[0] for k in ("__biz", "mid", "idx"))):
+            values.add(query["__biz"][0])
+    return next(iter(values)) if len(values) == 1 else ""
 
 
 class MessageIssues:
@@ -27,11 +50,15 @@ class MessageIssues:
             key).fetchone()
         if previous and previous[0] == fingerprint:
             return []
+        message = None
         try:
-            articles = parse_push(decode_push(row))
+            message = decode_push(row)
+            articles = parse_push(message)
         except LocalPushContentError as exc:
             self.conn.execute("INSERT OR REPLACE INTO local_wechat_message_issues VALUES (?,?,?,?)",
                               (*key, fingerprint, str(exc)))
+            if biz := _biz_hint(message):
+                self.conn.execute("INSERT OR REPLACE INTO local_wechat_issue_biz VALUES (?,?,?)", (*key, biz))
             return []
         self.conn.execute("DELETE FROM local_wechat_message_issues WHERE source_key=? AND local_id=?", key)
         return articles

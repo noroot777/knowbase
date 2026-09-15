@@ -39,6 +39,7 @@ class ArticleIndex:
                  "indexed_articles": 0, "initial_index": not checkpoints}
         progress(dict(stats))
         snapshots = list(source.snapshots(checkpoints))
+        self.snapshots = snapshots
         active = [s["source_key"] for s in snapshots]
         plans = []
         for snapshot in snapshots:
@@ -134,11 +135,13 @@ class ArticleIndex:
         return {a["name"] for a in accounts if a["fakeid"] in known}
 
     def unreadable_messages(self, accounts, active):
-        wanted = {a["fakeid"] for a in accounts}
-        sources = {r["source_key"] for r in self.conn.execute(
-            "SELECT DISTINCT source_key,biz FROM local_wechat_articles")
-            if r["source_key"] in active and r["biz"] in wanted}
-        return self.issues.count(sources)
+        return self.discovery_issues(accounts, active)["unreadable_messages"]
+
+    def discovery_issues(self, accounts, active):
+        from src.collect.local_coverage import discovery_issues
+
+        return discovery_issues(self.conn, accounts, self.snapshots, active,
+                                self.covered_accounts(accounts, active))
 
     def query(self, accounts, active, since="", until=""):
         if not accounts or not active:

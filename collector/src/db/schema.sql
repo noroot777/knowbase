@@ -102,6 +102,16 @@ CREATE TABLE IF NOT EXISTS local_wechat_message_issues (
   PRIMARY KEY (source_key, local_id)
 );
 
+-- 即使整条图文不可解析，也可从完整原文 URL 保留公众号归属线索。
+CREATE TABLE IF NOT EXISTS local_wechat_issue_biz (
+  source_key TEXT NOT NULL,
+  local_id INTEGER NOT NULL,
+  biz TEXT NOT NULL,
+  PRIMARY KEY (source_key, local_id),
+  FOREIGN KEY (source_key, local_id)
+    REFERENCES local_wechat_message_issues(source_key, local_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS local_wechat_articles (
   source_key TEXT NOT NULL,
   id TEXT NOT NULL,
