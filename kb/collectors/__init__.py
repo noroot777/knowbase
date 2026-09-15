@@ -175,6 +175,7 @@ _REGISTRY: dict[str, str] = {
     # name -> "模块路径:属性名",延迟导入:采集器实现可能拖着 requests 等依赖,
     # 而 kb.cli / kb.mcp_server 这些不碰管道的入口不该为此付启动成本
     "wechat_oa": "kb.collectors.wechat_oa:collector",
+    "wechat_local": "kb.collectors.wechat_local:collector",
 }
 
 _DEFAULT = "wechat_oa"
@@ -195,6 +196,12 @@ def get_collector(name: str | None = None) -> SourceCollector:
     return getattr(import_module(module_path), attr)
 
 
-def active_collector() -> SourceCollector:
+def active_collector(channel: str | None = None) -> SourceCollector:
     """当前生效的采集器。管道各阶段的唯一入口。"""
-    return get_collector()
+    return get_collector(channel)
+
+
+def collection_channels() -> list[dict]:
+    return [{"id": key, "label": getattr(c, "channel_label", c.label),
+             "hint": getattr(c, "channel_hint", ""), "range_hint": c.range_hint}
+            for key in _REGISTRY for c in [get_collector(key)]]

@@ -83,9 +83,15 @@ def _word_count_from_body_raw(raw: object, title: str = "") -> int:
     return len(re.sub(r"\s+", "", str(title or "")))
 
 
-def _ingest_crawl_article(repo, account_name: str, article: dict) -> None:
+def _ingest_crawl_article(repo, account_name: str, article: dict) -> bool:
     """入库单篇爬取文章：元数据、封面、正文、字数、全文索引。"""
     from src.db import fts as fts_mod
+    from src.utils.article_identity import prepare_article
+
+    prepared = prepare_article(repo, account_name, article)
+    if prepared is None:
+        return False
+    account_name, article, _is_new = prepared
 
     article_id = str(article.get("id") or "")
     repo.upsert_article_from_blog(account_name, article, update_fts=False)
@@ -119,6 +125,7 @@ def _ingest_crawl_article(repo, account_name: str, article: dict) -> None:
     wc = _word_count_from_body_raw(body_raw, str(article.get("title") or ""))
     repo.set_word_count(article_id, wc)
     repo.commit()
+    return _is_new
 
 
 def _fetch_article_detail_text(
@@ -139,12 +146,13 @@ def _fetch_article_detail_text(
     from src.db.connection import db_write_with_retry
     from src.db.repository import ArticleRepository
     from src.utils.wechat_body import fetch_article_body_full
+    from src.utils.article_identity import has_readable_body
 
     own_repo = repo is None
     if own_repo:
         repo = ArticleRepository()
     try:
-        if repo.has_body(article_id):
+        if has_readable_body(repo, article_id):
             return ""
         text, html, nickname = fetch_article_body_full(link)
         if not text:

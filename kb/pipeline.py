@@ -16,9 +16,11 @@ import json
 import re
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime
 
 from kb.config import DATA_DIR
+from kb.collectors import active_collector
 from kb.pipeline_retry import retry_failed_plan, start_retry_failed
 from kb.pipeline_stages import (
     _extract_pass,
@@ -98,6 +100,8 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
                 _state["stages"][s] = {"status": "skipped", "detail": "未选择"}
             elif s == "crawl":
                 _run_crawl(crawl_filter)
+            elif s == "export":
+                _run_export((crawl_filter or {}).get("channel"))
             elif s == "index":
                 if pre_thread and pre_thread.is_alive():
                     _stage("index", "running", "等存量提取收尾(避免并发写库)")
@@ -123,12 +127,15 @@ def start_pipeline(stages: list[str] | None = None,
     crawl_filter 见 _run_crawl:限定来源目标 + 时间段的范围抓取。
     """
     wanted = [s for s in (stages or list(STAGES)) if s in STAGES]
+    crawl_filter = deepcopy(crawl_filter or {})
+    crawl_filter["channel"] = active_collector(crawl_filter.get("channel")).name
     with _lock:
         if _state["running"]:
             return False
         _state.update({
             "running": True, "current_stage": "", "log": [],
             "started_at": _now(), "finished_at": "",
+            "crawl_filter": crawl_filter,
             "stages": {s: {"status": "pending" if s in wanted else "skipped",
                            "detail": ""} for s in STAGES},
         })
@@ -152,14 +159,17 @@ def load_schedule() -> dict:
         d = {}
     return {"enabled": bool(d.get("enabled")),
             "time": d.get("time") or "07:30",
+            "channel": d.get("channel") or active_collector().name,
             "last_fired": d.get("last_fired") or ""}
 
 
-def save_schedule(enabled: bool, time_str: str) -> dict:
+def save_schedule(enabled: bool, time_str: str, channel: str | None = None) -> dict:
     if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", time_str or ""):
         raise ValueError(f"时间格式应为 HH:MM,收到 {time_str!r}")
     cur = load_schedule()
-    cur.update({"enabled": bool(enabled), "time": time_str})
+    channel = active_collector(channel or cur["channel"]).name
+    cur.update({"enabled": bool(enabled), "time": time_str, "channel": channel})
+    _SCHED_FILE.parent.mkdir(parents=True, exist_ok=True)
     _SCHED_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
                            encoding="utf-8")
     return cur
@@ -185,7 +195,7 @@ def _scheduler_loop() -> None:
                 continue
             # 已在跑也标记今天已触发,避免同一分钟内反复尝试
             _mark_fired(today)
-            if start_pipeline(None):
+            if start_pipeline(None, crawl_filter={"channel": s["channel"]}):
                 _log(f"定时任务触发全流程同步(每日 {s['time']})")
         except Exception:
             pass          # 调度线程绝不能死

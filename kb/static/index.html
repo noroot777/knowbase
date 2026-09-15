@@ -114,7 +114,10 @@
       <span id="src-status" class="badge">检查中…</span>
       <span id="src-detail" style="font-size:12.5px;color:var(--muted);margin-left:8px"></span>
     </div>
-    <div style="display:flex;gap:12px;align-items:center;flex:none">
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:flex-end;min-width:0">
+      <select id="pipe-channel-current" aria-label="当前同步通道" onchange="changePipeChannel(this.value)">
+        <option value="">读取同步通道…</option>
+      </select>
       <button class="ghost" id="src-manage" onclick="openTargets()"
               style="padding:3px 12px;font-size:12.5px;display:none">管理订阅</button>
       <a id="src-console" href="#" target="_blank"
@@ -133,12 +136,15 @@
     <span id="pipe-hint" style="flex:1;min-width:0;font-size:12.5px;color:var(--muted)">
       抓取 → 导出 obs → 索引+向量 → 提取打标 → 条目化(工具/项目) → wiki(双链/实体页/日摘要/图谱)
     </span>
-    <span style="flex-shrink:0;display:flex;gap:7px;align-items:center;font-size:12.5px;color:var(--muted)">
+    <span style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--muted)">
       <label style="display:flex;gap:4px;align-items:center;cursor:pointer">
         <input type="checkbox" id="sched-on" onchange="saveSched()"> 每日定时
       </label>
       <input type="time" id="sched-time" value="07:30" onchange="saveSched()"
              style="padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink)">
+      <select id="sched-channel" aria-label="定时同步通道" onchange="saveSched()">
+        <option value="">读取同步通道…</option>
+      </select>
       <span id="sched-msg"></span>
     </span>
   </div>
@@ -153,6 +159,14 @@
   <div class="modal" style="width:min(640px,92vw);max-height:90vh;overflow-y:auto">
     <h2>全流程同步</h2>
     <p class="hint" style="margin:-8px 0 14px">选择时间段和公众号,抓完自动走 导出 → 索引 → 提取</p>
+
+    <div class="row">
+      <label for="pipe-channel" class="hint">同步通道</label>
+      <select id="pipe-channel" onchange="changePipeChannel(this.value)" style="display:block;width:100%;margin-top:6px">
+        <option value="">读取同步通道…</option>
+      </select>
+      <div id="pipe-channel-hint" class="hint" style="margin-top:8px"></div>
+    </div>
 
     <!-- 时间段 -->
     <div class="row" style="position:relative">
@@ -366,6 +380,7 @@
 <script src="/static/js/fav.js"></script>
 <script src="/static/js/chat.js"></script>
 <script src="/static/js/settings.js"></script>
+<script src="/static/js/pipe_channels.js"></script>
 <script src="/static/js/pipe.js"></script>
 <script src="/static/js/targets.js"></script>
 <script src="/static/js/gallery.js"></script>

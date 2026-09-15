@@ -6,17 +6,33 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from kb import pipeline as pl
+from kb.collectors import CollectorError, active_collector, collection_channels
 
 router = APIRouter()
+
+
+def _channel(value: str | None) -> str:
+    try:
+        return active_collector(value).name
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.get("/api/pipeline/channels")
+def pipeline_channels():
+    return {"channels": collection_channels(), "default": active_collector().name}
 
 
 class ScheduleRequest(BaseModel):
     enabled: bool
     time: str = "07:30"
+    channel: str | None = None
 
 
 @router.get("/api/pipeline/schedule")
@@ -27,19 +43,20 @@ def pipeline_schedule():
 @router.post("/api/pipeline/schedule")
 def pipeline_schedule_set(body: ScheduleRequest):
     try:
-        return pl.save_schedule(body.enabled, body.time)
+        return pl.save_schedule(body.enabled, body.time, body.channel)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
 @router.get("/api/pipeline/status")
-def pipeline_status(pending: bool = False, source: bool = True):
+def pipeline_status(pending: bool = False, source: bool = True, channel: str | None = None):
     state = dict(pl.get_state())
     # 来源状态要起采集器 CLI 并触网探测,冷缓存时几十秒都可能。只想知道
     # "管道在不在跑"的调用方(kb.sh 的停机保护就是)带 source=false 跳过它,
     # 否则一个慢探测会把"在不在跑"这个本来一读内存就有的答案也拖到超时。
     if source:
-        state["source"] = pl.source_status()
+        selected = channel or (state.get("crawl_filter") or {}).get("channel")
+        state["source"] = pl.source_status(_channel(selected))
     state["last_run"] = pl.load_last_run()
     # 待处理数要扫文件,只有显式要求且空闲时才算
     if pending and not state["running"]:
@@ -54,24 +71,33 @@ class PipelineRunRequest(BaseModel):
     accounts: list[str] | None = None
     since_date: str | None = None   # "YYYY-MM-DD"
     until_date: str | None = None   # "YYYY-MM-DD"
+    channel: str | None = None
 
 
 @router.post("/api/pipeline/run")
 def pipeline_run(body: PipelineRunRequest | None = None):
     stages = body.stages if body else None
-    crawl_filter = None
+    crawl_filter = {"channel": _channel(body.channel if body else None)}
     if body and (body.since_date or body.until_date):
         if not (body.since_date and body.until_date):
             raise HTTPException(400, "起始和结束日期必须同时提供")
+        try:
+            dates = [date.fromisoformat(d) for d in (body.since_date, body.until_date)]
+            if dates[0] > dates[1] or [d.isoformat() for d in dates] != [body.since_date, body.until_date]:
+                raise ValueError
+        except ValueError:
+            raise HTTPException(400, "日期须为 YYYY-MM-DD，且起始日期不能晚于结束日期") from None
+    if body and body.accounts and any(not name.strip() for name in body.accounts):
+        raise HTTPException(400, "公众号名称不能为空")
     # 只限定目标、不限定时间也要成立(「就把这几个号的新文章抓一下」)。
     # 以前的条件只看日期,给了 accounts 却没给日期就退回 crawl_filter=None,
     # 于是全部订阅目标照抓——筛选被静默忽略,比报错更难发现。
     if body and (body.since_date or body.until_date or body.accounts):
-        crawl_filter = {
+        crawl_filter.update({
             "accounts": body.accounts or [],
             "since_date": body.since_date or "",
             "until_date": body.until_date or "",
-        }
+        })
     if not pl.start_pipeline(stages, crawl_filter=crawl_filter):
         raise HTTPException(409, "管道已在运行中")
     return {"ok": True}
@@ -88,6 +114,9 @@ def pipeline_retry_failed():
 
 
 @router.get("/api/pipeline/accounts")
-def pipeline_accounts():
+def pipeline_accounts(channel: str | None = None):
     """来源里可筛选的目标列表(公众号名等),给管道面板的筛选下拉用。"""
-    return {"accounts": pl.source_targets()}
+    try:
+        return {"accounts": pl.source_targets(_channel(channel))}
+    except CollectorError as e:
+        raise HTTPException(400, str(e)) from None

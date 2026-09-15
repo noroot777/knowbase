@@ -507,6 +507,9 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         return bool(row and row["is_user_deleted"])
 
     def add_deleted_blacklist(self, article_id: str) -> None:
+        from src.utils.article_identity import remember_deleted_identity
+
+        remember_deleted_identity(self, article_id)
         self.conn.execute(
             """
             INSERT OR IGNORE INTO deleted_articles (article_id, deleted_at)
