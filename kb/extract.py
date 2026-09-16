@@ -53,6 +53,16 @@ def _tag_slug(name: str) -> str:
     return re.sub(r"[#,\[\]{}|^]", "", s)
 
 
+def _topic_slug(name: str) -> str:
+    """主题词的 slug:比实体多吃掉斜杠。
+
+    `topic/` 之后的那一段会被 wiki 层当成页面文件名(`wiki/topics/主题-X.md`),
+    斜杠在那里是目录分隔符。模型偶尔给出候选表外的词(2026-07-16 那篇 InfoQ
+    出过 `CI/CD流程`),整个 wiki 阶段就挂在 FileNotFoundError 上。实体名里的
+    斜杠是正当的(`shadcn/ui` 这类仓库名),所以只收紧主题这一侧。"""
+    return re.sub(r"[/\\]+", "-", _tag_slug(name)).strip("-")
+
+
 def parse_pretagged(doc) -> dict | None:
     """从已有 tags 解析 entity/topic(pre_tagged 来源的管线产物)。
 
@@ -124,10 +134,10 @@ def save_extraction(conn, path: str, data: dict) -> None:
     # topic 以 tag 形式统一存(和 pre_tagged 来源对齐)
     for t in data["topics"]:
         t = str(t).strip()
-        if t:
+        if t and _topic_slug(t):
             conn.execute(
                 "INSERT OR IGNORE INTO doc_tags (path, tag) VALUES (?, ?)",
-                (path, f"topic/{_tag_slug(t)}"),
+                (path, f"topic/{_topic_slug(t)}"),
             )
     for e in data["entities"]:
         name = str(e.get("name") or "").strip()

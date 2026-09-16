@@ -109,6 +109,10 @@ def main():
         name = r["tag"].split("/", 1)[1]
         topic_docs[name].add(r["path"])
     topics = {t: ds for t, ds in topic_docs.items() if len(ds) >= TOPIC_MIN_DOCS and t != "其他"}
+    # 主题页文件名同样要 sanitize:表外主题词可能带 `/`(如 CI/CD流程),
+    # 直接拼文件名会当成子目录写失败。清理后为空的主题不建页。
+    topic_file = {t: f"主题-{sanitize_filename(t)}" for t in topics if sanitize_filename(t)}
+    topics = {t: ds for t, ds in topics.items() if t in topic_file}
 
     # --- 反向映射 ---
     doc_ents = defaultdict(list)   # path -> [key](本文中、且有页面的实体)
@@ -233,7 +237,7 @@ def main():
         # 底部图谱区:保证实体/主题连边齐全
         tail = []
         ents = [ent_link(k) for k in sorted(doc_ents[p], key=lambda k: -len(ent_docs[k]))]
-        tops = [f"[[主题-{t}|{t}]]" for t in sorted(doc_topics[p])]
+        tops = [f"[[{topic_file[t]}|{t}]]" for t in sorted(doc_topics[p])]
         if ents or tops:
             tail.append("\n---\n")
             if ents:
@@ -288,7 +292,7 @@ def main():
             d = doc_by_path[p]
             lines.append(f"- {doc_link(p)} — {d['account']} · {d['published'][:10]}")
         lines.append("")
-        (OUT / "wiki" / "topics" / f"主题-{t}.md").write_text("\n".join(lines), encoding="utf-8")
+        (OUT / "wiki" / "topics" / f"{topic_file[t]}.md").write_text("\n".join(lines), encoding="utf-8")
 
     # --- index.md ---
     zh = {"tools": "工具与产品", "models": "模型", "orgs": "公司与组织", "concepts": "概念"}
@@ -304,7 +308,7 @@ def main():
             continue
         idx += [f"## {zh[sub]}", "", " · ".join(f"[[{n}]]" for _, n in items), ""]
     idx += ["## 主题", "", " · ".join(
-        f"[[主题-{t}|{t}]]" for t, _ in sorted(topics.items(), key=lambda x: -len(x[1]))), ""]
+        f"[[{topic_file[t]}|{t}]]" for t, _ in sorted(topics.items(), key=lambda x: -len(x[1]))), ""]
     idx += ["## 文章(按日期)", ""]
     by_date = defaultdict(list)
     for d in docs:

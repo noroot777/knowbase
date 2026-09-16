@@ -91,10 +91,10 @@ def cmd_extract(args) -> int:
             ents = ", ".join(e["name"] for e in data["entities"][:4])
             print(f"[{i}/{len(todo)}] OK {row['title'][:28]} → [{ents}]")
             if args.writeback:
-                tags = [f"topic/{t}" for t in data["topics"]] + \
-                       [f"entity/{e['name']}" for e in data["entities"]]
-                from kb.extract import _tag_slug
-                tags = [t.split("/")[0] + "/" + _tag_slug(t.split("/", 1)[1]) for t in tags]
+                from kb.extract import _tag_slug, _topic_slug
+                tags = [f"topic/{_topic_slug(t)}" for t in data["topics"]
+                        if _topic_slug(t)] + \
+                       [f"entity/{_tag_slug(e['name'])}" for e in data["entities"]]
                 writeback_tags(row["path"], tags)
         except Exception as e:
             failed += 1

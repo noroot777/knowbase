@@ -175,8 +175,8 @@ def _extract_pass(label: str, stats: dict) -> None:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from kb import store
-    from kb.extract import (_tag_slug, pending_docs, refresh_content_hash,
-                            save_extraction, writeback_tags)
+    from kb.extract import (_tag_slug, _topic_slug, pending_docs,
+                            refresh_content_hash, save_extraction, writeback_tags)
 
     conn = store.connect()
     try:
@@ -205,7 +205,8 @@ def _extract_pass(label: str, stats: dict) -> None:
                         conn.commit()
                         # tag 回写 obs frontmatter(决策:自动回写);回写改了文件,
                         # 同步刷新 hash 免得下次 index 白白重建这批文档
-                        tags = [f"topic/{_tag_slug(t)}" for t in data["topics"]] + \
+                        tags = [f"topic/{_topic_slug(t)}" for t in data["topics"]
+                                if _topic_slug(t)] + \
                                [f"entity/{_tag_slug(e['name'])}" for e in data["entities"]]
                         if writeback_tags(row["path"], tags):
                             refresh_content_hash(conn, row["path"])
