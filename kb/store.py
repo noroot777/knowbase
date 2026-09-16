@@ -175,7 +175,30 @@ def _migrate_promo(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE documents ADD COLUMN {name} {ddl}")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_documents_promo ON documents(promo_level)")
+    # 软广排除要按 url 从条目回溯原文(见 promo_exclude_sql),没索引就是每行一次全表扫
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_documents_url ON documents(url)")
     conn.commit()
+
+
+def promo_exclude_sql(alias: str = "d") -> str:
+    """软广排除子句,检索(kb.search)和枚举(kb.aggregate)共用同一份。
+
+    挡两样东西:被判 hard 的原文,**以及它拆出来的条目**。条目化产物是另一条
+    document(dr-gzh-projects),自己的 promo_level 永远是空的——只挡原文的话,
+    存量补判之后会出现「原文被挡住了,从这篇广告拆出来的工具条目还留在搜索
+    结果和实体榜里」,等于没抛弃。两者的关联键是 documents.url:write_entry
+    把原文链接原样写进条目的 frontmatter,所以按 url 回溯得到。
+
+    `pm.url <> ''` 不能省:库里有几十篇没有 url 的文档(dr 来源居多),少了这个
+    条件,只要有一篇空 url 的文章被判 hard,所有空 url 文档会被一并挡掉。
+    alias 只由本仓库的调用方传固定字面量,不接受外部输入。返回的是裸条件,
+    不带前导 AND —— 拼进 WHERE 列表还是接在 f-string 后面由调用方决定。
+    """
+    return (f"{alias}.promo_level <> 'hard'"
+            f" AND NOT EXISTS (SELECT 1 FROM documents pm"
+            f" WHERE pm.url = {alias}.url AND pm.url <> ''"
+            f" AND pm.promo_level = 'hard')")
 
 
 def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:

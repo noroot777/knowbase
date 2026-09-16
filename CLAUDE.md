@@ -233,6 +233,17 @@
   被缩到小子集」(有就把 KNN 候选放大到 4000),混进去会让每一次普通检索都误判。
 - transcribe 那一侧**按当前判定再拦一道**:存量补判之前 gate 已经放行过一批,
   那些 state 记录还是 `project_article=true`,只看 state 会拿全文去拆投放稿。
+- **hard 原文的衍生条目(`dr-gzh-projects`)按 `url` 一起挡掉**,口径只有
+  `store.promo_exclude_sql()` 一份,检索和枚举都调它。只挡原文的话,拆出来的
+  条目仍然带着广告产品的实体留在库里(2026-09-16 第 1 轮审查发现)。里面那句
+  `pm.url <> ''` 不能省:库里几十篇没有 url 的文档会互相匹配上、集体消失。
+- **`flag/软广` 是双写的:DB 的 `doc_tags` + md frontmatter,两边都得跟着判定走。**
+  `doc_tags` 每次 `upsert_document` 都按 frontmatter 重建,只写库的标记下次
+  重索引就没了(第 1 轮审查发现);反过来,hard 改判成 none/soft 时 md 里那行
+  也必须摘掉(`remove_writeback_tag`),否则重索引又把误判带回库里
+  (第 2 轮审查发现)。`save_promo` 返回「上次是 hard、这次不是」的信号,
+  提取流水线和 backfill 都据此调 `sync_promo_tag`;回写改了文件就同步
+  `refresh_content_hash`,免得下一轮 index 白白重建这批文档。
 - 存量补判走 `scripts/promo_backfill.py`(scan/run/report),只判软广、不重跑
   整套 extract,并按「标题 + 正文长度桶」**同稿归组**:8857 篇存量里有 2357 篇
   是同一份稿子的副本(克隆号互转、代充值广告同一个号发了 177 次),每组只判

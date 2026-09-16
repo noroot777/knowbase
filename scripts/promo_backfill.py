@@ -29,8 +29,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb import store                                            # noqa: E402
-from kb.extract import (PROMO_HEAD, PROMO_TAIL, judge_promo,    # noqa: E402
-                        pending_promo_docs, save_promo)
+from kb.extract import (PROMO_HEAD, PROMO_TAIL, PROMO_TAG,       # noqa: E402
+                        judge_promo, pending_promo_docs,
+                        save_promo, sync_promo_tag)
 
 # 软广只在公众号来源里成气候。dr(英文博客/HN 汇总)与 pre_tagged 的视频系
 # 不进这个补判:前者没有投放稿,后者是衍生条目,源头文章判过就够了。
@@ -116,6 +117,24 @@ def _judge_group(group: list[dict]) -> tuple[list[dict], dict]:
     return group, judge_promo(rep["title"], rep["body"], rep["account"])
 
 
+def _flag_in_vault(conn, path: str, level: str, stale: bool) -> None:
+    """把 flag/软广 在 md frontmatter 里对齐到当前判定,跟提取流水线一个做法。
+
+    只写 doc_tags 是留不住的:下次这篇文档内容有变动、走到 upsert_document 时,
+    doc_tags 会被整表删掉再按 frontmatter 重建,补判打的标记当场消失
+    (promo_level 还在,检索过滤不受影响,漂的是 obs/面板上的 tag 视图)。
+    反过来,重跑把 hard 改判成 none 时那行也得摘掉,否则重索引又把它带回来。
+    回写改了文件,所以同步刷新 content_hash,免得下次 index 白白重建这批文档。
+
+    单篇回写失败(文件被删、没有 frontmatter)不该让整组判定作废——判定结果
+    已经落库了,这里只是补一个展示用的标记。
+    """
+    try:
+        sync_promo_tag(conn, path, level, stale)
+    except OSError as e:
+        print(f"      (同步 {path} 的 {PROMO_TAG} 失败: {e})", flush=True)
+
+
 def cmd_run(args) -> int:
     conn = store.connect()
     try:
@@ -145,7 +164,8 @@ def cmd_run(args) -> int:
                     p = dict(promo)
                     if j:   # 广播给同稿副本,注明结论不是它自己判的
                         p["reason"] = f"{reason}(同稿判定:{group[0]['path']})"
-                    save_promo(conn, c["path"], p, now)
+                    stale = save_promo(conn, c["path"], p, now)
+                    _flag_in_vault(conn, c["path"], p["level"], stale)
                     done += 1
                 conn.commit()
                 if promo["level"] == "hard":

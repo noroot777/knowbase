@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from kb.config import expand_sources
 from kb.norm import entity_norm
-from kb.store import tokenize
+from kb.store import promo_exclude_sql, tokenize
 
 RRF_K = 60
 CANDIDATES_PER_LEG = 50   # 每路召回数,融合后再截断
@@ -89,8 +89,10 @@ def _filter_sql(f: Filters) -> tuple[str, list]:
 def _promo_sql(f: Filters) -> str:
     """软广排除子句。单独拼、不进 _filter_sql:后者的返回值还被 _vec_leg 用来
     判断「有没有把召回缩到小子集」(有就放大 KNN 候选)。软广只占全库很小一块,
-    混进去会让每一次检索都误判成带过滤、白白跑 4000 的 KNN。"""
-    return " AND d.promo_level <> 'hard'" if f.exclude_promo else ""
+    混进去会让每一次检索都误判成带过滤、白白跑 4000 的 KNN。
+
+    口径(含「连它拆出来的条目一起挡」)在 store.promo_exclude_sql,与枚举共用。"""
+    return f" AND {promo_exclude_sql('d')}" if f.exclude_promo else ""
 
 
 def _fts_leg(conn: sqlite3.Connection, query: str, f: Filters) -> list[tuple[int, str]]:

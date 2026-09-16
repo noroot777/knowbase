@@ -21,14 +21,17 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb import extract, search, store  # noqa: E402
+from kb import aggregate, extract, search, store  # noqa: E402
 
 
 class _DB(unittest.TestCase):
@@ -220,6 +223,218 @@ class GroupingTest(unittest.TestCase):
         groups = self.mod._group([self._c("short.md", "稿", 1000),
                                   self._c("long.md", "稿", 1400)])
         self.assertEqual(groups[0][0]["path"], "long.md")
+
+
+class DerivedEntryTest(unittest.TestCase):
+    """hard 原文拆出来的条目也要挡住。
+
+    条目化产物是另一条 document,自己的 promo_level 永远是空的:只挡原文的话,
+    存量补判之后会出现「原文被挡了、从这篇广告拆出来的工具条目还在搜索结果和
+    实体榜里」,等于没抛弃(第 1 轮审查发现)。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = store.connect(Path(self._tmp.name) / "kb.db")
+        rows = [
+            # path, source, title, promo_level, url
+            ("ad.md", "dr-gzh", "广告原文", "hard", "https://e.com/ad"),
+            ("ad-tool.md", "dr-gzh-projects", "广告拆出的条目", "", "https://e.com/ad"),
+            ("ok.md", "dr-gzh", "正常文章", "none", "https://e.com/ok"),
+            ("ok-tool.md", "dr-gzh-projects", "正常条目", "", "https://e.com/ok"),
+            # url 为空的文档:不能因为某篇 hard 没有 url 就被连坐
+            ("noUrl.md", "dr", "没有链接的文档", "", ""),
+        ]
+        for path, source, title, level, url in rows:
+            self.conn.execute(
+                "INSERT INTO documents (path, source, title, promo_level, url,"
+                " published) VALUES (?,?,?,?,?,'2026-09-16 10:00')",
+                (path, source, title, level, url))
+            cur = self.conn.execute(
+                "INSERT INTO chunks (path, seq, text) VALUES (?,0,?)",
+                (path, "Pavo 平台 免费 领取 注册"))
+            self.conn.execute(
+                "INSERT INTO chunks_fts (chunk_id, title_tok, text_tok)"
+                " VALUES (?,?,?)",
+                (cur.lastrowid, store.tokenize(title),
+                 store.tokenize("Pavo 平台 免费 领取 注册")))
+            self.conn.execute(
+                "INSERT INTO entities (path, entity, kind, norm)"
+                " VALUES (?,'Pavo','product','pavo')", (path,))
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def test_search_drops_derived_entry(self):
+        paths = {h.path for h in search.search(self.conn, "Pavo 平台",
+                                               use_vector=False, top_k=10)}
+        self.assertNotIn("ad.md", paths)
+        self.assertNotIn("ad-tool.md", paths)
+        self.assertIn("ok.md", paths)
+        self.assertIn("ok-tool.md", paths)
+
+    def test_entity_enumeration_drops_derived_entry(self):
+        docs = [d["path"] for item in aggregate.enumerate_entities(
+            self.conn, topic="Pavo", limit=10) for d in item["docs"]]
+        self.assertNotIn("ad.md", docs)
+        self.assertNotIn("ad-tool.md", docs)
+        self.assertIn("ok-tool.md", docs)
+
+    def test_document_enumeration_drops_derived_entry(self):
+        docs = [d["path"] for d in aggregate.enumerate_documents(
+            self.conn, source="gzh", limit=50)]
+        self.assertNotIn("ad.md", docs)
+        self.assertNotIn("ad-tool.md", docs)
+        self.assertIn("ok.md", docs)
+
+    def test_blank_url_not_collaterally_dropped(self):
+        # 把那篇空 url 的文档判成 hard:其它空 url 文档不能跟着消失
+        self.conn.execute(
+            "INSERT INTO documents (path, source, title, promo_level, url,"
+            " published) VALUES ('adNoUrl.md','dr-gzh','空链接广告','hard','',"
+            " '2026-09-16 10:00')")
+        self.conn.commit()
+        docs = [d["path"] for d in aggregate.enumerate_documents(
+            self.conn, limit=50)]
+        self.assertIn("noUrl.md", docs)
+        self.assertNotIn("adNoUrl.md", docs)
+
+    def test_opt_out_returns_everything(self):
+        paths = {h.path for h in search.search(
+            self.conn, "Pavo 平台", search.Filters(exclude_promo=False),
+            use_vector=False, top_k=10)}
+        self.assertIn("ad.md", paths)
+        self.assertIn("ad-tool.md", paths)
+
+
+class BackfillWritebackTest(unittest.TestCase):
+    """补判判出 hard 时要把 flag 回写进 md。
+
+    只写 doc_tags 留不住:下次 upsert_document 会整表删掉再按 frontmatter 重建
+    (第 1 轮审查发现)。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        import promo_backfill
+        self.mod = promo_backfill
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = store.connect(Path(self._tmp.name) / "kb.db")
+        self.conn.execute(
+            "INSERT INTO documents (path, source, title, content_hash)"
+            " VALUES ('a.md','dr-gzh','广告','old')")
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def test_writes_tag_into_frontmatter(self):
+        vault = Path(self._tmp.name) / "vault"
+        (vault / "").mkdir(parents=True, exist_ok=True)
+        md = vault / "a.md"
+        md.write_text('---\ntitle: "广告"\ntags:\n  - source/dr-gzh\n---\n正文\n',
+                      encoding="utf-8")
+        with mock.patch.object(extract, "VAULT_ROOT", vault):
+            self.mod._flag_in_vault(self.conn, "a.md", "hard", False)
+        self.assertIn(extract.PROMO_TAG, md.read_text(encoding="utf-8"))
+        # 回写改了文件,hash 要跟着刷新,否则下次 index 白白重建
+        self.assertNotEqual(self.conn.execute(
+            "SELECT content_hash FROM documents WHERE path='a.md'"
+        ).fetchone()["content_hash"], "old")
+
+    def test_missing_file_does_not_raise(self):
+        vault = Path(self._tmp.name) / "empty"
+        vault.mkdir(parents=True, exist_ok=True)
+        with mock.patch.object(extract, "VAULT_ROOT", vault):
+            self.mod._flag_in_vault(self.conn, "gone.md", "hard", False)  # 不抛
+
+
+class ReclassifyVaultTest(unittest.TestCase):
+    """误判 hard 之后改判,md 里那行 flag 也得摘掉。
+
+    writeback_tags 只会追加。DB 侧改判时 doc_tags 清了,但 frontmatter 还留着
+    那行——这篇文件之后任何一次改动触发 upsert_document,doc_tags 会按
+    frontmatter 重建,误判的标记就又回到库里(第 2 轮审查发现)。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.vault = Path(self._tmp.name) / "vault"
+        self.vault.mkdir()
+        self.md = self.vault / "a.md"
+        self.md.write_text(
+            '---\ntitle: "广告"\ntags:\n  - source/dr-gzh\n---\n正文\n',
+            encoding="utf-8")
+        self.conn = store.connect(Path(self._tmp.name) / "kb.db")
+        self.conn.execute(
+            "INSERT INTO documents (path, source, title, content_hash, url)"
+            " VALUES ('a.md','dr-gzh','广告','old','u')")
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def _reindex(self):
+        """模拟下一轮 index:doc_tags 按 md 当前的 frontmatter 重建。"""
+        tags = re.findall(r"^\s*-\s+(\S+)\s*$", self.md.read_text(encoding="utf-8"),
+                          re.M)
+        doc = SimpleNamespace(path="a.md", source="dr-gzh", title="广告",
+                              account="号", published="", url="u",
+                              content_hash="new", tags=tags)
+        store.upsert_document(self.conn, doc, [], "t2")
+        self.conn.commit()
+        return [r["tag"] for r in self.conn.execute(
+            "SELECT tag FROM doc_tags WHERE path='a.md' ORDER BY tag")]
+
+    def _judge(self, level: str):
+        with mock.patch.object(extract, "VAULT_ROOT", self.vault):
+            stale = extract.save_promo(self.conn, "a.md",
+                                       {"level": level, "reason": "r"})
+            extract.sync_promo_tag(self.conn, "a.md", level, stale)
+        self.conn.commit()
+        return stale
+
+    def test_flag_removed_from_markdown_on_reclassify(self):
+        self._judge("hard")
+        self.assertIn(extract.PROMO_TAG, self.md.read_text(encoding="utf-8"))
+
+        self.assertTrue(self._judge("none"))          # 需要摘 md 里那行
+        text = self.md.read_text(encoding="utf-8")
+        self.assertNotIn(extract.PROMO_TAG, text)
+        self.assertIn("source/dr-gzh", text)          # 别的 tag 不能被误删
+        self.assertIn("正文", text)                   # 正文不碰
+
+        self.assertNotIn(extract.PROMO_TAG, self._reindex())   # 重索引不再带回
+
+    def test_reindex_would_resurrect_without_cleanup(self):
+        # 反证:只清 DB、不动 md 时,重索引会把标记带回来
+        self._judge("hard")
+        self.conn.execute("DELETE FROM doc_tags WHERE path='a.md' AND tag=?",
+                          (extract.PROMO_TAG,))
+        self.conn.commit()
+        self.assertIn(extract.PROMO_TAG, self._reindex())
+
+    def test_no_file_touch_when_never_hard(self):
+        # 没判过 hard 的文章不该为了「摘 flag」去读写文件
+        before = self.md.read_text(encoding="utf-8")
+        self.assertFalse(self._judge("soft"))
+        self.assertEqual(self.md.read_text(encoding="utf-8"), before)
+
+    def test_save_extraction_reports_stale_flag(self):
+        self._judge("hard")
+        stale = extract.save_extraction(self.conn, "a.md", {
+            "entities": [], "topics": [], "summary": "改判",
+            "promo": {"level": "none", "reason": "不是广告"}})
+        self.assertTrue(stale)
+
+    def test_remove_tag_is_noop_on_missing_file(self):
+        with mock.patch.object(extract, "VAULT_ROOT", self.vault / "nope"):
+            self.assertFalse(
+                extract.remove_writeback_tag("a.md", extract.PROMO_TAG))
 
 
 if __name__ == "__main__":

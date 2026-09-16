@@ -179,8 +179,8 @@ def _extract_pass(label: str, stats: dict) -> None:
 
     from kb import store
     from kb.extract import (PROMO_TAG, _tag_slug, pending_docs,
-                            refresh_content_hash, save_extraction,
-                            writeback_tags)
+                            refresh_content_hash, remove_writeback_tag,
+                            save_extraction, writeback_tags)
 
     conn = store.connect()
     try:
@@ -206,7 +206,7 @@ def _extract_pass(label: str, stats: dict) -> None:
                             "title": row["title"], "reason": "正文为空,需回填"}
                         _log(f"extract: SKIP 正文为空 {row['title'][:24]}")
                     else:
-                        save_extraction(conn, row["path"], data)
+                        stale_flag = save_extraction(conn, row["path"], data)
                         conn.commit()
                         # tag 回写 obs frontmatter(决策:自动回写);回写改了文件,
                         # 同步刷新 hash 免得下次 index 白白重建这批文档
@@ -219,6 +219,11 @@ def _extract_pass(label: str, stats: dict) -> None:
                             _log(f"extract: 软广 {row['title'][:24]} — "
                                  f"{promo.get('reason', '')[:40]}")
                         if writeback_tags(row["path"], tags):
+                            refresh_content_hash(conn, row["path"])
+                            conn.commit()
+                        # 上一轮判 hard、这轮改判了:md 里那行 flag 得摘掉,
+                        # 否则下次重索引会按 frontmatter 把它重建回 doc_tags
+                        if stale_flag and remove_writeback_tag(row["path"], PROMO_TAG):
                             refresh_content_hash(conn, row["path"])
                             conn.commit()
                         stats["ok"] += 1

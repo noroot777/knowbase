@@ -18,6 +18,7 @@ import sqlite3
 
 from kb.config import PRIMARY_SOURCE_NAMES, SOURCE_GROUPS, expand_sources
 from kb.norm import kind_norm
+from kb.store import promo_exclude_sql
 
 # 截断时每个来源组在结果里的保底名额(不足这个数的组全保留)
 GROUP_FLOOR = 25
@@ -58,15 +59,16 @@ def enumerate_entities(
       匹配实体名,或原文里实体与任一词同段出现。没有主题词时排序截断实际是
       "全库热度榜",长尾实体(72% 只被 1 篇提及)会被挤掉——主题类枚举必须传。
     source: 来源名 / 组名("视频"→dig+video-projects) / 列表;None = 全部。
-    exclude_promo: 默认不统计 hard 软广里的实体。投放稿把同一个商业产品
-      在多个号重复吹一遍,按"提及篇数"排序时它会排到真正被讨论的项目前面。
+    exclude_promo: 默认不统计 hard 软广里的实体,连同这些广告拆出来的条目
+      (条目自己的 promo_level 是空的,按 url 回溯原文才挡得住)。投放稿把同一个
+      商业产品在多个号重复吹一遍,按"提及篇数"排序时它会排到真正被讨论的项目前面。
     """
     terms = _norm_topics(topic, topics)
     srcs = expand_sources(source)
 
     clauses, params = ["1=1"], []
     if exclude_promo:
-        clauses.append("d.promo_level <> 'hard'")
+        clauses.append(promo_exclude_sql("d"))
     if since:
         clauses.append("d.published >= ?")
         params.append(since)
@@ -231,13 +233,13 @@ def enumerate_documents(
     source 为 None 时只扫原始来源(排除 derived 的条目化衍生树,
     否则同一内容会以原文+工具条目两种形态重复出现);
     要枚举某个衍生来源就显式传它的名字或来源组。
-    exclude_promo: 默认不列 hard 软广(判定见 kb/extract.py)。
+    exclude_promo: 默认不列 hard 软广,以及它拆出来的条目(判定见 kb/extract.py)。
     """
     terms = _norm_topics(topic, topics)
     srcs = expand_sources(source)
     clauses, params = ["1=1"], []
     if exclude_promo:
-        clauses.append("d.promo_level <> 'hard'")
+        clauses.append(promo_exclude_sql("d"))
     if since:
         clauses.append("d.published >= ?")
         params.append(since)

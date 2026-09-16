@@ -231,9 +231,20 @@ def judge_promo(title: str, body: str, account: str = "",
     raise last_err
 
 
-def save_promo(conn, path: str, promo: dict, now: str | None = None) -> None:
-    """写软广判定,并同步 obs 侧的 flag tag。"""
+def save_promo(conn, path: str, promo: dict, now: str | None = None) -> bool:
+    """写软广判定,并同步 doc_tags 里的 flag。
+
+    返回 True = **md 里那行 flag 需要调用方去摘掉**(原来判的是 hard,这次不是)。
+    DB 侧这里就清干净了,但 frontmatter 只有 writeback 那条路能碰,而且
+    writeback_tags 只会追加;不摘的话,这篇文件之后任何一次改动触发
+    upsert_document,doc_tags 都会按 frontmatter 重建,误判的标记又回来
+    (第 2 轮审查发现)。改判是小概率事件,所以做成「要不要碰文件」的信号
+    返回给调用方,而不是每篇都去读一次 md。
+    """
     now = now or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    old = conn.execute("SELECT promo_level FROM documents WHERE path=?",
+                       (path,)).fetchone()
+    was_hard = bool(old and old["promo_level"] == "hard")
     conn.execute(
         "UPDATE documents SET promo_level=?, promo_reason=?, promo_at=? WHERE path=?",
         (promo["level"], promo.get("reason") or "", now, path),
@@ -241,12 +252,25 @@ def save_promo(conn, path: str, promo: dict, now: str | None = None) -> None:
     if promo["level"] == "hard":
         conn.execute("INSERT OR IGNORE INTO doc_tags (path, tag) VALUES (?, ?)",
                      (path, PROMO_TAG))
-    else:
-        # 重跑改判时把旧标记摘掉,不然面板上永远挂着
-        conn.execute("DELETE FROM doc_tags WHERE path=? AND tag=?", (path, PROMO_TAG))
+        return False
+    # 重跑改判时把旧标记摘掉,不然面板上永远挂着
+    conn.execute("DELETE FROM doc_tags WHERE path=? AND tag=?", (path, PROMO_TAG))
+    return was_hard
 
 
-def save_extraction(conn, path: str, data: dict) -> None:
+def sync_promo_tag(conn, doc_path: str, level: str, stale: bool) -> None:
+    """把 md frontmatter 里的 flag/软广 对齐到当前判定,改了文件就刷新 hash。
+
+    stale 取自 save_promo 的返回值:只有「上一次判 hard、这次不是」才需要去
+    摘那行,正常的 none 文章不必为此读一遍文件。
+    """
+    changed = (writeback_tags(doc_path, [PROMO_TAG]) if level == "hard"
+               else (stale and remove_writeback_tag(doc_path, PROMO_TAG)))
+    if changed:
+        refresh_content_hash(conn, doc_path)
+
+
+def save_extraction(conn, path: str, data: dict) -> bool:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn.execute("DELETE FROM entities WHERE path=?", (path,))
     for e in data["entities"]:
@@ -278,9 +302,11 @@ def save_extraction(conn, path: str, data: dict) -> None:
     )
     # promo 单独一条 UPDATE:pre_tagged 来源走的是 parse_pretagged,产物里没有
     # promo 字段,一并写的话会把源头文章判过的结果覆盖成空。
+    # 返回值透传 save_promo 的「md 里的 flag 该摘了」,调用方据此决定碰不碰文件。
     promo = data.get("promo")
     if isinstance(promo, dict) and promo.get("level"):
-        save_promo(conn, path, promo, now)
+        return save_promo(conn, path, promo, now)
+    return False
 
 
 def writeback_tags(doc_path: str, new_tags: list[str]) -> bool:
@@ -303,6 +329,30 @@ def writeback_tags(doc_path: str, new_tags: list[str]) -> bool:
         new_fm = re.sub(r"\n---\n\Z", f"\n{add_lines}---\n", fm_block)
     else:
         new_fm = re.sub(r"\n---\n\Z", f"\ntags:\n{add_lines}---\n", fm_block)
+    full.write_text(new_fm + body, encoding="utf-8")
+    return True
+
+
+def remove_writeback_tag(doc_path: str, tag: str) -> bool:
+    """从 md frontmatter 的 tags 列表里摘掉一个 tag。writeback_tags 的反向操作。
+
+    只删 tags 列表里那一行(格式与 writeback_tags 写进去的一致),正文和其余
+    frontmatter 一个字节不碰。文件不在/没有 frontmatter/本来就没这个 tag
+    都返回 False,调用方据此决定要不要刷新 hash。
+    """
+    full = VAULT_ROOT / doc_path
+    try:
+        text = full.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    m = re.match(r"\A(---\n.*?\n---\n)", text, re.S)
+    if not m:
+        return False
+    fm_block, body = m.group(1), text[m.end():]
+    new_fm = re.sub(rf"^[ \t]*-[ \t]+{re.escape(tag)}[ \t]*\n", "",
+                    fm_block, flags=re.M)
+    if new_fm == fm_block:
+        return False
     full.write_text(new_fm + body, encoding="utf-8")
     return True
 
