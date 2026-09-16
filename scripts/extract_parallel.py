@@ -8,8 +8,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from kb import store
-from kb.extract import (_tag_slug, extract_with_llm, pending_docs,
-                        refresh_content_hash, save_extraction, writeback_tags)
+from kb.extract import (extract_with_llm, pending_docs, save_extraction,
+                        writeback_extraction)
 
 WORKERS = 6
 
@@ -35,12 +35,9 @@ def main():
                 failed += 1
                 print(f"[{i}/{len(jobs)}] FAIL {title[:28]}: {str(e)[:80]}", flush=True)
                 continue
-            save_extraction(conn, path, data)
-            tags = [f"topic/{_tag_slug(t)}" for t in data["topics"]] + \
-                   [f"entity/{_tag_slug(e['name'])}" for e in data["entities"] if e.get("name")]
+            stale = save_extraction(conn, path, data)
             try:
-                if writeback_tags(path, tags):
-                    refresh_content_hash(conn, path)
+                writeback_extraction(conn, path, data, stale)
             except Exception as e:
                 print(f"    [writeback-fail] {path}: {e}", flush=True)
             conn.commit()

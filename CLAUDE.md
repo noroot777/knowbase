@@ -244,6 +244,12 @@
   (第 2 轮审查发现)。`save_promo` 返回「上次是 hard、这次不是」的信号,
   提取流水线和 backfill 都据此调 `sync_promo_tag`;回写改了文件就同步
   `refresh_content_hash`,免得下一轮 index 白白重建这批文档。
+- **提取有三条路,tag 回写只能有一份实现**(`extract.writeback_extraction`):
+  管道 `_extract_pass`、`kb extract --writeback`、`scripts/extract_parallel.py`
+  (后者自称与前者等价)。原来三处各拼各的 tag 列表,软广同步只接进了管道,
+  另外两条一条写不进 md、一条改判摘不掉,第 1、2 轮防住的漂移原样留在旁路上
+  (第 3 轮审查发现)。`PROMO_TAG` 在 `_tag_slug` **之后**追加——它已经是最终
+  形态,跟着 topic/entity 过一遍 slug 会被改写成别的 tag。
 - 存量补判走 `scripts/promo_backfill.py`(scan/run/report),只判软广、不重跑
   整套 extract,并按「标题 + 正文长度桶」**同稿归组**:8857 篇存量里有 2357 篇
   是同一份稿子的副本(克隆号互转、代充值广告同一个号发了 177 次),每组只判

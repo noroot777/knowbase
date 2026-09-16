@@ -437,5 +437,112 @@ class ReclassifyVaultTest(unittest.TestCase):
                 extract.remove_writeback_tag("a.md", extract.PROMO_TAG))
 
 
+class ExtractEntrypointsTest(unittest.TestCase):
+    """三条提取路对 md 里的 flag/软广 必须一视同仁。
+
+    管道之外还有两条用户直接跑的:`kb extract --writeback` 和
+    scripts/extract_parallel.py(自称与前者等价)。漏接软广同步的话,hard
+    写不进 frontmatter(重索引丢掉展示层标记)、改判后又摘不掉(重索引把
+    误判带回 doc_tags)——第 1、2 轮防的正是这两种漂移,第 3 轮审查发现它们
+    还留在这两条旁路上。所以这里对两个入口跑同一组断言。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        self._tmp = None
+        self._fresh()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _fresh(self):
+        """每个入口各跑一遍,之间要把临时库和 vault 清空重来。"""
+        if self._tmp is not None:
+            self._tmp.cleanup()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.vault = self.root / "vault"
+        self.vault.mkdir()
+        self.db = self.root / "kb.db"
+
+    def _seed(self, level: str, tags: list[str]) -> Path:
+        md = self.vault / "a.md"
+        md.write_text('---\ntitle: "文"\ntags:\n'
+                      + "".join(f"  - {t}\n" for t in tags) + "---\n正文\n",
+                      encoding="utf-8")
+        conn = store.connect(self.db)
+        conn.execute("INSERT INTO documents (path, source, title, content_hash,"
+                     " promo_level) VALUES ('a.md','dr-gzh','文','old',?)", (level,))
+        conn.execute("INSERT INTO chunks (path, seq, text) VALUES ('a.md',0,'正文')")
+        conn.commit()
+        conn.close()
+        return md
+
+    def _run(self, entry: str, llm_level: str):
+        data = {"entities": [{"name": "某产品", "kind": "product"}],
+                "topics": ["ai"], "summary": "s",
+                "promo": {"level": llm_level, "reason": "r"}}
+        fake = lambda *a, **kw: dict(data)          # noqa: E731
+        opened = [store.connect(self.db)]
+        with mock.patch.object(extract, "VAULT_ROOT", self.vault), \
+                mock.patch.object(store, "connect",
+                                  lambda *a, **kw: opened[0]):
+            if entry == "cli":
+                from kb import cli
+                with mock.patch.object(extract, "extract_with_llm", fake):
+                    cli.cmd_extract(SimpleNamespace(limit=0, writeback=True))
+            else:
+                import extract_parallel
+                with mock.patch.object(extract_parallel, "extract_with_llm", fake):
+                    extract_parallel.main()
+        # 入口自己会 close;重开一条读结果
+        conn = store.connect(self.db)
+        level = conn.execute(
+            "SELECT promo_level FROM documents WHERE path='a.md'").fetchone()[0]
+        conn.close()
+        return level
+
+    def _entries(self):
+        return ("cli", "parallel")
+
+    def test_hard_is_written_into_frontmatter(self):
+        for entry in self._entries():
+            with self.subTest(entry=entry):
+                self._fresh()
+                md = self._seed("", ["source/dr-gzh"])
+                self.assertEqual(self._run(entry, "hard"), "hard")
+                text = md.read_text(encoding="utf-8")
+                self.assertIn(extract.PROMO_TAG, text)
+                self.assertIn("topic/ai", text)      # 常规 tag 照写
+
+    def test_reclassify_removes_flag_from_frontmatter(self):
+        for entry in self._entries():
+            with self.subTest(entry=entry):
+                self._fresh()
+                md = self._seed("hard", ["source/dr-gzh", extract.PROMO_TAG])
+                self.assertEqual(self._run(entry, "none"), "none")
+                text = md.read_text(encoding="utf-8")
+                self.assertNotIn(extract.PROMO_TAG, text)
+                self.assertIn("source/dr-gzh", text)
+                self.assertIn("正文", text)
+
+    def test_promo_tag_is_not_slugged(self):
+        # flag/软广 已是最终形态,跟着 topic/entity 过一遍 _tag_slug 会被改写
+        tags = extract.extraction_tags(
+            {"topics": ["AI Agent"], "entities": [{"name": "Claude Code"}],
+             "promo": {"level": "hard"}})
+        self.assertIn(extract.PROMO_TAG, tags)
+        self.assertEqual(tags[-1], extract.PROMO_TAG)
+
+    def test_nothing_to_write_skips_file_io(self):
+        # 没 tag 又没改判时不该去读文件:补判 8000 多篇时这是纯浪费
+        conn = store.connect(self.db)
+        with mock.patch.object(extract, "VAULT_ROOT", self.root / "nope"):
+            self.assertFalse(extract.writeback_extraction(
+                conn, "missing.md", {"topics": [], "entities": [],
+                                     "promo": {"level": "none"}}, False))
+        conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

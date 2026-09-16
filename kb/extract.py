@@ -259,15 +259,14 @@ def save_promo(conn, path: str, promo: dict, now: str | None = None) -> bool:
 
 
 def sync_promo_tag(conn, doc_path: str, level: str, stale: bool) -> None:
-    """把 md frontmatter 里的 flag/软广 对齐到当前判定,改了文件就刷新 hash。
+    """把 md frontmatter 里的 flag/软广 对齐到当前判定(存量补判走这条)。
 
-    stale 取自 save_promo 的返回值:只有「上一次判 hard、这次不是」才需要去
-    摘那行,正常的 none 文章不必为此读一遍文件。
+    存量补判不重做 entity/topic,所以喂给 writeback_extraction 的是一份只有
+    promo 的结果——口径仍然共用那一份,不另写一遍。stale 取自 save_promo:
+    只有「上一次判 hard、这次不是」才需要去摘那行,正常的 none 文章连文件
+    都不用读。
     """
-    changed = (writeback_tags(doc_path, [PROMO_TAG]) if level == "hard"
-               else (stale and remove_writeback_tag(doc_path, PROMO_TAG)))
-    if changed:
-        refresh_content_hash(conn, doc_path)
+    writeback_extraction(conn, doc_path, {"promo": {"level": level}}, stale)
 
 
 def save_extraction(conn, path: str, data: dict) -> bool:
@@ -307,6 +306,44 @@ def save_extraction(conn, path: str, data: dict) -> bool:
     if isinstance(promo, dict) and promo.get("level"):
         return save_promo(conn, path, promo, now)
     return False
+
+
+def extraction_tags(data: dict) -> list[str]:
+    """一篇提取结果该回写进 frontmatter 的 tag(topic/entity,判 hard 再加软广)。
+
+    PROMO_TAG 是在 slug 之后追加的:它本身就是最终形态(`flag/软广`),跟着
+    topic/entity 过一遍 _tag_slug 会被改写成别的东西。
+    """
+    tags = [f"topic/{_tag_slug(t)}" for t in data.get("topics") or []
+            if str(t).strip()]
+    tags += [f"entity/{_tag_slug(e['name'])}" for e in data.get("entities") or []
+             if e.get("name")]
+    if (data.get("promo") or {}).get("level") == "hard":
+        tags.append(PROMO_TAG)
+    return tags
+
+
+def writeback_extraction(conn, doc_path: str, data: dict, stale: bool) -> bool:
+    """把提取结果的 tag 对齐到 md frontmatter,改了文件就刷新 content_hash。
+
+    提取有三条路(管道 `_extract_pass`、`kb extract --writeback`、
+    `scripts/extract_parallel.py`),口径必须只有这一份:各写各的话,软广标记
+    会只在其中一条路上跟着判定走,另外两条要么写不进 md(重索引即丢)、要么
+    改判后摘不掉(重索引又把误判带回库里)——第 1、2 轮审查各栽过一次,
+    第 3 轮就栽在这两条旁路上。
+
+    stale 是 save_extraction / save_promo 的返回值:「上轮判 hard、这轮不是」。
+    """
+    tags = extraction_tags(data)
+    need_remove = stale and (data.get("promo") or {}).get("level") != "hard"
+    if not tags and not need_remove:
+        return False     # 没什么要写的,不必为此读一遍文件
+    changed = writeback_tags(doc_path, tags) if tags else False
+    if need_remove:
+        changed = remove_writeback_tag(doc_path, PROMO_TAG) or changed
+    if changed:
+        refresh_content_hash(conn, doc_path)
+    return changed
 
 
 def writeback_tags(doc_path: str, new_tags: list[str]) -> bool:

@@ -178,9 +178,8 @@ def _extract_pass(label: str, stats: dict) -> None:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from kb import store
-    from kb.extract import (PROMO_TAG, _tag_slug, pending_docs,
-                            refresh_content_hash, remove_writeback_tag,
-                            save_extraction, writeback_tags)
+    from kb.extract import (pending_docs, save_extraction,
+                            writeback_extraction)
 
     conn = store.connect()
     try:
@@ -208,23 +207,14 @@ def _extract_pass(label: str, stats: dict) -> None:
                     else:
                         stale_flag = save_extraction(conn, row["path"], data)
                         conn.commit()
-                        # tag 回写 obs frontmatter(决策:自动回写);回写改了文件,
-                        # 同步刷新 hash 免得下次 index 白白重建这批文档
-                        tags = [f"topic/{_tag_slug(t)}" for t in data["topics"]] + \
-                               [f"entity/{_tag_slug(e['name'])}" for e in data["entities"]]
                         promo = data.get("promo") or {}
                         if promo.get("level") == "hard":
-                            tags.append(PROMO_TAG)
                             stats["promo"] += 1
                             _log(f"extract: 软广 {row['title'][:24]} — "
                                  f"{promo.get('reason', '')[:40]}")
-                        if writeback_tags(row["path"], tags):
-                            refresh_content_hash(conn, row["path"])
-                            conn.commit()
-                        # 上一轮判 hard、这轮改判了:md 里那行 flag 得摘掉,
-                        # 否则下次重索引会按 frontmatter 把它重建回 doc_tags
-                        if stale_flag and remove_writeback_tag(row["path"], PROMO_TAG):
-                            refresh_content_hash(conn, row["path"])
+                        # tag 回写 obs frontmatter(决策:自动回写);回写改了文件,
+                        # 同步刷新 hash 免得下次 index 白白重建这批文档
+                        if writeback_extraction(conn, row["path"], data, stale_flag):
                             conn.commit()
                         stats["ok"] += 1
                         # 存量轮失败、增量轮成功:清掉旧失败记录,计数才是最终状态

@@ -70,7 +70,7 @@ def cmd_index(args) -> int:
 
 def cmd_extract(args) -> int:
     from kb.extract import (extract_with_llm, pending_docs,
-                            save_extraction, writeback_tags)
+                            save_extraction, writeback_extraction)
     from kb.llm_stages import stage_model
     conn = store.connect()
     todo = pending_docs(conn, args.limit)
@@ -85,20 +85,22 @@ def cmd_extract(args) -> int:
             continue
         try:
             data = extract_with_llm(row["title"], body)
-            save_extraction(conn, row["path"], data)
+            stale = save_extraction(conn, row["path"], data)
             conn.commit()
             ok += 1
             ents = ", ".join(e["name"] for e in data["entities"][:4])
             print(f"[{i}/{len(todo)}] OK {row['title'][:28]} → [{ents}]")
-            if args.writeback:
-                tags = [f"topic/{t}" for t in data["topics"]] + \
-                       [f"entity/{e['name']}" for e in data["entities"]]
-                from kb.extract import _tag_slug
-                tags = [t.split("/")[0] + "/" + _tag_slug(t.split("/", 1)[1]) for t in tags]
-                writeback_tags(row["path"], tags)
         except Exception as e:
             failed += 1
             print(f"[{i}/{len(todo)}] FAIL {row['title'][:28]}: {e}")
+            continue
+        if args.writeback:
+            # 判定已经落库了,回写只是展示层;单篇失败不该把这篇记成 FAIL
+            try:
+                if writeback_extraction(conn, row["path"], data, stale):
+                    conn.commit()
+            except Exception as e:
+                print(f"    [writeback-fail] {row['path']}: {e}")
     line = f"[extract] 完成: 成功 {ok}, 失败 {failed}"
     if empty:
         line += f", 跳过 {empty}(正文空)"
