@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""entity/topic/summary 提取。
+"""entity/topic/summary/软广 提取。
 
 两条路:
 - pre_tagged 来源(dr-youtube-dig):frontmatter 里已有 entity/xxx、topic/xxx
@@ -7,6 +7,11 @@
 - 其他来源(dr-gzh、gzh):调 LLM API 读正文提取,结果进 DB;用哪个模型看设置
   面板的「管道 · 提取打标」阶段;--writeback 时同步回写 md frontmatter 的
   tags(obs 里可见可点)。
+
+**软广判定搭在这一步,不单开一次调用**:提取是「每篇原文各跑一次、覆盖所有
+非 pre_tagged 来源」的唯一一步,正文已经读进 prompt 了,多要一个 promo 字段
+只多几十个输出 token。单开一个阶段等于把同一篇正文再买一遍。判定结果落
+documents.promo_level,下游(条目化 gate、检索、wiki)一律读这一列。
 
 回写只动 frontmatter 的 tags 列表,正文一个字节不碰。
 """
@@ -24,13 +29,40 @@ from kb.norm import entity_norm, kind_norm
 # 阶段决定(kb.llm_stages 的 "extract");没配就用那里登记的内置默认 gpt-5.5。
 # 别在这里写死字面量:改模型要能在面板上看见、也能按供应商分开选。
 
+# 软广的判定口径。抽成一份常量:提取阶段(随 entity/topic 顺带判)和存量补判
+# 脚本(只判软广)共用同一段文字,两处的标准才不会各漂各的。
+#
+# 「只看正文主体」那条是拿真实样本调出来的:GitHub猿 这类号在每篇文末固定挂
+# 一段代充值/加群广告,不写清楚的话模型会因为那条尾巴把正经资讯文也判成 hard
+# (2026-09-16 随机采样 50 篇时抓到两例误杀)。
+_PROMO_RULES = """\
+  * hard:整篇就是为某个商业产品/服务服务的——通篇围绕它、只讲好话没有独立
+    对比与缺点,并且在做转化引导:堆促销权益话术(免费不限量、注册就送、每天
+    领取、限时白嫖、专属优惠码/邀请码、活动价)、给注册落地页或下载地址、
+    让人扫码进群/加客服/点「阅读原文」领取;或文中明示是推广/赞助/合作;
+    代充值、代开会员、共享账号、API 中转站一类导流文也算。
+  * soft:有推广倾向但仍给了实质信息——厂商自家发布通稿、带邀请返利链接的推荐、
+    通篇只夸一家产品但确实写清了能力和用法。
+  * none:正常内容——开源项目介绍、技术教程、行业资讯报道、观点评论、论文解读。
+  只看正文主体,不看文末的固定推广位:公众号普遍在结尾挂加群、加客服、代充值
+  一类的尾巴,那是这个号每篇都有的版位,不是这一篇的性质。正文本身是资讯报道、
+  开源项目介绍或教程的,即便文末挂着广告也判 none/soft;
+  hard 留给「把整篇文章买下来卖那个产品」的投放稿。
+  被推广的东西是开源项目(有公开仓库、能自己部署、不花钱)时一律不判 hard,
+  最多 soft:号主把它吹上天、顺带拉群拉关注,那是这类号的文风,不是买量投放。
+  hard 的推广对象必然是要花钱或要注册账号的商业产品/服务。
+  判断依据是「有没有在做拉新转化 + 是不是只讲好话」,不是「有没有提到商业产品」:
+  介绍一个免费开源项目、报道某厂新模型发布,本身都算 none;
+  有实测截图、有使用教程也不能反证不是软广——投放稿通常就长这样。"""
+
 _PROMPT = """\
 你是知识库索引员。读下面这篇文章,提取检索用元数据,只输出一个 JSON 对象,不要任何其他文字:
 
 {{
   "entities": [{{"name": "实体规范名", "kind": "project|product|org|model|other"}}],
   "topics": ["主题词"],
-  "summary": "一句话说明文章讲了什么(<=60字)"
+  "summary": "一句话说明文章讲了什么(<=60字)",
+  "promo": {{"level": "none|soft|hard", "reason": "一句话理由"}}
 }}
 
 规则:
@@ -39,13 +71,73 @@ _PROMPT = """\
 - topics 从这个固定候选里选,最多 4 个:AI编程, AI Agent, skill工具, 开源项目, 大模型,
   提示词工程, 知识管理, AI资讯, 效率工具, 机器人, AI视频图像, 其他
 - summary 说清楚"是什么+能干什么",让人不点开也知道要不要看。
+- promo 判断这篇是不是「软广」——受商业委托、以拉新转化为目的的投放稿:
+""" + _PROMO_RULES + """
 - JSON 字符串值里不要出现英文双引号,引用词一律用中文引号「」。
 
 标题: {title}
+公众号: {account}
 
 正文:
 {body}
 """
+
+# 只判软广的轻量 prompt:存量补判用。entity/topic/summary 早就提过了,没必要
+# 连同整套元数据重来一遍——输入砍到头尾各一段,输出只剩一个小 JSON。
+_PROMO_ONLY_PROMPT = """\
+你是内容审核员。判断下面这篇公众号文章是不是「软广」——受商业委托、以拉新转化\
+为目的的投放稿。只输出一个 JSON 对象,不要任何其他文字:
+
+{{"level": "none|soft|hard", "reason": "一句话理由,用中文"}}
+
+口径:
+""" + _PROMO_RULES + """
+- JSON 字符串值里不要出现英文双引号,引用词一律用中文引号「」。
+
+标题: {title}
+公众号: {account}
+
+正文:
+{body}
+"""
+
+# 喂给模型的正文上限。总量沿用原来的 6000 字符不变(token 成本不变),但拆成
+# 头 + 尾:软广的转化钩子(注册地址、「阅读原文领取」、推广落款)基本都在文末,
+# 只截开头的话这批信号一个都看不到。
+BODY_HEAD = 4800
+BODY_TAIL = 1200
+# 只判软广时的正文用量。软广信号密集在开头(钩子 + 产品名)和结尾(注册地址、
+# 促销),中间的实测细节对这个判断没什么增量,所以砍到全量提取的四成。
+PROMO_HEAD = 1600
+PROMO_TAIL = 800
+
+PROMO_LEVELS = ("none", "soft", "hard")
+# hard 软广在 obs 里也标出来。doc_tags 在重索引时会按 frontmatter 重建,所以
+# 这个 tag 跟 topic/entity 一样要靠 writeback 回写 md 才持久。
+PROMO_TAG = "flag/软广"
+
+
+def clip_body(body: str, head: int = BODY_HEAD, tail: int = BODY_TAIL) -> str:
+    """正文超长时取「头 + 尾」,中间略去。"""
+    if len(body) <= head + tail:
+        return body
+    return f"{body[:head]}\n\n……(中间略)……\n\n{body[-tail:]}"
+
+
+def normalize_promo(raw) -> dict:
+    """把模型给的 promo 归一成 {level, reason}。
+
+    认不出的一律落 none:软广判定是「宁可漏、不可错杀」——错杀会让一篇正常
+    文章连同它的实体一起从条目化和检索里消失,而漏判只是留着一篇广告。
+    """
+    if isinstance(raw, str):                    # 模型偶尔直接给 "hard"
+        raw = {"level": raw}
+    if not isinstance(raw, dict):
+        raw = {}
+    level = str(raw.get("level") or "").strip().lower()
+    if level not in PROMO_LEVELS:
+        level = "none"
+    return {"level": level, "reason": str(raw.get("reason") or "").strip()[:200]}
 
 
 def _tag_slug(name: str) -> str:
@@ -78,7 +170,8 @@ def parse_pretagged(doc) -> dict | None:
             "summary": str(meta.get("summary") or "")}
 
 
-def extract_with_llm(title: str, body: str, timeout: int = 120) -> dict:
+def extract_with_llm(title: str, body: str, timeout: int = 120,
+                     account: str = "") -> dict:
     """调 LLM API 提取。异常往上抛,由调用方决定跳过还是中止。
 
     模型偶发在字符串值里输出未转义双引号产生坏 JSON(概率性,同文重跑
@@ -86,17 +179,18 @@ def extract_with_llm(title: str, body: str, timeout: int = 120) -> dict:
     last_err: Exception | None = None
     for _ in range(2):
         try:
-            return _extract_once(title, body, timeout)
+            return _extract_once(title, body, timeout, account)
         except (json.JSONDecodeError, ValueError) as e:
             last_err = e
     raise last_err
 
 
-def _extract_once(title: str, body: str, timeout: int) -> dict:
+def _extract_once(title: str, body: str, timeout: int, account: str = "") -> dict:
     from kb.llm import chat
     from kb.llm_stages import stage_model
 
-    prompt = _PROMPT.format(title=title, body=body[:6000])
+    prompt = _PROMPT.format(title=title, account=account or "(未知)",
+                            body=clip_body(body))
     # 产物是一个小 JSON 对象,2048 足够;OpenAI 侧推理 token 另有内部下限兜底
     out = chat(prompt, stage_model("extract"), max_tokens=2048, timeout=timeout)
     # 容错:模型可能包 ```json 围栏
@@ -107,7 +201,49 @@ def _extract_once(title: str, body: str, timeout: int) -> dict:
     data.setdefault("entities", [])
     data.setdefault("topics", [])
     data.setdefault("summary", "")
+    data["promo"] = normalize_promo(data.get("promo"))
     return data
+
+
+def judge_promo(title: str, body: str, account: str = "",
+                timeout: int = 120) -> dict:
+    """只判软广,不重做 entity/topic/summary(存量补判走这条)。
+
+    重试语义与 extract_with_llm 一致:坏 JSON 原地重试一次,API 报错直接抛。
+    """
+    from kb.llm import chat
+    from kb.llm_stages import stage_model
+
+    prompt = _PROMO_ONLY_PROMPT.format(
+        title=title, account=account or "(未知)",
+        body=clip_body(body, PROMO_HEAD, PROMO_TAIL))
+    last_err: Exception | None = None
+    for _ in range(2):
+        out = chat(prompt, stage_model("extract"), max_tokens=1024, timeout=timeout)
+        m = re.search(r"\{.*\}", out, re.S)
+        if m is None:
+            last_err = ValueError(f"输出里没有 JSON: {out[:200]}")
+            continue
+        try:
+            return normalize_promo(json.loads(m.group(0)))
+        except json.JSONDecodeError as e:
+            last_err = e
+    raise last_err
+
+
+def save_promo(conn, path: str, promo: dict, now: str | None = None) -> None:
+    """写软广判定,并同步 obs 侧的 flag tag。"""
+    now = now or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "UPDATE documents SET promo_level=?, promo_reason=?, promo_at=? WHERE path=?",
+        (promo["level"], promo.get("reason") or "", now, path),
+    )
+    if promo["level"] == "hard":
+        conn.execute("INSERT OR IGNORE INTO doc_tags (path, tag) VALUES (?, ?)",
+                     (path, PROMO_TAG))
+    else:
+        # 重跑改判时把旧标记摘掉,不然面板上永远挂着
+        conn.execute("DELETE FROM doc_tags WHERE path=? AND tag=?", (path, PROMO_TAG))
 
 
 def save_extraction(conn, path: str, data: dict) -> None:
@@ -140,6 +276,11 @@ def save_extraction(conn, path: str, data: dict) -> None:
         "UPDATE documents SET extracted_at=?, summary=? WHERE path=?",
         (now, str(data.get("summary") or ""), path),
     )
+    # promo 单独一条 UPDATE:pre_tagged 来源走的是 parse_pretagged,产物里没有
+    # promo 字段,一并写的话会把源头文章判过的结果覆盖成空。
+    promo = data.get("promo")
+    if isinstance(promo, dict) and promo.get("level"):
+        save_promo(conn, path, promo, now)
 
 
 def writeback_tags(doc_path: str, new_tags: list[str]) -> bool:
@@ -184,9 +325,25 @@ def pending_docs(conn, limit: int = 0) -> list:
     pre_tagged_sources = {s.name for s in SOURCES if s.pre_tagged}
     ph = ",".join("?" * len(pre_tagged_sources))
     sql = f"""
-        SELECT path, title FROM documents
+        SELECT path, title, account FROM documents
         WHERE extracted_at IS NULL AND source NOT IN ({ph})
         ORDER BY published DESC
     """
     rows = conn.execute(sql, list(pre_tagged_sources)).fetchall()
+    return rows[:limit] if limit > 0 else rows
+
+
+def pending_promo_docs(conn, sources: list[str], limit: int = 0) -> list:
+    """已提取过、但还没做软广判定的文档(存量补判用)。
+
+    新入库的文章在提取时就顺带判了,这个查询只会捞出「软广判定上线之前」
+    提取的那批存量;补完一次就永远是空的。
+    """
+    ph = ",".join("?" * len(sources))
+    sql = f"""
+        SELECT path, title, account FROM documents
+        WHERE promo_level = '' AND source IN ({ph})
+        ORDER BY published DESC
+    """
+    rows = conn.execute(sql, list(sources)).fetchall()
     return rows[:limit] if limit > 0 else rows

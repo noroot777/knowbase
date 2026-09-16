@@ -30,8 +30,13 @@ CREATE TABLE IF NOT EXISTS documents (
   content_hash  TEXT NOT NULL DEFAULT '',
   indexed_at    TEXT,
   extracted_at  TEXT,          -- NULL = 还没做 entity/topic 提取
-  summary       TEXT NOT NULL DEFAULT ''
+  summary       TEXT NOT NULL DEFAULT '',
+  -- 软广判定(提取阶段顺带产出,见 kb/extract.py)
+  promo_level   TEXT NOT NULL DEFAULT '',  -- '' = 未判定;none/soft/hard
+  promo_reason  TEXT NOT NULL DEFAULT '',
+  promo_at      TEXT
 );
+-- idx_documents_promo 在 _migrate_promo 里建(老库先补列才能建索引)
 
 CREATE TABLE IF NOT EXISTS doc_tags (
   path  TEXT NOT NULL REFERENCES documents(path) ON DELETE CASCADE,
@@ -156,6 +161,23 @@ def _migrate_entities(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_promo(conn: sqlite3.Connection) -> None:
+    """documents 加软广判定三列并建索引。幂等。
+
+    老库 documents 已存在,_SCHEMA 的 CREATE TABLE IF NOT EXISTS 不会补列,
+    只能 ALTER;索引要等列补完才能建,所以不写进 _SCHEMA(同 _migrate_entities)。
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(documents)").fetchall()}
+    for name, ddl in (("promo_level", "TEXT NOT NULL DEFAULT ''"),
+                      ("promo_reason", "TEXT NOT NULL DEFAULT ''"),
+                      ("promo_at", "TEXT")):
+        if name not in cols:
+            conn.execute(f"ALTER TABLE documents ADD COLUMN {name} {ddl}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_documents_promo ON documents(promo_level)")
+    conn.commit()
+
+
 def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=30)
@@ -170,6 +192,7 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.executescript(_FAVORITES_DDL)
     conn.executescript(_VEC_SCHEMA)
     _migrate_entities(conn)
+    _migrate_promo(conn)
     return conn
 
 

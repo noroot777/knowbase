@@ -125,7 +125,8 @@ def _new_extract_stats() -> dict:
     # failed/empty 按路径记 set:存量+增量两轮会重试同一篇,计数去重,
     # 面板上的"失败 N"才等于真正有问题的文档数
     # failures: path -> {"title", "reason"},重试成功会移除,只留最终仍失败的
-    return {"ok": 0, "failed_paths": set(), "empty_paths": set(), "failures": {}}
+    return {"ok": 0, "promo": 0, "failed_paths": set(), "empty_paths": set(),
+            "failures": {}}
 
 
 def _finish_extract_stage(stats: dict) -> None:
@@ -136,6 +137,8 @@ def _finish_extract_stage(stats: dict) -> None:
         _stage("extract", "ok", "没有待提取的文档")
         return
     detail = f"成功 {ok},失败 {failed}"
+    if stats.get("promo"):
+        detail += f",软广 {stats['promo']}(已排除出条目化)"
     if empty:
         detail += f",跳过 {empty}(正文空,需回填)"
     _stage("extract", "ok" if failed == 0 and empty == 0 else "error", detail,
@@ -149,7 +152,7 @@ def _finish_extract_stage(stats: dict) -> None:
 EXTRACT_WORKERS = 6
 
 
-def _extract_one(path: str, title: str) -> dict | None:
+def _extract_one(path: str, title: str, account: str = "") -> dict | None:
     """工作线程:读正文(独立连接,WAL 下并发读安全)→ 调 LLM。不碰共享连接。
 
     正文为空(转载 stub 等导致 md 没有正文)时返回 None——调 LLM 必然失败或
@@ -164,7 +167,7 @@ def _extract_one(path: str, title: str) -> dict | None:
         conn.close()
     if not body.strip():
         return None
-    return extract_with_llm(title, body)
+    return extract_with_llm(title, body, account=account)
 
 
 def _extract_pass(label: str, stats: dict) -> None:
@@ -175,8 +178,9 @@ def _extract_pass(label: str, stats: dict) -> None:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from kb import store
-    from kb.extract import (_tag_slug, pending_docs, refresh_content_hash,
-                            save_extraction, writeback_tags)
+    from kb.extract import (PROMO_TAG, _tag_slug, pending_docs,
+                            refresh_content_hash, save_extraction,
+                            writeback_tags)
 
     conn = store.connect()
     try:
@@ -188,7 +192,8 @@ def _extract_pass(label: str, stats: dict) -> None:
         _stage("extract", "running", f"{label}提取 0/{len(todo)}")
         done = 0
         with ThreadPoolExecutor(max_workers=EXTRACT_WORKERS) as pool:
-            futs = {pool.submit(_extract_one, row["path"], row["title"]): row
+            futs = {pool.submit(_extract_one, row["path"], row["title"],
+                                row["account"]): row
                     for row in todo}
             for fut in as_completed(futs):
                 row = futs[fut]
@@ -207,6 +212,12 @@ def _extract_pass(label: str, stats: dict) -> None:
                         # 同步刷新 hash 免得下次 index 白白重建这批文档
                         tags = [f"topic/{_tag_slug(t)}" for t in data["topics"]] + \
                                [f"entity/{_tag_slug(e['name'])}" for e in data["entities"]]
+                        promo = data.get("promo") or {}
+                        if promo.get("level") == "hard":
+                            tags.append(PROMO_TAG)
+                            stats["promo"] += 1
+                            _log(f"extract: 软广 {row['title'][:24]} — "
+                                 f"{promo.get('reason', '')[:40]}")
                         if writeback_tags(row["path"], tags):
                             refresh_content_hash(conn, row["path"])
                             conn.commit()

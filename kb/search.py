@@ -48,6 +48,10 @@ class Filters:
     entities: list[str] = field(default_factory=list)  # AND 关系
     since: str | None = None   # published >= "YYYY-MM-DD"
     until: str | None = None   # published <= "YYYY-MM-DD"(含当天)
+    # 默认把 hard 软广挡在检索之外(判定见 kb/extract.py)。想专门查广告本身
+    # (比如核对误杀)才置 False。soft 不挡:那一档是厂商通稿/带返利的推荐,
+    # 里面的技术信息通常仍然有用。
+    exclude_promo: bool = True
 
 
 def _filter_sql(f: Filters) -> tuple[str, list]:
@@ -82,6 +86,13 @@ def _filter_sql(f: Filters) -> tuple[str, list]:
     return where, params
 
 
+def _promo_sql(f: Filters) -> str:
+    """软广排除子句。单独拼、不进 _filter_sql:后者的返回值还被 _vec_leg 用来
+    判断「有没有把召回缩到小子集」(有就放大 KNN 候选)。软广只占全库很小一块,
+    混进去会让每一次检索都误判成带过滤、白白跑 4000 的 KNN。"""
+    return " AND d.promo_level <> 'hard'" if f.exclude_promo else ""
+
+
 def _fts_leg(conn: sqlite3.Connection, query: str, f: Filters) -> list[tuple[int, str]]:
     """FTS 召回:返回 [(chunk_id, path)] 按相关性排序。"""
     tok = tokenize(query)
@@ -97,7 +108,7 @@ def _fts_leg(conn: sqlite3.Connection, query: str, f: Filters) -> list[tuple[int
             FROM chunks_fts ft
             JOIN chunks c ON c.id = ft.chunk_id
             JOIN documents d ON d.path = c.path
-            WHERE chunks_fts MATCH ? {where}
+            WHERE chunks_fts MATCH ? {where}{_promo_sql(f)}
             ORDER BY bm25(chunks_fts, 0, 3.0, 1.0)
             LIMIT ?
             """,
@@ -132,7 +143,7 @@ def _vec_leg(conn: sqlite3.Connection, query: str, f: Filters) -> list[tuple[int
         ) v
         JOIN chunks c ON c.id = v.chunk_id
         JOIN documents d ON d.path = c.path
-        WHERE 1=1 {where}
+        WHERE 1=1 {where}{_promo_sql(f)}
         ORDER BY v.distance
         LIMIT ?
         """,

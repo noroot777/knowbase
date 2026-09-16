@@ -194,8 +194,8 @@ def scan_candidates() -> dict[str, dict]:
     conn.row_factory = sqlite3.Row
     ph = ",".join("?" * len(GZH_SOURCES))
     docs = conn.execute(
-        f"SELECT path, title, account, published, url, summary FROM documents"
-        f" WHERE source IN ({ph}) ORDER BY published, path",
+        f"SELECT path, title, account, published, url, summary, promo_level"
+        f" FROM documents WHERE source IN ({ph}) ORDER BY published, path",
         list(GZH_SOURCES),
     ).fetchall()
     ents: dict[str, list[str]] = {}
@@ -227,6 +227,7 @@ def scan_candidates() -> dict[str, dict]:
             "published": r["published"], "url": r["url"],
             "summary": r["summary"] or "", "entities": ents.get(r["path"], []),
             "body": body, "hash": h, "dups": [],
+            "promo_level": r["promo_level"] or "",
         }
     out = {v["path"]: v for v in by_hash.values()}
     out["_stats"] = {"total": len(docs), "unique": len(by_hash), "short": short}
@@ -238,6 +239,24 @@ def _pop_stats(cands: dict) -> dict:
 
 
 # ---------------------------------------------------------------- gate
+
+def _promo_gate(info: dict) -> dict | None:
+    """提取阶段已判 hard 软广的,直接否掉,不花 gate 的钱。
+
+    软广稿写的就是「某某产品是什么、怎么用、免费领」,gate 必然判它
+    project_article=true,接着 transcribe 拿全文去拆条目——一篇投放稿要烧掉
+    两次调用,产出的还是污染条目库的广告页。判定在提取阶段顺带做完了
+    (documents.promo_level),这里只是读一个字段。
+    """
+    if (info.get("promo_level") or "") != "hard":
+        return None
+    return {
+        "project_article": False, "style": None, "confidence": "high",
+        "reason": "软广投放稿(提取阶段判定),不进条目化",
+        "checked_at": datetime.now(TZ).isoformat(timespec="seconds"),
+        "by": "promo",
+    }
+
 
 def gate_one(info: dict) -> dict:
     prompt = GATE_PROMPT.format(
@@ -261,6 +280,13 @@ def gate_one(info: dict) -> dict:
     }
 
 
+def _record_gate(state: dict, path: str, info: dict, gate: dict) -> None:
+    rec = state["docs"].setdefault(path, {})
+    rec.update({"title": info["title"], "account": info["account"],
+                "published": info["published"], "url": info["url"],
+                "hash": info["hash"], "dups": info["dups"], "gate": gate})
+
+
 def cmd_gate(args) -> int:
     state = load_state()
     cands = scan_candidates()
@@ -269,6 +295,22 @@ def cmd_gate(args) -> int:
             if "gate" not in state["docs"].get(p, {})]
     if args.limit:
         todo = todo[: args.limit]
+
+    # 软广先就地否掉:不调 LLM,也就不必逐条落盘(state 是全文件覆盖写、6MB+,
+    # 一条一存太贵),整批记完存一次
+    ads, rest = 0, []
+    for p, info in todo:
+        gate = _promo_gate(info)
+        if gate is None:
+            rest.append((p, info))
+            continue
+        _record_gate(state, p, info, gate)
+        ads += 1
+    if ads:
+        save_state(state)
+        print(f"[gate] 软广直接否掉 {ads} 篇(提取阶段已判定,不花 gate 的钱)", flush=True)
+
+    todo = rest
     print(f"[gate] 去重后候选 {len(cands)},待分类 {len(todo)},{GATE_WORKERS} 并发", flush=True)
     ok = failed = 0
     with ThreadPoolExecutor(max_workers=GATE_WORKERS) as pool:
@@ -282,10 +324,7 @@ def cmd_gate(args) -> int:
                 print(f"[{i}/{len(todo)}] FAIL {info['title'][:40]}: {str(e)[:100]}", flush=True)
                 continue
             try:
-                rec = state["docs"].setdefault(p, {})
-                rec.update({"title": info["title"], "account": info["account"],
-                            "published": info["published"], "url": info["url"],
-                            "hash": info["hash"], "dups": info["dups"], "gate": gate})
+                _record_gate(state, p, info, gate)
                 save_state(state)
             except Exception as e:
                 failed += 1
@@ -294,7 +333,8 @@ def cmd_gate(args) -> int:
             ok += 1
             if i % 25 == 0 or i == len(todo):
                 print(f"[{i}/{len(todo)}] ok={ok} fail={failed}", flush=True)
-    print(f"[gate] 完成: 成功 {ok},失败 {failed}(失败的下次重跑)", flush=True)
+    print(f"[gate] 完成: 成功 {ok},软广跳过 {ads},失败 {failed}(失败的下次重跑)",
+          flush=True)
     return 0
 
 
@@ -418,6 +458,7 @@ def cmd_transcribe(args) -> int:
     _pop_stats(cands)
     out_root = Path(args.out).expanduser() if args.out else OUT_ROOT
     todo = []
+    ads = 0
     for p, rec in state["docs"].items():
         if args.doc and p != args.doc:
             continue
@@ -430,11 +471,18 @@ def cmd_transcribe(args) -> int:
             continue
         if p not in cands:
             continue
+        # 存量补判软广之前 gate 已经放行过一批,那些记录还是 project_article=true;
+        # 这里按当前判定再拦一道,免得拿全文去拆一篇投放稿(transcribe 是最贵的一步)
+        if cands[p].get("promo_level") == "hard":
+            ads += 1
+            continue
         todo.append((p, rec, cands[p]))
     todo.sort(key=lambda x: x[2].get("published") or "", reverse=True)
     if args.limit:
         todo = todo[: args.limit]
     model = getattr(args, "model", None) or _stage_model("transcribe")
+    if ads:
+        print(f"[transcribe] 软广跳过 {ads} 篇(gate 放行在软广判定之前)", flush=True)
     print(f"[transcribe] 待条目化 {len(todo)},{TRANSCRIBE_WORKERS} 并发,模型 {model} → {out_root}", flush=True)
     ok = failed = empty = 0
     with ThreadPoolExecutor(max_workers=TRANSCRIBE_WORKERS) as pool:
