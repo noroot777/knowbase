@@ -174,9 +174,11 @@ class GalleryPromoTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _apply(self):
-        real = store.connect      # _apply_promo 调的是无参 store.connect()
-        with mock.patch.object(store, "connect", lambda *a, **kw: real(self.db)):
-            return projects._apply_promo(list(self.entries))
+        conn = store.connect(self.db)
+        try:
+            return projects._apply_promo(list(self.entries), conn)
+        finally:
+            conn.close()
 
     def test_hard_entry_dropped_soft_marked(self):
         kept = self._apply()
@@ -186,11 +188,83 @@ class GalleryPromoTest(unittest.TestCase):
 
     def test_db_failure_degrades_to_keeping_everything(self):
         # 图鉴不该因为查不到库就整个打不开
+        self.assertEqual(len(projects._apply_promo(list(self.entries), None)), 3)
+
+    def test_connect_failure_yields_no_conn(self):
         def boom(*a, **kw):
             raise RuntimeError("库没了")
         with mock.patch.object(store, "connect", boom):
-            kept = projects._apply_promo(list(self.entries))
-        self.assertEqual(len(kept), 3)
+            self.assertIsNone(projects._promo_conn())
+            self.assertEqual(projects._promo_sig(None), ())
+
+
+class GalleryCacheTest(unittest.TestCase):
+    """图鉴缓存要认得出软广判定的变化。
+
+    缓存签名原来只看条目文件的数量和最大 mtime。可补判改的是**原文**那一行
+    promo_level,衍生条目文件一个字节都没动——签名不变、缓存不失效,于是
+    「跑完 backfill 刷新图鉴,刚判成 hard 的工具还在原地」,除非重启 kb-web
+    (第 1 轮审查发现)。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.vault = root / "vault"
+        (self.vault / "source" / "dr-gzh-projects").mkdir(parents=True)
+        self.entry = self.vault / "source" / "dr-gzh-projects" / "cachetool.md"
+        self.entry.write_text(
+            '---\nproject: "CacheTool"\nkind: project\nsummary: "缓存工具"\n'
+            'url: "u_src"\naccount: "某号"\npublished: "2026-09-01"\n'
+            'source: dr-gzh-projects\n---\n正文\n', encoding="utf-8")
+        self.db = root / "kb.db"
+        conn = store.connect(self.db)
+        _doc(conn, "source/dr-gzh-projects/cachetool.md", "", "u_src",
+             source="dr-gzh-projects")
+        _doc(conn, "source/dr-gzh/src.md", "", "u_src")
+        conn.commit()
+        conn.close()
+        projects._cache.update({"sig": None, "entries": None, "groups": None})
+
+    def tearDown(self):
+        projects._cache.update({"sig": None, "entries": None, "groups": None})
+        self._tmp.cleanup()
+
+    def _list(self):
+        real = store.connect
+        with mock.patch.object(projects, "VAULT_ROOT", self.vault), \
+                mock.patch.object(store, "connect", lambda *a, **kw: real(self.db)):
+            return projects.list_tools()
+
+    def _judge(self, level):
+        """只改原文的判定,条目文件一个字节不动(补判就是这个形态)。"""
+        conn = store.connect(self.db)
+        conn.execute("UPDATE documents SET promo_level=?, promo_at=? "
+                     "WHERE path='source/dr-gzh/src.md'", (level, "2026-09-17 18:00:00"))
+        conn.commit()
+        conn.close()
+
+    def test_backfill_invalidates_cache(self):
+        self.assertEqual([t["name"] for t in self._list()["tools"]], ["CacheTool"])
+        self._judge("hard")
+        # 条目文件 mtime 没变:只看文件签名的话这里仍然返回 CacheTool
+        self.assertEqual(self._list()["tools"], [])
+
+    def test_reclassify_brings_it_back(self):
+        # 改判故意用同一个 promo_at:光靠时间戳的签名在这里一动不动
+        # (promo_at 只到秒,一轮 backfill 里同秒改判很常见),得靠分档计数
+        self._judge("hard")
+        self.assertEqual(self._list()["tools"], [])
+        self._judge("soft")
+        tools = self._list()["tools"]
+        self.assertEqual([t["name"] for t in tools], ["CacheTool"])
+        self.assertTrue(tools[0]["promo_soft"])
+
+    def test_cache_holds_when_nothing_changed(self):
+        self._list()
+        sig = projects._cache["sig"]
+        self._list()
+        self.assertIs(projects._cache["sig"], sig)   # 没变就不重建
 
 
 if __name__ == "__main__":

@@ -75,7 +75,48 @@ def _pick_url(urls: list[str]) -> str:
     return urls[0] if urls else ""
 
 
-def _apply_promo(entries: list[dict]) -> list[dict]:
+def _promo_conn():
+    """给这一轮 _ensure 用的库连接;拿不到就返回 None(调用方一律降级)。
+
+    图鉴本来是「纯扫文件」的,加了软广过滤之后才需要库。库不在/schema 旧不该
+    让图鉴整个打不开,所以这里把异常吞掉,由 _promo_sig / _apply_promo 各自
+    按 conn is None 退回加这层之前的行为。
+    """
+    try:
+        from kb import store
+        return store.connect()
+    except Exception:
+        return None
+
+
+def _promo_sig(conn) -> tuple:
+    """影响 _apply_promo 的库状态签名,和文件签名一起决定缓存要不要重建。
+
+    条目文件的 mtime 看不见软广判定的变化:补判改的是**原文**那一行
+    documents.promo_level,衍生条目文件一个字节都没动;hard 原文写回的
+    `flag/软广` 也写在原文 md 上。只按文件签名缓存的话,跑完
+    promo_backfill 刷新图鉴,刚判成 hard 的工具条目还在原地,除非重启服务
+    (第 1 轮审查发现)。
+
+    `save_promo` 每次都写 `promo_at = now`,所以新判一篇会把 MAX(promo_at) 抬到
+    当下。但光有时间戳不够:**改判**可能落在同一秒里(promo_at 只到秒),那样
+    签名一动不动。所以再带上按档位分组的计数——任何一次真正改变结论的判定
+    (none↔soft↔hard)都至少会挪动其中一个数;结论没变的重判本来也不需要重建。
+    拿不到库时返回固定值,行为退回加这层之前的样子。
+    """
+    if conn is None:
+        return ()
+    try:
+        rows = conn.execute(
+            "SELECT promo_level lv, COUNT(*) n, COALESCE(MAX(promo_at), '') t"
+            " FROM documents WHERE promo_level <> '' GROUP BY promo_level"
+        ).fetchall()
+        return tuple(sorted((r["lv"], r["n"], r["t"]) for r in rows))
+    except Exception:
+        return ()
+
+
+def _apply_promo(entries: list[dict], conn) -> list[dict]:
     """按软广判定过滤/标注条目:hard 的整条丢掉,soft 的打上标记。
 
     图鉴是唯一不走 kb.search / kb.aggregate 的展示面(它按文件聚合,那个
@@ -84,18 +125,14 @@ def _apply_promo(entries: list[dict]) -> list[dict]:
     里占一行。判定按条目自己的 path 查库,档位由 store.promo_level_sql 从
     同 url 的原文继承(条目自己永远没判过)。
 
-    查库失败(库不在/schema 旧)不该让图鉴整个打不开:降级成「全部保留、
-    不打标记」,和加这层之前的行为一致。
+    conn 为 None(库不在/查不动)时降级成「全部保留、不打标记」,和加这层
+    之前的行为一致。
     """
-    if not entries:
+    if not entries or conn is None:
         return entries
     try:
         from kb import store
-        conn = store.connect()
-        try:
-            levels = store.effective_promo_levels(conn, [e["path"] for e in entries])
-        finally:
-            conn.close()
+        levels = store.effective_promo_levels(conn, [e["path"] for e in entries])
     except Exception:
         return entries
     kept = []
@@ -107,7 +144,7 @@ def _apply_promo(entries: list[dict]) -> list[dict]:
     return kept
 
 
-def _build() -> tuple[list[dict], dict[str, dict]]:
+def _build(conn) -> tuple[list[dict], dict[str, dict]]:
     entries: list[dict] = []
     for root in _roots():
         if not root.is_dir():
@@ -118,7 +155,7 @@ def _build() -> tuple[list[dict], dict[str, dict]]:
                 entries.append(e)
     # 过滤放在分组之前:提及次数/号数/首末时间都是按条目算的,先分组再丢
     # 条目的话这些计数还带着广告那一份
-    entries = _apply_promo(entries)
+    entries = _apply_promo(entries, conn)
 
     groups: dict[str, dict] = {}
     for e in entries:
@@ -158,11 +195,22 @@ def _build() -> tuple[list[dict], dict[str, dict]]:
 
 
 def _ensure() -> None:
-    sig = _scan_sig()
-    with _lock:
-        if _cache["sig"] != sig:
-            _cache["entries"], _cache["groups"] = _build()
-            _cache["sig"] = sig
+    """缓存签名 = 条目文件签名 + 软广判定签名,少一半都会漏更新。
+
+    一条连接同时喂给取签名和重建:重建本来就要查库,分开开两次等于每个图鉴
+    请求多付一次 connect(那里面还有 sqlite_vec 扩展加载和几条建表/建索引)。
+    """
+    file_sig = _scan_sig()
+    conn = _promo_conn()
+    try:
+        sig = (file_sig, _promo_sig(conn))
+        with _lock:
+            if _cache["sig"] != sig:
+                _cache["entries"], _cache["groups"] = _build(conn)
+                _cache["sig"] = sig
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def list_tools() -> dict:
