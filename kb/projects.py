@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from hashlib import blake2b
 from pathlib import Path
 from threading import Lock
 
@@ -98,20 +99,33 @@ def _promo_sig(conn) -> tuple:
     promo_backfill 刷新图鉴,刚判成 hard 的工具条目还在原地,除非重启服务
     (第 1 轮审查发现)。
 
-    `save_promo` 每次都写 `promo_at = now`,所以新判一篇会把 MAX(promo_at) 抬到
-    当下。但光有时间戳不够:**改判**可能落在同一秒里(promo_at 只到秒),那样
-    签名一动不动。所以再带上按档位分组的计数——任何一次真正改变结论的判定
-    (none↔soft↔hard)都至少会挪动其中一个数;结论没变的重判本来也不需要重建。
-    拿不到库时返回固定值,行为退回加这层之前的样子。
+    签名取的是**逐篇状态的摘要**,不是聚合量。聚合量会碰撞:按档位分组的
+    「计数 + MAX(promo_at)」在「两篇同一秒对调 hard/soft」时完全不变,可图鉴
+    该显示的卡片已经换了一张(第 2 轮审查发现)。promo_at 只到秒,一轮
+    backfill 六个并发同秒改判很常见,这不是理论情形。
+
+    摘要里是 (path, promo_level, url) 三元组:前两个决定「这篇是不是广告」,
+    url 决定「哪些衍生条目跟着它走」(promo_level_sql 按 url 回溯继承)。
+    promo_at 不进摘要——它变而结论没变时本来就不需要重建。
+    没判过的文档不进摘要,它们对图鉴没有影响;拿不到库时返回固定值,行为
+    退回加这层之前的样子。
+
+    每个图鉴请求都要算一遍,所以量过:1888 篇已判文档 8.0 ms,而同一次请求里
+    `_scan_sig` 扫 10213 个条目文件要 70.8 ms —— 摘要只占既有开销的一成,
+    不值得为省这几毫秒换成「逐行异或免排序」那种要额外论证的写法。
     """
     if conn is None:
         return ()
     try:
-        rows = conn.execute(
-            "SELECT promo_level lv, COUNT(*) n, COALESCE(MAX(promo_at), '') t"
-            " FROM documents WHERE promo_level <> '' GROUP BY promo_level"
-        ).fetchall()
-        return tuple(sorted((r["lv"], r["n"], r["t"]) for r in rows))
+        h = blake2b(digest_size=16)
+        n = 0
+        for r in conn.execute(
+            "SELECT path, promo_level, url FROM documents"
+            " WHERE promo_level <> '' ORDER BY path"
+        ):
+            h.update(f"{r['path']}\0{r['promo_level']}\0{r['url']}\0".encode())
+            n += 1
+        return (n, h.hexdigest())
     except Exception:
         return ()
 

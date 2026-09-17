@@ -204,7 +204,8 @@ class GalleryCacheTest(unittest.TestCase):
     缓存签名原来只看条目文件的数量和最大 mtime。可补判改的是**原文**那一行
     promo_level,衍生条目文件一个字节都没动——签名不变、缓存不失效,于是
     「跑完 backfill 刷新图鉴,刚判成 hard 的工具还在原地」,除非重启 kb-web
-    (第 1 轮审查发现)。
+    (第 1 轮审查发现)。而签名若取聚合量(分档计数 / MAX(promo_at)),两篇同
+    一秒对调 hard/soft 时又完全碰撞(第 2 轮审查发现)——得逐篇取摘要。
     """
 
     def setUp(self):
@@ -252,13 +253,56 @@ class GalleryCacheTest(unittest.TestCase):
 
     def test_reclassify_brings_it_back(self):
         # 改判故意用同一个 promo_at:光靠时间戳的签名在这里一动不动
-        # (promo_at 只到秒,一轮 backfill 里同秒改判很常见),得靠分档计数
+        # (promo_at 只到秒,一轮 backfill 里同秒改判很常见)
         self._judge("hard")
         self.assertEqual(self._list()["tools"], [])
         self._judge("soft")
         tools = self._list()["tools"]
         self.assertEqual([t["name"] for t in tools], ["CacheTool"])
         self.assertTrue(tools[0]["promo_soft"])
+
+    def test_same_second_swap_invalidates(self):
+        """两篇同一秒对调 hard/soft:所有聚合量都不变,展示的卡片却换了一张。
+
+        分档计数、MAX(promo_at)、判过的总篇数 —— 对调之后一个都没动,所以
+        签名只要是聚合量就必然碰撞(第 2 轮审查发现)。得按逐篇状态取摘要。
+        """
+        second = (self.vault / "source" / "dr-gzh-projects" / "other.md")
+        second.write_text(
+            '---\nproject: "OtherTool"\nkind: project\nsummary: "另一个"\n'
+            'url: "u_two"\naccount: "某号"\npublished: "2026-09-01"\n'
+            'source: dr-gzh-projects\n---\n正文\n', encoding="utf-8")
+        conn = store.connect(self.db)
+        _doc(conn, "source/dr-gzh-projects/other.md", "", "u_two",
+             source="dr-gzh-projects")
+        _doc(conn, "source/dr-gzh/src2.md", "", "u_two")
+        at = "2026-09-17 18:00:00"
+        conn.execute("UPDATE documents SET promo_level='hard', promo_at=?"
+                     " WHERE path='source/dr-gzh/src.md'", (at,))
+        conn.execute("UPDATE documents SET promo_level='soft', promo_at=?"
+                     " WHERE path='source/dr-gzh/src2.md'", (at,))
+        conn.commit()
+        conn.close()
+        self.assertEqual([t["name"] for t in self._list()["tools"]], ["OtherTool"])
+
+        # 对调:hard/soft 各自的篇数、最大 promo_at、总篇数全都没变
+        conn = store.connect(self.db)
+        before = projects._promo_sig(conn)
+        conn.execute("UPDATE documents SET promo_level='soft', promo_at=?"
+                     " WHERE path='source/dr-gzh/src.md'", (at,))
+        conn.execute("UPDATE documents SET promo_level='hard', promo_at=?"
+                     " WHERE path='source/dr-gzh/src2.md'", (at,))
+        conn.commit()
+        after = projects._promo_sig(conn)
+        agg = conn.execute(
+            "SELECT promo_level lv, COUNT(*) n, MAX(promo_at) t FROM documents"
+            " WHERE promo_level <> '' GROUP BY promo_level").fetchall()
+        conn.close()
+        # 先确认这确实是「聚合量分不出来」的那一类改动
+        self.assertEqual(sorted((r["lv"], r["n"], r["t"]) for r in agg),
+                         [("hard", 1, at), ("soft", 1, at)])
+        self.assertNotEqual(before, after)
+        self.assertEqual([t["name"] for t in self._list()["tools"]], ["CacheTool"])
 
     def test_cache_holds_when_nothing_changed(self):
         self._list()
