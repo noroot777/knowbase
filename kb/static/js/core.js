@@ -84,7 +84,14 @@ function mdHtml(src) {
 function docA(h, label, cls = '', hash = '') {
   return docAHtml(h, esc(label), cls, hash);
 }
-function docAHtml(h, labelHtml, cls = '', hash = '') {
+// soft 软广的角标。hard 是直接抛弃(压根不会出现在结果里),soft 保留但要让人
+// 一眼看出「这篇有推广倾向」——判定理由在 documents.promo_reason,鼠标悬停看。
+// 只认 'soft':档位是后端算好的(含衍生条目按 url 继承),前端不做二次判断。
+function promoBadge(h) {
+  return h && h.promo_level === 'soft'
+    ? '<span class="badge promo" title="疑似软广:厂商通稿/带推广的推荐,内容仍保留,但检索里已降权">软广?</span>'
+    : '';
+}function docAHtml(h, labelHtml, cls = '', hash = '') {
   return `<a ${cls ? `class="${cls}"` : ''} href="${docLink(h)}${hash}" data-doc="1"` +
     ` data-path="${encodeURIComponent(h.path)}"` +
     ` data-title="${esc(h.title)}" data-url="${esc(safeUrl(h.url || ''))}" data-obs="${esc(obsLink(h))}"` +
@@ -164,6 +171,7 @@ async function doSearch() {
       <div class="meta">
         <span>${esc(h.account || '')}</span><span>${esc((h.published || '').slice(0, 10))}</span>
         <span class="badge">${esc(h.source || '')}</span>
+        ${promoBadge(h)}
         ${h.matched_by.map(m => `<span class="badge ${m === 'vec' ? 'vec' : ''}">${m === 'vec' ? '语义' : '关键词'}</span>`).join('')}
         <a href="${esc(obsLink(h))}" style="color:var(--muted)" title="在 Obsidian 中打开">Obsidian</a>
         ${h.url ? `<a href="${esc(safeUrl(h.url))}" target="_blank" rel="noopener" style="color:var(--muted)">原文↗</a>` : ''}

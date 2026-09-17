@@ -184,6 +184,9 @@ input[type=date] {
 .meta { font-size: 12px; color: var(--muted); margin-bottom: 6px; display: flex; gap: 10px; flex-wrap: wrap; }
 .badge { padding: 1px 7px; border-radius: 6px; background: var(--tag-bg); font-size: 11px; }
 .badge.vec { background: var(--brand-soft); color: var(--ok); }
+/* soft 软广角标:提示性质,不是错误,所以用暖褐而不是 --danger —— 这一档的
+   内容仍然留在库里,只是排序上被降了权(kb/search.py 的 SOFT_PROMO_WEIGHT) */
+.badge.promo { background: #F6EBDC; color: #8A5A22; cursor: help; }
 .summary { color: #3A464F; font-size: 13.5px; margin-bottom: 6px; }
 .snippet { color: var(--muted); font-size: 13px; }
 .ents { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }

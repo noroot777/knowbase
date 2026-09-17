@@ -102,6 +102,7 @@ function gcardHtml(t) {
     <span class="gspine ${kc}"></span>
     <span class="gcard-body">
       <span class="gcard-top"><span class="gname">${esc(t.name)}</span><span class="gkind ${kc}">${kindLabel(t.kind)}</span></span>
+      ${t.promo_soft ? '<span class="gpromo" title="这个工具的每一条记录都出自疑似软广">全部出自软广?</span>' : ''}
       <span class="gsum">${esc(t.summary || '')}</span>
       <span class="gstat"><span class="gtally">${tallySvg(t.n, 15)}</span>
         <span class="gcount">${t.n} 次 · ${t.accounts} 个号</span>
@@ -259,7 +260,7 @@ function renderToolEntries(d) {
     return `<details class="td-entry"${i === 0 ? ' open' : ''}>
       <summary>${srcGlyph(e.source)}<span class="acct">${esc(e.account || '')}</span>
         <span class="date">${esc(String(e.published || '').slice(0, 10))}</span>
-        <span class="atitle">${esc(e.article_title || '')}</span></summary>
+        <span class="atitle">${esc(e.article_title || '')}</span>${promoBadge(e)}</summary>
       <div class="body md">${mdHtml(e.body)}</div>
       <div class="elinks">
         ${e.url ? `<a href="${esc(safeUrl(e.url))}" target="_blank" rel="noopener">${

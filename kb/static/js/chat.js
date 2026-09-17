@@ -167,7 +167,7 @@ function renderMsg(m) {
     refMap[n] ? docA(refMap[n], `[${n}]`, 'cite') : s);
   const refsHtml = (m.refs || []).length ? `
     <details class="refs"><summary>来源 ${m.refs.length} 篇</summary>${m.refs.map(r =>
-      `[${r.n}] ${docA(r, r.title)} — ${esc(r.account || '')}` +
+      `[${r.n}] ${docA(r, r.title)} — ${esc(r.account || '')}${promoBadge(r)}` +
       ` · <a href="${esc(obsLink(r))}" style="color:var(--muted)" title="在 Obsidian 中打开">Obsidian</a>` +
       (r.url ? ` · <a href="${esc(safeUrl(r.url))}" target="_blank" rel="noopener" style="color:var(--muted)">原文↗</a>` : '')
     ).join('<br>')}</details>` : '';

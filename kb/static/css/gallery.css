@@ -72,6 +72,9 @@ button.gcard:hover {
 .gdate { margin-left: auto; font-size: 11px; color: var(--muted); font-family: var(--font-mono); flex-shrink: 0; }
 .gtags { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 8px; }
 .gtag { font-size: 10.5px; padding: 1px 8px; border-radius: 99px; background: var(--tag-bg); color: var(--muted); }
+/* 「全部出自软广?」角标:与搜索结果里的 .badge.promo 同一套暖褐,提示而非报错 */
+.gpromo { align-self: flex-start; font-size: 10.5px; padding: 1px 8px; border-radius: 99px;
+  background: #F6EBDC; color: #8A5A22; }
 
 .k-project  { background: var(--kind-project); }
 .k-product  { background: var(--kind-product); }

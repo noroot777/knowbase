@@ -201,6 +201,47 @@ def promo_exclude_sql(alias: str = "d") -> str:
             f" AND pm.promo_level = 'hard')")
 
 
+def promo_level_sql(alias: str = "d") -> str:
+    """一篇文档的**有效**软广档位,作为 SELECT 表达式用。
+
+    自己判过就用自己的;没判过(条目化衍生条目 dr-gzh-projects 永远是空的)
+    就按 url 从被拆的那篇原文继承。这和 promo_exclude_sql 挡 hard 时的回溯
+    是同一条关系,两处必须一致——只标原文的话,一篇 soft 广告拆出来的工具
+    条目在搜索结果和引用里仍然是干干净净的,标记等于没加。
+
+    同一个 url 挂多篇时按 hard > soft > none 取最重的一档:宁可多提示一次,
+    也不要把该提示的漏掉。`pm.url <> ''` 的理由同 promo_exclude_sql——库里
+    几十篇没有 url 的文档否则会互相继承。
+    """
+    return (
+        f"CASE WHEN {alias}.promo_level <> '' THEN {alias}.promo_level ELSE"
+        f" COALESCE((SELECT pm.promo_level FROM documents pm"
+        f" WHERE pm.url = {alias}.url AND pm.url <> '' AND pm.path <> {alias}.path"
+        f" AND pm.promo_level <> ''"
+        f" ORDER BY CASE pm.promo_level WHEN 'hard' THEN 0 WHEN 'soft' THEN 1"
+        f" ELSE 2 END LIMIT 1), '') END"
+    )
+
+
+def effective_promo_levels(conn, paths: list[str]) -> dict[str, str]:
+    """批量取一批文档的有效软广档位,口径与 promo_level_sql 同一份。
+
+    给检索用:排序要在截断 top-k **之前**知道谁是 soft,而那时还没查文档元数据。
+    只有 soft/hard 才进返回值,none 和未判定的不占位。
+    """
+    out: dict[str, str] = {}
+    for i in range(0, len(paths), 400):     # SQLITE_MAX_VARIABLE_NUMBER 留余量
+        chunk = paths[i:i + 400]
+        ph = ",".join("?" * len(chunk))
+        for r in conn.execute(
+            f"SELECT d.path, {promo_level_sql('d')} AS lvl FROM documents d"
+            f" WHERE d.path IN ({ph})", chunk
+        ):
+            if r["lvl"] in ("soft", "hard"):
+                out[r["path"]] = r["lvl"]
+    return out
+
+
 def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=30)

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from kb.config import expand_sources
 from kb.norm import entity_norm
-from kb.store import promo_exclude_sql, tokenize
+from kb.store import effective_promo_levels, promo_exclude_sql, tokenize
 
 RRF_K = 60
 CANDIDATES_PER_LEG = 50   # 每路召回数,融合后再截断
@@ -23,6 +23,15 @@ CANDIDATES_PER_LEG = 50   # 每路召回数,融合后再截断
 # 只占全库 chunk ~2%)在全局 top-150 里几乎不出现,过滤后向量腿必然为空。
 # vec0 的 KNN 本来就是全表暴力扫,k 放大只多付堆维护成本,几乎不影响耗时。
 KNN_K_FILTERED = 4000
+
+# soft 软广的降权系数。hard 是直接抛弃,soft 保留但往后排——那一档是厂商通稿、
+# 带返利链接的推荐,信息通常还有用,只是不该压在中立内容前面。
+#
+# RRF 的分数全挤在一个窄带里(rank r 得 1/(60+1+r)),所以乘一个系数约等于
+# 平移名次:降权后大致相当于往后挪 `(1/w - 1) * (RRF_K + 1)` 名。w=0.85 时
+# 约 11 名——同分的中立文章能排到它前面,但一篇高度相关的 soft 不会被赶出
+# top-10。要调松紧改这一个数,别去动 RRF_K(那会改掉两路融合的量纲)。
+SOFT_PROMO_WEIGHT = 0.85
 
 
 @dataclass
@@ -37,6 +46,9 @@ class Hit:
     best_chunk: str        # 得分最高 chunk 的文本(用于展示/引用)
     heading: str
     matched_by: list[str] = field(default_factory=list)  # ["fts", "vec"]
+    # 有效软广档位(""/soft;hard 默认已被挡掉)。给前端打标记用,口径见
+    # store.promo_level_sql——衍生条目按 url 继承原文的判定。
+    promo_level: str = ""
 
 
 @dataclass
@@ -187,7 +199,13 @@ def search(
         if p not in doc_best or s > doc_best[p][0]:
             doc_best[p] = (s, cid)
 
-    ranked = sorted(doc_best.items(), key=lambda kv: kv[1][0], reverse=True)[:top_k]
+    # soft 降权必须在截断 top_k **之前**做:排完再降只是在这 k 篇里换位置,
+    # 一篇被压下去的 soft 仍然占着名额,排在 k+1 的中立文章永远补不上来。
+    # 降完的分数就是 Hit.score:报原分的话,列表里会出现下面一条分数更高。
+    levels = effective_promo_levels(conn, list(doc_best))
+    scored = {p: (s * (SOFT_PROMO_WEIGHT if levels.get(p) == "soft" else 1.0), cid)
+              for p, (s, cid) in doc_best.items()}
+    ranked = sorted(scored.items(), key=lambda kv: kv[1][0], reverse=True)[:top_k]
 
     hits: list[Hit] = []
     for path, (score, cid) in ranked:
@@ -201,5 +219,6 @@ def search(
             best_chunk=(c["text"][:300] if c else ""),
             heading=(c["heading"] if c else ""),
             matched_by=sorted(chunk_legs.get(cid, set())),
+            promo_level=levels.get(path, ""),
         ))
     return hits

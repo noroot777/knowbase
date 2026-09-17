@@ -187,7 +187,8 @@ def _prepare_ask(conn, question: str, model: str, history: list[dict],
                     seen_paths[d["path"]] = len(seen_paths) + 1
                     refs.append({"n": seen_paths[d["path"]], "title": d["title"],
                                  "path": d["path"], "account": d["account"],
-                                 "url": d["url"]})
+                                 "url": d["url"],
+                                 "promo_level": d.get("promo_level", "")})
                 doc_strs.append(f"[{seen_paths[d['path']]}]{d['title']}")
             snip = f"\n  原文片段: {it['snippet']}" if it.get("snippet") else ""
             lines.append(f"- {it['entity']} ({it['kind']}) ← {'; '.join(doc_strs)}{snip}")
@@ -216,7 +217,8 @@ def _prepare_ask(conn, question: str, model: str, history: list[dict],
         lines = []
         for i, d in enumerate(docs, 1):
             refs.append({"n": i, "title": d["title"], "path": d["path"],
-                         "account": d["account"], "url": d["url"]})
+                         "account": d["account"], "url": d["url"],
+                         "promo_level": d.get("promo_level", "")})
             lines.append(f"[{i}] {d['title']} ({d['account']}, {d['published'][:10]})"
                          f"{' — ' + d['summary'] if d['summary'] else ''}")
         prompt = (
@@ -245,7 +247,8 @@ def _prepare_ask(conn, question: str, model: str, history: list[dict],
             parts.append(f"[{i}] {h.title} ({h.account}, {h.published[:10]})\n"
                          f"{full[:2500]}")
             refs.append({"n": i, "title": h.title, "path": h.path,
-                         "account": h.account, "url": h.url})
+                         "account": h.account, "url": h.url,
+                         "promo_level": h.promo_level})
         prompt = (
             "根据下面知识库文章回答用户问题。只基于给出的文章,不要编造;"
             "文章里没有就明说没有;引用时标注 [编号]。\n\n"

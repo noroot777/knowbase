@@ -18,7 +18,7 @@ import sqlite3
 
 from kb.config import PRIMARY_SOURCE_NAMES, SOURCE_GROUPS, expand_sources
 from kb.norm import kind_norm
-from kb.store import promo_exclude_sql
+from kb.store import promo_exclude_sql, promo_level_sql
 
 # 截断时每个来源组在结果里的保底名额(不足这个数的组全保留)
 GROUP_FLOOR = 25
@@ -97,7 +97,7 @@ def enumerate_entities(
     rows = conn.execute(
         f"""
         SELECT e.entity, e.kind, e.norm, d.title, d.path, d.published, d.account,
-               d.url, d.summary, d.source
+               d.url, d.summary, d.source, {promo_level_sql('d')} AS promo_level
         FROM entities e JOIN documents d ON d.path = e.path
         WHERE {where}
         ORDER BY e.norm, d.published DESC
@@ -126,7 +126,7 @@ def enumerate_entities(
         item["docs"].append({
             "title": r["title"], "path": r["path"],
             "published": r["published"], "account": r["account"], "url": r["url"],
-            "summary": r["summary"],
+            "summary": r["summary"], "promo_level": r["promo_level"],
         })
     for item in by_entity.values():
         item["entity"] = max(item["_names"], key=item["_names"].get)
@@ -269,7 +269,8 @@ def enumerate_documents(
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"""
-        SELECT d.path, d.title, d.account, d.published, d.summary, d.url
+        SELECT d.path, d.title, d.account, d.published, d.summary, d.url,
+               {promo_level_sql('d')} AS promo_level
         FROM documents d WHERE {where}
         ORDER BY d.published DESC LIMIT ?
         """,

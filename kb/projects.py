@@ -75,6 +75,38 @@ def _pick_url(urls: list[str]) -> str:
     return urls[0] if urls else ""
 
 
+def _apply_promo(entries: list[dict]) -> list[dict]:
+    """按软广判定过滤/标注条目:hard 的整条丢掉,soft 的打上标记。
+
+    图鉴是唯一不走 kb.search / kb.aggregate 的展示面(它按文件聚合,那个
+    「每工具多来源记录」的粒度只有文件层有),所以 promo_exclude_sql 那条
+    统一口径覆盖不到这里——一篇 hard 投放稿拆出来的工具条目原来照样在图鉴
+    里占一行。判定按条目自己的 path 查库,档位由 store.promo_level_sql 从
+    同 url 的原文继承(条目自己永远没判过)。
+
+    查库失败(库不在/schema 旧)不该让图鉴整个打不开:降级成「全部保留、
+    不打标记」,和加这层之前的行为一致。
+    """
+    if not entries:
+        return entries
+    try:
+        from kb import store
+        conn = store.connect()
+        try:
+            levels = store.effective_promo_levels(conn, [e["path"] for e in entries])
+        finally:
+            conn.close()
+    except Exception:
+        return entries
+    kept = []
+    for e in entries:
+        lvl = levels.get(e["path"], "")
+        if lvl == "hard":
+            continue
+        kept.append({**e, "promo_level": lvl})
+    return kept
+
+
 def _build() -> tuple[list[dict], dict[str, dict]]:
     entries: list[dict] = []
     for root in _roots():
@@ -84,6 +116,9 @@ def _build() -> tuple[list[dict], dict[str, dict]]:
             e = _load_entry(p)
             if e:
                 entries.append(e)
+    # 过滤放在分组之前:提及次数/号数/首末时间都是按条目算的,先分组再丢
+    # 条目的话这些计数还带着广告那一份
+    entries = _apply_promo(entries)
 
     groups: dict[str, dict] = {}
     for e in entries:
@@ -115,6 +150,9 @@ def _build() -> tuple[list[dict], dict[str, dict]]:
             "first": es[-1]["published"][:10],
             "topics": display,
             "all_topics": ranked,
+            # 卡片角标:这个工具**每一条**记录都出自 soft 软广时才标。有一条
+            # 中立报道就不标——那说明它是被正经讨论过的,只是也有人恰饭。
+            "promo_soft": all(x.get("promo_level") == "soft" for x in es),
         }
     return entries, groups
 

@@ -124,11 +124,13 @@ class _Tools:
         self.refs: list[dict] = []
         self._n_by_path: dict[str, int] = {}
 
-    def _ref(self, path: str, title: str, account: str, url: str) -> int:
+    def _ref(self, path: str, title: str, account: str, url: str,
+             promo: str = "") -> int:
         if path not in self._n_by_path:
             self._n_by_path[path] = len(self.refs) + 1
             self.refs.append({"n": self._n_by_path[path], "title": title,
-                              "path": path, "account": account, "url": url})
+                              "path": path, "account": account, "url": url,
+                              "promo_level": promo})
         return self._n_by_path[path]
 
     def run(self, name: str, args: dict) -> tuple[str, str]:
@@ -160,7 +162,7 @@ class _Tools:
         )
         lines = []
         for h in hits:
-            n = self._ref(h.path, h.title, h.account, h.url)
+            n = self._ref(h.path, h.title, h.account, h.url, h.promo_level)
             d = self.conn.execute("SELECT summary FROM documents WHERE path=?",
                                   (h.path,)).fetchone()
             gist = (d["summary"] if d and d["summary"] else h.best_chunk)[:220]
@@ -179,7 +181,8 @@ class _Tools:
         lines = []
         for it in items[:120]:
             marks = "".join(
-                f"[{self._ref(d['path'], d['title'], d['account'], d['url'])}]"
+                "[%d]" % self._ref(d["path"], d["title"], d["account"],
+                                   d["url"], d.get("promo_level", ""))
                 for d in it["docs"][:3])
             snip = (it.get("snippet") or "")[:150]
             lines.append(f"- {it['entity']}({it['kind']},{it['mentions']} 篇){marks}"
@@ -199,7 +202,8 @@ class _Tools:
         )
         lines = []
         for d in docs[:150]:
-            n = self._ref(d["path"], d["title"], d["account"], d["url"])
+            n = self._ref(d["path"], d["title"], d["account"], d["url"],
+                          d.get("promo_level", ""))
             summ = f" — {d['summary'][:100]}" if d["summary"] else ""
             lines.append(f"[{n}] {d['title']}({d['account']},{d['published'][:10]}){summ}")
         more = f"\n…还有 {len(docs) - 150} 篇" if len(docs) > 150 else ""
