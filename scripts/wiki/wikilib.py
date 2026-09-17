@@ -127,6 +127,25 @@ class Universe:
             if name != "其他":
                 self.topic_docs[name].add(r["path"])
 
+        # 主题页命名:和实体页走同一套 sanitize。主题词本该出自固定候选表,但
+        # 模型偶尔给表外的词,其中带 `/` 的(如 `CI/CD流程`)直接拼进
+        # wiki/topics/主题-X.md 就成了不存在的子目录 → FileNotFoundError 把整个
+        # wiki 阶段带崩(2026-09-15 那轮)。入库侧已在 extract._topic_slug 收紧,
+        # 这里是存量脏 tag 与其它非法字符(: * ? 等)的兜底。排序只按主题名,
+        # 与篇数无关,重名决胜才不会随每轮文章数漂移。
+        self.topic_file: dict[str, str] = {}
+        used_t: set[str] = set()
+        for t in sorted(self.topic_docs):
+            base = sanitize_filename(t)
+            if not base:
+                continue
+            name, i = f"主题-{base}", 2
+            while name.lower() in used_t:
+                name = f"主题-{base} ({i})"
+                i += 1
+            used_t.add(name.lower())
+            self.topic_file[t] = name
+
         self.page_keys = sorted(
             (k for k, ds in self.ent_docs.items() if len(ds) >= min_docs),
             key=lambda k: -len(self.ent_docs[k]))
@@ -162,6 +181,13 @@ class Universe:
     def ent_link(self, k: str, label: str | None = None) -> str:
         name = self.page_file[k][1]
         return f"[[{name}|{label}]]" if label and label != name else f"[[{name}]]"
+
+    def topic_link(self, t: str, label: str | None = None) -> str | None:
+        """主题页双链;没有页面(名字被清理到空)的主题返回 None,调用方跳过。"""
+        name = self.topic_file.get(t)
+        if not name:
+            return None
+        return f"[[{name}|{label or t}]]"
 
     def doc_link(self, p: str) -> str:
         d = self.docs[p]
@@ -277,8 +303,9 @@ def render_index(u: Universe, vault: Path, recent_days: int = 14) -> str:
                   " · ".join(f"[[{n}]]" for _, n in items), ""]
 
     tops = sorted(u.topic_docs.items(), key=lambda x: -len(x[1]))
-    L += ["## 主题", "",
-          " · ".join(f"[[主题-{t}|{t}({len(ds)})]]" for t, ds in tops), ""]
+    links = [lk for t, ds in tops
+             if (lk := u.topic_link(t, f"{t}({len(ds)})"))]
+    L += ["## 主题", "", " · ".join(links), ""]
 
     cutoff = (date.today() - timedelta(days=recent_days)).isoformat()
     recent = [d for d in u.docs.values() if d["published"][:10] >= cutoff]
@@ -341,12 +368,13 @@ def linkify_doc(u: Universe, p: str) -> str | None:
     body = "\n".join(lines)
 
     topics = sorted(t for t, ds in u.topic_docs.items() if p in ds)
+    topic_links = [lk for t in topics if (lk := u.topic_link(t))]
     ents = [u.ent_link(k) for k in sorted(keys, key=lambda k: -len(u.ent_docs[k]))]
     tail = [f"\n{GRAPH_MARK}\n\n---\n"]
     if ents:
         tail.append("**本文实体**:" + " · ".join(ents) + "\n")
-    if topics:
-        tail.append("**主题**:" + " · ".join(f"[[主题-{t}|{t}]]" for t in topics) + "\n")
+    if topic_links:
+        tail.append("**主题**:" + " · ".join(topic_links) + "\n")
     return fm + body.rstrip("\n") + "\n" + "".join(tail)
 
 

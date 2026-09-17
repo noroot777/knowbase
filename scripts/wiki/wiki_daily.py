@@ -63,8 +63,8 @@ def step_pages(u: W.Universe) -> tuple[int, int]:
             page.write_text(text, encoding="utf-8")
             n_e += 1
     n_t = 0
-    for t in u.topic_docs:
-        page = W.VAULT / "wiki" / "topics" / f"主题-{t}.md"
+    for t, fname in u.topic_file.items():
+        page = W.VAULT / "wiki" / "topics" / f"{fname}.md"
         text = W.render_topic_page(u, t)
         if not page.exists() or page.read_text(encoding="utf-8") != text:
             page.write_text(text, encoding="utf-8")

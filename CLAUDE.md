@@ -248,13 +248,27 @@
   管道 `_extract_pass`、`kb extract --writeback`、`scripts/extract_parallel.py`
   (后者自称与前者等价)。原来三处各拼各的 tag 列表,软广同步只接进了管道,
   另外两条一条写不进 md、一条改判摘不掉,第 1、2 轮防住的漂移原样留在旁路上
-  (第 3 轮审查发现)。`PROMO_TAG` 在 `_tag_slug` **之后**追加——它已经是最终
-  形态,跟着 topic/entity 过一遍 slug 会被改写成别的 tag。
+  (第 3 轮审查发现)。`PROMO_TAG` 在 slug **之后**追加——它已经是最终形态,
+  跟着 topic(`_topic_slug`)/entity(`_tag_slug`)过一遍会被改写成别的 tag。
 - 存量补判走 `scripts/promo_backfill.py`(scan/run/report),只判软广、不重跑
   整套 extract,并按「标题 + 正文长度桶」**同稿归组**:8857 篇存量里有 2357 篇
   是同一份稿子的副本(克隆号互转、代充值广告同一个号发了 177 次),每组只判
   一篇、结论广播给同组。归组键带长度桶是因为光看标题会把「量子位编辑作者招聘」
   这类撞名的不同文章判成同一篇。补完一次 `promo_level=''` 就不再有新增。
+
+## wiki 层(scripts/wiki/)
+
+- **主题页文件名必须过 `sanitize_filename`,双链用同一个名字。** 主题词本该出自
+  `kb/extract.py` 提示词里那张固定候选表,但模型偶尔给表外的词;带斜杠的那种
+  (2026-07-16 一篇 InfoQ 给出 `CI/CD流程`)拼成 `wiki/topics/主题-{t}.md` 之后
+  斜杠是目录分隔符,写页面时目录不存在 → `FileNotFoundError` 把整个 wiki 阶段
+  带崩,前面 674 篇的 linkify 全白跑(2026-09-15 那轮)。命名统一在
+  `Universe.topic_file`,取链接走 `topic_link()`——只清理文件名那一侧的话,
+  页面建出来了、链接却指向不存在的页。重名决胜按主题名排序,**不能按篇数**:
+  篇数每轮都在变,一变就换文件名,vault 里凭空多出旧名字的孤儿页。
+- **入库侧收紧只针对主题(`extract._topic_slug`),实体侧不能跟着改。**
+  `shadcn/ui`、`mattpocock/skills` 这类仓库名里的斜杠是正当的,库里几十个;
+  把 `_tag_slug` 一起改了等于把同一个实体拆成两个标签。
 
 ## 向量编码(bge-m3)
 

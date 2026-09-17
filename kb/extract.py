@@ -145,6 +145,16 @@ def _tag_slug(name: str) -> str:
     return re.sub(r"[#,\[\]{}|^]", "", s)
 
 
+def _topic_slug(name: str) -> str:
+    """主题词的 slug:比实体多吃掉斜杠。
+
+    `topic/` 之后的那一段会被 wiki 层当成页面文件名(`wiki/topics/主题-X.md`),
+    斜杠在那里是目录分隔符。模型偶尔给出候选表外的词(2026-07-16 那篇 InfoQ
+    出过 `CI/CD流程`),整个 wiki 阶段就挂在 FileNotFoundError 上。实体名里的
+    斜杠是正当的(`shadcn/ui` 这类仓库名),所以只收紧主题这一侧。"""
+    return re.sub(r"[/\\]+", "-", _tag_slug(name)).strip("-")
+
+
 def parse_pretagged(doc) -> dict | None:
     """从已有 tags 解析 entity/topic(pre_tagged 来源的管线产物)。
 
@@ -283,10 +293,10 @@ def save_extraction(conn, path: str, data: dict) -> bool:
     # topic 以 tag 形式统一存(和 pre_tagged 来源对齐)
     for t in data["topics"]:
         t = str(t).strip()
-        if t:
+        if t and _topic_slug(t):
             conn.execute(
                 "INSERT OR IGNORE INTO doc_tags (path, tag) VALUES (?, ?)",
-                (path, f"topic/{_tag_slug(t)}"),
+                (path, f"topic/{_topic_slug(t)}"),
             )
     for e in data["entities"]:
         name = str(e.get("name") or "").strip()
@@ -311,11 +321,16 @@ def save_extraction(conn, path: str, data: dict) -> bool:
 def extraction_tags(data: dict) -> list[str]:
     """一篇提取结果该回写进 frontmatter 的 tag(topic/entity,判 hard 再加软广)。
 
-    PROMO_TAG 是在 slug 之后追加的:它本身就是最终形态(`flag/软广`),跟着
-    topic/entity 过一遍 _tag_slug 会被改写成别的东西。
+    topic 走 `_topic_slug`(比实体多吃掉斜杠)、entity 走 `_tag_slug`,和
+    save_extraction 写 doc_tags 用的是同一对函数——两侧不一致的话,重索引会按
+    frontmatter 重建 doc_tags,带斜杠的主题当场回到库里,wiki 阶段照样崩。
+    slug 完为空的主题直接丢掉,不写一个 `topic/` 空标签。
+
+    PROMO_TAG 在 slug 之后追加:它本身就是最终形态(`flag/软广`),跟着过一遍
+    会被改写成别的东西。
     """
-    tags = [f"topic/{_tag_slug(t)}" for t in data.get("topics") or []
-            if str(t).strip()]
+    tags = [f"topic/{_topic_slug(t)}" for t in data.get("topics") or []
+            if _topic_slug(str(t))]
     tags += [f"entity/{_tag_slug(e['name'])}" for e in data.get("entities") or []
              if e.get("name")]
     if (data.get("promo") or {}).get("level") == "hard":

@@ -71,7 +71,7 @@ def build_data(since: str):
             "label": t, "cat": "topics", "n": len(ds),
             "desc": f"『{t}』方向,近期 {len(ds)} 篇文章。"
                     + (f"高频出现:{'、'.join(top3)}。" if top3 else ""),
-            "wiki": f"wiki/topics/主题-{t}",
+            "wiki": f"wiki/topics/{u.topic_file.get(t, '')}",
             "articles": articles_of(ds)})
 
     edges = []
