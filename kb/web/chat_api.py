@@ -41,6 +41,39 @@ class NoteRequest(BaseModel):
     refs: list[dict] = []
 
 
+_CITE_RE = re.compile(r"\[(\d+)\]")
+
+
+def linkify_citations(answer: str, refs: list[dict]) -> str:
+    """把正文里的 `[n]` 换成指向来源文章的 Obsidian 内部链接。
+
+    网页端是在渲染时把 `[n]` 替换成 docA 链接的(chat.js),存盘的是模型原文,
+    所以笔记里正文的 `[n]` 一直是纯文本——只有末尾「## 引用」列表能点。
+
+    **必须用 markdown 链接形式,不能用双链**:wikilink 的 alias 不允许出现
+    方括号(Obsidian 官方把 `[`/`]` 列为会让链接失效的字符),`[[路径|[1]]]`
+    会被解析器吃掉;去掉方括号写成 `[[路径|1]]` 又会让连着的几个引用糊成
+    「123」,认不出边界。`[\\[1\\]](路径.md)` 显示成 `[1]`、点得动,而且
+    文本里没有连续的 `[[`,不会被 wikilink 扫描误吞。
+    路径整体 URL 编码(空格→%20,括号→%28/%29),否则路径里的 `)` 会把
+    markdown 链接提前截断——vault 里的文件名带括号很常见。
+    """
+    by_n: dict[str, dict] = {}
+    for r in refs:
+        if str(r.get("path") or ""):
+            by_n[str(r.get("n"))] = r
+
+    def one(m: re.Match) -> str:
+        r = by_n.get(m.group(1))
+        if r is None:
+            return m.group(0)
+        href = quote(str(r["path"]))
+        title = str(r.get("title") or "").replace('"', "'").strip()
+        return f"[\\[{m.group(1)}\\]]({href}" + (f' "{title}")' if title else ")")
+
+    return _CITE_RE.sub(one, answer)
+
+
 @router.post("/api/notes")
 def api_save_note(body: NoteRequest):
     q, ans = body.question.strip(), body.answer.strip()
@@ -59,7 +92,9 @@ def api_save_note(body: NoteRequest):
     for r in body.refs:
         p = str(r.get("path") or "")
         t = str(r.get("title") or p or "?")
-        link = f"[[{p.removesuffix('.md')}|{t}]]" if p else t
+        # alias 里出现 [ ] | # ^ 会让整条双链失效,标题里带这些字符的文章不少
+        alias = re.sub(r"[\[\]|#^]+", " ", t).strip() or "来源"
+        link = f"[[{p.removesuffix('.md')}|{alias}]]" if p else t
         extra = " · ".join(x for x in (str(r.get("account") or ""),) if x)
         url = str(r.get("url") or "")
         ref_lines.append(f"{r.get('n', '-')}. {link}"
@@ -67,7 +102,7 @@ def api_save_note(body: NoteRequest):
                          + (f" · [原文]({url})" if url else ""))
 
     md = (f"---\ncreated: \"{_now()}\"\nsource: kb-web-ask\n---\n\n"
-          f"# {title}\n\n> 问题:{q}\n\n{ans}\n")
+          f"# {title}\n\n> 问题:{q}\n\n{linkify_citations(ans, body.refs)}\n")
     if ref_lines:
         md += "\n## 引用\n\n" + "\n".join(ref_lines) + "\n"
     path.write_text(md, encoding="utf-8")
