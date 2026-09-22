@@ -80,8 +80,9 @@ const CFG = {cfg};
 </html>
 """
 
-_REPO_CTL = ('<button class="toggle" id="repoBtn" title="只看 project_url 指向代码仓库的">'
-             '只看有仓库</button>')
+_REPO_CTL = ('<button class="toggle" id="repoBtn" '
+             'title="只看 project_url 指向代码托管站(GitHub/GitLab/Gitee…)的;'
+             '官网、文档站、应用商店这类不算">只看有仓库</button>')
 
 
 def render(data: dict, *, title: str, h1: str, sub: str, accent: str,
@@ -104,7 +105,7 @@ def render(data: dict, *, title: str, h1: str, sub: str, accent: str,
 def foot_html(meta: dict, unit: str) -> str:
     """底栏统计。「显示中」由前端按筛选实时改写。"""
     un = meta["total"] - meta["classified"]
-    parts = [f'显示中 <b id="shown">{meta["total"]}</b> / <b>{meta["total"]}</b> 个{unit}',
+    parts = [f'显示中 <b id="shown">{meta["total"]}</b> / <b>{meta["total"]}</b> {unit}',
              f'近 30 天有提及 <b>{meta["hot30"]}</b>',
              f'来自 <b>{meta["arts"]}</b> 篇文章',
              f'<b>{meta["edges"]}</b> 条共现关联']

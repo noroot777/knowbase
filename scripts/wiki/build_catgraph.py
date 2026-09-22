@@ -77,6 +77,14 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
     data = G.build(picked, codes, taxo, drop_codes=v["drop"])
     meta = data["meta"]
     out = out_dir / v["out"]
+    # 一条都没归类却已经有一张旧图在那儿,几乎只可能是归类这一步整体失败了
+    # (没配 key、中转站挂了、缓存文件坏了)。这时候写下去等于拿一张满屏
+    # 「待归类」覆盖掉好页面,而且从日志里看不出来——宁可报错让这步红掉。
+    # 首次生成(还没有旧图)不受影响,那时候满屏待归类是如实反映。
+    if meta["total"] and not meta["classified"] and out.exists():
+        raise SystemExit(
+            f"[{kind}] 归类结果为空({meta['total']} 个条目一个都没归类),"
+            f"拒绝覆盖已有的 {out.name};先确认模型配置/缓存文件是否正常")
     out.write_text(P.render(
         data, title=v["title"], h1=v["h1"], sub=v["sub"], accent=v["accent"],
         foot=P.foot_html(meta, v["unit"]), repo_toggle=v["repo_toggle"],

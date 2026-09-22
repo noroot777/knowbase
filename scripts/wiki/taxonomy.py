@@ -70,10 +70,18 @@ class Taxonomy:
         return out
 
     def sig(self) -> str:
-        """分类表指纹:类目改了就让整份缓存作废、全部重判。"""
+        """分类表指纹:**任何会改变判定的东西**变了就让整份缓存作废、全部重判。
+
+        不能只哈希 code/group/sub。`hint` 是类目说明、`extra_rules` 是 skill
+        「本体是软件还是 skill」那条成员资格规则,两者都原样进 prompt;改了它们
+        判定就该变,签名不动的话旧结论被永久沿用,页面上还是老那批成员
+        (2026-09-22 第 1 轮审查发现)。`fallback` 决定「判不出来落哪」、
+        `item_zh` 决定 prompt 里怎么称呼被判的东西,一并算进去。
+        """
         h = blake2b(digest_size=8)
+        h.update(f"{self.item_zh}\0{self.fallback}\0{self.extra_rules}\0".encode())
         for c in self.cats:
-            h.update(f"{c.code}\0{c.group}\0{c.sub}\0".encode())
+            h.update(f"{c.code}\0{c.group}\0{c.sub}\0{c.hint}\0".encode())
         return h.hexdigest()
 
     def prompt_table(self) -> str:
@@ -317,13 +325,19 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
         return {chunk[i][0]: c for i, c in got.items()
                 if 0 <= i < len(chunk) and c in valid}
 
-    done = 0
+    done, saved = 0, len(codes)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for got in ex.map(run, batches):
             codes.update(got)
             done += 1
-            if done % 5 == 0 or done == len(batches):
+            # 只在真判出新东西时落盘。一批都没成功(没配 key、中转站挂了)时写盘
+            # 等于拿一份空 items 覆盖掉旧判定——尤其在指纹刚变、老文件还攥着
+            # 几千条结论的时候,那一下是不可逆的数据丢失。什么都不写的话老文件
+            # 原样留着,下次跑通了再整体重写。
+            if len(codes) > saved and (done % 5 == 0 or done == len(batches)):
                 save_cache(taxo, codes, names)      # 中途落盘:被打断也不白跑
+                saved = len(codes)
                 log(f"  [{taxo.key}] {done}/{len(batches)} 批,已判 {len(codes)} 条")
-    save_cache(taxo, codes, names)
+    if len(codes) > saved:
+        save_cache(taxo, codes, names)
     return codes

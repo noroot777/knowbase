@@ -45,7 +45,7 @@ function pillEl(i) {
   const n = N[i];
   const el = document.createElement("span");
   el.className = "pill" + (n.n >= 8 ? " t3" : n.n >= 3 ? " t2" : "")
-    + (n.u ? " repo" : "");
+    + (n.rp ? " repo" : "");        // 小圆点 = 有代码仓库,和「只看有仓库」同一个判断
   el.style.color = color(n);
   el.dataset.i = i;
   el.innerHTML = esc(n.l) + (n.n > 1 ? `<span class="n">${n.n}</span>` : "");
@@ -141,7 +141,7 @@ function match(i) {
   const n = N[i];
   if (n.n < F.heat) return false;
   if (cut && n.t < cut) return false;
-  if (F.repo && !n.u) return false;
+  if (F.repo && !n.rp) return false;
   if (F.q) {
     const hay = (n.l + " " + n.s + " " + (n.tp || []).join(" ")).toLowerCase();
     if (!hay.includes(F.q)) return false;
@@ -177,7 +177,11 @@ function apply() {
   });
   emptyNote.style.display = shown ? "none" : "";
   document.getElementById("shown").textContent = shown;
-  if (selected >= 0) drawEdges(selected);
+  // 选中项被这次筛选滤掉了就整个复位:留着的话面板还展示着一个已经不在结果里的
+  // 节点,而 body.hasSel 会把**所有**可见 pill 压到 opacity .2 却没有一个是亮的,
+  // 整片结果区看起来像被禁用了
+  if (selected >= 0 && !vis[selected]) reset();
+  else if (selected >= 0) drawEdges(selected);
 }
 
 function resort() {
@@ -192,6 +196,9 @@ function resort() {
     });
     r.box.appendChild(frag);
   });
+  // pill 全都换了位置,连线必须跟着重画——否则路径还从排序前的坐标出发,
+  // 指到别的节点或页面空白处
+  if (selected >= 0) trackEdges();
 }
 
 /* ── 连线 ── */
@@ -261,8 +268,12 @@ function panelFor(i) {
     + `<span>最近 <b>${n.t}</b></span><span>首见 ${n.f}</span></div>`;
   h += `<div class="acts">`;
   h += `<a class="primary" href="${CFG.appBase}?tool=${encodeURIComponent(n.q)}" target="_blank" rel="noopener">在图鉴里看全部记录 →</a>`;
-  const repo = safeUrl(n.u);
-  if (repo) h += `<a href="${repo}" target="_blank" rel="noopener">${n.u.includes("github.com") ? "GitHub" : "项目主页"} ↗</a>`;
+  const link = safeUrl(n.u);
+  // 文案跟着 rp 走:构建时按主机名判过的才叫仓库,官网/文档站叫「项目主页」
+  if (link) {
+    const label = n.rp === "github.com" ? "GitHub" : n.rp ? "仓库" : "项目主页";
+    h += `<a href="${link}" target="_blank" rel="noopener">${label} ↗</a>`;
+  }
   h += `</div>`;
 
   if ((n.tp || []).length) {

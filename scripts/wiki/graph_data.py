@@ -8,7 +8,7 @@ entity_norm 合并、hard 软广条目整条剔除、soft 打标记。自己再�
 
 节点里的文章不内嵌标题/链接,只存**文章表下标**:一篇公众号文章常常拆出十几个
 项目条目,内嵌等于把同一份标题+URL 复制十几遍——开源项目那张图的 10460 条记录
-其实只出自 3190 篇文章。
+其实只出自 3203 篇文章。
 """
 from __future__ import annotations
 
@@ -16,19 +16,44 @@ import sys
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 REPO = Path(__file__).resolve().parents[2]
 
 ARTS_PER_NODE = 10      # 面板里「出自这些文章」最多列几条
 EDGES_PER_NODE = 10     # 每个节点最多留几条共现边(全留会让边表比节点表还大)
 
+# 代码托管站。「只看有仓库」筛的必须是这个,不能退化成「有任意 http 网址」——
+# project_url 里官网/文档站/应用商店/博客都有(opencode.ai、prettier.io…),
+# 按有没有 URL 筛的话开关名不副实。判定按解析出的 hostname 精确比对或后缀匹配,
+# 不用字符串包含:`github.com.evil.cn` 那种也会命中包含判断。
+REPO_HOSTS = frozenset({
+    "github.com", "gitlab.com", "gitee.com", "bitbucket.org", "codeberg.org",
+    "sourceforge.net", "git.sr.ht", "gitcode.com", "gitcode.net",
+    "huggingface.co", "hf.co", "modelscope.cn", "gitea.com", "framagit.org",
+})
+
 
 def _safe_url(u: str) -> str:
     """只放行 http(s)。project_url 是 LLM 从公众号正文里读出来写进 frontmatter
-    的,`javascript:` 这种点一下就执行;顺带让「只看有仓库」和面板上的链接
-    用同一个判断,不会出现"有小圆点却没链接"。"""
+    的,`javascript:` 这种点一下就执行。"""
     u = (u or "").strip()
     return u if u[:7].lower() == "http://" or u[:8].lower() == "https://" else ""
+
+
+def repo_host(u: str) -> str:
+    """URL 指向代码托管站时返回归一后的主机名,否则空串。"""
+    u = _safe_url(u)
+    if not u:
+        return ""
+    try:
+        host = (urlsplit(u).hostname or "").lower()
+    except ValueError:
+        return ""
+    host = host[4:] if host.startswith("www.") else host
+    if host in REPO_HOSTS:
+        return host
+    return next((h for h in REPO_HOSTS if host.endswith("." + h)), "")
 
 
 def _kb():
@@ -44,13 +69,12 @@ def load_groups() -> list[dict]:
 
 
 def select_projects(groups: list[dict]) -> list[dict]:
-    """开源项目:kind 判成 project 的,外加挂着 GitHub 仓库的其它条目。
+    """开源项目:kind 判成 project 的,外加 project_url 指向代码托管站的其它条目。
 
     只看 kind 会漏——同一个东西在有的文章里被当"产品"介绍(kind=product),
-    可它的 project_url 明明指着 github 仓库。两条口径取并集。
+    可它的 project_url 明明指着 github/gitee 仓库。两条口径取并集。
     """
-    return [g for g in groups
-            if g["kind"] == "project" or "github.com" in (g["url"] or "")]
+    return [g for g in groups if g["kind"] == "project" or repo_host(g["url"])]
 
 
 def select_skills(groups: list[dict]) -> list[dict]:
@@ -109,10 +133,13 @@ def build(groups: list[dict], codes: dict[str, str], taxo,
                 seen.append(ai)
                 by_art[ai].append(idx)
         code = codes.get(g["norm"], taxo.fallback)
+        host = repo_host(g["url"])
         nodes.append({
             "l": g["name"], "q": g["norm"], "c": code,
             "s": (g["summary"] or "").strip().replace("\n", " ")[:150],
             "u": _safe_url(g["url"]), "n": g["n"], "k": g["kind"],
+            # rp = 这个 URL 是不是代码仓库(「只看有仓库」筛它,面板据此改链接文案)
+            **({"rp": host} if host else {}),
             "a": g["accounts"], "f": g["first"], "t": g["latest"],
             "r30": sum(1 for e in g["entries"] if e["published"][:10] >= d30),
             "r90": sum(1 for e in g["entries"] if e["published"][:10] >= d90),

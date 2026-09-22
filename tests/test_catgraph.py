@@ -72,6 +72,36 @@ class TaxonomyCacheTest(unittest.TestCase):
         self.assertNotEqual(changed.sig(), T.SKILLS.sig())
         self.assertEqual(T.load_cache(changed), {})
 
+    def test_sig_covers_everything_that_enters_the_prompt(self):
+        """只改 hint / extra_rules / fallback / item_zh 时也必须重判。
+
+        这几样全都原样进 prompt(或改变「判不出来落哪」),改了判定就该变;
+        签名不动的话旧结论被永久沿用——skill 的 X 档尤其明显:成员资格规则
+        修正完,页面上还是老那批成员(2026-09-22 第 1 轮审查发现)。
+        """
+        base = T.SKILLS
+        variants = {
+            "extra_rules": T.Taxonomy(key=base.key, item_zh=base.item_zh,
+                                      fallback=base.fallback, cats=base.cats,
+                                      extra_rules="完全不同的成员资格规则"),
+            "item_zh": T.Taxonomy(key=base.key, item_zh="别的东西",
+                                  fallback=base.fallback, cats=base.cats,
+                                  extra_rules=base.extra_rules),
+            "hint": T.Taxonomy(
+                key=base.key, item_zh=base.item_zh, fallback=base.fallback,
+                extra_rules=base.extra_rules,
+                cats=tuple(T.Cat(c.code, c.group, c.sub, c.hint + "。补一句说明")
+                           for c in base.cats)),
+            "fallback": T.Taxonomy(key=base.key, item_zh=base.item_zh,
+                                   fallback="S1", cats=base.cats,
+                                   extra_rules=base.extra_rules),
+        }
+        T.save_cache(base, {"a": "S1"}, {"a": "甲"})
+        for what, v in variants.items():
+            with self.subTest(改了=what):
+                self.assertNotEqual(v.sig(), base.sig())
+                self.assertEqual(T.load_cache(v), {})
+
     def test_unknown_code_not_invented(self):
         """模型给了表外的 code 时 classify 不能把它写进缓存。"""
         seen = {}
@@ -87,6 +117,24 @@ class TaxonomyCacheTest(unittest.TestCase):
         self.assertIn("0. 甲 :: x", seen["p"])
         self.assertIn("1. 乙 :: y", seen["p"])
         self.assertEqual(got, {"a": "S1"})
+
+    def test_failed_round_does_not_wipe_the_cache(self):
+        """一批都没判成(没配 key / 中转站挂了)时不能把旧判定覆盖成空。
+
+        指纹刚变、老文件还攥着几千条结论的时候,那一下是不可逆的。
+        """
+        T.save_cache(T.SKILLS, {"a": "S1", "b": "S2"}, {"a": "甲", "b": "乙"})
+        stale = T.cache_path(T.SKILLS).read_text(encoding="utf-8")
+
+        def boom(prompt, model, **kw):
+            raise RuntimeError("openai 未配置 API key")
+
+        T._llm, old = boom, T._llm
+        self.addCleanup(lambda: setattr(T, "_llm", old))
+        got = T.classify(T.SKILLS, [("c", "丙", "x")], model="stub", workers=1,
+                         log=lambda *_: None)
+        self.assertEqual(got, {"a": "S1", "b": "S2"})
+        self.assertEqual(T.cache_path(T.SKILLS).read_text(encoding="utf-8"), stale)
 
     def test_fallback_must_exist(self):
         with self.assertRaises(AssertionError):
@@ -131,11 +179,38 @@ class BuildDataTest(unittest.TestCase):
         groups = [
             _group("p", "纯项目", kind="project"),
             _group("g", "挂着仓库的产品", kind="product", url="https://github.com/x/y"),
+            _group("z", "gitee 上的产品", kind="product", url="https://gitee.com/a/b"),
             _group("o", "别的产品", kind="product", url="https://example.com"),
             _group("s", "技能包", kind="product", topics=["skill工具"]),
         ]
-        self.assertEqual({g["norm"] for g in G.select_projects(groups)}, {"p", "g"})
+        self.assertEqual({g["norm"] for g in G.select_projects(groups)},
+                         {"p", "g", "z"})
         self.assertEqual({g["norm"] for g in G.select_skills(groups)}, {"s"})
+
+    def test_repo_host_is_matched_by_hostname_not_substring(self):
+        """「只看有仓库」筛的必须是代码托管站,不是「有任意 http 网址」。
+
+        project_url 里官网/文档站一大把(opencode.ai、prettier.io…),按有没有
+        URL 筛的话这个开关名不副实(2026-09-22 第 1 轮审查发现);而按字符串
+        包含判主机,`github.com.evil.cn` 也会蒙混过关。
+        """
+        self.assertEqual(G.repo_host("https://github.com/a/b"), "github.com")
+        self.assertEqual(G.repo_host("https://WWW.Gitee.com/a"), "gitee.com")
+        self.assertEqual(G.repo_host("https://raw.github.com/a"), "github.com")
+        for bad in ("https://opencode.ai", "https://prettier.io",
+                    "https://code.visualstudio.com/", "https://github.com.evil.cn/a",
+                    "javascript:alert(1)", "", "not a url"):
+            self.assertEqual(G.repo_host(bad), "", bad)
+
+    def test_node_marks_repo_separately_from_url(self):
+        d = G.build([_group("a", "A", url="https://prettier.io"),
+                     _group("b", "B", url="https://github.com/x/y"),
+                     _group("c", "C", url="javascript:alert(1)")],
+                    {}, T.PROJECTS)
+        a, b, c = d["nodes"]
+        self.assertEqual((a["u"], a.get("rp")), ("https://prettier.io", None))
+        self.assertEqual((b["u"], b["rp"]), ("https://github.com/x/y", "github.com"))
+        self.assertEqual((c["u"], c.get("rp")), ("", None))
 
     def test_rank_puts_hot_first(self):
         groups = [_group("a", "A", n=1), _group("b", "B", n=5)]
