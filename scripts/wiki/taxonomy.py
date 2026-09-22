@@ -21,6 +21,7 @@ import fcntl
 import json
 import os
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -470,7 +471,7 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
     (2026-09-22 第 6 轮审查发现)。
     """
     codes, names = load_raw(taxo)
-    n_official = len(codes)
+    official = dict(codes)     # 进来时的正式缓存,判「这一轮有没有新东西可提交」
     base = set(codes)          # 正式缓存里已经有的那些(重判时这里是空的)
     stale = 0 if codes else stale_cache_size(taxo)
     migrating = bool(stale)
@@ -483,7 +484,21 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
     part, pnames = load_raw(taxo, stage)
     kept_runs: list[list[str]] = []
     if part:
-        dropped = 0
+        # **正式缓存里已经有的 key,一律以正式缓存为准。** 暂存不记它是基于哪一版
+        # 正式缓存判出来的:旧 writer 在别人提交之后才把自己那份写进共享暂存、随即
+        # 崩掉,下一轮 `codes.update(part)` 就拿旧结论盖掉了新提交的那条——条数还
+        # 没变,`len(codes) == n_official` 又判成「无事可提交」,于是页面按暂存发、
+        # 缓存留在正式值上,两边当场对不上,而且每一轮都这样(2026-09-22 复审第 5
+        # 轮发现)。老格式暂存(整份 codes 落盘,含正式基线)也要靠这一步把基线摘
+        # 掉,不然「整份当一批验」正好把第 3 轮那个错分母又请回来:20 条全废的新增
+        # 混进 100 条正式基线,占比 16.7%,照样提交(同轮发现)。
+        clash = {n for n in part if n in base}
+        stale_part = {n for n in clash if part[n] != official[n]}
+        part = {n: c for n, c in part.items() if n not in clash}
+        dropped = len(clash)
+        if clash:
+            log(f"  [{taxo.key}] 暂存里有 {len(clash)} 条正式缓存已经有了"
+                f"({len(stale_part)} 条结论还不一样),以正式缓存为准,丢掉")
         for g in load_runs(stage, part):
             n_void = _void_bad([part[n] for n in g], void)
             if n_void and not allow_degenerate:
@@ -495,7 +510,7 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
             kept_runs.append(g)
             codes.update({n: part[n] for n in g})
             names.update({n: pnames.get(n, "") for n in g})
-        if dropped:                       # 坏批次当场从盘上抹掉,别留到下一轮
+        if dropped:                       # 丢掉的当场从盘上抹掉,别留到下一轮
             if kept_runs:
                 save_cache(taxo, {n: codes[n] for g in kept_runs for n in g},
                            names, stage, runs=kept_runs)
@@ -546,8 +561,11 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
                    f"{sorted(void)} 上(等于什么也没判出来),这一趟不作数,下次重判")
             log(f"  [{taxo.key}] {why};正式缓存与旧图原样保留")
             return Verdicts(codes, False, migrating, n_void, reason=why)
-        if not migrating and len(codes) == n_official:
-            return Verdicts(codes, True, False, left)     # 没判出新东西,无事可提交
+        if not migrating and codes == official:
+            # 「有没有新东西可提交」按**内容**比,不是比条数:旧 writer 留下的
+            # 同名判定被上面摘掉之后条数一样、内容也一样才叫没事干;只比长度的话
+            # 「盖掉一条又补进一条」这种也会被当成无事可提交(复审第 5 轮发现)。
+            return Verdicts(codes, True, False, left)
         log(f"  [{taxo.key}] {len(codes)} 条待提交(新图验收通过后才换上正式缓存)")
         ready, kept = dict(codes), dict(names)
         return Verdicts(codes, True, migrating, left,
@@ -636,6 +654,17 @@ def _promote(taxo: Taxonomy, codes: dict[str, str], names: dict[str, str]) -> No
     """把暂存换成正式缓存(rename 是原子的),再删掉暂存。
 
     只由 `Verdicts.commit()` 调——判完**并且**新图验收通过、页面落盘之后。
+
+    **`save_cache` 一成功就算提交完成**,后面那句清暂存失败只是个可恢复的收尾
+    问题,不能让它抛出去:调用方(`build_catgraph._publish`)把 `commit()` 的
+    任何异常都理解成「缓存没提交」,于是把页面回滚成旧的——缓存已经是新的 120
+    条、页面却被换回旧的 100 节点,反方向的半提交是自己制造出来的
+    (2026-09-22 复审第 5 轮发现)。留在盘上的暂存下一轮会被识别成「正式缓存
+    已经有了」而丢掉,清理本身能自愈。
     """
     save_cache(taxo, codes, names)
-    staging_path(taxo).unlink(missing_ok=True)
+    try:
+        staging_path(taxo).unlink(missing_ok=True)
+    except OSError as e:
+        print(f"[{taxo.key}] 正式缓存已提交,但暂存没清掉({e});"
+              f"它下一轮会被当成已提交的同名判定丢掉,不影响结果", file=sys.stderr)

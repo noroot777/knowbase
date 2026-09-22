@@ -69,6 +69,50 @@ B.build_one("skills", [group(i) for i in range(n)], use_llm=True, max_new=None,
             model="stub", workers=1, out_dir=out_dir)
 '''
 
+# 另一种交错:B 读完「还没有正式缓存」这个基线就卡在模型那儿,等 A 发布完才醒,
+# 判出同一条的另一个结论、写完暂存就崩。下一轮必须以正式缓存为准。
+STALE_CHILD = '''\
+import json, os, re, sys, time
+from pathlib import Path
+REPO = Path({repo!r})
+sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "scripts" / "wiki"))
+import build_catgraph as B, taxonomy as T
+T.CACHE_DIR = Path(sys.argv[2])
+code, out_dir = sys.argv[1], Path(sys.argv[3])
+ready, go, asked = Path(sys.argv[4]), Path(sys.argv[5]), Path(sys.argv[6])
+crash = sys.argv[7] == "1"
+
+def fake(prompt, model, **kw):
+    asked.touch()
+    if ready.name != "-":                # B:读完基线就停在这儿,等 A 发布完
+        ready.touch()
+        for _ in range(600):
+            if go.exists():
+                break
+            time.sleep(0.05)
+    rows = re.findall(r"^(\\d+)\\. (\\S+) ::", prompt, re.M)
+    return json.dumps([{{"id": int(i), "c": code}} for i, _nm in rows])
+T._llm = fake
+
+if crash:                                # 暂存刚落盘 → 进程没了
+    real = T.save_cache
+    def hooked(taxo, codes, names, path=None, **kw):
+        real(taxo, codes, names, path, **kw)
+        if path is not None:
+            os._exit(99)
+    T.save_cache = hooked
+
+g = {{"norm": "n0", "name": "名0", "kind": "product", "summary": "简介",
+     "url": "", "n": 1, "accounts": 1, "latest": "2026-09-20",
+     "first": "2026-09-01", "topics": ["skill工具"],
+     "all_topics": ["skill工具"], "sources": ["dr-gzh-projects"],
+     "entries": [{{"url": "https://x/n0", "article_title": "文0",
+                  "account": "号", "published": "2026-09-20"}}]}}
+B.build_one("skills", [g], use_llm=True, max_new=None,
+            model="stub", workers=1, out_dir=out_dir)
+'''
+
 
 class ConcurrentPublishTest(unittest.TestCase):
 
@@ -121,6 +165,57 @@ class ConcurrentPublishTest(unittest.TestCase):
             f"{dict(list(mismatch.items())[:3])}")
         self.assertFalse(b_jumped_the_queue,
                          "B 没等 A 交完班就自己发布了(发布锁没起作用)")
+
+    def test_a_crashed_stale_writer_does_not_resurrect_its_verdict(self):
+        """旧基线上崩掉的 writer,不许在恢复轮把已提交的结论换掉。
+
+        复审第 5 轮:暂存不记它基于哪一版正式缓存,`codes.update(part)` 拿旧结论
+        盖掉新提交的那条;条数还一样,`len(codes) == n_official` 又判成「无事可
+        提交」——恢复轮以成功退出收场,却把页面改成 S2、缓存留在 S1,而且暂存
+        永远留在盘上,以后每轮都这样。
+        """
+        root = Path(self.tmp.name)
+        stale = root / "stale.py"
+        stale.write_text(STALE_CHILD.format(repo=str(REPO)), encoding="utf-8")
+        ready, go, asked = root / "ready", root / "go2", root / "asked"
+
+        def spawn(code, *, wait, crash, asked_at=asked):
+            return subprocess.Popen(
+                [sys.executable, str(stale), code, str(self.cache_dir),
+                 str(self.out_dir), str(ready if wait else Path("-")), str(go),
+                 str(asked_at), "1" if crash else "0"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        b = spawn("S2", wait=True, crash=True)     # ① B 读完空基线,卡在模型那儿
+        for _ in range(400):
+            if ready.exists() or b.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertTrue(ready.exists(), "B 没走到等待点")
+
+        a = spawn("S1", wait=False, crash=False)   # ② A 整轮跑完,发布 S1
+        self.assertEqual(a.wait(timeout=120), 0, a.communicate()[1])
+        go.touch()                                 # ③ B 醒来,写完暂存就崩
+        self.assertEqual(b.wait(timeout=120), 99, b.communicate()[1])
+        self.assertEqual(T_load(self.cache_dir / "taxonomy_skills.staging.json"),
+                         {"n0": "S2"}, "没留下旧基线上的暂存")
+
+        asked.unlink()                             # ④ 恢复轮:不该再问模型
+        c = spawn("S3", wait=False, crash=False)
+        self.assertEqual(c.wait(timeout=120), 0, c.communicate()[1])
+        self.assertFalse(asked.exists(), "恢复轮又问了一遍模型")
+
+        page = (self.out_dir / "graph-skills.html").read_text(encoding="utf-8")
+        cache = T_load(self.cache_dir / "taxonomy_skills.json")
+        self.assertEqual(cache, {"n0": "S1"}, "崩掉的旧 writer 盖掉了正式缓存")
+        self.assertIn('"q": "n0", "c": "S1"', page, "页面用了作废的旧结论")
+        self.assertFalse((self.cache_dir / "taxonomy_skills.staging.json").exists(),
+                         "作废的暂存一直留在盘上")
+
+
+def T_load(path: Path) -> dict[str, str]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return {k: v["c"] for k, v in raw["items"].items()}
 
 
 if __name__ == "__main__":

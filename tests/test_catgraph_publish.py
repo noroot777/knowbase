@@ -293,6 +293,43 @@ class PublishGateTest(unittest.TestCase):
         self.assertFalse(T.cache_path(T.SKILLS).exists())
         self.assertEqual(list(self.out_dir.iterdir()), [])
 
+    def test_staging_cleanup_failure_does_not_roll_the_page_back(self):
+        """正式缓存换成功了,只是暂存没删掉:这叫提交完成,页面不许回滚。
+
+        复审第 5 轮:`_promote` 里两步共用一个异常边界,`_publish` 又把
+        `commit()` 的任何异常都当成「缓存没提交」——于是缓存已经是新的 120 条、
+        页面被换回旧的 100 节点,反方向的半提交是自己制造出来的。
+        """
+        base = [_group(f"n{i}", f"名{i}", topics=["skill工具"]) for i in range(100)]
+        self.groups = base
+        self._stub("S1")
+        self._build()
+
+        self.groups = base + [_group(f"m{i}", f"新{i}", topics=["skill工具"])
+                              for i in range(20)]
+        self._stub("S2")
+        real = Path.unlink
+
+        def denied(self_, *a, **kw):
+            if self_.name.endswith(".staging.json"):
+                raise PermissionError("simulated staging unlink denied")
+            return real(self_, *a, **kw)
+
+        with mock.patch.object(Path, "unlink", denied):
+            self._build()                       # 不该抛:缓存已经提交完成了
+        self.assertEqual(B.P.page_stats(self.page),
+                         {"nodes": 120, "classified": 120}, "页面被错误回滚了")
+        cache = json.loads(T.cache_path(T.SKILLS).read_text("utf-8"))["items"]
+        self.assertEqual(len(cache), 120)
+        self.assertTrue(T.staging_path(T.SKILLS).exists())   # 没删掉是既定事实
+
+        # 下一轮自己收尾:留在盘上的那份全是正式缓存已有的,丢掉并清理
+        self._stub("S3")
+        self._build()
+        self.assertFalse(T.staging_path(T.SKILLS).exists(), "残留暂存没被清理")
+        self.assertEqual(B.P.page_stats(self.page),
+                         {"nodes": 120, "classified": 120})
+
 
 if __name__ == "__main__":
     unittest.main()

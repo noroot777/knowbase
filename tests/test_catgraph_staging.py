@@ -168,6 +168,47 @@ class StagingIdentityTest(unittest.TestCase):
         self.assertEqual(sum(1 for v in cache.values() if v["c"] == "X"), 20)
         self.assertEqual(self.judged, 180)
 
+    # ── 暂存不记「基于哪一版正式缓存」,同名 key 一律以正式缓存为准 ──────────
+    def test_real_legacy_staging_carries_the_official_baseline(self):
+        """上一版写暂存落的是**整份 codes**(含正式基线),不是这一趟新判的那些。
+
+        复审第 5 轮:把这种文件「整份当一批验」,正好把第 3 轮那个错分母请回来
+        ——20 条全废的新增混进 100 条正式基线,占比 16.7%,照样提交。基线得先按
+        正式缓存摘掉,只拿剩下的当上一趟的批次验。
+        """
+        self._stub("S1")
+        self._build(100)                       # 正式缓存:100 条正常
+        good_page = self.page.read_bytes()
+        good_cache = T.cache_path(T.SKILLS).read_bytes()
+
+        self._seed_staging({**{f"n{i}": "S1" for i in range(100)},       # 正式基线
+                            **{f"n{i}": T.SKILLS.fallback                # 本轮新增
+                               for i in range(100, 120)}})               # 没有 runs
+        self._stub(T.SKILLS.fallback)          # 重判出来还是全废
+        self.judged = 0
+        with self.assertRaises(SystemExit) as cm:
+            self._build(120)
+        self.assertIn("不作数", str(cm.exception))
+        self.assertEqual(self.judged, 20, "摘掉基线后该重判的只有新增那 20 条")
+        self.assertEqual(self.page.read_bytes(), good_page)
+        self.assertEqual(T.cache_path(T.SKILLS).read_bytes(), good_cache)
+
+    def test_stale_staging_never_overrides_the_official_cache(self):
+        """旧 writer 留在暂存里的同名判定,不许盖掉已经提交的正式结论。"""
+        self._stub("S1")
+        self._build(1)                         # 正式缓存与页面:n0 = S1
+        self._seed_staging({"n0": "S2"}, runs=[["n0"]])   # 旧 writer 崩在盘上的
+
+        self._stub("S3")                       # 这一轮不该问模型
+        self.judged = 0
+        self._build(1)
+        self.assertEqual(self.judged, 0)
+        cache = json.loads(T.cache_path(T.SKILLS).read_text("utf-8"))["items"]
+        self.assertEqual(cache["n0"]["c"], "S1")
+        page = self.page.read_text(encoding="utf-8")
+        self.assertIn('"q": "n0", "c": "S1"', page, "页面用了暂存里的旧结论")
+        self.assertFalse(self.stage.exists(), "作废的暂存留在盘上了")
+
 
 if __name__ == "__main__":
     unittest.main()
