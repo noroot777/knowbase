@@ -360,16 +360,25 @@ class Verdicts:
 # 补不齐也不放宽 promote 的判据,只是少一次「因为漏一条而整轮白等」。
 _RESIGN_RETRIES = 2
 
+# 「这一趟等于没判」的判据:void(待归类 / 不是 skill)占比到了 VOID_SHARE 就不作数。
+# 不是只有 100% 才算坏——1 条正常 + 100 条待归类发出去也是一张废页,而且会把那
+# 100 条固化进正式缓存。条数少于 VOID_MIN_N 时只认 100%:新进来两三条确实判不
+# 出来是正常的,按比例算会把正常增量也拦下。真实数据的 void 占比在 2% 上下。
+VOID_SHARE = 0.9
+VOID_MIN_N = 20
+
 
 def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
              model=None, workers: int = 6, batch: int = 40,
              max_new: int | None = None, void_codes: frozenset[str] = frozenset(),
-             log=print) -> Verdicts:
+             allow_degenerate: bool = False, log=print) -> Verdicts:
     """items = [(norm, name, summary)],**按重要性排好序**(热度高的在前)。
 
     `void_codes`:判成这些 code 等于「什么也没判出来」(fallback 自动算一个;
-    skill 图谱还要把 X = 不是 skill 算进去,它判完就被踢出图谱)。整批**全部**
-    落在这里面时按「这一趟不作数」处理,见下面的 `finish()`。
+    skill 图谱还要把 X = 不是 skill 算进去,它判完就被踢出图谱)。压倒性地
+    落在这里面时按「这一趟不作数」处理,见下面的 `finish()`;维护者确认这就是
+    预期结果(比如故意收紧了成员资格规则)时用 `allow_degenerate` 放行,
+    对应命令行的 --allow-shrink。
 
     两种模式,区别在于「旧缓存还算不算数」:
 
@@ -413,16 +422,24 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
             log(f"  [{taxo.key}] {why};正式缓存与旧图原样保留")
             return Verdicts(codes, False, migrating, left, reason=why)
         void = void_codes | {taxo.fallback}
-        if codes and all(c in void for c in codes.values()):
-            # 整批全落在「等于没判」的那几个 code 上(全待归类、或 skill 全判成
-            # 「不是 skill」),这不是判定结果,是这一趟坏了(提示词/模型/中转站)。
-            # 暂存也一并扔掉:留着的话下一轮全命中、不再问模型,同一个坏结果
+        n_void = sum(1 for c in codes.values() if c in void)
+        degenerate = n_void == len(codes) or (
+            len(codes) >= VOID_MIN_N and n_void >= len(codes) * VOID_SHARE)
+        if codes and degenerate and not allow_degenerate:
+            # 判出来的东西压在「等于没判」的那几个 code 上(全待归类、skill 全判成
+            # 「不是 skill」、或者 101 条里 100 条待归类),这不是判定结果,是这一趟
+            # 坏了(提示词/模型/中转站)。**不是只有 100% 才算坏**:1 条正常 +
+            # 100 条 fallback 一样会被发成一张满屏待归类的页面,还把 100 条
+            # fallback 提交进正式缓存,之后全命中、再不重试(2026-09-22 复审第 2 轮
+            # 发现)。条数太少时只认 100%——几条新条目确实判不出来是正常的。
+            # 暂存一并扔掉:留着的话下一轮全命中、不再问模型,同一个坏结果
             # 会一直卡在那儿(2026-09-22 第 4、5 轮审查发现)。
             stage.unlink(missing_ok=True)
-            why = (f"{'重判' if migrating else '归类'}结果 {len(codes)} 条全落在 "
+            share = "全" if n_void == len(codes) else f"{n_void}/{len(codes)} 条"
+            why = (f"{'重判' if migrating else '归类'}结果 {share}落在 "
                    f"{sorted(void)} 上(等于什么也没判出来),这一趟不作数,下次重判")
             log(f"  [{taxo.key}] {why};正式缓存与旧图原样保留")
-            return Verdicts(codes, False, migrating, len(codes), reason=why)
+            return Verdicts(codes, False, migrating, n_void, reason=why)
         if not migrating and len(codes) == n_official:
             return Verdicts(codes, True, False, left)     # 没判出新东西,无事可提交
         log(f"  [{taxo.key}] {len(codes)} 条待提交(新图验收通过后才换上正式缓存)")

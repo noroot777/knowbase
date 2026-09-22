@@ -87,6 +87,90 @@ class PublishGateTest(unittest.TestCase):
         self.assertEqual(B.P.page_stats(self.page),
                          {"nodes": 3, "classified": 3})
 
+    # ── ①b 首发也有质量下限:不是只有 100% 待归类才算坏 ──────────────────────
+    def test_one_good_plus_a_hundred_fallback_never_publishes(self):
+        """101 条里 1 条正常、100 条待归类:首次生成同样不许发、不许进缓存。
+
+        复审第 2 轮:`complete` 原来只看「是不是**全部**落在 void 上」,有一条
+        正常 code 就算判完。于是这份 99% 待归类的结果被发成正式页面、100 条
+        fallback 进正式缓存,第二次运行全命中缓存、再也不问模型,自己走不出来。
+        """
+        many = [_group(f"n{i}", f"名{i}", topics=["skill工具"]) for i in range(101)]
+        self.groups = many
+        good_one = "名0"
+
+        def fake(prompt, model, **kw):
+            rows = re.findall(r"^(\d+)\. (\S+) ::", prompt, re.M)
+            return json.dumps([{"id": int(i),
+                                "c": "S1" if nm == good_one else T.SKILLS.fallback}
+                               for i, nm in rows])
+
+        T._llm, old = fake, T._llm
+        self.addCleanup(lambda: setattr(T, "_llm", old))
+
+        for run in (1, 2):                       # 第二次仍要问模型,不能卡死
+            with self.subTest(第几次=run):
+                self.calls = 0
+                with self.assertRaises(SystemExit) as cm:
+                    self._build()
+                self.assertIn("不作数", str(cm.exception))
+                self.assertFalse(self.page.exists())
+                self.assertFalse(T.cache_path(T.SKILLS).exists())
+                self.assertFalse(T.staging_path(T.SKILLS).exists())
+
+        # 模型恢复正常之后自己走出来
+        self._stub("S1")
+        self._build()
+        self.assertEqual(B.P.page_stats(self.page)["classified"], 101)
+
+    def test_a_few_fallbacks_are_normal(self):
+        """条数少的时候只认 100%:新来两三条确实判不出来,不该拦住整张图。"""
+        self._stub("S1")
+        self._build()                             # 3 条正常,先有一版
+        self.groups = self.groups + [_group("新来的", "新来的", topics=["skill工具"])]
+        self._stub(T.SKILLS.fallback)             # 新来的这一条判不出来
+        self._build()
+        self.assertEqual(B.P.page_stats(self.page),
+                         {"nodes": 4, "classified": 3})
+
+    def test_allow_shrink_lets_a_deliberate_collapse_through(self):
+        """确实是维护者自己收紧了规则:--allow-shrink 得放行。"""
+        many = [_group(f"n{i}", f"名{i}", topics=["skill工具"]) for i in range(101)]
+        self.groups = many
+        self._stub(T.SKILLS.fallback)
+        with self.assertRaises(SystemExit):
+            self._build()
+        self._stub(T.SKILLS.fallback)
+        self._build(allow_shrink=True)
+        self.assertEqual(B.P.page_stats(self.page)["nodes"], 101)
+
+    # ── ② 一个候选都没扫到,不许盖掉好页面 ──────────────────────────────────
+    def test_empty_scan_does_not_replace_a_good_page(self):
+        """上游扫描瞬时为空(vault 没挂上之类):旧图还在就必须拒绝。"""
+        self._stub("S1")
+        self._build()
+        good = self.page.read_bytes()
+        self.groups = []
+        with self.assertRaises(SystemExit) as cm:
+            B.build_one("skills", [], use_llm=False, max_new=None, model=None,
+                        workers=1, out_dir=self.out_dir)
+        self.assertIn("一个候选都没扫到", str(cm.exception))
+        self.assertEqual(self.page.read_bytes(), good)
+
+    def test_empty_scan_is_fine_when_there_is_no_old_page(self):
+        """首次生成时确实没东西:空图是如实反映,照常发。"""
+        B.build_one("skills", [], use_llm=False, max_new=None, model=None,
+                    workers=1, out_dir=self.out_dir)
+        self.assertEqual(B.P.page_stats(self.page), {"nodes": 0, "classified": 0})
+
+    def test_empty_scan_passes_with_allow_shrink(self):
+        """确认就是要清空:--allow-shrink 放行。"""
+        self._stub("S1")
+        self._build()
+        B.build_one("skills", [], use_llm=False, max_new=None, model=None,
+                    workers=1, out_dir=self.out_dir, allow_shrink=True)
+        self.assertEqual(B.P.page_stats(self.page), {"nodes": 0, "classified": 0})
+
     # ── ② 页面原子落盘 ─────────────────────────────────────────────────────
     def _boom_on_page(self):
         """把「写页面的临时文件」做成写一截就炸,其它写盘(缓存)照常。"""

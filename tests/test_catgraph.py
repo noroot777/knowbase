@@ -355,8 +355,9 @@ class ResignMigrationTest(unittest.TestCase):
     def test_mostly_excluded_rejudge_is_rejected_too(self):
         """101 个候选只剩 1 个活下来:不是 0 节点,但同样是塌了。
 
-        只挡全空的话,「只剩零星几个」照样能把好图换成一张空壳。按旧图节点数的
-        比例下限兜底。
+        只挡全空的话,「只剩零星几个」照样能把好图换成一张空壳。这一趟在归类层
+        就被「void 占比过半 = 不作数」拦下(复审第 2 轮起),拦不住时页面那头还有
+        按旧图节点数算的比例下限兜底。
         """
         out_dir, page, groups = self._page_with_old_content()
         self._stub()                                   # 先生成一张 101 节点的旧图
@@ -384,7 +385,7 @@ class ResignMigrationTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             B.build_one("skills", groups, use_llm=True, max_new=None,
                         model="stub", workers=1, out_dir=out_dir)
-        self.assertIn("只剩 1 个节点", str(cm.exception))
+        self.assertIn("不作数", str(cm.exception))
         self.assertEqual(page.read_text(encoding="utf-8"), good_page)
         self.assertEqual(T.cache_path(T.SKILLS).read_text(encoding="utf-8"),
                          good_cache)
@@ -509,23 +510,27 @@ class IncrementalCommitTest(unittest.TestCase):
                 self.assertEqual(self.page.read_text(encoding="utf-8"), good)
 
     def test_mostly_fallback_result_is_rejected(self):
-        """旧页 101/101 → 新结果 101/1:节点一个没少,可「已归类」塌了 99%。
+        """旧页 101/101 → 新结果 101/41:节点一个没少,可「已归类」塌了六成。
 
         第 7 轮审查:比例下限只比了节点总数,而 fallback 节点**不会**被 drop
         掉,所以 total 和旧图一模一样、那道阈值压根不动;「一个都没归类」又只
-        拦 0。于是好页面被换成满屏「待归类」,100 条 fallback 还进了正式缓存,
+        拦 0。于是好页面被换成满屏「待归类」,fallback 还进了正式缓存,
         下一轮全命中、不再问模型。两个维度都得比。
+
+        这里特意让 fallback 只占六成:再高就先被归类层那道「void 占比过半 =
+        不作数」拦下了(那条另有测试),页面这一道就测不到了。
         """
         groups = [_group(f"n{i}", f"名{i}", topics=["skill工具"]) for i in range(101)]
         good = self._good_page(groups)
         self.assertEqual(B.P.page_stats(self.page),
                          {"nodes": 101, "classified": 101})
         T.cache_path(T.SKILLS).unlink()               # 缓存丢失,指纹没变 → 走增量
+        half = {f"名{i}" for i in range(41)}          # 41 条正常 + 60 条待归类
 
         for run in (1, 2):
             with self.subTest(第几次=run):
                 self.calls = 0
-                self._stub(lambda nm: "S1" if nm == "名0" else T.SKILLS.fallback)
+                self._stub(lambda nm: "S1" if nm in half else T.SKILLS.fallback)
                 with self.assertRaises(SystemExit) as cm:
                     self._build(groups)
                 self.assertIn("已归类的节点", str(cm.exception))
@@ -537,10 +542,10 @@ class IncrementalCommitTest(unittest.TestCase):
                                  {"nodes": 101, "classified": 101})
 
         # 确认这就是预期结果时,--allow-shrink 放行
-        self._stub(lambda nm: "S1" if nm == "名0" else T.SKILLS.fallback)
+        self._stub(lambda nm: "S1" if nm in half else T.SKILLS.fallback)
         B.build_one("skills", groups, use_llm=True, max_new=None, model="stub",
                     workers=1, out_dir=self.out_dir, allow_shrink=True)
-        self.assertEqual(B.P.page_stats(self.page), {"nodes": 101, "classified": 1})
+        self.assertEqual(B.P.page_stats(self.page), {"nodes": 101, "classified": 41})
 
     def test_good_incremental_run_commits_after_the_page(self):
         """正常增量:页面写完之前正式缓存不动,写完之后新条目才进缓存。"""

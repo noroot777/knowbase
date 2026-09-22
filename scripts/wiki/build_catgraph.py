@@ -83,14 +83,23 @@ def quality_problem(meta: dict, picked: list, out: Path, *,
     管「多少节点退化成了待归类」。fallback 节点不会被 drop,所以 100 条判定
     退化成「待归类」时 `total` 和旧图一模一样、节点数那道阈值压根不动——好页面
     照样被换成满屏待归类(2026-09-22 第 7 轮审查发现)。
+
+    **「一个候选都没有」不是「没什么可验收的」**:上游 vault 没挂上、扫描出错、
+    某个过滤器回归,都会让这一轮扫出 0 组,原来那句 `if not picked: return ""`
+    直接跳过了下面所有比例检查,几千节点的好页面被一张 0 节点的新页原子替换,
+    还以退出码 0 收场(2026-09-22 复审第 2 轮发现)。旧图是空的(或首次生成)
+    才放行,确实要清空就加 --allow-shrink。
     """
+    old = P.page_stats(out)
     if not picked:
+        if old and old["nodes"] and not allow_shrink:
+            return (f"这一轮一个候选都没扫到,而旧图还有 {old['nodes']} 个节点"
+                    f"(多半是 vault 没挂上或上游扫描出了问题)")
         return ""                       # 本来就没候选,空图是如实反映
     if not meta["total"]:
         return f"新图 0 个节点({len(picked)} 个候选全被归类踢出去了)"
     if not meta["classified"]:
         return f"归类结果为空({meta['total']} 个条目一个都没归类)"
-    old = P.page_stats(out)
     if not old or allow_shrink:
         return ""
     for what, now, before in (("节点", meta["total"], old["nodes"]),
@@ -128,7 +137,8 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
     items = [(g["norm"], g["name"], g["summary"]) for g in picked]
     if use_llm:
         res = T.classify(taxo, items, model=model, workers=workers,
-                         max_new=max_new, void_codes=v["drop"])
+                         max_new=max_new, void_codes=v["drop"],
+                         allow_degenerate=allow_shrink)
         codes = res.codes
     else:
         codes = T.load_cache(taxo)
@@ -183,8 +193,9 @@ def main() -> None:
                     help="临时覆盖模型;默认用设置面板的「管道 · 图谱归类」阶段")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--allow-shrink", action="store_true",
-                    help="新图的节点数或已归类数比旧图少一半以上时照样写;确认"
-                         "这轮缩水是预期的(比如故意收紧了分类规则)再用")
+                    help="新图的节点数或已归类数比旧图少一半以上、或这一轮判定"
+                         "压倒性地落在「待归类/不是 skill」上时照样发;确认这轮"
+                         "缩水是预期的(比如故意收紧了分类规则)再用")
     a = ap.parse_args()
 
     kinds = list(VIEWS) if a.kind == "all" else [a.kind]
