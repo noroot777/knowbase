@@ -63,7 +63,7 @@ VIEWS = {
 }
 
 
-MIN_KEEP = 0.5     # 新图节点数不得低于旧图的这个比例(系统性误判的兜底)
+MIN_KEEP = 0.5     # 新图的节点数/已归类数不得低于旧图的这个比例(系统性误判的兜底)
 
 
 def quality_problem(meta: dict, picked: list, out: Path, *,
@@ -75,8 +75,13 @@ def quality_problem(meta: dict, picked: list, out: Path, *,
     数直接归零)、或者只剩零星几个活下来。第 5 轮审查那次就是 drop 把 101 个
     候选全踢光,`meta.total == 0` 从「有条目但没归类」这道检查底下溜过去,空图
     连同坏缓存一起提交、之后再不重试(2026-09-22 第 5 轮审查发现)。所以按
-    **可见输出**验收,顺带用旧图的节点数兜一道比例下限——只挡塌方,正常增减
-    (以及确实该缩的那次)放行,后者加 --allow-shrink。
+    **可见输出**验收,顺带用旧图兜一道比例下限——只挡塌方,正常增减(以及确实
+    该缩的那次)放行,后者加 --allow-shrink。
+
+    比例要**两个维度都比**:`total` 管「节点被 drop 掉了多少」,`classified`
+    管「多少节点退化成了待归类」。fallback 节点不会被 drop,所以 100 条判定
+    退化成「待归类」时 `total` 和旧图一模一样、节点数那道阈值压根不动——好页面
+    照样被换成满屏待归类(2026-09-22 第 7 轮审查发现)。
     """
     if not picked:
         return ""                       # 本来就没候选,空图是如实反映
@@ -85,9 +90,13 @@ def quality_problem(meta: dict, picked: list, out: Path, *,
     if not meta["classified"]:
         return f"归类结果为空({meta['total']} 个条目一个都没归类)"
     old = P.page_stats(out)
-    if old and not allow_shrink and meta["total"] < old["nodes"] * MIN_KEEP:
-        return (f"新图只剩 {meta['total']} 个节点,不到旧图 {old['nodes']} 个的 "
-                f"{MIN_KEEP:.0%}")
+    if not old or allow_shrink:
+        return ""
+    for what, now, before in (("节点", meta["total"], old["nodes"]),
+                              ("已归类的节点", meta["classified"], old["classified"])):
+        if before and now < before * MIN_KEEP:
+            return (f"新图只剩 {now} 个{what},不到旧图 {before} 个的 "
+                    f"{MIN_KEEP:.0%}")
     return ""
 
 
@@ -152,8 +161,8 @@ def main() -> None:
                     help="临时覆盖模型;默认用设置面板的「管道 · 图谱归类」阶段")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--allow-shrink", action="store_true",
-                    help="新图节点数比旧图少一半以上时照样写;确认这轮缩水是"
-                         "预期的(比如故意收紧了分类规则)再用")
+                    help="新图的节点数或已归类数比旧图少一半以上时照样写;确认"
+                         "这轮缩水是预期的(比如故意收紧了分类规则)再用")
     a = ap.parse_args()
 
     kinds = list(VIEWS) if a.kind == "all" else [a.kind]

@@ -508,6 +508,40 @@ class IncrementalCommitTest(unittest.TestCase):
                 self.assertFalse(T.staging_path(T.SKILLS).exists())
                 self.assertEqual(self.page.read_text(encoding="utf-8"), good)
 
+    def test_mostly_fallback_result_is_rejected(self):
+        """旧页 101/101 → 新结果 101/1:节点一个没少,可「已归类」塌了 99%。
+
+        第 7 轮审查:比例下限只比了节点总数,而 fallback 节点**不会**被 drop
+        掉,所以 total 和旧图一模一样、那道阈值压根不动;「一个都没归类」又只
+        拦 0。于是好页面被换成满屏「待归类」,100 条 fallback 还进了正式缓存,
+        下一轮全命中、不再问模型。两个维度都得比。
+        """
+        groups = [_group(f"n{i}", f"名{i}", topics=["skill工具"]) for i in range(101)]
+        good = self._good_page(groups)
+        self.assertEqual(B.P.page_stats(self.page),
+                         {"nodes": 101, "classified": 101})
+        T.cache_path(T.SKILLS).unlink()               # 缓存丢失,指纹没变 → 走增量
+
+        for run in (1, 2):
+            with self.subTest(第几次=run):
+                self.calls = 0
+                self._stub(lambda nm: "S1" if nm == "名0" else T.SKILLS.fallback)
+                with self.assertRaises(SystemExit) as cm:
+                    self._build(groups)
+                self.assertIn("已归类的节点", str(cm.exception))
+                self.assertGreater(self.calls, 0)     # 第二次也得重新问模型
+                self.assertFalse(T.cache_path(T.SKILLS).exists())
+                self.assertFalse(T.staging_path(T.SKILLS).exists())
+                self.assertEqual(self.page.read_text(encoding="utf-8"), good)
+                self.assertEqual(B.P.page_stats(self.page),
+                                 {"nodes": 101, "classified": 101})
+
+        # 确认这就是预期结果时,--allow-shrink 放行
+        self._stub(lambda nm: "S1" if nm == "名0" else T.SKILLS.fallback)
+        B.build_one("skills", groups, use_llm=True, max_new=None, model="stub",
+                    workers=1, out_dir=self.out_dir, allow_shrink=True)
+        self.assertEqual(B.P.page_stats(self.page), {"nodes": 101, "classified": 1})
+
     def test_good_incremental_run_commits_after_the_page(self):
         """正常增量:页面写完之前正式缓存不动,写完之后新条目才进缓存。"""
         groups = [_group(f"n{i}", f"名{i}", topics=["skill工具"]) for i in range(101)]
