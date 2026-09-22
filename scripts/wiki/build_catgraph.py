@@ -12,6 +12,9 @@
 
 归类结果长期缓存在 data/taxonomy_*.json,日常重生成是零 LLM 的;新条目进来才
 判新增的那几个(--max-new 兜底,防止某天一次性涌入几百条时把一轮管道拖长)。
+改了分类表/判定规则则整份作废、全量重判:那一趟不受 --max-new 限制,新结论先
+攒在 *.migrating.json 里,判完才换上正式缓存——半截结果既不落正式缓存也不
+覆盖旧页面。
 """
 from __future__ import annotations
 
@@ -69,9 +72,11 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
 
     items = [(g["norm"], g["name"], g["summary"]) for g in picked]
     if use_llm:
-        codes = T.classify(taxo, items, model=model, workers=workers, max_new=max_new)
+        res = T.classify(taxo, items, model=model, workers=workers, max_new=max_new)
+        codes = res.codes
     else:
         codes = T.load_cache(taxo)
+        res = T.Verdicts(codes)
         print(f"  [{kind}] --no-llm:只用缓存里的 {len(codes)} 条归类")
 
     data = G.build(picked, codes, taxo, drop_codes=v["drop"])
@@ -85,6 +90,13 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
         raise SystemExit(
             f"[{kind}] 归类结果为空({meta['total']} 个条目一个都没归类),"
             f"拒绝覆盖已有的 {out.name};先确认模型配置/缓存文件是否正常")
+    # 分类表改过、全量重判没判完:手上这份是半成品,大半节点会落「待归类」。
+    # 拿它盖掉好页面和「一个都没判出来」是同一种事故,只是没那么显眼。
+    if not res.complete and out.exists():
+        raise SystemExit(
+            f"[{kind}] 分类规则改过,全量重判还没做完(已判 {len(codes)} 条,"
+            f"还差 {res.pending} 条),拒绝用半份结果覆盖已有的 {out.name};"
+            f"进度已存盘,下次跑接着判")
     out.write_text(P.render(
         data, title=v["title"], h1=v["h1"], sub=v["sub"], accent=v["accent"],
         foot=P.foot_html(meta, v["unit"]), repo_toggle=v["repo_toggle"],
@@ -102,7 +114,8 @@ def main() -> None:
     ap.add_argument("--out-dir", default=str(VAULT_ROOT))
     ap.add_argument("--no-llm", action="store_true", help="不判新增条目,只用已有归类缓存")
     ap.add_argument("--max-new", type=int, default=400,
-                    help="本轮最多新判多少条(按热度排队);0 = 不限")
+                    help="本轮最多新判多少条(按热度排队);0 = 不限。"
+                         "只管增量;分类表改过时的全量重判不受它限制")
     ap.add_argument("--model", default=None,
                     help="临时覆盖模型;默认用设置面板的「管道 · 图谱归类」阶段")
     ap.add_argument("--workers", type=int, default=6)

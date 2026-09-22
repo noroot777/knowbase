@@ -195,10 +195,17 @@ def cache_path(taxo: Taxonomy) -> Path:
     return CACHE_DIR / f"taxonomy_{taxo.key}.json"
 
 
-def load_raw(taxo: Taxonomy) -> tuple[dict[str, str], dict[str, str]]:
+def migrate_path(taxo: Taxonomy) -> Path:
+    """全量重判(分类表改过)的半成品。**新结论先攒在这儿,判完才原子换上正式
+    缓存**——直接往正式缓存里写的话,`--max-new` 一截断,几千条完整旧判定就被
+    几百条新判定盖掉了,而且不可逆(2026-09-22 第 2 轮审查发现)。"""
+    return CACHE_DIR / f"taxonomy_{taxo.key}.migrating.json"
+
+
+def load_raw(taxo: Taxonomy, path: Path | None = None) -> tuple[dict[str, str], dict[str, str]]:
     """({norm: code}, {norm: 名字})。分类表指纹对不上(类目改过)就当空缓存,
     触发全量重判。名字只是给人翻这份 JSON 时对得上号,判定不读它。"""
-    p = cache_path(taxo)
+    p = path or cache_path(taxo)
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -220,10 +227,27 @@ def load_cache(taxo: Taxonomy) -> dict[str, str]:
     return load_raw(taxo)[0]
 
 
-def save_cache(taxo: Taxonomy, codes: dict[str, str], names: dict[str, str]) -> None:
+def stale_cache_size(taxo: Taxonomy) -> int:
+    """正式缓存里「指纹已经对不上」的那份有多少条(0 = 没有/指纹是对的)。
+
+    这就是「分类表改过、需要全量重判」的判据,也是重判期间**必须原样保住**的
+    那份东西。
+    """
+    try:
+        raw = json.loads(cache_path(taxo).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    items = raw.get("items")
+    if raw.get("sig") == taxo.sig() or not isinstance(items, dict):
+        return 0
+    return len(items)
+
+
+def save_cache(taxo: Taxonomy, codes: dict[str, str], names: dict[str, str],
+               path: Path | None = None) -> None:
     """写盘用「唯一临时文件 + rename」:截断重写会让并发读者读到半截 JSON,
     而半截 JSON 被 load_cache 吞成空缓存,下一次 build 就会把几千条重判一遍。"""
-    p = cache_path(taxo)
+    p = path or cache_path(taxo)
     p.parent.mkdir(parents=True, exist_ok=True)
     body = {"sig": taxo.sig(),
             "items": {k: {"c": v, "n": names.get(k, "")} for k, v in sorted(codes.items())}}
@@ -286,31 +310,69 @@ def _parse(out: str) -> dict[int, str]:
     return got
 
 
+@dataclass(frozen=True)
+class Verdicts:
+    """一轮归类的结果。
+
+    `complete=False` 只在**全量重判没做完**时出现,意思是「这份 codes 是半成品,
+    别拿它覆盖页面」:分类表刚改过、旧缓存整份失效,而这一轮没把候选全判完
+    (某些批次失败)。日常增量判定永远是 complete——那时候没判到的几条显示成
+    「待归类」是既定行为,不该拦着图谱更新。
+    """
+    codes: dict[str, str]
+    complete: bool = True
+    migrating: bool = False
+    pending: int = 0               # 还差多少条没判(仅重判期间有意义)
+
+
 def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
              model=None, workers: int = 6, batch: int = 40,
-             max_new: int | None = None, log=print) -> dict[str, str]:
+             max_new: int | None = None, log=print) -> Verdicts:
     """items = [(norm, name, summary)],**按重要性排好序**(热度高的在前)。
 
-    返回 {norm: code},只含已判定的(缓存命中 + 本轮新判)。没判到的留给调用方
-    落到 fallback:`--max-new` 截断和模型漏判都会留下尾巴,这时候宁可显示成
-    「未归类」,也不要瞎猜一个类目混进分区里。
+    两种模式,区别在于「旧缓存还算不算数」:
+
+    - **增量**(指纹没变):只判缓存里没有的那几条,`--max-new` 是上限——某天
+      涌入几百条新条目时不至于把一轮管道拖成半小时。没判到的落 fallback。
+    - **全量重判**(指纹变了,分类表/规则改过):旧结论整份作废。这时候
+      **`--max-new` 不适用**,而且新结论先攒在 `*.migrating.json` 里,全判完
+      才原子换上正式缓存。截断 + 就地覆盖的话,3183 条完整旧判定会被 400 条
+      新判定盖掉,剩下 2783 个节点当场变「待归类」,不可逆
+      (2026-09-22 第 2 轮审查发现)。判不完就保住旧缓存、下一轮接着判。
     """
     codes, names = load_raw(taxo)
+    stale = 0 if codes else stale_cache_size(taxo)
+    migrating = bool(stale)
+    out_path = migrate_path(taxo)
+    if migrating:
+        # 续跑上一轮没判完的部分(指纹对不上的半成品会被 load_raw 当空的)
+        part, pnames = load_raw(taxo, out_path)
+        codes, names = dict(part), dict(pnames)
+        log(f"  [{taxo.key}] 分类表改过,{stale} 条旧判定整份作废,本轮全量重判"
+            f"(--max-new 不适用){f';续上半成品 {len(codes)} 条' if codes else ''}")
+    else:
+        out_path = cache_path(taxo)
+        # 上一次重判留下的半成品已经用不上了(要么判完换上去了,要么指纹又变了)
+        migrate_path(taxo).unlink(missing_ok=True)
+
     names.update({n: nm for n, nm, _ in items})
     pending = [it for it in items if it[0] not in codes]
-    if max_new is not None and len(pending) > max_new:
+    if max_new is not None and len(pending) > max_new and not migrating:
         log(f"  [{taxo.key}] 待判 {len(pending)} 条,本轮只判前 {max_new} 条(按热度)")
         pending = pending[:max_new]
     if not pending:
         log(f"  [{taxo.key}] 全部命中缓存({len(codes)} 条)")
-        return codes
+        if migrating and codes:
+            _promote(taxo, codes, names)
+        return Verdicts(codes, bool(codes) or not migrating, migrating)
 
     model = model or default_model()
     valid = {c.code for c in taxo.cats}
     log(f"  [{taxo.key}] 新判 {len(pending)} 条,模型 {model},{workers} 并发")
     batches = [pending[i:i + batch] for i in range(0, len(pending), batch)]
+    failed = 0
 
-    def run(chunk: list[tuple[str, str, str]]) -> dict[str, str]:
+    def run(chunk: list[tuple[str, str, str]]) -> dict[str, str] | None:
         lines = "\n".join(
             f"{i}. {nm} :: {(sm or '(无简介)')[:140]}"
             for i, (_n, nm, sm) in enumerate(chunk))
@@ -321,23 +383,43 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
             got = _parse(_llm(prompt, model))
         except Exception as e:                      # 单批失败不该带崩整轮
             log(f"  [{taxo.key}] 一批失败({type(e).__name__}: {e}),留到下次")
-            return {}
+            return None
         return {chunk[i][0]: c for i, c in got.items()
                 if 0 <= i < len(chunk) and c in valid}
 
     done, saved = 0, len(codes)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for got in ex.map(run, batches):
-            codes.update(got)
+            if got is None:
+                failed += 1
+            else:
+                codes.update(got)
             done += 1
             # 只在真判出新东西时落盘。一批都没成功(没配 key、中转站挂了)时写盘
-            # 等于拿一份空 items 覆盖掉旧判定——尤其在指纹刚变、老文件还攥着
-            # 几千条结论的时候,那一下是不可逆的数据丢失。什么都不写的话老文件
-            # 原样留着,下次跑通了再整体重写。
+            # 等于拿一份空 items 覆盖掉旧判定;重判期间写的还是半成品文件,
+            # 正式缓存无论如何都要等判完才动。
             if len(codes) > saved and (done % 5 == 0 or done == len(batches)):
-                save_cache(taxo, codes, names)      # 中途落盘:被打断也不白跑
+                save_cache(taxo, codes, names, out_path)    # 中途落盘:被打断也不白跑
                 saved = len(codes)
                 log(f"  [{taxo.key}] {done}/{len(batches)} 批,已判 {len(codes)} 条")
     if len(codes) > saved:
-        save_cache(taxo, codes, names)
-    return codes
+        save_cache(taxo, codes, names, out_path)
+
+    if not migrating:
+        return Verdicts(codes, True, False)
+    left = sum(1 for it in items if it[0] not in codes)
+    if failed or not codes:
+        log(f"  [{taxo.key}] 重判未完成({failed} 批失败,还差 {left} 条),"
+            f"旧缓存原样保留,进度存在 {out_path.name},下次接着判")
+        return Verdicts(codes, False, True, left)
+    _promote(taxo, codes, names)
+    log(f"  [{taxo.key}] 重判完成,{len(codes)} 条换上正式缓存"
+        f"{f'(模型漏判 {left} 条,下轮按增量补)' if left else ''}")
+    return Verdicts(codes, True, True, left)
+
+
+def _promote(taxo: Taxonomy, codes: dict[str, str], names: dict[str, str]) -> None:
+    """重判判完了:把半成品换成正式缓存(rename 是原子的),再删掉半成品。"""
+    save_cache(taxo, codes, names)
+    migrate_path(taxo).unlink(missing_ok=True)
+

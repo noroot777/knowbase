@@ -15,12 +15,17 @@
    是"相关"也会把边表撑爆。
 5. **drop_codes 的类目不进图谱**(skill 图谱的 X = 判出来不是 skill),
    而且类目列表里也不能留着它,否则页面上会多一个永远空着的分区。
+6. **指纹失效后的全量重判是另一条路**:不吃 `--max-new`,新结论攒在半成品
+   文件里判完才换上正式缓存,没判完就既不动旧缓存也不覆盖旧图。混成一条的
+   话改一句规则就能把几千条完整旧判定缩成几百条,页面大面积退化。
 
 跑:  python -m unittest discover -s tests -v
 """
 
 from __future__ import annotations
 
+import json
+import re
 import sys
 import tempfile
 import unittest
@@ -30,6 +35,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "scripts" / "wiki"))
 
+import build_catgraph as B  # noqa: E402
 import graph_data as G  # noqa: E402
 import taxonomy as T  # noqa: E402
 
@@ -116,7 +122,7 @@ class TaxonomyCacheTest(unittest.TestCase):
                          model="stub", workers=1, log=lambda *_: None)
         self.assertIn("0. 甲 :: x", seen["p"])
         self.assertIn("1. 乙 :: y", seen["p"])
-        self.assertEqual(got, {"a": "S1"})
+        self.assertEqual(got.codes, {"a": "S1"})
 
     def test_failed_round_does_not_wipe_the_cache(self):
         """一批都没判成(没配 key / 中转站挂了)时不能把旧判定覆盖成空。
@@ -133,13 +139,105 @@ class TaxonomyCacheTest(unittest.TestCase):
         self.addCleanup(lambda: setattr(T, "_llm", old))
         got = T.classify(T.SKILLS, [("c", "丙", "x")], model="stub", workers=1,
                          log=lambda *_: None)
-        self.assertEqual(got, {"a": "S1", "b": "S2"})
+        self.assertEqual(got.codes, {"a": "S1", "b": "S2"})
         self.assertEqual(T.cache_path(T.SKILLS).read_text(encoding="utf-8"), stale)
 
     def test_fallback_must_exist(self):
         with self.assertRaises(AssertionError):
             T.Taxonomy(key="k", item_zh="x", fallback="没这个",
                        cats=(T.Cat("S0", "其他"),))
+
+
+class ResignMigrationTest(unittest.TestCase):
+    """分类表改过之后那一趟全量重判。
+
+    这里钉的是 2026-09-22 第 2 轮审查发现的事故:指纹一变旧缓存整份失效,
+    可 `--max-new` 照样截断,于是 400 条新判定就地盖掉 3183 条完整旧判定,
+    剩下 2783 个节点当场变「待归类」,页面也跟着被覆盖——模型全成功也会发生,
+    不需要任何故障。所以重判必须①不受 --max-new 限制、②攒在半成品文件里、
+    ③没判完就既不换正式缓存也不覆盖页面。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._old = T.CACHE_DIR
+        T.CACHE_DIR = Path(self.tmp.name)
+        self.addCleanup(lambda: setattr(T, "CACHE_DIR", self._old))
+        # 101 条旧判定 + 一份改过规则(指纹变了)的分类表
+        self.items = [(f"n{i}", f"名{i}", "简介") for i in range(101)]
+        self.old = {n: "S1" for n, _, _ in self.items}
+        T.save_cache(T.SKILLS, self.old, {n: nm for n, nm, _ in self.items})
+        self.stale_bytes = T.cache_path(T.SKILLS).read_text(encoding="utf-8")
+        self.taxo = T.Taxonomy(key=T.SKILLS.key, item_zh=T.SKILLS.item_zh,
+                               fallback=T.SKILLS.fallback, cats=T.SKILLS.cats,
+                               extra_rules="改过的成员资格规则")
+        self.assertNotEqual(self.taxo.sig(), T.SKILLS.sig())
+
+    def _stub(self, fail_batches=()):
+        """模型桩:按调用序数决定这一批是成功还是炸。"""
+        self.calls = 0
+
+        def fake(prompt, model, **kw):
+            i, self.calls = self.calls, self.calls + 1
+            if i in fail_batches:
+                raise RuntimeError("中转站 502")
+            ids = [int(m) for m in re.findall(r"^(\d+)\. ", prompt, re.M)]
+            return json.dumps([{"id": j, "c": "S2"} for j in ids])
+
+        T._llm, old = fake, T._llm
+        self.addCleanup(lambda: setattr(T, "_llm", old))
+
+    def test_max_new_does_not_truncate_a_resign_rejudge(self):
+        """重判不吃 --max-new:截断一次就等于把没轮到的那批旧判定扔了。"""
+        self._stub()
+        got = T.classify(self.taxo, self.items, model="stub", workers=1,
+                         batch=40, max_new=40, log=lambda *_: None)
+        self.assertTrue(got.complete)
+        self.assertTrue(got.migrating)
+        self.assertEqual(len(got.codes), 101)
+        # 判完才换上正式缓存,半成品文件收干净
+        self.assertEqual(T.load_cache(self.taxo), got.codes)
+        self.assertFalse(T.migrate_path(self.taxo).exists())
+
+    def test_incomplete_rejudge_keeps_the_old_cache(self):
+        """有批次失败 → 正式缓存一个字节不动,进度攒在半成品文件里等下次。"""
+        self._stub(fail_batches=(1,))
+        got = T.classify(self.taxo, self.items, model="stub", workers=1,
+                         batch=40, max_new=None, log=lambda *_: None)
+        self.assertFalse(got.complete)
+        self.assertEqual(got.pending, 40)
+        self.assertEqual(T.cache_path(T.SKILLS).read_text(encoding="utf-8"),
+                         self.stale_bytes)
+        self.assertEqual(T.load_raw(self.taxo, T.migrate_path(self.taxo))[0],
+                         got.codes)
+
+        # 下一轮只补没判到的那 40 条,补齐后才换上正式缓存
+        self._stub()
+        again = T.classify(self.taxo, self.items, model="stub", workers=1,
+                           batch=40, max_new=40, log=lambda *_: None)
+        self.assertTrue(again.complete)
+        self.assertEqual(len(again.codes), 101)
+        self.assertEqual(self.calls, 1)
+        self.assertEqual(T.load_cache(self.taxo), again.codes)
+        self.assertFalse(T.migrate_path(self.taxo).exists())
+
+    def test_incomplete_rejudge_does_not_overwrite_the_page(self):
+        """半份结果不许盖掉好页面(哪怕已经判出来几十条,classified > 0)。"""
+        self._stub(fail_batches=(1,))
+        out_dir = Path(self.tmp.name) / "vault"
+        out_dir.mkdir()
+        page = out_dir / B.VIEWS["skills"]["out"]
+        page.write_text("KNOWN-GOOD-OLD-PAGE", encoding="utf-8")
+        groups = [_group(n, nm, topics=["skill工具"]) for n, nm, _ in self.items]
+
+        old_taxo = B.VIEWS["skills"]["taxo"]
+        B.VIEWS["skills"]["taxo"] = self.taxo
+        self.addCleanup(lambda: B.VIEWS["skills"].__setitem__("taxo", old_taxo))
+        with self.assertRaises(SystemExit):
+            B.build_one("skills", groups, use_llm=True, max_new=None,
+                        model="stub", workers=1, out_dir=out_dir)
+        self.assertEqual(page.read_text(encoding="utf-8"), "KNOWN-GOOD-OLD-PAGE")
 
 
 class BuildDataTest(unittest.TestCase):
