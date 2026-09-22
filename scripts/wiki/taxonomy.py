@@ -17,14 +17,16 @@ code,分区因此稳定,改类目时 bump `Taxonomy.sig()` 会自动触发全量
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from hashlib import blake2b
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 
 REPO = Path(__file__).resolve().parents[2]
 CACHE_DIR = REPO / "data"
@@ -188,7 +190,8 @@ TAXONOMIES = {t.key: t for t in (PROJECTS, SKILLS)}
 
 # ── 缓存 ───────────────────────────────────────────────────────────────────────
 
-_io_lock = Lock()
+# 可重入:publish_lock 持着它再走 save_cache(那里面也要这把锁)
+_io_lock = RLock()
 
 
 def cache_path(taxo: Taxonomy) -> Path:
@@ -206,6 +209,31 @@ def staging_path(taxo: Taxonomy) -> Path:
     (2026-09-22 第 6 轮审查发现)。
     """
     return CACHE_DIR / f"taxonomy_{taxo.key}.staging.json"
+
+
+@contextmanager
+def publish_lock(taxo: Taxonomy):
+    """发布这一张图的跨进程独占锁(验收基线 → 落页面 → 提交缓存整段)。
+
+    页面和缓存是两个文件、两次 rename,各自原子挡不住两个 writer 交错:A 写完
+    页面 → B 写页面并提交 B 的缓存 → A 再提交 A 的缓存,两个进程都以 0 退出,
+    最终页面来自 B 而缓存来自 A,下一轮又拿 A 的缓存把页面刷回去,一路没有任何
+    告警(2026-09-22 复审第 3 轮发现)。CLI、wiki_daily 子进程、手动重跑都是
+    独立进程,进程内的锁管不着,所以锁在文件上。
+
+    锁的是**单独的 lockfile**,不是缓存或页面本身:那两个都是 rename 换文件,
+    锁着的 inode 会被换走;lockfile 也只创建不删除,unlink 会让「A 持锁 →
+    B 删文件 → C 新建再持锁」出现两个持锁者(和 secrets.json 那把锁同一套理由)。
+    """
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    p = CACHE_DIR / f"taxonomy_{taxo.key}.publish.lock"
+    with _io_lock:                       # 同进程内的并发先在这儿排队
+        fh = p.open("a+")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            fh.close()                   # 关闭即释放 flock
 
 
 def load_raw(taxo: Taxonomy, path: Path | None = None) -> tuple[dict[str, str], dict[str, str]]:
@@ -360,10 +388,12 @@ class Verdicts:
 # 补不齐也不放宽 promote 的判据,只是少一次「因为漏一条而整轮白等」。
 _RESIGN_RETRIES = 2
 
-# 「这一趟等于没判」的判据:void(待归类 / 不是 skill)占比到了 VOID_SHARE 就不作数。
-# 不是只有 100% 才算坏——1 条正常 + 100 条待归类发出去也是一张废页,而且会把那
-# 100 条固化进正式缓存。条数少于 VOID_MIN_N 时只认 100%:新进来两三条确实判不
-# 出来是正常的,按比例算会把正常增量也拦下。真实数据的 void 占比在 2% 上下。
+# 「这一趟等于没判」的判据:**这一趟新拿到的判定**里,落在 void(待归类 /
+# 不是 skill)上的占到 VOID_SHARE 就不作数。分母只算新判定——拿整份缓存当分母
+# 的话,3188 条缓存能把「新增 400 条全废」稀释成 12.6%,整批失败照样入库。
+# 不是只有 100% 才算坏:1 条正常 + 100 条待归类发出去也是一张废页,而且会把那
+# 100 条固化进正式缓存。反过来,少于 VOID_MIN_N 条时连 100% 也不算坏:skill
+# 候选里近四分之一本来就判「不是 skill」,某天只进来两三条、碰巧全是它是正常的。
 VOID_SHARE = 0.9
 VOID_MIN_N = 20
 
@@ -396,6 +426,7 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
     """
     codes, names = load_raw(taxo)
     n_official = len(codes)
+    base = set(codes)          # 正式缓存里已经有的那些(重判时这里是空的)
     stale = 0 if codes else stale_cache_size(taxo)
     migrating = bool(stale)
     stage = staging_path(taxo)
@@ -422,21 +453,27 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
             log(f"  [{taxo.key}] {why};正式缓存与旧图原样保留")
             return Verdicts(codes, False, migrating, left, reason=why)
         void = void_codes | {taxo.fallback}
-        n_void = sum(1 for c in codes.values() if c in void)
-        degenerate = n_void == len(codes) or (
-            len(codes) >= VOID_MIN_N and n_void >= len(codes) * VOID_SHARE)
-        if codes and degenerate and not allow_degenerate:
-            # 判出来的东西压在「等于没判」的那几个 code 上(全待归类、skill 全判成
-            # 「不是 skill」、或者 101 条里 100 条待归类),这不是判定结果,是这一趟
-            # 坏了(提示词/模型/中转站)。**不是只有 100% 才算坏**:1 条正常 +
-            # 100 条 fallback 一样会被发成一张满屏待归类的页面,还把 100 条
-            # fallback 提交进正式缓存,之后全命中、再不重试(2026-09-22 复审第 2 轮
-            # 发现)。条数太少时只认 100%——几条新条目确实判不出来是正常的。
+        # **分母是这一趟新拿到的判定**,不是整份缓存(续上的暂存算这一趟的)。
+        # 拿全部缓存当分母的话,缓存越大越掩盖问题:3188 条的正式缓存下,即使
+        # 新增的 400 条全是 void,占比也只有 12.6%,整批失败的增量照样入库、
+        # 下一轮全命中缓存再不重试(2026-09-22 复审第 3 轮发现)。
+        fresh = {n: c for n, c in codes.items() if n not in base}
+        n_void = sum(1 for c in fresh.values() if c in void)
+        degenerate = len(fresh) >= VOID_MIN_N and n_void >= len(fresh) * VOID_SHARE
+        if degenerate and not allow_degenerate:
+            # 这一趟拿到的判定压倒性地落在「等于没判」的那几个 code 上(全待归类、
+            # skill 全判成「不是 skill」、或者 101 条里 100 条待归类),这不是判定
+            # 结果,是这一趟坏了(提示词/模型/中转站)。**不是只有 100% 才算坏**:
+            # 1 条正常 + 100 条 fallback 一样会被发成一张满屏待归类的页面,还把
+            # 那 100 条固化进正式缓存(2026-09-22 复审第 2 轮发现)。反过来,
+            # 少于 VOID_MIN_N 条时连 100% 也不算:skill 候选里本来就有近四分之一
+            # 判出来「不是 skill」,某天只进来两三条、碰巧全是它,那是正常结果,
+            # 按坏结果拦下会让图谱天天红着、还得人工加 --allow-shrink 才能过。
             # 暂存一并扔掉:留着的话下一轮全命中、不再问模型,同一个坏结果
             # 会一直卡在那儿(2026-09-22 第 4、5 轮审查发现)。
             stage.unlink(missing_ok=True)
-            share = "全" if n_void == len(codes) else f"{n_void}/{len(codes)} 条"
-            why = (f"{'重判' if migrating else '归类'}结果 {share}落在 "
+            share = "全" if n_void == len(fresh) else f"{n_void}/{len(fresh)} 条"
+            why = (f"{'重判' if migrating else '本轮新判'}结果 {share}落在 "
                    f"{sorted(void)} 上(等于什么也没判出来),这一趟不作数,下次重判")
             log(f"  [{taxo.key}] {why};正式缓存与旧图原样保留")
             return Verdicts(codes, False, migrating, n_void, reason=why)

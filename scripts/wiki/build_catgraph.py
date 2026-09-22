@@ -156,25 +156,34 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
     if not res.complete:
         raise SystemExit(f"[{kind}] {res.reason};"
                          f"{'拒绝覆盖已有的 ' + out.name if out.exists() else '拒绝发布 ' + out.name}")
-    # 判定是完整的,但出来的图塌了。首次生成(还没有旧图)不拦,那时如实反映。
-    bad = quality_problem(meta, picked, out, allow_shrink=allow_shrink)
-    if bad and out.exists():
-        # 这份判定不作数,半成品一起扔掉,免得下一轮全命中缓存、不再问模型
-        res.discard()
-        raise SystemExit(
-            f"[{kind}] {bad},拒绝覆盖已有的 {out.name};"
-            f"先确认模型配置/缓存文件是否正常,确认这就是预期结果就加 "
-            f"--allow-shrink 重跑")
-    _atomic_write(out, P.render(
+    html = P.render(
         data, title=v["title"], h1=v["h1"], sub=v["sub"], accent=v["accent"],
         foot=P.foot_html(meta, v["unit"]), repo_toggle=v["repo_toggle"],
         other_group=taxo.get(taxo.fallback).group,
-    ))
-    # 新图验收通过、也落盘了,这才把重判的新结论换上正式缓存。**顺序不能反**:
-    # 先换缓存再校验的话,上面任何一道拦截都只保住页面保不住缓存——那份还能用的
-    # 旧缓存已经没了,之后每轮都命中新缓存、不再问模型,页面就再也更新不了
-    # (2026-09-22 第 4 轮审查发现)。写页面失败同理:没提交,下次重来。
-    res.commit()
+    )
+    # **验收 → 落页 → 提交缓存这一段要独占**(跨进程锁,见 taxonomy.publish_lock)。
+    # 页面和缓存各自 rename 只保证单个文件不是半截的,管不住两个 writer 交错:
+    # A 写完页面、B 写页面又提交了 B 的缓存、A 再提交 A 的缓存——两个进程都以 0
+    # 退出,最终页面来自 B、缓存来自 A,下一轮又拿 A 的缓存把页面刷回去,一路
+    # 无告警(2026-09-22 复审第 3 轮发现)。验收读的基线也得在锁里,不然刚比过的
+    # 旧图转头就被另一个 writer 换掉了。
+    with T.publish_lock(taxo):
+        # 判定是完整的,但出来的图塌了。--no-llm 首次生成不拦(那时满屏待归类是
+        # 如实反映);问过模型却塌了,即使没有旧页也不许发。
+        bad = quality_problem(meta, picked, out, allow_shrink=allow_shrink)
+        if bad and (out.exists() or (use_llm and not allow_shrink)):
+            # 这份判定不作数,半成品一起扔掉,免得下一轮全命中缓存、不再问模型
+            res.discard()
+            raise SystemExit(
+                f"[{kind}] {bad},拒绝{'覆盖已有的' if out.exists() else '发布'} "
+                f"{out.name};先确认模型配置/缓存文件是否正常,确认这就是预期"
+                f"结果就加 --allow-shrink 重跑")
+        _atomic_write(out, html)
+        # 新图验收通过、也落盘了,这才把重判的新结论换上正式缓存。**顺序不能反**:
+        # 先换缓存再校验的话,上面任何一道拦截都只保住页面保不住缓存——那份还能用的
+        # 旧缓存已经没了,之后每轮都命中新缓存、不再问模型,页面就再也更新不了
+        # (2026-09-22 第 4 轮审查发现)。写页面失败同理:没提交,下次重来。
+        res.commit()
     size = out.stat().st_size / 1024
     print(f"[{kind}] 节点 {meta['total']}(已归类 {meta['classified']}) "
           f"边 {meta['edges']} 文章 {meta['arts']} → {out} ({size:.0f} KB)")

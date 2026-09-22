@@ -63,11 +63,16 @@ class PublishGateTest(unittest.TestCase):
 
     # ── ① 不作数的判定不许发 ────────────────────────────────────────────────
     def test_void_verdict_never_publishes_a_first_page(self):
-        """每条都判成 X(不是 skill)= 这一趟坏了,没有旧页也不许发、要非零退出。"""
+        """每条都判成 X(不是 skill)= 图上一个节点都不剩,没有旧页也不许发。
+
+        条数少(3 条)时归类层不按「void 占比」判坏——skill 候选里本来就有近
+        四分之一是 X;但问过模型、最后一个节点都没剩,这一页就是废的,页面这道
+        验收即使没有旧图也要拦。
+        """
         self._stub("X")
         with self.assertRaises(SystemExit) as cm:
             self._build()
-        self.assertIn("不作数", str(cm.exception))
+        self.assertIn("0 个节点", str(cm.exception))
         self.assertFalse(self.page.exists(), "不作数的判定被写成新页面了")
         self.assertFalse(T.cache_path(T.SKILLS).exists())
         self.assertFalse(T.staging_path(T.SKILLS).exists())
@@ -123,8 +128,39 @@ class PublishGateTest(unittest.TestCase):
         self._build()
         self.assertEqual(B.P.page_stats(self.page)["classified"], 101)
 
+    def test_a_whole_bad_increment_is_rejected_even_with_a_healthy_cache(self):
+        """已有 100 条正常缓存,这天新增的 20 条全部退化:同样不许入库。
+
+        复审第 3 轮:void 占比原来拿**整份缓存**当分母,缓存越大越掩盖问题——
+        20/120 = 16.7% 远够不着阈值,于是整批失败的增量照样提交,下一轮全命中
+        缓存、不再问模型,坏结果永久固化。分母得是这一趟新拿到的判定。
+        """
+        base = [_group(f"n{i}", f"名{i}", topics=["skill工具"]) for i in range(100)]
+        self.groups = base
+        self._stub("S1")
+        self._build()                                   # 100 条正常,先有一版
+        good_page = self.page.read_bytes()
+        good_cache = T.cache_path(T.SKILLS).read_bytes()
+
+        self.groups = base + [_group(f"m{i}", f"新{i}", topics=["skill工具"])
+                              for i in range(20)]
+        for run in (1, 2):                              # 第二次仍要问模型
+            with self.subTest(第几次=run):
+                self._stub(T.SKILLS.fallback)           # 新增那 20 条全废
+                with self.assertRaises(SystemExit) as cm:
+                    self._build()
+                self.assertIn("不作数", str(cm.exception))
+                self.assertEqual(self.page.read_bytes(), good_page)
+                self.assertEqual(T.cache_path(T.SKILLS).read_bytes(), good_cache)
+                self.assertFalse(T.staging_path(T.SKILLS).exists())
+
+        self._stub("S2")                                # 模型恢复 → 自己走出来
+        self._build()
+        self.assertEqual(B.P.page_stats(self.page),
+                         {"nodes": 120, "classified": 120})
+
     def test_a_few_fallbacks_are_normal(self):
-        """条数少的时候只认 100%:新来两三条确实判不出来,不该拦住整张图。"""
+        """条数少的时候连 100% 也不算坏:新来两三条确实判不出来,不该拦住整张图。"""
         self._stub("S1")
         self._build()                             # 3 条正常,先有一版
         self.groups = self.groups + [_group("新来的", "新来的", topics=["skill工具"])]
