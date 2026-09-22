@@ -28,185 +28,11 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # 同目录的子进程模板
 
-CHILD = '''\
-import json, re, sys, time
-from pathlib import Path
-REPO = Path({repo!r})
-sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "scripts" / "wiki"))
-import build_catgraph as B, taxonomy as T
-T.CACHE_DIR = Path(sys.argv[3])
-code, n, out_dir = sys.argv[1], int(sys.argv[2]), Path(sys.argv[4])
-pause_at, go = Path(sys.argv[5]), Path(sys.argv[6])
+from catgraph_children import (CHILD, KEEP_CHILD, LATE_CHILD,  # noqa: E402
+                               STALE_CHILD)
 
-def fake(prompt, model, **kw):
-    rows = re.findall(r"^(\\d+)\\. (\\S+) ::", prompt, re.M)
-    return json.dumps([{{"id": int(i), "c": code}} for i, _nm in rows])
-T._llm = fake
-
-if pause_at.name != "-":                 # A:页面落盘后停住,还没提交缓存
-    real = B._atomic_write
-    def hooked(out, text):
-        real(out, text)
-        pause_at.touch()
-        for _ in range(600):
-            if go.exists():
-                return
-            time.sleep(0.05)
-    B._atomic_write = hooked
-
-def group(i):
-    q = f"n{{i}}"
-    return {{"norm": q, "name": f"名{{i}}", "kind": "product", "summary": "简介",
-            "url": "", "n": 1, "accounts": 1, "latest": "2026-09-20",
-            "first": "2026-09-01", "topics": ["skill工具"],
-            "all_topics": ["skill工具"], "sources": ["dr-gzh-projects"],
-            "entries": [{{"url": f"https://x/{{q}}", "article_title": f"文{{i}}",
-                         "account": "号", "published": "2026-09-20"}}]}}
-
-B.build_one("skills", [group(i) for i in range(n)], use_llm=True, max_new=None,
-            model="stub", workers=1, out_dir=out_dir)
-'''
-
-# 另一种交错:B 读完「还没有正式缓存」这个基线就卡在模型那儿,等 A 发布完才醒,
-# 判出同一条的另一个结论、写完暂存就崩。下一轮必须以正式缓存为准。
-STALE_CHILD = '''\
-import json, os, re, sys, time
-from pathlib import Path
-REPO = Path({repo!r})
-sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "scripts" / "wiki"))
-import build_catgraph as B, taxonomy as T
-T.CACHE_DIR = Path(sys.argv[2])
-code, out_dir = sys.argv[1], Path(sys.argv[3])
-ready, go, asked = Path(sys.argv[4]), Path(sys.argv[5]), Path(sys.argv[6])
-crash = sys.argv[7] == "1"
-
-def fake(prompt, model, **kw):
-    asked.touch()
-    if ready.name != "-":                # B:读完基线就停在这儿,等 A 发布完
-        ready.touch()
-        for _ in range(600):
-            if go.exists():
-                break
-            time.sleep(0.05)
-    rows = re.findall(r"^(\\d+)\\. (\\S+) ::", prompt, re.M)
-    return json.dumps([{{"id": int(i), "c": code}} for i, _nm in rows])
-T._llm = fake
-
-if crash:                                # 暂存刚落盘 → 进程没了
-    real = T.save_cache
-    def hooked(taxo, codes, names, path=None, **kw):
-        real(taxo, codes, names, path, **kw)
-        if path is not None:
-            os._exit(99)
-    T.save_cache = hooked
-
-g = {{"norm": "n0", "name": "名0", "kind": "product", "summary": "简介",
-     "url": "", "n": 1, "accounts": 1, "latest": "2026-09-20",
-     "first": "2026-09-01", "topics": ["skill工具"],
-     "all_topics": ["skill工具"], "sources": ["dr-gzh-projects"],
-     "entries": [{{"url": "https://x/n0", "article_title": "文0",
-                  "account": "号", "published": "2026-09-20"}}]}}
-B.build_one("skills", [g], use_llm=True, max_new=None,
-            model="stub", workers=1, out_dir=out_dir)
-'''
-
-# 第三种交错:整轮跑完(判定、建图、渲染都在锁外做完)才停在**取发布锁之前**,
-# 等另一个 writer 发布完再进锁。基于陈旧基线的这一份不许发出去。
-LATE_CHILD = '''\
-import contextlib, json, re, sys, time
-from pathlib import Path
-REPO = Path({repo!r})
-sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "scripts" / "wiki"))
-import build_catgraph as B, taxonomy as T
-T.CACHE_DIR = Path(sys.argv[3])
-code, n, out_dir = sys.argv[1], int(sys.argv[2]), Path(sys.argv[4])
-ready, go = Path(sys.argv[5]), Path(sys.argv[6])
-use_llm = sys.argv[7] == "1"
-summary = sys.argv[8] if len(sys.argv) > 8 else "简介"
-
-def fake(prompt, model, **kw):
-    rows = re.findall(r"^(\\d+)\\. (\\S+) ::", prompt, re.M)
-    return json.dumps([{{"id": int(i), "c": code}} for i, _nm in rows])
-T._llm = fake
-
-if ready.name != "-":                    # 判完、渲染完,停在取锁之前
-    real_lock = T.publish_lock
-    @contextlib.contextmanager
-    def slow(taxo):
-        ready.touch()
-        for _ in range(600):
-            if go.exists():
-                break
-            time.sleep(0.05)
-        with real_lock(taxo):
-            yield
-    T.publish_lock = slow
-
-def group(i):
-    q = f"n{{i}}"
-    return {{"norm": q, "name": f"名{{i}}", "kind": "product", "summary": summary,
-            "url": "", "n": 1, "accounts": 1, "latest": "2026-09-20",
-            "first": "2026-09-01", "topics": ["skill工具"],
-            "all_topics": ["skill工具"], "sources": ["dr-gzh-projects"],
-            "entries": [{{"url": f"https://x/{{q}}", "article_title": f"文{{i}}",
-                         "account": "号", "published": "2026-09-20"}}]}}
-
-B.build_one("skills", [group(i) for i in range(n)], use_llm=use_llm,
-            max_new=None, model="stub" if use_llm else None,
-            workers=1, out_dir=out_dir)
-'''
-
-# 第四种交错:两个进程各判**自己独有**的一条。赢的那个把共享暂存整份覆盖、发布
-# 完又把它删掉;输的那个被 CAS 拒绝时,自己那条判定必须还在盘上(正式缓存或暂存)。
-KEEP_CHILD = '''\
-import contextlib, json, re, sys, time
-from pathlib import Path
-REPO = Path({repo!r})
-sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "scripts" / "wiki"))
-import build_catgraph as B, taxonomy as T
-T.CACHE_DIR = Path(sys.argv[3])
-norm, code, out_dir = sys.argv[1], sys.argv[2], Path(sys.argv[4])
-ready, go = Path(sys.argv[5]), Path(sys.argv[6])
-hold, hold_go = Path(sys.argv[7]), Path(sys.argv[8])
-
-def fake(prompt, model, **kw):
-    if hold.name != "-":                 # 读完基线就停在模型调用里
-        hold.touch()
-        for _ in range(600):
-            if hold_go.exists():
-                break
-            time.sleep(0.05)
-    rows = re.findall(r"^(\\d+)\\. (\\S+) ::", prompt, re.M)
-    return json.dumps([{{"id": int(i), "c": code}} for i, _nm in rows])
-T._llm = fake
-
-if ready.name != "-":                    # 判完、渲染完,停在取锁之前
-    real_lock = T.publish_lock
-    @contextlib.contextmanager
-    def slow(taxo):
-        ready.touch()
-        for _ in range(600):
-            if go.exists():
-                break
-            time.sleep(0.05)
-        with real_lock(taxo):
-            yield
-    T.publish_lock = slow
-
-g = {{"norm": norm, "name": norm, "kind": "product", "summary": "简介",
-     "url": "", "n": 1, "accounts": 1, "latest": "2026-09-20",
-     "first": "2026-09-01", "topics": ["skill工具"],
-     "all_topics": ["skill工具"], "sources": ["dr-gzh-projects"],
-     "entries": [{{"url": f"https://x/{{norm}}", "article_title": "文",
-                  "account": "号", "published": "2026-09-20"}}]}}
-B.build_one("skills", [g], use_llm=True, max_new=None,
-            model="stub", workers=1, out_dir=out_dir)
-'''
 
 
 class ConcurrentPublishTest(unittest.TestCase):
@@ -340,14 +166,14 @@ class ConcurrentPublishTest(unittest.TestCase):
         self.assertFalse(stage.exists(), "提交完的那条还留在暂存里")
 
     # ── 基于陈旧基线的那一份不许发布(判定/建图/渲染都在锁外做完) ────────────
-    def _late(self, code, n, *, wait, llm=True, summary="简介"):
+    def _late(self, code, n, *, wait, llm=True, summary="简介", fail="-"):
         late = Path(self.tmp.name) / "late.py"
         if not late.exists():
             late.write_text(LATE_CHILD.format(repo=str(REPO)), encoding="utf-8")
         return subprocess.Popen(
             [sys.executable, str(late), code, str(n), str(self.cache_dir),
              str(self.out_dir), str(self.ready if wait else Path("-")),
-             str(self.go2), "1" if llm else "0", summary],
+             str(self.go2), "1" if llm else "0", summary, fail],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def _wait_ready(self, proc):
@@ -626,6 +452,62 @@ class ConcurrentPublishTest(unittest.TestCase):
         self.assertIn("不发布", out, "期间发布过两次,旧任务却没认出来(ABA)")
         self.assertEqual(page.read_bytes(), base_a, "旧快照盖掉了最后完成的那一版")
         self.assertNotIn("STALE_SNAPSHOT", page.read_text(encoding="utf-8"))
+
+    def test_a_writer_killed_right_after_the_page_still_leaves_a_trace(self):
+        """进程死在「页面已经可见、序号还没推进」那个窗口里 → ABA 又回来了。
+
+        复审第 9 轮:序号原来是**发布完才推进**的,于是普通的 kill、宿主机重启
+        就能留下「正式产物已经变了、序号没变」。这里让两个 writer 都死在页面刚
+        落盘的那一刻,页面照样走完 A→B→A,签名逐字回到开工那一版——旧任务认不出
+        期间有两次可见的发布,静默覆盖最终页面。序号改成**动正式产物之前就推进**
+        之后,这两次都留下了痕迹。
+        """
+        seed = self._late("S1", 1, wait=False, summary="BASE_A")
+        self.assertEqual(seed.wait(timeout=120), 0, seed.communicate()[1])
+        page = self.out_dir / "graph-skills.html"
+        base_a = page.read_bytes()
+
+        stale = self._late("S1", 1, wait=True, summary="STALE_SNAPSHOT")
+        self._wait_ready(stale)
+
+        b = self._late("S1", 1, wait=False, summary="NEW_B", fail="crash_after_page")
+        self.assertEqual(b.wait(timeout=120), 99, b.communicate()[1])
+        self.assertNotEqual(page.read_bytes(), base_a, "B 的页面没落盘,交错没构造成")
+        a2 = self._late("S1", 1, wait=False, summary="BASE_A", fail="crash_after_page")
+        self.assertEqual(a2.wait(timeout=120), 99, a2.communicate()[1])
+        self.assertEqual(page.read_bytes(), base_a,
+                         "这一轮的前提没了:页面该被还原成逐字相同的 A")
+
+        self.go2.touch()
+        out, err = stale.communicate(timeout=120)
+        self.assertEqual(stale.returncode, 0, err)
+        self.assertIn("不发布", out,
+                      "期间有两次可见的发布,旧任务却没认出来(序号推进得太晚)")
+        self.assertEqual(page.read_bytes(), base_a)
+        self.assertNotIn("STALE_SNAPSHOT", page.read_text(encoding="utf-8"))
+
+    def test_a_generation_write_failure_does_not_touch_the_artifacts(self):
+        """序号写不进去就 fail-closed:这一轮连页面都不换,报错退出。
+
+        复审第 9 轮:原来那句「这一次发布本身是成功的」只打了行告警就返回 0——
+        sidecar 的一次短暂 I/O 故障,就把并发保护静默降回上一轮已经证明存在 ABA
+        的内容签名。fail-closed 之后最坏也只是这一轮不发,产物一个字节没动。
+        """
+        seed = self._late("S1", 1, wait=False, summary="BASE_A")
+        self.assertEqual(seed.wait(timeout=120), 0, seed.communicate()[1])
+        page = self.out_dir / "graph-skills.html"
+        cache = self.cache_dir / "taxonomy_skills.json"
+        base_a, base_cache = page.read_bytes(), cache.read_bytes()
+        gen = (self.cache_dir / "taxonomy_skills.gen").read_text(encoding="utf-8")
+
+        b = self._late("S1", 2, wait=False, summary="NEW_B", fail="gen_oserror")
+        out, err = b.communicate(timeout=120)
+        self.assertNotEqual(b.returncode, 0, "序号写失败还当成功发布返回了")
+        self.assertIn("序号", out + err)
+        self.assertEqual(page.read_bytes(), base_a, "fail-closed 没兜住:页面被换了")
+        self.assertEqual(cache.read_bytes(), base_cache, "缓存被换了")
+        self.assertEqual((self.cache_dir / "taxonomy_skills.gen")
+                         .read_text(encoding="utf-8"), gen)
 
 
 def T_load(path: Path) -> dict[str, str]:

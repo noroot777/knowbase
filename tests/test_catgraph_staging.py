@@ -301,7 +301,7 @@ class StagingIdentityTest(unittest.TestCase):
         self.assertTrue(first.split("-")[0].isdigit())
 
     def test_a_failed_publish_does_not_move_the_generation(self):
-        """页面验收没过 → 没发布 → 序号不许动(不然失败也算进发布序列)。"""
+        """被验收拦下(压根没走到发布动作)时,序号不动。"""
         self._stub("S1")
         self._build(200)
         before = T.read_gen(T.SKILLS)
@@ -309,6 +309,49 @@ class StagingIdentityTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self._build(400)
         self.assertEqual(T.read_gen(T.SKILLS), before)
+
+    def test_a_generation_write_failure_is_fail_closed(self):
+        """序号写不进去 → 这一轮连页面都不换(不是打行告警照常发)。"""
+        self._stub("S1")
+        self._build(1)
+        page, cache = self.page.read_bytes(), T.cache_path(T.SKILLS).read_bytes()
+        real = T.bump_gen
+
+        def boom(taxo):
+            raise OSError("simulated gen sidecar write denied")
+
+        T.bump_gen = boom
+        self.addCleanup(lambda: setattr(T, "bump_gen", real))
+        self._stub("S1")
+        with self.assertRaises(SystemExit) as cm:
+            self._build(2)
+        self.assertIn("序号", str(cm.exception))
+        self.assertEqual(self.page.read_bytes(), page, "fail-closed 没兜住")
+        self.assertEqual(T.cache_path(T.SKILLS).read_bytes(), cache)
+
+    def test_a_later_failure_leaves_the_generation_bumped_on_purpose(self):
+        """序号先推进:后面页面写失败时它多走一步——**安全的假阳性**。
+
+        别的任务看到基线变了会多拒一轮(退出码 0,下一轮自己就好了),而正式产物
+        一个字节都没动。反过来「发布完才推进」留下的是危险的假阴性:产物变了、
+        序号没变,A→B→A 之后旧任务认不出期间发生过发布(复审第 9 轮发现)。
+        """
+        self._stub("S1")
+        self._build(1)
+        before, page = T.read_gen(T.SKILLS), self.page.read_bytes()
+        real = B._atomic_write
+
+        def boom(out, data):
+            raise OSError("simulated disk full")
+
+        B._atomic_write = boom
+        self.addCleanup(lambda: setattr(B, "_atomic_write", real))
+        self._stub("S1")
+        with self.assertRaises(OSError):
+            self._build(2)
+        self.assertNotEqual(T.read_gen(T.SKILLS), before)
+        self.assertEqual(self.page.read_bytes(), page, "正式页面不该被动过")
+        self.assertEqual(T_load(T.cache_path(T.SKILLS)), {"n0": "S1"})
 
 
 def T_load(path: Path) -> dict[str, str]:

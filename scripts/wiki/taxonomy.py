@@ -125,16 +125,20 @@ def read_gen(taxo: Taxonomy) -> str:
 
 
 def bump_gen(taxo: Taxonomy) -> str:
-    """整次发布都成功之后推进发布序号(只能在发布锁里调)。
+    """推进发布序号。**在动任何正式产物之前调**(见 `build_catgraph._publish`)。
 
     **内容签名挡不住 ABA**:任务跑的这段时间里正式产物经历 A→B→A(一次回退、
     一次恢复,或者干脆是同样输入的重发),结束时缓存内容和页面字节与开工时逐字
     相同,旧任务就认定「没人发布过」,把自己那份陈旧快照发出去——期间明明有两次
     发布成功完成(2026-09-23 复审第 8 轮发现)。内容哈希回答的是「东西一不一样」,
-    回答不了「发布序列有没有往前走」,后者只能靠一个每次成功发布都换一个值的序号。
+    回答不了「发布序列有没有往前走」,后者只能靠一个每次都换值的序号。
 
     序号带一个自增计数(给人看「发布过多少次」)和一段随机后缀(文件丢了、计数
-    从头开始时也不会撞回旧值)。写盘是唯一临时文件 + rename。
+    从头开始时也不会撞回旧值)。写盘是唯一临时文件 + rename,而且**落盘要落实**
+    (fsync 文件 + fsync 目录):序号存在的全部意义就是在别的进程、别的时间点被
+    读到,只写进页缓存的话宿主机一重启它就没了,ABA 防护跟着一起没
+    (2026-09-23 复审第 9 轮发现)。失败就把异常抛出去——调用方据此放弃这一轮,
+    一个字节都不改。
     """
     head = read_gen(taxo).split("-", 1)[0]
     n = int(head) + 1 if head.isdigit() else 1
@@ -143,8 +147,20 @@ def bump_gen(taxo: Taxonomy) -> str:
     tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
     token = f"{n}-{os.urandom(6).hex()}"
     with _io_lock:
-        tmp.write_text(token, encoding="utf-8")
-        tmp.replace(p)
+        try:
+            with tmp.open("w", encoding="utf-8") as fh:
+                fh.write(token)
+                fh.flush()
+                os.fsync(fh.fileno())
+            tmp.replace(p)
+            dfd = os.open(p.parent, os.O_RDONLY)      # rename 本身也要落实
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
     return token
 
 
