@@ -69,11 +69,21 @@ def _load_entry(path: Path) -> dict | None:
 
 
 def _pick_url(urls: list[str]) -> str:
-    """多条记录的 project_url 可能不一致:优先 github,其次第一个非空。"""
-    for u in urls:
-        if "github.com" in u:
-            return u
-    return urls[0] if urls else ""
+    """多条记录的 project_url 可能不一致:优先仓库地址(仓库里再优先 github),
+    其次第一个非空。
+
+    「有没有仓库」必须和 `repo_host` 同一套口径。原来只认字面量 github.com,
+    于是一个工具在 A 文中被写成官网、B 文中给了 Hugging Face/Gitee 仓库时,
+    聚合结果取了官网——图谱那头的「只看有仓库」按聚合后的这一个 url 判,这个
+    条目就被当成没有仓库筛掉了,open-weight 模型那几个连开源项目图谱都进不去
+    (2026-09-22 第 1 轮审查发现,实测 7 个条目受影响)。
+    """
+    from kb.repo_url import repo_host
+
+    repos = [u for u in urls if repo_host(u)]
+    pool = repos or urls
+    return next((u for u in pool if repo_host(u) == "github.com"),
+                pool[0] if pool else "")
 
 
 def _promo_conn():

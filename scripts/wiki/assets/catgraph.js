@@ -209,13 +209,25 @@ function resort() {
 /* ── 连线 ── */
 const svg = document.getElementById("edges");
 let selected = -1;
+/* 本次交互点的是哪一份副本。同一个节点在「近 30 天热议」和它的分类区里各有一份
+   pill,一律取首个可见副本的话:点分类区那份会被 scrollIntoView 拽回顶部的热议
+   区,连线也从热议那份出发——用户刚点的位置直接被滚出视口
+   (2026-09-22 第 1 轮审查发现)。没有来源元素的入口(面板上的关联按钮、搜索
+   回车)仍退回首个可见副本。 */
+let anchor = null;
+function livePill(i) {
+  const els = pills[i] || [];
+  if (anchor && els.indexOf(anchor) >= 0 && !anchor.classList.contains("hide"))
+    return anchor;
+  return els.find(e => !e.classList.contains("hide"));
+}
 function center(el) {
   const r = el.getBoundingClientRect();
   return [r.left + r.width / 2 + scrollX, r.top + r.height / 2 + scrollY];
 }
 function drawEdges(i) {
   svg.innerHTML = "";
-  const src = (pills[i] || []).find(e => !e.classList.contains("hide"));
+  const src = livePill(i);
   if (!src) return;
   svg.setAttribute("width", document.documentElement.scrollWidth);
   svg.setAttribute("height", document.documentElement.scrollHeight);
@@ -245,8 +257,9 @@ function trackEdges(dur = 340) {
 }
 
 /* ── 选中 / 详情面板 ── */
-function select(i) {
+function select(i, from) {
   selected = i;
+  anchor = from || null;     // 用户点的那一份副本,滚动和连线都以它为准
   document.body.classList.add("hasSel");
   pills.forEach(els => els && els.forEach(el => el.classList.remove("sel", "lit")));
   (pills[i] || []).forEach(el => {
@@ -257,8 +270,13 @@ function select(i) {
     (pills[o] || []).forEach(el => el.classList.add("lit")));
   panelFor(i);
   trackEdges();
-  const vis = (pills[i] || []).find(e => !e.classList.contains("hide"));
-  if (vis) vis.scrollIntoView({ block: "center", behavior: "smooth" });
+  // 滚动要**等面板挤压布局落定之后**再做:面板一开,主栏变窄、pill 整体重排,
+  // 同一个 pill 的文档坐标能挪上千像素——立刻滚是按旧坐标滚,用户刚点的那一份
+  // 照样被甩出视口(和 scrollIntoView 选错副本是同一个症状的两半)。
+  setTimeout(() => {
+    const el = livePill(i);
+    if (el && selected === i) el.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, 360);
 }
 
 function panelFor(i) {
@@ -313,6 +331,7 @@ function panelFor(i) {
 
 function reset() {
   selected = -1;
+  anchor = null;
   document.body.classList.remove("hasSel", "panelOpen");
   pills.forEach(els => els && els.forEach(el => el.classList.remove("sel", "lit")));
   svg.innerHTML = "";
@@ -325,7 +344,7 @@ document.addEventListener("click", e => {
   const go = e.target.closest("[data-go]");
   if (go) { e.stopPropagation(); select(+go.dataset.go); return; }
   const pill = e.target.closest(".pill");
-  if (pill) { e.stopPropagation(); select(+pill.dataset.i); return; }
+  if (pill) { e.stopPropagation(); select(+pill.dataset.i, pill); return; }
   if (e.target.closest("#panel") || e.target.closest("header")) return;
   reset();
 });

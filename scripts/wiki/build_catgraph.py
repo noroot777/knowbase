@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -100,6 +101,23 @@ def quality_problem(meta: dict, picked: list, out: Path, *,
     return ""
 
 
+def _atomic_write(out: Path, text: str) -> None:
+    """页面落盘用「同目录唯一临时文件 + rename」,别直接往正式产物上写。
+
+    直接 `write_text` 的话,磁盘满/进程被杀/写到一半抛异常都会先把正式页面截成
+    半截,再报错出去——缓存那头的两阶段提交还完好,kb-web 却已经在拿一份坏 HTML
+    对外服务了(2026-09-22 第 1 轮审查发现)。同目录才能保证 rename 是同一个
+    文件系统内的原子替换;临时文件名带 pid,两个进程同时生成不会抢同一个 tmp。
+    """
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(out)                      # 失败前旧页面逐字节不变
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | None,
               model, workers: int, out_dir: Path, allow_shrink: bool = False) -> Path:
     v = VIEWS[kind]
@@ -121,9 +139,13 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
     meta = data["meta"]
     out = out_dir / v["out"]
     # 判定本身就不能用(重判判了一半、或判出来的东西不作数):原因由 classify
-    # 给,该留的半成品它留着、该扔的它扔了,这里只负责不拿它盖掉好页面。
-    if not res.complete and out.exists():
-        raise SystemExit(f"[{kind}] {res.reason};拒绝覆盖已有的 {out.name}")
+    # 给,该留的半成品它留着、该扔的它扔了,这里只负责不拿它发出去。**跟有没有
+    # 旧页面无关**——首次生成、页面被人删了或产物丢了的时候,把一份已经判定
+    # 「不作数」的结果写成 0 节点的新页面、还以退出码 0 收场,管道面板照样绿
+    # (2026-09-22 第 1 轮审查发现)。没有旧页面可保不等于坏结果可以发。
+    if not res.complete:
+        raise SystemExit(f"[{kind}] {res.reason};"
+                         f"{'拒绝覆盖已有的 ' + out.name if out.exists() else '拒绝发布 ' + out.name}")
     # 判定是完整的,但出来的图塌了。首次生成(还没有旧图)不拦,那时如实反映。
     bad = quality_problem(meta, picked, out, allow_shrink=allow_shrink)
     if bad and out.exists():
@@ -133,11 +155,11 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
             f"[{kind}] {bad},拒绝覆盖已有的 {out.name};"
             f"先确认模型配置/缓存文件是否正常,确认这就是预期结果就加 "
             f"--allow-shrink 重跑")
-    out.write_text(P.render(
+    _atomic_write(out, P.render(
         data, title=v["title"], h1=v["h1"], sub=v["sub"], accent=v["accent"],
         foot=P.foot_html(meta, v["unit"]), repo_toggle=v["repo_toggle"],
         other_group=taxo.get(taxo.fallback).group,
-    ), encoding="utf-8")
+    ))
     # 新图验收通过、也落盘了,这才把重判的新结论换上正式缓存。**顺序不能反**:
     # 先换缓存再校验的话,上面任何一道拦截都只保住页面保不住缓存——那份还能用的
     # 旧缓存已经没了,之后每轮都命中新缓存、不再问模型,页面就再也更新不了

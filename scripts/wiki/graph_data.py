@@ -16,44 +16,18 @@ import sys
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 from pathlib import Path
-from urllib.parse import urlsplit
 
 REPO = Path(__file__).resolve().parents[2]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+# 「是不是仓库」的口径只有 kb.repo_url 一份:图鉴聚合 project_url 时用它挑仓库
+# 地址,这里用它筛「只看有仓库」。各写一份的话,聚合挑了官网、这边按仓库判,
+# 同一个条目在两层里的结论就对不上(2026-09-22 第 1 轮审查发现)。
+from kb.repo_url import REPO_HOSTS, repo_host, safe_url  # noqa: E402,F401
 
 ARTS_PER_NODE = 10      # 面板里「出自这些文章」最多列几条
 EDGES_PER_NODE = 10     # 每个节点最多留几条共现边(全留会让边表比节点表还大)
-
-# 代码托管站。「只看有仓库」筛的必须是这个,不能退化成「有任意 http 网址」——
-# project_url 里官网/文档站/应用商店/博客都有(opencode.ai、prettier.io…),
-# 按有没有 URL 筛的话开关名不副实。判定按解析出的 hostname 精确比对或后缀匹配,
-# 不用字符串包含:`github.com.evil.cn` 那种也会命中包含判断。
-REPO_HOSTS = frozenset({
-    "github.com", "gitlab.com", "gitee.com", "bitbucket.org", "codeberg.org",
-    "sourceforge.net", "git.sr.ht", "gitcode.com", "gitcode.net",
-    "huggingface.co", "hf.co", "modelscope.cn", "gitea.com", "framagit.org",
-})
-
-
-def _safe_url(u: str) -> str:
-    """只放行 http(s)。project_url 是 LLM 从公众号正文里读出来写进 frontmatter
-    的,`javascript:` 这种点一下就执行。"""
-    u = (u or "").strip()
-    return u if u[:7].lower() == "http://" or u[:8].lower() == "https://" else ""
-
-
-def repo_host(u: str) -> str:
-    """URL 指向代码托管站时返回归一后的主机名,否则空串。"""
-    u = _safe_url(u)
-    if not u:
-        return ""
-    try:
-        host = (urlsplit(u).hostname or "").lower()
-    except ValueError:
-        return ""
-    host = host[4:] if host.startswith("www.") else host
-    if host in REPO_HOSTS:
-        return host
-    return next((h for h in REPO_HOSTS if host.endswith("." + h)), "")
 
 
 def _kb():
@@ -118,7 +92,7 @@ def build(groups: list[dict], codes: dict[str, str], taxo,
         if key not in art_id:
             art_id[key] = len(arts)
             arts.append([e["article_title"][:70], e["account"],
-                         e["published"][:10], _safe_url(e["url"])])
+                         e["published"][:10], safe_url(e["url"])])
         return art_id[key]
 
     nodes: list[dict] = []
@@ -137,7 +111,7 @@ def build(groups: list[dict], codes: dict[str, str], taxo,
         nodes.append({
             "l": g["name"], "q": g["norm"], "c": code,
             "s": (g["summary"] or "").strip().replace("\n", " ")[:150],
-            "u": _safe_url(g["url"]), "n": g["n"], "k": g["kind"],
+            "u": safe_url(g["url"]), "n": g["n"], "k": g["kind"],
             # rp = 这个 URL 是不是代码仓库(「只看有仓库」筛它,面板据此改链接文案)
             **({"rp": host} if host else {}),
             "a": g["accounts"], "f": g["first"], "t": g["latest"],
