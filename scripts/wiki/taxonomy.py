@@ -115,7 +115,8 @@ def load_cache(taxo: Taxonomy) -> dict[str, str]:
 
 
 def cache_fingerprint(taxo: Taxonomy, codes: dict[str, str] | None = None) -> str:
-    """正式缓存的内容指纹(判定开始时记一份,发布前在锁里再取一份比对)。
+    """正式缓存的内容指纹——发布基线的**一半**(另一半是正式页面,见
+    `build_catgraph.publish_sig`:这两个文件一起才是「上一次发布出去的那一版」)。
 
     发布锁只保证两次发布动作不交错,认不出**后拿到锁的那个是基于陈旧基线跑出来
     的**:旧任务读完空基线、慢慢判、停在锁外;新任务发布了 40 节点的页面和 40 条
@@ -160,6 +161,46 @@ def _rewrite_stage(taxo: Taxonomy, stage: Path, codes: dict[str, str],
                    names, stage, runs=kept_runs)
     except OSError as e:
         print(f"[{taxo.key}] 暂存没能改写({e}),不影响这一轮的结果", file=sys.stderr)
+
+
+def _restash(taxo: Taxonomy, mine: dict[str, str], names: dict[str, str]) -> None:
+    """把「这一轮判出来、还没进正式缓存」的判定**并回**共享暂存(读-改-写)。
+
+    暂存是所有 writer 共用的一个文件,而且是整份覆盖的:我们在分类阶段写过一次
+    不代表它还在盘上——另一个 writer 随后写一次就把我们那份盖掉了,它发布成功
+    还会把整个暂存删掉。于是 CAS 拒绝发布时那句「判出来的判定留在暂存里,一条都
+    不丢」并不成立:唯一的那条判定既不在正式缓存也不在暂存,模型钱白花,日志还
+    说留下了(2026-09-23 复审第 7 轮发现)。
+
+    所以不发布之前先在**发布锁里**重新读一次暂存、把自己的并进去再写回:
+    ①正式缓存已经有的 key 一律不并(以正式缓存为准,同 `classify` 里那段
+    `clash`);②暂存里已经有的 key 原样留着,不拿自己的盖(两边都是没验过的
+    半成品,重复写只会把批次身份搅乱);③自己这些单独记成一批,下一轮照样按批
+    验(见 `load_runs`)。写盘失败只告警——并不回去顶多是下一轮重判一遍,不该
+    让它把「不发布」这条本来就安全的路径变成异常退出。
+    """
+    if not mine:
+        return
+    official = load_cache(taxo)
+    stage = staging_path(taxo)
+    raw, pnames = load_raw(taxo, stage)
+    part = {n: c for n, c in raw.items() if n not in official}
+    runs = load_runs(stage, part)
+    add = sorted(n for n in mine if n not in official and n not in part)
+    if not add and part == raw:
+        return                              # 盘上那份已经是对的,不动它
+    keep = [g for g in runs if g] + ([add] if add else [])
+    if not keep:
+        _cleanup(stage, "并回暂存时发现没什么要留的,")
+        return
+    codes = dict(part)
+    codes.update({n: mine[n] for n in add})
+    kept_names = {**pnames, **{n: names.get(n, "") for n in add}}
+    try:
+        save_cache(taxo, codes, kept_names, stage, runs=keep)
+    except OSError as e:
+        print(f"[{taxo.key}] 这一轮的 {len(add)} 条判定没能并回暂存({e}),"
+              f"下一轮会重判", file=sys.stderr)
 
 
 def stale_cache_size(taxo: Taxonomy) -> int:
@@ -304,11 +345,8 @@ class Verdicts:
     pending: int = 0               # 还差多少条没判(仅重判期间有意义)
     commit_fn: object = None       # 待提交的正式缓存;None = 没什么可提交的
     discard_fn: object = None      # 扔掉半成品;None = 没有半成品要扔
+    keep_fn: object = None         # 这一轮不发布时:把自己判的并回暂存
     reason: str = ""               # complete=False 时:为什么不能用(给人看的)
-    # 这一轮是**基于哪一版正式缓存**判出来的(`cache_fingerprint`)。发布前要在
-    # 锁里拿它跟盘上的再比一次:发布锁只保证两次发布动作不交错,认不出后拿到锁
-    # 的那个是基于陈旧基线跑出来的(2026-09-23 复审第 6 轮发现)。
-    baseline: str = ""
 
     def commit(self) -> None:
         """新图验收通过、页面已落盘之后调:把半成品原子换成正式缓存。"""
@@ -324,6 +362,18 @@ class Verdicts:
         """
         if self.discard_fn is not None:
             self.discard_fn()
+
+    def keep(self) -> None:
+        """这一轮**不发布**(基线被别人换过)时调:把自己判出来的并回暂存。
+
+        共享暂存是整份覆盖的:另一个 writer 在我们判完之后写一次,就把我们这份
+        盖掉了;它发布成功还会把暂存整个删掉。所以「不发布也一条都不丢」不能靠
+        「分类阶段写过一次」——那条唯一判定可能既不在正式缓存、也不在暂存,白花
+        一次模型钱,日志还说留下了(2026-09-23 复审第 7 轮发现)。这里是读-改-写
+        地并回去,而且跑在发布锁里。
+        """
+        if self.keep_fn is not None:
+            self.keep_fn()
 
 
 # 重判时漏项的补判轮数:模型偶尔漏一条,补判只问缺的那些,批次更小更容易回全。
@@ -376,7 +426,6 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
     """
     codes, names = load_raw(taxo)
     official = dict(codes)     # 进来时的正式缓存,判「这一轮有没有新东西可提交」
-    baseline = cache_fingerprint(taxo, official)   # 发布前在锁里再比一次
     base = set(codes)          # 正式缓存里已经有的那些(重判时这里是空的)
     stale = 0 if codes else stale_cache_size(taxo)
     migrating = bool(stale)
@@ -433,8 +482,7 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
             why = (f"分类规则改过,全量重判还没做完(已判 {len(codes)} 条,"
                    f"还差 {left} 条:批次失败或模型漏项),进度已存盘,下次跑接着判")
             log(f"  [{taxo.key}] {why};正式缓存与旧图原样保留")
-            return Verdicts(codes, False, migrating, left, reason=why,
-                            baseline=baseline)
+            return Verdicts(codes, False, migrating, left, reason=why)
         # **分母是这一趟自己判的那些**:不是整份缓存(3188 条缓存能把「新增 400 条
         # 全废」稀释成 12.6%,2026-09-22 复审第 3 轮发现),也不含从暂存里续上的
         # 批次(那些已经在上面各验过一遍了;混在一起算,180 条正常的照样能把 20 条
@@ -458,19 +506,23 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
             why = (f"{'重判' if migrating else '本轮新判'}结果 {share}落在 "
                    f"{sorted(void)} 上(等于什么也没判出来),这一趟不作数,下次重判")
             log(f"  [{taxo.key}] {why};正式缓存与旧图原样保留")
-            return Verdicts(codes, False, migrating, n_void, reason=why,
-                            baseline=baseline)
+            return Verdicts(codes, False, migrating, n_void, reason=why)
+        # 这一轮不发布(基线被别人换过)时,把自己判的并回暂存——共享暂存可能早
+        # 被别的 writer 盖掉或删掉了,分类阶段写过一次不代表它还在盘上(见 _restash)。
+        unpublished = {n: c for n, c in codes.items() if n not in base}
+        keep = (lambda snap=dict(unpublished), nm=dict(names):
+                _restash(taxo, snap, nm))
         if not migrating and codes == official:
             # 「有没有新东西可提交」按**内容**比,不是比条数:旧 writer 留下的
             # 同名判定被上面摘掉之后条数一样、内容也一样才叫没事干;只比长度的话
             # 「盖掉一条又补进一条」这种也会被当成无事可提交(复审第 5 轮发现)。
-            return Verdicts(codes, True, False, left, baseline=baseline)
+            return Verdicts(codes, True, False, left, keep_fn=keep)
         log(f"  [{taxo.key}] {len(codes)} 条待提交(新图验收通过后才换上正式缓存)")
         ready, kept = dict(codes), dict(names)
         return Verdicts(codes, True, migrating, left,
                         lambda: _promote(taxo, ready, kept),
                         lambda: _cleanup(stage, "不作数的暂存"),
-                        baseline=baseline)
+                        keep_fn=keep)
 
     pending = [it for it in items if it[0] not in codes]
     if max_new is not None and len(pending) > max_new and not migrating:

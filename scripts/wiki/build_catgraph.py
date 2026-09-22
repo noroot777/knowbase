@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from hashlib import blake2b
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -65,6 +66,34 @@ VIEWS = {
 
 
 MIN_KEEP = 0.5     # 新图的节点数/已归类数不得低于旧图的这个比例(系统性误判的兜底)
+
+
+def publish_sig(kind: str, out_dir: Path) -> str:
+    """一次发布的基线:**正式缓存内容 + 正式页面字节**。
+
+    一轮构建的产物有两个文件,基线也得是两个。只比分类缓存的话,页面这一层
+    完全没保护——而页面还取决于锁外读到的那份候选快照(候选数量、名字、简介、
+    链接、提及次数、文章列表、共现边),这些变了缓存可以一个字节都不动:
+
+    - `--no-llm` 撞上新候选时只把它显示成「待归类」,压根不写缓存;
+    - 默认构建全部命中缓存时,简介/热度/文章关系变了也不写缓存;
+    - 长期缓存里本来就躺着当前候选快照里没有的 norm。
+
+    于是旧任务能以退出码 0 把新任务刚发的 40 节点页面刷回 30 节点(新候选静默
+    消失)、把新版简介刷回旧版,缓存指纹自始至终一模一样,CAS 认不出来
+    (2026-09-23 复审第 7 轮发现)。
+
+    **要在读候选之前取**(`main()` 里是 `load_groups()` 之前):候选快照一读完,
+    我们手里的输入就定死了,这之后别人发布的任何一版都比我们新。页面按字节算,
+    因为页面里没有「只是重排、内容等价」这回事——同样的输入渲染出同样的字节。
+    """
+    v = VIEWS[kind]
+    out = out_dir / v["out"]
+    try:
+        page = blake2b(out.read_bytes(), digest_size=12).hexdigest()
+    except OSError:
+        page = "-"                                   # 还没有页面
+    return f"{T.cache_fingerprint(v['taxo'])}:{page}"
 
 
 def quality_problem(meta: dict, picked: list, out: Path, *,
@@ -157,9 +186,15 @@ def _publish(out: Path, html: str, res, kind: str) -> None:
 
 
 def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | None,
-              model, workers: int, out_dir: Path, allow_shrink: bool = False) -> Path:
+              model, workers: int, out_dir: Path, allow_shrink: bool = False,
+              base_sig: str | None = None) -> Path:
+    """`base_sig`:这一轮是基于哪一版正式产物跑出来的(见 `publish_sig`)。
+    调用方在**读候选之前**取一份传进来;不传就现取一份(直接调这个函数的路径,
+    比如测试)。"""
     v = VIEWS[kind]
     taxo = v["taxo"]
+    if base_sig is None:
+        base_sig = publish_sig(kind, out_dir)
     picked = G.rank(v["select"](groups))
     print(f"[{kind}] 候选 {len(picked)} 组")
 
@@ -171,9 +206,9 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
         codes = res.codes
     else:
         codes = T.load_cache(taxo)
-        # --no-llm 这条路的 commit 是空操作,更容易被忽略:它只会把旧页面重发一遍,
-        # 于是页面 30 节点、缓存 40 条,两边长期对不上。基线一样要记。
-        res = T.Verdicts(codes, baseline=T.cache_fingerprint(taxo, codes))
+        # --no-llm 这条路一样要比基线:它的 commit 是空操作,更容易被忽略,可它
+        # 照样会把整张页面重发一遍——把别人刚发的新候选/新简介刷回旧快照。
+        res = T.Verdicts(codes)
         print(f"  [{kind}] --no-llm:只用缓存里的 {len(codes)} 条归类")
 
     data = G.build(picked, codes, taxo, drop_codes=v["drop"])
@@ -199,19 +234,20 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
     # 无告警(2026-09-22 复审第 3 轮发现)。验收读的基线也得在锁里,不然刚比过的
     # 旧图转头就被另一个 writer 换掉了。
     with T.publish_lock(taxo):
-        now = T.cache_fingerprint(taxo)
-        if now != res.baseline:
-            # **读基线 → 判定 → 建图 → 渲染那一大段跑在锁外**(判定要问模型,几分钟
+        now = publish_sig(kind, out_dir)
+        if now != base_sig:
+            # **读候选 → 判定 → 建图 → 渲染那一大段跑在锁外**(判定要问模型,几分钟
             # 起,攥着锁不放会把另一条路堵死),所以锁只保证两次发布动作不交错,认不
-            # 出后拿到锁的这个是基于陈旧基线跑出来的:旧任务能以退出码 0 把刚发布的
-            # 40 节点页面刷回 30 节点、连新增的 10 条缓存一起抹掉;`--no-llm` 那条路
-            # 的 commit 又是空操作,只把旧页面重发一遍,留下页面 30 节点、缓存 40 条
-            # 的长期分裂(2026-09-23 复审第 6 轮发现)。别人在我们跑的这段时间里发布
-            # 过 = 那一版比我们这份新,这一轮就不发了;我们判出来的东西留在暂存里,
-            # 下一轮接着提交,一条都不丢。
-            print(f"[{kind}] 正式缓存在这一轮生成期间被别的 writer 换过了"
-                  f"(基线 {res.baseline[:8]} → {now[:8]}),那一版更新,"
-                  f"这一轮不发布 {out.name};判出来的判定留在暂存里,下一轮接着提交")
+            # 出后拿到锁的这个是基于陈旧输入跑出来的:旧任务能以退出码 0 把刚发布的
+            # 40 节点页面刷回 30 节点、连新增的 10 条缓存一起抹掉(2026-09-23 复审
+            # 第 6 轮发现);缓存一个字节没动、只有页面更新了的那几条路同样能被刷回
+            # 去(第 7 轮发现,所以基线里连页面字节一起比,见 publish_sig)。别人在
+            # 我们跑的这段时间里发布过 = 那一版比我们这份新,这一轮就不发了。
+            # 重试再发没有意义——我们的候选扫描也是那时候做的,一样旧。
+            res.keep()          # 自己判出来、还没进正式缓存的那些并回暂存
+            print(f"[{kind}] 正式产物在这一轮生成期间被别的 writer 换过了"
+                  f"(基线 {base_sig[:8]}… → {now[:8]}…),那一版更新,"
+                  f"这一轮不发布 {out.name};判出来的判定已并回暂存,下一轮接着提交")
             return out
         # 判定是完整的,但出来的图塌了。--no-llm 首次生成不拦(那时满屏待归类是
         # 如实反映);问过模型却塌了,即使没有旧页也不许发。
@@ -253,6 +289,12 @@ def main() -> None:
     a = ap.parse_args()
 
     kinds = list(VIEWS) if a.kind == "all" else [a.kind]
+    out_dir = Path(a.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # 基线要在**读候选之前**取:load_groups 一跑完,我们手里的输入就定死了,
+    # 这之后别人发布的任何一版都比我们新(--kind all 时 skills 是在 projects
+    # 判完几分钟后才开始建的,拿那时候的产物当基线就等于漏掉这段窗口)。
+    base = {k: publish_sig(k, out_dir) for k in kinds}
     groups = G.load_groups()
     print(f"条目分组 {len(groups)} 组(口径同图鉴:已合并写法变体、已剔除 hard 软广)")
 
@@ -263,13 +305,11 @@ def main() -> None:
         if model is None:
             raise SystemExit(f"认不出模型 {a.model} 属于哪家,请写成 provider:model")
 
-    out_dir = Path(a.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     for k in kinds:
         build_one(k, groups, use_llm=not a.no_llm,
                   max_new=a.max_new or None, model=model,
                   workers=a.workers, out_dir=out_dir,
-                  allow_shrink=a.allow_shrink)
+                  allow_shrink=a.allow_shrink, base_sig=base[k])
 
 
 if __name__ == "__main__":

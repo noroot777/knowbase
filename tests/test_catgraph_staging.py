@@ -209,6 +209,45 @@ class StagingIdentityTest(unittest.TestCase):
         self.assertIn('"q": "n0", "c": "S1"', page, "页面用了暂存里的旧结论")
         self.assertFalse(self.stage.exists(), "作废的暂存留在盘上了")
 
+    # ── 不发布时把自己判的并回暂存(_restash) ──────────────────────────────
+    def test_restash_merges_instead_of_overwriting(self):
+        """并回暂存是读-改-写:盘上别人留下的批次原样保住,自己的单独记一批。"""
+        self._seed_staging({"a": "S1"}, runs=[["a"]])
+        T._restash(T.SKILLS, {"b": "S2"}, {"b": "名B"})
+        self.assertEqual(T.load_raw(T.SKILLS, self.stage)[0],
+                         {"a": "S1", "b": "S2"})
+        self.assertEqual([sorted(g) for g in
+                          T.load_runs(self.stage, {"a": "S1", "b": "S2"})],
+                         [["a"], ["b"]], "两趟判的被揉成一批了(质量判定会互相稀释)")
+
+    def test_restash_never_shadows_the_official_cache(self):
+        """正式缓存已经有的 key 一律不并回去——同名以正式缓存为准(复审第 5 轮)。"""
+        self._stub("S1")
+        self._build(1)                                  # 正式缓存:n0 = S1
+        T._restash(T.SKILLS, {"n0": "S9", "n1": "S2"}, {})
+        self.assertEqual(T.load_raw(T.SKILLS, self.stage)[0], {"n1": "S2"})
+
+    def test_restash_on_an_empty_disk_writes_a_fresh_staging(self):
+        """赢家把共享暂存删掉之后,输家并回去的就是一份全新的暂存。"""
+        self.assertFalse(self.stage.exists())
+        T._restash(T.SKILLS, {"x": "S1"}, {"x": "名X"})
+        self.assertEqual(T.load_raw(T.SKILLS, self.stage)[0], {"x": "S1"})
+        self.assertEqual(T.load_runs(self.stage, {"x": "S1"}), [["x"]])
+
+    def test_restash_write_failure_only_warns(self):
+        """并不回去顶多是下一轮重判一遍,不该让「不发布」这条安全路径异常退出。"""
+        real = T.save_cache
+
+        def denied(taxo, codes, names, path=None, **kw):
+            if path is not None:
+                raise OSError("simulated staging write denied")
+            return real(taxo, codes, names, path, **kw)
+
+        T.save_cache = denied
+        self.addCleanup(lambda: setattr(T, "save_cache", real))
+        T._restash(T.SKILLS, {"x": "S1"}, {})           # 不抛就是通过
+        self.assertFalse(self.stage.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

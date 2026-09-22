@@ -126,6 +126,7 @@ T.CACHE_DIR = Path(sys.argv[3])
 code, n, out_dir = sys.argv[1], int(sys.argv[2]), Path(sys.argv[4])
 ready, go = Path(sys.argv[5]), Path(sys.argv[6])
 use_llm = sys.argv[7] == "1"
+summary = sys.argv[8] if len(sys.argv) > 8 else "简介"
 
 def fake(prompt, model, **kw):
     rows = re.findall(r"^(\\d+)\\. (\\S+) ::", prompt, re.M)
@@ -147,7 +148,7 @@ if ready.name != "-":                    # 判完、渲染完,停在取锁之前
 
 def group(i):
     q = f"n{{i}}"
-    return {{"norm": q, "name": f"名{{i}}", "kind": "product", "summary": "简介",
+    return {{"norm": q, "name": f"名{{i}}", "kind": "product", "summary": summary,
             "url": "", "n": 1, "accounts": 1, "latest": "2026-09-20",
             "first": "2026-09-01", "topics": ["skill工具"],
             "all_topics": ["skill工具"], "sources": ["dr-gzh-projects"],
@@ -157,6 +158,54 @@ def group(i):
 B.build_one("skills", [group(i) for i in range(n)], use_llm=use_llm,
             max_new=None, model="stub" if use_llm else None,
             workers=1, out_dir=out_dir)
+'''
+
+# 第四种交错:两个进程各判**自己独有**的一条。赢的那个把共享暂存整份覆盖、发布
+# 完又把它删掉;输的那个被 CAS 拒绝时,自己那条判定必须还在盘上(正式缓存或暂存)。
+KEEP_CHILD = '''\
+import contextlib, json, re, sys, time
+from pathlib import Path
+REPO = Path({repo!r})
+sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "scripts" / "wiki"))
+import build_catgraph as B, taxonomy as T
+T.CACHE_DIR = Path(sys.argv[3])
+norm, code, out_dir = sys.argv[1], sys.argv[2], Path(sys.argv[4])
+ready, go = Path(sys.argv[5]), Path(sys.argv[6])
+hold, hold_go = Path(sys.argv[7]), Path(sys.argv[8])
+
+def fake(prompt, model, **kw):
+    if hold.name != "-":                 # 读完基线就停在模型调用里
+        hold.touch()
+        for _ in range(600):
+            if hold_go.exists():
+                break
+            time.sleep(0.05)
+    rows = re.findall(r"^(\\d+)\\. (\\S+) ::", prompt, re.M)
+    return json.dumps([{{"id": int(i), "c": code}} for i, _nm in rows])
+T._llm = fake
+
+if ready.name != "-":                    # 判完、渲染完,停在取锁之前
+    real_lock = T.publish_lock
+    @contextlib.contextmanager
+    def slow(taxo):
+        ready.touch()
+        for _ in range(600):
+            if go.exists():
+                break
+            time.sleep(0.05)
+        with real_lock(taxo):
+            yield
+    T.publish_lock = slow
+
+g = {{"norm": norm, "name": norm, "kind": "product", "summary": "简介",
+     "url": "", "n": 1, "accounts": 1, "latest": "2026-09-20",
+     "first": "2026-09-01", "topics": ["skill工具"],
+     "all_topics": ["skill工具"], "sources": ["dr-gzh-projects"],
+     "entries": [{{"url": f"https://x/{{norm}}", "article_title": "文",
+                  "account": "号", "published": "2026-09-20"}}]}}
+B.build_one("skills", [g], use_llm=True, max_new=None,
+            model="stub", workers=1, out_dir=out_dir)
 '''
 
 
@@ -260,14 +309,14 @@ class ConcurrentPublishTest(unittest.TestCase):
                          "作废的暂存一直留在盘上")
 
     # ── 基于陈旧基线的那一份不许发布(判定/建图/渲染都在锁外做完) ────────────
-    def _late(self, code, n, *, wait, llm=True):
+    def _late(self, code, n, *, wait, llm=True, summary="简介"):
         late = Path(self.tmp.name) / "late.py"
         if not late.exists():
             late.write_text(LATE_CHILD.format(repo=str(REPO)), encoding="utf-8")
         return subprocess.Popen(
             [sys.executable, str(late), code, str(n), str(self.cache_dir),
              str(self.out_dir), str(self.ready if wait else Path("-")),
-             str(self.go2), "1" if llm else "0"],
+             str(self.go2), "1" if llm else "0", summary],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def _wait_ready(self, proc):
@@ -325,6 +374,130 @@ class ConcurrentPublishTest(unittest.TestCase):
         self.assertEqual(len(on_page), 40)
         self.assertFalse({q: c for q, c in on_page.items()
                           if cache_now.get(q) != c}, "页面和缓存对不上")
+
+    # ── 基线只比分类缓存不够:缓存一个字节没动,页面照样能被刷回去 ────────────
+    def _cache_fp(self) -> str:
+        sys.path.insert(0, str(REPO / "scripts" / "wiki"))
+        import taxonomy as T
+        old, T.CACHE_DIR = T.CACHE_DIR, self.cache_dir
+        try:
+            return T.cache_fingerprint(T.SKILLS)
+        finally:
+            T.CACHE_DIR = old
+
+    def test_a_stale_run_does_not_hide_candidates_the_cache_never_saw(self):
+        """新候选只在页面上(显示成待归类),分类缓存一条都没变:旧任务照样不许发。
+
+        复审第 7 轮:CAS 只比 `norm → code` 的话,`--no-llm` 撞上新候选、或者默认
+        构建全部命中缓存时,新任务发布的页面对缓存指纹毫无影响——旧任务两次读到
+        的指纹一模一样,以退出码 0 把 40 节点的页面刷回 30 节点,新出现的 10 个
+        候选从正式页面上静默消失。
+        """
+        seed = self._late("S1", 30, wait=False)      # 30 条判定 + 30 节点页面
+        self.assertEqual(seed.wait(timeout=120), 0, seed.communicate()[1])
+
+        stale = self._late("-", 30, wait=True, llm=False)
+        self._wait_ready(stale)
+        fp0 = self._cache_fp()
+        cur = self._late("-", 40, wait=False, llm=False)   # 多出来的 10 条待归类
+        self.assertEqual(cur.wait(timeout=120), 0, cur.communicate()[1])
+        self.assertEqual(self._cache_fp(), fp0,
+                         "这一轮的前提没了:新任务本来就不该动分类缓存")
+        page_now = (self.out_dir / "graph-skills.html").read_bytes()
+
+        self.go2.touch()
+        out, err = stale.communicate(timeout=120)
+        self.assertEqual(stale.returncode, 0, err)
+        self.assertIn("不发布", out, "缓存没变,旧任务就把新页面盖掉了")
+        page = self.out_dir / "graph-skills.html"
+        self.assertEqual(page.read_bytes(), page_now, "页面被旧任务刷回去了")
+        on_page = set(re.findall(r'"q": "(\w+)"', page.read_text(encoding="utf-8")))
+        missing = [f"n{i}" for i in range(30, 40) if f"n{i}" not in on_page]
+        self.assertFalse(missing, f"新候选从正式页面上消失了:{missing}")
+
+    def test_a_stale_run_does_not_roll_back_a_cache_hit_only_page(self):
+        """全部命中缓存的日常构建同样有这个问题:刷回去的是简介/热度这些可见内容。
+
+        两个任务判的是同一条 n0(缓存里已经有了,谁都不会再问模型),新任务手上
+        的是新版简介。缓存自始至终一条 `n0 → S1`,只有页面变了。
+        """
+        seed = self._late("S1", 1, wait=False, summary="旧简介")
+        self.assertEqual(seed.wait(timeout=120), 0, seed.communicate()[1])
+
+        stale = self._late("S1", 1, wait=True, summary="旧简介")
+        self._wait_ready(stale)
+        fp0 = self._cache_fp()
+        cur = self._late("S1", 1, wait=False, summary="新简介")
+        self.assertEqual(cur.wait(timeout=120), 0, cur.communicate()[1])
+        page = self.out_dir / "graph-skills.html"
+        self.assertEqual(self._cache_fp(), fp0, "这一轮的前提没了:缓存不该变")
+        self.assertIn("新简介", page.read_text(encoding="utf-8"))
+
+        self.go2.touch()
+        out, err = stale.communicate(timeout=120)
+        self.assertEqual(stale.returncode, 0, err)
+        self.assertIn("不发布", out, "旧快照又被发出去了")
+        text = page.read_text(encoding="utf-8")
+        self.assertIn("新简介", text, "正式页面被刷回旧简介了")
+        self.assertNotIn("旧简介", text)
+
+    # ── 被 CAS 拒绝时,自己判出来的那些必须还在盘上 ──────────────────────────
+    def test_a_rejected_stale_run_keeps_its_own_verdicts(self):
+        """赢的那个把共享暂存整份覆盖、发布完又删掉;输的那个不能假定自己写过的
+        还在盘上。
+
+        复审第 7 轮:所有进程共用一个 `taxonomy_skills.staging.json`,分类阶段是
+        整份覆盖式地写。CAS 拒绝发布时那句「判出来的判定留在暂存里,一条都不丢」
+        因此是假的——`stale_only` 既不在正式缓存也不在暂存,模型钱白花,日志还说
+        留下了。
+        """
+        root = Path(self.tmp.name)
+        keep = root / "keep.py"
+        keep.write_text(KEEP_CHILD.format(repo=str(REPO)), encoding="utf-8")
+        s_ready, s_go = root / "s_ready", root / "s_go"
+        c_hold, c_go = root / "c_hold", root / "c_go"
+
+        def spawn(norm, code, ready, go, hold, hold_go):
+            return subprocess.Popen(
+                [sys.executable, str(keep), norm, code, str(self.cache_dir),
+                 str(self.out_dir), str(ready), str(go), str(hold), str(hold_go)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        # ① 赢家读完空基线,卡在模型调用里
+        cur = spawn("current_only", "S2", Path("-"), Path("-"), c_hold, c_go)
+        for _ in range(400):
+            if c_hold.exists() or cur.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertTrue(c_hold.exists(), "赢家没走到等待点")
+        # ② 输家也读空基线,判出唯一的 stale_only、写完暂存,停在取锁之前
+        stale = spawn("stale_only", "S1", s_ready, s_go, Path("-"), Path("-"))
+        for _ in range(400):
+            if s_ready.exists() or stale.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertTrue(s_ready.exists(), "输家没走到取锁前的暂停点")
+        stage = self.cache_dir / "taxonomy_skills.staging.json"
+        self.assertEqual(T_load(stage), {"stale_only": "S1"})
+        # ③ 赢家醒来:暂存被它整份覆盖,发布成功之后连暂存一起删掉
+        c_go.touch()
+        self.assertEqual(cur.wait(timeout=120), 0, cur.communicate()[1])
+        self.assertEqual(T_load(self.cache_dir / "taxonomy_skills.json"),
+                         {"current_only": "S2"})
+        self.assertFalse(stage.exists(), "这一轮的前提没了:赢家该把暂存删掉")
+        # ④ 输家醒来:CAS 拒绝发布,但它那条判定不能就这么没了
+        s_go.touch()
+        out, err = stale.communicate(timeout=120)
+        self.assertEqual(stale.returncode, 0, err)
+        self.assertIn("不发布", out)
+        cache = T_load(self.cache_dir / "taxonomy_skills.json")
+        left = T_load(stage) if stage.exists() else {}
+        self.assertEqual(cache, {"current_only": "S2"}, "赢家的结论被动了")
+        self.assertEqual(left.get("stale_only"), "S1",
+                         f"被拒的那一轮把自己判的弄丢了(暂存 {left});"
+                         f"下一轮只能再花一次模型钱")
+        self.assertNotIn("current_only", left,
+                         "正式缓存已经有的 key 不该再并回暂存")
 
 
 def T_load(path: Path) -> dict[str, str]:
