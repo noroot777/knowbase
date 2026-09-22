@@ -248,6 +248,73 @@ class StagingIdentityTest(unittest.TestCase):
         T._restash(T.SKILLS, {"x": "S1"}, {})           # 不抛就是通过
         self.assertFalse(self.stage.exists())
 
+    # ── 共享暂存:各人只改自己那一批 ────────────────────────────────────────
+    def test_commit_keeps_other_writers_batches(self):
+        """提交完只摘掉**自己刚提交的那些** key,不是把整个暂存文件删掉。
+
+        复审第 8 轮:暂存是所有 writer 共用的,整份删会把别人还没提交的进度一起
+        带走——被 CAS 拒绝的那一轮刚把自己那条并回去,转头就被下一个发布成功的
+        writer 删掉了。这里让「别人」在我们读完暂存**之后**才并回去(页面刚落盘、
+        缓存还没提交那一刻),我们这一趟根本没见过它。
+        """
+        real = B._atomic_write
+
+        def hooked(out, data):
+            real(out, data)
+            T._restash(T.SKILLS, {"other": "S9"}, {"other": "别人"}, "otherrun")
+
+        B._atomic_write = hooked
+        self.addCleanup(lambda: setattr(B, "_atomic_write", real))
+        self._stub("S1")
+        self._build(1)                                  # 我们提交 n0
+        self.assertEqual(T_load(T.cache_path(T.SKILLS)), {"n0": "S1"})
+        self.assertEqual(T_load(self.stage), {"other": "S9"},
+                         "提交时把别人还没提交的进度一起删了")
+
+    def test_discard_only_drops_its_own_batch(self):
+        """「这一趟不作数」也只摘自己那一批,别人的留着。"""
+        T._restash(T.SKILLS, {"other": "S9"}, {"other": "别人"})
+        self._stub(T.SKILLS.fallback)                   # 这一趟 200 条全废
+        with self.assertRaises(SystemExit):
+            self._build(200)
+        self.assertEqual(T_load(self.stage), {"other": "S9"},
+                         "作废自己这一批时把别人的也扫了")
+
+    def test_a_second_stash_replaces_its_own_batch_instead_of_splitting_it(self):
+        """同一趟多次落盘写的是同一个批次身份,不该把自己拆成好几批。"""
+        T._edit_stage(T.SKILLS, put={"a": "S1"}, put_id="run1", names={})
+        T._edit_stage(T.SKILLS, put={"a": "S1", "b": "S1"}, put_id="run1", names={})
+        self.assertEqual(T_load(self.stage), {"a": "S1", "b": "S1"})
+        self.assertEqual(T.load_runs(self.stage, {"a": "S1", "b": "S1"}),
+                         [["a", "b"]])
+
+    # ── 发布序号:内容一样不等于没人发布过 ──────────────────────────────────
+    def test_publication_generation_moves_on_every_publish(self):
+        """两次发布同样的内容,序号也得往前走(ABA 只能靠它认出来)。"""
+        self._stub("S1")
+        self._build(1)
+        first = T.read_gen(T.SKILLS)
+        page = self.page.read_bytes()
+        self._build(1)                                  # 逐字相同的一次重发
+        self.assertEqual(self.page.read_bytes(), page)
+        self.assertNotEqual(T.read_gen(T.SKILLS), first, "发布序号没动")
+        self.assertTrue(first.split("-")[0].isdigit())
+
+    def test_a_failed_publish_does_not_move_the_generation(self):
+        """页面验收没过 → 没发布 → 序号不许动(不然失败也算进发布序列)。"""
+        self._stub("S1")
+        self._build(200)
+        before = T.read_gen(T.SKILLS)
+        self._stub(T.SKILLS.fallback)                   # 新增那 200 条全废
+        with self.assertRaises(SystemExit):
+            self._build(400)
+        self.assertEqual(T.read_gen(T.SKILLS), before)
+
+
+def T_load(path: Path) -> dict[str, str]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return {k: v["c"] for k, v in raw["items"].items()}
+
 
 if __name__ == "__main__":
     unittest.main()

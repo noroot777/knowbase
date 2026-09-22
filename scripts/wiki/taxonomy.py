@@ -20,11 +20,10 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from hashlib import blake2b
 from pathlib import Path
 from threading import RLock
@@ -39,6 +38,7 @@ CACHE_DIR = REPO / "data"
 from taxo_tables import (  # noqa: E402,F401
     Cat, Taxonomy, PROJECTS, SKILLS, TAXONOMIES,
 )
+import taxo_llm as L  # noqa: E402
 
 
 # ── 缓存 ───────────────────────────────────────────────────────────────────────
@@ -65,21 +65,13 @@ def staging_path(taxo: Taxonomy) -> Path:
 
 
 @contextmanager
-def publish_lock(taxo: Taxonomy):
-    """发布这一张图的跨进程独占锁(验收基线 → 落页面 → 提交缓存整段)。
-
-    页面和缓存是两个文件、两次 rename,各自原子挡不住两个 writer 交错:A 写完
-    页面 → B 写页面并提交 B 的缓存 → A 再提交 A 的缓存,两个进程都以 0 退出,
-    最终页面来自 B 而缓存来自 A,下一轮又拿 A 的缓存把页面刷回去,一路没有任何
-    告警(2026-09-22 复审第 3 轮发现)。CLI、wiki_daily 子进程、手动重跑都是
-    独立进程,进程内的锁管不着,所以锁在文件上。
-
-    锁的是**单独的 lockfile**,不是缓存或页面本身:那两个都是 rename 换文件,
-    锁着的 inode 会被换走;lockfile 也只创建不删除,unlink 会让「A 持锁 →
-    B 删文件 → C 新建再持锁」出现两个持锁者(和 secrets.json 那把锁同一套理由)。
-    """
+def _flock(name: str):
+    """CACHE_DIR 下一把跨进程独占锁。锁的是**单独的 lockfile**,不是缓存或页面
+    本身:那两个都是 rename 换文件,锁着的 inode 会被换走;lockfile 也只创建不
+    删除,unlink 会让「A 持锁 → B 删文件 → C 新建再持锁」出现两个持锁者
+    (和 secrets.json 那把锁同一套理由)。"""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    p = CACHE_DIR / f"taxonomy_{taxo.key}.publish.lock"
+    p = CACHE_DIR / name
     with _io_lock:                       # 同进程内的并发先在这儿排队
         fh = p.open("a+")
         try:
@@ -87,6 +79,73 @@ def publish_lock(taxo: Taxonomy):
             yield
         finally:
             fh.close()                   # 关闭即释放 flock
+
+
+@contextmanager
+def publish_lock(taxo: Taxonomy):
+    """发布这一张图的跨进程独占锁(验收基线 → 落页面 → 提交缓存 → 推进序号整段)。
+
+    页面和缓存是两个文件、两次 rename,各自原子挡不住两个 writer 交错:A 写完
+    页面 → B 写页面并提交 B 的缓存 → A 再提交 A 的缓存,两个进程都以 0 退出,
+    最终页面来自 B 而缓存来自 A,下一轮又拿 A 的缓存把页面刷回去,一路没有任何
+    告警(2026-09-22 复审第 3 轮发现)。CLI、wiki_daily 子进程、手动重跑都是
+    独立进程,进程内的锁管不着,所以锁在文件上。
+
+    **取锁顺序永远是 publish → stage**(`_edit_stage` 在发布锁里被调),反过来
+    没有任何路径,所以两把锁不会抱死。
+    """
+    with _flock(f"taxonomy_{taxo.key}.publish.lock"):
+        yield
+
+
+@contextmanager
+def stage_lock(taxo: Taxonomy):
+    """共享暂存的跨进程独占锁——**读、合并、写回、删除整段都得在它里面**。
+
+    暂存是所有 writer 共用的一个文件。只把「并回去」那一下做成读-改-写是不够的:
+    普通分类阶段的落盘仍然是整份覆盖、而且不持任何锁,于是一个还停在模型调用里、
+    正式基线依然合法的第三方 writer 可以把刚并回去的判定整份盖掉,发布成功后再
+    把整个暂存删掉——被拒的那一轮明明打印了「判定已并回暂存」,那条判定最后既不
+    在正式缓存也不在暂存(2026-09-23 复审第 8 轮发现)。
+    """
+    with _flock(f"taxonomy_{taxo.key}.staging.lock"):
+        yield
+
+
+def gen_path(taxo: Taxonomy) -> Path:
+    return CACHE_DIR / f"taxonomy_{taxo.key}.gen"
+
+
+def read_gen(taxo: Taxonomy) -> str:
+    """当前**发布序号**(还没发布过是空串)。见 `bump_gen`。"""
+    try:
+        return gen_path(taxo).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def bump_gen(taxo: Taxonomy) -> str:
+    """整次发布都成功之后推进发布序号(只能在发布锁里调)。
+
+    **内容签名挡不住 ABA**:任务跑的这段时间里正式产物经历 A→B→A(一次回退、
+    一次恢复,或者干脆是同样输入的重发),结束时缓存内容和页面字节与开工时逐字
+    相同,旧任务就认定「没人发布过」,把自己那份陈旧快照发出去——期间明明有两次
+    发布成功完成(2026-09-23 复审第 8 轮发现)。内容哈希回答的是「东西一不一样」,
+    回答不了「发布序列有没有往前走」,后者只能靠一个每次成功发布都换一个值的序号。
+
+    序号带一个自增计数(给人看「发布过多少次」)和一段随机后缀(文件丢了、计数
+    从头开始时也不会撞回旧值)。写盘是唯一临时文件 + rename。
+    """
+    head = read_gen(taxo).split("-", 1)[0]
+    n = int(head) + 1 if head.isdigit() else 1
+    p = gen_path(taxo)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
+    token = f"{n}-{os.urandom(6).hex()}"
+    with _io_lock:
+        tmp.write_text(token, encoding="utf-8")
+        tmp.replace(p)
+    return token
 
 
 def load_raw(taxo: Taxonomy, path: Path | None = None) -> tuple[dict[str, str], dict[str, str]]:
@@ -149,58 +208,64 @@ def _cleanup(path: Path, why: str) -> None:
         print(f"[{path.name}] {why}没清掉({e}),不影响这一轮的结果", file=sys.stderr)
 
 
-def _rewrite_stage(taxo: Taxonomy, stage: Path, codes: dict[str, str],
-                   names: dict[str, str], kept_runs: list[list[str]]) -> None:
-    """把暂存缩成「只剩验过的那几批」;一批都没剩就删掉。写盘失败同样只告警
-    ——留在盘上的那份下一轮会被重新识别、重新丢掉,不该让它带崩这一轮。"""
-    if not kept_runs:
-        _cleanup(stage, "作废的暂存")
-        return
+def _edit_stage(taxo: Taxonomy, *, put: dict[str, str] | None = None,
+                put_id: str = "", names: dict[str, str] | None = None,
+                drop_ids: tuple[str, ...] = ()) -> None:
+    """**共享暂存的唯一写入口**:读 → 改 → 写回,整段在 `stage_lock` 里。
+
+    每次都做三件事:①正式缓存已经有的 key 一律摘掉(以正式缓存为准,同 `clash`
+    那段);②`drop_ids` 里的批次删掉;③`put` 这一批以 `put_id` 为身份写进去
+    (已经被别的批次占着的 key 不重复写,免得同一条落在两批里)。剩下一条不剩
+    就把文件删掉。
+
+    **整份覆盖 / 整份删除是不行的**,哪怕加了锁:暂存是所有 writer 共用的一个
+    文件,覆盖会把别人的进度抹掉,删除更是连别人刚并回去的那条一起带走——被拒
+    的那一轮明明打印了「判定已并回暂存」,那条判定最后既不在正式缓存也不在暂存
+    (2026-09-23 复审第 8 轮发现)。所以「提交完清暂存」= 把**自己刚提交的那些
+    key** 摘掉,不是 unlink;「这一趟不作数」= 把**自己那一批**摘掉,不是 unlink。
+
+    整段失败只告警:暂存里的东西下一轮照样会被重新识别,没有理由让一次写盘失败
+    把「不发布」这条本来就安全的路径变成异常退出。
+    """
+    stage = staging_path(taxo)
     try:
-        save_cache(taxo, {n: codes[n] for g in kept_runs for n in g},
-                   names, stage, runs=kept_runs)
+        with stage_lock(taxo):
+            official = load_cache(taxo)
+            disk, dnames = load_raw(taxo, stage)
+            part = {n: c for n, c in disk.items() if n not in official}
+            runs = load_run_map(stage, part)
+            for rid in (*drop_ids, put_id):
+                runs.pop(rid, None)
+            owned = {n for g in runs.values() for n in g}
+            mine = {n: c for n, c in (put or {}).items()
+                    if n not in official and n not in owned}
+            if mine:
+                runs[put_id] = sorted(mine)
+            keys = {n for g in runs.values() for n in g}
+            if not keys:
+                _cleanup(stage, "空了的暂存")
+                return
+            codes = {n: (part[n] if n in part else mine[n]) for n in keys}
+            save_cache(taxo, codes,
+                       {**dnames, **{n: (names or {}).get(n, "") for n in mine}},
+                       stage, runs=runs)
     except OSError as e:
         print(f"[{taxo.key}] 暂存没能改写({e}),不影响这一轮的结果", file=sys.stderr)
 
 
-def _restash(taxo: Taxonomy, mine: dict[str, str], names: dict[str, str]) -> None:
-    """把「这一轮判出来、还没进正式缓存」的判定**并回**共享暂存(读-改-写)。
+def _restash(taxo: Taxonomy, mine: dict[str, str], names: dict[str, str],
+             run_id: str = "") -> None:
+    """把「这一轮判出来、还没进正式缓存」的判定**并回**共享暂存。
 
-    暂存是所有 writer 共用的一个文件,而且是整份覆盖的:我们在分类阶段写过一次
-    不代表它还在盘上——另一个 writer 随后写一次就把我们那份盖掉了,它发布成功
-    还会把整个暂存删掉。于是 CAS 拒绝发布时那句「判出来的判定留在暂存里,一条都
-    不丢」并不成立:唯一的那条判定既不在正式缓存也不在暂存,模型钱白花,日志还
-    说留下了(2026-09-23 复审第 7 轮发现)。
-
-    所以不发布之前先在**发布锁里**重新读一次暂存、把自己的并进去再写回:
-    ①正式缓存已经有的 key 一律不并(以正式缓存为准,同 `classify` 里那段
-    `clash`);②暂存里已经有的 key 原样留着,不拿自己的盖(两边都是没验过的
-    半成品,重复写只会把批次身份搅乱);③自己这些单独记成一批,下一轮照样按批
-    验(见 `load_runs`)。写盘失败只告警——并不回去顶多是下一轮重判一遍,不该
-    让它把「不发布」这条本来就安全的路径变成异常退出。
+    我们在分类阶段写过一次不代表它还在盘上——另一个 writer 随后写一次就把我们
+    那份盖掉了,它发布成功还会把整个暂存删掉。于是 CAS 拒绝发布时那句「判出来的
+    判定留在暂存里,一条都不丢」并不成立:唯一的那条判定既不在正式缓存也不在
+    暂存,模型钱白花,日志还说留下了(2026-09-23 复审第 7 轮发现)。所以不发布
+    之前在发布锁里重新读一次暂存、把自己的并进去(见 `_edit_stage`)。
     """
-    if not mine:
-        return
-    official = load_cache(taxo)
-    stage = staging_path(taxo)
-    raw, pnames = load_raw(taxo, stage)
-    part = {n: c for n, c in raw.items() if n not in official}
-    runs = load_runs(stage, part)
-    add = sorted(n for n in mine if n not in official and n not in part)
-    if not add and part == raw:
-        return                              # 盘上那份已经是对的,不动它
-    keep = [g for g in runs if g] + ([add] if add else [])
-    if not keep:
-        _cleanup(stage, "并回暂存时发现没什么要留的,")
-        return
-    codes = dict(part)
-    codes.update({n: mine[n] for n in add})
-    kept_names = {**pnames, **{n: names.get(n, "") for n in add}}
-    try:
-        save_cache(taxo, codes, kept_names, stage, runs=keep)
-    except OSError as e:
-        print(f"[{taxo.key}] 这一轮的 {len(add)} 条判定没能并回暂存({e}),"
-              f"下一轮会重判", file=sys.stderr)
+    if mine:
+        _edit_stage(taxo, put=mine, put_id=run_id or f"keep{os.getpid()}",
+                    names=names)
 
 
 def stale_cache_size(taxo: Taxonomy) -> int:
@@ -221,11 +286,13 @@ def stale_cache_size(taxo: Taxonomy) -> int:
 
 def save_cache(taxo: Taxonomy, codes: dict[str, str], names: dict[str, str],
                path: Path | None = None,
-               runs: list[list[str]] | None = None) -> None:
+               runs: dict[str, list[str]] | None = None) -> None:
     """写盘用「唯一临时文件 + rename」:截断重写会让并发读者读到半截 JSON,
     而半截 JSON 被 load_cache 吞成空缓存,下一次 build 就会把几千条重判一遍。
 
-    `runs` 只有暂存文件用:记「哪几条是同一趟判出来的」。见 `load_runs`。
+    `runs` 只有暂存文件用:`{批次身份: [norm, ...]}`,记「哪几条是同一趟判出来
+    的、属于哪个 run」。批次身份让多个 writer 能共用一个文件而不互相盖(见
+    `_edit_stage`)。见 `load_run_map`。
     """
     p = path or cache_path(taxo)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -233,94 +300,62 @@ def save_cache(taxo: Taxonomy, codes: dict[str, str], names: dict[str, str],
                   "items": {k: {"c": v, "n": names.get(k, "")}
                             for k, v in sorted(codes.items())}}
     if runs is not None:
-        body["runs"] = [sorted(g) for g in runs if g]
+        body["runs"] = {rid: sorted(g) for rid, g in runs.items() if g}
     tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
     with _io_lock:
         tmp.write_text(json.dumps(body, ensure_ascii=False, indent=0), encoding="utf-8")
         tmp.replace(p)
 
 
-def load_runs(path: Path, part: dict[str, str]) -> list[list[str]]:
-    """暂存里记的批次分组:[[norm, ...], ...],一组 = 同一趟 classify 判出来的。
+def load_run_map(path: Path, part: dict[str, str]) -> dict[str, list[str]]:
+    """暂存里记的批次:`{批次身份: [norm, ...]}`,一批 = 同一趟 classify 判出来的。
 
     暂存要有批次身份,是因为**质量判定跑在批次上**:进程在暂存写完、`finish()`
     的退化判定跑完之前被杀(或者另一个 writer 抢先读走),这批本该判为「不作数」
     的结果就留在盘上了;下一轮把它和更多正常结果合在一起算占比,20 条全废的
     被 180 条正常的稀释成 10%,当场随整份缓存提交,下一轮全命中、不再问模型
-    (2026-09-22 复审第 4 轮发现)。记下分组,恢复时就能按原批次各验各的。
+    (2026-09-22 复审第 4 轮发现)。记下分批,恢复时就能按原批次各验各的。
 
-    老格式(没有 runs)整份当一个批次——那是同样没验过的东西,不能因为
-    读不到分组就当它验过了。没被任何分组记到的零头同理,单独凑一组。
+    身份还决定**多个 writer 怎么共用这一个文件**:各人只改自己那一批,别人的
+    进度原样留着(见 `_edit_stage`)。
+
+    老格式(`runs` 是列表,或者压根没有)没有身份,给它们编一个:那是同样没验过
+    的东西,不能因为读不到分批就当它验过了。没被任何一批记到的零头同理。
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         got = raw.get("runs")
     except (OSError, json.JSONDecodeError):
         got = None
-    groups: list[list[str]] = []
+    if isinstance(got, list):                 # 老格式:一批一个编号
+        got = {f"old{i}": g for i, g in enumerate(got)}
+    out: dict[str, list[str]] = {}
     seen: set[str] = set()
-    for g in got if isinstance(got, list) else []:
+    for rid, g in (got if isinstance(got, dict) else {}).items():
         keep = [n for n in g if isinstance(n, str) and n in part and n not in seen]
         seen.update(keep)
         if keep:
-            groups.append(keep)
+            out[str(rid)] = keep
     rest = [n for n in part if n not in seen]
     if rest:
-        groups.append(rest)
-    return groups
+        out["rest"] = rest
+    return out
+
+
+def load_runs(path: Path, part: dict[str, str]) -> list[list[str]]:
+    """只要批次内容、不要身份时用这个(质量判定按批各验各的)。"""
+    return list(load_run_map(path, part).values())
 
 
 # ── LLM 批量判定 ───────────────────────────────────────────────────────────────
 
-_PROMPT = """\
-下面是一批{item_zh},请逐条判断它属于哪个类目。
-
-类目表(只能从这些 code 里选):
-{table}
-
-判定要求:
-- 按这个东西**本身是什么/主要用来做什么**归类,不要被它顺带支持的能力带偏。
-- 每条只给一个 code,拿不准就选最接近的那个;确实判不出来才给 {fallback}。
-{extra}
-条目(格式「编号. 名字 :: 简介」):
-{items}
-
-只输出 JSON 数组,不要解释、不要代码围栏,每个元素 {{"id": <编号>, "c": "<code>"}}。"""
-
-
-def _llm(prompt: str, model, timeout: int = 300, max_tokens: int = 8192) -> str:
-    import sys
-    if str(REPO) not in sys.path:
-        sys.path.insert(0, str(REPO))
-    from kb.llm import chat
-
-    return chat(prompt, model, max_tokens=max_tokens, timeout=timeout)
-
-
-def default_model():
-    import sys
-    if str(REPO) not in sys.path:
-        sys.path.insert(0, str(REPO))
-    from kb.llm_stages import stage_model
-
-    return stage_model("taxonomy")
-
-
-def _parse(out: str) -> dict[int, str]:
-    out = re.sub(r"^```(?:json)?|```$", "", out.strip(), flags=re.M).strip()
-    try:
-        arr = json.loads(out)
-    except json.JSONDecodeError:
-        # 整段解析不了时退回逐对象扫描:模型偶尔在数组后面多写一句话
-        arr = [json.loads(m.group(0)) for m in re.finditer(r"\{[^{}]*\}", out)]
-    got = {}
-    for x in arr:
-        if isinstance(x, dict) and "id" in x and "c" in x:
-            try:
-                got[int(x["id"])] = str(x["c"]).strip()
-            except (TypeError, ValueError):
-                continue
-    return got
+# 提示词 / 调模型 / 解析回包搬到了 taxo_llm.py(理由同 taxo_tables.py:这个文件
+# 越过 700 行上限,而那一块最独立)。名字原样绑在这儿,测试里 `T._llm = fake`
+# 这种打桩照旧有效——classify 是按本模块的全局去找它们的。
+_PROMPT = L.PROMPT
+_llm = L.llm
+_parse = L.parse
+default_model = L.default_model
 
 
 @dataclass(frozen=True)
@@ -431,10 +466,12 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
     migrating = bool(stale)
     stage = staging_path(taxo)
     void = void_codes | {taxo.fallback}
+    # 这一趟在共享暂存里的身份:各人只改自己这一批,别人的进度原样留着。
+    run_id = os.urandom(6).hex()
     # 续上上一轮判出来、还没提交的那些(指纹对不上的暂存会被 load_raw 当空的,
-    # 那种留在盘上也没用,顺手删掉)。**续之前先按原批次各验各的**:暂存里的
+    # 那种留在盘上也没用,顺手清掉)。**续之前先按原批次各验各的**:暂存里的
     # 东西都是没走完质量判定的半成品,进程被杀/被另一个 writer 抢读都会留下
-    # 一整批坏判定,直接合进来就被这一轮的正常结果稀释掉了(见 load_runs)。
+    # 一整批坏判定,直接合进来就被这一轮的正常结果稀释掉了(见 load_run_map)。
     part, pnames = load_raw(taxo, stage)
     kept_runs: list[list[str]] = []
     if part:
@@ -449,13 +486,15 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
         clash = {n for n in part if n in base}
         stale_part = {n for n in clash if part[n] != official[n]}
         part = {n: c for n, c in part.items() if n not in clash}
+        bad_ids: list[str] = []
         dropped = len(clash)
         if clash:
             log(f"  [{taxo.key}] 暂存里有 {len(clash)} 条正式缓存已经有了"
                 f"({len(stale_part)} 条结论还不一样),以正式缓存为准,丢掉")
-        for g in load_runs(stage, part):
+        for rid, g in load_run_map(stage, part).items():
             n_void = _void_bad([part[n] for n in g], void)
             if n_void and not allow_degenerate:
+                bad_ids.append(rid)
                 dropped += len(g)
                 log(f"  [{taxo.key}] 暂存里有一批 {len(g)} 条、{n_void} 条落在 "
                     f"{sorted(void)} 上(上一趟没走完质量判定就被打断),不作数,"
@@ -465,9 +504,9 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
             codes.update({n: part[n] for n in g})
             names.update({n: pnames.get(n, "") for n in g})
         if dropped:                       # 丢掉的当场从盘上抹掉,别留到下一轮
-            _rewrite_stage(taxo, stage, codes, names, kept_runs)
+            _edit_stage(taxo, drop_ids=tuple(bad_ids))
     elif stage.exists():
-        _cleanup(stage, "作废的暂存")
+        _edit_stage(taxo)                 # 指纹作废的那份自己就空了,顺手收掉
     resumed = {n for g in kept_runs for n in g}
     if migrating:
         log(f"  [{taxo.key}] 分类表改过,{stale} 条旧判定整份作废,本轮全量重判"
@@ -501,7 +540,7 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
             # 这一趟的判定从暂存里抹掉:留着的话下一轮全命中、不再问模型,同一个
             # 坏结果会一直卡在那儿(2026-09-22 第 4、5 轮审查发现)。验过的那些
             # 批次留着——它们是别的趟的进度,不该被这一趟的失败连坐。
-            _rewrite_stage(taxo, stage, codes, names, kept_runs)
+            _edit_stage(taxo, drop_ids=(run_id,))
             share = "全" if n_void == len(mine) else f"{n_void}/{len(mine)} 条"
             why = (f"{'重判' if migrating else '本轮新判'}结果 {share}落在 "
                    f"{sorted(void)} 上(等于什么也没判出来),这一趟不作数,下次重判")
@@ -511,7 +550,7 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
         # 被别的 writer 盖掉或删掉了,分类阶段写过一次不代表它还在盘上(见 _restash)。
         unpublished = {n: c for n, c in codes.items() if n not in base}
         keep = (lambda snap=dict(unpublished), nm=dict(names):
-                _restash(taxo, snap, nm))
+                _restash(taxo, snap, nm, run_id))
         if not migrating and codes == official:
             # 「有没有新东西可提交」按**内容**比,不是比条数:旧 writer 留下的
             # 同名判定被上面摘掉之后条数一样、内容也一样才叫没事干;只比长度的话
@@ -521,7 +560,9 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
         ready, kept = dict(codes), dict(names)
         return Verdicts(codes, True, migrating, left,
                         lambda: _promote(taxo, ready, kept),
-                        lambda: _cleanup(stage, "不作数的暂存"),
+                        # 「这一趟不作数」= 把**自己那一批**摘掉,不是 unlink 整份
+                        # 暂存——那会把别的 writer 的进度一起带走(第 8 轮发现)。
+                        lambda: _edit_stage(taxo, drop_ids=(run_id,)),
                         keep_fn=keep)
 
     pending = [it for it in items if it[0] not in codes]
@@ -552,10 +593,13 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
                 if 0 <= i < len(chunk) and c in valid}
 
     def stash() -> None:
-        """把 codes 落到暂存,并记下「哪些是这一趟判的」(见 load_runs)。"""
-        mine = [n for n in codes if n not in base and n not in resumed]
-        save_cache(taxo, {n: codes[n] for n in codes if n not in base}, names,
-                   stage, runs=kept_runs + [mine])
+        """把这一趟判出来的**并进**共享暂存(整份覆盖会抹掉别人的进度)。
+
+        写的只是「自己新判的那些」:续上来的批次还在盘上挂着它们自己的身份,
+        用不着我们再抄一遍。见 `_edit_stage`。
+        """
+        _edit_stage(taxo, put={n: codes[n] for n in codes if n not in base},
+                    put_id=run_id, names=names)
 
     def do_round(todo: list[tuple[str, str, str]]) -> None:
         """判一轮 todo,结果并进 codes 并落到**暂存文件**。
@@ -603,16 +647,21 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
 
 
 def _promote(taxo: Taxonomy, codes: dict[str, str], names: dict[str, str]) -> None:
-    """把暂存换成正式缓存(rename 是原子的),再删掉暂存。
+    """把这一轮的判定换成正式缓存(rename 是原子的),再把它们从共享暂存里摘掉。
 
     只由 `Verdicts.commit()` 调——判完**并且**新图验收通过、页面落盘之后。
+
+    **清暂存 ≠ 删暂存文件**:暂存是所有 writer 共用的,整份删会把别人还没提交的
+    进度一起带走——被 CAS 拒绝的那一轮刚把自己那条并回去,转头就被下一个发布成功
+    的 writer 删掉了,「一条都不丢」当场不成立(2026-09-23 复审第 8 轮发现)。
+    `_edit_stage` 每次都会把「正式缓存已经有的 key」摘掉,所以这里传空就等于
+    「只摘自己刚提交的那些」;摘完真空了它才删文件。
 
     **`save_cache` 一成功就算提交完成**,后面那句清暂存失败只是个可恢复的收尾
     问题,不能让它抛出去:调用方(`build_catgraph._publish`)把 `commit()` 的
     任何异常都理解成「缓存没提交」,于是把页面回滚成旧的——缓存已经是新的 120
     条、页面却被换回旧的 100 节点,反方向的半提交是自己制造出来的
-    (2026-09-22 复审第 5 轮发现)。留在盘上的暂存下一轮会被识别成「正式缓存
-    已经有了」而丢掉,清理本身能自愈。
+    (2026-09-22 复审第 5 轮发现)。`_edit_stage` 自己把失败吞成一行告警。
     """
     save_cache(taxo, codes, names)
-    _cleanup(staging_path(taxo), "正式缓存已提交,但暂存")
+    _edit_stage(taxo)

@@ -263,17 +263,21 @@ class ConcurrentPublishTest(unittest.TestCase):
                          "B 没等 A 交完班就自己发布了(发布锁没起作用)")
 
     def test_a_crashed_stale_writer_does_not_resurrect_its_verdict(self):
-        """旧基线上崩掉的 writer,不许在恢复轮把已提交的结论换掉。
+        """旧基线上的 writer,不许在恢复轮把已提交的结论换掉。
 
         复审第 5 轮:暂存不记它基于哪一版正式缓存,`codes.update(part)` 拿旧结论
         盖掉新提交的那条;条数还一样,`len(codes) == n_official` 又判成「无事可
         提交」——恢复轮以成功退出收场,却把页面改成 S2、缓存留在 S1,而且暂存
         永远留在盘上,以后每轮都这样。
+
+        第 8 轮把「以正式缓存为准」提到了每一次写暂存上(`_edit_stage`),所以
+        这条旧判定现在连盘都上不去:B 醒来时 n0 已经是 A 提交过的了。
         """
         root = Path(self.tmp.name)
         stale = root / "stale.py"
         stale.write_text(STALE_CHILD.format(repo=str(REPO)), encoding="utf-8")
         ready, go, asked = root / "ready", root / "go2", root / "asked"
+        stage = self.cache_dir / "taxonomy_skills.staging.json"
 
         def spawn(code, *, wait, crash, asked_at=asked):
             return subprocess.Popen(
@@ -291,10 +295,11 @@ class ConcurrentPublishTest(unittest.TestCase):
 
         a = spawn("S1", wait=False, crash=False)   # ② A 整轮跑完,发布 S1
         self.assertEqual(a.wait(timeout=120), 0, a.communicate()[1])
-        go.touch()                                 # ③ B 醒来,写完暂存就崩
-        self.assertEqual(b.wait(timeout=120), 99, b.communicate()[1])
-        self.assertEqual(T_load(self.cache_dir / "taxonomy_skills.staging.json"),
-                         {"n0": "S2"}, "没留下旧基线上的暂存")
+        go.touch()                                 # ③ B 醒来:它那条已经作废了
+        b_out, b_err = b.communicate(timeout=120)
+        self.assertEqual(b.returncode, 0, b_err)
+        self.assertIn("不发布", b_out, "基于陈旧基线的那一份还是发出去了")
+        self.assertFalse(stage.exists(), "作废的旧判定被写回了暂存")
 
         asked.unlink()                             # ④ 恢复轮:不该再问模型
         c = spawn("S3", wait=False, crash=False)
@@ -303,10 +308,36 @@ class ConcurrentPublishTest(unittest.TestCase):
 
         page = (self.out_dir / "graph-skills.html").read_text(encoding="utf-8")
         cache = T_load(self.cache_dir / "taxonomy_skills.json")
-        self.assertEqual(cache, {"n0": "S1"}, "崩掉的旧 writer 盖掉了正式缓存")
+        self.assertEqual(cache, {"n0": "S1"}, "旧 writer 盖掉了正式缓存")
         self.assertIn('"q": "n0", "c": "S1"', page, "页面用了作废的旧结论")
-        self.assertFalse((self.cache_dir / "taxonomy_skills.staging.json").exists(),
-                         "作废的暂存一直留在盘上")
+        self.assertFalse(stage.exists(), "作废的暂存一直留在盘上")
+
+    def test_a_crashed_writer_leaves_its_progress_for_the_next_run(self):
+        """写完暂存就被杀的 writer:它那批判定下一轮接着用,不用再买一遍。"""
+        root = Path(self.tmp.name)
+        stale = root / "stale.py"
+        stale.write_text(STALE_CHILD.format(repo=str(REPO)), encoding="utf-8")
+        go, asked = root / "go2", root / "asked"
+        stage = self.cache_dir / "taxonomy_skills.staging.json"
+
+        def spawn(code, *, crash):
+            return subprocess.Popen(
+                [sys.executable, str(stale), code, str(self.cache_dir),
+                 str(self.out_dir), "-", str(go), str(asked), "1" if crash else "0"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        b = spawn("S2", crash=True)                # 判完 n0,暂存刚落盘就没了
+        self.assertEqual(b.wait(timeout=120), 99, b.communicate()[1])
+        self.assertEqual(T_load(stage), {"n0": "S2"}, "崩掉的那趟没留下进度")
+        self.assertFalse((self.cache_dir / "taxonomy_skills.json").exists())
+
+        asked.unlink()
+        c = spawn("S3", crash=False)               # 恢复轮:续上,不再问模型
+        self.assertEqual(c.wait(timeout=120), 0, c.communicate()[1])
+        self.assertFalse(asked.exists(), "恢复轮又问了一遍模型")
+        self.assertEqual(T_load(self.cache_dir / "taxonomy_skills.json"),
+                         {"n0": "S2"})
+        self.assertFalse(stage.exists(), "提交完的那条还留在暂存里")
 
     # ── 基于陈旧基线的那一份不许发布(判定/建图/渲染都在锁外做完) ────────────
     def _late(self, code, n, *, wait, llm=True, summary="简介"):
@@ -479,12 +510,14 @@ class ConcurrentPublishTest(unittest.TestCase):
         self.assertTrue(s_ready.exists(), "输家没走到取锁前的暂停点")
         stage = self.cache_dir / "taxonomy_skills.staging.json"
         self.assertEqual(T_load(stage), {"stale_only": "S1"})
-        # ③ 赢家醒来:暂存被它整份覆盖,发布成功之后连暂存一起删掉
+        # ③ 赢家醒来:它只把**自己刚提交的那些**从共享暂存里摘掉,别人的进度留着
         c_go.touch()
         self.assertEqual(cur.wait(timeout=120), 0, cur.communicate()[1])
         self.assertEqual(T_load(self.cache_dir / "taxonomy_skills.json"),
                          {"current_only": "S2"})
-        self.assertFalse(stage.exists(), "这一轮的前提没了:赢家该把暂存删掉")
+        self.assertEqual(T_load(stage) if stage.exists() else {},
+                         {"stale_only": "S1"},
+                         "赢家提交时把别人还没提交的进度一起删了")
         # ④ 输家醒来:CAS 拒绝发布,但它那条判定不能就这么没了
         s_go.touch()
         out, err = stale.communicate(timeout=120)
@@ -498,6 +531,101 @@ class ConcurrentPublishTest(unittest.TestCase):
                          f"下一轮只能再花一次模型钱")
         self.assertNotIn("current_only", left,
                          "正式缓存已经有的 key 不该再并回暂存")
+
+    def test_a_third_writer_does_not_wipe_the_restashed_verdict(self):
+        """并回暂存的那条,不许被「基线仍然合法」的第三个 writer 盖掉再删掉。
+
+        复审第 8 轮:`_restash` 自己是安全的读-改-写,可普通分类阶段的落盘仍是
+        **整份覆盖**、而且不持任何锁,提交时又是**整份删除**。于是一个在 A 发布
+        之后才开工、正式基线完全合法的 D,能把 B 刚并回去的唯一判定盖掉、发布
+        成功后再把整个暂存删掉——B 明明返回成功并打印「判定已并回暂存」,那条判定
+        最后既不在正式缓存也不在暂存,下一轮还得再买一次模型。
+        """
+        root = Path(self.tmp.name)
+        keep = root / "keep.py"
+        keep.write_text(KEEP_CHILD.format(repo=str(REPO)), encoding="utf-8")
+        stage = self.cache_dir / "taxonomy_skills.staging.json"
+        cache = self.cache_dir / "taxonomy_skills.json"
+        b_ready, b_go = root / "b_ready", root / "b_go"
+        a_hold, a_go = root / "a_hold", root / "a_go"
+        d_hold, d_go = root / "d_hold", root / "d_go"
+
+        def spawn(norm, code, ready, go, hold, hold_go):
+            return subprocess.Popen(
+                [sys.executable, str(keep), norm, code, str(self.cache_dir),
+                 str(self.out_dir), str(ready), str(go), str(hold), str(hold_go)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        def wait_for(flag, proc, what):
+            for _ in range(400):
+                if flag.exists() or proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+            self.assertTrue(flag.exists(), f"{what} 没走到等待点")
+
+        # ① A 读空基线,卡在模型里;B 也读空基线,判完写进暂存、停在取锁之前
+        a = spawn("winner_a", "S1", Path("-"), Path("-"), a_hold, a_go)
+        wait_for(a_hold, a, "A")
+        b = spawn("restashed_b", "S2", b_ready, b_go, Path("-"), Path("-"))
+        wait_for(b_ready, b, "B")
+        self.assertEqual(T_load(stage), {"restashed_b": "S2"})
+        # ② A 恢复:发布 winner_a
+        a_go.touch()
+        self.assertEqual(a.wait(timeout=120), 0, a.communicate()[1])
+        self.assertEqual(T_load(cache), {"winner_a": "S1"})
+        # ③ D 在 A 发布之后开工(正式基线对它完全合法),卡在模型里
+        d = spawn("later_d", "S3", Path("-"), Path("-"), d_hold, d_go)
+        wait_for(d_hold, d, "D")
+        # ④ B 恢复:被 CAS 拒绝,把自己那条并回暂存
+        b_go.touch()
+        b_out, b_err = b.communicate(timeout=120)
+        self.assertEqual(b.returncode, 0, b_err)
+        self.assertIn("不发布", b_out)
+        self.assertEqual(T_load(stage).get("restashed_b"), "S2", "并回暂存没成")
+        # ⑤ D 恢复:它的发布是合法的,但不能顺手把 B 的进度抹掉
+        d_go.touch()
+        self.assertEqual(d.wait(timeout=120), 0, d.communicate()[1])
+        final_cache = T_load(cache)
+        final_stage = T_load(stage) if stage.exists() else {}
+        self.assertEqual(final_cache.get("winner_a"), "S1")
+        self.assertEqual(final_cache.get("later_d"), "S3")
+        # B 那条要么被 D 顺路提交进了正式缓存,要么还在暂存里等下一轮——就是不能没了
+        self.assertEqual(final_cache.get("restashed_b",
+                                         final_stage.get("restashed_b")), "S2",
+                         f"B 的唯一判定被第三个 writer 弄丢了(暂存 {final_stage},"
+                         f"缓存 {final_cache});下一轮只能再买一次模型")
+
+    # ── 内容一样不等于没人发布过(ABA) ──────────────────────────────────────
+    def test_a_stale_run_detects_a_publish_cycle_that_returns_to_the_same_bytes(self):
+        """产物 A→B→A 转了一圈:内容和开工时逐字相同,但发布序列已经走了两步。
+
+        复审第 8 轮:内容签名回答的是「东西一不一样」,回答不了「发布序列有没有
+        往前走」。定时任务、手动重跑和慢模型任务重叠时,只要页面内容发生回退再
+        恢复(或者同样输入重发一次),旧任务就能绕过 CAS 静默覆盖——它还打印
+        正常的发布结果、退出码 0。
+        """
+        seed = self._late("S1", 1, wait=False, summary="BASE_A")
+        self.assertEqual(seed.wait(timeout=120), 0, seed.communicate()[1])
+        page = self.out_dir / "graph-skills.html"
+        base_a = page.read_bytes()
+
+        stale = self._late("S1", 1, wait=True, summary="STALE_SNAPSHOT")
+        self._wait_ready(stale)                      # 以 A 为基线,停在取锁之前
+
+        b = self._late("S1", 1, wait=False, summary="NEW_B")   # A → B
+        self.assertEqual(b.wait(timeout=120), 0, b.communicate()[1])
+        self.assertNotEqual(page.read_bytes(), base_a)
+        a2 = self._late("S1", 1, wait=False, summary="BASE_A")  # B → A(逐字相同)
+        self.assertEqual(a2.wait(timeout=120), 0, a2.communicate()[1])
+        self.assertEqual(page.read_bytes(), base_a,
+                         "这一轮的前提没了:第二次发布该把页面还原成逐字相同的 A")
+
+        self.go2.touch()
+        out, err = stale.communicate(timeout=120)
+        self.assertEqual(stale.returncode, 0, err)
+        self.assertIn("不发布", out, "期间发布过两次,旧任务却没认出来(ABA)")
+        self.assertEqual(page.read_bytes(), base_a, "旧快照盖掉了最后完成的那一版")
+        self.assertNotIn("STALE_SNAPSHOT", page.read_text(encoding="utf-8"))
 
 
 def T_load(path: Path) -> dict[str, str]:
