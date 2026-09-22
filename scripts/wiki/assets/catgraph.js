@@ -130,7 +130,12 @@ main.appendChild(emptyNote);
 
 /* ── 筛选 ── */
 const F = { q: "", win: 0, heat: 1, repo: false, sort: "n" };
-const today = new Date(DATA.meta.built + "T00:00:00");
+/* built 是一个不带时区的日历日,窗口截止日必须**全程按 UTC 算**:按本地时区
+   解析午夜再 toISOString(),在 UTC+8 下会退回前一天(2026-09-22 → 截止日
+   2026-08-22),窗口凭空多含一天——页脚那句「近 30 天有提及 409」是后端按
+   date.today()-30 数的,前端却筛出 430,同一张页面自己跟自己对不上
+   (2026-09-22 第 10 轮审查发现)。所有 UTC 正偏移时区都会踩。 */
+const today = new Date(DATA.meta.built + "T00:00:00Z");
 function cutoff(days) {
   const d = new Date(today.getTime() - days * 864e5);
   return d.toISOString().slice(0, 10);
