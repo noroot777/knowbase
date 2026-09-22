@@ -171,7 +171,9 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
         codes = res.codes
     else:
         codes = T.load_cache(taxo)
-        res = T.Verdicts(codes)
+        # --no-llm 这条路的 commit 是空操作,更容易被忽略:它只会把旧页面重发一遍,
+        # 于是页面 30 节点、缓存 40 条,两边长期对不上。基线一样要记。
+        res = T.Verdicts(codes, baseline=T.cache_fingerprint(taxo, codes))
         print(f"  [{kind}] --no-llm:只用缓存里的 {len(codes)} 条归类")
 
     data = G.build(picked, codes, taxo, drop_codes=v["drop"])
@@ -197,6 +199,20 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
     # 无告警(2026-09-22 复审第 3 轮发现)。验收读的基线也得在锁里,不然刚比过的
     # 旧图转头就被另一个 writer 换掉了。
     with T.publish_lock(taxo):
+        now = T.cache_fingerprint(taxo)
+        if now != res.baseline:
+            # **读基线 → 判定 → 建图 → 渲染那一大段跑在锁外**(判定要问模型,几分钟
+            # 起,攥着锁不放会把另一条路堵死),所以锁只保证两次发布动作不交错,认不
+            # 出后拿到锁的这个是基于陈旧基线跑出来的:旧任务能以退出码 0 把刚发布的
+            # 40 节点页面刷回 30 节点、连新增的 10 条缓存一起抹掉;`--no-llm` 那条路
+            # 的 commit 又是空操作,只把旧页面重发一遍,留下页面 30 节点、缓存 40 条
+            # 的长期分裂(2026-09-23 复审第 6 轮发现)。别人在我们跑的这段时间里发布
+            # 过 = 那一版比我们这份新,这一轮就不发了;我们判出来的东西留在暂存里,
+            # 下一轮接着提交,一条都不丢。
+            print(f"[{kind}] 正式缓存在这一轮生成期间被别的 writer 换过了"
+                  f"(基线 {res.baseline[:8]} → {now[:8]}),那一版更新,"
+                  f"这一轮不发布 {out.name};判出来的判定留在暂存里,下一轮接着提交")
+            return out
         # 判定是完整的,但出来的图塌了。--no-llm 首次生成不拦(那时满屏待归类是
         # 如实反映);问过模型却塌了,即使没有旧页也不许发。
         bad = quality_problem(meta, picked, out, allow_shrink=allow_shrink)

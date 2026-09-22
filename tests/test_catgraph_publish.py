@@ -330,6 +330,39 @@ class PublishGateTest(unittest.TestCase):
         self.assertEqual(B.P.page_stats(self.page),
                          {"nodes": 120, "classified": 120})
 
+    def test_persistent_cleanup_failure_does_not_break_every_later_run(self):
+        """删不掉暂存的原因一直在(权限没改回来):以后每一轮也不能因此异常退出。
+
+        复审第 6 轮:`_promote()` 那头捕了 unlink 的 OSError,恢复路径里的
+        `stage.unlink()` 却是裸调的——「下一轮会把它丢掉、不影响结果」这句承诺
+        就成了「以后每一轮都在恢复阶段炸掉」。
+        """
+        base = [_group(f"n{i}", f"名{i}", topics=["skill工具"]) for i in range(100)]
+        self.groups = base
+        self._stub("S1")
+        self._build()
+        real = Path.unlink
+
+        def denied(self_, *a, **kw):
+            if self_.name.endswith(".staging.json"):
+                raise PermissionError("simulated persistent staging unlink denied")
+            return real(self_, *a, **kw)
+
+        with mock.patch.object(Path, "unlink", denied):
+            self.groups = base + [_group(f"m{i}", f"新{i}", topics=["skill工具"])
+                                  for i in range(20)]
+            self._stub("S2")
+            self._build()                       # 提交成功,暂存留在盘上
+            self.assertTrue(T.staging_path(T.SKILLS).exists())
+            for run in (1, 2):                  # 之后每一轮照样得能跑完
+                with self.subTest(第几次=run):
+                    self._stub("S3")
+                    self._build()
+                    self.assertEqual(B.P.page_stats(self.page),
+                                     {"nodes": 120, "classified": 120})
+                    cache = json.loads(T.cache_path(T.SKILLS).read_text("utf-8"))
+                    self.assertEqual(len(cache["items"]), 120)
+
 
 if __name__ == "__main__":
     unittest.main()

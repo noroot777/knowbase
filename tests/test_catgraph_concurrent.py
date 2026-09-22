@@ -113,6 +113,52 @@ B.build_one("skills", [g], use_llm=True, max_new=None,
             model="stub", workers=1, out_dir=out_dir)
 '''
 
+# 第三种交错:整轮跑完(判定、建图、渲染都在锁外做完)才停在**取发布锁之前**,
+# 等另一个 writer 发布完再进锁。基于陈旧基线的这一份不许发出去。
+LATE_CHILD = '''\
+import contextlib, json, re, sys, time
+from pathlib import Path
+REPO = Path({repo!r})
+sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "scripts" / "wiki"))
+import build_catgraph as B, taxonomy as T
+T.CACHE_DIR = Path(sys.argv[3])
+code, n, out_dir = sys.argv[1], int(sys.argv[2]), Path(sys.argv[4])
+ready, go = Path(sys.argv[5]), Path(sys.argv[6])
+use_llm = sys.argv[7] == "1"
+
+def fake(prompt, model, **kw):
+    rows = re.findall(r"^(\\d+)\\. (\\S+) ::", prompt, re.M)
+    return json.dumps([{{"id": int(i), "c": code}} for i, _nm in rows])
+T._llm = fake
+
+if ready.name != "-":                    # 判完、渲染完,停在取锁之前
+    real_lock = T.publish_lock
+    @contextlib.contextmanager
+    def slow(taxo):
+        ready.touch()
+        for _ in range(600):
+            if go.exists():
+                break
+            time.sleep(0.05)
+        with real_lock(taxo):
+            yield
+    T.publish_lock = slow
+
+def group(i):
+    q = f"n{{i}}"
+    return {{"norm": q, "name": f"名{{i}}", "kind": "product", "summary": "简介",
+            "url": "", "n": 1, "accounts": 1, "latest": "2026-09-20",
+            "first": "2026-09-01", "topics": ["skill工具"],
+            "all_topics": ["skill工具"], "sources": ["dr-gzh-projects"],
+            "entries": [{{"url": f"https://x/{{q}}", "article_title": f"文{{i}}",
+                         "account": "号", "published": "2026-09-20"}}]}}
+
+B.build_one("skills", [group(i) for i in range(n)], use_llm=use_llm,
+            max_new=None, model="stub" if use_llm else None,
+            workers=1, out_dir=out_dir)
+'''
+
 
 class ConcurrentPublishTest(unittest.TestCase):
 
@@ -126,6 +172,7 @@ class ConcurrentPublishTest(unittest.TestCase):
         self.child = root / "child.py"
         self.child.write_text(CHILD.format(repo=str(REPO)), encoding="utf-8")
         self.paused, self.go = root / "paused", root / "go"
+        self.ready, self.go2 = root / "ready2", root / "go3"
 
     def _spawn(self, code: str, n: int, *, pause: bool):
         return subprocess.Popen(
@@ -211,6 +258,73 @@ class ConcurrentPublishTest(unittest.TestCase):
         self.assertIn('"q": "n0", "c": "S1"', page, "页面用了作废的旧结论")
         self.assertFalse((self.cache_dir / "taxonomy_skills.staging.json").exists(),
                          "作废的暂存一直留在盘上")
+
+    # ── 基于陈旧基线的那一份不许发布(判定/建图/渲染都在锁外做完) ────────────
+    def _late(self, code, n, *, wait, llm=True):
+        late = Path(self.tmp.name) / "late.py"
+        if not late.exists():
+            late.write_text(LATE_CHILD.format(repo=str(REPO)), encoding="utf-8")
+        return subprocess.Popen(
+            [sys.executable, str(late), code, str(n), str(self.cache_dir),
+             str(self.out_dir), str(self.ready if wait else Path("-")),
+             str(self.go2), "1" if llm else "0"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def _wait_ready(self, proc):
+        for _ in range(400):
+            if self.ready.exists() or proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertTrue(self.ready.exists(), "没走到取锁前的暂停点")
+
+    def test_a_stale_llm_run_never_republishes_over_a_newer_one(self):
+        """旧任务判完 30 条停在锁外,新任务发布了 40 条:旧的那份不许再发。
+
+        复审第 6 轮:发布锁只保证两次发布动作不交错,认不出后拿到锁的是基于陈旧
+        基线跑出来的——两个进程都退出 0,可页面被刷回 30 节点,新增的 10 条缓存
+        一起蒸发。
+        """
+        stale = self._late("S1", 30, wait=True)
+        self._wait_ready(stale)
+        cur = self._late("S2", 40, wait=False)
+        self.assertEqual(cur.wait(timeout=120), 0, cur.communicate()[1])
+        page_now = (self.out_dir / "graph-skills.html").read_bytes()
+        cache_now = T_load(self.cache_dir / "taxonomy_skills.json")
+        self.assertEqual(len(cache_now), 40)
+
+        self.go2.touch()
+        out, err = stale.communicate(timeout=120)
+        self.assertEqual(stale.returncode, 0, err)
+        self.assertIn("不发布", out, "旧基线上的那一份还是发出去了")
+        self.assertEqual((self.out_dir / "graph-skills.html").read_bytes(),
+                         page_now, "新发布的页面被旧任务刷回去了")
+        self.assertEqual(T_load(self.cache_dir / "taxonomy_skills.json"),
+                         cache_now, "新提交的判定被旧任务抹掉了")
+
+    def test_a_stale_no_llm_run_does_not_split_page_and_cache(self):
+        """`--no-llm` 那条路的 commit 是空操作,更隐蔽:它只把旧页面重发一遍。"""
+        seed = self._late("S1", 30, wait=False)
+        self.assertEqual(seed.wait(timeout=120), 0, seed.communicate()[1])
+
+        stale = self._late("-", 30, wait=True, llm=False)
+        self._wait_ready(stale)
+        cur = self._late("S2", 40, wait=False)
+        self.assertEqual(cur.wait(timeout=120), 0, cur.communicate()[1])
+        page_now = (self.out_dir / "graph-skills.html").read_bytes()
+        cache_now = T_load(self.cache_dir / "taxonomy_skills.json")
+        self.assertEqual(len(cache_now), 40)
+
+        self.go2.touch()
+        out, err = stale.communicate(timeout=120)
+        self.assertEqual(stale.returncode, 0, err)
+        page = (self.out_dir / "graph-skills.html")
+        self.assertEqual(page.read_bytes(), page_now, "页面被旧任务刷回 30 节点了")
+        self.assertEqual(T_load(self.cache_dir / "taxonomy_skills.json"), cache_now)
+        on_page = dict(re.findall(r'"q": "(\w+)", "c": "(\w+)"',
+                                  page.read_text(encoding="utf-8")))
+        self.assertEqual(len(on_page), 40)
+        self.assertFalse({q: c for q, c in on_page.items()
+                          if cache_now.get(q) != c}, "页面和缓存对不上")
 
 
 def T_load(path: Path) -> dict[str, str]:
