@@ -13,6 +13,7 @@
 
 历史导入保护:步骤 1/2 机械操作,欢迎全量;4/5 有日期门,老日期永不触发 LLM。
 --skip-linkify:kb 管道 extract 正在跑时只做读 DB 的部分,不写 source 文件。
+6/7 任一失败都会让本脚本非零退出(前面的步骤照常完成),管道那头才看得见红态。
 """
 from __future__ import annotations
 
@@ -103,6 +104,30 @@ def step_synthesis(u: W.Universe, model, workers: int) -> list[str]:
     return S.run_targets(u, targets, model=model, workers=workers)
 
 
+def run_step(label: str, cmd: list[str], timeout: int) -> str:
+    """跑一个图谱子进程,成功返回空串,失败返回一句原因(调用方据此非零退出)。
+
+    子步骤失败**必须带着非零退出码传上去**:管道那头的 `_run_wiki()` 只看
+    wiki_daily 的总退出码,这里只打印一行 `FAIL` 的话,图谱质量验收拒绝写页面、
+    模型配置错、写盘失败全都会被报成 `wiki: ok`——两张图长期停在旧版本,面板上
+    却一路绿灯(2026-09-22 第 8 轮审查发现)。stdout 那行给面板看(它按
+    `graph:`/`catgraph:` 前缀捞),完整 stderr 原样转出去进日志。
+    """
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"{label}: FAIL 超时({timeout}s)")
+        return f"{label} 超时({timeout}s)"
+    if r.returncode == 0:
+        print(f"{label}: ok")
+        return ""
+    err = (r.stderr or r.stdout or "").strip()
+    print(f"{label}: FAIL {err[:200]}")
+    if r.stderr:
+        sys.stderr.write(r.stderr if r.stderr.endswith("\n") else r.stderr + "\n")
+    return f"{label} 退出码 {r.returncode}"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--recent-days", type=int, default=2, help="digest 回看天数")
@@ -139,22 +164,22 @@ def main():
     print("index: 已重渲染")
 
     since = (date.today() - timedelta(days=14)).isoformat()
-    r = subprocess.run([sys.executable, str(HERE / "build_graph_html.py"),
-                        "--since", since],
-                       capture_output=True, text=True, timeout=300)
-    print(f"graph: {'ok' if r.returncode == 0 else 'FAIL ' + r.stderr[:200]}")
-
-    # 分类图谱(开源项目 / skill)。归类结果长期缓存,日常只判当天新增的那几条;
-    # --skip-llm 时完全不判,用已有缓存重生成(新条目暂时落「待归类」)。
     cmd = [sys.executable, str(HERE / "build_catgraph.py")]
     if a.skip_llm:
+        # 分类图谱的归类结果长期缓存,日常只判当天新增的那几条;--skip-llm 时
+        # 完全不判,用已有缓存重生成(新条目暂时落「待归类」)。
         cmd.append("--no-llm")
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-    print(f"catgraph: {'ok' if r.returncode == 0 else 'FAIL ' + r.stderr[:200]}")
+    fails = [x for x in (
+        run_step("graph", [sys.executable, str(HERE / "build_graph_html.py"),
+                           "--since", since], 300),
+        run_step("catgraph", cmd, 1800),
+    ) if x]
 
     if n_link or made or syn:
         W.append_log(W.VAULT, "wiki",
                      f"双链化 {n_link} 篇,digest {len(made)} 天,综合 {len(syn)} 实体")
+    if fails:
+        raise SystemExit("wiki_daily: " + ";".join(fails) + "(图谱未更新)")
     print("WIKI_DAILY_DONE")
 
 

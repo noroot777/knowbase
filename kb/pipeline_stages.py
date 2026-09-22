@@ -255,7 +255,8 @@ def _run_wiki() -> None:
         _stage("wiki", "error", "wiki 同步超时(45 分钟)")
         return
     tail = [l for l in proc.stdout.splitlines()
-            if l.startswith(("linkify:", "digest:", "synthesis:"))]
+            if l.startswith(("linkify:", "digest:", "synthesis:",
+                             "graph:", "catgraph:"))]
     detail = ";".join(t.strip() for t in tail) or proc.stdout.strip()[-160:]
     # 面板卡片空间有限,压成一行短语;完整输出看日志
     m1 = re.search(r"新双链化 (\d+)", proc.stdout)
@@ -265,8 +266,18 @@ def _run_wiki() -> None:
         detail = (f"双链化 {m1.group(1) if m1 else 0} 篇 · "
                   f"日摘要 {m2.group(1) if m2 else 0} 天 · "
                   f"综合 {m3.group(1) if m3 else 0} 实体")
+    # 图谱子步骤自己会让 wiki_daily 非零退出,但那三项摘要一重建就把它盖没了,
+    # 面板上只剩「失败: 」一句空话。图谱那几行单拎出来,附在详情后面。
+    graph = [l.strip() for l in proc.stdout.splitlines()
+             if l.startswith(("graph:", "catgraph:"))]
+    bad = [l for l in graph if ": FAIL" in l]
+    if m1 or m2 or m3:
+        note = ";".join(bad) if bad else ("图谱 ok" if graph else "")
+        if note:
+            detail = f"{detail} · {note}"
     if proc.returncode != 0:
-        _stage("wiki", "error", f"失败: {(proc.stderr or detail)[-200:]}")
+        why = ";".join(bad) or (proc.stderr or detail).strip()
+        _stage("wiki", "error", f"失败: {why[-200:]}")
     else:
         _stage("wiki", "ok", detail[:200] or "完成")
 
