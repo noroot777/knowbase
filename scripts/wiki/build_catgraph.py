@@ -110,7 +110,7 @@ def quality_problem(meta: dict, picked: list, out: Path, *,
     return ""
 
 
-def _atomic_write(out: Path, text: str) -> None:
+def _atomic_write(out: Path, data: str | bytes) -> None:
     """页面落盘用「同目录唯一临时文件 + rename」,别直接往正式产物上写。
 
     直接 `write_text` 的话,磁盘满/进程被杀/写到一半抛异常都会先把正式页面截成
@@ -121,10 +121,39 @@ def _atomic_write(out: Path, text: str) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
+        if isinstance(data, bytes):
+            tmp.write_bytes(data)
+        else:
+            tmp.write_text(data, encoding="utf-8")
         tmp.replace(out)                      # 失败前旧页面逐字节不变
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _publish(out: Path, html: str, res, kind: str) -> None:
+    """落页面 + 提交缓存,**失败就把页面回滚成原样**。
+
+    两个文件各自 rename 只保证「不出半截文件」,给不了跨文件的失败原子性:页面
+    换好了、正式缓存却因为磁盘满/权限/IO 错误提交不上时,任务是报错退出了,可
+    Vault 里的正式页面已经变成新的 120 节点、缓存还停在旧的 100 条——「失败的
+    发布不改变正式产物」这条当场不成立,而且没人重试的话这个不一致会一直挂着
+    (2026-09-22 复审第 4 轮发现)。所以先把旧页面收在手里,提交失败就原子换回去。
+    """
+    backup = out.read_bytes() if out.exists() else None
+    _atomic_write(out, html)
+    try:
+        res.commit()
+    except BaseException:
+        try:
+            if backup is None:
+                out.unlink(missing_ok=True)   # 本来就没有页面:回到没有
+            else:
+                _atomic_write(out, backup)
+        except OSError as e:                  # 回滚都失败了,至少说清楚
+            print(f"[{kind}] 缓存提交失败后回滚页面也失败({e}),"
+                  f"{out.name} 现在是新的一版、缓存还是旧的,请手工重跑",
+                  file=sys.stderr)
+        raise
 
 
 def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | None,
@@ -178,12 +207,12 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
                 f"[{kind}] {bad},拒绝{'覆盖已有的' if out.exists() else '发布'} "
                 f"{out.name};先确认模型配置/缓存文件是否正常,确认这就是预期"
                 f"结果就加 --allow-shrink 重跑")
-        _atomic_write(out, html)
-        # 新图验收通过、也落盘了,这才把重判的新结论换上正式缓存。**顺序不能反**:
-        # 先换缓存再校验的话,上面任何一道拦截都只保住页面保不住缓存——那份还能用的
-        # 旧缓存已经没了,之后每轮都命中新缓存、不再问模型,页面就再也更新不了
-        # (2026-09-22 第 4 轮审查发现)。写页面失败同理:没提交,下次重来。
-        res.commit()
+        # 新图验收通过:落页面、换正式缓存。**顺序不能反**:先换缓存再校验的话,
+        # 上面任何一道拦截都只保住页面保不住缓存——那份还能用的旧缓存已经没了,
+        # 之后每轮都命中新缓存、不再问模型,页面就再也更新不了(2026-09-22 第 4
+        # 轮审查发现)。写页面失败同理:没提交,下次重来。缓存提交失败则把页面
+        # 回滚回去,别留下「页面新、缓存旧」的半提交状态(见 _publish)。
+        _publish(out, html, res, kind)
     size = out.stat().st_size / 1024
     print(f"[{kind}] 节点 {meta['total']}(已归类 {meta['classified']}) "
           f"边 {meta['edges']} 文章 {meta['arts']} → {out} ({size:.0f} KB)")

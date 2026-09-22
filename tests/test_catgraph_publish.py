@@ -241,6 +241,58 @@ class PublishGateTest(unittest.TestCase):
         self.assertFalse(T.cache_path(T.SKILLS).exists(),
                          "页面没写成却把判定提交进正式缓存了")
 
+    # ── ③ 反过来:页面写成了、缓存提交失败 ──────────────────────────────────
+    def _boom_on_cache(self):
+        """只让**正式缓存**那次写盘炸,暂存照常落(磁盘满/权限变化的形态)。"""
+        real = T.save_cache
+
+        def boom(taxo, codes, names, path=None, **kw):
+            if path is None or path == T.cache_path(taxo):
+                raise OSError("simulated cache disk full")
+            return real(taxo, codes, names, path, **kw)
+
+        return mock.patch.object(T, "save_cache", boom)
+
+    def test_cache_commit_failure_rolls_the_page_back(self):
+        """失败的发布不许改变正式产物:页面得原子回滚成旧的那一版。
+
+        复审第 4 轮:跨进程锁只挡 writer 交错,给不了跨文件的失败原子性。页面
+        换好了、缓存提交不上时任务是报错退出了,可 Vault 里已经是新页面、缓存
+        还停在旧的——没人重试的话这个不一致会一直挂着。
+        """
+        base = [_group(f"n{i}", f"名{i}", topics=["skill工具"]) for i in range(100)]
+        self.groups = base
+        self._stub("S1")
+        self._build()
+        good_page = self.page.read_bytes()
+        good_cache = T.cache_path(T.SKILLS).read_bytes()
+
+        self.groups = base + [_group(f"m{i}", f"新{i}", topics=["skill工具"])
+                              for i in range(20)]
+        self._stub("S2")
+        with self._boom_on_cache(), self.assertRaises(OSError):
+            self._build()
+        self.assertEqual(self.page.read_bytes(), good_page, "页面没回滚")
+        self.assertEqual(T.cache_path(T.SKILLS).read_bytes(), good_cache)
+        self.assertEqual(sorted(p.name for p in self.out_dir.iterdir()),
+                         [self.page.name], "临时文件没清掉")
+        self.assertTrue(T.staging_path(T.SKILLS).exists(),
+                        "这一轮判出来的东西是好的,别连进度一起丢了")
+
+        self._stub("S2")                       # 重试一次就该好
+        self._build()
+        self.assertEqual(B.P.page_stats(self.page),
+                         {"nodes": 120, "classified": 120})
+
+    def test_cache_commit_failure_on_a_first_publish_leaves_no_page(self):
+        """首次生成时提交失败:回到「什么都没有」,不留一张没有缓存的页面。"""
+        self._stub("S1")
+        with self._boom_on_cache(), self.assertRaises(OSError):
+            self._build()
+        self.assertFalse(self.page.exists())
+        self.assertFalse(T.cache_path(T.SKILLS).exists())
+        self.assertEqual(list(self.out_dir.iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

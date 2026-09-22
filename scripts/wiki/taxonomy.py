@@ -278,17 +278,54 @@ def stale_cache_size(taxo: Taxonomy) -> int:
 
 
 def save_cache(taxo: Taxonomy, codes: dict[str, str], names: dict[str, str],
-               path: Path | None = None) -> None:
+               path: Path | None = None,
+               runs: list[list[str]] | None = None) -> None:
     """写盘用「唯一临时文件 + rename」:截断重写会让并发读者读到半截 JSON,
-    而半截 JSON 被 load_cache 吞成空缓存,下一次 build 就会把几千条重判一遍。"""
+    而半截 JSON 被 load_cache 吞成空缓存,下一次 build 就会把几千条重判一遍。
+
+    `runs` 只有暂存文件用:记「哪几条是同一趟判出来的」。见 `load_runs`。
+    """
     p = path or cache_path(taxo)
     p.parent.mkdir(parents=True, exist_ok=True)
-    body = {"sig": taxo.sig(),
-            "items": {k: {"c": v, "n": names.get(k, "")} for k, v in sorted(codes.items())}}
+    body: dict = {"sig": taxo.sig(),
+                  "items": {k: {"c": v, "n": names.get(k, "")}
+                            for k, v in sorted(codes.items())}}
+    if runs is not None:
+        body["runs"] = [sorted(g) for g in runs if g]
     tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
     with _io_lock:
         tmp.write_text(json.dumps(body, ensure_ascii=False, indent=0), encoding="utf-8")
         tmp.replace(p)
+
+
+def load_runs(path: Path, part: dict[str, str]) -> list[list[str]]:
+    """暂存里记的批次分组:[[norm, ...], ...],一组 = 同一趟 classify 判出来的。
+
+    暂存要有批次身份,是因为**质量判定跑在批次上**:进程在暂存写完、`finish()`
+    的退化判定跑完之前被杀(或者另一个 writer 抢先读走),这批本该判为「不作数」
+    的结果就留在盘上了;下一轮把它和更多正常结果合在一起算占比,20 条全废的
+    被 180 条正常的稀释成 10%,当场随整份缓存提交,下一轮全命中、不再问模型
+    (2026-09-22 复审第 4 轮发现)。记下分组,恢复时就能按原批次各验各的。
+
+    老格式(没有 runs)整份当一个批次——那是同样没验过的东西,不能因为
+    读不到分组就当它验过了。没被任何分组记到的零头同理,单独凑一组。
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        got = raw.get("runs")
+    except (OSError, json.JSONDecodeError):
+        got = None
+    groups: list[list[str]] = []
+    seen: set[str] = set()
+    for g in got if isinstance(got, list) else []:
+        keep = [n for n in g if isinstance(n, str) and n in part and n not in seen]
+        seen.update(keep)
+        if keep:
+            groups.append(keep)
+    rest = [n for n in part if n not in seen]
+    if rest:
+        groups.append(rest)
+    return groups
 
 
 # ── LLM 批量判定 ───────────────────────────────────────────────────────────────
@@ -398,6 +435,14 @@ VOID_SHARE = 0.9
 VOID_MIN_N = 20
 
 
+def _void_bad(codes: list[str], void: frozenset[str]) -> int:
+    """这一**批**判定算不算「等于没判」?算就返回落在 void 上的条数(>0),
+    不算返回 0。判据只有这一份:这一轮自己判的那批、和从暂存里续上的每一批,
+    都拿它各验各的(见 `load_runs`)。"""
+    n_void = sum(1 for c in codes if c in void)
+    return n_void if len(codes) >= VOID_MIN_N and n_void >= len(codes) * VOID_SHARE else 0
+
+
 def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
              model=None, workers: int = 6, batch: int = 40,
              max_new: int | None = None, void_codes: frozenset[str] = frozenset(),
@@ -430,17 +475,38 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
     stale = 0 if codes else stale_cache_size(taxo)
     migrating = bool(stale)
     stage = staging_path(taxo)
+    void = void_codes | {taxo.fallback}
     # 续上上一轮判出来、还没提交的那些(指纹对不上的暂存会被 load_raw 当空的,
-    # 那种留在盘上也没用,顺手删掉)
+    # 那种留在盘上也没用,顺手删掉)。**续之前先按原批次各验各的**:暂存里的
+    # 东西都是没走完质量判定的半成品,进程被杀/被另一个 writer 抢读都会留下
+    # 一整批坏判定,直接合进来就被这一轮的正常结果稀释掉了(见 load_runs)。
     part, pnames = load_raw(taxo, stage)
+    kept_runs: list[list[str]] = []
     if part:
-        codes.update(part)
-        names.update(pnames)
+        dropped = 0
+        for g in load_runs(stage, part):
+            n_void = _void_bad([part[n] for n in g], void)
+            if n_void and not allow_degenerate:
+                dropped += len(g)
+                log(f"  [{taxo.key}] 暂存里有一批 {len(g)} 条、{n_void} 条落在 "
+                    f"{sorted(void)} 上(上一趟没走完质量判定就被打断),不作数,"
+                    f"这一轮重判")
+                continue
+            kept_runs.append(g)
+            codes.update({n: part[n] for n in g})
+            names.update({n: pnames.get(n, "") for n in g})
+        if dropped:                       # 坏批次当场从盘上抹掉,别留到下一轮
+            if kept_runs:
+                save_cache(taxo, {n: codes[n] for g in kept_runs for n in g},
+                           names, stage, runs=kept_runs)
+            else:
+                stage.unlink(missing_ok=True)
     elif stage.exists():
         stage.unlink(missing_ok=True)
+    resumed = {n for g in kept_runs for n in g}
     if migrating:
         log(f"  [{taxo.key}] 分类表改过,{stale} 条旧判定整份作废,本轮全量重判"
-            f"(--max-new 不适用){f';续上暂存 {len(part)} 条' if part else ''}")
+            f"(--max-new 不适用){f';续上暂存 {len(resumed)} 条' if resumed else ''}")
 
     names.update({n: nm for n, nm, _ in items})
 
@@ -452,15 +518,13 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
                    f"还差 {left} 条:批次失败或模型漏项),进度已存盘,下次跑接着判")
             log(f"  [{taxo.key}] {why};正式缓存与旧图原样保留")
             return Verdicts(codes, False, migrating, left, reason=why)
-        void = void_codes | {taxo.fallback}
-        # **分母是这一趟新拿到的判定**,不是整份缓存(续上的暂存算这一趟的)。
-        # 拿全部缓存当分母的话,缓存越大越掩盖问题:3188 条的正式缓存下,即使
-        # 新增的 400 条全是 void,占比也只有 12.6%,整批失败的增量照样入库、
-        # 下一轮全命中缓存再不重试(2026-09-22 复审第 3 轮发现)。
-        fresh = {n: c for n, c in codes.items() if n not in base}
-        n_void = sum(1 for c in fresh.values() if c in void)
-        degenerate = len(fresh) >= VOID_MIN_N and n_void >= len(fresh) * VOID_SHARE
-        if degenerate and not allow_degenerate:
+        # **分母是这一趟自己判的那些**:不是整份缓存(3188 条缓存能把「新增 400 条
+        # 全废」稀释成 12.6%,2026-09-22 复审第 3 轮发现),也不含从暂存里续上的
+        # 批次(那些已经在上面各验过一遍了;混在一起算,180 条正常的照样能把 20 条
+        # 全废的稀释过关,复审第 4 轮发现)。
+        mine = {n: c for n, c in codes.items() if n not in base and n not in resumed}
+        n_void = _void_bad(list(mine.values()), void)
+        if n_void and not allow_degenerate:
             # 这一趟拿到的判定压倒性地落在「等于没判」的那几个 code 上(全待归类、
             # skill 全判成「不是 skill」、或者 101 条里 100 条待归类),这不是判定
             # 结果,是这一趟坏了(提示词/模型/中转站)。**不是只有 100% 才算坏**:
@@ -469,10 +533,15 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
             # 少于 VOID_MIN_N 条时连 100% 也不算:skill 候选里本来就有近四分之一
             # 判出来「不是 skill」,某天只进来两三条、碰巧全是它,那是正常结果,
             # 按坏结果拦下会让图谱天天红着、还得人工加 --allow-shrink 才能过。
-            # 暂存一并扔掉:留着的话下一轮全命中、不再问模型,同一个坏结果
-            # 会一直卡在那儿(2026-09-22 第 4、5 轮审查发现)。
-            stage.unlink(missing_ok=True)
-            share = "全" if n_void == len(fresh) else f"{n_void}/{len(fresh)} 条"
+            # 这一趟的判定从暂存里抹掉:留着的话下一轮全命中、不再问模型,同一个
+            # 坏结果会一直卡在那儿(2026-09-22 第 4、5 轮审查发现)。验过的那些
+            # 批次留着——它们是别的趟的进度,不该被这一趟的失败连坐。
+            if kept_runs:
+                save_cache(taxo, {n: codes[n] for n in resumed}, names,
+                           stage, runs=kept_runs)
+            else:
+                stage.unlink(missing_ok=True)
+            share = "全" if n_void == len(mine) else f"{n_void}/{len(mine)} 条"
             why = (f"{'重判' if migrating else '本轮新判'}结果 {share}落在 "
                    f"{sorted(void)} 上(等于什么也没判出来),这一趟不作数,下次重判")
             log(f"  [{taxo.key}] {why};正式缓存与旧图原样保留")
@@ -512,6 +581,12 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
         return {chunk[i][0]: c for i, c in got.items()
                 if 0 <= i < len(chunk) and c in valid}
 
+    def stash() -> None:
+        """把 codes 落到暂存,并记下「哪些是这一趟判的」(见 load_runs)。"""
+        mine = [n for n in codes if n not in base and n not in resumed]
+        save_cache(taxo, {n: codes[n] for n in codes if n not in base}, names,
+                   stage, runs=kept_runs + [mine])
+
     def do_round(todo: list[tuple[str, str, str]]) -> None:
         """判一轮 todo,结果并进 codes 并落到**暂存文件**。
 
@@ -534,11 +609,11 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
                 # 只在真判出新东西时落盘;落的始终是暂存文件,正式缓存要等
                 # 调用方验收完新图才动。
                 if len(codes) > saved and (done % 5 == 0 or done == len(batches)):
-                    save_cache(taxo, codes, names, stage)  # 中途落盘:被打断也不白跑
+                    stash()                      # 中途落盘:被打断也不白跑
                     saved = len(codes)
                     log(f"  [{taxo.key}] {done}/{len(batches)} 批,已判 {len(codes)} 条")
         if len(codes) > saved:
-            save_cache(taxo, codes, names, stage)
+            stash()
 
     do_round(pending)
     if migrating:
