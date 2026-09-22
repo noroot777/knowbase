@@ -341,10 +341,66 @@ class ResignMigrationTest(unittest.TestCase):
         不了。连跑两次必须都:正式缓存逐字节不变、旧页面不变、而且**第二次还会
         再问模型**(不能卡死)。
         """
+        self._assert_degenerate_run_is_rejected(code=T.SKILLS.fallback)
+
+    def test_all_excluded_rejudge_never_replaces_the_page(self):
+        """每条都回合法的 X(不是 skill):判完全被 drop 掉,新图 0 个节点。
+
+        第 5 轮审查:X 不是 fallback,躲过了「全 fallback」那道特判;而 0 节点
+        又让「有条目却没归类」那道检查失效(它要求 total 为真)——空图连同坏缓存
+        一起提交,之后全命中、不再问模型,空图状态永久固化。
+        """
+        self._assert_degenerate_run_is_rejected(code="X")
+
+    def test_mostly_excluded_rejudge_is_rejected_too(self):
+        """101 个候选只剩 1 个活下来:不是 0 节点,但同样是塌了。
+
+        只挡全空的话,「只剩零星几个」照样能把好图换成一张空壳。按旧图节点数的
+        比例下限兜底。
+        """
+        out_dir, page, groups = self._page_with_old_content()
+        self._stub()                                   # 先生成一张 101 节点的旧图
+        B.build_one("skills", groups, use_llm=True, max_new=None, model="stub",
+                    workers=1, out_dir=out_dir)
+        good_page = page.read_text(encoding="utf-8")
+        good_cache = T.cache_path(T.SKILLS).read_text(encoding="utf-8")
+        self.assertEqual(B.P.page_stats(page), {"nodes": 101, "classified": 101})
+
+        # 规则再改一次 → 又一轮全量重判,这次 100 条判成 X、只剩 1 条
+        taxo2 = T.Taxonomy(key=T.SKILLS.key, item_zh=T.SKILLS.item_zh,
+                           fallback=T.SKILLS.fallback, cats=T.SKILLS.cats,
+                           extra_rules="又改了一版")
+        B.VIEWS["skills"]["taxo"] = taxo2
+        self.calls = 0
+
+        def fake(prompt, model, **kw):
+            self.calls += 1
+            rows = re.findall(r"^(\d+)\. (\S+) ::", prompt, re.M)
+            return json.dumps([{"id": int(i), "c": "S2" if nm == "名0" else "X"}
+                               for i, nm in rows])
+
+        T._llm, old = fake, T._llm
+        self.addCleanup(lambda: setattr(T, "_llm", old))
+        with self.assertRaises(SystemExit) as cm:
+            B.build_one("skills", groups, use_llm=True, max_new=None,
+                        model="stub", workers=1, out_dir=out_dir)
+        self.assertIn("只剩 1 个节点", str(cm.exception))
+        self.assertEqual(page.read_text(encoding="utf-8"), good_page)
+        self.assertEqual(T.cache_path(T.SKILLS).read_text(encoding="utf-8"),
+                         good_cache)
+        self.assertFalse(T.migrate_path(taxo2).exists())
+
+        # 确认这就是预期结果时,--allow-shrink 放行
+        B.build_one("skills", groups, use_llm=True, max_new=None, model="stub",
+                    workers=1, out_dir=out_dir, allow_shrink=True)
+        self.assertEqual(B.P.page_stats(page)["nodes"], 1)
+
+    def _assert_degenerate_run_is_rejected(self, *, code):
+        """连跑两次「判了等于没判」:缓存和页面都得原样,而且两次都还在问模型。"""
         out_dir, page, groups = self._page_with_old_content()
         for run in (1, 2):
             with self.subTest(第几次=run):
-                self._stub(code=T.SKILLS.fallback)
+                self._stub(code=code)
                 with self.assertRaises(SystemExit):
                     B.build_one("skills", groups, use_llm=True, max_new=None,
                                 model="stub", workers=1, out_dir=out_dir)

@@ -331,11 +331,23 @@ class Verdicts:
     migrating: bool = False
     pending: int = 0               # 还差多少条没判(仅重判期间有意义)
     commit_fn: object = None       # 待提交的正式缓存;None = 没什么可提交的
+    discard_fn: object = None      # 扔掉半成品;None = 没有半成品要扔
+    reason: str = ""               # complete=False 时:为什么不能用(给人看的)
 
     def commit(self) -> None:
         """新图验收通过、页面已落盘之后调:把半成品原子换成正式缓存。"""
         if self.commit_fn is not None:
             self.commit_fn()
+
+    def discard(self) -> None:
+        """新图验收**没**通过时调:连半成品一起扔掉,下一轮重新问模型。
+
+        判定本身完整、只是结果不作数(全判成「不是 skill」之类)时,半成品留着
+        的话下一轮全命中、不再问模型,同一个坏结果会一直卡在那儿——扔掉才能在
+        模型恢复后自己走出来。**判到一半**那种不要扔(那是进度,下次接着判)。
+        """
+        if self.discard_fn is not None:
+            self.discard_fn()
 
 
 # 重判时漏项的补判轮数:模型偶尔漏一条,补判只问缺的那些,批次更小更容易回全。
@@ -345,8 +357,13 @@ _RESIGN_RETRIES = 2
 
 def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
              model=None, workers: int = 6, batch: int = 40,
-             max_new: int | None = None, log=print) -> Verdicts:
+             max_new: int | None = None, void_codes: frozenset[str] = frozenset(),
+             log=print) -> Verdicts:
     """items = [(norm, name, summary)],**按重要性排好序**(热度高的在前)。
+
+    `void_codes`:判成这些 code 等于「什么也没判出来」(fallback 自动算一个;
+    skill 图谱还要把 X = 不是 skill 算进去,它判完就被踢出图谱)。整批**全部**
+    落在这里面时按「这一趟不作数」处理,见下面的 `finish()`。
 
     两种模式,区别在于「旧缓存还算不算数」:
 
@@ -379,20 +396,26 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
         """重判收尾:判完了没?判出来的东西作不作数?作数也只是**待提交**。"""
         left = sum(1 for it in items if it[0] not in codes)
         if left or not codes:
-            log(f"  [{taxo.key}] 重判未完成(还差 {left} 条:批次失败或模型漏项),"
-                f"正式缓存与旧图原样保留,进度存在 {out_path.name},下次接着判")
-            return Verdicts(codes, False, True, left)
-        if all(c == taxo.fallback for c in codes.values()):
-            # 每条都「待归类」不是判定结果,是这一趟坏了(提示词/模型/中转站)。
+            why = (f"分类规则改过,全量重判还没做完(已判 {len(codes)} 条,"
+                   f"还差 {left} 条:批次失败或模型漏项),进度已存盘,下次跑接着判")
+            log(f"  [{taxo.key}] {why};正式缓存与旧图原样保留")
+            return Verdicts(codes, False, True, left, reason=why)
+        void = void_codes | {taxo.fallback}
+        if all(c in void for c in codes.values()):
+            # 整批全落在「等于没判」的那几个 code 上(全待归类、或 skill 全判成
+            # 「不是 skill」),这不是判定结果,是这一趟坏了(提示词/模型/中转站)。
             # 半成品也一并扔掉:留着的话下一轮全命中、不再问模型,同一个坏结果
-            # 会一直卡在那儿(2026-09-22 第 4 轮审查发现)。
+            # 会一直卡在那儿(2026-09-22 第 4、5 轮审查发现)。
             migrate_path(taxo).unlink(missing_ok=True)
-            log(f"  [{taxo.key}] 重判结果 {len(codes)} 条全是「待归类」,判定这一趟"
-                f"不作数(多半是模型/中转站的问题),正式缓存与旧图原样保留,下次重判")
-            return Verdicts(codes, False, True, len(codes))
+            why = (f"重判结果 {len(codes)} 条全落在 {sorted(void)} 上"
+                   f"(等于什么也没判出来),这一趟不作数,下次重判")
+            log(f"  [{taxo.key}] {why};正式缓存与旧图原样保留")
+            return Verdicts(codes, False, True, len(codes), reason=why)
         log(f"  [{taxo.key}] 重判完成,{len(codes)} 条待提交(新图验收通过后才换上正式缓存)")
         ready, kept = dict(codes), dict(names)
-        return Verdicts(codes, True, True, 0, lambda: _promote(taxo, ready, kept))
+        return Verdicts(codes, True, True, 0,
+                        lambda: _promote(taxo, ready, kept),
+                        lambda: migrate_path(taxo).unlink(missing_ok=True))
 
     pending = [it for it in items if it[0] not in codes]
     if max_new is not None and len(pending) > max_new and not migrating:

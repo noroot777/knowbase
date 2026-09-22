@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from pathlib import Path
 
 ASSETS = Path(__file__).resolve().parent / "assets"
@@ -23,6 +24,7 @@ PALETTE = ["#0e7edb", "#7c5cff", "#0f9d63", "#e07a2f", "#d43f6a",
 GRAY = "#8a8f98"
 
 _TMPL = """<!DOCTYPE html>
+{mark}
 <html lang="zh">
 <head>
 <meta charset="utf-8">
@@ -84,14 +86,34 @@ _REPO_CTL = ('<button class="toggle" id="repoBtn" '
              'title="只看 project_url 指向代码托管站(GitHub/GitLab/Gitee…)的;'
              '官网、文档站、应用商店这类不算">只看有仓库</button>')
 
+# 头部的机读标记:下一次生成拿它当「上一张图有多少节点」的基线,好判断这一轮
+# 是不是塌了(全被归类踢掉、只剩零星几个)。读的是文件头两行,不必把 1.8 MB
+# 的产物整个解析一遍。老产物没有这一行,读出 None,那一轮就只做绝对值检查。
+_MARK = "<!-- catgraph nodes={nodes} classified={classified} built={built} -->"
+_MARK_RE = re.compile(r"<!-- catgraph nodes=(\d+) classified=(\d+)")
+
+
+def page_stats(path: Path) -> dict | None:
+    """读已有图谱头部那行标记 → {"nodes": n, "classified": m};没有则 None。"""
+    try:
+        with path.open(encoding="utf-8") as f:
+            head = f.readline() + f.readline()
+    except OSError:
+        return None
+    m = _MARK_RE.search(head)
+    return {"nodes": int(m.group(1)), "classified": int(m.group(2))} if m else None
+
 
 def render(data: dict, *, title: str, h1: str, sub: str, accent: str,
            foot: str, other_group: str, app_base: str = "/", hot_cap: int = 30,
            repo_toggle: bool = False) -> str:
     cfg = {"colors": PALETTE, "gray": GRAY, "otherGroup": other_group,
            "appBase": app_base, "hotCap": hot_cap}
+    meta = data["meta"]
     return _TMPL.format(
         title=html.escape(title), h1=h1, sub=html.escape(sub), accent=accent,
+        mark=_MARK.format(nodes=meta["total"], classified=meta["classified"],
+                          built=meta["built"]),
         css=(ASSETS / "catgraph.css").read_text(encoding="utf-8"),
         js=(ASSETS / "catgraph.js").read_text(encoding="utf-8"),
         # 数据里有文章标题这类外部文本,</script> 会当场截断脚本块

@@ -63,8 +63,36 @@ VIEWS = {
 }
 
 
+MIN_KEEP = 0.5     # 新图节点数不得低于旧图的这个比例(系统性误判的兜底)
+
+
+def quality_problem(meta: dict, picked: list, out: Path, *,
+                    allow_shrink: bool) -> str:
+    """新图能不能盖掉旧图?能就返回空串,不能就返回一句人话的原因。
+
+    验收看的是**这张图实际长什么样**,不是某个 code 的名字。归类塌掉的样子有
+    好几种:全落「待归类」、skill 全判成「不是 skill」(判完就被 drop 掉,节点
+    数直接归零)、或者只剩零星几个活下来。第 5 轮审查那次就是 drop 把 101 个
+    候选全踢光,`meta.total == 0` 从「有条目但没归类」这道检查底下溜过去,空图
+    连同坏缓存一起提交、之后再不重试(2026-09-22 第 5 轮审查发现)。所以按
+    **可见输出**验收,顺带用旧图的节点数兜一道比例下限——只挡塌方,正常增减
+    (以及确实该缩的那次)放行,后者加 --allow-shrink。
+    """
+    if not picked:
+        return ""                       # 本来就没候选,空图是如实反映
+    if not meta["total"]:
+        return f"新图 0 个节点({len(picked)} 个候选全被归类踢出去了)"
+    if not meta["classified"]:
+        return f"归类结果为空({meta['total']} 个条目一个都没归类)"
+    old = P.page_stats(out)
+    if old and not allow_shrink and meta["total"] < old["nodes"] * MIN_KEEP:
+        return (f"新图只剩 {meta['total']} 个节点,不到旧图 {old['nodes']} 个的 "
+                f"{MIN_KEEP:.0%}")
+    return ""
+
+
 def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | None,
-              model, workers: int, out_dir: Path) -> Path:
+              model, workers: int, out_dir: Path, allow_shrink: bool = False) -> Path:
     v = VIEWS[kind]
     taxo = v["taxo"]
     picked = G.rank(v["select"](groups))
@@ -72,7 +100,8 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
 
     items = [(g["norm"], g["name"], g["summary"]) for g in picked]
     if use_llm:
-        res = T.classify(taxo, items, model=model, workers=workers, max_new=max_new)
+        res = T.classify(taxo, items, model=model, workers=workers,
+                         max_new=max_new, void_codes=v["drop"])
         codes = res.codes
     else:
         codes = T.load_cache(taxo)
@@ -82,21 +111,19 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
     data = G.build(picked, codes, taxo, drop_codes=v["drop"])
     meta = data["meta"]
     out = out_dir / v["out"]
-    # 一条都没归类却已经有一张旧图在那儿,几乎只可能是归类这一步整体失败了
-    # (没配 key、中转站挂了、缓存文件坏了)。这时候写下去等于拿一张满屏
-    # 「待归类」覆盖掉好页面,而且从日志里看不出来——宁可报错让这步红掉。
-    # 首次生成(还没有旧图)不受影响,那时候满屏待归类是如实反映。
-    if meta["total"] and not meta["classified"] and out.exists():
-        raise SystemExit(
-            f"[{kind}] 归类结果为空({meta['total']} 个条目一个都没归类),"
-            f"拒绝覆盖已有的 {out.name};先确认模型配置/缓存文件是否正常")
-    # 分类表改过、全量重判没判完:手上这份是半成品,大半节点会落「待归类」。
-    # 拿它盖掉好页面和「一个都没判出来」是同一种事故,只是没那么显眼。
+    # 判定本身就不能用(重判判了一半、或判出来的东西不作数):原因由 classify
+    # 给,该留的半成品它留着、该扔的它扔了,这里只负责不拿它盖掉好页面。
     if not res.complete and out.exists():
+        raise SystemExit(f"[{kind}] {res.reason};拒绝覆盖已有的 {out.name}")
+    # 判定是完整的,但出来的图塌了。首次生成(还没有旧图)不拦,那时如实反映。
+    bad = quality_problem(meta, picked, out, allow_shrink=allow_shrink)
+    if bad and out.exists():
+        # 这份判定不作数,半成品一起扔掉,免得下一轮全命中缓存、不再问模型
+        res.discard()
         raise SystemExit(
-            f"[{kind}] 分类规则改过,全量重判还没做完(已判 {len(codes)} 条,"
-            f"还差 {res.pending} 条),拒绝用半份结果覆盖已有的 {out.name};"
-            f"进度已存盘,下次跑接着判")
+            f"[{kind}] {bad},拒绝覆盖已有的 {out.name};"
+            f"先确认模型配置/缓存文件是否正常,确认这就是预期结果就加 "
+            f"--allow-shrink 重跑")
     out.write_text(P.render(
         data, title=v["title"], h1=v["h1"], sub=v["sub"], accent=v["accent"],
         foot=P.foot_html(meta, v["unit"]), repo_toggle=v["repo_toggle"],
@@ -124,6 +151,9 @@ def main() -> None:
     ap.add_argument("--model", default=None,
                     help="临时覆盖模型;默认用设置面板的「管道 · 图谱归类」阶段")
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--allow-shrink", action="store_true",
+                    help="新图节点数比旧图少一半以上时照样写;确认这轮缩水是"
+                         "预期的(比如故意收紧了分类规则)再用")
     a = ap.parse_args()
 
     kinds = list(VIEWS) if a.kind == "all" else [a.kind]
@@ -142,7 +172,8 @@ def main() -> None:
     for k in kinds:
         build_one(k, groups, use_llm=not a.no_llm,
                   max_new=a.max_new or None, model=model,
-                  workers=a.workers, out_dir=out_dir)
+                  workers=a.workers, out_dir=out_dir,
+                  allow_shrink=a.allow_shrink)
 
 
 if __name__ == "__main__":
