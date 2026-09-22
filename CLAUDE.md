@@ -424,6 +424,15 @@
   失败时不打 `WIKI_DAILY_DONE`。面板详情也得带上图谱那几行:`_run_wiki()` 把
   linkify/digest/synthesis 压成一行短语时会把原始 stdout 盖掉,挂了的那张要
   单拎出来附在后面,否则红态里只剩一句没有信息的「失败: 」。
+- **标红那条详情里,标签、根因、完整 stderr 三样都得留住**(`_fail_wiki`)。
+  ①`graph:`/`catgraph:` 这个标签单独拼在前面、**只截错误正文**:整句一起
+  `[-200:]` 的话,稍长一点的报错就把开头的标签截没了,面板上连哪张图挂的都
+  看不出来;②摘要取 **stderr 里最后一条真正的错误行**——多行 traceback 在
+  stdout 那边只留一句「Traceback (most recent call last):」,根因在 stderr 末行,
+  `wiki_daily:` 开头那句是它自己的汇总(只说哪张图挂了),得跳过去继续往上找;
+  ③完整 stderr 写进管道日志、也塞进 `_stage(..., failures=[...])`(面板卡片里
+  可展开)——子进程是 `capture_output=True` 抓的,不主动写出来的话它哪儿都不会
+  出现,用户只能手工重跑一次才能看到根因(2026-09-22 第 9 轮审查发现)。
 
 ## 向量编码(bge-m3)
 

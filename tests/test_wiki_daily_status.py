@@ -100,7 +100,7 @@ class WikiDailyExitTest(unittest.TestCase):
 
 
 class RunWikiStageTest(unittest.TestCase):
-    """wiki_daily 非零 → 阶段落 error,详情里点名哪张图挂了。"""
+    """wiki_daily 非零 → 阶段落 error,详情里点名哪张图挂了、根因是什么。"""
 
     STDOUT = ("universe: 0 篇已提取文章,0 个实体页\n"
               "linkify: 新双链化 3 篇\n"
@@ -110,31 +110,76 @@ class RunWikiStageTest(unittest.TestCase):
               "graph: ok\n"
               "catgraph: FAIL QUALITY_GATE_REJECTED\n")
 
-    def _stage_of(self, stdout: str, rc: int):
+    TRACEBACK = ("Traceback (most recent call last):\n"
+                 '  File "scripts/wiki/build_catgraph.py", line 182, in main\n'
+                 "    build_one(k, groups, ...)\n"
+                 '  File "scripts/wiki/graph_data.py", line 61, in load_groups\n'
+                 "    conn.execute(sql)\n"
+                 "RuntimeError: ROOT_CAUSE_DATABASE_READ_ONLY\n"
+                 "wiki_daily: catgraph 退出码 1(图谱未更新)\n")
+
+    def _run(self, stdout: str, rc: int, stderr: str = ""):
         tmp = Path(tempfile.mkdtemp())
         stub = tmp / "wiki_daily_stub.py"
         stub.write_text(
-            f"import sys\nsys.stdout.write({stdout!r})\nsys.exit({rc})\n",
+            f"import sys\nsys.stdout.write({stdout!r})\n"
+            f"sys.stderr.write({stderr!r})\nsys.exit({rc})\n",
             encoding="utf-8")
-        calls = []
+        calls, logs = [], []
         with mock.patch.object(PS, "WIKI_DAILY", stub), \
+                mock.patch.object(PS, "_log", logs.append), \
                 mock.patch.object(PS, "_stage",
-                                  lambda *a, **k: calls.append(a)):
+                                  lambda *a, **k: calls.append((a, k))):
             PS._run_wiki()
-        return calls[-1]
+        args, kw = calls[-1]
+        return SimpleNamespace(name=args[0], status=args[1], detail=args[2],
+                               failures=kw.get("failures") or [],
+                               logs="\n".join(logs))
 
     def test_catgraph_failure_marks_stage_error(self):
-        name, status, detail = self._stage_of(self.STDOUT, 1)
-        self.assertEqual((name, status), ("wiki", "error"))
-        self.assertIn("catgraph: FAIL QUALITY_GATE_REJECTED", detail)
+        r = self._run(self.STDOUT, 1)
+        self.assertEqual((r.name, r.status), ("wiki", "error"))
+        self.assertIn("catgraph", r.detail)
+        self.assertIn("QUALITY_GATE_REJECTED", r.detail)
 
     def test_success_detail_keeps_graph_lines(self):
         ok = self.STDOUT.replace("catgraph: FAIL QUALITY_GATE_REJECTED",
                                  "catgraph: ok")
-        name, status, detail = self._stage_of(ok, 0)
-        self.assertEqual((name, status), ("wiki", "ok"))
-        self.assertIn("双链化 3 篇", detail)
-        self.assertIn("图谱 ok", detail)
+        r = self._run(ok, 0)
+        self.assertEqual((r.name, r.status), ("wiki", "ok"))
+        self.assertIn("双链化 3 篇", r.detail)
+        self.assertIn("图谱 ok", r.detail)
+
+    def test_traceback_root_cause_survives(self):
+        """多行 traceback:stdout 那边只剩标题,根因得从 stderr 末行捞出来。"""
+        out = self.STDOUT.replace("catgraph: FAIL QUALITY_GATE_REJECTED",
+                                  "catgraph: FAIL Traceback (most recent call last):")
+        r = self._run(out, 1, self.TRACEBACK)
+        self.assertEqual(r.status, "error")
+        self.assertIn("catgraph", r.detail)                       # 哪张图
+        self.assertIn("ROOT_CAUSE_DATABASE_READ_ONLY", r.detail)  # 根因
+        # wiki_daily 自己那句汇总不是根因,不能拿它当摘要
+        self.assertNotIn("退出码", r.detail)
+        # 完整 stderr 既进日志,也进面板的失败明细
+        self.assertIn("ROOT_CAUSE_DATABASE_READ_ONLY", r.logs)
+        self.assertIn('File "scripts/wiki/graph_data.py"', r.logs)
+        self.assertEqual(len(r.failures), 1)
+        self.assertIn("catgraph", r.failures[0]["title"])
+        self.assertIn("ROOT_CAUSE_DATABASE_READ_ONLY", r.failures[0]["reason"])
+
+    def test_long_error_keeps_the_label(self):
+        """报错正文超长时,截的是正文,不能把开头的 catgraph 标签截掉。"""
+        out = self.STDOUT.replace("QUALITY_GATE_REJECTED", "X" * 400)
+        r = self._run(out, 1)
+        self.assertEqual(r.status, "error")
+        self.assertIn("catgraph", r.detail)
+        self.assertTrue(r.detail.startswith("catgraph 失败:"), r.detail[:40])
+
+    def test_both_graphs_failed_are_both_named(self):
+        out = (self.STDOUT.replace("graph: ok", "graph: FAIL BOOM")
+               .replace("QUALITY_GATE_REJECTED", "X" * 400))
+        r = self._run(out, 1)
+        self.assertIn("graph/catgraph 失败", r.detail)
 
 
 if __name__ == "__main__":

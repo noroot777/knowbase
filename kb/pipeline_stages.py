@@ -235,6 +235,7 @@ def _extract_pass(label: str, stats: dict) -> None:
 # ── wiki 层同步 ─────────────────────────────────────────────────────────────────
 
 WIKI_DAILY = Path(__file__).resolve().parent.parent / "scripts" / "wiki" / "wiki_daily.py"
+_ERR_KEEP = 1500          # 失败时保留的 stderr 尾部长度(日志只留 80 条,别让一条撑爆)
 
 
 def _run_wiki() -> None:
@@ -276,10 +277,36 @@ def _run_wiki() -> None:
         if note:
             detail = f"{detail} · {note}"
     if proc.returncode != 0:
-        why = ";".join(bad) or (proc.stderr or detail).strip()
-        _stage("wiki", "error", f"失败: {why[-200:]}")
+        _fail_wiki(proc, bad, detail)
     else:
         _stage("wiki", "ok", detail[:200] or "完成")
+
+
+def _fail_wiki(proc, bad: list[str], detail: str) -> None:
+    """wiki 阶段标红:标签(哪张图)、根因(一句话)、完整 stderr(可展开+进日志)。
+
+    三样都得留住,少一样面板上就不够诊断(2026-09-22 第 9 轮审查发现):
+
+    - **标签单独留出来,只截错误正文**。整句一起 `[-200:]` 的话,稍长一点的
+      报错就把开头的 `graph:`/`catgraph:` 截没了,红态里连是哪张图挂的都看不出来。
+    - **摘要优先取 stderr 里最后一条真正的错误行**。多行 traceback 在 stdout
+      那边只留一句「Traceback (most recent call last):」,根因在 stderr 末行;
+      `wiki_daily:` 开头那句是它自己的汇总(只说哪张图挂了),跳过去继续往上找。
+    - **完整 stderr 进日志、也进失败明细**。子进程是 `capture_output=True` 抓的,
+      不主动写出来的话它哪儿都不会出现,用户只能手工重跑一次才能看到根因。
+    """
+    err = (proc.stderr or "").strip()
+    lines = [x.strip() for x in err.splitlines() if x.strip()]
+    root = next((x for x in reversed(lines) if not x.startswith("wiki_daily:")), "")
+    tags = "/".join(dict.fromkeys(l.split(":", 1)[0] for l in bad))
+    body = root or ";".join(l.partition(": FAIL")[2].strip() or l
+                            for l in bad) or detail.strip()
+    fails = None
+    if err:
+        _log(f"wiki 子进程 stderr:\n{err[-_ERR_KEEP:]}")
+        fails = [{"title": f"{tags or 'wiki_daily'} 子进程报错",
+                  "reason": err[-_ERR_KEEP:]}]
+    _stage("wiki", "error", f"{tags or 'wiki'} 失败: {body[-160:]}", failures=fails)
 
 
 # ── 条目化阶段:工具/项目拆条目(dr-gzh-projects / dr-video-projects)─────────────
