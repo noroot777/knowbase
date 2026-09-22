@@ -9,6 +9,7 @@
 4. digest    最近 N 天 ∩ >= EPOCH,无摘要或有新文章的日期(LLM,~1 次/天)
 5. synthesis 14 天窗口 >=3 篇且(无综合 或 新增 >=3 篇)的实体(LLM,增量)
 6. graph     重生成 graph.html(近 14 天窗口)
+7. catgraph  重生成 graph-projects.html / graph-skills.html(全量;新条目才判归类)
 
 历史导入保护:步骤 1/2 机械操作,欢迎全量;4/5 有日期门,老日期永不触发 LLM。
 --skip-linkify:kb 管道 extract 正在跑时只做读 DB 的部分,不写 source 文件。
@@ -142,6 +143,14 @@ def main():
                         "--since", since],
                        capture_output=True, text=True, timeout=300)
     print(f"graph: {'ok' if r.returncode == 0 else 'FAIL ' + r.stderr[:200]}")
+
+    # 分类图谱(开源项目 / skill)。归类结果长期缓存,日常只判当天新增的那几条;
+    # --skip-llm 时完全不判,用已有缓存重生成(新条目暂时落「待归类」)。
+    cmd = [sys.executable, str(HERE / "build_catgraph.py")]
+    if a.skip_llm:
+        cmd.append("--no-llm")
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    print(f"catgraph: {'ok' if r.returncode == 0 else 'FAIL ' + r.stderr[:200]}")
 
     if n_link or made or syn:
         W.append_log(W.VAULT, "wiki",

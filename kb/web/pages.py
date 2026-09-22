@@ -39,9 +39,28 @@ def static_asset(fpath: str):
 @router.get("/graph")
 def graph_page():
     """交互式知识图谱(wiki 管道阶段生成的静态单文件)。"""
-    f = VAULT_ROOT / "graph.html"
+    return _graph_file("graph.html")
+
+
+# 分类图谱:开源项目 / skill 各一张,由 scripts/wiki/build_catgraph.py 生成。
+# 名字在这里写死成白名单而不是拿 URL 片段去拼文件名:同目录下的 vault 根还放着
+# 别的东西,一个 `/graph/{name}.html` 的写法就把整个 vault 顶层变成可读的了。
+_CATGRAPHS = {"projects": "graph-projects.html", "skills": "graph-skills.html"}
+
+
+@router.get("/graph/{name}")
+def catgraph_page(name: str):
+    fname = _CATGRAPHS.get(name)
+    if fname is None:
+        raise HTTPException(404, f"没有这张图谱:{name}")
+    return _graph_file(fname)
+
+
+def _graph_file(fname: str):
+    f = VAULT_ROOT / fname
     if not f.is_file():
-        raise HTTPException(404, "graph.html 还没生成,先跑一次全流程同步(wiki 阶段会生成)")
+        raise HTTPException(
+            404, f"{fname} 还没生成,先跑一次全流程同步(wiki 阶段会生成)")
     return FileResponse(f)
 
 

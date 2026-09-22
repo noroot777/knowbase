@@ -59,6 +59,8 @@ STAGES: tuple[Stage, ...] = (
           default="gpt-5.6-luna", env="KB_WIKI_MODEL"),
     Stage("skill_tag", "脚本 · skill 标签回填", "批量判定项目该不该打「skill工具」标签",
           default="gpt-5.6-luna", env="KB_SKILL_TAG_MODEL"),
+    Stage("taxonomy", "管道 · 图谱归类", "给开源项目/skill 条目分门别类,一个条目判一次后长期复用",
+          default="gpt-5.5", env="KB_TAXONOMY_MODEL"),
 )
 
 _BY_KEY = {s.key: s for s in STAGES}

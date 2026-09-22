@@ -214,6 +214,16 @@ function closeToolDrawer() {
   $('tool-drawer').style.display = 'none';
 }
 
+// 分类图谱(/graph/projects、/graph/skills)里点「在图鉴里看全部记录」会带
+// ?tool=<norm> 跳回首页:直接把详情抽屉拉开。开完就把参数从地址栏抹掉,
+// 否则关掉抽屉后刷新一次它又自己弹出来。
+function openToolFromUrl() {
+  const norm = new URLSearchParams(location.search).get('tool');
+  if (!norm) return;
+  history.replaceState(null, '', location.pathname + location.hash);
+  openToolDrawer(norm);
+}
+
 // 外链箭头:内联 SVG(字符 ↗ 各字体渲染不一,对不齐);hover 随链接微移
 const EXT_ARROW = '<svg class="ext-arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">' +
   '<path d="M2.1 7.9 7.5 2.5M3.1 2.2h4.7v4.7" fill="none" stroke="currentColor"' +

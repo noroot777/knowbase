@@ -245,6 +245,18 @@ def list_tools() -> dict:
     }
 
 
+def all_groups() -> list[dict]:
+    """全部工具分组的 {**meta, "entries": [...]}(条目不含正文)。
+
+    给图谱这类「要一次拿到所有分组 + 每组出自哪些文章」的只读消费方用:
+    list_tools 只给 meta(没有条目明细),get_tool 会把每条的正文 md 读进来
+    (5000 多组逐个调等于把整棵条目树读一遍)。走同一份 _ensure 缓存,
+    软广过滤、分组口径都和图鉴完全一致。
+    """
+    _ensure()
+    return [{**g["meta"], "entries": g["entries"]} for g in _cache["groups"].values()]
+
+
 def get_tool(norm: str) -> dict | None:
     """单个工具的全部记录(含正文 md,给详情抽屉渲染)。"""
     _ensure()

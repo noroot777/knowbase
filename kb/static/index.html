@@ -26,7 +26,9 @@
   </nav>
   <span id="stats"></span>
   <span class="topbar-act">
-    <a class="tb-link" href="/graph" target="_blank" rel="noopener">图谱 ↗</a>
+    <a class="tb-link" href="/graph/projects" target="_blank" rel="noopener">项目图谱 ↗</a>
+    <a class="tb-link" href="/graph/skills" target="_blank" rel="noopener">Skill 图谱 ↗</a>
+    <a class="tb-link" href="/graph" target="_blank" rel="noopener">话题图谱 ↗</a>
     <button class="ghost" id="stages-btn" style="padding:6px 13px;font-size:13px"
             onclick="openStages()">模型</button>
     <button class="ghost" id="keys-btn" style="padding:6px 13px;font-size:13px"
@@ -413,6 +415,7 @@ refreshKeys();
 refreshMcp();
 loadSched();
 loadGallery();
+openToolFromUrl();
 </script>
 </body>
 </html>
