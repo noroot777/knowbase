@@ -315,14 +315,20 @@ class Verdicts:
     """一轮归类的结果。
 
     `complete=False` 只在**全量重判没做完**时出现,意思是「这份 codes 是半成品,
-    别拿它覆盖页面」:分类表刚改过、旧缓存整份失效,而这一轮没把候选全判完
-    (某些批次失败)。日常增量判定永远是 complete——那时候没判到的几条显示成
-    「待归类」是既定行为,不该拦着图谱更新。
+    别拿它覆盖页面」:分类表刚改过、旧缓存整份失效,而这一轮没能给每个候选都
+    拿到一个有效 code(批次抛异常,或模型返回合法 JSON 却漏了一截)。日常增量
+    判定永远是 complete——那时候没判到的几条显示成「待归类」是既定行为,不该
+    拦着图谱更新。
     """
     codes: dict[str, str]
     complete: bool = True
     migrating: bool = False
     pending: int = 0               # 还差多少条没判(仅重判期间有意义)
+
+
+# 重判时漏项的补判轮数:模型偶尔漏一条,补判只问缺的那些,批次更小更容易回全。
+# 补不齐也不放宽 promote 的判据,只是少一次「因为漏一条而整轮白等」。
+_RESIGN_RETRIES = 2
 
 
 def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
@@ -369,8 +375,6 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
     model = model or default_model()
     valid = {c.code for c in taxo.cats}
     log(f"  [{taxo.key}] 新判 {len(pending)} 条,模型 {model},{workers} 并发")
-    batches = [pending[i:i + batch] for i in range(0, len(pending), batch)]
-    failed = 0
 
     def run(chunk: list[tuple[str, str, str]]) -> dict[str, str] | None:
         lines = "\n".join(
@@ -387,39 +391,62 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
         return {chunk[i][0]: c for i, c in got.items()
                 if 0 <= i < len(chunk) and c in valid}
 
-    done, saved = 0, len(codes)
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for got in ex.map(run, batches):
-            if got is None:
-                failed += 1
-            else:
-                codes.update(got)
-            done += 1
-            # 只在真判出新东西时落盘。一批都没成功(没配 key、中转站挂了)时写盘
-            # 等于拿一份空 items 覆盖掉旧判定;重判期间写的还是半成品文件,
-            # 正式缓存无论如何都要等判完才动。
-            if len(codes) > saved and (done % 5 == 0 or done == len(batches)):
-                save_cache(taxo, codes, names, out_path)    # 中途落盘:被打断也不白跑
-                saved = len(codes)
-                log(f"  [{taxo.key}] {done}/{len(batches)} 批,已判 {len(codes)} 条")
-    if len(codes) > saved:
-        save_cache(taxo, codes, names, out_path)
+    def do_round(todo: list[tuple[str, str, str]]) -> None:
+        """判一轮 todo,结果并进 codes 并落盘(重判期间落的是半成品)。
 
+        **一批「没抛异常」不等于「这批判完了」**:模型返回语法合法但只含几条的
+        数组、输出被截断、id 重复、给的 code 在表外被过滤掉,都会让这批悄悄少
+        回来一截。所以漏项要和抛异常一样记下来,别当成功批次
+        (2026-09-22 第 3 轮审查发现)。
+        """
+        batches = [todo[i:i + batch] for i in range(0, len(todo), batch)]
+        done, saved = 0, len(codes)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for chunk, got in zip(batches, ex.map(run, batches)):
+                if got is not None:
+                    codes.update(got)
+                    short = sum(1 for it in chunk if it[0] not in got)
+                    if short:
+                        log(f"  [{taxo.key}] 一批只回了 {len(chunk) - short}/"
+                            f"{len(chunk)} 条(模型漏项/被截断),缺的留到下一轮")
+                done += 1
+                # 只在真判出新东西时落盘。一批都没成功(没配 key、中转站挂了)时写盘
+                # 等于拿一份空 items 覆盖掉旧判定;重判期间写的还是半成品文件,
+                # 正式缓存无论如何都要等判完才动。
+                if len(codes) > saved and (done % 5 == 0 or done == len(batches)):
+                    save_cache(taxo, codes, names, out_path)  # 中途落盘:被打断也不白跑
+                    saved = len(codes)
+                    log(f"  [{taxo.key}] {done}/{len(batches)} 批,已判 {len(codes)} 条")
+        if len(codes) > saved:
+            save_cache(taxo, codes, names, out_path)
+
+    do_round(pending)
     if not migrating:
         return Verdicts(codes, True, False)
+
+    # 重判:漏的那些再问一轮(只问缺的,批次更小、更容易回全)。这是为了别因为
+    # 模型偶尔漏一条就永远 promote 不了——但补不齐也绝不放宽下面的完成判据。
+    for _ in range(_RESIGN_RETRIES):
+        todo = [it for it in items if it[0] not in codes]
+        if not todo:
+            break
+        log(f"  [{taxo.key}] 还差 {len(todo)} 条没拿到判定,补判一轮")
+        do_round(todo)
+
     left = sum(1 for it in items if it[0] not in codes)
-    if failed or not codes:
-        log(f"  [{taxo.key}] 重判未完成({failed} 批失败,还差 {left} 条),"
-            f"旧缓存原样保留,进度存在 {out_path.name},下次接着判")
+    # **完成 = 每一条都拿到了有效 code**,不是「没有批次抛异常」。漏项响应造成的
+    # 后果和第 2 轮那次截断一模一样:3 条判定 promote 成正式缓存、覆盖掉 101 条
+    # 旧判定,页面上 98 个节点变待归类(2026-09-22 第 3 轮审查发现)。
+    if left or not codes:
+        log(f"  [{taxo.key}] 重判未完成(还差 {left} 条:批次失败或模型漏项),"
+            f"正式缓存与旧图原样保留,进度存在 {out_path.name},下次接着判")
         return Verdicts(codes, False, True, left)
     _promote(taxo, codes, names)
-    log(f"  [{taxo.key}] 重判完成,{len(codes)} 条换上正式缓存"
-        f"{f'(模型漏判 {left} 条,下轮按增量补)' if left else ''}")
-    return Verdicts(codes, True, True, left)
+    log(f"  [{taxo.key}] 重判完成,{len(codes)} 条换上正式缓存")
+    return Verdicts(codes, True, True, 0)
 
 
 def _promote(taxo: Taxonomy, codes: dict[str, str], names: dict[str, str]) -> None:
     """重判判完了:把半成品换成正式缓存(rename 是原子的),再删掉半成品。"""
     save_cache(taxo, codes, names)
     migrate_path(taxo).unlink(missing_ok=True)
-

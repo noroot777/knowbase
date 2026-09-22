@@ -151,11 +151,12 @@ class TaxonomyCacheTest(unittest.TestCase):
 class ResignMigrationTest(unittest.TestCase):
     """分类表改过之后那一趟全量重判。
 
-    这里钉的是 2026-09-22 第 2 轮审查发现的事故:指纹一变旧缓存整份失效,
-    可 `--max-new` 照样截断,于是 400 条新判定就地盖掉 3183 条完整旧判定,
-    剩下 2783 个节点当场变「待归类」,页面也跟着被覆盖——模型全成功也会发生,
-    不需要任何故障。所以重判必须①不受 --max-new 限制、②攒在半成品文件里、
-    ③没判完就既不换正式缓存也不覆盖页面。
+    这里钉的是 2026-09-22 第 2、3 轮审查发现的两次事故,形态一样:一份**半成品
+    判定**被 promote 成正式缓存、顺带把好页面盖成满屏「待归类」,不可逆。第 2 轮
+    的触发条件是 `--max-new` 截断,第 3 轮是模型回了合法 JSON 却漏了一截(输出
+    被截断、id 重复、code 在表外被过滤)——两次都不需要任何故障。所以重判必须
+    ①不受 --max-new 限制、②攒在半成品文件里、③**每一条都拿到有效 code 才算判完**,
+    没判完就既不换正式缓存也不覆盖页面。
     """
 
     def setUp(self):
@@ -174,19 +175,45 @@ class ResignMigrationTest(unittest.TestCase):
                                extra_rules="改过的成员资格规则")
         self.assertNotEqual(self.taxo.sig(), T.SKILLS.sig())
 
-    def _stub(self, fail_batches=()):
-        """模型桩:按调用序数决定这一批是成功还是炸。"""
+    def _stub(self, *, fail_names=(), omit=0, omit_until_call=10 ** 9,
+              bad_code=False):
+        """模型桩。
+
+        fail_names:批次里含这些名字就抛异常——**按内容判,不按第几次调用**,
+        这样补判轮再问一次照样失败(故障是持续的)。omit:每批少回几条,模拟
+        「语法合法但漏项」;bad_code 则把漏的那条给个表外 code(会被过滤掉,
+        效果一样)。omit_until_call:第几次调用之后不再漏(测补判补得上)。
+        """
         self.calls = 0
 
         def fake(prompt, model, **kw):
-            i, self.calls = self.calls, self.calls + 1
-            if i in fail_batches:
+            self.calls += 1
+            rows = re.findall(r"^(\d+)\. (\S+) ::", prompt, re.M)
+            if any(nm in fail_names for _i, nm in rows):
                 raise RuntimeError("中转站 502")
-            ids = [int(m) for m in re.findall(r"^(\d+)\. ", prompt, re.M)]
-            return json.dumps([{"id": j, "c": "S2"} for j in ids])
+            drop = omit if self.calls <= omit_until_call else 0
+            out = []
+            for k, (i, _nm) in enumerate(rows):
+                if k >= len(rows) - drop:
+                    if bad_code:                 # 表外 code:解析得出,但会被过滤
+                        out.append({"id": int(i), "c": "表外的类目"})
+                    continue                     # 不 bad_code 就是整条不回
+                out.append({"id": int(i), "c": "S2"})
+            return json.dumps(out)
 
         T._llm, old = fake, T._llm
         self.addCleanup(lambda: setattr(T, "_llm", old))
+
+    def _page_with_old_content(self):
+        out_dir = Path(self.tmp.name) / "vault"
+        out_dir.mkdir(exist_ok=True)
+        page = out_dir / B.VIEWS["skills"]["out"]
+        page.write_text("KNOWN-GOOD-OLD-PAGE", encoding="utf-8")
+        old_taxo = B.VIEWS["skills"]["taxo"]
+        B.VIEWS["skills"]["taxo"] = self.taxo
+        self.addCleanup(lambda: B.VIEWS["skills"].__setitem__("taxo", old_taxo))
+        groups = [_group(n, nm, topics=["skill工具"]) for n, nm, _ in self.items]
+        return out_dir, page, groups
 
     def test_max_new_does_not_truncate_a_resign_rejudge(self):
         """重判不吃 --max-new:截断一次就等于把没轮到的那批旧判定扔了。"""
@@ -202,7 +229,7 @@ class ResignMigrationTest(unittest.TestCase):
 
     def test_incomplete_rejudge_keeps_the_old_cache(self):
         """有批次失败 → 正式缓存一个字节不动,进度攒在半成品文件里等下次。"""
-        self._stub(fail_batches=(1,))
+        self._stub(fail_names={"名40"})
         got = T.classify(self.taxo, self.items, model="stub", workers=1,
                          batch=40, max_new=None, log=lambda *_: None)
         self.assertFalse(got.complete)
@@ -224,20 +251,54 @@ class ResignMigrationTest(unittest.TestCase):
 
     def test_incomplete_rejudge_does_not_overwrite_the_page(self):
         """半份结果不许盖掉好页面(哪怕已经判出来几十条,classified > 0)。"""
-        self._stub(fail_batches=(1,))
-        out_dir = Path(self.tmp.name) / "vault"
-        out_dir.mkdir()
-        page = out_dir / B.VIEWS["skills"]["out"]
-        page.write_text("KNOWN-GOOD-OLD-PAGE", encoding="utf-8")
-        groups = [_group(n, nm, topics=["skill工具"]) for n, nm, _ in self.items]
-
-        old_taxo = B.VIEWS["skills"]["taxo"]
-        B.VIEWS["skills"]["taxo"] = self.taxo
-        self.addCleanup(lambda: B.VIEWS["skills"].__setitem__("taxo", old_taxo))
+        self._stub(fail_names={"名40"})
+        _out_dir, page, groups = self._page_with_old_content()
         with self.assertRaises(SystemExit):
             B.build_one("skills", groups, use_llm=True, max_new=None,
-                        model="stub", workers=1, out_dir=out_dir)
+                        model="stub", workers=1, out_dir=_out_dir)
         self.assertEqual(page.read_text(encoding="utf-8"), "KNOWN-GOOD-OLD-PAGE")
+
+    def test_valid_but_short_response_is_not_a_finished_rejudge(self):
+        """合法 JSON 但漏项 = 没判完。
+
+        第 3 轮审查:`run()` 只在抛异常时算失败,于是「3 个批次各回 1 条」被当成
+        三批全成功,3 条判定 promote 成正式缓存、101 条旧判定被覆盖、页面上 98 个
+        节点变待归类。判据必须是「每一条都拿到有效 code」,不是「没有批次抛异常」。
+        """
+        self._stub(omit=39)              # 每批 40 条只回 1 条
+        out_dir, page, groups = self._page_with_old_content()
+        with self.assertRaises(SystemExit) as cm:
+            B.build_one("skills", groups, use_llm=True, max_new=None,
+                        model="stub", workers=1, out_dir=out_dir)
+        self.assertIn("全量重判还没做完", str(cm.exception))
+        self.assertEqual(page.read_text(encoding="utf-8"), "KNOWN-GOOD-OLD-PAGE")
+        self.assertEqual(T.cache_path(T.SKILLS).read_text(encoding="utf-8"),
+                         self.stale_bytes)
+        # 判出来的那些没白跑,攒在半成品里下轮接着补
+        part = T.load_raw(self.taxo, T.migrate_path(self.taxo))[0]
+        self.assertTrue(0 < len(part) < 101)
+
+    def test_out_of_table_code_counts_as_missing(self):
+        """模型给的 code 在表外被过滤掉 = 这条没判到,同样不算判完。"""
+        self._stub(omit=1, bad_code=True)
+        got = T.classify(self.taxo, self.items, model="stub", workers=1,
+                         batch=40, max_new=None, log=lambda *_: None)
+        self.assertFalse(got.complete)
+        self.assertGreater(got.pending, 0)
+        self.assertEqual(T.cache_path(T.SKILLS).read_text(encoding="utf-8"),
+                         self.stale_bytes)
+
+    def test_retry_round_fills_model_omissions(self):
+        """漏项会补判(只问缺的);补齐了才 promote——补判是为了别因为漏一条
+        就整轮白等,不是放宽判据。"""
+        self._stub(omit=2, omit_until_call=3)     # 第一轮 3 批各漏 2 条
+        got = T.classify(self.taxo, self.items, model="stub", workers=1,
+                         batch=40, max_new=None, log=lambda *_: None)
+        self.assertTrue(got.complete)
+        self.assertEqual(len(got.codes), 101)
+        self.assertEqual(self.calls, 4)           # 3 批 + 1 轮补判(6 条一批)
+        self.assertEqual(T.load_cache(self.taxo), got.codes)
+        self.assertFalse(T.migrate_path(self.taxo).exists())
 
 
 class BuildDataTest(unittest.TestCase):
