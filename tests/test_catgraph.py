@@ -15,9 +15,9 @@
    是"相关"也会把边表撑爆。
 5. **drop_codes 的类目不进图谱**(skill 图谱的 X = 判出来不是 skill),
    而且类目列表里也不能留着它,否则页面上会多一个永远空着的分区。
-6. **指纹失效后的全量重判是另一条路**:不吃 `--max-new`,新结论攒在半成品
-   文件里判完才换上正式缓存,没判完就既不动旧缓存也不覆盖旧图。混成一条的
-   话改一句规则就能把几千条完整旧判定缩成几百条,页面大面积退化。
+6. **判定先落暂存、验收过了才提交正式缓存**,增量和全量重判都一样。混成一条
+   的话:重判那边改一句规则就能把几千条完整旧判定缩成几百条;增量那边页面
+   验收不过时根本撤不回来,坏判定当场固化、下一轮不再问模型。
 
 跑:  python -m unittest discover -s tests -v
 """
@@ -230,7 +230,7 @@ class ResignMigrationTest(unittest.TestCase):
                          self.stale_bytes)
         got.commit()
         self.assertEqual(T.load_cache(self.taxo), got.codes)
-        self.assertFalse(T.migrate_path(self.taxo).exists())
+        self.assertFalse(T.staging_path(self.taxo).exists())
 
     def test_incomplete_rejudge_keeps_the_old_cache(self):
         """有批次失败 → 正式缓存一个字节不动,进度攒在半成品文件里等下次。"""
@@ -241,7 +241,7 @@ class ResignMigrationTest(unittest.TestCase):
         self.assertEqual(got.pending, 40)
         self.assertEqual(T.cache_path(T.SKILLS).read_text(encoding="utf-8"),
                          self.stale_bytes)
-        self.assertEqual(T.load_raw(self.taxo, T.migrate_path(self.taxo))[0],
+        self.assertEqual(T.load_raw(self.taxo, T.staging_path(self.taxo))[0],
                          got.codes)
 
         # 下一轮只补没判到的那 40 条,补齐后才换上正式缓存
@@ -253,7 +253,7 @@ class ResignMigrationTest(unittest.TestCase):
         self.assertEqual(self.calls, 1)
         again.commit()
         self.assertEqual(T.load_cache(self.taxo), again.codes)
-        self.assertFalse(T.migrate_path(self.taxo).exists())
+        self.assertFalse(T.staging_path(self.taxo).exists())
 
     def test_incomplete_rejudge_does_not_overwrite_the_page(self):
         """半份结果不许盖掉好页面(哪怕已经判出来几十条,classified > 0)。"""
@@ -281,7 +281,7 @@ class ResignMigrationTest(unittest.TestCase):
         self.assertEqual(T.cache_path(T.SKILLS).read_text(encoding="utf-8"),
                          self.stale_bytes)
         # 判出来的那些没白跑,攒在半成品里下轮接着补
-        part = T.load_raw(self.taxo, T.migrate_path(self.taxo))[0]
+        part = T.load_raw(self.taxo, T.staging_path(self.taxo))[0]
         self.assertTrue(0 < len(part) < 101)
 
     def test_out_of_table_code_counts_as_missing(self):
@@ -305,7 +305,7 @@ class ResignMigrationTest(unittest.TestCase):
         self.assertEqual(self.calls, 4)           # 3 批 + 1 轮补判(6 条一批)
         got.commit()
         self.assertEqual(T.load_cache(self.taxo), got.codes)
-        self.assertFalse(T.migrate_path(self.taxo).exists())
+        self.assertFalse(T.staging_path(self.taxo).exists())
 
     def test_cache_is_committed_only_after_the_page_is_written(self):
         """两阶段提交:页面落盘之前,正式缓存一个字节不能动。
@@ -330,7 +330,7 @@ class ResignMigrationTest(unittest.TestCase):
         self.assertEqual(seen["cache"], self.stale_bytes)
         self.assertNotEqual(page.read_text(encoding="utf-8"), "KNOWN-GOOD-OLD-PAGE")
         self.assertEqual(len(T.load_cache(self.taxo)), 101)   # 页面写完才提交
-        self.assertFalse(T.migrate_path(self.taxo).exists())
+        self.assertFalse(T.staging_path(self.taxo).exists())
 
     def test_all_fallback_rejudge_never_replaces_the_cache(self):
         """每条都回合法 fallback:`left == 0` 可这一趟等于没判。
@@ -388,7 +388,7 @@ class ResignMigrationTest(unittest.TestCase):
         self.assertEqual(page.read_text(encoding="utf-8"), good_page)
         self.assertEqual(T.cache_path(T.SKILLS).read_text(encoding="utf-8"),
                          good_cache)
-        self.assertFalse(T.migrate_path(taxo2).exists())
+        self.assertFalse(T.staging_path(taxo2).exists())
 
         # 确认这就是预期结果时,--allow-shrink 放行
         B.build_one("skills", groups, use_llm=True, max_new=None, model="stub",
@@ -409,7 +409,7 @@ class ResignMigrationTest(unittest.TestCase):
                                  self.stale_bytes)
                 self.assertEqual(page.read_text(encoding="utf-8"),
                                  "KNOWN-GOOD-OLD-PAGE")
-                self.assertFalse(T.migrate_path(self.taxo).exists())
+                self.assertFalse(T.staging_path(self.taxo).exists())
 
         # 模型恢复正常之后能自己走出来
         self._stub()
@@ -417,6 +417,119 @@ class ResignMigrationTest(unittest.TestCase):
                     workers=1, out_dir=out_dir)
         self.assertEqual(len(T.load_cache(self.taxo)), 101)
         self.assertNotEqual(page.read_text(encoding="utf-8"), "KNOWN-GOOD-OLD-PAGE")
+
+
+class IncrementalCommitTest(unittest.TestCase):
+    """同一个指纹下的日常增量判定,也得走两阶段提交。
+
+    第 6 轮审查:两阶段提交原来只覆盖「指纹变了的全量重判」,增量那一侧
+    `do_round` 直接写正式缓存,于是页面验收不过时 `res.discard()` 无从撤起——
+    坏判定当场固化,下一轮全命中缓存、不再问模型,模型恢复也救不回来。
+    这两条各盯一种真实触发路径:缓存丢了(页面发布在 vault、缓存在 data,
+    两边不在一处)、以及候选集合大换血(旧缓存只剩已消失的条目)。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._old = T.CACHE_DIR
+        T.CACHE_DIR = Path(self.tmp.name)
+        self.addCleanup(lambda: setattr(T, "CACHE_DIR", self._old))
+        self.out_dir = Path(self.tmp.name) / "vault"
+        self.out_dir.mkdir()
+        self.page = self.out_dir / B.VIEWS["skills"]["out"]
+        self.calls = 0
+
+    def _stub(self, code_of):
+        def fake(prompt, model, **kw):
+            self.calls += 1
+            rows = re.findall(r"^(\d+)\. (\S+) ::", prompt, re.M)
+            return json.dumps([{"id": int(i), "c": code_of(nm)} for i, nm in rows])
+
+        T._llm, old = fake, T._llm
+        self.addCleanup(lambda: setattr(T, "_llm", old))
+
+    def _build(self, groups):
+        return B.build_one("skills", groups, use_llm=True, max_new=None,
+                           model="stub", workers=1, out_dir=self.out_dir)
+
+    def _good_page(self, groups):
+        """先正常生成一张 101 节点的图,当作「已经发布出去的旧页面」。"""
+        self._stub(lambda nm: "S1")
+        self._build(groups)
+        self.assertEqual(B.P.page_stats(self.page)["nodes"], len(groups))
+        return self.page.read_text(encoding="utf-8")
+
+    def test_bad_incremental_run_with_no_cache_keeps_page_and_retries(self):
+        """缓存丢了、旧页面还在,增量把 101 条全判成 X:连跑两次都不能固化。"""
+        groups = [_group(f"n{i}", f"名{i}", topics=["skill工具"]) for i in range(101)]
+        good = self._good_page(groups)
+        T.cache_path(T.SKILLS).unlink()               # 缓存丢失,指纹没变 → 走增量
+
+        for run in (1, 2):
+            with self.subTest(第几次=run):
+                self.calls = 0
+                self._stub(lambda nm: "X")
+                with self.assertRaises(SystemExit):
+                    self._build(groups)
+                self.assertGreater(self.calls, 0)     # 第二次也得重新问模型
+                self.assertFalse(T.cache_path(T.SKILLS).exists())
+                self.assertFalse(T.staging_path(T.SKILLS).exists())
+                self.assertEqual(self.page.read_text(encoding="utf-8"), good)
+
+        # 模型恢复正常 → 自己走出来
+        self.calls = 0
+        self._stub(lambda nm: "S1")
+        self._build(groups)
+        self.assertEqual(len(T.load_cache(T.SKILLS)), 101)
+
+    def test_bad_incremental_run_leaves_the_official_cache_byte_identical(self):
+        """候选大换血、新的一批全判成 X:正式缓存必须逐字节不变。
+
+        这一条走的是「旧缓存里的条目还在、只是候选换了人」,所以 `codes` 不全是
+        X,`classify` 那层的「等于没判」拦不住——只能靠页面验收 + discard 回滚。
+        """
+        old_groups = [_group(f"n{i}", f"名{i}", topics=["skill工具"])
+                      for i in range(101)]
+        good = self._good_page(old_groups)
+        cache_bytes = T.cache_path(T.SKILLS).read_text(encoding="utf-8")
+
+        new_groups = [_group(f"m{i}", f"新{i}", topics=["skill工具"])
+                      for i in range(101)]
+        for run in (1, 2):
+            with self.subTest(第几次=run):
+                self.calls = 0
+                self._stub(lambda nm: "X")
+                with self.assertRaises(SystemExit):
+                    self._build(new_groups)
+                self.assertGreater(self.calls, 0)
+                self.assertEqual(T.cache_path(T.SKILLS).read_text(encoding="utf-8"),
+                                 cache_bytes)
+                self.assertFalse(T.staging_path(T.SKILLS).exists())
+                self.assertEqual(self.page.read_text(encoding="utf-8"), good)
+
+    def test_good_incremental_run_commits_after_the_page(self):
+        """正常增量:页面写完之前正式缓存不动,写完之后新条目才进缓存。"""
+        groups = [_group(f"n{i}", f"名{i}", topics=["skill工具"]) for i in range(101)]
+        self._good_page(groups)
+        before = T.cache_path(T.SKILLS).read_text(encoding="utf-8")
+        groups.append(_group("新来的", "新来的", topics=["skill工具"]))
+
+        seen, real = {}, B.P.render
+
+        def spy(*a, **kw):
+            seen["cache"] = T.cache_path(T.SKILLS).read_text(encoding="utf-8")
+            return real(*a, **kw)
+
+        B.P.render = spy
+        self.addCleanup(lambda: setattr(B.P, "render", real))
+        self.calls = 0
+        self._stub(lambda nm: "S2")
+        self._build(groups)
+        self.assertEqual(self.calls, 1)               # 只判新来的那一条
+        self.assertEqual(seen["cache"], before)       # 渲染时还没提交
+        self.assertEqual(len(T.load_cache(T.SKILLS)), 102)
+        self.assertFalse(T.staging_path(T.SKILLS).exists())
 
 
 class BuildDataTest(unittest.TestCase):

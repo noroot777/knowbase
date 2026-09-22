@@ -195,11 +195,17 @@ def cache_path(taxo: Taxonomy) -> Path:
     return CACHE_DIR / f"taxonomy_{taxo.key}.json"
 
 
-def migrate_path(taxo: Taxonomy) -> Path:
-    """全量重判(分类表改过)的半成品。**新结论先攒在这儿,判完才原子换上正式
-    缓存**——直接往正式缓存里写的话,`--max-new` 一截断,几千条完整旧判定就被
-    几百条新判定盖掉了,而且不可逆(2026-09-22 第 2 轮审查发现)。"""
-    return CACHE_DIR / f"taxonomy_{taxo.key}.migrating.json"
+def staging_path(taxo: Taxonomy) -> Path:
+    """**本轮判出来、还没被验收的判定**。判定一律先攒在这儿,等调用方把新图
+    验收通过、页面也落盘了才换上正式缓存(`Verdicts.commit()`)。
+
+    全量重判要这个,是因为直接往正式缓存里写的话 `--max-new` 一截断,几千条
+    完整旧判定就被几百条新判定盖掉了(2026-09-22 第 2 轮审查发现);增量同样
+    要,是因为「页面验收不过」时得能把这一轮的判定原样撤掉——写进正式缓存的
+    东西撤不回来,下一轮全命中坏缓存、不再问模型,流水线自己爬不出来
+    (2026-09-22 第 6 轮审查发现)。
+    """
+    return CACHE_DIR / f"taxonomy_{taxo.key}.staging.json"
 
 
 def load_raw(taxo: Taxonomy, path: Path | None = None) -> tuple[dict[str, str], dict[str, str]]:
@@ -369,53 +375,61 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
 
     - **增量**(指纹没变):只判缓存里没有的那几条,`--max-new` 是上限——某天
       涌入几百条新条目时不至于把一轮管道拖成半小时。没判到的落 fallback。
-    - **全量重判**(指纹变了,分类表/规则改过):旧结论整份作废。这时候
-      **`--max-new` 不适用**,而且新结论先攒在 `*.migrating.json` 里,全判完
-      才**交给调用方 `commit()`** 换上正式缓存。截断 + 就地覆盖的话,3183 条
-      完整旧判定会被 400 条新判定盖掉,剩下 2783 个节点当场变「待归类」,
-      不可逆(2026-09-22 第 2 轮审查发现)。判不完就保住旧缓存、下一轮接着判。
+    - **全量重判**(指纹变了,分类表/规则改过):旧结论整份作废,`--max-new`
+      **不适用**。截断 + 就地覆盖的话,3183 条完整旧判定会被 400 条新判定盖掉,
+      剩下 2783 个节点当场变「待归类」,不可逆(2026-09-22 第 2 轮审查发现)。
+      判不完就保住旧缓存、下一轮接着判。
+
+    **两种模式都只写暂存文件**(`staging_path`),正式缓存一律等调用方验收完新图
+    再 `commit()`。增量那一侧原来是直接写正式缓存的,于是「页面验收不过」时
+    `discard()` 无从撤起:坏判定当场固化,下一轮全命中、不再问模型
+    (2026-09-22 第 6 轮审查发现)。
     """
     codes, names = load_raw(taxo)
+    n_official = len(codes)
     stale = 0 if codes else stale_cache_size(taxo)
     migrating = bool(stale)
-    out_path = migrate_path(taxo)
+    stage = staging_path(taxo)
+    # 续上上一轮判出来、还没提交的那些(指纹对不上的暂存会被 load_raw 当空的,
+    # 那种留在盘上也没用,顺手删掉)
+    part, pnames = load_raw(taxo, stage)
+    if part:
+        codes.update(part)
+        names.update(pnames)
+    elif stage.exists():
+        stage.unlink(missing_ok=True)
     if migrating:
-        # 续跑上一轮没判完的部分(指纹对不上的半成品会被 load_raw 当空的)
-        part, pnames = load_raw(taxo, out_path)
-        codes, names = dict(part), dict(pnames)
         log(f"  [{taxo.key}] 分类表改过,{stale} 条旧判定整份作废,本轮全量重判"
-            f"(--max-new 不适用){f';续上半成品 {len(codes)} 条' if codes else ''}")
-    else:
-        out_path = cache_path(taxo)
-        # 上一次重判留下的半成品已经用不上了(要么判完换上去了,要么指纹又变了)
-        migrate_path(taxo).unlink(missing_ok=True)
+            f"(--max-new 不适用){f';续上暂存 {len(part)} 条' if part else ''}")
 
     names.update({n: nm for n, nm, _ in items})
 
     def finish() -> Verdicts:
-        """重判收尾:判完了没?判出来的东西作不作数?作数也只是**待提交**。"""
+        """收尾:判完了没?判出来的东西作不作数?作数也只是**待提交**。"""
         left = sum(1 for it in items if it[0] not in codes)
-        if left or not codes:
+        if migrating and (left or not codes):
             why = (f"分类规则改过,全量重判还没做完(已判 {len(codes)} 条,"
                    f"还差 {left} 条:批次失败或模型漏项),进度已存盘,下次跑接着判")
             log(f"  [{taxo.key}] {why};正式缓存与旧图原样保留")
-            return Verdicts(codes, False, True, left, reason=why)
+            return Verdicts(codes, False, migrating, left, reason=why)
         void = void_codes | {taxo.fallback}
-        if all(c in void for c in codes.values()):
+        if codes and all(c in void for c in codes.values()):
             # 整批全落在「等于没判」的那几个 code 上(全待归类、或 skill 全判成
             # 「不是 skill」),这不是判定结果,是这一趟坏了(提示词/模型/中转站)。
-            # 半成品也一并扔掉:留着的话下一轮全命中、不再问模型,同一个坏结果
+            # 暂存也一并扔掉:留着的话下一轮全命中、不再问模型,同一个坏结果
             # 会一直卡在那儿(2026-09-22 第 4、5 轮审查发现)。
-            migrate_path(taxo).unlink(missing_ok=True)
-            why = (f"重判结果 {len(codes)} 条全落在 {sorted(void)} 上"
-                   f"(等于什么也没判出来),这一趟不作数,下次重判")
+            stage.unlink(missing_ok=True)
+            why = (f"{'重判' if migrating else '归类'}结果 {len(codes)} 条全落在 "
+                   f"{sorted(void)} 上(等于什么也没判出来),这一趟不作数,下次重判")
             log(f"  [{taxo.key}] {why};正式缓存与旧图原样保留")
-            return Verdicts(codes, False, True, len(codes), reason=why)
-        log(f"  [{taxo.key}] 重判完成,{len(codes)} 条待提交(新图验收通过后才换上正式缓存)")
+            return Verdicts(codes, False, migrating, len(codes), reason=why)
+        if not migrating and len(codes) == n_official:
+            return Verdicts(codes, True, False, left)     # 没判出新东西,无事可提交
+        log(f"  [{taxo.key}] {len(codes)} 条待提交(新图验收通过后才换上正式缓存)")
         ready, kept = dict(codes), dict(names)
-        return Verdicts(codes, True, True, 0,
+        return Verdicts(codes, True, migrating, left,
                         lambda: _promote(taxo, ready, kept),
-                        lambda: migrate_path(taxo).unlink(missing_ok=True))
+                        lambda: stage.unlink(missing_ok=True))
 
     pending = [it for it in items if it[0] not in codes]
     if max_new is not None and len(pending) > max_new and not migrating:
@@ -423,7 +437,7 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
         pending = pending[:max_new]
     if not pending:
         log(f"  [{taxo.key}] 全部命中缓存({len(codes)} 条)")
-        return finish() if migrating else Verdicts(codes, True, False)
+        return finish()
 
     model = model or default_model()
     valid = {c.code for c in taxo.cats}
@@ -445,7 +459,7 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
                 if 0 <= i < len(chunk) and c in valid}
 
     def do_round(todo: list[tuple[str, str, str]]) -> None:
-        """判一轮 todo,结果并进 codes 并落盘(重判期间落的是半成品)。
+        """判一轮 todo,结果并进 codes 并落到**暂存文件**。
 
         **一批「没抛异常」不等于「这批判完了」**:模型返回语法合法但只含几条的
         数组、输出被截断、id 重复、给的 code 在表外被过滤掉,都会让这批悄悄少
@@ -463,28 +477,25 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
                         log(f"  [{taxo.key}] 一批只回了 {len(chunk) - short}/"
                             f"{len(chunk)} 条(模型漏项/被截断),缺的留到下一轮")
                 done += 1
-                # 只在真判出新东西时落盘。一批都没成功(没配 key、中转站挂了)时写盘
-                # 等于拿一份空 items 覆盖掉旧判定;重判期间写的还是半成品文件,
-                # 正式缓存无论如何都要等判完才动。
+                # 只在真判出新东西时落盘;落的始终是暂存文件,正式缓存要等
+                # 调用方验收完新图才动。
                 if len(codes) > saved and (done % 5 == 0 or done == len(batches)):
-                    save_cache(taxo, codes, names, out_path)  # 中途落盘:被打断也不白跑
+                    save_cache(taxo, codes, names, stage)  # 中途落盘:被打断也不白跑
                     saved = len(codes)
                     log(f"  [{taxo.key}] {done}/{len(batches)} 批,已判 {len(codes)} 条")
         if len(codes) > saved:
-            save_cache(taxo, codes, names, out_path)
+            save_cache(taxo, codes, names, stage)
 
     do_round(pending)
-    if not migrating:
-        return Verdicts(codes, True, False)
-
-    # 重判:漏的那些再问一轮(只问缺的,批次更小、更容易回全)。这是为了别因为
-    # 模型偶尔漏一条就永远 promote 不了——但补不齐也绝不放宽下面的完成判据。
-    for _ in range(_RESIGN_RETRIES):
-        todo = [it for it in items if it[0] not in codes]
-        if not todo:
-            break
-        log(f"  [{taxo.key}] 还差 {len(todo)} 条没拿到判定,补判一轮")
-        do_round(todo)
+    if migrating:
+        # 漏的那些再问一轮(只问缺的,批次更小、更容易回全)。这是为了别因为模型
+        # 偶尔漏一条就永远 promote 不了——但补不齐也绝不放宽 finish() 的完成判据。
+        for _ in range(_RESIGN_RETRIES):
+            todo = [it for it in items if it[0] not in codes]
+            if not todo:
+                break
+            log(f"  [{taxo.key}] 还差 {len(todo)} 条没拿到判定,补判一轮")
+            do_round(todo)
 
     # **完成 = 每一条都拿到了有效 code**,不是「没有批次抛异常」。漏项响应造成的
     # 后果和第 2 轮那次截断一模一样:3 条判定 promote 成正式缓存、覆盖掉 101 条
@@ -493,9 +504,9 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
 
 
 def _promote(taxo: Taxonomy, codes: dict[str, str], names: dict[str, str]) -> None:
-    """把半成品换成正式缓存(rename 是原子的),再删掉半成品。
+    """把暂存换成正式缓存(rename 是原子的),再删掉暂存。
 
-    只由 `Verdicts.commit()` 调——重判判完**并且**新图验收通过、页面落盘之后。
+    只由 `Verdicts.commit()` 调——判完**并且**新图验收通过、页面落盘之后。
     """
     save_cache(taxo, codes, names)
-    migrate_path(taxo).unlink(missing_ok=True)
+    staging_path(taxo).unlink(missing_ok=True)
