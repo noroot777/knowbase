@@ -319,11 +319,23 @@ class Verdicts:
     拿到一个有效 code(批次抛异常,或模型返回合法 JSON 却漏了一截)。日常增量
     判定永远是 complete——那时候没判到的几条显示成「待归类」是既定行为,不该
     拦着图谱更新。
+
+    **判完 ≠ 已提交**。重判的新结论一直攥在半成品文件里,要等调用方把新图验收
+    通过、页面也落盘了,才 `commit()` 换上正式缓存:两件事不在一个事务里的话,
+    「缓存已经换掉、页面校验才拦下」就成了半吊子状态——页面保住了,可那份还能
+    用的旧缓存已经没了,之后每一轮都会命中新缓存、不再问模型,流水线自己爬不
+    出来(2026-09-22 第 4 轮审查发现)。
     """
     codes: dict[str, str]
     complete: bool = True
     migrating: bool = False
     pending: int = 0               # 还差多少条没判(仅重判期间有意义)
+    commit_fn: object = None       # 待提交的正式缓存;None = 没什么可提交的
+
+    def commit(self) -> None:
+        """新图验收通过、页面已落盘之后调:把半成品原子换成正式缓存。"""
+        if self.commit_fn is not None:
+            self.commit_fn()
 
 
 # 重判时漏项的补判轮数:模型偶尔漏一条,补判只问缺的那些,批次更小更容易回全。
@@ -342,9 +354,9 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
       涌入几百条新条目时不至于把一轮管道拖成半小时。没判到的落 fallback。
     - **全量重判**(指纹变了,分类表/规则改过):旧结论整份作废。这时候
       **`--max-new` 不适用**,而且新结论先攒在 `*.migrating.json` 里,全判完
-      才原子换上正式缓存。截断 + 就地覆盖的话,3183 条完整旧判定会被 400 条
-      新判定盖掉,剩下 2783 个节点当场变「待归类」,不可逆
-      (2026-09-22 第 2 轮审查发现)。判不完就保住旧缓存、下一轮接着判。
+      才**交给调用方 `commit()`** 换上正式缓存。截断 + 就地覆盖的话,3183 条
+      完整旧判定会被 400 条新判定盖掉,剩下 2783 个节点当场变「待归类」,
+      不可逆(2026-09-22 第 2 轮审查发现)。判不完就保住旧缓存、下一轮接着判。
     """
     codes, names = load_raw(taxo)
     stale = 0 if codes else stale_cache_size(taxo)
@@ -362,15 +374,33 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
         migrate_path(taxo).unlink(missing_ok=True)
 
     names.update({n: nm for n, nm, _ in items})
+
+    def finish() -> Verdicts:
+        """重判收尾:判完了没?判出来的东西作不作数?作数也只是**待提交**。"""
+        left = sum(1 for it in items if it[0] not in codes)
+        if left or not codes:
+            log(f"  [{taxo.key}] 重判未完成(还差 {left} 条:批次失败或模型漏项),"
+                f"正式缓存与旧图原样保留,进度存在 {out_path.name},下次接着判")
+            return Verdicts(codes, False, True, left)
+        if all(c == taxo.fallback for c in codes.values()):
+            # 每条都「待归类」不是判定结果,是这一趟坏了(提示词/模型/中转站)。
+            # 半成品也一并扔掉:留着的话下一轮全命中、不再问模型,同一个坏结果
+            # 会一直卡在那儿(2026-09-22 第 4 轮审查发现)。
+            migrate_path(taxo).unlink(missing_ok=True)
+            log(f"  [{taxo.key}] 重判结果 {len(codes)} 条全是「待归类」,判定这一趟"
+                f"不作数(多半是模型/中转站的问题),正式缓存与旧图原样保留,下次重判")
+            return Verdicts(codes, False, True, len(codes))
+        log(f"  [{taxo.key}] 重判完成,{len(codes)} 条待提交(新图验收通过后才换上正式缓存)")
+        ready, kept = dict(codes), dict(names)
+        return Verdicts(codes, True, True, 0, lambda: _promote(taxo, ready, kept))
+
     pending = [it for it in items if it[0] not in codes]
     if max_new is not None and len(pending) > max_new and not migrating:
         log(f"  [{taxo.key}] 待判 {len(pending)} 条,本轮只判前 {max_new} 条(按热度)")
         pending = pending[:max_new]
     if not pending:
         log(f"  [{taxo.key}] 全部命中缓存({len(codes)} 条)")
-        if migrating and codes:
-            _promote(taxo, codes, names)
-        return Verdicts(codes, bool(codes) or not migrating, migrating)
+        return finish() if migrating else Verdicts(codes, True, False)
 
     model = model or default_model()
     valid = {c.code for c in taxo.cats}
@@ -433,20 +463,16 @@ def classify(taxo: Taxonomy, items: list[tuple[str, str, str]], *,
         log(f"  [{taxo.key}] 还差 {len(todo)} 条没拿到判定,补判一轮")
         do_round(todo)
 
-    left = sum(1 for it in items if it[0] not in codes)
     # **完成 = 每一条都拿到了有效 code**,不是「没有批次抛异常」。漏项响应造成的
     # 后果和第 2 轮那次截断一模一样:3 条判定 promote 成正式缓存、覆盖掉 101 条
     # 旧判定,页面上 98 个节点变待归类(2026-09-22 第 3 轮审查发现)。
-    if left or not codes:
-        log(f"  [{taxo.key}] 重判未完成(还差 {left} 条:批次失败或模型漏项),"
-            f"正式缓存与旧图原样保留,进度存在 {out_path.name},下次接着判")
-        return Verdicts(codes, False, True, left)
-    _promote(taxo, codes, names)
-    log(f"  [{taxo.key}] 重判完成,{len(codes)} 条换上正式缓存")
-    return Verdicts(codes, True, True, 0)
+    return finish()
 
 
 def _promote(taxo: Taxonomy, codes: dict[str, str], names: dict[str, str]) -> None:
-    """重判判完了:把半成品换成正式缓存(rename 是原子的),再删掉半成品。"""
+    """把半成品换成正式缓存(rename 是原子的),再删掉半成品。
+
+    只由 `Verdicts.commit()` 调——重判判完**并且**新图验收通过、页面落盘之后。
+    """
     save_cache(taxo, codes, names)
     migrate_path(taxo).unlink(missing_ok=True)

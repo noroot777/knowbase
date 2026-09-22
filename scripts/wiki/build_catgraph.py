@@ -102,6 +102,11 @@ def build_one(kind: str, groups: list[dict], *, use_llm: bool, max_new: int | No
         foot=P.foot_html(meta, v["unit"]), repo_toggle=v["repo_toggle"],
         other_group=taxo.get(taxo.fallback).group,
     ), encoding="utf-8")
+    # 新图验收通过、也落盘了,这才把重判的新结论换上正式缓存。**顺序不能反**:
+    # 先换缓存再校验的话,上面任何一道拦截都只保住页面保不住缓存——那份还能用的
+    # 旧缓存已经没了,之后每轮都命中新缓存、不再问模型,页面就再也更新不了
+    # (2026-09-22 第 4 轮审查发现)。写页面失败同理:没提交,下次重来。
+    res.commit()
     size = out.stat().st_size / 1024
     print(f"[{kind}] 节点 {meta['total']}(已归类 {meta['classified']}) "
           f"边 {meta['edges']} 文章 {meta['arts']} → {out} ({size:.0f} KB)")

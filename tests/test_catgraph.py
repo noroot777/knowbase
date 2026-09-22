@@ -151,12 +151,13 @@ class TaxonomyCacheTest(unittest.TestCase):
 class ResignMigrationTest(unittest.TestCase):
     """分类表改过之后那一趟全量重判。
 
-    这里钉的是 2026-09-22 第 2、3 轮审查发现的两次事故,形态一样:一份**半成品
-    判定**被 promote 成正式缓存、顺带把好页面盖成满屏「待归类」,不可逆。第 2 轮
-    的触发条件是 `--max-new` 截断,第 3 轮是模型回了合法 JSON 却漏了一截(输出
-    被截断、id 重复、code 在表外被过滤)——两次都不需要任何故障。所以重判必须
-    ①不受 --max-new 限制、②攒在半成品文件里、③**每一条都拿到有效 code 才算判完**,
-    没判完就既不换正式缓存也不覆盖页面。
+    这里钉的是 2026-09-22 第 2、3、4 轮审查发现的三次事故,形态一样:一份**不作数
+    的判定**被换成正式缓存,把还能用的旧判定和好页面毁掉,不可逆。第 2 轮的触发
+    条件是 `--max-new` 截断,第 3 轮是模型回了合法 JSON 却漏了一截(输出被截断、
+    id 重复、code 在表外被过滤),第 4 轮是每条都回合法 fallback——三次都不需要
+    任何故障。所以重判必须①不受 --max-new 限制、②攒在半成品文件里、③**每一条都
+    拿到有效 code 才算判完**、④**新图验收通过、页面落盘之后才提交缓存**,
+    没判完/不作数就既不换正式缓存也不覆盖页面。
     """
 
     def setUp(self):
@@ -176,13 +177,14 @@ class ResignMigrationTest(unittest.TestCase):
         self.assertNotEqual(self.taxo.sig(), T.SKILLS.sig())
 
     def _stub(self, *, fail_names=(), omit=0, omit_until_call=10 ** 9,
-              bad_code=False):
+              bad_code=False, code="S2"):
         """模型桩。
 
         fail_names:批次里含这些名字就抛异常——**按内容判,不按第几次调用**,
         这样补判轮再问一次照样失败(故障是持续的)。omit:每批少回几条,模拟
         「语法合法但漏项」;bad_code 则把漏的那条给个表外 code(会被过滤掉,
         效果一样)。omit_until_call:第几次调用之后不再漏(测补判补得上)。
+        code:每条回哪个 code(拿 fallback 测「判了等于没判」那条路)。
         """
         self.calls = 0
 
@@ -198,7 +200,7 @@ class ResignMigrationTest(unittest.TestCase):
                     if bad_code:                 # 表外 code:解析得出,但会被过滤
                         out.append({"id": int(i), "c": "表外的类目"})
                     continue                     # 不 bad_code 就是整条不回
-                out.append({"id": int(i), "c": "S2"})
+                out.append({"id": int(i), "c": code})
             return json.dumps(out)
 
         T._llm, old = fake, T._llm
@@ -223,7 +225,10 @@ class ResignMigrationTest(unittest.TestCase):
         self.assertTrue(got.complete)
         self.assertTrue(got.migrating)
         self.assertEqual(len(got.codes), 101)
-        # 判完才换上正式缓存,半成品文件收干净
+        # 判完也只是「待提交」:正式缓存这会儿还是旧的那份
+        self.assertEqual(T.cache_path(T.SKILLS).read_text(encoding="utf-8"),
+                         self.stale_bytes)
+        got.commit()
         self.assertEqual(T.load_cache(self.taxo), got.codes)
         self.assertFalse(T.migrate_path(self.taxo).exists())
 
@@ -246,6 +251,7 @@ class ResignMigrationTest(unittest.TestCase):
         self.assertTrue(again.complete)
         self.assertEqual(len(again.codes), 101)
         self.assertEqual(self.calls, 1)
+        again.commit()
         self.assertEqual(T.load_cache(self.taxo), again.codes)
         self.assertFalse(T.migrate_path(self.taxo).exists())
 
@@ -297,8 +303,64 @@ class ResignMigrationTest(unittest.TestCase):
         self.assertTrue(got.complete)
         self.assertEqual(len(got.codes), 101)
         self.assertEqual(self.calls, 4)           # 3 批 + 1 轮补判(6 条一批)
+        got.commit()
         self.assertEqual(T.load_cache(self.taxo), got.codes)
         self.assertFalse(T.migrate_path(self.taxo).exists())
+
+    def test_cache_is_committed_only_after_the_page_is_written(self):
+        """两阶段提交:页面落盘之前,正式缓存一个字节不能动。
+
+        先换缓存再校验新图的话,任何一道拦截都只保住页面保不住缓存
+        (2026-09-22 第 4 轮审查发现)。
+        """
+        self._stub()
+        out_dir, page, groups = self._page_with_old_content()
+        seen = {}
+        real = B.P.render
+
+        def spy(*a, **kw):
+            # 渲染这一刻(页面还没落盘)正式缓存必须还是旧的那份
+            seen["cache"] = T.cache_path(T.SKILLS).read_text(encoding="utf-8")
+            return real(*a, **kw)
+
+        B.P.render = spy
+        self.addCleanup(lambda: setattr(B.P, "render", real))
+        B.build_one("skills", groups, use_llm=True, max_new=None, model="stub",
+                    workers=1, out_dir=out_dir)
+        self.assertEqual(seen["cache"], self.stale_bytes)
+        self.assertNotEqual(page.read_text(encoding="utf-8"), "KNOWN-GOOD-OLD-PAGE")
+        self.assertEqual(len(T.load_cache(self.taxo)), 101)   # 页面写完才提交
+        self.assertFalse(T.migrate_path(self.taxo).exists())
+
+    def test_all_fallback_rejudge_never_replaces_the_cache(self):
+        """每条都回合法 fallback:`left == 0` 可这一趟等于没判。
+
+        第 4 轮审查:fallback 也是表内 code,于是 promote 先发生、`build_one`
+        的「一个都没归类」才拦下——页面保住了,可那份还能用的旧缓存已经被换成
+        一份全是「待归类」的新缓存;之后每轮全命中、不再问模型,页面永远更新
+        不了。连跑两次必须都:正式缓存逐字节不变、旧页面不变、而且**第二次还会
+        再问模型**(不能卡死)。
+        """
+        out_dir, page, groups = self._page_with_old_content()
+        for run in (1, 2):
+            with self.subTest(第几次=run):
+                self._stub(code=T.SKILLS.fallback)
+                with self.assertRaises(SystemExit):
+                    B.build_one("skills", groups, use_llm=True, max_new=None,
+                                model="stub", workers=1, out_dir=out_dir)
+                self.assertGreater(self.calls, 0)      # 没卡在坏缓存上
+                self.assertEqual(T.cache_path(T.SKILLS).read_text(encoding="utf-8"),
+                                 self.stale_bytes)
+                self.assertEqual(page.read_text(encoding="utf-8"),
+                                 "KNOWN-GOOD-OLD-PAGE")
+                self.assertFalse(T.migrate_path(self.taxo).exists())
+
+        # 模型恢复正常之后能自己走出来
+        self._stub()
+        B.build_one("skills", groups, use_llm=True, max_new=None, model="stub",
+                    workers=1, out_dir=out_dir)
+        self.assertEqual(len(T.load_cache(self.taxo)), 101)
+        self.assertNotEqual(page.read_text(encoding="utf-8"), "KNOWN-GOOD-OLD-PAGE")
 
 
 class BuildDataTest(unittest.TestCase):
