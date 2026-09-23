@@ -142,15 +142,20 @@ function cutoff(days) {
 }
 let cut = "";
 
+// 搜索词命不命中:名字 + 简介 + 主题。`match` 和 `relax` 共用这一份口径——
+// 各写各的话,「这一项挡没挡住目标」两边就会给出不一样的答案。
+function hitsQ(i) {
+  const n = N[i];
+  return (n.l + " " + n.s + " " + (n.tp || []).join(" "))
+    .toLowerCase().includes(F.q);
+}
+
 function match(i) {
   const n = N[i];
   if (n.n < F.heat) return false;
   if (cut && n.t < cut) return false;
   if (F.repo && !n.rp) return false;
-  if (F.q) {
-    const hay = (n.l + " " + n.s + " " + (n.tp || []).join(" ")).toLowerCase();
-    if (!hay.includes(F.q)) return false;
-  }
+  if (F.q && !hitsQ(i)) return false;
   return true;
 }
 
@@ -265,7 +270,10 @@ function trackEdges(dur = 340) {
 // (2026-09-23 第 1 轮审查发现,实测 visibleSelected=0 / visibleDimmed=152)。
 // `apply()` 里本来就有同一道保护(筛选变了、选中项被滤掉就 reset),关联跳转是从
 // 旁边绕过去的,所以这道口径收在 `select()` 里,别的入口也一并管住。
-// 只放开**挡路的那几项**,而且控件跟着回位——用户看得见筛选被放开了。
+// 只放开**挡路的那几项**,而且控件跟着回位——用户看得见筛选被放开了。逐项各判
+// 各的:组合筛选下目标常常只被其中一项挡着(搜「Claude」+「30 天」点到 Bun,
+// Bun 的简介里就有 Claude,挡住它的只有时间窗),顺手把仍然成立的搜索词也清掉的话,
+// 结果会从 18 个当场炸回 3187 个(2026-09-23 复审第 2 轮发现)。
 function setSeg(k, v) {
   F[k] = v;
   const seg = document.querySelector(`.seg[data-k="${k}"]`);
@@ -282,7 +290,7 @@ function relax(i) {
     F.repo = false;
     if (repoBtn) repoBtn.classList.remove("on");
   }
-  if (F.q) {
+  if (F.q && !hitsQ(i)) {                      // 目标仍命中搜索词时别动它
     clearTimeout(qt);                          // 刚敲下的那半个词别再回来
     F.q = "";
     qEl.value = "";

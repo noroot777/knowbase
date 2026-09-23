@@ -40,10 +40,13 @@ PROBE = Path(__file__).resolve().parent / "catgraph_probe.mjs"
 SHELL = (Path.home() / "Library/Caches/ms-playwright/chromium_headless_shell-1243"
          / "chrome-headless-shell-mac-arm64" / "chrome-headless-shell")
 
-# A 热、近、有仓库;B 冷、旧、没仓库——四个筛选各能把 B 单独挡住一次
+# A 热、近、有仓库;B 冷、旧、没仓库——四个筛选各能把 B 单独挡住一次。
+# A、B 的简介里都有 SHARED,C 没有:搜 SHARED 时 B 不会被搜索挡住,用来搭
+# 「目标仍命中搜索词、只被另一项挡着」的组合;C 则用来看放宽有没有放过头。
 TODAY = date.today().isoformat()
 OLD = (date.today() - timedelta(days=400)).isoformat()
-SHARED = "https://x/same-article"        # 同一篇文章 → 两者之间有一条共现边
+SHARED = "共同词"
+SHARED_ART = "https://x/same-article"    # 同一篇文章 → A、B 之间有一条共现边
 
 
 @unittest.skipUnless(shutil.which("node"), "需要 node 驱动无头浏览器")
@@ -68,18 +71,25 @@ class RelatedJumpTest(unittest.TestCase):
         try:
             B.build_one("projects", [
                 _group("aaa", "AAA工具", url="https://github.com/x/aaa",
-                       latest=TODAY, summary="甲",
-                       arts=[(SHARED, "同一篇", TODAY),
+                       latest=TODAY, summary=f"{SHARED} 甲",
+                       arts=[(SHARED_ART, "同一篇", TODAY),
                              ("https://x/a2", "另一篇", TODAY),
                              ("https://x/a3", "又一篇", TODAY)]),
-                _group("bbb", "BBB工具", url="", latest=OLD, summary="乙",
-                       arts=[(SHARED, "同一篇", OLD)]),
+                _group("bbb", "BBB工具", url="", latest=OLD,
+                       summary=f"{SHARED} 乙",
+                       arts=[(SHARED_ART, "同一篇", OLD)]),
+                # 不含公共词、也不和谁共现:放宽放过头了它就会冒出来
+                _group("ccc", "CCC工具", url="https://github.com/x/ccc",
+                       latest=TODAY, summary="丙",
+                       arts=[("https://x/c1", "丙一", TODAY),
+                             ("https://x/c2", "丙二", TODAY)]),
             ], use_llm=True, max_new=None, model="stub", workers=1, out_dir=out_dir)
         finally:
             T._llm = old_llm
             T.CACHE_DIR = old_cache
         cls.page = out_dir / B.VIEWS["projects"]["out"]
-        cls.probed = cls._probe(["search", "win", "heat", "repo", "none"])
+        cls.probed = cls._probe(["search", "win", "heat", "repo", "none",
+                                 "q+win", "q+heat", "q+repo"])
 
     @classmethod
     def tearDownClass(cls):
@@ -90,31 +100,57 @@ class RelatedJumpTest(unittest.TestCase):
         """一次浏览器启动跑完所有筛选(每个之间重新加载页面)。"""
         r = subprocess.run(
             [shutil.which("node"), str(PROBE), str(cls.page), ",".join(filters),
-             "AAA工具", "BBB工具"],
+             "AAA工具", "BBB工具", SHARED],
             capture_output=True, text=True, timeout=300,
             env={**os.environ, "HEADLESS_SHELL": str(SHELL)})
         if r.returncode != 0:
             raise AssertionError(r.stderr)
         return json.loads(r.stdout.strip().splitlines()[-1])
 
+    def _landed(self, s: dict) -> None:
+        """不管哪种筛选,跳过去之后都得真的落在 B 上。"""
+        self.assertTrue(s["hiddenFirst"], "这一轮的前提没了:B 没被挡住")
+        self.assertTrue(s["hasButton"], "面板里没有指向 B 的关联按钮")
+        self.assertEqual(s["panel"], "BBB工具")
+        # 原来的坏状态:面板是 B,可见 pill 全灰,一个选中的都没有
+        self.assertEqual(s["visibleSelected"], 1, f"跳到了一个被筛掉的节点上({s})")
+        self.assertGreater(s["edgePaths"], 0, "没有连线(选中项不在页面上)")
+        self.assertLess(s["visibleDimmed"], s["visiblePills"], "所有可见 pill 都被压暗了")
+
     def test_jumping_to_a_filtered_out_neighbour_opens_it_for_real(self):
         for filt in ("search", "win", "heat", "repo"):
             with self.subTest(filter=filt):
                 s = self.probed[filt]
-                self.assertTrue(s["hiddenFirst"], "这一轮的前提没了:B 没被挡住")
-                self.assertTrue(s["hasButton"], "面板里没有指向 B 的关联按钮")
-                self.assertEqual(s["panel"], "BBB工具")
-                # 原来的坏状态:面板是 B,可见 pill 全灰,一个选中的都没有
-                self.assertEqual(s["visibleSelected"], 1,
-                                 f"跳到了一个被筛掉的节点上({s})")
-                self.assertGreater(s["edgePaths"], 0, "没有连线(选中项不在页面上)")
-                self.assertLess(s["visibleDimmed"], s["visiblePills"],
-                                "所有可见 pill 都被压暗了")
+                self._landed(s)
                 # 挡路的那一项被放开了,而且控件上看得见
                 self.assertEqual(s["query"], "")
                 self.assertEqual(s["winOn"], "0")
                 self.assertEqual(s["heatOn"], "1")
                 self.assertFalse(s["repoOn"])
+
+    def test_a_search_that_still_matches_the_target_is_left_alone(self):
+        """组合筛选下只解除真正挡住目标的那一项:搜索词仍命中就别动它。
+
+        复审第 2 轮:`relax()` 的搜索分支原来只看 `F.q` 空不空,不看目标是不是
+        还命中它。于是「搜 Claude + 近 30 天 → 点 Bun」(Bun 的简介里就有
+        Claude,挡住它的只有时间窗)会把搜索词一起清掉,结果从 18 个当场炸回
+        3187 个,和同文件里那句「只放开挡路的那几项」正相反。
+        """
+        for filt, seg in (("q+win", "winOn"), ("q+heat", "heatOn"),
+                          ("q+repo", "repoOn")):
+            with self.subTest(filter=filt):
+                s = self.probed[filt]
+                self._landed(s)
+                self.assertEqual(s["query"], SHARED,
+                                 f"目标仍命中搜索词,搜索却被清掉了({s})")
+                # 只有挡路的那一项回位,另外两项本来就没开
+                self.assertEqual(s["winOn"], "0")
+                self.assertEqual(s["heatOn"], "1")
+                self.assertFalse(s["repoOn"])
+                # 搜索还在 → 不含公共词的 C 不该冒出来(A + B 两个)
+                self.assertEqual(s["shown"], "2",
+                                 f"放宽放过头了,筛选结果从 {s['shownFirst']} 涨到 "
+                                 f"{s['shown']}({s})")
 
     def test_an_unfiltered_jump_still_works(self):
         """没有任何筛选时照旧:这道保护不能顺手改掉正常路径。"""
