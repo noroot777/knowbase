@@ -257,7 +257,41 @@ function trackEdges(dur = 340) {
 }
 
 /* ── 选中 / 详情面板 ── */
+// 选中一个**当前被筛选挡着**的节点之前,先把挡它的那几项筛选放开。
+// 面板里「常一起出现」那排按钮是按共现关系列出来的,跟搜索词/时间窗/热度/仓库
+// 开关没有半点关系,点进去的目标十有八九不在当前结果里。直接 select 的话:
+// body.hasSel 把**所有**可见 pill 压到 opacity .2,而目标 pill 还挂着 .hide
+// ——面板展示着一个不在结果里的条目,结果区一片灰、没有一个亮的,连线也画不出来
+// (2026-09-23 第 1 轮审查发现,实测 visibleSelected=0 / visibleDimmed=152)。
+// `apply()` 里本来就有同一道保护(筛选变了、选中项被滤掉就 reset),关联跳转是从
+// 旁边绕过去的,所以这道口径收在 `select()` 里,别的入口也一并管住。
+// 只放开**挡路的那几项**,而且控件跟着回位——用户看得见筛选被放开了。
+function setSeg(k, v) {
+  F[k] = v;
+  const seg = document.querySelector(`.seg[data-k="${k}"]`);
+  if (seg) seg.querySelectorAll("button")
+    .forEach(b => b.classList.toggle("on", +b.dataset.v === v));
+}
+
+function relax(i) {
+  if (match(i)) return;                        // 常态:一次都不用重排
+  const n = N[i];
+  if (n.n < F.heat) setSeg("heat", 1);
+  if (cut && n.t < cut) setSeg("win", 0);
+  if (F.repo && !n.rp) {
+    F.repo = false;
+    if (repoBtn) repoBtn.classList.remove("on");
+  }
+  if (F.q) {
+    clearTimeout(qt);                          // 刚敲下的那半个词别再回来
+    F.q = "";
+    qEl.value = "";
+  }
+  apply();                                     // 放宽只会让更多 pill 露出来
+}
+
 function select(i, from) {
+  relax(i);
   selected = i;
   anchor = from || null;     // 用户点的那一份副本,滚动和连线都以它为准
   document.body.classList.add("hasSel");
