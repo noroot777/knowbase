@@ -20,10 +20,10 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
 from hashlib import blake2b
 from pathlib import Path
 from threading import RLock
@@ -116,12 +116,41 @@ def gen_path(taxo: Taxonomy) -> Path:
     return CACHE_DIR / f"taxonomy_{taxo.key}.gen"
 
 
+class GenUnreadable(OSError):
+    """发布序号读不出来,或者读出来是坏的。
+
+    故意继承 `OSError`:调用方对「序号这一步不可用」本来就一律 fail-closed,
+    多一个异常类型只是为了在日志里说清是读侧还是写侧。
+    """
+
+
+_GEN_RE = re.compile(r"\A\d+-[0-9a-f]{12}\Z")
+
+
 def read_gen(taxo: Taxonomy) -> str:
-    """当前**发布序号**(还没发布过是空串)。见 `bump_gen`。"""
+    """当前**发布序号**(还没发布过是空串)。见 `bump_gen`。
+
+    **只有「文件不存在」才是空串**,别的读失败一律抛出去。把权限、瞬时 I/O 故障
+    读出来的失败一起折叠成空串,等于读侧主动把一枚已经落实到盘上的序号扔掉:
+    同一个陈旧任务两次取基线都读失败时,序号那一半在两次签名里都是空,CAS 当场
+    退化回纯内容比较,产物走完 A→B→A 之后它认不出期间发生过两次发布,照样把陈旧
+    快照覆盖上去、退出码 0——写侧提前推进和 fsync 全白做(2026-09-23 复审第 10 轮
+    发现)。`bump_gen` 也走这里取计数头,于是「读不出来」还会被它当成「没有这个
+    文件」,从 1 重新计数并把原文件覆盖掉,把故障本身也抹了。
+
+    内容同样要验:空文件、半截 token、被别的东西写过的文件都不是有效基线,
+    拿它当「还没发布过」和上面那条是同一个错误。
+    """
+    p = gen_path(taxo)
     try:
-        return gen_path(taxo).read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+        raw = p.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""                                    # 还没发布过
+    except OSError as e:
+        raise GenUnreadable(f"{p} 读不出来({e})") from e
+    if not _GEN_RE.fullmatch(raw):
+        raise GenUnreadable(f"{p} 里不是合法发布序号({raw[:40]!r})")
+    return raw
 
 
 def bump_gen(taxo: Taxonomy) -> str:
@@ -138,7 +167,9 @@ def bump_gen(taxo: Taxonomy) -> str:
     (fsync 文件 + fsync 目录):序号存在的全部意义就是在别的进程、别的时间点被
     读到,只写进页缓存的话宿主机一重启它就没了,ABA 防护跟着一起没
     (2026-09-23 复审第 9 轮发现)。失败就把异常抛出去——调用方据此放弃这一轮,
-    一个字节都不改。
+    一个字节都不改。**读不出已有序号时同样如此**(`read_gen` 抛
+    `GenUnreadable`):那时候我们既不知道该接着谁往下数,也不能拿一份新序号去盖
+    它——盖掉等于把「有人发布过」这个事实连同故障一起抹平。
     """
     head = read_gen(taxo).split("-", 1)[0]
     n = int(head) + 1 if head.isdigit() else 1
@@ -373,58 +404,8 @@ _llm = L.llm
 _parse = L.parse
 default_model = L.default_model
 
-
-@dataclass(frozen=True)
-class Verdicts:
-    """一轮归类的结果。
-
-    `complete=False` 只在**全量重判没做完**时出现,意思是「这份 codes 是半成品,
-    别拿它覆盖页面」:分类表刚改过、旧缓存整份失效,而这一轮没能给每个候选都
-    拿到一个有效 code(批次抛异常,或模型返回合法 JSON 却漏了一截)。日常增量
-    判定永远是 complete——那时候没判到的几条显示成「待归类」是既定行为,不该
-    拦着图谱更新。
-
-    **判完 ≠ 已提交**。重判的新结论一直攥在半成品文件里,要等调用方把新图验收
-    通过、页面也落盘了,才 `commit()` 换上正式缓存:两件事不在一个事务里的话,
-    「缓存已经换掉、页面校验才拦下」就成了半吊子状态——页面保住了,可那份还能
-    用的旧缓存已经没了,之后每一轮都会命中新缓存、不再问模型,流水线自己爬不
-    出来(2026-09-22 第 4 轮审查发现)。
-    """
-    codes: dict[str, str]
-    complete: bool = True
-    migrating: bool = False
-    pending: int = 0               # 还差多少条没判(仅重判期间有意义)
-    commit_fn: object = None       # 待提交的正式缓存;None = 没什么可提交的
-    discard_fn: object = None      # 扔掉半成品;None = 没有半成品要扔
-    keep_fn: object = None         # 这一轮不发布时:把自己判的并回暂存
-    reason: str = ""               # complete=False 时:为什么不能用(给人看的)
-
-    def commit(self) -> None:
-        """新图验收通过、页面已落盘之后调:把半成品原子换成正式缓存。"""
-        if self.commit_fn is not None:
-            self.commit_fn()
-
-    def discard(self) -> None:
-        """新图验收**没**通过时调:连半成品一起扔掉,下一轮重新问模型。
-
-        判定本身完整、只是结果不作数(全判成「不是 skill」之类)时,半成品留着
-        的话下一轮全命中、不再问模型,同一个坏结果会一直卡在那儿——扔掉才能在
-        模型恢复后自己走出来。**判到一半**那种不要扔(那是进度,下次接着判)。
-        """
-        if self.discard_fn is not None:
-            self.discard_fn()
-
-    def keep(self) -> None:
-        """这一轮**不发布**(基线被别人换过)时调:把自己判出来的并回暂存。
-
-        共享暂存是整份覆盖的:另一个 writer 在我们判完之后写一次,就把我们这份
-        盖掉了;它发布成功还会把暂存整个删掉。所以「不发布也一条都不丢」不能靠
-        「分类阶段写过一次」——那条唯一判定可能既不在正式缓存、也不在暂存,白花
-        一次模型钱,日志还说留下了(2026-09-23 复审第 7 轮发现)。这里是读-改-写
-        地并回去,而且跑在发布锁里。
-        """
-        if self.keep_fn is not None:
-            self.keep_fn()
+# 归类结果对象搬到了 taxo_verdicts.py(同样是 700 行上限逼出来的,那一块最独立)。
+from taxo_verdicts import Verdicts  # noqa: E402,F401
 
 
 # 重判时漏项的补判轮数:模型偶尔漏一条,补判只问缺的那些,批次更小更容易回全。

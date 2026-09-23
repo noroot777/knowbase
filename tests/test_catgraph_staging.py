@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -352,6 +353,45 @@ class StagingIdentityTest(unittest.TestCase):
         self.assertNotEqual(T.read_gen(T.SKILLS), before)
         self.assertEqual(self.page.read_bytes(), page, "正式页面不该被动过")
         self.assertEqual(T_load(T.cache_path(T.SKILLS)), {"n0": "S1"})
+
+    def test_only_a_missing_sidecar_reads_as_no_generation_yet(self):
+        """「还没发布过」只有一种写法:文件不存在。读失败和坏内容都得抛出来。
+
+        复审第 10 轮:两者原来都返回空串,于是一次读故障就把已经落实到盘上的
+        序号扔掉,CAS 退化回纯内容比较(上一轮已经证明它挡不住 ABA)。
+        """
+        gen = T.gen_path(T.SKILLS)
+        self.assertEqual(T.read_gen(T.SKILLS), "")       # 真的没发布过
+        self._stub("S1")
+        self._build(1)
+        token = T.read_gen(T.SKILLS)
+
+        for bad in ("", "   ", "abc", "1-xyz", "1-0011223344", token + "\n后面还有"):
+            gen.write_text(bad, encoding="utf-8")
+            with self.assertRaises(T.GenUnreadable, msg=f"{bad!r} 被当成合法序号"):
+                T.read_gen(T.SKILLS)
+        gen.write_text(token, encoding="utf-8")
+        self.assertEqual(T.read_gen(T.SKILLS), token)    # 合法的照旧读得出来
+
+        if os.geteuid() != 0:                            # root 不受权限约束
+            gen.chmod(0o000)
+            self.addCleanup(lambda: gen.exists() and gen.chmod(0o644))
+            with self.assertRaises(T.GenUnreadable):
+                T.read_gen(T.SKILLS)
+
+    @unittest.skipIf(os.geteuid() == 0, "root 不受文件权限约束")
+    def test_bump_gen_never_overwrites_a_sidecar_it_cannot_read(self):
+        """读不出已有序号时不许从 1 重新计数、把它盖掉——那会把故障本身也抹了。"""
+        self._stub("S1")
+        self._build(1)
+        gen = T.gen_path(T.SKILLS)
+        before = gen.read_bytes()
+        gen.chmod(0o000)
+        self.addCleanup(lambda: gen.exists() and gen.chmod(0o644))
+        with self.assertRaises(T.GenUnreadable):
+            T.bump_gen(T.SKILLS)
+        gen.chmod(0o644)
+        self.assertEqual(gen.read_bytes(), before, "不可读的 sidecar 被覆盖了")
 
 
 def T_load(path: Path) -> dict[str, str]:

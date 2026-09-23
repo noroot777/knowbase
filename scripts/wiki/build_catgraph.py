@@ -71,7 +71,7 @@ MIN_KEEP = 0.5     # 新图的节点数/已归类数不得低于旧图的这个�
 def publish_sig(kind: str, out_dir: Path) -> str:
     """一次发布的基线:**发布序号 + 正式缓存内容 + 正式页面字节**。
 
-    序号(`taxonomy.bump_gen`,每次整次发布成功才推进)回答「发布序列有没有往前
+    序号(`taxonomy.bump_gen`,动正式产物之前就推进)回答「发布序列有没有往前
     走」,内容签名回答「东西一不一样」——两个问题都要问:
 
     - 只比内容会被 **ABA** 骗过去:任务跑的这段时间里正式产物经历 A→B→A(回退
@@ -92,14 +92,29 @@ def publish_sig(kind: str, out_dir: Path) -> str:
 
     **要在读候选之前取**(`main()` 里是 `load_groups()` 之前):候选快照一读完,
     我们手里的输入就定死了,这之后别人发布的任何一版都比我们新。
+
+    **读不出来一律 fail-closed**,不许退化成「还没有」:序号读失败折叠成空串、
+    页面读失败折叠成「没有页面」,都等于自己把基线的一半丢掉,ABA 就又能骗过
+    CAS 了(2026-09-23 复审第 10 轮发现)。取基线是在动任何东西之前,这时候退出
+    最干净。
     """
     v = VIEWS[kind]
     out = out_dir / v["out"]
     try:
         page = blake2b(out.read_bytes(), digest_size=12).hexdigest()
-    except OSError:
+    except FileNotFoundError:
         page = "-"                                   # 还没有页面
-    return f"{T.read_gen(v['taxo'])}|{T.cache_fingerprint(v['taxo'])}:{page}"
+    except OSError as e:
+        raise SystemExit(f"[{kind}] 读不了正式页面 {out}({e}),这一轮不发布:"
+                         f"发布基线少一半就认不出别人发布过,产物原样保留")
+    try:
+        gen = T.read_gen(v["taxo"])
+    except T.GenUnreadable as e:
+        raise SystemExit(f"[{kind}] 发布序号不可用({e}),这一轮不发布:序号是"
+                         f"并发发布的唯一顺序凭据,读不到就没法确认别人有没有"
+                         f"发布过。正式页面与分类缓存原样保留,修好盘上的权限/"
+                         f"内容后重跑")
+    return f"{gen}|{T.cache_fingerprint(v['taxo'])}:{page}"
 
 
 def quality_problem(meta: dict, picked: list, out: Path, *,

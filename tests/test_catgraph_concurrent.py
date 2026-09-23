@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -508,6 +509,56 @@ class ConcurrentPublishTest(unittest.TestCase):
         self.assertEqual(cache.read_bytes(), base_cache, "缓存被换了")
         self.assertEqual((self.cache_dir / "taxonomy_skills.gen")
                          .read_text(encoding="utf-8"), gen)
+
+    @unittest.skipIf(os.geteuid() == 0, "root 不受文件权限约束")
+    def test_a_stale_run_whose_generation_read_fails_must_not_publish(self):
+        """序号**读**不出来的那个任务,同样一步都不许往下走。
+
+        复审第 10 轮:`read_gen` 原来把所有 `OSError` 都折叠成空串,于是「这台
+        机器还没发布过」和「这枚序号我读不了」变成同一个答案。一个两次取基线都
+        读失败的陈旧任务,序号那一半在两次签名里都是空,CAS 当场退化回上一轮已经
+        证明挡不住 ABA 的纯内容比较——期间产物走完 A→B→A,它照样把陈旧快照盖上去、
+        退出码 0,写侧提前推进和 fsync 全白做。
+
+        这里用真实文件权限让读失败(不打桩),中间把权限放开,让另外两个 writer
+        真的完成一次 A→B→A。
+        """
+        seed = self._late("S1", 1, wait=False, summary="BASE_A")
+        self.assertEqual(seed.wait(timeout=120), 0, seed.communicate()[1])
+        page = self.out_dir / "graph-skills.html"
+        sidecar = self.cache_dir / "taxonomy_skills.gen"
+        base_a = page.read_bytes()
+        self.addCleanup(lambda: sidecar.exists() and sidecar.chmod(0o644))
+
+        sidecar.chmod(0o000)                          # 取基线时读不了
+        stale = self._late("S1", 1, wait=True, summary="STALE_SNAPSHOT")
+        for _ in range(600):                          # 停在取锁之前,或者当场退出
+            if self.ready.exists() or stale.poll() is not None:
+                break
+            time.sleep(0.05)
+
+        sidecar.chmod(0o644)                          # 另外两个 writer 一切正常
+        b = self._late("S1", 1, wait=False, summary="NEW_B")
+        self.assertEqual(b.wait(timeout=120), 0, b.communicate()[1])
+        tok_b = sidecar.read_text(encoding="utf-8")
+        a2 = self._late("S1", 1, wait=False, summary="BASE_A")
+        self.assertEqual(a2.wait(timeout=120), 0, a2.communicate()[1])
+        self.assertEqual(page.read_bytes(), base_a,
+                         "这一轮的前提没了:第二次发布该把页面还原成逐字相同的 A")
+        self.assertNotEqual(sidecar.read_text(encoding="utf-8"), tok_b,
+                            "这一轮的前提没了:两次发布该各推进一次序号")
+
+        sidecar.chmod(0o000)                          # 锁内复查时又读不了
+        self.go2.touch()
+        out, err = stale.communicate(timeout=120)
+        self.assertNotEqual(stale.returncode, 0,
+                            "序号读不出来,这一轮却当成发布成功了")
+        self.assertIn("序号", out + err)
+        self.assertEqual(page.read_bytes(), base_a, "陈旧快照盖掉了最后完成的那一版")
+        self.assertNotIn("STALE_SNAPSHOT", page.read_text(encoding="utf-8"))
+        sidecar.chmod(0o644)
+        self.assertNotEqual(sidecar.read_text(encoding="utf-8").split("-")[0], "1",
+                            "读不出来的 sidecar 被当成不存在、从 1 重新计数了")
 
 
 def T_load(path: Path) -> dict[str, str]:
