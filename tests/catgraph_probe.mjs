@@ -9,6 +9,8 @@
 //   win|heat|repo  时间窗 30 天 / 热度 ≥2 / 只看有仓库(各能单独挡住 B)
 //   none    不筛
 //   enter   另一条路:先搜 A 回车打开它,再把搜索换成 B **不等防抖**直接回车
+//   ime     输入法组合态:组合文本设成 B,用带 isComposing 的 Enter 确认候选
+//           (那一下不该打开详情),compositionend 之后的普通回车才算数
 // 于是 "q+win" 就是「目标仍命中搜索词、只被时间窗挡着」那种组合。
 // B 是 A 的关联项,点它就是从筛选结果里跳到一个被挡住的节点。
 // 几个 case 共用一次浏览器启动,每个之间重新加载页面。
@@ -86,14 +88,34 @@ async function probe(filter) {
   const type = t => { q.value = t; q.dispatchEvent(new Event("input", {bubbles: true})); };
   const enter = () => q.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", bubbles: true}));
   let hiddenFirst = false, hasButton = false, shownFirst = "";
-  if (on.has("enter")) {
+  let midPanelShown = false, eventWasComposing = false;
+  const shownNow = () => document.getElementById("shown").textContent;
+  const panelUp = () => document.getElementById("panel").classList.contains("show");
+  if (on.has("ime")) {
+    // 输入法组合态:compositionstart → 组合文本 → 用 Enter 确认候选
+    q.focus();
+    q.dispatchEvent(new CompositionEvent("compositionstart", {bubbles: true}));
+    q.value = ${B};
+    q.dispatchEvent(new InputEvent("input", {bubbles: true, data: ${B},
+      inputType: "insertCompositionText", isComposing: true}));
+    const ev = new KeyboardEvent("keydown",
+      {key: "Enter", bubbles: true, isComposing: true});
+    eventWasComposing = ev.isComposing;            // 浏览器确认这一下确实在组合中
+    q.dispatchEvent(ev);
+    await ${sleep(400)};                           // 防抖也过去了
+    midPanelShown = panelUp();                     // 这时候面板不该开
+    q.dispatchEvent(new CompositionEvent("compositionend", {bubbles: true, data: ${B}}));
+    q.dispatchEvent(new InputEvent("input", {bubbles: true, data: ${B},
+      inputType: "insertFromComposition"}));
+    enter();                                       // 组合结束后的普通回车才算数
+  } else if (on.has("enter")) {
     type(${A});                                   // 先搜 A,等防抖过去再回车
     await ${sleep(300)};
     enter();
     await ${sleep(500)};
-    shownFirst = document.getElementById("shown").textContent;
+    shownFirst = shownNow();
     hiddenFirst = !hit(${B});                     // A 的搜索词把 B 挡住了
-    hasButton = document.getElementById("panel").classList.contains("show");
+    hasButton = panelUp();
     type(${B});                                   // 换成 B,**不等防抖**直接回车
     enter();
   } else {
@@ -103,7 +125,7 @@ async function probe(filter) {
     if (on.has("repo")) document.getElementById("repoBtn").click();
     await ${sleep(300)};
     hiddenFirst = !hit(${B});                     // B 确实被挡住了(前提)
-    shownFirst = document.getElementById("shown").textContent;
+    shownFirst = shownNow();
     hit(${A}).click();                            // 打开 A 的详情
     await ${sleep(500)};
     const btn = [...document.querySelectorAll("#panelBody button[data-go]")]
@@ -114,9 +136,9 @@ async function probe(filter) {
   await ${sleep(700)};
   const vis = [...document.querySelectorAll(".pill")].filter(p => !p.classList.contains("hide"));
   return {
-    hiddenFirst, hasButton, shownFirst,
-    shown: document.getElementById("shown").textContent,
-    panelShown: document.getElementById("panel").classList.contains("show"),
+    hiddenFirst, hasButton, shownFirst, midPanelShown, eventWasComposing,
+    shown: shownNow(),
+    panelShown: panelUp(),
     panel: (document.querySelector("#panelBody h3") || {}).textContent || "",
     visibleSelected: vis.filter(p => p.classList.contains("sel")).length,
     visiblePills: vis.length,

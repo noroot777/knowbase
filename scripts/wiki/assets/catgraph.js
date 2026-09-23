@@ -405,6 +405,11 @@ qEl.addEventListener("input", () => {
   qt = setTimeout(() => { F.q = qEl.value.trim().toLowerCase(); apply(); }, 120);
 });
 qEl.addEventListener("keydown", e => {
+  // 输入法在**组合阶段**也用 Enter 确认候选(中日韩都是):那一下是「就选这几个
+  // 字」,不是「搜这个词」,浏览器给的事件带 `isComposing=true`。不排掉的话,选词
+  // 时按的第一个回车就把详情面板打开了,词还没敲完(2026-09-23 复审第 4 轮发现)。
+  // `keyCode === 229` 是老浏览器表示「这一下归输入法」的写法,一并认。
+  if (e.isComposing || e.keyCode === 229) return;
   if (e.key !== "Enter") return;
   const v = qEl.value.trim().toLowerCase();
   // 先把这次输入同步落定:`F.q` 是防抖 120ms 之后才更新的,而下面的 `match()`

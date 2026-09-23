@@ -89,7 +89,7 @@ class RelatedJumpTest(unittest.TestCase):
             T.CACHE_DIR = old_cache
         cls.page = out_dir / B.VIEWS["projects"]["out"]
         cls.probed = cls._probe(["search", "win", "heat", "repo", "none",
-                                 "q+win", "q+heat", "q+repo", "enter"])
+                                 "q+win", "q+heat", "q+repo", "enter", "ime"])
 
     @classmethod
     def tearDownClass(cls):
@@ -174,6 +174,20 @@ class RelatedJumpTest(unittest.TestCase):
         self.assertEqual(s["query"], "BBB工具")
         self.assertTrue(s["panelShown"], f"回车没打开新结果({s})")
         self.assertEqual(s["panel"], "BBB工具", f"回车按旧搜索词找的({s})")
+        self.assertEqual(s["visibleSelected"], 1)
+
+    def test_an_ime_enter_that_only_confirms_a_candidate_opens_nothing(self):
+        """输入法用 Enter 确认候选的那一下,不算「搜这个词」。
+
+        复审第 4 轮:中日韩输入法在组合阶段就用 Enter 选词,浏览器给页面的事件
+        带 `isComposing=true`。不排掉的话,选第一个词时按的回车就把详情面板打开
+        了——词还没敲完。组合结束(compositionend)之后的普通回车才该生效。
+        """
+        s = self.probed["ime"]
+        self.assertTrue(s["eventWasComposing"], "这一轮的前提没了:事件不在组合态")
+        self.assertFalse(s["midPanelShown"], f"确认候选的回车把详情打开了({s})")
+        self.assertTrue(s["panelShown"], f"组合结束后的回车反倒不管用了({s})")
+        self.assertEqual(s["panel"], "BBB工具")
         self.assertEqual(s["visibleSelected"], 1)
 
 

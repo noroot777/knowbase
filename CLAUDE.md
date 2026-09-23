@@ -616,6 +616,13 @@
   最后停在「列表是新词、面板关着、一个选中的都没有」(2026-09-23 复审第 3 轮
   发现,实测搜 Claude 回车再换 Blender 立刻回车:`shown=4 panelShown=false
   panel="Claude Code" visibleSelected=0`)。
+- **搜索框的回车还要排掉输入法组合态**(`e.isComposing || e.keyCode === 229`)。
+  中日韩输入法在组合阶段就用 Enter 确认候选,浏览器给页面的事件带
+  `isComposing=true`——不排掉的话,中文搜索选第一个词按的那个回车就把详情面板
+  打开了,词还没敲完(2026-09-23 复审第 4 轮发现,实测组合态输入「教学管理平台」
+  确认候选即打开「教学管理平台(基于Spring Boot)」)。`compositionend` 之后的
+  普通回车才算数。回归用真实 `CompositionEvent` / `InputEvent` / 带 `isComposing`
+  的 `KeyboardEvent` 走一遍(无头浏览器里没有系统候选窗,但页面拿到的是同一批事件)。
 - **「近 30/90 天」的截止日全程按 UTC 算**(`catgraph.js` 的 `cutoff`)。
   `meta.built` 是后端 `date.today()` 落下来的裸日历日,页脚那句「近 30 天有
   提及 N」也是后端按 `date.today()-30` 数的;前端要是按本地时区解析它的午夜再
