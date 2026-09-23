@@ -609,6 +609,13 @@
   Chrome(CDP 直连 playwright 缓存里的 chrome-headless-shell,不装 playwright、
   不连网),四种筛选各单独跳一次,外加三种「搜索仍命中 + 另一项挡住」的组合,
   共用一次浏览器启动。
+- **搜索框回车要先把这次输入同步落定再找**(`F.q !== v` 就 `clearTimeout(qt)` +
+  赋值 + `apply()`)。`F.q` 是防抖 120ms 之后才更新的,而回车分支里的 `match()`
+  读的就是它:已经搜着一个词、换成另一个再立刻回车,目标会被**上一个**搜索条件
+  排除,回车什么也没打开;120ms 后防抖把列表换成新词,还顺手把旧选中项 reset 掉,
+  最后停在「列表是新词、面板关着、一个选中的都没有」(2026-09-23 复审第 3 轮
+  发现,实测搜 Claude 回车再换 Blender 立刻回车:`shown=4 panelShown=false
+  panel="Claude Code" visibleSelected=0`)。
 - **「近 30/90 天」的截止日全程按 UTC 算**(`catgraph.js` 的 `cutoff`)。
   `meta.built` 是后端 `date.today()` 落下来的裸日历日,页脚那句「近 30 天有
   提及 N」也是后端按 `date.today()-30` 数的;前端要是按本地时区解析它的午夜再

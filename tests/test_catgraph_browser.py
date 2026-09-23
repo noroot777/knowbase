@@ -89,7 +89,7 @@ class RelatedJumpTest(unittest.TestCase):
             T.CACHE_DIR = old_cache
         cls.page = out_dir / B.VIEWS["projects"]["out"]
         cls.probed = cls._probe(["search", "win", "heat", "repo", "none",
-                                 "q+win", "q+heat", "q+repo"])
+                                 "q+win", "q+heat", "q+repo", "enter"])
 
     @classmethod
     def tearDownClass(cls):
@@ -159,6 +159,22 @@ class RelatedJumpTest(unittest.TestCase):
         self.assertEqual(s["panel"], "BBB工具")
         self.assertEqual(s["visibleSelected"], 1)
         self.assertGreater(s["edgePaths"], 0)
+
+    def test_replacing_the_query_and_hitting_enter_right_away_opens_the_new_hit(self):
+        """换个搜索词立刻回车:回车得按**刚敲的那个词**找,不是上一个。
+
+        复审第 3 轮:`F.q` 是防抖 120ms 之后才更新的,而回车分支里的 `match()`
+        读的就是它。已经搜着一个词、换成另一个再立刻回车时,目标被上一个搜索
+        条件排除,回车什么也没打开;120ms 后防抖把列表换成新词,还顺手把旧选中
+        项 reset 掉——最后停在「列表是新词、面板关着、一个选中的都没有」。
+        """
+        s = self.probed["enter"]
+        self.assertTrue(s["hasButton"], "这一轮的前提没了:第一次回车没打开 A")
+        self.assertTrue(s["hiddenFirst"], "这一轮的前提没了:A 的搜索词没挡住 B")
+        self.assertEqual(s["query"], "BBB工具")
+        self.assertTrue(s["panelShown"], f"回车没打开新结果({s})")
+        self.assertEqual(s["panel"], "BBB工具", f"回车按旧搜索词找的({s})")
+        self.assertEqual(s["visibleSelected"], 1)
 
 
 if __name__ == "__main__":

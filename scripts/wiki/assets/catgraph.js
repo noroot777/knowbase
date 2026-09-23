@@ -407,6 +407,11 @@ qEl.addEventListener("input", () => {
 qEl.addEventListener("keydown", e => {
   if (e.key !== "Enter") return;
   const v = qEl.value.trim().toLowerCase();
+  // 先把这次输入同步落定:`F.q` 是防抖 120ms 之后才更新的,而下面的 `match()`
+  // 读的就是它——已经搜着一个词、换成另一个再立刻回车的话,目标会被**上一个**
+  // 搜索条件排除,回车什么也没打开;120ms 后防抖才把列表换成新词,还顺手把旧
+  // 选中项 reset 掉,于是页面上一个选中的都没有(2026-09-23 复审第 3 轮发现)。
+  if (F.q !== v) { clearTimeout(qt); F.q = v; apply(); }
   if (!v) return;
   for (let i = 0; i < N.length; i++) {
     if (match(i) && N[i].l.toLowerCase().includes(v)) { select(i); return; }

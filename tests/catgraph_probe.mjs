@@ -8,6 +8,7 @@
 //   q       搜公共词(A、B 都命中 → 搜索**不**挡 B,用来搭组合)
 //   win|heat|repo  时间窗 30 天 / 热度 ≥2 / 只看有仓库(各能单独挡住 B)
 //   none    不筛
+//   enter   另一条路:先搜 A 回车打开它,再把搜索换成 B **不等防抖**直接回车
 // 于是 "q+win" 就是「目标仍命中搜索词、只被时间窗挡着」那种组合。
 // B 是 A 的关联项,点它就是从筛选结果里跳到一个被挡住的节点。
 // 几个 case 共用一次浏览器启动,每个之间重新加载页面。
@@ -81,28 +82,41 @@ async function probe(filter) {
   const seg = k => document.querySelector('.seg[data-k="' + k + '"]');
   const hit = ${pick};
   const on = new Set(${JSON.stringify(filter)}.split("+"));
-  if (on.has("search") || on.has("q")) {
-    const q = document.getElementById("q");
-    q.value = on.has("search") ? ${A} : ${Q};
-    q.dispatchEvent(new Event("input", {bubbles: true}));
+  const q = document.getElementById("q");
+  const type = t => { q.value = t; q.dispatchEvent(new Event("input", {bubbles: true})); };
+  const enter = () => q.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", bubbles: true}));
+  let hiddenFirst = false, hasButton = false, shownFirst = "";
+  if (on.has("enter")) {
+    type(${A});                                   // 先搜 A,等防抖过去再回车
+    await ${sleep(300)};
+    enter();
+    await ${sleep(500)};
+    shownFirst = document.getElementById("shown").textContent;
+    hiddenFirst = !hit(${B});                     // A 的搜索词把 B 挡住了
+    hasButton = document.getElementById("panel").classList.contains("show");
+    type(${B});                                   // 换成 B,**不等防抖**直接回车
+    enter();
+  } else {
+    if (on.has("search") || on.has("q")) type(on.has("search") ? ${A} : ${Q});
+    if (on.has("win")) seg("win").querySelector('[data-v="30"]').click();
+    if (on.has("heat")) seg("heat").querySelector('[data-v="2"]').click();
+    if (on.has("repo")) document.getElementById("repoBtn").click();
+    await ${sleep(300)};
+    hiddenFirst = !hit(${B});                     // B 确实被挡住了(前提)
+    shownFirst = document.getElementById("shown").textContent;
+    hit(${A}).click();                            // 打开 A 的详情
+    await ${sleep(500)};
+    const btn = [...document.querySelectorAll("#panelBody button[data-go]")]
+      .find(x => x.textContent.trim().startsWith(${B}));
+    hasButton = !!btn;
+    if (btn) btn.click();
   }
-  if (on.has("win")) seg("win").querySelector('[data-v="30"]').click();
-  if (on.has("heat")) seg("heat").querySelector('[data-v="2"]').click();
-  if (on.has("repo")) document.getElementById("repoBtn").click();
-  await ${sleep(300)};
-  const hiddenFirst = !hit(${B});                 // B 确实被挡住了(前提)
-  const shownFirst = document.getElementById("shown").textContent;
-  hit(${A}).click();                              // 打开 A 的详情
-  await ${sleep(500)};
-  const btn = [...document.querySelectorAll("#panelBody button[data-go]")]
-    .find(x => x.textContent.trim().startsWith(${B}));
-  const hasButton = !!btn;
-  if (btn) btn.click();
   await ${sleep(700)};
   const vis = [...document.querySelectorAll(".pill")].filter(p => !p.classList.contains("hide"));
   return {
     hiddenFirst, hasButton, shownFirst,
     shown: document.getElementById("shown").textContent,
+    panelShown: document.getElementById("panel").classList.contains("show"),
     panel: (document.querySelector("#panelBody h3") || {}).textContent || "",
     visibleSelected: vis.filter(p => p.classList.contains("sel")).length,
     visiblePills: vis.length,
