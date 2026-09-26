@@ -1,6 +1,6 @@
 // Run against a local preview with Playwright CLI, always in a headless session:
-// playwright-cli -s=workspace open http://127.0.0.1:18877
-// playwright-cli -s=workspace run-code --filename tests/workspace_probe.js
+// npx --yes --package @playwright/cli playwright-cli -s=workspace open http://127.0.0.1:18877
+// npx --yes --package @playwright/cli playwright-cli -s=workspace run-code --filename tests/workspace_probe.js
 // API and document routes are fully isolated; no production writes or LLM calls.
 async page => {
   const checks = [], errors = [], writes = [];
@@ -225,6 +225,7 @@ async page => {
     check('无同步或设置写入', writes.every(p=>['/api/ask/stream','/api/favorites/toggle'].includes(p)));
     return {passed:checks.length,checks,errors,isolatedWrites:writes};
   } finally {
+    await page.evaluate(()=>invalidatePipeStatus());
     page.off('pageerror',onError);
     await page.unroute('**/api/**',handler);
     await page.unroute('**/doc/**');

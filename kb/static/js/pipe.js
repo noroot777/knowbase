@@ -38,9 +38,8 @@ function invalidatePipeStatus() {
 }
 function queuePipeRefresh() {
   clearTimeout(pipeTimer);
-  if (pipeSnapshot?.running || $('pipepanel').style.display !== 'none') {
-    pipeTimer = setTimeout(() => { pipeTimer = null; refreshPipe(); }, document.hidden ? 8000 : pipeSnapshot?.running ? 1500 : 6000);
-  }
+  // A lightweight status read also discovers new background runs and retries an initial failure.
+  pipeTimer = setTimeout(() => { pipeTimer = null; refreshPipe(); }, document.hidden ? 8000 : pipeSnapshot?.running ? 1500 : 6000);
 }
 async function refreshPipe(withPending = false) {
   if (withPending) { refreshPipeSource(); refreshPipePending(); }
@@ -144,5 +143,5 @@ async function stopPipe() {
   finally { await refreshPipe(); pipeAction = ''; renderPipeButtons(); }
 }
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && (pipeSnapshot?.running || $('pipepanel').style.display !== 'none')) refreshPipe();
+  if (!document.hidden) refreshPipe();
 });

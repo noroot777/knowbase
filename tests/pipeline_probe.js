@@ -1,4 +1,5 @@
 // Run through Playwright CLI against tests/serve_workspace.py (headless).
+// npx --yes --package @playwright/cli playwright-cli -s=sync-check run-code --filename tests/pipeline_probe.js
 // Every API route is isolated. No collector, schedule or model is actually invoked.
 async page => {
   const checks = [], errors = [], writes = [];
@@ -11,21 +12,24 @@ async page => {
   let state = {running:false,stages:{},log:[],stop_supported:true};
   let holdSource = true, releaseSource = null, holdStatus = false, releaseStatus = null;
   let statusCount = 0, statusFail = false, holdStop = false, releaseStop = null;
+  let sourceCount = 0, pendingCount = 0;
   let holdB = false, releaseB = null, accountFail = false, startFail = false;
   let holdStart = false, releaseStart = null, scheduleFail = false;
   const accounts = {a:['公众号甲','公众号乙','公众号丙 "<测试>'],b:['另一通道甲','另一通道乙']};
   const reply = (route,data,status=200) => route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)}).catch(()=>{});
   const copy = value => JSON.parse(JSON.stringify(value));
+  const settlePaint = () => page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
   const handler = async route => {
     const request = route.request(), url = request.url();
     const path = url.slice(origin.length).split('?')[0];
     if (request.method() !== 'GET') writes.push({path,body:request.postDataJSON()});
     if (path === '/api/pipeline/status') {
       if (!url.includes('source=false')) {
+        sourceCount++;
         if (holdSource) { releaseSource=()=>reply(route,{source:{online:true,label:'测试来源',message:'已连接'}}); return; }
         return reply(route,{source:{online:true,label:'测试来源',message:'已连接'}});
       }
-      if (url.includes('pending=true')) return reply(route,{...copy(state),pending:{extract:0}});
+      if (url.includes('pending=true')) { pendingCount++; return reply(route,{...copy(state),pending:{extract:0}}); }
       statusCount++;
       if (holdStatus) { releaseStatus=()=>reply(route,copy(state)); return; }
       return reply(route,statusFail?{detail:'测试网络中断'}:copy(state),statusFail?503:200);
@@ -79,6 +83,31 @@ async page => {
     await page.setViewportSize({width:1440,height:1100});
     await page.emulateMedia({reducedMotion:'reduce'});
     await page.evaluate(()=>localStorage.removeItem('kb-sync-channel'));
+    state={running:true,stop_supported:true,stages:emptyStages(),log:[]};
+    state.stages.crawl={status:'running',detail:'后台定时同步'};
+    await page.goto(origin+'/?pipeline-test='+Date.now()+'#gallery');
+    await page.locator('#nav-sync-dot').waitFor({state:'visible',timeout:10000});
+    check('默认图鉴冷启动即可发现后台同步',await page.locator('#gallerypanel').isVisible() && !await page.locator('#pipepanel').isVisible());
+    await page.reload();
+    await page.locator('#nav-sync-dot').waitFor({state:'visible',timeout:10000});
+    check('刷新后不进入同步页仍显示运行提示',await page.locator('#tab-gallery').getAttribute('aria-current')==='page');
+    check('冷启动只读取轻量状态不触发采集器与积压扫描',sourceCount===0 && pendingCount===0);
+    await settlePaint();
+    await page.screenshot({path:'output/playwright/review-background-running.png'});
+    statusFail=true;await page.reload();
+    await page.waitForFunction(()=>!pipeRequest && !document.getElementById('pipe-connection').hidden);
+    statusFail=false;
+    await page.locator('#nav-sync-dot').waitFor({state:'visible',timeout:12000});
+    check('首次状态读取失败会在图鉴自动恢复',await page.locator('#tab-gallery').getAttribute('aria-current')==='page');
+    holdSource=false;finish();
+    await page.locator('#nav-sync-dot').waitFor({state:'hidden',timeout:10000});
+    check('后台运行结束自动清除图鉴侧栏提示',await page.locator('#gallerypanel').isVisible());
+    state={running:true,stop_supported:true,stages:emptyStages(),log:[]};
+    state.stages.crawl={status:'running',detail:'另一个标签页启动的同步'};
+    await page.locator('#nav-sync-dot').waitFor({state:'visible',timeout:12000});
+    check('留在图鉴也能发现后来启动的后台同步',await page.locator('#gallerypanel').isVisible());
+    state={running:false,stages:{},log:[],stop_supported:true};
+    holdSource=true;releaseSource=null;
     await page.goto(origin+'/?pipeline-test='+Date.now()+'#pipe');
     await page.waitForFunction(()=>!document.getElementById('pipe-run').disabled);
     check('慢采集器探测不阻塞同步状态',holdSource && !!releaseSource && await page.locator('.pipe-stage').count()===6);
@@ -122,9 +151,23 @@ async page => {
     check('停止请求防重复提交',countWrites('/api/pipeline/stop')===1);
     await releaseStop();await page.waitForFunction(()=>document.getElementById('pipe-state-title').textContent.includes('收尾'));
     check('停止不伪装成瞬间完成',await page.locator('#pipe-run').isDisabled());
-    finish();state.stopped=true;state.stages.wiki={status:'stopped',detail:'已停止，未继续执行'};
+    finish();state.stopped=true;
+    for (const key of keys.slice(1)) state.stages[key]={status:'stopped',detail:'已停止，未继续执行'};
     await refresh();
     check('停止后说明结果保留且允许新建',(await page.locator('#pipe-state-hint').textContent()).includes('已保留') && !await page.locator('#pipe-run').isDisabled());
+    await settlePaint();
+    check('第一步后停止保留1/6完成且进度不跳满',await page.locator('#pipe-progress-label').textContent()==='1 / 6 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>Math.abs(el.getBoundingClientRect().width/el.parentElement.getBoundingClientRect().width-.17)<.005) && await page.locator('.pipe-stage[data-status=stopped]').count()===5);
+    await page.screenshot({path:'output/playwright/review-stopped-progress.png',fullPage:true});
+    state={running:false,stop_supported:true,stages:{},log:[],last_run:copy(state)};
+    await refresh();
+    check('持久化的停止记录也保持实际完成进度',await page.locator('#pipe-progress-label').textContent()==='1 / 6 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='17%'));
+    state={running:true,stop_supported:true,stages:Object.fromEntries(keys.map(k=>[k,{status:'skipped',detail:'本次不执行'}])),log:[]};
+    state.stages.extract={status:'running',detail:'仅执行提取'};await refresh();
+    check('跳过五步仅执行一步时不会预先填满进度',await page.locator('#pipe-progress-label').textContent()==='0 / 6 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='0%'));
+    state.running=false;state.finished_at='2026-09-26 12:06:00';state.stages.extract={status:'ok',detail:'提取完成'};await refresh();
+    check('部分步骤跳过时进度与完成计数一致',await page.locator('#pipe-progress-label').textContent()==='1 / 6 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='17%'));
+    finish();await refresh();
+    check('六步全部成功才显示完整进度',await page.locator('#pipe-progress-label').textContent()==='6 / 6 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='100%'));
     await page.locator('#pipe-run').click();await page.locator('input[data-acct]').first().waitFor();
     check('公众号是可键盘操作的真实复选框',await page.getByRole('checkbox',{name:'公众号丙 "<测试>',exact:true}).isChecked());
     await page.getByRole('checkbox',{name:'公众号甲',exact:true}).uncheck();
@@ -162,6 +205,7 @@ async page => {
     finish();state.stages.extract={status:'error',detail:'失败 1',failures:[{title:'测试文档',reason:'模型暂不可用'}]};await refresh();
     await page.locator('#tab-pipe').click();await page.waitForFunction(()=>!document.getElementById('pipe-retry').hidden);
     check('部分失败不显示全成功并提供重试',(await page.locator('#pipe-state-title').textContent()).includes('需处理'));
+    check('失败步骤不计为成功进度',await page.locator('#pipe-progress-label').textContent()==='5 / 6 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='83%'));
     await page.locator('#pipe-retry').click();await page.waitForFunction(()=>!pipeAction && pipeSnapshot.running);
     check('重试有运行反馈且不重复启动',countWrites('/api/pipeline/retry-failed')===1 && await page.locator('#pipe-run').isDisabled());
     finish();await refresh();

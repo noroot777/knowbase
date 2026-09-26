@@ -186,4 +186,5 @@ function initWorkspace() {
   try { setGalleryView(localStorage.getItem('kb-gallery-view') === 'list' ? 'list' : 'grid'); } catch {}
   restoreWorkspaceLocation();
   syncOverlays();
+  refreshPipe(); // Discover work started by the scheduler or another tab, even on the gallery.
 }

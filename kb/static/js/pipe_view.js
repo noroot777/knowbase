@@ -45,7 +45,6 @@ function renderPipeState(s) {
   }
   const values = Object.values(stages), failed = values.filter(pipeHasFailure).length;
   const completed = values.filter(st => st.status === 'ok' && !pipeHasFailure(st)).length;
-  const settled = values.filter(st => ['ok','error','skipped','stopped'].includes(st.status)).length;
   const active = Object.keys(STAGE_META).filter(k => stages[k]?.status === 'running').map(k => STAGE_META[k].name);
   const skipped = values.filter(st => st.status === 'skipped').length;
   let title = '准备好收录新内容';
@@ -60,7 +59,8 @@ function renderPipeState(s) {
   $('pipe-progress-label').textContent = `${completed} / 6 完成`;
   const duration = pipeDuration(result.started_at, s.running ? '' : result.finished_at);
   $('pipe-elapsed').textContent = duration ? `${s.running ? '已运行' : '耗时'} ${duration}` : '';
-  $('pipe-progress-fill').style.width = Math.round(settled / 6 * 100) + '%';
+  // Use the same successful-step count as the label; unexecuted work never fills the bar.
+  $('pipe-progress-fill').style.width = Math.round(completed / 6 * 100) + '%';
   $('pipe-state-hint').textContent = s.stop_requested && s.running ? '正在等待执行中的任务结束，不会启动后续步骤；不会强行中断写入。' : s.running ? '正在后台同步，切换工作区或关闭配置窗口都不会中断。' : result.stopped ? '已完成结果已保留。可重新配置同步，已有内容会按现有规则去重。' : failed ? '展开问题明细查看原因，修复后可重试失败项。' : skipped ? `${skipped} 个步骤被跳过，具体原因见下方。` : '同步在后台执行，切换页面不会中断。';
   $('pipe-retry').hidden = s.running || !(failed || pipePending.extract > 0);
   renderPipeLog((s.log?.length ? s.log : result.log) || [], result.finished_at);

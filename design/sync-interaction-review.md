@@ -2,14 +2,25 @@
 
 2026-09-26 · ash `ZHHoqY-1y74k` · 根据侧栏标注图及同步操作反馈修订。
 
-## 本轮发现与处理
+## 第 1 轮审查修复（2026-09-26）
+
+根据审查报告的两条阻塞意见修复，保留已确认的 72px 侧栏、字号和选中样式。
+
+1. **进度条与完成计数统一**：`pipe_view.js` 使用同一个成功步骤计数计算进度文字和填充宽度。`stopped`、`skipped`、`error` 均不计为成功完成；第一步后停止显示 `1 / 6 完成` 和约 17% 填充，五个未执行步骤不会把进度推到 100%。从 `last_run` 恢复停止记录也使用同一规则。
+2. **任何工作区都能发现后台运行**：`initWorkspace()` 初始化时读取一次 `/api/pipeline/status?source=false`。复用单请求轮询，空闲每 6 秒、运行时约 1.5 秒、浏览器页面隐藏时 8 秒；返回可见时立即刷新。这样既能在图鉴冷启动时发现任务，也能发现后来启动的定时或其他标签页任务。首次读取失败同样自动重试，任务完成后自动收起运行提示。
+
+启动和定时轮询只读取轻量状态，不调用采集器探测或积压扫描；既有任务结束时的一次结果、来源和积压刷新继续保留。没有修改后端停止语义、任务编排或同步配置流程。
+
+本轮新增 12 项回归：冷启动、刷新、轻量请求隔离、初次失败恢复、自动清除提示、发现后来启动的任务，以及停止、持久化停止、执行部分步骤、跳过、全部成功和失败的进度一致性。停止用例同时检查实际渲染条宽，避免仅断言样式字符串。
+
+## 已实现的交互修订
 
 | 问题 | 修订后的行为 |
 | --- | --- |
 | 状态轮询同时探测采集器，慢探测会拖住进度 | 进度单独请求 `source=false`；来源连接检查、待处理统计分别读取，慢请求不会覆盖进度 |
 | `setInterval` 可能积压多个慢请求，旧响应覆盖新状态 | 单个状态请求完成后才安排下一轮；写操作前使旧状态请求失效 |
 | 断线时静默停在旧状态，没有恢复入口 | 保留最后结果并显示重连提示；自动重连、可手动重连；未确认状态时禁用启动和停止 |
-| 空闲后停止监测，看不到随后启动的定时任务 | 同步页空闲时每 6 秒检查，运行时约 1.5 秒；隐藏页面降为 8 秒 |
+| 空闲后停止监测，看不到随后启动的定时任务 | 所有工作区初始化时检查，并在空闲时每 6 秒检查，运行时约 1.5 秒；隐藏页面降为 8 秒 |
 | 并行抓取和存量提取只看到一个“当前阶段” | 汇总所有正在执行的阶段；同时展示通道、范围、耗时和成功步骤数 |
 | 失败、跳过和完成不容易区分 | 每个步骤有明确文字状态；部分失败不报全成功，跳过原因完整显示 |
 | 每次刷新重建卡片，展开的失败列表和焦点丢失 | 阶段节点保持稳定，只更新内容；保留展开状态、焦点和问题列表滚动位置 |
@@ -36,25 +47,36 @@
 
 ## 验证与边界
 
-- `tests/workspace_probe.js`：47 项工作区回归检查，覆盖窄侧栏、移动导航、图鉴、搜索、问答、收藏与弹层。
-- `tests/pipeline_probe.js`：46 项同步专用隔离回归，包括慢探测、断线重连、并行执行、稳定明细、日志阅读、停止、切换通道竞态、草稿、重复提交、重试、定时保存和手机长表单。
-- `tests/test_pipeline_stop.py` 与 `tests/test_sync_channels.py`：27 项 Python 测试通过。使用临时状态文件、替代阶段函数和模拟请求；不运行真实采集或模型。修复两项旧通道测试对本地提取积压的依赖，让重试判断测试与真实数据隔离。
-- 真实数据只读预览检查布局；启动、停止、重试和定时写入均通过隔离响应验证。未对运行中的知识库发送写操作，未重启或合并生产服务。
+- `tests/workspace_probe.js`：49 项工作区回归检查（本轮通过），覆盖窄侧栏、移动导航、图鉴、搜索、问答、收藏与弹层。
+- `tests/pipeline_probe.js`：58 项同步专用隔离回归（本轮通过），包括慢探测、断线重连、并行执行、稳定明细、日志阅读、停止、切换通道竞态、草稿、重复提交、重试、定时保存和手机长表单。
+- `tests/test_pipeline_stop.py` 与 `tests/test_sync_channels.py`：27 项 Python 测试在上一轮实现与本次审查中通过；本轮仅修改前端，未重复执行。使用临时状态文件、替代阶段函数和模拟请求；不运行真实采集或模型。修复两项旧通道测试对本地提取积压的依赖，让重试判断测试与真实数据隔离。
+- 初版布局使用真实数据只读预览。本轮使用无上游的预览服务，浏览器全部 API 路由隔离，不接触生产后端；启动、停止、重试、问答、收藏和定时写入均使用模拟响应。
 - 停止功能的真实采集器收尾耗时取决于当前阶段；本次验证的是边界控制、接口和界面反馈，未实际中断生产任务。
 
-浏览器降级说明：本轮优先检查 Chrome 扩展，返回 `unsupported Codex auth method: apikey`，无法建立具名后台会话。之后使用 Playwright CLI 的独立无头浏览器、临时 profile 和具名会话 `kb-sync-polish`。未接管普通 Chrome 标签、未连接用户调试端口、未激活 Chrome 或使用有头模式。
+浏览器降级说明：本轮优先检查 Chrome 扩展，返回 `unsupported Codex auth method: apikey`，无法建立具名后台会话。之后使用 Playwright CLI 的独立无头浏览器、临时 profile 和具名会话 `kb-review-fix`。未接管普通 Chrome 标签、未连接用户调试端口、未激活 Chrome 或使用有头模式。
 
 ## 复现
 
 ```bash
-python3 tests/serve_workspace.py --port 18879 --upstream http://127.0.0.1:8787
-playwright-cli -s=sync-check open http://127.0.0.1:18879
-playwright-cli -s=sync-check run-code --filename tests/workspace_probe.js
-playwright-cli -s=sync-check run-code --filename tests/pipeline_probe.js
-playwright-cli -s=sync-check close
-python -m unittest tests.test_pipeline_stop tests.test_sync_channels
+# 终端一：只提供本分支静态文件，不连接生产后端
+python3 tests/serve_workspace.py --port 18879
+
+# 终端二：需 Node.js/npm 及可用的 Chrome/Chromium，无需全局安装 playwright-cli
+mkdir -p output/playwright
+npx --yes --package @playwright/cli playwright-cli -s=sync-check open http://127.0.0.1:18879
+npx --yes --package @playwright/cli playwright-cli -s=sync-check run-code --filename tests/workspace_probe.js
+npx --yes --package @playwright/cli playwright-cli -s=sync-check run-code --filename tests/pipeline_probe.js
+npx --yes --package @playwright/cli playwright-cli -s=sync-check close
+# 最后在终端一 Ctrl+C 关闭预览服务
 ```
 
-使用默认 headless 模式。需要安装项目依赖；纯隔离浏览器测试可省略预览服务的 `--upstream`。预览服务只转发 GET，不启动调度线程。
+使用默认 headless 模式。本轮实际通过以上 `npx` 方式运行，两份浏览器探针需单独执行，不属于 Python `unittest discover`。若需额外执行后端测试，在已安装项目依赖的 Python 环境运行 `python -m unittest tests.test_pipeline_stop tests.test_sync_channels`。预览服务不启动调度线程。
 
 截图和机器可读结果保存在 `output/playwright/`，不加入 Git：`compact-gallery-desktop.png`、`compact-gallery-mobile.png`、`compact-gallery-tablet.png`、`compact-nav-mobile.png`、`sync-real-desktop.png`、`sync-running-desktop.png`（模拟运行状态）、`sync-mobile.png`、`sync-setup-mobile.png`、`compact-workspace-checks.json`、`sync-interaction-checks.json`、`compact-visual-checks.json`。
+
+本轮审查修复证据同样保留在 `output/playwright/`（不加入 Git）：
+
+- `review-background-running.png`：刷新后停留图鉴，侧栏显示正在运行。
+- `review-stopped-progress.png`：只完成第一步后停止，进度约 17%，其余五步未执行。
+- `review-pipeline-checks.json`：58 项同步回归，含新增的 12 项。
+- `review-workspace-checks.json`：49 项工作区回归。
