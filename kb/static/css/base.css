@@ -1,17 +1,17 @@
 /* Shared tokens, controls, feedback, search results and reader. */
 
 :root {
-  --paper: #F5F6FA;          /* 雾灰页面背景 */
+  --paper: #F1F3F7;          /* 雾灰页面背景 */
   --card: #FFFFFF;
-  --ink: #25293D;            /* 墨蓝黑(正文/标题) */
-  --muted: #70758A;
-  --line: #E4E6EF;
-  --brand: #5153C9;          /* 靛蓝重点色 */
-  --brand-soft: #EBEBFC;
+  --ink: #172033;            /* 墨蓝黑(正文/标题) */
+  --muted: #515D73;
+  --line: #CFD5E0;
+  --brand: #3F43B9;          /* 靛蓝重点色 */
+  --brand-soft: #E9ECFC;
   --tag-bg: #F0F1F7;
   --ok: #2E7D57;
   --danger: #C33;            /* 失败/危险动作(原先各处散着写死 #c33) */
-  --brand-deep: #3D3F9E;     /* brand 加深:soft 底上的正文字用 */
+  --brand-deep: #2F3392;     /* brand 加深:soft 底上的正文字用 */
 
   /* 旧 token 别名:搬迁面板的 CSS 与内联样式免改 */
   --bg: var(--paper);
@@ -19,12 +19,12 @@
   --accent-soft: var(--brand-soft);
 
   /* 来源字形与旧面板兼容色；图鉴类型色在 gallery.css 统一定义。 */
-  --kind-project: #5153C9;
+  --kind-project: #3F43B9;
   --kind-product: #3D5A80;   /* 产品 · 靛蓝 */
   --kind-model: #7D4E9E;     /* 模型 · 紫 */
   --kind-research: #2F6D7A;  /* 研究 · 深青(数据里实际存在,文档五色谱外补充) */
   --kind-org: #8C6A3F;       /* 公司 · 褐 */
-  --kind-other: #70758A;     /* 其他 · 灰 */
+  --kind-other: #515D73;     /* 其他 · 灰 */
 
   --font-display: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, monospace;

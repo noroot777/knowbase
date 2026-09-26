@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>工具图鉴 · 知识库</title>
-<meta name="theme-color" content="#f5f6fa">
+<meta name="theme-color" content="#ffffff">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <!-- marked / DOMPurify 都随包放本地:走 CDN 时一次外网抖动或拦截插件就让 marked 缺席,
      mdHtml 的失败关闭兜底会把回答静默降级成纯文本,看起来就是"markdown 没了" -->
@@ -15,50 +15,57 @@
 <link rel="stylesheet" href="/static/css/panels.css">
 <link rel="stylesheet" href="/static/css/gallery.css">
 <link rel="stylesheet" href="/static/css/workspace.css">
+<link rel="stylesheet" href="/static/css/navigation.css">
 </head>
 <body>
 
 <a class="skip-link" href="#main-content" onclick="event.preventDefault();document.getElementById('main-content').focus()">跳到主要内容</a>
 <div id="nav-mask" hidden onclick="toggleNavigation(false)"></div>
-<aside id="sidebar" aria-label="工作区导航">
+<header id="topbar">
   <a class="brand-lockup" href="#gallery" onclick="switchTab('gallery');return false">
     <span class="brand-icon" aria-hidden="true"><i data-icon="library"></i></span>
     <span class="wordmark">知识库<small>KNOWLEDGE ATLAS</small></span>
   </a>
-  <button class="quick-search" onclick="focusWorkspaceSearch()"><i data-icon="search"></i><span>快速查找</span><kbd>⌘ K</kbd></button>
-  <div class="nav-label">我的工作区</div>
-  <nav class="tabs" aria-label="主要导航">
-    <button id="tab-gallery" class="on" onclick="switchTab('gallery')" aria-current="page"><i data-icon="grid"></i><span>工具图鉴</span><span id="nav-tool-count" class="nav-count"></span></button>
-    <button id="tab-search" onclick="switchTab('search')"><i data-icon="search"></i><span>全文检索</span></button>
-    <button id="tab-ask" onclick="switchTab('ask')"><i data-icon="spark"></i><span>知识问答</span></button>
-    <button id="tab-fav" onclick="switchTab('fav')"><i data-icon="bookmark"></i><span>我的收藏</span></button>
-    <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span>同步管理</span></button>
-  </nav>
-  <div class="nav-label explore-label">发现关联</div>
-  <nav class="explore-links" aria-label="知识图谱">
-    <a href="/graph/projects" target="_blank" rel="noopener"><i data-icon="network"></i>项目图谱<span>↗</span></a>
-    <a href="/graph/skills" target="_blank" rel="noopener"><i data-icon="layers"></i>Skill 图谱<span>↗</span></a>
-    <a href="/graph" target="_blank" rel="noopener"><i data-icon="orbit"></i>话题图谱<span>↗</span></a>
-  </nav>
-  <div class="sidebar-bottom">
-    <details class="workspace-settings">
-      <summary><i data-icon="settings"></i>工作区设置<i data-icon="chevron"></i></summary>
-      <button id="stages-btn" onclick="toggleNavigation(false);openStages()">模型配置<i data-icon="chevron"></i></button>
-      <button id="keys-btn" onclick="toggleNavigation(false);openKeys()">API Key<span id="keys-dot">●</span></button>
-      <button id="mcp-btn" onclick="toggleNavigation(false);openMcp()">MCP 连接<span id="mcp-dot">●</span></button>
-    </details>
-    <div class="library-status"><span class="local-mark"><i data-icon="library"></i></span><div><strong>我的知识空间</strong><span id="stats">正在读取知识库…</span></div></div>
-  </div>
-</aside>
-<header id="topbar">
+  <span id="page-crumb" class="mobile-page-name">工具图鉴</span>
   <button class="icon-button mobile-menu" onclick="toggleNavigation()" aria-label="打开导航" aria-expanded="false" aria-controls="sidebar"><i data-icon="menu"></i></button>
-  <div class="breadcrumb">我的工作区<span>/</span><b id="page-crumb">工具图鉴</b></div>
-  <div class="topbar-right"><span class="local-caption">让收集的知识，重新产生连接</span><button class="icon-button" onclick="openShortcuts()" aria-label="键盘快捷键" title="键盘快捷键"><i data-icon="keyboard"></i></button></div>
+  <div id="sidebar" aria-label="工作区导航">
+    <div class="mobile-nav-heading"><strong>工作区导航</strong><button class="icon-button" onclick="toggleNavigation(false)" aria-label="关闭导航">×</button></div>
+    <nav class="tabs" aria-label="主要导航">
+      <button id="tab-gallery" class="on" onclick="switchTab('gallery')" aria-current="page"><i data-icon="grid"></i><span>工具图鉴</span><span id="nav-tool-count" class="nav-count"></span></button>
+      <button id="tab-search" onclick="switchTab('search')"><i data-icon="search"></i><span>全文检索</span></button>
+      <button id="tab-ask" onclick="switchTab('ask')"><i data-icon="spark"></i><span>知识问答</span></button>
+      <button id="tab-fav" onclick="switchTab('fav')"><i data-icon="bookmark"></i><span>我的收藏</span></button>
+      <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span>同步管理</span></button>
+    </nav>
+    <div class="nav-utilities">
+      <button class="icon-button quick-search" onclick="focusWorkspaceSearch()" aria-label="快速查找" title="快速查找 · ⌘ / Ctrl K"><i data-icon="search"></i></button>
+      <details class="nav-dropdown workspace-graphs">
+        <summary><i data-icon="network"></i>图谱<i data-icon="chevron"></i></summary>
+        <div class="nav-popover">
+          <nav class="explore-links" aria-label="知识图谱">
+            <a href="/graph/projects" target="_blank" rel="noopener"><i data-icon="network"></i>项目图谱<span>↗</span></a>
+            <a href="/graph/skills" target="_blank" rel="noopener"><i data-icon="layers"></i>Skill 图谱<span>↗</span></a>
+            <a href="/graph" target="_blank" rel="noopener"><i data-icon="orbit"></i>话题图谱<span>↗</span></a>
+          </nav>
+        </div>
+      </details>
+      <details class="nav-dropdown workspace-settings">
+        <summary><i data-icon="settings"></i>设置<i data-icon="chevron"></i></summary>
+        <div class="nav-popover">
+          <button id="stages-btn" onclick="toggleNavigation(false);openStages()">模型配置<i data-icon="chevron"></i></button>
+          <button id="keys-btn" onclick="toggleNavigation(false);openKeys()">API Key<span id="keys-dot">●</span></button>
+          <button id="mcp-btn" onclick="toggleNavigation(false);openMcp()">MCP 连接<span id="mcp-dot">●</span></button>
+          <button onclick="toggleNavigation(false);openShortcuts()">键盘快捷键<i data-icon="keyboard"></i></button>
+          <div class="library-status"><span id="stats">正在读取知识库…</span></div>
+        </div>
+      </details>
+    </div>
+  </div>
 </header>
 <main id="main-content" tabindex="-1">
 <div id="gallerypanel">
   <section class="gallery-intro">
-    <div class="intro-copy"><span class="eyebrow">YOUR KNOWLEDGE, CONNECTED</span><h1>发现值得探索的工具<span class="title-dot">.</span></h1><p>从读过的文章、看过的视频里，找到下一个灵感。</p>
+    <div class="intro-copy"><h1>发现值得探索的工具<span class="title-dot">.</span></h1><p>从读过的文章、看过的视频里，找到下一个灵感。</p>
       <div class="collection-meta"><span><strong id="g-total">—</strong> 个工具</span><span><strong id="g-records">—</strong> 条收录记录</span><span id="g-updated">正在读取最近收录</span></div>
     </div>
     <button class="ask-invitation" onclick="switchTab('ask')"><span class="invitation-icon"><i data-icon="spark"></i></span><span><strong>有问题，让知识库帮你找</strong><small>带着问题探索，回答有据可循</small></span><i data-icon="arrow"></i></button>

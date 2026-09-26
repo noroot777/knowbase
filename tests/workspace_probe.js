@@ -74,6 +74,15 @@ async page => {
     await page.goto(origin + '/?workspace-test=' + Date.now() + '#gallery');
     await page.locator('.gcard').first().waitFor();
     check('首屏增量渲染', await page.locator('.gcard').count() === 48);
+    check('桌面内容占据至少九成屏幕宽度', await page.locator('#g-grid').evaluate(el=>el.getBoundingClientRect().width / innerWidth >= .9));
+    check('主导航为单行顶栏', await page.locator('.tabs').evaluate(el=>el.getBoundingClientRect().bottom <= 72));
+    await page.locator('.workspace-graphs summary').click();
+    check('图谱菜单可访问', await page.getByRole('link',{name:'项目图谱 ↗'}).isVisible());
+    await page.keyboard.press('Escape');
+    check('图谱菜单 Escape 关闭并返回焦点', await page.locator('.workspace-graphs').evaluate(el=>!el.open && document.activeElement===el.querySelector('summary')));
+    await page.locator('.workspace-settings summary').click();
+    await page.locator('h1').first().click();
+    check('点击内容区收起菜单', await page.locator('.workspace-settings').evaluate(el=>!el.open));
     await page.evaluate(()=>window.scrollTo(0,1100));
     await page.locator('#tab-search').click();
     await page.locator('#tab-gallery').click();
@@ -194,6 +203,7 @@ async page => {
       check(tab + ' 导航关闭且不可聚焦', await page.locator('#sidebar').evaluate(el=>el.inert));
     }
     await page.getByRole('button',{name:'打开导航',exact:true}).click();
+    await page.locator('.workspace-settings summary').click();
     await page.locator('#keys-btn').click();
     check('手机设置显示于导航上层', await page.locator('#keys-modal').evaluate(el=>!el.inert && getComputedStyle(el).display!=='none'));
     await page.keyboard.press('Escape');

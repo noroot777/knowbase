@@ -3,6 +3,7 @@ const WORKSPACE_TITLES = { gallery: '工具图鉴', search: '全文检索', ask:
 let activeTab = 'gallery';
 let restoringLocation = false;
 const tabScroll = new Map();
+const compactNavigation = matchMedia('(max-width:960px)');
 
 function saveWorkspaceLocation(push = false) {
   if (restoringLocation) return;
@@ -49,10 +50,17 @@ function restoreWorkspaceLocation() {
 }
 
 function toggleNavigation(open) {
-  const show = open ?? !document.body.classList.contains('nav-open');
+  const show = compactNavigation.matches && (open ?? !document.body.classList.contains('nav-open'));
   document.body.classList.toggle('nav-open', show);
   $('nav-mask').hidden = !show;
   document.querySelector('.mobile-menu').setAttribute('aria-expanded', String(show));
+  if (show) {
+    $('sidebar').setAttribute('role', 'dialog');
+    $('sidebar').setAttribute('aria-modal', 'true');
+  } else {
+    $('sidebar').removeAttribute('role');
+    $('sidebar').removeAttribute('aria-modal');
+  }
   syncOverlays();
 }
 
@@ -92,15 +100,15 @@ function focusOverlay(el) {
 function syncOverlays() {
   const dialogs = [...document.querySelectorAll('.modal-mask,#tool-drawer,#reader')];
   const visible = dialogs.filter(el => el.style.display !== 'none' && el.isConnected);
-  if (document.body.classList.contains('nav-open') && matchMedia('(max-width:760px)').matches) visible.push($('sidebar'));
+  if (document.body.classList.contains('nav-open') && compactNavigation.matches) visible.push($('sidebar'));
   visible.sort((a, b) => Number(getComputedStyle(a).zIndex) - Number(getComputedStyle(b).zIndex));
   const next = visible.at(-1) || null;
   const prev = overlayTop;
   if (next && next !== prev && !focusReturns.has(next)) focusReturns.set(next, document.activeElement);
   overlayTop = next;
-  for (const el of [$('main-content'), $('topbar'), $('sidebar'), ...dialogs]) el.inert = !!next && el !== next;
-  // A mobile drawer is inaccessible while offscreen, including to keyboard users.
-  if (!next && matchMedia('(max-width:760px)').matches) $('sidebar').inert = true;
+  // The mobile menu lives inside the header. Only its siblings may be inert.
+  for (const el of [$('main-content'), ...$('topbar').children, ...dialogs]) el.inert = !!next && el !== next;
+  if (!next && compactNavigation.matches) $('sidebar').inert = true;
   document.body.classList.toggle('overlay-open', !!next);
   if (next === prev) return;
   if (prev && !visible.includes(prev)) {
@@ -113,6 +121,11 @@ function syncOverlays() {
 
 document.addEventListener('keydown', e => {
   if (e.isComposing) return;
+  const menu = document.querySelector('.nav-dropdown[open]');
+  if (e.key === 'Escape' && menu && (!overlayTop || overlayTop.id === 'sidebar')) {
+    e.preventDefault(); menu.open = false;
+    menu.querySelector('summary').focus(); return;
+  }
   if (overlayTop) {
     if (e.key === 'Escape' && !overlayTop.classList.contains('confirm-mask')) {
       e.preventDefault(); e.stopImmediatePropagation();
@@ -135,6 +148,19 @@ document.addEventListener('keydown', e => {
   }
 }, true);
 
+document.addEventListener('click', e => {
+  document.querySelectorAll('.nav-dropdown[open]').forEach(menu => {
+    if (!menu.contains(e.target)) menu.open = false;
+  });
+});
+document.querySelectorAll('.nav-dropdown').forEach(menu => {
+  menu.addEventListener('toggle', () => {
+    if (menu.open) document.querySelectorAll('.nav-dropdown[open]').forEach(other => {
+      if (other !== menu) other.open = false;
+    });
+  });
+});
+
 document.addEventListener('focusin', e => {
   if (overlayTop && !overlayTop.contains(e.target)) focusOverlay(overlayTop);
 });
@@ -156,7 +182,7 @@ function initWorkspace() {
   document.querySelectorAll('.modal-mask,#tool-drawer,#reader').forEach(el => observer.observe(el, { attributes: true, attributeFilter: ['style'] }));
   observer.observe(document.body, { childList: true });
   window.addEventListener('hashchange', restoreWorkspaceLocation);
-  matchMedia('(max-width:760px)').addEventListener('change', () => toggleNavigation(false));
+  compactNavigation.addEventListener('change', () => toggleNavigation(false));
   try { setGalleryView(localStorage.getItem('kb-gallery-view') === 'list' ? 'list' : 'grid'); } catch {}
   restoreWorkspaceLocation();
   syncOverlays();

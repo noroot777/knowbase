@@ -2,17 +2,22 @@
 
 2026-09-26 · ash task `ZHHoqY-1y74k`
 
-本次以主页及图鉴、全文检索、问答、收藏、同步五个工作区为范围。采用侧栏导航、浅雾灰底和靛蓝重点色，重做内容层级与主要交互。图谱保持独立页面，通过侧栏进入。
+本次以主页及图鉴、全文检索、问答、收藏、同步五个工作区为范围。根据续聊反馈，本轮重点解决文字对比度偏低和常驻左侧栏挤压内容的问题：改为单行顶部导航，恢复内容宽度，并加强标题、正文与选中状态。图谱保持独立页面，从顶部菜单进入。
 
 ## 视觉方向
 
-- 主色：雾灰 `#F5F6FA`、白 `#FFFFFF`、墨蓝 `#25293D`、靛蓝 `#5153C9`、浅靛蓝 `#EBEBFC`、灰 `#70758A`。
+- 主色：雾灰 `#F1F3F7`、白 `#FFFFFF`、墨蓝 `#172033`、靛蓝 `#3F43B9`、浅靛蓝 `#E9ECFC`、次级文字 `#515D73`；边界色加深至 `#CFD5E0`。
 - 标题用 Avenir Next / PingFang SC，正文用系统字体，计数与日期用系统等宽字体，无远程字体或图标请求。
-- 档案卡片以类型图标、折角式色块、摘要、主题、提及次数和日期分层。保留正字计数作为来源证据的识别元素。
-- 主导航、图谱、设置分别分组；桌面固定侧栏，手机折叠导航。大屏三/四列、中屏双列、手机单列。
+- 卡片名称从 16px / 600 增至 18px / 700；摘要从浅灰 12px 改为深灰 14px。标签和日期加深，来源计数继续保留正字标记。
+- 当前工作区采用深底白字，当前类型采用靛蓝底白字，选中主题增加明确边框；选中类型悬停时保持深色背景。
+- 取消 224px 常驻侧栏和独立面包屑栏，桌面使用 72px 顶部导航。1440px 视口中，内容宽度由 1132px 增至 1344px（约 19%），仍保留三列以扩大单卡阅读空间。首张卡片由约 561px 上移至 504px。
+- 内容最大宽度为 1600px；1750px 起四列、1180px 及以下双列、580px 及以下单列。检索页保留 1200px 阅读宽度，避免长文本铺满超宽屏。
+- 960px 及以下使用按需展开的顶部菜单，不常驻占用内容空间。移动端保留清晰字号，不靠缩小文字增加信息量。
 
 ## 交互变化
 
+- 五个主要工作区在桌面顶栏直接可达，图谱与设置按需展开；菜单互斥，点击外部或 Esc 可关闭，Esc 返回菜单入口焦点。
+- 小屏导航作为弹层管理焦点与背景交互，切换页面自动收起；设置弹窗可从导航正常打开、关闭。
 - 图鉴支持卡片/列表切换并记住偏好；筛选写入 URL，刷新和浏览器后退可恢复。
 - 主题默认收起，可展开；选中主题仍可见；一键清空筛选。
 - 每批 48 项，支持滚动增量加载与显式加载按钮。
@@ -24,32 +29,34 @@
 
 ## 验证
 
-- 41 项隔离浏览器回归检查通过：`tests/workspace_probe.js`，所有 API 均模拟，收藏与问答不写入真实数据。
-- 18 项真实数据浏览检查通过：图鉴、详情与阅读器、三类设置弹窗、同步六阶段、移动导航、问答及收藏布局。
-- 真实搜索返回 20 条结果。1440、768、375px 布局检查通过，无未处理前端异常。
+- 本轮 46 项隔离浏览器回归检查通过：`tests/workspace_probe.js`。覆盖导航、宽度、筛选恢复、增量渲染、列表偏好、搜索竞态与失败恢复、问答中止和旧请求隔离、收藏反馈、输入法与弹层焦点等；所有 API 均模拟。
+- 本轮补充验证选中筛选项悬停和菜单互斥，均通过。选中筛选项悬停的文字对比度为 10.45:1。
+- 在真实数据下抽查 14 类文字及默认/选中状态的实际渲染颜色，对比度均超过 WCAG AA 普通文本的 4.5:1 要求，最低为 5.98:1；卡片名称 16.27:1、摘要 8.65:1、日期与来源计数 6.64:1。此为抽查结果，不代表全站无障碍认证。
+- 真实数据下检查 1280、1024、961、960、768、375px 图鉴布局，以及 375px 检索、问答、收藏、同步面板，均无横向溢出。已检查桌面、平板、手机、移动导航、问答与详情截图，无未处理前端异常。
+- 上轮已通过真实数据详情/阅读器、设置、同步及搜索验证；本轮未改动这些接口或服务端逻辑。
 - 所有前端 JS 通过 `node --check`；`git diff --check` 通过；新增/修改代码文件均低于 700 行。
 - 只读预览服务已验证静态资源、路径边界和写请求拦截。未启动新的采集/同步任务，未修改真实配置。
 - 问答模型输出与收藏写入在隔离响应下验证交互；本次未调用真实 LLM 或向真实知识库写测试记录。
 
-浏览器降级说明：首先检查 Chrome 扩展，返回 `unsupported Codex auth method: apikey`，无法建立具名后台会话；随后通过 Playwright CLI 启动独立无头 Chrome，使用临时 profile。未复用或直连用户普通标签，未激活 Chrome 窗口，未启用有头模式。
+浏览器降级说明：本轮再次优先检查 Chrome 扩展，返回 `unsupported Codex auth method: apikey`，无法建立具名后台会话；随后通过 Playwright CLI 启动独立无头 Chrome，使用临时 profile 和 `kb-refinement` 会话。未复用或直连用户普通标签，未激活 Chrome 窗口，未启用有头模式。真实数据验证通过仅转发 GET 的只读预览服务进行。
 
 ## 复现
 
 ```bash
 # 只读预览当前 worktree 的静态页面，GET 请求复用现有后端
-python3 tests/serve_workspace.py --upstream http://127.0.0.1:8787
+python3 tests/serve_workspace.py --port 18879 --upstream http://127.0.0.1:8787
 
 # 完全隔离测试也可省略 --upstream；始终使用 headless 默认模式
-playwright-cli -s=workspace open http://127.0.0.1:18877
+playwright-cli -s=workspace open http://127.0.0.1:18879
 playwright-cli -s=workspace run-code --filename tests/workspace_probe.js
 playwright-cli -s=workspace close
 ```
 
 本次实现位于当前 worktree；没有合并主分支或重启运行中的生产服务。预览工具不启动调度线程，拒绝转发 POST、PUT、PATCH、DELETE。
 
-本地验收截图和机器可读结果保存在 `output/playwright/`（不加入 Git）：
+本轮验收截图和机器可读结果保存在 `output/playwright/`（不加入 Git）：
 
-- `after-desktop.png`、`after-tablet.png`、`after-mobile.png`
-- `detail-desktop.png`、`search-results-desktop.png`
-- `ask-mobile.png`、`fav-mobile.png`、`pipe-mobile.png`
-- `interaction-checks.json`、`real-data-checks.json`、`visual-checks.json`
+- `refined-desktop.png`、`refined-tablet.png`、`refined-mobile.png`
+- `refined-menu.png`、`refined-mobile-menu.png`
+- `refined-chat.png`、`refined-favorites.png`、`refined-detail.png`
+- `refined-interaction-checks.json`、`refined-visual-checks.json`、`refined-hover-checks.json`
