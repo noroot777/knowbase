@@ -75,7 +75,8 @@ class ChannelDispatchTests(unittest.TestCase):
         self.assertIn("正文待重试 1 篇", detail)
         self.assertNotIn("失败", detail)
         with patch.object(pipeline_retry, "load_last_run", return_value={
-                "stages": {"crawl": {"status": "ok", "detail": detail, "failures": [body]}}}):
+                "stages": {"crawl": {"status": "ok", "detail": detail, "failures": [body]}}}), \
+             patch("kb.store.connect"), patch("kb.extract.pending_docs", return_value=[]):
             self.assertEqual([], pipeline_retry.retry_failed_plan())
 
     def test_export_missing_bodies_reach_panel_as_pending_details(self):
@@ -241,7 +242,8 @@ class ChannelDispatchTests(unittest.TestCase):
             self.assertIn("请检查读取器或推送格式", items[0]["reason"])
             self.assertEqual(not confirmed, "归属待核实" in items[0]["reason"])
             with patch.object(pipeline_retry, "load_last_run", return_value={"stages": {
-                    "crawl": {"status": "ok", "detail": detail, "failures": items}}}):
+                    "crawl": {"status": "ok", "detail": detail, "failures": items}}}), \
+                 patch("kb.store.connect"), patch("kb.extract.pending_docs", return_value=[]):
                 self.assertEqual([], pipeline_retry.retry_failed_plan())
 
     def test_collector_cli_gets_selected_channel_and_reports_read_failures(self):

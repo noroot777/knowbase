@@ -46,6 +46,7 @@ from kb.pipeline_state import (
     _state,
     get_state,
     load_last_run,
+    request_stop,
 )
 
 # 对外门面:Web 层只 import 本模块,不直接碰拆出去的三个子模块
@@ -55,6 +56,7 @@ __all__ = [
     "load_last_run",
     "load_schedule",
     "pending_counts",
+    "request_stop",
     "retry_failed_plan",
     "save_schedule",
     "source_status",
@@ -73,14 +75,14 @@ _RUNNERS = {"crawl": _run_crawl, "export": _run_export,
 
 
 def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
+    pre_thread = None
     try:
         # 抓取被反爬间隔限速(页间/号间随机 sleep),期间 CPU 和网络全闲着:
         # 先并行开跑一轮"存量"提取,消化上一轮已索引但没提取的积压。
         # 安全边界:提取只写 kb.db(WAL)和 obs frontmatter,与抓取(采集器进程外)、
         # 导出(幂等,已存在的文件跳过、不覆盖)互不冲突;索引前 join,保持库的单写者。
         ex_stats = _new_extract_stats()
-        pre_thread = None
-        if "extract" in stages and "crawl" in stages:
+        if "extract" in stages and "crawl" in stages and not _state.get("stop_requested"):
             def _pre_extract():
                 try:
                     _extract_pass("存量", ex_stats)
@@ -96,6 +98,8 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
             pre_thread.start()
 
         for s in STAGES:
+            if _state.get("stop_requested"):
+                break
             if s not in stages:
                 _state["stages"][s] = {"status": "skipped", "detail": "未选择"}
             elif s == "crawl":
@@ -106,10 +110,14 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
                 if pre_thread and pre_thread.is_alive():
                     _stage("index", "running", "等存量提取收尾(避免并发写库)")
                     pre_thread.join()
+                    if _state.get("stop_requested"):
+                        break
                 _run_index()
             elif s == "extract":
                 if pre_thread:
                     pre_thread.join()
+                    if _state.get("stop_requested"):
+                        break
                     _extract_pass("增量", ex_stats)
                     _finish_extract_stage(ex_stats)
                 else:
@@ -117,6 +125,10 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
             else:
                 _RUNNERS[s]()
     finally:
+        # Parallel extraction owns database writes too. Do not advertise idle
+        # until it finishes, including stop requests and unexpected exceptions.
+        if pre_thread:
+            pre_thread.join()
         _end_run()
 
 
@@ -134,6 +146,7 @@ def start_pipeline(stages: list[str] | None = None,
             return False
         _state.update({
             "running": True, "current_stage": "", "log": [],
+            "stop_requested": False, "stopped": False,
             "started_at": _now(), "finished_at": "",
             "crawl_filter": crawl_filter,
             "stages": {s: {"status": "pending" if s in wanted else "skipped",

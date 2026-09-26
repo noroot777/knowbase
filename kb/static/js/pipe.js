@@ -1,301 +1,148 @@
-// ── 数据管道 ──────────────────────────────────────────────────────────────
+// Live progress never waits for collector probes or filesystem backlog scans.
 const STAGE_META = {
-  crawl:   { name: '抓取',  desc: '来源 → 采集器本地' },
-  export:  { name: '导出',  desc: '采集器 → obs md' },
-  index:   { name: '索引',  desc: 'obs → FTS + 向量' },
-  extract: { name: '提取',  desc: 'entity/topic/摘要' },
-  projects:{ name: '条目化', desc: '工具/项目拆条目' },
-  wiki:    { name: 'Wiki',  desc: '双链/实体页/日摘要' },
+  crawl: { name: '抓取内容', desc: '从所选来源收集文章' },
+  export: { name: '导出文章', desc: '保存到本地知识库' },
+  index: { name: '建立索引', desc: '让全文与语义检索可用' },
+  extract: { name: '提取知识', desc: '识别实体、主题与摘要' },
+  projects: { name: '整理工具', desc: '拆分工具与项目条目' },
+  wiki: { name: '更新 Wiki', desc: '生成关联页面与知识图谱' },
 };
-const STATUS_ICON = { pending: '⋯', running: '<span class="spin"></span>',
-                      ok: '✓', skipped: '⊘', error: '✗', '': '—' };
-let pipeTimer = null;
+let pipeTimer = null, pipeSnapshot = null, pipePending = {};
+let pipeRequest = null, pipeStatusAbort = null, pipeStatusVersion = 0;
+let pipeAction = '', pipeConnected = false, pipeLastRead = 0;
+let pipeSourceVersion = 0, pipePendingRequest = null;
 
-// ── 全流程同步弹窗(时间段 + 目标多选) ──────────────────────────────────────
-let pipeAcctList = [];                                 // 来源的全部可选目标
-let pipeSel = new Set();                               // 选中的目标
-let pipeRange = { label: '不限时间', from: '', to: '' };
-// 采集器给的区间补抓注意事项(如"微信只保留近 30 天可翻页历史")。
-// 由 refreshPipe 从 /api/pipeline/status 带回,面板本身不预设任何来源知识。
-let pipeRangeHint = '';
-
-// 本地日期 YYYY-MM-DD。不能用 toISOString() —— 那给的是 UTC 日期,
-// 东八区 00:00-07:59 会算成前一天,整套预设范围跟着错开一天(当天文章漏抓)。
-function localDay(d) {
-  const p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-function isoDay(offset) {
-  const d = new Date();
-  d.setDate(d.getDate() + offset);
-  return localDay(d);
-}
-function pipePresets() {
-  const today = isoDay(0);
-  const m3 = new Date(); m3.setMonth(m3.getMonth() - 3);
-  return [
-    { label: '不限时间', from: '', to: '' },
-    { label: '今天', from: today, to: today },
-    { label: '近 7 天', from: isoDay(-7), to: today },
-    { label: '近 30 天', from: isoDay(-30), to: today },
-    { label: '近 3 个月', from: localDay(m3), to: today },
-    { label: '今年', from: today.slice(0, 4) + '-01-01', to: today },
-  ];
-}
-
-async function openPipeModal() {
-  try { await loadPipeChannels(); }
-  catch (e) { toast('同步通道读取失败', { detail: e.message }); return; }
-  // 目标列表每次打开都拉一次(可能刚在采集器那边加了新目标)
-  const r = await fetch(channelUrl('/api/pipeline/accounts')).catch(() => null);
-  if (!r) { toast('公众号列表读取失败'); return; }
-  if (await toastIfFail(r, '公众号列表读取失败')) return;
-  const d = await r.json();
-  pipeAcctList = (d && d.accounts) || [];
-  pipeSel = new Set(pipeAcctList);                     // 默认全选
-  pipeRange = { label: '不限时间', from: '', to: '' };
-  $('pipe-acct-search').value = '';
-  $('pipe-modal').style.display = '';
-  renderPipeChannel();
-  renderPipeRange();
-  renderPipeAcctList();
-}
-function closePipeModal() {
-  $('pipe-modal').style.display = 'none';
-  $('pipe-range-pop').style.display = 'none';
-}
-
-function togglePipeRangePop(e) {
-  e.stopPropagation();
-  const pop = $('pipe-range-pop');
-  const show = pop.style.display === 'none';
-  if (show) renderPipePresets();
-  pop.style.display = show ? '' : 'none';
-}
-function renderPipePresets() {
-  $('pipe-range-presets').innerHTML = pipePresets().map((p, i) => `
-    <div onclick="applyPipePreset(${i})"
-         style="display:flex;align-items:center;gap:8px;padding:8px 14px;cursor:pointer;font-size:13.5px"
-         onmouseover="this.style.background='var(--tag-bg)'" onmouseout="this.style.background=''">
-      <span style="width:14px;color:var(--accent)">${p.label === pipeRange.label ? '✓' : ''}</span>${p.label}
-    </div>`).join('');
-  $('pipe-custom-from').value = pipeRange.from;
-  $('pipe-custom-to').value = pipeRange.to;
-  $('pipe-custom-err').textContent = '';
-}
-function applyPipePreset(i) {
-  pipeRange = { ...pipePresets()[i] };
-  $('pipe-range-pop').style.display = 'none';
-  renderPipeRange();
-}
-function applyPipeCustomRange() {
-  const from = $('pipe-custom-from').value, to = $('pipe-custom-to').value;
-  const err = m => { $('pipe-custom-err').textContent = m; };
-  if (!from || !to) { err('起止日期都要填'); return; }
-  if (from > to) { err('起始日期不能晚于结束日期'); return; }
-  err('');
-  pipeRange = { label: `${from} ~ ${to}`, from, to };
-  $('pipe-range-pop').style.display = 'none';
-  renderPipeRange();
-}
-
-function renderPipeRange() {
-  $('pipe-range-label').textContent = pipeRange.label;
-  const ranged = !!pipeRange.from;
-  $('pipe-range-hint').textContent = ranged
-    ? pipeRangeHint
-    : '不限时间 = 扫描所选通道可提供的文章列表，已有文章按身份去重。';
-  renderPipeEst();
-}
-
-function renderPipeAcctList() {
-  const q = $('pipe-acct-search').value.trim().toLowerCase();
-  const items = q ? pipeAcctList.filter(n => n.toLowerCase().includes(q)) : pipeAcctList;
-  $('pipe-acct-count').textContent = `${pipeSel.size}/${pipeAcctList.length}`;
-  // 目标名来自采集器的外部数据,不拼进 inline onclick 的 JS 字符串:
-  // 只转义单引号挡不住双引号/尖括号破坏属性。值走 data-acct + 事件委托。
-  $('pipe-acct-list').innerHTML = items.length ? items.map(n => `
-    <div data-acct="${esc(n)}"
-         style="display:flex;align-items:center;gap:9px;padding:9px 13px;cursor:pointer;
-                border-bottom:1px solid var(--line);font-size:13.5px"
-         onmouseover="this.style.background='var(--tag-bg)'" onmouseout="this.style.background=''">
-      <span style="color:${pipeSel.has(n) ? 'var(--accent)' : 'var(--muted)'}">${pipeSel.has(n) ? '☑' : '☐'}</span>
-      <span>${esc(n)}</span>
-    </div>`).join('')
-    : `<div style="padding:22px;text-align:center;font-size:12.5px;color:var(--muted)">${
-        pipeAcctList.length ? '没有匹配的目标' : '采集器不在线或还没有可选目标'}</div>`;
-  renderPipeEst();
-}
-$('pipe-acct-list').addEventListener('click', e => {
-  const row = e.target.closest('[data-acct]');
-  if (row) togglePipeAcct(row.dataset.acct);
-});
-function togglePipeAcct(n) {
-  pipeSel.has(n) ? pipeSel.delete(n) : pipeSel.add(n);
-  renderPipeAcctList();
-}
-function pipeSelectAll() { pipeSel = new Set(pipeAcctList); renderPipeAcctList(); }
-function pipeSelectNone() { pipeSel = new Set(); renderPipeAcctList(); }
-
-function renderPipeEst() {
-  const n = pipeSel.size;
-  const channel = pipeChannels.find(c => c.id === pipeChannel);
-  $('pipe-est').textContent = `使用${channel?.label || '所选通道'}同步 ${n} 个公众号。`
-    + '耗时取决于新文章数量和正文获取速度；两个通道共用已采集文章，不会因切换重复入库。';
-  $('pipe-start').disabled = n === 0;
-  $('pipe-start').textContent = `开始同步 (${n} 个)`;
-}
-
-async function refreshPipe(withPending = false) {
-  try { await loadPipeChannels(); } catch { return; }
-  const requestedChannel = pipeChannel;
-  const s = await fetch(channelUrl('/api/pipeline/status' + (withPending ? '?pending=1' : '')))
-    .then(r => r.json()).catch(() => null);
-  if (!s || requestedChannel !== pipeChannel) return;
-  const runningChannel = s.running && s.crawl_filter?.channel;
-  const runningLabel = pipeChannels.find(c => c.id === runningChannel)?.label || runningChannel;
-  $('pipe-running-channel').textContent = runningChannel ? `正在通过${runningLabel}同步` : '';
-
-  // 来源采集器状态。message/hint 都是采集器给的成品文案,这里只负责显示
-  // ——换来源(RSS、播客…)不用改这段。
-  const src = s.source || { online: false, message: '' };
-  $('src-label').textContent = src.channel_label || src.label || '来源采集器';
-  $('src-status').textContent = src.online ? '在线' : '不在线(抓取将跳过)';
-  $('src-status').style.color = src.online ? 'var(--ok)' : '#c33';
-  $('src-detail').textContent =
-    [src.message, src.hint].filter(Boolean).join(' · ');
-  const console_ = $('src-console');
-  console_.style.display = src.console_url ? '' : 'none';
-  if (src.console_url) console_.href = src.console_url;
-  pipeRangeHint = src.range_hint || '';
-
-  // 阶段卡片(空闲时叠加 last_run 和待处理数)
-  const stages = s.running ? s.stages : (s.last_run ? s.last_run.stages : s.stages);
-  $('pipe-stages').innerHTML = Object.entries(STAGE_META).map(([k, m]) => {
-    const st = stages[k] || { status: '', detail: '' };
-    const pendN = s.pending && s.pending[k] != null ? s.pending[k] : null;
-    const pend = pendN != null ? `待处理 ${pendN}` : '';
-    // 卡片正文 = 上次运行结果 + 当前积压。两者都有就并排显示:只认 detail 的话,
-    // 「本次无需重试」这类重试链留下的通用文案会把真正待办的积压数盖掉
-    // (重试跳过 projects 时,169 篇待条目化在卡片上就消失了)。
-    const body = [st.detail, pendN ? pend : ''].filter(Boolean).join(' · ') || pend;
-    // 失败明细(后端 _stage 的 failures):卡片内可展开,不用翻日志
-    const fails = st.failures || [];
-    const onlyPending = fails.every(f => f.pending);
-    const failHtml = fails.length ? `
-      <details style="margin-top:5px">
-        <summary style="cursor:pointer;font-size:11.5px;color:${onlyPending ? 'var(--muted)' : '#c33'}">${onlyPending ? '待处理' : '失败'}明细 ${fails.length}</summary>
-        <div style="font-size:11.5px;margin-top:3px;max-height:130px;overflow:auto">
-          ${fails.map(f => `<div style="margin-bottom:4px">· ${esc(f.title)}<br>
-            <span style="color:var(--muted)">${esc(f.reason)}</span></div>`).join('')}
-        </div>
-      </details>` : '';
-    return `<div class="hit" style="margin:0;padding:12px 14px">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <b style="font-size:14px">${m.name}</b>
-        <span style="font-size:14px">${STATUS_ICON[st.status] ?? st.status}</span>
-      </div>
-      <div style="font-size:11.5px;color:var(--muted);margin:2px 0 6px">${m.desc}</div>
-      <div style="font-size:12px;color:#4A565F;min-height:18px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden"
-           title="${esc(body)}">${esc(body)}</div>
-      ${failHtml}
-    </div>`;
-  }).join('');
-
-  // 日志 + 按钮态
-  $('pipe-log').textContent = (s.log && s.log.length) ? s.log.join('\n')
-    : (s.last_run ? `上次运行完成于 ${s.last_run.finished_at}` : '(暂无日志)');
-  const logBox = $('pipe-log').parentElement;
-  logBox.scrollTop = logBox.scrollHeight;
-  $('pipe-run').disabled = s.running;
-  $('pipe-channel-current').disabled = s.running;
-  $('pipe-run').textContent = s.running ? '同步中…' : '全流程同步';
-  // 任一阶段有失败(或提取有积压)且空闲时,亮出全局重试按钮
-  const hasFail = Object.values(stages).some(st =>
-    st && (st.status === 'error' || /失败 [1-9]/.test(st.detail || '') ||
-           /\d+ 个账号失败/.test(st.detail || '')));
-  const hasPend = s.pending && s.pending.extract > 0;
-  $('pipe-retry').style.display = (!s.running && (hasFail || hasPend)) ? '' : 'none';
-
-  // 运行中自动轮询
-  if (s.running && !pipeTimer) {
-    pipeTimer = setInterval(() => refreshPipe(false), 1500);
-  } else if (!s.running && pipeTimer) {
-    clearInterval(pipeTimer);
-    pipeTimer = null;
-    refreshPipe(true);   // 结束后刷一次待处理数
-    loadMeta();          // 文档/实体数可能变了
-  }
-}
-
-async function retryFailed() {
-  const btn = $('pipe-retry');
-  btn.disabled = true;
+async function pipeJson(path, options = {}, timeout = 15000) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  options.signal?.addEventListener('abort', abort, { once: true });
+  if (options.signal?.aborted) controller.abort();
+  const timer = setTimeout(abort, timeout);
   try {
-    const r = await fetch('/api/pipeline/retry-failed', { method: 'POST' });
-    if (await toastIfFail(r, '重试没能启动')) return;
-    const d = await r.json().catch(() => ({}));
-    toast('已开始重试失败项', { type: 'ok', detail: d.plan ? '阶段:' + d.plan : '' });
-    refreshPipe(false);
+    const r = await fetch(path, { ...options, signal: controller.signal });
+    if (!r.ok) throw new Error(await apiFail(r, '请求未完成'));
+    return await r.json();
   } catch (e) {
-    toast('重试没能启动', { detail: e.message });
+    if (e.name === 'AbortError') throw new Error('连接超时，请检查服务后重试');
+    throw e;
   } finally {
-    btn.disabled = false;
+    clearTimeout(timer); options.signal?.removeEventListener('abort', abort);
   }
 }
-
-// ── 每日定时同步 ──────────────────────────────────────────────────────────
-async function loadSched() {
+function pipePost(path, body) {
+  return pipeJson(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+}
+function invalidatePipeStatus() {
+  clearTimeout(pipeTimer); pipeTimer = null;
+  pipeStatusVersion++; pipeStatusAbort?.abort(); pipeRequest = null;
+}
+function queuePipeRefresh() {
+  clearTimeout(pipeTimer);
+  if (pipeSnapshot?.running || $('pipepanel').style.display !== 'none') {
+    pipeTimer = setTimeout(() => { pipeTimer = null; refreshPipe(); }, document.hidden ? 8000 : pipeSnapshot?.running ? 1500 : 6000);
+  }
+}
+async function refreshPipe(withPending = false) {
+  if (withPending) { refreshPipeSource(); refreshPipePending(); }
+  if (pipeRequest) return pipeRequest;
+  clearTimeout(pipeTimer);
+  const version = ++pipeStatusVersion;
+  pipeStatusAbort = new AbortController();
+  const request = (async () => {
+    try {
+      const s = await pipeJson('/api/pipeline/status?source=false', { signal: pipeStatusAbort.signal });
+      if (version !== pipeStatusVersion) return;
+      const wasRunning = pipeSnapshot?.running;
+      pipeSnapshot = s; pipeConnected = true; pipeLastRead = Date.now();
+      $('pipe-connection').hidden = true;
+      renderPipeState(s);
+      if (wasRunning && !s.running) {
+        refreshPipePending(); refreshPipeSource();
+        pipeJson('/api/stats').then(stats => {
+          $('stats').textContent = `${stats.documents.toLocaleString()} 篇内容已收录`;
+        }).catch(() => {});
+        toast(s.stopped || s.last_run?.stopped ? '同步已停止' : '同步已结束', { key: 'pipeline', type: 'info', detail: '各步骤结果已更新，可查看待处理明细。' });
+      }
+    } catch (e) {
+      if (version !== pipeStatusVersion) return;
+      pipeConnected = false;
+      $('pipe-connection').hidden = false;
+      $('pipe-connection').querySelector('span').textContent = `状态暂时无法更新：${e.message}。${pipeLastRead ? '保留上次结果，正在自动重连。' : '正在自动重连。'}`;
+      renderPipeButtons();
+    } finally {
+      if (version === pipeStatusVersion) { pipeRequest = null; queuePipeRefresh(); }
+    }
+  })();
+  pipeRequest = request;
+  return request;
+}
+async function refreshPipeSource() {
+  const version = ++pipeSourceVersion;
+  $('src-status').textContent = '检查中…';
   try {
     await loadPipeChannels();
-    const s = await fetch('/api/pipeline/schedule').then(r => r.json());
-    $('sched-on').checked = !!s.enabled;
-    if (s.time) $('sched-time').value = s.time;
-    if (s.channel) $('sched-channel').value = s.channel;
-  } catch {}
-}
-
-async function saveSched() {
-  const body = { enabled: $('sched-on').checked, time: $('sched-time').value || '07:30',
-                 channel: $('sched-channel').value };
-  try {
-    const r = await fetch('/api/pipeline/schedule', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!r.ok) throw new Error(await apiFail(r, '定时同步配置保存失败'));
-    $('sched-msg').textContent = body.enabled ? `✓ 每天 ${body.time} 自动同步` : '已关闭';
+    const channel = pipeChannel;
+    const s = await pipeJson(channelUrl('/api/pipeline/status', channel), {}, 60000);
+    if (version !== pipeSourceVersion || channel !== pipeChannel) return;
+    const src = s.source || {};
+    $('src-label').textContent = src.channel_label || src.label || '来源采集器';
+    $('src-status').textContent = src.online ? '已连接' : '未连接';
+    $('src-status').style.color = src.online ? 'var(--ok)' : 'var(--danger)';
+    $('src-detail').textContent = [src.message, src.hint].filter(Boolean).join(' · ') || (src.online ? '来源可用，可以开始同步。' : '可检查采集器配置。来源离线时抓取会跳过，已有内容仍可处理。');
+    $('src-console').style.display = src.console_url ? '' : 'none';
+    if (src.console_url) $('src-console').href = safeUrl(src.console_url);
+    pipeRangeHint = src.range_hint || pipeRangeHint;
+    renderPipeRange();
   } catch (e) {
-    $('sched-msg').textContent = '保存失败: ' + e.message;
+    if (version !== pipeSourceVersion) return;
+    $('src-status').textContent = '连接未确认';
+    $('src-detail').textContent = e.message + '。可以重新检查连接，运行进度不受影响。';
   }
-  setTimeout(() => { $('sched-msg').textContent = ''; }, 5000);
 }
-
-async function startPipeFromModal() {
-  if (!pipeSel.size) { toast('请至少选择一个公众号'); return; }
-  const body = { channel: pipeChannel };
-  if (pipeRange.from) {
-    body.since_date = pipeRange.from;
-    body.until_date = pipeRange.to;
-    body.accounts = Array.from(pipeSel);
-  } else if (pipeSel.size && pipeSel.size < pipeAcctList.length) {
-    // 增量也能只抓选中的几个号。全选时不传:那跟不过滤等价,还省得把
-    // 几十个名字塞进请求和采集器的命令行
-    body.accounts = Array.from(pipeSel);
-  }
-  const btn = $('pipe-start');
-  btn.disabled = true;
+async function refreshPipePending() {
+  if (pipePendingRequest || pipeSnapshot?.running) return;
+  const startedAt = pipeSnapshot?.started_at;
+  pipePendingRequest = pipeJson('/api/pipeline/status?source=false&pending=true', {}, 60000);
   try {
-    const r = await fetch('/api/pipeline/run', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    });
-    if (await toastIfFail(r, '同步没能启动')) return;
-    closePipeModal();
-    refreshPipe(false);
-  } catch (e) {
-    toast('同步没能启动', { detail: e.message });
-  } finally {
-    btn.disabled = false;
-  }
+    const s = await pipePendingRequest;
+    if (!pipeSnapshot?.running && (!startedAt || startedAt === pipeSnapshot?.started_at)) {
+      pipePending = s.pending || {}; if (pipeSnapshot) renderPipeState(pipeSnapshot);
+    }
+  } catch { /* Backlog estimates never replace live progress or block actions. */ }
+  finally { pipePendingRequest = null; }
 }
+function renderPipeButtons() {
+  const running = !!pipeSnapshot?.running;
+  $('pipe-run').disabled = !pipeConnected || running || !!pipeAction;
+  $('pipe-run').textContent = pipeAction === 'start' ? '正在启动…' : running ? '同步进行中' : !pipeSnapshot ? '读取状态…' : '新建同步';
+  $('pipe-channel-current').disabled = running || !!pipeAction;
+  $('pipe-retry').disabled = !pipeConnected || running || !!pipeAction;
+  $('pipe-retry').textContent = pipeAction === 'retry' ? '正在启动重试…' : '重试失败项';
+  $('pipe-stop').hidden = !running || !pipeSnapshot?.stop_supported;
+  $('pipe-stop').disabled = !pipeConnected || !!pipeAction || !!pipeSnapshot?.stop_requested;
+  $('pipe-stop').textContent = pipeAction === 'stop' || pipeSnapshot?.stop_requested ? '等待当前阶段结束…' : '本阶段结束后停止';
+  $('nav-sync-dot').hidden = !running;
+  renderPipeEst();
+}
+async function retryFailed() {
+  if (pipeAction || pipeSnapshot?.running) return;
+  pipeAction = 'retry'; invalidatePipeStatus(); renderPipeButtons();
+  try {
+    await pipePost('/api/pipeline/retry-failed');
+    toast('已开始重试', { key: 'pipeline', type: 'ok', detail: '将处理失败阶段及必要的后续步骤，已完成内容按现有规则去重。' });
+  } catch (e) { toast('重试未能启动', { key: 'pipeline', detail: e.message }); }
+  finally { await refreshPipe(); pipeAction = ''; renderPipeButtons(); }
+}
+async function stopPipe() {
+  if (pipeAction || !pipeSnapshot?.running || pipeSnapshot.stop_requested) return;
+  pipeAction = 'stop'; invalidatePipeStatus(); renderPipeButtons();
+  try {
+    await pipePost('/api/pipeline/stop');
+    pipeSnapshot.stop_requested = true; renderPipeState(pipeSnapshot);
+    toast('已请求停止', { key: 'pipeline', type: 'info', detail: '等待所有当前执行中的阶段结束；已完成的结果会保留。' });
+  } catch (e) { toast('停止请求未完成', { key: 'pipeline', detail: e.message }); }
+  finally { await refreshPipe(); pipeAction = ''; renderPipeButtons(); }
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && (pipeSnapshot?.running || $('pipepanel').style.display !== 'none')) refreshPipe();
+});

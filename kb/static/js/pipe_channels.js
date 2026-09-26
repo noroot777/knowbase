@@ -36,10 +36,12 @@ function renderPipeChannel() {
 }
 
 async function changePipeChannel(value) {
-  if (!pipeChannels.some(c => c.id === value)) return;
+  if (pipeAction || pipeSnapshot?.running || !pipeChannels.some(c => c.id === value)) { renderPipeChannel(); return; }
+  savePipeDraft();
   pipeChannel = value;
   try { localStorage.setItem('kb-sync-channel', value); } catch {}
   renderPipeChannel();
   $('src-detail').textContent = '正在检查所选通道…';
-  await Promise.all([refreshPipe(false), initTargets()]);
+  refreshPipeSource(); initTargets();
+  if (pipeModalOpen()) { $('pipe-acct-search').value = ''; closePipeRange(); await loadPipeAccounts(); }
 }

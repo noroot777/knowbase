@@ -150,20 +150,14 @@ def retry_failed_plan() -> list[str]:
 
 def _run_retry_failed(plan: list[str], crawl_filter: dict | None = None) -> None:
     try:
-        if "crawl" in plan:
-            _run_crawl(crawl_filter)
-        if "export" in plan:
-            _run_export((crawl_filter or {}).get("channel"))
-        if "refill" in plan:
-            _run_refill()
-        if "index" in plan:
-            _run_index()
-        if "extract" in plan:
-            _run_extract()
-        if "projects" in plan:
-            _run_projects()
-        if "wiki" in plan:
-            _run_wiki()
+        runners = {"crawl": lambda: _run_crawl(crawl_filter),
+                   "export": lambda: _run_export((crawl_filter or {}).get("channel")),
+                   "refill": _run_refill, "index": _run_index,
+                   "extract": _run_extract, "projects": _run_projects, "wiki": _run_wiki}
+        for stage in plan:
+            if _state.get("stop_requested"):
+                break
+            runners[stage]()
     finally:
         _end_run()
 
@@ -183,6 +177,7 @@ def start_retry_failed() -> tuple[bool, str]:
         card["export"] = card["export"] or "refill" in plan
         _state.update({
             "running": True, "current_stage": "", "log": [],
+            "stop_requested": False, "stopped": False,
             "started_at": _now(), "finished_at": "",
             "crawl_filter": crawl_filter,
             "stages": {s: {"status": "pending" if card[s] else "skipped",

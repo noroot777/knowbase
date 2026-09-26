@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
+from copy import deepcopy
 from datetime import datetime
 
 from kb.config import DATA_DIR
@@ -20,11 +21,13 @@ STAGES = ("crawl", "export", "index", "extract", "projects", "wiki")
 
 _state: dict = {
     "running": False,
+    "stop_requested": False,
+    "stopped": False,
     "current_stage": "",
     "started_at": "",
     "finished_at": "",
     "crawl_filter": {},
-    # 每阶段: {status: pending/running/ok/skipped/error, detail: str}
+    # 每阶段: {status: pending/running/ok/skipped/error/stopped, detail: str}
     "stages": {s: {"status": "", "detail": ""} for s in STAGES},
     "log": [],          # 最近若干条进度行
 }
@@ -60,9 +63,12 @@ def _save_last_run() -> None:
     try:
         _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         _STATE_FILE.write_text(json.dumps({
+            "started_at": _state["started_at"],
             "finished_at": _state["finished_at"],
+            "stopped": _state.get("stopped", False),
             "stages": _state["stages"],
             "crawl_filter": _state["crawl_filter"],
+            "log": _state["log"],
         }, ensure_ascii=False, indent=1), encoding="utf-8")
     except OSError:
         pass
@@ -76,12 +82,32 @@ def load_last_run() -> dict | None:
 
 
 def get_state() -> dict:
-    return _state
+    return deepcopy(_state)
+
+
+def request_stop() -> bool:
+    """Finish active work before releasing the single-pipeline lock."""
+    with _lock:
+        if not _state["running"]:
+            return False
+        if not _state.get("stop_requested"):
+            _state["stop_requested"] = True
+            _log("已请求停止：当前执行中的阶段结束后，不再启动后续阶段")
+        return True
 
 
 def _end_run() -> None:
-    _state["running"] = False
-    _state["current_stage"] = ""
-    _state["finished_at"] = _now()
-    _log("管道结束")
-    _save_last_run()
+    with _lock:
+        stopped = bool(_state.get("stop_requested"))
+        _state["stopped"] = stopped
+        for name, stage in _state["stages"].items():
+            if stage["status"] in ("pending", "running"):
+                _stage(name, "stopped" if stopped else "error",
+                       ("已停止，未继续执行" if stopped else "流程中断，未完成")
+                       + (" · " + stage["detail"] if stage.get("detail") else ""),
+                       failures=stage.get("failures"))
+        _state["current_stage"] = ""
+        _state["finished_at"] = _now()
+        _log("同步已停止，已完成的结果保留" if stopped else "管道结束")
+        _save_last_run()
+        _state["running"] = False

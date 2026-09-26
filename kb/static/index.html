@@ -16,51 +16,49 @@
 <link rel="stylesheet" href="/static/css/gallery.css">
 <link rel="stylesheet" href="/static/css/workspace.css">
 <link rel="stylesheet" href="/static/css/navigation.css">
+<link rel="stylesheet" href="/static/css/pipeline.css">
 </head>
 <body>
 
 <a class="skip-link" href="#main-content" onclick="event.preventDefault();document.getElementById('main-content').focus()">跳到主要内容</a>
 <div id="nav-mask" hidden onclick="toggleNavigation(false)"></div>
-<header id="topbar">
-  <a class="brand-lockup" href="#gallery" onclick="switchTab('gallery');return false">
-    <span class="brand-icon" aria-hidden="true"><i data-icon="library"></i></span>
-    <span class="wordmark">知识库<small>KNOWLEDGE ATLAS</small></span>
-  </a>
-  <span id="page-crumb" class="mobile-page-name">工具图鉴</span>
-  <button class="icon-button mobile-menu" onclick="toggleNavigation()" aria-label="打开导航" aria-expanded="false" aria-controls="sidebar"><i data-icon="menu"></i></button>
-  <div id="sidebar" aria-label="工作区导航">
-    <div class="mobile-nav-heading"><strong>工作区导航</strong><button class="icon-button" onclick="toggleNavigation(false)" aria-label="关闭导航">×</button></div>
-    <nav class="tabs" aria-label="主要导航">
-      <button id="tab-gallery" class="on" onclick="switchTab('gallery')" aria-current="page"><i data-icon="grid"></i><span>工具图鉴</span><span id="nav-tool-count" class="nav-count"></span></button>
-      <button id="tab-search" onclick="switchTab('search')"><i data-icon="search"></i><span>全文检索</span></button>
-      <button id="tab-ask" onclick="switchTab('ask')"><i data-icon="spark"></i><span>知识问答</span></button>
-      <button id="tab-fav" onclick="switchTab('fav')"><i data-icon="bookmark"></i><span>我的收藏</span></button>
-      <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span>同步管理</span></button>
-    </nav>
-    <div class="nav-utilities">
-      <button class="icon-button quick-search" onclick="focusWorkspaceSearch()" aria-label="快速查找" title="快速查找 · ⌘ / Ctrl K"><i data-icon="search"></i></button>
-      <details class="nav-dropdown workspace-graphs">
-        <summary><i data-icon="network"></i>图谱<i data-icon="chevron"></i></summary>
-        <div class="nav-popover">
-          <nav class="explore-links" aria-label="知识图谱">
-            <a href="/graph/projects" target="_blank" rel="noopener"><i data-icon="network"></i>项目图谱<span>↗</span></a>
-            <a href="/graph/skills" target="_blank" rel="noopener"><i data-icon="layers"></i>Skill 图谱<span>↗</span></a>
-            <a href="/graph" target="_blank" rel="noopener"><i data-icon="orbit"></i>话题图谱<span>↗</span></a>
-          </nav>
-        </div>
-      </details>
-      <details class="nav-dropdown workspace-settings">
-        <summary><i data-icon="settings"></i>设置<i data-icon="chevron"></i></summary>
-        <div class="nav-popover">
-          <button id="stages-btn" onclick="toggleNavigation(false);openStages()">模型配置<i data-icon="chevron"></i></button>
-          <button id="keys-btn" onclick="toggleNavigation(false);openKeys()">API Key<span id="keys-dot">●</span></button>
-          <button id="mcp-btn" onclick="toggleNavigation(false);openMcp()">MCP 连接<span id="mcp-dot">●</span></button>
-          <button onclick="toggleNavigation(false);openShortcuts()">键盘快捷键<i data-icon="keyboard"></i></button>
-          <div class="library-status"><span id="stats">正在读取知识库…</span></div>
-        </div>
-      </details>
-    </div>
+<aside id="sidebar" aria-label="工作区导航">
+  <div class="sidebar-brand">
+    <a class="brand-lockup" href="#gallery" onclick="switchTab('gallery');return false"><span class="brand-icon" aria-hidden="true"><i data-icon="library"></i></span><span class="wordmark">知识库<small>KNOWLEDGE ATLAS</small></span></a>
+    <button class="icon-button mobile-close" onclick="toggleNavigation(false)" aria-label="关闭导航">×</button>
   </div>
+  <button class="quick-search" onclick="focusWorkspaceSearch()"><i data-icon="search"></i><span>快速查找</span><kbd>⌘ K</kbd></button>
+  <div class="nav-label">我的工作区</div>
+  <nav class="tabs" aria-label="主要导航">
+    <button id="tab-gallery" class="on" onclick="switchTab('gallery')" aria-current="page"><i data-icon="grid"></i><span>工具图鉴</span><span id="nav-tool-count" class="nav-count"></span></button>
+    <button id="tab-search" onclick="switchTab('search')"><i data-icon="search"></i><span>全文检索</span></button>
+    <button id="tab-ask" onclick="switchTab('ask')"><i data-icon="spark"></i><span>知识问答</span></button>
+    <button id="tab-fav" onclick="switchTab('fav')"><i data-icon="bookmark"></i><span>我的收藏</span></button>
+    <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span>同步管理</span><span id="nav-sync-dot" hidden aria-label="同步进行中"></span></button>
+  </nav>
+  <div class="nav-label explore-label">发现关联</div>
+  <nav class="explore-links" aria-label="知识图谱">
+    <a href="/graph/projects" target="_blank" rel="noopener"><i data-icon="network"></i>项目图谱<span>↗</span></a>
+    <a href="/graph/skills" target="_blank" rel="noopener"><i data-icon="layers"></i>Skill 图谱<span>↗</span></a>
+    <a href="/graph" target="_blank" rel="noopener"><i data-icon="orbit"></i>话题图谱<span>↗</span></a>
+  </nav>
+  <div class="sidebar-bottom">
+    <details class="nav-dropdown workspace-settings">
+      <summary><i data-icon="settings"></i>工作区设置<i data-icon="chevron"></i></summary>
+      <div class="nav-popover">
+        <button id="stages-btn" onclick="toggleNavigation(false);openStages()">模型配置<i data-icon="chevron"></i></button>
+        <button id="keys-btn" onclick="toggleNavigation(false);openKeys()">API Key<span id="keys-dot">●</span></button>
+        <button id="mcp-btn" onclick="toggleNavigation(false);openMcp()">MCP 连接<span id="mcp-dot">●</span></button>
+        <button onclick="toggleNavigation(false);openShortcuts()">键盘快捷键<i data-icon="keyboard"></i></button>
+      </div>
+    </details>
+    <div class="library-status"><span id="stats">正在读取知识库…</span></div>
+  </div>
+</aside>
+<header id="topbar">
+  <button class="icon-button mobile-menu" onclick="toggleNavigation()" aria-label="打开导航" aria-expanded="false" aria-controls="sidebar"><i data-icon="menu"></i></button>
+  <strong>知识库</strong><span id="page-crumb">工具图鉴</span>
+  <button class="icon-button" onclick="focusWorkspaceSearch()" aria-label="快速查找"><i data-icon="search"></i></button>
 </header>
 <main id="main-content" tabindex="-1">
 <div id="gallerypanel">
@@ -140,122 +138,50 @@
 </div>
 
 <div id="pipepanel" style="display:none">
-  <div class="page-heading"><span class="eyebrow">KEEP YOUR KNOWLEDGE GROWING</span><h1>给知识库添一点新知<span class="title-dot">.</span></h1><p>管理内容来源，查看同步进度，让收集有条不紊。</p></div>
-  <!-- 来源采集器连接状态 -->
-  <div class="hit" id="pipe-source" style="display:flex;justify-content:space-between;align-items:center">
-    <div>
-      <b id="src-label">来源采集器</b>
-      <span id="src-status" class="badge">检查中…</span>
-      <span id="src-detail" style="font-size:12.5px;color:var(--muted);margin-left:8px"></span>
-    </div>
-    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:flex-end;min-width:0">
-      <select id="pipe-channel-current" aria-label="当前同步通道" onchange="changePipeChannel(this.value)">
-        <option value="">读取同步通道…</option>
-      </select>
-      <button class="ghost" id="src-manage" onclick="openTargets()"
-              style="padding:3px 12px;font-size:12.5px;display:none">管理订阅</button>
-      <a id="src-console" href="#" target="_blank"
-         style="font-size:12.5px;color:var(--accent);display:none">打开采集器配置 ↗</a>
-    </div>
+  <div class="pipe-page-heading"><div><h1>同步管理<span class="title-dot">.</span></h1><p>把新内容收进知识库，进度和待处理问题都在这里。</p></div>
+    <div class="pipe-actions"><button class="ghost" id="pipe-retry" onclick="retryFailed()" hidden>重试失败项</button><button id="pipe-run" onclick="openPipeModal()" disabled>读取状态…</button></div>
   </div>
-
-  <!-- 阶段卡片 -->
-  <div id="pipe-stages" style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin:12px 0"></div>
-
-  <!-- 操作区 -->
-  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
-    <button id="pipe-run" onclick="openPipeModal()">全流程同步</button>
-    <span id="pipe-running-channel" class="hint" role="status"></span>
-    <button id="pipe-retry" class="ghost" onclick="retryFailed()" style="display:none"
-            title="按上次失败的阶段自动编排:抓取(账号失败)→ 导出 → 回填空正文 → 索引 → 提取">重试失败项</button>
-    <span id="pipe-hint" style="flex:1;min-width:0;font-size:12.5px;color:var(--muted)">
-      抓取 → 导出 obs → 索引+向量 → 提取打标 → 条目化(工具/项目) → wiki(双链/实体页/日摘要/图谱)
-    </span>
-    <span style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--muted)">
-      <label style="display:flex;gap:4px;align-items:center;cursor:pointer">
-        <input type="checkbox" id="sched-on" onchange="saveSched()"> 每日定时
-      </label>
-      <input type="time" id="sched-time" value="07:30" onchange="saveSched()"
-             style="padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink)">
-      <select id="sched-channel" aria-label="定时同步通道" onchange="saveSched()">
-        <option value="">读取同步通道…</option>
-      </select>
-      <span id="sched-msg"></span>
-    </span>
+  <div class="pipe-source" id="pipe-source">
+    <div><strong id="src-label">来源采集器</strong><span id="src-status" class="badge">检查中…</span><p id="src-detail">正在检查所选通道</p></div>
+    <div class="pipe-source-actions"><select id="pipe-channel-current" aria-label="当前同步通道" onchange="changePipeChannel(this.value)"><option value="">读取通道…</option></select>
+      <button class="ghost" id="src-manage" onclick="openTargets()" style="display:none">管理订阅</button><a id="src-console" href="#" target="_blank" rel="noopener" style="display:none">采集器配置 ↗</a>
+      <button class="text-button" onclick="refreshPipeSource()">检查连接</button></div>
   </div>
-
-  <!-- 日志 -->
-  <div class="hit" style="max-height:300px;overflow-y:auto">
-    <div id="pipe-log" style="font-family:var(--font-mono);font-size:12px;color:#4A565F;white-space:pre-wrap">(暂无日志)</div>
+  <div id="pipe-connection" class="pipe-notice" hidden role="status"><span></span><button class="ghost" onclick="refreshPipe(true)">重新连接</button></div>
+  <section class="pipe-overview" aria-label="同步概况">
+    <div class="pipe-overview-main"><div><span class="pipe-section-label">当前状态</span><h2 id="pipe-state-title" role="status" tabindex="-1">正在读取同步状态</h2><p id="pipe-running-channel"></p><p id="pipe-run-scope"></p></div><div class="pipe-run-metrics"><b id="pipe-progress-label">—</b><span id="pipe-elapsed"></span></div></div>
+    <div class="pipe-progress-track" aria-hidden="true"><span id="pipe-progress-fill"></span></div>
+    <div class="pipe-overview-footer"><span id="pipe-state-hint">同步在后台执行，切换页面不会中断。</span><button class="ghost" id="pipe-stop" onclick="stopPipe()" hidden>本阶段结束后停止</button></div>
+  </section>
+  <div class="pipe-workbench">
+    <section class="pipe-stage-panel"><div class="pipe-section-heading"><h2>同步步骤</h2><span>每一步都有结果</span></div><div id="pipe-stages" aria-label="同步阶段"></div></section>
+    <section class="pipe-log-panel"><div class="pipe-section-heading"><h2>运行日志</h2><label><input id="pipe-log-follow" type="checkbox" checked onchange="togglePipeLogFollow()"> 跟随最新</label></div>
+      <div id="pipe-log-box" tabindex="0" aria-label="同步运行日志"><pre id="pipe-log">尚无运行记录</pre></div>
+      <div class="pipe-log-footer"><span id="pipe-log-note">保留最近 80 条</span><button id="pipe-log-latest" class="text-button" onclick="followPipeLog()" hidden>查看最新 ↓</button><button class="text-button" onclick="downloadPipeLog()">下载日志</button></div>
+    </section>
   </div>
+  <section class="pipe-schedule"><div><h2>每日定时同步</h2><p>按所选通道同步全部订阅。修改后保存，下一次定时任务生效。</p></div>
+    <fieldset id="sched-fields" disabled><label><input type="checkbox" id="sched-on" onchange="markSchedDirty()"> 启用定时</label><label>每天 <input type="time" id="sched-time" value="07:30" required oninput="markSchedDirty()"></label><select id="sched-channel" aria-label="定时同步通道" onchange="markSchedDirty()"><option value="">读取通道…</option></select></fieldset>
+    <div class="pipe-schedule-footer"><span id="sched-msg" role="status">正在读取定时设置…</span><button id="sched-reload" class="ghost" onclick="loadSched()" hidden>重新读取</button><button id="sched-save" class="ghost" onclick="saveSched()" disabled>保存设置</button></div>
+  </section>
 </div>
-
 </main>
 
 <div id="pipe-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closePipeModal()">
-  <div class="modal" style="width:min(640px,92vw);max-height:90vh;overflow-y:auto">
-    <h2>全流程同步</h2>
-    <p class="hint" style="margin:-8px 0 14px">选择时间段和公众号,抓完自动走 导出 → 索引 → 提取</p>
-
-    <div class="row">
-      <label for="pipe-channel" class="hint">同步通道</label>
-      <select id="pipe-channel" onchange="changePipeChannel(this.value)" style="display:block;width:100%;margin-top:6px">
-        <option value="">读取同步通道…</option>
-      </select>
-      <div id="pipe-channel-hint" class="hint" style="margin-top:8px"></div>
-    </div>
-
-    <!-- 时间段 -->
-    <div class="row" style="position:relative">
-      <div style="font-size:12px;color:var(--muted);margin-bottom:6px">时间段</div>
-      <button class="ghost" id="pipe-range-btn" onclick="togglePipeRangePop(event)"
-              style="padding:7px 14px;font-size:13.5px">
-        &#128197; <span id="pipe-range-label">不限时间</span>
-        <span style="opacity:.55;margin-left:2px">&#9662;</span>
-      </button>
-      <div id="pipe-range-pop" style="display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:60;
-           width:260px;background:var(--card);border:1px solid var(--line);border-radius:12px;
-           box-shadow:0 12px 36px rgba(0,0,0,.14);overflow:hidden">
-        <div style="padding:10px 14px 4px;font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.06em">快速选择</div>
-        <div id="pipe-range-presets"></div>
-        <div style="border-top:1px solid var(--line);padding:12px 14px">
-          <div style="font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.06em;margin-bottom:8px">自定义范围</div>
-          <div style="display:flex;gap:6px;align-items:center">
-            <input type="date" id="pipe-custom-from" style="flex:1;min-width:0">
-            <span style="color:var(--muted);font-size:12px">—</span>
-            <input type="date" id="pipe-custom-to" style="flex:1;min-width:0">
-          </div>
-          <button onclick="applyPipeCustomRange()" style="width:100%;margin-top:8px;padding:7px 0;font-size:13px">应用</button>
-          <div id="pipe-custom-err" class="field-err"></div>
-        </div>
+  <div class="modal pipe-setup">
+    <div class="pipe-setup-heading"><div><h2>新建同步</h2><p class="hint">选择来源与时间范围，自动完成后续六个步骤。</p></div><button class="icon-button" onclick="closePipeModal()" aria-label="关闭同步配置">×</button></div>
+    <div id="pipe-setup-error" class="pipe-notice" hidden role="alert"></div>
+    <fieldset id="pipe-fields">
+      <div class="row"><label for="pipe-channel">同步通道</label><select id="pipe-channel" onchange="changePipeChannel(this.value)"><option value="">读取通道…</option></select><div id="pipe-channel-hint" class="hint"></div></div>
+      <div class="row pipe-range-row"><label>时间范围</label><button class="ghost" id="pipe-range-btn" onclick="togglePipeRangePop(event)" aria-expanded="false" aria-controls="pipe-range-pop"><span id="pipe-range-label">不限时间</span> ▾</button>
+        <div id="pipe-range-pop" style="display:none"><div id="pipe-range-presets"></div><div class="pipe-custom-range"><label>开始日期<input type="date" id="pipe-custom-from"></label><label>结束日期<input type="date" id="pipe-custom-to"></label><button onclick="applyPipeCustomRange()">应用日期</button><div id="pipe-custom-err" class="field-err" role="alert"></div></div></div>
+        <p id="pipe-range-hint" class="hint"></p>
       </div>
-      <div id="pipe-range-hint" class="hint" style="margin-top:8px"></div>
-    </div>
-
-    <!-- 公众号多选 -->
-    <div class="row" id="pipe-acct-block">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <span style="font-size:12px;color:var(--muted)">公众号 <b id="pipe-acct-count" style="color:var(--ink)"></b></span>
-        <span style="display:flex;gap:4px">
-          <button class="ghost" onclick="pipeSelectAll()" style="padding:2px 10px;font-size:12px">全选</button>
-          <button class="ghost" onclick="pipeSelectNone()" style="padding:2px 10px;font-size:12px">全不选</button>
-        </span>
+      <div class="row" id="pipe-acct-block"><div class="pipe-acct-heading"><label for="pipe-acct-search">公众号 <b id="pipe-acct-count"></b></label><span><button class="text-button" id="pipe-select-all" onclick="pipeSelectAll()">全选</button><button class="text-button" id="pipe-select-none" onclick="pipeSelectNone()">清空选择</button></span></div>
+        <input id="pipe-acct-search" placeholder="搜索公众号名称…" oninput="renderPipeAcctList()"><div id="pipe-acct-list" aria-busy="false"></div>
       </div>
-      <input id="pipe-acct-search" placeholder="搜索公众号名称…" oninput="renderPipeAcctList()"
-             style="width:100%;padding:9px 14px;font:inherit;font-size:13.5px;border:1px solid var(--line);
-                    border-radius:10px;background:var(--bg);outline:none;margin-bottom:8px">
-      <div id="pipe-acct-list" style="max-height:240px;overflow-y:auto;border:1px solid var(--line);
-           border-radius:10px;background:var(--bg)"></div>
-    </div>
-
-    <!-- 预估 -->
-    <div class="row" id="pipe-est" style="background:var(--tag-bg);border-radius:10px;padding:10px 14px;
-         font-size:12.5px;line-height:1.6"></div>
-
-    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
-      <button class="ghost" onclick="closePipeModal()">取消</button>
-      <button id="pipe-start" onclick="startPipeFromModal()">开始同步</button>
-    </div>
+    </fieldset>
+    <div class="pipe-setup-footer"><div id="pipe-est" class="hint" role="status"></div><div><button class="ghost" onclick="closePipeModal()">暂不执行</button><button id="pipe-start" onclick="startPipeFromModal()" disabled>开始同步</button></div></div>
   </div>
 </div>
 
@@ -439,6 +365,9 @@
 <script src="/static/js/settings.js"></script>
 <script src="/static/js/pipe_channels.js"></script>
 <script src="/static/js/pipe.js"></script>
+<script src="/static/js/pipe_view.js"></script>
+<script src="/static/js/pipe_setup.js"></script>
+<script src="/static/js/pipe_schedule.js"></script>
 <script src="/static/js/targets.js"></script>
 <script src="/static/js/gallery.js"></script>
 <script src="/static/js/workspace.js"></script>

@@ -1,0 +1,201 @@
+// Run through Playwright CLI against tests/serve_workspace.py (headless).
+// Every API route is isolated. No collector, schedule or model is actually invoked.
+async page => {
+  const checks = [], errors = [], writes = [];
+  const check = (name, value) => { if (!value) throw new Error(name); checks.push(name); };
+  const onError = e => errors.push(e.message);
+  page.on('pageerror', onError);
+  const origin = page.url().match(/^https?:\/\/[^/]+/)[0];
+  const keys = ['crawl','export','index','extract','projects','wiki'];
+  const emptyStages = () => Object.fromEntries(keys.map(k=>[k,{status:'pending',detail:''}]));
+  let state = {running:false,stages:{},log:[],stop_supported:true};
+  let holdSource = true, releaseSource = null, holdStatus = false, releaseStatus = null;
+  let statusCount = 0, statusFail = false, holdStop = false, releaseStop = null;
+  let holdB = false, releaseB = null, accountFail = false, startFail = false;
+  let holdStart = false, releaseStart = null, scheduleFail = false;
+  const accounts = {a:['公众号甲','公众号乙','公众号丙 "<测试>'],b:['另一通道甲','另一通道乙']};
+  const reply = (route,data,status=200) => route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)}).catch(()=>{});
+  const copy = value => JSON.parse(JSON.stringify(value));
+  const handler = async route => {
+    const request = route.request(), url = request.url();
+    const path = url.slice(origin.length).split('?')[0];
+    if (request.method() !== 'GET') writes.push({path,body:request.postDataJSON()});
+    if (path === '/api/pipeline/status') {
+      if (!url.includes('source=false')) {
+        if (holdSource) { releaseSource=()=>reply(route,{source:{online:true,label:'测试来源',message:'已连接'}}); return; }
+        return reply(route,{source:{online:true,label:'测试来源',message:'已连接'}});
+      }
+      if (url.includes('pending=true')) return reply(route,{...copy(state),pending:{extract:0}});
+      statusCount++;
+      if (holdStatus) { releaseStatus=()=>reply(route,copy(state)); return; }
+      return reply(route,statusFail?{detail:'测试网络中断'}:copy(state),statusFail?503:200);
+    }
+    if (path === '/api/pipeline/accounts') {
+      const channel = url.match(/[?&]channel=([^&]*)/)?.[1];
+      if (channel==='b' && holdB) { releaseB=()=>reply(route,{accounts:accounts.b}); return; }
+      return reply(route,accountFail?{detail:'测试列表加载失败'}:{accounts:accounts[channel] || []},accountFail?503:200);
+    }
+    if (path === '/api/pipeline/stop') {
+      if (holdStop) { releaseStop=()=>{state.stop_requested=true;return reply(route,{ok:true});};return; }
+      state.stop_requested=true; return reply(route,{ok:true});
+    }
+    if (path === '/api/pipeline/run') {
+      if (startFail) return reply(route,{detail:'测试启动失败，请检查采集器'},500);
+      const start = () => {
+        state={running:true,stop_requested:false,stop_supported:true,started_at:'2026-09-26 12:00:00',crawl_filter:request.postDataJSON(),stages:emptyStages(),log:['同步开始']};
+        state.stages.crawl={status:'running',detail:'抓取公众号甲'};
+        return reply(route,{ok:true});
+      };
+      if (holdStart) { releaseStart=start;return; }
+      return start();
+    }
+    if (path === '/api/pipeline/retry-failed') {
+      state.running=true;state.stages.extract={status:'running',detail:'重试提取'};return reply(route,{ok:true,plan:'extract'});
+    }
+    if (path === '/api/pipeline/schedule' && request.method()==='POST') return reply(route,scheduleFail?{detail:'测试保存失败'}:request.postDataJSON(),scheduleFail?500:200);
+    const fixtures = {
+      '/api/pipeline/channels':{default:'a',channels:[{id:'a',label:'凭证通道'},{id:'b',label:'本机通道'}]},
+      '/api/pipeline/schedule':{enabled:false,time:'07:30',channel:'a'},
+      '/api/sources/targets':{manageable:false},
+      '/api/stats':{documents:100,vectors:100,entities:50,extracted:90},
+      '/api/facets':{sources:[],accounts:[],topics:[],entities:[]},
+      '/api/projects':{tools:[],kinds:{},topics:[],total_entries:0},
+      '/api/favorites':{doc_paths:[],favorites:[],counts:{inbox:0,done:0,archived:0},stale:0},
+      '/api/favorites/settings':{model:'openai:test'}, '/api/favorites/triage':{running:false},
+      '/api/models':{models:[],default:''}, '/api/keys':{keys:{}}, '/api/mcp/status':{config:'{}',tools:[]},
+      '/api/conversations':{conversations:[]},
+    };
+    return reply(route,fixtures[path] || {});
+  };
+  await page.route('**/api/**',handler);
+  const refresh = () => page.evaluate(()=>refreshPipe());
+  const countWrites = path => writes.filter(w=>w.path===path).length;
+  const finish = () => {
+    state.running=false;state.finished_at='2026-09-26 12:06:00';
+    state.stages=Object.fromEntries(keys.map(k=>[k,{status:'ok',detail:'完成'}]));
+    state.stopped=false;state.stop_requested=false;
+  };
+  try {
+    await page.setViewportSize({width:1440,height:1100});
+    await page.emulateMedia({reducedMotion:'reduce'});
+    await page.evaluate(()=>localStorage.removeItem('kb-sync-channel'));
+    await page.goto(origin+'/?pipeline-test='+Date.now()+'#pipe');
+    await page.waitForFunction(()=>!document.getElementById('pipe-run').disabled);
+    check('慢采集器探测不阻塞同步状态',holdSource && !!releaseSource && await page.locator('.pipe-stage').count()===6);
+    holdSource=false;await releaseSource();
+    state={running:true,stop_supported:true,started_at:'2026-09-26 12:00:00',crawl_filter:{channel:'a',accounts:['公众号甲']},stages:emptyStages(),log:Array.from({length:80},(_,i)=>`[12:00:${String(i).padStart(2,'0')}] 处理测试内容 ${i}`)};
+    state.stages.crawl={status:'running',detail:'下载正文 12/40 篇',failures:[{title:'待补文章',reason:'等待来源恢复',pending:true}]};
+    state.stages.extract={status:'running',detail:'正在处理存量文档'};
+    await refresh();
+    check('并行步骤都显示执行中',(await page.locator('#pipe-state-title').textContent()).includes('抓取内容 + 提取知识'));
+    check('运行时禁用重复启动与切换通道',await page.locator('#pipe-run').isDisabled() && await page.locator('#pipe-channel-current').isDisabled());
+    check('运行时侧栏有后台任务提示',await page.locator('#nav-sync-dot').isVisible());
+    await page.locator('#pipe-stage-crawl summary').click();
+    await page.locator('#pipe-log-box').evaluate(el=>{el.scrollTop=0;el.dispatchEvent(new Event('scroll'));});
+    check('阅读旧日志自动暂停跟随',!await page.locator('#pipe-log-follow').isChecked());
+    state.log.push('[12:02:00] 新进展');state.stages.crawl.detail='下载正文 13/40 篇';
+    await refresh();
+    check('刷新保留展开明细与键盘焦点',await page.locator('#pipe-stage-crawl details').evaluate(el=>el.open && el.contains(document.activeElement)));
+    check('刷新不会抢走日志阅读位置',await page.locator('#pipe-log-box').evaluate(el=>el.scrollTop===0));
+    await page.locator('#pipe-log-latest').click();
+    check('可一键恢复跟随最新日志',await page.locator('#pipe-log-follow').isChecked() && await page.locator('#pipe-log-box').evaluate(el=>el.scrollHeight-el.scrollTop-el.clientHeight<3));
+    await page.setViewportSize({width:1024,height:1100});
+    await page.waitForFunction(()=>{const el=document.getElementById('pipe-log-box');return el.scrollHeight-el.scrollTop-el.clientHeight<3;});
+    check('调整窗口后仍能跟随最新日志',await page.locator('#pipe-log-follow').isChecked());
+    await page.setViewportSize({width:1440,height:1100});
+    await page.screenshot({path:'output/playwright/sync-running-desktop.png'});
+    statusFail=true;await refresh();
+    check('断线保留现有结果并提示重连',await page.locator('#pipe-connection').isVisible() && (await page.locator('#pipe-stage-crawl .pipe-stage-detail').textContent()).includes('13/40'));
+    check('状态不确定时禁用写操作',await page.locator('#pipe-stop').isDisabled());
+    statusFail=false;await page.locator('#pipe-connection button').click();
+    await page.waitForFunction(()=>document.getElementById('pipe-connection').hidden);
+    check('重连后恢复操作',!await page.locator('#pipe-stop').isDisabled());
+    holdStatus=true;const beforeStatus=statusCount;
+    await page.evaluate(()=>{refreshPipe();refreshPipe();refreshPipe();});
+    await page.waitForFunction(()=>!!pipeRequest);
+    await page.waitForTimeout(100);
+    check('慢状态请求不会堆积并发轮询',statusCount===beforeStatus+1);
+    holdStatus=false;await releaseStatus();await page.waitForFunction(()=>!pipeRequest);
+    holdStop=true;await page.locator('#pipe-stop').click();
+    check('停止提交有明确等待反馈',await page.locator('#pipe-stop').isDisabled() && (await page.locator('#pipe-stop').textContent()).includes('等待'));
+    await page.locator('#pipe-stop').evaluate(el=>el.click());
+    check('停止请求防重复提交',countWrites('/api/pipeline/stop')===1);
+    await releaseStop();await page.waitForFunction(()=>document.getElementById('pipe-state-title').textContent.includes('收尾'));
+    check('停止不伪装成瞬间完成',await page.locator('#pipe-run').isDisabled());
+    finish();state.stopped=true;state.stages.wiki={status:'stopped',detail:'已停止，未继续执行'};
+    await refresh();
+    check('停止后说明结果保留且允许新建',(await page.locator('#pipe-state-hint').textContent()).includes('已保留') && !await page.locator('#pipe-run').isDisabled());
+    await page.locator('#pipe-run').click();await page.locator('input[data-acct]').first().waitFor();
+    check('公众号是可键盘操作的真实复选框',await page.getByRole('checkbox',{name:'公众号丙 "<测试>',exact:true}).isChecked());
+    await page.getByRole('checkbox',{name:'公众号甲',exact:true}).uncheck();
+    check('单选后不重建列表丢焦点',await page.getByRole('checkbox',{name:'公众号甲',exact:true}).evaluate(el=>el===document.activeElement));
+    await page.locator('#pipe-range-btn').click();await page.getByRole('button',{name:'近 7 天',exact:true}).click();
+    check('近7天包含今天共7天',await page.evaluate(()=>{const p=pipePresets()[2];return Math.round((Date.parse(p.to)-Date.parse(p.from))/86400000)===6;}));
+    await page.locator('#pipe-acct-search').fill('公众号乙');await page.locator('#pipe-select-none').click();
+    check('取消搜索结果不会清空其他已选账号',(await page.locator('#pipe-acct-count').textContent()).includes('已选 1'));
+    await page.locator('#pipe-select-all').click();
+    await page.getByRole('button',{name:'暂不执行',exact:true}).click();
+    await page.locator('#pipe-run').click();await page.locator('input[data-acct]').first().waitFor();
+    check('重开配置保留账号与日期草稿',!await page.getByRole('checkbox',{name:'公众号甲',exact:true}).isChecked() && (await page.locator('#pipe-range-label').textContent())==='近 7 天');
+    holdB=true;await page.locator('#pipe-channel').selectOption('b');
+    check('切换通道清空旧列表并禁用启动',await page.locator('#pipe-start').isDisabled() && await page.locator('input[data-acct]').count()===0);
+    await page.locator('#pipe-channel').selectOption('a');await page.locator('input[data-acct]').first().waitFor();
+    holdB=false;if(releaseB)await releaseB();
+    check('旧通道慢响应不会覆盖当前列表',await page.getByRole('checkbox',{name:'公众号乙',exact:true}).isVisible() && await page.getByRole('checkbox',{name:'另一通道甲',exact:true}).count()===0);
+    accountFail=true;await page.locator('#pipe-channel').selectOption('b');await page.getByRole('button',{name:'重新读取公众号'}).waitFor();
+    check('列表失败有就地重试且不会错误启动',await page.locator('#pipe-setup-error').isVisible() && await page.locator('#pipe-start').isDisabled());
+    accountFail=false;await page.getByRole('button',{name:'重新读取公众号'}).click();await page.getByRole('checkbox',{name:'另一通道甲',exact:true}).waitFor();
+    check('新通道加载对应账号',await page.locator('input[data-acct]').count()===2);
+    startFail=true;await page.locator('#pipe-start').click();
+    await page.waitForFunction(()=>document.getElementById('pipe-setup-error').textContent.includes('同步未启动') && !pipeAction);
+    check('启动失败保留表单并给出具体原因',await page.locator('#pipe-modal').isVisible() && (await page.locator('#pipe-setup-error').textContent()).includes('测试启动失败'));
+    startFail=false;holdStart=true;const beforeStart=countWrites('/api/pipeline/run');await page.locator('#pipe-start').click();
+    check('启动期间锁定表单',await page.locator('#pipe-channel').isDisabled() && await page.locator('#pipe-start').isDisabled());
+    await page.locator('#pipe-start').evaluate(el=>el.click());
+    check('启动防重复提交',countWrites('/api/pipeline/run')===beforeStart+1);
+    await releaseStart();await page.waitForFunction(()=>document.getElementById('pipe-modal').style.display==='none' && !pipeAction);
+    check('启动后焦点转到运行状态',await page.locator('#pipe-state-title').evaluate(el=>el===document.activeElement));
+    const submitted=writes.filter(w=>w.path==='/api/pipeline/run').at(-1).body;
+    check('请求使用正确通道及明确账号范围',submitted.channel==='b' && submitted.accounts.join('|')===accounts.b.join('|'));
+    await page.locator('#tab-gallery').click();
+    check('离开同步页仍保留后台运行提示',await page.locator('#nav-sync-dot').isVisible());
+    finish();state.stages.extract={status:'error',detail:'失败 1',failures:[{title:'测试文档',reason:'模型暂不可用'}]};await refresh();
+    await page.locator('#tab-pipe').click();await page.waitForFunction(()=>!document.getElementById('pipe-retry').hidden);
+    check('部分失败不显示全成功并提供重试',(await page.locator('#pipe-state-title').textContent()).includes('需处理'));
+    await page.locator('#pipe-retry').click();await page.waitForFunction(()=>!pipeAction && pipeSnapshot.running);
+    check('重试有运行反馈且不重复启动',countWrites('/api/pipeline/retry-failed')===1 && await page.locator('#pipe-run').isDisabled());
+    finish();await refresh();
+    const beforeSchedule=countWrites('/api/pipeline/schedule');
+    await page.locator('#sched-on').check();await page.locator('#sched-time').fill('08:45');await page.locator('#sched-channel').selectOption('b');
+    check('修改定时字段不会隐式保存',countWrites('/api/pipeline/schedule')===beforeSchedule && (await page.locator('#sched-msg').textContent()).includes('未保存'));
+    scheduleFail=true;await page.locator('#sched-save').click();await page.waitForFunction(()=>!schedSaving);
+    check('定时保存失败保留编辑并允许重试',(await page.locator('#sched-msg').textContent()).includes('未保存') && await page.locator('#sched-time').inputValue()==='08:45' && !await page.locator('#sched-save').isDisabled());
+    scheduleFail=false;await page.locator('#sched-save').click();await page.waitForFunction(()=>!schedSaving);
+    check('定时整组设置一次保存',JSON.stringify(writes.filter(w=>w.path==='/api/pipeline/schedule').at(-1).body)===JSON.stringify({enabled:true,time:'08:45',channel:'b'}) && await page.locator('#sched-save').isDisabled());
+    await page.setViewportSize({width:375,height:812});
+    check('手机同步页面无横向溢出',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+    check('同一同步任务提示不堆叠',await page.locator('[data-toast-key=pipeline]').count()<=1);
+    await page.locator('[data-toast-key=pipeline] .toast-x').click().catch(()=>{});
+    await page.evaluate(()=>window.scrollTo(0,0));
+    await page.screenshot({path:'output/playwright/sync-mobile.png'});
+    await page.locator('#pipe-run').click();await page.locator('input[data-acct]').first().waitFor();
+    await page.locator('#pipe-range-btn').click();
+    await page.locator('#pipe-custom-from').fill('2026-09-20');await page.locator('#pipe-custom-to').fill('2026-09-10');
+    await page.getByRole('button',{name:'应用日期',exact:true}).click();
+    check('日期倒置在表单内提示',(await page.locator('#pipe-custom-err').textContent()).includes('不能晚于'));
+    check('未应用日期时禁用启动避免误用旧范围',await page.locator('#pipe-start').isDisabled());
+    check('手机日期编辑无横向溢出',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+    check('手机长表单标题和底部操作保持可见',await page.evaluate(()=>{const modal=document.querySelector('.pipe-setup').getBoundingClientRect(),title=document.querySelector('.pipe-setup h2').getBoundingClientRect(),footer=document.querySelector('.pipe-setup-footer').getBoundingClientRect();return title.top>=modal.top && footer.bottom<=modal.bottom+1;}));
+    await page.screenshot({path:'output/playwright/sync-setup-mobile.png'});
+    await page.keyboard.press('Escape');
+    check('Escape先关闭日期选择并返回焦点',await page.locator('#pipe-range-btn').evaluate(el=>el===document.activeElement && el.getAttribute('aria-expanded')==='false'));
+    await page.keyboard.press('Escape');
+    check('关闭配置返回原入口焦点',await page.locator('#pipe-run').evaluate(el=>el===document.activeElement));
+    check('无未处理前端异常',errors.length===0);
+    return {passed:checks.length,checks,errors,isolatedWrites:writes};
+  } finally {
+    await page.evaluate(()=>{invalidatePipeStatus();});
+    page.off('pageerror',onError);
+    await page.unroute('**/api/**',handler);
+  }
+}

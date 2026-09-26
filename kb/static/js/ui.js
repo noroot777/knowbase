@@ -20,12 +20,14 @@ function toastHost() {
 }
 
 /** 轻提示。text=一句话结论,detail=次要说明(小字,可长)。type: err|ok|info */
-function toast(text, { type = 'err', detail = '', ms } = {}) {
+function toast(text, { type = 'err', detail = '', ms, key = '' } = {}) {
   const host = toastHost();
+  if (key) dismissToastGroup(key);
   while (host.children.length >= TOAST_MAX) host.firstElementChild.remove();
 
   const el = document.createElement('div');
   el.className = 'toast ' + type;
+  if (key) el.dataset.toastKey = key;
   el.innerHTML =
     `<span class="toast-ic">${TOAST_ICON[type] || ''}</span>` +
     `<div class="toast-body"><b>${esc(text)}</b>` +
@@ -43,6 +45,12 @@ function toast(text, { type = 'err', detail = '', ms } = {}) {
   el.querySelector('.toast-x').onclick = close;
   timer = setTimeout(close, ms ?? TOAST_MS[type] ?? 4500);
   return close;
+}
+
+function dismissToastGroup(key) {
+  document.querySelectorAll('[data-toast-key]').forEach(el => {
+    if (el.dataset.toastKey === key) el.remove();
+  });
 }
 
 /** 确认框(取代原生 confirm)。返回 Promise<boolean>,Esc / 点遮罩 = 取消 */

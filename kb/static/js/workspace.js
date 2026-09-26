@@ -3,7 +3,7 @@ const WORKSPACE_TITLES = { gallery: '工具图鉴', search: '全文检索', ask:
 let activeTab = 'gallery';
 let restoringLocation = false;
 const tabScroll = new Map();
-const compactNavigation = matchMedia('(max-width:960px)');
+const compactNavigation = matchMedia('(max-width:900px)');
 
 function saveWorkspaceLocation(push = false) {
   if (restoringLocation) return;
@@ -106,8 +106,8 @@ function syncOverlays() {
   const prev = overlayTop;
   if (next && next !== prev && !focusReturns.has(next)) focusReturns.set(next, document.activeElement);
   overlayTop = next;
-  // The mobile menu lives inside the header. Only its siblings may be inert.
-  for (const el of [$('main-content'), ...$('topbar').children, ...dialogs]) el.inert = !!next && el !== next;
+  // Sidebar and mobile header are siblings; never inert an active dialog ancestor.
+  for (const el of [$('main-content'), $('sidebar'), $('topbar'), ...dialogs]) el.inert = !!next && el !== next;
   if (!next && compactNavigation.matches) $('sidebar').inert = true;
   document.body.classList.toggle('overlay-open', !!next);
   if (next === prev) return;
@@ -129,7 +129,7 @@ document.addEventListener('keydown', e => {
   if (overlayTop) {
     if (e.key === 'Escape' && !overlayTop.classList.contains('confirm-mask')) {
       e.preventDefault(); e.stopImmediatePropagation();
-      if (overlayTop.id === 'pipe-modal' && $('pipe-range-pop').style.display !== 'none') $('pipe-range-pop').style.display = 'none';
+      if (overlayTop.id === 'pipe-modal' && $('pipe-range-pop').style.display !== 'none') { closePipeRange(); $('pipe-range-btn').focus(); }
       else overlayClosers[overlayTop.id]?.();
     } else if (e.key === 'Tab') {
       const items = visibleFocusables(overlayTop);

@@ -1,0 +1,102 @@
+// Patch stable stage nodes; polling must not steal focus, close details or jump logs.
+const PIPE_STATUS = { pending: '等待中', running: '执行中', ok: '已完成', skipped: '已跳过', error: '需处理', stopped: '未执行', '': '未开始' };
+function pipeHasFailure(stage) {
+  return stage?.status === 'error' || /失败 [1-9]|\d+ 个账号失败/.test(stage?.detail || '');
+}
+function pipeResult(s) { return s.running ? s : s.last_run || s; }
+function pipeDuration(start, finish) {
+  const from = new Date((start || '').replace(' ', 'T')).getTime();
+  const to = finish ? new Date(finish.replace(' ', 'T')).getTime() : Date.now();
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return '';
+  const minutes = Math.floor(Math.max(0, to - from) / 60000);
+  return minutes < 1 ? '不到 1 分钟' : minutes < 60 ? `${minutes} 分钟` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`;
+}
+function initPipeStageRows() {
+  if ($('pipe-stages').children.length) return;
+  $('pipe-stages').innerHTML = Object.entries(STAGE_META).map(([key, meta], i) => `
+    <div class="pipe-stage" id="pipe-stage-${key}" data-status="">
+      <span class="pipe-stage-number">${i + 1}</span><div><h3>${meta.name}</h3><p class="pipe-stage-desc">${meta.desc}</p><p class="pipe-stage-detail"></p><p class="pipe-stage-pending" hidden></p>
+      <details hidden><summary></summary><div class="pipe-failures"></div></details></div><span class="pipe-stage-status"></span>
+    </div>`).join('');
+}
+function renderPipeState(s) {
+  initPipeStageRows();
+  const result = pipeResult(s), stages = result.stages || {};
+  for (const key of Object.keys(STAGE_META)) {
+    const st = stages[key] || { status: '', detail: '' }, row = $('pipe-stage-' + key);
+    const status = pipeHasFailure(st) ? 'error' : st.status || '';
+    row.dataset.status = status;
+    row.querySelector('.pipe-stage-status').textContent = PIPE_STATUS[status] || '状态未知';
+    row.querySelector('.pipe-stage-detail').textContent = st.detail || (s.running && status === 'pending' ? '前序步骤结束后自动开始' : '');
+    const pending = row.querySelector('.pipe-stage-pending');
+    pending.hidden = s.running || pipePending[key] == null;
+    pending.textContent = pipePending[key] != null ? `当前待处理 ${pipePending[key]} 项` : '';
+    const details = row.querySelector('details'), failures = st.failures || [];
+    details.hidden = !failures.length;
+    const waiting = failures.every(f => f.pending);
+    details.querySelector('summary').textContent = `${waiting ? '待处理' : '问题'}明细 · ${failures.length} 项`;
+    const list = details.querySelector('.pipe-failures');
+    const signature = JSON.stringify(failures);
+    if (list.dataset.signature !== signature) {
+      const scroll = list.scrollTop;
+      list.innerHTML = failures.map(f => `<p><b>${esc(f.title || '未命名内容')}</b><span>${esc(f.reason || '')}</span></p>`).join('');
+      list.dataset.signature = signature; list.scrollTop = scroll;
+    }
+  }
+  const values = Object.values(stages), failed = values.filter(pipeHasFailure).length;
+  const completed = values.filter(st => st.status === 'ok' && !pipeHasFailure(st)).length;
+  const settled = values.filter(st => ['ok','error','skipped','stopped'].includes(st.status)).length;
+  const active = Object.keys(STAGE_META).filter(k => stages[k]?.status === 'running').map(k => STAGE_META[k].name);
+  const skipped = values.filter(st => st.status === 'skipped').length;
+  let title = '准备好收录新内容';
+  if (s.running) title = s.stop_requested ? '正在收尾，随后停止' : active.length ? active.join(' + ') : '同步正在启动';
+  else if (result.stopped) title = '同步已停止';
+  else if (failed) title = `同步结束，${failed} 个步骤需处理`;
+  else if (result.finished_at) title = skipped ? '同步结束，部分步骤已跳过' : '同步已完成';
+  if ($('pipe-state-title').textContent !== title) $('pipe-state-title').textContent = title;
+  const filter = result.crawl_filter || {}, channel = pipeChannels.find(c => c.id === filter.channel);
+  $('pipe-running-channel').textContent = filter.channel ? `${s.running ? '本次' : '上次'}通道：${channel?.label || filter.channel}` : '选择来源后开始一次同步';
+  $('pipe-run-scope').textContent = filter.channel ? `${filter.accounts?.length ? filter.accounts.length + ' 个指定公众号' : '全部订阅'} · ${filter.since_date ? filter.since_date + ' 至 ' + filter.until_date : '不限时间'}${result.finished_at ? ' · ' + result.finished_at + ' 结束' : ''}` : '';
+  $('pipe-progress-label').textContent = `${completed} / 6 完成`;
+  const duration = pipeDuration(result.started_at, s.running ? '' : result.finished_at);
+  $('pipe-elapsed').textContent = duration ? `${s.running ? '已运行' : '耗时'} ${duration}` : '';
+  $('pipe-progress-fill').style.width = Math.round(settled / 6 * 100) + '%';
+  $('pipe-state-hint').textContent = s.stop_requested && s.running ? '正在等待执行中的任务结束，不会启动后续步骤；不会强行中断写入。' : s.running ? '正在后台同步，切换工作区或关闭配置窗口都不会中断。' : result.stopped ? '已完成结果已保留。可重新配置同步，已有内容会按现有规则去重。' : failed ? '展开问题明细查看原因，修复后可重试失败项。' : skipped ? `${skipped} 个步骤被跳过，具体原因见下方。` : '同步在后台执行，切换页面不会中断。';
+  $('pipe-retry').hidden = s.running || !(failed || pipePending.extract > 0);
+  renderPipeLog((s.log?.length ? s.log : result.log) || [], result.finished_at);
+  renderPipeButtons();
+}
+function renderPipeLog(lines, finishedAt) {
+  const log = $('pipe-log'), box = $('pipe-log-box');
+  const text = lines.length ? lines.join('\n') : finishedAt ? `上次结束于 ${finishedAt}，没有保留详细日志。` : '尚无运行记录。开始同步后，这里会实时显示进展。';
+  if (log.textContent === text) return;
+  const follow = $('pipe-log-follow').checked, top = box.scrollTop;
+  log.textContent = text;
+  if (follow) box.scrollTop = box.scrollHeight;
+  else box.scrollTop = top;
+  $('pipe-log-latest').hidden = follow;
+  $('pipe-log-note').textContent = follow ? '保留最近 80 条' : '已暂停跟随 · 有新进展';
+}
+function followPipeLog() {
+  $('pipe-log-follow').checked = true;
+  $('pipe-log-box').scrollTop = $('pipe-log-box').scrollHeight;
+  $('pipe-log-latest').hidden = true; $('pipe-log-note').textContent = '保留最近 80 条';
+}
+function togglePipeLogFollow() {
+  if ($('pipe-log-follow').checked) followPipeLog();
+  else { $('pipe-log-latest').hidden = false; $('pipe-log-note').textContent = '已暂停跟随'; }
+}
+$('pipe-log-box').addEventListener('scroll', () => {
+  const box = $('pipe-log-box');
+  if (box.scrollHeight - box.scrollTop - box.clientHeight > 32 && $('pipe-log-follow').checked) {
+    $('pipe-log-follow').checked = false; togglePipeLogFollow();
+  }
+});
+new ResizeObserver(() => {
+  if ($('pipe-log-follow').checked) $('pipe-log-box').scrollTop = $('pipe-log-box').scrollHeight;
+}).observe($('pipe-log-box'));
+function downloadPipeLog() {
+  const url = URL.createObjectURL(new Blob([$('pipe-log').textContent], { type: 'text/plain;charset=utf-8' }));
+  const a = document.createElement('a'); a.href = url; a.download = '知识库同步日志.txt'; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

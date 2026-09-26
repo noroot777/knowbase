@@ -143,7 +143,7 @@ document.addEventListener('click', e => {
 document.addEventListener('click', e => {
   const pop = $('pipe-range-pop');
   if (pop.style.display !== 'none' && !pop.contains(e.target) && !$('pipe-range-btn').contains(e.target)) {
-    pop.style.display = 'none';
+    closePipeRange();
   }
 });
 
