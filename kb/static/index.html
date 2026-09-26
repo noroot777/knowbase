@@ -27,7 +27,7 @@
     <a class="brand-lockup" href="#gallery" onclick="switchTab('gallery');return false"><span class="brand-icon" aria-hidden="true"><i data-icon="library"></i></span><span class="wordmark">知识库<small>KNOWLEDGE ATLAS</small></span></a>
     <button class="icon-button mobile-close" onclick="toggleNavigation(false)" aria-label="关闭导航">×</button>
   </div>
-  <button class="quick-search" onclick="focusWorkspaceSearch()"><i data-icon="search"></i><span>快速查找</span><kbd>⌘ K</kbd></button>
+  <button class="quick-search" onclick="focusWorkspaceSearch()" aria-label="快速查找" title="快速查找（⌘ / Ctrl + K）"><i data-icon="search"></i><span>快速查找</span><kbd>⌘ K</kbd></button>
   <div class="nav-label">我的工作区</div>
   <nav class="tabs" aria-label="主要导航">
     <button id="tab-gallery" class="on" onclick="switchTab('gallery')" aria-current="page"><i data-icon="grid"></i><span>工具图鉴</span><span id="nav-tool-count" class="nav-count"></span></button>
@@ -44,15 +44,15 @@
   </nav>
   <div class="sidebar-bottom">
     <details class="nav-dropdown workspace-settings">
-      <summary><i data-icon="settings"></i>工作区设置<i data-icon="chevron"></i></summary>
+      <summary aria-label="工作区设置"><i data-icon="settings"></i><span class="settings-label">设置</span><i data-icon="chevron"></i></summary>
       <div class="nav-popover">
         <button id="stages-btn" onclick="toggleNavigation(false);openStages()">模型配置<i data-icon="chevron"></i></button>
         <button id="keys-btn" onclick="toggleNavigation(false);openKeys()">API Key<span id="keys-dot">●</span></button>
         <button id="mcp-btn" onclick="toggleNavigation(false);openMcp()">MCP 连接<span id="mcp-dot">●</span></button>
         <button onclick="toggleNavigation(false);openShortcuts()">键盘快捷键<i data-icon="keyboard"></i></button>
+        <div class="library-status"><span id="stats">正在读取知识库…</span></div>
       </div>
     </details>
-    <div class="library-status"><span id="stats">正在读取知识库…</span></div>
   </div>
 </aside>
 <header id="topbar">
@@ -66,7 +66,7 @@
     <div class="intro-copy"><h1>发现值得探索的工具<span class="title-dot">.</span></h1><p>从读过的文章、看过的视频里，找到下一个灵感。</p>
       <div class="collection-meta"><span><strong id="g-total">—</strong> 个工具</span><span><strong id="g-records">—</strong> 条收录记录</span><span id="g-updated">正在读取最近收录</span></div>
     </div>
-    <button class="ask-invitation" onclick="switchTab('ask')"><span class="invitation-icon"><i data-icon="spark"></i></span><span><strong>有问题，让知识库帮你找</strong><small>带着问题探索，回答有据可循</small></span><i data-icon="arrow"></i></button>
+    <button class="ask-invitation" onclick="switchTab('ask')"><i data-icon="spark"></i><span>向知识库提问</span><i data-icon="arrow"></i></button>
   </section>
   <section class="gallery-controls" aria-label="筛选工具">
     <div class="gfilters">

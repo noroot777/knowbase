@@ -1,5 +1,5 @@
 /* Sync is a readable sequence with stable detail rows and an independent log. */
-.pipe-page-heading { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 24px; }
+.pipe-page-heading { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 20px; }
 .pipe-page-heading p, .pipe-schedule p { margin-top: 7px; color: var(--muted); font-size: 14px; }
 .pipe-actions, .pipe-source-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 #pipepanel button, #pipepanel select { min-height: 38px; font-size: 13px; }
@@ -15,7 +15,7 @@
 .pipe-overview { background: #fff; border: 1px solid var(--line); border-top: 3px solid var(--brand); border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; }
 .pipe-overview-main { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .pipe-section-label { font-size: 12px; color: var(--muted); }
-.pipe-overview h2 { font-size: 22px; line-height: 1.4; margin: 6px 0; }
+.pipe-overview h2 { font-size: 20px; line-height: 1.4; margin: 6px 0; }
 .pipe-overview p { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .pipe-run-metrics { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex-shrink: 0; }
 .pipe-run-metrics b { font: 600 20px/1.4 var(--font-display); }

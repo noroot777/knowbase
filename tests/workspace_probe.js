@@ -74,11 +74,17 @@ async page => {
     await page.goto(origin + '/?workspace-test=' + Date.now() + '#gallery');
     await page.locator('.gcard').first().waitFor();
     check('首屏增量渲染', await page.locator('.gcard').count() === 48);
-    check('桌面侧栏宽度为 176px', await page.locator('#sidebar').evaluate(el=>el.getBoundingClientRect().width===176));
+    check('桌面侧栏宽度为 88px', await page.locator('#sidebar').evaluate(el=>el.getBoundingClientRect().width===88));
     check('桌面不再显示顶部横条', !await page.locator('#topbar').isVisible());
-    check('内容区域紧随窄侧栏', await page.locator('#main-content').evaluate(el=>el.getBoundingClientRect().left===176));
+    check('内容区域紧随窄侧栏', await page.locator('#main-content').evaluate(el=>el.getBoundingClientRect().left===88));
     check('三个图谱入口直接可达', await page.locator('.explore-links a:visible').count()===3);
+    await page.locator('.quick-search').click();
+    check('窄栏搜索仍可点击并定位输入框', await page.locator('#g-q').evaluate(el=>el===document.activeElement));
     await page.locator('.workspace-settings summary').click();
+    check('设置浮层未被窄侧栏裁切', await page.locator('#keys-btn').evaluate(el=>{
+      const r=el.getBoundingClientRect();
+      return r.left>=88 && document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===el;
+    }));
     await page.keyboard.press('Escape');
     check('设置菜单 Escape 关闭并返回焦点', await page.locator('.workspace-settings').evaluate(el=>!el.open && document.activeElement===el.querySelector('summary')));
     await page.locator('.workspace-settings summary').click();
