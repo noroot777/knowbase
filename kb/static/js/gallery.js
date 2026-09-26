@@ -1,17 +1,18 @@
 // ── 图鉴视图(默认视图):工具/项目条目的图鉴式浏览 + 详情抽屉 ────────────────
 // 数据:进页面 fetch /api/projects 一次,之后全部内存过滤/排序。
-// 渲染:96 张/批增量出卡 + IntersectionObserver 哨兵(1445 个工具一次全渲染会卡)。
+// 渲染:48 张/批增量出卡，自动加载与显式加载按钮并存。
 
 const KIND_LABEL = { project: '开源项目', product: '产品', model: '模型',
                      research: '研究', org: '公司', other: '其他' };
 const KIND_ORDER = ['project', 'product', 'model', 'research', 'org', 'other'];
-const G_BATCH = 96;
+const G_BATCH = 48;
 const G_SRC = { gzh: 'dr-gzh-projects', video: 'dr-video-projects' };
 
 let gData = null;          // /api/projects 原始响应
 let gFiltered = [];        // 当前筛选结果
 let gRendered = 0;         // 已渲染张数
 const gState = { q: '', kind: '', topic: '', src: '', sort: 'recent' };
+let gTopicsExpanded = false;
 
 function kindCls(k) { return KIND_ORDER.includes(k) ? 'k-' + k : 'k-other'; }
 function kindLabel(k) { return KIND_LABEL[k] || k || '其他'; }
@@ -56,14 +57,47 @@ function renderKindSeg() {
   const kinds = KIND_ORDER.filter(k => counts[k])
     .concat(Object.keys(counts).filter(k => !KIND_ORDER.includes(k)));
   const seg = [['', `全部<b>${gData.tools.length}</b>`]].concat(
-    kinds.map(k => [k, `${kindLabel(k)}<b>${counts[k]}</b>`]));
+    kinds.map(k => [k, `${esc(kindLabel(k))}<b>${counts[k]}</b>`]));
   $('g-kinds').innerHTML = seg.map(([k, label]) =>
-    `<button class="${gState.kind === k ? 'on' : ''}" data-kind="${k}">${label}</button>`).join('');
+    `<button class="${gState.kind === k ? 'on' : ''}" aria-pressed="${gState.kind === k}" data-kind="${esc(k)}">${label}</button>`).join('');
 }
 
 function renderTopicChips() {
-  $('g-topics').innerHTML = (gData.topics || []).map(t =>
-    `<span class="gtopic ${gState.topic === t.value ? 'on' : ''}" data-topic="${esc(t.value)}">${esc(t.value)}<i>${t.n}</i></span>`).join('');
+  const all = gData.topics || [];
+  const shown = gTopicsExpanded ? all : all.filter((t, i) => i < 7 || t.value === gState.topic);
+  $('g-topics').innerHTML = shown.map(t =>
+    `<button class="gtopic ${gState.topic === t.value ? 'on' : ''}" aria-pressed="${gState.topic === t.value}" data-topic="${esc(t.value)}">${esc(t.value)}<i>${t.n}</i></button>`).join('');
+  $('g-topics').classList.toggle('expanded', gTopicsExpanded);
+  $('g-topic-toggle').hidden = all.length <= 7;
+  $('g-topic-toggle').textContent = gTopicsExpanded ? '收起主题' : '展开全部';
+  $('g-topic-toggle').setAttribute('aria-expanded', String(gTopicsExpanded));
+}
+
+function toggleTopics() { if (!gData) return; gTopicsExpanded = !gTopicsExpanded; renderTopicChips(); }
+
+function resetGalleryFilters() {
+  clearTimeout(gQTimer);
+  Object.assign(gState, { q: '', kind: '', topic: '', src: '', sort: 'recent' });
+  syncGalleryControls();
+  applyGalleryFilter();
+  $('g-q').focus();
+}
+
+function syncGalleryControls() {
+  $('g-q').value = gState.q;
+  $('g-src').value = gState.src;
+  $('g-sort').value = gState.sort;
+  if (gData) { renderKindSeg(); renderTopicChips(); }
+}
+
+function setGalleryView(view) {
+  const list = view === 'list';
+  $('g-grid').classList.toggle('list-view', list);
+  for (const mode of ['grid', 'list']) {
+    $('g-view-' + mode).classList.toggle('on', mode === view);
+    $('g-view-' + mode).setAttribute('aria-pressed', String(mode === view));
+  }
+  try { localStorage.setItem('kb-gallery-view', list ? 'list' : 'grid'); } catch {}
 }
 
 function applyGalleryFilter() {
@@ -90,24 +124,27 @@ function applyGalleryFilter() {
   gRendered = 0;
   $('g-grid').innerHTML = '';
   $('g-empty').style.display = list.length ? 'none' : '';
-  $('g-count').textContent =
-    `${list.length} / ${gData.tools.length} 个工具 · 共 ${gData.total_entries} 条记录`;
+  $('g-count').textContent = `${list.length.toLocaleString()} 个结果`;
+  $('g-section-title').textContent = gState.kind ? kindLabel(gState.kind) : '全部工具';
+  $('g-reset').hidden = !['q', 'kind', 'topic', 'src'].some(k => gState[k]);
+  if (typeof saveWorkspaceLocation === 'function') saveWorkspaceLocation();
   renderGalleryBatch();
+  updateGalleryFooter();
 }
 
 function gcardHtml(t) {
   const kc = kindCls(t.kind);
   const tags = (t.topics || []).slice(0, 3).map(x => `<span class="gtag">${esc(x)}</span>`).join('');
+  const glyph = { project: 'code', product: 'box', model: 'spark', research: 'orbit', org: 'network' }[t.kind] || 'layers';
   return `<button class="gcard" data-norm="${encodeURIComponent(t.norm)}" title="${esc(t.name)}">
-    <span class="gspine ${kc}"></span>
     <span class="gcard-body">
-      <span class="gcard-top"><span class="gname">${esc(t.name)}</span><span class="gkind ${kc}">${kindLabel(t.kind)}</span></span>
+      <span class="gcard-top"><span class="gmark ${kc}">${icon(glyph)}</span><span class="gcard-heading"><span class="gname">${esc(t.name)}</span><span class="gkind ${kc}">${esc(kindLabel(t.kind))}</span></span><span class="gcard-arrow" aria-hidden="true">↗</span></span>
       ${t.promo_soft ? '<span class="gpromo" title="这个工具的每一条记录都出自疑似软广">全部出自软广?</span>' : ''}
-      <span class="gsum">${esc(t.summary || '')}</span>
-      <span class="gstat"><span class="gtally">${tallySvg(t.n, 15)}</span>
-        <span class="gcount">${t.n} 次 · ${t.accounts} 个号</span>
+      <span class="gsum">${esc(t.summary || '还没有简介，打开收录记录了解更多。')}</span>
+      <span class="gtags">${tags}</span>
+      <span class="gstat"><span class="gtally">${tallySvg(Math.min(t.n, 5), 13)}</span>
+        <span class="gcount">${t.n} 次提及 · ${t.accounts} 个来源</span>
         <span class="gdate">${esc(String(t.latest || '').slice(0, 10))}</span></span>
-      ${tags ? `<span class="gtags">${tags}</span>` : ''}
     </span>
   </button>`;
 }
@@ -117,24 +154,38 @@ function renderGalleryBatch() {
   const next = gFiltered.slice(gRendered, gRendered + G_BATCH);
   gRendered += next.length;
   $('g-grid').insertAdjacentHTML('beforeend', next.map(gcardHtml).join(''));
+  updateGalleryFooter();
+}
+
+function updateGalleryFooter() {
+  $('g-loaded').textContent = gFiltered.length ? `已显示 ${gRendered} / ${gFiltered.length.toLocaleString()} 个工具` : '';
+  $('g-load-more').hidden = gRendered >= gFiltered.length;
 }
 
 // 哨兵:滚到底继续出卡
 const gObserver = new IntersectionObserver(es => {
   if (es.some(x => x.isIntersecting)) renderGalleryBatch();
-}, { rootMargin: '800px' });
+}, { rootMargin: '200px' });
 
 async function loadGallery() {
-  $('g-grid').innerHTML = '<div class="empty"><span class="spin"></span>加载图鉴…</div>';
+  $('g-grid').setAttribute('aria-busy', 'true');
+  $('g-grid').innerHTML = Array.from({length: 6}, () => '<div class="gallery-skeleton" aria-hidden="true"></div>').join('');
   try {
     gData = await fetch('/api/projects').then(r => {
       if (!r.ok) throw new Error(r.status);
       return r.json();
     });
   } catch (e) {
-    $('g-grid').innerHTML = `<div class="empty">图鉴加载失败: ${esc(e.message)}</div>`;
+    $('g-grid').innerHTML = `<div class="empty-state"><h3>图鉴暂时没有加载成功</h3><p>请检查服务连接，然后重试。${esc(e.message)}</p><button onclick="loadGallery()">重新加载</button></div>`;
+    $('g-grid').setAttribute('aria-busy', 'false');
     return;
   }
+  $('g-grid').setAttribute('aria-busy', 'false');
+  $('g-total').textContent = gData.tools.length.toLocaleString();
+  $('nav-tool-count').textContent = gData.tools.length.toLocaleString();
+  $('g-records').textContent = (gData.total_entries || 0).toLocaleString();
+  const latest = gData.tools.reduce((day, t) => t.latest > day ? t.latest : day, '');
+  $('g-updated').textContent = latest ? `最近收录 ${latest.slice(0, 10)}` : '等待第一条收录';
   renderKindSeg();
   renderTopicChips();
   applyGalleryFilter();
@@ -143,9 +194,14 @@ async function loadGallery() {
 
 // 筛选交互(脚本在 body 末尾加载,元素已存在,直接绑)
 let gQTimer = null;
-$('g-q').addEventListener('input', () => {
+$('g-q').addEventListener('input', e => {
   clearTimeout(gQTimer);
+  if (e.isComposing) return;
   gQTimer = setTimeout(() => { gState.q = $('g-q').value; applyGalleryFilter(); }, 120);
+});
+$('g-q').addEventListener('compositionend', () => {
+  clearTimeout(gQTimer);
+  gState.q = $('g-q').value; applyGalleryFilter();
 });
 $('g-kinds').addEventListener('click', e => {
   const b = e.target.closest('button[data-kind]');
@@ -172,6 +228,7 @@ let toolMeta = null;       // /api/projects/{norm} 响应缓存
 let toolConvId = null;     // 抽屉 chatbox 会话 id;换工具时清空
 let toolChatBusy = false;
 let toolAbort = null;
+let toolRequestVersion = 0;
 
 function srcGlyph(source) {
   return source === 'dr-video-projects'
@@ -188,6 +245,14 @@ async function openToolDrawer(norm) {
   toolMeta = null;
   toolConvId = null;
   if (toolAbort) toolAbort.abort();
+  toolRequestVersion++;
+  toolAbort = null;
+  toolChatBusy = false;
+  $('td-chat-send').textContent = '发送';
+  $('td-chat-send').classList.remove('stop');
+  $('td-chat-send').onclick = sendToolChat;
+  $('td-chat-input').value = '';
+  $('td-chat-send').disabled = true;
   $('td-chat-msgs').innerHTML = '';
   $('td-name').textContent = '…';
   $('td-hero').innerHTML = '<div class="empty"><span class="spin"></span>加载中…</div>';
@@ -199,11 +264,12 @@ async function openToolDrawer(norm) {
       return r.json();
     });
   } catch (e) {
-    if (toolNorm === norm) $('td-hero').innerHTML = `<div class="empty">加载失败: ${esc(e.message)}</div>`;
+    if (toolNorm === norm) $('td-hero').innerHTML = `<div class="empty-state"><h3>暂时无法读取工具</h3><p>${esc(e.message)}</p><button onclick="openToolDrawer(toolNorm)">重新加载</button></div>`;
     return;
   }
   if (toolNorm !== norm) return;         // 加载期间切开了别的工具
   toolMeta = d;
+  $('td-chat-send').disabled = false;
   renderToolHero(d);
   renderToolEntries(d);
   $('td-scroll').scrollTop = 0;
@@ -247,15 +313,15 @@ function renderToolHero(d) {
     let label = u;
     try { const x = new URL(u); label = x.host + x.pathname.replace(/\/$/, ''); } catch {}
     if (label.length > 46) label = label.slice(0, 46) + '…';
-    return `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(label)}${EXT_ARROW}</a>`;
+    return `<a href="${esc(safeUrl(u))}" target="_blank" rel="noopener">${esc(label)}${EXT_ARROW}</a>`;
   }).join('');
   const kc = kindCls(d.kind);
   $('td-hero').innerHTML = `
-    <div class="td-hero-top"><span class="gkind ${kc}">${kindLabel(d.kind)}</span>
+    <div class="td-hero-top"><span class="gkind ${kc}">${esc(kindLabel(d.kind))}</span>
       <span class="lbl">首次 ${esc(String(d.first || '').slice(0, 10))} · 最近 ${esc(String(d.latest || '').slice(0, 10))}</span></div>
     <div class="name">${esc(d.name)}</div>
     <div class="td-stat"><span class="gtally">${tallySvg(d.n, 20)}</span>
-      <span class="lbl">${d.n} 次提及 · ${d.accounts} 个号</span></div>
+      <span class="lbl">${d.n} 次提及 · ${d.accounts} 个来源</span></div>
     ${d.summary ? `<div class="sum">${esc(d.summary)}</div>` : ''}
     ${links ? `<div class="td-links">${links}</div>` : ''}
     ${(d.topics || []).length ? `<div class="gtags">${d.topics.map(x =>
@@ -296,6 +362,8 @@ function sendToolChat() {
 }
 
 async function doSendToolChat(q) {
+  const version = ++toolRequestVersion;
+  const current = () => version === toolRequestVersion;
   toolChatBusy = true;
   const btn = $('td-chat-send');
   btn.textContent = '■ 停止'; btn.classList.add('stop');
@@ -317,6 +385,7 @@ async function doSendToolChat(q) {
       body: JSON.stringify({ query, model, conversation_id: toolConvId }),
       signal: toolAbort.signal,
     });
+    if (!current()) return;
     if (!r.ok) {
       let msg = r.status;
       try { const j = await r.json(); msg = j.detail || msg; } catch {}
@@ -328,6 +397,7 @@ async function doSendToolChat(q) {
     let lineBuf = '';
     for (;;) {
       const { value, done } = await reader.read();
+      if (!current()) { await reader.cancel(); return; }
       if (done) break;
       lineBuf += dec.decode(value, { stream: true });
       let nl;
@@ -354,6 +424,7 @@ async function doSendToolChat(q) {
     if (pend) pend.outerHTML = renderMsg({ role: 'assistant', content: partial, refs, model });
     loadConvs();     // 会话已落库,问答 tab 侧栏同步
   } catch (e) {
+    if (!current()) return;
     const pend = document.getElementById('td-pending');
     if (e.name === 'AbortError') {
       if (pend) pend.outerHTML =
@@ -362,10 +433,12 @@ async function doSendToolChat(q) {
       pend.outerHTML = `<div class="msg assistant"><div class="bubble md err">出错了: ${esc(e.message)}</div></div>`;
     }
   } finally {
-    toolChatBusy = false;
-    toolAbort = null;
-    btn.textContent = '发送'; btn.classList.remove('stop'); btn.onclick = sendToolChat;
-    $('td-scroll').scrollTop = $('td-scroll').scrollHeight;
+    if (current()) {
+      toolChatBusy = false;
+      toolAbort = null;
+      btn.textContent = '发送'; btn.classList.remove('stop'); btn.onclick = sendToolChat;
+      $('td-scroll').scrollTop = $('td-scroll').scrollHeight;
+    }
   }
 }
 

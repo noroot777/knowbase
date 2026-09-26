@@ -39,15 +39,12 @@ function stopChat() { if (chatAbort) chatAbort.abort(); }
 
 const CHAT_EMPTY = `
   <div class="chat-empty">
-    <div class="chat-empty-title">知识库问答</div>
-    <div class="chat-empty-sub">
-      问题交给模型自主研究:自己选择检索/枚举工具、结果太少会换近义词、换来源再查
-      (气泡上方能看到每一步),查够了再综合成带引用的回答。穷举类("都提过哪些")
-      走全量聚合不漏项;追问可直接基于上文。支持多轮对话、随时停止,记录自动保存。
-    </div>
-    <span class="chat-suggest" onclick="suggestChat(this)">最近一周公众号都提过哪些开源项目?</span>
-    <span class="chat-suggest" onclick="suggestChat(this)">知识库里有哪些可以生成视频的开源模型?</span>
-    <span class="chat-suggest" onclick="suggestChat(this)">Claude Code 有哪些实用技巧?</span>
+    <span class="empty-icon">${icon('spark')}</span>
+    <div class="chat-empty-title">让积累的知识，回答你的问题</div>
+    <div class="chat-empty-sub">从你的文章与视频里寻找线索，整理成带出处的回答。随时追问，继续深入。</div>
+    <button class="chat-suggest" onclick="suggestChat(this)">最近一周公众号都提过哪些开源项目？</button>
+    <button class="chat-suggest" onclick="suggestChat(this)">知识库里有哪些可以生成视频的开源模型？</button>
+    <button class="chat-suggest" onclick="suggestChat(this)">Claude Code 有哪些实用技巧？</button>
   </div>`;
 
 function initChat() {
@@ -88,17 +85,17 @@ function renderConvList() {
   const spin = '<span class="spin" style="width:10px;height:10px;border-width:1.5px;margin-right:5px"></span>';
   // 进行中/失败的"新对话"还没落库,列表顶部给个占位项,点击可切回去看进度
   const newItem = (inflight && inflight.convId === null) ? `
-    <div class="conv-item ${chatConvId === null ? 'on' : ''}" onclick="newChat()">
+    <div role="button" tabindex="0" class="conv-item ${chatConvId === null ? 'on' : ''}" onclick="newChat()">
       <div class="conv-title" title="${esc(inflight.q)}">${inflight.error ? '' : spin}${esc(inflight.q)}</div>
       <div class="conv-meta">${inflight.error ? '回答失败 · 点击查看' : '回答生成中…'}</div>
     </div>` : '';
   $('chat-convs').innerHTML = newItem + (chatConvs.length ? chatConvs.map(c => `
-    <div class="conv-item ${c.id === chatConvId ? 'on' : ''}" onclick="openConv(${c.id})">
+    <div role="button" tabindex="0" class="conv-item ${c.id === chatConvId ? 'on' : ''}" onclick="openConv(${c.id})">
       <div class="conv-title" title="${esc(c.title)}">${
         (inflight && !inflight.error && inflight.convId === c.id) ? spin : ''
       }${esc(c.title || '(无标题)')}</div>
       <div class="conv-meta">${timeAgo(c.updated_at)} · ${Math.max(1, Math.floor(c.n_messages / 2))} 轮</div>
-      <span class="conv-del" title="删除对话" onclick="event.stopPropagation();delConv(${c.id})">✕</span>
+      <button class="conv-del" aria-label="删除对话" title="删除对话" onclick="event.stopPropagation();delConv(${c.id})">✕</button>
     </div>`).join('')
     : (newItem ? '' : '<div class="chat-side-empty">还没有历史对话</div>'));
 }
@@ -314,3 +311,10 @@ function retryChat(btn) {
   if (inflight && inflight.error) inflight = null;   // 这条错误已被消费
   doSendChat(q, true);
 }
+
+// Conversation rows are keyboard-operable; nested delete buttons keep their own action.
+$('chat-convs').addEventListener('keydown', e => {
+  if (e.target.matches('.conv-item') && (e.key === 'Enter' || e.key === ' ')) {
+    e.preventDefault(); e.target.click();
+  }
+});

@@ -3,11 +3,14 @@ const $ = id => document.getElementById(id);
 let tagFilters = [], entityFilters = [];
 
 function switchTab(t) {
+  if (!['gallery', 'search', 'ask', 'fav', 'pipe'].includes(t)) return;
+  const previousScroll = window.scrollY;
   for (const k of ['gallery', 'search', 'ask', 'fav', 'pipe']) {
     $(k + 'panel').style.display = t === k ? '' : 'none';
     $('tab-' + k).classList.toggle('on', t === k);
   }
   document.body.classList.toggle('chat-mode', t === 'ask');
+  if (typeof updateWorkspaceTab === 'function') updateWorkspaceTab(t, previousScroll);
   if (t === 'pipe') { refreshPipe(true); initTargets(); }
   if (t === 'ask') initChat();
   if (t === 'fav') loadFavPanel();
@@ -19,7 +22,7 @@ async function loadMeta() {
     fetch('/api/facets').then(r => r.json()),
   ]);
   $('stats').textContent =
-    `${stats.documents} 篇 · ${stats.vectors} 向量 · ${stats.entities} 实体 · 已提取 ${stats.extracted}`;
+    `${stats.documents.toLocaleString()} 篇内容已收录`;
   const fill = (sel, items, label) => {
     for (const it of items) {
       const o = document.createElement('option');
@@ -38,8 +41,8 @@ function renderChips() {
   // chip 文案是被索引的外部内容(实体名来自公众号原文/LLM 提取),一律转义;
   // 删除按钮走 data 属性 + 事件委托,不再把值拼进 onclick 的 JS 字符串里
   $('chips').innerHTML =
-    tagFilters.map(t => `<span class="chip">${esc(t)}<b data-rm-tag="${esc(t)}">×</b></span>`).join('') +
-    entityFilters.map(e => `<span class="chip">${esc(e)}<b data-rm-ent="${esc(e)}">×</b></span>`).join('');
+    tagFilters.map(t => `<span class="chip">${esc(t)}<button data-rm-tag="${esc(t)}" aria-label="移除主题 ${esc(t)}">×</button></span>`).join('') +
+    entityFilters.map(e => `<span class="chip">${esc(e)}<button data-rm-ent="${esc(e)}" aria-label="移除实体 ${esc(e)}">×</button></span>`).join('');
 }
 function addTopic(v) { if (v && !tagFilters.includes(v)) tagFilters.push(v); $('f-topic').value=''; renderChips(); doSearch(); }
 function rmTopic(v) { tagFilters = tagFilters.filter(x => x !== v); renderChips(); doSearch(); }
@@ -136,15 +139,6 @@ document.addEventListener('click', e => {
   const rmE = e.target.closest('[data-rm-ent]');
   if (rmE) rmEntity(rmE.dataset.rmEnt);
 });
-// Escape 逐层关:阅读器(最高)→ 工具详情抽屉 → 管道时间段弹层 / 管道弹窗 / 模型分配弹窗
-document.addEventListener('keydown', e => {
-  if (e.key !== 'Escape') return;
-  if ($('reader').style.display !== 'none') { closeReader(); return; }
-  if ($('tool-drawer').style.display !== 'none') { closeToolDrawer(); return; }
-  if ($('pipe-range-pop').style.display !== 'none') $('pipe-range-pop').style.display = 'none';
-  else if ($('pipe-modal').style.display !== 'none') closePipeModal();
-  else if ($('stages-modal').style.display !== 'none') closeStages();
-});
 // 时间段弹层点外面收起(弹窗本体不关)
 document.addEventListener('click', e => {
   const pop = $('pipe-range-pop');
@@ -153,19 +147,50 @@ document.addEventListener('click', e => {
   }
 });
 
+let searchAbort = null;
+let searchVersion = 0;
+const SEARCH_WELCOME = $('results').innerHTML;
 async function doSearch() {
   const q = $('q').value.trim();
-  if (!q && !tagFilters.length && !entityFilters.length) return;
+  if (searchAbort) searchAbort.abort();
+  const version = ++searchVersion;
+  if (!q && !tagFilters.length && !entityFilters.length && !$('f-source').value && !$('f-account').value) {
+    $('results').innerHTML = SEARCH_WELCOME;
+    $('results').setAttribute('aria-busy', 'false');
+    $('search-submit').innerHTML = icon('search') + '搜索';
+    $('q').focus(); return;
+  }
+  searchAbort = new AbortController();
+  $('results').setAttribute('aria-busy', 'true');
+  $('search-submit').textContent = '搜索中…';
   $('results').innerHTML = '<div class="empty"><span class="spin"></span>搜索中…</div>';
   const p = new URLSearchParams({ q: q || '*' });
   if ($('f-source').value) p.set('source', $('f-source').value);
   if ($('f-account').value) p.set('account', $('f-account').value);
   tagFilters.forEach(t => p.append('tag', t));
   entityFilters.forEach(e => p.append('entity', e));
-  const res = await fetch('/api/search?' + p).then(r => r.json()).catch(() => ({hits: []}));
-  if (!res.hits.length) { $('results').innerHTML = '<div class="empty">没有结果</div>'; return; }
+  let res;
+  try {
+    const response = await fetch('/api/search?' + p, { signal: searchAbort.signal });
+    if (!response.ok) throw new Error(await apiFail(response, '搜索失败'));
+    res = await response.json();
+    if (version !== searchVersion) return;
+  } catch (e) {
+    if (e.name === 'AbortError' || version !== searchVersion) return;
+    $('results').innerHTML = `<div class="empty-state"><h3>搜索暂时不可用</h3><p>${esc(e.message)}</p><button onclick="doSearch()">重试搜索</button></div>`;
+    return;
+  } finally {
+    if (version === searchVersion) {
+      $('results').setAttribute('aria-busy', 'false');
+      $('search-submit').innerHTML = icon('search') + '搜索';
+    }
+  }
+  if (!res.hits.length) {
+    $('results').innerHTML = '<div class="empty-state"><span class="empty-icon">' + icon('search') + '</span><h3>没有找到相关内容</h3><p>试试更短的关键词，或减少来源与主题限制。</p><button class="ghost" onclick="clearSearchFilters()">清空筛选条件</button></div>';
+    return;
+  }
   // 命中里的标题/账号/摘要/片段/实体都是被索引的外部内容,拼进 innerHTML 前一律转义
-  $('results').innerHTML = res.hits.map(h => `
+  $('results').innerHTML = `<p class="search-count">找到 ${res.hits.length} 条相关内容 · 点击标题阅读全文</p>` + res.hits.map(h => `
     <div class="hit">
       <h3>${docA(h, h.title)}</h3>
       <div class="meta">
@@ -175,12 +200,18 @@ async function doSearch() {
         ${h.matched_by.map(m => `<span class="badge ${m === 'vec' ? 'vec' : ''}">${m === 'vec' ? '语义' : '关键词'}</span>`).join('')}
         <a href="${esc(obsLink(h))}" style="color:var(--muted)" title="在 Obsidian 中打开">Obsidian</a>
         ${h.url ? `<a href="${esc(safeUrl(h.url))}" target="_blank" rel="noopener" style="color:var(--muted)">原文↗</a>` : ''}
-        <span class="favbtn ${favSet.has(h.path) ? 'on' : ''}" data-path="${encodeURIComponent(h.path)}"
-              onclick="toggleFav(this)">${favSet.has(h.path) ? '★ 已收藏' : '☆ 收藏'}</span>
+        <button class="favbtn ${favSet.has(h.path) ? 'on' : ''}" data-path="${encodeURIComponent(h.path)}"
+              onclick="toggleFav(this)">${favSet.has(h.path) ? '★ 已收藏' : '☆ 收藏'}</button>
       </div>
       ${h.summary ? `<div class="summary">${esc(h.summary)}</div>` : ''}
       <div class="snippet">${esc((h.best_chunk || '').slice(0, 160))}…</div>
       ${h.entities.length ? `<div class="ents">${h.entities.map(e =>
-        `<span class="ent" data-ent="${esc(e)}">${esc(e)}</span>`).join('')}</div>` : ''}
+        `<button class="ent" data-ent="${esc(e)}">${esc(e)}</button>`).join('')}</div>` : ''}
     </div>`).join('');
+}
+
+function clearSearchFilters() {
+  tagFilters = []; entityFilters = [];
+  $('f-source').value = ''; $('f-account').value = '';
+  renderChips(); doSearch();
 }

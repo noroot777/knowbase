@@ -1,33 +1,32 @@
-/* 知识库前端 · 基础层:tokens / 布局 / 顶栏 / 通用控件 / 搜索面板 / 阅读器
-   配色:瓷白 × 墨蓝黑 × 深松绿(旧奶油白 #F4F1EA + 赤陶橙 #b3541e 已全量替换) */
+/* Shared tokens, controls, feedback, search results and reader. */
 
 :root {
-  --paper: #F3F5F4;          /* 瓷白冷底(页面背景) */
+  --paper: #F5F6FA;          /* 雾灰页面背景 */
   --card: #FFFFFF;
-  --ink: #14202B;            /* 墨蓝黑(正文/标题) */
-  --muted: #66727C;
-  --line: #DFE5E5;
-  --brand: #17604F;          /* 深松绿(主 accent) */
-  --brand-soft: #DFF0E9;
-  --tag-bg: #EAEEED;
+  --ink: #25293D;            /* 墨蓝黑(正文/标题) */
+  --muted: #70758A;
+  --line: #E4E6EF;
+  --brand: #5153C9;          /* 靛蓝重点色 */
+  --brand-soft: #EBEBFC;
+  --tag-bg: #F0F1F7;
   --ok: #2E7D57;
   --danger: #C33;            /* 失败/危险动作(原先各处散着写死 #c33) */
-  --brand-deep: #114A3D;     /* brand 加深:soft 底上的正文字用 */
+  --brand-deep: #3D3F9E;     /* brand 加深:soft 底上的正文字用 */
 
   /* 旧 token 别名:搬迁面板的 CSS 与内联样式免改 */
   --bg: var(--paper);
   --accent: var(--brand);
   --accent-soft: var(--brand-soft);
 
-  /* kind 五色谱:只用于卡片书脊色条和 kind 标签,别扩散到别处 */
-  --kind-project: #17604F;   /* 开源项目 · 松绿 */
+  /* 来源字形与旧面板兼容色；图鉴类型色在 gallery.css 统一定义。 */
+  --kind-project: #5153C9;
   --kind-product: #3D5A80;   /* 产品 · 靛蓝 */
   --kind-model: #7D4E9E;     /* 模型 · 紫 */
   --kind-research: #2F6D7A;  /* 研究 · 深青(数据里实际存在,文档五色谱外补充) */
   --kind-org: #8C6A3F;       /* 公司 · 褐 */
-  --kind-other: #66727C;     /* 其他 · 灰 */
+  --kind-other: #70758A;     /* 其他 · 灰 */
 
-  --font-display: "Songti SC", "STSong", "Noto Serif SC", serif;
+  --font-display: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
@@ -35,46 +34,9 @@
 body {
   font: 15px/1.7 -apple-system, "PingFang SC", "Noto Sans SC", sans-serif;
   background: var(--bg); color: var(--ink);
-  max-width: 1240px; margin: 0 auto; padding: 0 24px 80px;
+  margin: 0; padding: 0;
 }
 :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
-
-/* ── sticky 顶栏:知识库 | 图鉴 搜索 问答 收藏 管道 | stats 图谱 keys mcp ── */
-#topbar {
-  position: sticky; top: 0; z-index: 20;
-  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-  padding: 12px 24px; margin: 0 -24px 22px;
-  background: color-mix(in srgb, var(--paper) 92%, transparent);
-  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--line);
-}
-.wordmark {
-  font-family: var(--font-display); font-weight: 900; font-size: 21px;
-  letter-spacing: .08em; white-space: nowrap;
-}
-#stats {
-  color: var(--muted); font-size: 11.5px; font-family: var(--font-mono);
-  margin-left: auto; white-space: nowrap;
-}
-.topbar-act { display: flex; gap: 7px; align-items: center; }
-.tb-link {
-  padding: 6px 13px; font-size: 13px; text-decoration: none; color: var(--ink);
-  background: var(--tag-bg); border-radius: 9px; white-space: nowrap;
-}
-.tb-link:hover { background: var(--brand-soft); color: var(--brand-deep); }
-#keys-dot.on, #mcp-dot.on { color: var(--ok); opacity: 1 !important; }
-#keys-dot.off, #mcp-dot.off { color: #c33; opacity: 1 !important; }
-
-.tabs { display: flex; gap: 2px; }
-.tabs button {
-  background: transparent; color: var(--muted); padding: 7px 14px;
-  border-radius: 9px; font-size: 14px;
-}
-.tabs button:hover { opacity: 1; color: var(--ink); background: var(--tag-bg); }
-.tabs button.on { background: var(--ink); color: var(--paper); }
-
-/* 旧四面板保持窄栏阅读宽度;图鉴用全宽网格 */
-#searchpanel, #askpanel, #favpanel, #pipepanel { max-width: 900px; margin: 0 auto; }
 
 /* ── 弹窗 ── */
 .modal-mask {
@@ -145,23 +107,24 @@ body {
 .searchbar { display: flex; gap: 8px; margin-bottom: 12px; }
 #q {
   flex: 1; padding: 12px 16px; font-size: 15px; border: 1.5px solid var(--line);
-  border-radius: 12px; background: var(--card); outline: none; transition: border-color .15s;
+  border-radius: 12px; background: var(--card); transition: border-color .15s;
 }
 #q:focus { border-color: var(--accent); }
 button {
-  padding: 0 18px; border: none; border-radius: 12px; cursor: pointer;
+  min-height: 36px; padding: 7px 16px; font-family: inherit; border: none; border-radius: 12px; cursor: pointer;
   font-size: 14px; font-weight: 500; background: var(--accent); color: #fff;
   white-space: nowrap; flex-shrink: 0;
 }
 button:hover { opacity: .9; }
 button.ghost { background: var(--tag-bg); color: var(--ink); }
+button.favbtn { background: transparent; padding: 0 4px; font: inherit; min-height: 28px; }
 button.danger { background: var(--danger); color: #fff; }
 button:disabled { opacity: .45; cursor: not-allowed; }
 
 .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; align-items: center; }
 select {
   padding: 6px 10px; border: 1px solid var(--line); border-radius: 9px;
-  background: var(--card); font-size: 13px; color: var(--ink); outline: none; max-width: 200px;
+  background: var(--card); font-size: 13px; color: var(--ink); max-width: 200px;
 }
 input[type=date] {
   padding: 5px 10px; border: 1px solid var(--line); border-radius: 9px;
@@ -171,7 +134,7 @@ input[type=date] {
   display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px;
   background: var(--accent-soft); border-radius: 99px; font-size: 12.5px; color: var(--brand-deep);
 }
-.chip b { cursor: pointer; font-weight: 700; }
+.chip button { padding: 0 3px; min-height: 24px; background: none; color: inherit; font-size: 16px; }
 
 /* ── 搜索结果卡 ── */
 .hit {
@@ -229,14 +192,6 @@ input[type=date] {
   vertical-align: -3px; margin-right: 8px;
 }
 @keyframes r { to { transform: rotate(360deg); } }
-
-/* ── 响应式 ── */
-@media (max-width: 760px) {
-  body { padding: 0 14px 60px; }
-  #topbar { padding: 10px 14px; margin: 0 -14px 16px; gap: 8px; }
-  #stats { display: none; }
-  .tabs button { padding: 6px 10px; font-size: 13px; }
-}
 
 /* ── reduced-motion:全局尊重(正字 draw-in、滑入、转圈全部即时呈现) ── */
 @media (prefers-reduced-motion: reduce) {

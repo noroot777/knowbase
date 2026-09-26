@@ -1,0 +1,163 @@
+// Workspace navigation, addressable filters and accessible overlay lifecycle.
+const WORKSPACE_TITLES = { gallery: '工具图鉴', search: '全文检索', ask: '知识问答', fav: '我的收藏', pipe: '同步管理' };
+let activeTab = 'gallery';
+let restoringLocation = false;
+const tabScroll = new Map();
+
+function saveWorkspaceLocation(push = false) {
+  if (restoringLocation) return;
+  const params = new URLSearchParams();
+  if (activeTab === 'gallery') {
+    for (const [key, value] of Object.entries(gState)) {
+      if (value && !(key === 'sort' && value === 'recent')) params.set(key, value);
+    }
+  }
+  const hash = '#' + activeTab + (params.size ? '?' + params : '');
+  if (location.hash !== hash) history[push ? 'pushState' : 'replaceState'](null, '', location.pathname + location.search + hash);
+}
+
+function updateWorkspaceTab(tab, previousScroll = window.scrollY) {
+  const changed = tab !== activeTab;
+  tabScroll.set(activeTab, previousScroll);
+  activeTab = tab;
+  $('page-crumb').textContent = WORKSPACE_TITLES[tab];
+  document.title = WORKSPACE_TITLES[tab] + ' · 知识库';
+  for (const key of Object.keys(WORKSPACE_TITLES)) {
+    if (key === tab) $('tab-' + key).setAttribute('aria-current', 'page');
+    else $('tab-' + key).removeAttribute('aria-current');
+  }
+  toggleNavigation(false);
+  saveWorkspaceLocation(changed);
+  if (changed) window.scrollTo({ top: tabScroll.get(tab) || 0, behavior: 'instant' });
+}
+
+function restoreWorkspaceLocation() {
+  const [tabName, query = ''] = location.hash.slice(1).split('?');
+  const tab = Object.hasOwn(WORKSPACE_TITLES, tabName) ? tabName : 'gallery';
+  restoringLocation = true;
+  if (tab === 'gallery') {
+    clearTimeout(gQTimer);
+    const params = new URLSearchParams(query);
+    for (const key of ['q', 'kind', 'topic']) gState[key] = params.get(key) || '';
+    gState.src = ['gzh', 'video'].includes(params.get('src')) ? params.get('src') : '';
+    gState.sort = ['recent', 'n', 'first'].includes(params.get('sort')) ? params.get('sort') : 'recent';
+    syncGalleryControls();
+    applyGalleryFilter();
+  }
+  switchTab(tab);
+  restoringLocation = false;
+}
+
+function toggleNavigation(open) {
+  const show = open ?? !document.body.classList.contains('nav-open');
+  document.body.classList.toggle('nav-open', show);
+  $('nav-mask').hidden = !show;
+  document.querySelector('.mobile-menu').setAttribute('aria-expanded', String(show));
+  syncOverlays();
+}
+
+function focusWorkspaceSearch() {
+  if (activeTab !== 'gallery' && activeTab !== 'search') switchTab('search');
+  toggleNavigation(false);
+  const input = $(activeTab === 'gallery' ? 'g-q' : 'q');
+  input.focus(); input.select();
+}
+
+function searchExample(query) { $('q').value = query; doSearch(); }
+function toggleChatHistory() {
+  const show = $('askpanel').classList.toggle('history-open');
+  $('chat-history-toggle').setAttribute('aria-expanded', String(show));
+}
+function openShortcuts() { $('shortcuts-modal').style.display = ''; }
+function closeShortcuts() { $('shortcuts-modal').style.display = 'none'; }
+
+const overlayClosers = {
+  'tool-drawer': closeToolDrawer, reader: closeReader, 'pipe-modal': closePipeModal,
+  'tgt-modal': closeTargets, 'stages-modal': closeStages, 'keys-modal': closeKeys,
+  'mcp-modal': closeMcp, 'shortcuts-modal': closeShortcuts,
+  sidebar: () => toggleNavigation(false),
+};
+let overlayTop = null;
+const focusReturns = new WeakMap();
+const focusableSelector = 'a[href],button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),summary,iframe,[tabindex="0"]';
+function visibleFocusables(el) {
+  return [...el.querySelectorAll(focusableSelector)].filter(x => x.getClientRects().length && !x.closest('[inert]'));
+}
+function focusOverlay(el) {
+  const target = visibleFocusables(el)[0] || el;
+  if (target === el) el.tabIndex = -1;
+  target.focus({ preventScroll: true });
+}
+
+function syncOverlays() {
+  const dialogs = [...document.querySelectorAll('.modal-mask,#tool-drawer,#reader')];
+  const visible = dialogs.filter(el => el.style.display !== 'none' && el.isConnected);
+  if (document.body.classList.contains('nav-open') && matchMedia('(max-width:760px)').matches) visible.push($('sidebar'));
+  visible.sort((a, b) => Number(getComputedStyle(a).zIndex) - Number(getComputedStyle(b).zIndex));
+  const next = visible.at(-1) || null;
+  const prev = overlayTop;
+  if (next && next !== prev && !focusReturns.has(next)) focusReturns.set(next, document.activeElement);
+  overlayTop = next;
+  for (const el of [$('main-content'), $('topbar'), $('sidebar'), ...dialogs]) el.inert = !!next && el !== next;
+  // A mobile drawer is inaccessible while offscreen, including to keyboard users.
+  if (!next && matchMedia('(max-width:760px)').matches) $('sidebar').inert = true;
+  document.body.classList.toggle('overlay-open', !!next);
+  if (next === prev) return;
+  if (prev && !visible.includes(prev)) {
+    const target = focusReturns.get(prev);
+    focusReturns.delete(prev);
+    if (target?.isConnected && !target.closest('[inert]') && target.getClientRects().length) target.focus({ preventScroll: true });
+  }
+  if (next && !next.contains(document.activeElement)) focusOverlay(next);
+}
+
+document.addEventListener('keydown', e => {
+  if (e.isComposing) return;
+  if (overlayTop) {
+    if (e.key === 'Escape' && !overlayTop.classList.contains('confirm-mask')) {
+      e.preventDefault(); e.stopImmediatePropagation();
+      if (overlayTop.id === 'pipe-modal' && $('pipe-range-pop').style.display !== 'none') $('pipe-range-pop').style.display = 'none';
+      else overlayClosers[overlayTop.id]?.();
+    } else if (e.key === 'Tab') {
+      const items = visibleFocusables(overlayTop);
+      if (!items.length) { e.preventDefault(); return; }
+      if (e.shiftKey && (document.activeElement === items[0] || !items.includes(document.activeElement))) {
+        e.preventDefault(); items.at(-1).focus();
+      } else if (!e.shiftKey && document.activeElement === items.at(-1)) {
+        e.preventDefault(); items[0].focus();
+      }
+    }
+    return;
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); focusWorkspaceSearch(); }
+  else if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.target.closest('input,textarea,select,[contenteditable]')) {
+    e.preventDefault(); focusWorkspaceSearch();
+  }
+}, true);
+
+document.addEventListener('focusin', e => {
+  if (overlayTop && !overlayTop.contains(e.target)) focusOverlay(overlayTop);
+});
+
+function initWorkspace() {
+  $('reader-frame').addEventListener('load', () => {
+    try {
+      $('reader-frame').contentDocument?.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && !e.isComposing) { e.preventDefault(); closeReader(); }
+      });
+    } catch { /* An external document cannot share keyboard events. */ }
+  });
+  document.querySelectorAll('.modal-mask > .modal').forEach((el, index) => {
+    el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true');
+    const heading = el.querySelector('h2');
+    if (heading) { heading.id ||= 'dialog-title-' + index; el.setAttribute('aria-labelledby', heading.id); }
+  });
+  const observer = new MutationObserver(syncOverlays);
+  document.querySelectorAll('.modal-mask,#tool-drawer,#reader').forEach(el => observer.observe(el, { attributes: true, attributeFilter: ['style'] }));
+  observer.observe(document.body, { childList: true });
+  window.addEventListener('hashchange', restoreWorkspaceLocation);
+  matchMedia('(max-width:760px)').addEventListener('change', () => toggleNavigation(false));
+  try { setGalleryView(localStorage.getItem('kb-gallery-view') === 'list' ? 'list' : 'grid'); } catch {}
+  restoreWorkspaceLocation();
+  syncOverlays();
+}

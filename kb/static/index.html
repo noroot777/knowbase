@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>知识库</title>
+<title>工具图鉴 · 知识库</title>
+<meta name="theme-color" content="#f5f6fa">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <!-- marked / DOMPurify 都随包放本地:走 CDN 时一次外网抖动或拦截插件就让 marked 缺席,
      mdHtml 的失败关闭兜底会把回答静默降级成纯文本,看起来就是"markdown 没了" -->
 <script src="/static/vendor/marked.min.js"></script>
@@ -12,72 +14,91 @@
 <link rel="stylesheet" href="/static/css/base.css">
 <link rel="stylesheet" href="/static/css/panels.css">
 <link rel="stylesheet" href="/static/css/gallery.css">
+<link rel="stylesheet" href="/static/css/workspace.css">
 </head>
 <body>
 
-<header id="topbar">
-  <span class="wordmark">知识库</span>
-  <nav class="tabs">
-    <button id="tab-gallery" class="on" onclick="switchTab('gallery')">图鉴</button>
-    <button id="tab-search" onclick="switchTab('search')">搜索</button>
-    <button id="tab-ask" onclick="switchTab('ask')">问答</button>
-    <button id="tab-fav" onclick="switchTab('fav')">收藏</button>
-    <button id="tab-pipe" onclick="switchTab('pipe')">管道</button>
+<a class="skip-link" href="#main-content" onclick="event.preventDefault();document.getElementById('main-content').focus()">跳到主要内容</a>
+<div id="nav-mask" hidden onclick="toggleNavigation(false)"></div>
+<aside id="sidebar" aria-label="工作区导航">
+  <a class="brand-lockup" href="#gallery" onclick="switchTab('gallery');return false">
+    <span class="brand-icon" aria-hidden="true"><i data-icon="library"></i></span>
+    <span class="wordmark">知识库<small>KNOWLEDGE ATLAS</small></span>
+  </a>
+  <button class="quick-search" onclick="focusWorkspaceSearch()"><i data-icon="search"></i><span>快速查找</span><kbd>⌘ K</kbd></button>
+  <div class="nav-label">我的工作区</div>
+  <nav class="tabs" aria-label="主要导航">
+    <button id="tab-gallery" class="on" onclick="switchTab('gallery')" aria-current="page"><i data-icon="grid"></i><span>工具图鉴</span><span id="nav-tool-count" class="nav-count"></span></button>
+    <button id="tab-search" onclick="switchTab('search')"><i data-icon="search"></i><span>全文检索</span></button>
+    <button id="tab-ask" onclick="switchTab('ask')"><i data-icon="spark"></i><span>知识问答</span></button>
+    <button id="tab-fav" onclick="switchTab('fav')"><i data-icon="bookmark"></i><span>我的收藏</span></button>
+    <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span>同步管理</span></button>
   </nav>
-  <span id="stats"></span>
-  <span class="topbar-act">
-    <a class="tb-link" href="/graph/projects" target="_blank" rel="noopener">项目图谱 ↗</a>
-    <a class="tb-link" href="/graph/skills" target="_blank" rel="noopener">Skill 图谱 ↗</a>
-    <a class="tb-link" href="/graph" target="_blank" rel="noopener">话题图谱 ↗</a>
-    <button class="ghost" id="stages-btn" style="padding:6px 13px;font-size:13px"
-            onclick="openStages()">模型</button>
-    <button class="ghost" id="keys-btn" style="padding:6px 13px;font-size:13px"
-            onclick="openKeys()">API Key <span id="keys-dot" style="opacity:.5">●</span></button>
-    <button class="ghost" id="mcp-btn" style="padding:6px 13px;font-size:13px"
-            onclick="openMcp()">MCP <span id="mcp-dot" style="opacity:.5">●</span></button>
-  </span>
-</header>
-
-<!-- 图鉴(默认视图) -->
-<div id="gallerypanel">
-  <div class="gfilters">
-    <input id="g-q" placeholder="搜工具名 / 简介 / 主题…">
-    <div id="g-kinds" class="gseg"></div>
-    <select id="g-src" title="来源">
-      <option value="">全部来源</option>
-      <option value="gzh">公众号</option>
-      <option value="video">视频</option>
-    </select>
-    <select id="g-sort" title="排序">
-      <option value="recent">最近提及</option>
-      <option value="n">提及最多</option>
-      <option value="first">最早收录</option>
-    </select>
+  <div class="nav-label explore-label">发现关联</div>
+  <nav class="explore-links" aria-label="知识图谱">
+    <a href="/graph/projects" target="_blank" rel="noopener"><i data-icon="network"></i>项目图谱<span>↗</span></a>
+    <a href="/graph/skills" target="_blank" rel="noopener"><i data-icon="layers"></i>Skill 图谱<span>↗</span></a>
+    <a href="/graph" target="_blank" rel="noopener"><i data-icon="orbit"></i>话题图谱<span>↗</span></a>
+  </nav>
+  <div class="sidebar-bottom">
+    <details class="workspace-settings">
+      <summary><i data-icon="settings"></i>工作区设置<i data-icon="chevron"></i></summary>
+      <button id="stages-btn" onclick="toggleNavigation(false);openStages()">模型配置<i data-icon="chevron"></i></button>
+      <button id="keys-btn" onclick="toggleNavigation(false);openKeys()">API Key<span id="keys-dot">●</span></button>
+      <button id="mcp-btn" onclick="toggleNavigation(false);openMcp()">MCP 连接<span id="mcp-dot">●</span></button>
+    </details>
+    <div class="library-status"><span class="local-mark"><i data-icon="library"></i></span><div><strong>我的知识空间</strong><span id="stats">正在读取知识库…</span></div></div>
   </div>
-  <div id="g-topics" class="gtopic-row"></div>
-  <div id="g-count" class="gcount-line"></div>
-  <div id="g-grid" class="ggrid"></div>
+</aside>
+<header id="topbar">
+  <button class="icon-button mobile-menu" onclick="toggleNavigation()" aria-label="打开导航" aria-expanded="false" aria-controls="sidebar"><i data-icon="menu"></i></button>
+  <div class="breadcrumb">我的工作区<span>/</span><b id="page-crumb">工具图鉴</b></div>
+  <div class="topbar-right"><span class="local-caption">让收集的知识，重新产生连接</span><button class="icon-button" onclick="openShortcuts()" aria-label="键盘快捷键" title="键盘快捷键"><i data-icon="keyboard"></i></button></div>
+</header>
+<main id="main-content" tabindex="-1">
+<div id="gallerypanel">
+  <section class="gallery-intro">
+    <div class="intro-copy"><span class="eyebrow">YOUR KNOWLEDGE, CONNECTED</span><h1>发现值得探索的工具<span class="title-dot">.</span></h1><p>从读过的文章、看过的视频里，找到下一个灵感。</p>
+      <div class="collection-meta"><span><strong id="g-total">—</strong> 个工具</span><span><strong id="g-records">—</strong> 条收录记录</span><span id="g-updated">正在读取最近收录</span></div>
+    </div>
+    <button class="ask-invitation" onclick="switchTab('ask')"><span class="invitation-icon"><i data-icon="spark"></i></span><span><strong>有问题，让知识库帮你找</strong><small>带着问题探索，回答有据可循</small></span><i data-icon="arrow"></i></button>
+  </section>
+  <section class="gallery-controls" aria-label="筛选工具">
+    <div class="gfilters">
+      <div class="gallery-search"><i data-icon="search"></i><input id="g-q" type="search" autocomplete="off" aria-label="搜索工具" placeholder="搜索工具名称、用途或主题…"><kbd>/</kbd></div>
+      <label class="select-field"><span>来源</span><select id="g-src" aria-label="工具来源"><option value="">全部来源</option><option value="gzh">公众号</option><option value="video">视频</option></select></label>
+    </div>
+    <div id="g-kinds" class="gseg" aria-label="工具类型"></div>
+    <div class="topic-filter"><span class="filter-label">主题</span><div id="g-topics" class="gtopic-row"></div><button id="g-topic-toggle" class="text-button" aria-expanded="false" onclick="toggleTopics()">展开全部</button></div>
+  </section>
+  <div class="gallery-toolbar"><div><h2 id="g-section-title">全部工具</h2><span id="g-count" class="gcount-line" role="status" aria-live="polite"></span><button id="g-reset" class="text-button" onclick="resetGalleryFilters()" hidden>清空筛选 ×</button></div>
+    <div class="gallery-view-controls"><select id="g-sort" aria-label="工具排序"><option value="recent">最近提及</option><option value="n">提及最多</option><option value="first">最早收录</option></select><div class="view-switch" aria-label="显示方式"><button id="g-view-grid" class="on" onclick="setGalleryView('grid')" aria-label="卡片视图" aria-pressed="true"><i data-icon="grid"></i></button><button id="g-view-list" onclick="setGalleryView('list')" aria-label="列表视图" aria-pressed="false"><i data-icon="list"></i></button></div></div>
+  </div>
+  <div id="g-grid" class="ggrid" aria-label="工具列表" aria-busy="true"></div>
   <div id="g-sentinel"></div>
-  <div id="g-empty" class="empty" style="display:none">没有匹配的工具</div>
+  <div id="g-empty" class="empty-state" style="display:none"><span class="empty-icon"><i data-icon="search"></i></span><h3>没有找到匹配的工具</h3><p>换个关键词，或清空筛选重新探索。</p><button onclick="resetGalleryFilters()">清空筛选</button></div>
+  <div class="gallery-footer"><span id="g-loaded"></span><button id="g-load-more" class="ghost" onclick="renderGalleryBatch()" hidden>加载更多</button><button class="text-button" onclick="window.scrollTo({top:0,behavior:'smooth'})">回到顶部 ↑</button></div>
 </div>
 
 <div id="searchpanel" style="display:none">
+  <div class="page-heading"><span class="eyebrow">FIND WHAT YOU REMEMBER</span><h1>找回读过的好内容<span class="title-dot">.</span></h1><p>记住一个词，或描述你的想法。文章、视频和笔记一起搜。</p></div>
   <div class="searchbar">
     <input id="q" placeholder="关键词或一句话描述,如:把书变成 skill 的工具"
-           onkeydown="if(event.key==='Enter')doSearch()">
-    <button onclick="doSearch()">搜索</button>
+           aria-label="搜索知识库" onkeydown="if(event.key==='Enter' &amp;&amp; !event.isComposing)doSearch()">
+    <button id="search-submit" onclick="doSearch()"><i data-icon="search"></i>搜索</button>
   </div>
   <div class="filters">
-    <select id="f-source" onchange="doSearch()"><option value="">全部来源</option></select>
-    <select id="f-account" onchange="doSearch()"><option value="">全部账号</option></select>
-    <select id="f-topic" onchange="addTopic(this.value)"><option value="">加主题过滤…</option></select>
-    <select id="f-entity" onchange="addEntity(this.value)"><option value="">加实体过滤…</option></select>
+    <select id="f-source" aria-label="检索来源" onchange="doSearch()"><option value="">全部来源</option></select>
+    <select id="f-account" aria-label="检索账号" onchange="doSearch()"><option value="">全部账号</option></select>
+    <select id="f-topic" aria-label="添加主题筛选" onchange="addTopic(this.value)"><option value="">加主题过滤…</option></select>
+    <select id="f-entity" aria-label="添加实体筛选" onchange="addEntity(this.value)"><option value="">加实体过滤…</option></select>
     <span id="chips"></span>
   </div>
-  <div id="results"><div class="empty">输入点什么开始搜</div></div>
+  <div id="results" aria-live="polite"><div class="empty-state search-welcome"><span class="empty-icon"><i data-icon="search"></i></span><h3>你的下一条线索，就在这里</h3><p>试试一个熟悉的工具，或你想解决的问题。</p><div class="search-suggestions"><button class="ghost" onclick="searchExample('Claude Code')">Claude Code</button><button class="ghost" onclick="searchExample('视频生成')">视频生成</button><button class="ghost" onclick="searchExample('知识管理')">知识管理</button></div></div></div>
 </div>
 
 <div id="askpanel" style="display:none">
+  <div class="compact-heading"><h1>知识问答</h1><span>每一个回答，都能回到出处</span><button id="chat-history-toggle" class="ghost" onclick="toggleChatHistory()" aria-expanded="false" aria-controls="chat-convs">历史对话</button></div>
   <div class="chat-layout">
     <aside class="chat-side">
       <button id="chat-new" onclick="newChat()">＋ 新对话</button>
@@ -86,7 +107,7 @@
     <section class="chat-main">
       <div id="chat-msgs"></div>
       <div class="chat-inputbar">
-        <textarea id="chat-input" rows="1"
+        <textarea id="chat-input" aria-label="向知识库提问" rows="1"
                   placeholder="输入问题,Enter 发送,Shift+Enter 换行"></textarea>
         <select id="ask-model" title="回答模型"></select>
         <button id="chat-send" onclick="sendChat()">发送</button>
@@ -96,6 +117,7 @@
 </div>
 
 <div id="favpanel" style="display:none">
+  <div class="page-heading"><span class="eyebrow">SAVED FOR A REASON</span><h1>把灵感留给下一步<span class="title-dot">.</span></h1><p>收藏值得回看的内容，把想试试的工具变成行动。</p></div>
   <div class="fav-sub">
     <button id="fav-t-inbox" class="on" onclick="switchFavView('inbox')">待试</button>
     <button id="fav-t-done" onclick="switchFavView('done')">已处理</button>
@@ -103,7 +125,7 @@
     <span class="fav-tools" id="fav-tools">
       <select id="fav-model" onchange="saveFavModel()" title="分诊与行动卡用的模型"></select>
       <button class="ghost" id="fav-triage-btn" onclick="runTriage()">✨ 重新分诊</button>
-      <span class="fav-mode-toggle" id="fav-mode-toggle" onclick="toggleFavMode()">以列表查看 ▾</span>
+      <button class="fav-mode-toggle" id="fav-mode-toggle" onclick="toggleFavMode()">以列表查看 ▾</button>
     </span>
   </div>
   <div id="fav-stale" class="fav-stale" style="display:none"></div>
@@ -111,6 +133,7 @@
 </div>
 
 <div id="pipepanel" style="display:none">
+  <div class="page-heading"><span class="eyebrow">KEEP YOUR KNOWLEDGE GROWING</span><h1>给知识库添一点新知<span class="title-dot">.</span></h1><p>管理内容来源，查看同步进度，让收集有条不紊。</p></div>
   <!-- 来源采集器连接状态 -->
   <div class="hit" id="pipe-source" style="display:flex;justify-content:space-between;align-items:center">
     <div>
@@ -159,6 +182,8 @@
     <div id="pipe-log" style="font-family:var(--font-mono);font-size:12px;color:#4A565F;white-space:pre-wrap">(暂无日志)</div>
   </div>
 </div>
+
+</main>
 
 <div id="pipe-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closePipeModal()">
   <div class="modal" style="width:min(640px,92vw);max-height:90vh;overflow-y:auto">
@@ -369,10 +394,10 @@
 
 <!-- 工具详情抽屉(z 30/31,低于阅读器) -->
 <div id="tool-mask" style="display:none" onclick="closeToolDrawer()"></div>
-<aside id="tool-drawer" style="display:none" aria-label="工具详情">
+<aside id="tool-drawer" style="display:none" role="dialog" aria-modal="true" aria-label="工具详情">
   <div class="td-head">
     <b id="td-name"></b>
-    <button class="ghost" onclick="closeToolDrawer()" style="padding:4px 10px">✕</button>
+    <button class="ghost" onclick="closeToolDrawer()" aria-label="关闭工具详情" style="padding:4px 10px">✕</button>
   </div>
   <div class="td-scroll" id="td-scroll">
     <div id="td-hero" class="td-hero"></div>
@@ -380,24 +405,26 @@
     <div id="td-chat-msgs"></div>
   </div>
   <div class="td-chatbar">
-    <textarea id="td-chat-input" rows="1" placeholder="就这个工具提问,Enter 发送…"></textarea>
+    <textarea id="td-chat-input" aria-label="向工具提问" rows="1" placeholder="就这个工具提问,Enter 发送…"></textarea>
     <button id="td-chat-send" onclick="sendToolChat()">发送</button>
   </div>
 </aside>
 
 <div id="reader-mask" style="display:none" onclick="closeReader()"></div>
-<div id="reader" style="display:none">
+<div id="reader" style="display:none" role="dialog" aria-modal="true" aria-label="文章阅读器">
   <div class="reader-head">
     <b id="reader-title"></b>
-    <span class="favbtn" id="reader-fav" onclick="toggleFav(this)" style="display:none;font-size:12.5px"></span>
+    <button class="favbtn" id="reader-fav" onclick="toggleFav(this)" style="display:none;font-size:12.5px"></button>
     <a id="reader-open" target="_blank" rel="noopener">新标签↗</a>
     <a id="reader-obs">Obsidian</a>
     <a id="reader-src" target="_blank" rel="noopener" style="display:none">微信原文↗</a>
-    <button class="ghost" onclick="closeReader()" style="padding:4px 10px">✕</button>
+    <button class="ghost" onclick="closeReader()" aria-label="关闭阅读器" style="padding:4px 10px">✕</button>
   </div>
-  <iframe id="reader-frame"></iframe>
+  <iframe id="reader-frame" title="文章内容"></iframe>
 </div>
 
+<div id="shortcuts-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeShortcuts()"><div class="modal shortcuts-dialog"><h2>少一点点击，多一点专注</h2><p class="hint">常用键盘快捷键</p><dl><div><dt>快速搜索</dt><dd><kbd>⌘ / Ctrl</kbd> <kbd>K</kbd></dd></div><div><dt>搜索当前图鉴</dt><dd><kbd>/</kbd></dd></div><div><dt>关闭当前弹窗</dt><dd><kbd>Esc</kbd></dd></div><div><dt>发送问题 / 换行</dt><dd><kbd>Enter</kbd> / <kbd>Shift Enter</kbd></dd></div></dl><button onclick="closeShortcuts()">知道了</button></div></div>
+<script src="/static/js/icons.js"></script>
 <script src="/static/js/ui.js"></script>
 <script src="/static/js/core.js"></script>
 <script src="/static/js/fav.js"></script>
@@ -407,14 +434,16 @@
 <script src="/static/js/pipe.js"></script>
 <script src="/static/js/targets.js"></script>
 <script src="/static/js/gallery.js"></script>
+<script src="/static/js/workspace.js"></script>
 <script>
-loadMeta();
+loadMeta().catch(() => { $('stats').textContent = '统计暂不可用'; });
 loadFavSet();
 loadModels();
 refreshKeys();
 refreshMcp();
 loadSched();
 loadGallery();
+initWorkspace();
 openToolFromUrl();
 </script>
 </body>
