@@ -139,7 +139,7 @@
 
 <div id="pipepanel" style="display:none">
   <div class="pipe-page-heading"><div><h1>同步管理<span class="title-dot">.</span></h1><p>把新内容收进知识库，进度和待处理问题都在这里。</p></div>
-    <div class="pipe-actions"><button class="ghost" id="pipe-retry" onclick="retryFailed()" hidden>重试失败项</button><button id="pipe-run" onclick="openPipeModal()">新建同步</button></div>
+    <div class="pipe-actions"><button class="ghost" id="pipe-retry" onclick="retryFailed()" aria-describedby="pipe-retry-help" hidden>重试失败项</button><button id="pipe-run" onclick="openPipeModal()" aria-describedby="pipe-state-hint">新建同步</button></div>
   </div>
   <div class="pipe-source" id="pipe-source">
     <div><strong id="src-label">来源采集器</strong><span id="src-status" class="badge">检查中…</span><p id="src-detail">正在检查所选通道</p></div>
@@ -152,6 +152,12 @@
     <div class="pipe-overview-main"><div><span class="pipe-section-label">当前状态</span><h2 id="pipe-state-title" role="status" tabindex="-1">正在读取同步状态</h2><p id="pipe-running-channel"></p><p id="pipe-run-scope"></p></div><div class="pipe-run-metrics"><b id="pipe-progress-label">—</b><span id="pipe-elapsed"></span></div></div>
     <div class="pipe-progress-track" aria-hidden="true"><span id="pipe-progress-fill"></span></div>
     <div class="pipe-overview-footer"><span id="pipe-state-hint">同步在后台执行，切换页面不会中断。</span><button class="ghost" id="pipe-stop" onclick="stopPipe()" hidden>本阶段结束后停止</button></div>
+    <details id="pipe-retry-help" class="pipe-retry-help">
+      <summary>新建同步和重试失败项有什么区别？</summary>
+      <p><strong>新建同步：</strong>按本次通道、公众号和日期抓取。提取失败且仍在待处理列表中的文档，会在下次完整同步再次尝试；其他步骤仍受各自处理范围、去重和重试间隔限制。</p>
+      <p><strong>重试失败项：</strong>抓取沿用上次的通道和范围，重跑失败阶段及必要的后续步骤；“正文为空”的提取问题会先尝试回填。</p>
+      <p>凭证失效、模型配置或服务故障需先处理。重试不保证成功，也不代表强制重跑全部历史失败。</p>
+    </details>
   </section>
   <div class="pipe-workbench">
     <section class="pipe-stage-panel"><div class="pipe-section-heading"><h2>同步步骤</h2><span>每一步都有结果</span></div><div id="pipe-stages" aria-label="同步阶段"></div></section>

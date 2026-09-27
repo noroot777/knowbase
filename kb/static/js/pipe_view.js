@@ -4,6 +4,17 @@ function pipeHasFailure(stage) {
   return stage?.status === 'error' || /失败 [1-9]|\d+ 个账号失败/.test(stage?.detail || '');
 }
 function pipeResult(s) { return s.running ? s : s.last_run || s; }
+function pipeStateHint(s, result, failed, skipped) {
+  if (s.running) {
+    if (s.stop_requested) return '正在等待执行中的步骤收尾；全部结束前暂不能新建同步，已完成结果会保留。';
+    if (failed) return `已有 ${failed} 个步骤失败，本轮仍在执行。请等全部步骤结束后再新建同步；失败项不会阻止下一轮。`;
+    return '本轮同步尚未结束，暂不能新建同步。任务在后台执行，切换页面不会中断。';
+  }
+  if (failed) return `${result.stopped ? '本轮已停止，结果已保留。' : ''}上次有 ${failed} 个步骤失败，不影响新建同步。可重新配置一次同步，或按上次抓取范围重试失败项。`;
+  if (result.stopped) return '已完成结果已保留。可重新配置同步，已有内容会按现有规则去重。';
+  if (skipped) return `${skipped} 个步骤被跳过，具体原因见下方。`;
+  return '同步在后台执行，切换页面不会中断。';
+}
 function pipeDuration(start, finish) {
   const from = new Date((start || '').replace(' ', 'T')).getTime();
   const to = finish ? new Date(finish.replace(' ', 'T')).getTime() : Date.now();
@@ -61,7 +72,7 @@ function renderPipeState(s) {
   $('pipe-elapsed').textContent = duration ? `${s.running ? '已运行' : '耗时'} ${duration}` : '';
   // Use the same successful-step count as the label; unexecuted work never fills the bar.
   $('pipe-progress-fill').style.width = Math.round(completed / 6 * 100) + '%';
-  $('pipe-state-hint').textContent = s.stop_requested && s.running ? '正在等待执行中的任务结束，不会启动后续步骤；不会强行中断写入。' : s.running ? '正在后台同步，切换工作区或关闭配置窗口都不会中断。' : result.stopped ? '已完成结果已保留。可重新配置同步，已有内容会按现有规则去重。' : failed ? '展开问题明细查看原因，修复后可重试失败项。' : skipped ? `${skipped} 个步骤被跳过，具体原因见下方。` : '同步在后台执行，切换页面不会中断。';
+  $('pipe-state-hint').textContent = pipeStateHint(s, result, failed, skipped);
   $('pipe-retry').hidden = s.running || !(failed || pipePending.extract > 0);
   renderPipeLog((s.log?.length ? s.log : result.log) || [], result.finished_at);
   renderPipeButtons();

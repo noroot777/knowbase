@@ -6,7 +6,7 @@ from threading import Event, Thread
 from unittest import TestCase, main
 from unittest.mock import patch
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from kb import pipeline, pipeline_retry, pipeline_state as state
@@ -136,6 +136,36 @@ class PipelineStopTests(TestCase):
             self.assertTrue(pipeline.start_pipeline(['index']))
         self.assertFalse(state._state['stop_requested'])
         self.assertFalse(state._state['stopped'])
+
+    def test_previous_failures_allow_new_sync_with_new_scope(self):
+        for restored in (False, True):
+            with self.subTest(restored=restored):
+                state._state.update(running=False, crawl_filter={
+                    'channel': 'wechat_oa', 'accounts': ['上次公众号'],
+                    'since_date': '2026-09-01', 'until_date': '2026-09-02'})
+                state._stage('extract', 'error', '失败 1')
+                state._save_last_run()
+                if restored:
+                    state._state['stages'] = {}
+                with patch.object(pipeline.threading, 'Thread') as thread:
+                    response = pipeline_api.pipeline_run(pipeline_api.PipelineRunRequest(
+                        channel='wechat_oa', accounts=['本次公众号'],
+                        since_date='2026-09-27', until_date='2026-09-28'))
+                    self.assertEqual({'ok': True}, response)
+                    thread.return_value.start.assert_called_once()
+                self.assertEqual(['本次公众号'], state._state['crawl_filter']['accounts'])
+                self.assertEqual('2026-09-27', state._state['crawl_filter']['since_date'])
+                self.assertTrue(state._state['running'])
+
+    def test_failure_during_live_run_still_blocks_concurrent_sync(self):
+        state._stage('extract', 'error', '失败 1')
+        state._stage('crawl', 'running', '抓取仍在执行')
+        with patch.object(pipeline.threading, 'Thread') as thread:
+            with self.assertRaises(HTTPException) as error:
+                pipeline_api.pipeline_run(pipeline_api.PipelineRunRequest(channel='wechat_oa'))
+            self.assertEqual(409, error.exception.status_code)
+            self.assertIn('运行中', error.exception.detail)
+            thread.assert_not_called()
 
 
 if __name__ == '__main__':
