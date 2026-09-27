@@ -15,6 +15,8 @@ async page => {
   let sourceCount = 0, pendingCount = 0;
   let holdB = false, releaseB = null, accountFail = false, startFail = false;
   let holdStart = false, releaseStart = null, scheduleFail = false;
+  let holdChannels = false, releaseChannels = null, channelFail = false;
+  let clockInstalled = false;
   const accounts = {a:['公众号甲','公众号乙','公众号丙 "<测试>'],b:['另一通道甲','另一通道乙']};
   const reply = (route,data,status=200) => route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)}).catch(()=>{});
   const copy = value => JSON.parse(JSON.stringify(value));
@@ -57,6 +59,11 @@ async page => {
       state.running=true;state.stages.extract={status:'running',detail:'重试提取'};return reply(route,{ok:true,plan:'extract'});
     }
     if (path === '/api/pipeline/schedule' && request.method()==='POST') return reply(route,scheduleFail?{detail:'测试保存失败'}:request.postDataJSON(),scheduleFail?500:200);
+    if (path === '/api/pipeline/channels' && holdChannels) {
+      releaseChannels = () => reply(route,{default:'a',channels:[{id:'a',label:'凭证通道'},{id:'b',label:'本机通道'}]});
+      return;
+    }
+    if (path === '/api/pipeline/channels' && channelFail) return reply(route,{detail:'测试通道读取失败'},503);
     const fixtures = {
       '/api/pipeline/channels':{default:'a',channels:[{id:'a',label:'凭证通道'},{id:'b',label:'本机通道'}]},
       '/api/pipeline/schedule':{enabled:false,time:'07:30',channel:'a'},
@@ -107,9 +114,13 @@ async page => {
     await page.locator('#nav-sync-dot').waitFor({state:'visible',timeout:12000});
     check('留在图鉴也能发现后来启动的后台同步',await page.locator('#gallerypanel').isVisible());
     state={running:false,stages:{},log:[],stop_supported:true};
-    holdSource=true;releaseSource=null;
+    holdSource=true;releaseSource=null;holdStatus=true;
     await page.goto(origin+'/?pipeline-test='+Date.now()+'#pipe');
-    await page.waitForFunction(()=>!document.getElementById('pipe-run').disabled);
+    await page.locator('#pipe-run').click();await page.locator('input[data-acct]').first().waitFor();
+    check('首次状态请求未返回也能打开新建同步',await page.locator('#pipe-modal').isVisible());
+    check('读取状态时在配置内说明原因并防止实际启动',await page.locator('#pipe-setup-connection').isVisible() && await page.locator('#pipe-start').isDisabled());
+    await page.getByRole('button',{name:'暂不执行',exact:true}).click();
+    holdStatus=false;await releaseStatus();await page.waitForFunction(()=>pipeConnected && !pipeRequest);
     check('慢采集器探测不阻塞同步状态',holdSource && !!releaseSource && await page.locator('.pipe-stage').count()===6);
     holdSource=false;await releaseSource();
     state={running:true,stop_supported:true,started_at:'2026-09-26 12:00:00',crawl_filter:{channel:'a',accounts:['公众号甲']},stages:emptyStages(),log:Array.from({length:80},(_,i)=>`[12:00:${String(i).padStart(2,'0')}] 处理测试内容 ${i}`)};
@@ -168,6 +179,31 @@ async page => {
     check('部分步骤跳过时进度与完成计数一致',await page.locator('#pipe-progress-label').textContent()==='1 / 6 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='17%'));
     finish();await refresh();
     check('六步全部成功才显示完整进度',await page.locator('#pipe-progress-label').textContent()==='6 / 6 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='100%'));
+    statusFail=true;await refresh();
+    check('空闲时断线不会禁用新建配置入口',!await page.locator('#pipe-run').isDisabled() && await page.locator('#pipe-run').textContent()==='新建同步');
+    await page.locator('#pipe-run').click();await page.locator('input[data-acct]').first().waitFor();
+    await page.waitForFunction(()=>!pipeRequest);
+    check('断线仍能配置且在弹窗内提供重连',await page.locator('#pipe-setup-connection button').isEnabled() && (await page.locator('#pipe-est').textContent()).includes('恢复状态连接'));
+    const disconnectedWrites=countWrites('/api/pipeline/run');
+    await page.locator('#pipe-start').evaluate(el=>el.click());
+    check('断线配置不会发出启动请求',await page.locator('#pipe-start').isDisabled() && countWrites('/api/pipeline/run')===disconnectedWrites);
+    await page.getByRole('checkbox',{name:'公众号甲',exact:true}).uncheck();
+    await page.locator('#pipe-range-btn').click();await page.getByRole('button',{name:'近 7 天',exact:true}).click();
+    await page.locator('#pipe-setup-connection button').click();await page.waitForFunction(()=>!pipeRequest);
+    check('重连失败后可继续重试且保留配置',!await page.getByRole('checkbox',{name:'公众号甲',exact:true}).isChecked() && await page.locator('#pipe-range-label').textContent()==='近 7 天' && await page.locator('#pipe-setup-connection button').isEnabled());
+    await page.setViewportSize({width:375,height:812});
+    await settlePaint();
+    check('手机断线配置仍显示提示及底部按钮且不横向溢出',await page.locator('#pipe-setup-connection').isVisible() && await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth && document.querySelector('.pipe-setup-footer').getBoundingClientRect().bottom<=innerHeight));
+    await page.screenshot({path:'output/playwright/new-sync-disconnected-after.png'});
+    await page.setViewportSize({width:1440,height:1100});
+    statusFail=false;state.running=true;
+    await page.locator('#pipe-setup-connection button').click();await page.waitForFunction(()=>pipeConnected && !pipeRequest);
+    check('重连发现后台已有任务时明确提示并阻止重复启动',(await page.locator('#pipe-setup-connection').textContent()).includes('已有同步') && await page.locator('#pipe-start').isDisabled());
+    state.running=false;await refresh();
+    check('后台恢复空闲后可继续启动且配置未丢失',await page.locator('#pipe-start').isEnabled() && !await page.getByRole('checkbox',{name:'公众号甲',exact:true}).isChecked() && await page.locator('#pipe-range-label').textContent()==='近 7 天');
+    await page.getByRole('checkbox',{name:'公众号甲',exact:true}).check();
+    await page.locator('#pipe-range-btn').click();await page.getByRole('button',{name:'不限时间',exact:true}).click();
+    await page.getByRole('button',{name:'暂不执行',exact:true}).click();
     await page.locator('#pipe-run').click();await page.locator('input[data-acct]').first().waitFor();
     check('公众号是可键盘操作的真实复选框',await page.getByRole('checkbox',{name:'公众号丙 "<测试>',exact:true}).isChecked());
     await page.getByRole('checkbox',{name:'公众号甲',exact:true}).uncheck();
@@ -235,9 +271,31 @@ async page => {
     check('Escape先关闭日期选择并返回焦点',await page.locator('#pipe-range-btn').evaluate(el=>el===document.activeElement && el.getAttribute('aria-expanded')==='false'));
     await page.keyboard.press('Escape');
     check('关闭配置返回原入口焦点',await page.locator('#pipe-run').evaluate(el=>el===document.activeElement));
+    channelFail=true;
+    await page.goto(origin+'/?pipeline-test='+Date.now()+'#pipe');
+    await page.waitForFunction(()=>pipeConnected && !pipeChannelsLoading);
+    await page.locator('#pipe-run').click();
+    await page.getByRole('button',{name:'重新读取同步通道',exact:true}).waitFor();
+    check('通道请求失败显示具体原因和就地重试',await page.locator('#pipe-start').isDisabled() && (await page.locator('#pipe-setup-error').textContent()).includes('测试通道读取失败'));
+    channelFail=false;
+    await page.getByRole('button',{name:'重新读取同步通道',exact:true}).click();await page.locator('input[data-acct]').first().waitFor();
+    check('通道重试恢复可用表单',await page.locator('#pipe-start').isEnabled());
+    await page.getByRole('button',{name:'暂不执行',exact:true}).click();
+    holdChannels=true;releaseChannels=null;
+    await page.clock.install();clockInstalled=true;
+    await page.goto(origin+'/?pipeline-test='+Date.now()+'#pipe');
+    await page.waitForFunction(()=>pipeConnected);
+    await page.locator('#pipe-run').click();
+    await page.clock.fastForward(16000);
+    await page.getByRole('button',{name:'重新读取同步通道',exact:true}).waitFor();
+    check('通道请求挂起会超时退出等待并允许重试',(await page.locator('#pipe-setup-error').textContent()).includes('超时') && await page.locator('#pipe-start').isDisabled());
+    holdChannels=false;if(releaseChannels)await releaseChannels();
+    await page.getByRole('button',{name:'重新读取同步通道',exact:true}).click();await page.locator('input[data-acct]').first().waitFor();
+    check('超时后重试不复用失效请求',await page.locator('#pipe-start').isEnabled());
     check('无未处理前端异常',errors.length===0);
     return {passed:checks.length,checks,errors,isolatedWrites:writes};
   } finally {
+    if(clockInstalled)await page.clock.resume();
     await page.evaluate(()=>{invalidatePipeStatus();});
     page.off('pageerror',onError);
     await page.unroute('**/api/**',handler);

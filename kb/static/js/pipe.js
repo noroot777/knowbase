@@ -69,10 +69,11 @@ async function refreshPipe(withPending = false) {
       $('pipe-connection').querySelector('span').textContent = `状态暂时无法更新：${e.message}。${pipeLastRead ? '保留上次结果，正在自动重连。' : '正在自动重连。'}`;
       renderPipeButtons();
     } finally {
-      if (version === pipeStatusVersion) { pipeRequest = null; queuePipeRefresh(); }
+      if (version === pipeStatusVersion) { pipeRequest = null; renderPipeButtons(); queuePipeRefresh(); }
     }
   })();
   pipeRequest = request;
+  renderPipeButtons();
   return request;
 }
 async function refreshPipeSource() {
@@ -112,8 +113,9 @@ async function refreshPipePending() {
 }
 function renderPipeButtons() {
   const running = !!pipeSnapshot?.running;
-  $('pipe-run').disabled = !pipeConnected || running || !!pipeAction;
-  $('pipe-run').textContent = pipeAction === 'start' ? '正在启动…' : running ? '同步进行中' : !pipeSnapshot ? '读取状态…' : '新建同步';
+  // Opening a draft is local; only the actual start requires a confirmed connection.
+  $('pipe-run').disabled = running || !!pipeAction;
+  $('pipe-run').textContent = pipeAction === 'start' ? '正在启动…' : running ? '同步进行中' : '新建同步';
   $('pipe-channel-current').disabled = running || !!pipeAction;
   $('pipe-retry').disabled = !pipeConnected || running || !!pipeAction;
   $('pipe-retry').textContent = pipeAction === 'retry' ? '正在启动重试…' : '重试失败项';

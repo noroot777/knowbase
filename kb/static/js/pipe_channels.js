@@ -8,11 +8,10 @@ async function loadPipeChannels() {
   if (pipeChannels.length) return;
   if (pipeChannelsLoading) return pipeChannelsLoading;
   pipeChannelsLoading = (async () => {
-    const r = await fetch('/api/pipeline/channels');
-    if (!r.ok) throw new Error(await apiFail(r, '读取同步通道失败'));
-    const data = await r.json();
+    const data = await pipeJson('/api/pipeline/channels');
+    if (!data.channels?.length) throw new Error('暂无可用的同步通道，请检查采集器配置后重试');
     pipeChannels = data.channels || [];
-    if (!pipeChannels.some(c => c.id === pipeChannel)) pipeChannel = data.default;
+    if (!pipeChannels.some(c => c.id === pipeChannel)) pipeChannel = pipeChannels.some(c => c.id === data.default) ? data.default : pipeChannels[0].id;
     for (const id of ['pipe-channel', 'pipe-channel-current', 'sched-channel']) {
       $(id).innerHTML = pipeChannels.map(c => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join('');
       $(id).value = id === 'sched-channel' ? data.default : pipeChannel;

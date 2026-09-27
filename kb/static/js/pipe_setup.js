@@ -28,11 +28,16 @@ async function openPipeModal() {
   pipeSetupError(); $('pipe-acct-search').value = ''; pipeAccountsReady = false;
   $('pipe-acct-list').innerHTML = '<p class="pipe-acct-empty">正在读取同步通道与公众号…</p>';
   renderPipeEst();
+  if (!pipeConnected) refreshPipe();
   try {
     await loadPipeChannels();
     if (!pipeModalOpen()) return;
     renderPipeChannel(); await loadPipeAccounts();
-  } catch (e) { pipeSetupError(e.message); }
+  } catch (e) {
+    if (!pipeModalOpen()) return;
+    $('pipe-acct-list').innerHTML = '<div class="pipe-acct-empty">同步通道暂不可用。<br><button class="ghost" onclick="openPipeModal()">重新读取同步通道</button></div>';
+    pipeSetupError(e.message);
+  }
 }
 function closePipeModal() {
   savePipeDraft(); pipeAccountVersion++; pipeAccountAbort?.abort();
@@ -127,7 +132,17 @@ function pipeSelectNone() { for (const n of filteredPipeAccounts()) pipeSel.dele
 function renderPipeEst() {
   const channel = pipeChannels.find(c => c.id === pipeChannel), n = pipeSel.size;
   const editingRange = $('pipe-range-pop').style.display !== 'none';
+  const connection = $('pipe-setup-connection'), reconnect = connection.querySelector('button');
+  connection.hidden = pipeConnected && !pipeSnapshot?.running;
+  connection.querySelector('span').textContent = !pipeConnected
+    ? '尚未确认后台运行状态。可先配置，连接恢复且没有运行中的任务时才能开始同步。'
+    : '已有同步正在后台执行。配置已保留，结束后可启动下一次同步。';
+  reconnect.hidden = pipeConnected;
+  reconnect.disabled = !!pipeRequest;
+  reconnect.textContent = pipeRequest ? '正在连接…' : '重新连接';
   $('pipe-est').textContent = !pipeAccountsReady ? '列表读取完成后即可开始。' : n ? `${channel?.label || '所选通道'} · ${n} 个公众号 · ${pipeRange.label}。执行中可离开本页，稍后回来查看。` : '请至少选择一个公众号。';
+  if (!pipeConnected) $('pipe-est').textContent = '请先恢复状态连接，再开始同步。';
+  else if (pipeSnapshot?.running) $('pipe-est').textContent = '等待当前同步结束，配置会保留。';
   if (editingRange) $('pipe-est').textContent = '请先应用日期范围，或收起日期选择以使用当前已选范围。';
   $('pipe-start').disabled = editingRange || !pipeConnected || !pipeAccountsReady || !n || !!pipeAction || !!pipeSnapshot?.running;
   $('pipe-start').textContent = pipeAction === 'start' ? '正在启动…' : n ? `开始同步 · ${n} 个` : '开始同步';

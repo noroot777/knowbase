@@ -139,7 +139,7 @@
 
 <div id="pipepanel" style="display:none">
   <div class="pipe-page-heading"><div><h1>同步管理<span class="title-dot">.</span></h1><p>把新内容收进知识库，进度和待处理问题都在这里。</p></div>
-    <div class="pipe-actions"><button class="ghost" id="pipe-retry" onclick="retryFailed()" hidden>重试失败项</button><button id="pipe-run" onclick="openPipeModal()" disabled>读取状态…</button></div>
+    <div class="pipe-actions"><button class="ghost" id="pipe-retry" onclick="retryFailed()" hidden>重试失败项</button><button id="pipe-run" onclick="openPipeModal()">新建同步</button></div>
   </div>
   <div class="pipe-source" id="pipe-source">
     <div><strong id="src-label">来源采集器</strong><span id="src-status" class="badge">检查中…</span><p id="src-detail">正在检查所选通道</p></div>
@@ -170,6 +170,7 @@
 <div id="pipe-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closePipeModal()">
   <div class="modal pipe-setup">
     <div class="pipe-setup-heading"><div><h2>新建同步</h2><p class="hint">选择来源与时间范围，自动完成后续六个步骤。</p></div><button class="icon-button" onclick="closePipeModal()" aria-label="关闭同步配置">×</button></div>
+    <div id="pipe-setup-connection" class="pipe-notice" hidden role="status"><span></span><button class="ghost" onclick="refreshPipe()">重新连接</button></div>
     <div id="pipe-setup-error" class="pipe-notice" hidden role="alert"></div>
     <fieldset id="pipe-fields">
       <div class="row"><label for="pipe-channel">同步通道</label><select id="pipe-channel" onchange="changePipeChannel(this.value)"><option value="">读取通道…</option></select><div id="pipe-channel-hint" class="hint"></div></div>
