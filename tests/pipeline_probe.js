@@ -9,6 +9,7 @@ async page => {
   const origin = page.url().match(/^https?:\/\/[^/]+/)[0];
   const keys = ['crawl','export','index','extract','projects','wiki'];
   const emptyStages = () => Object.fromEntries(keys.map(k=>[k,{status:'pending',detail:''}]));
+  const retryStages = plan => Object.fromEntries(keys.map(k=>[k,{status:plan.includes(k)?'pending':'skipped',detail:plan.includes(k)?'':'本次无需重试'}]));
   let state = {running:false,stages:{},log:[],stop_supported:true};
   let holdSource = true, releaseSource = null, holdStatus = false, releaseStatus = null;
   let statusCount = 0, statusFail = false, holdStop = false, releaseStop = null;
@@ -48,7 +49,7 @@ async page => {
     if (path === '/api/pipeline/run') {
       if (startFail) return reply(route,{detail:'测试启动失败，请检查采集器'},500);
       const start = () => {
-        state={running:true,stop_requested:false,stop_supported:true,started_at:'2026-09-26 12:00:00',crawl_filter:request.postDataJSON(),stages:emptyStages(),log:['同步开始']};
+        state={running:true,run_kind:'sync',planned_stages:[...keys],stop_requested:false,stop_supported:true,started_at:'2026-09-26 12:00:00',crawl_filter:request.postDataJSON(),stages:emptyStages(),log:['同步开始']};
         state.stages.crawl={status:'running',detail:'抓取公众号甲'};
         return reply(route,{ok:true});
       };
@@ -56,7 +57,8 @@ async page => {
       return start();
     }
     if (path === '/api/pipeline/retry-failed') {
-      state.running=true;state.stages.extract={status:'running',detail:'重试提取'};return reply(route,{ok:true,plan:'extract'});
+      state={...state,running:true,run_kind:'retry',planned_stages:['extract'],finished_at:'',stages:retryStages(['extract'])};
+      state.stages.extract={status:'running',detail:'重试提取'};return reply(route,{ok:true,plan:'extract'});
     }
     if (path === '/api/pipeline/schedule' && request.method()==='POST') return reply(route,scheduleFail?{detail:'测试保存失败'}:request.postDataJSON(),scheduleFail?500:200);
     if (path === '/api/pipeline/channels' && holdChannels) {
@@ -79,11 +81,12 @@ async page => {
     return reply(route,fixtures[path] || {});
   };
   await page.route('**/api/**',handler);
-  const refresh = () => page.evaluate(()=>refreshPipe());
+  // Finish a navigation-triggered read before requesting the next fixture state.
+  const refresh = () => page.evaluate(async()=>{ await pipeRequest; await refreshPipe(); });
   const countWrites = path => writes.filter(w=>w.path===path).length;
   const finish = () => {
     state.running=false;state.finished_at='2026-09-26 12:06:00';
-    state.stages=Object.fromEntries(keys.map(k=>[k,{status:'ok',detail:'完成'}]));
+    state.stages=Object.fromEntries(keys.map(k=>[k, !state.planned_stages || state.planned_stages.includes(k) ? {status:'ok',detail:'完成'} : {status:'skipped',detail:state.run_kind==='retry'?'本次无需重试':'未选择'}]));
     state.stopped=false;state.stop_requested=false;
   };
   try {
@@ -177,6 +180,35 @@ async page => {
     check('跳过五步仅执行一步时不会预先填满进度',await page.locator('#pipe-progress-label').textContent()==='0 / 6 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='0%'));
     state.running=false;state.finished_at='2026-09-26 12:06:00';state.stages.extract={status:'ok',detail:'提取完成'};await refresh();
     check('部分步骤跳过时进度与完成计数一致',await page.locator('#pipe-progress-label').textContent()==='1 / 6 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='17%'));
+    const retryPlan=['export','index','extract'];
+    state={running:true,run_kind:'retry',planned_stages:retryPlan,stop_supported:true,stages:retryStages(retryPlan),log:[]};
+    state.stages.export={status:'ok',detail:'回填完成'};state.stages.index={status:'ok',detail:'索引完成'};state.stages.extract={status:'running',detail:'重试提取'};await refresh();
+    check('三步重试运行中按本次计划显示2/3和67%',await page.locator('#pipe-progress-label').textContent()==='2 / 3 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='67%'));
+    check('运行标题与按钮明确正在重试',(await page.locator('#pipe-state-title').textContent()).includes('正在重试') && await page.locator('#pipe-run').textContent()==='重试进行中');
+    state.running=false;state.finished_at='2026-09-28 08:00:00';state.stages.extract={status:'error',detail:'失败 1'};await refresh();
+    check('重试仍有失败保持2/3并显示需处理',await page.locator('#pipe-progress-label').textContent()==='2 / 3 完成' && await page.locator('#pipe-state-title').textContent()==='重试结束，1 个步骤需处理');
+    state.stages.extract={status:'ok',detail:'提取完成'};await refresh();await settlePaint();
+    check('三步重试全部成功显示3/3及满进度',await page.locator('#pipe-progress-label').textContent()==='3 / 3 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='100%'));
+    check('无需重试的步骤不误报部分跳过',await page.locator('#pipe-state-title').textContent()==='重试已完成' && (await page.locator('#pipe-state-hint').textContent()).includes('3 个步骤均已完成') && await page.locator('.pipe-stage[data-status=not_planned]').count()===3);
+    const completedRetry=copy(state);
+    state={running:false,stop_supported:true,stages:{},log:[],last_run:copy(completedRetry)};
+    await page.reload();await page.waitForFunction(()=>document.getElementById('pipe-state-title').textContent==='重试已完成');
+    check('刷新后历史重试计划仍显示3/3',await page.locator('#pipe-progress-label').textContent()==='3 / 3 完成');
+    await settlePaint();await page.screenshot({path:'output/playwright/retry-completed-plan.png'});
+    await page.setViewportSize({width:375,height:812});await settlePaint();
+    check('手机重试完成态无横向溢出',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+    await page.screenshot({path:'output/playwright/retry-completed-plan-mobile.png'});
+    await page.setViewportSize({width:1440,height:1100});
+    delete state.last_run.run_kind;delete state.last_run.planned_stages;await refresh();
+    check('兼容旧重试记录按无需重试标记还原3/3',await page.locator('#pipe-progress-label').textContent()==='3 / 3 完成' && await page.locator('#pipe-state-title').textContent()==='重试已完成');
+    state={...copy(completedRetry),stopped:true};
+    state.stages.index={status:'stopped',detail:'停止'};state.stages.extract={status:'stopped',detail:'停止'};await refresh();
+    check('重试中途停止仍以原计划三步为分母',await page.locator('#pipe-progress-label').textContent()==='1 / 3 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='33%') && await page.locator('#pipe-state-title').textContent()==='重试已停止');
+    state={running:false,run_kind:'retry',planned_stages:['extract'],finished_at:'2026-09-28 08:00:00',stages:retryStages(['extract']),log:[]};state.stages.extract={status:'ok',detail:'完成'};await refresh();
+    check('仅重试一步成功显示1/1满进度',await page.locator('#pipe-progress-label').textContent()==='1 / 1 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='100%'));
+    state={running:false,run_kind:'retry',planned_stages:[...keys],finished_at:'2026-09-28 08:00:00',stages:Object.fromEntries(keys.map(k=>[k,{status:'ok',detail:'完成'}])),log:[]};await refresh();
+    check('六步全纳入重试时仍识别重试完成',await page.locator('#pipe-progress-label').textContent()==='6 / 6 完成' && await page.locator('#pipe-state-title').textContent()==='重试已完成');
+    state={running:false,stop_supported:true,stages:{},log:[]};
     finish();await refresh();
     check('六步全部成功才显示完整进度',await page.locator('#pipe-progress-label').textContent()==='6 / 6 完成' && await page.locator('#pipe-progress-fill').evaluate(el=>el.style.width==='100%'));
     statusFail=true;await refresh();

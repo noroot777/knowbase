@@ -149,6 +149,8 @@ def start_pipeline(stages: list[str] | None = None,
             "stop_requested": False, "stopped": False,
             "started_at": _now(), "finished_at": "",
             "crawl_filter": crawl_filter,
+            "run_kind": "sync",
+            "planned_stages": [s for s in STAGES if s in wanted],
             "stages": {s: {"status": "pending" if s in wanted else "skipped",
                            "detail": ""} for s in STAGES},
         })

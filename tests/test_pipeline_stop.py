@@ -20,6 +20,7 @@ class PipelineStopTests(TestCase):
         self.file_patch = patch.object(state, '_STATE_FILE', Path(self.temp.name) / 'state.json')
         self.file_patch.start()
         state._state.update(running=True, stop_requested=False, stopped=False,
+                            run_kind='', planned_stages=None,
                             current_stage='', started_at='2026-09-26 09:00:00',
                             finished_at='', crawl_filter={}, log=[],
                             stages={name: {'status': 'pending', 'detail': ''} for name in state.STAGES})
@@ -166,6 +167,47 @@ class PipelineStopTests(TestCase):
             self.assertEqual(409, error.exception.status_code)
             self.assertIn('运行中', error.exception.detail)
             thread.assert_not_called()
+
+    def test_sync_plan_survives_stop_and_is_an_independent_status_snapshot(self):
+        for selected in (None, ['index', 'extract']):
+            with self.subTest(selected=selected):
+                state._state.update(running=False, run_kind='retry', planned_stages=['wiki'])
+                with patch.object(pipeline.threading, 'Thread'):
+                    self.assertTrue(pipeline.start_pipeline(selected))
+                planned = list(state.STAGES) if selected is None else selected
+                status = pipeline_api.pipeline_status(source=False)
+                self.assertEqual('sync', status['run_kind'])
+                self.assertEqual(planned, status['planned_stages'])
+                status['planned_stages'].clear()
+                self.assertEqual(planned, state._state['planned_stages'])
+                state._stage(planned[0], 'ok', '完成')
+                state.request_stop()
+                state._end_run()
+                last = pipeline_api.pipeline_status(source=False)['last_run']
+                self.assertEqual(planned, last['planned_stages'])
+                self.assertEqual('sync', last['run_kind'])
+                self.assertTrue(last['stopped'])
+
+    def test_retry_persists_its_own_plan_and_counts_refill_in_export_once(self):
+        cases = [(['extract'], ['extract']),
+                 (['refill', 'index', 'extract'], ['export', 'index', 'extract']),
+                 (['export', 'refill', 'index', 'extract'], ['export', 'index', 'extract'])]
+        for plan, expected in cases:
+            with self.subTest(plan=plan):
+                state._state['running'] = False
+                with patch.object(pipeline_retry, 'retry_failed_plan', return_value=plan), \
+                     patch.object(pipeline_retry, 'load_last_run', return_value={'crawl_filter': {'channel': 'wechat_oa'}}), \
+                     patch.object(pipeline_retry.threading, 'Thread'):
+                    started, _ = pipeline_retry.start_retry_failed()
+                self.assertTrue(started)
+                self.assertEqual(expected, pipeline_api.pipeline_status(source=False)['planned_stages'])
+                for name in expected:
+                    state._stage(name, 'ok', '重试完成')
+                state._end_run()
+                last = pipeline_api.pipeline_status(source=False)['last_run']
+                self.assertEqual('retry', last['run_kind'])
+                self.assertEqual(expected, last['planned_stages'])
+                self.assertEqual(len(expected), sum(s['status'] == 'ok' for s in last['stages'].values()))
 
 
 if __name__ == '__main__':

@@ -27,6 +27,8 @@ _state: dict = {
     "started_at": "",
     "finished_at": "",
     "crawl_filter": {},
+    "run_kind": "",
+    "planned_stages": None,
     # 每阶段: {status: pending/running/ok/skipped/error/stopped, detail: str}
     "stages": {s: {"status": "", "detail": ""} for s in STAGES},
     "log": [],          # 最近若干条进度行
@@ -66,6 +68,8 @@ def _save_last_run() -> None:
             "started_at": _state["started_at"],
             "finished_at": _state["finished_at"],
             "stopped": _state.get("stopped", False),
+            "run_kind": _state.get("run_kind", ""),
+            "planned_stages": _state.get("planned_stages"),
             "stages": _state["stages"],
             "crawl_filter": _state["crawl_filter"],
             "log": _state["log"],

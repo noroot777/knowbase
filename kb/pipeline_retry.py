@@ -180,6 +180,8 @@ def start_retry_failed() -> tuple[bool, str]:
             "stop_requested": False, "stopped": False,
             "started_at": _now(), "finished_at": "",
             "crawl_filter": crawl_filter,
+            "run_kind": "retry",
+            "planned_stages": [s for s in STAGES if card[s]],
             "stages": {s: {"status": "pending" if card[s] else "skipped",
                            "detail": "" if card[s] else "本次无需重试"}
                        for s in STAGES},

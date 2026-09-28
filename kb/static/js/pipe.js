@@ -60,7 +60,7 @@ async function refreshPipe(withPending = false) {
         pipeJson('/api/stats').then(stats => {
           $('stats').textContent = `${stats.documents.toLocaleString()} 篇内容已收录`;
         }).catch(() => {});
-        toast(s.stopped || s.last_run?.stopped ? '同步已停止' : '同步已结束', { key: 'pipeline', type: 'info', detail: '各步骤结果已更新，可查看待处理明细。' });
+        toast(pipeRunLabel(pipeResult(s)) + (s.stopped || s.last_run?.stopped ? '已停止' : '已结束'), { key: 'pipeline', type: 'info', detail: '各步骤结果已更新，可查看待处理明细。' });
       }
     } catch (e) {
       if (version !== pipeStatusVersion) return;
@@ -115,7 +115,7 @@ function renderPipeButtons() {
   const running = !!pipeSnapshot?.running;
   // Opening a draft is local; only the actual start requires a confirmed connection.
   $('pipe-run').disabled = running || !!pipeAction;
-  $('pipe-run').textContent = pipeAction === 'start' ? '正在启动…' : running ? '同步进行中' : '新建同步';
+  $('pipe-run').textContent = pipeAction === 'start' ? '正在启动…' : running ? pipeRunLabel(pipeSnapshot) + '进行中' : '新建同步';
   $('pipe-channel-current').disabled = running || !!pipeAction;
   $('pipe-retry').disabled = !pipeConnected || running || !!pipeAction;
   $('pipe-retry').textContent = pipeAction === 'retry' ? '正在启动重试…' : '重试失败项';

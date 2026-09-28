@@ -1,18 +1,33 @@
 // Patch stable stage nodes; polling must not steal focus, close details or jump logs.
-const PIPE_STATUS = { pending: '等待中', running: '执行中', ok: '已完成', skipped: '已跳过', error: '需处理', stopped: '未执行', '': '未开始' };
+const PIPE_STATUS = { pending: '等待中', running: '执行中', ok: '已完成', skipped: '已跳过', not_planned: '本次不执行', error: '需处理', stopped: '未执行', '': '未开始' };
 function pipeHasFailure(stage) {
   return stage?.status === 'error' || /失败 [1-9]|\d+ 个账号失败/.test(stage?.detail || '');
 }
 function pipeResult(s) { return s.running ? s : s.last_run || s; }
-function pipeStateHint(s, result, failed, skipped) {
+function pipePlannedStages(result) {
+  const keys = Object.keys(STAGE_META);
+  if (Array.isArray(result.planned_stages)) return keys.filter(k => result.planned_stages.includes(k));
+  // Older snapshots encode exclusions in the skipped reason. A runtime skip or
+  // an early stop remains part of the original plan and must not shrink it.
+  return keys.filter(k => {
+    const stage = result.stages?.[k];
+    return stage?.status && !(stage.status === 'skipped' && ['本次无需重试', '未选择'].includes(stage.detail));
+  });
+}
+function pipeRunLabel(result) {
+  const legacyRetry = !result.run_kind && Object.values(result.stages || {}).some(st => st.status === 'skipped' && st.detail === '本次无需重试');
+  return result.run_kind === 'retry' || legacyRetry ? '重试' : '同步';
+}
+function pipeStateHint(s, result, failed, skipped, progress) {
   if (s.running) {
     if (s.stop_requested) return '正在等待执行中的步骤收尾；全部结束前暂不能新建同步，已完成结果会保留。';
     if (failed) return `已有 ${failed} 个步骤失败，本轮仍在执行。请等全部步骤结束后再新建同步；失败项不会阻止下一轮。`;
-    return '本轮同步尚未结束，暂不能新建同步。任务在后台执行，切换页面不会中断。';
+    return `本轮${progress.label}尚未结束，暂不能新建同步。任务在后台执行，切换页面不会中断。`;
   }
   if (failed) return `${result.stopped ? '本轮已停止，结果已保留。' : ''}上次有 ${failed} 个步骤失败，不影响新建同步。可重新配置一次同步，或按上次抓取范围重试失败项。`;
   if (result.stopped) return '已完成结果已保留。可重新配置同步，已有内容会按现有规则去重。';
   if (skipped) return `${skipped} 个步骤被跳过，具体原因见下方。`;
+  if (result.finished_at && progress.total && progress.completed === progress.total) return `本次${progress.label}计划的 ${progress.total} 个步骤均已完成。`;
   return '同步在后台执行，切换页面不会中断。';
 }
 function pipeDuration(start, finish) {
@@ -33,9 +48,10 @@ function initPipeStageRows() {
 function renderPipeState(s) {
   initPipeStageRows();
   const result = pipeResult(s), stages = result.stages || {};
+  const planned = pipePlannedStages(result), label = pipeRunLabel(result);
   for (const key of Object.keys(STAGE_META)) {
     const st = stages[key] || { status: '', detail: '' }, row = $('pipe-stage-' + key);
-    const status = pipeHasFailure(st) ? 'error' : st.status || '';
+    const status = !planned.includes(key) && st.status === 'skipped' ? 'not_planned' : pipeHasFailure(st) ? 'error' : st.status || '';
     row.dataset.status = status;
     row.querySelector('.pipe-stage-status').textContent = PIPE_STATUS[status] || '状态未知';
     row.querySelector('.pipe-stage-detail').textContent = st.detail || (s.running && status === 'pending' ? '前序步骤结束后自动开始' : '');
@@ -54,25 +70,25 @@ function renderPipeState(s) {
       list.dataset.signature = signature; list.scrollTop = scroll;
     }
   }
-  const values = Object.values(stages), failed = values.filter(pipeHasFailure).length;
+  const values = planned.map(k => stages[k] || {}), failed = values.filter(pipeHasFailure).length;
   const completed = values.filter(st => st.status === 'ok' && !pipeHasFailure(st)).length;
   const active = Object.keys(STAGE_META).filter(k => stages[k]?.status === 'running').map(k => STAGE_META[k].name);
   const skipped = values.filter(st => st.status === 'skipped').length;
   let title = '准备好收录新内容';
-  if (s.running) title = s.stop_requested ? '正在收尾，随后停止' : active.length ? active.join(' + ') : '同步正在启动';
-  else if (result.stopped) title = '同步已停止';
-  else if (failed) title = `同步结束，${failed} 个步骤需处理`;
-  else if (result.finished_at) title = skipped ? '同步结束，部分步骤已跳过' : '同步已完成';
+  if (s.running) title = s.stop_requested ? '正在收尾，随后停止' : active.length ? (label === '重试' ? '正在重试：' : '') + active.join(' + ') : `${label}正在启动`;
+  else if (result.stopped) title = `${label}已停止`;
+  else if (failed) title = `${label}结束，${failed} 个步骤需处理`;
+  else if (result.finished_at) title = skipped ? `${label}结束，部分步骤已跳过` : planned.length && completed === planned.length ? `${label}已完成` : `${label}结束，本次步骤未全部完成`;
   if ($('pipe-state-title').textContent !== title) $('pipe-state-title').textContent = title;
   const filter = result.crawl_filter || {}, channel = pipeChannels.find(c => c.id === filter.channel);
   $('pipe-running-channel').textContent = filter.channel ? `${s.running ? '本次' : '上次'}通道：${channel?.label || filter.channel}` : '选择来源后开始一次同步';
   $('pipe-run-scope').textContent = filter.channel ? `${filter.accounts?.length ? filter.accounts.length + ' 个指定公众号' : '全部订阅'} · ${filter.since_date ? filter.since_date + ' 至 ' + filter.until_date : '不限时间'}${result.finished_at ? ' · ' + result.finished_at + ' 结束' : ''}` : '';
-  $('pipe-progress-label').textContent = `${completed} / 6 完成`;
+  $('pipe-progress-label').textContent = planned.length ? `${completed} / ${planned.length} 完成` : '—';
   const duration = pipeDuration(result.started_at, s.running ? '' : result.finished_at);
   $('pipe-elapsed').textContent = duration ? `${s.running ? '已运行' : '耗时'} ${duration}` : '';
   // Use the same successful-step count as the label; unexecuted work never fills the bar.
-  $('pipe-progress-fill').style.width = Math.round(completed / 6 * 100) + '%';
-  $('pipe-state-hint').textContent = pipeStateHint(s, result, failed, skipped);
+  $('pipe-progress-fill').style.width = (planned.length ? Math.round(completed / planned.length * 100) : 0) + '%';
+  $('pipe-state-hint').textContent = pipeStateHint(s, result, failed, skipped, { label, completed, total: planned.length });
   $('pipe-retry').hidden = s.running || !(failed || pipePending.extract > 0);
   renderPipeLog((s.log?.length ? s.log : result.log) || [], result.finished_at);
   renderPipeButtons();
