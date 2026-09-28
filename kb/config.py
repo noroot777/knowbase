@@ -10,12 +10,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from kb.source_types import feed_types
 
 # obs vault 根
-VAULT_ROOT = Path.home() / "obs" / "new-start"
+VAULT_ROOT = Path(os.environ.get("KB_VAULT_ROOT", str(Path.home() / "obs" / "new-start")))
 
 # 项目数据目录(索引数据库等,不进 git)
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA_DIR = Path(os.environ.get("KB_DATA_DIR", str(Path(__file__).resolve().parent.parent / "data")))
 DB_PATH = DATA_DIR / "kb.db"
 
 # 本地 embedding 模型(bge-m3:中英混合效果好,1024 维 dense)
@@ -61,6 +62,7 @@ class Source:
 
 
 SOURCES: list[Source] = [
+    *(Source(name=kind, root=VAULT_ROOT / "source" / kind) for kind in feed_types()),
     Source(
         # claude-dr 生成的 AI 日报(英文博客/X/HN/AI 资讯,每天一篇)。
         # 内容是总结形态,但这些信息在本地只有此形态且与其它来源不重叠,按原始来源对待;
@@ -111,6 +113,7 @@ SOURCE_GROUPS: dict[str, list[str]] = {
     "gzh": ["dr-gzh", "dr-gzh-projects", "gzh"],
     "video": ["dr-youtube-dig", "dr-video-projects"],
     "dr": ["dr"],
+    **{kind: [kind] for kind in feed_types()},
 }
 
 # 组的自然语言别名(问答规划/工具参数里用户或模型可能给的写法)
@@ -118,6 +121,9 @@ SOURCE_ALIASES: dict[str, str] = {
     "公众号": "gzh", "微信": "gzh", "wechat": "gzh", "公众号系": "gzh",
     "视频": "video", "视频系": "video", "youtube": "video", "yt": "video",
     "日报": "dr", "daily": "dr", "ai日报": "dr",
+    "大v观点": "social", "大v": "social", "推特": "social", "x": "social",
+    "rss订阅": "rss",
+    **{spec.label.lower(): kind for kind, spec in feed_types().items()},
 }
 
 def expand_sources(value) -> list[str] | None:

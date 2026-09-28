@@ -26,7 +26,7 @@ async function openPipeModal() {
   dismissToastGroup('pipeline');
   $('pipe-modal').style.display = ''; $('pipe-fields').disabled = false;
   pipeSetupError(); $('pipe-acct-search').value = ''; pipeAccountsReady = false;
-  $('pipe-acct-list').innerHTML = '<p class="pipe-acct-empty">正在读取同步通道与公众号…</p>';
+  $('pipe-acct-list').innerHTML = '<p class="pipe-acct-empty">正在读取同步通道与订阅…</p>';
   renderPipeEst();
   if (!pipeConnected) refreshPipe();
   try {
@@ -49,7 +49,7 @@ async function loadPipeAccounts() {
   pipeAccountAbort?.abort(); pipeAccountAbort = new AbortController();
   pipeAccountsReady = false; pipeAcctList = []; pipeSel = new Set();
   $('pipe-acct-list').setAttribute('aria-busy', 'true');
-  $('pipe-acct-list').innerHTML = '<p class="pipe-acct-empty">正在读取公众号列表…</p>';
+  $('pipe-acct-list').innerHTML = '<p class="pipe-acct-empty">正在读取订阅列表…</p>';
   $('pipe-acct-count').textContent = ''; renderPipeEst(); pipeSetupError();
   const draft = pipeDrafts.get(channel);
   pipeRange = draft?.range ? { ...draft.range } : { label: '不限时间', from: '', to: '' };
@@ -63,7 +63,7 @@ async function loadPipeAccounts() {
     renderPipeAcctList(); savePipeDraft();
   } catch (e) {
     if (version !== pipeAccountVersion || !pipeModalOpen()) return;
-    $('pipe-acct-list').innerHTML = '<div class="pipe-acct-empty">列表暂不可用。<br><button class="ghost" onclick="loadPipeAccounts()">重新读取公众号</button></div>';
+    $('pipe-acct-list').innerHTML = '<div class="pipe-acct-empty">列表暂不可用。<br><button class="ghost" onclick="loadPipeAccounts()">重新读取订阅</button></div>';
     pipeSetupError(e.message);
   } finally {
     if (version === pipeAccountVersion) { $('pipe-acct-list').setAttribute('aria-busy', 'false'); renderPipeEst(); }
@@ -108,7 +108,7 @@ function filteredPipeAccounts() {
 function renderPipeAcctList() {
   if (!pipeAccountsReady) return;
   const items = filteredPipeAccounts(), box = $('pipe-acct-list'), scroll = box.scrollTop;
-  box.innerHTML = items.length ? items.map(n => `<label class="pipe-acct"><input type="checkbox" data-acct="${esc(n)}" ${pipeSel.has(n) ? 'checked' : ''}><span>${esc(n)}</span></label>`).join('') : `<div class="pipe-acct-empty">${pipeAcctList.length ? '没有匹配的公众号，试试其他关键词。' : '当前通道暂无公众号，请先管理订阅或检查采集器。'}</div>`;
+  box.innerHTML = items.length ? items.map(n => `<label class="pipe-acct"><input type="checkbox" data-acct="${esc(n)}" ${pipeSel.has(n) ? 'checked' : ''}><span>${esc(n)}</span></label>`).join('') : `<div class="pipe-acct-empty">${pipeAcctList.length ? '没有匹配的订阅，试试其他关键词。' : '当前通道暂无订阅，请先管理订阅或检查采集器。'}</div>`;
   box.scrollTop = scroll;
   updatePipeSelection();
 }
@@ -140,7 +140,7 @@ function renderPipeEst() {
   reconnect.hidden = pipeConnected;
   reconnect.disabled = !!pipeRequest;
   reconnect.textContent = pipeRequest ? '正在连接…' : '重新连接';
-  $('pipe-est').textContent = !pipeAccountsReady ? '列表读取完成后即可开始。' : n ? `${channel?.label || '所选通道'} · ${n} 个公众号 · ${pipeRange.label}。执行中可离开本页，稍后回来查看。` : '请至少选择一个公众号。';
+  $('pipe-est').textContent = !pipeAccountsReady ? '列表读取完成后即可开始。' : n ? `${channel?.label || '所选通道'} · ${n} 个订阅 · ${pipeRange.label}。执行中可离开本页，稍后回来查看。` : '请至少选择一个订阅。';
   if (!pipeConnected) $('pipe-est').textContent = '请先恢复状态连接，再开始同步。';
   else if (pipeSnapshot?.running) $('pipe-est').textContent = '等待当前同步结束，配置会保留。';
   if (editingRange) $('pipe-est').textContent = '请先应用日期范围，或收起日期选择以使用当前已选范围。';

@@ -1,0 +1,422 @@
+[
+  {
+    "kind": "social",
+    "name": "Andrej Karpathy",
+    "url": "https://x.com/karpathy",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Sam Altman",
+    "url": "https://x.com/sama",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Garry Tan",
+    "url": "https://x.com/garrytan",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Guillermo Rauch",
+    "url": "https://x.com/rauchg",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Alex Albert",
+    "url": "https://x.com/alexalbert__",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Thariq",
+    "url": "https://x.com/trq212",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Kevin Weil",
+    "url": "https://x.com/kevinweil",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Amjad Masad",
+    "url": "https://x.com/amasad",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Aaron Levie",
+    "url": "https://x.com/levie",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Swyx",
+    "url": "https://x.com/swyx",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Peter Yang",
+    "url": "https://x.com/petergyang",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Greg Isenberg",
+    "url": "https://x.com/gregisenberg",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Nan Yu",
+    "url": "https://x.com/thenanyu",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Lenny Rachitsky",
+    "url": "https://x.com/lennysan",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Vicki Boykis",
+    "url": "https://x.com/vboykis",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Simon Willison",
+    "url": "https://x.com/simonw",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Lilian Weng",
+    "url": "https://x.com/lilianweng",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Francois Chollet",
+    "url": "https://x.com/fchollet",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "David Ha",
+    "url": "https://x.com/hardmaru",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Ethan Mollick",
+    "url": "https://x.com/emollick",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Bindu Reddy",
+    "url": "https://x.com/bindureddy",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Andrew Mayne",
+    "url": "https://x.com/andrewmayne",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Near",
+    "url": "https://x.com/nearcyan",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "Tibor Blaho",
+    "url": "https://x.com/tszzl",
+    "mode": "feed",
+    "group_name": "海外关注"
+  },
+  {
+    "kind": "social",
+    "name": "九原客",
+    "url": "https://x.com/9hills",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "卡尔的AI沃茨",
+    "url": "https://x.com/aiwarts",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "花叔",
+    "url": "https://x.com/AlchainHust",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "AnyGen",
+    "url": "https://x.com/AnyGenIO",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "axtrur",
+    "url": "https://x.com/axtrur",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "Agent成峰",
+    "url": "https://x.com/chengfeng240928",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "宝玉",
+    "url": "https://x.com/dotey",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "Frank Wang",
+    "url": "https://x.com/fanjiewang",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "范凯说 AI | Kai on AI",
+    "url": "https://x.com/fankaishuoai",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "idoubi",
+    "url": "https://x.com/idoubicc",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "Frank Wang 玉伯",
+    "url": "https://x.com/lifesinger",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "离谱",
+    "url": "https://x.com/LipuAIX",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "铁锤人",
+    "url": "https://x.com/lxfater",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "Larus Canus",
+    "url": "https://x.com/MrLarus",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "歸藏(guizang.ai)",
+    "url": "https://x.com/op7418",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "Mr Panda",
+    "url": "https://x.com/PandaTalk8",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "雪踏乌云",
+    "url": "https://x.com/Pluvio9yte",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "AI产品黄叔",
+    "url": "https://x.com/PMbackttfuture",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "Readwise",
+    "url": "https://x.com/readwise",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "耳朵",
+    "url": "https://x.com/RookieRicardoR",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "ruanyf",
+    "url": "https://x.com/ruanyf",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "huangserva",
+    "url": "https://x.com/servasyy_ai",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "Hsiang (Alex Xiang)",
+    "url": "https://x.com/sootao",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "向阳乔木",
+    "url": "https://x.com/vista8",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "Wang Shuyi",
+    "url": "https://x.com/wshuyi",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "XHunt",
+    "url": "https://x.com/xhunt_ai",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "social",
+    "name": "张小珺 Xiaojun Zhang",
+    "url": "https://x.com/zhang_benita",
+    "mode": "feed",
+    "group_name": "中文关注"
+  },
+  {
+    "kind": "rss",
+    "name": "HN Top 100 Blogs",
+    "url": "https://hn-blogs.kronis.dev/feed-top100.xml",
+    "mode": "feed",
+    "group_name": "聚合订阅"
+  },
+  {
+    "kind": "rss",
+    "name": "OpenAI News",
+    "url": "https://openai.com/news/rss.xml",
+    "mode": "feed",
+    "group_name": "博客订阅"
+  },
+  {
+    "kind": "rss",
+    "name": "Simon Willison",
+    "url": "https://simonwillison.net/atom/everything/",
+    "mode": "feed",
+    "group_name": "博客订阅"
+  },
+  {
+    "kind": "rss",
+    "name": "Lilian Weng",
+    "url": "https://lilianweng.github.io/index.xml",
+    "mode": "feed",
+    "group_name": "博客订阅"
+  },
+  {
+    "kind": "rss",
+    "name": "Sam Altman",
+    "url": "https://blog.samaltman.com/posts.atom",
+    "mode": "feed",
+    "group_name": "博客订阅"
+  },
+  {
+    "kind": "rss",
+    "name": "Andrej Karpathy",
+    "url": "https://karpathy.bearblog.dev/feed/",
+    "mode": "feed",
+    "group_name": "博客订阅"
+  },
+  {
+    "kind": "rss",
+    "name": "HN Buzzing",
+    "url": "https://hn.buzzing.cc/feed.xml",
+    "mode": "feed",
+    "group_name": "聚合订阅"
+  },
+  {
+    "kind": "rss",
+    "name": "AI Hub Today",
+    "url": "https://ai.hubtoday.app/blog/index.xml",
+    "mode": "feed",
+    "group_name": "聚合订阅"
+  },
+  {
+    "kind": "rss",
+    "name": "Hugging Face Blog",
+    "url": "https://huggingface.co/blog/feed.xml",
+    "mode": "feed",
+    "group_name": "博客订阅"
+  }
+]

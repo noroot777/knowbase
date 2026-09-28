@@ -61,7 +61,7 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     state["last_run"] = pl.load_last_run()
     # 待处理数要扫文件,只有显式要求且空闲时才算
     if pending and not state["running"]:
-        state["pending"] = pl.pending_counts()
+        state["pending"] = pl.pending_counts(_channel(channel)) if channel else pl.pending_counts()
     return state
 
 
@@ -89,7 +89,7 @@ def pipeline_run(body: PipelineRunRequest | None = None):
         except ValueError:
             raise HTTPException(400, "日期须为 YYYY-MM-DD，且起始日期不能晚于结束日期") from None
     if body and body.accounts and any(not name.strip() for name in body.accounts):
-        raise HTTPException(400, "公众号名称不能为空")
+        raise HTTPException(400, "订阅名称不能为空")
     # 只限定目标、不限定时间也要成立(「就把这几个号的新文章抓一下」)。
     # 以前的条件只看日期,给了 accounts 却没给日期就退回 crawl_filter=None,
     # 于是全部订阅目标照抓——筛选被静默忽略,比报错更难发现。

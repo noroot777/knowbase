@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
+from kb.source_types import feed_types
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class FetchScope:
     targets: tuple[str, ...] = field(default=())    # 空 = 全部
     since: str = ""                                 # YYYY-MM-DD
     until: str = ""
+    force: bool = False                         # 手动重试可跳过来源退避
 
     @property
     def ranged(self) -> bool:
@@ -176,6 +178,7 @@ _REGISTRY: dict[str, str] = {
     # 而 kb.cli / kb.mcp_server 这些不碰管道的入口不该为此付启动成本
     "wechat_oa": "kb.collectors.wechat_oa:collector",
     "wechat_local": "kb.collectors.wechat_local:collector",
+    **{kind: "kb.collectors.feeds:create_collector" for kind in feed_types()},
 }
 
 _DEFAULT = "wechat_oa"
@@ -193,7 +196,8 @@ def get_collector(name: str | None = None) -> SourceCollector:
     module_path, _, attr = target.partition(":")
     from importlib import import_module
 
-    return getattr(import_module(module_path), attr)
+    resolved = getattr(import_module(module_path), attr)
+    return resolved(key) if attr == "create_collector" else resolved
 
 
 def active_collector(channel: str | None = None) -> SourceCollector:

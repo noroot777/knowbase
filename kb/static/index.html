@@ -17,6 +17,7 @@
 <link rel="stylesheet" href="/static/css/workspace.css">
 <link rel="stylesheet" href="/static/css/navigation.css">
 <link rel="stylesheet" href="/static/css/pipeline.css">
+<link rel="stylesheet" href="/static/css/sources.css">
 </head>
 <body>
 
@@ -34,8 +35,12 @@
     <button id="tab-search" onclick="switchTab('search')"><i data-icon="search"></i><span>全文检索</span></button>
     <button id="tab-ask" onclick="switchTab('ask')"><i data-icon="spark"></i><span>知识问答</span></button>
     <button id="tab-fav" onclick="switchTab('fav')"><i data-icon="bookmark"></i><span>我的收藏</span></button>
-    <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span>同步管理</span><span id="nav-sync-dot" hidden aria-label="同步进行中"></span></button>
   </nav>
+  <div class="nav-label">信息来源</div>
+  <nav class="tabs" id="source-navigation" aria-label="信息来源">
+    <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span>微信同步</span><span id="nav-sync-dot" hidden aria-label="同步进行中"></span></button>
+  </nav>
+  <button id="source-nav-error" hidden onclick="this.hidden=true;initSourceModules()"></button>
   <div class="nav-label explore-label">发现关联</div>
   <nav class="explore-links" aria-label="知识图谱">
     <a href="/graph/projects" target="_blank" rel="noopener"><i data-icon="network"></i>项目图谱<span>↗</span></a>
@@ -154,7 +159,7 @@
     <div class="pipe-overview-footer"><span id="pipe-state-hint">同步在后台执行，切换页面不会中断。</span><button class="ghost" id="pipe-stop" onclick="stopPipe()" hidden>本阶段结束后停止</button></div>
     <details id="pipe-retry-help" class="pipe-retry-help">
       <summary>新建同步和重试失败项有什么区别？</summary>
-      <p><strong>新建同步：</strong>按本次通道、公众号和日期抓取。提取失败且仍在待处理列表中的文档，会在下次完整同步再次尝试；其他步骤仍受各自处理范围、去重和重试间隔限制。</p>
+      <p><strong>新建同步：</strong>按本次通道、订阅和日期抓取。提取失败且仍在待处理列表中的文档，会在下次完整同步再次尝试；其他步骤仍受各自处理范围、去重和重试间隔限制。</p>
       <p><strong>重试失败项：</strong>抓取沿用上次的通道和范围，重跑失败阶段及必要的后续步骤；“正文为空”的提取问题会先尝试回填。</p>
       <p>凭证失效、模型配置或服务故障需先处理。重试不保证成功，也不代表强制重跑全部历史失败。</p>
     </details>
@@ -171,7 +176,47 @@
     <div class="pipe-schedule-footer"><span id="sched-msg" role="status">正在读取定时设置…</span><button id="sched-reload" class="ghost" onclick="loadSched()" hidden>重新读取</button><button id="sched-save" class="ghost" onclick="saveSched()" disabled>保存设置</button></div>
   </section>
 </div>
+
+<div id="sourcepanel" style="display:none">
+  <header class="source-heading"><div><h1 id="source-title"></h1><p id="source-description"></p><div id="source-summary" class="source-counts" role="status"></div></div>
+    <div class="source-heading-actions"><button class="ghost" id="source-add" onclick="openSourceEditor()">＋ 添加订阅</button><button id="source-sync" onclick="syncSource()">同步全部</button></div>
+  </header>
+  <div id="source-error" class="source-banner error" hidden role="alert"><span id="source-error-text"></span><button class="ghost" onclick="loadSourceModule(true)">重新读取</button></div>
+  <div id="source-progress" class="source-banner" hidden role="status"><span id="source-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度 →</button></div>
+  <button id="source-issues" hidden onclick="switchSourceView('manage')"></button>
+  <div class="source-workbench">
+    <section class="source-stream" aria-label="订阅内容与来源">
+      <div class="source-view-tabs"><button id="source-view-items" class="on" aria-pressed="true" onclick="switchSourceView('items')">最新内容</button><button id="source-view-manage" aria-pressed="false" onclick="switchSourceView('manage')">订阅管理 <small id="source-subscriptions-count"></small></button></div>
+      <div class="source-filters"><input id="source-q" type="search" placeholder="搜索已收录的内容…" aria-label="搜索来源内容" oninput="sourceFilterChanged()"><select id="source-filter" aria-label="筛选订阅来源" onchange="sourceFilterChanged()"><option value="">全部订阅</option></select></div>
+      <div id="source-list" aria-live="polite"></div><button id="source-more" class="ghost" hidden onclick="moreSourceItems()">加载更多</button>
+    </section>
+    <aside class="source-settings" aria-label="此来源的同步设置"><h2>持续收集</h2>
+      <form id="source-settings-form" onsubmit="saveSourceSettings(event)"><fieldset id="source-settings-fields" disabled>
+        <label><input id="source-auto" type="checkbox"> 自动同步</label>
+        <label for="source-interval">同步间隔<br>每 <input id="source-interval" type="number" min="15" max="10080" value="60" required> 分钟</label>
+        <details id="source-bridge-field" hidden><summary>X 订阅桥接设置</summary><p>每行一个地址，使用 {handle} 代表账号名。按顺序尝试；也可在单个订阅里填写专用链接。</p><textarea id="source-bridges" aria-label="X订阅桥接地址" spellcheck="false"></textarea></details>
+        <div id="source-settings-error" class="field-err" role="alert"></div><button id="source-settings-save" class="ghost" type="submit">保存设置</button>
+      </fieldset></form>
+      <p id="source-settings-status" role="status"></p><div class="source-rule"><p id="source-last-run"></p><p id="source-note"></p><p>每源每次最多读取最近 500 条，后续按原文链接去重。删除订阅保留已收录内容。</p><p>自动同步需要知识库服务保持运行。与微信共用同步队列，繁忙时顺延。</p><p>保存后自动建立检索索引；知识提取可在同步管理中继续执行。</p></div>
+    </aside>
+  </div>
+</div>
 </main>
+
+
+<div id="source-editor" class="modal-mask" style="display:none" onclick="if(event.target===this)closeSourceEditor()"><div class="modal source-editor">
+  <h2 id="source-editor-title">添加订阅</h2><form onsubmit="saveSourceEditor(event)">
+  <label for="source-edit-name">名称</label><input id="source-edit-name" maxlength="120" required placeholder="作者或订阅名称">
+  <label for="source-edit-url">链接</label><input id="source-edit-url" type="url" maxlength="2048" required placeholder="https://"><p id="source-edit-hint" class="hint"></p>
+  <label for="source-edit-group">分组（可选）</label><input id="source-edit-group" maxlength="80" placeholder="例如：中文关注、技术博客">
+  <label for="source-edit-feed">专用订阅链接（可选）</label><input id="source-edit-feed" type="url" maxlength="2048" placeholder="https://"><p class="hint">填写后优先从这里获取内容，主页链接保持不变。</p>
+  <label><input id="source-edit-enabled" type="checkbox" checked> 启用此订阅</label>
+  <div id="source-edit-error" class="field-err" role="alert"></div><div class="source-form-actions"><button type="button" class="ghost" onclick="closeSourceEditor()">取消</button><button type="submit" id="source-edit-save">保存订阅</button></div>
+  </form></div></div>
+<div id="source-reader" class="modal-mask" style="display:none" onclick="if(event.target===this)$('source-reader').style.display='none'"><div class="modal source-reader-dialog">
+  <div class="source-reader-toolbar"><a id="source-reader-link" target="_blank" rel="noopener noreferrer">打开原文 ↗</a><button class="ghost" onclick="$('source-reader').style.display='none'" aria-label="关闭内容阅读">关闭</button></div>
+  <h2 id="source-reader-title"></h2><p id="source-reader-meta" class="hint"></p><div id="source-reader-body"></div>
+</div></div>
 
 <div id="pipe-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closePipeModal()">
   <div class="modal pipe-setup">
@@ -184,8 +229,8 @@
         <div id="pipe-range-pop" style="display:none"><div id="pipe-range-presets"></div><div class="pipe-custom-range"><label>开始日期<input type="date" id="pipe-custom-from"></label><label>结束日期<input type="date" id="pipe-custom-to"></label><button onclick="applyPipeCustomRange()">应用日期</button><div id="pipe-custom-err" class="field-err" role="alert"></div></div></div>
         <p id="pipe-range-hint" class="hint"></p>
       </div>
-      <div class="row" id="pipe-acct-block"><div class="pipe-acct-heading"><label for="pipe-acct-search">公众号 <b id="pipe-acct-count"></b></label><span><button class="text-button" id="pipe-select-all" onclick="pipeSelectAll()">全选</button><button class="text-button" id="pipe-select-none" onclick="pipeSelectNone()">清空选择</button></span></div>
-        <input id="pipe-acct-search" placeholder="搜索公众号名称…" oninput="renderPipeAcctList()"><div id="pipe-acct-list" aria-busy="false"></div>
+      <div class="row" id="pipe-acct-block"><div class="pipe-acct-heading"><label for="pipe-acct-search">订阅 <b id="pipe-acct-count"></b></label><span><button class="text-button" id="pipe-select-all" onclick="pipeSelectAll()">全选</button><button class="text-button" id="pipe-select-none" onclick="pipeSelectNone()">清空选择</button></span></div>
+        <input id="pipe-acct-search" placeholder="搜索订阅名称…" oninput="renderPipeAcctList()"><div id="pipe-acct-list" aria-busy="false"></div>
       </div>
     </fieldset>
     <div class="pipe-setup-footer"><div id="pipe-est" class="hint" role="status"></div><div><button class="ghost" onclick="closePipeModal()">暂不执行</button><button id="pipe-start" onclick="startPipeFromModal()" disabled>开始同步</button></div></div>
@@ -357,7 +402,7 @@
     <button class="favbtn" id="reader-fav" onclick="toggleFav(this)" style="display:none;font-size:12.5px"></button>
     <a id="reader-open" target="_blank" rel="noopener">新标签↗</a>
     <a id="reader-obs">Obsidian</a>
-    <a id="reader-src" target="_blank" rel="noopener" style="display:none">微信原文↗</a>
+    <a id="reader-src" target="_blank" rel="noopener" style="display:none">原文↗</a>
     <button class="ghost" onclick="closeReader()" aria-label="关闭阅读器" style="padding:4px 10px">✕</button>
   </div>
   <iframe id="reader-frame" title="文章内容"></iframe>
@@ -377,6 +422,8 @@
 <script src="/static/js/pipe_schedule.js"></script>
 <script src="/static/js/targets.js"></script>
 <script src="/static/js/gallery.js"></script>
+<script src="/static/js/sources.js"></script>
+<script src="/static/js/source_forms.js"></script>
 <script src="/static/js/workspace.js"></script>
 <script>
 loadMeta().catch(() => { $('stats').textContent = '统计暂不可用'; });

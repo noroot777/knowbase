@@ -30,7 +30,7 @@ _PLAN_PROMPT = """\
   "mode": "enumerate_entities | enumerate_docs | retrieve | direct",
   "since": "YYYY-MM-DD 或 null",
   "until": "YYYY-MM-DD 或 null",
-  "source": "dr-gzh | dr-youtube-dig | null",
+  "source": "dr-gzh | dr-youtube-dig | dr | social | rss | null",
   "kind": "project | product | org | model | null",
   "topic": "枚举时的主题过滤词 或 null",
   "query": "用于语义检索的查询语句"
@@ -54,7 +54,8 @@ _PLAN_PROMPT = """\
   完全不查任何新资料时 → direct。注意:"总结今天/昨天/最近的信息"是要查知识库某
   时间段的文章,属 enumerate_docs,不是 direct;拿不准就 retrieve
 - "公众号"→ source=dr-gzh,"YouTube/视频"→ source=dr-youtube-dig,
-  "日报/每日新闻/AI 日报"→ source=dr,没提到来源 → null
+  "日报/每日新闻/AI 日报"→ source=dr,"大V观点/推特"→ source=social,
+  "RSS/订阅文章"→ source=rss,没提到来源 → null
 - 时间词换算成具体日期:"今天"→ since=until=今天;"昨天"→ since=until=昨天;
   "前天"→ since=until=前天;"最近一周/这周"→ since=7天前;"最近/近期/这几天"
   (无具体数字)→ since=3天前;"最近一个月"→ since=30天前;没提时间 → null

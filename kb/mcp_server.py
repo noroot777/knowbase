@@ -39,7 +39,7 @@ def kb_search(
     Args:
         query: 关键词或一句话意图,如 "book-to-skill" 或 "把书变成技能的工具"
         source: 限定来源。推荐用来源组:gzh/公众号(dr-gzh+dr-gzh-projects)、
-            video/视频(dr-youtube-dig+dr-video-projects)、dr/日报;
+            video/视频(dr-youtube-dig+dr-video-projects)、dr/日报、social/大V观点、rss;
             也可给具体来源名(dr-gzh、dr-youtube-dig、dr-video-projects 等)
         tag: 限定主题标签,如 topic/skill工具、topic/ai-coding
         entity: 限定实体(项目/产品/公司名),如 "Claude Code"
@@ -98,7 +98,7 @@ def kb_enumerate(
         what: "entities"(枚举实体,带出处文章) 或 "docs"(枚举文章)
         since: 只看这天之后发布的,格式 YYYY-MM-DD
         until: 只看这天之前发布的(含当天)
-        source: 来源组或来源名,None=全部。推荐用组:gzh/公众号、video/视频、dr/日报
+        source: 来源组或来源名,None=全部。推荐用组:gzh/公众号、video/视频、dr/日报、social/大V观点、rss
             (组包含对应的条目化衍生树,查工具/项目类信息最全)。
             what=docs 且 None 时只扫原始来源(不含条目化衍生树,避免内容重复)
         kind: 实体类型 project(开源项目)/product/org(公司)/model(模型),仅 what=entities 有效

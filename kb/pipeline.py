@@ -197,21 +197,24 @@ def _mark_fired(day: str) -> None:
                            encoding="utf-8")
 
 
+def _scheduler_tick() -> None:
+    s = load_schedule()
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    if s["enabled"] and now.strftime("%H:%M") >= s["time"] and s["last_fired"] != today:
+        if start_pipeline(None, crawl_filter={"channel": s["channel"]}):
+            _mark_fired(today)
+            _log(f"定时任务触发全流程同步(每日 {s['time']})")
+            return
+    from kb.feeds.schedule import tick
+    tick(start_pipeline)
+
+
 def _scheduler_loop() -> None:
     while True:
         time.sleep(30)
         try:
-            s = load_schedule()
-            if not s["enabled"]:
-                continue
-            now = datetime.now()
-            today = now.strftime("%Y-%m-%d")
-            if now.strftime("%H:%M") != s["time"] or s["last_fired"] == today:
-                continue
-            # 已在跑也标记今天已触发,避免同一分钟内反复尝试
-            _mark_fired(today)
-            if start_pipeline(None, crawl_filter={"channel": s["channel"]}):
-                _log(f"定时任务触发全流程同步(每日 {s['time']})")
+            _scheduler_tick()
         except Exception:
             pass          # 调度线程绝不能死
 
@@ -226,11 +229,11 @@ def start_scheduler() -> None:
 
 # ── 待处理数(空闲时给面板显示)────────────────────────────────────────────────
 
-def pending_counts() -> dict:
+def pending_counts(channel: str | None = None) -> dict:
     """各阶段待处理数。文件扫描有成本,管道运行中不要调。"""
     out: dict = {}
     # 导出待处理:采集器那边已有、但还没落进 vault 的条数(采集器自己算)
-    out["export"] = source_pending()
+    out["export"] = source_pending(channel)
     # 索引/提取待处理
     try:
         from kb import store

@@ -102,7 +102,7 @@ async function refreshPipeSource() {
 async function refreshPipePending() {
   if (pipePendingRequest || pipeSnapshot?.running) return;
   const startedAt = pipeSnapshot?.started_at;
-  pipePendingRequest = pipeJson('/api/pipeline/status?source=false&pending=true', {}, 60000);
+  pipePendingRequest = pipeJson(channelUrl('/api/pipeline/status?source=false&pending=true'), {}, 60000);
   try {
     const s = await pipePendingRequest;
     if (!pipeSnapshot?.running && (!startedAt || startedAt === pipeSnapshot?.started_at)) {

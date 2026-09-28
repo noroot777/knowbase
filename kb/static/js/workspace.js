@@ -83,6 +83,7 @@ const overlayClosers = {
   'tool-drawer': closeToolDrawer, reader: closeReader, 'pipe-modal': closePipeModal,
   'tgt-modal': closeTargets, 'stages-modal': closeStages, 'keys-modal': closeKeys,
   'mcp-modal': closeMcp, 'shortcuts-modal': closeShortcuts,
+  'source-editor': closeSourceEditor, 'source-reader': () => { $('source-reader').style.display = 'none'; },
   sidebar: () => toggleNavigation(false),
 };
 let overlayTop = null;
@@ -165,7 +166,8 @@ document.addEventListener('focusin', e => {
   if (overlayTop && !overlayTop.contains(e.target)) focusOverlay(overlayTop);
 });
 
-function initWorkspace() {
+async function initWorkspace() {
+  await initSourceModules();
   $('reader-frame').addEventListener('load', () => {
     try {
       $('reader-frame').contentDocument?.addEventListener('keydown', e => {

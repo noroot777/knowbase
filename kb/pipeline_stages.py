@@ -45,9 +45,9 @@ def source_targets(channel: str | None = None) -> list[str]:
     return list(collector.status().targets)
 
 
-def source_pending() -> int | None:
+def source_pending(channel: str | None = None) -> int | None:
     """采集器那边已有、但还没落进 vault 的条数。算不出返回 None。"""
-    return active_collector().pending()
+    return active_collector(channel).pending()
 
 
 def _run_crawl(crawl_filter: dict | None = None) -> None:
@@ -63,6 +63,7 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
             targets=tuple(crawl_filter.get("accounts") or ()),
             since=crawl_filter.get("since_date", ""),
             until=crawl_filter.get("until_date", ""),
+            force=bool(crawl_filter.get("force")),
         )
     collector = active_collector((crawl_filter or {}).get("channel"))
     _log(f"采集通道: {getattr(collector, 'channel_label', collector.label)}")

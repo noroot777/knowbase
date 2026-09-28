@@ -3,17 +3,23 @@ const $ = id => document.getElementById(id);
 let tagFilters = [], entityFilters = [];
 
 function switchTab(t) {
-  if (!['gallery', 'search', 'ask', 'fav', 'pipe'].includes(t)) return;
+  const regularTabs = ['gallery', 'search', 'ask', 'fav', 'pipe'];
+  const isSource = typeof sourceModules !== 'undefined' && sourceModules.has(t);
+  if (!regularTabs.includes(t) && !isSource) return;
   const previousScroll = window.scrollY;
   for (const k of ['gallery', 'search', 'ask', 'fav', 'pipe']) {
     $(k + 'panel').style.display = t === k ? '' : 'none';
     $('tab-' + k).classList.toggle('on', t === k);
   }
   document.body.classList.toggle('chat-mode', t === 'ask');
+  $('sourcepanel').style.display = isSource ? '' : 'none';
+  if (typeof sourceModules !== 'undefined') for (const kind of sourceModules.keys()) $('tab-' + kind).classList.toggle('on', t === kind);
   if (typeof updateWorkspaceTab === 'function') updateWorkspaceTab(t, previousScroll);
   if (t === 'pipe') { refreshPipe(true); initTargets(); }
   if (t === 'ask') initChat();
   if (t === 'fav') loadFavPanel();
+  if (t === 'search') loadMeta().catch(() => {});
+  if (isSource) openSourceModule(t);
 }
 
 async function loadMeta() {
@@ -24,12 +30,16 @@ async function loadMeta() {
   $('stats').textContent =
     `${stats.documents.toLocaleString()} 篇内容已收录`;
   const fill = (sel, items, label) => {
+    const selected = sel.value;
+    while (sel.options.length > 1) sel.remove(1);
     for (const it of items) {
       const o = document.createElement('option');
       o.value = it.value;
-      o.textContent = `${label ? it.value.replace(label, '') : it.value} (${it.n})`;
+      const name = sel.id === 'f-source' && typeof sourceModules !== 'undefined' ? sourceModules.get(it.value)?.label : '';
+      o.textContent = `${name || (label ? it.value.replace(label, '') : it.value)} (${it.n})`;
       sel.appendChild(o);
     }
+    if ([...sel.options].some(o => o.value === selected)) sel.value = selected;
   };
   fill($('f-source'), facets.sources);
   fill($('f-account'), facets.accounts);
