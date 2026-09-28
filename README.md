@@ -99,7 +99,7 @@ web 界面(`uv run kb-web` → http://127.0.0.1:8787)的"管道"tab 一键搞定
 在「管道 → 全流程同步」中选择「同步通道」，再选择时间段和公众号：
 
 - **凭证抓取（原通道）**：默认选项，继续用 wxdown 获取每个公众号的文章凭证。
-- **微信本地数据库**：通过 `wechat-cli` 只读本机已同步的公众号图文推送，提取文章链接后复用正文抓取。无需 wxdown 或逐号文章凭证，但需已有可用的微信数据库接入；不可读时显示错误，不自动获取密钥或切换通道。
+- **微信本地数据库**：通过 Rion Reader 只读本机已同步的公众号图文推送，提取文章链接后复用正文抓取。无需 wxdown 或逐号文章凭证；首次可在面板的「微信接入」中检查、准备工具并获取数据库 key。日常同步不可读时显示错误，不自动重新获取密钥或切换通道。
 
 两通道共用知识库中的公众号订阅列表和文章库。请在 Mac 微信订阅并同步需要采集的公众号；本机没有推送的号会显示为覆盖缺口，不算请求失败。微信数据库通道先增量更新本地文章索引，再按文章发布时间和所选公众号查询，去重后只下载新文章及缺失正文；「不限时间」查询整个索引，指定区间包含结束日全天。订阅前的历史和未同步消息不能保证补齐。
 
@@ -124,7 +124,24 @@ cd collector
 ./.venv/bin/python -m cli collect --channel local --targets 公众号名
 ```
 
-默认复用 `${CODEX_HOME:-~/.codex}/skills/wechat-cli/scripts/reader.sh` 或已安装的 `rion-wechat-cli`，需要支持只读 `schema` / `sql`；自定义安装可通过 `RION_WECHAT_CLI_BIN` 指定可执行文件。升级后在 `collector` 运行 `uv sync --frozen` 安装压缩消息所需的 `zstandard`。文章元数据及读取游标保存在采集器私有 SQLite 的 `local_wechat_articles` / `local_wechat_sources` 表，不持久化原始推送 XML、私聊或数据库密钥；旧版 JSON 匹配缓存不再参与采集。
+默认复用 `${CODEX_HOME:-~/.codex}/skills/wechat-cli/scripts/reader.sh` 或已安装的 `rion-wechat-cli`，需要支持只读 `schema` / `sql`；也可使用「微信接入」准备的独立运行环境，无需安装 skill。自定义安装可通过 `RION_WECHAT_CLI_BIN` 指定可执行文件。升级后在 `collector` 运行 `uv sync --frozen` 安装压缩消息所需的 `zstandard`。文章元数据及读取游标保存在采集器私有 SQLite 的 `local_wechat_articles` / `local_wechat_sources` 表，不持久化原始推送 XML、私聊或数据库密钥；旧版 JSON 匹配缓存不再参与采集。
+
+### 首次微信接入
+
+首页「完成首次配置」、设置菜单「微信接入」和同步管理页均可进入。先配置供应商和模型／智能体，再点「检查并接入微信」。获取 key 是独立的本机步骤，不使用供应商 API，也不向模型发送密钥。
+
+1. 已有 Reader 配置可读时直接复用；已有 wxkey 材料则验证并导入，不覆盖旧配置和 Profile。
+2. 没有 Reader 时，项目自动下载校验固定版本源码，用 uv 安装隔离的 SQLCipher / Zstandard 环境。多个账号必须在页面选择，不能自动合并。
+3. 确实缺 key 时，自动构建固定版本 wxkey。页面说明进程访问、微信退出／重启及重签名副本的影响，勾选确认后点「自动获取 key 并验证」。管理员密码只在 macOS 系统授权框输入。
+4. 获取前保存本机加密数据库和 sidecar 副本（活动文件副本不等于一致性备份），单次获取最多 600 秒，授权等待另有 180 秒。获取后自动验证、发布 Reader 配置并检查采集器实际使用的 Reader。成功后点「去同步公众号」。
+
+当前自动获取限 macOS 本机访问，要求已登录自己的微信，以及 uv、Go、Apple Command Line Tools（LLDB）。Go 1.26.5 工具链可由已有 Go 自动下载。远程部署不能替浏览器所在电脑读取微信。系统授权、登录和版本不兼容不能保证无人值守完成。
+
+独立工具位于 `~/.local/share/knowledge-base/wechat`，可用 `KB_WECHAT_RUNTIME` 更改（Web 服务和采集器需保持一致）；密钥与 Reader 配置仍位于本机私有配置目录，不回传页面。状态、构建收据和加密备份留在私有运行目录，备份可在确认不再需要后自行移除。关闭页面不取消后台工作；刷新页面恢复进度。获取失败保留上游恢复锁，不能自动重试或清除锁。已有配置失效时先修复配置，不因读取失败重新获取 key。
+
+实现固定到 [Rion Reader `f7d60b6`](https://github.com/Rion-Wu-tech/wechat-intelligence-hub/tree/f7d60b6d94c70f09ad92b89215ce40b2dd752e7f/projects/rion-wechat-reader) 和 [wxkey `9b70eec`](https://github.com/r266-tech/wxkey/tree/9b70eecdde47a7172b19465c3f977c86b6050e8a)。下载文件校验 SHA256，wxkey 从固定源码构建并记录二进制 SHA256；系统授权路径以 root 调用并设置 `WXKEY_NO_ELEVATE=1`，该版本会跳过管理员密码 Keychain 路线，不启用修改原微信或关闭 SIP 的开关。兼容适配只修正“可读但未分类的辅助库被误计为未解密”的判断，真正读失败仍阻止接入。
+
+**文章获取与 skill 的关系：** `wechat-intelligence-hub` skill 用于聊天情报、日报和商机分析，本项目采集文章不依赖它。数据库 key 用于读取公众号推送；全文及图片通过原文网页下载，不需要微信缓存图片的解码 key，也不保证补齐未同步到本机的历史。
 
 ## 设计决策备忘
 

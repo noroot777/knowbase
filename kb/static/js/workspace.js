@@ -83,6 +83,7 @@ const overlayClosers = {
   'tool-drawer': closeToolDrawer, reader: closeReader, 'pipe-modal': closePipeModal,
   'tgt-modal': closeTargets, 'stages-modal': closeStages, 'keys-modal': closeKeys,
   'mcp-modal': closeMcp, 'shortcuts-modal': closeShortcuts,
+  'wechat-modal': closeWechatSetup,
   sidebar: () => toggleNavigation(false),
 };
 let overlayTop = null;

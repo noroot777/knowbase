@@ -197,6 +197,7 @@ async function _saveStage(key, value) {
     $('stages-list').innerHTML = d.stages.map(s => stageRow(s, d.providers)).join('');
     $('stages-msg').textContent = '✓ 已保存,即时生效';
     loadModels();       // 问答下拉的默认项跟着「问答 · 回答」阶段走
+    refreshWechatSetup();
     if (key === 'fav') { // 收藏页那个下拉和「收藏 · 分诊与行动卡」是同一处配置
       favToolsInited = false;
       initFavTools();
@@ -260,6 +261,7 @@ async function saveKeys() {
     $('key-anthropic').value = ''; $('key-openai').value = '';
     refreshKeys();
     loadModels();   // 刷新下拉:刚配好 key 的模型解除置灰
+    refreshWechatSetup();
   } catch (e) {
     $('keys-msg').textContent = '保存失败: ' + e.message;
   }

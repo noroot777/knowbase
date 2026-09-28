@@ -1,0 +1,89 @@
+// Isolated browser contract. Run via playwright-cli run-code --filename.
+// All API routes are fixtures; acquisition is never invoked on the host.
+async page => {
+  const checks = [], errors = [], writes = [];
+  const check = (name, ok) => { if (!ok) throw new Error(name); checks.push(name); };
+  const onError = error => errors.push(error.message);
+  page.on('pageerror', onError);
+  let status = { state: 'unchecked', message: '检查本机微信，已有可用配置会直接复用。',
+    running: false, provider_ready: true, models_ready: true };
+  const base = page.url().match(/^https?:\/\/[^/]+/)[0];
+  const respond = (route, data, code = 200) => route.fulfill({
+    status: code, contentType: 'application/json', body: JSON.stringify(data),
+  });
+  const routeHandler = route => {
+    const request = route.request(), path = request.url().slice(base.length).split('?')[0];
+    if (path === '/api/wechat/setup') {
+      if (request.method() === 'POST') {
+        const body = request.postDataJSON(); writes.push(body);
+        if (body.action === 'acquire') {
+          check('获取携带已确认令牌', body.confirmed && body.confirmation_token === 'test-token');
+          check('获取请求带本机页面标记', request.headers()['x-kb-wechat-action'] === '1');
+          status = { ...status, state: 'acquiring', running: true, message: '请在这台 Mac 上完成系统授权' };
+        } else status = { ...status, state: 'authorization_required', confirmation_token: 'test-token',
+          message: '工具已准备好。确认下方影响后，点击自动获取并验证。' };
+      }
+      return respond(route, status, request.method() === 'POST' ? 202 : 200);
+    }
+    const fixtures = {
+      '/api/stats': {documents:0,vectors:0,entities:0,extracted:0},
+      '/api/facets': {sources:[],accounts:[],topics:[],entities:[]},
+      '/api/projects': {tools:[],kinds:{},total_entries:0,topics:[]},
+      '/api/favorites': {doc_paths:[],favorites:[],counts:{inbox:0,done:0,archived:0},stale:0},
+      '/api/models': {models:[],default:''},
+      '/api/keys': {keys:{anthropic:{set:true},openai:{set:false}}},
+      '/api/mcp/status': {config:'{}',command:'',tools:[],cli_available:false},
+      '/api/pipeline/channels': {default:'wechat_oa',channels:[{id:'wechat_oa',label:'凭证抓取'},{id:'wechat_local',label:'微信本地数据库'}]},
+      '/api/pipeline/schedule': {enabled:false,time:'07:30'},
+      '/api/pipeline/status': {running:false,stages:{},source:{online:true,ready:true},log:[]},
+      '/api/pipeline/pending': {}, '/api/pipeline/accounts': {accounts:['测试公众号']},
+      '/api/sources/targets': {manageable:true,label:'公众号',targets:[]},
+      '/api/conversations': {conversations:[]}, '/api/stages': {stages:[],providers:[]},
+    };
+    return respond(route, fixtures[path] || {});
+  };
+  await page.route('**/api/**', routeHandler);
+  try {
+    await page.evaluate(() => localStorage.clear());
+    await page.setViewportSize({width:1280,height:900});
+    await page.goto(base);
+    await page.getByRole('button',{name:'完成首次配置'}).click();
+    await page.locator('#wechat-check').waitFor({state:'visible'});
+    check('首次配置展示供应商和模型状态', await page.locator('#wechat-provider-state').textContent() === '已配置'
+      && await page.locator('#wechat-model-state').textContent() === '已就绪');
+    await page.locator('#wechat-check').click();
+    await page.locator('#wechat-authorization').waitFor({state:'visible'});
+    check('未确认影响不能获取', await page.locator('#wechat-acquire').isDisabled());
+    await page.locator('#wechat-consent').check();
+    await page.locator('#wechat-acquire').click();
+    await page.getByText('请在这台 Mac 上完成系统授权', {exact:true}).first().waitFor();
+    check('运行中阻止重复启动', await page.locator('#wechat-check').isDisabled());
+    await page.reload();
+    await page.getByRole('button',{name:'完成首次配置'}).click();
+    check('刷新后恢复后台进度', (await page.locator('#wechat-status').textContent()).includes('系统授权'));
+    status = { ...status, state:'ready', running:false, ready:true,
+      confirmation_token:undefined, message:'微信数据库已验证可读，可以开始同步。' };
+    await page.locator('#wechat-next').waitFor({state:'visible'});
+    check('成功后首次提示收起', await page.locator('#wechat-welcome').isHidden());
+    await page.locator('#wechat-next').click();
+    check('继续同步切换本地通道', await page.locator('#pipe-channel-current').inputValue() === 'wechat_local');
+    check('打开同步管理页', await page.locator('#pipepanel').isVisible());
+    await page.getByRole('button',{name:'检查并接入微信',exact:true}).click();
+    await page.setViewportSize({width:390,height:844});
+    await page.locator('#wechat-modal summary').click();
+    check('手机弹窗内容无横向溢出', await page.locator('.wechat-dialog').evaluate(el => el.scrollWidth <= el.clientWidth + 1));
+    check('说明明确无需 skill', (await page.locator('.wechat-explanation').textContent()).includes('不需要安装个人情报库 skill'));
+    await page.screenshot({path:'output/playwright/wechat-setup-mobile.png',fullPage:true});
+    await page.setViewportSize({width:1280,height:900});
+    await page.screenshot({path:'output/playwright/wechat-setup-desktop.png',fullPage:true});
+    await page.keyboard.press('Escape');
+    check('Esc 可关闭接入弹窗', await page.locator('#wechat-modal').isHidden());
+    check('只产生一次检查和一次明确获取', writes.length === 2);
+    check('页面无脚本异常', errors.length === 0);
+    return {passed:checks.length,checks,errors,writes:writes.map(x=>x.action)};
+  } finally {
+    await page.evaluate(() => { invalidatePipeStatus(); clearTimeout(wechatPoll); });
+    await page.unroute('**/api/**', routeHandler);
+    page.off('pageerror', onError);
+  }
+}
