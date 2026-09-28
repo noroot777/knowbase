@@ -2,7 +2,7 @@
 """从 kb.db 生成 Karpathy LLM-wiki 形式的独立演示 vault。
 
 只读来源:
-  - /Users/fjh/code/knowledge-base/data/kb.db
+  - <repo>/data/kb.db
   - /Users/fjh/obs/new-start/source/dr-gzh/  (文章正文与图片,只读拷贝)
 输出(全新目录,不碰 new-start):
   - /Users/fjh/obs/llm-wiki-demo/
@@ -17,7 +17,7 @@ import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
-DB = "/Users/fjh/code/knowledge-base/data/kb.db"
+DB = str(Path(__file__).resolve().parents[2] / "data" / "kb.db")
 SRC_VAULT = Path("/Users/fjh/obs/new-start")
 OUT = Path("/Users/fjh/obs/llm-wiki-demo")
 SINCE = "2026-06-30"
@@ -329,7 +329,7 @@ def main():
         f"从公众号知识库(kb.db)导入 {len(docs)} 篇 dr-gzh 文章"
         f"(发布于 {SINCE} ~ 2026-07-04),生成 {n_pages} 个实体页、{len(topics)} 个主题页,"
         f"正文内插入 {link_count} 处双链,复制图片 {asset_count} 张。"
-        "来源:~/obs/new-start/source/dr-gzh + ~/code/knowledge-base(只读)。\n",
+        "来源:~/obs/new-start/source/dr-gzh + ~/code/knowbase(只读)。\n",
         encoding="utf-8",
     )
 

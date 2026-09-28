@@ -5,7 +5,9 @@
 .brand-lockup { display: flex; flex-direction: column; align-items: center; gap: 5px; color: var(--ink); text-decoration: none; }
 .brand-icon { display: grid; place-items: center; width: 32px; height: 35px; border-radius: 9px 9px 4px 9px; color: white; background: var(--brand); }
 .brand-icon .icon { width: 22px; height: 22px; }
-.wordmark { font-size: 13px; font-weight: 700; line-height: 1.4; }
+/* 窄栏只有 59px 可用,而 Knowbase 是 8 个拉丁字母:字号留够余量并禁止折行,
+   换个缺 Avenir Next 的系统(回退到更宽的 PingFang/Noto 拉丁字形)也不会断成两行。 */
+.wordmark { font-size: 10px; font-weight: 700; line-height: 1.4; letter-spacing: .01em; white-space: nowrap; }
 .wordmark small { display: none; }
 .quick-search { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 9px; margin: 16px 8px 14px; background: var(--paper); border: 1px solid var(--line); color: var(--muted); border-radius: 8px; }
 .quick-search .icon { width: 17px; height: 17px; }
@@ -57,8 +59,8 @@
   #nav-mask { position: fixed; inset: 0; background: #17203366; z-index: 54; }
   .sidebar-brand { justify-content: space-between; }
   .brand-lockup { flex-direction: row; gap: 9px; }
-  .wordmark { font-size: 21px; }
-  .wordmark small { display: block; font: 8px/1.8 var(--font-mono); color: var(--muted); }
+  .wordmark { font-size: 21px; letter-spacing: -.01em; }
+  .wordmark small { display: block; font: 10px/1.6 var(--font-display); letter-spacing: .16em; color: var(--muted); }
   .mobile-close { display: grid; font-size: 22px; }
   .quick-search { margin: 22px 0; font-size: 13px; }
   .quick-search > span, .quick-search kbd { display: inline; }

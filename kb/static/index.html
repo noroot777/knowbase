@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>工具图鉴 · 知识库</title>
+<title>工具图鉴 · Knowbase</title>
 <meta name="theme-color" content="#ffffff">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <!-- marked / DOMPurify 都随包放本地:走 CDN 时一次外网抖动或拦截插件就让 marked 缺席,
@@ -24,7 +24,7 @@
 <div id="nav-mask" hidden onclick="toggleNavigation(false)"></div>
 <aside id="sidebar" aria-label="工作区导航">
   <div class="sidebar-brand">
-    <a class="brand-lockup" href="#gallery" onclick="switchTab('gallery');return false"><span class="brand-icon" aria-hidden="true"><i data-icon="library"></i></span><span class="wordmark">知识库<small>KNOWLEDGE ATLAS</small></span></a>
+    <a class="brand-lockup" href="#gallery" onclick="switchTab('gallery');return false"><span class="brand-icon" aria-hidden="true"><i data-icon="library"></i></span><span class="wordmark">Knowbase<small>个人知识库</small></span></a>
     <button class="icon-button mobile-close" onclick="toggleNavigation(false)" aria-label="关闭导航">×</button>
   </div>
   <button class="quick-search" onclick="focusWorkspaceSearch()" aria-label="快速查找" title="快速查找（⌘ / Ctrl + K）"><i data-icon="search"></i><span>快速查找</span><kbd>⌘ K</kbd></button>
@@ -57,7 +57,7 @@
 </aside>
 <header id="topbar">
   <button class="icon-button mobile-menu" onclick="toggleNavigation()" aria-label="打开导航" aria-expanded="false" aria-controls="sidebar"><i data-icon="menu"></i></button>
-  <strong>知识库</strong><span id="page-crumb">工具图鉴</span>
+  <strong>Knowbase</strong><span id="page-crumb">工具图鉴</span>
   <button class="icon-button" onclick="focusWorkspaceSearch()" aria-label="快速查找"><i data-icon="search"></i></button>
 </header>
 <main id="main-content" tabindex="-1">

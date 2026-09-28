@@ -1,4 +1,4 @@
-# knowledge-base 项目约定
+# knowbase 项目约定
 
 ## 代码文件行数上限(硬性)
 

@@ -1,7 +1,7 @@
 [project]
-name = "knowledge-base"
+name = "knowbase"
 version = "0.1.0"
-description = "个人知识库:obs vault(公众号/YouTube)的索引、混合检索与意图搜索"
+description = "Knowbase:把 obs vault(公众号/YouTube)统一索引,做混合检索与意图问答的个人知识库"
 requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6.0",

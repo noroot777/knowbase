@@ -31,7 +31,7 @@ from kb.web import (
     sources_api,
 )
 
-app = FastAPI(title="knowledge-base")
+app = FastAPI(title="knowbase")
 
 for _r in (pages.router, library_api.router, chat_api.router,
            favorites_api.router, settings_api.router, pipeline_api.router,
