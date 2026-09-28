@@ -71,7 +71,10 @@ async function saveSourceSettings(e) {
   if (sourceModules.get(kind).adapter === 'social') body.bridges = $('source-bridges').value.split('\n').map(v=>v.trim()).filter(Boolean);
   try {
     const settings = await pipeJson(`/api/intake/${kind}/settings`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    if (kind === sourceKind) fillSourceSettings(settings);
+    if (kind === sourceKind) {
+      fillSourceSettings(settings);
+      await loadSourceModule(false);
+    }
     toast('同步设置已保存', {type:'ok'});
   } catch(e) { $('source-settings-error').textContent = e.message; }
   finally { $('source-settings-save').disabled = false; }

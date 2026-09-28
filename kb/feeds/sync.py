@@ -5,50 +5,100 @@ import json
 import os
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import yaml
 
 from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
-from kb.feeds.fetching import fetch_source
+from kb.feeds.fetching import SOURCE_SECONDS, fetch_source
 from kb.pipeline_state import _state, _stage
+
+FETCH_WORKERS = 4
+COLLECT_SECONDS = 90
+BRIDGE_FAILURE_LIMIT = 3
+
+
+def _save_result(source, result, scope):
+    entries, validators = result
+    if scope.ranged:
+        entries = [e for e in entries if e['published'] and scope.since <= e['published'][:10] <= scope.until]
+        # A ranged import must not cache away entries outside the selected dates.
+        validators = {k: source[k] for k in ('etag', 'modified', 'resolved_url')}
+    added = reg.put_items(source, entries)
+    with reg.db() as c:
+        c.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
+            failures=0,retry_at=0,etag=?,modified=?,resolved_url=? WHERE id=?''',
+            (reg.now(),reg.now(),validators['etag'],validators['modified'],validators['resolved_url'],source['id']))
+    return added
+
+
+def _save_failure(source, error, summary):
+    reason = str(error)[:1200] or type(error).__name__
+    summary['errors'].append({'title': source['name'], 'reason': reason})
+    with reg.db() as c:
+        c.execute('''UPDATE subscriptions SET last_attempt=?,last_error=?,failures=failures+1,
+            retry_at=? WHERE id=?''', (reg.now(),reason,
+            time.time() + min(86400, 1800 * 2 ** min(source['failures'], 6)),source['id']))
 
 
 def collect(kind, scope):
     started = reg.now()
     sources = [s for s in reg.subscriptions(kind) if s['enabled'] and
                (not scope.targets or str(s['id']) in scope.targets or s['name'] in scope.targets)]
-    summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0, 'errors': [], 'stopped': False}
+    summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0,
+               'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [], 'stopped': False}
     settings = reg.get_settings(kind)
+    pending = []
     for source in sources:
-        if _state.get('stop_requested'):
-            summary['stopped'] = True
-            break
-        if source['retry_at'] > time.time() and not scope.force:
+        if reg.configuration_error(source, settings):
+            summary['unconfigured'] += 1
+        elif source['retry_at'] > time.time() and not scope.force:
             summary['deferred'] += 1
-            continue
-        _stage('crawl', 'running', f"{reg.KINDS[kind]} {summary['checked'] + 1}/{len(sources)} · {source['name']}")
-        try:
-            entries, validators = fetch_source(source, settings, unconditional=scope.ranged)
-            if scope.ranged:
-                entries = [e for e in entries if e['published'] and scope.since <= e['published'][:10] <= scope.until]
-                # A filtered import must never install validators that would hide
-                # out-of-range entries from the next ordinary incremental run.
-                validators = {k:source[k] for k in ('etag','modified','resolved_url')}
-            summary['added'] += reg.put_items(source, entries)
-            with reg.db() as c:
-                c.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
-                    failures=0,retry_at=0,etag=?,modified=?,resolved_url=? WHERE id=?''',
-                    (reg.now(),reg.now(),validators['etag'],validators['modified'],validators['resolved_url'],source['id']))
-        except Exception as e:
-            reason = str(e)[:1200] or type(e).__name__
-            summary['errors'].append({'title': source['name'], 'reason': reason})
-            with reg.db() as c:
-                c.execute('''UPDATE subscriptions SET last_attempt=?,last_error=?,failures=failures+1,
-                    retry_at=? WHERE id=?''', (reg.now(),reason,
-                    time.time() + min(86400, 1800 * 2 ** min(source['failures'], 6)),source['id']))
-        summary['checked'] += 1
+        else:
+            pending.append(source)
+    # Budget-limited runs continue with never/least recently attempted sources.
+    pending.sort(key=lambda s: (s['last_attempt'], s['id']))
+    deadline = time.monotonic() + COLLECT_SECONDS
+    bridge_failures = 0
+    # Fetches alone run concurrently; persistence and pipeline state have one writer.
+    # Submit only one bounded batch so failures/stop never leave a 51-job backlog.
+    with ThreadPoolExecutor(max_workers=FETCH_WORKERS, thread_name_prefix='feed') as pool:
+        while pending:
+            if _state.get('stop_requested'):
+                summary['stopped'] = True
+                break
+            if time.monotonic() >= deadline:
+                summary['skipped'] += len(pending)
+                summary['message'] = '本轮采集已到时间预算，剩余订阅留待下次同步'
+                break
+            if bridge_failures >= BRIDGE_FAILURE_LIMIT:
+                independent = [s for s in pending if not reg.uses_bridge(s)]
+                summary['skipped'] += len(pending) - len(independent)
+                summary['message'] = 'X 桥接连续失败，已暂停本轮其余桥接请求；请检查桥接设置后重试'
+                pending = independent
+            batch, pending = pending[:FETCH_WORKERS], pending[FETCH_WORKERS:]
+            if not batch:
+                break
+            _stage('crawl', 'running', f"{reg.KINDS[kind]} · 正在读取 {len(batch)} 个来源（已检查 {summary['checked']}/{len(sources)}）")
+            batch_deadline = min(deadline, time.monotonic() + SOURCE_SECONDS)
+            futures = {pool.submit(fetch_source, s, settings, unconditional=scope.ranged,
+                                   deadline=batch_deadline): s for s in batch}
+            shared_ok, shared_errors = False, 0
+            for future in as_completed(futures):
+                source = futures[future]
+                try:
+                    result = future.result()
+                    shared_ok |= reg.uses_bridge(source)
+                    summary['added'] += _save_result(source, result, scope)
+                except Exception as e:
+                    shared_errors += int(reg.uses_bridge(source))
+                    _save_failure(source, e, summary)
+                summary['checked'] += 1
+                _stage('crawl', 'running', f"{reg.KINDS[kind]} {summary['checked']}/{len(sources)} · {source['name']}")
+            bridge_failures = 0 if shared_ok else bridge_failures + shared_errors
+    summary['stopped'] |= bool(_state.get('stop_requested'))
     with reg.db() as c:
         c.execute('INSERT INTO feed_runs(kind,started_at,finished_at,summary) VALUES(?,?,?,?)',
                   (kind,started,reg.now(),json.dumps(summary,ensure_ascii=False)))
@@ -59,7 +109,12 @@ def collect(kind, scope):
         label += f"，{summary['deferred']} 个等待重试"
     if summary['errors']:
         label += f"，失败 {len(summary['errors'])} 个"
-    _stage('crawl', 'stopped' if summary['stopped'] else ('error' if summary['errors'] else 'ok'),
+    if summary['unconfigured']:
+        label += f"，待配置 {summary['unconfigured']} 个（请填写 X 桥接或专用订阅链接）"
+    if summary['message']:
+        label += f"，跳过 {summary['skipped']} 个；{summary['message']}"
+    status = 'error' if summary['errors'] or summary['skipped'] else 'skipped' if summary['unconfigured'] else 'ok'
+    _stage('crawl', 'stopped' if summary['stopped'] else status,
            label, failures=summary['errors'])
     return summary
 
@@ -79,9 +134,9 @@ def export(kind: str):
                     url=item['url'], fetched_at=item['fetched_at'], content_kind=item['content_kind'])
         notice = '\n> 以下为订阅源提供的摘要；完整内容请打开原文。\n' if item['content_kind'] == 'summary' else ''
         text = '---\n' + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + '---\n\n'
-        # Store plain text. Escape raw HTML so scripts can never become active in downstream readers.
-        body = item['body'].replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
-        text += '# ' + item['title'].replace('<','&lt;') + '\n' + notice + '\n' + body + '\n'
+        # Keep the parsed text intact for the vault, indexing and extraction.
+        # HTML safety belongs to the reader (textContent / DOMPurify).
+        text += '# ' + item['title'] + '\n' + notice + '\n' + item['body'] + '\n'
         temp = None
         try:
             with tempfile.NamedTemporaryFile('w', dir=root, suffix='.tmp', encoding='utf-8', delete=False) as f:

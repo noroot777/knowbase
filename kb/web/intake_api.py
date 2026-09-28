@@ -44,10 +44,15 @@ def modules():
 def overview(kind: str):
     kind_checked(kind)
     sources = reg.subscriptions(kind)
+    settings = reg.get_settings(kind)
+    for source in sources:
+        source['configuration_error'] = reg.configuration_error(source, settings)
     with reg.db() as c:
         count = c.execute('SELECT count(*) FROM feed_items WHERE kind=?',(kind,)).fetchone()[0]
-    return {'sources':sources, 'settings':reg.get_settings(kind), 'last_run':reg.latest_run(kind),
+    return {'sources':sources, 'settings':settings, 'last_run':reg.latest_run(kind),
             'total':count, 'enabled':sum(s['enabled'] for s in sources),
+            'ready':sum(s['enabled'] and not s['configuration_error'] for s in sources),
+            'unconfigured':sum(s['enabled'] and bool(s['configuration_error']) for s in sources),
             'errors':sum(bool(s['last_error']) and s['enabled'] for s in sources)}
 
 
@@ -122,6 +127,9 @@ def sync(kind: str,body: SyncRequest):
     selected = [s for s in active if not body.source_ids or s['id'] in body.source_ids]
     if not selected or (body.source_ids and len(selected) != len(set(body.source_ids))):
         raise HTTPException(400,'请选择存在且已启用的订阅')
+    settings = reg.get_settings(kind)
+    if all(reg.configuration_error(s, settings) for s in selected):
+        raise HTTPException(400, reg.configuration_error(selected[0], settings))
     if not pipeline.start_pipeline(['crawl','export','index'],crawl_filter={
             'channel':kind,'accounts':[str(s['id']) for s in selected], 'force':True}):
         raise HTTPException(409,'其他同步正在运行，请结束后重试；自动同步会顺延')

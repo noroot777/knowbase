@@ -2,6 +2,7 @@
 const sourceModules = new Map();
 let sourceKind = '', sourceView = 'items', sourceData = null, sourceRows = [];
 let sourceOffset = 0, sourceTotal = 0, sourceVersion = 0, sourcePoll = null, sourceSearchTimer;
+let sourceItemsVersion = 0, sourceItemsFailed = false;
 let sourceBusy = false;
 const sourceFilters = new Map();
 
@@ -25,7 +26,9 @@ async function initSourceModules() {
 
 async function openSourceModule(kind) {
   clearTimeout(sourcePoll);
-  sourceKind = kind; sourceVersion++; sourceData = null; sourceRows = [];
+  clearTimeout(sourceSearchTimer);
+  sourceKind = kind; sourceVersion++; sourceItemsVersion++; sourceItemsFailed = false;
+  sourceData = null; sourceRows = []; sourceOffset = 0;
   const spec = sourceModules.get(kind);
   const filter = sourceFilters.get(kind) || { view: 'items', q: '', id: '' };
   sourceView = filter.view;
@@ -57,7 +60,7 @@ async function loadSourceModule(reset = false, selectedId = null) {
   const kind = sourceKind, version = ++sourceVersion;
   try {
     const data = await pipeJson('/api/intake/' + kind);
-    if (version !== sourceVersion || kind !== sourceKind) return;
+    if (version !== sourceVersion || kind !== sourceKind || !sourceActive()) return;
     const changed = !sourceData || JSON.stringify(data.sources) !== JSON.stringify(sourceData.sources) || data.total !== sourceData.total;
     sourceData = data;
     sourceError();
@@ -67,14 +70,16 @@ async function loadSourceModule(reset = false, selectedId = null) {
     $('source-filter').value = data.sources.some(s => String(s.id) === selected) ? selected : '';
     $('source-issues').hidden = !data.errors;
     $('source-issues').textContent = `${data.errors} 个来源上次连接失败，已安排退避重试。查看订阅管理 →`;
+    $('source-configuration').hidden = !data.unconfigured;
+    $('source-configuration').textContent = `${data.unconfigured} 个账号待配置：请填写可用的 X 订阅桥接，或为账号添加专用订阅链接。已配置的来源可照常同步。`;
     $('source-subscriptions-count').textContent = data.sources.length;
     if (reset) fillSourceSettings(data.settings);
     const run = data.last_run;
-    $('source-last-run').textContent = run ? `上次检查 ${sourceTime(run.finished_at)} · 新增 ${run.summary.added} 条${run.summary.errors.length ? ' · ' + run.summary.errors.length + ' 个来源失败' : ''}` : '尚未同步。先检查订阅，再开始收集。';
-    if (reset || changed) await renderSourceView(reset);
+    $('source-last-run').textContent = run ? `上次检查 ${sourceTime(run.finished_at)} · 新增 ${run.summary.added} 条${run.summary.errors.length ? ' · ' + run.summary.errors.length + ' 个来源失败' : ''}${run.summary.message ? ' · ' + run.summary.message : ''}` : '尚未同步。先检查订阅，再开始收集。';
+    if (reset || changed || sourceItemsFailed) await renderSourceView(reset);
     updateSourceRunStatus();
   } catch (e) {
-    if (version === sourceVersion) sourceError(e.message);
+    if (version === sourceVersion && kind === sourceKind && sourceActive()) sourceError(e.message);
   } finally {
     if (sourceActive()) queueSourcePoll();
   }
@@ -90,14 +95,15 @@ function queueSourcePoll() {
 function updateSourceRunStatus() {
   const running = pipeSnapshot?.running;
   const ours = running && pipeSnapshot?.crawl_filter?.channel === sourceKind;
-  $('source-sync').disabled = sourceBusy || !!running || !sourceData?.enabled;
+  $('source-sync').disabled = sourceBusy || !!running || !sourceData?.ready;
   $('source-sync').textContent = ours ? '同步中…' : '同步全部';
   $('source-progress').hidden = !running;
   $('source-progress-text').textContent = ours
     ? (pipeSnapshot.stages[pipeSnapshot.current_stage]?.detail || '正在同步')
     : '其他来源正在同步，自动任务会顺延。';
   $('source-list').querySelectorAll('[data-source-action]').forEach(b => {
-    const paused = b.dataset.sourceAction === 'sync' && !sourceData?.sources.find(s=>s.id===Number(b.dataset.sourceId))?.enabled;
+    const source = sourceData?.sources.find(s=>s.id===Number(b.dataset.sourceId));
+    const paused = b.dataset.sourceAction === 'sync' && (!source?.enabled || source?.configuration_error);
     b.disabled = sourceBusy || !!running || paused;
   });
   $('source-add').disabled = sourceBusy || !!ours;
@@ -108,11 +114,12 @@ function switchSourceView(view) {
 }
 function sourceFilterChanged() {
   clearTimeout(sourceSearchTimer);
+  sourceItemsVersion++; // Invalidate responses immediately, including during debounce.
   sourceSearchTimer = setTimeout(() => renderSourceView(true).catch(e => sourceError(e.message)), 220);
 }
 async function renderSourceView(reset = false) {
   if (!sourceData) return;
-  const kind = sourceKind;
+  const kind = sourceKind, version = ++sourceItemsVersion;
   $('source-view-items').classList.toggle('on', sourceView === 'items');
   $('source-view-manage').classList.toggle('on', sourceView === 'manage');
   $('source-view-items').setAttribute('aria-pressed', String(sourceView === 'items'));
@@ -120,29 +127,43 @@ async function renderSourceView(reset = false) {
   $('source-q').placeholder = sourceView === 'items' ? '搜索已收录的内容…' : '搜索名称、链接或分组…';
   $('source-filter').hidden = sourceView === 'manage';
   $('source-more').hidden = true;
+  $('source-more').disabled = false;
   const q = $('source-q').value.trim(), id = $('source-filter').value;
   sourceFilters.set(kind, { view: sourceView, q, id });
   if (sourceView === 'manage') {
+    sourceItemsFailed = false;
     const rows = sourceData.sources.filter(s => (s.name+' '+s.url+' '+s.group_name).toLowerCase().includes(q.toLowerCase()));
     $('source-list').innerHTML = rows.map(renderSubscription).join('') || '<div class="source-empty"><h3>没有匹配的订阅</h3><p>换个关键词，或添加新的来源。</p></div>';
     updateSourceRunStatus();
     return;
   }
-  const version = ++sourceVersion;
   const count = !reset && sourceOffset ? sourceOffset : 30;
   // Reload the visible window to avoid duplicates when a sync inserts new entries.
-  const data = await pipeJson(`/api/intake/${kind}/items?limit=${Math.min(count,100)}&offset=0&q=${encodeURIComponent(q)}${id ? '&source_id='+id : ''}`);
-  if (version !== sourceVersion || kind !== sourceKind || sourceView !== 'items') return;
-  sourceRows = data.items; sourceOffset = data.items.length; sourceTotal = data.total;
-  renderSourceItems();
+  if (reset) $('source-list').innerHTML = '<div class="source-empty">正在读取内容…</div>';
+  try {
+    const data = await pipeJson(`/api/intake/${kind}/items?limit=${Math.min(count,100)}&offset=0&q=${encodeURIComponent(q)}${id ? '&source_id='+id : ''}`);
+    if (!currentSourceItems(kind, version, q, id)) return;
+    sourceItemsFailed = false;
+    sourceRows = data.items; sourceOffset = data.items.length; sourceTotal = data.total;
+    renderSourceItems();
+  } catch (e) {
+    if (!currentSourceItems(kind, version, q, id)) return;
+    sourceItemsFailed = true;
+    $('source-list').innerHTML = `<div class="source-empty" role="alert"><h3>内容读取失败</h3><p>${esc(e.message)}</p><p>稍后会自动重试，也可以立即重新读取。</p><button class="ghost" data-retry-items>重新读取</button></div>`;
+  }
+}
+function currentSourceItems(kind, version, q, id) {
+  return kind === sourceKind && version === sourceItemsVersion && sourceActive() && sourceView === 'items'
+    && q === $('source-q').value.trim() && id === $('source-filter').value;
 }
 function renderSubscription(s) {
-  const status = !s.enabled ? '已停用' : s.last_error ? '连接失败' : s.last_success ? '已同步' : '待首次同步';
+  const status = !s.enabled ? '已停用' : s.configuration_error ? '待配置' : s.last_error ? '连接失败' : s.last_success ? '已同步' : '待首次同步';
   return `<article class="source-subscription ${!s.enabled ? 'is-paused' : ''}">
     <div class="source-avatar" aria-hidden="true">${esc(s.name.slice(0,1))}</div>
     <div class="source-subscription-body"><div class="source-row-title"><h3>${esc(s.name)}</h3><span class="source-state ${s.enabled && s.last_error ? 'failed' : ''}">${status}</span></div>
     <a class="source-url" href="${esc(safeUrl(s.url))}" target="_blank" rel="noopener noreferrer">${esc(s.url)}</a>
     <div class="source-row-meta">${esc(s.group_name || '未分组')} · ${s.item_count} 条 · ${s.last_success ? '最近成功 '+sourceTime(s.last_success) : '尚未成功同步'}</div>
+    ${s.configuration_error ? `<p class="source-row-meta">${esc(s.configuration_error)}</p>` : ''}
     ${s.last_error ? `<details class="source-failure"><summary>查看失败原因与重试时间</summary><p>${esc(s.last_error)}</p><p>自动重试：${sourceTime(s.retry_at*1000)}；也可点击“同步”立即重试。</p></details>` : ''}</div>
     <div class="source-row-actions"><button class="text-button" data-source-action="edit" data-source-id="${s.id}">编辑</button><button class="text-button" data-source-action="toggle" data-source-id="${s.id}">${s.enabled ? '停用' : '启用'}</button><button class="text-button" data-source-action="sync" data-source-id="${s.id}" ${!s.enabled?'disabled':''}>同步</button><button class="text-button source-delete" data-source-action="delete" data-source-id="${s.id}">删除</button></div></article>`;
 }
@@ -152,21 +173,22 @@ function renderSourceItems() {
     <h3><button class="source-entry-title" data-read-item="${item.key}">${esc(item.title)}</button></h3>
     <p class="source-excerpt">${esc(item.body.slice(0,380))}${item.body.length>380?'…':''}</p>
     <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}</span><button class="text-button" data-read-item="${item.key}">展开阅读</button><a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文 ↗</a></div></article>`).join('') ||
-    `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value ? '换个关键词或切换订阅试试。' : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p></div>`;
+    `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value ? '换个关键词或切换订阅试试。' : sourceData?.unconfigured && !sourceData?.ready ? '账号待配置。先填写 X 订阅桥接或账号的专用订阅链接，再开始同步。' : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p></div>`;
   $('source-more').hidden = sourceOffset >= sourceTotal;
   $('source-more').textContent = `加载更多（已显示 ${sourceRows.length} / ${sourceTotal}）`;
 }
 async function moreSourceItems() {
-  const kind = sourceKind, version = sourceVersion;
+  const kind = sourceKind, version = ++sourceItemsVersion;
+  const q = $('source-q').value.trim(), id = $('source-filter').value;
   $('source-more').disabled = true;
   try {
-    const q = $('source-q').value.trim(), id = $('source-filter').value;
     const data = await pipeJson(`/api/intake/${kind}/items?offset=${sourceOffset}&q=${encodeURIComponent(q)}${id?'&source_id='+id:''}`);
-    if (kind !== sourceKind || version !== sourceVersion || sourceView !== 'items') return;
+    if (!currentSourceItems(kind, version, q, id)) return;
     const seen = new Set(sourceRows.map(r => r.key));
     sourceRows.push(...data.items.filter(r => !seen.has(r.key)));
     sourceOffset += data.items.length; sourceTotal = data.total; renderSourceItems();
-  } catch(e) { sourceError(e.message); } finally { $('source-more').disabled = false; }
+  } catch(e) { if (currentSourceItems(kind, version, q, id)) sourceError(e.message); }
+  finally { if (version === sourceItemsVersion) $('source-more').disabled = false; }
 }
 async function syncSource(ids = []) {
   if (sourceBusy) return;
@@ -189,6 +211,7 @@ function readSourceItem(key) {
   $('source-reader').style.display = '';
 }
 $('source-list').addEventListener('click', e => {
+  if (e.target.closest('[data-retry-items]')) renderSourceView(true);
   const read = e.target.closest('[data-read-item]');
   if (read) readSourceItem(read.dataset.readItem);
   const action = e.target.closest('[data-source-action]');

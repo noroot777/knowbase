@@ -1,6 +1,7 @@
 """Isolated source lifecycle, ingestion, scheduling and search regressions."""
 import json
 import tempfile
+import threading
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -78,7 +79,7 @@ class FeedTests(unittest.TestCase):
         with patch.object(fetching.socket,'getaddrinfo',return_value=[(2,1,6,'',('10.0.0.1',443))]):
             with self.assertRaises(fetching.FeedError): fetching.public_url('https://example.org/rss')
         # Public URL validation itself is applied for every redirect in request().
-        with patch.object(fetching,'public_url',side_effect=['https://example.org/rss',fetching.FeedError('private')]), \
+        with patch.object(fetching,'public_addresses',side_effect=[('https://example.org/rss',['8.8.8.8']),fetching.FeedError('private')]), \
              patch.object(fetching.httpx,'Client') as client:
             client.return_value.__enter__.return_value.stream.return_value.__enter__.return_value = Mock(
                 status_code=302,headers={'location':'http://127.0.0.1/private'})
@@ -125,8 +126,9 @@ class FeedTests(unittest.TestCase):
             self.assertEqual('v1',req.call_args.args[1]['If-None-Match'])
         s=self.source('https://x.com/example',kind='social')
         with patch.object(fetching,'request',side_effect=[fetching.FeedError('blocked'),fetching.Response(200,'https://xcancel.com/example/rss',ATOM,{})]) as req:
-            entries,_=fetching.fetch_source(s,reg.get_settings('social'))
+            entries,_=fetching.fetch_source(s,{'bridges':['https://nitter.net/{handle}/rss','https://xcancel.com/{handle}/rss']})
             self.assertEqual(2,req.call_count); self.assertEqual(1,len(entries))
+            self.assertEqual(req.call_args_list[0].kwargs['deadline'], req.call_args_list[1].kwargs['deadline'])
 
     def test_homepage_discovers_only_advertised_rss(self):
         s=self.source('https://example.org/')
@@ -140,7 +142,11 @@ class FeedTests(unittest.TestCase):
         reg.save_subscription('rss',{'enabled':False},disabled['id'])
         scope=FetchScope(targets=tuple(str(s['id']) for s in [a,b,disabled]))
         good=(self.entries(),{'etag':'v1','modified':'','resolved_url':a['url']})
-        with patch.object(sync,'fetch_source',side_effect=[fetching.FeedError('blocked'),good]) as fetch:
+        def response(source, *args, **kwargs):
+            if source['id'] == a['id']:
+                raise fetching.FeedError('blocked')
+            return good
+        with patch.object(sync,'fetch_source',side_effect=response) as fetch:
             summary=sync.collect('rss',scope)
             self.assertEqual(2,fetch.call_count); self.assertEqual(1,summary['added']); self.assertEqual(1,len(summary['errors']))
         self.assertEqual('',reg.subscription('rss',a['id'])['last_success'])
@@ -201,7 +207,8 @@ class FeedTests(unittest.TestCase):
 
     def test_schedule_busy_retries_and_modules_keep_independent_settings(self):
         reg.save_settings('rss',{'enabled':True,'interval_minutes':120,'next_run':10})
-        reg.save_settings('social',{'enabled':True,'interval_minutes':30,'next_run':20})
+        reg.save_settings('social',{'enabled':True,'interval_minutes':30,'next_run':20,
+                                  'bridges':['https://example.org/{handle}/rss']})
         start=Mock(return_value=False)
         self.assertIsNone(schedule.tick(start,current_time=100))
         self.assertEqual(10,reg.get_settings('rss')['next_run'])
@@ -232,6 +239,111 @@ class FeedTests(unittest.TestCase):
             pipeline._scheduler_tick()
             mark.assert_called_once()
             self.assertEqual('wechat_local',start.call_args.kwargs['crawl_filter']['channel'])
+
+    def test_default_social_waits_for_configuration_without_starting_pipeline(self):
+        overview = self.client.get('/api/intake/social').json()
+        self.assertEqual((51, 0), (overview['unconfigured'], overview['ready']))
+        self.assertEqual([], overview['settings']['bridges'])
+        self.assertFalse(get_collector('social').status().ready)
+        with patch.object(pipeline, 'start_pipeline') as start:
+            response = self.client.post('/api/intake/social/sync', json={})
+            self.assertEqual(400, response.status_code)
+            self.assertIn('待配置', response.json()['detail'])
+            start.assert_not_called()
+        with patch.object(sync, 'fetch_source') as fetch:
+            summary = sync.collect('social', FetchScope(force=True))
+            self.assertEqual(51, summary['unconfigured'])
+            fetch.assert_not_called()
+        reg.save_settings('social', {'enabled':True, 'next_run':0})
+        start = Mock(return_value=True)
+        self.assertIsNone(schedule.tick(start, current_time=100))
+        start.assert_not_called()
+        self.assertFalse(any(s['last_error'] for s in reg.subscriptions('social')))
+
+    def test_dedicated_feed_and_saved_bridges_remain_usable(self):
+        source = reg.subscriptions('social')[0]
+        reg.save_subscription('social', {'feed_url':'https://example.org/account/rss'}, source['id'])
+        data = self.client.get('/api/intake/social').json()
+        self.assertEqual((50, 1), (data['unconfigured'], data['ready']))
+        with patch.object(pipeline, 'start_pipeline', return_value=True):
+            self.assertEqual(200, self.client.post('/api/intake/social/sync', json={'source_ids':[source['id']]}).status_code)
+        reg.save_settings('social', {'bridges':['https://custom.org/{handle}/rss']})
+        self.assertEqual(['https://custom.org/{handle}/rss'], reg.get_settings('social')['bridges'])
+        self.assertEqual(51, self.client.get('/api/intake/social').json()['ready'])
+        reg.save_settings('social', {'bridges':[]})
+        self.assertEqual(1, self.client.get('/api/intake/social').json()['ready'])
+
+    def test_shared_bridge_failure_stops_after_one_concurrent_batch(self):
+        reg.save_settings('social', {'bridges':['https://broken.org/{handle}/rss']})
+        barrier = threading.Barrier(sync.FETCH_WORKERS)
+        def blocked(*args, **kwargs):
+            barrier.wait(timeout=2)  # Fails if fetching becomes serial again.
+            raise fetching.FeedError('HTTP 451')
+        with patch.object(sync, 'fetch_source', side_effect=blocked) as fetch:
+            summary = sync.collect('social', FetchScope(force=True))
+        self.assertEqual(4, fetch.call_count)
+        self.assertEqual((4,47), (summary['checked'],summary['skipped']))
+        self.assertIn('X 桥接连续失败', summary['message'])
+        sources = reg.subscriptions('social')
+        self.assertEqual(4, sum(bool(s['last_error']) for s in sources))
+        self.assertTrue(all(not s['last_attempt'] for s in sources[4:]))
+        self.assertEqual('error', pipeline_state._state['stages']['crawl']['status'])
+
+    def test_bridge_circuit_does_not_skip_dedicated_or_other_social_feeds(self):
+        reg.save_settings('social', {'bridges':['https://broken.org/{handle}/rss']})
+        direct = self.source('https://example.org/social-feed', kind='social')
+        dedicated = self.source('https://x.com/dedicated', kind='social')
+        reg.save_subscription('social', {'feed_url':'https://example.org/dedicated'}, dedicated['id'])
+        def response(source, *args, **kwargs):
+            if reg.uses_bridge(source):
+                raise fetching.FeedError('HTTP 451')
+            return self.entries(), {'etag':'', 'modified':'', 'resolved_url':source['url']}
+        with patch.object(sync, 'fetch_source', side_effect=response):
+            summary = sync.collect('social', FetchScope(force=True))
+        self.assertEqual((6,47,1), (summary['checked'],summary['skipped'],summary['added']))
+        self.assertTrue(reg.subscription('social', direct['id'])['last_success'])
+        self.assertTrue(reg.subscription('social', dedicated['id'])['last_success'])
+
+    def test_collect_budget_leaves_unattempted_sources_for_next_run(self):
+        good = (self.entries(), {'etag':'','modified':'','resolved_url':'https://example.org'})
+        with patch.object(sync, 'fetch_source', return_value=good) as fetch, \
+             patch.object(sync.time, 'monotonic', side_effect=[0,0,0,100]):
+            summary = sync.collect('rss', FetchScope(force=True))
+        self.assertEqual((4,5), (summary['checked'],summary['skipped']))
+        self.assertIn('时间预算', summary['message'])
+        self.assertEqual(4, fetch.call_count)
+        self.assertEqual(20, fetch.call_args.kwargs['deadline'])
+        first = {c.args[0]['id'] for c in fetch.call_args_list}
+        with patch.object(sync, 'fetch_source', return_value=good) as fetch, \
+             patch.object(sync.time, 'monotonic', side_effect=[0,0,0,100]):
+            sync.collect('rss', FetchScope(force=True))
+        self.assertTrue(first.isdisjoint(c.args[0]['id'] for c in fetch.call_args_list))
+
+    def test_export_keeps_plain_symbols_and_fts_has_no_entity_words(self):
+        from kb import scanner, store
+        from kb.config import Source
+        from kb.chunker import split_chunks
+        from kb.search import _fts_leg, Filters
+        source = self.source()
+        entry = {**self.entries()[0], 'title':'A & B <b> 标题',
+                 'body':'比较 a < b 且 b > c，成本 R&D 占 30%。\nRust & Go'}
+        reg.put_items(source, [entry]); sync.export('rss')
+        vault = self.root/'vault'
+        text = next(vault.rglob('*.md')).read_text()
+        self.assertIn('# ' + entry['title'] + '\n', text)
+        self.assertIn(entry['body'], text)
+        self.assertNotIn('&amp;', text)
+        self.assertNotIn('&lt;', text)
+        with patch.object(scanner,'VAULT_ROOT',vault), patch.object(scanner,'SOURCES',[Source('rss',vault/'source/rss')]):
+            doc = next(scanner.scan_all())
+        self.assertEqual(entry['title'], doc.title)
+        conn = store.connect(self.root/'index.db')
+        try:
+            store.upsert_document(conn,doc,split_chunks(doc.body),reg.now()); conn.commit()
+            self.assertEqual([], _fts_leg(conn, 'amp', Filters(source='rss')))
+            self.assertTrue(_fts_leg(conn, 'Rust', Filters(source='rss')))
+        finally:
+            conn.close()
 
 
 if __name__ == '__main__':

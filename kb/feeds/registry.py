@@ -139,7 +139,7 @@ def get_settings(kind: str) -> dict:
     with db() as c:
         row = c.execute('SELECT value FROM feed_settings WHERE kind=?', (kind,)).fetchone()
     default = {'enabled': False, 'interval_minutes': feed_types()[kind].interval_minutes,
-               'next_run': 0, 'bridges': ['https://nitter.net/{handle}/rss', 'https://xcancel.com/{handle}/rss']}
+               'next_run': 0, 'bridges': []}
     return {**default, **(json.loads(row['value']) if row else {})}
 
 
@@ -149,8 +149,8 @@ def save_settings(kind: str, values: dict) -> dict:
     if not isinstance(cur['interval_minutes'], int) or not 15 <= cur['interval_minutes'] <= 10080:
         raise ValueError('同步间隔须在 15 分钟至 7 天之间')
     bridges = cur.get('bridges', [])
-    if not isinstance(bridges, list) or not 1 <= len(bridges) <= 5:
-        raise ValueError('请设置 1–5 个 X 订阅桥接地址')
+    if not isinstance(bridges, list) or len(bridges) > 5:
+        raise ValueError('最多设置 5 个 X 订阅桥接地址；留空时账号等待配置专用链接')
     for value in bridges:
         if value.count('{handle}') != 1:
             raise ValueError('桥接地址须包含一个 {handle}，用于替换账号名')
@@ -158,6 +158,17 @@ def save_settings(kind: str, values: dict) -> dict:
     with db() as c:
         c.execute('INSERT OR REPLACE INTO feed_settings VALUES(?,?)', (kind, json.dumps(cur)))
     return cur
+
+
+def uses_bridge(source: dict) -> bool:
+    return (feed_types()[source['kind']].adapter == 'social' and not source['feed_url']
+            and bool(x_handle(source['url'])))
+
+
+def configuration_error(source: dict, settings: dict) -> str:
+    if uses_bridge(source) and not settings['bridges']:
+        return '待配置：请在 X 订阅桥接设置中填写可用模板，或编辑账号的专用订阅链接'
+    return ''
 
 
 def subscriptions(kind: str) -> list[dict]:

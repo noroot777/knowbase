@@ -17,7 +17,7 @@ import re
 import threading
 import time
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from kb.config import DATA_DIR
 from kb.collectors import active_collector
@@ -165,6 +165,7 @@ def start_pipeline(stages: list[str] | None = None,
 
 _SCHED_FILE = DATA_DIR / "pipeline_schedule.json"
 _sched_started = False
+_schedule_lock = threading.RLock()
 
 
 def load_schedule() -> dict:
@@ -175,37 +176,54 @@ def load_schedule() -> dict:
     return {"enabled": bool(d.get("enabled")),
             "time": d.get("time") or "07:30",
             "channel": d.get("channel") or active_collector().name,
-            "last_fired": d.get("last_fired") or ""}
+            "last_fired": d.get("last_fired") or "",
+            "next_run": d.get("next_run") or ""}
 
 
 def save_schedule(enabled: bool, time_str: str, channel: str | None = None) -> dict:
     if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", time_str or ""):
         raise ValueError(f"时间格式应为 HH:MM,收到 {time_str!r}")
-    cur = load_schedule()
-    channel = active_collector(channel or cur["channel"]).name
-    cur.update({"enabled": bool(enabled), "time": time_str, "channel": channel})
-    _SCHED_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _SCHED_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
-                           encoding="utf-8")
-    return cur
+    with _schedule_lock:
+        cur = load_schedule()
+        channel = active_collector(channel or cur["channel"]).name
+        now = datetime.now()
+        hour, minute = map(int, time_str.split(':'))
+        next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        # Saving always schedules a future occurrence, never an implicit catch-up.
+        # Keep last_fired truthful, and allow at most one daily run per calendar day.
+        if next_run <= now or cur['last_fired'] == now.strftime('%Y-%m-%d'):
+            next_run += timedelta(days=1)
+        cur.update({"enabled": bool(enabled), "time": time_str, "channel": channel,
+                    "next_run": next_run.isoformat(timespec='minutes') if enabled else ''})
+        _SCHED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _SCHED_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
+                               encoding="utf-8")
+        return cur
 
 
 def _mark_fired(day: str) -> None:
     cur = load_schedule()
     cur["last_fired"] = day
+    tomorrow = datetime.strptime(day, '%Y-%m-%d') + timedelta(days=1)
+    cur['next_run'] = tomorrow.strftime('%Y-%m-%d') + 'T' + cur['time']
     _SCHED_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
                            encoding="utf-8")
 
 
 def _scheduler_tick() -> None:
-    s = load_schedule()
-    now = datetime.now()
-    today = now.strftime("%Y-%m-%d")
-    if s["enabled"] and now.strftime("%H:%M") >= s["time"] and s["last_fired"] != today:
-        if start_pipeline(None, crawl_filter={"channel": s["channel"]}):
-            _mark_fired(today)
-            _log(f"定时任务触发全流程同步(每日 {s['time']})")
-            return
+    with _schedule_lock:
+        s = load_schedule()
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        # Legacy schedules retain restart catch-up; newly saved schedules persist
+        # their next occurrence, including busy deferrals across midnight/restarts.
+        due = (now.isoformat(timespec='minutes') >= s['next_run'] if s.get('next_run')
+               else now.strftime('%H:%M') >= s['time'])
+        if s["enabled"] and due and s["last_fired"] != today:
+            if start_pipeline(None, crawl_filter={"channel": s["channel"]}):
+                _mark_fired(today)
+                _log(f"定时任务触发全流程同步(每日 {s['time']})")
+                return
     from kb.feeds.schedule import tick
     tick(start_pipeline)
 

@@ -11,6 +11,9 @@ def tick(start_pipeline, current_time=None):
     for kind in feed_types():
         s = reg.get_settings(kind)
         if s['enabled'] and s['next_run'] <= now:
+            if not any(source['enabled'] and not reg.configuration_error(source, s)
+                       for source in reg.subscriptions(kind)):
+                continue
             due.append((s['next_run'],kind,s))
     for _,kind,s in sorted(due):
         if start_pipeline(['crawl','export','index'], crawl_filter={'channel':kind, 'scheduled':True}):

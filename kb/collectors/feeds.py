@@ -15,10 +15,13 @@ class FeedCollector:
     def status(self):
         sources = reg.subscriptions(self.name)
         active = [s for s in sources if s['enabled']]
+        settings = reg.get_settings(self.name)
+        unconfigured = sum(bool(reg.configuration_error(s, settings)) for s in active)
         errors = sum(bool(s['last_error']) for s in active)
-        return SourceStatus(online=True, ready=bool(active),
-                            message=f'已启用 {len(active)} 个来源 · {errors} 个来源上次连接失败',
-                            hint='连接结果以实际同步为准', targets=tuple(s['name'] for s in active))
+        return SourceStatus(online=True, ready=len(active) > unconfigured,
+                            message=f'已启用 {len(active)} 个来源 · {unconfigured} 个待配置 · {errors} 个来源上次连接失败',
+                            hint=('请配置 X 订阅桥接或账号的专用订阅链接' if unconfigured else '连接结果以实际同步为准'),
+                            targets=tuple(s['name'] for s in active))
 
     def fetch(self, scope):
         from kb.feeds.sync import collect
