@@ -42,11 +42,17 @@ for _r in (pages.router, library_api.router, chat_api.router,
 pl.start_scheduler()   # 定时同步调度线程(跟随 kb-web 进程存活)
 
 
+@app.get("/api/health")
+def health():
+    return {"status": "ok"}
+
+
 def main() -> None:
     import os
 
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("PORT", "8787")))
+    uvicorn.run(app, host=os.environ.get("KB_HOST", "127.0.0.1"),
+                port=int(os.environ.get("PORT", "8787")))
 
 
 if __name__ == "__main__":

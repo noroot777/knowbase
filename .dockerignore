@@ -1,0 +1,25 @@
+# Allowlist: secrets, private databases, host virtualenvs and worktrees never enter context.
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!kb/
+!kb/**
+!scripts/
+!scripts/**
+!collector/
+!collector/**
+!docker/
+!docker/**
+**/__pycache__
+**/*.pyc
+**/.venv
+**/data
+**/runtime_logs
+**/.run
+**/.env*
+**/*.egg-info
+collector/tests
+collector/nohup.out
+scripts/wiki/build_wiki_demo.py
+docker/*.md

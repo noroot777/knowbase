@@ -3,6 +3,25 @@
 个人知识库:把 obs vault 里的内容(微信公众号、YouTube 视频摘要)统一索引,
 支持关键词 + 语义混合检索和意图问答。
 
+## Docker 部署
+
+安装 Docker Engine / Docker Desktop 和 Compose v2，在项目根目录运行：
+
+```bash
+docker compose up -d --build
+# 打开 http://127.0.0.1:8787，配置供应商和各阶段模型
+docker compose logs -f --tail 100
+```
+
+默认使用持久卷保存配置、索引、采集器数据、文章和模型缓存。已有文章目录可在
+`.env` 中配置 `KB_VAULT_PATH`（参考 `.env.example`），再运行
+`docker compose exec knowledge-base kb index --no-vector` 建立关键词索引。
+
+**微信 key 仍需在 Mac 本机获取。** Linux 容器不能访问 Mac 微信进程；推荐在 Mac
+完成微信接入和文章导出，Docker 挂载该文章目录做索引和分析，无需安装情报库 skill。
+镜像已包含应用和采集器依赖，首次向量索引会额外下载约 2GB 模型。
+迁移、挂载、凭证采集和备份方法见 [Docker 部署说明](docker/README.md)。
+
 ## 架构
 
 ```

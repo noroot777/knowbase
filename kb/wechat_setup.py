@@ -211,6 +211,9 @@ def _work(fd, account_id, acquire):
 
 
 def start(action="connect", account_id="", confirmation_token="", confirmed=False):
+    from kb.deployment import in_container, wechat_container_status
+    if in_container():
+        raise runtime.SetupError(wechat_container_status()["message"])
     with _mutex:
         fd = _lock()
         try:

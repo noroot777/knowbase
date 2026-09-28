@@ -64,7 +64,7 @@
 </header>
 <main id="main-content" tabindex="-1">
   <section id="wechat-welcome" class="wechat-welcome" hidden aria-label="首次配置">
-    <div><strong>让知识库接上你的微信</strong><p id="wechat-welcome-status">配置供应商和模型后，一次接入本机公众号文章。</p></div>
+    <div><strong id="wechat-welcome-title">让知识库接上你的微信</strong><p id="wechat-welcome-status">配置供应商和模型后，一次接入本机公众号文章。</p></div>
     <button onclick="openWechatSetup()">完成首次配置</button><button class="text-button" onclick="dismissWechatWelcome()">稍后配置</button>
   </section>
 <div id="gallerypanel">
@@ -373,11 +373,11 @@
 <div id="shortcuts-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeShortcuts()"><div class="modal shortcuts-dialog"><h2>少一点点击，多一点专注</h2><p class="hint">常用键盘快捷键</p><dl><div><dt>快速搜索</dt><dd><kbd>⌘ / Ctrl</kbd> <kbd>K</kbd></dd></div><div><dt>搜索当前图鉴</dt><dd><kbd>/</kbd></dd></div><div><dt>关闭当前弹窗</dt><dd><kbd>Esc</kbd></dd></div><div><dt>发送问题 / 换行</dt><dd><kbd>Enter</kbd> / <kbd>Shift Enter</kbd></dd></div></dl><button onclick="closeShortcuts()">知道了</button></div></div>
 <div id="wechat-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeWechatSetup()">
   <div class="modal wechat-dialog">
-    <div class="wechat-heading"><div><span class="eyebrow">CONNECT YOUR KNOWLEDGE</span><h2>接入你的微信</h2><p class="hint">从本机已同步的公众号推送中发现文章，收进知识库。</p></div><button class="icon-button" onclick="closeWechatSetup()" aria-label="关闭微信接入">×</button></div>
+    <div class="wechat-heading"><div><span class="eyebrow">CONNECT YOUR KNOWLEDGE</span><h2 id="wechat-title">接入你的微信</h2><p class="hint" id="wechat-intro">从本机已同步的公众号推送中发现文章，收进知识库。</p></div><button class="icon-button" onclick="closeWechatSetup()" aria-label="关闭微信接入">×</button></div>
     <ol class="wechat-steps">
       <li><span class="wechat-step-number">01</span><div><strong>配置供应商</strong><small id="wechat-provider-state">待检查</small></div><button class="ghost" onclick="wechatConfigured(openKeys)">API Key</button></li>
       <li><span class="wechat-step-number">02</span><div><strong>分配模型与智能体</strong><small id="wechat-model-state">待检查</small></div><button class="ghost" onclick="wechatConfigured(openStages)">模型配置</button></li>
-      <li><span class="wechat-step-number">03</span><div><strong>接入本机微信</strong><small>已有配置直接复用，缺 key 时自动准备获取工具</small></div><span id="wechat-database-state" class="badge">待接入</span></li>
+      <li><span class="wechat-step-number">03</span><div><strong id="wechat-source-title">接入本机微信</strong><small id="wechat-source-hint">已有配置直接复用，缺 key 时自动准备获取工具</small></div><span id="wechat-database-state" class="badge">待接入</span></li>
     </ol>
     <p id="wechat-status" class="wechat-progress" role="status" aria-live="polite">正在读取微信接入状态…</p>
     <label id="wechat-account-row" class="wechat-account-row" hidden>选择本人微信账号<select id="wechat-account" onchange="renderWechatSetup()"><option value="">请选择本人账号</option></select></label>
@@ -389,7 +389,7 @@
     </div>
     <p id="wechat-error" role="alert"></p>
     <div class="wechat-actions"><button id="wechat-check" onclick="startWechatSetup()">检查并接入微信</button><button id="wechat-next" class="ghost" onclick="useLocalWechat()" hidden>去同步公众号</button><button class="ghost" onclick="refreshWechatSetup()">刷新状态</button></div>
-    <p class="hint">可以关闭窗口，任务继续在后台执行。获取和验证不需要大模型 API。</p>
+    <p class="hint" id="wechat-runtime-hint">可以关闭窗口，任务继续在后台执行。获取和验证不需要大模型 API。</p>
     <details class="wechat-explanation hint"><summary>文章怎么获取？需要安装 skill 吗？</summary><p>不需要安装个人情报库 skill。项目会准备独立 Reader，读取本机已同步的公众号推送，提取文章链接，再抓取公开正文、归档和索引；智能体用于后续分析。</p><p>仅覆盖本机已同步的推送，不保证订阅前的历史。私聊、群聊不会被作为文章采集。公众号正文图片走网页下载，不要求微信缓存图片解码 key。</p><p>原“凭证抓取”通道仍通过 wxdown 获取逐号短期凭证。微信接入目前支持在本机 Mac 上获取 key；远程服务器不能读取你电脑上的微信。</p></details>
   </div>
 </div>

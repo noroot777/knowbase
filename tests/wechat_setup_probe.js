@@ -78,6 +78,17 @@ async page => {
     await page.screenshot({path:'output/playwright/wechat-setup-desktop.png',fullPage:true});
     await page.keyboard.press('Escape');
     check('Esc 可关闭接入弹窗', await page.locator('#wechat-modal').isHidden());
+    status = {state:'host_required',deployment:'docker',can_connect:false,ready:false,running:false,
+      provider_ready:true,models_ready:true,message:'当前运行在 Docker 中，请在 Mac 本机获取 key。'};
+    await page.evaluate(() => refreshWechatSetup());
+    await page.getByRole('button',{name:'完成首次配置'}).click();
+    check('Docker 禁止本机接入按钮', await page.locator('#wechat-check').isDisabled()
+      && (await page.locator('#wechat-check').textContent()).includes('Mac 本机'));
+    check('Docker 隐藏进程授权', await page.locator('#wechat-authorization').isHidden());
+    check('Docker 首次说明提示挂载文章', (await page.locator('#wechat-welcome-status').textContent()).includes('挂载文章目录'));
+    check('Docker 配置步骤指向文章挂载', (await page.locator('#wechat-title').textContent()).includes('Docker')
+      && (await page.locator('#wechat-source-hint').textContent()).includes('挂载 Mac 导出的 vault'));
+    await page.evaluate(() => startWechatSetup('connect'));
     check('只产生一次检查和一次明确获取', writes.length === 2);
     check('页面无脚本异常', errors.length === 0);
     return {passed:checks.length,checks,errors,writes:writes.map(x=>x.action)};

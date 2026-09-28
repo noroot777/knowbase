@@ -29,7 +29,7 @@ from pathlib import Path
 from threading import RLock
 
 REPO = Path(__file__).resolve().parents[2]
-CACHE_DIR = REPO / "data"
+CACHE_DIR = Path(os.environ.get("KB_DATA_DIR") or REPO / "data").expanduser()
 
 
 # 分类表(Cat / Taxonomy / PROJECTS / SKILLS)搬到了 taxo_tables.py:这个文件
