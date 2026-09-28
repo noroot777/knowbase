@@ -26,6 +26,10 @@ class FeedError(ValueError):
     pass
 
 
+class CollectionBudgetExceeded(Exception):
+    """The run stopped this fetch; the source has not failed."""
+
+
 def public_addresses(url: str) -> tuple[str, list[str]]:
     url = normalize_url(url)
     host = urlsplit(url).hostname
@@ -44,8 +48,15 @@ def public_url(url: str) -> str:
     return public_addresses(url)[0]
 
 
-def remaining(deadline: float) -> float:
-    seconds = deadline - time.monotonic()
+def remaining(deadline: float, collect_deadline: float | None = None) -> float:
+    now = time.monotonic()
+    # Keep the cause of the limiting deadline, even if a blocking operation
+    # returns after both deadlines. A tie belongs to the collection budget.
+    if collect_deadline is not None and collect_deadline <= deadline:
+        if now >= collect_deadline:
+            raise CollectionBudgetExceeded
+        deadline = collect_deadline
+    seconds = deadline - now
     if seconds <= 0:
         raise FeedError('本次订阅读取超时，请稍后重试')
     return seconds
@@ -73,11 +84,12 @@ def tls_context(hostname: str):
     return context
 
 
-def request(url: str, headers: dict | None = None, *, deadline: float | None = None) -> Response:
+def request(url: str, headers: dict | None = None, *, deadline: float | None = None,
+            collect_deadline: float | None = None) -> Response:
     deadline = deadline if deadline is not None else time.monotonic() + SOURCE_SECONDS
     try:
         for _ in range(6):
-            remaining(deadline)
+            remaining(deadline, collect_deadline)
             url, addresses = public_addresses(url)
             original = httpx.URL(url)
             # Direct sockets and proxy CONNECT targets use validated numeric IPs.
@@ -90,12 +102,12 @@ def request(url: str, headers: dict | None = None, *, deadline: float | None = N
                                        'Accept': 'application/atom+xml, application/rss+xml, application/xml, text/xml;q=0.9, text/html;q=0.5'}) as client:
                 for index, address in enumerate(addresses):
                     try:
-                        budget = remaining(deadline)
+                        budget = remaining(deadline, collect_deadline)
                         with client.stream('GET', original.copy_with(host=address),
                                            headers={**(headers or {}), 'Host': original.netloc.decode('ascii')},
                                            extensions={'sni_hostname': original.raw_host.decode('ascii')},
                                            timeout=httpx.Timeout(min(8, budget), connect=min(6, budget))) as r:
-                            remaining(deadline)
+                            remaining(deadline, collect_deadline)
                             if r.status_code in (301, 302, 303, 307, 308):
                                 dest = urljoin(url, r.headers.get('location', ''))
                                 if urlsplit(dest)[:2] != urlsplit(url)[:2]:
@@ -109,7 +121,7 @@ def request(url: str, headers: dict | None = None, *, deadline: float | None = N
                                 raise FeedError(f'订阅服务返回 HTTP {r.status_code}{hint}')
                             content = bytearray()
                             for block in r.iter_bytes():
-                                remaining(deadline)
+                                remaining(deadline, collect_deadline)
                                 content.extend(block)
                                 if len(content) > MAX_BYTES:
                                     raise FeedError('订阅内容超过 8 MB，请改用较小的订阅源')
@@ -119,6 +131,7 @@ def request(url: str, headers: dict | None = None, *, deadline: float | None = N
                             raise
         raise FeedError('订阅地址重定向次数过多')
     except httpx.TimeoutException:
+        remaining(deadline, collect_deadline)
         raise FeedError('订阅连接超时，请稍后重试或修改链接') from None
     except httpx.HTTPError:
         raise FeedError('无法连接订阅服务，请检查网络或修改链接') from None
@@ -219,12 +232,13 @@ ADAPTERS = {'rss': RSSAdapter(), 'social': SocialAdapter()}
 
 
 def fetch_source(source: dict, settings: dict, *, unconditional: bool = False,
-                 deadline: float | None = None) -> tuple[list[dict], dict]:
+                 deadline: float | None = None,
+                 collect_deadline: float | None = None) -> tuple[list[dict], dict]:
     deadline = deadline if deadline is not None else time.monotonic() + SOURCE_SECONDS
     adapter = ADAPTERS[feed_types()[source['kind']].adapter]
     errors = []
     for endpoint in adapter.endpoints(source, settings):
-        remaining(deadline)
+        remaining(deadline, collect_deadline)
         headers = {}
         if not unconditional and endpoint == source.get('resolved_url'):
             if source.get('etag'):
@@ -232,7 +246,7 @@ def fetch_source(source: dict, settings: dict, *, unconditional: bool = False,
             if source.get('modified'):
                 headers['If-Modified-Since'] = source['modified']
         try:
-            response = request(endpoint, headers, deadline=deadline)
+            response = request(endpoint, headers, deadline=deadline, collect_deadline=collect_deadline)
             if response.status == 304:
                 return [], {'etag': source['etag'], 'modified': source['modified'], 'resolved_url': endpoint}
             try:
@@ -243,7 +257,7 @@ def fetch_source(source: dict, settings: dict, *, unconditional: bool = False,
                 discovered = discover_feed(response.body, response.url)
                 if not discovered:
                     raise
-                response = request(discovered, deadline=deadline)
+                response = request(discovered, deadline=deadline, collect_deadline=collect_deadline)
                 entries = adapter.parse(response.body, response.url)
             return entries, {'etag': response.headers.get('etag',''),
                              'modified': response.headers.get('last-modified',''),

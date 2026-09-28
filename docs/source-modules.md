@@ -25,7 +25,7 @@
 - 微信每日任务优先，两个新增模块按到期时间顺序执行。没有新的并行写索引通道。
 - 每个订阅保留最近尝试、最近成功、失败原因、退避期限、ETag 和 Last-Modified。
 - 单个来源失败不阻塞其他来源；成功来源照常保存和索引。失败从 30 分钟开始指数退避，最大 24 小时；手动重试跳过退避。
-- 抓取每批最多并发 4 个来源，写数据库、导出和索引仍串行。单源桥接回退与重定向共享 20 秒网络预算；每轮采集 90 秒后不再提交新批次，收尾等待当前请求退出，不遗留后台写入。读取/连接分别最多等待 8/6 秒，系统 DNS 解析耗时另受操作系统控制。未尝试的来源不记为连接失败，下一轮优先检查，避免总从第一条开始。
+- 抓取每批最多并发 4 个来源，写数据库、导出和索引仍串行。单源桥接回退与重定向共享 20 秒网络预算；每轮采集预算为 90 秒，剩余不足完整的 20 秒时不再提交新批次，工作线程开始时也会复查余量。收尾等待当前请求退出，不遗留后台写入。读取/连接分别最多等待 8/6 秒，系统 DNS 解析耗时另受操作系统控制。未投递或因本轮总预算中断的来源计入跳过，不改最近尝试、失败次数和退避期限，下一轮优先检查；真正的连接失败或单源预算先到期仍正常退避。两种期限同时到期时按总预算中断处理。
 - 首次读取订阅当前提供的条目，单源单次最多 500 条；源服务只提供近期内容时无法补齐全部历史。HTTP 响应最大 8 MB，连接/读取有超时。
 - 来源类型 + 规范化原文 URL 作为身份，移除跟踪参数；X 镜像的推文链接归一到 x.com。不同 RSS 入口重复包含一篇文章时只保存一份，并记录多订阅关联。
 - 原文首次收录快照保留，不会因另一聚合源摘要更短而覆盖全文。更换订阅链接会清空该订阅的缓存和关联计数，旧快照仍保留。
@@ -72,6 +72,7 @@
 ```sh
 .venv/bin/python -m unittest discover -s tests -p 'test_feed_sources.py'
 .venv/bin/python -m unittest discover -s tests -p 'test_feed_transport.py'
+.venv/bin/python -m unittest discover -s tests -p 'test_feed_budget.py'
 .venv/bin/python -m unittest discover -s tests -p 'test_daily_schedule.py'
 .venv/bin/python -m unittest discover -s tests -p 'test_sync_channels.py'
 .venv/bin/python -m unittest discover -s tests -p 'test_pipeline_stop.py'

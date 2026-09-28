@@ -304,21 +304,6 @@ class FeedTests(unittest.TestCase):
         self.assertTrue(reg.subscription('social', direct['id'])['last_success'])
         self.assertTrue(reg.subscription('social', dedicated['id'])['last_success'])
 
-    def test_collect_budget_leaves_unattempted_sources_for_next_run(self):
-        good = (self.entries(), {'etag':'','modified':'','resolved_url':'https://example.org'})
-        with patch.object(sync, 'fetch_source', return_value=good) as fetch, \
-             patch.object(sync.time, 'monotonic', side_effect=[0,0,0,100]):
-            summary = sync.collect('rss', FetchScope(force=True))
-        self.assertEqual((4,5), (summary['checked'],summary['skipped']))
-        self.assertIn('时间预算', summary['message'])
-        self.assertEqual(4, fetch.call_count)
-        self.assertEqual(20, fetch.call_args.kwargs['deadline'])
-        first = {c.args[0]['id'] for c in fetch.call_args_list}
-        with patch.object(sync, 'fetch_source', return_value=good) as fetch, \
-             patch.object(sync.time, 'monotonic', side_effect=[0,0,0,100]):
-            sync.collect('rss', FetchScope(force=True))
-        self.assertTrue(first.isdisjoint(c.args[0]['id'] for c in fetch.call_args_list))
-
     def test_export_keeps_plain_symbols_and_fts_has_no_entity_words(self):
         from kb import scanner, store
         from kb.config import Source
