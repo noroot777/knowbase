@@ -82,7 +82,9 @@ def collect(kind, scope):
             if not batch:
                 break
             _stage('crawl', 'running', f"{reg.KINDS[kind]} · 正在读取 {len(batch)} 个来源（已检查 {summary['checked']}/{len(sources)}）")
-            batch_deadline = min(deadline, time.monotonic() + SOURCE_SECONDS)
+            # The run budget gates new batches; admitted requests retain their
+            # full source budget so a local cutoff cannot trigger source backoff.
+            batch_deadline = time.monotonic() + SOURCE_SECONDS
             futures = {pool.submit(fetch_source, s, settings, unconditional=scope.ranged,
                                    deadline=batch_deadline): s for s in batch}
             shared_ok, shared_errors = False, 0
@@ -113,7 +115,7 @@ def collect(kind, scope):
         label += f"，待配置 {summary['unconfigured']} 个（请填写 X 桥接或专用订阅链接）"
     if summary['message']:
         label += f"，跳过 {summary['skipped']} 个；{summary['message']}"
-    status = 'error' if summary['errors'] or summary['skipped'] else 'skipped' if summary['unconfigured'] else 'ok'
+    status = 'error' if summary['errors'] else 'skipped' if summary['unconfigured'] else 'ok'
     _stage('crawl', 'stopped' if summary['stopped'] else status,
            label, failures=summary['errors'])
     return summary

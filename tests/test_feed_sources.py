@@ -310,14 +310,62 @@ class FeedTests(unittest.TestCase):
              patch.object(sync.time, 'monotonic', side_effect=[0,0,0,100]):
             summary = sync.collect('rss', FetchScope(force=True))
         self.assertEqual((4,5), (summary['checked'],summary['skipped']))
+        self.assertEqual([], summary['errors'])
+        self.assertEqual('ok', pipeline_state._state['stages']['crawl']['status'])
         self.assertIn('时间预算', summary['message'])
         self.assertEqual(4, fetch.call_count)
         self.assertEqual(20, fetch.call_args.kwargs['deadline'])
         first = {c.args[0]['id'] for c in fetch.call_args_list}
+        untouched = [s for s in reg.subscriptions('rss') if s['id'] not in first]
+        self.assertTrue(all(not s['last_attempt'] and not s['last_error']
+                            and not s['failures'] and not s['retry_at'] for s in untouched))
         with patch.object(sync, 'fetch_source', return_value=good) as fetch, \
              patch.object(sync.time, 'monotonic', side_effect=[0,0,0,100]):
             sync.collect('rss', FetchScope(force=True))
         self.assertTrue(first.isdisjoint(c.args[0]['id'] for c in fetch.call_args_list))
+
+    def test_inflight_batch_crosses_run_budget_without_failure_backoff(self):
+        # Twenty-five feeds: five healthy batches finish at t=89.9; the next
+        # batch returns HTTP 200 at t=91.9. Only the final unopened source waits.
+        for i in range(16):
+            self.source(f'https://example.org/feed-{i}.xml', name=f'Feed {i}')
+        clock = [0.0]
+        durations = iter([18,18,18,18,17.9,2])
+        def finish_batch():
+            clock[0] += next(durations)
+        barrier = threading.Barrier(4, action=finish_batch)
+        def response(url, headers=None, *, deadline=None):
+            barrier.wait(timeout=2)
+            fetching.remaining(deadline)
+            return fetching.Response(200, url, RSS, {})
+        with patch.object(fetching, 'request', side_effect=response) as request, \
+             patch.object(sync.time, 'monotonic', side_effect=lambda:clock[0]):
+            summary = sync.collect('rss', FetchScope(force=True))
+        self.assertEqual([], summary['errors'])
+        self.assertEqual((24,1), (summary['checked'],summary['skipped']))
+        self.assertEqual(24, request.call_count)
+        sources = reg.subscriptions('rss')
+        self.assertEqual(24, sum(bool(s['last_success']) for s in sources))
+        self.assertTrue(all(not s['last_error'] and not s['failures'] and not s['retry_at'] for s in sources))
+        self.assertEqual('', sources[-1]['last_attempt'])
+        self.assertEqual('ok', pipeline_state._state['stages']['crawl']['status'])
+
+    def test_source_timeout_still_records_failure_and_backoff(self):
+        source = self.source()
+        clock = [0.0]
+        def timeout(url, headers=None, *, deadline=None):
+            clock[0] = 21  # This source itself has exceeded its full 20s budget.
+            fetching.remaining(deadline)
+        with patch.object(fetching, 'request', side_effect=timeout), \
+             patch.object(sync.time, 'monotonic', side_effect=lambda:clock[0]):
+            summary = sync.collect('rss', FetchScope(targets=(str(source['id']),), force=True))
+        saved = reg.subscription('rss', source['id'])
+        self.assertEqual(1, len(summary['errors']))
+        self.assertEqual(0, summary['skipped'])
+        self.assertEqual(1, saved['failures'])
+        self.assertGreater(saved['retry_at'], sync.time.time())
+        self.assertIn('超时', saved['last_error'])
+        self.assertEqual('error', pipeline_state._state['stages']['crawl']['status'])
 
     def test_export_keeps_plain_symbols_and_fts_has_no_entity_words(self):
         from kb import scanner, store
