@@ -43,7 +43,7 @@ from src.export.obsidian import (  # noqa: E402
     unique_md_path,
 )
 
-OBS_ROOT = Path.home() / "obs" / "new-start" / "source"
+OBS_ROOT = Path(os.environ.get("KB_VAULT_ROOT") or Path.home() / "obs" / "new-start").expanduser() / "source"
 DEFAULT_OUT = OBS_ROOT / "dr-gzh"
 DEFAULT_DEDUP_ROOTS = [OBS_ROOT / "gzh", DEFAULT_OUT]
 

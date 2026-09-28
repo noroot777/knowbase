@@ -29,9 +29,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-VIDEOS_ROOT = Path.home() / "code" / "daily-report" / "videos"
-OUT_ROOT = Path.home() / "obs" / "new-start" / "source" / "dr-video-projects"
-STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "video_projects_state.json"
+from kb.config import DATA_DIR, VAULT_ROOT, VIDEOS_ROOT
+
+OUT_ROOT = VAULT_ROOT / "source" / "dr-video-projects"
+STATE_PATH = DATA_DIR / "video_projects_state.json"
 TZ = timezone(timedelta(hours=8))
 
 # 两步都走 kb.llm 的 API 通道;用哪家的哪个模型由设置面板的

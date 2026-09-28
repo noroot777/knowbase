@@ -1,0 +1,25 @@
+services:
+  knowledge-base:
+    build: .
+    image: knowledge-base:local
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${KB_PORT:-8787}:8787"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      KB_VAULT_ROOT: /vault/new-start
+      KB_DATA_DIR: /app/data
+      HF_HOME: /home/kb/.cache/huggingface
+    volumes:
+      - ${KB_DATA_PATH:-kb-data}:/app/data
+      - ${KB_COLLECTOR_DATA_PATH:-collector-data}:/app/collector/data
+      - ${KB_VAULT_PATH:-kb-vault}:/vault/new-start
+      - model-cache:/home/kb/.cache/huggingface
+    stop_grace_period: 30s
+
+volumes:
+  kb-data:
+  collector-data:
+  kb-vault:
+  model-cache:

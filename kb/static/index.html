@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>工具图鉴 · 知识库</title>
+<title>工具图鉴 · Knowbase</title>
 <meta name="theme-color" content="#ffffff">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <!-- marked / DOMPurify 都随包放本地:走 CDN 时一次外网抖动或拦截插件就让 marked 缺席,
@@ -18,6 +18,7 @@
 <link rel="stylesheet" href="/static/css/navigation.css">
 <link rel="stylesheet" href="/static/css/pipeline.css">
 <link rel="stylesheet" href="/static/css/sources.css">
+<link rel="stylesheet" href="/static/css/wechat_setup.css">
 </head>
 <body>
 
@@ -25,7 +26,7 @@
 <div id="nav-mask" hidden onclick="toggleNavigation(false)"></div>
 <aside id="sidebar" aria-label="工作区导航">
   <div class="sidebar-brand">
-    <a class="brand-lockup" href="#gallery" onclick="switchTab('gallery');return false"><span class="brand-icon" aria-hidden="true"><i data-icon="library"></i></span><span class="wordmark">知识库<small>KNOWLEDGE ATLAS</small></span></a>
+    <a class="brand-lockup" href="#gallery" onclick="switchTab('gallery');return false"><span class="brand-icon" aria-hidden="true"><i data-icon="library"></i></span><span class="wordmark">Knowbase<small>个人知识库</small></span></a>
     <button class="icon-button mobile-close" onclick="toggleNavigation(false)" aria-label="关闭导航">×</button>
   </div>
   <button class="quick-search" onclick="focusWorkspaceSearch()" aria-label="快速查找" title="快速查找（⌘ / Ctrl + K）"><i data-icon="search"></i><span>快速查找</span><kbd>⌘ K</kbd></button>
@@ -54,6 +55,7 @@
         <button id="stages-btn" onclick="toggleNavigation(false);openStages()">模型配置<i data-icon="chevron"></i></button>
         <button id="keys-btn" onclick="toggleNavigation(false);openKeys()">API Key<span id="keys-dot">●</span></button>
         <button id="mcp-btn" onclick="toggleNavigation(false);openMcp()">MCP 连接<span id="mcp-dot">●</span></button>
+        <button id="wechat-btn" onclick="toggleNavigation(false);openWechatSetup()">微信接入<span id="wechat-dot">●</span></button>
         <button onclick="toggleNavigation(false);openShortcuts()">键盘快捷键<i data-icon="keyboard"></i></button>
         <div class="library-status"><span id="stats">正在读取知识库…</span></div>
       </div>
@@ -62,10 +64,14 @@
 </aside>
 <header id="topbar">
   <button class="icon-button mobile-menu" onclick="toggleNavigation()" aria-label="打开导航" aria-expanded="false" aria-controls="sidebar"><i data-icon="menu"></i></button>
-  <strong>知识库</strong><span id="page-crumb">工具图鉴</span>
+  <strong>Knowbase</strong><span id="page-crumb">工具图鉴</span>
   <button class="icon-button" onclick="focusWorkspaceSearch()" aria-label="快速查找"><i data-icon="search"></i></button>
 </header>
 <main id="main-content" tabindex="-1">
+  <section id="wechat-welcome" class="wechat-welcome" hidden aria-label="首次配置">
+    <div><strong id="wechat-welcome-title">让知识库接上你的微信</strong><p id="wechat-welcome-status">配置供应商和模型后，一次接入本机公众号文章。</p></div>
+    <button onclick="openWechatSetup()">完成首次配置</button><button class="text-button" onclick="dismissWechatWelcome()">稍后配置</button>
+  </section>
 <div id="gallerypanel">
   <section class="gallery-intro">
     <div class="intro-copy"><h1>发现值得探索的工具<span class="title-dot">.</span></h1><p>从读过的文章、看过的视频里，找到下一个灵感。</p>
@@ -152,6 +158,7 @@
       <button class="ghost" id="src-manage" onclick="openTargets()" style="display:none">管理订阅</button><a id="src-console" href="#" target="_blank" rel="noopener" style="display:none">采集器配置 ↗</a>
       <button class="text-button" onclick="refreshPipeSource()">检查连接</button></div>
   </div>
+  <p class="hint" style="margin:12px 0">首次使用本地微信通道？<button class="text-button" onclick="openWechatSetup()">检查并接入微信</button></p>
   <div id="pipe-connection" class="pipe-notice" hidden role="status"><span></span><button class="ghost" onclick="refreshPipe(true)">重新连接</button></div>
   <section class="pipe-overview" aria-label="同步概况">
     <div class="pipe-overview-main"><div><span class="pipe-section-label">当前状态</span><h2 id="pipe-state-title" role="status" tabindex="-1">正在读取同步状态</h2><p id="pipe-running-channel"></p><p id="pipe-run-scope"></p></div><div class="pipe-run-metrics"><b id="pipe-progress-label">—</b><span id="pipe-elapsed"></span></div></div>
@@ -410,6 +417,28 @@
 </div>
 
 <div id="shortcuts-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeShortcuts()"><div class="modal shortcuts-dialog"><h2>少一点点击，多一点专注</h2><p class="hint">常用键盘快捷键</p><dl><div><dt>快速搜索</dt><dd><kbd>⌘ / Ctrl</kbd> <kbd>K</kbd></dd></div><div><dt>搜索当前图鉴</dt><dd><kbd>/</kbd></dd></div><div><dt>关闭当前弹窗</dt><dd><kbd>Esc</kbd></dd></div><div><dt>发送问题 / 换行</dt><dd><kbd>Enter</kbd> / <kbd>Shift Enter</kbd></dd></div></dl><button onclick="closeShortcuts()">知道了</button></div></div>
+<div id="wechat-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeWechatSetup()">
+  <div class="modal wechat-dialog">
+    <div class="wechat-heading"><div><span class="eyebrow">CONNECT YOUR KNOWLEDGE</span><h2 id="wechat-title">接入你的微信</h2><p class="hint" id="wechat-intro">从本机已同步的公众号推送中发现文章，收进知识库。</p></div><button class="icon-button" onclick="closeWechatSetup()" aria-label="关闭微信接入">×</button></div>
+    <ol class="wechat-steps">
+      <li><span class="wechat-step-number">01</span><div><strong>配置供应商</strong><small id="wechat-provider-state">待检查</small></div><button class="ghost" onclick="wechatConfigured(openKeys)">API Key</button></li>
+      <li><span class="wechat-step-number">02</span><div><strong>分配模型与智能体</strong><small id="wechat-model-state">待检查</small></div><button class="ghost" onclick="wechatConfigured(openStages)">模型配置</button></li>
+      <li><span class="wechat-step-number">03</span><div><strong id="wechat-source-title">接入本机微信</strong><small id="wechat-source-hint">已有配置直接复用，缺 key 时自动准备获取工具</small></div><span id="wechat-database-state" class="badge">待接入</span></li>
+    </ol>
+    <p id="wechat-status" class="wechat-progress" role="status" aria-live="polite">正在读取微信接入状态…</p>
+    <label id="wechat-account-row" class="wechat-account-row" hidden>选择本人微信账号<select id="wechat-account" onchange="renderWechatSetup()"><option value="">请选择本人账号</option></select></label>
+    <div id="wechat-authorization" class="wechat-authorization" hidden>
+      <strong>获取前，请确认本机操作</strong>
+      <p class="hint">固定版本 wxkey 会请求 macOS 管理员授权、访问微信进程，可能退出或重启微信并创建重签名副本。请先保存正在编辑的消息。密码仅在系统授权框输入，页面不接收密码或明文 key；失败不会自动再次获取。</p>
+      <label class="wechat-consent"><input type="checkbox" id="wechat-consent" onchange="renderWechatSetup()"><span>这是我本人的微信，我同意上述操作影响。</span></label>
+      <button id="wechat-acquire" onclick="startWechatSetup('acquire')" disabled>自动获取 key 并验证</button>
+    </div>
+    <p id="wechat-error" role="alert"></p>
+    <div class="wechat-actions"><button id="wechat-check" onclick="startWechatSetup()">检查并接入微信</button><button id="wechat-next" class="ghost" onclick="useLocalWechat()" hidden>去同步公众号</button><button class="ghost" onclick="refreshWechatSetup()">刷新状态</button></div>
+    <p class="hint" id="wechat-runtime-hint">可以关闭窗口，任务继续在后台执行。获取和验证不需要大模型 API。</p>
+    <details class="wechat-explanation hint"><summary>文章怎么获取？需要安装 skill 吗？</summary><p>不需要安装个人情报库 skill。项目会准备独立 Reader，读取本机已同步的公众号推送，提取文章链接，再抓取公开正文、归档和索引；智能体用于后续分析。</p><p>仅覆盖本机已同步的推送，不保证订阅前的历史。私聊、群聊不会被作为文章采集。公众号正文图片走网页下载，不要求微信缓存图片解码 key。</p><p>原“凭证抓取”通道仍通过 wxdown 获取逐号短期凭证。微信接入目前支持在本机 Mac 上获取 key；远程服务器不能读取你电脑上的微信。</p></details>
+  </div>
+</div>
 <script src="/static/js/icons.js"></script>
 <script src="/static/js/ui.js"></script>
 <script src="/static/js/core.js"></script>
@@ -425,6 +454,7 @@
 <script src="/static/js/gallery.js"></script>
 <script src="/static/js/sources.js"></script>
 <script src="/static/js/source_forms.js"></script>
+<script src="/static/js/wechat_setup.js"></script>
 <script src="/static/js/workspace.js"></script>
 <script>
 loadMeta().catch(() => { $('stats').textContent = '统计暂不可用'; });
@@ -435,6 +465,7 @@ refreshMcp();
 loadSched();
 loadGallery();
 initWorkspace();
+refreshWechatSetup();
 openToolFromUrl();
 </script>
 </body>

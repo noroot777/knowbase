@@ -37,12 +37,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb.config import DB_PATH, VAULT_ROOT  # noqa: E402
+from kb.config import DB_PATH, VAULT_ROOT, DATA_DIR  # noqa: E402
 from kb.scanner import normalize_body, parse_frontmatter  # noqa: E402
 
 GZH_SOURCES = ("dr-gzh", "gzh")
 OUT_ROOT = VAULT_ROOT / "source" / "dr-gzh-projects"
-STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "gzh_projects_state.json"
+STATE_PATH = DATA_DIR / "gzh_projects_state.json"
 TZ = timezone(timedelta(hours=8))
 
 # 两步都走 kb.llm 的 API 通道,用哪家的哪个模型由设置面板的

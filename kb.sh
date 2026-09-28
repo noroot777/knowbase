@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# knowledge-base 的统一操作入口。取代原来 WeChatOA 的 start_all.sh。
+# Knowbase 的统一操作入口。取代原来 WeChatOA 的 start_all.sh。
 #
 # 原则:每条命令都是跑完就还你终端。服务起成后台守护进程,耗时的活(采集、
 # 导出、索引、打标)交给已经在后台的 kb-web 去跑,命令本身立刻返回。
@@ -412,7 +412,7 @@ cmd_logs() {
 
 usage() {
   cat >&2 <<'EOF'
-knowledge-base 操作入口 —— 每条命令跑完就还你终端,不用挂着
+Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
 
   日常
     ./kb.sh prep                    同步前:重起 wxdown + 切路由 + 起面板

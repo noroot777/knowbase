@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 from kb.collectors import FetchScope, active_collector
+from kb.config import VIDEOS_ROOT
 from kb.pipeline_state import _log, _now, _stage
 
 
@@ -313,12 +314,13 @@ def _fail_wiki(proc, bad: list[str], detail: str) -> None:
 # ── 条目化阶段:工具/项目拆条目(dr-gzh-projects / dr-video-projects)─────────────
 
 KB_DIR = Path(__file__).resolve().parent.parent
-VIDEOS_DIR = Path.home() / "code" / "daily-report" / "videos"
+VIDEOS_DIR = VIDEOS_ROOT
 
 
 def _run_export_script(script: str, *argv: str, timeout_min: int):
+    import sys
     return subprocess.run(
-        ["uv", "run", "python", f"scripts/{script}", *argv],
+        [sys.executable, f"scripts/{script}", *argv],
         cwd=KB_DIR, capture_output=True, text=True, timeout=timeout_min * 60,
     )
 

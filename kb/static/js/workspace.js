@@ -22,7 +22,7 @@ function updateWorkspaceTab(tab, previousScroll = window.scrollY) {
   tabScroll.set(activeTab, previousScroll);
   activeTab = tab;
   $('page-crumb').textContent = WORKSPACE_TITLES[tab];
-  document.title = WORKSPACE_TITLES[tab] + ' · 知识库';
+  document.title = WORKSPACE_TITLES[tab] + ' · Knowbase';
   for (const key of Object.keys(WORKSPACE_TITLES)) {
     if (key === tab) $('tab-' + key).setAttribute('aria-current', 'page');
     else $('tab-' + key).removeAttribute('aria-current');
@@ -84,6 +84,7 @@ const overlayClosers = {
   'tgt-modal': closeTargets, 'stages-modal': closeStages, 'keys-modal': closeKeys,
   'mcp-modal': closeMcp, 'shortcuts-modal': closeShortcuts,
   'source-editor': closeSourceEditor, 'source-reader': () => { $('source-reader').style.display = 'none'; },
+  'wechat-modal': closeWechatSetup,
   sidebar: () => toggleNavigation(false),
 };
 let overlayTop = null;
