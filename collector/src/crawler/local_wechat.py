@@ -31,11 +31,13 @@ def reader_command() -> str:
         return explicit
     root = Path(os.getenv("CODEX_HOME") or Path.home() / ".codex")
     candidates = [shutil.which("rion-wechat-cli"),
-                  root / "skills/wechat-cli/scripts/reader.sh", root / "bin/rion-wechat-cli"]
+                  root / "skills/wechat-cli/scripts/reader.sh", root / "bin/rion-wechat-cli",
+                  Path(os.getenv("KB_WECHAT_RUNTIME") or Path.home() /
+                       ".local/share/knowledge-base/wechat").expanduser() / "bin/rion-wechat-cli"]
     for candidate in candidates:
         if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
-    raise LocalReaderError("未安装微信数据库读取器，请配置 wechat-cli 或 RION_WECHAT_CLI_BIN")
+    raise LocalReaderError("未安装微信数据库读取器，请在知识库的「微信接入」中检查并接入")
 
 
 class LocalReader:

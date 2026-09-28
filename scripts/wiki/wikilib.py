@@ -16,14 +16,16 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 import unicodedata
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-DB = REPO / "data" / "kb.db"
-VAULT = Path.home() / "obs" / "new-start"
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+from kb.config import DB_PATH as DB, VAULT_ROOT as VAULT
 EPOCH = "2026-06-30"          # digest/synthesis 等 LLM 环节只处理这之后的日期
 SOURCE = "dr-gzh"
 

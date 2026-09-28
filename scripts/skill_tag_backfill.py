@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from kb.config import VAULT_ROOT  # noqa: E402
+from kb.config import DATA_DIR, VAULT_ROOT  # noqa: E402
 from kb.norm import entity_norm  # noqa: E402
 
 SOURCES = ("dr-gzh-projects", "dr-video-projects")
@@ -230,8 +230,7 @@ def main() -> int:
         print(f"[judge] 从 {args.verdicts} 加载 {len(verdicts)}/{len(pool)} 个判定")
     else:
         verdicts = judge(pool)
-        vpath = (Path(__file__).resolve().parent.parent / "data"
-                 / "skill_tag_verdicts-latest.json")
+        vpath = DATA_DIR / "skill_tag_verdicts-latest.json"
         vpath.write_text(json.dumps(
             {pool[j].norm: v for j, v in verdicts.items()},
             ensure_ascii=False, indent=1), encoding="utf-8")
@@ -272,7 +271,7 @@ def main() -> int:
                 log.append({"action": "remove", "name": e.name,
                             "path": str(x.path.relative_to(VAULT_ROOT))})
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_path = Path(__file__).resolve().parent.parent / "data" / f"skill_tag_backfill-{ts}.json"
+    log_path = DATA_DIR / f"skill_tag_backfill-{ts}.json"
     log_path.write_text(json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"\n[apply] 修改 {len(log)} 个文件,日志: {log_path}")
     return 0

@@ -13,11 +13,12 @@ from pathlib import Path
 from kb.source_types import feed_types
 
 # obs vault 根
-VAULT_ROOT = Path(os.environ.get("KB_VAULT_ROOT", str(Path.home() / "obs" / "new-start")))
+VAULT_ROOT = Path(os.environ.get("KB_VAULT_ROOT") or Path.home() / "obs" / "new-start").expanduser()
 
 # 项目数据目录(索引数据库等,不进 git)
-DATA_DIR = Path(os.environ.get("KB_DATA_DIR", str(Path(__file__).resolve().parent.parent / "data")))
+DATA_DIR = Path(os.environ.get("KB_DATA_DIR") or Path(__file__).resolve().parent.parent / "data").expanduser()
 DB_PATH = DATA_DIR / "kb.db"
+VIDEOS_ROOT = Path(os.environ.get("KB_VIDEOS_ROOT") or Path.home() / "code/daily-report/videos").expanduser()
 
 # 本地 embedding 模型(bge-m3:中英混合效果好,1024 维 dense)
 EMBEDDING_MODEL = "BAAI/bge-m3"
