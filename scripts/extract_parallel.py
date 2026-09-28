@@ -2,7 +2,7 @@
 """kb extract 的并发版:LLM 调用(kb.llm API 通道)并发跑,DB 写入在主线程串行。
 
 与 `kb extract --writeback` 结果等价;可随时中断,断点由 extracted_at IS NULL 天然接续。
-放在 knowledge-base 项目里用 uv run python 跑。
+放在 Knowbase 项目里用 uv run python 跑。
 """
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed

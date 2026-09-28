@@ -2,7 +2,7 @@
 """MCP server:把知识库检索暴露给 Claude Code / Claude Desktop。
 
 注册(在任意目录):
-    claude mcp add kb --scope user -- uv run --directory ~/code/knowledge-base kb-mcp
+    claude mcp add kb --scope user -- uv run --directory ~/code/knowbase kb-mcp
 
 之后在对话里可直接用 kb_search / kb_read 工具。
 不提供 ask 工具 —— 调用方本身就是 LLM,拿到检索结果自己综合即可。
@@ -18,7 +18,7 @@ from kb import store
 from kb.config import VAULT_ROOT
 from kb.search import Filters, search
 
-mcp = FastMCP("knowledge-base")
+mcp = FastMCP("knowbase")
 
 
 @mcp.tool()

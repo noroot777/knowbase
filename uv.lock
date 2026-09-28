@@ -592,7 +592,7 @@ wheels = [
 ]
 
 [[package]]
-name = "knowledge-base"
+name = "knowbase"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

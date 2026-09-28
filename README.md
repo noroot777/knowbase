@@ -1,4 +1,4 @@
-# knowledge-base
+# Knowbase
 
 个人知识库:把 obs vault 里的内容(微信公众号、YouTube 视频摘要)统一索引,
 支持关键词 + 语义混合检索和意图问答。
@@ -64,7 +64,7 @@ uv run kb-web                  # Web 界面: http://127.0.0.1:8787
 ## MCP(在 Claude Code / Desktop 里直接问知识库)
 
 ```bash
-claude mcp add kb --scope user -- uv run --directory ~/code/knowledge-base kb-mcp
+claude mcp add kb --scope user -- uv run --directory ~/code/knowbase kb-mcp
 ```
 
 注册后对话里可用工具:`kb_search`(混合检索,支持 since/until 时间过滤)、

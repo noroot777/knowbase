@@ -1,12 +1,12 @@
 # WeChatOA_Aggregation
 
 > **先看这段**:这份 README 是采集器从独立仓库 WeChatOA_Aggregation 搬进
-> knowledge-base 之前的原文,留着是为了讲清楚微信这一侧的原理(凭证怎么来的、
+> Knowbase 之前的原文,留着是为了讲清楚微信这一侧的原理(凭证怎么来的、
 > 正文怎么抓、相似检测怎么做)。**但它描述的那个产品形态已经不存在了**:
 >
 > - Vue 前端(`frontend/`)、`start_all.sh`、Docker 部署、跑在 :8000 的
 >   FastAPI 后端(`api.py` 的 53 个路由 + `server.py` + `web_app.py`)
->   都已删除。阅读、订阅管理、同步进度现在全在 knowledge-base 的面板里。
+>   都已删除。阅读、订阅管理、同步进度现在全在 Knowbase 的面板里。
 > - 采集器现在是**一次性 CLI**:`cd collector && ./.venv/bin/python -m cli <命令>`。
 >   日常不必直接碰它,仓库根目录的 `./kb.sh` 就是入口。
 > - `api.py` 只剩采集流程共用的底层(抓正文、下封面、搜号、查扫码凭证)。
@@ -217,7 +217,7 @@ uv run python scripts/migrate_json_to_sqlite.py
 
 ## 仓库结构
 
-> 下面是搬进 knowledge-base 之前的样子。现在 `api.py` 只剩采集共用的底层,
+> 下面是搬进 Knowbase 之前的样子。现在 `api.py` 只剩采集共用的底层,
 > `start_all.sh` / `frontend/` / `server.py` / `web_app.py` 都已删除,
 > 多出 `cli.py`(唯一入口)与 `setup.sh`(新 worktree 首次准备)。
 

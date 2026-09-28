@@ -265,7 +265,7 @@ NDJSON:`meta(plan+refs+model)` → `delta(text)`× → `done(conversation_id+ref
 2. 杀 8787 旧进程
 3. **env -i 干净环境**重启(继承环境会带上嵌套 claude 的变量导致 Not logged in 类问题),形如:
    ```bash
-   cd /Users/fjh/code/knowledge-base && env -i HOME="$HOME" PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin" nohup uv run kb web >/tmp/kb-web.log 2>&1 &
+   cd /Users/fjh/code/knowbase && env -i HOME="$HOME" PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin" nohup uv run kb web >/tmp/kb-web.log 2>&1 &
    ```
    (以实际曾用命令为准,可查 `/tmp/kb-web.log` 或进程历史)
 4. `curl -s http://127.0.0.1:8787/api/projects | head -c 300` 验证新端点活着
@@ -295,6 +295,6 @@ preview_start 它,preview 工具就能附着到已运行的 8787 而不管理它
 ## 9. 其它注意
 
 - 每次 Bash 调用后 shell cwd 会重置(原会话在 /Users/fjh/code/gongzhonghao),命令都带
-  `cd /Users/fjh/code/knowledge-base &&`
+  `cd /Users/fjh/code/knowbase &&`
 - 任务 #6(跑存量管道)是**暂停**状态,别顺手恢复
 - 用户偏好:汇报短行可扫读;完成后给截图

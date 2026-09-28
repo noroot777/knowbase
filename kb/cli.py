@@ -196,7 +196,7 @@ def cmd_stats(args) -> int:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(prog="kb", description="个人知识库")
+    p = argparse.ArgumentParser(prog="kb", description="Knowbase · 个人知识库")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("index", help="扫 vault 建/更新索引")
