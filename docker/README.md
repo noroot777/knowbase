@@ -57,10 +57,10 @@ Mac Docker Desktop 通常会处理文件共享映射，仍须在其设置中允�
 使用目录挂载后，直接建立索引；也可以将准备好的 `source` 目录复制进默认卷：
 
 ```bash
-docker compose cp ./my-vault/source knowledge-base:/vault/new-start/
-docker compose exec knowledge-base kb index --no-vector
-docker compose exec knowledge-base kb search '你的关键词' --no-vector
-docker compose exec knowledge-base kb stats
+docker compose cp ./my-vault/source knowbase:/vault/new-start/
+docker compose exec knowbase kb index --no-vector
+docker compose exec knowbase kb search '你的关键词' --no-vector
+docker compose exec knowbase kb stats
 ```
 
 若 `compose cp` 后文件属于 root，给复制的目录授权后再运行需要写回的任务。
@@ -91,7 +91,7 @@ Docker 内无法从 Mac 微信进程提取数据库 key。页面会显示“请�
 
 ```yaml
 services:
-  knowledge-base:
+  knowbase:
     environment:
       WXDOWN_CRED_FILE: /run/wechat/credentials.json
     volumes:
@@ -104,8 +104,8 @@ services:
 
 ```bash
 # 使用采集器自己的 Python 环境
-docker compose exec -w /app/collector knowledge-base .venv/bin/python -m cli status
-docker compose exec -w /app/collector knowledge-base .venv/bin/python -m cli export
+docker compose exec -w /app/collector knowbase .venv/bin/python -m cli status
+docker compose exec -w /app/collector knowbase .venv/bin/python -m cli export
 ```
 
 ## MCP 客户端
@@ -118,8 +118,8 @@ docker compose exec -w /app/collector knowledge-base .venv/bin/python -m cli exp
   "mcpServers": {
     "kb": {
       "command": "docker",
-      "args": ["compose", "--project-directory", "/absolute/path/to/knowledge-base",
-               "exec", "-T", "knowledge-base", "kb-mcp"]
+      "args": ["compose", "--project-directory", "/absolute/path/to/knowbase",
+               "exec", "-T", "knowbase", "kb-mcp"]
     }
   }
 }

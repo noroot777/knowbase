@@ -15,7 +15,7 @@ docker compose logs -f --tail 100
 
 默认使用持久卷保存配置、索引、采集器数据、文章和模型缓存。已有文章目录可在
 `.env` 中配置 `KB_VAULT_PATH`（参考 `.env.example`），再运行
-`docker compose exec knowledge-base kb index --no-vector` 建立关键词索引。
+`docker compose exec knowbase kb index --no-vector` 建立关键词索引。
 
 **微信 key 仍需在 Mac 本机获取。** Linux 容器不能访问 Mac 微信进程；推荐在 Mac
 完成微信接入和文章导出，Docker 挂载该文章目录做索引和分析，无需安装情报库 skill。
@@ -156,7 +156,7 @@ cd collector
 
 当前自动获取限 macOS 本机访问，要求已登录自己的微信，以及 uv、Go、Apple Command Line Tools（LLDB）。Go 1.26.5 工具链可由已有 Go 自动下载。远程部署不能替浏览器所在电脑读取微信。系统授权、登录和版本不兼容不能保证无人值守完成。
 
-独立工具位于 `~/.local/share/knowledge-base/wechat`，可用 `KB_WECHAT_RUNTIME` 更改（Web 服务和采集器需保持一致）；密钥与 Reader 配置仍位于本机私有配置目录，不回传页面。状态、构建收据和加密备份留在私有运行目录，备份可在确认不再需要后自行移除。关闭页面不取消后台工作；刷新页面恢复进度。获取失败保留上游恢复锁，不能自动重试或清除锁。已有配置失效时先修复配置，不因读取失败重新获取 key。
+独立工具位于 `~/.local/share/knowbase/wechat`，可用 `KB_WECHAT_RUNTIME` 更改（Web 服务和采集器需保持一致）；密钥与 Reader 配置仍位于本机私有配置目录，不回传页面。状态、构建收据和加密备份留在私有运行目录，备份可在确认不再需要后自行移除。关闭页面不取消后台工作；刷新页面恢复进度。获取失败保留上游恢复锁，不能自动重试或清除锁。已有配置失效时先修复配置，不因读取失败重新获取 key。
 
 实现固定到 [Rion Reader `f7d60b6`](https://github.com/Rion-Wu-tech/wechat-intelligence-hub/tree/f7d60b6d94c70f09ad92b89215ce40b2dd752e7f/projects/rion-wechat-reader) 和 [wxkey `9b70eec`](https://github.com/r266-tech/wxkey/tree/9b70eecdde47a7172b19465c3f977c86b6050e8a)。下载文件校验 SHA256，wxkey 从固定源码构建并记录二进制 SHA256；系统授权路径以 root 调用并设置 `WXKEY_NO_ELEVATE=1`，该版本会跳过管理员密码 Keychain 路线，不启用修改原微信或关闭 SIP 的开关。兼容适配只修正“可读但未分类的辅助库被误计为未解密”的判断，真正读失败仍阻止接入。
 
