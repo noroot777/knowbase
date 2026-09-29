@@ -71,10 +71,13 @@ _DOC_TMPL = """<!DOCTYPE html>
 <script src="/static/vendor/marked.min.js"></script>
 <script src="/static/vendor/purify.min.js"></script>
 <style>
+  /* 配色与 kb/static/css/base.css 的 :root 逐个对齐 —— 这页是 iframe 里独立
+     渲染的产物,拿不到那份 token,只能抄。改那边记得改这里,否则点一条搜索
+     结果去读原文就换了一套配色。 */
   body {{ font: 16px/1.8 -apple-system, "PingFang SC", "Noto Sans SC", sans-serif;
-         background: #F2F4F3; color: #1a1a1a; max-width: 760px;
+         background: #F3F5F4; color: #14202B; max-width: 760px;
          margin: 0 auto; padding: 40px 20px 80px; }}
-  h1.doc-title {{ font-size: 24px; margin-bottom: 6px; }}
+  h1.doc-title {{ font: 900 24px/1.4 "Songti SC","STSong",serif; letter-spacing: .02em; margin-bottom: 6px; }}
   .meta {{ color: #66727C; font-size: 13px; margin-bottom: 28px;
            display: flex; gap: 14px; flex-wrap: wrap; }}
   .meta a {{ color: #17604F; text-decoration: none; }}
@@ -83,7 +86,7 @@ _DOC_TMPL = """<!DOCTYPE html>
   #content p, #content ul, #content ol, #content blockquote {{ margin-bottom: 12px; }}
   #content pre {{ background: #EAEEED; padding: 14px; border-radius: 9px; overflow-x: auto; }}
   #content code {{ background: #EAEEED; padding: 1px 5px; border-radius: 4px; font-size: 14px; }}
-  #content blockquote {{ border-left: 3px solid #DFE5E5; padding-left: 14px; color: #555; }}
+  #content blockquote {{ border-left: 3px solid #DCE3E0; padding-left: 14px; color: #3A4750; }}
 </style></head><body>
 <h1 class="doc-title">{title}</h1>
 <div class="meta">{meta}</div>
@@ -110,12 +113,12 @@ _DOC_SNIP_JS = r"""
   const content = document.getElementById('content');
   document.head.insertAdjacentHTML('beforeend', `<style>
     #snipbtn { position: fixed; z-index: 10; padding: 6px 13px;
-      font-size: 12.5px; background: #1a1a1a; color: #fff; border-radius: 9px;
+      font-size: 12.5px; background: #14202B; color: #fff; border-radius: 9px;
       cursor: pointer; user-select: none; box-shadow: 0 4px 14px rgba(0,0,0,.28);
       white-space: nowrap; }
     #kbtoast { position: fixed; z-index: 11; top: 16px; left: 50%;
       transform: translateX(-50%); padding: 8px 16px; font-size: 13px;
-      background: #1a1a1a; color: #fff; border-radius: 10px;
+      background: #14202B; color: #fff; border-radius: 10px;
       box-shadow: 0 4px 14px rgba(0,0,0,.28); max-width: 88vw; }
     ::highlight(kb-quote) { background: #DFF0E9; color: #17604F; }
   </style>`);

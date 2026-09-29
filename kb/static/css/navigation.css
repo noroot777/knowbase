@@ -1,31 +1,33 @@
-/* Slim icon rail; a light tint and fine marker identify the current workspace. */
-:root { --sidebar-width: 72px; }
-#sidebar { position: fixed; inset: 0 auto 0 0; width: var(--sidebar-width); padding: 18px 6px 12px; display: flex; flex-direction: column; background: #fff; border-right: 1px solid var(--line); z-index: 25; overflow-y: auto; scrollbar-width: thin; }
+/* 图标导航栏。选中态 = 浅松绿底 + 左侧细竖线。
+   宽度 80px:上一版为了给内容区多挤 16px 一路从 176 → 88 → 72,结果 11 个入口
+   的标签只剩 59px 可用,得靠「字号留够余量并禁止折行」硬顶着。内容区宽度差
+   这点根本看不出来,标签挤不挤一眼就看得出来,所以这笔交易反过来做。 */
+:root { --sidebar-width: 80px; }
+#sidebar { position: fixed; inset: 0 auto 0 0; width: var(--sidebar-width); padding: 18px 6px 12px; display: flex; flex-direction: column; background: var(--card); border-right: 1px solid var(--line); z-index: 25; overflow-y: auto; scrollbar-width: thin; }
 .sidebar-brand { display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.brand-lockup { display: flex; flex-direction: column; align-items: center; gap: 5px; color: var(--ink); text-decoration: none; }
+.brand-lockup { display: flex; flex-direction: column; align-items: center; gap: 6px; color: var(--ink); text-decoration: none; }
+/* 折角方块:和图鉴卡片上那枚类型标记同一个形状语言 */
 .brand-icon { display: grid; place-items: center; width: 32px; height: 35px; border-radius: 9px 9px 4px 9px; color: white; background: var(--brand); }
 .brand-icon .icon { width: 22px; height: 22px; }
-/* 窄栏只有 59px 可用,而 Knowbase 是 8 个拉丁字母:字号留够余量并禁止折行,
-   换个缺 Avenir Next 的系统(回退到更宽的 PingFang/Noto 拉丁字形)也不会断成两行。 */
-.wordmark { font-size: 10px; font-weight: 700; line-height: 1.4; letter-spacing: .01em; white-space: nowrap; }
+.wordmark { font: 900 11px/1.4 var(--font-display); letter-spacing: .04em; white-space: nowrap; }
 .wordmark small { display: none; }
 .quick-search { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 9px; margin: 16px 8px 14px; background: var(--paper); border: 1px solid var(--line); color: var(--muted); border-radius: 8px; }
 .quick-search .icon { width: 17px; height: 17px; }
 .quick-search > span, .quick-search kbd, .nav-label { display: none; }
-.tabs, .explore-links { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
-.tabs button, .explore-links a { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 56px; padding: 7px 3px; color: var(--muted); background: transparent; font-size: 12px; line-height: 1.4; border-radius: 8px; text-decoration: none; }
+.tabs, .explore-links { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
+.tabs button, .explore-links a { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; min-height: 56px; padding: 7px 2px; color: var(--muted); background: transparent; font-size: 11.5px; line-height: 1.35; border-radius: 8px; text-decoration: none; }
 .tabs .icon, .explore-links .icon { width: 20px; height: 20px; }
 .tabs button:hover, .explore-links a:hover { color: var(--ink); background: var(--tag-bg); }
-.tabs button.on { background: color-mix(in srgb,var(--brand-soft) 60%,white); color: var(--brand-deep); font-weight: 550; }
+.tabs button.on { background: var(--brand-tint); color: var(--brand-deep); font-weight: 600; }
 .tabs button.on::before { content: ''; position: absolute; left: 0; top: calc(50% - 8px); width: 2px; height: 16px; background: var(--brand); border-radius: 2px; }
 .tabs button.on:hover { background: var(--brand-soft); }
 .nav-count { display: none; }
-#nav-sync-dot { position: absolute; top: 8px; right: 15px; width: 6px; height: 6px; border-radius: 50%; background: var(--brand); }
+#nav-sync-dot { position: absolute; top: 8px; right: 17px; width: 6px; height: 6px; border-radius: 50%; background: var(--brand); }
 .explore-links { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 .explore-links a { min-height: 52px; }
 .explore-links a > span { display: none; }
 .sidebar-bottom { margin-top: auto; padding-top: 16px; flex-shrink: 0; }
-.nav-dropdown summary { list-style: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; cursor: pointer; min-height: 52px; padding: 7px 3px; border-radius: 8px; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.nav-dropdown summary { list-style: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; cursor: pointer; min-height: 52px; padding: 7px 2px; border-radius: 8px; font-size: 11.5px; line-height: 1.35; color: var(--muted); }
 .nav-dropdown summary::-webkit-details-marker { display: none; }
 .nav-dropdown summary > .icon { width: 20px; height: 20px; }
 .nav-dropdown summary > .icon:last-child { display: none; }
@@ -33,7 +35,7 @@
 .nav-dropdown[open] > summary { background: var(--brand-soft); color: var(--brand-deep); }
 .nav-popover { position: fixed; left: calc(var(--sidebar-width) + 8px); bottom: 12px; width: 228px; max-height: calc(100dvh - 24px); overflow-y: auto; background: var(--card); padding: 8px; border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
 .workspace-settings button { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 9px 12px; min-height: 40px; color: var(--ink); background: transparent; text-align: left; font-size: 13px; border-radius: 7px; }
-.workspace-settings button:hover { color: var(--brand); background: var(--brand-soft); }
+.workspace-settings button:hover { color: var(--brand-deep); background: var(--brand-soft); }
 .workspace-settings button .icon { width: 13px; height: 13px; }
 #keys-dot, #mcp-dot { font-size: 9px; }
 #keys-dot.on, #mcp-dot.on { color: var(--ok); }
@@ -50,17 +52,17 @@
   .sidebar-bottom { padding-top: 10px; }
 }
 @media (max-width: 900px) {
-  #topbar { display: flex; position: sticky; top: 0; height: 56px; align-items: center; gap: 12px; padding: 0 16px; background: white; border-bottom: 1px solid var(--line); z-index: 20; }
-  #topbar strong { font-size: 17px; }
+  #topbar { display: flex; position: sticky; top: 0; height: 56px; align-items: center; gap: 12px; padding: 0 16px; background: var(--card); border-bottom: 1px solid var(--line); z-index: 20; }
+  #topbar strong { font: 900 17px var(--font-display); letter-spacing: .03em; }
   #page-crumb { color: var(--muted); font-size: 13px; border-left: 1px solid var(--line); padding-left: 12px; }
   #topbar > :last-child { margin-left: auto; }
   #sidebar { display: none; width: 232px; max-width: 85vw; padding: 22px 16px 16px; z-index: 56; }
   body.nav-open #sidebar { display: flex; }
-  #nav-mask { position: fixed; inset: 0; background: #17203366; z-index: 54; }
+  #nav-mask { position: fixed; inset: 0; background: #14202b66; z-index: 54; }
   .sidebar-brand { justify-content: space-between; }
   .brand-lockup { flex-direction: row; gap: 9px; }
-  .wordmark { font-size: 21px; letter-spacing: -.01em; }
-  .wordmark small { display: block; font: 10px/1.6 var(--font-display); letter-spacing: .16em; color: var(--muted); }
+  .wordmark { font-size: 20px; letter-spacing: .02em; }
+  .wordmark small { display: block; font: 10px/1.6 var(--font-body); letter-spacing: .16em; color: var(--muted); }
   .mobile-close { display: grid; font-size: 22px; }
   .quick-search { margin: 22px 0; font-size: 13px; }
   .quick-search > span, .quick-search kbd { display: inline; }

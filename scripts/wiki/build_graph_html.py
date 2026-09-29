@@ -100,8 +100,8 @@ TEMPLATE = r"""<!DOCTYPE html>
 <title>公众号 AI 图谱 · Connected</title>
 <style>
 :root{
-  --bg:#f7f6f2; --card:#ffffff; --line:#e7e4dc; --ink:#20242a; --muted:#8a8f98;
-  --c-topics:#7c5cff; --c-tools:#0e7edb; --c-models:#0f9d63; --c-orgs:#e07a2f;
+  --bg:#f3f5f4; --card:#ffffff; --line:#dce3e0; --ink:#14202b; --muted:#66727c;
+  --c-topics:#7D4E9E; --c-tools:#3D5A80; --c-models:#17604F; --c-orgs:#8C6A3F;
   --panelW:min(400px,92vw);
 }
 *{box-sizing:border-box}
@@ -131,7 +131,7 @@ body.panelOpen footer{right:var(--panelW)}
   body.panelOpen footer{right:0}
 }
 .band{background:var(--card);border:1px solid var(--line);border-radius:16px;
-  padding:16px 20px 18px;margin:16px 0;box-shadow:0 1px 3px rgba(30,30,20,.04)}
+  padding:16px 20px 18px;margin:16px 0;box-shadow:0 1px 3px rgba(20,32,43,.04)}
 .band h2{font-size:13px;margin:0 0 10px;letter-spacing:1.5px;font-weight:800;display:flex;gap:10px;align-items:baseline}
 .band h2 .tag{font-weight:400;letter-spacing:0;color:var(--muted);font-size:12.5px}
 .band h2 .dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex:none;align-self:center}
@@ -148,22 +148,22 @@ body.hasSel .pill.sel{opacity:1}
 .pill.sel .n{color:rgba(255,255,255,.75)}
 body.searching .pill{opacity:.15}
 body.searching .pill.hit{opacity:1}
-.pill[data-cat=topics].lit{border-color:var(--c-topics);background:#f3efff}
-.pill[data-cat=tools].lit{border-color:var(--c-tools);background:#ecf5fd}
-.pill[data-cat=models].lit{border-color:var(--c-models);background:#eaf7f1}
-.pill[data-cat=orgs].lit{border-color:var(--c-orgs);background:#fdf1e7}
+.pill[data-cat=topics].lit{border-color:var(--c-topics);background:#F1ECF5}
+.pill[data-cat=tools].lit{border-color:var(--c-tools);background:#ECF0F5}
+.pill[data-cat=models].lit{border-color:var(--c-models);background:#DFF0E9}
+.pill[data-cat=orgs].lit{border-color:var(--c-orgs);background:#F3EDE4}
 .pill[data-cat=topics].sel{background:var(--c-topics)}
 .pill[data-cat=tools].sel{background:var(--c-tools)}
 .pill[data-cat=models].sel{background:var(--c-models)}
 .pill[data-cat=orgs].sel{background:var(--c-orgs)}
 #panel{position:fixed;top:0;right:0;width:var(--panelW);height:100vh;overflow-y:auto;
-  background:var(--card);border-left:1px solid var(--line);box-shadow:-8px 0 30px rgba(30,30,20,.07);
+  background:var(--card);border-left:1px solid var(--line);box-shadow:-8px 0 30px rgba(20,32,43,.07);
   padding:26px 26px 40px;z-index:10;transform:translateX(105%);transition:transform .22s ease}
 #panel.show{transform:none}
 #panel .badge{display:inline-block;color:#fff;font-size:11px;letter-spacing:1.5px;font-weight:700;
   border-radius:6px;padding:3px 9px;margin-bottom:10px}
 #panel h3{margin:0 0 10px;font-size:22px;font-weight:800}
-#panel .desc{font-size:14px;color:#3c414a}
+#panel .desc{font-size:14px;color:#14202b}
 #panel .sec{font-size:11.5px;letter-spacing:1.5px;color:var(--muted);font-weight:800;margin:20px 0 8px}
 #panel .chips{display:flex;flex-wrap:wrap;gap:7px}
 #panel .chips button{border:1px solid var(--line);background:#fff;border-radius:15px;padding:4px 11px;
@@ -173,14 +173,14 @@ body.searching .pill.hit{opacity:1}
 #panel .art a{color:var(--ink);text-decoration:none;font-size:13.5px;font-weight:600}
 #panel .art a:hover{color:var(--c-tools)}
 #panel .art .meta{color:var(--muted);font-size:12px;margin-top:2px}
-#panel .art .sum{color:#565c66;font-size:12.5px;margin-top:3px}
+#panel .art .sum{color:#66727c;font-size:12.5px;margin-top:3px}
 #panel .openwiki{display:inline-block;margin-top:16px;font-size:13px;color:var(--c-tools);text-decoration:none}
 #panel .close{position:absolute;top:14px;right:16px;border:none;background:none;font-size:20px;
   color:var(--muted);cursor:pointer}
 footer{position:fixed;left:0;bottom:0;right:0;padding:10px 36px;font-size:12.5px;color:var(--muted);
   background:linear-gradient(transparent,var(--bg) 40%);z-index:4;pointer-events:none;
   transition:right .22s ease}
-footer b{color:#4a4f57}
+footer b{color:#66727c}
 </style>
 </head>
 <body>
@@ -211,7 +211,7 @@ const CATS = [
   ["orgs","公司与组织","背后的玩家"],
 ];
 const CATLABEL = Object.fromEntries(CATS.map(c=>[c[0],c[1]]));
-const COLOR = {topics:"#7c5cff",tools:"#0e7edb",models:"#0f9d63",orgs:"#e07a2f"};
+const COLOR = {topics:"#7D4E9E",tools:"#3D5A80",models:"#17604F",orgs:"#8C6A3F"};
 const adj = new Map();
 DATA.edges.forEach(([a,b,w])=>{
   if(!adj.has(a)) adj.set(a,[]);
@@ -311,7 +311,7 @@ function panelFor(i){
     if(!groups[cat]) continue;
     h += `<div class="sec" style="margin-top:10px;color:${COLOR[cat]}">${CATLABEL[cat]}</div><div class="chips">`;
     h += groups[cat].slice(0,14).map(({o,w})=>
-      `<button onclick="event.stopPropagation();select(${o})" title="共同出现 ${w} 篇">${DATA.nodes[o].label}<span style="color:#aaa"> ${w}</span></button>`).join("");
+      `<button onclick="event.stopPropagation();select(${o})" title="共同出现 ${w} 篇">${DATA.nodes[o].label}<span style="color:#66727c"> ${w}</span></button>`).join("");
     h += `</div>`;
   }
   h += `<div class="sec">出自这些文章</div>`;

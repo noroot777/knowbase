@@ -22,7 +22,7 @@ runtime_logs/
 
 # Local browser validation artifacts
 .playwright-cli/
-output/playwright/
+output/
 
 # Local deployment settings may contain provider credentials or private paths.
 .env

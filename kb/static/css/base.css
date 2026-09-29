@@ -1,38 +1,68 @@
 /* Shared tokens, controls, feedback, search results and reader. */
 
+/* ── 设计语言:瓷白 × 墨蓝黑 × 深松绿 ──────────────────────────────
+   整套系统只有这一份色板。阅读页(kb/web/pages.py)和三张图谱
+   (scripts/wiki/assets/catgraph.css、build_graph_html.py)照抄同一组值——
+   它们是独立产物、没法 import 这个文件,但值必须逐个对上:一度三处各走
+   各的(应用靛蓝 / 阅读页松绿 / 图谱奶油白),点一条搜索结果去读原文就换一
+   套配色,点「项目图谱」又换一套。改这里记得同步那两处。
+
+   为什么是松绿不是靛蓝:靛蓝(#3F43B9 一带)是 AI 产品的默认重点色,满大街
+   都是;而「开源项目」占了图鉴 5475 个条目里的 2932 个,类型色一旦跟重点色
+   撞上,卡片上那枚类型标记就什么也没区分。松绿把主力类目和重点色统一成
+   一件事,剩下五个类目各自认领一个色相。 */
 :root {
-  --paper: #F1F3F7;          /* 雾灰页面背景 */
+  /* 底 */
+  --paper: #F3F5F4;          /* 瓷白冷底(页面背景) */
+  --paper-2: #ECF0EE;        /* 次级底:输入框、浅填充、日志 */
   --card: #FFFFFF;
-  --ink: #172033;            /* 墨蓝黑(正文/标题) */
-  --muted: #515D73;
-  --line: #CFD5E0;
-  --brand: #3F43B9;          /* 靛蓝重点色 */
-  --brand-soft: #E9ECFC;
-  --tag-bg: #F0F1F7;
+
+  /* 墨蓝黑文字阶:三档够用,别再就地调 #3A464F / #4A565F / #414C60 */
+  --ink: #14202B;            /* 标题与正文 */
+  --ink-2: #3A4750;          /* 次要正文:卡片摘要、搜索摘要 */
+  --muted: #66727C;          /* 辅助信息:日期、计数、说明 */
+
+  /* 线 */
+  --line: #DCE3E0;           /* 常规边界 */
+  --line-soft: #E9EDEB;      /* 卡片内分隔,比边界再轻一档 */
+
+  /* 深松绿 */
+  --brand: #17604F;
+  --brand-deep: #0E4A3B;     /* soft 底上的文字、hover 加深 */
+  --brand-soft: #DFF0E9;
+  --brand-tint: #F0F7F4;     /* 最浅填充:选中底、hover 底 */
+
+  --tag-bg: #EAEEED;
   --ok: #2E7D57;
-  --danger: #C33;            /* 失败/危险动作(原先各处散着写死 #c33) */
-  --brand-deep: #2F3392;     /* brand 加深:soft 底上的正文字用 */
+  --danger: #B3402F;         /* 失败/危险动作(原先散着写死 #c33/#b33/#aa3325) */
+  --warn: #8A5A22;           /* 软广角标一类提示,不是错误 */
+  --warn-soft: #F6EBDC;
 
   /* 旧 token 别名:搬迁面板的 CSS 与内联样式免改 */
   --bg: var(--paper);
   --accent: var(--brand);
   --accent-soft: var(--brand-soft);
 
-  /* 来源字形与旧面板兼容色；图鉴类型色在 gallery.css 统一定义。 */
-  --kind-project: #3F43B9;
+  /* 图鉴类型五色谱:开源项目=品牌松绿,其余各认一个色相,互相拉开 */
+  --kind-project: #17604F;   /* 开源项目 · 松绿 */
   --kind-product: #3D5A80;   /* 产品 · 靛蓝 */
   --kind-model: #7D4E9E;     /* 模型 · 紫 */
-  --kind-research: #2F6D7A;  /* 研究 · 深青(数据里实际存在,文档五色谱外补充) */
+  --kind-research: #2F6D7A;  /* 研究 · 深青(数据里实际存在,五色谱外补充) */
   --kind-org: #8C6A3F;       /* 公司 · 褐 */
-  --kind-other: #515D73;     /* 其他 · 灰 */
+  --kind-other: #66727C;     /* 其他 · 灰 */
 
-  --font-display: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* 字体三件套,全系统字体、零下载:
+     展示体(宋体 900)只用于页面大标题和详情抽屉的工具名——这是这套界面
+     唯一的字形签名,换成无衬线就跟任何一个后台模板没有区别了;
+     等宽体用于工具名、日期、计数、norm 这些数据感元素;正文用黑体。 */
+  --font-display: "Songti SC", "STSong", "Source Han Serif SC", "Noto Serif CJK SC", serif;
   --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  --font-body: -apple-system, "PingFang SC", "Noto Sans SC", sans-serif;
 }
 
 * { box-sizing: border-box; margin: 0; }
 body {
-  font: 15px/1.7 -apple-system, "PingFang SC", "Noto Sans SC", sans-serif;
+  font: 15px/1.7 var(--font-body);
   background: var(--bg); color: var(--ink);
   margin: 0; padding: 0;
 }
@@ -122,10 +152,19 @@ button.danger { background: var(--danger); color: #fff; }
 button:disabled { opacity: .45; cursor: not-allowed; }
 
 .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; align-items: center; }
+/* 勾选框/单选框用品牌色:不设的话浏览器给的是系统蓝,整页只剩这一处是蓝的 */
+input[type=checkbox], input[type=radio] { accent-color: var(--brand); }
+
+/* 下拉框:自绘箭头。留系统原生外观的话,整页只有这几个控件是 macOS 的蓝色
+   圆角样式,和旁边自己画的输入框、分段按钮对不上。 */
 select {
-  padding: 6px 10px; border: 1px solid var(--line); border-radius: 9px;
-  background: var(--card); font-size: 13px; color: var(--ink); max-width: 200px;
+  padding: 6px 28px 6px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--card) no-repeat right 9px center/9px 6px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' fill='none' stroke='%2366727C' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  font-size: 13px; color: var(--ink); max-width: 200px;
+  -webkit-appearance: none; appearance: none; cursor: pointer;
 }
+select:hover { border-color: var(--brand); }
 input[type=date] {
   padding: 5px 10px; border: 1px solid var(--line); border-radius: 9px;
   background: var(--card); font: inherit; font-size: 13px; color: var(--ink); outline: none;
@@ -146,16 +185,16 @@ input[type=date] {
 .hit h3 a:hover { color: var(--accent); }
 .meta { font-size: 12px; color: var(--muted); margin-bottom: 6px; display: flex; gap: 10px; flex-wrap: wrap; }
 .badge { padding: 1px 7px; border-radius: 6px; background: var(--tag-bg); font-size: 11px; }
-.badge.vec { background: var(--brand-soft); color: var(--ok); }
+.badge.vec { background: var(--brand-soft); color: var(--brand-deep); }
 /* soft 软广角标:提示性质,不是错误,所以用暖褐而不是 --danger —— 这一档的
    内容仍然留在库里,只是排序上被降了权(kb/search.py 的 SOFT_PROMO_WEIGHT) */
-.badge.promo { background: #F6EBDC; color: #8A5A22; cursor: help; }
-.summary { color: #3A464F; font-size: 13.5px; margin-bottom: 6px; }
+.badge.promo { background: var(--warn-soft); color: var(--warn); cursor: help; }
+.summary { color: var(--ink-2); font-size: 13.5px; margin-bottom: 6px; }
 .snippet { color: var(--muted); font-size: 13px; }
 .ents { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
 .ent {
   font-size: 11.5px; padding: 2px 9px; background: var(--tag-bg);
-  border-radius: 99px; cursor: pointer; color: #4A565F;
+  border-radius: 99px; cursor: pointer; color: var(--ink-2);
 }
 .ent:hover { background: var(--accent-soft); color: var(--brand-deep); }
 

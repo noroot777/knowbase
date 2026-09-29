@@ -27,7 +27,7 @@
 .fav-snip-row { border-left: 2px solid var(--line); padding-left: 10px; margin-left: 2px; }
 a.fav-snip-link { flex: 1; min-width: 0; text-decoration: none; overflow: hidden; }
 .fav-snip-q {
-  display: block; font-size: 13.5px; color: #3A464F;
+  display: block; font-size: 13.5px; color: var(--ink-2);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 a.fav-snip-link:hover .fav-snip-q { color: var(--accent); }
@@ -54,7 +54,7 @@ code.fav-cmd {
   font-size: 12.5px; font-family: var(--font-mono); cursor: pointer;
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-code.fav-cmd:hover { background: #1E2E3C; }
+code.fav-cmd:hover { background: var(--ink); }
 .fav-drawer { margin-bottom: 20px; }
 .fav-drawer-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
 .fav-drawer-head b { font-size: 14px; }
@@ -73,7 +73,7 @@ code.fav-cmd:hover { background: #1E2E3C; }
   background: var(--brand-soft); color: var(--ok); white-space: nowrap; flex-shrink: 0;
 }
 .fav-acard .eta.long { background: var(--tag-bg); color: var(--muted); }
-.fav-acard .what { font-size: 13px; color: #3A464F; margin-bottom: 7px; }
+.fav-acard .what { font-size: 13px; color: var(--ink-2); margin-bottom: 7px; }
 .fav-acard .cmdline { margin-bottom: 7px; }
 .fav-acard code.fav-cmd { font-size: 12px; padding: 5px 10px; display: inline-block; max-width: 100%; }
 .fav-acard .src { font-size: 12px; color: var(--muted); margin-bottom: 9px;
@@ -104,7 +104,7 @@ code.fav-cmd:hover { background: #1E2E3C; }
 .fav-rowline .rops { margin-left: auto; flex-shrink: 0; display: flex; gap: 6px; }
 .fav-rowline .rops button { padding: 3px 11px; font-size: 12px; border-radius: 7px; }
 .fav-rowline.q { border-left: 3px solid var(--accent); }
-.fav-rowline.q .t a { color: #4A565F; }
+.fav-rowline.q .t a { color: var(--ink-2); }
 .fav-triage-note {
   display: flex; align-items: center; gap: 10px; padding: 9px 14px; margin-bottom: 12px;
   background: var(--tag-bg); border-radius: 12px; font-size: 12.5px; color: var(--muted);
@@ -134,7 +134,7 @@ body.chat-mode { padding-bottom: 28px; }
   position: absolute; right: 7px; top: 6px; display: none; cursor: pointer;
   color: var(--muted); font-weight: 700; padding: 2px 4px; font-size: 12px;
 }
-.conv-del:hover { color: #c33; }
+.conv-del:hover { color: var(--danger); }
 .conv-item:hover .conv-del { display: block; }
 .chat-side-empty { font-size: 12.5px; color: var(--muted); text-align: center; padding: 24px 0; }
 
@@ -161,10 +161,10 @@ body.chat-mode { padding-bottom: 28px; }
 .msg .md pre { background: var(--tag-bg); padding: 12px; border-radius: 9px; overflow-x: auto; margin-bottom: 10px; }
 .msg .md table { border-collapse: collapse; margin-bottom: 10px; }
 .msg .md th, .msg .md td { border: 1px solid var(--line); padding: 5px 10px; font-size: 13.5px; }
-.msg .err { color: #b33; }
+.msg .err { color: var(--danger); }
 .msg-meta { font-size: 11px; color: var(--muted); margin-top: 5px; padding-left: 2px; }
 .gen-head { font-size: 11px; color: var(--muted); margin-bottom: 6px; padding-left: 2px; }
-#chat-send.stop { background: #b33; border-color: #b33; color: #fff; }
+#chat-send.stop { background: var(--danger); border-color: var(--danger); color: #fff; }
 .refs summary { cursor: pointer; color: var(--muted); font-size: 12.5px; user-select: none; }
 
 .chat-empty { text-align: center; color: var(--muted); padding: 60px 20px 0; }
@@ -172,7 +172,7 @@ body.chat-mode { padding-bottom: 28px; }
 .chat-empty-sub { font-size: 12.5px; line-height: 1.7; max-width: 440px; margin: 0 auto 22px; }
 .chat-suggest {
   display: block; width: fit-content; margin: 8px auto; padding: 7px 16px;
-  background: var(--tag-bg); border-radius: 99px; font-size: 13px; color: #4A565F; cursor: pointer;
+  background: var(--tag-bg); border-radius: 99px; font-size: 13px; color: var(--ink-2); cursor: pointer;
 }
 .chat-suggest:hover { background: var(--accent-soft); color: var(--brand-deep); }
 
@@ -225,8 +225,8 @@ body.chat-mode { padding-bottom: 28px; }
 }
 /* 绿=凭证新鲜可采;黄=还在但放太久了,采集会去试、不算就绪;红=没有或已失效 */
 .tgt-dot.ok { background: var(--ok); }
-.tgt-dot.warn { background: #d9a03c; }
-.tgt-dot.bad { background: #c33; }
+.tgt-dot.warn { background: var(--warn); }
+.tgt-dot.bad { background: var(--danger); }
 
 /* ── 模型分配弹窗(每个用到大模型的阶段各选一家一模型) ── */
 .stage-row {

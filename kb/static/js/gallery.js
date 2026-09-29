@@ -20,6 +20,10 @@ function kindLabel(k) { return KIND_LABEL[k] || k || '其他'; }
 // ── 正字计数(签名元素):n 次提及 = 逐笔画 n 笔,每 5 笔一个正 ──
 // 最多画 3 个正,超出后 3 个全画满并追加 ×N。出现时逐笔 draw-in,
 // reduced-motion 下由 CSS 直接置 stroke-dashoffset:0(见 base.css/gallery.css)。
+//
+// 没画到的那几笔要留一道浅色底(.ghost),不能只画实笔:3 次提及那种半个正字
+// 单看就是个「下」,读者看到的是一个错字而不是一个数到一半的计数。补上底之后
+// 同一个字形立刻变成「5 格里填了 3 格」,而且每个正字宽度一致、能对齐。
 const TALLY_STROKES = [
   [2.5, 4, 17.5, 4],      // s1 上横
   [10, 4, 10, 16.5],      // s2 中竖
@@ -37,6 +41,11 @@ function tallySvg(n, size = 15) {
   for (let c = 0; c < chars; c++) {
     const strokes = (overflow || c < full) ? 5 : rest;
     let lines = '';
+    // 先铺满 5 笔浅色底,实笔再盖在上面 —— 顺序不能反,否则底会压住实笔
+    for (let i = strokes; i < 5; i++) {
+      const [x1, y1, x2, y2] = TALLY_STROKES[i];
+      lines += `<line class="ghost" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
+    }
     for (let i = 0; i < strokes; i++) {
       const [x1, y1, x2, y2] = TALLY_STROKES[i];
       const len = Math.hypot(x2 - x1, y2 - y1).toFixed(1);
@@ -138,7 +147,7 @@ function gcardHtml(t) {
   const glyph = { project: 'code', product: 'box', model: 'spark', research: 'orbit', org: 'network' }[t.kind] || 'layers';
   return `<button class="gcard" data-norm="${encodeURIComponent(t.norm)}" title="${esc(t.name)}">
     <span class="gcard-body">
-      <span class="gcard-top"><span class="gmark ${kc}">${icon(glyph)}</span><span class="gcard-heading"><span class="gname">${esc(t.name)}</span><span class="gkind ${kc}">${esc(kindLabel(t.kind))}</span></span><span class="gcard-arrow" aria-hidden="true">↗</span></span>
+      <span class="gcard-top"><span class="gmark ${kc}">${icon(glyph)}</span><span class="gcard-heading"><span class="gname">${esc(t.name)}</span><span class="gkind ${kc}">${esc(kindLabel(t.kind))}</span></span></span>
       ${t.promo_soft ? '<span class="gpromo" title="这个工具的每一条记录都出自疑似软广">全部出自软广?</span>' : ''}
       <span class="gsum">${esc(t.summary || '还没有简介，打开收录记录了解更多。')}</span>
       <span class="gtags">${tags}</span>

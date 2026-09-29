@@ -37,11 +37,11 @@ function setSendMode(busy) {
 
 function stopChat() { if (chatAbort) chatAbort.abort(); }
 
+// 空态只留三条能直接点的例子。原来顶上压着「大图标 + 一句标语 + 一段说明」,
+// 那是给第一次访问的访客写的;这是自己每天开的工具,说明文案第二次看就是噪音。
 const CHAT_EMPTY = `
   <div class="chat-empty">
-    <span class="empty-icon">${icon('spark')}</span>
-    <div class="chat-empty-title">让积累的知识，回答你的问题</div>
-    <div class="chat-empty-sub">从你的文章与视频里寻找线索，整理成带出处的回答。随时追问，继续深入。</div>
+    <div class="chat-empty-sub">问点什么，回答会带上出处。</div>
     <button class="chat-suggest" onclick="suggestChat(this)">最近一周公众号都提过哪些开源项目？</button>
     <button class="chat-suggest" onclick="suggestChat(this)">知识库里有哪些可以生成视频的开源模型？</button>
     <button class="chat-suggest" onclick="suggestChat(this)">Claude Code 有哪些实用技巧？</button>

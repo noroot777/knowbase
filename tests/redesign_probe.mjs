@@ -1,0 +1,188 @@
+// 这一轮改版的回归:配色 token 是否真的落到页面上、正字计数的虚笔有没有算错、
+// 搜索摘要去重会不会把正经摘要吞掉、各面板有没有报错、窄屏有没有横向溢出。
+// CDP 直连 playwright 缓存里的 chrome-headless-shell(不装 playwright、不连网、
+// 始终无头、临时 profile)。
+//
+//   HEADLESS_SHELL=<bin> node tests/redesign_probe.mjs <baseURL>
+import { spawn } from "node:child_process";
+
+const BIN = process.env.HEADLESS_SHELL;
+const base = process.argv[2];
+
+const proc = spawn(BIN, ["--headless", "--remote-debugging-port=0", "--disable-gpu",
+                         "--hide-scrollbars", "--window-size=1440,1000", "about:blank"],
+                   { stdio: ["ignore", "pipe", "pipe"] });
+const port = await new Promise((res, rej) => {
+  let buf = "";
+  proc.stderr.on("data", d => {
+    buf += d;
+    const m = buf.match(/ws:\/\/127\.0\.0\.1:(\d+)\//);
+    if (m) res(+m[1]);
+  });
+  proc.on("exit", c => rej(new Error(`exit ${c}\n${buf}`)));
+  setTimeout(() => rej(new Error("no devtools port")), 20000);
+});
+
+const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const ws = new WebSocket(list.find(t => t.type === "page").webSocketDebuggerUrl);
+await new Promise(r => ws.addEventListener("open", r, { once: true }));
+
+let id = 0;
+const pend = new Map();
+let pageErrors = [];
+ws.addEventListener("message", ev => {
+  const m = JSON.parse(ev.data);
+  if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); return; }
+  if (m.method === "Runtime.exceptionThrown")
+    pageErrors.push(m.params.exceptionDetails?.exception?.description
+                    || m.params.exceptionDetails?.text);
+  if (m.method === "Runtime.consoleAPICalled" && m.params.type === "error")
+    pageErrors.push(m.params.args.map(a => a.value ?? a.description ?? "").join(" "));
+});
+const send = (method, params = {}) => {
+  const mid = ++id;
+  return new Promise(res => { pend.set(mid, res); ws.send(JSON.stringify({ id: mid, method, params })); });
+};
+const evalJs = async (expression) => {
+  const r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+  if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.text + " :: " + expression);
+  return r.result?.result?.value;
+};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+await send("Runtime.enable");
+await send("Page.enable");
+
+const fails = [], oks = [];
+const check = (name, cond, extra = "") => (cond ? oks : fails).push(name + (extra ? ` — ${extra}` : ""));
+
+async function goHome(w = 1440, h = 1000) {
+  await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: w < 800 });
+  await send("Page.navigate", { url: base + "/" });
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    if (await evalJs(`document.querySelectorAll('button.gcard').length > 8`)) return true;
+    await sleep(400);
+  }
+  return false;
+}
+
+pageErrors = [];
+check("图鉴能加载出卡片", await goHome());
+
+// ── 1. 配色 token 真的落到页面上(不是只改了 :root 没人用) ──
+const palette = await evalJs(`(() => {
+  const cs = getComputedStyle(document.documentElement);
+  const g = n => cs.getPropertyValue(n).trim();
+  const body = getComputedStyle(document.body).backgroundColor;
+  const on = document.querySelector('.tabs button.on');
+  return { brand: g('--brand'), paper: g('--paper'), ink: g('--ink'),
+           body, navOn: on && getComputedStyle(on).color,
+           display: g('--font-display') };
+})()`);
+check("重点色是深松绿 #17604F", palette.brand.toUpperCase() === "#17604F", palette.brand);
+check("页面底色是瓷白 #F3F5F4", palette.paper.toUpperCase() === "#F3F5F4", palette.paper);
+check("body 真的用上了瓷白", palette.body === "rgb(243, 245, 244)", palette.body);
+check("展示体是宋体", /Songti|STSong|Serif/i.test(palette.display), palette.display);
+check("全站没有残留靛蓝 #3F43B9", !JSON.stringify(palette).toUpperCase().includes("3F43B9"));
+
+// ── 2. 类型色真的互相拉开(上一版 project 和重点色撞成一个) ──
+const kinds = await evalJs(`(() => {
+  const out = {};
+  for (const k of ['project','product','model','research','org','other']) {
+    const el = document.createElement('span');
+    el.className = 'gmark k-' + k; document.body.appendChild(el);
+    out[k] = getComputedStyle(el).color; el.remove();
+  }
+  return out;
+})()`);
+check("六个类型色两两不同", new Set(Object.values(kinds)).size === 6, JSON.stringify(kinds));
+check("开源项目=品牌松绿", kinds.project === "rgb(23, 96, 79)", kinds.project);
+
+// ── 3. 正字计数:实笔 + 虚笔恒为 5,实笔数等于 n(封顶 5) ──
+const tally = await evalJs(`(() => {
+  const out = [];
+  for (const n of [1,2,3,4,5]) {
+    const d = document.createElement('div');
+    d.innerHTML = tallySvg(n, 13); document.body.appendChild(d);
+    const svg = d.querySelector('svg');
+    out.push({ n, solid: svg.querySelectorAll('line:not(.ghost)').length,
+               ghost: svg.querySelectorAll('line.ghost').length });
+    d.remove();
+  }
+  return out;
+})()`);
+for (const t of tally) {
+  check(`正字 n=${t.n}:实笔${t.solid}+虚笔${t.ghost}=5`, t.solid + t.ghost === 5, JSON.stringify(t));
+  check(`正字 n=${t.n}:实笔数正确`, t.solid === t.n, JSON.stringify(t));
+}
+
+// ── 4. 搜索摘要去重:标题含摘要才吞,不能把正经摘要一起吞了 ──
+const dedup = await evalJs(`(() => {
+  const same = { title: 'foo:用于集中配置的命令行工具', summary: '用于集中配置的命令行工具' };
+  const diff = { title: '某公众号的一篇长文', summary: '这是一段和标题完全不同的摘要' };
+  return { same: dupSummary(same), diff: dupSummary(diff),
+           empty: dupSummary({ title: 'x' }), nullish: dupSummary({}) };
+})()`);
+check("标题已含摘要 → 不再重复渲染", dedup.same === true);
+check("摘要和标题不同 → 照常渲染", dedup.diff === false);
+check("没有摘要 → 不渲染空行", dedup.empty === true);
+check("字段缺失不抛异常", dedup.nullish === true);
+
+// ── 4b. 下拉框的自绘箭头没有被 background 简写清掉 ──
+// `background: transparent` 这种简写会连 background-image 一起清,下拉框就
+// 退化成一段看不出可点的纯文字;各处覆盖只许改 background-color。
+await evalJs(`switchTab('gallery')`);
+await sleep(500);
+const arrows = await evalJs(`(() => {
+  const out = {};
+  for (const sel of ['g-src','g-sort','ask-model','f-source']) {
+    const el = document.getElementById(sel);
+    out[sel] = el ? getComputedStyle(el).backgroundImage !== 'none' : 'missing';
+  }
+  return out;
+})()`);
+for (const [k, v] of Object.entries(arrows))
+  check(`下拉框 ${k} 保留箭头`, v === true, String(v));
+
+// ── 5. 五个面板逐个切过去,不许报错、不许出横向滚动条 ──
+for (const tab of ["gallery", "search", "ask", "fav", "pipe"]) {
+  await evalJs(`switchTab('${tab}')`);
+  await sleep(700);
+  const over = await evalJs(`document.documentElement.scrollWidth - document.documentElement.clientWidth`);
+  check(`${tab} 面板无横向溢出`, over <= 0, `溢出 ${over}px`);
+}
+
+// ── 6. 窄屏 375 / 390:图鉴与导航都不许横向溢出 ──
+for (const w of [375, 390]) {
+  await goHome(w, 780);
+  const over = await evalJs(`document.documentElement.scrollWidth - document.documentElement.clientWidth`);
+  check(`${w}px 图鉴无横向溢出`, over <= 0, `溢出 ${over}px`);
+}
+
+// ── 7. 详情抽屉能打开,标题用上展示体 ──
+await goHome();
+await evalJs(`document.querySelector('button.gcard').click()`);
+await sleep(2200);
+const drawer = await evalJs(`(() => {
+  const n = document.querySelector('#tool-drawer .name');
+  if (!n) return null;
+  const cs = getComputedStyle(n);
+  return { text: n.textContent.slice(0,40), font: cs.fontFamily, weight: cs.fontWeight };
+})()`);
+check("详情抽屉打得开", !!drawer, JSON.stringify(drawer));
+check("抽屉工具名用展示体 900", drawer && /Songti|STSong|serif/i.test(drawer.font) && drawer.weight === "900",
+      JSON.stringify(drawer));
+
+check("整轮没有页面报错", pageErrors.length === 0, pageErrors.slice(0, 4).join(" | "));
+
+console.log(`\n通过 ${oks.length} 项`);
+if (fails.length) {
+  console.log(`\n失败 ${fails.length} 项:`);
+  for (const f of fails) console.log("  ✗ " + f);
+} else {
+  console.log("全部通过");
+}
+ws.close();
+proc.kill();
+process.exit(fails.length ? 1 : 0);
