@@ -30,3 +30,17 @@
 使用 `KB_CONTAINER=1` 启动 `tests/serve_sources.py --port 18879`，数据库与 vault 位于临时目录，远端 feed 和向量模型为替身；原生微信接入交互使用 API fixture，不执行真实 key 获取。未访问生产 8787 服务、真实微信数据库或个人 vault，也未重新构建 Docker 镜像。
 
 日志、专项脚本和截图保存在本地忽略目录 `output/playwright/merge-*`。验证结束后关闭本次浏览器和隔离服务。
+
+## 2026-09-29：合入 main 的后续预算修复
+
+再次在任务分支执行 `git merge main`，合入 `c50f2b772ec2eebcd4d4c91caf44bdc0c1ef63dc`。未切换或修改目标分支。
+
+- `kb/feeds/sync.py`：保留 main 的完整预算准入、工作线程复查及 `CollectionBudgetExceeded` 独立处理；同时保留本分支仅在真实来源错误时标红的修复。
+- `tests/test_feed_sources.py`：按 main 的拆分合入，把预算回归集中到 `tests/test_feed_budget.py`。保留其全部 9 项回归，补充成功／失败阶段断言，并将原尾批 HTTP 用例调整为符合新准入规则的第 70 秒启动、第 89.9 秒完成；24 个成功、1 个跳过，订阅不被误罚退避。
+- `docs/source-modules.md`：同步最终预算规则，把之前允许尾批跨越总预算的策略明确标为历史，保留当时的验证记录。
+
+验证：41 项 feed 回归通过；全量非浏览器后端回归运行 307 项，306 项通过，1 项因未配置 `KB_WECHAT_TEST_RUNTIME` 跳过。范围包含来源、传输、预算、同步通道、停止、定时与 Docker / 微信接入回归。`uv lock --check --offline`、`uv build --offline`、Python 编译和差异检查均通过，修改的代码文件均少于 700 行。
+
+相对 main，采集传输实现与拆分后的来源测试保持一致，生产代码只补回本分支的零错误不标红规则；前端、微信接入和 Docker 集成未变。本轮预算测试使用临时数据库、受控时钟和 HTTP 替身，无真实订阅或生产数据写入。因本轮没有页面改动，未运行无关的图谱浏览器测试，也未操作浏览器，不涉及浏览器通道降级。
+
+本轮日志位于忽略目录 `output/playwright/budget-merge-feed.log` 与 `budget-merge-backend.log`。

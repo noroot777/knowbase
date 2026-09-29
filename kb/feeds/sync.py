@@ -12,12 +12,23 @@ import yaml
 
 from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
-from kb.feeds.fetching import SOURCE_SECONDS, fetch_source
+from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_state import _state, _stage
 
 FETCH_WORKERS = 4
 COLLECT_SECONDS = 90
 BRIDGE_FAILURE_LIMIT = 3
+BUDGET_MESSAGE = '本轮采集时间预算不足，剩余订阅留待下次同步'
+
+
+def _fetch_with_budget(source, settings, scope, collect_deadline):
+    # Check again in the worker: submission/scheduling can use up the margin.
+    # Each admitted source gets its own full allowance, never a clipped tail.
+    deadline = time.monotonic() + SOURCE_SECONDS
+    if deadline > collect_deadline:
+        raise CollectionBudgetExceeded
+    return fetch_source(source, settings, unconditional=scope.ranged,
+                        deadline=deadline, collect_deadline=collect_deadline)
 
 
 def _save_result(source, result, scope):
@@ -69,9 +80,9 @@ def collect(kind, scope):
             if _state.get('stop_requested'):
                 summary['stopped'] = True
                 break
-            if time.monotonic() >= deadline:
+            if deadline - time.monotonic() < SOURCE_SECONDS:
                 summary['skipped'] += len(pending)
-                summary['message'] = '本轮采集已到时间预算，剩余订阅留待下次同步'
+                summary['message'] = BUDGET_MESSAGE
                 break
             if bridge_failures >= BRIDGE_FAILURE_LIMIT:
                 independent = [s for s in pending if not reg.uses_bridge(s)]
@@ -82,11 +93,7 @@ def collect(kind, scope):
             if not batch:
                 break
             _stage('crawl', 'running', f"{reg.KINDS[kind]} · 正在读取 {len(batch)} 个来源（已检查 {summary['checked']}/{len(sources)}）")
-            # The run budget gates new batches; admitted requests retain their
-            # full source budget so a local cutoff cannot trigger source backoff.
-            batch_deadline = time.monotonic() + SOURCE_SECONDS
-            futures = {pool.submit(fetch_source, s, settings, unconditional=scope.ranged,
-                                   deadline=batch_deadline): s for s in batch}
+            futures = {pool.submit(_fetch_with_budget, s, settings, scope, deadline): s for s in batch}
             shared_ok, shared_errors = False, 0
             for future in as_completed(futures):
                 source = futures[future]
@@ -94,6 +101,10 @@ def collect(kind, scope):
                     result = future.result()
                     shared_ok |= reg.uses_bridge(source)
                     summary['added'] += _save_result(source, result, scope)
+                except CollectionBudgetExceeded:
+                    summary['skipped'] += 1
+                    summary['message'] = BUDGET_MESSAGE
+                    continue
                 except Exception as e:
                     shared_errors += int(reg.uses_bridge(source))
                     _save_failure(source, e, summary)
