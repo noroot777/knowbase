@@ -19,10 +19,54 @@ from pathlib import Path
 
 from kb.collectors import FetchScope, active_collector
 from kb.config import VIDEOS_ROOT
-from kb.pipeline_state import _log, _now, _stage
+from kb.pipeline_state import _log, _now, _stage, _state, stage_segment
 
 
 # ── 采集:抓取 + 导出,两阶段都只跟采集器契约打交道 ────────────────────────────
+
+def crawl_channels(crawl_filter: dict | str | None = None) -> list[dict]:
+    """把一次同步的来源摊平成 [{"channel", "accounts"}],一个或多个都是这个读法。
+
+    一次同步可以同时抓几个来源(面板上勾几个就是几个),所以范围是
+    `channels: [{"channel": ..., "accounts": [...]}]`;只抓一个来源时仍写成
+    老样子的 `channel` + `accounts`,存量的状态文件、定时配置和重试记录
+    因此一律不用迁移。
+    """
+    if isinstance(crawl_filter, str) or crawl_filter is None:
+        crawl_filter = {"channel": crawl_filter or ""}
+    scopes = crawl_filter.get("channels") or [
+        {"channel": crawl_filter.get("channel") or "",
+         "accounts": crawl_filter.get("accounts") or []}]
+    return [{"channel": s.get("channel") or "",
+             "accounts": [n for n in (s.get("accounts") or [])]} for s in scopes]
+
+
+def _channel_label(collector) -> str:
+    return getattr(collector, "channel_label", collector.label)
+
+
+def _per_channel(stage: str, crawl_filter: dict | str | None, run) -> None:
+    """让每个选中的来源各跑一遍这个阶段。
+
+    多来源时每个来源的汇报各记一段(stage_segment),否则后一个来源的结论会
+    把前一个整个盖掉,面板上只剩最后那个来源的成败。
+    """
+    scopes = crawl_channels(crawl_filter)
+    for scope in scopes:
+        collector = active_collector(scope["channel"])
+        if len(scopes) == 1:
+            run(collector, scope)
+            continue
+        if _state.get("stop_requested"):
+            break            # 停止是对整次同步说的,别再起下一个来源
+        with stage_segment(stage, _channel_label(collector)):
+            try:
+                run(collector, scope)
+            except Exception as e:
+                # 勾了好几个来源:这一个炸了不该把剩下的一起带走。记成它自己那一段的
+                # 失败,面板上照样看得见是谁挂的,后面的来源继续跑。
+                _stage(stage, "error", f"{type(e).__name__}: {e}")
+
 
 def source_status(channel: str | None = None) -> dict:
     """当前来源的健康状况,给状态面板用。"""
@@ -56,24 +100,26 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
 
     crawl_filter 为 None 走增量;否则形如
     {"accounts": [...], "since_date": "YYYY-MM-DD", "until_date": "YYYY-MM-DD"}
-    的区间补抓,accounts 为空 = 该来源的全部订阅目标。
+    的区间补抓,accounts 为空 = 该来源的全部订阅目标。多来源同时抓时
+    accounts 记在各自的 channels 项里(见 crawl_channels)。
     """
-    scope = FetchScope()
-    if crawl_filter:
-        scope = FetchScope(
-            targets=tuple(crawl_filter.get("accounts") or ()),
-            since=crawl_filter.get("since_date", ""),
-            until=crawl_filter.get("until_date", ""),
-            force=bool(crawl_filter.get("force")),
-        )
-    collector = active_collector((crawl_filter or {}).get("channel"))
-    _log(f"采集通道: {getattr(collector, 'channel_label', collector.label)}")
-    collector.fetch(scope)
+    filters = crawl_filter or {}
+
+    def _fetch(collector, scope: dict) -> None:
+        _log(f"采集通道: {_channel_label(collector)}")
+        collector.fetch(FetchScope(
+            targets=tuple(scope["accounts"]),
+            since=filters.get("since_date", ""),
+            until=filters.get("until_date", ""),
+            force=bool(filters.get("force")),
+        ))
+
+    _per_channel("crawl", crawl_filter, _fetch)
 
 
-def _run_export(channel: str | None = None) -> None:
+def _run_export(crawl_filter: dict | str | None = None) -> None:
     """让采集器把它本地的内容落成 obs md。"""
-    active_collector(channel).materialize()
+    _per_channel("export", crawl_filter, lambda collector, scope: collector.materialize())
 
 
 def _run_index() -> None:

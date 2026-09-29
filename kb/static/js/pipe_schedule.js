@@ -5,6 +5,15 @@ function scheduleMessage(s) {
   const next = s.next_run ? ` · 下次 ${new Date(s.next_run).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}` : '';
   return `已保存：每天 ${s.time} 自动同步${next}`;
 }
+// 定时同步也可以一次跑几个来源，所以这里是一组勾选框而不是一个下拉。
+function renderSchedChannels(selected) {
+  $('sched-channels').innerHTML = pipeChannels.map(c => `<label class="pipe-channel">
+    <input type="checkbox" data-sched-channel="${esc(c.id)}" onchange="markSchedDirty()"${selected.includes(c.id) ? ' checked' : ''}>
+    <span><b>${esc(c.label)}</b></span></label>`).join('');
+}
+function schedChannels() {
+  return [...$('sched-channels').querySelectorAll('input:checked')].map(i => i.dataset.schedChannel);
+}
 async function loadSched() {
   if (schedLoading || schedSaving || schedDirty) return;
   schedLoading = true; $('sched-reload').hidden = true;
@@ -13,7 +22,7 @@ async function loadSched() {
     await loadPipeChannels();
     const s = await pipeJson('/api/pipeline/schedule');
     $('sched-on').checked = !!s.enabled; $('sched-time').value = s.time || '07:30';
-    $('sched-channel').value = s.channel || pipeChannel;
+    renderSchedChannels(s.channels?.length ? s.channels : [s.channel || pipeChannel]);
     schedLoaded = true; $('sched-fields').disabled = false;
     $('sched-msg').textContent = scheduleMessage(s);
   } catch (e) { $('sched-msg').textContent = '读取失败：' + e.message; $('sched-reload').hidden = false; }
@@ -26,8 +35,9 @@ function markSchedDirty() {
 async function saveSched() {
   if (!schedLoaded || schedSaving || !schedDirty) return;
   if (!$('sched-time').reportValidity()) return;
-  if (!$('sched-channel').value) { $('sched-msg').textContent = '请选择同步通道'; return; }
-  const body = { enabled: $('sched-on').checked, time: $('sched-time').value, channel: $('sched-channel').value };
+  const channels = schedChannels();
+  if (!channels.length) { $('sched-msg').textContent = '请至少选择一个同步来源'; return; }
+  const body = { enabled: $('sched-on').checked, time: $('sched-time').value, channels };
   schedSaving = true; $('sched-fields').disabled = true; $('sched-save').disabled = true;
   $('sched-save').textContent = '正在保存…'; $('sched-msg').textContent = '';
   try {

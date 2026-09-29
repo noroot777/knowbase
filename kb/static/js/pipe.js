@@ -91,8 +91,6 @@ async function refreshPipeSource() {
     $('src-detail').textContent = [src.message, src.hint].filter(Boolean).join(' · ') || (src.online ? '来源可用，可以开始同步。' : '可检查采集器配置。来源离线时抓取会跳过，已有内容仍可处理。');
     $('src-console').style.display = src.console_url ? '' : 'none';
     if (src.console_url) $('src-console').href = safeUrl(src.console_url);
-    pipeRangeHint = src.range_hint || pipeRangeHint;
-    renderPipeRange();
   } catch (e) {
     if (version !== pipeSourceVersion) return;
     $('src-status').textContent = '连接未确认';

@@ -22,7 +22,8 @@ def kind_checked(kind):
 def guard(kind):
     kind_checked(kind)
     state = pipeline.get_state()
-    if state['running'] and state.get('crawl_filter',{}).get('channel') == kind:
+    running = {scope['channel'] for scope in pipeline.crawl_channels(state.get('crawl_filter'))}
+    if state['running'] and kind in running:
         raise HTTPException(409,'该来源正在同步，请等待结束后修改订阅')
 
 

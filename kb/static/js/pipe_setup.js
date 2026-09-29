@@ -1,8 +1,10 @@
-// A cancellable configuration dialog: drafts are separate for each source channel.
-let pipeAcctList = [], pipeSel = new Set(), pipeAccountsReady = false;
-let pipeRange = { label: '不限时间', from: '', to: '' }, pipeRangeHint = '';
-let pipeAccountVersion = 0, pipeAccountAbort = null, pipeAccountsChannel = '';
-const pipeDrafts = new Map();
+// A cancellable configuration dialog: one subscription draft per source, one shared range.
+// 一次同步可以勾好几个来源，所以选择是「来源 → 订阅集合」两层，不是一个扁平列表。
+const pipeAccounts = new Map();   // channel -> {state:'loading'|'ready'|'error', list, error}
+const pipeSel = new Map();        // channel -> Set(订阅名)
+const pipeDrafts = new Map();     // channel -> [订阅名]，关掉弹窗再打开时接着用
+const pipeAcctAborts = new Map();
+let pipeRange = { label: '不限时间', from: '', to: '' };
 function localDay(d) {
   const pad = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -15,8 +17,13 @@ function pipePresets() {
     { label: '近 3 个月', from: localDay(m3), to: today }, { label: '今年', from: today.slice(0, 4) + '-01-01', to: today }];
 }
 function pipeModalOpen() { return $('pipe-modal').style.display !== 'none'; }
+function pipeReadyChannels() { return pipeRunSel.filter(id => pipeAccounts.get(id)?.state === 'ready'); }
+function pipeLoadingChannels() { return pipeRunSel.filter(id => pipeAccounts.get(id)?.state === 'loading'); }
+function pipeFailedChannels() { return pipeRunSel.filter(id => pipeAccounts.get(id)?.state === 'error'); }
+function pipeSelected(channel) { return pipeSel.get(channel) || new Set(); }
+function pipeSelCount() { return pipeReadyChannels().reduce((n, id) => n + pipeSelected(id).size, 0); }
 function savePipeDraft() {
-  if (pipeAccountsReady && pipeAccountsChannel) pipeDrafts.set(pipeAccountsChannel, { selected: [...pipeSel], range: { ...pipeRange } });
+  for (const id of pipeReadyChannels()) pipeDrafts.set(id, [...pipeSelected(id)]);
 }
 function pipeSetupError(message = '') {
   $('pipe-setup-error').hidden = !message; $('pipe-setup-error').textContent = message;
@@ -25,8 +32,8 @@ async function openPipeModal() {
   if (pipeAction || pipeSnapshot?.running) return;
   dismissToastGroup('pipeline');
   $('pipe-modal').style.display = ''; $('pipe-fields').disabled = false;
-  pipeSetupError(); $('pipe-acct-search').value = ''; pipeAccountsReady = false;
-  $('pipe-acct-list').innerHTML = '<p class="pipe-acct-empty">正在读取同步通道与订阅…</p>';
+  pipeSetupError(); $('pipe-acct-search').value = '';
+  $('pipe-acct-list').innerHTML = '<p class="pipe-acct-empty">正在读取同步来源与订阅…</p>';
   renderPipeEst();
   if (!pipeConnected) refreshPipe();
   try {
@@ -35,38 +42,49 @@ async function openPipeModal() {
     renderPipeChannel(); await loadPipeAccounts();
   } catch (e) {
     if (!pipeModalOpen()) return;
-    $('pipe-acct-list').innerHTML = '<div class="pipe-acct-empty">同步通道暂不可用。<br><button class="ghost" onclick="openPipeModal()">重新读取同步通道</button></div>';
+    $('pipe-acct-list').innerHTML = '<div class="pipe-acct-empty">同步来源暂不可用。<br><button class="ghost" onclick="openPipeModal()">重新读取来源</button></div>';
     pipeSetupError(e.message);
   }
 }
 function closePipeModal() {
-  savePipeDraft(); pipeAccountVersion++; pipeAccountAbort?.abort();
+  savePipeDraft();
+  for (const controller of pipeAcctAborts.values()) controller.abort();
+  pipeAcctAborts.clear();
   $('pipe-modal').style.display = 'none'; closePipeRange();
 }
+// 勾掉的来源不再占列表，但它的选择留在草稿里：再勾回来时还是上次那几个订阅。
 async function loadPipeAccounts() {
   savePipeDraft();
-  const channel = pipeChannel, version = ++pipeAccountVersion;
-  pipeAccountAbort?.abort(); pipeAccountAbort = new AbortController();
-  pipeAccountsReady = false; pipeAcctList = []; pipeSel = new Set();
-  $('pipe-acct-list').setAttribute('aria-busy', 'true');
-  $('pipe-acct-list').innerHTML = '<p class="pipe-acct-empty">正在读取订阅列表…</p>';
-  $('pipe-acct-count').textContent = ''; renderPipeEst(); pipeSetupError();
-  const draft = pipeDrafts.get(channel);
-  pipeRange = draft?.range ? { ...draft.range } : { label: '不限时间', from: '', to: '' };
-  renderPipeRange();
+  for (const id of [...pipeAccounts.keys()]) {
+    if (pipeRunSel.includes(id)) continue;
+    pipeAcctAborts.get(id)?.abort(); pipeAcctAborts.delete(id);
+    pipeAccounts.delete(id); pipeSel.delete(id);
+  }
+  renderPipeAcctList();
+  await Promise.all(pipeRunSel.map(id => loadChannelAccounts(id)));
+}
+async function loadChannelAccounts(channel, force = false) {
+  if (!force && ['ready', 'loading'].includes(pipeAccounts.get(channel)?.state)) return;
+  pipeAcctAborts.get(channel)?.abort();
+  const controller = new AbortController();
+  pipeAcctAborts.set(channel, controller);
+  pipeAccounts.set(channel, { state: 'loading', list: [], error: '' });
+  renderPipeAcctList();
   try {
-    const data = await pipeJson(channelUrl('/api/pipeline/accounts', channel), { signal: pipeAccountAbort.signal }, 60000);
-    if (version !== pipeAccountVersion || channel !== pipeChannel || !pipeModalOpen()) return;
-    pipeAcctList = [...new Set((data.accounts || []).filter(n => typeof n === 'string'))];
-    pipeSel = new Set(draft ? draft.selected.filter(n => pipeAcctList.includes(n)) : pipeAcctList);
-    pipeAccountsReady = true; pipeAccountsChannel = channel;
-    renderPipeAcctList(); savePipeDraft();
+    const data = await pipeJson(channelUrl('/api/pipeline/accounts', channel), { signal: controller.signal }, 60000);
+    // 这一轮还算不算数：来源被勾掉了，或者又发起了一次更新的读取
+    if (!pipeRunSel.includes(channel) || pipeAcctAborts.get(channel) !== controller) return;
+    const list = [...new Set((data.accounts || []).filter(n => typeof n === 'string'))];
+    const draft = pipeDrafts.get(channel);
+    pipeAccounts.set(channel, { state: 'ready', list, error: '' });
+    pipeSel.set(channel, new Set(draft ? draft.filter(n => list.includes(n)) : list));
+    savePipeDraft();
   } catch (e) {
-    if (version !== pipeAccountVersion || !pipeModalOpen()) return;
-    $('pipe-acct-list').innerHTML = '<div class="pipe-acct-empty">列表暂不可用。<br><button class="ghost" onclick="loadPipeAccounts()">重新读取订阅</button></div>';
-    pipeSetupError(e.message);
+    if (!pipeRunSel.includes(channel) || pipeAcctAborts.get(channel) !== controller) return;
+    pipeAccounts.set(channel, { state: 'error', list: [], error: e.message });
   } finally {
-    if (version === pipeAccountVersion) { $('pipe-acct-list').setAttribute('aria-busy', 'false'); renderPipeEst(); }
+    if (pipeAcctAborts.get(channel) === controller) pipeAcctAborts.delete(channel);
+    if (pipeModalOpen()) renderPipeAcctList();
   }
 }
 function closePipeRange() {
@@ -86,7 +104,7 @@ function renderPipePresets() {
   $('pipe-custom-err').textContent = '';
 }
 function applyPipePreset(i) {
-  pipeRange = { ...pipePresets()[i] }; closePipeRange(); renderPipeRange(); savePipeDraft(); $('pipe-range-btn').focus();
+  pipeRange = { ...pipePresets()[i] }; closePipeRange(); renderPipeRange(); $('pipe-range-btn').focus();
 }
 function applyPipeCustomRange() {
   const from = $('pipe-custom-from').value, to = $('pipe-custom-to').value;
@@ -94,43 +112,98 @@ function applyPipeCustomRange() {
     $('pipe-custom-err').textContent = !from || !to ? '请填写开始和结束日期' : '开始日期不能晚于结束日期'; return;
   }
   pipeRange = { label: `${from} 至 ${to}`, from, to };
-  closePipeRange(); renderPipeRange(); savePipeDraft(); $('pipe-range-btn').focus();
+  closePipeRange(); renderPipeRange(); $('pipe-range-btn').focus();
+}
+// 区间补抓的注意事项每个来源各有各的（公众号翻不到 30 天前、RSS 补不齐历史），
+// 勾了几个就把几条都说出来，只显示当前查看那一个会漏掉别人的限制。
+function pipeRangeHints() {
+  return [...new Set(pipeRunSel.map(id => pipeChannels.find(c => c.id === id)?.range_hint).filter(Boolean))].join(' ');
 }
 function renderPipeRange() {
   $('pipe-range-label').textContent = pipeRange.label;
-  $('pipe-range-hint').textContent = pipeRange.from ? pipeRangeHint || '包含开始与结束当天。日期只影响抓取范围，后续步骤仍处理知识库中的待处理内容。' : '扫描所选来源可提供的文章；已有内容按身份去重。后续步骤会处理知识库中的待处理内容。';
+  $('pipe-range-hint').textContent = pipeRange.from ? pipeRangeHints() || '包含开始与结束当天。日期只影响抓取范围，后续步骤仍处理知识库中的待处理内容。' : '扫描所选来源可提供的文章；已有内容按身份去重。后续步骤会处理知识库中的待处理内容。';
   renderPipeEst();
 }
-function filteredPipeAccounts() {
-  const query = $('pipe-acct-search').value.trim().toLowerCase();
-  return pipeAcctList.filter(n => n.toLowerCase().includes(query));
+function pipeQuery() { return $('pipe-acct-search').value.trim().toLowerCase(); }
+function filteredPipeAccounts(channel) {
+  const query = pipeQuery();
+  return (pipeAccounts.get(channel)?.list || []).filter(n => n.toLowerCase().includes(query));
+}
+function pipeChannelBlock(id) {
+  const info = pipeAccounts.get(id) || { state: 'loading' }, label = esc(channelLabel(id));
+  if (info.state === 'loading') return `<div class="pipe-acct-group"><div class="pipe-acct-group-head"><b>${label}</b><span>正在读取订阅…</span></div></div>`;
+  if (info.state === 'error') {
+    return `<div class="pipe-acct-group"><div class="pipe-acct-group-head"><b>${label}</b><span>读取失败</span></div>
+      <div class="pipe-acct-empty">${esc(info.error)}<br><button class="ghost" onclick="loadChannelAccounts('${esc(id)}', true)">重新读取订阅</button></div></div>`;
+  }
+  const items = filteredPipeAccounts(id);
+  const rows = items.map(n => `<label class="pipe-acct"><input type="checkbox" data-channel="${esc(id)}" data-acct="${esc(n)}"${pipeSelected(id).has(n) ? ' checked' : ''}><span>${esc(n)}</span></label>`).join('')
+    || `<div class="pipe-acct-empty">${info.list.length ? '没有匹配的订阅，试试其他关键词。' : '这个来源暂无订阅，请先管理订阅或检查采集器。'}</div>`;
+  return `<div class="pipe-acct-group"><div class="pipe-acct-group-head"><b>${label}</b><span data-group-count="${esc(id)}">已选 ${pipeSelected(id).size} / ${info.list.length}</span></div>${rows}</div>`;
+}
+// 勾一个订阅只改分组标题上那个计数。整块重渲染会把键盘焦点从刚勾中的复选框上弄掉,
+// 连着勾第二个就得重新 Tab 过去。
+function updateGroupCounts() {
+  for (const el of $('pipe-acct-list').querySelectorAll('[data-group-count]')) {
+    const info = pipeAccounts.get(el.dataset.groupCount);
+    if (info?.state === 'ready') el.textContent = `已选 ${pipeSelected(el.dataset.groupCount).size} / ${info.list.length}`;
+  }
 }
 function renderPipeAcctList() {
-  if (!pipeAccountsReady) return;
-  const items = filteredPipeAccounts(), box = $('pipe-acct-list'), scroll = box.scrollTop;
-  box.innerHTML = items.length ? items.map(n => `<label class="pipe-acct"><input type="checkbox" data-acct="${esc(n)}" ${pipeSel.has(n) ? 'checked' : ''}><span>${esc(n)}</span></label>`).join('') : `<div class="pipe-acct-empty">${pipeAcctList.length ? '没有匹配的订阅，试试其他关键词。' : '当前通道暂无订阅，请先管理订阅或检查采集器。'}</div>`;
+  const box = $('pipe-acct-list'), scroll = box.scrollTop;
+  box.setAttribute('aria-busy', String(!!pipeLoadingChannels().length));
+  box.innerHTML = pipeRunSel.length ? pipeRunSel.map(pipeChannelBlock).join('')
+    : '<div class="pipe-acct-empty">先在上面勾选至少一个来源。</div>';
   box.scrollTop = scroll;
   updatePipeSelection();
 }
 function updatePipeSelection() {
-  const filtered = !!$('pipe-acct-search').value.trim();
-  $('pipe-acct-count').textContent = `已选 ${pipeSel.size} / ${pipeAcctList.length}`;
+  const total = pipeReadyChannels().reduce((n, id) => n + (pipeAccounts.get(id)?.list.length || 0), 0);
+  const filtered = !!pipeQuery();
+  $('pipe-acct-count').textContent = `已选 ${pipeSelCount()} / ${total}`;
   $('pipe-select-all').textContent = filtered ? '全选搜索结果' : '全选';
   $('pipe-select-none').textContent = filtered ? '取消搜索结果' : '清空选择';
-  $('pipe-select-all').disabled = !pipeAccountsReady || !filteredPipeAccounts().length;
-  $('pipe-select-none').disabled = !pipeAccountsReady || !pipeSel.size;
+  const visible = pipeReadyChannels().reduce((n, id) => n + filteredPipeAccounts(id).length, 0);
+  $('pipe-select-all').disabled = !visible;
+  $('pipe-select-none').disabled = !pipeSelCount();
   renderPipeEst(); savePipeDraft();
 }
 $('pipe-acct-list').addEventListener('change', e => {
   if (!e.target.matches('input[data-acct]')) return;
-  const n = e.target.dataset.acct;
-  if (e.target.checked) pipeSel.add(n); else pipeSel.delete(n);
-  updatePipeSelection();
+  const { channel, acct } = e.target.dataset;
+  const selected = pipeSel.get(channel) || new Set();
+  if (e.target.checked) selected.add(acct); else selected.delete(acct);
+  pipeSel.set(channel, selected);
+  updateGroupCounts(); updatePipeSelection();
 });
-function pipeSelectAll() { for (const n of filteredPipeAccounts()) pipeSel.add(n); renderPipeAcctList(); }
-function pipeSelectNone() { for (const n of filteredPipeAccounts()) pipeSel.delete(n); renderPipeAcctList(); }
+function pipeSelectAll() {
+  for (const id of pipeReadyChannels()) {
+    const selected = pipeSel.get(id) || new Set();
+    for (const n of filteredPipeAccounts(id)) selected.add(n);
+    pipeSel.set(id, selected);
+  }
+  renderPipeAcctList();
+}
+function pipeSelectNone() {
+  for (const id of pipeReadyChannels()) {
+    const selected = pipeSel.get(id) || new Set();
+    for (const n of filteredPipeAccounts(id)) selected.delete(n);
+    pipeSel.set(id, selected);
+  }
+  renderPipeAcctList();
+}
+function pipeEstText() {
+  const n = pipeSelCount(), failed = pipeFailedChannels().length;
+  if (!pipeRunSel.length) return '请至少选择一个来源。';
+  if (pipeLoadingChannels().length) return '订阅读取完成后即可开始。';
+  if (!pipeReadyChannels().length) return '所选来源的订阅都没能读出来，请重新读取后再开始。';
+  if (!n) return '请至少选择一个订阅。';
+  const sources = pipeReadyChannels().filter(id => pipeSelected(id).size)
+    .map(id => `${channelLabel(id)} ${pipeSelected(id).size} 个`).join(' · ');
+  return `${sources} · ${pipeRange.label}。执行中可离开本页，稍后回来查看。`
+    + (failed ? `另有 ${failed} 个来源读取失败，本次不会同步它们。` : '');
+}
 function renderPipeEst() {
-  const channel = pipeChannels.find(c => c.id === pipeChannel), n = pipeSel.size;
   const editingRange = $('pipe-range-pop').style.display !== 'none';
   const connection = $('pipe-setup-connection'), reconnect = connection.querySelector('button');
   connection.hidden = pipeConnected && !pipeSnapshot?.running;
@@ -140,17 +213,27 @@ function renderPipeEst() {
   reconnect.hidden = pipeConnected;
   reconnect.disabled = !!pipeRequest;
   reconnect.textContent = pipeRequest ? '正在连接…' : '重新连接';
-  $('pipe-est').textContent = !pipeAccountsReady ? '列表读取完成后即可开始。' : n ? `${channel?.label || '所选通道'} · ${n} 个订阅 · ${pipeRange.label}。执行中可离开本页，稍后回来查看。` : '请至少选择一个订阅。';
+  const n = pipeSelCount();
+  $('pipe-est').textContent = pipeEstText();
   if (!pipeConnected) $('pipe-est').textContent = '请先恢复状态连接，再开始同步。';
   else if (pipeSnapshot?.running) $('pipe-est').textContent = '等待当前同步结束，配置会保留。';
   if (editingRange) $('pipe-est').textContent = '请先应用日期范围，或收起日期选择以使用当前已选范围。';
-  $('pipe-start').disabled = editingRange || !pipeConnected || !pipeAccountsReady || !n || !!pipeAction || !!pipeSnapshot?.running;
+  $('pipe-start').disabled = editingRange || !pipeConnected || !n || !!pipeAction || !!pipeSnapshot?.running
+    || !!pipeLoadingChannels().length;
   $('pipe-start').textContent = pipeAction === 'start' ? '正在启动…' : n ? `开始同步 · ${n} 个` : '开始同步';
 }
-async function startPipeFromModal() {
-  if ($('pipe-range-pop').style.display !== 'none' || !pipeConnected || pipeAction || !pipeAccountsReady || !pipeSel.size || pipeSnapshot?.running) return;
-  const body = { channel: pipeChannel, accounts: [...pipeSel] };
+function pipeRunBody() {
+  const channels = pipeReadyChannels()
+    .filter(id => pipeSelected(id).size)
+    .map(id => ({ channel: id, accounts: [...pipeSelected(id)] }));
+  const body = { channels };
   if (pipeRange.from) Object.assign(body, { since_date: pipeRange.from, until_date: pipeRange.to });
+  return body;
+}
+async function startPipeFromModal() {
+  if ($('pipe-range-pop').style.display !== 'none' || !pipeConnected || pipeAction
+      || !pipeSelCount() || pipeSnapshot?.running) return;
+  const body = pipeRunBody();
   pipeAction = 'start'; pipeSetupError(); invalidatePipeStatus();
   let failure = '';
   $('pipe-fields').disabled = true; renderPipeEst(); renderPipeButtons();

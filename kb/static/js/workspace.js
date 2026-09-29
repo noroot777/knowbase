@@ -1,12 +1,16 @@
 // Workspace navigation, addressable filters and accessible overlay lifecycle.
-const WORKSPACE_TITLES = { gallery: '工具图鉴', search: '全文检索', ask: '知识问答', fav: '我的收藏', pipe: '同步管理' };
+const WORKSPACE_TITLES = { gallery: '工具图鉴', search: '全文检索', ask: '知识问答', fav: '我的收藏', pipe: '同步中心' };
 let activeTab = 'gallery';
 let restoringLocation = false;
+// 首次定位完成前谁都不许写地址栏:图鉴的数据常常比 initWorkspace 里那次
+// restoreWorkspaceLocation 先回来,applyGalleryFilter 一存位置就把深链接
+// (#pipe 这种)按默认的 activeTab 覆写成 #gallery,用户直接打开同步中心会被弹回图鉴。
+let workspaceLocated = false;
 const tabScroll = new Map();
 const compactNavigation = matchMedia('(max-width:900px)');
 
 function saveWorkspaceLocation(push = false) {
-  if (restoringLocation) return;
+  if (restoringLocation || !workspaceLocated) return;
   const params = new URLSearchParams();
   if (activeTab === 'gallery') {
     for (const [key, value] of Object.entries(gState)) {
@@ -36,6 +40,7 @@ function restoreWorkspaceLocation() {
   const [tabName, query = ''] = location.hash.slice(1).split('?');
   const tab = Object.hasOwn(WORKSPACE_TITLES, tabName) ? tabName : 'gallery';
   restoringLocation = true;
+  workspaceLocated = true;   // 地址已经读完,之后各面板再存位置就不会盖掉它
   if (tab === 'gallery') {
     clearTimeout(gQTimer);
     const params = new URLSearchParams(query);

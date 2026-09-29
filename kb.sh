@@ -447,7 +447,7 @@ else:
     echo "(面板没开)"
   fi
   echo
-  echo "── 微信流量路由 ──"
+  echo "── 绿泡泡流量路由 ──"
   cli route 2>&1 | grep -o '"message": "[^"]*"' | cut -d'"' -f4 || echo "(读不到 Clash)"
   echo
   echo "── 扫码凭证(只用来搜号加号)──"
@@ -473,14 +473,14 @@ print("  放太久 %d · 已失效 %d · 没凭证 %d(前两类采集时照样�
 # 同步前的准备。已经在跑的先杀掉重起,保证是干净的一份
 cmd_prep() {
   wxdown_restart
-  say "[route] 切微信文章流量到 wxdown…"
+  say "[route] 切绿泡泡文章流量到 wxdown…"
   cli route --activate >/dev/null 2>&1 || say "[route] 切换失败,自己看 ./kb.sh route"
   web_start
   echo
   cli creds 2>&1 | head -1 || true
   echo
   say "起好了,终端可以关。"
-  say "接下来去 Mac 微信里逐个打开公众号的文章,在 $API"
+  say "接下来去 Mac 绿泡泡里逐个打开公众号的文章,在 $API"
   say "管道 tab →「管理公众号」看还差谁(自动刷新),点得差不多了就「同步」。"
   say "凭证放过 20 分钟会转黄:那只是没把握,采集照样会试,试通了自己转绿。"
   say "或者直接 ./kb.sh sync 也行。"
@@ -509,7 +509,7 @@ Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
   日常
     ./kb.sh prep                    同步前:重起 wxdown + 切路由 + 起面板
     ./kb.sh sync                    跑全流程(采集→导出→索引→打标),后台跑
-    ./kb.sh sync --channel wechat_local  用微信本地数据库发现文章
+    ./kb.sh sync --channel wechat_local  用绿泡泡本地数据库发现文章
     ./kb.sh sync --channel wechat_oa     用原凭证通道(默认)
     ./kb.sh status                  服务 / 同步进度 / 路由 / 凭证 一屏看全
 
@@ -532,7 +532,7 @@ Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
 
   凭证与订阅(瞬间返回)
     ./kb.sh creds [--missing-only]  每个号的文章凭证够不够(顺带从 wxdown 导入)
-    ./kb.sh route [--activate]      微信文章流量有没有走 wxdown
+    ./kb.sh route [--activate]      绿泡泡文章流量有没有走 wxdown
     ./kb.sh accounts list|search|add|remove|enable|disable [名字]
     ./kb.sh setup                   新 worktree 首次准备
 
@@ -541,7 +541,7 @@ Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
     ./kb.sh watch                   每 5 秒刷新,只列还没拿到凭证的号
 
   两套凭证别搞混:login 那套是扫码拿的、全局一份,现在只剩「搜公众号加号」
-  一个用途;creds 那套是每个号各一份的文章凭证,只能靠在 Mac 微信里打开该号
+  一个用途;creds 那套是每个号各一份的文章凭证,只能靠在 Mac 绿泡泡里打开该号
   一篇文章、由 wxdown 截下来。原通道取列表靠后者,login 救不了;
   本地数据库通道无需它,两通道都按文章链接获取正文。
 EOF

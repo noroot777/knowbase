@@ -287,11 +287,10 @@ async function fetchModels(p) {
     const cur = await fetch('/api/keys').then(r => r.json()).then(d => d.keys[p].models || []);
     const box = $('models-' + p + '-box');
     box.innerHTML = d.models.map(id =>
-      `<label style="display:block;font-size:13px;padding:2px 0">`
-      + `<input type="checkbox" value="${id}"${cur.includes(id) ? ' checked' : ''}> ${id}</label>`
+      `<label><input type="checkbox" value="${esc(id)}"${cur.includes(id) ? ' checked' : ''}> ${esc(id)}</label>`
     ).join('') || '<span class="hint">中转站没返回模型</span>';
-    box.style.display = '';
-    $('models-' + p + '-save').style.display = d.models.length ? '' : 'none';
+    box.hidden = false;
+    $('models-' + p + '-save').hidden = !d.models.length;
     msg.textContent = `共 ${d.models.length} 个,勾选后保存`;
   } catch (e) { msg.textContent = '拉取失败: ' + e.message; }
 }

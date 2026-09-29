@@ -290,7 +290,7 @@ def doc_page(doc_path: str):
             # url 来自被索引的外部内容,只放行 http(s):javascript: 之类点一下就执行
             safe = row["url"] if re.match(r"^https?://", row["url"], re.I) else "#"
             meta_parts.append(
-                f'<a href="{html_mod.escape(safe)}" target="_blank" rel="noopener">微信原文{_EXT_ARROW}</a>'
+                f'<a href="{html_mod.escape(safe)}" target="_blank" rel="noopener">绿泡泡原文{_EXT_ARROW}</a>'
             )
     obs = (f"obsidian://open?vault={quote(VAULT_NAME)}"
            f"&file={quote(doc_path.removesuffix('.md'))}")

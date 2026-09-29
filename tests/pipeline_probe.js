@@ -22,6 +22,8 @@ async page => {
   const reply = (route,data,status=200) => route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)}).catch(()=>{});
   const copy = value => JSON.parse(JSON.stringify(value));
   const settlePaint = () => page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  // 换视口后弹窗的 max-height 按新 vh 重算要多一帧,别拿中间态去断言底部按钮位置
+  const settleSetup = () => page.waitForFunction(()=>{const el=document.querySelector('.pipe-setup');return !el || el.getBoundingClientRect().bottom<=innerHeight;},null,{timeout:5000});
   const handler = async route => {
     const request = route.request(), url = request.url();
     const path = url.slice(origin.length).split('?')[0];
@@ -92,7 +94,9 @@ async page => {
   try {
     await page.setViewportSize({width:1440,height:1100});
     await page.emulateMedia({reducedMotion:'reduce'});
-    await page.evaluate(()=>localStorage.removeItem('kb-sync-channel'));
+    await page.evaluate(()=>{localStorage.removeItem('kb-sync-channel');localStorage.removeItem('kb-sync-channels');});
+    const channelBox = name => page.locator('#pipe-channel-list').getByRole('checkbox',{name,exact:true});
+    const sorted = list => [...list].sort().join('|');
     state={running:true,stop_supported:true,stages:emptyStages(),log:[]};
     state.stages.crawl={status:'running',detail:'后台定时同步'};
     await page.goto(origin+'/?pipeline-test='+Date.now()+'#gallery');
@@ -131,7 +135,12 @@ async page => {
     state.stages.extract={status:'running',detail:'正在处理存量文档'};
     await refresh();
     check('并行步骤都显示执行中',(await page.locator('#pipe-state-title').textContent()).includes('抓取内容 + 提取知识'));
-    check('运行时禁用重复启动与切换通道',await page.locator('#pipe-run').isDisabled() && await page.locator('#pipe-channel-current').isDisabled());
+    state.crawl_filter={channel:'a',accounts:['公众号甲'],channels:[{channel:'a',accounts:['公众号甲']},{channel:'b',accounts:[]}]};
+    await refresh();
+    check('运行中列出本次抓取的全部来源',(await page.locator('#pipe-running-channel').textContent()).includes('凭证通道 + 本机通道') && (await page.locator('#pipe-run-scope').textContent()).includes('凭证通道 1 个指定订阅 · 本机通道 全部订阅'));
+    state.crawl_filter={channel:'a',accounts:['公众号甲']};await refresh();
+    check('只抓一个来源时不重复标注来源名',(await page.locator('#pipe-run-scope').textContent()).startsWith('1 个指定订阅'));
+    check('运行时禁用重复启动与切换查看来源',await page.locator('#pipe-run').isDisabled() && await page.locator('#pipe-channel-current').isDisabled());
     check('运行时侧栏有后台任务提示',await page.locator('#nav-sync-dot').isVisible());
     await page.locator('#pipe-stage-crawl summary').click();
     await page.locator('#pipe-log-box').evaluate(el=>{el.scrollTop=0;el.dispatchEvent(new Event('scroll'));});
@@ -224,7 +233,7 @@ async page => {
     await page.locator('#pipe-setup-connection button').click();await page.waitForFunction(()=>!pipeRequest);
     check('重连失败后可继续重试且保留配置',!await page.getByRole('checkbox',{name:'公众号甲',exact:true}).isChecked() && await page.locator('#pipe-range-label').textContent()==='近 7 天' && await page.locator('#pipe-setup-connection button').isEnabled());
     await page.setViewportSize({width:375,height:812});
-    await settlePaint();
+    await settlePaint();await settleSetup();
     check('手机断线配置仍显示提示及底部按钮且不横向溢出',await page.locator('#pipe-setup-connection').isVisible() && await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth && document.querySelector('.pipe-setup-footer').getBoundingClientRect().bottom<=innerHeight));
     await page.screenshot({path:'output/playwright/new-sync-disconnected-after.png'});
     await page.setViewportSize({width:1440,height:1100});
@@ -248,26 +257,30 @@ async page => {
     await page.getByRole('button',{name:'暂不执行',exact:true}).click();
     await page.locator('#pipe-run').click();await page.locator('input[data-acct]').first().waitFor();
     check('重开配置保留账号与日期草稿',!await page.getByRole('checkbox',{name:'公众号甲',exact:true}).isChecked() && (await page.locator('#pipe-range-label').textContent())==='近 7 天');
-    holdB=true;await page.locator('#pipe-channel').selectOption('b');
-    check('切换通道清空旧列表并禁用启动',await page.locator('#pipe-start').isDisabled() && await page.locator('input[data-acct]').count()===0);
-    await page.locator('#pipe-channel').selectOption('a');await page.locator('input[data-acct]').first().waitFor();
-    holdB=false;if(releaseB)await releaseB();
-    check('旧通道慢响应不会覆盖当前列表',await page.getByRole('checkbox',{name:'公众号乙',exact:true}).isVisible() && await page.getByRole('checkbox',{name:'另一通道甲',exact:true}).count()===0);
-    accountFail=true;await page.locator('#pipe-channel').selectOption('b');await page.getByRole('button',{name:'重新读取公众号'}).waitFor();
-    check('列表失败有就地重试且不会错误启动',await page.locator('#pipe-setup-error').isVisible() && await page.locator('#pipe-start').isDisabled());
-    accountFail=false;await page.getByRole('button',{name:'重新读取公众号'}).click();await page.getByRole('checkbox',{name:'另一通道甲',exact:true}).waitFor();
-    check('新通道加载对应账号',await page.locator('input[data-acct]').count()===2);
+    holdB=true;await channelBox('本机通道').check();
+    check('新勾来源读取期间禁止启动但保留已就绪来源',await page.locator('#pipe-start').isDisabled() && (await page.locator('#pipe-est').textContent()).includes('订阅读取完成') && await page.getByRole('checkbox',{name:'公众号乙',exact:true}).isVisible());
+    holdB=false;await releaseB();await page.getByRole('checkbox',{name:'另一通道甲',exact:true}).waitFor();
+    check('两个来源的订阅同时列出并各自计数',await page.locator('input[data-acct]').count()===5 && await page.locator('#pipe-acct-count').textContent()==='已选 4 / 5' && await page.locator('.pipe-acct-group').count()===2);
+    await channelBox('凭证通道').uncheck();
+    check('取消来源后它的订阅立即退出本次范围',await page.locator('input[data-acct]').count()===2 && await page.getByRole('checkbox',{name:'公众号乙',exact:true}).count()===0);
+    await channelBox('凭证通道').check();await page.getByRole('checkbox',{name:'公众号乙',exact:true}).waitFor();
+    check('重新勾回来源沿用上次的订阅选择',!await page.getByRole('checkbox',{name:'公众号甲',exact:true}).isChecked() && await page.getByRole('checkbox',{name:'公众号乙',exact:true}).isChecked());
+    accountFail=true;await channelBox('凭证通道').uncheck();await channelBox('凭证通道').check();
+    await page.getByRole('button',{name:'重新读取订阅',exact:true}).waitFor();
+    check('一个来源读取失败只停掉它自己',await page.locator('.pipe-acct-group').count()===2 && await page.locator('input[data-acct]').count()===2 && await page.locator('#pipe-start').isEnabled() && (await page.locator('#pipe-est').textContent()).includes('1 个来源读取失败'));
+    accountFail=false;await page.getByRole('button',{name:'重新读取订阅',exact:true}).click();await page.getByRole('checkbox',{name:'公众号乙',exact:true}).waitFor();
+    check('就地重试恢复该来源的订阅',await page.locator('input[data-acct]').count()===5);
     startFail=true;await page.locator('#pipe-start').click();
     await page.waitForFunction(()=>document.getElementById('pipe-setup-error').textContent.includes('同步未启动') && !pipeAction);
     check('启动失败保留表单并给出具体原因',await page.locator('#pipe-modal').isVisible() && (await page.locator('#pipe-setup-error').textContent()).includes('测试启动失败'));
     startFail=false;holdStart=true;const beforeStart=countWrites('/api/pipeline/run');await page.locator('#pipe-start').click();
-    check('启动期间锁定表单',await page.locator('#pipe-channel').isDisabled() && await page.locator('#pipe-start').isDisabled());
+    check('启动期间锁定表单',await channelBox('凭证通道').isDisabled() && await page.locator('#pipe-start').isDisabled());
     await page.locator('#pipe-start').evaluate(el=>el.click());
     check('启动防重复提交',countWrites('/api/pipeline/run')===beforeStart+1);
     await releaseStart();await page.waitForFunction(()=>document.getElementById('pipe-modal').style.display==='none' && !pipeAction);
     check('启动后焦点转到运行状态',await page.locator('#pipe-state-title').evaluate(el=>el===document.activeElement));
     const submitted=writes.filter(w=>w.path==='/api/pipeline/run').at(-1).body;
-    check('请求使用正确通道及明确账号范围',submitted.channel==='b' && submitted.accounts.join('|')===accounts.b.join('|'));
+    check('一次请求带上每个来源和它自己的订阅范围',submitted.channels.map(x=>x.channel).join('|')==='a|b' && sorted(submitted.channels[0].accounts)===sorted(accounts.a.slice(1)) && sorted(submitted.channels[1].accounts)===sorted(accounts.b));
     await page.locator('#tab-gallery').click();
     check('离开同步页仍保留后台运行提示',await page.locator('#nav-sync-dot').isVisible());
     finish();state.stages.extract={status:'error',detail:'失败 1',failures:[{title:'测试文档',reason:'模型暂不可用'}]};await refresh();
@@ -300,19 +313,24 @@ async page => {
     check('重试有运行反馈且不重复启动',countWrites('/api/pipeline/retry-failed')===1 && await page.locator('#pipe-run').isDisabled());
     finish();await refresh();
     const beforeSchedule=countWrites('/api/pipeline/schedule');
-    await page.locator('#sched-on').check();await page.locator('#sched-time').fill('08:45');await page.locator('#sched-channel').selectOption('b');
+    await page.locator('#sched-on').check();await page.locator('#sched-time').fill('08:45');
+    await page.locator('#sched-channels').getByRole('checkbox',{name:'本机通道',exact:true}).check();
     check('修改定时字段不会隐式保存',countWrites('/api/pipeline/schedule')===beforeSchedule && (await page.locator('#sched-msg').textContent()).includes('未保存'));
     scheduleFail=true;await page.locator('#sched-save').click();await page.waitForFunction(()=>!schedSaving);
     check('定时保存失败保留编辑并允许重试',(await page.locator('#sched-msg').textContent()).includes('未保存') && await page.locator('#sched-time').inputValue()==='08:45' && !await page.locator('#sched-save').isDisabled());
     scheduleFail=false;await page.locator('#sched-save').click();await page.waitForFunction(()=>!schedSaving);
-    check('定时整组设置一次保存',JSON.stringify(writes.filter(w=>w.path==='/api/pipeline/schedule').at(-1).body)===JSON.stringify({enabled:true,time:'08:45',channel:'b'}) && await page.locator('#sched-save').isDisabled());
+    check('定时整组设置一次保存并带上多个来源',JSON.stringify(writes.filter(w=>w.path==='/api/pipeline/schedule').at(-1).body)===JSON.stringify({enabled:true,time:'08:45',channels:['a','b']}) && await page.locator('#sched-save').isDisabled());
+    await page.locator('#sched-channels').getByRole('checkbox',{name:'凭证通道',exact:true}).uncheck();
+    await page.locator('#sched-channels').getByRole('checkbox',{name:'本机通道',exact:true}).uncheck();
+    await page.locator('#sched-save').click();
+    check('定时不允许一个来源都不选',(await page.locator('#sched-msg').textContent()).includes('至少选择一个') && countWrites('/api/pipeline/schedule')===beforeSchedule+2);
     await page.setViewportSize({width:375,height:812});
     check('手机同步页面无横向溢出',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
     check('同一同步任务提示不堆叠',await page.locator('[data-toast-key=pipeline]').count()<=1);
     await page.locator('[data-toast-key=pipeline] .toast-x').click().catch(()=>{});
     await page.evaluate(()=>window.scrollTo(0,0));
     await page.screenshot({path:'output/playwright/sync-mobile.png'});
-    await page.locator('#pipe-run').click();await page.locator('input[data-acct]').first().waitFor();
+    await page.locator('#pipe-run').click();await page.locator('input[data-acct]').first().waitFor();await settleSetup();
     await page.locator('#pipe-range-btn').click();
     await page.locator('#pipe-custom-from').fill('2026-09-20');await page.locator('#pipe-custom-to').fill('2026-09-10');
     await page.getByRole('button',{name:'应用日期',exact:true}).click();
@@ -329,10 +347,10 @@ async page => {
     await page.goto(origin+'/?pipeline-test='+Date.now()+'#pipe');
     await page.waitForFunction(()=>pipeConnected && !pipeChannelsLoading);
     await page.locator('#pipe-run').click();
-    await page.getByRole('button',{name:'重新读取同步通道',exact:true}).waitFor();
+    await page.getByRole('button',{name:'重新读取来源',exact:true}).waitFor();
     check('通道请求失败显示具体原因和就地重试',await page.locator('#pipe-start').isDisabled() && (await page.locator('#pipe-setup-error').textContent()).includes('测试通道读取失败'));
     channelFail=false;
-    await page.getByRole('button',{name:'重新读取同步通道',exact:true}).click();await page.locator('input[data-acct]').first().waitFor();
+    await page.getByRole('button',{name:'重新读取来源',exact:true}).click();await page.locator('input[data-acct]').first().waitFor();
     check('通道重试恢复可用表单',await page.locator('#pipe-start').isEnabled());
     await page.getByRole('button',{name:'暂不执行',exact:true}).click();
     holdChannels=true;releaseChannels=null;
@@ -341,13 +359,18 @@ async page => {
     await page.waitForFunction(()=>pipeConnected);
     await page.locator('#pipe-run').click();
     await page.clock.fastForward(16000);
-    await page.getByRole('button',{name:'重新读取同步通道',exact:true}).waitFor();
+    await page.getByRole('button',{name:'重新读取来源',exact:true}).waitFor();
     check('通道请求挂起会超时退出等待并允许重试',(await page.locator('#pipe-setup-error').textContent()).includes('超时') && await page.locator('#pipe-start').isDisabled());
     holdChannels=false;if(releaseChannels)await releaseChannels();
-    await page.getByRole('button',{name:'重新读取同步通道',exact:true}).click();await page.locator('input[data-acct]').first().waitFor();
+    await page.getByRole('button',{name:'重新读取来源',exact:true}).click();await page.locator('input[data-acct]').first().waitFor();
     check('超时后重试不复用失效请求',await page.locator('#pipe-start').isEnabled());
     check('无未处理前端异常',errors.length===0);
     return {passed:checks.length,checks,errors,isolatedWrites:writes};
+  } catch (e) {
+    // 超时之类的失败不带 check 名,报告里看不出跑到哪一步了
+    e.message = `${e.message}\n已通过 ${checks.length} 项,最后通过:${checks.at(-1) || '(无)'}`
+      + (errors.length ? `\n页面异常:${errors.join(' | ')}` : '');
+    throw e;
   } finally {
     if(clockInstalled)await page.clock.resume();
     await page.evaluate(()=>{invalidatePipeStatus();});

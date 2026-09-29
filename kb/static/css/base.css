@@ -78,6 +78,11 @@ body {
   width: min(560px, 92vw); box-shadow: 0 20px 60px rgba(20, 32, 43, .2);
 }
 .modal h2 { font-size: 17px; margin-bottom: 14px; }
+/* 叠在另一个弹窗之上(从「绿泡泡接入」里点 API Key / 模型配置):底下那层留着不关,
+   否则关掉上面这层之后接入向导也跟着没了,还得重新点开一次。z 必须高过普通弹窗——
+   workspace.js 的 syncOverlays 按 z-index 认最上层,同 z 时按 DOM 顺序,而这几个
+   弹窗恰好排在接入弹窗前面,Esc 会关掉底下那个。 */
+.modal-mask.stacked { z-index: 60; background: rgba(20, 32, 43, .22); }
 .modal .row { margin-bottom: 12px; font-size: 14px; }
 .modal code {
   display: block; background: var(--tag-bg); padding: 10px 12px; border-radius: 9px;
@@ -134,6 +139,24 @@ body {
 .field-err:empty { display: none; }
 
 /* ── 通用控件 ── */
+/* 文本输入框:没有这条基线时拿到的是浏览器默认外观 —— Safari 画一圈粗黑边配大圆角,
+   Chrome 画方角细灰边,于是同一个弹窗里的输入框跟旁边自绘的下拉、按钮完全不是一套
+   (「API Key 设置」那几个框就是这么难看的)。只点名文本类 type:checkbox / radio /
+   date / time 各有各的规则,别被这条盖掉;更具体的选择器(#q、#chat-input…)照旧覆盖它。 */
+input:not([type]), input[type=text], input[type=password], input[type=search],
+input[type=url], input[type=email], input[type=number], input[type=tel], textarea {
+  padding: 9px 13px; font: inherit; font-size: 14px; line-height: 1.5;
+  color: var(--ink); background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px;
+  -webkit-appearance: none; appearance: none; transition: border-color .15s;
+}
+input:not([type]):focus, input[type=text]:focus, input[type=password]:focus,
+input[type=search]:focus, input[type=url]:focus, input[type=email]:focus,
+input[type=number]:focus, input[type=tel]:focus, textarea:focus { border-color: var(--brand); }
+input::placeholder, textarea::placeholder { color: var(--muted); }
+input:disabled, textarea:disabled, select:disabled {
+  background: var(--paper-2); color: var(--muted); cursor: not-allowed;
+}
 .searchbar { display: flex; gap: 8px; margin-bottom: 12px; }
 #q {
   flex: 1; padding: 12px 16px; font-size: 15px; border: 1.5px solid var(--line);

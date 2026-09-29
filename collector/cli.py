@@ -133,7 +133,7 @@ def cmd_collect(args) -> int:
 
     result = collect(emit, targets=targets or None, since=since, until=until)
     if result["auth_error"]:
-        info("一份文章凭证都没有,没开跑。先起 wxdown,再在 Mac 微信里打开各号的一篇文章")
+        info("一份文章凭证都没有,没开跑。先起 wxdown,再在 Mac 绿泡泡里打开各号的一篇文章")
         return EXIT_AUTH
     info(f"采集完成:新增 {result['new_articles']} 篇"
          + (f",{len(result['errors'])} 个号失败" if result["errors"] else ""))
@@ -273,9 +273,9 @@ def cmd_creds(args) -> int:
 # ── route:让微信文章流量走 wxdown 的代理 ─────────────────────────────────────────
 
 def cmd_route(args) -> int:
-    """看/切 Clash 上那条把微信文章流量交给 wxdown 的规则。
+    """看/切 Clash 上那条把绿泡泡文章流量交给 wxdown 的规则。
 
-    不切的话,在微信里点文章 wxdown 截不到,凭证就一直是"没有"。
+    不切的话,在绿泡泡里点文章 wxdown 截不到,凭证就一直是"没有"。
     """
     from src.services.clash_wxdown_route import ClashRouteError, clash_wxdown_route
 
@@ -470,7 +470,7 @@ def cmd_login(args) -> int:
     except Exception as e:
         info(f"取二维码失败:{e}")
         return EXIT_ERROR
-    info(f"二维码已存到 {qr_path}\n用微信扫它,然后在手机上确认登录。")
+    info(f"二维码已存到 {qr_path}\n用绿泡泡扫它,然后在手机上确认登录。")
 
     deadline = time.time() + 300
     last_msg = ""
@@ -528,7 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--until", help="结束日期 YYYY-MM-DD")
     c.add_argument("--targets", help="逗号分隔的公众号名,默认全部订阅号")
     c.add_argument("--channel", choices=["profile_ext", "local"], default="profile_ext",
-                   help="profile_ext=原凭证通道；local=本机微信数据库推送")
+                   help="profile_ext=原凭证通道；local=本机绿泡泡数据库推送")
 
     e = sub.add_parser("export", help="把本地库导出成 obsidian md")
     e.add_argument("--no-images", action="store_true", help="不下图,保留远程 URL")
@@ -538,7 +538,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--no-import", action="store_true", help="只看现状,不从 wxdown 导入")
     r.add_argument("--missing-only", action="store_true", help="只列还没就绪的")
 
-    rt = sub.add_parser("route", help="微信文章流量是否走 wxdown 代理")
+    rt = sub.add_parser("route", help="绿泡泡文章流量是否走 wxdown 代理")
     rt.add_argument("--activate", action="store_true", help="立即切过去")
     rt.add_argument("--json", action="store_true", help="输出 JSON")
 

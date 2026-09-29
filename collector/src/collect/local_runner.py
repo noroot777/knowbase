@@ -13,8 +13,8 @@ def local_status() -> dict:
     try:
         LocalReader().check()
     except LocalReaderError as e:
-        return {"ready": False, "message": "微信数据库不可读", "hint": str(e), "targets": targets}
-    return {"ready": True, "message": "微信数据库可读",
+        return {"ready": False, "message": "绿泡泡数据库不可读", "hint": str(e), "targets": targets}
+    return {"ready": True, "message": "绿泡泡数据库可读",
             "hint": "只采集本机已同步的公众号推送；完整正文仍通过原文链接获取", "targets": targets}
 
 

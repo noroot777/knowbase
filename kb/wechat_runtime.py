@@ -56,7 +56,7 @@ def run(argv, *, timeout=120, env=None, cwd=None):
             except subprocess.TimeoutExpired:
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.communicate()
-            raise SetupError("步骤超时，已停止本次命令；获取阶段请检查微信及系统授权状态后再处理。") from None
+            raise SetupError("步骤超时，已停止本次命令；获取阶段请检查绿泡泡及系统授权状态后再处理。") from None
     except OSError:
         raise SetupError("所需命令无法启动，请检查运行环境和执行权限。") from None
     return proc.returncode, stdout
@@ -76,20 +76,20 @@ def json_call(argv, *, timeout=120):
         if not isinstance(result, dict):
             raise ValueError
     except (ValueError, TypeError):
-        raise SetupError("微信读取器返回格式不兼容，请检查或更新读取器。") from None
+        raise SetupError("绿泡泡读取器返回格式不兼容，请检查或更新读取器。") from None
     # Nonzero is also used by upstream for actionable onboarding states.
     if result.get("ok") is True and isinstance(result.get("data"), dict):
         return result["data"]
     error = result.get("error")
     name = error.get("code") if isinstance(error, dict) else ""
     known = {
-        "previous_run_requires_review": "上次获取尚待恢复检查，不能重复启动。请先检查微信和残留获取进程。",
-        "authorization_or_worker_failed_review_required": "系统授权被取消或获取失败，请检查微信；本次不会自动重试。",
+        "previous_run_requires_review": "上次获取尚待恢复检查，不能重复启动。请先检查绿泡泡和残留获取进程。",
+        "authorization_or_worker_failed_review_required": "系统授权被取消或获取失败，请检查绿泡泡；本次不会自动重试。",
         "provider_config_exists_use_connect": "已有 wxkey 材料，需先验证复用，不能重新获取。",
         "reader_config_exists_not_overwritten": "已有 Reader 配置，已保留。请先检查配置。",
         "access_validation_failed": "数据库验证未通过，请检查账号、文件权限和依赖。",
     }
-    raise SetupError(known.get(name, "微信接入未完成，已有配置已保留；请检查本机授权、微信状态和读取器兼容性。"))
+    raise SetupError(known.get(name, "绿泡泡接入未完成，已有配置已保留；请检查本机授权、绿泡泡状态和读取器兼容性。"))
 
 
 def reader_command() -> list[str] | None:

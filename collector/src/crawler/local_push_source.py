@@ -31,7 +31,7 @@ class LocalPushSource:
         rows = self.reader.call("sql", query, "--subdir", "message", "--file", filename,
                                 "--limit", str(limit)).get("rows")
         if not isinstance(rows, list):
-            raise LocalReaderError("微信读取器缺少只读 SQL 结果，请更新 wechat-cli")
+            raise LocalReaderError("绿泡泡读取器缺少只读 SQL 结果，请更新 wechat-cli")
         return rows
 
     def snapshots(self, checkpoints):
@@ -41,12 +41,12 @@ class LocalPushSource:
                   if re.fullmatch(r"gh_[A-Za-z0-9_]+", s.get("username", ""))}
         databases = self.reader.call("schema", "--subdir", "message").get("databases")
         if not isinstance(databases, list) or not databases:
-            raise LocalReaderError("微信读取器未提供消息数据库结构，请更新 wechat-cli")
+            raise LocalReaderError("绿泡泡读取器未提供消息数据库结构，请更新 wechat-cli")
         for database in databases:
             filename = database["file"]
             # source_key 会进入只读 SQL 字面量，仅允许标准数据库文件名。
             if not re.fullmatch(r"[A-Za-z0-9_.-]+", filename):
-                raise LocalReaderError("微信消息数据库文件名不兼容")
+                raise LocalReaderError("绿泡泡消息数据库文件名不兼容")
             selected = sorted(t["name"] for t in database.get("tables", [])
                               if t["name"] in tables)
             for start in range(0, len(selected), TABLE_BATCH):
@@ -65,7 +65,7 @@ class LocalPushSource:
                         f'FROM "{table}"')
                 rows = self.sql(filename, " UNION ALL ".join(queries), TABLE_BATCH)
                 if len(rows) != len(queries):
-                    raise LocalReaderError("微信消息统计不完整，未推进读取游标")
+                    raise LocalReaderError("绿泡泡消息统计不完整，未推进读取游标")
                 for row in rows:
                     for field in ("first", "last", "boundary"):
                         row[field + "_hash"] = _digest(row.pop(field + "_anchor"))

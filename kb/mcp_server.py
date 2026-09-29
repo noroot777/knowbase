@@ -31,7 +31,7 @@ def kb_search(
     until: str | None = None,
     top: int = 10,
 ) -> list[dict]:
-    """搜索个人知识库(微信公众号文章 + YouTube 视频摘要 + 工具条目树)。
+    """搜索个人知识库(绿泡泡公众号文章 + YouTube 视频摘要 + 工具条目树)。
 
     混合检索:关键词(FTS) + 语义(向量),适合精确名词和意图描述两类查询。
     注意:这是 top-K 相关性检索;"都提过哪些 XX"类穷举问题请用 kb_enumerate。

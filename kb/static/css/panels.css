@@ -241,3 +241,35 @@ body.chat-mode { padding-bottom: 28px; }
 .stage-now { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); margin-top: -4px; }
 .stage-now b { font-family: var(--font-mono); font-weight: 500; color: var(--ink); }
 .stage-now.warn { color: var(--danger); }
+
+/* ── API Key 弹窗 ─────────────────────────────────────────────
+   一家供应商一块:标题行(名字 + 当前状态)、两个输入框、拉取模型那一行。
+   原来 key/base_url 两个框直接上下贴着、还各自带一串内联 style,看上去
+   就是两块砖;这里把间距、等宽字体和分块边界一次说清。 */
+/* 说明里的路径/片段是行内的。base.css 那条 `.modal code{display:block}` 是给
+   「整块命令,点一下复制」用的,套到这段说明上会把一句话切成四个灰块,
+   而灰块在这个弹窗里跟输入框长得一模一样,人根本分不清哪个能填。 */
+#keys-modal .hint code {
+  display: inline; margin: 0; padding: 1px 6px; border-radius: 5px;
+  font-size: 12px; cursor: text; word-break: normal; overflow-wrap: anywhere;
+}
+.key-block { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.key-block + .key-block { margin-top: 12px; }
+.key-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; margin-bottom: 10px; }
+.key-head b { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.key-head span { font-size: 12px; color: var(--muted); }
+.key-fields { display: grid; gap: 8px; }
+/* key 和 base_url 都是标识符,等宽体下位数对得齐,也一眼看出是不是粘漏了 */
+.key-fields input { width: 100%; font-family: var(--font-mono); font-size: 12.5px; }
+.key-models { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
+.key-models button { min-height: 30px; padding: 4px 12px; font-size: 12px; }
+.key-models .hint { font-size: 12px; }
+.key-model-box {
+  margin-top: 8px; max-height: 150px; overflow: auto; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--paper);
+}
+.key-model-box label { display: block; font-size: 13px; padding: 2px 0; }
+.key-model-save { margin-top: 8px; min-height: 30px; padding: 4px 12px; font-size: 12px; }
+/* 保存结果就在按钮旁边说,别顶在弹窗最底下让人再找一眼 */
+.keys-footer { display: flex; gap: 8px; align-items: center; margin-top: 16px; }
+.keys-footer #keys-msg { flex: 1; min-width: 0; font-size: 12.5px; }

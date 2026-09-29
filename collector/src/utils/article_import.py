@@ -53,7 +53,7 @@ def normalize_mp_article_url(url: str) -> str:
     parsed = urlparse(raw)
     host = (parsed.hostname or "").lower().removeprefix("www.")
     if host != _MP_HOST:
-        raise ArticleImportError("请输入有效的微信公众号文章链接（mp.weixin.qq.com）")
+        raise ArticleImportError("请输入有效的绿泡泡公众号文章链接（mp.weixin.qq.com）")
     path = parsed.path or ""
     if "/s/" not in path and "appmsg" not in path:
         raise ArticleImportError("该链接不是公众号文章页")

@@ -224,13 +224,13 @@ def _search_biz(query: str) -> list[SearchCandidate]:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"微信接口请求失败：{e}")
+        raise HTTPException(status_code=503, detail=f"绿泡泡接口请求失败：{e}")
 
     # 微信接口正常时 ret=0，非 0 表示 token/cookie 问题
     if response.get('base_resp', {}).get('ret') != 0:
         raise HTTPException(
             status_code=502,
-            detail=f"微信接口返回错误：{response.get('base_resp', {}).get('err_msg', '未知')}，请检查 token/cookie 是否过期",
+            detail=f"绿泡泡接口返回错误：{response.get('base_resp', {}).get('err_msg', '未知')}，请检查 token/cookie 是否过期",
         )
 
     # 将微信返回的字段映射到前端友好的结构

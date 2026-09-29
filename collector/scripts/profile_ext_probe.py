@@ -275,7 +275,7 @@ def probe(
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict):
-        raise ValueError(f"微信返回了异常 JSON 类型：{type(payload).__name__}")
+        raise ValueError(f"绿泡泡返回了异常 JSON 类型：{type(payload).__name__}")
 
     ret = int(payload.get("ret") or 0)
     result: dict[str, Any] = {
@@ -294,9 +294,9 @@ def probe(
     if ret == 0 and isinstance(raw_list, str) and raw_list:
         result["articles"] = parse_articles(raw_list, credential.biz)
     if ret == -3:
-        result["hint"] = "微信返回 no session，需要有效的 uin/key/pass_ticket Credential"
+        result["hint"] = "绿泡泡返回 no session，需要有效的 uin/key/pass_ticket Credential"
     elif ret != 0:
-        result["hint"] = "Credential 可能已过期，或该微信接口触发了风控"
+        result["hint"] = "Credential 可能已过期，或该绿泡泡接口触发了风控"
     elif not result["articles"]:
         result["hint"] = "接口成功，但本页没有解析到图文文章"
     return result
@@ -304,7 +304,7 @@ def probe(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="只读验证微信客户端 profile_ext 文章列表通道",
+        description="只读验证绿泡泡客户端 profile_ext 文章列表通道",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Credential JSON 示例（文件不要提交到 Git）：\n"
@@ -315,7 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--account", default="", help="从 SQLite 查询公众号 __biz")
-    parser.add_argument("--url", default="", help="微信客户端捕获的完整 profile_ext URL")
+    parser.add_argument("--url", default="", help="绿泡泡客户端捕获的完整 profile_ext URL")
     parser.add_argument(
         "--credential-file",
         type=Path,
@@ -328,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--use-env-proxy",
         action="store_true",
-        help="允许 requests 使用系统代理；默认强制直连微信",
+        help="允许 requests 使用系统代理；默认强制直连绿泡泡",
     )
     parser.add_argument("--json", action="store_true", help="输出完整 JSON 结果")
     return parser

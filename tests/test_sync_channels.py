@@ -59,6 +59,38 @@ class ChannelAPITests(unittest.TestCase):
             self.client.post("/api/pipeline/schedule", json={"enabled": False, "time": "08:20"})
             self.assertEqual("wechat_local", pipeline.load_schedule()["channel"])
 
+    def test_schedule_keeps_several_sources_and_still_answers_single_channel(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(pipeline, "_SCHED_FILE", Path(tmp) / "schedule.json"):
+            body = {"enabled": True, "time": "08:15", "channels": ["rss", "wechat_local"]}
+            saved = self.client.post("/api/pipeline/schedule", json=body).json()
+            self.assertEqual(["rss", "wechat_local"], saved["channels"])
+            # 老的读取方只认 channel:多来源时它就是第一个,不能是空
+            self.assertEqual("rss", saved["channel"])
+            self.client.post("/api/pipeline/schedule", json={"enabled": False, "time": "08:20"})
+            self.assertEqual(["rss", "wechat_local"], pipeline.load_schedule()["channels"])
+
+    def test_several_sources_run_in_one_pass_with_their_own_subscriptions(self):
+        body = {"channels": [{"channel": "wechat_local", "accounts": ["甲"]},
+                             {"channel": "rss"}],
+                "since_date": "2026-09-15", "until_date": "2026-09-15"}
+        with patch.object(pipeline, "start_pipeline", return_value=True) as start:
+            self.assertEqual(200, self.client.post("/api/pipeline/run", json=body).status_code)
+        crawl_filter = start.call_args.kwargs["crawl_filter"]
+        self.assertEqual([{"channel": "wechat_local", "accounts": ["甲"]},
+                          {"channel": "rss", "accounts": []}], crawl_filter["channels"])
+        # 单来源的老字段仍然填着第一个来源,旧的读取方不用改
+        self.assertEqual(("wechat_local", ["甲"]), (crawl_filter["channel"], crawl_filter["accounts"]))
+
+    def test_repeated_empty_or_unknown_sources_are_rejected_before_run(self):
+        bodies = [{"channels": []},
+                  {"channels": [{"channel": "rss"}, {"channel": "rss"}]},
+                  {"channels": [{"channel": "bad"}]},
+                  {"channels": [{"channel": "rss", "accounts": [" "]}]}]
+        with patch.object(pipeline, "start_pipeline") as start:
+            for body in bodies:
+                self.assertEqual(400, self.client.post("/api/pipeline/run", json=body).status_code, body)
+            start.assert_not_called()
+
 
 class ChannelDispatchTests(unittest.TestCase):
     def test_pending_bodies_are_visible_without_red_stage_or_immediate_retry(self):
@@ -133,7 +165,7 @@ class ChannelDispatchTests(unittest.TestCase):
         with patch.object(wechat_oa, "_stage") as stage:
             wechat_oa.WeChatOACollector._report(0, result)
         self.assertEqual(("crawl", "ok"), stage.call_args.args[:2])
-        self.assertIn("本机暂无推送 1 个号（在微信关注并同步后可采集）", stage.call_args.args[2])
+        self.assertIn("本机暂无推送 1 个号（在绿泡泡关注并同步后可采集）", stage.call_args.args[2])
         self.assertIn("等待重试 3 篇", stage.call_args.args[2])
         self.assertEqual([], stage.call_args.kwargs["failures"])
         self.assertNotIn("覆盖待核实", stage.call_args.args[2])
@@ -176,7 +208,7 @@ class ChannelDispatchTests(unittest.TestCase):
         with patch.object(wechat_oa, "_stage") as stage:
             wechat_oa.WeChatOACollector._report(0, result)
         self.assertIn("未匹配到本机推送 14 个号", stage.call_args.args[2])
-        self.assertIn("若未关注或未同步，请在微信关注并同步", stage.call_args.args[2])
+        self.assertIn("若未关注或未同步，请在绿泡泡关注并同步", stage.call_args.args[2])
         self.assertIn("另有 1 条无法确认归属的推送，可能属于其中某个号", stage.call_args.args[2])
         self.assertNotIn("推送覆盖待核实", stage.call_args.args[2])
         items = stage.call_args.kwargs["failures"]
@@ -261,17 +293,24 @@ class ChannelDispatchTests(unittest.TestCase):
         self.assertEqual("2026-09-15", argv[argv.index("--until") + 1])
         self.assertEqual(("crawl", "error"), stage.call_args.args[:2])
 
-    def test_scheduler_dispatches_saved_channel(self):
-        schedule = {"enabled": True, "time": "08:15", "channel": "wechat_local", "last_fired": ""}
-        with patch.object(pipeline, "load_schedule", return_value=schedule), \
-             patch.object(pipeline, "datetime") as clock, \
-             patch.object(pipeline.time, "sleep", side_effect=[None, KeyboardInterrupt]), \
-             patch.object(pipeline, "_mark_fired"), \
-             patch.object(pipeline, "start_pipeline", return_value=True) as start:
-            clock.now.return_value = datetime(2026, 9, 15, 8, 15)
-            with self.assertRaises(KeyboardInterrupt):
-                pipeline._scheduler_loop()
-        start.assert_called_once_with(None, crawl_filter={"channel": "wechat_local"})
+    def test_scheduler_dispatches_saved_channels(self):
+        for saved, expected in (
+                ({"channel": "wechat_local"}, {"channel": "wechat_local"}),
+                ({"channel": "wechat_local", "channels": ["wechat_local", "rss"]},
+                 {"channel": "wechat_local",
+                  "channels": [{"channel": "wechat_local", "accounts": []},
+                               {"channel": "rss", "accounts": []}]})):
+            schedule = {"enabled": True, "time": "08:15", "last_fired": "", **saved}
+            with self.subTest(saved=saved), \
+                 patch.object(pipeline, "load_schedule", return_value=schedule), \
+                 patch.object(pipeline, "datetime") as clock, \
+                 patch.object(pipeline.time, "sleep", side_effect=[None, KeyboardInterrupt]), \
+                 patch.object(pipeline, "_mark_fired"), \
+                 patch.object(pipeline, "start_pipeline", return_value=True) as start:
+                clock.now.return_value = datetime(2026, 9, 15, 8, 15)
+                with self.assertRaises(KeyboardInterrupt):
+                    pipeline._scheduler_loop()
+                start.assert_called_once_with(None, crawl_filter=expected)
 
     def test_crawl_passes_target_and_dates_to_selected_collector(self):
         collector = Mock()
@@ -282,6 +321,95 @@ class ChannelDispatchTests(unittest.TestCase):
         active.assert_called_once_with("wechat_local")
         collector.fetch.assert_called_once_with(FetchScope(("指定号",), "2026-09-01", "2026-09-15"))
 
+    def test_each_source_fetches_its_own_targets_and_keeps_the_others_result(self):
+        """多来源同抓:一个来源红了不能把另一个来源的结论顶掉。"""
+        saved = deepcopy(pipeline_state._state)
+        try:
+            pipeline_state.clear_segments()
+            pipeline_state._state["stages"] = {s: {"status": "", "detail": ""}
+                                               for s in pipeline_state.STAGES}
+            local, rss = Mock(), Mock()
+            local.channel_label, rss.channel_label = "本机库", "RSS"
+            local.fetch.side_effect = lambda scope: pipeline_state._stage("crawl", "ok", "新增 2 篇")
+            rss.fetch.side_effect = lambda scope: pipeline_state._stage(
+                "crawl", "error", "连接失败", failures=[{"title": "某源", "reason": "超时"}])
+            filt = {"channel": "wechat_local",
+                    "channels": [{"channel": "wechat_local", "accounts": ["甲"]},
+                                 {"channel": "rss", "accounts": []}]}
+            with patch.object(pipeline_stages, "active_collector", side_effect=[local, rss]):
+                pipeline_stages._run_crawl(filt)
+            local.fetch.assert_called_once_with(FetchScope(("甲",)))
+            rss.fetch.assert_called_once_with(FetchScope())
+            entry = pipeline_state._state["stages"]["crawl"]
+            self.assertEqual("error", entry["status"])
+            self.assertEqual("本机库：新增 2 篇；RSS：连接失败", entry["detail"])
+            self.assertEqual([{"title": "某源", "reason": "超时"}], entry["failures"])
+        finally:
+            pipeline_state.clear_segments()
+            pipeline_state._state.clear()
+            pipeline_state._state.update(saved)
+
+    def test_one_source_blowing_up_does_not_cancel_the_rest(self):
+        """采集器直接抛异常时,勾了的其余来源照样要跑完,面板上也得看见是谁挂的。"""
+        saved = deepcopy(pipeline_state._state)
+        try:
+            pipeline_state.clear_segments()
+            pipeline_state._state["stages"] = {s: {"status": "", "detail": ""}
+                                               for s in pipeline_state.STAGES}
+            broken, rss = Mock(), Mock()
+            broken.channel_label, rss.channel_label = "本机库", "RSS"
+            broken.fetch.side_effect = RuntimeError("读取器没装")
+            rss.fetch.side_effect = lambda scope: pipeline_state._stage("crawl", "ok", "新增 3 篇")
+            filt = {"channel": "wechat_local",
+                    "channels": [{"channel": "wechat_local"}, {"channel": "rss"}]}
+            with patch.object(pipeline_stages, "active_collector", side_effect=[broken, rss]):
+                pipeline_stages._run_crawl(filt)
+            rss.fetch.assert_called_once_with(FetchScope())
+            entry = pipeline_state._state["stages"]["crawl"]
+            self.assertEqual("error", entry["status"])
+            self.assertIn("本机库：RuntimeError: 读取器没装", entry["detail"])
+            self.assertIn("RSS：新增 3 篇", entry["detail"])
+        finally:
+            pipeline_state.clear_segments()
+            pipeline_state._state.clear()
+            pipeline_state._state.update(saved)
+
+    def test_stop_request_keeps_the_remaining_sources_untouched(self):
+        """停止是对整次同步说的:点了之后不许再起下一个来源。"""
+        saved = deepcopy(pipeline_state._state)
+        try:
+            pipeline_state.clear_segments()
+            pipeline_state._state["stages"] = {s: {"status": "", "detail": ""}
+                                               for s in pipeline_state.STAGES}
+            pipeline_state._state["stop_requested"] = False
+            first, second = Mock(), Mock()
+            first.channel_label, second.channel_label = "本机库", "RSS"
+
+            def _stop(scope):
+                pipeline_state._state["stop_requested"] = True
+                pipeline_state._stage("crawl", "stopped", "已停止")
+
+            first.fetch.side_effect = _stop
+            filt = {"channel": "wechat_local",
+                    "channels": [{"channel": "wechat_local"}, {"channel": "rss"}]}
+            with patch.object(pipeline_stages, "active_collector", side_effect=[first, second]):
+                pipeline_stages._run_crawl(filt)
+            first.fetch.assert_called_once()
+            second.fetch.assert_not_called()
+        finally:
+            pipeline_state.clear_segments()
+            pipeline_state._state.clear()
+            pipeline_state._state.update(saved)
+
+    def test_export_materialises_every_selected_source(self):
+        local, rss = Mock(), Mock()
+        filt = {"channel": "wechat_local",
+                "channels": [{"channel": "wechat_local"}, {"channel": "rss"}]}
+        with patch.object(pipeline_stages, "active_collector", side_effect=[local, rss]):
+            pipeline_stages._run_export(filt)
+        local.materialize.assert_called_once_with()
+        rss.materialize.assert_called_once_with()
+
     def test_retry_preserves_original_channel_and_range(self):
         filt = {"channel": "wechat_local", "accounts": ["指定号"],
                 "since_date": "2026-09-01", "until_date": "2026-09-15"}
@@ -290,7 +418,8 @@ class ChannelDispatchTests(unittest.TestCase):
              patch.object(pipeline_retry, "_end_run"):
             pipeline_retry._run_retry_failed(["crawl", "export"], filt)
         crawl.assert_called_once_with(filt)
-        export.assert_called_once_with("wechat_local")
+        # 导出也要拿到整份范围:多来源那一轮的导出得把每个来源各跑一遍
+        export.assert_called_once_with(filt)
 
     def test_start_freezes_channel_and_scope_in_saved_run(self):
         saved = deepcopy(pipeline_state._state)

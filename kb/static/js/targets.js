@@ -126,7 +126,7 @@ function renderTargets() {
     const left = tgtReadiness.total - tgtReadiness.ready;
     $('tgt-ready-text').textContent = left
       ? `还有 ${left} 个凭证不新鲜(黄=放太久,红=没有或已失效)`
-        + '——去 Mac 微信里各点开一篇文章'
+        + '——去 Mac 绿泡泡里各点开一篇文章'
       : '全部就绪,可以同步了';
     $('tgt-ready-text').style.color = left ? 'var(--muted)' : 'var(--ok)';
   }

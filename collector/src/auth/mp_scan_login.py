@@ -53,7 +53,7 @@ class ScanAskResult:
 def scan_status_message(status: int, data: dict | None = None) -> str:
     data = data or {}
     if status == SCAN_STATUS_WAITING:
-        return "请使用微信扫一扫登录"
+        return "请使用绿泡泡扫一扫登录"
     if status == SCAN_STATUS_CONFIRMED:
         return "已确认，正在登录…"
     if status in SCAN_STATUS_EXPIRED:
