@@ -67,7 +67,7 @@ async page => {
     check('成功后首次提示收起', await page.locator('#wechat-welcome').isHidden());
     await page.locator('#wechat-next').click();
     check('继续同步切换本地通道', await page.locator('#pipe-channel-current').inputValue() === 'wechat_local');
-    check('打开同步管理页', await page.locator('#pipepanel').isVisible());
+    check('打开同步中心', await page.locator('#pipepanel').isVisible());
     await page.getByRole('button',{name:'检查并接入绿泡泡',exact:true}).click();
     // 向导里点 API Key / 模型配置:新窗口叠在向导之上,关掉它向导必须还开着
     // (原来是先关向导再开新窗口,关掉新窗口就落回空白页面,得重新点开向导)

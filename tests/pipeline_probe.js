@@ -15,6 +15,7 @@ async page => {
   let statusCount = 0, statusFail = false, holdStop = false, releaseStop = null;
   let sourceCount = 0, pendingCount = 0;
   let holdB = false, releaseB = null, accountFail = false, startFail = false;
+  let holdAcct = false; const heldAcct = [], acctCalls = {};
   let holdStart = false, releaseStart = null, scheduleFail = false;
   let holdChannels = false, releaseChannels = null, channelFail = false;
   let clockInstalled = false;
@@ -41,7 +42,9 @@ async page => {
     }
     if (path === '/api/pipeline/accounts') {
       const channel = url.match(/[?&]channel=([^&]*)/)?.[1];
+      acctCalls[channel] = (acctCalls[channel] || 0) + 1;
       if (channel==='b' && holdB) { releaseB=()=>reply(route,{accounts:accounts.b}); return; }
+      if (holdAcct) { heldAcct.push(route); return; }
       return reply(route,accountFail?{detail:'测试列表加载失败'}:{accounts:accounts[channel] || []},accountFail?503:200);
     }
     if (path === '/api/pipeline/stop') {
@@ -364,6 +367,32 @@ async page => {
     holdChannels=false;if(releaseChannels)await releaseChannels();
     await page.getByRole('button',{name:'重新读取来源',exact:true}).click();await page.locator('input[data-acct]').first().waitFor();
     check('超时后重试不复用失效请求',await page.locator('#pipe-start').isEnabled());
+
+    // 关闭窗口时被中止的那次读取不会再回来:重开必须重新发请求,不然永远停在
+    // 「正在读取订阅…」上,开始按钮跟着一直禁用。
+    await page.getByRole('button',{name:'暂不执行',exact:true}).click();
+    const acctBefore = acctCalls.a;
+    const waitAcctCalls = async n => { for (let i=0;i<60 && acctCalls.a<n;i++) await page.waitForTimeout(50); };
+    holdAcct=true;
+    await page.locator('#pipe-run').click();
+    await waitAcctCalls(acctBefore+1);
+    check('重开配置会重新读取订阅而不是沿用旧缓存',acctCalls.a===acctBefore+1 && (await page.locator('#pipe-acct-list').textContent()).includes('正在读取订阅'));
+    await page.getByRole('button',{name:'暂不执行',exact:true}).click();
+    holdAcct=false;for(const r of heldAcct.splice(0))r.abort().catch(()=>{});
+    await page.locator('#pipe-run').click();await page.locator('input[data-acct]').first().waitFor();
+    check('读取订阅途中关掉再打开不会卡在加载中',acctCalls.a===acctBefore+2 && await page.locator('#pipe-start').isEnabled());
+    // 关着的这段时间里订阅被增删过(在别处添加/停用/移除了号):重开要照新的来,
+    // 原来的勾选按新列表过滤——没了的不留,新来的也不替用户勾上。
+    await page.getByRole('checkbox',{name:'公众号甲',exact:true}).uncheck();
+    await page.getByRole('button',{name:'暂不执行',exact:true}).click();
+    accounts.a=['公众号甲','公众号乙','公众号丁'];
+    await page.locator('#pipe-run').click();
+    await page.getByRole('checkbox',{name:'公众号丁',exact:true}).waitFor();
+    check('重开反映订阅增删并按新列表过滤原勾选',
+      await page.getByRole('checkbox',{name:'公众号丙 "<测试>',exact:true}).count()===0
+      && !await page.getByRole('checkbox',{name:'公众号甲',exact:true}).isChecked()
+      && await page.getByRole('checkbox',{name:'公众号乙',exact:true}).isChecked()
+      && !await page.getByRole('checkbox',{name:'公众号丁',exact:true}).isChecked());
     check('无未处理前端异常',errors.length===0);
     return {passed:checks.length,checks,errors,isolatedWrites:writes};
   } catch (e) {

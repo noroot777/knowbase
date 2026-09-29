@@ -39,7 +39,8 @@ async function openPipeModal() {
   try {
     await loadPipeChannels();
     if (!pipeModalOpen()) return;
-    renderPipeChannel(); await loadPipeAccounts();
+    // 每次打开都重读一遍订阅:上次看到的那份可能已经过期(期间添加/停用/移除过号)
+    renderPipeChannel(); await loadPipeAccounts(true);
   } catch (e) {
     if (!pipeModalOpen()) return;
     $('pipe-acct-list').innerHTML = '<div class="pipe-acct-empty">同步来源暂不可用。<br><button class="ghost" onclick="openPipeModal()">重新读取来源</button></div>';
@@ -48,12 +49,19 @@ async function openPipeModal() {
 }
 function closePipeModal() {
   savePipeDraft();
-  for (const controller of pipeAcctAborts.values()) controller.abort();
+  for (const [id, controller] of pipeAcctAborts) {
+    controller.abort();
+    // 中止掉的那次读取不会再回来了。状态留成 loading 的话,下次打开会被
+    // loadChannelAccounts 的短路当成"正在读",既不发新请求也永远结束不了,
+    // 开始按钮就一直禁用着。
+    pipeAccounts.delete(id);
+  }
   pipeAcctAborts.clear();
   $('pipe-modal').style.display = 'none'; closePipeRange();
 }
 // 勾掉的来源不再占列表，但它的选择留在草稿里：再勾回来时还是上次那几个订阅。
-async function loadPipeAccounts() {
+// force=true 用在打开弹窗时(重读全部),勾选变化时不带,只读新勾上的那个。
+async function loadPipeAccounts(force = false) {
   savePipeDraft();
   for (const id of [...pipeAccounts.keys()]) {
     if (pipeRunSel.includes(id)) continue;
@@ -61,7 +69,7 @@ async function loadPipeAccounts() {
     pipeAccounts.delete(id); pipeSel.delete(id);
   }
   renderPipeAcctList();
-  await Promise.all(pipeRunSel.map(id => loadChannelAccounts(id)));
+  await Promise.all(pipeRunSel.map(id => loadChannelAccounts(id, force)));
 }
 async function loadChannelAccounts(channel, force = false) {
   if (!force && ['ready', 'loading'].includes(pipeAccounts.get(channel)?.state)) return;
