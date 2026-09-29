@@ -18,6 +18,7 @@
 <link rel="stylesheet" href="/static/css/navigation.css">
 <link rel="stylesheet" href="/static/css/pipeline.css">
 <link rel="stylesheet" href="/static/css/sources.css">
+<link rel="stylesheet" href="/static/css/daily.css">
 <link rel="stylesheet" href="/static/css/wechat_setup.css">
 </head>
 <body>
@@ -36,6 +37,7 @@
     <button id="tab-search" onclick="switchTab('search')"><i data-icon="search"></i><span>全文检索</span></button>
     <button id="tab-ask" onclick="switchTab('ask')"><i data-icon="spark"></i><span>知识问答</span></button>
     <button id="tab-fav" onclick="switchTab('fav')"><i data-icon="bookmark"></i><span>我的收藏</span></button>
+    <button id="tab-daily" onclick="switchTab('daily')"><i data-icon="paper"></i><span>每日日报</span><span id="nav-daily-dot" hidden aria-label="日报生成中"></span></button>
   </nav>
   <div class="nav-label">信息来源</div>
   <nav class="tabs" id="source-navigation" aria-label="信息来源">
@@ -147,6 +149,46 @@
   <div id="fav-list"><div class="empty">加载中…</div></div>
 </div>
 
+<div id="dailypanel" style="display:none">
+  <header class="daily-heading">
+    <div><h1>每日日报</h1>
+      <div class="collection-meta"><span><strong id="daily-count">—</strong> 份日报</span><span id="daily-latest">正在读取已生成的日报</span></div>
+    </div>
+    <div class="daily-heading-actions">
+      <label for="daily-date">日期</label><input type="date" id="daily-date" aria-label="日报日期">
+      <button class="ghost" id="daily-gen" onclick="runDaily(false)">直接生成</button>
+      <button id="daily-sync-gen" onclick="runDaily(true)">同步全部并生成</button>
+    </div>
+  </header>
+  <div id="daily-progress" class="daily-banner" hidden role="status"><span id="daily-progress-text"></span><button class="text-button" id="daily-stop" onclick="stopDaily()">停止</button></div>
+  <div id="daily-error" class="daily-banner error" hidden role="alert"><span id="daily-error-text"></span><button class="ghost" onclick="loadDailyPanel()">重新读取</button></div>
+  <div class="daily-workbench">
+    <section class="daily-stream" aria-label="已生成的日报">
+      <div class="daily-section-heading"><h2>已生成</h2><span id="daily-list-note"></span></div>
+      <div id="daily-list" aria-live="polite"></div>
+    </section>
+    <article class="daily-reader" aria-label="日报正文">
+      <div class="daily-reader-head">
+        <h2 id="daily-reader-title">还没有选中日报</h2>
+        <div class="daily-reader-actions"><button class="text-button" id="daily-copy" onclick="copyDailyReport()" hidden>复制全文</button><button class="text-button daily-delete" id="daily-del" onclick="deleteDailyReport()" hidden>删除</button></div>
+      </div>
+      <p id="daily-reader-meta" class="hint"></p>
+      <div id="daily-reader-body"><div class="daily-empty"><h3>先生成今天的日报</h3><p>点右上角「同步全部并生成」：依次同步所选来源，再把当天入库的内容写成一份日报。</p></div></div>
+    </article>
+  </div>
+  <section class="daily-schedule">
+    <div><h2>每天定时生成</h2><p>需要知识库服务保持运行；管道被占用时顺延。</p></div>
+    <fieldset id="daily-sched-fields" disabled>
+      <label><input type="checkbox" id="daily-on" onchange="markDailyDirty()"> 启用定时</label>
+      <label>每天 <input type="time" id="daily-time" value="08:00" required oninput="markDailyDirty()"></label>
+      <label><input type="checkbox" id="daily-sync" checked onchange="markDailyDirty()"> 生成前先同步</label>
+      <label>覆盖最近 <input type="number" id="daily-days" min="1" max="7" value="1" required oninput="markDailyDirty()"> 天</label>
+    </fieldset>
+    <div class="daily-channels"><span class="daily-channels-label">同步范围</span><div id="daily-channels" role="group" aria-label="同步范围"></div></div>
+    <div class="daily-schedule-footer"><span id="daily-sched-msg" role="status">正在读取定时设置…</span><button id="daily-sched-save" class="ghost" onclick="saveDailySettings()" disabled>保存设置</button></div>
+  </section>
+</div>
+
 <div id="pipepanel" style="display:none">
   <div class="pipe-page-heading"><div><h1>微信同步</h1></div>
     <div class="pipe-actions"><button class="ghost" id="pipe-retry" onclick="retryFailed()" aria-describedby="pipe-retry-help" hidden>重试失败项</button><button id="pipe-run" onclick="openPipeModal()" aria-describedby="pipe-state-hint">新建同步</button></div>
@@ -221,7 +263,7 @@
   <div id="source-edit-error" class="field-err" role="alert"></div><div class="source-form-actions"><button type="button" class="ghost" onclick="closeSourceEditor()">取消</button><button type="submit" id="source-edit-save">保存订阅</button></div>
   </form></div></div>
 <div id="source-reader" class="modal-mask" style="display:none" onclick="if(event.target===this)$('source-reader').style.display='none'"><div class="modal source-reader-dialog">
-  <div class="source-reader-toolbar"><a id="source-reader-link" target="_blank" rel="noopener noreferrer">打开原文<i data-arrow="ext"></i></a><button class="ghost" onclick="$('source-reader').style.display='none'" aria-label="关闭内容阅读">关闭</button></div>
+  <div class="source-reader-toolbar"><a id="source-reader-link" target="_blank" rel="noopener noreferrer">打开原文<i data-arrow="ext"></i></a><button class="text-button" id="source-reader-original" hidden onclick="toggleSourceOriginal()">看英文原文</button><button class="ghost" onclick="$('source-reader').style.display='none'" aria-label="关闭内容阅读">关闭</button></div>
   <h2 id="source-reader-title"></h2><p id="source-reader-meta" class="hint"></p><div id="source-reader-body"></div>
 </div></div>
 
@@ -451,6 +493,7 @@
 <script src="/static/js/pipe_schedule.js"></script>
 <script src="/static/js/targets.js"></script>
 <script src="/static/js/gallery.js"></script>
+<script src="/static/js/daily.js"></script>
 <script src="/static/js/sources.js"></script>
 <script src="/static/js/source_forms.js"></script>
 <script src="/static/js/wechat_setup.js"></script>

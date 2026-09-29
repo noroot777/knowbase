@@ -1,5 +1,5 @@
 // Workspace navigation, addressable filters and accessible overlay lifecycle.
-const WORKSPACE_TITLES = { gallery: '工具图鉴', search: '全文检索', ask: '知识问答', fav: '我的收藏', pipe: '同步管理' };
+const WORKSPACE_TITLES = { gallery: '工具图鉴', search: '全文检索', ask: '知识问答', fav: '我的收藏', daily: '每日日报', pipe: '同步管理' };
 let activeTab = 'gallery';
 let restoringLocation = false;
 const tabScroll = new Map();
@@ -190,4 +190,5 @@ async function initWorkspace() {
   restoreWorkspaceLocation();
   syncOverlays();
   refreshPipe(); // Discover work started by the scheduler or another tab, even on the gallery.
+  refreshDailyStatus(); // 同理:定时日报可能正在跑,侧栏那颗点要立刻亮起来。
 }

@@ -47,6 +47,48 @@ CREATE TABLE IF NOT EXISTS feed_runs (
 );
 '''
 
+# 译文列是后加的(见 kb/feeds/translate.py)。老库里已有几千条英文条目,建表语句
+# 的 IF NOT EXISTS 对它们不生效,只能逐列 ALTER 补——补不上就不是"少个字段",
+# 而是整个翻译流程在老库上永远报 no such column。
+_ADDED_COLUMNS = {
+    'feed_items': (
+        ('lang', "TEXT NOT NULL DEFAULT ''"),              # '' 未判 / zh 无需翻译 / en 待翻译
+        ('title_zh', "TEXT NOT NULL DEFAULT ''"),
+        ('body_zh', "TEXT NOT NULL DEFAULT ''"),
+        ('translated_at', "TEXT NOT NULL DEFAULT ''"),
+        ('translate_error', "TEXT NOT NULL DEFAULT ''"),
+        ('translate_tries', 'INTEGER NOT NULL DEFAULT 0'),
+    ),
+}
+
+
+def _migrate(conn) -> None:
+    for table, columns in _ADDED_COLUMNS.items():
+        have = {r['name'] for r in conn.execute(f'PRAGMA table_info({table})')}
+        for name, decl in columns:
+            if name not in have:
+                conn.execute(f'ALTER TABLE {table} ADD COLUMN {name} {decl}')
+
+
+# 非中文判定:中日韩字符占比低于这个数就当成"外文,要翻译"。纯英文条目是 0,
+# 正常中文条目远高于它;夹杂大段代码/英文引文的中文条目也在它之上。
+_CJK_SHARE = 0.12
+
+
+def text_language(*parts: str) -> str:
+    """'zh' = 不用翻译;'en' = 外文(泛指非中文),要走翻译。
+
+    只看字符构成,不调模型:翻译本身才花钱,判定不能也花钱。标题和正文合起来
+    判一次——短标题单看常常判不准(全是产品名的标题一个汉字都没有)。
+    """
+    text = ' '.join(p or '' for p in parts)
+    cjk = sum(1 for ch in text if '一' <= ch <= '鿿')
+    letters = sum(1 for ch in text if ch.isalpha())
+    if letters < 12:                      # 太短:判不出来就别翻,留原样
+        return 'zh'
+    return 'zh' if cjk / letters >= _CJK_SHARE else 'en'
+
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
@@ -114,6 +156,7 @@ def db():
     conn.execute('PRAGMA journal_mode=WAL')
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         # One transaction: deleting a default never brings it back on restart.
         conn.execute('BEGIN IMMEDIATE')
         if not conn.execute("SELECT 1 FROM feed_meta WHERE key='defaults-v1'").fetchone():
@@ -238,10 +281,11 @@ def put_items(source: dict, entries: list[dict]) -> int:
             added += int(not exists)
             # First provenance remains stable when an aggregate also contains this URL.
             c.execute('''INSERT INTO feed_items
-                (key,kind,url,title,author,published,body,content_kind,fetched_at,content_hash)
-                VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO NOTHING''',
+                (key,kind,url,title,author,published,body,content_kind,fetched_at,content_hash,lang)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO NOTHING''',
                 (key,source['kind'],e['url'],e['title'],e.get('author') or source['name'],
-                 e.get('published',''),e['body'],e.get('content_kind','feed'),now(),digest))
+                 e.get('published',''),e['body'],e.get('content_kind','feed'),now(),digest,
+                 text_language(e['title'], e['body'])))
             c.execute('INSERT OR IGNORE INTO subscription_items VALUES(?,?)', (source['id'],key))
     return added
 
@@ -253,8 +297,11 @@ def items(kind: str, source_id: int | None = None, offset: int = 0, limit: int =
         where += ' AND key IN (SELECT item_key FROM subscription_items WHERE subscription_id=?)'
         args.append(source_id)
     if q:
-        where += ' AND (title LIKE ? OR body LIKE ? OR author LIKE ?)'
-        args.extend(['%' + q + '%'] * 3)
+        # 译文也要能搜到:面板上显示的就是译文,搜屏幕上看得见的词却搜不出来
+        # 是最难解释的一种"没结果"。
+        where += (' AND (title LIKE ? OR body LIKE ? OR author LIKE ?'
+                  ' OR title_zh LIKE ? OR body_zh LIKE ?)')
+        args.extend(['%' + q + '%'] * 5)
     with db() as c:
         total = c.execute('SELECT count(*) FROM feed_items WHERE ' + where, args).fetchone()[0]
         rows = c.execute('SELECT * FROM feed_items WHERE ' + where +

@@ -1,0 +1,260 @@
+# -*- coding: utf-8 -*-
+"""日报:把一天里进来的所有内容(公众号、大V观点、RSS、视频…)写成一份综述。
+
+素材取自 kb.db 的 documents —— 也就是说日报只认"已经落进 vault 并索引过"的
+内容,不认识任何具体来源。这是故意的:新增一种来源,日报自动就覆盖了。
+
+产物是 vault 里的一篇 markdown(`<vault>/daily/YYYY-MM-DD.md`),不是数据库里的
+一行:kb.db 是可以随时删掉重建的索引,而日报是花了模型钱写出来的东西,重建索引
+不该把它弄丢;放进 vault 也顺带让 Obsidian 那头能直接读。这个目录不在
+`kb.config.SOURCES` 的任何一棵树下,所以日报自己不会被索引进库、更不会成为
+下一份日报的素材。
+"""
+
+from __future__ import annotations
+
+import os
+import tempfile
+from datetime import date as Date
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import yaml
+
+from kb.config import PRIMARY_SOURCE_NAMES, VAULT_ROOT
+from kb.scanner import parse_frontmatter
+from kb.source_types import SOURCE_TYPES
+from kb.store import promo_exclude_sql
+
+# 一份日报最多带多少条素材进 prompt。一天正常十几到几十条;真有几百条时
+# 取最新的那批,并在日报里如实写明"另有 N 条未纳入"。
+MAX_ITEMS = 120
+EXCERPT = 400           # 每条素材的摘要上限(字符)
+DIR_NAME = 'daily'
+
+# 来源名 → 人话。feed 类来源的标签跟着 SOURCE_TYPES 走,其余几棵树是固定的。
+_SOURCE_LABEL = {
+    'dr-gzh': '公众号', 'gzh': '公众号', 'dr': 'AI 日报',
+    'dr-youtube-dig': 'YouTube 视频',
+    **{k: v.label for k, v in SOURCE_TYPES.items()},
+}
+
+PROMPT = """你是这个知识库主人的情报助理。下面是 {range_label} 进入知识库的 {n} 条内容\
+(来自公众号、社交观点、RSS 订阅和视频摘要)。请写一份当日日报。
+
+输出要求:
+- 全中文,直接输出 markdown 正文,不要代码围栏,不要重复标题行。
+- 每条结论后面用编号标注出处,如 [3][7];编号就是下面列表的序号。
+- 只依据下面给出的材料写,不要编造事实、数字、评价;材料没说的不要推断。
+- 不要逐条复述所有内容,该合并的合并,该舍弃的舍弃。
+
+结构严格如下:
+
+## 今日要点
+
+3~6 条真正值得知道的事。每条一个列表项:**一句话点明事件**,再用一两句说清\
+"是什么、为什么值得注意"。教程、旧闻盘点、招聘、纯营销不算要点。
+
+## 工具与项目
+
+今天出现的、可以拿来用的开源项目或产品。每条一行:名字 — 一句话说明它解决什么问题。\
+今天没有就写"今天没有值得单独拿出来的新工具"。
+
+## 观点与讨论
+
+社交观点和评论里值得留意的看法,1~4 条。没有就写一行"今天没有明显的讨论热点"。
+
+## 一句话速览
+
+其余内容各一行,一行不超过 30 字。最多 12 行,超出的不写。
+
+材料:
+{items}
+"""
+
+
+def report_dir() -> Path:
+    return VAULT_ROOT / DIR_NAME
+
+
+def _label(source: str) -> str:
+    return _SOURCE_LABEL.get(source, source)
+
+
+def _range(day: str, days: int) -> tuple[str, str]:
+    """(since, until),都是 YYYY-MM-DD,闭区间。days=1 就是当天。"""
+    until = Date.fromisoformat(day)
+    since = until - timedelta(days=max(1, days) - 1)
+    return since.isoformat(), until.isoformat()
+
+
+def collect(conn, since: str, until: str, limit: int = MAX_ITEMS) -> tuple[list[dict], int]:
+    """取区间内的素材,返回 (最多 limit 条, 区间内总条数)。
+
+    - 只看非衍生来源:条目化产物(dr-gzh-projects 等)与原文是同一批内容,
+      两份都进 prompt 的话同一个工具会在日报里出现两次。
+    - 挡掉 hard 软广,口径与检索一致(`store.promo_exclude_sql`)。
+    - `published` 是来源给的发布时间,少数条目为空;那种按入库时间归日,
+      否则一条没有日期的 RSS 永远进不了任何一天的日报。
+    """
+    names = ','.join('?' * len(PRIMARY_SOURCE_NAMES))
+    where = (f"d.source IN ({names})"
+             " AND (CASE WHEN d.published <> '' THEN substr(d.published,1,10)"
+             " ELSE substr(COALESCE(d.indexed_at,''),1,10) END) BETWEEN ? AND ?"
+             f" AND {promo_exclude_sql('d')}")
+    args = [*PRIMARY_SOURCE_NAMES, since, until]
+    total = conn.execute(f'SELECT count(*) FROM documents d WHERE {where}', args).fetchone()[0]
+    rows = conn.execute(
+        'SELECT d.path,d.source,d.title,d.account,d.published,d.url,d.summary,d.indexed_at'
+        f' FROM documents d WHERE {where}'
+        " ORDER BY CASE WHEN d.published <> '' THEN d.published ELSE d.indexed_at END DESC"
+        ' LIMIT ?', [*args, limit]).fetchall()
+    items = []
+    for r in rows:
+        doc = dict(r)
+        doc['entities'] = [e[0] for e in conn.execute(
+            'SELECT entity FROM entities WHERE path=? LIMIT 8', (doc['path'],))]
+        doc['topics'] = [t[0].split('/', 1)[-1] for t in conn.execute(
+            "SELECT tag FROM doc_tags WHERE path=? AND tag LIKE 'topic/%'", (doc['path'],))]
+        doc['excerpt'] = (doc['summary'] or '').strip()
+        if not doc['excerpt']:
+            # 没提取过的文档没有 summary(提取失败、或者刚索引完还没轮到它)。
+            # 拿第一个 chunk 顶上,总比把这条从日报里整个漏掉强。
+            first = conn.execute(
+                'SELECT text FROM chunks WHERE path=? ORDER BY seq LIMIT 1',
+                (doc['path'],)).fetchone()
+            doc['excerpt'] = (first[0] if first else '').strip()
+        doc['excerpt'] = doc['excerpt'][:EXCERPT]
+        items.append(doc)
+    return items, total
+
+
+def _material(items: list[dict]) -> str:
+    lines = []
+    for i, d in enumerate(items, 1):
+        head = f"{i}. [{_label(d['source'])}·{d['account'] or '未署名'}] {d['title']}"
+        tail = []
+        if d['entities']:
+            tail.append('涉及: ' + '、'.join(d['entities'][:6]))
+        if d['topics']:
+            tail.append('主题: ' + '、'.join(d['topics'][:4]))
+        lines.append(head + '\n   ' + (d['excerpt'] or '(无摘要)')
+                     + ('\n   ' + ';'.join(tail) if tail else ''))
+    return '\n'.join(lines)
+
+
+def _range_label(since: str, until: str) -> str:
+    return until if since == until else f'{since} 至 {until}'
+
+
+def _page(since: str, until: str, items: list[dict], total: int,
+          body: str, model: str) -> str:
+    counts: dict[str, int] = {}
+    for d in items:
+        counts[_label(d['source'])] = counts.get(_label(d['source']), 0) + 1
+    meta = {
+        'type': 'daily-report', 'date': until, 'since': since, 'until': until,
+        'docs': len(items), 'total': total, 'sources': counts, 'model': model,
+        'generated': datetime.now().strftime('%Y-%m-%d %H:%M'),
+    }
+    refs = '\n'.join(
+        f"{i}. [{d['title']}]({d['url']}) — {_label(d['source'])}·{d['account'] or '未署名'}"
+        if d['url'] else
+        f"{i}. {d['title']} — {_label(d['source'])}·{d['account'] or '未署名'}"
+        for i, d in enumerate(items, 1))
+    more = (f'\n\n> 当日共 {total} 条,以上列出最新的 {len(items)} 条。'
+            if total > len(items) else '')
+    return ('---\n' + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + '---\n\n'
+            f'# 日报 · {_range_label(since, until)}\n\n{body.strip()}\n\n'
+            f'## 素材清单({len(items)} 条)\n\n{refs}{more}\n')
+
+
+def _write(path: Path, text: str) -> None:
+    """同目录唯一临时文件 + rename:写到一半失败时,昨天那份日报逐字节不变。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + '.', suffix='.tmp')
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(text)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def generate(day: str | None = None, days: int = 1, model=None, progress=None) -> dict:
+    """生成一份日报并落盘,返回 {date, path, docs, total, model}。
+
+    素材为空时抛 LookupError(那不是失败,是"今天没内容"),调用方据此提示,
+    而不是拿一份空日报盖掉可能已经存在的那份。
+    """
+    from kb import llm, llm_stages, store
+
+    day = day or Date.today().isoformat()
+    since, until = _range(day, days)
+    conn = store.connect()
+    try:
+        items, total = collect(conn, since, until)
+    finally:
+        conn.close()
+    if not items:
+        raise LookupError(f'{_range_label(since, until)} 没有已入库的内容,先同步再生成日报')
+    picked = model or llm_stages.stage_model('daily')
+    if progress:
+        progress(f'正在让模型综合 {len(items)} 条内容')
+    body = llm.chat(PROMPT.format(range_label=_range_label(since, until),
+                                  n=len(items), items=_material(items)),
+                    picked, max_tokens=8192, timeout=600)
+    if not body.strip():
+        raise RuntimeError('模型返回了空日报,请稍后重试或换一个模型')
+    path = report_dir() / f'{until}.md'
+    _write(path, _page(since, until, items, total, body, str(picked)))
+    return {'date': until, 'since': since, 'until': until, 'path': str(path),
+            'docs': len(items), 'total': total, 'model': str(picked)}
+
+
+# ── 已生成的日报 ────────────────────────────────────────────────────────────────
+
+def _entry(path: Path, with_body: bool = False) -> dict:
+    meta, body = parse_frontmatter(path.read_text(encoding='utf-8'))
+    out = {'date': str(meta.get('date') or path.stem), 'docs': int(meta.get('docs') or 0),
+           'total': int(meta.get('total') or 0), 'model': str(meta.get('model') or ''),
+           'generated': str(meta.get('generated') or ''),
+           'sources': meta.get('sources') if isinstance(meta.get('sources'), dict) else {},
+           'since': str(meta.get('since') or ''), 'until': str(meta.get('until') or '')}
+    if with_body:
+        out['body'] = body
+    return out
+
+
+def _path_for(day: str) -> Path:
+    """按日期取文件路径。日期先过 fromisoformat —— 它同时是校验:
+    这个值来自 HTTP 参数,不校验就等于把整个 vault 变成可读的。"""
+    return report_dir() / f'{Date.fromisoformat(day).isoformat()}.md'
+
+
+def reports(limit: int = 60) -> list[dict]:
+    root = report_dir()
+    if not root.is_dir():
+        return []
+    out = []
+    for path in sorted(root.glob('*.md'), reverse=True)[:limit]:
+        try:
+            out.append(_entry(path))
+        except (OSError, ValueError):
+            continue            # 手工放进来的文件不该让整个列表打不开
+    return out
+
+
+def report(day: str) -> dict | None:
+    path = _path_for(day)
+    return _entry(path, with_body=True) if path.is_file() else None
+
+
+def delete(day: str) -> bool:
+    path = _path_for(day)
+    if not path.is_file():
+        return False
+    path.unlink()
+    return True

@@ -28,7 +28,21 @@ class FeedCollector:
         collect(self.name, scope)
 
     def materialize(self):
+        from kb.feeds import translate
         from kb.feeds.sync import export
+        from kb.pipeline_state import _log, _stage
+
+        # 进度每 5 条报一次:_stage 每次都往运行日志里写一行,逐条报会把
+        # 只留 80 行的日志刷成一屏"翻译 17/40",别的阶段全被挤没。
+        def progress(done, total):
+            if done % 5 == 0 or done == total:
+                _stage('export', 'running', f'翻译外文内容 {done}/{total}')
+
+        # 先把外文条目译成中文再落盘:vault 的 md 是索引/提取/日报共同的事实来源,
+        # 导出完再翻等于先写一份英文进去,后面每一层都按英文处理过一遍。
+        summary = translate.translate_pending(self.name, progress=progress)
+        if note := translate.summarize(summary):
+            _log(f'export: {note}')
         export(self.name)
 
     def pending(self):

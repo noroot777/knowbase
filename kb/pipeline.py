@@ -211,6 +211,11 @@ def _mark_fired(day: str) -> None:
 
 
 def _scheduler_tick() -> None:
+    from kb import daily_run
+    # 日报自己会依次占用管道跑每个通道。这时候再让别的定时任务插进来抢锁,
+    # 日报那边就会一直等不到空闲、把通道一个个记成"跳过"。
+    if daily_run.is_running():
+        return
     with _schedule_lock:
         s = load_schedule()
         now = datetime.now()
@@ -224,6 +229,8 @@ def _scheduler_tick() -> None:
                 _mark_fired(today)
                 _log(f"定时任务触发全流程同步(每日 {s['time']})")
                 return
+    if daily_run.tick():
+        return
     from kb.feeds.schedule import tick
     tick(start_pipeline)
 

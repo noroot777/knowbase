@@ -12,6 +12,7 @@ import yaml
 
 from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
+from kb.feeds import translate
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_state import _state, _stage
 
@@ -143,13 +144,23 @@ def export(kind: str):
             break
         path = root / (item['key'] + '.md')
         rel = str(path.relative_to(VAULT_ROOT))
-        meta = dict(source=kind, title=item['title'], account=item['author'], published=item['published'],
+        title, body = translate.display(item)
+        translated = body != item['body']
+        meta = dict(source=kind, title=title, account=item['author'], published=item['published'],
                     url=item['url'], fetched_at=item['fetched_at'], content_kind=item['content_kind'])
+        if translated:
+            meta.update(lang='zh', translated_from='en')
+            # 标题没跟着译时不写这一行:原标题和 title 一模一样,写上去只是噪音。
+            # 真译了才留 —— 正文已经整篇换成中文,想按英文名找回这条只剩这个入口。
+            if title != item['title']:
+                meta['original_title'] = item['title']
         notice = '\n> 以下为订阅源提供的摘要；完整内容请打开原文。\n' if item['content_kind'] == 'summary' else ''
+        if translated:
+            notice += '\n' + translate.NOTE + '\n'
         text = '---\n' + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + '---\n\n'
         # Keep the parsed text intact for the vault, indexing and extraction.
         # HTML safety belongs to the reader (textContent / DOMPurify).
-        text += '# ' + item['title'] + '\n' + notice + '\n' + item['body'] + '\n'
+        text += '# ' + title + '\n' + notice + '\n' + body + '\n'
         temp = None
         try:
             with tempfile.NamedTemporaryFile('w', dir=root, suffix='.tmp', encoding='utf-8', delete=False) as f:

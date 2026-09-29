@@ -3,11 +3,11 @@ const $ = id => document.getElementById(id);
 let tagFilters = [], entityFilters = [];
 
 function switchTab(t) {
-  const regularTabs = ['gallery', 'search', 'ask', 'fav', 'pipe'];
+  const regularTabs = ['gallery', 'search', 'ask', 'fav', 'daily', 'pipe'];
   const isSource = typeof sourceModules !== 'undefined' && sourceModules.has(t);
   if (!regularTabs.includes(t) && !isSource) return;
   const previousScroll = window.scrollY;
-  for (const k of ['gallery', 'search', 'ask', 'fav', 'pipe']) {
+  for (const k of regularTabs) {
     $(k + 'panel').style.display = t === k ? '' : 'none';
     $('tab-' + k).classList.toggle('on', t === k);
   }
@@ -16,6 +16,7 @@ function switchTab(t) {
   if (typeof sourceModules !== 'undefined') for (const kind of sourceModules.keys()) $('tab-' + kind).classList.toggle('on', t === kind);
   if (typeof updateWorkspaceTab === 'function') updateWorkspaceTab(t, previousScroll);
   if (t === 'pipe') { refreshPipe(true); initTargets(); }
+  if (t === 'daily') loadDailyPanel();
   if (t === 'ask') initChat();
   if (t === 'fav') loadFavPanel();
   if (t === 'search') loadMeta().catch(() => {});

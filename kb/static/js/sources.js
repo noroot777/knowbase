@@ -167,12 +167,19 @@ function renderSubscription(s) {
     ${s.last_error ? `<details class="source-failure"><summary>查看失败原因与重试时间</summary><p>${esc(s.last_error)}</p><p>自动重试：${sourceTime(s.retry_at*1000)}；也可点击“同步”立即重试。</p></details>` : ''}</div>
     <div class="source-row-actions"><button class="text-button" data-source-action="edit" data-source-id="${s.id}">编辑</button><button class="text-button" data-source-action="toggle" data-source-id="${s.id}">${s.enabled ? '停用' : '启用'}</button><button class="text-button" data-source-action="sync" data-source-id="${s.id}" ${!s.enabled?'disabled':''}>同步</button><button class="text-button source-delete" data-source-action="delete" data-source-id="${s.id}">删除</button></div></article>`;
 }
+// 外文条目在入库前已经译成中文(kb/feeds/translate.py),面板一律显示译文:
+// vault 里存的就是这一份,面板显示英文的话用户根本不知道库里到底是什么。
+// 原文没丢,阅读弹窗里可以切回去。
+function sourceText(item) {
+  return { title: item.title_zh || item.title, body: item.body_zh || item.body,
+           translated: !!(item.body_zh || item.title_zh) };
+}
 function renderSourceItems() {
-  $('source-list').innerHTML = sourceRows.map(item => `<article class="source-entry">
+  $('source-list').innerHTML = sourceRows.map(item => { const t = sourceText(item); return `<article class="source-entry">
     <div class="source-entry-meta"><span>${esc(item.author)}</span><time>${item.published ? sourceTime(item.published) : '发布时间未知'}</time></div>
-    <h3><button class="source-entry-title" data-read-item="${item.key}">${esc(item.title)}</button></h3>
-    <p class="source-excerpt">${esc(item.body.slice(0,380))}${item.body.length>380?'…':''}</p>
-    <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}</span><button class="text-button" data-read-item="${item.key}">展开阅读</button><a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`).join('') ||
+    <h3><button class="source-entry-title" data-read-item="${item.key}">${esc(t.title)}</button></h3>
+    <p class="source-excerpt">${esc(t.body.slice(0,380))}${t.body.length>380?'…':''}</p>
+    <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}${t.translated ? ' · 已译为中文' : ''}</span><button class="text-button" data-read-item="${item.key}">展开阅读</button><a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`; }).join('') ||
     `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value ? '换个关键词或切换订阅试试。' : sourceData?.unconfigured && !sourceData?.ready ? '账号待配置。先填写 X 订阅桥接或账号的专用订阅链接，再开始同步。' : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p></div>`;
   $('source-more').hidden = sourceOffset >= sourceTotal;
   $('source-more').textContent = `加载更多（已显示 ${sourceRows.length} / ${sourceTotal}）`;
@@ -201,14 +208,27 @@ async function syncSource(ids = []) {
   } catch(e) { toast('未能开始同步', { detail:e.message }); }
   finally { sourceBusy=false; updateSourceRunStatus(); }
 }
+let sourceReaderItem = null, sourceReaderOriginal = false;
 function readSourceItem(key) {
   const item = sourceRows.find(r => r.key === key);
   if (!item) return;
-  $('source-reader-title').textContent = item.title;
-  $('source-reader-meta').textContent = `${item.author} · ${item.published ? sourceTime(item.published) : '发布时间未知'}${item.content_kind==='summary'?' · 订阅摘要，全文请打开原文':''}`;
-  $('source-reader-body').textContent = item.body;
+  sourceReaderItem = item; sourceReaderOriginal = false;
+  renderSourceReader();
   $('source-reader-link').href = safeUrl(item.url);
   $('source-reader').style.display = '';
+}
+function renderSourceReader() {
+  const item = sourceReaderItem, t = sourceText(item);
+  const original = sourceReaderOriginal;
+  $('source-reader-title').textContent = original ? item.title : t.title;
+  $('source-reader-meta').textContent = `${item.author} · ${item.published ? sourceTime(item.published) : '发布时间未知'}${item.content_kind==='summary'?' · 订阅摘要，全文请打开原文':''}${t.translated ? (original ? ' · 英文原文' : ' · 自动翻译') : ''}`;
+  $('source-reader-body').textContent = original ? item.body : t.body;
+  $('source-reader-original').hidden = !t.translated;
+  $('source-reader-original').textContent = original ? '看中文译文' : '看英文原文';
+}
+function toggleSourceOriginal() {
+  sourceReaderOriginal = !sourceReaderOriginal;
+  renderSourceReader();
 }
 $('source-list').addEventListener('click', e => {
   if (e.target.closest('[data-retry-items]')) renderSourceView(true);

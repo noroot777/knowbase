@@ -22,7 +22,7 @@
 .tabs button.on::before { content: ''; position: absolute; left: 0; top: calc(50% - 8px); width: 2px; height: 16px; background: var(--brand); border-radius: 2px; }
 .tabs button.on:hover { background: var(--brand-soft); }
 .nav-count { display: none; }
-#nav-sync-dot { position: absolute; top: 8px; right: 17px; width: 6px; height: 6px; border-radius: 50%; background: var(--brand); }
+#nav-sync-dot, #nav-daily-dot { position: absolute; top: 8px; right: 17px; width: 6px; height: 6px; border-radius: 50%; background: var(--brand); }
 .explore-links { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 .explore-links a { min-height: 52px; }
 .explore-links a > span { display: none; }
@@ -70,7 +70,7 @@
   .nav-label { display: block; margin: 0 10px 9px; font-size: 12px; color: var(--muted); }
   .tabs button, .explore-links a { flex-direction: row; justify-content: flex-start; gap: 10px; min-height: 44px; padding: 10px; font-size: 14px; }
   .tabs .icon, .explore-links .icon { width: 18px; height: 18px; }
-  #nav-sync-dot { position: static; margin-left: auto; }
+  #nav-sync-dot, #nav-daily-dot { position: static; margin-left: auto; }
   .explore-label { margin-top: 24px; }
   .explore-links { border: 0; margin: 0; padding: 0; }
   .explore-links a > span { display: inline; margin-left: auto; font-size: 12px; }

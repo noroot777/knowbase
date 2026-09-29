@@ -14,6 +14,7 @@
     favorites_api  /api/favorites*
     settings_api   /api/models*、/api/stages、/api/keys、/api/mcp/*
     pipeline_api   /api/pipeline/*
+    daily_api      /api/daily/*  每日日报:定时、立即生成、历史日报
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from fastapi import FastAPI
 from kb import pipeline as pl
 from kb.web import (
     chat_api,
+    daily_api,
     favorites_api,
     library_api,
     pages,
@@ -37,7 +39,8 @@ app = FastAPI(title="knowbase")
 
 for _r in (pages.router, library_api.router, chat_api.router,
            favorites_api.router, settings_api.router, pipeline_api.router,
-           sources_api.router, intake_api.router, wechat_api.router):
+           sources_api.router, intake_api.router, wechat_api.router,
+           daily_api.router):
     app.include_router(_r)
 
 pl.start_scheduler()   # 定时同步调度线程(跟随 kb-web 进程存活)

@@ -61,6 +61,10 @@ STAGES: tuple[Stage, ...] = (
           default="gpt-5.6-luna", env="KB_SKILL_TAG_MODEL"),
     Stage("taxonomy", "管道 · 图谱归类", "给开源项目/skill 条目分门别类,一个条目判一次后长期复用",
           default="gpt-5.5", env="KB_TAXONOMY_MODEL"),
+    Stage("translate", "来源 · 英文内容翻译", "把 RSS/大V 抓到的英文标题正文译成中文,一条一次后长期复用",
+          default="gpt-5.5", env="KB_TRANSLATE_MODEL"),
+    Stage("daily", "日报 · 当日综述", "把当天入库的全部内容写成一份日报,每天一次",
+          default="gpt-5.6-luna", env="KB_DAILY_MODEL"),
 )
 
 _BY_KEY = {s.key: s for s in STAGES}
