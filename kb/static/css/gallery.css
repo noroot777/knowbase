@@ -38,7 +38,7 @@ button.gcard:hover { border-color: var(--kind-color); box-shadow: 0 4px 16px #14
 .list-view button.gcard { padding: 16px 22px; }
 .list-view .gcard-body { display: grid; grid-template-columns: 220px minmax(0,1fr) 155px; align-items: center; gap: 6px 24px; }
 .list-view .gcard-top { margin: 0; grid-row: span 2; }
-.list-view .list-view .gsum { min-height: 0; margin: 0; -webkit-line-clamp: 1; }
+.list-view .gsum { min-height: 0; margin: 0; -webkit-line-clamp: 1; }
 .list-view .gtags { margin: 0; grid-column: 2; min-height: 0; }
 .list-view .gstat { grid-column: 3; grid-row: 1 / span 2; flex-wrap: wrap; justify-content: flex-end; padding: 0; border: none; margin: 0; }
 .list-view .gdate { flex-basis: 100%; text-align: right; }

@@ -142,7 +142,7 @@ SVG,同一个意思的第七种写法)。这些字在 PingFang SC 里本身就�
 
 ### 回归
 
-`tests/redesign_probe.mjs` 从 36 项加到 43 项,新增七条:
+`tests/redesign_probe.mjs` 从 36 项加到 43 项(后来复审那轮又补到 48),新增七条:
 
 - 页面上不许再出现箭头字符(遍历可见文本节点);
 - 行内箭头都渲染成了 SVG、没有未替换的 `data-icon` / `data-arrow`;
@@ -159,8 +159,9 @@ Python 套件 311 通过 1 跳过(跳过的那条要外部 Reader 运行时,与�
 
 ## 验证
 
-- **`tests/redesign_probe.mjs` 36 项全过**:色板 token 真的落到页面上、全站无残留
+- **`tests/redesign_probe.mjs` 48 项全过**:色板 token 真的落到页面上、全站无残留
   靛蓝、六个类型色两两不同、正字虚实笔数、摘要去重的四种输入、四个下拉框都保留箭头、
+  页面无箭头字符、齿轮 8 齿旋转对称、图鉴列表视图摘要单行且行高紧凑、
   五个面板无报错无横向溢出、375/390px 窄屏无横向溢出、抽屉标题确实是宋体 900。
 - **Python 套件 312 项全过**(含图谱构建、发布并发、无头浏览器那几组)。
 - 图谱页用**复制出来的归类缓存 + `--no-llm` + `--out-dir` 临时目录**重建验证,
@@ -194,13 +195,48 @@ kb-web 对 `/graph*` 就是把文件原样发出去。下一次 wiki 构建会�
 `graph_data.py`、`taxo_tables.py`、`build_graph_html.py` 的 mtime 和三张页面的 mtime,
 旧了就说一句)。提示而不代劳 —— 每次重启都会告诉你该重建了,动不动 Vault 是你说了算。
 
-### `./kb.sh graph` 只许在主检出跑
+### `./kb.sh graph` 用仓库内 `data/` 时只许在主检出跑
 
-`cmd_graph` 第一件事是用 `git rev-parse --git-common-dir` 把 worktree 挡掉。
+`cmd_graph` 解析完数据目录后,只要它就是仓库内的 `data/`,就用
+`git rev-parse --git-common-dir` 把 worktree 挡掉。
 本轮实测过照跑的后果:worktree 的 `data/` 是跑测试留下的 135 KB 空壳库,
 `build_graph_html.py` 拿它建出一张 **0 节点的 `graph.html`,原子替换掉 Vault 里那张好的**
 —— 它自己不做质量验收,`build_catgraph` 那套闸门只管它自己那两张。
 (那次是我在验证新命令时踩的,随后从主检出重建修回:280 节点 1805 边。)
+
+`KB_DATA_DIR` 指到仓库外时这条前提不成立 —— 数据是显式挂的,跟在哪个检出里跑无关,
+那时只靠归类缓存那道检查把空目录挡住。见下面复审第 1 轮。
+
+## 复审第 1 轮修的两条
+
+### 1. `cmd_graph` 的前置检查没认 `KB_DATA_DIR`
+
+`kb/config.py:20` 和 `scripts/wiki/taxonomy.py:32` 都从 `KB_DATA_DIR` 解析数据目录,
+两个构建器因此本来就认它;可 `cmd_graph` 的归类缓存检查写死了 `$ROOT/data/`。
+于是把数据放在仓库外的用户,数据明明是全的,却在**进构建器之前**就被一句
+「缺 data/taxonomy_projects.json」拦下,三张图谱一张也重建不了。
+
+改成先按同一个口径解析真实数据目录(`KB_DATA_DIR` 优先,没设才回退仓库 `data/`;
+相对路径按构建器的 cwd `$ROOT` 解),再用这个路径检查缓存。worktree 那道闸门跟着
+收窄到「数据目录就是仓库内 `data/`」这一种情形。
+
+隔离验证(临时数据目录 + 临时 Vault,真 Vault 三张页面的 mtime 一个没动):
+
+- worktree + 默认 `data/` → 照旧被 worktree 闸门拦下;
+- worktree + `KB_DATA_DIR=<临时目录>`(放了两份归类缓存)→ 越过前置检查,进构建器;
+- `KB_DATA_DIR=<空目录>` → 报缺文件,且报的是那个外置路径。
+
+### 2. 图鉴列表视图的摘要选择器失效
+
+上一轮删 `.list-view .gcard-arrow` 那条死规则时,把相邻两行并成了
+`.list-view .list-view .gsum` —— 选择器匹配不到任何元素。页面不报错、不溢出,
+只是切到列表视图后每行仍顶着卡片视图的两行摘要和 46px 占位:实测中位行高
+**116.4px**,改回 `.list-view .gsum` 之后 **83.3px**(差的正是一行 23px + 那 10px 下边距)。
+
+探针补了 4d 之后的一节(4e),把四件事各钉一道:算出来的 `-webkit-line-clamp` 必须是 1、
+`min-height` 和 `margin-bottom` 必须归零、最长的那条摘要不许超过一行行高、中位行高
+不到 96px(行高取中位数:带「全部出自软广?」角标的那几条会多占一行,那是内容不是回归)。
+把 bug 注回去,这四条一起红。
 
 
 ## 浏览器通道

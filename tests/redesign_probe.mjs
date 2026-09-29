@@ -195,6 +195,39 @@ check("齿轮有齿(齿顶明显高于齿根)", gear.rmax - gear.rmin > 1.5,
       `R=${gear.rmax?.toFixed(2)} r=${gear.rmin?.toFixed(2)}`);
 check("齿轮有轴心圆且路径闭合", gear.hasHub && gear.closed, JSON.stringify(gear));
 
+// ── 4e. 图鉴列表视图:摘要单行、不留卡片视图的占位,行才能紧凑 ──
+// `.list-view .gsum` 那条覆盖一度被误写成 `.list-view .list-view .gsum`,选择器
+// 匹配不到任何元素 —— 页面不报错、不溢出,只是每行白白顶着卡片视图的两行摘要和
+// 46px 占位,列表看着跟卡片一样松。所以按算出来的样式和真实行高各钉一道。
+await evalJs(`setGalleryView('list')`);
+await sleep(600);
+const listView = await evalJs(`(() => {
+  const grid = document.getElementById('g-grid');
+  const cards = [...grid.querySelectorAll('button.gcard')];
+  const sums = cards.map(c => c.querySelector('.gsum')).filter(s => s && s.textContent.trim());
+  const cs = sums.map(s => getComputedStyle(s));
+  const v = (f) => [...new Set(cs.map(f))];
+  return { isList: grid.classList.contains('list-view'), n: sums.length,
+           clamp: v(c => c.getPropertyValue('-webkit-line-clamp')),
+           minH: v(c => c.minHeight), marginB: v(c => c.marginBottom),
+           line: Math.max(...cs.map(c => parseFloat(c.lineHeight))),
+           sumH: Math.max(...sums.map(s => s.getBoundingClientRect().height)),
+           // 行高取中位数:带「全部出自软广?」角标的那几条会多占一行,是内容不是回归
+           cardH: cards.map(c => c.getBoundingClientRect().height)
+                       .sort((a, b) => a - b)[cards.length >> 1] };
+})()`);
+check("列表视图切得过去且有摘要", listView.isList && listView.n > 4, JSON.stringify(listView));
+check("列表摘要单行截断", JSON.stringify(listView.clamp) === '["1"]', JSON.stringify(listView.clamp));
+check("列表摘要不留卡片视图的占位",
+      JSON.stringify(listView.minH) === '["0px"]' && JSON.stringify(listView.marginB) === '["0px"]',
+      `min-height ${listView.minH} / margin-bottom ${listView.marginB}`);
+check("最长的摘要也没换行", listView.sumH <= listView.line + 1,
+      `${listView.sumH?.toFixed(1)}px > 一行 ${listView.line}px`);
+// 实测 83.3px;选择器失效时是 116.4px(多一行摘要 23px + 卡片视图那 10px 下边距)
+check("列表行紧凑(不到 96px)", listView.cardH < 96, `中位行高 ${listView.cardH?.toFixed(1)}px`);
+await evalJs(`setGalleryView('grid')`);
+await sleep(300);
+
 // ── 5. 五个面板逐个切过去,不许报错、不许出横向滚动条 ──
 for (const tab of ["gallery", "search", "ask", "fav", "pipe"]) {
   await evalJs(`switchTab('${tab}')`);

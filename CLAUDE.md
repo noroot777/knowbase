@@ -27,12 +27,18 @@
   重启都在原子替换三张正式页面——`build_catgraph` 里那一整套两阶段提交 / 发布 CAS /
   质量验收,存在的理由就是这个动作有风险。改成 `web_start` 之后比一次 mtime,旧了就
   打一行提示(`graph_stale`),提示而不代劳。
-- **`./kb.sh graph` 只许在主检出跑**,`cmd_graph` 第一件事就是用 `git rev-parse
-  --git-common-dir` 把 worktree 挡掉。`data/`(库 + 归类缓存)在 .gitignore 里、
-  只有主检出有;worktree 里要么没有、要么是跑测试留下的空壳,而
+- **`./kb.sh graph` 用仓库内的 `data/` 时只许在主检出跑**,`cmd_graph` 第一件事就是用
+  `git rev-parse --git-common-dir` 把 worktree 挡掉。`data/`(库 + 归类缓存)在
+  .gitignore 里、只有主检出有;worktree 里要么没有、要么是跑测试留下的空壳,而
   **`build_graph_html.py` 自己不做质量验收**——2026-09-29 实测:从 worktree 跑,它拿
   135 KB 的测试库建出一张 0 节点的 `graph.html`,原子替换掉 Vault 里那张好的
   (`build_catgraph` 那套闸门只管它自己那两张)。
+- **`cmd_graph` 的前置检查按 `KB_DATA_DIR` 解析数据目录**(没设才回退仓库 `data/`),
+  跟 `kb/config.py` 与 `scripts/wiki/taxonomy.py` 一个口径。两个构建器本来就认这个
+  环境变量,前置检查只认 `$ROOT/data` 的话,外置数据目录下数据明明是全的、却在进
+  构建器之前就误报「缺归类缓存」,三张图谱一张也重建不了(2026-09-29 审查发现)。
+  数据目录指到仓库外时上面那道 worktree 闸门不再适用(数据是显式挂的、跟检出无关),
+  空目录由归类缓存那道检查挡住。
 - **服务一律用 `daemonize()` 起,不用 `nohup ... &`**。后者起出来的进程跟脚本同一个
   进程组,非交互 shell 会给它把 SIGINT 设成 SIG_IGN,而这个 SIG_IGN 被子进程继承——
   于是 stop 时的 `kill -INT` 也被忽略,只能降级 SIGTERM,恰好会把 wxdown 的
@@ -748,11 +754,12 @@
 - **图谱页是把 CSS 内联进单文件 HTML 的产物**:改 `catgraph.css` 只影响之后构建的
   页面,Vault 里现有的 `graph*.html` 要重新生成才会变样。**`./kb.sh restart` 不管用**
   (它只重启进程);重建跑 `./kb.sh graph`(`--no-llm` 用缓存重建、零模型调用,约 6 秒),
-  或者等下一次同步的 wiki 阶段。**只能在主检出跑**——归类缓存和库都在主检出的 `data/`,
-  从 worktree 跑会拿空库/空缓存覆盖掉好页面(详见「操作入口」那两条)。
-- 回归在 `tests/redesign_probe.mjs`(43 项:token 真的落到页面、无残留靛蓝、六个类型色
+  或者等下一次同步的 wiki 阶段。**用仓库内 `data/` 时只能在主检出跑**——归类缓存和库
+  都在主检出的 `data/`,从 worktree 跑会拿空库/空缓存覆盖掉好页面(详见「操作入口」
+  那三条;`KB_DATA_DIR` 指到仓库外时不受这条限制)。
+- 回归在 `tests/redesign_probe.mjs`(48 项:token 真的落到页面、无残留靛蓝、六个类型色
   两两不同、正字虚实笔数、摘要去重、下拉箭头、页面无箭头字符、齿轮旋转对称、
-  五面板无溢出、窄屏无溢出、抽屉标题字重)。
+  图鉴列表视图摘要单行且行高紧凑、五面板无溢出、窄屏无溢出、抽屉标题字重)。
   截图脚本 `tests/shots.mjs`。两者都是 CDP 直连 chrome-headless-shell,不装 playwright。
 
 ## 前端反馈(硬性)

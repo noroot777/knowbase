@@ -371,21 +371,34 @@ PY
 }
 
 cmd_graph() {
-  # **只许在主检出跑。** 三张图谱读的是 data/ 下的库和归类缓存,那两样都在
-  # .gitignore 里、只有主检出有;worktree 里要么没有、要么是跑测试留下的空壳
-  # ——照跑的后果实测过:话题图谱拿 135 KB 的测试库建出一张 0 节点的页面,
-  # **原子替换掉 Vault 里那张好的**(它自己不做质量验收,catgraph 那套闸门管不着它)。
-  # 判据用 git 的 common-dir:worktree 的 .git 是个文件,指向主检出那一份。
-  local common; common="$(git -C "$ROOT" rev-parse --path-format=absolute \
-                            --git-common-dir 2>/dev/null || true)"
-  if [ -n "$common" ] && [ "$common" != "$ROOT/.git" ]; then
-    die "这是 worktree,data/(库 + 归类缓存)只有主检出有,照跑会拿空库覆盖掉好页面。
+  # 数据目录跟 kb/config.py 和 scripts/wiki/taxonomy.py 一个口径:KB_DATA_DIR
+  # 优先,没设才回退仓库内的 data/。两个构建器本来就按这个环境变量找库和归类
+  # 缓存,前置检查要是只认 $ROOT/data,外置数据目录下就会在进构建器之前误报
+  # 「缺文件」——数据明明是全的,三张图谱一张也重建不了。
+  local datadir; datadir="$("$BOOT_PY" -c '
+import os, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+d = pathlib.Path(os.environ.get("KB_DATA_DIR") or (root / "data")).expanduser()
+print(d if d.is_absolute() else root / d)   # 构建器的 cwd 就是 $ROOT,相对路径按它解
+' "$ROOT")"
+  # **仓库内的 data/ 只许在主检出跑。** 它在 .gitignore 里、只有主检出有;worktree
+  # 里要么没有、要么是跑测试留下的空壳——照跑的后果实测过:话题图谱拿 135 KB 的
+  # 测试库建出一张 0 节点的页面,**原子替换掉 Vault 里那张好的**(它自己不做质量
+  # 验收,catgraph 那套闸门管不着它)。判据用 git 的 common-dir:worktree 的 .git
+  # 是个文件,指向主检出那一份。KB_DATA_DIR 指到仓库外时这条前提不成立(数据是
+  # 显式挂的、跟检出无关),那时只靠下面那道归类缓存检查把空目录挡住。
+  if [ "$datadir" = "$ROOT/data" ]; then
+    local common; common="$(git -C "$ROOT" rev-parse --path-format=absolute \
+                              --git-common-dir 2>/dev/null || true)"
+    if [ -n "$common" ] && [ "$common" != "$ROOT/.git" ]; then
+      die "这是 worktree,data/(库 + 归类缓存)只有主检出有,照跑会拿空库覆盖掉好页面。
      去主检出跑:cd ${common%/.git} && ./kb.sh graph"
+    fi
   fi
   local f
-  for f in data/taxonomy_projects.json data/taxonomy_skills.json; do
-    [ -f "$ROOT/$f" ] || die "缺 $f —— 归类缓存不在,--no-llm 会把几千条判成「待归类」。
-     先跑一次完整同步(wiki 阶段会重建缓存),或者 ./kb.sh graph 之前确认 data/ 挂对了"
+  for f in taxonomy_projects.json taxonomy_skills.json; do
+    [ -f "$datadir/$f" ] || die "缺 $datadir/$f —— 归类缓存不在,--no-llm 会把几千条判成「待归类」。
+     先跑一次完整同步(wiki 阶段会重建缓存),或者 ./kb.sh graph 之前确认数据目录挂对了"
   done
   local since; since="$("$BOOT_PY" -c \
     'import datetime;print((datetime.date.today()-datetime.timedelta(days=14)).isoformat())')"
