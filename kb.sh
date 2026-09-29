@@ -227,7 +227,7 @@ WEB_PAT="kb-web"
 
 web_start() {
   if [ -n "$(service_pids "$WEB_PID" "$WEB_PORT" "$WEB_PAT")" ]; then
-    say "[web] 已在 $API"; return 0
+    say "[web] 已在 $API"; graph_stale; return 0
   fi
   # 端口有人占但不是 kb-web:说清楚,别等它"起完"再报一个莫名其妙的超时。
   if port_busy "$WEB_PORT"; then
@@ -239,7 +239,10 @@ web_start() {
     env -i HOME="$HOME" PATH="$PATH" PORT="$WEB_PORT" uv run kb-web
   local n=0
   while ! port_busy "$WEB_PORT" && [ "$n" -lt 40 ]; do sleep 0.5; n=$((n+1)); done
-  port_busy "$WEB_PORT" && say "[web] $API" || die "kb-web 起不来,看 $LOG_DIR/web.log"
+  port_busy "$WEB_PORT" || die "kb-web 起不来,看 $LOG_DIR/web.log"
+  say "[web] $API"
+  # 图谱页是 Vault 里的产物,不是 kb-web 现渲染的:样式改了得重新生成,提示一句
+  graph_stale
 }
 
 # 管道跑在 kb-web 进程里,杀了它这一轮同步就断在半路(采集到一半的文章要重抓)。
@@ -329,6 +332,71 @@ print(json.dumps(b))' "$stages" "$since" "$until" "$targets" "$channel")"
     200) say "已在后台开始。进度看 $API 管道 tab,或跑 ./kb.sh status" ;;
     *)   die "启动失败:$(echo "$out" | sed '$d')" ;;
   esac
+}
+
+# ── 图谱页 ────────────────────────────────────────────────────────────────────
+# 三张图谱是「CSS/JS 内联进单文件 HTML」的产物,住在 Vault 里,kb-web 只是把文件
+# 原样发出去。所以改了 catgraph.css/js 或那几个构建脚本,**重启不会让页面变样**,
+# 得重新生成。跑同步时 wiki 阶段会顺手带上;这条命令是「只想立刻看到新样式」时的
+# 快捷方式:--no-llm 只吃已有归类缓存,零模型调用,实测约 6 秒(其中 5.5 秒是读
+# 那棵 5530 组的条目树)。
+#
+# **故意没做成 restart 的一部分。** restart 现在是纯进程操作,失败了顶多服务没起来,
+# 磁盘上一个字节不动;塞进去之后每次重启都在**原子替换 Vault 里三张正式页面**,而
+# build_catgraph 里那一整套两阶段提交 / 发布 CAS / 质量验收,存在的理由就是这个动作
+# 有风险 —— 重启一天十次就是对正式产物发布十次,还会跟正在跑的 wiki 阶段抢发布锁
+# (--force 停服务时管道拦不住)。所以这里只在 web 起来之后**提示一句**,不代劳。
+GRAPH_SRC=(scripts/wiki/assets/catgraph.css scripts/wiki/assets/catgraph.js
+           scripts/wiki/catgraph_page.py scripts/wiki/build_catgraph.py
+           scripts/wiki/graph_data.py scripts/wiki/taxo_tables.py
+           scripts/wiki/build_graph_html.py)
+
+graph_stale() {   # 源文件比图谱页新就提示一句。永远返回 0:它只是提示,不能挡住启动
+  "$BOOT_PY" - "$ROOT" "${GRAPH_SRC[@]}" <<'PY' || true
+import os, pathlib, sys
+try:
+    root, srcs = pathlib.Path(sys.argv[1]), sys.argv[2:]
+    vault = pathlib.Path(os.environ.get("KB_VAULT_ROOT")
+                         or pathlib.Path.home() / "obs" / "new-start").expanduser()
+    pages = [vault / n for n in ("graph.html", "graph-projects.html", "graph-skills.html")]
+    if all(p.is_file() for p in pages):   # 还没生成过就不催:跑一次 wiki 阶段就有了
+        newest = max((root / s).stat().st_mtime for s in srcs if (root / s).is_file())
+        if newest > min(p.stat().st_mtime for p in pages):
+            print("[graph] 图谱页比样式/构建源旧了 —— ./kb.sh graph 重建"
+                  "(约 6 秒,零模型调用)", file=sys.stderr)
+except Exception:
+    pass                                  # 提示而已,读不到就算了,别把启动带崩
+PY
+  return 0
+}
+
+cmd_graph() {
+  # **只许在主检出跑。** 三张图谱读的是 data/ 下的库和归类缓存,那两样都在
+  # .gitignore 里、只有主检出有;worktree 里要么没有、要么是跑测试留下的空壳
+  # ——照跑的后果实测过:话题图谱拿 135 KB 的测试库建出一张 0 节点的页面,
+  # **原子替换掉 Vault 里那张好的**(它自己不做质量验收,catgraph 那套闸门管不着它)。
+  # 判据用 git 的 common-dir:worktree 的 .git 是个文件,指向主检出那一份。
+  local common; common="$(git -C "$ROOT" rev-parse --path-format=absolute \
+                            --git-common-dir 2>/dev/null || true)"
+  if [ -n "$common" ] && [ "$common" != "$ROOT/.git" ]; then
+    die "这是 worktree,data/(库 + 归类缓存)只有主检出有,照跑会拿空库覆盖掉好页面。
+     去主检出跑:cd ${common%/.git} && ./kb.sh graph"
+  fi
+  local f
+  for f in data/taxonomy_projects.json data/taxonomy_skills.json; do
+    [ -f "$ROOT/$f" ] || die "缺 $f —— 归类缓存不在,--no-llm 会把几千条判成「待归类」。
+     先跑一次完整同步(wiki 阶段会重建缓存),或者 ./kb.sh graph 之前确认 data/ 挂对了"
+  done
+  local since; since="$("$BOOT_PY" -c \
+    'import datetime;print((datetime.date.today()-datetime.timedelta(days=14)).isoformat())')"
+  say "[graph] 重建三张图谱(--no-llm:只吃已有归类缓存,不调模型)…"
+  ( cd "$ROOT" && uv run python scripts/wiki/build_graph_html.py --since "$since" ) \
+    || die "话题图谱没建成(原因在上面)"
+  # 分类图谱会在「新图明显不如旧图」时拒绝发布并非零退出 —— 那是保护不是故障,
+  # 确实该缩的那次(比如故意收紧分类规则)加 --allow-shrink。
+  ( cd "$ROOT" && uv run python scripts/wiki/build_catgraph.py --kind all --no-llm "$@" ) \
+    || die "分类图谱没发布(原因在上面)。拒绝发布是保护:确实该缩就加 --allow-shrink"
+  say "[graph] 好了。刷新 /graph、/graph/projects、/graph/skills"
 }
 
 # ── 组合动作 ──────────────────────────────────────────────────────────────────
@@ -434,6 +502,9 @@ Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
     ./kb.sh export
     ./kb.sh index
     ./kb.sh extract
+    ./kb.sh graph [--allow-shrink]  重建三张图谱页(前台约 6 秒,零模型调用)
+                   图谱是 Vault 里的单文件 HTML,样式改了要重新生成——重启不管用。
+                   跑同步时 wiki 阶段本来就会带上,这条是「只想立刻看到新样式」用的。
 
   凭证与订阅(瞬间返回)
     ./kb.sh creds [--missing-only]  每个号的文章凭证够不够(顺带从 wxdown 导入)
@@ -489,6 +560,7 @@ case "$ACTION" in
   export)  pipeline_run '["export"]' ;;
   index)   pipeline_run '["index"]' ;;
   extract) pipeline_run '["extract"]' ;;
+  graph)   cmd_graph "$@" ;;
 
   creds|route|login|accounts) cli "$ACTION" "$@" ;;
   setup)   "$COLLECTOR/setup.sh" ;;

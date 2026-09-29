@@ -19,6 +19,20 @@
 - **`./kb.sh` 是唯一的操作入口**(取代原 WeChatOA 的 start_all.sh)。`./kb.sh` 不带参数
   打印全部命令。日常两条:`./kb.sh prep`(同步前起 wxdown + 切路由 + 盯凭证)、
   `./kb.sh status`(服务/路由/凭证/订阅一屏看全)。
+- **`restart` 只重启进程,不重建任何产物,尤其不重建三张图谱页。** 图谱是 Vault 里
+  的单文件 HTML,kb-web 只是把文件原样发出去,所以改了 `catgraph.css/js` 重启看不出
+  任何变化。重建走 `./kb.sh graph`(`--no-llm`,零模型调用,实测约 6 秒,其中 5.5 秒
+  是读那棵 5530 组的条目树);跑同步时 wiki 阶段本来就会带上。**没把它塞进 restart**:
+  restart 现在是纯进程操作,失败了顶多服务没起来、磁盘一个字节不动,塞进去之后每次
+  重启都在原子替换三张正式页面——`build_catgraph` 里那一整套两阶段提交 / 发布 CAS /
+  质量验收,存在的理由就是这个动作有风险。改成 `web_start` 之后比一次 mtime,旧了就
+  打一行提示(`graph_stale`),提示而不代劳。
+- **`./kb.sh graph` 只许在主检出跑**,`cmd_graph` 第一件事就是用 `git rev-parse
+  --git-common-dir` 把 worktree 挡掉。`data/`(库 + 归类缓存)在 .gitignore 里、
+  只有主检出有;worktree 里要么没有、要么是跑测试留下的空壳,而
+  **`build_graph_html.py` 自己不做质量验收**——2026-09-29 实测:从 worktree 跑,它拿
+  135 KB 的测试库建出一张 0 节点的 `graph.html`,原子替换掉 Vault 里那张好的
+  (`build_catgraph` 那套闸门只管它自己那两张)。
 - **服务一律用 `daemonize()` 起,不用 `nohup ... &`**。后者起出来的进程跟脚本同一个
   进程组,非交互 shell 会给它把 SIGINT 设成 SIG_IGN,而这个 SIG_IGN 被子进程继承——
   于是 stop 时的 `kill -INT` 也被忽略,只能降级 SIGTERM,恰好会把 wxdown 的
@@ -732,9 +746,10 @@
   齿轮是旋转对称形状,少一齿或齿距不匀一眼就看得出来。回归里按「r(θ) 以 45°
   为周期」钉住了这件事。
 - **图谱页是把 CSS 内联进单文件 HTML 的产物**:改 `catgraph.css` 只影响之后构建的
-  页面,Vault 里现有的 `graph*.html` 要重新生成才会变样(`build_catgraph.py --no-llm`
-  用缓存重建、零模型调用)。注意归类缓存在主检出的 `data/` 里,worktree 里没有,
-  从 worktree 跑会当成缓存全空、把几千条重判一遍。
+  页面,Vault 里现有的 `graph*.html` 要重新生成才会变样。**`./kb.sh restart` 不管用**
+  (它只重启进程);重建跑 `./kb.sh graph`(`--no-llm` 用缓存重建、零模型调用,约 6 秒),
+  或者等下一次同步的 wiki 阶段。**只能在主检出跑**——归类缓存和库都在主检出的 `data/`,
+  从 worktree 跑会拿空库/空缓存覆盖掉好页面(详见「操作入口」那两条)。
 - 回归在 `tests/redesign_probe.mjs`(43 项:token 真的落到页面、无残留靛蓝、六个类型色
   两两不同、正字虚实笔数、摘要去重、下拉箭头、页面无箭头字符、齿轮旋转对称、
   五面板无溢出、窄屏无溢出、抽屉标题字重)。

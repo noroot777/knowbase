@@ -169,14 +169,39 @@ Python 套件 311 通过 1 跳过(跳过的那条要外部 Reader 运行时,与�
 ## 图谱页要重新生成才会变样
 
 三张图谱是把 CSS **内联**进单文件 HTML 的产物,改 `catgraph.css` 只影响之后构建的页面,
-Vault 里现有的 `graph*.html` 仍是旧样式。下一次 wiki 构建会自动带上;想立刻更新:
+Vault 里现有的 `graph*.html` 仍是旧样式。**`./kb.sh restart` 不管用** —— 它只重启进程,
+kb-web 对 `/graph*` 就是把文件原样发出去。下一次 wiki 构建会自动带上;想立刻更新:
 
 ```bash
-uv run python scripts/wiki/build_catgraph.py --kind all --no-llm   # 只用缓存,不调模型
+./kb.sh graph        # = build_graph_html + build_catgraph --no-llm,零模型调用,约 6 秒
 ```
 
-本轮没有替用户执行它 —— 那会改写 Vault 里的正式产物,而且本 worktree 没有 `data/`
-(归类缓存在主检出里),从这里跑会当成缓存全空、把几千条重判一遍。
+### 为什么没把它塞进 `restart`
+
+用户问过「适合放到重启命令里吗」。不适合:
+
+- `restart` 现在是**纯进程操作**,失败了顶多服务没起来,磁盘上一个字节不动。塞进去
+  之后,每次重启都在**原子替换 Vault 里三张正式页面** —— `build_catgraph` 里那一整套
+  两阶段提交 / 发布 CAS / 质量验收,存在的理由就是这个动作有风险。重启一天十次就是
+  对正式产物发布十次。
+- `set -euo pipefail` 下,构建失败会让 restart 断在构建那一步。构建放在 `web_start`
+  之后能避开,但语义还是错的:「重启服务」不该顺带改产物。
+- `--force` 停服务时管道拦不住,restart 会跟正在跑的 wiki 阶段抢发布锁 —— CAS 保证
+  不出坏产物,但会让管道那一轮的图谱发布被顶掉、要等下一次同步。
+
+所以做成两件事:独立命令 `./kb.sh graph`,加上 `web_start` 之后的一行**陈旧提示**
+(`graph_stale`:比 `catgraph.css/js`、`catgraph_page.py`、`build_catgraph.py`、
+`graph_data.py`、`taxo_tables.py`、`build_graph_html.py` 的 mtime 和三张页面的 mtime,
+旧了就说一句)。提示而不代劳 —— 每次重启都会告诉你该重建了,动不动 Vault 是你说了算。
+
+### `./kb.sh graph` 只许在主检出跑
+
+`cmd_graph` 第一件事是用 `git rev-parse --git-common-dir` 把 worktree 挡掉。
+本轮实测过照跑的后果:worktree 的 `data/` 是跑测试留下的 135 KB 空壳库,
+`build_graph_html.py` 拿它建出一张 **0 节点的 `graph.html`,原子替换掉 Vault 里那张好的**
+—— 它自己不做质量验收,`build_catgraph` 那套闸门只管它自己那两张。
+(那次是我在验证新命令时踩的,随后从主检出重建修回:280 节点 1805 边。)
+
 
 ## 浏览器通道
 
