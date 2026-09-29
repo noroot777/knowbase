@@ -11,8 +11,8 @@ from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 import requests
 from lxml import etree
 
-from src.utils.helpers import message_is_delete, time_now
-from src.utils.wechat_body import fetch_article_body
+from src.utils.helpers import message_unavailable, time_now
+from src.utils.wechat_body import FETCH_ERROR, body_unavailable, fetch_article_body
 from src.utils.wechat_picture import (
     extract_picture_urls,
     is_picture_message_html,
@@ -131,8 +131,8 @@ def _fetch_article_html(url: str) -> tuple[str, str]:
         raise ArticleImportError(f"无法访问该链接：{e}") from e
     final_url = resp.url.split("#")[0]
     html = resp.text
-    if message_is_delete(response=html):
-        raise ArticleImportError("该文章已被发布者删除")
+    if reason := message_unavailable(response=html):
+        raise ArticleImportError(f"该文章无法查看：{reason}")
     return final_url, html
 
 
@@ -263,10 +263,11 @@ def build_blog_from_url(url: str) -> dict[str, Any]:
         text = [meta["title"], meta["digest"]]
     else:
         text, _body_html = fetch_article_body(final_url)
-        if text == "已删除":
-            raise ArticleImportError("该文章已被发布者删除")
-        if text == "请求错误":
+        if text == FETCH_ERROR:
             raise ArticleImportError("抓取正文失败，请检查网络或 data/id_info.json 凭证")
+        # 不可用时把页面那句原话回给用户:删除、违规下架、投诉侵权各是一回事
+        if body_unavailable(text):
+            raise ArticleImportError(f"该文章无法查看：{text}")
         if not meta["digest"] and isinstance(text, list):
             joined = "\n".join(str(x) for x in text if str(x).strip())
             meta["digest"] = joined[:160].replace("\n", " ")

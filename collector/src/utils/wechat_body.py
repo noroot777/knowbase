@@ -14,7 +14,28 @@ import requests
 from lxml import etree
 
 from src.utils.data_manager import headers
-from src.utils.helpers import message_is_delete
+from src.utils.helpers import message_unavailable
+
+# 抓取失败的两种哨兵:FETCH_ERROR 是临时故障(网络、反爬、解析不出正文),
+# 其余字符串都是页面给出的「这篇永远读不到了」的原因原话。调用方一律用
+# body_unavailable() 区分,别再拿 text == "已删除" 比 —— 不可用的措辞
+# 不止一种(见 helpers._UNAVAILABLE_HINTS),写死一句就等于只认其中一种。
+FETCH_ERROR = "请求错误"
+
+# 本体只有一张分享卡片的图文:正文容器是空的 original_panel_content,
+# 真内容在卡片指向的原文里。原文读不到(被删、被风控验证码挡、也是隐私)
+# 时这篇就没有正文可抓,而且下次来还是同一个空节点 —— 归到「不可用」按周
+# 复查,不要拿它当临时故障每天重试。
+SHARE_ONLY_HINT = "这是一篇分享，卡片指向的原文读不到"
+
+
+def body_unavailable(text: Any) -> str:
+    """抓取返回值 → 原文不可用的原因;空串表示「不是这种失败」。
+
+    正常正文是 list[str];字符串只有两类,FETCH_ERROR 之外都是不可用原因。
+    """
+    return text if isinstance(text, str) and text != FETCH_ERROR else ""
+
 
 _RICH_MEDIA_XPATHS = (
     '//div[@class="rich_media_content js_underline_content\n                       autoTypeSetting24psection\n            "]',
@@ -41,16 +62,25 @@ def _find_rich_media_div(tree: etree._Element) -> list:
     return []
 
 
-def _fetch_page(url: str) -> tuple[str, etree._Element | None]:
+def _fetch_page(url: str) -> tuple[str, etree._Element | None, bool]:
+    """返回 (最后一次拿到的 HTML, 正文 div, 是不是「只有分享卡片」的图文)。
+
+    第三个值只在「这篇本体没有正文、我们顺着卡片去抓原文也没抓到」时为真。
+    它跟 div is None 不是一回事:普通文章抓失败下次还能成,而这一种本体
+    永远是空的(正文容器 original_panel_content 由前端渲染,服务端只回空节点),
+    只要卡片原文一直读不到,重试多少次都是同一个结果。
+    """
     from src.utils.wechat_preview import _request_headers
 
     response = requests.get(url, headers=_request_headers(), timeout=20).text
     tree = etree.HTML(response, parser=etree.HTMLParser(encoding="utf-8"))
     if tree is None:
-        return response, None
+        return response, None, False
     div = _find_rich_media_div(tree)
     if div:
-        return response, div[0]
+        return response, div[0], False
+    # 有这个卡片就说明本体是一篇分享:正文得去卡片指向的原文里取。
+    # 普通转载文章自己带 rich_media_content,上面就返回了,走不到这儿。
     data_url = tree.xpath('//div[@class="original_panel_tool"]/span/@data-url')
     if data_url:
         response = requests.get(data_url[0], headers=_request_headers(), timeout=20).text
@@ -58,8 +88,9 @@ def _fetch_page(url: str) -> tuple[str, etree._Element | None]:
         if tree is not None:
             div = _find_rich_media_div(tree)
             if div:
-                return response, div[0]
-    return response, None
+                return response, div[0], False
+        return response, None, True
+    return response, None, False
 
 
 def _div_to_text_list(div: etree._Element) -> list[str]:
@@ -150,7 +181,7 @@ def fetch_article_body_full(url: str, num: int = 0) -> tuple[Any, str | None, st
     """一次请求解析纯文本、HTML 和公众号当前昵称。
 
     返回 (text, html, nickname):
-    - text: list[str] 或 '已删除' / '请求错误'
+    - text: list[str];失败时是 FETCH_ERROR 或页面给出的不可用原因
     - html: 正文 HTML；失败时为 None
     - nickname: 公众号当前昵称；读不到为空串
 
@@ -158,19 +189,23 @@ def fetch_article_body_full(url: str, num: int = 0) -> tuple[Any, str | None, st
     带着新名字(列表接口 getmsg 的返回里没有,wxdown 截的凭证里 name 恒为 null)。
     """
     try:
-        response, div = _fetch_page(url)
+        response, div, share_only = _fetch_page(url)
     except Exception:
         if num >= 3:
-            return "请求错误", None, ""
+            return FETCH_ERROR, None, ""
         time.sleep(random.uniform(2.5, 4.0))
         return fetch_article_body_full(url, num=num + 1)
 
     nickname = extract_account_nickname(response)
     if div is None:
-        if message_is_delete(response=response):
-            return "已删除", None, nickname
+        # response 此时可能已经是卡片原文那一页,所以删除/违规这类提示优先 ——
+        # 原文被删了就按原文的原因记,比笼统的「分享读不到」准。
+        reason = message_unavailable(response=response) or (
+            SHARE_ONLY_HINT if share_only else "")
+        if reason:
+            return reason, None, nickname
         if num >= 3:
-            return "请求错误", None, nickname
+            return FETCH_ERROR, None, nickname
         time.sleep(random.uniform(2.5, 4.0))
         return fetch_article_body_full(url, num=num + 1)
 
@@ -182,7 +217,7 @@ def fetch_article_body(url: str, num: int = 0) -> tuple[Any, str | None]:
     一次请求同时解析纯文本与 HTML。
 
     返回 (text, html):
-    - text: list[str] 或 '已删除' / '请求错误'
+    - text: list[str];失败时是 FETCH_ERROR 或页面给出的不可用原因
     - html: 正文 HTML；失败时为 None
     """
     text, body_html, _nickname = fetch_article_body_full(url, num=num)
@@ -192,7 +227,7 @@ def fetch_article_body(url: str, num: int = 0) -> tuple[Any, str | None]:
 def url2html(url: str, num: int = 0) -> str | None:
     """仅抓取 HTML；错误时返回 None。"""
     text, html = fetch_article_body(url, num=num)
-    if isinstance(text, str) and text in ("已删除", "请求错误"):
+    if isinstance(text, str):
         return None
     return html
 

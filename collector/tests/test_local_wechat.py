@@ -351,13 +351,24 @@ class LocalCollectionTests(unittest.TestCase):
         self.assertEqual(2, self.fill.call_count)
 
     def test_confirmed_unavailable_body_is_deferred_without_permanent_deletion(self):
-        self.fill.return_value = ("已删除", None, "")
+        self.fill.return_value = ("该内容已被发布者删除", None, "")
         first, second = self.collect(), self.collect()
         self.assertEqual([], first["errors"])
         self.assertEqual(1, first["unavailable_articles"])
         self.assertEqual(1, second["deferred_articles"])
         self.assertEqual(1, self.fill.call_count)
         self.assertEqual(0, self.repo.conn.execute("SELECT is_wx_deleted FROM articles").fetchone()[0])
+
+    def test_violation_page_counts_as_unavailable_not_body_failure(self):
+        # 违规下架跟作者删除一样读不回来:按临时失败退避的话,它每天都会
+        # 重试一次、还永远挂在面板的「正文待重试」里(判定见 message_unavailable)。
+        self.fill.return_value = ("此内容因违规无法查看", None, "")
+        result = self.collect()
+        self.assertEqual([], result["errors"])
+        self.assertEqual(1, result["unavailable_articles"])
+        self.assertEqual([], result["body_failures"])
+        self.assertEqual("unavailable", self.repo.conn.execute(
+            "SELECT reason FROM article_fetch_state").fetchone()[0])
 
     def test_auto_retired_article_can_recover_in_either_channel(self):
         import api

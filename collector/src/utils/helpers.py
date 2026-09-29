@@ -61,7 +61,7 @@ def time_now():
 def url2text(url, num=0):
     '''
     提取 rich_media_content 下的纯文本（供 LLM / 字数统计）。
-    :return: 列表形式，每个元素对应一段；失败时为「已删除」「请求错误」
+    :return: 列表形式，每个元素对应一段；失败时为不可用原因或「请求错误」
     '''
     from src.utils.wechat_body import fetch_article_body
 
@@ -78,6 +78,52 @@ def message_is_delete(url='', response=None):
     if len(warn) > 0 and warn[0] == '该内容已被发布者删除':
         return True
     return False
+
+
+# 原文永久不可读的页面提示。只收有实样的三种:作者删除、平台违规下架、
+# 投诉侵权下架。这三种页面一个字都不会再变回正文,按临时失败重试等于
+# 每天白打一次请求、还永远挂在面板的「正文待重试」里。
+#
+# 这张表要保守:命中即判「不可用」、退避拉到一周,误判会让一篇本可抓到的
+# 文章一周才试一次。所以只写这几条特异的整句短语,不做「无法查看」这种
+# 宽泛匹配 —— 认不出的形态落回 request_failed,顶多多试几次,方向是安全的。
+_UNAVAILABLE_HINTS = (
+    '已被发布者删除',
+    '因违规无法查看',
+    '涉嫌侵权',
+)
+
+# 第四种形态:作者把文章设成了隐私可见。这一种页面上没有任何提示文字 ——
+# 服务端只回一个空壳(<div id="app"></div> + 公众号信息),「根据作者隐私设置,
+# 无法查看该内容」那句是前端渲染出来的,抓下来的 HTML 里一个字都没有。
+# 能认的只有入口 bundle:隐私页加载 private.<hash>.js,正常文章页加载
+# appmsg.<hash>.js。按整条资源路径匹配,别拿 'private' 裸串去搜正文。
+_PRIVATE_ENTRY_RE = re.compile(r'/assets/private(?:-legacy)?\.[0-9a-z]+\.js')
+_PRIVATE_HINT = '根据作者隐私设置，无法查看该内容'
+
+
+def message_unavailable(url='', response=None):
+    """原文是否永久不可读;是则返回那句原因,否则空串。
+
+    提示节点有 div.weui-msg__title.warn(删除)和 h3.weui-msg__title(违规、
+    侵权)两种形态,所以按 class 包含匹配、取全部文本,别再只认 div.warn。
+    隐私文章没有提示节点,只能认入口 bundle(见 _PRIVATE_ENTRY_RE)。
+
+    传了 response 就只看它(空串也是「这次拿到的就是空页面」,不是「没传」),
+    别在这里替调用方补一次不带凭证的裸请求。
+    """
+    if response is None:
+        response = requests.get(url=url, headers=headers).text
+    tree = etree.HTML(response, parser=etree.HTMLParser(encoding='utf-8'))
+    if tree is None:
+        return ''
+    for raw in tree.xpath('//*[contains(@class, "weui-msg__title")]//text()'):
+        hint = ' '.join(str(raw).split())
+        if any(kw in hint for kw in _UNAVAILABLE_HINTS):
+            return hint
+    if _PRIVATE_ENTRY_RE.search(response):
+        return _PRIVATE_HINT
+    return ''
 
 
 def check_text_ratio(text):

@@ -60,7 +60,7 @@ def main() -> int:
             title_short = row["title"][:32]
             try:
                 text, html = fetch_article_body(row["link"])
-                if isinstance(text, str) and text in ("已删除", "请求错误"):
+                if isinstance(text, str):
                     print(f"[{i}/{len(todo)}] SKIP({text}) {title_short}")
                     failed += 1
                 elif html:

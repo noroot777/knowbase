@@ -17,7 +17,7 @@ import requests
 from lxml import etree
 
 from src.utils.data_manager import data_manager, headers as default_headers
-from src.utils.helpers import message_is_delete
+from src.utils.helpers import message_unavailable
 from src.utils.wechat_body import is_allowed_wechat_image_url, prepare_html_for_preview
 
 _MP_ORIGIN = "https://mp.weixin.qq.com/"
@@ -204,7 +204,7 @@ def fetch_article_page_html(url: str, num: int = 0) -> str | None:
             return None
         return fetch_article_page_html(url, num=num + 1)
 
-    if message_is_delete(response=html):
+    if message_unavailable(response=html):
         return None
 
     tree = etree.HTML(html, parser=etree.HTMLParser(encoding="utf-8"))

@@ -145,7 +145,7 @@ def _fetch_article_detail_text(
         return ""
     from src.db.connection import db_write_with_retry
     from src.db.repository import ArticleRepository
-    from src.utils.wechat_body import fetch_article_body_full
+    from src.utils.wechat_body import body_unavailable, fetch_article_body_full
     from src.utils.article_identity import has_readable_body
     from src.utils import body_retry
 
@@ -158,8 +158,10 @@ def _fetch_article_detail_text(
         if body_retry.deferred(repo, article_id, link):
             return ""
         text, html, nickname = fetch_article_body_full(link)
-        if isinstance(text, str) and text in ("已删除", "请求错误"):
-            body_retry.failed(repo, article_id, link, unavailable=text == "已删除")
+        if isinstance(text, str):
+            # 作者删除/平台违规下架/投诉侵权 → 一周复查一次;其余算临时故障退避重试
+            body_retry.failed(repo, article_id, link,
+                              unavailable=bool(body_unavailable(text)))
             return nickname
         paragraphs = text if isinstance(text, list) else [text]
         if not any(str(p or "").strip() for p in paragraphs) and not (html or "").strip():
