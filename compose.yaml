@@ -1,7 +1,7 @@
 services:
-  knowledge-base:
+  knowbase:
     build: .
-    image: knowledge-base:local
+    image: knowbase:local
     init: true
     restart: unless-stopped
     ports:

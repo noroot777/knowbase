@@ -30,7 +30,7 @@ class SetupError(Exception):
 
 def runtime_home() -> Path:
     return Path(os.getenv("KB_WECHAT_RUNTIME") or
-                Path.home() / ".local/share/knowledge-base/wechat").expanduser()
+                Path.home() / ".local/share/knowbase/wechat").expanduser()
 
 
 def private_dir(path: Path) -> Path:

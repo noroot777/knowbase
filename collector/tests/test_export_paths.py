@@ -1,4 +1,4 @@
-"""Collector exports must land in the same vault mounted by the knowledge base."""
+"""Collector exports must land in the same vault mounted by Knowbase."""
 
 import json
 import os

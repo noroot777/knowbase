@@ -33,7 +33,7 @@ def reader_command() -> str:
     candidates = [shutil.which("rion-wechat-cli"),
                   root / "skills/wechat-cli/scripts/reader.sh", root / "bin/rion-wechat-cli",
                   Path(os.getenv("KB_WECHAT_RUNTIME") or Path.home() /
-                       ".local/share/knowledge-base/wechat").expanduser() / "bin/rion-wechat-cli"]
+                       ".local/share/knowbase/wechat").expanduser() / "bin/rion-wechat-cli"]
     for candidate in candidates:
         if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
