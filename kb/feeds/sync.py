@@ -133,9 +133,23 @@ def collect(kind, scope):
     return summary
 
 
-def export(kind: str):
+def export(kind: str, hold_untranslated: bool = False):
+    # hold_untranslated:还排在翻译队列里的条目这一轮不写 vault。一轮只译
+    # MAX_ITEMS 条,不拦的话第 41 条会先以英文落盘,索引/提取/检索/日报都按
+    # 英文处理过一遍。翻译整个跳过时(没配 key)不能拦,否则这些条目永远进
+    # 不了知识库 —— 那时英文总比没有强。
+    base = 'FROM feed_items WHERE kind=? AND exported_hash<>content_hash'
+    args: list = [kind]
+    held = 0
+    if hold_untranslated:
+        cond, extra = translate.queued_sql()
+        with reg.db() as c:
+            held = c.execute(f'SELECT count(*) {base} AND ({cond})',
+                             (*args, *extra)).fetchone()[0]
+        base += f' AND NOT ({cond})'
+        args += extra
     with reg.db() as c:
-        rows = c.execute('SELECT * FROM feed_items WHERE kind=? AND exported_hash<>content_hash', (kind,)).fetchall()
+        rows = c.execute(f'SELECT * {base}', args).fetchall()
     errors, done = [], 0
     root = VAULT_ROOT / 'source' / kind
     root.mkdir(parents=True, exist_ok=True)
@@ -175,4 +189,6 @@ def export(kind: str):
         finally:
             if temp:
                 temp.unlink(missing_ok=True)
-    _stage('export', 'error' if errors else 'ok', f'已保存 {done} 条到知识库', failures=errors)
+    _stage('export', 'error' if errors else 'ok',
+           f'已保存 {done} 条到知识库' + (f'，{held} 条待翻译（译完再入库）' if held else ''),
+           failures=errors)

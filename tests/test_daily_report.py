@@ -2,6 +2,7 @@
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -10,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from kb import daily, daily_run, llm, llm_stages, store
+from kb.collectors.feeds import FeedCollector
 from kb.feeds import registry as reg, sync, translate
 from kb.scanner import parse_frontmatter
 from kb.web import daily_api
@@ -179,9 +181,8 @@ class DailyReportTests(unittest.TestCase):
     def test_next_window_starts_where_the_last_report_ended(self):
         add_doc(self.conn, 'source/dr-gzh/a.md')
         self.gen()                                   # 截止 09-29 08:00
-        since, until, clamped = daily.next_window(now=T('2026-09-30 08:00'))
-        self.assertEqual((T('2026-09-29 08:00'), T('2026-09-30 08:00'), False),
-                         (since, until, clamped))
+        self.assertEqual((T('2026-09-29 08:00'), T('2026-09-30 08:00')),
+                         daily.next_window(now=T('2026-09-30 08:00')))
 
     def test_regenerating_today_ignores_todays_own_report(self):
         # 重新生成今天这一份要的是"从昨天那一刻起的完整一天",不是"从今早那份
@@ -190,17 +191,23 @@ class DailyReportTests(unittest.TestCase):
         add_doc(self.conn, 'source/dr-gzh/b.md', published='2026-09-28 12:00')
         self.gen(T('2026-09-27 08:00'), T('2026-09-28 08:00'))
         self.gen(T('2026-09-28 08:00'), T('2026-09-29 08:00'))
-        since, _, _ = daily.next_window(now=T('2026-09-29 20:00'))
-        self.assertEqual(T('2026-09-28 08:00'), since)
+        self.assertEqual(T('2026-09-28 08:00'),
+                         daily.next_window(now=T('2026-09-29 20:00'))[0])
 
-    def test_window_is_clamped_by_max_days(self):
+    def test_a_long_outage_does_not_move_the_window_start(self):
+        # 停服几天之后,起点仍然接上一份日报的截止时刻。按"最长回溯 N 天"截断的
+        # 话,被截掉那几天的内容再也进不了任何一份日报——素材多是限量问题
+        # (collect 按条数截、日报里写明),窗口断链没法补。
         add_doc(self.conn, 'source/dr-gzh/a.md', published='2026-09-01 12:00')
         self.gen(T('2026-09-01 08:00'), T('2026-09-02 08:00'))
-        since, until, clamped = daily.next_window(max_days=3, now=T('2026-09-29 08:00'))
-        self.assertEqual((T('2026-09-26 08:00'), True), (since, clamped))
-        # 一份日报都没有时回溯 24 小时,不是回溯到库的开天辟地。
+        self.assertEqual(T('2026-09-02 08:00'),
+                         daily.next_window(first_days=3, now=T('2026-09-29 08:00'))[0])
+        # 一份日报都没有时才回溯 first_days 天,不是回溯到库的开天辟地。
         daily.delete('2026-09-02')
-        self.assertEqual(T('2026-09-28 08:00'), daily.next_window(now=until)[0])
+        self.assertEqual(T('2026-09-26 08:00'),
+                         daily.next_window(first_days=3, now=T('2026-09-29 08:00'))[0])
+        self.assertEqual(T('2026-09-28 08:00'),
+                         daily.next_window(now=T('2026-09-29 08:00'))[0])
 
     def test_listing_reading_and_deleting(self):
         add_doc(self.conn, 'source/dr-gzh/a.md')
@@ -249,10 +256,57 @@ class DailyScheduleTests(unittest.TestCase):
         self.clock.now.return_value = datetime(2026, 9, 29, 7, 30)
         self.assertTrue(daily_run.tick())
         # 定时这一轮不钉窗口:起点接上一份日报,终点是同步跑完的那一刻。
-        self.start.assert_called_once_with(sync=True, channels=['rss'],
-                                           max_days=3, trigger='schedule')
+        self.start.assert_called_once_with(sync=True, channels=['rss'], first_days=1,
+                                           trigger='schedule', sched_day='2026-09-29')
+        self.assertFalse(daily_run.tick())          # 起过一轮就不会重复起
+
+    def test_a_transient_failure_is_retried_the_same_day(self):
+        # "已触发"不等于"已出报":在起跑那一刻就记下今天已经出过报的话,一次
+        # 模型 502 就让用户整天等不到日报,而且面板上看不出还会不会再试。
+        daily_run.save_settings(True, '07:30', ['rss'])
+        self.clock.now.return_value = datetime(2026, 9, 29, 7, 30)
+        self.assertTrue(daily_run.tick())
+        self.assertEqual('', daily_run.load_settings()['last_fired'])
+        self.assertEqual('2026-09-29T08:00', daily_run.load_settings()['next_run'])
+        moment = datetime(2026, 9, 29, 7, 30)
+        for attempt in range(1, daily_run.MAX_RETRIES + 1):   # 前几次失败:同日重试
+            daily_run._finish_schedule('2026-09-29', retry=True)
+            self.assertEqual((attempt, ''), (daily_run.load_settings()['fail_count'],
+                                             daily_run.load_settings()['last_fired']))
+            moment += daily_run.RETRY_AFTER
+            self.clock.now.return_value = moment
+            self.assertTrue(daily_run.tick())
+        daily_run._finish_schedule('2026-09-29', retry=True)   # 补满次数就收手
         self.assertEqual('2026-09-29', daily_run.load_settings()['last_fired'])
-        self.assertFalse(daily_run.tick())          # 同一天不会跑第二次
+        self.assertEqual('2026-09-30T07:30', daily_run.load_settings()['next_run'])
+        self.assertFalse(daily_run.tick())
+
+    def test_a_successful_run_books_tomorrow_and_clears_the_failure_count(self):
+        daily_run.save_settings(True, '07:30', ['rss'])
+        self.clock.now.return_value = datetime(2026, 9, 29, 7, 30)
+        daily_run.tick()
+        daily_run._finish_schedule('2026-09-29', retry=True)
+        daily_run._finish_schedule('2026-09-29', retry=False)
+        s = daily_run.load_settings()
+        self.assertEqual(('2026-09-29', '2026-09-30T07:30', 0),
+                         (s['last_fired'], s['next_run'], s['fail_count']))
+
+    def test_a_run_crossing_midnight_is_booked_against_the_day_it_fired(self):
+        # 同步能跑几小时:23:50 起的那一轮可能 00:50 才收尾。按收尾时刻记的话
+        # last_fired 落在第二天,第二天那一跳当场被自己吃掉。
+        daily_run.save_settings(True, '23:50', ['rss'])
+        self.clock.now.return_value = datetime(2026, 9, 29, 0, 50)
+        daily_run._finish_schedule('2026-09-28', retry=False)
+        s = daily_run.load_settings()
+        self.assertEqual(('2026-09-28', '2026-09-29T23:50'), (s['last_fired'], s['next_run']))
+        self.clock.now.return_value = datetime(2026, 9, 29, 23, 50)
+        self.assertTrue(daily_run.tick())           # 29 号那一跳还在
+
+    def test_old_settings_keep_working_under_the_new_key(self):
+        # 老配置里这个键叫 days / max_days,意思变了(现在只管第一份回溯多久),
+        # 值照读——不读的话升级之后这个设置悄悄回到默认。
+        self.path.write_text(json.dumps({'enabled': True, 'time': '07:30', 'max_days': 5}))
+        self.assertEqual(5, daily_run.load_settings()['first_days'])
 
     def test_unknown_channels_fall_back_to_defaults(self):
         self.path.write_text(json.dumps({'enabled': True, 'time': '07:30',
@@ -269,6 +323,50 @@ class DailyScheduleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             daily_run.save_settings(True, '25:00', ['rss'])
         self.assertFalse(self.path.exists())
+
+
+class DailyStopTests(unittest.TestCase):
+    """按下「停止」= 这一轮到此为止;同步超预算 = 别再同步了,照样出报。"""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.settings = Path(temp.name) / 'daily_report.json'
+        for p in (patch.object(daily_run, 'STATE_FILE', Path(temp.name) / 'last_run.json'),
+                  patch.object(daily_run, 'SETTINGS_FILE', self.settings)):
+            p.start(); self.addCleanup(p.stop)
+        self.before = deepcopy(daily_run._state)
+        self.addCleanup(lambda: daily_run._state.update(self.before))
+
+    def run_once(self, **flags):
+        daily_run._state.update({**self.before, 'running': True, 'log': [],
+                                 'channels': [], **flags})
+        gen = Mock(return_value={'date': '2026-09-29', 'since': '', 'until': '', 'path': '',
+                                 'docs': 2, 'total': 2, 'late': 0, 'model': 'm'})
+        with patch.object(daily, 'generate', gen):
+            daily_run._run(None, None, False, [], daily.FIRST_DAYS)
+        return gen
+
+    def test_user_stop_does_not_spend_another_model_call(self):
+        # 界面上写的是"当前阶段结束后停止",用户的预期是不再出报;继续生成等于
+        # 把一份同步到一半的日报当成功交出去,还再花一次模型钱。
+        gen = self.run_once(stop_requested=True)
+        gen.assert_not_called()
+        self.assertEqual(('stopped', False),
+                         (daily_run._state['phase'], daily_run._state['running']))
+
+    def test_running_out_of_budget_still_generates(self):
+        # 超预算是"别再同步了,拿现有内容出报",生成正是它的目的。
+        gen = self.run_once(over_budget=True)
+        gen.assert_called_once()
+        self.assertEqual('done', daily_run._state['phase'])
+
+    def test_a_stopped_scheduled_round_is_not_retried(self):
+        self.settings.write_text(json.dumps({'enabled': True, 'time': '07:30'}))
+        self.run_once(stop_requested=True, sched_day='2026-09-29')
+        s = daily_run._raw_settings()
+        self.assertEqual(('2026-09-29', '2026-09-30T07:30', 0),
+                         (s['last_fired'], s['next_run'], s['fail_count']))
 
 
 class TranslateTests(unittest.TestCase):
@@ -318,10 +416,32 @@ class TranslateTests(unittest.TestCase):
                 translate.translate_pending('rss')
         self.assertEqual(0, translate.pending('rss'))         # 不再自动重试
         self.assertEqual(translate.MAX_TRIES, self.item()['translate_tries'])
-        sync.export('rss')
+        # 队列有出口:试满次数之后按原文导出,而不是把这条永远挡在知识库外面。
+        sync.export('rss', hold_untranslated=True)
         text = (self.root / 'vault' / 'source' / 'rss' / (self.item()['key'] + '.md')).read_text()
         self.assertIn('Some English body text', text)
         self.assertNotIn('original_title', text)
+
+    def test_an_entry_still_in_the_queue_does_not_land_in_english(self):
+        # 一轮只译 MAX_ITEMS 条:一次进来 41 条英文时,没轮到的那条原来会先以
+        # 英文写进 vault,而索引/提取/检索/日报读的全是 vault 里那份英文。
+        self.put('An English post', 'English body waiting for its turn.')
+        path = self.root / 'vault' / 'source' / 'rss' / (self.item()['key'] + '.md')
+        sync.export('rss', hold_untranslated=True)
+        self.assertFalse(path.exists())
+        with patch.object(llm, 'chat', Mock(return_value='###TITLE###\n中文标题\n'
+                                            '###BODY###\n中文正文。')):
+            translate.translate_pending('rss')
+        sync.export('rss', hold_untranslated=True)
+        self.assertIn('中文正文。', path.read_text())
+
+    def test_without_an_api_key_english_still_reaches_the_vault(self):
+        # 翻译整个被跳过时不能拦:那些条目会永远进不了知识库,英文总比没有强。
+        self.put('Key-less English post', 'English body with no model configured.')
+        with patch.object(translate, '_model', Mock(side_effect=RuntimeError('没配 key'))):
+            FeedCollector('rss').materialize()
+        path = self.root / 'vault' / 'source' / 'rss' / (self.item()['key'] + '.md')
+        self.assertIn('English body with no model', path.read_text())
 
     def test_missing_api_key_is_not_charged_against_retries(self):
         self.put('English again please', 'Body text in English for this entry.')

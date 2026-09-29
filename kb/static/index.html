@@ -189,7 +189,7 @@
       <label><input type="checkbox" id="daily-on" onchange="markDailyDirty()"> 启用定时</label>
       <label>每天 <input type="time" id="daily-time" value="08:00" required oninput="markDailyDirty()"></label>
       <label><input type="checkbox" id="daily-sync" checked onchange="markDailyDirty()"> 生成前先同步</label>
-      <label>最长回溯 <input type="number" id="daily-maxdays" min="1" max="7" value="3" required oninput="markDailyDirty()"> 天</label>
+      <label>没有上一份时回溯 <input type="number" id="daily-firstdays" min="1" max="7" value="1" required oninput="markDailyDirty()"> 天</label>
     </fieldset>
     <div class="daily-channels"><span class="daily-channels-label">同步范围</span><div id="daily-channels" role="group" aria-label="同步范围"></div></div>
     <div class="daily-schedule-footer"><span id="daily-sched-msg" role="status">正在读取定时设置…</span><button id="daily-sched-save" class="ghost" onclick="saveDailySettings()" disabled>保存设置</button></div>

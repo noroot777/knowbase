@@ -48,7 +48,7 @@ class SettingsRequest(BaseModel):
     enabled: bool
     time: str = '08:00'
     sync: bool = True
-    max_days: int = Field(default=daily.MAX_WINDOW_DAYS, ge=1, le=7)
+    first_days: int = Field(default=daily.FIRST_DAYS, ge=1, le=7)
     channels: list[str] | None = None
 
 
@@ -56,7 +56,7 @@ class SettingsRequest(BaseModel):
 def set_settings(body: SettingsRequest):
     try:
         return daily_run.save_settings(body.enabled, body.time, body.channels,
-                                       body.sync, body.max_days)
+                                       body.sync, body.first_days)
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
 
@@ -69,10 +69,11 @@ def status():
 @router.get('/window')
 def window():
     """下一份日报默认覆盖的区间:上一份的截止时刻 → 现在。界面拿它预填。"""
-    since, until, clamped = daily.next_window(daily_run.load_settings()['max_days'])
+    settings = daily_run.load_settings()
+    since, until = daily.next_window(settings['first_days'])
     return {'since': since.isoformat(timespec='minutes'),
-            'until': until.isoformat(timespec='minutes'), 'clamped': clamped,
-            'max_days': daily_run.load_settings()['max_days']}
+            'until': until.isoformat(timespec='minutes'),
+            'first_days': settings['first_days']}
 
 
 class RunRequest(BaseModel):
@@ -99,7 +100,7 @@ def run(body: RunRequest | None = None):
 def stop():
     if not daily_run.request_stop():
         raise HTTPException(409, '当前没有正在运行的日报任务')
-    return {'ok': True, 'detail': '当前阶段结束后停止，已同步的内容会保留'}
+    return {'ok': True, 'detail': '当前阶段结束后停止,这一轮不生成日报;已同步的内容会保留'}
 
 
 @router.get('/reports')

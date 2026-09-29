@@ -89,12 +89,27 @@ await evalJs(`loadDailyPanel()`);
 
 // 地址栏 #daily 是 initWorkspace 收尾时才恢复的,比 dailyLoaded 还晚一步。
 await waitFor(`document.getElementById('page-crumb').textContent === '每日日报'
-  && getComputedStyle(document.getElementById('dailypanel')).display !== 'none'`);
+  && getComputedStyle(document.getElementById('dailypanel')).display !== 'none'`, 20000);
+const where = await evalJs(`JSON.stringify({crumb: document.getElementById('page-crumb').textContent,
+  tab: typeof activeTab === 'undefined' ? '?' : activeTab, loaded: dailyLoaded, hash: location.hash,
+  shown: getComputedStyle(document.getElementById('dailypanel')).display})`);
 check("侧栏有「每日日报」入口", await evalJs(`!!document.getElementById('tab-daily')`));
-check("面板打开后标题是每日日报", await evalJs(`document.getElementById('page-crumb').textContent`) === "每日日报");
-check("面板可见", await evalJs(`getComputedStyle(document.getElementById('dailypanel')).display !== 'none'`));
+check("面板打开后标题是每日日报",
+      await evalJs(`document.getElementById('page-crumb').textContent`) === "每日日报", where);
+check("面板可见",
+      await evalJs(`getComputedStyle(document.getElementById('dailypanel')).display !== 'none'`), where);
 
 const today = new Date().toLocaleDateString("sv");
+// 沙箱只预置"上一份日报"(昨天那份);今天这一份由探针自己先生成一次,全新
+// 沙箱和跑过一次的沙箱才是同一个起点。之前默认它已经在那儿,于是脚本只在
+// 复用过的沙箱里全绿,换个干净目录当场四项红。
+const hasToday = `(async () => (await (await fetch('/api/daily/reports')).json())
+  .reports.some(r => r.date === '${today}'))()`;
+if (!(await evalJs(hasToday))) {
+  await evalJs(`(() => { runDaily(false); })()`);
+  await waitStatus(hasToday, 40000);
+  await evalJs(`loadDailyPanel()`);
+}
 // dailyLoaded 只说明定时设置回来了;列表、正文、覆盖区间是另外三个接口。
 await waitFor(`!!document.querySelector('[data-report]')`);
 await waitFor(`!!document.querySelector('#daily-reader-body h2')`);
@@ -154,6 +169,7 @@ check("覆盖已有日报前先确认", asked,
       asked ? "" : await evalJs(`JSON.stringify({dates: dailyReports.map(r => r.date), busy: dailyBusy,
         running: dailyState && dailyState.running, phase: dailyState && dailyState.phase,
         masks: document.querySelectorAll('.confirm-mask').length, today: new Date().toLocaleDateString('sv')})`));
+if (asked) await sleep(1100);   // window_until 只到秒:同一秒内重生成逐字相同
 if (asked) await evalJs(`document.querySelector('.confirm-mask [data-act=ok]').click()`);
 await waitStatus(`${stamp}.then(v => v !== ${JSON.stringify(before)})`);
 const after = await evalJs(stamp);
@@ -165,6 +181,10 @@ check("重新生成后不再显示上一次的失败",
 // 来源面板:英文条目显示译文,弹窗能切回原文
 await evalJs(`switchTab('rss')`);
 await sleep(2500);
+// 恢复地址栏之后照常记录位置(那道"恢复前不写地址栏"的闸门只管启动那一下,
+// 卡死的话所有深链和前进后退一起没了)。
+check("切走之后地址栏跟着更新", (await evalJs(`location.hash`)) === "#rss",
+      await evalJs(`location.hash`));
 const excerpt = await evalJs(`document.querySelector('.source-excerpt')?.textContent || ''`);
 check("订阅内容显示的是中文译文", /[一-鿿]/.test(excerpt) && !/^The runtime schedules/.test(excerpt), excerpt.slice(0, 60));
 check("条目标注了已译为中文",

@@ -8,9 +8,10 @@
 判定不花钱(`registry.text_language` 只看字符构成),只有判成外文的条目才调
 模型;一条译一次,结果落在 feed_items 的 title_zh/body_zh 上长期复用。
 
-失败不挡路:译不动的条目按原文导出(`display()` 有译文用译文、没有用原文),
-记下失败原因等下一轮重试,超过 `MAX_TRIES` 次就不再自动重试——它多半不是
-偶发抖动,而是这条内容本身有问题,留着原文比一直烧钱强。
+失败不挡路,但也不抢在前头:还排在翻译队列里的条目这一轮先不导出(见
+`queued_sql`),等译完再落盘;重试 `MAX_TRIES` 次仍然译不动的才按原文导出
+——那多半不是偶发抖动,而是这条内容本身有问题,留着原文比一直烧钱强,更比
+把它挡在知识库外面强。
 """
 from __future__ import annotations
 
@@ -136,11 +137,23 @@ def _has(item, column: str) -> bool:
         return False
 
 
+def queued_sql() -> tuple[str, list]:
+    """"还排在翻译队列里"的判据,只有这一份。
+
+    这些条目**不按英文导出**:一轮只译 MAX_ITEMS 条,一次进来 41 条英文的话
+    第 41 条会先以英文写进 vault,而索引、提取、检索、日报读的全是 vault 里
+    那份英文。等下一轮译完再落盘,晚一轮但是中文的。队列有出口——试满
+    MAX_TRIES 次仍然失败的就不在这个集合里了,那时按原文导出,免得一条
+    永远译不动的内容永远进不了知识库。
+    """
+    return "lang='en' AND body_zh='' AND translate_tries<?", [MAX_TRIES]
+
+
 def pending(kind: str) -> int:
+    cond, args = queued_sql()
     with reg.db() as c:
-        return c.execute(
-            "SELECT count(*) FROM feed_items WHERE kind=? AND lang='en'"
-            " AND body_zh='' AND translate_tries<?", (kind, MAX_TRIES)).fetchone()[0]
+        return c.execute(f'SELECT count(*) FROM feed_items WHERE kind=? AND {cond}',
+                         (kind, *args)).fetchone()[0]
 
 
 def _label_unknown(kind: str) -> None:
@@ -222,7 +235,7 @@ def summarize(summary: dict) -> str:
         return ''
     text = f"已翻译 {summary['done']} 条英文内容"
     if summary['failed']:
-        text += f",{summary['failed']} 条翻译失败(按原文保留)"
+        text += f",{summary['failed']} 条翻译失败(仍在重试,暂不入库)"
     if summary['left']:
-        text += f",{summary['left']} 条留待下次同步"
+        text += f",{summary['left']} 条留到下一轮译完再入库"
     return text

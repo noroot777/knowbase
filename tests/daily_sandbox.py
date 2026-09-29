@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 from datetime import datetime, timedelta
+from datetime import time as dt_time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,7 +51,12 @@ def main():
             body='发布得更早、这一轮才抓进来的内容,应该进补录。')
 
     # 一份"昨天的日报":下一份的起点就接在它的截止时刻上,是个固定值。
-    mark = now - timedelta(hours=20)
+    # 取 min(now-20h, 今天零点前一分钟):20 小时前落在今天的话(下午之后跑),
+    # 这份日报的文件名就是今天,`next_window` 会把它当成"要被覆盖的那一份"
+    # 跳过,起点转而回落到 24 小时前——探针那条"起点接上一份日报"当场变成
+    # 一个随时间漂的值。
+    mark = min(now - timedelta(hours=20),
+               datetime.combine(now.date(), dt_time()) - timedelta(minutes=1))
     daily_dir = vault / 'daily'
     daily_dir.mkdir(parents=True, exist_ok=True)
     (daily_dir / f'{mark.date().isoformat()}.md').write_text(

@@ -39,11 +39,13 @@ class FeedCollector:
                 _stage('export', 'running', f'翻译外文内容 {done}/{total}')
 
         # 先把外文条目译成中文再落盘:vault 的 md 是索引/提取/日报共同的事实来源,
-        # 导出完再翻等于先写一份英文进去,后面每一层都按英文处理过一遍。
+        # 导出完再翻等于先写一份英文进去,后面每一层都按英文处理过一遍。这一轮
+        # 没轮到的(一轮上限 40 条)同样不导出,留到下一轮译完再落盘;翻译整个被
+        # 跳过时(没配 key)照旧按原文导出,否则英文条目永远进不了知识库。
         summary = translate.translate_pending(self.name, progress=progress)
         if note := translate.summarize(summary):
             _log(f'export: {note}')
-        export(self.name)
+        export(self.name, hold_untranslated=not summary['skipped'])
 
     def pending(self):
         with reg.db() as c:

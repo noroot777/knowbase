@@ -51,7 +51,7 @@ function renderDailyWindowLabel() {
   const since = dailyClock($('daily-since').value || dailyWindow.since);
   $('daily-window-label').textContent = dailyWindowDirty
     ? `覆盖 ${since} → ${dailyClock($('daily-until').value)}`
-    : `覆盖 ${since} 起到生成时刻` + (dailyWindow.clamped ? `（已截到最近 ${dailyWindow.max_days} 天）` : '');
+    : `覆盖 ${since} 起到生成时刻`;
 }
 
 async function loadDailyWindow() {
@@ -96,7 +96,7 @@ async function loadDailySettings() {
     $('daily-on').checked = !!dailySettings.enabled;
     $('daily-time').value = dailySettings.time;
     $('daily-sync').checked = !!dailySettings.sync;
-    $('daily-maxdays').value = dailySettings.max_days;
+    $('daily-firstdays').value = dailySettings.first_days;
     renderDailyChannels();
     dailyLoaded = true;
     $('daily-sched-fields').disabled = false;
@@ -126,7 +126,7 @@ function markDailyDirty() {
 
 async function saveDailySettings() {
   if (!dailyLoaded || dailySaving || !dailyDirty) return;
-  if (!$('daily-time').reportValidity() || !$('daily-maxdays').reportValidity()) return;
+  if (!$('daily-time').reportValidity() || !$('daily-firstdays').reportValidity()) return;
   const channels = pickedDailyChannels();
   if (!channels.length) { $('daily-sched-msg').textContent = '至少勾选一个同步范围'; return; }
   dailySaving = true; $('daily-sched-save').disabled = true;
@@ -134,7 +134,7 @@ async function saveDailySettings() {
   try {
     dailySettings = await pipePost('/api/daily/settings', {
       enabled: $('daily-on').checked, time: $('daily-time').value,
-      sync: $('daily-sync').checked, max_days: Number($('daily-maxdays').value) || 3, channels,
+      sync: $('daily-sync').checked, first_days: Number($('daily-firstdays').value) || 1, channels,
     });
     dailyDirty = false;
     $('daily-sched-msg').textContent = dailyScheduleMessage(dailySettings);
@@ -253,7 +253,7 @@ async function runDaily(sync) {
 async function stopDaily() {
   try {
     await pipePost('/api/daily/stop');
-    toast('已请求停止', { key: 'daily', type: 'info', detail: '当前阶段结束后停止，已同步的内容会保留。' });
+    toast('已请求停止', { key: 'daily', type: 'info', detail: '当前阶段结束后停止，这一轮不生成日报；已同步的内容会保留。' });
   } catch (e) { toast('停止请求未完成', { key: 'daily', detail: e.message }); }
   finally { refreshDailyStatus(); }
 }
@@ -268,6 +268,7 @@ function renderDailyButtons() {
 
 function dailyPhaseText(s) {
   if (s.phase === 'failed') return '上次生成失败：' + (s.error || '未知原因');
+  if (s.phase === 'stopped') return s.detail || '已停止，这一轮没有生成日报';
   if (s.phase === 'done') return s.detail || '日报已生成';
   return s.detail || '正在准备';
 }
@@ -291,6 +292,7 @@ async function refreshDailyStatus() {
   renderDailyButtons();
   if (finished) {
     if (s.phase === 'failed') toast('日报未生成', { key: 'daily', detail: s.error || '' });
+    else if (s.phase === 'stopped') toast('已停止', { key: 'daily', type: 'info', detail: s.detail || '' });
     else toast('日报已生成', { key: 'daily', type: 'ok', detail: s.detail || '' });
     if (dailyActive()) {
       dailyCurrent = s.result?.date || dailyCurrent;

@@ -44,10 +44,8 @@ MAX_ITEMS = 120
 LATE_ITEMS = 30         # 补录那一段最多带多少条
 EXCERPT = 400           # 每条素材的摘要上限(字符)
 DIR_NAME = 'daily'
-# 没有上一份日报可接时回溯多久。
-FIRST_WINDOW = timedelta(days=1)
-# 窗口最长回溯多少天的默认值(服务停了半个月时别让一份日报去综合半个月)。
-MAX_WINDOW_DAYS = 3
+# **只有**在一份日报都没有、接不上任何截止时刻时回溯多久(天)。
+FIRST_DAYS = 1
 STAMP = '%Y-%m-%d %H:%M:%S'
 
 # 来源名 → 人话。feed 类来源的标签跟着 SOURCE_TYPES 走,其余几棵树是固定的。
@@ -232,7 +230,7 @@ def _material(items: list[dict]) -> str:
 
 
 def _page(since: datetime, until: datetime, mat: Material, body: str,
-          model: str, clamped: bool) -> str:
+          model: str) -> str:
     shown = mat.all()
     counts: dict[str, int] = {}
     for d in shown:
@@ -245,8 +243,6 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
         'sources': counts, 'model': model,
         'generated': datetime.now().strftime('%Y-%m-%d %H:%M'),
     }
-    if clamped:
-        meta['clamped'] = True
     refs = '\n'.join(
         f"{i}. [{d['title']}]({d['url']}) — {_label(d['source'])}·{d['account'] or '未署名'}"
         f"{' · 补录' if d['late'] else ''}"
@@ -259,8 +255,6 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
         more.append(f'窗口内共 {mat.total} 条,以上列出最新的 {len(mat.items)} 条。')
     if mat.late_total > len(mat.late):
         more.append(f'补录共 {mat.late_total} 条,以上列出最近入库的 {len(mat.late)} 条。')
-    if clamped:
-        more.append(f'距上一份日报超过 {MAX_WINDOW_DAYS} 天,窗口已截到最近这段。')
     tail = ('\n\n> ' + ' '.join(more)) if more else ''
     head = (f'# 日报 · {until:%Y-%m-%d}\n\n'
             f'> 覆盖 {_label_window(since, until)} 发布的内容(按发布时间,不是抓取时间)。\n\n')
@@ -283,28 +277,31 @@ def _write(path: Path, text: str) -> None:
         raise
 
 
-def next_window(max_days: int = MAX_WINDOW_DAYS,
-                now: datetime | None = None) -> tuple[datetime, datetime, bool]:
-    """(since, until, 是否被回溯上限截断)。
+def next_window(first_days: int = FIRST_DAYS,
+                now: datetime | None = None) -> tuple[datetime, datetime]:
+    """(since, until)。起点是**上一份日报的截止时刻**,隔多久都照接。
 
-    起点是**上一份日报的截止时刻**,所以两份日报之间一条都不漏、也不重。
     算起点时跳过"今天这一份":重新生成今天的日报时,要的是从昨天那一刻起的
     完整一天,而不是从今早那份的截止时刻起的几个小时 —— 后者会把今天上午
-    已经写进旧版本的内容整段丢掉。
+    已经写进旧版本的内容整段丢掉(那一份马上要被同名文件覆盖掉)。
+
+    **这里没有"最长回溯几天"的上限。** 上限会把起点往后挪,被挪过去的那段
+    内容就再也进不了任何一份日报:服务停四天、上限三天的话,第一天整段永久
+    消失,而且一行提示都没有。素材太多是"限量"问题——`collect` 按条数截到
+    MAX_ITEMS,日报里如实写明"窗口内共 N 条,以上列出最新的 M 条",能补;
+    窗口断链不能补。只有一份日报都没有、接不上任何截止时刻时才回溯
+    `first_days` 天,那时没有"上一份"可言,回溯多久是个纯粹的偏好。
     """
     until = (now or datetime.now()).replace(microsecond=0)
     today = until.date().isoformat()
     marks = [parse_ts(r.get('window_until')) for r in reports() if r['date'] != today]
     marks = [m for m in marks if m and m < until]
-    since = max(marks) if marks else until - FIRST_WINDOW
-    cap = timedelta(days=max(1, int(max_days or MAX_WINDOW_DAYS)))
-    if until - since > cap:
-        return until - cap, until, True
-    return since, until, False
+    return (max(marks) if marks else
+            until - timedelta(days=max(1, int(first_days or FIRST_DAYS)))), until
 
 
 def generate(since: datetime | None = None, until: datetime | None = None,
-             max_days: int = MAX_WINDOW_DAYS, model=None, progress=None) -> dict:
+             first_days: int = FIRST_DAYS, model=None, progress=None) -> dict:
     """生成一份日报并落盘,返回 {date, since, until, docs, total, late, path, model}。
 
     素材为空时抛 LookupError(那不是失败,是"这段时间没有新内容"),调用方据此
@@ -312,9 +309,8 @@ def generate(since: datetime | None = None, until: datetime | None = None,
     """
     from kb import llm, llm_stages, store
 
-    clamped = False
     if since is None or until is None:
-        auto_since, auto_until, clamped = next_window(max_days)
+        auto_since, auto_until = next_window(first_days)
         since, until = since or auto_since, until or auto_until
     if since >= until:
         raise ValueError('日报的起始时刻必须早于截止时刻')
@@ -336,7 +332,7 @@ def generate(since: datetime | None = None, until: datetime | None = None,
     if not body.strip():
         raise RuntimeError('模型返回了空日报,请稍后重试或换一个模型')
     path = report_dir() / f'{until.date().isoformat()}.md'
-    _write(path, _page(since, until, mat, body, str(picked), clamped))
+    _write(path, _page(since, until, mat, body, str(picked)))
     return {'date': until.date().isoformat(), 'since': since.strftime(STAMP),
             'until': until.strftime(STAMP), 'path': str(path), 'docs': len(mat.items),
             'total': mat.total, 'late': len(mat.late), 'model': str(picked)}
@@ -352,8 +348,7 @@ def _entry(path: Path, with_body: bool = False) -> dict:
            'generated': str(meta.get('generated') or ''),
            'sources': meta.get('sources') if isinstance(meta.get('sources'), dict) else {},
            'window_since': str(meta.get('window_since') or ''),
-           'window_until': str(meta.get('window_until') or ''),
-           'clamped': bool(meta.get('clamped'))}
+           'window_until': str(meta.get('window_until') or '')}
     if with_body:
         out['body'] = body
     return out

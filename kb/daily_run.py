@@ -32,13 +32,17 @@ SYNC_STAGES = ['crawl', 'export', 'index', 'extract']
 SYNC_BUDGET = int(os.environ.get('KB_DAILY_SYNC_BUDGET', str(3 * 3600)))
 # 管道被别人占着时,等它空出来的上限(每个通道各算各的)。
 WAIT_BUSY = 900
+# 定时那一轮临时失败后,隔多久重试、同一天最多补几次。
+RETRY_AFTER = timedelta(minutes=30)
+MAX_RETRIES = 2
 
 _lock = threading.RLock()
 _state: dict = {
     'running': False, 'phase': '', 'detail': '', 'date': '',
     'since': '', 'until': '', 'sync': False,
     'trigger': '', 'started_at': '', 'finished_at': '', 'error': '',
-    'stop_requested': False, 'channels': [], 'result': None, 'log': [],
+    'stop_requested': False, 'over_budget': False, 'sched_day': '',
+    'channels': [], 'result': None, 'log': [],
 }
 
 
@@ -73,12 +77,15 @@ def _raw_settings() -> dict:
     return {'enabled': bool(d.get('enabled')),
             'time': d.get('time') or '08:00',
             'sync': d.get('sync', True) is not False,
-            # 老配置里这个键叫 days、意思是"覆盖最近几天";窗口改成按上一份
-            # 日报的截止时刻接力之后,它只剩"最长回溯几天"这一个用途。
-            'max_days': max(1, min(7, int(d.get('max_days') or d.get('days') or 0)
-                                   or daily.MAX_WINDOW_DAYS)),
+            # 一份日报都没有、接不上任何截止时刻时回溯几天。老配置里这个键
+            # 叫 days/max_days(当时是"覆盖最近几天"和"最长回溯几天"),窗口
+            # 改成一律接上一份日报的截止时刻之后,它只剩"第一份回溯几天"。
+            'first_days': max(1, min(7, int(d.get('first_days') or d.get('max_days')
+                                            or d.get('days') or 0) or daily.FIRST_DAYS)),
             'channels': [str(c) for c in (d.get('channels') or [])],
             'last_fired': d.get('last_fired') or '',
+            'fail_day': d.get('fail_day') or '',
+            'fail_count': int(d.get('fail_count') or 0),
             'next_run': d.get('next_run') or ''}
 
 
@@ -92,11 +99,11 @@ def load_settings() -> dict:
 
 
 def save_settings(enabled: bool, time_str: str, channels: list[str] | None = None,
-                  sync: bool = True, max_days: int = daily.MAX_WINDOW_DAYS) -> dict:
+                  sync: bool = True, first_days: int = daily.FIRST_DAYS) -> dict:
     if not re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d', time_str or ''):
         raise ValueError(f'时间格式应为 HH:MM,收到 {time_str!r}')
-    if not 1 <= int(max_days) <= 7:
-        raise ValueError('最长回溯天数须在 1 到 7 天之间')
+    if not 1 <= int(first_days) <= 7:
+        raise ValueError('第一份日报的回溯天数须在 1 到 7 天之间')
     known = _channel_labels()
     picked = [c for c in (channels or []) if c in known]
     if channels and not picked:
@@ -110,7 +117,7 @@ def save_settings(enabled: bool, time_str: str, channels: list[str] | None = Non
         if nxt <= now or cur['last_fired'] == now.strftime('%Y-%m-%d'):
             nxt += timedelta(days=1)
         cur.update({'enabled': bool(enabled), 'time': time_str, 'sync': bool(sync),
-                    'max_days': int(max_days), 'channels': picked or cur['channels'],
+                    'first_days': int(first_days), 'channels': picked or cur['channels'],
                     'next_run': nxt.isoformat(timespec='minutes') if enabled else ''})
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
@@ -118,14 +125,42 @@ def save_settings(enabled: bool, time_str: str, channels: list[str] | None = Non
         return cur
 
 
-def _mark_fired(day: str) -> None:
+def _write_settings(**changes) -> None:
     with _lock:
         cur = _raw_settings()
-        cur['last_fired'] = day
-        tomorrow = datetime.strptime(day, '%Y-%m-%d') + timedelta(days=1)
-        cur['next_run'] = tomorrow.strftime('%Y-%m-%d') + 'T' + cur['time']
+        cur.update(changes)
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
                                  encoding='utf-8')
+
+
+def _at(day: datetime, time_str: str) -> str:
+    return day.strftime('%Y-%m-%d') + 'T' + time_str
+
+
+def _mark_attempt(now: datetime) -> None:
+    """定时起了一轮:先把下一跳推到重试时刻,**不记"今天已出报"**。
+
+    记"已出报"要等真的出来了(`_finish_schedule`)。在这里就记的话,这一轮
+    因为模型 502 之类的临时故障失败,当天再也不会自己试第二次,用户一整天
+    等不到日报、面板上也只有一句失败原因。
+    """
+    _write_settings(next_run=(now + RETRY_AFTER).isoformat(timespec='minutes'))
+
+
+def _finish_schedule(day: str, retry: bool) -> None:
+    """定时这一轮收尾。retry=True 表示临时故障,同一天内补几次;False 表示
+    今天到此为止(出报成功、没有素材、或者用户自己按了停止)。"""
+    with _lock:
+        cur = _raw_settings()
+        now = datetime.now()
+        count = (cur['fail_count'] if cur['fail_day'] == day else 0) + (1 if retry else 0)
+        done = not retry or count > MAX_RETRIES
+        _write_settings(
+            last_fired=day if done else cur['last_fired'],
+            fail_day=day if retry else '', fail_count=count if retry else 0,
+            next_run=(_at(datetime.strptime(day, '%Y-%m-%d') + timedelta(days=1), cur['time'])
+                      if done else (now + RETRY_AFTER).isoformat(timespec='minutes')))
 
 
 # ── 运行状态 ────────────────────────────────────────────────────────────────────
@@ -172,17 +207,26 @@ def _load_last_run() -> dict | None:
 
 
 def request_stop() -> bool:
-    """停止这一轮日报。正在跑的管道阶段按它自己的规矩收尾,已完成的结果保留。"""
+    """停下这一轮日报:剩下的通道不同步了,**日报也不生成**。
+
+    正在跑的管道阶段按它自己的规矩收尾,已同步进库的内容保留。
+    """
     from kb import pipeline as pl
     with _lock:
         if not _state['running']:
             return False
         if not _state['stop_requested']:
             _state['stop_requested'] = True
-            _log('已请求停止:当前阶段结束后不再继续')
+            _log('已请求停止:当前阶段结束后不再继续,这一轮不生成日报')
     if pl.get_state()['running']:
         pl.request_stop()
     return True
+
+
+def _halting() -> bool:
+    """还要不要继续同步下一个通道。两个原因分开记:用户按的停止会连生成一起
+    取消,时间预算耗尽只是不再同步、照样拿已有内容出日报。"""
+    return bool(_state['stop_requested'] or _state['over_budget'])
 
 
 # ── 执行 ────────────────────────────────────────────────────────────────────────
@@ -191,7 +235,7 @@ def _wait_idle(deadline: float) -> bool:
     """等管道空下来。True = 空了;False = 等超时或被要求停止。"""
     from kb import pipeline as pl
     while pl.get_state()['running']:
-        if _state['stop_requested'] or time.monotonic() > deadline:
+        if _halting() or time.monotonic() > deadline:
             return False
         time.sleep(2)
     return True
@@ -217,9 +261,9 @@ def _sync_channel(channel: str, label: str, budget_end: float) -> dict:
         stage = snapshot.get('current_stage') or ''
         detail = (snapshot['stages'].get(stage) or {}).get('detail') or ''
         _state['detail'] = f'{label}:{detail}' if detail else f'{label}:同步中'
-        if time.monotonic() > budget_end and not _state['stop_requested']:
+        if time.monotonic() > budget_end and not _halting():
             _log(f'{label}:同步超出时间预算,请求停止后直接生成日报')
-            _state['stop_requested'] = True
+            _state['over_budget'] = True
             pl.request_stop()
         time.sleep(2)
     stages = pl.get_state()['stages']
@@ -231,32 +275,43 @@ def _sync_channel(channel: str, label: str, budget_end: float) -> dict:
 
 
 def _run(since: datetime | None, until: datetime | None, sync: bool,
-         channels: list[str], max_days: int, trigger: str) -> None:
+         channels: list[str], first_days: int) -> None:
+    sched_day, retry = _state['sched_day'], False
     try:
         if sync:
             labels = _channel_labels()
             budget_end = time.monotonic() + SYNC_BUDGET
             for channel in channels:
-                if _state['stop_requested']:
+                if _halting():
                     _state['channels'].append(
                         {'channel': channel, 'label': labels.get(channel, channel),
-                         'status': 'skipped', 'detail': '已停止,未同步'})
+                         'status': 'skipped',
+                         'detail': '已停止,未同步' if _state['stop_requested']
+                                   else '超出时间预算,未同步'})
                     continue
                 _state['channels'].append(
                     _sync_channel(channel, labels.get(channel, channel), budget_end))
+        # 用户按的停止到此为止:接着生成等于把一份"同步到一半"的日报当成功交出去,
+        # 还要再花一次模型钱。超预算是另一回事——那本来就是"别再同步了,拿现有的
+        # 内容出报",继续生成正是它的目的。
+        if _state['stop_requested']:
+            _set('stopped', '已按请求停止,这一轮没有生成日报')
+            return
         _set('generate', '正在生成日报')
         # 窗口的截止时刻要在**同步跑完之后**才定下来(没显式指定时 generate 自己
         # 取 now):日报覆盖的是"到生成这一刻为止",同步花掉的那几小时里产出的
         # 内容也算数。开跑时就把 until 钉死的话,那几小时会掉进两份日报的缝里。
-        res = daily.generate(since=since, until=until, max_days=max_days,
+        res = daily.generate(since=since, until=until, first_days=first_days,
                              progress=lambda text: _set('generate', text))
         _state.update(result=res, date=res['date'], since=res['since'], until=res['until'])
         _set('done', f"日报已生成:{res['docs']} 条素材"
                      + (f"(另有 {res['late']} 条补录)" if res['late'] else ''))
     except LookupError as e:
+        # "这段时间没有新内容"不是故障,重试多少次都是同一个结果。
         _state['error'] = str(e)
         _set('failed', str(e))
     except Exception as e:                       # noqa: BLE001 - 面板要看到原因
+        retry = True
         _state['error'] = str(e)
         _set('failed', f'日报生成失败: {e}')
     finally:
@@ -264,15 +319,20 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
             _state['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             _save_last_run()
             _state['running'] = False
+        if sched_day:
+            _finish_schedule(sched_day, retry)
 
 
 def start(since: datetime | None = None, until: datetime | None = None,
           sync: bool = True, channels: list[str] | None = None,
-          max_days: int | None = None, trigger: str = 'manual') -> bool:
+          first_days: int | None = None, trigger: str = 'manual',
+          sched_day: str = '') -> bool:
     """起一轮日报。已经在跑返回 False。
 
     `since`/`until` 都不给时由 `daily.next_window()` 接着上一份日报算,那是
-    日常路径;显式给窗口是为了补一份旧的、或者重算一段。
+    日常路径;显式给窗口是为了补一份旧的、或者重算一段。`sched_day` 是定时
+    那一跳的日期(定时专用):这一轮的成败要记回那一天,而不是记在收尾时刻
+    所在的那一天——同步跨过零点的话两者差一天,记错会把明天那一跳也吃掉。
     """
     settings = load_settings()
     known = _channel_labels()
@@ -289,14 +349,15 @@ def start(since: datetime | None = None, until: datetime | None = None,
             'since': since.strftime(daily.STAMP) if since else '',
             'until': until.strftime(daily.STAMP) if until else '',
             'sync': bool(sync), 'trigger': trigger, 'error': '', 'log': [],
-            'stop_requested': False, 'channels': [], 'result': None,
+            'stop_requested': False, 'over_budget': False, 'sched_day': sched_day,
+            'channels': [], 'result': None,
             'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'finished_at': '',
         })
         window = f'{since:%m-%d %H:%M} 起' if since else '接上一份日报'
         _log(f'开始生成日报({window})'
              + (f',先同步 {len(picked)} 个来源' if sync else ''))
     threading.Thread(target=_run, args=(since, until, bool(sync), picked,
-                                        max_days or settings['max_days'], trigger),
+                                        first_days or settings['first_days']),
                      daemon=True).start()
     return True
 
@@ -316,9 +377,9 @@ def tick() -> bool:
         if not due or s['last_fired'] == today:
             return False
     settings = load_settings()
+    # 先把下一跳推到重试时刻,再起跑:反过来的话,一轮跑得极快(比如不同步、
+    # 当场报错)时它已经写完收尾状态了,这一行会把它盖回去。
+    _mark_attempt(now)
     # 定时这一轮不指定窗口:起点接上一份日报的截止时刻,终点是同步跑完的那一刻。
-    if start(sync=settings['sync'], channels=settings['channels'],
-             max_days=settings['max_days'], trigger='schedule'):
-        _mark_fired(today)
-        return True
-    return False
+    return start(sync=settings['sync'], channels=settings['channels'],
+                 first_days=settings['first_days'], trigger='schedule', sched_day=today)
