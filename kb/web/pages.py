@@ -64,6 +64,14 @@ def _graph_file(fname: str):
     return FileResponse(f)
 
 
+# 外链箭头,几何抄自 kb/static/js/icons.js 的 ARROW_PATHS.ext
+_EXT_ARROW = (
+    '<svg class="ia" width="1em" height="1em" viewBox="0 0 12 12" fill="none"'
+    ' stroke="currentColor" stroke-width="1.4" stroke-linecap="round"'
+    ' stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M2.9 9.1 9.1 2.9M4.9 2.9h4.2v4.2"/></svg>'
+)
+
 _DOC_TMPL = """<!DOCTYPE html>
 <html lang="zh"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -87,6 +95,9 @@ _DOC_TMPL = """<!DOCTYPE html>
   #content pre {{ background: #EAEEED; padding: 14px; border-radius: 9px; overflow-x: auto; }}
   #content code {{ background: #EAEEED; padding: 1px 5px; border-radius: 4px; font-size: 14px; }}
   #content blockquote {{ border-left: 3px solid #DCE3E0; padding-left: 14px; color: #3A4750; }}
+  /* 行内箭头:与 kb/static/js/icons.js 的 ARROW_PATHS.ext 同一份几何(这页独立
+     渲染,拿不到那个模块,只能抄)。别退回字符 ↗ —— 各字体粗细基线都不同。 */
+  .ia {{ display: inline-block; vertical-align: -.14em; margin-left: 3px; opacity: .7; }}
 </style></head><body>
 <h1 class="doc-title">{title}</h1>
 <div class="meta">{meta}</div>
@@ -279,7 +290,7 @@ def doc_page(doc_path: str):
             # url 来自被索引的外部内容,只放行 http(s):javascript: 之类点一下就执行
             safe = row["url"] if re.match(r"^https?://", row["url"], re.I) else "#"
             meta_parts.append(
-                f'<a href="{html_mod.escape(safe)}" target="_blank" rel="noopener">微信原文↗</a>'
+                f'<a href="{html_mod.escape(safe)}" target="_blank" rel="noopener">微信原文{_EXT_ARROW}</a>'
             )
     obs = (f"obsidian://open?vault={quote(VAULT_NAME)}"
            f"&file={quote(doc_path.removesuffix('.md'))}")

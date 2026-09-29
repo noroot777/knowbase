@@ -299,10 +299,8 @@ function openToolFromUrl() {
   openToolDrawer(norm);
 }
 
-// 外链箭头:内联 SVG(字符 ↗ 各字体渲染不一,对不齐);hover 随链接微移
-const EXT_ARROW = '<svg class="ext-arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">' +
-  '<path d="M2.1 7.9 7.5 2.5M3.1 2.2h4.7v4.7" fill="none" stroke="currentColor"' +
-  ' stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+// 外链箭头走 icons.js 的统一那份(字符 ↗ 各字体渲染不一,对不齐)
+const EXT_ARROW = arrow('ext');
 
 function renderToolHero(d) {
   $('td-name').textContent = d.name;

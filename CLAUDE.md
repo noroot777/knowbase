@@ -718,12 +718,26 @@
 - **改下拉框样式只许动 `background-color`。** `background` 简写会连 base.css 里
   那个自绘箭头(`background-image`)一起清掉,下拉框退化成一段看不出可点的纯文字。
   `#ask-model`、`.gallery-view-controls select`、`.select-field select` 都踩过。
+- **箭头一律走 `icons.js` 的 `arrow(kind)`,页面里不许再出现 ↗ ↑ ↓ → ▾ ▴ 字符。**
+  这些字在 PingFang SC 里本身就细长歪斜,缺字还会回退到系统 emoji 字体 —— 于是
+  「项目图谱 ↗」和「查看同步进度 →」的粗细、长度、基线各不相同,跟这套 1.4px
+  描边的图标更不是一家。几何只有一份(`ARROW_PATHS`,viewBox 12、stroke 1.4、
+  尺寸 1em 跟着所在文字缩放),下拉框那个自绘箭头用的也是里面的 `caretDown`。
+  静态标记写 `<i data-arrow="ext">`(`renderIcons()` 会替换),JS 里拼 `arrow('ext')`;
+  注意宿主元素得是 `innerHTML` 不能是 `textContent`。**三处独立产物各抄一份同样的
+  几何**(阅读页 `pages.py._EXT_ARROW`、分类图谱 `catgraph.js` 的 `IA`、话题图谱
+  `build_graph_html.py` 的 `openwiki`),理由同配色 —— 它们拿不到那个模块。
+- **`icons.js` 的齿轮路径是按极坐标算出来的(8 齿等分,齿顶 R=9.3 / 齿根 r=7),
+  别手改数字。** 原来那条是手画折线,齿不等分、首尾对不上,看着就像缺了一块——
+  齿轮是旋转对称形状,少一齿或齿距不匀一眼就看得出来。回归里按「r(θ) 以 45°
+  为周期」钉住了这件事。
 - **图谱页是把 CSS 内联进单文件 HTML 的产物**:改 `catgraph.css` 只影响之后构建的
   页面,Vault 里现有的 `graph*.html` 要重新生成才会变样(`build_catgraph.py --no-llm`
   用缓存重建、零模型调用)。注意归类缓存在主检出的 `data/` 里,worktree 里没有,
   从 worktree 跑会当成缓存全空、把几千条重判一遍。
-- 回归在 `tests/redesign_probe.mjs`(36 项:token 真的落到页面、无残留靛蓝、六个类型色
-  两两不同、正字虚实笔数、摘要去重、下拉箭头、五面板无溢出、窄屏无溢出、抽屉标题字重)。
+- 回归在 `tests/redesign_probe.mjs`(43 项:token 真的落到页面、无残留靛蓝、六个类型色
+  两两不同、正字虚实笔数、摘要去重、下拉箭头、页面无箭头字符、齿轮旋转对称、
+  五面板无溢出、窄屏无溢出、抽屉标题字重)。
   截图脚本 `tests/shots.mjs`。两者都是 CDP 直连 chrome-headless-shell,不装 playwright。
 
 ## 前端反馈(硬性)

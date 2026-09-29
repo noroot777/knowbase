@@ -145,6 +145,56 @@ const arrows = await evalJs(`(() => {
 for (const [k, v] of Object.entries(arrows))
   check(`下拉框 ${k} 保留箭头`, v === true, String(v));
 
+// ── 4c. 箭头一律是 icons.js 那份内联 SVG,页面上不许再出现箭头字符 ──
+// ↗ ↑ ↓ → ▾ ▴ 这些字在 PingFang SC 里细长歪斜,缺字还会回退到系统 emoji 字体,
+// 同一行里混着用就参差不齐。
+const glyphs = await evalJs(`(() => {
+  const bad = [];
+  const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n = w.nextNode(); n; n = w.nextNode()) {
+    if (!/[\\u2191\\u2193\\u2192\\u2197\\u25b4\\u25be\\u203a]/.test(n.nodeValue)) continue;
+    if (!n.parentElement?.offsetParent && n.parentElement?.tagName !== 'BODY') continue;
+    bad.push(n.nodeValue.trim().slice(0, 30));
+  }
+  const ia = [...document.querySelectorAll('.ia')];
+  return { bad, ia: ia.length, allSvg: ia.every(e => e.tagName.toLowerCase() === 'svg'),
+           unrendered: document.querySelectorAll('[data-arrow],[data-icon]').length };
+})()`);
+check("页面上没有残留箭头字符", glyphs.bad.length === 0, glyphs.bad.join(" | "));
+check("行内箭头都渲染成了 SVG", glyphs.ia > 0 && glyphs.allSvg, `${glyphs.ia} 个`);
+check("没有未替换的 data-icon/data-arrow", glyphs.unrendered === 0, String(glyphs.unrendered));
+
+// ── 4d. 齿轮真的是 8 齿等分的旋转对称形状 ──
+// 原来那条 settings 路径是手画折线,齿不等分、首尾对不上,看着就像缺了一块。
+// 判据:沿路径采样,把「每个角度上的最大半径」按 1° 分箱,r(θ) 必须以 45° 为周期
+// —— 少一齿、齿距不匀、某一段塌进去,这条当场就不成立。
+const gear = await evalJs(`(() => {
+  const host = document.createElement('div');
+  host.style.cssText = 'position:absolute;left:-9999px';
+  host.innerHTML = icon('settings');
+  document.body.appendChild(host);
+  const svg = host.querySelector('svg');
+  const path = svg.querySelector('path'), circle = svg.querySelector('circle');
+  const L = path.getTotalLength(), bins = new Array(360).fill(0);
+  for (let i = 0; i < 4000; i++) {
+    const p = path.getPointAtLength(L * i / 4000);
+    const dx = p.x - 12, dy = p.y - 12;
+    const a = ((Math.atan2(dy, dx) * 180 / Math.PI) % 360 + 360) % 360 | 0;
+    bins[a] = Math.max(bins[a], Math.hypot(dx, dy));
+  }
+  let worst = 0;
+  for (let i = 0; i < 360; i++) worst = Math.max(worst, Math.abs(bins[i] - bins[(i + 45) % 360]));
+  const rs = bins.filter(Boolean);
+  host.remove();
+  return { worst, rmin: Math.min(...rs), rmax: Math.max(...rs), filled: rs.length,
+           hasHub: !!circle, closed: path.getAttribute('d').trim().endsWith('Z') };
+})()`);
+check("齿轮 8 齿旋转对称(r(θ) 以 45° 为周期)", gear.worst < 0.25, `最大偏差 ${gear.worst?.toFixed(3)}`);
+check("齿轮每个角度都有轮廓(没有缺口)", gear.filled === 360, `${gear.filled}/360`);
+check("齿轮有齿(齿顶明显高于齿根)", gear.rmax - gear.rmin > 1.5,
+      `R=${gear.rmax?.toFixed(2)} r=${gear.rmin?.toFixed(2)}`);
+check("齿轮有轴心圆且路径闭合", gear.hasHub && gear.closed, JSON.stringify(gear));
+
 // ── 5. 五个面板逐个切过去,不许报错、不许出横向滚动条 ──
 for (const tab of ["gallery", "search", "ask", "fav", "pipe"]) {
   await evalJs(`switchTab('${tab}')`);

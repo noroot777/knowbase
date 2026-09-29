@@ -76,7 +76,7 @@
   .explore-links a > span { display: inline; margin-left: auto; font-size: 12px; }
   .nav-dropdown summary { flex-direction: row; justify-content: flex-start; gap: 10px; padding: 10px; min-height: 44px; font-size: 14px; }
   .nav-dropdown summary > .icon { width: 18px; height: 18px; }
-  .nav-dropdown summary > .icon:last-child { display: block; width: 11px; margin-left: auto; }
+  .nav-dropdown summary > .icon:last-child { display: block; width: 14px; margin-left: auto; }
   .nav-dropdown[open] summary > .icon:last-child { transform: rotate(90deg); }
   .settings-label::before { content: '工作区'; }
   .nav-popover { position: static; width: auto; max-height: none; margin-top: 4px; border: none; box-shadow: none; background: var(--paper); }

@@ -13,7 +13,6 @@ button.gcard:hover { border-color: var(--kind-color); box-shadow: 0 4px 16px #14
 /* 工具名走等宽体:它是标识符(norm),不是散文;等宽还能让一栏里的名字对齐 */
 .gname { display: block; font: 600 14.5px/1.45 var(--font-mono); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: -.01em; }
 .gkind { display: inline-block; font: 11.5px/1.5 var(--font-body); color: var(--kind-color); margin-top: 2px; }
-.gcard-arrow { display: none; }
 .gsum { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font: 13.5px/1.7 var(--font-body); color: var(--ink-2); min-height: 46px; margin-bottom: 10px; overflow-wrap: anywhere; }
 .gtags { display: flex; gap: 5px; flex-wrap: wrap; min-height: 21px; margin-bottom: 10px; }
 .gtag { display: inline-block; color: var(--muted); background: var(--tag-bg); padding: 1px 7px; font: 11.5px/1.6 var(--font-body); border-radius: 4px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -39,8 +38,7 @@ button.gcard:hover { border-color: var(--kind-color); box-shadow: 0 4px 16px #14
 .list-view button.gcard { padding: 16px 22px; }
 .list-view .gcard-body { display: grid; grid-template-columns: 220px minmax(0,1fr) 155px; align-items: center; gap: 6px 24px; }
 .list-view .gcard-top { margin: 0; grid-row: span 2; }
-.list-view .gcard-arrow { display: none; }
-.list-view .gsum { min-height: 0; margin: 0; -webkit-line-clamp: 1; }
+.list-view .list-view .gsum { min-height: 0; margin: 0; -webkit-line-clamp: 1; }
 .list-view .gtags { margin: 0; grid-column: 2; min-height: 0; }
 .list-view .gstat { grid-column: 3; grid-row: 1 / span 2; flex-wrap: wrap; justify-content: flex-end; padding: 0; border: none; margin: 0; }
 .list-view .gdate { flex-basis: 100%; text-align: right; }
@@ -139,9 +137,6 @@ button.gcard:hover { border-color: var(--kind-color); box-shadow: 0 4px 16px #14
 .td-entry .elinks a { color: var(--brand); text-decoration: none; }
 .td-entry .elinks a:hover { text-decoration: underline; }
 
-/* 外链箭头(内联 SVG):贴着文字基线,hover 朝右上微移 */
-.ext-arrow { display: inline-block; vertical-align: 1px; margin-left: 4px; opacity: .65; transition: transform .12s, opacity .12s; }
-a:hover .ext-arrow { transform: translate(1.5px, -1.5px); opacity: 1; }
 
 /* 抽屉底部 chatbox:气泡复用 panels.css 的 .msg 全套 */
 #td-chat-msgs { margin-top: 6px; }

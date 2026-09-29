@@ -110,7 +110,7 @@ function favGroupCard(g) {
     `<span class="fav-row-meta">${esc(h.account || '')} · ${(h.published || '').slice(5, 10)}` +
     ` · 收藏于 ${(g.latest || '').slice(5, 10)}` +
     ` · <a href="${esc(obsLink(h))}" title="在 Obsidian 中打开">Obsidian</a>` +
-    (h.url ? ` · <a href="${esc(safeUrl(h.url))}" target="_blank" rel="noopener">原文↗</a>` : '') + `</span>`;
+    (h.url ? ` · <a href="${esc(safeUrl(h.url))}" target="_blank" rel="noopener">原文${arrow('ext')}</a>` : '') + `</span>`;
   const snipRows = g.snips.map(s => `
       <div class="fav-row fav-snip-row" title="${esc(s.quote.slice(0, 200))}">
         ${favDocAHtml(s, `<span class="fav-snip-q">❝ ${esc(s.quote)}</span>`, 'fav-snip-link')}
@@ -308,7 +308,7 @@ async function loadFavPanel() {
   clearInterval(triagePoll); triagePoll = null;
   const triageMode = favView === 'inbox' && !favListMode;
   $('fav-tools').style.display = favView === 'inbox' ? '' : 'none';
-  $('fav-mode-toggle').textContent = favListMode ? '智能分诊 ▴' : '以列表查看 ▾';
+  $('fav-mode-toggle').innerHTML = favListMode ? `智能分诊${arrow('caretUp')}` : `以列表查看${arrow('caretDown')}`;
   $('fav-triage-btn').style.display = triageMode ? '' : 'none';
   $('fav-list').innerHTML = '<div class="empty"><span class="spin"></span>加载中…</div>';
   if (favView === 'inbox') initFavTools();

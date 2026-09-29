@@ -9,6 +9,13 @@ const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g,
 // 只放行 http(s):esc 挡得住属性逃逸,挡不住 javascript: —— 那个点一下就执行
 const safeUrl = u => (/^https?:\/\//i.test(u || "") ? esc(u) : "");
 
+/* 行内箭头:几何抄自 kb/static/js/icons.js 的 ARROW_PATHS(图谱是脱离 kb-web 也能
+   直接打开的单文件产物,拿不到那个模块)。别退回字符 → ↗ —— 各字体粗细基线都不同。 */
+const IA = { right: "M2.5 6h7M6.7 3.3 9.4 6 6.7 8.7", ext: "M2.9 9.1 9.1 2.9M4.9 2.9h4.2v4.2" };
+const arrow = k => `<svg class="ia" width="1em" height="1em" viewBox="0 0 12 12" fill="none"`
+  + ` stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"`
+  + ` aria-hidden="true"><path d="${IA[k]}"/></svg>`;
+
 /* ── 类目 → 大类分组(顺序即分类表顺序) ── */
 const catOf = {}, groups = [];
 DATA.cats.forEach(c => {
@@ -332,12 +339,12 @@ function panelFor(i) {
     + `<span>近 30 天 <b>${n.r30}</b> 次</span>`
     + `<span>最近 <b>${n.t}</b></span><span>首见 ${n.f}</span></div>`;
   h += `<div class="acts">`;
-  h += `<a class="primary" href="${CFG.appBase}?tool=${encodeURIComponent(n.q)}" target="_blank" rel="noopener">在图鉴里看全部记录 →</a>`;
+  h += `<a class="primary" href="${CFG.appBase}?tool=${encodeURIComponent(n.q)}" target="_blank" rel="noopener">在图鉴里看全部记录${arrow("right")}</a>`;
   const link = safeUrl(n.u);
   // 文案跟着 rp 走:构建时按主机名判过的才叫仓库,官网/文档站叫「项目主页」
   if (link) {
     const label = n.rp === "github.com" ? "GitHub" : n.rp ? "仓库" : "项目主页";
-    h += `<a href="${link}" target="_blank" rel="noopener">${label} ↗</a>`;
+    h += `<a href="${link}" target="_blank" rel="noopener">${label}${arrow("ext")}</a>`;
   }
   h += `</div>`;
 

@@ -166,7 +166,7 @@ function renderMsg(m) {
     <details class="refs"><summary>来源 ${m.refs.length} 篇</summary>${m.refs.map(r =>
       `[${r.n}] ${docA(r, r.title)} — ${esc(r.account || '')}${promoBadge(r)}` +
       ` · <a href="${esc(obsLink(r))}" style="color:var(--muted)" title="在 Obsidian 中打开">Obsidian</a>` +
-      (r.url ? ` · <a href="${esc(safeUrl(r.url))}" target="_blank" rel="noopener" style="color:var(--muted)">原文↗</a>` : '')
+      (r.url ? ` · <a href="${esc(safeUrl(r.url))}" target="_blank" rel="noopener" style="color:var(--muted)">原文${arrow('ext')}</a>` : '')
     ).join('<br>')}</details>` : '';
   const meta = m.model ? `<div class="msg-meta">${esc(modelLabel(m.model))}${m.created_at ? ' · ' + timeAgo(m.created_at) : ''}` +
     ` · <button class="ghost note-btn" style="padding:2px 10px;font-size:12px" ` +

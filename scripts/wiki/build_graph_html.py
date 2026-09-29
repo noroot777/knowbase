@@ -175,6 +175,7 @@ body.searching .pill.hit{opacity:1}
 #panel .art .meta{color:var(--muted);font-size:12px;margin-top:2px}
 #panel .art .sum{color:#66727c;font-size:12.5px;margin-top:3px}
 #panel .openwiki{display:inline-block;margin-top:16px;font-size:13px;color:var(--c-tools);text-decoration:none}
+#panel .openwiki .ia{display:inline-block;vertical-align:-.14em;margin-left:3px;opacity:.75}
 #panel .close{position:absolute;top:14px;right:16px;border:none;background:none;font-size:20px;
   color:var(--muted);cursor:pointer}
 footer{position:fixed;left:0;bottom:0;right:0;padding:10px 36px;font-size:12.5px;color:var(--muted);
@@ -321,7 +322,12 @@ function panelFor(i){
       (a.s?`<div class="sum">${a.s}…</div>`:"")+`</div>`;
   }).join("");
   const wikiUri = `obsidian://open?vault=${encodeURIComponent(DATA.meta.vault)}&file=${encodeURIComponent(n.wiki)}`;
-  h += `<a class="openwiki" href="${wikiUri}">在 Obsidian 中打开「${n.label}」wiki 页 →</a>`;
+  // 行内箭头:几何抄自 kb/static/js/icons.js 的 ARROW_PATHS.right(本页是脱离
+  // kb-web 也能打开的单文件产物,拿不到那个模块)。别退回字符 → 。
+  h += `<a class="openwiki" href="${wikiUri}">在 Obsidian 中打开「${n.label}」wiki 页`
+    + `<svg class="ia" width="1em" height="1em" viewBox="0 0 12 12" fill="none" stroke="currentColor"`
+    + ` stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">`
+    + `<path d="M2.5 6h7M6.7 3.3 9.4 6 6.7 8.7"/></svg></a>`;
   document.getElementById("panelBody").innerHTML=h;
   document.getElementById("panel").classList.add("show");
   document.body.classList.add("panelOpen");
