@@ -375,19 +375,30 @@ cmd_graph() {
   # 优先,没设才回退仓库内的 data/。两个构建器本来就按这个环境变量找库和归类
   # 缓存,前置检查要是只认 $ROOT/data,外置数据目录下就会在进构建器之前误报
   # 「缺文件」——数据明明是全的,三张图谱一张也重建不了。
-  local datadir; datadir="$("$BOOT_PY" -c '
+  #
+  # **算出来的路径要规范化之后再跟仓库 data/ 比。** `pathlib.Path` 去得掉 `./`,
+  # 去不掉 `..`,也不消解符号链接 —— 拿原始字符串比的话,`$ROOT/data/../data` 和
+  # 一条指回 `data/` 的软链接都是同一个目录的另一种写法,却跟 `$ROOT/data` 不相等,
+  # 下面那道 worktree 闸门当场被绕过去(2026-09-29 复审第 2 轮实测:worktree 里
+  # 这么写,话题图谱拿 135 KB 的测试库发布了一张 0 节点页面,还以退出码 0 报「好了」)。
+  local resolved; resolved="$("$BOOT_PY" -c '
 import os, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 d = pathlib.Path(os.environ.get("KB_DATA_DIR") or (root / "data")).expanduser()
-print(d if d.is_absolute() else root / d)   # 构建器的 cwd 就是 $ROOT,相对路径按它解
+if not d.is_absolute():
+    d = root / d                      # 构建器的 cwd 就是 $ROOT,相对路径按它解
+d = os.path.realpath(d)               # 消解 .. 和符号链接,别名不能换个写法就变一家
+print(d)
+print("repo" if d == os.path.realpath(root / "data") else "external")
 ' "$ROOT")"
+  local datadir="${resolved%%$'\n'*}" datakind="${resolved##*$'\n'}"
   # **仓库内的 data/ 只许在主检出跑。** 它在 .gitignore 里、只有主检出有;worktree
   # 里要么没有、要么是跑测试留下的空壳——照跑的后果实测过:话题图谱拿 135 KB 的
   # 测试库建出一张 0 节点的页面,**原子替换掉 Vault 里那张好的**(它自己不做质量
   # 验收,catgraph 那套闸门管不着它)。判据用 git 的 common-dir:worktree 的 .git
   # 是个文件,指向主检出那一份。KB_DATA_DIR 指到仓库外时这条前提不成立(数据是
   # 显式挂的、跟检出无关),那时只靠下面那道归类缓存检查把空目录挡住。
-  if [ "$datadir" = "$ROOT/data" ]; then
+  if [ "$datakind" = "repo" ]; then
     local common; common="$(git -C "$ROOT" rev-parse --path-format=absolute \
                               --git-common-dir 2>/dev/null || true)"
     if [ -n "$common" ] && [ "$common" != "$ROOT/.git" ]; then
