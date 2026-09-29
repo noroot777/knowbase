@@ -160,6 +160,14 @@ document.addEventListener('click', e => {
 let searchAbort = null;
 let searchVersion = 0;
 const SEARCH_WELCOME = $('results').innerHTML;
+// 条目化衍生条目的标题本身就是「名字:摘要」,照渲染的话同一句话在标题正下方
+// 又出现一遍 —— 一屏三条结果里有三条在复读自己。标题已经包含摘要时就不出这一行。
+function dupSummary(h) {
+  const s = (h.summary || '').trim();
+  if (!s) return true;
+  return (h.title || '').replace(/\s+/g, '').includes(s.replace(/\s+/g, ''));
+}
+
 async function doSearch() {
   const q = $('q').value.trim();
   if (searchAbort) searchAbort.abort();
@@ -209,11 +217,11 @@ async function doSearch() {
         ${promoBadge(h)}
         ${h.matched_by.map(m => `<span class="badge ${m === 'vec' ? 'vec' : ''}">${m === 'vec' ? '语义' : '关键词'}</span>`).join('')}
         <a href="${esc(obsLink(h))}" style="color:var(--muted)" title="在 Obsidian 中打开">Obsidian</a>
-        ${h.url ? `<a href="${esc(safeUrl(h.url))}" target="_blank" rel="noopener" style="color:var(--muted)">原文↗</a>` : ''}
+        ${h.url ? `<a href="${esc(safeUrl(h.url))}" target="_blank" rel="noopener" style="color:var(--muted)">原文${arrow('ext')}</a>` : ''}
         <button class="favbtn ${favSet.has(h.path) ? 'on' : ''}" data-path="${encodeURIComponent(h.path)}"
               onclick="toggleFav(this)">${favSet.has(h.path) ? '★ 已收藏' : '☆ 收藏'}</button>
       </div>
-      ${h.summary ? `<div class="summary">${esc(h.summary)}</div>` : ''}
+      ${dupSummary(h) ? '' : `<div class="summary">${esc(h.summary)}</div>`}
       <div class="snippet">${esc((h.best_chunk || '').slice(0, 160))}…</div>
       ${h.entities.length ? `<div class="ents">${h.entities.map(e =>
         `<button class="ent" data-ent="${esc(e)}">${esc(e)}</button>`).join('')}</div>` : ''}

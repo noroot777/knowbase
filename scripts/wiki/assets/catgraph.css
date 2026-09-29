@@ -1,8 +1,11 @@
-/* 分类图谱(开源项目 / skill)。配色沿用 graph.html 的瓷白 × 墨蓝,
-   大类颜色由构建时注入的 --g0..--g9 决定。 */
+/* 分类图谱(开源项目 / skill)。配色与 kb/static/css/base.css 的 :root 逐个对齐——
+   这是独立产物(单文件 HTML,要能脱离 kb-web 直接用浏览器打开),拿不到那份
+   token,只能抄。大类颜色由构建时注入的 --g0..--g9 决定。
+   原来这里是另一套奶油白 #f7f6f2 + 纯黑,和应用主体完全两个调子:侧栏点
+   「项目图谱」就整页换一种审美。改 base.css 记得同步这里和 build_graph_html.py。 */
 :root{
-  --bg:#f7f6f2; --card:#ffffff; --line:#e7e4dc; --ink:#20242a; --muted:#8a8f98;
-  --soft:#f1efe9; --panelW:min(430px,94vw);
+  --bg:#f3f5f4; --card:#ffffff; --line:#dce3e0; --ink:#14202b; --muted:#66727c;
+  --soft:#eaeeed; --accent:#17604f; --panelW:min(430px,94vw);
 }
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
@@ -11,11 +14,11 @@ body{background:var(--bg);color:var(--ink);
 #edges{position:absolute;top:0;left:0;pointer-events:none;z-index:3}
 
 /* ── 顶栏 ── */
-header{position:sticky;top:0;z-index:6;background:rgba(247,246,242,.93);
+header{position:sticky;top:0;z-index:6;background:rgba(243,245,244,.93);
   backdrop-filter:blur(10px);border-bottom:1px solid var(--line);
   padding:16px 34px 0;transition:margin-right .22s ease}
 .hrow{display:flex;flex-wrap:wrap;gap:14px;align-items:baseline}
-h1{font-size:21px;margin:0;font-weight:800;letter-spacing:.2px}
+h1{font:900 21px/1.4 "Songti SC","STSong",serif;margin:0;letter-spacing:.02em}
 h1 em{font-style:normal;color:var(--accent)}
 .sub{color:var(--muted);font-size:13px;max-width:560px}
 .controls{margin-left:auto;display:flex;gap:9px;align-items:center;flex-wrap:wrap}
@@ -50,16 +53,16 @@ body.panelOpen footer{right:var(--panelW)}
   header,main{padding-left:16px;padding-right:16px}
 }
 .band{background:var(--card);border:1px solid var(--line);border-radius:16px;
-  padding:15px 19px 17px;margin:0 0 14px;box-shadow:0 1px 3px rgba(30,30,20,.04);
+  padding:15px 19px 17px;margin:0 0 14px;box-shadow:0 1px 3px rgba(20,32,43,.04);
   scroll-margin-top:150px}
-.band.hot{background:linear-gradient(180deg,#fffdf7,#fff)}
+.band.hot{background:linear-gradient(180deg,#ffffff,#fff)}
 .band>h2{font-size:14px;margin:0 0 4px;font-weight:800;display:flex;gap:9px;align-items:center}
 .band>h2 .dot{width:10px;height:10px;border-radius:50%;flex:none}
 .band>h2 .cnt{font-weight:400;color:var(--muted);font-size:12px}
 .band>h2 .tag{font-weight:400;letter-spacing:0;color:var(--muted);font-size:12.5px;margin-left:2px}
 .sub-row{padding:9px 0 0;border-top:1px dashed var(--line);margin-top:9px}
 .sub-row:first-of-type{border-top:none;margin-top:2px}
-.sub-row>.st{font-size:12px;color:#5d636c;font-weight:700;margin:0 0 6px;
+.sub-row>.st{font-size:12px;color:var(--muted);font-weight:700;margin:0 0 6px;
   display:flex;gap:7px;align-items:baseline}
 .sub-row>.st .n{color:var(--muted);font-weight:400;font-size:11px}
 .pills{display:flex;flex-wrap:wrap;gap:7px}
@@ -83,22 +86,23 @@ body.hasSel .pill.lit,body.hasSel .pill.sel{opacity:1}
 /* ── 右侧面板 ── */
 #panel{position:fixed;top:0;right:0;width:var(--panelW);height:100vh;overflow-y:auto;
   background:var(--card);border-left:1px solid var(--line);
-  box-shadow:-8px 0 30px rgba(30,30,20,.07);padding:24px 24px 48px;z-index:10;
+  box-shadow:-8px 0 30px rgba(20,32,43,.07);padding:24px 24px 48px;z-index:10;
   transform:translateX(105%);transition:transform .22s ease}
 #panel.show{transform:none}
 #panel .badge{display:inline-block;color:#fff;font-size:11px;letter-spacing:1.2px;
   font-weight:700;border-radius:6px;padding:3px 9px;margin-bottom:10px}
 #panel h3{margin:0 0 8px;font-size:21px;font-weight:800;line-height:1.35}
-#panel .desc{font-size:14px;color:#3c414a}
+#panel .desc{font-size:14px;color:var(--ink)}
 #panel .facts{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:12px;
   font-size:12.5px;color:var(--muted)}
-#panel .facts b{color:#3c414a;font-weight:700}
+#panel .facts b{color:var(--ink);font-weight:700}
 #panel .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
 #panel .acts a{font-size:12.5px;text-decoration:none;border-radius:16px;padding:6px 13px;
   border:1px solid var(--line);color:var(--ink);background:#fff}
 #panel .acts a.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
 #panel .acts a:hover{border-color:var(--accent);color:var(--accent)}
 #panel .acts a.primary:hover{color:#fff;opacity:.88}
+#panel .acts .ia{display:inline-block;vertical-align:-.14em;margin-left:3px;opacity:.75}
 #panel .sec{font-size:11.5px;letter-spacing:1.4px;color:var(--muted);font-weight:800;
   margin:20px 0 8px}
 #panel .chips{display:flex;flex-wrap:wrap;gap:6px}
@@ -113,10 +117,10 @@ body.hasSel .pill.lit,body.hasSel .pill.sel{opacity:1}
 #panel .art .meta{color:var(--muted);font-size:11.5px;margin-top:2px}
 #panel .close{position:absolute;top:12px;right:14px;border:none;background:none;
   font-size:20px;color:var(--muted);cursor:pointer}
-.promo{font-size:11px;color:#b0561f;border:1px solid #edd7bf;background:#fdf6ee;
+.promo{font-size:11px;color:#8A5A22;border:1px solid #E4CBA8;background:#F6EBDC;
   border-radius:5px;padding:1px 6px;margin-left:6px;vertical-align:middle;font-weight:600}
 
 footer{position:fixed;left:0;bottom:0;right:0;padding:9px 34px;font-size:12.5px;
   color:var(--muted);background:linear-gradient(transparent,var(--bg) 42%);z-index:5;
   pointer-events:none;transition:right .22s ease}
-footer b{color:#4a4f57}
+footer b{color:var(--muted)}

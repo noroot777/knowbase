@@ -44,9 +44,9 @@
   <button id="source-nav-error" hidden onclick="this.hidden=true;initSourceModules()"></button>
   <div class="nav-label explore-label">发现关联</div>
   <nav class="explore-links" aria-label="知识图谱">
-    <a href="/graph/projects" target="_blank" rel="noopener"><i data-icon="network"></i>项目图谱<span>↗</span></a>
-    <a href="/graph/skills" target="_blank" rel="noopener"><i data-icon="layers"></i>Skill 图谱<span>↗</span></a>
-    <a href="/graph" target="_blank" rel="noopener"><i data-icon="orbit"></i>话题图谱<span>↗</span></a>
+    <a href="/graph/projects" target="_blank" rel="noopener"><i data-icon="network"></i>项目图谱<span><i data-arrow="ext"></i></span></a>
+    <a href="/graph/skills" target="_blank" rel="noopener"><i data-icon="layers"></i>Skill 图谱<span><i data-arrow="ext"></i></span></a>
+    <a href="/graph" target="_blank" rel="noopener"><i data-icon="orbit"></i>话题图谱<span><i data-arrow="ext"></i></span></a>
   </nav>
   <div class="sidebar-bottom">
     <details class="nav-dropdown workspace-settings">
@@ -74,10 +74,9 @@
   </section>
 <div id="gallerypanel">
   <section class="gallery-intro">
-    <div class="intro-copy"><h1>发现值得探索的工具<span class="title-dot">.</span></h1><p>从读过的文章、看过的视频里，找到下一个灵感。</p>
+    <div class="intro-copy"><h1>工具图鉴</h1>
       <div class="collection-meta"><span><strong id="g-total">—</strong> 个工具</span><span><strong id="g-records">—</strong> 条收录记录</span><span id="g-updated">正在读取最近收录</span></div>
     </div>
-    <button class="ask-invitation" onclick="switchTab('ask')"><i data-icon="spark"></i><span>向知识库提问</span><i data-icon="arrow"></i></button>
   </section>
   <section class="gallery-controls" aria-label="筛选工具">
     <div class="gfilters">
@@ -93,11 +92,11 @@
   <div id="g-grid" class="ggrid" aria-label="工具列表" aria-busy="true"></div>
   <div id="g-sentinel"></div>
   <div id="g-empty" class="empty-state" style="display:none"><span class="empty-icon"><i data-icon="search"></i></span><h3>没有找到匹配的工具</h3><p>换个关键词，或清空筛选重新探索。</p><button onclick="resetGalleryFilters()">清空筛选</button></div>
-  <div class="gallery-footer"><span id="g-loaded"></span><button id="g-load-more" class="ghost" onclick="renderGalleryBatch()" hidden>加载更多</button><button class="text-button" onclick="window.scrollTo({top:0,behavior:'smooth'})">回到顶部 ↑</button></div>
+  <div class="gallery-footer"><span id="g-loaded"></span><button id="g-load-more" class="ghost" onclick="renderGalleryBatch()" hidden>加载更多</button><button class="text-button" onclick="window.scrollTo({top:0,behavior:'smooth'})">回到顶部<i data-arrow="up"></i></button></div>
 </div>
 
 <div id="searchpanel" style="display:none">
-  <div class="page-heading"><span class="eyebrow">FIND WHAT YOU REMEMBER</span><h1>找回读过的好内容<span class="title-dot">.</span></h1><p>记住一个词，或描述你的想法。文章、视频和笔记一起搜。</p></div>
+  <div class="page-heading"><h1>全文检索</h1><span id="search-count-slot"></span></div>
   <div class="searchbar">
     <input id="q" placeholder="关键词或一句话描述,如:把书变成 skill 的工具"
            aria-label="搜索知识库" onkeydown="if(event.key==='Enter' &amp;&amp; !event.isComposing)doSearch()">
@@ -114,7 +113,7 @@
 </div>
 
 <div id="askpanel" style="display:none">
-  <div class="compact-heading"><h1>知识问答</h1><span>每一个回答，都能回到出处</span><button id="chat-history-toggle" class="ghost" onclick="toggleChatHistory()" aria-expanded="false" aria-controls="chat-convs">历史对话</button></div>
+  <div class="compact-heading"><h1>知识问答</h1><button id="chat-history-toggle" class="ghost" onclick="toggleChatHistory()" aria-expanded="false" aria-controls="chat-convs">历史对话</button></div>
   <div class="chat-layout">
     <aside class="chat-side">
       <button id="chat-new" onclick="newChat()">＋ 新对话</button>
@@ -133,7 +132,7 @@
 </div>
 
 <div id="favpanel" style="display:none">
-  <div class="page-heading"><span class="eyebrow">SAVED FOR A REASON</span><h1>把灵感留给下一步<span class="title-dot">.</span></h1><p>收藏值得回看的内容，把想试试的工具变成行动。</p></div>
+  <div class="page-heading"><h1>我的收藏</h1></div>
   <div class="fav-sub">
     <button id="fav-t-inbox" class="on" onclick="switchFavView('inbox')">待试</button>
     <button id="fav-t-done" onclick="switchFavView('done')">已处理</button>
@@ -141,7 +140,7 @@
     <span class="fav-tools" id="fav-tools">
       <select id="fav-model" onchange="saveFavModel()" title="分诊与行动卡用的模型"></select>
       <button class="ghost" id="fav-triage-btn" onclick="runTriage()">✨ 重新分诊</button>
-      <button class="fav-mode-toggle" id="fav-mode-toggle" onclick="toggleFavMode()">以列表查看 ▾</button>
+      <button class="fav-mode-toggle" id="fav-mode-toggle" onclick="toggleFavMode()">以列表查看<i data-arrow="caretDown"></i></button>
     </span>
   </div>
   <div id="fav-stale" class="fav-stale" style="display:none"></div>
@@ -149,13 +148,13 @@
 </div>
 
 <div id="pipepanel" style="display:none">
-  <div class="pipe-page-heading"><div><h1>同步管理<span class="title-dot">.</span></h1><p>把新内容收进知识库，进度和待处理问题都在这里。</p></div>
+  <div class="pipe-page-heading"><div><h1>微信同步</h1></div>
     <div class="pipe-actions"><button class="ghost" id="pipe-retry" onclick="retryFailed()" aria-describedby="pipe-retry-help" hidden>重试失败项</button><button id="pipe-run" onclick="openPipeModal()" aria-describedby="pipe-state-hint">新建同步</button></div>
   </div>
   <div class="pipe-source" id="pipe-source">
     <div><strong id="src-label">来源采集器</strong><span id="src-status" class="badge">检查中…</span><p id="src-detail">正在检查所选通道</p></div>
     <div class="pipe-source-actions"><select id="pipe-channel-current" aria-label="当前同步通道" onchange="changePipeChannel(this.value)"><option value="">读取通道…</option></select>
-      <button class="ghost" id="src-manage" onclick="openTargets()" style="display:none">管理订阅</button><a id="src-console" href="#" target="_blank" rel="noopener" style="display:none">采集器配置 ↗</a>
+      <button class="ghost" id="src-manage" onclick="openTargets()" style="display:none">管理订阅</button><a id="src-console" href="#" target="_blank" rel="noopener" style="display:none">采集器配置<i data-arrow="ext"></i></a>
       <button class="text-button" onclick="refreshPipeSource()">检查连接</button></div>
   </div>
   <p class="hint" style="margin:12px 0">首次使用本地微信通道？<button class="text-button" onclick="openWechatSetup()">检查并接入微信</button></p>
@@ -175,7 +174,7 @@
     <section class="pipe-stage-panel"><div class="pipe-section-heading"><h2>同步步骤</h2><span>每一步都有结果</span></div><div id="pipe-stages" aria-label="同步阶段"></div></section>
     <section class="pipe-log-panel"><div class="pipe-section-heading"><h2>运行日志</h2><label><input id="pipe-log-follow" type="checkbox" checked onchange="togglePipeLogFollow()"> 跟随最新</label></div>
       <div id="pipe-log-box" tabindex="0" aria-label="同步运行日志"><pre id="pipe-log">尚无运行记录</pre></div>
-      <div class="pipe-log-footer"><span id="pipe-log-note">保留最近 80 条</span><button id="pipe-log-latest" class="text-button" onclick="followPipeLog()" hidden>查看最新 ↓</button><button class="text-button" onclick="downloadPipeLog()">下载日志</button></div>
+      <div class="pipe-log-footer"><span id="pipe-log-note">保留最近 80 条</span><button id="pipe-log-latest" class="text-button" onclick="followPipeLog()" hidden>查看最新<i data-arrow="down"></i></button><button class="text-button" onclick="downloadPipeLog()">下载日志</button></div>
     </section>
   </div>
   <section class="pipe-schedule"><div><h2>每日定时同步</h2><p>按所选通道同步全部订阅。修改后保存，下一次定时任务生效。</p></div>
@@ -190,7 +189,7 @@
   </header>
   <div id="source-error" class="source-banner error" hidden role="alert"><span id="source-error-text"></span><button class="ghost" onclick="loadSourceModule(true)">重新读取</button></div>
   <div id="source-configuration" class="source-banner" hidden role="status"></div>
-  <div id="source-progress" class="source-banner" hidden role="status"><span id="source-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度 →</button></div>
+  <div id="source-progress" class="source-banner" hidden role="status"><span id="source-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度<i data-arrow="right"></i></button></div>
   <button id="source-issues" hidden onclick="switchSourceView('manage')"></button>
   <div class="source-workbench">
     <section class="source-stream" aria-label="订阅内容与来源">
@@ -222,7 +221,7 @@
   <div id="source-edit-error" class="field-err" role="alert"></div><div class="source-form-actions"><button type="button" class="ghost" onclick="closeSourceEditor()">取消</button><button type="submit" id="source-edit-save">保存订阅</button></div>
   </form></div></div>
 <div id="source-reader" class="modal-mask" style="display:none" onclick="if(event.target===this)$('source-reader').style.display='none'"><div class="modal source-reader-dialog">
-  <div class="source-reader-toolbar"><a id="source-reader-link" target="_blank" rel="noopener noreferrer">打开原文 ↗</a><button class="ghost" onclick="$('source-reader').style.display='none'" aria-label="关闭内容阅读">关闭</button></div>
+  <div class="source-reader-toolbar"><a id="source-reader-link" target="_blank" rel="noopener noreferrer">打开原文<i data-arrow="ext"></i></a><button class="ghost" onclick="$('source-reader').style.display='none'" aria-label="关闭内容阅读">关闭</button></div>
   <h2 id="source-reader-title"></h2><p id="source-reader-meta" class="hint"></p><div id="source-reader-body"></div>
 </div></div>
 
@@ -233,7 +232,7 @@
     <div id="pipe-setup-error" class="pipe-notice" hidden role="alert"></div>
     <fieldset id="pipe-fields">
       <div class="row"><label for="pipe-channel">同步通道</label><select id="pipe-channel" onchange="changePipeChannel(this.value)"><option value="">读取通道…</option></select><div id="pipe-channel-hint" class="hint"></div></div>
-      <div class="row pipe-range-row"><label>时间范围</label><button class="ghost" id="pipe-range-btn" onclick="togglePipeRangePop(event)" aria-expanded="false" aria-controls="pipe-range-pop"><span id="pipe-range-label">不限时间</span> ▾</button>
+      <div class="row pipe-range-row"><label>时间范围</label><button class="ghost" id="pipe-range-btn" onclick="togglePipeRangePop(event)" aria-expanded="false" aria-controls="pipe-range-pop"><span id="pipe-range-label">不限时间</span><i data-arrow="caretDown"></i></button>
         <div id="pipe-range-pop" style="display:none"><div id="pipe-range-presets"></div><div class="pipe-custom-range"><label>开始日期<input type="date" id="pipe-custom-from"></label><label>结束日期<input type="date" id="pipe-custom-to"></label><button onclick="applyPipeCustomRange()">应用日期</button><div id="pipe-custom-err" class="field-err" role="alert"></div></div></div>
         <p id="pipe-range-hint" class="hint"></p>
       </div>
@@ -408,18 +407,18 @@
   <div class="reader-head">
     <b id="reader-title"></b>
     <button class="favbtn" id="reader-fav" onclick="toggleFav(this)" style="display:none;font-size:12.5px"></button>
-    <a id="reader-open" target="_blank" rel="noopener">新标签↗</a>
+    <a id="reader-open" target="_blank" rel="noopener">新标签<i data-arrow="ext"></i></a>
     <a id="reader-obs">Obsidian</a>
-    <a id="reader-src" target="_blank" rel="noopener" style="display:none">原文↗</a>
+    <a id="reader-src" target="_blank" rel="noopener" style="display:none">原文<i data-arrow="ext"></i></a>
     <button class="ghost" onclick="closeReader()" aria-label="关闭阅读器" style="padding:4px 10px">✕</button>
   </div>
   <iframe id="reader-frame" title="文章内容"></iframe>
 </div>
 
-<div id="shortcuts-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeShortcuts()"><div class="modal shortcuts-dialog"><h2>少一点点击，多一点专注</h2><p class="hint">常用键盘快捷键</p><dl><div><dt>快速搜索</dt><dd><kbd>⌘ / Ctrl</kbd> <kbd>K</kbd></dd></div><div><dt>搜索当前图鉴</dt><dd><kbd>/</kbd></dd></div><div><dt>关闭当前弹窗</dt><dd><kbd>Esc</kbd></dd></div><div><dt>发送问题 / 换行</dt><dd><kbd>Enter</kbd> / <kbd>Shift Enter</kbd></dd></div></dl><button onclick="closeShortcuts()">知道了</button></div></div>
+<div id="shortcuts-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeShortcuts()"><div class="modal shortcuts-dialog"><h2>键盘快捷键</h2><dl><div><dt>快速搜索</dt><dd><kbd>⌘ / Ctrl</kbd> <kbd>K</kbd></dd></div><div><dt>搜索当前图鉴</dt><dd><kbd>/</kbd></dd></div><div><dt>关闭当前弹窗</dt><dd><kbd>Esc</kbd></dd></div><div><dt>发送问题 / 换行</dt><dd><kbd>Enter</kbd> / <kbd>Shift Enter</kbd></dd></div></dl><button onclick="closeShortcuts()">知道了</button></div></div>
 <div id="wechat-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeWechatSetup()">
   <div class="modal wechat-dialog">
-    <div class="wechat-heading"><div><span class="eyebrow">CONNECT YOUR KNOWLEDGE</span><h2 id="wechat-title">接入你的微信</h2><p class="hint" id="wechat-intro">从本机已同步的公众号推送中发现文章，收进知识库。</p></div><button class="icon-button" onclick="closeWechatSetup()" aria-label="关闭微信接入">×</button></div>
+    <div class="wechat-heading"><div><h2 id="wechat-title">接入你的微信</h2><p class="hint" id="wechat-intro">从本机已同步的公众号推送中发现文章，收进知识库。</p></div><button class="icon-button" onclick="closeWechatSetup()" aria-label="关闭微信接入">×</button></div>
     <ol class="wechat-steps">
       <li><span class="wechat-step-number">01</span><div><strong>配置供应商</strong><small id="wechat-provider-state">待检查</small></div><button class="ghost" onclick="wechatConfigured(openKeys)">API Key</button></li>
       <li><span class="wechat-step-number">02</span><div><strong>分配模型与智能体</strong><small id="wechat-model-state">待检查</small></div><button class="ghost" onclick="wechatConfigured(openStages)">模型配置</button></li>

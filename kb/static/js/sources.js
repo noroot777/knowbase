@@ -69,7 +69,7 @@ async function loadSourceModule(reset = false, selectedId = null) {
     $('source-filter').innerHTML = '<option value="">全部订阅</option>' + data.sources.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
     $('source-filter').value = data.sources.some(s => String(s.id) === selected) ? selected : '';
     $('source-issues').hidden = !data.errors;
-    $('source-issues').textContent = `${data.errors} 个来源上次连接失败，已安排退避重试。查看订阅管理 →`;
+    $('source-issues').innerHTML = `${esc(String(data.errors))} 个来源上次连接失败，已安排退避重试。查看订阅管理${arrow('right')}`;
     $('source-configuration').hidden = !data.unconfigured;
     $('source-configuration').textContent = `${data.unconfigured} 个账号待配置：请填写可用的 X 订阅桥接，或为账号添加专用订阅链接。已配置的来源可照常同步。`;
     $('source-subscriptions-count').textContent = data.sources.length;
@@ -172,7 +172,7 @@ function renderSourceItems() {
     <div class="source-entry-meta"><span>${esc(item.author)}</span><time>${item.published ? sourceTime(item.published) : '发布时间未知'}</time></div>
     <h3><button class="source-entry-title" data-read-item="${item.key}">${esc(item.title)}</button></h3>
     <p class="source-excerpt">${esc(item.body.slice(0,380))}${item.body.length>380?'…':''}</p>
-    <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}</span><button class="text-button" data-read-item="${item.key}">展开阅读</button><a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文 ↗</a></div></article>`).join('') ||
+    <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}</span><button class="text-button" data-read-item="${item.key}">展开阅读</button><a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`).join('') ||
     `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value ? '换个关键词或切换订阅试试。' : sourceData?.unconfigured && !sourceData?.ready ? '账号待配置。先填写 X 订阅桥接或账号的专用订阅链接，再开始同步。' : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p></div>`;
   $('source-more').hidden = sourceOffset >= sourceTotal;
   $('source-more').textContent = `加载更多（已显示 ${sourceRows.length} / ${sourceTotal}）`;
