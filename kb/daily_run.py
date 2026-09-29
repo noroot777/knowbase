@@ -17,9 +17,9 @@ import re
 import threading
 import time
 from copy import deepcopy
-from datetime import date as Date
 from datetime import datetime, timedelta
 
+from kb import daily
 from kb.config import DATA_DIR
 
 SETTINGS_FILE = DATA_DIR / 'daily_report.json'
@@ -35,7 +35,8 @@ WAIT_BUSY = 900
 
 _lock = threading.RLock()
 _state: dict = {
-    'running': False, 'phase': '', 'detail': '', 'date': '', 'sync': False,
+    'running': False, 'phase': '', 'detail': '', 'date': '',
+    'since': '', 'until': '', 'sync': False,
     'trigger': '', 'started_at': '', 'finished_at': '', 'error': '',
     'stop_requested': False, 'channels': [], 'result': None, 'log': [],
 }
@@ -72,7 +73,10 @@ def _raw_settings() -> dict:
     return {'enabled': bool(d.get('enabled')),
             'time': d.get('time') or '08:00',
             'sync': d.get('sync', True) is not False,
-            'days': max(1, min(7, int(d.get('days') or 1))),
+            # 老配置里这个键叫 days、意思是"覆盖最近几天";窗口改成按上一份
+            # 日报的截止时刻接力之后,它只剩"最长回溯几天"这一个用途。
+            'max_days': max(1, min(7, int(d.get('max_days') or d.get('days') or 0)
+                                   or daily.MAX_WINDOW_DAYS)),
             'channels': [str(c) for c in (d.get('channels') or [])],
             'last_fired': d.get('last_fired') or '',
             'next_run': d.get('next_run') or ''}
@@ -88,11 +92,11 @@ def load_settings() -> dict:
 
 
 def save_settings(enabled: bool, time_str: str, channels: list[str] | None = None,
-                  sync: bool = True, days: int = 1) -> dict:
+                  sync: bool = True, max_days: int = daily.MAX_WINDOW_DAYS) -> dict:
     if not re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d', time_str or ''):
         raise ValueError(f'时间格式应为 HH:MM,收到 {time_str!r}')
-    if not 1 <= int(days) <= 7:
-        raise ValueError('日报覆盖天数须在 1 到 7 天之间')
+    if not 1 <= int(max_days) <= 7:
+        raise ValueError('最长回溯天数须在 1 到 7 天之间')
     known = _channel_labels()
     picked = [c for c in (channels or []) if c in known]
     if channels and not picked:
@@ -106,7 +110,7 @@ def save_settings(enabled: bool, time_str: str, channels: list[str] | None = Non
         if nxt <= now or cur['last_fired'] == now.strftime('%Y-%m-%d'):
             nxt += timedelta(days=1)
         cur.update({'enabled': bool(enabled), 'time': time_str, 'sync': bool(sync),
-                    'days': int(days), 'channels': picked or cur['channels'],
+                    'max_days': int(max_days), 'channels': picked or cur['channels'],
                     'next_run': nxt.isoformat(timespec='minutes') if enabled else ''})
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
@@ -153,7 +157,7 @@ def _save_last_run() -> None:
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         STATE_FILE.write_text(json.dumps({
-            k: _state[k] for k in ('date', 'sync', 'trigger', 'started_at',
+            k: _state[k] for k in ('date', 'since', 'until', 'sync', 'trigger', 'started_at',
                                    'finished_at', 'error', 'channels', 'result', 'log')
         }, ensure_ascii=False, indent=1), encoding='utf-8')
     except OSError:
@@ -226,9 +230,8 @@ def _sync_channel(channel: str, label: str, budget_end: float) -> dict:
     return entry
 
 
-def _run(day: str, sync: bool, channels: list[str], days: int, trigger: str) -> None:
-    from kb import daily
-
+def _run(since: datetime | None, until: datetime | None, sync: bool,
+         channels: list[str], max_days: int, trigger: str) -> None:
     try:
         if sync:
             labels = _channel_labels()
@@ -241,10 +244,15 @@ def _run(day: str, sync: bool, channels: list[str], days: int, trigger: str) -> 
                     continue
                 _state['channels'].append(
                     _sync_channel(channel, labels.get(channel, channel), budget_end))
-        _set('generate', f'正在生成 {day} 的日报')
-        _state['result'] = daily.generate(day, days=days,
-                                          progress=lambda text: _set('generate', text))
-        _set('done', f"日报已生成:{_state['result']['docs']} 条素材")
+        _set('generate', '正在生成日报')
+        # 窗口的截止时刻要在**同步跑完之后**才定下来(没显式指定时 generate 自己
+        # 取 now):日报覆盖的是"到生成这一刻为止",同步花掉的那几小时里产出的
+        # 内容也算数。开跑时就把 until 钉死的话,那几小时会掉进两份日报的缝里。
+        res = daily.generate(since=since, until=until, max_days=max_days,
+                             progress=lambda text: _set('generate', text))
+        _state.update(result=res, date=res['date'], since=res['since'], until=res['until'])
+        _set('done', f"日报已生成:{res['docs']} 条素材"
+                     + (f"(另有 {res['late']} 条补录)" if res['late'] else ''))
     except LookupError as e:
         _state['error'] = str(e)
         _set('failed', str(e))
@@ -258,28 +266,37 @@ def _run(day: str, sync: bool, channels: list[str], days: int, trigger: str) -> 
             _state['running'] = False
 
 
-def start(day: str | None = None, sync: bool = True,
-          channels: list[str] | None = None, days: int | None = None,
-          trigger: str = 'manual') -> bool:
-    """起一轮日报。已经在跑返回 False。"""
+def start(since: datetime | None = None, until: datetime | None = None,
+          sync: bool = True, channels: list[str] | None = None,
+          max_days: int | None = None, trigger: str = 'manual') -> bool:
+    """起一轮日报。已经在跑返回 False。
+
+    `since`/`until` 都不给时由 `daily.next_window()` 接着上一份日报算,那是
+    日常路径;显式给窗口是为了补一份旧的、或者重算一段。
+    """
     settings = load_settings()
     known = _channel_labels()
     picked = [c for c in (channels if channels is not None else settings['channels'])
               if c in known]
-    day = (day or Date.today().isoformat())
-    Date.fromisoformat(day)                      # 非法日期当场炸,别等到线程里
+    if since and until and since >= until:
+        raise ValueError('日报的起始时刻必须早于截止时刻')
     with _lock:
         if _state['running']:
             return False
         _state.update({
-            'running': True, 'phase': 'starting', 'detail': '', 'date': day,
+            'running': True, 'phase': 'starting', 'detail': '',
+            'date': until.date().isoformat() if until else '',
+            'since': since.strftime(daily.STAMP) if since else '',
+            'until': until.strftime(daily.STAMP) if until else '',
             'sync': bool(sync), 'trigger': trigger, 'error': '', 'log': [],
             'stop_requested': False, 'channels': [], 'result': None,
             'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'finished_at': '',
         })
-        _log(f'开始生成 {day} 的日报' + (f'(先同步 {len(picked)} 个来源)' if sync else ''))
-    threading.Thread(target=_run, args=(day, bool(sync), picked,
-                                        days or settings['days'], trigger),
+        window = f'{since:%m-%d %H:%M} 起' if since else '接上一份日报'
+        _log(f'开始生成日报({window})'
+             + (f',先同步 {len(picked)} 个来源' if sync else ''))
+    threading.Thread(target=_run, args=(since, until, bool(sync), picked,
+                                        max_days or settings['max_days'], trigger),
                      daemon=True).start()
     return True
 
@@ -299,8 +316,9 @@ def tick() -> bool:
         if not due or s['last_fired'] == today:
             return False
     settings = load_settings()
-    if start(today, sync=settings['sync'], channels=settings['channels'],
-             days=settings['days'], trigger='schedule'):
+    # 定时这一轮不指定窗口:起点接上一份日报的截止时刻,终点是同步跑完的那一刻。
+    if start(sync=settings['sync'], channels=settings['channels'],
+             max_days=settings['max_days'], trigger='schedule'):
         _mark_fired(today)
         return True
     return False

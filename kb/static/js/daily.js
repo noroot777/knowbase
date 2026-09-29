@@ -1,9 +1,10 @@
 // 每日日报:定时设置、立即生成、历史日报的阅读。
 // 生成过程借用同步管道(每个通道跑一趟),细节留在同步管理里看;这里只展示
 // "现在跑到哪个来源了"和结果,同一件事不做两套进度展示。
-let dailySettings = null, dailyChannels = [], dailyReports = [];
+let dailySettings = null, dailyChannels = [], dailyReports = [], dailyWindow = null;
 let dailyCurrent = '', dailyState = null, dailyTimer = null;
 let dailyLoaded = false, dailyDirty = false, dailySaving = false, dailyBusy = false;
+let dailyWindowDirty = false;
 
 function dailyActive() { return activeTab === 'daily'; }
 
@@ -30,11 +31,53 @@ function clearDailyError(kind) {
 }
 
 async function loadDailyPanel() {
-  // toLocaleDateString('sv') = 本地时区下的 YYYY-MM-DD。toISOString() 是 UTC,
-  // 东八区在早上八点之前会给出前一天。
-  if (!$('daily-date').value) $('daily-date').value = new Date().toLocaleDateString('sv');
-  await Promise.all([loadDailySettings(), loadDailyReports()]);
+  await Promise.all([loadDailySettings(), loadDailyReports(), loadDailyWindow()]);
   refreshDailyStatus();
+}
+
+// ── 覆盖区间 ────────────────────────────────────────────────────────────────
+// 日报覆盖的是「上一份日报的截止时刻 → 这一次的生成时刻」这段时间里**发布**的
+// 内容,不是某个自然日、也不是这一轮抓到了什么。默认区间由后端按上一份日报算,
+// 这里只负责显示和让人改。
+
+function dailyClock(iso) {
+  // '2026-09-29T08:00' → '09-29 08:00'。不过 Date:本地时区解析再格式化,
+  // 中途换一次时区表示只会给自己找麻烦,后端给的本来就是本地时刻。
+  return iso ? iso.slice(5, 16).replace('T', ' ') : '';
+}
+
+function renderDailyWindowLabel() {
+  if (!dailyWindow) return;
+  const since = dailyClock($('daily-since').value || dailyWindow.since);
+  $('daily-window-label').textContent = dailyWindowDirty
+    ? `覆盖 ${since} → ${dailyClock($('daily-until').value)}`
+    : `覆盖 ${since} 起到生成时刻` + (dailyWindow.clamped ? `（已截到最近 ${dailyWindow.max_days} 天）` : '');
+}
+
+async function loadDailyWindow() {
+  if (dailyWindowDirty) return;
+  try {
+    dailyWindow = await pipeJson('/api/daily/window');
+  } catch { return; }
+  $('daily-since').value = dailyWindow.since;
+  $('daily-until').value = dailyWindow.until;
+  renderDailyWindowLabel();
+}
+
+function toggleDailyWindow() {
+  const box = $('daily-window');
+  box.hidden = !box.hidden;
+  $('daily-window-toggle').setAttribute('aria-expanded', String(!box.hidden));
+}
+
+function markDailyWindow() {
+  dailyWindowDirty = true;
+  renderDailyWindowLabel();
+}
+
+async function resetDailyWindow() {
+  dailyWindowDirty = false;
+  await loadDailyWindow();
 }
 
 // ── 定时设置 ────────────────────────────────────────────────────────────────
@@ -53,7 +96,7 @@ async function loadDailySettings() {
     $('daily-on').checked = !!dailySettings.enabled;
     $('daily-time').value = dailySettings.time;
     $('daily-sync').checked = !!dailySettings.sync;
-    $('daily-days').value = dailySettings.days;
+    $('daily-maxdays').value = dailySettings.max_days;
     renderDailyChannels();
     dailyLoaded = true;
     $('daily-sched-fields').disabled = false;
@@ -83,7 +126,7 @@ function markDailyDirty() {
 
 async function saveDailySettings() {
   if (!dailyLoaded || dailySaving || !dailyDirty) return;
-  if (!$('daily-time').reportValidity() || !$('daily-days').reportValidity()) return;
+  if (!$('daily-time').reportValidity() || !$('daily-maxdays').reportValidity()) return;
   const channels = pickedDailyChannels();
   if (!channels.length) { $('daily-sched-msg').textContent = '至少勾选一个同步范围'; return; }
   dailySaving = true; $('daily-sched-save').disabled = true;
@@ -91,7 +134,7 @@ async function saveDailySettings() {
   try {
     dailySettings = await pipePost('/api/daily/settings', {
       enabled: $('daily-on').checked, time: $('daily-time').value,
-      sync: $('daily-sync').checked, days: Number($('daily-days').value) || 1, channels,
+      sync: $('daily-sync').checked, max_days: Number($('daily-maxdays').value) || 3, channels,
     });
     dailyDirty = false;
     $('daily-sched-msg').textContent = dailyScheduleMessage(dailySettings);
@@ -127,7 +170,7 @@ async function loadDailyReports(keepSelection = true) {
 function renderDailyList() {
   $('daily-list').innerHTML = dailyReports.map(r => `<button class="daily-row ${r.date === dailyCurrent ? 'on' : ''}"
     data-report="${esc(r.date)}"><b>${esc(r.date)}</b>
-    <span>${r.docs} 条素材${r.total > r.docs ? ` / 当日 ${r.total}` : ''}</span>
+    <span>${r.docs} 条素材${r.total > r.docs ? ` / 窗口内 ${r.total}` : ''}${r.late ? ` · 补录 ${r.late}` : ''}</span>
     <small>${esc(Object.entries(r.sources || {}).map(([k, n]) => `${k} ${n}`).join(' · ') || '—')}</small></button>`).join('')
     || '<div class="daily-empty"><h3>还没有日报</h3><p>选好日期，点右上角生成。</p></div>';
 }
@@ -140,13 +183,15 @@ async function openDailyReport(date) {
     if (dailyCurrent !== date) return;
     $('daily-reader-title').textContent = '日报 · ' + r.date;
     $('daily-reader-meta').textContent =
-      `${r.docs} 条素材${r.total > r.docs ? `（当日共 ${r.total} 条）` : ''} · ` +
-      `${r.since && r.since !== r.until ? r.since + ' 至 ' + r.until + ' · ' : ''}` +
-      `${modelLabel(r.model)} · 生成于 ${r.generated}`;
+      `覆盖 ${dailyClock(r.window_since.replace(' ', 'T'))} → ${dailyClock(r.window_until.replace(' ', 'T'))} 发布的内容 · ` +
+      `${r.docs} 条素材${r.total > r.docs ? `（窗口内共 ${r.total} 条）` : ''}` +
+      `${r.late ? ` · 补录 ${r.late} 条` : ''} · ${modelLabel(r.model)} · 生成于 ${r.generated}`;
     // 正文是模型写的 markdown(外部内容),mdHtml 里过 DOMPurify。开头那行
     // `# 日报 · 日期` 是给 Obsidian 看的,面板上标题栏已经写着同一句,渲染出来
-    // 就是连着两行一模一样的标题。
-    $('daily-reader-body').innerHTML = mdHtml(r.body.replace(/^\s*#\s+[^\n]*\n/, ''));
+    // 就是连着两行一模一样的标题;跟在它后面那句「> 覆盖 … 发布的内容」同理,
+    // 元信息那一行已经写了。两处都只在面板上剥掉,vault 里的文件一个字不改。
+    $('daily-reader-body').innerHTML =
+      mdHtml(r.body.replace(/^\s*#\s+[^\n]*\n+(?:>\s*覆盖[^\n]*\n)?/, ''));
     $('daily-copy').hidden = $('daily-del').hidden = false;
     $('daily-copy').dataset.body = r.body;
   } catch (e) {
@@ -181,14 +226,23 @@ async function deleteDailyReport() {
 
 async function runDaily(sync) {
   if (dailyBusy || dailyState?.running) return;
-  const date = $('daily-date').value;
-  if (!date) { toast('先选一个日期'); return; }
+  // 改过区间就按改的来;没改就什么都不传,让后端按上一份日报接着算——区间的
+  // 截止时刻必须是**生成那一刻**,同步跑掉的几小时也该算进来,在这里钉死的话
+  // 那几小时会掉进两份日报中间的缝里。
+  const custom = dailyWindowDirty
+    ? { since: $('daily-since').value, until: $('daily-until').value } : {};
+  if (custom.since && custom.until && custom.since >= custom.until) {
+    toast('起始时刻要早于截止时刻'); return;
+  }
+  // 覆盖提示按「这一份会写到哪一天」判:自定义区间落在截止时刻那天,
+  // 默认区间落在今天(生成时刻)。
+  const date = custom.until ? custom.until.slice(0, 10) : new Date().toLocaleDateString('sv');
   if (dailyReports.some(r => r.date === date) &&
       !await confirmBox({ title: `重新生成 ${date} 的日报？`,
         body: '这一天已经有一份日报，重新生成会覆盖它。', ok: '重新生成' })) return;
   dailyBusy = true; renderDailyButtons();
   try {
-    await pipePost('/api/daily/run', { date, sync, channels: pickedDailyChannels() });
+    await pipePost('/api/daily/run', { ...custom, sync, channels: pickedDailyChannels() });
     toast(sync ? '已开始同步并生成日报' : '已开始生成日报',
       { key: 'daily', type: 'ok', detail: sync ? '依次同步所选来源后生成，离开页面不影响。' : '直接用已入库的内容生成。' });
   } catch (e) {
@@ -238,7 +292,11 @@ async function refreshDailyStatus() {
   if (finished) {
     if (s.phase === 'failed') toast('日报未生成', { key: 'daily', detail: s.error || '' });
     else toast('日报已生成', { key: 'daily', type: 'ok', detail: s.detail || '' });
-    if (dailyActive()) { dailyCurrent = s.result?.date || dailyCurrent; await loadDailyReports(); }
+    if (dailyActive()) {
+      dailyCurrent = s.result?.date || dailyCurrent;
+      // 上一份日报的截止时刻变了,默认区间跟着往前挪。
+      await Promise.all([loadDailyReports(), loadDailyWindow()]);
+    }
   }
   queueDailyPoll();
 }

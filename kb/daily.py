@@ -1,8 +1,19 @@
 # -*- coding: utf-8 -*-
-"""日报:把一天里进来的所有内容(公众号、大V观点、RSS、视频…)写成一份综述。
+"""日报:把一段时间里**生产出来**的内容(公众号、大V观点、RSS、视频…)写成一份综述。
 
 素材取自 kb.db 的 documents —— 也就是说日报只认"已经落进 vault 并索引过"的
 内容,不认识任何具体来源。这是故意的:新增一种来源,日报自动就覆盖了。
+
+**窗口按内容的生产时间(`published`)算,不是抓取/入库时间(`indexed_at`)。**
+两者差几天是常态:实测一批 RSS 文章发布于 09-26,09-29 才被抓进来。按入库
+时间出日报,读到的是"今天抓到了什么",而人想知道的是"这段时间世界上发生了
+什么"。抓取时间只用来回答另一个问题——哪些东西是这一轮才拿到的(见"补录")。
+
+窗口也不是自然日,而是**上一份日报的截止时刻到这一次的生成时刻**:日报在
+早上七点出,那它该覆盖的就是昨天七点到今天七点,而不是"昨天 00:00-24:00"
+(后者会漏掉昨晚七点之后的一切,再也不会被任何一份日报提到)。上一份的截止
+时刻记在它自己的 frontmatter 里(`window_until`),所以链条自描述:删掉状态
+文件也能接上,补生成一份旧的也不会让后面的窗口错位。
 
 产物是 vault 里的一篇 markdown(`<vault>/daily/YYYY-MM-DD.md`),不是数据库里的
 一行:kb.db 是可以随时删掉重建的索引,而日报是花了模型钱写出来的东西,重建索引
@@ -15,6 +26,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from dataclasses import dataclass, field
 from datetime import date as Date
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -29,8 +41,14 @@ from kb.store import promo_exclude_sql
 # 一份日报最多带多少条素材进 prompt。一天正常十几到几十条;真有几百条时
 # 取最新的那批,并在日报里如实写明"另有 N 条未纳入"。
 MAX_ITEMS = 120
+LATE_ITEMS = 30         # 补录那一段最多带多少条
 EXCERPT = 400           # 每条素材的摘要上限(字符)
 DIR_NAME = 'daily'
+# 没有上一份日报可接时回溯多久。
+FIRST_WINDOW = timedelta(days=1)
+# 窗口最长回溯多少天的默认值(服务停了半个月时别让一份日报去综合半个月)。
+MAX_WINDOW_DAYS = 3
+STAMP = '%Y-%m-%d %H:%M:%S'
 
 # 来源名 → 人话。feed 类来源的标签跟着 SOURCE_TYPES 走,其余几棵树是固定的。
 _SOURCE_LABEL = {
@@ -39,8 +57,8 @@ _SOURCE_LABEL = {
     **{k: v.label for k, v in SOURCE_TYPES.items()},
 }
 
-PROMPT = """你是这个知识库主人的情报助理。下面是 {range_label} 进入知识库的 {n} 条内容\
-(来自公众号、社交观点、RSS 订阅和视频摘要)。请写一份当日日报。
+PROMPT = """你是这个知识库主人的情报助理。下面是 {range_label} 这段时间里**发布**的 {n} 条内容\
+(来自公众号、社交观点、RSS 订阅和视频摘要)。请写一份日报。
 
 输出要求:
 - 全中文,直接输出 markdown 正文,不要代码围栏,不要重复标题行。
@@ -57,19 +75,26 @@ PROMPT = """你是这个知识库主人的情报助理。下面是 {range_label}
 
 ## 工具与项目
 
-今天出现的、可以拿来用的开源项目或产品。每条一行:名字 — 一句话说明它解决什么问题。\
-今天没有就写"今天没有值得单独拿出来的新工具"。
+这段时间出现的、可以拿来用的开源项目或产品。每条一行:名字 — 一句话说明它解决什么问题。\
+没有就写"这段时间没有值得单独拿出来的新工具"。
 
 ## 观点与讨论
 
-社交观点和评论里值得留意的看法,1~4 条。没有就写一行"今天没有明显的讨论热点"。
+社交观点和评论里值得留意的看法,1~4 条。没有就写一行"没有明显的讨论热点"。
 
 ## 一句话速览
 
 其余内容各一行,一行不超过 30 字。最多 12 行,超出的不写。
-
+{late_section}
 材料:
 {items}
+"""
+
+_LATE_SECTION = """
+## 补录
+
+材料里标了「补录」的,是发布时间更早、这一轮才抓进来的内容。每条一行,\
+写清它是什么、发布于什么时候。上面四节不要提它们。
 """
 
 
@@ -81,58 +106,121 @@ def _label(source: str) -> str:
     return _SOURCE_LABEL.get(source, source)
 
 
-def _range(day: str, days: int) -> tuple[str, str]:
-    """(since, until),都是 YYYY-MM-DD,闭区间。days=1 就是当天。"""
-    until = Date.fromisoformat(day)
-    since = until - timedelta(days=max(1, days) - 1)
-    return since.isoformat(), until.isoformat()
+def parse_ts(value) -> datetime | None:
+    """把库里的时间字符串解析成本地朴素时间;认不出来给 None。
+
+    `published` 在库里实测有四种写法:`2026-09-28 17:08`(2.1 万篇)、
+    `2026-06-14T11:29:37+08:00`(1178 篇)、`2026-09-29`(92 篇)、空(1 篇)。
+    **所以不能拿字符串直接比大小**:同一天里 `T`(0x54)排在空格(0x20)后面,
+    `2026-09-29T07:00:00+08:00` 字典序上大于 `2026-09-29 08:00`,按字符串筛
+    窗口会把早上七点发的内容算进八点才开始的窗口。带时区的先换算到本地,
+    只有日期的按当天 00:00 —— 那是这种写法唯一能确定的下界。
+    """
+    s = str(value or '').strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return dt.astimezone().replace(tzinfo=None) if dt.tzinfo else dt
 
 
-def collect(conn, since: str, until: str, limit: int = MAX_ITEMS) -> tuple[list[dict], int]:
-    """取区间内的素材,返回 (最多 limit 条, 区间内总条数)。
+@dataclass
+class Material:
+    """一次取材的结果。`late` 是"发布得更早、这一轮才入库"的那批。"""
+    items: list[dict] = field(default_factory=list)
+    total: int = 0
+    late: list[dict] = field(default_factory=list)
+    late_total: int = 0
 
-    - 只看非衍生来源:条目化产物(dr-gzh-projects 等)与原文是同一批内容,
-      两份都进 prompt 的话同一个工具会在日报里出现两次。
-    - 挡掉 hard 软广,口径与检索一致(`store.promo_exclude_sql`)。
-    - `published` 是来源给的发布时间,少数条目为空;那种按入库时间归日,
-      否则一条没有日期的 RSS 永远进不了任何一天的日报。
+    def all(self) -> list[dict]:
+        return [*self.items, *self.late]
+
+    def __bool__(self) -> bool:
+        return bool(self.items or self.late)
+
+
+def _label_window(since: datetime, until: datetime) -> str:
+    same = since.date() == until.date()
+    return (f"{since:%Y-%m-%d %H:%M} 至 {until:%H:%M}" if same
+            else f"{since:%Y-%m-%d %H:%M} 至 {until:%Y-%m-%d %H:%M}")
+
+
+_FIELDS = ('SELECT d.path,d.source,d.title,d.account,d.published,d.url,d.summary,'
+           'd.indexed_at FROM documents d WHERE ')
+
+
+def _scope() -> tuple[str, list]:
+    """所有取材共用的口径:只看非衍生来源 + 挡掉 hard 软广。
+
+    条目化产物(dr-gzh-projects 等)与原文是同一批内容,两份都进 prompt 的话
+    同一个工具会在日报里出现两次;软广口径跟检索共用 `promo_exclude_sql`。
     """
     names = ','.join('?' * len(PRIMARY_SOURCE_NAMES))
-    where = (f"d.source IN ({names})"
-             " AND (CASE WHEN d.published <> '' THEN substr(d.published,1,10)"
-             " ELSE substr(COALESCE(d.indexed_at,''),1,10) END) BETWEEN ? AND ?"
-             f" AND {promo_exclude_sql('d')}")
-    args = [*PRIMARY_SOURCE_NAMES, since, until]
-    total = conn.execute(f'SELECT count(*) FROM documents d WHERE {where}', args).fetchone()[0]
-    rows = conn.execute(
-        'SELECT d.path,d.source,d.title,d.account,d.published,d.url,d.summary,d.indexed_at'
-        f' FROM documents d WHERE {where}'
-        " ORDER BY CASE WHEN d.published <> '' THEN d.published ELSE d.indexed_at END DESC"
-        ' LIMIT ?', [*args, limit]).fetchall()
-    items = []
-    for r in rows:
-        doc = dict(r)
-        doc['entities'] = [e[0] for e in conn.execute(
-            'SELECT entity FROM entities WHERE path=? LIMIT 8', (doc['path'],))]
-        doc['topics'] = [t[0].split('/', 1)[-1] for t in conn.execute(
-            "SELECT tag FROM doc_tags WHERE path=? AND tag LIKE 'topic/%'", (doc['path'],))]
-        doc['excerpt'] = (doc['summary'] or '').strip()
-        if not doc['excerpt']:
-            # 没提取过的文档没有 summary(提取失败、或者刚索引完还没轮到它)。
-            # 拿第一个 chunk 顶上,总比把这条从日报里整个漏掉强。
-            first = conn.execute(
-                'SELECT text FROM chunks WHERE path=? ORDER BY seq LIMIT 1',
-                (doc['path'],)).fetchone()
-            doc['excerpt'] = (first[0] if first else '').strip()
-        doc['excerpt'] = doc['excerpt'][:EXCERPT]
-        items.append(doc)
-    return items, total
+    return f'd.source IN ({names}) AND {promo_exclude_sql("d")}', list(PRIMARY_SOURCE_NAMES)
+
+
+def _enrich(conn, row, when: datetime | None, late: bool) -> dict:
+    doc = dict(row)
+    doc['when'] = when
+    doc['late'] = late
+    doc['entities'] = [e[0] for e in conn.execute(
+        'SELECT entity FROM entities WHERE path=? LIMIT 8', (doc['path'],))]
+    doc['topics'] = [t[0].split('/', 1)[-1] for t in conn.execute(
+        "SELECT tag FROM doc_tags WHERE path=? AND tag LIKE 'topic/%'", (doc['path'],))]
+    doc['excerpt'] = (doc['summary'] or '').strip()
+    if not doc['excerpt']:
+        # 没提取过的文档没有 summary(提取失败、或者刚索引完还没轮到它)。
+        # 拿第一个 chunk 顶上,总比把这条从日报里整个漏掉强。
+        first = conn.execute(
+            'SELECT text FROM chunks WHERE path=? ORDER BY seq LIMIT 1',
+            (doc['path'],)).fetchone()
+        doc['excerpt'] = (first[0] if first else '').strip()
+    doc['excerpt'] = doc['excerpt'][:EXCERPT]
+    return doc
+
+
+def collect(conn, since: datetime, until: datetime, limit: int = MAX_ITEMS) -> Material:
+    """取窗口 (since, until] 内**发布**的素材,外加这一轮才入库的早前内容。
+
+    SQL 那一层只按日期前缀粗筛(两头各放一天,给时区换算留余量),精确到分钟的
+    判断在 Python 里按解析出来的时间做 —— 库里四种时间写法互相之间没法用字符串
+    比大小,见 `parse_ts`。粗筛之后只剩两三天的量,排序开销可以忽略。
+    """
+    where, args = _scope()
+    lo = (since.date() - timedelta(days=1)).isoformat()
+    hi = (until.date() + timedelta(days=1)).isoformat()
+    picked = []
+    for row in conn.execute(_FIELDS + where + ' AND substr(d.published,1,10) BETWEEN ? AND ?',
+                            [*args, lo, hi]):
+        when = parse_ts(row['published'])
+        if when and since < when <= until:
+            picked.append((when, row))
+    picked.sort(key=lambda p: p[0], reverse=True)
+    items = [_enrich(conn, row, when, False) for when, row in picked[:limit]]
+
+    # 补录:发布时间落在窗口之前(或者压根没有发布时间),但这一轮才入库。
+    # 不捡回来的话它永远进不了任何一份日报 —— 实测 RSS 差三天是常事。
+    # 判据用 indexed_at,它在库里只有 `YYYY-MM-DD HH:MM:SS` 一种写法,可以直接比。
+    late = []
+    for row in conn.execute(_FIELDS + where + ' AND d.indexed_at > ? AND d.indexed_at <= ?'
+                            ' ORDER BY d.indexed_at DESC',
+                            [*args, since.strftime(STAMP), until.strftime(STAMP)]):
+        when = parse_ts(row['published'])
+        if when is None or when <= since:
+            late.append((when, row))
+    return Material(items=items, total=len(picked),
+                    late=[_enrich(conn, row, when, True) for when, row in late[:LATE_ITEMS]],
+                    late_total=len(late))
 
 
 def _material(items: list[dict]) -> str:
     lines = []
     for i, d in enumerate(items, 1):
-        head = f"{i}. [{_label(d['source'])}·{d['account'] or '未署名'}] {d['title']}"
+        mark = f"补录·发布于 {d['when']:%m-%d %H:%M}" if d['late'] and d['when'] else \
+               '补录·无发布时间' if d['late'] else f"{d['when']:%m-%d %H:%M}"
+        head = f"{i}. [{mark}|{_label(d['source'])}·{d['account'] or '未署名'}] {d['title']}"
         tail = []
         if d['entities']:
             tail.append('涉及: ' + '、'.join(d['entities'][:6]))
@@ -143,30 +231,42 @@ def _material(items: list[dict]) -> str:
     return '\n'.join(lines)
 
 
-def _range_label(since: str, until: str) -> str:
-    return until if since == until else f'{since} 至 {until}'
-
-
-def _page(since: str, until: str, items: list[dict], total: int,
-          body: str, model: str) -> str:
+def _page(since: datetime, until: datetime, mat: Material, body: str,
+          model: str, clamped: bool) -> str:
+    shown = mat.all()
     counts: dict[str, int] = {}
-    for d in items:
+    for d in shown:
         counts[_label(d['source'])] = counts.get(_label(d['source']), 0) + 1
     meta = {
-        'type': 'daily-report', 'date': until, 'since': since, 'until': until,
-        'docs': len(items), 'total': total, 'sources': counts, 'model': model,
+        'type': 'daily-report', 'date': until.date().isoformat(),
+        'window_since': since.strftime(STAMP), 'window_until': until.strftime(STAMP),
+        'docs': len(mat.items), 'total': mat.total,
+        'late': len(mat.late), 'late_total': mat.late_total,
+        'sources': counts, 'model': model,
         'generated': datetime.now().strftime('%Y-%m-%d %H:%M'),
     }
+    if clamped:
+        meta['clamped'] = True
     refs = '\n'.join(
         f"{i}. [{d['title']}]({d['url']}) — {_label(d['source'])}·{d['account'] or '未署名'}"
+        f"{' · 补录' if d['late'] else ''}"
         if d['url'] else
         f"{i}. {d['title']} — {_label(d['source'])}·{d['account'] or '未署名'}"
-        for i, d in enumerate(items, 1))
-    more = (f'\n\n> 当日共 {total} 条,以上列出最新的 {len(items)} 条。'
-            if total > len(items) else '')
+        f"{' · 补录' if d['late'] else ''}"
+        for i, d in enumerate(shown, 1))
+    more = []
+    if mat.total > len(mat.items):
+        more.append(f'窗口内共 {mat.total} 条,以上列出最新的 {len(mat.items)} 条。')
+    if mat.late_total > len(mat.late):
+        more.append(f'补录共 {mat.late_total} 条,以上列出最近入库的 {len(mat.late)} 条。')
+    if clamped:
+        more.append(f'距上一份日报超过 {MAX_WINDOW_DAYS} 天,窗口已截到最近这段。')
+    tail = ('\n\n> ' + ' '.join(more)) if more else ''
+    head = (f'# 日报 · {until:%Y-%m-%d}\n\n'
+            f'> 覆盖 {_label_window(since, until)} 发布的内容(按发布时间,不是抓取时间)。\n\n')
     return ('---\n' + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + '---\n\n'
-            f'# 日报 · {_range_label(since, until)}\n\n{body.strip()}\n\n'
-            f'## 素材清单({len(items)} 条)\n\n{refs}{more}\n')
+            + head + f'{body.strip()}\n\n'
+            f'## 素材清单({len(shown)} 条)\n\n{refs}{tail}\n')
 
 
 def _write(path: Path, text: str) -> None:
@@ -183,35 +283,63 @@ def _write(path: Path, text: str) -> None:
         raise
 
 
-def generate(day: str | None = None, days: int = 1, model=None, progress=None) -> dict:
-    """生成一份日报并落盘,返回 {date, path, docs, total, model}。
+def next_window(max_days: int = MAX_WINDOW_DAYS,
+                now: datetime | None = None) -> tuple[datetime, datetime, bool]:
+    """(since, until, 是否被回溯上限截断)。
 
-    素材为空时抛 LookupError(那不是失败,是"今天没内容"),调用方据此提示,
-    而不是拿一份空日报盖掉可能已经存在的那份。
+    起点是**上一份日报的截止时刻**,所以两份日报之间一条都不漏、也不重。
+    算起点时跳过"今天这一份":重新生成今天的日报时,要的是从昨天那一刻起的
+    完整一天,而不是从今早那份的截止时刻起的几个小时 —— 后者会把今天上午
+    已经写进旧版本的内容整段丢掉。
+    """
+    until = (now or datetime.now()).replace(microsecond=0)
+    today = until.date().isoformat()
+    marks = [parse_ts(r.get('window_until')) for r in reports() if r['date'] != today]
+    marks = [m for m in marks if m and m < until]
+    since = max(marks) if marks else until - FIRST_WINDOW
+    cap = timedelta(days=max(1, int(max_days or MAX_WINDOW_DAYS)))
+    if until - since > cap:
+        return until - cap, until, True
+    return since, until, False
+
+
+def generate(since: datetime | None = None, until: datetime | None = None,
+             max_days: int = MAX_WINDOW_DAYS, model=None, progress=None) -> dict:
+    """生成一份日报并落盘,返回 {date, since, until, docs, total, late, path, model}。
+
+    素材为空时抛 LookupError(那不是失败,是"这段时间没有新内容"),调用方据此
+    提示,而不是拿一份空日报盖掉可能已经存在的那份。
     """
     from kb import llm, llm_stages, store
 
-    day = day or Date.today().isoformat()
-    since, until = _range(day, days)
+    clamped = False
+    if since is None or until is None:
+        auto_since, auto_until, clamped = next_window(max_days)
+        since, until = since or auto_since, until or auto_until
+    if since >= until:
+        raise ValueError('日报的起始时刻必须早于截止时刻')
     conn = store.connect()
     try:
-        items, total = collect(conn, since, until)
+        mat = collect(conn, since, until)
     finally:
         conn.close()
-    if not items:
-        raise LookupError(f'{_range_label(since, until)} 没有已入库的内容,先同步再生成日报')
+    if not mat:
+        raise LookupError(f'{_label_window(since, until)} 没有已入库的内容,先同步再生成日报')
     picked = model or llm_stages.stage_model('daily')
+    shown = mat.all()
     if progress:
-        progress(f'正在让模型综合 {len(items)} 条内容')
-    body = llm.chat(PROMPT.format(range_label=_range_label(since, until),
-                                  n=len(items), items=_material(items)),
+        progress(f'正在让模型综合 {len(shown)} 条内容')
+    body = llm.chat(PROMPT.format(range_label=_label_window(since, until),
+                                  n=len(shown), items=_material(shown),
+                                  late_section=_LATE_SECTION if mat.late else ''),
                     picked, max_tokens=8192, timeout=600)
     if not body.strip():
         raise RuntimeError('模型返回了空日报,请稍后重试或换一个模型')
-    path = report_dir() / f'{until}.md'
-    _write(path, _page(since, until, items, total, body, str(picked)))
-    return {'date': until, 'since': since, 'until': until, 'path': str(path),
-            'docs': len(items), 'total': total, 'model': str(picked)}
+    path = report_dir() / f'{until.date().isoformat()}.md'
+    _write(path, _page(since, until, mat, body, str(picked), clamped))
+    return {'date': until.date().isoformat(), 'since': since.strftime(STAMP),
+            'until': until.strftime(STAMP), 'path': str(path), 'docs': len(mat.items),
+            'total': mat.total, 'late': len(mat.late), 'model': str(picked)}
 
 
 # ── 已生成的日报 ────────────────────────────────────────────────────────────────
@@ -219,10 +347,13 @@ def generate(day: str | None = None, days: int = 1, model=None, progress=None) -
 def _entry(path: Path, with_body: bool = False) -> dict:
     meta, body = parse_frontmatter(path.read_text(encoding='utf-8'))
     out = {'date': str(meta.get('date') or path.stem), 'docs': int(meta.get('docs') or 0),
-           'total': int(meta.get('total') or 0), 'model': str(meta.get('model') or ''),
+           'total': int(meta.get('total') or 0), 'late': int(meta.get('late') or 0),
+           'model': str(meta.get('model') or ''),
            'generated': str(meta.get('generated') or ''),
            'sources': meta.get('sources') if isinstance(meta.get('sources'), dict) else {},
-           'since': str(meta.get('since') or ''), 'until': str(meta.get('until') or '')}
+           'window_since': str(meta.get('window_since') or ''),
+           'window_until': str(meta.get('window_until') or ''),
+           'clamped': bool(meta.get('clamped'))}
     if with_body:
         out['body'] = body
     return out

@@ -155,11 +155,18 @@
       <div class="collection-meta"><span><strong id="daily-count">—</strong> 份日报</span><span id="daily-latest">正在读取已生成的日报</span></div>
     </div>
     <div class="daily-heading-actions">
-      <label for="daily-date">日期</label><input type="date" id="daily-date" aria-label="日报日期">
+      <span id="daily-window-label" class="daily-window-label">正在算覆盖区间…</span>
+      <button class="text-button" id="daily-window-toggle" onclick="toggleDailyWindow()" aria-expanded="false" aria-controls="daily-window">改区间</button>
       <button class="ghost" id="daily-gen" onclick="runDaily(false)">直接生成</button>
       <button id="daily-sync-gen" onclick="runDaily(true)">同步全部并生成</button>
     </div>
   </header>
+  <div id="daily-window" class="daily-window" hidden>
+    <label>起 <input type="datetime-local" id="daily-since" oninput="markDailyWindow()"></label>
+    <label>止 <input type="datetime-local" id="daily-until" oninput="markDailyWindow()"></label>
+    <button class="text-button" onclick="resetDailyWindow()">接上一份日报</button>
+    <span class="hint">按内容的发布时间筛，不是抓取时间；默认从上一份日报的截止时刻算到生成这一刻。</span>
+  </div>
   <div id="daily-progress" class="daily-banner" hidden role="status"><span id="daily-progress-text"></span><button class="text-button" id="daily-stop" onclick="stopDaily()">停止</button></div>
   <div id="daily-error" class="daily-banner error" hidden role="alert"><span id="daily-error-text"></span><button class="ghost" onclick="loadDailyPanel()">重新读取</button></div>
   <div class="daily-workbench">
@@ -173,7 +180,7 @@
         <div class="daily-reader-actions"><button class="text-button" id="daily-copy" onclick="copyDailyReport()" hidden>复制全文</button><button class="text-button daily-delete" id="daily-del" onclick="deleteDailyReport()" hidden>删除</button></div>
       </div>
       <p id="daily-reader-meta" class="hint"></p>
-      <div id="daily-reader-body"><div class="daily-empty"><h3>先生成今天的日报</h3><p>点右上角「同步全部并生成」：依次同步所选来源，再把当天入库的内容写成一份日报。</p></div></div>
+      <div id="daily-reader-body"><div class="daily-empty"><h3>还没有日报</h3><p>点右上角「同步全部并生成」：依次同步所选来源，再把这段时间里发布的内容写成一份日报。</p></div></div>
     </article>
   </div>
   <section class="daily-schedule">
@@ -182,7 +189,7 @@
       <label><input type="checkbox" id="daily-on" onchange="markDailyDirty()"> 启用定时</label>
       <label>每天 <input type="time" id="daily-time" value="08:00" required oninput="markDailyDirty()"></label>
       <label><input type="checkbox" id="daily-sync" checked onchange="markDailyDirty()"> 生成前先同步</label>
-      <label>覆盖最近 <input type="number" id="daily-days" min="1" max="7" value="1" required oninput="markDailyDirty()"> 天</label>
+      <label>最长回溯 <input type="number" id="daily-maxdays" min="1" max="7" value="3" required oninput="markDailyDirty()"> 天</label>
     </fieldset>
     <div class="daily-channels"><span class="daily-channels-label">同步范围</span><div id="daily-channels" role="group" aria-label="同步范围"></div></div>
     <div class="daily-schedule-footer"><span id="daily-sched-msg" role="status">正在读取定时设置…</span><button id="daily-sched-save" class="ghost" onclick="saveDailySettings()" disabled>保存设置</button></div>

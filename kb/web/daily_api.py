@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -26,6 +26,16 @@ def _check_day(value: str | None) -> str | None:
         raise HTTPException(400, '日期须为 YYYY-MM-DD') from None
 
 
+def _check_time(value: str | None) -> datetime | None:
+    """把界面上的 datetime-local(`2026-09-29T08:00`)解析成本地时刻。"""
+    if value in (None, ''):
+        return None
+    try:
+        return datetime.fromisoformat(value).replace(second=0, microsecond=0)
+    except ValueError:
+        raise HTTPException(400, '时刻须为 YYYY-MM-DDTHH:MM') from None
+
+
 @router.get('/settings')
 def get_settings():
     from kb.collectors import collection_channels
@@ -38,7 +48,7 @@ class SettingsRequest(BaseModel):
     enabled: bool
     time: str = '08:00'
     sync: bool = True
-    days: int = Field(default=1, ge=1, le=7)
+    max_days: int = Field(default=daily.MAX_WINDOW_DAYS, ge=1, le=7)
     channels: list[str] | None = None
 
 
@@ -46,7 +56,7 @@ class SettingsRequest(BaseModel):
 def set_settings(body: SettingsRequest):
     try:
         return daily_run.save_settings(body.enabled, body.time, body.channels,
-                                       body.sync, body.days)
+                                       body.sync, body.max_days)
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
 
@@ -56,18 +66,31 @@ def status():
     return daily_run.get_state()
 
 
+@router.get('/window')
+def window():
+    """下一份日报默认覆盖的区间:上一份的截止时刻 → 现在。界面拿它预填。"""
+    since, until, clamped = daily.next_window(daily_run.load_settings()['max_days'])
+    return {'since': since.isoformat(timespec='minutes'),
+            'until': until.isoformat(timespec='minutes'), 'clamped': clamped,
+            'max_days': daily_run.load_settings()['max_days']}
+
+
 class RunRequest(BaseModel):
-    date: str | None = None
+    since: str | None = None
+    until: str | None = None
     sync: bool = True
-    days: int | None = Field(default=None, ge=1, le=7)
     channels: list[str] | None = None
 
 
 @router.post('/run')
 def run(body: RunRequest | None = None):
     body = body or RunRequest()
-    day = _check_day(body.date)
-    if not daily_run.start(day, sync=body.sync, channels=body.channels, days=body.days):
+    try:
+        started = daily_run.start(_check_time(body.since), _check_time(body.until),
+                                  sync=body.sync, channels=body.channels)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    if not started:
         raise HTTPException(409, '日报任务已在运行中')
     return {'ok': True}
 

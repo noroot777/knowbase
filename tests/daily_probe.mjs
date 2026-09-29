@@ -1,5 +1,10 @@
-// 日报面板的浏览器回归:侧栏入口、列表与正文渲染、定时设置保存、生成按钮、
-// 来源面板显示译文而不是英文原文。
+// 日报面板的浏览器回归:侧栏入口、列表与正文渲染、覆盖区间(按发布时间、接上
+// 一份日报)、定时设置保存、生成按钮、来源面板显示译文而不是英文原文。
+//
+// 需要一个跑着沙箱数据的 kb-web:
+//   python3 tests/llm_stub.py --port 8801 &
+//   python3 tests/daily_sandbox.py /tmp/kb-daily-sandbox 8801
+//   KB_DATA_DIR=... KB_VAULT_ROOT=... uv run uvicorn kb.server:app --port 8799
 // CDP 直连 playwright 缓存里的 chrome-headless-shell(不装 playwright、不连网、
 // 始终无头、临时 profile),与 tests/redesign_probe.mjs 同一套连法。
 //
@@ -56,6 +61,17 @@ const waitFor = async (expression, ms = 8000) => {
   }
   return false;
 };
+// 等运行状态时得自己驱动刷新:面板平时靠 setTimeout 轮询,而无头浏览器把
+// 后台页面的定时器节流到分钟级 —— 干等的话客户端会拿着一份二十秒前的
+// "还在跑"不放,下一次 runDaily 当场被它自己那道「已在运行」闸门挡掉。
+const waitStatus = async (expression, ms = 20000) => {
+  for (let i = 0; i * 400 < ms; i++) {
+    await evalJs(`refreshDailyStatus()`);
+    if (await evalJs(expression)) return true;
+    await sleep(400);
+  }
+  return false;
+};
 
 await send("Runtime.enable");
 await send("Page.enable");
@@ -67,56 +83,81 @@ await send("Page.navigate", { url: base + "/#daily" });
 // initWorkspace 要先把来源模块拉回来才 restoreWorkspaceLocation,首帧之后还有
 // 一串接口要落地;等 dailyLoaded 而不是拍一个固定时长。
 for (let i = 0; i < 60 && !(await evalJs(`typeof dailyLoaded !== 'undefined' && dailyLoaded`)); i++) await sleep(250);
+// 再显式等一次面板自己的三个接口:列表/正文/覆盖区间各走各的,
+// dailyLoaded 只代表定时设置回来了。
+await evalJs(`loadDailyPanel()`);
 
+// 地址栏 #daily 是 initWorkspace 收尾时才恢复的,比 dailyLoaded 还晚一步。
+await waitFor(`document.getElementById('page-crumb').textContent === '每日日报'
+  && getComputedStyle(document.getElementById('dailypanel')).display !== 'none'`);
 check("侧栏有「每日日报」入口", await evalJs(`!!document.getElementById('tab-daily')`));
 check("面板打开后标题是每日日报", await evalJs(`document.getElementById('page-crumb').textContent`) === "每日日报");
 check("面板可见", await evalJs(`getComputedStyle(document.getElementById('dailypanel')).display !== 'none'`));
 
-check("日报列表出现了 2026-09-28",
-      await evalJs(`[...document.querySelectorAll('[data-report]')].some(b => b.dataset.report === '2026-09-28')`));
+const today = new Date().toLocaleDateString("sv");
+// dailyLoaded 只说明定时设置回来了;列表、正文、覆盖区间是另外三个接口。
+await waitFor(`!!document.querySelector('[data-report]')`);
+await waitFor(`!!document.querySelector('#daily-reader-body h2')`);
+await waitFor(`!/正在算/.test(document.getElementById('daily-window-label').textContent)`);
+check("日报列表出现了今天这一份",
+      await evalJs(`[...document.querySelectorAll('[data-report]')].some(b => b.dataset.report === '${today}')`));
 check("已生成份数写在页头", (await evalJs(`document.getElementById('daily-count').textContent`)) !== "—");
+check("列表里标出了补录条数",
+      /补录 1/.test(await evalJs(`document.querySelector('[data-report]').textContent`)));
 const bodyHtml = await evalJs(`document.getElementById('daily-reader-body').innerHTML`);
 check("正文渲染成 markdown", bodyHtml.includes("<h2") && bodyHtml.includes("今日要点"), bodyHtml.slice(0, 80));
 check("正文没有重复一遍大标题", !bodyHtml.includes("<h1"), bodyHtml.slice(0, 120));
-check("正文元信息带素材数与模型",
-      /条素材/.test(await evalJs(`document.getElementById('daily-reader-meta').textContent`)));
+check("正文没有重复一遍覆盖区间", !bodyHtml.includes("blockquote"), bodyHtml.slice(0, 120));
+const meta = await evalJs(`document.getElementById('daily-reader-meta').textContent`);
+check("元信息写明覆盖的是发布时间", /覆盖 .+ → .+ 发布的内容/.test(meta) && /补录 1 条/.test(meta), meta);
 
-check("同步范围列出了各通道",
-      (await evalJs(`document.querySelectorAll('#daily-channels input').length`)) >= 3);
-check("日期默认是今天",
-      (await evalJs(`document.getElementById('daily-date').value`)) === new Date().toLocaleDateString("sv"));
+// 覆盖区间:默认接上一份日报,截止时刻是生成那一刻(不预先钉死)
+const label = await evalJs(`document.getElementById('daily-window-label').textContent`);
+check("页头写着这一份要覆盖哪一段", /覆盖 \d\d-\d\d \d\d:\d\d 起到生成时刻/.test(label), label);
+await evalJs(`toggleDailyWindow()`);
+check("改区间能展开两个时刻输入",
+      await evalJs(`!document.getElementById('daily-window').hidden
+        && document.getElementById('daily-since').type === 'datetime-local'`));
+const since = await evalJs(`document.getElementById('daily-since').value`);
+const last = (await evalJs(`(async () => (await (await fetch('/api/daily/reports')).json())
+  .reports.filter(r => r.date !== '${today}')[0].window_until)()`)).slice(0, 16).replace(' ', 'T');
+check("起点预填成上一份日报的截止时刻", since === last, `${since} / ${last}`);
 
-// 定时设置:改一个字段 → 保存按钮亮 → 保存后回显下一次时间
-await evalJs(`(() => { const t = document.getElementById('daily-time');
-  t.value = '06:45'; t.dispatchEvent(new Event('input')); })()`);
-check("改了设置后保存按钮可用", !(await evalJs(`document.getElementById('daily-sched-save').disabled`)));
-await evalJs(`(() => { document.getElementById('daily-on').checked = true;
-  document.getElementById('daily-on').dispatchEvent(new Event('change')); saveDailySettings(); })()`);
-await sleep(1200);
-const schedMsg = await evalJs(`document.getElementById('daily-sched-msg').textContent`);
-check("保存后回显了下一次生成时间", /每天 06:45/.test(schedMsg), schedMsg);
-
-// 空日期:不该悄悄出一份空日报,而是把原因写在横幅上,并且这句原因要留得住
-// (紧接着会刷一次日报列表,刷成功顺手清横幅的话原因一闪就没了)。
-await evalJs(`(() => { document.getElementById('daily-date').value = '2026-09-27'; runDaily(false); })()`);
-await waitFor(`!document.getElementById('daily-error').hidden`);
+// 自定义一段没有内容的历史区间:不该悄悄出一份空日报,而是把原因写在横幅上,
+// 并且这句原因要留得住(紧接着会刷一次日报列表)。
+await evalJs(`(() => {
+  document.getElementById('daily-since').value = '2026-01-01T00:00';
+  document.getElementById('daily-until').value = '2026-01-02T00:00';
+  markDailyWindow(); runDaily(false); })()`);
+await waitStatus(`!document.getElementById('daily-error').hidden`);
 await evalJs(`loadDailyReports()`);
 const banner = await evalJs(`document.getElementById('daily-error-text').textContent`);
-check("没有内容的日期给出原因而不是空日报", /没有已入库的内容/.test(banner), banner);
-check("这一天没有被写成日报",
-      !(await evalJs(`[...document.querySelectorAll('[data-report]')].some(b => b.dataset.report === '2026-09-27')`)));
+check("没有内容的区间给出原因而不是空日报", /没有已入库的内容/.test(banner),
+      banner || await evalJs(`JSON.stringify(dailyState)`));
+check("这一段没有被写成日报",
+      !(await evalJs(`[...document.querySelectorAll('[data-report]')].some(b => b.dataset.report === '2026-01-02')`)));
+check("改过的区间照原样显示",
+      /覆盖 01-01 00:00 → 01-02 00:00/.test(
+        await evalJs(`document.getElementById('daily-window-label').textContent`)));
+await evalJs(`resetDailyWindow()`);
+check("「接上一份日报」能把区间收回默认",
+      /起到生成时刻/.test(await evalJs(`document.getElementById('daily-window-label').textContent`)));
 
-// 重新生成已有的那天:先弹确认框,确认后列表里的生成时间会变
-const stamp = `(async () => (await (await fetch('/api/daily/reports/2026-09-28')).json()).generated)()`;
+// 重新生成今天这一份:先弹确认框,确认后生成时间会变
+// 比 window_until 而不是 generated:后者只到分钟,同一分钟内重新生成逐字相同。
+const stamp = `(async () => (await (await fetch('/api/daily/reports/${today}')).json()).window_until)()`;
 const before = await evalJs(stamp);
-await evalJs(`(() => { document.getElementById('daily-date').value = '2026-09-28'; runDaily(false); })()`);
-const asked = await waitFor(`!!document.querySelector('.confirm-mask [data-act=ok]')`, 3000);
+// 不能直接 await runDaily:它自己会停在确认框上等点击,await 等于死锁。
+await evalJs(`(() => { runDaily(false); })()`);
+const asked = await waitFor(`!!document.querySelector('.confirm-mask [data-act=ok]')`, 5000);
 check("覆盖已有日报前先确认", asked,
-      asked ? "" : await evalJs(`JSON.stringify({dates: dailyReports.map(r => r.date), busy: dailyBusy, state: dailyState && dailyState.phase})`));
+      asked ? "" : await evalJs(`JSON.stringify({dates: dailyReports.map(r => r.date), busy: dailyBusy,
+        running: dailyState && dailyState.running, phase: dailyState && dailyState.phase,
+        masks: document.querySelectorAll('.confirm-mask').length, today: new Date().toLocaleDateString('sv')})`));
 if (asked) await evalJs(`document.querySelector('.confirm-mask [data-act=ok]').click()`);
-await waitFor(`${stamp}.then(v => v !== ${JSON.stringify(before)})`);
+await waitStatus(`${stamp}.then(v => v !== ${JSON.stringify(before)})`);
 const after = await evalJs(stamp);
-check("确认后这一天被重新生成", !!after && after !== before, `${before} → ${after}`);
+check("确认后这一份被重新生成", !!after && after !== before, `${before} → ${after}`);
 await evalJs(`refreshDailyStatus()`);
 check("重新生成后不再显示上一次的失败",
       await evalJs(`document.getElementById('daily-error').hidden`));
