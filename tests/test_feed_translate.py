@@ -11,11 +11,12 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from kb import extract, llm, pipeline_state, scanner, search, store
+from kb import daily, extract, llm, pipeline_state, scanner, search, store
 from kb.chunker import split_chunks
 from kb.collectors.feeds import FeedCollector
 from kb.config import Source
@@ -344,6 +345,122 @@ class ExportStageTests(FeedCase):
             FeedCollector('rss').materialize()      # 第三次失败:出队,按原文入库
         self.assertEqual('ok', self.stage()['status'])
         self.assertIn('已保存 1 条', self.stage()['detail'])
+
+    def test_a_backfill_failure_on_a_shipped_entry_is_not_called_success(self):
+        # 按英文导出过、内容又没变的条目 exported_hash==content_hash,压根不在
+        # "待导出"集合里,可它照样排在队列里等补译。拿待导出集合去数失败,这一
+        # 档一条也数不出来:导出阶段绿、日报记「同步完成」,而库里躺的还是英文、
+        # 素材清单里就是那行英文标题(2026-09-30 第 2 轮审查实测)。
+        self.put('Legacy release', 'Legacy release supports agent scheduling.')
+        sync.export('rss')                  # 没配 key 那阵子按英文入过库
+        path = self.root / 'vault/source/rss' / (self.item()['key'] + '.md')
+        with patch.object(llm, 'chat', Mock(side_effect=RuntimeError('HTTP 503 translator'))):
+            FeedCollector('rss').materialize()
+        stage = self.stage()
+        self.assertEqual('error', stage['status'])
+        self.assertIn('1 条补译失败（库里仍是原文）', stage['detail'])
+        self.assertIn('HTTP 503', json.dumps(stage.get('failures'), ensure_ascii=False))
+        # 原文照样读得到:补译失败不该把已经入库的内容撤下来
+        self.assertIn('Legacy release supports agent scheduling.',
+                      path.read_text(encoding='utf-8'))
+
+    def test_a_shipped_entry_waiting_its_turn_is_not_called_uningested(self):
+        # 已经按原文入库、只是还没轮到补译的那些:说它"译完再入库"是谎报——
+        # 它此刻在 vault 里读得到,等的只是中文覆盖上去。
+        self.put('First legacy post', 'Body one in English.')
+        self.put('Second legacy post', 'Body two in English.')
+        sync.export('rss')
+        with patch.object(translate, 'MAX_ITEMS', 1), \
+                patch.object(llm, 'chat', Mock(return_value='###TITLE###\n中文标题\n'
+                                               '###BODY###\n中文正文。')):
+            FeedCollector('rss').materialize()
+        stage = self.stage()
+        self.assertEqual('ok', stage['status'])
+        self.assertIn('1 条等待中文译文覆盖', stage['detail'])
+        self.assertNotIn('待翻译', stage['detail'])
+        self.assertNotIn('翻译失败', stage['detail'])
+
+
+class MixedBatchTests(unittest.TestCase):
+    """同一轮里有译成的也有译不成的:译成的那些必须照样进知识库。
+
+    实测过的坏结果:导出收尾那句汇总里,形参 `translated`(这一轮的翻译摘要)
+    被循环中同名的布尔变量覆盖,`.get('errors')` 当场 AttributeError —— 那时
+    成功的文章已经落盘、exported_hash 也更新过,异常却把 materialize 连同后面
+    的 index/extract 一起带崩:同一轮译成的新文章一篇都进不了检索和当天日报,
+    页面上只说这个来源没同步成功(2026-09-30 第 2 轮审查实测)。
+
+    所以 setUp 里那一趟 `materialize()` 本身就是断言:它抛异常这一整类就红。
+    """
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.vault = self.root / 'vault'
+        for p in (patch.object(reg, 'DB_PATH', self.root / 'feeds.db'),
+                  patch.object(sync, 'VAULT_ROOT', self.vault),
+                  patch.object(scanner, 'VAULT_ROOT', self.vault),
+                  patch.object(translate, '_model', lambda: MODEL),
+                  patch.dict(pipeline_state._state, {
+                      'stages': deepcopy(pipeline_state._state['stages']),
+                      'log': [], 'stop_requested': False})):
+            p.start(); self.addCleanup(p.stop)
+        self.conn = store.connect(self.root / 'kb.db')
+        self.addCleanup(self.conn.close)
+        source = reg.save_subscription('rss', {'name': 'Blog', 'url': 'https://e.org/f.xml'})
+        for key, title in (('good', 'Good release'), ('bad', 'Bad release')):
+            reg.put_items(source, [{'url': f'https://e.org/{key}', 'title': title,
+                                    'body': f'{title} supports agent tool scheduling.',
+                                    'published': '2026-09-28 09:00'}])
+        with patch.object(llm, 'chat', self.answer):
+            FeedCollector('rss').materialize()
+
+    @staticmethod
+    def answer(prompt, *args, **kwargs):
+        if 'Bad release' in prompt:
+            raise RuntimeError('HTTP 503 translator unavailable')
+        return '###TITLE###\n新发布\n###BODY###\n这个新发布支持智能体工具调度。'
+
+    def index(self) -> list[str]:
+        """把 vault 里此刻的东西真的索引一遍,返回入库的路径。"""
+        spec = Source(name='rss', root=self.vault / 'source/rss')
+        paths = []
+        for path in sorted(spec.root.glob('*.md')):
+            doc = scanner._doc_from_file(path, spec)
+            store.upsert_document(self.conn, doc, split_chunks(doc.body),
+                                  '2026-09-28 09:30:00')
+            paths.append(str(path.relative_to(self.vault)))
+        self.conn.commit()
+        return paths
+
+    def test_the_translated_article_still_lands_in_the_vault(self):
+        files = sorted((self.vault / 'source/rss').glob('*.md'))
+        self.assertEqual(1, len(files))                 # 译成的那篇进来了
+        self.assertIn('这个新发布支持智能体工具调度。', files[0].read_text(encoding='utf-8'))
+        # 译不成的那篇仍然扣着,重试次数和原因都记上了
+        bad = [i for i in reg.items('rss')['items'] if i['title'] == 'Bad release'][0]
+        self.assertEqual(1, bad['translate_tries'])
+        self.assertIn('HTTP 503', bad['translate_error'])
+        self.assertEqual('', bad['exported_hash'])
+
+    def test_the_round_is_reported_as_partly_failed(self):
+        stage = pipeline_state._state['stages']['export']
+        self.assertEqual('error', stage['status'])
+        self.assertIn('已保存 1 条', stage['detail'])
+        self.assertIn('1 条翻译失败', stage['detail'])
+        self.assertIn('HTTP 503', json.dumps(stage.get('failures'), ensure_ascii=False))
+
+    def test_the_translated_article_is_searchable(self):
+        paths = self.index()
+        hits = search.search(self.conn, '智能体', search.Filters(), use_vector=False)
+        self.assertEqual(paths, [h.path for h in hits])
+
+    def test_the_translated_article_reaches_the_same_day_report(self):
+        paths = self.index()
+        mat = daily.collect(self.conn, datetime(2026, 9, 28), datetime(2026, 9, 28, 23, 59))
+        self.assertEqual(paths, [d['path'] for d in mat.items])
+        self.assertEqual(['新发布'], [d['title'] for d in mat.items])
 
 
 class ReexportMetadataTests(unittest.TestCase):

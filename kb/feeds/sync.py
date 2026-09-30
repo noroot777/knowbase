@@ -174,18 +174,35 @@ def export(kind: str, hold_untranslated: bool = False,
     # 进日志的话,这一行 _stage 随后把阶段刷成绿色,而实测那一轮确实有新文章
     # 因为翻译 503 一篇都没进知识库,日报那头照样记「同步完成」
     # (2026-09-30 审查实测)。
-    base = 'FROM feed_items WHERE kind=? AND exported_hash<>content_hash'
+    queue = 'FROM feed_items WHERE kind=?'
+    base = queue + ' AND exported_hash<>content_hash'
     args: list = [kind]
-    held = stuck = 0
+    held = stuck = shipped = shipped_stuck = 0
     if hold_untranslated:
         cond, extra = translate.queued_sql()
         with reg.db() as c:
-            # 扣下的条目分两种,合成一个数就等于把故障说成积压:`stuck` 是译
-            # 过、报了错、这一轮没能入库的(该判红),held-stuck 是还没轮到的
-            # 正常积压(下一轮自然消化)。
-            row = c.execute(f"SELECT count(*) n, sum(translate_error<>'') bad "
-                            f'{base} AND ({cond})', (*args, *extra)).fetchone()
-        held, stuck = row['n'], row['bad'] or 0
+            # 数的是**整个翻译队列**,不是下面那个"待导出"集合。按英文导出过、
+            # 内容又没变的条目 exported_hash==content_hash,压根不在待导出集合
+            # 里,可它们照样排在队列里等补译 —— 拿待导出集合去数,这一档的补译
+            # 失败一条也数不出来,导出阶段绿、日报记「同步完成」,而素材清单里
+            # 还躺着英文标题(2026-09-30 第 2 轮审查实测)。
+            #
+            # 两个维度各回答一件事,四档都得分开说:
+            #   fresh(exported_hash='') 还没入库,导出闸门确实扣着它
+            #   bad(translate_error<>'') 译过、报了错、还可以再试
+            # 合成一个数就等于把故障说成积压,或者把"库里还是外文"说成"读不到"。
+            # 判据和来源面板那三档是同一个(见 `registry.items`)。
+            tally = c.execute(
+                f"SELECT exported_hash='' AS fresh, translate_error<>'' AS bad,"
+                f' count(*) AS n {queue} AND ({cond}) GROUP BY fresh, bad',
+                (*args, *extra)).fetchall()
+        for t in tally:
+            if t['fresh']:
+                held += t['n']
+                stuck += t['n'] if t['bad'] else 0
+            else:
+                shipped += t['n']
+                shipped_stuck += t['n'] if t['bad'] else 0
         base += f' AND NOT ({cond})'
         args += extra
     with reg.db() as c:
@@ -202,10 +219,15 @@ def export(kind: str, hold_untranslated: bool = False,
         # 标题被译了也算"这一篇是译文":只有一行标题的短动态(正文为空)整条
         # 可读内容就是标题,不标的话 vault 里这一篇看不出是译文、也丢掉了
         # 回查原标题的入口。
-        translated = body != item['body'] or title != item['title']
+        # 名字不能叫 translated:那是本函数的形参(这一轮的翻译摘要)。同名的话
+        # 循环跑完之后摘要已经变成一个布尔值,收尾处 `.get('errors')` 当场
+        # AttributeError —— 而那时成功的文章已经落盘、exported_hash 也更新过,
+        # 异常却把 materialize 连同后面的 index/extract 一起带崩:同一轮里译成
+        # 的新文章一篇都进不了检索和当天日报(2026-09-30 第 2 轮审查实测)。
+        is_zh = body != item['body'] or title != item['title']
         meta = dict(source=kind, title=title, account=item['author'], published=item['published'],
                     url=item['url'], fetched_at=item['fetched_at'], content_kind=item['content_kind'])
-        if translated:
+        if is_zh:
             meta.update(lang='zh', translated_from='en')
             # 标题没跟着译时不写这一行:原标题和 title 一模一样,写上去只是噪音。
             # 真译了才留 —— 正文已经整篇换成中文,想按英文名找回这条只剩这个入口。
@@ -215,7 +237,7 @@ def export(kind: str, hold_untranslated: bool = False,
         # 末尾的话新 tag 会落进别的键下面。
         meta.update(_kept_meta(path))
         notice = '\n> 以下为订阅源提供的摘要；完整内容请打开原文。\n' if item['content_kind'] == 'summary' else ''
-        if translated:
+        if is_zh:
             notice += '\n' + translate.NOTE + '\n'
         text = '---\n' + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + '---\n\n'
         # Keep the parsed text intact for the vault, indexing and extraction.
@@ -240,8 +262,16 @@ def export(kind: str, hold_untranslated: bool = False,
         note += f'，{stuck} 条翻译失败（暂未入库）'
     if held - stuck > 0:
         note += f'，{held - stuck} 条待翻译（译完再入库）'
-    # 翻译失败让导出阶段判红:这一轮确实有内容没能进知识库,那不是"稍后再说"。
-    # 已经试满 MAX_TRIES、按原文入库的那些不算——它们不在扣留集合里(见
-    # `translate.queued_sql` 的出口),留着原文是设计好的退让,不是失败。
-    fails = errors + ([] if not stuck else (translated or {}).get('errors') or [])
-    _stage('export', 'error' if errors or stuck else 'ok', note, failures=fails)
+    # 已经按原文入库的那一档:补译失败不影响"读得到",可库里躺的还是外文,
+    # 说成「同步完成」照样是谎报 —— 实测那一轮日报的素材清单里就是英文标题。
+    # 所以它和 stuck 一样判红,只是文案说清原文还在。
+    if shipped_stuck:
+        note += f'，{shipped_stuck} 条补译失败（库里仍是原文）'
+    if shipped - shipped_stuck > 0:
+        note += f'，{shipped - shipped_stuck} 条等待中文译文覆盖'
+    # 翻译失败让导出阶段判红:这一轮确实有内容没能按中文进知识库,那不是
+    # "稍后再说"。已经试满 MAX_TRIES、按原文入库的那些不算——它们不在扣留
+    # 集合里(见 `translate.queued_sql` 的出口),留着原文是设计好的退让。
+    bad = stuck + shipped_stuck
+    fails = errors + ([] if not bad else (translated or {}).get('errors') or [])
+    _stage('export', 'error' if errors or bad else 'ok', note, failures=fails)
