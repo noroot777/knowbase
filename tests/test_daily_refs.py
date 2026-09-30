@@ -8,15 +8,27 @@
 规则,第三轮证明这条路没有终点,于是改成**每次替换渲染一遍、由渲染器裁决**。
 第 4 轮抓的是这个裁决本身的两处不实:裁决用 CommonMark 而页面的 marked 开着
 GFM(裸网址、表格都看不见),以及"这一处之外一个字都没动"其实只比了代码/图片/
-链接那几类(表格挤错列、不可见的定义行冒出来都漏过)。
+链接那几类(表格挤错列、不可见的定义行冒出来都漏过)。第 5 轮证明"换个预设名"
+不等于对齐:两个 markdown 实现永远逐位对不齐,`gfm-like` 的 linkify 只认一份
+有限的 TLD 名单,`www.example.dev/path/[1]` 照样被改坏 —— 所以裸网址那一类
+另有一道不依赖解析器细节的超集判据,而回归得拿**页面那一份 marked** 来验
+(`TheRealMarkedAgrees`),在后端渲染器里比一遍只能证明它自己前后一致。
 
 判据统一是「原文那一段逐字还在,而它后面那个出处确实变成了链接」,两半缺一不可:
 只验前半句的话,一个什么都不替换的实现也能全绿 —— 而"保护得过宽"和"改坏原文"
 一样是错的,该链接的出处漏掉,用户看到的还是一串对不上号的数字。
 """
+import json
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
 from kb.daily_refs import link_refs
+
+MARKED_PROBE = Path(__file__).resolve().parent / 'daily_refs_marked.mjs'
 
 # link_refs 收的是「编号 → (已转义的目标, 已转义的标题)」,转义口径在 kb.daily
 LINKS = {'1': ('<https://e.org/a>', '甲文'), '2': ('<https://e.org/b>', '乙文')}
@@ -226,6 +238,143 @@ class Fences(unittest.TestCase):
         # ``` 后面再有反引号的那行压根不是围栏,后面的出处照样要加链接
         out = link_refs('```a`b\n\n出处 [1]。', LINKS)
         self.assertIn('出处 ' + OUT['1'] + '。', out)
+
+
+# 每一项是一行正文,不是裸 URL 片段 —— marked 认不认还跟位置有关(实测它的
+# inlineText 前瞻大小写敏感,大写 scheme 只有在段落开头才被切出来)。这些全是
+# 「页面认、后端(曾经)不认」的形态,Python 断言和 `TheRealMarkedAgrees` 共用。
+BARE_URL_LINES = [
+    # 第 5 轮实测被改坏的 8 个后缀:linkify-it 的默认名单里没有它们
+    '已有网址 www.example.dev/path/[1] 原样保留。',
+    '已有网址 www.example.app/path/[1] 原样保留。',
+    '已有网址 www.example.cloud/path/[1] 原样保留。',
+    '已有网址 www.example.news/path/[1] 原样保留。',
+    '已有网址 www.example.technology/path/[1] 原样保留。',
+    '已有网址 www.example.online/path/[1] 原样保留。',
+    '已有网址 www.example.blog/path/[1] 原样保留。',
+    '已有网址 www.example.xyz/path/[1] 原样保留。',
+    # 名单里本来就有的(第 4 轮修过,别退回去)
+    '已有网址 www.example.com/path/[1] 原样保留。',
+    '已有网址 www.example.org/path/[1] 原样保留。',
+    # 一字符 TLD:TLD 放宽到"两字符以上"之后 linkify 仍然认不出,marked 认
+    '已有网址 www.x.y/[1] 原样保留。',
+    # marked 认的三种 scheme,外加查询串、片段
+    '已有网址 http://a.io/[1] 原样保留。',
+    '已有网址 https://e.org/p/[1] 原样保留。',
+    '已有网址 ftp://f.example.zz/[1] 原样保留。',
+    '已有网址 https://e.org/a?q=[1] 原样保留。',
+    '已有网址 https://e.org/a#[1] 原样保留。',
+    # 大写 scheme / 大写 www:只在段落开头被 marked 切出来
+    'HTTPS://E.ORG/PATH/[1] 这条大写的也认。',
+    'WWW.E.ORG/p/[1] 这条大写的也认。',
+    # autolink 的尾巴是 `[^\s<]*`:不跨空白,却跨中文
+    '见https://e.org/doc的说明[1]。',
+]
+
+
+class BareUrlsAreNeverTouched(Keeps):
+    """裸网址里的 `[N]` 一律不动 —— 判据不能是"后端的 linkify 认不认得出来"。
+
+    第 5 轮实测:换上 `gfm-like` 之后仍有 8 个后缀被改坏(`dev`/`app`/`cloud`/
+    `news`/`technology`/`online`/`blog`/`xyz`),原网址的文字和 href 双双变样、
+    点过去是另一个地址。补几个后缀是在维护一份名单,下一个没见过的照样漏,所以
+    另有一道不依赖解析器细节的超集判据(见 `daily_refs` 开头 ①′)。
+    """
+
+    def test_a_citation_inside_a_bare_url_is_left_alone(self):
+        for line in BARE_URL_LINES:
+            with self.subTest(line=line):
+                self.keeps(line)
+
+    def test_forms_the_real_marked_misses_are_protected_anyway(self):
+        # 超集判据宁可多说"是":这两种 marked 其实不认(域名只收 ASCII;大写 scheme
+        # 嵌在文字中间时它的前瞻切不出来),保护它们只是少加一条链接,不会改坏谁。
+        self.keeps('已有网址 https://例え.テスト/path/[1] 原样保留。')
+        self.keeps('已有网址 HTTPS://E.ORG/PATH/[1] 原样保留。')
+
+    def test_a_space_ends_the_url_so_that_citation_still_links(self):
+        # 反过来:别保护得太宽。空白截断 autolink,后面那个出处该加链接。
+        out = link_refs('见 https://e.org/doc 的说明,出处 [1]。', LINKS)
+        self.assertIn('出处 ' + OUT['1'] + '。', out)
+
+    def test_a_url_on_its_own_line_does_not_shield_the_next_line(self):
+        out = link_refs('https://e.org/doc\n\n出处 [1]。', LINKS)
+        self.assertIn('出处 ' + OUT['1'] + '。', out)
+
+
+class MergedGroupsWithGaps(unittest.TestCase):
+    """合并编号里有一个对不上素材时,对得上的那个照样要成链接。
+
+    第 5 轮的不拦项:`[1,9]` 原来整组留成纯文本 —— 还原时只把第一个哨兵换回整组
+    原文,而没素材的那个编号生成的 `[9]` 还留在旁边,还原结果成了 `[1,9][9]`、跟
+    原文对不上,于是整处被拒。页面上前端兜底能补,拿走 md 文件就只剩一串数字。
+    """
+
+    def test_one_number_has_no_material(self):
+        self.assertEqual('混合 ' + OUT['1'] + '[9]。',
+                         link_refs('混合 [1,9]。', LINKS))
+
+    def test_one_number_has_no_url(self):
+        # 素材在、但没有 url —— kb.daily 那边就不会把它放进 links
+        self.assertEqual('混合 ' + OUT['1'] + '[2]。',
+                         link_refs('混合 [1、2]。', {'1': LINKS['1']}))
+
+    def test_both_sides_link(self):
+        self.assertEqual('两条 ' + OUT['1'] + OUT['2'] + '。',
+                         link_refs('两条 [1,2]。', LINKS))
+
+    def test_a_repeated_number(self):
+        self.assertEqual('重复 ' + OUT['1'] + OUT['1'] + '。',
+                         link_refs('重复 [1,1]。', LINKS))
+
+
+@unittest.skipUnless(shutil.which('node'), '需要 node 跑页面那份 marked')
+class TheRealMarkedAgrees(unittest.TestCase):
+    """拿**页面那一份** marked 渲染前后,原有的链接必须逐字还在。
+
+    上面那些断言比的是落盘文本,而"改没改坏"最终由渲染器说了算 —— 后端的裁决器
+    是 markdown-it、页面是 marked,第 5 轮正是栽在两者的 linkify 口径不同上:后端
+    比一遍只能证明它自己前后一致。所以这一条真把 `kb/static/vendor/marked.min.js`
+    跑起来,按 (href, 链接内部) 逐条比。
+    """
+
+    def rendered(self, cases: list[dict]) -> list[dict]:
+        fd, path = tempfile.mkstemp(suffix='.json')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+                json.dump(cases, fh, ensure_ascii=False)
+            done = subprocess.run(['node', str(MARKED_PROBE), path],
+                                  capture_output=True, text=True, check=True)
+        finally:
+            os.unlink(path)
+        return json.loads(done.stdout)
+
+    def test_bare_urls_keep_their_text_and_destination(self):
+        cases = [{'name': line, 'before': line + '\n\n普通出处 [1]。',
+                  'after': link_refs(line + '\n\n普通出处 [1]。', LINKS)}
+                 for line in BARE_URL_LINES]
+        for got in self.rendered(cases):
+            with self.subTest(url=got['name']):
+                # 样本本身在 marked 眼里就得是链接,否则这一条什么也没验
+                self.assertTrue(got['before'], got)
+                for link in got['before']:
+                    self.assertIn(link, got['after'], got)
+                # 而且那句普通出处确实成了链接 —— 只验前半句的话,一个什么都不换
+                # 的实现也能全绿
+                self.assertIn(['https://e.org/a', '[1]'], got['after'], got)
+
+    def test_mixed_body_keeps_code_links_and_images(self):
+        body = ('使用示例 `items[1]` 不动。\n\n'
+                '[版本 [1]](https://keep.e.org/v) 不动。\n\n'
+                '![图 [1]](https://img.e.org/a.png) 不动。\n\n'
+                '| 主题 | 出处 |\n| --- | --- |\n| 产品 | [1] |\n\n'
+                '普通出处 [1]。')
+        got = self.rendered([{'name': 'mixed', 'before': body,
+                              'after': link_refs(body, LINKS)}])[0]
+        for link in got['before']:
+            self.assertIn(link, got['after'], got)
+        self.assertEqual(2, sum(1 for h, t in got['after']
+                                if [h, t] == ['https://e.org/a', '[1]']), got)
 
 
 class StillLinksTheRealCitations(unittest.TestCase):

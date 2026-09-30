@@ -18,6 +18,17 @@ CommonMark 裁决,而页面的 marked 默认开着 GFM —— 裸网址 `https:/
 就是另一个地址;GFM 表格同理,CommonMark 压根不解析,单元格被标题里的 `|` 挤错位
 也看不出来。所以这里用 `gfm-like`(linkify + 表格 + 删除线),和 marked 对齐。
 
+**①′ 但"两个 markdown 实现"永远不可能逐位对齐,所以裸网址另有一道超集判据。**
+第 5 轮实测:换上 `gfm-like` 之后 `www.example.dev/path/[1]` 照样被改坏 ——
+linkify-it 只认一份有限的 TLD 名单,`dev`/`app`/`cloud`/`news` 之类都不在里面,
+而 marked 对 TLD 不做任何限制。补几个后缀是在维护名单,下一个没见过的后缀照样
+漏;path 边界、backpedal 这些地方还有同类缺口。所以除了把 TLD 放宽成"任意",
+另加一道**不依赖任何解析器细节**的判据:marked 的 autolink 只有 `www.` 和
+`scheme://` 两种起手式,尾巴是 `[^\s<]*`(不跨空白、不跨 `<`)—— 于是"这个编号落
+在某条裸网址里"必然满足「往左数到最近的空白或 `<` 为止,这一段出现过 `www.`
+或 `://`」。反过来不成立,所以它是超集:多拒几处(那一处留成纯文本)换"再不会有
+下一个漏网的后缀"。
+
 **② 判据是整份渲染结果逐字比,不是挑几类元素比。** 原来只收集代码/图片/链接,
 于是"表格列错位、一整格内容丢了""不可见的引用定义被显示出来"这类改动全部漏过
 ——`_accepts` 嘴上说"这一处之外一个字都没动",实际只看了那几类。现在的做法:
@@ -46,16 +57,40 @@ _SEP_RE = re.compile(r'[,，、]')
 # 和页面渲染日报的 marked 同一套口径:marked 默认开 GFM,所以这里也得有 linkify
 # (裸网址成链接)和表格 —— 少一样,页面上被改坏的东西在这里就看着无害。
 _MD = MarkdownIt('gfm-like')
+# linkify-it 默认只认一份有限的 TLD 名单(com/org/net…),marked 却对 TLD 不做任何
+# 限制 —— `www.example.dev/path/[1]` 因此在页面上是链接、在这里只是一段文字,替换
+# 完点过去就是另一个地址(2026-09-30 第 5 轮审查实测,8 个后缀全中)。放宽成"任意
+# 两字符以上的字母数字",让这里的识别范围**覆盖** marked 那一侧。不放到一字符是
+# 因为那会把 `3.2`、`v1.5` 这类版本号也认成域名 —— 过度识别不改坏东西(只是那一
+# 处不加链接),但没必要。真正兜底的是下面 `_autolinked` 那道超集判据。
+_MD.linkify.tlds(r'[a-z0-9\-]{2,}', keep_old=False)
+
+# marked 的 GFM autolink 只有两种起手式(`www.` 或 `scheme://`),尾巴是 `[^\s<]*`
+# —— 不跨空白、不跨 `<`。所以「这个编号落在某条裸网址里」有一个**必要条件**:从它
+# 往左数到最近的空白或 `<` 为止,这一段里出现过 `www.` 或 `://`。命中就不换。
+# 这是超集判据,不依赖谁的 TLD 名单更全、谁的 path 正则更准 —— 上面那次放宽只是
+# 让主裁决器别再明显窄于 marked,"不会再漏下一个没见过的后缀"靠的是这一道。
+_URL_HEAD_RE = re.compile(r'www\.|://')
 
 # 哨兵:私用区字符,日报正文里不会出现。拿它当链接文字,就能在渲染结果里**精确**
 # 认出"哪几条是这一次新插进去的",不必靠 (文字, 地址) 去猜(原文里本来就有一条
 # 一模一样的链接时,猜哪条都说不准)。
 _S1, _S2 = '\ue000', '\ue001'
 _SENT_RE = re.compile(f'{_S1}(\\d+)\\.(\\d+){_S2}')
+# 同一组的哨兵在替换时是连着写下去的(`''.join`),所以「整组」= 组号相同的一串。
+_GROUP_RE = re.compile(f'{_S1}(\\d+)\\.\\d+{_S2}(?:{_S1}\\1\\.\\d+{_S2})*')
 # 新链接落进这几种元素里就是改坏了:链接套链接浏览器会拆开(点击目标错位),
 # 代码里冒出链接则是把别人照着复制的命令改了。这两种情况还原之后照样逐字相同
 # (容器本身没变),所以得单拦一道。
 _FORBID = ('a', 'code', 'pre')
+
+
+def _autolinked(body: str, at: int) -> bool:
+    """这个位置有没有可能落在一条裸网址里面?(宁可多说是,见模块开头 ①′)"""
+    i = at
+    while i and not (body[i - 1].isspace() or body[i - 1] == '<'):
+        i -= 1
+    return _URL_HEAD_RE.search(body[i:at]) is not None
 
 
 def _nums(m: re.Match) -> list[str]:
@@ -89,30 +124,28 @@ def _accepts(base: str, body: str, spots: list[tuple[int, re.Match]],
     raw = {i: m.group(0) for i, m in spots}
     num_at = {(i, k): n for i, m in spots for k, n in enumerate(_nums(m))}
 
+    # 一组里没有素材的那几个编号也打上哨兵(只是不做成链接),还原时整组一起换回
+    # 原文那一段。落下一个的话,`[1,9]` 会还原成 `[1,9][9]` 跟原文对不上,于是连
+    # 有素材的那个编号也白白留成纯文本(2026-09-30 第 5 轮审查实测)。
     shown = _MD.render(_splice(body, spots, lambda i, k, n: (
-        _md_link(f'{_S1}{i}.{k}{_S2}', *links[n]) if n in links else f'[{n}]')))
+        _md_link(f'{_S1}{i}.{k}{_S2}', *links[n]) if n in links
+        else f'{_S1}{i}.{k}{_S2}')))
 
     soup = BeautifulSoup(shown, 'html.parser')
-    got, seen = 0, set()
+    got = 0
     for a in soup.find_all('a'):
-        hit = _SENT_RE.fullmatch(a.get_text())
-        if not hit:
+        if not _SENT_RE.fullmatch(a.get_text()):
             continue
         if a.find_parent(_FORBID):      # 落进了链接或代码里面
             return ''
         got += 1
-        i = int(hit.group(1))
-        # 整组还原成原文那一段:合并写法 `[1、2]` 换出来是两条相邻的链接,一条条
-        # 还原成 `[1][2]` 就跟原文对不上了 —— 那个分隔符本来就该消失。
-        if i in seen:
-            a.decompose()
-        else:
-            seen.add(i)
-            a.replace_with(raw[i])
+        a.replace_with(a.get_text())    # 只脱掉这层 <a>,哨兵文本留在原处
     if got != want:                     # 有的没成链接(在代码里、在 HTML 块里…)
         return ''
-    if str(soup) != base:               # 别处也跟着变了(表格挤错列、定义行冒出来…)
-        return ''
+    # 整组哨兵换回原文那一段:合并写法 `[1、2]` 换出来是几个相邻元素,一个个还原成
+    # `[1][2]` 就跟原文对不上了 —— 那个分隔符本来就该消失。
+    if _GROUP_RE.sub(lambda mm: raw[int(mm.group(1))], str(soup)) != base:
+        return ''                       # 别处也跟着变了(表格挤错列、定义行冒出来…)
 
     real = _splice(body, spots, lambda i, k, n: (
         _md_link(f'\\[{n}\\]', *links[n]) if n in links else f'[{n}]'))
@@ -138,7 +171,8 @@ def link_refs(body: str, links: dict[str, tuple[str, str]]) -> str:
         return body
     # 一组里一个都对不上就整段别动:那多半不是出处编号(年份区间、条目序号之类)。
     hits = [m for m in _NUMS_RE.finditer(body)
-            if any(n in links for n in _nums(m))]
+            if any(n in links for n in _nums(m))
+            and not _autolinked(body, m.start())]
     if not hits:
         return body
 
