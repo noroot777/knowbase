@@ -510,7 +510,9 @@ Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
     ./kb.sh prep                    同步前:重起 wxdown + 切路由 + 起面板
     ./kb.sh sync                    跑全流程(采集→导出→索引→打标),后台跑
     ./kb.sh sync --channel wechat_local  用绿泡泡本地数据库发现文章
-    ./kb.sh sync --channel wechat_oa     用原凭证通道(默认)
+    ./kb.sh sync --channel wechat_oa     用原凭证通道
+                 (两条互斥,常用那条在面板「设置 → 绿泡泡接入 → 采集通道」里选,
+                  默认本地数据库;这里的 --channel 是一次性覆盖,不改设置)
     ./kb.sh status                  服务 / 同步进度 / 路由 / 凭证 一屏看全
 
   服务(都是后台守护进程;restart 会先杀掉在跑的那份,不管是谁起的)

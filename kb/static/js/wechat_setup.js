@@ -1,11 +1,73 @@
 // Local onboarding stays independent of cloud models and of the active sync channel.
 let wechatSetup = null, wechatPoll = null, wechatRequest = false;
 let wechatStatusVersion = 0;
+let wechatChannelBusy = false;
 function openWechatSetup() {
   $('wechat-modal').style.display = '';
   $('wechat-error').textContent = '';
   refreshWechatSetup();
+  loadWechatChannels();
 }
+
+// ── 采集通道（设置项）─────────────────────────────────────────────────────────
+// 绿泡泡两条通道抓的是同一批公众号，只能走一条，所以它不在「这次同步抓哪几个来源」
+// 里勾，而是在这儿选一次：选中的那条才会出现在同步范围和日报范围里。
+
+function renderWechatChannels() {
+  const options = pipeWechat?.options || [];
+  $('wechat-channels').innerHTML = options.map(c => `<label class="pipe-channel">
+    <input type="radio" name="wechat-channel" value="${esc(c.id)}"
+      ${c.id === pipeWechat.selected ? 'checked' : ''} ${wechatChannelBusy ? 'disabled' : ''}>
+    <span><b>${esc(c.label)}</b>${c.hint ? `<small>${esc(c.hint)}</small>` : ''}</span></label>`).join('');
+}
+
+async function loadWechatChannels() {
+  const msg = $('wechat-channel-msg');
+  try {
+    // 每次打开都重新核对一次服务端：这是个全局单值，另一个页面、CLI、API 都改得动，
+    // 吃缓存的话单选按钮会指着一个和落盘值相反的通道。
+    const applied = await loadPipeChannels(true);
+    // 这次核对被更新的通道状态作废了（最常见的是核对还没回来、用户已经在这个弹窗里存过
+    // 一次）：那句「已切换到…」才是最新的事实，别拿一次过期的核对把它清掉。
+    if (applied !== false) msg.textContent = '';
+    renderWechatChannels();
+  } catch (error) {
+    $('wechat-channels').innerHTML = '';
+    msg.textContent = '读取采集通道失败：' + error.message;
+  }
+}
+
+async function changeWechatChannel(id) {
+  if (wechatChannelBusy || !id || id === pipeWechat.selected) return;
+  wechatChannelBusy = true;
+  $('wechat-channel-msg').textContent = '正在保存…';
+  renderWechatChannels();
+  try {
+    await saveWechatChannel(id);
+    $('wechat-channel-msg').textContent = `已切换到「${channelLabel(pipeWechat.selected)}」，下次同步按它采集。`;
+    refreshPipeSource();          // 顶部那块「来源状态」问的是另一条通道了
+    initTargets();
+  } catch (error) {
+    $('wechat-channel-msg').textContent = '未能切换通道：' + error.message;
+  } finally {
+    wechatChannelBusy = false;
+    // 按 pipeWechat.selected 重画：保存失败时它没变，单选按钮也就拨回原来那条
+    // —— 留在用户点的那一项上等于谎报保存成功。
+    renderWechatChannels();
+  }
+}
+
+$('wechat-channels').addEventListener('change', e => {
+  const input = e.target.closest('input[name=wechat-channel]');
+  if (input) changeWechatChannel(input.value);
+});
+
+// 通道换过了（可能是别的页面换的，storage 事件那条路）：弹窗正开着时把单选按钮也
+// 拨过去，别让它停在一条已经不生效的通道上。
+document.addEventListener('kb:channels-changed', () => {
+  if ($('wechat-modal').style.display !== 'none') renderWechatChannels();
+});
+
 function closeWechatSetup() { $('wechat-modal').style.display = 'none'; }
 function dismissWechatWelcome() {
   $('wechat-welcome').hidden = true;
@@ -114,7 +176,10 @@ async function startWechatSetup(action = 'connect') {
 
 async function useLocalWechat() {
   try {
-    await loadPipeChannels();
+    // 重新核对：缓存里那份可能已经被别处改过，陈旧的 selected 会让下面那句直接短路。
+    await loadPipeChannels(true);
+    await saveWechatChannel('wechat_local');   // 接入完成了，采集通道就定在本机这条
+    renderWechatChannels();
     await changePipeChannel('wechat_local');
     selectRunChannel('wechat_local');   // 下一次新建同步默认就抓本机这条通道
     closeWechatSetup(); switchTab('pipe');

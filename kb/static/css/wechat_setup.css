@@ -8,6 +8,14 @@
 .wechat-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
 .wechat-heading h2 { font: 700 24px/1.4 var(--font-display); margin: 5px 0 10px; }
 .wechat-heading .eyebrow { font-size: 10px; letter-spacing: .13em; color: var(--muted); }
+/* 采集通道:绿泡泡两条通道互斥,选择落在这里(见 kb.collectors.wechat_channel)。
+   复用同步中心那组来源卡片的样式,免得同一个东西在两处长得不一样。 */
+.wechat-channel-picker { margin-top: 18px; }
+.wechat-channel-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.wechat-channel-head strong { font-size: 14px; }
+.wechat-channel-head small { color: var(--muted); font-size: 12px; }
+#wechat-channel-msg:empty { display: none; }
+#wechat-channel-msg { margin-top: 2px; }
 .wechat-steps { list-style: none; padding: 0; margin: 20px 0; border-top: 1px solid var(--line); }
 .wechat-steps li { display: flex; gap: 14px; align-items: center; padding: 13px 0; border-bottom: 1px solid var(--line); }
 .wechat-step-number { font: 12px var(--font-mono); color: var(--muted); }

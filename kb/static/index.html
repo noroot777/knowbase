@@ -485,6 +485,11 @@
 <div id="wechat-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeWechatSetup()">
   <div class="modal wechat-dialog">
     <div class="wechat-heading"><div><h2 id="wechat-title">接入你的绿泡泡</h2><p class="hint" id="wechat-intro">从本机已同步的公众号推送中发现文章，收进知识库。</p></div><button class="icon-button" onclick="closeWechatSetup()" aria-label="关闭绿泡泡接入">×</button></div>
+    <section class="wechat-channel-picker" aria-label="公众号采集通道">
+      <div class="wechat-channel-head"><strong>采集通道</strong><small>两条通道抓的是同一批公众号，只能选一条；换通道不影响已收录的文章</small></div>
+      <div id="wechat-channels" class="pipe-channel-list" role="radiogroup" aria-label="公众号采集通道"></div>
+      <p id="wechat-channel-msg" class="hint" role="status"></p>
+    </section>
     <ol class="wechat-steps">
       <li><span class="wechat-step-number">01</span><div><strong>配置供应商</strong><small id="wechat-provider-state">待检查</small></div><button class="ghost" onclick="wechatConfigured(openKeys, 'keys-modal')">API Key</button></li>
       <li><span class="wechat-step-number">02</span><div><strong>分配模型与智能体</strong><small id="wechat-model-state">待检查</small></div><button class="ghost" onclick="wechatConfigured(openStages, 'stages-modal')">模型配置</button></li>

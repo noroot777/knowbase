@@ -61,10 +61,10 @@ def _channel_labels() -> dict[str, str]:
 
 
 def default_channels() -> list[str]:
-    """默认同步范围:微信默认通道 + 全部订阅类来源。
+    """默认同步范围:设置里选中的那条绿泡泡通道 + 全部订阅类来源。
 
-    微信两条通道(凭证/本地库)是同一批内容的两条路,默认只走当前生效的那条;
-    两条都勾上只会把同一批公众号抓两遍。
+    绿泡泡两条通道(凭证/本地库)是同一批内容的两条路,互斥,选哪条在设置里定
+    (见 kb.collectors.wechat_channel);两条都抓只会把同一批公众号抓两遍。
     """
     from kb.collectors import active_collector
     from kb.source_types import feed_types
@@ -97,9 +97,12 @@ def _raw_settings() -> dict:
 
 
 def load_settings() -> dict:
+    from kb.collectors import known_channels
     d = _raw_settings()
     known = _channel_labels()
-    channels = [c for c in d['channels'] if c in known]
+    # known_channels 先把存量里的绿泡泡通道带到当前设置上:设置换了一条之后,
+    # 盘上那个旧名字不能被当成"不认识的通道"丢掉——丢掉等于公众号从此不进日报。
+    channels = [c for c in known_channels(d['channels']) if c in known]
     # 通道被删掉/改名之后,存下来的那份可能一个都不认识了。回落到默认范围,
     # 而不是留一份空列表——那会让定时日报每天都跑出"一个来源都没同步"。
     return {**d, 'channels': channels or [c for c in default_channels() if c in known]}
@@ -111,8 +114,9 @@ def save_settings(enabled: bool, time_str: str, channels: list[str] | None = Non
         raise ValueError(f'时间格式应为 HH:MM,收到 {time_str!r}')
     if not 1 <= int(first_days) <= 7:
         raise ValueError('第一份日报的回溯天数须在 1 到 7 天之间')
+    from kb.collectors import known_channels
     known = _channel_labels()
-    picked = [c for c in (channels or []) if c in known]
+    picked = [c for c in known_channels(channels or []) if c in known]
     if channels and not picked:
         raise ValueError('同步范围里没有一个可用的来源通道')
     with _lock:
@@ -423,10 +427,11 @@ def start(since: datetime | None = None, until: datetime | None = None,
     那一跳的日期(定时专用):这一轮的成败要记回那一天,而不是记在收尾时刻
     所在的那一天——同步跨过零点的话两者差一天,记错会把明天那一跳也吃掉。
     """
+    from kb.collectors import known_channels
     settings = load_settings()
     known = _channel_labels()
-    picked = [c for c in (channels if channels is not None else settings['channels'])
-              if c in known]
+    picked = [c for c in known_channels(
+        channels if channels is not None else settings['channels']) if c in known]
     if since and until and since >= until:
         raise ValueError('日报的起始时刻必须早于截止时刻')
     # 勾了"先同步"却一个来源都没选,同步阶段会静静地什么都不做,面板上仍旧
