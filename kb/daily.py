@@ -267,7 +267,7 @@ def _link_refs(body: str, shown: list[dict]) -> str:
     超出范围的)或那条素材没有 url 时原样留着,不编一个链接出来。
 
     代码和已有链接里的数字方括号不是出处,改了就是把别人的正文改坏 ——
-    哪些片段不许动由 `kb.daily_refs` 按 markdown 的构造扫出来。
+    换不换由 `kb.daily_refs` 渲染一遍裁决,那边不写「哪些片段不许动」的规则。
     """
     links = {}
     for i, d in enumerate(shown, 1):

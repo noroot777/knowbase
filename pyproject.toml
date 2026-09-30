@@ -17,6 +17,9 @@ dependencies = [
     "httpx>=0.28",
     "feedparser>=6.0",
     "beautifulsoup4>=4.12",
+    # 日报正文加出处链接时按 CommonMark 渲染一遍做裁决(kb/daily_refs.py)。
+    # 原来只是 rich 的传递依赖,那条链断了这里就崩,所以显式列出来。
+    "markdown-it-py>=3.0",
 ]
 
 [project.scripts]

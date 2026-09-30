@@ -1,27 +1,35 @@
 """正文出处编号换成链接时,别把日报原文改坏(`kb/daily_refs.py`)。
 
-这段替换写进**文件**,页面、复制全文、Obsidian 一起受影响。2026-09-30 连着两轮
-审查各抓出一批合法 markdown 写法被改坏:第 1 轮是行内代码和已有链接的文字,
+这段替换写进**文件**,页面、复制全文、Obsidian 一起受影响。2026-09-30 连着三轮
+审查各抓出一批合法 markdown 写法被改坏:第 1 轮是行内代码和已有链接的文字;
 第 2 轮是跨行代码跨度、单引号标题、引用式链接、两层嵌套的括号目标,外加多层围栏
-认错开闭。这里逐个钉住 —— 判据统一是「原文那一段逐字还在,而句末那个出处确实
-变成了链接」,两半缺一不可:只验前半句的话,一个什么都不替换的实现也能全绿。
+认错开闭;第 3 轮是多行定义、引用段里的定义、原始 HTML 的 `<a>` 与 `<code>`、
+独立缩进代码块、autolink 的地址。前两轮各补一批手写规则,第三轮证明这条路没有
+终点,于是改成**每次替换渲染一遍、由渲染器裁决**。
+
+判据统一是「原文那一段逐字还在,而它后面那个出处确实变成了链接」,两半缺一不可:
+只验前半句的话,一个什么都不替换的实现也能全绿 —— 而"保护得过宽"和"改坏原文"
+一样是错的,该链接的出处漏掉,用户看到的还是一串对不上号的数字。
 """
 import unittest
 
-from kb.daily_refs import link_refs, protected_spans
+from kb.daily_refs import link_refs
 
 LINKS = {'1': '[\\[1\\]](<https://e.org/a> "甲文")',
          '2': '[\\[2\\]](<https://e.org/b> "乙文")'}
 
 
-class KeepsOriginalMarkdown(unittest.TestCase):
+class Keeps(unittest.TestCase):
+    """基类:原样保留 original,而它后面那句出处照样变成链接。"""
+
     def keeps(self, original: str, note: str = ''):
-        """原样保留 original,而它后面那句出处照样变成链接。"""
         out = link_refs(original + '\n\n出处 [1]。', LINKS)
         self.assertIn(original, out, note or original)
         self.assertIn('出处 ' + LINKS['1'] + '。', out, note or original)
         return out
 
+
+class CodeStaysCode(Keeps):
     def test_inline_code(self):
         self.keeps('使用示例 `items[1]` 原样保留。')
 
@@ -34,6 +42,20 @@ class KeepsOriginalMarkdown(unittest.TestCase):
         # N 个反引号由**恰好** N 个关闭,中间那对单反引号不算结束
         self.keeps('多反引号 ``code `x` items[1]`` 也不动。')
 
+    def test_raw_html_code(self):
+        # 第 3 轮:`<code>` 是用 HTML 直接写的,markdown 那层看不出它是代码,
+        # 可渲染出来的页面里就是一段代码 —— 实测里面被插进了一条 <a>
+        self.keeps('使用示例 <code>items[1]</code>。')
+
+    def test_standalone_indented_code_block(self):
+        # 第 3 轮:空行后四空格缩进是独立代码块
+        self.keeps('使用示例:\n\n    items[1]')
+
+    def test_code_span_inside_link_text(self):
+        self.keeps('[见 `a[1]` 的说明](https://e.org/keep)')
+
+
+class LinksStayWhole(Keeps):
     def test_link_with_double_quoted_title(self):
         self.keeps('[版本 [1]](https://e.org/keep "产品说明")')
 
@@ -61,22 +83,37 @@ class KeepsOriginalMarkdown(unittest.TestCase):
     def test_shortcut_reference_link(self):
         self.keeps('[产品说明]\n\n[产品说明]: https://e.org/reference')
 
+    def test_reference_destination_on_next_line(self):
+        # 第 3 轮:定义的目标可以另起一行
+        self.keeps('[产品 [1]][p]\n\n[p]:\n  https://e.org/keep')
+
+    def test_reference_definition_in_blockquote(self):
+        # 第 3 轮:引用段里的定义照样在全篇生效
+        self.keeps('> [p]: https://e.org/keep\n\n[产品 [1]][p]')
+
+    def test_autolink_destination(self):
+        # 第 3 轮:autolink 的地址就是它的文字,改了文字就是改了跳转目标
+        # (实测 href 从 %5B1%5D 变成 %5B%5C%5B1%5C%5D%5D)
+        self.keeps('已有地址 <https://e.org/path/[1]>。')
+
+    def test_raw_html_link(self):
+        # 第 3 轮:HTML 直接写的链接。链接套链接在 HTML 里非法,浏览器会把内层
+        # 提升成兄弟 —— 原来那条的文字被切掉一截,点 [1] 跳到素材而不是产品页。
+        self.keeps('<a href="https://e.org/keep">版本 [1]</a>')
+
     def test_image_alt_text(self):
         self.keeps('![封面 [1]](https://e.org/cover.png)')
 
     def test_nested_image_inside_link(self):
         self.keeps('[![封面 [1]](https://e.org/c.png)](https://e.org/keep)')
 
-    def test_code_span_inside_link_text(self):
-        self.keeps('[见 `a[1]` 的说明](https://e.org/keep)')
+    def test_a_number_that_is_already_a_link_is_not_nested(self):
+        self.assertEqual('已是链接 [1](http://x) 不动。',
+                         link_refs('已是链接 [1](http://x) 不动。', LINKS))
 
 
-class MatchesTheRenderer(unittest.TestCase):
-    """和渲染器(CommonMark)同一套口径 —— 这几条都拿 markdown-it 核对过。
-
-    保护得过宽和过窄一样是错的:该链接的出处漏掉,用户看到的还是一串对不上号的
-    数字,而那正是这件事要解决的问题。
-    """
+class MatchesTheRenderer(Keeps):
+    """和渲染器(CommonMark)同一套口径 —— 这几条都拿 markdown-it 核对过。"""
 
     def test_a_numeric_definition_makes_the_citation_a_link_already(self):
         # `[1]: url` 是一条链接引用定义,之后正文里的 [1] 本身就渲染成链接了 ——
@@ -93,12 +130,28 @@ class MatchesTheRenderer(unittest.TestCase):
     def test_link_text_may_hold_brackets(self):
         # 反过来,链接**文字**允许嵌套方括号 —— `[产品 [1]][product]` 是一条完整
         # 的引用式链接(整段不许动)
-        self.keeps_pair('[产品 [1]][product]\n\n[product]: https://e.org/reference')
+        self.keeps('[产品 [1]][product]\n\n[product]: https://e.org/reference')
 
-    def keeps_pair(self, original: str):
-        out = link_refs(original + '\n\n出处 [1]。', LINKS)
-        self.assertIn(original, out)
-        self.assertIn('出处 ' + LINKS['1'] + '。', out)
+    def test_a_line_that_only_looks_like_a_definition(self):
+        # 冒号后面跟着目标**再跟一段文字**的不是定义,那个 [1] 就是个普通出处 ——
+        # 照定义登记下来的话这一条永远漏链接。
+        out = link_refs('[1]: https://e.org/x 多余文字\n\n出处 [1]。', LINKS)
+        self.assertEqual(2, out.count(LINKS['1']), out)
+
+    def test_a_definition_inside_a_code_span_is_not_a_definition(self):
+        # 代码里那行长得像定义,可它是代码 —— 既不该改它,也不该让它影响别处
+        out = self.keeps('`[1]: https://e.org/keep`')
+        self.assertNotIn('e.org/keep>', out)
+
+    def test_escaped_bracket_stays_plain_text(self):
+        # `\[1]` 渲染出来是字面的 [1],不是可替换的出处:换了只会得到一串
+        # 谁也点不动的 `[[1]](…)` 字面量
+        self.assertEqual('单边转义 \\[1] 原样。',
+                         link_refs('单边转义 \\[1] 原样。', LINKS))
+
+    def test_html_block_is_left_alone(self):
+        # HTML 块内部不解析 markdown,塞一条链接进去只会得到一行字面量
+        self.keeps('<div>\n[1]\n</div>')
 
 
 class Fences(unittest.TestCase):
@@ -140,39 +193,29 @@ class StillLinksTheRealCitations(unittest.TestCase):
         self.assertEqual('第九条 [9],年份 [2026]。',
                          link_refs('第九条 [9],年份 [2026]。', LINKS))
 
-    def test_a_number_that_is_already_a_link_is_not_nested(self):
-        self.assertEqual('已是链接 [1](http://x) 不动。',
-                         link_refs('已是链接 [1](http://x) 不动。', LINKS))
-
     def test_a_lone_backtick_does_not_swallow_the_rest(self):
         # 代码跨度不跨空行:落单的反引号只是个普通字符,后面段落的出处照样加链接
         out = link_refs('一个反引号 ` 落单。\n\n出处 [1]。', LINKS)
         self.assertIn('出处 ' + LINKS['1'] + '。', out)
 
     def test_indented_continuation_lines_still_get_links(self):
-        # 故意不认「四空格缩进 = 代码块」:日报正文以列表为主,列表项续行本来就
-        # 缩进四格,按代码块保护会让那些行的出处全部漏掉。
+        # 日报正文以列表为主,列表项续行本来就缩进四格 —— 那是段落,不是代码块,
+        # 按缩进一刀切会让这些行的出处全部漏掉。和上面那条独立缩进代码块成对看。
         out = link_refs('- 一条\n    续行里的出处 [1]。', LINKS)
         self.assertIn('续行里的出处 ' + LINKS['1'] + '。', out)
+
+    def test_every_citation_in_a_long_body_gets_linked(self):
+        # 逐个候选各判各的:一处被拒不该带累其它
+        body = '\n\n'.join(['`a[1]`'] + [f'第 {i} 句 [1]。' for i in range(12)])
+        out = link_refs(body, LINKS)
+        self.assertIn('`a[1]`', out)
+        self.assertEqual(12, out.count(LINKS['1']), out)
 
     def test_no_links_means_no_change(self):
         self.assertEqual('出处 [1]。', link_refs('出处 [1]。', {}))
 
     def test_a_group_with_no_match_is_left_alone(self):
         self.assertEqual('区间 [7、8]。', link_refs('区间 [7、8]。', LINKS))
-
-
-class ProtectedSpans(unittest.TestCase):
-    def test_spans_are_sorted_and_disjoint(self):
-        body = ('`code[1]` 和 [文字 [1]](https://e.org/k "t") 和 ![图 [1]](https://e.org/i.png)\n'
-                '```\n围栏 [1]\n```\n[p]: https://e.org/p\n')
-        spans = protected_spans(body)
-        self.assertTrue(spans)
-        for (a, b), (c, d) in zip(spans, spans[1:]):
-            self.assertLessEqual(b, c, f'{(a, b)} 和 {(c, d)} 重叠或没排序')
-
-    def test_a_plain_citation_is_not_protected(self):
-        self.assertEqual([], protected_spans('正文里的出处 [1]。'))
 
 
 if __name__ == '__main__':
