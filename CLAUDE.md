@@ -788,6 +788,21 @@
   关系全靠位置猜。焦点同理只画一条:`.chat-inputbar:has(#chat-input:focus-visible)`
   画 border + 内描边,`#chat-input` 得显式 `box-shadow: none` 压掉 base.css 那条
   `textarea:focus-visible`(和 `#q`/`#g-q` 那两个容器画边的搜索框是同一套写法)。
+- **问答面板的高度按可用空间算,不许再写 `calc(100dvh - N)`。** 那个 N 是照
+  「页头上面还有多少东西」量出来的,页头一变就错:`#wechat-welcome` 这条首次配置
+  横幅(88.6px + 24px 下边距)不在估算里,首次配置没做完时输入区整块掉出首屏,
+  模型下拉和发送按钮都得往下滚才看得见(三档断点上原本各写一个 96/162/175)。
+  现在是 `body.chat-mode #main-content` 锁在 `calc(100dvh - var(--topbar-h))`
+  并改成 flex 列,`#askpanel` 与 `.chat-layout` 各用 `flex: 1` 逐层吃掉剩余;
+  `--topbar-h` 在 navigation.css 里定义(宽屏 0、≤900px 56px),别再各写一个 56。
+  **`#askpanel` 上那句 `min-height: 0` 不能省**:flex 项的自动最小尺寸按内容算,
+  一段长对话会把面板顶到几千像素高,`#chat-msgs` 那条 `overflow-y: auto` 就再没
+  机会滚动、输入区被推到页面最底下 —— 空库看不出来,得有真对话才暴露。
+  `width: 100%` 同理不能省:`#main-content > div` 那条 `margin: 0 auto` 让 flex 项
+  放弃 stretch,不给宽度就塌成 fit-content。地板由 `.chat-layout` 的 `min-height`
+  管,窗口太矮时宁可整页滚,不要把对话框压成一条缝。回归在
+  `tests/test_chat_height.py`(真页面 + 无头 Chrome,四档视口 × 横幅在/关,
+  另外塞 4000px 的假对话钉住「消息区内部滚动」)。
 - **禁止用原生 `alert` / `confirm` / `prompt`**,系统弹窗跟本项目的瓷白×墨蓝黑调子完全不搭,还阻塞主线程。
 - 统一走 `kb/static/js/ui.js` 三个出口:
   - `toast(text, {type: err|ok|info, detail})` — 一次性操作反馈(失败/成功),右下浮起,自动消失。

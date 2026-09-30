@@ -100,7 +100,35 @@ h1 { font-family: var(--font-display); font-size: 19px; font-weight: 900; letter
 .search-count { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
 #chat-history-toggle { display: none; }
 body.chat-mode { padding-bottom: 0; }
-.chat-layout { height: calc(100dvh - 96px); min-height: 490px; gap: 22px; }
+/* ── 问答面板撑满可用高度 ──────────────────────────────────────
+   别再按「上面还有多少东西」估高度:三档断点上原本各写一个
+   calc(100dvh - 96/162/175px),而那几个数是照着当时的页头量出来的 ——
+   首次配置横幅(#wechat-welcome)出现时它不在估算里(88.6px + 24px 下边距),
+   输入区整块被顶出首屏,模型下拉和发送按钮都看不见。
+   改成让 #main-content 在 chat 模式下自己锁在可用视口高度上、变成 flex 列,
+   #askpanel 吃掉页头之外的全部剩余,.chat-layout 再吃掉它的剩余:横幅在与
+   不在、页头折成几行,都不用再改任何数字。 */
+body.chat-mode #main-content {
+  display: flex; flex-direction: column;
+  height: calc(100dvh - var(--topbar-h));
+  /* 上面那两条 min-height 都是 100vh 起算的:移动端地址栏露出时 100vh > 100dvh,
+     留着它就把这个盒子重新顶高,输入区又掉到首屏外。地板由 .chat-layout 自己管。 */
+  min-height: 0;
+}
+/* 横幅按内容高度占位,不许被 flex 压缩(它的自动最小尺寸能兜住,写明更保险) */
+body.chat-mode #wechat-welcome { flex-shrink: 0; }
+/* 两条都少不了:
+   ① width —— flex 项一旦有 auto 的横向外边距就放弃 stretch,宽度会塌成
+      fit-content(#main-content > div 那条规则正是 margin: 0 auto),所以横向
+      尺寸得显式给足,再靠 max-width + auto 边距居中,和别的 tab 逐像素一致;
+   ② min-height: 0 —— flex 项的自动最小尺寸按内容算,一段长对话会把这个盒子
+      顶到几千像素高,#chat-msgs 那条 overflow-y: auto 就再没机会滚动、输入区
+      被推到页面最底下(高度写死的时候正是这一点把它盖住了)。地板交给
+      .chat-layout 的 min-height:窗口太矮时宁可整页滚。 */
+body.chat-mode #askpanel { display: flex; flex-direction: column; width: 100%; flex: 1; min-height: 0; }
+/* 高度来自父级剩余空间;min-height 只是地板(窗口太矮时宁可整页滚,不要把
+   对话框压成一条缝),不再承担「估算上方高度」的职责。 */
+.chat-layout { flex: 1; min-height: 490px; gap: 22px; }
 .chat-side { width: 192px; }
 .chat-main { border-radius: 12px; }
 .chat-empty { padding: 55px 22px 20px; }
@@ -157,10 +185,9 @@ body.overlay-open { overflow: hidden; }
   .gseg button { padding: 5px 8px; }
 }
 @media (max-width: 900px) {
-  #main-content { margin-left: 0; min-height: calc(100vh - 56px); }
+  #main-content { margin-left: 0; min-height: calc(100vh - var(--topbar-h)); }
   .ask-invitation { display: none; }
   .chat-side { width: 150px; }
-  .chat-layout { height: calc(100dvh - 162px); }
   .fav-tools { margin-left: 0; }
   .stage-row { grid-template-columns: 1fr; }
 }
@@ -196,7 +223,7 @@ body.overlay-open { overflow: hidden; }
   .compact-heading { flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
   .compact-heading > span { display: none; }
   #chat-history-toggle { display: block; margin-left: auto; font-size: 11px; }
-  .chat-layout { flex-direction: column; height: calc(100dvh - 175px); min-height: 520px; gap: 12px; }
+  .chat-layout { flex-direction: column; min-height: 520px; gap: 12px; }
   .chat-side { width: 100%; max-height: 185px; }
   #chat-new { width: auto; align-self: flex-start; padding: 8px 16px; }
   #chat-convs { display: none; }

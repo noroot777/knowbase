@@ -114,7 +114,9 @@ code.fav-cmd:hover { background: var(--ink); }
 /* ── 问答面板 ── */
 /* chat 模式只收窄底部留白给聊天区让高度,宽度与其他 tab 一致,切换不跳动 */
 body.chat-mode { padding-bottom: 28px; }
-.chat-layout { display: flex; gap: 12px; height: calc(100vh - 140px); min-height: 430px; }
+/* 高度由父级(chat 模式下的 #askpanel,见 workspace.css)按剩余空间给,
+   这里不写固定高度 —— 照「上面还有多少东西」估的数字一遇到页头变化就错。 */
+.chat-layout { display: flex; gap: 12px; flex: 1; min-height: 430px; }
 
 .chat-side { width: 180px; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px; }
 #chat-new { width: 100%; padding: 10px 0; border-radius: 12px; font-size: 13.5px; }
@@ -213,7 +215,7 @@ body.chat-mode { padding-bottom: 28px; }
 .cite:hover { background: var(--accent-soft); text-decoration: underline; }
 
 @media (max-width: 640px) {
-  .chat-layout { flex-direction: column; height: auto; }
+  .chat-layout { flex-direction: column; }
   .chat-side { width: 100%; max-height: 160px; }
   .chat-main { min-height: 60vh; }
 }
