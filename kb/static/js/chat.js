@@ -103,7 +103,9 @@ function autoGrowChat() {
 // 输入框内外边距和行间 gap、横幅留白),它给不出卡片本身的高度;卡片仍装不下一行
 // 输入区时才上第二级,让页头那两处留白退让(主内容上下内边距、标题行下边距);
 // 还不够就上第三级,让首次配置横幅按回一行(≤600 时它默认折行,一个人吃掉 114.59px);
-// 再不够就上第四级,把横幅那句说明文字收起(标题和两个按钮都留着)。
+// 再不够就上第四级,把横幅那句说明文字收起(标题和两个按钮都留着);最后一级把
+// 模型下拉压窄,让它和发送按钮回到同一行(长模型名把下拉撑到 240px 时它们会分两行,
+// 输入区从 82 涨到 112px)。
 // 不逐级的话就是 600×360 那个形态:卡片 57.95px、输入区一行要 82px,差的 24px
 // 卡片里根本没有 —— 文本域被 `overflow: hidden` 从**上边**裁掉(只剩下缘 9px),
 // 聚焦还把卡片内部滚到底(`scrollTop=36`),点写字的地方打到的是 `#main-content`,
@@ -113,7 +115,8 @@ function autoGrowChat() {
 // 现读(竖排那档的 `.chat-layout` gap、第二级的页头留白都跟着 class 变),两边口径
 // 一致。同步改完就恢复原值,中间不会有一帧被画出来,ResizeObserver 也不会为
 // 「改了又改回去」的同一个尺寸发通知。
-const CHAT_TIGHT = ['chat-tight', 'chat-tight-2', 'chat-tight-3', 'chat-tight-4'];
+const CHAT_TIGHT = ['chat-tight', 'chat-tight-2', 'chat-tight-3', 'chat-tight-4',
+                    'chat-tight-5'];
 
 function fitChatTight(t) {
   const bar = t.closest('.chat-inputbar');
@@ -133,15 +136,21 @@ function fitChatTight(t) {
   const prev = t.style.height;
   t.style.height = CHAT_INPUT_MIN + 'px';
   for (const lvl of CHAT_TIGHT) {
-    const room = card.clientHeight;
-    if (chatBarNeed(bar) <= room) break;
+    const gap = chatBarNeed(bar) - card.clientHeight;
+    if (gap <= 0) break;
     cls.add(lvl);
     // **这一级白加就当场退回去**:同一条规则在不同窗口上效果是反的 —— 横幅按回
     // 一行在 568 宽上省掉整整 46px,在 320 那种真窄屏上两个 `flex-shrink: 0` 的
     // 按钮会把文字压成一条细柱,横幅反而从 136.7 长到 230.1px(复审第 2 轮实测)。
     // 「哪一级对哪个窗口有用」不是一个宽度断点能回答的,所以每一级都按**实际
-    // 占位**验一次,没换来卡片高度就摘掉,再试下一级。
-    if (card.clientHeight <= room) cls.remove(lvl);
+    // 占位**验一次,没换来余量就摘掉,再试下一级。
+    // **「有没有用」要比缺口,不能只比卡片高度**:第一级收的全是卡片**里面**那点
+    // 空隙,它按定义不会让卡片外高变化 —— 只比卡片高度就把它一律判成无效。关掉
+    // 横幅的 812×200 上实测:第一级把最小需求从 144 压到 92px,却被摘掉,于是二级
+    // 把余量抬到 103px 之后需求又回到 144,四级走完还差 29px,输入框下沿和发送
+    // 按钮重新被裁(2026-09-30 复审第 5 轮发现)。缺口 = 需求 - 余量,两头哪边
+    // 变好都算数。
+    if (chatBarNeed(bar) - card.clientHeight >= gap) cls.remove(lvl);
   }
   t.style.height = prev;
 }

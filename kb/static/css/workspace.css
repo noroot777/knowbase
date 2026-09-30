@@ -329,6 +329,19 @@ body.chat-tight-4 #wechat-welcome strong { font-size: 13px; }
 body.chat-tight-4 #main-content { padding-top: 0; padding-bottom: 0; }
 body.chat-tight-4 .compact-heading { margin-bottom: 0; }
 
+/* ── 第五级:模型下拉和发送按钮回到同一行(body.chat-tight-5)────────────────
+   `#ask-model` 的宽度跟着最长的那个选项走(`max-width: 240px`),长模型名一到就把
+   它撑满 —— 320 宽的输入框里放不下「240px 下拉 + 发送按钮」,`flex-wrap` 于是把
+   发送挤到第三行,输入区从 82px 涨到 112px、最小占地从 92 涨到 122px,而卡片只有
+   92px:文本域被从**上边**裁掉(只剩下缘 15px),点中心打到 `#main-content`、字一个
+   也进不去;先写好字再放行模型列表则是发送按钮下沿掉到 341.72 / 视口 320
+   (2026-09-30 复审第 5 轮实测 320×320)。
+   `flex-basis: 0` 是关键:折行是按 flex 基准尺寸决定的,只给 `min-width: 0` /
+   `flex-shrink` 不管用(收缩发生在折行**之后**)。基准归零之后下拉和发送必然同行,
+   下拉再 grow 去吃掉发送剩下的宽度,长名字由原生 select 自己截断。
+   **只在真的走到这一级时才压**:常规窗口上下拉照旧显示完整模型名。 */
+body.chat-tight-5 #ask-model { flex: 1 1 0; min-width: 0; max-width: none; }
+
 /* 历史栏在 ≤760 是竖排、跟输入区抢高度,这里把它和卡片之间的间距也收掉。
    **只在竖排时收** —— >760 时那个 gap 是横排的水平间距,收了不省任何高度,
    反而让历史栏贴着卡片。同理别给 `.chat-side` 压 max-height:折叠态那一条

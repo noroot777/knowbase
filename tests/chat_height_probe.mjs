@@ -119,6 +119,22 @@ const VIEWPORTS = [
   // 更糟(第三级自己退回去),同样得靠第四级。
   { w: 480, h: 320, name: "矮横屏 480x320" },
   { w: 320, h: 360, name: "窄矮屏 320x360" },
+  // 整套里最紧的一格:长模型名把下拉撑到 240px,320 宽的框里放不下「下拉 + 发送」,
+  // flex-wrap 把发送挤到第三行 —— 输入区 82 → 112px、最小占地 92 → 122px,而卡片
+  // 只有 92px,文本域被从上边裁掉(只剩下缘 15px)、点中心打到 #main-content
+  // (2026-09-30 复审第 5 轮实测)。第五级就是为这一格存在的。
+  { w: 320, h: 320, name: "窄矮屏 320x320" },
+  // 带横幅能撑住的最矮一档横屏(四级收完卡片 99px / 需求 92px)。
+  { w: 812, h: 240, name: "极矮横屏 812x240" },
+  // **只测关掉横幅**的 812×200:第一级收的全是卡片里面那点空隙,按定义不改卡片
+  // 外高 —— 「没换来卡片高度就摘掉」于是把它一律判成无效,最小需求从 92 退回
+  // 144px,四级走完仍差 29px,输入框下沿和发送按钮重新被裁(2026-09-30 复审第 5
+  // 轮实测:发送底边 204.59 / 视口 200)。复现步骤本来就是「先点稍后配置再缩窗口」。
+  // **横幅那一半在这个高度上物理放不下**:200 - 56(顶栏)= 144,四级收完的横幅
+  // 连边距 56px、标题 26.6px,剩 61.4px 而一行输入区要 92px —— 把标题整行拿掉也
+  // 只有 85.6px。能退的都退完还是不够时,如实标出来比挑一条控件藏掉强
+  // (≥901 宽没有顶栏,同样 200 高就放得下,实测 1280×200 卡片 115px)。
+  { w: 812, h: 200, name: "极矮横屏 812x200", banners: [false] },
   // 旧的 max-height: 520 阈值两侧:520 好好的、521 恢复常规留白就被裁,
   // 540/550 同样被裁 —— 所以这几档一起钉,防的是「换一个固定阈值」那种修法。
   { w: 375, h: 520, name: "小手机 375x520" },
@@ -206,6 +222,7 @@ const measure = `(() => {
     tight2: document.body.classList.contains('chat-tight-2'),
     tight3: document.body.classList.contains('chat-tight-3'),
     tight4: document.body.classList.contains('chat-tight-4'),
+    tight5: document.body.classList.contains('chat-tight-5'),
     // 第三/四级把「首次配置」这块往回收,但**它本身必须还完整可用**:
     // 标题在、两个按钮都在、都点得到。收的是那句解释性说明,不是功能。
     bannerOk: (() => {
@@ -218,7 +235,8 @@ const measure = `(() => {
   };
 })()`;
 
-const tierOf = m => m.tight4 ? "四级" : m.tight3 ? "三级" : m.tight2 ? "二级" : m.tight ? "一级" : "否";
+const tierOf = m => m.tight5 ? "五级" : m.tight4 ? "四级" : m.tight3 ? "三级"
+                 : m.tight2 ? "二级" : m.tight ? "一级" : "否";
 
 // 12 行 —— 够顶到 150px 那个舒适上限,正是审查复现出问题的输入量。
 const LONG_TEXT = Array.from({ length: 12 }, (_, i) => `第${i + 1}行输入内容测试`).join("\n");
@@ -320,7 +338,9 @@ async function probe(vp, banner, history) {
   await typeIntoInput("");
 
   // 最紧的那几档再真点一次:几何全过也可能点不进字(见 clickAndType 的注释)。
-  if (vp.h <= 520 && banner) await clickAndType(tag, "点击后输入的测试问题");
+  // **横幅关掉的那一半也要点**:812×200 那条裁切正是「点了稍后配置之后」才发作的,
+  // 只在带横幅时真点会整条漏掉(2026-09-30 复审第 5 轮)。
+  if (vp.h <= 520) await clickAndType(tag, "点击后输入的测试问题");
 }
 
 // ── 模型选项异步到达 ────────────────────────────────────────────────────────
@@ -351,7 +371,7 @@ await sleep(150);
 for (const vp of VIEWPORTS) {
   await send("Emulation.setDeviceMetricsOverride",
              { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.w <= HISTORY_BREAKPOINT });
-  for (const banner of [true, false]) {
+  for (const banner of vp.banners || [true, false]) {
     await probe(vp, banner, false);
     // 历史栏只有竖排断点上才收起/展开,宽屏它一直在
     if (vp.w <= HISTORY_BREAKPOINT) await probe(vp, banner, true);
@@ -367,7 +387,10 @@ for (const vp of VIEWPORTS) {
 // 卡片仍差十几像素(2026-09-30 复审第 2 轮实测 375×521:发送底边 514.47 / 裁剪线
 // 500,滚页面也补不回来)。所以这一格按视口循环,而不是再钉一个固定高度。
 for (const vp of [{ w: 375, h: 667 }, { w: 375, h: 521 }, { w: 375, h: 540 },
-                  { w: 375, h: 550 }, { w: 320, h: 520 }, { w: 640, h: 360 }]) {
+                  { w: 375, h: 550 }, { w: 320, h: 520 }, { w: 640, h: 360 },
+                  // 先写好字、模型列表后到的那条真实顺序:320×320 上原来是发送按钮
+                  // 下沿掉到 341.72 / 视口 320,滚页面也回不来(复审第 5 轮)。
+                  { w: 320, h: 320 }]) {
   const tag = `模型选项异步到达 ${vp.w}x${vp.h}`;
   await send("Emulation.setDeviceMetricsOverride",
              { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: true });
@@ -406,7 +429,12 @@ for (const vp of [{ w: 375, h: 667 }, { w: 375, h: 521 }, { w: 375, h: 540 },
   check(`${tag}:输入区完整在首屏内`,
         post.innerHeight - Math.max(post.barBottom, post.sendBottom, post.modelBottom) >= 0,
         `底边 ${post.barBottom.toFixed(1)} / 视口 ${post.innerHeight}(卡片 ${post.cardHeight.toFixed(1)} / 输入框 ${post.barHeight.toFixed(1)})`);
+  check(`${tag}:文本域完整可见且点得到`,
+        post.taVisible >= post.taHeight - 0.5 && post.hitInput,
+        `可见 ${post.taVisible.toFixed(1)}/${post.taHeight.toFixed(1)}px,命中 ${post.hitInput}(紧凑 ${tierOf(post)})`);
   await typeIntoInput("");
+  // 模型到达之后再真点一次:几何过了也可能因为卡片内部被滚起来而打不进字。
+  if (vp.h <= 360) await clickAndType(tag, "模型到达后输入的测试问题");
   await evalJs(`(() => {
     document.getElementById('askpanel').classList.remove('history-open');
     document.getElementById('ask-model').innerHTML = '';
