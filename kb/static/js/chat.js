@@ -89,12 +89,50 @@ const CHAT_INPUT_MIN = 32;    // 一行(14.5px × 1.5 + 上下内边距);再挤�
 
 function autoGrowChat() {
   const t = $('chat-input');
+  fitChatTight(t);
   t.style.height = 'auto';
   const want = Math.min(t.scrollHeight, CHAT_INPUT_MAX);
   const h = Math.max(CHAT_INPUT_MIN, Math.min(want, chatInputRoom(t))) + 'px';
   // 算出来一样就原样赋回去:尺寸不变 → ResizeObserver 不再发通知,上面那条
   // 「观察输入框」的回路到此为止。
   t.style.height = h;
+}
+
+// 放不下就把留白收起来(body.chat-tight,值在 workspace.css)。
+// **判定永远在常规留白下做**:进来先把 class 摘掉、把文本域压到一行下限,量一次
+// 「输入区 + 消息区那点内边距」还进不进得去卡片 —— 进不去才加回 class。这样加完
+// 之后即使真的放得下了,下一趟仍然按常规留白重新判,不会出现「收了 → 放得下 →
+// 松开 → 又放不下」的来回抖;card.clientHeight 也在摘掉 class 之后读,竖排那档
+// 的 .chat-layout gap 跟着变,两边口径一致。
+// 原来这件事是交给 `@media (max-height: 520px)` 的,而「放不放得下」不是一个高度
+// 数字能回答的:375×520 好好的,375×521 恢复常规留白后,异步到达的长模型名把发送
+// 按钮挤到第二行,文本域已经在 32px 下限、卡片仍差十几像素,按钮被卡片的
+// overflow: hidden 裁掉(2026-09-30 复审第 2 轮实测:下沿 514.47 / 裁剪线 500)。
+// 同步改完就恢复原值,中间不会有一帧被画出来,ResizeObserver 也不会为「改了又
+// 改回去」的同一个尺寸发通知。
+function fitChatTight(t) {
+  const bar = t.closest('.chat-inputbar');
+  const card = t.closest('.chat-main');
+  if (!bar || !card) return;
+  const cls = document.body.classList;
+  cls.remove('chat-tight');
+  const prev = t.style.height;
+  t.style.height = CHAT_INPUT_MIN + 'px';
+  const room = card.clientHeight;
+  const need = room ? chatBarNeed(bar) : 0;
+  t.style.height = prev;
+  if (room && need > room) cls.add('chat-tight');
+}
+
+// 输入区在卡片里的最小占地 = 消息区压不下去的那点内边距 + 输入框上下外边距
+//   + 输入框自身高度(此时文本域正被压在一行下限上)。
+function chatBarNeed(bar) {
+  const bs = getComputedStyle(bar);
+  const msgs = $('chat-msgs');
+  const ms = msgs ? getComputedStyle(msgs) : null;
+  const pad = ms ? parseFloat(ms.paddingTop) + parseFloat(ms.paddingBottom) : 0;
+  return pad + parseFloat(bs.marginTop) + parseFloat(bs.marginBottom)
+       + bar.getBoundingClientRect().height;
 }
 
 // 卡片里留给文本域的最大高度 = 卡片内容高 - 消息区压不下去的那点内边距

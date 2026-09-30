@@ -10,6 +10,7 @@
 //
 //   HEADLESS_SHELL=<bin> node tests/chat_height_probe.mjs <baseURL>
 import { spawn } from "node:child_process";
+import { writeSync } from "node:fs";
 
 const BIN = process.env.HEADLESS_SHELL;
 const base = process.argv[2];
@@ -92,10 +93,20 @@ const VIEWPORTS = [
   { w: 812, h: 375, name: "横屏 812x375" },
   { w: 844, h: 390, name: "横屏 844x390" },
   { w: 896, h: 414, name: "横屏 896x414" },
-  // 又矮又窄:同时命中 max-width 760 和 max-height 520 两档,专钉那两块的先后
+  // 又矮又窄:竖排 + 高度只剩 360,留白那几处必须同时收
   { w: 640, h: 360, name: "横屏 640x360" },
   // 最窄的在用机型:竖排 + 历史栏展开时剩给卡片的更少
   { w: 320, h: 568, name: "窄手机 320x568" },
+  // 窄且短:≤600 时首次配置横幅本来就折行,复审第 2 轮那次强行 nowrap 把文字挤成
+  // 一条细柱、横幅反而从 136.7 长到 230.1px,卡片只剩 90.9px(实测 320×520)。
+  { w: 320, h: 520, name: "窄短屏 320x520" },
+  { w: 320, h: 500, name: "窄短屏 320x500" },
+  // 旧的 max-height: 520 阈值两侧:520 好好的、521 恢复常规留白就被裁,
+  // 540/550 同样被裁 —— 所以这几档一起钉,防的是「换一个固定阈值」那种修法。
+  { w: 375, h: 520, name: "小手机 375x520" },
+  { w: 375, h: 521, name: "小手机 375x521" },
+  { w: 375, h: 540, name: "小手机 375x540" },
+  { w: 375, h: 550, name: "小手机 375x550" },
 ];
 // ≤760 才有「历史对话」这个开关(#chat-history-toggle),展开后历史栏排在
 // 输入区上方、独占 185px,是另一个把输入区挤下去的来源。
@@ -162,6 +173,7 @@ const measure = `(() => {
     msgsHeight: box.getBoundingClientRect().height,
     msgsScrollable: box.scrollHeight > box.clientHeight + 1,
     scrollW: document.documentElement.scrollWidth,
+    tight: document.body.classList.contains('chat-tight'),
   };
 })()`;
 
@@ -194,6 +206,13 @@ async function probe(vp, banner, history) {
   check(`${tag}:输入区完整在首屏内`, slack >= 0,
         `底边 ${m.barBottom.toFixed(1)} / 视口 ${m.innerHeight},余 ${slack.toFixed(1)}px`
         + `(可用 ${m.layoutHeight.toFixed(1)} / 卡片 ${m.cardHeight.toFixed(1)} / 输入框 ${m.barHeight.toFixed(1)})`);
+  // 连输入框自己的下边框都不许被卡片切掉 —— 复审第 2 轮把 640×360 那 2px 列为
+  // 「不拦但你该知道」,既然留白已经按实际余量收,顺手把它也清掉。
+  check(`${tag}:输入框整体没被卡片裁掉`, m.barBottom <= m.cardClipBottom + 0.5,
+        `输入框底边 ${m.barBottom.toFixed(2)} / 卡片裁剪线 ${m.cardClipBottom.toFixed(2)}`);
+  check(`${tag}:模型下拉与发送按钮没被卡片裁掉`,
+        m.sendBottom <= m.cardClipBottom + 0.5 && m.modelBottom <= m.cardClipBottom + 0.5,
+        `发送底边 ${m.sendBottom.toFixed(2)} / 下拉底边 ${m.modelBottom.toFixed(2)} / 卡片裁剪线 ${m.cardClipBottom.toFixed(2)}`);
   check(`${tag}:模型下拉与发送按钮点得到`, m.hitSend && m.hitModel,
         `elementFromPoint 命中 发送=${m.hitSend} 下拉=${m.hitModel}`);
   check(`${tag}:没有横向溢出`, m.scrollW <= m.innerWidth + 1,
@@ -211,24 +230,14 @@ async function probe(vp, banner, history) {
   check(`${t2}:输入区完整在首屏内`,
         g.innerHeight - Math.max(g.barBottom, g.sendBottom, g.modelBottom) >= 0,
         `底边 ${g.barBottom.toFixed(1)} / 视口 ${g.innerHeight}`);
+  check(`${t2}:输入框整体没被卡片裁掉`, g.barBottom <= g.cardClipBottom + 0.5,
+        `输入框底边 ${g.barBottom.toFixed(2)} / 卡片裁剪线 ${g.cardClipBottom.toFixed(2)}`);
   check(`${t2}:模型下拉与发送按钮没被卡片裁掉`,
         g.sendBottom <= g.cardClipBottom + 0.5 && g.modelBottom <= g.cardClipBottom + 0.5,
         `发送底边 ${g.sendBottom.toFixed(2)} / 下拉底边 ${g.modelBottom.toFixed(2)} / 卡片裁剪线 ${g.cardClipBottom.toFixed(2)}(文本域 ${g.taHeight.toFixed(2)}px)`);
   check(`${t2}:发送按钮和模型下拉点得到`, g.hitSend && g.hitModel,
         `elementFromPoint 命中 发送=${g.hitSend} 下拉=${g.hitModel}`);
   await typeIntoInput("");
-}
-
-for (const vp of VIEWPORTS) {
-  await send("Emulation.setDeviceMetricsOverride",
-             { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.w <= HISTORY_BREAKPOINT });
-  for (const banner of [true, false]) {
-    await probe(vp, banner, false);
-    // 历史栏只有竖排断点上才收起/展开,宽屏它一直在
-    if (vp.w <= HISTORY_BREAKPOINT) await probe(vp, banner, true);
-  }
-  // 收起历史栏得完全恢复,别把展开态带进下一个视口
-  await evalJs(`document.getElementById('askpanel').classList.remove('history-open')`);
 }
 
 // ── 模型选项异步到达 ────────────────────────────────────────────────────────
@@ -248,35 +257,78 @@ const LOAD_LONG_MODEL = `(async () => {
   try { await loadModels(); } finally { window.fetch = real; }
 })()`;
 
-await send("Emulation.setDeviceMetricsOverride", { width: 375, height: 667, deviceScaleFactor: 1, mobile: true });
-await evalJs(`(() => {
-  switchTab('ask');
-  document.getElementById('wechat-welcome').hidden = false;
-  document.getElementById('askpanel').classList.add('history-open');
-  document.getElementById('ask-model').innerHTML = '';
-})()`);
-await evalJs(FILL);
-await typeIntoInput(LONG_TEXT);
-await sleep(150);
-const preModels = await evalJs(measure);
+// 整个矩阵都带着这个长模型名跑:下拉里只有一行「加载中…」时量不到「选项撑宽下拉、
+// 发送按钮被 flex-wrap 挤到第二行」那个形态,而那正是最吃高度的一种排布
+// (2026-09-30 复审第 2 轮指出常规矩阵的下拉没有真实选项)。短→长的异步切换在
+// 下面单独还有一格。
+await evalJs(`switchTab('ask')`);
 await evalJs(LOAD_LONG_MODEL);
-await sleep(250);
-const postModels = await evalJs(measure);
-// 先确认这一趟真的复现了那个形态(下拉撑宽、按钮换行),否则下面那条形同虚设
-check("模型选项异步到达:长模型名把下拉撑宽了",
-      postModels.modelWidth > preModels.modelWidth + 100,
-      `下拉宽 ${preModels.modelWidth.toFixed(1)} → ${postModels.modelWidth.toFixed(1)}`);
-check("模型选项异步到达:发送按钮被挤到新行",
-      (postModels.barHeight - postModels.taHeight) > (preModels.barHeight - preModels.taHeight) + 20,
-      `框内非文本域部分 ${(preModels.barHeight - preModels.taHeight).toFixed(1)} → ${(postModels.barHeight - postModels.taHeight).toFixed(1)}`);
-check("模型选项异步到达:文本域跟着让位,发送按钮仍在卡片内且点得到",
-      postModels.sendBottom <= postModels.cardClipBottom + 0.5 && postModels.hitSend && postModels.hitModel,
-      `文本域 ${preModels.taHeight.toFixed(2)} → ${postModels.taHeight.toFixed(2)}px / 发送底边 ${postModels.sendBottom.toFixed(2)} / 裁剪线 ${postModels.cardClipBottom.toFixed(2)} / 命中 发送=${postModels.hitSend} 下拉=${postModels.hitModel}`);
-await typeIntoInput("");
-await evalJs(`(() => {
-  document.getElementById('askpanel').classList.remove('history-open');
-  document.getElementById('ask-model').innerHTML = '';
-})()`);
+await sleep(150);
+
+for (const vp of VIEWPORTS) {
+  await send("Emulation.setDeviceMetricsOverride",
+             { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.w <= HISTORY_BREAKPOINT });
+  for (const banner of [true, false]) {
+    await probe(vp, banner, false);
+    // 历史栏只有竖排断点上才收起/展开,宽屏它一直在
+    if (vp.w <= HISTORY_BREAKPOINT) await probe(vp, banner, true);
+  }
+  // 收起历史栏得完全恢复,别把展开态带进下一个视口
+  await evalJs(`document.getElementById('askpanel').classList.remove('history-open')`);
+}
+
+
+// 短 → 长的异步切换在几档**吃紧的**视口上各走一遍。只测 375×667 是不够的:
+// 那里余量宽,长模型到达后压一压文本域就够了;真正会出事的是旧的 max-height: 520
+// 阈值**外侧**那几档 —— 521/540/550 恢复常规留白,按钮换行后文本域已在 32px 下限、
+// 卡片仍差十几像素(2026-09-30 复审第 2 轮实测 375×521:发送底边 514.47 / 裁剪线
+// 500,滚页面也补不回来)。所以这一格按视口循环,而不是再钉一个固定高度。
+for (const vp of [{ w: 375, h: 667 }, { w: 375, h: 521 }, { w: 375, h: 540 },
+                  { w: 375, h: 550 }, { w: 320, h: 520 }, { w: 640, h: 360 }]) {
+  const tag = `模型选项异步到达 ${vp.w}x${vp.h}`;
+  await send("Emulation.setDeviceMetricsOverride",
+             { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: true });
+  await evalJs(`(() => {
+    switchTab('ask');
+    document.getElementById('wechat-welcome').hidden = false;
+    document.getElementById('askpanel').classList.add('history-open');
+    document.getElementById('ask-model').innerHTML = '';
+  })()`);
+  await evalJs(FILL);
+  await typeIntoInput(LONG_TEXT);
+  await sleep(150);
+  const pre = await evalJs(measure);
+  await evalJs(LOAD_LONG_MODEL);
+  await sleep(250);
+  const post = await evalJs(measure);
+  if (vp.h === 667) {
+    // 先确认这一趟真的复现了那个形态(下拉撑宽、按钮换行),否则下面那条形同虚设。
+    // 只在余量最宽的那一档确认:窄屏上按钮本来就已经在第二行,量不出「被挤下去」。
+    check(`${tag}:长模型名把下拉撑宽了`, post.modelWidth > pre.modelWidth + 100,
+          `下拉宽 ${pre.modelWidth.toFixed(1)} → ${post.modelWidth.toFixed(1)}`);
+    check(`${tag}:发送按钮被挤到新行`,
+          (post.barHeight - post.taHeight) > (pre.barHeight - pre.taHeight) + 20,
+          `框内非文本域部分 ${(pre.barHeight - pre.taHeight).toFixed(1)} → ${(post.barHeight - post.taHeight).toFixed(1)}`);
+  }
+  check(`${tag}:文本域跟着让位,发送按钮仍在卡片内且点得到`,
+        post.sendBottom <= post.cardClipBottom + 0.5 && post.hitSend && post.hitModel,
+        `文本域 ${pre.taHeight.toFixed(2)} → ${post.taHeight.toFixed(2)}px / 发送底边 ${post.sendBottom.toFixed(2)} / 裁剪线 ${post.cardClipBottom.toFixed(2)} / 命中 发送=${post.hitSend} 下拉=${post.hitModel}`);
+  // 旧的 max-height: 520 阈值**外侧**、而且实测常规留白放不下的那两档:按实际余量
+  // 判定的话必须收 —— 这一条钉的是「不再靠高度阈值」这件事本身,而不只是结果好看。
+  // 550 不在内是因为它常规留白下就放得下(实测卡片 170.3 / 输入框 132),不收才对。
+  if (vp.w === 375 && (vp.h === 521 || vp.h === 540)) {
+    check(`${tag}:阈值外侧也按实际余量收了留白`, post.tight,
+          `body.chat-tight=${post.tight}(卡片 ${post.cardHeight.toFixed(1)} / 输入框 ${post.barHeight.toFixed(1)})`);
+  }
+  check(`${tag}:输入区完整在首屏内`,
+        post.innerHeight - Math.max(post.barBottom, post.sendBottom, post.modelBottom) >= 0,
+        `底边 ${post.barBottom.toFixed(1)} / 视口 ${post.innerHeight}(卡片 ${post.cardHeight.toFixed(1)} / 输入框 ${post.barHeight.toFixed(1)})`);
+  await typeIntoInput("");
+  await evalJs(`(() => {
+    document.getElementById('askpanel').classList.remove('history-open');
+    document.getElementById('ask-model').innerHTML = '';
+  })()`);
+}
 
 // 横幅一出现,聊天区应当自己变矮(说明高度真的跟着可用空间走,不是写死的)。
 // 上面塞的那 4000px 还在页面里,所以这一条也是在长对话下量的。
@@ -320,9 +372,14 @@ check("ResizeObserver 没有跑成收不住的回路", roLoop.length === 0, roLo
 ws.close();
 proc.kill();
 const bad = results.filter(r => !r.ok);
+// **收尾一律 writeSync,并且不许用 process.exit。** node 对管道上的 stdout/stderr
+// 是异步写的,exit() 会把还没刷出去的那部分直接丢掉 —— 管道缓冲是 64 KB,项数涨到
+// 七百多条之后两个流都越过了这条线,于是 test_chat_height.py 收到的 JSON 恰好在
+// 第 65536 字节处断在一个中文字符中间,报的是 UnicodeDecodeError,看着像超时或者
+// 编码问题,其实是输出被掐了(2026-09-30 复审第 2 轮补视口后踩到)。
 for (const r of results)
-  console.error(`${r.ok ? "  ok" : "FAIL"}  ${r.name}${r.detail ? " — " + r.detail : ""}`);
-console.error(`${results.length - bad.length} ok, ${bad.length} failed`);
+  writeSync(2, `${r.ok ? "  ok" : "FAIL"}  ${r.name}${r.detail ? " — " + r.detail : ""}\n`);
+writeSync(2, `${results.length - bad.length} ok, ${bad.length} failed\n`);
 // 最后一行给 tests/test_chat_height.py 读(人看的那份走 stderr)
-console.log(JSON.stringify(results));
-process.exit(bad.length ? 1 : 0);
+writeSync(1, JSON.stringify(results) + "\n");
+process.exitCode = bad.length ? 1 : 0;
