@@ -26,7 +26,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kb.daily_refs import link_refs
+from kb.daily_refs import _autolinked, link_refs
 
 MARKED_PROBE = Path(__file__).resolve().parent / 'daily_refs_marked.mjs'
 
@@ -267,6 +267,15 @@ BARE_URL_LINES = [
     # 大写 scheme / 大写 www:只在段落开头被 marked 切出来
     'HTTPS://E.ORG/PATH/[1] 这条大写的也认。',
     'WWW.E.ORG/p/[1] 这条大写的也认。',
+    # 起手式大写 **且** 后缀落在后端 linkify 认不出的范围里 —— 两道保护同时
+    # 失效的那个组合。上一轮那两条大写样本用的是 `E.ORG`,linkify 自己就认得,
+    # 于是 `_autolinked` 漏掉大小写这件事一条都没红(2026-10-01 第 6 轮实测)。
+    'WWW.example.中国/path/[1] 这条大写加中文后缀的也认。',
+    'WWW.x.y/path/[1] 这条大写加一字符后缀的也认。',
+    'Www.example.中国/path/[1] 首字母大写同理。',
+    # 同一个后缀的小写对照:它靠 `_autolinked` 命中 `www.` 挡住
+    'www.example.中国/path/[1] 小写的也认。',
+    '已有网址 www.example.中国/path/[1] 嵌在句子里也认。',
     # autolink 的尾巴是 `[^\s<]*`:不跨空白,却跨中文
     '见https://e.org/doc的说明[1]。',
 ]
@@ -285,6 +294,16 @@ class BareUrlsAreNeverTouched(Keeps):
         for line in BARE_URL_LINES:
             with self.subTest(line=line):
                 self.keeps(line)
+
+    def test_the_superset_check_ignores_case(self):
+        # 直接钉住 `_autolinked` 本身:marked 那条 url 规则带 `i` 标志,所以起手式
+        # 的大小写一律要认。绕开"TLD 放宽恰好也挡住了"这层遮掩 —— 上一轮就是被
+        # 它遮住,大写漏判一条测试都没红。
+        for head in ('www.', 'WWW.', 'Www.', 'wWw.', 'http://', 'HTTP://',
+                     'https://', 'HTTPS://', 'ftp://', 'FTP://'):
+            line = f'{head}example.zz/path/[1]'
+            with self.subTest(head=head):
+                self.assertTrue(_autolinked(line, line.index('[1]')), line)
 
     def test_forms_the_real_marked_misses_are_protected_anyway(self):
         # 超集判据宁可多说"是":这两种 marked 其实不认(域名只收 ASCII;大写 scheme
