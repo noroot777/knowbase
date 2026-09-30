@@ -230,6 +230,15 @@
   写盘是「唯一名字的临时文件 + rename」:截断重写会让并发读者读到半截 JSON,而
   `_file_secrets` 把坏 JSON 吞成 `{}`,接着一存盘就把整份 key 抹了;临时文件名不
   唯一则两个进程会抢同一个 tmp,先 rename 的把它搬走、后一个报 FileNotFoundError。
+- **面板上每一步都写着「推荐哪个模型」,但注册表里存的是档位不是 id**
+  (`Stage.rec` = `cheap`/`main`,`recommended()` 按 `_TIERS` 的关键词在**当前实际
+  可选的模型**里挑一个具体 id 出来)。写死 id 十有八九不在候选里 —— 内置默认表写的
+  是 `claude-sonnet-4-5`,用户的中转站开的是 `claude-sonnet-4-6`,那行字就成了一句
+  指不到任何选项的废话,点「改用推荐」也选不中。挑的时候**已配 key 的那几家优先**,
+  一个关键词都不沾时返回空串、面板退回 `_TIER_LABEL` 那句档位说法。口径:量大的
+  解析活(规划/提取/gate/标签回填)推便宜档,写给人读或决定产物质量的那几步
+  (回答/研究/分诊/拆条目/wiki/归类)推主力档。`tests/test_llm_stages.py` 钉住了
+  「推荐必须是 `llm.model_pool()` 里真有的选项」和「agent 限 Anthropic 时不推到别家」。
 - 收藏页那个模型下拉和面板里的「收藏 · 分诊与行动卡」**是同一处配置**
   (`llm.set_fav_model` 直接写 stages)。两边各存一份的话,用户在一处改完,
   另一处的值会悄悄把它压回去。旧的顶层键(`default_model`/`plan_model`/
@@ -773,6 +782,12 @@
 
 ## 前端反馈(硬性)
 
+- **问答的模型下拉收在输入框里,不许再单起一行。** `.chat-inputbar` 整体就是那个框
+  (边和圆角画在它身上),文本域占满上面一行、自己不再描边,下拉贴框内左下角、发送在
+  右下角。下拉浮在框外时它看着是页面上一个孤立控件,跟「这次发送用哪个模型」的从属
+  关系全靠位置猜。焦点同理只画一条:`.chat-inputbar:has(#chat-input:focus-visible)`
+  画 border + 内描边,`#chat-input` 得显式 `box-shadow: none` 压掉 base.css 那条
+  `textarea:focus-visible`(和 `#q`/`#g-q` 那两个容器画边的搜索框是同一套写法)。
 - **禁止用原生 `alert` / `confirm` / `prompt`**,系统弹窗跟本项目的瓷白×墨蓝黑调子完全不搭,还阻塞主线程。
 - 统一走 `kb/static/js/ui.js` 三个出口:
   - `toast(text, {type: err|ok|info, detail})` — 一次性操作反馈(失败/成功),右下浮起,自动消失。

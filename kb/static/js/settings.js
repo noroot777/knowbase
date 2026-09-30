@@ -141,6 +141,21 @@ function stageNow(st) {
     + ` · ${esc(st.provider)} · ${note}${tail}</div>`;
 }
 
+// 推荐那行:后端按「档位」在当前实际可选的模型里挑出来的具体 id + 一句为什么。
+// 挑不出来(那家没配 key、中转站只开了别的型号)时退回档位说法,总得说点能照着
+// 做的东西——只写「推荐主力档」而不指到一个选项,面板上就是一句废话。
+function stageRec(st) {
+  if (!st.rec_why) return '';
+  const cur = st.provider && st.model ? `${st.provider}:${st.model}` : '';
+  const pick = st.recommend || '';
+  const on = pick && pick === cur;
+  const what = pick ? `<b>${esc(modelLabel(pick))}</b>` : esc(st.rec_tier || '');
+  const act = pick && !on
+    ? ` <button class="text-button" onclick="saveStage('${esc(st.key)}', '${esc(pick)}')">改用推荐</button>`
+    : (on ? ' · 已在用' : '');
+  return `<div class="stage-rec">推荐:${what} · ${esc(st.rec_why)}${act}</div>`;
+}
+
 function stageRow(st, providers) {
   const locked = st.source === 'env' && !st.configured;
   return `<div class="stage-row">
@@ -153,6 +168,7 @@ function stageRow(st, providers) {
       ${stageOptions(st, providers)}
     </select>
     ${stageNow(st)}
+    ${stageRec(st)}
   </div>`;
 }
 

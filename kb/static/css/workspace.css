@@ -72,7 +72,7 @@ h1 { font-family: var(--font-display); font-size: 19px; font-weight: 900; letter
 /* 这几个下拉平时是透明边框(看着像一行纯文字),聚焦时得把边补回来 —— 不然同一排里
    旁边那个下拉是 2px 绿边,它只剩内描边那 1px。base.css 那条 select:focus-visible
    跟这里的透明边规则特异度一模一样,后加载的赢,所以得在本文件里写回来。 */
-.gallery-view-controls select:focus-visible, #ask-model:focus-visible { border-color: var(--brand); }
+.gallery-view-controls select:focus-visible { border-color: var(--brand); }
 .view-switch { display: flex; padding: 2px; border: 1px solid var(--line); background: var(--paper-2); border-radius: 7px; }
 .view-switch button { display: grid; place-items: center; background: none; padding: 4px 8px; min-height: 26px; color: var(--muted); border-radius: 5px; }
 .view-switch button.on { background: var(--card); color: var(--brand); box-shadow: 0 1px 3px #14202b14; }
@@ -109,10 +109,6 @@ body.chat-mode { padding-bottom: 0; }
 .chat-empty-sub { font-size: 13px; line-height: 1.9; max-width: 350px; }
 .chat-suggest { background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 10px 15px; font-size: 12.5px; white-space: normal; text-align: left; width: min(400px,100%); }
 .chat-suggest:hover { border-color: var(--brand); color: var(--brand); }
-.chat-inputbar { flex-wrap: wrap; background: var(--card); }
-#chat-input { min-width: 0; flex-basis: 100%; background: var(--card); }
-#ask-model { max-width: 240px; margin-right: auto; background-color: transparent; border-color: transparent; font-size: 11px; }
-#chat-send { padding: 7px 18px; }
 .fav-sub { flex-wrap: wrap; align-items: center; padding: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
 .fav-sub button.on { background: var(--brand); color: #fff; }
 .fav-tools { flex-wrap: wrap; }

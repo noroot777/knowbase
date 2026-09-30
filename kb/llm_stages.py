@@ -35,38 +35,65 @@ class Stage:
     env: str | None = None              # 环境变量覆盖
     auto: str = ""                      # 未配置且无 default 时的自动挑选策略
     prefer_last: bool = False           # True = 自动挑选优先于「调用方当前所选模型」
+    rec: str = ""                       # 推荐档位(见 _TIERS),面板上那行「推荐」
+    rec_why: str = ""                   # 一句话说明为什么推荐这一档
 
 
 # 顺序即面板上的展示顺序:先问答链路,再管道链路。
 STAGES: tuple[Stage, ...] = (
     Stage("ask", "问答 · 回答", "对话里综合资料写答案,也是其他阶段的兜底模型",
-          legacy="default_model", env="KB_ASK_MODEL", auto="first_with_key"),
+          legacy="default_model", env="KB_ASK_MODEL", auto="first_with_key",
+          rec="main", rec_why="要把几十条检索结果读成一个答案,这步换便宜模型最容易看出来"),
     Stage("plan", "问答 · 意图规划", "把问题解析成检索条件,活轻,用便宜的就行",
-          legacy="plan_model", env="KB_PLAN_MODEL", auto="cheap", prefer_last=True),
+          legacy="plan_model", env="KB_PLAN_MODEL", auto="cheap", prefer_last=True,
+          rec="cheap", rec_why="只是把一句话拆成关键词和过滤条件,每次提问都跑,越快越好"),
     Stage("agent", "问答 · 研究(工具循环)",
           "agent 模式下反复调检索工具找资料;要走 Anthropic 的 tools 接口,只能选 Claude",
           providers=("anthropic",), legacy="agent_model", env="KB_AGENT_MODEL",
-          auto="sonnet"),
+          auto="sonnet",
+          rec="main", rec_why="要自己决定再查一轮还是收工,便宜模型往往查一次就交差"),
     Stage("fav", "收藏 · 分诊与行动卡", "给收藏的文章分诊、提炼「怎么上手」的行动卡",
-          legacy="fav_model", env="KB_FAV_MODEL", auto="follow_ask"),
+          legacy="fav_model", env="KB_FAV_MODEL", auto="follow_ask",
+          rec="main", rec_why="一天也就几条,产出是要照着做的步骤,不值得在这儿省"),
     Stage("extract", "管道 · 提取打标", "读正文提 实体/主题/一句话摘要,每篇一次",
-          default="gpt-5.5", env="KB_EXTRACT_MODEL"),
+          default="gpt-5.5", env="KB_EXTRACT_MODEL",
+          rec="cheap", rec_why="按固定字段抽取、每篇都跑,是管道里调用次数最多的一步"),
     Stage("gate", "管道 · 条目化判定", "先判这篇是不是「工具/项目介绍型」,只看开头,量大",
-          default="gpt-5.5", env="KB_GATE_MODEL"),
+          default="gpt-5.5", env="KB_GATE_MODEL",
+          rec="cheap", rec_why="只看开头答一个是/否,量最大,便宜模型足够"),
     Stage("transcribe", "管道 · 条目化拆条目", "把整篇拆成一个个工具条目,吃全文,最贵的一步",
-          default="gpt-5.6-luna", env="KB_TRANSCRIBE_MODEL"),
+          default="gpt-5.6-luna", env="KB_TRANSCRIBE_MODEL",
+          rec="main", rec_why="图鉴里每个条目的质量上限就在这一步,拆错了后面全是错的"),
     Stage("wiki", "管道 · wiki 摘要与综述", "生成每日摘要页和实体页的「近期动态」",
-          default="gpt-5.6-luna", env="KB_WIKI_MODEL"),
+          default="gpt-5.6-luna", env="KB_WIKI_MODEL",
+          rec="main", rec_why="产出是给人读的成段文字,便宜模型的流水账一眼看得出来"),
     Stage("skill_tag", "脚本 · skill 标签回填", "批量判定项目该不该打「skill工具」标签",
-          default="gpt-5.6-luna", env="KB_SKILL_TAG_MODEL"),
+          default="gpt-5.6-luna", env="KB_SKILL_TAG_MODEL",
+          rec="cheap", rec_why="批量判一个标签打不打,答案只有两种"),
     Stage("taxonomy", "管道 · 图谱归类", "给开源项目/skill 条目分门别类,一个条目判一次后长期复用",
-          default="gpt-5.5", env="KB_TAXONOMY_MODEL"),
+          default="gpt-5.5", env="KB_TAXONOMY_MODEL",
+          rec="main", rec_why="要在 45 个子类里挑一个,判完长期缓存,判错得改分类表才会重判"),
 )
 
 _BY_KEY = {s.key: s for s in STAGES}
 
 # 「便宜模型」的识别词:规划这种解析活用不上旗舰
 _CHEAP_HINTS = ("haiku", "mini", "flash", "lite", "nano", "spark")
+
+# ── 推荐档位 ─────────────────────────────────────────────────────────────
+# 面板上「推荐」那一行按档位在**实际可选的模型**里挑一个具体 id 出来,注册表里
+# 不写死 id:每家中转站开出来的型号不一样(内置默认表写的是 claude-sonnet-4-5,
+# 用户那边可能只有 claude-sonnet-4-6),写死一个十有八九不在候选里,那行就成了
+# 一句指不到任何选项的废话。命中顺序即偏好顺序。
+_TIERS: dict[str, tuple[str, ...]] = {
+    "cheap": _CHEAP_HINTS,
+    "main": ("sonnet", "gpt-5.6", "gpt-5.5", "gpt-5", "gpt-4", "opus"),
+}
+# 一个候选都匹配不上时退回这句(没配 key、中转站只开了些别的型号)
+_TIER_LABEL = {
+    "cheap": "便宜快的那一档(haiku / mini 这类)",
+    "main": "主力那一档(sonnet / gpt-5.5 这类)",
+}
 
 
 def stage(key: str) -> Stage:
@@ -139,6 +166,24 @@ def _candidates(st: Stage) -> list[tuple[str, str]]:
     """该阶段可选的 (provider, model_id),受 providers 限制。"""
     provs = st.providers or tuple(llm.PROVIDERS)
     return [(p, m) for p in provs for m in llm.configured_models(p)]
+
+
+def recommended(st: Stage) -> str:
+    """该阶段推荐用哪个模型,返回 "provider:model_id";挑不出来返回空串。
+
+    在这个阶段允许的候选里按档位关键词挑第一个命中的,**已配 key 的那几家优先**
+    ——推荐一个用不了的型号等于没推荐。挑不出来时面板退回 `_TIER_LABEL` 那句话。
+    """
+    hints = _TIERS.get(st.rec)
+    if not hints:
+        return ""
+    cands = _candidates(st)
+    pool = [c for c in cands if llm.has_key(c[0])] or cands
+    for hint in hints:
+        for prov, model in pool:
+            if hint in model.lower():
+                return f"{prov}:{model}"
+    return ""
 
 
 def _auto(st: Stage) -> llm.Model | None:
@@ -236,6 +281,10 @@ def describe() -> list[dict]:
             "model": eff.model_id if eff else "",
             "source": source,
             "ready": bool(eff and llm.has_key(eff.provider)),
+            # 推荐:具体 id(挑得出来时)+ 档位说明 + 一句为什么
+            "recommend": recommended(st),
+            "rec_tier": _TIER_LABEL.get(st.rec, ""),
+            "rec_why": st.rec_why,
         })
     return out
 
