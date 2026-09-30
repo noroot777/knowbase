@@ -236,6 +236,11 @@ function fmtKeyState(k) {
   return k.base_url_source === 'env' ? s + ' · base_url 由环境变量提供' : s;
 }
 
+function updateOpenaiConversionState() {
+  $('openai-conversion-state').textContent = $('openai-protocol-conversion').checked
+    ? '协议转换已开启' : '使用原生 Responses';
+}
+
 async function refreshKeys() {
   try {
     const d = await fetch('/api/keys').then(r => r.json());
@@ -249,6 +254,9 @@ async function refreshKeys() {
       url.disabled = urlEnv;
       url.value = k[p].base_url || '';               // 回填当前中转站地址,便于查看/改
     }
+    $('openai-protocol-conversion').checked = k.openai.protocol_conversion_enabled !== false;
+    $('openai-protocol-conversion').disabled = false;
+    updateOpenaiConversionState();
     $('keys-dot').className = (k.anthropic.set || k.openai.set) ? 'on' : 'off';
     return k;
   } catch { $('keys-msg').textContent = '状态获取失败'; }
@@ -259,6 +267,7 @@ function openKeys() {
   $('keys-msg').textContent = '';
   $('key-anthropic').value = '';   // key 框永远空着(不回显密文),url 框由 refreshKeys 回填
   $('key-openai').value = '';
+  $('openai-protocol-conversion').disabled = true;
   refreshKeys();
 }
 function closeKeys() { $('keys-modal').style.display = 'none'; }
@@ -269,6 +278,9 @@ async function saveKeys() {
     const kf = $('key-' + p), uf = $('url-' + p);
     if (!kf.disabled && kf.value !== '') body[p + '_key'] = kf.value;  // 空=不改,空格=清除
     if (!uf.disabled) body[p + '_base_url'] = uf.value;               // url 已回填,原样回传(改了才变)
+  }
+  if (!$('openai-protocol-conversion').disabled) {
+    body.openai_protocol_conversion_enabled = $('openai-protocol-conversion').checked;
   }
   if (Object.keys(body).length === 0) { $('keys-msg').textContent = '没有可改的项'; return; }
   $('keys-msg').textContent = '保存中…';
@@ -295,6 +307,9 @@ async function fetchModels(p) {
   const kf = $('key-' + p), uf = $('url-' + p), save = {};
   if (!kf.disabled && kf.value !== '') save[p + '_key'] = kf.value;
   if (!uf.disabled) save[p + '_base_url'] = uf.value;
+  if (p === 'openai' && !$('openai-protocol-conversion').disabled) {
+    save.openai_protocol_conversion_enabled = $('openai-protocol-conversion').checked;
+  }
   msg.textContent = '拉取中…';
   try {
     if (Object.keys(save).length) {
