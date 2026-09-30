@@ -372,6 +372,11 @@ const stageRec = await evalJs(`(async () => {
       { key: 'wiki', label: '管道 · wiki', hint: '综述', providers: [], configured: null,
         provider: 'anthropic', model: 'claude-sonnet-4-6', source: 'default', ready: true,
         recommend: '', rec_tier: '主力那一档(sonnet 这类)', rec_why: '给人读的文字' },
+      // 带单引号的型号名:中转站开什么名字是用户那侧给的,拼进 onclick 就断句
+      { key: 'skill_tag', label: '脚本 · 标签回填', hint: '批量', providers: [],
+        configured: null, provider: 'anthropic', model: 'claude-haiku-4-5',
+        source: 'default', ready: true,
+        recommend: "anthropic:weird'break", rec_tier: '便宜档', rec_why: '量大' },
     ],
     providers: [{ key: 'anthropic', label: 'Anthropic', has_key: true,
                   models: ['claude-haiku-4-5', 'claude-sonnet-4-6'] }],
@@ -391,7 +396,7 @@ const stageRec = await evalJs(`(async () => {
     onBtn: !!rec[0]?.querySelector('button'),
     // 不一致 → 点一下就切过去,按钮带的是带家的 provider:model
     offText: rec[1]?.textContent.replace(/\\s+/g, '') || '',
-    offBtn: rec[1]?.querySelector('button')?.getAttribute('onclick') || '',
+    offBtn: rec[1]?.querySelector('button')?.dataset.rec || '',
     // 一个具体 id 都挑不出来时退回档位说法,而不是留一行空推荐
     noneText: rec[2]?.textContent.replace(/\\s+/g, '') || '',
     noneBtn: !!rec[2]?.querySelector('button'),
@@ -399,20 +404,30 @@ const stageRec = await evalJs(`(async () => {
     pickIsOption: [...rows[1].querySelectorAll('option')].some(o => o.value === 'anthropic:claude-sonnet-4-6'),
     mono: rec[0] && getComputedStyle(rec[0].querySelector('b')).fontFamily.toLowerCase(),
   };
+  // 带引号的 id:按钮点得下去、送出去的还是原值(拼进 onclick 的写法在这里抛
+  // SyntaxError,一个请求都发不出去)
+  let sent = null;
+  const realSave = window.saveStage;
+  window.saveStage = (k, v) => { sent = [k, v]; };
+  try { rec[3].querySelector('button').click(); } catch (e) { sent = ['threw', String(e)]; }
+  window.saveStage = realSave;
+  out.quoted = sent;
   closeStages();
   window.fetch = real;
   return out;
 })()`);
-check("每一步都写了推荐", stageRec.rows === 3 && stageRec.everyRowHasRec, JSON.stringify(stageRec));
+check("每一步都写了推荐", stageRec.rows === 4 && stageRec.everyRowHasRec, JSON.stringify(stageRec));
 check("推荐写的是具体模型 id", stageRec.offText.includes('claude-sonnet-4-6')
       && stageRec.offText.includes('质量上限在这步'), stageRec.offText);
 check("已经在用推荐就不给按钮", stageRec.onText.includes('已在用') && !stageRec.onBtn, stageRec.onText);
-check("没在用推荐给「改用推荐」且带供应商", /saveStage\('transcribe','anthropic:claude-sonnet-4-6'\)/
-      .test(stageRec.offBtn.replace(/\s/g, '')), stageRec.offBtn);
+check("没在用推荐给「改用推荐」且带供应商", stageRec.offBtn === 'anthropic:claude-sonnet-4-6',
+      stageRec.offBtn);
 check("挑不出具体 id 时退回档位说法", stageRec.noneText.includes('主力那一档') && !stageRec.noneBtn,
       stageRec.noneText);
 check("推荐的 id 在下拉里真有这个选项", stageRec.pickIsOption === true, JSON.stringify(stageRec.pickIsOption));
 check("推荐里的模型 id 用等宽体", /mono|menlo|sf mono|consolas/.test(stageRec.mono || ""), stageRec.mono);
+check("带引号的模型 id 也能原样送出去", stageRec.quoted?.[0] === 'skill_tag'
+      && stageRec.quoted?.[1] === "anthropic:weird'break", JSON.stringify(stageRec.quoted));
 
 check("整轮没有页面报错", pageErrors.length === 0, pageErrors.slice(0, 4).join(" | "));
 

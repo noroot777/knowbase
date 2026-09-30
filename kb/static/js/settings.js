@@ -150,8 +150,13 @@ function stageRec(st) {
   const pick = st.recommend || '';
   const on = pick && pick === cur;
   const what = pick ? `<b>${esc(modelLabel(pick))}</b>` : esc(st.rec_tier || '');
+  // 模型 id 走 data-* 读到运行时,不拼进 onclick 的 JS 字面量里:esc() 是 HTML 属性
+  // 转义,`&#39;` 在属性值里会被解回真正的单引号 —— 一个带引号的 id(中转站的型号
+  // 名是用户那侧给的)就把 onclick 断成 `saveStage('wiki','a'break')`,点下去只抛
+  // SyntaxError、什么也不存。阶段 key 是 STAGES 里的固定值,照旧内联。
   const act = pick && !on
-    ? ` <button class="text-button" onclick="saveStage('${esc(st.key)}', '${esc(pick)}')">改用推荐</button>`
+    ? ` <button class="text-button" data-rec="${esc(pick)}"`
+      + ` onclick="saveStage('${esc(st.key)}', this.dataset.rec)">改用推荐</button>`
     : (on ? ' · 已在用' : '');
   return `<div class="stage-rec">推荐:${what} · ${esc(st.rec_why)}${act}</div>`;
 }
