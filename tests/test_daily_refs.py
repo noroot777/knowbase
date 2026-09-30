@@ -1,11 +1,14 @@
 """正文出处编号换成链接时,别把日报原文改坏(`kb/daily_refs.py`)。
 
-这段替换写进**文件**,页面、复制全文、Obsidian 一起受影响。2026-09-30 连着三轮
+这段替换写进**文件**,页面、复制全文、Obsidian 一起受影响。2026-09-30 连着四轮
 审查各抓出一批合法 markdown 写法被改坏:第 1 轮是行内代码和已有链接的文字;
-第 2 轮是跨行代码跨度、单引号标题、引用式链接、两层嵌套的括号目标,外加多层围栏
-认错开闭;第 3 轮是多行定义、引用段里的定义、原始 HTML 的 `<a>` 与 `<code>`、
-独立缩进代码块、autolink 的地址。前两轮各补一批手写规则,第三轮证明这条路没有
-终点,于是改成**每次替换渲染一遍、由渲染器裁决**。
+第 2 轮是跨行代码跨度、单引号/圆括号标题、引用式链接、两层嵌套的括号目标,外加
+多层围栏认错开闭;第 3 轮是多行定义、引用段里的定义、原始 HTML 的 `<a>` 与
+`<code>`、独立缩进代码块、autolink 的地址 —— 前三轮补的都是"哪些片段不许动"的
+规则,第三轮证明这条路没有终点,于是改成**每次替换渲染一遍、由渲染器裁决**。
+第 4 轮抓的是这个裁决本身的两处不实:裁决用 CommonMark 而页面的 marked 开着
+GFM(裸网址、表格都看不见),以及"这一处之外一个字都没动"其实只比了代码/图片/
+链接那几类(表格挤错列、不可见的定义行冒出来都漏过)。
 
 判据统一是「原文那一段逐字还在,而它后面那个出处确实变成了链接」,两半缺一不可:
 只验前半句的话,一个什么都不替换的实现也能全绿 —— 而"保护得过宽"和"改坏原文"
@@ -15,8 +18,10 @@ import unittest
 
 from kb.daily_refs import link_refs
 
-LINKS = {'1': '[\\[1\\]](<https://e.org/a> "甲文")',
-         '2': '[\\[2\\]](<https://e.org/b> "乙文")'}
+# link_refs 收的是「编号 → (已转义的目标, 已转义的标题)」,转义口径在 kb.daily
+LINKS = {'1': ('<https://e.org/a>', '甲文'), '2': ('<https://e.org/b>', '乙文')}
+# 它该落盘成什么样
+OUT = {n: f'[\\[{n}\\]]({d} "{t}")' for n, (d, t) in LINKS.items()}
 
 
 class Keeps(unittest.TestCase):
@@ -25,7 +30,7 @@ class Keeps(unittest.TestCase):
     def keeps(self, original: str, note: str = ''):
         out = link_refs(original + '\n\n出处 [1]。', LINKS)
         self.assertIn(original, out, note or original)
-        self.assertIn('出处 ' + LINKS['1'] + '。', out, note or original)
+        self.assertIn('出处 ' + OUT['1'] + '。', out, note or original)
         return out
 
 
@@ -112,6 +117,50 @@ class LinksStayWhole(Keeps):
                          link_refs('已是链接 [1](http://x) 不动。', LINKS))
 
 
+class MatchesTheGfmRenderer(Keeps):
+    """页面的 marked 默认开着 GFM,裁决也得开 —— 第 4 轮两条拦验收都出在这儿。
+
+    按 CommonMark 裁决的话:裸网址只是一段文字(于是放行,而页面上它是链接,替换完
+    点过去是另一个地址)、表格压根不解析(单元格被标题里的 `|` 挤错位也看不出来)。
+    """
+
+    def test_bare_url(self):
+        # 实测 href 从 …/%5B1%5D 变成 …/%5B%5C%5B1%5C%5D%5D,点了跳错地方
+        self.keeps('已有地址 https://e.org/path/[1] 原样保留。')
+
+    def test_www_url(self):
+        self.keeps('已有地址 www.e.org/path/[1] 原样保留。')
+
+    def test_strikethrough(self):
+        out = link_refs('~~不再推荐 [1]~~。', LINKS)
+        self.assertEqual('~~不再推荐 ' + OUT['1'] + '~~。', out)
+
+    def test_table_cell_keeps_its_columns(self):
+        # 标题里的 `|` 已在 kb.daily 那边转义,所以这一格照样能加链接、状态还在
+        body = ('| 主题 | 出处 | 状态 |\n| --- | --- | --- |\n'
+                '| 产品 | [1] | 已可用 |')
+        out = link_refs(body, LINKS)
+        self.assertIn('| 产品 | ' + OUT['1'] + ' | 已可用 |', out)
+
+    def test_a_pipe_in_the_title_would_split_the_row(self):
+        # 没转义的 `|` 会把那一格从中间劈开、把「已可用」挤出表外 —— 裁决得拦下来,
+        # 宁可这一处漏链接。表格外的同一条出处不受影响。
+        bad = {'1': ('<https://e.org/a>', '技术 | 新闻')}
+        body = ('| 主题 | 出处 | 状态 |\n| --- | --- | --- |\n'
+                '| 产品 | [1] | 已可用 |\n\n表外出处 [1]。')
+        out = link_refs(body, bad)
+        self.assertIn('| 产品 | [1] | 已可用 |', out)
+        self.assertIn('表外出处 [\\[1\\]](<https://e.org/a> "技术 | 新闻")。', out)
+
+    def test_an_unused_definition_stays_invisible(self):
+        # 没被正文引用的定义行在页面上是不显示的。把它改成出处链接等于凭空多出
+        # 一行可见正文 —— 比对只挑代码/图片/链接那几类时漏过了(第 4 轮不拦项)。
+        body = '[1]: https://e.org/unused\n\n另一条出处 [2]。'
+        out = link_refs(body, LINKS)
+        self.assertIn('[1]: https://e.org/unused', out)
+        self.assertIn('另一条出处 ' + OUT['2'] + '。', out)
+
+
 class MatchesTheRenderer(Keeps):
     """和渲染器(CommonMark)同一套口径 —— 这几条都拿 markdown-it 核对过。"""
 
@@ -125,7 +174,7 @@ class MatchesTheRenderer(Keeps):
         # 链接标签里不许有未转义的方括号,所以 `[产品 [1]]` 是字面文本,不是链接
         # (markdown-it 实测渲染成 `[产品 [1]]`)。这里的 [1] 就是个普通出处。
         out = link_refs('[产品 [1]] 只是文字。', LINKS)
-        self.assertEqual('[产品 ' + LINKS['1'] + '] 只是文字。', out)
+        self.assertEqual('[产品 ' + OUT['1'] + '] 只是文字。', out)
 
     def test_link_text_may_hold_brackets(self):
         # 反过来,链接**文字**允许嵌套方括号 —— `[产品 [1]][product]` 是一条完整
@@ -136,7 +185,7 @@ class MatchesTheRenderer(Keeps):
         # 冒号后面跟着目标**再跟一段文字**的不是定义,那个 [1] 就是个普通出处 ——
         # 照定义登记下来的话这一条永远漏链接。
         out = link_refs('[1]: https://e.org/x 多余文字\n\n出处 [1]。', LINKS)
-        self.assertEqual(2, out.count(LINKS['1']), out)
+        self.assertEqual(2, out.count(OUT['1']), out)
 
     def test_a_definition_inside_a_code_span_is_not_a_definition(self):
         # 代码里那行长得像定义,可它是代码 —— 既不该改它,也不该让它影响别处
@@ -161,13 +210,13 @@ class Fences(unittest.TestCase):
         body = '````\n```\n围栏里的 [1] 不动\n```\n````\n\n出处 [1]。'
         out = link_refs(body, LINKS)
         self.assertIn('围栏里的 [1] 不动', out)
-        self.assertIn('出处 ' + LINKS['1'] + '。', out)
+        self.assertIn('出处 ' + OUT['1'] + '。', out)
 
     def test_tilde_fence_is_not_closed_by_backticks(self):
         body = '~~~\n```\n波浪围栏里的 [1] 不动\n~~~\n\n出处 [1]。'
         out = link_refs(body, LINKS)
         self.assertIn('波浪围栏里的 [1] 不动', out)
-        self.assertIn('出处 ' + LINKS['1'] + '。', out)
+        self.assertIn('出处 ' + OUT['1'] + '。', out)
 
     def test_unclosed_fence_protects_to_the_end(self):
         out = link_refs('```\n没关上的围栏里 [1]', LINKS)
@@ -176,17 +225,17 @@ class Fences(unittest.TestCase):
     def test_info_string_with_backtick_is_not_a_fence(self):
         # ``` 后面再有反引号的那行压根不是围栏,后面的出处照样要加链接
         out = link_refs('```a`b\n\n出处 [1]。', LINKS)
-        self.assertIn('出处 ' + LINKS['1'] + '。', out)
+        self.assertIn('出处 ' + OUT['1'] + '。', out)
 
 
 class StillLinksTheRealCitations(unittest.TestCase):
     def test_plain_citation(self):
-        self.assertEqual('两条 ' + LINKS['1'] + LINKS['2'] + '。',
+        self.assertEqual('两条 ' + OUT['1'] + OUT['2'] + '。',
                          link_refs('两条 [1][2]。', LINKS))
 
     def test_merged_citation(self):
         for raw in ('[1, 2]', '[1，2]', '[1、2]'):
-            self.assertEqual('也认 ' + LINKS['1'] + LINKS['2'],
+            self.assertEqual('也认 ' + OUT['1'] + OUT['2'],
                              link_refs('也认 ' + raw, LINKS), raw)
 
     def test_out_of_range_numbers_are_left_alone(self):
@@ -196,20 +245,20 @@ class StillLinksTheRealCitations(unittest.TestCase):
     def test_a_lone_backtick_does_not_swallow_the_rest(self):
         # 代码跨度不跨空行:落单的反引号只是个普通字符,后面段落的出处照样加链接
         out = link_refs('一个反引号 ` 落单。\n\n出处 [1]。', LINKS)
-        self.assertIn('出处 ' + LINKS['1'] + '。', out)
+        self.assertIn('出处 ' + OUT['1'] + '。', out)
 
     def test_indented_continuation_lines_still_get_links(self):
         # 日报正文以列表为主,列表项续行本来就缩进四格 —— 那是段落,不是代码块,
         # 按缩进一刀切会让这些行的出处全部漏掉。和上面那条独立缩进代码块成对看。
         out = link_refs('- 一条\n    续行里的出处 [1]。', LINKS)
-        self.assertIn('续行里的出处 ' + LINKS['1'] + '。', out)
+        self.assertIn('续行里的出处 ' + OUT['1'] + '。', out)
 
     def test_every_citation_in_a_long_body_gets_linked(self):
         # 逐个候选各判各的:一处被拒不该带累其它
         body = '\n\n'.join(['`a[1]`'] + [f'第 {i} 句 [1]。' for i in range(12)])
         out = link_refs(body, LINKS)
         self.assertIn('`a[1]`', out)
-        self.assertEqual(12, out.count(LINKS['1']), out)
+        self.assertEqual(12, out.count(OUT['1']), out)
 
     def test_no_links_means_no_change(self):
         self.assertEqual('出处 [1]。', link_refs('出处 [1]。', {}))

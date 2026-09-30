@@ -287,6 +287,22 @@ class DailyReportTests(unittest.TestCase):
         self.assertIn('出处 [\\[1\\]](<https://e.org/a> "甲文 — 公众号·某号")。', body)
         self.assertEqual(1, body.split('## 素材清单')[0].count('<https://e.org/a>'))
 
+    def test_citation_linking_survives_pipes_and_gfm(self):
+        # 库里 215 篇文章标题带着 `|`(`AI Weekly 016 | 开源项目与科技进展` 那种)。
+        # GFM 先按行拆单元格再解析 inline,标题或网址里一个裸 `|` 就把那一格劈开:
+        # 出处那格变成半截标题,右边「已可用」被挤出表外(2026-09-30 第 4 轮审查实测)。
+        add_doc(self.conn, 'source/dr-gzh/a.md', title='技术 | 新闻',
+                url='https://e.org/a|b', published='2026-09-28 20:00')
+        self.chat.return_value = (
+            '## 今日要点\n\n'
+            '| 主题 | 出处 | 状态 |\n| --- | --- | --- |\n| 产品 | [1] | 已可用 |\n\n'
+            '- 裸网址 https://e.org/path/[1] 原样保留;出处 [1]。\n')
+        body = parse_frontmatter(Path(self.gen()['path']).read_text(encoding='utf-8'))[1]
+        cell = '[\\[1\\]](<https://e.org/a%7Cb> "技术 \\| 新闻 — 公众号·某号")'
+        self.assertIn(f'| 产品 | {cell} | 已可用 |', body)   # 状态列还在原位
+        self.assertIn('裸网址 https://e.org/path/[1] 原样保留', body)
+        self.assertIn(f'出处 {cell}。', body)
+
     def test_listing_reading_and_deleting(self):
         add_doc(self.conn, 'source/dr-gzh/a.md')
         self.gen()

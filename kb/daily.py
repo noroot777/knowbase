@@ -236,8 +236,14 @@ def _md_dest(url: str) -> str:
     库里的 url 实测有带圆括号的(`…-(clean).pdf`、`S2589-0042(26)00811-4`),
     裸写进 `](…)` 里会在第一个 `)` 处提前收尾,链接当场断掉、后半截漏成正文。
     尖括号里唯一不能裸出现的是 `<` `>` 本身,转义掉。
+
+    `|` 也得编码:GFM 是**先按行拆单元格再解析 inline** 的,尖括号拦不住它 ——
+    一条目标带 `|` 的链接写进表格,那一格从 `|` 处当场裂成两格,右边的内容被挤
+    出表外(2026-09-30 第 4 轮审查实测)。`%7C` 和 `\|` 渲染出来的 href 逐字
+    相同,编码那种在非 markdown 场景下也对。
     """
-    return '<' + ' '.join(str(url or '').split()).replace('<', '%3C').replace('>', '%3E') + '>'
+    return ('<' + ' '.join(str(url or '').split())
+            .replace('<', '%3C').replace('>', '%3E').replace('|', '%7C') + '>')
 
 
 def _md_text(text: str) -> str:
@@ -252,7 +258,12 @@ def _md_text(text: str) -> str:
 
 
 def _md_title(text: str) -> str:
-    return ' '.join(str(text or '').split()).replace('\\', '\\\\').replace('"', '\\"')
+    """链接标题里的 `|` 要转义 —— 库里 215 篇文章标题带着它(`AI Weekly 016 | 开源
+    项目与科技进展` 那种)。GFM 先拆单元格再解析 inline,标题里一个裸 `|` 就把那
+    一格从中间劈开:出处那格变成半截标题,右边「已可用」被挤出表外、页面上再也
+    看不见(2026-09-30 第 4 轮审查实测)。`\\|` 在表格内外渲染结果一致。"""
+    return (' '.join(str(text or '').split())
+            .replace('\\', '\\\\').replace('"', '\\"').replace('|', '\\|'))
 
 
 def _link_refs(body: str, shown: list[dict]) -> str:
@@ -272,8 +283,9 @@ def _link_refs(body: str, shown: list[dict]) -> str:
     links = {}
     for i, d in enumerate(shown, 1):
         if d.get('url'):
-            title = _md_title(f"{d['title']} — {_label(d['source'])}·{d['account'] or '未署名'}")
-            links[str(i)] = f'[\\[{i}\\]]({_md_dest(d["url"])} "{title}")'
+            links[str(i)] = (
+                _md_dest(d['url']),
+                _md_title(f"{d['title']} — {_label(d['source'])}·{d['account'] or '未署名'}"))
     return daily_refs.link_refs(body, links)
 
 
