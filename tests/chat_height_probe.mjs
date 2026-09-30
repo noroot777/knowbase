@@ -85,6 +85,17 @@ const VIEWPORTS = [
   { w: 700, h: 720, name: "矮竖排 700x720" },
   { w: 390, h: 844, name: "手机 390x844" },
   { w: 375, h: 667, name: "小手机 375x667" },
+  // 手机横屏:高度只剩三四百像素,是整套里最紧的一档。三档断点里它落在 ≤900
+  // (出顶栏、聊天区仍横排),而**可用高度比任何竖屏都少**——.chat-main 上那条
+  // 200px 地板在这里必然比剩余空间高,整块输入区被顶出首屏(2026-09-30 复审
+  // 实测 812×375 带横幅:发送按钮下沿 411.19 / 视口 375)。
+  { w: 812, h: 375, name: "横屏 812x375" },
+  { w: 844, h: 390, name: "横屏 844x390" },
+  { w: 896, h: 414, name: "横屏 896x414" },
+  // 又矮又窄:同时命中 max-width 760 和 max-height 520 两档,专钉那两块的先后
+  { w: 640, h: 360, name: "横屏 640x360" },
+  // 最窄的在用机型:竖排 + 历史栏展开时剩给卡片的更少
+  { w: 320, h: 568, name: "窄手机 320x568" },
 ];
 // ≤760 才有「历史对话」这个开关(#chat-history-toggle),展开后历史栏排在
 // 输入区上方、独占 185px,是另一个把输入区挤下去的来源。
@@ -146,6 +157,8 @@ const measure = `(() => {
     panelWidth: panel.getBoundingClientRect().width,
     barWidth: r.width, barHeight: r.height,
     modelWidth: model.getBoundingClientRect().width,
+    layoutHeight: document.querySelector('.chat-layout').getBoundingClientRect().height,
+    cardHeight: cr.height,
     msgsHeight: box.getBoundingClientRect().height,
     msgsScrollable: box.scrollHeight > box.clientHeight + 1,
     scrollW: document.documentElement.scrollWidth,
@@ -179,7 +192,10 @@ async function probe(vp, banner, history) {
   const tag = `${vp.name}·${banner ? "横幅在" : "横幅关"}${history ? "·历史栏开" : ""}`;
   const slack = m.innerHeight - Math.max(m.barBottom, m.sendBottom, m.modelBottom);
   check(`${tag}:输入区完整在首屏内`, slack >= 0,
-        `底边 ${m.barBottom.toFixed(1)} / 视口 ${m.innerHeight},余 ${slack.toFixed(1)}px`);
+        `底边 ${m.barBottom.toFixed(1)} / 视口 ${m.innerHeight},余 ${slack.toFixed(1)}px`
+        + `(可用 ${m.layoutHeight.toFixed(1)} / 卡片 ${m.cardHeight.toFixed(1)} / 输入框 ${m.barHeight.toFixed(1)})`);
+  check(`${tag}:模型下拉与发送按钮点得到`, m.hitSend && m.hitModel,
+        `elementFromPoint 命中 发送=${m.hitSend} 下拉=${m.hitModel}`);
   check(`${tag}:没有横向溢出`, m.scrollW <= m.innerWidth + 1,
         `scrollWidth ${m.scrollW} > ${m.innerWidth}`);
   check(`${tag}:面板铺满内容区宽度`, m.panelWidth > Math.min(vp.w, 1600) * 0.7,

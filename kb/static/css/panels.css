@@ -145,13 +145,17 @@ body.chat-mode { padding-bottom: 28px; }
 .conv-item:hover .conv-del { display: block; }
 .chat-side-empty { font-size: 12.5px; color: var(--muted); text-align: center; padding: 24px 0; }
 
-/* min-height 是全局唯一的高度地板,取值只够「输入区那一行 + 两三行消息」:
-   它有 overflow: hidden,压得比输入区还矮就会把输入区裁掉,所以不能一路缩到 0;
-   但也不能像原来那样写 380px / 60vh —— 一旦比可用空间高,先被挤出去的仍是
-   输入区(2026-09-30 审查:390×844 展开历史对话即触发)。该缩的是 #chat-msgs
-   和 #chat-convs,它们本来就能内部滚动。 */
+/* **全系统一条固定高度地板都没有了。** 这里原来写 min-height: 200px,理由是
+   「它有 overflow: hidden,压得比输入区还矮会把输入区裁掉」——可地板造不出不存在
+   的空间:手机横屏 812×375 带首次配置横幅时 .chat-layout 只有 115.8px,200px 的
+   卡片直接把整块输入区顶到视口外(发送按钮下沿 420.2 / 视口 375,点不到),
+   比裁掉还糟(2026-09-30 复审实测;320×568 展开历史栏是同一条的另一种表现)。
+   正解是把「输入区最小需要多少」压到任何支持的视口都放得下:卡片按剩余空间走,
+   留白(#chat-msgs 的内边距、输入框的外边距和内边距)在矮/窄视口一起收 ——
+   见下面 640 那档和 workspace.css 里 760 / max-height 520 两档。
+   该缩的仍然是 #chat-msgs 和 #chat-convs,它们本来就能内部滚动。 */
 .chat-main {
-  flex: 1; min-width: 0; min-height: 200px; display: flex; flex-direction: column;
+  flex: 1; min-width: 0; display: flex; flex-direction: column;
   background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
 }
 #chat-msgs { flex: 1; overflow-y: auto; padding: 22px 24px 10px; }
