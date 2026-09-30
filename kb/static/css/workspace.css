@@ -9,7 +9,6 @@ button:hover { opacity: 1; }
 button:active:not(:disabled) { transform: translateY(1px); }
 input, textarea { color: var(--ink); }
 input::placeholder, textarea::placeholder { color: var(--muted); }
-input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
 kbd { font: 11px/1.6 var(--font-mono); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; color: var(--muted); background: #fff; white-space: nowrap; }
 .skip-link { position: fixed; top: -60px; left: 20px; z-index: 100; background: var(--brand); color: white; padding: 8px 20px; border-radius: 8px; }
 .skip-link:focus { top: 12px; }
@@ -36,7 +35,14 @@ h1 { font-family: var(--font-display); font-size: 19px; font-weight: 900; letter
 .gallery-controls { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 4px 0 0; }
 .gfilters { display: flex; gap: 14px; align-items: center; padding: 10px 0; }
 .gallery-search { flex: 1; display: flex; align-items: center; gap: 10px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); min-width: 0; }
-.gallery-search:focus-within { border-color: var(--brand); box-shadow: 0 0 0 3px #17604f14; }
+/* 边框画在容器上的两个搜索框:焦点也由容器画,和别处的输入框是同一条 2px 绿边。
+   input 自己那圈内描边要关掉 —— 容器一条、里面再一条就又是两道「选中」。
+   :has 而不是 :focus-within:.searchbar 里还有个提交按钮,Tab 到它时容器不该跟着亮,
+   按钮有自己的外圈焦点环。 */
+.gallery-search:has(input:focus-visible), .searchbar:has(input:focus-visible) {
+  border-color: var(--brand); box-shadow: inset 0 0 0 1px var(--brand);
+}
+#g-q, #q { box-shadow: none; }
 .gallery-search > .icon { width: 17px; color: var(--muted); }
 #g-q { width: 100%; min-width: 0; padding: 8px 0; border: 0; outline: 0; background: none; font: inherit; font-size: 13.5px; }
 .select-field { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); }
@@ -63,6 +69,10 @@ h1 { font-family: var(--font-display); font-size: 19px; font-weight: 900; letter
 /* 只清底色,不要用 background 简写 —— 简写会连同 base.css 里那个自绘箭头
    (background-image)一起清掉,下拉框就变成一段没有任何可点提示的纯文字。 */
 .gallery-view-controls select { background-color: transparent; border-color: transparent; font-size: 12px; max-width: 130px; }
+/* 这几个下拉平时是透明边框(看着像一行纯文字),聚焦时得把边补回来 —— 不然同一排里
+   旁边那个下拉是 2px 绿边,它只剩内描边那 1px。base.css 那条 select:focus-visible
+   跟这里的透明边规则特异度一模一样,后加载的赢,所以得在本文件里写回来。 */
+.gallery-view-controls select:focus-visible, #ask-model:focus-visible { border-color: var(--brand); }
 .view-switch { display: flex; padding: 2px; border: 1px solid var(--line); background: var(--paper-2); border-radius: 7px; }
 .view-switch button { display: grid; place-items: center; background: none; padding: 4px 8px; min-height: 26px; color: var(--muted); border-radius: 5px; }
 .view-switch button.on { background: var(--card); color: var(--brand); box-shadow: 0 1px 3px #14202b14; }

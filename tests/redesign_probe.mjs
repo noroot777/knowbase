@@ -257,6 +257,51 @@ check("详情抽屉打得开", !!drawer, JSON.stringify(drawer));
 check("抽屉工具名用展示体 900", drawer && /Songti|STSong|serif/i.test(drawer.font) && drawer.weight === "900",
       JSON.stringify(drawer));
 
+
+// ── 8. 焦点只有一条环 ──
+// 输入框外面套一圈 outline、自己再变一次色,就是两道「选中」痕迹:「API Key 设置」
+// 那几个框上下挨着时,选中一个看着像选中了一整块。现在统一成「那条边变成 2px 绿」
+// —— border 1px + 紧贴内沿的 inset 1px。复选框太小,描边画进去等于没有提示,
+// 它们保留外圈 outline(这是无障碍底线,别一起删掉)。
+await send("Emulation.setFocusEmulationEnabled", { enabled: true });
+await goHome();
+// 先来一次真键盘,让 :focus-visible 进入键盘模态(下拉和复选框只认这个)
+await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+await sleep(200);
+const focusRings = await evalJs(`(async () => {
+  const G = '23, 96, 79';
+  const read = el => { const cs = getComputedStyle(el); return {
+    outline: cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) > 0 && cs.outlineColor.includes(G),
+    inset: cs.boxShadow.includes(G) && cs.boxShadow.includes('inset'),
+    glow: cs.boxShadow.includes(G) && !cs.boxShadow.includes('inset'),
+    border: parseFloat(cs.borderTopWidth) > 0 && cs.borderTopColor.includes(G) }; };
+  const focus = async el => { el.focus(); await new Promise(r => setTimeout(r, 320)); };
+  const out = {};
+  switchTab('search');
+  await new Promise(r => setTimeout(r, 400));
+  const sel = document.getElementById('f-topic');
+  await focus(sel); out.select = read(sel);
+  const q = document.getElementById('q');          // 边框画在 .searchbar 上
+  await focus(q); out.qSelf = read(q); out.qBar = read(q.closest('.searchbar'));
+  switchTab('gallery');
+  await new Promise(r => setTimeout(r, 500));
+  const gq = document.getElementById('g-q');       // 边框画在 .gallery-search 上
+  await focus(gq); out.gqSelf = read(gq); out.gqBox = read(gq.closest('.gallery-search'));
+  const cb = document.createElement('input');
+  cb.type = 'checkbox'; document.body.appendChild(cb);
+  await focus(cb); out.checkbox = read(cb); cb.remove();
+  return out;
+})()`);
+check("下拉聚焦不套外圈 outline", focusRings.select && !focusRings.select.outline, JSON.stringify(focusRings.select));
+check("下拉聚焦是 border + 内描边", focusRings.select?.border && focusRings.select?.inset, JSON.stringify(focusRings.select));
+check("容器画边的搜索框自己不再描一圈", !focusRings.qSelf?.inset && !focusRings.gqSelf?.inset,
+      JSON.stringify({ q: focusRings.qSelf, gq: focusRings.gqSelf }));
+check("这两个框的焦点由容器画成同一条边", focusRings.qBar?.border && focusRings.qBar?.inset
+      && focusRings.gqBox?.border && focusRings.gqBox?.inset, JSON.stringify({ bar: focusRings.qBar, box: focusRings.gqBox }));
+check("容器不再外发光", !focusRings.qBar?.glow && !focusRings.gqBox?.glow, JSON.stringify(focusRings.gqBox));
+check("复选框保留外圈焦点环", focusRings.checkbox?.outline, JSON.stringify(focusRings.checkbox));
+
 check("整轮没有页面报错", pageErrors.length === 0, pageErrors.slice(0, 4).join(" | "));
 
 console.log(`\n通过 ${oks.length} 项`);
