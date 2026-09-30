@@ -61,6 +61,13 @@ _BODY_ONLY = _RULES + """
 正文:
 {body}"""
 
+# 标题单独译:正文为空的条目(social 那类短动态)用它,正文回包里漏了标题
+# 分隔标记时也用它补一次。
+_TITLE_ONLY = _RULES + """
+
+只译下面这一行标题,直接输出译文本身,不要加标记:
+{title}"""
+
 
 def _model():
     from kb import llm, llm_stages
@@ -93,21 +100,45 @@ def _split(body: str) -> list[str]:
 
 
 def _parse_titled(out: str) -> tuple[str, str]:
-    """拆 ###TITLE###/###BODY### 两段。模型没按格式回时整段当正文,标题留原文
-    ——宁可标题没译,也不要把一行格式标记当成标题写进 vault。"""
+    """拆 ###TITLE###/###BODY### 两段。没有分隔标记时整段当正文、标题回空串
+    ——一行格式标记不能当标题写进 vault。空标题不代表"这一条译完了",
+    由调用方补问一次(见 `translate_item`)。"""
     if '###BODY###' not in out:
         return '', out.strip()
     head, _, body = out.partition('###BODY###')
     return head.replace('###TITLE###', '').strip(), body.strip()
 
 
+def _title_only(title: str, model) -> str:
+    """单独译一行标题。译不出来就抛错,让整条走失败重试。"""
+    if not title.strip():
+        return ''
+    for line in _call(_TITLE_ONLY.format(title=title), model).splitlines():
+        line = line.replace('###TITLE###', '').replace('###BODY###', '').strip()
+        if line:
+            return line
+    raise RuntimeError('标题没有译出来')
+
+
 def translate_item(item, model) -> tuple[str, str]:
-    """返回 (标题译文, 正文译文)。标题译不出来时回空串,调用方保留原标题。"""
+    """返回 (标题译文, 正文译文)。**标题和正文都得有译文才算这一条译完了。**
+
+    标题单独兜一道:模型偶尔漏掉 ###TITLE### 分隔标记,那时只解析得出正文。
+    原来这种回包按"成功,标题留原文"存下来,而存下来就不再进翻译队列——页面
+    上标着"已译为中文",标题却永久是英文(2026-09-30 复审实测)。所以缺了
+    就补问一次;补不到就抛错,整条按失败计次、下一轮重试。
+
+    正文为空的条目(social 那类只有一行标题的动态)不走带正文的那套格式:
+    问它译一段空正文只会拿回空译文,白白耗掉三次重试额度。
+    """
+    original = item['title'] or ''
     body = (item['body'] or '')[:MAX_BODY]
     truncated = len(item['body'] or '') > MAX_BODY
-    parts = _split(body) or ['']
+    parts = _split(body)
+    if not parts:                                # 只有标题
+        return _title_only(original, model), ''
     title_zh, out = _parse_titled(_call(
-        _WITH_TITLE.format(title=item['title'] or '(无标题)', body=parts[0]), model))
+        _WITH_TITLE.format(title=original or '(无标题)', body=parts[0]), model))
     pieces = [out]
     for extra in parts[1:]:
         pieces.append(_call(_BODY_ONLY.format(body=extra), model))
@@ -116,6 +147,8 @@ def translate_item(item, model) -> tuple[str, str]:
         raise RuntimeError('模型返回了空译文')
     if truncated:
         text += _TRUNCATED.format(n=MAX_BODY)
+    if original and not title_zh:
+        title_zh = _title_only(original, model)
     return title_zh, text
 
 
@@ -145,8 +178,12 @@ def queued_sql() -> tuple[str, list]:
     那份英文。等下一轮译完再落盘,晚一轮但是中文的。队列有出口——试满
     MAX_TRIES 次仍然失败的就不在这个集合里了,那时按原文导出,免得一条
     永远译不动的内容永远进不了知识库。
+
+    判据是 `translated_at`(`_save` 只在整条译成时写它),不是"有没有 body_zh"
+    ——只有标题的短动态译完之后 body_zh 仍然是空串,拿它判的话这一条译完了
+    还赖在队列里,每轮重译一遍。
     """
-    return "lang='en' AND body_zh='' AND translate_tries<?", [MAX_TRIES]
+    return "lang='en' AND translated_at='' AND translate_tries<?", [MAX_TRIES]
 
 
 def available() -> bool:
@@ -216,11 +253,12 @@ def translate_pending(kind: str, limit: int | None = None, progress=None) -> dic
     """
     summary = {'done': 0, 'failed': 0, 'left': 0, 'skipped': '', 'errors': []}
     _label_unknown(kind)
+    cond, cargs = queued_sql()          # 队列判据只有这一份,别在这里另写一遍
     with reg.db() as c:
         rows = [dict(r) for r in c.execute(
-            "SELECT * FROM feed_items WHERE kind=? AND lang='en' AND body_zh=''"
-            ' AND translate_tries<? ORDER BY translate_tries, fetched_at DESC LIMIT ?',
-            (kind, MAX_TRIES, max(1, limit or MAX_ITEMS))).fetchall()]
+            f'SELECT * FROM feed_items WHERE kind=? AND ({cond})'
+            ' ORDER BY translate_tries, fetched_at DESC LIMIT ?',
+            (kind, *cargs, max(1, limit or MAX_ITEMS))).fetchall()]
     summary['left'] = max(0, pending(kind) - len(rows))
     if not rows:
         return summary

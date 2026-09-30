@@ -23,6 +23,11 @@ _state: dict = {
     "running": False,
     "stop_requested": False,
     "stopped": False,
+    # 这一轮运行的身份。管道是单例,但"正在跑"这个布尔认不出**跑的是哪一轮**:
+    # 日报在两次两秒轮询之间,自己那一轮可能已经结束、另一项同步已经接替上来,
+    # 它看到的仍是连续的 running=True(2026-09-30 第 2 轮审查实测)。有了 id,
+    # "停我自己那一轮"和"等我自己那一轮"才表达得出来。永不复用(进程内自增)。
+    "run_id": "",
     "current_stage": "",
     "started_at": "",
     "finished_at": "",
@@ -34,6 +39,14 @@ _state: dict = {
     "log": [],          # 最近若干条进度行
 }
 _lock = threading.Lock()
+_run_seq = 0
+
+
+def new_run_id() -> str:
+    """给新一轮运行发一个身份。只在 `_lock` 里调(`start_pipeline` 那一段)。"""
+    global _run_seq
+    _run_seq += 1
+    return f'run-{_run_seq}'
 
 
 def _now() -> str:
@@ -89,10 +102,18 @@ def get_state() -> dict:
     return deepcopy(_state)
 
 
-def request_stop() -> bool:
-    """Finish active work before releasing the single-pipeline lock."""
+def request_stop(run_id: str = "") -> bool:
+    """Finish active work before releasing the single-pipeline lock.
+
+    `run_id` 非空时只停这一轮:调用方手里那个 id 跟当前运行不一致,说明自己
+    那一轮已经结束、现在跑的是别人起的,停它就是越权(日报的"停止"原来就会
+    误停紧接着启动的普通同步)。空串 = 停当前这一轮,不问是谁起的(面板上那个
+    停止按钮就是这个语义)。
+    """
     with _lock:
         if not _state["running"]:
+            return False
+        if run_id and _state.get("run_id") != run_id:
             return False
         if not _state.get("stop_requested"):
             _state["stop_requested"] = True

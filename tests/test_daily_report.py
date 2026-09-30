@@ -1,6 +1,10 @@
-"""日报:窗口按发布时间、素材口径、落盘产物、定时语义;以及外文条目在导出前被译成中文。"""
+"""日报:窗口按发布时间、素材口径、落盘产物、定时与停止语义。
+
+外文条目的翻译在 tests/test_feed_translate.py。
+"""
 import json
 import tempfile
+import time
 import unittest
 from copy import deepcopy
 from datetime import datetime
@@ -11,8 +15,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from kb import daily, daily_run, llm, llm_stages, store
-from kb.collectors.feeds import FeedCollector
-from kb.feeds import registry as reg, sync, translate
 from kb.scanner import parse_frontmatter
 from kb.web import daily_api
 
@@ -393,7 +395,7 @@ class DailyStopTests(unittest.TestCase):
         # 顺手把别人启动的那一轮同步也停掉是越权。
         from kb import pipeline as pl
         daily_run._state.update({**self.before, 'running': True, 'phase': 'sync',
-                                 'owns_pipeline': False})
+                                 'pipeline_run': ''})
         with patch.object(pl, 'get_state', Mock(return_value={'running': True})), \
              patch.object(pl, 'request_stop', Mock()) as stop:
             accepted, _ = daily_run.request_stop()
@@ -404,11 +406,54 @@ class DailyStopTests(unittest.TestCase):
     def test_stop_does_end_the_round_we_started(self):
         from kb import pipeline as pl
         daily_run._state.update({**self.before, 'running': True, 'phase': 'sync',
-                                 'owns_pipeline': True})
+                                 'pipeline_run': 'run-7'})
         with patch.object(pl, 'get_state', Mock(return_value={'running': True})), \
              patch.object(pl, 'request_stop', Mock()) as stop:
             self.assertEqual(True, daily_run.request_stop()[0])
-        stop.assert_called_once()
+        # 带上 id:停的是"我们那一轮",不是"现在在跑的那一轮"
+        stop.assert_called_once_with('run-7')
+
+    def test_stop_targets_our_run_by_id_not_whatever_runs_now(self):
+        # 审查者的复现:我们那一轮在两次轮询之间跑完,另一项普通同步紧接着
+        # 拿到全局管道。只记布尔所有权的话,停止会落到别人头上
+        # (2026-09-30 审查实测 pipeline_stop_calls=1 落在替换后的同步上)。
+        from kb import pipeline_state as ps
+        state = deepcopy(ps._state)
+        try:
+            ps._state.update({'running': True, 'run_id': 'run-2',
+                              'stop_requested': False, 'log': []})
+            daily_run._state.update({**self.before, 'running': True, 'phase': 'sync',
+                                     'pipeline_run': 'run-1'})
+            self.assertEqual(True, daily_run.request_stop()[0])
+            # 真的走一遍 pipeline.request_stop:别人那一轮一个字节都没动
+            self.assertFalse(ps._state['stop_requested'])
+            self.assertTrue(daily_run._state['stop_requested'])
+        finally:
+            ps._state.clear(); ps._state.update(state)
+
+    def test_a_replaced_run_neither_gets_stopped_nor_reported_as_ours(self):
+        # 同一件事的执行侧:`_sync_channel` 只认 run id 相同的快照。换人之后
+        # 既不去停它(那是别人的活),也不把它的阶段结果当成我们的成绩单。
+        from kb import pipeline as pl
+        snapshots = [
+            {'running': True, 'run_id': 'run-1', 'current_stage': 'crawl',
+             'stages': {'crawl': {'status': 'running', 'detail': '抓取中'}}},
+            # 我们那一轮收尾了,普通同步马上接手:running 看起来从没断过
+            {'running': True, 'run_id': 'run-2', 'current_stage': 'index',
+             'stages': {'index': {'status': 'error', 'detail': '别人那轮的失败'}}},
+        ]
+        daily_run._state.update({**self.before, 'running': True, 'phase': 'sync',
+                                 'pipeline_run': '', 'log': [], 'detail': ''})
+        with patch.object(pl, 'start_pipeline', Mock(return_value='run-1')), \
+             patch.object(pl, 'get_state', Mock(side_effect=snapshots)), \
+             patch.object(pl, 'request_stop', Mock()) as stop, \
+             patch.object(daily_run.time, 'sleep', Mock()), \
+             patch.object(daily_run, '_wait_idle', Mock(return_value=True)):
+            entry = daily_run._sync_channel('rss', 'RSS', time.monotonic() + 600)
+        stop.assert_not_called()
+        self.assertEqual('ok', entry['status'])
+        self.assertNotIn('别人那轮的失败', entry['detail'])
+        self.assertEqual('', daily_run._state['pipeline_run'])
 
     def test_syncing_nothing_is_refused_at_both_layers(self):
         # 勾了"先同步"却一个来源都没选:同步阶段什么都不做、却一路报成功,
@@ -430,161 +475,6 @@ class DailyStopTests(unittest.TestCase):
         s = daily_run._raw_settings()
         self.assertEqual(('2026-09-29', '2026-09-30T07:30', 0),
                          (s['last_fired'], s['next_run'], s['fail_count']))
-
-
-class TranslateTests(unittest.TestCase):
-    def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
-        for p in (patch.object(reg, 'DB_PATH', self.root / 'feeds.db'),
-                  patch.object(sync, 'VAULT_ROOT', self.root / 'vault'),
-                  patch.object(translate, '_model', lambda: MODEL)):
-            p.start(); self.addCleanup(p.stop)
-        self.source = reg.save_subscription('rss', {'name': 'Blog', 'url': 'https://e.org/f.xml'})
-
-    def put(self, title, body, published='2026-09-28 09:00'):
-        reg.put_items(self.source, [{'url': 'https://e.org/p' + str(abs(hash(title)) % 999),
-                                     'title': title, 'body': body, 'published': published}])
-
-    def item(self, index=0):
-        return reg.items('rss')['items'][index]
-
-    def test_english_entry_is_translated_before_it_reaches_the_vault(self):
-        self.put('A new agent runtime', 'The runtime schedules tools for coding agents.')
-        with patch.object(llm, 'chat', Mock(return_value='###TITLE###\n全新的智能体运行时\n'
-                                            '###BODY###\n这个运行时为编码智能体调度工具。')):
-            summary = translate.translate_pending('rss')
-        self.assertEqual(1, summary['done'])
-        sync.export('rss')
-        text = (self.root / 'vault' / 'source' / 'rss' / (self.item()['key'] + '.md')).read_text()
-        meta, body = parse_frontmatter(text)
-        self.assertEqual('全新的智能体运行时', meta['title'])
-        self.assertEqual('A new agent runtime', meta['original_title'])
-        self.assertIn('这个运行时为编码智能体调度工具。', body)
-        self.assertIn('自动翻译', body)
-
-    def test_short_foreign_text_is_not_mistaken_for_chinese(self):
-        # 一个汉字都没有就不可能是中文,这一档没有"判不准"可言。旧规则
-        # "字母少于 12 个一律算中文"把「Hello world」(10 个字母)永久挡在
-        # 翻译队列外面,而 social 那类来源的短动态整段都是这个形态。
-        self.assertEqual('en', reg.text_language('Hello world', ''))
-        self.assertEqual('zh', reg.text_language('预告', ''))          # 有汉字又太短
-        self.assertEqual('zh', reg.text_language('2026 🚀 1.3', ''))   # 没字可判
-        self.assertEqual('zh', reg.text_language('Bun 1.3', ''))       # 没什么可译的
-        self.put('Hello world', 'Short note.')
-        self.assertEqual('en', self.item()['lang'])
-        self.assertEqual(1, translate.pending('rss'))
-
-    def test_existing_short_english_gets_relabelled_and_translated(self):
-        # 存量那批已经按旧规则标成 zh 落在库里了,只改规则救不回来。
-        self.put('Hello world', 'Short note.')
-        with reg.db() as c:
-            c.execute("UPDATE feed_items SET lang='zh'")
-        self.assertEqual(0, translate.pending('rss'))
-        with patch.object(llm, 'chat', Mock(return_value='###TITLE###\n你好世界\n'
-                                            '###BODY###\n短笔记。')):
-            self.assertEqual(1, translate.translate_pending('rss')['done'])
-        self.assertEqual('你好世界', self.item()['title_zh'])
-
-    def test_queued_entries_are_marked_as_waiting_in_the_panel(self):
-        # 一轮只译 MAX_ITEMS 条,还排在队列里的那些被扣在导出闸门外:vault 里
-        # 没有这一份,面板也不能拿英文原文冒充库里那一份。
-        self.put('An English post', 'Some English body text for the panel.')
-        data = reg.items('rss')
-        self.assertEqual((1, 1, 1), (data['total'], data['translating'],
-                                     data['items'][0]['translating']))
-        with patch.object(llm, 'chat', Mock(return_value='###TITLE###\n一篇中文\n'
-                                            '###BODY###\n中文正文。')):
-            translate.translate_pending('rss')
-        data = reg.items('rss')
-        self.assertEqual((0, 0), (data['translating'], data['items'][0]['translating']))
-
-    def test_without_a_key_the_panel_does_not_claim_a_translation_is_coming(self):
-        # 没配 key 时导出闸门放行(原文入库),面板也就不该写"正在等翻译"
-        # ——两边各判各的话,面板上标着等翻译的条目其实已经以英文躺在 vault 里。
-        self.put('An English post', 'Some English body text for the panel.')
-        with patch.object(translate, '_model', Mock(side_effect=RuntimeError('没配 key'))):
-            data = reg.items('rss')
-        self.assertEqual((0, 0), (data['translating'], data['items'][0]['translating']))
-
-    def test_chinese_entry_costs_no_model_call(self):
-        self.put('国产大模型发布', '今天发布了一个新的国产大模型，支持长上下文。')
-        chat = Mock()
-        with patch.object(llm, 'chat', chat):
-            self.assertEqual(0, translate.translate_pending('rss')['done'])
-        chat.assert_not_called()
-        self.assertEqual('zh', self.item()['lang'])
-
-    def test_failure_keeps_the_original_and_stops_after_max_tries(self):
-        self.put('Another English post', 'Some English body text for the reader.')
-        with patch.object(llm, 'chat', Mock(side_effect=RuntimeError('502 bad gateway'))):
-            for _ in range(translate.MAX_TRIES + 1):
-                translate.translate_pending('rss')
-        self.assertEqual(0, translate.pending('rss'))         # 不再自动重试
-        self.assertEqual(translate.MAX_TRIES, self.item()['translate_tries'])
-        # 队列有出口:试满次数之后按原文导出,而不是把这条永远挡在知识库外面。
-        sync.export('rss', hold_untranslated=True)
-        text = (self.root / 'vault' / 'source' / 'rss' / (self.item()['key'] + '.md')).read_text()
-        self.assertIn('Some English body text', text)
-        self.assertNotIn('original_title', text)
-
-    def test_an_entry_still_in_the_queue_does_not_land_in_english(self):
-        # 一轮只译 MAX_ITEMS 条:一次进来 41 条英文时,没轮到的那条原来会先以
-        # 英文写进 vault,而索引/提取/检索/日报读的全是 vault 里那份英文。
-        self.put('An English post', 'English body waiting for its turn.')
-        path = self.root / 'vault' / 'source' / 'rss' / (self.item()['key'] + '.md')
-        sync.export('rss', hold_untranslated=True)
-        self.assertFalse(path.exists())
-        with patch.object(llm, 'chat', Mock(return_value='###TITLE###\n中文标题\n'
-                                            '###BODY###\n中文正文。')):
-            translate.translate_pending('rss')
-        sync.export('rss', hold_untranslated=True)
-        self.assertIn('中文正文。', path.read_text())
-
-    def test_without_an_api_key_english_still_reaches_the_vault(self):
-        # 翻译整个被跳过时不能拦:那些条目会永远进不了知识库,英文总比没有强。
-        self.put('Key-less English post', 'English body with no model configured.')
-        with patch.object(translate, '_model', Mock(side_effect=RuntimeError('没配 key'))):
-            FeedCollector('rss').materialize()
-        path = self.root / 'vault' / 'source' / 'rss' / (self.item()['key'] + '.md')
-        self.assertIn('English body with no model', path.read_text())
-
-    def test_missing_api_key_is_not_charged_against_retries(self):
-        self.put('English again please', 'Body text in English for this entry.')
-        with patch.object(translate, '_model', Mock(side_effect=RuntimeError('没配 key'))):
-            summary = translate.translate_pending('rss')
-        self.assertIn('没配 key', summary['skipped'])
-        self.assertEqual(1, summary['left'])
-        self.assertEqual(0, self.item()['translate_tries'])
-
-    def test_retranslation_forces_a_fresh_export(self):
-        self.put('English entry here', 'English body that will be translated later.')
-        sync.export('rss')
-        path = self.root / 'vault' / 'source' / 'rss' / (self.item()['key'] + '.md')
-        self.assertIn('English body', path.read_text())
-        with patch.object(llm, 'chat', Mock(return_value='###TITLE###\n中文标题\n###BODY###\n中文正文。')):
-            translate.translate_pending('rss')
-        sync.export('rss')
-        self.assertIn('中文正文。', path.read_text())
-
-    def test_long_body_is_translated_in_chunks_and_marked_as_truncated(self):
-        self.put('Long English post', 'paragraph of english text. ' * 700)
-        calls = []
-
-        def chat(prompt, *a, **k):
-            calls.append(prompt)
-            return ('###TITLE###\n长文\n###BODY###\n中文段落。' if len(calls) == 1 else '中文段落。')
-        with patch.object(translate, 'MAX_BODY', 6000), patch.object(llm, 'chat', chat):
-            translate.translate_pending('rss')
-        self.assertGreater(len(calls), 1)
-        self.assertIn('以上为前 6000 字', self.item()['body_zh'])
-
-    def test_translated_text_is_searchable_in_the_panel(self):
-        self.put('An English title', 'English body about agents and runtimes.')
-        with patch.object(llm, 'chat', Mock(return_value='###TITLE###\n中文标题\n###BODY###\n关于智能体的正文。')):
-            translate.translate_pending('rss')
-        self.assertEqual(1, reg.items('rss', q='智能体')['total'])
 
 
 if __name__ == '__main__':

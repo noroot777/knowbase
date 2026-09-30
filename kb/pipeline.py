@@ -46,6 +46,7 @@ from kb.pipeline_state import (
     _state,
     get_state,
     load_last_run,
+    new_run_id,
     request_stop,
 )
 
@@ -133,20 +134,25 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
 
 
 def start_pipeline(stages: list[str] | None = None,
-                   crawl_filter: dict | None = None) -> bool:
-    """启动管道线程。已在跑返回 False。
+                   crawl_filter: dict | None = None) -> str:
+    """启动管道线程。返回这一轮的 run id;已在跑返回空串(照旧可以当布尔用)。
 
     crawl_filter 见 _run_crawl:限定来源目标 + 时间段的范围抓取。
+
+    返回 id 而不是 True,是为了让调用方**原子地**拿到"我起的是哪一轮":
+    事后再去读状态的话,我们那一轮可能已经跑完、另一项同步已经接替,读回来
+    的就是别人的身份(见 `pipeline_state.request_stop` 的说明)。
     """
     wanted = [s for s in (stages or list(STAGES)) if s in STAGES]
     crawl_filter = deepcopy(crawl_filter or {})
     crawl_filter["channel"] = active_collector(crawl_filter.get("channel")).name
     with _lock:
         if _state["running"]:
-            return False
+            return ""
+        run_id = new_run_id()
         _state.update({
             "running": True, "current_stage": "", "log": [],
-            "stop_requested": False, "stopped": False,
+            "stop_requested": False, "stopped": False, "run_id": run_id,
             "started_at": _now(), "finished_at": "",
             "crawl_filter": crawl_filter,
             "run_kind": "sync",
@@ -156,7 +162,7 @@ def start_pipeline(stages: list[str] | None = None,
         })
     threading.Thread(target=_run_pipeline, args=(wanted, crawl_filter),
                      daemon=True).start()
-    return True
+    return run_id
 
 
 # ── 定时同步 ────────────────────────────────────────────────────────────────────

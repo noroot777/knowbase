@@ -112,6 +112,9 @@ if (!(await evalJs(hasToday))) {
 }
 // dailyLoaded 只说明定时设置回来了;列表、正文、覆盖区间是另外三个接口。
 await waitFor(`!!document.querySelector('[data-report]')`);
+// 等的是"今天那一份已经在阅读区里",不是"随便有段正文":列表刷新和打开正文
+// 是两个请求,只等正文的话会读到上一份日报的元信息(全新沙箱首跑假红的原因)。
+await waitFor(`document.getElementById('daily-reader-title').textContent === '日报 · ${today}'`);
 await waitFor(`!!document.querySelector('#daily-reader-body h2')`);
 await waitFor(`!/正在算/.test(document.getElementById('daily-window-label').textContent)`);
 check("日报列表出现了今天这一份",
@@ -228,6 +231,10 @@ check("待翻译的条目标成「正在等翻译」", !!waiting,
 const w = waiting ? JSON.parse(waiting) : {};
 check("待翻译的条目不展示英文正文",
       !!waiting && !/still waiting for its translation/.test(w.excerpt), w.excerpt);
+// 标题也不行:这是进 RSS 页面就看得见的默认内容,露一行英文标题和"英文内容
+// 都译成中文"一样矛盾(2026-09-30 复审实测)。
+check("待翻译的条目不展示英文标题",
+      !!waiting && !/A second English post/.test(w.name) && /[一-鿿]/.test(w.name), w.name);
 check("待翻译的条目不给展开阅读", !!waiting && !w.expandable);
 check("面板写明还有几条在等翻译",
       /条外文内容还在等翻译/.test(await evalJs(`document.querySelector('.source-note')?.textContent || ''`)),

@@ -171,24 +171,33 @@ function renderSubscription(s) {
 // 外文条目在入库前已经译成中文(kb/feeds/translate.py),面板一律显示译文:
 // vault 里存的就是这一份,面板显示英文的话用户根本不知道库里到底是什么。
 // 原文没丢,阅读弹窗里可以切回去。
-// `translating` 是后端按导出闸门那一份口径给的("还扣着没入库"),不是前端
-// 自己猜的:一轮只译 40 条,第 41 条在译完之前既不在 vault 里、也不该在面板
-// 上以英文冒充库里那一份(2026-09-30 审查实测)。
+// `translating` / `retranslating` 是后端按导出闸门那一份口径给的,不是前端
+// 自己猜的(kb/feeds/registry.py 的 items):
+//   translating    还扣着没入库,在等译文 —— 一轮只译 40 条,第 41 条在译完
+//                  之前既不在 vault 里、也不该在面板上以英文冒充库里那一份
+//                  (2026-09-30 审查实测)。**连标题都不显示原文**:这是进
+//                  RSS 页面就看得见的默认内容,露一行英文标题和"英文内容都
+//                  译成中文"一样矛盾(复审实测)。想看原文点右边那个链接。
+//   retranslating  原文已经按原样入库(没配 key 那阵子同步的),补上 key 之后
+//                  重新排进队列等中文覆盖。这一态**照原文显示、可以展开**:
+//                  vault 里此刻确实是这一份英文,说它"暂未写入知识库"和文件、
+//                  索引的事实正相反(复审实测)。如实显示 + 写明在等覆盖。
 function sourceText(item) {
   return { title: item.title_zh || item.title, body: item.body_zh || item.body,
-           translated: !!(item.body_zh || item.title_zh), translating: !!item.translating };
+           translated: !!(item.body_zh || item.title_zh), translating: !!item.translating,
+           retranslating: !!item.retranslating };
 }
 function renderSourceItems() {
   const rows = sourceRows.map(item => { const t = sourceText(item); return `<article class="source-entry">
     <div class="source-entry-meta"><span>${esc(item.author)}</span><time>${item.published ? sourceTime(item.published) : '发布时间未知'}</time></div>
     ${t.translating
       // 等翻译的条目不给“展开阅读”:知识库里这一条还不存在,展开只能展开英文
-      // 原文。标题留着当身份,正文位置如实写状态。
-      ? `<h3 class="source-entry-name">${esc(t.title)}</h3>
-    <p class="source-excerpt">还没有中文译文，这一条暂未写入知识库；下一轮翻译完成后显示中文正文。</p>`
+      // 原文。标题和正文都换成中文状态文案,原文入口留在右下角那个链接上。
+      ? `<h3 class="source-entry-name">外文内容，正在等翻译</h3>
+    <p class="source-excerpt">译成中文之后才写进知识库；这一条现在只有原文，点右下角“原文”可以直接看。</p>`
       : `<h3><button class="source-entry-title" data-read-item="${item.key}">${esc(t.title)}</button></h3>
     <p class="source-excerpt">${esc(t.body.slice(0,380))}${t.body.length>380?'…':''}</p>`}
-    <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}${t.translating ? ' · 外文原文，正在等翻译' : t.translated ? ' · 已译为中文' : ''}</span>${t.translating ? '' : `<button class="text-button" data-read-item="${item.key}">展开阅读</button>`}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`; }).join('');
+    <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}${t.translating ? ' · 外文原文，正在等翻译' : t.translated ? ' · 已译为中文' : t.retranslating ? ' · 外文原文已入库，正在等中文译文覆盖' : ''}</span>${t.translating ? '' : `<button class="text-button" data-read-item="${item.key}">展开阅读</button>`}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`; }).join('');
   const note = sourceTranslating
     ? `<p class="source-note" role="status">${sourceTranslating} 条外文内容还在等翻译：译成中文之后才写进知识库。</p>` : '';
   $('source-list').innerHTML = rows ? note + rows :

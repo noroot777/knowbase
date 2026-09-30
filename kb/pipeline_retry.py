@@ -22,6 +22,7 @@ from kb.pipeline_state import (
     _stage,
     _state,
     load_last_run,
+    new_run_id,
 )
 from kb.pipeline_stages import (
     _run_crawl,
@@ -175,9 +176,12 @@ def start_retry_failed() -> tuple[bool, str]:
         # refill 不是独立卡片,占用 export 那张展示进度。
         card = {s: s in plan for s in STAGES}
         card["export"] = card["export"] or "refill" in plan
+        # 这条也是一次"新的运行":发个新身份,别让它继承上一轮的 id
+        # (日报只停自己那一轮,靠的就是这个 id 不复用)。
         _state.update({
             "running": True, "current_stage": "", "log": [],
             "stop_requested": False, "stopped": False,
+            "run_id": new_run_id(),
             "started_at": _now(), "finished_at": "",
             "crawl_filter": crawl_filter,
             "run_kind": "retry",

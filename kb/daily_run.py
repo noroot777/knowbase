@@ -42,9 +42,13 @@ _state: dict = {
     'since': '', 'until': '', 'sync': False,
     'trigger': '', 'started_at': '', 'finished_at': '', 'error': '',
     'stop_requested': False, 'over_budget': False, 'sched_day': '',
-    # 当前那一轮管道是不是我们自己起的。日报允许在别人的管道跑着时排队等,
-    # 这时候用户按"停止"只该结束我们的等待,不能顺手把别人的同步也停掉。
-    'owns_pipeline': False,
+    # 我们自己起的那一轮管道的 run id(没起就是空串)。日报允许在别人的管道
+    # 跑着时排队等,这时候用户按"停止"只该结束我们的等待,不能顺手把别人的
+    # 同步也停掉。**记 id 而不是布尔**:布尔只回答"是不是我起的",答不了
+    # "现在跑的还是不是我那一轮"——我们那轮在两次轮询之间跑完、另一项普通
+    # 同步紧接着拿到全局管道时,布尔仍是 True,停止就落到了别人头上
+    # (2026-09-30 审查实测)。
+    'pipeline_run': '',
     'channels': [], 'result': None, 'log': [],
 }
 
@@ -234,12 +238,14 @@ def request_stop() -> tuple[bool, str]:
         # 二选一:要么停止先落下、生成整段跳过,要么生成已经开跑、停止被拒。
         if _state['phase'] == 'generate':
             return False, STOP_GENERATING
-        mine = _state['owns_pipeline']
+        mine = _state['pipeline_run']
         if not _state['stop_requested']:
             _state['stop_requested'] = True
             _log('已请求停止:当前阶段结束后不再继续,这一轮不生成日报')
-    if mine and pl.get_state()['running']:
-        pl.request_stop()
+    # 带上 id:我们那一轮可能已经收尾、现在跑的是别人起的同步,那就不该停它。
+    # 这个判断交给 pipeline 在它自己的锁里做,免得"读状态"和"去停"之间又开一道缝。
+    if mine:
+        pl.request_stop(mine)
     return True, STOP_OK
 
 
@@ -270,32 +276,45 @@ def _sync_channel(channel: str, label: str, budget_end: float) -> dict:
     if not _wait_idle(min(budget_end, time.monotonic() + WAIT_BUSY)):
         entry.update(status='skipped', detail='同步管道一直被占用,本轮跳过')
         return entry
-    if not pl.start_pipeline(SYNC_STAGES, crawl_filter={'channel': channel}):
+    run = pl.start_pipeline(SYNC_STAGES, crawl_filter={'channel': channel})
+    if not run:
         entry.update(status='skipped', detail='同步管道已被其它任务占用,本轮跳过')
         return entry
     with _lock:
-        _state['owns_pipeline'] = True
+        _state['pipeline_run'] = run
     # 停止请求正好落在"等到空闲"和"起跑"之间时,request_stop 那一刻还不归我们,
     # 它不会去停这一轮;补一次,免得用户按了停止还要眼看着它跑完整个通道。
     if _halting():
-        pl.request_stop()
+        pl.request_stop(run)
     _set('sync', f'{label}:同步中')
+    # 只认 run id 相同的快照。两秒一跳的轮询里,我们那一轮跑完、另一项同步
+    # 马上接手全局管道是完全可能的:只看 running 的话看到的是连绵不断的 True,
+    # 既不知道已经换人,还会把别人的阶段结果当成自己这个通道的成绩单。
+    mine: dict | None = None
     while True:
         snapshot = pl.get_state()
+        if snapshot.get('run_id') != run:
+            break                    # 我们那一轮已经收尾,现在跑的是别人的
+        mine = snapshot
         if not snapshot['running']:
-            with _lock:
-                _state['owns_pipeline'] = False
-            break
+            break                    # 正常收尾:这份快照就是最终结果
         stage = snapshot.get('current_stage') or ''
         detail = (snapshot['stages'].get(stage) or {}).get('detail') or ''
         _state['detail'] = f'{label}:{detail}' if detail else f'{label}:同步中'
         if time.monotonic() > budget_end and not _halting():
             _log(f'{label}:同步超出时间预算,请求停止后直接生成日报')
             _state['over_budget'] = True
-            pl.request_stop()
+            pl.request_stop(run)
         time.sleep(2)
-    stages = pl.get_state()['stages']
-    bad = [f'{name} {s["detail"]}' for name, s in stages.items() if s['status'] == 'error']
+    with _lock:
+        if _state['pipeline_run'] == run:
+            _state['pipeline_run'] = ''
+    if mine is None:                 # 一次都没看到自己那一轮(跑得比第一跳还快)
+        entry.update(status='ok', detail='同步已结束(阶段结果已被下一轮运行覆盖)')
+        _log(f'{label}:{entry["detail"]}')
+        return entry
+    bad = [f'{name} {s["detail"]}'
+           for name, s in mine['stages'].items() if s['status'] == 'error']
     entry.update(status='error' if bad else 'ok',
                  detail='；'.join(bad)[:400] if bad else '同步完成')
     _log(f'{label}:{entry["detail"]}')
@@ -348,7 +367,7 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         _set('failed', f'日报生成失败: {e}')
     finally:
         with _lock:
-            _state['owns_pipeline'] = False
+            _state['pipeline_run'] = ''
             _state['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             _save_last_run()
             _state['running'] = False

@@ -164,7 +164,10 @@ async function loadDailyReports(keepSelection = true) {
   renderDailyList();
   const wanted = keepSelection && dailyReports.some(r => r.date === dailyCurrent)
     ? dailyCurrent : dailyReports[0]?.date;
-  if (wanted) openDailyReport(wanted);
+  // await:调用方("生成完了,刷新一下")等的是"新那一份已经在屏幕上",不是
+  // "列表请求回来了"。不等的话阅读区还挂着上一份的正文和元信息,看起来像是
+  // 生成没生效(2026-09-30 复审在全新沙箱上抓到,回归因此假红)。
+  if (wanted) await openDailyReport(wanted);
 }
 
 function renderDailyList() {

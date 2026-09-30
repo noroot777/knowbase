@@ -159,7 +159,10 @@ def export(kind: str, hold_untranslated: bool = False):
         path = root / (item['key'] + '.md')
         rel = str(path.relative_to(VAULT_ROOT))
         title, body = translate.display(item)
-        translated = body != item['body']
+        # 标题被译了也算"这一篇是译文":只有一行标题的短动态(正文为空)整条
+        # 可读内容就是标题,不标的话 vault 里这一篇看不出是译文、也丢掉了
+        # 回查原标题的入口。
+        translated = body != item['body'] or title != item['title']
         meta = dict(source=kind, title=title, account=item['author'], published=item['published'],
                     url=item['url'], fetched_at=item['fetched_at'], content_kind=item['content_kind'])
         if translated:
