@@ -97,6 +97,11 @@ const VIEWPORTS = [
   { w: 640, h: 360, name: "横屏 640x360" },
   // 最窄的在用机型:竖排 + 历史栏展开时剩给卡片的更少
   { w: 320, h: 568, name: "窄手机 320x568" },
+  // 600 / 601 两侧:600 落在 ≤600 那档(横幅折行、比 601 高一截),是整套里卡片最矮的
+  // 一格 —— 复审第 3 轮实测卡片只有 57.95px,装不下 82px 的一行输入区,文本域被从
+  // **上边**裁掉、点不到也打不进字。601 是同一个问题的轻症(顶部被切约 5px)。
+  { w: 600, h: 360, name: "窄横屏 600x360" },
+  { w: 601, h: 360, name: "窄横屏 601x360" },
   // 窄且短:≤600 时首次配置横幅本来就折行,复审第 2 轮那次强行 nowrap 把文字挤成
   // 一条细柱、横幅反而从 136.7 长到 230.1px,卡片只剩 90.9px(实测 320×520)。
   { w: 320, h: 520, name: "窄短屏 320x520" },
@@ -153,12 +158,23 @@ const measure = `(() => {
   // (实测旧代码那格,按钮底边越线 6.6px,中心还在裁剪线上方)。
   const hit = el => {
     const b = el.getBoundingClientRect();
-    return [b.top + b.height / 2, b.bottom - 2].every(y => {
+    return [b.top + 2, b.top + b.height / 2, b.bottom - 2].every(y => {
       const t = document.elementFromPoint(b.left + b.width / 2, y);
       return !!t && (t === el || el.contains(t));
     });
   };
+  const tr = ta.getBoundingClientRect();
+  const cs = getComputedStyle(card);
   return {
+    barTop: r.top,
+    cardClipTop: cr.top + parseFloat(cs.borderTopWidth),
+    // 聚焦一个被 overflow: hidden 裁掉的子元素,浏览器会把这个容器**内部**滚起来,
+    // 于是文本域从上边被推出去、而下沿看着还在卡片里(2026-09-30 复审第 3 轮
+    // 600×360 实测 scrollTop=36)。只比下沿会得出错误的通过结论。
+    cardScrollTop: card.scrollTop,
+    taTop: tr.top, taBottom: tr.bottom,
+    taVisible: Math.max(0, Math.min(tr.bottom, cr.bottom) - Math.max(tr.top, cr.top)),
+    hitInput: hit(ta),
     barBottom: r.bottom, sendBottom: send.getBoundingClientRect().bottom,
     modelBottom: model.getBoundingClientRect().bottom,
     cardClipBottom: cr.bottom - parseFloat(getComputedStyle(card).borderBottomWidth),
@@ -174,6 +190,7 @@ const measure = `(() => {
     msgsScrollable: box.scrollHeight > box.clientHeight + 1,
     scrollW: document.documentElement.scrollWidth,
     tight: document.body.classList.contains('chat-tight'),
+    tight2: document.body.classList.contains('chat-tight-2'),
   };
 })()`;
 
@@ -188,6 +205,30 @@ async function typeIntoInput(text) {
     t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); t.focus(); })()`);
   if (text) await send("Input.insertText", { text });
   await sleep(80);
+}
+
+// 真的用鼠标点一下文本域中心,再敲字 —— 光看几何是不够的:600×360 那次文本域
+// 的矩形完好、下沿也在卡片里,可它被父卡片从上边裁掉,点中心打到的是
+// `#main-content`,字一个也进不去(2026-09-30 复审第 3 轮)。
+async function clickAndType(tag, text) {
+  await evalJs(`(() => { const t = document.getElementById('chat-input');
+    t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); t.blur(); })()`);
+  const box = await evalJs(`(() => {
+    const b = document.getElementById('chat-input').getBoundingClientRect();
+    return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
+  })()`);
+  for (const type of ["mousePressed", "mouseReleased"])
+    await send("Input.dispatchMouseEvent",
+               { type, x: box.x, y: box.y, button: "left", clickCount: 1 });
+  await send("Input.insertText", { text });
+  await sleep(80);
+  const got = await evalJs(`(() => ({
+    focused: document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : '',
+    value: document.getElementById('chat-input').value,
+  }))()`);
+  check(`${tag}:点文本域中心能真的打进字`, got.value === text,
+        `焦点在 ${got.focused || "(无)"},value=${JSON.stringify(got.value)}`);
+  await typeIntoInput("");
 }
 
 // 一个视口 × 一种(横幅, 历史栏)组合:量一次、判四条。
@@ -210,6 +251,17 @@ async function probe(vp, banner, history) {
   // 「不拦但你该知道」,既然留白已经按实际余量收,顺手把它也清掉。
   check(`${tag}:输入框整体没被卡片裁掉`, m.barBottom <= m.cardClipBottom + 0.5,
         `输入框底边 ${m.barBottom.toFixed(2)} / 卡片裁剪线 ${m.cardClipBottom.toFixed(2)}`);
+  // 上边界和「文本域点不点得到」得单独查:被裁掉的是**顶部**时,下沿和按钮全在卡片
+  // 里,只比下沿会判成通过(2026-09-30 复审第 3 轮 600×360:文本域只剩下缘 9px,
+  // 点中心打到 #main-content,真敲字进不去输入框)。
+  check(`${tag}:输入框上沿没被卡片裁掉`, m.barTop >= m.cardClipTop - 0.5,
+        `输入框上沿 ${m.barTop.toFixed(2)} / 卡片裁剪上沿 ${m.cardClipTop.toFixed(2)}`);
+  check(`${tag}:文本域完整可见且点得到`,
+        m.taVisible >= m.taHeight - 0.5 && m.hitInput,
+        `可见 ${m.taVisible.toFixed(1)}/${m.taHeight.toFixed(1)}px,命中 ${m.hitInput}`
+        + `(紧凑 ${m.tight ? (m.tight2 ? "二级" : "一级") : "否"} / 卡片 ${m.cardHeight.toFixed(1)})`);
+  check(`${tag}:卡片没有被聚焦滚出内部偏移`, m.cardScrollTop === 0,
+        `card.scrollTop=${m.cardScrollTop}`);
   check(`${tag}:模型下拉与发送按钮没被卡片裁掉`,
         m.sendBottom <= m.cardClipBottom + 0.5 && m.modelBottom <= m.cardClipBottom + 0.5,
         `发送底边 ${m.sendBottom.toFixed(2)} / 下拉底边 ${m.modelBottom.toFixed(2)} / 卡片裁剪线 ${m.cardClipBottom.toFixed(2)}`);
@@ -238,6 +290,9 @@ async function probe(vp, banner, history) {
   check(`${t2}:发送按钮和模型下拉点得到`, g.hitSend && g.hitModel,
         `elementFromPoint 命中 发送=${g.hitSend} 下拉=${g.hitModel}`);
   await typeIntoInput("");
+
+  // 最紧的那几档再真点一次:几何全过也可能点不进字(见 clickAndType 的注释)。
+  if (vp.h <= 520 && banner) await clickAndType(tag, "点击后输入的测试问题");
 }
 
 // ── 模型选项异步到达 ────────────────────────────────────────────────────────

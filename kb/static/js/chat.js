@@ -98,30 +98,34 @@ function autoGrowChat() {
   t.style.height = h;
 }
 
-// 放不下就把留白收起来(body.chat-tight,值在 workspace.css)。
-// **判定永远在常规留白下做**:进来先把 class 摘掉、把文本域压到一行下限,量一次
-// 「输入区 + 消息区那点内边距」还进不进得去卡片 —— 进不去才加回 class。这样加完
-// 之后即使真的放得下了,下一趟仍然按常规留白重新判,不会出现「收了 → 放得下 →
-// 松开 → 又放不下」的来回抖;card.clientHeight 也在摘掉 class 之后读,竖排那档
-// 的 .chat-layout gap 跟着变,两边口径一致。
-// 原来这件事是交给 `@media (max-height: 520px)` 的,而「放不放得下」不是一个高度
-// 数字能回答的:375×520 好好的,375×521 恢复常规留白后,异步到达的长模型名把发送
-// 按钮挤到第二行,文本域已经在 32px 下限、卡片仍差十几像素,按钮被卡片的
-// overflow: hidden 裁掉(2026-09-30 复审第 2 轮实测:下沿 514.47 / 裁剪线 500)。
-// 同步改完就恢复原值,中间不会有一帧被画出来,ResizeObserver 也不会为「改了又
-// 改回去」的同一个尺寸发通知。
+// 放不下就把留白收起来(`body.chat-tight` / `chat-tight-2`,值在 workspace.css)。
+// **逐级试,每加一级重新量一次**:第一级收的是卡片**里面**那点空隙(消息区内边距、
+// 输入框内外边距和行间 gap、横幅留白),它给不出卡片本身的高度;卡片仍装不下一行
+// 输入区时才上第二级,让页头那两处留白退让(主内容上下内边距、标题行下边距)。
+// 不逐级的话就是 600×360 那个形态:卡片 57.95px、输入区一行要 82px,差的 24px
+// 卡片里根本没有 —— 文本域被 `overflow: hidden` 从**上边**裁掉(只剩下缘 9px),
+// 聚焦还把卡片内部滚到底(`scrollTop=36`),点写字的地方打到的是 `#main-content`,
+// 字进不去输入框,滚页面也没用(2026-09-30 复审第 3 轮实测)。
+// **判定永远从「一级都不加」重新开始**,而且每一级都在文本域压到一行下限时量,
+// 所以收完不会反过来判成「放得下」再松开,不会来回抖;`card.clientHeight` 每一趟
+// 现读(竖排那档的 `.chat-layout` gap、第二级的页头留白都跟着 class 变),两边口径
+// 一致。同步改完就恢复原值,中间不会有一帧被画出来,ResizeObserver 也不会为
+// 「改了又改回去」的同一个尺寸发通知。
+const CHAT_TIGHT = ['chat-tight', 'chat-tight-2'];
+
 function fitChatTight(t) {
   const bar = t.closest('.chat-inputbar');
   const card = t.closest('.chat-main');
   if (!bar || !card) return;
   const cls = document.body.classList;
-  cls.remove('chat-tight');
+  cls.remove(...CHAT_TIGHT);
   const prev = t.style.height;
   t.style.height = CHAT_INPUT_MIN + 'px';
-  const room = card.clientHeight;
-  const need = room ? chatBarNeed(bar) : 0;
+  for (const lvl of CHAT_TIGHT) {
+    if (!card.clientHeight || chatBarNeed(bar) <= card.clientHeight) break;
+    cls.add(lvl);
+  }
   t.style.height = prev;
-  if (room && need > room) cls.add('chat-tight');
 }
 
 // 输入区在卡片里的最小占地 = 消息区压不下去的那点内边距 + 输入框上下外边距

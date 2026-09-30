@@ -294,6 +294,19 @@ body.chat-tight #wechat-welcome { padding: 8px 12px; margin-bottom: 8px; }
   body.chat-tight #wechat-welcome > div { flex-basis: auto; }
 }
 
+/* ── 第二级:收完卡片内的留白还是装不下,就让页头退让(body.chat-tight-2)──
+   收留白只能收卡片**里面**那点空隙,给不出卡片本身的高度。600×360 带首次配置横幅
+   时卡片只有 57.95px,而输入区一行的最小占地是 82px —— 差的 24px 卡片里根本没有,
+   于是文本域被 `overflow: hidden` 从**上边**裁掉(只剩下缘 9px),聚焦还把卡片内部
+   滚到了底(`scrollTop=36`),点写字的位置打到的是 `#main-content`,字进不去输入框,
+   滚页面也没用(2026-09-30 复审第 3 轮实测;600 宽落在 ≤600 那档,横幅本来就折行、
+   比 601 高一截,所以偏偏是它最紧)。这一级把页头那两处留白让出来:主内容上下内边距
+   和标题行的下边距 —— 它们是「这一屏上还有什么」里最不值钱的部分,而卡片装不下输入区
+   是功能直接不可用。实测 600×360 卡片 57.95 → 94.95px,文本域 32px 全部可见。
+   **只在第一级不够时才加**(chat.js 的 fitChatTight 逐级试),够了就不动页头。 */
+body.chat-tight-2 #main-content { padding-top: 4px; padding-bottom: 4px; }
+body.chat-tight-2 .compact-heading { margin-bottom: 4px; }
+
 /* 历史栏在 ≤760 是竖排、跟输入区抢高度,这里把它和卡片之间的间距也收掉。
    **只在竖排时收** —— >760 时那个 gap 是横排的水平间距,收了不省任何高度,
    反而让历史栏贴着卡片。同理别给 `.chat-side` 压 max-height:折叠态那一条
