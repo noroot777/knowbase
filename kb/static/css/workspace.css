@@ -100,7 +100,37 @@ h1 { font-family: var(--font-display); font-size: 19px; font-weight: 900; letter
 .search-count { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
 #chat-history-toggle { display: none; }
 body.chat-mode { padding-bottom: 0; }
-.chat-layout { height: calc(100dvh - 96px); min-height: 490px; gap: 22px; }
+/* ── 问答面板撑满可用高度 ──────────────────────────────────────
+   别再按「上面还有多少东西」估高度:三档断点上原本各写一个
+   calc(100dvh - 96/162/175px),而那几个数是照着当时的页头量出来的 ——
+   首次配置横幅(#wechat-welcome)出现时它不在估算里(88.6px + 24px 下边距),
+   输入区整块被顶出首屏,模型下拉和发送按钮都看不见。
+   改成让 #main-content 在 chat 模式下自己锁在可用视口高度上、变成 flex 列,
+   #askpanel 吃掉页头之外的全部剩余,.chat-layout 再吃掉它的剩余:横幅在与
+   不在、页头折成几行,都不用再改任何数字。 */
+body.chat-mode #main-content {
+  display: flex; flex-direction: column;
+  height: calc(100dvh - var(--topbar-h));
+  /* 上面那两条 min-height 都是 100vh 起算的:移动端地址栏露出时 100vh > 100dvh,
+     留着它就把这个盒子重新顶高,输入区又掉到首屏外。地板由 .chat-main 自己管。 */
+  min-height: 0;
+}
+/* 横幅按内容高度占位,不许被 flex 压缩(它的自动最小尺寸能兜住,写明更保险) */
+body.chat-mode #wechat-welcome { flex-shrink: 0; }
+/* 两条都少不了:
+   ① width —— flex 项一旦有 auto 的横向外边距就放弃 stretch,宽度会塌成
+      fit-content(#main-content > div 那条规则正是 margin: 0 auto),所以横向
+      尺寸得显式给足,再靠 max-width + auto 边距居中,和别的 tab 逐像素一致;
+   ② min-height: 0 —— flex 项的自动最小尺寸按内容算,一段长对话会把这个盒子
+      顶到几千像素高,#chat-msgs 那条 overflow-y: auto 就再没机会滚动、输入区
+      被推到页面最底下(高度写死的时候正是这一点把它盖住了)。地板交给
+      .chat-main 的 min-height,只够一行输入区。 */
+body.chat-mode #askpanel { display: flex; flex-direction: column; width: 100%; flex: 1; min-height: 0; }
+/* 高度全部来自父级剩余空间。**这里不许再设 min-height**:地板一旦比可用空间高,
+   被顶出首屏的恰好是输入区 —— 700×720 带首次配置横幅时可用高度只有 456px,而
+   原来的 490/520 把整块撑出页面,模型下拉和发送按钮又掉到视口外(2026-09-30
+   审查实测)。全系统唯一的高度地板在 .chat-main 上(panels.css),只够一行输入区。 */
+.chat-layout { flex: 1; gap: 22px; }
 .chat-side { width: 192px; }
 .chat-main { border-radius: 12px; }
 .chat-empty { padding: 55px 22px 20px; }
@@ -157,10 +187,9 @@ body.overlay-open { overflow: hidden; }
   .gseg button { padding: 5px 8px; }
 }
 @media (max-width: 900px) {
-  #main-content { margin-left: 0; min-height: calc(100vh - 56px); }
+  #main-content { margin-left: 0; min-height: calc(100vh - var(--topbar-h)); }
   .ask-invitation { display: none; }
   .chat-side { width: 150px; }
-  .chat-layout { height: calc(100dvh - 162px); }
   .fav-tools { margin-left: 0; }
   .stage-row { grid-template-columns: 1fr; }
 }
@@ -196,13 +225,26 @@ body.overlay-open { overflow: hidden; }
   .compact-heading { flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
   .compact-heading > span { display: none; }
   #chat-history-toggle { display: block; margin-left: auto; font-size: 11px; }
-  .chat-layout { flex-direction: column; height: calc(100dvh - 175px); min-height: 520px; gap: 12px; }
-  .chat-side { width: 100%; max-height: 185px; }
+  .chat-layout { flex-direction: column; gap: 12px; }
+  /* 竖排时历史栏排在输入区上方,展开后独占一块高度,空间不够时挤走的就是输入区
+     (2026-09-30 审查:390×844 和 375×667 实测)。所以给它一个**按比例**的上限:
+     聊天区宽裕时还是原来的 185px,窄到放不下时按 30% 让位,列表自己内部滚。
+     这跟原来那些 96/162/175/490/520 不是一回事 —— 那些是「上面还有多少东西」的
+     估值,一变就错;这条是占比,任何高度下都成立。
+     **别指望 flex-shrink 顶事**:.chat-main 的 flex-basis 是 0%,一条 185px 的
+     历史栏加它 = 197px,基本总小于聊天区高度,于是这条 flex 线走的是 grow 分支、
+     压根不会去收缩谁;真正撑破的是 .chat-main 那条 min-height 地板被 grow 阶段
+     的最小值钳制住。flex-shrink: 1 只在聊天区矮到连 197px 都不够时才轮得到它,
+     那时该先压扁的确实是历史栏。 */
+  .chat-side { width: 100%; max-height: min(185px, 26%); flex-shrink: 1; }
   #chat-new { width: auto; align-self: flex-start; padding: 8px 16px; }
   #chat-convs { display: none; }
   .history-open #chat-convs { display: flex; }
-  .chat-main { min-height: 380px; }
-  #chat-msgs { padding: 20px 15px; }
+  /* 留白在这一档就开始收:320 宽时发送按钮会换行,输入框本身要 116px,
+     而 320×568 展开历史栏后留给卡片的只有一百五十几 —— 原来的 20/20 内边距
+     加上去就放不下了(2026-09-30 复审实测输入区底边 575.4 / 视口 568)。 */
+  #chat-msgs { padding: 14px 15px 8px; }
+  .chat-inputbar { margin: 4px 10px 10px; }
   .chat-empty { padding: 25px 5px 10px; }
   .chat-empty-title { font-size: 22px; }
   .fav-tools { width: 100%; gap: 7px; }
@@ -224,4 +266,88 @@ body.overlay-open { overflow: hidden; }
   .modal { padding: 20px; }
   #mcp-config { white-space: pre-wrap !important; }
 }
+/* ── 空间不够时收留白(body.chat-tight)────────────────────────────────
+   **触发是 JS 按实际余量加的 class,不是高度阈值**(chat.js 的 `fitChatTight`)。
+   原来这里写的是 `@media (max-height: 520px)`,可「放不放得下」从来不是一个高度
+   数字能回答的:375×520 好好的,375×521 一过阈值就恢复常规留白,而异步到达的长
+   模型名恰好把发送按钮挤到第二行 —— 文本域已经压到 32px 一行下限,卡片仍差十几
+   像素,按钮下半截被 `overflow: hidden` 裁掉,滚页面也补不回来(2026-09-30 复审
+   第 2 轮实测:375×521 发送按钮下沿 514.47 / 裁剪线 500,375×540、375×550 同样
+   被裁)。同一个阈值在反方向也错:视口够矮但内容很少时白收一轮留白。
+   现在由 chat.js 每次重算时量一遍「常规留白下、文本域压到一行,输入区还放不放得
+   进卡片」,放不下才加这个 class —— 判定永远在**常规留白**下做,所以加完不会反过来
+   让判定变成「放得下」,不会来回抖。
+   让出空间的就是留白这一处,四个地方一起收:消息区内边距、输入框内外边距、
+   **输入框自己的行间 gap**(不收就差那十来像素,640×360 上发送按钮被裁 11px),
+   以及首次配置横幅的内外边距(把横幅按回一行是第三级的事,见下面)。 */
+body.chat-tight #chat-msgs { padding: 6px 15px 0; }
+body.chat-tight .chat-inputbar { margin: 2px 8px 2px; padding: 4px 8px 4px 10px; gap: 4px 10px; }
+body.chat-tight #wechat-welcome { padding: 8px 12px; margin-bottom: 8px; }
+
+
+/* ── 第二级:收完卡片内的留白还是装不下,就让页头退让(body.chat-tight-2)──
+   收留白只能收卡片**里面**那点空隙,给不出卡片本身的高度。600×360 带首次配置横幅
+   时卡片只有 57.95px,而输入区一行的最小占地是 82px —— 差的 24px 卡片里根本没有,
+   于是文本域被 `overflow: hidden` 从**上边**裁掉(只剩下缘 9px),聚焦还把卡片内部
+   滚到了底(`scrollTop=36`),点写字的位置打到的是 `#main-content`,字进不去输入框,
+   滚页面也没用(2026-09-30 复审第 3 轮实测;600 宽落在 ≤600 那档,横幅本来就折行、
+   比 601 高一截,所以偏偏是它最紧)。这一级把页头那两处留白让出来:主内容上下内边距
+   和标题行的下边距 —— 它们是「这一屏上还有什么」里最不值钱的部分,而卡片装不下输入区
+   是功能直接不可用。实测 600×360 卡片 57.95 → 94.95px,文本域 32px 全部可见。
+   **只在第一级不够时才加**(chat.js 的 fitChatTight 逐级试),够了就不动页头。 */
+body.chat-tight-2 #main-content { padding-top: 4px; padding-bottom: 4px; }
+body.chat-tight-2 .compact-heading { margin-bottom: 4px; }
+
+/* ── 第三级:让首次配置横幅按回一行(body.chat-tight-3)────────────────────
+   ≤600 时 wechat_setup.css 让它折行(文字独占一行、两个按钮排第二行),横幅一个人
+   就吃掉 114.59px。568×320 / 600×320 带横幅时前两级收完卡片仍然只有 57px,而一行
+   输入区要 92px —— 按回一行省下的 46px 正好补上(实测卡片 57 → 94px,文本域
+   32px 全部可见)。不修的形态是:写问题的地方、模型下拉、发送按钮**全都看不见**,点
+   原位置打不进字、滚页面也没用(2026-09-30 复审第 4 轮实测)。
+   **这一级不许按宽度断点开**:320 那种真窄屏上两个 `flex-shrink: 0` 的按钮会把
+   文字压成一条细柱,横幅反而从 136.7 长到 230.1px、卡片只剩 90.9px(复审第 2 轮
+   实测 320×520)。所以 chat.js 加完这一级之后量一次卡片高度,没换来高度就当场
+   摘掉 —— 按真实占位退让,不按屏宽猜(原来那个 `@media (min-width: 601px)` 就是
+   猜的,而 568×320 恰好落在猜错的一侧)。 */
+body.chat-tight-3 #wechat-welcome { flex-wrap: nowrap; gap: 10px; }
+body.chat-tight-3 #wechat-welcome > div { flex-basis: auto; }
+
+/* ── 第四级:横幅只留标题和两个按钮(body.chat-tight-4)──────────────────
+   到这一级时前三级全收完卡片仍然装不下一行输入区,只剩「横幅那句说明文字」和
+   「写问题的地方」二选一 —— 480×320(横幅按回一行后文字仍占两行、90.7px)、
+   320×360 / 320×380(真窄屏上按回一行只会更糟,第三级已经自己退回去了)都是这个
+   形态。说明文字是解释性的,标题和「完成首次配置 / 稍后配置」两个按钮都留着,
+   所以横幅本身还是完整可用;而输入区装不下是功能直接不可用。实测 480×320 卡片
+   78 → 127px、320×360 74 → 132px,文本域和两个按钮全部可见可点。
+   **只有真的走到这一级才生效**,常规窗口(包括 568×320、600×320)在第三级就够了,
+   那句说明文字照常显示。 */
+body.chat-tight-4 #wechat-welcome p { display: none; }
+body.chat-tight-4 #wechat-welcome { padding: 6px 10px; margin-bottom: 6px; }
+body.chat-tight-4 #wechat-welcome strong { font-size: 13px; }
+/* 顺手把第二级留的那点页头留白退到零 —— 都到这一级了,4px 的上下内边距和标题
+   下边距是纯留白,一分钱不值,而它们正好是 320×320 那种极端窗口差的最后十来像素。 */
+body.chat-tight-4 #main-content { padding-top: 0; padding-bottom: 0; }
+body.chat-tight-4 .compact-heading { margin-bottom: 0; }
+
+/* ── 第五级:模型下拉和发送按钮回到同一行(body.chat-tight-5)────────────────
+   `#ask-model` 的宽度跟着最长的那个选项走(`max-width: 240px`),长模型名一到就把
+   它撑满 —— 320 宽的输入框里放不下「240px 下拉 + 发送按钮」,`flex-wrap` 于是把
+   发送挤到第三行,输入区从 82px 涨到 112px、最小占地从 92 涨到 122px,而卡片只有
+   92px:文本域被从**上边**裁掉(只剩下缘 15px),点中心打到 `#main-content`、字一个
+   也进不去;先写好字再放行模型列表则是发送按钮下沿掉到 341.72 / 视口 320
+   (2026-09-30 复审第 5 轮实测 320×320)。
+   `flex-basis: 0` 是关键:折行是按 flex 基准尺寸决定的,只给 `min-width: 0` /
+   `flex-shrink` 不管用(收缩发生在折行**之后**)。基准归零之后下拉和发送必然同行,
+   下拉再 grow 去吃掉发送剩下的宽度,长名字由原生 select 自己截断。
+   **只在真的走到这一级时才压**:常规窗口上下拉照旧显示完整模型名。 */
+body.chat-tight-5 #ask-model { flex: 1 1 0; min-width: 0; max-width: none; }
+
+/* 历史栏在 ≤760 是竖排、跟输入区抢高度,这里把它和卡片之间的间距也收掉。
+   **只在竖排时收** —— >760 时那个 gap 是横排的水平间距,收了不省任何高度,
+   反而让历史栏贴着卡片。同理别给 `.chat-side` 压 max-height:折叠态那一条
+   (标题 + 展开按钮)本身就要 37px,按百分比压下去会把历史栏入口自己裁掉。 */
+@media (max-width: 760px) {
+  body.chat-tight .chat-layout { gap: 6px; }
+}
+
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }

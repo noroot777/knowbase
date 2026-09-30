@@ -2,7 +2,12 @@
    宽度 80px:上一版为了给内容区多挤 16px 一路从 176 → 88 → 72,结果 11 个入口
    的标签只剩 59px 可用,得靠「字号留够余量并禁止折行」硬顶着。内容区宽度差
    这点根本看不出来,标签挤不挤一眼就看得出来,所以这笔交易反过来做。 */
-:root { --sidebar-width: 80px; }
+:root {
+  --sidebar-width: 80px;
+  /* 窄屏才有顶栏,宽屏为 0 —— 谁想按「视口里还剩多少」算高度就读它,别再
+     各写一个 56。#main-content 的 min-height 和问答面板的 height 都靠它。 */
+  --topbar-h: 0px;
+}
 #sidebar { position: fixed; inset: 0 auto 0 0; width: var(--sidebar-width); padding: 18px 6px 12px; display: flex; flex-direction: column; background: var(--card); border-right: 1px solid var(--line); z-index: 25; overflow-y: auto; scrollbar-width: thin; }
 .sidebar-brand { display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .brand-lockup { display: flex; flex-direction: column; align-items: center; gap: 6px; color: var(--ink); text-decoration: none; }
@@ -52,7 +57,8 @@
   .sidebar-bottom { padding-top: 10px; }
 }
 @media (max-width: 900px) {
-  #topbar { display: flex; position: sticky; top: 0; height: 56px; align-items: center; gap: 12px; padding: 0 16px; background: var(--card); border-bottom: 1px solid var(--line); z-index: 20; }
+  :root { --topbar-h: 56px; }
+  #topbar { display: flex; position: sticky; top: 0; height: var(--topbar-h); align-items: center; gap: 12px; padding: 0 16px; background: var(--card); border-bottom: 1px solid var(--line); z-index: 20; }
   #topbar strong { font: 900 17px var(--font-display); letter-spacing: .03em; }
   #page-crumb { color: var(--muted); font-size: 13px; border-left: 1px solid var(--line); padding-left: 12px; }
   #topbar > :last-child { margin-left: auto; }
