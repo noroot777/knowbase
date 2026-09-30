@@ -255,6 +255,17 @@ def _halting() -> bool:
     return bool(_state['stop_requested'] or _state['over_budget'])
 
 
+def _sync_issues() -> list[dict]:
+    """这一轮没同步成功的通道(error / unknown / 被跳过的都算)。
+
+    降级拿已有内容出报是对的("今天的日报没出来"比"少了两个来源"严重),但这份
+    名单必须一路传下去:面板上的横幅、完成提示、写进日报文件的那几行都读它。
+    """
+    return [{'channel': c['channel'], 'label': c['label'],
+             'status': c['status'], 'detail': c['detail']}
+            for c in _state['channels'] if c['status'] != 'ok']
+
+
 # ── 执行 ────────────────────────────────────────────────────────────────────────
 
 def _wait_idle(deadline: float) -> bool:
@@ -368,11 +379,21 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         # 窗口的截止时刻要在**同步跑完之后**才定下来(没显式指定时 generate 自己
         # 取 now):日报覆盖的是"到生成这一刻为止",同步花掉的那几小时里产出的
         # 内容也算数。开跑时就把 until 钉死的话,那几小时会掉进两份日报的缝里。
+        issues = _sync_issues()
         res = daily.generate(since=since, until=until, first_days=first_days,
-                             progress=lambda text: _set('generate', text))
+                             progress=lambda text: _set('generate', text),
+                             sync_issues=issues)
         _state.update(result=res, date=res['date'], since=res['since'], until=res['until'])
-        _set('done', f"日报已生成:{res['docs']} 条素材"
-                     + (f"(另有 {res['late']} 条补录)" if res['late'] else ''))
+        # 完成这句话要把同步缺口说出来。"日报已生成"配一个绿勾、外加一份看起来
+        # 完整的日报,用户没法区分"全都同步到了"和"一个来源都没同步到、直接拿
+        # 旧素材出报"——后者实测就长这样(2026-09-30 审查:三个来源全部连接失败)。
+        note = f"日报已生成:{res['docs']} 条素材"
+        if res['late']:
+            note += f"(另有 {res['late']} 条补录)"
+        if issues:
+            note += (f";{len(issues)} 个来源未同步成功("
+                     + '、'.join(i['label'] for i in issues) + ')')
+        _set('done', note)
     except LookupError as e:
         # "这段时间没有新内容"不是故障,重试多少次都是同一个结果。
         _state['error'] = str(e)

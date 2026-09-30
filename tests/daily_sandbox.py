@@ -59,15 +59,37 @@ def main():
                datetime.combine(now.date(), dt_time()) - timedelta(minutes=1))
     daily_dir = vault / 'daily'
     daily_dir.mkdir(parents=True, exist_ok=True)
+    # 这一份还故意带上"有来源没同步成功":降级拿已有内容出报是允许的,但那一份
+    # 日报不能跟"全都同步到了"长得一模一样(2026-09-30 审查:三个来源全部连接
+    # 失败,页面和文件里一个字都没提)。给历史那一份带上,探针才能验"翻回去还
+    # 看得见当时缺了什么"。
     (daily_dir / f'{mark.date().isoformat()}.md').write_text(
         '---\ntype: daily-report\n'
         f'date: {mark.date().isoformat()}\n'
         f"window_since: {(mark - timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"window_until: {mark.strftime('%Y-%m-%d %H:%M:%S')}\n"
         'docs: 1\ntotal: 1\nlate: 0\nsources: {公众号: 1}\nmodel: stub-model\n'
-        f"generated: {mark.strftime('%Y-%m-%d %H:%M')}\n---\n\n"
-        f'# 日报 · {mark.date().isoformat()}\n\n## 今日要点\n\n- 上一份日报 [1]\n',
+        f"generated: {mark.strftime('%Y-%m-%d %H:%M')}\n"
+        "sync_failed:\n- 'RSS：无法连接来源'\n---\n\n"
+        f'# 日报 · {mark.date().isoformat()}\n\n'
+        '> 覆盖上一份日报之后发布的内容(按发布时间,不是抓取时间)。\n\n'
+        '> **本轮有 1 个来源没有同步成功**,以下内容只来自已经入库的素材:\n'
+        '> - RSS：无法连接来源\n\n'
+        '## 今日要点\n\n- 上一份日报 [1]\n',
         encoding='utf-8')
+
+    # 上一轮运行的落盘状态:重启 kb-web 之后进程内没有通道结果,面板要从这里
+    # 读回"哪些来源没同步成功"。
+    (data / 'daily_last_run.json').write_text(json.dumps({
+        'date': mark.date().isoformat(), 'since': '', 'until': '', 'sync': True,
+        'trigger': 'manual', 'started_at': mark.strftime('%Y-%m-%d %H:%M:%S'),
+        'finished_at': mark.strftime('%Y-%m-%d %H:%M:%S'), 'error': '',
+        'channels': [{'channel': 'rss', 'label': 'RSS', 'status': 'error',
+                      'detail': '无法连接来源'},
+                     {'channel': 'dr-gzh', 'label': '公众号', 'status': 'ok',
+                      'detail': '同步完成'}],
+        'result': None, 'log': [],
+    }, ensure_ascii=False, indent=1), encoding='utf-8')
 
     env = {**os.environ, 'KB_DATA_DIR': str(data), 'KB_VAULT_ROOT': str(vault)}
     subprocess.run(['uv', 'run', 'kb', 'index', '--no-vector'], cwd=ROOT, env=env, check=True)

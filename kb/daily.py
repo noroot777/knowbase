@@ -230,11 +230,17 @@ def _material(items: list[dict]) -> str:
 
 
 def _page(since: datetime, until: datetime, mat: Material, body: str,
-          model: str) -> str:
+          model: str, sync_issues: list[dict] | None = None) -> str:
     shown = mat.all()
     counts: dict[str, int] = {}
     for d in shown:
         counts[_label(d['source'])] = counts.get(_label(d['source']), 0) + 1
+    # 哪些来源这一轮没同步成功。**必须写进文件本身**:日报是拿走就读的产物
+    # (复制、Obsidian、明天再翻),面板上的提示留不住。一份"只用旧素材"的日报
+    # 和一份"全都同步到了"的日报长得一模一样,那是在骗人(2026-09-30 审查实测:
+    # 三个来源全部连接失败,页面照样只有一句绿色的「日报已生成」)。
+    issues = [f"{i.get('label') or i.get('channel')}：{i.get('detail') or '未同步成功'}"
+              for i in (sync_issues or [])]
     meta = {
         'type': 'daily-report', 'date': until.date().isoformat(),
         'window_since': since.strftime(STAMP), 'window_until': until.strftime(STAMP),
@@ -243,6 +249,8 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
         'sources': counts, 'model': model,
         'generated': datetime.now().strftime('%Y-%m-%d %H:%M'),
     }
+    if issues:
+        meta['sync_failed'] = issues
     refs = '\n'.join(
         f"{i}. [{d['title']}]({d['url']}) — {_label(d['source'])}·{d['account'] or '未署名'}"
         f"{' · 补录' if d['late'] else ''}"
@@ -258,6 +266,10 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
     tail = ('\n\n> ' + ' '.join(more)) if more else ''
     head = (f'# 日报 · {until:%Y-%m-%d}\n\n'
             f'> 覆盖 {_label_window(since, until)} 发布的内容(按发布时间,不是抓取时间)。\n\n')
+    if issues:
+        head += (f'> **本轮有 {len(issues)} 个来源没有同步成功**,'
+                 '以下内容只来自已经入库的素材:\n'
+                 + ''.join(f'> - {t}\n' for t in issues) + '\n')
     return ('---\n' + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + '---\n\n'
             + head + f'{body.strip()}\n\n'
             f'## 素材清单({len(shown)} 条)\n\n{refs}{tail}\n')
@@ -301,11 +313,15 @@ def next_window(first_days: int = FIRST_DAYS,
 
 
 def generate(since: datetime | None = None, until: datetime | None = None,
-             first_days: int = FIRST_DAYS, model=None, progress=None) -> dict:
+             first_days: int = FIRST_DAYS, model=None, progress=None,
+             sync_issues: list[dict] | None = None) -> dict:
     """生成一份日报并落盘,返回 {date, since, until, docs, total, late, path, model}。
 
     素材为空时抛 LookupError(那不是失败,是"这段时间没有新内容"),调用方据此
     提示,而不是拿一份空日报盖掉可能已经存在的那份。
+
+    `sync_issues` 是这一轮没同步成功的通道(`daily_run` 给的通道结果),原样写进
+    日报:允许降级用已有内容出报,但不能让它看起来像是全都同步到了。
     """
     from kb import llm, llm_stages, store
 
@@ -332,7 +348,7 @@ def generate(since: datetime | None = None, until: datetime | None = None,
     if not body.strip():
         raise RuntimeError('模型返回了空日报,请稍后重试或换一个模型')
     path = report_dir() / f'{until.date().isoformat()}.md'
-    _write(path, _page(since, until, mat, body, str(picked)))
+    _write(path, _page(since, until, mat, body, str(picked), sync_issues))
     return {'date': until.date().isoformat(), 'since': since.strftime(STAMP),
             'until': until.strftime(STAMP), 'path': str(path), 'docs': len(mat.items),
             'total': mat.total, 'late': len(mat.late), 'model': str(picked)}
@@ -342,13 +358,15 @@ def generate(since: datetime | None = None, until: datetime | None = None,
 
 def _entry(path: Path, with_body: bool = False) -> dict:
     meta, body = parse_frontmatter(path.read_text(encoding='utf-8'))
+    issues = meta.get('sync_failed')
     out = {'date': str(meta.get('date') or path.stem), 'docs': int(meta.get('docs') or 0),
            'total': int(meta.get('total') or 0), 'late': int(meta.get('late') or 0),
            'model': str(meta.get('model') or ''),
            'generated': str(meta.get('generated') or ''),
            'sources': meta.get('sources') if isinstance(meta.get('sources'), dict) else {},
            'window_since': str(meta.get('window_since') or ''),
-           'window_until': str(meta.get('window_until') or '')}
+           'window_until': str(meta.get('window_until') or ''),
+           'sync_failed': [str(t) for t in issues] if isinstance(issues, list) else []}
     if with_body:
         out['body'] = body
     return out

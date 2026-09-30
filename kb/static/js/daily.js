@@ -174,7 +174,8 @@ function renderDailyList() {
   $('daily-list').innerHTML = dailyReports.map(r => `<button class="daily-row ${r.date === dailyCurrent ? 'on' : ''}"
     data-report="${esc(r.date)}"><b>${esc(r.date)}</b>
     <span>${r.docs} 条素材${r.total > r.docs ? ` / 窗口内 ${r.total}` : ''}${r.late ? ` · 补录 ${r.late}` : ''}</span>
-    <small>${esc(Object.entries(r.sources || {}).map(([k, n]) => `${k} ${n}`).join(' · ') || '—')}</small></button>`).join('')
+    <small>${esc(Object.entries(r.sources || {}).map(([k, n]) => `${k} ${n}`).join(' · ') || '—')}${
+      r.sync_failed?.length ? ` · ${r.sync_failed.length} 个来源未同步` : ''}</small></button>`).join('')
     || '<div class="daily-empty"><h3>还没有日报</h3><p>选好日期，点右上角生成。</p></div>';
 }
 
@@ -193,6 +194,8 @@ async function openDailyReport(date) {
     // `# 日报 · 日期` 是给 Obsidian 看的,面板上标题栏已经写着同一句,渲染出来
     // 就是连着两行一模一样的标题;跟在它后面那句「> 覆盖 … 发布的内容」同理,
     // 元信息那一行已经写了。两处都只在面板上剥掉,vault 里的文件一个字不改。
+    // 正文里那段「本轮有 N 个来源没有同步成功」跟着 md 一起渲染出来(剥掉的只有
+    // 标题和覆盖区间这两行重复信息),所以历史日报翻回来也看得见当时的同步缺口。
     $('daily-reader-body').innerHTML =
       mdHtml(r.body.replace(/^\s*#\s+[^\n]*\n+(?:>\s*覆盖[^\n]*\n)?/, ''));
     $('daily-copy').hidden = $('daily-del').hidden = false;
@@ -284,6 +287,25 @@ function renderDailyButtons() {
   $('nav-daily-dot').hidden = !running;
 }
 
+// 同步缺口横幅:哪些来源这一轮没同步成功。toast 会自己消失,而"这份日报只用了
+// 已入库的素材"是看这份日报时一直要知道的事——一个来源都没同步到的那一轮,页面
+// 原来只有一句绿色的「日报已生成」(2026-09-30 审查实测)。
+function dailyChannelResults(s) {
+  // 重启 kb-web 之后进程内状态是空的,上一轮的通道结果留在落盘的 last_run 里。
+  return (s?.channels?.length ? s.channels : s?.last_run?.channels) || [];
+}
+
+function renderDailySyncNote(s) {
+  const bad = dailyChannelResults(s).filter(c => c.status !== 'ok');
+  $('daily-sync-note').hidden = !bad.length;
+  if (!bad.length) return;
+  $('daily-sync-note-text').textContent =
+    `本轮有 ${bad.length} 个来源没有同步成功：`
+    + bad.map(c => `${c.label}（${c.detail || '未同步成功'}）`).join('；')
+    // 只有真出了报才提这一句;停止/失败那两档日报压根没生成。
+    + (s?.phase === 'done' ? '。日报用的是已经入库的内容。' : '。');
+}
+
 function dailyPhaseText(s) {
   if (s.phase === 'failed') return '上次生成失败：' + (s.error || '未知原因');
   if (s.phase === 'stopped') return s.detail || '已停止，这一轮没有生成日报';
@@ -308,9 +330,15 @@ async function refreshDailyStatus() {
   if (!s.running && s.phase === 'failed') dailyError(s.error || '日报生成失败', 'run');
   else if (s.running) clearDailyError('run');
   renderDailyButtons();
+  renderDailySyncNote(s);
   if (finished) {
+    const bad = dailyChannelResults(s).filter(c => c.status !== 'ok');
     if (s.phase === 'failed') toast('日报未生成', { key: 'daily', detail: s.error || '' });
     else if (s.phase === 'stopped') toast('已停止', { key: 'daily', type: 'info', detail: s.detail || '' });
+    // 有来源没同步到就不报成功色:日报是出了,但它不是"同步全部并生成"承诺的
+    // 那一份,标成绿勾等于把降级说成完整成功。
+    else if (bad.length) toast(`日报已生成，但 ${bad.length} 个来源未同步成功`,
+      { key: 'daily', type: 'info', detail: s.detail || '' });
     else toast('日报已生成', { key: 'daily', type: 'ok', detail: s.detail || '' });
     if (dailyActive()) {
       dailyCurrent = s.result?.date || dailyCurrent;

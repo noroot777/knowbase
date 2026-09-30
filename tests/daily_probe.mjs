@@ -103,6 +103,30 @@ const today = new Date().toLocaleDateString("sv");
 // 沙箱只预置"上一份日报"(昨天那份);今天这一份由探针自己先生成一次,全新
 // 沙箱和跑过一次的沙箱才是同一个起点。之前默认它已经在那儿,于是脚本只在
 // 复用过的沙箱里全绿,换个干净目录当场四项红。
+// 有来源没同步成功时,面板上要有一条留得住的说明(toast 会自己消失,而"这份
+// 日报只用了已入库的素材"是看它时一直要知道的事)。状态喂的是真实形状 ——
+// 真去跑一轮失败的同步既要连外网、又要等采集超时,那不是这一项要验的东西;
+// 「后端确实把通道结果放进状态」由 tests/test_daily_report.py 钉住。
+const noteOf = async (state) => JSON.parse(await evalJs(
+  `(() => { renderDailySyncNote(${JSON.stringify(state)});
+    const el = document.getElementById('daily-sync-note');
+    return JSON.stringify({ hidden: el.hidden,
+      text: document.getElementById('daily-sync-note-text').textContent }); })()`));
+const failed = { channel: 'rss', label: 'RSS', status: 'error', detail: '无法连接来源' };
+const okChannel = { channel: 'dr-gzh', label: '公众号', status: 'ok', detail: '同步完成' };
+check("状态接口带着各通道的结果",
+      'channels' in JSON.parse(await evalJs(
+        `(async () => JSON.stringify(await (await fetch('/api/daily/status')).json()))()`)));
+let gap = await noteOf({ phase: 'done', channels: [failed, okChannel] });
+check("没同步成功的来源写在面板上",
+      !gap.hidden && /没有同步成功/.test(gap.text) && /RSS/.test(gap.text)
+        && /无法连接来源/.test(gap.text) && !/公众号/.test(gap.text), JSON.stringify(gap));
+gap = await noteOf({ phase: 'done', channels: [], last_run: { channels: [failed] } });
+check("重启后从上一轮的落盘结果里读回来", !gap.hidden && /RSS/.test(gap.text),
+      JSON.stringify(gap));
+gap = await noteOf({ phase: 'done', channels: [okChannel] });
+check("全都同步成功时没有这条横幅", gap.hidden, JSON.stringify(gap));
+
 const hasToday = `(async () => (await (await fetch('/api/daily/reports')).json())
   .reports.some(r => r.date === '${today}'))()`;
 if (!(await evalJs(hasToday))) {
@@ -128,6 +152,26 @@ check("正文没有重复一遍大标题", !bodyHtml.includes("<h1"), bodyHtml.s
 check("正文没有重复一遍覆盖区间", !bodyHtml.includes("blockquote"), bodyHtml.slice(0, 120));
 const meta = await evalJs(`document.getElementById('daily-reader-meta').textContent`);
 check("元信息写明覆盖的是发布时间", /覆盖 .+ → .+ 发布的内容/.test(meta) && /补录 1 条/.test(meta), meta);
+
+// 那一份"有来源没同步成功"的日报:文件本身带着说明,所以翻回去还看得见
+const prev = JSON.parse(await evalJs(`(async () => {
+  const rs = (await (await fetch('/api/daily/reports')).json()).reports
+    .filter(r => r.date !== '${today}');
+  return JSON.stringify(rs[0] || {}); })()`));
+check("同步缺口随日报一起存下来", (prev.sync_failed || []).length === 1,
+      JSON.stringify(prev.sync_failed));
+check("列表行上标出那一份缺了来源",
+      /1 个来源未同步/.test(await evalJs(`[...document.querySelectorAll('[data-report]')]
+        .find(b => b.dataset.report === ${JSON.stringify(prev.date)})?.textContent || ''`)),
+      prev.date);
+await evalJs(`openDailyReport(${JSON.stringify(prev.date)})`);
+await waitFor(`document.getElementById('daily-reader-title').textContent === '日报 · ${prev.date}'`);
+const prevBody = await evalJs(`document.getElementById('daily-reader-body').innerHTML`);
+check("日报正文写明哪些来源没同步成功",
+      /本轮有 1 个来源没有同步成功/.test(prevBody) && /RSS/.test(prevBody),
+      prevBody.slice(0, 160));
+await evalJs(`openDailyReport('${today}')`);
+await waitFor(`document.getElementById('daily-reader-title').textContent === '日报 · ${today}'`);
 
 // 覆盖区间:默认接上一份日报,截止时刻是生成那一刻(不预先钉死)
 const label = await evalJs(`document.getElementById('daily-window-label').textContent`);

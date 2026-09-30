@@ -211,6 +211,30 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual(T('2026-09-28 08:00'),
                          daily.next_window(now=T('2026-09-29 08:00'))[0])
 
+    def test_a_report_says_which_sources_did_not_sync(self):
+        # 降级拿已有内容出报是对的,但一份"只用旧素材"的日报不能长得跟"全都同步
+        # 到了"一模一样 —— 实测三个来源全部连接失败,页面上只有一句绿色的
+        # 「日报已生成」,文件里一个字都没提(2026-09-30 审查)。
+        add_doc(self.conn, 'source/dr-gzh/a.md', title='甲文')
+        out = daily.generate(since=self.since, until=self.until, sync_issues=[
+            {'channel': 'rss', 'label': 'RSS', 'status': 'error', 'detail': '无法连接来源'},
+            {'channel': 'social', 'label': '大V观点', 'status': 'unknown', 'detail': '成败未知'}])
+        meta, body = parse_frontmatter(Path(out['path']).read_text(encoding='utf-8'))
+        self.assertEqual(['RSS：无法连接来源', '大V观点：成败未知'], meta['sync_failed'])
+        self.assertIn('本轮有 2 个来源没有同步成功', body)
+        self.assertIn('> - RSS：无法连接来源', body)
+        # 读回来也带着:历史日报翻回去仍然看得出当时缺了什么
+        self.assertEqual(2, len(daily.report('2026-09-29')['sync_failed']))
+        self.assertEqual(2, len(daily.reports()[0]['sync_failed']))
+
+    def test_a_clean_sync_adds_no_warning(self):
+        add_doc(self.conn, 'source/dr-gzh/a.md', title='甲文')
+        out = daily.generate(since=self.since, until=self.until, sync_issues=[])
+        meta, body = parse_frontmatter(Path(out['path']).read_text(encoding='utf-8'))
+        self.assertNotIn('sync_failed', meta)
+        self.assertNotIn('没有同步成功', body)
+        self.assertEqual([], daily.report('2026-09-29')['sync_failed'])
+
     def test_listing_reading_and_deleting(self):
         add_doc(self.conn, 'source/dr-gzh/a.md')
         self.gen()
@@ -494,6 +518,25 @@ class DailyStopTests(unittest.TestCase):
         finally:
             ps._state.clear(); ps._state.update(state)
             ps._finished.clear(); ps._finished.update(finished)
+
+    def test_a_failed_channel_reaches_the_report_and_the_finish_notice(self):
+        # 通道失败原来只留在 _state['channels'] 里:没人读,也没写进日报,完成
+        # 提示照样是一句绿色的"日报已生成"(2026-09-30 审查实测)。
+        gen = self.run_once(channels=[
+            {'channel': 'rss', 'label': 'RSS', 'status': 'error', 'detail': '无法连接来源'},
+            {'channel': 'social', 'label': '大V观点', 'status': 'ok', 'detail': '同步完成'},
+            {'channel': 'wechat_oa', 'label': '公众号', 'status': 'skipped',
+             'detail': '超出时间预算,未同步'}])
+        issues = gen.call_args.kwargs['sync_issues']
+        self.assertEqual(['RSS', '公众号'], [i['label'] for i in issues])  # ok 的不算
+        self.assertEqual('done', daily_run._state['phase'])
+        self.assertIn('2 个来源未同步成功(RSS、公众号)', daily_run._state['detail'])
+
+    def test_a_clean_round_keeps_its_plain_finish_notice(self):
+        gen = self.run_once(channels=[
+            {'channel': 'rss', 'label': 'RSS', 'status': 'ok', 'detail': '同步完成'}])
+        self.assertEqual([], gen.call_args.kwargs['sync_issues'])
+        self.assertNotIn('未同步成功', daily_run._state['detail'])
 
     def test_syncing_nothing_is_refused_at_both_layers(self):
         # 勾了"先同步"却一个来源都没选:同步阶段什么都不做、却一路报成功,

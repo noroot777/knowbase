@@ -15,6 +15,8 @@
 .daily-banner span { margin-right:auto; overflow-wrap:anywhere; }
 .daily-banner[hidden] { display:none; }
 .daily-banner.error { background:var(--warn-soft); color:var(--danger); }
+/* 同步没成功但日报还是出了:这不是错误(日报确实在那儿),也不该是绿色。 */
+.daily-banner.warn { background:var(--warn-soft); color:var(--warn); }
 
 .daily-workbench { display:grid; grid-template-columns:268px minmax(0,1fr); gap:24px; align-items:start; }
 .daily-stream { min-width:0; }

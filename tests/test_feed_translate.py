@@ -1,23 +1,33 @@
 """外文订阅条目在导出进 vault 之前被译成中文:语言判定、队列口径、标题译文、
-来源面板那两种"还没有中文"的状态。
+来源面板那两种"还没有中文"的状态、重导出不丢已有标签、翻译失败如实上报。
 
 从 tests/test_daily_report.py 拆出来的(那份写到 682 行、逼近 700 行上限,而
 翻译这一块最独立:只碰 kb/feeds/,不需要日报那套窗口与定时脚手架)。
 """
+import json
+import sqlite3
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from kb import llm
+from kb import extract, llm, pipeline_state, scanner, search, store
+from kb.chunker import split_chunks
 from kb.collectors.feeds import FeedCollector
+from kb.config import Source
 from kb.feeds import registry as reg, sync, translate
 from kb.scanner import parse_frontmatter
 
 MODEL = llm.Model('openai', 'test-model')
 
 
-class TranslateTests(unittest.TestCase):
+class FeedCase(unittest.TestCase):
+    """脚手架:临时 registry + 临时 vault + 一个固定模型。自己不带断言。"""
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -34,6 +44,9 @@ class TranslateTests(unittest.TestCase):
 
     def item(self, index=0):
         return reg.items('rss')['items'][index]
+
+
+class TranslateTests(FeedCase):
 
     def test_english_entry_is_translated_before_it_reaches_the_vault(self):
         self.put('A new agent runtime', 'The runtime schedules tools for coding agents.')
@@ -275,6 +288,221 @@ class TranslateTests(unittest.TestCase):
         with patch.object(llm, 'chat', Mock(return_value='###TITLE###\n中文标题\n###BODY###\n关于智能体的正文。')):
             translate.translate_pending('rss')
         self.assertEqual(1, reg.items('rss', q='智能体')['total'])
+
+
+class ExportStageTests(FeedCase):
+    """翻译失败不许在阶段状态里蒸发。
+
+    导出是这条链上最后一个报阶段状态的人:失败只写进日志的话,它随后把阶段刷成
+    绿色,日报那头照抄成"同步完成"——而那一轮的新文章一篇都没进知识库
+    (2026-09-30 审查实测)。
+    """
+
+    def setUp(self):
+        super().setUp()
+        p = patch.dict(pipeline_state._state, {
+            'stages': deepcopy(pipeline_state._state['stages']),
+            'log': [], 'stop_requested': False})
+        p.start(); self.addCleanup(p.stop)
+
+    def stage(self):
+        return pipeline_state._state['stages']['export']
+
+    def test_a_translation_failure_turns_the_export_stage_red(self):
+        self.put('New release today', 'A new release became available.')
+        with patch.object(llm, 'chat', Mock(side_effect=RuntimeError('HTTP 503 translator'))):
+            FeedCollector('rss').materialize()
+        stage = self.stage()
+        self.assertEqual('error', stage['status'])
+        self.assertIn('1 条翻译失败', stage['detail'])
+        # 原因要留在明细里:不然用户只看到一个红点,重跑一次才知道是 503
+        self.assertIn('HTTP 503', json.dumps(stage.get('failures'), ensure_ascii=False))
+        self.assertFalse(list((self.root / 'vault' / 'source' / 'rss').glob('*.md')))
+
+    def test_a_normal_backlog_is_not_reported_as_a_failure(self):
+        # "这一轮只译得下 MAX_ITEMS 条,其余下一轮"是正常积压,不是故障。两者
+        # 合成一个数就等于把故障说成积压(或者反过来天天报红)。
+        self.put('First English post', 'Body one in English.')
+        self.put('Second English post', 'Body two in English.')
+        with patch.object(translate, 'MAX_ITEMS', 1), \
+                patch.object(llm, 'chat', Mock(return_value='###TITLE###\n中文标题\n'
+                                               '###BODY###\n中文正文。')):
+            FeedCollector('rss').materialize()
+        stage = self.stage()
+        self.assertEqual('ok', stage['status'])
+        self.assertIn('1 条待翻译', stage['detail'])
+        self.assertNotIn('翻译失败', stage['detail'])
+
+    def test_giving_up_after_max_tries_is_not_reported_as_a_failure(self):
+        # 试满 MAX_TRIES 之后按原文入库是设计好的出口:内容进了知识库,阶段不该
+        # 一直红着——否则这一条永远译不动的内容会把每一轮同步都标成失败。
+        self.put('Stubborn English post', 'Body that never gets translated.')
+        with patch.object(llm, 'chat', Mock(side_effect=RuntimeError('502 bad gateway'))):
+            for _ in range(translate.MAX_TRIES - 1):
+                FeedCollector('rss').materialize()
+            self.assertEqual('error', self.stage()['status'])   # 还扣着,还没入库
+            FeedCollector('rss').materialize()      # 第三次失败:出队,按原文入库
+        self.assertEqual('ok', self.stage()['status'])
+        self.assertIn('已保存 1 条', self.stage()['detail'])
+
+
+class ReexportMetadataTests(unittest.TestCase):
+    """补译会重写已经导出过的 md —— 提取回写的标签必须留下来。
+
+    实测过的坏结果:一篇已提取的英文旧文补成中文后,frontmatter 里的 tags 被
+    整份重写抹掉,索引按 frontmatter 重建 doc_tags,而 `extracted_at` 还在、
+    提取不会再做一遍 —— 按原话题检索当场从 1 条归零,再同步也不恢复
+    (2026-09-30 审查实测)。
+    """
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.vault = self.root / 'vault'
+        for p in (patch.object(reg, 'DB_PATH', self.root / 'feeds.db'),
+                  patch.object(sync, 'VAULT_ROOT', self.vault),
+                  patch.object(scanner, 'VAULT_ROOT', self.vault),
+                  patch.object(extract, 'VAULT_ROOT', self.vault),
+                  patch.object(translate, '_model', lambda: MODEL)):
+            p.start(); self.addCleanup(p.stop)
+        self.conn = store.connect(self.root / 'kb.db')
+        self.addCleanup(self.conn.close)
+        source = reg.save_subscription('rss', {'name': 'Blog', 'url': 'https://e.org/f.xml'})
+        reg.put_items(source, [{'url': 'https://e.org/old', 'title': 'Agent runtime',
+                                'body': 'The runtime supports tool scheduling.',
+                                'published': '2026-09-28 09:00'}])
+        # 没配 key 那阵子英文原文是按原样入过库的,提取也跑过了(这就是补译要
+        # 重写的那批文件)。
+        sync.export('rss')
+        self.path = self.vault / 'source/rss' / (reg.items('rss')['items'][0]['key'] + '.md')
+        self.spec = Source(name='rss', root=self.path.parent)
+        self.index('2026-09-28 09:10:00')
+        data = {'entities': [{'name': 'AgentRuntime', 'kind': 'project'}],
+                'topics': ['ai-coding'], 'summary': '智能体工具调度运行时'}
+        rel = str(self.path.relative_to(self.vault))
+        stale = extract.save_extraction(self.conn, rel, data)
+        extract.writeback_extraction(self.conn, rel, data, stale)
+        self.conn.commit()
+
+    def index(self, now):
+        doc = scanner._doc_from_file(self.path, self.spec)
+        store.upsert_document(self.conn, doc, split_chunks(doc.body), now)
+        self.conn.commit()
+        return doc
+
+    def tags(self):
+        return sorted(r[0] for r in self.conn.execute(
+            'SELECT tag FROM doc_tags WHERE path=?',
+            (str(self.path.relative_to(self.vault)),)))
+
+    def translate_and_reexport(self):
+        with patch.object(llm, 'chat', Mock(return_value='###TITLE###\n智能体运行时\n'
+                                            '###BODY###\n运行时支持工具调度。')):
+            self.assertEqual(1, translate.translate_pending('rss')['done'])
+        sync.export('rss', hold_untranslated=True)
+
+    def test_a_backfilled_translation_keeps_the_extracted_tags(self):
+        self.assertEqual(['entity/agentruntime', 'topic/ai-coding'], self.tags())
+        self.translate_and_reexport()
+        self.assertIn('运行时支持工具调度。', self.path.read_text(encoding='utf-8'))
+        # 文件本身要留住 tags:doc_tags 是按 frontmatter 重建的
+        meta, _ = parse_frontmatter(self.path.read_text(encoding='utf-8'))
+        self.assertEqual(['entity/agentruntime', 'topic/ai-coding'], sorted(meta['tags']))
+        self.index('2026-09-28 09:20:00')
+        self.assertEqual(['entity/agentruntime', 'topic/ai-coding'], self.tags())
+
+    def test_the_topic_filter_still_finds_it_after_the_backfill(self):
+        rel = str(self.path.relative_to(self.vault))
+        hits = search.search(self.conn, 'runtime',
+                             search.Filters(tags=['topic/ai-coding']), use_vector=False)
+        self.assertEqual([rel], [h.path for h in hits])
+        self.translate_and_reexport()
+        self.index('2026-09-28 09:20:00')
+        # 提取不会重做(extracted_at 还在),所以标签只能靠导出保留下来
+        self.assertNotIn(rel, [r['path'] for r in extract.pending_docs(self.conn)])
+        hits = search.search(self.conn, '运行时',
+                             search.Filters(tags=['topic/ai-coding']), use_vector=False)
+        self.assertEqual([rel], [h.path for h in hits])
+
+    def test_export_still_owns_its_own_fields(self):
+        # 保留别人的字段,不等于把自己那几个键也冻住:标题/语言标记每轮按
+        # registry 的当前事实重写,否则译完了 md 里还写着 lang: en。
+        self.translate_and_reexport()
+        meta, _ = parse_frontmatter(self.path.read_text(encoding='utf-8'))
+        self.assertEqual('智能体运行时', meta['title'])
+        self.assertEqual('Agent runtime', meta['original_title'])
+        self.assertEqual('zh', meta['lang'])
+
+
+class ColumnBackfillTests(unittest.TestCase):
+    """译文那几列是 ALTER 补上去的:补列和它前面那次列集合读取必须在同一把写锁里。
+
+    分开跑的话,升级后的第一次并发访问会有一个请求 500(`duplicate column name`,
+    2026-09-30 审查实测)。
+    """
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.db = Path(temp.name) / 'feeds.db'
+        p = patch.object(reg, 'DB_PATH', self.db)
+        p.start(); self.addCleanup(p.stop)
+        old = sqlite3.connect(self.db)              # 一个还没有译文列的老库
+        old.executescript(reg.SCHEMA)
+        old.commit(); old.close()
+
+    def test_the_backfill_runs_inside_the_write_lock(self):
+        seen, real = [], reg._migrate
+        with patch.object(reg, '_migrate',
+                          lambda c: (seen.append(c.in_transaction), real(c))[1]):
+            with reg.db() as c:
+                c.execute('SELECT count(*) FROM feed_items').fetchone()
+        self.assertEqual([True], seen)
+
+    def test_two_first_accesses_both_succeed(self):
+        # 屏障卡在"列集合已读出来"那一刻:锁外跑时两个连接都能走到这里,于是
+        # 后一个 ALTER 撞 duplicate;锁内跑时第二个还堵在 BEGIN IMMEDIATE 上,
+        # 屏障超时后由第一个自己走完(所以超时要吞掉,不能当失败)。
+        barrier = threading.Barrier(2)
+        connect = sqlite3.connect
+
+        class Watched:
+            def __init__(self, inner):
+                object.__setattr__(self, 'inner', inner)
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+            def __setattr__(self, name, value):     # row_factory 要落到真连接上
+                setattr(self.inner, name, value)
+
+            def execute(self, sql, *a):
+                rows = self.inner.execute(sql, *a)
+                if sql.startswith('PRAGMA table_info'):
+                    rows = rows.fetchall()
+                    try:
+                        barrier.wait(timeout=1)
+                    except threading.BrokenBarrierError:
+                        pass
+                return rows
+
+        def read(_):
+            try:
+                with reg.db() as c:
+                    c.execute('SELECT count(*) FROM feed_items').fetchone()
+                return ''
+            except Exception as e:                   # noqa: BLE001 - 就是要看清它
+                return f'{type(e).__name__}: {e}'
+
+        with patch.object(reg, 'sqlite3', SimpleNamespace(
+                connect=lambda *a, **k: Watched(connect(*a, **k)), Row=sqlite3.Row)), \
+                ThreadPoolExecutor(max_workers=2) as pool:
+            problems = [p for p in pool.map(read, (1, 2)) if p]
+        self.assertEqual([], problems)
+        with reg.db() as c:
+            self.assertIn('lang', {r['name'] for r in
+                                   c.execute('PRAGMA table_info(feed_items)')})
 
 
 if __name__ == '__main__':

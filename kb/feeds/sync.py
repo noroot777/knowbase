@@ -15,6 +15,7 @@ from kb.feeds import registry as reg
 from kb.feeds import translate
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_state import _state, _stage
+from kb.scanner import parse_frontmatter
 
 FETCH_WORKERS = 4
 COLLECT_SECONDS = 90
@@ -133,19 +134,58 @@ def collect(kind, scope):
     return summary
 
 
-def export(kind: str, hold_untranslated: bool = False):
+# export 自己产出的 frontmatter 字段:每一轮都按 registry 里的当前事实重写。
+# 这张表之外的键都是**别人**写进这篇 md 的(提取回写的 tags 是唯一的现役例子),
+# 重导出时必须原样留下。
+_OWNED_META = ('source', 'title', 'account', 'published', 'url', 'fetched_at',
+               'content_kind', 'lang', 'translated_from', 'original_title')
+
+
+def _kept_meta(path: Path) -> dict:
+    """旧文件里那些不属于 export 的 frontmatter 字段。
+
+    重导出是整份重写这篇 md。原来只写 export 自己那几个键,于是提取阶段回写的
+    `tags`(topic/entity/flag)被一起抹掉 —— 而索引按 frontmatter 重建 doc_tags、
+    `documents.extracted_at` 又还在,提取不会再做一遍:这篇文章从此按话题再也
+    搜不到,以后每次同步都是同一个结果(2026-09-30 审查实测:一篇已提取的英文
+    旧文补译后,按原话题检索当场从 1 条归零)。
+
+    重导出原本少见(只有源内容变了才发生),翻译把它变成了常规路径:没配 key
+    那阵子按英文入库的条目补上 key 之后要重写一遍,老解析器留下的半成品补译
+    标题也要重写一遍。保留而不是重做提取,是因为标签口径没变 —— 内容还是同一
+    篇,只是换了语言,再买一次提取只是重复付钱。
+    """
+    try:
+        meta, _ = parse_frontmatter(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError):
+        return {}                     # 还没导出过(或者读不了),没什么可留的
+    return {k: v for k, v in meta.items() if k not in _OWNED_META}
+
+
+def export(kind: str, hold_untranslated: bool = False,
+           translated: dict | None = None):
     # hold_untranslated:还排在翻译队列里的条目这一轮不写 vault。一轮只译
     # MAX_ITEMS 条,不拦的话第 41 条会先以英文落盘,索引/提取/检索/日报都按
     # 英文处理过一遍。翻译整个跳过时(没配 key)不能拦,否则这些条目永远进
     # 不了知识库 —— 那时英文总比没有强。
+    #
+    # translated:这一轮翻译的成品摘要(`translate.translate_pending` 的返回值)。
+    # 导出是这条链上**最后**一个报阶段状态的人,翻译失败必须在这里汇总:只写
+    # 进日志的话,这一行 _stage 随后把阶段刷成绿色,而实测那一轮确实有新文章
+    # 因为翻译 503 一篇都没进知识库,日报那头照样记「同步完成」
+    # (2026-09-30 审查实测)。
     base = 'FROM feed_items WHERE kind=? AND exported_hash<>content_hash'
     args: list = [kind]
-    held = 0
+    held = stuck = 0
     if hold_untranslated:
         cond, extra = translate.queued_sql()
         with reg.db() as c:
-            held = c.execute(f'SELECT count(*) {base} AND ({cond})',
-                             (*args, *extra)).fetchone()[0]
+            # 扣下的条目分两种,合成一个数就等于把故障说成积压:`stuck` 是译
+            # 过、报了错、这一轮没能入库的(该判红),held-stuck 是还没轮到的
+            # 正常积压(下一轮自然消化)。
+            row = c.execute(f"SELECT count(*) n, sum(translate_error<>'') bad "
+                            f'{base} AND ({cond})', (*args, *extra)).fetchone()
+        held, stuck = row['n'], row['bad'] or 0
         base += f' AND NOT ({cond})'
         args += extra
     with reg.db() as c:
@@ -171,6 +211,9 @@ def export(kind: str, hold_untranslated: bool = False):
             # 真译了才留 —— 正文已经整篇换成中文,想按英文名找回这条只剩这个入口。
             if title != item['title']:
                 meta['original_title'] = item['title']
+        # 留在最后:writeback_tags 是往 frontmatter 末尾追加 tag 的,tags 不在
+        # 末尾的话新 tag 会落进别的键下面。
+        meta.update(_kept_meta(path))
         notice = '\n> 以下为订阅源提供的摘要；完整内容请打开原文。\n' if item['content_kind'] == 'summary' else ''
         if translated:
             notice += '\n' + translate.NOTE + '\n'
@@ -192,6 +235,13 @@ def export(kind: str, hold_untranslated: bool = False):
         finally:
             if temp:
                 temp.unlink(missing_ok=True)
-    _stage('export', 'error' if errors else 'ok',
-           f'已保存 {done} 条到知识库' + (f'，{held} 条待翻译（译完再入库）' if held else ''),
-           failures=errors)
+    note = f'已保存 {done} 条到知识库'
+    if stuck:
+        note += f'，{stuck} 条翻译失败（暂未入库）'
+    if held - stuck > 0:
+        note += f'，{held - stuck} 条待翻译（译完再入库）'
+    # 翻译失败让导出阶段判红:这一轮确实有内容没能进知识库,那不是"稍后再说"。
+    # 已经试满 MAX_TRIES、按原文入库的那些不算——它们不在扣留集合里(见
+    # `translate.queued_sql` 的出口),留着原文是设计好的退让,不是失败。
+    fails = errors + ([] if not stuck else (translated or {}).get('errors') or [])
+    _stage('export', 'error' if errors or stuck else 'ok', note, failures=fails)

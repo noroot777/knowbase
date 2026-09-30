@@ -45,7 +45,9 @@ class FeedCollector:
         summary = translate.translate_pending(self.name, progress=progress)
         if note := translate.summarize(summary):
             _log(f'export: {note}')
-        export(self.name, hold_untranslated=not summary['skipped'])
+        # 摘要一路交给 export:阶段状态由它最后落,翻译失败只写日志的话这个
+        # 阶段会以绿色收尾,而那些文章一篇都没入库(见 `sync.export`)。
+        export(self.name, hold_untranslated=not summary['skipped'], translated=summary)
 
     def pending(self):
         with reg.db() as c:

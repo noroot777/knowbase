@@ -63,6 +63,12 @@ _ADDED_COLUMNS = {
 
 
 def _migrate(conn) -> None:
+    """补上后加的列。调用方必须已经持有写锁(见 `db()`)。
+
+    "读一遍列集合 → 逐列 ALTER"这两步分开跑的话,两个连接同时首访老库时会读到
+    同一份旧列集合,后一个 ALTER 撞上 `duplicate column name`,那一个请求当场
+    500(2026-09-30 审查实测:升级后的第一次并发访问,一个成功一个报错)。
+    """
     for table, columns in _ADDED_COLUMNS.items():
         have = {r['name'] for r in conn.execute(f'PRAGMA table_info({table})')}
         for name, decl in columns:
@@ -174,9 +180,11 @@ def db():
     conn.execute('PRAGMA journal_mode=WAL')
     try:
         conn.executescript(SCHEMA)
-        _migrate(conn)
         # One transaction: deleting a default never brings it back on restart.
+        # 补列也在这把写锁里:它先读列集合再 ALTER,锁外跑的话两个首访连接会
+        # 读到同一份旧列集合,后一个 ALTER 报 duplicate column(见 `_migrate`)。
         conn.execute('BEGIN IMMEDIATE')
+        _migrate(conn)
         if not conn.execute("SELECT 1 FROM feed_meta WHERE key='defaults-v1'").fetchone():
             defaults = json.loads(Path(__file__).with_name('defaults.json').read_text())
             for s in defaults:
