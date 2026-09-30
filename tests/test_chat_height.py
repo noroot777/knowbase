@@ -13,6 +13,7 @@
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -26,8 +27,22 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PROBE = Path(__file__).resolve().parent / "chat_height_probe.mjs"
 SERVER = Path(__file__).resolve().parent / "serve_workspace.py"
-SHELL = (Path.home() / "Library/Caches/ms-playwright/chromium_headless_shell-1243"
-         / "chrome-headless-shell-mac-arm64" / "chrome-headless-shell")
+
+
+def _shell() -> Path | None:
+    """playwright 缓存里的 chrome-headless-shell,版本号不写死。
+
+    tests/test_catgraph_browser.py 那份钉的是 `chromium_headless_shell-1243`,
+    缓存一升版整组测试就静默跳过、再也不跑(2026-09-30 审查提到的那条)。
+    这里按 glob 取版本号最大的一份,一个都没有才跳过。
+    """
+    root = Path.home() / "Library/Caches/ms-playwright"
+    found = sorted(root.glob("chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell"),
+                   key=lambda p: int(re.search(r"-(\d+)", p.parts[-3]).group(1)))
+    return found[-1] if found else None
+
+
+SHELL = _shell()
 
 
 def _free_port() -> int:
@@ -37,7 +52,7 @@ def _free_port() -> int:
 
 
 @unittest.skipUnless(shutil.which("node"), "需要 node 驱动无头浏览器")
-@unittest.skipUnless(SHELL.exists(), f"需要 chrome-headless-shell({SHELL})")
+@unittest.skipUnless(SHELL is not None, "需要 playwright 缓存里的 chrome-headless-shell")
 class ChatHeightTest(unittest.TestCase):
 
     @classmethod

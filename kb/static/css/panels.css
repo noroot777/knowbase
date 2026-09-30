@@ -114,9 +114,14 @@ code.fav-cmd:hover { background: var(--ink); }
 /* ── 问答面板 ── */
 /* chat 模式只收窄底部留白给聊天区让高度,宽度与其他 tab 一致,切换不跳动 */
 body.chat-mode { padding-bottom: 28px; }
-/* 高度由父级(chat 模式下的 #askpanel,见 workspace.css)按剩余空间给,
-   这里不写固定高度 —— 照「上面还有多少东西」估的数字一遇到页头变化就错。 */
-.chat-layout { display: flex; gap: 12px; flex: 1; min-height: 430px; }
+/* 高度由父级(chat 模式下的 #askpanel,见 workspace.css)按剩余空间给,这里
+   既不写固定高度、也不设地板 —— 照「上面还有多少东西」估的数字一遇到页头变化
+   就错,而地板比可用空间高的时候,被顶出首屏的恰好是输入区。唯一的下限落在
+   .chat-main 上,只够一行输入区加一点消息。
+   **min-height 得显式写 0,不能只是「不写」**:省掉它等于 min-height: auto,
+   而 flex 项的自动最小尺寸按内容算 —— 一段长对话立刻把这块顶到几千像素高,
+   跟 #askpanel 上那句 0 是同一个道理(实测消息区 4294px、页面整个被撑开)。 */
+.chat-layout { display: flex; gap: 12px; flex: 1; min-height: 0; }
 
 .chat-side { width: 180px; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px; }
 #chat-new { width: 100%; padding: 10px 0; border-radius: 12px; font-size: 13.5px; }
@@ -140,8 +145,13 @@ body.chat-mode { padding-bottom: 28px; }
 .conv-item:hover .conv-del { display: block; }
 .chat-side-empty { font-size: 12.5px; color: var(--muted); text-align: center; padding: 24px 0; }
 
+/* min-height 是全局唯一的高度地板,取值只够「输入区那一行 + 两三行消息」:
+   它有 overflow: hidden,压得比输入区还矮就会把输入区裁掉,所以不能一路缩到 0;
+   但也不能像原来那样写 380px / 60vh —— 一旦比可用空间高,先被挤出去的仍是
+   输入区(2026-09-30 审查:390×844 展开历史对话即触发)。该缩的是 #chat-msgs
+   和 #chat-convs,它们本来就能内部滚动。 */
 .chat-main {
-  flex: 1; min-width: 0; display: flex; flex-direction: column;
+  flex: 1; min-width: 0; min-height: 200px; display: flex; flex-direction: column;
   background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
 }
 #chat-msgs { flex: 1; overflow-y: auto; padding: 22px 24px 10px; }
@@ -216,8 +226,8 @@ body.chat-mode { padding-bottom: 28px; }
 
 @media (max-width: 640px) {
   .chat-layout { flex-direction: column; }
-  .chat-side { width: 100%; max-height: 160px; }
-  .chat-main { min-height: 60vh; }
+  /* 竖排时历史栏得能被压扁(它自己内部滚动),不然挤走的是输入区 */
+  .chat-side { width: 100%; max-height: 160px; flex-shrink: 1; }
 }
 
 /* ── 采集目标管理弹窗 ─────────────────────────────────────────── */

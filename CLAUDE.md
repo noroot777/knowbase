@@ -799,10 +799,23 @@
   一段长对话会把面板顶到几千像素高,`#chat-msgs` 那条 `overflow-y: auto` 就再没
   机会滚动、输入区被推到页面最底下 —— 空库看不出来,得有真对话才暴露。
   `width: 100%` 同理不能省:`#main-content > div` 那条 `margin: 0 auto` 让 flex 项
-  放弃 stretch,不给宽度就塌成 fit-content。地板由 `.chat-layout` 的 `min-height`
-  管,窗口太矮时宁可整页滚,不要把对话框压成一条缝。回归在
-  `tests/test_chat_height.py`(真页面 + 无头 Chrome,四档视口 × 横幅在/关,
-  另外塞 4000px 的假对话钉住「消息区内部滚动」)。
+  放弃 stretch,不给宽度就塌成 fit-content。
+- **聊天区里不许再有第二条固定高度地板。** 全系统只留一条:`.chat-main` 的
+  `min-height: 200px`(它有 `overflow: hidden`,压得比输入区还矮会把输入区裁掉)。
+  `.chat-layout` 的 430/490/520 和 `.chat-main` 的 380px/60vh 全部删掉了 ——
+  地板一旦比可用空间高,被顶出首屏的恰好是输入区:700×720 带首次配置横幅时聊天区
+  只有 456px,520px 的地板把整块撑出页面(2026-09-30 审查实测)。该缩的是能内部
+  滚动的那两块(`#chat-msgs`、`#chat-convs`)。**`.chat-layout` 的 `min-height: 0`
+  要显式写,不能只是「不写」** —— 省掉等于 `min-height: auto`,长对话立刻把它顶到
+  几千像素高(实测消息区 4294px),和 `#askpanel` 上那句是同一个坑。
+- **竖排断点下历史栏按比例限高:`.chat-side { max-height: min(185px, 30%) }`。**
+  展开后它排在输入区上方独占 185px,小屏上挤走的就是发送按钮(390×844 / 375×667
+  实测)。占比在任何高度下都成立,跟那些「上面还有多少东西」的估值不是一回事。
+  **别指望 `flex-shrink` 顶事**:`.chat-main` 的 `flex-basis` 是 `0%`,历史栏
+  185px + 它 ≈ 197px 基本总小于聊天区高度,这条 flex 线走的是 **grow** 分支、
+  压根不会去收缩谁;`flex-shrink: 1` 只在聊天区连 197px 都不够时才轮得到。
+  回归在 `tests/test_chat_height.py`(真页面 + 无头 Chrome,八档视口 × 横幅在/关
+  × 竖排断点上再乘历史栏开/关,另塞 4000px 假对话和 20 条假会话)。
 - **禁止用原生 `alert` / `confirm` / `prompt`**,系统弹窗跟本项目的瓷白×墨蓝黑调子完全不搭,还阻塞主线程。
 - 统一走 `kb/static/js/ui.js` 三个出口:
   - `toast(text, {type: err|ok|info, detail})` — 一次性操作反馈(失败/成功),右下浮起,自动消失。

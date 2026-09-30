@@ -112,7 +112,7 @@ body.chat-mode #main-content {
   display: flex; flex-direction: column;
   height: calc(100dvh - var(--topbar-h));
   /* 上面那两条 min-height 都是 100vh 起算的:移动端地址栏露出时 100vh > 100dvh,
-     留着它就把这个盒子重新顶高,输入区又掉到首屏外。地板由 .chat-layout 自己管。 */
+     留着它就把这个盒子重新顶高,输入区又掉到首屏外。地板由 .chat-main 自己管。 */
   min-height: 0;
 }
 /* 横幅按内容高度占位,不许被 flex 压缩(它的自动最小尺寸能兜住,写明更保险) */
@@ -124,11 +124,13 @@ body.chat-mode #wechat-welcome { flex-shrink: 0; }
    ② min-height: 0 —— flex 项的自动最小尺寸按内容算,一段长对话会把这个盒子
       顶到几千像素高,#chat-msgs 那条 overflow-y: auto 就再没机会滚动、输入区
       被推到页面最底下(高度写死的时候正是这一点把它盖住了)。地板交给
-      .chat-layout 的 min-height:窗口太矮时宁可整页滚。 */
+      .chat-main 的 min-height,只够一行输入区。 */
 body.chat-mode #askpanel { display: flex; flex-direction: column; width: 100%; flex: 1; min-height: 0; }
-/* 高度来自父级剩余空间;min-height 只是地板(窗口太矮时宁可整页滚,不要把
-   对话框压成一条缝),不再承担「估算上方高度」的职责。 */
-.chat-layout { flex: 1; min-height: 490px; gap: 22px; }
+/* 高度全部来自父级剩余空间。**这里不许再设 min-height**:地板一旦比可用空间高,
+   被顶出首屏的恰好是输入区 —— 700×720 带首次配置横幅时可用高度只有 456px,而
+   原来的 490/520 把整块撑出页面,模型下拉和发送按钮又掉到视口外(2026-09-30
+   审查实测)。全系统唯一的高度地板在 .chat-main 上(panels.css),只够一行输入区。 */
+.chat-layout { flex: 1; gap: 22px; }
 .chat-side { width: 192px; }
 .chat-main { border-radius: 12px; }
 .chat-empty { padding: 55px 22px 20px; }
@@ -223,12 +225,21 @@ body.overlay-open { overflow: hidden; }
   .compact-heading { flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
   .compact-heading > span { display: none; }
   #chat-history-toggle { display: block; margin-left: auto; font-size: 11px; }
-  .chat-layout { flex-direction: column; min-height: 520px; gap: 12px; }
-  .chat-side { width: 100%; max-height: 185px; }
+  .chat-layout { flex-direction: column; gap: 12px; }
+  /* 竖排时历史栏排在输入区上方,展开后独占一块高度,空间不够时挤走的就是输入区
+     (2026-09-30 审查:390×844 和 375×667 实测)。所以给它一个**按比例**的上限:
+     聊天区宽裕时还是原来的 185px,窄到放不下时按 30% 让位,列表自己内部滚。
+     这跟原来那些 96/162/175/490/520 不是一回事 —— 那些是「上面还有多少东西」的
+     估值,一变就错;这条是占比,任何高度下都成立。
+     **别指望 flex-shrink 顶事**:.chat-main 的 flex-basis 是 0%,一条 185px 的
+     历史栏加它 = 197px,基本总小于聊天区高度,于是这条 flex 线走的是 grow 分支、
+     压根不会去收缩谁;真正撑破的是 .chat-main 那条 min-height 地板被 grow 阶段
+     的最小值钳制住。flex-shrink: 1 只在聊天区矮到连 197px 都不够时才轮得到它,
+     那时该先压扁的确实是历史栏。 */
+  .chat-side { width: 100%; max-height: min(185px, 30%); flex-shrink: 1; }
   #chat-new { width: auto; align-self: flex-start; padding: 8px 16px; }
   #chat-convs { display: none; }
   .history-open #chat-convs { display: flex; }
-  .chat-main { min-height: 380px; }
   #chat-msgs { padding: 20px 15px; }
   .chat-empty { padding: 25px 5px 10px; }
   .chat-empty-title { font-size: 22px; }

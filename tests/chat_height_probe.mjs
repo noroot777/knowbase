@@ -62,24 +62,45 @@ for (let i = 0; i < 60; i++) {
   await sleep(200);
 }
 
-// 三档断点各取一个真实窗口:>900 桌面、≤900 出顶栏、≤760 聊天区改竖排。
-// 高度取 900(审查证据用的就是这个)和一档更紧的 720。
+// 三档断点各取真实窗口:>900 桌面、≤900 出顶栏、≤760 聊天区改竖排。
+// 每档都要带一个矮的 —— 只测 900px 高的话,地板(min-height)比可用空间还高的
+// 那一类问题量不出来:700x720 带横幅时可用高度只有 456px,原来的 520px 地板
+// 把整块撑出页面(2026-09-30 审查)。
 const VIEWPORTS = [
   { w: 1280, h: 900, name: "桌面 1280x900" },
   { w: 1280, h: 720, name: "矮桌面 1280x720" },
   { w: 860, h: 900, name: "窄屏 860x900" },
+  { w: 860, h: 720, name: "矮窄屏 860x720" },
   { w: 700, h: 900, name: "竖排 700x900" },
+  { w: 700, h: 720, name: "矮竖排 700x720" },
+  { w: 390, h: 844, name: "手机 390x844" },
+  { w: 375, h: 667, name: "小手机 375x667" },
 ];
+// ≤760 才有「历史对话」这个开关(#chat-history-toggle),展开后历史栏排在
+// 输入区上方、独占 185px,是另一个把输入区挤下去的来源。
+const HISTORY_BREAKPOINT = 760;
 
 // 长对话:flex 项的自动最小尺寸按内容算,一段几千像素的消息流会把面板整个顶高、
 // 让 #chat-msgs 那条 overflow-y: auto 失去意义,输入区跟着被推到页面最底下。
 // 空库跑不出这个形态,所以这里自己塞一段够长的内容进去。
+// 历史列表同理:没有后端时它只有一行「加载中…」,撑不满 max-height,量不出
+// 「展开历史对话把发送按钮顶出首屏」那个形态,所以也自己塞满。
 const FILL = `(() => {
   const box = document.getElementById('chat-msgs');
   if (!document.getElementById('probe-fill')) {
     const d = document.createElement('div');
     d.id = 'probe-fill'; d.style.height = '4000px';
     box.appendChild(d);
+  }
+  const convs = document.getElementById('chat-convs');
+  if (!convs.querySelector('.probe-conv')) {
+    convs.innerHTML = '';
+    for (let i = 0; i < 20; i++) {
+      const it = document.createElement('div');
+      it.className = 'conv-item probe-conv';
+      it.innerHTML = '<div class="conv-title">测试对话 ' + i + '</div><div class="conv-meta">刚刚</div>';
+      convs.appendChild(it);
+    }
   }
 })()`;
 
@@ -102,29 +123,38 @@ const measure = `(() => {
   };
 })()`;
 
+// 一个视口 × 一种(横幅, 历史栏)组合:量一次、判四条。
+async function probe(vp, banner, history) {
+  await evalJs(`(() => {
+    switchTab('ask');
+    document.getElementById('wechat-welcome').hidden = ${!banner};
+    document.getElementById('askpanel').classList.toggle('history-open', ${history});
+  })()`);
+  await evalJs(FILL);
+  await sleep(120);
+  const m = await evalJs(measure);
+  const tag = `${vp.name}·${banner ? "横幅在" : "横幅关"}${history ? "·历史栏开" : ""}`;
+  const slack = m.innerHeight - Math.max(m.barBottom, m.sendBottom, m.modelBottom);
+  check(`${tag}:输入区完整在首屏内`, slack >= 0,
+        `底边 ${m.barBottom.toFixed(1)} / 视口 ${m.innerHeight},余 ${slack.toFixed(1)}px`);
+  check(`${tag}:没有横向溢出`, m.scrollW <= m.innerWidth + 1,
+        `scrollWidth ${m.scrollW} > ${m.innerWidth}`);
+  check(`${tag}:面板铺满内容区宽度`, m.panelWidth > Math.min(vp.w, 1600) * 0.7,
+        `panelWidth ${m.panelWidth.toFixed(1)}`);
+  check(`${tag}:长对话在消息区内部滚动`, m.msgsScrollable && m.msgsHeight < m.innerHeight,
+        `消息区高 ${m.msgsHeight.toFixed(1)} / 可滚 ${m.msgsScrollable}`);
+}
+
 for (const vp of VIEWPORTS) {
   await send("Emulation.setDeviceMetricsOverride",
-             { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: false });
+             { width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.w <= HISTORY_BREAKPOINT });
   for (const banner of [true, false]) {
-    await evalJs(`(() => {
-      switchTab('ask');
-      document.getElementById('wechat-welcome').hidden = ${!banner};
-    })()`);
-    await evalJs(FILL);
-    await sleep(120);
-    const m = await evalJs(measure);
-    const tag = `${vp.name}·${banner ? "横幅在" : "横幅关"}`;
-    const slack = m.innerHeight - Math.max(m.barBottom, m.sendBottom, m.modelBottom);
-    check(`${tag}:输入区完整在首屏内`, slack >= 0,
-          `底边 ${m.barBottom.toFixed(1)} / 视口 ${m.innerHeight},余 ${slack.toFixed(1)}px`);
-    check(`${tag}:没有横向溢出`, m.scrollW <= m.innerWidth + 1,
-          `scrollWidth ${m.scrollW} > ${m.innerWidth}`);
-    // 面板宽度别因为改成 flex 项塌成 fit-content
-    check(`${tag}:面板铺满内容区宽度`, m.panelWidth > Math.min(vp.w, 1600) * 0.7,
-          `panelWidth ${m.panelWidth.toFixed(1)}`);
-    check(`${tag}:长对话在消息区内部滚动`, m.msgsScrollable && m.msgsHeight < m.innerHeight,
-          `消息区高 ${m.msgsHeight.toFixed(1)} / 可滚 ${m.msgsScrollable}`);
+    await probe(vp, banner, false);
+    // 历史栏只有竖排断点上才收起/展开,宽屏它一直在
+    if (vp.w <= HISTORY_BREAKPOINT) await probe(vp, banner, true);
   }
+  // 收起历史栏得完全恢复,别把展开态带进下一个视口
+  await evalJs(`document.getElementById('askpanel').classList.remove('history-open')`);
 }
 
 // 横幅一出现,聊天区应当自己变矮(说明高度真的跟着可用空间走,不是写死的)。
