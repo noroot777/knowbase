@@ -815,7 +815,27 @@
   185px + 它 ≈ 197px 基本总小于聊天区高度,这条 flex 线走的是 **grow** 分支、
   压根不会去收缩谁;`flex-shrink: 1` 只在聊天区连 197px 都不够时才轮得到。
   回归在 `tests/test_chat_height.py`(真页面 + 无头 Chrome,八档视口 × 横幅在/关
-  × 竖排断点上再乘历史栏开/关,另塞 4000px 假对话和 20 条假会话)。
+  × 竖排断点上再乘历史栏开/关,另塞 4000px 假对话和 20 条假会话,每格再敲 12 行
+  真输入量一次)。
+- **文本域的增长上限得认卡片里的实际余量,这件事只能在 JS 里做**
+  (`chat.js` 的 `chatInputRoom`)。`autoGrowChat` 写的是**行内 height**,而行内
+  高度会成为 flex 的「specified size suggestion」——`.chat-inputbar` 再怎么
+  `flex-shrink` / `min-height: 0` 都压不到它以下,CSS 侧没有出路。不管的话:
+  `.chat-main` 是 `overflow: hidden` 的裁剪边界,12 行输入把 150px 的文本域撑满时
+  模型下拉和发送按钮整个落在卡片外,**看不见也点不到**(2026-09-30 审查实测
+  375×667 + 首次配置横幅 + 展开历史栏,`elementFromPoint` 打到的是 `#main-content`,
+  页面还没得滚)。上限 = 卡片内容高 - 消息区压不下去的那点内边距 - 输入框上下
+  外边距 - 输入框里除文本域之外的部分,再和 150 取小、和一行高取大。
+  **别反过来去调 `.chat-main` 的地板**,那只会把整个输入区重新顶出首屏。
+- **重算的触发挂 `ResizeObserver(.chat-main)`,不是 `window.resize`。** 已经长起来
+  的文本域不会自己缩回去,而把它逼窄的三件事里,展开历史栏和关掉首次配置横幅
+  **压根不触发 resize**。卡片高度是父级 flex 给的、跟文本域无关,所以不会自激。
+- **验收不能只看「元素 bottom < innerHeight」。** 被 `overflow: hidden` 的祖先裁掉
+  时,元素照样在首屏坐标里,人却看不见、点不到。所以回归同时量卡片的裁剪边界,
+  并用 `elementFromPoint` 做真实命中测试;命中要探**中心点 + 贴下边沿两个点**——
+  实测旧代码那格按钮底边越线 6.6px 时中心还在裁剪线上方,只探中心探不出来。
+  撑高也必须走真实输入事件(CDP `Input.insertText`),直接赋 `value` 不触发
+  `autoGrowChat`,测的就不是用户会遇到的那条路。
 - **禁止用原生 `alert` / `confirm` / `prompt`**,系统弹窗跟本项目的瓷白×墨蓝黑调子完全不搭,还阻塞主线程。
 - 统一走 `kb/static/js/ui.js` 三个出口:
   - `toast(text, {type: err|ok|info, detail})` — 一次性操作反馈(失败/成功),右下浮起,自动消失。

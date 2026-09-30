@@ -57,13 +57,47 @@ function initChat() {
   t.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); }
   });
+  // 可用高度一变就重算上限:窗口缩放、展开历史栏、关掉首次配置横幅都会让聊天卡片
+  // 变矮,而已经长起来的文本域不会自己缩回去。观察卡片而不是监听 window resize,
+  // 是因为后两件事压根不触发 resize。卡片高度是父级 flex 给的、跟文本域无关,
+  // 所以不会自激。
+  const card = t.closest('.chat-main');
+  if (card && window.ResizeObserver) new ResizeObserver(() => autoGrowChat()).observe(card);
   t.focus();
 }
+
+// 文本域随内容长高,但**不许长到把模型下拉和发送按钮顶出卡片**:.chat-main 是
+// overflow: hidden 的裁剪边界,顶出去不是「挤下去还能滚到」,而是当场看不见、
+// 点不到(2026-09-30 审查实测:375×667 + 首次配置横幅 + 展开历史栏 + 12 行输入,
+// 发送按钮整个落在卡片底边之外,elementFromPoint 打到的是 #main-content)。
+// 上限只能在 JS 里算:这里写的是**行内 height**,而行内高度会成为 flex 的
+// 「specified size suggestion」——.chat-inputbar 再怎么 flex-shrink / min-height: 0
+// 都压不到它以下,CSS 侧无解。也不能反过来把 .chat-main 的地板调大,那只会把
+// 整个输入区重新顶出首屏,正是上一轮修掉的形态。
+const CHAT_INPUT_MAX = 150;   // 舒适上限,跟 #chat-input 的 max-height 是同一个数
+const CHAT_INPUT_MIN = 32;    // 一行(14.5px × 1.5 + 上下内边距);再挤也留一行
 
 function autoGrowChat() {
   const t = $('chat-input');
   t.style.height = 'auto';
-  t.style.height = Math.min(t.scrollHeight, 150) + 'px';
+  const want = Math.min(t.scrollHeight, CHAT_INPUT_MAX);
+  t.style.height = Math.max(CHAT_INPUT_MIN, Math.min(want, chatInputRoom(t))) + 'px';
+}
+
+// 卡片里留给文本域的最大高度 = 卡片内容高 - 消息区压不下去的那点内边距
+//   - 输入框上下外边距 - 输入框里除文本域之外的部分(边框、内边距、下拉与按钮那一行)。
+// 调用时文本域正处在 height:auto,所以直接拿两个实测高度相减就是「除它之外」。
+// 量不出来(面板没显示、拿不到卡片)时返回 Infinity,退回原来的纯内容增长。
+function chatInputRoom(t) {
+  const bar = t.closest('.chat-inputbar');
+  const card = t.closest('.chat-main');
+  if (!bar || !card || !card.clientHeight) return Infinity;
+  const bs = getComputedStyle(bar);
+  const msgs = $('chat-msgs');           // flex: 1 + 内部滚动,能缩到只剩内边距
+  const ms = msgs ? getComputedStyle(msgs) : null;
+  const pad = ms ? parseFloat(ms.paddingTop) + parseFloat(ms.paddingBottom) : 0;
+  const other = bar.getBoundingClientRect().height - t.getBoundingClientRect().height;
+  return card.clientHeight - pad - parseFloat(bs.marginTop) - parseFloat(bs.marginBottom) - other;
 }
 
 function timeAgo(iso) {

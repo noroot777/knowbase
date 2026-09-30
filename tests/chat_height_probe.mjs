@@ -104,16 +104,34 @@ const FILL = `(() => {
   }
 })()`;
 
+// 只看「bottom < innerHeight」是不够的:.chat-main 是 overflow: hidden 的,
+// 输入区被它裁掉时元素照样在首屏坐标里,人却看不见也点不到。所以同时量卡片的
+// 裁剪边界(padding box 底边),再用 elementFromPoint 做一次真实命中测试 ——
+// 后者才是「这个按钮现在点得到吗」的直接答案。
 const measure = `(() => {
   const bar = document.querySelector('.chat-inputbar');
   const send = document.getElementById('chat-send');
   const model = document.getElementById('ask-model');
   const panel = document.getElementById('askpanel');
   const box = document.getElementById('chat-msgs');
-  const r = bar.getBoundingClientRect();
+  const card = document.querySelector('.chat-main');
+  const ta = document.getElementById('chat-input');
+  const r = bar.getBoundingClientRect(), cr = card.getBoundingClientRect();
+  // 中心点 + 贴下边沿各探一次:只探中心的话「下半截被裁掉」探不出来
+  // (实测旧代码那格,按钮底边越线 6.6px,中心还在裁剪线上方)。
+  const hit = el => {
+    const b = el.getBoundingClientRect();
+    return [b.top + b.height / 2, b.bottom - 2].every(y => {
+      const t = document.elementFromPoint(b.left + b.width / 2, y);
+      return !!t && (t === el || el.contains(t));
+    });
+  };
   return {
     barBottom: r.bottom, sendBottom: send.getBoundingClientRect().bottom,
     modelBottom: model.getBoundingClientRect().bottom,
+    cardClipBottom: cr.bottom - parseFloat(getComputedStyle(card).borderBottomWidth),
+    hitSend: hit(send), hitModel: hit(model),
+    taHeight: ta.getBoundingClientRect().height, taLines: ta.value.split('\\n').length,
     innerHeight: window.innerHeight, innerWidth: window.innerWidth,
     panelWidth: panel.getBoundingClientRect().width,
     barWidth: r.width,
@@ -123,6 +141,19 @@ const measure = `(() => {
   };
 })()`;
 
+// 12 行 —— 够顶到 150px 那个舒适上限,正是审查复现出问题的输入量。
+const LONG_TEXT = Array.from({ length: 12 }, (_, i) => `第${i + 1}行输入内容测试`).join("\n");
+
+// 用 CDP 的 Input.insertText 真的往聚焦的文本域里敲,走的是浏览器自己的输入
+// 通道:autoGrowChat 挂在 input 事件上,直接赋 value 不触发它,那样测的就不是
+// 用户实际会遇到的路径。
+async function typeIntoInput(text) {
+  await evalJs(`(() => { const t = document.getElementById('chat-input');
+    t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); t.focus(); })()`);
+  if (text) await send("Input.insertText", { text });
+  await sleep(80);
+}
+
 // 一个视口 × 一种(横幅, 历史栏)组合:量一次、判四条。
 async function probe(vp, banner, history) {
   await evalJs(`(() => {
@@ -131,6 +162,7 @@ async function probe(vp, banner, history) {
     document.getElementById('askpanel').classList.toggle('history-open', ${history});
   })()`);
   await evalJs(FILL);
+  await typeIntoInput("");
   await sleep(120);
   const m = await evalJs(measure);
   const tag = `${vp.name}·${banner ? "横幅在" : "横幅关"}${history ? "·历史栏开" : ""}`;
@@ -143,6 +175,21 @@ async function probe(vp, banner, history) {
         `panelWidth ${m.panelWidth.toFixed(1)}`);
   check(`${tag}:长对话在消息区内部滚动`, m.msgsScrollable && m.msgsHeight < m.innerHeight,
         `消息区高 ${m.msgsHeight.toFixed(1)} / 可滚 ${m.msgsScrollable}`);
+
+  // 多行输入:文本域会长高,不许把模型下拉和发送按钮顶出卡片的裁剪边界。
+  await typeIntoInput(LONG_TEXT);
+  const g = await evalJs(measure);
+  const t2 = `${tag}·12 行输入`;
+  check(`${t2}:输入事件确实送达`, g.taLines === 12, `文本域 ${g.taLines} 行`);
+  check(`${t2}:输入区完整在首屏内`,
+        g.innerHeight - Math.max(g.barBottom, g.sendBottom, g.modelBottom) >= 0,
+        `底边 ${g.barBottom.toFixed(1)} / 视口 ${g.innerHeight}`);
+  check(`${t2}:模型下拉与发送按钮没被卡片裁掉`,
+        g.sendBottom <= g.cardClipBottom + 0.5 && g.modelBottom <= g.cardClipBottom + 0.5,
+        `发送底边 ${g.sendBottom.toFixed(2)} / 下拉底边 ${g.modelBottom.toFixed(2)} / 卡片裁剪线 ${g.cardClipBottom.toFixed(2)}(文本域 ${g.taHeight.toFixed(2)}px)`);
+  check(`${t2}:发送按钮和模型下拉点得到`, g.hitSend && g.hitModel,
+        `elementFromPoint 命中 发送=${g.hitSend} 下拉=${g.hitModel}`);
+  await typeIntoInput("");
 }
 
 for (const vp of VIEWPORTS) {
@@ -168,6 +215,28 @@ const heights = await evalJs(`(() => {
   const on = el.getBoundingClientRect().height;
   return { off, on, banner: w.getBoundingClientRect().height };
 })()`);
+await typeIntoInput(LONG_TEXT);
+const tall = await evalJs(`document.getElementById('chat-input').getBoundingClientRect().height`);
+check("空间宽裕时文本域照样长到 150px 上限", Math.abs(tall - 150) < 1, `文本域 ${tall.toFixed(2)}px`);
+await typeIntoInput("");
+
+// 已经长起来的文本域不会自己缩回去 —— 可用空间变小时得有人来重算。这里在大
+// 视口敲满 12 行,然后**不再碰输入**直接缩到小手机 + 展开历史栏,考的就是
+// initChat 里挂在 .chat-main 上的那个 ResizeObserver(窗口缩放、展开历史栏、
+// 关掉横幅都走它;后两件事压根不触发 window resize)。
+await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+await typeIntoInput(LONG_TEXT);
+await send("Emulation.setDeviceMetricsOverride", { width: 375, height: 667, deviceScaleFactor: 1, mobile: true });
+await evalJs(`document.getElementById('askpanel').classList.add('history-open')`);
+await sleep(200);
+const shrunk = await evalJs(measure);
+check("缩小窗口后已长高的文本域跟着让位", shrunk.sendBottom <= shrunk.cardClipBottom + 0.5 && shrunk.hitSend,
+      `文本域 ${shrunk.taHeight.toFixed(2)}px / 发送底边 ${shrunk.sendBottom.toFixed(2)} / 裁剪线 ${shrunk.cardClipBottom.toFixed(2)} / 命中 ${shrunk.hitSend}`);
+await evalJs(`document.getElementById('askpanel').classList.remove('history-open')`);
+await typeIntoInput("");
+await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+await sleep(120);
+
 check("横幅出现时聊天区跟着让出高度", heights.off - heights.on >= heights.banner,
       `无横幅 ${heights.off} / 有横幅 ${heights.on} / 横幅 ${heights.banner}`);
 
