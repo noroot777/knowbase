@@ -3,8 +3,9 @@
 let pipeChannel = '';
 let pipeChannels = [];
 let pipeChannelsLoading = null;
-// 每次读取的代次。切换发生后补发的那次才算最新:在途的那个请求是在设置改动**之前**
-// 发出的,它回来时必须被丢掉,否则一份陈旧的设置会被当成最新的写回内存(并按它派发同步)。
+// 通道状态的代次。「更新的状态」有两种来路,都要让在它之前发出、还没回来的读取作废:
+// 一次更新的读取,和**本页自己保存成功的那一次**(saveWechatChannel)—— 在途那个请求带
+// 回来的是改动**之前**的设置,应用它就是拿一份陈旧设置写回内存(并按它派发同步)。
 let pipeChannelsGen = 0;
 // 「手里这份来源清单是不是刚跟服务端核对过的」。可勾选来源取决于一个全局设置(别的
 // 页面、CLI、API 都改得动),所以新建同步开跑之前它必须为真:核对没做完、或者核对失败
@@ -61,25 +62,32 @@ function applyChannelData(data) {
 // 的设置（别的页面、CLI、API 都改得动）。force=true 重新核对服务端：设置窗口和新建同步
 // 打开时各来一次 —— 否则这份缓存会把一个和落盘值相反的选择一直显示下去，并按它派发
 // 同步。状态轮询那类高频路径照旧吃缓存。
+// 返回值:这次调用结束时手里那份清单算不算最新。`false` = 自己这次读回来的结果被更新的
+// 通道状态作废了(期间在本页存过一次、或者别处改过),调用方别再拿它去更新界面。
 async function loadPipeChannels(force = false) {
-  if (pipeChannels.length && !force) return;
+  if (pipeChannels.length && !force) return true;
   // 非强制那次照旧合并并发请求;**强制那次必须自己发一趟** —— 复用在途的那个等于拿
   // 切换之前的响应当成最新设置,页面随后按旧通道读订阅、按旧通道开跑(实测:开着的
   // 新建同步在慢响应期间收到切换通知,回来后仍派发 wechat_local)。
   if (pipeChannelsLoading && !force) return pipeChannelsLoading;
   if (force) markChannelsStale();
   const gen = ++pipeChannelsGen;
-  const request = (async () => {
+  let request;
+  request = (async () => {
     const data = await pipeJson('/api/pipeline/channels');
-    // 这一轮还算不算数:期间又发起过更新的读取(设置在别处改过),这份响应已经过时,
-    // 丢掉、跟着最新那次走 —— 调用方 await 到的就是最新结果。
-    if (gen !== pipeChannelsGen) return pipeChannelsLoading;
+    // 这一轮还算不算数:期间通道状态又更新过(别处改了设置,或者本页刚保存成功过一次),
+    // 这份响应已经过时。有更新的读取在跑就跟着它(调用方 await 到的就是最新结果);作废
+    // 我们的是一次保存时没有别的读取在跑,到此为止 —— 手里那份正是保存回来的最新清单,
+    // 这里再 `return pipeChannelsLoading` 就是让这个 promise 等自己,当场链环死锁。
+    if (gen !== pipeChannelsGen)
+      return pipeChannelsLoading === request ? false : pipeChannelsLoading;
     if (!data.channels?.length) throw new Error('暂无可用的同步来源，请检查采集器配置后重试');
     applyChannelData(data);
     pipeChannelsFresh = true;
+    return true;
   })();
   pipeChannelsLoading = request;
-  try { await request; } finally { if (pipeChannelsLoading === request) pipeChannelsLoading = null; }
+  try { return await request; } finally { if (pipeChannelsLoading === request) pipeChannelsLoading = null; }
 }
 
 // 清单待核对:核对期间和核对失败之后都是这个状态,开始按钮和提交入口都不许放行。
@@ -159,7 +167,16 @@ function selectRunChannel(id) {
 // 带着它们一起改道：另一条通道从此不在列表里。
 async function saveWechatChannel(id) {
   if (!id || id === pipeWechat.selected) return pipeWechat.selected;
-  applyChannelData(await pipePost('/api/pipeline/channels/wechat', { channel: id }));
+  const data = await pipePost('/api/pipeline/channels/wechat', { channel: id });
+  // 保存成功也是一次「更新的通道状态」:在它之前发出、还在路上的那些读取全部作废 ——
+  // 它们带回来的是保存之前那份设置。不作废的话,慢响应回来时代次仍然相等,旧清单被当成
+  // 最新结果应用:单选按钮跳回旧通道、`kb-sync-channel` 也写回旧值,而服务端存着的是新
+  // 的,页面显示的和落盘的正相反(2026-09-30 第 3 轮审查实测)。这条路没有别的纠正机会
+  // —— 自己写 storage 不会触发自己那个监听器,跨页面那次补发读取也只发生在**别的**页面。
+  pipeChannelsGen++;
+  applyChannelData(data);
+  // POST 的回包就是此刻服务端那份清单,比任何还在路上的读取都新
+  pipeChannelsFresh = true;
   // 同源的其他页面靠 storage 事件收到这件事：CustomEvent 不跨文档，而这个设置是全局
   // 单值 —— 不广播的话另一个页面会一直按一条已经不生效的通道显示、并按它派发同步。
   // 带时间戳是因为 storage 只在值真变了时才触发（换回原来那条也得通知）。

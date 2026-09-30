@@ -390,6 +390,16 @@ async function pickInB(to) {
   return B.until(`document.getElementById('wechat-channel-msg').textContent.includes('已切换')`);
 }
 const switchInB = async to => { await openSetupInB(); return pickInB(to); };
+// 在页面 A 自己的设置里换通道:同页面那条路走的是 POST 回包直接改内存,没有 storage 广播。
+async function switchInA(to) {
+  await evalJs(`openWechatSetup()`);
+  await until(`document.querySelectorAll('#wechat-channels label').length === 2`);
+  await evalJs(`changeWechatChannel(${JSON.stringify(to)})`);
+  const ok = await until(`document.getElementById('wechat-channel-msg').textContent.includes('已切换')`);
+  await evalJs(`closeWechatSetup()`);
+  return ok;
+}
+const acctsOf = (scope, channel) => (scope.find(c => c.channel === channel)?.accounts || []).join();
 // 每一节都从「设置 = 本机库、勾着公众号 + RSS」这个已知状态起跑。
 async function freshPipe() {
   selected = "wechat_local";
@@ -497,11 +507,128 @@ check("重试成功后派发的是当前设置那条通道",
       && runs[retryRuns].channels?.map(c => c.channel).join() === "wechat_oa,rss",
       JSON.stringify(runs[retryRuns]));
 
+// ── 14. 关着新建同步的时候换通道:订阅选择不许被重置成全选 ──
+// 迁移写在「弹窗开着吗」后面的话,关着的时候换就整段跳过 —— 新通道没有草稿,下次打开
+// loadChannelAccounts 按整份订阅全选初始化:上次只勾了一个号,换个采集方式回来变成全选,
+// 点开始把没勾的那些一起采了(第 3 轮审查实测 accounts 从「甲」变成「甲+乙」)。
+await freshPipe();
+await evalJs(`openPipeModal()`);
+await until(`pipeReadyChannels().join() === 'wechat_local,rss'`);
+await evalJs(`pipeSel.set('wechat_local', new Set(['测试公众号甲'])); updatePipeSelection(); true`);
+await evalJs(`closePipeModal()`);
+check("关着窗口也换得动通道", await switchInA("wechat_oa"));
+await evalJs(`openPipeModal()`);
+await until(`pipeReadyChannels().join() === 'wechat_oa,rss'`);
+const closedScope = JSON.parse(await evalJs(`JSON.stringify(pipeRunBody().channels)`));
+check("关着窗口换通道后来源跟着设置走",
+      closedScope.map(c => c.channel).join() === "wechat_oa,rss",
+      JSON.stringify(closedScope.map(c => c.channel)));
+check("关着窗口换通道后订阅选择没被扩大",
+      acctsOf(closedScope, "wechat_oa") === "测试公众号甲", acctsOf(closedScope, "wechat_oa"));
+const closedRuns = runs.length;
+await evalJs(`startPipeFromModal()`);
+check("关着窗口换通道后派发的范围也没扩大",
+      await waitRuns(closedRuns + 1)
+      && acctsOf(runs[closedRuns].channels || [], "wechat_oa") === "测试公众号甲",
+      JSON.stringify(runs[closedRuns]));
+// 「一个都不采」同样是用户的选择:当成"没有草稿"的话它也会变成全选
+await freshPipe();
+await evalJs(`openPipeModal()`);
+await until(`pipeReadyChannels().join() === 'wechat_local,rss'`);
+await evalJs(`pipeSel.set('wechat_local', new Set()); updatePipeSelection(); true`);
+await evalJs(`closePipeModal()`);
+await switchInA("wechat_oa");
+await evalJs(`openPipeModal()`);
+await until(`pipeReadyChannels().join() === 'wechat_oa,rss'`);
+check("关着窗口换通道后「一个都不勾」也保持原样",
+      await evalJs(`pipeSelected('wechat_oa').size`) === 0,
+      await evalJs(`[...pipeSelected('wechat_oa')].join()`));
+await evalJs(`closePipeModal()`);
+
+// ── 15. 来回换两次:用的是最新那份选择,不是目标通道自己的旧草稿 ──
+// 目标通道已经有草稿就不迁移的话,换回去时那份**更早**的选择会盖掉用户刚改过的这份。
+await freshPipe();
+await boot(B);
+await B.until(`typeof pipeWechat !== 'undefined' && pipeWechat.selected === 'wechat_local'`);
+await evalJs(`openPipeModal()`);
+await until(`pipeReadyChannels().join() === 'wechat_local,rss'`);
+await evalJs(`pipeSel.set('wechat_local', new Set(['测试公众号甲'])); updatePipeSelection(); true`);
+await switchInB("wechat_oa");
+await until(`pipeReadyChannels().join() === 'wechat_oa,rss'`);
+check("第一次改道把当时那份选择带过去",
+      await evalJs(`[...pipeSelected('wechat_oa')].join()`) === "测试公众号甲",
+      await evalJs(`[...pipeSelected('wechat_oa')].join()`));
+// 在新通道上改成只选乙 —— 这才是最新的那份选择
+await evalJs(`pipeSel.set('wechat_oa', new Set(['测试公众号乙'])); updatePipeSelection(); true`);
+await switchInB("wechat_local");
+await until(`pipeReadyChannels().join() === 'wechat_local,rss'`);
+const backScope = JSON.parse(await evalJs(`JSON.stringify(pipeRunBody().channels)`));
+check("换回曾用过的通道:不恢复它自己那份更早的选择",
+      acctsOf(backScope, "wechat_local") === "测试公众号乙", acctsOf(backScope, "wechat_local"));
+const backRuns = runs.length;
+await evalJs(`startPipeFromModal()`);
+check("换回来点开始派发的是最后一次用户选择",
+      await waitRuns(backRuns + 1)
+      && acctsOf(runs[backRuns].channels || [], "wechat_local") === "测试公众号乙",
+      JSON.stringify(runs[backRuns]));
+
+// ── 16. 同一个页面:保存成功之后,保存之前那份读取不许把它拨回去 ──
+// 代次只在发起读取时推进的话,保存成功不会作废在途的那次读取 —— 慢响应回来时代次仍然
+// 相等,一份保存前生成的旧清单被当成最新结果应用(第 3 轮审查实测:单选跳回本地数据库、
+// kb-sync-channel 也写回旧值,而服务端存着的是 wechat_oa)。跨页面那条路救不了它:自己
+// 写 storage 不会触发自己的监听器。
+// **这一节必须只剩 A 一个页面**:报告里这条的条件正是「没有另一个页面触发新读取」。
+// B 还在的话它会收到 storage 通知、自己重读一遍,顺手把同源 localStorage 那两个键写回
+// 正确值 —— 于是下面「落盘值有没有被拨回去」那两项变成假绿(注入回归实测它们确实没红,
+// 只有内存和单选那几项红)。
+await B.send("Page.navigate", { url: "about:blank" });
+await freshPipe();
+await evalJs(`openWechatSetup()`);     // 先开关一次,让单选按钮已经有正常内容
+await until(`document.querySelectorAll('#wechat-channels label').length === 2`);
+await evalJs(`closeWechatSetup()`);
+holdChannelsWanted = true;
+// openWechatSetup 自己不 await 那次核对,所以这里不会陪它卡到 pipeJson 的 15 秒超时
+await evalJs(`openWechatSetup(); true`);
+check("设置里那次重新核对真的被扣住了", await waitFor(() => heldChannels.length === 1, 4000));
+await evalJs(`changeWechatChannel('wechat_oa')`);
+await until(`document.getElementById('wechat-channel-msg').textContent.includes('已切换')`);
+check("保存成功时单选停在新通道",
+      await evalJs(`document.querySelector('#wechat-channels input:checked')?.value`) === "wechat_oa");
+check("服务端存下来的确实是新通道", selected === "wechat_oa", selected);
+releaseChannels();                     // 保存之前那份响应现在才回来
+check("保存之前那份响应已经处理完", await until(`pipeChannelsLoading === null`, 8000));
+check("旧响应没把单选拨回去",
+      await evalJs(`document.querySelector('#wechat-channels input:checked')?.value`) === "wechat_oa",
+      await evalJs(`document.querySelector('#wechat-channels input:checked')?.value`));
+check("旧响应没把内存里那条通道拨回去", await evalJs(`pipeWechat.selected`) === "wechat_oa",
+      await evalJs(`pipeWechat.selected`));
+check("旧响应没把落盘的来源选择拨回去",
+      await evalJs(`localStorage.getItem('kb-sync-channel')`) === "wechat_oa",
+      await evalJs(`localStorage.getItem('kb-sync-channel')`));
+check("旧响应没把这次同步的范围拨回去",
+      await evalJs(`localStorage.getItem('kb-sync-channels')`) === '["wechat_oa","rss"]',
+      await evalJs(`localStorage.getItem('kb-sync-channels')`));
+check("保存成功那句反馈没被过期的核对清掉",
+      (await evalJs(`document.getElementById('wechat-channel-msg').textContent`)).includes("已切换"),
+      await evalJs(`document.getElementById('wechat-channel-msg').textContent`));
+check("保存回来的那份清单算核对过（开始按钮不该被无故拦住）",
+      await evalJs(`pipeChannelsFresh`) === true);
+await evalJs(`closeWechatSetup()`);
+const staleRuns = runs.length;
+await evalJs(`openPipeModal()`);
+await until(`pipeReadyChannels().join() === 'wechat_oa,rss'`);
+await evalJs(`startPipeFromModal()`);
+check("随后开跑用的是保存下来那条通道",
+      await waitRuns(staleRuns + 1)
+      && runs[staleRuns].channels?.map(c => c.channel).join() === "wechat_oa,rss",
+      JSON.stringify(runs[staleRuns]));
+
 check("页面无脚本异常", A.errors.length === 0, A.errors.join(" | "));
 check("第二个页面也无脚本异常", !B || B.errors.length === 0, (B?.errors || []).join(" | "));
 
 for (const page of [A, B].filter(Boolean)) {
-  await page.evalJs(`invalidatePipeStatus(); clearTimeout(wechatPoll)`);
+  // B 已经被挪到 about:blank,那儿没有这些函数
+  await page.evalJs(`invalidatePipeStatus(); clearTimeout(wechatPoll)`).catch(() => {});
   page.ws.close();
 }
 proc.kill(); server.close();

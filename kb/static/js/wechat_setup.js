@@ -26,8 +26,10 @@ async function loadWechatChannels() {
   try {
     // 每次打开都重新核对一次服务端：这是个全局单值，另一个页面、CLI、API 都改得动，
     // 吃缓存的话单选按钮会指着一个和落盘值相反的通道。
-    await loadPipeChannels(true);
-    msg.textContent = '';
+    const applied = await loadPipeChannels(true);
+    // 这次核对被更新的通道状态作废了（最常见的是核对还没回来、用户已经在这个弹窗里存过
+    // 一次）：那句「已切换到…」才是最新的事实，别拿一次过期的核对把它清掉。
+    if (applied !== false) msg.textContent = '';
     renderWechatChannels();
   } catch (error) {
     $('wechat-channels').innerHTML = '';

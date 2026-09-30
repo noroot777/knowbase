@@ -28,18 +28,30 @@ function savePipeDraft() {
 function pipeSetupError(message = '') {
   $('pipe-setup-error').hidden = !message; $('pipe-setup-error').textContent = message;
 }
-// 采集通道在设置里换过了（可能是别的页面换的）。弹窗正开着时,这里那份订阅状态是按旧
-// 通道读的:`pipeRunSel` 已经改道,`pipeAccounts` 里却没有新通道那一条 —— 它既不算
-// ready 也不算 loading,于是 `pipeRunBody()` 直接把它漏掉、开始按钮还照样能点,用户
-// 明明勾着公众号、点下去只同步了 RSS,一句提示都没有(2026-09-30 复审实测)。重读一遍
-// 订阅:读取期间新通道是 loading,开始按钮自动禁用,读完才恢复。两条绿泡泡通道订阅的是
-// 同一批号,所以把旧通道的草稿一并挪过去,用户刚勾的那几个号不会被重置成全选。
+// 采集通道在设置里换过了（可能是别的页面换的）。两件事:订阅选择跟着改道、开着的弹窗
+// 重读订阅。
+// **改道跟弹窗开没开无关,目标通道有没有旧草稿也无关**:两条绿泡泡通道订阅的是同一批
+// 号,换通道是「改道」不是「换来源」,采哪几个号只由用户最后一次选择决定。少一半就出事,
+// 两种形态都实测过(2026-09-30 第 3 轮审查):
+//  · **关着的时候换**——迁移写在 `pipeModalOpen()` 后面的话这儿直接 return,新通道没有
+//    草稿,下次打开 `loadChannelAccounts` 的 `draft ? … : list` 分支按「整份订阅全选」
+//    初始化:上次只勾了一个号,换个采集方式回来变成全选,点开始把没勾的那些一起采了;
+//  · **换回曾用过的那条**——`!pipeDrafts.has(after)` 那个条件会把它排除掉,于是目标通道
+//    那份**更早**的草稿盖掉用户刚改过的这份:只选乙,来回换一次变回只选甲,开始后采的
+//    也是甲。所以一律用当前选择覆盖目标通道的草稿。
+// 取值优先 `pipeSel`(屏幕上此刻的选择),它没有才退回草稿;空集合也要照搬 —— 「一个都
+// 不采」是用户的选择,当成"没有草稿"就又变成全选了。
+// **重读订阅只在弹窗开着时做**:那份 `pipeAccounts` 是按旧通道读的,`pipeRunSel` 已经
+// 改道、里面却没有新通道那一条 —— 它既不算 ready 也不算 loading,于是 `pipeRunBody()`
+// 直接把它漏掉、开始按钮还照样能点,用户明明勾着公众号、点下去只同步了 RSS,一句提示都
+// 没有(2026-09-30 复审实测)。读取期间新通道是 loading,开始按钮自动禁用,读完才恢复。
 document.addEventListener('kb:channels-changed', e => {
-  if (!pipeModalOpen()) return;
   const { before, after } = e.detail;
-  if (before && after && pipeDrafts.has(before) && !pipeDrafts.has(after))
-    pipeDrafts.set(after, [...pipeDrafts.get(before)]);
-  loadPipeAccounts(true).catch(() => {});
+  if (before && after && before !== after) {
+    const latest = pipeSel.get(before) || pipeDrafts.get(before);
+    if (latest) pipeDrafts.set(after, [...latest]);
+  }
+  if (pipeModalOpen()) loadPipeAccounts(true).catch(() => {});
 });
 async function openPipeModal() {
   if (pipeAction || pipeSnapshot?.running) return;
