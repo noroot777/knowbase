@@ -7,7 +7,7 @@
 
 前端下拉里的模型 = 中转站实际能调的 id。给了内置兜底 id,但更推荐在「API Key」面板
 点「拉取可用模型」,从各自中转站的 /v1/models 拉取并勾选(见 list_remote_models)。
-GPT 侧走 chat.completions,用 max_completion_tokens、不传 temperature,兼容 gpt-5 推理系。
+OpenAI 侧支持原生 Responses 或转换为 Chat Completions;旧配置默认开启转换。
 
 **哪一步用哪个模型不在这里决定**:提取、条目化、wiki、问答各阶段的分配在
 `kb.llm_stages`(面板「模型」),本模块只管解析 + 真正发请求。chat/chat_stream
@@ -87,6 +87,11 @@ def get_key(provider: str) -> str | None:
 def get_base_url(provider: str) -> str | None:
     """有效 base_url(中转站地址):环境变量优先,其次文件;都没有返回 None=官方。"""
     return os.environ.get(_ENV_URL[provider]) or _file_entry(provider).get("base_url") or None
+
+
+def openai_conversion_enabled() -> bool:
+    """旧配置默认沿用 Chat Completions;只有显式关闭才走 Responses。"""
+    return _file_entry("openai").get("protocol_conversion_enabled") is not False
 
 
 def has_key(provider: str) -> bool:
@@ -210,6 +215,11 @@ def set_config(updates: dict) -> None:
                     entry["models"] = cleaned
                 else:
                     entry.pop("models", None)
+            if prov == "openai" and "protocol_conversion_enabled" in fields:
+                enabled = fields["protocol_conversion_enabled"]
+                if not isinstance(enabled, bool):
+                    raise ValueError("协议转换开关必须是布尔值")
+                entry["protocol_conversion_enabled"] = enabled
             if entry:
                 data[prov] = entry
             else:
@@ -242,6 +252,8 @@ def key_status() -> dict:
             "env_url": _ENV_URL[prov],
             "models": configured_models(prov),
         }
+        if prov == "openai":
+            out[prov]["protocol_conversion_enabled"] = openai_conversion_enabled()
     return out
 
 
@@ -472,17 +484,15 @@ def _chat_anthropic(model_id: str, prompt: str, max_tokens: int, timeout: int) -
 
 
 def _chat_openai(model_id: str, prompt: str, max_tokens: int, timeout: int) -> str:
-    # max_completion_tokens 对 gpt-4o 和 gpt-5 都通用;gpt-5 推理系不接受 temperature,
-    # 故这里一律不传 temperature。推理 token 也计入该上限,给足余量。
+    from kb.llm_openai import complete
+
     try:
-        resp = _openai().with_options(timeout=timeout).chat.completions.create(
-            model=model_id,
-            max_completion_tokens=max(max_tokens, 16000),
-            messages=[{"role": "user", "content": prompt}],
+        return complete(
+            _openai().with_options(timeout=timeout), model_id, prompt,
+            max_tokens, openai_conversion_enabled(),
         )
     except Exception as e:
-        raise RuntimeError(f"GPT 调用失败: {e}")
-    return (resp.choices[0].message.content or "").strip()
+        raise RuntimeError(f"GPT 调用失败: {e}") from e
 
 
 def chat_stream(prompt: str, model, max_tokens: int = 8192,
@@ -555,22 +565,14 @@ def anthropic_model_for_tools(prefer: str | None = None) -> str | None:
 
 def _stream_openai(model_id: str, prompt: str, max_tokens: int,
                    timeout: int) -> Iterator[str]:
-    # 同 _chat_openai:max_completion_tokens 通用、不传 temperature 兼容 gpt-5 推理系。
+    from kb.llm_openai import text_stream
+
     try:
-        resp = _openai().with_options(timeout=timeout).chat.completions.create(
-            model=model_id,
-            max_completion_tokens=max(max_tokens, 16000),
-            messages=[{"role": "user", "content": prompt}],
-            stream=True,
+        yield from text_stream(
+            _openai().with_options(timeout=timeout), model_id, prompt,
+            max_tokens, openai_conversion_enabled(),
         )
-        for chunk in resp:
-            choices = getattr(chunk, "choices", None)
-            if not choices:
-                continue
-            delta = choices[0].delta.content
-            if delta:
-                yield delta
     except GeneratorExit:
         raise
     except Exception as e:
-        raise RuntimeError(f"GPT 调用失败: {e}")
+        raise RuntimeError(f"GPT 调用失败: {e}") from e

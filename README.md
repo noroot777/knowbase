@@ -162,6 +162,19 @@ cd collector
 
 **文章获取与 skill 的关系：** `wechat-intelligence-hub` skill 用于聊天情报、日报和商机分析，本项目采集文章不依赖它。数据库 key 用于读取公众号推送；全文及图片通过原文网页下载，不需要绿泡泡缓存图片的解码 key，也不保证补齐未同步到本机的历史。
 
+## OpenAI 兼容协议
+
+顶栏「设置 → API Key」的 OpenAI 兼容区域提供 **Responses → Chat Completions** 开关。
+开启时，统一文本调用转为供应商的 `/chat/completions`；关闭时直接调用 `/responses`。
+普通调用和问答流式调用使用同一配置，保存后即时生效，无需重启。原生 Responses 请求使用
+`store=false`，不依赖供应商保存会话；问答上下文仍由知识库自己的提示词传入。
+
+为保留升级前的行为，未配置开关的旧配置默认开启转换。配置保存在
+`data/secrets.json` 的 `openai.protocol_conversion_enabled` 布尔字段；API 写入字段为
+`POST /api/keys` 的 `openai_protocol_conversion_enabled`。Key 和 Base URL 的环境变量
+优先级不变，协议开关仍可独立设置。模型列表继续通过 `/models` 拉取，不受开关影响。
+这不是对外的 Responses 代理，不包含 Codex 工具调用协议转发。
+
 ## 设计决策备忘
 
 - **obs md 是事实来源**,SQLite 只是索引(可随时删掉重建):换检索栈不锁死数据

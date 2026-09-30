@@ -286,6 +286,27 @@ body.chat-mode { padding-bottom: 28px; }
 .key-fields { display: grid; gap: 8px; }
 /* key 和 base_url 都是标识符,等宽体下位数对得齐,也一眼看出是不是粘漏了 */
 .key-fields input { width: 100%; font-family: var(--font-mono); font-size: 12.5px; }
+.key-conversion {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px;
+  padding: 12px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--brand-tint); cursor: pointer;
+}
+.key-conversion > span:first-child { flex: 1 1 220px; min-width: 0; }
+.key-conversion b { display: block; font-size: 13px; }
+.key-conversion .hint { display: block; margin-top: 4px; font-size: 12px; }
+.key-conversion-control { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.key-conversion-control input {
+  appearance: none; position: relative; flex: 0 0 36px; width: 36px; height: 20px;
+  margin: 0; padding: 0; border: 0; border-radius: 20px; background: var(--muted); cursor: pointer;
+}
+.key-conversion-control input::before {
+  content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--card);
+}
+.key-conversion-control input:checked { background: var(--brand); }
+.key-conversion-control input:checked::before { left: 19px; }
+.key-conversion-control input:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+.key-conversion-control input:disabled { opacity: .5; cursor: wait; }
 .key-models { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
 .key-models button { min-height: 30px; padding: 4px 12px; font-size: 12px; }
 .key-models .hint { font-size: 12px; }

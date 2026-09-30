@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 from kb import llm, llm_stages
 
@@ -87,6 +87,7 @@ class KeysRequest(BaseModel):
     anthropic_base_url: str | None = None
     openai_key: str | None = None
     openai_base_url: str | None = None
+    openai_protocol_conversion_enabled: StrictBool | None = None
 
 
 @router.get("/api/keys")
@@ -106,6 +107,8 @@ def api_keys_set(body: KeysRequest):
         updates["openai"]["key"] = body.openai_key
     if body.openai_base_url is not None:
         updates["openai"]["base_url"] = body.openai_base_url
+    if body.openai_protocol_conversion_enabled is not None:
+        updates["openai"]["protocol_conversion_enabled"] = body.openai_protocol_conversion_enabled
     llm.set_config(updates)
     return {"keys": llm.key_status()}
 

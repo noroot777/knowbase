@@ -341,13 +341,22 @@
               onclick="saveModels('anthropic')">保存所选模型</button>
     </div>
     <div class="row key-block">
-      <div class="key-head"><b>OpenAI / GPT</b><span>OpenAI 格式 · <span id="key-openai-st"></span></span></div>
+      <div class="key-head"><b>OpenAI 兼容 / GPT</b><span>OpenAI 格式 · <span id="key-openai-st"></span></span></div>
       <div class="key-fields">
         <input id="key-openai" type="password" autocomplete="off" spellcheck="false"
                aria-label="OpenAI key" placeholder="key,如 sk-…">
         <input id="url-openai" type="text" autocomplete="off" spellcheck="false"
                aria-label="OpenAI base_url" placeholder="base_url,如 https://你的gpt中转站.com/v1(留空=官方)">
       </div>
+      <label class="key-conversion" for="openai-protocol-conversion">
+        <span><b>Responses → Chat Completions</b><span id="openai-conversion-help" class="hint">仅支持 /chat/completions 的供应商请开启；关闭后使用原生 /responses。旧配置默认开启，普通与流式调用均生效。</span></span>
+        <span class="key-conversion-control">
+          <input id="openai-protocol-conversion" type="checkbox" role="switch" checked disabled
+                 aria-label="Responses → Chat Completions" aria-describedby="openai-conversion-help"
+                 onchange="updateOpenaiConversionState()">
+          <span id="openai-conversion-state">协议转换已开启</span>
+        </span>
+      </label>
       <div class="key-models">
         <button type="button" class="ghost" onclick="fetchModels('openai')">拉取可用模型</button>
         <span id="models-openai-msg" class="hint"></span>
