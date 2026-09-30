@@ -212,6 +212,64 @@ class TranslateTests(unittest.TestCase):
         self.assertGreater(len(calls), 1)
         self.assertIn('以上为前 6000 字', self.item()['body_zh'])
 
+    def legacy_partial(self):
+        """装入老解析器留下的那份半成品:正文中文、标题空、完成时间非空、已导出。
+
+        这形态是 2026-09-30 之前"漏掉 ###TITLE### 就整段当正文"的直接产物,
+        真实可达(第 3 轮审查用它复现)。
+        """
+        self.put('A new agent runtime', 'This runtime schedules tools.')
+        with reg.db() as c:
+            c.execute("UPDATE feed_items SET title_zh='', body_zh='这个运行时调度工具。',"
+                      " translated_at='2026-09-29T00:00:00+00:00',"
+                      ' exported_hash=content_hash')
+
+    def test_a_legacy_half_translated_entry_is_not_called_done(self):
+        # 页脚原来按"任一字段有译文"写「已译为中文」,而标题明明是一行英文
+        # (第 3 轮审查实测)。完成的判据前后端同一个:正文和标题都得有译文。
+        self.legacy_partial()
+        item = reg.items('rss')['items'][0]
+        self.assertTrue(item['partial'])
+        self.assertEqual((False, False), (item['translating'], item['retranslating']))
+
+    def test_a_legacy_half_translated_entry_gets_its_title_filled_in(self):
+        # 新队列判据只选 translated_at 空的,这批"完成时间非空、标题空"的存量
+        # 永远选不到,再同步也不补——所以要一次幂等迁移把它们清回队列。
+        self.legacy_partial()
+        self.assertEqual(0, translate.pending('rss'))          # 迁移前选不到
+        with patch.object(llm, 'chat', Mock(return_value='全新的智能体运行时')) as chat:
+            summary = translate.translate_pending('rss')
+        self.assertEqual(1, summary['done'])
+        # 只补标题那一次调用:正文已经是中文,整篇重译是把同一份正文再买一遍
+        chat.assert_called_once()
+        item = self.item()
+        self.assertEqual('全新的智能体运行时', item['title_zh'])
+        self.assertEqual('这个运行时调度工具。', item['body_zh'])
+        self.assertEqual(0, translate.pending('rss'))          # 补完就出队
+        # 补完之后才轮到「已译为中文」,而且 md 会被重写(exported_hash 清了)
+        panel = reg.items('rss')['items'][0]
+        self.assertEqual((False, False, False),
+                         (panel['partial'], panel['translating'], panel['retranslating']))
+        self.assertEqual('', panel['exported_hash'])
+
+    def test_requeueing_legacy_partials_is_idempotent(self):
+        # 幂等:清回一次之后它由正常流程收尾,不会每轮都被重新清一遍。
+        self.legacy_partial()
+        self.assertEqual(1, translate._requeue_partial('rss'))
+        self.assertEqual(0, translate._requeue_partial('rss'))
+        # 整条译好的不会被误当半成品清回去
+        with patch.object(llm, 'chat', Mock(return_value='全新的智能体运行时')):
+            translate.translate_pending('rss')
+        self.assertEqual(0, translate._requeue_partial('rss'))
+
+    def test_a_title_only_entry_is_not_mistaken_for_a_partial(self):
+        # 只有标题的条目译完之后 body_zh 本来就是空的,它不是半成品。
+        self.put('Great', '')
+        with patch.object(llm, 'chat', Mock(return_value='很棒')):
+            translate.translate_pending('rss')
+        self.assertEqual(0, translate._requeue_partial('rss'))
+        self.assertFalse(reg.items('rss')['items'][0]['partial'])
+
     def test_translated_text_is_searchable_in_the_panel(self):
         self.put('An English title', 'English body about agents and runtimes.')
         with patch.object(llm, 'chat', Mock(return_value='###TITLE###\n中文标题\n###BODY###\n关于智能体的正文。')):

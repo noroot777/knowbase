@@ -182,10 +182,16 @@ function renderSubscription(s) {
 //                  重新排进队列等中文覆盖。这一态**照原文显示、可以展开**:
 //                  vault 里此刻确实是这一份英文,说它"暂未写入知识库"和文件、
 //                  索引的事实正相反(复审实测)。如实显示 + 写明在等覆盖。
+//   partial        正文是中文、标题还是原文的半成品(老解析器留下的存量),
+//                  下一次同步会把它清回队列补译标题。
+// **「已译为中文」的判据和后端同一个**:正文有译文、而且标题(只要原标题不空)
+// 也有译文。原来是"任一字段非空就算完成",于是半成品页脚写着已译为中文、标题
+// 却是一行英文,连着三轮审查指的都是这处谎报(第 3 轮实测)。
 function sourceText(item) {
-  return { title: item.title_zh || item.title, body: item.body_zh || item.body,
-           translated: !!(item.body_zh || item.title_zh), translating: !!item.translating,
-           retranslating: !!item.retranslating };
+  const title = item.title_zh || item.title, body = item.body_zh || item.body;
+  const whole = !!item.body_zh && (!item.title || !!item.title_zh);
+  return { title, body, translated: whole, translating: !!item.translating,
+           retranslating: !!item.retranslating, partial: !!item.partial };
 }
 function renderSourceItems() {
   const rows = sourceRows.map(item => { const t = sourceText(item); return `<article class="source-entry">
@@ -197,7 +203,7 @@ function renderSourceItems() {
     <p class="source-excerpt">译成中文之后才写进知识库；这一条现在只有原文，点右下角“原文”可以直接看。</p>`
       : `<h3><button class="source-entry-title" data-read-item="${item.key}">${esc(t.title)}</button></h3>
     <p class="source-excerpt">${esc(t.body.slice(0,380))}${t.body.length>380?'…':''}</p>`}
-    <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}${t.translating ? ' · 外文原文，正在等翻译' : t.translated ? ' · 已译为中文' : t.retranslating ? ' · 外文原文已入库，正在等中文译文覆盖' : ''}</span>${t.translating ? '' : `<button class="text-button" data-read-item="${item.key}">展开阅读</button>`}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`; }).join('');
+    <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}${t.translating ? ' · 外文原文，正在等翻译' : t.translated ? ' · 已译为中文' : t.retranslating ? ' · 外文原文已入库，正在等中文译文覆盖' : t.partial ? ' · 正文已译为中文，标题还是原文（下次同步补译）' : ''}</span>${t.translating ? '' : `<button class="text-button" data-read-item="${item.key}">展开阅读</button>`}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`; }).join('');
   const note = sourceTranslating
     ? `<p class="source-note" role="status">${sourceTranslating} 条外文内容还在等翻译：译成中文之后才写进知识库。</p>` : '';
   $('source-list').innerHTML = rows ? note + rows :

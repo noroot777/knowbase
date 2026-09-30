@@ -41,12 +41,32 @@ _state: dict = {
 _lock = threading.Lock()
 _run_seq = 0
 
+# 已经收尾的那几轮运行的终态,按 run id 存着。等一轮同步的人(日报)靠两秒一跳的
+# 轮询取快照,而全局状态只有一份:我们那一轮收尾、另一轮马上接替时,轮询就再也
+# 看不到自己那一轮的阶段结果了——只知道"不是我的了",不知道它是成功、失败还是
+# 被停的。没有这份记录只能猜,而猜成"成功"就是拿一份没人证明过的结果去记账
+# (2026-09-30 第 3 轮审查实测)。只留最近几轮:够覆盖"等的那一轮刚被接替"这个
+# 窄窗口,又不让状态无限长。
+_finished: dict[str, dict] = {}
+_FINISHED_KEEP = 8
+
 
 def new_run_id() -> str:
     """给新一轮运行发一个身份。只在 `_lock` 里调(`start_pipeline` 那一段)。"""
     global _run_seq
     _run_seq += 1
     return f'run-{_run_seq}'
+
+
+def run_result(run_id: str) -> dict | None:
+    """那一轮运行的终态(还在跑、或者已经被挤出记录时回 None)。
+
+    形状和 `get_state()` 的相关字段一致(`stages` / `stopped` / `finished_at`),
+    调用方拿它当"我那一轮的最后一份快照"用。
+    """
+    with _lock:
+        got = _finished.get(run_id)
+        return deepcopy(got) if got else None
 
 
 def _now() -> str:
@@ -135,4 +155,15 @@ def _end_run() -> None:
         _state["finished_at"] = _now()
         _log("同步已停止，已完成的结果保留" if stopped else "管道结束")
         _save_last_run()
+        # 收尾状态按 run id 留一份,再把 running 放下:等这一轮的人晚一步来取
+        # 也还拿得到自己那一轮的结果(阶段修正已经在上面做完了,存的就是终态)。
+        run_id = _state.get("run_id") or ""
+        if run_id:
+            _finished[run_id] = {
+                "run_id": run_id, "stopped": stopped,
+                "finished_at": _state["finished_at"],
+                "stages": deepcopy(_state["stages"]),
+            }
+            for old_id in list(_finished)[:-_FINISHED_KEEP]:
+                del _finished[old_id]
         _state["running"] = False

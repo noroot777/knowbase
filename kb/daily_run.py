@@ -290,14 +290,19 @@ def _sync_channel(channel: str, label: str, budget_end: float) -> dict:
     # 只认 run id 相同的快照。两秒一跳的轮询里,我们那一轮跑完、另一项同步
     # 马上接手全局管道是完全可能的:只看 running 的话看到的是连绵不断的 True,
     # 既不知道已经换人,还会把别人的阶段结果当成自己这个通道的成绩单。
+    #
+    # `mine` 只装**终态**(自己那一轮 running 已经放下的那份快照)。中途快照不算:
+    # 那时阶段还是 running/pending,拿它数 error 一个都数不出来,于是"被接替"和
+    # "跑完了还全是绿的"长得一模一样——报成功却没有任何证据。被接替的那条路统一
+    # 去问管道按 id 留的收尾记录。
     mine: dict | None = None
     while True:
         snapshot = pl.get_state()
         if snapshot.get('run_id') != run:
             break                    # 我们那一轮已经收尾,现在跑的是别人的
-        mine = snapshot
         if not snapshot['running']:
-            break                    # 正常收尾:这份快照就是最终结果
+            mine = snapshot          # 正常收尾:这份快照就是最终结果
+            break
         stage = snapshot.get('current_stage') or ''
         detail = (snapshot['stages'].get(stage) or {}).get('detail') or ''
         _state['detail'] = f'{label}:{detail}' if detail else f'{label}:同步中'
@@ -309,8 +314,19 @@ def _sync_channel(channel: str, label: str, budget_end: float) -> dict:
     with _lock:
         if _state['pipeline_run'] == run:
             _state['pipeline_run'] = ''
-    if mine is None:                 # 一次都没看到自己那一轮(跑得比第一跳还快)
-        entry.update(status='ok', detail='同步已结束(阶段结果已被下一轮运行覆盖)')
+    # 没能亲眼看到自己那一轮收尾(它跑得比下一跳还快,接替者已经顶上来):
+    # 管道按 run id 留了收尾快照,照 id 去取自己那一份。
+    if mine is None:
+        mine = pl.run_result(run)
+    if mine is None:
+        # 连收尾记录都没有(被更多轮挤出去了)。**这一档不许算成功**:我们既没
+        # 看到 run-1 的任何阶段状态,也不知道它是跑完了、失败了还是被停的,写
+        # 一句"同步完成"等于拿一份没人证明过的结果去记账(2026-09-30 第 3 轮
+        # 审查实测)。如实记未知,日报照样生成——素材是库里已有的那些,不因为
+        # 一个通道的结果查不到就整轮不出。
+        entry.update(status='unknown',
+                     detail='没拿到这一轮的同步结果(管道已被下一轮运行接替),'
+                            '成败未知')
         _log(f'{label}:{entry["detail"]}')
         return entry
     bad = [f'{name} {s["detail"]}'

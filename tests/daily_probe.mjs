@@ -240,6 +240,22 @@ check("面板写明还有几条在等翻译",
       /条外文内容还在等翻译/.test(await evalJs(`document.querySelector('.source-note')?.textContent || ''`)),
       await evalJs(`document.querySelector('.source-note')?.textContent || ''`));
 
+// 老解析器留下的半成品(正文中文、标题还是原文):页脚不能说「已译为中文」
+const half = await evalJs(`(() => {
+  const el = [...document.querySelectorAll('.source-entry')]
+    .find(r => /A half translated post/.test(r.textContent));
+  return el ? JSON.stringify({ foot: el.querySelector('.source-entry-footer span')?.textContent || '',
+    excerpt: el.querySelector('.source-excerpt')?.textContent || '' }) : ''; })()`);
+const h = half ? JSON.parse(half) : {};
+check("半成品条目仍在列表里", !!half,
+      await evalJs(`document.getElementById('source-list').textContent.slice(0, 300)`));
+// 「· 已译为中文」是完成态那句话的完整形态(以它收尾);半成品那句是
+// 「正文已译为中文,标题还是原文…」,所以只能按结尾判,不能按包含判。
+check("半成品不谎称整条已译为中文", !!half && !/·\s*已译为中文\s*$/.test(h.foot), h.foot);
+check("半成品页脚写清标题还是原文", !!half && /标题还是原文/.test(h.foot), h.foot);
+check("半成品的中文正文照常显示", !!half && /这一条只有正文回来了中文/.test(h.excerpt),
+      h.excerpt.slice(0, 60));
+
 check("页面没有脚本报错", pageErrors.length === 0, pageErrors.join(" | "));
 
 console.log(oks.map(o => "  ok  " + o).join("\n"));

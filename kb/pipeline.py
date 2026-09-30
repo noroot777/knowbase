@@ -48,6 +48,7 @@ from kb.pipeline_state import (
     load_last_run,
     new_run_id,
     request_stop,
+    run_result,
 )
 
 # 对外门面:Web 层只 import 本模块,不直接碰拆出去的三个子模块
@@ -59,6 +60,7 @@ __all__ = [
     "pending_counts",
     "request_stop",
     "retry_failed_plan",
+    "run_result",
     "save_schedule",
     "source_status",
     "source_targets",

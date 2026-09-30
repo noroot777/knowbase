@@ -97,6 +97,16 @@ def main():
     reg.put_items(source, [{'url': 'https://example.org/en-2', 'title': 'A second English post',
                             'body': 'This one is still waiting for its translation.',
                             'published': (recent - timedelta(hours=2)).strftime('%Y-%m-%d %H:%M')}])
+    # 第三条:老解析器留下的**半成品**(正文中文、标题空、完成时间非空、已导出)。
+    # 它不在翻译队列里,页脚不能写「已译为中文」——2026-09-30 第 3 轮审查就是在
+    # 真实页面上看到"英文标题 + 中文正文 + 已译为中文"三样同时出现的。
+    reg.put_items(source, [{'url': 'https://example.org/en-3', 'title': 'A half translated post',
+                            'body': 'Only the body of this one came back in Chinese.',
+                            'published': (recent - timedelta(hours=3)).strftime('%Y-%m-%d %H:%M')}])
+    with reg.db() as c:
+        c.execute("UPDATE feed_items SET title_zh='', body_zh=?, translated_at=?,"
+                  ' exported_hash=content_hash WHERE url=?',
+                  ('这一条只有正文回来了中文。', reg.now(), 'https://example.org/en-3'))
     print(json.dumps({'KB_DATA_DIR': str(data), 'KB_VAULT_ROOT': str(vault)}, ensure_ascii=False))
 
 

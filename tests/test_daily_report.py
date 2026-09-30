@@ -431,9 +431,8 @@ class DailyStopTests(unittest.TestCase):
         finally:
             ps._state.clear(); ps._state.update(state)
 
-    def test_a_replaced_run_neither_gets_stopped_nor_reported_as_ours(self):
-        # 同一件事的执行侧:`_sync_channel` 只认 run id 相同的快照。换人之后
-        # 既不去停它(那是别人的活),也不把它的阶段结果当成我们的成绩单。
+    def replaced_mid_poll(self, result=None):
+        """跑一趟 `_sync_channel`:我们那一轮在第一跳之前就收尾、别人顶了上来。"""
         from kb import pipeline as pl
         snapshots = [
             {'running': True, 'run_id': 'run-1', 'current_stage': 'crawl',
@@ -446,14 +445,55 @@ class DailyStopTests(unittest.TestCase):
                                  'pipeline_run': '', 'log': [], 'detail': ''})
         with patch.object(pl, 'start_pipeline', Mock(return_value='run-1')), \
              patch.object(pl, 'get_state', Mock(side_effect=snapshots)), \
+             patch.object(pl, 'run_result', Mock(return_value=result)), \
              patch.object(pl, 'request_stop', Mock()) as stop, \
              patch.object(daily_run.time, 'sleep', Mock()), \
              patch.object(daily_run, '_wait_idle', Mock(return_value=True)):
             entry = daily_run._sync_channel('rss', 'RSS', time.monotonic() + 600)
-        stop.assert_not_called()
-        self.assertEqual('ok', entry['status'])
-        self.assertNotIn('别人那轮的失败', entry['detail'])
+        stop.assert_not_called()                      # 别人那一轮不该被我们停
         self.assertEqual('', daily_run._state['pipeline_run'])
+        return entry
+
+    def test_a_replaced_run_is_judged_by_its_own_recorded_outcome(self):
+        # `_sync_channel` 只认 run id 相同的快照。换人之后既不去停它、也不拿
+        # 它的阶段结果当我们的成绩单——改从管道那份按 id 存的收尾快照里取。
+        entry = self.replaced_mid_poll(
+            {'run_id': 'run-1', 'stopped': False, 'finished_at': '',
+             'stages': {'crawl': {'status': 'error', 'detail': '我们那轮的失败'}}})
+        self.assertEqual('error', entry['status'])
+        self.assertIn('我们那轮的失败', entry['detail'])
+        self.assertNotIn('别人那轮的失败', entry['detail'])
+
+    def test_an_unobtainable_outcome_is_not_recorded_as_success(self):
+        # 连收尾记录都取不到时**不许算成功**:那一轮的阶段状态我们一眼都没
+        # 看到,成败、是否被停全都不知道,写"同步完成"是拿没人证明过的结果去
+        # 记账(2026-09-30 第 3 轮审查实测这里硬编码成了 ok)。
+        entry = self.replaced_mid_poll(None)
+        self.assertEqual('unknown', entry['status'])
+        self.assertIn('未知', entry['detail'])
+        self.assertNotIn('别人那轮的失败', entry['detail'])
+
+    def test_the_pipeline_keeps_each_finished_run_addressable_by_id(self):
+        # 上面那两条靠的是管道真留了这份记录:终态在 running 放下之前按 id 存。
+        from kb import pipeline_state as ps
+        state, finished = deepcopy(ps._state), dict(ps._finished)
+        try:
+            ps._state.update({'running': True, 'run_id': 'run-42', 'log': [],
+                              'stop_requested': False,
+                              'stages': {s: {'status': 'ok', 'detail': '好了'}
+                                         for s in ps.STAGES}})
+            with patch.object(ps, '_save_last_run', Mock()):
+                ps._end_run()
+            got = ps.run_result('run-42')
+            self.assertEqual('ok', got['stages']['crawl']['status'])
+            self.assertFalse(got['stopped'])
+            self.assertIsNone(ps.run_result('run-41'))     # 没跑过的查不到
+            # 存的是快照,不是同一个对象:之后再起一轮不会把它改掉
+            ps._state['stages']['crawl'] = {'status': 'running', 'detail': '新一轮'}
+            self.assertEqual('ok', ps.run_result('run-42')['stages']['crawl']['status'])
+        finally:
+            ps._state.clear(); ps._state.update(state)
+            ps._finished.clear(); ps._finished.update(finished)
 
     def test_syncing_nothing_is_refused_at_both_layers(self):
         # 勾了"先同步"却一个来源都没选:同步阶段什么都不做、却一路报成功,

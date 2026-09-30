@@ -336,12 +336,26 @@ def items(kind: str, source_id: int | None = None, offset: int = 0, limit: int =
     #   translating    还没入库,在等译文(导出闸门确实扣着它)
     #   retranslating  原文已经入库,在等中文译文覆盖
     # 顶上那个"还有几条在等翻译"的计数只数前者——后者已经能读了。
+    #
+    # 还有第三档 `partial`:**不在队列里、可正文是中文而标题还是原文**。这批是
+    # 老解析器留下的半成品(`translate.PARTIAL_SQL`),同步跑起来时
+    # `_requeue_partial` 会把它们清回队列,但在那之前打开面板也不能说它"已译为
+    # 中文"——页脚这么写而标题明明是英文,是三轮审查里同一处谎报的最后一块
+    # (第 3 轮实测)。"完成"的判据前后端必须是同一个:正文有译文、而且标题
+    # (只要原标题不空)也有译文。
     from kb.feeds import translate
     queued, qargs = translate.queued_sql()
     holding = translate.available()
-    state_sql, sargs = ((f"CASE WHEN ({queued}) THEN"
+    # 半成品那一档排在最前面,而且要求它**已经导出过**:库里此刻那篇 md 就是
+    # "中文正文 + 原文标题",如实显示、可以展开,页脚写清标题还在等补译。清回
+    # 队列之后它同时满足 queued,可"外文原文已入库"那句话对它就不准了(正文已经
+    # 是中文)。没导出过的(极少见)照旧按队列那两档走——那时库里确实没有这一条,
+    # 不能给展开。
+    partial = f"({translate.PARTIAL_SQL}) AND exported_hash<>''"
+    state_sql, sargs = ((f"CASE WHEN ({partial}) THEN 3 WHEN ({queued}) THEN"
                          " (CASE WHEN exported_hash='' THEN 1 ELSE 2 END) ELSE 0 END"),
-                        qargs) if holding else ('0', [])
+                        qargs) if holding else (
+                        f'CASE WHEN ({partial}) THEN 3 ELSE 0 END', [])
     with db() as c:
         total = c.execute('SELECT count(*) FROM feed_items WHERE ' + where, args).fetchone()[0]
         waiting = (c.execute(f'SELECT count(*) FROM feed_items WHERE {where}'
@@ -356,6 +370,7 @@ def items(kind: str, source_id: int | None = None, offset: int = 0, limit: int =
         state = d.pop('translate_state')
         d['translating'] = state == 1
         d['retranslating'] = state == 2
+        d['partial'] = state == 3
         out.append(d)
     return {'items': out, 'total': total, 'offset': offset, 'translating': waiting}
 

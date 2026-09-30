@@ -132,6 +132,10 @@ def translate_item(item, model) -> tuple[str, str]:
     问它译一段空正文只会拿回空译文,白白耗掉三次重试额度。
     """
     original = item['title'] or ''
+    if _has(item, 'body_zh') and not _has(item, 'title_zh') and original:
+        # 存量半成品(见 `_requeue_partial`):正文已经是中文,只差标题那一行。
+        # 整篇重译一遍是把同一份正文再买一次,而它已经在 vault 里了。
+        return _title_only(original, model), item['body_zh']
     body = (item['body'] or '')[:MAX_BODY]
     truncated = len(item['body'] or '') > MAX_BODY
     parts = _split(body)
@@ -230,6 +234,28 @@ def _label_unknown(kind: str) -> None:
                 c.execute('UPDATE feed_items SET lang=? WHERE key=?', (lang, r['key']))
 
 
+# 「半成品」的唯一口径:整条判成外文、原标题不空、正文有译文而标题没有。
+# 这形态是 2026-09-30 之前那版解析器留下的——模型漏掉 ###TITLE### 分隔标记时,
+# 整段当正文、空标题照样存下来。修了写入路径救不了**已经在库里的那批**:它们
+# `translated_at` 非空,新的队列判据永远选不到,面板还按"任一字段有译文"标成
+# 「已译为中文」,于是英文标题永久留着、再同步也不补(第 3 轮审查实测)。
+PARTIAL_SQL = "lang='en' AND title<>'' AND title_zh='' AND body_zh<>''"
+
+
+def _requeue_partial(kind: str) -> int:
+    """把存量半成品清回待翻译状态,让下一趟只补一次标题。返回清回几条。
+
+    幂等:清掉 `translated_at` 之后这一条就不再匹配 `PARTIAL_SQL` 里那个
+    "已经完成过"的前提了(它进了队列,由正常流程收尾)。`translate_tries` 保持
+    原样——补译标题失败照样计次,试满 `MAX_TRIES` 仍然拿不到标题的按原文留着,
+    不会无限烧钱。
+    """
+    with reg.db() as c:
+        cur = c.execute("UPDATE feed_items SET translated_at='' WHERE kind=? AND"
+                        f" translated_at<>'' AND ({PARTIAL_SQL})", (kind,))
+        return cur.rowcount or 0
+
+
 def _save(key: str, title_zh: str, body_zh: str) -> None:
     with reg.db() as c:
         # exported_hash 清空 = 让导出阶段重写这篇 md。译完不重导的话,vault 里
@@ -253,6 +279,7 @@ def translate_pending(kind: str, limit: int | None = None, progress=None) -> dic
     """
     summary = {'done': 0, 'failed': 0, 'left': 0, 'skipped': '', 'errors': []}
     _label_unknown(kind)
+    _requeue_partial(kind)
     cond, cargs = queued_sql()          # 队列判据只有这一份,别在这里另写一遍
     with reg.db() as c:
         rows = [dict(r) for r in c.execute(
