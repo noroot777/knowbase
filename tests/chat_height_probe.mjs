@@ -104,8 +104,21 @@ const VIEWPORTS = [
   { w: 601, h: 360, name: "窄横屏 601x360" },
   // 窄且短:≤600 时首次配置横幅本来就折行,复审第 2 轮那次强行 nowrap 把文字挤成
   // 一条细柱、横幅反而从 136.7 长到 230.1px,卡片只剩 90.9px(实测 320×520)。
-  { w: 320, h: 520, name: "窄短屏 320x520" },
   { w: 320, h: 500, name: "窄短屏 320x500" },
+  { w: 320, h: 520, name: "窄短屏 320x520" },
+  // 更矮的横屏:568×320 是 320×480 那代机型横过来的样子,也是复审第 4 轮复现的那格。
+  // 带首次配置横幅时卡片被挤到只剩 2px(内容高 0)—— 而 `!card.clientHeight` 被当成
+  // 「面板没显示」,一级紧凑都不加,写问题的地方、模型下拉、发送按钮全部消失,
+  // 点原位置打不进字、滚页面也没用。600×320 是同一格的另一个宽度。
+  { w: 568, h: 320, name: "矮横屏 568x320" },
+  { w: 600, h: 320, name: "矮横屏 600x320" },
+  { w: 600, h: 340, name: "矮横屏 600x340" },
+  { w: 601, h: 320, name: "矮横屏 601x320" },
+  // 再矮一档:横幅按回一行之后文字仍占两行,只剩「那句说明文字」和「写问题的地方」
+  // 二选一 —— 第四级就是为这一格存在的。320×360 是另一侧:真窄屏上按回一行只会
+  // 更糟(第三级自己退回去),同样得靠第四级。
+  { w: 480, h: 320, name: "矮横屏 480x320" },
+  { w: 320, h: 360, name: "窄矮屏 320x360" },
   // 旧的 max-height: 520 阈值两侧:520 好好的、521 恢复常规留白就被裁,
   // 540/550 同样被裁 —— 所以这几档一起钉,防的是「换一个固定阈值」那种修法。
   { w: 375, h: 520, name: "小手机 375x520" },
@@ -191,8 +204,21 @@ const measure = `(() => {
     scrollW: document.documentElement.scrollWidth,
     tight: document.body.classList.contains('chat-tight'),
     tight2: document.body.classList.contains('chat-tight-2'),
+    tight3: document.body.classList.contains('chat-tight-3'),
+    tight4: document.body.classList.contains('chat-tight-4'),
+    // 第三/四级把「首次配置」这块往回收,但**它本身必须还完整可用**:
+    // 标题在、两个按钮都在、都点得到。收的是那句解释性说明,不是功能。
+    bannerOk: (() => {
+      const wb = document.getElementById('wechat-welcome');
+      if (!wb || wb.hidden) return true;
+      const btns = [...wb.querySelectorAll('button')];
+      const title = document.getElementById('wechat-welcome-title');
+      return btns.length >= 2 && btns.every(hit) && !!title && hit(title);
+    })(),
   };
 })()`;
+
+const tierOf = m => m.tight4 ? "四级" : m.tight3 ? "三级" : m.tight2 ? "二级" : m.tight ? "一级" : "否";
 
 // 12 行 —— 够顶到 150px 那个舒适上限,正是审查复现出问题的输入量。
 const LONG_TEXT = Array.from({ length: 12 }, (_, i) => `第${i + 1}行输入内容测试`).join("\n");
@@ -259,7 +285,9 @@ async function probe(vp, banner, history) {
   check(`${tag}:文本域完整可见且点得到`,
         m.taVisible >= m.taHeight - 0.5 && m.hitInput,
         `可见 ${m.taVisible.toFixed(1)}/${m.taHeight.toFixed(1)}px,命中 ${m.hitInput}`
-        + `(紧凑 ${m.tight ? (m.tight2 ? "二级" : "一级") : "否"} / 卡片 ${m.cardHeight.toFixed(1)})`);
+        + `(紧凑 ${tierOf(m)} / 卡片 ${m.cardHeight.toFixed(1)})`);
+  // 收留白不许把「首次配置」这块收没:标题和两个按钮一个都不能少,而且点得到。
+  check(`${tag}:首次配置横幅仍完整可用`, m.bannerOk, `紧凑 ${tierOf(m)}`);
   check(`${tag}:卡片没有被聚焦滚出内部偏移`, m.cardScrollTop === 0,
         `card.scrollTop=${m.cardScrollTop}`);
   check(`${tag}:模型下拉与发送按钮没被卡片裁掉`,

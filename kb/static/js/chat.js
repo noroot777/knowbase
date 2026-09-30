@@ -98,10 +98,12 @@ function autoGrowChat() {
   t.style.height = h;
 }
 
-// 放不下就把留白收起来(`body.chat-tight` / `chat-tight-2`,值在 workspace.css)。
+// 放不下就让别的东西退让(`body.chat-tight` / `-2` / `-3`,值在 workspace.css)。
 // **逐级试,每加一级重新量一次**:第一级收的是卡片**里面**那点空隙(消息区内边距、
 // 输入框内外边距和行间 gap、横幅留白),它给不出卡片本身的高度;卡片仍装不下一行
-// 输入区时才上第二级,让页头那两处留白退让(主内容上下内边距、标题行下边距)。
+// 输入区时才上第二级,让页头那两处留白退让(主内容上下内边距、标题行下边距);
+// 还不够就上第三级,让首次配置横幅按回一行(≤600 时它默认折行,一个人吃掉 114.59px);
+// 再不够就上第四级,把横幅那句说明文字收起(标题和两个按钮都留着)。
 // 不逐级的话就是 600×360 那个形态:卡片 57.95px、输入区一行要 82px,差的 24px
 // 卡片里根本没有 —— 文本域被 `overflow: hidden` 从**上边**裁掉(只剩下缘 9px),
 // 聚焦还把卡片内部滚到底(`scrollTop=36`),点写字的地方打到的是 `#main-content`,
@@ -111,19 +113,35 @@ function autoGrowChat() {
 // 现读(竖排那档的 `.chat-layout` gap、第二级的页头留白都跟着 class 变),两边口径
 // 一致。同步改完就恢复原值,中间不会有一帧被画出来,ResizeObserver 也不会为
 // 「改了又改回去」的同一个尺寸发通知。
-const CHAT_TIGHT = ['chat-tight', 'chat-tight-2'];
+const CHAT_TIGHT = ['chat-tight', 'chat-tight-2', 'chat-tight-3', 'chat-tight-4'];
 
 function fitChatTight(t) {
   const bar = t.closest('.chat-inputbar');
   const card = t.closest('.chat-main');
-  if (!bar || !card) return;
   const cls = document.body.classList;
+  // 先无条件摘干净再判:离开问答时这个函数照样会被 ResizeObserver 叫到,
+  // 提前 return 而不摘的话紧凑样式会跟着走到别的页面上去。
   cls.remove(...CHAT_TIGHT);
+  if (!bar || !card) return;
+  // **「面板没显示」和「可见但被挤到只剩那两条边框」是两回事**,不能拿
+  // `clientHeight` 当隐藏判据 —— 后者恰恰是最需要收缩的形态,而原来那句
+  // `!card.clientHeight` 让它一级都不试:568×320 / 600×320 带首次配置横幅时
+  // 卡片被挤到 2px(内容高 0),写问题的地方、模型下拉、发送按钮**全部消失**,
+  // 点原位置打不进字、滚页面也没用(2026-09-30 复审第 4 轮实测)。
+  // 越需要释放空间反而越不释放,是这条判据写反了。
+  if (!card.getClientRects().length) return;
   const prev = t.style.height;
   t.style.height = CHAT_INPUT_MIN + 'px';
   for (const lvl of CHAT_TIGHT) {
-    if (!card.clientHeight || chatBarNeed(bar) <= card.clientHeight) break;
+    const room = card.clientHeight;
+    if (chatBarNeed(bar) <= room) break;
     cls.add(lvl);
+    // **这一级白加就当场退回去**:同一条规则在不同窗口上效果是反的 —— 横幅按回
+    // 一行在 568 宽上省掉整整 46px,在 320 那种真窄屏上两个 `flex-shrink: 0` 的
+    // 按钮会把文字压成一条细柱,横幅反而从 136.7 长到 230.1px(复审第 2 轮实测)。
+    // 「哪一级对哪个窗口有用」不是一个宽度断点能回答的,所以每一级都按**实际
+    // 占位**验一次,没换来卡片高度就摘掉,再试下一级。
+    if (card.clientHeight <= room) cls.remove(lvl);
   }
   t.style.height = prev;
 }
@@ -146,7 +164,9 @@ function chatBarNeed(bar) {
 function chatInputRoom(t) {
   const bar = t.closest('.chat-inputbar');
   const card = t.closest('.chat-main');
-  if (!bar || !card || !card.clientHeight) return Infinity;
+  // 同 fitChatTight:只有**真没显示**才退回纯内容增长。可见卡片就算内容高是 0
+  // 也得按它算,否则文本域会照着 150px 长起来、把整块输入区顶得更远。
+  if (!bar || !card || !card.getClientRects().length) return Infinity;
   const bs = getComputedStyle(bar);
   const msgs = $('chat-msgs');           // flex: 1 + 内部滚动,能缩到只剩内边距
   const ms = msgs ? getComputedStyle(msgs) : null;

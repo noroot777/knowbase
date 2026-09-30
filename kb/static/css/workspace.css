@@ -279,20 +279,11 @@ body.overlay-open { overflow: hidden; }
    让判定变成「放得下」,不会来回抖。
    让出空间的就是留白这一处,四个地方一起收:消息区内边距、输入框内外边距、
    **输入框自己的行间 gap**(不收就差那十来像素,640×360 上发送按钮被裁 11px),
-   以及首次配置横幅。 */
+   以及首次配置横幅的内外边距(把横幅按回一行是第三级的事,见下面)。 */
 body.chat-tight #chat-msgs { padding: 6px 15px 0; }
 body.chat-tight .chat-inputbar { margin: 2px 8px 2px; padding: 4px 8px 4px 10px; gap: 4px 10px; }
 body.chat-tight #wechat-welcome { padding: 8px 12px; margin-bottom: 8px; }
 
-/* 横幅**够宽才按回一行**。≤600 时 wechat_setup.css 本来就让它折行(文字独占一行、
-   两个按钮排第二行),强行 nowrap 的后果是反的:两个 `flex-shrink: 0` 的按钮把
-   文字列压成一条细柱,横幅从 136.7px 长到 230.1px,卡片只剩 90.9px,发送按钮只
-   露出一小条(2026-09-30 复审第 2 轮实测 320×520)。够宽时它才真的省下那一行
-   (89 → 143px 的反向:≤760 的 wrap 把按钮挤到第二行,横幅在 640 宽上白吃 54px)。 */
-@media (min-width: 601px) {
-  body.chat-tight #wechat-welcome { flex-wrap: nowrap; gap: 10px; }
-  body.chat-tight #wechat-welcome > div { flex-basis: auto; }
-}
 
 /* ── 第二级:收完卡片内的留白还是装不下,就让页头退让(body.chat-tight-2)──
    收留白只能收卡片**里面**那点空隙,给不出卡片本身的高度。600×360 带首次配置横幅
@@ -306,6 +297,37 @@ body.chat-tight #wechat-welcome { padding: 8px 12px; margin-bottom: 8px; }
    **只在第一级不够时才加**(chat.js 的 fitChatTight 逐级试),够了就不动页头。 */
 body.chat-tight-2 #main-content { padding-top: 4px; padding-bottom: 4px; }
 body.chat-tight-2 .compact-heading { margin-bottom: 4px; }
+
+/* ── 第三级:让首次配置横幅按回一行(body.chat-tight-3)────────────────────
+   ≤600 时 wechat_setup.css 让它折行(文字独占一行、两个按钮排第二行),横幅一个人
+   就吃掉 114.59px。568×320 / 600×320 带横幅时前两级收完卡片仍然只有 57px,而一行
+   输入区要 92px —— 按回一行省下的 46px 正好补上(实测卡片 57 → 94px,文本域
+   32px 全部可见)。不修的形态是:写问题的地方、模型下拉、发送按钮**全都看不见**,点
+   原位置打不进字、滚页面也没用(2026-09-30 复审第 4 轮实测)。
+   **这一级不许按宽度断点开**:320 那种真窄屏上两个 `flex-shrink: 0` 的按钮会把
+   文字压成一条细柱,横幅反而从 136.7 长到 230.1px、卡片只剩 90.9px(复审第 2 轮
+   实测 320×520)。所以 chat.js 加完这一级之后量一次卡片高度,没换来高度就当场
+   摘掉 —— 按真实占位退让,不按屏宽猜(原来那个 `@media (min-width: 601px)` 就是
+   猜的,而 568×320 恰好落在猜错的一侧)。 */
+body.chat-tight-3 #wechat-welcome { flex-wrap: nowrap; gap: 10px; }
+body.chat-tight-3 #wechat-welcome > div { flex-basis: auto; }
+
+/* ── 第四级:横幅只留标题和两个按钮(body.chat-tight-4)──────────────────
+   到这一级时前三级全收完卡片仍然装不下一行输入区,只剩「横幅那句说明文字」和
+   「写问题的地方」二选一 —— 480×320(横幅按回一行后文字仍占两行、90.7px)、
+   320×360 / 320×380(真窄屏上按回一行只会更糟,第三级已经自己退回去了)都是这个
+   形态。说明文字是解释性的,标题和「完成首次配置 / 稍后配置」两个按钮都留着,
+   所以横幅本身还是完整可用;而输入区装不下是功能直接不可用。实测 480×320 卡片
+   78 → 127px、320×360 74 → 132px,文本域和两个按钮全部可见可点。
+   **只有真的走到这一级才生效**,常规窗口(包括 568×320、600×320)在第三级就够了,
+   那句说明文字照常显示。 */
+body.chat-tight-4 #wechat-welcome p { display: none; }
+body.chat-tight-4 #wechat-welcome { padding: 6px 10px; margin-bottom: 6px; }
+body.chat-tight-4 #wechat-welcome strong { font-size: 13px; }
+/* 顺手把第二级留的那点页头留白退到零 —— 都到这一级了,4px 的上下内边距和标题
+   下边距是纯留白,一分钱不值,而它们正好是 320×320 那种极端窗口差的最后十来像素。 */
+body.chat-tight-4 #main-content { padding-top: 0; padding-bottom: 0; }
+body.chat-tight-4 .compact-heading { margin-bottom: 0; }
 
 /* 历史栏在 ≤760 是竖排、跟输入区抢高度,这里把它和卡片之间的间距也收掉。
    **只在竖排时收** —— >760 时那个 gap 是横排的水平间距,收了不省任何高度,
