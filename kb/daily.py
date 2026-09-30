@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
 from datetime import date as Date
@@ -229,6 +230,73 @@ def _material(items: list[dict]) -> str:
     return '\n'.join(lines)
 
 
+# 正文里的出处编号:`[18]`、`[3][7]`、`[3, 7]` 三种写法都收。后面紧跟 `(` 的
+# 不动 —— 那已经是一条 markdown 链接(`[3](http://…)`),再包一层就成了套娃。
+_REF_RE = re.compile(r'\[(\d{1,3}(?:\s*[,，、]\s*\d{1,3})*)\](?!\()')
+_FENCE_RE = re.compile(r'^\s*(?:```|~~~)')
+
+
+def _md_dest(url: str) -> str:
+    """markdown 链接的目标一律用尖括号包起来。
+
+    库里的 url 实测有带圆括号的(`…-(clean).pdf`、`S2589-0042(26)00811-4`),
+    裸写进 `](…)` 里会在第一个 `)` 处提前收尾,链接当场断掉、后半截漏成正文。
+    尖括号里唯一不能裸出现的是 `<` `>` 本身,转义掉。
+    """
+    return '<' + ' '.join(str(url or '').split()).replace('<', '%3C').replace('>', '%3E') + '>'
+
+
+def _md_text(text: str) -> str:
+    """链接文字里的方括号一律转义。
+
+    库里十来篇标题带着 `[视频]`、`[四川话、粤语等]` 这种写法,平衡的还好,
+    落单一个就能把素材清单那条链接从中间截断 —— 后半截标题漏成正文、url
+    露在外面。
+    """
+    return (str(text or '').replace('\\', '\\\\')
+            .replace('[', '\\[').replace(']', '\\]'))
+
+
+def _md_title(text: str) -> str:
+    return ' '.join(str(text or '').split()).replace('\\', '\\\\').replace('"', '\\"')
+
+
+def _link_refs(body: str, shown: list[dict]) -> str:
+    """把模型写的出处编号变成指向原文的链接。
+
+    **写进文件、不留到阅读时**:日报是拿走就读的产物(复制出去、在 Obsidian 里
+    翻回来),编号只在 kb-web 上可点的话,换一个读法就退回一串对不上号的数字。
+    素材清单本来就带着每条的链接,正文这几个编号指的是同一批东西。
+
+    链接文字保留方括号(`[\[18\]](url)`),读起来还是原来的角标;转义是因为
+    Obsidian 会把裸 `[[18]]` 当成 wikilink。编号对不上素材(模型偶尔会编一个
+    超出范围的)或那条素材没有 url 时原样留着,不编一个链接出来。
+    """
+    links = {}
+    for i, d in enumerate(shown, 1):
+        if d.get('url'):
+            links[str(i)] = (d['url'],
+                             f"{d['title']} — {_label(d['source'])}·{d['account'] or '未署名'}")
+    if not links:
+        return body
+
+    def _one(num: str) -> str:
+        hit = links.get(num)
+        return f'[\\[{num}\\]]({_md_dest(hit[0])} "{_md_title(hit[1])}")' if hit else f'[{num}]'
+
+    def _sub(m) -> str:
+        nums = [n.strip() for n in re.split(r'[,，、]', m.group(1))]
+        # 一个都对不上就整段别动:那多半不是出处编号(年份区间、条目序号之类)。
+        return ''.join(_one(n) for n in nums) if any(n in links for n in nums) else m.group(0)
+
+    out, fenced = [], False
+    for line in body.split('\n'):
+        if _FENCE_RE.match(line):
+            fenced = not fenced
+        out.append(line if fenced else _REF_RE.sub(_sub, line))
+    return '\n'.join(out)
+
+
 def _page(since: datetime, until: datetime, mat: Material, body: str,
           model: str, sync_issues: list[dict] | None = None) -> str:
     shown = mat.all()
@@ -252,7 +320,8 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
     if issues:
         meta['sync_failed'] = issues
     refs = '\n'.join(
-        f"{i}. [{d['title']}]({d['url']}) — {_label(d['source'])}·{d['account'] or '未署名'}"
+        f"{i}. [{_md_text(d['title'])}]({_md_dest(d['url'])})"
+        f" — {_label(d['source'])}·{d['account'] or '未署名'}"
         f"{' · 补录' if d['late'] else ''}"
         if d['url'] else
         f"{i}. {d['title']} — {_label(d['source'])}·{d['account'] or '未署名'}"
@@ -271,7 +340,7 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
                  '以下内容只来自已经入库的素材:\n'
                  + ''.join(f'> - {t}\n' for t in issues) + '\n')
     return ('---\n' + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + '---\n\n'
-            + head + f'{body.strip()}\n\n'
+            + head + f'{_link_refs(body.strip(), shown)}\n\n'
             f'## 素材清单({len(shown)} 条)\n\n{refs}{tail}\n')
 
 

@@ -150,6 +150,25 @@ const bodyHtml = await evalJs(`document.getElementById('daily-reader-body').inne
 check("正文渲染成 markdown", bodyHtml.includes("<h2") && bodyHtml.includes("今日要点"), bodyHtml.slice(0, 80));
 check("正文没有重复一遍大标题", !bodyHtml.includes("<h1"), bodyHtml.slice(0, 120));
 check("正文没有重复一遍覆盖区间", !bodyHtml.includes("blockquote"), bodyHtml.slice(0, 120));
+// 正文里的出处编号要能点。新日报在落盘时就写成链接(kb/daily.py 的 _link_refs),
+// 所以这里读的是真产物;外链一律新标签打开,否则点一下就把 kb-web 连同正在跑
+// 的管道面板一起顶掉。
+const refOf = async () => JSON.parse(await evalJs(`(() => {
+  const a = [...document.querySelectorAll('#daily-reader-body a')]
+    .find(x => /^\\[\\d+\\]$/.test(x.textContent.trim()));
+  const list = [...document.querySelectorAll('#daily-reader-body a')]
+    .filter(x => /^https?:/.test(x.getAttribute('href') || ''));
+  return JSON.stringify({ text: a ? a.textContent : '', href: a ? a.getAttribute('href') : '',
+    title: a ? a.title : '', cls: a ? a.className : '', target: a ? a.target : '',
+    links: list.length, blank: list.filter(x => x.target === '_blank').length }); })()`));
+let ref = await refOf();
+check("正文里的出处编号是链接", ref.text === "[1]" && /^https:\/\/example\.org\//.test(ref.href),
+      JSON.stringify(ref));
+check("出处链接带着标题与来源当提示", /—/.test(ref.title), ref.title);
+check("出处链接套上角标样式", /daily-ref/.test(ref.cls), ref.cls);
+check("正文和素材清单的外链都在新标签打开",
+      ref.links > 1 && ref.links === ref.blank, JSON.stringify(ref));
+
 const meta = await evalJs(`document.getElementById('daily-reader-meta').textContent`);
 check("元信息写明覆盖的是发布时间", /覆盖 .+ → .+ 发布的内容/.test(meta) && /补录 1 条/.test(meta), meta);
 
@@ -170,6 +189,15 @@ const prevBody = await evalJs(`document.getElementById('daily-reader-body').inne
 check("日报正文写明哪些来源没同步成功",
       /本轮有 1 个来源没有同步成功/.test(prevBody) && /RSS/.test(prevBody),
       prevBody.slice(0, 160));
+// 加链接之前生成的日报:正文里编号还是纯文本,素材清单的 url 也没套尖括号。
+// 它们是花过模型钱的产物,不该为了加链接重新生成一份(重算窗口还会换掉内容),
+// 面板照那份清单补上就是。
+ref = await refOf();
+check("老日报的纯文本编号也补成了链接",
+      ref.text === "[1]" && ref.href === "https://example.org/a", JSON.stringify(ref));
+check("补出来的链接同样新标签打开", ref.target === "_blank" && /daily-ref/.test(ref.cls),
+      JSON.stringify(ref));
+
 await evalJs(`openDailyReport('${today}')`);
 await waitFor(`document.getElementById('daily-reader-title').textContent === '日报 · ${today}'`);
 

@@ -198,11 +198,71 @@ async function openDailyReport(date) {
     // 标题和覆盖区间这两行重复信息),所以历史日报翻回来也看得见当时的同步缺口。
     $('daily-reader-body').innerHTML =
       mdHtml(r.body.replace(/^\s*#\s+[^\n]*\n+(?:>\s*覆盖[^\n]*\n)?/, ''));
+    enhanceDailyBody($('daily-reader-body'), r.body);
     $('daily-copy').hidden = $('daily-del').hidden = false;
     $('daily-copy').dataset.body = r.body;
   } catch (e) {
     if (dailyCurrent !== date) return;
     $('daily-reader-body').innerHTML = `<div class="daily-empty" role="alert"><h3>读取失败</h3><p>${esc(e.message)}</p></div>`;
+  }
+}
+
+// ── 正文里的出处链接 ────────────────────────────────────────────────────────────
+// 序号→原文的对应关系写在每份日报自己的素材清单里(`12. [标题](<url>) — 来源·作者`),
+// 所以这里不问接口、只读这一篇的正文。url 带圆括号的会被尖括号包起来(见
+// daily._md_dest),两种写法都认;标题里的方括号是转义过的,还原回去当 tooltip。
+const DAILY_REF_LINE = /^(\d{1,3})\.\s+\[(.*?)\]\((?:<([^>]*)>|([^\s)]*))\)\s*—\s*(.*)$/gm;
+
+function dailyRefMap(md) {
+  const out = new Map();
+  for (const m of String(md || '').matchAll(DAILY_REF_LINE)) {
+    const url = (m[3] || m[4] || '').trim();
+    // 没有 url 的素材在清单里不带方括号,压根匹配不上——补不出链接来,对的。
+    if (url) out.set(m[1], { url, title: `${m[2].replace(/\\([[\]\\])/g, '$1')} — ${m[5].trim()}` });
+  }
+  return out;
+}
+
+// 正文里那些出处编号要能点。新日报落盘时就已经写成链接了(kb/daily.py 的
+// `_link_refs`),这里补两件事:
+//   ① 那之前生成的日报编号还是纯文本。它们是花过模型钱的产物,不该为了加链接
+//      重新生成一份(重算窗口还会换掉内容),照素材清单补上就是。新日报上这一步
+//      是空转——编号已经在 <a> 里,遍历时直接跳过。
+//   ② 外链一律新标签打开。日报正文和素材清单指的都是站外地址,在当前标签里跳走
+//      等于把 kb-web 连同正在跑的管道面板一起顶掉。
+function enhanceDailyBody(el, md) {
+  const refs = dailyRefMap(md);
+  if (refs.size) {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+      // 已经是链接的编号、代码块里的数字都别碰
+      acceptNode: n => n.parentElement && n.parentElement.closest('a, code, pre')
+        ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+    const todo = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode())
+      if (/\[\d{1,3}\]/.test(n.nodeValue)) todo.push(n);
+    // 先收集再替换:边走边改会把 walker 的游标扔在一个已经离开文档的节点上。
+    for (const node of todo) {
+      const text = node.nodeValue, frag = document.createDocumentFragment();
+      let last = 0;
+      for (const m of text.matchAll(/\[(\d{1,3})\]/g)) {
+        const hit = refs.get(m[1]);
+        if (!hit) continue;           // 模型偶尔写个超出范围的编号,原样留着
+        frag.append(text.slice(last, m.index));
+        const a = document.createElement('a');
+        a.href = safeUrl(hit.url); a.title = hit.title; a.textContent = m[0];
+        frag.append(a);
+        last = m.index + m[0].length;
+      }
+      frag.append(text.slice(last));
+      node.replaceWith(frag);
+    }
+  }
+  for (const a of el.querySelectorAll('a[href]')) {
+    if (/^https?:/i.test(a.getAttribute('href') || '')) {
+      a.target = '_blank'; a.rel = 'noopener noreferrer';
+    }
+    // 角标样式认的是"链接文字就是 [12]",落盘写进去的和刚补上的一视同仁。
+    if (/^\[\d{1,3}\]$/.test((a.textContent || '').trim())) a.classList.add('daily-ref');
   }
 }
 

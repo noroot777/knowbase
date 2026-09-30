@@ -84,7 +84,7 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual('2026-09-28 08:00:00', meta['window_since'])
         self.assertEqual('2026-09-29 08:00:00', meta['window_until'])
         self.assertIn('按发布时间,不是抓取时间', body)
-        self.assertIn('[甲文](https://e.org/a)', body)       # 有 url 的给链接
+        self.assertIn('[甲文](<https://e.org/a>) — 公众号·某号', body)   # 有 url 的给链接
         self.assertIn('乙文 — RSS·Blog', body)               # 没有 url 的只列名字
         prompt = self.chat.call_args[0][0]
         self.assertIn('1. [09-28 20:00|RSS·Blog] 乙文', prompt)   # 新的排前面
@@ -234,6 +234,31 @@ class DailyReportTests(unittest.TestCase):
         self.assertNotIn('sync_failed', meta)
         self.assertNotIn('没有同步成功', body)
         self.assertEqual([], daily.report('2026-09-29')['sync_failed'])
+
+    def test_body_citations_become_links_to_the_source(self):
+        # 正文里那串 [18][23][29] 原来是纯文本:素材清单在底下,读到一半想
+        # 点开出处只能自己数行。链接**写进文件**,不留到阅读时 —— 日报是拿走
+        # 就读的产物(复制出去、在 Obsidian 里翻回来),只在 kb-web 上可点的话
+        # 换个读法就退回一串对不上号的数字。
+        add_doc(self.conn, 'source/dr-gzh/a.md', title='甲文', url='https://e.org/a',
+                published='2026-09-28 20:00')
+        add_doc(self.conn, 'source/rss/b.md', source='rss', title='乙 [视频]',
+                account='Blog', url='https://e.org/b(26)x', published='2026-09-28 19:00')
+        add_doc(self.conn, 'source/rss/c.md', source='rss', title='丙文',
+                account='Blog', published='2026-09-28 18:00')
+        self.chat.return_value = ('## 今日要点\n\n- **甲乙**:两条 [1][2]\n'
+                                  '- **顿号**:也认 [1、2]\n'
+                                  '- **没链接**:第三条 [3],编号超范围 [9]\n'
+                                  '- **已是链接**:[1](http://x) 不动\n')
+        body = parse_frontmatter(Path(self.gen()['path']).read_text(encoding='utf-8'))[1]
+        self.assertIn('[\\[1\\]](<https://e.org/a> "甲文 — 公众号·某号")', body)
+        # url 里的圆括号:裸写进 ](…) 会在第一个 ) 提前收尾,链接当场断掉
+        self.assertIn('[\\[2\\]](<https://e.org/b(26)x> "乙 [视频] — RSS·Blog")', body)
+        self.assertIn('也认 [\\[1\\]](<https://e.org/a>', body)   # 顿号/逗号分隔
+        self.assertIn('第三条 [3],编号超范围 [9]', body)    # 没 url / 对不上号的原样留着
+        self.assertIn('[1](http://x) 不动', body)           # 已经是链接的不套娃
+        # 素材清单里标题的方括号要转义,落单一个就能把这条链接从中间截断
+        self.assertIn('2. [乙 \\[视频\\]](<https://e.org/b(26)x>) — RSS·Blog', body)
 
     def test_listing_reading_and_deleting(self):
         add_doc(self.conn, 'source/dr-gzh/a.md')
@@ -531,6 +556,55 @@ class DailyStopTests(unittest.TestCase):
         self.assertEqual(['RSS', '公众号'], [i['label'] for i in issues])  # ok 的不算
         self.assertEqual('done', daily_run._state['phase'])
         self.assertIn('2 个来源未同步成功(RSS、公众号)', daily_run._state['detail'])
+
+    def sync_once(self, stages):
+        """跑一趟 `_sync_channel` 到正常收尾,stages 之外的阶段按"没选中"处理。"""
+        from kb import pipeline as pl
+        from kb.pipeline_state import STAGES
+        # 没被选中的阶段一开跑就是 skipped(见 pipeline.start_pipeline)
+        full = {s: {'status': 'skipped', 'detail': ''} for s in STAGES}
+        full.update(stages)
+        daily_run._state.update({**self.before, 'running': True, 'phase': 'sync',
+                                 'pipeline_run': '', 'log': [], 'detail': ''})
+        with patch.object(pl, 'start_pipeline', Mock(return_value='run-1')), \
+             patch.object(pl, 'get_state', Mock(return_value={
+                 'running': False, 'run_id': 'run-1', 'current_stage': '', 'stages': full})), \
+             patch.object(pl, 'request_stop', Mock()), \
+             patch.object(daily_run.time, 'sleep', Mock()), \
+             patch.object(daily_run, '_wait_idle', Mock(return_value=True)):
+            return daily_run._sync_channel('social', '大V观点', time.monotonic() + 600)
+
+    def test_a_skipped_stage_is_not_a_successful_sync(self):
+        # 2026-09-30 实测:51 个大V账号全缺 X 桥接配置,crawl 整个落 skipped
+        # (「待配置 51 个」)。这里原来只数 error,于是通道报绿色的「同步完成」,
+        # 日报里那一行只剩 extract 的结果 —— "一条都没抓到"连同原因一起看不见。
+        entry = self.sync_once({
+            'crawl': {'status': 'skipped',
+                      'detail': '检查 0/51 个来源，新增 0 条，待配置 51 个（请填写 X 桥接或专用订阅链接）'},
+            'export': {'status': 'ok', 'detail': '已保存 0 条到知识库'},
+            'index': {'status': 'ok', 'detail': '新增/更新 0'},
+            'extract': {'status': 'ok', 'detail': '没有待提取的文档'}})
+        self.assertEqual('skipped', entry['status'])
+        self.assertIn('待配置 51 个', entry['detail'])
+        # 没选中的阶段也是 skipped,不能跟着报出来
+        self.assertNotIn('projects', entry['detail'])
+        self.assertNotIn('wiki', entry['detail'])
+
+    def test_a_stage_stopped_by_the_budget_is_reported_too(self):
+        entry = self.sync_once({
+            'crawl': {'status': 'ok', 'detail': '检查 8/8 个来源'},
+            'export': {'status': 'stopped', 'detail': '已停止，未继续执行'},
+            'index': {'status': 'error', 'detail': '索引失败: 磁盘满'},
+            'extract': {'status': 'stopped', 'detail': ''}})
+        self.assertEqual('error', entry['status'])          # 有红就是红
+        self.assertIn('index 索引失败: 磁盘满', entry['detail'])
+        self.assertIn('export 已停止，未继续执行', entry['detail'])
+        self.assertIn('extract 本轮未执行', entry['detail'])
+
+    def test_a_fully_green_round_still_reads_as_done(self):
+        entry = self.sync_once({s: {'status': 'ok', 'detail': f'{s} 好了'}
+                                for s in daily_run.SYNC_STAGES})
+        self.assertEqual(('ok', '同步完成'), (entry['status'], entry['detail']))
 
     def test_a_clean_round_keeps_its_plain_finish_notice(self):
         gen = self.run_once(channels=[
