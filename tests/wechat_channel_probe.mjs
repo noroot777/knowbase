@@ -119,53 +119,65 @@ const port = await new Promise((res, rej) => {
   proc.on("exit", c => rej(new Error(`exit ${c}\n${buf}`)));
   setTimeout(() => rej(new Error("no devtools port")), 20000);
 });
-const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-const ws = new WebSocket(list.find(t => t.type === "page").webSocketDebuggerUrl);
-await new Promise(r => ws.addEventListener("open", r, { once: true }));
-
-let id = 0;
-const pend = new Map();
-const pageErrors = [];
-ws.addEventListener("message", ev => {
-  const m = JSON.parse(ev.data);
-  if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); return; }
-  if (m.method === "Runtime.exceptionThrown")
-    pageErrors.push(m.params.exceptionDetails?.exception?.description || m.params.exceptionDetails?.text);
-  if (m.method === "Runtime.consoleAPICalled" && m.params.type === "error")
-    pageErrors.push(m.params.args.map(a => a.value ?? a.description ?? "").join(" "));
-});
-const send = (method, params = {}) => {
-  const mid = ++id;
-  return new Promise(res => { pend.set(mid, res); ws.send(JSON.stringify({ id: mid, method, params })); });
-};
-const evalJs = async expression => {
-  const r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-  if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.text + " :: " + expression);
-  return r.result?.result?.value;
-};
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const until = async (expr, ms = 8000) => {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (await evalJs(expr)) return true;
-    await sleep(120);
-  }
-  return false;
-};
 
-await send("Runtime.enable");
-await send("Page.enable");
+// 一个 page target 一套连接：第 9 节要开第二个页面（跨页面切换那条），所以做成工厂。
+async function connectPage(wsUrl) {
+  const ws = new WebSocket(wsUrl);
+  await new Promise(r => ws.addEventListener("open", r, { once: true }));
+  let id = 0;
+  const pend = new Map();
+  const errors = [];
+  ws.addEventListener("message", ev => {
+    const m = JSON.parse(ev.data);
+    if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); return; }
+    if (m.method === "Runtime.exceptionThrown")
+      errors.push(m.params.exceptionDetails?.exception?.description || m.params.exceptionDetails?.text);
+    if (m.method === "Runtime.consoleAPICalled" && m.params.type === "error")
+      errors.push(m.params.args.map(a => a.value ?? a.description ?? "").join(" "));
+  });
+  const send = (method, params = {}) => {
+    const mid = ++id;
+    return new Promise(res => { pend.set(mid, res); ws.send(JSON.stringify({ id: mid, method, params })); });
+  };
+  const evalJs = async expression => {
+    const r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+    if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.text + " :: " + expression);
+    return r.result?.result?.value;
+  };
+  const until = async (expr, ms = 8000) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (await evalJs(expr)) return true;
+      await sleep(120);
+    }
+    return false;
+  };
+  // 勾选框的 value 是 "on"，通道名记在 data-* 上：dataset 优先，别拿默认值当 id。
+  const ids = sel => evalJs(`[...document.querySelectorAll('${sel}')].map(e => e.dataset.runChannel
+    || e.dataset.channel || e.dataset.schedChannel || e.value)`);
+  await send("Runtime.enable");
+  await send("Page.enable");
+  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+  return { ws, send, evalJs, until, ids, errors };
+}
+
+// 打开（或重新打开）知识库页面并等脚本就绪。第 8 节靠重新加载来模拟"升级后第一次打开"。
+async function boot(page) {
+  await page.send("Page.navigate", { url: base + "/" });
+  if (!await page.until(`typeof loadPipeChannels === 'function' && typeof openWechatSetup === 'function'`, 20000))
+    throw new Error("页面没起来");
+}
+
+const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const A = await connectPage(list.find(t => t.type === "page").webSocketDebuggerUrl);
+const { evalJs, until, ids } = A;
+let B = null;
 
 const fails = [], oks = [];
 const check = (name, cond, extra = "") => (cond ? oks : fails).push(name + (extra ? ` — ${extra}` : ""));
-// 勾选框的 value 是 "on"，通道名记在 data-* 上：dataset 优先，别拿默认值当 id。
-const ids = sel => evalJs(`[...document.querySelectorAll('${sel}')].map(e => e.dataset.runChannel
-  || e.dataset.channel || e.dataset.schedChannel || e.value)`);
 
-await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
-await send("Page.navigate", { url: base + "/" });
-if (!await until(`typeof loadPipeChannels === 'function' && typeof openWechatSetup === 'function'`, 20000))
-  throw new Error("页面没起来");
+await boot(A);
 await evalJs(`localStorage.clear()`);
 
 // ── 1. 设置里能选，默认本机数据库 ──
@@ -258,10 +270,91 @@ check("保存失败时同步范围一个字没动",
       (await ids("#pipe-channel-list input")).join() === "wechat_oa,social,rss");
 check("保存失败后还能再试", await evalJs(`!wechatChannelBusy`));
 
-check("页面无脚本异常", pageErrors.length === 0, pageErrors.join(" | "));
+// ── 8. 升级过来的存量选择：旧通道名跟着设置走，别的来源一个不动 ──
+// 上一版两条绿泡泡通道都能勾，所以浏览器里存着的可能是另一条、也可能两条都在。当成
+// "不认识的来源"直接丢掉的话，只要还勾着 RSS 之类，「一个都没剩才补默认」那句兜底就不
+// 触发 —— 公众号被静默地漏掉，界面上一点提示都没有。
+for (const m of [
+  { setting: "wechat_local", stored: ["wechat_oa", "rss"], want: ["wechat_local", "rss"] },
+  { setting: "wechat_oa", stored: ["wechat_local", "social"], want: ["wechat_oa", "social"] },
+  { setting: "wechat_local", stored: ["wechat_oa", "wechat_local", "rss"], want: ["wechat_local", "rss"] },
+  { setting: "wechat_oa", stored: ["没这个通道", "rss"], want: ["rss"] },
+]) {
+  const tag = `${m.stored.join("+")} → ${m.setting}`;
+  selected = m.setting;
+  await evalJs(`localStorage.setItem('kb-sync-channel', ${JSON.stringify(m.stored[0])});
+    localStorage.setItem('kb-sync-channels', ${JSON.stringify(JSON.stringify(m.stored))}); true`);
+  await boot(A);
+  await evalJs(`switchTab('pipe'); openPipeModal()`);
+  await until(`document.querySelectorAll('#pipe-channel-list label').length === 3`);
+  const checked = await evalJs(`[...document.querySelectorAll('#pipe-channel-list input:checked')]
+    .map(i => i.dataset.runChannel).join()`);
+  check(`存量选择迁移后仍勾着（${tag}）`, checked === m.want.join(), checked);
+  // 勾选框对了而真正派发出去的范围漏掉公众号，等于没修
+  await until(`pipeRunBody().channels.length === ${m.want.length}`);
+  const scoped = JSON.parse(await evalJs(`JSON.stringify(pipeRunBody().channels.map(c => c.channel))`));
+  check(`提交范围跟着一起迁移（${tag}）`, scoped.join() === m.want.join(), scoped.join());
+  const stored = await evalJs(`localStorage.getItem('kb-sync-channels')`);
+  check(`迁移后的选择落了盘（${tag}）`, stored === JSON.stringify(m.want), stored);
+  await evalJs(`closePipeModal()`);
+}
 
-await evalJs(`invalidatePipeStatus(); clearTimeout(wechatPoll)`);
-ws.close(); proc.kill(); server.close();
+// ── 9. 另一个页面改了设置：这一个不刷新也得跟着走 ──
+// 通道是个全局单值，CustomEvent 不跨文档，所以靠 localStorage 的 storage 事件广播。
+selected = "wechat_local";
+// 页面 A 勾着公众号 + 两个订阅来源：换通道是「改道」，另外两个来源必须原样留着。
+await evalJs(`localStorage.clear();
+  localStorage.setItem('kb-sync-channels', '["wechat_local","social","rss"]'); true`);
+await boot(A);
+await evalJs(`switchTab('pipe')`);
+await until(`typeof pipeChannels !== 'undefined' && pipeChannels.length === 3`);
+await (await fetch(`http://127.0.0.1:${port}/json/new`, { method: "PUT" })).json()
+  .then(async t => { B = await connectPage(t.webSocketDebuggerUrl); await boot(B); });
+await B.evalJs(`openWechatSetup()`);
+await B.until(`document.querySelectorAll('#wechat-channels label').length === 2`);
+await B.evalJs(`changeWechatChannel('wechat_oa')`);
+await B.until(`document.getElementById('wechat-channel-msg').textContent.includes('已切换')`);
+check("另一个页面把通道换成了新的", await B.evalJs(`pipeWechat.selected`) === "wechat_oa");
+await until(`pipeWechat.selected === 'wechat_oa'`);
+check("旧页面不刷新也跟到了新通道", await evalJs(`pipeWechat.selected`) === "wechat_oa",
+      await evalJs(`pipeWechat.selected`));
+await evalJs(`openPipeModal()`);
+await until(`document.querySelectorAll('#pipe-channel-list label').length === 3`);
+const crossList = await ids("#pipe-channel-list input");
+check("旧页面的同步范围换成了新通道", crossList.join() === "wechat_oa,social,rss", crossList.join());
+await until(`pipeRunBody().channels.length === 3`);
+const crossScope = JSON.parse(await evalJs(`JSON.stringify(pipeRunBody().channels.map(c => c.channel))`));
+check("旧页面派发的范围也是新通道", crossScope.join() === "wechat_oa,social,rss", crossScope.join());
+await evalJs(`closePipeModal()`);
+
+// ── 10. 设置被 CLI/API 直接改掉（没有 storage 广播可听）：打开时重新核对服务端 ──
+// 自己 boot 一次，别吃上一节的结果：页面内存里是 wechat_oa，随后终端把落盘值改掉。
+selected = "wechat_oa";
+await boot(A);
+await until(`typeof pipeWechat !== 'undefined' && pipeWechat.selected === 'wechat_oa'`);
+selected = "wechat_local";
+check("终端改完、页面还没核对时内存里仍是旧值", await evalJs(`pipeWechat.selected`) === "wechat_oa");
+await evalJs(`openWechatSetup()`);
+check("重开设置会重新核对服务端",
+      await until(`document.querySelector('#wechat-channels input:checked')?.value === 'wechat_local'`),
+      await evalJs(`document.querySelector('#wechat-channels input:checked')?.value`));
+await evalJs(`closeWechatSetup()`);
+selected = "wechat_oa";
+await evalJs(`openPipeModal()`);
+check("重开新建同步也会重新核对服务端",
+      await until(`[...document.querySelectorAll('#pipe-channel-list input')]
+        .map(i => i.dataset.runChannel).join() === 'wechat_oa,social,rss'`),
+      (await ids("#pipe-channel-list input")).join());
+await evalJs(`closePipeModal()`);
+
+check("页面无脚本异常", A.errors.length === 0, A.errors.join(" | "));
+check("第二个页面也无脚本异常", !B || B.errors.length === 0, (B?.errors || []).join(" | "));
+
+for (const page of [A, B].filter(Boolean)) {
+  await page.evalJs(`invalidatePipeStatus(); clearTimeout(wechatPoll)`);
+  page.ws.close();
+}
+proc.kill(); server.close();
 console.log(`通过 ${oks.length} 项`);
 for (const name of oks) console.log("  ok  " + name);
 if (fails.length) {

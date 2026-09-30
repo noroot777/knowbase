@@ -13,22 +13,53 @@ let pipeWechat = { selected: '', options: [] };
 try { pipeChannel = localStorage.getItem('kb-sync-channel') || ''; } catch {}
 try { pipeRunSel = JSON.parse(localStorage.getItem('kb-sync-channels') || '[]'); } catch {}
 
-async function loadPipeChannels() {
-  if (pipeChannels.length) return;
+// 存下来的通道名 → 现在生效的那条。两条绿泡泡通道抓的是同一批公众号、只能走一条，
+// 所以存量里写着哪一条都按设置里选中的那条算（后端 known_channels 是同一个口径）。
+// 换通道是「改道」不是「减来源」：当成"不认识的来源"丢掉的话，只要还勾着 RSS 之类，
+// 下面那句「一个都没剩才补默认」的兜底就不触发 —— 上一版同时勾了公众号和 RSS 的用户，
+// 升级后打开新建同步只剩 RSS，公众号被静默地漏掉，界面上一点提示都没有。
+// 去重保序：上一版两条都能勾，存量里可能同时写着它们。
+function adoptWechatChannel(list) {
+  const wechat = new Set((pipeWechat.options || []).map(c => c.id));
+  return [...new Set((list || []).filter(Boolean)
+    .map(id => (wechat.has(id) && pipeWechat.selected ? pipeWechat.selected : id)))];
+}
+
+// 一份新的来源清单落进内存：存下来的选择跟着当前设置走，各处面板重画。首次加载、
+// 设置窗口重新核对、别的页面改过设置之后走的都是这一段。
+function applyChannelData(data) {
+  const before = pipeWechat.selected;
+  pipeChannels = data.channels || [];
+  pipeChannelLabels = data.labels || {};
+  pipeWechat = data.wechat || { selected: '', options: [] };
+  pipeChannel = adoptWechatChannel([pipeChannel])[0] || '';
+  if (!pipeChannels.some(c => c.id === pipeChannel)) pipeChannel = pipeChannels.some(c => c.id === data.default) ? data.default : pipeChannels[0].id;
+  try { localStorage.setItem('kb-sync-channel', pipeChannel); } catch {}
+  // 记下来的来源可能已经不在注册表里（改过名、拿掉了一个采集器）
+  pipeRunSel = adoptWechatChannel(pipeRunSel).filter(id => pipeChannels.some(c => c.id === id));
+  if (!pipeRunSel.length) pipeRunSel = [pipeChannel];
+  saveRunChannels();
+  $('pipe-channel-current').innerHTML = pipeChannels.map(c => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join('');
+  renderPipeChannel();
+  // 定时范围、日报范围各自在加载时渲染一次、之后不跟着切页面重读：不在这儿通知它们
+  // 就地换掉的话，界面上会一直列着一条已经不存在的来源，勾了它保存下去也只是被
+  // 后端改写成新的那条 —— 显示的和存下来的对不上。
+  if (before && before !== pipeWechat.selected)
+    document.dispatchEvent(new CustomEvent('kb:channels-changed',
+      { detail: { before, after: pipeWechat.selected } }));
+}
+
+// 可勾选的来源 = 注册表减去没被选中的那条绿泡泡通道，所以这份清单取决于一个随时改得动
+// 的设置（别的页面、CLI、API 都改得动）。force=true 重新核对服务端：设置窗口和新建同步
+// 打开时各来一次 —— 否则这份缓存会把一个和落盘值相反的选择一直显示下去，并按它派发
+// 同步。状态轮询那类高频路径照旧吃缓存。
+async function loadPipeChannels(force = false) {
+  if (pipeChannels.length && !force) return;
   if (pipeChannelsLoading) return pipeChannelsLoading;
   pipeChannelsLoading = (async () => {
     const data = await pipeJson('/api/pipeline/channels');
     if (!data.channels?.length) throw new Error('暂无可用的同步来源，请检查采集器配置后重试');
-    pipeChannels = data.channels || [];
-    pipeChannelLabels = data.labels || {};
-    pipeWechat = data.wechat || { selected: '', options: [] };
-    if (!pipeChannels.some(c => c.id === pipeChannel)) pipeChannel = pipeChannels.some(c => c.id === data.default) ? data.default : pipeChannels[0].id;
-    // 记下来的来源可能已经不在注册表里（改过名、拿掉了一个采集器）
-    pipeRunSel = pipeRunSel.filter(id => pipeChannels.some(c => c.id === id));
-    if (!pipeRunSel.length) pipeRunSel = [pipeChannel];
-    $('pipe-channel-current').innerHTML = pipeChannels.map(c => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join('');
-    $('pipe-channel-current').value = pipeChannel;
-    renderPipeChannel();
+    applyChannelData(data);
   })();
   try { await pipeChannelsLoading; } finally { pipeChannelsLoading = null; }
 }
@@ -99,29 +130,22 @@ function selectRunChannel(id) {
   renderPipeChannelList();
 }
 
-// 换绿泡泡的采集通道（设置项）。存下来的那些选择（顶部下拉、这次同步勾了哪几个、
-// 定时范围）都按通道名记，换完要重新拉一次清单让它们跟着走：另一条通道从此不在
-// 列表里，loadPipeChannels 会把它过滤掉并回落到新的那条。
+// 换绿泡泡的采集通道（设置项，不是这次同步的范围）。存下来的那些选择（顶部下拉、
+// 这次同步勾了哪几个、定时范围）都按通道名记，POST 回来的清单交给 applyChannelData
+// 带着它们一起改道：另一条通道从此不在列表里。
 async function saveWechatChannel(id) {
   if (!id || id === pipeWechat.selected) return pipeWechat.selected;
-  const before = pipeWechat.selected;
-  const data = await pipePost('/api/pipeline/channels/wechat', { channel: id });
-  pipeChannels = data.channels || [];
-  pipeChannelLabels = data.labels || {};
-  pipeWechat = data.wechat || pipeWechat;
-  // 旧通道的每一处引用都换成新的：两条抓的是同一批公众号，这是"改道"不是"减来源"。
-  const swap = list => list.map(c => (c === before ? id : c));
-  pipeChannel = pipeChannels.some(c => c.id === pipeChannel) ? pipeChannel
-    : pipeChannels.some(c => c.id === data.default) ? data.default : pipeChannels[0].id;
-  try { localStorage.setItem('kb-sync-channel', pipeChannel); } catch {}
-  pipeRunSel = [...new Set(swap(pipeRunSel))].filter(c => pipeChannels.some(x => x.id === c));
-  if (!pipeRunSel.length) pipeRunSel = [pipeChannel];
-  saveRunChannels();
-  $('pipe-channel-current').innerHTML = pipeChannels.map(c => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join('');
-  renderPipeChannel();
-  // 定时范围、日报范围各自在加载时渲染一次、之后不跟着切页面重读：不在这儿通知它们
-  // 就地换掉的话，界面上会一直列着一条已经不存在的来源，勾了它保存下去也只是被
-  // 后端改写成新的那条 —— 显示的和存下来的对不上。
-  document.dispatchEvent(new CustomEvent('kb:channels-changed', { detail: { before, after: id } }));
+  applyChannelData(await pipePost('/api/pipeline/channels/wechat', { channel: id }));
+  // 同源的其他页面靠 storage 事件收到这件事：CustomEvent 不跨文档，而这个设置是全局
+  // 单值 —— 不广播的话另一个页面会一直按一条已经不生效的通道显示、并按它派发同步。
+  // 带时间戳是因为 storage 只在值真变了时才触发（换回原来那条也得通知）。
+  try { localStorage.setItem('kb-wechat-channel', `${pipeWechat.selected}@${Date.now()}`); } catch {}
   return pipeWechat.selected;
 }
+
+// 别的页面（或 CLI/API）改过采集通道：重新核对一次服务端，把范围选择和各处面板带到
+// 新通道上。storage 事件只在其他同源文档里触发，自己那次写不会绕回自己身上。
+window.addEventListener('storage', e => {
+  if (e.key !== 'kb-wechat-channel' || !pipeChannels.length) return;
+  loadPipeChannels(true).catch(() => {});
+});

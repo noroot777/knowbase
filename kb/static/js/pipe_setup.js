@@ -37,7 +37,9 @@ async function openPipeModal() {
   renderPipeEst();
   if (!pipeConnected) refreshPipe();
   try {
-    await loadPipeChannels();
+    // 每次打开都重新核对来源清单:绿泡泡那条互斥通道是个全局设置,别的页面/CLI/API
+    // 都改得动 —— 吃缓存的话这儿会按一条已经不生效的通道显示并派发同步。
+    await loadPipeChannels(true);
     if (!pipeModalOpen()) return;
     // 每次打开都重读一遍订阅:上次看到的那份可能已经过期(期间添加/停用/移除过号)
     renderPipeChannel(); await loadPipeAccounts(true);

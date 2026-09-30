@@ -24,7 +24,9 @@ function renderWechatChannels() {
 async function loadWechatChannels() {
   const msg = $('wechat-channel-msg');
   try {
-    await loadPipeChannels();
+    // 每次打开都重新核对一次服务端：这是个全局单值，另一个页面、CLI、API 都改得动，
+    // 吃缓存的话单选按钮会指着一个和落盘值相反的通道。
+    await loadPipeChannels(true);
     msg.textContent = '';
     renderWechatChannels();
   } catch (error) {
@@ -56,6 +58,12 @@ async function changeWechatChannel(id) {
 $('wechat-channels').addEventListener('change', e => {
   const input = e.target.closest('input[name=wechat-channel]');
   if (input) changeWechatChannel(input.value);
+});
+
+// 通道换过了（可能是别的页面换的，storage 事件那条路）：弹窗正开着时把单选按钮也
+// 拨过去，别让它停在一条已经不生效的通道上。
+document.addEventListener('kb:channels-changed', () => {
+  if ($('wechat-modal').style.display !== 'none') renderWechatChannels();
 });
 
 function closeWechatSetup() { $('wechat-modal').style.display = 'none'; }
@@ -166,7 +174,8 @@ async function startWechatSetup(action = 'connect') {
 
 async function useLocalWechat() {
   try {
-    await loadPipeChannels();
+    // 重新核对：缓存里那份可能已经被别处改过，陈旧的 selected 会让下面那句直接短路。
+    await loadPipeChannels(true);
     await saveWechatChannel('wechat_local');   // 接入完成了，采集通道就定在本机这条
     renderWechatChannels();
     await changePipeChannel('wechat_local');
