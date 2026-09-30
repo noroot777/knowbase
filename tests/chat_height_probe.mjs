@@ -34,9 +34,18 @@ await new Promise(r => ws.addEventListener("open", r, { once: true }));
 
 let id = 0;
 const pend = new Map();
+// 页面自己报的错都收着:ResizeObserver 现在观察 .chat-inputbar,而改文本域高度
+// 又会改它的高 —— 这条回路真要收不住,浏览器会喊
+// 「ResizeObserver loop completed with undelivered notifications」。
+const pageErrors = [];
 ws.addEventListener("message", ev => {
   const m = JSON.parse(ev.data);
   if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); }
+  if (m.method === "Runtime.exceptionThrown")
+    pageErrors.push(m.params.exceptionDetails.exception?.description
+                    || m.params.exceptionDetails.text || "");
+  if (m.method === "Log.entryAdded" && m.params.entry.level === "error")
+    pageErrors.push(m.params.entry.text || "");
 });
 const send = (method, params = {}) => {
   const mid = ++id;
@@ -51,6 +60,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 await send("Runtime.enable");
 await send("Page.enable");
+await send("Log.enable");
 
 const results = [];
 const check = (name, cond, extra = "") => results.push({ name, ok: !!cond, detail: extra });
@@ -134,7 +144,8 @@ const measure = `(() => {
     taHeight: ta.getBoundingClientRect().height, taLines: ta.value.split('\\n').length,
     innerHeight: window.innerHeight, innerWidth: window.innerWidth,
     panelWidth: panel.getBoundingClientRect().width,
-    barWidth: r.width,
+    barWidth: r.width, barHeight: r.height,
+    modelWidth: model.getBoundingClientRect().width,
     msgsHeight: box.getBoundingClientRect().height,
     msgsScrollable: box.scrollHeight > box.clientHeight + 1,
     scrollW: document.documentElement.scrollWidth,
@@ -204,6 +215,53 @@ for (const vp of VIEWPORTS) {
   await evalJs(`document.getElementById('askpanel').classList.remove('history-open')`);
 }
 
+// ── 模型选项异步到达 ────────────────────────────────────────────────────────
+// 卡片一动不动、输入框自己变高的那一类:模型下拉的选项是 fetch 回来的,长模型名
+// 把它从 40px 撑到 240px,发送按钮被 flex-wrap 挤到新行 —— 只观察 .chat-main 的话
+// 这一整类全漏(2026-09-30 第 3 轮审查:发送按钮下沿越过卡片裁剪线约 10px)。
+// 走的是 settings.js 里那个真的 loadModels():只把 /api/models 那一条 fetch 打桩,
+// 填 option 的代码一行没动 —— 直接往 select 里插 option 就绕开了被测代码。
+const LOAD_LONG_MODEL = `(async () => {
+  const real = window.fetch;
+  const key = 'openai:Qwen/Qwen3-Coder-480B-A35B-Instruct';
+  window.fetch = (u, ...rest) => String(u).includes('/api/models')
+    ? Promise.resolve(new Response(
+        JSON.stringify({ models: [{ key, label: key.slice(7), enabled: true }], default: key }),
+        { headers: { 'content-type': 'application/json' } }))
+    : real(u, ...rest);
+  try { await loadModels(); } finally { window.fetch = real; }
+})()`;
+
+await send("Emulation.setDeviceMetricsOverride", { width: 375, height: 667, deviceScaleFactor: 1, mobile: true });
+await evalJs(`(() => {
+  switchTab('ask');
+  document.getElementById('wechat-welcome').hidden = false;
+  document.getElementById('askpanel').classList.add('history-open');
+  document.getElementById('ask-model').innerHTML = '';
+})()`);
+await evalJs(FILL);
+await typeIntoInput(LONG_TEXT);
+await sleep(150);
+const preModels = await evalJs(measure);
+await evalJs(LOAD_LONG_MODEL);
+await sleep(250);
+const postModels = await evalJs(measure);
+// 先确认这一趟真的复现了那个形态(下拉撑宽、按钮换行),否则下面那条形同虚设
+check("模型选项异步到达:长模型名把下拉撑宽了",
+      postModels.modelWidth > preModels.modelWidth + 100,
+      `下拉宽 ${preModels.modelWidth.toFixed(1)} → ${postModels.modelWidth.toFixed(1)}`);
+check("模型选项异步到达:发送按钮被挤到新行",
+      (postModels.barHeight - postModels.taHeight) > (preModels.barHeight - preModels.taHeight) + 20,
+      `框内非文本域部分 ${(preModels.barHeight - preModels.taHeight).toFixed(1)} → ${(postModels.barHeight - postModels.taHeight).toFixed(1)}`);
+check("模型选项异步到达:文本域跟着让位,发送按钮仍在卡片内且点得到",
+      postModels.sendBottom <= postModels.cardClipBottom + 0.5 && postModels.hitSend && postModels.hitModel,
+      `文本域 ${preModels.taHeight.toFixed(2)} → ${postModels.taHeight.toFixed(2)}px / 发送底边 ${postModels.sendBottom.toFixed(2)} / 裁剪线 ${postModels.cardClipBottom.toFixed(2)} / 命中 发送=${postModels.hitSend} 下拉=${postModels.hitModel}`);
+await typeIntoInput("");
+await evalJs(`(() => {
+  document.getElementById('askpanel').classList.remove('history-open');
+  document.getElementById('ask-model').innerHTML = '';
+})()`);
+
 // 横幅一出现,聊天区应当自己变矮(说明高度真的跟着可用空间走,不是写死的)。
 // 上面塞的那 4000px 还在页面里,所以这一条也是在长对话下量的。
 await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -239,6 +297,9 @@ await sleep(120);
 
 check("横幅出现时聊天区跟着让出高度", heights.off - heights.on >= heights.banner,
       `无横幅 ${heights.off} / 有横幅 ${heights.on} / 横幅 ${heights.banner}`);
+
+const roLoop = pageErrors.filter(t => /ResizeObserver loop/i.test(t));
+check("ResizeObserver 没有跑成收不住的回路", roLoop.length === 0, roLoop.slice(0, 2).join(" | "));
 
 ws.close();
 proc.kill();

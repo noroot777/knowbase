@@ -57,12 +57,22 @@ function initChat() {
   t.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); }
   });
-  // 可用高度一变就重算上限:窗口缩放、展开历史栏、关掉首次配置横幅都会让聊天卡片
-  // 变矮,而已经长起来的文本域不会自己缩回去。观察卡片而不是监听 window resize,
-  // 是因为后两件事压根不触发 resize。卡片高度是父级 flex 给的、跟文本域无关,
-  // 所以不会自激。
-  const card = t.closest('.chat-main');
-  if (card && window.ResizeObserver) new ResizeObserver(() => autoGrowChat()).observe(card);
+  // 可用高度一变就重算上限。两个都要观察,各挡一类:
+  //   .chat-main —— 卡片自己变矮(窗口缩放、展开历史栏、关掉首次配置横幅)。
+  //     后两件事压根不触发 window resize,所以不能只监听窗口。
+  //   .chat-inputbar —— **卡片一动不动,输入框自己变高**:模型下拉的选项是异步
+  //     拿回来的,长模型名把它从 40px 撑到 240px、发送按钮被 flex-wrap 挤到新行,
+  //     输入框高 167 → 201,而卡片还是 226.9(2026-09-30 第 3 轮审查实测
+  //     375×667 + 横幅 + 历史栏 + 先粘 12 行再放行 /api/models:发送按钮下沿越过
+  //     裁剪线约 10px,点下沿打到 #main-content)。只观察卡片的话这一类全漏。
+  //     发送按钮在「发送 / ■ 停止」之间换字、字体迟到同样会改这一行的排布。
+  // 卡片高度是父级 flex 给的、跟文本域无关;输入框这条回路则在下一趟算出同一个
+  // 高度、赋回同一个值,尺寸没变就不会再有第三次通知,自己收敛。
+  const card = t.closest('.chat-main'), bar = t.closest('.chat-inputbar');
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(() => autoGrowChat());
+    for (const el of [card, bar]) if (el) ro.observe(el);
+  }
   t.focus();
 }
 
@@ -81,7 +91,10 @@ function autoGrowChat() {
   const t = $('chat-input');
   t.style.height = 'auto';
   const want = Math.min(t.scrollHeight, CHAT_INPUT_MAX);
-  t.style.height = Math.max(CHAT_INPUT_MIN, Math.min(want, chatInputRoom(t))) + 'px';
+  const h = Math.max(CHAT_INPUT_MIN, Math.min(want, chatInputRoom(t))) + 'px';
+  // 算出来一样就原样赋回去:尺寸不变 → ResizeObserver 不再发通知,上面那条
+  // 「观察输入框」的回路到此为止。
+  t.style.height = h;
 }
 
 // 卡片里留给文本域的最大高度 = 卡片内容高 - 消息区压不下去的那点内边距
