@@ -11,22 +11,31 @@ from unittest.mock import Mock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb import pipeline, pipeline_retry, pipeline_stages, pipeline_state
+from kb import llm, pipeline, pipeline_retry, pipeline_stages, pipeline_state
 from kb.collectors import FetchScope
 from kb.web import pipeline_api
 
 
 class ChannelAPITests(unittest.TestCase):
     def setUp(self):
+        # 绿泡泡采集通道是落盘设置(secrets.json),指到 tmp:测试不该读开发机上
+        # 那份真配置,更不该改它。
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        original = llm._SECRETS_PATH
+        llm._SECRETS_PATH = Path(tmp.name) / "secrets.json"
+        self.addCleanup(lambda: setattr(llm, "_SECRETS_PATH", original))
         self.app = FastAPI()
         self.app.include_router(pipeline_api.router)
         self.client = TestClient(self.app)
 
-    def test_default_is_original_and_explicit_local_preserves_scope(self):
+    def test_default_is_the_local_database_and_explicit_scope_is_preserved(self):
         with patch.object(pipeline, "start_pipeline", return_value=True) as start:
             self.assertEqual(200, self.client.post("/api/pipeline/run", json={}).status_code)
-            self.assertEqual("wechat_oa", start.call_args.kwargs["crawl_filter"]["channel"])
-            body = {"channel": "wechat_local", "accounts": ["指定号"],
+            self.assertEqual("wechat_local", start.call_args.kwargs["crawl_filter"]["channel"])
+            # 显式点名另一条通道仍然照跑:设置只决定默认与面板上列哪条,
+            # 不该把「这一次用原凭证通道试一下」这条排查路子堵死。
+            body = {"channel": "wechat_oa", "accounts": ["指定号"],
                     "since_date": "2026-09-15", "until_date": "2026-09-15"}
             self.assertEqual(200, self.client.post("/api/pipeline/run", json=body).status_code)
             self.assertEqual(body, start.call_args.kwargs["crawl_filter"])
@@ -52,7 +61,7 @@ class ChannelAPITests(unittest.TestCase):
 
     def test_schedule_persists_channel_and_preserves_old_clients(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(pipeline, "_SCHED_FILE", Path(tmp) / "schedule.json"):
-            self.assertEqual("wechat_oa", pipeline.load_schedule()["channel"])
+            self.assertEqual("wechat_local", pipeline.load_schedule()["channel"])
             body = {"enabled": True, "time": "08:15", "channel": "wechat_local"}
             response = self.client.post("/api/pipeline/schedule", json=body)
             self.assertEqual("wechat_local", response.json()["channel"])

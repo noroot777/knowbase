@@ -85,6 +85,27 @@
 
 - 同步有 `wechat_oa`（原凭证）与 `wechat_local`（微信本地库）两条注册通道；
   手动请求、定时配置和失败重试均显式携带 `channel`，不修改进程全局环境来切换。
+- **两条通道互斥，选哪条是设置、不是每次同步现勾的范围**（`collectors.wechat_channel`，
+  落 `secrets.json` 的 `collectors.wechat`，默认 `wechat_local`，面板在「设置 →
+  绿泡泡接入 → 采集通道」）。它们抓的是同一批公众号、写进同一套订阅和文章库，
+  两条都勾只会把同一批号抓两遍。所以 `collection_channels()` **只列选中的那条**，
+  另一条压根不出现在同步中心 / 定时同步 / 日报的同步范围里。
+  三条配套约束，少一条就出事：
+  ①**没被选中的那条仍然要能翻成人话**（`channel_labels()` 给全集，API 的 `labels`
+  字段，前端 `channelLabel()` 回落查它）——历史运行记录里写着的可能正是它，
+  面板上那行「上次来源」不该显示成一个裸 id；
+  ②**存量配置里的旧通道名要跟着设置走**（`resolve_channel` / `known_channels`，
+  `pipeline.load_schedule`、`daily_run.load_settings`/`save_settings`/`start` 都过它）
+  ——当成「不在可选列表里」丢掉的话，公众号从此不再定时同步、不再进日报，而面板上
+  完全看不出少了什么；
+  ③**显式点名另一条仍然有效**（`get_collector` 保持严格，`--channel wechat_oa`、
+  API 里显式传的 channel 照跑）——设置管的是默认和面板列哪条，不该把一次性排查堵死。
+  前端那几组勾选（同步范围、定时范围、日报范围）各自只在加载时渲染一次、不跟着切
+  页面重读，所以换通道时由 `kb:channels-changed` 事件就地把旧通道那一项换成新的
+  （其余勾选原样留着，换通道是「改道」不是「减来源」）；不换的话界面上会一直列着
+  一条已经不存在的来源，勾了它保存下去也只会被后端改写成新的那条。
+  回归在 `tests/test_wechat_channel.py`（13 条 Python + 一条真页面 probe
+  `tests/wechat_channel_probe.mjs`，自带 mock 后端、CDP 直连 chrome-headless-shell）。
   两通道共用公众号订阅/文章库/导出；本地库只负责文章发现，正文继续按链接抓取。
   本地读取只能通过已配置的 `rion-wechat-cli`，须确认 `live_database_read_ok`，
   不允许通知预览替代、自动获取密钥或操作微信。

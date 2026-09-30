@@ -20,7 +20,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 
 from kb.config import DATA_DIR
-from kb.collectors import active_collector
+from kb.collectors import active_collector, known_channels, resolve_channel
 from kb.pipeline_retry import retry_failed_plan, start_retry_failed
 from kb.pipeline_stages import (
     _extract_pass,
@@ -184,10 +184,14 @@ _schedule_lock = threading.RLock()
 
 
 def _schedule_channels(value) -> list[str]:
-    """定时配置里的来源列表。旧配置只有一个 channel,读成单元素列表。"""
+    """要存进定时配置的来源列表。认不出的名字在这里就抛,别等到点了才发现。
+
+    先过 resolve_channel:绿泡泡两条通道是互斥的设置项(见 kb.collectors),
+    存进来的旧名字要按当前设置落盘,否则定时那一轮会绕开设置去跑另一条。
+    """
     names, seen = [], set()
     for name in (value or []):
-        resolved = active_collector(name).name
+        resolved = active_collector(resolve_channel(name)).name
         if resolved not in seen:
             seen.add(resolved)
             names.append(resolved)
@@ -208,7 +212,9 @@ def load_schedule() -> dict:
         d = json.loads(_SCHED_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         d = {}
-    channels = [c for c in (d.get("channels") or [d.get("channel")]) if c] \
+    # 读盘这一侧宽容:认不出的名字跳过(通道被删/改过名),绿泡泡那条跟着设置走。
+    # 一个坏名字不该让整份定时配置读不出来。
+    channels = known_channels([c for c in (d.get("channels") or [d.get("channel")]) if c]) \
         or [active_collector().name]
     return {"enabled": bool(d.get("enabled")),
             "time": d.get("time") or "07:30",

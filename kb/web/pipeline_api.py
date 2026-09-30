@@ -12,7 +12,15 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from kb import pipeline as pl
-from kb.collectors import CollectorError, active_collector, collection_channels
+from kb.collectors import (
+    CollectorError,
+    active_collector,
+    channel_labels,
+    collection_channels,
+    set_wechat_channel,
+    wechat_channel,
+    wechat_channel_options,
+)
 
 router = APIRouter()
 
@@ -26,7 +34,29 @@ def _channel(value: str | None) -> str:
 
 @router.get("/api/pipeline/channels")
 def pipeline_channels():
-    return {"channels": collection_channels(), "default": active_collector().name}
+    """可勾选的来源 + 绿泡泡那条互斥选择的当前值。
+
+    `labels` 是**全部**通道的人话名字(含没被选中的那条绿泡泡通道):历史运行
+    记录里写着的可能正是它,面板不该把它显示成一个裸 id。
+    """
+    return {"channels": collection_channels(), "default": active_collector().name,
+            "labels": channel_labels(),
+            "wechat": {"selected": wechat_channel(),
+                       "options": wechat_channel_options()}}
+
+
+class WechatChannelRequest(BaseModel):
+    channel: str
+
+
+@router.post("/api/pipeline/channels/wechat")
+def pipeline_wechat_channel(body: WechatChannelRequest):
+    """换绿泡泡的采集通道(设置项,不是一次同步的范围)。返回更新后的通道清单。"""
+    try:
+        set_wechat_channel(body.channel)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    return pipeline_channels()
 
 
 class ScheduleRequest(BaseModel):

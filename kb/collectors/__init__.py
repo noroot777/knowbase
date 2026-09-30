@@ -181,12 +181,74 @@ _REGISTRY: dict[str, str] = {
     **{kind: "kb.collectors.feeds:create_collector" for kind in feed_types()},
 }
 
-_DEFAULT = "wechat_oa"
+# ── 绿泡泡的两条通道:互斥,选哪条是设置项 ────────────────────────────────────────
+# wechat_oa(逐号文章凭证)和 wechat_local(本机已同步的推送)抓的是同一批公众号,
+# 写进同一套订阅、同一个文章库、同一份导出,差别只在"从哪儿发现文章"。两条同时开
+# 只会把同一批号抓两遍,所以它不是"每次同步现勾"的范围,而是一个设置:选中的那条
+# 出现在同步范围里,另一条根本不列出来(见 collection_channels)。
+WECHAT_CHANNELS: tuple[str, ...] = ("wechat_local", "wechat_oa")
+# 默认本机数据库:它不需要 wxdown、不需要逐号文章凭证,开箱就能用。
+_DEFAULT_WECHAT = "wechat_local"
+# 设置落在 secrets.json(它早就不只装 key —— 各阶段的模型分配也在里面),
+# 借 kb.llm 那套「两把锁 + 唯一临时文件 + rename」的读改写,不另起一套。
+_SETTINGS_SECTION = "collectors"
+
+
+def wechat_channel() -> str:
+    """当前生效的公众号采集通道。没配过 / 配了个不认识的值都回落到本机数据库。"""
+    from kb import llm
+
+    section = llm.read_settings().get(_SETTINGS_SECTION)
+    value = (section or {}).get("wechat") if isinstance(section, dict) else None
+    return value if value in WECHAT_CHANNELS else _DEFAULT_WECHAT
+
+
+def set_wechat_channel(name: str) -> str:
+    """把公众号采集通道存进设置,返回存下来的那条。"""
+    if name not in WECHAT_CHANNELS:
+        raise ValueError(f"未知的公众号采集通道 {name!r},"
+                         f"可选: {', '.join(WECHAT_CHANNELS)}")
+    from kb import llm
+
+    def mutate(data: dict) -> None:
+        section = data.get(_SETTINGS_SECTION)
+        if not isinstance(section, dict):
+            section = {}
+            data[_SETTINGS_SECTION] = section
+        section["wechat"] = name
+
+    llm.update_settings(mutate)
+    return name
+
+
+def resolve_channel(name: str) -> str:
+    """把存下来的通道名带到当前设置上(非微信通道原样返回)。
+
+    盘上那些"抓哪几个来源"的配置(日报范围、定时范围)是按通道名存的。设置里把
+    绿泡泡换到另一条通道之后,存着的旧名字必须跟着走——当成"不在可选列表里"
+    丢掉的话,公众号从此不再同步,而面板上完全看不出少了什么。
+    """
+    return wechat_channel() if name in WECHAT_CHANNELS else name
+
+
+def known_channels(names) -> list[str]:
+    """盘上存的来源名 → 当前认得出的那些(先 resolve,再去重保序)。
+
+    读存量配置用它;写配置那一侧要的是"认不出就报错",别用这个。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in names or []:
+        resolved = resolve_channel(str(name))
+        if resolved in _REGISTRY and resolved not in seen:
+            seen.add(resolved)
+            out.append(resolved)
+    return out
 
 
 def get_collector(name: str | None = None) -> SourceCollector:
-    """按名字取采集器。name 为空时取 KB_COLLECTOR 环境变量,再回落到默认。"""
-    key = name or os.getenv("KB_COLLECTOR", "").strip() or _DEFAULT
+    """按名字取采集器。name 为空时取 KB_COLLECTOR 环境变量,再回落到设置里那条。"""
+    key = name or os.getenv("KB_COLLECTOR", "").strip() or wechat_channel()
     try:
         target = _REGISTRY[key]
     except KeyError:
@@ -205,7 +267,28 @@ def active_collector(channel: str | None = None) -> SourceCollector:
     return get_collector(channel)
 
 
+def _channel_info(key: str) -> dict:
+    c = get_collector(key)
+    return {"id": key, "label": getattr(c, "channel_label", c.label),
+            "hint": getattr(c, "channel_hint", ""), "range_hint": c.range_hint}
+
+
 def collection_channels() -> list[dict]:
-    return [{"id": key, "label": getattr(c, "channel_label", c.label),
-             "hint": getattr(c, "channel_hint", ""), "range_hint": c.range_hint}
-            for key in _REGISTRY for c in [get_collector(key)]]
+    """可以勾选的来源通道。绿泡泡两条互斥,只列设置里选中的那条。"""
+    active = wechat_channel()
+    return [_channel_info(key) for key in _REGISTRY
+            if key not in WECHAT_CHANNELS or key == active]
+
+
+def channel_labels() -> dict[str, str]:
+    """全部通道 id → 人话名字,**含没被选中的那条**。
+
+    历史运行记录里写着的可能正是另一条绿泡泡通道("上次来源:…"),
+    面板得能把它显示成人话,而不是一个裸 id。
+    """
+    return {key: _channel_info(key)["label"] for key in _REGISTRY}
+
+
+def wechat_channel_options() -> list[dict]:
+    """设置面板上那两个候选(顺序即默认在前)。"""
+    return [_channel_info(key) for key in WECHAT_CHANNELS]
