@@ -178,6 +178,26 @@ await evalJs(`refreshDailyStatus()`);
 check("重新生成后不再显示上一次的失败",
       await evalJs(`document.getElementById('daily-error').hidden`));
 
+// 同步范围一个都不勾:不能把「同步全部并生成」静静地降级成「直接生成」
+// ——那一轮素材根本没刷新,面板上却一路"成功"。
+await evalJs(`(() => { document.querySelectorAll('#daily-channels input:checked')
+  .forEach(i => { i.checked = false; }); })()`);
+const stampBefore = await evalJs(stamp);
+await evalJs(`(() => { runDaily(true); })()`);
+await sleep(600);
+check("空同步范围没有起跑", !(await evalJs(`!!(dailyState && dailyState.running)`)),
+      await evalJs(`JSON.stringify({phase: dailyState && dailyState.phase})`));
+check("空同步范围就地说清怎么办",
+      /先勾选至少一个同步范围/.test(await evalJs(`document.getElementById('toast-host')?.textContent || ''`)),
+      await evalJs(`document.getElementById('toast-host')?.textContent || ''`));
+check("空同步范围没有顺手重算今天那一份", (await evalJs(stamp)) === stampBefore);
+const rejected = await evalJs(`(async () => (await fetch('/api/daily/run', { method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ sync: true, channels: [] }) })).status)()`);
+check("后端也拒绝空同步范围", rejected === 400, String(rejected));
+await evalJs(`(() => { document.querySelectorAll('#daily-channels input')
+  .forEach(i => { i.checked = true; }); })()`);
+
 // 来源面板:英文条目显示译文,弹窗能切回原文
 await evalJs(`switchTab('rss')`);
 await sleep(2500);
@@ -195,6 +215,23 @@ check("阅读弹窗给了看原文的入口", !(await evalJs(`document.getElemen
 await evalJs(`toggleSourceOriginal()`);
 check("切回原文后正文是英文",
       /The runtime schedules/.test(await evalJs(`document.getElementById('source-reader-body').textContent`)));
+
+// 还排在翻译队列里的那一条:vault 里没有这一份,面板也不能拿英文原文充数
+const waiting = await evalJs(`(() => {
+  const el = [...document.querySelectorAll('.source-entry')]
+    .find(r => /正在等翻译/.test(r.textContent));
+  return el ? JSON.stringify({ name: el.querySelector('.source-entry-name')?.textContent || '',
+    excerpt: el.querySelector('.source-excerpt')?.textContent || '',
+    expandable: !!el.querySelector('[data-read-item]') }) : ''; })()`);
+check("待翻译的条目标成「正在等翻译」", !!waiting,
+      await evalJs(`document.getElementById('source-list').textContent.slice(0, 200)`));
+const w = waiting ? JSON.parse(waiting) : {};
+check("待翻译的条目不展示英文正文",
+      !!waiting && !/still waiting for its translation/.test(w.excerpt), w.excerpt);
+check("待翻译的条目不给展开阅读", !!waiting && !w.expandable);
+check("面板写明还有几条在等翻译",
+      /条外文内容还在等翻译/.test(await evalJs(`document.querySelector('.source-note')?.textContent || ''`)),
+      await evalJs(`document.querySelector('.source-note')?.textContent || ''`));
 
 check("页面没有脚本报错", pageErrors.length === 0, pageErrors.join(" | "));
 

@@ -98,9 +98,11 @@ def run(body: RunRequest | None = None):
 
 @router.post('/stop')
 def stop():
-    if not daily_run.request_stop():
-        raise HTTPException(409, '当前没有正在运行的日报任务')
-    return {'ok': True, 'detail': '当前阶段结束后停止,这一轮不生成日报;已同步的内容会保留'}
+    accepted, detail = daily_run.request_stop()
+    if not accepted:
+        # 没在跑、或者已经进了生成阶段(那一档停不了,原因照搬 daily_run 的说明)
+        raise HTTPException(409, detail)
+    return {'ok': True, 'detail': detail}
 
 
 @router.get('/reports')

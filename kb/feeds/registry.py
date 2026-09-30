@@ -73,6 +73,12 @@ def _migrate(conn) -> None:
 # 非中文判定:中日韩字符占比低于这个数就当成"外文,要翻译"。纯英文条目是 0,
 # 正常中文条目远高于它;夹杂大段代码/英文引文的中文条目也在它之上。
 _CJK_SHARE = 0.12
+# 一个汉字都没有时,至少要有这么多字母才判外文。低于它的("Bun 1.3"、一串
+# 表情)本来也没什么可译的,翻一遍只是白花钱。
+_MIN_LETTERS = 6
+# 夹着汉字的短文本:占比算不准(一个汉字 + 几个字母就能压到阈值以下),
+# 这种一律不翻,留原样。
+_SHORT_MIXED = 12
 
 
 def text_language(*parts: str) -> str:
@@ -80,11 +86,21 @@ def text_language(*parts: str) -> str:
 
     只看字符构成,不调模型:翻译本身才花钱,判定不能也花钱。标题和正文合起来
     判一次——短标题单看常常判不准(全是产品名的标题一个汉字都没有)。
+
+    短文本按"有没有汉字"分开处理。原来是"字母少于 12 个一律算中文",
+    结果「Hello world」(10 个字母)被**稳定地**判成中文、永远进不了翻译队列,
+    而 social 那类来源的短动态整段都是这个形态(2026-09-30 审查实测)。
+    一个汉字都没有就不可能是中文,这一档没有"判不准"可言;真正判不准的是
+    "有汉字但太短",那一档照旧留原样。
     """
     text = ' '.join(p or '' for p in parts)
     cjk = sum(1 for ch in text if '一' <= ch <= '鿿')
     letters = sum(1 for ch in text if ch.isalpha())
-    if letters < 12:                      # 太短:判不出来就别翻,留原样
+    if not letters:                       # 没字可判(纯数字/表情/标点)
+        return 'zh'
+    if not cjk:
+        return 'en' if letters >= _MIN_LETTERS else 'zh'
+    if letters < _SHORT_MIXED:            # 有汉字又太短:判不出来就别翻
         return 'zh'
     return 'zh' if cjk / letters >= _CJK_SHARE else 'en'
 
@@ -302,12 +318,27 @@ def items(kind: str, source_id: int | None = None, offset: int = 0, limit: int =
         where += (' AND (title LIKE ? OR body LIKE ? OR author LIKE ?'
                   ' OR title_zh LIKE ? OR body_zh LIKE ?)')
         args.extend(['%' + q + '%'] * 5)
+    # 「还在等翻译」的条目要在面板上标出来:它们被扣在导出闸门外,vault 里
+    # 还没有这一份,而没有译文时展示逻辑会回退成原文——不标的话用户看到的就
+    # 是一条英文内容,和"英文先译成中文再入库"直接矛盾(2026-09-30 审查实测
+    # 一次进来 41 条时第 41 条整条英文出现在面板上)。
+    # 口径必须和导出那道闸门(`sync.export(hold_untranslated=)`)严格一致:
+    # 那边扣着不入库、这边才说"等翻译";没配 key 时那边按原文入库,这边也就
+    # 照原文显示——两边各判各的话,面板上写着"等翻译"的条目其实早已以英文
+    # 躺在 vault 里了。
+    from kb.feeds import translate
+    queued, qargs = translate.queued_sql()
+    holding = translate.available()
+    flag, fargs = (f'({queued})', qargs) if holding else ('0', [])
     with db() as c:
         total = c.execute('SELECT count(*) FROM feed_items WHERE ' + where, args).fetchone()[0]
-        rows = c.execute('SELECT * FROM feed_items WHERE ' + where +
+        waiting = (c.execute(f'SELECT count(*) FROM feed_items WHERE {where} AND ({queued})',
+                             [*args, *qargs]).fetchone()[0] if holding else 0)
+        rows = c.execute(f'SELECT *, {flag} AS translating FROM feed_items WHERE ' + where +
                          " ORDER BY COALESCE(NULLIF(published,''),fetched_at) DESC,key DESC LIMIT ? OFFSET ?",
-                         [*args,limit,offset]).fetchall()
-    return {'items': [dict(r) for r in rows], 'total': total, 'offset': offset}
+                         [*fargs,*args,limit,offset]).fetchall()
+    return {'items': [dict(r) for r in rows], 'total': total, 'offset': offset,
+            'translating': waiting}
 
 
 def latest_run(kind: str) -> dict | None:

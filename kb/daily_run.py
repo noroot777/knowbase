@@ -42,6 +42,9 @@ _state: dict = {
     'since': '', 'until': '', 'sync': False,
     'trigger': '', 'started_at': '', 'finished_at': '', 'error': '',
     'stop_requested': False, 'over_budget': False, 'sched_day': '',
+    # 当前那一轮管道是不是我们自己起的。日报允许在别人的管道跑着时排队等,
+    # 这时候用户按"停止"只该结束我们的等待,不能顺手把别人的同步也停掉。
+    'owns_pipeline': False,
     'channels': [], 'result': None, 'log': [],
 }
 
@@ -206,21 +209,38 @@ def _load_last_run() -> dict | None:
         return None
 
 
-def request_stop() -> bool:
+STOP_IDLE = '当前没有正在运行的日报任务'
+STOP_GENERATING = ('日报正在生成,这一阶段不能中途停止:模型已经在出稿,'
+                   '这一轮会照常保存(需要的话生成完可以删掉这一份)')
+STOP_OK = '当前阶段结束后停止,这一轮不生成日报;已同步的内容会保留'
+
+
+def request_stop() -> tuple[bool, str]:
     """停下这一轮日报:剩下的通道不同步了,**日报也不生成**。
 
-    正在跑的管道阶段按它自己的规矩收尾,已同步进库的内容保留。
+    返回 `(受理了没有, 说明)`。两种不受理:没有在跑的日报;已经进了生成阶段
+    ——那时候模型钱已经花出去了,`daily.generate()` 自己把文件写完才返回,
+    受理下来只会承诺一件做不到的事(界面上写着"这一轮不生成日报",实际照样
+    多出一份日报,2026-09-30 审查实测)。所以那一档如实拒掉、按钮也置灰。
+
+    只停自己起的那一轮管道:在别人的管道后面排队等的时候按停止,只结束我们
+    自己的等待。
     """
     from kb import pipeline as pl
     with _lock:
         if not _state['running']:
-            return False
+            return False, STOP_IDLE
+        # 这个判断和 `_run` 里"进入生成阶段"那一步共用 `_lock`,所以两者严格
+        # 二选一:要么停止先落下、生成整段跳过,要么生成已经开跑、停止被拒。
+        if _state['phase'] == 'generate':
+            return False, STOP_GENERATING
+        mine = _state['owns_pipeline']
         if not _state['stop_requested']:
             _state['stop_requested'] = True
             _log('已请求停止:当前阶段结束后不再继续,这一轮不生成日报')
-    if pl.get_state()['running']:
+    if mine and pl.get_state()['running']:
         pl.request_stop()
-    return True
+    return True, STOP_OK
 
 
 def _halting() -> bool:
@@ -253,10 +273,18 @@ def _sync_channel(channel: str, label: str, budget_end: float) -> dict:
     if not pl.start_pipeline(SYNC_STAGES, crawl_filter={'channel': channel}):
         entry.update(status='skipped', detail='同步管道已被其它任务占用,本轮跳过')
         return entry
+    with _lock:
+        _state['owns_pipeline'] = True
+    # 停止请求正好落在"等到空闲"和"起跑"之间时,request_stop 那一刻还不归我们,
+    # 它不会去停这一轮;补一次,免得用户按了停止还要眼看着它跑完整个通道。
+    if _halting():
+        pl.request_stop()
     _set('sync', f'{label}:同步中')
     while True:
         snapshot = pl.get_state()
         if not snapshot['running']:
+            with _lock:
+                _state['owns_pipeline'] = False
             break
         stage = snapshot.get('current_stage') or ''
         detail = (snapshot['stages'].get(stage) or {}).get('detail') or ''
@@ -294,10 +322,14 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         # 用户按的停止到此为止:接着生成等于把一份"同步到一半"的日报当成功交出去,
         # 还要再花一次模型钱。超预算是另一回事——那本来就是"别再同步了,拿现有的
         # 内容出报",继续生成正是它的目的。
-        if _state['stop_requested']:
-            _set('stopped', '已按请求停止,这一轮没有生成日报')
-            return
-        _set('generate', '正在生成日报')
+        # 判断和"进入生成阶段"必须在同一把锁里:分两步的话,停止请求正好挤在中间
+        # 时它既看不到 phase=generate(于是受理、承诺不出报)、又赶不上这道检查
+        # (于是照样生成),承诺和行为当场对不上。
+        with _lock:
+            if _state['stop_requested']:
+                _set('stopped', '已按请求停止,这一轮没有生成日报')
+                return
+            _set('generate', '正在生成日报')
         # 窗口的截止时刻要在**同步跑完之后**才定下来(没显式指定时 generate 自己
         # 取 now):日报覆盖的是"到生成这一刻为止",同步花掉的那几小时里产出的
         # 内容也算数。开跑时就把 until 钉死的话,那几小时会掉进两份日报的缝里。
@@ -316,6 +348,7 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         _set('failed', f'日报生成失败: {e}')
     finally:
         with _lock:
+            _state['owns_pipeline'] = False
             _state['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             _save_last_run()
             _state['running'] = False
@@ -340,6 +373,12 @@ def start(since: datetime | None = None, until: datetime | None = None,
               if c in known]
     if since and until and since >= until:
         raise ValueError('日报的起始时刻必须早于截止时刻')
+    # 勾了"先同步"却一个来源都没选,同步阶段会静静地什么都不做,面板上仍旧
+    # 一路"成功"——"同步全部并生成"被悄悄降级成"直接生成",用户不知道素材
+    # 根本没刷新(2026-09-30 审查实测)。要么给个来源,要么明确走"直接生成"。
+    if sync and not picked:
+        raise ValueError('同步范围里一个可用来源都没有:先勾选至少一个,'
+                         '或者改用"直接生成"(只用已入库的内容出报)')
     with _lock:
         if _state['running']:
             return False

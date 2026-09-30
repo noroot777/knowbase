@@ -234,6 +234,15 @@ async function runDaily(sync) {
   if (custom.since && custom.until && custom.since >= custom.until) {
     toast('起始时刻要早于截止时刻'); return;
   }
+  // 同步范围一个都没勾:同步阶段会什么都不做、却一路报成功,"同步全部并生成"
+  // 静静地变成"直接生成"。后端也会拒(daily_run.start),这里先拦一道,好把
+  // 话说在按钮边上。
+  const channels = pickedDailyChannels();
+  if (sync && !channels.length) {
+    toast('先勾选至少一个同步范围', { key: 'daily',
+      detail: '同步范围在下面的「每天定时生成」里；只想用已入库的内容出报就点「直接生成」。' });
+    return;
+  }
   // 覆盖提示按「这一份会写到哪一天」判:自定义区间落在截止时刻那天,
   // 默认区间落在今天(生成时刻)。
   const date = custom.until ? custom.until.slice(0, 10) : new Date().toLocaleDateString('sv');
@@ -242,7 +251,7 @@ async function runDaily(sync) {
         body: '这一天已经有一份日报，重新生成会覆盖它。', ok: '重新生成' })) return;
   dailyBusy = true; renderDailyButtons();
   try {
-    await pipePost('/api/daily/run', { ...custom, sync, channels: pickedDailyChannels() });
+    await pipePost('/api/daily/run', { ...custom, sync, channels });
     toast(sync ? '已开始同步并生成日报' : '已开始生成日报',
       { key: 'daily', type: 'ok', detail: sync ? '依次同步所选来源后生成，离开页面不影响。' : '直接用已入库的内容生成。' });
   } catch (e) {
@@ -252,8 +261,10 @@ async function runDaily(sync) {
 
 async function stopDaily() {
   try {
-    await pipePost('/api/daily/stop');
-    toast('已请求停止', { key: 'daily', type: 'info', detail: '当前阶段结束后停止，这一轮不生成日报；已同步的内容会保留。' });
+    // 说明文案跟着后端给的那一份走:受理与不受理(尤其"生成阶段停不了")
+    // 的口径只有一份,两边各写一句迟早对不上。
+    const r = await pipePost('/api/daily/stop');
+    toast('已请求停止', { key: 'daily', type: 'info', detail: r.detail || '' });
   } catch (e) { toast('停止请求未完成', { key: 'daily', detail: e.message }); }
   finally { refreshDailyStatus(); }
 }
@@ -262,7 +273,11 @@ function renderDailyButtons() {
   const running = !!dailyState?.running;
   $('daily-gen').disabled = $('daily-sync-gen').disabled = dailyBusy || running;
   $('daily-sync-gen').textContent = running ? '生成中…' : '同步全部并生成';
-  $('daily-stop').disabled = !!dailyState?.stop_requested;
+  // 进了生成阶段就停不了了:模型已经在出稿,daily.generate() 自己把文件写完
+  // 才返回。按钮留着能点、点了又被拒,不如置灰并把原因写在上面。
+  const generating = running && dailyState?.phase === 'generate';
+  $('daily-stop').disabled = generating || !!dailyState?.stop_requested;
+  $('daily-stop').title = generating ? '正在出稿，这一阶段不能中途停止' : '';
   $('nav-daily-dot').hidden = !running;
 }
 

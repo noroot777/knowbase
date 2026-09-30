@@ -2,7 +2,7 @@
 const sourceModules = new Map();
 let sourceKind = '', sourceView = 'items', sourceData = null, sourceRows = [];
 let sourceOffset = 0, sourceTotal = 0, sourceVersion = 0, sourcePoll = null, sourceSearchTimer;
-let sourceItemsVersion = 0, sourceItemsFailed = false;
+let sourceItemsVersion = 0, sourceItemsFailed = false, sourceTranslating = 0;
 let sourceBusy = false;
 const sourceFilters = new Map();
 
@@ -145,6 +145,7 @@ async function renderSourceView(reset = false) {
     if (!currentSourceItems(kind, version, q, id)) return;
     sourceItemsFailed = false;
     sourceRows = data.items; sourceOffset = data.items.length; sourceTotal = data.total;
+    sourceTranslating = data.translating || 0;
     renderSourceItems();
   } catch (e) {
     if (!currentSourceItems(kind, version, q, id)) return;
@@ -170,16 +171,27 @@ function renderSubscription(s) {
 // 外文条目在入库前已经译成中文(kb/feeds/translate.py),面板一律显示译文:
 // vault 里存的就是这一份,面板显示英文的话用户根本不知道库里到底是什么。
 // 原文没丢,阅读弹窗里可以切回去。
+// `translating` 是后端按导出闸门那一份口径给的("还扣着没入库"),不是前端
+// 自己猜的:一轮只译 40 条,第 41 条在译完之前既不在 vault 里、也不该在面板
+// 上以英文冒充库里那一份(2026-09-30 审查实测)。
 function sourceText(item) {
   return { title: item.title_zh || item.title, body: item.body_zh || item.body,
-           translated: !!(item.body_zh || item.title_zh) };
+           translated: !!(item.body_zh || item.title_zh), translating: !!item.translating };
 }
 function renderSourceItems() {
-  $('source-list').innerHTML = sourceRows.map(item => { const t = sourceText(item); return `<article class="source-entry">
+  const rows = sourceRows.map(item => { const t = sourceText(item); return `<article class="source-entry">
     <div class="source-entry-meta"><span>${esc(item.author)}</span><time>${item.published ? sourceTime(item.published) : '发布时间未知'}</time></div>
-    <h3><button class="source-entry-title" data-read-item="${item.key}">${esc(t.title)}</button></h3>
-    <p class="source-excerpt">${esc(t.body.slice(0,380))}${t.body.length>380?'…':''}</p>
-    <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}${t.translated ? ' · 已译为中文' : ''}</span><button class="text-button" data-read-item="${item.key}">展开阅读</button><a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`; }).join('') ||
+    ${t.translating
+      // 等翻译的条目不给“展开阅读”:知识库里这一条还不存在,展开只能展开英文
+      // 原文。标题留着当身份,正文位置如实写状态。
+      ? `<h3 class="source-entry-name">${esc(t.title)}</h3>
+    <p class="source-excerpt">还没有中文译文，这一条暂未写入知识库；下一轮翻译完成后显示中文正文。</p>`
+      : `<h3><button class="source-entry-title" data-read-item="${item.key}">${esc(t.title)}</button></h3>
+    <p class="source-excerpt">${esc(t.body.slice(0,380))}${t.body.length>380?'…':''}</p>`}
+    <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}${t.translating ? ' · 外文原文，正在等翻译' : t.translated ? ' · 已译为中文' : ''}</span>${t.translating ? '' : `<button class="text-button" data-read-item="${item.key}">展开阅读</button>`}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`; }).join('');
+  const note = sourceTranslating
+    ? `<p class="source-note" role="status">${sourceTranslating} 条外文内容还在等翻译：译成中文之后才写进知识库。</p>` : '';
+  $('source-list').innerHTML = rows ? note + rows :
     `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value ? '换个关键词或切换订阅试试。' : sourceData?.unconfigured && !sourceData?.ready ? '账号待配置。先填写 X 订阅桥接或账号的专用订阅链接，再开始同步。' : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p></div>`;
   $('source-more').hidden = sourceOffset >= sourceTotal;
   $('source-more').textContent = `加载更多（已显示 ${sourceRows.length} / ${sourceTotal}）`;
@@ -193,7 +205,8 @@ async function moreSourceItems() {
     if (!currentSourceItems(kind, version, q, id)) return;
     const seen = new Set(sourceRows.map(r => r.key));
     sourceRows.push(...data.items.filter(r => !seen.has(r.key)));
-    sourceOffset += data.items.length; sourceTotal = data.total; renderSourceItems();
+    sourceOffset += data.items.length; sourceTotal = data.total;
+    sourceTranslating = data.translating || 0; renderSourceItems();
   } catch(e) { if (currentSourceItems(kind, version, q, id)) sourceError(e.message); }
   finally { if (version === sourceItemsVersion) $('source-more').disabled = false; }
 }

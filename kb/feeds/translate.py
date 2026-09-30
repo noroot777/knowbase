@@ -149,6 +149,20 @@ def queued_sql() -> tuple[str, list]:
     return "lang='en' AND body_zh='' AND translate_tries<?", [MAX_TRIES]
 
 
+def available() -> bool:
+    """翻译这一步现在能不能真的发生(配了 key、解析得出模型)。
+
+    来源面板据此决定"没有译文"该怎么显示:能翻就是"还在等翻译,尚未入库",
+    翻不了就是"这条只有原文",而后者的原文此刻已经按原样进了 vault
+    (`materialize()` 传 `hold_untranslated=not skipped`)。
+    """
+    try:
+        _model()
+        return True
+    except Exception:                      # noqa: BLE001 - 配置问题一律当"翻不了"
+        return False
+
+
 def pending(kind: str) -> int:
     cond, args = queued_sql()
     with reg.db() as c:
@@ -156,14 +170,27 @@ def pending(kind: str) -> int:
                          (kind, *args)).fetchone()[0]
 
 
+# 复判的长度上限:判定规则收紧的只是"短文本"那一档,够长的条目在旧规则下
+# 就走不到那一档,不必每轮重新数一遍字符。
+_RECHECK_CHARS = 400
+
+
 def _label_unknown(kind: str) -> None:
-    """老库里的条目没判过语种(lang='')。判定纯本地,一次把它们标完。"""
+    """老库里的条目没判过语种(lang='')。判定纯本地,一次把它们标完。
+
+    顺带复判一次短条目:2026-09-30 之前"字母少于 12 个一律算中文"把
+    「Hello world」这种短外文永久挡在翻译队列外面,只改判定规则的话存量那批
+    仍然一辈子是英文。判定不花钱,标签变了才写盘,所以这一趟稳定状态下是
+    空转。
+    """
     with reg.db() as c:
-        rows = c.execute("SELECT key,title,body FROM feed_items WHERE kind=? AND lang=''",
-                         (kind,)).fetchall()
+        rows = c.execute('SELECT key,title,body,lang FROM feed_items WHERE kind=? AND'
+                         " (lang='' OR (lang='zh' AND length(title)+length(body)<?))",
+                         (kind, _RECHECK_CHARS)).fetchall()
         for r in rows:
-            c.execute('UPDATE feed_items SET lang=? WHERE key=?',
-                      (reg.text_language(r['title'], r['body']), r['key']))
+            lang = reg.text_language(r['title'], r['body'])
+            if lang != (r['lang'] or ''):
+                c.execute('UPDATE feed_items SET lang=? WHERE key=?', (lang, r['key']))
 
 
 def _save(key: str, title_zh: str, body_zh: str) -> None:

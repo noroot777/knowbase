@@ -91,6 +91,12 @@ def main():
     with reg.db() as c:
         c.execute("UPDATE feed_items SET title_zh=?, body_zh=?, translated_at=? WHERE lang='en'",
                   ('全新的智能体运行时', '这个运行时为编码智能体调度工具。', reg.now()))
+    # 再来一条英文、故意不给译文:它还排在翻译队列里,所以既不该进 vault、
+    # 也不该在面板上以英文冒充库里那一份。发布时间排在上面那条之后,免得它
+    # 顶到列表第一行去(那几条检查认的是第一行)。
+    reg.put_items(source, [{'url': 'https://example.org/en-2', 'title': 'A second English post',
+                            'body': 'This one is still waiting for its translation.',
+                            'published': (recent - timedelta(hours=2)).strftime('%Y-%m-%d %H:%M')}])
     print(json.dumps({'KB_DATA_DIR': str(data), 'KB_VAULT_ROOT': str(vault)}, ensure_ascii=False))
 
 

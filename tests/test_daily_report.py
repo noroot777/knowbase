@@ -361,6 +361,69 @@ class DailyStopTests(unittest.TestCase):
         gen.assert_called_once()
         self.assertEqual('done', daily_run._state['phase'])
 
+    def test_stop_is_refused_once_the_model_is_writing(self):
+        # 生成阶段停不了:模型已经在出稿,`daily.generate()` 自己把文件写完才
+        # 返回。受理下来只会承诺一件做不到的事——界面写着"这一轮不生成日报",
+        # 实际照样多出一份,钱也照花(2026-09-30 审查实测)。
+        daily_run._state.update({**self.before, 'running': True, 'phase': 'generate'})
+        accepted, detail = daily_run.request_stop()
+        self.assertFalse(accepted)
+        self.assertIn('不能中途停止', detail)
+        self.assertFalse(daily_run._state['stop_requested'])
+
+    def test_stopping_mid_generation_does_not_promise_anything_it_cannot_do(self):
+        # 审查者的复现形态:生成桩阻塞在模型调用上时按停止。受理与否必须和
+        # 实际行为一致——这里是"拒掉 + 照常出报",而不是"受理 + 照常出报"。
+        seen = {}
+
+        def generating(**kwargs):
+            seen['stop'] = daily_run.request_stop()
+            return {'date': '2026-09-29', 'since': '', 'until': '', 'path': '',
+                    'docs': 2, 'total': 2, 'late': 0, 'model': 'm'}
+
+        daily_run._state.update({**self.before, 'running': True, 'log': [], 'channels': []})
+        with patch.object(daily, 'generate', Mock(side_effect=generating)):
+            daily_run._run(None, None, False, [], daily.FIRST_DAYS)
+        self.assertFalse(seen['stop'][0])
+        self.assertEqual('done', daily_run._state['phase'])
+        self.assertFalse(daily_run._state['stop_requested'])
+
+    def test_stop_while_waiting_leaves_another_task_pipeline_alone(self):
+        # 日报允许在别人的管道后面排队等。这时候按停止只该结束我们自己的等待,
+        # 顺手把别人启动的那一轮同步也停掉是越权。
+        from kb import pipeline as pl
+        daily_run._state.update({**self.before, 'running': True, 'phase': 'sync',
+                                 'owns_pipeline': False})
+        with patch.object(pl, 'get_state', Mock(return_value={'running': True})), \
+             patch.object(pl, 'request_stop', Mock()) as stop:
+            accepted, _ = daily_run.request_stop()
+        self.assertTrue(accepted)
+        stop.assert_not_called()
+        self.assertTrue(daily_run._state['stop_requested'])
+
+    def test_stop_does_end_the_round_we_started(self):
+        from kb import pipeline as pl
+        daily_run._state.update({**self.before, 'running': True, 'phase': 'sync',
+                                 'owns_pipeline': True})
+        with patch.object(pl, 'get_state', Mock(return_value={'running': True})), \
+             patch.object(pl, 'request_stop', Mock()) as stop:
+            self.assertEqual(True, daily_run.request_stop()[0])
+        stop.assert_called_once()
+
+    def test_syncing_nothing_is_refused_at_both_layers(self):
+        # 勾了"先同步"却一个来源都没选:同步阶段什么都不做、却一路报成功,
+        # "同步全部并生成"静静地降级成"直接生成"(2026-09-30 审查实测)。
+        with self.assertRaises(ValueError):
+            daily_run.start(sync=True, channels=[])
+        app = FastAPI(); app.include_router(daily_api.router)
+        client = TestClient(app)
+        self.assertEqual(400, client.post('/api/daily/run',
+                                          json={'sync': True, 'channels': []}).status_code)
+        # "直接生成"照旧:它本来就不同步,空范围是正常形态。
+        with patch.object(daily_run.threading, 'Thread', Mock()):
+            self.assertTrue(daily_run.start(sync=False, channels=[]))
+        daily_run._state.update(self.before)
+
     def test_a_stopped_scheduled_round_is_not_retried(self):
         self.settings.write_text(json.dumps({'enabled': True, 'time': '07:30'}))
         self.run_once(stop_requested=True, sched_day='2026-09-29')
@@ -400,6 +463,50 @@ class TranslateTests(unittest.TestCase):
         self.assertEqual('A new agent runtime', meta['original_title'])
         self.assertIn('这个运行时为编码智能体调度工具。', body)
         self.assertIn('自动翻译', body)
+
+    def test_short_foreign_text_is_not_mistaken_for_chinese(self):
+        # 一个汉字都没有就不可能是中文,这一档没有"判不准"可言。旧规则
+        # "字母少于 12 个一律算中文"把「Hello world」(10 个字母)永久挡在
+        # 翻译队列外面,而 social 那类来源的短动态整段都是这个形态。
+        self.assertEqual('en', reg.text_language('Hello world', ''))
+        self.assertEqual('zh', reg.text_language('预告', ''))          # 有汉字又太短
+        self.assertEqual('zh', reg.text_language('2026 🚀 1.3', ''))   # 没字可判
+        self.assertEqual('zh', reg.text_language('Bun 1.3', ''))       # 没什么可译的
+        self.put('Hello world', 'Short note.')
+        self.assertEqual('en', self.item()['lang'])
+        self.assertEqual(1, translate.pending('rss'))
+
+    def test_existing_short_english_gets_relabelled_and_translated(self):
+        # 存量那批已经按旧规则标成 zh 落在库里了,只改规则救不回来。
+        self.put('Hello world', 'Short note.')
+        with reg.db() as c:
+            c.execute("UPDATE feed_items SET lang='zh'")
+        self.assertEqual(0, translate.pending('rss'))
+        with patch.object(llm, 'chat', Mock(return_value='###TITLE###\n你好世界\n'
+                                            '###BODY###\n短笔记。')):
+            self.assertEqual(1, translate.translate_pending('rss')['done'])
+        self.assertEqual('你好世界', self.item()['title_zh'])
+
+    def test_queued_entries_are_marked_as_waiting_in_the_panel(self):
+        # 一轮只译 MAX_ITEMS 条,还排在队列里的那些被扣在导出闸门外:vault 里
+        # 没有这一份,面板也不能拿英文原文冒充库里那一份。
+        self.put('An English post', 'Some English body text for the panel.')
+        data = reg.items('rss')
+        self.assertEqual((1, 1, 1), (data['total'], data['translating'],
+                                     data['items'][0]['translating']))
+        with patch.object(llm, 'chat', Mock(return_value='###TITLE###\n一篇中文\n'
+                                            '###BODY###\n中文正文。')):
+            translate.translate_pending('rss')
+        data = reg.items('rss')
+        self.assertEqual((0, 0), (data['translating'], data['items'][0]['translating']))
+
+    def test_without_a_key_the_panel_does_not_claim_a_translation_is_coming(self):
+        # 没配 key 时导出闸门放行(原文入库),面板也就不该写"正在等翻译"
+        # ——两边各判各的话,面板上标着等翻译的条目其实已经以英文躺在 vault 里。
+        self.put('An English post', 'Some English body text for the panel.')
+        with patch.object(translate, '_model', Mock(side_effect=RuntimeError('没配 key'))):
+            data = reg.items('rss')
+        self.assertEqual((0, 0), (data['translating'], data['items'][0]['translating']))
 
     def test_chinese_entry_costs_no_model_call(self):
         self.put('国产大模型发布', '今天发布了一个新的国产大模型，支持长上下文。')

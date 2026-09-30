@@ -31,6 +31,10 @@
 .source-entry h3 { margin:12px 0; }
 .source-entry-title { background:none; color:var(--ink); text-align:left; padding:0; font:600 18px/1.6 var(--font-display); overflow-wrap:anywhere; }
 .source-entry-title:hover { color:var(--brand); }
+/* 还在等翻译的条目:标题只是身份,不可点开——所以不用 .source-entry-title
+   那套 hover 变色。 */
+.source-entry-name { font:600 18px/1.6 var(--font-display); overflow-wrap:anywhere; }
+.source-note { color:var(--muted); font-size:12px; margin:0 0 14px; }
 .source-excerpt { color:var(--muted); font-size:14px; line-height:1.9; white-space:pre-line; overflow-wrap:anywhere; }
 .source-entry-footer { margin-top:18px; display:flex; align-items:center; gap:16px; font-size:12px; }
 .source-entry-footer span { margin-right:auto; color:var(--muted); }
