@@ -37,7 +37,7 @@ def reader_command() -> str:
     for candidate in candidates:
         if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
-    raise LocalReaderError("未安装微信数据库读取器，请在知识库的「微信接入」中检查并接入")
+    raise LocalReaderError("未安装绿泡泡数据库读取器，请在知识库的「绿泡泡接入」中检查并接入")
 
 
 class LocalReader:
@@ -46,19 +46,19 @@ class LocalReader:
             proc = subprocess.run([reader_command(), *args], capture_output=True,
                                   text=True, timeout=60)
         except subprocess.TimeoutExpired:
-            raise LocalReaderError("微信数据库读取超时，请检查 wechat-cli doctor") from None
+            raise LocalReaderError("绿泡泡数据库读取超时，请检查 wechat-cli doctor") from None
         except OSError:
-            raise LocalReaderError("无法启动微信读取器，请检查安装和执行权限") from None
+            raise LocalReaderError("无法启动绿泡泡读取器，请检查安装和执行权限") from None
         try:
             payload = json.loads(proc.stdout)
         except (ValueError, TypeError):
-            raise LocalReaderError("微信读取器未返回有效 JSON，请检查 wechat-cli doctor") from None
+            raise LocalReaderError("绿泡泡读取器未返回有效 JSON，请检查 wechat-cli doctor") from None
         if not isinstance(payload, dict) or proc.returncode or not payload.get("ok"):
             # 不把包含原始 XML、文件路径或访问材料的 stderr 送进管道日志。
-            raise LocalReaderError("微信数据库读取失败，请运行 wechat-cli doctor 检查本机接入")
+            raise LocalReaderError("绿泡泡数据库读取失败，请运行 wechat-cli doctor 检查本机接入")
         data = payload.get("data")
         if not isinstance(data, dict):
-            raise LocalReaderError("微信读取器数据格式不兼容")
+            raise LocalReaderError("绿泡泡读取器数据格式不兼容")
         return data
 
     def check(self) -> None:
@@ -66,13 +66,13 @@ class LocalReader:
         status = data.get("status", {})
         status = status.get("status", status)
         if status.get("live_database_read_ok") is not True:
-            raise LocalReaderError("微信数据库尚未就绪；请用 wechat-cli access-plan 检查，通知预览不能采集文章")
+            raise LocalReaderError("绿泡泡数据库尚未就绪；请用 wechat-cli access-plan 检查，通知预览不能采集文章")
 
     def accounts(self) -> list[dict]:
         # 足够大的 limit 避免 Reader 先截会话、再按类型过滤导致漏掉不活跃公众号。
         rows = self.call("sessions", "--type-filter", "official_account", "--limit", "100000").get("sessions")
         if not isinstance(rows, list):
-            raise LocalReaderError("微信读取器缺少公众号会话列表")
+            raise LocalReaderError("绿泡泡读取器缺少公众号会话列表")
         return [r for r in rows if re.fullmatch(r"gh_[A-Za-z0-9_]+", r.get("username", ""))]
 
     def messages(self, username: str, *, limit: int = 500, offset: int = 0) -> list[dict]:
@@ -81,7 +81,7 @@ class LocalReader:
         rows = self.call("timeline", username, "--limit", str(limit), "--offset", str(offset),
                          "--display-order", "desc", "--include-media-paths", "false").get("messages")
         if not isinstance(rows, list):
-            raise LocalReaderError("微信读取器缺少推送记录")
+            raise LocalReaderError("绿泡泡读取器缺少推送记录")
         return rows
 
     def articles(self, username: str, *, on_error=None):

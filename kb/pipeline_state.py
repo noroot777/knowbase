@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 
@@ -86,11 +87,61 @@ def _stage(name: str, status: str, detail: str = "",
     entry: dict = {"status": status, "detail": detail}
     if failures:
         entry["failures"] = failures[:50]
+    segments = _segments.get(name)
+    if segments:
+        # 这一阶段正被多个来源各跑一遍:只更新当前这一段,再把各段合成一条对外的结论
+        segments[-1].update(entry)
+        entry = _merge_segments(segments)
+        detail = f"{segments[-1]['label']}：{detail}" if detail else detail
     _state["stages"][name] = entry
     if status == "running":
         _state["current_stage"] = name
     if detail:
         _log(f"{name}: {detail}")
+
+
+# ── 多来源分段汇报 ──────────────────────────────────────────────────────────────
+# 一次同步可以同时抓几个来源,而 crawl / export 两个阶段是每个来源各跑一遍的。
+# 各自直接写 _state["stages"][name] 的话,后一个来源的结论会把前一个整个盖掉——
+# 面板上只剩最后那个来源的成败,前面几个是成功、失败还是跳过都看不见了。
+_segments: dict[str, list[dict]] = {}
+
+# 合并后的状态取"最要紧"的那一档:有一个红就是红,还有没跑完的就是执行中,
+# 剩下全跳过才算跳过。
+_MERGE_ORDER = ("error", "running", "pending", "stopped", "skipped", "ok")
+
+
+def _merge_segments(segments: list[dict]) -> dict:
+    status = next((s for s in _MERGE_ORDER
+                   if any(seg["status"] == s for seg in segments)), "ok")
+    entry: dict = {
+        "status": status,
+        "detail": "；".join(f"{seg['label']}：{seg['detail']}"
+                            for seg in segments if seg.get("detail")),
+    }
+    failures = [item for seg in segments for item in seg.get("failures", [])]
+    if failures:
+        entry["failures"] = failures[:50]
+    return entry
+
+
+@contextmanager
+def stage_segment(name: str, label: str):
+    """把这一段时间里对 name 阶段的汇报记成"label 这个来源的那一段"。"""
+    segments = _segments.setdefault(name, [])
+    segments.append({"label": label, "status": "running", "detail": ""})
+    try:
+        yield
+    finally:
+        current = segments[-1]
+        if current["status"] == "running":
+            # 采集器连一次最终状态都没报(异常穿出去了):不替它编一个成功
+            current.update({"status": "error", "detail": current["detail"] or "没有返回结果"})
+        _state["stages"][name] = _merge_segments(segments)
+
+
+def clear_segments() -> None:
+    _segments.clear()
 
 
 def _save_last_run() -> None:
@@ -143,6 +194,9 @@ def request_stop(run_id: str = "") -> bool:
 
 def _end_run() -> None:
     with _lock:
+        # 分段是"这一轮某个阶段被几个来源各跑一遍"的临时账本,收尾时一定要清掉:
+        # 留着的话下一轮的第一条汇报会被并进上一轮的段里。
+        clear_segments()
         stopped = bool(_state.get("stop_requested"))
         _state["stopped"] = stopped
         for name, stage in _state["stages"].items():

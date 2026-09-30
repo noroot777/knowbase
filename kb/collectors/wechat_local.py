@@ -13,7 +13,7 @@ from kb.collectors.wechat_oa import WeChatOACollector, _backend_problem, _run_cl
 
 class WeChatLocalCollector(WeChatOACollector):
     name = "wechat_local"
-    channel_label = "微信本地数据库"
+    channel_label = "绿泡泡本地数据库"
     cli_channel = "local"
     channel_hint = "读取本机已同步的公众号推送，再获取原文；无需 wxdown 或逐号文章凭证。"
     range_hint = "只能覆盖本机已同步的推送，按文章发布时间筛选；新订阅不能保证补齐历史。"
@@ -45,7 +45,7 @@ class WeChatLocalCollector(WeChatOACollector):
                                 message=data.get("message", ""), hint=data.get("hint", ""),
                                 targets=tuple(data.get("targets") or []))
         except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
-            return SourceStatus(online=False, message="微信数据库状态读取失败",
+            return SourceStatus(online=False, message="绿泡泡数据库状态读取失败",
                                 hint="请检查采集器和 wechat-cli doctor")
 
     def list_targets(self):

@@ -119,7 +119,8 @@ SOURCE_GROUPS: dict[str, list[str]] = {
 
 # 组的自然语言别名(问答规划/工具参数里用户或模型可能给的写法)
 SOURCE_ALIASES: dict[str, str] = {
-    "公众号": "gzh", "微信": "gzh", "wechat": "gzh", "公众号系": "gzh",
+    # 「微信」留着:界面上改叫绿泡泡了,用户问答里两种写法都可能给
+    "公众号": "gzh", "微信": "gzh", "绿泡泡": "gzh", "wechat": "gzh", "公众号系": "gzh",
     "视频": "video", "视频系": "video", "youtube": "video", "yt": "video",
     "日报": "dr", "daily": "dr", "ai日报": "dr",
     "大v观点": "social", "大v": "social", "推特": "social", "x": "social",

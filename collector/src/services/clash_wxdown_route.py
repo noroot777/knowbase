@@ -135,7 +135,7 @@ class ClashWxdownRoute:
         listening = self._port_is_listening()
         active = current == self.local_proxy and local_alive and listening
         if active and local_alive and listening:
-            message = "微信文章流量正在经过 wxdown"
+            message = "绿泡泡文章流量正在经过 wxdown"
         elif not listening:
             message = f"wxdown 代理端口 {self.proxy_port} 未启动"
         elif not local_alive:

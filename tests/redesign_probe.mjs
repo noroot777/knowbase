@@ -257,6 +257,178 @@ check("详情抽屉打得开", !!drawer, JSON.stringify(drawer));
 check("抽屉工具名用展示体 900", drawer && /Songti|STSong|serif/i.test(drawer.font) && drawer.weight === "900",
       JSON.stringify(drawer));
 
+
+// ── 8. 焦点只有一条环 ──
+// 输入框外面套一圈 outline、自己再变一次色,就是两道「选中」痕迹:「API Key 设置」
+// 那几个框上下挨着时,选中一个看着像选中了一整块。现在统一成「那条边变成 2px 绿」
+// —— border 1px + 紧贴内沿的 inset 1px。复选框太小,描边画进去等于没有提示,
+// 它们保留外圈 outline(这是无障碍底线,别一起删掉)。
+await send("Emulation.setFocusEmulationEnabled", { enabled: true });
+await goHome();
+// 先来一次真键盘,让 :focus-visible 进入键盘模态(下拉和复选框只认这个)
+await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+await sleep(200);
+const focusRings = await evalJs(`(async () => {
+  const G = '23, 96, 79';
+  const read = el => { const cs = getComputedStyle(el); return {
+    outline: cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) > 0 && cs.outlineColor.includes(G),
+    inset: cs.boxShadow.includes(G) && cs.boxShadow.includes('inset'),
+    glow: cs.boxShadow.includes(G) && !cs.boxShadow.includes('inset'),
+    border: parseFloat(cs.borderTopWidth) > 0 && cs.borderTopColor.includes(G) }; };
+  const focus = async el => { el.focus(); await new Promise(r => setTimeout(r, 320)); };
+  const out = {};
+  switchTab('search');
+  await new Promise(r => setTimeout(r, 400));
+  const sel = document.getElementById('f-topic');
+  await focus(sel); out.select = read(sel);
+  const q = document.getElementById('q');          // 边框画在 .searchbar 上
+  await focus(q); out.qSelf = read(q); out.qBar = read(q.closest('.searchbar'));
+  switchTab('gallery');
+  await new Promise(r => setTimeout(r, 500));
+  const gq = document.getElementById('g-q');       // 边框画在 .gallery-search 上
+  await focus(gq); out.gqSelf = read(gq); out.gqBox = read(gq.closest('.gallery-search'));
+  const cb = document.createElement('input');
+  cb.type = 'checkbox'; document.body.appendChild(cb);
+  await focus(cb); out.checkbox = read(cb); cb.remove();
+  return out;
+})()`);
+check("下拉聚焦不套外圈 outline", focusRings.select && !focusRings.select.outline, JSON.stringify(focusRings.select));
+check("下拉聚焦是 border + 内描边", focusRings.select?.border && focusRings.select?.inset, JSON.stringify(focusRings.select));
+check("容器画边的搜索框自己不再描一圈", !focusRings.qSelf?.inset && !focusRings.gqSelf?.inset,
+      JSON.stringify({ q: focusRings.qSelf, gq: focusRings.gqSelf }));
+check("这两个框的焦点由容器画成同一条边", focusRings.qBar?.border && focusRings.qBar?.inset
+      && focusRings.gqBox?.border && focusRings.gqBox?.inset, JSON.stringify({ bar: focusRings.qBar, box: focusRings.gqBox }));
+check("容器不再外发光", !focusRings.qBar?.glow && !focusRings.gqBox?.glow, JSON.stringify(focusRings.gqBox));
+check("复选框保留外圈焦点环", focusRings.checkbox?.outline, JSON.stringify(focusRings.checkbox));
+
+
+// ── 9. 问答的模型下拉收在输入框里 ──
+// 原来它单起一行浮在框外,看着是页面上一个孤立控件,跟「这次发送用哪个模型」的
+// 从属关系全靠位置猜。现在整个 .chat-inputbar 就是那个框:边画在它身上、文本域
+// 自己不再描边,下拉和发送贴在框内底部一行。
+await send("Emulation.setFocusEmulationEnabled", { enabled: false });
+await goHome();
+const composer = await evalJs(`(async () => {
+  switchTab('ask');
+  await new Promise(r => setTimeout(r, 600));
+  const bar = document.querySelector('.chat-inputbar');
+  const ta = document.getElementById('chat-input');
+  const sel = document.getElementById('ask-model');
+  const send = document.getElementById('chat-send');
+  const cs = getComputedStyle(bar), ts = getComputedStyle(ta);
+  const b = bar.getBoundingClientRect(), s = sel.getBoundingClientRect();
+  const t = ta.getBoundingClientRect(), k = send.getBoundingClientRect();
+  const pad = { t: parseFloat(cs.paddingTop), b: parseFloat(cs.paddingBottom) };
+  return {
+    sameBox: sel.closest('.chat-inputbar') === bar,
+    // 几何上真的在框内(含内边距),不是靠"父元素恰好是它"蒙混
+    inside: s.top >= b.top + pad.t - 1 && s.bottom <= b.bottom - pad.b + 1
+            && s.left >= b.left && s.right <= b.right,
+    below: s.top >= t.bottom - 1,              // 在文本域下面那一行,不是挤在右边
+    sendRight: k.left > s.right,                // 发送仍在右下角
+    barBorder: parseFloat(cs.borderTopWidth) > 0,
+    taBorder: parseFloat(ts.borderTopWidth),    // 文本域自己不再描边
+    barRadius: parseFloat(cs.borderTopLeftRadius),
+  };
+})()`);
+check("模型下拉在输入框这一个框里", composer.sameBox && composer.inside, JSON.stringify(composer));
+check("下拉在文本域下面、发送在它右边", composer.below && composer.sendRight, JSON.stringify(composer));
+check("边画在框上、文本域自己不再描一条", composer.barBorder && composer.taBorder === 0
+      && composer.barRadius > 0, JSON.stringify(composer));
+
+// 焦点也是一条边:框上 border + 内描边,文本域自己不描
+await send("Emulation.setFocusEmulationEnabled", { enabled: true });
+await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+const composerFocus = await evalJs(`(async () => {
+  const G = '23, 96, 79';
+  document.getElementById('chat-input').focus();
+  await new Promise(r => setTimeout(r, 320));
+  const bar = getComputedStyle(document.querySelector('.chat-inputbar'));
+  const ta = getComputedStyle(document.getElementById('chat-input'));
+  return { barEdge: bar.borderTopColor.includes(G) && bar.boxShadow.includes('inset'),
+           taQuiet: !ta.boxShadow.includes(G) && ta.outlineStyle === 'none' };
+})()`);
+check("聚焦时边由框来画", composerFocus.barEdge, JSON.stringify(composerFocus));
+check("文本域不再自己描一圈", composerFocus.taQuiet, JSON.stringify(composerFocus));
+
+// ── 10. 模型分配面板每一步都写着推荐哪个模型 ──
+// 后端按「档位」在当前实际可选的模型里挑出具体 id(写死 id 十有八九不在候选里)。
+// 这里把 /api/stages 换成定值再开面板:线上那份的模型清单随用户配置变,验不了。
+await send("Emulation.setFocusEmulationEnabled", { enabled: false });
+const stageRec = await evalJs(`(async () => {
+  const real = window.fetch;
+  const stub = {
+    stages: [
+      { key: 'gate', label: '管道 · 条目化判定', hint: '只看开头', providers: [],
+        configured: { provider: 'anthropic', model: 'claude-haiku-4-5' },
+        provider: 'anthropic', model: 'claude-haiku-4-5', source: 'config', ready: true,
+        recommend: 'anthropic:claude-haiku-4-5', rec_tier: '便宜档', rec_why: '量最大' },
+      { key: 'transcribe', label: '管道 · 拆条目', hint: '吃全文', providers: [],
+        configured: { provider: 'anthropic', model: 'claude-haiku-4-5' },
+        provider: 'anthropic', model: 'claude-haiku-4-5', source: 'config', ready: true,
+        recommend: 'anthropic:claude-sonnet-4-6', rec_tier: '主力档', rec_why: '质量上限在这步' },
+      { key: 'wiki', label: '管道 · wiki', hint: '综述', providers: [], configured: null,
+        provider: 'anthropic', model: 'claude-sonnet-4-6', source: 'default', ready: true,
+        recommend: '', rec_tier: '主力那一档(sonnet 这类)', rec_why: '给人读的文字' },
+      // 带单引号的型号名:中转站开什么名字是用户那侧给的,拼进 onclick 就断句
+      { key: 'skill_tag', label: '脚本 · 标签回填', hint: '批量', providers: [],
+        configured: null, provider: 'anthropic', model: 'claude-haiku-4-5',
+        source: 'default', ready: true,
+        recommend: "anthropic:weird'break", rec_tier: '便宜档', rec_why: '量大' },
+    ],
+    providers: [{ key: 'anthropic', label: 'Anthropic', has_key: true,
+                  models: ['claude-haiku-4-5', 'claude-sonnet-4-6'] }],
+  };
+  window.fetch = (u, o) => (String(u).split('?')[0].endsWith('/api/stages')
+    ? Promise.resolve(new Response(JSON.stringify(stub), { headers: { 'Content-Type': 'application/json' } }))
+    : real(u, o));
+  openStages();
+  await new Promise(r => setTimeout(r, 400));
+  const rows = [...document.querySelectorAll('#stages-list .stage-row')];
+  const rec = rows.map(r => r.querySelector('.stage-rec'));
+  const out = {
+    rows: rows.length,
+    everyRowHasRec: rec.every(Boolean),
+    // 推荐值跟当前一致 → 只说「已在用」,不给一个点了什么也不变的按钮
+    onText: rec[0]?.textContent.replace(/\\s+/g, '') || '',
+    onBtn: !!rec[0]?.querySelector('button'),
+    // 不一致 → 点一下就切过去,按钮带的是带家的 provider:model
+    offText: rec[1]?.textContent.replace(/\\s+/g, '') || '',
+    offBtn: rec[1]?.querySelector('button')?.dataset.rec || '',
+    // 一个具体 id 都挑不出来时退回档位说法,而不是留一行空推荐
+    noneText: rec[2]?.textContent.replace(/\\s+/g, '') || '',
+    noneBtn: !!rec[2]?.querySelector('button'),
+    // 推荐的 id 一定是下拉里真有的那个选项(不然「改用推荐」存进去也选不中)
+    pickIsOption: [...rows[1].querySelectorAll('option')].some(o => o.value === 'anthropic:claude-sonnet-4-6'),
+    mono: rec[0] && getComputedStyle(rec[0].querySelector('b')).fontFamily.toLowerCase(),
+  };
+  // 带引号的 id:按钮点得下去、送出去的还是原值(拼进 onclick 的写法在这里抛
+  // SyntaxError,一个请求都发不出去)
+  let sent = null;
+  const realSave = window.saveStage;
+  window.saveStage = (k, v) => { sent = [k, v]; };
+  try { rec[3].querySelector('button').click(); } catch (e) { sent = ['threw', String(e)]; }
+  window.saveStage = realSave;
+  out.quoted = sent;
+  closeStages();
+  window.fetch = real;
+  return out;
+})()`);
+check("每一步都写了推荐", stageRec.rows === 4 && stageRec.everyRowHasRec, JSON.stringify(stageRec));
+check("推荐写的是具体模型 id", stageRec.offText.includes('claude-sonnet-4-6')
+      && stageRec.offText.includes('质量上限在这步'), stageRec.offText);
+check("已经在用推荐就不给按钮", stageRec.onText.includes('已在用') && !stageRec.onBtn, stageRec.onText);
+check("没在用推荐给「改用推荐」且带供应商", stageRec.offBtn === 'anthropic:claude-sonnet-4-6',
+      stageRec.offBtn);
+check("挑不出具体 id 时退回档位说法", stageRec.noneText.includes('主力那一档') && !stageRec.noneBtn,
+      stageRec.noneText);
+check("推荐的 id 在下拉里真有这个选项", stageRec.pickIsOption === true, JSON.stringify(stageRec.pickIsOption));
+check("推荐里的模型 id 用等宽体", /mono|menlo|sf mono|consolas/.test(stageRec.mono || ""), stageRec.mono);
+check("带引号的模型 id 也能原样送出去", stageRec.quoted?.[0] === 'skill_tag'
+      && stageRec.quoted?.[1] === "anthropic:weird'break", JSON.stringify(stageRec.quoted));
+
 check("整轮没有页面报错", pageErrors.length === 0, pageErrors.slice(0, 4).join(" | "));
 
 console.log(`\n通过 ${oks.length} 项`);

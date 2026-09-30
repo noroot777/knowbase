@@ -11,18 +11,33 @@ function dismissWechatWelcome() {
   $('wechat-welcome').hidden = true;
   try { localStorage.setItem('kb-wechat-welcome-dismissed', '1'); } catch {}
 }
-function wechatConfigured(open) { closeWechatSetup(); open(); }
+function wechatConfigured(open, id) {
+  // 接入向导里点「API Key」「模型配置」:向导留在底下不关,新弹窗叠在它上面。
+  // 原来是先 closeWechatSetup() 再 open(),于是关掉上面那层之后人落回空白页面,
+  // 还得重新点开向导才能接着走完剩下的步骤。
+  const modal = $(id);
+  modal.classList.add('stacked');   // 先加类再打开:syncOverlays 按 z-index 认最上层
+  open();
+  syncOverlays();
+  const done = new MutationObserver(() => {
+    if (modal.style.display !== 'none') return;
+    done.disconnect();
+    modal.classList.remove('stacked');
+    refreshWechatSetup();           // 刚配完的 key / 模型,向导那两步的状态跟着更新
+  });
+  done.observe(modal, { attributes: true, attributeFilter: ['style'] });
+}
 
 function renderWechatSetup() {
   const s = wechatSetup || {}, busy = !!s.running || wechatRequest;
   const docker = s.deployment === 'docker';
-  $('wechat-title').textContent = docker ? '配置 Docker 知识库' : '接入你的微信';
-  $('wechat-welcome-title').textContent = docker ? '让文章进入你的知识库' : '让知识库接上你的微信';
+  $('wechat-title').textContent = docker ? '配置 Docker 知识库' : '接入你的绿泡泡';
+  $('wechat-welcome-title').textContent = docker ? '让文章进入你的知识库' : '让知识库接上你的绿泡泡';
   $('wechat-intro').textContent = docker ? '在 Mac 采集文章，在容器中索引、检索和分析。' : '从本机已同步的公众号推送中发现文章，收进知识库。';
-  $('wechat-source-title').textContent = docker ? '导入文章目录' : '接入本机微信';
+  $('wechat-source-title').textContent = docker ? '导入文章目录' : '接入本机绿泡泡';
   $('wechat-source-hint').textContent = docker ? '挂载 Mac 导出的 vault，再运行知识库索引' : '已有配置直接复用，缺 key 时自动准备获取工具';
   $('wechat-runtime-hint').textContent = docker ? '挂载与索引步骤见项目的 Docker 部署说明。' : '可以关闭窗口，任务继续在后台执行。获取和验证不需要大模型 API。';
-  $('wechat-status').textContent = s.message || '正在读取微信接入状态…';
+  $('wechat-status').textContent = s.message || '正在读取绿泡泡接入状态…';
   $('wechat-status').setAttribute('aria-busy', String(busy));
   $('wechat-provider-state').textContent = s.provider_ready ? '已配置' : '待配置';
   $('wechat-model-state').textContent = s.models_ready ? '已就绪' : '待配置';
@@ -30,7 +45,7 @@ function renderWechatSetup() {
   $('wechat-dot').className = s.ready ? 'on' : 'off';
   $('wechat-dot').textContent = s.running ? '…' : '●';
   $('wechat-check').disabled = busy || s.can_connect === false;
-  $('wechat-check').textContent = s.can_connect === false ? '请在 Mac 本机接入' : busy ? '正在处理…' : s.ready ? '重新检查连接' : '检查并接入微信';
+  $('wechat-check').textContent = s.can_connect === false ? '请在 Mac 本机接入' : busy ? '正在处理…' : s.ready ? '重新检查连接' : '检查并接入绿泡泡';
   const authorization = s.state === 'authorization_required' && !busy && s.can_connect !== false;
   $('wechat-authorization').hidden = !authorization;
   $('wechat-acquire').disabled = busy || !$('wechat-consent').checked;
@@ -48,8 +63,8 @@ function renderWechatSetup() {
   let dismissed = false;
   try { dismissed = localStorage.getItem('kb-wechat-welcome-dismissed') === '1'; } catch {}
   $('wechat-welcome').hidden = s.ready || dismissed;
-  $('wechat-welcome-status').textContent = s.can_connect === false ? 'Docker 已就绪。配置模型、挂载文章目录后即可建立知识索引；微信 key 在 Mac 本机获取。' : s.running ? s.message :
-    '配置供应商和模型后，接入本机微信，开始收集公众号文章。';
+  $('wechat-welcome-status').textContent = s.can_connect === false ? 'Docker 已就绪。配置模型、挂载文章目录后即可建立知识索引；绿泡泡 key 在 Mac 本机获取。' : s.running ? s.message :
+    '配置供应商和模型后，接入本机绿泡泡，开始收集公众号文章。';
 }
 
 async function refreshWechatSetup() {
@@ -101,6 +116,7 @@ async function useLocalWechat() {
   try {
     await loadPipeChannels();
     await changePipeChannel('wechat_local');
+    selectRunChannel('wechat_local');   // 下一次新建同步默认就抓本机这条通道
     closeWechatSetup(); switchTab('pipe');
     await refreshPipeSource();
   } catch (error) { $('wechat-error').textContent = error.message; }

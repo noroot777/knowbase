@@ -1,18 +1,18 @@
 // Workspace navigation, addressable filters and accessible overlay lifecycle.
-const WORKSPACE_TITLES = { gallery: '工具图鉴', search: '全文检索', ask: '知识问答', fav: '我的收藏', daily: '每日日报', pipe: '同步管理' };
+const WORKSPACE_TITLES = { gallery: '工具图鉴', search: '全文检索', ask: '知识问答', fav: '我的收藏', daily: '每日日报', pipe: '同步中心' };
 let activeTab = 'gallery';
 let restoringLocation = false;
 // 地址栏里那个 #tab 在 initWorkspace 收尾时才被读走(restoreWorkspaceLocation),
 // 而 loadGallery() 是和 initWorkspace 并排起跑的:它的接口先回来时
-// applyGalleryFilter() 会顺手写一次地址栏,把 #daily 覆盖成 #gallery,深链当场
-// 失效、落到图鉴上。两条路都是网络往返,谁先回来纯看运气(无头浏览器里实测
-// 四次红一次)。恢复之前一律不写地址栏:那时候地址栏才是权威。
-let locationRestored = false;
+// applyGalleryFilter() 会顺手写一次地址栏,把 #daily / #pipe 覆盖成 #gallery,
+// 深链当场失效、落到图鉴上。两条路都是网络往返,谁先回来纯看运气(无头浏览器里
+// 实测四次红一次)。首次定位完成之前一律不写地址栏:那时候地址栏才是权威。
+let workspaceLocated = false;
 const tabScroll = new Map();
 const compactNavigation = matchMedia('(max-width:900px)');
 
 function saveWorkspaceLocation(push = false) {
-  if (restoringLocation || !locationRestored) return;
+  if (restoringLocation || !workspaceLocated) return;
   const params = new URLSearchParams();
   if (activeTab === 'gallery') {
     for (const [key, value] of Object.entries(gState)) {
@@ -42,6 +42,7 @@ function restoreWorkspaceLocation() {
   const [tabName, query = ''] = location.hash.slice(1).split('?');
   const tab = Object.hasOwn(WORKSPACE_TITLES, tabName) ? tabName : 'gallery';
   restoringLocation = true;
+  workspaceLocated = true;   // 地址已经读完,之后各面板再存位置就不会盖掉它
   if (tab === 'gallery') {
     clearTimeout(gQTimer);
     const params = new URLSearchParams(query);
@@ -53,7 +54,6 @@ function restoreWorkspaceLocation() {
   }
   switchTab(tab);
   restoringLocation = false;
-  locationRestored = true;
 }
 
 function toggleNavigation(open) {

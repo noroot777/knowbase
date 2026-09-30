@@ -270,11 +270,11 @@ class ProfileCredentialStore:
         credential = self.records().get(str(biz).strip())
         if credential is None:
             raise ProfileCredentialUnavailableError(
-                "该公众号缺少 Mac 微信 Credential，请启动 wxdown-service 并在微信中打开该号文章"
+                "该公众号缺少 Mac 绿泡泡 Credential，请启动 wxdown-service 并在绿泡泡中打开该号文章"
             )
         if not credential.is_valid() and not allow_invalid:
             raise ProfileCredentialUnavailableError(
-                "该公众号的 Mac 微信 Credential 已被服务端判定失效，请在微信中重新打开一篇文章"
+                "该公众号的 Mac 绿泡泡 Credential 已被服务端判定失效，请在绿泡泡中重新打开一篇文章"
             )
         return credential
 
@@ -450,11 +450,11 @@ def fetch_profile_ext_page(
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict):
-        raise RuntimeError("微信 profile_ext 返回了异常数据")
+        raise RuntimeError("绿泡泡 profile_ext 返回了异常数据")
     ret = int(payload.get("ret") or 0)
     if ret == -3:
         raise ProfileCredentialUnavailableError(
-            "Mac 微信 Credential 已失效（no session），请重新打开该公众号文章"
+            "Mac 绿泡泡 Credential 已失效（no session），请重新打开该公众号文章"
         )
     if ret != 0:
         raise RuntimeError(

@@ -141,6 +141,26 @@ function stageNow(st) {
     + ` · ${esc(st.provider)} · ${note}${tail}</div>`;
 }
 
+// 推荐那行:后端按「档位」在当前实际可选的模型里挑出来的具体 id + 一句为什么。
+// 挑不出来(那家没配 key、中转站只开了别的型号)时退回档位说法,总得说点能照着
+// 做的东西——只写「推荐主力档」而不指到一个选项,面板上就是一句废话。
+function stageRec(st) {
+  if (!st.rec_why) return '';
+  const cur = st.provider && st.model ? `${st.provider}:${st.model}` : '';
+  const pick = st.recommend || '';
+  const on = pick && pick === cur;
+  const what = pick ? `<b>${esc(modelLabel(pick))}</b>` : esc(st.rec_tier || '');
+  // 模型 id 走 data-* 读到运行时,不拼进 onclick 的 JS 字面量里:esc() 是 HTML 属性
+  // 转义,`&#39;` 在属性值里会被解回真正的单引号 —— 一个带引号的 id(中转站的型号
+  // 名是用户那侧给的)就把 onclick 断成 `saveStage('wiki','a'break')`,点下去只抛
+  // SyntaxError、什么也不存。阶段 key 是 STAGES 里的固定值,照旧内联。
+  const act = pick && !on
+    ? ` <button class="text-button" data-rec="${esc(pick)}"`
+      + ` onclick="saveStage('${esc(st.key)}', this.dataset.rec)">改用推荐</button>`
+    : (on ? ' · 已在用' : '');
+  return `<div class="stage-rec">推荐:${what} · ${esc(st.rec_why)}${act}</div>`;
+}
+
 function stageRow(st, providers) {
   const locked = st.source === 'env' && !st.configured;
   return `<div class="stage-row">
@@ -153,6 +173,7 @@ function stageRow(st, providers) {
       ${stageOptions(st, providers)}
     </select>
     ${stageNow(st)}
+    ${stageRec(st)}
   </div>`;
 }
 
@@ -287,11 +308,10 @@ async function fetchModels(p) {
     const cur = await fetch('/api/keys').then(r => r.json()).then(d => d.keys[p].models || []);
     const box = $('models-' + p + '-box');
     box.innerHTML = d.models.map(id =>
-      `<label style="display:block;font-size:13px;padding:2px 0">`
-      + `<input type="checkbox" value="${id}"${cur.includes(id) ? ' checked' : ''}> ${id}</label>`
+      `<label><input type="checkbox" value="${esc(id)}"${cur.includes(id) ? ' checked' : ''}> ${esc(id)}</label>`
     ).join('') || '<span class="hint">中转站没返回模型</span>';
-    box.style.display = '';
-    $('models-' + p + '-save').style.display = d.models.length ? '' : 'none';
+    box.hidden = false;
+    $('models-' + p + '-save').hidden = !d.models.length;
     msg.textContent = `共 ${d.models.length} 个,勾选后保存`;
   } catch (e) { msg.textContent = '拉取失败: ' + e.message; }
 }

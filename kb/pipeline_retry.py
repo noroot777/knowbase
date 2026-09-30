@@ -152,7 +152,7 @@ def retry_failed_plan() -> list[str]:
 def _run_retry_failed(plan: list[str], crawl_filter: dict | None = None) -> None:
     try:
         runners = {"crawl": lambda: _run_crawl(crawl_filter),
-                   "export": lambda: _run_export((crawl_filter or {}).get("channel")),
+                   "export": lambda: _run_export(crawl_filter),
                    "refill": _run_refill, "index": _run_index,
                    "extract": _run_extract, "projects": _run_projects, "wiki": _run_wiki}
         for stage in plan:

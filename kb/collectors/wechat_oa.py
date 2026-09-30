@@ -96,7 +96,7 @@ class WeChatOACollector:
     channel_label = "凭证抓取（原通道）"
     cli_channel = "profile_ext"
     channel_hint = "用各公众号的文章凭证获取列表；同步前通过 wxdown 准备凭证。"
-    range_hint = ("提示:微信服务端一般只保留近 30 天可翻页的历史,"
+    range_hint = ("提示:绿泡泡服务端一般只保留近 30 天可翻页的历史,"
                   "跨度过大的旧文章可能拉不到。")
 
     # ── 状态 ────────────────────────────────────────────────────────────────
@@ -243,10 +243,10 @@ class WeChatOACollector:
         if last.get("missing_accounts"):
             count = len(last["missing_accounts"])
             if last.get("unattributed_messages"):
-                coverage += (f",未匹配到本机推送 {count} 个号（若未关注或未同步，请在微信关注并同步；"
+                coverage += (f",未匹配到本机推送 {count} 个号（若未关注或未同步，请在绿泡泡关注并同步；"
                              f"另有 {last['unattributed_messages']} 条无法确认归属的推送，可能属于其中某个号）")
             else:
-                coverage += f",本机暂无推送 {count} 个号（在微信关注并同步后可采集）"
+                coverage += f",本机暂无推送 {count} 个号（在绿泡泡关注并同步后可采集）"
         if last.get("coverage_unknown_accounts"):
             coverage += f",推送覆盖待核实 {len(last['coverage_unknown_accounts'])} 个号"
         if last.get("unreadable_accounts"):
@@ -265,7 +265,7 @@ class WeChatOACollector:
             # 一份文章凭证都没有,采集器直接没开跑。login 那套扫码凭证救不了它
             _stage("crawl", "error",
                    "一份文章凭证都没有:先 `./kb.sh prep` 起 wxdown,"
-                   "再在 Mac 微信里打开各号的一篇文章",
+                   "再在 Mac 绿泡泡里打开各号的一篇文章",
                    failures=failures)
         elif code != 0:
             detail = (f"新增 {new} 篇,失败 {len(errors)} 项" if errors

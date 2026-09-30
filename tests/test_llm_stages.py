@@ -231,6 +231,49 @@ class StageTests(_Sandbox):
         self.assertEqual(rows["extract"]["source"], "default")
         self.assertEqual(rows["agent"]["providers"], ["anthropic"])
 
+    # ── 推荐档位 ───────────────────────────────────────────────────────
+    # 面板上那行「推荐」必须指到一个**下拉里真有的选项**:注册表里只写档位、
+    # 由 recommended() 在当前实际可选的模型里挑,就是为了不出现「推荐一个这台
+    # 机器上根本选不到的 id」——那行字点了「改用推荐」也选不中,等于没推荐。
+    def test_recommend_is_always_a_dropdown_option(self):
+        pool = llm.model_pool()
+        for st in llm_stages.STAGES:
+            pick = llm_stages.recommended(st)
+            self.assertTrue(pick, f"{st.key} 挑不出推荐")
+            prov, _, model = pick.partition(":")
+            self.assertIn(model, pool.get(prov, []), st.key)
+            if st.providers:                      # agent 限 Anthropic,别推到别家
+                self.assertIn(prov, st.providers, st.key)
+
+    # 轻活推便宜档、重活推主力档:两边挑出来的不能是同一个
+    def test_recommend_splits_cheap_and_main(self):
+        cheap = llm_stages.recommended(llm_stages.stage("gate"))
+        main = llm_stages.recommended(llm_stages.stage("transcribe"))
+        self.assertEqual(cheap, "anthropic:claude-haiku-4-5")
+        self.assertEqual(main, "anthropic:claude-sonnet-4-5")
+
+    # 已配 key 的那家优先:推一个用不了的型号等于没推荐
+    def test_recommend_prefers_provider_with_key(self):
+        self.write({"anthropic": {"models": ["claude-sonnet-4-5"]},       # 没 key
+                    "openai": {"key": "sk-o", "models": ["gpt-5.5"]}})
+        self.assertEqual(llm_stages.recommended(llm_stages.stage("wiki")), "openai:gpt-5.5")
+
+    # 一家都没配 key 时照样给一条建议(而不是空着):候选池退回全集
+    def test_recommend_survives_without_any_key(self):
+        self.write({"anthropic": {"models": ["claude-sonnet-4-5"]},
+                    "openai": {"models": ["gpt-5.5"]}})
+        self.assertEqual(llm_stages.recommended(llm_stages.stage("wiki")),
+                         "anthropic:claude-sonnet-4-5")
+
+    # 候选里一个档位关键词都不沾时返回空串,面板据此退回档位说法
+    def test_recommend_empty_when_nothing_matches(self):
+        self.write({"anthropic": {"key": "sk-a", "models": ["mystery-1"]},
+                    "openai": {"key": "sk-o", "models": ["mystery-2"]}})
+        self.assertEqual(llm_stages.recommended(llm_stages.stage("wiki")), "")
+        row = {r["key"]: r for r in llm_stages.describe()}["wiki"]
+        self.assertEqual(row["recommend"], "")
+        self.assertTrue(row["rec_tier"] and row["rec_why"])   # 还有话可说
+
 
 class ConcurrentWriteTests(_Sandbox):
     """secrets.json 是整文件读改写,并发保存不能互相吃掉。

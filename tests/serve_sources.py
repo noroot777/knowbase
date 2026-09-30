@@ -36,8 +36,8 @@ def main():
         # Keep source status checks in this sandbox independent of the user's WeChat process.
         original_status=pipeline.source_status
         pipeline.source_status=lambda channel=None: (original_status(channel) if channel in reg.KINDS else
-            dict(online=False,ready=False,label='微信同步',channel=channel or 'wechat_oa',
-                 channel_label='微信同步',message='隔离测试环境',hint='',range_hint=''))
+            dict(online=False,ready=False,label='绿泡泡同步',channel=channel or 'wechat_oa',
+                 channel_label='绿泡泡同步',message='隔离测试环境',hint='',range_hint=''))
         pipeline.pending_counts=lambda *a,**k: {}
         from kb.server import app
         import uvicorn

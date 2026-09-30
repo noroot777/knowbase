@@ -1,5 +1,5 @@
 // 每日日报:定时设置、立即生成、历史日报的阅读。
-// 生成过程借用同步管道(每个通道跑一趟),细节留在同步管理里看;这里只展示
+// 生成过程借用同步管道(每个通道跑一趟),细节留在同步中心里看;这里只展示
 // "现在跑到哪个来源了"和结果,同一件事不做两套进度展示。
 let dailySettings = null, dailyChannels = [], dailyReports = [], dailyWindow = null;
 let dailyCurrent = '', dailyState = null, dailyTimer = null;

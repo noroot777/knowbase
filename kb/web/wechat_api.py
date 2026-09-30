@@ -12,14 +12,14 @@ def local_request(request: Request):
     local = {"127.0.0.1", "::1", "localhost"}
     # Check Host as well as peer to prevent DNS rebinding. Never trust forwarded headers.
     if not request.client or request.client.host not in local or request.url.hostname not in local:
-        raise HTTPException(403, "微信接入仅允许从运行项目的本机访问。")
+        raise HTTPException(403, "绿泡泡接入仅允许从运行项目的本机访问。")
     origin = request.headers.get("origin")
     if origin and origin != str(request.base_url).rstrip("/"):
-        raise HTTPException(403, "不允许跨站发起微信接入。")
+        raise HTTPException(403, "不允许跨站发起绿泡泡接入。")
     if request.headers.get("sec-fetch-site") == "cross-site":
-        raise HTTPException(403, "不允许跨站发起微信接入。")
+        raise HTTPException(403, "不允许跨站发起绿泡泡接入。")
     if request.method == "POST" and request.headers.get("x-kb-wechat-action") != "1":
-        raise HTTPException(403, "请从本项目的微信接入页面启动操作。")
+        raise HTTPException(403, "请从本项目的绿泡泡接入页面启动操作。")
 
 
 router = APIRouter()

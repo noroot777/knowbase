@@ -80,9 +80,14 @@ function renderPipeState(s) {
   else if (failed) title = `${label}结束，${failed} 个步骤需处理`;
   else if (result.finished_at) title = skipped ? `${label}结束，部分步骤已跳过` : planned.length && completed === planned.length ? `${label}已完成` : `${label}结束，本次步骤未全部完成`;
   if ($('pipe-state-title').textContent !== title) $('pipe-state-title').textContent = title;
-  const filter = result.crawl_filter || {}, channel = pipeChannels.find(c => c.id === filter.channel);
-  $('pipe-running-channel').textContent = filter.channel ? `${s.running ? '本次' : '上次'}通道：${channel?.label || filter.channel}` : '选择来源后开始一次同步';
-  $('pipe-run-scope').textContent = filter.channel ? `${filter.accounts?.length ? filter.accounts.length + ' 个指定公众号' : '全部订阅'} · ${filter.since_date ? filter.since_date + ' 至 ' + filter.until_date : '不限时间'}${result.finished_at ? ' · ' + result.finished_at + ' 结束' : ''}` : '';
+  const scopes = pipeRunScopes(result.crawl_filter), filter = result.crawl_filter || {};
+  $('pipe-running-channel').textContent = scopes.length
+    ? `${s.running ? '本次' : '上次'}来源：${scopes.map(scope => channelLabel(scope.channel)).join(' + ')}`
+    : '选择来源后开始一次同步';
+  const range = filter.since_date ? filter.since_date + ' 至 ' + filter.until_date : '不限时间';
+  const scope = scopes.map(item => `${scopes.length > 1 ? channelLabel(item.channel) + ' ' : ''}${item.accounts?.length ? item.accounts.length + ' 个指定订阅' : '全部订阅'}`).join(' · ');
+  $('pipe-run-scope').textContent = scopes.length
+    ? `${scope} · ${range}${result.finished_at ? ' · ' + result.finished_at + ' 结束' : ''}` : '';
   $('pipe-progress-label').textContent = planned.length ? `${completed} / ${planned.length} 完成` : '—';
   const duration = pipeDuration(result.started_at, s.running ? '' : result.finished_at);
   $('pipe-elapsed').textContent = duration ? `${s.running ? '已运行' : '耗时'} ${duration}` : '';

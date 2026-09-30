@@ -32,6 +32,7 @@ from kb.pipeline_stages import (
     _run_index,
     _run_projects,
     _run_wiki,
+    crawl_channels,
     source_pending,
     source_status,
     source_targets,
@@ -54,6 +55,8 @@ from kb.pipeline_state import (
 # 对外门面:Web 层只 import 本模块,不直接碰拆出去的三个子模块
 __all__ = [
     "STAGES",
+    "channel_filter",
+    "crawl_channels",
     "get_state",
     "load_last_run",
     "load_schedule",
@@ -108,7 +111,7 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
             elif s == "crawl":
                 _run_crawl(crawl_filter)
             elif s == "export":
-                _run_export((crawl_filter or {}).get("channel"))
+                _run_export(crawl_filter)
             elif s == "index":
                 if pre_thread and pre_thread.is_alive():
                     _stage("index", "running", "等存量提取收尾(避免并发写库)")
@@ -139,7 +142,8 @@ def start_pipeline(stages: list[str] | None = None,
                    crawl_filter: dict | None = None) -> str:
     """启动管道线程。返回这一轮的 run id;已在跑返回空串(照旧可以当布尔用)。
 
-    crawl_filter 见 _run_crawl:限定来源目标 + 时间段的范围抓取。
+    crawl_filter 见 _run_crawl:限定来源目标 + 时间段的范围抓取;
+    同时抓几个来源时来源列表在 channels 里(见 crawl_channels)。
 
     返回 id 而不是 True,是为了让调用方**原子地**拿到"我起的是哪一轮":
     事后再去读状态的话,我们那一轮可能已经跑完、另一项同步已经接替,读回来
@@ -148,6 +152,9 @@ def start_pipeline(stages: list[str] | None = None,
     wanted = [s for s in (stages or list(STAGES)) if s in STAGES]
     crawl_filter = deepcopy(crawl_filter or {})
     crawl_filter["channel"] = active_collector(crawl_filter.get("channel")).name
+    # 每个来源都按注册表认一遍名字:认不出来在这里就抛,别等跑到一半才发现
+    for scope in crawl_filter.get("channels") or []:
+        scope["channel"] = active_collector(scope.get("channel")).name
     with _lock:
         if _state["running"]:
             return ""
@@ -176,24 +183,50 @@ _sched_started = False
 _schedule_lock = threading.RLock()
 
 
+def _schedule_channels(value) -> list[str]:
+    """定时配置里的来源列表。旧配置只有一个 channel,读成单元素列表。"""
+    names, seen = [], set()
+    for name in (value or []):
+        resolved = active_collector(name).name
+        if resolved not in seen:
+            seen.add(resolved)
+            names.append(resolved)
+    return names
+
+
+def channel_filter(channels: list[str]) -> dict:
+    """把来源名列表做成 crawl_filter。只有一个来源时写成老样子的 channel。"""
+    scopes = [{"channel": name, "accounts": []} for name in channels]
+    crawl_filter: dict = {"channel": scopes[0]["channel"] if scopes else ""}
+    if len(scopes) > 1:
+        crawl_filter["channels"] = scopes
+    return crawl_filter
+
+
 def load_schedule() -> dict:
     try:
         d = json.loads(_SCHED_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         d = {}
+    channels = [c for c in (d.get("channels") or [d.get("channel")]) if c] \
+        or [active_collector().name]
     return {"enabled": bool(d.get("enabled")),
             "time": d.get("time") or "07:30",
-            "channel": d.get("channel") or active_collector().name,
+            "channel": channels[0],
+            "channels": channels,
             "last_fired": d.get("last_fired") or "",
             "next_run": d.get("next_run") or ""}
 
 
-def save_schedule(enabled: bool, time_str: str, channel: str | None = None) -> dict:
+def save_schedule(enabled: bool, time_str: str,
+                  channels: list[str] | str | None = None) -> dict:
     if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", time_str or ""):
         raise ValueError(f"时间格式应为 HH:MM,收到 {time_str!r}")
+    if isinstance(channels, str):
+        channels = [channels]
     with _schedule_lock:
         cur = load_schedule()
-        channel = active_collector(channel or cur["channel"]).name
+        names = _schedule_channels(channels) or _schedule_channels(cur["channels"])
         now = datetime.now()
         hour, minute = map(int, time_str.split(':'))
         next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -201,7 +234,10 @@ def save_schedule(enabled: bool, time_str: str, channel: str | None = None) -> d
         # Keep last_fired truthful, and allow at most one daily run per calendar day.
         if next_run <= now or cur['last_fired'] == now.strftime('%Y-%m-%d'):
             next_run += timedelta(days=1)
-        cur.update({"enabled": bool(enabled), "time": time_str, "channel": channel,
+        # channel 与 channels 一起写:旧版本的读取方(以及还没升级的状态文件消费者)
+        # 认前者,多来源时它就是第一个。
+        cur.update({"enabled": bool(enabled), "time": time_str,
+                    "channel": names[0], "channels": names,
                     "next_run": next_run.isoformat(timespec='minutes') if enabled else ''})
         _SCHED_FILE.parent.mkdir(parents=True, exist_ok=True)
         _SCHED_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
@@ -233,7 +269,9 @@ def _scheduler_tick() -> None:
         due = (now.isoformat(timespec='minutes') >= s['next_run'] if s.get('next_run')
                else now.strftime('%H:%M') >= s['time'])
         if s["enabled"] and due and s["last_fired"] != today:
-            if start_pipeline(None, crawl_filter={"channel": s["channel"]}):
+            # channels 是新写法;读到的要是旧配置(或还没升级的调用方给的 dict)就退回单个 channel
+            channels = [c for c in (s.get("channels") or [s.get("channel")]) if c]
+            if start_pipeline(None, crawl_filter=channel_filter(channels)):
                 _mark_fired(today)
                 _log(f"定时任务触发全流程同步(每日 {s['time']})")
                 return

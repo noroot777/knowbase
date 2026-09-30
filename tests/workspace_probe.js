@@ -74,9 +74,9 @@ async page => {
     await page.goto(origin + '/?workspace-test=' + Date.now() + '#gallery');
     await page.locator('.gcard').first().waitFor();
     check('首屏增量渲染', await page.locator('.gcard').count() === 48);
-    check('桌面侧栏宽度为 72px', await page.locator('#sidebar').evaluate(el=>el.getBoundingClientRect().width===72));
+    check('桌面侧栏宽度跟 --sidebar-width 一致', await page.locator('#sidebar').evaluate(el=>el.getBoundingClientRect().width===parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width'))));
     check('桌面不再显示顶部横条', !await page.locator('#topbar').isVisible());
-    check('内容区域紧随窄侧栏', await page.locator('#main-content').evaluate(el=>el.getBoundingClientRect().left===72));
+    check('内容区域紧随窄侧栏', await page.locator('#main-content').evaluate(el=>el.getBoundingClientRect().left===parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width'))));
     check('三个图谱入口直接可达', await page.locator('.explore-links a:visible').count()===3);
     await page.locator('.quick-search').click();
     check('窄栏搜索仍可点击并定位输入框', await page.locator('#g-q').evaluate(el=>el===document.activeElement));

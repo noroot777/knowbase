@@ -176,17 +176,34 @@ body.chat-mode { padding-bottom: 28px; }
 }
 .chat-suggest:hover { background: var(--accent-soft); color: var(--brand-deep); }
 
+/* 输入区整体就是那一个输入框:文本域占满上面一行,模型下拉贴着框内左下角、
+   发送按钮在右下角。下拉原来是框外单起一行的,看着像页面上一个孤立控件,
+   它跟「这次发送用哪个模型」的从属关系全靠位置猜;收进框里才是同一件事。 */
 .chat-inputbar {
-  display: flex; gap: 9px; align-items: flex-end; padding: 12px 14px;
-  border-top: 1px solid var(--line);
+  display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center;
+  margin: 4px 14px 14px; padding: 8px 10px 8px 12px;
+  border: 1.5px solid var(--line); border-radius: 14px; background: var(--card);
+  transition: border-color .15s;
+}
+/* 焦点边画在框上,里面的 textarea 不再自己画一条 —— 两条就是两道「选中」痕迹,
+   和 base.css 那次「outline 收进框里」是同一条口径。:has 而不是 :focus-within:
+   Tab 到模型下拉或发送按钮时这个框不该跟着亮,它们各有自己的焦点提示。 */
+.chat-inputbar:has(#chat-input:focus-visible) {
+  border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent);
 }
 #chat-input {
-  flex: 1; padding: 10px 14px; font: inherit; font-size: 14.5px; line-height: 1.5;
-  border: 1.5px solid var(--line); border-radius: 12px; background: var(--bg);
-  outline: none; resize: none; max-height: 150px;
+  flex: 1 1 100%; min-width: 0; padding: 5px 2px; font: inherit; font-size: 14.5px;
+  line-height: 1.5; border: 0; border-radius: 0; background: transparent;
+  outline: none; box-shadow: none; resize: none; max-height: 150px;
 }
-#chat-input:focus { border-color: var(--accent); }
-#chat-send { padding: 10px 20px; }
+/* 框内的下拉是「顺手换一下」,不是一个要被看见的表单控件:透明边、小一号字。
+   只清底色不用 background 简写 —— 简写会连 base.css 那个自绘箭头一起清掉。 */
+#ask-model {
+  margin-right: auto; max-width: 240px; font-size: 11.5px;
+  background-color: transparent; border-color: transparent;
+}
+#ask-model:focus-visible { border-color: var(--brand); }
+#chat-send { padding: 7px 18px; }
 .refs { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); font-size: 13px; }
 .refs a { color: var(--accent); text-decoration: none; }
 .cite {
@@ -241,3 +258,43 @@ body.chat-mode { padding-bottom: 28px; }
 .stage-now { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); margin-top: -4px; }
 .stage-now b { font-family: var(--font-mono); font-weight: 500; color: var(--ink); }
 .stage-now.warn { color: var(--danger); }
+/* 推荐那行:跟「当前」同一档灰,但左边压一条绿线区分开 —— 一个说的是现状,
+   一个说的是建议,两行都是小灰字的话看上去像同一句话被拆成两截。 */
+.stage-rec {
+  grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); line-height: 1.6;
+  padding: 5px 0 5px 9px; border-left: 2px solid var(--brand-soft);
+}
+.stage-rec b { font-family: var(--font-mono); font-weight: 500; color: var(--brand-deep); }
+.stage-rec .text-button { font-size: 11.5px; min-height: 0; padding: 0; vertical-align: baseline; }
+
+/* ── API Key 弹窗 ─────────────────────────────────────────────
+   一家供应商一块:标题行(名字 + 当前状态)、两个输入框、拉取模型那一行。
+   原来 key/base_url 两个框直接上下贴着、还各自带一串内联 style,看上去
+   就是两块砖;这里把间距、等宽字体和分块边界一次说清。 */
+/* 说明里的路径/片段是行内的。base.css 那条 `.modal code{display:block}` 是给
+   「整块命令,点一下复制」用的,套到这段说明上会把一句话切成四个灰块,
+   而灰块在这个弹窗里跟输入框长得一模一样,人根本分不清哪个能填。 */
+#keys-modal .hint code {
+  display: inline; margin: 0; padding: 1px 6px; border-radius: 5px;
+  font-size: 12px; cursor: text; word-break: normal; overflow-wrap: anywhere;
+}
+.key-block { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.key-block + .key-block { margin-top: 12px; }
+.key-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; margin-bottom: 10px; }
+.key-head b { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.key-head span { font-size: 12px; color: var(--muted); }
+.key-fields { display: grid; gap: 8px; }
+/* key 和 base_url 都是标识符,等宽体下位数对得齐,也一眼看出是不是粘漏了 */
+.key-fields input { width: 100%; font-family: var(--font-mono); font-size: 12.5px; }
+.key-models { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
+.key-models button { min-height: 30px; padding: 4px 12px; font-size: 12px; }
+.key-models .hint { font-size: 12px; }
+.key-model-box {
+  margin-top: 8px; max-height: 150px; overflow: auto; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--paper);
+}
+.key-model-box label { display: block; font-size: 13px; padding: 2px 0; }
+.key-model-save { margin-top: 8px; min-height: 30px; padding: 4px 12px; font-size: 12px; }
+/* 保存结果就在按钮旁边说,别顶在弹窗最底下让人再找一眼 */
+.keys-footer { display: flex; gap: 8px; align-items: center; margin-top: 16px; }
+.keys-footer #keys-msg { flex: 1; min-width: 0; font-size: 12.5px; }

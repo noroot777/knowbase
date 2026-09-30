@@ -5,7 +5,7 @@ async page => {
   const check = (name, ok) => { if (!ok) throw new Error(name); checks.push(name); };
   const onError = error => errors.push(error.message);
   page.on('pageerror', onError);
-  let status = { state: 'unchecked', message: '检查本机微信，已有可用配置会直接复用。',
+  let status = { state: 'unchecked', message: '检查本机绿泡泡，已有可用配置会直接复用。',
     running: false, provider_ready: true, models_ready: true };
   const base = page.url().match(/^https?:\/\/[^/]+/)[0];
   const respond = (route, data, code = 200) => route.fulfill({
@@ -33,7 +33,7 @@ async page => {
       '/api/models': {models:[],default:''},
       '/api/keys': {keys:{anthropic:{set:true},openai:{set:false}}},
       '/api/mcp/status': {config:'{}',command:'',tools:[],cli_available:false},
-      '/api/pipeline/channels': {default:'wechat_oa',channels:[{id:'wechat_oa',label:'凭证抓取'},{id:'wechat_local',label:'微信本地数据库'}]},
+      '/api/pipeline/channels': {default:'wechat_oa',channels:[{id:'wechat_oa',label:'凭证抓取'},{id:'wechat_local',label:'绿泡泡本地数据库'}]},
       '/api/pipeline/schedule': {enabled:false,time:'07:30'},
       '/api/pipeline/status': {running:false,stages:{},source:{online:true,ready:true},log:[]},
       '/api/pipeline/pending': {}, '/api/pipeline/accounts': {accounts:['测试公众号']},
@@ -62,13 +62,27 @@ async page => {
     await page.getByRole('button',{name:'完成首次配置'}).click();
     check('刷新后恢复后台进度', (await page.locator('#wechat-status').textContent()).includes('系统授权'));
     status = { ...status, state:'ready', running:false, ready:true,
-      confirmation_token:undefined, message:'微信数据库已验证可读，可以开始同步。' };
+      confirmation_token:undefined, message:'绿泡泡数据库已验证可读，可以开始同步。' };
     await page.locator('#wechat-next').waitFor({state:'visible'});
     check('成功后首次提示收起', await page.locator('#wechat-welcome').isHidden());
     await page.locator('#wechat-next').click();
     check('继续同步切换本地通道', await page.locator('#pipe-channel-current').inputValue() === 'wechat_local');
-    check('打开同步管理页', await page.locator('#pipepanel').isVisible());
-    await page.getByRole('button',{name:'检查并接入微信',exact:true}).click();
+    check('打开同步中心', await page.locator('#pipepanel').isVisible());
+    await page.getByRole('button',{name:'检查并接入绿泡泡',exact:true}).click();
+    // 向导里点 API Key / 模型配置:新窗口叠在向导之上,关掉它向导必须还开着
+    // (原来是先关向导再开新窗口,关掉新窗口就落回空白页面,得重新点开向导)
+    await page.locator('#wechat-modal').waitFor({state:'visible'});
+    await page.getByRole('button',{name:'API Key',exact:true}).click();
+    await page.locator('#keys-modal').waitFor({state:'visible'});
+    check('叠加的 API Key 弹窗接住键盘焦点', await page.evaluate(()=>overlayTop?.id==='keys-modal' && document.getElementById('keys-modal').contains(document.activeElement)));
+    check('向导留在底下不关', await page.locator('#wechat-modal').isVisible());
+    await page.keyboard.press('Escape');
+    check('关掉 API Key 后回到向导', await page.locator('#keys-modal').isHidden() && await page.locator('#wechat-modal').isVisible() && await page.evaluate(()=>overlayTop?.id==='wechat-modal'));
+    await page.getByRole('button',{name:'模型配置',exact:true}).click();
+    await page.locator('#stages-modal').waitFor({state:'visible'});
+    await page.keyboard.press('Escape');
+    check('关掉模型配置后回到向导', await page.locator('#stages-modal').isHidden() && await page.locator('#wechat-modal').isVisible());
+    check('叠加类用完就摘掉', await page.evaluate(()=>!document.getElementById('keys-modal').classList.contains('stacked') && !document.getElementById('stages-modal').classList.contains('stacked')));
     await page.setViewportSize({width:390,height:844});
     await page.locator('#wechat-modal summary').click();
     check('手机弹窗内容无横向溢出', await page.locator('.wechat-dialog').evaluate(el => el.scrollWidth <= el.clientWidth + 1));

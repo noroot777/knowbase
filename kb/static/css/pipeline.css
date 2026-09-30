@@ -71,7 +71,27 @@
 .pipe-setup .row { margin-bottom: 20px; }
 .pipe-setup .hint { font-size: 13px; }
 .pipe-setup label { font-size: 14px; }
-#pipe-channel, #pipe-acct-search { display: block; width: 100%; max-width: 100%; margin: 7px 0; font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; color: var(--ink); background: white; }
+#pipe-acct-search { display: block; width: 100%; max-width: 100%; margin: 7px 0; }
+/* 来源多选:一次同步可以勾好几个来源,所以这里是一组勾选块而不是一个下拉 */
+.pipe-channel-list { display: grid; gap: 8px; margin: 8px 0; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+.pipe-channel {
+  display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+}
+.pipe-channel:hover { border-color: var(--brand); }
+.pipe-channel:has(input:checked) { border-color: var(--brand); background: var(--brand-tint); }
+.pipe-channel input { flex-shrink: 0; width: 16px; height: 16px; margin-top: 2px; accent-color: var(--brand); }
+.pipe-channel b { display: block; font-size: 13.5px; font-weight: 600; }
+.pipe-channel small { display: block; margin-top: 3px; font-size: 12px; color: var(--muted); line-height: 1.5; }
+/* 订阅按来源分区:哪个号属于哪个来源必须一眼看出来,否则两边同名就分不清了 */
+.pipe-acct-group + .pipe-acct-group { border-top: 1px solid var(--line); }
+.pipe-acct-group-head {
+  display: flex; justify-content: space-between; gap: 10px; align-items: baseline;
+  padding: 8px 12px; background: var(--paper); position: sticky; top: 0;
+}
+.pipe-acct-group-head b { font-size: 12.5px; font-weight: 600; }
+.pipe-acct-group-head span { font-size: 12px; color: var(--muted); }
+.pipe-schedule .pipe-channel-list { flex-basis: 100%; margin: 0; }
 #pipe-range-btn { margin-left: 12px; font-size: 14px; border: 1px solid var(--line); }
 #pipe-range-hint { margin-top: 8px; }
 #pipe-range-pop { margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
@@ -92,7 +112,9 @@
 .pipe-acct input { flex-shrink: 0; width: 16px; height: 16px; accent-color: var(--brand); }
 .pipe-acct-empty { padding: 18px; font-size: 13px; color: var(--muted); }
 .pipe-acct-empty button { margin-top: 8px; }
-.pipe-setup-footer { padding: 16px 24px 20px; border-top: 1px solid var(--line); background: white; flex-shrink: 0; }
+/* footer 是常驻操作条,任何情况下都得点得到:fieldset 当滚动容器时不裁剪
+   sticky 的分区头(实测手机上第二个分区头正好压在「暂不执行」上),所以这里提一层。 */
+.pipe-setup-footer { position: relative; z-index: 1; padding: 16px 24px 20px; border-top: 1px solid var(--line); background: var(--card); flex-shrink: 0; }
 .pipe-setup-footer > div:last-child { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
 @media (max-width: 1180px) { .pipe-workbench { grid-template-columns: 1fr; } #pipe-log-box { height: 280px; } .pipe-source-actions { max-width: 100%; } .pipe-source { flex-wrap: wrap; } }
 @media (max-width: 600px) {
@@ -112,6 +134,12 @@
   .pipe-custom-range button { grid-column: 1/-1; }
   .pipe-acct-heading { align-items: flex-start; flex-direction: column; gap: 3px; }
   .pipe-acct-heading > span { align-self: flex-end; }
+  /* 来源多选块让弹窗比以前高一截,手机上把各段间距和订阅列表一起收紧,
+     否则断线提示一出来就顶到 90vh 上限、底部按钮要滚才点得到。 */
+  .pipe-setup .row { margin-bottom: 14px; }
+  .pipe-channel-list { gap: 6px; margin: 6px 0; }
+  .pipe-channel { padding: 9px 11px; }
+  #pipe-acct-list { max-height: 190px; }
   .pipe-schedule fieldset { padding: 0; gap: 14px; }
   .pipe-schedule-footer { flex-wrap: wrap; }
 }

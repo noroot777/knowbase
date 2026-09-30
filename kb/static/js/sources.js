@@ -94,7 +94,8 @@ function queueSourcePoll() {
 }
 function updateSourceRunStatus() {
   const running = pipeSnapshot?.running;
-  const ours = running && pipeSnapshot?.crawl_filter?.channel === sourceKind;
+  // 一次同步可能带上好几个来源，本来源在不在这一批里决定了显示「同步中」还是「顺延」
+  const ours = running && pipeRunScopes(pipeSnapshot?.crawl_filter).some(scope => scope.channel === sourceKind);
   $('source-sync').disabled = sourceBusy || !!running || !sourceData?.ready;
   $('source-sync').textContent = ours ? '同步中…' : '同步全部';
   $('source-progress').hidden = !running;

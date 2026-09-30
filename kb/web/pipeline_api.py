@@ -33,6 +33,7 @@ class ScheduleRequest(BaseModel):
     enabled: bool
     time: str = "07:30"
     channel: str | None = None
+    channels: list[str] | None = None
 
 
 @router.get("/api/pipeline/schedule")
@@ -42,8 +43,10 @@ def pipeline_schedule():
 
 @router.post("/api/pipeline/schedule")
 def pipeline_schedule_set(body: ScheduleRequest):
+    # channels 是新写法(可以定几个来源一起同步),channel 是老的单个写法
+    channels = body.channels if body.channels is not None else body.channel
     try:
-        return pl.save_schedule(body.enabled, body.time, body.channel)
+        return pl.save_schedule(body.enabled, body.time, channels)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -65,20 +68,57 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     return state
 
 
+class ChannelScope(BaseModel):
+    """一次同步里的一个来源:抓它的哪些订阅。accounts 空 = 该来源的全部订阅。"""
+
+    channel: str
+    accounts: list[str] | None = None
+
+
 class PipelineRunRequest(BaseModel):
     stages: list[str] | None = None  # None = 全部
-    # 以下三个用于范围抓取(只影响 crawl 阶段):
+    # 以下几个用于范围抓取(只影响 crawl 阶段):
     # 填了日期区间则按 [since_date, until_date] 补抓;accounts 空/None = 来源的全部目标
     accounts: list[str] | None = None
     since_date: str | None = None   # "YYYY-MM-DD"
     until_date: str | None = None   # "YYYY-MM-DD"
     channel: str | None = None
+    # 多来源一起抓:每个来源各带自己的订阅。给了它就不看上面的 channel/accounts
+    channels: list[ChannelScope] | None = None
+
+
+def _scopes(body: PipelineRunRequest | None) -> list[dict]:
+    """把请求里的来源整理成 [{"channel", "accounts"}],顺序就是抓取顺序。"""
+    if body and body.channels is not None:
+        if not body.channels:
+            raise HTTPException(400, "请至少选择一个来源")
+        scopes, seen = [], set()
+        for item in body.channels:
+            name = _channel(item.channel)
+            if name in seen:
+                raise HTTPException(400, "同一个来源只能选一次")
+            seen.add(name)
+            scopes.append({"channel": name, "accounts": _accounts(item.accounts)})
+        return scopes
+    return [{"channel": _channel(body.channel if body else None),
+             "accounts": _accounts(body.accounts if body else None)}]
+
+
+def _accounts(names: list[str] | None) -> list[str]:
+    if names and any(not name.strip() for name in names):
+        raise HTTPException(400, "订阅名称不能为空")
+    return list(names or [])
 
 
 @router.post("/api/pipeline/run")
 def pipeline_run(body: PipelineRunRequest | None = None):
     stages = body.stages if body else None
-    crawl_filter = {"channel": _channel(body.channel if body else None)}
+    scopes = _scopes(body)
+    crawl_filter: dict = {"channel": scopes[0]["channel"]}
+    # 只有一个来源时仍写成老样子的 channel + accounts:存量状态文件、重试记录
+    # 和还没升级的读取方因此一行都不用改
+    if len(scopes) > 1:
+        crawl_filter["channels"] = scopes
     if body and (body.since_date or body.until_date):
         if not (body.since_date and body.until_date):
             raise HTTPException(400, "起始和结束日期必须同时提供")
@@ -88,14 +128,13 @@ def pipeline_run(body: PipelineRunRequest | None = None):
                 raise ValueError
         except ValueError:
             raise HTTPException(400, "日期须为 YYYY-MM-DD，且起始日期不能晚于结束日期") from None
-    if body and body.accounts and any(not name.strip() for name in body.accounts):
-        raise HTTPException(400, "订阅名称不能为空")
     # 只限定目标、不限定时间也要成立(「就把这几个号的新文章抓一下」)。
     # 以前的条件只看日期,给了 accounts 却没给日期就退回 crawl_filter=None,
     # 于是全部订阅目标照抓——筛选被静默忽略,比报错更难发现。
-    if body and (body.since_date or body.until_date or body.accounts):
+    if body and (body.since_date or body.until_date
+                 or any(scope["accounts"] for scope in scopes)):
         crawl_filter.update({
-            "accounts": body.accounts or [],
+            "accounts": scopes[0]["accounts"],
             "since_date": body.since_date or "",
             "until_date": body.until_date or "",
         })

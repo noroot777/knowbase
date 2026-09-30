@@ -117,7 +117,8 @@ header .sub{color:var(--muted);font-size:13.5px;max-width:520px}
 .controls{margin-left:auto;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 #q{width:220px;padding:8px 14px;border:1px solid var(--line);border-radius:20px;
   background:var(--card);font-size:14px;outline:none}
-#q:focus{border-color:var(--c-tools)}
+/* 焦点是一条 2px 的边:内描边贴着 border 内沿,和主站 base.css 那条同一套 */
+#q:focus{border-color:var(--c-tools);box-shadow:inset 0 0 0 1px var(--c-tools)}
 .starter{font-size:12.5px;color:var(--muted)}
 .starter button{border:1px solid var(--line);background:var(--card);border-radius:16px;
   padding:5px 12px;font-size:12.5px;cursor:pointer;color:var(--ink)}
