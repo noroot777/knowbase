@@ -344,10 +344,21 @@ def _sync_channel(channel: str, label: str, budget_end: float) -> dict:
                             '成败未知')
         _log(f'{label}:{entry["detail"]}')
         return entry
-    bad = [f'{name} {s["detail"]}'
-           for name, s in mine['stages'].items() if s['status'] == 'error']
-    entry.update(status='error' if bad else 'ok',
-                 detail='；'.join(bad)[:400] if bad else '同步完成')
+    # 只看这一轮请求了的那几个阶段:没选中的阶段一开跑就落 skipped(见
+    # `pipeline.start_pipeline`),全收进来的话每个通道都要多报两句"条目化/
+    # wiki 未执行"。
+    stages = [(name, mine['stages'].get(name) or {}) for name in SYNC_STAGES]
+    bad = [f'{name} {s.get("detail") or "失败"}'
+           for name, s in stages if s.get('status') == 'error']
+    # skipped / stopped = 这个阶段该做的事一件没做,**不能跟着算成功**。
+    # 2026-09-30 实测:51 个大V账号全都缺 X 桥接配置,crawl 因此整个落 skipped
+    # (「待配置 51 个」),而这里只数 error —— 那一轮 social 通道报的是绿色的
+    # 「同步完成」,日报里那行只剩下 extract 的结果,"一条都没抓到"这件事连同
+    # 原因一起看不见。超预算/被停止时管道落 stopped,同理。
+    idle = [f'{name} {s.get("detail") or "本轮未执行"}'
+            for name, s in stages if s.get('status') in ('skipped', 'stopped')]
+    entry.update(status='error' if bad else 'skipped' if idle else 'ok',
+                 detail='；'.join(bad + idle)[:400] if bad or idle else '同步完成')
     _log(f'{label}:{entry["detail"]}')
     return entry
 

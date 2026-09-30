@@ -17,6 +17,11 @@ dependencies = [
     "httpx>=0.28",
     "feedparser>=6.0",
     "beautifulsoup4>=4.12",
+    # 日报正文加出处链接时渲染一遍做裁决(kb/daily_refs.py)。口径要和页面渲染
+    # 日报的 marked 一致 —— marked 默认开 GFM,所以这里也要 linkify(裸网址成链接)
+    # 和表格,少一样都会让"页面上被改坏的东西"在这里看着无害。
+    # 原来只是 rich 的传递依赖,那条链断了这里就崩,所以显式列出来。
+    "markdown-it-py[linkify]>=3.0",
 ]
 
 [project.scripts]

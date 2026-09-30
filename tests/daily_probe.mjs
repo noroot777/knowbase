@@ -150,6 +150,25 @@ const bodyHtml = await evalJs(`document.getElementById('daily-reader-body').inne
 check("正文渲染成 markdown", bodyHtml.includes("<h2") && bodyHtml.includes("今日要点"), bodyHtml.slice(0, 80));
 check("正文没有重复一遍大标题", !bodyHtml.includes("<h1"), bodyHtml.slice(0, 120));
 check("正文没有重复一遍覆盖区间", !bodyHtml.includes("blockquote"), bodyHtml.slice(0, 120));
+// 正文里的出处编号要能点。新日报在落盘时就写成链接(kb/daily.py 的 _link_refs),
+// 所以这里读的是真产物;外链一律新标签打开,否则点一下就把 kb-web 连同正在跑
+// 的管道面板一起顶掉。
+const refOf = async () => JSON.parse(await evalJs(`(() => {
+  const a = [...document.querySelectorAll('#daily-reader-body a')]
+    .find(x => /^\\[\\d+\\]$/.test(x.textContent.trim()));
+  const list = [...document.querySelectorAll('#daily-reader-body a')]
+    .filter(x => /^https?:/.test(x.getAttribute('href') || ''));
+  return JSON.stringify({ text: a ? a.textContent : '', href: a ? a.getAttribute('href') : '',
+    title: a ? a.title : '', cls: a ? a.className : '', target: a ? a.target : '',
+    links: list.length, blank: list.filter(x => x.target === '_blank').length }); })()`));
+let ref = await refOf();
+check("正文里的出处编号是链接", ref.text === "[1]" && /^https:\/\/example\.org\//.test(ref.href),
+      JSON.stringify(ref));
+check("出处链接带着标题与来源当提示", /—/.test(ref.title), ref.title);
+check("出处链接套上角标样式", /daily-ref/.test(ref.cls), ref.cls);
+check("正文和素材清单的外链都在新标签打开",
+      ref.links > 1 && ref.links === ref.blank, JSON.stringify(ref));
+
 const meta = await evalJs(`document.getElementById('daily-reader-meta').textContent`);
 check("元信息写明覆盖的是发布时间", /覆盖 .+ → .+ 发布的内容/.test(meta) && /补录 1 条/.test(meta), meta);
 
@@ -170,6 +189,41 @@ const prevBody = await evalJs(`document.getElementById('daily-reader-body').inne
 check("日报正文写明哪些来源没同步成功",
       /本轮有 1 个来源没有同步成功/.test(prevBody) && /RSS/.test(prevBody),
       prevBody.slice(0, 160));
+// 加链接之前生成的日报:正文里编号还是纯文本,素材清单的 url 也没套尖括号。
+// 它们是花过模型钱的产物,不该为了加链接重新生成一份(重算窗口还会换掉内容),
+// 面板照那份清单补上就是。
+ref = await refOf();
+check("老日报的纯文本编号也补成了链接",
+      ref.text === "[1]" && ref.href === "https://example.org/a", JSON.stringify(ref));
+check("补出来的链接同样新标签打开", ref.target === "_blank" && /daily-ref/.test(ref.cls),
+      JSON.stringify(ref));
+// 清单那几行还有两种真实形态:带平衡圆括号的裸 url —— 自己写正则解析会在 url 里
+// 第一个 `)` 处断掉,那一条的编号永远补不出链接(2026-09-30 审查在生产日报的 107
+// 条素材里实测到一条);以及根本没有 url 的素材,补不出来就该留纯文本。合并编号
+// (`[1、2]`)在落盘那条路上是认的,面板这边必须同一套口径,否则同一种写法在新旧
+// 日报上一个能点一个不能。行内代码里的数字方括号不是出处,一个字都不能动。
+const legacy = JSON.parse(await evalJs(`(() => {
+  const body = document.getElementById('daily-reader-body');
+  const head = [...body.querySelectorAll('h2')].find(h => /^素材清单/.test(h.textContent.trim()));
+  const list = head && head.nextElementSibling;
+  const refs = [...body.querySelectorAll('a')].filter(x => !list || !list.contains(x));
+  const href = t => { const a = refs.find(x => x.textContent.trim() === t);
+                      return a ? a.getAttribute('href') : ''; };
+  const count = t => refs.filter(x => x.textContent.trim() === t).length;
+  return JSON.stringify({ two: href('[2]'), three: href('[3]'),
+    ones: count('[1]'), twos: count('[2]'),
+    // 读 innerHTML 不是 textContent:往 <code> 里塞一个 <a> 并不改变文本,
+    // 拿 textContent 断言的话这一项对『代码里别建链接』根本不敏感。
+    code: (body.querySelector('code') || {}).innerHTML || '',
+    plainThree: /\\[3\\] 没有原文/.test(body.textContent) }); })()`));
+check("带圆括号的裸网址也认得出来",
+      legacy.two === "https://example.org/paper-(clean).pdf", legacy.two);
+check("合并写法里的编号逐个成链接", legacy.ones === 2 && legacy.twos === 2,
+      JSON.stringify(legacy));
+check("没有原文的那个编号留成纯文本", !legacy.three && legacy.plainThree,
+      JSON.stringify(legacy));
+check("行内代码里的数字方括号没被动过", legacy.code === "items[1]", legacy.code);
+
 await evalJs(`openDailyReport('${today}')`);
 await waitFor(`document.getElementById('daily-reader-title').textContent === '日报 · ${today}'`);
 

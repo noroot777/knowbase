@@ -33,6 +33,7 @@ from pathlib import Path
 
 import yaml
 
+from kb import daily_refs
 from kb.config import PRIMARY_SOURCE_NAMES, VAULT_ROOT
 from kb.scanner import parse_frontmatter
 from kb.source_types import SOURCE_TYPES
@@ -229,6 +230,65 @@ def _material(items: list[dict]) -> str:
     return '\n'.join(lines)
 
 
+def _md_dest(url: str) -> str:
+    """markdown 链接的目标一律用尖括号包起来。
+
+    库里的 url 实测有带圆括号的(`…-(clean).pdf`、`S2589-0042(26)00811-4`),
+    裸写进 `](…)` 里会在第一个 `)` 处提前收尾,链接当场断掉、后半截漏成正文。
+    尖括号里唯一不能裸出现的是 `<` `>` 本身,转义掉。
+
+    `|` 也得编码:GFM 是**先按行拆单元格再解析 inline** 的,尖括号拦不住它 ——
+    一条目标带 `|` 的链接写进表格,那一格从 `|` 处当场裂成两格,右边的内容被挤
+    出表外(2026-09-30 第 4 轮审查实测)。`%7C` 和 `\|` 渲染出来的 href 逐字
+    相同,编码那种在非 markdown 场景下也对。
+    """
+    return ('<' + ' '.join(str(url or '').split())
+            .replace('<', '%3C').replace('>', '%3E').replace('|', '%7C') + '>')
+
+
+def _md_text(text: str) -> str:
+    """链接文字里的方括号一律转义。
+
+    库里十来篇标题带着 `[视频]`、`[四川话、粤语等]` 这种写法,平衡的还好,
+    落单一个就能把素材清单那条链接从中间截断 —— 后半截标题漏成正文、url
+    露在外面。
+    """
+    return (str(text or '').replace('\\', '\\\\')
+            .replace('[', '\\[').replace(']', '\\]'))
+
+
+def _md_title(text: str) -> str:
+    """链接标题里的 `|` 要转义 —— 库里 215 篇文章标题带着它(`AI Weekly 016 | 开源
+    项目与科技进展` 那种)。GFM 先拆单元格再解析 inline,标题里一个裸 `|` 就把那
+    一格从中间劈开:出处那格变成半截标题,右边「已可用」被挤出表外、页面上再也
+    看不见(2026-09-30 第 4 轮审查实测)。`\\|` 在表格内外渲染结果一致。"""
+    return (' '.join(str(text or '').split())
+            .replace('\\', '\\\\').replace('"', '\\"').replace('|', '\\|'))
+
+
+def _link_refs(body: str, shown: list[dict]) -> str:
+    """把模型写的出处编号变成指向原文的链接。
+
+    **写进文件、不留到阅读时**:日报是拿走就读的产物(复制出去、在 Obsidian 里
+    翻回来),编号只在 kb-web 上可点的话,换一个读法就退回一串对不上号的数字。
+    素材清单本来就带着每条的链接,正文这几个编号指的是同一批东西。
+
+    链接文字保留方括号(`[\[18\]](url)`),读起来还是原来的角标;转义是因为
+    Obsidian 会把裸 `[[18]]` 当成 wikilink。编号对不上素材(模型偶尔会编一个
+    超出范围的)或那条素材没有 url 时原样留着,不编一个链接出来。
+
+    代码和已有链接里的数字方括号不是出处,改了就是把别人的正文改坏 ——
+    换不换由 `kb.daily_refs` 渲染一遍裁决,那边不写「哪些片段不许动」的规则。
+    """
+    links = {}
+    for i, d in enumerate(shown, 1):
+        if d.get('url'):
+            links[str(i)] = (
+                _md_dest(d['url']),
+                _md_title(f"{d['title']} — {_label(d['source'])}·{d['account'] or '未署名'}"))
+    return daily_refs.link_refs(body, links)
+
+
 def _page(since: datetime, until: datetime, mat: Material, body: str,
           model: str, sync_issues: list[dict] | None = None) -> str:
     shown = mat.all()
@@ -252,7 +312,8 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
     if issues:
         meta['sync_failed'] = issues
     refs = '\n'.join(
-        f"{i}. [{d['title']}]({d['url']}) — {_label(d['source'])}·{d['account'] or '未署名'}"
+        f"{i}. [{_md_text(d['title'])}]({_md_dest(d['url'])})"
+        f" — {_label(d['source'])}·{d['account'] or '未署名'}"
         f"{' · 补录' if d['late'] else ''}"
         if d['url'] else
         f"{i}. {d['title']} — {_label(d['source'])}·{d['account'] or '未署名'}"
@@ -271,7 +332,7 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
                  '以下内容只来自已经入库的素材:\n'
                  + ''.join(f'> - {t}\n' for t in issues) + '\n')
     return ('---\n' + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + '---\n\n'
-            + head + f'{body.strip()}\n\n'
+            + head + f'{_link_refs(body.strip(), shown)}\n\n'
             f'## 素材清单({len(shown)} 条)\n\n{refs}{tail}\n')
 
 

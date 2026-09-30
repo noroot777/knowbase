@@ -45,6 +45,12 @@
 #daily-reader-body p { margin:10px 0; }
 #daily-reader-body strong { color:var(--ink); }
 #daily-reader-body a { color:var(--brand); }
+/* 出处角标。模型常常连着写四五个([18][23][29][38]),按正文字号上色就是一堵
+   数字墙,盖过它注解的那句话。缩一档、走等宽体(编号是标识符不是散文)、平时
+   只有辅助色,指上去才亮成品牌色。 */
+#daily-reader-body a.daily-ref { font:500 0.82em/1 var(--font-mono); color:var(--muted);
+  text-decoration:none; padding:0 1px; white-space:nowrap; vertical-align:1px; }
+#daily-reader-body a.daily-ref:hover { color:var(--brand); text-decoration:underline; }
 #daily-reader-body hr { border:0; border-top:1px solid var(--line-soft); margin:22px 0; }
 
 .daily-empty { border:1px dashed var(--line); border-radius:14px; text-align:center; padding:56px 28px; color:var(--muted); }
