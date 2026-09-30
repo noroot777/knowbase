@@ -25,7 +25,13 @@ const WECHAT = {
 const FEEDS = [{ id: "social", label: "大V观点", hint: "" }, { id: "rss", label: "RSS", hint: "" }];
 let selected = "wechat_local";
 let failNext = false;          // 下一次保存故意失败，看页面怎么收场
+let failGetOnce = false;       // 下一次读通道清单故意 503（重新核对失败那一档）
+let holdChannelsWanted = false;  // 下一次读通道清单扣住不返回（慢响应那一档）
+const heldChannels = [];         // 扣住的那些响应，release 时按序放出
+let holdAccounts = false;        // 扣住订阅读取，好观察「读取期间不许开跑」
+const heldAccounts = [];
 const posts = [];
+const runs = [];               // /api/pipeline/run 真正收到的同步范围
 const channelsPayload = () => ({
   channels: [WECHAT[selected], ...FEEDS],
   default: selected,
@@ -37,6 +43,8 @@ const channelsPayload = () => ({
 const LAST_RUN = { crawl_filter: { channel: "wechat_oa", accounts: [] },
                    started_at: "2026-09-29 08:00", finished_at: "2026-09-29 08:30",
                    stages: {}, log: [] };
+const releaseChannels = () => { for (const f of heldChannels.splice(0)) f(); };
+const releaseAccounts = () => { holdAccounts = false; for (const f of heldAccounts.splice(0)) f(); };
 const FIXTURES = {
   "/api/stats": { documents: 0, vectors: 0, entities: 0, extracted: 0 },
   "/api/facets": { sources: [], accounts: [], topics: [], entities: [] },
@@ -51,7 +59,7 @@ const FIXTURES = {
   "/api/pipeline/schedule": { enabled: false, time: "07:30", channel: selected, channels: [selected] },
   "/api/pipeline/status": { running: false, stages: {}, source: { online: true, ready: true },
                             log: [], last_run: LAST_RUN },
-  "/api/pipeline/accounts": { accounts: ["测试公众号"] },
+  "/api/pipeline/accounts": { accounts: ["测试公众号甲", "测试公众号乙"] },
   "/api/sources/targets": { manageable: true, label: "公众号", targets: [] },
   "/api/wechat/setup": { state: "ready", ready: true, running: false, provider_ready: true,
                          models_ready: true, message: "绿泡泡数据库已验证可读。" },
@@ -69,7 +77,24 @@ const server = createServer((req, res) => {
     res.writeHead(code, { "Content-Type": "application/json", "Content-Length": body.length });
     res.end(body);
   };
-  if (path === "/api/pipeline/channels" && req.method === "GET") return json(channelsPayload());
+  if (path === "/api/pipeline/channels" && req.method === "GET") {
+    if (failGetOnce) { failGetOnce = false; return json({ detail: "测试故障：来源读取失败" }, 503); }
+    // 响应内容在**此刻**定下来：扣住之后设置再被改掉，放出来的仍是那份旧的，
+    // 正是「慢响应回来时设置已经变了」这个形态。
+    const payload = channelsPayload();
+    if (holdChannelsWanted) { holdChannelsWanted = false; heldChannels.push(() => json(payload)); return; }
+    return json(payload);
+  }
+  if (path === "/api/pipeline/accounts" && holdAccounts) {
+    heldAccounts.push(() => json(FIXTURES[path]));
+    return;
+  }
+  if (path === "/api/pipeline/run" && req.method === "POST") {
+    let raw = "";
+    req.on("data", c => { raw += c; });
+    req.on("end", () => { runs.push(JSON.parse(raw || "{}")); json({ ok: true }); });
+    return;
+  }
   if (path === "/api/pipeline/channels/wechat" && req.method === "POST") {
     let raw = "";
     req.on("data", c => { raw += c; });
@@ -120,6 +145,13 @@ const port = await new Promise((res, rej) => {
   setTimeout(() => rej(new Error("no devtools port")), 20000);
 });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// node 侧的等待：等 mock 后端那边出现某个状态（扣住的响应就位、真的收到了一次 run）。
+const waitFor = async (fn, ms = 8000) => {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) { if (fn()) return true; await sleep(80); }
+  return false;
+};
+const waitRuns = n => waitFor(() => runs.length >= n);
 
 // 一个 page target 一套连接：第 9 节要开第二个页面（跨页面切换那条），所以做成工厂。
 async function connectPage(wsUrl) {
@@ -346,6 +378,124 @@ check("重开新建同步也会重新核对服务端",
         .map(i => i.dataset.runChannel).join() === 'wechat_oa,social,rss'`),
       (await ids("#pipe-channel-list input")).join());
 await evalJs(`closePipeModal()`);
+
+// 复用页面 B 切一次通道：场景 11、12 都要「另一个页面把设置改掉」。
+// 分两步是给场景 12 用的：那一节要先把弹窗开好，切换那一下才够快（见那一节的注释）。
+async function openSetupInB() {
+  await B.evalJs(`openWechatSetup()`);
+  return B.until(`document.querySelectorAll('#wechat-channels label').length === 2`);
+}
+async function pickInB(to) {
+  await B.evalJs(`changeWechatChannel(${JSON.stringify(to)})`);
+  return B.until(`document.getElementById('wechat-channel-msg').textContent.includes('已切换')`);
+}
+const switchInB = async to => { await openSetupInB(); return pickInB(to); };
+// 每一节都从「设置 = 本机库、勾着公众号 + RSS」这个已知状态起跑。
+async function freshPipe() {
+  selected = "wechat_local";
+  await evalJs(`localStorage.clear();
+    localStorage.setItem('kb-sync-channels', '["wechat_local","rss"]'); true`);
+  await boot(A);
+  await evalJs(`switchTab('pipe')`);
+  await until(`typeof pipeWechat !== 'undefined' && pipeWechat.selected === 'wechat_local'`);
+}
+
+// ── 11. 新建同步开着的时候换通道：那份订阅状态也得跟着改道 ──
+// pipeRunSel 改道了而 pipeAccounts 没有的话，新通道既不算 ready 也不算 loading：
+// pipeRunBody() 直接把它漏掉，开始按钮还照样能点 —— 勾着公众号点下去只同步了 RSS。
+await freshPipe();
+await evalJs(`openPipeModal()`);
+await until(`pipeReadyChannels().join() === 'wechat_local,rss'`);
+// 只留一个号：换通道时这份选择要带过去，不能被重置成全选
+await evalJs(`pipeSel.set('wechat_local', new Set(['测试公众号甲'])); updatePipeSelection(); true`);
+await boot(B);
+await B.until(`typeof pipeWechat !== 'undefined' && pipeWechat.selected === 'wechat_local'`);
+holdAccounts = true;                      // 换通道后那次订阅读取扣住，好看清读取中的状态
+await switchInB("wechat_oa");
+await until(`pipeLoadingChannels().length > 0`);
+check("换通道后新通道在读订阅期间不能开始",
+      await evalJs(`document.getElementById('pipe-start').disabled`) === true);
+const heldRuns = runs.length;
+await evalJs(`startPipeFromModal()`);
+await sleep(250);
+check("读订阅期间提交入口也拦住", runs.length === heldRuns, JSON.stringify(runs.slice(heldRuns)));
+releaseAccounts();
+await until(`pipeReadyChannels().join() === 'wechat_oa,rss'`);
+const openScope = JSON.parse(await evalJs(`JSON.stringify(pipeRunBody().channels)`));
+check("开着的窗口换通道后一个来源都不漏",
+      openScope.map(c => c.channel).join() === "wechat_oa,rss",
+      JSON.stringify(openScope.map(c => c.channel)));
+check("换通道把原来勾的那几个订阅带过去（不是重置成全选）",
+      openScope.find(c => c.channel === "wechat_oa")?.accounts.join() === "测试公众号甲",
+      JSON.stringify(openScope.find(c => c.channel === "wechat_oa")?.accounts));
+const openRuns = runs.length;
+await evalJs(`startPipeFromModal()`);
+check("点开始真的按新通道派发",
+      await waitRuns(openRuns + 1)
+      && runs[openRuns].channels?.map(c => c.channel).join() === "wechat_oa,rss",
+      JSON.stringify(runs[openRuns]));
+
+// ── 12. 慢响应期间设置被改掉：那份旧响应不许当成最新 ──
+// 强制重读复用在途请求的话，回来的是切换**之前**生成的那份，页面按它读订阅、按它开跑。
+await freshPipe();
+await boot(B);
+await B.until(`typeof pipeWechat !== 'undefined' && pipeWechat.selected === 'wechat_local'`);
+// 探测这个页面到底处理过切换通知没有 —— 监听器按注册顺序跑，pipe_channels.js 那个在前，
+// 所以计数变 1 时它已经同步走完（补发了读取，或者错误地复用了在途的那个）。没有这个等待，
+// 「慢响应回来」和「通知到达」谁先谁后纯看运气：通知后到的那一跳会自己补一次正常读取，
+// 于是复用在途请求这个缺陷在探针里时而不复现（2026-09-30 注入回归实测漏过）。
+await evalJs(`window.__chanNotice = 0;
+  window.addEventListener('storage', e => { if (e.key === 'kb-wechat-channel') window.__chanNotice++; }); true`);
+// B 先把设置弹窗开好：扣住响应到放开这一整段必须跑在 `pipeJson` 那 15 秒超时之内 ——
+// 超时的话请求已经 reject、`pipeChannelsLoading` 早被清空，这个缺陷压根不会发生
+// （2026-09-30 注入回归实测：`await openPipeModal()` 自己就把 probe 阻塞满 15 秒）。
+await openSetupInB();
+holdChannelsWanted = true;
+// 故意不 await：这次读取要一直扣着，await 它等于 probe 陪它一起卡到超时。
+await evalJs(`openPipeModal(); true`);
+check("慢响应那次读取真的被扣住了", await waitFor(() => heldChannels.length === 1, 4000));
+await pickInB("wechat_oa");
+check("切换通知送到了那个还在等响应的页面", await until(`window.__chanNotice === 1`, 6000));
+releaseChannels();                        // 旧响应现在才回来
+await until(`pipeReadyChannels().join() === 'wechat_oa,rss'`, 12000);
+const racyList = await ids("#pipe-channel-list input");
+check("慢响应回来后列表是切换后的通道", racyList.join() === "wechat_oa,social,rss", racyList.join());
+const racyRuns = runs.length;
+await evalJs(`startPipeFromModal()`);
+check("慢响应回来后派发的也是新通道",
+      await waitRuns(racyRuns + 1)
+      && runs[racyRuns].channels?.map(c => c.channel).join() === "wechat_oa,rss",
+      JSON.stringify(runs[racyRuns]));
+
+// ── 13. 重新核对失败时，上次那份就绪状态不许还能开跑 ──
+await freshPipe();
+await evalJs(`openPipeModal()`);
+await until(`pipeReadyChannels().join() === 'wechat_local,rss'`);
+await evalJs(`closePipeModal()`);
+selected = "wechat_oa";                   // 别的客户端改了设置，没有 storage 广播可听
+failGetOnce = true;                       // 而这次重新核对 503
+await evalJs(`openPipeModal()`);
+await until(`document.getElementById('pipe-setup-error').hidden === false`);
+check("重读失败时开始按钮禁用",
+      await evalJs(`document.getElementById('pipe-start').disabled`) === true);
+check("重读失败时写清为什么不能开始",
+      (await evalJs(`document.getElementById('pipe-est').textContent`)).includes("尚未确认"),
+      await evalJs(`document.getElementById('pipe-est').textContent`));
+const failRuns = runs.length;
+await evalJs(`startPipeFromModal()`);
+await sleep(250);
+check("重读失败时提交入口也拦住（不会拿旧通道开跑）",
+      runs.length === failRuns, JSON.stringify(runs.slice(failRuns)));
+await evalJs(`openPipeModal()`);         // 「重新读取来源」
+await until(`pipeReadyChannels().join() === 'wechat_oa,rss'`);
+check("重试成功后恢复可开始",
+      await evalJs(`!document.getElementById('pipe-start').disabled`));
+const retryRuns = runs.length;
+await evalJs(`startPipeFromModal()`);
+check("重试成功后派发的是当前设置那条通道",
+      await waitRuns(retryRuns + 1)
+      && runs[retryRuns].channels?.map(c => c.channel).join() === "wechat_oa,rss",
+      JSON.stringify(runs[retryRuns]));
 
 check("页面无脚本异常", A.errors.length === 0, A.errors.join(" | "));
 check("第二个页面也无脚本异常", !B || B.errors.length === 0, (B?.errors || []).join(" | "));

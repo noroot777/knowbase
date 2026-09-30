@@ -100,7 +100,7 @@
   完全看不出少了什么；
   ③**显式点名另一条仍然有效**（`get_collector` 保持严格，`--channel wechat_oa`、
   API 里显式传的 channel 照跑）——设置管的是默认和面板列哪条，不该把一次性排查堵死。
-  **前端那一侧同样是三件事，`pipe_channels.js` 里各占一段：**
+  **前端那一侧是六件事**（①②③ 在 `pipe_channels.js`，④⑤⑥ 收在它和 `pipe_setup.js`）：
   ①**浏览器里存着的选择也要「跟着设置走」**（`adoptWechatChannel`，和后端
   `known_channels` 一个口径，`applyChannelData` 首次加载就过一遍）——上一版两条都能勾，
   所以 `kb-sync-channels` 里写着的可能是另一条、也可能两条都在；当成「不认识的来源」
@@ -118,10 +118,27 @@
   另一个页面改的，storage 当场把这个页面带过去；CLI/API 直接改的没有广播可听，靠打开
   时那次重新核对。都不做的话另一个页面会一直显示、并**按一条已经不生效的通道派发
   同步**，重开设置看到的还是和落盘值相反的那条（同轮审查实测）。
+  ④**强制核对那一次必须自己发一趟请求，而且只有最新那次的响应算数**（`pipeChannelsGen`）。
+  复用在途的那个等于拿切换**之前**生成的响应当成最新设置：慢响应期间收到切换通知，回来后
+  页面按旧通道读订阅、按旧通道开跑（2026-09-30 复审实测派发 `wechat_local`，而服务端那时
+  已经是 `wechat_oa`）。**探针要复现这条得卡在 15 秒之内**（`pipeJson` 的默认超时）：
+  `await openPipeModal()` 自己就会陪着扣住的那个请求卡满超时，那时 `pipeChannelsLoading`
+  早被清掉、缺陷压根不发生 —— 注入回归实测这么漏过一次，所以那一节故意不 await 它。
+  ⑤**核对没做完、或者核对失败时一律不许开跑**（`pipeChannelsFresh`，开始按钮和
+  `startPipeFromModal` 各拦一道）。手里那份 ready 订阅是按一条可能已经不生效的通道读的，
+  页面上都写着「同步来源暂不可用」了，按钮还能点下去拿旧通道开跑（2026-09-30 复审实测：
+  重读 503 之后照样派发 `wechat_local`）。
+  ⑥**新建同步开着的时候换通道，那份订阅状态也得跟着改道**（`pipe_setup.js` 监听
+  `kb:channels-changed` → `loadPipeAccounts(true)`，并把旧通道的草稿挪给新通道）。只迁
+  `pipeRunSel` 的话 `pipeAccounts` 里没有新通道那一条 —— 它既不算 ready 也不算 loading，
+  于是 `pipeRunBody()` 直接把它漏掉、开始按钮还照样能点：用户明明勾着公众号，点下去只同步
+  了 RSS，一句提示都没有（2026-09-30 复审实测）。重读期间新通道是 loading，按钮自动禁用；
+  草稿一起挪是因为两条通道订阅的是同一批号，不该把用户刚勾的那几个号重置成全选。
   回归在 `tests/test_wechat_channel.py`（13 条 Python + 一条真页面 probe
-  `tests/wechat_channel_probe.mjs`，44 项：自带 mock 后端、CDP 直连
-  chrome-headless-shell，存量选择四种形态各验「勾选 + 提交范围 + 落盘」，跨页面那条
-  真开两个 target）。
+  `tests/wechat_channel_probe.mjs`，58 项：自带 mock 后端、CDP 直连
+  chrome-headless-shell，存量选择四种形态各验「勾选 + 提交范围 + 落盘」，跨页面那几条真
+  开两个 target，慢响应/503 靠 mock 扣响应和注故障复现，提交范围一律看真的发出去的
+  `/api/pipeline/run` body）。
   两通道共用公众号订阅/文章库/导出；本地库只负责文章发现，正文继续按链接抓取。
   本地读取只能通过已配置的 `rion-wechat-cli`，须确认 `live_database_read_ok`，
   不允许通知预览替代、自动获取密钥或操作微信。

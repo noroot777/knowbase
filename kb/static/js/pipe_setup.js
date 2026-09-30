@@ -28,6 +28,19 @@ function savePipeDraft() {
 function pipeSetupError(message = '') {
   $('pipe-setup-error').hidden = !message; $('pipe-setup-error').textContent = message;
 }
+// 采集通道在设置里换过了（可能是别的页面换的）。弹窗正开着时,这里那份订阅状态是按旧
+// 通道读的:`pipeRunSel` 已经改道,`pipeAccounts` 里却没有新通道那一条 —— 它既不算
+// ready 也不算 loading,于是 `pipeRunBody()` 直接把它漏掉、开始按钮还照样能点,用户
+// 明明勾着公众号、点下去只同步了 RSS,一句提示都没有(2026-09-30 复审实测)。重读一遍
+// 订阅:读取期间新通道是 loading,开始按钮自动禁用,读完才恢复。两条绿泡泡通道订阅的是
+// 同一批号,所以把旧通道的草稿一并挪过去,用户刚勾的那几个号不会被重置成全选。
+document.addEventListener('kb:channels-changed', e => {
+  if (!pipeModalOpen()) return;
+  const { before, after } = e.detail;
+  if (before && after && pipeDrafts.has(before) && !pipeDrafts.has(after))
+    pipeDrafts.set(after, [...pipeDrafts.get(before)]);
+  loadPipeAccounts(true).catch(() => {});
+});
 async function openPipeModal() {
   if (pipeAction || pipeSnapshot?.running) return;
   dismissToastGroup('pipeline');
@@ -47,6 +60,10 @@ async function openPipeModal() {
     if (!pipeModalOpen()) return;
     $('pipe-acct-list').innerHTML = '<div class="pipe-acct-empty">同步来源暂不可用。<br><button class="ghost" onclick="openPipeModal()">重新读取来源</button></div>';
     pipeSetupError(e.message);
+    // 核对没成功,`pipeChannelsFresh` 仍是假:这一句把它落到开始按钮上 —— 上次那份
+    // ready 订阅是按一条可能已经不生效的通道读的,页面都写着「暂不可用」了,按钮还能点
+    // 下去拿旧通道开跑(2026-09-30 复审实测:GET 503 之后照样派发 wechat_local)。
+    renderPipeEst();
   }
 }
 function closePipeModal() {
@@ -227,9 +244,10 @@ function renderPipeEst() {
   $('pipe-est').textContent = pipeEstText();
   if (!pipeConnected) $('pipe-est').textContent = '请先恢复状态连接，再开始同步。';
   else if (pipeSnapshot?.running) $('pipe-est').textContent = '等待当前同步结束，配置会保留。';
+  else if (!pipeChannelsFresh) $('pipe-est').textContent = '同步来源尚未确认，请重新读取来源后再开始。';
   if (editingRange) $('pipe-est').textContent = '请先应用日期范围，或收起日期选择以使用当前已选范围。';
   $('pipe-start').disabled = editingRange || !pipeConnected || !n || !!pipeAction || !!pipeSnapshot?.running
-    || !!pipeLoadingChannels().length;
+    || !!pipeLoadingChannels().length || !pipeChannelsFresh;
   $('pipe-start').textContent = pipeAction === 'start' ? '正在启动…' : n ? `开始同步 · ${n} 个` : '开始同步';
 }
 function pipeRunBody() {
@@ -242,7 +260,7 @@ function pipeRunBody() {
 }
 async function startPipeFromModal() {
   if ($('pipe-range-pop').style.display !== 'none' || !pipeConnected || pipeAction
-      || !pipeSelCount() || pipeSnapshot?.running) return;
+      || !pipeChannelsFresh || !pipeSelCount() || pipeSnapshot?.running) return;
   const body = pipeRunBody();
   pipeAction = 'start'; pipeSetupError(); invalidatePipeStatus();
   let failure = '';

@@ -3,6 +3,14 @@
 let pipeChannel = '';
 let pipeChannels = [];
 let pipeChannelsLoading = null;
+// 每次读取的代次。切换发生后补发的那次才算最新:在途的那个请求是在设置改动**之前**
+// 发出的,它回来时必须被丢掉,否则一份陈旧的设置会被当成最新的写回内存(并按它派发同步)。
+let pipeChannelsGen = 0;
+// 「手里这份来源清单是不是刚跟服务端核对过的」。可勾选来源取决于一个全局设置(别的
+// 页面、CLI、API 都改得动),所以新建同步开跑之前它必须为真:核对没做完、或者核对失败
+// 时,手里那份 ready 订阅是按一条可能已经不生效的通道读的 —— 让它进
+// /api/pipeline/run 就是拿旧通道开跑,而页面上明明写着「同步来源暂不可用」。
+let pipeChannelsFresh = false;
 let pipeRunSel = [];
 // 全部通道的人话名字（含没被选中的那条绿泡泡通道）。上次运行记录里写着的可能正是
 // 它——只查 pipeChannels 的话那行会显示成一个裸 id。
@@ -55,13 +63,29 @@ function applyChannelData(data) {
 // 同步。状态轮询那类高频路径照旧吃缓存。
 async function loadPipeChannels(force = false) {
   if (pipeChannels.length && !force) return;
-  if (pipeChannelsLoading) return pipeChannelsLoading;
-  pipeChannelsLoading = (async () => {
+  // 非强制那次照旧合并并发请求;**强制那次必须自己发一趟** —— 复用在途的那个等于拿
+  // 切换之前的响应当成最新设置,页面随后按旧通道读订阅、按旧通道开跑(实测:开着的
+  // 新建同步在慢响应期间收到切换通知,回来后仍派发 wechat_local)。
+  if (pipeChannelsLoading && !force) return pipeChannelsLoading;
+  if (force) markChannelsStale();
+  const gen = ++pipeChannelsGen;
+  const request = (async () => {
     const data = await pipeJson('/api/pipeline/channels');
+    // 这一轮还算不算数:期间又发起过更新的读取(设置在别处改过),这份响应已经过时,
+    // 丢掉、跟着最新那次走 —— 调用方 await 到的就是最新结果。
+    if (gen !== pipeChannelsGen) return pipeChannelsLoading;
     if (!data.channels?.length) throw new Error('暂无可用的同步来源，请检查采集器配置后重试');
     applyChannelData(data);
+    pipeChannelsFresh = true;
   })();
-  try { await pipeChannelsLoading; } finally { pipeChannelsLoading = null; }
+  pipeChannelsLoading = request;
+  try { await request; } finally { if (pipeChannelsLoading === request) pipeChannelsLoading = null; }
+}
+
+// 清单待核对:核对期间和核对失败之后都是这个状态,开始按钮和提交入口都不许放行。
+function markChannelsStale() {
+  pipeChannelsFresh = false;
+  if (typeof renderPipeEst === 'function') renderPipeEst();
 }
 
 function channelUrl(path, channel = pipeChannel) {
