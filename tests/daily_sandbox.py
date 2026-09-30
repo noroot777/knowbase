@@ -68,20 +68,32 @@ def main():
         f'date: {mark.date().isoformat()}\n'
         f"window_since: {(mark - timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"window_until: {mark.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        'docs: 1\ntotal: 1\nlate: 0\nsources: {公众号: 1}\nmodel: stub-model\n'
+        'docs: 3\ntotal: 3\nlate: 0\nsources: {公众号: 2, RSS: 1}\nmodel: stub-model\n'
         f"generated: {mark.strftime('%Y-%m-%d %H:%M')}\n"
         "sync_failed:\n- 'RSS：无法连接来源'\n---\n\n"
         f'# 日报 · {mark.date().isoformat()}\n\n'
         '> 覆盖上一份日报之后发布的内容(按发布时间,不是抓取时间)。\n\n'
         '> **本轮有 1 个来源没有同步成功**,以下内容只来自已经入库的素材:\n'
         '> - RSS：无法连接来源\n\n'
-        '## 今日要点\n\n- 上一份日报 [1]\n\n'
+        '## 今日要点\n\n'
+        '- 上一份日报 [1]\n'
+        # 带平衡圆括号的裸 url:前端要是自己写正则解析清单那几行,会在 url 里
+        # 第一个 `)` 处断掉,这一条的编号永远补不出链接(2026-09-30 审查实测,
+        # 生产那份日报的 107 条素材里真有这么一条)。
+        '- 带圆括号网址的来源 [2] 也要能点。\n'
+        # 合并编号(落盘那条路认 `[1, 2]`/`[1，2]`/`[1、2]`),前端得同一套口径;
+        # `[3]` 那条素材没有 url,补不出来就该留纯文本。
+        '- 合并写法 [1、2] 同样算数,而 [3] 没有原文、保持纯文本。\n'
+        # 行内代码里的数字方括号不是出处,一个字都不能动。
+        '- 命令里的 `items[1]` 原样保留。\n\n'
         # 素材清单**故意按老写法写**(url 不套尖括号、正文里的编号还是纯文本):
         # 这就是加链接之前那些日报的形态。它们是花过模型钱的产物,不该为了加
         # 链接重新生成一份 —— 面板得照这份清单把编号补成链接(daily.js 的
         # `enhanceDailyBody`),两种 url 写法也都要认。
-        '## 素材清单(1 条)\n\n'
-        '1. [上一份日报里的那篇](https://example.org/a) — 公众号·某公众号\n',
+        '## 素材清单(3 条)\n\n'
+        '1. [上一份日报里的那篇](https://example.org/a) — 公众号·某公众号\n'
+        '2. [论文 [pdf]](https://example.org/paper-(clean).pdf) — RSS·某站\n'
+        '3. 没有链接的那篇 — 公众号·某公众号\n',
         encoding='utf-8')
 
     # 上一轮运行的落盘状态:重启 kb-web 之后进程内没有通道结果,面板要从这里

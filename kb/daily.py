@@ -230,9 +230,20 @@ def _material(items: list[dict]) -> str:
     return '\n'.join(lines)
 
 
-# 正文里的出处编号:`[18]`、`[3][7]`、`[3, 7]` 三种写法都收。后面紧跟 `(` 的
-# 不动 —— 那已经是一条 markdown 链接(`[3](http://…)`),再包一层就成了套娃。
-_REF_RE = re.compile(r'\[(\d{1,3}(?:\s*[,，、]\s*\d{1,3})*)\](?!\()')
+# 一行正文里**不许被改写**的片段,跟出处编号一起匹配:谁命中决定动不动它。
+# 光靠「后面别跟 `(`」挡不住两种真实形态(2026-09-30 审查实测,都是先写坏文件、
+# 页面/复制/Obsidian 一起受影响,不是渲染层的事):
+#   ① 行内代码 `items[1]` —— 落盘后成了 `items[\[1\]](<url> "…")`,页面上那个
+#      <code> 里就明晃晃显示这一串,照着复制的命令当场是错的;
+#   ② 已有链接的文字 `[版本 [1]](https://…)` —— 里面那个 `[1]` 后面跟的是 `]`
+#      不是 `(`,照样被改写,一条链接当场裂成两个不同目的地。
+# 所以按 markdown 的构造跳:行内代码(开闭反引号数量相同)、链接/图片整体
+# (文字里允许一层方括号,目标允许 `<>` 包裹或平衡圆括号)。
+_GUARD_RE = re.compile(
+    r'(?P<tick>`+).*?(?P=tick)'
+    r'|!?\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\]'
+    r'\((?:<[^>]*>|[^()\s]*(?:\([^()]*\)[^()\s]*)*)(?:\s+"[^"]*")?\)'
+    r'|\[(?P<nums>\d{1,3}(?:\s*[,，、]\s*\d{1,3})*)\]')
 _FENCE_RE = re.compile(r'^\s*(?:```|~~~)')
 
 
@@ -271,6 +282,9 @@ def _link_refs(body: str, shown: list[dict]) -> str:
     链接文字保留方括号(`[\[18\]](url)`),读起来还是原来的角标;转义是因为
     Obsidian 会把裸 `[[18]]` 当成 wikilink。编号对不上素材(模型偶尔会编一个
     超出范围的)或那条素材没有 url 时原样留着,不编一个链接出来。
+
+    围栏代码、行内代码、已有的链接与图片整段跳过(见 `_GUARD_RE`)——那里面的
+    数字方括号不是出处,改了就是把别人的正文改坏。
     """
     links = {}
     for i, d in enumerate(shown, 1):
@@ -285,7 +299,9 @@ def _link_refs(body: str, shown: list[dict]) -> str:
         return f'[\\[{num}\\]]({_md_dest(hit[0])} "{_md_title(hit[1])}")' if hit else f'[{num}]'
 
     def _sub(m) -> str:
-        nums = [n.strip() for n in re.split(r'[,，、]', m.group(1))]
+        if m.group('nums') is None:
+            return m.group(0)       # 行内代码 / 已有链接 / 图片:一个字都不动
+        nums = [n.strip() for n in re.split(r'[,，、]', m.group('nums'))]
         # 一个都对不上就整段别动:那多半不是出处编号(年份区间、条目序号之类)。
         return ''.join(_one(n) for n in nums) if any(n in links for n in nums) else m.group(0)
 
@@ -293,7 +309,7 @@ def _link_refs(body: str, shown: list[dict]) -> str:
     for line in body.split('\n'):
         if _FENCE_RE.match(line):
             fenced = not fenced
-        out.append(line if fenced else _REF_RE.sub(_sub, line))
+        out.append(line if fenced else _GUARD_RE.sub(_sub, line))
     return '\n'.join(out)
 
 

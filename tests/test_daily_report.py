@@ -260,6 +260,33 @@ class DailyReportTests(unittest.TestCase):
         # 素材清单里标题的方括号要转义,落单一个就能把这条链接从中间截断
         self.assertIn('2. [乙 \\[视频\\]](<https://e.org/b(26)x>) — RSS·Blog', body)
 
+    def test_citation_linking_never_rewrites_code_or_existing_links(self):
+        # 出处编号是替换进**文件**的,改错了就是把日报原文改坏 —— 页面、复制全文、
+        # Obsidian 一起受影响,不是渲染层的事。两种真实形态光靠"后面别跟 `(`"挡不住
+        # (2026-09-30 审查实测):行内代码 `items[1]` 被改写之后,照着复制的命令当场
+        # 是错的;已有链接的文字 `[版本 [1]](…)` 里那个 [1] 后面跟的是 `]`,照样被
+        # 改写,一条链接当场裂成两个不同目的地。
+        add_doc(self.conn, 'source/dr-gzh/a.md', title='甲文', url='https://e.org/a',
+                published='2026-09-28 20:00')
+        self.chat.return_value = (
+            '## 今日要点\n\n'
+            '- 行内代码 `items[1]` 不动;出处 [1]。\n'
+            '- 多反引号 ``code `x` items[1]`` 也不动。\n'
+            '- 已有链接:[版本 [1]](https://e.org/keep) 仍指向原处。\n'
+            '- 图片:![封面 [1]](https://e.org/cover.png)。\n'
+            '- 带圆括号目标:[论文 [pdf]](https://e.org/p-(c).pdf)。\n\n'
+            '```\n围栏里的 [1] 也不动\n```\n')
+        body = parse_frontmatter(Path(self.gen()['path']).read_text(encoding='utf-8'))[1]
+        for kept in ('`items[1]` 不动', '``code `x` items[1]`` 也不动',
+                     '[版本 [1]](https://e.org/keep) 仍指向原处',
+                     '![封面 [1]](https://e.org/cover.png)',
+                     '[论文 [pdf]](https://e.org/p-(c).pdf)',
+                     '围栏里的 [1] 也不动'):
+            self.assertIn(kept, body)
+        # 正文里唯一该被改写的就是那个句末出处
+        self.assertIn('出处 [\\[1\\]](<https://e.org/a> "甲文 — 公众号·某号")。', body)
+        self.assertEqual(1, body.split('## 素材清单')[0].count('<https://e.org/a>'))
+
     def test_listing_reading_and_deleting(self):
         add_doc(self.conn, 'source/dr-gzh/a.md')
         self.gen()

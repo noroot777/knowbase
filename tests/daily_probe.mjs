@@ -197,6 +197,32 @@ check("老日报的纯文本编号也补成了链接",
       ref.text === "[1]" && ref.href === "https://example.org/a", JSON.stringify(ref));
 check("补出来的链接同样新标签打开", ref.target === "_blank" && /daily-ref/.test(ref.cls),
       JSON.stringify(ref));
+// 清单那几行还有两种真实形态:带平衡圆括号的裸 url —— 自己写正则解析会在 url 里
+// 第一个 `)` 处断掉,那一条的编号永远补不出链接(2026-09-30 审查在生产日报的 107
+// 条素材里实测到一条);以及根本没有 url 的素材,补不出来就该留纯文本。合并编号
+// (`[1、2]`)在落盘那条路上是认的,面板这边必须同一套口径,否则同一种写法在新旧
+// 日报上一个能点一个不能。行内代码里的数字方括号不是出处,一个字都不能动。
+const legacy = JSON.parse(await evalJs(`(() => {
+  const body = document.getElementById('daily-reader-body');
+  const head = [...body.querySelectorAll('h2')].find(h => /^素材清单/.test(h.textContent.trim()));
+  const list = head && head.nextElementSibling;
+  const refs = [...body.querySelectorAll('a')].filter(x => !list || !list.contains(x));
+  const href = t => { const a = refs.find(x => x.textContent.trim() === t);
+                      return a ? a.getAttribute('href') : ''; };
+  const count = t => refs.filter(x => x.textContent.trim() === t).length;
+  return JSON.stringify({ two: href('[2]'), three: href('[3]'),
+    ones: count('[1]'), twos: count('[2]'),
+    // 读 innerHTML 不是 textContent:往 <code> 里塞一个 <a> 并不改变文本,
+    // 拿 textContent 断言的话这一项对『代码里别建链接』根本不敏感。
+    code: (body.querySelector('code') || {}).innerHTML || '',
+    plainThree: /\\[3\\] 没有原文/.test(body.textContent) }); })()`));
+check("带圆括号的裸网址也认得出来",
+      legacy.two === "https://example.org/paper-(clean).pdf", legacy.two);
+check("合并写法里的编号逐个成链接", legacy.ones === 2 && legacy.twos === 2,
+      JSON.stringify(legacy));
+check("没有原文的那个编号留成纯文本", !legacy.three && legacy.plainThree,
+      JSON.stringify(legacy));
+check("行内代码里的数字方括号没被动过", legacy.code === "items[1]", legacy.code);
 
 await evalJs(`openDailyReport('${today}')`);
 await waitFor(`document.getElementById('daily-reader-title').textContent === '日报 · ${today}'`);
