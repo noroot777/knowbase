@@ -1,0 +1,56 @@
+# NOTICE
+
+Knowbase
+Copyright (c) 2026 fjh
+
+本仓库整体以 MIT 许可发布(见 `LICENSE`),**但下面「不在 MIT 覆盖范围内」那一节
+列出的文件除外**。
+
+## 许可边界速览
+
+| 范围 | 许可 |
+|------|------|
+| `kb/`、`scripts/`、`tests/`、`docker/`、`kb.sh`、根目录文档 | MIT |
+| `kb/static/vendor/` 下的第三方库 | 各自的原许可(见下) |
+| `collector/` 中源自 ZejunCao/WeChatOA_Aggregation 的 4 个文件 | **许可状态未定,不在 MIT 覆盖范围内** |
+| `collector/` 其余部分 | MIT |
+
+## 随仓库分发的第三方代码
+
+### kb/static/vendor/marked.min.js
+
+marked v12.0.2 — a markdown parser
+Copyright (c) 2011-2024, Christopher Jeffrey
+License: MIT
+https://github.com/markedjs/marked
+
+### kb/static/vendor/purify.min.js
+
+DOMPurify 3.2.4
+Copyright (c) Cure53 and other contributors
+License: Apache License 2.0 / Mozilla Public License 2.0(双许可)
+https://github.com/cure53/DOMPurify
+
+## 不在 MIT 覆盖范围内:源自 ZejunCao/WeChatOA_Aggregation 的部分
+
+`collector/` 整体源自 [ZejunCao/WeChatOA_Aggregation](https://github.com/ZejunCao/WeChatOA_Aggregation)。
+搬进本仓库之后形态变了很多(Vue 前端、FastAPI 后端、Docker 部署、公众平台后台抓
+列表、扫码登录、封面下载、MinHash 相似检测都已删除),但**下面这 4 个文件仍逐字
+沿用上游**:
+
+- `collector/src/db/repository.py`
+- `collector/src/db/migrations.py`
+- `collector/src/utils/wechat_body.py`
+- `collector/src/db/connection.py`
+
+**上游仓库没有 LICENSE 文件**(已核实)。没有许可声明意味着上游作者保留全部权利:
+既没有授予再分发的许可,也没有授予修改的许可。因此:
+
+- 这 4 个文件的许可状态**未定**;
+- 它们**不在本仓库 MIT 许可的覆盖范围内** —— 本仓库的 MIT 许可无权替上游作者
+  授权任何人使用它们;
+- 打算复制、再分发或商用这部分代码的人,**需要自行评估法律风险**,并在必要时直接
+  联系上游作者取得许可。
+
+这个归属问题由本仓库的维护者与上游另行解决;在解决之前,上面这段就是本仓库对它的
+如实声明。

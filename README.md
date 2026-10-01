@@ -280,3 +280,16 @@ vault **之前**先整篇翻译:标题和正文都译,专有名词保留原文,�
 - 这段时间没有任何内容时**不写空日报**，横幅上说明原因；已有的那天要重新生成会先问一次。
   日报不进 `kb/config.py` 的 `SOURCES`，不会自己把自己再索引一遍。
 - 模型在顶栏「模型」的「日报 · 当日综述」阶段里配。
+
+## 许可
+
+**MIT,但不是整个仓库都是 MIT。**
+
+- `kb/`、`scripts/`、`tests/`、`docker/`、`kb.sh`、根目录文档 —— MIT(见 [LICENSE](LICENSE))
+- `kb/static/vendor/` 下的 marked 与 DOMPurify —— 各自的原许可
+- **`collector/` 里有 4 个文件逐字沿用上游 [ZejunCao/WeChatOA_Aggregation](https://github.com/ZejunCao/WeChatOA_Aggregation),
+  而上游仓库没有 LICENSE —— 这部分许可状态未定,不在本仓库 MIT 的覆盖范围内**,
+  要复制或再分发得自行评估
+
+完整的第三方归属和那 4 个文件的具体路径在 [NOTICE](NOTICE) 里。安全问题怎么报、
+以及**本项目没有任何内置鉴权**这件事见 [SECURITY.md](SECURITY.md)。
