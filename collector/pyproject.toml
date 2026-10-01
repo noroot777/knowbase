@@ -1,16 +1,11 @@
 [project]
-name = "wechatoa-aggregation"
+name = "knowbase-collector"
 version = "0.1.0"
-description = "Add your description here"
+description = "Knowbase 的公众号采集器:从本机微信数据库发现推送,按链接抓正文,导出 markdown"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "jieba>=0.42.1",
-    "fastapi>=0.135.1",
     "lxml>=6.0.2",
-    "openai>=2.31.0",
     "requests>=2.32.5",
     "zstandard>=0.23.0",
-    "uvicorn[standard]>=0.41.0",
-    "ipykernel>=7.2.0",
 ]
