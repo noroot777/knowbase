@@ -8,7 +8,7 @@ import re
 
 from src.utils.helpers import time_now
 
-LATEST_SCHEMA_VERSION = 16
+LATEST_SCHEMA_VERSION = 17
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -159,6 +159,15 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (16, time_now()),
+        )
+        conn.commit()
+        current = 16
+
+    if current < 17:
+        _migrate_to_v17(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (17, time_now()),
         )
         conn.commit()
 
@@ -474,40 +483,53 @@ def _migrate_to_v14(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_to_v15(conn: sqlite3.Connection) -> None:
-    """删掉 articles.cover_path 这一列(封面图不再下载到本地)。
+    """退役:原来在这里 `DROP articles.cover_path`,现在什么都不做(见 v17)。
 
-    封面曾经是给那套已经删掉的 Vue 阅读器用的:每抓一篇就把图拉下来、用
-    Pillow 压到 640 宽存进 data/covers/,再把相对路径写进这一列。阅读器没了
-    之后两头都没人读——这一列零个读取方,那个目录实测 326 MB 还在随每轮采集
-    继续长。文章自带的 cover_url 留着(它是推送里本来就有的一行元数据,不占
-    地方),要封面按 URL 现取即可。
-
-    data/covers/ 目录本身不在这里删:迁移只管库结构,删文件是一次性的运维
-    动作,而且误删不可逆。
+    留着这个空壳而不是把编号抹掉:版本号是写进 `schema_migrations` 的,早就
+    有库记着"15 跑过了"。抹掉编号只会让那些库的版本号对不上任何一段代码。
     """
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='articles'"
-    ).fetchone()
-    if not row:
-        return
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()}
-    if "cover_path" in cols:
-        conn.execute("ALTER TABLE articles DROP COLUMN cover_path")
 
 
 def _migrate_to_v16(conn: sqlite3.Connection) -> None:
-    """删掉 accounts.display_checked_at(改名核对不再需要按天节流)。
+    """退役:原来在这里 `DROP accounts.display_checked_at`,现在什么都不做(见 v17)。"""
 
-    v13 加这一列是因为那时核对昵称要**单独抓一篇正文页**,只为读里面那行
-    `var nickname`——每个号每 7 天一次请求,所以得记下"上次什么时候核对的"。
-    现在名字直接从本机微信的会话列表上读(见 local_accounts.refresh_display_names),
-    零请求、每轮都核对,没有节流可言,这一列也就没有读取方了。
+
+def _migrate_to_v17(conn: sqlite3.Connection) -> None:
+    """把 v15/v16 删掉的两列补回来 —— 这个库要能被两个分支同时打开。
+
+    封面不再下载到本地、昵称核对不再按天节流,所以 `articles.cover_path` 和
+    `accounts.display_checked_at` 在主干上确实零个读取方,v15/v16 当时就把它们
+    DROP 了。**但这个库不只有主干在读。** 凭证采集那条通道留在 `wechat-oa`
+    分支上永久并行(见仓库 CLAUDE.md),两个分支的 setup.sh 默认链的是同一份
+    data/ —— 代码分叉了,库没有。而那个分支是冻结的:它的 `upsert_article_from_blog`
+    照旧往 `cover_path` 里写,核对改名照旧读写 `display_checked_at`。
+
+    于是实测出来的后果是:按主干跑一次(自动迁到 v16),再切回保留分支采集,
+    第一篇新文章就 `OperationalError: table articles has no column named
+    cover_path`,那条分支从此写不进任何文章 —— 而「保留」这件事就名存实亡了。
+    旧分支自己救不回来:它只认到 v13,看到 `MAX(version)=16` 什么都不跑,
+    它 schema.sql 里的 `CREATE TABLE IF NOT EXISTS` 对已存在的表也是空操作。
+
+    所以把两列加回来,并且**主干从此不在这个库上做破坏性的 schema 变更**:
+    要停用一列就停止读写它,别 DROP。两个空列的代价是几十字节,换的是另一条
+    分支还能跑。v14 删 `article_fts` 不在此列 —— 那是整张表,旧分支 schema.sql
+    里的 `CREATE VIRTUAL TABLE IF NOT EXISTS` 会把它重建出来(内容要靠它自己
+    那条重建路径补,但写入不会失败)。
+
+    这一步也是已经迁到 v16 的存量库的唯一出路:列是真的被 DROP 掉了,
+    光把 v15/v16 改成空操作并不会让它们自己长回来。
     """
-    row = conn.execute(
+    articles = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='articles'"
+    ).fetchone()
+    if articles:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()}
+        if "cover_path" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN cover_path TEXT")
+    accounts = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts'"
     ).fetchone()
-    if not row:
-        return
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
-    if "display_checked_at" in cols:
-        conn.execute("ALTER TABLE accounts DROP COLUMN display_checked_at")
+    if accounts:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+        if "display_checked_at" not in cols:
+            conn.execute("ALTER TABLE accounts ADD COLUMN display_checked_at TEXT")
