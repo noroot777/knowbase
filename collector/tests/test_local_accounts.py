@@ -209,6 +209,7 @@ class CliDiscoverTests(_Base):
         self.assertEqual(0, code)
         self.assertEqual([{"name": "索引里的号", "fakeid": "biz-indexed",
                            "alias": "gh_indexed", "signature": "最近推送 1970-01-01",
+                           "probe": "index",
                            "subscribed": False, "stored_name": ""}],
                          payload["candidates"])
 
@@ -224,8 +225,38 @@ class CliDiscoverTests(_Base):
     def test_the_human_listing_marks_which_ones_can_actually_be_added(self):
         code, _, err = self.run_cli()
         self.assertEqual(0, code)
-        self.assertIn("其中 1 个可以添加", err)      # 已订阅的和无图文的都不算
+        self.assertIn("其中 1 个可以添加", err)      # 已订阅的和没解出归属的都不算
+
+    def test_a_candidate_nobody_looked_at_is_not_called_articleless(self):
+        """裸列一个都不翻,所以索引外那个号这一轮压根没核验过。
+
+        原来这里显示「本机暂无可解析的图文推送」—— 一个没做过的结论,而用户
+        看到它就不会再试了。审查实测:15 个都有有效图文推送的候选,宽泛搜索下
+        排在解析预算之外的 3 个被这么标出来,缩小关键词再搜立刻解出 biz、加得进去。
+        """
+        _, _, err = self.run_cli()
+        self.assertIn("待核验", err)
+        self.assertIn("这次没核验", err)
+        self.assertNotIn("暂无可解析", err)
+
+    def test_a_candidate_that_was_looked_at_and_has_nothing_says_so(self):
+        """翻过、确实解不出归属的那一档照旧如实说「没有图文」。
+
+        和上一条是同一个展示位上的两种事实,共用 probe 这一份判定 —— 两边各判
+        一次的话,「查过了」和「没查过」迟早又被压回同一句话。
+        """
+        self.reader.messages = Mock(return_value=[])
+        _, _, err = self.run_cli("索引外")
+        self.assertIn("无图文", err)
         self.assertIn("本机暂无可解析的图文推送", err)
+
+    def test_a_session_that_cannot_be_read_says_that_instead(self):
+        """读不动是第三种事实:别人家的结论里最容易被含糊成「没有图文」的那个。"""
+        self.reader.messages = Mock(side_effect=LocalReaderError("这条会话读不动"))
+        _, _, err = self.run_cli("索引外")
+        self.assertIn("待核验", err)
+        self.assertIn("读不动", err)
+        self.assertNotIn("暂无可解析", err)
 
     def test_an_unreadable_database_fails_loudly_instead_of_listing_nothing(self):
         """读不动库要非零退出,别拿一张空列表冒充「本机没有这个号」。

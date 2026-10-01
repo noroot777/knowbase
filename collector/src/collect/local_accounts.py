@@ -50,7 +50,14 @@ def discover(repo, query: str = "", *, reader=None,
 
     每行:name(微信里显示的名字)、username(gh_ 开头的会话号)、fakeid
     (`__biz`,解不出来是空串)、subscribed(已经在订阅列表里)、stored_name
-    (已订阅时库里存的档案键,可能是个旧名字)、last_at。
+    (已订阅时库里存的档案键,可能是个旧名字)、last_at、probe。
+
+    `probe` 是「fakeid 为空是怎么来的」—— 不记下来就只能把所有空 fakeid 说成
+    同一件事,而它们是四件:`index` / `live` 解出来了;`none` 翻过它的推送、
+    确实没有可解析的图文;`unchecked` **这一次压根没翻**(裸列时一个都不翻,
+    给了查询词也只翻前 `resolve_limit` 个);`error` 这条会话读不动。
+    把后两档说成「本机暂无可解析的图文推送」是在报一个没做过的结论:实测宽泛
+    搜索下排在预算之外的号就这样被说成没有图文,而缩小关键词再搜立刻就解出来了。
     """
     reader = reader or LocalReader()
     reader.check()
@@ -66,8 +73,9 @@ def discover(repo, query: str = "", *, reader=None,
         name = (session.get("display_name") or "").strip()
         if q and q not in name.lower() and q not in username.lower():
             continue
-        rows.append({"name": name, "username": username,
-                     "fakeid": index.get(_table(username), ""),
+        biz = index.get(_table(username), "")
+        rows.append({"name": name, "username": username, "fakeid": biz,
+                     "probe": "index" if biz else "unchecked",
                      "last_at": int(session.get("last_timestamp") or 0)})
     rows.sort(key=lambda r: -r["last_at"])
     del rows[MAX_ROWS:]
@@ -82,10 +90,10 @@ def discover(repo, query: str = "", *, reader=None,
                 # 坏推送跳过继续往下找,别让一条解析不了的消息把这个号判死。
                 row["fakeid"] = session_biz(reader, row["username"],
                                             lambda _message: None) or ""
+                row["probe"] = "live" if row["fakeid"] else "none"
             except LocalReaderError:
-                # 单个会话读不动不该让整次搜索失败:它只是解不出归属,
-                # 下面会如实标成「本机暂无可解析的图文推送」。
-                pass
+                # 单个会话读不动不该让整次搜索失败:它只是这一次解不出归属。
+                row["probe"] = "error"
 
     for row in rows:
         row["subscribed"] = bool(row["fakeid"]) and row["fakeid"] in subscribed

@@ -64,5 +64,3 @@ def message_unavailable(response: str) -> str:
     if _PRIVATE_ENTRY_RE.search(response):
         return _PRIVATE_HINT
     return ''
-
-

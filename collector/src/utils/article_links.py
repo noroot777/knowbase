@@ -112,5 +112,3 @@ def link_lookup_variants(url: str) -> list[str]:
     except ArticleImportError:
         pass
     return out
-
-

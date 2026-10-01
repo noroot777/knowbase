@@ -197,6 +197,7 @@ def _accounts_discover(query: str, as_json: bool) -> int:
     candidates = [{"name": r["name"], "fakeid": r["fakeid"],
                    "alias": r["username"],
                    "signature": _discover_note(r),
+                   "probe": r["probe"],
                    "subscribed": r["subscribed"],
                    "stored_name": r["stored_name"]}
                   for r in rows if r["name"]]
@@ -209,14 +210,26 @@ def _accounts_discover(query: str, as_json: bool) -> int:
         addable = sum(1 for c in candidates if c["fakeid"] and not c["subscribed"])
         info(f"本机 {len(candidates)} 个公众号会话,其中 {addable} 个可以添加:")
         for c in candidates:
-            mark = "已订阅" if c["subscribed"] else ("可添加" if c["fakeid"] else "无图文")
+            mark = ("已订阅" if c["subscribed"] else "可添加" if c["fakeid"]
+                    else "无图文" if c["probe"] == "none" else "待核验")
             info(f"  {mark}  {_pad(c['name'], 26)}{c['signature']}")
     return EXIT_OK
 
 
+# 解不出归属时该说什么。按 `discover` 记下的 probe 分档 —— 「翻过、确实没有」和
+# 「这一次没翻」不是一件事:后者说成没有图文就是在报一个没做过的结论,而用户看到
+# 它就不会再试了。实测 15 个都有图文推送的候选,宽泛搜索下排在解析预算之外的 3 个
+# 被说成没有图文,缩小关键词再搜立刻解出来、加得进去。
+_NO_BIZ_NOTE = {
+    "none": "本机暂无可解析的图文推送",
+    "unchecked": "这次没核验(缩小关键词再搜)",
+    "error": "本机这条会话读不动(缩小关键词再搜)",
+}
+
+
 def _discover_note(row: dict) -> str:
     if not row["fakeid"]:
-        return "本机暂无可解析的图文推送"
+        return _NO_BIZ_NOTE.get(row.get("probe", ""), _NO_BIZ_NOTE["unchecked"])
     if row["subscribed"] and row["stored_name"] != row["name"]:
         return f"已订阅,库里存作「{row['stored_name']}」"
     if row["subscribed"]:
