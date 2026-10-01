@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """kb.db + vault 的维护互斥锁:一把跨进程独占锁,写这两处的人全都认它。
 
-**为什么要有它。** kb.db 和 vault 是同一份事实的两面,改它们的有四条路:存量
+**为什么要有它。** kb.db 和 vault 是同一份事实的两面,改它们的有五条路:存量
 清理脚本(`scripts/feed_trim_history.py`)、订阅同步的存盘与导出
-(`kb.feeds.sync`)、索引(管道的 index 阶段与 `kb index`)。每一条都是
+(`kb.feeds.sync`)、索引(管道的 index 阶段与 `kb index`)、条目化的就地入库
+(`pipeline_stages._ingest_pretagged_sources`)。每一条都是
 「先把一份快照读进内存 → 过一会儿再按它写盘」,两两不互斥的话,一边就能用
 **删除之前**读到的那份快照把另一边刚删掉的东西复活:
 
@@ -24,15 +25,29 @@ scan → upsert → `remove_missing_documents` 一整段都在锁里。
 读出来(id + 正文),再分批写回 `chunk_vec`;而 `chunk_vec` 是 sqlite_vec 的
 虚表,**没有外键级联**(`remove_missing_documents` 是按 chunk id 显式删它的),
 清理在这中间删掉那些 chunk 的话,后面几批会按已经不存在的 chunk id 把向量插
-回去 —— 这些孤儿行谁也不会再来收(「孤儿向量 0」是生产审计在看的一条不变量)。
-代价是一轮大编码会把锁攥上几分钟(`--reembed` 更久),而被它挡住的只有一次性
-运维脚本 —— 它本来就不该在重新编码的中途删文档。
+回去 —— 这些孤儿行谁也不会再来收(「孤儿向量 0」是生产审计在看的一条不变量),
+而且它们照样占着语义检索的候选名额(`search` 先取全局 top-N 再 JOIN 当前
+chunks),于是清理之后**仍然留着**的文章会被一批指向不存在 chunk 的向量挤出
+结果,重跑索引也不恢复(2026-10-01 审查实测 151 行孤儿向量、语义检索返回空)。
+所以**凡是调 `embed_pending_chunks` 的入口都要在锁里**:它补的是全库待编码的
+chunk,不限于本轮自己写进去的那些 —— 条目化入库就是这么漏掉的第三条路。
+代价是一轮大编码会把锁攥上几分钟(`--reembed` 更久),被它挡住的不止那个一次性
+清理脚本:另一个进程的订阅存盘与导出也在等同一把锁。这是统一互斥的标价,接受
+它的理由是这几条路写的本来就是同一个库,串起来跑才是对的。
 
 **等不到就别做。** 等待有上限(`KB_MAINT_LOCK_WAIT`,默认 900 秒)并在等的时候
 出声(`on_wait`);超时抛 `LockBusy`,调用方一律「什么都没动」收场(index 阶段
 标红写明原因、`kb index` 退 2、清理脚本退 2 且一个字节没改)。无限等更坏:管道
 是单例,一个卡住的持锁者会把面板上的同步、定时同步和日报一起冻死,而索引漏跑
 一轮下一轮就补上了 —— 不可逆删除和"假结果留在库里"才是不能赌的那两头。
+
+**「还在等」和「还要不要等」分两个回调。** 出声是低频的(每 `NOTIFY_EVERY`
+秒一条,面板日志是个 80 行的环),而「用户按了停止」得跟轮询同频 ——
+两件事挂在同一个回调上的话,等锁期间按下的那一下最坏要 60 秒后才被看见
+(2026-10-01 审查实测:停止请求没有中止等待,最后落的是 error 而不是 stopped)。
+所以 `on_poll` 每轮调一次、只用来问「还要不要继续等」,`on_wait` 只管出声。
+`flock` 一成功就返回,正好落在两次轮询之间的那一下照样会被吃掉,所以调用方拿
+到锁之后还要自己认一次(见 `pipeline_stages._lock_waiter` 旁边那段)。
 
 **不会抱死。** 这是系统里唯一一把跨进程维护锁,没有任何路径在持有它的时候再去
 取别的锁;同线程重入直接放行(flock 认的是 open file description,同进程换一个
@@ -73,12 +88,15 @@ class LockBusy(RuntimeError):
 _held = threading.local()
 
 
-def _acquire(fh, wait: float, on_wait) -> None:
+def _acquire(fh, wait: float, on_wait, on_poll) -> None:
     """拿到锁才返回;超时抛 `LockBusy`。
 
-    flock 没有超时参数,所以用非阻塞加轮询。第一次就拿到的话不会调 `on_wait`
-    —— 常态下不该有任何「正在等」的噪音。`on_wait` 可以自己抛(index 阶段用它
-    响应用户按下的「停止」),异常原样穿出去。
+    flock 没有超时参数,所以用非阻塞加轮询。第一次就拿到的话两个回调都不调
+    —— 常态下不该有任何「正在等」的噪音。两个回调都可以自己抛(index 阶段用
+    `on_poll` 响应用户按下的「停止」),异常原样穿出去。
+
+    `on_poll` 每轮一次、`on_wait` 每 `NOTIFY_EVERY` 秒一次:分开的理由见模块
+    说明 —— 把「要不要放弃」挂在低频提示上等于让它最坏晚一分钟才生效。
     """
     deadline = time.monotonic() + max(wait, 0.0)
     started = time.monotonic()
@@ -90,6 +108,8 @@ def _acquire(fh, wait: float, on_wait) -> None:
         except OSError:
             pass
         waited = time.monotonic() - started
+        if on_poll:
+            on_poll(waited)
         if on_wait and (told is None or waited - told >= NOTIFY_EVERY):
             told = waited
             on_wait(waited)
@@ -101,12 +121,14 @@ def _acquire(fh, wait: float, on_wait) -> None:
 
 
 @contextmanager
-def maintenance_lock(wait: float | None = None, on_wait=None):
+def maintenance_lock(wait: float | None = None, on_wait=None, on_poll=None):
     """持有维护锁跑这一段。整段的理由见模块说明。
 
     wait: 等待上限(秒),缺省 `WAIT_SECONDS`;0 = 拿不到就立刻抛。
     on_wait: `on_wait(已等秒数)`,只在真的等上了才调(立刻一次,之后每
-             `NOTIFY_EVERY` 秒一次)。
+             `NOTIFY_EVERY` 秒一次)——出声用。
+    on_poll: `on_poll(已等秒数)`,等待期间**每轮**调一次(`_POLL` 秒)。自己抛
+             异常就是放弃这一趟;「停止」这类取消检查挂在它上面,别挂 on_wait。
     """
     if getattr(_held, 'on', False):
         yield
@@ -114,7 +136,7 @@ def maintenance_lock(wait: float | None = None, on_wait=None):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     fh = (DATA_DIR / LOCK_NAME).open('a+')
     try:
-        _acquire(fh, WAIT_SECONDS if wait is None else wait, on_wait)
+        _acquire(fh, WAIT_SECONDS if wait is None else wait, on_wait, on_poll)
         _held.on = True
         yield
     finally:

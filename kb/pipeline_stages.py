@@ -126,16 +126,30 @@ class _StopWhileWaiting(Exception):
     """等维护锁的时候用户按了停止。"""
 
 
-def _index_lock_wait(waited: float) -> None:
-    """等维护锁时出声,顺带认一次「停止」。
+def _lock_waiter(stage: str):
+    """给一个阶段配一套等维护锁的回调,返回 `(等过没有, on_poll, on_wait)`。
 
-    不出声的话面板上那张卡片会一直停在「扫描 vault」,看着像卡死;而停止是对
-    整次同步说的,等锁期间按下的那一下不该等到锁拿到手才生效。
+    两个回调分工不同,这是分开的全部理由:出声是低频的(面板日志是个 80 行的
+    环,每条提示占一行),而「用户按了停止」得跟轮询同频 —— 两件事挂在同一个
+    回调上的话,等锁期间按下的那一下最坏要 `NOTIFY_EVERY` 秒后才被看见
+    (2026-10-01 审查实测:停止没有中止等待,最后落的是 error 而不是 stopped)。
+
+    「等过没有」给调用方用:`flock` 一成功就立刻返回,正好落在两次轮询之间按下
+    的那一下轮询不到,所以**等过锁**的话拿到手之后还要再认一次。没等过就不认
+    —— 按钮承诺的是「当前阶段结束后停止」,不是取消刚开跑的这个阶段。
     """
-    if _state.get("stop_requested"):
-        raise _StopWhileWaiting()
-    _stage("index", "running",
-           f"等维护锁:另一个 kb.db 维护任务正在跑(已等 {int(waited)} 秒)")
+    waited = {"on": False}
+
+    def on_poll(_sec: float) -> None:
+        waited["on"] = True
+        if _state.get("stop_requested"):
+            raise _StopWhileWaiting()
+
+    def on_wait(sec: float) -> None:
+        _stage(stage, "running",
+               f"等维护锁:另一个 kb.db 维护任务正在跑(已等 {int(sec)} 秒)")
+
+    return waited, on_poll, on_wait
 
 
 def _run_index() -> None:
@@ -154,8 +168,11 @@ def _run_index() -> None:
     from kb.maintenance import LockBusy, maintenance_lock
 
     _stage("index", "running", "扫描 vault")
+    waited, on_poll, on_wait = _lock_waiter("index")
     try:
-        with maintenance_lock(on_wait=_index_lock_wait):
+        with maintenance_lock(on_wait=on_wait, on_poll=on_poll):
+            if waited["on"] and _state.get("stop_requested"):
+                raise _StopWhileWaiting()
             _index_pass()
     except _StopWhileWaiting:
         _stage("index", "stopped", "已请求停止:等维护锁时放弃了这一轮索引")
@@ -415,7 +432,26 @@ def _run_export_script(script: str, *argv: str, timeout_min: int):
 
 
 def _ingest_pretagged_sources() -> tuple[int, int]:
-    """把条目化脚本新产出的 md 就地入库(只增不删;删除留给下轮 index 阶段)。"""
+    """把条目化脚本新产出的 md 就地入库(只增不删;删除留给下轮 index 阶段)。
+
+    **整趟在维护锁里**,理由和 index 阶段逐字相同(见 `kb.maintenance`):这条
+    路也是「scan 读一份磁盘快照 → upsert → 补向量」,而 `embed_pending_chunks`
+    补的是**全库**待编码的 chunk、不限于条目来源。不取锁的话,一轮并发的存量
+    清理删掉的那些 chunk 会被这里按旧快照插回 `chunk_vec` —— 那张虚表没有外键
+    级联,孤儿行谁也不会再来收,还照样占着语义检索的候选名额:清理之后仍然留着
+    的文章从此召不回来,重跑索引也不恢复(2026-10-01 审查实测 151 行孤儿向量、
+    语义检索返回空)。「只增不删」防不住这件事 —— 要删的是另一个进程。
+    """
+    from kb.maintenance import maintenance_lock
+
+    waited, on_poll, on_wait = _lock_waiter("projects")
+    with maintenance_lock(on_wait=on_wait, on_poll=on_poll):
+        if waited["on"] and _state.get("stop_requested"):
+            raise _StopWhileWaiting()
+        return _ingest_pass()
+
+
+def _ingest_pass() -> tuple[int, int]:
     from kb import store
     from kb.chunker import split_chunks
     from kb.extract import parse_pretagged, save_extraction
@@ -451,6 +487,8 @@ def _run_projects() -> None:
     手动分批消化(scripts/gzh_projects_export.py transcribe --limit N),
     避免定时同步悄悄烧大额度。脚本自带文件锁:手动实例在跑时本阶段跳过。"""
     from datetime import timedelta
+
+    from kb.maintenance import LockBusy
     since = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
     steps = [
         ("gzh gate", "gzh_projects_export.py", ["gate"], 30),
@@ -483,6 +521,12 @@ def _run_projects() -> None:
     _stage("projects", "running", "新条目入库")
     try:
         n_new, n_vec = _ingest_pretagged_sources()
+    except _StopWhileWaiting:
+        _stage("projects", "stopped", "已请求停止:等维护锁时放弃了新条目入库")
+        return
+    except LockBusy as e:
+        _stage("projects", "error", f"新条目没入库: {e}")
+        return
     except Exception as e:
         _stage("projects", "error", f"入库失败: {e}")
         return

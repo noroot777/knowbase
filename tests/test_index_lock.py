@@ -4,22 +4,29 @@
 kb.db」。两边不互斥的话,一轮在清理之前开扫的索引会拿删除**之前**读到的那个
 Doc 完成 upsert —— 库里留下一行指向不存在文件的 documents:搜得到、点开没有
 原文,而清理那一侧已经收尾、重跑也找不到它(2026-10-01 审查实测 `documents=1`、
-全文检索命中 1)。两条索引入口(管道 index 阶段、`kb index`)各是一条路,
-跨进程那一半只能用真的子进程验。
+全文检索命中 1)。写 kb.db 的入口有三条(管道 index 阶段、`kb index`、条目化的
+就地入库)各是一条路,跨进程那一半只能用真的子进程验。
 """
 import argparse
+import struct
 import subprocess
 import sys
 import textwrap
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from kb import cli, embedder, maintenance, pipeline_stages, scanner, store
-from kb.config import Source
+from kb.config import EMBEDDING_DIM, Source
 from kb.feeds import sync
 from kb.pipeline_state import _state
+
+# setUp 会把批量编码换成桩(真跑要加载 bge-m3),验「孤儿向量」的那条用例得把
+# 真的那一份要回来 —— 它要的正是 embed_pending_chunks 自己那个「先读快照、再
+# 分批写回」的形状,只替掉最底层的模型调用。
+_real_embed = embedder.embed_pending_chunks
 
 from feed_trim_fixture import TrimFixture, trim  # noqa: E402
 
@@ -64,6 +71,34 @@ class IndexLockTests(TrimFixture, unittest.TestCase):
         self.addCleanup(child.stdout.close)
         self.assertEqual('locked', child.stdout.readline().strip())
         return child
+
+    def orphan_vectors(self):
+        """指向已经不存在的 chunk 的向量行。
+
+        `chunk_vec` 是 sqlite_vec 的虚表、没有外键级联,`remove_missing_documents`
+        只按**当前** chunks 的 id 删它 —— 所以这种行再跑多少轮索引也收不掉,
+        还照样占着语义检索的候选名额(「孤儿向量 0」是生产审计在看的不变量)。
+        """
+        conn = store.connect()
+        try:
+            return conn.execute('SELECT count(*) FROM chunk_vec WHERE chunk_id '
+                                'NOT IN (SELECT id FROM chunks)').fetchone()[0]
+        finally:
+            conn.close()
+
+    def wait_until_waiting(self, stage='index', timeout=5.0):
+        """等到面板上出现这个阶段的第一条「等维护锁」为止。
+
+        那条提示是真的等上了才出的(第一次立刻出),所以它是「已经在排队」这件
+        事唯一的外部信号 —— 拿 sleep 猜一个时长的话,机器一忙就变成在测运气。
+        """
+        until = time.monotonic() + timeout
+        while time.monotonic() < until:
+            if any('等维护锁' in (s[2] or '')
+                   for s in self.stages if s[0] == stage and s[1] == 'running'):
+                return True
+            time.sleep(0.02)
+        return False
 
     def documents_without_a_file(self):
         conn = store.connect()
@@ -155,14 +190,75 @@ class IndexLockTests(TrimFixture, unittest.TestCase):
         self.assertIn('索引没做', self.stage('error')[0][2])
         self.assertEqual(1, self.state(item)['documents'])   # 一个字节都没动
 
-    def test_a_stop_request_ends_the_wait(self):
-        """等锁期间按下的「停止」不该等到锁拿到手才生效。"""
+    def test_a_stop_request_already_in_place_skips_the_wait(self):
+        """停止早就按下了的话,这一轮压根不该去排队等锁。"""
         self.hold_the_lock_in_another_process()
         _state['stop_requested'] = True
         with patch.object(maintenance, 'WAIT_SECONDS', 30):
             pipeline_stages._run_index()
         self.assertTrue(self.stage('stopped'))
         self.assertFalse(self.stage('error'))
+
+    def test_a_stop_pressed_after_the_wait_began_takes_effect_at_once(self):
+        """等上了之后才按的那一下,也不该等到下一条「还在等」才被看见。
+
+        取消检查原来和那条低频提示挂在同一个回调上(最多 `NOTIFY_EVERY`=60 秒
+        一条),于是等锁期间按下的停止最坏要一分钟后才生效 —— 审查实测把等待
+        上限缩成 2 秒之后,那一轮等满超时、落的是 `error / 索引没做`,而不是
+        `stopped`(2026-10-01 第 1 轮)。所以这里**不动** `NOTIFY_EVERY`:
+        第一条提示是立刻出的,第二条要 60 秒后,而等待上限只有 3 秒。
+        """
+        self.hold_the_lock_in_another_process()
+        with patch.object(maintenance, 'WAIT_SECONDS', 3):
+            worker = threading.Thread(target=pipeline_stages._run_index)
+            worker.start()
+            self.assertTrue(self.wait_until_waiting(), '它压根没等上')
+            _state['stop_requested'] = True
+            began = time.monotonic()
+            worker.join(timeout=10)
+        self.assertFalse(worker.is_alive())
+        took = time.monotonic() - began
+        self.assertTrue(self.stage('stopped'), f'没有当场停下: {self.stages}')
+        self.assertFalse(self.stage('error'))
+        self.assertLess(took, 2.0, '停止是等到超时才收场的,不是当场生效')
+
+    def test_a_stop_landing_right_as_the_lock_frees_up_still_counts(self):
+        """停止正好落在两次轮询之间、锁紧接着就松了 —— 这一下也不许被吃掉。
+
+        `_acquire` 的循环是「试 flock → 没拿到才问一次要不要放弃」,所以锁在这
+        两步之间松开的话,下一轮直接 return、再也不问。拿到锁之后不补一次检查
+        的话,这一轮会照常索引到底(按钮上写的是「本阶段结束后停止」,而这一轮
+        的本阶段还没开始做事)。
+        """
+        source = self.legacy(self.sub())
+        item = self.seed(source)
+        (self.vault / item['path']).unlink()          # 真做了索引就会收掉这行
+        holder = self.hold_the_lock_in_another_process()
+        with patch.object(maintenance, 'WAIT_SECONDS', 30):
+            worker = threading.Thread(target=pipeline_stages._run_index)
+            worker.start()
+            self.assertTrue(self.wait_until_waiting(), '它压根没等上')
+            _state['stop_requested'] = True        # 先按停止
+            holder.terminate(); holder.wait()      # 紧接着锁就松了
+            worker.join(timeout=10)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(self.stage('stopped'), f'没有停下: {self.stages}')
+        self.assertEqual(1, self.state(item)['documents'])   # 一个字节都没动
+
+    def test_an_idle_lock_does_not_turn_a_stop_request_into_a_skipped_index(self):
+        """反过来:锁空着的时候,一个早已按下的停止不该把这一轮索引顶掉。
+
+        「等过锁」才补那次检查,就是为了这条 —— 按钮承诺的是「当前阶段结束后
+        停止」,不是取消刚开跑的这个阶段;无条件检查会让管道编排刚放进 index
+        的那一轮当场变成 stopped。
+        """
+        source = self.legacy(self.sub())
+        item = self.seed(source)
+        (self.vault / item['path']).unlink()
+        _state['stop_requested'] = True
+        pipeline_stages._run_index()
+        self.assertTrue(self.stage('ok'), f'索引被停止请求顶掉了: {self.stages}')
+        self.assertEqual(0, self.state(item)['documents'])
 
     def test_the_vector_pass_is_inside_the_lock(self):
         """补向量也在锁里 —— 这不是顺手圈进来的,挪出去会留下孤儿向量行。
@@ -178,6 +274,94 @@ class IndexLockTests(TrimFixture, unittest.TestCase):
                           lambda *a: held.append(getattr(maintenance._held, 'on', False)) or 0):
             pipeline_stages._run_index()
         self.assertEqual([True], held)
+
+    # ---- 条目化的就地入库 ----
+    def test_project_ingestion_cannot_write_vectors_for_deleted_chunks(self):
+        """条目化入库那条路也得认这把锁 —— 它补的是**全库**待编码的 chunk。
+
+        审查那次的复现(2026-10-01 第 1 轮):清理持着锁跑,「整理工具」阶段的
+        就地入库并行开跑、读到了清理即将删掉的那批 chunk;清理把文件、
+        documents、chunks 全删干净之后编码才返回,151 行向量照样插进
+        `chunk_vec` —— 那张虚表没有外键级联,下一轮索引也收不掉它们(没有待
+        编码 chunk 就直接返回,`remove_missing_documents` 只按当前 chunks 的 id
+        删),于是这批更近的孤儿向量占满语义检索的候选名额,清理之后**仍然留着**
+        的文章从此召不回来。
+
+        这条路一个新条目都没有时也会调 `embed_pending_chunks`,所以不必摆条目
+        文件:要复现的就是「本轮没有新条目,却照样给全库补向量」。
+        """
+        source = self.legacy(self.sub())
+        self.seed(source)                     # 这条 chunk 还没有向量
+        real_backup = trim._backup
+        encoding, release = threading.Event(), threading.Event()
+
+        def fake_encode(texts, _batch):
+            """站在「快照已经读完、正在编码」这一刻。只替掉模型本身。"""
+            encoding.set()
+            self.assertTrue(release.wait(10))
+            one = struct.pack(f'{EMBEDDING_DIM}f', *([0.1] * EMBEDDING_DIM))
+            return EMBEDDING_DIM, one * len(texts)
+
+        seen, out = {}, {}
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = None
+
+            def backup_then_start_ingest(*a):
+                nonlocal future
+                res = real_backup(*a)                 # 此刻清理持着锁
+                future = pool.submit(pipeline_stages._ingest_pretagged_sources)
+                seen['encoding'] = encoding.wait(1.0)
+                seen['told'] = any('等维护锁' in (s[2] or '') for s in self.stages
+                                   if s[0] == 'projects' and s[1] == 'running')
+                return res
+
+            try:
+                with patch.object(embedder, 'embed_pending_chunks', _real_embed), \
+                     patch.object(embedder, '_encode', fake_encode), \
+                     patch.object(embedder, 'shutdown', lambda: None), \
+                     patch.object(trim, '_backup', side_effect=backup_then_start_ingest):
+                    self.assertEqual(0, trim.cmd_run(self.args(source)))
+            finally:
+                release.set()
+            if future is not None:
+                out['result'] = future.result(timeout=20)
+
+        # 末态先断:孤儿向量那一行就是审查报告里的那份证据,而持锁期间的两条
+        # 观察断在它前面的话,注入旧行为时红的是过程、看不见后果。
+        self.assertEqual(0, self.orphan_vectors(), '留下了指向已删 chunk 的向量行')
+        self.assertFalse(self.documents_without_a_file())
+        self.assertEqual((0, 0), out['result'])   # 没有新条目,也没有待编码 chunk
+        self.assertFalse(seen['encoding'], '入库在清理持锁期间就读走快照开编了')
+        self.assertTrue(seen['told'], '等锁期间面板上一声不响')
+
+    def test_project_ingestion_gives_up_instead_of_waiting_forever(self):
+        """等不到锁同样是「什么都没做」,面板上写明原因而不是一句裸异常。"""
+        from kb.maintenance import LockBusy
+        self.hold_the_lock_in_another_process()
+        with patch.object(maintenance, 'WAIT_SECONDS', 0.5):
+            with self.assertRaises(LockBusy):
+                pipeline_stages._ingest_pretagged_sources()
+
+    def test_the_projects_stage_says_why_instead_of_leaking_the_exception(self):
+        """等不到锁 / 等锁期间被停止,面板上各有一句说法。
+
+        不分开接的话两种都落进那句笼统的「入库失败」,而它们的含义正相反:
+        一个是「别人占着锁,这一轮没做」,一个是「你自己按了停止」。
+        """
+        from kb.maintenance import LockBusy
+        done = subprocess.CompletedProcess([], 0, stdout='', stderr='')
+        for boom, status, text in (
+                (LockBusy('占着呢'), 'error', '新条目没入库'),
+                (pipeline_stages._StopWhileWaiting(), 'stopped', '已请求停止')):
+            self.stages.clear()
+            with patch.object(pipeline_stages, '_run_export_script',
+                              return_value=done), \
+                 patch.object(pipeline_stages, '_ingest_pretagged_sources',
+                              side_effect=boom):
+                pipeline_stages._run_projects()
+            said = [s for s in self.stages if s[0] == 'projects' and s[1] == status]
+            self.assertTrue(said, f'{status} 没落下: {self.stages}')
+            self.assertIn(text, said[-1][2])
 
     # ---- 命令行那条入口 ----
     def test_the_cli_index_waits_for_a_cleanup_in_another_process(self):
