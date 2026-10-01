@@ -279,6 +279,23 @@
   存档整段捞进来就走它,这是唯一的逃生口。
 - 下界按 **Asia/Shanghai** 算,因为被比较的 `published` 就是 `fetching.parse_feed` 按这
   个时区格式化出来的;两头不同时区的话每天有 8 小时窗口会差一整天。
+- **`sync._within_history` 只管往后,存量要单独清**(`scripts/feed_trim_history.py`,
+  `scan` 只读 / `run --source <id|名字>` 真清)。RSS 这 9 个订阅是 2026-09-29 同一天建的,
+  在下界这件事存在之前就已经把各自的存档拉进来了。清理**同时会给那个订阅钉上
+  `history_floor`**——不钉的话下一次同步按空下界把整个存档原样再拉一遍,这一趟白做。
+  顺序:备份 → 钉下界 → 删 feeds.db 行 → 删 vault md → `store.remove_missing_documents`。
+  **feeds.db 要先删**:它是「要不要重新导出」的事实来源,后删会留下「文件没了、
+  `exported_hash` 还在」那种既不重建也不存在的半状态。**被别的订阅共享的条目只摘归属、
+  不删 `feed_items` 行**(聚合源和单号源常常收同一篇)。命中收藏、或条目被共享时默认
+  拒绝执行,要 `--allow-favorites` / `--allow-shared` 显式放行。备份是
+  `data/backups/feedtrim-*`(manifest + feed_items JSON + vault md 的 tar);kb.db 那一侧
+  不用备份,它本来就是能从 vault 重建的索引。**清理口径和那道闸必须同一个**
+  (`below_floor` 与 `_within_history` 互为补集,回归里对过),两处各判各的话,清掉的和
+  以后拦掉的不是同一批。管道在跑时直接拒绝(问 `127.0.0.1:8787` 那个状态接口 —— 管道
+  状态是 kb-web 的进程内状态,别的进程只能这么问;连不上 = 服务没起 = 没管道在跑)。
+  2026-10-01 已对 `Hugging Face Blog` 执行过一次(497 条,2024-04-10 ~ 2026-09-22),
+  其余 7 个订阅扫出 1155 条待定 —— **低频长文那几个(Lilian Weng / Karpathy / Sam Altman)
+  的存档很可能正是订阅它们的理由,不要默认清掉**。
 - **测试样本的发布日期必须跟着今天走**(`tests/test_feed_sources.py` 的 `_FRESH`/`DAY`)。
   写死 `2026-09-28` 的 feed 样本过几天就被这道闸挡住,红的却是一堆跟历史下界毫无关系
   的用例。回归 7 条(`test_feed_sources.py`):首次抓取只收窗口内(含边界当天)、**第一次

@@ -263,6 +263,40 @@ class FeedTests(unittest.TestCase):
         reg.save_subscription('rss',{'url':'https://example.org/other.xml'},s['id'])
         self.assertEqual(reg.history_floor(),self.floor_of(s))
 
+    def test_trim_script_picks_the_same_set_the_floor_would_have_rejected(self):
+        """存量清理(scripts/feed_trim_history.py)和往后那道闸必须同一个口径。
+
+        两处各判各的话,清掉的和以后拦掉的不是同一批,库里会留下一段谁也说不
+        清的灰色地带。没有发布时间的照留,理由同 `_within_history`。
+        """
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'feed_trim_history', Path(__file__).resolve().parent.parent / 'scripts' / 'feed_trim_history.py')
+        trim = importlib.util.module_from_spec(spec); spec.loader.exec_module(trim)
+        s = self.source()
+        rows = [self.aged(reg.HISTORY_DAYS + 1), self.aged(reg.HISTORY_DAYS), self.aged(800),
+                {**self.entries()[0], 'url': 'https://example.org/undated', 'published': ''}]
+        floor = trim.planned_floor(reg.subscription('rss', s['id']))
+        self.assertEqual(reg.history_floor(), floor)
+        cut = {r['published'][:10] for r in trim.below_floor(rows, floor)}
+        # 清掉的那些,正是这道闸会拦下的那些 —— 两边互为补集,一条不差。
+        kept = {e['published'][:10] for e in sync._within_history(s, rows)}
+        self.assertEqual(cut | kept, {r['published'][:10] for r in rows})
+        self.assertFalse(cut & kept)
+        self.assertIn('', kept)                      # 无日期的留着
+        self.assertNotIn(floor, cut)                 # 边界当天不清
+
+    def test_trim_script_keeps_an_existing_floor(self):
+        """已经钉过下界就用它自己那个,不按创建日重算。"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'feed_trim_history', Path(__file__).resolve().parent.parent / 'scripts' / 'feed_trim_history.py')
+        trim = importlib.util.module_from_spec(spec); spec.loader.exec_module(trim)
+        s = self.source()
+        with reg.db() as c:
+            c.execute("UPDATE subscriptions SET history_floor='2026-01-01' WHERE id=?", (s['id'],))
+        self.assertEqual('2026-01-01', trim.planned_floor(reg.subscription('rss', s['id'])))
+
     def test_range_does_not_cache_away_out_of_range_entries(self):
         s=self.source()
         entries=self.entries()+[{**self.entries()[0],'url':'https://example.org/old','published':'2026-08-01 08:00'}]
