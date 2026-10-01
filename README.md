@@ -32,6 +32,19 @@
 不接受上面这些,就别用这个项目 —— 只做索引和检索(不碰微信)的那部分可以单独用:
 把已有的 Markdown 目录挂给它,见「[Docker 部署](#docker-部署)」。
 
+## 没有鉴权:默认只听回环,别直接暴露到网上
+
+**kb-web 不做任何身份验证** —— 全仓库没有一行鉴权代码:没有登录、没有 token、没有
+API key 校验。它唯一的保护是**默认只绑在回环地址上**(`kb/server.py` 里 `KB_HOST`
+默认 `127.0.0.1`)。
+
+把 `KB_HOST` 改成 `0.0.0.0`、或者把 8787 端口映射出去之后,**任何能连上这个端口的人**
+都可以读走整个知识库的全文与笔记、调 `/api/chat` 花掉你配置的模型 API key(账单记在
+你头上)、触发采集管道、改配置、删库里的内容。
+
+要从别处访问就走 **SSH 端口转发**(`ssh -L 8787:127.0.0.1:8787 …`)、私有网络,或者
+在前面放一个**自己带鉴权的反向代理**,只让代理连本机端口。细节见 [SECURITY.md](SECURITY.md)。
+
 ## Docker 部署
 
 安装 Docker Engine / Docker Desktop 和 Compose v2，在项目根目录运行：
@@ -208,6 +221,30 @@ cd collector
 `POST /api/keys` 的 `openai_protocol_conversion_enabled`。Key 和 Base URL 的环境变量
 优先级不变，协议开关仍可独立设置。模型列表继续通过 `/models` 拉取，不受开关影响。
 这不是对外的 Responses 代理，不包含 Codex 工具调用协议转发。
+
+## 跑测试
+
+两侧各自一套,都是标准库 `unittest`,不需要联网、不需要模型 key(用到大模型的地方
+走本地桩):
+
+```bash
+# 知识库侧(约 530 条)
+uv run python -m unittest discover -s tests -t . -q
+
+# 采集器侧(约 160 条)。没有 .venv 先跑一次 ./collector/setup.sh
+cd collector && ./.venv/bin/python -m unittest discover -s tests -t . -q
+```
+
+有些测试按环境条件自动 skip,不是失败:
+
+- **浏览器回归**(`test_catgraph_browser` / `test_chat_height` / `test_retired_channel`
+  里的 browser 那组)要 `node` 和一个 `chrome-headless-shell`。按
+  `HEADLESS_SHELL=<可执行文件路径>` 指定,或者装一份 playwright 的无头壳
+  (`npx playwright install chromium-headless-shell`)让它自己探测到。**始终无头、
+  临时 profile,不碰你正在用的浏览器。**
+- **向量相关**的那些要 bge-m3 模型(首次约 2GB),CI 上不下。
+
+单跑一个文件:`uv run python -m unittest tests.test_daily_report -v`。
 
 ## 设计决策备忘
 
