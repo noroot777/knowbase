@@ -6,6 +6,7 @@
 """
 import argparse
 import importlib.util
+import json
 import sqlite3
 import subprocess
 import sys
@@ -356,6 +357,88 @@ class TrimTests(unittest.TestCase):
         self.assertEqual(0, trim.cmd_run(self.args(s, allow_favorites=True)))
         self.assertEqual((False, 0, 0), (self.state(item)['file'],
                                          self.state(item)['documents'], self.favorites()))
+
+    def _star(self, path, note='race-note'):
+        """另开一条连接提交一条带备注的片段收藏(模拟收藏 API)。"""
+        conn = store.connect()
+        try:
+            conn.execute('INSERT INTO favorites(path,quote,note,created_at,updated_at)'
+                         ' VALUES(?,?,?,?,?)',
+                         (path, 'quoted text', note, '2026-10-01 12:00:00',
+                          '2026-10-01 12:00:00'))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_a_favorite_committed_after_approval_is_not_deleted(self):
+        """确认之后、删除之前收藏成功的那篇,不许连备注一起被删掉。
+
+        护栏原来是「查完就关连接」,从那一刻到真正删除之间还有确认、备份打包、
+        进度落盘、逐个 unlink 一整段:收藏 API 在这段时间里返回 200、库里真有
+        那一行,随后 documents 行一删、`ON DELETE CASCADE` 把收藏连用户刚写的
+        备注一起带走,命令还以 0 退出(2026-10-01 第 3 轮审查实测)。索引能从
+        vault 重建,收藏和备注不能。
+        """
+        s = self.sub()
+        item = self.seed(s)
+        real = trim._backup
+
+        def backup_then_star(*a, **kw):
+            out = real(*a, **kw)
+            self._star(item['path'])          # 备份之后、_apply 之前
+            return out
+
+        with patch.object(trim, '_backup', backup_then_star):
+            self.assertEqual(2, trim.cmd_run(self.args(s)))
+        st = self.state(item)
+        self.assertEqual((True, 1, 1, 1),
+                         (st['file'], st['documents'], st['searchable'], self.favorites()))
+        self.assertEqual(1, len(trim._plans(s['id'])))   # 计划留着,能续
+
+        # 显式放行时照删,但要毁掉的那几行连备注一起进备份(md 压缩包里没有它们)
+        self.assertEqual(0, trim.cmd_run(self.args(s, allow_favorites=True)))
+        st = self.state(item)
+        self.assertEqual((False, 0, 0, 0),
+                         (st['file'], st['documents'], st['searchable'], self.favorites()))
+        saved = [json.loads((d / 'favorites.json').read_text(encoding='utf-8'))
+                 for d in (self.root / 'backups').glob('feedtrim-*')
+                 if (d / 'favorites.json').exists()]
+        self.assertEqual(1, len(saved))
+        self.assertEqual(['race-note'], [r['note'] for r in saved[0]])
+
+    def test_the_deletion_window_locks_out_favorite_writes(self):
+        """删除整段持 kb.db 写锁:这期间的收藏写入只能等/报错,不会"成功了又被删"。
+
+        只靠"动手前再查一遍"挡不住查完那一瞬之后提交的那条;真正关掉这条缝的
+        是 `BEGIN IMMEDIATE`。
+        """
+        s = self.sub()
+        item = self.seed(s)
+        side = store.connect()
+        side.execute('PRAGMA busy_timeout=200')
+        seen = {}
+        real = trim._drop_index
+
+        def drop_with_a_racing_star(conn, paths):
+            try:
+                side.execute('INSERT INTO favorites(path,created_at,updated_at)'
+                             ' VALUES(?,?,?)',
+                             (item['path'], '2026-10-01 12:00:00', '2026-10-01 12:00:00'))
+                side.commit()
+                seen['err'] = None
+            except sqlite3.OperationalError as e:
+                side.rollback()
+                seen['err'] = str(e)
+            return real(conn, paths)
+
+        try:
+            with patch.object(trim, '_drop_index', drop_with_a_racing_star):
+                self.assertEqual(0, trim.cmd_run(self.args(s)))
+        finally:
+            side.close()
+        self.assertIn('locked', (seen.get('err') or ''))   # 写锁真的挡住了
+        self.assertEqual(0, self.favorites())
+        self.assertFalse(self.state(item)['file'])
 
     # ---- 备份目录 ----
     def test_two_cleanups_in_the_same_second_get_their_own_backup(self):

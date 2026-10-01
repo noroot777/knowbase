@@ -139,17 +139,33 @@ def _live_paths(paths: list[str]) -> set[str]:
             f'SELECT DISTINCT path FROM feed_items WHERE path IN ({ph})', paths)}
 
 
-def _favorites(paths: list[str]) -> list[str]:
+class FavoritesAppeared(Exception):
+    """动手时发现收藏(多半是这一趟开跑之后才加的),这一轮不删。"""
+
+    def __init__(self, paths: list[str]):
+        super().__init__(f'{len(paths)} 篇在收藏里')
+        self.paths = paths
+
+
+def _favorites(conn, paths: list[str]) -> list[str]:
+    """这些路径里被收藏的那些。**用调用方那条连接查**,不自己开一条。
+
+    真正的闸门是 `_apply` 里那次 —— 它跑在同一条连接的 `BEGIN IMMEDIATE`
+    里,所以「查完」到「删完」之间没有缝。自己开一条连接就做不到这件事:
+    查完即关,收藏 API 照样能在备份/删除期间提交成功(见 `_apply`)。
+    """
     if not paths:
         return []
-    from kb import store
-    conn = store.connect()
-    try:
-        ph = ','.join('?' * len(paths))
-        return [r['path'] for r in conn.execute(
-            f'SELECT path FROM favorites WHERE path IN ({ph})', paths)]
-    finally:
-        conn.close()
+    ph = ','.join('?' * len(paths))
+    # DISTINCT:一篇可以有整篇 + 若干片段好几行,消息和计数说的都是「几篇」。
+    return [r['path'] for r in conn.execute(
+        f'SELECT DISTINCT path FROM favorites WHERE path IN ({ph}) ORDER BY path', paths)]
+
+
+def _favorites_rows(conn, paths: list[str]) -> list[dict]:
+    ph = ','.join('?' * len(paths))
+    return [dict(r) for r in conn.execute(
+        f'SELECT * FROM favorites WHERE path IN ({ph}) ORDER BY id', paths)]
 
 
 def _pipeline_busy() -> str:
@@ -230,24 +246,37 @@ def _cut_feeds(plan: dict) -> None:
                       f'(SELECT item_key FROM subscription_items)', keys)
 
 
-def _drop_index(paths: list[str]) -> int:
+def _drop_index(conn, paths: list[str]) -> int:
+    """删 `documents` 行(级联 chunk/tag/entity/收藏与向量)。
+
+    连接由 `_apply` 给 —— 收藏复查和这一步必须是**同一条**连接上的同一个写
+    事务。另开一条连接去删就是跟自己抢写锁,当场自锁。
+    """
     from kb import store
-    conn = store.connect()
-    try:
-        alive = {r['path'] for r in conn.execute('SELECT path FROM documents')} - set(paths)
-        dead = store.remove_missing_documents(conn, alive)
-        conn.commit()
-    finally:
-        conn.close()
-    return dead
+    alive = {r['path'] for r in conn.execute('SELECT path FROM documents')} - set(paths)
+    return store.remove_missing_documents(conn, alive)
 
 
-def _apply(out: Path, plan: dict) -> None:
+def _apply(out: Path, plan: dict, allow_favorites: bool = False) -> None:
     """按 feeds.db → vault → kb.db 往下做;每一步幂等,做完就记一笔。
 
     顺序要紧:先钉下界(不钉的话下一次同步把存档原样再拉一遍),再删 feeds.db
     的行 —— 它是「要不要重新导出」的事实来源,先删它才不会留下「文件没了、
     exported_hash 还在」那种既不重建也不存在的半状态。
+
+    **删文件和删索引整段跑在 kb.db 的一个 `BEGIN IMMEDIATE` 里,收藏的最终
+    复查也在同一条连接的同一个事务里做。** 收藏护栏原来是「查完就关连接」,
+    从那一刻到真正删除之间有备份打包、进度落盘、逐个 unlink 这么长一段 ——
+    用户在这段时间里收藏一篇还读得到的文章,收藏 API 返回 200、库里真有那
+    一行,随后 `remove_missing_documents` 删掉 `documents` 行、`favorites`
+    的 `ON DELETE CASCADE` 把它连同用户刚写的备注一起带走,命令还以 0 退出
+    (2026-10-01 第 3 轮审查实测,整篇和带备注的片段各复现三次)。索引能从
+    vault 重建,**收藏和备注不能** —— 备份里压根没有它们。
+    `BEGIN IMMEDIATE` 当场拿到 kb.db 的写锁,于是这期间的收藏写入只有两种
+    结局:赶在我们取锁之前提交成功(那它就会被这次复查看见、把这一轮拦下),
+    或者等/报错(`store.connect` 的 `timeout=30`)—— 不会再有「成功了又被
+    静默删掉」这一档。清理锁 `reg.trim_lock()` 管不了这件事:收藏 API 不认
+    它,只有 kb.db 自己的写锁挡得住。
     """
     if not plan.get('feeds'):
         _cut_feeds(plan)
@@ -255,18 +284,37 @@ def _apply(out: Path, plan: dict) -> None:
         print(f"  feeds.db 已清,history_floor={plan['floor']}")
     # 还有 feed_items 行指着的路径一律跳过:计划是动手之前算的,这一道是兜底。
     dead = [p for p in plan['paths'] if p not in _live_paths(plan['paths'])]
-    if not plan.get('vault'):
-        gone = 0
-        for p in dead:
-            fp = VAULT_ROOT / p
-            if fp.exists():
-                fp.unlink()
-                gone += 1
-        _mark(out, plan, 'vault')
-        print(f'  vault 删除 {gone} 个 md')
-    if not plan.get('index'):
-        print(f'  kb.db 删除 {_drop_index(dead)} 篇文档(级联 chunk/tag/entity 与向量)')
-        _mark(out, plan, 'index')
+    from kb import store
+    conn = store.connect()
+    try:
+        conn.execute('BEGIN IMMEDIATE')          # 这一刻起收藏写不进来
+        if (fav := _favorites(conn, dead)) and not allow_favorites:
+            conn.rollback()
+            raise FavoritesAppeared(fav)
+        if fav:
+            # 显式放行时也把要毁掉的那几行(备注、片段锚、状态、行动卡)存进
+            # 备份 —— 它们不在 vault 里,md 压缩包重建不出来。
+            (out / 'favorites.json').write_text(
+                json.dumps(_favorites_rows(conn, dead), ensure_ascii=False, indent=1),
+                encoding='utf-8')
+        if not plan.get('vault'):
+            gone = 0
+            for p in dead:
+                fp = VAULT_ROOT / p
+                if fp.exists():
+                    fp.unlink()
+                    gone += 1
+            _mark(out, plan, 'vault')
+            print(f'  vault 删除 {gone} 个 md')
+        if not plan.get('index'):
+            dropped = _drop_index(conn, dead)
+            conn.commit()
+            _mark(out, plan, 'index')
+            print(f'  kb.db 删除 {dropped} 篇文档(级联 chunk/tag/entity 与向量)')
+        else:
+            conn.commit()
+    finally:
+        conn.close()
     _mark(out, plan, 'done')
 
 
@@ -350,15 +398,16 @@ def cmd_run(args) -> int:
             # 收藏起来,重跑(没加 --allow-favorites)照样把文件、documents 和
             # 收藏一起删掉,退出码还是 0(2026-10-01 第 2 轮审查实测)。所以按
             # **此刻**真要删的那几篇再查一遍。
-            dead = [p for p in plan['paths'] if p not in _live_paths(plan['paths'])]
-            if (fav := _favorites(dead)) and not args.allow_favorites:
-                print(f'这份没做完的清理({out})里有 {len(fav)} 篇在收藏里:\n  '
-                      + '\n  '.join(fav[:10])
-                      + '\n收藏是用户显式留下的(可能是这次失败之后才加的),'
-                        '确认要删加 --allow-favorites。', file=sys.stderr)
-                return 2
             print(f'续上没做完的那一份:{out}')
-            _apply(out, plan)
+            try:
+                _apply(out, plan, args.allow_favorites)
+            except FavoritesAppeared as e:
+                print(f'这份没做完的清理({out})里有 {len(e.paths)} 篇在收藏里:\n  '
+                      + '\n  '.join(e.paths[:10])
+                      + '\n收藏是用户显式留下的(可能是这次失败之后才加的),'
+                        '确认要删加 --allow-favorites。计划留着,改完参数能接着续。',
+                      file=sys.stderr)
+                return 2
         if left:
             with reg.db() as c:
                 source = dict(c.execute('SELECT * FROM subscriptions WHERE id=?',
@@ -395,7 +444,15 @@ def cmd_run(args) -> int:
             print(f'{len(shared)} 条还被别的订阅收录着:这边只摘掉归属,文件和索引'
                   f'留给那边。确认请加 --allow-shared。', file=sys.stderr)
             return 2
-        if (fav := _favorites(paths)) and not args.allow_favorites:
+        # 早一道:动手之前就把话说清楚(省掉建备份目录)。真闸门在 `_apply` 的
+        # 写事务里 —— 这里查完到那里删完之间还有确认、备份、unlink 一整段。
+        from kb import store as _store
+        _c = _store.connect()
+        try:
+            fav = _favorites(_c, paths)
+        finally:
+            _c.close()
+        if fav and not args.allow_favorites:
             print(f'这批里有 {len(fav)} 篇在收藏里:\n  ' + '\n  '.join(fav[:10])
                   + '\n收藏是用户显式留下的,确认要删加 --allow-favorites。', file=sys.stderr)
             return 2
@@ -413,7 +470,15 @@ def cmd_run(args) -> int:
                 'keys': keys, 'paths': paths}
         _mark(out, plan, 'planned')
         print(f'  备份 → {out}')
-        _apply(out, plan)
+        try:
+            _apply(out, plan, args.allow_favorites)
+        except FavoritesAppeared as e:
+            print(f'这一趟开跑之后有 {len(e.paths)} 篇被收藏了:\n  '
+                  + '\n  '.join(e.paths[:10])
+                  + '\n收藏连备注一起删掉就找不回来了,所以这一轮不删。'
+                    f'计划留在 {out},确认要删加 --allow-favorites 续跑。',
+                  file=sys.stderr)
+            return 2
     return 0
 
 
