@@ -8,7 +8,7 @@ import re
 
 from src.utils.helpers import time_now
 
-LATEST_SCHEMA_VERSION = 15
+LATEST_SCHEMA_VERSION = 16
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -150,6 +150,15 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (15, time_now()),
+        )
+        conn.commit()
+        current = 15
+
+    if current < 16:
+        _migrate_to_v16(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (16, time_now()),
         )
         conn.commit()
 
@@ -484,3 +493,21 @@ def _migrate_to_v15(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()}
     if "cover_path" in cols:
         conn.execute("ALTER TABLE articles DROP COLUMN cover_path")
+
+
+def _migrate_to_v16(conn: sqlite3.Connection) -> None:
+    """删掉 accounts.display_checked_at(改名核对不再需要按天节流)。
+
+    v13 加这一列是因为那时核对昵称要**单独抓一篇正文页**,只为读里面那行
+    `var nickname`——每个号每 7 天一次请求,所以得记下"上次什么时候核对的"。
+    现在名字直接从本机微信的会话列表上读(见 local_accounts.refresh_display_names),
+    零请求、每轮都核对,没有节流可言,这一列也就没有读取方了。
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts'"
+    ).fetchone()
+    if not row:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+    if "display_checked_at" in cols:
+        conn.execute("ALTER TABLE accounts DROP COLUMN display_checked_at")

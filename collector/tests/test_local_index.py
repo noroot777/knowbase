@@ -279,7 +279,7 @@ class IndexTests(unittest.TestCase):
         self.assertTrue(all(r[0] for r in self.repo.conn.execute("SELECT latest_crawl_at FROM accounts")))
         with patch("src.collect.local_runner.collect", return_value=result), \
              contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.EXIT_OK, cli.main(["collect", "--channel", "local"]))
+            self.assertEqual(cli.EXIT_OK, cli.main(["collect"]))
 
     def test_database_failure_does_not_prevent_other_source_timestamp(self):
         self.repo.enable_crawl_account("其他", "biz-b")

@@ -153,8 +153,10 @@ class AddByNameTests(_Base):
     def test_adding_by_name_resolves_locally_and_never_touches_the_platform(self):
         import api
 
+        # 公众平台那条路连函数都不剩了:加号从此只认本机会话,没有凭证可过期
+        self.assertFalse(hasattr(api, "_search_biz"))
         with patch("src.collect.local_accounts.LocalReader", return_value=self.reader), \
-             patch.object(api, "_search_biz", side_effect=AssertionError("不该搜公众平台")):
+             patch("requests.get", side_effect=AssertionError("加号不该走网络")):
             code, _ = self.add("索引里的号")
         self.assertEqual(0, code)
         self.assertEqual(("索引里的号", "biz-indexed"), self.repo.conn.execute(

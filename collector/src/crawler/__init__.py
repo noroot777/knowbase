@@ -1,6 +1,2 @@
-# -*- coding:utf-8 -*-
-# @description : crawler模块初始化文件
-
-from .wechat_request import WechatRequest
-
-__all__ = ['WechatRequest']
+# -*- coding: utf-8 -*-
+"""从本机绿泡泡数据库发现公众号推送。"""

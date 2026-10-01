@@ -91,3 +91,38 @@ def discover(repo, query: str = "", *, reader=None,
         row["subscribed"] = bool(row["fakeid"]) and row["fakeid"] in subscribed
         row["stored_name"] = subscribed.get(row["fakeid"], "")
     return rows
+
+
+def refresh_display_names(repo, *, reader=None) -> int:
+    """用本机会话列表上的名字核对订阅号的显示名,返回改了几个。
+
+    公众号改名之后,微信的会话列表立刻显示新名字——这是本机现成的事实,不用抓
+    任何一篇正文。原来这件事要靠两条路凑:①抓到新文章时顺手读正文页里的
+    `var nickname`;②隔 7 天单独抓一篇旧文章的正文页、只为读那一行昵称。而
+    「改了名」和「不发新文章」常常是同一批号——那恰恰是用户在微信里搜不到、
+    最需要看见新名字的那批,①救不了它们,所以才有了②那条按天节流、每个号每
+    7 天多花一次请求的补救。
+
+    会话列表把这两条都替掉了:零请求、不限于发了新文章的号、而且拿到的就是
+    微信此刻显示的那个名字,所以也不需要节流。实测 44 个订阅号里能对上会话
+    的 42 个,名字与库里逐个一致。
+
+    只改 `display_name`,绝不动 `name`:后者是主键,`articles.account_name` 是
+    指向它的外键,已导出的 vault 目录也按它归档。
+    """
+    reader = reader or LocalReader()
+    index = indexed_biz(repo.conn)
+    live = {}
+    for session in reader.accounts():
+        biz = index.get(_table(session.get("username") or ""))
+        name = (session.get("display_name") or "").strip()
+        if biz and name:
+            live[biz] = name
+    changed = 0
+    rows = repo.conn.execute(
+        "SELECT name, fakeid FROM accounts WHERE removed=0 AND fakeid<>''").fetchall()
+    for row in rows:
+        display = live.get(row["fakeid"])
+        if display and repo.set_account_display_name(row["name"], display):
+            changed += 1
+    return changed

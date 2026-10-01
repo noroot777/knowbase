@@ -13,7 +13,6 @@ from urllib.parse import quote, urlparse
 import requests
 from lxml import etree
 
-from src.utils.data_manager import data_manager, headers
 from src.utils.helpers import message_unavailable
 
 # 抓取失败的两种哨兵:FETCH_ERROR 是临时故障(网络、反爬、解析不出正文),
@@ -55,23 +54,15 @@ _ALLOWED_IMAGE_HOSTS = frozenset(
 
 
 _MP_ORIGIN = "https://mp.weixin.qq.com/"
+# 公众号文章页是公开的,匿名就能抓,不需要任何凭证或 Cookie。UA 要像浏览器:
+# 默认的 python-requests 会被挡下来。Referer 指回站内,少一些风控。
+_BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/86.0.4240.198 Safari/537.36")
 
 
 def _request_headers() -> dict[str, str]:
-    """抓正文用的请求头:基础 UA + 扫码凭证里的 Cookie(有就带上)。
-
-    Cookie 不是必需的 —— 公开文章页匿名也打得开;但带上之后被风控拦下的
-    概率明显低一些,所以读不到凭证时只是不带,不作为失败。
-    """
-    h = dict(headers)
-    try:
-        cookie = (data_manager.id_info or {}).get("cookie", "")
-        if cookie:
-            h["Cookie"] = cookie
-    except Exception:
-        pass
-    h["Referer"] = _MP_ORIGIN
-    return h
+    """抓正文用的请求头。"""
+    return {"User-Agent": _BROWSER_UA, "Referer": _MP_ORIGIN}
 
 
 def _find_rich_media_div(tree: etree._Element) -> list:

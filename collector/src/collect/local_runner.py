@@ -19,6 +19,7 @@ def local_status() -> dict:
 
 
 def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
+    from src.collect.local_accounts import refresh_display_names
     from src.collect.local_index import ArticleIndex
     from src.db.repository import ArticleRepository
     from src.utils.helpers import time_now
@@ -47,6 +48,12 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
             if accounts:
                 index = ArticleIndex(repo)
                 active = index.refresh(reader, progress, result["errors"].append)
+                # 改名核对:会话列表上的名字就是微信此刻显示的那个,零请求。
+                # 放在发现之后,这样新订阅的号在同一轮里就能解出归属、对上名字。
+                try:
+                    refresh_display_names(repo, reader=reader)
+                except LocalReaderError as e:
+                    result["errors"].append(f"核对公众号名字: {e}")
                 covered = index.covered_accounts(accounts, active)
                 result.update(index.discovery_issues(accounts, active))
                 # 已有覆盖的账号统一记录最近完成发现检查的时间；坏推送单独诊断。

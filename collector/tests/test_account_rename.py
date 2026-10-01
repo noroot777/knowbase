@@ -208,10 +208,12 @@ class ReSubscribeByNewNameTests(unittest.TestCase):
 
 
 class RefreshDisplayNameTests(unittest.TestCase):
-    """不发新文章的号也得能改名。
+    """不发新文章的号也得能改名,而且这件事不该再花一次请求。
 
-    改名原本只搭在"抓新文章正文"这趟车上,可最需要看到新名字的恰恰是那些
-    安静下来、又在微信里改了名的号——它们永远等不到那趟车。
+    改名原本只搭在"抓新文章正文"这趟车上(正文页里那行 `var nickname`),可最
+    需要看到新名字的恰恰是那些安静下来、又在微信里改了名的号——它们永远等不到
+    那趟车。原来的补救是隔 7 天单独抓一篇旧文章的正文页只为读昵称;现在名字直接
+    从本机微信的会话列表上读,零请求,所以也不需要节流。
     """
 
     def setUp(self) -> None:
@@ -222,163 +224,121 @@ class RefreshDisplayNameTests(unittest.TestCase):
         conn_mod.DATA_DIR = tmp
         conn_mod._db_ready = False
 
+        from src.crawler.local_wechat import LocalReader
         from src.db.repository import ArticleRepository
 
         self.repo = ArticleRepository()
         self.repo.enable_crawl_account("旧名字", "fake-1")
-        self.repo.conn.execute(
-            "INSERT INTO articles (id, account_name, title, link, create_time) "
-            "VALUES ('a1', '旧名字', 't', 'https://mp.weixin.qq.com/s?x=1', "
-            "'2026-08-27 10:00')")
         self.repo.commit()
+        self.reader = LocalReader()
+        self.reader.check = mock.Mock()
+        self.reader.accounts = mock.Mock(return_value=[
+            {"username": "gh_one", "display_name": "新名字", "last_timestamp": 1}])
+        self._index("gh_one", "fake-1")
 
     def tearDown(self) -> None:
         self.repo.close()
         conn_mod.DEFAULT_DB_PATH, conn_mod.DATA_DIR, conn_mod._db_ready = self._saved
         self._tmp.cleanup()
 
+    def _index(self, username: str, biz: str) -> None:
+        """把「这个会话属于哪个号」记进发现索引(每轮本地采集自己会建)。"""
+        from src.collect.local_accounts import _table
+
+        self.repo.conn.execute(
+            "INSERT INTO local_wechat_articles (source_key, id, biz, create_time,"
+            " message_time, local_id, article_json)"
+            " VALUES (?,?,?,'2026-08-27 10:00',1,1,'{}')",
+            (f"biz_message_0.db:{_table(username)}", f"{biz}-a", biz))
+        self.repo.commit()
+
     def _display(self) -> str:
         return self.repo.conn.execute(
             "SELECT display_name FROM accounts WHERE name='旧名字'").fetchone()[0]
 
-    def _age_the_check(self, days: int = 8) -> None:
-        """把"上次核对时间"往前推,模拟节流窗口已经过去。"""
-        old = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
-        self.repo.conn.execute(
-            "UPDATE accounts SET display_checked_at=? WHERE name='旧名字'", (old,))
-        self.repo.commit()
+    def _run(self) -> int:
+        from src.collect.local_accounts import refresh_display_names
 
-    def _run(self, nickname: str = "新名字", *, boom: bool = False, by_link=None):
-        """跑一次核对。by_link 给"哪条链接返回什么昵称",没给就一律返回 nickname。"""
-        from src.collect import runner
+        return refresh_display_names(self.repo, reader=self.reader)
 
-        calls = []
-
-        def fetch(link, num=0):
-            calls.append(link)
-            if boom:
-                raise RuntimeError("凭证没了")
-            got = (by_link or {}).get(link, nickname) if by_link else nickname
-            return "正文", "<p>正文</p>", got
-
-        with mock.patch("src.utils.wechat_body.fetch_article_body_full", fetch):
-            runner._refresh_display_name(self.repo, "旧名字")
-        self.repo.commit()
-        return calls
-
-    def _add_article(self, aid: str, link: str, when: str, *,
-                     wx_deleted: int = 0, user_deleted: int = 0) -> None:
-        self.repo.conn.execute(
-            "INSERT INTO articles (id, account_name, title, link, create_time, "
-            "is_wx_deleted, is_user_deleted) VALUES (?, '旧名字', 't', ?, ?, ?, ?)",
-            (aid, link, when, wx_deleted, user_deleted))
-        self.repo.commit()
-
-    def test_deleted_article_does_not_block_the_refresh(self) -> None:
-        """最新那篇被微信删了,不能就此卡住——真实库里就有这么一个号。
-
-        已删文章的链接打开是"该内容已被发布者删除",页面上没有 var nickname。
-        多图文的次条被删尤其常见,而它和头条 create_time 一样、排在头条前面。
-        """
-        self._add_article("a2", "https://bad.example", "2026-08-28 12:00",
-                          wx_deleted=1)
-        self._add_article("a3", "https://good.example", "2026-08-28 11:00")
-
-        calls = self._run(nickname="新名字")
-        self.assertNotIn("https://bad.example", calls)   # 压根不该去请求它
-        self.assertEqual("新名字", self._display())
-
-    def test_falls_back_to_an_older_article_when_the_page_has_no_nickname(self) -> None:
-        """打开了但读不出昵称(刚被删还没标上),往下一篇退,而不是这轮放弃。"""
-        self._add_article("a2", "https://blank.example", "2026-08-28 12:00")
-        self._add_article("a3", "https://good.example", "2026-08-28 11:00")
-
-        calls = self._run(by_link={"https://blank.example": "",
-                                   "https://good.example": "新名字"})
-        self.assertEqual(["https://blank.example", "https://good.example"], calls)
-        self.assertEqual("新名字", self._display())
-
-    def test_fallback_is_bounded(self) -> None:
-        """备选有上限,不能一个号把整本历史翻一遍。"""
-        from src.collect import runner
-
-        for i in range(6):
-            self._add_article(f"b{i}", f"https://blank{i}.example",
-                              f"2026-08-2{i} 12:00")
-        calls = self._run(nickname="")
-        self.assertEqual(runner._NICKNAME_CANDIDATES, len(calls))
-        self.assertEqual("", self._display())            # 全没读到,不记核对时间
-
-    def test_picks_up_the_new_name_without_a_new_article(self) -> None:
-        self.assertEqual(1, len(self._run()))
-        self.assertEqual("新名字", self._display())
-
-    def test_second_run_costs_nothing(self) -> None:
-        """核对过就别再抓:44 个号每轮各白抓一篇正文是实打实的开销。"""
-        self._run()
-        self.assertEqual([], self._run())
-
-    def test_recheck_finds_a_later_rename(self) -> None:
-        """节流到期后要能发现第二次改名。
-
-        只看 display_name 空不空的话,补上一次之后就再也不抓第二次——停更号
-        以后再改名就永远停在旧显示名上,而停更号正是这条路径要救的对象。
-        """
-        self._run(nickname="第一次改名")
-        self.assertEqual("第一次改名", self._display())
-        self.assertEqual([], self._run())            # 还在节流窗口里
-
-        self._age_the_check()
-        self.assertEqual(1, len(self._run(nickname="第二次改名")))
-        self.assertEqual("第二次改名", self._display())
-
-    def test_recheck_interval_is_tunable(self) -> None:
-        self._run()
-        with mock.patch.dict(os.environ, {"GZH_DISPLAY_RECHECK_DAYS": "0"}):
-            # 下限是 1 天,乱填/填 0 都不会退化成每轮都抓
-            self.assertEqual([], self._run())
-        self._age_the_check()
-        with mock.patch.dict(os.environ, {"GZH_DISPLAY_RECHECK_DAYS": "30"}):
-            self.assertEqual([], self._run())        # 30 天窗口里,8 天前核对过不算过期
-
-    def test_unreadable_timestamp_is_treated_as_never_checked(self) -> None:
-        self._run()
-        self.repo.conn.execute(
-            "UPDATE accounts SET display_checked_at='不是时间' WHERE name='旧名字'")
-        self.repo.commit()
-        self.assertEqual(1, len(self._run(nickname="又改了")))
-        self.assertEqual("又改了", self._display())
-
-    def test_unchanged_name_is_still_throttled(self) -> None:
-        """昵称跟主键一样也要记一笔核对时间,否则这个号每轮都会重新抓。"""
-        self._run(nickname="旧名字")
-        self.assertEqual("旧名字", self._display())
-        self.assertEqual([], self._run())
-
-    def test_unreadable_nickname_does_not_count_as_checked(self) -> None:
-        """页面读不出昵称就不算核对过,下一轮还要再试。"""
-        self._run(nickname="")
-        self.assertEqual("", self._display())
-        self.assertEqual(1, len(self._run(nickname="新名字")))
-
-    def test_failure_is_swallowed(self) -> None:
-        """抓不动是常事(凭证过期/限流),不能让它把这一轮采集带崩。"""
-        self._run(boom=True)
-        self.assertEqual("", self._display())
-
-    def test_account_without_articles_is_skipped(self) -> None:
-        """新订阅还没采过的号没有正文可读,跳过就是了。"""
-        from src.collect import runner
-
-        self.repo.enable_crawl_account("空号", "fake-2")
-        self.repo.commit()
-        calls = []
-        # 别用 side_effect 抛异常来断言"没被调用":_refresh_display_name 捕获
-        # Exception,AssertionError 也是 Exception,会被吞掉,测试就成了假通过
+    def test_picks_up_the_new_name_without_a_new_article_or_a_request(self) -> None:
+        """库里一篇文章都没有,也不发一个请求——名字就在会话列表上。"""
         with mock.patch("src.utils.wechat_body.fetch_article_body_full",
-                        lambda link, num=0: calls.append(link) or ("", "", "")):
-            runner._refresh_display_name(self.repo, "空号")
-        self.assertEqual([], calls)
+                        side_effect=AssertionError("不该去抓正文页")):
+            self.assertEqual(1, self._run())
+        self.assertEqual("新名字", self._display())
+
+    def test_second_run_costs_nothing_and_a_later_rename_is_still_found(self) -> None:
+        self._run()
+        self.assertEqual(0, self._run())          # 名字没变,一行都不写
+        self.reader.accounts.return_value[0]["display_name"] = "更新的名字"
+        self.assertEqual(1, self._run())
+        self.assertEqual("更新的名字", self._display())
+
+    def test_the_archive_key_is_never_touched(self) -> None:
+        self._run()
+        self.assertEqual([("旧名字", "fake-1", "新名字")], [
+            tuple(r) for r in self.repo.conn.execute(
+                "SELECT name, fakeid, display_name FROM accounts")])
+
+    def test_each_name_goes_to_its_own_biz_never_to_the_neighbour(self) -> None:
+        """配对只认 `__biz`。会话列表的顺序、重名、谁在前面都不算线索。
+
+        注入「按会话顺序取第一个名字」时这条会红,上面那几条全绿——它们只有
+        一个号一个会话,瞎配也能碰对。而写错一个名字的后果不是"显示旧名",
+        是面板上甲号挂着乙号的名字,用户照它去微信里找根本找不到。
+        """
+        self.repo.enable_crawl_account("另一个旧名字", "fake-2")
+        self.repo.commit()
+        self._index("gh_two", "fake-2")
+        # 故意把乙排在前面,顺序和库里那两行相反
+        self.reader.accounts.return_value = [
+            {"username": "gh_two", "display_name": "乙的新名字", "last_timestamp": 2},
+            {"username": "gh_one", "display_name": "甲的新名字", "last_timestamp": 1}]
+        self.assertEqual(2, self._run())
+        self.assertEqual([("旧名字", "fake-1", "甲的新名字"),
+                          ("另一个旧名字", "fake-2", "乙的新名字")],
+                         sorted((tuple(r) for r in self.repo.conn.execute(
+                             "SELECT name, fakeid, display_name FROM accounts")),
+                                key=lambda r: r[1]))
+
+    def test_a_session_whose_owner_is_still_unknown_is_left_alone(self) -> None:
+        """归属还没解出来的会话不能靠名字硬认——认错了就是把名字写到别人头上。"""
+        self.repo.conn.execute("DELETE FROM local_wechat_articles")
+        self.repo.commit()
+        self.assertEqual(0, self._run())
+        self.assertFalse(self._display())
+
+    def test_accounts_missing_from_the_session_list_keep_their_name(self) -> None:
+        """本机没有这个号的会话时保持原样,不要把显示名清空。"""
+        self.repo.set_account_display_name("旧名字", "之前记下的名字")
+        self.repo.commit()
+        self.reader.accounts.return_value = []
+        self.assertEqual(0, self._run())
+        self.assertEqual("之前记下的名字", self._display())
+
+    def test_a_removed_account_is_not_resurrected_by_the_session_list(self) -> None:
+        self.repo.remove_account_from_list("旧名字")
+        self.repo.commit()
+        self.assertEqual(0, self._run())
+
+    def test_a_reader_failure_is_reported_as_a_collect_error_not_a_crash(self) -> None:
+        """核对名字挂了不该把整轮采集带崩:它是顺手做的一件事,不是采集本身。"""
+        from src.collect.local_runner import collect
+        from src.crawler.local_wechat import LocalReaderError
+
+        with mock.patch("src.collect.local_accounts.refresh_display_names",
+                        side_effect=LocalReaderError("会话列表读不动")), \
+             mock.patch("src.collect.local_index.ArticleIndex.refresh", return_value=[]), \
+             mock.patch("src.collect.local_index.ArticleIndex.covered_accounts",
+                        return_value=set()), \
+             mock.patch("src.collect.local_index.ArticleIndex.discovery_issues",
+                        return_value={}), \
+             mock.patch("src.collect.local_index.ArticleIndex.failed_accounts",
+                        return_value=set()), \
+             mock.patch("src.collect.local_index.ArticleIndex.query", return_value=[]):
+            result = collect(lambda event: None, reader=self.reader)
+        self.assertEqual(["核对公众号名字: 会话列表读不动"], result["errors"])
 
 
 if __name__ == "__main__":
