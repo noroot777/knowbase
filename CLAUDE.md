@@ -175,8 +175,8 @@
   会怎样),外加加完之后另一条同名候选仍然不是「已订阅」、以及缩小搜索只剩一条时
   那两种写法各一条。
 - **一个档案名不许改挂到另一个 `__biz` 上**(`enable_crawl_account` 抛
-  `AccountNameTaken`,`name_held_by` 是唯一判据)。`accounts.name` 是主键、
-  `articles.account_name` 是指向它的外键、导出的 vault 目录也按它归档,所以原来那句
+  `AccountNameTaken`)。`accounts.name` 是主键、`articles.account_name` 是指向它的
+  外键、导出的 vault 目录也按它归档,所以原来那句
   `ON CONFLICT(name) DO UPDATE SET fakeid=excluded.fakeid` 碰上"两个号同名"就是把
   第一个号的**全部历史文章连同导出目录**接到第二个号的身份上:外键全都合法、提示
   还是「已添加」,订阅列表看起来只是少了一个号(2026-10-01 第 2 轮审查实测:两条
@@ -186,15 +186,38 @@
   名,不是写库这一步能顺手定的。
   **拒绝不是死路**:没有历史文章的号移除时整行就真删了(`remove_account_from_list`),
   所以"同名两个号、第一次点错了"自己有退路,不需要在写库这一步替用户判断谁该让位。
-  两条豁免缺一不可:①`import:` 开头的占位键不算"另一个号"(`upsert_import_account`
-  留下的,本来就等着被真归属填上;当成另一个号会让这类存量账号永久订阅不了);
-  ②**空 fakeid 的调用不许把已有归属抹成空**(`fakeid=CASE WHEN excluded.fakeid <> ''
-  …`)——那种调用只是在说"确保这个名字在采集列表里",没有在声明身份。
+  **判据就在那条 UPSERT 自己的 `DO UPDATE … WHERE` 里,不许在 Python 那边先
+  SELECT 一次。** 先查后写是 TOCTOU:两个请求都读到"这个名字没人占"(面板上那个
+  `tgtBusy` 只管单个页面,管不到另一个标签页、更管不到独立的 CLI 进程),随后第二
+  条 UPSERT 照样把第一条刚写进去的 fakeid 盖掉,两边都报「已添加」——和这条规则
+  本来要挡的事故一模一样,只是把窗口从"永远"缩成了"同时"(2026-10-01 第 3 轮审查
+  实测:两个线程各一条连接抢同一个名字 50/50 复现,真实 HTTP→CLI→仓储一条链也
+  复现)。python 的 `sqlite3` 默认 `isolation_level=''` 下 **SELECT 压根不开事务、
+  不持任何锁**,所以那次预检和随后的写入之间没有任何东西把它们绑在一起;而 SQLite
+  把写入串行化,判据待在写语句的 WHERE 里才和那次写入同生共死,放行不了就是 0 行
+  (`cursor.rowcount == 0` 就是拒绝信号,由调用方抛 `AccountNameTaken`)。
+  **不走"`BEGIN IMMEDIATE` 包住读+写"**:这个连接可能已经在别人开的事务里,而 WAL
+  下拿不到快照报的是 `SQLITE_BUSY_SNAPSHOT`,`busy_timeout` 管不着它。`name_held_by`
+  降级成**只给错误文案用的读取**——规则只有 WHERE 那一份,它只回答"现在挂在谁名下"。
+  四句豁免缺一不可,**每一句各有一条回归钉着**:①`excluded.fakeid = ''`,空 fakeid
+  的调用不许把已有归属抹成空(`fakeid=CASE WHEN excluded.fakeid <> '' …`)——那种
+  调用只是在说"确保这个名字在采集列表里",没有在声明身份;②`accounts.fakeid = ''`,
+  归属还没核实的名字不算"另一个号",真 `__biz` 认出来要填得进去;③
+  `accounts.fakeid = excluded.fakeid`,同一个号重新订阅只更新;④`import:` 开头的
+  占位键不算"另一个号"(`upsert_import_account` 留下的,本来就等着被真归属填上;
+  当成另一个号会让这类存量账号永久订阅不了)。**②那句是逐句反向验证补出来的**:
+  去掉它整套测试照旧全绿,而它一旦没了,空 fakeid 的行就永远订阅不了。
   回归:`collector/tests/test_account_subscription.py` 的 `SameNameDifferentAccountTests`
   (拒掉之后第一个号和它那篇文章一个字没动、外键干净 / 移除之后名字让得出来 /
-  空 fakeid 不抹归属 / 占位键还能被认领)+ `test_local_accounts.py` 里走真 CLI 的
-  那条;探针那边**把 mock 后端按名字主键改成会拒**——只往数组里 push 的话,"同名
-  第二个号"这条路在页面上看起来永远是成功的(第 2 轮审查指的就是这个 mock 不够真)。
+  四句豁免各一条 / **两条独立连接同时抢同一个名字,8 组各一次,只能一个赢、库里
+  只留赢家那个 fakeid** / **抢输的那一边不许把赢家的历史文章带走** / **两个真
+  subprocess 跑 `cli accounts add`,退出码必须是一个 0 一个 1**)+
+  `test_local_accounts.py` 里走真 CLI 的那条;探针那边**把 mock 后端按名字主键改成
+  会拒**——只往数组里 push 的话,"同名第二个号"这条路在页面上看起来永远是成功的
+  (第 2 轮审查指的就是这个 mock 不够真)。并发那三条**必须是真的两个执行体**:
+  同进程两条连接就足以证明闸门不靠进程内状态(sqlite3 不共享 cache),再加两个真
+  进程那一条,是因为"先 SELECT 后写"那一版在两个进程下同样 50/50 —— 注入回去时它
+  报的正是 `[0, 0]`(两个都说成功)。
 - **本地库只负责文章发现,正文继续按链接抓取。** 本地读取只能通过已配置的
   `rion-wechat-cli`,须确认 `live_database_read_ok`,不允许通知预览替代、自动获取
   密钥或操作微信。归属最终按推送 URL 的 `__biz` 核实,不能以同名自动匹配。
