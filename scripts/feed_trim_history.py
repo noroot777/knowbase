@@ -80,6 +80,33 @@ def below_floor(rows: list[sqlite3.Row], floor: str) -> list[dict]:
     return [dict(r) for r in rows if r['published'] and r['published'][:10] < floor]
 
 
+def find_source(conn, token: str) -> tuple[dict | None, str]:
+    """按 id 或名字定位订阅,返回 `(订阅, 拦下的原因)`。
+
+    **纯数字一律按 id 查,不许退回名字。** 原来是 `id=? OR name=?` 再
+    `fetchone()`:一个**名字恰好叫「62」**的订阅会抢在 id=62 前面被取走 ——
+    实测 `run --source 62` 清掉的是 61 号那个名叫「62」的订阅,真正点名的 62 号
+    一个字节没动,而且是确定性的(2026-10-01 第 2 轮审查实测)。
+
+    **名字命中多条时拒绝执行、要求改用 id。** 注册表允许重名(同名不同链接是
+    正当形态),挑哪一条都可能是错的那一条,而这是不可逆删除。
+    """
+    if token.isdigit():
+        row = conn.execute('SELECT * FROM subscriptions WHERE id=?', (int(token),)).fetchone()
+        if not row:
+            return None, f'找不到 id 为 {token} 的订阅(先跑 scan 看 id)'
+        return dict(row), ''
+    rows = conn.execute('SELECT * FROM subscriptions WHERE name=? ORDER BY id',
+                        (token,)).fetchall()
+    if not rows:
+        return None, f'找不到叫「{token}」的订阅(先跑 scan 看 id)'
+    if len(rows) > 1:
+        ids = '、'.join(str(r['id']) for r in rows)
+        return None, (f'有 {len(rows)} 个订阅都叫「{token}」(id {ids});'
+                      f'这是不可逆删除,请改用 id 点名。')
+    return dict(rows[0]), ''
+
+
 def _items(conn, source_id: int) -> list[sqlite3.Row]:
     return list(conn.execute(
         'SELECT fi.* FROM feed_items fi JOIN subscription_items si ON si.item_key=fi.key '
@@ -132,6 +159,14 @@ def _pipeline_busy() -> str:
     **连接被拒 = 服务没起 = 没有管道在跑**,放行;别的毛病(超时、HTTP 错、
     回包不是 JSON)证明不了"没人在跑",一律拦下——这是不可逆删除,问不到就
     别猜。真正的互斥靠 `reg.trim_lock()`,这里只是开工前的早一道。
+
+    **已知缺口**:`reg.trim_lock()` 只有订阅存盘(`sync._save_result`)和导出
+    (`sync.export`)认,index 阶段(`pipeline_stages._run_index` / `cli.cmd_index`)
+    不认。清理开跑之后才起的「只跑 index」那种同步,可以在我们删文件之前把这篇
+    读进内存、在删完之后 upsert 回 kb.db,留下一行指向不存在文件的 `documents`
+    (搜得到、点开没有原文)。它会被**下一次** index 自己收掉
+    (`remove_missing_documents` 按磁盘上还在的那些算),所以不是永久损坏;
+    真要堵死得让所有 kb.db 写入方共用这把锁,那是另一件事。
     """
     try:
         with urllib.request.urlopen(STATUS_URL, timeout=5) as r:
@@ -236,10 +271,20 @@ def _apply(out: Path, plan: dict) -> None:
 
 
 def _backup(source: dict, cut: list[dict], paths: list[str], floor: str) -> Path:
+    """备份 + 这一趟的续跑记录,目录名带 id 且**原子地占一个唯一名字**。
+
+    原来是「slug + 秒」加 `exist_ok=True`:两个同名订阅在同一秒里清理会复用
+    同一个目录,manifest / feed_items.json / md 压缩包 / `progress.json` 全被
+    后一个覆盖 —— 前一个清掉的那些内容从此既不在库里也不在备份里,它那份没做
+    完的计划也一起没了,重跑只会说「无事可做」(2026-10-01 第 2 轮审查实测)。
+    slug 截断和非字母数字归一化还会让**不同**名字撞到一起,所以唯一性不能靠
+    名字:`mkdtemp` 由内核保证这个目录是我们新建的。
+    """
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     slug = ''.join(ch if ch.isalnum() else '-' for ch in source['name'])[:30].strip('-')
-    out = DATA_DIR / 'backups' / f'feedtrim-{slug}-{stamp}'
-    out.mkdir(parents=True, exist_ok=True)
+    root = DATA_DIR / 'backups'
+    root.mkdir(parents=True, exist_ok=True)
+    out = Path(tempfile.mkdtemp(prefix=f'feedtrim-{source["id"]}-{slug}-{stamp}-', dir=root))
     (out / 'feed_items.json').write_text(json.dumps(cut, ensure_ascii=False, indent=1))
     (out / 'manifest.json').write_text(json.dumps(
         {'subscription_id': source['id'], 'name': source['name'], 'floor': floor,
@@ -288,12 +333,10 @@ def cmd_run(args) -> int:
     # 期间起跑的同步会把刚删掉的存档按旧快照原样写回来(见 `reg.trim_lock`)。
     with reg.trim_lock():
         with reg.db() as c:
-            row = c.execute('SELECT * FROM subscriptions WHERE id=? OR name=?',
-                            (args.source if args.source.isdigit() else -1, args.source)).fetchone()
-        if not row:
-            print(f'找不到订阅 {args.source}(先跑 scan 看 id)', file=sys.stderr)
+            source, why = find_source(c, args.source)
+        if not source:
+            print(why, file=sys.stderr)
             return 2
-        source = dict(row)
         left = _plans(source['id'])
         if left and not args.yes:
             for out, plan in left:
@@ -302,6 +345,18 @@ def cmd_run(args) -> int:
                       file=sys.stderr)
             return 1
         for out, plan in left:
+            # 续跑**不是**「接着执行上次批准的那件事」:收藏那道护栏排在新计划
+            # 的后面,续跑从旁边绕过去了 —— 失败之后用户把那篇还读得到的文章
+            # 收藏起来,重跑(没加 --allow-favorites)照样把文件、documents 和
+            # 收藏一起删掉,退出码还是 0(2026-10-01 第 2 轮审查实测)。所以按
+            # **此刻**真要删的那几篇再查一遍。
+            dead = [p for p in plan['paths'] if p not in _live_paths(plan['paths'])]
+            if (fav := _favorites(dead)) and not args.allow_favorites:
+                print(f'这份没做完的清理({out})里有 {len(fav)} 篇在收藏里:\n  '
+                      + '\n  '.join(fav[:10])
+                      + '\n收藏是用户显式留下的(可能是这次失败之后才加的),'
+                        '确认要删加 --allow-favorites。', file=sys.stderr)
+                return 2
             print(f'续上没做完的那一份:{out}')
             _apply(out, plan)
         if left:
@@ -350,6 +405,8 @@ def cmd_run(args) -> int:
         if not args.yes:
             print('这一步不可逆(有备份)。确认请加 --yes。')
             return 1
+        # index 阶段不认这把锁(见 `_pipeline_busy` 那条已知缺口)。
+        print('  清理期间别起同步 —— 尤其是「只跑 index」那种,它不认清理锁。')
 
         out = _backup(source, cut, paths, floor)
         plan = {'subscription_id': source['id'], 'name': source['name'], 'floor': floor,
