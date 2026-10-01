@@ -36,6 +36,11 @@ def main():
                 print(f"[{i}/{len(jobs)}] FAIL {title[:28]}: {str(e)[:80]}", flush=True)
                 continue
             stale = save_extraction(conn, path, data)
+            # 先把判定落盘,再去回写 —— 和另外两条路同一个时序。回写整段要取
+            # kb.maintenance 那把维护锁,攥着一个没提交的 SQLite 写事务去等它的话,
+            # 持锁的清理会卡在自己的 DELETE 上(SQLite 的写锁不认那把锁),两边
+            # 互相等到我们超时放弃为止。
+            conn.commit()
             try:
                 writeback_extraction(conn, path, data, stale)
             except Exception as e:
