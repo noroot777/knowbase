@@ -1,243 +1,88 @@
-# WeChatOA_Aggregation
+# collector — Knowbase 的公众号采集器
 
-> **先看这段**:这份 README 是采集器从独立仓库 WeChatOA_Aggregation 搬进
-> Knowbase 之前的原文,留着是为了讲清楚绿泡泡这一侧的原理(凭证怎么来的、
-> 正文怎么抓、相似检测怎么做)。**但它描述的那个产品形态已经不存在了**:
->
-> - Vue 前端(`frontend/`)、`start_all.sh`、Docker 部署、跑在 :8000 的
->   FastAPI 后端(`api.py` 的 53 个路由 + `server.py` + `web_app.py`)
->   都已删除。阅读、订阅管理、同步进度现在全在 Knowbase 的面板里。
-> - 采集器现在是**一次性 CLI**:`cd collector && ./.venv/bin/python -m cli <命令>`。
->   日常不必直接碰它,仓库根目录的 `./kb.sh` 就是入口。
-> - `api.py` 只剩采集流程共用的底层(抓正文、下封面、搜号、查扫码凭证)。
-> - **文章列表也不走公众平台后台了**。绿泡泡关掉 `appmsgpublish` 之后,列表和
->   正文都从 Mac 绿泡泡客户端的 `profile_ext` 通道拿(凭证由 wxdown 截)。旧的
->   `appmsgpublish` 抓取链路——`main.py`、`src/processor/`、`src/web/`——已删除。
->   扫码登录(`cli login`)只剩「搜公众号加号」一个用途,下文凡说"扫码续期就能
->   继续抓文章"的地方都已经不成立。
-> - 新增 `collect --channel local`：通过已配置的 `wechat-cli` 只读本机公众号推送，
->   与默认的 `--channel profile_ext` 共用文章库、正文抓取与导出。面板和根目录
->   `kb.sh` 使用 `wechat_local` / `wechat_oa` 选择通道，详见根目录 README。
->
-> 下面「快速开始」「Docker 部署」「仓库结构」几节讲的是旧形态,当历史读。
+从**本机微信（Mac 客户端）已同步的推送**里发现公众号文章,按链接抓正文,导出成
+Obsidian markdown 交给 Knowbase 索引。
 
-当前采集器测试：在 `collector` 目录运行 `.venv/bin/python -m unittest discover -s tests -t . -q`，无需额外设置 `PYTHONPATH`。
-
-**语言：** [简体中文](README.md)（本文） · [**English**](README.en.md)
-
-**本地绿泡泡公众号文章聚合工作台** — 在本地订阅多个公众号、爬取并归档列表信息；信息流中浏览 **封面、标题、摘要**（可选模型打标/摘要），**全文需跳转原文**；可选用大模型辅助标签与摘要生成。
-
-![信息流预览](figures/blog_preview.png)
-
----
-
-## 这个项目解决什么问题
-
-绿泡泡公众号内容分散在多个账号里，浏览器里切换成本高；若希望**在本地统一归档、按条件筛选、标记已读/收藏、必要时用模型打标签或写摘要**，需要一个轻量、可自托管的一体化工具。
-
-本仓库提供 **FastAPI 后端 + Vue 前端**，数据落在本地 `data/`，不依赖外部数据库，适合个人或小团队长期使用。
-
----
-
-## 你能用它做什么
-
-下表概括主要能力，**偏「能做什么」**；若需对照本地落盘路径，见后文「数据与存储」。
-
-| 能力 | 说明 |
-|------|------|
-| **公众号与订阅** | 按名称搜索并添加公众号、随时移除；可单独控制某个号是否在文章流中展示（隐藏不等于删订阅，只是阅读时不打扰），方便区分工作号与兴趣号。 |
-| **凭证与扫码登录** | 配置页 **扫码登录** 完成公众平台授权，会话保存在本地，无需手抄 token。过期或认证失败时顶部横幅提示，再扫一次即可续期，减少「爬取跑半天才发现凭证坏了」的情况。 |
-| **爬取与同步** | **一键整批爬取**：按已添加账号依次拉取近期文章列表，用稳定规则做增量去重，只处理新篇。界面展示进度与当前账号；凭证不可用时主动中止并给出原因。 |
-| **封面、标题与摘要** | 信息流里主要看 **封面**、**标题**、**摘要/简介**（公众号列表里的摘要，或开启模型后的摘要）以及标签等；**不提供应用内全文阅读**，要点进链接到绿泡泡公众平台看完整正文。**封面** 尽量下载到本地并压缩，减轻裂图。爬取时抓取的 **正文** 会落在本地，但主要用于后台 **字数统计、大模型打标/摘要、相似检测** 等，不是给当前 UI 当阅读器用的。 |
-| **阅读、筛选与视图** | **卡片 / 列表** 两种密度，支持按 **日期分组**；关键词、公众号、日期范围、标签、排序等组合筛选，适合从大量文章中快速收窄范围。多套 **Feed 皮肤** 与全局浅色 / 深色 / 跟随系统搭配。 |
-| **已读、收藏与删除** | 打开原文即记 **已读**，未读有视觉区分；**收藏** 与顶栏「全部 / 未读 / 收藏」联动。**删除** 会移出列表并在后续爬取中永久跳过该篇，避免无效或不想看的内容反复出现。 |
-| **大模型（可选）** | 接入 Chat Completions 兼容接口后，可在配置中启用 **爬取时的摘要与打标**，并指定任务所用连接、并发档位等；未启用时爬取与阅读照常，仅无 AI 生成的摘要与标签。 |
-| **相似内容** | 内置 **MinHash + LSH** 相似检测，减轻多号搬运同一热点造成的重复噪音；参数与实验见 `README.legacy.md`。 |
-| **日志** | 爬取起止、账号变更、缓存清理等写入 **操作日志**，前端独立页面按时间查看，便于复盘问题。 |
-
----
-
-## 整体工作流
-
-1. **准备环境**：安装 Python 依赖与前端依赖（见下文表格与命令）。
-2. **写入凭证**：启动后进入「配置」→ 扫码登录，直到界面显示凭证有效。
-3. **维护订阅**：添加公众号、按需隐藏部分账号在信息流中的展示。
-4. **触发爬取**：一键爬取 → 文章列表、封面及后台正文缓存等按策略更新，进度与异常在界面可见。
-5. **可选模型**：在配置中启用爬取时的总结/打标，并设置并发与任务所用模型配置。
-6. **日常阅读**：在信息流中筛选、标记已读/收藏、打开原文链接。
-
-```text
-浏览器 (Vue)  ←→  FastAPI 后端  ←→  本地归档（列表、正文、封面等）
-                      ↓
-              绿泡泡公众平台接口 · 正文抓取 · 可选大模型
-```
-
----
-
-## 技术栈
-
-| 层级 | 选用 |
-|------|------|
-| 前端 | Vue 3、TypeScript、Vite、Tailwind CSS v4、Pinia、Vue Router、lucide-vue-next 等 |
-| 后端 | FastAPI、Uvicorn、Requests、Pillow、datasketch 等（见 `pyproject.toml`） |
-| 数据 | 本地 JSON / JSONL、静态封面目录，无独立数据库服务 |
-
----
-
-## 环境要求
-
-| 工具 | 版本建议 | 用途 |
-|------|-----------|------|
-| **Python** | ≥ 3.11 | 后端与脚本 |
-| **uv** | 最新稳定版 | 推荐用于安装与运行 Python 依赖 |
-| **Node.js** | LTS（含 npm） | 前端开发与构建 |
-
----
-
-## 快速开始
-
-### 1. 克隆并安装依赖
+它是一次性 CLI,不是常驻服务:
 
 ```bash
-# 将本仓库克隆到本地后进入项目根目录
-cd WeChatOA_Aggregation
-
-uv sync
-cd frontend && npm install && cd ..
+cd collector && ./.venv/bin/python -m cli <命令>
 ```
 
-### 2. 一键启动（开发）
+日常不必直接碰它 —— 仓库根目录的 `./kb.sh sync` 会把它当作一个采集通道调起来
+(契约在 `kb/collectors/wechat_local.py`)。stdout 只出 NDJSON 给程序读,
+人看的提示走 stderr。
+
+## 装
 
 ```bash
-./start_all.sh
+./setup.sh
 ```
 
-| 服务 | 地址 |
-|------|------|
-| 后端 API | <http://127.0.0.1:8000> |
-| 前端开发服 | <http://127.0.0.1:5173> |
+把两样不进版本库的东西链到仓库外:`data/`(文章库)和 `.venv/`。两者默认落在
+`$XDG_DATA_HOME/knowbase/collector/`,可用 `KB_COLLECTOR_DATA` /
+`KB_COLLECTOR_VENV` 指到别处。venv 不在就用 [uv](https://docs.astral.sh/uv/)
+建一个。脚本幂等,新开 git worktree 跑一次即可 —— 多个工作树共用同一份库才对,
+采集是有状态的。
 
-终端内 `Ctrl+C` 会结束脚本拉起的前后端子进程。
+依赖只有三个:`lxml`、`requests`、`zstandard`(后者解本机推送里的压缩消息)。
 
-### 3. 手动分启（可选）
+## 用
 
 ```bash
-# 终端 1
-uv run uvicorn web_app:app --reload --port 8000
-
-# 终端 2
-cd frontend && npm run dev
+python -m cli status                      # 健康状况 + 订阅列表(JSON)
+python -m cli collect [--since 2026-09-01 --until 2026-09-30] [--targets a,b]
+python -m cli export [--no-images]        # 导出成 obsidian md
+python -m cli accounts list|discover|add|remove|enable|disable [名字] [--json]
 ```
 
-### 4. Docker 部署（推荐用于长期自托管）
+`accounts discover` 从本机微信的会话列表里找候选:**不登录、不走网络**。裸列时
+归属从发现索引里查(一条推送都不翻),给了关键词才现翻索引外那几个会话。
+加号走 `accounts add <名字>`,同名会话要补 `--fakeid`。
 
-仓库已提供 `Dockerfile` + `docker-compose.yml`，构建为单容器、单进程，**前后端同域**通过 `http://127.0.0.1:8000` 访问，`data/` 以 volume 形式挂到宿主持久化。
+## 它是怎么拿到文章的
 
-| 项 | 说明 |
-|----|------|
-| **镜像内容** | Python 3.11 + uv + 项目依赖 + 前端构建产物 |
-| **入口** | `uvicorn server:app`（见仓库根目录 `server.py`，复用 `api.app` 并挂载前端 dist 与 `/data`） |
-| **端口** | 容器内 `8000`，默认只绑定到宿主 `127.0.0.1:8000`（避免把扫码凭证暴露到公网） |
-| **持久化** | 宿主 `./data` ↔ 容器 `/app/data`；迁移 = 拷贝 `data/` 目录 |
-| **时区** | 默认 `Asia/Shanghai`，可通过 `TZ` 环境变量覆盖 |
-
-```bash
-docker compose up -d --build     # 构建并后台启动
-docker compose logs -f           # 跟随日志
-docker compose down              # 停止并移除容器（data/ 仍保留在宿主）
+```
+本机微信数据库  --(只读 SQL,经 rion-wechat-cli)-->  发现:哪些推送、属于哪个号
+      |
+      v
+local_wechat_articles  --(按 __biz + mid + idx 认身份)-->  articles
+      |
+      v
+按文章链接抓正文(保留 chksm)  -->  article_bodies  -->  export 成 vault md
 ```
 
-**SQLite 存储（推荐，数据量大时）**：
+两件事分开:**发现**只读本机库,**正文**照旧按 `mp.weixin.qq.com` 的文章链接抓。
+本机库只提供「有哪些推送、各属于谁」。
 
-```bash
-# 首次：将 data/*.json 或 data/old_data/*.json 迁入 data/wechatoa.db
-uv run python scripts/migrate_json_to_sqlite.py
-```
+几条硬约束(详见仓库根目录 `CLAUDE.md` 的「collector 采集器」一节):
 
-服务**仅使用** SQLite（`data/wechatoa.db`）；历史 JSON 可归档在 `data/old_data/`。
+- 只能通过已配置的 `rion-wechat-cli` 读,须确认 `live_database_read_ok`;不自动
+  获取密钥、不操作微信、不用通知预览替代。
+- 归属最终按推送 URL 里的 `__biz` 核实,不以同名自动匹配。
+- 文章身份是 `__biz + mid + idx`;用户删除的文章记进链接身份黑名单,换一种发现
+  方式也不复活。
+- 公众号改名只改 `accounts.display_name`,永不动主键 `name`(`articles` 有外键
+  指着它,vault 目录也按它归档)。新名字从本机会话列表上读。
 
-信息流改为分页加载（`GET /api/articles`），关键词搜索走 FTS（`GET /api/articles/search`）。
-
-启动成功后浏览器打开 <http://127.0.0.1:8000> → **配置页 → 扫码登录** 即可使用，和本地跑 `./start_all.sh` 体验一致。
-
-> 首次构建会安装 Python 依赖并编译前端；后续变更代码只会重跑受影响的层。
->
-> 若需要跨机访问，自行改 `docker-compose.yml` 里的端口映射，并在上游挡一层反向代理 + HTTPS；**不建议将 `8000` 直接暴露到公网**，因为 `data/` 中的 `id_info.json`、`llm_config.json` 含有敏感凭证。
-
----
-
-## 配置说明
-
-### 绿泡泡开放平台凭证
-
-| 步骤 | 操作 |
-|------|------|
-| 1 | 浏览器打开前端，进入 **「配置」** |
-| 2 | 点击 **「扫码登录」**，按引导完成公众平台登录 |
-| 3 | 成功后 token / cookie 写入 `data/id_info.json`（高级用户可手动编辑，需自担风险） |
-
-凭证失效时，配置页顶部会提示，重复扫码即可。
-
-### Mac 绿泡泡文章列表 Credential
-
-绿泡泡关闭 `appmsgpublish` 后，文章列表抓取优先使用 Mac 绿泡泡客户端的 `profile_ext` Credential。本项目不内置抓包服务，需要临时配合 [wxdown-service](https://github.com/wechat-article/wxdown-service)：
-
-1. 启动 wxdown-service，并按其文档设置证书和 Mac HTTP/HTTPS 代理。
-2. 保持 WeChatOA 前端打开，右上角「客户端凭证」会自动连接 `wss://127.0.0.1:65001`。
-3. 在 Mac 绿泡泡内打开目标公众号的任意文章，页面会自动接收并保存 Credential。
-4. Credential 约 25 分钟有效；抓取结束后可停止 wxdown-service，日常浏览已归档文章不依赖它。
-
-临时 Credential 写入 `data/profile_credentials.json`，文件权限为 `0600`、已被 `.gitignore` 排除，后端与 Vite 也会拒绝通过 `/data/` 访问它。
-
-### 大模型（可选）
-
-| 项目 | 说明 |
-|------|------|
-| **配置文件** | `data/llm_config.json`，由前端「模型配置」等界面读写；支持多 profile、任务绑定、爬取时是否启用总结/打标、多线程并发档位等。 |
-| **代码入口** | `src/llm/`（如 `llm_config.py`、`article_tagging.py`、`model_client.py`），爬取侧逻辑见 `api.py` 中与 LLM 相关的调用。 |
-
----
-
-## 数据与存储
+## 数据落在哪
 
 | 路径 | 用途 |
 |------|------|
-| `data/wechatoa.db` | 文章、公众号、正文、已读/收藏、删除黑名单（SQLite） |
-| `data/id_info.json` | 绿泡泡会话凭证 |
-| `data/profile_credentials.json` | Mac 绿泡泡按公众号区分的短期 Credential（勿提交） |
-| `data/llm_config.json` | 大模型与任务配置 |
-| `data/issues_message.json` | 爬取问题记录（去重等） |
-| `data/covers/` | 封面图 |
-| `data/operation_logs.jsonl` | 操作日志 |
-| `data/old_data/` | 迁移前的 JSON 归档（日常不读） |
+| `data/wechatoa.db` | 文章、公众号、正文、本机发现索引(SQLite) |
+| `data/covers/`、`data/backups/`、`data/*.json` | 旧形态留下的存量,代码已经不读了 |
 
-**安全提示**：上述文件多含隐私与密钥，公开仓库请勿提交；请配合 `.gitignore` 与团队规范使用。
+库里有正文全文和订阅列表 —— **别提交,别外传**。`.gitignore` 里对 `data` 有
+不带斜杠的显式规则(它是符号链接,带斜杠那条挡不住),别删。
 
----
+## 来历
 
-## 仓库结构
+这个采集器源自 [ZejunCao/WeChatOA_Aggregation](https://github.com/ZejunCao/WeChatOA_Aggregation),
+搬进本仓库之后形态变了很多:原来的 Vue 前端、跑在 :8000 的 FastAPI 后端、Docker
+部署、公众平台后台抓列表、扫码登录、封面下载、MinHash 相似检测都已删除,只留下
+「发现 → 抓正文 → 导出」这条链和它的库。另一条采集方式(逐号文章凭证,靠 mitm
+从 Mac 微信里截)在 `wechat-oa` 分支上,**两个分支始终并行、不打算合并**。
 
-> 下面是搬进 Knowbase 之前的样子。现在 `api.py` 只剩采集共用的底层,
-> `start_all.sh` / `frontend/` / `server.py` / `web_app.py` 都已删除,
-> 多出 `cli.py`(唯一入口)与 `setup.sh`(新 worktree 首次准备)。
-
-```text
-WeChatOA_Aggregation/
-├── api.py                 # FastAPI：账号、爬取、缓存、凭证、日志、LLM 配置 API 等
-├── start_all.sh           # 开发环境并行启动前后端
-├── pyproject.toml         # Python 依赖声明
-├── data/                  # 运行时数据（默认不入库）
-├── src/
-│   ├── crawler/           # 绿泡泡请求与爬取相关
-│   ├── llm/               # 配置读写、打标/摘要、模型客户端
-│   └── utils/             # 数据管理、通用工具
-├── frontend/              # Vue 3 前端工程
-└── figures/               # README 等用图
-```
-
----
-
-## 致谢与参考
-
-- [wechat-article-exporter](https://github.com/wechat-article/wechat-article-exporter)
-- [WeChat_Article](https://github.com/1061700625/WeChat_Article)
+当前实现里仍有一部分代码逐字沿用上游(主要在 `src/db/repository.py`、
+`src/db/migrations.py`、`src/utils/wechat_body.py`、`src/db/connection.py`)。
+**上游没有 LICENSE**,所以这部分的许可状态未定 —— 本仓库对外发布前要先解决它。
