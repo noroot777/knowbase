@@ -122,13 +122,55 @@ def _run_export(crawl_filter: dict | str | None = None) -> None:
     _per_channel("export", crawl_filter, lambda collector, scope: collector.materialize())
 
 
+class _StopWhileWaiting(Exception):
+    """等维护锁的时候用户按了停止。"""
+
+
+def _index_lock_wait(waited: float) -> None:
+    """等维护锁时出声,顺带认一次「停止」。
+
+    不出声的话面板上那张卡片会一直停在「扫描 vault」,看着像卡死;而停止是对
+    整次同步说的,等锁期间按下的那一下不该等到锁拿到手才生效。
+    """
+    if _state.get("stop_requested"):
+        raise _StopWhileWaiting()
+    _stage("index", "running",
+           f"等维护锁:另一个 kb.db 维护任务正在跑(已等 {int(waited)} 秒)")
+
+
 def _run_index() -> None:
+    """扫 vault → 增量 upsert → 收掉已删的 → 补向量。**整趟在维护锁里。**
+
+    锁的原委和取舍都在 `kb.maintenance`:scan 读到的是那一刻磁盘上的内容,而
+    删文件和 documents 行是另一个进程的事(存量清理
+    `scripts/feed_trim_history.py`)。不互斥的话,一轮在清理之前开扫的索引会拿
+    删除**之前**读到的那个 Doc 完成 upsert —— 库里留下一行指向不存在文件的
+    documents:搜得到、点开没有原文,而清理那一侧已经收尾、重跑也找不到它
+    (2026-10-01 审查实测 `documents=1`、全文检索命中 1)。
+
+    等不到锁就**不做**这一轮:索引漏一轮下一轮自己就补上了(扫描是全量比对),
+    而按旧快照写回去的那行假结果要等到下一次索引才会被收掉。
+    """
+    from kb.maintenance import LockBusy, maintenance_lock
+
+    _stage("index", "running", "扫描 vault")
+    try:
+        with maintenance_lock(on_wait=_index_lock_wait):
+            _index_pass()
+    except _StopWhileWaiting:
+        _stage("index", "stopped", "已请求停止:等维护锁时放弃了这一轮索引")
+    except LockBusy as e:
+        _stage("index", "error", f"索引没做: {e}")
+    except Exception as e:
+        _stage("index", "error", f"索引失败: {e}")
+
+
+def _index_pass() -> None:
     from kb import store
     from kb.chunker import split_chunks
     from kb.extract import parse_pretagged, save_extraction
     from kb.scanner import scan_all
 
-    _stage("index", "running", "扫描 vault")
     conn = store.connect()
     try:
         now = _now()
@@ -153,11 +195,12 @@ def _run_index() -> None:
             _stage("index", "running",
                    f"编码 {total} 个新 chunk" if done == 0 else f"编码 {done}/{total}")
 
+        # 向量编码也在锁里:`chunk_vec` 是没有外键级联的虚表,清理在编码中途
+        # 删掉那些 chunk 的话,后面几批会按已经不存在的 chunk id 插回孤儿向量
+        # 行,谁也不会再来收(见 `kb.maintenance`)。
         from kb.embedder import embed_pending_chunks
         n = embed_pending_chunks(conn, _report)
         _stage("index", "ok", f"新增/更新 {new},移除 {removed},新向量 {n}")
-    except Exception as e:
-        _stage("index", "error", f"索引失败: {e}")
     finally:
         conn.close()
 

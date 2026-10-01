@@ -22,6 +22,26 @@ from kb.search import Filters, search
 
 
 def cmd_index(args) -> int:
+    """整趟在维护锁里:扫描读到的是那一刻磁盘上的内容,而删文件和 documents
+    行是另一个进程的事(存量清理 `scripts/feed_trim_history.py`)。不互斥的话
+    这一趟会拿删除**之前**读到的内容把刚清掉的文档写回去,库里留下一行指向不
+    存在文件的 documents(搜得到、点开没有原文)。原委见 `kb.maintenance`。
+    """
+    from kb.maintenance import LockBusy, maintenance_lock
+
+    def waiting(waited: float) -> None:
+        print(f'[index] 等维护锁:另一个 kb.db 维护任务正在跑(已等 {int(waited)} 秒)',
+              flush=True)
+
+    try:
+        with maintenance_lock(on_wait=waiting):
+            return _index_pass(args)
+    except LockBusy as e:
+        print(f'[index] {e}', file=sys.stderr)
+        return 2
+
+
+def _index_pass(args) -> int:
     conn = store.connect()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     seen: set[str] = set()

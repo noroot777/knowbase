@@ -16,7 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from kb import daily, extract, llm, pipeline_state, scanner, search, store
+from kb import daily, extract, llm, maintenance, pipeline_state, scanner, search, store
 from kb.chunker import split_chunks
 from kb.collectors.feeds import FeedCollector
 from kb.config import Source
@@ -33,7 +33,10 @@ class FeedCase(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
+        # 维护锁的 lockfile 在 DATA_DIR 下:不指到 tmp 的话这些用例会去 flock 生产
+        # 那一个,被 kb-web 正在跑的一轮索引(整趟持锁)挂住(见 kb.maintenance)。
         for p in (patch.object(reg, 'DB_PATH', self.root / 'feeds.db'),
+                  patch.object(maintenance, 'DATA_DIR', self.root),
                   patch.object(sync, 'VAULT_ROOT', self.root / 'vault'),
                   patch.object(translate, '_model', lambda: MODEL)):
             p.start(); self.addCleanup(p.stop)
