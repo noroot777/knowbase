@@ -35,3 +35,32 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["kb"]
+
+# ruff 只用来**固定住这个项目已有的风格**,不是拿来改造它的。所以:
+#   - 规则集窄:导入位置(E4)、语法错误(E9)、pyflakes(F)、失效转义(W6)。
+#     E7 整组不选 —— 里面的 E701/E702(`a; b` 写在一行)在这个仓库里有 80 多处,
+#     是刻意的紧凑写法,不是疏漏;E501 同理不选(见下面 line-length 那条)。
+#   - **CI 只跑 `ruff check`,不跑 `ruff format`。**全仓库格式化会把 diff 炸掉,
+#     还可能把文件推过 CLAUDE.md 里那条 700 行上限。
+[tool.ruff]
+# 实测:34943 行里只有 34 行(0.1%)超过 120,250 行超过 100 —— 100 是这份代码
+# 实际的书写宽度。它只喂给 `ruff format`(没人跑)和 E501(没选),所以是声明
+# 意图、不是闸门:现有那几百行长行不会因此变红。
+line-length = 100
+target-version = "py311"
+# 这 4 个文件逐字沿用上游 ZejunCao/WeChatOA_Aggregation,**不许改**(理由见 NOTICE:
+# 上游没有 LICENSE,看过原文之后的"修一下 lint"同样是衍生作品)。所以整个排除,
+# 而不是逐条 per-file-ignores —— 后者在将来冒出新告警时会逼人去动它们。
+exclude = [
+    "collector/src/db/connection.py",
+    "collector/src/db/migrations.py",
+    "collector/src/db/repository.py",
+    "collector/src/utils/wechat_body.py",
+]
+
+[tool.ruff.lint]
+select = ["E4", "E9", "F", "W6"]
+
+[tool.ruff.format]
+# 仓库里单双引号是混用的,真要跑格式化也别拿这件事去动每一个文件。
+quote-style = "preserve"

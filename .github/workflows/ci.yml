@@ -1,0 +1,75 @@
+# ubuntu 上跑两侧的 Python 单元测试 + ruff。
+#
+# **跑不了的那些要自然 skip,不是报错**:
+#   - 浏览器回归(catgraph / chat-height / retired-channel 的 browser 那组)要一个
+#     chrome-headless-shell。这里**故意不装** —— tests/headless.py 找不到它就
+#     skip 并在理由里写清怎么装。装一份要几十 M、还得跟着 playwright 升版,而这几
+#     项验的是 CSS 布局和前端交互,放在本机跑更合适。
+#   - 向量那一侧不需要 bge-m3:测试把编码打了桩(tests/_stub_worker.py),
+#     整套跑完不会去下那 2GB 模型。
+#   - 本机微信那条链路(读数据库、取 key)在 Linux 上压根不存在,相关测试自己
+#     带着 skip 条件。
+#
+# TZ 钉成 Asia/Shanghai:日报窗口和订阅历史下界都按这个时区算日历日(见 CLAUDE.md),
+# runner 默认 UTC,两边差 8 小时的话每天有一段窗口会落到前一天去。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+  # 别让任何一步偷偷去 Hugging Face 拉模型:真有人加了这种测试,要当场红而不是
+  # 在 CI 上静静下 2GB。
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kb:
+    name: 知识库侧
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: 装依赖
+        run: uv sync --frozen
+      - name: ruff
+        # 版本钉死:lint 结果不该随 ruff 发版漂。规则集见 pyproject.toml 的 [tool.ruff]
+        # —— 只 check,不 format(全仓库格式化会把 diff 炸掉)。
+        run: uvx ruff@0.16.7 check .
+      - name: 单元测试
+        run: uv run python -m unittest discover -s tests -t . -q
+      - name: 报一下跳过了什么
+        if: always()
+        # 静默跳过是上一轮审计抓到的问题本身,所以让它在日志里留一行。
+        run: uv run python -m tests.headless || true
+
+  collector:
+    name: 采集器侧
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: 装依赖
+        # 走 README 告诉用户跑的那条路(它顺带建好 data/ 和 .venv 两个链接),
+        # 两个路径都指到 runner 的临时目录,免得碰到存量回退那条分支。
+        env:
+          KB_COLLECTOR_DATA_PATH: ${{ runner.temp }}/collector-data
+          KB_COLLECTOR_VENV_PATH: ${{ runner.temp }}/collector-venv
+        run: ./collector/setup.sh
+      - name: 单元测试
+        working-directory: collector
+        run: ./.venv/bin/python -m unittest discover -s tests -t . -q

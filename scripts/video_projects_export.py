@@ -323,7 +323,6 @@ def cmd_gate(args) -> int:
                         "url": info["url"], "gate": gate})
             save_state(state)
             ok += 1
-            mark = "✓" if gate["project_video"] else "✗"
             if i % 10 == 0 or i == len(todo):
                 print(f"[{i}/{len(todo)}] ok={ok} fail={failed}", flush=True)
     print(f"[gate] 完成: 成功 {ok},失败 {failed}(失败的下次重跑)", flush=True)

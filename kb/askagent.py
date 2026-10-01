@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
 from datetime import date
 

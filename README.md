@@ -242,9 +242,18 @@ cd collector && ./.venv/bin/python -m unittest discover -s tests -t . -q
   `HEADLESS_SHELL=<可执行文件路径>` 指定,或者装一份 playwright 的无头壳
   (`npx playwright install chromium-headless-shell`)让它自己探测到。**始终无头、
   临时 profile,不碰你正在用的浏览器。**
-- **向量相关**的那些要 bge-m3 模型(首次约 2GB),CI 上不下。
+- **不需要 bge-m3**:测试把向量编码打了桩(`tests/_stub_worker.py`),整套跑完不会去下
+  那 2GB 模型;读本机微信那条链路在非 macOS 上也自己带着 skip 条件。
 
 单跑一个文件:`uv run python -m unittest tests.test_daily_report -v`。
+
+lint 是 ruff(规则集在 `pyproject.toml` 的 `[tool.ruff]`,只 check、不 format):
+
+```bash
+uvx ruff@0.16.7 check .
+```
+
+CI 在 ubuntu 上跑上面这三条,见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
 ## 设计决策备忘
 
