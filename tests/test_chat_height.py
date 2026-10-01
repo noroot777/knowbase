@@ -5,15 +5,13 @@
 (88.6px + 24px 下边距)不在估算里,首次配置没做完时输入区整块掉出视口,
 模型下拉和发送按钮都得往下滚才看得见。
 
-驱动是 CDP 直连 playwright 缓存里的 chrome-headless-shell(不装 playwright、
-不连网、始终无头、临时 profile),口径同 tests/test_catgraph_browser.py。
+驱动是 CDP 直连 chrome-headless-shell(不装 playwright、不连网、始终无头、
+临时 profile);怎么找那个二进制的口径在 tests/headless.py,三个浏览器回归共用。
 页面由 tests/serve_workspace.py 原样发出工作树里的 kb/static,后端一律 503 ——
 这里量的是 CSS 布局,不需要真数据。
 """
 
 import json
-import os
-import re
 import shutil
 import socket
 import subprocess
@@ -28,21 +26,9 @@ REPO = Path(__file__).resolve().parents[1]
 PROBE = Path(__file__).resolve().parent / "chat_height_probe.mjs"
 SERVER = Path(__file__).resolve().parent / "serve_workspace.py"
 
+sys.path.insert(0, str(REPO))
 
-def _shell() -> Path | None:
-    """playwright 缓存里的 chrome-headless-shell,版本号不写死。
-
-    tests/test_catgraph_browser.py 那份钉的是 `chromium_headless_shell-1243`,
-    缓存一升版整组测试就静默跳过、再也不跑(2026-09-30 审查提到的那条)。
-    这里按 glob 取版本号最大的一份,一个都没有才跳过。
-    """
-    root = Path.home() / "Library/Caches/ms-playwright"
-    found = sorted(root.glob("chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell"),
-                   key=lambda p: int(re.search(r"-(\d+)", p.parts[-3]).group(1)))
-    return found[-1] if found else None
-
-
-SHELL = _shell()
+from tests.headless import probe_env, requires_headless  # noqa: E402
 
 
 def _free_port() -> int:
@@ -51,8 +37,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-@unittest.skipUnless(shutil.which("node"), "需要 node 驱动无头浏览器")
-@unittest.skipUnless(SHELL is not None, "需要 playwright 缓存里的 chrome-headless-shell")
+@requires_headless
 class ChatHeightTest(unittest.TestCase):
 
     @classmethod
@@ -73,8 +58,7 @@ class ChatHeightTest(unittest.TestCase):
             raise AssertionError("预览服务没起来")
         run = subprocess.run(
             [shutil.which("node"), str(PROBE), base],
-            capture_output=True, text=True, timeout=300,
-            env={**os.environ, "HEADLESS_SHELL": str(SHELL)})
+            capture_output=True, text=True, timeout=300, env=probe_env())
         cls.stderr = run.stderr
         line = run.stdout.strip().splitlines()[-1] if run.stdout.strip() else ""
         if not line:

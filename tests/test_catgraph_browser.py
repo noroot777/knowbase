@@ -9,8 +9,9 @@
 `visibleSelected=0 visibleDimmed=152 edgePaths=0`)。
 
 这里拿真页面在**无头 Chrome** 里跑一遍:真的筛选、真的点关联按钮、再读 DOM。
-驱动是 CDP 直连 playwright 缓存里的 chrome-headless-shell(不装 playwright、
-不连网、不开有头窗口);没有那个二进制就跳过。
+驱动是 CDP 直连 chrome-headless-shell(不装 playwright、不连网、不开有头窗口)。
+怎么找那个二进制见 tests/headless.py —— HEADLESS_SHELL 优先,其次按 glob 探
+playwright 缓存(不写死构建号和平台),都没有才跳过。
 
 跑:  python -m unittest discover -s tests -v
 """
@@ -18,7 +19,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -34,11 +34,10 @@ sys.path.insert(0, str(REPO / "scripts" / "wiki"))
 import build_catgraph as B  # noqa: E402
 import taxonomy as T  # noqa: E402
 
+from tests.headless import probe_env, requires_headless  # noqa: E402
 from tests.test_catgraph import _group  # noqa: E402
 
 PROBE = Path(__file__).resolve().parent / "catgraph_probe.mjs"
-SHELL = (Path.home() / "Library/Caches/ms-playwright/chromium_headless_shell-1243"
-         / "chrome-headless-shell-mac-arm64" / "chrome-headless-shell")
 
 # A 热、近、有仓库;B 冷、旧、没仓库——四个筛选各能把 B 单独挡住一次。
 # A、B 的简介里都有 SHARED,C 没有:搜 SHARED 时 B 不会被搜索挡住,用来搭
@@ -49,8 +48,7 @@ SHARED = "共同词"
 SHARED_ART = "https://x/same-article"    # 同一篇文章 → A、B 之间有一条共现边
 
 
-@unittest.skipUnless(shutil.which("node"), "需要 node 驱动无头浏览器")
-@unittest.skipUnless(SHELL.exists(), f"需要 chrome-headless-shell({SHELL})")
+@requires_headless
 class RelatedJumpTest(unittest.TestCase):
 
     @classmethod
@@ -101,8 +99,7 @@ class RelatedJumpTest(unittest.TestCase):
         r = subprocess.run(
             [shutil.which("node"), str(PROBE), str(cls.page), ",".join(filters),
              "AAA工具", "BBB工具", SHARED],
-            capture_output=True, text=True, timeout=300,
-            env={**os.environ, "HEADLESS_SHELL": str(SHELL)})
+            capture_output=True, text=True, timeout=300, env=probe_env())
         if r.returncode != 0:
             raise AssertionError(r.stderr)
         return json.loads(r.stdout.strip().splitlines()[-1])
