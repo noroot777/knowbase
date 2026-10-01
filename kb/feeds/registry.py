@@ -7,9 +7,10 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR
 from kb.source_types import feed_types
@@ -27,6 +28,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
  last_error TEXT NOT NULL DEFAULT '', failures INTEGER NOT NULL DEFAULT 0,
  retry_at REAL NOT NULL DEFAULT 0, etag TEXT NOT NULL DEFAULT '',
  modified TEXT NOT NULL DEFAULT '', resolved_url TEXT NOT NULL DEFAULT '',
+ -- 排在最后,和老库 ALTER 补出来的列序一致(见 _ADDED_COLUMNS)。
+ history_floor TEXT NOT NULL DEFAULT '',
  UNIQUE(kind, url)
 );
 CREATE TABLE IF NOT EXISTS feed_items (
@@ -51,6 +54,12 @@ CREATE TABLE IF NOT EXISTS feed_runs (
 # 的 IF NOT EXISTS 对它们不生效,只能逐列 ALTER 补——补不上就不是"少个字段",
 # 而是整个翻译流程在老库上永远报 no such column。
 _ADDED_COLUMNS = {
+    # 这一条是新订阅的历史下界(见 `history_floor`)。老库里的订阅补成空串 =
+    # 不设下界:它们的存档早就抓完了,回头给它们钉一个下界只会在源站补发旧文
+    # 时静默丢内容,挡不住任何已经发生的事。
+    'subscriptions': (
+        ('history_floor', "TEXT NOT NULL DEFAULT ''"),
+    ),
     'feed_items': (
         ('lang', "TEXT NOT NULL DEFAULT ''"),              # '' 未判 / zh 无需翻译 / en 待翻译
         ('title_zh', "TEXT NOT NULL DEFAULT ''"),
@@ -116,6 +125,24 @@ def text_language(*parts: str) -> str:
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+# 新订阅第一次抓取最多带回多少天以前的内容。一个刚添加的源常常把自己的整个
+# 存档一次交出来(实测 Hugging Face Blog 的 feed 一口气给了 500 条、最早到
+# 2024-04-10),这些旧文随后逐批翻译、逐批重新导出,每重新导出一次 `indexed_at`
+# 就刷新一次,于是连着十几天以"补录"的形态占满当天日报——而它们并不是那几天
+# 发生的事(2026-10-01 那份日报 46 条素材里补录占了 30 条)。
+HISTORY_DAYS = 5
+
+
+def history_floor(when: datetime | None = None) -> str:
+    """新订阅的历史下界(含当天),`YYYY-MM-DD`。
+
+    按 Asia/Shanghai 算,因为被比较的 `published` 就是 `fetching.parse_feed`
+    按这个时区格式化出来的——两头不同时区的话,每天有 8 小时窗口会差一整天。
+    """
+    at = (when or datetime.now(timezone.utc)).astimezone(ZoneInfo('Asia/Shanghai'))
+    return (at.date() - timedelta(days=HISTORY_DAYS)).isoformat()
 
 
 def check_kind(kind: str) -> str:
@@ -187,11 +214,15 @@ def db():
         _migrate(conn)
         if not conn.execute("SELECT 1 FROM feed_meta WHERE key='defaults-v1'").fetchone():
             defaults = json.loads(Path(__file__).with_name('defaults.json').read_text())
+            # 全新安装 = 这 60 个默认订阅全是新的,同样只收最近几天,否则第一次
+            # 同步就把几十个源的存档一起拖进来。
+            floor = history_floor()
             for s in defaults:
                 conn.execute('''INSERT OR IGNORE INTO subscriptions
-                    (kind,name,url,mode,group_name,config,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)''',
+                    (kind,name,url,mode,group_name,config,created_at,updated_at,history_floor)
+                    VALUES(?,?,?,?,?,?,?,?,?)''',
                     (s['kind'], s['name'], source_url(s['kind'],s['url']), s['mode'], s['group_name'],
-                     '{}', now(), now()))
+                     '{}', now(), now(), floor))
             conn.execute("INSERT INTO feed_meta VALUES('defaults-v1',?)", (now(),))
         conn.commit()
         yield conn
@@ -279,13 +310,17 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
                 c.execute('''UPDATE subscriptions SET name=?,url=?,feed_url=?,mode=?,group_name=?,
                     enabled=?,updated_at=? WHERE id=?''', (name,url,feed_url,mode,group,enabled,now(),source_id))
                 if reset:
+                    # 换了链接 = 这个订阅从头开始,历史下界也跟着重算:指向一个
+                    # 全新的源时,旧订阅那个两年前的下界等于没有下界。
                     c.execute("""UPDATE subscriptions SET etag='',modified='',resolved_url='',
-                        last_error='',last_success='',last_attempt='',failures=0,retry_at=0,config='{}' WHERE id=?""", (source_id,))
+                        last_error='',last_success='',last_attempt='',failures=0,retry_at=0,config='{}',
+                        history_floor=? WHERE id=?""", (history_floor(), source_id))
                     c.execute('DELETE FROM subscription_items WHERE subscription_id=?', (source_id,))
             else:
                 source_id = c.execute('''INSERT INTO subscriptions
-                    (kind,name,url,feed_url,mode,group_name,enabled,created_at,updated_at)
-                    VALUES(?,?,?,?,?,?,?,?,?)''', (kind,name,url,feed_url,mode,group,enabled,now(),now())).lastrowid
+                    (kind,name,url,feed_url,mode,group_name,enabled,created_at,updated_at,history_floor)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)''', (kind,name,url,feed_url,mode,group,enabled,
+                    now(),now(),history_floor())).lastrowid
     except sqlite3.IntegrityError:
         raise ValueError('这个链接已经在订阅列表中') from None
     return subscription(kind, source_id)

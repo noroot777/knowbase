@@ -4,7 +4,10 @@ import tempfile
 import threading
 import unittest
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from unittest.mock import patch, Mock
 
 from fastapi import FastAPI
@@ -15,14 +18,22 @@ from kb.collectors import FetchScope, get_collector
 from kb.feeds import registry as reg, fetching, sync, schedule
 from kb.web import intake_api
 
-RSS = b'''<?xml version="1.0"?><rss version="2.0"><channel><title>Test</title>
+# 固定日期会让这套测试在几天后自己变红:新订阅只收最近 `reg.HISTORY_DAYS` 天
+# (见 sync._within_history),写死 2026-09-28 的样本过几天就被那道闸挡住,而红
+# 的是一堆跟历史下界毫无关系的用例。所以样本日期跟着今天走,断言也用同一个值。
+_FRESH = datetime.now(timezone.utc) - timedelta(days=1)
+# published 由 fetching.parse_feed 按 Asia/Shanghai 格式化,断言要用同一个时区
+# 换算出来的日历日,否则每天有 8 小时窗口对不上。
+DAY = _FRESH.astimezone(ZoneInfo('Asia/Shanghai')).date().isoformat()
+RSS = ('''<?xml version="1.0"?><rss version="2.0"><channel><title>Test</title>
 <item><guid>id-1</guid><title>Agent notebook</title><link>https://example.org/post?utm_source=rss</link>
 <description><![CDATA[<p>agent notebook knowledge</p><script>danger()</script>]]></description>
-<pubDate>Mon, 28 Sep 2026 01:00:00 GMT</pubDate></item></channel></rss>'''
-ATOM = b'''<feed xmlns="http://www.w3.org/2005/Atom"><title>Notes</title>
+<pubDate>%s</pubDate></item></channel></rss>''' % format_datetime(_FRESH)).encode()
+ATOM = ('''<feed xmlns="http://www.w3.org/2005/Atom"><title>Notes</title>
 <entry><id>urn:post:1</id><title>Short thought</title><link href="https://nitter.net/Example/status/123#m"/>
-<updated>2026-09-28T02:00:00Z</updated><author><name>Example</name></author>
+<updated>%s</updated><author><name>Example</name></author>
 <content type="html">&lt;p&gt;A thought&lt;/p&gt;</content></entry></feed>'''
+        % _FRESH.strftime('%Y-%m-%dT%H:%M:%SZ')).encode()
 
 
 class FeedTests(unittest.TestCase):
@@ -89,7 +100,7 @@ class FeedTests(unittest.TestCase):
         e = self.entries()[0]
         self.assertEqual('https://example.org/post',e['url'])
         self.assertNotIn('danger',e['body'])
-        self.assertIn('2026-09-28',e['published'])
+        self.assertIn(DAY,e['published'])
         self.assertEqual('summary',e['content_kind'])
         atom = fetching.parse_feed(ATOM,'https://example.org/rss',social=True)[0]
         self.assertEqual('https://x.com/example/status/123',atom['url'])
@@ -156,11 +167,107 @@ class FeedTests(unittest.TestCase):
             sync.collect('rss',FetchScope(targets=(str(a['id']),),force=True))
             self.assertEqual('',reg.subscription('rss',a['id'])['last_error'])
 
+    # ---- 新订阅的历史下界(sync._within_history / reg.history_floor) ----
+    # 背景:一个刚添加的源常常把整个存档一次交出来(实测 Hugging Face Blog 的
+    # feed 一口气给了 500 条、最早到 2024-04-10)。这些旧文随后逐批翻译、逐批
+    # 重新导出,每重新导出一次 indexed_at 就刷新一次,于是连着十几天以"补录"
+    # 的形态占满当天日报(2026-10-01 那份 46 条素材里补录占了 30 条)。
+
+    def fed(self, source, entries, etag='v1'):
+        """把一份 feed 交给 collect,返回这一轮新增几条。"""
+        with patch.object(sync,'fetch_source',
+                          return_value=(entries,{'etag':etag,'modified':'','resolved_url':source['url']})):
+            return sync.collect('rss',FetchScope(targets=(str(source['id']),),force=True))['added']
+
+    def aged(self, days, url=None):
+        """一条 days 天前发布的条目。"""
+        day = (datetime.now(ZoneInfo('Asia/Shanghai')).date() - timedelta(days=days)).isoformat()
+        return {**self.entries()[0],'url':url or f'https://example.org/p{days}',
+                'published':f'{day} 08:00'}
+
+    def floor_of(self, source):
+        return reg.subscription('rss',source['id'])['history_floor']
+
+    def test_new_subscription_takes_only_recent_history(self):
+        s=self.source()
+        self.assertEqual(reg.history_floor(),self.floor_of(s))
+        # 下界含当天:正好第 HISTORY_DAYS 天的那条要收,再老一天的不收。
+        edge=self.aged(reg.HISTORY_DAYS); stale=self.aged(reg.HISTORY_DAYS+1); ancient=self.aged(800)
+        self.assertEqual(2,self.fed(s,[*self.entries(),edge,stale,ancient]))
+        kept={i['url'] for i in reg.items('rss',s['id'],limit=50)['items']}
+        self.assertEqual({'https://example.org/post',edge['url']},kept)
+
+    def test_history_floor_still_applies_after_the_first_fetch(self):
+        """只拦"第一次抓取"挡不住任何事。
+
+        第一次之后 etag 命中 304、什么都不返回;等源站下次更新,整份 feed(连同
+        那 500 条存档)又回来了——那时"首次导入"的闸门早就撤了,存档照样整批
+        进来。所以判据是一个固定日期,与抓第几次无关。
+        """
+        s=self.source()
+        self.assertEqual(1,self.fed(s,self.entries()))
+        s=reg.subscription('rss',s['id'])
+        self.assertEqual(0,self.fed(s,[self.aged(400),self.aged(90)],etag='v2'))
+        self.assertEqual(1,reg.items('rss',s['id'])['total'])
+
+    def test_history_floor_is_fixed_so_outage_recovery_keeps_its_backlog(self):
+        """下界是钉死的日期,不是"距今 N 天"的滑动窗口。
+
+        滑动窗口会在源站停更(或我们这边挂了)几天之后恢复时,把那几天的内容
+        静默丢掉——而那正是最该补回来的一批。
+        """
+        s=self.source()
+        with reg.db() as c:
+            c.execute("UPDATE subscriptions SET history_floor=? WHERE id=?",
+                      ((datetime.now(ZoneInfo('Asia/Shanghai')).date()-timedelta(days=60)).isoformat(),s['id']))
+        s=reg.subscription('rss',s['id'])
+        self.assertEqual(2,self.fed(s,[self.aged(9),self.aged(30)]))
+
+    def test_subscriptions_without_a_floor_are_unrestricted(self):
+        """老库里的订阅补成空串 = 不设下界,行为逐字不变。
+
+        它们的存档早就抓完了,回头给它们钉一个下界只会在源站补发旧文时静默
+        丢内容,挡不住任何已经发生的事。
+        """
+        s=self.source()
+        with reg.db() as c:
+            c.execute("UPDATE subscriptions SET history_floor='' WHERE id=?",(s['id'],))
+        s=reg.subscription('rss',s['id'])
+        self.assertEqual(2,self.fed(s,[self.aged(800),self.aged(1)]))
+
+    def test_undated_entries_pass_the_floor(self):
+        """没有发布时间的条目照收:它身上没有任何"很旧"的证据。
+
+        丢掉是不可恢复的静默损失,而日报那边本来就按"补录"接住这一档。
+        """
+        self.assertEqual(1,self.fed(self.source(),
+                                    [{**self.entries()[0],'url':'https://example.org/undated','published':''}]))
+
+    def test_ranged_import_bypasses_the_floor(self):
+        """区间补抓是用户点名要的那段日期,是这道闸的逃生口。"""
+        s=self.source(); old=self.aged(400)
+        with patch.object(sync,'fetch_source',
+                          return_value=([old],{'etag':'v1','modified':'','resolved_url':s['url']})):
+            day=old['published'][:10]
+            sync.collect('rss',FetchScope(targets=(str(s['id']),),since=day,until=day,force=True))
+        self.assertEqual(1,reg.items('rss',s['id'])['total'])
+
+    def test_url_change_recomputes_the_floor(self):
+        """换了链接 = 这个订阅从头开始。
+
+        指向一个全新的源时,旧订阅那个两年前的下界等于没有下界。
+        """
+        s=self.source()
+        with reg.db() as c:
+            c.execute("UPDATE subscriptions SET history_floor='2024-01-01' WHERE id=?",(s['id'],))
+        reg.save_subscription('rss',{'url':'https://example.org/other.xml'},s['id'])
+        self.assertEqual(reg.history_floor(),self.floor_of(s))
+
     def test_range_does_not_cache_away_out_of_range_entries(self):
         s=self.source()
         entries=self.entries()+[{**self.entries()[0],'url':'https://example.org/old','published':'2026-08-01 08:00'}]
         with patch.object(sync,'fetch_source',return_value=(entries,{'etag':'new','modified':'','resolved_url':s['url']})):
-            sync.collect('rss',FetchScope(targets=(str(s['id']),),since='2026-09-28',until='2026-09-28'))
+            sync.collect('rss',FetchScope(targets=(str(s['id']),),since=DAY,until=DAY))
         self.assertEqual(1,reg.items('rss')['total'])
         self.assertEqual('',reg.subscription('rss',s['id'])['etag'])
 
@@ -178,7 +285,7 @@ class FeedTests(unittest.TestCase):
         conn=store.connect(self.root/'index.db')
         try:
             store.upsert_document(conn,docs[0],split_chunks(docs[0].body),reg.now());conn.commit()
-            found=_fts_leg(conn,'notebook',Filters(source='rss',until='2026-09-28'))
+            found=_fts_leg(conn,'notebook',Filters(source='rss',until=DAY))
             self.assertEqual(1,len(found))
             self.assertEqual([], _fts_leg(conn,'notebook',Filters(source='social')))
         finally: conn.close()
