@@ -483,7 +483,7 @@
     <p id="wechat-error" role="alert"></p>
     <div class="wechat-actions"><button id="wechat-check" onclick="startWechatSetup()">检查并接入绿泡泡</button><button id="wechat-next" class="ghost" onclick="useLocalWechat()" hidden>去同步公众号</button><button class="ghost" onclick="refreshWechatSetup()">刷新状态</button></div>
     <p class="hint" id="wechat-runtime-hint">可以关闭窗口，任务继续在后台执行。获取和验证不需要大模型 API。</p>
-    <details class="wechat-explanation hint"><summary>文章怎么获取？需要安装 skill 吗？</summary><p>不需要安装个人情报库 skill。项目会准备独立 Reader，读取本机已同步的公众号推送，提取文章链接，再抓取公开正文、归档和索引；智能体用于后续分析。</p><p>仅覆盖本机已同步的推送，不保证订阅前的历史。私聊、群聊不会被作为文章采集。公众号正文图片走网页下载，不要求绿泡泡缓存图片解码 key。</p><p>原“凭证抓取”通道仍通过 wxdown 获取逐号短期凭证。绿泡泡接入目前支持在本机 Mac 上获取 key；远程服务器不能读取你电脑上的绿泡泡。</p></details>
+    <details class="wechat-explanation hint"><summary>文章怎么获取？需要安装 skill 吗？</summary><p>不需要安装个人情报库 skill。项目会准备独立 Reader，读取本机已同步的公众号推送，提取文章链接，再抓取公开正文、归档和索引；智能体用于后续分析。</p><p>仅覆盖本机已同步的推送，不保证订阅前的历史。私聊、群聊不会被作为文章采集。公众号正文图片走网页下载，不要求绿泡泡缓存图片解码 key。</p><p>本机推送是这里唯一的通道，正文按文章链接公开抓取，所以没有任何凭证要维护。另一条“逐号文章凭证”的通道（要 wxdown 抓包、要人去逐个点开文章）在 wechat-oa 分支上，主干不带它。绿泡泡接入目前只支持在本机 Mac 上获取 key；远程服务器读不到你电脑上的绿泡泡。</p></details>
   </div>
 </div>
 <script src="/static/js/icons.js"></script>
