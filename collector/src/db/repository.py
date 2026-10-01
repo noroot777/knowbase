@@ -136,33 +136,45 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
                 # 用户搜到的这个名字就是微信当前昵称,顺手把改名记下来
                 self.set_account_display_name(existing, name)
                 return existing
-        held = self.name_held_by(name)
-        if fakeid and held and held != fakeid:
-            raise AccountNameTaken(name, held, fakeid)
-        self.conn.execute(
+        cur = self.conn.execute(
             """
             INSERT INTO accounts (name, fakeid, latest_crawl_at, in_crawl_config, created_at, updated_at)
             VALUES (?, ?, '', 1, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
-              -- 到这儿只剩三种可能:这个名字没人占、占着的就是同一个 fakeid、
-              -- 或者占着的是个占位键。空 fakeid 一律不许把已有归属抹掉——那种
-              -- 调用只是在说"确保这个名字在采集列表里",没有在声明身份。
+              -- WHERE 放行时只剩三种可能:这个名字没人占、占着的就是同一个
+              -- fakeid、或者占着的是个占位键。空 fakeid 一律不许把已有归属抹掉
+              -- ——那种调用只是在说"确保这个名字在采集列表里",没在声明身份。
               fakeid=CASE WHEN excluded.fakeid <> '' THEN excluded.fakeid
                           ELSE accounts.fakeid END,
               in_crawl_config=1,
               removed=0,
               updated_at=excluded.updated_at
+            -- **归属判定就在这里,不在 Python 那边先 SELECT 一次。** 先查后写是
+            -- TOCTOU:两个请求(面板上那个 tgtBusy 只管单个页面,管不到另一个标签
+            -- 页、更管不到独立的 CLI 进程)都读到"这个名字没人占",随后第二条
+            -- UPSERT 照样把第一条刚写进去的 fakeid 盖掉,两边都报「已添加」
+            -- (2026-10-01 第 3 轮审查 50/50 复现,真实 HTTP→CLI→仓储一条链也
+            -- 复现了)。SQLite 把写入串行化,所以判据只有待在写语句自己的 WHERE
+            -- 里,才和那次写入同生共死。放行不了就是 0 行,由调用方抛出来。
+            WHERE excluded.fakeid = ''
+               OR accounts.fakeid = ''
+               OR accounts.fakeid = excluded.fakeid
+               OR substr(accounts.fakeid, 1, 7) = 'import:'
             """,
             (name, fakeid, now, now),
         )
+        if cur.rowcount == 0:
+            raise AccountNameTaken(name, self.name_held_by(name), fakeid)
         return name
 
     def name_held_by(self, name: str) -> str:
-        """这个档案名现在挂在哪个 `__biz` 上;空串 = 没人占着,可以写。
+        """这个档案名现在挂在哪个 `__biz` 上。**只给错误文案用,不是闸门**——
+        闸门是 `enable_crawl_account` 那条 UPSERT 自己的 WHERE(见那里的注释)。
 
         `import:` 开头的不算占着:那是链接导入留下的占位键(`upsert_import_account`),
         本来就是等着被真正的归属填上的,拿它当"另一个号"会让这类存量账号永远订阅
-        不了。空 fakeid 同理——还没核实过归属,不是另一个号。
+        不了。空 fakeid 同理——还没核实过归属,不是另一个号。两条豁免跟那条 WHERE
+        里的两句一一对应。
         """
         row = self.conn.execute(
             "SELECT fakeid FROM accounts WHERE name=?", (name,)
