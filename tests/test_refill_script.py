@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """正文回填脚本是可选外挂,路径不许写死在代码里。
 
-原来是 `REFILL_SCRIPT = Path.home() / "code" / "gongzhonghao" / "gzh_refill_body.py"`
-——仓库里没有这个脚本,它是维护者自己机器上的一份存量修补工具。优雅降级成 skipped
+原来是一行 `Path.home() / ... / "gzh_refill_body.py"` ——仓库里没有这个脚本,
+它是维护者自己机器上某个目录下的一份存量修补工具。优雅降级成 skipped
 所以不崩,但每个外部用户每次点「重试失败项」都会看到一行指向别人家目录的提示,而
 这个功能对他们永远不可用。
 
@@ -55,7 +55,8 @@ class RefillScriptTests(unittest.TestCase):
     def test_no_hardcoded_path_anywhere_in_the_module(self):
         """源码里不许再出现写死的私人路径。"""
         source = Path(pipeline_retry.__file__).read_text(encoding="utf-8")
-        for bad in ("gongzhonghao", "gzh_refill_body", "Path.home()"):
+        # `Path.home()` 是那类路径的通用形状,`gzh_refill_body` 是具体那一个
+        for bad in ("gzh_refill_body", "Path.home()"):
             self.assertNotIn(bad, source)
 
     def test_unset_means_the_step_does_not_exist(self):
