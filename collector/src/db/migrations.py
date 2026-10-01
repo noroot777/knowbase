@@ -8,7 +8,7 @@ import re
 
 from src.utils.helpers import time_now
 
-LATEST_SCHEMA_VERSION = 17
+LATEST_SCHEMA_VERSION = 18
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -168,6 +168,15 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (17, time_now()),
+        )
+        conn.commit()
+        current = 17
+
+    if current < 18:
+        _migrate_to_v18(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (18, time_now()),
         )
         conn.commit()
 
@@ -466,20 +475,13 @@ def _migrate_to_v13(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_to_v14(conn: sqlite3.Connection) -> None:
-    """删掉 article_fts 全文索引。
+    """退役:原来在这里 `DROP TABLE article_fts`,现在什么都不做(见 v18)。
 
-    它从头到尾只有写入方:每次入库/改正文/改标签都重新分词写一遍,而唯一的
-    读取口 `Repository.search_articles` 没有任何调用者——文章检索在知识库那
-    一侧按 vault 的 md 做,采集器这边只管抓和导出。实测这张虚拟表连同它的
-    影子表占 134 MB,纯粹是每次抓取都要付一次的分词开销。
-
-    DROP 虚拟表会连 article_fts_{data,idx,content,docsize,config} 一起删掉。
+    那张虚拟表在主干确实零个读取方,**真正省下来的是「每次入库都重新分词写一遍」
+    那笔开销**——而主干早就一行 fts 代码都不调了,这笔开销跟表在不在无关。
+    DROP 只多换来「把它占的页还给 freelist」,代价却是把共用这个库的另一条分支
+    打断(见 v18 的说明)。
     """
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE name='article_fts'"
-    ).fetchone()
-    if row:
-        conn.execute("DROP TABLE article_fts")
 
 
 def _migrate_to_v15(conn: sqlite3.Connection) -> None:
@@ -512,9 +514,9 @@ def _migrate_to_v17(conn: sqlite3.Connection) -> None:
 
     所以把两列加回来,并且**主干从此不在这个库上做破坏性的 schema 变更**:
     要停用一列就停止读写它,别 DROP。两个空列的代价是几十字节,换的是另一条
-    分支还能跑。v14 删 `article_fts` 不在此列 —— 那是整张表,旧分支 schema.sql
-    里的 `CREATE VIRTUAL TABLE IF NOT EXISTS` 会把它重建出来(内容要靠它自己
-    那条重建路径补,但写入不会失败)。
+    分支还能跑。(这里原来写着「v14 删 `article_fts` 不在此列,旧分支的
+    `CREATE VIRTUAL TABLE IF NOT EXISTS` 会重建它」—— **那句话只对重启成立**,
+    见 v18。)
 
     这一步也是已经迁到 v16 的存量库的唯一出路:列是真的被 DROP 掉了,
     光把 v15/v16 改成空操作并不会让它们自己长回来。
@@ -533,3 +535,41 @@ def _migrate_to_v17(conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
         if "display_checked_at" not in cols:
             conn.execute("ALTER TABLE accounts ADD COLUMN display_checked_at TEXT")
+
+
+
+def _migrate_to_v18(conn: sqlite3.Connection) -> None:
+    """把 v14 删掉的 article_fts 建回来(空表),并且以后不再删它。
+
+    v17 把「不许 DROP COLUMN」那条立住了,却给整张表开了个口子,理由是「旧分支
+    schema.sql 里的 `CREATE VIRTUAL TABLE IF NOT EXISTS` 会重建它」。**那句话只
+    对重启成立。** `ensure_database_ready` 的缓存是进程内的:旧分支那个进程只在
+    第一次打开库时跑 schema,之后一直攥着同一个连接采集,别的进程删了表它不会
+    再跑一遍。于是实测出来的形态是——旧分支正在同步、主干在另一个进程里第一次
+    升级这个库,旧分支采下一篇时
+    `sqlite3.OperationalError: no such table: article_fts`,那一轮中途失败、
+    那个号这一批剩下的文章都不再正常入库,要关掉重开才恢复(2026-10-01 第 2 轮
+    审查复现,真走它的 `api._ingest_crawl_article`)。
+
+    **所以口径收成一句:主干的迁移只增不减。** 列是这样,表也是这样 —— 判据不是
+    「对方重启后能不能自己长回来」,而是「对方不重启会不会当场挂」。v15/v16/v14
+    现在都是空操作,v17/v18 只 ADD / CREATE;ADD COLUMN 对在途连接是安全的
+    (SQLite 自己会重新编译语句),删东西不是。
+
+    建出来是**空表**:主干不写它,所以 134 MB 的索引内容不会回来(那些页在 v14
+    已经还给 freelist 了);旧分支要内容自己有一条重建路径。定义照抄
+    `wechat-oa` 分支 schema.sql 里那一份 —— 列名和 tokenize 必须一字不差,
+    否则它那句 `INSERT INTO article_fts (article_id, title_tok, digest_tok,
+    body_tok)` 照样失败,而且它重启时那句 `IF NOT EXISTS` 是空操作、改不回来。
+    """
+    conn.execute(
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS article_fts USING fts5(
+          article_id UNINDEXED,
+          title_tok,
+          digest_tok,
+          body_tok,
+          tokenize='unicode61 remove_diacritics 0'
+        )
+        """
+    )

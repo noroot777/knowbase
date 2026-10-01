@@ -169,3 +169,17 @@ CREATE TABLE IF NOT EXISTS article_notes (
 
 CREATE INDEX IF NOT EXISTS idx_article_notes_updated_at
   ON article_notes (updated_at DESC);
+
+-- 全文索引。**主干不读也不写它**:文章检索在知识库那一侧按 vault 的 md 做,
+-- 采集器只管抓和导出,所以这里一行 fts 代码都没有、也不付那笔分词开销。
+-- 留着这张表是因为这个库要能被 wechat-oa 分支同时打开,它采集时每篇都写它 ——
+-- 而删掉会把**正在同步**的那个旧进程当场打断(它只在首次打开库时跑这份
+-- schema,不会因为别的进程删表而再跑一遍)。详见 migrations v18。
+-- 列名和 tokenize 跟那个分支一字不差,它的 INSERT 才对得上。
+CREATE VIRTUAL TABLE IF NOT EXISTS article_fts USING fts5(
+  article_id UNINDEXED,
+  title_tok,
+  digest_tok,
+  body_tok,
+  tokenize='unicode61 remove_diacritics 0'
+);
