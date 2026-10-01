@@ -167,11 +167,3 @@ CREATE TABLE IF NOT EXISTS article_notes (
 
 CREATE INDEX IF NOT EXISTS idx_article_notes_updated_at
   ON article_notes (updated_at DESC);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS article_fts USING fts5(
-  article_id UNINDEXED,
-  title_tok,
-  digest_tok,
-  body_tok,
-  tokenize='unicode61 remove_diacritics 0'
-);

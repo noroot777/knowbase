@@ -84,8 +84,7 @@ def _word_count_from_body_raw(raw: object, title: str = "") -> int:
 
 
 def _ingest_crawl_article(repo, account_name: str, article: dict) -> bool:
-    """入库单篇爬取文章：元数据、封面、正文、字数、全文索引。"""
-    from src.db import fts as fts_mod
+    """入库单篇爬取文章：元数据、封面、正文、字数。"""
     from src.utils.article_identity import prepare_article
 
     prepared = prepare_article(repo, account_name, article)
@@ -94,7 +93,7 @@ def _ingest_crawl_article(repo, account_name: str, article: dict) -> bool:
     account_name, article, _is_new = prepared
 
     article_id = str(article.get("id") or "")
-    repo.upsert_article_from_blog(account_name, article, update_fts=False)
+    repo.upsert_article_from_blog(account_name, article)
     download_cover(
         article_id,
         str(article.get("cover") or ""),
@@ -111,17 +110,6 @@ def _ingest_crawl_article(repo, account_name: str, article: dict) -> bool:
     if nickname and repo.set_account_display_name(account_name, nickname):
         repo.commit()
     body_raw = repo.get_body_text(article_id) or ""
-    if isinstance(body_raw, list):
-        body_for_fts = "\n".join(str(x) for x in body_raw)
-    else:
-        body_for_fts = str(body_raw)
-    fts_mod.upsert_article_fts(
-        repo.conn,
-        article_id,
-        str(article.get("title") or ""),
-        str(article.get("digest") or ""),
-        body_for_fts,
-    )
     wc = _word_count_from_body_raw(body_raw, str(article.get("title") or ""))
     repo.set_word_count(article_id, wc)
     repo.commit()

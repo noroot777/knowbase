@@ -6,7 +6,7 @@
 WeChatOA 自家阅读器的事,知识库侧另有提取阶段。
 
 入库单篇复用 api.py 里久经验证的 _ingest_crawl_article(封面下载、正文抓取、
-FTS、字数一条龙)。
+字数一条龙)。
 """
 
 from __future__ import annotations

@@ -12,7 +12,6 @@ from typing import Any
 
 from src.db.body_text import normalize_body_text
 from src.db.connection import DATA_DIR, ensure_database_ready, get_connection
-from src.db import fts as fts_mod
 from src.db._repo_notes import NotesMixin
 from src.db._repo_queries import QueryMixin
 from src.db._repo_reading import ReadingMixin
@@ -309,7 +308,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         account_name: str,
         blog: dict[str, Any],
         *,
-        update_fts: bool = True,
         source: str = "crawl",
     ) -> None:
         aid = str(blog.get("id") or "").strip()
@@ -373,16 +371,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         if isinstance(tags, list) and tags:
             self.set_llm_tags(aid, [str(t) for t in tags if str(t).strip()])
 
-        if update_fts:
-            body = self.get_body_text(aid) or ""
-            fts_mod.upsert_article_fts(
-                self.conn,
-                aid,
-                str(blog.get("title") or ""),
-                str(blog.get("digest") or ""),
-                body,
-            )
-
     def set_llm_tags(self, article_id: str, tags: list[str]) -> None:
         self.conn.execute(
             "DELETE FROM article_llm_tags WHERE article_id=?", (article_id,)
@@ -404,14 +392,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         )
         if tags:
             self.set_llm_tags(article_id, tags)
-        row = self.conn.execute(
-            "SELECT title, digest FROM articles WHERE id=?", (article_id,)
-        ).fetchone()
-        if row:
-            body = self.get_body_text(article_id) or ""
-            fts_mod.upsert_article_fts(
-                self.conn, article_id, row["title"], row["digest"], body
-            )
 
     def set_body_text(self, article_id: str, raw: Any) -> None:
         text = normalize_body_text(raw)
@@ -426,13 +406,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             """,
             (article_id, text, now, now),
         )
-        row = self.conn.execute(
-            "SELECT title, digest FROM articles WHERE id=?", (article_id,)
-        ).fetchone()
-        if row:
-            fts_mod.upsert_article_fts(
-                self.conn, article_id, row["title"], row["digest"], text
-            )
 
     def get_body_text(self, article_id: str) -> str | None:
         row = self.conn.execute(
@@ -521,7 +494,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             "UPDATE articles SET is_user_deleted=1, updated_at=? WHERE id=?",
             (time_now(), article_id),
         )
-        fts_mod.delete_article_fts(self.conn, article_id)
 
     def remove_article(self, article_id: str, account: str) -> bool:
         row = self.conn.execute(
@@ -581,7 +553,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             return 0
         removed = 0
         for aid in ids:
-            fts_mod.delete_article_fts(self.conn, aid)
             self.conn.execute("DELETE FROM article_bodies WHERE article_id=?", (aid,))
             self.conn.execute(
                 "DELETE FROM article_llm_tags WHERE article_id=?", (aid,)
@@ -592,19 +563,3 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
 
     def commit(self) -> None:
         self.conn.commit()
-
-    def rebuild_all_fts(self) -> int:
-        rows = self.conn.execute(
-            """
-            SELECT a.id, a.title, a.digest, COALESCE(b.body_text, '') AS body_text
-            FROM articles a
-            LEFT JOIN article_bodies b ON b.article_id = a.id
-            WHERE a.is_user_deleted=0
-            """
-        ).fetchall()
-        self.conn.execute("DELETE FROM article_fts")
-        for r in rows:
-            fts_mod.upsert_article_fts(
-                self.conn, r["id"], r["title"], r["digest"], r["body_text"]
-            )
-        return len(rows)

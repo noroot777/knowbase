@@ -8,7 +8,7 @@ import re
 
 from src.utils.helpers import time_now
 
-LATEST_SCHEMA_VERSION = 13
+LATEST_SCHEMA_VERSION = 14
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -132,6 +132,15 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (13, time_now()),
+        )
+        conn.commit()
+        current = 13
+
+    if current < 14:
+        _migrate_to_v14(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (14, time_now()),
         )
         conn.commit()
 
@@ -427,3 +436,20 @@ def _migrate_to_v13(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
     if "display_checked_at" not in cols:
         conn.execute("ALTER TABLE accounts ADD COLUMN display_checked_at TEXT")
+
+
+def _migrate_to_v14(conn: sqlite3.Connection) -> None:
+    """删掉 article_fts 全文索引。
+
+    它从头到尾只有写入方:每次入库/改正文/改标签都重新分词写一遍,而唯一的
+    读取口 `Repository.search_articles` 没有任何调用者——文章检索在知识库那
+    一侧按 vault 的 md 做,采集器这边只管抓和导出。实测这张虚拟表连同它的
+    影子表占 134 MB,纯粹是每次抓取都要付一次的分词开销。
+
+    DROP 虚拟表会连 article_fts_{data,idx,content,docsize,config} 一起删掉。
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='article_fts'"
+    ).fetchone()
+    if row:
+        conn.execute("DROP TABLE article_fts")
