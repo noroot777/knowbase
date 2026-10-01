@@ -1,11 +1,13 @@
 """Persistent subscriptions and fetched items, independent of the rebuildable search index."""
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import ipaddress
 import json
 import re
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -143,6 +145,42 @@ def history_floor(when: datetime | None = None) -> str:
     """
     at = (when or datetime.now(timezone.utc)).astimezone(ZoneInfo('Asia/Shanghai'))
     return (at.date() - timedelta(days=HISTORY_DAYS)).isoformat()
+
+
+_trim_held = threading.local()
+
+
+@contextmanager
+def trim_lock():
+    """存量清理(`scripts/feed_trim_history.py`)与订阅写入之间的跨进程独占锁。
+
+    清理是「备份 → 钉下界 → 删 feeds.db 行 → 删 vault → 删 kb.db」好几步,
+    同步那一侧是「读订阅快照 → 发请求 → 存结果 → 导出 vault」,两边各自没有
+    任何互斥:订阅快照是请求**之前**读的,于是一轮在备份期间起跑的同步能拿着
+    空下界的旧快照,在清理收尾之后把刚删掉的存档原样再入库一遍(2026-10-01
+    审查实测重新入库 1 条、文件也回来了)。开工时问一次 kb-web 的管道状态只能
+    回答"那一刻忙不忙",答不了"接下来会不会有人起跑"。
+
+    锁的是 `data/` 下**单独的 lockfile**,只创建不删除:unlink 会让
+    「A 持锁 → B 删文件 → C 新建再持锁」出现两个持锁者(和 `secrets.json`
+    那把锁同一套理由)。flock 随进程退出自动释放,所以清理崩了也不会把同步
+    堵死。
+
+    同一线程重入直接放行:flock 认的是 open file description,同进程换一个 fd
+    再锁会把自己锁死。
+    """
+    if getattr(_trim_held, 'on', False):
+        yield
+        return
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    fh = (DATA_DIR / 'feeds-trim.lock').open('a+')
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        _trim_held.on = True
+        yield
+    finally:
+        _trim_held.on = False
+        fh.close()                       # 关闭即释放 flock
 
 
 def check_kind(kind: str) -> str:

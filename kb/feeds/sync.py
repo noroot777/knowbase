@@ -48,11 +48,23 @@ def _within_history(source, entries):
     没有发布时间的条目照收:它身上没有任何"很旧"的证据,丢掉是不可恢复的静默
     损失,而日报那边本来就按"补录"接住这一档(只会出现一次)。区间补抓
     (`scope.ranged`)不受这道闸限制——那是用户点名要的那段日期,拿它当逃生口。
+
+    **下界现读,不信手里那份订阅快照**:快照是发请求**之前**读的,而这中间
+    `feed_trim_history` 可能刚给这个订阅钉上下界、把存档清了出去——按旧快照
+    (空下界)存结果就是把刚删掉的旧文原样再入库一遍,文件和归属一起回来
+    (2026-10-01 审查实测 1 条)。订阅行已经没了的时候才退回快照那一份。
     """
-    floor = (source.get('history_floor') or '')[:10]
+    floor = _stored_floor(source)[:10]
     if not floor:
         return entries
     return [e for e in entries if not e['published'] or e['published'][:10] >= floor]
+
+
+def _stored_floor(source) -> str:
+    with reg.db() as c:
+        row = c.execute('SELECT history_floor FROM subscriptions WHERE id=?',
+                        (source['id'],)).fetchone()
+    return (row['history_floor'] if row else source.get('history_floor')) or ''
 
 
 def _save_result(source, result, scope):
@@ -61,13 +73,17 @@ def _save_result(source, result, scope):
         entries = [e for e in entries if e['published'] and scope.since <= e['published'][:10] <= scope.until]
         # A ranged import must not cache away entries outside the selected dates.
         validators = {k: source[k] for k in ('etag', 'modified', 'resolved_url')}
-    else:
-        entries = _within_history(source, entries)
-    added = reg.put_items(source, entries)
-    with reg.db() as c:
-        c.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
-            failures=0,retry_at=0,etag=?,modified=?,resolved_url=? WHERE id=?''',
-            (reg.now(),reg.now(),validators['etag'],validators['modified'],validators['resolved_url'],source['id']))
+    # 存盘整段在清理锁里:存量清理持同一把锁,两边交错的话它删掉的旧文会被
+    # 这一轮按旧快照原样写回去(见 `reg.trim_lock`)。锁内再现读一次下界,所以
+    # 对方不持锁的旁路同样挡得住 —— 两道各管一段,缺一不可。
+    with reg.trim_lock():
+        if not scope.ranged:
+            entries = _within_history(source, entries)
+        added = reg.put_items(source, entries)
+        with reg.db() as c:
+            c.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
+                failures=0,retry_at=0,etag=?,modified=?,resolved_url=? WHERE id=?''',
+                (reg.now(),reg.now(),validators['etag'],validators['modified'],validators['resolved_url'],source['id']))
     return added
 
 
@@ -188,6 +204,17 @@ def _kept_meta(path: Path) -> dict:
 
 def export(kind: str, hold_untranslated: bool = False,
            translated: dict | None = None):
+    # 整段在清理锁里:导出是「选出待导出的行 → 逐篇写 vault」,存量清理是
+    # 「删 feeds.db 行 → 删 vault 文件」。不互斥的话清理删掉行、导出随后按
+    # 自己那份快照把文件写回去,而 feed_items 里已经没有这一条——vault 里从此
+    # 躺着一篇谁也管不着的旧文,索引照样收它,下一次清理也找不到它
+    # (见 `reg.trim_lock`)。
+    with reg.trim_lock():
+        return _export(kind, hold_untranslated, translated)
+
+
+def _export(kind: str, hold_untranslated: bool = False,
+            translated: dict | None = None):
     # hold_untranslated:还排在翻译队列里的条目这一轮不写 vault。一轮只译
     # MAX_ITEMS 条,不拦的话第 41 条会先以英文落盘,索引/提取/检索/日报都按
     # 英文处理过一遍。翻译整个跳过时(没配 key)不能拦,否则这些条目永远进
