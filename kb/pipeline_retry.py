@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import threading
@@ -33,26 +34,46 @@ from kb.pipeline_stages import (
     _run_wiki,
 )
 
-REFILL_SCRIPT = Path.home() / "code" / "gongzhonghao" / "gzh_refill_body.py"
+# 正文回填脚本是**可选外挂**:路径由 KB_REFILL_SCRIPT 指定,仓库里不带它。
+# 它要干的事(找 dr-gzh 树里正文为空的 md、重抓原文回填,转载 stub 还要走平台列表
+# API 定位原文短链)取决于各人存量是怎么坏的,没法内置成一个通用实现——所以做成
+# "配了就用、没配就整段不做",而不是在代码里写死某台机器上的一个路径:后者让每个
+# 外部用户每次点「重试失败项」都看到一行指向别人家目录的提示,而这个功能对他们
+# 永远不可用。
+_REFILL_ENV = "KB_REFILL_SCRIPT"
+
+
+def refill_script() -> Path | None:
+    """配置好的回填脚本路径;没配返回 None。
+
+    现读环境变量而不是在导入时定下来:测试要能逐个用例换路径。
+    """
+    raw = os.environ.get(_REFILL_ENV, "").strip()
+    return Path(raw).expanduser() if raw else None
 
 # 阶段 detail 里写了失败条数就算失败(状态本身是 ok 也算),与面板按钮同一套判定
 _FAIL_DETAIL_RE = re.compile(r"失败 [1-9]|\d+ 个账号失败")
 
 
 def _run_refill() -> None:
-    """子进程跑 gzh_refill_body.py:找 dr-gzh 树里正文为空的 md,重抓原文回填
+    """子进程跑配置好的回填脚本:找 dr-gzh 树里正文为空的 md,重抓原文回填
     (转载 stub 会走平台列表 API 定位原文短链)。占用 export 卡片展示进度。
 
-    回填成功的文档重置 extracted_at:防御历史上空正文却仅凭标题"提取成功"
-    的假成功,让它们跟着这次的 extract 重提。"""
-    if not REFILL_SCRIPT.exists():
-        _stage("export", "skipped", f"未找到 {REFILL_SCRIPT},跳过回填")
+    脚本按约定逐行输出 `OK <相对路径>` / `FAIL <说明>`,没有空正文时打印
+    "没有找到空正文文件"。回填成功的文档重置 extracted_at:防御历史上空正文却
+    仅凭标题"提取成功"的假成功,让它们跟着这次的 extract 重提。"""
+    script = refill_script()
+    if script is None:   # 正常形态:没配这个外挂,这一步不存在
+        _stage("export", "skipped", f"未配置正文回填脚本({_REFILL_ENV}),跳过回填")
+        return
+    if not script.exists():   # 配了却指不到——这是配置错了,得说出来
+        _stage("export", "skipped", f"{_REFILL_ENV} 指向的脚本不存在:{script}")
         return
     _stage("export", "running", "回填空正文(重抓原文)")
     try:
         proc = subprocess.run(
-            ["python3", str(REFILL_SCRIPT)],
-            cwd=REFILL_SCRIPT.parent, capture_output=True, text=True,
+            ["python3", str(script)],
+            cwd=script.parent, capture_output=True, text=True,
             timeout=30 * 60,
         )
     except subprocess.TimeoutExpired:
@@ -97,7 +118,7 @@ def retry_failed_plan() -> list[str]:
 
     - crawl 有账号失败/出错 → 重抓(增量爬取,便宜)
     - export 有失败/出错、或链里重抓过 → 重导出
-    - extract 有"正文空"跳过 → 先回填(refill)
+    - extract 有"正文空"跳过、且配了回填脚本 → 先回填(refill)
     - export/refill 可能补了数据、或 index 自己出错 → 重建索引
     - extract 出过错、或前面补了新文章 → 重提取
     - projects/wiki 出过错 → 重跑(它们在链尾,不牵连别人)
@@ -126,7 +147,9 @@ def retry_failed_plan() -> list[str]:
         plan.append("crawl")
     if _failed("export") or "crawl" in plan:
         plan.append("export")
-    if "正文空" in _detail("extract"):
+    # 没配回填脚本时这一步压根不进计划:让外部用户看一张"本次跳过"的卡片,
+    # 比不显示更糟——那个功能对他们不存在。
+    if "正文空" in _detail("extract") and refill_script() is not None:
         plan.append("refill")
     if plan or _failed("index") or projects_ingest_only:
         plan.append("index")

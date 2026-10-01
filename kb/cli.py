@@ -81,7 +81,7 @@ def cmd_extract(args) -> int:
         if not body.strip():
             empty += 1
             print(f"[{i}/{len(todo)}] SKIP {row['title'][:28]}: 正文为空"
-                  f"(先跑 gzh_refill_body.py 回填,再 kb index)")
+                  f"(先把正文补回来再 kb index)")
             continue
         try:
             data = extract_with_llm(row["title"], body)

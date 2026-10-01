@@ -3,7 +3,7 @@
 
 2026-09-15 那轮管道的 wiki 阶段整个挂在:
 
-    FileNotFoundError: '/Users/fjh/obs/new-start/wiki/topics/主题-ci/cd流程.md'
+    FileNotFoundError: '<vault>/wiki/topics/主题-ci/cd流程.md'
 
 提取阶段的主题词本该出自固定候选表,但模型给了表外的 `CI/CD流程`,slug 里的
 斜杠原样进了 `topic/` 标签;wiki 层拿它拼 `wiki/topics/主题-{t}.md`,斜杠成了
