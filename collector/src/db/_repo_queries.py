@@ -236,7 +236,7 @@ class QueryMixin:
         )
 
     def find_article_by_link(self, link: str) -> dict[str, Any] | None:
-        from src.utils.article_import import extract_mp_article_slug, link_lookup_variants
+        from src.utils.article_links import extract_mp_article_slug, link_lookup_variants
 
         for variant in link_lookup_variants(link):
             row = self.conn.execute(

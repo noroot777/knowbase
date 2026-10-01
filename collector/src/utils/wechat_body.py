@@ -13,7 +13,7 @@ from urllib.parse import quote, urlparse
 import requests
 from lxml import etree
 
-from src.utils.data_manager import headers
+from src.utils.data_manager import data_manager, headers
 from src.utils.helpers import message_unavailable
 
 # 抓取失败的两种哨兵:FETCH_ERROR 是临时故障(网络、反爬、解析不出正文),
@@ -54,6 +54,26 @@ _ALLOWED_IMAGE_HOSTS = frozenset(
 )
 
 
+_MP_ORIGIN = "https://mp.weixin.qq.com/"
+
+
+def _request_headers() -> dict[str, str]:
+    """抓正文用的请求头:基础 UA + 扫码凭证里的 Cookie(有就带上)。
+
+    Cookie 不是必需的 —— 公开文章页匿名也打得开;但带上之后被风控拦下的
+    概率明显低一些,所以读不到凭证时只是不带,不作为失败。
+    """
+    h = dict(headers)
+    try:
+        cookie = (data_manager.id_info or {}).get("cookie", "")
+        if cookie:
+            h["Cookie"] = cookie
+    except Exception:
+        pass
+    h["Referer"] = _MP_ORIGIN
+    return h
+
+
 def _find_rich_media_div(tree: etree._Element) -> list:
     for xp in _RICH_MEDIA_XPATHS:
         div = tree.xpath(xp)
@@ -70,8 +90,6 @@ def _fetch_page(url: str) -> tuple[str, etree._Element | None, bool]:
     永远是空的(正文容器 original_panel_content 由前端渲染,服务端只回空节点),
     只要卡片原文一直读不到,重试多少次都是同一个结果。
     """
-    from src.utils.wechat_preview import _request_headers
-
     response = requests.get(url, headers=_request_headers(), timeout=20).text
     tree = etree.HTML(response, parser=etree.HTMLParser(encoding="utf-8"))
     if tree is None:

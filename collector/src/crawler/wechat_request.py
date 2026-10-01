@@ -40,7 +40,7 @@ def _canonical_link(link: str) -> str:
         return ""
     try:
         from src.utils.article_identity import article_identity
-        from src.utils.article_import import canonical_article_link
+        from src.utils.article_links import canonical_article_link
 
         return article_identity(link) or canonical_article_link(link)
     except Exception:
