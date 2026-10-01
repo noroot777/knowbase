@@ -206,6 +206,33 @@ class AddByNameTests(_Base):
         self.assertIn("这次没核验", out)
         self.assertNotIn("同步一篇图文", out)
 
+    def test_a_same_name_session_without_a_biz_also_counts_as_ambiguous(self):
+        """同名两条、只有一条解析出了归属时,按名字添加照样得拒掉。
+
+        第 1 轮审查复现的就是这条路:面板上点那条写着「本机这条会话读不动」的候选,
+        前端发上来的正是空 id,而原来这里只拿「已经解析出 __biz 的那几个」判歧义
+        —— 于是**另一条**同名候选的 biz 被拿去入库,退出码 0、提示「已添加」。
+        归属只认 `__biz`,同名不是线索。
+        """
+        self.reader.accounts.return_value = [
+            {"username": "gh_right", "display_name": "同名公众号", "last_timestamp": 2},
+            {"username": "gh_clicked", "display_name": "同名公众号", "last_timestamp": 1}]
+        self.index("gh_right", "biz-other-account")
+        self.reader.messages.side_effect = LocalReaderError("这个会话读不动")
+        with patch("src.collect.local_accounts.LocalReader", return_value=self.reader):
+            code, out = self.add("同名公众号")
+        self.assertEqual(1, code)
+        self.assertIn("本机这条会话读不动", out)
+        self.assertIn("--fakeid", out)
+        # 真正要钉的是库里一个字都没多:只看提示的话,挑错号那条路也"看起来对"
+        self.assertEqual([], self.repo.conn.execute(
+            "SELECT name FROM accounts WHERE fakeid='biz-other-account'").fetchall())
+        # 指明了是哪一个就该加得进去 —— 拒的是歧义,不是这个号
+        with patch("src.collect.local_accounts.LocalReader", return_value=self.reader):
+            self.assertEqual(0, self.add("同名公众号", "--fakeid", "biz-other-account")[0])
+        self.assertEqual("同名公众号", self.repo.conn.execute(
+            "SELECT name FROM accounts WHERE fakeid='biz-other-account'").fetchone()[0])
+
     def test_two_sessions_with_the_same_name_require_an_explicit_fakeid(self):
         self.reader.accounts.return_value = [
             {"username": "gh_one", "display_name": "同名号", "last_timestamp": 2},

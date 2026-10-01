@@ -290,6 +290,7 @@ def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
             return _fail(str(e), as_json, EXIT_ERROR)
         same = [r for r in rows if r["name"] == name]
         exact = [r for r in same if r["fakeid"]]
+        blind = [r for r in same if not r["fakeid"]]
         ids = {r["fakeid"] for r in exact}
         if same and not ids:
             # 名字对上了、只是没拿到 __biz。别说成"没关注"——那是另一回事,
@@ -310,6 +311,19 @@ def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
         if len(ids) > 1:
             return _fail(f"本机有 {len(ids)} 个同名公众号会话,"
                          f"请用 --fakeid 指定是哪一个", as_json)
+        if blind:
+            # **同名会话里还有没解析出归属的,一样是歧义。** 原来只拿「已经解析出
+            # __biz 的那几个」判歧义,于是:两个同名会话、一个解析出来了、另一个
+            # 读不动(或排在预算之外),按名字添加会**把解析出来的那个拿去入库**
+            # —— 退出码 0、提示「已添加」,订阅的却是另一个号(第 1 轮审查复现:
+            # 面板上点那条写着「本机这条会话读不动」的候选,前端发的正是空 id,
+            # 落库的是另一条候选的 biz)。归属只认 `__biz`,同名不是线索:一个
+            # 名字对上两个会话时,少一个归属就等于不知道用户要的是哪一个。
+            probe = _worst_probe(blind)
+            return _fail(f"本机有 {len(same)} 个名叫「{name}」的会话,其中 "
+                         f"{len(blind)} 个{_NO_BIZ_STATE[probe]},没法确定你要的是"
+                         f"哪一个。{_NO_BIZ_FIX[probe]},或者用 --fakeid 指定",
+                         as_json)
         fakeid = exact[0]["fakeid"]
 
     with ArticleRepository() as repo:

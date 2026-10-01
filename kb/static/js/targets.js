@@ -8,6 +8,10 @@ let tgtList = [];        // 已订阅
 let tgtCands = [];       // 上次搜索的候选
 let tgtLabel = '目标';
 let tgtBusy = false;     // 有请求在飞:防连点造成重复添加/删除
+// 归属没解析出来那几条候选,按钮上挂的解释。行里那句状态文案(signature)
+// 已经说了是哪一档(没核验 / 读不动 / 确实没有图文),这里只说下一步怎么办。
+const TGT_BLIND_HINT = '这条会话还没解析出归属,无法确认是哪个号;'
+  + '按上面那行提示缩小关键词再搜一次';
 
 /** 面板加载时调用:决定要不要显示"管理订阅"入口 */
 async function initTargets() {
@@ -105,11 +109,22 @@ function renderTgtCands() {
    * 正是因为列表上那个旧名字他已经认不出来了。点下去就会多出一条同 id 的订阅。 */
   const byId = new Map(tgtList.filter(t => t.id).map(t => [t.id, t]));
   const byName = new Map(tgtList.map(t => [t.name, t]));
+  /* 名字兜底只在「这个名字在本次结果里只出现一次」时才敢用。两条同名候选、
+   * 其中一条已订阅时,按名字认会把另一条也标成「已订阅」——可它们是两个不同的号
+   * (一个会话一个 __biz),于是用户看到的是"这个号已经加过了",而他压根没加过
+   * (第 1 轮审查复现的后半截:点完之后两条同名候选一起变成了「已订阅」)。 */
+  const dupName = new Map();
+  tgtCands.forEach(c => dupName.set(c.name, (dupName.get(c.name) || 0) + 1));
   box.style.display = '';
   box.innerHTML = tgtCands.map(c => {
-    const own = (c.id && byId.get(c.id)) || byName.get(c.name);
+    const own = (c.id && byId.get(c.id))
+      || (dupName.get(c.name) === 1 ? byName.get(c.name) : null);
     // 认出是同一个号、但库里存的是另一个名字:说清楚,否则"已订阅"看着像认错了
     const renamed = own && own.name !== c.name;
+    /* 归属(__biz)没解析出来的候选不能点添加:这里能发上去的只有名字和一个空 id,
+     * 后端拿名字再搜一遍 —— 同名的另一个号就会被当成这一条入库,还报「已添加」
+     * (第 1 轮审查复现)。后端那边同样按歧义拒掉,这里是别让它点得下去。 */
+    const blind = !c.id && !own;
     return `
       <div class="tgt-row">
         <div style="min-width:0">
@@ -118,8 +133,10 @@ function renderTgtCands() {
           ${renamed ? `<div class="tgt-was">已订阅,库里存作「${esc(own.name)}」</div>` : ''}
         </div>
         <button class="ghost" data-tgt-add="${esc(c.name)}" data-tgt-id="${esc(c.id)}"
-                style="padding:3px 12px;font-size:12px;flex:none" ${own ? 'disabled' : ''}>
-          ${own ? '已订阅' : '添加'}
+                style="padding:3px 12px;font-size:12px;flex:none"
+                ${own || blind ? 'disabled' : ''}
+                ${blind ? `title="${esc(TGT_BLIND_HINT)}"` : ''}>
+          ${own ? '已订阅' : blind ? '不可添加' : '添加'}
         </button>
       </div>`;
   }).join('');

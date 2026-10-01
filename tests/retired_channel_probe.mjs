@@ -36,6 +36,7 @@ const LAST_RUN = { crawl_filter: { channel: "wechat_oa", accounts: [] },
                    started_at: "2026-09-29 08:00", finished_at: "2026-09-29 08:30",
                    stages: {}, log: [] };
 const runs = [];
+const adds = [];
 const FIXTURES = {
   "/api/stats": { documents: 0, vectors: 0, entities: 0, extracted: 0 },
   "/api/facets": { sources: [], accounts: [], topics: [], entities: [] },
@@ -85,6 +86,27 @@ const server = createServer((req, res) => {
   // 这个端点已经删掉了:页面上任何一处还在调它,这里就会被记一笔
   if (path === "/api/pipeline/channels/wechat") { runs.push({ forbidden: path }); return json({}, 404); }
   if (path === "/api/sources/targets/refresh") { runs.push({ forbidden: path }); return json({}, 404); }
+  // 搜出两条同名候选:一条解析出了归属,一条本机会话读不动(归属是空串)。
+  // 这正是第 1 轮审查复现的输入形状。
+  if (path === "/api/sources/targets/search") {
+    return json({ candidates: [
+      { id: "biz-right", name: "同名公众号", detail: "最近推送 2026-09-28" },
+      { id: "", name: "同名公众号", detail: "本机这条会话读不动(缩小关键词再搜)" }] });
+  }
+  if (path === "/api/sources/targets/add" && req.method === "POST") {
+    let raw = "";
+    req.on("data", c => { raw += c; });
+    req.on("end", () => {
+      const body = JSON.parse(raw || "{}");
+      adds.push(body);
+      // 真后端按 __biz 入库;这里照样只认 id,好让「已订阅」那一侧也按身份走
+      FIXTURES["/api/sources/targets"].targets.push(
+        { id: body.id, name: body.name, display_name: "", enabled: true,
+          detail: "最近采集 —", ready: null, state: "按本机推送采集", tone: "" });
+      json({ ok: true, detail: `已添加:${body.name} (${body.id})` });
+    });
+    return;
+  }
   if (path === "/api/daily/settings") {
     const settings = { enabled: false, time: "08:00", sync: true, first_days: 2,
                        channels: ["wechat_local", "social", "rss"] };
@@ -155,6 +177,18 @@ const until = async (expr, ms = 8000) => {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) { if (await evalJs(expr)) return true; await sleep(120); }
   return false;
+};
+// 真鼠标点在元素中心。disabled 的按钮要靠真实事件才证明得了"点不动"——
+// 直接调 .click() 在 disabled 上本来就不触发,证明不了页面上点下去会怎样。
+const clickAt = async sel => {
+  const box = await evalJs(`(() => { const e = document.querySelector('${sel}');
+    if (!e) return null; const r = e.getBoundingClientRect();
+    return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 }); })()`);
+  if (!box) return false;
+  const { x, y } = JSON.parse(box);
+  for (const type of ["mousePressed", "mouseReleased"])
+    await send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+  return true;
 };
 const ids = sel => evalJs(`[...document.querySelectorAll('${sel}')].map(e => e.dataset.runChannel
   || e.dataset.channel || e.dataset.schedChannel || e.value)`);
@@ -276,6 +310,35 @@ check("ready=null 的目标不画那颗小圆点",
       await evalJs(`!document.querySelector('#tgt-list .tgt-dot')`));
 check("凭证那套文案一个字都不剩",
       !(await evalJs(`document.body.innerText`)).includes("凭证"));
+
+// ── 6.5 归属没解析出来的候选不许点添加,也不许按同名显示成「已订阅」 ──────────
+// 第 1 轮审查复现:点那条写着「读不动」的候选,前端发的是 {name, id:""},后端照
+// 名字再搜一遍,把**另一条**同名候选的 biz 入了库,还提示「已添加」,两行一起变
+// 「已订阅」。后端那侧按歧义拒掉(collector/tests/test_local_accounts.py),这里
+// 钉的是页面上压根点不下去、也不谎称订阅过。
+await evalJs(`document.getElementById('tgt-search').value = '同名公众号'; searchTargets()`);
+await until(`document.querySelectorAll('#tgt-cands .tgt-row').length === 2`);
+const candBtn = n => `#tgt-cands .tgt-row:nth-child(${n}) [data-tgt-add]`;
+check("读不动那条候选的添加按钮点不动",
+      await evalJs(`!!document.querySelector('${candBtn(2)}')?.disabled`));
+check("它写的是「不可添加」、而且给出了下一步",
+      (await evalJs(`document.querySelector('${candBtn(2)}')?.textContent.trim()`)) === "不可添加"
+      && (await evalJs(`document.querySelector('${candBtn(2)}')?.title`)).includes("缩小关键词"),
+      await evalJs(`document.querySelector('${candBtn(2)}')?.textContent.trim()`));
+await clickAt(candBtn(2));
+await sleep(400);
+check("真点一下它,一个添加请求都没发出去", adds.length === 0, JSON.stringify(adds));
+// 解析出来的那条照旧能加,而且带着 __biz
+await clickAt(candBtn(1));
+check("解析出来的那条点得动", await waitFor(() => adds.length === 1));
+check("发出去的是 __biz、不是空 id",
+      adds[0]?.id === "biz-right" && adds[0]?.name === "同名公众号", JSON.stringify(adds[0]));
+await until(`document.querySelector('${candBtn(1)}')?.textContent.trim() === '已订阅'`);
+check("加完之后,另一条同名候选没被说成「已订阅」",
+      (await evalJs(`document.querySelector('${candBtn(2)}')?.textContent.trim()`)) === "不可添加",
+      await evalJs(`document.querySelector('${candBtn(2)}')?.textContent.trim()`));
+check("加完之后也只多出一条订阅",
+      await evalJs(`tgtList.filter(t => t.name === '同名公众号').length`) === 1);
 
 // ── 7. 删掉的两个端点没有任何一处还在调 ────────────────────────────────────────
 await evalJs(`closeTargets()`); await sleep(500);
