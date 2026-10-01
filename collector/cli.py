@@ -220,11 +220,43 @@ def _accounts_discover(query: str, as_json: bool) -> int:
 # 「这一次没翻」不是一件事:后者说成没有图文就是在报一个没做过的结论,而用户看到
 # 它就不会再试了。实测 15 个都有图文推送的候选,宽泛搜索下排在解析预算之外的 3 个
 # 被说成没有图文,缩小关键词再搜立刻解出来、加得进去。
-_NO_BIZ_NOTE = {
+# 拆成「状态」和「怎么办」两半,是因为加号失败那条提示要把它们重新组合:
+# 列表里一行放得下 `状态(怎么办)`,一句错误提示里还得接着说别的,原样塞进去
+# 就是括号套括号。`_NO_BIZ_NOTE` 照旧由这两半拼出来,字面值一个字没变。
+_NO_BIZ_STATE = {
     "none": "本机暂无可解析的图文推送",
-    "unchecked": "这次没核验(缩小关键词再搜)",
-    "error": "本机这条会话读不动(缩小关键词再搜)",
+    "unchecked": "这次没核验",
+    "error": "本机这条会话读不动",
 }
+
+# 下一步怎么办。只有「真的没有图文」那档该去绿泡泡里同步一篇;另两档是这一轮
+# 没解析到(排在预算之外/这条会话读不动),号本身可能早就有图文了,叫人再去
+# 同步一遍是白跑。
+_NO_BIZ_FIX = {
+    "none": "可能只收到过服务通知;在绿泡泡里打开它、同步一篇图文之后再试",
+    "unchecked": "缩小关键词再搜",
+    "error": "缩小关键词再搜",
+}
+
+# 列表那一列只放得下一句,所以「怎么办」收在括号里;「没有图文」那档的处置话太长,
+# 列表里不写,留给加号失败时那条提示。
+_NO_BIZ_NOTE = {
+    key: state + ("" if key == "none" else f"({_NO_BIZ_FIX[key]})")
+    for key, state in _NO_BIZ_STATE.items()
+}
+
+
+def _worst_probe(rows: list[dict]) -> str:
+    """一组同名候选里取最该说出来的那一档:读不动 > 没核验 > 确实没有图文。
+
+    排在前面的两档都是「这一轮没查清」,照它们给建议最多是多搜一次;反过来把
+    读不动说成「没有图文」,用户就不会再试了。
+    """
+    probes = {r.get("probe", "") for r in rows}
+    for probe in ("error", "unchecked", "none"):
+        if probe in probes:
+            return probe
+    return "unchecked"
 
 
 def _discover_note(row: dict) -> str:
@@ -260,11 +292,16 @@ def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
         exact = [r for r in same if r["fakeid"]]
         ids = {r["fakeid"] for r in exact}
         if same and not ids:
-            # 名字对上了、只是这个号本机还没有可解析的图文:别说成"没关注",
-            # 那是另一回事,照着去关注一遍也不会变好。
-            return _fail(f"「{name}」在本机有会话,但还没有能解析出归属的图文推送"
-                         "(可能只收到过服务通知)。在绿泡泡里打开它、"
-                         "同步一篇图文之后再试", as_json)
+            # 名字对上了、只是没拿到 __biz。别说成"没关注"——那是另一回事,
+            # 照着去关注一遍也不会变好。**为什么没拿到有三档,处置也不同**:
+            # 原来一律按"确实没有图文"报,于是本机这条会话读不动、或者这次压根
+            # 没核验到它的时候,提示也在建议"去同步一篇图文",而它早就同步过了
+            # (第 2 轮审查实测:搜索那一行显示的是「本机这条会话读不动」,点添加
+            # 却说成「没有能解析出归属的图文推送」)。文案口径仍是 _NO_BIZ_NOTE。
+            probe = _worst_probe(same)
+            return _fail(f"「{name}」在本机有会话,但{_NO_BIZ_STATE[probe]}。"
+                         f"{_NO_BIZ_FIX[probe]},或者用 --fakeid 直接指定是哪一个",
+                         as_json)
         if not ids:
             near = "、".join(dict.fromkeys(r["name"] for r in rows[:5]))
             return _fail(f"本机没有名叫「{name}」的公众号会话"

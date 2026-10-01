@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import io
 import tempfile
 import unittest
@@ -168,12 +169,42 @@ class AddByNameTests(_Base):
         with patch("src.collect.local_accounts.LocalReader", return_value=self.reader):
             code, out = self.add("索引外的号")
             self.assertEqual(1, code)
-            self.assertIn("还没有能解析出归属的图文推送", out)
+            self.assertIn("本机暂无可解析的图文推送", out)
+            self.assertIn("同步一篇图文之后再试", out)
             missing = self.add("从来没关注过的号")
         self.assertEqual(1, missing[0])
         self.assertIn("本机没有名叫", missing[1])
         self.assertIsNone(self.repo.conn.execute(
             "SELECT 1 FROM accounts WHERE name='索引外的号'").fetchone())
+
+    def test_a_session_that_cannot_be_read_is_not_called_a_push_less_account(self):
+        """读不动 ≠ 没有图文。搜索那一行已经分清了,加号失败这条也得分清。
+
+        说成「没有图文、去同步一篇」的话,用户照着做也不会变好 —— 它可能早就
+        有图文了,是本机这条会话这一次读不出来(第 2 轮审查实测的就是这一处)。
+        """
+        self.reader.messages.side_effect = LocalReaderError("这个会话读不动")
+        with patch("src.collect.local_accounts.LocalReader", return_value=self.reader):
+            code, out = self.add("索引外的号")
+        self.assertEqual(1, code)
+        self.assertIn("本机这条会话读不动", out)
+        self.assertNotIn("同步一篇图文", out)
+        self.assertIn("--fakeid", out)
+
+    def test_a_candidate_outside_the_resolve_budget_says_so(self):
+        """排在解析预算之外的那档同理:这一次没核验,不是核验过没有。"""
+        from src.collect import local_accounts
+
+        # 预算是 `discover` 的默认参数,改模块常量改不动已经绑定的那个默认值;
+        # 这里把预算按 0 传进去,等于「这一轮一个会话都没来得及核验」。
+        self.reader.messages.return_value = [{"text": "服务通知"}]
+        broke = functools.partial(local_accounts.discover, resolve_limit=0)
+        with patch("src.collect.local_accounts.LocalReader", return_value=self.reader), \
+             patch("src.collect.local_accounts.discover", broke):
+            code, out = self.add("索引外的号")
+        self.assertEqual(1, code)
+        self.assertIn("这次没核验", out)
+        self.assertNotIn("同步一篇图文", out)
 
     def test_two_sessions_with_the_same_name_require_an_explicit_fakeid(self):
         self.reader.accounts.return_value = [
