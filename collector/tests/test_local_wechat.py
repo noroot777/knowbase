@@ -233,7 +233,6 @@ class LocalCollectionTests(unittest.TestCase):
 
         self.fill = patch("src.utils.wechat_body.fetch_article_body_full", return_value=(
             ["真实正文测试内容"], "<p>真实正文测试内容</p>", "")).start()
-        patch("api.download_cover").start()
         patch("src.utils.request_pacing.RequestPacer.wait").start()
 
     def tearDown(self):

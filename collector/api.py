@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""采集器的公共底层:抓正文、下封面、搜号、查扫码凭证。
+"""采集器的公共底层:抓正文、搜号、查扫码凭证。
 
 这个文件原来是那个跑在 :8000 的 FastAPI 后端(53 个路由 + 一个 `app`),给
 `collector/frontend` 那套 web UI 用。前端和常驻服务都已经撤掉——公众号管理
@@ -21,7 +21,6 @@ from pydantic import BaseModel
 
 # ── 数据目录和文件路径 ──────────────────────────────────────────────────────────
 DATA_DIR = Path(__file__).parent / "data"
-COVERS_DIR = DATA_DIR / "covers"
 
 
 class SearchCandidate(BaseModel):
@@ -34,39 +33,11 @@ class SearchCandidate(BaseModel):
     service_type: int  # 0=订阅号, 1=服务号, 2=其他
 
 
-# 下载封面图时使用的 HTTP 请求头，模拟浏览器访问，避免微信服务器拒绝请求
-_DOWNLOAD_HEADERS = {
+# 请求 mp.weixin.qq.com 时用的 HTTP 请求头，模拟浏览器访问，避免被拒
+_MP_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.198 Safari/537.36',
     'Referer': 'https://mp.weixin.qq.com/',
 }
-
-
-def download_cover(article_id: str, cover_url: str, covers_dir: Path, request_headers: dict[str, str]) -> None:
-    """下载封面图到 data/covers；失败时仅告警不阻断流程。"""
-    if not article_id or not cover_url:
-        return
-    covers_dir.mkdir(parents=True, exist_ok=True)
-    filename = article_id.replace("/", "_") + ".jpg"
-    dest = covers_dir / filename
-    if dest.exists():
-        return
-    try:
-        import io
-        import requests
-        from PIL import Image
-
-        resp = requests.get(cover_url, timeout=15, headers=request_headers)
-        resp.raise_for_status()
-        img = Image.open(io.BytesIO(resp.content))
-        if img.mode in ("RGBA", "P"):
-            img = img.convert("RGB")
-        width, height = img.size
-        if width > 640:
-            new_height = int(height * 640.0 / width)
-            img = img.resize((640, new_height), Image.Resampling.LANCZOS)
-        img.save(dest, "JPEG", quality=85)
-    except Exception as e:
-        print(f"[cover] 下载失败 {article_id}: {e}")
 
 
 def _word_count_from_body_raw(raw: object, title: str = "") -> int:
@@ -84,7 +55,7 @@ def _word_count_from_body_raw(raw: object, title: str = "") -> int:
 
 
 def _ingest_crawl_article(repo, account_name: str, article: dict) -> bool:
-    """入库单篇爬取文章：元数据、封面、正文、字数。"""
+    """入库单篇爬取文章：元数据、正文、字数。"""
     from src.utils.article_identity import prepare_article
 
     prepared = prepare_article(repo, account_name, article)
@@ -94,13 +65,6 @@ def _ingest_crawl_article(repo, account_name: str, article: dict) -> bool:
 
     article_id = str(article.get("id") or "")
     repo.upsert_article_from_blog(account_name, article)
-    download_cover(
-        article_id,
-        str(article.get("cover") or ""),
-        COVERS_DIR,
-        _DOWNLOAD_HEADERS,
-    )
-    repo.update_cover_path(article_id)
     repo.commit()
     nickname = _fetch_article_detail_text(
         article_id, str(article.get("link") or ""), repo=repo
@@ -270,7 +234,7 @@ def _check_auth_valid() -> tuple[bool, str]:
         if not token or not cookie:
             return False, "id_info.json 中 token 或 cookie 为空"
 
-        h = dict(_DOWNLOAD_HEADERS)
+        h = dict(_MP_HEADERS)
         h["Cookie"] = cookie
         # 用 search_biz 接口做探测（参数随意，只看返回的 err_msg）
         params = {

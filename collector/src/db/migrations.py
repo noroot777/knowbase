@@ -8,7 +8,7 @@ import re
 
 from src.utils.helpers import time_now
 
-LATEST_SCHEMA_VERSION = 14
+LATEST_SCHEMA_VERSION = 15
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -141,6 +141,15 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (14, time_now()),
+        )
+        conn.commit()
+        current = 14
+
+    if current < 15:
+        _migrate_to_v15(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (15, time_now()),
         )
         conn.commit()
 
@@ -453,3 +462,25 @@ def _migrate_to_v14(conn: sqlite3.Connection) -> None:
     ).fetchone()
     if row:
         conn.execute("DROP TABLE article_fts")
+
+
+def _migrate_to_v15(conn: sqlite3.Connection) -> None:
+    """删掉 articles.cover_path 这一列(封面图不再下载到本地)。
+
+    封面曾经是给那套已经删掉的 Vue 阅读器用的:每抓一篇就把图拉下来、用
+    Pillow 压到 640 宽存进 data/covers/,再把相对路径写进这一列。阅读器没了
+    之后两头都没人读——这一列零个读取方,那个目录实测 326 MB 还在随每轮采集
+    继续长。文章自带的 cover_url 留着(它是推送里本来就有的一行元数据,不占
+    地方),要封面按 URL 现取即可。
+
+    data/covers/ 目录本身不在这里删:迁移只管库结构,删文件是一次性的运维
+    动作,而且误删不可逆。
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='articles'"
+    ).fetchone()
+    if not row:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()}
+    if "cover_path" in cols:
+        conn.execute("ALTER TABLE articles DROP COLUMN cover_path")

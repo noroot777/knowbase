@@ -17,9 +17,6 @@ from src.db._repo_queries import QueryMixin
 from src.db._repo_reading import ReadingMixin
 from src.utils.helpers import time_now
 
-# 与 api.COVERS_DIR 一致
-COVERS_DIR = DATA_DIR / "covers"
-
 
 def _parse_create_time_unix(create_time: str) -> int | None:
     create_time = (create_time or "").strip()
@@ -30,13 +27,6 @@ def _parse_create_time_unix(create_time: str) -> int | None:
             return int(datetime.strptime(create_time, fmt).timestamp())
         except ValueError:
             continue
-    return None
-
-
-def _cover_path_for_id(article_id: str) -> str | None:
-    rel = f"covers/{article_id.replace('/', '_')}.jpg"
-    if (DATA_DIR / rel).is_file():
-        return rel
     return None
 
 
@@ -316,24 +306,22 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         now = time_now()
         create_time = str(blog.get("create_time") or "")
         cover_url = str(blog.get("cover") or "")
-        cover_path = _cover_path_for_id(aid)
         article_source = "import" if source == "import" else "crawl"
         import_listed = 1 if source == "import" else 0
         self.conn.execute(
             """
             INSERT INTO articles (
-              id, account_name, title, digest, link, cover_url, cover_path,
+              id, account_name, title, digest, link, cover_url,
               create_time, create_time_unix, is_wx_deleted, is_user_deleted,
               item_show_type, llm_summary, word_count, ingested_at, updated_at,
               source, import_listed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               account_name=excluded.account_name,
               title=excluded.title,
               digest=excluded.digest,
               link=excluded.link,
               cover_url=excluded.cover_url,
-              cover_path=COALESCE(excluded.cover_path, articles.cover_path),
               create_time=excluded.create_time,
               create_time_unix=excluded.create_time_unix,
               is_wx_deleted=excluded.is_wx_deleted,
@@ -354,7 +342,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
                 str(blog.get("digest") or ""),
                 str(blog.get("link") or ""),
                 cover_url,
-                cover_path,
                 create_time,
                 _parse_create_time_unix(create_time),
                 1 if blog.get("is_deleted") else 0,
@@ -517,14 +504,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             "UPDATE articles SET word_count=?, updated_at=? WHERE id=?",
             (count, time_now(), article_id),
         )
-
-    def update_cover_path(self, article_id: str) -> None:
-        path = _cover_path_for_id(article_id)
-        if path:
-            self.conn.execute(
-                "UPDATE articles SET cover_path=?, updated_at=? WHERE id=?",
-                (path, time_now(), article_id),
-            )
 
     # ── 缓存清理 ─────────────────────────────────────────────────────────────
 

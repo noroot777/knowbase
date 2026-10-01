@@ -252,7 +252,7 @@ class IndexTests(unittest.TestCase):
     def test_unselected_bad_source_does_not_affect_selected_account(self):
         self.reader.add("gh_target", [push()])
         self.reader.add("gh_stranger", [{"text": "<mmreader>"}])
-        with patch("src.utils.request_pacing.RequestPacer.wait"), patch("api.download_cover"), \
+        with patch("src.utils.request_pacing.RequestPacer.wait"), \
              patch("src.utils.wechat_body.fetch_article_body_full", return_value=(["正文"], "<p>正文</p>", "")):
             for _ in range(3):
                 result = collect(lambda e: None, reader=self.reader)
@@ -269,7 +269,7 @@ class IndexTests(unittest.TestCase):
         self.repo.commit()
         self.reader.add("gh_target", [push()])
         self.reader.add("gh_other", [push(biz="biz-b")])
-        with patch("src.utils.request_pacing.RequestPacer.wait"), patch("api.download_cover"), \
+        with patch("src.utils.request_pacing.RequestPacer.wait"), \
              patch("src.utils.wechat_body.fetch_article_body_full", side_effect=[
                  ("请求错误", None, ""), (["正文"], "<p>正文</p>", "")]):
             result = collect(lambda e: None, reader=self.reader)
@@ -336,7 +336,7 @@ class IndexTests(unittest.TestCase):
         self.reader.add("gh_target", [push()])
         self.reader.add("gh_other", [push(biz="biz-b")])
         self.reader.add("gh_disabled", [push(biz="biz-off")])
-        with patch("src.utils.request_pacing.RequestPacer.wait"), patch("api.download_cover"), \
+        with patch("src.utils.request_pacing.RequestPacer.wait"), \
              patch("src.utils.wechat_body.fetch_article_body_full", return_value=("请求错误", None, "")) as body:
             events = []
             first = collect(events.append, targets=["目标"], reader=self.reader)

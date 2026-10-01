@@ -36,7 +36,6 @@ CREATE TABLE IF NOT EXISTS articles (
   digest            TEXT NOT NULL DEFAULT '',
   link              TEXT NOT NULL DEFAULT '',
   cover_url         TEXT NOT NULL DEFAULT '',
-  cover_path        TEXT,
   create_time       TEXT NOT NULL,
   create_time_unix  INTEGER,
   is_wx_deleted     INTEGER NOT NULL DEFAULT 0,
