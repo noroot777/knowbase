@@ -66,6 +66,10 @@ const FIXTURES = {
   "/api/daily/reports": { reports: [] },
   "/api/daily/status": { running: false, phase: "", channels: [] },
 };
+let searchHits = [
+  { id: "biz-right", name: "同名公众号", detail: "最近推送 2026-09-28" },
+  { id: "", name: "同名公众号", detail: "本机这条会话读不动(缩小关键词再搜)" }];
+
 const MIME = { html: "text/html", js: "text/javascript", css: "text/css", json: "application/json",
                svg: "image/svg+xml", ico: "image/x-icon" };
 
@@ -86,19 +90,24 @@ const server = createServer((req, res) => {
   // 这个端点已经删掉了:页面上任何一处还在调它,这里就会被记一笔
   if (path === "/api/pipeline/channels/wechat") { runs.push({ forbidden: path }); return json({}, 404); }
   if (path === "/api/sources/targets/refresh") { runs.push({ forbidden: path }); return json({}, 404); }
-  // 搜出两条同名候选:一条解析出了归属,一条本机会话读不动(归属是空串)。
-  // 这正是第 1 轮审查复现的输入形状。
-  if (path === "/api/sources/targets/search") {
-    return json({ candidates: [
-      { id: "biz-right", name: "同名公众号", detail: "最近推送 2026-09-28" },
-      { id: "", name: "同名公众号", detail: "本机这条会话读不动(缩小关键词再搜)" }] });
-  }
+  // 这一轮搜出什么由用例摆(searchHits)。默认是第 1 轮审查复现的输入形状:
+  // 两条同名候选,一条解析出了归属,一条本机会话读不动(归属是空串)。
+  if (path === "/api/sources/targets/search") return json({ candidates: searchHits });
   if (path === "/api/sources/targets/add" && req.method === "POST") {
     let raw = "";
     req.on("data", c => { raw += c; });
     req.on("end", () => {
       const body = JSON.parse(raw || "{}");
       adds.push(body);
+      /* 真后端按 name 建档(accounts.name 是主键、articles.account_name 指着它),
+       * 同名不同 __biz 一律拒、不覆盖已有那一行(collector 那侧的 AccountNameTaken)。
+       * mock 照着来:只往数组里 push 的话,"同名第二个号"这条路在页面上看起来永远
+       * 是成功的,而真后端返回的是 400(第 2 轮审查指的就是这个 mock 不够真)。 */
+      const held = FIXTURES["/api/sources/targets"].targets.find(t => t.name === body.name);
+      if (held && held.id !== body.id) {
+        return json({ detail: `「${body.name}」这个档案名在库里已经是另一个号的`
+                              + `(__biz ${held.id}),不能改挂到 ${body.id} 上` }, 400);
+      }
       // 真后端按 __biz 入库;这里照样只认 id,好让「已订阅」那一侧也按身份走
       FIXTURES["/api/sources/targets"].targets.push(
         { id: body.id, name: body.name, display_name: "", enabled: true,
@@ -339,6 +348,50 @@ check("加完之后,另一条同名候选没被说成「已订阅」",
       await evalJs(`document.querySelector('${candBtn(2)}')?.textContent.trim()`));
 check("加完之后也只多出一条订阅",
       await evalJs(`tgtList.filter(t => t.name === '同名公众号').length`) === 1);
+
+// ── 6.6 缩小搜索之后,「已订阅」仍然只按身份认 ─────────────────────────────────
+// 第 2 轮审查的两张截图:上面那条 biz-right 已经订上了,用候选下面显示的编号单独
+// 再搜一次(结果只剩一条)时,原来那条「本次结果里只出现一次就按名字认」的兜底又
+// 会把它标成「已订阅」—— 而它是同名的另一个号。两种写法各钉一条。
+const search = async hits => {
+  searchHits = hits;
+  await evalJs(`document.getElementById('tgt-cands').innerHTML = '';
+                document.getElementById('tgt-search').value = '同名公众号'; searchTargets()`);
+  await until(`document.querySelectorAll('#tgt-cands .tgt-row').length === ${hits.length}`);
+};
+await search([{ id: "", name: "同名公众号", detail: "本机这条会话读不动(缩小关键词再搜)" }]);
+check("只剩一条、归属还是空的候选不许说成「已订阅」",
+      (await evalJs(`document.querySelector('${candBtn(1)}')?.textContent.trim()`)) === "不可添加",
+      await evalJs(`document.querySelector('${candBtn(1)}')?.textContent.trim()`));
+await search([{ id: "biz-second", name: "同名公众号", detail: "最近推送 2026-09-27" }]);
+check("只剩一条、归属是另一个 __biz 的候选也不许说成「已订阅」",
+      (await evalJs(`document.querySelector('${candBtn(1)}')?.textContent.trim()`)) === "添加"
+      && !(await evalJs(`!!document.querySelector('${candBtn(1)}')?.disabled`)),
+      await evalJs(`document.querySelector('${candBtn(1)}')?.textContent.trim()`));
+
+// 两条都解析出了归属、其中一条已订阅时,点另一条:后端按名字主键拒掉,
+// 页面如实报错,已订阅那条的身份不许被换掉。
+await search([
+  { id: "biz-right", name: "同名公众号", detail: "最近推送 2026-09-28" },
+  { id: "biz-second", name: "同名公众号", detail: "最近推送 2026-09-27" }]);
+check("已订阅的那条按 __biz 认出来了",
+      (await evalJs(`document.querySelector('${candBtn(1)}')?.textContent.trim()`)) === "已订阅"
+      && (await evalJs(`document.querySelector('${candBtn(2)}')?.textContent.trim()`)) === "添加");
+const addsBefore = adds.length;
+await clickAt(candBtn(2));
+check("点它确实发了请求,带的是第二个 __biz",
+      await waitFor(() => adds.length === addsBefore + 1)
+      && adds[adds.length - 1]?.id === "biz-second", JSON.stringify(adds[adds.length - 1]));
+check("后端拒了,页面上如实说清为什么",
+      // 这里只能用 until:waitFor 不 await 谓词,给它一个 async 函数等于永远真
+      await until(`(document.querySelector('#toast-host .toast.err')?.textContent || '')
+                   .includes('已经是另一个号的')`),
+      await evalJs(`document.querySelector('#toast-host .toast.err')?.textContent
+                    || '(没有出错的 toast)'`));
+check("原来那条订阅的身份一个字都没变",
+      await evalJs(`JSON.stringify(tgtList.filter(t => t.name === '同名公众号')
+                                          .map(t => t.id))`) === '["biz-right"]',
+      await evalJs(`JSON.stringify(tgtList.map(t => [t.name, t.id]))`));
 
 // ── 7. 删掉的两个端点没有任何一处还在调 ────────────────────────────────────────
 await evalJs(`closeTargets()`); await sleep(500);

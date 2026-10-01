@@ -30,6 +30,20 @@ def _parse_create_time_unix(create_time: str) -> int | None:
     return None
 
 
+class AccountNameTaken(Exception):
+    """要订阅的号和一个已有档案同名,而那个档案属于另一个 `__biz`。
+
+    `accounts.name` 是主键,`articles.account_name` 是指向它的外键、导出的 vault
+    目录也按它归档,所以"同名"这件事没法靠改名绕开——把那一行的 fakeid 换成新号
+    等于把旧号的全部历史文章连同导出目录一起接到新号的身份上,而外键全都合法、
+    谁也不报错。只能拒掉,由调用方说清楚是怎么回事。
+    """
+
+    def __init__(self, name: str, held: str, wanted: str) -> None:
+        super().__init__(name)
+        self.name, self.held, self.wanted = name, held, wanted
+
+
 class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
     """文章 / 公众号仓储。
 
@@ -99,6 +113,11 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         `articles.account_name` 指着它、导出的 vault 目录也按它归档——照新名字
         再插一行,库里就有两条同 fakeid 的订阅:同一个号的新文章会被分别写进
         两套主键,vault 目录跟着裂开,外键还全都合法,面板上像订了两个号。
+
+        反过来,**这个名字已经是另一个 `__biz` 的档案时抛 `AccountNameTaken`**,
+        不覆盖它(见那个异常)。移除一个没有历史文章的号会把那一行真删掉
+        (`remove_account_from_list`),所以"同名两个号、第一次点错了"自己有退路:
+        移除之后名字就空出来了,不需要在这里替用户判断谁该让位。
         """
         now = time_now()
         fakeid = (fakeid or "").strip()
@@ -117,12 +136,19 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
                 # 用户搜到的这个名字就是微信当前昵称,顺手把改名记下来
                 self.set_account_display_name(existing, name)
                 return existing
+        held = self.name_held_by(name)
+        if fakeid and held and held != fakeid:
+            raise AccountNameTaken(name, held, fakeid)
         self.conn.execute(
             """
             INSERT INTO accounts (name, fakeid, latest_crawl_at, in_crawl_config, created_at, updated_at)
             VALUES (?, ?, '', 1, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
-              fakeid=excluded.fakeid,
+              -- 到这儿只剩三种可能:这个名字没人占、占着的就是同一个 fakeid、
+              -- 或者占着的是个占位键。空 fakeid 一律不许把已有归属抹掉——那种
+              -- 调用只是在说"确保这个名字在采集列表里",没有在声明身份。
+              fakeid=CASE WHEN excluded.fakeid <> '' THEN excluded.fakeid
+                          ELSE accounts.fakeid END,
               in_crawl_config=1,
               removed=0,
               updated_at=excluded.updated_at
@@ -130,6 +156,19 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             (name, fakeid, now, now),
         )
         return name
+
+    def name_held_by(self, name: str) -> str:
+        """这个档案名现在挂在哪个 `__biz` 上;空串 = 没人占着,可以写。
+
+        `import:` 开头的不算占着:那是链接导入留下的占位键(`upsert_import_account`),
+        本来就是等着被真正的归属填上的,拿它当"另一个号"会让这类存量账号永远订阅
+        不了。空 fakeid 同理——还没核实过归属,不是另一个号。
+        """
+        row = self.conn.execute(
+            "SELECT fakeid FROM accounts WHERE name=?", (name,)
+        ).fetchone()
+        held = str(row["fakeid"] or "") if row is not None else ""
+        return "" if held.startswith("import:") else held
 
     def account_in_crawl_config(self, name: str) -> bool:
         row = self.conn.execute(

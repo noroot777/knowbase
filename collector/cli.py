@@ -274,7 +274,7 @@ def _discover_note(row: dict) -> str:
 def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
     """写入订阅列表。给了 fakeid 就直接落库——面板上是先搜后点,那一步已经
     定死了是哪个号,再搜一次既慢又可能因为微信排序变化选中另一个同名号。"""
-    from src.db.repository import ArticleRepository
+    from src.db.repository import AccountNameTaken, ArticleRepository
 
     if not fakeid:
         # 面板上是先 discover 后点,fakeid 早就定死了;这条是终端里直接按名字
@@ -332,7 +332,21 @@ def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
         # 且有历史文章的号会提示"已添加",但它 removed 还是 1——列表、同步目标、
         # 默认采集里统统看不到它。upsert_account 留给采集过程更新用,那条路上
         # 不该有把已移除的号悄悄复活的能力。
-        stored = repo.enable_crawl_account(name, fakeid)
+        try:
+            stored = repo.enable_crawl_account(name, fakeid)
+        except AccountNameTaken as e:
+            # **同名、不同号:拒掉,一个字都不写。** 档案名是主键,旧号的文章全挂
+            # 在它名下、导出目录也按它归档,覆盖等于把那些历史接到这个新号的身份
+            # 上(第 2 轮审查实测:两条同名候选都解析出归属之后点第二条,报的是
+            # 「已添加」、订阅列表仍只有一条,第一个号连它的历史文章一起变成了第二
+            # 个号的 __biz)。目前不支持同时订阅两个同名号——要支持就得给第二个号
+            # 另起一个档案键,而那个键会成为新的 vault 目录名,不是这里能顺手定的。
+            return _fail(
+                f"「{name}」这个档案名在库里已经是另一个号的(__biz {e.held}),"
+                f"历史文章都挂在它名下、导出目录也按它归档,不能改挂到 {e.wanted} "
+                f"上。目前不支持同时订阅两个同名公众号;如果是刚才加错了号,把那条"
+                f"订阅移除(名下还没有文章的号移除时整行就删掉了,名字跟着空出来)"
+                f"再加这一个", as_json)
         repo.commit()
     if stored != name:
         # 同一个号改了名:认出来了,没有再插一行

@@ -104,27 +104,26 @@ function renderTargets() {
 function renderTgtCands() {
   const box = $('tgt-cands');
   if (!tgtCands.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
-  /* 「已订阅」优先按 id(公众号是 fakeid)判,名字只是兜底。
-   * 只比名字的话,改过名的号在这里永远显示成「添加」——而用户来搜新名字,
-   * 正是因为列表上那个旧名字他已经认不出来了。点下去就会多出一条同 id 的订阅。 */
+  /* 「已订阅」**只按身份(公众号是 fakeid/__biz)认,名字一律不作数**。
+   * 按 id 认是为了改过名的号:只比名字的话它在这里永远显示成「添加」,而用户来搜
+   * 新名字,正是因为列表上那个旧名字他已经认不出来了,点下去就多出一条同 id 的订阅。
+   * 名字兜底怎么收都不对——它回答的是"这个名字订过没有",要显示的却是"这一条候选
+   * 订过没有",而同名的两个会话是两个号,名字相同什么也证明不了。第 1 轮按「同屏
+   * 只出现一次」放行,于是拿第二条下面那个编号单独搜一次(结果只剩它一条)就又按
+   * 名字认成「已订阅」:候选 id 为空的、候选 id 明确是另一个 __biz 的,两种写法都
+   * 这么显示,而真正订着的是同名的另一个号(第 2 轮审查两张截图)。
+   * 名字被另一个号占着这件事不在这里判——后端那条闸门(AccountNameTaken)才是
+   * 唯一口径,照它的说明拒掉比在浏览器里再写一份判据可靠。 */
   const byId = new Map(tgtList.filter(t => t.id).map(t => [t.id, t]));
-  const byName = new Map(tgtList.map(t => [t.name, t]));
-  /* 名字兜底只在「这个名字在本次结果里只出现一次」时才敢用。两条同名候选、
-   * 其中一条已订阅时,按名字认会把另一条也标成「已订阅」——可它们是两个不同的号
-   * (一个会话一个 __biz),于是用户看到的是"这个号已经加过了",而他压根没加过
-   * (第 1 轮审查复现的后半截:点完之后两条同名候选一起变成了「已订阅」)。 */
-  const dupName = new Map();
-  tgtCands.forEach(c => dupName.set(c.name, (dupName.get(c.name) || 0) + 1));
   box.style.display = '';
   box.innerHTML = tgtCands.map(c => {
-    const own = (c.id && byId.get(c.id))
-      || (dupName.get(c.name) === 1 ? byName.get(c.name) : null);
+    const own = c.id ? byId.get(c.id) : null;
     // 认出是同一个号、但库里存的是另一个名字:说清楚,否则"已订阅"看着像认错了
     const renamed = own && own.name !== c.name;
     /* 归属(__biz)没解析出来的候选不能点添加:这里能发上去的只有名字和一个空 id,
      * 后端拿名字再搜一遍 —— 同名的另一个号就会被当成这一条入库,还报「已添加」
      * (第 1 轮审查复现)。后端那边同样按歧义拒掉,这里是别让它点得下去。 */
-    const blind = !c.id && !own;
+    const blind = !c.id;
     return `
       <div class="tgt-row">
         <div style="min-width:0">

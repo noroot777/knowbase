@@ -233,6 +233,41 @@ class AddByNameTests(_Base):
         self.assertEqual("同名公众号", self.repo.conn.execute(
             "SELECT name FROM accounts WHERE fakeid='biz-other-account'").fetchone()[0])
 
+    def test_adding_the_second_same_name_account_does_not_replace_the_first(self):
+        """两条同名候选都解析出了归属时,点第二条不许把第一条的档案顶掉。
+
+        第 2 轮审查实测的正是这条路:前端放开了同名第二条(它的 id 非空、和第一条
+        不同),点下去报「已添加」、订阅列表仍只有一条,而那一条的 __biz 换成了第二
+        个号 —— 第一个号的历史文章(链接里还是第一个 __biz)跟着被接到第二个号的
+        身份下。档案名是主键、文章外键指着它,这种冲突只能拒,一个字都不写。
+        """
+        self.reader.accounts.return_value = [
+            {"username": "gh_first", "display_name": "同名公众号", "last_timestamp": 2},
+            {"username": "gh_second", "display_name": "同名公众号", "last_timestamp": 1}]
+        self.index("gh_first", "biz-first")
+        self.index("gh_second", "biz-second")
+        with patch("src.collect.local_accounts.LocalReader", return_value=self.reader):
+            self.assertEqual(0, self.add("同名公众号", "--fakeid", "biz-first")[0])
+        self.repo.conn.execute(
+            "INSERT INTO articles (id, account_name, title, create_time, link)"
+            " VALUES (?, ?, ?, ?, ?)",
+            ("art-first", "同名公众号", "第一个号的旧文章", "2026-09-01 10:00",
+             "https://mp.weixin.qq.com/s?__biz=biz-first&mid=1&idx=1"))
+        self.repo.commit()
+
+        with patch("src.collect.local_accounts.LocalReader", return_value=self.reader):
+            code, out = self.add("同名公众号", "--fakeid", "biz-second")
+        self.assertEqual(1, code)
+        self.assertIn("biz-first", out)          # 占着这个名字的是谁,说出来
+        self.assertIn("不支持同时订阅两个同名公众号", out)
+        # 第一个号和它的文章一个字都没动
+        self.assertEqual(("同名公众号", "biz-first"), tuple(self.repo.conn.execute(
+            "SELECT name, fakeid FROM accounts WHERE name='同名公众号'").fetchone()))
+        self.assertEqual("同名公众号", self.repo.conn.execute(
+            "SELECT account_name FROM articles WHERE id='art-first'").fetchone()[0])
+        self.assertEqual([], self.repo.conn.execute(
+            "SELECT name FROM accounts WHERE fakeid='biz-second'").fetchall())
+
     def test_two_sessions_with_the_same_name_require_an_explicit_fakeid(self):
         self.reader.accounts.return_value = [
             {"username": "gh_one", "display_name": "同名号", "last_timestamp": 2},
