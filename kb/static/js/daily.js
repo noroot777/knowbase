@@ -116,16 +116,6 @@ function renderDailyChannels() {
 function pickedDailyChannels() {
   return [...$('daily-channels').querySelectorAll('input:checked')].map(i => i.dataset.channel);
 }
-// 采集通道在设置里换过了：候选换成新的那条，原来勾着绿泡泡的仍然勾着绿泡泡。
-// 这一组只在读设置时渲染一次，不在这儿换的话它会一直列着一条已经不存在的来源。
-document.addEventListener('kb:channels-changed', e => {
-  if (!dailyLoaded) return;
-  dailyChannels = pipeChannels;
-  const picked = pickedDailyChannels().map(c => (c === e.detail.before ? e.detail.after : c));
-  dailySettings = { ...dailySettings, channels: [...new Set(picked)] };
-  renderDailyChannels();
-});
-
 function markDailyDirty() {
   if (!dailyLoaded || dailySaving) return;
   dailyDirty = true;

@@ -8,9 +8,6 @@ let tgtList = [];        // 已订阅
 let tgtCands = [];       // 上次搜索的候选
 let tgtLabel = '目标';
 let tgtBusy = false;     // 有请求在飞:防连点造成重复添加/删除
-let tgtReadiness = null; // {ready,total};来源没有"逐个目标就绪"这回事则为 null
-let tgtOnlyPending = false;
-let tgtTimer = null;     // 自动刷新:边在微信里点文章边看着它变绿
 
 /** 面板加载时调用:决定要不要显示"管理订阅"入口 */
 async function initTargets() {
@@ -24,10 +21,7 @@ async function initTargets() {
   if (!d || !d.manageable) { btn.style.display = 'none'; return; }
   tgtLabel = d.label || '目标';
   tgtList = d.targets || [];
-  tgtReadiness = d.readiness || null;
-  btn.textContent = tgtReadiness
-    ? `管理${tgtLabel} · ${tgtReadiness.ready}/${tgtReadiness.total} 就绪`
-    : `管理${tgtLabel}`;
+  btn.textContent = `管理${tgtLabel}`;
   btn.style.display = '';
 }
 
@@ -37,58 +31,12 @@ async function openTargets() {
   tgtCands = [];
   renderTgtCands();
   await reloadTargets();
-  startTgtAutoRefresh();
   $('tgt-search').focus();
 }
 
 function closeTargets() {
   $('tgt-modal').style.display = 'none';
-  stopTgtAutoRefresh();
-  initTargets();          // 入口按钮上的就绪计数也跟着更新
-}
-
-/* 自动刷新只在"还有号没就绪"时跑:你在微信里逐篇点,这边每 5 秒把 wxdown
- * 新抓到的凭证并进来。全部就绪就自动停——没什么可等的时候不该一直起子进程。*/
-function startTgtAutoRefresh() {
-  stopTgtAutoRefresh();
-  if (!tgtReadiness) return;
-  if (!$('tgt-auto') || !$('tgt-auto').checked) return;
-  if (tgtReadiness && tgtReadiness.ready >= tgtReadiness.total) return;
-  tgtTimer = setInterval(() => {
-    if ($('tgt-modal').style.display === 'none') return stopTgtAutoRefresh();
-    refreshReadiness(true);
-  }, 5000);
-}
-
-function stopTgtAutoRefresh() {
-  if (tgtTimer) { clearInterval(tgtTimer); tgtTimer = null; }
-}
-
-/** 重新探测就绪状态。silent=自动刷新时不弹 toast,只更新计数 */
-async function refreshReadiness(silent = false) {
-  if (tgtBusy) return;
-  tgtBusy = true;
-  const btn = $('tgt-refresh');
-  if (btn && !silent) btn.textContent = '刷新中…';
-  try {
-    const r = await fetch('/api/sources/targets/refresh', { method: 'POST' });
-    if (!r.ok) {
-      stopTgtAutoRefresh();     // 失败就别一直重试,否则 5 秒一次刷屏
-      if (!silent) toast('刷新失败', { detail: await apiFail(r) });
-      else toast('自动刷新失败,已停止', { detail: await apiFail(r) });
-      return;
-    }
-    if (!silent) toast((await r.json()).detail || '已刷新', { type: 'ok' });
-    tgtBusy = false;            // reloadTargets 自己不占锁,这里先放开
-    await reloadTargets();
-    if (tgtReadiness && tgtReadiness.ready >= tgtReadiness.total) {
-      stopTgtAutoRefresh();
-      if (silent) toast(`全部 ${tgtReadiness.total} 个${tgtLabel}凭证就绪`, { type: 'ok' });
-    }
-  } finally {
-    tgtBusy = false;
-    if (btn && !silent) btn.textContent = '刷新凭证';
-  }
+  initTargets();
 }
 
 async function reloadTargets() {
@@ -97,7 +45,6 @@ async function reloadTargets() {
   const d = await r.json();
   tgtList = d.targets || [];
   tgtLabel = d.label || tgtLabel;
-  tgtReadiness = d.readiness || null;
   renderTargets();
 }
 
@@ -116,28 +63,13 @@ function tgtTone(t) {
 function renderTargets() {
   const on = tgtList.filter(t => t.enabled).length;
   $('tgt-title').textContent = `订阅的${tgtLabel}`;
-  $('tgt-count').textContent = `共 ${tgtList.length} 个,${on} 个参与采集`
-    + (tgtReadiness ? ` · ${tgtReadiness.ready}/${tgtReadiness.total} 个凭证就绪` : '');
-
-  // 就绪那一栏只在来源确实逐个授权时才出现
-  const bar = $('tgt-ready-bar');
-  bar.style.display = tgtReadiness ? '' : 'none';
-  if (tgtReadiness) {
-    const left = tgtReadiness.total - tgtReadiness.ready;
-    $('tgt-ready-text').textContent = left
-      ? `还有 ${left} 个凭证不新鲜(黄=放太久,红=没有或已失效)`
-        + '——去 Mac 绿泡泡里各点开一篇文章'
-      : '全部就绪,可以同步了';
-    $('tgt-ready-text').style.color = left ? 'var(--muted)' : 'var(--ok)';
-  }
+  $('tgt-count').textContent = `共 ${tgtList.length} 个,${on} 个参与采集`;
 
   // 按名字排,不按启用状态:后端是"启用的在前",那样一点停用行就沉底、
   // 下一行顶上来接住第二次点击——连着停用几个时会误伤。位置稳定才点得准。
   // 排序用看得见的那个名字,否则改过名的行会排在一个没显示出来的键上。
   let rows = [...tgtList].sort(
     (a, b) => tgtShown(a).localeCompare(tgtShown(b), 'zh'));
-  // 「只看未就绪」是给"还差谁要去微信里点"用的,停用的号不用点,别混进来
-  if (tgtOnlyPending) rows = rows.filter(t => t.ready === false && t.enabled);
   const box = $('tgt-list');
   const keepScroll = box.scrollTop;      // 整块重渲染会把长列表弹回顶部
   box.innerHTML = rows.length
@@ -161,14 +93,8 @@ function renderTargets() {
                   style="padding:3px 10px;font-size:12px;color:#c33">移除</button>
         </div>
       </div>`).join('')
-    : `<div class="empty">${tgtOnlyPending
-        ? '没有待处理的' : `还没有订阅任何${esc(tgtLabel)}`}</div>`;
+    : `<div class="empty">还没有订阅任何${esc(tgtLabel)}</div>`;
   box.scrollTop = keepScroll;
-}
-
-function toggleOnlyPending(el) {
-  tgtOnlyPending = el.checked;
-  renderTargets();
 }
 
 function renderTgtCands() {

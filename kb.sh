@@ -3,23 +3,18 @@
 #
 # 原则:每条命令都是跑完就还你终端。服务起成后台守护进程,耗时的活(采集、
 # 导出、索引、打标)交给已经在后台的 kb-web 去跑,命令本身立刻返回。
-# 只有两个例外,因为它们的本质就是要你盯着:login(扫码)和 watch(盯凭证)。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 COLLECTOR="$ROOT/collector"
 PY="$COLLECTOR/.venv/bin/python"
-WXDOWN_DIR="${WXDOWN_DIR:-$HOME/code/gongzhonghao/wxdown-service}"
 RUN_DIR="$ROOT/.run"
 LOG_DIR="$ROOT/runtime_logs"
 WEB_PORT="${KB_WEB_PORT:-8787}"
-WXDOWN_PORT="${WXDOWN_PROXY_PORT:-65000}"   # 跟 clash_wxdown_route 认同一个变量
-WXDOWN_WS_PORT="${WXDOWN_WS_PORT:-65001}"
 # pidfile 名字里带端口。脚本自己在端口冲突时就会劝你 KB_WEB_PORT=8788 换个端口跑,
 # 要是所有端口共用一个 .run/web.pid,临时端口起过一次之后,默认 8787 的
 # status/stop/restart 就会把临时端口那份也当成自己的——上一轮 pgrep 跨端口误杀
 # 是同一个病根。
-WXDOWN_PID="$RUN_DIR/wxdown-$WXDOWN_PORT.pid"
 WEB_PID="$RUN_DIR/web-$WEB_PORT.pid"
 API="http://127.0.0.1:$WEB_PORT"
 # 所有 curl 都带超时。没有超时的话,旧实例端口还在监听但 HTTP 卡住时,
@@ -46,9 +41,10 @@ port_busy(){ lsof -ti tcp:"$1" >/dev/null 2>&1; }
 
 # 起一个真正脱离终端的后台进程:自成会话 + SIGINT 恢复默认。
 # 不用 `nohup cmd &` 的原因:那样起的进程跟脚本同一个进程组,非交互 shell 会把它的
-# SIGINT 设成 SIG_IGN,而这个 SIG_IGN 被子进程继承——于是 stop 时的 kill -INT 也被
-# 忽略,只能降级 SIGTERM,恰好会把 wxdown 的 multiprocessing 子进程丢成孤儿。
-# macOS 没有 setsid 命令,所以借 python 做 fork + setsid。
+# SIGINT 设成 SIG_IGN,而这个 SIG_IGN 被子进程继承——于是 stop 时的 kill -INT 被
+# 悄悄忽略,只能一路升级到 SIGTERM/SIGKILL。而「先好好说一句」在这儿是有意义的:
+# kb-web 进程里可能正跑着同步,握着 kb.db 的写事务、一个采集器子进程、一个向量
+# 编码子进程。macOS 没有 setsid 命令,所以借 python 做 fork + setsid。
 daemonize() {   # daemonize <pidfile> <logfile> <workdir> <cmd...>
   local pidfile="$1" logfile="$2" workdir="$3"; shift 3
   "$BOOT_PY" -c '
@@ -73,9 +69,9 @@ os.execvp(cmd[0], cmd)
   while [ ! -s "$pidfile" ] && [ "$n" -lt 20 ]; do sleep 0.1; n=$((n+1)); done
 }
 
-# 从一个进程往上找到这个服务的"头"。lsof 给的常常是子进程——`uv run kb-web` 起的
-# 实际 server、wxdown 的 multiprocessing worker 都是——而 kill_tree 只往下走,
-# 从子进程动手会把父进程剩在那儿(端口没释放,restart 于是失败)。
+# 从一个进程往上找到这个服务的"头"。lsof 给的常常是子进程(`uv run kb-web` 起的
+# 实际 server 就是),而 kill_tree 只往下走,从子进程动手会把父进程剩在那儿
+# (端口没释放,restart 于是失败)。
 # 一路向上,直到父进程不再长得像这个服务为止。
 #
 # 碰到 shell 就停:交互 shell 和 `bash -c '...'` 的命令行里可能正好带着这个字样
@@ -112,10 +108,9 @@ pid_matches() { ps -o command= -p "${1:-0}" 2>/dev/null | grep -qF -- "$2"; }
 # 那份记录(pidfile 名字里带端口,只可能是本端口这一份写的)才有用。
 #
 # 两条路来的 pid 都要核命令行,而且核的是【往上走到头】的那个:lsof 给的常常是
-# 子进程,命令行未必带服务的字样(wxdown 的 multiprocessing worker 就只是个
-# `python -c ...`)。不核则更糟——65000 被别的东西占着时 start 会说"已在运行"
-# 却什么都没起,接着 route --activate 把微信流量导到一个不是 wxdown 的端口上,
-# 凭证于是永远抓不到,而面板一切正常。
+# 子进程,命令行未必带服务的字样。不核则更糟——8787 被别的东西占着时 start 会说
+# "已在运行"却什么都没起,接着 ./kb.sh sync 把同步请求 POST 给一个根本不是 kb-web
+# 的进程,而这边一切看着正常。
 service_pids() {   # service_pids <pidfile> <port> <pattern>
   local pidfile="${1:-}" port="${2:-}" pattern="${3:-}" pid owner raw=""
   [ -n "$port" ] && raw="$(lsof -ti tcp:"$port" 2>/dev/null || true)"
@@ -136,8 +131,8 @@ collect_tree() {
   for child in $(pgrep -P "$pid" 2>/dev/null || true); do collect_tree "$child"; done
 }
 
-# SIGINT → SIGTERM → SIGKILL 逐级升级。先 SIGINT 是因为 wxdown 只在 SIGINT 时
-# 收拾自己的 multiprocessing 子进程,直接 SIGTERM 会把它们丢成孤儿。
+# SIGINT → SIGTERM → SIGKILL 逐级升级。先 SIGINT 是给一次收拾自己的机会:
+# 服务可能正跑着同步,直接 SIGKILL 会把 sqlite 的写事务和子进程甩在那儿。
 kill_tree() {
   local root="${1:-}" pids pid n=0
   alive "$root" || return 0
@@ -181,44 +176,6 @@ stop_service() {   # stop_service <名字> <pidfile> <port> <pattern>
       sleep 1
     fi
   fi
-}
-
-# ── wxdown:抓文章凭证的本地代理 ───────────────────────────────────────────────
-
-# 认这个 wxdown 安装目录,而不是只认 main.py:它的 multiprocessing worker 命令行里
-# 只有 `.venv/bin/python -c ...`,不带 main.py 字样。父进程要是先死了,worker 变成
-# 孤儿,只认 main.py 就再也认不出它、也就清不掉。
-WXDOWN_PAT="$WXDOWN_DIR/"
-
-wxdown_start() {
-  if [ -n "$(service_pids "$WXDOWN_PID" "$WXDOWN_PORT" "$WXDOWN_PAT")" ]; then
-    say "[wxdown] 已在运行"; return 0
-  fi
-  [ -x "$WXDOWN_DIR/.venv/bin/python" ] || die "找不到 wxdown-service($WXDOWN_DIR)"
-  if port_busy "$WXDOWN_PORT"; then
-    die "端口 $WXDOWN_PORT 被别的进程占着(不是 wxdown),它起不来。
-     换个端口:WXDOWN_PROXY_PORT=65010 ./kb.sh wxdown start"
-  fi
-  # 端口要显式传给它。只用 WXDOWN_PORT 做探测和 Clash 路由、却让 wxdown 按默认的
-  # 65000/65001 起,改了端口就会一边按新端口找、一边在老端口上跑。
-  daemonize "$WXDOWN_PID" "$LOG_DIR/wxdown.log" "$WXDOWN_DIR" \
-    "$WXDOWN_DIR/.venv/bin/python" "$WXDOWN_DIR/main.py" \
-    -p "$WXDOWN_PORT" -w "$WXDOWN_WS_PORT"
-  sleep 3
-  alive "$(read_pid "$WXDOWN_PID")" \
-    && say "[wxdown] 已启动(PID $(read_pid "$WXDOWN_PID"))" \
-    || die "wxdown 起不来,看 $LOG_DIR/wxdown.log"
-}
-
-wxdown_stop()    { stop_service wxdown "$WXDOWN_PID" "$WXDOWN_PORT" "$WXDOWN_PAT"; }
-wxdown_restart() { wxdown_stop; wxdown_start; }
-
-wxdown_status() {
-  local pids; pids="$(service_pids "$WXDOWN_PID" "$WXDOWN_PORT" "$WXDOWN_PAT")"
-  if [ -n "$pids" ]; then echo "wxdown    运行中 (PID $(echo "$pids" | tr '\n' ' '))"
-  elif port_busy "$WXDOWN_PORT"; then
-    echo "wxdown    未运行(端口 $WXDOWN_PORT 被别的进程占着)"
-  else echo "wxdown    未运行"; fi
 }
 
 # ── kb-web:知识库面板(耗时的活都在它进程里跑)────────────────────────────────
@@ -428,7 +385,6 @@ print("repo" if d == os.path.realpath(root / "data") else "external")
 cmd_status() {
   echo "── 服务 ──"
   web_status
-  wxdown_status
   echo
   echo "── 同步进度 ──"
   if port_busy "$WEB_PORT"; then
@@ -447,58 +403,19 @@ else:
     echo "(面板没开)"
   fi
   echo
-  echo "── 绿泡泡流量路由 ──"
-  cli route 2>&1 | grep -o '"message": "[^"]*"' | cut -d'"' -f4 || echo "(读不到 Clash)"
-  echo
-  echo "── 扫码凭证(只用来搜号加号)──"
+  echo "── 公众号来源 ──"
   cli status 2>/dev/null | tail -1 \
     | "$PY" -c 'import json,sys
 d = json.load(sys.stdin)
 print(d.get("message", ""))
 if d.get("hint"): print("  " + d["hint"])' \
     || echo "(采集器起不来)"
-  echo
-  echo "── 文章凭证(每个号各一份)──"
-  cli creds --json 2>/dev/null | tail -1 \
-    | "$PY" -c 'import json,sys
-d = json.load(sys.stdin)
-extra = "(本次新导入 %d 条)" % d["imported"] if d["imported"] else ""
-n = lambda s: sum(1 for a in d["accounts"] if a["state"] == s)
-print("%d/%d 个号凭证新鲜%s" % (d["ready"], d["total"], extra))
-print("  放太久 %d · 已失效 %d · 没凭证 %d(前两类采集时照样会试一把)"
-      % (n("stale"), n("expired"), n("missing")))' \
-    || echo "(读不到)"
 }
 
 # 同步前的准备。已经在跑的先杀掉重起,保证是干净的一份
-cmd_prep() {
-  wxdown_restart
-  say "[route] 切绿泡泡文章流量到 wxdown…"
-  cli route --activate >/dev/null 2>&1 || say "[route] 切换失败,自己看 ./kb.sh route"
-  web_start
-  echo
-  cli creds 2>&1 | head -1 || true
-  echo
-  say "起好了,终端可以关。"
-  say "接下来去 Mac 绿泡泡里逐个打开公众号的文章,在 $API"
-  say "管道 tab →「管理公众号」看还差谁(自动刷新),点得差不多了就「同步」。"
-  say "凭证放过 20 分钟会转黄:那只是没把握,采集照样会试,试通了自己转绿。"
-  say "或者直接 ./kb.sh sync 也行。"
-}
-
-cmd_watch() {
-  while true; do
-    clear
-    cli creds --missing-only 2>&1 | head -40 || true
-    echo
-    echo "(每 5 秒刷新,Ctrl-C 退出;服务是后台守护进程,退出不影响它们)"
-    sleep 5
-  done
-}
-
 cmd_logs() {
   local f="${1:-web}"
-  case "$f" in web|wxdown) ;; *) die "只有 web / wxdown 两份日志" ;; esac
+  [ "$f" = "web" ] || die "只有 web 一份日志"
   tail -n "${2:-40}" "$LOG_DIR/$f.log" 2>/dev/null || say "还没有 $f 的日志"
 }
 
@@ -507,24 +424,20 @@ usage() {
 Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
 
   日常
-    ./kb.sh prep                    同步前:重起 wxdown + 切路由 + 起面板
+    ./kb.sh start                   起面板(后台守护进程)
     ./kb.sh sync                    跑全流程(采集→导出→索引→打标),后台跑
-    ./kb.sh sync --channel wechat_local  用绿泡泡本地数据库发现文章
-    ./kb.sh sync --channel wechat_oa     用原凭证通道
-                 (两条互斥,常用那条在面板「设置 → 绿泡泡接入 → 采集通道」里选,
-                  默认本地数据库;这里的 --channel 是一次性覆盖,不改设置)
-    ./kb.sh status                  服务 / 同步进度 / 路由 / 凭证 一屏看全
+    ./kb.sh sync --channel rss      只跑某一个来源(wechat_local|social|rss)
+    ./kb.sh status                  服务 / 同步进度 / 来源 一屏看全
 
-  服务(都是后台守护进程;restart 会先杀掉在跑的那份,不管是谁起的)
-    ./kb.sh start | stop | restart        两个服务一起
-    ./kb.sh web    start|stop|restart|status     面板 8787
-    ./kb.sh wxdown start|stop|restart|status     抓凭证的代理 65000/65001
-    ./kb.sh logs [web|wxdown] [行数]
+  服务(后台守护进程;restart 会先杀掉在跑的那份,不管是谁起的)
+    ./kb.sh start | stop | restart
+    ./kb.sh web   start|stop|restart|status      面板 8787
+    ./kb.sh logs [行数]
     (同步正在跑时 stop/restart 会拦一下,加 --force 强来)
 
   单跑某一步(都是后台跑,立刻返回)
     ./kb.sh collect [--since 2026-08-01 --until 2026-08-26] [--targets a,b]
-                   [--channel wechat_local|wechat_oa]
+                   [--channel wechat_local|social|rss]
     ./kb.sh export
     ./kb.sh index
     ./kb.sh extract
@@ -532,20 +445,14 @@ Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
                    图谱是 Vault 里的单文件 HTML,样式改了要重新生成——重启不管用。
                    跑同步时 wiki 阶段本来就会带上,这条是「只想立刻看到新样式」用的。
 
-  凭证与订阅(瞬间返回)
-    ./kb.sh creds [--missing-only]  每个号的文章凭证够不够(顺带从 wxdown 导入)
-    ./kb.sh route [--activate]      绿泡泡文章流量有没有走 wxdown
-    ./kb.sh accounts list|search|add|remove|enable|disable [名字]
+  订阅(瞬间返回)
+    ./kb.sh accounts list|discover|add|remove|enable|disable [名字]
+                   discover 从本机绿泡泡的会话列表里找候选:不登录、不走网络。
     ./kb.sh setup                   新 worktree 首次准备
 
-  这两条会占着终端,因为它们本来就是要你盯着的:
-    ./kb.sh login                   扫码续期(只有搜号加号用得到)
-    ./kb.sh watch                   每 5 秒刷新,只列还没拿到凭证的号
-
-  两套凭证别搞混:login 那套是扫码拿的、全局一份,现在只剩「搜公众号加号」
-  一个用途;creds 那套是每个号各一份的文章凭证,只能靠在 Mac 绿泡泡里打开该号
-  一篇文章、由 wxdown 截下来。原通道取列表靠后者,login 救不了;
-  本地数据库通道无需它,两通道都按文章链接获取正文。
+公众号文章从本机绿泡泡客户端已经同步下来的推送里发现(只读那个库),正文再按
+链接公开抓取,所以没有任何凭证要维护。另一条「逐号文章凭证」的通道(要 wxdown
+抓包、要人去逐个点开文章)在 wechat-oa 分支上,主干不带它。
 EOF
 }
 
@@ -571,15 +478,12 @@ svc() {   # svc <前缀> <动作>
 
 case "$ACTION" in
   status)  cmd_status ;;
-  prep)    cmd_prep ;;
-  watch)   cmd_watch ;;
   logs)    cmd_logs "$@" ;;
 
-  start)   wxdown_start; web_start ;;
-  stop)    web_stop; wxdown_stop ;;
-  restart) web_stop; wxdown_stop; wxdown_start; web_start ;;
+  start)   web_start ;;
+  stop)    web_stop ;;
+  restart) web_stop; web_start ;;
   web)     svc web "${1:-status}" ;;
-  wxdown)  svc wxdown "${1:-status}" ;;
 
   sync)    pipeline_run "" "$@" ;;
   collect) pipeline_run '["crawl"]' "$@" ;;
@@ -588,7 +492,7 @@ case "$ACTION" in
   extract) pipeline_run '["extract"]' ;;
   graph)   cmd_graph "$@" ;;
 
-  creds|route|login|accounts) cli "$ACTION" "$@" ;;
+  accounts) cli accounts "$@" ;;
   setup)   "$COLLECTOR/setup.sh" ;;
   -h|--help|help) usage ;;
   *) die "不认识的命令 $ACTION(跑 ./kb.sh 看列表)" ;;

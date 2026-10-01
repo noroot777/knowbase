@@ -186,8 +186,9 @@ _schedule_lock = threading.RLock()
 def _schedule_channels(value) -> list[str]:
     """要存进定时配置的来源列表。认不出的名字在这里就抛,别等到点了才发现。
 
-    先过 resolve_channel:绿泡泡两条通道是互斥的设置项(见 kb.collectors),
-    存进来的旧名字要按当前设置落盘,否则定时那一轮会绕开设置去跑另一条。
+    先过 resolve_channel:公众号早先那条凭证通道已经退役(见 kb.collectors),
+    老配置和老页面里写着的旧名字要换成接替它的那条落盘,别当成"不认识"抛掉
+    ——抛掉等于公众号从此不再定时同步,而面板上完全看不出少了什么。
     """
     names, seen = [], set()
     for name in (value or []):

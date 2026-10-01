@@ -61,11 +61,7 @@ def _channel_labels() -> dict[str, str]:
 
 
 def default_channels() -> list[str]:
-    """默认同步范围:设置里选中的那条绿泡泡通道 + 全部订阅类来源。
-
-    绿泡泡两条通道(凭证/本地库)是同一批内容的两条路,互斥,选哪条在设置里定
-    (见 kb.collectors.wechat_channel);两条都抓只会把同一批公众号抓两遍。
-    """
+    """默认同步范围:公众号 + 全部订阅类来源。"""
     from kb.collectors import active_collector
     from kb.source_types import feed_types
     return [active_collector().name, *feed_types()]
@@ -100,7 +96,7 @@ def load_settings() -> dict:
     from kb.collectors import known_channels
     d = _raw_settings()
     known = _channel_labels()
-    # known_channels 先把存量里的绿泡泡通道带到当前设置上:设置换了一条之后,
+    # known_channels 先把存量里那条退役的公众号通道名换成接替它的那条:
     # 盘上那个旧名字不能被当成"不认识的通道"丢掉——丢掉等于公众号从此不进日报。
     channels = [c for c in known_channels(d['channels']) if c in known]
     # 通道被删掉/改名之后,存下来的那份可能一个都不认识了。回落到默认范围,

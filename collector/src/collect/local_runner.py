@@ -24,7 +24,7 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
     from src.db.repository import ArticleRepository
     from src.utils.helpers import time_now
 
-    result = {"new_articles": 0, "errors": [], "auth_error": False, "done": 0, "total": 0,
+    result = {"new_articles": 0, "errors": [], "done": 0, "total": 0,
               "missing_accounts": [], "deferred_articles": 0, "unavailable_articles": 0,
               "matched_articles": 0, "download_done": 0, "download_total": 0,
               "download_succeeded": 0, "download_failed": 0, "existing_articles": 0,

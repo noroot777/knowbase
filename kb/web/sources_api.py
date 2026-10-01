@@ -51,26 +51,7 @@ def list_targets(channel: str | None = None):
         targets = [t.as_dict() for t in mgr.list_targets()]
     except CollectorError as e:
         raise HTTPException(400, str(e))
-    # 停用的目标不参与采集,自然也不该要求它有凭证。把它算进总数的话,
-    # 用户停用一个号之后「全部就绪」就永远到不了,弹窗还一直催他去 Mac 微信里
-    # 点那个号的文章。口径也要和 CLI 的 `creds` 对齐——那边的 SQL 本来就是
-    # `WHERE removed=0 AND in_crawl_config=1`,不统一就是两个数各说各话。
-    scored = [t for t in targets
-              if t["ready"] is not None and t.get("enabled", True)]
-    return {
-        "manageable": True,
-        "label": collector.label,
-        "targets": targets,
-        # 有"逐个目标就绪"这回事的来源才给计数,前端据此决定显不显示那一栏
-        "readiness": ({"ready": sum(1 for t in scored if t["ready"]),
-                       "total": len(scored)} if scored else None),
-    }
-
-
-@router.post("/api/sources/targets/refresh")
-def refresh_readiness():
-    """重新探测各目标的就绪状态(微信:把 wxdown 抓到的新凭证并进来)。"""
-    return _guard(_manager().refresh_readiness)
+    return {"manageable": True, "label": collector.label, "targets": targets}
 
 
 @router.get("/api/sources/targets/search")

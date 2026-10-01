@@ -33,7 +33,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-EXIT_OK, EXIT_ERROR, EXIT_AUTH = 0, 1, 2
+EXIT_OK, EXIT_ERROR = 0, 1
 
 
 def emit(event: dict) -> None:
@@ -192,7 +192,7 @@ def _accounts_discover(query: str, as_json: bool) -> int:
         with ArticleRepository() as repo:
             rows = discover(repo, query)
     except LocalReaderError as e:
-        return _fail(str(e), as_json, EXIT_AUTH)
+        return _fail(str(e), as_json, EXIT_ERROR)
 
     candidates = [{"name": r["name"], "fakeid": r["fakeid"],
                    "alias": r["username"],
@@ -242,7 +242,7 @@ def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
             with ArticleRepository() as repo:
                 rows = discover(repo, name)
         except LocalReaderError as e:
-            return _fail(str(e), as_json, EXIT_AUTH)
+            return _fail(str(e), as_json, EXIT_ERROR)
         same = [r for r in rows if r["name"] == name]
         exact = [r for r in same if r["fakeid"]]
         ids = {r["fakeid"] for r in exact}

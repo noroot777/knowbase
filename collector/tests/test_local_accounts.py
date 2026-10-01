@@ -228,7 +228,14 @@ class CliDiscoverTests(_Base):
         self.assertIn("本机暂无可解析的图文推送", err)
 
     def test_an_unreadable_database_fails_loudly_instead_of_listing_nothing(self):
+        """读不动库要非零退出,别拿一张空列表冒充「本机没有这个号」。
+
+        退出码是普通的 EXIT_ERROR:原来这里借用的 EXIT_AUTH(=2)是凭证通道的
+        「一份文章凭证都没有」那一档,本机推送不分号授权,那个码已经没有了。
+        """
+        import cli
+
         self.reader.check.side_effect = LocalReaderError("绿泡泡数据库尚未就绪")
         code, _, err = self.run_cli("索引里")
-        self.assertEqual(2, code)
+        self.assertEqual(cli.EXIT_ERROR, code)
         self.assertIn("尚未就绪", err)
