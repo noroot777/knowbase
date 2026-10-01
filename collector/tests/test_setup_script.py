@@ -40,8 +40,8 @@ class SetupScriptTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_setup(self):
-        env = {**os.environ, "KB_COLLECTOR_DATA": str(self.data),
-               "KB_COLLECTOR_VENV": str(self.venv)}
+        env = {**os.environ, "KB_COLLECTOR_DATA_PATH": str(self.data),
+               "KB_COLLECTOR_VENV_PATH": str(self.venv)}
         return subprocess.run(["./setup.sh"], cwd=self.here, env=env,
                               capture_output=True, text=True)
 

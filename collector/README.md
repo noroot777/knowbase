@@ -20,8 +20,8 @@ cd collector && ./.venv/bin/python -m cli <命令>
 ```
 
 把两样不进版本库的东西链到仓库外:`data/`(文章库)和 `.venv/`。两者默认落在
-`$XDG_DATA_HOME/knowbase/collector/`,可用 `KB_COLLECTOR_DATA` /
-`KB_COLLECTOR_VENV` 指到别处。venv 不在就用 [uv](https://docs.astral.sh/uv/)
+`$XDG_DATA_HOME/knowbase/collector/`,可用 `KB_COLLECTOR_DATA_PATH` /
+`KB_COLLECTOR_VENV_PATH` 指到别处。venv 不在就用 [uv](https://docs.astral.sh/uv/)
 建一个。脚本幂等,新开 git worktree 跑一次即可 —— 多个工作树共用同一份库才对,
 采集是有状态的。
 

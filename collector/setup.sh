@@ -6,24 +6,25 @@
 #
 # 两者都指向仓库外的同一份真实目录——采集是有状态的,多个 worktree 共用同一个库
 # 才对:各自持有一份几百 M 的副本既浪费,又会让"哪份是最新的"变成新问题。
-# 要独立数据就设 KB_COLLECTOR_DATA 指到别处。
+# 要独立数据就设 KB_COLLECTOR_DATA_PATH 指到别处 —— 和 compose.yaml / .env 里那个
+# 同名变量是同一个意思(「宿主机上的 collector 数据目录在哪」),故意共用一个名字。
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 STATE="${XDG_DATA_HOME:-$HOME/.local/share}/knowbase/collector"
-DATA_HOME="${KB_COLLECTOR_DATA:-$STATE/data}"
-VENV_HOME="${KB_COLLECTOR_VENV:-$STATE/venv}"
+DATA_HOME="${KB_COLLECTOR_DATA_PATH:-$STATE/data}"
+VENV_HOME="${KB_COLLECTOR_VENV_PATH:-$STATE/venv}"
 
 # 存量回退:这个采集器原来住在 WeChatOA_Aggregation 里,库和 venv 也在那边。
 # 没显式指定、默认位置还空着、而老位置确实有东西时就接着用老的——搬几百 M 的库
 # 是用户自己的决定,不该由一个"链好符号链接"的脚本代劳。
 LEGACY="$HOME/code/gongzhonghao/WeChatOA_Aggregation"
-if [ -z "${KB_COLLECTOR_DATA:-}" ] && [ ! -e "$DATA_HOME" ] && [ -d "$LEGACY/data" ]; then
+if [ -z "${KB_COLLECTOR_DATA_PATH:-}" ] && [ ! -e "$DATA_HOME" ] && [ -d "$LEGACY/data" ]; then
   DATA_HOME="$LEGACY/data"
   echo "[setup] 沿用原位置的数据目录:$DATA_HOME" >&2
-  echo "[setup]   要搬到 $STATE/data 就把目录移过去,或设 KB_COLLECTOR_DATA" >&2
+  echo "[setup]   要搬到 $STATE/data 就把目录移过去,或设 KB_COLLECTOR_DATA_PATH" >&2
 fi
-if [ -z "${KB_COLLECTOR_VENV:-}" ] && [ ! -x "$VENV_HOME/bin/python" ] \
+if [ -z "${KB_COLLECTOR_VENV_PATH:-}" ] && [ ! -x "$VENV_HOME/bin/python" ] \
    && [ -x "$LEGACY/.venv/bin/python" ]; then
   VENV_HOME="$LEGACY/.venv"
   echo "[setup] 沿用原位置的 venv:$VENV_HOME" >&2
@@ -36,7 +37,7 @@ mkdir -p "$DATA_HOME"
 
 if [ ! -x "$VENV_HOME/bin/python" ]; then
   command -v uv > /dev/null \
-    || fail "没有 venv 也没有 uv。装一个 uv(https://docs.astral.sh/uv/),或用 KB_COLLECTOR_VENV 指到现成的 venv"
+    || fail "没有 venv 也没有 uv。装一个 uv(https://docs.astral.sh/uv/),或用 KB_COLLECTOR_VENV_PATH 指到现成的 venv"
   echo "[setup] 建 venv:$VENV_HOME"
   uv venv --project "$HERE" "$VENV_HOME" > /dev/null
   VIRTUAL_ENV="$VENV_HOME" uv sync --project "$HERE" --active > /dev/null
