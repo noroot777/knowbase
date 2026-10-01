@@ -14,9 +14,9 @@ CREATE TABLE IF NOT EXISTS accounts (
   -- name 是主键、又被 articles.account_name 和已导出的 vault 目录引用着,
   -- 改不动;能改的只有"显示成什么"。为空表示还没核对过。
   display_name      TEXT NOT NULL DEFAULT '',
-  -- 上次去正文页核对昵称的时间。跟 display_name 分开是因为"核对过、名字没变"
-  -- 和"还没核对过"是两回事:只看 display_name 空不空的话,补上一次之后就再也
-  -- 不会去看第二眼,这个号以后再改名就永远发现不了。
+  -- 上次去正文页核对昵称的时间。**主干不读也不写它**:名字直接从本机微信的
+  -- 会话列表上读,零请求、每轮都核对,没有节流可言。留着这一列是因为这个库
+  -- 要能被 wechat-oa 分支同时打开,那条通道还在按它节流(见 migrations v17)。
   display_checked_at TEXT,
   latest_crawl_at   TEXT,
   in_crawl_config   INTEGER NOT NULL DEFAULT 1,
@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS articles (
   digest            TEXT NOT NULL DEFAULT '',
   link              TEXT NOT NULL DEFAULT '',
   cover_url         TEXT NOT NULL DEFAULT '',
+  -- 封面图在本地的相对路径。**主干不读也不写它**:封面早就不下载了,要图按
+  -- cover_url 现取。留着这一列的理由同 display_checked_at(见 migrations v17)。
   cover_path        TEXT,
   create_time       TEXT NOT NULL,
   create_time_unix  INTEGER,
@@ -168,6 +170,12 @@ CREATE TABLE IF NOT EXISTS article_notes (
 CREATE INDEX IF NOT EXISTS idx_article_notes_updated_at
   ON article_notes (updated_at DESC);
 
+-- 全文索引。**主干不读也不写它**:文章检索在知识库那一侧按 vault 的 md 做,
+-- 采集器只管抓和导出,所以这里一行 fts 代码都没有、也不付那笔分词开销。
+-- 留着这张表是因为这个库要能被 wechat-oa 分支同时打开,它采集时每篇都写它 ——
+-- 而删掉会把**正在同步**的那个旧进程当场打断(它只在首次打开库时跑这份
+-- schema,不会因为别的进程删表而再跑一遍)。详见 migrations v18。
+-- 列名和 tokenize 跟那个分支一字不差,它的 INSERT 才对得上。
 CREATE VIRTUAL TABLE IF NOT EXISTS article_fts USING fts5(
   article_id UNINDEXED,
   title_tok,

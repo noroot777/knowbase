@@ -332,8 +332,9 @@ class DailyScheduleTests(unittest.TestCase):
         self.path = Path(temp.name) / 'daily_report.json'
         for p in (patch.object(daily_run, 'SETTINGS_FILE', self.path),
                   patch.object(daily_run, '_channel_labels',
-                               lambda: {'wechat_oa': '微信', 'rss': 'RSS'}),
-                  patch.object(daily_run, 'default_channels', lambda: ['wechat_oa', 'rss'])):
+                               lambda: {'wechat_local': '公众号', 'rss': 'RSS'}),
+                  patch.object(daily_run, 'default_channels',
+                               lambda: ['wechat_local', 'rss'])):
             p.start(); self.addCleanup(p.stop)
         self.clock = Mock(wraps=datetime)
         self.clock.now.return_value = datetime(2026, 9, 28, 16, 42)
@@ -405,7 +406,7 @@ class DailyScheduleTests(unittest.TestCase):
     def test_unknown_channels_fall_back_to_defaults(self):
         self.path.write_text(json.dumps({'enabled': True, 'time': '07:30',
                                          'channels': ['gone']}))
-        self.assertEqual(['wechat_oa', 'rss'], daily_run.load_settings()['channels'])
+        self.assertEqual(['wechat_local', 'rss'], daily_run.load_settings()['channels'])
 
     def test_disabled_schedule_never_fires(self):
         daily_run.save_settings(False, '07:30', ['rss'])
@@ -593,7 +594,7 @@ class DailyStopTests(unittest.TestCase):
         gen = self.run_once(channels=[
             {'channel': 'rss', 'label': 'RSS', 'status': 'error', 'detail': '无法连接来源'},
             {'channel': 'social', 'label': '大V观点', 'status': 'ok', 'detail': '同步完成'},
-            {'channel': 'wechat_oa', 'label': '公众号', 'status': 'skipped',
+            {'channel': 'wechat_local', 'label': '公众号', 'status': 'skipped',
              'detail': '超出时间预算,未同步'}])
         issues = gen.call_args.kwargs['sync_issues']
         self.assertEqual(['RSS', '公众号'], [i['label'] for i in issues])  # ok 的不算

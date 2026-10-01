@@ -71,7 +71,7 @@ class FetchScope:
 
 @runtime_checkable
 class SourceCollector(Protocol):
-    """采集器契约。实现见 kb.collectors.wechat_oa。"""
+    """采集器契约。实现见 kb.collectors.wechat_local。"""
 
     name: str                               # 稳定标识,配置里用
     label: str                              # 面板上的人话名字
@@ -153,15 +153,6 @@ class TargetManager(Protocol):
 
     def set_target_enabled(self, name: str, enabled: bool) -> str: ...
 
-    def refresh_readiness(self) -> str:
-        """重新探测各目标的就绪状态,返回一句成品结果文案。
-
-        对逐个目标授权的来源,授权是在采集器外面拿到的(微信是人去 Mac 微信里
-        打开文章、由抓包工具截下凭证),知识库这边只能"再看一眼有没有变"。
-        不区分目标就绪与否的来源直接返回空串即可。
-        """
-        ...
-
 
 def target_manager(collector: SourceCollector | None = None) -> TargetManager | None:
     """当前采集器支持目标管理就返回它,否则 None。"""
@@ -173,62 +164,40 @@ def target_manager(collector: SourceCollector | None = None) -> TargetManager | 
 # 目前只有一个来源。多来源时这里改成 list,管道对每个采集器跑一遍即可
 # ——fetch/materialize 之后的阶段(索引/提取/条目化)本来就是来源无关的。
 
+_DEFAULT_CHANNEL = "wechat_local"
+
 _REGISTRY: dict[str, str] = {
     # name -> "模块路径:属性名",延迟导入:采集器实现可能拖着 requests 等依赖,
     # 而 kb.cli / kb.mcp_server 这些不碰管道的入口不该为此付启动成本
-    "wechat_oa": "kb.collectors.wechat_oa:collector",
     "wechat_local": "kb.collectors.wechat_local:collector",
     **{kind: "kb.collectors.feeds:create_collector" for kind in feed_types()},
 }
 
-# ── 绿泡泡的两条通道:互斥,选哪条是设置项 ────────────────────────────────────────
-# wechat_oa(逐号文章凭证)和 wechat_local(本机已同步的推送)抓的是同一批公众号,
-# 写进同一套订阅、同一个文章库、同一份导出,差别只在"从哪儿发现文章"。两条同时开
-# 只会把同一批号抓两遍,所以它不是"每次同步现勾"的范围,而是一个设置:选中的那条
-# 出现在同步范围里,另一条根本不列出来(见 collection_channels)。
-WECHAT_CHANNELS: tuple[str, ...] = ("wechat_local", "wechat_oa")
-# 默认本机数据库:它不需要 wxdown、不需要逐号文章凭证,开箱就能用。
-_DEFAULT_WECHAT = "wechat_local"
-# 设置落在 secrets.json(它早就不只装 key —— 各阶段的模型分配也在里面),
-# 借 kb.llm 那套「两把锁 + 唯一临时文件 + rename」的读改写,不另起一套。
-_SETTINGS_SECTION = "collectors"
-
-
-def wechat_channel() -> str:
-    """当前生效的公众号采集通道。没配过 / 配了个不认识的值都回落到本机数据库。"""
-    from kb import llm
-
-    section = llm.read_settings().get(_SETTINGS_SECTION)
-    value = (section or {}).get("wechat") if isinstance(section, dict) else None
-    return value if value in WECHAT_CHANNELS else _DEFAULT_WECHAT
-
-
-def set_wechat_channel(name: str) -> str:
-    """把公众号采集通道存进设置,返回存下来的那条。"""
-    if name not in WECHAT_CHANNELS:
-        raise ValueError(f"未知的公众号采集通道 {name!r},"
-                         f"可选: {', '.join(WECHAT_CHANNELS)}")
-    from kb import llm
-
-    def mutate(data: dict) -> None:
-        section = data.get(_SETTINGS_SECTION)
-        if not isinstance(section, dict):
-            section = {}
-            data[_SETTINGS_SECTION] = section
-        section["wechat"] = name
-
-    llm.update_settings(mutate)
-    return name
+# ── 退役通道名的别名 ──────────────────────────────────────────────────────────
+# 公众号曾经有两条通道二选一:wechat_oa 用逐号文章凭证(凭证靠 mitm 代理从绿泡泡
+# 客户端流量里截)、wechat_local 读本机已经同步下来的推送。它们抓的是同一批号、
+# 写进同一套订阅和文章库,差别只在"从哪儿发现文章",所以主干只留了后一条,
+# 前一条整条搬去 wechat-oa 分支。
+#
+# 别名表不能跟着一起删:盘上那些"抓哪几个来源"的配置(定时范围、日报范围)是按
+# 通道名存的,老配置里写着的正是 wechat_oa。当成"不认识的通道"丢掉的话,公众号
+# 从此不再定时同步、不再进日报,而面板上完全看不出少了什么。
+_RETIRED_CHANNELS: dict[str, str] = {"wechat_oa": "wechat_local"}
 
 
 def resolve_channel(name: str) -> str:
-    """把存下来的通道名带到当前设置上(非微信通道原样返回)。
+    """把存下来的通道名换成现在认得的那个(认得的原样返回)。"""
+    return _RETIRED_CHANNELS.get(name, name)
 
-    盘上那些"抓哪几个来源"的配置(日报范围、定时范围)是按通道名存的。设置里把
-    绿泡泡换到另一条通道之后,存着的旧名字必须跟着走——当成"不在可选列表里"
-    丢掉的话,公众号从此不再同步,而面板上完全看不出少了什么。
+
+def retired_channels() -> dict[str, str]:
+    """退役通道名 → 接替它的那条。给浏览器那一侧用。
+
+    `kb-sync-channel` / `kb-sync-channels` 这些选择存在 localStorage 里,后端那套
+    `resolve_channel` 管不到。前端不该自己写一份 `wechat_oa` 的字面量——两份清单
+    迟早漂,而漂的后果是升级后打开新建同步时公众号被静默地漏掉。
     """
-    return wechat_channel() if name in WECHAT_CHANNELS else name
+    return dict(_RETIRED_CHANNELS)
 
 
 def known_channels(names) -> list[str]:
@@ -247,8 +216,9 @@ def known_channels(names) -> list[str]:
 
 
 def get_collector(name: str | None = None) -> SourceCollector:
-    """按名字取采集器。name 为空时取 KB_COLLECTOR 环境变量,再回落到设置里那条。"""
-    key = name or os.getenv("KB_COLLECTOR", "").strip() or wechat_channel()
+    """按名字取采集器。name 为空时取 KB_COLLECTOR 环境变量,再回落到公众号那条。"""
+    key = resolve_channel(name or os.getenv("KB_COLLECTOR", "").strip()
+                          or _DEFAULT_CHANNEL)
     try:
         target = _REGISTRY[key]
     except KeyError:
@@ -267,6 +237,15 @@ def active_collector(channel: str | None = None) -> SourceCollector:
     return get_collector(channel)
 
 
+def wechat_channel() -> str:
+    """公众号那条通道的 id。
+
+    留着这个名字是因为"默认范围里的绿泡泡是哪条"有好几个读取方(定时同步、
+    日报),它们不该各写一个字面量。
+    """
+    return _DEFAULT_CHANNEL
+
+
 def _channel_info(key: str) -> dict:
     c = get_collector(key)
     return {"id": key, "label": getattr(c, "channel_label", c.label),
@@ -274,21 +253,16 @@ def _channel_info(key: str) -> dict:
 
 
 def collection_channels() -> list[dict]:
-    """可以勾选的来源通道。绿泡泡两条互斥,只列设置里选中的那条。"""
-    active = wechat_channel()
-    return [_channel_info(key) for key in _REGISTRY
-            if key not in WECHAT_CHANNELS or key == active]
+    """可以勾选的来源通道。"""
+    return [_channel_info(key) for key in _REGISTRY]
 
 
 def channel_labels() -> dict[str, str]:
-    """全部通道 id → 人话名字,**含没被选中的那条**。
+    """通道 id → 人话名字,**含已经退役的那些**。
 
-    历史运行记录里写着的可能正是另一条绿泡泡通道("上次来源:…"),
-    面板得能把它显示成人话,而不是一个裸 id。
+    历史运行记录里写着的可能正是一条退役通道("上次来源:…"),面板得能把它
+    显示成人话,而不是一个裸 id。退役的那条指向接替它的通道,名字自然一致。
     """
-    return {key: _channel_info(key)["label"] for key in _REGISTRY}
-
-
-def wechat_channel_options() -> list[dict]:
-    """设置面板上那两个候选(顺序即默认在前)。"""
-    return [_channel_info(key) for key in WECHAT_CHANNELS]
+    labels = {key: _channel_info(key)["label"] for key in _REGISTRY}
+    return {**{old: labels[new] for old, new in _RETIRED_CHANNELS.items()
+               if new in labels}, **labels}

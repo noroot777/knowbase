@@ -304,24 +304,6 @@
     <h2 id="tgt-title">订阅列表</h2>
     <p class="hint" style="margin:-8px 0 12px" id="tgt-count"></p>
 
-    <!-- 凭证就绪(逐个目标授权的来源才显示) -->
-    <div id="tgt-ready-bar" style="display:none;background:var(--tag-bg);border-radius:10px;
-         padding:9px 14px;margin-bottom:12px;display:flex;justify-content:space-between;
-         align-items:center;gap:10px;flex-wrap:wrap">
-      <span id="tgt-ready-text" style="font-size:12.5px"></span>
-      <span style="display:flex;gap:10px;align-items:center;flex:none">
-        <label style="font-size:12px;color:var(--muted);display:flex;gap:4px;align-items:center">
-          <input type="checkbox" onchange="toggleOnlyPending(this)"> 只看未就绪
-        </label>
-        <label style="font-size:12px;color:var(--muted);display:flex;gap:4px;align-items:center">
-          <input type="checkbox" id="tgt-auto" checked
-                 onchange="this.checked ? startTgtAutoRefresh() : stopTgtAutoRefresh()"> 自动刷新
-        </label>
-        <button class="ghost" id="tgt-refresh" onclick="refreshReadiness()"
-                style="padding:3px 12px;font-size:12px">刷新凭证</button>
-      </span>
-    </div>
-
     <!-- 搜索添加 -->
     <div class="row" style="margin-bottom:10px">
       <div style="display:flex;gap:6px">
@@ -485,11 +467,6 @@
 <div id="wechat-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeWechatSetup()">
   <div class="modal wechat-dialog">
     <div class="wechat-heading"><div><h2 id="wechat-title">接入你的绿泡泡</h2><p class="hint" id="wechat-intro">从本机已同步的公众号推送中发现文章，收进知识库。</p></div><button class="icon-button" onclick="closeWechatSetup()" aria-label="关闭绿泡泡接入">×</button></div>
-    <section class="wechat-channel-picker" aria-label="公众号采集通道">
-      <div class="wechat-channel-head"><strong>采集通道</strong><small>两条通道抓的是同一批公众号，只能选一条；换通道不影响已收录的文章</small></div>
-      <div id="wechat-channels" class="pipe-channel-list" role="radiogroup" aria-label="公众号采集通道"></div>
-      <p id="wechat-channel-msg" class="hint" role="status"></p>
-    </section>
     <ol class="wechat-steps">
       <li><span class="wechat-step-number">01</span><div><strong>配置供应商</strong><small id="wechat-provider-state">待检查</small></div><button class="ghost" onclick="wechatConfigured(openKeys, 'keys-modal')">API Key</button></li>
       <li><span class="wechat-step-number">02</span><div><strong>分配模型与智能体</strong><small id="wechat-model-state">待检查</small></div><button class="ghost" onclick="wechatConfigured(openStages, 'stages-modal')">模型配置</button></li>

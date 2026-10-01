@@ -27,17 +27,23 @@ def push(biz="biz-a", mid="101", idx="1", published="2026-09-15 18:30", **extra)
 
 
 class PushTests(unittest.TestCase):
-    def test_cli_local_failure_does_not_fall_back_to_remote(self):
+    def test_collect_has_exactly_one_path_and_a_failure_is_not_reported_as_success(self):
+        """采集只剩本机数据库这一条路:没有"另一条通道"可以悄悄退回去。
+
+        原来 `--channel` 两选一,而 profile_ext 那条在缺凭证时会一路报成功;
+        现在那条路连代码都不剩了,读不动数据库就是非零退出码。
+        """
         import cli
 
-        failed = {"new_articles": 0, "errors": ["数据库不可读"], "auth_error": False}
+        failed = {"new_articles": 0, "errors": ["数据库不可读"]}
         with patch("src.collect.local_runner.collect", return_value=failed) as local, \
-             patch("src.collect.runner.collect") as remote, \
              contextlib.redirect_stderr(io.StringIO()):
-            code = cli.main(["collect", "--channel", "local", "--targets", "指定号"])
+            code = cli.main(["collect", "--targets", "指定号"])
         self.assertEqual(cli.EXIT_ERROR, code)
         self.assertEqual(["指定号"], local.call_args.kwargs["targets"])
-        remote.assert_not_called()
+        with self.assertRaises(SystemExit):     # --channel 这个开关没有了
+            with contextlib.redirect_stderr(io.StringIO()):
+                cli.main(["collect", "--channel", "local"])
 
     def test_identity_is_shared_across_query_order_tracking_and_timestamp(self):
         article = parse_push(push())[0]
@@ -233,7 +239,6 @@ class LocalCollectionTests(unittest.TestCase):
 
         self.fill = patch("src.utils.wechat_body.fetch_article_body_full", return_value=(
             ["真实正文测试内容"], "<p>真实正文测试内容</p>", "")).start()
-        patch("api.download_cover").start()
         patch("src.utils.request_pacing.RequestPacer.wait").start()
 
     def tearDown(self):

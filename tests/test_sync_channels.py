@@ -18,8 +18,7 @@ from kb.web import pipeline_api
 
 class ChannelAPITests(unittest.TestCase):
     def setUp(self):
-        # 绿泡泡采集通道是落盘设置(secrets.json),指到 tmp:测试不该读开发机上
-        # 那份真配置,更不该改它。
+        # secrets.json 指到 tmp:测试不该读开发机上那份真配置,更不该改它。
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         original = llm._SECRETS_PATH
@@ -33,12 +32,21 @@ class ChannelAPITests(unittest.TestCase):
         with patch.object(pipeline, "start_pipeline", return_value=True) as start:
             self.assertEqual(200, self.client.post("/api/pipeline/run", json={}).status_code)
             self.assertEqual("wechat_local", start.call_args.kwargs["crawl_filter"]["channel"])
-            # 显式点名另一条通道仍然照跑:设置只决定默认与面板上列哪条,
-            # 不该把「这一次用原凭证通道试一下」这条排查路子堵死。
-            body = {"channel": "wechat_oa", "accounts": ["指定号"],
+            body = {"channel": "wechat_local", "accounts": ["指定号"],
                     "since_date": "2026-09-15", "until_date": "2026-09-15"}
             self.assertEqual(200, self.client.post("/api/pipeline/run", json=body).status_code)
             self.assertEqual(body, start.call_args.kwargs["crawl_filter"])
+
+    def test_a_retired_channel_name_runs_as_the_one_that_replaced_it(self):
+        """老页面/老脚本里写着的 `wechat_oa` 不该变成 400。
+
+        那条凭证通道退役了,可盘上和别人脚本里的旧名字还在。按"不认识的通道"
+        拒掉等于让一次本来该跑的同步静静地失败,而它要抓的号一个没变。
+        """
+        with patch.object(pipeline, "start_pipeline", return_value=True) as start:
+            r = self.client.post("/api/pipeline/run", json={"channel": "wechat_oa"})
+            self.assertEqual(200, r.status_code)
+            self.assertEqual("wechat_local", start.call_args.kwargs["crawl_filter"]["channel"])
 
     def test_invalid_channel_date_and_blank_names_are_rejected_before_run(self):
         bodies = [{"channel": "bad"}, {"accounts": [" "]}, {"since_date": "2026-09-15"},
@@ -103,13 +111,13 @@ class ChannelAPITests(unittest.TestCase):
 
 class ChannelDispatchTests(unittest.TestCase):
     def test_pending_bodies_are_visible_without_red_stage_or_immediate_retry(self):
-        from kb.collectors import wechat_oa
+        from kb.collectors import wechat_local
 
         body = {"title": "目标 · 测试文章", "reason": "正文暂未获取，已安排自动重试"}
         result = {"new_articles": 2, "errors": [], "download_succeeded": 1,
                   "body_failures": [body], "unreadable_messages": 1}
-        with patch.object(wechat_oa, "_stage") as stage:
-            wechat_oa.WeChatOACollector._report(0, result)
+        with patch.object(wechat_local, "_stage") as stage:
+            wechat_local.WeChatLocalCollector._report(0, result)
         self.assertEqual(("crawl", "ok"), stage.call_args.args[:2])
         self.assertEqual([{**body, "pending": True}], stage.call_args.kwargs["failures"])
         detail = stage.call_args.args[2]
@@ -122,13 +130,13 @@ class ChannelDispatchTests(unittest.TestCase):
 
     def test_export_missing_bodies_reach_panel_as_pending_details(self):
         import subprocess
-        from kb.collectors import wechat_oa
+        from kb.collectors import wechat_local
 
         payload = {"detail": "完成: 导出 0, 待补正文 2", "no_body": ["号甲 · 文甲", "号乙 · 文乙"]}
-        with patch.object(wechat_oa, "_backend_problem", return_value=""), \
-             patch.object(wechat_oa, "_run_cli", return_value=subprocess.CompletedProcess(
-                 [], 0, stdout=json.dumps(payload), stderr="")), patch.object(wechat_oa, "_stage") as stage:
-            wechat_oa.WeChatOACollector().materialize()
+        with patch.object(wechat_local, "_backend_problem", return_value=""), \
+             patch.object(wechat_local, "_run_cli", return_value=subprocess.CompletedProcess(
+                 [], 0, stdout=json.dumps(payload), stderr="")), patch.object(wechat_local, "_stage") as stage:
+            wechat_local.WeChatLocalCollector().materialize()
         self.assertEqual(("export", "ok"), stage.call_args.args[:2])
         items = stage.call_args.kwargs["failures"]
         self.assertEqual(2, len(items))
@@ -137,9 +145,9 @@ class ChannelDispatchTests(unittest.TestCase):
         self.assertNotIn("is_wx_deleted", items[0]["reason"])
 
     def test_local_progress_renders_discovery_and_body_counts_without_changing_old_channel(self):
-        from kb.collectors.wechat_oa import WeChatOACollector
+        from kb.collectors.wechat_local import WeChatLocalCollector
 
-        detail = WeChatOACollector._progress_detail
+        detail = WeChatLocalCollector._progress_detail
         self.assertIn("首次建立索引", detail({"phase": "discovery", "initial_index": True}))
         self.assertIn("已读推送 500/501 条", detail({"phase": "discovery",
                                               "scanned_messages": 500, "message_total": 501}))
@@ -152,27 +160,27 @@ class ChannelDispatchTests(unittest.TestCase):
 
     def test_local_fetch_invalidates_its_own_status_cache(self):
         import subprocess
-        from kb.collectors import wechat_oa
+        from kb.collectors import wechat_local
         from kb.collectors.wechat_local import WeChatLocalCollector
 
         for fail in (False, True):
             with self.subTest(fail=fail):
                 collector = WeChatLocalCollector()
-                collector._local_cache = (0, object())
-                with patch.object(wechat_oa, "_backend_problem", return_value=""), \
-                     patch.object(wechat_oa, "_stage"), \
+                collector._cache = (0, object())
+                with patch.object(wechat_local, "_backend_problem", return_value=""), \
+                     patch.object(wechat_local, "_stage"), \
                      patch.object(collector, "_stream", return_value=(0, {}),
                                   side_effect=subprocess.TimeoutExpired("collect", 1) if fail else None):
                     collector.fetch(FetchScope())
-                self.assertIsNone(collector._local_cache)
+                self.assertIsNone(collector._cache)
 
     def test_local_coverage_and_deferred_bodies_do_not_look_like_fresh_failures(self):
-        from kb.collectors import wechat_oa
+        from kb.collectors import wechat_local
 
         result = {"new_articles": 2, "errors": [], "missing_accounts": ["未订阅"],
                   "deferred_articles": 3, "unavailable_articles": 1}
-        with patch.object(wechat_oa, "_stage") as stage:
-            wechat_oa.WeChatOACollector._report(0, result)
+        with patch.object(wechat_local, "_stage") as stage:
+            wechat_local.WeChatLocalCollector._report(0, result)
         self.assertEqual(("crawl", "ok"), stage.call_args.args[:2])
         self.assertIn("本机暂无推送 1 个号（在绿泡泡关注并同步后可采集）", stage.call_args.args[2])
         self.assertIn("等待重试 3 篇", stage.call_args.args[2])
@@ -180,24 +188,24 @@ class ChannelDispatchTests(unittest.TestCase):
         self.assertNotIn("覆盖待核实", stage.call_args.args[2])
 
     def test_missing_fourteen_accounts_do_not_become_permanent_pending_details(self):
-        from kb.collectors import wechat_oa
+        from kb.collectors import wechat_local
 
         result = {"new_articles": 0, "errors": [], "download_succeeded": 0,
                   "missing_accounts": [f"未同步{i}" for i in range(14)]}
         for _ in range(2):
-            with patch.object(wechat_oa, "_stage") as stage:
-                wechat_oa.WeChatOACollector._report(0, result)
+            with patch.object(wechat_local, "_stage") as stage:
+                wechat_local.WeChatLocalCollector._report(0, result)
             self.assertEqual(("crawl", "ok"), stage.call_args.args[:2])
             self.assertIn("本机暂无推送 14 个号", stage.call_args.args[2])
             self.assertEqual([], stage.call_args.kwargs["failures"])
 
     def test_unattributed_messages_are_one_pending_total_not_per_account_counts(self):
-        from kb.collectors import wechat_oa
+        from kb.collectors import wechat_local
 
         result = {"errors": [], "download_succeeded": 0, "unattributed_messages": 2,
                   "coverage_unknown_accounts": ["甲", "乙"]}
-        with patch.object(wechat_oa, "_stage") as stage:
-            wechat_oa.WeChatOACollector._report(0, result)
+        with patch.object(wechat_local, "_stage") as stage:
+            wechat_local.WeChatLocalCollector._report(0, result)
         self.assertEqual(("crawl", "ok"), stage.call_args.args[:2])
         self.assertIn("另有归属待核实的不可读推送 2 条（存量）", stage.call_args.args[2])
         self.assertNotIn("本机暂无推送", stage.call_args.args[2])
@@ -209,13 +217,13 @@ class ChannelDispatchTests(unittest.TestCase):
         self.assertIn("可能相关账号：甲、乙（归属待核实）", items[0]["reason"])
 
     def test_unknown_push_summary_preserves_missing_account_advice_without_naming_them(self):
-        from kb.collectors import wechat_oa
+        from kb.collectors import wechat_local
 
         result = {"errors": [], "download_succeeded": 0, "unattributed_messages": 1,
                   "missing_accounts": [f"未同步{i}" for i in range(14)],
                   "coverage_unknown_accounts": []}
-        with patch.object(wechat_oa, "_stage") as stage:
-            wechat_oa.WeChatOACollector._report(0, result)
+        with patch.object(wechat_local, "_stage") as stage:
+            wechat_local.WeChatLocalCollector._report(0, result)
         self.assertIn("未匹配到本机推送 14 个号", stage.call_args.args[2])
         self.assertIn("若未关注或未同步，请在绿泡泡关注并同步", stage.call_args.args[2])
         self.assertIn("另有 1 条无法确认归属的推送，可能属于其中某个号", stage.call_args.args[2])
@@ -227,12 +235,12 @@ class ChannelDispatchTests(unittest.TestCase):
         self.assertNotIn("未同步", str(items))
 
     def test_renamed_unreadable_account_gets_qualification_not_unconditional_subscribe_advice(self):
-        from kb.collectors import wechat_oa
+        from kb.collectors import wechat_local
 
         result = {"errors": [], "download_succeeded": 0, "unattributed_messages": 3,
                   "missing_accounts": ["旧名"], "coverage_unknown_accounts": []}
-        with patch.object(wechat_oa, "_stage") as stage:
-            wechat_oa.WeChatOACollector._report(0, result)
+        with patch.object(wechat_local, "_stage") as stage:
+            wechat_local.WeChatLocalCollector._report(0, result)
         detail = stage.call_args.args[2]
         self.assertIn("未匹配到本机推送 1 个号", detail)
         self.assertIn("另有 3 条无法确认归属的推送，可能属于其中某个号", detail)
@@ -243,7 +251,7 @@ class ChannelDispatchTests(unittest.TestCase):
         self.assertIn("这些推送也可能来自未匹配到推送的账号", items[0]["reason"])
 
     def test_account_diagnostics_survive_fifty_body_failures_and_errors_stay_first(self):
-        from kb.collectors import wechat_oa
+        from kb.collectors import wechat_local
 
         saved = deepcopy(pipeline_state._state)
         try:
@@ -251,7 +259,7 @@ class ChannelDispatchTests(unittest.TestCase):
                       "unreadable_messages": 3, "unattributed_messages": 2,
                       "unreadable_accounts": [{"name": "甲", "messages": 3, "identity_confirmed": True}],
                       "body_failures": [{"title": f"正文{i}", "reason": "等待自动重试"} for i in range(60)]}
-            wechat_oa.WeChatOACollector._report(0, result)
+            wechat_local.WeChatLocalCollector._report(0, result)
             entry = pipeline_state._state["stages"]["crawl"]
             self.assertEqual("error", entry["status"])
             self.assertEqual(50, len(entry["failures"]))
@@ -264,15 +272,15 @@ class ChannelDispatchTests(unittest.TestCase):
             pipeline_state._state.update(saved)
 
     def test_all_unreadable_account_is_named_with_correct_remedy_and_no_immediate_retry(self):
-        from kb.collectors import wechat_oa
+        from kb.collectors import wechat_local
 
         for confirmed in (True, False):
             result = {"new_articles": 0, "errors": [], "download_succeeded": 0,
                       "missing_accounts": [], "unreadable_messages": 3,
                       "unreadable_accounts": [{"name": "目标", "messages": 3,
                                                "identity_confirmed": confirmed}]}
-            with patch.object(wechat_oa, "_stage") as stage:
-                wechat_oa.WeChatOACollector._report(0, result)
+            with patch.object(wechat_local, "_stage") as stage:
+                wechat_local.WeChatLocalCollector._report(0, result)
             self.assertEqual(("crawl", "ok"), stage.call_args.args[:2])
             detail = stage.call_args.args[2]
             self.assertIn("推送解析待核查 1 个号", detail)
@@ -287,17 +295,17 @@ class ChannelDispatchTests(unittest.TestCase):
                  patch("kb.store.connect"), patch("kb.extract.pending_docs", return_value=[]):
                 self.assertEqual([], pipeline_retry.retry_failed_plan())
 
-    def test_collector_cli_gets_selected_channel_and_reports_read_failures(self):
-        from kb.collectors import wechat_oa
+    def test_collector_cli_gets_scope_and_reports_read_failures(self):
+        from kb.collectors import wechat_local
         from kb.collectors.wechat_local import collector
 
         result = {"new_articles": 0, "errors": ["本机推送未同步"]}
-        with patch.object(wechat_oa, "_backend_problem", return_value=""), \
+        with patch.object(wechat_local, "_backend_problem", return_value=""), \
              patch.object(collector, "_stream", return_value=(0, result)) as stream, \
-             patch.object(wechat_oa, "_stage") as stage:
+             patch.object(wechat_local, "_stage") as stage:
             collector.fetch(FetchScope(("指定号",), "2026-09-01", "2026-09-15"))
         argv = stream.call_args.args[0]
-        self.assertEqual(["collect", "--channel", "local"], argv[:3])
+        self.assertEqual(["collect"], argv[:1])
         self.assertEqual("指定号", argv[argv.index("--targets") + 1])
         self.assertEqual("2026-09-15", argv[argv.index("--until") + 1])
         self.assertEqual(("crawl", "error"), stage.call_args.args[:2])

@@ -11,28 +11,17 @@ async page => {
   const respond = (route, data, code = 200) => route.fulfill({
     status: code, contentType: 'application/json', body: JSON.stringify(data),
   });
-  // 绿泡泡两条通道互斥,选哪条是设置(见 kb.collectors.wechat_channel):只有选中的
-  // 那条出现在同步范围里。这里按真实语义实现,起点故意是原凭证通道 —— 接入向导
-  // 走完点「去同步公众号」就该把它切到本机库。
-  const WECHAT = {
-    wechat_local: {id:'wechat_local', label:'绿泡泡本地数据库', hint:'读取本机已同步的公众号推送'},
-    wechat_oa: {id:'wechat_oa', label:'凭证抓取（原通道）', hint:'用各公众号的文章凭证获取列表'},
-  };
-  let channel = 'wechat_oa';
+  // 公众号只剩一条通道了（原来那条逐号文章凭证的在 wechat-oa 分支上）。`aliases` 是
+  // 退役通道名 → 接替它的那条：浏览器 localStorage 里存着的可能正是旧名字。
+  const WECHAT = {id:'wechat_local', label:'公众号', hint:'读取本机已同步的公众号推送'};
   const channelsPayload = () => ({
-    channels: [WECHAT[channel], {id:'rss', label:'RSS'}], default: channel,
-    labels: {wechat_local: WECHAT.wechat_local.label, wechat_oa: WECHAT.wechat_oa.label, rss: 'RSS'},
-    wechat: {selected: channel, options: [WECHAT.wechat_local, WECHAT.wechat_oa]},
+    channels: [WECHAT, {id:'rss', label:'RSS', hint:'订阅源'}], default: WECHAT.id,
+    labels: {wechat_local: WECHAT.label, wechat_oa: WECHAT.label, rss: 'RSS'},
+    aliases: {wechat_oa: WECHAT.id},
   });
   const routeHandler = route => {
     const request = route.request(), path = request.url().slice(base.length).split('?')[0];
     if (path === '/api/pipeline/channels') return respond(route, channelsPayload());
-    if (path === '/api/pipeline/channels/wechat') {
-      const wanted = request.postDataJSON()?.channel;
-      if (!WECHAT[wanted]) return respond(route, {detail:'未知的公众号采集通道'}, 400);
-      channel = wanted;
-      return respond(route, channelsPayload());
-    }
     if (path === '/api/wechat/setup') {
       if (request.method() === 'POST') {
         const body = request.postDataJSON(); writes.push(body);
@@ -70,11 +59,6 @@ async page => {
     await page.locator('#wechat-check').waitFor({state:'visible'});
     check('首次配置展示供应商和模型状态', await page.locator('#wechat-provider-state').textContent() === '已配置'
       && await page.locator('#wechat-model-state').textContent() === '已就绪');
-    // 采集通道的选择就在这个向导里(两条互斥,同步范围里只出现选中的那条)
-    await page.locator('#wechat-channels input').first().waitFor();
-    check('向导里列出两条互斥通道', await page.locator('#wechat-channels input').count() === 2);
-    check('当前选中的是设置里那条',
-      await page.locator('#wechat-channels input:checked').inputValue() === 'wechat_oa');
     await page.locator('#wechat-check').click();
     await page.locator('#wechat-authorization').waitFor({state:'visible'});
     check('未确认影响不能获取', await page.locator('#wechat-acquire').isDisabled());
@@ -90,12 +74,12 @@ async page => {
     await page.locator('#wechat-next').waitFor({state:'visible'});
     check('成功后首次提示收起', await page.locator('#wechat-welcome').isHidden());
     await page.locator('#wechat-next').click();
-    // 切通道是一次真的网络往返(设置要落盘),点完不能立刻断言 —— 等页面自己更新完
     await page.waitForFunction(() => document.getElementById('pipe-channel-current').value === 'wechat_local');
-    // 接入完成后「去同步公众号」把采集通道定在本机库:改的是设置,不是勾一次范围
-    check('继续同步把采集通道切到本机库', channel === 'wechat_local');
-    check('继续同步切换本地通道', await page.locator('#pipe-channel-current').inputValue() === 'wechat_local');
-    check('切完通道同步范围里没有另一条', await page.evaluate(() => !pipeChannels.some(c => c.id === 'wechat_oa')));
+    // 接入完成后「去同步公众号」把要看/要管的来源定在公众号这条,并勾进这次同步的范围
+    check('继续同步选中公众号这条', await page.locator('#pipe-channel-current').inputValue() === 'wechat_local');
+    check('公众号也进了这次同步的范围',
+      await page.evaluate(() => pipeRunSel.includes('wechat_local')));
+    check('同步范围里没有退役的那条', await page.evaluate(() => !pipeChannels.some(c => c.id === 'wechat_oa')));
     check('打开同步中心', await page.locator('#pipepanel').isVisible());
     await page.getByRole('button',{name:'检查并接入绿泡泡',exact:true}).click();
     // 向导里点 API Key / 模型配置:新窗口叠在向导之上,关掉它向导必须还开着

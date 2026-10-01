@@ -12,13 +12,15 @@
   就是为了改采集器时也能用 worktree 隔离——分成两个 git 的话,worktree 只会
   复制 kb 那一半,collector 仍是那唯一一份生产代码,隔离等于没有。
 - 知识库主干不认识任何具体来源,只认 `kb/collectors/` 的采集器契约;微信特有的
-  东西全在 `kb/collectors/wechat_oa.py` 与 `collector/` 里。新增来源写个实现即可。
+  东西全在 `kb/collectors/wechat_local.py` 与 `collector/` 里。新增来源写个实现即可。
 
 ## 操作入口
 
-- **`./kb.sh` 是唯一的操作入口**(取代原 WeChatOA 的 start_all.sh)。`./kb.sh` 不带参数
-  打印全部命令。日常两条:`./kb.sh prep`(同步前起 wxdown + 切路由 + 盯凭证)、
-  `./kb.sh status`(服务/路由/凭证/订阅一屏看全)。
+- **`./kb.sh` 是唯一的操作入口**。不带参数打印全部命令。日常两条:
+  `./kb.sh sync`(采集→导出→索引→打标,后台跑)、`./kb.sh status`
+  (服务/同步进度/公众号来源一屏看全)。**没有「同步前的准备」这一步了**——
+  原来的 `prep`(起 wxdown + 切路由 + 盯凭证)连同整条凭证通道一起搬去了
+  `wechat-oa` 分支,主干采集只读本机绿泡泡数据库,开面板就能同步。
 - **`restart` 只重启进程,不重建任何产物,尤其不重建三张图谱页。** 图谱是 Vault 里
   的单文件 HTML,kb-web 只是把文件原样发出去,所以改了 `catgraph.css/js` 重启看不出
   任何变化。重建走 `./kb.sh graph`(`--no-llm`,零模型调用,实测约 6 秒,其中 5.5 秒
@@ -50,125 +52,179 @@
   主检出不受影响。构建器用 PATH 上的 `uv` 桩挡住,判定逻辑一行都不打桩。
 - **服务一律用 `daemonize()` 起,不用 `nohup ... &`**。后者起出来的进程跟脚本同一个
   进程组,非交互 shell 会给它把 SIGINT 设成 SIG_IGN,而这个 SIG_IGN 被子进程继承——
-  于是 stop 时的 `kill -INT` 也被忽略,只能降级 SIGTERM,恰好会把 wxdown 的
-  multiprocessing 子进程丢成孤儿。daemonize 借 python 做 fork+setsid(macOS 没有
-  setsid 命令)并把 SIGINT 恢复默认:自成会话不受终端影响,同时 stop 能优雅收尾。
-- **两套凭证别搞混**:`login` 那套是扫码拿的、全局一份,微信关掉 `appmsgpublish`
-  之后它只剩「搜公众号加号」一个用途;`creds` 那套是每个号各一份的文章凭证,
-  只能靠在 Mac 微信里打开该号一篇文章、由 wxdown-service 的 mitm 截下来。
-  **原凭证通道获取文章列表靠后者**,`login` 救不了；本地数据库通道无需后者，
-  两个通道都按文章链接复用正文抓取。
-- 公众平台后台那套采集(`appmsgpublish` 翻列表)的代码已经删干净了,包括
-  `main.py`、`src/processor/`、`src/web/` 和 `profile_adapter` 的 monkey-patch。
-  留着它不是无害的:原来"某个号没有 profile_ext 凭证 → 悄悄退回旧接口 →
-  invalid session → 整轮采集中止 → 提示去跑 login"这条路,每一步都是错的。
-  现在 `WechatRequest` 本身就是 profile_ext 实现,缺凭证只影响那一个号。
-- **文章凭证有四态,别再只分"有/没有"**:`missing`(没截到)、`expired`(服务端
-  回过 no session,`invalidated_at>0`)、`stale`(还没被否掉,但截下来超过
-  `WXDOWN_CRED_FRESH_MINUTES`,默认 20 分钟)、`valid`。判定在
-  `profile_ext.credential_state()`。**stale 只影响上报,不影响放行**——
-  `is_valid()` 是 `get(allow_invalid=False)` 的闸门,按年龄收紧它就等于
-  "过了 20 分钟不许采",而实测 30 分钟的凭证三个里两个还能用。stale 不计入
-  「几个就绪」,面板上是黄点;采集照样拿它去试,试通了 `mark_valid` 转绿。
-  没有这一档的话,昨天截的 44 条今天全是绿点,面板报 44/44 就绪。
-- **新鲜度算的是 `max(captured_at, verified_at)`,不是 `captured_at`。**
-  `verified_at` 由 `mark_valid` 在采集实测通过时写,是独立字段——写回
-  `captured_at` 会把"什么时候截的"这个事实改掉。没有它,`mark_valid` 就只清
-  `invalidated_at`,一条三小时前截的凭证明明刚采成功,面板照样黄点、照样不
-  计入就绪,和注释里写的"试通转绿"自相矛盾(2026-08-27 审查发现)。
-  `mark_valid` 写盘有 60 秒节流:翻一页调一次,不然一个号十几次全量重写。
-- wxdown 把抓到的凭证写在 `wxdown-service/resources/data/credentials.json`,
-  `cli creds` 直接读这个文件导入。原来那条 "wxdown WebSocket → 前端 :5173 →
-  后端 :8000 POST" 的转发链路只是在搬运这个文件,两个常驻服务都已不需要。
+  于是 stop 时的 `kill -INT` 也被忽略,只能降级 SIGTERM——而 kb-web 进程里跑着
+  管道,SIGTERM 会把正在写 kb.db 的那一步砍在半路。daemonize 借 python 做
+  fork+setsid(macOS 没有 setsid 命令)并把 SIGINT 恢复默认:自成会话不受终端
+  影响,同时 stop 能优雅收尾。
+- **凭证通道整条都不在主干上了。** 「每个号一份文章凭证、靠 wxdown 的 mitm 从 Mac
+  微信里截下来」那一套(四态判定、新鲜度、`cli creds`、`cli login` 扫码、Clash 路由
+  切换)连同它依赖的上游代码一起留在 `wechat-oa` 分支,**两个分支始终并行、不打算
+  合并**。主干采集只有一条路:读本机绿泡泡数据库(`kb/collectors/wechat_local.py`
+  + `collector/src/crawler/local_wechat.py`),没有逐号授权、没有要盯的凭证面板,
+  正文照旧按文章链接抓。碰到提凭证的历史说法(注释、提交信息、`wechat-oa` 分支上
+  的文档),那说的是另一条分支。
+- **两个分支共用同一份 `collector/data`,所以主干不许在那个库上做破坏性的 schema
+  变更。** 分叉的是代码,不是库:两边 setup.sh 默认链的是同一个目录,而
+  `wechat-oa` 是**冻结**的,改不动——它照旧往 `articles.cover_path` 里写,核对
+  改名照旧读写 `accounts.display_checked_at`。v15/v16 当时按"主干零个读取方"把这
+  两列 DROP 了,实测后果是:按主干跑一次(自动迁到 v16)、再切回保留分支采集,
+  第一篇新文章就 `OperationalError: table articles has no column named cover_path`
+  ——那条分支从此写不进任何文章,「保留」名存实亡(2026-10-01 审查复现,用户那份
+  832M 的库当时已经停在这个状态)。旧分支自己救不回来:它只认到 v13,看到
+  `MAX(version)=16` 什么都不跑,它 schema.sql 里的 `CREATE TABLE IF NOT EXISTS`
+  对已存在的表也是空操作。所以 v15/v16 退役成空操作、**v17 把两列补回来**(存量库
+  只有这一条出路),**要停用一列就停止读写它、别 DROP**。两个空列几十字节,换的是
+  另一条分支还能跑。
+  **表和列一视同仁,口径收成一句:主干的迁移只增不减。** 这里原来给 v14 删
+  `article_fts` 开了个口子,理由是"整张表旧分支的 `CREATE VIRTUAL TABLE IF NOT
+  EXISTS` 会重建它,写入不会失败"——**那句话只对重启成立**。`ensure_database_ready`
+  的缓存是进程内的:旧分支正在同步(等下一篇、等网络)、主干在另一个进程里第一次
+  把这个库迁过 v14,它那个连接早就初始化完了,不会因为别人删了张表再跑一遍 schema,
+  于是采下一篇时 `OperationalError: no such table: article_fts`,那一批的后续文章
+  连带记成账号同步失败(2026-10-01 第 2 轮审查复现,走的是旧分支真实的
+  `api._ingest_crawl_article` → `fts.upsert_article_fts`)。所以 **v14 也退役成空
+  操作、v18 把那张表建回来**(空表,主干一行 fts 代码都不调;定义照抄冻结分支的
+  schema.sql,列名和 tokenize 一字不差,因为它自己那句 `IF NOT EXISTS` 建错了也
+  改不回来)。判据是「另一条分支**不重启**会不会当场坏」,不是「它重启之后能不能
+  自愈」。`ADD COLUMN` 对在途连接是安全的(SQLite 会重新编译语句),删东西不是。
+  **反过来不要去"隔离数据"**:主干那份
+  8850 篇文章就在这个库里,换个默认目录等于主干从一个空库开始。
+  回归在 `collector/tests/test_shared_db_compat.py`(11 条):钉的不是"列在不在",
+  而是**把那条冻结分支的 SQL 原样跑一遍**(含它那两句 FTS 读写),外加两道闸门:
+  ①一个**升级前就建好、全程不重开**的连接,在另一个连接迁完之后照样写得进去;
+  ②**逐版**比表和列的集合,只增不减——只比首尾的话"v14 删掉、v18 又建回来"看起来
+  毫无变化,那个口子就又开了。
+- **`setup.sh` 要继续认旧变量名 `GZH_DATA_HOME` / `GZH_VENV_HOME`。** 脚本改名成
+  `KB_COLLECTOR_DATA_PATH` / `KB_COLLECTOR_VENV_PATH` 之后只读新名字,于是用旧名字
+  **显式隔离过**数据目录的人升级后被静默换到别处(默认位置,或者存量回退那个原项目
+  目录),脚本照旧返回 0 报成功——用户看到的订阅和文章变成另一批、或者看起来全没了
+  (2026-10-01 审查复现)。换掉的是「打开哪个库」,不是一个链接的写法。口径在
+  `pick_path`:新名字优先、两个都设了打一行说明、只设旧的就沿用并提一句新名字;
+  **旧变量算显式选择**,不该被"原位置还有东西"那条存量兜底顶掉。
 
 ## collector 采集器
 
-- 同步有 `wechat_oa`（原凭证）与 `wechat_local`（微信本地库）两条注册通道；
-  手动请求、定时配置和失败重试均显式携带 `channel`，不修改进程全局环境来切换。
-- **两条通道互斥，选哪条是设置、不是每次同步现勾的范围**（`collectors.wechat_channel`，
-  落 `secrets.json` 的 `collectors.wechat`，默认 `wechat_local`，面板在「设置 →
-  绿泡泡接入 → 采集通道」）。它们抓的是同一批公众号、写进同一套订阅和文章库，
-  两条都勾只会把同一批号抓两遍。所以 `collection_channels()` **只列选中的那条**，
-  另一条压根不出现在同步中心 / 定时同步 / 日报的同步范围里。
-  三条配套约束，少一条就出事：
-  ①**没被选中的那条仍然要能翻成人话**（`channel_labels()` 给全集，API 的 `labels`
-  字段，前端 `channelLabel()` 回落查它）——历史运行记录里写着的可能正是它，
-  面板上那行「上次来源」不该显示成一个裸 id；
-  ②**存量配置里的旧通道名要跟着设置走**（`resolve_channel` / `known_channels`，
-  `pipeline.load_schedule`、`daily_run.load_settings`/`save_settings`/`start` 都过它）
-  ——当成「不在可选列表里」丢掉的话，公众号从此不再定时同步、不再进日报，而面板上
-  完全看不出少了什么；
-  ③**显式点名另一条仍然有效**（`get_collector` 保持严格，`--channel wechat_oa`、
-  API 里显式传的 channel 照跑）——设置管的是默认和面板列哪条，不该把一次性排查堵死。
-  **前端那一侧是六件事**（①②③ 在 `pipe_channels.js`，④⑤⑥ 收在它和 `pipe_setup.js`）：
-  ①**浏览器里存着的选择也要「跟着设置走」**（`adoptWechatChannel`，和后端
-  `known_channels` 一个口径，`applyChannelData` 首次加载就过一遍）——上一版两条都能勾，
-  所以 `kb-sync-channels` 里写着的可能是另一条、也可能两条都在；当成「不认识的来源」
-  直接过滤掉的话，只要还勾着 RSS，「一个都没剩才补默认」那句兜底就不触发，升级后打开
-  新建同步只剩 RSS，**公众号被静默地漏掉、一句提示都没有**（2026-09-30 审查实测，
-  提交上去的范围里一个公众号通道都没有）。
-  ②**那几组勾选（同步范围、定时范围、日报范围）各自只在加载时渲染一次、不跟着切
-  页面重读**，所以换通道时由 `kb:channels-changed` 事件就地把旧通道那一项换成新的
-  （其余勾选原样留着，换通道是「改道」不是「减来源」）；不换的话界面上会一直列着
-  一条已经不存在的来源，勾了它保存下去也只会被后端改写成新的那条。
-  ③**这份来源清单取决于一个全局单值，所以那份缓存不能永久复用。** 改动前它是静态的、
-  缓存一次就够；现在设置窗口和新建同步打开时各 `loadPipeChannels(true)` 重新核对一次
-  服务端（状态轮询那类高频路径照旧吃缓存），换完通道再往 `kb-wechat-channel` 写一笔
-  广播给**别的页面**（`CustomEvent` 不跨文档，`storage` 事件才跨）。两道防线各管一段：
-  另一个页面改的，storage 当场把这个页面带过去；CLI/API 直接改的没有广播可听，靠打开
-  时那次重新核对。都不做的话另一个页面会一直显示、并**按一条已经不生效的通道派发
-  同步**，重开设置看到的还是和落盘值相反的那条（同轮审查实测）。
-  ④**强制核对那一次必须自己发一趟请求，而且只有最新那次的响应算数**（`pipeChannelsGen`）。
-  复用在途的那个等于拿切换**之前**生成的响应当成最新设置：慢响应期间收到切换通知，回来后
-  页面按旧通道读订阅、按旧通道开跑（2026-09-30 复审实测派发 `wechat_local`，而服务端那时
-  已经是 `wechat_oa`）。**探针要复现这条得卡在 15 秒之内**（`pipeJson` 的默认超时）：
-  `await openPipeModal()` 自己就会陪着扣住的那个请求卡满超时，那时 `pipeChannelsLoading`
-  早被清掉、缺陷压根不发生 —— 注入回归实测这么漏过一次，所以那一节故意不 await 它。
-  **「更新的通道状态」不止是更新的读取，还包括本页自己保存成功那一次**（`saveWechatChannel`
-  推进代次并把 `pipeChannelsFresh` 置真）。只在发起读取时推进的话，保存之前发出、还在路上
-  的那次读取回来时代次仍然相等，一份保存前生成的旧清单被当成最新结果应用：单选按钮跳回旧
-  通道、`kb-sync-channel` 也写回旧值，而服务端存着的是新的（2026-09-30 第 3 轮审查实测）。
-  这条路没有第二次纠正机会 —— 自己写 storage 不触发自己的监听器，跨页面那次补发读取只发生
-  在**别的**页面上，所以跨页面那条回归证明不了它。作废分支**不能无条件 `return
-  pipeChannelsLoading`**：作废我们的是一次保存时，那个值就是我们自己，promise 等自己当场
-  `Chaining cycle detected`，用户看到的是「读取采集通道失败」+ 一组空的单选按钮（实测）；
-  没有更新的读取可跟随时返回 `false`，调用方据此知道「这次核对过期了，别拿它更新界面」——
-  `loadWechatChannels` 就靠它保住刚保存成功那句反馈。
-  **同页面那一节的探针里必须只剩一个页面**：另开的那个 target 会收到 storage 通知、自己重
-  读一遍，顺手把同源 localStorage 写回正确值 —— 于是「落盘值有没有被拨回去」那两项变成假绿
-  （注入回归实测只有内存和单选那几项红）。
-  ⑤**核对没做完、或者核对失败时一律不许开跑**（`pipeChannelsFresh`，开始按钮和
-  `startPipeFromModal` 各拦一道）。手里那份 ready 订阅是按一条可能已经不生效的通道读的，
-  页面上都写着「同步来源暂不可用」了，按钮还能点下去拿旧通道开跑（2026-09-30 复审实测：
-  重读 503 之后照样派发 `wechat_local`）。
-  ⑥**换通道要迁的是两样东西：开着的弹窗那份订阅状态、和「采哪几个号」这份选择**
-  （`pipe_setup.js` 监听 `kb:channels-changed`）。**重读订阅**（`loadPipeAccounts(true)`）
-  只在弹窗开着时做：`pipeRunSel` 改道了而 `pipeAccounts` 里没有新通道那一条的话，它既不算
-  ready 也不算 loading，于是 `pipeRunBody()` 直接把它漏掉、开始按钮还照样能点 —— 用户明明
-  勾着公众号，点下去只同步了 RSS，一句提示都没有（2026-09-30 复审实测）。重读期间新通道是
-  loading，按钮自动禁用。**订阅选择的迁移正相反：跟弹窗开没开无关，目标通道有没有旧草稿也
-  无关**（一律用当前选择覆盖 `pipeDrafts` 里目标那一项）。两条通道订阅的是同一批号，换通道
-  是「改道」不是「换来源」，采哪几个号只由用户最后一次选择决定；少一半就出事，两种形态都
-  实测过（2026-09-30 第 3 轮审查）：**关着窗口换**的话迁移被写在「弹窗开着吗」后面直接跳
-  过，新通道没有草稿，下次打开 `loadChannelAccounts` 的 `draft ? … : list` 分支按整份订阅
-  全选初始化 —— 上次只勾了一个号，换个采集方式回来变成全选，点开始把没勾的那些一起采了；
-  **换回曾用过的那条**则被 `!pipeDrafts.has(after)` 排除，目标通道那份**更早**的草稿盖掉用
-  户刚改过的这份（实测「只选乙」换回「只选甲」，开始后采的也是甲）。取值优先 `pipeSel`（屏
-  幕上此刻那份），没有才退回草稿；**空集合照搬** —— 「一个都不采」也是用户的选择，当成"没有
-  草稿"又会变成全选。
-  回归在 `tests/test_wechat_channel.py`（13 条 Python + 一条真页面 probe
-  `tests/wechat_channel_probe.mjs`，77 项：自带 mock 后端、CDP 直连
-  chrome-headless-shell，存量选择四种形态各验「勾选 + 提交范围 + 落盘」，跨页面那几条真
-  开两个 target，慢响应/503/保存与旧读取赛跑靠 mock 扣响应和注故障复现，关窗口换通道与来回
-  换两次各验「选择不扩大 / 不回退到更早那版」，提交范围一律看真的发出去的
-  `/api/pipeline/run` body）。
-  两通道共用公众号订阅/文章库/导出；本地库只负责文章发现，正文继续按链接抓取。
-  本地读取只能通过已配置的 `rion-wechat-cli`，须确认 `live_database_read_ok`，
-  不允许通知预览替代、自动获取密钥或操作微信。
-  归属最终按推送 URL 的 `__biz` 核实，不能以同名自动匹配。
-- 跨通道文章身份使用 `article_identity` 的 `__biz + mid + idx`，保留已有文章 ID
-  和归属；用户删除时同时保留链接身份黑名单，防止另一通道换 ID 后复活文章。
-  不要把推送接收时间或带跟踪参数的完整 URL 当成跨通道唯一键。
+- **公众号只有一条通道 `wechat_local`(读本机绿泡泡数据库)。** 原来那条逐号文章凭证的
+  `wechat_oa` 在 `wechat-oa` 分支上,主干的注册表里压根没有它,所以「两条通道互斥、
+  选哪条是个设置」那一整套(`collectors.wechat_channel`、`POST /api/pipeline/channels/wechat`、
+  面板上的单选、浏览器里的 `kb-wechat-channel` 广播)全部删掉了。手动请求、定时配置和
+  失败重试照旧显式携带 `channel`,不修改进程全局环境。
+- **退役的通道名要留成别名,不能当「不认识的来源」丢掉**(`_RETIRED_CHANNELS`
+  = `{"wechat_oa": "wechat_local"}`,`resolve_channel` / `known_channels` 是唯一口径,
+  `pipeline.load_schedule`、`daily_run.load_settings`/`save_settings`/`start` 都过它)。
+  存量 `schedule.json` / `daily.json` 里写着的正是旧名字,丢掉的话**公众号从此不再
+  定时同步、不再进日报,而面板上完全看不出少了什么**。两条配套的:
+  ①**退役名也要能翻成人话**(`channel_labels()` 把别名一并给出,API 的 `labels`
+  字段,前端 `channelLabel()` 回落查它)——历史运行记录里写着的可能正是它,面板上
+  那行「上次来源」不该显示成一个裸 id;
+  ②**别名表要发到浏览器**(`/api/pipeline/channels` 的 `aliases`,前端 `adoptChannels`
+  照它改写 `kb-sync-channels` / `kb-daily-channels`)。localStorage 在后端的射程之外,
+  而前端不该把 `wechat_oa` 这个名字写死——那等于同一份退役清单维护两遍。不改写的话
+  只要还勾着 RSS,「一个都没剩才补默认」那句兜底就不触发,升级后打开新建同步只剩
+  RSS,公众号被静默地漏掉、一句提示都没有。
+  回归在 `tests/test_retired_channel.py`(12 条)+ `tests/retired_channel_probe.mjs`
+  (23 项,自带 mock 后端、CDP 直连 chrome-headless-shell):存着
+  `["wechat_oa","rss"]` 的 localStorage 打开新建同步要勾出公众号、localStorage 被
+  改写、而且**看真的发出去的 `/api/pipeline/run` body** 里是 `wechat_local`;另有
+  几项钉住删掉的那些东西没留下残骸(没有 `pipeWechat`/`saveWechatChannel` 这类
+  全局、没有 `tgt-ready-bar`/`tgt-refresh` 这些节点、页面上不出现「凭证」二字、
+  删掉的那两个端点一次都没被请求)。
+- **逐号「就绪」那套在主干上永久是空的。** 采集器一律返回 `ready=None` /
+  `state="按本机推送采集"`,`refresh_readiness` 从 `TargetManager` 契约里摘掉了,
+  `POST /api/sources/targets/refresh` 也没了。`Target.ready/tone/state` 这三个字段
+  和前端那条 `ready === null` 的渲染分支留着——契约是通用的,别的来源用得上。
+  别再把「刷新凭证」「去 Mac 绿泡泡里各点开一篇文章」那类文案加回来:它指的是
+  另一条分支上的流程。
+- **「翻过、确实没有图文」和「这一次没翻」不是一件事**(`local_accounts.discover`
+  给每行一个 `probe`:`index`/`live`/`none`/`unchecked`/`error`,文案口径是
+  `cli._NO_BIZ_STATE`(哪一档)+ `_NO_BIZ_FIX`(下一步怎么办)这两半,`_NO_BIZ_NOTE`
+  由它们拼出来给终端那一列的标记和面板的 `signature`)。`discover` 裸列时
+  一个会话都不翻、给了查询词也只翻前 `RESOLVE_LIMIT`(12)个,剩下的 `fakeid` 是空
+  的——原来把所有空 fakeid 一律说成「本机暂无可解析的图文推送」,那是在报一个没做过
+  的结论,而用户看到它就不会再试了。审查实测:15 个都有有效图文推送的候选,宽泛搜
+  索下排在预算之外的 3 个被这么标出来,缩小关键词再搜立刻解出 biz、加得进去
+  (2026-10-01)。单会话读不动也别含糊成「没有图文」。
+  **「加号失败」这条提示也归这份口径管**(`_accounts_add` 的 `_worst_probe`):
+  它原来对所有空 fakeid 一律报「没有能解析出归属的图文推送」+「去绿泡泡里同步一篇
+  图文之后再试」,于是搜索那一行明明显示着「本机这条会话读不动」,点添加却换了个
+  说法,还在建议一件白跑的事——读不动和排在预算之外都不是"没有图文",号本身可能
+  早就有了(2026-10-01 第 2 轮审查实测)。只有 `none` 那档该去同步一篇;另两档给
+  「缩小关键词再搜,或者用 --fakeid 直接指定」。拆成状态 + 处置两半就是为了这条:
+  列表里一行放得下 `状态(怎么办)`,错误提示里还要接着说别的,原样塞进去是括号
+  套括号。
+- **同名会话里只要有一条没解析出归属,按名字添加就是歧义,一律拒掉**
+  (`_accounts_add` 里那个 `blind`)。原来只拿「已经解析出 `__biz` 的那几个」判歧义,
+  于是两个同名会话、一个解出来了、另一个读不动(或排在解析预算之外)时,按名字添加
+  会**把解出来的那个拿去入库**:退出码 0、提示「已添加」,订阅的却是另一个号
+  (2026-10-01 第 3 轮审查复现——面板上点那条写着「本机这条会话读不动」的候选,
+  前端发上去的正是空 id)。**归属只认 `__biz`,同名不是线索**:一个名字对上两个
+  会话时,少一个归属就等于不知道用户要的是哪一个。
+  配套的两条在前端(`targets.js` 的 `renderTgtCands`):①**归属是空的候选不许点
+  添加**(`blind`,按钮禁用 + 写清下一步),这里能发上去的只有名字和一个空 id,
+  点下去就是走上面那条路;②**「已订阅」只按身份(`byId`,公众号是 `__biz`)认,
+  名字一律不作数**——它回答的是"这个名字订过没有",要显示的却是"这一条候选订过
+  没有",而同名的两个会话是两个号。第 1 轮收成「这个名字在本次结果里只出现一次
+  才按名字认」还不够:拿候选下面显示的那个编号单独再搜一次,结果只剩一条,于是
+  又按名字认成「已订阅」,而真正订着的是同名的另一个号——候选 id 为空的、id 明确
+  是另一个 `__biz` 的,两种写法都这样(2026-10-01 第 2 轮审查两张截图)。按 id 认
+  本来就能管住改过名的号,名字兜底整条删掉。
+  回归:`collector/tests/test_local_accounts.py` 那条混合同名的——钉的不是提示文案,
+  而是**库里一个字都没多**(只验提示的话,挑错号那条路也"看起来对");
+  `tests/retired_channel_probe.mjs` 里**真鼠标点**一下禁用的那颗按钮,确认一个
+  请求都没发出去(disabled 上直接调 `.click()` 本来就不触发,证明不了页面上点下去
+  会怎样),外加加完之后另一条同名候选仍然不是「已订阅」、以及缩小搜索只剩一条时
+  那两种写法各一条。
+- **一个档案名不许改挂到另一个 `__biz` 上**(`enable_crawl_account` 抛
+  `AccountNameTaken`)。`accounts.name` 是主键、`articles.account_name` 是指向它的
+  外键、导出的 vault 目录也按它归档,所以原来那句
+  `ON CONFLICT(name) DO UPDATE SET fakeid=excluded.fakeid` 碰上"两个号同名"就是把
+  第一个号的**全部历史文章连同导出目录**接到第二个号的身份上:外键全都合法、提示
+  还是「已添加」,订阅列表看起来只是少了一个号(2026-10-01 第 2 轮审查实测:两条
+  同名候选都解析出归属之后点第二条,HTTP 200、列表仍只有一条、id 换成第二个号,
+  而那篇旧文章的链接里还是第一个 `__biz`)。**拒掉是唯一不丢东西的做法**——要支持
+  同时订阅两个同名号,就得给第二个号另起一个档案键,而那个键会成为新的 vault 目录
+  名,不是写库这一步能顺手定的。
+  **拒绝不是死路**:没有历史文章的号移除时整行就真删了(`remove_account_from_list`),
+  所以"同名两个号、第一次点错了"自己有退路,不需要在写库这一步替用户判断谁该让位。
+  **判据就在那条 UPSERT 自己的 `DO UPDATE … WHERE` 里,不许在 Python 那边先
+  SELECT 一次。** 先查后写是 TOCTOU:两个请求都读到"这个名字没人占"(面板上那个
+  `tgtBusy` 只管单个页面,管不到另一个标签页、更管不到独立的 CLI 进程),随后第二
+  条 UPSERT 照样把第一条刚写进去的 fakeid 盖掉,两边都报「已添加」——和这条规则
+  本来要挡的事故一模一样,只是把窗口从"永远"缩成了"同时"(2026-10-01 第 3 轮审查
+  实测:两个线程各一条连接抢同一个名字 50/50 复现,真实 HTTP→CLI→仓储一条链也
+  复现)。python 的 `sqlite3` 默认 `isolation_level=''` 下 **SELECT 压根不开事务、
+  不持任何锁**,所以那次预检和随后的写入之间没有任何东西把它们绑在一起;而 SQLite
+  把写入串行化,判据待在写语句的 WHERE 里才和那次写入同生共死,放行不了就是 0 行
+  (`cursor.rowcount == 0` 就是拒绝信号,由调用方抛 `AccountNameTaken`)。
+  **不走"`BEGIN IMMEDIATE` 包住读+写"**:这个连接可能已经在别人开的事务里,而 WAL
+  下拿不到快照报的是 `SQLITE_BUSY_SNAPSHOT`,`busy_timeout` 管不着它。`name_held_by`
+  降级成**只给错误文案用的读取**——规则只有 WHERE 那一份,它只回答"现在挂在谁名下"。
+  四句豁免缺一不可,**每一句各有一条回归钉着**:①`excluded.fakeid = ''`,空 fakeid
+  的调用不许把已有归属抹成空(`fakeid=CASE WHEN excluded.fakeid <> '' …`)——那种
+  调用只是在说"确保这个名字在采集列表里",没有在声明身份;②`accounts.fakeid = ''`,
+  归属还没核实的名字不算"另一个号",真 `__biz` 认出来要填得进去;③
+  `accounts.fakeid = excluded.fakeid`,同一个号重新订阅只更新;④`import:` 开头的
+  占位键不算"另一个号"(`upsert_import_account` 留下的,本来就等着被真归属填上;
+  当成另一个号会让这类存量账号永久订阅不了)。**②那句是逐句反向验证补出来的**:
+  去掉它整套测试照旧全绿,而它一旦没了,空 fakeid 的行就永远订阅不了。
+  回归:`collector/tests/test_account_subscription.py` 的 `SameNameDifferentAccountTests`
+  (拒掉之后第一个号和它那篇文章一个字没动、外键干净 / 移除之后名字让得出来 /
+  四句豁免各一条 / **两条独立连接同时抢同一个名字,8 组各一次,只能一个赢、库里
+  只留赢家那个 fakeid** / **抢输的那一边不许把赢家的历史文章带走** / **两个真
+  subprocess 跑 `cli accounts add`,退出码必须是一个 0 一个 1**)+
+  `test_local_accounts.py` 里走真 CLI 的那条;探针那边**把 mock 后端按名字主键改成
+  会拒**——只往数组里 push 的话,"同名第二个号"这条路在页面上看起来永远是成功的
+  (第 2 轮审查指的就是这个 mock 不够真)。并发那三条**必须是真的两个执行体**:
+  同进程两条连接就足以证明闸门不靠进程内状态(sqlite3 不共享 cache),再加两个真
+  进程那一条,是因为"先 SELECT 后写"那一版在两个进程下同样 50/50 —— 注入回去时它
+  报的正是 `[0, 0]`(两个都说成功)。
+- **本地库只负责文章发现,正文继续按链接抓取。** 本地读取只能通过已配置的
+  `rion-wechat-cli`,须确认 `live_database_read_ok`,不允许通知预览替代、自动获取
+  密钥或操作微信。归属最终按推送 URL 的 `__biz` 核实,不能以同名自动匹配。
+- **文章身份是 `article_identity` 的 `__biz + mid + idx`,保留已有文章 ID 和归属。**
+  库里那 6000 多篇存量是凭证通道采的(ID 另一套规则),本地库再发现同一篇时必须认出
+  来、不能新开一行;用户删除时同时记进链接身份黑名单,免得换一种发现方式又把它复活。
+  不要把推送接收时间或带跟踪参数的完整 URL 当成唯一键。
 - 本地推送链接须保留正文校验参数 `chksm`，仅剔除跟踪参数。发现阶段经 Reader
   只读 SQL 批量读取公众号 Msg 表，使用分片/表级 local_id 游标；不要用 timeline
   的 after-local-id 做增量分页（读取器是在 LIMIT 后过滤 ID），也不能拿发布时间
@@ -203,55 +259,51 @@
   抓取/导出两阶段落 skipped 而不是 error。**别再让它退回 `sys.executable`**:
   那是知识库自己的解释器,拿它跑 `-m cli` 必死在 `import requests`,用户看到的是
   一句 ModuleNotFoundError 的 traceback 尾巴,完全指不到 setup.sh 上去
-  (2026-08-27 修,判定在 `wechat_oa._backend_problem()`)。
+  (2026-08-27 修,判定在 `wechat_local._backend_problem()`)。
 - 采集器是**一次性 CLI,不是常驻服务**:`cd collector && ./.venv/bin/python -m cli <命令>`。
   常用 `status`(健康+订阅列表) / `collect` / `export` / `accounts list|add|remove` / `login`。
   stdout 只出 NDJSON 给程序读,人看的提示走 stderr。
 - `collector/api.py` **不再是 API**。它原来是跑在 :8000 的 FastAPI 后端(53 个路由),
   给 `collector/frontend` 那套 Vue UI 用;前端和常驻服务撤掉后一个路由都没人调,
   已经连同 `server.py` / `web_app.py` / `src/api/` 一起删了。现在只剩 CLI 和采集
-  流程共用的底层(抓正文、下封面、搜号、查扫码凭证)。文件名没改,是因为
-  `cli.py` 和 `src/collect/` 里的 `import api` 还指着它。要看旧服务翻 git 历史。
+  流程共用的底层——现在只剩三个函数(数正文字数、把一篇文章写进库、抓正文)。
+  文件名没改,是因为 `cli.py` 和 `src/collect/` 里的 `import api` 还指着它。
+  要看旧服务(或者封面下载、公众平台搜号、扫码凭证那几个)翻 git 历史。
 - **公众号列表**存在 `collector/data/wechatoa.db` 的 `accounts` 表,日常维护走
   kb-web 管道 tab 的「管理公众号」弹窗(搜索添加 / 停用 / 移除),不要直接改库。
-  终端等价物是 `cli accounts list|search|add|remove|enable|disable`;面板走的就是它。
-  搜索添加需要扫码凭证(`cli login`),停用/移除只动本地库,凭证过期也能用。
+  终端等价物是 `cli accounts list|discover|add|remove|enable|disable`;面板走的就是它。
+  **添加候选来自本机绿泡泡的会话列表**(`cli accounts discover`):不登录公众平台、
+  不走网络。裸列时归属从发现索引里查(一条推送都不翻),给了查询词才现翻索引外那几个
+  会话、并且有上限——280 个会话逐个翻一遍是几分钟。
 - **公众号改名只更新 `accounts.display_name`,永远不动 `name`。** `name` 是主键,
   `articles.account_name` 是指向它的外键(没有 ON UPDATE CASCADE),已导出的
   vault markdown 也按它归档——改它要么被外键拒绝,要么让 6000 多篇文章和磁盘
   上的文件对不上。新名字从正文页的 `var nickname = htmlDecode(...)` 里读,
   抓正文时顺手记下(见 `extract_account_nickname`)。别用页里裸的 `nickname:`,
-  那可能是推荐位里别人家的号。列表接口 getmsg 和 wxdown 的凭证都不带昵称。
-  昵称有三条来路,缺一条就有号永远改不了名:①抓到新文章时顺手读;
-  ②`runner._refresh_display_name` 每隔 `GZH_DISPLAY_RECHECK_DAYS`(默认 7 天)
-  核对一次(挑库里几篇旧文章单抓正文页,只读昵称)——不发新文章的号
-  只有这一条路;③用户搜新名字添加时直接采信。
-  挑文章要排掉 `is_wx_deleted=1`,并且读不出昵称时往下一篇退(上限
-  `_NICKNAME_CANDIDATES`):已删文章的链接打开是"该内容已被发布者删除",
-  页面上没有 `var nickname`,而多图文的次条被删很常见、还跟头条同一个
-  create_time 排在它前面——只取一篇的话这个号就永远改不了名
-  (2026-08-27 第 2 轮审查发现,`GitHub源码` 就是这个形态)。
-  **节流看的是 `display_checked_at`,不是 display_name 空不空**:后者只回答
-  "现在叫什么",补上一次之后就再也不看第二眼,停更号以后再改名就永远发现
-  不了(2026-08-27 第 1 轮审查发现)。核对完无论名字变没变都记一笔时间,
-  所以稳定状态下每个号每 7 天才多花一次请求。
+  那可能是推荐位里别人家的号——本机推送的 XML 里同样没有昵称。
+  **主路是本机会话列表**(`local_accounts.refresh_display_names`,每次同步在
+  发现阶段之后跑一次):公众号改名后微信的会话列表立刻显示新名字,这是本机现成的
+  事实,零请求、不限于发了新文章的号,所以也不需要节流。实测 44 个订阅号里能对上
+  会话的 42 个。另外两条顺手的:抓正文时读到的 `var nickname` 照旧写回
+  (`api.py`),用户 discover 添加时直接采信会话列表上的名字。
+  **它删掉了原来那两条凑出来的路**:①只在抓到新文章时读——而「改了名」和「不发
+  新文章」常常是同一批号,恰恰是用户在微信里搜不到、最需要看见新名字的那批;
+  ②`GZH_DISPLAY_RECHECK_DAYS`(7 天)定期单抓一篇旧文章的正文页只为读那一行昵称,
+  还要排掉 `is_wx_deleted=1`、读不出就往下一篇退。这些连同 `display_checked_at`
+  列(migration 16)一起没了,别再加回来。
+  **按 biz 一一对应,不许「只有一个就配上」**:`__biz` 对不上的会话一律跳过,
+  否则两个号的名字会互换(回归在 `collector/tests/test_account_rename.py`,
+  两个号、两个会话、顺序故意反着摆)。
 - **`enable_crawl_account` 先按 fakeid 认号,认出来只更新、不插新行。**
   改名后用户必然拿新名字来搜索添加(列表上还是旧名,微信里搜不到旧名),
   照新名字插一行就会有两条同 fakeid 的订阅:同一个号的新文章分别写进两套
   主键,vault 目录裂开,外键还全合法,谁也不报错。它返回**实际入库的档案键**,
   调用方据此区分"新添加"和"这就是那个改了名的号"。前端候选的「已订阅」
   判定同理——只比名字的话,改过名的号永远显示成「添加」(2026-08-27 审查发现)。
-- **「几个凭证就绪」只数参与采集的号**,而且是**三处同一个口径**:面板
-  (`sources_api.list_targets` 的 `scored` 过滤 `enabled`)、`cli creds`
-  (SQL 里的 `in_crawl_config=1`)、`cli accounts list` 的摘要行。停用的号不
-  采集,自然不该要求它有凭证——算进总数的话,停用一个号之后「全部就绪」
-  就永远到不了,弹窗还一直催你去点它的文章。这条口径在三处**分别漏过一次**
-  (2026-08-27 连着两轮审查各抓出一个),`tests/test_ready_count.py` 就是拿来
-  把它们钉在一起的。列表本身照样显示停用号(得能重新启用),只是不进计数、
-  不进「只看未就绪」。
-- 别把 `collector/data` 或 `collector/.venv` 加进版本库:前者含 592M 库、264M 封面和
-  带 token/cookie 的 `id_info.json`。它们现在是符号链接,`data/` 那条带斜杠的规则
-  挡不住,所以 .gitignore 里另有不带斜杠的显式两行,别删。
+- 别把 `collector/data` 或 `collector/.venv` 加进版本库:前者是 832M 的库,外加几份
+  存量垃圾——326M `covers`(封面早就不下载了,见 `8cc380d`)、654M `backups`、凭证
+  通道留下的 `profile_credentials.json`。它们现在是符号链接,`data/` 那条带斜杠的
+  规则挡不住,所以 .gitignore 里另有不带斜杠的显式两行,别删。
 
 ## 订阅的历史深度(kb/feeds/registry.py + sync.py)
 

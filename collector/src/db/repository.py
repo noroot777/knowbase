@@ -12,14 +12,10 @@ from typing import Any
 
 from src.db.body_text import normalize_body_text
 from src.db.connection import DATA_DIR, ensure_database_ready, get_connection
-from src.db import fts as fts_mod
 from src.db._repo_notes import NotesMixin
 from src.db._repo_queries import QueryMixin
 from src.db._repo_reading import ReadingMixin
 from src.utils.helpers import time_now
-
-# 与 api.COVERS_DIR 一致
-COVERS_DIR = DATA_DIR / "covers"
 
 
 def _parse_create_time_unix(create_time: str) -> int | None:
@@ -34,11 +30,18 @@ def _parse_create_time_unix(create_time: str) -> int | None:
     return None
 
 
-def _cover_path_for_id(article_id: str) -> str | None:
-    rel = f"covers/{article_id.replace('/', '_')}.jpg"
-    if (DATA_DIR / rel).is_file():
-        return rel
-    return None
+class AccountNameTaken(Exception):
+    """要订阅的号和一个已有档案同名,而那个档案属于另一个 `__biz`。
+
+    `accounts.name` 是主键,`articles.account_name` 是指向它的外键、导出的 vault
+    目录也按它归档,所以"同名"这件事没法靠改名绕开——把那一行的 fakeid 换成新号
+    等于把旧号的全部历史文章连同导出目录一起接到新号的身份上,而外键全都合法、
+    谁也不报错。只能拒掉,由调用方说清楚是怎么回事。
+    """
+
+    def __init__(self, name: str, held: str, wanted: str) -> None:
+        super().__init__(name)
+        self.name, self.held, self.wanted = name, held, wanted
 
 
 class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
@@ -110,6 +113,11 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         `articles.account_name` 指着它、导出的 vault 目录也按它归档——照新名字
         再插一行,库里就有两条同 fakeid 的订阅:同一个号的新文章会被分别写进
         两套主键,vault 目录跟着裂开,外键还全都合法,面板上像订了两个号。
+
+        反过来,**这个名字已经是另一个 `__biz` 的档案时抛 `AccountNameTaken`**,
+        不覆盖它(见那个异常)。移除一个没有历史文章的号会把那一行真删掉
+        (`remove_account_from_list`),所以"同名两个号、第一次点错了"自己有退路:
+        移除之后名字就空出来了,不需要在这里替用户判断谁该让位。
         """
         now = time_now()
         fakeid = (fakeid or "").strip()
@@ -128,19 +136,51 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
                 # 用户搜到的这个名字就是微信当前昵称,顺手把改名记下来
                 self.set_account_display_name(existing, name)
                 return existing
-        self.conn.execute(
+        cur = self.conn.execute(
             """
             INSERT INTO accounts (name, fakeid, latest_crawl_at, in_crawl_config, created_at, updated_at)
             VALUES (?, ?, '', 1, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
-              fakeid=excluded.fakeid,
+              -- WHERE 放行时只剩三种可能:这个名字没人占、占着的就是同一个
+              -- fakeid、或者占着的是个占位键。空 fakeid 一律不许把已有归属抹掉
+              -- ——那种调用只是在说"确保这个名字在采集列表里",没在声明身份。
+              fakeid=CASE WHEN excluded.fakeid <> '' THEN excluded.fakeid
+                          ELSE accounts.fakeid END,
               in_crawl_config=1,
               removed=0,
               updated_at=excluded.updated_at
+            -- **归属判定就在这里,不在 Python 那边先 SELECT 一次。** 先查后写是
+            -- TOCTOU:两个请求(面板上那个 tgtBusy 只管单个页面,管不到另一个标签
+            -- 页、更管不到独立的 CLI 进程)都读到"这个名字没人占",随后第二条
+            -- UPSERT 照样把第一条刚写进去的 fakeid 盖掉,两边都报「已添加」
+            -- (2026-10-01 第 3 轮审查 50/50 复现,真实 HTTP→CLI→仓储一条链也
+            -- 复现了)。SQLite 把写入串行化,所以判据只有待在写语句自己的 WHERE
+            -- 里,才和那次写入同生共死。放行不了就是 0 行,由调用方抛出来。
+            WHERE excluded.fakeid = ''
+               OR accounts.fakeid = ''
+               OR accounts.fakeid = excluded.fakeid
+               OR substr(accounts.fakeid, 1, 7) = 'import:'
             """,
             (name, fakeid, now, now),
         )
+        if cur.rowcount == 0:
+            raise AccountNameTaken(name, self.name_held_by(name), fakeid)
         return name
+
+    def name_held_by(self, name: str) -> str:
+        """这个档案名现在挂在哪个 `__biz` 上。**只给错误文案用,不是闸门**——
+        闸门是 `enable_crawl_account` 那条 UPSERT 自己的 WHERE(见那里的注释)。
+
+        `import:` 开头的不算占着:那是链接导入留下的占位键(`upsert_import_account`),
+        本来就是等着被真正的归属填上的,拿它当"另一个号"会让这类存量账号永远订阅
+        不了。空 fakeid 同理——还没核实过归属,不是另一个号。两条豁免跟那条 WHERE
+        里的两句一一对应。
+        """
+        row = self.conn.execute(
+            "SELECT fakeid FROM accounts WHERE name=?", (name,)
+        ).fetchone()
+        held = str(row["fakeid"] or "") if row is not None else ""
+        return "" if held.startswith("import:") else held
 
     def account_in_crawl_config(self, name: str) -> bool:
         row = self.conn.execute(
@@ -219,25 +259,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         )
         return True
 
-    def display_name_checked_at(self, name: str) -> str:
-        """上次去正文页核对昵称是什么时候(没核对过是空串)。"""
-        row = self.conn.execute(
-            "SELECT display_checked_at FROM accounts WHERE name=?", (name,)
-        ).fetchone()
-        return "" if row is None else str(row["display_checked_at"] or "")
-
-    def mark_display_name_checked(self, name: str) -> None:
-        """记下"这个号的昵称刚核对过"。
-
-        跟 set_account_display_name 分开写:名字没变时那个方法不落任何痕迹,
-        只看它的话就分不清"核对过、没变"和"压根没核对过"——于是要么每轮都
-        重抓一遍,要么补上一次之后永远不再看第二眼。
-        """
-        self.conn.execute(
-            "UPDATE accounts SET display_checked_at=? WHERE name=?",
-            (time_now(), name),
-        )
-
     def remove_account_from_list(self, name: str) -> None:
         """仅从订阅列表移除，保留已爬文章。
 
@@ -309,7 +330,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         account_name: str,
         blog: dict[str, Any],
         *,
-        update_fts: bool = True,
         source: str = "crawl",
     ) -> None:
         aid = str(blog.get("id") or "").strip()
@@ -318,24 +338,22 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         now = time_now()
         create_time = str(blog.get("create_time") or "")
         cover_url = str(blog.get("cover") or "")
-        cover_path = _cover_path_for_id(aid)
         article_source = "import" if source == "import" else "crawl"
         import_listed = 1 if source == "import" else 0
         self.conn.execute(
             """
             INSERT INTO articles (
-              id, account_name, title, digest, link, cover_url, cover_path,
+              id, account_name, title, digest, link, cover_url,
               create_time, create_time_unix, is_wx_deleted, is_user_deleted,
               item_show_type, llm_summary, word_count, ingested_at, updated_at,
               source, import_listed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               account_name=excluded.account_name,
               title=excluded.title,
               digest=excluded.digest,
               link=excluded.link,
               cover_url=excluded.cover_url,
-              cover_path=COALESCE(excluded.cover_path, articles.cover_path),
               create_time=excluded.create_time,
               create_time_unix=excluded.create_time_unix,
               is_wx_deleted=excluded.is_wx_deleted,
@@ -356,7 +374,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
                 str(blog.get("digest") or ""),
                 str(blog.get("link") or ""),
                 cover_url,
-                cover_path,
                 create_time,
                 _parse_create_time_unix(create_time),
                 1 if blog.get("is_deleted") else 0,
@@ -372,16 +389,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         tags = blog.get("tags")
         if isinstance(tags, list) and tags:
             self.set_llm_tags(aid, [str(t) for t in tags if str(t).strip()])
-
-        if update_fts:
-            body = self.get_body_text(aid) or ""
-            fts_mod.upsert_article_fts(
-                self.conn,
-                aid,
-                str(blog.get("title") or ""),
-                str(blog.get("digest") or ""),
-                body,
-            )
 
     def set_llm_tags(self, article_id: str, tags: list[str]) -> None:
         self.conn.execute(
@@ -404,14 +411,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         )
         if tags:
             self.set_llm_tags(article_id, tags)
-        row = self.conn.execute(
-            "SELECT title, digest FROM articles WHERE id=?", (article_id,)
-        ).fetchone()
-        if row:
-            body = self.get_body_text(article_id) or ""
-            fts_mod.upsert_article_fts(
-                self.conn, article_id, row["title"], row["digest"], body
-            )
 
     def set_body_text(self, article_id: str, raw: Any) -> None:
         text = normalize_body_text(raw)
@@ -426,13 +425,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             """,
             (article_id, text, now, now),
         )
-        row = self.conn.execute(
-            "SELECT title, digest FROM articles WHERE id=?", (article_id,)
-        ).fetchone()
-        if row:
-            fts_mod.upsert_article_fts(
-                self.conn, article_id, row["title"], row["digest"], text
-            )
 
     def get_body_text(self, article_id: str) -> str | None:
         row = self.conn.execute(
@@ -521,7 +513,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             "UPDATE articles SET is_user_deleted=1, updated_at=? WHERE id=?",
             (time_now(), article_id),
         )
-        fts_mod.delete_article_fts(self.conn, article_id)
 
     def remove_article(self, article_id: str, account: str) -> bool:
         row = self.conn.execute(
@@ -545,14 +536,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             "UPDATE articles SET word_count=?, updated_at=? WHERE id=?",
             (count, time_now(), article_id),
         )
-
-    def update_cover_path(self, article_id: str) -> None:
-        path = _cover_path_for_id(article_id)
-        if path:
-            self.conn.execute(
-                "UPDATE articles SET cover_path=?, updated_at=? WHERE id=?",
-                (path, time_now(), article_id),
-            )
 
     # ── 缓存清理 ─────────────────────────────────────────────────────────────
 
@@ -581,7 +564,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             return 0
         removed = 0
         for aid in ids:
-            fts_mod.delete_article_fts(self.conn, aid)
             self.conn.execute("DELETE FROM article_bodies WHERE article_id=?", (aid,))
             self.conn.execute(
                 "DELETE FROM article_llm_tags WHERE article_id=?", (aid,)
@@ -592,19 +574,3 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
 
     def commit(self) -> None:
         self.conn.commit()
-
-    def rebuild_all_fts(self) -> int:
-        rows = self.conn.execute(
-            """
-            SELECT a.id, a.title, a.digest, COALESCE(b.body_text, '') AS body_text
-            FROM articles a
-            LEFT JOIN article_bodies b ON b.article_id = a.id
-            WHERE a.is_user_deleted=0
-            """
-        ).fetchall()
-        self.conn.execute("DELETE FROM article_fts")
-        for r in rows:
-            fts_mod.upsert_article_fts(
-                self.conn, r["id"], r["title"], r["digest"], r["body_text"]
-            )
-        return len(rows)

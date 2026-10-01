@@ -2,21 +2,23 @@
 # -*- coding: utf-8 -*-
 """公众号采集器命令行入口 —— 一次性任务,跑完就退,不常驻。
 
-    python -m cli status                          健康状况(JSON)
+    python -m cli status                           健康状况(JSON)
     python -m cli collect                          日常增量采集
     python -m cli collect --since 2026-08-01 --until 2026-08-26 [--targets a,b]
     python -m cli export [--no-images]             导出到 obsidian
-    python -m cli creds [--missing-only]           看每个号的文章凭证够不够
     python -m cli accounts list                    看订阅的公众号
-    python -m cli accounts search <关键词>         搜候选(需要扫码凭证)
-    python -m cli accounts add <名字> [--fakeid X] 加入订阅;给了 fakeid 就不再搜
+    python -m cli accounts discover [关键词]       从本机已关注的号里找候选
+    python -m cli accounts add <名字> [--fakeid X] 加入订阅
     python -m cli accounts remove <名字>
     python -m cli accounts enable|disable <名字>   是否参与采集
+
+文章从本机绿泡泡数据库里已同步的推送发现,正文按文章链接抓。不需要登录
+公众平台,也不需要任何代理或逐号凭证。
 
 输出协议:stdout 只出 NDJSON(每行一个事件),给上游程序解析;
 人类可读的提示一律走 stderr。这样同一个命令既能给知识库管道调,也能手敲。
 
-退出码:0 正常 / 1 一般错误 / 2 凭证失效
+退出码:0 正常 / 1 一般错误 / 2 本机数据库读不了
 """
 
 from __future__ import annotations
@@ -25,12 +27,13 @@ import argparse
 import json
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-EXIT_OK, EXIT_ERROR, EXIT_AUTH = 0, 1, 2
+EXIT_OK, EXIT_ERROR = 0, 1
 
 
 def emit(event: dict) -> None:
@@ -48,73 +51,19 @@ def _pad(text: str, width: int) -> str:
     return text + " " * max(1, width - shown)
 
 
-def _ago(seconds: int) -> str:
-    """"多久以前"的粗略说法。隔夜的存货写成 1396 分钟前没人读得出是昨天。"""
-    if seconds < 0:
-        return ""
-    if seconds < 3600:
-        return f"{seconds // 60} 分钟前"
-    if seconds < 48 * 3600:
-        return f"{seconds // 3600} 小时前"
-    return f"{seconds // 86400} 天前"
-
-
 # ── status ──────────────────────────────────────────────────────────────────────
 
 def cmd_status(args) -> int:
-    if getattr(args, "channel", "profile_ext") == "local":
-        from src.collect.local_runner import local_status
+    from src.collect.local_runner import local_status
 
-        emit(local_status())
-        return EXIT_OK
-    import api
-    from src.db.repository import ArticleRepository
-
-    auth = api._build_auth_status().model_dump()
-    with ArticleRepository() as repo:
-        targets = sorted(repo.get_name2fakeid().keys())
-
-    # 一次性任务,每次实测,不吃 _auth_state 的缓存:那个 dict 在没探测过时
-    # valid 恒为 true,读它会把"没查过"说成"有效"。
-    # credential_expired 是另一回事——它按 saved_at + 4 天 TTL 本地估算,
-    # 偏保守,实测有效时以实测为准(实测过 8-26:估算已超期 4 天但 cookie 仍活)。
-    ok, reason = api._check_auth_valid()
-    expired = bool(auth.get("credential_expired"))
-    label = auth.get("credential_expiry_label") or ""
-    # 这套扫码凭证现在只剩搜号一个用途:文章列表和正文都走 wxdown 截下来的
-    # profile_ext 凭证。所以它失效不影响同步,文案别吓人。
-    if not ok:
-        message = f"扫码凭证失效:{reason}"
-        hint = "只影响搜号加号,抓文章不用它;要加号就跑 `python -m cli login`"
-    elif reason:
-        # ok=True 但 reason 非空,按 _check_auth_valid 的约定是"没测出来"(网络异常),
-        # 不是"测过没问题"。以前这种也说成"实测仍可用",于是 token 早就 invalid
-        # session 了这一栏还在报平安。
-        message = f"没能实测({reason})" + (f";本地估算{label}" if expired else "")
-        hint = "只有搜号加号要用它,不放心就跑一次 `python -m cli login`"
-    else:
-        message = "凭证有效" + (f"(本地估算{label},实测仍可用)" if expired else "")
-        hint = ""
-    emit({
-        # ready 说的是"这套扫码凭证能不能搜号"。它不拦抓取——抓取只认文章凭证,
-        # 那个由 creds 那栏单独报。
-        "ready": ok,
-        "message": message,
-        "hint": hint,
-        "credential_expiry_label": label,
-        "credential_days_remaining": auth.get("credential_days_remaining"),
-        "targets": targets,
-    })
+    emit(local_status())
     return EXIT_OK
 
 
 # ── collect ─────────────────────────────────────────────────────────────────────
 
 def cmd_collect(args) -> int:
-    if getattr(args, "channel", "profile_ext") == "local":
-        from src.collect.local_runner import collect
-    else:
-        from src.collect.runner import collect
+    from src.collect.local_runner import collect
 
     since, until = args.since or "", args.until or ""
     if bool(since) != bool(until):
@@ -132,14 +81,9 @@ def cmd_collect(args) -> int:
     targets = [t.strip() for t in (args.targets or "").split(",") if t.strip()]
 
     result = collect(emit, targets=targets or None, since=since, until=until)
-    if result["auth_error"]:
-        info("一份文章凭证都没有,没开跑。先起 wxdown,再在 Mac 绿泡泡里打开各号的一篇文章")
-        return EXIT_AUTH
     info(f"采集完成:新增 {result['new_articles']} 篇"
          + (f",{len(result['errors'])} 个号失败" if result["errors"] else ""))
-    if getattr(args, "channel", "profile_ext") == "local" and result["errors"]:
-        return EXIT_ERROR
-    return EXIT_OK
+    return EXIT_ERROR if result["errors"] else EXIT_OK
 
 
 # ── export ──────────────────────────────────────────────────────────────────────
@@ -169,132 +113,6 @@ def cmd_export(args) -> int:
     return EXIT_OK
 
 
-# ── creds:每个公众号的文章凭证 ──────────────────────────────────────────────────
-#
-# 这套凭证跟 `login` 那个扫码 token 是两回事:扫码 token 只用来搜索/翻列表,
-# 抓正文要的是每个号各自的 profile 凭证,由 Mac 微信里打开一篇文章时经
-# wxdown-service 的 mitm 抓下来。
-#
-# wxdown 把抓到的凭证写成一个普通 JSON 文件,所以这里直接读它——原来那条
-# "wxdown WebSocket → 前端 :5173 → 后端 :8000 POST" 的转发链路,两头的常驻
-# 服务都只是为了搬运这个文件,去掉即可。
-
-def _wxdown_cred_file() -> Path:
-    """wxdown-service 的凭证文件位置。装到别处就设 WXDOWN_DIR 或 WXDOWN_CRED_FILE。"""
-    import os
-
-    explicit = os.getenv("WXDOWN_CRED_FILE", "").strip()
-    if explicit:
-        return Path(explicit).expanduser()
-    base = os.getenv("WXDOWN_DIR", "").strip()
-    root = Path(base).expanduser() if base else \
-        Path.home() / "code" / "gongzhonghao" / "wxdown-service"
-    return root / "resources" / "data" / "credentials.json"
-
-
-def _import_wxdown_creds() -> tuple[int, str]:
-    """把 wxdown 文件里的凭证并进本地库。返回 (真正新增/更新的条数, 说明)。"""
-    import json as _json
-
-    from src.crawler.profile_ext import profile_credential_store
-
-    path = _wxdown_cred_file()
-    if not path.exists():
-        return 0, f"没找到 wxdown 凭证文件({path})"
-    try:
-        items = _json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        return 0, f"读不了 wxdown 凭证文件:{e}"
-    if not isinstance(items, list):
-        return 0, "wxdown 凭证文件格式不对(顶层不是数组)"
-
-    # save_wxdown_items 对"时间戳一样"的条目也算保存,直接用它的返回数,
-    # 每次重跑都报同一个数字——边点文章边刷新时就看不出这轮新增了几个。
-    # 自己比对前后快照,只数真正变新的。
-    before = {biz: c.captured_at for biz, c in profile_credential_store.records().items()}
-    profile_credential_store.save_wxdown_items(items)
-    after = profile_credential_store.records()
-    fresh = sum(1 for biz, c in after.items()
-                if biz not in before or c.captured_at > before[biz])
-    return fresh, ""
-
-
-def cmd_creds(args) -> int:
-    from src.crawler.profile_ext import (
-        credential_public_status,
-        profile_credential_store,
-    )
-    from src.db.repository import ArticleRepository
-
-    imported, warn = (0, "") if args.no_import else _import_wxdown_creds()
-
-    records = profile_credential_store.records()
-    status = {biz: credential_public_status(c) for biz, c in records.items()}
-    with ArticleRepository() as repo:
-        rows = repo.conn.execute(
-            "SELECT name, fakeid FROM accounts "
-            "WHERE removed=0 AND in_crawl_config=1 ORDER BY name"
-        ).fetchall()
-
-    accounts = []
-    for r in rows:
-        cur = status.get(r["fakeid"])
-        if cur is None:
-            state, captured, age = "missing", "", -1
-        else:
-            state, captured = cur["state"], cur["captured_at"]
-            age = cur["age_seconds"]
-        accounts.append({"name": r["name"], "fakeid": r["fakeid"],
-                         "state": state, "captured_at": captured,
-                         "age_seconds": age})
-
-    ready = sum(1 for a in accounts if a["state"] == "valid")
-    if args.json:
-        emit({"ready": ready, "total": len(accounts), "imported": imported,
-              "warning": warn, "source": str(_wxdown_cred_file()),
-              "accounts": accounts})
-        return EXIT_OK
-
-    if warn:
-        info(f"注意:{warn}")
-    elif imported:
-        info(f"从 wxdown 导入 {imported} 条新凭证")
-    info(f"{ready}/{len(accounts)} 个公众号已就绪:")
-    label = {"valid": "✓ 有效", "stale": "~ 放太久", "expired": "✗ 已失效",
-             "missing": "· 没凭证"}
-    for a in accounts:
-        if args.missing_only and a["state"] == "valid":
-            continue
-        aged = f"({_ago(a['age_seconds'])})" if a["state"] == "stale" else ""
-        info(f"  {label[a['state']]}  {_pad(a['name'], 26)}{a['captured_at']} {aged}")
-    return EXIT_OK
-
-
-# ── route:让微信文章流量走 wxdown 的代理 ─────────────────────────────────────────
-
-def cmd_route(args) -> int:
-    """看/切 Clash 上那条把绿泡泡文章流量交给 wxdown 的规则。
-
-    不切的话,在绿泡泡里点文章 wxdown 截不到,凭证就一直是"没有"。
-    """
-    from src.services.clash_wxdown_route import ClashRouteError, clash_wxdown_route
-
-    try:
-        data = clash_wxdown_route.activate() if args.activate \
-            else clash_wxdown_route.status()
-    except ClashRouteError as e:
-        if args.json:
-            emit({"ok": False, "detail": str(e)})
-        else:
-            info(f"错误:{e}")
-        return EXIT_ERROR
-    if args.json:
-        emit({"ok": True, **data})
-    else:
-        info(json.dumps(data, ensure_ascii=False, indent=2))
-    return EXIT_OK
-
-
 # ── accounts ────────────────────────────────────────────────────────────────────
 
 def cmd_accounts(args) -> int:
@@ -302,51 +120,33 @@ def cmd_accounts(args) -> int:
 
     action = args.action
     if action == "list":
-        # 顺带把每个号的文章凭证状态带上:面板要按"哪些还没就绪"来提示,
-        # 分两条命令拿就得起两个子进程。这里只读本地凭证文件,不碰 wxdown、
-        # 不走网络,够便宜——从 wxdown 导入是 `creds` 的活。
-        from src.crawler.profile_ext import credential_state, profile_credential_store
-
-        creds = {biz: credential_state(c)
-                 for biz, c in profile_credential_store.records().items()}
         with ArticleRepository() as repo:
             rows = repo.conn.execute(
                 "SELECT name, fakeid, display_name, in_crawl_config, latest_crawl_at "
                 "FROM accounts WHERE removed=0 ORDER BY in_crawl_config DESC, name"
             ).fetchall()
-        out = []
-        for r in rows:
-            out.append({**dict(r),
-                        "cred_state": creds.get(r["fakeid"], "missing")})
+        out = [dict(r) for r in rows]
         if args.json:
             emit({"accounts": out})
         else:
-            # 就绪只数参与采集的号,跟 `creds` 和面板一个口径。拿全量 out 算的话,
-            # 停用一个号就永远到不了「全部就绪」,而同一件事在另外两处是另一个
-            # 数字——用户对着命令表看,三个地方三套账。停用号照样列出来(得能
-            # 看见、能重新启用),只是不进这行摘要。
-            active = [a for a in out if a["in_crawl_config"]]
-            ready = sum(1 for a in active if a["cred_state"] == "valid")
-            info(f"共 {len(out)} 个公众号,{len(active)} 个参与采集(✓),"
-                 f"其中 {ready}/{len(active)} 个凭证就绪:")
-            mark_cred = {"valid": "凭证✓", "stale": "凭证~", "expired": "凭证✗",
-                         "missing": "无凭证"}
+            active = sum(1 for a in out if a["in_crawl_config"])
+            info(f"共 {len(out)} 个公众号,{active} 个参与采集(✓):")
             for a in out:
                 mark = "✓" if a["in_crawl_config"] else "·"
                 # 微信上已经改了名的,把新名字跟在后面——库里的键还是旧的那个
                 shown = a["name"]
                 if a["display_name"] and a["display_name"] != a["name"]:
                     shown = f"{a['name']} →{a['display_name']}"
-                info(f"  {mark} {_pad(shown, 32)}{mark_cred[a['cred_state']]}"
-                     f"  最近采集 {a['latest_crawl_at'] or '-'}")
+                info(f"  {mark} {_pad(shown, 32)}最近采集 {a['latest_crawl_at'] or '-'}")
         return EXIT_OK
+
+    if action == "discover":
+        return _accounts_discover(args.name or "", args.json)
 
     if not args.name:
         info(f"错误:{action} 需要给公众号名字")
         return EXIT_ERROR
 
-    if action == "search":
-        return _accounts_search(args.name, args.json)
     if action == "add":
         return _accounts_add(args.name, args.fakeid, args.json)
 
@@ -382,47 +182,149 @@ def _fail(detail: str, as_json: bool, code: int = EXIT_ERROR) -> int:
     return code
 
 
-def _accounts_search(query: str, as_json: bool) -> int:
-    """搜公众号候选。走公众平台接口,需要扫码凭证。"""
-    import api
+def _accounts_discover(query: str, as_json: bool) -> int:
+    """从本机绿泡泡会话里找候选。不需要扫码凭证,也不走网络。"""
+    from src.collect.local_accounts import discover
+    from src.crawler.local_wechat import LocalReaderError
+    from src.db.repository import ArticleRepository
 
     try:
-        candidates = api._search_biz(query)
-    except Exception as e:
-        return _fail(f"搜索失败,凭证可能已过期(跑 `python -m cli login` 续期):"
-                     f"{str(e)[:120]}", as_json, EXIT_AUTH)
-    rows = [{"name": c.nickname, "fakeid": c.fakeid,
-             "alias": c.alias, "signature": c.signature}
-            for c in candidates]
+        with ArticleRepository() as repo:
+            rows = discover(repo, query)
+    except LocalReaderError as e:
+        return _fail(str(e), as_json, EXIT_ERROR)
+
+    candidates = [{"name": r["name"], "fakeid": r["fakeid"],
+                   "alias": r["username"],
+                   "signature": _discover_note(r),
+                   "probe": r["probe"],
+                   "subscribed": r["subscribed"],
+                   "stored_name": r["stored_name"]}
+                  for r in rows if r["name"]]
     if as_json:
-        emit({"candidates": rows})
-    elif not rows:
-        info(f"没搜到「{query}」")
+        emit({"candidates": candidates})
+    elif not candidates:
+        info(f"本机没有名字含「{query}」的公众号会话" if query
+             else "本机还没有任何公众号会话")
     else:
-        info(f"搜到 {len(rows)} 个:")
-        for r in rows:
-            info(f"  {_pad(r['name'], 26)}{r['alias'] or '-'}")
+        addable = sum(1 for c in candidates if c["fakeid"] and not c["subscribed"])
+        info(f"本机 {len(candidates)} 个公众号会话,其中 {addable} 个可以添加:")
+        for c in candidates:
+            mark = ("已订阅" if c["subscribed"] else "可添加" if c["fakeid"]
+                    else "无图文" if c["probe"] == "none" else "待核验")
+            info(f"  {mark}  {_pad(c['name'], 26)}{c['signature']}")
     return EXIT_OK
+
+
+# 解不出归属时该说什么。按 `discover` 记下的 probe 分档 —— 「翻过、确实没有」和
+# 「这一次没翻」不是一件事:后者说成没有图文就是在报一个没做过的结论,而用户看到
+# 它就不会再试了。实测 15 个都有图文推送的候选,宽泛搜索下排在解析预算之外的 3 个
+# 被说成没有图文,缩小关键词再搜立刻解出来、加得进去。
+# 拆成「状态」和「怎么办」两半,是因为加号失败那条提示要把它们重新组合:
+# 列表里一行放得下 `状态(怎么办)`,一句错误提示里还得接着说别的,原样塞进去
+# 就是括号套括号。`_NO_BIZ_NOTE` 照旧由这两半拼出来,字面值一个字没变。
+_NO_BIZ_STATE = {
+    "none": "本机暂无可解析的图文推送",
+    "unchecked": "这次没核验",
+    "error": "本机这条会话读不动",
+}
+
+# 下一步怎么办。只有「真的没有图文」那档该去绿泡泡里同步一篇;另两档是这一轮
+# 没解析到(排在预算之外/这条会话读不动),号本身可能早就有图文了,叫人再去
+# 同步一遍是白跑。
+_NO_BIZ_FIX = {
+    "none": "可能只收到过服务通知;在绿泡泡里打开它、同步一篇图文之后再试",
+    "unchecked": "缩小关键词再搜",
+    "error": "缩小关键词再搜",
+}
+
+# 列表那一列只放得下一句,所以「怎么办」收在括号里;「没有图文」那档的处置话太长,
+# 列表里不写,留给加号失败时那条提示。
+_NO_BIZ_NOTE = {
+    key: state + ("" if key == "none" else f"({_NO_BIZ_FIX[key]})")
+    for key, state in _NO_BIZ_STATE.items()
+}
+
+
+def _worst_probe(rows: list[dict]) -> str:
+    """一组同名候选里取最该说出来的那一档:读不动 > 没核验 > 确实没有图文。
+
+    排在前面的两档都是「这一轮没查清」,照它们给建议最多是多搜一次;反过来把
+    读不动说成「没有图文」,用户就不会再试了。
+    """
+    probes = {r.get("probe", "") for r in rows}
+    for probe in ("error", "unchecked", "none"):
+        if probe in probes:
+            return probe
+    return "unchecked"
+
+
+def _discover_note(row: dict) -> str:
+    if not row["fakeid"]:
+        return _NO_BIZ_NOTE.get(row.get("probe", ""), _NO_BIZ_NOTE["unchecked"])
+    if row["subscribed"] and row["stored_name"] != row["name"]:
+        return f"已订阅,库里存作「{row['stored_name']}」"
+    if row["subscribed"]:
+        return "已订阅"
+    return "最近推送 " + (
+        datetime.fromtimestamp(row["last_at"]).strftime("%Y-%m-%d")
+        if row["last_at"] else "—")
 
 
 def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
     """写入订阅列表。给了 fakeid 就直接落库——面板上是先搜后点,那一步已经
     定死了是哪个号,再搜一次既慢又可能因为微信排序变化选中另一个同名号。"""
-    from src.db.repository import ArticleRepository
+    from src.db.repository import AccountNameTaken, ArticleRepository
 
     if not fakeid:
-        import api
+        # 面板上是先 discover 后点,fakeid 早就定死了;这条是终端里直接按名字
+        # 加的路。从本机会话里按**完全同名**认,不做模糊匹配——加错号之后
+        # 文章会按它的档案键归档,再改回来要连 vault 目录一起搬。
+        from src.collect.local_accounts import discover
+        from src.crawler.local_wechat import LocalReaderError
+
         try:
-            candidates = api._search_biz(name)
-        except Exception as e:
-            return _fail(f"搜索失败,凭证可能已过期(跑 `python -m cli login` 续期):"
-                         f"{str(e)[:120]}", as_json, EXIT_AUTH)
-        exact = [c for c in candidates if c.nickname == name]
-        if not exact:
-            near = "、".join(c.nickname for c in candidates[:5])
-            return _fail(f"没有完全同名的公众号" + (f",搜到:{near}" if near else ""),
+            with ArticleRepository() as repo:
+                rows = discover(repo, name)
+        except LocalReaderError as e:
+            return _fail(str(e), as_json, EXIT_ERROR)
+        same = [r for r in rows if r["name"] == name]
+        exact = [r for r in same if r["fakeid"]]
+        blind = [r for r in same if not r["fakeid"]]
+        ids = {r["fakeid"] for r in exact}
+        if same and not ids:
+            # 名字对上了、只是没拿到 __biz。别说成"没关注"——那是另一回事,
+            # 照着去关注一遍也不会变好。**为什么没拿到有三档,处置也不同**:
+            # 原来一律按"确实没有图文"报,于是本机这条会话读不动、或者这次压根
+            # 没核验到它的时候,提示也在建议"去同步一篇图文",而它早就同步过了
+            # (第 2 轮审查实测:搜索那一行显示的是「本机这条会话读不动」,点添加
+            # 却说成「没有能解析出归属的图文推送」)。文案口径仍是 _NO_BIZ_NOTE。
+            probe = _worst_probe(same)
+            return _fail(f"「{name}」在本机有会话,但{_NO_BIZ_STATE[probe]}。"
+                         f"{_NO_BIZ_FIX[probe]},或者用 --fakeid 直接指定是哪一个",
                          as_json)
-        name, fakeid = exact[0].nickname, exact[0].fakeid
+        if not ids:
+            near = "、".join(dict.fromkeys(r["name"] for r in rows[:5]))
+            return _fail(f"本机没有名叫「{name}」的公众号会话"
+                         + (f",相近的有:{near}" if near else "")
+                         + "。请先在绿泡泡里关注并同步该号", as_json)
+        if len(ids) > 1:
+            return _fail(f"本机有 {len(ids)} 个同名公众号会话,"
+                         f"请用 --fakeid 指定是哪一个", as_json)
+        if blind:
+            # **同名会话里还有没解析出归属的,一样是歧义。** 原来只拿「已经解析出
+            # __biz 的那几个」判歧义,于是:两个同名会话、一个解析出来了、另一个
+            # 读不动(或排在预算之外),按名字添加会**把解析出来的那个拿去入库**
+            # —— 退出码 0、提示「已添加」,订阅的却是另一个号(第 1 轮审查复现:
+            # 面板上点那条写着「本机这条会话读不动」的候选,前端发的正是空 id,
+            # 落库的是另一条候选的 biz)。归属只认 `__biz`,同名不是线索:一个
+            # 名字对上两个会话时,少一个归属就等于不知道用户要的是哪一个。
+            probe = _worst_probe(blind)
+            return _fail(f"本机有 {len(same)} 个名叫「{name}」的会话,其中 "
+                         f"{len(blind)} 个{_NO_BIZ_STATE[probe]},没法确定你要的是"
+                         f"哪一个。{_NO_BIZ_FIX[probe]},或者用 --fakeid 指定",
+                         as_json)
+        fakeid = exact[0]["fakeid"]
 
     with ArticleRepository() as repo:
         # 走 enable_crawl_account 而不是 upsert_account:add 是"用户主动订阅",
@@ -430,7 +332,21 @@ def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
         # 且有历史文章的号会提示"已添加",但它 removed 还是 1——列表、同步目标、
         # 默认采集里统统看不到它。upsert_account 留给采集过程更新用,那条路上
         # 不该有把已移除的号悄悄复活的能力。
-        stored = repo.enable_crawl_account(name, fakeid)
+        try:
+            stored = repo.enable_crawl_account(name, fakeid)
+        except AccountNameTaken as e:
+            # **同名、不同号:拒掉,一个字都不写。** 档案名是主键,旧号的文章全挂
+            # 在它名下、导出目录也按它归档,覆盖等于把那些历史接到这个新号的身份
+            # 上(第 2 轮审查实测:两条同名候选都解析出归属之后点第二条,报的是
+            # 「已添加」、订阅列表仍只有一条,第一个号连它的历史文章一起变成了第二
+            # 个号的 __biz)。目前不支持同时订阅两个同名号——要支持就得给第二个号
+            # 另起一个档案键,而那个键会成为新的 vault 目录名,不是这里能顺手定的。
+            return _fail(
+                f"「{name}」这个档案名在库里已经是另一个号的(__biz {e.held}),"
+                f"历史文章都挂在它名下、导出目录也按它归档,不能改挂到 {e.wanted} "
+                f"上。目前不支持同时订阅两个同名公众号;如果是刚才加错了号,把那条"
+                f"订阅移除(名下还没有文章的号移除时整行就删掉了,名字跟着空出来)"
+                f"再加这一个", as_json)
         repo.commit()
     if stored != name:
         # 同一个号改了名:认出来了,没有再插一行
@@ -444,75 +360,6 @@ def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
     return EXIT_OK
 
 
-# ── login ───────────────────────────────────────────────────────────────────────
-
-def cmd_login(args) -> int:
-    """扫码登录公众平台:二维码存成图片,路径打在 stderr 上,自己打开扫。
-
-    过期会自动换一张(微信的二维码大约两分钟就废),整体等 5 分钟不确认就放弃。
-    """
-    import time
-    from datetime import datetime
-
-    from src.auth.mp_scan_login import (
-        SCAN_STATUS_CONFIRMED,
-        SCAN_STATUS_EXPIRED,
-        MpScanLogin,
-        scan_status_message,
-    )
-    from src.utils.data_manager import data_manager
-
-    qr_path = ROOT / "data" / "login_qrcode.png"
-    login = MpScanLogin()
-    try:
-        login.start_session()
-        qr_path.write_bytes(login.fetch_qrcode_bytes())
-    except Exception as e:
-        info(f"取二维码失败:{e}")
-        return EXIT_ERROR
-    info(f"二维码已存到 {qr_path}\n用绿泡泡扫它,然后在手机上确认登录。")
-
-    deadline = time.time() + 300
-    last_msg = ""
-    while time.time() < deadline:
-        try:
-            result = login.poll_scan()
-        except Exception as e:
-            info(f"轮询扫码状态失败:{e}")
-            return EXIT_ERROR
-        if result.status == SCAN_STATUS_CONFIRMED:
-            break
-        if result.status in SCAN_STATUS_EXPIRED:
-            try:
-                qr_path.write_bytes(login.fetch_qrcode_bytes())
-                info("二维码过期,已换一张,重新扫")
-            except Exception as e:
-                info(f"刷新二维码失败:{e}")
-                return EXIT_ERROR
-        else:
-            msg = scan_status_message(result.status, result.raw)
-            if msg != last_msg:            # 同一状态别刷屏
-                info(msg)
-                last_msg = msg
-        time.sleep(2)
-    else:
-        info("等待扫码超时(5 分钟),放弃")
-        return EXIT_ERROR
-
-    try:
-        token, cookie_str = login.complete_login()
-    except Exception as e:
-        info(f"完成登录失败:{e}")
-        return EXIT_ERROR
-    data_manager.id_info["token"] = token
-    data_manager.id_info["cookie"] = cookie_str
-    data_manager.id_info["saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data_manager.write("id_info")
-    qr_path.unlink(missing_ok=True)
-    info("登录成功,凭证已写入 data/id_info.json")
-    return EXIT_OK
-
-
 # ── 入口 ────────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -520,36 +367,24 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cli", description="公众号采集器(一次性任务,不常驻)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    status = sub.add_parser("status", help="健康状况与订阅列表(JSON)")
-    status.add_argument("--channel", choices=["profile_ext", "local"], default="profile_ext")
+    sub.add_parser("status", help="健康状况与订阅列表(JSON)")
 
     c = sub.add_parser("collect", help="采集文章到本地库")
     c.add_argument("--since", help="起始日期 YYYY-MM-DD(与 --until 同时给)")
     c.add_argument("--until", help="结束日期 YYYY-MM-DD")
     c.add_argument("--targets", help="逗号分隔的公众号名,默认全部订阅号")
-    c.add_argument("--channel", choices=["profile_ext", "local"], default="profile_ext",
-                   help="profile_ext=原凭证通道；local=本机绿泡泡数据库推送")
 
     e = sub.add_parser("export", help="把本地库导出成 obsidian md")
     e.add_argument("--no-images", action="store_true", help="不下图,保留远程 URL")
 
-    r = sub.add_parser("creds", help="每个公众号的文章凭证状态(自动从 wxdown 导入)")
-    r.add_argument("--json", action="store_true", help="输出 JSON 而不是人话")
-    r.add_argument("--no-import", action="store_true", help="只看现状,不从 wxdown 导入")
-    r.add_argument("--missing-only", action="store_true", help="只列还没就绪的")
-
-    rt = sub.add_parser("route", help="绿泡泡文章流量是否走 wxdown 代理")
-    rt.add_argument("--activate", action="store_true", help="立即切过去")
-    rt.add_argument("--json", action="store_true", help="输出 JSON")
-
     a = sub.add_parser("accounts", help="维护订阅的公众号")
     a.add_argument("action",
-                   choices=["list", "search", "add", "remove", "enable", "disable"])
-    a.add_argument("name", nargs="?", help="公众号名字(search 时是关键词)")
-    a.add_argument("--fakeid", default="", help="add 时直接指定,跳过搜索")
+                   choices=["list", "discover", "add", "remove", "enable", "disable"])
+    a.add_argument("name", nargs="?",
+                   help="公众号名字(discover 时是关键词,可省略)")
+    a.add_argument("--fakeid", default="", help="add 时直接指定,跳过查找")
     a.add_argument("--json", action="store_true", help="输出 JSON 而不是人话")
 
-    sub.add_parser("login", help="扫码登录公众平台(添加公众号时需要)")
     return p
 
 
@@ -557,11 +392,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     from src.collect.bootstrap import install
 
-    install()          # profile_ext 通道 + 微信域名绕过代理,不装会静默走错路
+    install()          # 微信域名绕过系统代理,不装会在有 MITM 代理时静默失败
     handlers = {
         "status": cmd_status, "collect": cmd_collect, "export": cmd_export,
-        "accounts": cmd_accounts, "login": cmd_login, "creds": cmd_creds,
-        "route": cmd_route,
+        "accounts": cmd_accounts,
     }
     try:
         return handlers[args.cmd](args)

@@ -8,7 +8,7 @@ import re
 
 from src.utils.helpers import time_now
 
-LATEST_SCHEMA_VERSION = 13
+LATEST_SCHEMA_VERSION = 18
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -132,6 +132,51 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (13, time_now()),
+        )
+        conn.commit()
+        current = 13
+
+    if current < 14:
+        _migrate_to_v14(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (14, time_now()),
+        )
+        conn.commit()
+        current = 14
+
+    if current < 15:
+        _migrate_to_v15(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (15, time_now()),
+        )
+        conn.commit()
+        current = 15
+
+    if current < 16:
+        _migrate_to_v16(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (16, time_now()),
+        )
+        conn.commit()
+        current = 16
+
+    if current < 17:
+        _migrate_to_v17(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (17, time_now()),
+        )
+        conn.commit()
+        current = 17
+
+    if current < 18:
+        _migrate_to_v18(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (18, time_now()),
         )
         conn.commit()
 
@@ -427,3 +472,104 @@ def _migrate_to_v13(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
     if "display_checked_at" not in cols:
         conn.execute("ALTER TABLE accounts ADD COLUMN display_checked_at TEXT")
+
+
+def _migrate_to_v14(conn: sqlite3.Connection) -> None:
+    """退役:原来在这里 `DROP TABLE article_fts`,现在什么都不做(见 v18)。
+
+    那张虚拟表在主干确实零个读取方,**真正省下来的是「每次入库都重新分词写一遍」
+    那笔开销**——而主干早就一行 fts 代码都不调了,这笔开销跟表在不在无关。
+    DROP 只多换来「把它占的页还给 freelist」,代价却是把共用这个库的另一条分支
+    打断(见 v18 的说明)。
+    """
+
+
+def _migrate_to_v15(conn: sqlite3.Connection) -> None:
+    """退役:原来在这里 `DROP articles.cover_path`,现在什么都不做(见 v17)。
+
+    留着这个空壳而不是把编号抹掉:版本号是写进 `schema_migrations` 的,早就
+    有库记着"15 跑过了"。抹掉编号只会让那些库的版本号对不上任何一段代码。
+    """
+
+
+def _migrate_to_v16(conn: sqlite3.Connection) -> None:
+    """退役:原来在这里 `DROP accounts.display_checked_at`,现在什么都不做(见 v17)。"""
+
+
+def _migrate_to_v17(conn: sqlite3.Connection) -> None:
+    """把 v15/v16 删掉的两列补回来 —— 这个库要能被两个分支同时打开。
+
+    封面不再下载到本地、昵称核对不再按天节流,所以 `articles.cover_path` 和
+    `accounts.display_checked_at` 在主干上确实零个读取方,v15/v16 当时就把它们
+    DROP 了。**但这个库不只有主干在读。** 凭证采集那条通道留在 `wechat-oa`
+    分支上永久并行(见仓库 CLAUDE.md),两个分支的 setup.sh 默认链的是同一份
+    data/ —— 代码分叉了,库没有。而那个分支是冻结的:它的 `upsert_article_from_blog`
+    照旧往 `cover_path` 里写,核对改名照旧读写 `display_checked_at`。
+
+    于是实测出来的后果是:按主干跑一次(自动迁到 v16),再切回保留分支采集,
+    第一篇新文章就 `OperationalError: table articles has no column named
+    cover_path`,那条分支从此写不进任何文章 —— 而「保留」这件事就名存实亡了。
+    旧分支自己救不回来:它只认到 v13,看到 `MAX(version)=16` 什么都不跑,
+    它 schema.sql 里的 `CREATE TABLE IF NOT EXISTS` 对已存在的表也是空操作。
+
+    所以把两列加回来,并且**主干从此不在这个库上做破坏性的 schema 变更**:
+    要停用一列就停止读写它,别 DROP。两个空列的代价是几十字节,换的是另一条
+    分支还能跑。(这里原来写着「v14 删 `article_fts` 不在此列,旧分支的
+    `CREATE VIRTUAL TABLE IF NOT EXISTS` 会重建它」—— **那句话只对重启成立**,
+    见 v18。)
+
+    这一步也是已经迁到 v16 的存量库的唯一出路:列是真的被 DROP 掉了,
+    光把 v15/v16 改成空操作并不会让它们自己长回来。
+    """
+    articles = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='articles'"
+    ).fetchone()
+    if articles:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()}
+        if "cover_path" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN cover_path TEXT")
+    accounts = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts'"
+    ).fetchone()
+    if accounts:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+        if "display_checked_at" not in cols:
+            conn.execute("ALTER TABLE accounts ADD COLUMN display_checked_at TEXT")
+
+
+
+def _migrate_to_v18(conn: sqlite3.Connection) -> None:
+    """把 v14 删掉的 article_fts 建回来(空表),并且以后不再删它。
+
+    v17 把「不许 DROP COLUMN」那条立住了,却给整张表开了个口子,理由是「旧分支
+    schema.sql 里的 `CREATE VIRTUAL TABLE IF NOT EXISTS` 会重建它」。**那句话只
+    对重启成立。** `ensure_database_ready` 的缓存是进程内的:旧分支那个进程只在
+    第一次打开库时跑 schema,之后一直攥着同一个连接采集,别的进程删了表它不会
+    再跑一遍。于是实测出来的形态是——旧分支正在同步、主干在另一个进程里第一次
+    升级这个库,旧分支采下一篇时
+    `sqlite3.OperationalError: no such table: article_fts`,那一轮中途失败、
+    那个号这一批剩下的文章都不再正常入库,要关掉重开才恢复(2026-10-01 第 2 轮
+    审查复现,真走它的 `api._ingest_crawl_article`)。
+
+    **所以口径收成一句:主干的迁移只增不减。** 列是这样,表也是这样 —— 判据不是
+    「对方重启后能不能自己长回来」,而是「对方不重启会不会当场挂」。v15/v16/v14
+    现在都是空操作,v17/v18 只 ADD / CREATE;ADD COLUMN 对在途连接是安全的
+    (SQLite 自己会重新编译语句),删东西不是。
+
+    建出来是**空表**:主干不写它,所以 134 MB 的索引内容不会回来(那些页在 v14
+    已经还给 freelist 了);旧分支要内容自己有一条重建路径。定义照抄
+    `wechat-oa` 分支 schema.sql 里那一份 —— 列名和 tokenize 必须一字不差,
+    否则它那句 `INSERT INTO article_fts (article_id, title_tok, digest_tok,
+    body_tok)` 照样失败,而且它重启时那句 `IF NOT EXISTS` 是空操作、改不回来。
+    """
+    conn.execute(
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS article_fts USING fts5(
+          article_id UNINDEXED,
+          title_tok,
+          digest_tok,
+          body_tok,
+          tokenize='unicode61 remove_diacritics 0'
+        )
+        """
+    )

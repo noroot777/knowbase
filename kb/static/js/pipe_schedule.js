@@ -14,13 +14,6 @@ function renderSchedChannels(selected) {
 function schedChannels() {
   return [...$('sched-channels').querySelectorAll('input:checked')].map(i => i.dataset.schedChannel);
 }
-// 采集通道在设置里换过了：把旧通道那一项就地换成新的，其余勾选原样留着。
-// 换通道是「改道」不是「减来源」，原来勾着绿泡泡的现在仍然勾着绿泡泡。
-document.addEventListener('kb:channels-changed', e => {
-  if (!schedLoaded) return;
-  const picked = schedChannels().map(c => (c === e.detail.before ? e.detail.after : c));
-  renderSchedChannels([...new Set(picked)]);
-});
 async function loadSched() {
   if (schedLoading || schedSaving || schedDirty) return;
   schedLoading = true; $('sched-reload').hidden = true;
