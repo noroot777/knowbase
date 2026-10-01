@@ -15,6 +15,9 @@ class WeChatLocalCollector(WeChatOACollector):
     name = "wechat_local"
     channel_label = "绿泡泡本地数据库"
     cli_channel = "local"
+    # 候选从本机会话列表里来:订阅一个号不必登录公众平台,也不需要扫码凭证。
+    # 归属(fakeid=__biz)优先从发现索引里查,查不到的才现翻一次它的推送。
+    search_action = "discover"
     channel_hint = "读取本机已同步的公众号推送，再获取原文；无需 wxdown 或逐号文章凭证。"
     range_hint = "只能覆盖本机已同步的推送，按文章发布时间筛选；新订阅不能保证补齐历史。"
     _local_cache = None

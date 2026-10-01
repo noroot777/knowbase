@@ -120,6 +120,21 @@ class SettingTests(_Sandbox):
         collectors.set_wechat_channel("wechat_oa")
         self.assertEqual(["wechat_oa"], collectors.known_channels(["wechat_local"]))
 
+    def test_each_channel_finds_candidates_its_own_way(self):
+        """「添加一个公众号」两条通道走的不是同一条路,这件事只由一个类属性决定。
+
+        本地通道从本机会话列表里找(`accounts discover`,不需要扫码凭证、不走
+        网络);原通道搜公众平台(`accounts search`,要一份全局扫码凭证)。两边
+        共用 `search_targets` 的解析,所以这里钉的是"它到底跑了哪个子命令"——
+        写死成 search 的话本地通道加号又得去登录,而那正是要去掉的那条依赖。
+        """
+        for channel, action in (("wechat_local", "discover"), ("wechat_oa", "search")):
+            collector = collectors.get_collector(channel)
+            with patch.object(type(collector), "_accounts",
+                              return_value={"candidates": []}) as called:
+                self.assertEqual([], collector.search_targets("关键词"))
+            self.assertEqual((action, "关键词"), called.call_args.args)
+
 
 class ScopeTests(_Sandbox):
     """存量的「抓哪几个来源」配置要跟着设置走,不能被当成不认识的通道丢掉。"""

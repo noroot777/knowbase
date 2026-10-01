@@ -25,6 +25,7 @@ import argparse
 import json
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -341,6 +342,9 @@ def cmd_accounts(args) -> int:
                      f"  最近采集 {a['latest_crawl_at'] or '-'}")
         return EXIT_OK
 
+    if action == "discover":
+        return _accounts_discover(args.name or "", args.json)
+
     if not args.name:
         info(f"错误:{action} 需要给公众号名字")
         return EXIT_ERROR
@@ -382,6 +386,50 @@ def _fail(detail: str, as_json: bool, code: int = EXIT_ERROR) -> int:
     return code
 
 
+def _accounts_discover(query: str, as_json: bool) -> int:
+    """从本机绿泡泡会话里找候选。不需要扫码凭证,也不走网络。"""
+    from src.collect.local_accounts import discover
+    from src.crawler.local_wechat import LocalReaderError
+    from src.db.repository import ArticleRepository
+
+    try:
+        with ArticleRepository() as repo:
+            rows = discover(repo, query)
+    except LocalReaderError as e:
+        return _fail(str(e), as_json, EXIT_AUTH)
+
+    candidates = [{"name": r["name"], "fakeid": r["fakeid"],
+                   "alias": r["username"],
+                   "signature": _discover_note(r),
+                   "subscribed": r["subscribed"],
+                   "stored_name": r["stored_name"]}
+                  for r in rows if r["name"]]
+    if as_json:
+        emit({"candidates": candidates})
+    elif not candidates:
+        info(f"本机没有名字含「{query}」的公众号会话" if query
+             else "本机还没有任何公众号会话")
+    else:
+        addable = sum(1 for c in candidates if c["fakeid"] and not c["subscribed"])
+        info(f"本机 {len(candidates)} 个公众号会话,其中 {addable} 个可以添加:")
+        for c in candidates:
+            mark = "已订阅" if c["subscribed"] else ("可添加" if c["fakeid"] else "无图文")
+            info(f"  {mark}  {_pad(c['name'], 26)}{c['signature']}")
+    return EXIT_OK
+
+
+def _discover_note(row: dict) -> str:
+    if not row["fakeid"]:
+        return "本机暂无可解析的图文推送"
+    if row["subscribed"] and row["stored_name"] != row["name"]:
+        return f"已订阅,库里存作「{row['stored_name']}」"
+    if row["subscribed"]:
+        return "已订阅"
+    return "最近推送 " + (
+        datetime.fromtimestamp(row["last_at"]).strftime("%Y-%m-%d")
+        if row["last_at"] else "—")
+
+
 def _accounts_search(query: str, as_json: bool) -> int:
     """搜公众号候选。走公众平台接口,需要扫码凭证。"""
     import api
@@ -411,18 +459,35 @@ def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
     from src.db.repository import ArticleRepository
 
     if not fakeid:
-        import api
+        # 面板上是先 discover 后点,fakeid 早就定死了;这条是终端里直接按名字
+        # 加的路。从本机会话里按**完全同名**认,不做模糊匹配——加错号之后
+        # 文章会按它的档案键归档,再改回来要连 vault 目录一起搬。
+        from src.collect.local_accounts import discover
+        from src.crawler.local_wechat import LocalReaderError
+
         try:
-            candidates = api._search_biz(name)
-        except Exception as e:
-            return _fail(f"搜索失败,凭证可能已过期(跑 `python -m cli login` 续期):"
-                         f"{str(e)[:120]}", as_json, EXIT_AUTH)
-        exact = [c for c in candidates if c.nickname == name]
-        if not exact:
-            near = "、".join(c.nickname for c in candidates[:5])
-            return _fail(f"没有完全同名的公众号" + (f",搜到:{near}" if near else ""),
-                         as_json)
-        name, fakeid = exact[0].nickname, exact[0].fakeid
+            with ArticleRepository() as repo:
+                rows = discover(repo, name)
+        except LocalReaderError as e:
+            return _fail(str(e), as_json, EXIT_AUTH)
+        same = [r for r in rows if r["name"] == name]
+        exact = [r for r in same if r["fakeid"]]
+        ids = {r["fakeid"] for r in exact}
+        if same and not ids:
+            # 名字对上了、只是这个号本机还没有可解析的图文:别说成"没关注",
+            # 那是另一回事,照着去关注一遍也不会变好。
+            return _fail(f"「{name}」在本机有会话,但还没有能解析出归属的图文推送"
+                         "(可能只收到过服务通知)。在绿泡泡里打开它、"
+                         "同步一篇图文之后再试", as_json)
+        if not ids:
+            near = "、".join(dict.fromkeys(r["name"] for r in rows[:5]))
+            return _fail(f"本机没有名叫「{name}」的公众号会话"
+                         + (f",相近的有:{near}" if near else "")
+                         + "。请先在绿泡泡里关注并同步该号", as_json)
+        if len(ids) > 1:
+            return _fail(f"本机有 {len(ids)} 个同名公众号会话,"
+                         f"请用 --fakeid 指定是哪一个", as_json)
+        fakeid = exact[0]["fakeid"]
 
     with ArticleRepository() as repo:
         # 走 enable_crawl_account 而不是 upsert_account:add 是"用户主动订阅",
@@ -544,9 +609,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser("accounts", help="维护订阅的公众号")
     a.add_argument("action",
-                   choices=["list", "search", "add", "remove", "enable", "disable"])
-    a.add_argument("name", nargs="?", help="公众号名字(search 时是关键词)")
-    a.add_argument("--fakeid", default="", help="add 时直接指定,跳过搜索")
+                   choices=["list", "discover", "search", "add",
+                            "remove", "enable", "disable"])
+    a.add_argument("name", nargs="?",
+                   help="公众号名字(discover/search 时是关键词,discover 可省略)")
+    a.add_argument("--fakeid", default="", help="add 时直接指定,跳过查找")
     a.add_argument("--json", action="store_true", help="输出 JSON 而不是人话")
 
     sub.add_parser("login", help="扫码登录公众平台(添加公众号时需要)")

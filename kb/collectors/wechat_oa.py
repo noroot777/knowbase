@@ -95,6 +95,8 @@ class WeChatOACollector:
     label = "公众号"
     channel_label = "凭证抓取（原通道）"
     cli_channel = "profile_ext"
+    # 找候选用哪个 CLI 动作:原通道搜公众平台(要扫码凭证),本地通道翻本机会话。
+    search_action = "search"
     channel_hint = "用各公众号的文章凭证获取列表；同步前通过 wxdown 准备凭证。"
     range_hint = ("提示:绿泡泡服务端一般只保留近 30 天可翻页的历史,"
                   "跨度过大的旧文章可能拉不到。")
@@ -372,7 +374,7 @@ class WeChatOACollector:
                f"当前 {ready}/{total} 个号凭证新鲜"
 
     def search_targets(self, query: str) -> list[Target]:
-        data = self._accounts("search", query, timeout=60)
+        data = self._accounts(self.search_action, query, timeout=60)
         return [
             Target(
                 id=str(row.get("fakeid") or ""),

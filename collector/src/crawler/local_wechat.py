@@ -151,6 +151,17 @@ def parse_push(message: dict) -> list[dict]:
     return result
 
 
+def session_biz(reader: LocalReader, username: str, on_error=None) -> str | None:
+    """这个会话属于哪个公众号——取它首篇图文推送 URL 里的 `__biz`。
+
+    gh_ 会话一对一地对应一个公众号,首篇有效图文就能确认身份,不用翻完历史;
+    近期可能只有服务通知,所以复用分页读取继续往已同步的历史里找。一篇都
+    解析不出来时返回 None(该号本机只有通知,没有可采的图文)。
+    """
+    first = next(reader.articles(username, on_error=on_error), None)
+    return first["biz"] if first else None
+
+
 def resolve_accounts(reader: LocalReader, accounts: list[dict], cached: dict,
                      progress=lambda name: None, on_error=None, *, discovery=None) -> dict[str, str]:
     """名字只用于加速找候选；最终始终用推送 URL 的 __biz 核实。"""
@@ -183,13 +194,10 @@ def resolve_accounts(reader: LocalReader, accounts: list[dict], cached: dict,
         progress(session.get("display_name") or "公众号")
         parse_errors = []
         try:
-            # 近期可能只有服务通知；复用分页读取，继续从已同步历史中核实身份。
-            first = next(reader.articles(username, on_error=parse_errors.append), None)
-            biz = first["biz"] if first else None
-            # gh_ 会话对应一个公众号，首篇有效图文即可确认，无需翻完该号历史。
+            biz = session_biz(reader, username, parse_errors.append)
             if biz in wanted:
                 found[biz] = username
-            if first or not parse_errors:
+            if biz or not parse_errors:
                 discovery[username] = {"biz": biz, "stamp": stamp, "checked_at": now}
         except LocalReaderError as e:
             parse_errors.append(str(e))
