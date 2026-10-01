@@ -1,8 +1,14 @@
 """setup.sh 把 data/ 和 .venv/ 链到仓库外那份真实目录上。
 
-钉住的是「替换」这件事:`ln -sfn A link` 在 link 已经是真目录时会把链接建**进**
-那个目录(link/A),而不是替换它——而库是照 `DATA_DIR = collector/data` 建的,
-于是采集器拿一个空库跑,`cli status` 报 0 个号而不是报错。非空目录不许静默替换。
+钉住两件事。
+
+一是「替换」:`ln -sfn A link` 在 link 已经是真目录时会把链接建**进**那个目录
+(link/A),而不是替换它——而库是照 `DATA_DIR = collector/data` 建的,于是采集器
+拿一个空库跑,`cli status` 报 0 个号而不是报错。非空目录不许静默替换。
+
+二是「别换掉人家指定的数据位置」:这个脚本原来读 GZH_DATA_HOME / GZH_VENV_HOME,
+改名成 KB_COLLECTOR_* 之后旧名字必须继续认。用旧名字显式隔离过数据目录的人,
+升级后看到的订阅和文章会变成另一批(或者看起来全没了),而脚本照旧返回 0。
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ from pathlib import Path
 SETUP = Path(__file__).resolve().parents[1] / "setup.sh"
 
 
-class SetupScriptTests(unittest.TestCase):
+class _Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         # macOS 的 /var 是 /private/var 的软链接,resolve() 会消解它 —— 两边口径得一致
@@ -39,9 +45,15 @@ class SetupScriptTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_setup(self):
+    def run_setup(self, **overrides):
+        """跑一遍脚本。overrides 里给 None 表示把那个变量从环境里摘掉。"""
         env = {**os.environ, "KB_COLLECTOR_DATA_PATH": str(self.data),
                "KB_COLLECTOR_VENV_PATH": str(self.venv)}
+        for key, value in overrides.items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = str(value)
         return subprocess.run(["./setup.sh"], cwd=self.here, env=env,
                               capture_output=True, text=True)
 
@@ -52,6 +64,8 @@ class SetupScriptTests(unittest.TestCase):
         self.assertFalse((link / "real-data").exists(), "链接被建进了目录里")
         self.assertEqual(self.venv, (self.here / ".venv").resolve())
 
+
+class LinkingTheTwoDirectories(_Base):
     def test_a_fresh_checkout_gets_both_links(self):
         self.assertEqual(0, self.run_setup().returncode)
         self.assert_linked()
@@ -88,3 +102,44 @@ class SetupScriptTests(unittest.TestCase):
         result = self.run_setup()
         self.assertNotEqual(0, result.returncode)
         self.assertEqual("not a directory", (self.here / "data").read_text())
+
+
+class TheOldVariableNamesStillWork(_Base):
+    """只设旧名字时,链接必须落在旧名字指的那个目录上。
+
+    这是审查复现出来的那条路:用户早就用 GZH_DATA_HOME 把自己的库隔离开了,
+    新脚本只认 KB_COLLECTOR_DATA_PATH,于是无视这个选择、把链接改到默认位置
+    或者存量回退那个原项目目录,还返回 0 报成功。
+    """
+
+    def only_legacy(self, **overrides):
+        return self.run_setup(KB_COLLECTOR_DATA_PATH=None,
+                              KB_COLLECTOR_VENV_PATH=None,
+                              GZH_DATA_HOME=self.data,
+                              GZH_VENV_HOME=self.venv, **overrides)
+
+    def test_a_custom_directory_named_by_the_old_variable_is_honoured(self):
+        result = self.only_legacy()
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assert_linked()
+        self.assertIn("GZH_DATA_HOME", result.stderr)   # 换了名字要说一声
+
+    def test_the_old_variable_beats_the_legacy_location_fallback(self):
+        """旧变量是显式选择,不该被"原位置还有东西"那条兜底顶掉。
+
+        兜底的本意是「谁都没指定」时别把人家原来的库丢下;用旧名字指过的人
+        恰恰是指定了。两者撞上时按用户说的来。
+        """
+        legacy = Path(self.tmp.name).resolve() / "fake-home" / "code" / "gongzhonghao"
+        (legacy / "WeChatOA_Aggregation" / "data").mkdir(parents=True)
+        (legacy / "WeChatOA_Aggregation" / "data" / "wechatoa.db").write_bytes(b"old project")
+        self.assertEqual(0, self.only_legacy(HOME=legacy.parents[1]).returncode)
+        self.assert_linked()
+
+    def test_the_new_name_wins_when_both_are_set(self):
+        other = Path(self.tmp.name).resolve() / "other-data"
+        other.mkdir()
+        result = self.run_setup(GZH_DATA_HOME=other, GZH_VENV_HOME=self.venv)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assert_linked()                             # 新名字那个
+        self.assertIn("都设了", result.stderr)           # 但别闷着

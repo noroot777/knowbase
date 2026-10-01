@@ -12,19 +12,47 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 STATE="${XDG_DATA_HOME:-$HOME/.local/share}/knowbase/collector"
-DATA_HOME="${KB_COLLECTOR_DATA_PATH:-$STATE/data}"
-VENV_HOME="${KB_COLLECTOR_VENV_PATH:-$STATE/venv}"
+
+# 旧变量名 GZH_DATA_HOME / GZH_VENV_HOME 必须继续认 —— 这个脚本改名之前读的是
+# 它们,用它们显式指过目录的人,换的是「打开哪个库」而不是一个链接的写法:
+# 静默忽略等于让人升级之后打开另一份(或者一份空的)订阅和文章,而脚本照旧
+# 报成功。新名字优先,两个都设了打一行说明;只设旧的就沿用并提一句新名字。
+# 结果从 PICKED / PICKED_EXPLICIT 带出来(bash 函数只能返回退出码)。
+pick_path() {
+  local new="$1" old="$2" new_name="$3" old_name="$4" fallback="$5"
+  PICKED_EXPLICIT=1
+  if [ -n "$new" ]; then
+    [ -n "$old" ] && [ "$new" != "$old" ] \
+      && echo "[setup] $new_name 和 $old_name 都设了,按 $new_name 来:$new" >&2
+    PICKED="$new"
+    return
+  fi
+  if [ -n "$old" ]; then
+    echo "[setup] 沿用旧变量 $old_name:$old(新名字是 $new_name)" >&2
+    PICKED="$old"
+    return
+  fi
+  PICKED="$fallback"
+  PICKED_EXPLICIT=""
+}
+
+pick_path "${KB_COLLECTOR_DATA_PATH:-}" "${GZH_DATA_HOME:-}" \
+  KB_COLLECTOR_DATA_PATH GZH_DATA_HOME "$STATE/data"
+DATA_HOME="$PICKED"; DATA_EXPLICIT="$PICKED_EXPLICIT"
+pick_path "${KB_COLLECTOR_VENV_PATH:-}" "${GZH_VENV_HOME:-}" \
+  KB_COLLECTOR_VENV_PATH GZH_VENV_HOME "$STATE/venv"
+VENV_HOME="$PICKED"; VENV_EXPLICIT="$PICKED_EXPLICIT"
 
 # 存量回退:这个采集器原来住在 WeChatOA_Aggregation 里,库和 venv 也在那边。
 # 没显式指定、默认位置还空着、而老位置确实有东西时就接着用老的——搬几百 M 的库
 # 是用户自己的决定,不该由一个"链好符号链接"的脚本代劳。
 LEGACY="$HOME/code/gongzhonghao/WeChatOA_Aggregation"
-if [ -z "${KB_COLLECTOR_DATA_PATH:-}" ] && [ ! -e "$DATA_HOME" ] && [ -d "$LEGACY/data" ]; then
+if [ -z "$DATA_EXPLICIT" ] && [ ! -e "$DATA_HOME" ] && [ -d "$LEGACY/data" ]; then
   DATA_HOME="$LEGACY/data"
   echo "[setup] 沿用原位置的数据目录:$DATA_HOME" >&2
   echo "[setup]   要搬到 $STATE/data 就把目录移过去,或设 KB_COLLECTOR_DATA_PATH" >&2
 fi
-if [ -z "${KB_COLLECTOR_VENV_PATH:-}" ] && [ ! -x "$VENV_HOME/bin/python" ] \
+if [ -z "$VENV_EXPLICIT" ] && [ ! -x "$VENV_HOME/bin/python" ] \
    && [ -x "$LEGACY/.venv/bin/python" ]; then
   VENV_HOME="$LEGACY/.venv"
   echo "[setup] 沿用原位置的 venv:$VENV_HOME" >&2
