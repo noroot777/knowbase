@@ -129,7 +129,7 @@ class ShareCardTests(unittest.TestCase):
         # _fetch_page 里两次 requests.get:先本体,再卡片指向的原文
         with patch("src.utils.wechat_body.requests.get",
                    side_effect=[Mock(text=p) for p in pages]) as get, \
-             patch("src.utils.wechat_preview._request_headers", return_value={}):
+             patch("src.utils.wechat_body._request_headers", return_value={}):
             text, html, _ = fetch_article_body_full("https://mp.weixin.qq.com/s?x=1")
         return text, html, get.call_count
 
@@ -158,7 +158,7 @@ class ShareCardTests(unittest.TestCase):
         # 没有卡片的普通页面抓不到正文,仍然是临时失败(重试到上限)
         with patch("src.utils.wechat_body.requests.get",
                    return_value=Mock(text=BLANK)), \
-             patch("src.utils.wechat_preview._request_headers", return_value={}), \
+             patch("src.utils.wechat_body._request_headers", return_value={}), \
              patch("src.utils.wechat_body.time.sleep"):
             text, _html, _ = fetch_article_body_full("https://mp.weixin.qq.com/s?x=1")
         self.assertEqual(FETCH_ERROR, text)

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.db import fts as fts_mod
 from src.utils.helpers import time_now
 
 
@@ -209,34 +208,8 @@ class QueryMixin:
                 next_cursor = f"{last['create_time']}|{last['id']}"
         return items, next_cursor
 
-    def search_articles(
-        self,
-        query: str,
-        *,
-        limit: int = 30,
-        cursor: str | None = None,
-        account: str | None = None,
-        read_filter: str | None = None,
-        starred_only: bool = False,
-        import_only: bool = False,
-        noted_only: bool = False,
-    ) -> tuple[list[dict[str, Any]], str | None]:
-        ids = fts_mod.search_article_ids(self.conn, query, limit=500)
-        if not ids:
-            return [], None
-        return self.list_articles(
-            limit=limit,
-            cursor=cursor,
-            account=account,
-            article_ids=ids,
-            read_filter=read_filter,
-            starred_only=starred_only,
-            import_only=import_only,
-            noted_only=noted_only,
-        )
-
     def find_article_by_link(self, link: str) -> dict[str, Any] | None:
-        from src.utils.article_import import extract_mp_article_slug, link_lookup_variants
+        from src.utils.article_links import extract_mp_article_slug, link_lookup_variants
 
         for variant in link_lookup_variants(link):
             row = self.conn.execute(

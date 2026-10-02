@@ -142,7 +142,7 @@ class PipelineStopTests(TestCase):
         for restored in (False, True):
             with self.subTest(restored=restored):
                 state._state.update(running=False, crawl_filter={
-                    'channel': 'wechat_oa', 'accounts': ['上次公众号'],
+                    'channel': 'wechat_local', 'accounts': ['上次公众号'],
                     'since_date': '2026-09-01', 'until_date': '2026-09-02'})
                 state._stage('extract', 'error', '失败 1')
                 state._save_last_run()
@@ -150,7 +150,7 @@ class PipelineStopTests(TestCase):
                     state._state['stages'] = {}
                 with patch.object(pipeline.threading, 'Thread') as thread:
                     response = pipeline_api.pipeline_run(pipeline_api.PipelineRunRequest(
-                        channel='wechat_oa', accounts=['本次公众号'],
+                        channel='wechat_local', accounts=['本次公众号'],
                         since_date='2026-09-27', until_date='2026-09-28'))
                     self.assertEqual({'ok': True}, response)
                     thread.return_value.start.assert_called_once()
@@ -163,7 +163,7 @@ class PipelineStopTests(TestCase):
         state._stage('crawl', 'running', '抓取仍在执行')
         with patch.object(pipeline.threading, 'Thread') as thread:
             with self.assertRaises(HTTPException) as error:
-                pipeline_api.pipeline_run(pipeline_api.PipelineRunRequest(channel='wechat_oa'))
+                pipeline_api.pipeline_run(pipeline_api.PipelineRunRequest(channel='wechat_local'))
             self.assertEqual(409, error.exception.status_code)
             self.assertIn('运行中', error.exception.detail)
             thread.assert_not_called()
@@ -196,7 +196,7 @@ class PipelineStopTests(TestCase):
             with self.subTest(plan=plan):
                 state._state['running'] = False
                 with patch.object(pipeline_retry, 'retry_failed_plan', return_value=plan), \
-                     patch.object(pipeline_retry, 'load_last_run', return_value={'crawl_filter': {'channel': 'wechat_oa'}}), \
+                     patch.object(pipeline_retry, 'load_last_run', return_value={'crawl_filter': {'channel': 'wechat_local'}}), \
                      patch.object(pipeline_retry.threading, 'Thread'):
                     started, _ = pipeline_retry.start_retry_failed()
                 self.assertTrue(started)

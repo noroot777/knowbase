@@ -81,8 +81,10 @@ class TrimFixture:
         conn.commit(); conn.close()
         return item
 
-    def args(self, source, **over):
-        base = dict(source=str(source['id']), floor=None, yes=True,
+    def args(self, row, **over):
+        # 形参叫 row 而不是 source:`source` 是 Namespace 里那个字段名,用例要能
+        # `self.args(s, source='Only One')` 覆盖它(按名字查那几条就这么写)。
+        base = dict(source=str(row['id']), floor=None, yes=True,
                     allow_shared=False, allow_favorites=False, verbose=False)
         return argparse.Namespace(**(base | over))
 
@@ -101,6 +103,12 @@ class TrimFixture:
         return dict(feed_row=bool(row), memberships=links,
                     exported=bool(row and row['exported_hash'] == row['content_hash']),
                     file=(self.vault / item['path']).exists(), documents=docs, searchable=hits)
+
+    def favorites(self):
+        conn = store.connect()
+        n = conn.execute('SELECT count(*) FROM favorites').fetchone()[0]
+        conn.close()
+        return n
 
     def documents_without_a_file(self):
         """库里指向不存在文件的那些行 —— 「复活」最后留下的痕迹就是它。"""

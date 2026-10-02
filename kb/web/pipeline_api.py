@@ -17,9 +17,7 @@ from kb.collectors import (
     active_collector,
     channel_labels,
     collection_channels,
-    set_wechat_channel,
-    wechat_channel,
-    wechat_channel_options,
+    retired_channels,
 )
 
 router = APIRouter()
@@ -34,29 +32,14 @@ def _channel(value: str | None) -> str:
 
 @router.get("/api/pipeline/channels")
 def pipeline_channels():
-    """可勾选的来源 + 绿泡泡那条互斥选择的当前值。
+    """可勾选的来源。
 
-    `labels` 是**全部**通道的人话名字(含没被选中的那条绿泡泡通道):历史运行
-    记录里写着的可能正是它,面板不该把它显示成一个裸 id。
+    `labels` 还多给几条**已经退役的通道名**:历史运行记录里写着的可能正是它们
+    (公众号早先那条凭证通道),面板不该把它显示成一个裸 id。`aliases` 则是给
+    浏览器里存着的那些选择用的——localStorage 里写着的可能正是一条退役通道。
     """
     return {"channels": collection_channels(), "default": active_collector().name,
-            "labels": channel_labels(),
-            "wechat": {"selected": wechat_channel(),
-                       "options": wechat_channel_options()}}
-
-
-class WechatChannelRequest(BaseModel):
-    channel: str
-
-
-@router.post("/api/pipeline/channels/wechat")
-def pipeline_wechat_channel(body: WechatChannelRequest):
-    """换绿泡泡的采集通道(设置项,不是一次同步的范围)。返回更新后的通道清单。"""
-    try:
-        set_wechat_channel(body.channel)
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from None
-    return pipeline_channels()
+            "labels": channel_labels(), "aliases": retired_channels()}
 
 
 class ScheduleRequest(BaseModel):

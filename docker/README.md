@@ -28,7 +28,7 @@ docker compose logs -f --tail 100
 | 内容 | 容器路径 | 默认命名卷 | 可选 `.env` 宿主机目录 |
 | --- | --- | --- | --- |
 | SQLite 索引、模型配置、收藏和进度 | `/app/data` | `kb-data` | `KB_DATA_PATH` |
-| 采集器文章库、订阅和凭证 | `/app/collector/data` | `collector-data` | `KB_COLLECTOR_DATA_PATH` |
+| 采集器文章库和订阅 | `/app/collector/data` | `collector-data` | `KB_COLLECTOR_DATA_PATH` |
 | Markdown vault、图片与 Wiki | `/vault/new-start` | `kb-vault` | `KB_VAULT_PATH` |
 | Hugging Face 模型缓存 | `/home/kb/.cache/huggingface` | `model-cache` | — |
 
@@ -82,25 +82,15 @@ Docker 内无法从 Mac 绿泡泡进程提取数据库 key。页面会显示“�
 
 1. 在 Mac 原生运行本项目，完成供应商／模型配置和“绿泡泡接入”。已有可用 Reader 可复用，
    无需安装 `wechat-intelligence-hub` skill。
-2. 在 Mac 通过本地绿泡泡数据库通道同步公众号，并导出 Markdown 到 vault。
+2. 在 Mac 同步公众号(读本机已同步的推送)，并导出 Markdown 到 vault。
 3. 将 vault 通过 `KB_VAULT_PATH` 挂载到 Docker，执行索引；检索、问答与后续分析在容器运行。
 
-镜像也包含原有凭证通道的采集器，可使用已保存的 `collector/data` 及有效公众号凭证。
-凭证获取／更新仍在宿主机完成；镜像不包含 wxdown 桌面配套程序或 Mac Reader。
-如需同步宿主机 wxdown 的凭证文件，可增加 `compose.override.yaml`：
+容器里能跑采集器的后几步(导出、索引)，**发现文章那一步不行**——它要读 Mac 微信
+客户端的库，容器碰不到。所以挂载已有的 `collector/data` 之后可以在容器里 `export`，
+但 `collect` 要在 Mac 上跑。
 
-```yaml
-services:
-  knowbase:
-    environment:
-      WXDOWN_CRED_FILE: /run/wechat/credentials.json
-    volumes:
-      - /absolute/path/to/wxdown/resources/data:/run/wechat:ro
-```
-
-挂载整个凭证目录可以跟随文件原子替换；路径须存在且容器用户可读。只读挂载不会阻止
-采集器把凭证副本保存到自己的私有数据卷。凭证仍可能过期，状态页会报告实际可用性。
-这不使“绿泡泡本地数据库”通道在 Linux 容器中可用。
+> 另一条采集方式(逐号文章凭证，靠 mitm 从 Mac 微信里截)在 `wechat-oa` 分支上，
+> 不做推荐、不再跟进主干。那条路同样要宿主机配合，容器里也只能跑导出之后的步骤。
 
 ```bash
 # 使用采集器自己的 Python 环境
@@ -133,6 +123,6 @@ docker compose exec -w /app/collector knowbase .venv/bin/python -m cli export
 收藏、采集状态和文章原件。模型缓存可重新下载，不是唯一数据源。
 
 `docker compose ps` 的 healthy 来自 `/api/health`，只表示 Web 进程可响应，
-不代表供应商、网络或绿泡泡凭证已就绪。初始化失败先看 `docker compose logs`；
+不代表供应商、网络或本机微信库已就绪。初始化失败先看 `docker compose logs`；
 端口冲突修改 `.env` 的 `KB_PORT`。镜像构建需要访问 Docker registry、PyPI、
 PyTorch CPU wheel 源和 Debian 包源，网络代理请在 Docker 的构建环境中配置，勿写入镜像。

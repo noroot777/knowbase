@@ -62,33 +62,6 @@ class NotesMixin:
             items.append(item)
         return items
 
-    def search_note_article_ids(
-        self, query: str, *, account: str | None = None
-    ) -> list[str]:
-        """在笔记正文内做关键词匹配（FTS 不索引笔记，故用 LIKE 兜底）。"""
-        q = (query or "").strip()
-        if not q:
-            return []
-        where = [
-            "ar.is_user_deleted=0",
-            "length(trim(COALESCE(nt.content, ''))) > 0",
-            "nt.content LIKE ?",
-        ]
-        params: list[Any] = [f"%{q}%"]
-        if account:
-            where.append("ar.account_name=?")
-            params.append(account)
-        sql = f"""
-            SELECT nt.article_id AS id
-            FROM article_notes nt
-            JOIN articles ar ON ar.id = nt.article_id
-            WHERE {' AND '.join(where)}
-            ORDER BY nt.updated_at DESC
-            LIMIT 500
-        """
-        rows = self.conn.execute(sql, params).fetchall()
-        return [str(r["id"]) for r in rows]
-
     def get_article_note(self, article_id: str) -> dict[str, Any]:
         row = self.conn.execute(
             """
