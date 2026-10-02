@@ -20,7 +20,14 @@ async page => {
   const hit = name => ({ path: 'test.md', title: name, vault: 'test', account: '测试来源',
     published: '2026-09-26', source: 'dr-gzh', matched_by: ['fts'], entities: ['Alpha'],
     summary: '检索回归验证', best_chunk: '测试正文', url: '' });
-  let galleryFail = false, searchFail = false, delayedSearch = null;
+  // 来源目录真给数据,否则 initSourceModules 走的是错误分支,导轨上那几个
+  // 动态入口(以及它们的 .nav-text)压根不会被建出来、测不到。
+  const intakeModules = [
+    {id:'social',label:'大V观点',description:'关注的人,此刻的想法。',note:'测试来源',manager:'feeds',icon:'chat'},
+    {id:'rss',label:'RSS',description:'订阅的站点与博客。',note:'测试来源',manager:'feeds',icon:'rss'},
+    {id:'gzh',label:'公众号',description:'不由这套面板管。',note:'测试来源',manager:'wechat',icon:'chat'},
+  ];
+  let galleryFail = false, searchFail = false, delayedSearch = null, holdModules = null;
   let askHandler = null, askCount = 0, favorite = false;
   const respond = (route, data, status = 200) => route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
   const handler = async route => {
@@ -51,6 +58,10 @@ async page => {
       return route.fulfill({contentType:'application/x-ndjson',body:frames.map(x=>JSON.stringify(x)).join('\n')+'\n'});
     }
     if (path === '/api/favorites/toggle') { favorite = !favorite; return respond(route,{favorited:favorite}); }
+    if (path === '/api/intake/modules') {
+      if (holdModules) await holdModules;   // 扣住它,验证名字浮层不跟着一起等
+      return respond(route, {modules: intakeModules});
+    }
     const fixtures = {
       '/api/stats': {documents:180,vectors:300,entities:90,extracted:180},
       '/api/facets': {sources:[{value:'dr-gzh',n:90}],accounts:[],topics:[{value:'topic/知识',n:5}],entities:[{value:'Alpha',n:5}]},
@@ -78,12 +89,44 @@ async page => {
     check('桌面不再显示顶部横条', !await page.locator('#topbar').isVisible());
     check('内容区域紧随窄侧栏', await page.locator('#main-content').evaluate(el=>el.getBoundingClientRect().left===parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width'))));
     check('三个图谱入口直接可达', await page.locator('.explore-links a:visible').count()===3);
-    await page.locator('.quick-search').click();
-    check('窄栏搜索仍可点击并定位输入框', await page.locator('#g-q').evaluate(el=>el===document.activeElement));
+    check('导轨上不再有那个只剩放大镜的查找框', await page.locator('.quick-search').count() === 0);
+    await page.keyboard.press('Control+k');
+    check('快捷键仍能定位搜索输入框', await page.locator('#g-q').evaluate(el=>el===document.activeElement));
+    check('三组入口各有一道分组记号', await page.evaluate(() => {
+      const marked = [...document.querySelectorAll('#sidebar .nav-section')]
+        .filter(el => el.getClientRects().length && getComputedStyle(el, '::before').content !== 'none');
+      return marked.length === 2;   // 第一组在品牌下面,不需要记号
+    }));
+    check('外链图谱带可见的新标签角标', await page.evaluate(() =>
+      [...document.querySelectorAll('.explore-links a > .nav-ext')].every(el => el.getClientRects().length)));
+    check('导轨上没有常驻文字标签', await page.evaluate(() =>
+      [...document.querySelectorAll('#sidebar .nav-text')].every(el => el.getBoundingClientRect().width <= 1)));
+    await page.locator('#tab-fav').hover();
+    check('悬停把名字推到栏外且不被裁掉', await page.evaluate(() => {
+      const tip = document.getElementById('nav-tip'), rail = document.getElementById('sidebar');
+      const t = tip.getBoundingClientRect(), r = rail.getBoundingClientRect();
+      return !tip.hidden && tip.textContent === '我的收藏' && t.left >= r.right
+        && document.elementFromPoint(t.left + t.width / 2, t.top + t.height / 2) !== null;
+    }));
+    await page.locator('h1').first().hover();
+    check('鼠标离开导轨后浮层收起', await page.evaluate(() => document.getElementById('nav-tip').hidden));
+    await page.locator('.brand-lockup').focus();
+    await page.keyboard.press('Tab');
+    check('键盘聚焦同样给出名字', await page.evaluate(() =>
+      !document.getElementById('nav-tip').hidden && document.getElementById('nav-tip').textContent === '工具图鉴'));
+    await page.locator('#g-q').focus();
+    check('焦点离开导轨后浮层收起', await page.evaluate(() => document.getElementById('nav-tip').hidden));
+    await page.locator('#tab-gallery').click();   // 鼠标点完焦点也留在按钮上
+    await page.locator('h1').first().hover();
+    check('点过的入口在鼠标挪开后不留浮层', await page.evaluate(() => document.getElementById('nav-tip').hidden));
     await page.locator('.workspace-settings summary').click();
+    // details 的 toggle 是排进任务队列才发的,所以这里等一拍,不当场读
+    check('设置菜单展开后名字浮层让开', await page.waitForFunction(
+      () => document.getElementById('nav-tip').hidden, null, {timeout:2000}).then(() => true, () => false));
     check('设置浮层未被窄侧栏裁切', await page.locator('#keys-btn').evaluate(el=>{
       const r=el.getBoundingClientRect();
-      return r.left>=72 && document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===el;
+      const rail=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width'));
+      return r.left>=rail && document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===el;
     }));
     await page.keyboard.press('Escape');
     check('设置菜单 Escape 关闭并返回焦点', await page.locator('.workspace-settings').evaluate(el=>!el.open && document.activeElement===el.querySelector('summary')));
@@ -214,6 +257,54 @@ async page => {
     await page.locator('#keys-btn').click();
     check('手机设置显示于导航上层', await page.locator('#keys-modal').evaluate(el=>!el.inert && getComputedStyle(el).display!=='none'));
     await page.keyboard.press('Escape');
+    /* ── 名字只剩浮层这一条路了,它不许被任何一个和它无关的请求拖住 ──
+       扣住来源目录(线上就是 pipeJson 的 15 秒超时那一段):工具卡片已经能翻了,
+       导轨上每一个入口都得说得出自己叫什么;目录回来之后,原地一直没挪过的那次
+       悬停也得还在——那时候不会再有第二个 pointerover 把名字带回来。 */
+    await page.setViewportSize({width:1440,height:1000});
+    let releaseModules = () => {};
+    holdModules = new Promise(resolve => { releaseModules = resolve; });
+    await page.goto(origin + '/?workspace-test=' + Date.now() + '#gallery');
+    await page.locator('.gcard').first().waitFor();
+    await page.locator('#tab-fav').hover();
+    check('来源目录还没回来,导轨照样报得出名字', await page.evaluate(() => {
+      const tip = document.getElementById('nav-tip');
+      return !document.getElementById('tab-rss') && !tip.hidden && tip.textContent === '我的收藏';
+    }));
+    releaseModules(); holdModules = null;
+    await page.locator('#tab-rss').waitFor();
+    check('目录回来后原地未挪的悬停仍有名字且贴着那个入口', await page.evaluate(() => {
+      const tip = document.getElementById('nav-tip');
+      const t = tip.getBoundingClientRect(), item = document.getElementById('tab-fav').getBoundingClientRect();
+      return !tip.hidden && tip.textContent === '我的收藏'
+        && Math.abs((t.top + t.height / 2) - (item.top + item.height / 2)) <= 1;
+    }));
+    check('只有 feeds 那几个来源进导轨', await page.evaluate(() =>
+      !!document.getElementById('tab-social') && !document.getElementById('tab-gzh')));
+    await page.locator('#tab-rss').hover();
+    check('接口回来后插进去的来源入口同样有名字', await page.evaluate(() => {
+      const tip = document.getElementById('nav-tip');
+      return !tip.hidden && tip.textContent === 'RSS'
+        && document.querySelector('#tab-rss .nav-text').getBoundingClientRect().width <= 1;
+    }));
+    /* 矮窗口里 Tab 到露在视野外的入口,浏览器会自己滚侧栏——锚点没变、只是位置变了,
+       那时候把名字清掉就再也没有第二个 focusin 能把它带回来。 */
+    await page.locator('h1').first().hover();
+    await page.setViewportSize({width:1440,height:540});
+    await page.locator('.brand-lockup').focus();
+    for (let i = 0; i < 24; i++) {
+      if (await page.evaluate(() => !!document.activeElement?.closest?.('.nav-dropdown'))) break;
+      await page.keyboard.press('Tab');
+    }
+    // 自动滚动是焦点落定之后才发生的,它那个 scroll 事件要等到下一次渲染更新才派发——
+    // 按完键当场读的话,清掉名字的那一下还没发生,缺陷看不出来
+    await page.waitForFunction(() => new Promise(resolve =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))));
+    check('矮窗口里键盘走到被滚进视野的入口仍有名字', await page.evaluate(() => {
+      const tip = document.getElementById('nav-tip');
+      return document.getElementById('sidebar').scrollTop > 0 && !tip.hidden && tip.textContent === '设置';
+    }));
+    await page.setViewportSize({width:1440,height:1000});
     galleryFail = true;
     await page.goto(origin + '/?workspace-test=' + Date.now() + '#gallery');
     await page.getByRole('button',{name:'重新加载',exact:true}).waitFor();
