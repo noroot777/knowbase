@@ -13,7 +13,7 @@ from unittest.mock import patch, Mock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb import pipeline, pipeline_state
+from kb import maintenance, pipeline, pipeline_state
 from kb.collectors import FetchScope, get_collector
 from kb.feeds import registry as reg, fetching, sync, schedule
 from kb.web import intake_api
@@ -41,7 +41,10 @@ class FeedTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        # 维护锁的 lockfile 在 DATA_DIR 下:不指到 tmp 的话这些用例会去 flock 生产
+        # 那一个,被 kb-web 正在跑的一轮索引(整趟持锁)挂住(见 kb.maintenance)。
         self.patches = [patch.object(reg,'DB_PATH',self.root/'feeds.db'),
+                        patch.object(maintenance,'DATA_DIR',self.root),
                         patch.object(sync,'VAULT_ROOT',self.root/'vault')]
         for p in self.patches:
             p.start(); self.addCleanup(p.stop)

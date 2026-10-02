@@ -13,7 +13,9 @@
 只多几十个输出 token。单开一个阶段等于把同一篇正文再买一遍。判定结果落
 documents.promo_level,下游(条目化 gate、检索、wiki)一律读这一列。
 
-回写只动 frontmatter 的 tags 列表,正文一个字节不碰。
+回写只动 frontmatter 的 tags 列表,正文一个字节不碰 —— 但它**写的是 vault 文件**,
+所以整段在 `kb.maintenance` 那把维护锁里,而且锁内先确认这一篇还在(见
+`writeback_extraction`)。
 """
 
 from __future__ import annotations
@@ -338,6 +340,14 @@ def extraction_tags(data: dict) -> list[str]:
     return tags
 
 
+def _still_indexed(conn, doc_path: str) -> bool:
+    """这一篇此刻还在 vault、也还在库里吗。**只在持着维护锁时问才有意义。**"""
+    if not (VAULT_ROOT / doc_path).exists():
+        return False
+    return conn.execute("SELECT 1 FROM documents WHERE path=? LIMIT 1",
+                        (doc_path,)).fetchone() is not None
+
+
 def writeback_extraction(conn, doc_path: str, data: dict, stale: bool) -> bool:
     """把提取结果的 tag 对齐到 md frontmatter,改了文件就刷新 content_hash。
 
@@ -347,18 +357,58 @@ def writeback_extraction(conn, doc_path: str, data: dict, stale: bool) -> bool:
     改判后摘不掉(重索引又把误判带回库里)——第 1、2 轮审查各栽过一次,
     第 3 轮就栽在这两条旁路上。
 
-    stale 是 save_extraction / save_promo 的返回值:「上轮判 hard、这轮不是」。
+    **读文件 → 改 frontmatter → 写回 → 刷 hash 整段在维护锁里**
+    (`kb.maintenance`,模型请求留在锁外、不占它)。这里写的是 vault 文件,而
+    `writeback_tags` 是「`read_text` 拿一份内存快照 → 过一会儿 `write_text`
+    整份写回」——存量清理在这中间把这一篇从 feeds.db / vault / kb.db 三处删干净
+    的话,那次 `write_text` 会把**文件重新创建出来**:下一轮索引合法地扫到它、
+    upsert 回库,旧文从此搜得到、点得开,而 feeds.db 里已经没有这一条,重跑清理
+    只会说「无事可做」——比 index 那条路更糟,那一条下一轮 `remove_missing_documents`
+    还收得掉,这一条文件真的回来了,谁也收不掉(2026-10-01 第 2 轮审查两种合法
+    时序各实测一次:`kb extract --writeback` 与同步的并行存量提取)。
+    **外键级联挡不住这一步**:标签是在删除**之前**写进去并提交的,清理的级联
+    删除照样全部成功,它管的是库里那几张表,管不着谁在之后重建文件。
+
+    **取锁之前先把调用方那个写事务提交掉**(见下面 `conn.in_transaction` 那段):
+    SQLite 的写锁不认维护锁,攥着写事务等锁会把持锁的清理卡死在它自己的 DELETE 上。
+
+    **锁拿到手之后先确认这一篇还在**(`_still_indexed`)——等锁的这段时间里清理
+    很可能正是把它删掉了,那就什么都不做、返回 False(「没改文件」)。不抛异常:
+    文章是用户主动清理掉的,把它记成提取失败会让面板标红、谎报一次故障,而判定
+    本身早就落库了(随后被外键级联一并删掉,末态干净)。
     """
     tags = extraction_tags(data)
     need_remove = stale and (data.get("promo") or {}).get("level") != "hard"
     if not tags and not need_remove:
         return False     # 没什么要写的,不必为此读一遍文件
-    changed = writeback_tags(doc_path, tags) if tags else False
-    if need_remove:
-        changed = remove_writeback_tag(doc_path, PROMO_TAG) or changed
-    if changed:
-        refresh_content_hash(conn, doc_path)
-    return changed
+    if conn.in_transaction:
+        # **取锁之前把调用方手里那个写事务落盘,这件事由这里负责、不靠调用方自觉。**
+        # SQLite 的写锁不认维护锁:攥着它去等锁,持锁的清理就卡在自己的 DELETE 上,
+        # 两边互等到 SQLite 的 busy 超时(默认 30 秒)把清理打断 —— 清理报
+        # `database is locked`、索引那一步没做完,搜索里还留着刚删掉的旧文
+        # (2026-10-01 第 3 轮审查跨进程实测 32.5 秒后报错,末态 documents=1、
+        # 全文命中 1,要重试一次才收得干净)。原来这条契约写在**调用方**那一侧,
+        # 于是软广补判这个经 `sync_promo_tag` 进来的第四个调用方被漏掉,而回归
+        # 只枚举了三条提取路径、全绿照过。改成在共用入口自己 flush:多一个调用
+        # 方就少一处可漏的地方。
+        # 提前提交不新增副作用 —— 改了文件本来也要在锁内 `conn.commit()`,这里
+        # 只是把同一个提交挪早;四个调用方的判定都是逐篇独立、可重跑的,组内
+        # 那次提交没有「要么全要么全不」的语义。
+        conn.commit()
+    from kb.maintenance import maintenance_lock
+
+    with maintenance_lock():
+        if not _still_indexed(conn, doc_path):
+            return False
+        changed = writeback_tags(doc_path, tags) if tags else False
+        if need_remove:
+            changed = remove_writeback_tag(doc_path, PROMO_TAG) or changed
+        if changed:
+            refresh_content_hash(conn, doc_path)
+            # 在锁里提交:攥着 SQLite 写事务走出锁的话,下一个拿到维护锁的清理
+            # 会卡在它的 DELETE 上(SQLite 的写锁不认我们这把锁)。
+            conn.commit()
+        return changed
 
 
 def writeback_tags(doc_path: str, new_tags: list[str]) -> bool:

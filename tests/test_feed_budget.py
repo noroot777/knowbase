@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import httpx
 
+from kb import maintenance
 from kb.collectors import FetchScope
 from kb.feeds import fetching, registry as reg, sync
 
@@ -38,6 +39,8 @@ class FeedBudgetTests(unittest.TestCase):
         clock = SimpleNamespace(monotonic=self.clock.monotonic, time=lambda: self.epoch)
         for mock in (
             patch.object(reg, 'DB_PATH', Path(temp.name) / 'feeds.db'),
+            # 维护锁的 lockfile 在 DATA_DIR 下,指到 tmp 才不会去 flock 生产那一个
+            patch.object(maintenance, 'DATA_DIR', Path(temp.name)),
             patch.object(sync, '_state', {'stop_requested': False}),
             patch.object(sync, '_stage'),
             patch.object(sync, 'time', clock),

@@ -128,6 +128,11 @@ def _flag_in_vault(conn, path: str, level: str, stale: bool) -> None:
 
     单篇回写失败(文件被删、没有 frontmatter)不该让整组判定作废——判定结果
     已经落库了,这里只是补一个展示用的标记。
+
+    **调用它之前整组判定必须已经提交**(见 `cmd_run`):回写整段在维护锁里,
+    攥着写事务等锁会把持锁的清理卡死。等不到锁时 `LockBusy` 照常抛出去、整轮
+    中止 —— 那说明另一头正在做维护,这个脚本本来就按 `promo_level=''` 可重跑,
+    每篇再各等 `KB_MAINT_LOCK_WAIT` 才是更坏的一种。
     """
     try:
         sync_promo_tag(conn, path, level, stale)
@@ -160,13 +165,23 @@ def cmd_run(args) -> int:
                     print(f"[{i}/{len(groups)}] FAIL {str(e)[:120]}", flush=True)
                     continue
                 reason = promo["reason"]
+                flags = []
                 for j, c in enumerate(group):
                     p = dict(promo)
                     if j:   # 广播给同稿副本,注明结论不是它自己判的
                         p["reason"] = f"{reason}(同稿判定:{group[0]['path']})"
                     stale = save_promo(conn, c["path"], p, now)
-                    _flag_in_vault(conn, c["path"], p["level"], stale)
+                    flags.append((c["path"], p["level"], stale))
                     done += 1
+                # 整组判定先落盘,**再**逐篇回写 —— 和另外三条提取路径同一个时序。
+                # 回写要取 kb.maintenance 那把维护锁,而 SQLite 的写锁不认它:
+                # 攥着这一组没提交的写事务去等锁,持锁的清理会卡在自己的 DELETE
+                # 上,两边互等到清理报 `database is locked`(2026-10-01 第 3 轮
+                # 审查实测)。共用入口自己也会 flush,这里写明顺序是为了在调用
+                # 点上就看得出来。
+                conn.commit()
+                for path, level, stale in flags:
+                    _flag_in_vault(conn, path, level, stale)
                 conn.commit()
                 if promo["level"] == "hard":
                     hard += len(group)

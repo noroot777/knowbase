@@ -14,8 +14,9 @@ HN Top 100 Blogs 499 条。这些旧文逐批翻译、逐批重新导出,每重�
 **清理同时会给这个订阅钉上 `history_floor`**,否则下一次同步按老样子(空下界)
 把整个存档原样再拉一遍,这一趟白做。没有旧文可清时同样要钉 —— 见 `cmd_run`。
 
-动手整段持 `reg.trim_lock()`(同步那一侧也认这把锁),删除进度落在备份目录的
-`progress.json` 里,中途失败重跑会先把没做完的那几步续完。
+动手整段持 `kb.maintenance.maintenance_lock()`(同步的存盘/导出和索引的整趟扫描
+写库也认这把锁),删除进度落在备份目录的 `progress.json` 里,中途失败重跑会先把
+没做完的那几步续完。
 """
 from __future__ import annotations
 
@@ -36,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb.config import DATA_DIR, VAULT_ROOT          # noqa: E402
 from kb.feeds import registry as reg                # noqa: E402
+from kb.maintenance import LockBusy, maintenance_lock  # noqa: E402
 
 STATUS_URL = 'http://127.0.0.1:8787/api/pipeline/status'
 PHASES = ('feeds', 'vault', 'index')
@@ -174,15 +176,9 @@ def _pipeline_busy() -> str:
     管道跑在 kb-web 进程内,它的运行状态只有那个进程知道,所以问 HTTP。
     **连接被拒 = 服务没起 = 没有管道在跑**,放行;别的毛病(超时、HTTP 错、
     回包不是 JSON)证明不了"没人在跑",一律拦下——这是不可逆删除,问不到就
-    别猜。真正的互斥靠 `reg.trim_lock()`,这里只是开工前的早一道。
-
-    **已知缺口**:`reg.trim_lock()` 只有订阅存盘(`sync._save_result`)和导出
-    (`sync.export`)认,index 阶段(`pipeline_stages._run_index` / `cli.cmd_index`)
-    不认。清理开跑之后才起的「只跑 index」那种同步,可以在我们删文件之前把这篇
-    读进内存、在删完之后 upsert 回 kb.db,留下一行指向不存在文件的 `documents`
-    (搜得到、点开没有原文)。它会被**下一次** index 自己收掉
-    (`remove_missing_documents` 按磁盘上还在的那些算),所以不是永久损坏;
-    真要堵死得让所有 kb.db 写入方共用这把锁,那是另一件事。
+    别猜。真正的互斥靠 `kb.maintenance.maintenance_lock()`(index 阶段也持它),
+    这里只是开工前的早一道:管道正忙时当场说清楚,而不是让人对着一个一声不响
+    等满 `KB_MAINT_LOCK_WAIT` 的终端等下去。
     """
     try:
         with urllib.request.urlopen(STATUS_URL, timeout=5) as r:
@@ -275,8 +271,8 @@ def _apply(out: Path, plan: dict, allow_favorites: bool = False) -> None:
     `BEGIN IMMEDIATE` 当场拿到 kb.db 的写锁,于是这期间的收藏写入只有两种
     结局:赶在我们取锁之前提交成功(那它就会被这次复查看见、把这一轮拦下),
     或者等/报错(`store.connect` 的 `timeout=30`)—— 不会再有「成功了又被
-    静默删掉」这一档。清理锁 `reg.trim_lock()` 管不了这件事:收藏 API 不认
-    它,只有 kb.db 自己的写锁挡得住。
+    静默删掉」这一档。维护锁 `kb.maintenance.maintenance_lock()` 管不了这件事:
+    收藏 API 不认它,只有 kb.db 自己的写锁挡得住。
     """
     if not plan.get('feeds'):
         _cut_feeds(plan)
@@ -377,108 +373,121 @@ def cmd_run(args) -> int:
     except ValueError as e:
         print(e, file=sys.stderr)
         return 2
-    # 动手整段在清理锁里:同步那一侧的存盘和导出也认这把锁,不然一轮在备份
-    # 期间起跑的同步会把刚删掉的存档按旧快照原样写回来(见 `reg.trim_lock`)。
-    with reg.trim_lock():
-        with reg.db() as c:
-            source, why = find_source(c, args.source)
-        if not source:
-            print(why, file=sys.stderr)
-            return 2
-        left = _plans(source['id'])
-        if left and not args.yes:
-            for out, plan in left:
-                done = '/'.join(p for p in PHASES if plan.get(p)) or '无'
-                print(f'有一份没做完的清理:{out}(已完成 {done});加 --yes 续完它。',
-                      file=sys.stderr)
-            return 1
-        for out, plan in left:
-            # 续跑**不是**「接着执行上次批准的那件事」:收藏那道护栏排在新计划
-            # 的后面,续跑从旁边绕过去了 —— 失败之后用户把那篇还读得到的文章
-            # 收藏起来,重跑(没加 --allow-favorites)照样把文件、documents 和
-            # 收藏一起删掉,退出码还是 0(2026-10-01 第 2 轮审查实测)。所以按
-            # **此刻**真要删的那几篇再查一遍。
-            print(f'续上没做完的那一份:{out}')
-            try:
-                _apply(out, plan, args.allow_favorites)
-            except FavoritesAppeared as e:
-                print(f'这份没做完的清理({out})里有 {len(e.paths)} 篇在收藏里:\n  '
-                      + '\n  '.join(e.paths[:10])
-                      + '\n收藏是用户显式留下的(可能是这次失败之后才加的),'
-                        '确认要删加 --allow-favorites。计划留着,改完参数能接着续。',
-                      file=sys.stderr)
-                return 2
-        if left:
-            with reg.db() as c:
-                source = dict(c.execute('SELECT * FROM subscriptions WHERE id=?',
-                                        (source['id'],)).fetchone())
-        try:
-            floor = override or planned_floor(source)
-        except ValueError as e:
-            print(e, file=sys.stderr)
-            return 2
-        with reg.db() as c:
-            cut = below_floor(_items(c, source['id']), floor)
-            keys = [r['key'] for r in cut]
-            shared = _shared_keys(c, keys, source['id'])
-        if not cut:
-            if source['history_floor'][:10] == floor:
-                print(f"[{source['id']}] {source['name']}:下界 {floor} 之前没有条目,无事可做。")
-                return 0
-            # 空集合不等于"不用钉下界":老订阅(空下界)眼下恰好没有旧文,源站
-            # 下次补发 7 月的东西照样整批收 —— 提前返回的话这一趟什么都没改变,
-            # 而命令以 0 退出,看着像做完了(2026-10-01 审查实测)。
-            print(f"[{source['id']}] {source['name']}:下界 {floor} 之前没有条目;"
-                  f"把 history_floor 从「{source['history_floor'] or '空'}」钉成 {floor}。")
-            if not args.yes:
-                print('确认请加 --yes。')
-                return 1
-            with reg.db() as c:
-                c.execute('UPDATE subscriptions SET history_floor=? WHERE id=?',
-                          (floor, source['id']))
-            print(f'  history_floor={floor}')
-            return 0
-        # 共享条目只摘归属,所以它们的文件和索引不进待删清单。
-        paths = [r['path'] for r in cut if r['path'] and r['key'] not in shared]
-        if shared and not args.allow_shared:
-            print(f'{len(shared)} 条还被别的订阅收录着:这边只摘掉归属,文件和索引'
-                  f'留给那边。确认请加 --allow-shared。', file=sys.stderr)
-            return 2
-        # 早一道:动手之前就把话说清楚(省掉建备份目录)。真闸门在 `_apply` 的
-        # 写事务里 —— 这里查完到那里删完之间还有确认、备份、unlink 一整段。
-        from kb import store as _store
-        _c = _store.connect()
-        try:
-            fav = _favorites(_c, paths)
-        finally:
-            _c.close()
-        if fav and not args.allow_favorites:
-            print(f'这批里有 {len(fav)} 篇在收藏里:\n  ' + '\n  '.join(fav[:10])
-                  + '\n收藏是用户显式留下的,确认要删加 --allow-favorites。', file=sys.stderr)
-            return 2
-        print(f"[{source['id']}] {source['name']}:下界 {floor},清掉 {len(cut)} 条"
-              f"({cut[0]['published'][:10]} ~ {cut[-1]['published'][:10]});"
-              f"其中 {len(shared)} 条被共享、只摘归属,{len(paths)} 篇连文件和索引一起删")
-        if not args.yes:
-            print('这一步不可逆(有备份)。确认请加 --yes。')
-            return 1
-        # index 阶段不认这把锁(见 `_pipeline_busy` 那条已知缺口)。
-        print('  清理期间别起同步 —— 尤其是「只跑 index」那种,它不认清理锁。')
+    # 动手整段在维护锁里:同步那一侧的存盘和导出、索引那一侧的整趟扫描写库都
+    # 认这把锁。不然一轮在备份期间起跑的同步会把刚删掉的存档按旧快照原样写回来,
+    # 一轮并发的索引会把刚删掉的 documents 行按删除之前读到的内容写回来
+    # (见 `kb.maintenance`)。
+    try:
+        with maintenance_lock(on_wait=_lock_wait):
+            return _run_locked(args, override)
+    except LockBusy as e:
+        print(e, file=sys.stderr)
+        return 2
 
-        out = _backup(source, cut, paths, floor)
-        plan = {'subscription_id': source['id'], 'name': source['name'], 'floor': floor,
-                'keys': keys, 'paths': paths}
-        _mark(out, plan, 'planned')
-        print(f'  备份 → {out}')
+
+def _lock_wait(waited: float) -> None:
+    print(f'等维护锁:另一个 kb.db 维护任务(索引或另一趟清理)正在跑'
+          f'(已等 {int(waited)} 秒)…', file=sys.stderr, flush=True)
+
+
+def _run_locked(args, override: str) -> int:
+    with reg.db() as c:
+        source, why = find_source(c, args.source)
+    if not source:
+        print(why, file=sys.stderr)
+        return 2
+    left = _plans(source['id'])
+    if left and not args.yes:
+        for out, plan in left:
+            done = '/'.join(p for p in PHASES if plan.get(p)) or '无'
+            print(f'有一份没做完的清理:{out}(已完成 {done});加 --yes 续完它。',
+                  file=sys.stderr)
+        return 1
+    for out, plan in left:
+        # 续跑**不是**「接着执行上次批准的那件事」:收藏那道护栏排在新计划
+        # 的后面,续跑从旁边绕过去了 —— 失败之后用户把那篇还读得到的文章
+        # 收藏起来,重跑(没加 --allow-favorites)照样把文件、documents 和
+        # 收藏一起删掉,退出码还是 0(2026-10-01 第 2 轮审查实测)。所以按
+        # **此刻**真要删的那几篇再查一遍。
+        print(f'续上没做完的那一份:{out}')
         try:
             _apply(out, plan, args.allow_favorites)
         except FavoritesAppeared as e:
-            print(f'这一趟开跑之后有 {len(e.paths)} 篇被收藏了:\n  '
+            print(f'这份没做完的清理({out})里有 {len(e.paths)} 篇在收藏里:\n  '
                   + '\n  '.join(e.paths[:10])
-                  + '\n收藏连备注一起删掉就找不回来了,所以这一轮不删。'
-                    f'计划留在 {out},确认要删加 --allow-favorites 续跑。',
+                  + '\n收藏是用户显式留下的(可能是这次失败之后才加的),'
+                    '确认要删加 --allow-favorites。计划留着,改完参数能接着续。',
                   file=sys.stderr)
             return 2
+    if left:
+        with reg.db() as c:
+            source = dict(c.execute('SELECT * FROM subscriptions WHERE id=?',
+                                    (source['id'],)).fetchone())
+    try:
+        floor = override or planned_floor(source)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
+    with reg.db() as c:
+        cut = below_floor(_items(c, source['id']), floor)
+        keys = [r['key'] for r in cut]
+        shared = _shared_keys(c, keys, source['id'])
+    if not cut:
+        if source['history_floor'][:10] == floor:
+            print(f"[{source['id']}] {source['name']}:下界 {floor} 之前没有条目,无事可做。")
+            return 0
+        # 空集合不等于"不用钉下界":老订阅(空下界)眼下恰好没有旧文,源站
+        # 下次补发 7 月的东西照样整批收 —— 提前返回的话这一趟什么都没改变,
+        # 而命令以 0 退出,看着像做完了(2026-10-01 审查实测)。
+        print(f"[{source['id']}] {source['name']}:下界 {floor} 之前没有条目;"
+              f"把 history_floor 从「{source['history_floor'] or '空'}」钉成 {floor}。")
+        if not args.yes:
+            print('确认请加 --yes。')
+            return 1
+        with reg.db() as c:
+            c.execute('UPDATE subscriptions SET history_floor=? WHERE id=?',
+                      (floor, source['id']))
+        print(f'  history_floor={floor}')
+        return 0
+    # 共享条目只摘归属,所以它们的文件和索引不进待删清单。
+    paths = [r['path'] for r in cut if r['path'] and r['key'] not in shared]
+    if shared and not args.allow_shared:
+        print(f'{len(shared)} 条还被别的订阅收录着:这边只摘掉归属,文件和索引'
+              f'留给那边。确认请加 --allow-shared。', file=sys.stderr)
+        return 2
+    # 早一道:动手之前就把话说清楚(省掉建备份目录)。真闸门在 `_apply` 的
+    # 写事务里 —— 这里查完到那里删完之间还有确认、备份、unlink 一整段。
+    from kb import store as _store
+    _c = _store.connect()
+    try:
+        fav = _favorites(_c, paths)
+    finally:
+        _c.close()
+    if fav and not args.allow_favorites:
+        print(f'这批里有 {len(fav)} 篇在收藏里:\n  ' + '\n  '.join(fav[:10])
+              + '\n收藏是用户显式留下的,确认要删加 --allow-favorites。', file=sys.stderr)
+        return 2
+    print(f"[{source['id']}] {source['name']}:下界 {floor},清掉 {len(cut)} 条"
+          f"({cut[0]['published'][:10]} ~ {cut[-1]['published'][:10]});"
+          f"其中 {len(shared)} 条被共享、只摘归属,{len(paths)} 篇连文件和索引一起删")
+    if not args.yes:
+        print('这一步不可逆(有备份)。确认请加 --yes。')
+        return 1
+
+    out = _backup(source, cut, paths, floor)
+    plan = {'subscription_id': source['id'], 'name': source['name'], 'floor': floor,
+            'keys': keys, 'paths': paths}
+    _mark(out, plan, 'planned')
+    print(f'  备份 → {out}')
+    try:
+        _apply(out, plan, args.allow_favorites)
+    except FavoritesAppeared as e:
+        print(f'这一趟开跑之后有 {len(e.paths)} 篇被收藏了:\n  '
+              + '\n  '.join(e.paths[:10])
+              + '\n收藏连备注一起删掉就找不回来了,所以这一轮不删。'
+                f'计划留在 {out},确认要删加 --allow-favorites 续跑。',
+              file=sys.stderr)
+        return 2
     return 0
 
 

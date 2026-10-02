@@ -12,6 +12,7 @@ import yaml
 
 from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
+from kb.maintenance import maintenance_lock
 from kb.feeds import translate
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_state import _state, _stage
@@ -73,10 +74,10 @@ def _save_result(source, result, scope):
         entries = [e for e in entries if e['published'] and scope.since <= e['published'][:10] <= scope.until]
         # A ranged import must not cache away entries outside the selected dates.
         validators = {k: source[k] for k in ('etag', 'modified', 'resolved_url')}
-    # 存盘整段在清理锁里:存量清理持同一把锁,两边交错的话它删掉的旧文会被
-    # 这一轮按旧快照原样写回去(见 `reg.trim_lock`)。锁内再现读一次下界,所以
-    # 对方不持锁的旁路同样挡得住 —— 两道各管一段,缺一不可。
-    with reg.trim_lock():
+    # 存盘整段在维护锁里:存量清理和索引持同一把锁,两边交错的话它删掉的旧文
+    # 会被这一轮按旧快照原样写回去(见 `kb.maintenance`)。锁内再现读一次下界,
+    # 所以对方不持锁的旁路同样挡得住 —— 两道各管一段,缺一不可。
+    with maintenance_lock():
         if not scope.ranged:
             entries = _within_history(source, entries)
         added = reg.put_items(source, entries)
@@ -204,12 +205,12 @@ def _kept_meta(path: Path) -> dict:
 
 def export(kind: str, hold_untranslated: bool = False,
            translated: dict | None = None):
-    # 整段在清理锁里:导出是「选出待导出的行 → 逐篇写 vault」,存量清理是
+    # 整段在维护锁里:导出是「选出待导出的行 → 逐篇写 vault」,存量清理是
     # 「删 feeds.db 行 → 删 vault 文件」。不互斥的话清理删掉行、导出随后按
     # 自己那份快照把文件写回去,而 feed_items 里已经没有这一条——vault 里从此
     # 躺着一篇谁也管不着的旧文,索引照样收它,下一次清理也找不到它
-    # (见 `reg.trim_lock`)。
-    with reg.trim_lock():
+    # (见 `kb.maintenance`)。
+    with maintenance_lock():
         return _export(kind, hold_untranslated, translated)
 
 

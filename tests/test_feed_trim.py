@@ -2,38 +2,26 @@
 
 这个脚本是**不可逆删除**:除了"清对了哪一批",还得钉住三件事 —— 共享条目
 不许连带挖空另一个订阅、中途失败重跑能收敛、清理期间起跑的同步不能把刚删掉
-的旧文写回来。
+的旧文写回来。它和**索引**之间的互斥在 `test_index_lock.py`。
 """
-import argparse
-import importlib.util
 import json
 import sqlite3
 import subprocess
 import sys
 import tarfile
-import tempfile
 import textwrap
 import unittest
 import urllib.error
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
-from zoneinfo import ZoneInfo
 
-from kb import store
+from kb import maintenance, store
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg, sync
 
-ROOT = Path(__file__).resolve().parent.parent
-_spec = importlib.util.spec_from_file_location(
-    'feed_trim_history', ROOT / 'scripts' / 'feed_trim_history.py')
-trim = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(trim)
-
-OLD = 'https://example.org/old-post'
-_real_connect = store.connect
-_real_busy = trim._pipeline_busy          # setUp 会把它换成桩,先留一份真的
+from feed_trim_fixture import TrimFixture, _real_busy, trim  # noqa: E402
 
 
 class _FixedNow(datetime):
@@ -47,91 +35,7 @@ class _FixedNow(datetime):
         return datetime(2026, 10, 1, 11, 0, 0)
 
 
-class TrimTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        self.vault = self.root / 'vault'
-        for target, attr, value in ((reg, 'DB_PATH', self.root / 'feeds.db'),
-                                    (reg, 'DATA_DIR', self.root),
-                                    (trim, 'DATA_DIR', self.root),
-                                    (trim, 'VAULT_ROOT', self.vault),
-                                    (sync, 'VAULT_ROOT', self.vault)):
-            p = patch.object(target, attr, value)
-            p.start(); self.addCleanup(p.stop)
-        for p in (patch.object(store, 'connect', lambda *a, **k: _real_connect(self.root / 'kb.db')),
-                  patch.object(trim, '_pipeline_busy', return_value='')):
-            p.start(); self.addCleanup(p.stop)
-
-    # ---- 夹具 ----
-    def sub(self, name='Review A', url='https://example.org/a.xml'):
-        return reg.save_subscription('rss', {'name': name, 'url': url})
-
-    def entry(self, url=OLD, published='2026-07-01 08:00'):
-        return dict(url=url, title='Historical post', body='historical review content',
-                    published=published, author='Review', content_kind='feed')
-
-    def legacy(self, source):
-        """老库里的订阅:空下界(migrate 补出来就是这样)。"""
-        with reg.db() as c:
-            c.execute("UPDATE subscriptions SET history_floor='' WHERE id=?", (source['id'],))
-        return reg.subscription('rss', source['id'])
-
-    def seed(self, source, entry=None):
-        """把一条旧文落到三处:feeds.db、vault、kb.db(含可检索的 chunk)。"""
-        e = entry or self.entry()
-        reg.put_items(source, [e])
-        sync.export('rss')
-        with reg.db() as c:
-            item = dict(c.execute('SELECT * FROM feed_items WHERE url=?', (e['url'],)).fetchone())
-        conn = store.connect()
-        conn.execute('INSERT OR IGNORE INTO documents(path,source,title,published,indexed_at) '
-                     'VALUES(?,?,?,?,?)', (item['path'], 'rss', item['title'],
-                                           item['published'], '2026-10-01 09:00:00'))
-        cid = conn.execute('INSERT INTO chunks(path,seq,text) VALUES(?,?,?)',
-                           (item['path'], 0, e['body'])).lastrowid
-        conn.execute('INSERT INTO chunks_fts(chunk_id,title_tok,text_tok) VALUES(?,?,?)',
-                     (cid, 'historical', e['body']))
-        conn.commit(); conn.close()
-        return item
-
-    def favorites(self):
-        conn = store.connect()
-        n = conn.execute('SELECT count(*) FROM favorites').fetchone()[0]
-        conn.close()
-        return n
-
-    def args(self, row, **over):
-        base = dict(source=str(row['id']), floor=None, yes=True,
-                    allow_shared=False, allow_favorites=False, verbose=False)
-        return argparse.Namespace(**(base | over))
-
-    def state(self, item, source=None):
-        with reg.db() as c:
-            row = c.execute('SELECT exported_hash,content_hash FROM feed_items WHERE key=?',
-                            (item['key'],)).fetchone()
-            links = c.execute('SELECT count(*) FROM subscription_items WHERE item_key=?',
-                              (item['key'],)).fetchone()[0]
-        conn = store.connect()
-        docs = conn.execute('SELECT count(*) FROM documents WHERE path=?',
-                            (item['path'],)).fetchone()[0]
-        hits = conn.execute("SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'historical'"
-                            ).fetchone()[0]
-        conn.close()
-        return dict(feed_row=bool(row), memberships=links,
-                    exported=bool(row and row['exported_hash'] == row['content_hash']),
-                    file=(self.vault / item['path']).exists(), documents=docs, searchable=hits)
-
-    def floor_of(self, source):
-        return reg.subscription('rss', source['id'])['history_floor']
-
-    # ---- 口径:清掉的正是以后会被拦下的那一批 ----
-    def aged(self, days, url=None):
-        day = (datetime.now(ZoneInfo('Asia/Shanghai')).date() - timedelta(days=days)).isoformat()
-        return {'url': url or f'https://example.org/p{days}', 'title': 'x', 'body': 'y',
-                'published': f'{day} 08:00', 'author': 'a', 'content_kind': 'feed'}
-
+class TrimTests(TrimFixture, unittest.TestCase):
     def test_picks_the_same_set_the_floor_would_have_rejected(self):
         """和往后那道闸(`sync._within_history`)必须同一个口径。
 
@@ -485,8 +389,8 @@ class TrimTests(unittest.TestCase):
         st = self.state(item)
         self.assertEqual((0, False, False, 0), (added, st['feed_row'], st['file'], st['documents']))
 
-    def test_the_write_paths_take_the_trim_lock(self):
-        """存盘和导出都要在清理锁里:下界现读只拦"写回旧文",拦不住导出。
+    def test_the_write_paths_take_the_maintenance_lock(self):
+        """存盘和导出都要在维护锁里:下界现读只拦"写回旧文",拦不住导出。
 
         导出是「选出待导出的行 → 逐篇写 vault」:清理删掉行之后,导出按自己
         那份快照照样把文件写回去,而 `feed_items` 里已经没有这一条 —— vault
@@ -500,14 +404,14 @@ class TrimTests(unittest.TestCase):
             taken.append(1)
             yield
 
-        with patch.object(reg, 'trim_lock', spy):
+        with patch.object(sync, 'maintenance_lock', spy):
             sync._save_result(s, ([self.entry(published='2026-10-01 08:00')],
                                   dict(etag='n', modified='', resolved_url=s['url'])), FetchScope())
             self.assertEqual(1, len(taken))
             sync.export('rss')
             self.assertEqual(2, len(taken))
 
-    def test_the_trim_lock_really_excludes_another_process(self):
+    def test_the_maintenance_lock_really_excludes_another_process(self):
         """锁必须跨进程:CLI、kb-web 管道、手动重跑各是独立进程。"""
         child = textwrap.dedent('''
             import fcntl, sys
@@ -519,7 +423,7 @@ class TrimTests(unittest.TestCase):
                 print('busy')
         ''')
         lock = self.root / 'feeds-trim.lock'
-        with reg.trim_lock():
+        with maintenance.maintenance_lock():
             self.assertTrue(lock.exists())
             r = subprocess.run([sys.executable, '-c', child, str(lock)],
                                capture_output=True, text=True, timeout=30)
@@ -528,10 +432,10 @@ class TrimTests(unittest.TestCase):
                            capture_output=True, text=True, timeout=30)
         self.assertEqual('free', r.stdout.strip())
 
-    def test_the_trim_lock_is_reentrant_in_one_thread(self):
+    def test_the_maintenance_lock_is_reentrant_in_one_thread(self):
         """flock 认的是 open file description,同进程换个 fd 再锁会把自己锁死。"""
-        with reg.trim_lock():
-            with reg.trim_lock():
+        with maintenance.maintenance_lock():
+            with maintenance.maintenance_lock():
                 pass
 
     # ---- 开工前那道状态查询 ----
