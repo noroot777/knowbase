@@ -44,19 +44,36 @@ _REFILL_ENV = "KB_REFILL_SCRIPT"
 
 
 def refill_script() -> Path | None:
-    """配置好的回填脚本路径(绝对路径);没配返回 None。
+    """配置好的回填脚本路径(绝对路径);没配返回 None。**这个函数永远不抛异常。**
 
     现读环境变量而不是在导入时定下来:测试要能逐个用例换路径。
 
-    **必须在这里就 `resolve()` 成绝对路径**:跑它的时候 `cwd` 是脚本自己所在的目录
-    (脚本按相对路径找 vault 和存量 md),相对路径配置下这两件事会打架 ——
+    **必须在这里就变成绝对路径**:跑它的时候 `cwd` 是脚本自己所在的目录(脚本按相对
+    路径找 vault 和存量 md),相对路径配置下这两件事会打架 ——
     `KB_REFILL_SCRIPT=tools/refill.py` 的存在性检查在当前目录下通过,子进程却带着
     `cwd=tools/` 再去找 `tools/refill.py`,于是打开的是 `tools/tools/refill.py`,
     报一句「回填脚本异常: ... No such file」,而检查明明说文件在
     (2026-10-02 审查实测)。检查和执行用同一个绝对路径,这条缝就没有了。
+
+    **绝对化只做字符串层面的 `abspath`,不做 `resolve()`。** `Path.resolve()` 要顺着
+    符号链接走,**链接成环时 Python 3.11 抛 `RuntimeError: Symlink loop`** —— 而这个
+    函数在 `retry_failed_plan()` 里被调用,异常从计划生成阶段一路冒到 HTTP 层:面板上
+    点「重试失败项」只看到一句「重试未能启动 / Internal Server Error」,**连同一轮里
+    本该重试的 index / extract 一起没了**,而这只是一个可选外挂配错了
+    (2026-10-02 第 2 轮审查实测,真走 `POST /api/pipeline/retry-failed` 复现 500)。
+    路径对不对本来就有 `_run_refill` 里那道 `is_file()` 负责报(坏链接上它返回 False,
+    不抛),这里只负责交出一个「检查和执行共用」的绝对路径。`abspath` 是纯字符串运算、
+    碰不到文件系统,唯一的例外是相对路径要问一次 cwd —— 连这个都失败(cwd 被删了)就
+    原样交回去,照样让那道检查去报,绝不把异常抛给重试计划。
     """
     raw = os.environ.get(_REFILL_ENV, "").strip()
-    return Path(raw).expanduser().resolve() if raw else None
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    try:
+        return Path(os.path.abspath(path))
+    except OSError:
+        return path
 
 # 阶段 detail 里写了失败条数就算失败(状态本身是 ok 也算),与面板按钮同一套判定
 _FAIL_DETAIL_RE = re.compile(r"失败 [1-9]|\d+ 个账号失败")

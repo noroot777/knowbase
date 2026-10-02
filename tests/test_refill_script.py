@@ -7,7 +7,9 @@
 这个功能对他们永远不可用。
 
 现在的口径:配了 KB_REFILL_SCRIPT 才有这一步,没配就压根不进重试计划。
-配进来的路径一律当场 resolve 成绝对路径 —— 检查和执行必须是同一个路径。
+配进来的路径一律当场变成绝对路径(`abspath`,不是 `resolve`)—— 检查和执行必须是
+同一个路径,而且这一步**永远不许抛异常**:它跑在重试计划生成里,抛出去就是整条
+重试链连同 index/extract 一起 500。
 """
 
 import os
@@ -41,13 +43,15 @@ class RefillScriptTests(unittest.TestCase):
         stage.start()
         self.addCleanup(stage.stop)
 
-    def _plan(self, *, extract_detail='跳过 3(正文空,需回填)') -> list[str]:
+    def _plan(self, *, extract_detail='跳过 3(正文空,需回填)',
+              stages: dict | None = None) -> list[str]:
         """算一次重试计划。
 
         计划为空时 retry_failed_plan 会去库里看提取积压 —— 这里把那条支路也挡掉,
         免得测试去碰开发机上真实的 data/kb.db。
         """
-        last = {"stages": {"extract": {"status": "ok", "detail": extract_detail}}}
+        last = {"stages": {"extract": {"status": "ok", "detail": extract_detail},
+                           **(stages or {})}}
         with patch.object(pipeline_retry, "load_last_run", return_value=last), \
              patch.object(store, "connect", return_value=_FakeConn()), \
              patch.object(extract, "pending_docs", return_value=[]):
@@ -78,7 +82,7 @@ class RefillScriptTests(unittest.TestCase):
         pipeline_retry._run_refill()
         name, status, detail = self.stages[0]
         self.assertEqual(("export", "skipped"), (name, status))
-        self.assertIn(str(missing.resolve()), detail)
+        self.assertIn(str(missing), detail)
 
     def test_a_directory_is_not_a_script(self):
         """指到一个目录上同样是配置错了:别等子进程报一句看不懂的话。"""
@@ -93,7 +97,7 @@ class RefillScriptTests(unittest.TestCase):
         script = Path(self.tmp.name) / "refill.py"
         script.write_text("print('没有找到空正文文件')\n", encoding="utf-8")
         os.environ["KB_REFILL_SCRIPT"] = str(script)
-        self.assertEqual(script.resolve(), pipeline_retry.refill_script())
+        self.assertEqual(script, pipeline_retry.refill_script())
         self.assertIn("refill", self._plan())
         pipeline_retry._run_refill()
         self.assertEqual("running", self.stages[0][1])
@@ -103,8 +107,7 @@ class RefillScriptTests(unittest.TestCase):
     def test_tilde_is_expanded(self):
         """`~/...` 这种写法得认,不然配上去永远指不到。"""
         os.environ["KB_REFILL_SCRIPT"] = "~/refill.py"
-        self.assertEqual((Path.home() / "refill.py").resolve(),
-                         pipeline_retry.refill_script())
+        self.assertEqual(Path.home() / "refill.py", pipeline_retry.refill_script())
 
     def test_relative_path_in_a_subdir_really_runs(self):
         """子目录相对路径要真的跑起来 —— 这条钉的是检查和执行用同一个路径。
@@ -126,6 +129,66 @@ class RefillScriptTests(unittest.TestCase):
         pipeline_retry._run_refill()
         self.assertEqual(("export", "ok"), self.stages[-1][:2])
         self.assertIn("没有空正文文件", self.stages[-1][2])
+
+    def _loop_link(self) -> Path:
+        """造一条指向自己的符号链接,并配给 KB_REFILL_SCRIPT。"""
+        link = Path(self.tmp.name) / "loop.py"
+        link.symlink_to(link)
+        os.environ["KB_REFILL_SCRIPT"] = str(link)
+        return link
+
+    def test_symlink_loop_is_a_bad_config_not_an_exception(self):
+        """指向自己的链接:取路径不许抛,阶段落 skipped 并把那条路径说出来。
+
+        `Path.resolve()` 要顺着链接走,成环时 Python 3.11 抛
+        `RuntimeError: Symlink loop` —— 而 `refill_script()` 跑在重试计划生成里。
+        """
+        link = self._loop_link()
+        got = pipeline_retry.refill_script()   # 不抛
+        self.assertTrue(got.is_absolute())
+        pipeline_retry._run_refill()
+        name, status, detail = self.stages[0]
+        self.assertEqual(("export", "skipped"), (name, status))
+        self.assertIn(str(link), detail)
+
+    def test_a_bad_refill_config_does_not_block_the_other_retries(self):
+        """坏配置不许连坐:index / extract 照样进计划。
+
+        这是最要命的那一面 —— 异常从计划生成冒出去的话,这一轮**什么都重试不了**。
+        """
+        self._loop_link()
+        plan = self._plan(stages={"index": {"status": "error", "detail": "挂了"}})
+        self.assertEqual(["refill", "index", "extract"], plan)
+
+    def test_the_retry_endpoint_does_not_500_on_a_bad_refill_config(self):
+        """走真的 HTTP 路由再钉一遍:坏配置下不许 500。
+
+        面板上看到的是「重试未能启动 / Internal Server Error」,而这只是一个可选
+        外挂配错了。这里把 `running` 先立起来,于是真实路由会在算完计划之后按
+        409「管道已在运行中」收尾 —— 计划生成那一段是真跑的,它抛就是 500。
+        """
+        from copy import deepcopy
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from kb import pipeline_state as pstate
+        from kb.web import pipeline_api
+
+        self._loop_link()
+        saved = deepcopy(pstate._state)
+        self.addCleanup(lambda: (pstate._state.clear(), pstate._state.update(saved)))
+        pstate._state["running"] = True
+        app = FastAPI()
+        app.include_router(pipeline_api.router)
+        client = TestClient(app, raise_server_exceptions=False)
+        last = {"stages": {"extract": {"status": "ok",
+                                       "detail": "跳过 3(正文空,需回填)"},
+                           "index": {"status": "error", "detail": "挂了"}}}
+        with patch.object(pipeline_retry, "load_last_run", return_value=last):
+            r = client.post("/api/pipeline/retry-failed")
+        self.assertEqual(409, r.status_code, r.text)
+        self.assertIn("已在运行", r.json().get("detail", ""))
 
 
 if __name__ == "__main__":
