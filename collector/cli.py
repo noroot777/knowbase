@@ -133,7 +133,7 @@ def cmd_accounts(args) -> int:
             info(f"共 {len(out)} 个公众号,{active} 个参与采集(✓):")
             for a in out:
                 mark = "✓" if a["in_crawl_config"] else "·"
-                # 微信上已经改了名的,把新名字跟在后面——库里的键还是旧的那个
+                # 绿泡泡上已经改了名的,把新名字跟在后面——库里的键还是旧的那个
                 shown = a["name"]
                 if a["display_name"] and a["display_name"] != a["name"]:
                     shown = f"{a['name']} →{a['display_name']}"
@@ -273,7 +273,7 @@ def _discover_note(row: dict) -> str:
 
 def _accounts_add(name: str, fakeid: str = "", as_json: bool = False) -> int:
     """写入订阅列表。给了 fakeid 就直接落库——面板上是先搜后点,那一步已经
-    定死了是哪个号,再搜一次既慢又可能因为微信排序变化选中另一个同名号。"""
+    定死了是哪个号,再搜一次既慢又可能因为绿泡泡排序变化选中另一个同名号。"""
     from src.db.repository import AccountNameTaken, ArticleRepository
 
     if not fakeid:
@@ -392,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     from src.collect.bootstrap import install
 
-    install()          # 微信域名绕过系统代理,不装会在有 MITM 代理时静默失败
+    install()          # 绿泡泡域名绕过系统代理,不装会在有 MITM 代理时静默失败
     handlers = {
         "status": cmd_status, "collect": cmd_collect, "export": cmd_export,
         "accounts": cmd_accounts,

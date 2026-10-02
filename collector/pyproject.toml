@@ -1,7 +1,7 @@
 [project]
 name = "knowbase-collector"
 version = "0.1.0"
-description = "Knowbase 的公众号采集器:从本机微信数据库发现推送,按链接抓正文,导出 markdown"
+description = "Knowbase 的公众号采集器:从本机绿泡泡数据库发现推送,按链接抓正文,导出 markdown"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

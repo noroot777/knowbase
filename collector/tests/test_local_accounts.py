@@ -45,7 +45,7 @@ class _Base(unittest.TestCase):
 
         self.repo = ArticleRepository()
         self._seq = 0
-        # 库里存的是旧名字,微信里这个号已经改叫「订阅号·新名」——
+        # 库里存的是旧名字,绿泡泡里这个号已经改叫「订阅号·新名」——
         # 「已订阅」必须按 biz 认出来,否则用户会照新名字再加一遍。
         self.repo.enable_crawl_account("订阅号·旧名", "biz-sub")
         self.repo.commit()

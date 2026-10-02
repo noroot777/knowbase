@@ -85,11 +85,11 @@ Docker 内无法从 Mac 绿泡泡进程提取数据库 key。页面会显示“�
 2. 在 Mac 同步公众号(读本机已同步的推送)，并导出 Markdown 到 vault。
 3. 将 vault 通过 `KB_VAULT_PATH` 挂载到 Docker，执行索引；检索、问答与后续分析在容器运行。
 
-容器里能跑采集器的后几步(导出、索引)，**发现文章那一步不行**——它要读 Mac 微信
+容器里能跑采集器的后几步(导出、索引)，**发现文章那一步不行**——它要读 Mac 绿泡泡
 客户端的库，容器碰不到。所以挂载已有的 `collector/data` 之后可以在容器里 `export`，
 但 `collect` 要在 Mac 上跑。
 
-> 另一条采集方式(逐号文章凭证，靠 mitm 从 Mac 微信里截)在 `wechat-oa` 分支上，
+> 另一条采集方式(逐号文章凭证，靠 mitm 从 Mac 绿泡泡里截)在 `wechat-oa` 分支上，
 > 不做推荐、不再跟进主干。那条路同样要宿主机配合，容器里也只能跑导出之后的步骤。
 
 ```bash
@@ -123,6 +123,6 @@ docker compose exec -w /app/collector knowbase .venv/bin/python -m cli export
 收藏、采集状态和文章原件。模型缓存可重新下载，不是唯一数据源。
 
 `docker compose ps` 的 healthy 来自 `/api/health`，只表示 Web 进程可响应，
-不代表供应商、网络或本机微信库已就绪。初始化失败先看 `docker compose logs`；
+不代表供应商、网络或本机绿泡泡库已就绪。初始化失败先看 `docker compose logs`；
 端口冲突修改 `.env` 的 `KB_PORT`。镜像构建需要访问 Docker registry、PyPI、
 PyTorch CPU wheel 源和 Debian 包源，网络代理请在 Docker 的构建环境中配置，勿写入镜像。

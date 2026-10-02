@@ -74,7 +74,7 @@ def _resolve_proxy_url(src: str) -> str:
 
 
 class _ArticleParser(HTMLParser):
-    """把微信 rich_media_content HTML 转成 Markdown（移植自 gzh_saver._ArticleParser）。
+    """把绿泡泡 rich_media_content HTML 转成 Markdown（移植自 gzh_saver._ArticleParser）。
 
     - <section> 满天飞，语义上是块级容器，当 <p> 处理
     - <img data-src> 优先（库里 html 的 src 已还原，但保留兼容）

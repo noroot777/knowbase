@@ -52,7 +52,7 @@ async function reloadTargets() {
   renderTargets();
 }
 
-/* 显示名 vs 档案键:来源那边改了名,列表要显示新的那个,否则你在微信里
+/* 显示名 vs 档案键:来源那边改了名,列表要显示新的那个,否则你在绿泡泡里
  * 按看到的名字去搜会搜不着。但增删改一律还得用 name——它是后端的键。 */
 function tgtShown(t) { return t.display_name || t.name; }
 function tgtRenamed(t) { return !!t.display_name && t.display_name !== t.name; }

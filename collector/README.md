@@ -1,6 +1,6 @@
 # collector — Knowbase 的公众号采集器
 
-从**本机微信（Mac 客户端）已同步的推送**里发现公众号文章,按链接抓正文,导出成
+从**本机绿泡泡（Mac 客户端）已同步的推送**里发现公众号文章,按链接抓正文,导出成
 Obsidian markdown 交给 Knowbase 索引。
 
 它是一次性 CLI,不是常驻服务:
@@ -36,14 +36,14 @@ python -m cli export [--no-images]        # 导出成 obsidian md
 python -m cli accounts list|discover|add|remove|enable|disable [名字] [--json]
 ```
 
-`accounts discover` 从本机微信的会话列表里找候选:**不登录、不走网络**。裸列时
+`accounts discover` 从本机绿泡泡的会话列表里找候选:**不登录、不走网络**。裸列时
 归属从发现索引里查(一条推送都不翻),给了关键词才现翻索引外那几个会话。
 加号走 `accounts add <名字>`,同名会话要补 `--fakeid`。
 
 ## 它是怎么拿到文章的
 
 ```
-本机微信数据库  --(只读 SQL,经 rion-wechat-cli)-->  发现:哪些推送、属于哪个号
+本机绿泡泡数据库  --(只读 SQL,经 rion-wechat-cli)-->  发现:哪些推送、属于哪个号
       |
       v
 local_wechat_articles  --(按 __biz + mid + idx 认身份)-->  articles
@@ -58,7 +58,7 @@ local_wechat_articles  --(按 __biz + mid + idx 认身份)-->  articles
 几条硬约束(详见仓库根目录 `CLAUDE.md` 的「collector 采集器」一节):
 
 - 只能通过已配置的 `rion-wechat-cli` 读,须确认 `live_database_read_ok`;不自动
-  获取密钥、不操作微信、不用通知预览替代。
+  获取密钥、不操作绿泡泡、不用通知预览替代。
 - 归属最终按推送 URL 里的 `__biz` 核实,不以同名自动匹配。
 - 文章身份是 `__biz + mid + idx`;用户删除的文章记进链接身份黑名单,换一种发现
   方式也不复活。
@@ -81,7 +81,7 @@ local_wechat_articles  --(按 __biz + mid + idx 认身份)-->  articles
 搬进本仓库之后形态变了很多:原来的 Vue 前端、跑在 :8000 的 FastAPI 后端、Docker
 部署、公众平台后台抓列表、扫码登录、封面下载、MinHash 相似检测都已删除,只留下
 「发现 → 抓正文 → 导出」这条链和它的库。另一条采集方式(逐号文章凭证,靠 mitm
-从 Mac 微信里截)在 `wechat-oa` 分支上,**两个分支始终并行、不打算合并**。
+从 Mac 绿泡泡里截)在 `wechat-oa` 分支上,**两个分支始终并行、不打算合并**。
 
 当前实现里仍有一部分代码逐字沿用上游(主要在 `src/db/repository.py`、
 `src/db/migrations.py`、`src/utils/wechat_body.py`、`src/db/connection.py`)。
