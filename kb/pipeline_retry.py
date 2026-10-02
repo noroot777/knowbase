@@ -44,12 +44,19 @@ _REFILL_ENV = "KB_REFILL_SCRIPT"
 
 
 def refill_script() -> Path | None:
-    """配置好的回填脚本路径;没配返回 None。
+    """配置好的回填脚本路径(绝对路径);没配返回 None。
 
     现读环境变量而不是在导入时定下来:测试要能逐个用例换路径。
+
+    **必须在这里就 `resolve()` 成绝对路径**:跑它的时候 `cwd` 是脚本自己所在的目录
+    (脚本按相对路径找 vault 和存量 md),相对路径配置下这两件事会打架 ——
+    `KB_REFILL_SCRIPT=tools/refill.py` 的存在性检查在当前目录下通过,子进程却带着
+    `cwd=tools/` 再去找 `tools/refill.py`,于是打开的是 `tools/tools/refill.py`,
+    报一句「回填脚本异常: ... No such file」,而检查明明说文件在
+    (2026-10-02 审查实测)。检查和执行用同一个绝对路径,这条缝就没有了。
     """
     raw = os.environ.get(_REFILL_ENV, "").strip()
-    return Path(raw).expanduser() if raw else None
+    return Path(raw).expanduser().resolve() if raw else None
 
 # 阶段 detail 里写了失败条数就算失败(状态本身是 ok 也算),与面板按钮同一套判定
 _FAIL_DETAIL_RE = re.compile(r"失败 [1-9]|\d+ 个账号失败")
@@ -66,8 +73,8 @@ def _run_refill() -> None:
     if script is None:   # 正常形态:没配这个外挂,这一步不存在
         _stage("export", "skipped", f"未配置正文回填脚本({_REFILL_ENV}),跳过回填")
         return
-    if not script.exists():   # 配了却指不到——这是配置错了,得说出来
-        _stage("export", "skipped", f"{_REFILL_ENV} 指向的脚本不存在:{script}")
+    if not script.is_file():   # 配了却指不到一个文件——这是配置错了,得说出来
+        _stage("export", "skipped", f"{_REFILL_ENV} 指不到脚本文件:{script}")
         return
     _stage("export", "running", "回填空正文(重抓原文)")
     try:

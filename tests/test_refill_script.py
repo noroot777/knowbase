@@ -7,6 +7,7 @@
 这个功能对他们永远不可用。
 
 现在的口径:配了 KB_REFILL_SCRIPT 才有这一步,没配就压根不进重试计划。
+配进来的路径一律当场 resolve 成绝对路径 —— 检查和执行必须是同一个路径。
 """
 
 import os
@@ -77,14 +78,22 @@ class RefillScriptTests(unittest.TestCase):
         pipeline_retry._run_refill()
         name, status, detail = self.stages[0]
         self.assertEqual(("export", "skipped"), (name, status))
-        self.assertIn(str(missing), detail)
+        self.assertIn(str(missing.resolve()), detail)
+
+    def test_a_directory_is_not_a_script(self):
+        """指到一个目录上同样是配置错了:别等子进程报一句看不懂的话。"""
+        os.environ["KB_REFILL_SCRIPT"] = self.tmp.name
+        pipeline_retry._run_refill()
+        name, status, detail = self.stages[0]
+        self.assertEqual(("export", "skipped"), (name, status))
+        self.assertIn(self.tmp.name, detail)
 
     def test_configured_and_present_runs_it(self):
         """配好了就真的跑它,而且跑的是配置里那一份。"""
         script = Path(self.tmp.name) / "refill.py"
         script.write_text("print('没有找到空正文文件')\n", encoding="utf-8")
         os.environ["KB_REFILL_SCRIPT"] = str(script)
-        self.assertEqual(script, pipeline_retry.refill_script())
+        self.assertEqual(script.resolve(), pipeline_retry.refill_script())
         self.assertIn("refill", self._plan())
         pipeline_retry._run_refill()
         self.assertEqual("running", self.stages[0][1])
@@ -94,7 +103,29 @@ class RefillScriptTests(unittest.TestCase):
     def test_tilde_is_expanded(self):
         """`~/...` 这种写法得认,不然配上去永远指不到。"""
         os.environ["KB_REFILL_SCRIPT"] = "~/refill.py"
-        self.assertEqual(Path.home() / "refill.py", pipeline_retry.refill_script())
+        self.assertEqual((Path.home() / "refill.py").resolve(),
+                         pipeline_retry.refill_script())
+
+    def test_relative_path_in_a_subdir_really_runs(self):
+        """子目录相对路径要真的跑起来 —— 这条钉的是检查和执行用同一个路径。
+
+        原来 `refill_script()` 只 expanduser:`tools/refill.py` 的存在性检查在当前
+        目录下通过,子进程却带着 `cwd=tools/` 再找同一个相对路径,打开的是
+        `tools/tools/refill.py`,阶段落 `error / 回填脚本异常`。所以这里不打桩
+        subprocess,真起一个 python3 看它到底开到了哪个文件。
+        """
+        tools = Path(self.tmp.name) / "tools"
+        tools.mkdir()
+        (tools / "refill.py").write_text("print('没有找到空正文文件')\n",
+                                         encoding="utf-8")
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(self.tmp.name)
+        os.environ["KB_REFILL_SCRIPT"] = "tools/refill.py"
+        self.assertTrue(pipeline_retry.refill_script().is_absolute())
+        pipeline_retry._run_refill()
+        self.assertEqual(("export", "ok"), self.stages[-1][:2])
+        self.assertIn("没有空正文文件", self.stages[-1][2])
 
 
 if __name__ == "__main__":
