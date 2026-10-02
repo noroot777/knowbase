@@ -14,13 +14,14 @@ async function initSourceModules() {
       WORKSPACE_TITLES[spec.id] = spec.label;
       const btn = document.createElement('button');
       btn.id = 'tab-' + spec.id;
-      btn.innerHTML = icon(spec.icon) + '<span>' + esc(spec.label) + '</span>';
+      btn.innerHTML = icon(spec.icon) + '<span class="nav-text">' + esc(spec.label) + '</span>';
       btn.onclick = () => switchTab(spec.id);
       $('source-navigation').appendChild(btn);
     }
   } catch (e) {
     $('source-nav-error').hidden = false;
     $('source-nav-error').textContent = '来源列表暂不可用，点击重试';
+    $('source-nav-error').title = '来源列表暂不可用，点击重试';
   }
 }
 

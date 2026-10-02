@@ -30,29 +30,28 @@
     <a class="brand-lockup" href="#gallery" onclick="switchTab('gallery');return false"><span class="brand-icon" aria-hidden="true"><i data-icon="library"></i></span><span class="wordmark">Knowbase<small>个人知识库</small></span></a>
     <button class="icon-button mobile-close" onclick="toggleNavigation(false)" aria-label="关闭导航">×</button>
   </div>
-  <button class="quick-search" onclick="focusWorkspaceSearch()" aria-label="快速查找" title="快速查找（⌘ / Ctrl + K）"><i data-icon="search"></i><span>快速查找</span><kbd>⌘ K</kbd></button>
   <div class="nav-label">我的工作区</div>
   <nav class="tabs" aria-label="主要导航">
-    <button id="tab-gallery" class="on" onclick="switchTab('gallery')" aria-current="page"><i data-icon="grid"></i><span>工具图鉴</span><span id="nav-tool-count" class="nav-count"></span></button>
-    <button id="tab-search" onclick="switchTab('search')"><i data-icon="search"></i><span>全文检索</span></button>
-    <button id="tab-ask" onclick="switchTab('ask')"><i data-icon="spark"></i><span>知识问答</span></button>
-    <button id="tab-fav" onclick="switchTab('fav')"><i data-icon="bookmark"></i><span>我的收藏</span></button>
-    <button id="tab-daily" onclick="switchTab('daily')"><i data-icon="paper"></i><span>每日日报</span><span id="nav-daily-dot" hidden aria-label="日报生成中"></span></button>
+    <button id="tab-gallery" class="on" onclick="switchTab('gallery')" aria-current="page"><i data-icon="grid"></i><span class="nav-text">工具图鉴</span><span id="nav-tool-count" class="nav-count"></span></button>
+    <button id="tab-search" onclick="switchTab('search')"><i data-icon="search"></i><span class="nav-text">全文检索</span></button>
+    <button id="tab-ask" onclick="switchTab('ask')"><i data-icon="spark"></i><span class="nav-text">知识问答</span></button>
+    <button id="tab-fav" onclick="switchTab('fav')"><i data-icon="bookmark"></i><span class="nav-text">我的收藏</span></button>
+    <button id="tab-daily" onclick="switchTab('daily')"><i data-icon="paper"></i><span class="nav-text">每日日报</span><span id="nav-daily-dot" hidden aria-label="日报生成中"></span></button>
   </nav>
   <div class="nav-label">信息来源</div>
-  <nav class="tabs" id="source-navigation" aria-label="信息来源">
-    <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span>同步中心</span><span id="nav-sync-dot" hidden aria-label="同步进行中"></span></button>
+  <nav class="tabs nav-section" id="source-navigation" aria-label="信息来源">
+    <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span class="nav-text">同步中心</span><span id="nav-sync-dot" hidden aria-label="同步进行中"></span></button>
   </nav>
   <button id="source-nav-error" hidden onclick="this.hidden=true;initSourceModules()"></button>
-  <div class="nav-label explore-label">发现关联</div>
-  <nav class="explore-links" aria-label="知识图谱">
-    <a href="/graph/projects" target="_blank" rel="noopener"><i data-icon="network"></i>项目图谱<span><i data-arrow="ext"></i></span></a>
-    <a href="/graph/skills" target="_blank" rel="noopener"><i data-icon="layers"></i>Skill 图谱<span><i data-arrow="ext"></i></span></a>
-    <a href="/graph" target="_blank" rel="noopener"><i data-icon="orbit"></i>话题图谱<span><i data-arrow="ext"></i></span></a>
+  <div class="nav-label">发现关联</div>
+  <nav class="explore-links nav-section" aria-label="知识图谱">
+    <a href="/graph/projects" target="_blank" rel="noopener"><i data-icon="network"></i><span class="nav-text">项目图谱</span><span class="nav-ext"><i data-arrow="ext"></i></span></a>
+    <a href="/graph/skills" target="_blank" rel="noopener"><i data-icon="layers"></i><span class="nav-text">Skill 图谱</span><span class="nav-ext"><i data-arrow="ext"></i></span></a>
+    <a href="/graph" target="_blank" rel="noopener"><i data-icon="orbit"></i><span class="nav-text">话题图谱</span><span class="nav-ext"><i data-arrow="ext"></i></span></a>
   </nav>
   <div class="sidebar-bottom">
     <details class="nav-dropdown workspace-settings">
-      <summary aria-label="工作区设置"><i data-icon="settings"></i><span class="settings-label">设置</span><i data-icon="chevron"></i></summary>
+      <summary aria-label="工作区设置"><i data-icon="settings"></i><span class="settings-label nav-text">设置</span><i data-icon="chevron"></i></summary>
       <div class="nav-popover">
         <button id="stages-btn" onclick="toggleNavigation(false);openStages()">模型配置<i data-icon="chevron"></i></button>
         <button id="keys-btn" onclick="toggleNavigation(false);openKeys()">API Key<span id="keys-dot">●</span></button>
@@ -64,6 +63,7 @@
     </details>
   </div>
 </aside>
+<div id="nav-tip" aria-hidden="true" hidden></div>
 <header id="topbar">
   <button class="icon-button mobile-menu" onclick="toggleNavigation()" aria-label="打开导航" aria-expanded="false" aria-controls="sidebar"><i data-icon="menu"></i></button>
   <strong>Knowbase</strong><span id="page-crumb">工具图鉴</span>
