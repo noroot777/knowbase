@@ -7,12 +7,12 @@ Doc 完成 upsert —— 库里留下一行指向不存在文件的 documents:�
 全文检索命中 1)。写 kb.db 的入口有三条(管道 index 阶段、`kb index`、条目化的
 就地入库)各是一条路,跨进程那一半只能用真的子进程验。
 
-提取的 tag 回写是第四种形状:它写的是 **vault 文件**,而且同样是「read_text 拿
-快照 → 过一会儿 write_text 整份写回」—— 清理在这中间删干净的话那次写回会把
-**文件重新创建出来**,下一轮索引合法地把它收回库里,而 feeds.db 里已经没有这
-一条,重跑清理只会说「无事可做」:比 index 那条路更糟,那一条下一轮还收得掉。
+写 vault 文件那一种形状(提取的 tag 回写、软广补判)在 `test_writeback_lock.py`
+—— 两边挤在一个文件里会越过 700 行上限。
 """
 import argparse
+import contextlib
+import re
 import struct
 import subprocess
 import sys
@@ -105,14 +105,6 @@ class IndexLockTests(TrimFixture, unittest.TestCase):
                 return True
             time.sleep(0.02)
         return False
-
-    def documents_without_a_file(self):
-        conn = store.connect()
-        try:
-            return [r['path'] for r in conn.execute('SELECT path FROM documents')
-                    if not (self.vault / r['path']).exists()]
-        finally:
-            conn.close()
 
     # ---- 管道的 index 阶段 ----
     def test_an_index_pass_cannot_resurrect_what_the_cleanup_deleted(self):
@@ -368,121 +360,6 @@ class IndexLockTests(TrimFixture, unittest.TestCase):
             said = [s for s in self.stages if s[0] == 'projects' and s[1] == status]
             self.assertTrue(said, f'{status} 没落下: {self.stages}')
             self.assertIn(text, said[-1][2])
-
-    # ---- 提取的 tag 回写(写的是 vault 文件) ----
-    EXTRACTED = {'entities': [{'name': 'Review A', 'kind': 'org'}],
-                 'topics': ['AI编程'], 'summary': 's'}
-
-    def a_writeback_racing_a_cleanup(self, runner):
-        """清理持锁期间起跑一轮带回写的提取,返回(持锁期间的观察, 那条旧文)。
-
-        回写必须整段卡在锁上:读也不许读 —— 读到了就等于手里攥着一份删除**之前**
-        的全文快照,等锁拿到手再写回去,文件就回来了。
-        """
-        source = self.legacy(self.sub())
-        item = self.seed(source)
-        target = self.vault / item['path']
-        real_backup, real_write = trim._backup, Path.write_text
-        writing, release = threading.Event(), threading.Event()
-
-        def gated_write(who, data, **kw):
-            # 只卡这一篇的回写;清理自己的备份/进度文件照常写。站在「快照已经
-            # 读完、正要写回」这一刻 —— 审查那次的复现就卡在这里。
-            if Path(who) == target:
-                writing.set()
-                self.assertTrue(release.wait(10))
-            return real_write(who, data, **kw)
-
-        seen = {}
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = None
-
-            def backup_then_start_extract(*a):
-                nonlocal future
-                out = real_backup(*a)                 # 此刻清理持着锁
-                future = pool.submit(runner)
-                seen['writing'] = writing.wait(1.0)
-                return out
-
-            try:
-                with patch.object(extract, 'VAULT_ROOT', self.vault), \
-                     patch.object(extract, 'extract_with_llm',
-                                  lambda *a, **k: dict(self.EXTRACTED)), \
-                     patch.object(Path, 'write_text', gated_write), \
-                     patch.object(trim, '_backup',
-                                  side_effect=backup_then_start_extract):
-                    self.assertEqual(0, trim.cmd_run(self.args(source)))
-            finally:
-                release.set()
-            if future is not None:
-                future.result(timeout=20)
-        return seen, item
-
-    def assert_the_cleanup_stuck(self, seen, item):
-        """末态先断:文件有没有被重新创建出来,才是审查报告里的那份证据。
-
-        过程观察(「回写在持锁期间就动手了」)断在它前面的话,注入旧行为时红的
-        是过程、看不见后果 —— 而后果正是「索引合法地把旧文收回库里」。
-        """
-        after = self.state(item)
-        self.assertFalse(after['file'], '回写把清理删掉的 vault 文件重建出来了')
-        pipeline_stages._run_index()                  # 下一轮索引:不该有东西可收
-        done = self.state(item)
-        self.assertEqual((False, 0, 0), (done['file'], done['documents'],
-                                         done['searchable']))
-        self.assertFalse(self.documents_without_a_file())
-        self.assertFalse(seen['writing'], '回写在清理持锁期间就把文件写回去了')
-
-    def test_the_cli_writeback_cannot_recreate_a_file_the_cleanup_deleted(self):
-        """`kb extract --writeback`:清理删掉的那一篇不许被回写重建出来。"""
-        args = argparse.Namespace(limit=0, writeback=True)
-        seen, item = self.a_writeback_racing_a_cleanup(lambda: cli.cmd_extract(args))
-        self.assert_the_cleanup_stuck(seen, item)
-
-    def test_the_pipeline_writeback_cannot_recreate_a_file_the_cleanup_deleted(self):
-        """同步的并行存量提取走的是另一条路(`_extract_pass`),同样不许重建。"""
-        stats = {'ok': 0, 'promo': 0, 'failed_paths': set(),
-                 'empty_paths': set(), 'failures': {}}
-        seen, item = self.a_writeback_racing_a_cleanup(
-            lambda: pipeline_stages._extract_pass('存量', stats))
-        self.assert_the_cleanup_stuck(seen, item)
-        # 文章是用户主动清理掉的,不是一次故障:回写什么都没做要返回 False,
-        # 不能抛异常 —— `_extract_pass` 把回写和 save_extraction 包在同一个
-        # try 里,抛出去就是把这一篇记成提取失败、面板标红。
-        self.assertEqual((1, set()), (stats['ok'], stats['failed_paths']))
-
-    def test_every_writeback_caller_commits_before_taking_the_lock(self):
-        """三条提取路径调回写时,共享连接都不许攥着一个没提交的写事务。
-
-        回写整段要取维护锁,而 **SQLite 的写锁不认那把锁**:攥着 save_extraction
-        留下的写事务去等锁,持锁的清理就卡在自己的 DELETE 上,两边互相等到我们
-        超时放弃 —— 清理那一趟白跑,这一篇也没回写进去。另外两条路本来就是先
-        提交再回写,`extract_parallel.py` 原来不是(2026-10-01 第 2 轮顺带修)。
-        """
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            'extract_parallel', ROOT / 'scripts' / 'extract_parallel.py')
-        ep = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(ep)
-
-        args = argparse.Namespace(limit=0, writeback=True)
-        stats = {'ok': 0, 'promo': 0, 'failed_paths': set(),
-                 'empty_paths': set(), 'failures': {}}
-        for i, (label, runner, where) in enumerate((
-                ('kb extract --writeback', lambda: cli.cmd_extract(args), extract),
-                ('管道存量提取', lambda: pipeline_stages._extract_pass('存量', stats),
-                 extract),
-                ('extract_parallel.py', ep.main, ep))):
-            with self.subTest(label):
-                self.seed(self.legacy(self.sub(label, f'https://example.org/w{i}.xml')),
-                          self.entry(url=f'https://example.org/old-w{i}'))
-                seen = []
-                with patch.object(where, 'extract_with_llm',
-                                  lambda *a, **k: dict(self.EXTRACTED)), \
-                     patch.object(where, 'writeback_extraction',
-                                  lambda conn, *a: seen.append(conn.in_transaction)):
-                    runner()
-                self.assertEqual([False], seen, f'{label}:回写之前没有提交')
 
     # ---- 命令行那条入口 ----
     def test_the_cli_index_waits_for_a_cleanup_in_another_process(self):

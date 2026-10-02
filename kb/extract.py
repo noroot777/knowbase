@@ -369,6 +369,9 @@ def writeback_extraction(conn, doc_path: str, data: dict, stale: bool) -> bool:
     **外键级联挡不住这一步**:标签是在删除**之前**写进去并提交的,清理的级联
     删除照样全部成功,它管的是库里那几张表,管不着谁在之后重建文件。
 
+    **取锁之前先把调用方那个写事务提交掉**(见下面 `conn.in_transaction` 那段):
+    SQLite 的写锁不认维护锁,攥着写事务等锁会把持锁的清理卡死在它自己的 DELETE 上。
+
     **锁拿到手之后先确认这一篇还在**(`_still_indexed`)——等锁的这段时间里清理
     很可能正是把它删掉了,那就什么都不做、返回 False(「没改文件」)。不抛异常:
     文章是用户主动清理掉的,把它记成提取失败会让面板标红、谎报一次故障,而判定
@@ -378,6 +381,20 @@ def writeback_extraction(conn, doc_path: str, data: dict, stale: bool) -> bool:
     need_remove = stale and (data.get("promo") or {}).get("level") != "hard"
     if not tags and not need_remove:
         return False     # 没什么要写的,不必为此读一遍文件
+    if conn.in_transaction:
+        # **取锁之前把调用方手里那个写事务落盘,这件事由这里负责、不靠调用方自觉。**
+        # SQLite 的写锁不认维护锁:攥着它去等锁,持锁的清理就卡在自己的 DELETE 上,
+        # 两边互等到 SQLite 的 busy 超时(默认 30 秒)把清理打断 —— 清理报
+        # `database is locked`、索引那一步没做完,搜索里还留着刚删掉的旧文
+        # (2026-10-01 第 3 轮审查跨进程实测 32.5 秒后报错,末态 documents=1、
+        # 全文命中 1,要重试一次才收得干净)。原来这条契约写在**调用方**那一侧,
+        # 于是软广补判这个经 `sync_promo_tag` 进来的第四个调用方被漏掉,而回归
+        # 只枚举了三条提取路径、全绿照过。改成在共用入口自己 flush:多一个调用
+        # 方就少一处可漏的地方。
+        # 提前提交不新增副作用 —— 改了文件本来也要在锁内 `conn.commit()`,这里
+        # 只是把同一个提交挪早;四个调用方的判定都是逐篇独立、可重跑的,组内
+        # 那次提交没有「要么全要么全不」的语义。
+        conn.commit()
     from kb.maintenance import maintenance_lock
 
     with maintenance_lock():

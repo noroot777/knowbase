@@ -102,6 +102,15 @@ class TrimFixture:
                     exported=bool(row and row['exported_hash'] == row['content_hash']),
                     file=(self.vault / item['path']).exists(), documents=docs, searchable=hits)
 
+    def documents_without_a_file(self):
+        """库里指向不存在文件的那些行 —— 「复活」最后留下的痕迹就是它。"""
+        conn = store.connect()
+        try:
+            return [r['path'] for r in conn.execute('SELECT path FROM documents')
+                    if not (self.vault / r['path']).exists()]
+        finally:
+            conn.close()
+
     def floor_of(self, source):
         return reg.subscription('rss', source['id'])['history_floor']
 
