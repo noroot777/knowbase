@@ -48,7 +48,7 @@ def _ingest_crawl_article(repo, account_name: str, article: dict) -> bool:
         article_id, str(article.get("link") or ""), repo=repo
     )
     # 公众号改名后,只有正文页带着新名字。这里顺手记下来,面板才不会一直显示
-    # 一个在微信里已经搜不到的旧名字。改的是 display_name,不动主键 name。
+    # 一个在绿泡泡里已经搜不到的旧名字。改的是 display_name,不动主键 name。
     if nickname and repo.set_account_display_name(account_name, nickname):
         repo.commit()
     body_raw = repo.get_body_text(article_id) or ""

@@ -21,5 +21,4 @@
 **/*.egg-info
 collector/tests
 collector/nohup.out
-scripts/wiki/build_wiki_demo.py
 docker/*.md

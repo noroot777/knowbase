@@ -154,10 +154,10 @@ class EmbedPoolHangGuardTests(unittest.TestCase):
         orig = embed_pool.EMBED_REQUEST_TIMEOUT
         embed_pool.EMBED_REQUEST_TIMEOUT = 1.0
         try:
-            t0 = time.time()
+            t0 = time.monotonic()
             with self.assertRaisesRegex(embed_pool.EmbedWorkerError, "超过"):
                 self.pool.encode(["__SILENT__"], 32)
-            self.assertLess(time.time() - t0, 30, "超时没生效,卡住了")
+            self.assertLess(time.monotonic() - t0, 30, "超时没生效,卡住了")
         finally:
             embed_pool.EMBED_REQUEST_TIMEOUT = orig
 
@@ -174,8 +174,8 @@ class EmbedPoolLifecycleTests(unittest.TestCase):
         try:
             pool.encode(["warmup"], 32)
             proc = pool._proc
-            deadline = time.time() + 10
-            while time.time() < deadline and pool._proc is not None:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and pool._proc is not None:
                 time.sleep(0.1)
             self.assertIsNone(pool._proc, "空闲超时后 worker 没被收掉")
             self.assertIsNotNone(proc.poll())

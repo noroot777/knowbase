@@ -79,7 +79,7 @@ class MessageIssues:
                     for row in source.page(plans):
                         found.add((row["source_key"], row["local_id"]))
                         accept(row, self.parse(row))
-                    # 被微信移除的异常消息不再保留待核对记录。
+                    # 被绿泡泡移除的异常消息不再保留待核对记录。
                     self.conn.executemany(
                         "DELETE FROM local_wechat_message_issues WHERE source_key=? AND local_id=?",
                         [(r["source_key"], r["local_id"]) for r in batch

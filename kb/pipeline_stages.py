@@ -253,7 +253,7 @@ def _finish_extract_stage(stats: dict) -> None:
            failures=list(stats["failures"].values()))
 
 
-# 提取并发数。瓶颈是逐篇几十秒的 LLM 调用,与微信反爬无关,可以放心并发。
+# 提取并发数。瓶颈是逐篇几十秒的 LLM 调用,与绿泡泡反爬无关,可以放心并发。
 # 2026-08-26 起提取走 kb.llm 的 API 通道(模型见设置面板的「模型分配」),每个 worker 只是一个
 # HTTP 请求,不再是 claude CLI(Node)子进程,本机 RAM/CPU 不再是上限;真正的
 # 约束变成中转站的并发/速率限制与按 token 计费,故沿用实测稳定的 6 不上调。

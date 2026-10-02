@@ -1,5 +1,4 @@
 """Isolated source lifecycle, ingestion, scheduling and search regressions."""
-import json
 import tempfile
 import threading
 import unittest

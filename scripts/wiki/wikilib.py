@@ -25,7 +25,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
-from kb.config import DB_PATH as DB, VAULT_ROOT as VAULT
+from kb.config import DB_PATH as DB, VAULT_ROOT as VAULT   # noqa: E402
 EPOCH = "2026-06-30"          # digest/synthesis 等 LLM 环节只处理这之后的日期
 SOURCE = "dr-gzh"
 

@@ -10,11 +10,11 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE TABLE IF NOT EXISTS accounts (
   name              TEXT PRIMARY KEY,
   fakeid            TEXT NOT NULL DEFAULT '',
-  -- 公众号在微信上的当前昵称,采集正文时顺手更新。它跟 name 分开存是因为
+  -- 公众号在绿泡泡上的当前昵称,采集正文时顺手更新。它跟 name 分开存是因为
   -- name 是主键、又被 articles.account_name 和已导出的 vault 目录引用着,
   -- 改不动;能改的只有"显示成什么"。为空表示还没核对过。
   display_name      TEXT NOT NULL DEFAULT '',
-  -- 上次去正文页核对昵称的时间。**主干不读也不写它**:名字直接从本机微信的
+  -- 上次去正文页核对昵称的时间。**主干不读也不写它**:名字直接从本机绿泡泡的
   -- 会话列表上读,零请求、每轮都核对,没有节流可言。留着这一列是因为这个库
   -- 要能被 wechat-oa 分支同时打开,那条通道还在按它节流(见 migrations v17)。
   display_checked_at TEXT,
@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS article_bodies (
   updated_at   TEXT
 );
 
--- 正文读取失败是有期限的重试状态，不是用户删除或微信删除。
+-- 正文读取失败是有期限的重试状态，不是用户删除或绿泡泡删除。
 CREATE TABLE IF NOT EXISTS article_fetch_state (
   article_id    TEXT PRIMARY KEY REFERENCES articles(id) ON DELETE CASCADE,
   link_hash     TEXT NOT NULL,

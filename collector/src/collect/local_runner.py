@@ -1,4 +1,4 @@
-"""本机微信推送 → 增量文章索引 → 按范围下载正文。"""
+"""本机绿泡泡推送 → 增量文章索引 → 按范围下载正文。"""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
             if accounts:
                 index = ArticleIndex(repo)
                 active = index.refresh(reader, progress, result["errors"].append)
-                # 改名核对:会话列表上的名字就是微信此刻显示的那个,零请求。
+                # 改名核对:会话列表上的名字就是绿泡泡此刻显示的那个,零请求。
                 # 放在发现之后,这样新订阅的号在同一轮里就能解出归属、对上名字。
                 try:
                     refresh_display_names(repo, reader=reader)

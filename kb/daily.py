@@ -231,7 +231,7 @@ def _material(items: list[dict]) -> str:
 
 
 def _md_dest(url: str) -> str:
-    """markdown 链接的目标一律用尖括号包起来。
+    r"""markdown 链接的目标一律用尖括号包起来。
 
     库里的 url 实测有带圆括号的(`…-(clean).pdf`、`S2589-0042(26)00811-4`),
     裸写进 `](…)` 里会在第一个 `)` 处提前收尾,链接当场断掉、后半截漏成正文。
@@ -267,7 +267,7 @@ def _md_title(text: str) -> str:
 
 
 def _link_refs(body: str, shown: list[dict]) -> str:
-    """把模型写的出处编号变成指向原文的链接。
+    r"""把模型写的出处编号变成指向原文的链接。
 
     **写进文件、不留到阅读时**:日报是拿走就读的产物(复制出去、在 Obsidian 里
     翻回来),编号只在 kb-web 上可点的话,换一个读法就退回一串对不上号的数字。

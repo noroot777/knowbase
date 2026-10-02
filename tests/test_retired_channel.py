@@ -24,7 +24,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -39,16 +38,16 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb import collectors, daily_run, llm, pipeline  # noqa: E402
+from tests.headless import probe_env, requires_headless  # noqa: E402
 from kb.web import pipeline_api  # noqa: E402
 
 RETIRED = "wechat_oa"
 LIVE = "wechat_local"
 
-# 页面那一侧的回归:probe 自带 mock 后端,CDP 直连 playwright 缓存里的
-# chrome-headless-shell(不装 playwright、不连网、始终无头、临时 profile)。
+# 页面那一侧的回归:probe 自带 mock 后端,CDP 直连 chrome-headless-shell
+# (不装 playwright、不连网、始终无头、临时 profile)。怎么找那个二进制见
+# tests/headless.py。
 _PROBE = Path(__file__).resolve().parent / "retired_channel_probe.mjs"
-_SHELL = (Path.home() / "Library/Caches/ms-playwright/chromium_headless_shell-1243"
-          / "chrome-headless-shell-mac-arm64" / "chrome-headless-shell")
 
 
 class _Sandbox(unittest.TestCase):
@@ -175,15 +174,14 @@ class ChannelApiTests(_Sandbox):
         self.assertEqual(404, r.status_code)
 
 
-@unittest.skipUnless(_SHELL.exists() and shutil.which("node"),
-                     "需要 node + playwright 缓存里的 chrome-headless-shell")
+@requires_headless
 class BrowserTests(unittest.TestCase):
     """浏览器里存着的旧通道名真的会被带到现役那条上,公众号不会静默消失。"""
 
     def test_a_stored_retired_name_still_syncs_wechat(self):
         r = subprocess.run([shutil.which("node"), str(_PROBE)],
                            capture_output=True, text=True, timeout=300,
-                           env={**os.environ, "HEADLESS_SHELL": str(_SHELL)})
+                           env=probe_env())
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
 
 

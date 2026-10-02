@@ -1,4 +1,4 @@
-"""通过 rion-wechat-cli 只读公众号推送；不接触密钥、私聊或微信界面。"""
+"""通过 rion-wechat-cli 只读公众号推送；不接触密钥、私聊或绿泡泡界面。"""
 
 from __future__ import annotations
 

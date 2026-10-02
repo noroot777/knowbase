@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import threading
@@ -33,26 +34,87 @@ from kb.pipeline_stages import (
     _run_wiki,
 )
 
-REFILL_SCRIPT = Path.home() / "code" / "gongzhonghao" / "gzh_refill_body.py"
+# 正文回填脚本是**可选外挂**:路径由 KB_REFILL_SCRIPT 指定,仓库里不带它。
+# 它要干的事(找 dr-gzh 树里正文为空的 md、重抓原文回填,转载 stub 还要走平台列表
+# API 定位原文短链)取决于各人存量是怎么坏的,没法内置成一个通用实现——所以做成
+# "配了就用、没配就整段不做",而不是在代码里写死某台机器上的一个路径:后者让每个
+# 外部用户每次点「重试失败项」都看到一行指向别人家目录的提示,而这个功能对他们
+# 永远不可用。
+_REFILL_ENV = "KB_REFILL_SCRIPT"
+
+
+def refill_script() -> Path | None:
+    """配置好的回填脚本路径(绝对路径);没配返回 None。**这个函数永远不抛异常。**
+
+    现读环境变量而不是在导入时定下来:测试要能逐个用例换路径。
+
+    **必须在这里就变成绝对路径**:跑它的时候 `cwd` 是脚本自己所在的目录(脚本按相对
+    路径找 vault 和存量 md),相对路径配置下这两件事会打架 ——
+    `KB_REFILL_SCRIPT=tools/refill.py` 的存在性检查在当前目录下通过,子进程却带着
+    `cwd=tools/` 再去找 `tools/refill.py`,于是打开的是 `tools/tools/refill.py`,
+    报一句「回填脚本异常: ... No such file」,而检查明明说文件在
+    (2026-10-02 审查实测)。检查和执行用同一个绝对路径,这条缝就没有了。
+
+    **绝对化只做字符串层面的 `abspath`,不做 `resolve()`。** `Path.resolve()` 要顺着
+    符号链接走,**链接成环时 Python 3.11 抛 `RuntimeError: Symlink loop`** —— 而这个
+    函数在 `retry_failed_plan()` 里被调用,异常从计划生成阶段一路冒到 HTTP 层:面板上
+    点「重试失败项」只看到一句「重试未能启动 / Internal Server Error」,**连同一轮里
+    本该重试的 index / extract 一起没了**,而这只是一个可选外挂配错了
+    (2026-10-02 第 2 轮审查实测,真走 `POST /api/pipeline/retry-failed` 复现 500)。
+    路径对不对本来就有 `_run_refill` 里那道 `is_file()` 负责报(坏链接上它返回 False,
+    不抛),这里只负责交出一个「检查和执行共用」的绝对路径。`abspath` 是纯字符串运算、
+    碰不到文件系统,唯一的例外是相对路径要问一次 cwd。
+
+    **`~` 展开也必须在同一条异常边界里面。** `Path.expanduser()` 对 `~不存在的用户名/…`
+    抛 `RuntimeError: Could not determine home directory.`(Python 3.11)—— 写错一个
+    用户名、或者从别人的配置里抄一条 `~someone/...` 过来,后果和上面那个坏链接**一模
+    一样**:`POST /api/pipeline/retry-failed` 返回 500,面板上只有一句「重试未能启动」,
+    index / extract 一起没了(2026-10-02 第 3 轮审查实测)。
+
+    所以这个函数的契约是一句话:**不管配进来的是什么字符串,它只返回路径、永不抛。**
+    任何一种解析失败都把原字符串原样交回去(这也是最好的诊断文案 —— 提示里出现的就是
+    用户自己配的那一行),照样让 `is_file()` 那道检查去报「指不到脚本文件」。
+    """
+    raw = os.environ.get(_REFILL_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        return Path(os.path.abspath(Path(raw).expanduser()))
+    except (OSError, RuntimeError, ValueError):
+        return Path(raw)
 
 # 阶段 detail 里写了失败条数就算失败(状态本身是 ok 也算),与面板按钮同一套判定
 _FAIL_DETAIL_RE = re.compile(r"失败 [1-9]|\d+ 个账号失败")
 
 
 def _run_refill() -> None:
-    """子进程跑 gzh_refill_body.py:找 dr-gzh 树里正文为空的 md,重抓原文回填
+    """子进程跑配置好的回填脚本:找 dr-gzh 树里正文为空的 md,重抓原文回填
     (转载 stub 会走平台列表 API 定位原文短链)。占用 export 卡片展示进度。
 
-    回填成功的文档重置 extracted_at:防御历史上空正文却仅凭标题"提取成功"
-    的假成功,让它们跟着这次的 extract 重提。"""
-    if not REFILL_SCRIPT.exists():
-        _stage("export", "skipped", f"未找到 {REFILL_SCRIPT},跳过回填")
+    脚本按约定逐行输出 `OK <相对路径>` / `FAIL <说明>`,没有空正文时打印
+    "没有找到空正文文件"。回填成功的文档重置 extracted_at:防御历史上空正文却
+    仅凭标题"提取成功"的假成功,让它们跟着这次的 extract 重提。"""
+    script = refill_script()
+    if script is None:   # 正常形态:没配这个外挂,这一步不存在
+        _stage("export", "skipped", f"未配置正文回填脚本({_REFILL_ENV}),跳过回填")
+        return
+    # 配了却指不到一个文件——这是配置错了,得说出来。`is_file()` 只吞「不存在 / 不是
+    # 目录 / 链接成环」那几个 errno,**名字太长(ENAMETOOLONG)它是照抛的** —— 而这里
+    # 抛出去就把 `_run_retry_failed` 的循环打断,后面的 index / extract 一个都不跑
+    # (POST 已经返回 200 了,面板上只看到回填这张卡片停在 running)。坏路径的处置
+    # 只有一种:说清楚、跳过。
+    try:
+        usable = script.is_file()
+    except (OSError, ValueError):
+        usable = False
+    if not usable:
+        _stage("export", "skipped", f"{_REFILL_ENV} 指不到脚本文件:{script}")
         return
     _stage("export", "running", "回填空正文(重抓原文)")
     try:
         proc = subprocess.run(
-            ["python3", str(REFILL_SCRIPT)],
-            cwd=REFILL_SCRIPT.parent, capture_output=True, text=True,
+            ["python3", str(script)],
+            cwd=script.parent, capture_output=True, text=True,
             timeout=30 * 60,
         )
     except subprocess.TimeoutExpired:
@@ -97,7 +159,7 @@ def retry_failed_plan() -> list[str]:
 
     - crawl 有账号失败/出错 → 重抓(增量爬取,便宜)
     - export 有失败/出错、或链里重抓过 → 重导出
-    - extract 有"正文空"跳过 → 先回填(refill)
+    - extract 有"正文空"跳过、且配了回填脚本 → 先回填(refill)
     - export/refill 可能补了数据、或 index 自己出错 → 重建索引
     - extract 出过错、或前面补了新文章 → 重提取
     - projects/wiki 出过错 → 重跑(它们在链尾,不牵连别人)
@@ -126,7 +188,9 @@ def retry_failed_plan() -> list[str]:
         plan.append("crawl")
     if _failed("export") or "crawl" in plan:
         plan.append("export")
-    if "正文空" in _detail("extract"):
+    # 没配回填脚本时这一步压根不进计划:让外部用户看一张"本次跳过"的卡片,
+    # 比不显示更糟——那个功能对他们不存在。
+    if "正文空" in _detail("extract") and refill_script() is not None:
         plan.append("refill")
     if plan or _failed("index") or projects_ingest_only:
         plan.append("index")
