@@ -63,17 +63,25 @@ def refill_script() -> Path | None:
     (2026-10-02 第 2 轮审查实测,真走 `POST /api/pipeline/retry-failed` 复现 500)。
     路径对不对本来就有 `_run_refill` 里那道 `is_file()` 负责报(坏链接上它返回 False,
     不抛),这里只负责交出一个「检查和执行共用」的绝对路径。`abspath` 是纯字符串运算、
-    碰不到文件系统,唯一的例外是相对路径要问一次 cwd —— 连这个都失败(cwd 被删了)就
-    原样交回去,照样让那道检查去报,绝不把异常抛给重试计划。
+    碰不到文件系统,唯一的例外是相对路径要问一次 cwd。
+
+    **`~` 展开也必须在同一条异常边界里面。** `Path.expanduser()` 对 `~不存在的用户名/…`
+    抛 `RuntimeError: Could not determine home directory.`(Python 3.11)—— 写错一个
+    用户名、或者从别人的配置里抄一条 `~someone/...` 过来,后果和上面那个坏链接**一模
+    一样**:`POST /api/pipeline/retry-failed` 返回 500,面板上只有一句「重试未能启动」,
+    index / extract 一起没了(2026-10-02 第 3 轮审查实测)。
+
+    所以这个函数的契约是一句话:**不管配进来的是什么字符串,它只返回路径、永不抛。**
+    任何一种解析失败都把原字符串原样交回去(这也是最好的诊断文案 —— 提示里出现的就是
+    用户自己配的那一行),照样让 `is_file()` 那道检查去报「指不到脚本文件」。
     """
     raw = os.environ.get(_REFILL_ENV, "").strip()
     if not raw:
         return None
-    path = Path(raw).expanduser()
     try:
-        return Path(os.path.abspath(path))
-    except OSError:
-        return path
+        return Path(os.path.abspath(Path(raw).expanduser()))
+    except (OSError, RuntimeError, ValueError):
+        return Path(raw)
 
 # 阶段 detail 里写了失败条数就算失败(状态本身是 ok 也算),与面板按钮同一套判定
 _FAIL_DETAIL_RE = re.compile(r"失败 [1-9]|\d+ 个账号失败")
@@ -90,7 +98,16 @@ def _run_refill() -> None:
     if script is None:   # 正常形态:没配这个外挂,这一步不存在
         _stage("export", "skipped", f"未配置正文回填脚本({_REFILL_ENV}),跳过回填")
         return
-    if not script.is_file():   # 配了却指不到一个文件——这是配置错了,得说出来
+    # 配了却指不到一个文件——这是配置错了,得说出来。`is_file()` 只吞「不存在 / 不是
+    # 目录 / 链接成环」那几个 errno,**名字太长(ENAMETOOLONG)它是照抛的** —— 而这里
+    # 抛出去就把 `_run_retry_failed` 的循环打断,后面的 index / extract 一个都不跑
+    # (POST 已经返回 200 了,面板上只看到回填这张卡片停在 running)。坏路径的处置
+    # 只有一种:说清楚、跳过。
+    try:
+        usable = script.is_file()
+    except (OSError, ValueError):
+        usable = False
+    if not usable:
         _stage("export", "skipped", f"{_REFILL_ENV} 指不到脚本文件:{script}")
         return
     _stage("export", "running", "回填空正文(重抓原文)")
