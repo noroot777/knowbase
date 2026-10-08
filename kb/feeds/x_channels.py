@@ -280,8 +280,9 @@ def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
     # 「这一轮没读完」原样带回去:它不是失败(抓到的照旧入库),但也不是一次
     # 完整的同步 —— 面板上要看得见,否则"停在时间线半中间"和"全读完了"长得
     # 一模一样。水位那一侧已经由各自的 harvest 留着旧值兜住:浏览器那边是
-    # 「滚不到上次的位置」(`x_browser.harvest`),feedgrab 那边是「这一批有几条
-    # 没抓下来」(`x_feedgrab._incomplete` —— 它的退出码照样是 0)。
+    # 「滚不到上次的位置」(`x_browser.harvest`),feedgrab 那边是「翻页中途失败」
+    # 或者「这一批有几条没抓下来」(`x_feedgrab._incomplete` —— 这两种它的退出码
+    # 照样是 0)。
     if note := got.get('incomplete'):
         meta['note'] = note
     return got['entries'], meta

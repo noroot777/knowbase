@@ -276,7 +276,7 @@ function sourceConfigHint() {
 }
 function renderSubscription(s) {
   // `last_note` = 上一轮同步成功但**没读完**:浏览器通道滚不到上次的位置、
-  // feedgrab 那一批里有几条没抓下来 —— 两条通道都会留下这一句。
+  // feedgrab 翻页中途失败或者那一批里有几条没抓下来 —— 两条通道都会留下这一句。
   // 它排在 last_error 之后、已同步之前:抓到的条目确实入库了,但把它显示成
   // 「已同步」就等于宣布这一轮读完了 —— 而时间线下面那一段还没读到。
   const status = !s.enabled ? '已停用' : s.configuration_error ? '待配置' : s.last_error ? '连接失败' : s.last_note ? '部分同步' : s.last_success ? '已同步' : '待首次同步';
