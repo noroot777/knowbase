@@ -21,7 +21,7 @@ from kb import maintenance, store
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg, sync
 
-from feed_trim_fixture import TrimFixture, _real_busy, trim  # noqa: E402
+from feed_trim_fixture import FRESH, TrimFixture, _real_busy, trim  # noqa: E402
 
 
 class _FixedNow(datetime):
@@ -197,7 +197,7 @@ class TrimTests(TrimFixture, unittest.TestCase):
 
     def test_an_already_pinned_subscription_has_nothing_to_do(self):
         s = self.sub()
-        self.seed(s, self.entry(published='2026-10-01 08:00'))
+        self.seed(s, self.entry(published=FRESH))
         with patch.object(trim, '_backup', side_effect=AssertionError('不该备份')):
             self.assertEqual(0, trim.cmd_run(self.args(s)))
 
