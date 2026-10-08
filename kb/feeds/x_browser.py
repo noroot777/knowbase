@@ -137,10 +137,22 @@ def _as_published(iso: str) -> str:
 
 
 def _utc(iso: str) -> datetime | None:
+    """任意 ISO 写法 → UTC。**不带时区的那种按项目时区(Asia/Shanghai)补齐。**
+
+    `astimezone` 对 naive 的默认是拿**宿主机器**的时区补 —— 于是同一个
+    `2026-10-05` 在 UTC 机器上是上海时间 08:00,那一天凌晨 0 点到 7 点 59 的
+    推文一条也翻不到,还不报任何错(2026-10-08 审查实测 `TZ=UTC`:四条里只
+    收进 08:01 那一条)。而这条通道里被比较的另一头(`_as_published`)固定按
+    上海算,两头必须是同一个口径,不能由部署机器决定用户勾的日期是什么意思。
+
+    区间补抓那个日期在 `x_channels.since_floor` 就已经转成带时区的下界了;
+    这里是第二道 —— 以后谁再把一个裸日期交进来,含义也不会跟着机器漂。
+    """
     try:
-        return datetime.fromisoformat(iso.replace('Z', '+00:00')).astimezone(timezone.utc)
+        dt = datetime.fromisoformat(iso.replace('Z', '+00:00'))
     except (ValueError, AttributeError):
         return None
+    return dt.replace(tzinfo=dt.tzinfo or SHANGHAI).astimezone(timezone.utc)
 
 
 def _is_pinned(context: str) -> bool:

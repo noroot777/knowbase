@@ -190,6 +190,28 @@ class WatermarkTests(ChannelBase):
                                               x_channels.BROWSER))
 
 
+class SinceFloorTests(unittest.TestCase):
+    """用户点的那一天 → 交给采集器的下界。换算只有这一处,两条通道都过它。"""
+
+    def test_the_date_is_read_in_the_projects_timezone(self):
+        self.assertEqual(datetime(2026, 10, 5, tzinfo=SHANGHAI),
+                         datetime.fromisoformat(x_channels.since_floor('2026-10-05'))
+                         + timedelta(microseconds=1))
+
+    def test_the_start_of_the_day_is_inside_the_range(self):
+        """下游那条选择规则是严格大于,所以下界要落在零点**之前**那一瞬 ——
+        推文时间的源精度到毫秒,真实内容落不进这中间。"""
+        floor = datetime.fromisoformat(x_channels.since_floor('2026-10-05'))
+        self.assertLess(floor, datetime(2026, 10, 5, tzinfo=SHANGHAI))
+        self.assertGreater(floor, datetime(2026, 10, 4, 23, 59, 59, tzinfo=SHANGHAI))
+
+    def test_an_unparsable_date_falls_back_to_the_daily_watermark(self):
+        """认不出来就返回空串 —— `prefetch` 那句 `floor or watermark(...)` 于是
+        退回按日常水位读,而不是把整轮带掉。"""
+        for bad in ('', 'today', '2026/10/05', None):
+            self.assertEqual('', x_channels.since_floor(bad), repr(bad))
+
+
 class TakeTests(ChannelBase):
     def entry(self, url='https://x.com/Example/status/1'):
         return {'url': url, 'title': 'a thought', 'body': 'a thought',
@@ -323,6 +345,18 @@ class PrefetchTests(ChannelBase):
                 patch.object(x_feedgrab, 'harvest', side_effect=AssertionError('不该预取')):
             sync._prefetch_x('social', reg.subscriptions('social'),
                              self.settings(x_channels.BRIDGE), FetchScope())
+
+    def test_a_ranged_round_hands_over_the_converted_floor_not_the_raw_date(self):
+        """裸日期交下去的含义由**宿主时区**决定(采集器那头 `fromisoformat` 拿到
+        的是不带时区的时间),而零点整那条还会被严格大于的规则丢掉。换算的那一
+        处是 `since_floor`;这条钉的是 `prefetch` 真的用了它。"""
+        self.sub()
+        seen = []
+        with patch.object(x_browser, 'harvest',
+                          lambda jobs, **kw: seen.extend(jobs) or {}):
+            x_channels.prefetch(reg.subscriptions('social'),
+                                self.settings(x_channels.BROWSER), since='2026-10-05')
+        self.assertEqual([('example', x_channels.since_floor('2026-10-05'))], seen)
 
     def test_a_stale_harvest_from_a_previous_round_is_cleared(self):
         """上一轮的结果留着 = 这一轮一条都没抓到时却"取"得出东西来。"""

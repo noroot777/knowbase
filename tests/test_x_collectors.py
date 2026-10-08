@@ -9,13 +9,16 @@ feedgrab 都不碰 —— 挤在一个文件里会越过仓库那条 700 行上�
 """
 import json
 import os
+import tempfile
 import time
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
-from kb.feeds import x_browser, x_feedgrab
+from kb.feeds import x_browser, x_channels, x_feedgrab
 
 # 样本时间跟着今天走,理由同 test_x_channels:新订阅只收最近几天,写死一个日期
 # 的话过几天红的是一堆跟通道毫无关系的用例。
@@ -425,6 +428,80 @@ class PageOrderStreakTests(unittest.TestCase):
         self.assertFalse(x_browser._old_enough(noise, self.floor(24), 'example'))
 
 
+@contextmanager
+def host_tz(name):
+    """把**宿主机器**的时区换成 name:日期边界那几条要证明的正是"它不影响结果"。"""
+    old = os.environ.get('TZ')
+    os.environ['TZ'] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop('TZ', None)
+        else:
+            os.environ['TZ'] = old
+        time.tzset()
+
+
+class DateBoundaryTests(unittest.TestCase):
+    """区间补抓那一天的边界:时区按项目的、起点算在里面。
+
+    两条独立的错各有一条回归(审查第 2、3 条):只修时区的话零点那条照样漏,
+    而零点那条在上海时区的机器上也成立。
+    """
+
+    SHANGHAI = ZoneInfo('Asia/Shanghai')
+
+    def day(self, hour, minute=0, day=5):
+        return datetime(2026, 10, day, hour, minute, tzinfo=self.SHANGHAI)
+
+    def dated(self):
+        """上海时间 10-05 那天的四条(含零点整),外加前一天三条原创老推 ——
+        后者让"连着三条自己的老推"成立,这一轮才算真读完。"""
+        inside = [self.day(8, 1), self.day(7, 59), self.day(1, 0), self.day(0, 0)]
+        before = [self.day(23, day=4), self.day(22, day=4), self.day(21, day=4)]
+        return [tweet(str(100 + i), when=w.isoformat())
+                for i, w in enumerate(inside + before)]
+
+    def test_a_naive_timestamp_means_the_projects_timezone_not_the_machines(self):
+        """`astimezone` 对不带时区的时间拿**宿主**时区补齐 —— UTC 机器上
+        `2026-10-05` 会被理解成上海时间 08:00(审查实测漏掉凌晨 8 小时)。"""
+        for name in ('UTC', 'Asia/Shanghai', 'America/Los_Angeles'):
+            with host_tz(name):
+                self.assertEqual(self.day(0), x_browser._utc('2026-10-05'), name)
+
+    def test_the_whole_requested_day_comes_in_on_a_utc_machine(self):
+        """审查实测 `TZ=UTC`:四条里只收进 08:01,00:00 / 01:00 / 07:59 全缺,
+        而 `errors=[]` —— 没有任何提示。"""
+        with host_tz('UTC'), Quick():
+            entries, incomplete = x_browser._harvest_one(
+                Timeline(self.dated(), page=3), 'Example',
+                x_browser._utc(x_channels.since_floor('2026-10-05')))
+        self.assertEqual('', incomplete)
+        self.assertEqual(['2026-10-05 00:00', '2026-10-05 01:00',
+                          '2026-10-05 07:59', '2026-10-05 08:01'],
+                         [e['published'] for e in entries])
+
+    def test_midnight_itself_is_inside_the_requested_range(self):
+        """下游那条选择规则是严格大于(日常水位靠它避免重抓),而"从 10-05 开始"
+        包含这一天 00:00:00 发的那条 —— 在上海时区的机器上也一样漏
+        (审查实测 `missing_times=['2026-10-05 00:00']`)。"""
+        with host_tz('Asia/Shanghai'), Quick():
+            entries, _ = x_browser._harvest_one(
+                Timeline(self.dated(), page=3), 'Example',
+                x_browser._utc(x_channels.since_floor('2026-10-05')))
+        self.assertIn('2026-10-05 00:00', [e['published'] for e in entries])
+
+    def test_the_daily_watermark_still_excludes_the_tweet_it_stopped_at(self):
+        """包含性只属于区间那条路:日常水位照旧**排他**,否则每一轮都把上一轮
+        最后那条重抓一遍(`put_items` 会去重,但那是白跑一趟)。"""
+        water = self.day(1, 0)
+        picked = x_browser._select(self.dated(), x_browser._utc(water.isoformat()), 'Example')
+        self.assertEqual(['2026-10-05 07:59', '2026-10-05 08:01'],
+                         [e['published'] for e in picked])
+
+
 class FeedgrabChannelTests(unittest.TestCase):
     def test_the_vault_variable_is_cleared_so_tweets_never_land_in_the_vault(self):
         """feedgrab 的输出目录优先认 OBSIDIAN_VAULT,而这台机器上它指的正是知识库
@@ -441,6 +518,25 @@ class FeedgrabChannelTests(unittest.TestCase):
         self.assertEqual('true', env['X_USER_TWEETS_ENABLED'])
         self.assertEqual('http://127.0.0.1:7890', env['HTTPS_PROXY'])
         self.assertNotIn('SOME_SECRET', env)
+
+    def test_a_ranged_floor_is_handed_over_as_the_day_before(self):
+        """这条通道的下界是 `X_USER_TWEETS_SINCE`,只认日期而且按 **UTC 的日**算
+        —— 把 `2026-10-05` 原样交给它,上海时间那天 0 点到 7 点 59 一条也拿不到。
+        换算成前一天的最后一瞬之后 `[:10]` 得到 10-04,那段窗口才回来;多出来的
+        前一天由 `sync._save_result` 的日期筛选收口。
+
+        这也是为什么换算放在 `x_channels.since_floor` 而不是给浏览器那条选择规则
+        加一个"包含起点"的开关:后者修不到这条通道。
+        """
+        seen = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(x_feedgrab, 'find_binary', lambda b: '/usr/bin/true'), \
+                    patch.object(x_feedgrab, '_run',
+                                 lambda exe, h, env, base: seen.update(env)), \
+                    patch.object(x_feedgrab, '_read_output', lambda *a: []):
+                x_feedgrab.harvest([('example', x_channels.since_floor('2026-10-05'))],
+                                   data_dir=f'{tmp}/sessions', workdir=f'{tmp}/work')
+        self.assertEqual('2026-10-04', seen['X_USER_TWEETS_SINCE'])
 
     def test_no_since_key_is_set_when_there_is_no_watermark(self):
         env = x_feedgrab._env(Path('/tmp/run-x'), '/tmp/sessions', '')

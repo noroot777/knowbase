@@ -12,6 +12,7 @@
 """
 import sys
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,11 +20,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg, sync, x_browser, x_channels
-from tests.test_x_channels import FRESH_LOCAL, ChannelBase
+from tests.test_x_channels import FRESH, FRESH_LOCAL, ChannelBase, tweet
 
 
-class WatermarkCommitTests(ChannelBase):
-    """**水位和条目一个事务**:存盘失败那一轮水位不许动。"""
+class BrowserRound(ChannelBase):
+    """真跑一轮浏览器通道的摆盘:只替掉"起浏览器抓一批"那一下。"""
 
     def entry(self, url='https://x.com/Example/status/1'):
         return {'url': url, 'title': 'a thought', 'body': 'a thought',
@@ -46,6 +47,16 @@ class WatermarkCommitTests(ChannelBase):
         """
         with patch.object(x_browser, 'harvest', lambda jobs, **kw: dict(by_handle)):
             return sync.collect('social', scope or FetchScope(force=True))
+
+    def repoint(self, source_id, handle='Other'):
+        """采集途中用户把这条订阅改指到另一个账号 —— 走的是真的保存那条路
+        (`reset`:清 config、清条目归属、重算历史下界)。"""
+        return reg.save_subscription(
+            'social', {'name': handle, 'url': f'https://x.com/{handle}'}, source_id)
+
+
+class WatermarkCommitTests(BrowserRound):
+    """**水位和条目一个事务**:存盘失败那一轮水位不许动。"""
 
     def test_a_failed_save_does_not_advance_the_watermark(self):
         """原来 `take()` 在工作线程里当场存一次水位,而条目要等主线程的
@@ -104,7 +115,7 @@ class WatermarkCommitTests(ChannelBase):
         self.assertEqual('', reg.subscription('social', s['id'])['last_note'])
 
 
-class RangedScopeTests(ChannelBase):
+class RangedScopeTests(BrowserRound):
     """区间补抓:用用户点的那段日期当下界,而且不许动日常增量水位。"""
 
     def test_the_prefetch_gets_the_requested_date_not_the_daily_watermark(self):
@@ -122,7 +133,9 @@ class RangedScopeTests(ChannelBase):
         with patch.object(x_browser, 'harvest', fake):
             sync._prefetch_x('social', reg.subscriptions('social'),
                              self.settings(x_channels.BROWSER), scope)
-        self.assertEqual({'example': '2026-10-05'}, seen)
+        # 交下去的是**换算过**的下界(项目时区的零点、且把零点算在内),不是裸
+        # 日期 —— 裸日期的含义由宿主时区决定(见 `x_channels.since_floor`)。
+        self.assertEqual({'example': x_channels.since_floor('2026-10-05')}, seen)
 
     def test_a_ranged_round_never_moves_the_daily_watermark(self):
         s = self.sub()
@@ -147,10 +160,6 @@ class RangedScopeTests(ChannelBase):
         """它不改日常增量的任何状态,这条提示也算 —— 清掉等于替日常同步宣布
         "读完了",而那一边的进度一点没动。"""
         s = self.sub()
-        self.settings(x_channels.BROWSER)
-        cookies = x_channels.BROWSER_PROFILE / 'Default' / 'Cookies'
-        cookies.parent.mkdir(parents=True, exist_ok=True)
-        cookies.write_bytes(b'x')
         with patch.object(x_browser, 'harvest', lambda jobs, **kw: {
                 'example': {'entries': [], 'error': '', 'watermark': '',
                             'incomplete': '滚动次数用完'}}):
@@ -175,6 +184,121 @@ class RangedScopeTests(ChannelBase):
             sync._prefetch_x('social', reg.subscriptions('social'),
                              self.settings(x_channels.BROWSER), FetchScope())
         self.assertEqual({'alpha': '2026-10-01T00:00:00+00:00', 'beta': ''}, seen)
+
+
+class RepointedSubscriptionTests(BrowserRound):
+    """采集期间这条订阅被改指到另一个账号:手里那份结果一个字都不许写。
+
+    审查实测(真走 guard → `start_pipeline` → 采集 → 存盘,两个测试屏障只暂停
+    函数入口):修改请求先在空闲状态通过 `intake_api.guard`、随后管道才起跑,
+    于是保存落在采集中间 —— 库里躺着 `OldExample/status/900`,新账号那个水位键
+    被写成旧账号最新推文的时间,`next_sync_selection=[]`(新账号比这个时间更早
+    的推文从此任何一轮都选不到),而 crawl 报 ok、新增 1 条。
+    """
+
+    def test_the_old_accounts_tweets_are_not_credited_to_the_new_one(self):
+        s = self.sub()
+
+        def harvest(jobs, **kw):
+            self.repoint(s['id'])
+            return {'example': {'entries': [self.entry()], 'error': '',
+                                'watermark': '2026-10-07T00:00:00+00:00'}}
+
+        stages = []
+        with patch.object(x_browser, 'harvest', harvest), \
+                patch.object(sync, '_stage', lambda *a, **k: stages.append(a)):
+            summary = sync.collect('social', FetchScope(force=True))
+        row = reg.subscription('social', s['id'])
+        self.assertIn('改了订阅链接', stages[-1][2])     # 面板上说得出这一轮为什么空
+        self.assertEqual(0, reg.items('social', s['id'])['total'], '旧账号的推文记给了新账号')
+        self.assertEqual('', x_channels.watermark(row, x_channels.BROWSER),
+                         '旧账号的水位写进了新账号那个键')
+        self.assertEqual('', row['last_success'], '替新账号宣布它同步成功了')
+        self.assertEqual((0, 0, 1, []), (summary['added'], summary['checked'],
+                                         summary['repointed'], summary['errors']))
+
+    def test_the_new_account_can_still_be_read_from_its_own_beginning(self):
+        """水位被旧账号污染的真实代价:新账号比那个时间更早的推文再也选不到。
+
+        所以这一条不只看库里那个值,而是拿新账号一条**比旧账号那条更早**的推文
+        过一次生产的 `_select`(审查实测 `next_sync_selection=[]`):水位该是空的,
+        它就该被选中。污染之后它低于水位,从此任何一轮增量都挑不出来。
+        """
+        s = self.sub()
+
+        def harvest(jobs, **kw):
+            self.repoint(s['id'], 'NewExample')
+            return {'example': {'entries': [self.entry()], 'error': '',
+                                'watermark': FRESH.strftime('%Y-%m-%dT%H:%M:%SZ')}}
+
+        with patch.object(x_browser, 'harvest', harvest):
+            sync.collect('social', FetchScope(force=True))
+        row = reg.subscription('social', s['id'])
+        floor = x_channels.watermark(row, x_channels.BROWSER)
+        earlier = tweet('901', handle='NewExample',
+                        when=(FRESH - timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))
+        picked = x_browser._select([earlier], x_browser._utc(floor) if floor else None,
+                                   'NewExample')
+        self.assertEqual(['https://x.com/NewExample/status/901'],
+                         [e['url'] for e in picked], f'水位被污染成 {floor!r}')
+
+    def test_a_failure_is_not_charged_to_the_subscription_that_replaced_it(self):
+        """旧账号那次失败记在新账号头上 = 按别人的毛病把一条好订阅推进退避
+        (最长 24 小时),面板上还显示"连接失败" —— 新账号一次都没被访问过。"""
+        s = self.sub()
+
+        def harvest(jobs, **kw):
+            self.repoint(s['id'])
+            return {'example': {'entries': [], 'error': '登录态已失效,请重新登录'}}
+
+        with patch.object(x_browser, 'harvest', harvest):
+            summary = sync.collect('social', FetchScope(force=True))
+        row = reg.subscription('social', s['id'])
+        self.assertEqual(('', 0, 0), (row['last_error'], row['failures'], row['retry_at']))
+        self.assertEqual(([], 1), (summary['errors'], summary['repointed']))
+
+    def test_a_subscription_deleted_mid_round_is_not_written_back(self):
+        s = self.sub()
+
+        def harvest(jobs, **kw):
+            reg.delete_subscription('social', s['id'])
+            return {'example': {'entries': [self.entry()], 'error': '',
+                                'watermark': '2026-10-07T00:00:00+00:00'}}
+
+        with patch.object(x_browser, 'harvest', harvest):
+            summary = sync.collect('social', FetchScope(force=True))
+        self.assertEqual((0, 1), (summary['added'], summary['repointed']))
+        with reg.db() as c:
+            self.assertEqual(0, c.execute('SELECT count(*) FROM subscription_items').fetchone()[0])
+
+    def test_the_old_accounts_partial_note_does_not_stay_on_the_new_one(self):
+        """换链接的那次 reset 清掉了 `last_success`,却留着上一轮那条「没读完」
+        —— 而前端的状态链在 `last_success` 之前先看它,于是新账号那一行显示着旧
+        账号的「部分同步」(审查实测,列为不拦验收项)。"""
+        s = self.sub()
+        self.collect(example={'entries': [], 'error': '', 'incomplete': '滚动次数用完'})
+        self.assertIn('滚动次数', reg.subscription('social', s['id'])['last_note'])
+        self.repoint(s['id'])
+        row = reg.subscription('social', s['id'])
+        self.assertEqual(('', ''), (row['last_note'], row['last_success']))
+
+    def test_renaming_during_the_round_does_not_throw_the_result_away(self):
+        """判据是**身份**(链接),不是"这一行有没有被动过"。改个名字、换个分组
+        都不影响这一轮抓的是谁 —— 连这种也作废的话,正常同步会被一次改名白白
+        丢掉一轮(而登录态通道一轮是十几分钟)。"""
+        s = self.sub()
+
+        def harvest(jobs, **kw):
+            reg.save_subscription('social', {'name': '换个名字'}, s['id'])
+            return {'example': {'entries': [self.entry()], 'error': '',
+                                'watermark': '2026-10-07T00:00:00+00:00'}}
+
+        with patch.object(x_browser, 'harvest', harvest):
+            summary = sync.collect('social', FetchScope(force=True))
+        self.assertEqual((1, 0), (summary['added'], summary['repointed']))
+        self.assertEqual('2026-10-07T00:00:00+00:00',
+                         x_channels.watermark(reg.subscription('social', s['id']),
+                                              x_channels.BROWSER))
 
 
 if __name__ == '__main__':

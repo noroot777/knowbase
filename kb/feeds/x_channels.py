@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR
 from kb.source_types import feed_types
@@ -151,6 +153,44 @@ def _handle(source: dict) -> str:
         return ''
 
 
+def since_floor(day: str) -> str:
+    """用户点名的那一天 → 交给采集器的下界(带时区的 ISO,语义是**排他**的)。
+
+    两件事都得在这一处定下来,交给下游各自解释必然各漂一头:
+
+    ①**时区按项目统一的 Asia/Shanghai,不按部署机器的。** 把 `YYYY-MM-DD`
+      原样传下去的话,采集器那头 `fromisoformat` 得到的是个**不带时区**的时间,
+      补齐时用的是宿主时区 —— UTC 机器上这一天的起点落在上海时间 08:00,凌晨
+      0 点到 7 点 59 的推文一条也翻不到,`errors` 还是空的(2026-10-08 审查
+      实测 `TZ=UTC`:同一天四条推文只收进 08:01 那一条)。入库那一侧的
+      `published`(`x_browser._as_published`)和 `sync._save_result` 的日期筛选
+      固定按上海算,下界必须是同一个口径。
+
+    ②**起点算在区间里。** 下游那条选择规则是严格大于(日常水位要靠它避免重抓
+      上一轮最后那条),而用户勾的"从 10-05 开始"包含这一天 00:00:00 发的那条
+      —— 直接把日期当水位传下去,零点整那条会被当成"已经收过"丢掉(同轮审查
+      在上海时区下实测:`missing_times=['2026-10-05 00:00']`)。所以这里给的是
+      **那一天零点前的最后一瞬**(微秒级):闭区间换成等价的排他下界,下游那条
+      规则一个字不用改,而推文时间的源精度到毫秒 —— 真实内容落不进这中间。
+
+    **为什么是在这里换算,而不是给下游加一个"包含起点"的开关:** 那只修得了
+    浏览器通道。feedgrab 那一侧的下界是 `X_USER_TWEETS_SINCE`,只认日期、而且
+    按 UTC 的日算 —— 把 `2026-10-05` 原样交给它,上海时间那天 0 点到 7 点 59
+    (UTC 10-04 16:00 起)同样一条都拿不到。换算成前一天的最后一瞬之后它
+    `[:10]` 得到 `2026-10-04`,那段窗口才回来;多出来的前一天由
+    `sync._save_result` 的日期筛选收口(它按 `published` 的日期比 since/until,
+    本来就是闭区间),重叠的条目也早被 `put_items` 按 URL 去重。
+
+    认不出的写法返回空串 —— 那会退回"按日常水位读",而不是把整轮带掉;日期本身
+    由 `FetchScope` 那一侧校验。
+    """
+    try:
+        start = datetime.strptime(day, '%Y-%m-%d').replace(tzinfo=ZoneInfo('Asia/Shanghai'))
+    except (TypeError, ValueError):
+        return ''
+    return (start - timedelta(microseconds=1)).isoformat()
+
+
 def targets(sources: list[dict], settings: dict) -> list[dict]:
     """这一轮里该由非 HTTP 通道接管的订阅。"""
     from kb.feeds import registry as reg
@@ -172,11 +212,15 @@ def prefetch(sources: list[dict], settings: dict, *, since: str = '',
     **`since` 是区间补抓那段日期的起点**(`FetchScope.since`,日常同步为空)。
     它是这条路唯一的逃生口:用户点名要补 10-05 那天,而日常水位已经停在 10-07,
     按水位读的话一条也翻不到那天 —— 下界必须换成用户给的日期(审查实测:传给
-    采集器的仍是 10-07、`added=0`)。
+    采集器的仍是 10-07、`added=0`)。那个日期先过 `since_floor` 换算成带时区、
+    而且把起点算在内的下界,不原样交下去。
     """
     channel = channel_of(settings)
     picked = targets(sources, settings)
-    jobs = [(_handle(s), since or watermark(s, channel)) for s in picked]
+    # 区间补抓的下界要先翻成带时区、且把起点算在内的 ISO(见 `since_floor`):
+    # 裸日期交下去的含义由宿主时区决定,而零点整那条会被严格大于的选择规则丢掉。
+    floor = since_floor(since) if since else ''
+    jobs = [(_handle(s), floor or watermark(s, channel)) for s in picked]
     if not jobs:
         with _lock:
             _harvest.clear()

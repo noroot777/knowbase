@@ -399,9 +399,13 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
                 if reset:
                     # 换了链接 = 这个订阅从头开始,历史下界也跟着重算:指向一个
                     # 全新的源时,旧订阅那个两年前的下界等于没有下界。
+                    # **上一轮那条「没读完」的提示也要一起清掉**(`last_note`):
+                    # 它说的是旧账号读到哪儿了,留着就是在新账号那一行显示
+                    # 「部分同步」——前端的状态链在 `last_success` 之前先看它,
+                    # 而 `last_success` 这里已经清了(2026-10-08 审查实测)。
                     c.execute("""UPDATE subscriptions SET etag='',modified='',resolved_url='',
                         last_error='',last_success='',last_attempt='',failures=0,retry_at=0,config='{}',
-                        history_floor=? WHERE id=?""", (history_floor(), source_id))
+                        last_note='',history_floor=? WHERE id=?""", (history_floor(), source_id))
                     c.execute('DELETE FROM subscription_items WHERE subscription_id=?', (source_id,))
             else:
                 source_id = c.execute('''INSERT INTO subscriptions
