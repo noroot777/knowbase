@@ -401,7 +401,11 @@ class MixedBatchTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.vault = self.root / 'vault'
+        # 维护锁的 lockfile 在 DATA_DIR 下:这两类都真走 `sync.export`(整段在锁
+        # 里),不指到 tmp 就会去 flock **生产**那一个,被 kb-web 正在跑的一轮索引
+        # (整趟持锁)挂住几分钟(见 kb.maintenance)。
         for p in (patch.object(reg, 'DB_PATH', self.root / 'feeds.db'),
+                  patch.object(maintenance, 'DATA_DIR', self.root),
                   patch.object(sync, 'VAULT_ROOT', self.vault),
                   patch.object(scanner, 'VAULT_ROOT', self.vault),
                   patch.object(translate, '_model', lambda: MODEL),
@@ -480,7 +484,11 @@ class ReexportMetadataTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.vault = self.root / 'vault'
+        # 维护锁的 lockfile 在 DATA_DIR 下:这两类都真走 `sync.export`(整段在锁
+        # 里),不指到 tmp 就会去 flock **生产**那一个,被 kb-web 正在跑的一轮索引
+        # (整趟持锁)挂住几分钟(见 kb.maintenance)。
         for p in (patch.object(reg, 'DB_PATH', self.root / 'feeds.db'),
+                  patch.object(maintenance, 'DATA_DIR', self.root),
                   patch.object(sync, 'VAULT_ROOT', self.vault),
                   patch.object(scanner, 'VAULT_ROOT', self.vault),
                   patch.object(extract, 'VAULT_ROOT', self.vault),

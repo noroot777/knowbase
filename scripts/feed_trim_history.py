@@ -404,6 +404,21 @@ def cmd_scan(args) -> int:
 
 
 def cmd_run(args) -> int:
+    # **这道检查必须排在所有副作用之前,包括续跑那一步。** 它原来在
+    # `_run_locked` 里、排在「续上没做完的那一份」后面:同一个订阅存在一份
+    # 已经备份、还没删完的计划时(备份落盘之后进程被杀或 I/O 异常,是脚本
+    # 明确支持的恢复场景),带两个开关重跑会先把那份计划**续完** —— feeds
+    # 行、vault md、`documents`、全文索引和 `history_floor` 全动了 —— 然后
+    # 才打印「不能一起用」并退 2。于是「两个开关同时给时一个字节都不动」在
+    # 这条路上压根不成立,用户看到的是一句拒绝加一篇读不到了的文章
+    # (2026-10-08 审查实测:退出码 2,而 feed 行/文件/documents/检索四处
+    # 同时归零)。原来那条回归只摆了「没有未完成计划」的局,所以全绿骗了
+    # 过去 —— 判据是**有旧计划时也不许动**,不是「提示对不对」。
+    # 取锁也算副作用:非法参数不该先去等满 `KB_MAINT_LOCK_WAIT`。
+    if args.pending_translation and args.floor:
+        print('--pending-translation 筛的是翻译队列,不是日期;这两个开关不能一起用。',
+              file=sys.stderr)
+        return 2
     if blocked := _pipeline_busy():
         print(blocked, file=sys.stderr)
         return 2
@@ -462,11 +477,8 @@ def _run_locked(args, override: str) -> int:
         with reg.db() as c:
             source = dict(c.execute('SELECT * FROM subscriptions WHERE id=?',
                                     (source['id'],)).fetchone())
+    # 互斥检查在 `cmd_run` 里、续跑之前就做完了(理由见那里)。
     mode = 'pending-translation' if args.pending_translation else ''
-    if mode and args.floor:
-        print('--pending-translation 筛的是翻译队列,不是日期;这两个开关不能一起用。',
-              file=sys.stderr)
-        return 2
     try:
         # 新模式下这一趟跟下界无关,压根不算它:算出来只会出现在打印和计划里,
         # 让人以为钉了一个。真正"不动它"那一下在 `_cut_feeds` 里。

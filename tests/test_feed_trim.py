@@ -550,6 +550,36 @@ class PendingTranslationTests(TrimFixture, unittest.TestCase):
         self.assertTrue(self.state(item)['file'])
         self.assertFalse(list((self.root / 'backups').glob('feedtrim-*')))
 
+    def test_an_illegal_combo_does_not_resume_an_unfinished_plan(self):
+        """有一份没做完的计划时,非法参数组合**照样**一个字节都不许动。
+
+        互斥检查原来排在「续上没做完的那一份」后面,于是带两个开关重跑会先把
+        那份计划**续完** —— feeds 行、vault md、`documents`、全文索引和
+        `history_floor` 全动了 —— 然后才打印「不能一起用」并退 2:用户看到的
+        是一句拒绝加一篇再也读不到的文章(2026-10-08 审查实测,四处同时归零)。
+        上一条用例只摆了「没有旧计划」的局,那条路上两种实现都是绿的 —— 所以
+        判据必须是**有旧计划时也不许动**,光验提示和退出码证明不了任何事。
+        """
+        s = self.legacy(self.sub())
+        item = self.seed(s, self.english('https://example.org/queued'))
+        # 备份和 progress.json 落盘之后、任何删除之前中断:这是脚本明确支持的
+        # 恢复场景(进程被杀、I/O 异常),所以此刻三处数据必须逐字未变。
+        with patch.object(trim, '_apply', side_effect=RuntimeError('备份之后中断')):
+            with self.assertRaises(RuntimeError):
+                trim.cmd_run(self.args(s))
+        self.assertEqual(1, len(trim._plans(s['id'])))
+        before = self.state(item)
+        self.assertTrue(before['feed_row'] and before['file'])
+        self.assertEqual((1, 1), (before['documents'], before['searchable']))
+
+        # 带两个互斥开关重跑:拒绝,而且那份计划一步都没续。
+        self.assertEqual(2, trim.cmd_run(
+            self.args(s, pending_translation=True, floor='2026-08-01')))
+        self.assertEqual(before, self.state(item))
+        self.assertEqual('', self.floor_of(s))
+        # 计划留着 —— 改对参数还能接着续,这是拒绝与「删一半」的分界。
+        self.assertEqual(1, len(trim._plans(s['id'])))
+
 
 if __name__ == '__main__':
     unittest.main()
