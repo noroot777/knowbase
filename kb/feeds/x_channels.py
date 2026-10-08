@@ -127,6 +127,11 @@ def watermark_patch(channel: str, value: str) -> dict:
     `put_items` 失败那一轮水位已经推进了,这批没入库的推文比旧水位新、又比新
     水位老,从此**任何一轮增量都选不到它们**(审查实测:存盘失败后 `stored_items=0`
     而水位已前进,重试取回 0 条)。
+
+    **空值 = 什么都不改,所以「这一轮没读完」不能交一个空值过来**:新订阅压根
+    没有水位,两条 harvest 因此存回的是**这一轮真正用过的那个下界**,而不是手里
+    那个空的 `water` —— 交空值的话下一轮会现算一个「当天往回 FIRST_DAYS 天」,
+    没读完的那段日期随时间往前滑走(实测记在 `x_feedgrab.harvest`)。
     """
     key = _WATER_KEY.get(channel)
     return {key: value} if key and value else {}

@@ -388,16 +388,23 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     on_progress(index, len(jobs), handle)
                 floor = _utc(water) if water else (
                     datetime.now(timezone.utc) - timedelta(days=FIRST_DAYS))
+                # 这一轮真正用过的下界。没读完时存回**它**而不是存 `water`:新订阅
+                # 的 `water` 是空的,存空值等于什么都没存(`watermark_patch` 对空
+                # 值不产生补丁),下一轮又现算一个「当天往回 FIRST_DAYS 天」——
+                # 那段没读完的日期就随时间往前滑走了,而面板显示「已同步」。
+                # 实测与理由记在 `x_feedgrab.harvest` 那条注释里(两条通道同一个
+                # 缺口);`_select` 两轮都按同一个**排他**下界筛,窗口逐字相同。
+                started = water or floor.isoformat()
                 try:
                     entries, incomplete = _harvest_one(page, handle, floor)
                     # **没读完就不推进水位**:这一轮停在时间线半中间,下面那一段
                     # 既没读也没入库,而把水位推到"这一轮见过的最新"就等于宣布
                     # 那一段已经收过 —— 它们比旧水位新、又比新水位老,从此任何
-                    # 一轮增量都选不到它们。留着旧水位:下一轮重叠重抓,
+                    # 一轮增量都选不到它们。留着这一轮的下界:下一轮重叠重抓,
                     # `put_items` 按 URL 去重,一条都不会重复入库。
                     results[handle] = {
                         'entries': entries, 'error': '', 'incomplete': incomplete,
-                        'watermark': water if incomplete else _newest(entries, water)}
+                        'watermark': started if incomplete else _newest(entries, water)}
                 except (XBrowserError, CdpError) as e:
                     results[handle] = {'entries': [], 'error': str(e)}
     except (CdpError, EOFError, OSError) as e:

@@ -342,6 +342,28 @@ class ReadToTheWatermarkTests(unittest.TestCase):
         self.assertEqual('滚动次数用完', got['example']['incomplete'])
         self.assertEqual('', got['example']['error'])
 
+    def test_a_first_incomplete_round_saves_the_floor_it_actually_used(self):
+        """**新订阅那一轮尤其要存**:它的 `water` 是空的,「留着旧水位」在它身上
+        什么都没留下 —— 空值压根不产生 config 补丁(`x_channels.watermark_patch`),
+        下一轮又按「当天往回 FIRST_DAYS 天」现算一个下界,那段没读完的日期
+        **随时间往前滑走**,而面板上写的是「已同步」(2026-10-09 第 4 轮审查在
+        feedgrab 那条通道上实测,两条通道是同一个缺口)。
+
+        断言的是「存下来的那个值解析回去,正是这一轮真用过的下界」—— 只验"非空"
+        的话,存一个"现在"上去也能过,而那恰好是最坏的一种。
+        """
+        used = []
+
+        def fake_harvest_one(page, handle, floor):
+            used.append(floor)
+            return [{'published': '2026-10-07 20:30'}], '滚动次数用完'
+
+        with patch.object(x_browser, '_harvest_one', fake_harvest_one), \
+                patch.object(x_browser, 'Chrome', _FakeChrome):
+            got = x_browser.harvest([('example', '')], profile='/tmp/p')
+        self.assertNotEqual('', got['example']['watermark'], '首轮未完成,下界没存下来')
+        self.assertEqual(used[0], x_browser._utc(got['example']['watermark']))
+
     def test_a_complete_round_does_advance_the_watermark(self):
         def fake_harvest_one(page, handle, floor):
             return [{'published': '2026-10-07 20:30'}], ''
@@ -543,6 +565,32 @@ class FeedgrabChannelTests(unittest.TestCase):
                 x_feedgrab.harvest([('example', x_channels.since_floor('2026-10-05'))],
                                    data_dir=f'{tmp}/sessions', workdir=f'{tmp}/work')
         self.assertEqual('2026-10-04', seen['X_USER_TWEETS_SINCE'])
+
+    def test_a_first_incomplete_round_saves_the_boundary_it_handed_over(self):
+        """同浏览器通道那条:首轮没抓全时存回**这一轮真正交给上游的那个下界**。
+
+        这条通道的下界就是 `X_USER_TWEETS_SINCE`,所以断言直接拿它比 —— 存回它
+        不会漏掉边界那一天:上游的日期过滤是 `tweet_date < since_date` 才丢
+        (含下界当天),下一轮的窗口和这一轮逐字相同。
+        """
+        seen = {}
+
+        def run(exe, handle, env, base):
+            seen.update(env)
+            # 翻页半途中断:上游这一行之后 `break`,而批量记录和摘要里一个字
+            # 都看不出来(见 `x_feedgrab._incomplete`)。
+            return ('[UserTweets] >>> 第 2 页所有 1 个账号均失败 <<< 已抓取 1 条，停止分页\n'
+                    '总数: 1, 成功: 1, 跳过: 0, 失败: 0')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(x_feedgrab, 'find_binary', lambda b: '/usr/bin/true'), \
+                    patch.object(x_feedgrab, '_run', run), \
+                    patch.object(x_feedgrab, '_read_output', lambda *a: []):
+                got = x_feedgrab.harvest([('example', '')], data_dir=f'{tmp}/sessions',
+                                         workdir=f'{tmp}/work')
+        self.assertIn('翻页', got['example']['incomplete'])
+        self.assertEqual(seen['X_USER_TWEETS_SINCE'], got['example']['watermark'],
+                         '首轮未完成,交给上游的那个下界没存下来')
 
     def test_no_since_key_is_set_when_there_is_no_watermark(self):
         env = x_feedgrab._env(Path('/tmp/run-x'), '/tmp/sessions', '')

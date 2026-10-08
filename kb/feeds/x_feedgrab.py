@@ -70,7 +70,17 @@ _SUMMARY_FAILED = re.compile(r'成功[:：]\s*\d+[^\n]*?失败[:：]\s*(\d+)')
 # **要连「第 N 页」「M 个账号」一起认**:松成裸「均失败」会把 `twitter.py` 里
 # 那句「所有 GraphQL Cookie 均失败,降级到 FxTwitter」也算进来 —— 那是降级之后
 # 照样拿到了内容,不是漏,而误报把水位**永久**冻住(见 `_incomplete`)。
-_PAGE_ABORT = re.compile(r'第\s*\d+\s*页所有\s*\d+\s*个账号均失败')
+# **`>>>` / `<<<` 这两个标记不是为了"更像那句话",它是这条判据唯一防得住用户
+# 内容的地方。** 上游把推文标题和显示名回显进日志只有产物路径这一条路
+# (`Saved to Markdown: …/<显示名>/<作者>_<日期>:<标题>.md`),而路径的每一段都过
+# 一遍文件名清理,`utils/storage.py` 的 `_ILLEGAL_CHARS_RE` 和
+# `_sanitize_folder_name` 都把 `<` `>` 换成空格 —— 于是一条标题里**逐字写着这句
+# 报错**的推文(排查记录、转发的日志截图)带不进这两个标记。裸认那句话的后果
+# 实测过:两条推文明明都抓到了、上游摘要写着「失败: 0」,面板却永久显示
+# 「部分同步」、水位永久冻在原处,再同步也清不掉(2026-10-09 第 4 轮审查,拿
+# 上游原版 `fetch_user_tweets` 复现)。唯一命中的那行正是上游的 INFO 保存日志。
+# 另一道(跳过回显路径的行)在 `_aborted`。
+_PAGE_ABORT = re.compile(r'>>>[^<>\n]*第\s*\d+\s*页所有\s*\d+\s*个账号均失败[^<>\n]*<<<')
 
 
 class FeedgrabError(RuntimeError):
@@ -219,6 +229,28 @@ def _batch_failures(folder: Path) -> int:
     return failed
 
 
+def _aborted(output: str, folder: Path) -> bool:
+    """这份输出里有没有那行「翻页半途中断」。**逐行看,而且先把路径回显摘掉。**
+
+    真正防住用户内容的有两道,各有射程,缺任何一道都会把推文正文当成一次故障
+    (见 `_PAGE_ABORT` 那段注释里的实测):
+
+    ①`>>>` / `<<<` 两个标记在 `_PAGE_ABORT` 里,靠的是上游的文件名清理
+      (`_ILLEGAL_CHARS_RE` / `_sanitize_folder_name` 把 `<` `>` 换成空格)。
+    ②**跳过回显了本轮产物目录的行**:上游打的保存路径(`Saved to Markdown:`、
+      `批量记录已保存:`)都在这个目录下面,而路径里带着推文标题和显示名。真正那
+      句报错里压根没有路径,所以跳过它不会漏报;这一道**不依赖上游的清理规则**
+      —— 清理哪天放开 `<` `>`,只剩 ① 就守不住了。
+
+    **逐行而不在整份输出上 `search` 不算第三道** —— 那两个标记的字符类本来就是
+    `[^<>\\n]`,跨行凑不出一次命中。它是 ② 的前提(要按行决定跳不跳),顺带在
+    字符类将来被放宽时多兜一层。
+    """
+    own = str(folder)
+    return any(_PAGE_ABORT.search(line) for line in output.splitlines()
+               if own not in line)
+
+
 def _incomplete(output: str, folder: Path) -> str:
     """「这一批抓全了吗」。返回没读完的原因,全抓到了就是空串。
 
@@ -244,7 +276,8 @@ def _incomplete(output: str, folder: Path) -> str:
       上游原版 `fetch_user_tweets` 复现)。**这一档只有这一个证据源** —— 它的
       缺口在"没拿到的那一页"里,条数、日期我们一个都看不到,没有结构化的第二道
       可言;「我们拿到的最早那条还没到下界」倒是看得见,但那证明不了漏(这个号
-      本来就可能没有更早的推文),所以不能当判据。
+      本来就可能没有更早的推文),所以不能当判据。正因为只有这一个证据源,认它
+      的时候要认准:怎么把这一行和回显了推文标题的保存日志分开,见 `_aborted`。
     ②**逐条失败**:批量记录里的逐条状态(`_batch_failures`),或者收尾摘要那行
       文本里的「失败: N」。这两道**不是同一份实现的两种写法** —— 记录换了位置/
       改了文件名时还有文本兜着,摘要改了措辞时还有记录兜着。而且摘要那道自己
@@ -264,7 +297,7 @@ def _incomplete(output: str, folder: Path) -> str:
     不是一句笼统的警告。
     """
     notes = []
-    if _PAGE_ABORT.search(output):
+    if _aborted(output, folder):
         notes.append('feedgrab 翻页中途失败,没有读到上次的位置')
     failed = _batch_failures(folder) or (
         int(hit.group(1)) if (hit := _SUMMARY_FAILED.search(output)) else 0)
@@ -333,18 +366,32 @@ def harvest(jobs: list[tuple[str, str]], *, binary: str = '', data_dir: str,
         out = base / f'run-{handle.lower()}'
         shutil.rmtree(out, ignore_errors=True)
         out.mkdir(parents=True, exist_ok=True)
-        since = water or (datetime.now(timezone.utc)
-                          - timedelta(days=FIRST_DAYS)).strftime('%Y-%m-%d')
+        # 这一轮真正交给上游的那个下界。有水位时它就是水位,没有(新订阅首轮)
+        # 时按「当天往回 FIRST_DAYS 天」现算一个。
+        since = (water or (datetime.now(timezone.utc)
+                           - timedelta(days=FIRST_DAYS)).strftime('%Y-%m-%d'))[:10]
         try:
-            output = _run(exe, handle, _env(out, data_dir, since[:10]), base)
+            output = _run(exe, handle, _env(out, data_dir, since), base)
             entries = _read_output(out, handle)
-            # **没抓全就不推进水位**(口径同浏览器通道那句 `water if incomplete`):
-            # 抓到的照旧入库,但下一轮的下界要留在原处,否则漏掉的那几条从此
-            # 任何一轮增量都选不到(见 `_incomplete`)。重叠重抓是安全的:
-            # `put_items` 按 `sha256(kind:url)` + `ON CONFLICT DO NOTHING` 去重。
+            # **没抓全就不推进水位 —— 存回这一轮真正用过的那个下界**(口径同浏览器
+            # 通道那句 `started if incomplete`)。抓到的照旧入库,漏掉的那几条下
+            # 一轮重叠重抓,`put_items` 按 `sha256(kind:url)` +
+            # `ON CONFLICT DO NOTHING` 去重;不留着下界的话它们从此任何一轮增量
+            # 都选不到(见 `_incomplete`)。
+            # **首轮尤其要存**:新订阅的水位是空的,「留着旧水位」在它身上什么都
+            # 没留下 —— 空值压根不产生 config 补丁(见 `x_channels.watermark_patch`),
+            # 于是下一轮又现算一个「当天往回 FIRST_DAYS 天」,那段没读完的日期
+            # **随时间往前滑走**。实测:9-20 建的订阅首轮翻页中断只收进 1 条,
+            # 10-01 恢复之后下界变成 9-17,9-15 那条推文再也选不到,而面板上写的
+            # 是「已同步」(2026-10-09 第 4 轮审查 —— 那条订阅自己的
+            # `history_floor` 还停在 9-15,按原下界取回来的那条照样过得了
+            # `sync._within_history`,所以不是历史闸门拦的)。
+            # 存回下界本身不会漏掉边界那一天:上游的日期过滤是
+            # `tweet_date < since_date` 才丢(`fetchers/twitter_user_tweets.py`,
+            # 含下界当天),所以下一轮的窗口和这一轮逐字相同。
             note = _incomplete(output, out)
             results[handle] = {'entries': entries, 'error': '', 'incomplete': note,
-                               'watermark': water if note else _newest(entries, water)}
+                               'watermark': since if note else _newest(entries, water)}
         except FeedgrabError as e:
             results[handle] = {'entries': [], 'error': str(e)}
         finally:

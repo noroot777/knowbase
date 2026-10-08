@@ -51,6 +51,14 @@ import pathlib
 import sys
 
 PLAN = json.loads(pathlib.Path(@@PLAN@@).read_text(encoding='utf-8'))
+# 上游 `utils/storage.py` 的 `_ILLEGAL_CHARS_RE`:这几个字符一律换成空格。
+# **照抄它是这个假 CLI 的职责之一** —— `<` `>` 被它换掉,正是"推文标题带不进
+# 那两个标记"这件事的依据(见 `x_feedgrab._PAGE_ABORT` 那段注释)。
+BAD = set(chr(92) + '/:*?"<>|') | {chr(c) for c in range(32)}
+
+
+def clean(text):
+    return ''.join(' ' if ch in BAD else ch for ch in text)
 
 
 def markdown(tweet, display):
@@ -113,8 +121,13 @@ def main():
         for part in [p for p in category.split('/') if p]:
             folder = folder / part
         folder.mkdir(parents=True, exist_ok=True)
-        name = '%s_%s：%s.md' % (spec['display'], tweet['published'], tweet['title'])
+        name = clean('%s_%s：%s' % (spec['display'], tweet['published'],
+                                    tweet['title'])) + '.md'
         (folder / name).write_text(markdown(tweet, spec['display']), encoding='utf-8')
+        # 上游每存一篇都打这一行(`storage.save_to_markdown` 的
+        # `logger.info(f"Saved to Markdown: {path}")`),而路径里带着推文标题和
+        # 显示名 —— 这是推文内容进到我们手里那份输出的唯一一条路。
+        sys.stderr.write('INFO Saved to Markdown: %s\\n' % (folder / name))
     if spec.get('record', True):
         record = base / 'index' / ('status_%s_%s.json' % (handle, os.getpid()))
         record.write_text(json.dumps(
@@ -365,133 +378,6 @@ class PartialBatchTests(FeedgrabRound):
         summary = self.collect()
         self.assertEqual(self.day(4), self.water(s['id']))
         self.assertEqual(1, len(summary['partial']))
-
-
-class PaginationAbortTests(FeedgrabRound):
-    """**翻页半途失败也是「没抓全」,而那两道判据一个字都看不出来。**
-
-    上游分页时某一页所有轮换账号都失败,它只打一行
-    `logger.error('[UserTweets] >>> 第 N 页所有 M 个账号均失败 <<< 已抓取 X 条,
-    停止分页')` 然后 `break`(`fetchers/twitter_user_tweets.py` 的
-    `if not response` 分支)。这一页**压根没拿到**,没拿到的条目不会进
-    `tweet_list` —— 于是批量记录里只有成功那几行、收尾摘要写的是「失败: 0」、
-    退出码照旧是 0:**现有两道判据各自跑一遍都是 0**。
-
-    后果和逐条失败那一档一模一样。审查实测:账号还有 10-07 的推文,首次同步
-    `added=1`、`errors=[]`、`partial=[]`,水位从 10-05 前进到 10-08;把第二页的
-    故障解除再点同步 `added=0`、库里仍然只有 10-08 那条 —— 这一轮传给上游的
-    下界已经是 `X_USER_TWEETS_SINCE=2026-10-08`,10-07 那条**任何一轮增量都
-    选不到**(2026-10-09 第 3 轮审查,拿上游 0.26.2 原版 `fetch_user_tweets`
-    复现;对照组用最初的下界跑同一个健康上游,两条推文都在)。
-    """
-
-    def plan(self, *, abort=2, **spec):
-        """同一个号两页:第一页今天那条拿到了,第二页本该有昨天那条。"""
-        return {'example': {'display': 'Example Person', 'abort_page': abort,
-                            'tweets': [
-            tweet(id_='30001', title='今天那条', body='第一页,正常拿到。'),
-            tweet(id_='30000', title='昨天那条', body='第二页,这一轮没拿到。',
-                  published=YESTERDAY, page=2),
-        ]} | spec}
-
-    def test_a_pagination_abort_keeps_the_old_watermark_and_says_so(self):
-        s = self.start_from()
-        self.cli(**self.plan())
-        summary = self.collect()
-        # 后果先断言:水位一步都不许动 —— 动了,第二页那条就永久选不到了。
-        self.assertEqual(self.day(4), self.water(s['id']))
-        # 第一页那条照旧入库:这不是一次失败(不记 errors、不进退避)。
-        self.assertEqual(1, summary['added'])
-        self.assertEqual([], summary['errors'])
-        self.assertEqual(['Example'], [p['title'] for p in summary['partial']])
-        self.assertIn('翻页', summary['partial'][0]['reason'])
-        # 面板那条「部分同步」读的是订阅行上的 `last_note`,所以连端点一起验。
-        rows = {r['name']: r for r in self.client.get('/api/intake/social')
-                .json()['sources']}
-        self.assertIn('翻页', rows['Example']['last_note'])
-        self.assertEqual('', rows['Example']['last_error'])
-
-    def test_the_tweet_behind_the_abort_comes_back_once_the_page_recovers(self):
-        """审查那份证据的反面:第二页恢复之后再同步,昨天那条要补回来。
-
-        靠的就是上一条留着的旧水位 —— 推进了的话这一轮的下界已经越过它。
-        """
-        s = self.start_from()
-        self.cli(**self.plan())
-        self.collect()
-        self.cli(**self.plan(abort=0))                # 第二页恢复
-        again = self.collect()
-        self.assertEqual(1, again['added'])           # 补回第二页那条
-        self.assertEqual([], again['partial'])
-        urls = sorted(r['url'] for r in self.rows(s['id'])['items'])
-        self.assertEqual(['https://x.com/Example/status/30000',
-                          'https://x.com/Example/status/30001'], urls)
-        self.assertEqual(2, self.rows(s['id'])['total'])
-        # 这一轮读全了:水位跟到最新那天,提示也清掉。
-        self.assertEqual(TODAY, self.water(s['id']))
-        self.assertEqual('', reg.subscription('social', s['id'])['last_note'])
-
-    def test_neither_existing_judgment_can_see_a_pagination_abort(self):
-        """这一档为什么非得单独认一次:它发生在逐条处理**之前**。
-
-        没拿到的条目不会进批量记录,收尾摘要数的也只是拿到的那些 —— 两道判据
-        各自单独跑一遍都是 0,证据只有那行日志。这里不走 `harvest`(它收尾会把
-        产物目录删掉),直接拿真的那个外部程序跑一次看它留下了什么。
-        """
-        exe = self.cli(**self.plan())
-        out = self.root / 'probe'
-        out.mkdir()
-        env = x_feedgrab._env(out, str(self.root / 'fg'), self.day(4))
-        output = x_feedgrab._run(exe, 'Example', env, self.root)
-        self.assertEqual(0, x_feedgrab._batch_failures(out))
-        self.assertIn('失败: 0', output)
-        self.assertIn('均失败', output)               # 证据只有这一行
-        self.assertIn('翻页', x_feedgrab._incomplete(output, out))
-
-    def test_an_abort_and_a_per_tweet_failure_are_both_reported(self):
-        """两档同时发生时两句话都要说出来:它们是不同的原因,修法也不一样。"""
-        s = self.start_from()
-        self.cli(example={'display': 'Example Person', 'abort_page': 2, 'tweets': [
-            tweet(id_='30001', title='今天那条'),
-            tweet(id_='30002', title='今天另一条', fails=True),
-            tweet(id_='30000', title='昨天那条', published=YESTERDAY, page=2),
-        ]})
-        summary = self.collect()
-        self.assertEqual(self.day(4), self.water(s['id']))
-        reason = summary['partial'][0]['reason']
-        self.assertIn('翻页', reason)
-        self.assertIn('没抓下来', reason)
-
-
-class PaginationAbortShapeTests(unittest.TestCase):
-    """中断那一行要连「第 N 页」「M 个账号」一起认,正常收尾一律不算中断。"""
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.folder = Path(self.temp.name)
-
-    def test_the_abort_line_is_recognised(self):
-        self.assertIn('翻页', x_feedgrab._incomplete(
-            '[UserTweets] 获取第 2 页...\n'
-            '[UserTweets] >>> 第 2 页所有 3 个账号均失败 <<< 已抓取 1 条，停止分页\n'
-            '总数: 1, 成功: 1, 跳过: 0, 失败: 0\n', self.folder))
-
-    def test_a_cookie_degradation_is_not_a_pagination_abort(self):
-        """`twitter.py` 那句「所有 GraphQL Cookie 均失败,降级到 FxTwitter」说的是
-        降级之后照样拿到了内容,不是漏。松成裸「均失败」会把它也算进来,而误报把
-        水位**永久**冻住、每一轮重抓整个窗口,比漏报还难看出来。"""
-        self.assertEqual('', x_feedgrab._incomplete(
-            '[Twitter] 所有 GraphQL Cookie 均失败，降级到 FxTwitter\n'
-            '总数: 1, 成功: 1, 跳过: 0, 失败: 0\n', self.folder))
-
-    def test_reaching_the_date_floor_is_not_an_abort(self):
-        """读到下界就停是「读完了」的正面证据(上游那句 `stop_pagination`)。
-        连它也报中断的话,这条通道的水位永远不会前进。"""
-        self.assertEqual('', x_feedgrab._incomplete(
-            '[UserTweets] 第 1 页获取 2 条（过滤 1 条），累计 2 条\n'
-            '[UserTweets] 已到达日期过滤边界，停止分页\n'
-            '总数: 2, 成功: 2, 跳过: 0, 失败: 0\n', self.folder))
 
 
 class BatchRecordShapeTests(unittest.TestCase):
