@@ -386,11 +386,23 @@
   (`_plain_lines`:统一行尾、去行末空白、三个以上连续换行并成一个空行)。
   **类型要跟着值一起取**:`content` 用 `content[i].type`、`summary` 用
   `summary_detail.type`,各有一份,不能只认一个。
-- **标着纯文本却真有标签时退回 HTML 路径**(`_is_plain` 在类型之外再用 bs4 嗅探
-  一次)。feedparser 把 RSS 的裸 `<title>` 一律标成 `text/plain`,而标错 type 的
-  feed 本来就存在 —— 严格按类型走的话那些 `<p>` 会原样显示给用户。
-  **嗅探必须用解析器不能用正则**:`if (a <b) return c` 在 `html.parser` 眼里没有
-  标签,正则会把它误判成 HTML 再把那段尖括号吃掉。
+- **分流只问类型,不看内容长什么样。** 别再往 `_is_plain` 里加「内容里有标签就
+  按 HTML 处理」那种嗅探 —— **「这段文字能被解析成标签」证明不了作者标错了类型**。
+  技术文章里的 `List<T>`、尖括号写的链接、一段字面 HTML 示例全是这个形态,而它们
+  正是作者声明 `type="text"` 要原样显示的东西:嗅探会把 `<T>` 当标签删掉、真实
+  段落再按 HTML 规则折叠掉(`'Use List<T> for the new generic API.\n\nThe second…'`
+  → `'Use List for the new generic API. The second…'`),字面 `<b>` 同理消失;一篇
+  正文只有 `<script>alert(1)</script>` 示例的文章更会被 `plain()` 的脚本清理整个
+  掏空,`parse_feed` 当场跳过条目抛 `FeedError`,**文章有正常标题和链接却收录不
+  进来**(2026-10-08 第 2 轮审查三种形态各实测一次)。它是待显示的示例文字,不是
+  要执行的脚本 —— 阅读页本来就用 `textContent` 显示正文。
+  **当初加那道嗅探的理由本身是错的**:它写着「feedparser 把 RSS 的裸 `<title>`
+  一律标成 `text/plain`」,而实测 RSS 的裸标题和 `<description>` 拿到的都是
+  `text/html`(复判那一轮重测确认);`text/plain` 只出现在 Atom 显式 `type="text"`
+  和 Atom 不写 type 时 —— 两种都是作者的明确声明,不是错标。
+  **类型取不到就按 HTML 走**,并且容忍 `None`:content 与 summary 并存时
+  feedparser 给的 `summary_detail.type` 就是 `None`(那条路 content 先返回,走不到,
+  但别让它崩)。
 - **标题和作者走 `oneline`**(plain 之后把换行压成空格):它们是单行字段,`<br>`
   在正文里该换行,在标题里只该是一个空格。**它也要带上类型** —— 纯文本标题同样
   不该被当 HTML 解析。
@@ -400,18 +412,21 @@
   已入库的条目再抓到也不更新。改这里只对新条目生效。要修存量只能重新抓(而 feed
   里早已滚出去的条目救不回来),且 body 一变 `content_hash` 就变,会连带触发重译
   和重新导出 —— 那是一笔要单独决定的模型开销。
-- 回归在 `tests/test_feed_plain.py`(21 条):截图那条真实形态的句子不许被链接切开、
+- 回归在 `tests/test_feed_plain.py`(24 条):截图那条真实形态的句子不许被链接切开、
   段落之间真的有空行、注释和 script 不进正文、源码缩进照 HTML 规则折叠、`<br>`
   只断一行、表格行列各归各位、`<pre>` 的缩进和内部空行原样、**相邻两个 `<pre>` 不
   粘连**、**`<pre>` 和紧挨着它的正文之间也分段**(这两条不许再借 `<p>` 补边界)、
   正文里伪造占位符偷不走 `<pre>` 内容、`parse_feed` 出来的 body 带段落边界、标题不
-  含换行、**Atom `type="text"` 的正文与 summary 端到端保留段落和单换行**、**标错
-  type 的 HTML 仍按 HTML 分段**、**落单的 `<` 不算标签**、纯文本字段照样压成一行、
+  含换行、**Atom `type="text"` 的正文与 summary 端到端保留段落和单换行**、
+  **声明成纯文本的 `List<T>` 和字面 `<b>` 一个字都不许少**、**正文只有 `<script>`
+  示例的那篇照样收录得进来**、**类型说是 HTML 就照样剥标签**(反过来钉住别把分流
+  判反)、**类型缺失或为 `None` 时按 HTML 走且不崩**、纯文本字段照样压成一行、
   行末空白与连续空行归一,以及**翻译按段落切而不是从句中硬切**(判据是
   `'\n\n'.join(_split(body)) == body` —— 硬切时当场不成立)。反向验证定点注入过
   五版:整个 `plain` 退回旧版红 11 条(其中就有翻译硬切那条)、三档边界合并成一档
   红 2 条、去掉 `<pre>` 保护红 1 条、`<pre>` 退回 `replace_with` 整个标签红 2 条、
-  正文类型一律忽略红 3 条、去掉 bs4 嗅探红 1 条。
+  正文类型一律忽略红 6 条、**把 bs4 嗅探加回去红 3 条**(`<T>` 被吃掉 / 字面 `<b>`
+  被吃掉 / `<script>` 那篇抛 `FeedError`)。
 
 ## 订阅的历史深度(kb/feeds/registry.py + sync.py)
 

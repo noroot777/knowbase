@@ -153,16 +153,39 @@ class PlainTextBodiesKeepTheirOwnNewlines(unittest.TestCase):
         entry = fetching.parse_feed(feed(ARTICLE), 'https://example.org/feed.xml')[0]
         self.assertEqual(2, len(entry['body'].split('\n\n')))
 
-    def test_a_body_mislabeled_as_text_but_really_html_falls_back_to_html(self):
-        # 标着 text/plain 却真有标签时按 HTML 解析:feedparser 把 RSS 的裸标题一律
-        # 标成 text/plain,严格按类型走会把 <p> 原样显示给用户。
+    def test_a_generic_parameter_survives_in_declared_plain_text(self):
+        # 「这段文字能被解析成标签」证明不了作者标错了类型:List<T> 正是 type="text"
+        # 要原样显示的东西。嗅探会把 <T> 当标签删掉、段落再按 HTML 规则折叠掉。
+        body = 'Use List&lt;T&gt; for the new generic API.\n\nThe second paragraph stays separate.'
+        entry = fetching.parse_feed(atom(body), 'https://example.org/feed.xml')[0]
+        self.assertEqual('Use List<T> for the new generic API.\n\n'
+                         'The second paragraph stays separate.', entry['body'])
+
+    def test_literal_markup_in_a_plain_text_summary_survives_too(self):
+        body = 'Literal &lt;b&gt;not bold&lt;/b&gt; sample.\n\nSecond paragraph.'
+        entry = fetching.parse_feed(atom(body, tag='summary'), 'https://example.org/feed.xml')[0]
+        self.assertEqual('Literal <b>not bold</b> sample.\n\nSecond paragraph.', entry['body'])
+
+    def test_an_article_whose_body_is_only_a_script_example_is_still_collected(self):
+        # 走 HTML 路径的话这一篇会被 script 清理整个掏空,parse_feed 当场跳过条目、
+        # 抛 FeedError —— 文章有正常标题和链接却收录不进来。它是待显示的示例文字,
+        # 不是要执行的脚本(阅读页本来就用 textContent 显示正文)。
+        entry = fetching.parse_feed(atom('&lt;script&gt;alert(1)&lt;/script&gt;'),
+                                    'https://example.org/feed.xml')[0]
+        self.assertEqual('<script>alert(1)</script>', entry['body'])
+        self.assertEqual('Plain Text', entry['title'])
+
+    def test_html_typed_bodies_still_get_their_tags_stripped(self):
+        # 反过来钉住:类型说是 HTML 就按 HTML 处理,别因为上面几条把分流判反了。
         html = '&lt;p&gt;A &lt;a href="#"&gt;link&lt;/a&gt; here.&lt;/p&gt;&lt;p&gt;Two.&lt;/p&gt;'
-        entry = fetching.parse_feed(atom(html), 'https://example.org/feed.xml')[0]
+        entry = fetching.parse_feed(atom(html, kind='html'), 'https://example.org/feed.xml')[0]
         self.assertEqual('A link here.\n\nTwo.', entry['body'])
 
-    def test_a_lone_angle_bracket_is_not_a_tag(self):
-        # 嗅探用解析器而不是正则:这段在 html.parser 眼里没有标签,原样留着。
-        self.assertEqual('if (a <b) return c', fetching.body_text('if (a <b) return c', 'text/plain'))
+    def test_a_missing_type_is_not_treated_as_plain_text(self):
+        # 类型取不到(None / 空串)时按 HTML 走,和 oneline/author 那几个不带类型的
+        # 调用口径一致;None 也不许让它崩。
+        self.assertEqual('A b', fetching.body_text('<p>A</p><p>b</p>', None).replace('\n\n', ' '))
+        self.assertEqual('A b', fetching.body_text('<p>A</p><p>b</p>', '').replace('\n\n', ' '))
 
     def test_plain_text_fields_still_collapse_to_one_line(self):
         self.assertEqual('A b', fetching.oneline('A\n\nb', 'text/plain'))

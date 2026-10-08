@@ -219,20 +219,22 @@ def _plain_lines(text: str) -> str:
     return re.sub(r'\n{3,}', '\n\n', '\n'.join(lines)).strip()[:100000]
 
 
-def _is_plain(value: str, kind: str) -> bool:
-    """这份正文该不该按纯文本处理。
+def _is_plain(kind: str | None) -> bool:
+    """这份正文该不该按纯文本处理 —— **只问类型,不看内容长什么样**。
 
-    类型标着纯文本、里面却真有标签是常见的 feed 质量问题(feedparser 把 RSS 的
-    裸 `<title>` 一律标成 `text/plain`),照纯文本处理会把 `<p>` 原样显示给用户。
-    所以标着纯文本时再用解析器问一句「里面到底有没有元素」,有就还按 HTML 走 ——
-    比正则可靠:`if (a <b) return c>d` 这种在 html.parser 眼里不是标签。
+    别再往这里加「内容里有标签就按 HTML 处理」那种嗅探:**「这段文字能被解析成
+    标签」证明不了作者标错了类型**。技术文章里的 `List<T>`、尖括号写的链接、
+    一段字面 HTML 示例全是这个形态,而它们正是作者声明 `type="text"` 要原样
+    显示的东西 —— 嗅探会把 `<T>` 当标签删掉、把真实段落按 HTML 规则折叠掉,
+    一篇正文只有 `<script>alert(1)</script>` 示例的文章更会被脚本清理整个掏空,
+    连条目都收录不进来(2026-10-08 第 2 轮审查三种形态各实测一次)。
     """
-    return kind.lower() in _PLAIN_TYPES and BeautifulSoup(value, 'html.parser').find() is None
+    return (kind or '').lower() in _PLAIN_TYPES
 
 
-def body_text(value: str, kind: str = '') -> str:
+def body_text(value: str, kind: str | None = '') -> str:
     """按 feedparser 给出的正文类型选解析方式。取正文/标题/作者都走这个入口。"""
-    return _plain_lines(value) if _is_plain(value, kind) else plain(value)
+    return _plain_lines(value) if _is_plain(kind) else plain(value)
 
 
 def entry_body(item) -> tuple[str, bool]:
@@ -244,13 +246,13 @@ def entry_body(item) -> tuple[str, bool]:
     """
     for c in item.get('content', []):
         if c.get('value'):
-            return body_text(c['value'], c.get('type', '')), True
+            return body_text(c['value'], c.get('type')), True
     if summary := item.get('summary', ''):
-        return body_text(summary, item.get('summary_detail', {}).get('type', '')), False
-    return oneline(item.get('title', ''), item.get('title_detail', {}).get('type', '')), False
+        return body_text(summary, item.get('summary_detail', {}).get('type')), False
+    return oneline(item.get('title', ''), item.get('title_detail', {}).get('type')), False
 
 
-def oneline(value: str, kind: str = '') -> str:
+def oneline(value: str, kind: str | None = '') -> str:
     """标题、作者这类单行字段:块级元素同样不该在里面留下换行。"""
     return ' '.join(body_text(value, kind).split())
 
@@ -293,7 +295,7 @@ def parse_feed(body: bytes, base_url: str, *, social: bool = False) -> list[dict
         text, has_content = entry_body(item)
         if not text:
             continue
-        title = (oneline(item.get('title', ''), item.get('title_detail', {}).get('type', ''))
+        title = (oneline(item.get('title', ''), item.get('title_detail', {}).get('type'))
                  or text.splitlines()[0][:100])
         date = item.get('published_parsed') or item.get('updated_parsed')
         published = ''
