@@ -277,14 +277,25 @@ def translate_pending(kind: str, limit: int | None = None, progress=None) -> dic
     没配 key / 没有可用模型时直接跳过(skipped 带原因),不报错也不重试计数
     ——那是配置问题,不是这些条目有问题,按失败记会把重试次数白白耗光。
     """
-    summary = {'done': 0, 'failed': 0, 'left': 0, 'skipped': '', 'errors': []}
+    summary = {'done': 0, 'failed': 0, 'left': 0, 'skipped': '',
+               'errors': [], 'failed_keys': []}
     _label_unknown(kind)
     _requeue_partial(kind)
     cond, cargs = queued_sql()          # 队列判据只有这一份,别在这里另写一遍
     with reg.db() as c:
+        # **失败过的优先**。原来是 `ORDER BY translate_tries`(升序),于是译
+        # 不动的那些永远排在"从没试过"的后面:实测队列里 833 条 tries=0 压着
+        # 63 条 tries=1,按一轮 40 条算要 21 轮同步、三周才轮得到重试一次,而
+        # 这期间每一轮导出都把这 63 条原样报成「补译失败」并判红 —— 一个三周
+        # 不变的红点,说的还不是这一轮发生的事(2026-10-08 实测)。
+        # 失败优先不会让它们赖着:`translate_tries<MAX_TRIES` 是硬出口,试满
+        # 就按原文导出、离开队列。而 tries=0 的那些只是正常积压,晚一轮无损。
         rows = [dict(r) for r in c.execute(
             f'SELECT * FROM feed_items WHERE kind=? AND ({cond})'
-            ' ORDER BY translate_tries, fetched_at DESC LIMIT ?',
+            # `key` 收尾是为了定序:`fetched_at` 只精确到秒(`registry.now`),
+            # 一批抓回来的几百条时间戳一模一样,前两段排完仍然没有定序 —— 取
+            # 哪 40 条就交给 SQLite 的扫描顺序了,不可复现也没法测。
+            ' ORDER BY translate_tries DESC, fetched_at DESC, key LIMIT ?',
             (kind, *cargs, max(1, limit or MAX_ITEMS))).fetchall()]
     summary['left'] = max(0, pending(kind) - len(rows))
     if not rows:
@@ -309,6 +320,9 @@ def translate_pending(kind: str, limit: int | None = None, progress=None) -> dic
         for item, title_zh, result in pool.map(one, rows):
             if isinstance(result, Exception):
                 summary['failed'] += 1
+                # key 也记下来:导出那头要靠它把"本轮新失败"和"此前失败、还排着
+                # 队"分开报,拿 failed 这个计数是分不出来的(见 `sync._export`)。
+                summary['failed_keys'].append(item['key'])
                 summary['errors'].append({'title': item['title'][:120], 'reason': str(result)[:300]})
             elif result is None:                     # 收到停止请求,剩下的留给下一轮
                 summary['left'] += 1
