@@ -13,13 +13,31 @@ from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 
 import feedparser
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 from kb.feeds.registry import normalize_url, x_handle
 from kb.source_types import feed_types
 
 MAX_BYTES = 8 * 1024 * 1024
 SOURCE_SECONDS = 20
+_WS = re.compile(r'\s+')
+_CTRL = re.compile(r'[\x00\x02\x03]')
+# 元素边界分三档,各插一个标记,相邻的标记随后合并成最强的那一档(\x02 > \x03 >
+# 空格),所以「前后各插一个」不会在块与块之间留下双倍空行。
+#   块级 \x02 → 空行:这是段落边界,翻译按它切块、markdown 按它分段
+#   换行 \x03 → <br> 和表格行,只断行,不然一张表会被空行撑成几十段
+#   单元格 → 一个空格,同一行里的几格不该各占一行
+# 其余一律当行内,不插任何分隔符 —— <a>/<em>/<code> 切开的是同一个句子。
+_BLOCK = frozenset((
+    'address article aside blockquote caption dd details dialog div dl dt fieldset figcaption '
+    'figure footer form h1 h2 h3 h4 h5 h6 header hgroup hr li main nav ol p pre section summary '
+    'table tbody tfoot thead ul').split())
+_LINE = frozenset('br tr'.split())
+# feedparser 对 Atom 的 type="text" 和 RSS 的裸标题给的就是这几种写法。
+_PLAIN_TYPES = frozenset(('text', 'plain', 'text/plain'))
+_CELL = frozenset('td th'.split())
+_MARKS = {**{t: '\x02' for t in _BLOCK}, **{t: '\x03' for t in _LINE}, **{t: ' ' for t in _CELL}}
+_MARK_RUN = re.compile(r' *[\x02\x03][\x02\x03 ]*')
 
 
 class FeedError(ValueError):
@@ -138,10 +156,105 @@ def request(url: str, headers: dict | None = None, *, deadline: float | None = N
 
 
 def plain(html: str) -> str:
-    soup = BeautifulSoup(html, 'html.parser')
+    """HTML 正文转纯文本:只有块级元素换行,行内元素不切断句子。
+
+    别退回 `soup.get_text('\n', strip=True)`:那个分隔符对**每一个文本节点**
+    都插一次换行,而 <a>/<em>/<code> 这些行内元素正是把一句话切成多个文本节点
+    的东西 —— 一句「As <a>promised</a>, Anthropic released ...」出来就是三行,
+    每个链接文字独占一行。更糟的是段落边界跟着一起塌掉:<p> 之间本该是空行,
+    strip=True 之下也只剩一个 \n,和句中被切开的那些换行再也分不出来
+    (2026-10-08 实测:库里 738 条 RSS 条目有 677 条带换行,而带空行的只有 3 条
+    —— 段落信息已经在入库那一刻丢光了)。后果是三重的:面板的阅读视图按
+    `white-space: pre-wrap` 一行行照显,导出的 vault md 整篇没有一个空行,
+    翻译那边 `_split` 按 '\n\n' 切块于是整篇算一段、超过 CHUNK 就从句子中间
+    硬切,而 prompt 里写着「保持原有的段落与换行结构」—— 模型忠实照做,
+    译文把碎行逐行译了一遍。用户看到的「翻译后排版乱」在英文原文里就已经乱了。
+    """
+    # 这三个控制字符不会出现在正常正文里,先清掉:下面拿 NUL 当 <pre> 的占位符,
+    # \x02 / \x03 当元素边界标记。
+    soup = BeautifulSoup(_CTRL.sub('', html), 'html.parser')
     for node in soup(['script', 'style', 'iframe', 'noscript']):
         node.decompose()
-    return re.sub(r'\n[ \t]*\n+', '\n\n', soup.get_text('\n', strip=True)).strip()[:100000]
+    # <pre> 的空白是内容(代码块的缩进和换行),先把它的内容换成占位符,免得被
+    # 下面那道 HTML 空白折叠压成一行。**换掉的是内容,不是整个标签** —— 整个
+    # replace_with 成一段裸文本的话,`pre` 虽然在 _BLOCK 里,后面那趟 find_all
+    # 已经找不到这个标签了,它自己的块级边界跟着一起没:两个相邻的 <pre> 直接
+    # 拼成一块(`more_first()second()`),<pre> 和两侧文字之间同样粘连
+    # (`Beforecode` / `indentAfter`),复制出来就是错的命令。占位符本身不含空白,
+    # 留在标签里一个字也不会被折叠掉。
+    kept: list[str] = []
+    for tag in soup.find_all('pre'):
+        kept.append(tag.get_text().strip('\n'))
+        tag.string = f'\x00{len(kept) - 1}\x00'
+    # 按 HTML 的空白折叠规则逐个文本节点归一。必须赶在插入分隔符之前做,
+    # 否则连我们自己插的换行一起折叠掉。`type(...) is` 而不是 isinstance:
+    # Comment / CData / Doctype 都是 NavigableString 的子类,照这样替换会把
+    # 注释内容搬进正文。
+    for text in soup.find_all(string=True):
+        if type(text) is NavigableString and (flat := _WS.sub(' ', text)) != text:
+            text.replace_with(NavigableString(flat))
+    for tag in soup.find_all(set(_MARKS)):
+        mark = _MARKS[tag.name]
+        tag.insert_before(NavigableString(mark))
+        tag.insert_after(NavigableString(mark))
+    # 一串相邻标记(连同夹在中间、折叠出来的空格)合并成一个换行,有块级标记就
+    # 是空行。标记两侧的空格一并吃掉 —— 那是源码缩进,不是内容。
+    text = _MARK_RUN.sub(lambda m: '\n\n' if '\x02' in m[0] else '\n', soup.get_text(''))
+    # 单元格标记是空格,相邻两格各插一个就成了双空格;文本节点内部的空白上面
+    # 已经折叠过,这里剩下的都是标记凑出来的。
+    text = re.sub(' {2,}', ' ', text)
+    # <pre> 放回来要排在最后:它内部的缩进和空行是内容,不该被上面那条规则碰。
+    text = re.sub('\x00(\\d+)\x00', lambda m: kept[int(m[1])], text)
+    return text.strip()[:100000]
+
+
+def _plain_lines(text: str) -> str:
+    """纯文本正文:原样保留换行,只做最轻的归一(统一行尾、去行末空白、并空行)。
+
+    不能拿 `plain()` 去处理它 —— 那里那道 HTML 空白折叠会把真正的换行当成源码
+    缩进抹掉,一篇本来分成几段的纯文本文章被压成一整段(译文、导出的 md、阅读页
+    一路继承,长正文还会退回「整篇算一段、超过 CHUNK 从句中硬切」那个老问题)。
+    """
+    lines = [line.rstrip() for line in text.replace('\r\n', '\n').replace('\r', '\n').split('\n')]
+    return re.sub(r'\n{3,}', '\n\n', '\n'.join(lines)).strip()[:100000]
+
+
+def _is_plain(kind: str | None) -> bool:
+    """这份正文该不该按纯文本处理 —— **只问类型,不看内容长什么样**。
+
+    别再往这里加「内容里有标签就按 HTML 处理」那种嗅探:**「这段文字能被解析成
+    标签」证明不了作者标错了类型**。技术文章里的 `List<T>`、尖括号写的链接、
+    一段字面 HTML 示例全是这个形态,而它们正是作者声明 `type="text"` 要原样
+    显示的东西 —— 嗅探会把 `<T>` 当标签删掉、把真实段落按 HTML 规则折叠掉,
+    一篇正文只有 `<script>alert(1)</script>` 示例的文章更会被脚本清理整个掏空,
+    连条目都收录不进来(2026-10-08 第 2 轮审查三种形态各实测一次)。
+    """
+    return (kind or '').lower() in _PLAIN_TYPES
+
+
+def body_text(value: str, kind: str | None = '') -> str:
+    """按 feedparser 给出的正文类型选解析方式。取正文/标题/作者都走这个入口。"""
+    return _plain_lines(value) if _is_plain(kind) else plain(value)
+
+
+def entry_body(item) -> tuple[str, bool]:
+    """条目正文:content 优先,其次 summary,都没有退回标题;各自按自己的类型解析。
+
+    类型必须跟着值一起取 —— 同一个条目里 content 可能是 `text/plain` 而 summary
+    是 `text/html`,把它们混成一个 `a or b or c` 再统一按 HTML 解析,纯文本那一份
+    的分段就没了。
+    """
+    for c in item.get('content', []):
+        if c.get('value'):
+            return body_text(c['value'], c.get('type')), True
+    if summary := item.get('summary', ''):
+        return body_text(summary, item.get('summary_detail', {}).get('type')), False
+    return oneline(item.get('title', ''), item.get('title_detail', {}).get('type')), False
+
+
+def oneline(value: str, kind: str | None = '') -> str:
+    """标题、作者这类单行字段:块级元素同样不该在里面留下换行。"""
+    return ' '.join(body_text(value, kind).split())
 
 
 def canonical_url(url: str, social: bool = False) -> str:
@@ -179,11 +292,11 @@ def parse_feed(body: bytes, base_url: str, *, social: bool = False) -> list[dict
             link = canonical_url(urljoin(base_url, link), social)
         except ValueError:
             continue
-        content = next((c.get('value', '') for c in item.get('content', []) if c.get('value')), '')
-        text = plain(content or item.get('summary', '') or item.get('title', ''))
+        text, has_content = entry_body(item)
         if not text:
             continue
-        title = plain(item.get('title', '')) or text.splitlines()[0][:100]
+        title = (oneline(item.get('title', ''), item.get('title_detail', {}).get('type'))
+                 or text.splitlines()[0][:100])
         date = item.get('published_parsed') or item.get('updated_parsed')
         published = ''
         if date:
@@ -193,8 +306,8 @@ def parse_feed(body: bytes, base_url: str, *, social: bool = False) -> list[dict
             except (ValueError, OverflowError):
                 pass
         entries.append({'url': link, 'title': title[:500], 'body': text,
-                        'author': plain(item.get('author', '')), 'published': published,
-                        'content_kind': 'post' if social else ('content' if content else 'summary')})
+                        'author': oneline(item.get('author', '')), 'published': published,
+                        'content_kind': 'post' if social else ('content' if has_content else 'summary')})
     if parsed.entries and not entries:
         raise FeedError('订阅有条目，但没有可保存的正文和原文链接')
     return entries
