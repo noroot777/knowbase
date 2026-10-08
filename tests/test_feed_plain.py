@@ -6,6 +6,10 @@
 往下传:面板按 pre-wrap 一行行照显、vault md 整篇没有空行、翻译按 '\n\n'
 切块于是整篇算一段、超长就从句子中间硬切,而 prompt 写着「保持原有的段落与
 换行结构」—— 模型忠实照做,译文把碎行逐行译了一遍。
+
+连带钉住修这件事时自己踩的两脚:<pre> 摘出去时整个标签一起换掉的话,它自己
+那道块级边界跟着没了(两个代码块粘成一个);而给 HTML 做的空白折叠套到
+feedparser 标明的纯文本正文上,原本好好分段的文章会被压成一整段。
 """
 import unittest
 
@@ -70,6 +74,18 @@ class BlockBoundariesKeepTheirGranularity(unittest.TestCase):
         text = fetching.plain('<p>Try:</p><pre><code>def f():\n    return 1\n\n    return 2\n</code></pre><p>Done.</p>')
         self.assertEqual('Try:\n\ndef f():\n    return 1\n\n    return 2\n\nDone.', text)
 
+    def test_adjacent_pre_blocks_do_not_run_together(self):
+        # 摘出去时换掉的只能是内容:整个标签 replace_with 成裸文本的话,pre 虽然在
+        # _BLOCK 里,后面那趟 find_all 已经找不到它,两个代码块会直接首尾相接。
+        self.assertEqual('first()\n    more_first()\n\nsecond()\n    more_second()',
+                         fetching.plain('<pre>first()\n    more_first()</pre>'
+                                        '<pre>second()\n    more_second()</pre>'))
+
+    def test_pre_is_separated_from_text_right_next_to_it(self):
+        # 两侧没有 <p> 代它补边界的形态 —— 原来那条用例恰好被 <p> 遮住了。
+        self.assertEqual('Before\n\ncode\n    indent\n\nAfter',
+                         fetching.plain('<div>Before<pre>code\n    indent</pre>After</div>'))
+
     def test_placeholder_control_chars_in_the_source_cannot_forge_a_pre_block(self):
         # <pre> 摘出去时在原位留的是 NUL 占位符;正文里写出同样的形状不许被当真。
         text = fetching.plain('<p>\x00 0 \x00 and \x020\x02</p><pre>SECRET</pre>')
@@ -104,6 +120,56 @@ class ParsedEntriesFeedTheRestOfThePipeline(unittest.TestCase):
         self.assertEqual(body, '\n\n'.join(chunks))
         for chunk in chunks:
             self.assertTrue(chunk.endswith('ends here.'), chunk[-60:])
+
+
+def atom(body: str, kind: str = 'text', tag: str = 'content') -> bytes:
+    return ('<feed xmlns="http://www.w3.org/2005/Atom"><title>Blog</title><entry>'
+            '<title type="text">Plain Text</title><id>https://example.org/p</id>'
+            '<link href="https://example.org/p"/>'
+            f'<{tag} type="{kind}">{body}</{tag}></entry></feed>').encode()
+
+
+class PlainTextBodiesKeepTheirOwnNewlines(unittest.TestCase):
+    """纯文本正文的换行就是内容,不许按 HTML 空白规则折叠掉。
+
+    feedparser 会如实给出正文类型(Atom 的 type="text" → text/plain),照它选解析
+    方式;HTML 那套空白折叠套到纯文本上,一篇本来分段的文章会被压成一整段。
+    """
+
+    BODY = 'First paragraph.\n\nSecond paragraph.\nThird line.'
+
+    def test_atom_text_content_keeps_paragraphs_and_single_breaks(self):
+        entry = fetching.parse_feed(atom(self.BODY), 'https://example.org/feed.xml')[0]
+        self.assertEqual(self.BODY, entry['body'])
+        self.assertEqual('content', entry['content_kind'])
+
+    def test_atom_text_summary_keeps_them_too(self):
+        # summary 走的是 summary_detail.type,和 content 各有一份类型。
+        entry = fetching.parse_feed(atom(self.BODY, tag='summary'), 'https://example.org/feed.xml')[0]
+        self.assertEqual(self.BODY, entry['body'])
+        self.assertEqual('summary', entry['content_kind'])
+
+    def test_html_bodies_are_unaffected(self):
+        entry = fetching.parse_feed(feed(ARTICLE), 'https://example.org/feed.xml')[0]
+        self.assertEqual(2, len(entry['body'].split('\n\n')))
+
+    def test_a_body_mislabeled_as_text_but_really_html_falls_back_to_html(self):
+        # 标着 text/plain 却真有标签时按 HTML 解析:feedparser 把 RSS 的裸标题一律
+        # 标成 text/plain,严格按类型走会把 <p> 原样显示给用户。
+        html = '&lt;p&gt;A &lt;a href="#"&gt;link&lt;/a&gt; here.&lt;/p&gt;&lt;p&gt;Two.&lt;/p&gt;'
+        entry = fetching.parse_feed(atom(html), 'https://example.org/feed.xml')[0]
+        self.assertEqual('A link here.\n\nTwo.', entry['body'])
+
+    def test_a_lone_angle_bracket_is_not_a_tag(self):
+        # 嗅探用解析器而不是正则:这段在 html.parser 眼里没有标签,原样留着。
+        self.assertEqual('if (a <b) return c', fetching.body_text('if (a <b) return c', 'text/plain'))
+
+    def test_plain_text_fields_still_collapse_to_one_line(self):
+        self.assertEqual('A b', fetching.oneline('A\n\nb', 'text/plain'))
+
+    def test_trailing_whitespace_and_runs_of_blank_lines_are_normalized(self):
+        self.assertEqual('a\n\nb', fetching.body_text('  a   \n\n\n\nb  \n\n', 'text/plain'))
+        self.assertEqual('a\nb', fetching.body_text('a\r\nb', 'text/plain'))
 
 
 if __name__ == '__main__':
