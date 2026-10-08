@@ -2,7 +2,8 @@
 
 这个脚本是**不可逆删除**:除了"清对了哪一批",还得钉住三件事 —— 共享条目
 不许连带挖空另一个订阅、中途失败重跑能收敛、清理期间起跑的同步不能把刚删掉
-的旧文写回来。它和**索引**之间的互斥在 `test_index_lock.py`。
+的旧文写回来。它和**索引**之间的互斥在 `test_index_lock.py`;另一条筛选口径
+(`--pending-translation`)和它跟日期口径之间的互斥在 `test_feed_trim_pending.py`。
 """
 import json
 import sqlite3
@@ -108,16 +109,25 @@ class TrimTests(TrimFixture, unittest.TestCase):
         `published[:10] < floor` 是字符串比较:`2026-10-1` 比当天那篇
         `2026-10-01 08:00` 大(于是被删),也比第二天的 `2026-10-02` 大
         (于是新文还被挡在门外)。
+
+        **空串和纯空白也在这张名单里**:`--floor ""` 是 `--floor "$CUTOFF"` 而
+        `CUTOFF` 还没赋值这种最常见的 shell 事故。`cmd_run` 原来拿**真值**判
+        「给了 --floor 没有」,空串于是和「压根没给」长得一模一样 —— `norm_floor`
+        根本没被调用,这条命令不报错,而是悄悄按订阅自己那个默认下界新建一轮
+        清理把旧文删掉,还以 0 退出(2026-10-08 第 3 轮审查实测)。判据是**后果**:
+        那一篇三处都还在、下界没被动过、而且连备份目录都不许建出来。
         """
         s = self.sub()
         item = self.seed(s, self.entry(published='2026-10-01 08:00'))
         before = self.floor_of(s)
-        for bad in ('2026-10-1', '2026-2-30', '2026-02-30', 'yesterday', '20261001'):
-            with self.subTest(bad):
+        for bad in ('2026-10-1', '2026-2-30', '2026-02-30', 'yesterday', '20261001',
+                    '', ' '):
+            with self.subTest(repr(bad)):
                 self.assertEqual(2, trim.cmd_run(self.args(s, floor=bad)))
                 st = self.state(item)
                 self.assertEqual((True, True, 1), (st['feed_row'], st['file'], st['documents']))
                 self.assertEqual(before, self.floor_of(s))
+                self.assertFalse(list((self.root / 'backups').glob('feedtrim-*')))
         self.assertEqual('2026-10-01', trim.norm_floor(' 2026-10-01 '))
 
     def test_a_malformed_stored_floor_stops_the_run(self):
@@ -458,97 +468,6 @@ class TrimTests(TrimFixture, unittest.TestCase):
             with self.subTest(type(err).__name__):
                 with patch.object(trim.urllib.request, 'urlopen', side_effect=err):
                     self.assertEqual(blocked, bool(_real_busy()))
-
-
-class PendingTranslationTests(TrimFixture, unittest.TestCase):
-    """`--pending-translation`:清掉某个源还排在翻译队列里的条目。
-
-    给服务已经停掉的源用(2026-10-08:HN Top 100 Blogs 的源站停了,284 条还排
-    在队列里,每一轮都占着 `translate.MAX_ITEMS` 的额度把还活着的源挤到后面)。
-    筛的维度是翻译队列,不是日期 —— 所以这一路**不钉 `history_floor`**。
-    """
-
-    def english(self, url, **over):
-        return dict(url=url, title='Historical post', body='historical review content',
-                    published='2026-07-01 08:00', author='Review',
-                    content_kind='feed') | over
-
-    def mark(self, url, **cols):
-        sets = ','.join(f'{k}=?' for k in cols)
-        with reg.db() as c:
-            c.execute(f'UPDATE feed_items SET {sets} WHERE url=?', (*cols.values(), url))
-
-    def test_the_cut_is_exactly_what_translation_still_has_queued(self):
-        """口径直接取 `translate.queued_sql()`,不在清理脚本里另写一遍。
-
-        两处各判各的话,清掉的和翻译那头还排着的不是同一批。
-        """
-        from kb.feeds import translate
-        s = self.sub()
-        reg.put_items(s, [self.english('https://example.org/queued'),
-                          self.english('https://example.org/done'),
-                          self.english('https://example.org/gaveup')])
-        self.mark('https://example.org/done', translated_at='2026-10-01 09:00',
-                  body_zh='中文正文')
-        self.mark('https://example.org/gaveup', translate_tries=translate.MAX_TRIES,
-                  translate_error='503')
-        with reg.db() as c:
-            rows = trim._items(c, s['id'])
-            queued = {r['url'] for r in c.execute(
-                'SELECT url FROM feed_items WHERE ' + translate.queued_sql()[0],
-                translate.queued_sql()[1])}
-        self.assertEqual({'https://example.org/queued'},
-                         {r['url'] for r in trim.pending_translation(rows)})
-        self.assertEqual(queued, {r['url'] for r in trim.pending_translation(rows)})
-
-    def test_it_removes_the_queued_entry_from_all_three_places(self):
-        s = self.legacy(self.sub())
-        queued = self.seed(s, self.english('https://example.org/queued'))
-        kept = self.seed(s, self.english('https://example.org/done'))
-        self.mark('https://example.org/done', translated_at='2026-10-01 09:00',
-                  body_zh='中文正文')
-        self.assertEqual(0, trim.cmd_run(self.args(s, pending_translation=True)))
-        gone = self.state(queued)
-        self.assertEqual((False, False, 0), (gone['feed_row'], gone['file'], gone['documents']))
-        # 已经译完的那条一个字都不许动 —— 它不在队列里。
-        still = self.state(kept)
-        self.assertEqual((True, True, 1), (still['feed_row'], still['file'], still['documents']))
-
-    def test_it_does_not_pin_a_history_floor(self):
-        """下界属于"清历史存量"那条路。顺手钉一个就是做了没被要求的事 ——
-        这个源将来真要重新启用时,那条下界会把它自己的存档永久挡在门外。"""
-        s = self.sub()
-        # 先钉一个下界:空下界的订阅看不出区别 —— 不管走哪条路写回去的都是空串。
-        with reg.db() as c:
-            c.execute("UPDATE subscriptions SET history_floor='2026-01-01' WHERE id=?",
-                      (s['id'],))
-        s = reg.subscription('rss', s['id'])
-        self.seed(s, self.english('https://example.org/queued'))
-        self.assertEqual(0, trim.cmd_run(self.args(s, pending_translation=True)))
-        self.assertEqual('2026-01-01', self.floor_of(s))
-
-    def test_the_two_filters_cannot_be_combined(self):
-        """`--floor` 筛日期、`--pending-translation` 筛队列,凑在一起没有定义。"""
-        s = self.legacy(self.sub())
-        self.seed(s, self.english('https://example.org/queued'))
-        self.assertEqual(2, trim.cmd_run(
-            self.args(s, pending_translation=True, floor='2026-08-01')))
-        # 拦下 = 一个字节都没动:行还在、下界还是空的、备份目录都没建。
-        with reg.db() as c:
-            self.assertEqual(1, c.execute('SELECT count(*) FROM feed_items').fetchone()[0])
-        self.assertEqual('', self.floor_of(s))
-        self.assertFalse(list((self.root / 'backups').glob('feedtrim-*')))
-
-    def test_an_empty_queue_changes_nothing(self):
-        """队列里没有这个源的条目 = 真的无事可做,不该顺手改任何设置。"""
-        s = self.legacy(self.sub())
-        item = self.seed(s, self.english('https://example.org/done'))
-        self.mark('https://example.org/done', translated_at='2026-10-01 09:00',
-                  body_zh='中文正文')
-        self.assertEqual(0, trim.cmd_run(self.args(s, pending_translation=True)))
-        self.assertEqual('', self.floor_of(s))
-        self.assertTrue(self.state(item)['file'])
-        self.assertFalse(list((self.root / 'backups').glob('feedtrim-*')))
 
 
 if __name__ == '__main__':

@@ -23,8 +23,9 @@ HN Top 100 Blogs 499 条。这些旧文逐批翻译、逐批重新导出,每重�
 把整个存档原样再拉一遍,这一趟白做。没有旧文可清时同样要钉 —— 见 `cmd_run`。
 
 动手整段持 `kb.maintenance.maintenance_lock()`(同步的存盘/导出和索引的整趟扫描
-写库也认这把锁),删除进度落在备份目录的 `progress.json` 里,中途失败重跑会先把
-没做完的那几步续完。
+写库也认这把锁),删除进度落在备份目录的 `progress.json` 里,中途失败重跑会把没做
+完的那几步续完 —— **那一趟只续,不会再开新的一轮**(`--yes` 批准的是那份计划,
+不是另一种清理;要再清一轮就重新跑一次)。
 """
 from __future__ import annotations
 
@@ -398,17 +399,54 @@ def cmd_scan(args) -> int:
                       f"；与别的订阅共享 {shared} 条(只摘归属,文件和索引留着)")
     for out, plan in _plans():
         done = '/'.join(p for p in PHASES if plan.get(p)) or '无'
-        print(f"!! 有一份没做完的清理:{out}(订阅 {plan['subscription_id']},已完成 {done})"
-              f" —— 跑 run --source {plan['subscription_id']} --yes 续完它")
+        # 续跑按计划里记着的 keys/paths 走,**不看**命令行上的筛选开关,所以这条
+        # 提示不带 `--pending-translation`/`--floor` 是对的。它原来也不带,可那时
+        # 候续完之后还会接着按这次的口径再开一轮 —— 照提示恢复就等于换个口径再
+        # 删一遍(见 `_run_locked`)。口径这一栏是给人看的:这份没做完的计划当初
+        # 是按什么筛出来的。
+        scope = ('翻译队列' if plan.get('mode') == 'pending-translation'
+                 else f"下界 {plan.get('floor') or '—'}")
+        print(f"!! 有一份没做完的清理:{out}(订阅 {plan['subscription_id']},"
+              f"口径 {scope},已完成 {done}) —— 跑 "
+              f"run --source {plan['subscription_id']} --yes 续完它"
+              f"(只续这一份,不会再开新的一轮)")
     return 0
 
 
 def cmd_run(args) -> int:
+    # **这道检查必须排在所有副作用之前,包括续跑那一步。** 它原来在
+    # `_run_locked` 里、排在「续上没做完的那一份」后面:同一个订阅存在一份
+    # 已经备份、还没删完的计划时(备份落盘之后进程被杀或 I/O 异常,是脚本
+    # 明确支持的恢复场景),带两个开关重跑会先把那份计划**续完** —— feeds
+    # 行、vault md、`documents`、全文索引和 `history_floor` 全动了 —— 然后
+    # 才打印「不能一起用」并退 2。于是「两个开关同时给时一个字节都不动」在
+    # 这条路上压根不成立,用户看到的是一句拒绝加一篇读不到了的文章
+    # (2026-10-08 审查实测:退出码 2,而 feed 行/文件/documents/检索四处
+    # 同时归零)。原来那条回归只摆了「没有未完成计划」的局,所以全绿骗了
+    # 过去 —— 判据是**有旧计划时也不许动**,不是「提示对不对」。
+    # 取锁也算副作用:非法参数不该先去等满 `KB_MAINT_LOCK_WAIT`。
+    #
+    # **「给了 --floor 没有」要问 `is not None`,不许问真值。** argparse 本来
+    # 就把两件事分得清:没写这个开关是 `None`,写了 `--floor ""` 是空字符串。
+    # 拿真值判的话空字符串和「压根没给」长得一模一样 —— 而这两条判断都在这
+    # 上面:①互斥检查放行,于是 `--floor "" --yes --pending-translation` 这条
+    # 本该一个字节都不动的命令,把那份没做完的**日期**计划续完了(文章四处
+    # 归零、下界被钉上、退 0);②`norm_floor` 压根没被调用,于是**没有**未完成
+    # 计划时单给 `--floor "" --yes` 也不报错,而是悄悄按默认下界新建一轮清理
+    # 把旧文删掉(2026-10-08 第 3 轮审查用真 argparse + 真子进程复现,前者独立
+    # 三次一致)。空字符串不是一种顺手的写法,它是 `--floor "$CUTOFF"` 而
+    # `CUTOFF` 还没赋值这种最常见的 shell 事故 —— 而这是不可逆删除。
+    # 显式给了就必须过 `norm_floor`(`''` 不是 `YYYY-MM-DD`,它自己会拒),
+    # 显式给了就算「给了日期」(于是和 `--pending-translation` 互斥)。
+    if args.pending_translation and args.floor is not None:
+        print('--pending-translation 筛的是翻译队列,不是日期;这两个开关不能一起用。',
+              file=sys.stderr)
+        return 2
     if blocked := _pipeline_busy():
         print(blocked, file=sys.stderr)
         return 2
     try:
-        override = norm_floor(args.floor) if args.floor else ''
+        override = norm_floor(args.floor) if args.floor is not None else ''
     except ValueError as e:
         print(e, file=sys.stderr)
         return 2
@@ -442,31 +480,42 @@ def _run_locked(args, override: str) -> int:
             print(f'有一份没做完的清理:{out}(已完成 {done});加 --yes 续完它。',
                   file=sys.stderr)
         return 1
-    for out, plan in left:
-        # 续跑**不是**「接着执行上次批准的那件事」:收藏那道护栏排在新计划
-        # 的后面,续跑从旁边绕过去了 —— 失败之后用户把那篇还读得到的文章
-        # 收藏起来,重跑(没加 --allow-favorites)照样把文件、documents 和
-        # 收藏一起删掉,退出码还是 0(2026-10-01 第 2 轮审查实测)。所以按
-        # **此刻**真要删的那几篇再查一遍。
-        print(f'续上没做完的那一份:{out}')
-        try:
-            _apply(out, plan, args.allow_favorites)
-        except FavoritesAppeared as e:
-            print(f'这份没做完的清理({out})里有 {len(e.paths)} 篇在收藏里:\n  '
-                  + '\n  '.join(e.paths[:10])
-                  + '\n收藏是用户显式留下的(可能是这次失败之后才加的),'
-                    '确认要删加 --allow-favorites。计划留着,改完参数能接着续。',
-                  file=sys.stderr)
-            return 2
     if left:
-        with reg.db() as c:
-            source = dict(c.execute('SELECT * FROM subscriptions WHERE id=?',
-                                    (source['id'],)).fetchone())
+        # **有没做完的计划时,这一趟只续它,续完就结束。** 原来续完之后还会接着
+        # 按**这次命令行**上的筛选开关新建第二份计划再删一轮,而 `cmd_scan` 给出
+        # 的恢复提示是 `run --source N --yes`(不带任何筛选开关)—— 于是「照工具
+        # 自己的提示恢复一份 `--pending-translation` 的计划」= 续完该续的那一份,
+        # 紧接着按**默认的日期口径**又清一轮:已经译好、还读得到搜得到的旧文章
+        # 连 feeds 行、md 文件、`documents` 和全文索引一起没了,`history_floor`
+        # 也被钉上,而命令以 0 退出(2026-10-08 第 2 轮审查实测,独立复现三次;
+        # 恢复时手动补上 `--pending-translation` 则只删该删的那一篇 —— 可那个
+        # 选项压根不在提示里)。日期口径自己撞不上这件事(续跑已经把 floor 钉成
+        # 同一个值,第二份计划筛出来是空的),它是新口径**不钉下界**带出来的。
+        # 判据是**授权的范围**:`--yes` 批准的是「把那份已经备份、删了一半的计划
+        # 做完」,不是「再启动另一种清理」——一次调用只做一件事,要再清一轮就重新
+        # 跑一次(那时没有未完成计划,走的是正常的确认流程)。这样续跑压根不需要
+        # 「继承口径」或者「比对口径」:计划自带它要删的 keys 和 paths,`_apply`
+        # 认计划里的 `mode`,筛选开关只用来**建**新计划。
+        for out, plan in left:
+            # 续跑**不是**「接着执行上次批准的那件事」:收藏那道护栏排在新计划
+            # 的后面,续跑从旁边绕过去了 —— 失败之后用户把那篇还读得到的文章
+            # 收藏起来,重跑(没加 --allow-favorites)照样把文件、documents 和
+            # 收藏一起删掉,退出码还是 0(2026-10-01 第 2 轮审查实测)。所以按
+            # **此刻**真要删的那几篇再查一遍。
+            print(f'续上没做完的那一份:{out}')
+            try:
+                _apply(out, plan, args.allow_favorites)
+            except FavoritesAppeared as e:
+                print(f'这份没做完的清理({out})里有 {len(e.paths)} 篇在收藏里:\n  '
+                      + '\n  '.join(e.paths[:10])
+                      + '\n收藏是用户显式留下的(可能是这次失败之后才加的),'
+                        '确认要删加 --allow-favorites。计划留着,改完参数能接着续。',
+                      file=sys.stderr)
+                return 2
+        print('续完了。这一趟只做这一件事 —— 要再清一轮(不管按哪个口径)请重新跑一次。')
+        return 0
+    # 互斥检查在 `cmd_run` 里、续跑之前就做完了(理由见那里)。
     mode = 'pending-translation' if args.pending_translation else ''
-    if mode and args.floor:
-        print('--pending-translation 筛的是翻译队列,不是日期;这两个开关不能一起用。',
-              file=sys.stderr)
-        return 2
     try:
         # 新模式下这一趟跟下界无关,压根不算它:算出来只会出现在打印和计划里,
         # 让人以为钉了一个。真正"不动它"那一下在 `_cut_feeds` 里。
@@ -552,7 +601,7 @@ def main() -> int:
     s.add_argument('--pending-translation', action='store_true',
                    help='改为按「还排在翻译队列里」统计')
     s.set_defaults(func=cmd_scan)
-    r = sub.add_parser('run', help='清理一个订阅(先备份);有没做完的先续完')
+    r = sub.add_parser('run', help='清理一个订阅(先备份);有没做完的那一趟只续完它')
     r.add_argument('--source', required=True, help='订阅 id 或名字')
     r.add_argument('--floor', help='覆盖下界(YYYY-MM-DD),缺省按「创建日 - HISTORY_DAYS」')
     r.add_argument('--pending-translation', action='store_true',
