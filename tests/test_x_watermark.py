@@ -11,6 +11,7 @@
 跑:  python -m unittest tests.test_x_watermark -v
 """
 import sys
+import threading
 import unittest
 from datetime import timedelta
 from pathlib import Path
@@ -299,6 +300,116 @@ class RepointedSubscriptionTests(BrowserRound):
         self.assertEqual('2026-10-07T00:00:00+00:00',
                          x_channels.watermark(reg.subscription('social', s['id']),
                                               x_channels.BROWSER))
+
+
+class LateEditTests(BrowserRound):
+    """**改指赶在身份检查之后**:那半个窗口只能靠写锁关掉,不是靠检查写在哪。
+
+    上面那几条排的是"修改先提交、再做身份检查",它们在 `_repointed` 落地那一轮
+    就绿了。可身份检查自己只是一次 SELECT —— python 的 `sqlite3` 在 legacy
+    `isolation_level` 下**压根不开事务、不持任何锁**,于是"检查通过了、第一笔
+    写入还没发生"这一瞬间照样插得进另一个连接的提交,后果和这道判据本来要挡的
+    事故一模一样(2026-10-08 第 3 轮审查实测:检查那一刻 `in_transaction=false`,
+    随后真 PATCH 以 200 提交,旧账号的 `/status/900` 照样记给了新账号、
+    `next_sync_selection=[]`)。这里排的就是这后半个交错,**要真的两个连接**:
+    同一个连接上压根排不出来。
+    """
+
+    def race(self, **by_handle):
+        """真跑一轮,并让那次改指在**身份检查返回之后**才去提交。"""
+        s = self.sub()
+        done, seen, err = threading.Event(), {}, []
+
+        def edit_once():
+            try:
+                self.repoint(s['id'], 'NewExample')
+            except Exception as e:                    # noqa: BLE001
+                err.append(e)
+            finally:
+                done.set()
+
+        edit = threading.Thread(target=edit_once)
+        real = sync._repointed
+
+        def looked(c, source):
+            # **屏障摆在身份那次 SELECT 刚读完的位置**,不是整个 `_claim_write`
+            # 之后:那时候锁早拿到了,于是"先 SELECT 再取锁"这种写法也能混过去
+            # —— 而它的窗口正好在这两句之间。
+            verdict = real(c, source)
+            seen['in_transaction'] = c.in_transaction
+            edit.start()
+            # 没拿到写锁的话这次保存当场就提交完了(实测毫秒级);拿到了的话它
+            # 会一直等到我们提交 —— 这一秒只是给它机会抢在第一笔写入之前落下。
+            seen['edit_committed_first'] = done.wait(1.0)
+            return verdict
+
+        with patch.object(sync, '_repointed', looked):
+            summary = self.collect(**by_handle)
+        edit.join(30)
+        self.assertFalse(edit.is_alive(), '那次改指一直没能完成')
+        self.assertEqual([], err, '那次改指报错了')
+        self.assertTrue(seen, '这一轮压根没走到身份检查')
+        return s, summary, seen
+
+    def test_an_edit_after_the_identity_check_leaves_the_new_account_clean(self):
+        s, summary, seen = self.race(example={
+            'entries': [self.entry()], 'error': '',
+            'watermark': FRESH.strftime('%Y-%m-%dT%H:%M:%SZ')})
+        row = reg.subscription('social', s['id'])
+        floor = x_channels.watermark(row, x_channels.BROWSER)
+        earlier = tweet('901', handle='NewExample',
+                        when=(FRESH - timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))
+        picked = x_browser._select([earlier], x_browser._utc(floor) if floor else None,
+                                   'NewExample')
+        # **末态先断言**:注入旧版本时该红的是"后果",不是"锁取了没有" —— 只验
+        # 后者的话,一个把检查挪到别处、什么都没防住的实现也能绿。
+        self.assertEqual(0, reg.items('social', s['id'])['total'], '旧账号的推文记给了新账号')
+        self.assertEqual('', floor, '旧账号的水位写进了新账号那个键')
+        self.assertEqual(['https://x.com/NewExample/status/901'],
+                         [e['url'] for e in picked], f'水位被污染成 {floor!r}')
+        self.assertEqual('', row['last_success'], '替新账号宣布它同步成功了')
+        self.assertEqual((True, False), (seen['in_transaction'], seen['edit_committed_first']),
+                         '身份检查没有待在写事务里')
+
+    def test_a_failure_after_the_identity_check_is_not_charged_either(self):
+        """失败那一侧同一个缺陷:旧账号的错误和退避落在一条从没被访问过的订阅上。"""
+        s, summary, seen = self.race(example={'entries': [],
+                                              'error': '登录态已失效,请重新登录'})
+        row = reg.subscription('social', s['id'])
+        self.assertEqual(('', 0, 0), (row['last_error'], row['failures'], row['retry_at']),
+                         '旧账号那次失败记在了新账号头上')
+        # 这一轮确实没抓到旧账号那边的东西,阶段里照实说 —— 清掉的是**新订阅
+        # 那一行**的状态(用户自己改指带来的),不是这一轮的成绩单。
+        self.assertEqual(1, len(summary['errors']))
+        self.assertEqual((True, False), (seen['in_transaction'], seen['edit_committed_first']))
+
+    def test_the_write_lock_is_taken_before_the_identity_is_read(self):
+        """直测一道:`BEGIN IMMEDIATE` 必须排在身份那次 SELECT **之前**。
+
+        race 那两条看的是末态,这一条看的是机制本身 —— 持锁期间另一个连接的保存
+        必须被挡在外面等。反过来写("先 SELECT 再升级成写事务")在 WAL 下报的是
+        `SQLITE_BUSY_SNAPSHOT`,`busy_timeout` 管不着它。
+        """
+        s, seen = self.sub(), []
+        real = sync._repointed
+        other = threading.Thread(target=lambda: self.repoint(s['id'], 'NewExample'))
+
+        def looked(c, source):
+            seen.append(c.in_transaction)
+            return real(c, source)
+
+        try:
+            with patch.object(sync, '_repointed', looked), reg.db() as c:
+                self.assertTrue(sync._claim_write(c, s))
+                other.start()
+                other.join(1.0)
+                self.assertTrue(other.is_alive(), '持锁期间另一个连接照样写得进去')
+                self.assertEqual([True], seen, '读身份的时候写锁还没拿到手')
+        finally:
+            if other.ident is not None:                # 断言在 start 之前红掉时
+                other.join(30)
+        self.assertEqual('https://x.com/newexample',
+                         reg.subscription('social', s['id'])['url'])
 
 
 if __name__ == '__main__':

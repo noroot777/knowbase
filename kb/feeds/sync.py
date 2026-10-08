@@ -84,13 +84,13 @@ def _repointed(c, source) -> bool:
     的推文从此任何一轮增量都选不到(2026-10-08 审查实测:改成 NewExample 之后
     库里躺着 `OldExample/status/900`,`next_sync_selection=[]`,而面板报 ok)。
 
-    **判据必须待在这个写事务里,不能在 API 入口先 SELECT 一次。** 入口那道
-    `intake_api.guard`(忙就 409)是**早一道**:它只回答"这一刻在跑吗",答不了
-    "我保存的这一瞬间还没在跑吗" —— 已经通过检查、还在途中的那个修改请求照样
-    会落在采集中间(审查就是这么复现的:修改先过 guard,随后管道才起跑)。口径
-    同 `collector` 那条"判据就在 UPSERT 自己的 WHERE 里"和清理脚本那条"真正的
-    互斥是那把锁,问管道忙不忙只是早一道":先查后写在两个进程之间压根不成立,
-    而 SQLite 把写入串行化,待在写事务里的判断才和这次写入同生共死。
+    **判据必须和这次写入同生共死,所以调用方得先拿到写锁(见 `_claim_write`),
+    不能在 API 入口先 SELECT 一次。** 入口那道 `intake_api.guard`(忙就 409)
+    是**早一道**:它只回答"这一刻在跑吗",答不了"我保存的这一瞬间还没在跑吗"
+    —— 已经通过检查、还在途中的那个修改请求照样会落在采集中间(审查就是这么
+    复现的:修改先过 guard,随后管道才起跑)。口径同 `collector` 那条"判据就在
+    UPSERT 自己的 WHERE 里"和清理脚本那条"真正的互斥是那把锁,问管道忙不忙只是
+    早一道":先查后写在两个进程之间压根不成立,而 SQLite 把写入串行化。
 
     订阅行已经被删掉时同样返回 True:那一轮的结果不该把条目归属重新插回去。
     """
@@ -99,6 +99,33 @@ def _repointed(c, source) -> bool:
     if not row:
         return True
     return (row['url'], row['feed_url']) != (source.get('url'), source.get('feed_url'))
+
+
+def _claim_write(c, source) -> bool:
+    """先拿写锁、再认身份,返回「这一轮的结果还写不写得进去」。
+
+    **两句的顺序就是这个函数存在的理由。** `reg.db()` 交出来的连接**不在事务
+    里** —— 它自己那个 `BEGIN IMMEDIATE` 在初始化/迁移之后就提交了(见
+    `registry.db`),而 python 的 `sqlite3` 在 legacy `isolation_level` 下
+    **SELECT 压根不开事务、不持任何锁**。所以光把 `_repointed` 搬进
+    `with reg.db()` 块里只是把窗口从「整轮采集」缩成「检查到第一笔写入之间」,
+    另一个连接的修改照样插得进来,后果和这道判据本来要挡的事故一模一样:
+    2026-10-08 第 3 轮审查实测检查那一刻 `in_transaction=false`,随后那次真
+    PATCH 以 200 提交,旧账号的 `/status/900` 照样记成了新账号的内容、水位也
+    跟着过去(`next_sync_selection=[]`),失败那一侧是旧账号的错误连同 1800 秒
+    退避记在了一条从没被访问过的新订阅头上。
+
+    `BEGIN IMMEDIATE` 当场拿到写锁,于是这期间的订阅修改只有两种结局,两种的
+    末态都是对的:①赶在取锁之前提交 —— 那就会被这次 `_repointed` 看见,整轮
+    作废;②等我们提交之后才落下 —— `save_subscription` 的 `reset` 会把刚写进去
+    的条目归属、config(两条通道的水位)、成功时间戳一并清掉,等于用户在一轮
+    采集**结束之后**改指,本来就是这个结果。不再有「检查通过了又被串号」这一档。
+
+    **不能反过来写成「先 SELECT 再升级成写事务」**:WAL 下拿不到快照报的是
+    `SQLITE_BUSY_SNAPSHOT`,`busy_timeout` 管不着它(口径同清理脚本那条)。
+    """
+    c.execute('BEGIN IMMEDIATE')
+    return not _repointed(c, source)
 
 
 def _save_result(source, result, scope):
@@ -119,7 +146,7 @@ def _save_result(source, result, scope):
         # 一轮水位已经推进了,而这批推文一条都没入库 —— 它们比旧水位新、又比
         # 新水位老,从此任何一轮增量都选不到(见 `x_channels.watermark_patch`)。
         with reg.db() as c:
-            if _repointed(c, source):
+            if not _claim_write(c, source):
                 # 这条订阅在本轮采集期间被改指到别的源了 —— 手里这份属于旧的那个。
                 # 一个字都不写(条目、水位、成功时间戳一样都不写):这一轮作废,
                 # 下一轮按新身份重新抓。
@@ -138,14 +165,14 @@ def _save_result(source, result, scope):
 
 
 def _save_failure(source, error, summary) -> bool:
-    """失败也要先认身份(见 `_repointed`),返回这一笔记没记上。
+    """失败也要先拿写锁再认身份(见 `_claim_write`),返回这一笔记没记上。
 
     被改指之后把旧账号那次失败记在新账号头上,是把一条好订阅按别人的毛病推进
     退避(最长 24 小时),面板上还显示"连接失败" —— 而新账号一次都没被访问过。
     """
     reason = str(error)[:1200] or type(error).__name__
     with reg.db() as c:
-        if _repointed(c, source):
+        if not _claim_write(c, source):
             return False
         summary['errors'].append({'title': source['name'], 'reason': reason})
         c.execute('''UPDATE subscriptions SET last_attempt=?,last_error=?,failures=failures+1,
