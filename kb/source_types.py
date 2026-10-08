@@ -22,7 +22,7 @@ class SourceType:
 
 
 SOURCE_TYPES = {
-    'wechat': SourceType('wechat', '绿泡泡同步', '关注的公众号文章',
+    'wechat': SourceType('wechat', '公众号', '关注的公众号文章',
                          ('wechat_oa', 'wechat_local'), manager='wechat', icon='chat'),
     'social': SourceType('social', '大V观点', '关注的人，此刻的想法。', ('social',),
                          icon='chat', interval_minutes=60,

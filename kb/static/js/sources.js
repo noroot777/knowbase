@@ -1,5 +1,12 @@
 // The catalog supplies module identity; this shared workspace handles feed-backed sources.
 const sourceModules = new Map();
+// 「我的订阅」页:三类来源(公众号 / 大V观点 / RSS)并列,页内切换。
+// subsCatalog 是完整目录(含非 feeds 的公众号),sourceModules 仍只收 feeds 那一半
+// ——/api/intake/{kind} 那套接口只对 feeds 来源成立。
+let subsCatalog = [];
+let subsKind = '';
+let subsPendingKind = '';   // switchTab 接到老深链(#social 等)时暂存的目标视图
+try { subsKind = localStorage.getItem('kb-subs-kind') || ''; } catch {}
 let sourceKind = '', sourceView = 'items', sourceData = null, sourceRows = [];
 let sourceOffset = 0, sourceTotal = 0, sourceVersion = 0, sourcePoll = null, sourceSearchTimer;
 let sourceItemsVersion = 0, sourceItemsFailed = false, sourceTranslating = 0;
@@ -9,20 +16,83 @@ const sourceFilters = new Map();
 async function initSourceModules() {
   try {
     const data = await pipeJson('/api/intake/modules');
-    for (const spec of data.modules.filter(m => m.manager === 'feeds')) {
-      sourceModules.set(spec.id, spec);
-      WORKSPACE_TITLES[spec.id] = spec.label;
-      const btn = document.createElement('button');
-      btn.id = 'tab-' + spec.id;
-      btn.innerHTML = icon(spec.icon) + '<span class="nav-text">' + esc(spec.label) + '</span>';
-      btn.onclick = () => switchTab(spec.id);
-      $('source-navigation').appendChild(btn);
-    }
-  } catch (e) {
-    $('source-nav-error').hidden = false;
-    $('source-nav-error').textContent = '来源列表暂不可用，点击重试';
-    $('source-nav-error').title = '来源列表暂不可用，点击重试';
+    const modules = Array.isArray(data.modules) ? data.modules : [];
+    subsCatalog = modules;
+    for (const spec of modules.filter(m => m.manager === 'feeds')) sourceModules.set(spec.id, spec);
+  } catch {
+    // 目录读不到不拦整个页面:打开「我的订阅」时 openSubsPanel 会重试一次,
+    // 失败原因显示在页内横幅上,其他面板照常可用。
   }
+}
+
+async function openSubsPanel(kind = '') {
+  if (kind) subsKind = kind;
+  if (!subsCatalog.length) {
+    $('subs-error').hidden = true;
+    await initSourceModules();
+    if (!subsCatalog.length) {
+      $('subs-switch').innerHTML = '';
+      $('subs-wechat').hidden = true;
+      $('subs-feeds').hidden = true;
+      $('subs-error').hidden = false;
+      $('subs-error-text').textContent = '来源目录暂时读不到，请确认服务后重试。';
+      return;
+    }
+  }
+  if (!subsCatalog.some(m => m.id === subsKind)) subsKind = subsCatalog[0].id;
+  try { localStorage.setItem('kb-subs-kind', subsKind); } catch {}
+  renderSubsSwitch();
+  const feeds = sourceModules.has(subsKind);
+  $('subs-wechat').hidden = feeds;
+  $('subs-feeds').hidden = !feeds;
+  if (feeds) {
+    openSourceModule(subsKind);
+  } else {
+    // 离开 feeds 视图就停掉它的轮询;sourceKind 清空让 sourceActive() 收假
+    clearTimeout(sourcePoll);
+    clearTimeout(sourceSearchTimer);
+    sourceKind = '';
+    openWechatSubs();
+  }
+}
+
+function renderSubsSwitch() {
+  $('subs-switch').innerHTML = subsCatalog.map(m => `<button role="tab" id="subs-switch-${esc(m.id)}"
+    class="${m.id === subsKind ? 'on' : ''}" aria-selected="${m.id === subsKind}"
+    onclick="openSubsPanel('${esc(m.id)}')">${icon(m.icon)}<span>${esc(m.label)}</span></button>`).join('');
+}
+
+// ── 公众号视图:连接卡 + 订阅列表 + 同步全部 ────────────────────────────────
+let subsWechatBusy = false;
+function openWechatSubs() {
+  renderWechatSubsStatus();
+  refreshPipeSource();
+  loadTargets();
+}
+// 同步状态由 renderPipeButtons 顺手驱动(pipe.js 的轮询回路),这里只管画。
+function renderWechatSubsStatus() {
+  const section = $('subs-wechat');
+  if (!section || section.hidden) return;
+  const running = !!pipeSnapshot?.running;
+  const ours = running && pipeRunScopes(pipeSnapshot?.crawl_filter).some(s => s.channel === pipeChannel);
+  $('subs-wechat-sync').disabled = subsWechatBusy || running || !!pipeAction;
+  $('subs-wechat-sync').textContent = ours ? '同步中…' : '同步全部';
+  $('subs-wechat-progress').hidden = !running;
+  $('subs-wechat-progress-text').textContent = ours
+    ? (pipeSnapshot.stages?.[pipeSnapshot.current_stage]?.detail || '正在同步公众号')
+    : '其他来源正在同步，新任务会顺延。';
+}
+async function syncWechatSubs() {
+  if (subsWechatBusy || pipeSnapshot?.running) return;
+  subsWechatBusy = true; renderWechatSubsStatus();
+  try {
+    await loadPipeChannels();
+    // accounts 空 = 该来源的全部订阅(kb/web/pipeline_api.py 的 ChannelScope)
+    await pipePost('/api/pipeline/run', { channels: [{ channel: pipeChannel, accounts: [] }] });
+    toast('同步已开始', { type: 'ok', detail: '进度在同步中心实时显示，离开页面不影响同步。' });
+    await refreshPipe();
+  } catch (e) { toast('未能开始同步', { detail: e.message }); }
+  finally { subsWechatBusy = false; renderWechatSubsStatus(); }
 }
 
 async function openSourceModule(kind) {
@@ -54,7 +124,8 @@ function sourceTime(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
 }
-function sourceActive() { return activeTab === sourceKind && sourceModules.has(sourceKind); }
+// feeds 视图还亮着才继续轮询/渲染:tab 在订阅页、页内选的就是这个来源
+function sourceActive() { return activeTab === 'subs' && subsKind === sourceKind && sourceModules.has(sourceKind); }
 
 async function loadSourceModule(reset = false, selectedId = null) {
   if (!sourceActive()) return;

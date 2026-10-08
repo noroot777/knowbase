@@ -299,13 +299,17 @@ check("后端也拒绝空同步范围", rejected === 400, String(rejected));
 await evalJs(`(() => { document.querySelectorAll('#daily-channels input')
   .forEach(i => { i.checked = true; }); })()`);
 
-// 来源面板:英文条目显示译文,弹窗能切回原文
+// 来源面板:英文条目显示译文,弹窗能切回原文。老深链 #rss 现在落到
+// 「我的订阅」页的 RSS 视图,地址栏写的是统一的 #subs。
 await evalJs(`switchTab('rss')`);
 await sleep(2500);
 // 恢复地址栏之后照常记录位置(那道"恢复前不写地址栏"的闸门只管启动那一下,
 // 卡死的话所有深链和前进后退一起没了)。
-check("切走之后地址栏跟着更新", (await evalJs(`location.hash`)) === "#rss",
+check("切走之后地址栏跟着更新", (await evalJs(`location.hash`)) === "#subs",
       await evalJs(`location.hash`));
+check("老深链落到订阅页的 RSS 视图",
+      await evalJs(`activeTab === 'subs' && subsKind === 'rss'
+                    && !document.getElementById('subs-feeds').hidden`));
 const excerpt = await evalJs(`document.querySelector('.source-excerpt')?.textContent || ''`);
 check("订阅内容显示的是中文译文", /[一-鿿]/.test(excerpt) && !/^The runtime schedules/.test(excerpt), excerpt.slice(0, 60));
 check("条目标注了已译为中文",

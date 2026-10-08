@@ -39,10 +39,6 @@
 .nav-section { margin-top: 13px; padding-top: 13px; }
 /* 来源列表拉不到时 #source-navigation 一个按钮都没有,不收掉就剩一道孤线 */
 .tabs:empty { display: none; }
-/* 那种时候才出现的重试条:按 sources.css 的 15px 左右边距,导轨里一行挤不下两
-   个字(navigation.css 在 sources.css 之前加载,所以加一层 #sidebar 提权)。
-   导轨上只放一行字,完整说明走它的 title */
-#sidebar #source-nav-error { margin: 10px 0; padding: 0; text-align: center; line-height: 1.45; font-size: 11px; }
 
 /* ── 入口 ──
    一格就是一枚 20px 图标居中的 44 高方块。44 既是舒服的点击区,也刚好让整条
@@ -127,7 +123,6 @@
   .nav-label { display: block; margin: 20px 10px 8px; font-size: 12px; color: var(--muted); }
   .nav-section { margin-top: 0; padding-top: 0; }
   .nav-section::before, .sidebar-bottom::before { display: none; }
-  #sidebar #source-nav-error { margin: 8px 10px; text-align: left; font-size: 12px; }
   .tabs button, .explore-links a { justify-content: flex-start; gap: 10px; min-height: 44px; padding: 10px; font-size: 14px; }
   .tabs .icon, .explore-links .icon { width: 18px; height: 18px; }
   #nav-sync-dot, #nav-daily-dot { position: static; margin-left: auto; }

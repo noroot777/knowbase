@@ -116,9 +116,10 @@ async function startWechatSetup(action = 'connect') {
 async function useLocalWechat() {
   try {
     await loadPipeChannels();
-    await changePipeChannel('wechat_local');
+    setPipeChannel('wechat_local');
     selectRunChannel('wechat_local');   // 下一次新建同步默认就抓公众号这条
-    closeWechatSetup(); switchTab('pipe');
-    await refreshPipeSource();
+    closeWechatSetup();
+    subsPendingKind = 'wechat';         // 落到「我的订阅」的公众号视图,连接状态就地可见
+    switchTab('subs');
   } catch (error) { $('wechat-error').textContent = error.message; }
 }

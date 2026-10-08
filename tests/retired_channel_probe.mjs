@@ -46,7 +46,16 @@ const FIXTURES = {
   "/api/keys": { keys: { anthropic: { set: true }, openai: { set: false } } },
   "/api/stages": { stages: [], providers: [] },
   "/api/mcp/status": { config: "{}", command: "", tools: [], cli_available: false },
-  "/api/intake/modules": { modules: [] },
+  // 真实目录的形状(kb/source_types.py 的 catalog()):公众号 + 两类 feeds。
+  // 「我的订阅」页的来源切换按它建,公众号视图(订阅列表就地管理)也从这里进。
+  "/api/intake/modules": { modules: [
+    { id: "wechat", label: "公众号", description: "关注的公众号文章",
+      channels: ["wechat_oa", "wechat_local"], manager: "wechat", icon: "chat" },
+    { id: "social", label: "大V观点", description: "关注的人，此刻的想法。",
+      channels: ["social"], manager: "feeds", icon: "chat" },
+    { id: "rss", label: "RSS", description: "让值得读的文章，自己来到这里。",
+      channels: ["rss"], manager: "feeds", icon: "rss" },
+  ] },
   "/api/conversations": { conversations: [] },
   // 范围类接口在服务端就过了 known_channels,交到前端的只会是现役名(定时范围
   // 里那个退役名换成现役名由 tests/test_retired_channel.py 的 ScopeTests 钉住)。
@@ -234,8 +243,8 @@ check("存量里那条退役名换成了公众号、RSS 原样留着",
 check("落盘的选择也改了道",
       await evalJs(`localStorage.getItem('kb-sync-channels')`) === '["wechat_local","rss"]',
       await evalJs(`localStorage.getItem('kb-sync-channels')`));
-check("顶部那个「看哪个来源」也换成了公众号",
-      await evalJs(`document.getElementById('pipe-channel-current').value`) === "wechat_local"
+check("「看哪个来源」那份选择也换成了公众号",
+      await evalJs(`pipeChannel`) === "wechat_local"
       && await evalJs(`localStorage.getItem('kb-sync-channel')`) === "wechat_local");
 
 // ── 2. 真的派发一次同步:提交上去的范围必须带着公众号 ──────────────────────────
@@ -286,25 +295,23 @@ check("别名映射留下来了(浏览器里存的选择只能靠它)",
 // 向导收尾那一步原来要先存一次采集通道设置(saveWechatChannel)。设置没有了,它改成
 // 只把「看哪个来源」和「这次同步抓哪几个」定在公众号上 —— 先故意把公众号从范围里拿掉,
 // 点完必须回来,否则用户走完向导点开新建同步会发现公众号压根没勾。
-await evalJs(`pipeRunSel = ['rss']; saveRunChannels(); changePipeChannel('rss'); true`);
+await evalJs(`pipeRunSel = ['rss']; saveRunChannels(); setPipeChannel('rss'); true`);
 await until(`document.getElementById('wechat-next') &&
             !document.getElementById('wechat-next').hidden`);
 await evalJs(`document.getElementById('wechat-next').click()`);
-await until(`document.getElementById('pipe-channel-current').value === 'wechat_local'`);
+await until(`localStorage.getItem('kb-sync-channel') === 'wechat_local'`);
 check("向导收尾把来源定在公众号上",
-      await evalJs(`localStorage.getItem('kb-sync-channel')`) === "wechat_local");
+      await evalJs(`pipeChannel`) === "wechat_local");
 check("向导收尾也把公众号勾进这次同步的范围",
       await evalJs(`pipeRunSel.includes('wechat_local')
                     && !!document.querySelector('#pipe-channel-list input[data-run-channel=wechat_local]')?.checked`),
       await evalJs(`JSON.stringify(pipeRunSel)`));
-check("向导收尾后落在同步中心、弹窗关掉了",
+check("向导收尾后落在「我的订阅」的公众号视图、弹窗关掉了",
       await evalJs(`document.getElementById('wechat-modal').style.display === 'none'
-                    && document.getElementById('pipepanel').offsetParent !== null`));
-await evalJs(`openWechatSetup()`);
-await until(`document.getElementById('wechat-modal').style.display !== 'none'`);
+                    && document.getElementById('subspanel').offsetParent !== null
+                    && !document.getElementById('subs-wechat').hidden`));
 
-// ── 6. 逐号凭证那一栏也没了,而订阅列表照常 ────────────────────────────────────
-await evalJs(`closeWechatSetup(); openTargets()`);
+// ── 6. 逐号凭证那一栏也没了,订阅列表就地在「我的订阅」页上 ────────────────────
 await until(`document.querySelectorAll('#tgt-list .tgt-row').length === 1`);
 check("订阅列表照常列出来", (await evalJs(
   `document.querySelector('#tgt-list .tgt-name')?.textContent.trim()`)) === "测试公众号甲");
@@ -312,9 +319,9 @@ check("逐号凭证那一栏不在了",
       await evalJs(`!document.getElementById('tgt-ready-bar')
                     && !document.getElementById('tgt-refresh')
                     && !document.getElementById('tgt-auto')`));
-check("入口按钮上没有「N/N 就绪」",
-      !(await evalJs(`document.getElementById('src-manage').textContent`)).includes("就绪"),
-      await evalJs(`document.getElementById('src-manage').textContent`));
+check("管理订阅不再是弹窗:tgt-modal 和那个入口按钮都没了",
+      await evalJs(`!document.getElementById('tgt-modal')
+                    && !document.getElementById('src-manage')`));
 check("ready=null 的目标不画那颗小圆点",
       await evalJs(`!document.querySelector('#tgt-list .tgt-dot')`));
 check("凭证那套文案一个字都不剩",
@@ -394,7 +401,7 @@ check("原来那条订阅的身份一个字都没变",
       await evalJs(`JSON.stringify(tgtList.map(t => [t.name, t.id]))`));
 
 // ── 7. 删掉的两个端点没有任何一处还在调 ────────────────────────────────────────
-await evalJs(`closeTargets()`); await sleep(500);
+await sleep(500);
 const forbidden = runs.filter(r => r.forbidden).map(r => r.forbidden);
 check("没有谁还在调删掉的那两个端点", forbidden.length === 0, forbidden.join());
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));

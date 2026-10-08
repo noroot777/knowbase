@@ -42,7 +42,7 @@ function queuePipeRefresh() {
   pipeTimer = setTimeout(() => { pipeTimer = null; refreshPipe(); }, document.hidden ? 8000 : pipeSnapshot?.running ? 1500 : 6000);
 }
 async function refreshPipe(withPending = false) {
-  if (withPending) { refreshPipeSource(); refreshPipePending(); }
+  if (withPending) refreshPipePending();
   if (pipeRequest) return pipeRequest;
   clearTimeout(pipeTimer);
   const version = ++pipeStatusVersion;
@@ -56,7 +56,9 @@ async function refreshPipe(withPending = false) {
       $('pipe-connection').hidden = true;
       renderPipeState(s);
       if (wasRunning && !s.running) {
-        refreshPipePending(); refreshPipeSource();
+        refreshPipePending();
+        // 来源连接卡在「我的订阅」的公众号视图上,只有它亮着才值得探一次
+        if (!$('subs-wechat').hidden) refreshPipeSource();
         pipeJson('/api/stats').then(stats => {
           $('stats').textContent = `${stats.documents.toLocaleString()} 篇内容已收录`;
         }).catch(() => {});
@@ -114,13 +116,14 @@ function renderPipeButtons() {
   // Opening a draft is local; only the actual start requires a confirmed connection.
   $('pipe-run').disabled = running || !!pipeAction;
   $('pipe-run').textContent = pipeAction === 'start' ? '正在启动…' : running ? pipeRunLabel(pipeSnapshot) + '进行中' : '新建同步';
-  $('pipe-channel-current').disabled = running || !!pipeAction;
   $('pipe-retry').disabled = !pipeConnected || running || !!pipeAction;
   $('pipe-retry').textContent = pipeAction === 'retry' ? '正在启动重试…' : '重试失败项';
   $('pipe-stop').hidden = !running || !pipeSnapshot?.stop_supported;
   $('pipe-stop').disabled = !pipeConnected || !!pipeAction || !!pipeSnapshot?.stop_requested;
   $('pipe-stop').textContent = pipeAction === 'stop' || pipeSnapshot?.stop_requested ? '等待当前阶段结束…' : '本阶段结束后停止';
   $('nav-sync-dot').hidden = !running;
+  // 「我的订阅」公众号视图上的同步按钮/进度横幅跟着同一份快照走
+  if (typeof renderWechatSubsStatus === 'function') renderWechatSubsStatus();
   renderPipeEst();
 }
 async function retryFailed() {

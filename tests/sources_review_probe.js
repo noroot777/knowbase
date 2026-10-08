@@ -22,7 +22,10 @@ async page => {
   await page.route('**/api/intake/*/items?*', handler);
   try {
     await page.setViewportSize({width:1440,height:1050});
-    await page.locator('#tab-social').click();
+    // 三类来源并进了「我的订阅」页:先定好要看的视图,再走真实点击进入
+    await page.evaluate(() => localStorage.setItem('kb-subs-kind', 'social'));
+    await page.locator('#tab-subs').click();
+    await page.locator('#subs-switch-social').waitFor();
     await page.waitForFunction(() => sourceData?.unconfigured === 51);
     check('默认 51 个账号明确待配置，不可启动空跑', await page.locator('#source-sync').isDisabled()
       && (await page.locator('#source-configuration').textContent()).includes('51 个账号待配置'));
@@ -41,7 +44,7 @@ async page => {
 
     // No metadata changes and no manual reload between the failure and recovery.
     mode = 'fail'; hits = 0;
-    await page.locator('#tab-rss').click();
+    await page.locator('#subs-switch-rss').click();
     await page.locator('[data-retry-items]').waitFor();
     check('内容失败显示错误与重新读取', (await page.locator('#source-list').textContent()).includes('内容服务暂时不可用'));
     await page.screenshot({path:'output/playwright/review-items-retry.png'});
@@ -67,13 +70,13 @@ async page => {
 
     await page.locator('#source-view-items').click();
     while (!held.length) await page.waitForTimeout(20);
-    await page.locator('#tab-social').click();
+    await page.locator('#subs-switch-social').click();
     await page.waitForFunction(() => sourceKind === 'social' && sourceData?.sources.length === 51);
     await reply(held.shift(), {detail:'过期 RSS 错误'},503);
     await page.waitForTimeout(80);
-    check('切模块后旧错误不污染新模块', !(await page.locator('#sourcepanel').textContent()).includes('过期 RSS 错误'));
+    check('切模块后旧错误不污染新模块', !(await page.locator('#subspanel').textContent()).includes('过期 RSS 错误'));
 
-    await page.locator('#tab-rss').click();
+    await page.locator('#subs-switch-rss').click();
     while (!held.length) await page.waitForTimeout(20);
     mode = 'fresh';
     await page.locator('#source-q').fill('Fresh');

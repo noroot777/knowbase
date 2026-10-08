@@ -94,6 +94,20 @@ function renderPipeState(s) {
   // Use the same successful-step count as the label; unexecuted work never fills the bar.
   $('pipe-progress-fill').style.width = (planned.length ? Math.round(completed / planned.length * 100) : 0) + '%';
   $('pipe-state-hint').textContent = pipeStateHint(s, result, failed, skipped, { label, completed, total: planned.length });
+  // 需处理的问题在整轮结束后统一收进总览卡片:哪几步、各自卡在什么,配一颗重试按钮,
+  // 不用去每个步骤卡片里找「需处理」。运行中不出现(失败项不阻止本轮继续)。
+  const failedStages = planned.filter(k => pipeHasFailure(stages[k]));
+  const backlog = !s.running && pipePending.extract > 0;
+  const issues = $('pipe-issues');
+  issues.hidden = s.running || !(failedStages.length || backlog);
+  if (!issues.hidden) {
+    $('pipe-issues-title').textContent = failedStages.length
+      ? `${failedStages.length} 个步骤需处理`
+      : `还有 ${pipePending.extract} 项内容待提取`;
+    $('pipe-issues-list').innerHTML = failedStages.map(k =>
+      `<li><b>${STAGE_META[k].name}</b><span>${esc(stages[k]?.detail || '执行失败')}</span></li>`).join('')
+      + (failedStages.length && backlog ? `<li><b>提取知识</b><span>另有 ${pipePending.extract} 项待提取</span></li>` : '');
+  }
   $('pipe-retry').hidden = s.running || !(failed || pipePending.extract > 0);
   renderPipeLog((s.log?.length ? s.log : result.log) || [], result.finished_at);
   renderPipeButtons();

@@ -3,24 +3,23 @@ const $ = id => document.getElementById(id);
 let tagFilters = [], entityFilters = [];
 
 function switchTab(t) {
-  const regularTabs = ['gallery', 'search', 'ask', 'fav', 'daily', 'pipe'];
-  const isSource = typeof sourceModules !== 'undefined' && sourceModules.has(t);
-  if (!regularTabs.includes(t) && !isSource) return;
+  const regularTabs = ['gallery', 'search', 'ask', 'fav', 'daily', 'subs', 'pipe'];
+  // 老深链 #wechat/#social/#rss(来源目录里的模块 id)一律落到「我的订阅」的对应视图
+  if (typeof subsCatalog !== 'undefined' && subsCatalog.some(m => m.id === t)) { subsPendingKind = t; t = 'subs'; }
+  if (!regularTabs.includes(t)) return;
   const previousScroll = window.scrollY;
   for (const k of regularTabs) {
     $(k + 'panel').style.display = t === k ? '' : 'none';
     $('tab-' + k).classList.toggle('on', t === k);
   }
   document.body.classList.toggle('chat-mode', t === 'ask');
-  $('sourcepanel').style.display = isSource ? '' : 'none';
-  if (typeof sourceModules !== 'undefined') for (const kind of sourceModules.keys()) $('tab-' + kind).classList.toggle('on', t === kind);
   if (typeof updateWorkspaceTab === 'function') updateWorkspaceTab(t, previousScroll);
-  if (t === 'pipe') { refreshPipe(true); initTargets(); }
+  if (t === 'pipe') refreshPipe(true);
   if (t === 'daily') loadDailyPanel();
   if (t === 'ask') initChat();
   if (t === 'fav') loadFavPanel();
   if (t === 'search') loadMeta().catch(() => {});
-  if (isSource) openSourceModule(t);
+  if (t === 'subs') { const kind = subsPendingKind; subsPendingKind = ''; openSubsPanel(kind); }
 }
 
 async function loadMeta() {

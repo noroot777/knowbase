@@ -81,6 +81,7 @@ await shoot("drawer", { ready: GRID, prep: `document.querySelector('button.gcard
 await shoot("search", { ready: GRID, prep: `switchTab('search'); document.getElementById('q').value='claude code'; doSearch();`, wait: 2200 });
 await shoot("ask", { ready: GRID, prep: `switchTab('ask')` });
 await shoot("fav", { ready: GRID, prep: `switchTab('fav')` });
+await shoot("subs", { ready: GRID, prep: `switchTab('subs')`, wait: 1800 });
 await shoot("pipe", { ready: GRID, prep: `switchTab('pipe')` });
 await shoot("mobile-gallery", { w: 390, h: 844, ready: GRID });
 await shoot("mobile-nav", { w: 390, h: 844, ready: GRID, prep: `document.getElementById('nav-toggle')?.click()||document.querySelector('.mobile-menu')?.click()` });

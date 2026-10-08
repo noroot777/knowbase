@@ -228,8 +228,8 @@ check("列表行紧凑(不到 96px)", listView.cardH < 96, `中位行高 ${listV
 await evalJs(`setGalleryView('grid')`);
 await sleep(300);
 
-// ── 5. 五个面板逐个切过去,不许报错、不许出横向滚动条 ──
-for (const tab of ["gallery", "search", "ask", "fav", "pipe"]) {
+// ── 5. 六个面板逐个切过去,不许报错、不许出横向滚动条 ──
+for (const tab of ["gallery", "search", "ask", "fav", "subs", "pipe"]) {
   await evalJs(`switchTab('${tab}')`);
   await sleep(700);
   const over = await evalJs(`document.documentElement.scrollWidth - document.documentElement.clientWidth`);

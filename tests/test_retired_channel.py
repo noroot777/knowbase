@@ -16,7 +16,7 @@
 3. 旧名字仍然要能翻成人话(历史运行记录里写着的可能正是它)。
 4. 别名表要供给浏览器那一侧(localStorage 里存着的选择后端 resolve 不到)。
 5. 「添加一个公众号」走的是本机会话列表,不是搜公众平台。
-6. 页面上同一件事由 tests/retired_channel_probe.mjs 真跑一遍(20 项)。
+6. 页面上同一件事由 tests/retired_channel_probe.mjs 真跑一遍。
 
 跑:  python -m unittest tests.test_retired_channel -v
 """

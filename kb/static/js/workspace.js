@@ -1,5 +1,5 @@
 // Workspace navigation, addressable filters and accessible overlay lifecycle.
-const WORKSPACE_TITLES = { gallery: '工具图鉴', search: '全文检索', ask: '知识问答', fav: '我的收藏', daily: '每日日报', pipe: '同步中心' };
+const WORKSPACE_TITLES = { gallery: '工具图鉴', search: '全文检索', ask: '知识问答', fav: '我的收藏', daily: '每日日报', subs: '我的订阅', pipe: '同步中心' };
 let activeTab = 'gallery';
 let restoringLocation = false;
 // 地址栏里那个 #tab 在 initWorkspace 收尾时才被读走(restoreWorkspaceLocation),
@@ -40,7 +40,10 @@ function updateWorkspaceTab(tab, previousScroll = window.scrollY) {
 
 function restoreWorkspaceLocation() {
   const [tabName, query = ''] = location.hash.slice(1).split('?');
-  const tab = Object.hasOwn(WORKSPACE_TITLES, tabName) ? tabName : 'gallery';
+  // 老深链 #wechat/#social/#rss 仍然认:switchTab 会把它落到「我的订阅」的对应视图
+  const known = Object.hasOwn(WORKSPACE_TITLES, tabName)
+    || (typeof subsCatalog !== 'undefined' && subsCatalog.some(m => m.id === tabName));
+  const tab = known ? tabName : 'gallery';
   restoringLocation = true;
   workspaceLocated = true;   // 地址已经读完,之后各面板再存位置就不会盖掉它
   if (tab === 'gallery') {
@@ -157,7 +160,7 @@ function closeShortcuts() { $('shortcuts-modal').style.display = 'none'; }
 
 const overlayClosers = {
   'tool-drawer': closeToolDrawer, reader: closeReader, 'pipe-modal': closePipeModal,
-  'tgt-modal': closeTargets, 'stages-modal': closeStages, 'keys-modal': closeKeys,
+  'stages-modal': closeStages, 'keys-modal': closeKeys,
   'mcp-modal': closeMcp, 'shortcuts-modal': closeShortcuts,
   'source-editor': closeSourceEditor, 'source-reader': () => { $('source-reader').style.display = 'none'; },
   'wechat-modal': closeWechatSetup,
@@ -252,10 +255,9 @@ async function initWorkspace() {
   // 干脆超时的那段时间里,工具列表已经能翻了,而侧栏每一个入口都说不出自己叫
   // 什么;请求回来也救不了已经停在那儿的那次悬停(没有新的 pointerover)。
   watchNavTips();
+  // 来源目录要先就位:restoreWorkspaceLocation 认老深链(#social 等)靠的是它。
+  // 导轨入口是静态的,目录读不到也不影响侧栏,失败显示在「我的订阅」页内。
   await initSourceModules();
-  // 来源入口是插在导轨中段的,它一来,下面那几个入口整体往下挪;
-  // 还挂在那儿的浮层得跟过去,否则名字会停在原来那个位置上。
-  resyncNavTip();
   $('reader-frame').addEventListener('load', () => {
     try {
       $('reader-frame').contentDocument?.addEventListener('keydown', e => {

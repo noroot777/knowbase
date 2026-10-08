@@ -1,7 +1,7 @@
-/* 采集目标(订阅了哪些公众号 / RSS 源…)的管理弹窗。
+/* 采集目标(订阅了哪些公众号…)的管理,就地渲染在「我的订阅」页的公众号视图里。
  *
  * 只认 /api/sources/targets 这套通用接口,文案里的"公众号"来自后端给的 label
- * ——换来源时这个文件不用改。后端说 manageable=false 就整个入口不显示。
+ * ——换来源时这个文件不用改。
  */
 
 let tgtList = [];        // 已订阅
@@ -13,39 +13,25 @@ let tgtBusy = false;     // 有请求在飞:防连点造成重复添加/删除
 const TGT_BLIND_HINT = '这条会话还没解析出归属,无法确认是哪个号;'
   + '按上面那行提示缩小关键词再搜一次';
 
-/** 面板加载时调用:决定要不要显示"管理订阅"入口 */
-async function initTargets() {
-  try { await loadPipeChannels(); } catch { return; }
-  const requestedChannel = pipeChannel;
-  const btn = $('src-manage');
-  if (!btn) return;
-  const d = await fetch(channelUrl('/api/sources/targets')).then(r => r.ok ? r.json() : null)
-    .catch(() => null);
-  if (requestedChannel !== pipeChannel) return;
-  if (!d || !d.manageable) { btn.style.display = 'none'; return; }
-  tgtLabel = d.label || '目标';
-  tgtList = d.targets || [];
-  btn.textContent = `管理${tgtLabel}`;
-  btn.style.display = '';
-}
-
-async function openTargets() {
-  $('tgt-modal').style.display = 'flex';
-  $('tgt-search').value = '';
+/** 打开公众号订阅视图时调用:读订阅列表并就地渲染 */
+async function loadTargets() {
   tgtCands = [];
   renderTgtCands();
+  $('tgt-list').innerHTML = '<div class="empty">正在读取订阅列表…</div>';
+  try { await loadPipeChannels(); } catch (e) {
+    $('tgt-list').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    return;
+  }
   await reloadTargets();
-  $('tgt-search').focus();
-}
-
-function closeTargets() {
-  $('tgt-modal').style.display = 'none';
-  initTargets();
 }
 
 async function reloadTargets() {
-  const r = await fetch(channelUrl('/api/sources/targets'));
-  if (await toastIfFail(r, `读取${tgtLabel}列表失败`)) return;
+  const r = await fetch(channelUrl('/api/sources/targets')).catch(() => null);
+  if (!r || !r.ok) {
+    const reason = r ? await apiFail(r, '读取失败') : '连接失败';
+    $('tgt-list').innerHTML = `<div class="empty">读取${esc(tgtLabel)}列表失败:${esc(reason)}<br><button class="ghost" style="margin-top:8px" onclick="loadTargets()">重新读取</button></div>`;
+    return;
+  }
   const d = await r.json();
   tgtList = d.targets || [];
   tgtLabel = d.label || tgtLabel;
@@ -204,8 +190,5 @@ document.addEventListener('click', async e => {
 });
 
 document.addEventListener('keydown', e => {
-  if ($('tgt-modal') && $('tgt-modal').style.display !== 'none') {
-    if (e.key === 'Escape') closeTargets();
-    if (e.key === 'Enter' && e.target.id === 'tgt-search') searchTargets();
-  }
+  if (e.key === 'Enter' && e.target.id === 'tgt-search' && !e.isComposing) searchTargets();
 });

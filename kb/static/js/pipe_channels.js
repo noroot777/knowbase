@@ -35,7 +35,6 @@ function applyChannelData(data) {
   pipeRunSel = adoptChannels(pipeRunSel).filter(id => pipeChannels.some(c => c.id === id));
   if (!pipeRunSel.length) pipeRunSel = [pipeChannel];
   saveRunChannels();
-  $('pipe-channel-current').innerHTML = pipeChannels.map(c => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join('');
   renderPipeChannel();
 }
 
@@ -67,7 +66,6 @@ function pipeRunScopes(filter) {
 }
 
 function renderPipeChannel() {
-  $('pipe-channel-current').value = pipeChannel;
   renderPipeChannelList();
   renderPipeRange();
 }
@@ -103,14 +101,12 @@ $('pipe-channel-list').addEventListener('change', e => {
   loadPipeAccounts();
 });
 
-// 顶部那个选择：换的是「查看/管理哪个来源」，不动这次同步要抓哪几个。
-async function changePipeChannel(value) {
-  if (!pipeChannels.some(c => c.id === value)) { renderPipeChannel(); return; }
+// 「查看/管理哪个来源的连接与订阅」的当前选择(channelUrl 据此拼参数)。
+// 不动这次同步要抓哪几个来源(pipeRunSel)。
+function setPipeChannel(value) {
+  if (!pipeChannels.some(c => c.id === value)) return;
   pipeChannel = value;
   try { localStorage.setItem('kb-sync-channel', value); } catch {}
-  renderPipeChannel();
-  $('src-detail').textContent = '正在检查所选来源…';
-  refreshPipeSource(); initTargets();
 }
 
 // 接入向导走完之后直接把公众号那条选上，用户回到同步中心就能开跑。

@@ -40,9 +40,9 @@
   </nav>
   <div class="nav-label">信息来源</div>
   <nav class="tabs nav-section" id="source-navigation" aria-label="信息来源">
+    <button id="tab-subs" onclick="switchTab('subs')"><i data-icon="rss"></i><span class="nav-text">我的订阅</span></button>
     <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span class="nav-text">同步中心</span><span id="nav-sync-dot" hidden aria-label="同步进行中"></span></button>
   </nav>
-  <button id="source-nav-error" hidden onclick="this.hidden=true;initSourceModules()"></button>
   <div class="nav-label">发现关联</div>
   <nav class="explore-links nav-section" aria-label="知识图谱">
     <a href="/graph/projects" target="_blank" rel="noopener"><i data-icon="network"></i><span class="nav-text">项目图谱</span><span class="nav-ext"><i data-arrow="ext"></i></span></a>
@@ -199,26 +199,23 @@
 
 <div id="pipepanel" style="display:none">
   <div class="pipe-page-heading"><div><h1>同步中心</h1></div>
-    <div class="pipe-actions"><button class="ghost" id="pipe-retry" onclick="retryFailed()" aria-describedby="pipe-retry-help" hidden>重试失败项</button><button id="pipe-run" onclick="openPipeModal()" aria-describedby="pipe-state-hint">新建同步</button></div>
+    <div class="pipe-actions"><button id="pipe-run" onclick="openPipeModal()" aria-describedby="pipe-state-hint">新建同步</button></div>
   </div>
-  <div class="pipe-source" id="pipe-source">
-    <div><strong id="src-label">来源采集器</strong><span id="src-status" class="badge">检查中…</span><p id="src-detail">正在检查所选通道</p></div>
-    <div class="pipe-source-actions"><select id="pipe-channel-current" aria-label="查看哪个来源的连接状态" onchange="changePipeChannel(this.value)"><option value="">读取来源…</option></select>
-      <button class="ghost" id="src-manage" onclick="openTargets()" style="display:none">管理订阅</button><a id="src-console" href="#" target="_blank" rel="noopener" style="display:none">采集器配置<i data-arrow="ext"></i></a>
-      <button class="text-button" onclick="refreshPipeSource()">检查连接</button></div>
-  </div>
-  <p class="hint" style="margin:12px 0">首次使用本地绿泡泡通道？<button class="text-button" onclick="openWechatSetup()">检查并接入绿泡泡</button></p>
   <div id="pipe-connection" class="pipe-notice" hidden role="status"><span></span><button class="ghost" onclick="refreshPipe(true)">重新连接</button></div>
   <section class="pipe-overview" aria-label="同步概况">
     <div class="pipe-overview-main"><div><span class="pipe-section-label">当前状态</span><h2 id="pipe-state-title" role="status" tabindex="-1">正在读取同步状态</h2><p id="pipe-running-channel"></p><p id="pipe-run-scope"></p></div><div class="pipe-run-metrics"><b id="pipe-progress-label">—</b><span id="pipe-elapsed"></span></div></div>
     <div class="pipe-progress-track" aria-hidden="true"><span id="pipe-progress-fill"></span></div>
     <div class="pipe-overview-footer"><span id="pipe-state-hint">同步在后台执行，切换页面不会中断。</span><button class="ghost" id="pipe-stop" onclick="stopPipe()" hidden>本阶段结束后停止</button></div>
-    <details id="pipe-retry-help" class="pipe-retry-help">
-      <summary>新建同步和重试失败项有什么区别？</summary>
-      <p><strong>新建同步：</strong>按本次通道、订阅和日期抓取。提取失败且仍在待处理列表中的文档，会在下次完整同步再次尝试；其他步骤仍受各自处理范围、去重和重试间隔限制。</p>
-      <p><strong>重试失败项：</strong>抓取沿用上次的通道和范围，重跑失败阶段及必要的后续步骤；“正文为空”的提取问题在配了回填脚本时会先尝试回填。</p>
-      <p>凭证失效、模型配置或服务故障需先处理。重试不保证成功，也不代表强制重跑全部历史失败。</p>
-    </details>
+    <div id="pipe-issues" class="pipe-issues" hidden role="status">
+      <div class="pipe-issues-head"><b id="pipe-issues-title"></b><button class="ghost" id="pipe-retry" onclick="retryFailed()" aria-describedby="pipe-retry-help" hidden>重试失败项</button></div>
+      <ul id="pipe-issues-list"></ul>
+      <details id="pipe-retry-help" class="pipe-retry-help">
+        <summary>新建同步和重试失败项有什么区别？</summary>
+        <p><strong>新建同步：</strong>按本次通道、订阅和日期抓取。提取失败且仍在待处理列表中的文档，会在下次完整同步再次尝试；其他步骤仍受各自处理范围、去重和重试间隔限制。</p>
+        <p><strong>重试失败项：</strong>抓取沿用上次的通道和范围，重跑失败阶段及必要的后续步骤；“正文为空”的提取问题在配了回填脚本时会先尝试回填。</p>
+        <p>凭证失效、模型配置或服务故障需先处理。重试不保证成功，也不代表强制重跑全部历史失败。</p>
+      </details>
+    </div>
   </section>
   <div class="pipe-workbench">
     <section class="pipe-stage-panel"><div class="pipe-section-heading"><h2>同步步骤</h2><span>每一步都有结果</span></div><div id="pipe-stages" aria-label="同步阶段"></div></section>
@@ -227,16 +224,37 @@
       <div class="pipe-log-footer"><span id="pipe-log-note">保留最近 80 条</span><button id="pipe-log-latest" class="text-button" onclick="followPipeLog()" hidden>查看最新<i data-arrow="down"></i></button><button class="text-button" onclick="downloadPipeLog()">下载日志</button></div>
     </section>
   </div>
-  <section class="pipe-schedule"><div><h2>每日定时同步</h2><p>按所选来源同步全部订阅，可以勾几个一起跑。修改后保存，下一次定时任务生效。</p></div>
-    <fieldset id="sched-fields" disabled><label><input type="checkbox" id="sched-on" onchange="markSchedDirty()"> 启用定时</label><label>每天 <input type="time" id="sched-time" value="07:30" required oninput="markSchedDirty()"></label>
-      <div id="sched-channels" class="pipe-channel-list" role="group" aria-label="定时同步的来源"></div>
-    </fieldset>
-    <div class="pipe-schedule-footer"><span id="sched-msg" role="status">正在读取定时设置…</span><button id="sched-reload" class="ghost" onclick="loadSched()" hidden>重新读取</button><button id="sched-save" class="ghost" onclick="saveSched()" disabled>保存设置</button></div>
-  </section>
 </div>
 
-<div id="sourcepanel" style="display:none">
-  <header class="source-heading"><div><h1 id="source-title"></h1><p id="source-description"></p><div id="source-summary" class="source-counts" role="status"></div></div>
+<div id="subspanel" style="display:none">
+  <div class="pipe-page-heading"><div><h1>我的订阅</h1></div>
+    <div id="subs-switch" class="subs-switch" role="tablist" aria-label="订阅来源"></div>
+  </div>
+  <div id="subs-error" class="source-banner error" hidden role="alert"><span id="subs-error-text"></span><button class="ghost" onclick="openSubsPanel()">重新读取</button></div>
+
+  <section id="subs-wechat" hidden aria-label="公众号订阅">
+    <div class="pipe-source" id="pipe-source">
+      <div><strong id="src-label">公众号采集器</strong><span id="src-status" class="badge">检查中…</span><p id="src-detail">正在检查来源连接</p></div>
+      <div class="pipe-source-actions"><a id="src-console" href="#" target="_blank" rel="noopener" style="display:none">采集器配置<i data-arrow="ext"></i></a>
+        <button class="text-button" onclick="openWechatSetup()">检查并接入绿泡泡</button>
+        <button class="text-button" onclick="refreshPipeSource()">检查连接</button></div>
+    </div>
+    <div id="subs-wechat-progress" class="source-banner" hidden role="status"><span id="subs-wechat-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度<i data-arrow="right"></i></button></div>
+    <div id="subs-wechat-manage" class="subs-manage-card">
+      <div class="subs-manage-head"><div><h2 id="tgt-title">订阅的公众号</h2><p id="tgt-count" class="hint"></p></div>
+        <button id="subs-wechat-sync" onclick="syncWechatSubs()">同步全部</button></div>
+      <div class="subs-target-search">
+        <input id="tgt-search" placeholder="输入名字搜索并添加…" aria-label="搜索并添加公众号">
+        <button id="tgt-search-btn" class="ghost" onclick="searchTargets()">搜索</button>
+      </div>
+      <div id="tgt-cands" style="display:none"></div>
+      <div id="tgt-list"></div>
+      <p class="hint" style="margin-top:12px">添加候选来自本机绿泡泡的会话列表，不走网络。移除订阅不影响已采集的文章。</p>
+    </div>
+  </section>
+
+  <section id="subs-feeds" hidden>
+  <header class="source-heading"><div><h2 id="source-title"></h2><p id="source-description"></p><div id="source-summary" class="source-counts" role="status"></div></div>
     <div class="source-heading-actions"><button class="ghost" id="source-add" onclick="openSourceEditor()">＋ 添加订阅</button><button id="source-sync" onclick="syncSource()">同步全部</button></div>
   </header>
   <div id="source-error" class="source-banner error" hidden role="alert"><span id="source-error-text"></span><button class="ghost" onclick="loadSourceModule(true)">重新读取</button></div>
@@ -259,6 +277,14 @@
       <p id="source-settings-status" role="status"></p><div class="source-rule"><p id="source-last-run"></p><p id="source-note"></p><p>每源每次最多读取最近 500 条，后续按原文链接去重。删除订阅保留已收录内容。</p><p>自动同步需要知识库服务保持运行。与绿泡泡共用同步队列，繁忙时顺延。</p><p>保存后自动建立检索索引；知识提取可在同步中心继续执行。</p></div>
     </aside>
   </div>
+  </section>
+
+  <section class="pipe-schedule"><div><h2>每日定时同步</h2><p>每天在固定时间把勾选来源的全部订阅同步一遍。修改后保存，下一次定时任务生效。</p></div>
+    <fieldset id="sched-fields" disabled><label><input type="checkbox" id="sched-on" onchange="markSchedDirty()"> 启用定时</label><label>每天 <input type="time" id="sched-time" value="07:30" required oninput="markSchedDirty()"></label>
+      <div id="sched-channels" class="pipe-channel-list" role="group" aria-label="定时同步的来源"></div>
+    </fieldset>
+    <div class="pipe-schedule-footer"><span id="sched-msg" role="status">正在读取定时设置…</span><button id="sched-reload" class="ghost" onclick="loadSched()" hidden>重新读取</button><button id="sched-save" class="ghost" onclick="saveSched()" disabled>保存设置</button></div>
+  </section>
 </div>
 </main>
 
@@ -296,34 +322,6 @@
       </div>
     </fieldset>
     <div class="pipe-setup-footer"><div id="pipe-est" class="hint" role="status"></div><div><button class="ghost" onclick="closePipeModal()">暂不执行</button><button id="pipe-start" onclick="startPipeFromModal()" disabled>开始同步</button></div></div>
-  </div>
-</div>
-
-<div id="tgt-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeTargets()">
-  <div class="modal" style="width:min(600px,92vw);max-height:88vh;display:flex;flex-direction:column">
-    <h2 id="tgt-title">订阅列表</h2>
-    <p class="hint" style="margin:-8px 0 12px" id="tgt-count"></p>
-
-    <!-- 搜索添加 -->
-    <div class="row" style="margin-bottom:10px">
-      <div style="display:flex;gap:6px">
-        <input id="tgt-search" placeholder="输入名字搜索并添加…"
-               style="flex:1;min-width:0;padding:9px 14px;font:inherit;font-size:13.5px;
-                      border:1px solid var(--line);border-radius:10px;background:var(--bg);outline:none">
-        <button id="tgt-search-btn" onclick="searchTargets()"
-                style="flex:none;padding:9px 18px;font-size:13.5px">搜索</button>
-      </div>
-      <div id="tgt-cands" style="display:none;margin-top:8px;border:1px solid var(--line);
-           border-radius:10px;max-height:200px;overflow-y:auto"></div>
-    </div>
-
-    <!-- 已订阅 -->
-    <div id="tgt-list" style="flex:1;min-height:0;overflow-y:auto;border:1px solid var(--line);
-         border-radius:10px"></div>
-
-    <div style="display:flex;justify-content:flex-end;margin-top:14px">
-      <button class="ghost" onclick="closeTargets()">关闭</button>
-    </div>
   </div>
 </div>
 

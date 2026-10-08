@@ -23,6 +23,15 @@
 .pipe-progress-track { height: 5px; background: var(--tag-bg); border-radius: 5px; overflow: hidden; margin-top: 20px; }
 #pipe-progress-fill { display: block; height: 100%; background: var(--brand); transition: width .3s; }
 .pipe-overview-footer { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-top: 12px; font-size: 13px; color: var(--muted); }
+/* 整轮跑完后需处理的问题统一收在这块:失败步骤清单 + 重试按钮,一处看全 */
+.pipe-issues { margin-top: 16px; padding: 14px 16px; border: 1px solid var(--warn); background: var(--warn-soft); border-radius: 10px; }
+.pipe-issues[hidden] { display: none; }
+.pipe-issues-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pipe-issues-head b { font-size: 14px; color: var(--danger); }
+.pipe-issues ul { list-style: none; margin: 10px 0 0; padding: 0; }
+.pipe-issues li { display: flex; gap: 10px; align-items: baseline; padding: 7px 0; border-top: 1px solid var(--line-soft); font-size: 13px; }
+.pipe-issues li b { flex: none; font-weight: 600; }
+.pipe-issues li span { color: var(--ink-2); overflow-wrap: anywhere; white-space: pre-wrap; }
 .pipe-retry-help { margin-top: 12px; font-size: 13px; }
 .pipe-retry-help summary { cursor: pointer; color: var(--brand); }
 .pipe-retry-help p { margin-top: 8px; line-height: 1.7; }

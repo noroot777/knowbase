@@ -74,14 +74,16 @@ async page => {
     await page.locator('#wechat-next').waitFor({state:'visible'});
     check('成功后首次提示收起', await page.locator('#wechat-welcome').isHidden());
     await page.locator('#wechat-next').click();
-    await page.waitForFunction(() => document.getElementById('pipe-channel-current').value === 'wechat_local');
+    await page.waitForFunction(() => pipeChannel === 'wechat_local');
     // 接入完成后「去同步公众号」把要看/要管的来源定在公众号这条,并勾进这次同步的范围
-    check('继续同步选中公众号这条', await page.locator('#pipe-channel-current').inputValue() === 'wechat_local');
+    check('继续同步选中公众号这条', await page.evaluate(() =>
+      localStorage.getItem('kb-sync-channel') === 'wechat_local'));
     check('公众号也进了这次同步的范围',
       await page.evaluate(() => pipeRunSel.includes('wechat_local')));
     check('同步范围里没有退役的那条', await page.evaluate(() => !pipeChannels.some(c => c.id === 'wechat_oa')));
-    check('打开同步中心', await page.locator('#pipepanel').isVisible());
-    await page.getByRole('button',{name:'检查并接入绿泡泡',exact:true}).click();
+    check('落在「我的订阅」的公众号视图', await page.locator('#subspanel').isVisible()
+      && await page.evaluate(() => !document.getElementById('subs-wechat').hidden));
+    await page.getByRole('button',{name:'检查并接入绿泡泡',exact:true}).first().click();
     // 向导里点 API Key / 模型配置:新窗口叠在向导之上,关掉它向导必须还开着
     // (原来是先关向导再开新窗口,关掉新窗口就落回空白页面,得重新点开向导)
     await page.locator('#wechat-modal').waitFor({state:'visible'});

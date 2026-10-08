@@ -290,7 +290,8 @@
   文件名没改,是因为 `cli.py` 和 `src/collect/` 里的 `import api` 还指着它。
   要看旧服务(或者封面下载、公众平台搜号、扫码凭证那几个)翻 git 历史。
 - **公众号列表**存在 `collector/data/wechatoa.db` 的 `accounts` 表,日常维护走
-  kb-web 管道 tab 的「管理公众号」弹窗(搜索添加 / 停用 / 移除),不要直接改库。
+  kb-web「我的订阅」页的公众号视图(搜索添加 / 停用 / 移除,就地在页面上,不再是
+  弹窗),不要直接改库。
   终端等价物是 `cli accounts list|discover|add|remove|enable|disable`;面板走的就是它。
   **添加候选来自本机绿泡泡的会话列表**(`cli accounts discover`):不登录公众平台、
   不走网络。裸列时归属从发现索引里查(一条推送都不翻),给了查询词才现翻索引外那几个

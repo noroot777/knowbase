@@ -75,6 +75,8 @@ async page => {
       '/api/pipeline/channels':{default:'a',channels:[{id:'a',label:'凭证通道'},{id:'b',label:'本机通道'}]},
       '/api/pipeline/schedule':{enabled:false,time:'07:30',channel:'a'},
       '/api/sources/targets':{manageable:false},
+      // 「我的订阅」页的来源切换按这个目录建;公众号视图是来源连接卡现在的家
+      '/api/intake/modules':{modules:[{id:'wechat',label:'公众号',description:'测试来源',channels:['a','b'],manager:'wechat',icon:'chat'}]},
       '/api/stats':{documents:100,vectors:100,entities:50,extracted:90},
       '/api/facets':{sources:[],accounts:[],topics:[],entities:[]},
       '/api/projects':{tools:[],kinds:{},topics:[],total_entries:0},
@@ -130,6 +132,10 @@ async page => {
     check('首次状态请求未返回也能打开新建同步',await page.locator('#pipe-modal').isVisible());
     check('读取状态时在配置内说明原因并防止实际启动',await page.locator('#pipe-setup-connection').isVisible() && await page.locator('#pipe-start').isDisabled());
     await page.getByRole('button',{name:'暂不执行',exact:true}).click();
+    // 采集器探测搬到了「我的订阅」的公众号视图;慢探测照样不许拖住同步状态
+    await page.locator('#tab-subs').click();
+    await page.waitForFunction(()=>!document.getElementById('subs-wechat').hidden);
+    await page.locator('#tab-pipe').click();
     holdStatus=false;await releaseStatus();await page.waitForFunction(()=>pipeConnected && !pipeRequest);
     check('慢采集器探测不阻塞同步状态',holdSource && !!releaseSource && await page.locator('.pipe-stage').count()===6);
     holdSource=false;await releaseSource();
@@ -143,7 +149,7 @@ async page => {
     check('运行中列出本次抓取的全部来源',(await page.locator('#pipe-running-channel').textContent()).includes('凭证通道 + 本机通道') && (await page.locator('#pipe-run-scope').textContent()).includes('凭证通道 1 个指定订阅 · 本机通道 全部订阅'));
     state.crawl_filter={channel:'a',accounts:['公众号甲']};await refresh();
     check('只抓一个来源时不重复标注来源名',(await page.locator('#pipe-run-scope').textContent()).startsWith('1 个指定订阅'));
-    check('运行时禁用重复启动与切换查看来源',await page.locator('#pipe-run').isDisabled() && await page.locator('#pipe-channel-current').isDisabled());
+    check('运行时禁用重复启动',await page.locator('#pipe-run').isDisabled());
     check('运行时侧栏有后台任务提示',await page.locator('#nav-sync-dot').isVisible());
     await page.locator('#pipe-stage-crawl summary').click();
     await page.locator('#pipe-log-box').evaluate(el=>{el.scrollTop=0;el.dispatchEvent(new Event('scroll'));});
@@ -315,6 +321,8 @@ async page => {
     await page.locator('#pipe-retry').click();await page.waitForFunction(()=>!pipeAction && pipeSnapshot.running);
     check('重试有运行反馈且不重复启动',countWrites('/api/pipeline/retry-failed')===1 && await page.locator('#pipe-run').isDisabled());
     finish();await refresh();
+    // 每日定时同步搬进了「我的订阅」页
+    await page.locator('#tab-subs').click();
     const beforeSchedule=countWrites('/api/pipeline/schedule');
     await page.locator('#sched-on').check();await page.locator('#sched-time').fill('08:45');
     await page.locator('#sched-channels').getByRole('checkbox',{name:'本机通道',exact:true}).check();
@@ -327,6 +335,7 @@ async page => {
     await page.locator('#sched-channels').getByRole('checkbox',{name:'本机通道',exact:true}).uncheck();
     await page.locator('#sched-save').click();
     check('定时不允许一个来源都不选',(await page.locator('#sched-msg').textContent()).includes('至少选择一个') && countWrites('/api/pipeline/schedule')===beforeSchedule+2);
+    await page.locator('#tab-pipe').click();
     await page.setViewportSize({width:375,height:812});
     check('手机同步页面无横向溢出',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
     check('同一同步任务提示不堆叠',await page.locator('[data-toast-key=pipeline]').count()<=1);

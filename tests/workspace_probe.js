@@ -246,7 +246,7 @@ async page => {
     await page.keyboard.press('Escape');
     check('设置弹窗关闭返回入口', await page.locator('#keys-btn').evaluate(el=>el===document.activeElement));
     await page.setViewportSize({width:375,height:812});
-    for (const tab of ['gallery','search','ask','fav','pipe']) {
+    for (const tab of ['gallery','search','ask','fav','subs','pipe']) {
       await page.getByRole('button',{name:'打开导航',exact:true}).click();
       await page.locator('#tab-' + tab).click();
       check('375px ' + tab + ' 无横向溢出', await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
@@ -258,9 +258,8 @@ async page => {
     check('手机设置显示于导航上层', await page.locator('#keys-modal').evaluate(el=>!el.inert && getComputedStyle(el).display!=='none'));
     await page.keyboard.press('Escape');
     /* ── 名字只剩浮层这一条路了,它不许被任何一个和它无关的请求拖住 ──
-       扣住来源目录(线上就是 pipeJson 的 15 秒超时那一段):工具卡片已经能翻了,
-       导轨上每一个入口都得说得出自己叫什么;目录回来之后,原地一直没挪过的那次
-       悬停也得还在——那时候不会再有第二个 pointerover 把名字带回来。 */
+       扣住来源目录(线上就是 pipeJson 的 15 秒超时那一段):导轨入口现在全是静态的
+       (「我的订阅」收编了三类来源),工具卡片能翻时每一个入口都得说得出自己叫什么。 */
     await page.setViewportSize({width:1440,height:1000});
     let releaseModules = () => {};
     holdModules = new Promise(resolve => { releaseModules = resolve; });
@@ -269,23 +268,17 @@ async page => {
     await page.locator('#tab-fav').hover();
     check('来源目录还没回来,导轨照样报得出名字', await page.evaluate(() => {
       const tip = document.getElementById('nav-tip');
-      return !document.getElementById('tab-rss') && !tip.hidden && tip.textContent === '我的收藏';
+      return !tip.hidden && tip.textContent === '我的收藏';
     }));
+    check('订阅入口是静态的,不等目录;来源 tab 不再插进导轨', await page.evaluate(() =>
+      !!document.getElementById('tab-subs') && !document.getElementById('tab-rss')
+      && !document.getElementById('tab-social') && !document.getElementById('tab-gzh')));
     releaseModules(); holdModules = null;
-    await page.locator('#tab-rss').waitFor();
-    check('目录回来后原地未挪的悬停仍有名字且贴着那个入口', await page.evaluate(() => {
+    await page.locator('#tab-subs').hover();
+    check('订阅入口同样只剩浮层报名字', await page.evaluate(() => {
       const tip = document.getElementById('nav-tip');
-      const t = tip.getBoundingClientRect(), item = document.getElementById('tab-fav').getBoundingClientRect();
-      return !tip.hidden && tip.textContent === '我的收藏'
-        && Math.abs((t.top + t.height / 2) - (item.top + item.height / 2)) <= 1;
-    }));
-    check('只有 feeds 那几个来源进导轨', await page.evaluate(() =>
-      !!document.getElementById('tab-social') && !document.getElementById('tab-gzh')));
-    await page.locator('#tab-rss').hover();
-    check('接口回来后插进去的来源入口同样有名字', await page.evaluate(() => {
-      const tip = document.getElementById('nav-tip');
-      return !tip.hidden && tip.textContent === 'RSS'
-        && document.querySelector('#tab-rss .nav-text').getBoundingClientRect().width <= 1;
+      return !tip.hidden && tip.textContent === '我的订阅'
+        && document.querySelector('#tab-subs .nav-text').getBoundingClientRect().width <= 1;
     }));
     /* 矮窗口里 Tab 到露在视野外的入口,浏览器会自己滚侧栏——锚点没变、只是位置变了,
        那时候把名字清掉就再也没有第二个 focusin 能把它带回来。 */
