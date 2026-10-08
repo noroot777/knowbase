@@ -86,8 +86,16 @@ const server = createServer(async (req, res) => {
   const m = path.match(/^\/api\/intake\/(\w+)\/x-channel(\/\w+)?$/);
   if (m) {
     if (m[1] !== "social") return json({ detail: "该来源没有可选的采集通道" }, 404);
-    if (m[2] === "/login") { posted.push(path); return json({ ok: true, detail: "已打开登录窗口。登录成功后关掉它。" }); }
-    if (m[2] === "/check") { posted.push(path); return json(checkReply); }
+    // **按方法回答,和真后端一样**:这个 mock 原来只看 URL,于是「检查连接」发
+    // 的是 GET 也照样返回成功 —— 真路由只收 POST,按钮在真页面上永远报 405,
+    // 而这套探针全绿(2026-10-08 审查实测)。
+    if (m[2] === "/login" || m[2] === "/check") {
+      posted.push(`${req.method} ${path}`);
+      if (req.method !== "POST") return json({ detail: "Method Not Allowed" }, 405);
+      return m[2] === "/login"
+        ? json({ ok: true, detail: "已打开登录窗口。登录成功后关掉它。" })
+        : json(checkReply);
+    }
     const ready = channel === "bridge";
     return json({ current: channel, channels: CHANNELS,
                   ready, why: ready ? "" : "浏览器通道还没有登录过 X",
@@ -235,8 +243,8 @@ check("选浏览器后只显示它那一块",
       && !await shown("#source-x-feedgrab"));
 check("「打开登录窗口」真点得到", await clickAt("#source-x-login-btn"));
 await until(`document.querySelector('#toast-host')?.textContent.includes('已打开')`, 8000);
-check("登录请求打的是 login 端点", posted.includes("/api/intake/social/x-channel/login"),
-      posted.join());
+check("登录请求打的是 login 端点,而且是 POST",
+      posted.includes("POST /api/intake/social/x-channel/login"), posted.join());
 check("登录结果如实显示在提示里",
       (await evalJs(`document.querySelector('#toast-host')?.textContent || ''`)).includes("关掉它"),
       await evalJs(`document.querySelector('#toast-host')?.textContent || ''`));
@@ -259,9 +267,19 @@ check("保存之后这条就是当前通道、「检查连接」回来了",
 // 5. 「检查连接」真连一次,结论写回状态行
 check("「检查连接」点得到", await clickAt("#source-x-check"));
 await until(`document.getElementById('source-x-state').textContent.includes('推文')`, 20000);
-check("检查请求打的是 check 端点", posted.includes("/api/intake/social/x-channel/check"), posted.join());
+// **方法要对**:后端那条路由只收 POST,而 `pipeJson(path, {}, 120000)` 发的是
+// GET(选项里没有 method,fetch 默认 GET)—— 于是这颗按钮在真页面上永远是
+// 405 Method Not Allowed,状态行把它当成结论贴出来(2026-10-08 审查实测)。
+check("检查请求打的是 check 端点,而且是 POST",
+      posted.includes("POST /api/intake/social/x-channel/check"), posted.join());
+check("检查没有发出任何 GET",
+      !posted.some(p => p.startsWith("GET /api/intake/social/x-channel/check")),
+      posted.join());
 check("检查结论写回状态行",
       (await evalJs(`document.getElementById('source-x-state').textContent`)).includes("登录态有效"),
+      await evalJs(`document.getElementById('source-x-state').textContent`));
+check("状态行里没有 405 这类方法错误",
+      !(await evalJs(`document.getElementById('source-x-state').textContent`)).includes("Method"),
       await evalJs(`document.getElementById('source-x-state').textContent`));
 
 // 6. 失败的检查如实说,不留一句"成功"

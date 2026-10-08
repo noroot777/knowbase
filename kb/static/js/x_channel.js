@@ -96,7 +96,7 @@ async function checkXChannel() {
   $('source-x-state').textContent = '正在检查…';
   try {
     // 这一步会真起一个 Chrome 或真跑一次 feedgrab doctor,比普通请求慢得多。
-    const r = await pipeJson(`/api/intake/${xChanKind}/x-channel/check`, {}, 120000);
+    const r = await pipePost(`/api/intake/${xChanKind}/x-channel/check`, {}, 120000);
     if (xChan) { xChan.ready = r.ready; xChan.why = r.detail; }
     $('source-x-state').textContent = r.detail;
     toast(r.detail, { type: r.ready ? 'ok' : 'err' });

@@ -116,24 +116,28 @@ def watermark(source: dict, channel: str) -> str:
     return str(_config(source).get(_WATER_KEY.get(channel, ''), '') or '')
 
 
-def save_watermark(source_id: int, channel: str, value: str) -> None:
-    """只改自己那个键,别的键原样留着(另一条通道的水位、将来别人加的字段)。"""
+def watermark_patch(channel: str, value: str) -> dict:
+    """这条通道要写进 `subscriptions.config` 的那一个键。空值 = 什么都不要改。
+
+    **返回补丁而不是直接写盘**:水位必须和条目在**同一个事务**里提交。原来是
+    `take()` 当场存一次 —— 那是 fetch 的工作线程,而条目要等主线程的
+    `sync._save_result` 才真正写进库,两个独立事务没有共同的成功/失败边界:
+    `put_items` 失败那一轮水位已经推进了,这批没入库的推文比旧水位新、又比新
+    水位老,从此**任何一轮增量都选不到它们**(审查实测:存盘失败后 `stored_items=0`
+    而水位已前进,重试取回 0 条)。
+    """
     key = _WATER_KEY.get(channel)
-    if not key or not value:
-        return
+    return {key: value} if key and value else {}
+
+
+def save_watermark(source_id: int, channel: str, value: str, conn=None) -> None:
+    """只改自己那个键,别的键原样留着(另一条通道的水位、将来别人加的字段)。
+
+    `conn` 非空时并进调用方那个事务(存盘那条路要的就是这个),否则自己开一个。
+    """
     from kb.feeds import registry as reg
-    with reg.db() as c:
-        row = c.execute('SELECT config FROM subscriptions WHERE id=?', (source_id,)).fetchone()
-        if not row:
-            return
-        try:
-            cfg = json.loads(row['config'] or '{}')
-            cfg = cfg if isinstance(cfg, dict) else {}
-        except (TypeError, ValueError):
-            cfg = {}
-        cfg[key] = value
-        c.execute('UPDATE subscriptions SET config=? WHERE id=?',
-                  (json.dumps(cfg, ensure_ascii=False), source_id))
+    if patch := watermark_patch(channel, value):
+        reg.merge_config(source_id, patch, conn=conn)
 
 
 # ── 整批预取 ────────────────────────────────────────────────────────────────
@@ -155,8 +159,8 @@ def targets(sources: list[dict], settings: dict) -> list[dict]:
     return [s for s in sources if reg.uses_bridge(s) and _handle(s)]
 
 
-def prefetch(sources: list[dict], settings: dict, *, budget: float = 0.0,
-             on_progress=None, should_stop=None) -> dict:
+def prefetch(sources: list[dict], settings: dict, *, since: str = '',
+             budget: float = 0.0, on_progress=None, should_stop=None) -> dict:
     """抓完整批,把结果放进本轮缓存。返回 {handle: 结果} 以便汇报。
 
     失败不抛:每个账号的失败落在它自己那一项上,由 `take()` 翻成这条订阅的
@@ -164,10 +168,15 @@ def prefetch(sources: list[dict], settings: dict, *, budget: float = 0.0,
 
     `should_stop` 每个账号之间问一次:面板上那颗停止按钮承诺的是"当前阶段
     结束后停止",而这一批要跑十几分钟,不认它的话按下去要等满整轮预算。
+
+    **`since` 是区间补抓那段日期的起点**(`FetchScope.since`,日常同步为空)。
+    它是这条路唯一的逃生口:用户点名要补 10-05 那天,而日常水位已经停在 10-07,
+    按水位读的话一条也翻不到那天 —— 下界必须换成用户给的日期(审查实测:传给
+    采集器的仍是 10-07、`added=0`)。
     """
     channel = channel_of(settings)
     picked = targets(sources, settings)
-    jobs = [(_handle(s), watermark(s, channel)) for s in picked]
+    jobs = [(_handle(s), since or watermark(s, channel)) for s in picked]
     if not jobs:
         with _lock:
             _harvest.clear()
@@ -185,6 +194,14 @@ def prefetch(sources: list[dict], settings: dict, *, budget: float = 0.0,
             data_dir=str(FEEDGRAB_HOME / 'sessions'),
             workdir=str(FEEDGRAB_HOME / 'work'), budget=budget,
             on_progress=on_progress, should_stop=should_stop)
+    if since:
+        # **区间补抓不推进日常增量水位**:它读的下界是用户点的那个日期,跟"上次
+        # 读到哪儿了"没有关系。存下去就是拿一段指定的历史冒充增量进度 —— 水位和
+        # 真实读取位置之间那一段从此任何一轮都选不到(口径同 `_save_result` 把
+        # validators 重建回原值:区间补抓不许改任何缓存状态)。在这里摘掉而不是
+        # 在 `take()` 里再判一次,是为了只有一处知道"这一轮是区间"。
+        for got in result.values():
+            got.pop('watermark', None)
     with _lock:
         _harvest.clear()
         _harvest.update(result)
@@ -208,13 +225,20 @@ def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
     if note := got.get('skipped'):
         from kb.feeds.fetching import CollectionBudgetExceeded
         raise CollectionBudgetExceeded(note)
-    if water := got.get('watermark'):
-        save_watermark(source['id'], channel, water)
     # 这条路没有 etag / last-modified 可言,把三个校验字段原样留着:
     # 写回空串会把这条订阅之前走 HTTP 时攒下的缓存信息抹掉,切回 bridge
     # 通道时就要白拉一次全量。
-    return got['entries'], {k: source.get(k, '') for k in
-                            ('etag', 'modified', 'resolved_url')}
+    meta = {k: source.get(k, '') for k in ('etag', 'modified', 'resolved_url')}
+    # 水位作为"要并进 config 的补丁"交回去,由存盘那一步和条目同一个事务提交
+    # (见 `watermark_patch`)。这里是工作线程,当场写盘就和条目脱钩了。
+    if patch := watermark_patch(channel, got.get('watermark', '')):
+        meta['config_patch'] = patch
+    # 「这一轮没读完」原样带回去:它不是失败(抓到的照旧入库),但也不是一次
+    # 完整的同步 —— 面板上要看得见,否则"停在时间线半中间"和"全读完了"长得
+    # 一模一样(水位那一侧已经由 harvest 留着旧值兜住,见 `x_browser.harvest`)。
+    if note := got.get('incomplete'):
+        meta['note'] = note
+    return got['entries'], meta
 
 
 def reset() -> None:

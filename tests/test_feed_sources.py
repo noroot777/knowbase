@@ -1,4 +1,5 @@
 """Isolated source lifecycle, ingestion, scheduling and search regressions."""
+import json
 import tempfile
 import threading
 import unittest
@@ -330,6 +331,41 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(7300,reg.get_settings('rss')['next_run'])
         self.assertEqual(20,reg.get_settings('social')['next_run'])
         self.assertEqual('social',schedule.tick(start,current_time=100))
+
+    def test_a_stored_legacy_interval_is_migrated_to_the_new_default(self):
+        """改 `SourceType.interval_minutes` **只影响没有设置行的新库**。
+
+        已经保存过的那份 JSON 在 `get_settings` 里盖在默认值上面,面板保存通道时
+        又把旧间隔原样带回去 —— 于是「social 改成每天一次」对所有老用户都没有
+        发生(2026-10-08 审查实测:存量 60 的设置行,真跑一次 `tick` 仍然安排
+        一小时后再来)。所以迁移按 `settings_rev` 做,读的时候归一。
+        """
+        with reg.db() as c:          # 旧版真实存下来的形状,没有 settings_rev
+            c.execute('INSERT OR REPLACE INTO feed_settings VALUES(?,?)',
+                      ('social', json.dumps({'enabled': True, 'interval_minutes': 60,
+                                             'next_run': 0, 'bridges':
+                                             ['https://example.org/{handle}/rss']})))
+        self.assertEqual(1440, reg.get_settings('social')['interval_minutes'])
+        reg.save_subscription('social', {'name': 'Someone',
+                                         'url': 'https://x.com/Someone'})
+        start = Mock(return_value=True)
+        self.assertEqual('social', schedule.tick(start, current_time=100))
+        self.assertEqual(100 + 1440 * 60, reg.get_settings('social')['next_run'])
+
+    def test_an_interval_the_user_picked_himself_is_left_alone(self):
+        """只迁"仍然等于旧默认值"的那些。升级之后他自己挑的值也不许被再迁一次
+        —— `save_settings` 把 `settings_rev` 一起存下去,所以盖过章就不再动。"""
+        with reg.db() as c:
+            c.execute('INSERT OR REPLACE INTO feed_settings VALUES(?,?)',
+                      ('social', json.dumps({'enabled': False, 'interval_minutes': 180,
+                                             'next_run': 0})))
+        self.assertEqual(180, reg.get_settings('social')['interval_minutes'])
+        reg.save_settings('social', {'interval_minutes': 60})
+        self.assertEqual(60, reg.get_settings('social')['interval_minutes'])
+
+    def test_other_kinds_keep_their_own_interval(self):
+        reg.save_settings('rss', {'enabled': False, 'interval_minutes': 60})
+        self.assertEqual(60, reg.get_settings('rss')['interval_minutes'])
 
     def test_collector_registration_and_manual_scope_force(self):
         from kb import pipeline_stages

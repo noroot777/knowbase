@@ -90,11 +90,17 @@ def _published(meta: dict) -> str:
 
 
 def _entry(meta: dict, body: str, handle: str) -> dict | None:
+    """一条产物 md → feed_items 的条目形状。
+
+    **置顶照收**(口径同浏览器通道的 `_in_timeline`):原来按 `is_pinned` 丢掉,
+    理由是"它每天都在"。可那是在拿一个不存在的问题换一个真的:`put_items` 按
+    `sha256(kind:url)` + `ON CONFLICT DO NOTHING` 去重,旧置顶重复出现一条都不会
+    重复入库;而**刚发出来就被钉上去**的推文(宣布新版本、活动预告 —— 正是最该
+    收的那种)被这一句永久丢掉,下一轮它的日期已经低于水位,再也补不回来。
+    """
     url = str(meta.get('source') or '').strip()
     if not url or f'/{handle.lower()}/status/' not in url.lower():
         return None                      # 别的号(引用/转推产物)不算这个订阅的
-    if str(meta.get('is_pinned', '')).lower() == 'true':
-        return None                      # 置顶每天都在,口径同浏览器通道
     author = meta.get('author')
     name = (meta.get('author_name') or
             (author[0] if isinstance(author, list) and author else author) or handle)

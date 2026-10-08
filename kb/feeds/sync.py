@@ -78,6 +78,8 @@ def _save_result(source, result, scope):
     if scope.ranged:
         entries = [e for e in entries if e['published'] and scope.since <= e['published'][:10] <= scope.until]
         # A ranged import must not cache away entries outside the selected dates.
+        # 重建这一份也顺手丢掉 `config_patch`(登录态通道的水位):区间补抓读的
+        # 是用户点名的那段日期,拿它当增量进度就是宣布中间那段已经收过。
         validators = {k: source[k] for k in ('etag', 'modified', 'resolved_url')}
     # 存盘整段在维护锁里:存量清理和索引持同一把锁,两边交错的话它删掉的旧文
     # 会被这一轮按旧快照原样写回去(见 `kb.maintenance`)。锁内再现读一次下界,
@@ -85,11 +87,20 @@ def _save_result(source, result, scope):
     with maintenance_lock():
         if not scope.ranged:
             entries = _within_history(source, entries)
-        added = reg.put_items(source, entries)
+        # **条目、水位、成功时间戳一个事务**。分成两个的话,`put_items` 失败那
+        # 一轮水位已经推进了,而这批推文一条都没入库 —— 它们比旧水位新、又比
+        # 新水位老,从此任何一轮增量都选不到(见 `x_channels.watermark_patch`)。
         with reg.db() as c:
+            added = reg.put_items(source, entries, conn=c)
+            reg.merge_config(source['id'], validators.get('config_patch') or {}, conn=c)
             c.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
-                failures=0,retry_at=0,etag=?,modified=?,resolved_url=? WHERE id=?''',
-                (reg.now(),reg.now(),validators['etag'],validators['modified'],validators['resolved_url'],source['id']))
+                failures=0,retry_at=0,etag=?,modified=?,resolved_url=?,last_note=? WHERE id=?''',
+                (reg.now(),reg.now(),validators['etag'],validators['modified'],
+                 validators['resolved_url'],
+                 # 区间补抓不改日常增量的任何状态,这条提示也算 —— 清掉它等于替
+                 # 日常同步宣布"读完了",而那一边的进度一点没动。
+                 source.get('last_note','') if scope.ranged else validators.get('note',''),
+                 source['id']))
     return added
 
 
@@ -102,7 +113,7 @@ def _save_failure(source, error, summary):
             time.time() + min(86400, 1800 * 2 ** min(source['failures'], 6)),source['id']))
 
 
-def _prefetch_x(kind, sources, settings):
+def _prefetch_x(kind, sources, settings, scope):
     """X 登录态通道的整批预取。跑在起线程池之前,所以读侧不必加锁。
 
     一个账号都抓不到也不抛:每个账号的失败已经落在它自己那一项上,随后
@@ -121,7 +132,10 @@ def _prefetch_x(kind, sources, settings):
     def progress(done, count, handle):
         _stage('crawl', 'running', f'{reg.KINDS[kind]} · {name} {done}/{count} · @{handle}')
 
+    # 区间补抓把它那段日期的起点交给采集器当下界:日常水位可能已经停在那段
+    # 日期之后,按水位读的话用户点名的那几天一条都翻不到(见 `prefetch`)。
     x_channels.prefetch(sources, settings, budget=X_LOCAL_SECONDS,
+                        since=scope.since if scope.ranged else '',
                         on_progress=progress,
                         should_stop=lambda: bool(_state.get('stop_requested')))
 
@@ -131,7 +145,8 @@ def collect(kind, scope):
     sources = [s for s in reg.subscriptions(kind) if s['enabled'] and
                (not scope.targets or str(s['id']) in scope.targets or s['name'] in scope.targets)]
     summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0,
-               'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [], 'stopped': False}
+               'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [],
+               'partial': [], 'stopped': False}
     settings = reg.get_settings(kind)
     pending, unconfigured_why = [], ''
     for source in sources:
@@ -146,7 +161,7 @@ def collect(kind, scope):
             pending.append(source)
     # Budget-limited runs continue with never/least recently attempted sources.
     pending.sort(key=lambda s: (s['last_attempt'], s['id']))
-    _prefetch_x(kind, pending, settings)
+    _prefetch_x(kind, pending, settings, scope)
     # 预取可能跑十几分钟(见 X_LOCAL_SECONDS),所以 HTTP 那一侧的预算要在它
     # **之后**才开始算。算在前面的话,预取一跑完每条订阅都已经超了预算,整轮
     # 一条也取不走、全部记成"留待下次"—— 而东西明明已经抓在手里了。
@@ -186,6 +201,12 @@ def collect(kind, scope):
                     result = future.result()
                     shared_ok |= shared_upstream and reg.uses_bridge(source)
                     summary['added'] += _save_result(source, result, scope)
+                    # **「没读完」不是失败,但也不许静默**:抓到的照旧入库、水位
+                    # 留在原处(下一轮接着读),可"停在时间线半中间"和"全读完了"
+                    # 在面板上不该长得一模一样。记成 error 更不对 —— 那会显示
+                    # "连接失败"并让这条订阅进退避重试,而连接好得很。
+                    if note := result[1].get('note'):
+                        summary['partial'].append({'title': source['name'], 'reason': note})
                 except CollectionBudgetExceeded:
                     summary['skipped'] += 1
                     summary['message'] = BUDGET_MESSAGE
@@ -207,6 +228,8 @@ def collect(kind, scope):
         label += f"，{summary['deferred']} 个等待重试"
     if summary['errors']:
         label += f"，失败 {len(summary['errors'])} 个"
+    if summary['partial']:
+        label += f"，{len(summary['partial'])} 个没读完（{summary['partial'][0]['reason']}）"
     if summary['unconfigured']:
         label += f"，待配置 {summary['unconfigured']} 个（{unconfigured_why}）"
     if summary['message']:

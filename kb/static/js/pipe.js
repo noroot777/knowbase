@@ -29,8 +29,11 @@ async function pipeJson(path, options = {}, timeout = 15000) {
     clearTimeout(timer); options.signal?.removeEventListener('abort', abort);
   }
 }
-function pipePost(path, body) {
-  return pipeJson(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+// timeout 省略时沿用 pipeJson 的默认值。**要 POST 就走这个**:直接
+// pipeJson(path, {}, 120000) 是 GET —— 选项对象里没有 method,fetch 默认 GET,
+// 而后端那条路由只收 POST,于是按钮永远报 405(2026-10-08 审查实测「检查连接」)。
+function pipePost(path, body, timeout) {
+  return pipeJson(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }, timeout);
 }
 function invalidatePipeStatus() {
   clearTimeout(pipeTimer); pipeTimer = null;

@@ -215,9 +215,13 @@ class TakeTests(ChannelBase):
         with self.assertRaises(fetching.CollectionBudgetExceeded):
             x_channels.take(reg.subscription('social', s['id']), self.settings(x_channels.BROWSER))
 
-    def test_taking_keeps_the_http_validators_and_advances_the_watermark(self):
+    def test_taking_keeps_the_http_validators_and_hands_back_the_watermark(self):
         """这条路没有 etag 可言,但写回空串会把之前走 HTTP 攒下的缓存抹掉 ——
-        切回桥接通道时就要白拉一次全量。"""
+        切回桥接通道时就要白拉一次全量。
+
+        **水位只是作为补丁交回去,这一步一个字节都不写盘**:存盘要和条目在同一个
+        事务里(见 `WatermarkCommitTests`)。
+        """
         s = self.sub()
         with reg.db() as c:
             c.execute("UPDATE subscriptions SET etag=?, modified=?, resolved_url=? WHERE id=?",
@@ -230,9 +234,22 @@ class TakeTests(ChannelBase):
         self.assertEqual(1, len(entries))
         self.assertEqual('"abc"', meta['etag'])
         self.assertEqual('https://bridge.example/Example', meta['resolved_url'])
-        self.assertEqual('2026-10-07T00:00:00+00:00',
-                         x_channels.watermark(reg.subscription('social', s['id']),
-                                              x_channels.BROWSER))
+        self.assertEqual({'x_watermark_browser': '2026-10-07T00:00:00+00:00'},
+                         meta.get('config_patch'))
+        self.assertEqual('', x_channels.watermark(reg.subscription('social', s['id']),
+                                                  x_channels.BROWSER))
+
+    def test_an_incomplete_round_comes_back_as_a_note_not_a_failure(self):
+        """抓到的照旧入库,但"停在时间线半中间"要在面板上看得见。"""
+        s = self.sub()
+        self.harvested(example={'entries': [self.entry()], 'error': '',
+                                'incomplete': '滚动次数用完,没有读到上次的位置',
+                                'watermark': ''})
+        entries, meta = x_channels.take(reg.subscription('social', s['id']),
+                                        self.settings(x_channels.BROWSER))
+        self.assertEqual(1, len(entries))
+        self.assertIn('滚动次数', meta['note'])
+        self.assertNotIn('config_patch', meta)
 
 
 class DispatchTests(ChannelBase):
@@ -294,7 +311,7 @@ class PrefetchTests(ChannelBase):
         pipeline_state._state['stop_requested'] = True
         with patch.object(x_browser, 'Chrome', side_effect=AssertionError('不该起浏览器')):
             sync._prefetch_x('social', reg.subscriptions('social'),
-                             self.settings(x_channels.BROWSER))
+                             self.settings(x_channels.BROWSER), FetchScope())
         with x_channels._lock:
             got = dict(x_channels._harvest)
         self.assertEqual({'alpha', 'beta'}, set(got))
@@ -305,7 +322,7 @@ class PrefetchTests(ChannelBase):
         with patch.object(x_browser, 'harvest', side_effect=AssertionError('不该预取')), \
                 patch.object(x_feedgrab, 'harvest', side_effect=AssertionError('不该预取')):
             sync._prefetch_x('social', reg.subscriptions('social'),
-                             self.settings(x_channels.BRIDGE))
+                             self.settings(x_channels.BRIDGE), FetchScope())
 
     def test_a_stale_harvest_from_a_previous_round_is_cleared(self):
         """上一轮的结果留着 = 这一轮一条都没抓到时却"取"得出东西来。"""
@@ -403,6 +420,31 @@ class ChannelApiTests(ChannelBase):
             r = self.client.post('/api/intake/social/x-channel/login')
         self.assertEqual(400, r.status_code)
         self.assertIn('已经开着', r.json()['detail'])
+
+    def test_the_two_action_endpoints_only_answer_post(self):
+        """页面上那两颗按钮打的是动作端点,不是读取 —— 这一条和下一条合起来钉住
+        「前端发什么方法」和「后端收什么方法」是同一个。"""
+        for path in ('/api/intake/social/x-channel/check',
+                     '/api/intake/social/x-channel/login'):
+            self.assertEqual(405, self.client.get(path).status_code, path)
+
+    def test_the_panel_sends_those_two_with_post(self):
+        """`pipeJson(path, {}, 120000)` 发的是 **GET**(选项里没有 method,fetch
+        默认 GET),于是「检查连接」在真页面上永远是 405 Method Not Allowed,
+        状态行还把它当成结论贴出来(2026-10-08 审查实测)。
+
+        单测发对了方法、探针那个 mock 又只按 URL 匹配 —— 两边都看不见这个缺口,
+        所以这里直接读那份前端代码:两个动作端点必须经 `pipePost`。
+        """
+        js = (Path(intake_api.__file__).parents[2] / 'kb' / 'static' / 'js'
+              / 'x_channel.js').read_text(encoding='utf-8')
+        for action in ('check', 'login'):
+            calls = [line.strip() for line in js.splitlines()
+                     if f"x-channel/{action}`" in line]
+            self.assertTrue(calls, action)
+            for line in calls:
+                self.assertIn('pipePost(', line, line)
+                self.assertNotIn('pipeJson(', line, line)
 
     def test_checking_the_browser_channel_really_opens_one(self):
         self.settings(x_channels.BROWSER)

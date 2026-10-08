@@ -8,7 +8,16 @@
 
 **为什么不是「看到一条老的就停」**:profile 页顶上可能钉着一条几年前的置顶推文,
 转推显示的又是**原推**的时间 —— 两者都会在新推文中间插进一条很老的时间。所以
-判据是「连续 `_OLD_STREAK` 条都老于水位」,并且置顶那条**不参与**判定。
+判据是「**按页面出现顺序**连续 `_OLD_STREAK` 条**自己发的**推都老于水位」:置顶和
+转推身上那个时间跟"读到哪儿了"没有关系,不参与这个证明(但它们照旧入库,
+见 `_in_timeline` / `_own_tweet`)。
+
+**没证明到就不推进水位**(`harvest` 里那句 `water if incomplete else ...`)。滚动
+次数用完、单个账号的时间预算用完、页面不再长出新内容而又不在底部 —— 这三种都是
+「没读完」:这一轮停在时间线半中间,下面那一段既没读也没入库,而把水位推到"这一轮
+见过的最新"就等于宣布那一段已经收过 —— 它们比旧水位新、又比新水位老,从此**任何
+一轮增量都选不到它们**,再同步也补不回来。没读完就留着旧水位:下一轮重叠重抓,
+`put_items` 按 URL 去重,一条都不会重复入库。
 
 **为什么一次会话抓多个账号**:起一个 Chrome 要两三秒,51 个账号各起一次就是
 两分多钟纯开销,还会撞上采集阶段 90 秒的预算;而同一个 profile 目录同时只能
@@ -40,9 +49,18 @@ ACCOUNT_SECONDS = 50.0
 # 每次滚动后等新节点出现的上限。X 的懒加载实测 0.3~1.5 秒。
 _SETTLE_SECONDS = 2.5
 _SETTLE_STEP = 0.25
+# 「滚不出新东西」要连着几次、而且每次都停在页面底部,才算真的到底了。
+# 一次不算:慢网络下的一次懒加载空窗和"时间线到底了"长得一模一样,而把前者
+# 当成后者就是在给一次没读完的抓取盖上"完整"的章。
+_BOTTOM_TRIES = 3
 
 # 页面里的收集器:挂在 window 上跨多次 eval 累积,因为虚拟列表会把滚过去的
 # 节点回收掉 —— 滚完再统一取就只剩最后一屏。按推文 id 去重。
+#
+# **`items` 的顺序就是推文在时间线上出现的顺序**,这件事下面 `_old_enough` 要用:
+# Map 记插入顺序,而首次插入发生在这条推文第一次出现在 DOM 里的时候;对已有 key
+# 再 `set` 不会改变它的位置。所以「连续几条」问的是页面顺序,不是时间排序 ——
+# 按时间排序的话,三条不相邻的旧转推会被拼成一条"连续的老尾巴"。
 _COLLECT_JS = r'''
 (() => {
   const S = window.__kbX = window.__kbX || {seen: new Map()};
@@ -74,7 +92,16 @@ _COLLECT_JS = r'''
 '''
 
 _RESET_JS = 'window.__kbX = {seen: new Map()}; window.scrollTo(0, 0); true'
-_SCROLL_JS = 'window.scrollBy(0, Math.round(window.innerHeight * 0.85)); true'
+# 滚一屏,顺带回答「滚完是不是停在底部了」。这个答案只在随后"没滚出新东西"时
+# 才用得上(见 `_BOTTOM_TRIES`):那时页面没长高,这次测量仍然有效。
+_SCROLL_JS = r'''
+(() => {
+  const el = document.scrollingElement || document.documentElement;
+  window.scrollBy(0, Math.round(window.innerHeight * 0.85));
+  const left = el.scrollHeight - (window.scrollY + window.innerHeight);
+  return JSON.stringify({bottom: left < 40});
+})()
+'''
 # 登录态失效的几种落地页。X 会跳 /i/flow/login,也会在原地渲染登录按钮。
 _STATE_JS = r'''
 (() => {
@@ -124,25 +151,46 @@ def _is_promoted(context: str) -> bool:
     return any(k in context for k in ('Promoted', '推广', '赞助'))
 
 
-def _countable(item: dict, handle: str) -> bool:
-    """这一条算不算「这个账号时间线上的推文」。翻到底的计数和入库共用这一个判据。
+def _in_timeline(item: dict, handle: str) -> bool:
+    """这一条是不是从**这个账号的时间线**里长出来的 —— 入库资格就是它。
 
-    三种不算:
-    ①**置顶** —— 每天都在那儿、发布时间又很老。算进"翻到底"的连续计数会让每一轮
-      都在第一屏就收手;收进库里就是每天多一条"新动态",日报那边还会把它当"补录"
-      反复提。
-    ②**推广位** —— 它是广告,不是这个人的观点。
-    ③**作者不是这个号、又没有转推那一行上下文** —— 那它不是从这个账号的时间线里
-      长出来的(推荐位、"你可能喜欢")。按这个订阅记进去就是把别人的推文当成这个
-      大V的观点,和 feedgrab 那一侧按 `/<handle>/status/` 过滤是同一条规矩。
-      转推一定带着一行 socialContext,所以这么判不会把转推丢掉 —— 而转推正是
-      "他此刻在想什么"的一部分,正文里保留那行上下文(见 `_entry`)。
+    两种不算:
+    ①**推广位** —— 它是广告,不是这个人的观点。
+    ②**作者不是这个号、又没有转推那一行上下文** —— 推荐位、"你可能喜欢"。按这个
+      订阅记进去就是把别人的推文当成这个大V的观点,和 feedgrab 那一侧按
+      `/<handle>/status/` 过滤是同一条规矩。转推一定带着一行 socialContext,
+      所以这么判不会把转推丢掉 —— 而转推正是"他此刻在想什么"的一部分,正文里
+      保留那行上下文(见 `_entry`)。
+
+    **置顶算**。它不参与"翻到底"的计数(见 `_own_tweet`),但那是另一个问题:
+    刚发出来就被钉上去的推文在 X 上看得见,不入库就是永久丢掉一条真内容。
+    "旧置顶每天都在、会反复入库"不成立 —— `put_items` 按 `sha256(kind:url)`
+    去重,而且它的时间低于水位,下一轮 `_select` 自己就筛掉了。
     """
     context = (item.get('context') or '').strip()
-    if _is_pinned(context) or _is_promoted(context):
+    if _is_promoted(context):
         return False
     foreign = handle and (item.get('author') or '').lower() != handle.lower()
     return not (foreign and not context)
+
+
+def _own_tweet(item: dict, handle: str) -> bool:
+    """这一条身上那个时间能不能当成「读到时间线哪儿了」的证据。
+
+    只有**这个号自己发的原创推**算得上。profile 时间线按"活动时间"倒序排,而
+    `<time datetime>` 给的是**原推**发布时间:
+    - 置顶:位置在最上面,时间却可能是几年前 —— 一条都不该算。
+    - 转推:位置按转推时刻排,显示的是原推时间(必然 ≤ 转推时刻)。所以"它很老"
+      证明不了我们已经翻过水位(可能是刚刚转的一条老推);反过来"它很新"倒是
+      能证明还没翻过去(活动时间比它更新),那一档由 `_old_enough` 里的"重置"
+      分支接住。
+    只有原创推的 `datetime` 等于它的活动时间,才能当位置用。
+    """
+    if (item.get('context') or '').strip():          # 置顶、转推、推荐位都带它
+        return False
+    if not handle:
+        return True
+    return (item.get('author') or '').lower() == handle.lower()
 
 
 def _entry(item: dict) -> dict | None:
@@ -180,46 +228,88 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
     raise XBrowserError(f'@{handle} 的时间线上没有读到推文')
 
 
-def _harvest_one(page: Chrome, handle: str, floor: datetime | None) -> list[dict]:
-    """抓一个账号,返回时间上不早于 floor 的条目(置顶那条例外,见下)。"""
+def _harvest_one(page: Chrome, handle: str,
+                 floor: datetime | None) -> tuple[list[dict], str]:
+    """抓一个账号。返回 (条目, 没读完的原因)。
+
+    **原因非空 = 这一轮没有读到水位的证据**,调用方据此不推进水位(见 `harvest`)。
+    三种"没读完":滚动次数用完、这个账号的时间预算用完、页面不再长出新内容而又
+    不在底部(懒加载卡住/被限流)。没有下界(floor 为空)时无从谈起"读到水位",
+    那是新订阅的首轮,按读到的为准。
+    """
     page.goto(f'https://x.com/{handle}')
     deadline = time.monotonic() + ACCOUNT_SECONDS
     _wait_state(page, handle, deadline)
     page.eval(_RESET_JS)
     seen_articles = parsed = 0
     items: list[dict] = []
+    incomplete = '滚动次数用完,没有读到上次的位置' if floor else ''
+    dry = 0                                        # 连着几次"滚完没长出新东西"
     for _ in range(MAX_SCROLLS):
         snap = json.loads(page.eval(_COLLECT_JS))
         seen_articles, parsed, items = snap['articles'], snap['parsed'], snap['items']
         if floor and _old_enough(items, floor, handle):
+            incomplete = ''
             break
         if time.monotonic() > deadline:
+            if floor:
+                incomplete = f'单个账号的 {int(ACCOUNT_SECONDS)} 秒用完,没有读到上次的位置'
             break
         before = len(items)
-        page.eval(_SCROLL_JS)
-        if not _settle(page, before, deadline):
-            break                                  # 滚不出新东西了 = 到底了
+        bottom = json.loads(page.eval(_SCROLL_JS))['bottom']
+        if _settle(page, before, deadline):
+            dry = 0
+            continue
+        # 滚完没长出新东西。**一次不算**:慢网络下的一次懒加载空窗和"到底了"
+        # 长得一模一样,而把前者当成后者就是给一次没读完的抓取盖"完整"的章。
+        dry += 1
+        if dry < _BOTTOM_TRIES:
+            continue                               # 回到循环顶上:再 collect、再滚一次
+        if bottom:
+            incomplete = ''                        # 停在底部、连着几次没新内容 = 真到底
+        elif floor:
+            incomplete = '页面不再长出新内容,而且不在时间线底部'
+        break
     if seen_articles and not parsed:
         # 有推文卡片却一个字段都解析不出来 —— 这是 X 改了 DOM,不是"没有推文"。
         # 两者必须分开:后者安静跳过是对的,前者安静跳过会让这条通道从某天起
         # 永远返回空,而面板上一切正常。
         raise XBrowserError(f'@{handle} 的页面结构看不懂了(读到 {seen_articles} 条卡片,'
                             '一条都解析不出来),X 可能改版了')
-    return _select(items, floor, handle)
+    return _select(items, floor, handle), incomplete
 
 
 def _old_enough(items: list[dict], floor: datetime, handle: str = '') -> bool:
-    """按时间倒序看最后几条:连续 _OLD_STREAK 条老于 floor 才算翻到底。
+    """**按页面出现顺序**连续 `_OLD_STREAK` 条「自己发的推」都老于 floor 才算翻到底。
 
-    只数"这个账号时间线上的推文"(见 `_countable`):置顶、推广和推荐位的时间
-    跟这条时间线的进度没有关系。
+    两件事各有理由:
+
+    **为什么按页面顺序,不按时间排序**:时间排序会把三条互不相邻的旧推(散落在
+    新推之间的老转推、几年前的置顶)拼成一条"连续的老尾巴",第一屏就判翻到底、
+    下面的新推全漏(`items` 的顺序由 `_COLLECT_JS` 那个 Map 的插入顺序保证,
+    就是它们在 DOM 里第一次出现的顺序)。
+
+    **为什么只有原创推算证据**(`_own_tweet`):profile 时间线按活动时间倒序,而
+    `<time datetime>` 给的是原推时间 —— 置顶和转推身上那个时间说明不了"读到哪儿
+    了"。但它们照旧入库(`_in_timeline`),只是不参与这个证明。
+
+    **反过来,任何一条新于 floor 的时间线条目都重置计数**:转推显示的原推时间
+    必然 ≤ 它的活动时间,所以"它很新"足以证明这个位置还没翻过水位。
     """
-    ordered = sorted((i for i in items if _countable(i, handle)),
-                     key=lambda i: i.get('datetime') or '', reverse=True)
-    tail = ordered[-_OLD_STREAK:]
-    if len(tail) < _OLD_STREAK:
-        return False
-    return all((dt := _utc(i.get('datetime', ''))) and dt <= floor for i in tail)
+    streak = 0
+    for item in items:                             # 页面出现顺序
+        if not _in_timeline(item, handle):
+            continue                               # 推广位、推荐位:不是这条时间线
+        when = _utc(item.get('datetime', ''))
+        if not when:
+            continue
+        if when > floor:
+            streak = 0
+        elif _own_tweet(item, handle):
+            streak += 1
+            if streak >= _OLD_STREAK:
+                return True
+    return False
 
 
 def _settle(page: Chrome, before: int, deadline: float) -> bool:
@@ -235,12 +325,14 @@ def _settle(page: Chrome, before: int, deadline: float) -> bool:
 def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list[dict]:
     """落到 feed_items 之前的最后一道:去掉不属于这条时间线的和过老的,转成条目形状。
 
-    哪些不属于见 `_countable`(置顶、推广、推荐位)—— 判据和"翻到底"那一步共用
-    一份,两处各判各的话,被这里丢掉的条目还在那边顶着连续计数。
+    哪些不属于见 `_in_timeline`(推广位、推荐位)—— 入库口径只有那一份,两处各判
+    各的话,被这里丢掉的条目还在"翻到底"那边顶着计数。**置顶照收**:它不参与
+    翻到底的证明(`_own_tweet`),但刚发出来就被钉上去的推文在 X 上看得见,不收
+    就是永久丢掉一条真内容。
     """
     out = []
     for item in sorted(items, key=lambda i: i.get('datetime') or ''):
-        if not _countable(item, handle):
+        if not _in_timeline(item, handle):
             continue
         when = _utc(item.get('datetime', ''))
         if floor and when and when <= floor:
@@ -285,9 +377,15 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 floor = _utc(water) if water else (
                     datetime.now(timezone.utc) - timedelta(days=FIRST_DAYS))
                 try:
-                    entries = _harvest_one(page, handle, floor)
-                    results[handle] = {'entries': entries, 'error': '',
-                                       'watermark': _newest(entries, water)}
+                    entries, incomplete = _harvest_one(page, handle, floor)
+                    # **没读完就不推进水位**:这一轮停在时间线半中间,下面那一段
+                    # 既没读也没入库,而把水位推到"这一轮见过的最新"就等于宣布
+                    # 那一段已经收过 —— 它们比旧水位新、又比新水位老,从此任何
+                    # 一轮增量都选不到它们。留着旧水位:下一轮重叠重抓,
+                    # `put_items` 按 URL 去重,一条都不会重复入库。
+                    results[handle] = {
+                        'entries': entries, 'error': '', 'incomplete': incomplete,
+                        'watermark': water if incomplete else _newest(entries, water)}
                 except (XBrowserError, CdpError) as e:
                     results[handle] = {'entries': [], 'error': str(e)}
     except (CdpError, EOFError, OSError) as e:

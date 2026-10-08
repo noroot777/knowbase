@@ -266,14 +266,26 @@ function currentSourceItems(kind, version, q, id) {
   return kind === sourceKind && version === sourceItemsVersion && sourceActive() && sourceView === 'items'
     && q === $('source-q').value.trim() && id === $('source-filter').value;
 }
+// 空态那句「要先配置什么」按后端给的理由写,不写死桥接那一档:选了浏览器
+// 登录态通道的人看到「先填写 X 订阅桥接」,说的是跟他这一轮采集毫无关系的一个
+// 设置(口径同 `registry.configuration_error`,它已经按当前通道分支了)。
+function sourceConfigHint() {
+  const why = (sourceData?.sources || []).map(s => s.configuration_error).find(Boolean) || '';
+  const reason = why.replace(/^待配置[:：]\s*/, '').replace(/[。；;，,]$/, '');
+  return reason ? `${reason}；配置好之后再开始同步。` : '这些账号还要先配置，配置好之后再开始同步。';
+}
 function renderSubscription(s) {
-  const status = !s.enabled ? '已停用' : s.configuration_error ? '待配置' : s.last_error ? '连接失败' : s.last_success ? '已同步' : '待首次同步';
+  // `last_note` = 上一轮同步成功但**没读完**(登录态通道滚不到上次的位置)。
+  // 它排在 last_error 之后、已同步之前:抓到的条目确实入库了,但把它显示成
+  // 「已同步」就等于宣布这一轮读完了 —— 而时间线下面那一段还没读到。
+  const status = !s.enabled ? '已停用' : s.configuration_error ? '待配置' : s.last_error ? '连接失败' : s.last_note ? '部分同步' : s.last_success ? '已同步' : '待首次同步';
   return `<article class="source-subscription ${!s.enabled ? 'is-paused' : ''}">
     <div class="source-avatar" aria-hidden="true">${esc(s.name.slice(0,1))}</div>
     <div class="source-subscription-body"><div class="source-row-title"><h3>${esc(s.name)}</h3><span class="source-state ${s.enabled && s.last_error ? 'failed' : ''}">${status}</span></div>
     <a class="source-url" href="${esc(safeUrl(s.url))}" target="_blank" rel="noopener noreferrer">${esc(s.url)}</a>
     <div class="source-row-meta">${esc(s.group_name || '未分组')} · ${s.item_count} 条 · ${s.last_success ? '最近成功 '+sourceTime(s.last_success) : '尚未成功同步'}</div>
     ${s.configuration_error ? `<p class="source-row-meta">${esc(s.configuration_error)}</p>` : ''}
+    ${!s.last_error && s.last_note ? `<p class="source-row-meta">${esc(s.last_note)}；下次同步从上次的位置接着读。</p>` : ''}
     ${s.last_error ? `<details class="source-failure"><summary>查看失败原因与重试时间</summary><p>${esc(s.last_error)}</p><p>自动重试：${sourceTime(s.retry_at*1000)}；也可点击“同步”立即重试。</p></details>` : ''}</div>
     <div class="source-row-actions"><button class="text-button" data-source-action="edit" data-source-id="${s.id}">编辑</button><button class="text-button" data-source-action="toggle" data-source-id="${s.id}">${s.enabled ? '停用' : '启用'}</button><button class="text-button" data-source-action="sync" data-source-id="${s.id}" ${!s.enabled?'disabled':''}>同步</button><button class="text-button source-delete" data-source-action="delete" data-source-id="${s.id}">删除</button></div></article>`;
 }
@@ -316,7 +328,7 @@ function renderSourceItems() {
   const note = sourceTranslating
     ? `<p class="source-note" role="status">${sourceTranslating} 条外文内容还在等翻译：译成中文之后才写进知识库。</p>` : '';
   $('source-list').innerHTML = rows ? note + rows :
-    `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value ? '换个关键词或切换订阅试试。' : sourceData?.unconfigured && !sourceData?.ready ? '账号待配置。先填写 X 订阅桥接或账号的专用订阅链接，再开始同步。' : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p></div>`;
+    `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value ? '换个关键词或切换订阅试试。' : sourceData?.unconfigured && !sourceData?.ready ? sourceConfigHint() : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p></div>`;
   $('source-more').hidden = sourceOffset >= sourceTotal;
   $('source-more').textContent = `加载更多（已显示 ${sourceRows.length} / ${sourceTotal}）`;
 }
