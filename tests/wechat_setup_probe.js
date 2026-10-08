@@ -42,6 +42,13 @@ async page => {
       '/api/models': {models:[],default:''},
       '/api/keys': {keys:{anthropic:{set:true},openai:{set:false}}},
       '/api/mcp/status': {config:'{}',command:'',tools:[],cli_available:false},
+      // 「我的订阅」页起手要先拿来源目录;缺了它目录为空,向导收尾落不到公众号视图
+      '/api/intake/modules': {modules:[
+        {id:'wechat', label:'公众号', description:'关注的公众号文章',
+         channels:['wechat_oa','wechat_local'], manager:'wechat', icon:'chat'},
+        {id:'rss', label:'RSS', description:'让值得读的文章，自己来到这里。',
+         channels:['rss'], manager:'feeds', icon:'rss'},
+      ]},
       '/api/pipeline/schedule': {enabled:false,time:'07:30'},
       '/api/pipeline/status': {running:false,stages:{},source:{online:true,ready:true},log:[]},
       '/api/pipeline/pending': {}, '/api/pipeline/accounts': {accounts:['测试公众号']},

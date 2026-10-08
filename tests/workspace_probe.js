@@ -281,9 +281,12 @@ async page => {
         && document.querySelector('#tab-subs .nav-text').getBoundingClientRect().width <= 1;
     }));
     /* 矮窗口里 Tab 到露在视野外的入口,浏览器会自己滚侧栏——锚点没变、只是位置变了,
-       那时候把名字清掉就再也没有第二个 focusin 能把它带回来。 */
+       那时候把名字清掉就再也没有第二个 focusin 能把它带回来。
+       480 这一档是量出来的:来源 tab 收编进「我的订阅」后侧栏矮了一行,540 恰好
+       放得下、不再触发自动滚动,这个场景就空转了(实测 540 时 scrollHeight==540,
+       480 时 523>480)。 */
     await page.locator('h1').first().hover();
-    await page.setViewportSize({width:1440,height:540});
+    await page.setViewportSize({width:1440,height:480});
     await page.locator('.brand-lockup').focus();
     for (let i = 0; i < 24; i++) {
       if (await page.evaluate(() => !!document.activeElement?.closest?.('.nav-dropdown'))) break;

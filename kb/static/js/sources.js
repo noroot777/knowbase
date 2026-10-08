@@ -64,7 +64,27 @@ function renderSubsSwitch() {
 
 // ── 公众号视图:连接卡 + 订阅列表 + 同步全部 ────────────────────────────────
 let subsWechatBusy = false;
-function openWechatSubs() {
+// 这个视图管的通道由**来源目录**决定(模块声明的 channels,退役名过别名表),
+// 不信 `kb-sync-channel` 里那份全局选择 —— 旧版同步中心用它记「上次看哪个来源的
+// 连接状态」,存量值可能是 rss/social(都是合法通道,别名迁移不会动它们)。
+// 沿用的话公众号视图的连接卡、订阅列表、「同步全部」全跟着串到别的来源上。
+function wechatSubsChannel() {
+  const spec = subsCatalog.find(m => m.id === subsKind && m.manager !== 'feeds');
+  return adoptChannels(spec?.channels || []).find(id => pipeChannels.some(c => c.id === id)) || '';
+}
+async function openWechatSubs() {
+  renderWechatSubsStatus();
+  try { await loadPipeChannels(); } catch (e) {
+    $('tgt-list').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    return;
+  }
+  const channel = wechatSubsChannel();
+  if (!channel) {
+    $('tgt-list').innerHTML = '<div class="empty">这个来源的采集通道暂不可用，请确认采集器配置后重试。</div>';
+    return;
+  }
+  // 绑到全局选择上:channelUrl(连接卡、订阅列表的请求)和运行态判断都读它
+  setPipeChannel(channel);
   renderWechatSubsStatus();
   refreshPipeSource();
   loadTargets();
@@ -74,7 +94,8 @@ function renderWechatSubsStatus() {
   const section = $('subs-wechat');
   if (!section || section.hidden) return;
   const running = !!pipeSnapshot?.running;
-  const ours = running && pipeRunScopes(pipeSnapshot?.crawl_filter).some(s => s.channel === pipeChannel);
+  const mine = wechatSubsChannel();
+  const ours = running && !!mine && pipeRunScopes(pipeSnapshot?.crawl_filter).some(s => s.channel === mine);
   $('subs-wechat-sync').disabled = subsWechatBusy || running || !!pipeAction;
   $('subs-wechat-sync').textContent = ours ? '同步中…' : '同步全部';
   $('subs-wechat-progress').hidden = !running;
@@ -87,8 +108,12 @@ async function syncWechatSubs() {
   subsWechatBusy = true; renderWechatSubsStatus();
   try {
     await loadPipeChannels();
+    // 提交的通道同样按来源目录现解析,不拿全局选择当然值
+    const channel = wechatSubsChannel();
+    if (!channel) throw new Error('这个来源的采集通道暂不可用，请确认采集器配置后重试');
+    setPipeChannel(channel);
     // accounts 空 = 该来源的全部订阅(kb/web/pipeline_api.py 的 ChannelScope)
-    await pipePost('/api/pipeline/run', { channels: [{ channel: pipeChannel, accounts: [] }] });
+    await pipePost('/api/pipeline/run', { channels: [{ channel, accounts: [] }] });
     toast('同步已开始', { type: 'ok', detail: '进度在同步中心实时显示，离开页面不影响同步。' });
     await refreshPipe();
   } catch (e) { toast('未能开始同步', { detail: e.message }); }

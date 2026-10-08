@@ -143,12 +143,19 @@
   只要还勾着 RSS,「一个都没剩才补默认」那句兜底就不触发,升级后打开新建同步只剩
   RSS,公众号被静默地漏掉、一句提示都没有。
   回归在 `tests/test_retired_channel.py`(12 条)+ `tests/retired_channel_probe.mjs`
-  (23 项,自带 mock 后端、CDP 直连 chrome-headless-shell):存着
+  (48 项,自带 mock 后端、CDP 直连 chrome-headless-shell):存着
   `["wechat_oa","rss"]` 的 localStorage 打开新建同步要勾出公众号、localStorage 被
   改写、而且**看真的发出去的 `/api/pipeline/run` body** 里是 `wechat_local`;另有
   几项钉住删掉的那些东西没留下残骸(没有 `pipeWechat`/`saveWechatChannel` 这类
   全局、没有 `tgt-ready-bar`/`tgt-refresh` 这些节点、页面上不出现「凭证」二字、
   删掉的那两个端点一次都没被请求)。
+  **「我的订阅」的公众号视图不信 `kb-sync-channel` 里那份全局选择**
+  (`sources.js` 的 `wechatSubsChannel()`:按来源目录声明的通道过别名表解析)——
+  那是旧版同步中心记「上次看哪个来源」用的,存量值可能是 rss/social(都是合法
+  通道,别名迁移不会动它们),沿用的话公众号视图的连接卡、订阅列表、「同步全部」
+  全跟着串到别的来源上。探针里存量 rss/social/未知值各走一遍:通道绑回
+  `wechat_local`、连接卡和订阅列表的请求都点名它、「同步全部」提交的 body 是
+  公众号、新建同步的多来源草稿(`kb-sync-channels`)不被改写。
 - **逐号「就绪」那套在主干上永久是空的。** 采集器一律返回 `ready=None` /
   `state="按本机推送采集"`,`refresh_readiness` 从 `TargetManager` 契约里摘掉了,
   `POST /api/sources/targets/refresh` 也没了。`Target.ready/tone/state` 这三个字段

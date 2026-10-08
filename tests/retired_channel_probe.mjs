@@ -37,6 +37,8 @@ const LAST_RUN = { crawl_filter: { channel: "wechat_oa", accounts: [] },
                    stages: {}, log: [] };
 const runs = [];
 const adds = [];
+// 公众号视图发出的只读请求流水(连接卡探测、订阅列表):每条都得点名公众号通道。
+const gets = [];
 const FIXTURES = {
   "/api/stats": { documents: 0, vectors: 0, entities: 0, extracted: 0 },
   "/api/facets": { sources: [], accounts: [], topics: [], entities: [] },
@@ -84,6 +86,10 @@ const MIME = { html: "text/html", js: "text/javascript", css: "text/css", json: 
 
 const server = createServer((req, res) => {
   const path = req.url.split("?")[0];
+  if (req.method === "GET"
+      && (path === "/api/sources/targets"
+          || (path === "/api/pipeline/status" && req.url.includes("channel=")
+              && !req.url.includes("pending=true")))) gets.push(req.url);
   const json = (data, code = 200) => {
     const body = Buffer.from(JSON.stringify(data));
     res.writeHead(code, { "Content-Type": "application/json", "Content-Length": body.length });
@@ -399,6 +405,41 @@ check("原来那条订阅的身份一个字都没变",
       await evalJs(`JSON.stringify(tgtList.filter(t => t.name === '同名公众号')
                                           .map(t => t.id))`) === '["biz-right"]',
       await evalJs(`JSON.stringify(tgtList.map(t => [t.name, t.id]))`));
+
+// ── 6.7 存量「看哪个来源」停在 RSS/social 上:公众号视图不许跟着串来源 ──────────
+// 第 1 轮审查拦验收的那条:升级前最后看过 RSS 的连接状态(kb-sync-channel='rss',
+// 是合法现役值,别名迁移不会动它),升级后进「我的订阅 → 公众号」,连接卡显示 RSS、
+// 订阅列表读的是 RSS,点「同步全部」提交的也是 RSS —— 而页面上写着「公众号」。
+// 视图绑定的通道必须按来源目录(模块声明的 channels)解析,不信那份全局选择;
+// 新建同步的多来源草稿(kb-sync-channels)不许被顺手改写。
+// '没这个来源' 那档走 applyChannelData 的默认兜底(退役名 wechat_oa 在第 0 节),一并钉住。
+for (const legacy of ["rss", "social", "没这个来源"]) {
+  await evalJs(`localStorage.setItem('kb-sync-channel', '${legacy}');
+    localStorage.setItem('kb-sync-channels', JSON.stringify(['rss']));
+    localStorage.setItem('kb-subs-kind', 'wechat'); true`);
+  await boot();
+  gets.length = 0;
+  await evalJs(`switchTab('subs')`);
+  await until(`!document.getElementById('subs-wechat').hidden
+               && document.querySelectorAll('#tgt-list .tgt-row').length > 0`);
+  check(`存量 ${legacy}:视图把通道绑回公众号`,
+        await evalJs(`pipeChannel`) === "wechat_local", await evalJs(`pipeChannel`));
+  const wrong = gets.filter(u => !u.includes("channel=wechat_local"));
+  check(`存量 ${legacy}:连接卡和订阅列表的请求都点名公众号通道`,
+        gets.some(u => u.startsWith("/api/sources/targets"))
+        && gets.some(u => u.startsWith("/api/pipeline/status")) && wrong.length === 0,
+        JSON.stringify(gets));
+  const before = runs.length;
+  await clickAt("#subs-wechat-sync");
+  check(`存量 ${legacy}:「同步全部」提交的是公众号`,
+        await waitFor(() => runs.length === before + 1)
+        && JSON.stringify(runs[runs.length - 1]?.channels)
+           === '[{"channel":"wechat_local","accounts":[]}]',
+        JSON.stringify(runs[runs.length - 1]));
+  check(`存量 ${legacy}:新建同步的多来源草稿没被改写`,
+        await evalJs(`localStorage.getItem('kb-sync-channels')`) === '["rss"]',
+        await evalJs(`localStorage.getItem('kb-sync-channels')`));
+}
 
 // ── 7. 删掉的两个端点没有任何一处还在调 ────────────────────────────────────────
 await sleep(500);

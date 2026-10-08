@@ -28,8 +28,11 @@ def main():
         def fixture(source, settings, **kwargs):
             if 'example.org' not in source['url']:
                 raise FeedError('浏览器测试环境仅允许 example.org 验证源，不访问真实订阅')
+            # 发布时间跟着今天走:新订阅只收最近 HISTORY_DAYS 天(sync._within_history),
+            # 写死日期的样例过几天就被历史下界挡掉,单源同步「贯通」那条探针白等。
+            from datetime import datetime
             return ([dict(title='验证样例：Agent 知识工作流',body='这是一条用于验证同步与检索的样例。\n\n阅读、整理、建立 notebook 索引。',
-                          url='https://example.org/qa-entry',published='2026-09-28 09:30',
+                          url='https://example.org/qa-entry',published=datetime.now().strftime('%Y-%m-%d %H:%M'),
                           author='测试作者',content_kind='content')],
                     dict(etag='fixture-v1',modified='',resolved_url=source['url']))
         sync.fetch_source=fixture

@@ -22,10 +22,10 @@ async page => {
   await page.route('**/api/intake/*/items?*', handler);
   try {
     await page.setViewportSize({width:1440,height:1050});
-    // 三类来源并进了「我的订阅」页:先定好要看的视图,再走真实点击进入
-    await page.evaluate(() => localStorage.setItem('kb-subs-kind', 'social'));
+    // 三类来源并进了「我的订阅」页:先进页,再点页内切换走真实点击进入大V视图
+    // (subsKind 是脚本加载时从 localStorage 读定的,事后写 localStorage 不改变本次会话)
     await page.locator('#tab-subs').click();
-    await page.locator('#subs-switch-social').waitFor();
+    await page.locator('#subs-switch-social').click();
     await page.waitForFunction(() => sourceData?.unconfigured === 51);
     check('默认 51 个账号明确待配置，不可启动空跑', await page.locator('#source-sync').isDisabled()
       && (await page.locator('#source-configuration').textContent()).includes('51 个账号待配置'));
