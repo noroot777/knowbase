@@ -307,7 +307,9 @@ def readiness(settings: dict) -> tuple[bool, str, str]:
             return False, str(e), ''
         sessions = FEEDGRAB_HOME / 'sessions'
         if not any(sessions.glob('*twitter*')) and not any(sessions.glob('*x*')):
-            return False, 'feedgrab 还没有 X 登录态', x_feedgrab.login_command(str(sessions))
+            return (False, 'feedgrab 还没有 X 登录态',
+                    x_feedgrab.login_command(str(sessions),
+                                             settings.get('x_feedgrab_bin', '')))
         return True, '', ''
     # browser:profile 里有 Cookies 文件就算登录过。真失效要等抓取时才知道
     # (那时 `x_browser` 会认出登录页并给出重新登录的提示)。
@@ -316,17 +318,24 @@ def readiness(settings: dict) -> tuple[bool, str, str]:
     return True, '', ''
 
 
-def login_command(channel: str) -> str:
+def login_command(settings: dict) -> str:
     """这条通道要用户在终端里跑的那条命令。没有就是空串。
 
     feedgrab 的登录是交互式的(它自己会开浏览器、要用户扫码或贴 cookie),
     只能他本人在终端跑;浏览器通道则是点按钮开一个有头窗口(见
     `x_browser.open_login_window`),不需要命令行。
+
+    **收的是整份 settings,不只是通道名**:那条命令要用的可执行文件就存在
+    `x_feedgrab_bin` 里(采集和体检都认它),只给通道名的话这里压根拿不到它,
+    于是只能写死裸 `feedgrab` —— 见 `x_feedgrab.login_command` 的注释。口径同
+    `readiness` / `check`:这个模块里凡是要回答「当前这套设置会怎么跑」的,
+    一律收 settings。
     """
-    if resolve(channel) != FEEDGRAB:
+    if channel_of(settings) != FEEDGRAB:
         return ''
     from kb.feeds import x_feedgrab
-    return x_feedgrab.login_command(str(FEEDGRAB_HOME / 'sessions'))
+    return x_feedgrab.login_command(str(FEEDGRAB_HOME / 'sessions'),
+                                    settings.get('x_feedgrab_bin', ''))
 
 
 def check(settings: dict) -> tuple[bool, str]:

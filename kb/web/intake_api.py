@@ -151,7 +151,7 @@ def x_channel(kind: str):
         'channels': [{'id': c, 'label': x_channels.LABELS[c],
                       'hint': x_channels.HINTS[c]} for c in x_channels.CHANNELS],
         'ready': ready, 'why': why, 'hint': hint,
-        'login_command': x_channels.login_command(current),
+        'login_command': x_channels.login_command(settings),
         'needs_login_window': current == x_channels.BROWSER,
     }
 

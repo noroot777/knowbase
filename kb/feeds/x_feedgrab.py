@@ -19,6 +19,7 @@ feed_items、翻译和导出整条链,表现是 vault 里凭空多出一批谁�
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -27,8 +28,12 @@ from pathlib import Path
 
 from kb.scanner import parse_frontmatter
 
-# feedgrab 把推文写在 {OUTPUT_DIR}/X/ 下,一条一个 md(PLATFORM_FOLDER_MAP)。
-_PLATFORM_DIR = 'X'
+# **产物路径不许写死**:feedgrab 的保存位置是「平台目录 + category」拼出来的
+# (`utils/storage.py` 的 `save_to_markdown`),而账号推文的 category 是
+# `status_author/<显示名>`(`fetchers/twitter_user_tweets.py`,api 那条实现同样)。
+# 显示名只过了一遍文件名清理,中文、空格、emoji 全留着 —— 猜不出来,只能整棵扫。
+# 归属判据在 `_entry`(推文 URL 里的 handle),不在它落在哪个子目录。
+
 # 单个账号的墙上时间上限。它内部会分页、必要时还会起浏览器补抓,给得宽一些。
 ACCOUNT_SECONDS = 180.0
 # 没有水位时(新订阅)往回要多少天。真正的下界由 `sync._within_history` 钉死。
@@ -49,9 +54,27 @@ class FeedgrabError(RuntimeError):
     """feedgrab 通道的失败。message 是成品文案。"""
 
 
-def login_command(data_dir: str) -> str:
-    """给用户照抄的登录命令。登录是交互式的(扫码/填 cookie),只能他自己跑。"""
-    return f'FEEDGRAB_DATA_DIR={data_dir} feedgrab login twitter'
+def login_command(data_dir: str, binary: str = '') -> str:
+    """给用户照抄的登录命令。登录是交互式的(扫码/填 cookie),只能他自己跑。
+
+    **可执行文件和采集时用的必须是同一个**(所以这里过一遍 `find_binary`)。
+    原来写死裸 `feedgrab`:用户把它装在独立虚拟环境里、只在面板上填了绝对路径
+    (`harvest`/`doctor` 都认这个设置)时,照页面抄下来那条命令在终端里是
+    `feedgrab: command not found`,首次配置从此走不通 —— 而面板上明明显示着
+    那条可用的路径(2026-10-08 审查实测 `exit 127`)。保存设置不会往用户终端的
+    PATH 里加任何东西,所以这条提示得自己把路径带上。
+
+    两头都 `shlex.quote`:路径里有空格时不 quote 的命令会被 shell 拆成两段。
+    """
+    try:
+        exe = find_binary(binary)
+    except FeedgrabError:
+        # 配了路径但当下不可执行时照它原样显示 —— 用户看得见自己填错在哪儿,
+        # 「路径不可执行」那句话由面板的就绪判断单独说。两头都没有才退回裸命令
+        # (那一档面板写的是"装好之后在通道设置里填它的完整路径")。
+        exe = binary.strip() or 'feedgrab'
+    return (f'FEEDGRAB_DATA_DIR={shlex.quote(data_dir)} '
+            f'{shlex.quote(exe)} login twitter')
 
 
 def find_binary(explicit: str = '') -> str:
@@ -114,8 +137,20 @@ def _entry(meta: dict, body: str, handle: str) -> dict | None:
 
 
 def _read_output(folder: Path, handle: str) -> list[dict]:
+    """把这一轮的产物目录**整棵**读下来。
+
+    原来按 `X/*.md` 只扫顶层,而账号推文落在 `X/status_author/<显示名>/` 里
+    (见上面那段注释),于是**抓到的推文一条也读不到**:`harvest` 把这个空结果
+    当成功存下来、随后把产物目录删掉,面板上是「已同步 · 0 条」而知识库里什么
+    都没有 —— 错得最狠的一种,因为它长得和"这个号今天没发推"一模一样
+    (2026-10-08 审查实测,产物落在 `X/status_author/Example Person/` 下)。
+
+    递归不放松归属:这个目录是本轮为这个账号新建的(`harvest` 里先
+    `rmtree` 再 `mkdir`),而真正的判据是 `_entry` 按推文 URL 里的 handle 过滤,
+    跟文件在哪一层没有关系。顺带也不再漏掉顶层那些产物(单条推文/长文线程)。
+    """
     entries, broken = [], 0
-    for path in sorted(folder.glob('*.md')):
+    for path in sorted(folder.rglob('*.md')):
         try:
             meta, body = parse_frontmatter(path.read_text(encoding='utf-8'))
         except (OSError, UnicodeDecodeError, ValueError):
@@ -191,7 +226,7 @@ def harvest(jobs: list[tuple[str, str]], *, binary: str = '', data_dir: str,
                           - timedelta(days=FIRST_DAYS)).strftime('%Y-%m-%d')
         try:
             _run(exe, handle, _env(out, data_dir, since[:10]), base)
-            entries = _read_output(out / _PLATFORM_DIR, handle)
+            entries = _read_output(out, handle)
             results[handle] = {'entries': entries, 'error': '',
                                'watermark': _newest(entries, water)}
         except FeedgrabError as e:
