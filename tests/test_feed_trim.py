@@ -4,6 +4,7 @@
 不许连带挖空另一个订阅、中途失败重跑能收敛、清理期间起跑的同步不能把刚删掉
 的旧文写回来。它和**索引**之间的互斥在 `test_index_lock.py`。
 """
+import io
 import json
 import sqlite3
 import subprocess
@@ -12,7 +13,7 @@ import tarfile
 import textwrap
 import unittest
 import urllib.error
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -579,6 +580,75 @@ class PendingTranslationTests(TrimFixture, unittest.TestCase):
         self.assertEqual('', self.floor_of(s))
         # 计划留着 —— 改对参数还能接着续,这是拒绝与「删一半」的分界。
         self.assertEqual(1, len(trim._plans(s['id'])))
+
+    def test_resuming_by_the_printed_command_keeps_the_translated_article(self):
+        """照工具自己给出的恢复提示续跑,**不许**再按别的口径清一轮。
+
+        `cmd_scan` 的提示是 `run --source N --yes`(不带筛选开关),而续跑原来
+        只是这一趟的第一步:续完那份 `--pending-translation` 的计划之后,它接着
+        按**默认的日期口径**新建第二份计划再删一轮 —— 已经译好、还读得到搜得到
+        的旧文章连 feeds 行、中文 md、`documents` 和全文索引一起没了,
+        `history_floor` 也被钉上,而命令以 0 退出(2026-10-08 第 2 轮审查实测,
+        独立复现三次;恢复时手动补上 `--pending-translation` 则只删该删的那篇)。
+
+        判据是**已译那篇四处都还在、下界还是空的、没有第二个备份目录**,不是
+        提示里有没有那个开关:光把提示写全,续完之后那一轮照样会开。
+        """
+        s = self.legacy(self.sub())
+        queued = self.seed(s, self.english('https://example.org/queued'))
+        kept = self.seed(s, self.english('https://example.org/translated'))
+        # 已经译好、导出成中文的那一篇:它不在翻译队列里,这一趟压根不该碰它。
+        self.mark('https://example.org/translated', translated_at='2026-10-08 04:00',
+                  title_zh='已经译好的历史文章', body_zh='已经译好的中文正文。',
+                  exported_hash='')
+        sync.export('rss')
+        self.assertIn('已经译好的中文正文',
+                      (self.vault / kept['path']).read_text(encoding='utf-8'))
+        # 备份和 progress.json 落盘之后、任何删除之前中断(脚本明确支持的恢复场景)。
+        with patch.object(trim, '_apply', side_effect=OSError('备份之后 I/O 中断')):
+            with self.assertRaises(OSError):
+                trim.cmd_run(self.args(s, pending_translation=True))
+        plans = trim._plans(s['id'])
+        self.assertEqual(['pending-translation'], [pl['mode'] for _, pl in plans])
+        before = self.state(kept)
+
+        # 照提示恢复 —— 提示里没有 `--pending-translation`,所以这里也不给。
+        self.assertEqual(0, trim.cmd_run(self.args(s)))
+        self.assertFalse(trim._plans(s['id']))                  # 那份计划做完了
+        gone = self.state(queued)
+        self.assertEqual((False, False, 0), (gone['feed_row'], gone['file'],
+                                             gone['documents']))
+        # 已经译好的那一篇:feeds 行、中文文件、documents 一处都没少,还读得到。
+        for field in ('feed_row', 'memberships', 'exported', 'file', 'documents'):
+            self.assertEqual(before[field], self.state(kept)[field], field)
+        self.assertEqual((True, True, 1),
+                         (before['feed_row'], before['file'], before['documents']))
+        self.assertIn('已经译好的中文正文',
+                      (self.vault / kept['path']).read_text(encoding='utf-8'))
+        self.assertEqual(1, self.state(kept)['searchable'])     # 它那条检索命中还在
+        # 下界没被钉上、也没有第二个备份目录 —— 第二轮日期清理压根没开。
+        self.assertEqual('', self.floor_of(s))
+        self.assertEqual(1, len(list((self.root / 'backups').glob('feedtrim-*'))))
+
+    def test_the_resume_hint_says_which_filter_that_plan_used(self):
+        """没做完的那份计划是按什么筛的,`scan` 得写出来。
+
+        续跑按计划里记着的 keys/paths 走、不看筛选开关,所以提示里不带
+        `--pending-translation` 是对的;但「这份计划当初筛的是翻译队列」是人
+        判断「要不要续」的依据,不该只剩一个备份目录路径。
+        """
+        s = self.legacy(self.sub())
+        self.seed(s, self.english('https://example.org/queued'))
+        with patch.object(trim, '_apply', side_effect=OSError('备份之后 I/O 中断')):
+            with self.assertRaises(OSError):
+                trim.cmd_run(self.args(s, pending_translation=True))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(0, trim.cmd_scan(self.args(s)))
+        hint = [ln for ln in out.getvalue().splitlines() if ln.startswith('!!')]
+        self.assertEqual(1, len(hint))
+        self.assertIn('翻译队列', hint[0])
+        self.assertIn(f"run --source {s['id']} --yes", hint[0])
 
 
 if __name__ == '__main__':
