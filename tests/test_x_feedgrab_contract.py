@@ -21,8 +21,9 @@ import json
 import shlex
 import subprocess
 import sys
+import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -30,12 +31,18 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb.collectors import FetchScope
-from kb.feeds import registry as reg, sync, x_channels
+from kb.feeds import registry as reg, sync, x_channels, x_feedgrab
 from tests.test_x_channels import ChannelBase
 
-TODAY = datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat()
+SHANGHAI = ZoneInfo('Asia/Shanghai')
+# 样本日期跟着今天走:新订阅只收最近 `reg.HISTORY_DAYS` 天(见 `sync._within_history`),
+# 写死一个日期的话过几天红的是一堆跟这条通道毫无关系的用例。
+TODAY = datetime.now(SHANGHAI).date().isoformat()
+YESTERDAY = (datetime.now(SHANGHAI).date() - timedelta(days=1)).isoformat()
 
-# 假 feedgrab 的全部职责:照上游的规则把 PLAN 里那几条推文写到 OUTPUT_DIR 下。
+# 假 feedgrab 的全部职责:照上游的规则把 PLAN 里那几条推文写到 OUTPUT_DIR 下,
+# 并照它的样子落一份**批量记录**、打一行收尾摘要 —— 「这一批里哪几条没抓下来」
+# 外部程序只在这两处说,退出码一律是 0(见 `x_feedgrab._incomplete`)。
 _CLI_SRC = '''#!@@PY@@
 # -*- coding: utf-8 -*-
 import json
@@ -73,10 +80,26 @@ def main():
         return 1
     base = pathlib.Path(os.environ.get('OBSIDIAN_VAULT')
                         or os.environ['OUTPUT_DIR']) / 'X'
-    # 上游自己的去重索引和推文躺在同一棵树里(不是 .md)。
+    # 上游自己的去重索引和推文躺在同一棵树里:它是个 {item_id: url} 的字典,
+    # 不是批量记录(`_batch_failures` 那道形状判据正好把它排除掉)。
     (base / 'index').mkdir(parents=True, exist_ok=True)
     (base / 'index' / 'item_id_url.json').write_text('{}', encoding='utf-8')
+    # 上游按 `X_USER_TWEETS_SINCE` 把更早的推文整段丢掉(它那句 stop_pagination)。
+    since = os.environ.get('X_USER_TWEETS_SINCE', '')
+    rows, fetched, failed = [], 0, 0
     for tweet in spec['tweets']:
+        if since and tweet['published'][:10] < since:
+            continue
+        bad = bool(tweet.get('fails'))
+        rows.append({'url': tweet['url'], 'published': tweet['published'],
+                     'status': 'failed' if bad else 'fetched',
+                     'error': 'boom' if bad else ''})
+        if bad:
+            # 单条失败只记一笔日志就继续:整批不抛异常(上游那个 except 分支)。
+            failed += 1
+            sys.stderr.write('[UserTweets] [1/1] 失败: @%s - boom\\n' % handle)
+            continue
+        fetched += 1
         folder = base
         category = tweet.get('category', 'status_author/' + spec['display'])
         for part in [p for p in category.split('/') if p]:
@@ -84,6 +107,17 @@ def main():
         folder.mkdir(parents=True, exist_ok=True)
         name = '%s_%s：%s.md' % (spec['display'], tweet['published'], tweet['title'])
         (folder / name).write_text(markdown(tweet, spec['display']), encoding='utf-8')
+    if spec.get('record', True):
+        record = base / 'index' / ('status_%s_%s.json' % (handle, os.getpid()))
+        record.write_text(json.dumps(
+            {'fetched_at': '', 'screen_name': handle, 'since': since,
+             'total': len(rows), 'tweets': rows}, ensure_ascii=False),
+            encoding='utf-8')
+    if spec.get('summary', True):
+        sys.stdout.write('\\n\u2705 账号推文批量抓取完成\\n'
+                         '总数: %d, 成功: %d, 跳过: 0, 失败: %d\\n'
+                         '批量记录: index/status_...json\\n'
+                         % (len(rows), fetched, failed))
     return 0
 
 
@@ -126,6 +160,10 @@ class FeedgrabRound(ChannelBase):
 
     def rows(self, source_id):
         return reg.items('social', source_id)
+
+    def water(self, source_id):
+        return x_channels.watermark(reg.subscription('social', source_id),
+                                    x_channels.FEEDGRAB)
 
 
 class RealOutputTreeTests(FeedgrabRound):
@@ -212,6 +250,149 @@ class RealOutputTreeTests(FeedgrabRound):
         summary = self.collect()
         self.assertEqual(1, len(summary['errors']))
         self.assertEqual(0, self.rows(s['id'])['total'])
+
+
+class PartialBatchTests(FeedgrabRound):
+    """**退出码 0 不等于这一批抓全了。**
+
+    上游逐条抓,单条失败只往批量记录里记一笔 `status: failed` 就继续
+    (`fetchers/twitter_user_tweets.py` 的 except 分支),收尾把计数包成一句普通
+    正文(`reader.py`),CLI 的账号主页分支 `print` 完直接 return —— 只有抛异常
+    才 `sys.exit(1)`。所以"进程退出码为 0"证明不了这一批没漏。
+
+    不认出这一档就是**静默丢数据**:水位一推到"这一轮抓到的最新那天",下一轮的
+    `X_USER_TWEETS_SINCE` 就是它,上游按这个下界把更早的推文整段丢掉 —— 失败
+    那几条比旧水位新、又比新水位老,从此任何一轮增量都选不到。审查实测:
+    `added=1`、`errors=[]`、`partial=[]`、水位从 10-05 跳到 10-08,外部故障解除
+    后再点同步 `added=0`,那条推文再也回不来(2026-10-08 第 2 轮审查)。
+    """
+
+    def plan(self, *, older_fails=True, **spec):
+        """同一个号两条推文:更早那条按需失败,更新那条照旧成功。"""
+        return {'example': {'display': 'Example Person', 'tweets': [
+            tweet(id_='10000', title='更早那条', body='前一天的观点。',
+                  published=YESTERDAY, fails=older_fails),
+            tweet(id_='10001', title='更新那条', body='今天的观点。'),
+        ]} | spec}
+
+    def start_from(self, days=4):
+        """先摆一个旧水位,这样"推进了没有"才看得出来。"""
+        s = self.sub()
+        x_channels.save_watermark(s['id'], x_channels.FEEDGRAB, self.day(days))
+        return s
+
+    def day(self, back):
+        return (datetime.now(SHANGHAI).date() - timedelta(days=back)).isoformat()
+
+    def test_a_partial_batch_keeps_the_old_watermark_and_says_so(self):
+        s = self.start_from()
+        self.cli(**self.plan())
+        summary = self.collect()
+        # 后果先断言:水位一步都不许动 —— 动了那条失败的推文就永久选不到了。
+        self.assertEqual(self.day(4), self.water(s['id']))
+        # 抓到的照旧入库,这不是一次失败(不记 errors、不进退避)。
+        self.assertEqual(1, summary['added'])
+        self.assertEqual([], summary['errors'])
+        # 但也不是一次完整的同步:面板上要看得见(「部分同步」那一档)。
+        self.assertEqual(['Example'], [p['title'] for p in summary['partial']])
+        self.assertIn('没抓下来', summary['partial'][0]['reason'])
+        # 面板那条「部分同步」读的是订阅行上的 `last_note`(`sources.js` 的状态链
+        # 在 `last_success` 之前先看它),所以这里连端点一起验 —— 只验库里有那一行
+        # 的话,它发没发到浏览器还是没人管。
+        page = self.client.get('/api/intake/social').json()
+        rows = {row['name']: row for row in page['sources']}
+        self.assertIn('没抓下来', rows['Example']['last_note'])
+        self.assertEqual('', rows['Example']['last_error'])
+
+    def test_the_tweet_that_failed_comes_back_once_the_failure_clears(self):
+        """审查那份证据的反面:解除外部故障再同步一次,漏掉那条要补回来。
+
+        靠的就是上一条留着的旧水位 —— 推进了的话下一轮的下界已经越过它。
+        """
+        s = self.start_from()
+        self.cli(**self.plan())
+        self.collect()
+        self.cli(**self.plan(older_fails=False))      # 外部故障解除
+        again = self.collect()
+        self.assertEqual(1, again['added'])           # 补回更早那条
+        self.assertEqual([], again['partial'])
+        urls = sorted(r['url'] for r in self.rows(s['id'])['items'])
+        self.assertEqual(['https://x.com/Example/status/10000',
+                          'https://x.com/Example/status/10001'], urls)
+        # 更新那条重叠重抓,但 `put_items` 按 URL 去重,一条都不会重复。
+        self.assertEqual(2, self.rows(s['id'])['total'])
+        # 这一轮读全了:水位跟到最新那天,提示也要清掉(否则留下过期的「部分同步」)。
+        self.assertEqual(TODAY, self.water(s['id']))
+        self.assertEqual('', reg.subscription('social', s['id'])['last_note'])
+
+    def test_a_complete_batch_still_advances_the_watermark(self):
+        """反过来钉一边:没有失败就该照常推进 —— 一律报「部分同步」的实现
+        会把水位永久冻住,每一轮都重抓整个窗口,而面板上天天挂着假故障。"""
+        s = self.start_from()
+        self.cli(**self.plan(older_fails=False))
+        summary = self.collect()
+        self.assertEqual(TODAY, self.water(s['id']))
+        self.assertEqual([], summary['partial'])
+        self.assertEqual(2, summary['added'])
+
+    def test_the_batch_record_alone_is_enough_to_see_the_gap(self):
+        """摘要那行一个字都没打时,证据只剩上游落下的批量记录。
+
+        顺带钉住另一件事:日志里那行「失败: @Example - boom」**不算**证据 ——
+        收尾摘要那道判据要是写成裸 `失败:`,它会每一轮都误报,把水位永久冻住。
+        """
+        s = self.start_from()
+        self.cli(**self.plan(summary=False))
+        summary = self.collect()
+        self.assertEqual(self.day(4), self.water(s['id']))
+        self.assertEqual(1, len(summary['partial']))
+
+    def test_the_summary_line_alone_is_enough_to_see_the_gap(self):
+        """反过来:批量记录换了位置/改了名字时,证据只剩那行摘要。
+
+        两道判据不是同一份实现的两种写法,所以各自单独成立。
+        """
+        s = self.start_from()
+        self.cli(**self.plan(record=False))
+        summary = self.collect()
+        self.assertEqual(self.day(4), self.water(s['id']))
+        self.assertEqual(1, len(summary['partial']))
+
+
+class BatchRecordShapeTests(unittest.TestCase):
+    """批量记录认形状不认路径,而且「跳过」不是「失败」。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.folder = Path(self.temp.name)
+
+    def write(self, name, payload):
+        path = self.folder / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
+
+    def test_the_dedup_index_is_not_mistaken_for_a_batch_record(self):
+        """`index/item_id_url.json` 是个 {item_id: url} 的字典,躺在同一棵树里。"""
+        self.write('X/index/item_id_url.json', {'abc123': 'https://x.com/a/status/1'})
+        self.assertEqual(0, x_feedgrab._batch_failures(self.folder))
+
+    def test_skipped_is_not_a_failure_but_an_unknown_status_is(self):
+        """`skipped` 是上游自己按去重/互动阈值跳的,那是它的决定、不是漏;
+        没见过的状态一律当成漏 —— 漏报是静默丢数据,误报只多一次重叠重抓。"""
+        self.write('X/index/status_a_1.json', {'tweets': [
+            {'status': 'fetched'}, {'status': 'skipped'}]})
+        self.assertEqual(0, x_feedgrab._batch_failures(self.folder))
+        self.write('X/index/status_a_2.json', {'tweets': [{'status': 'wat'}]})
+        self.assertEqual(1, x_feedgrab._batch_failures(self.folder))
+
+    def test_both_writers_count_and_broken_files_are_ignored(self):
+        """同一份记录有两个写入方,文件名前缀还不一样(`status_` / `api_status_`)
+        —— 按名字取就漏掉一半。读不出来的文件不算证据,也不许把整轮带掉。"""
+        self.write('X/index/status_a_1.json', {'tweets': [{'status': 'failed'}]})
+        self.write('X/index/api_status_a_1.json', {'tweets': [{'status': 'failed'}]})
+        (self.folder / 'X/index/broken.json').write_text('{not json', encoding='utf-8')
+        self.assertEqual(2, x_feedgrab._batch_failures(self.folder))
 
 
 class LoginCommandTests(ChannelBase):

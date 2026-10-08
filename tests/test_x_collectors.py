@@ -529,10 +529,16 @@ class FeedgrabChannelTests(unittest.TestCase):
         加一个"包含起点"的开关:后者修不到这条通道。
         """
         seen = {}
+
+        def run(exe, handle, env, base):
+            seen.update(env)
+            # `_run` 的契约是把 CLI 的输出交回来(完整性判据要读它),所以这个桩
+            # 也得给一句真实形状的收尾摘要 —— 返回 None 的桩测的就不是同一条路。
+            return '总数: 0, 成功: 0, 跳过: 0, 失败: 0'
+
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(x_feedgrab, 'find_binary', lambda b: '/usr/bin/true'), \
-                    patch.object(x_feedgrab, '_run',
-                                 lambda exe, h, env, base: seen.update(env)), \
+                    patch.object(x_feedgrab, '_run', run), \
                     patch.object(x_feedgrab, '_read_output', lambda *a: []):
                 x_feedgrab.harvest([('example', x_channels.since_floor('2026-10-05'))],
                                    data_dir=f'{tmp}/sessions', workdir=f'{tmp}/work')

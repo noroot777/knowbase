@@ -9,6 +9,10 @@
 
 和 `collector/` 那个采集器是同一个模式(kb 只知道一条命令行),理由也一样。
 
+**退出码 0 不代表这一批抓全了**:上游单条失败只记一笔状态就继续往下跑。没认出
+这一档就是静默丢数据 —— 水位会推过那几条漏掉的推文,从此谁也捞不回来。判据和
+后果写在 `_incomplete` / `_batch_failures`。
+
 **环境变量是白名单 + 显式清场,不是继承**。`OBSIDIAN_VAULT` 必须清掉:
 feedgrab 的输出目录优先认它、其次才是 `OUTPUT_DIR`,而这台机器上它指的正是
 知识库那个 vault —— 不清掉,抓来的推文会被 feedgrab 直接写进 vault/X/,绕过
@@ -18,7 +22,9 @@ feed_items、翻译和导出整条链,表现是 vault 里凭空多出一批谁�
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -48,6 +54,13 @@ _PASS_ENV = ('PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR', 'SSL_CERT_FILE',
 # 没登录时它的报错里会有这些字样 —— 这一档要翻成"去跑这条命令",
 # 而不是把一行 CLI 报错原样糊到面板上。
 _LOGIN_HINTS = ('login twitter', 'Twitter Cookie', '未找到有效 Cookie', 'cookie')
+# 上游批量记录里"这一条没问题"的两种状态(`fetched` 抓到了 / `skipped` 它自己
+# 按去重或互动阈值跳的)。别的一律当成没抓下来 —— 见 `_batch_failures`。
+_OK_STATUS = ('fetched', 'skipped')
+# 收尾摘要那一行的形状:`总数: 2, 成功: 1, 跳过: 0, 失败: 1`。要求带上「成功」
+# 那半截是为了不被日志里的「失败: @某人 - 原因」「补充抓取失败: …」蒙到 ——
+# 误报会把水位永久冻住,那比漏报还难看出来。
+_SUMMARY_FAILED = re.compile(r'成功[:：]\s*\d+[^\n]*?失败[:：]\s*(\d+)')
 
 
 class FeedgrabError(RuntimeError):
@@ -163,6 +176,74 @@ def _read_output(folder: Path, handle: str) -> list[dict]:
     return entries
 
 
+def _batch_failures(folder: Path) -> int:
+    """这一批有几条没抓下来。证据是上游自己落的**批量记录**。
+
+    `fetch_user_tweets` 逐条抓,**单条异常只记一笔 `status: failed` 就继续**
+    (`fetchers/twitter_user_tweets.py` 的 except 分支),收尾把整份清单写进
+    `{OUTPUT_DIR}/X/index/status_<号>_*.json`(`_save_batch_record` →
+    `utils/dedup.get_index_path().parent`)—— 就在我们这一轮为这个账号新建的那个
+    产物目录里面,所以里面的每一条都是这一次的,不会混进别轮别号。
+
+    **认形状不认路径**(`rglob('*.json')` + 「有一个 tweets 列表」):同一份记录
+    有两个写入方,文件名前缀还不一样(GraphQL 那条是 `status_`、TwitterAPI.io
+    那条是 `api_status_`),按名字取等于漏掉一半。去重索引
+    (`index/item_id_url.json`)是个 `{item_id: url}` 的字典,这道形状判据正好
+    把它排除掉。
+
+    **只有 `fetched`/`skipped` 算没问题**,别的状态一律当成没抓下来:漏报是静默
+    丢数据(见 `_incomplete`),误报的代价只是下一轮重叠重抓 + 面板上一句
+    「部分同步」。两个方向的代价差着一个量级,所以宁可多报。
+    """
+    failed = 0
+    for path in sorted(folder.rglob('*.json')):
+        try:
+            payload = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        rows = payload.get('tweets') if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            continue
+        failed += sum(1 for row in rows if isinstance(row, dict)
+                      and str(row.get('status') or '') not in _OK_STATUS)
+    return failed
+
+
+def _incomplete(output: str, folder: Path) -> str:
+    """「这一批抓全了吗」。返回没读完的原因,全抓到了就是空串。
+
+    **退出码 0 不等于全成功**:上游单条失败只往批量记录里记一笔就继续,收尾
+    把计数包成一句普通正文(`reader.py` 的 `summary`),CLI 那条账号主页分支
+    `print` 完直接 return —— 只有抛异常才 `sys.exit(1)`(`cli.py`)。所以
+    `_run` 不报错的那一轮里完全可能有几条没抓下来。
+
+    **而这一档不认出来就是静默丢数据**:水位推到"这一轮抓到的最新那天",下一轮
+    的 `X_USER_TWEETS_SINCE` 就是它,上游按这个下界把更早的推文整段丢掉
+    (`stop_pagination`)—— 失败那几条比旧水位新、又比新水位老,**从此任何一轮
+    增量都选不到**。审查实测:更早一天那条临时失败、更新那条成功,面板报
+    「已同步 · 新增 1 条」、`errors` 和 `partial` 都是空的、水位从 10-05 跳到
+    10-08;外部故障解除之后再点同步,`added=0`,那条推文再也回不来
+    (2026-10-08 第 2 轮审查)。
+
+    两道判据,谁命中都算漏:①批量记录里的逐条状态(`_batch_failures`);
+    ②收尾摘要那行文本里的「失败: N」。它们**不是同一份实现的两种写法** ——
+    记录换了位置/改了文件名时还有文本兜着,摘要改了措辞时还有记录兜着。而且
+    ②自己就有一类独占的证据:上游那条「补充抓取」(UserTweets 没够到下界时用搜索
+    往回补)**只把计数并进摘要,不往批量记录里写**(`tweet_list` 只在它自己那个
+    循环里追加,`_save_batch_record` 排在补充抓取之后),所以补充抓取里逐条失败的
+    那些,只有摘要数得出来。
+
+    **这里不管「补充抓取整段失败/没开」那一档**:它是另一个形状 —— 上游
+    `logger.warning('补充抓取失败: …')` 之后 `failed` 一个都不加,缺口在
+    `since` 和它实际够到的最早那天之间,而这两个数我们在摘要里都看不到。要认它
+    就得按那句警告的措辞判,而它一旦是长期坏的(没浏览器、没 API key),水位就
+    **永久**冻在原处、每一轮重抓整个窗口 —— 那个取舍得单独算,不在本轮的射程里。
+    """
+    failed = _batch_failures(folder) or (
+        int(hit.group(1)) if (hit := _SUMMARY_FAILED.search(output)) else 0)
+    return f'feedgrab 这一批有 {failed} 条没抓下来' if failed else ''
+
+
 def _run(binary: str, handle: str, env: dict, cwd: Path) -> str:
     """跑一次抓取。返回它的输出(给失败时的文案用)。"""
     try:
@@ -189,7 +270,8 @@ def harvest(jobs: list[tuple[str, str]], *, binary: str = '', data_dir: str,
     """逐个账号跑 feedgrab,返回和浏览器通道同形状的结果。
 
     jobs:  [(handle, 水位 'YYYY-MM-DD' 或空串)]
-    返回:  {handle: {'entries': [...], 'error': '', 'watermark': 'YYYY-MM-DD'}}
+    返回:  {handle: {'entries': [...], 'error': '', 'incomplete': '没抓全的原因',
+                     'watermark': 'YYYY-MM-DD'}}
     """
     results: dict[str, dict] = {}
     if not jobs:
@@ -225,10 +307,15 @@ def harvest(jobs: list[tuple[str, str]], *, binary: str = '', data_dir: str,
         since = water or (datetime.now(timezone.utc)
                           - timedelta(days=FIRST_DAYS)).strftime('%Y-%m-%d')
         try:
-            _run(exe, handle, _env(out, data_dir, since[:10]), base)
+            output = _run(exe, handle, _env(out, data_dir, since[:10]), base)
             entries = _read_output(out, handle)
-            results[handle] = {'entries': entries, 'error': '',
-                               'watermark': _newest(entries, water)}
+            # **没抓全就不推进水位**(口径同浏览器通道那句 `water if incomplete`):
+            # 抓到的照旧入库,但下一轮的下界要留在原处,否则漏掉的那几条从此
+            # 任何一轮增量都选不到(见 `_incomplete`)。重叠重抓是安全的:
+            # `put_items` 按 `sha256(kind:url)` + `ON CONFLICT DO NOTHING` 去重。
+            note = _incomplete(output, out)
+            results[handle] = {'entries': entries, 'error': '', 'incomplete': note,
+                               'watermark': water if note else _newest(entries, water)}
         except FeedgrabError as e:
             results[handle] = {'entries': [], 'error': str(e)}
         finally:
