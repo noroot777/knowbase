@@ -85,7 +85,8 @@ class TrimFixture:
         # 形参叫 row 而不是 source:`source` 是 Namespace 里那个字段名,用例要能
         # `self.args(s, source='Only One')` 覆盖它(按名字查那几条就这么写)。
         base = dict(source=str(row['id']), floor=None, yes=True,
-                    allow_shared=False, allow_favorites=False, verbose=False)
+                    allow_shared=False, allow_favorites=False, verbose=False,
+                    pending_translation=False)
         return argparse.Namespace(**(base | over))
 
     def state(self, item, source=None):
