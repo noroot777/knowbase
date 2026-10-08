@@ -11,6 +11,14 @@ HN Top 100 Blogs 499 条。这些旧文逐批翻译、逐批重新导出,每重�
     scripts/feed_trim_history.py scan                # 只读:每个订阅会清掉多少
     scripts/feed_trim_history.py run --source 60     # 真清(先备份)
 
+另一条筛选口径 `--pending-translation`:清掉某个源**还排在翻译队列里**的条目,
+给服务已经停掉的源用 —— 内容不会再更新,译了也没人看,可它们每一轮都占着
+`translate.MAX_ITEMS` 的额度,把还活着的源挤到后面去。这一路**不钉
+`history_floor`**(筛的维度不是日期)。
+
+    scripts/feed_trim_history.py scan --pending-translation
+    scripts/feed_trim_history.py run --source 52 --pending-translation --yes
+
 **清理同时会给这个订阅钉上 `history_floor`**,否则下一次同步按老样子(空下界)
 把整个存档原样再拉一遍,这一趟白做。没有旧文可清时同样要钉 —— 见 `cmd_run`。
 
@@ -80,6 +88,24 @@ def planned_floor(source: dict) -> str:
 def below_floor(rows: list[sqlite3.Row], floor: str) -> list[dict]:
     """低于下界的那些。没有发布时间的照留 —— 和 `sync._within_history` 同一个口径。"""
     return [dict(r) for r in rows if r['published'] and r['published'][:10] < floor]
+
+
+def pending_translation(rows: list[sqlite3.Row]) -> list[dict]:
+    """还排在翻译队列里的那些 —— `--pending-translation` 用这个口径。
+
+    判据直接取 `translate.queued_sql()`,不在这里另写一遍:两处各判各的话,
+    清掉的和翻译那头还在排队的不是同一批,库里会留下一段谁也说不清的灰色地带
+    (`sync._export` 的四档统计、来源面板那三档读的都是那一份)。
+
+    用在服务已经停掉的源上:内容不会再更新,排着的那些译了也没人看,可它们
+    每一轮都占着 `MAX_ITEMS` 的额度,把还活着的源挤到后面去。
+    """
+    from kb.feeds import translate
+    cond, extra = translate.queued_sql()
+    tries_cap = extra[0]
+    return [dict(r) for r in rows
+            if r['lang'] == 'en' and not r['translated_at']
+            and r['translate_tries'] < tries_cap]
 
 
 def find_source(conn, token: str) -> tuple[dict | None, str]:
@@ -231,8 +257,13 @@ def _cut_feeds(plan: dict) -> None:
     keys, source_id = plan['keys'], plan['subscription_id']
     with reg.db() as c:
         c.execute('BEGIN IMMEDIATE')
-        c.execute('UPDATE subscriptions SET history_floor=? WHERE id=?',
-                  (plan['floor'], source_id))
+        # 下界只属于"清历史存量"那条路。`--pending-translation` 筛的维度压根
+        # 不是日期,顺手钉一个下界就是做了没被要求的事 —— 这个源将来真要重新
+        # 启用时,那条下界会把它自己的存档永久挡在门外。老计划没有 mode 字段,
+        # 照旧走钉下界那一路。
+        if plan.get('mode') != 'pending-translation':
+            c.execute('UPDATE subscriptions SET history_floor=? WHERE id=?',
+                      (plan['floor'], source_id))
         if keys:
             ph = ','.join('?' * len(keys))
             c.execute(f'DELETE FROM subscription_items WHERE item_key IN ({ph}) '
@@ -277,7 +308,9 @@ def _apply(out: Path, plan: dict, allow_favorites: bool = False) -> None:
     if not plan.get('feeds'):
         _cut_feeds(plan)
         _mark(out, plan, 'feeds')
-        print(f"  feeds.db 已清,history_floor={plan['floor']}")
+        # 新模式不钉下界,就别在这里报一个没发生的改动。
+        print('  feeds.db 已清' + ('' if plan.get('mode') == 'pending-translation'
+                                  else f",history_floor={plan['floor']}"))
     # 还有 feed_items 行指着的路径一律跳过:计划是动手之前算的,这一道是兜底。
     dead = [p for p in plan['paths'] if p not in _live_paths(plan['paths'])]
     from kb import store
@@ -347,12 +380,18 @@ def cmd_scan(args) -> int:
             rows = _items(c, s['id'])
             if not rows:
                 continue
-            floor = planned_floor(s)
-            cut = below_floor(rows, floor)
-            mark = '' if s['history_floor'] else '  (还没钉下界)'
-            print(f"[{s['id']:>3}] {s['name'][:28]:30} {len(rows):>4} 条 "
-                  f"最早 {rows[0]['published'][:10] or '—'}  下界 {floor}  "
-                  f"可清 {len(cut)}{mark}")
+            if args.pending_translation:
+                cut = pending_translation(rows)
+                print(f"[{s['id']:>3}] {s['name'][:28]:30} {len(rows):>4} 条 "
+                      f"最早 {rows[0]['published'][:10] or '—'}  "
+                      f"还排在翻译队列里 {len(cut)}")
+            else:
+                floor = planned_floor(s)
+                cut = below_floor(rows, floor)
+                mark = '' if s['history_floor'] else '  (还没钉下界)'
+                print(f"[{s['id']:>3}] {s['name'][:28]:30} {len(rows):>4} 条 "
+                      f"最早 {rows[0]['published'][:10] or '—'}  下界 {floor}  "
+                      f"可清 {len(cut)}{mark}")
             if cut and args.verbose:
                 shared = len(_shared_keys(c, [r['key'] for r in cut], s['id']))
                 print(f"       待清区间 {cut[0]['published'][:16]} ~ {cut[-1]['published'][:16]}"
@@ -423,15 +462,26 @@ def _run_locked(args, override: str) -> int:
         with reg.db() as c:
             source = dict(c.execute('SELECT * FROM subscriptions WHERE id=?',
                                     (source['id'],)).fetchone())
+    mode = 'pending-translation' if args.pending_translation else ''
+    if mode and args.floor:
+        print('--pending-translation 筛的是翻译队列,不是日期;这两个开关不能一起用。',
+              file=sys.stderr)
+        return 2
     try:
-        floor = override or planned_floor(source)
+        # 新模式下这一趟跟下界无关,压根不算它:算出来只会出现在打印和计划里,
+        # 让人以为钉了一个。真正"不动它"那一下在 `_cut_feeds` 里。
+        floor = '' if mode else (override or planned_floor(source))
     except ValueError as e:
         print(e, file=sys.stderr)
         return 2
     with reg.db() as c:
-        cut = below_floor(_items(c, source['id']), floor)
+        rows = _items(c, source['id'])
+        cut = pending_translation(rows) if mode else below_floor(rows, floor)
         keys = [r['key'] for r in cut]
         shared = _shared_keys(c, keys, source['id'])
+    if not cut and mode:
+        print(f"[{source['id']}] {source['name']}:翻译队列里没有这个源的条目,无事可做。")
+        return 0
     if not cut:
         if source['history_floor'][:10] == floor:
             print(f"[{source['id']}] {source['name']}:下界 {floor} 之前没有条目,无事可做。")
@@ -467,7 +517,9 @@ def _run_locked(args, override: str) -> int:
         print(f'这批里有 {len(fav)} 篇在收藏里:\n  ' + '\n  '.join(fav[:10])
               + '\n收藏是用户显式留下的,确认要删加 --allow-favorites。', file=sys.stderr)
         return 2
-    print(f"[{source['id']}] {source['name']}:下界 {floor},清掉 {len(cut)} 条"
+    scope = ('还排在翻译队列里的 ' + str(len(cut)) + ' 条') if mode \
+        else f'下界 {floor},清掉 {len(cut)} 条'
+    print(f"[{source['id']}] {source['name']}:{scope}"
           f"({cut[0]['published'][:10]} ~ {cut[-1]['published'][:10]});"
           f"其中 {len(shared)} 条被共享、只摘归属,{len(paths)} 篇连文件和索引一起删")
     if not args.yes:
@@ -476,7 +528,7 @@ def _run_locked(args, override: str) -> int:
 
     out = _backup(source, cut, paths, floor)
     plan = {'subscription_id': source['id'], 'name': source['name'], 'floor': floor,
-            'keys': keys, 'paths': paths}
+            'keys': keys, 'paths': paths, 'mode': mode}
     _mark(out, plan, 'planned')
     print(f'  备份 → {out}')
     try:
@@ -497,10 +549,14 @@ def main() -> int:
     sub = ap.add_subparsers(dest='cmd', required=True)
     s = sub.add_parser('scan', help='只读:每个订阅在下界之前压着多少条')
     s.add_argument('-v', '--verbose', action='store_true')
+    s.add_argument('--pending-translation', action='store_true',
+                   help='改为按「还排在翻译队列里」统计')
     s.set_defaults(func=cmd_scan)
     r = sub.add_parser('run', help='清理一个订阅(先备份);有没做完的先续完')
     r.add_argument('--source', required=True, help='订阅 id 或名字')
     r.add_argument('--floor', help='覆盖下界(YYYY-MM-DD),缺省按「创建日 - HISTORY_DAYS」')
+    r.add_argument('--pending-translation', action='store_true',
+                   help='改为清掉「还排在翻译队列里」的条目(源已停服时用),不动 history_floor')
     r.add_argument('--yes', action='store_true', help='确认执行')
     r.add_argument('--allow-shared', action='store_true', help='条目被别的订阅共享时照样摘归属')
     r.add_argument('--allow-favorites', action='store_true', help='命中收藏时照删')

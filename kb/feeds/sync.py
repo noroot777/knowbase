@@ -347,6 +347,29 @@ def _kept_meta(path: Path) -> dict:
     return {k: v for k, v in meta.items() if k not in _OWNED_META}
 
 
+def _new_failures(conn, queue: str, cond: str, args: list, extra: list,
+                  keys: list[str]) -> tuple[int, int]:
+    """这一轮刚失败、而且**还排在队列里**的那些,按"入没入过库"分两档。
+
+    返回 `(未入库的, 已入库的)`。`keys` 是 `translate.translate_pending` 这一轮
+    真失败的条目;空列表(比如 `export` 被单独调用、这一轮压根没跑翻译)时两档
+    都是 0 —— 没跑翻译就没有"本轮新失败"可言,队列里那些错误全是此前留下的。
+    """
+    if not keys:
+        return 0, 0
+    fresh = shipped = 0
+    ph = ','.join('?' * len(keys))
+    for t in conn.execute(
+            f"SELECT exported_hash='' AS fresh, count(*) AS n {queue} AND ({cond})"
+            f" AND translate_error<>'' AND key IN ({ph}) GROUP BY fresh",
+            (*args, *extra, *keys)):
+        if t['fresh']:
+            fresh = t['n']
+        else:
+            shipped = t['n']
+    return fresh, shipped
+
+
 def export(kind: str, hold_untranslated: bool = False,
            translated: dict | None = None):
     # 整段在维护锁里:导出是「选出待导出的行 → 逐篇写 vault」,存量清理是
@@ -374,6 +397,7 @@ def _export(kind: str, hold_untranslated: bool = False,
     base = queue + ' AND exported_hash<>content_hash'
     args: list = [kind]
     held = stuck = shipped = shipped_stuck = 0
+    fresh_new = shipped_new = 0
     if hold_untranslated:
         cond, extra = translate.queued_sql()
         with reg.db() as c:
@@ -392,6 +416,19 @@ def _export(kind: str, hold_untranslated: bool = False,
                 f"SELECT exported_hash='' AS fresh, translate_error<>'' AS bad,"
                 f' count(*) AS n {queue} AND ({cond}) GROUP BY fresh, bad',
                 (*args, *extra)).fetchall()
+            # **本轮新失败**要单独数出来。上面那份 tally 数的是队列里所有
+            # `translate_error` 非空的条目,而那是**累计**的:一条失败过一次
+            # 的内容会一直带着这行错误待在队列里,直到轮到它重试。两者合成
+            # 一个数的后果实测过 —— 63 条陈年失败让导出阶段天天判红、天天报
+            # 同一个数字,而那一轮一次模型调用都没失败(2026-10-08)。
+            #
+            # 口径取 `translate_pending` 这一轮真失败的那几个 key,再**回库
+            # 里查一次**,不直接用摘要里的 `failed` 计数:本轮失败之后试满
+            # MAX_TRIES 的条目已经离开队列、按原文入库了,那是设计好的出口,
+            # 不该判红(见 `translate.queued_sql`)。回查天然把它们排除在外。
+            fresh_new, shipped_new = _new_failures(
+                c, queue, cond, args, extra,
+                list((translated or {}).get('failed_keys') or []))
         for t in tally:
             if t['fresh']:
                 held += t['n']
@@ -454,20 +491,31 @@ def _export(kind: str, hold_untranslated: bool = False,
             if temp:
                 temp.unlink(missing_ok=True)
     note = f'已保存 {done} 条到知识库'
-    if stuck:
-        note += f'，{stuck} 条翻译失败（暂未入库）'
+    # 失败那两档各拆成「本轮」和「此前」:它们是两件事,混成一个数就既说不清
+    # 这一轮到底出没出故障,也说不清那个数字为什么天天不变(2026-10-08 实测:
+    # 63 条陈年失败连着让每一轮导出判红,而那几轮一次模型调用都没失败)。
+    if fresh_new:
+        note += f'，本轮 {fresh_new} 条翻译失败（暂未入库）'
+    if stuck - fresh_new > 0:
+        note += f'，{stuck - fresh_new} 条此前翻译失败（排队重试，暂未入库）'
     if held - stuck > 0:
         note += f'，{held - stuck} 条待翻译（译完再入库）'
     # 已经按原文入库的那一档:补译失败不影响"读得到",可库里躺的还是外文,
     # 说成「同步完成」照样是谎报 —— 实测那一轮日报的素材清单里就是英文标题。
-    # 所以它和 stuck 一样判红,只是文案说清原文还在。
-    if shipped_stuck:
-        note += f'，{shipped_stuck} 条补译失败（库里仍是原文）'
+    # 所以本轮新失败的照样判红,只是文案说清原文还在。
+    if shipped_new:
+        note += f'，本轮 {shipped_new} 条补译失败（库里仍是原文）'
+    if shipped_stuck - shipped_new > 0:
+        note += (f'，{shipped_stuck - shipped_new} 条此前补译失败'
+                 f'（排队重试，库里仍是原文）')
     if shipped - shipped_stuck > 0:
         note += f'，{shipped - shipped_stuck} 条等待中文译文覆盖'
-    # 翻译失败让导出阶段判红:这一轮确实有内容没能按中文进知识库,那不是
-    # "稍后再说"。已经试满 MAX_TRIES、按原文入库的那些不算——它们不在扣留
-    # 集合里(见 `translate.queued_sql` 的出口),留着原文是设计好的退让。
-    bad = stuck + shipped_stuck
+    # **只有本轮新失败才判红。** 这一轮确实有内容没能按中文进知识库,那不是
+    # "稍后再说"。两类不算:①已经试满 MAX_TRIES、按原文入库的(不在扣留集合
+    # 里,留着原文是设计好的退让);②此前失败、还排在队列里等重试的 —— 它们
+    # 下一轮就会被优先取走(见 `translate.translate_pending` 的取数顺序),
+    # 让它们把每一轮都染红,红点就不再指向任何一次真实故障。文案里照样如实
+    # 列着,只是不判红。
+    bad = fresh_new + shipped_new
     fails = errors + ([] if not bad else (translated or {}).get('errors') or [])
     _stage('export', 'error' if errors or bad else 'ok', note, failures=fails)

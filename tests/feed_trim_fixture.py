@@ -22,10 +22,6 @@ trim = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(trim)
 
 OLD = 'https://example.org/old-post'
-# 窗口内的发布时间,**必须跟着今天走**。写死一个日期的话,过几天它就掉到
-# `reg.history_floor()` 下面,于是「已经钉着下界就无事可做」那条用例红的其实是
-# 「这条旧文该不该清」—— 和它要验的事毫无关系(口径同 test_feed_sources 的 _FRESH)。
-FRESH = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M')
 _real_connect = store.connect
 _real_busy = trim._pipeline_busy          # setUp 会把它换成桩,先留一份真的
 
@@ -89,7 +85,8 @@ class TrimFixture:
         # 形参叫 row 而不是 source:`source` 是 Namespace 里那个字段名,用例要能
         # `self.args(s, source='Only One')` 覆盖它(按名字查那几条就这么写)。
         base = dict(source=str(row['id']), floor=None, yes=True,
-                    allow_shared=False, allow_favorites=False, verbose=False)
+                    allow_shared=False, allow_favorites=False, verbose=False,
+                    pending_translation=False)
         return argparse.Namespace(**(base | over))
 
     def state(self, item, source=None):
