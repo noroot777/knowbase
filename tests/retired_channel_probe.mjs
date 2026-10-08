@@ -84,6 +84,10 @@ let searchHits = [
 const MIME = { html: "text/html", js: "text/javascript", css: "text/css", json: "application/json",
                svg: "image/svg+xml", ico: "image/x-icon" };
 
+// 6.8 节用:让 /api/pipeline/channels 暂时 503,复现「首次通道读取失败」。
+// 置回 false 之前保持失败,免得页面自己的重试提前消除故障。
+let channelsFail = false;
+
 const server = createServer((req, res) => {
   const path = req.url.split("?")[0];
   if (req.method === "GET"
@@ -95,7 +99,10 @@ const server = createServer((req, res) => {
     res.writeHead(code, { "Content-Type": "application/json", "Content-Length": body.length });
     res.end(body);
   };
-  if (path === "/api/pipeline/channels" && req.method === "GET") return json(CHANNELS);
+  if (path === "/api/pipeline/channels" && req.method === "GET") {
+    if (channelsFail) return json({ detail: "测试：来源目录暂时不可用" }, 503);
+    return json(CHANNELS);
+  }
   if (path === "/api/pipeline/run" && req.method === "POST") {
     let raw = "";
     req.on("data", c => { raw += c; });
@@ -440,6 +447,38 @@ for (const legacy of ["rss", "social", "没这个来源"]) {
         await evalJs(`localStorage.getItem('kb-sync-channels')`) === '["rss"]',
         await evalJs(`localStorage.getItem('kb-sync-channels')`));
 }
+
+// ── 6.8 首次通道读取失败、恢复后点「检查连接」:查的必须还是公众号 ──────────────
+// 第 2 轮审查拦验收的那条:存量 kb-sync-channel='rss' + 首次 /api/pipeline/channels
+// 503(初始化在绑定公众号之前就返回了),恢复后点「检查连接」——原来那颗按钮直连
+// refreshPipeSource(),后者拿残留的全局 pipeChannel 去查,公众号页顶着「公众号」
+// 标题显示 RSS 的「已连接」,订阅列表还停在原来的错误上。检查/重试入口必须按来源
+// 目录重新解析通道、把订阅初始化重新跑一遍。
+await evalJs(`localStorage.setItem('kb-sync-channel', 'rss');
+  localStorage.setItem('kb-subs-kind', 'wechat'); true`);
+channelsFail = true;
+await boot();
+await evalJs(`switchTab('subs')`);
+await until(`!!document.querySelector('#tgt-list .empty button')`);
+check("初始化失败时订阅列表留了重试入口、通道没绑上",
+      await evalJs(`!!document.querySelector('#tgt-list .empty button')`)
+      && await evalJs(`pipeChannel`) === "rss", await evalJs(`pipeChannel`));
+channelsFail = false;
+gets.length = 0;
+await clickAt("#src-recheck");
+check("恢复后点「检查连接」:订阅列表重新读出来了",
+      await until(`document.querySelectorAll('#tgt-list .tgt-row').length > 0`));
+check("恢复后通道绑回公众号",
+      await evalJs(`pipeChannel`) === "wechat_local", await evalJs(`pipeChannel`));
+check("恢复后的连接检查和订阅列表都点名公众号、没有一条查到 RSS 头上",
+      gets.some(u => u.startsWith("/api/pipeline/status"))
+      && gets.some(u => u.startsWith("/api/sources/targets"))
+      && gets.every(u => u.includes("channel=wechat_local")), JSON.stringify(gets));
+check("连接卡显示的是本页来源的状态",
+      await until(`document.getElementById('src-status').textContent === '已连接'`)
+      && !(await evalJs(`document.getElementById('src-label').textContent`)).includes("RSS"),
+      await evalJs(`document.getElementById('src-label').textContent + ' / '
+                    + document.getElementById('src-status').textContent`));
 
 // ── 7. 删掉的两个端点没有任何一处还在调 ────────────────────────────────────────
 await sleep(500);

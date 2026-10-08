@@ -143,7 +143,7 @@
   只要还勾着 RSS,「一个都没剩才补默认」那句兜底就不触发,升级后打开新建同步只剩
   RSS,公众号被静默地漏掉、一句提示都没有。
   回归在 `tests/test_retired_channel.py`(12 条)+ `tests/retired_channel_probe.mjs`
-  (48 项,自带 mock 后端、CDP 直连 chrome-headless-shell):存着
+  (53 项,自带 mock 后端、CDP 直连 chrome-headless-shell):存着
   `["wechat_oa","rss"]` 的 localStorage 打开新建同步要勾出公众号、localStorage 被
   改写、而且**看真的发出去的 `/api/pipeline/run` body** 里是 `wechat_local`;另有
   几项钉住删掉的那些东西没留下残骸(没有 `pipeWechat`/`saveWechatChannel` 这类
@@ -156,6 +156,14 @@
   全跟着串到别的来源上。探针里存量 rss/social/未知值各走一遍:通道绑回
   `wechat_local`、连接卡和订阅列表的请求都点名它、「同步全部」提交的 body 是
   公众号、新建同步的多来源草稿(`kb-sync-channels`)不被改写。
+  **检查/重试入口也一样,不依赖「某次成功初始化改过全局选择」**:首次读取通道
+  失败时 `openWechatSubs` 在绑定之前就返回了,连接卡那颗「检查连接」原来直连
+  `refreshPipeSource()`、拿残留的全局 `pipeChannel` 去查 —— 存量 rss + 首次 503 +
+  恢复后点检查,公众号页顶着「公众号」标题显示 RSS 的「已连接」,订阅列表还停在
+  原错误上(2026-10-08 第 2 轮审查实测)。现在 `refreshPipeSource()` 自己按目录
+  现解析通道(这张连接卡只在公众号视图上),「检查连接」改为重跑整个
+  `openWechatSubs`(连接 + 订阅列表一起恢复),失败文案里留「重新读取」入口。
+  探针 6.8 节钉住:503 恢复后点检查,请求全部点名公众号、列表重新读出来。
 - **逐号「就绪」那套在主干上永久是空的。** 采集器一律返回 `ready=None` /
   `state="按本机推送采集"`,`refresh_readiness` 从 `TargetManager` 契约里摘掉了,
   `POST /api/sources/targets/refresh` 也没了。`Target.ready/tone/state` 这三个字段

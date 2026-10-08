@@ -74,13 +74,18 @@ function wechatSubsChannel() {
 }
 async function openWechatSubs() {
   renderWechatSubsStatus();
+  // 失败要留重试入口:初始化失败后通道还没绑上,这时唯一能把视图带回正轨的
+  // 就是重新跑一遍本函数(连接卡那颗「检查连接」按的也是它)。
+  const retry = '<button class="text-button" onclick="openWechatSubs()">重新读取</button>';
   try { await loadPipeChannels(); } catch (e) {
-    $('tgt-list').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    refreshPipeSource();   // 连接卡如实落「连接未确认」,不许停在「检查中…」
+    $('tgt-list').innerHTML = `<div class="empty">${esc(e.message)}。${retry}</div>`;
     return;
   }
   const channel = wechatSubsChannel();
   if (!channel) {
-    $('tgt-list').innerHTML = '<div class="empty">这个来源的采集通道暂不可用，请确认采集器配置后重试。</div>';
+    refreshPipeSource();
+    $('tgt-list').innerHTML = `<div class="empty">这个来源的采集通道暂不可用，请确认采集器配置后重试。${retry}</div>`;
     return;
   }
   // 绑到全局选择上:channelUrl(连接卡、订阅列表的请求)和运行态判断都读它

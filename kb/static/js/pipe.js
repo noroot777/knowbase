@@ -83,7 +83,13 @@ async function refreshPipeSource() {
   $('src-status').textContent = '检查中…';
   try {
     await loadPipeChannels();
-    const channel = pipeChannel;
+    // 这张连接卡只在「我的订阅」的公众号视图上:通道按来源目录现解析
+    // (wechatSubsChannel),不拿全局选择当然值 —— 首次初始化失败过一次时
+    // pipeChannel 还是存量的 rss/social,照它查就是把别的来源的「已连接」
+    // 当成本页的连接结果(2026-10-08 第 2 轮审查实测)。
+    const channel = wechatSubsChannel();
+    if (!channel) throw new Error('这个来源的采集通道暂不可用，请确认采集器配置');
+    setPipeChannel(channel);
     const s = await pipeJson(channelUrl('/api/pipeline/status', channel), {}, 60000);
     if (version !== pipeSourceVersion || channel !== pipeChannel) return;
     const src = s.source || {};

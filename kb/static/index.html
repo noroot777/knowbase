@@ -237,7 +237,7 @@
       <div><strong id="src-label">公众号采集器</strong><span id="src-status" class="badge">检查中…</span><p id="src-detail">正在检查来源连接</p></div>
       <div class="pipe-source-actions"><a id="src-console" href="#" target="_blank" rel="noopener" style="display:none">采集器配置<i data-arrow="ext"></i></a>
         <button class="text-button" onclick="openWechatSetup()">检查并接入绿泡泡</button>
-        <button class="text-button" onclick="refreshPipeSource()">检查连接</button></div>
+        <button id="src-recheck" class="text-button" onclick="openWechatSubs()">检查连接</button></div>
     </div>
     <div id="subs-wechat-progress" class="source-banner" hidden role="status"><span id="subs-wechat-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度<i data-arrow="right"></i></button></div>
     <div id="subs-wechat-manage" class="subs-manage-card">
