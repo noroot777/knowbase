@@ -425,7 +425,20 @@ def cmd_run(args) -> int:
     # 同时归零)。原来那条回归只摆了「没有未完成计划」的局,所以全绿骗了
     # 过去 —— 判据是**有旧计划时也不许动**,不是「提示对不对」。
     # 取锁也算副作用:非法参数不该先去等满 `KB_MAINT_LOCK_WAIT`。
-    if args.pending_translation and args.floor:
+    #
+    # **「给了 --floor 没有」要问 `is not None`,不许问真值。** argparse 本来
+    # 就把两件事分得清:没写这个开关是 `None`,写了 `--floor ""` 是空字符串。
+    # 拿真值判的话空字符串和「压根没给」长得一模一样 —— 而这两条判断都在这
+    # 上面:①互斥检查放行,于是 `--floor "" --yes --pending-translation` 这条
+    # 本该一个字节都不动的命令,把那份没做完的**日期**计划续完了(文章四处
+    # 归零、下界被钉上、退 0);②`norm_floor` 压根没被调用,于是**没有**未完成
+    # 计划时单给 `--floor "" --yes` 也不报错,而是悄悄按默认下界新建一轮清理
+    # 把旧文删掉(2026-10-08 第 3 轮审查用真 argparse + 真子进程复现,前者独立
+    # 三次一致)。空字符串不是一种顺手的写法,它是 `--floor "$CUTOFF"` 而
+    # `CUTOFF` 还没赋值这种最常见的 shell 事故 —— 而这是不可逆删除。
+    # 显式给了就必须过 `norm_floor`(`''` 不是 `YYYY-MM-DD`,它自己会拒),
+    # 显式给了就算「给了日期」(于是和 `--pending-translation` 互斥)。
+    if args.pending_translation and args.floor is not None:
         print('--pending-translation 筛的是翻译队列,不是日期;这两个开关不能一起用。',
               file=sys.stderr)
         return 2
@@ -433,7 +446,7 @@ def cmd_run(args) -> int:
         print(blocked, file=sys.stderr)
         return 2
     try:
-        override = norm_floor(args.floor) if args.floor else ''
+        override = norm_floor(args.floor) if args.floor is not None else ''
     except ValueError as e:
         print(e, file=sys.stderr)
         return 2
