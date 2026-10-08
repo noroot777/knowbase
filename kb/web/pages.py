@@ -109,6 +109,7 @@ const DOC_PATH = {path_json};
 // 两个库任一没加载出来就退化成纯文本(失败关闭),不给未净化的 HTML 放行
 // (漏判 marked 的话 marked.parse 直接抛 ReferenceError,正文整个空白)
 const MD_OK = !!(window.DOMPurify && window.marked);
+{literal_js}
 document.getElementById('content').innerHTML = MD_OK
   ? DOMPurify.sanitize(marked.parse(MD))
   : '<div style="white-space:pre-wrap"></div>';
@@ -116,6 +117,38 @@ if (!MD_OK) document.querySelector('#content div').textContent = MD;
 {snip_js}
 </script>
 </body></html>"""
+
+# 正文里的尖括号一律按字面文字显示(纯常量、不走 str.format,大括号可以直接写):
+#
+# vault 里文章正文按契约**已经是纯文本** —— RSS 走 `kb/feeds/fetching.py` 的 plain/
+# body_text,公众号走它自己的转换器,两边都把标签剥干净了。所以正文里剩下的
+# `List<T>`、`<dependency>`、`<system-reminder>` 全是作者写在文章里的示例文字,
+# 没有一处是要渲染的标记(实测 2.58 万篇 vault md 里有 39 篇正文带着**代码围栏之外**
+# 的这种示例 —— 38 篇公众号 + 1 篇 RSS,围栏里的 marked 本来就当代码显示;
+# wiki/daily/index 一篇都没有裸 HTML)。
+#
+# 而 marked 默认把它们当原始 HTML 交给 DOMPurify,于是**这些字在阅读页上直接消失**:
+# `<T>` 被当成未知标签吃掉(`Use List<T>` 显示成 `Use List`)、整段只有
+# `<script>alert(1)</script>` 的示例被净化删掉之后正文一片空白。订阅面板的展开阅读
+# 用 textContent 显示,同一篇在那边是完整的 —— 换个阅读入口内容就少一截
+# (2026-10-08 第 3 轮审查实测两种样本)。
+#
+# **不是关掉净化**:DOMPurify 照旧过一遍,这里只改「原始 HTML 怎么渲染」—— html
+# token 转义成字面文字,于是压根没有原始 HTML 送到净化器面前,比原来更严。
+# 代价是正文里真有一段想渲染的 HTML 时也只显示文字,这正是要的:上面那条契约说
+# 它不该存在,而「示例文字静默消失」比「示例文字照显示」坏得多。
+#
+# **只改这一页。** `kb/static/js/core.js` 的 mdHtml 渲染的是模型写的 markdown
+# (问答回答、日报正文)和条目正文,不是剥过标签的文章原文;而且日报出处链接那套
+# 裁决器(`kb/daily_refs.py`)的方言是按它逐位对齐的(`html=True`),动它等于让
+# 那份对齐失效。
+_DOC_LITERAL_JS = r"""
+if (window.marked) marked.use({ renderer: { html(t) {
+  // v12 给的是字符串,v13 起给 token 对象;拿错了会抛异常、正文整个空白
+  const s = typeof t === 'string' ? t : (t && t.text) || '';
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+} } });
+"""
 
 # 片段收藏脚本(纯常量、不走 str.format,所以里面可以放心用大括号):
 # 选中正文文字浮出「☆ 收藏此段」;URL 带 #kbq=… 时按 quote+前后文锚点定位高亮。
@@ -301,7 +334,8 @@ def doc_page(doc_path: str):
     return HTMLResponse(
         _DOC_TMPL.format(
             title=html_mod.escape(title), meta=" · ".join(meta_parts),
-            md_json=md_json, path_json=path_json, snip_js=_DOC_SNIP_JS,
+            md_json=md_json, path_json=path_json,
+            literal_js=_DOC_LITERAL_JS, snip_js=_DOC_SNIP_JS,
         ),
         # 动态渲染页,改版后旧缓存会让新脚本(片段收藏)不生效
         headers={"Cache-Control": "no-cache"},
