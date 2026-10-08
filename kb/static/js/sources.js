@@ -173,7 +173,13 @@ async function loadSourceModule(reset = false, selectedId = null) {
     $('source-issues').hidden = !data.errors;
     $('source-issues').innerHTML = `${esc(String(data.errors))} 个来源上次连接失败，已安排退避重试。查看订阅管理${arrow('right')}`;
     $('source-configuration').hidden = !data.unconfigured;
-    $('source-configuration').textContent = `${data.unconfigured} 个账号待配置：请填写可用的 X 订阅桥接，或为账号添加专用订阅链接。已配置的来源可照常同步。`;
+    // 理由由后端按**当前通道**算好(桥接要模板、feedgrab 要登录态、浏览器要在那个
+    // 独立 profile 里登录过),这里不自己拼一句"请填写 X 桥接" —— 选了别的通道的人
+    // 看到的会是一个跟他这一轮采集毫无关系的设置。
+    const why = (data.sources.find(s => s.configuration_error)?.configuration_error || '')
+      .replace(/^待配置[：:]\s*/, '');
+    $('source-configuration').textContent = `${data.unconfigured} 个账号待配置：`
+      + (why ? why + '。' : '') + '已配置的来源可照常同步。';
     $('source-subscriptions-count').textContent = data.sources.length;
     if (reset) fillSourceSettings(data.settings);
     const run = data.last_run;

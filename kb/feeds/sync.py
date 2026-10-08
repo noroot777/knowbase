@@ -13,13 +13,18 @@ import yaml
 from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
 from kb.maintenance import maintenance_lock
-from kb.feeds import translate
+from kb.feeds import translate, x_channels
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_state import _state, _stage
 from kb.scanner import parse_frontmatter
 
 FETCH_WORKERS = 4
 COLLECT_SECONDS = 90
+# X 的登录态通道(feedgrab / 浏览器)另算预算:它们是串行的 —— 同一个浏览器
+# profile 只能被一个实例打开 —— 而单个账号要滚时间线、必要时还要等懒加载,
+# 90 秒连五个号都跑不完。这条通道按天同步(见 `source_types` 里 social 的
+# interval),所以给得宽;用完的账号记成"留待下次",靠 last_attempt 轮转补齐。
+X_LOCAL_SECONDS = float(os.environ.get('KB_X_LOCAL_SECONDS', '1200'))
 BRIDGE_FAILURE_LIMIT = 3
 BUDGET_MESSAGE = '本轮采集时间预算不足，剩余订阅留待下次同步'
 
@@ -97,6 +102,30 @@ def _save_failure(source, error, summary):
             time.time() + min(86400, 1800 * 2 ** min(source['failures'], 6)),source['id']))
 
 
+def _prefetch_x(kind, sources, settings):
+    """X 登录态通道的整批预取。跑在起线程池之前,所以读侧不必加锁。
+
+    一个账号都抓不到也不抛:每个账号的失败已经落在它自己那一项上,随后
+    `fetch_source` 会把它翻成这条订阅的失败 —— 一个改了名的号不该把整轮带掉。
+    通道是 bridge(或这一类来源没有通道概念)时 `targets()` 返回空,直接空转。
+    """
+    x_channels.reset()
+    if not x_channels.supports_channels(kind):
+        return
+    picked = x_channels.targets(sources, settings)
+    if not picked:
+        return
+    name = x_channels.label(x_channels.channel_of(settings))
+    _stage('crawl', 'running', f'{reg.KINDS[kind]} · {name}:准备读取 {len(picked)} 个账号')
+
+    def progress(done, count, handle):
+        _stage('crawl', 'running', f'{reg.KINDS[kind]} · {name} {done}/{count} · @{handle}')
+
+    x_channels.prefetch(sources, settings, budget=X_LOCAL_SECONDS,
+                        on_progress=progress,
+                        should_stop=lambda: bool(_state.get('stop_requested')))
+
+
 def collect(kind, scope):
     started = reg.now()
     sources = [s for s in reg.subscriptions(kind) if s['enabled'] and
@@ -104,17 +133,30 @@ def collect(kind, scope):
     summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0,
                'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [], 'stopped': False}
     settings = reg.get_settings(kind)
-    pending = []
+    pending, unconfigured_why = [], ''
     for source in sources:
-        if reg.configuration_error(source, settings):
+        if problem := reg.configuration_error(source, settings):
             summary['unconfigured'] += 1
+            # 理由按当前通道走(桥接要模板、feedgrab 要登录态、浏览器要登录过),
+            # 所以收尾那行提示也从这里取,不写死"请填写 X 桥接"。
+            unconfigured_why = unconfigured_why or problem.removeprefix('待配置：')
         elif source['retry_at'] > time.time() and not scope.force:
             summary['deferred'] += 1
         else:
             pending.append(source)
     # Budget-limited runs continue with never/least recently attempted sources.
     pending.sort(key=lambda s: (s['last_attempt'], s['id']))
+    _prefetch_x(kind, pending, settings)
+    # 预取可能跑十几分钟(见 X_LOCAL_SECONDS),所以 HTTP 那一侧的预算要在它
+    # **之后**才开始算。算在前面的话,预取一跑完每条订阅都已经超了预算,整轮
+    # 一条也取不走、全部记成"留待下次"—— 而东西明明已经抓在手里了。
     deadline = time.monotonic() + COLLECT_SECONDS
+    # 桥接熔断只对桥接通道成立:它防的是"公共实例挂了,别再拿 50 个账号去撞"。
+    # 登录态通道的内容已经在预取里抓完,这里只是逐条取走,断开只会白扔掉已经
+    # 付过代价的结果;而那两条通道真出问题(登录失效)时每个账号拿到的是同一
+    # 句话,熔断省不下任何东西。
+    shared_upstream = (x_channels.supports_channels(kind)
+                       and x_channels.channel_of(settings) == x_channels.BRIDGE)
     bridge_failures = 0
     # Fetches alone run concurrently; persistence and pipeline state have one writer.
     # Submit only one bounded batch so failures/stop never leave a 51-job backlog.
@@ -142,14 +184,14 @@ def collect(kind, scope):
                 source = futures[future]
                 try:
                     result = future.result()
-                    shared_ok |= reg.uses_bridge(source)
+                    shared_ok |= shared_upstream and reg.uses_bridge(source)
                     summary['added'] += _save_result(source, result, scope)
                 except CollectionBudgetExceeded:
                     summary['skipped'] += 1
                     summary['message'] = BUDGET_MESSAGE
                     continue
                 except Exception as e:
-                    shared_errors += int(reg.uses_bridge(source))
+                    shared_errors += int(shared_upstream and reg.uses_bridge(source))
                     _save_failure(source, e, summary)
                 summary['checked'] += 1
                 _stage('crawl', 'running', f"{reg.KINDS[kind]} {summary['checked']}/{len(sources)} · {source['name']}")
@@ -166,7 +208,7 @@ def collect(kind, scope):
     if summary['errors']:
         label += f"，失败 {len(summary['errors'])} 个"
     if summary['unconfigured']:
-        label += f"，待配置 {summary['unconfigured']} 个（请填写 X 桥接或专用订阅链接）"
+        label += f"，待配置 {summary['unconfigured']} 个（{unconfigured_why}）"
     if summary['message']:
         label += f"，跳过 {summary['skipped']} 个；{summary['message']}"
     status = 'error' if summary['errors'] else 'skipped' if summary['unconfigured'] else 'ok'

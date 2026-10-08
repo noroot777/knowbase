@@ -271,7 +271,22 @@
       <form id="source-settings-form" onsubmit="saveSourceSettings(event)"><fieldset id="source-settings-fields" disabled>
         <label><input id="source-auto" type="checkbox"> 自动同步</label>
         <label for="source-interval">同步间隔<br>每 <input id="source-interval" type="number" min="15" max="10080" value="60" required> 分钟</label>
-        <details id="source-bridge-field" hidden><summary>X 订阅桥接设置</summary><p>每行一个可用地址，使用 {handle} 代表账号名。留空时账号处于待配置；也可在单个订阅里填写专用链接。公共桥接可能不可用，连续失败会暂停本轮请求。</p><textarea id="source-bridges" aria-label="X订阅桥接地址" spellcheck="false"></textarea></details>
+        <div id="source-xchan" class="xchan" hidden>
+          <label for="source-x-channel">X 的取法<select id="source-x-channel" onchange="xChannelPicked()"></select></label>
+          <p id="source-x-hint" class="hint"></p>
+          <details id="source-bridge-field" hidden><summary>X 订阅桥接设置</summary><p>每行一个可用地址，使用 {handle} 代表账号名。留空时账号处于待配置；也可在单个订阅里填写专用链接。公共桥接可能不可用，连续失败会暂停本轮请求。</p><textarea id="source-bridges" aria-label="X订阅桥接地址" spellcheck="false"></textarea></details>
+          <div id="source-x-feedgrab" hidden>
+            <label for="source-x-bin">feedgrab 可执行文件（可留空）<input id="source-x-bin" spellcheck="false" placeholder="留空时从 PATH 里找"></label>
+            <p class="hint">登录要在终端里跑一次（它会要你扫码或贴 Cookie）：<br><code id="source-x-login"></code></p>
+          </div>
+          <div id="source-x-browser" hidden>
+            <label for="source-x-chrome">Chrome 可执行文件（可留空）<input id="source-x-chrome" spellcheck="false" placeholder="留空时用默认位置的 Google Chrome"></label>
+            <p class="hint">在一个独立 profile 里登录一次，之后每天无头复用这份登录态。登录窗口要关掉，抓取时它独占这个 profile。</p>
+            <button type="button" class="ghost" id="source-x-login-btn" onclick="openXLoginWindow()">打开登录窗口</button>
+          </div>
+          <p id="source-x-state" class="hint" role="status"></p>
+          <button type="button" class="ghost" id="source-x-check" onclick="checkXChannel()">检查连接</button>
+        </div>
         <div id="source-settings-error" class="field-err" role="alert"></div><button id="source-settings-save" class="ghost" type="submit">保存设置</button>
       </fieldset></form>
       <p id="source-settings-status" role="status"></p><div class="source-rule"><p id="source-last-run"></p><p id="source-note"></p><p>每源每次最多读取最近 500 条，后续按原文链接去重。删除订阅保留已收录内容。</p><p>自动同步需要知识库服务保持运行。与绿泡泡共用同步队列，繁忙时顺延。</p><p>保存后自动建立检索索引；知识提取可在同步中心继续执行。</p></div>
@@ -500,6 +515,7 @@
 <script src="/static/js/daily.js"></script>
 <script src="/static/js/sources.js"></script>
 <script src="/static/js/source_forms.js"></script>
+<script src="/static/js/x_channel.js"></script>
 <script src="/static/js/wechat_setup.js"></script>
 <script src="/static/js/workspace.js"></script>
 <script>

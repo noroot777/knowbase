@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from kb import pipeline
 from kb.feeds import registry as reg
+from kb.feeds import x_channels
 from kb.source_types import catalog
 
 router = APIRouter(prefix='/api/intake')
@@ -104,17 +105,78 @@ class Settings(BaseModel):
     enabled: bool
     interval_minutes: int = Field(ge=15,le=10080)
     bridges: list[str] | None = None
+    x_channel: str | None = None
+    x_feedgrab_bin: str | None = None
+    x_chrome_path: str | None = None
 
 
 @router.put('/{kind}/settings')
 def set_settings(kind: str,body: Settings):
     kind_checked(kind)
     values = body.model_dump(exclude_none=True)
+    if not x_channels.supports_channels(kind):
+        # X 的通道字段只对 social 有意义。不摘掉的话它们会被原样存进 rss 的设置里
+        # (那一类压根不走 `x_channels.validate`),留下一份谁也不读、也没校验过的垃圾。
+        for key in ('x_channel', 'x_feedgrab_bin', 'x_chrome_path'):
+            values.pop(key, None)
     # Changing the interval starts a new interval; enabling starts within the next tick.
     old = reg.get_settings(kind)
     values['next_run'] = (time.time() if body.enabled and not old['enabled'] else
                           time.time()+body.interval_minutes*60)
     return call(reg.save_settings,kind,values)
+
+
+# ── X 的采集通道(只有 social 这一类有)──────────────────────────────────────
+
+
+def _x_kind(kind: str) -> dict:
+    """确认这一类来源有通道可选,并把当前设置取出来。"""
+    kind_checked(kind)
+    if not x_channels.supports_channels(kind):
+        raise HTTPException(404, '该来源没有可选的采集通道')
+    return reg.get_settings(kind)
+
+
+@router.get('/{kind}/x-channel')
+def x_channel(kind: str):
+    """通道清单 + 当前选择 + 便宜的就绪判断。面板每次打开都调它,所以不连网。"""
+    settings = _x_kind(kind)
+    ready, why, hint = x_channels.readiness(settings)
+    current = x_channels.channel_of(settings)
+    # 这里不发别名表:通道选择只存在服务端的 feed_settings 里,而 `get_settings`
+    # 读出来就已经 resolve 过(见 `x_channels.resolve`),浏览器手里拿不到退役名。
+    # 公众号那边要发别名是因为那份选择存在 localStorage —— 在后端的射程之外。
+    return {
+        'current': current,
+        'channels': [{'id': c, 'label': x_channels.LABELS[c],
+                      'hint': x_channels.HINTS[c]} for c in x_channels.CHANNELS],
+        'ready': ready, 'why': why, 'hint': hint,
+        'login_command': x_channels.login_command(current),
+        'needs_login_window': current == x_channels.BROWSER,
+    }
+
+
+@router.post('/{kind}/x-channel/login')
+def x_channel_login(kind: str):
+    """开一个有头窗口让用户登录(只有浏览器通道走这条)。起完就返回。"""
+    settings = _x_kind(kind)
+    if x_channels.channel_of(settings) != x_channels.BROWSER:
+        raise HTTPException(400, '只有「我的浏览器登录态」这条通道需要在这里登录')
+    from kb.feeds import x_browser
+    try:
+        detail = x_browser.open_login_window(str(x_channels.BROWSER_PROFILE),
+                                             settings.get('x_chrome_path', ''))
+    except Exception as e:                                # noqa: BLE001 - 成品文案
+        raise HTTPException(400, str(e)) from None
+    return {'ok': True, 'detail': detail}
+
+
+@router.post('/{kind}/x-channel/check')
+def x_channel_check(kind: str):
+    """真连一次。这是用户点「检查连接」才做的事,所以允许慢。"""
+    settings = _x_kind(kind)
+    ready, detail = call(x_channels.check, settings)
+    return {'ready': ready, 'detail': detail}
 
 
 class SyncRequest(BaseModel):

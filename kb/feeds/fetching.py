@@ -1,4 +1,9 @@
-"""Bounded public HTTP transport and RSS/Atom parsing. No browser/login side effects."""
+"""Bounded public HTTP transport and RSS/Atom parsing.
+
+No browser/login side effects live here: X's logged-in channels do their work in
+`kb.feeds.x_channels` before the fetch phase fans out, and `fetch_source` only
+hands back what that prefetch already collected.
+"""
 from __future__ import annotations
 
 import calendar
@@ -15,7 +20,8 @@ import feedparser
 import httpx
 from bs4 import BeautifulSoup
 
-from kb.feeds.registry import normalize_url, x_handle
+from kb.feeds import x_channels
+from kb.feeds.registry import normalize_url, uses_bridge, x_handle
 from kb.source_types import feed_types
 
 MAX_BYTES = 8 * 1024 * 1024
@@ -234,6 +240,17 @@ ADAPTERS = {'rss': RSSAdapter(), 'social': SocialAdapter()}
 def fetch_source(source: dict, settings: dict, *, unconditional: bool = False,
                  deadline: float | None = None,
                  collect_deadline: float | None = None) -> tuple[list[dict], dict]:
+    # X 的非 HTTP 通道(feedgrab / 浏览器登录态)不走下面这套 endpoint + etag:
+    # 它们在采集阶段开始时已经整批抓完,这里只是按订阅取自己那一份(见
+    # `kb.feeds.x_channels`)。放在最前面是因为这条路连 endpoint 都没有 ——
+    # `SocialAdapter.endpoints()` 会把账号主页本身当地址返回,那是一个 HTML 页,
+    # 解析必然失败,报出来的还是一句跟真实原因无关的"没有返回 RSS / Atom"。
+    #
+    # 只接管「走桥接的那些 X 账号」:填了专用订阅链接的订阅照旧走 HTTP,那是
+    # 桥接全挂时唯一还能采的那批(见 `registry.uses_bridge`)。
+    if x_channels.supports_channels(source['kind']) and uses_bridge(source) \
+            and x_channels.channel_of(settings) != x_channels.BRIDGE:
+        return x_channels.take(source, settings)
     deadline = deadline if deadline is not None else time.monotonic() + SOURCE_SECONDS
     adapter = ADAPTERS[feed_types()[source['kind']].adapter]
     errors = []

@@ -6,7 +6,10 @@ import ipaddress
 import json
 import re
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
+# 直接按名字拿:`sqlite3` 这个模块名在测试里会被换成一个只有 connect/Row 的替身,
+# 而异常类不随连接工厂变 —— 走 `sqlite3.OperationalError` 会在那种替身下 AttributeError。
+from sqlite3 import OperationalError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -210,7 +213,13 @@ def db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
-    conn.execute('PRAGMA journal_mode=WAL')
+    # 切 journal 模式要的是**排他锁**,而 SQLite 对这条语句**不走 busy handler**
+    # (`timeout=30` 管不着它):两个连接同时首访一个还是 rollback-journal 的库时,
+    # 输的那个当场 `database is locked` —— 而它想做的事已经由赢的那个做掉了,
+    # WAL 是写在库头里的持久状态。所以这里丢掉 BUSY 继续往下走:真写不进去,
+    # 两行之后的 BEGIN IMMEDIATE 会报一个说得清的错。
+    with suppress(OperationalError):
+        conn.execute('PRAGMA journal_mode=WAL')
     try:
         conn.executescript(SCHEMA)
         # One transaction: deleting a default never brings it back on restart.
@@ -246,7 +255,19 @@ def get_settings(kind: str) -> dict:
         row = c.execute('SELECT value FROM feed_settings WHERE kind=?', (kind,)).fetchone()
     default = {'enabled': False, 'interval_minutes': feed_types()[kind].interval_minutes,
                'next_run': 0, 'bridges': []}
-    return {**default, **(json.loads(row['value']) if row else {})}
+    if feed_types()[kind].adapter == 'social':
+        # X 的取法是个设置,默认仍是桥接 —— 存量库里这一段压根没有这个键,
+        # 读出来必须和升级前逐字同义。
+        from kb.feeds import x_channels
+        default |= {'x_channel': x_channels.DEFAULT, 'x_feedgrab_bin': '',
+                    'x_chrome_path': ''}
+    settings = {**default, **(json.loads(row['value']) if row else {})}
+    if 'x_channel' in settings:
+        from kb.feeds import x_channels
+        # 存量里写着的可能是个退役名,现在就翻成现用名:各处读设置的地方
+        # 都从这里拿,翻译留在这一层就只有一份口径(见 `x_channels.resolve`)。
+        settings['x_channel'] = x_channels.resolve(settings['x_channel'])
+    return settings
 
 
 def save_settings(kind: str, values: dict) -> dict:
@@ -261,20 +282,42 @@ def save_settings(kind: str, values: dict) -> dict:
         if value.count('{handle}') != 1:
             raise ValueError('桥接地址须包含一个 {handle}，用于替换账号名')
         normalize_url(value.replace('{handle}', 'example'))
+    if feed_types()[kind].adapter == 'social':
+        from kb.feeds import x_channels
+        x_channels.validate(cur)
     with db() as c:
         c.execute('INSERT OR REPLACE INTO feed_settings VALUES(?,?)', (kind, json.dumps(cur)))
     return cur
 
 
 def uses_bridge(source: dict) -> bool:
+    """这条订阅的内容是不是要走「X 通道」拿(而不是它自己那条 feed 地址)。
+
+    名字沿用桥接那一版:判据没变 —— social 来源 + 没填专用订阅链接 + 是个 X
+    账号。通道化之后它回答的是"这条订阅受 X 通道设置管吗",桥接只是其中一条
+    通道(见 `kb.feeds.x_channels`)。
+    """
     return (feed_types()[source['kind']].adapter == 'social' and not source['feed_url']
             and bool(x_handle(source['url'])))
 
 
 def configuration_error(source: dict, settings: dict) -> str:
-    if uses_bridge(source) and not settings['bridges']:
-        return '待配置：请在 X 订阅桥接设置中填写可用模板，或编辑账号的专用订阅链接'
-    return ''
+    """这条订阅现在能不能开工。空串 = 能。
+
+    判据按当前通道走:桥接要有模板,feedgrab 要有可执行文件和登录态,浏览器
+    要在那个独立 profile 里登录过。**问的必须是当前通道**——按桥接判的话,
+    选了浏览器通道的用户会看到一片"请填写 X 订阅桥接",而那个设置跟他这一轮
+    采集毫无关系。
+    """
+    if not uses_bridge(source):
+        return ''
+    from kb.feeds import x_channels
+    if x_channels.channel_of(settings) == x_channels.BRIDGE:
+        if not settings['bridges']:
+            return '待配置：请在 X 订阅桥接设置中填写可用模板，或编辑账号的专用订阅链接'
+        return ''
+    ready, why, _hint = x_channels.readiness(settings)
+    return '' if ready else f'待配置：{why}'
 
 
 def subscriptions(kind: str) -> list[dict]:
