@@ -182,6 +182,40 @@ stop_service() {   # stop_service <名字> <pidfile> <port> <pattern>
 
 WEB_PAT="kb-web"
 
+# env -i 干净环境:继承外层(尤其是嵌套 claude)的环境变量会导致 Not logged in
+CLEAN_ENV=(env -i HOME="$HOME" PATH="$PATH")
+
+# **起服务那条命令一律 --offline。** `uv run` 每次都要先确认一遍项目环境,而
+# pyproject.toml 一动(改依赖、改注释都算)它就要重建那个 editable 包 —— 重建要解析
+# `build-system.requires` 里的 hatchling,不带 --offline 时**即使 uv 缓存里已经有**
+# 也要去 pypi 问一次最新版。于是网络一抖启动就挂在
+# 「No solution found when resolving: hatchling」上,而这事发生在 daemonize 之后的
+# 后台进程里:用户看到的只有一句「kb-web 起不来,看 web.log」,而日志尾巴是一段跟
+# 知识库毫无关系的 tls handshake eof(2026-10-08 实测:pyproject 10-02 改过一次,
+# 10-08 起服务时撞上,服务整天起不来;同一份缓存加上 --offline 当场就建好了)。
+#
+# 「要不要联网装东西」因此挪到前台来问(`web_prepare_env`):离线确认不成——真的新增
+# 了依赖、或者 uv 缓存被清过——才联网装一次。前台做有两个好处:失败当场说得清,
+# 而不是让人去日志尾巴里猜;以及用得上当前 shell 的代理设置,env -i 把 *_proxy
+# 一起清掉了,而这台机器上 pypi 常常得走代理。
+#
+# **不用 `uv sync` 做这件事**:它默认 exact,会卸掉 venv 里那份旧项目名的 editable
+# 残留(knowledge_base),而两份 dist-info 的 RECORD 记着**同一组** bin/kb、
+# bin/kb-web、bin/kb-mcp —— 卸掉它就可能把启动入口一起删了。`uv run` 默认 inexact,
+# 压根不碰它。
+web_prepare_env() {
+  if ( cd "$ROOT" && "${CLEAN_ENV[@]}" uv run --offline python -c "" ) >/dev/null 2>&1; then
+    return 0
+  fi
+  say "[web] 环境要补一下(依赖有变动,或 uv 缓存不全),联网装一次"
+  local with_proxy=("${CLEAN_ENV[@]}") v
+  for v in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do
+    if [ -n "${!v:-}" ]; then with_proxy+=("$v=${!v}"); fi
+  done
+  ( cd "$ROOT" && "${with_proxy[@]}" uv run python -c "" ) \
+    || die "依赖装不上,kb-web 起不来。网络通了再跑一次 ./kb.sh web start"
+}
+
 web_start() {
   if [ -n "$(service_pids "$WEB_PID" "$WEB_PORT" "$WEB_PAT")" ]; then
     say "[web] 已在 $API"; graph_stale; return 0
@@ -191,9 +225,9 @@ web_start() {
     die "端口 $WEB_PORT 被别的进程占着,kb-web 起不来。
      换个端口:KB_WEB_PORT=8788 ./kb.sh web start"
   fi
-  # env -i 干净环境:继承外层(尤其是嵌套 claude)的环境变量会导致 Not logged in
+  web_prepare_env
   daemonize "$WEB_PID" "$LOG_DIR/web.log" "$ROOT" \
-    env -i HOME="$HOME" PATH="$PATH" PORT="$WEB_PORT" uv run kb-web
+    "${CLEAN_ENV[@]}" PORT="$WEB_PORT" uv run --offline kb-web
   local n=0
   while ! port_busy "$WEB_PORT" && [ "$n" -lt 40 ]; do sleep 0.5; n=$((n+1)); done
   port_busy "$WEB_PORT" || die "kb-web 起不来,看 $LOG_DIR/web.log"

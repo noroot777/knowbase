@@ -1042,6 +1042,28 @@
 - 管道跑在 kb-web 进程内,杀 8787 前先 `curl -s http://127.0.0.1:8787/api/pipeline/status` 确认 `"running": false`。
 - server.py / projects.py 改动要重启才生效;kb/static/ 下静态文件每次请求从磁盘读,免重启。
 - 重启用 `env -i` 干净环境(继承嵌套 claude 的环境变量会导致 Not logged in)。
+- **起服务那条命令一律 `uv run --offline`,「要不要联网装东西」挪到前台问**
+  (`kb.sh` 的 `web_prepare_env`)。`uv run` 每次都要先确认一遍项目环境,而
+  **pyproject.toml 一动(改依赖、改注释都算)它就要重建那个 editable 包** —— 重建要
+  解析 `build-system.requires` 里的 hatchling,不带 `--offline` 时**即使 uv 缓存里
+  已经有**也会去 pypi 问一次最新版。于是网络一抖启动就挂在「No solution found when
+  resolving: hatchling」上,**而这事发生在 daemonize 之后的后台进程里**:用户看到的
+  只有一句「kb-web 起不来,看 web.log」,日志尾巴是一段跟知识库毫无关系的
+  `tls handshake eof`(2026-10-08 实测:pyproject 10-02 改过一次,10-08 起服务时撞上,
+  服务整天起不来;同一份缓存加 `--offline` 当场就建好了)。前台那一步先离线确认,
+  不成——真新增了依赖、或者 uv 缓存被清过——才联网装一次:失败当场说得清,而且
+  **用得上当前 shell 的代理设置**(`env -i` 把 `*_proxy` 一起清掉了,而这台机器上
+  pypi 常常得走代理),装完照旧离线起服务。
+  **不许改用 `uv sync`**:它默认 exact,会卸掉 venv 里那份旧项目名的 editable 残留
+  (`knowledge_base-0.1.0.dist-info`,项目改名前留下的),而两份 dist-info 的 RECORD
+  记着**同一组** `bin/kb`、`bin/kb-web`、`bin/kb-mcp` —— 卸掉它就可能把启动入口一起
+  删了。`uv run` 默认 inexact,压根不碰它(`uv sync --dry-run` 实测会报
+  `Would uninstall knowledge-base`)。回归在 `tests/test_kb_web_start.py`(4 条,真跑
+  `kb.sh web start`、uv 用 PATH 上的桩挡住,判定逻辑一行不打桩):缓存命中时一次网络
+  都不碰、起服务那条确实带 `--offline`、离线不成才联网且代理带进去了而起服务照旧
+  离线、装不上就在前台停住(非零退出、不留 pidfile、不去 daemonize 一个必死的后台
+  进程)。反向验证定点注入两版:只去掉起服务那条的 `--offline` 红 3 条,整段退回旧版
+  红 4 条。
 - 不要用 preview_start 托管 kb-web(会接管生命周期,杀掉管道)。
 - **地址栏的 `#tab` 被读走之前,谁都不许写它**(`workspace.js` 的 `workspaceLocated`)。
   `restoreWorkspaceLocation()` 在 `initWorkspace` 收尾时才读 hash,而 `loadGallery()`
