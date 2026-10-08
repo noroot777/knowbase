@@ -81,10 +81,11 @@ const docUrl = rel => base + "/doc/" + rel.split("/").map(encodeURIComponent).jo
 await send("Page.navigate", { url: base + "/#subs" });
 await until(`typeof switchTab === 'function' && typeof subsCatalog !== 'undefined'`, 25000);
 await evalJs(`switchTab('subs'); document.getElementById('subs-switch-rss').click(); true`);
-await until(`typeof sourceRows !== 'undefined' && sourceRows.length >= 2`, 20000);
+await until(`typeof sourceRows !== 'undefined' && sourceRows.length >= 3`, 20000);
 
 const readerText = {};
-for (const [key, title] of [["generics", "泛型示例"], ["script", "脚本字面示例"]]) {
+for (const [key, title] of [["generics", "泛型示例"], ["script", "脚本字面示例"],
+                            ["scriptComment", "脚本开头示例"]]) {
   const opened = await evalJs(`(() => {
     const art = [...document.querySelectorAll('#source-list article')]
       .find(a => a.textContent.includes(${JSON.stringify(title)}));
@@ -103,6 +104,9 @@ check("订阅面板:泛型示例一个字没少",
 check("订阅面板:脚本字面示例一个字没少",
       same(readerText.script, "<script>alert(1)</script>"),
       JSON.stringify(readerText.script));
+check("订阅面板:脚本开头示例一个字没少",
+      same(readerText.scriptComment, "示例开头写 <!-- <script>。\n这里是普通的第二段。"),
+      JSON.stringify(readerText.scriptComment));
 
 // ── 2. 同一篇的知识库阅读页 ──
 const docBody = async () => evalJs(`(() => {
@@ -141,6 +145,43 @@ check("阅读页:示例没有变成可执行的 script 节点",
 check("阅读页:正文 innerHTML 里是转义后的文字,没有裸标签",
       await evalJs(`!/<script/i.test(document.getElementById('content').innerHTML)`),
       await evalJs(`document.getElementById('content').innerHTML.slice(0, 200)`));
+
+// ── 2b. 正文里写着「脚本开头」的那篇:整段内联脚本曾经压根没执行 ──
+// `<!--` 之后再出现 `<script` 会把页面的内联 <script> 推进 HTML 的「双重转义」状态,
+// 那之后页面末尾的 `</script>` 只退回一层、不结束脚本元素,于是 MD 没定义、字面
+// renderer 没注册、正文渲染和纯文本降级全都没跑 —— 阅读页只剩标题,后面那个普通
+// 段落一起消失(第 4 轮审查实测)。
+await send("Page.navigate", { url: docUrl(docs.scriptComment) });
+await until(`!!document.getElementById('content') && document.getElementById('content').innerHTML.length > 0`);
+const commentDoc = await docBody();
+check("阅读页:脚本开头示例那篇正文没有消失",
+      lines(commentDoc).join("\n").includes("<!-- <script>"), JSON.stringify(commentDoc));
+check("阅读页:它后面那个普通段落也还在",
+      lines(commentDoc).join("\n").includes("这里是普通的第二段。"), JSON.stringify(commentDoc));
+check("阅读页与订阅面板读到的是同一份内容(脚本开头)",
+      same(commentDoc, readerText.scriptComment),
+      `${JSON.stringify(lines(commentDoc))} vs ${JSON.stringify(lines(readerText.scriptComment))}`);
+// 整段脚本真的跑完了:MD 定义了、片段收藏那一段也挂上了(它排在渲染之后,
+// 内联脚本被吞掉时第一个消失的就是它)。
+check("阅读页:内联脚本跑到底了(MD 有定义、片段收藏挂上了)",
+      await evalJs(`typeof MD === 'string' && !!document.getElementById('snipbtn')`),
+      JSON.stringify(await evalJs(`[typeof MD, !!document.getElementById('snipbtn')]`)));
+
+// ── 2c. 同一个开头放进正常的 markdown 代码围栏里,照样不许吞掉全文 ──
+await send("Page.navigate", { url: docUrl(docs.fenced) });
+await until(`!!document.getElementById('content') && document.getElementById('content').innerHTML.length > 0`);
+const fenced = await evalJs(`(() => {
+  const c = document.getElementById('content');
+  const pre = c.querySelector('pre code');
+  return { fence: pre ? pre.textContent.trim() : '', text: c.textContent,
+           scripts: c.querySelectorAll('script').length };
+})()`);
+check("阅读页:围栏里的脚本开头照旧按代码显示",
+      fenced.fence === "<!--\n<script>", JSON.stringify(fenced.fence));
+check("阅读页:围栏后面那个普通段落还在",
+      fenced.text.includes("这是代码块之后的普通段落。"), JSON.stringify(fenced.text));
+check("阅读页:围栏里的示例没有变成可执行的 script 节点",
+      fenced.scripts === 0, String(fenced.scripts));
 
 // ── 3. 反向:正常 markdown 照旧渲染 ──
 await send("Page.navigate", { url: docUrl(docs.markdown) });

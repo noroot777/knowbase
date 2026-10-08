@@ -7,6 +7,11 @@
 marked,原来会把这些字当原始 HTML —— `Use List<T>` 显示成 `Use List`、整段只有一个
 脚本示例的那篇正文一片空白(2026-10-08 第 3 轮审查实测)。
 
+正文嵌进页面内联 `<script>` 的那一层还有一处边界:`<!--` 之后再出现 `<script` 会
+把分词器推进「双重转义」,页面末尾那个 `</script>` 不再结束脚本元素 —— 整段脚本一行
+都没执行,阅读页只剩标题,连后面那个普通段落一起没了;同一个开头放进 markdown 代码
+围栏里照样复现,因为故障发生在 markdown 解析**之前**(第 4 轮审查实测)。
+
 判据不能只是「md 文件里能找到这串字符」:那一关原来就是过的,丢字发生在渲染。
 所以这条回归真起一个沙箱 kb-web、真用无头浏览器打开两个入口比内容;顺便钉住反向
 ——转义原始 HTML 之后正常的 markdown 照旧渲染成元素,不许退化成纯文字。
@@ -87,3 +92,19 @@ class ReadingEntriesAgreeTest(unittest.TestCase):
         for r in self.results:
             with self.subTest(check=r["name"]):
                 self.assertTrue(r["ok"], r["detail"])
+
+
+class EmbeddedJsonTests(unittest.TestCase):
+    """内联脚本里的 JSON 不许留裸 `<`(便宜的早期信号,行为由上面那条浏览器回归钉)。"""
+
+    def test_no_raw_angle_bracket_survives_serialization(self):
+        from kb.web.pages import _script_json
+        for body in ['示例开头写 <!-- <script>。\n\n这里是普通的第二段。',
+                     '<!--\n<script>',
+                     '收尾写 </script> 的那种',
+                     '新 API 使用 List<T>。',
+                     'source/dr-gzh/<odd>.md']:
+            with self.subTest(body=body):
+                out = _script_json(body)
+                self.assertNotIn('<', out)
+                self.assertEqual(json.loads(out), body)

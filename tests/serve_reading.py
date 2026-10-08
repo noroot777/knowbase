@@ -36,6 +36,12 @@ LITERAL_ITEMS = [
     {'url': 'https://example.org/script',
      'title': '脚本字面示例',
      'body': '<script>alert(1)</script>'},
+    # 作者只展示「脚本开头怎么写」:`<!--` 后面再出现 `<script` 会把页面内联脚本推进
+    # HTML 的「双重转义」状态,于是页面末尾那个 `</script>` 不再结束脚本 —— 整段脚本
+    # 一行都没跑,阅读页只剩标题,连后面那个普通段落一起没了(第 4 轮审查实测)。
+    {'url': 'https://example.org/script-comment',
+     'title': '脚本开头示例',
+     'body': '示例开头写 <!-- <script>。\n\n这里是普通的第二段。'},
 ]
 
 MARKDOWN_ARTICLE = """---
@@ -63,6 +69,27 @@ url: https://example.org/markdown-doc
 """
 
 
+# 同一个开头放进正常的 markdown 代码围栏里也照样复现 —— 故障发生在 markdown 解析
+# **之前**(HTML 文档的内联 JSON 那一层),围栏保护不了它。
+FENCED_ARTICLE = """---
+source: dr-gzh
+title: 围栏里的脚本开头
+account: 某公众号
+published: {published}
+url: https://example.org/fenced-comment
+---
+
+示例展示开始部分:
+
+```html
+<!--
+<script>
+```
+
+这是代码块之后的普通段落。
+"""
+
+
 def build(data: Path, vault: Path) -> dict:
     from kb import cli
     from kb.feeds import registry as reg
@@ -79,6 +106,8 @@ def build(data: Path, vault: Path) -> dict:
     md = vault / 'source' / 'dr-gzh' / 'markdown-doc.md'
     md.parent.mkdir(parents=True, exist_ok=True)
     md.write_text(MARKDOWN_ARTICLE.format(published=published), encoding='utf-8')
+    fenced = vault / 'source' / 'dr-gzh' / 'fenced-comment.md'
+    fenced.write_text(FENCED_ARTICLE.format(published=published), encoding='utf-8')
 
     cli._index_pass(Namespace(reembed=False, no_vector=True))
 
@@ -87,7 +116,9 @@ def build(data: Path, vault: Path) -> dict:
     docs = {r['url']: r['path'] for r in rows}
     return {'generics': docs['https://example.org/generics'],
             'script': docs['https://example.org/script'],
-            'markdown': md.relative_to(vault).as_posix()}
+            'scriptComment': docs['https://example.org/script-comment'],
+            'markdown': md.relative_to(vault).as_posix(),
+            'fenced': fenced.relative_to(vault).as_posix()}
 
 
 def main() -> None:

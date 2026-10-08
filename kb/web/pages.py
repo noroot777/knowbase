@@ -289,6 +289,22 @@ _DOC_SNIP_JS = r"""
 """
 
 
+# 正文是嵌进页面内联 <script> 里的,所以 `<` 一律编码成 `\u003c` —— 不是只防
+# `</script>` 那一种写法。HTML 的脚本数据状态里,`<!--` 之后再出现 `<script` 会把
+# 分词器推进「双重转义」:那之后的 `</script>` 只把状态退回一层、**不结束这个
+# script 元素**,于是页面末尾的 `</script></body></html>` 全被当成脚本内容吞掉 ——
+# 整段脚本一行都没执行:`MD` 没定义、上面那个字面 renderer 没注册、正文渲染、纯文本
+# 降级和片段收藏全都没发生,阅读页只剩标题(2026-10-08 第 4 轮审查实测:一篇正文写着
+# `示例开头写 <!-- <script>。` 的纯文本文章,连它后面那个普通段落一起看不见;同一个
+# 开头放进 markdown 代码围栏里照样复现 —— 故障发生在 markdown 解析**之前**,围栏
+# 保护不了 HTML 文档里的内嵌 JSON)。
+#
+# `<` 全编码掉之后分词器再也离不开脚本数据状态,原来那条 `</` 特判被它涵盖;
+# `\u003c` 是合法的 JSON 转义,`JSON.parse` 回来还是同一个字符串,md 一个字节不变。
+def _script_json(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c")
+
+
 @router.get("/doc/{doc_path:path}")
 def doc_page(doc_path: str):
     root = VAULT_ROOT.resolve()
@@ -329,8 +345,8 @@ def doc_page(doc_path: str):
            f"&file={quote(doc_path.removesuffix('.md'))}")
     meta_parts.append(f'<a href="{obs}">在 Obsidian 打开</a>')
 
-    md_json = json.dumps(body, ensure_ascii=False).replace("</", "<\\/")
-    path_json = json.dumps(doc_path, ensure_ascii=False).replace("</", "<\\/")
+    md_json = _script_json(body)
+    path_json = _script_json(doc_path)
     return HTMLResponse(
         _DOC_TMPL.format(
             title=html_mod.escape(title), meta=" · ".join(meta_parts),
