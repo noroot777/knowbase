@@ -38,6 +38,10 @@ INSTALL_HINT = ("装一份:`npx playwright install chromium-headless-shell`,"
 
 _GLOB = "chromium_headless_shell-*/*/chrome-headless-shell*"
 
+#: 把「原调用方是谁」告诉探针的环境变量;口径在 `tests/probe_shell.mjs` 的 CALLER。
+#: 唯一的写入方是 `run_probe`,别在调用点自己设。
+PARENT_ENV = "KB_PROBE_PARENT"
+
 
 def _cache_roots() -> list[Path]:
     """可能放着 playwright 浏览器的目录。
@@ -133,10 +137,20 @@ def run_probe(argv, *, timeout: int = 300, env=None, cwd=None,
     判据只能待在子进程里 —— `tests/probe_shell.mjs` 的 `watchParent()` 盯着
     `process.ppid`,调用方一死它自己退出,'exit' 钩子接着把浏览器收掉。
 
+    **这里要做的那一半是:把「原调用方是谁」明确告诉它**(`KB_PROBE_PARENT`)。
+    让它自己现读 `process.ppid` 不够 —— 探针在起浏览器之前本来就有一段异步(等沙箱
+    后端监听、摆局),调用方死在那一段里时它读到的已经是 1,于是「本来就没有调用方,
+    不用盯」,检查**永久不装**,随后照旧起一个浏览器留在后台(实测:取消之后 node
+    ppid=1 仍创建 chrome、DevTools 端口持续监听,3 秒后仍都在)。pid 在这里是现成的,
+    传过去它就能回答「我还是不是那个人的子进程」。**无条件覆盖**调用方给的 env:
+    这个值只有一个写入方,`probe_env()` 顺手把继承来的旧值摘掉。
+
     返回值和 `subprocess.run` 的形状一样,调用点照旧读 `.returncode` / `.stdout`。
     """
+    child_env = dict(os.environ if env is None else env)
+    child_env[PARENT_ENV] = str(os.getpid())
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, env=env, cwd=cwd, start_new_session=True)
+                            text=True, env=child_env, cwd=cwd, start_new_session=True)
     # pgid 现在就记下来:进程退出之后 os.getpgid() 会抛 ProcessLookupError,
     # 而 start_new_session 保证了它恒等于 proc.pid,不必去问系统。
     pgid = proc.pid
@@ -170,7 +184,11 @@ def _killpg(pgid: int) -> None:
 def probe_env() -> dict[str, str]:
     """跑 .mjs 探针时要传给子进程的环境(探针按 HEADLESS_SHELL 找二进制)。"""
     assert SHELL is not None, "没有无头壳就不该走到这里,用 @requires_headless 拦住"
-    return {**os.environ, "HEADLESS_SHELL": str(SHELL)}
+    out = {**os.environ, "HEADLESS_SHELL": str(SHELL)}
+    # 继承来的旧值一律摘掉:那个 pid 说的是别人的调用方,留着会让探针一启动就
+    # 判成「我已经没有调用方了」当场退出。唯一的写入方是 run_probe。
+    out.pop(PARENT_ENV, None)
+    return out
 
 
 if __name__ == "__main__":   # 排查用:python -m tests.headless

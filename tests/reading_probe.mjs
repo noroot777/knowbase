@@ -66,8 +66,17 @@ const docUrl = rel => base + "/doc/" + rel.split("/").map(encodeURIComponent).jo
 
 // ── 1. 订阅面板的展开阅读(textContent,本来就是完整的) ──
 await send("Page.navigate", { url: base + "/#subs" });
-await until(`typeof switchTab === 'function' && typeof subsCatalog !== 'undefined'`, 25000);
-await evalJs(`switchTab('subs'); document.getElementById('subs-switch-rss').click(); true`);
+await until(`typeof switchTab === 'function'`, 25000);
+await evalJs(`switchTab('subs'); true`);
+// 等的是**这颗按钮自己**,不是 `typeof subsCatalog !== 'undefined'` —— 后者是个模块级
+// 变量(初值空数组),脚本一加载 `typeof` 就不再是 'undefined',它回答的不是「来源目录
+// 取回来了吗」;按钮要等 `openSubsPanel` 拿到目录之后才渲染出来。机器一忙就等成
+// `getElementById(...)` 为 null、整组 setUpClass 当场红,而页面本身毫无问题
+// (4 路并发各 24 轮实测:`ed63603` 原版 3/24、迁移过启动路径的版本 7/24 —— 出错的
+// 那一行两版逐字相同,改成等按钮之后 0/24)。
+if (!await until(`!!document.getElementById('subs-switch-rss')`, 25000))
+  throw new Error("来源目录没渲染出 RSS 入口");
+await evalJs(`document.getElementById('subs-switch-rss').click(); true`);
 await until(`typeof sourceRows !== 'undefined' && sourceRows.length >= 3`, 20000);
 
 const readerText = {};
