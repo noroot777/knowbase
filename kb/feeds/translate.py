@@ -186,8 +186,16 @@ def queued_sql() -> tuple[str, list]:
     判据是 `translated_at`(`_save` 只在整条译成时写它),不是"有没有 body_zh"
     ——只有标题的短动态译完之后 body_zh 仍然是空串,拿它判的话这一条译完了
     还赖在队列里,每轮重译一遍。
+
+    **还排在正文补抓队列里的条目不算待翻译**(见 `kb.feeds.fulltext`):它们
+    此刻手里那份正文是 feed 给的跳转壳,正文马上要被整条换掉。不排掉的话同一
+    条内容买两次模型调用 —— 先按壳译一遍,补上正文再译一遍,而第一份译文随后
+    就被 `fulltext._save` 丢掉。翻译是这条链上最贵的一步,顺序不能反。
     """
-    return "lang='en' AND translated_at='' AND translate_tries<?", [MAX_TRIES]
+    from kb.feeds import fulltext      # 函数内 import:两个模块互相认识对方的口径
+    cond, args = fulltext.queued_sql()
+    return (f"lang='en' AND translated_at='' AND translate_tries<? AND NOT ({cond})",
+            [MAX_TRIES, *args])
 
 
 def available() -> bool:
@@ -256,19 +264,67 @@ def _requeue_partial(kind: str) -> int:
         return cur.rowcount or 0
 
 
-def _save(key: str, title_zh: str, body_zh: str) -> None:
+def input_version(item) -> tuple[str, str]:
+    """这一次翻译请求所依据的那份输入:标题 + 正文。写回时拿它当判据。
+
+    **口径只有这一份。** 取快照那头和写回那头各写一遍的话,哪天多比一列、
+    少比一列,两处就各漂各的 —— 而这道判据漏一次就是让一份作废的译文重新
+    成为知识库内容。
+
+    标题也要比,不是只比正文:半成品那条路(见 `PARTIAL_SQL`)的请求输入就
+    只有标题,而正文换掉时它手里那份 `body_zh` 同样是旧正文的译文。
+    """
+    return (item['title'] or '', item['body'] or '')
+
+
+def _save(key: str, title_zh: str, body_zh: str, seen: tuple[str, str]) -> bool:
+    """写回译文。返回**写进去了没有** —— 0 行 = 这期间原文换过了。
+
+    **判据是「这一条还是我发请求时那份标题和正文吗」,而且待在 UPDATE 自己的
+    WHERE 里,不许在 Python 这边先 SELECT 一次比对。** 先查后写在两个线程/
+    进程之间压根不成立(翻译跑在 3 个工作线程上,而换正文的那两个写入方 ——
+    `fulltext._save` 和 `scripts/feed_fulltext_recheck` —— 可能在另一个进程里),
+    而 SQLite 把写入串行化:判据待在写语句里才和那次写入同生共死。口径同
+    `scripts/feed_fulltext_recheck._downgrade`、`sync._claim_write`、
+    `store.mark_no_body` 和 collector 那条 UPSERT。
+
+    **不这么写就是让作废的旧译文重新成为知识库内容,而且不可恢复**:模型请求
+    要几十秒到几分钟,这期间复查(或者一次成功补抓)完全可能把这一条的正文整
+    份换掉并清空译文 —— 旧回包随后按 key 盖回去,`translated_at` 跟着重新设上,
+    于是这一条**再也不进翻译队列**,导出和阅读又优先用 `body_zh`:正文是新的、
+    中文却是旧内容的译文,后面每一轮同步都把这段文字重新写进 vault
+    (2026-10-09 第 4 轮审查三个隔离库稳定复现:复查把一段版权声明换成了正确
+    的标题与链接,而迟到的旧回包把「版权所有,网站使用条款和隐私声明。」写了
+    回去,再同步三轮也清不掉)。
+
+    **0 行什么都不动,这正是我们要的末态**:`translated_at` 没写上,这一条还
+    待在队列里(它此刻多半在补抓队列,等正文定下来再译);`exported_hash` 也
+    没清,vault 里那份不会被这份过期译文重写。
+    """
     with reg.db() as c:
         # exported_hash 清空 = 让导出阶段重写这篇 md。译完不重导的话,vault 里
         # 留着的还是那份英文,索引/提取/日报读到的也还是英文,等于没译。
-        c.execute("""UPDATE feed_items SET title_zh=?,body_zh=?,translated_at=?,
-            translate_error='',translate_tries=0,exported_hash='' WHERE key=?""",
-            (title_zh, body_zh, reg.now(), key))
+        cur = c.execute("""UPDATE feed_items SET title_zh=?,body_zh=?,translated_at=?,
+            translate_error='',translate_tries=0,exported_hash=''
+            WHERE key=? AND title=? AND body=?""",
+            (title_zh, body_zh, reg.now(), key, *seen))
+        return bool(cur.rowcount)
 
 
-def _fail(key: str, error: Exception) -> None:
+def _fail(key: str, error: Exception, seen: tuple[str, str]) -> bool:
+    """记一次失败。返回**记上了没有** —— 判据同 `_save`,理由是另一半:
+
+    一份基于旧正文的请求失败了,那是**旧内容**的毛病,不该记在换过来的新内容
+    头上。记上去就是拿别人的错误推进这一条的重试计数(`MAX_TRIES` 到顶就按
+    原文导出,等于让新正文少几次翻译机会),面板上那行「补译失败」说的也是一
+    件跟当前内容无关的事。
+    """
     with reg.db() as c:
-        c.execute('UPDATE feed_items SET translate_error=?,translate_tries=translate_tries+1'
-                  ' WHERE key=?', (str(error)[:600] or type(error).__name__, key))
+        cur = c.execute('UPDATE feed_items SET translate_error=?,'
+                        'translate_tries=translate_tries+1'
+                        ' WHERE key=? AND title=? AND body=?',
+                        (str(error)[:600] or type(error).__name__, key, *seen))
+        return bool(cur.rowcount)
 
 
 def translate_pending(kind: str, limit: int | None = None, progress=None) -> dict:
@@ -277,7 +333,11 @@ def translate_pending(kind: str, limit: int | None = None, progress=None) -> dic
     没配 key / 没有可用模型时直接跳过(skipped 带原因),不报错也不重试计数
     ——那是配置问题,不是这些条目有问题,按失败记会把重试次数白白耗光。
     """
-    summary = {'done': 0, 'failed': 0, 'left': 0, 'skipped': '',
+    # stale:这一轮的回包作废了几条(请求发出之后原文被换掉了,见 `_save`)。
+    # 它既不算成功也不算失败 —— 什么都没坏,只是这份译文不是当前内容的译文;
+    # 统计要如实反映**实际写回结果**,按"调了几次模型"报的话这一轮会说"已翻译
+    # N 条"而库里一个字都没改。
+    summary = {'done': 0, 'failed': 0, 'left': 0, 'stale': 0, 'skipped': '',
                'errors': [], 'failed_keys': []}
     _label_unknown(kind)
     _requeue_partial(kind)
@@ -308,27 +368,34 @@ def translate_pending(kind: str, limit: int | None = None, progress=None) -> dic
         return summary
 
     def one(item):
+        """调模型。失败就地记错(时机和写回判据都跟着这一条自己走)。
+
+        第四个值是「这一条的写回落下了吗」:失败那一侧由 `_fail` 现场回答,
+        成功那一侧的实际写入方是主循环里的 `_save`,所以这里给 True。
+        """
         if _state.get('stop_requested'):
-            return item, None, None
+            return item, None, None, True
         try:
-            return item, *translate_item(item, model)
+            return item, *translate_item(item, model), True
         except Exception as e:                       # noqa: BLE001 - 逐条隔离
-            _fail(item['key'], e)
-            return item, None, e
+            return item, None, e, _fail(item['key'], e, input_version(item))
 
     with ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix='translate') as pool:
-        for item, title_zh, result in pool.map(one, rows):
-            if isinstance(result, Exception):
+        for item, title_zh, result, recorded in pool.map(one, rows):
+            if isinstance(result, Exception) and recorded:
                 summary['failed'] += 1
                 # key 也记下来:导出那头要靠它把"本轮新失败"和"此前失败、还排着
                 # 队"分开报,拿 failed 这个计数是分不出来的(见 `sync._export`)。
                 summary['failed_keys'].append(item['key'])
                 summary['errors'].append({'title': item['title'][:120], 'reason': str(result)[:300]})
+            elif isinstance(result, Exception):      # 原文已经换过,这次失败不算它的
+                summary['stale'] += 1
             elif result is None:                     # 收到停止请求,剩下的留给下一轮
                 summary['left'] += 1
-            else:
-                _save(item['key'], title_zh, result)
+            elif _save(item['key'], title_zh, result, input_version(item)):
                 summary['done'] += 1
+            else:
+                summary['stale'] += 1                # 作废,不写成功标记也不重导出
             if progress:
                 progress(summary['done'] + summary['failed'], len(rows))
     return summary
@@ -337,11 +404,16 @@ def translate_pending(kind: str, limit: int | None = None, progress=None) -> dic
 def summarize(summary: dict) -> str:
     if summary['skipped']:
         return f"英文内容未翻译({summary['skipped']})"
-    if not (summary['done'] or summary['failed'] or summary['left']):
+    if not (summary['done'] or summary['failed'] or summary['left']
+            or summary.get('stale')):
         return ''
     text = f"已翻译 {summary['done']} 条英文内容"
     if summary['failed']:
         text += f",{summary['failed']} 条翻译失败(仍在重试,暂不入库)"
+    if summary.get('stale'):
+        # 不混进 failed:那会让面板判红,而这不是故障。也不混进 left:那句话
+        # 说的是"这一轮没轮到",而这一条是译过了、结果作废了。
+        text += f",{summary['stale']} 条的原文在这期间换过、旧译文作废(下一轮按新正文重译)"
     if summary['left']:
         text += f",{summary['left']} 条留到下一轮译完再入库"
     return text

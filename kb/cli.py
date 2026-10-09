@@ -89,15 +89,20 @@ def _index_pass(args) -> int:
 
 
 def cmd_extract(args) -> int:
-    from kb.extract import (NO_BODY_NO_TEXT, body_gap, extract_with_llm,
-                            mark_no_body, pending_docs, save_extraction,
-                            writeback_extraction)
+    from kb.extract import (NO_BODY_NO_TEXT, StaleBody, body_fingerprint,
+                            body_gap, commit_extraction, extract_with_llm,
+                            mark_no_body, pending_docs)
     from kb.llm_stages import stage_model
     conn = store.connect()
     todo = pending_docs(conn, args.limit)
     print(f"[extract] 待提取 {len(todo)} 篇 (model={stage_model('extract')})")
-    ok = failed = empty = no_text = 0
+    ok = failed = empty = no_text = stale_body = 0
     for i, row in enumerate(todo, 1):
+        # 正文和它所属的那一版一条语句读出来(见 store.doc_body_version):拆成
+        # 两句的话,「这一版没有文字」那个终态会落到另一版正文上。顺带这也是
+        # commit_extraction 那道版本校验的取样点 —— 两个机制问的不是一件事
+        # (version 是"索引里哪一版文件",指纹是"我读到的正文长什么样"),但都
+        # 该取自同一个快照。
         version, body = store.doc_body_version(conn, row["path"])
         # 空正文的两档判定与管道共用 kb.extract 那一份,别在这儿另写一套 ——
         # 两处各判各的话,命令行跑完不落终态,下一轮管道又把它报成「需回填」
@@ -120,33 +125,40 @@ def cmd_extract(args) -> int:
             print(f"[{i}/{len(todo)}] SKIP {row['title'][:28]}: 正文为空"
                   f"(先把正文补回来再 kb index)")
             continue
+        # 读到的这一份正文的指纹:落库前 save_extraction 拿它比一次,正文在
+        # 模型调用期间被整篇换过(补抓把跳转壳换成全文)就丢掉这次结果。
+        seen = body_fingerprint(body)
         try:
             data = extract_with_llm(row["title"], body)
-            stale = save_extraction(conn, row["path"], data)
-            conn.commit()
+            # 校验 → 落库 → 提交 → 回写整段在「维护锁 → kb.db 写锁」里:这中间
+            # 没有别人能把正文换掉(见 commit_extraction)。回写失败只打一行 ——
+            # 判定已经落库了,不该把这一篇记成 FAIL。
+            commit_extraction(
+                conn, row["path"], data, seen, writeback=args.writeback,
+                on_error=lambda e, p=row["path"]: print(f"    [writeback-fail] {p}: {e}"))
             ok += 1
             ents = ", ".join(e["name"] for e in data["entities"][:4])
             print(f"[{i}/{len(todo)}] OK {row['title'][:28]} → [{ents}]")
+        except StaleBody:
+            # 不是失败:这一篇还在待提取集合里,下一轮按新正文重提。
+            stale_body += 1
+            print(f"[{i}/{len(todo)}] SKIP {row['title'][:28]}: 正文已更新,"
+                  f"这次结果作废(下轮按新正文重提)")
+            continue
         except Exception as e:
             failed += 1
             print(f"[{i}/{len(todo)}] FAIL {row['title'][:28]}: {e}")
             continue
-        if args.writeback:
-            # 判定已经落库了,回写只是展示层;单篇失败不该把这篇记成 FAIL
-            try:
-                if writeback_extraction(conn, row["path"], data, stale):
-                    conn.commit()
-            except Exception as e:
-                print(f"    [writeback-fail] {row['path']}: {e}")
     line = f"[extract] 完成: 成功 {ok}, 失败 {failed}"
     if empty:
         line += f", 跳过 {empty}(正文空)"
     if no_text:
         line += f", 无正文 {no_text}(仅图片等)"
+    if stale_body:
+        line += f", 跳过 {stale_body}(正文已更新)"
     print(line)
     conn.close()
     return 0
-
 
 def _build_filters(args) -> Filters:
     return Filters(

@@ -165,6 +165,11 @@ def start_pipeline(stages: list[str] | None = None,
             "stop_requested": False, "stopped": False, "run_id": run_id,
             "started_at": _now(), "finished_at": "",
             "crawl_filter": crawl_filter,
+            # 常规同步的导出范围就是抓取范围。**显式写一份、不靠"没设过"兜底**:
+            # 这是进程内的常驻状态,上一轮如果是重试,里面躺着的是那一轮的导出范围
+            # —— 不覆盖的话这一轮的落盘会把它原样带走,下一次重试就按一份跟这一轮
+            # 毫无关系的范围去导出。
+            "export_filter": deepcopy(crawl_filter),
             "run_kind": "sync",
             "planned_stages": [s for s in STAGES if s in wanted],
             "stages": {s: {"status": "pending" if s in wanted else "skipped",

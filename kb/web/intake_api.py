@@ -72,6 +72,10 @@ class Subscription(BaseModel):
     feed_url: str = Field(default='',max_length=2048)
     group_name: str = Field(default='',max_length=80)
     enabled: bool = True
+    # 「去原文链接把正文抓回来」(见 kb/feeds/fulltext.py)。默认关:只有链接
+    # 聚合源需要它,对本来就给全文的 feed 再抓一次是拿启发式提取的结果去换
+    # 作者亲手给的全文。
+    fulltext: bool = False
 
 
 class SubscriptionPatch(BaseModel):
@@ -80,6 +84,7 @@ class SubscriptionPatch(BaseModel):
     feed_url: str | None = Field(default=None,max_length=2048)
     group_name: str | None = Field(default=None,max_length=80)
     enabled: bool | None = None
+    fulltext: bool | None = None
 
 
 @router.post('/{kind}/sources',status_code=201)

@@ -85,7 +85,15 @@ function renderPipeState(s) {
     ? `${s.running ? '本次' : '上次'}来源：${scopes.map(scope => channelLabel(scope.channel)).join(' + ')}`
     : '选择来源后开始一次同步';
   const range = filter.since_date ? filter.since_date + ' 至 ' + filter.until_date : '不限时间';
-  const scope = scopes.map(item => `${scopes.length > 1 ? channelLabel(item.channel) + ' ' : ''}${item.accounts?.length ? item.accounts.length + ' 个指定订阅' : '全部订阅'}`).join(' · ');
+  // 「重试失败项」那一轮的范围是**按来源各自**收窄的（见 pipeline_retry.retry_crawl_scopes）:
+  // 收窄到失败项的那个来源写「仅重试失败的 N 个订阅」,而报不出失败名单的来源（公众号
+  // 的失败是文章级的）跑的就是原范围。给所有来源一律写「仅重试失败项」是一句谎话 ——
+  // 它承诺了那个来源并没有发生的收窄;照 accounts 一律写「全部订阅」也是,那正是这颗
+  // 按钮刚被修掉的那个行为。
+  const scopeText = item => item.retry === 'targets'
+    ? `仅重试失败的 ${item.accounts.length} 个订阅`
+    : item.accounts?.length ? item.accounts.length + ' 个指定订阅' : '全部订阅';
+  const scope = scopes.map(item => `${scopes.length > 1 ? channelLabel(item.channel) + ' ' : ''}${scopeText(item)}`).join(' · ');
   $('pipe-run-scope').textContent = scopes.length
     ? `${scope} · ${range}${result.finished_at ? ' · ' + result.finished_at + ' 结束' : ''}` : '';
   $('pipe-progress-label').textContent = planned.length ? `${completed} / ${planned.length} 完成` : '—';

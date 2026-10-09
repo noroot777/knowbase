@@ -61,8 +61,10 @@ function channelLabel(id) { return pipeChannels.find(c => c.id === id)?.label ||
 // 一次运行抓了哪几个来源。多来源记在 channels 里，只有一个来源时仍是老样子的
 // channel + accounts —— 存量状态文件和旧的运行记录都还是后者，两种都要认。
 function pipeRunScopes(filter) {
-  if (filter?.channels?.length) return filter.channels.map(s => ({ channel: s.channel, accounts: s.accounts || [] }));
-  return filter?.channel ? [{ channel: filter.channel, accounts: filter.accounts || [] }] : [];
+  // retry:「重试失败项」那一轮这个来源的范围是怎么来的（'targets' 收窄到了失败的
+  // 那几个 / 'all' 这个来源收窄不了、跑的是原范围），面板那行「本次范围」要照它说话。
+  if (filter?.channels?.length) return filter.channels.map(s => ({ channel: s.channel, accounts: s.accounts || [], retry: s.retry || '' }));
+  return filter?.channel ? [{ channel: filter.channel, accounts: filter.accounts || [], retry: filter.retry || '' }] : [];
 }
 
 function renderPipeChannel() {

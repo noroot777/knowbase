@@ -9,7 +9,7 @@ let subsPendingKind = '';   // switchTab 接到老深链(#social 等)时暂存�
 try { subsKind = localStorage.getItem('kb-subs-kind') || ''; } catch {}
 let sourceKind = '', sourceView = 'items', sourceData = null, sourceRows = [];
 let sourceOffset = 0, sourceTotal = 0, sourceVersion = 0, sourcePoll = null, sourceSearchTimer;
-let sourceItemsVersion = 0, sourceItemsFailed = false, sourceTranslating = 0;
+let sourceItemsVersion = 0, sourceItemsFailed = false, sourceTranslating = 0, sourceFetching = 0;
 let sourceBusy = false;
 const sourceFilters = new Map();
 
@@ -254,7 +254,7 @@ async function renderSourceView(reset = false) {
     if (!currentSourceItems(kind, version, q, id)) return;
     sourceItemsFailed = false;
     sourceRows = data.items; sourceOffset = data.items.length; sourceTotal = data.total;
-    sourceTranslating = data.translating || 0;
+    sourceTranslating = data.translating || 0; sourceFetching = data.fetching || 0;
     renderSourceItems();
   } catch (e) {
     if (!currentSourceItems(kind, version, q, id)) return;
@@ -284,7 +284,7 @@ function renderSubscription(s) {
     <div class="source-avatar" aria-hidden="true">${esc(s.name.slice(0,1))}</div>
     <div class="source-subscription-body"><div class="source-row-title"><h3>${esc(s.name)}</h3><span class="source-state ${s.enabled && s.last_error ? 'failed' : ''}">${status}</span></div>
     <a class="source-url" href="${esc(safeUrl(s.url))}" target="_blank" rel="noopener noreferrer">${esc(s.url)}</a>
-    <div class="source-row-meta">${esc(s.group_name || '未分组')} · ${s.item_count} 条 · ${s.last_success ? '最近成功 '+sourceTime(s.last_success) : '尚未成功同步'}</div>
+    <div class="source-row-meta">${esc(s.group_name || '未分组')} · ${s.item_count} 条 · ${s.last_success ? '最近成功 '+sourceTime(s.last_success) : '尚未成功同步'}${s.fulltext ? ' · 补抓原文正文' : ''}</div>
     ${s.configuration_error ? `<p class="source-row-meta">${esc(s.configuration_error)}</p>` : ''}
     ${!s.last_error && s.last_note ? `<p class="source-row-meta">${esc(s.last_note)}；下次同步从上次的位置接着读。</p>` : ''}
     ${s.last_error ? `<details class="source-failure"><summary>查看失败原因与重试时间</summary><p>${esc(s.last_error)}</p><p>自动重试：${sourceTime(s.retry_at*1000)}；也可点击“同步”立即重试。</p></details>` : ''}</div>
@@ -313,7 +313,12 @@ function sourceText(item) {
   const title = item.title_zh || item.title, body = item.body_zh || item.body;
   const whole = !!item.body_zh && (!item.title || !!item.title_zh);
   return { title, body, translated: whole, translating: !!item.translating,
-           retranslating: !!item.retranslating, partial: !!item.partial };
+           retranslating: !!item.retranslating, partial: !!item.partial,
+           // 正文补抓那两档(kb/feeds/fulltext.py)。它排在翻译之前,所以后端
+           // 的 `translate.queued_sql` 已经把这批条目排除在翻译队列之外 ——
+           // 这里不会和上面几档同时为真。`refetching` 是"壳已经入库、正在补抓
+           // 正文覆盖它",和 `retranslating` 是同一个形状。
+           fetching: !!item.fetching, refetching: !!item.refetching };
 }
 function renderSourceItems() {
   const rows = sourceRows.map(item => { const t = sourceText(item); return `<article class="source-entry">
@@ -321,13 +326,55 @@ function renderSourceItems() {
     ${t.translating
       // 等翻译的条目不给“展开阅读”:知识库里这一条还不存在,展开只能展开英文
       // 原文。标题和正文都换成中文状态文案,原文入口留在右下角那个链接上。
+      // **这一行在社交观点上照旧显示**:它回答的是"这张卡片为什么没有内容",
+      // 不是"这条内容叫什么" —— 和下面去掉的那个标题不是一回事。
       ? `<h3 class="source-entry-name">外文内容，正在等翻译</h3>
     <p class="source-excerpt">译成中文之后才写进知识库；这一条现在只有原文，点右下角“原文”可以直接看。</p>`
-      : `<h3><button class="source-entry-title" data-read-item="${item.key}">${esc(t.title)}</button></h3>
-    <p class="source-excerpt">${esc(t.body.slice(0,380))}${t.body.length>380?'…':''}</p>`}
-    <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}${t.translating ? ' · 外文原文，正在等翻译' : t.translated ? ' · 已译为中文' : t.retranslating ? ' · 外文原文已入库，正在等中文译文覆盖' : t.partial ? ' · 正文已译为中文，标题还是原文（下次同步补译）' : ''}</span>${t.translating ? '' : `<button class="text-button" data-read-item="${item.key}">展开阅读</button>`}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`; }).join('');
-  const note = sourceTranslating
-    ? `<p class="source-note" role="status">${sourceTranslating} 条外文内容还在等翻译：译成中文之后才写进知识库。</p>` : '';
+      // 等补抓的条目**标题照显示**:它是这条内容的标题,不是占位文字,而且
+      // 用户正是靠它认出这一条。换掉的只有正文那一段 —— 那里此刻是 feed 给
+      // 的跳转壳(“标题（域名）↑ 101 HN Points”),照显示等于让人以为这条内容
+      // 就只有这些。也不给“展开阅读”:库里压根还没有这一条(exported_hash 空,
+      // 导出闸门扣着它)。
+      //
+      // **这一档不按 `content_kind` 省掉标题**(下面那个普通分支会):省标题的
+      // 理由是"推文的标题就是正文,摆在正文上面等于同一段话读两遍",而这一档的
+      // 正文位置换成了状态文案 —— 标题是卡片上唯一的内容标识,省掉就只剩一句
+      // 谁都一样的提示,认不出是哪一条了。
+      //
+      // **已经导出过的那一档(`refetching`)走下面的普通分支**:库里此刻就是
+      // 这份壳,如实显示、照旧可以展开,只在页脚说清正文还在补。说它"抓到之后
+      // 才写进知识库"和文件、索引的事实正相反 —— 而打开这个开关最常见的时机
+      // 恰恰是"已经同步过、几百条壳就摆在眼前",那一句加上"不给展开"等于把一批
+      // 本来读得到的条目一起藏起来(口径同翻译那边的 retranslating)。
+      : t.fetching
+      ? `<h3 class="source-entry-name">${esc(t.title)}</h3>
+    <p class="source-excerpt">这个来源只给了一条链接，正在去原文把正文抓回来；抓到之后才翻译、写进知识库。点右下角“原文”可以直接看。</p>`
+      // **社交观点没有「标题」这回事**:采集器把推文正文的前 500 字符原样当成
+      // title(`x_browser._entry` / `x_feedgrab._entry`;桥接那条走
+      // `fetching.parse_feed`,源没给标题时回退成正文首行),于是这一档的标题
+      // 和紧跟着的正文是同一句话连着显示两遍 —— 而标题那个 <button> 继承了
+      // base.css 的 `white-space: nowrap`(按钮文字本来就不该折行),旁边那句
+      // `overflow-wrap:anywhere` 在 nowrap 之下压根不起作用,于是一条长推文
+      // 一行到底、直接撑出卡片右边界。
+      // **判据用条目自己的 `content_kind`**(只有 social 来源的条目是 `post`),
+      // 不问当前视图选的是哪个来源:要回答的是"这一条内容有没有标题",那是内容
+      // 自己的属性。如实记一笔:今天 `sourceKind === 'social'` 和它逐条等价
+      // (social 来源的每一条都是 post,而弹窗是模态的、开着时切不了视图),
+      // 定点注入换成按视图判一条都不红 —— 选它不是因为防住了某个事故,是因为
+      // 另一个问句(现在在看哪个来源)恰好同解,而同解是会变的。页脚那句
+      // 「社交观点 / 订阅正文」问的才是来源,所以它照旧按视图走。
+      // 去掉标题之后正文是卡片上唯一的内容,所以从 muted 的"摘要"提成次要
+      // 正文(`is-post`)。展开阅读原来有标题和页脚两个入口,现在只剩页脚那个。
+      : `${item.content_kind === 'post' ? '' : `<h3><button class="source-entry-title" data-read-item="${item.key}">${esc(t.title)}</button></h3>`}
+    <p class="source-excerpt${item.content_kind === 'post' ? ' is-post' : ''}">${esc(t.body.slice(0,380))}${t.body.length>380?'…':''}</p>`}
+    <div class="source-entry-footer"><span>${t.fetching || t.refetching ? '链接条目' : item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}${t.fetching ? ' · 正在补抓原文正文' : t.refetching ? ' · 只有链接的壳已入库，正在补抓原文正文覆盖' : t.translating ? ' · 外文原文，正在等翻译' : t.translated ? ' · 已译为中文' : t.retranslating ? ' · 外文原文已入库，正在等中文译文覆盖' : t.partial ? ' · 正文已译为中文，标题还是原文（下次同步补译）' : ''}</span>${t.translating || t.fetching ? '' : `<button class="text-button" data-read-item="${item.key}">展开阅读</button>`}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`; }).join('');
+  // 两句提示各说各的一档,都有就都说:它们是流水线上先后两步,数字也不是一回事
+  // (补抓那一档还没轮到翻译,翻译那一档的正文早就到手了)。
+  const notes = [
+    sourceFetching ? `${sourceFetching} 条只拿到链接，正在补抓原文正文：抓到之后才翻译、写进知识库。` : '',
+    sourceTranslating ? `${sourceTranslating} 条外文内容还在等翻译：译成中文之后才写进知识库。` : '',
+  ].filter(Boolean);
+  const note = notes.length ? `<p class="source-note" role="status">${notes.join('')}</p>` : '';
   $('source-list').innerHTML = rows ? note + rows :
     `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value ? '换个关键词或切换订阅试试。' : sourceData?.unconfigured && !sourceData?.ready ? sourceConfigHint() : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p></div>`;
   $('source-more').hidden = sourceOffset >= sourceTotal;
@@ -343,7 +390,8 @@ async function moreSourceItems() {
     const seen = new Set(sourceRows.map(r => r.key));
     sourceRows.push(...data.items.filter(r => !seen.has(r.key)));
     sourceOffset += data.items.length; sourceTotal = data.total;
-    sourceTranslating = data.translating || 0; renderSourceItems();
+    sourceTranslating = data.translating || 0; sourceFetching = data.fetching || 0;
+    renderSourceItems();
   } catch(e) { if (currentSourceItems(kind, version, q, id)) sourceError(e.message); }
   finally { if (version === sourceItemsVersion) $('source-more').disabled = false; }
 }
@@ -370,7 +418,12 @@ function readSourceItem(key) {
 function renderSourceReader() {
   const item = sourceReaderItem, t = sourceText(item);
   const original = sourceReaderOriginal;
-  $('source-reader-title').textContent = original ? item.title : t.title;
+  // 社交观点同样不显示标题(理由见 renderSourceItems):那是正文的前 500 字符,
+  // 摆在正文正上方就是同一段话连着读两遍。作者和时间留在下面那行 meta 上,
+  // 这一条是谁什么时候发的不会因此丢掉。
+  const post = item.content_kind === 'post';
+  $('source-reader-title').hidden = post;
+  $('source-reader-title').textContent = post ? '' : (original ? item.title : t.title);
   $('source-reader-meta').textContent = `${item.author} · ${item.published ? sourceTime(item.published) : '发布时间未知'}${item.content_kind==='summary'?' · 订阅摘要，全文请打开原文':''}${t.translated ? (original ? ' · 英文原文' : ' · 自动翻译') : ''}`;
   $('source-reader-body').textContent = original ? item.body : t.body;
   $('source-reader-original').hidden = !t.translated;

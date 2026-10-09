@@ -8,9 +8,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from kb import store
-from kb.extract import (NO_BODY_NO_TEXT, body_gap, extract_with_llm,
-                        mark_no_body, pending_docs, save_extraction,
-                        writeback_extraction)
+from kb.extract import (NO_BODY_NO_TEXT, StaleBody, body_fingerprint, body_gap,
+                        commit_extraction, extract_with_llm, mark_no_body,
+                        pending_docs)
 
 WORKERS = 6
 
@@ -23,6 +23,11 @@ def main():
     # 预取正文,worker 不碰数据库。空正文在这儿就筛掉:拿空串去调 LLM 必然
     # 产出一份只凭标题编的判定,还要按 token 付钱。两档判定与另外两条路共用
     # kb.extract 那一份(这个脚本自称与 `kb extract --writeback` 等价)。
+    #
+    # 版本号和指纹都取自同一个快照(doc_body_version 一条语句),回答的不是一件
+    # 事:版本号给 mark_no_body 做条件 UPDATE,指纹给 commit_extraction 比对
+    # ——这一趟几千篇要跑几十分钟,期间某一篇的正文完全可能被整篇换掉(补抓把
+    # 跳转壳换成全文),落库前拿它比一次。
     jobs = []
     empty = no_text = tried = 0
     for row in todo:
@@ -37,7 +42,7 @@ def main():
         if gap:
             empty += 1
             continue
-        jobs.append((row["path"], row["title"], body))
+        jobs.append((row["path"], row["title"], body, body_fingerprint(body)))
     if tried:
         # 0 行的那次 UPDATE 也把事务开着了,所以按「试过几次」提交、不按
         # 「写进去几条」:后面的 tag 回写要先取维护锁,攥着没提交的写事务
@@ -48,33 +53,41 @@ def main():
     if empty:
         print(f"[extract-p] 正文为空 {empty} 篇(待回填,本轮跳过)", flush=True)
 
-    ok = failed = 0
+    ok = failed = stale_body = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futs = {pool.submit(extract_with_llm, t, b): (p, t) for p, t, b in jobs}
+        futs = {pool.submit(extract_with_llm, t, b): (p, t, seen)
+                for p, t, b, seen in jobs}
         for i, fut in enumerate(as_completed(futs), 1):
-            path, title = futs[fut]
+            path, title, seen = futs[fut]
             try:
                 data = fut.result()
             except Exception as e:
                 failed += 1
                 print(f"[{i}/{len(jobs)}] FAIL {title[:28]}: {str(e)[:80]}", flush=True)
                 continue
-            stale = save_extraction(conn, path, data)
-            # 先把判定落盘,再去回写 —— 和另外两条路同一个时序。回写整段要取
-            # kb.maintenance 那把维护锁,攥着一个没提交的 SQLite 写事务去等它的话,
-            # 持锁的清理会卡在自己的 DELETE 上(SQLite 的写锁不认那把锁),两边
-            # 互相等到我们超时放弃为止。
-            conn.commit()
             try:
-                writeback_extraction(conn, path, data, stale)
-            except Exception as e:
-                print(f"    [writeback-fail] {path}: {e}", flush=True)
-            conn.commit()
+                # 校验 → 落库 → 提交 → 回写整段在「维护锁 → kb.db 写锁」里,
+                # 和另外两条路同一个入口:这中间没有别人能把正文换掉,而攥着一个
+                # 没提交的写事务去等维护锁会把持锁的清理卡死在它自己的 DELETE 上
+                # (SQLite 的写锁不认那把锁)。见 extract.commit_extraction。
+                commit_extraction(
+                    conn, path, data, seen,
+                    on_error=lambda e, p=path: print(f"    [writeback-fail] {p}: {e}",
+                                                     flush=True))
+            except StaleBody:
+                # 不是失败:这一篇还在待提取集合里,下一轮按新正文重提。
+                stale_body += 1
+                print(f"[{i}/{len(jobs)}] SKIP {title[:28]}: 正文已更新,这次结果作废",
+                      flush=True)
+                continue
             ok += 1
             if i % 10 == 0 or i == len(jobs):
                 print(f"[{i}/{len(jobs)}] ok={ok} fail={failed}", flush=True)
 
-    print(f"[extract-p] 完成: 成功 {ok}, 失败 {failed}", flush=True)
+    line = f"[extract-p] 完成: 成功 {ok}, 失败 {failed}"
+    if stale_body:
+        line += f", 跳过 {stale_body}(正文已更新)"
+    print(line, flush=True)
     conn.close()
     return 0
 

@@ -31,7 +31,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb import aggregate, extract, search, store  # noqa: E402
+from kb import aggregate, extract, scanner, search, store  # noqa: E402
 
 
 class _DB(unittest.TestCase):
@@ -471,8 +471,13 @@ class ExtractEntrypointsTest(unittest.TestCase):
                       + "".join(f"  - {t}\n" for t in tags) + "---\n正文\n",
                       encoding="utf-8")
         conn = store.connect(self.db)
+        # content_hash 要是**真**的那一份:生产里这一列只有 `scanner.file_hash`
+        # 一个口径(索引写、`refresh_content_hash` 刷),写个假值等于摆出一个
+        # 「索引还没扫到当前这份 md」的状态 —— `save_extraction` 的正文版本校验
+        # 会如实把这次结果作废,而这条用例测的压根不是那件事。
         conn.execute("INSERT INTO documents (path, source, title, content_hash,"
-                     " promo_level) VALUES ('a.md','dr-gzh','文','old',?)", (level,))
+                     " promo_level) VALUES ('a.md','dr-gzh','文',?,?)",
+                     (scanner.file_hash(md.read_text(encoding="utf-8")), level))
         conn.execute("INSERT INTO chunks (path, seq, text) VALUES ('a.md',0,'正文')")
         conn.commit()
         conn.close()

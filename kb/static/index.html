@@ -312,6 +312,7 @@
   <label for="source-edit-group">分组（可选）</label><input id="source-edit-group" maxlength="80" placeholder="例如：中文关注、技术博客">
   <label for="source-edit-feed">专用订阅链接（可选）</label><input id="source-edit-feed" type="url" maxlength="2048" placeholder="https://"><p class="hint">填写后优先从这里获取内容，主页链接保持不变。</p>
   <label><input id="source-edit-enabled" type="checkbox" checked> 启用此订阅</label>
+  <label><input id="source-edit-fulltext" type="checkbox"> 去原文链接补抓正文</label><p class="hint">给只提供链接和摘要的聚合源用（例如 HN Buzzing）：同步时顺着每条的原文链接把正文抓回来，再翻译、写进知识库。本来就提供全文的订阅不要开，那会拿自动提取的结果换掉作者给的全文。打开之后，这个来源已收录的旧条目也会分批补抓并重新翻译。</p>
   <div id="source-edit-error" class="field-err" role="alert"></div><div class="source-form-actions"><button type="button" class="ghost" onclick="closeSourceEditor()">取消</button><button type="submit" id="source-edit-save">保存订阅</button></div>
   </form></div></div>
 <div id="source-reader" class="modal-mask" style="display:none" onclick="if(event.target===this)$('source-reader').style.display='none'"><div class="modal source-reader-dialog">

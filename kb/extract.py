@@ -20,7 +20,7 @@ documents.promo_level,下游(条目化 gate、检索、wiki)一律读这一列�
 
 from __future__ import annotations
 
-import json
+import hashlib
 import re
 from datetime import datetime
 
@@ -31,115 +31,19 @@ from kb.norm import entity_norm, kind_norm
 # 阶段决定(kb.llm_stages 的 "extract");没配就用那里登记的内置默认 gpt-5.5。
 # 别在这里写死字面量:改模型要能在面板上看见、也能按供应商分开选。
 
-# 软广的判定口径。抽成一份常量:提取阶段(随 entity/topic 顺带判)和存量补判
-# 脚本(只判软广)共用同一段文字,两处的标准才不会各漂各的。
-#
-# 「只看正文主体」那条是拿真实样本调出来的:GitHub猿 这类号在每篇文末固定挂
-# 一段代充值/加群广告,不写清楚的话模型会因为那条尾巴把正经资讯文也判成 hard
-# (2026-09-16 随机采样 50 篇时抓到两例误杀)。
-_PROMO_RULES = """\
-  * hard:整篇就是为某个商业产品/服务服务的——通篇围绕它、只讲好话没有独立
-    对比与缺点,并且在做转化引导:堆促销权益话术(免费不限量、注册就送、每天
-    领取、限时白嫖、专属优惠码/邀请码、活动价)、给注册落地页或下载地址、
-    让人扫码进群/加客服/点「阅读原文」领取;或文中明示是推广/赞助/合作;
-    代充值、代开会员、共享账号、API 中转站一类导流文也算。
-  * soft:有推广倾向但仍给了实质信息——厂商自家发布通稿、带邀请返利链接的推荐、
-    通篇只夸一家产品但确实写清了能力和用法。
-  * none:正常内容——开源项目介绍、技术教程、行业资讯报道、观点评论、论文解读。
-  只看正文主体,不看文末的固定推广位:公众号普遍在结尾挂加群、加客服、代充值
-  一类的尾巴,那是这个号每篇都有的版位,不是这一篇的性质。正文本身是资讯报道、
-  开源项目介绍或教程的,即便文末挂着广告也判 none/soft;
-  hard 留给「把整篇文章买下来卖那个产品」的投放稿。
-  被推广的东西是开源项目(有公开仓库、能自己部署、不花钱)时一律不判 hard,
-  最多 soft:号主把它吹上天、顺带拉群拉关注,那是这类号的文风,不是买量投放。
-  hard 的推广对象必然是要花钱或要注册账号的商业产品/服务。
-  判断依据是「有没有在做拉新转化 + 是不是只讲好话」,不是「有没有提到商业产品」:
-  介绍一个免费开源项目、报道某厂新模型发布,本身都算 none;
-  有实测截图、有使用教程也不能反证不是软广——投放稿通常就长这样。"""
+# 提示词、正文截断、调模型与回包归一都在 `kb/extract_llm.py`(700 行上限逼出来
+# 的一次拆分,那一块没有模块级可变状态、不碰库也不碰文件)。**在这里原样再导出**:
+# `extract.clip_body` / `extract.PROMO_HEAD` / `patch.object(extract,
+# "extract_with_llm", …)` 这些写法一个字不用改,调用方函数内 import 的也照旧
+# 拿到被打桩的那一份。
+from kb.extract_llm import (  # noqa: F401  (原样再导出,见上面那段)
+    BODY_HEAD, BODY_TAIL, PROMO_HEAD, PROMO_LEVELS, PROMO_TAIL, clip_body,
+    extract_with_llm, judge_promo, normalize_promo)
 
-_PROMPT = """\
-你是知识库索引员。读下面这篇文章,提取检索用元数据,只输出一个 JSON 对象,不要任何其他文字:
-
-{{
-  "entities": [{{"name": "实体规范名", "kind": "project|product|org|model|other"}}],
-  "topics": ["主题词"],
-  "summary": "一句话说明文章讲了什么(<=60字)",
-  "promo": {{"level": "none|soft|hard", "reason": "一句话理由"}}
-}}
-
-规则:
-- entities 是文章实际介绍/讨论的具体对象:开源项目名、产品名、公司名、模型名。
-  用官方拼写(如 book-to-skill、Claude Code),最多 8 个,只提文章真正着墨的,顺带一提的不要。
-- topics 从这个固定候选里选,最多 4 个:AI编程, AI Agent, skill工具, 开源项目, 大模型,
-  提示词工程, 知识管理, AI资讯, 效率工具, 机器人, AI视频图像, 其他
-- summary 说清楚"是什么+能干什么",让人不点开也知道要不要看。
-- promo 判断这篇是不是「软广」——受商业委托、以拉新转化为目的的投放稿:
-""" + _PROMO_RULES + """
-- JSON 字符串值里不要出现英文双引号,引用词一律用中文引号「」。
-
-标题: {title}
-公众号: {account}
-
-正文:
-{body}
-"""
-
-# 只判软广的轻量 prompt:存量补判用。entity/topic/summary 早就提过了,没必要
-# 连同整套元数据重来一遍——输入砍到头尾各一段,输出只剩一个小 JSON。
-_PROMO_ONLY_PROMPT = """\
-你是内容审核员。判断下面这篇公众号文章是不是「软广」——受商业委托、以拉新转化\
-为目的的投放稿。只输出一个 JSON 对象,不要任何其他文字:
-
-{{"level": "none|soft|hard", "reason": "一句话理由,用中文"}}
-
-口径:
-""" + _PROMO_RULES + """
-- JSON 字符串值里不要出现英文双引号,引用词一律用中文引号「」。
-
-标题: {title}
-公众号: {account}
-
-正文:
-{body}
-"""
-
-# 喂给模型的正文上限。总量沿用原来的 6000 字符不变(token 成本不变),但拆成
-# 头 + 尾:软广的转化钩子(注册地址、「阅读原文领取」、推广落款)基本都在文末,
-# 只截开头的话这批信号一个都看不到。
-BODY_HEAD = 4800
-BODY_TAIL = 1200
-# 只判软广时的正文用量。软广信号密集在开头(钩子 + 产品名)和结尾(注册地址、
-# 促销),中间的实测细节对这个判断没什么增量,所以砍到全量提取的四成。
-PROMO_HEAD = 1600
-PROMO_TAIL = 800
-
-PROMO_LEVELS = ("none", "soft", "hard")
 # hard 软广在 obs 里也标出来。doc_tags 在重索引时会按 frontmatter 重建,所以
-# 这个 tag 跟 topic/entity 一样要靠 writeback 回写 md 才持久。
+# 这个 tag 跟 topic/entity 一样要靠 writeback 回写 md 才持久。**它留在这里**:
+# 回答的是"回写哪个标签",不是跟模型打交道的事。
 PROMO_TAG = "flag/软广"
-
-
-def clip_body(body: str, head: int = BODY_HEAD, tail: int = BODY_TAIL) -> str:
-    """正文超长时取「头 + 尾」,中间略去。"""
-    if len(body) <= head + tail:
-        return body
-    return f"{body[:head]}\n\n……(中间略)……\n\n{body[-tail:]}"
-
-
-def normalize_promo(raw) -> dict:
-    """把模型给的 promo 归一成 {level, reason}。
-
-    认不出的一律落 none:软广判定是「宁可漏、不可错杀」——错杀会让一篇正常
-    文章连同它的实体一起从条目化和检索里消失,而漏判只是留着一篇广告。
-    """
-    if isinstance(raw, str):                    # 模型偶尔直接给 "hard"
-        raw = {"level": raw}
-    if not isinstance(raw, dict):
-        raw = {}
-    level = str(raw.get("level") or "").strip().lower()
-    if level not in PROMO_LEVELS:
-        level = "none"
-    return {"level": level, "reason": str(raw.get("reason") or "").strip()[:200]}
 
 
 def _tag_slug(name: str) -> str:
@@ -182,65 +86,24 @@ def parse_pretagged(doc) -> dict | None:
             "summary": str(meta.get("summary") or "")}
 
 
-def extract_with_llm(title: str, body: str, timeout: int = 120,
-                     account: str = "") -> dict:
-    """调 LLM API 提取。异常往上抛,由调用方决定跳过还是中止。
-
-    模型偶发在字符串值里输出未转义双引号产生坏 JSON(概率性,同文重跑
-    通常就好),解析失败原地重试一次;API 报错/超时不重试,留给下轮管道。"""
-    last_err: Exception | None = None
-    for _ in range(2):
-        try:
-            return _extract_once(title, body, timeout, account)
-        except (json.JSONDecodeError, ValueError) as e:
-            last_err = e
-    raise last_err
 
 
-def _extract_once(title: str, body: str, timeout: int, account: str = "") -> dict:
-    from kb.llm import chat
-    from kb.llm_stages import stage_model
+class StaleBody(Exception):
+    """这次提取结果针对的那份正文,已经不是当前那一份了 —— 结果作废。
 
-    prompt = _PROMPT.format(title=title, account=account or "(未知)",
-                            body=clip_body(body))
-    # 产物是一个小 JSON 对象,2048 足够;OpenAI 侧推理 token 另有内部下限兜底
-    out = chat(prompt, stage_model("extract"), max_tokens=2048, timeout=timeout)
-    # 容错:模型可能包 ```json 围栏
-    m = re.search(r"\{.*\}", out, re.S)
-    if not m:
-        raise ValueError(f"输出里没有 JSON: {out[:200]}")
-    data = json.loads(m.group(0))
-    data.setdefault("entities", [])
-    data.setdefault("topics", [])
-    data.setdefault("summary", "")
-    data["promo"] = normalize_promo(data.get("promo"))
-    return data
-
-
-def judge_promo(title: str, body: str, account: str = "",
-                timeout: int = 120) -> dict:
-    """只判软广,不重做 entity/topic/summary(存量补判走这条)。
-
-    重试语义与 extract_with_llm 一致:坏 JSON 原地重试一次,API 报错直接抛。
+    不是故障:这一篇留在待提取集合里(`extracted_at` 一个字不写),下一轮按
+    新正文重提一次就对了。三条提取路径都把它归到「跳过」那一档,不记失败
+    ——记失败会让面板标红,而这里什么都没坏。
     """
-    from kb.llm import chat
-    from kb.llm_stages import stage_model
 
-    prompt = _PROMO_ONLY_PROMPT.format(
-        title=title, account=account or "(未知)",
-        body=clip_body(body, PROMO_HEAD, PROMO_TAIL))
-    last_err: Exception | None = None
-    for _ in range(2):
-        out = chat(prompt, stage_model("extract"), max_tokens=1024, timeout=timeout)
-        m = re.search(r"\{.*\}", out, re.S)
-        if m is None:
-            last_err = ValueError(f"输出里没有 JSON: {out[:200]}")
-            continue
-        try:
-            return normalize_promo(json.loads(m.group(0)))
-        except json.JSONDecodeError as e:
-            last_err = e
-    raise last_err
+
+def body_fingerprint(text: str) -> str:
+    """一份正文的指纹。提取开始时按读到的那份算一次,落库前再比一次。
+
+    口径只有这一份:调用方拿自己手里那份 body 算,`save_extraction` 落库前
+    按**索引里此刻**那份算,两个数相等才说明"这个结论还是针对当前正文的"。
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def save_promo(conn, path: str, promo: dict, now: str | None = None) -> bool:
@@ -281,7 +144,81 @@ def sync_promo_tag(conn, doc_path: str, level: str, stale: bool) -> None:
     writeback_extraction(conn, doc_path, {"promo": {"level": level}}, stale)
 
 
-def save_extraction(conn, path: str, data: dict) -> bool:
+def _body_moved(conn, path: str, body_seen: str) -> str:
+    """这次结果针对的那份正文还是**当前**那一份吗 —— 变了就返回一句原因。
+
+    **口径只有这一份,两个消费点**:落库前 `_require_current_body` 拿它抛
+    `StaleBody`,回写前 `writeback_extraction` 在同一把维护锁里拿它判一次布尔。
+    两处各写一遍的话,拦下来的和写回去的不是同一批。
+
+    两道各管一种交错时序,少哪一道哪一种就漏过去:
+
+    ①**索引还没扫到当前这份 md**(`documents.content_hash` 对不上文件)。这是
+      「导出完成、索引还没跟上」那一档:`fulltext.retire_stale` 在导出之后就把
+      这一篇排回了待提取集合,而提取读的是**索引里**那份正文(`store.doc_body`
+      拼的是 chunks)—— 旁路的一轮 `kb extract` 正好落在这个缝里,就会拿旧壳
+      再提一遍。那一刻 chunks 压根没变,所以 ② 对它是瞎的。
+    ②**索引里那份正文已经和我读到的不是同一份了**。这是「旧正文的提取请求
+      在途、模型回包晚于全文更新」那一档:中间那次 index 已经把 chunks 换成
+      新正文,`content_hash` 跟着对上了文件 —— 所以 ① 对它是瞎的。
+
+    **拦不住的后果是永久的**:落库会把 `extracted_at` 设上,这一篇从此再也不进
+    `pending_docs`,摘要、主题、实体永久停在那个跳转壳上,再同步、再索引都不会
+    自己纠正(2026-10-09 第 2 轮审查两种时序各三次稳定复现)。
+
+    **md 压根读不出来(清理正把这一篇删掉)不算"版本不对",直接放行。** 这一档
+    本来就有人管:`writeback_extraction` 在锁内复查「这一篇还在吗」,落进库的判定
+    随后被外键级联一并带走(真半途失败也由下一轮 `remove_missing_documents` 收掉),
+    末态干净 —— 那是本来就对的一条路。在这里改判成作废只是把它换了个形状,代价
+    却是实打实的:回写压根不会被调到,**于是"回写在锁里、读也不许读"那组回归对它
+    不再敏感**(把回写那把锁去掉也照样全绿)。这道判据只回答「我读到的正文还是
+    当前那一份吗」,"这一篇还在不在"不是它的问题。
+    """
+    from kb import store
+    from kb.scanner import file_hash
+    try:
+        text = (VAULT_ROOT / path).read_text(encoding="utf-8")
+    except OSError:
+        return ""                   # 见 docstring:这一档交给回写那道锁内复查
+    if store.doc_needs_reindex(conn, path, file_hash(text)):
+        return "索引还没扫到当前这份 md,提取结果作废"
+    if body_fingerprint(store.doc_body(conn, path)) != body_seen:
+        return "正文已更新,提取结果作废"
+    return ""
+
+
+def _require_current_body(conn, path: str, body_seen: str) -> None:
+    """落库之前确认正文版本,对不上抛 `StaleBody`(判据见 `_body_moved`)。
+
+    **这道检查本身给不了保证,得由 `commit_extraction` 把它和写入圈进同一个
+    维护锁 + 写事务里。** 单独跑只回答"检查的那一瞬间正文还是不是我读到的
+    那份",答不了"我写进去的那一瞬间还是不是" —— 两者之间那个窗口有一份实测
+    后果,见 `commit_extraction` 的说明。
+    """
+    reason = _body_moved(conn, path, body_seen)
+    if reason:
+        raise StaleBody(f"{reason}: {path}")
+
+
+def save_extraction(conn, path: str, data: dict, body_seen: str | None = None) -> bool:
+    """把一篇的提取结果落库。`body_seen` 给了就先校验正文版本(见 `StaleBody`)。
+
+    **提取是「读正文 → 等几十秒模型 → 落库」,正文在这中间可能整篇换掉。**
+    补抓把跳转壳换成全文正是这么一条路:它会把这一篇送回待提取集合,于是
+    「模型读走旧壳 → 期间正文换新并重新索引 → 旧结论落库」成了常规时序,
+    而落库会把 `extracted_at` 设上 —— 这一篇从此再也不进 `pending_docs`,
+    摘要、主题、实体永久停在那个壳上,再同步也不会自己纠正(2026-10-09
+    第 2 轮审查两种交错时序各三次稳定复现)。所以落库之前比一次指纹,
+    对不上就整份丢掉。
+
+    判据有两道,**各管一种交错时序、缺一不可**(都在 `_body_moved`)。校验和这
+    一串写入之间还有个窗口,**那由 `commit_extraction` 把两头圈进同一个维护锁
+    + 写事务里关掉** —— 三条读正文的提取路径一律走它,不要在外面自己拼。
+    不校验的那几条路(`body_seen=None`)是压根不读索引正文的:`parse_pretagged`
+    直接解析 frontmatter,软广补判只改 promo —— 它们没有"基于哪一份正文"可言。
+    """
+    if body_seen is not None:
+        _require_current_body(conn, path, body_seen)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn.execute("DELETE FROM entities WHERE path=?", (path,))
     for e in data["entities"]:
@@ -348,7 +285,8 @@ def _still_indexed(conn, doc_path: str) -> bool:
                         (doc_path,)).fetchone() is not None
 
 
-def writeback_extraction(conn, doc_path: str, data: dict, stale: bool) -> bool:
+def writeback_extraction(conn, doc_path: str, data: dict, stale: bool,
+                         body_seen: str | None = None) -> bool:
     """把提取结果的 tag 对齐到 md frontmatter,改了文件就刷新 content_hash。
 
     提取有三条路(管道 `_extract_pass`、`kb extract --writeback`、
@@ -376,6 +314,16 @@ def writeback_extraction(conn, doc_path: str, data: dict, stale: bool) -> bool:
     很可能正是把它删掉了,那就什么都不做、返回 False(「没改文件」)。不抛异常:
     文章是用户主动清理掉的,把它记成提取失败会让面板标红、谎报一次故障,而判定
     本身早就落库了(随后被外键级联一并删掉,末态干净)。
+
+    **给了 `body_seen` 就在锁内再确认一次「这份 tag 算的还是当前那份正文吗」**
+    (`_body_moved`,和落库那道同一份口径)。正常路径上 `commit_extraction` 已经
+    把落库和回写圈在同一个锁区间里、中间没有窗口,所以这一道是**这个公开入口
+    自己的契约**:谁在锁外隔着一段时间拿一份基于旧正文的结果来回写,都该被挡
+    下来 —— 旧 tag 一写进新全文就摘不掉了(`writeback_tags` 只追加),而它还顺手
+    刷了 content_hash,下一次索引未必重建(2026-10-09 第 3 轮审查实测:新全文的
+    frontmatter 里混着 `topic/link-only` + `topic/ai-coding` 两代主题)。
+    同样返回 False、不抛异常 —— 判定要么已经落库、要么由落库那道挡掉了,这里
+    没有任何坏事发生,下一轮按新正文重提会写进对的那一批。
     """
     tags = extraction_tags(data)
     need_remove = stale and (data.get("promo") or {}).get("level") != "hard"
@@ -400,6 +348,8 @@ def writeback_extraction(conn, doc_path: str, data: dict, stale: bool) -> bool:
     with maintenance_lock():
         if not _still_indexed(conn, doc_path):
             return False
+        if body_seen is not None and _body_moved(conn, doc_path, body_seen):
+            return False            # 见 docstring:旧 tag 贴到新全文上就摘不掉了
         changed = writeback_tags(doc_path, tags) if tags else False
         if need_remove:
             changed = remove_writeback_tag(doc_path, PROMO_TAG) or changed
@@ -409,6 +359,77 @@ def writeback_extraction(conn, doc_path: str, data: dict, stale: bool) -> bool:
             # 会卡在它的 DELETE 上(SQLite 的写锁不认我们这把锁)。
             conn.commit()
         return changed
+
+
+def commit_extraction(conn, path: str, data: dict, body_seen: str, *,
+                      writeback: bool = True, on_error=None) -> bool:
+    """交付一次提取的结果:校验正文版本 → 落库 → 提交 → 回写 md,整段在
+    「维护锁 → kb.db 写锁」里。返回回写有没有改文件。
+
+    **这个协调区间就是它存在的理由。** `save_extraction` 里那道版本校验只回答
+    "检查的那一瞬间正文还是不是我读到的那份",答不了"我写进去的那一瞬间还是
+    不是" —— 校验到第一条 SQL、以及落库到回写之间各有一个窗口,而把正文整篇
+    换掉的那条路(补抓 → 翻译 → 导出 → 作废旧提取 → 索引)全程持着**同一把**
+    维护锁。两个窗口各有一份实测后果(2026-10-09 第 3 轮审查,各三次稳定复现):
+
+    - **校验到写入**:校验合法通过,随后另一边走完补抓和索引、`extract_stale`
+      也清了零,这才放行旧结果落库 —— 末态是新全文配旧结论
+      (`summary="只有一条链接和 HN 得分。"`、`entities=["htmx"]`),`extracted_at`
+      非空、`pending=[]`,**再同步一轮也不变**。
+    - **落库到回写**:旧结果合法落库并提交,期间新全文进了索引、md 里那批旧 tag
+      已经被作废摘掉,这才放行回写 —— `topic/link-only` 重新写进新全文的
+      frontmatter,而 `writeback_tags` 只追加不摘除、还顺手刷了 content_hash,
+      所以下一次索引未必重建它。
+
+    **原来那条兜底论证不成立,记在这儿备查**:`_require_current_body` 曾写着
+    「窗口里真被写进去了也不是死局 —— `feed_items.extract_stale` 那个待办只在
+    作废**做完**之后才放下,下一轮导出会再作废一次」。那句话的前提是旧保存落在
+    作废**之前**;上面第一个时序正好相反 —— 待办已经清零,没有第二次作废。
+
+    **锁序是维护锁 → SQLite 写锁,不许反过来**(见 `kb.maintenance` 和
+    `writeback_extraction` 里 `conn.in_transaction` 那两段):攥着一个没提交的写
+    事务去等维护锁,持锁的清理会卡在它自己的 DELETE 上,两边互等到 SQLite 的
+    busy 超时把清理打断。所以进锁之前先 flush,进锁之后才 `BEGIN IMMEDIATE`。
+
+    **模型请求留在锁外,粒度是每篇各取一次。** 这一趟几千篇要跑几十分钟,把整趟
+    圈起来等于攥着锁等几十次 LLM 往返,面板上的同步、定时同步和日报一起冻住。
+
+    **锁拿到手之后先确认这一篇还在**(`_still_indexed`,原来只有回写那一侧问)。
+    等锁的这段时间里清理很可能正是把它删掉了,而 `doc_tags` / `entities` 对
+    `documents(path)` 都是外键 —— 落库会当场报 `FOREIGN KEY constraint failed`,
+    被调用方记成一次提取失败、面板标红,而文章是用户主动清理掉的。安静返回
+    False(什么都没写、`extracted_at` 一个字没动)才是这一档的末态。
+    把 save 挪进锁里之后这道检查就只能在这儿问:原来它赶在清理之前跑完,所以
+    外键那时是合法的。
+
+    `writeback=False` 给 `kb extract` 不带 `--writeback` 的那条路。`on_error`
+    收回写阶段的异常:判定已经落库了,回写只是展示层,单篇回写失败不该把这一篇
+    记成提取失败 —— 不给就原样抛出去(管道那条路靠外层统一记账)。
+    """
+    from kb.maintenance import maintenance_lock
+
+    if conn.in_transaction:
+        conn.commit()           # 取维护锁之前先落盘,理由同 writeback_extraction
+    with maintenance_lock():
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if not _still_indexed(conn, path):
+                return False    # 见 docstring:等锁期间清理把这一篇删掉了
+            stale = save_extraction(conn, path, data, body_seen)
+            conn.commit()
+        finally:
+            if conn.in_transaction:
+                conn.rollback()
+        if not writeback:
+            return False
+        try:
+            return writeback_extraction(conn, path, data, stale,
+                                        body_seen=body_seen)
+        except Exception as e:
+            if on_error is None:
+                raise
+            on_error(e)
+            return False
 
 
 def writeback_tags(doc_path: str, new_tags: list[str]) -> bool:
@@ -462,14 +483,14 @@ def remove_writeback_tag(doc_path: str, tag: str) -> bool:
 def refresh_content_hash(conn, doc_path: str) -> None:
     """writeback 改了 frontmatter 后刷新库里的 hash,避免下次 index 无谓重建。
     正文没变(chunker 只看 body),chunks/FTS/向量都无需动。"""
-    import hashlib
+    from kb.scanner import file_hash
     full = VAULT_ROOT / doc_path
     try:
         text = full.read_text(encoding="utf-8")
     except OSError:
         return
-    h = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-    conn.execute("UPDATE documents SET content_hash=? WHERE path=?", (h, doc_path))
+    conn.execute("UPDATE documents SET content_hash=? WHERE path=?",
+                 (file_hash(text), doc_path))
 
 
 # ── 「这一篇没有正文」的两档 ────────────────────────────────────────────────────

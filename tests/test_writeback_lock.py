@@ -60,10 +60,14 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text(f'---\ntitle: 补判目标\n---\n{body}', encoding='utf-8')
         conn = store.connect()
+        # content_hash 照索引那条真路径算(`scanner.file_hash`):留空等于摆出
+        # 一个「索引还没扫到当前这份 md」的状态,`save_extraction` 的正文版本
+        # 校验会把这次提取如实作废 —— 这条用例测的是锁序,不是那件事。
         conn.execute('INSERT INTO documents(path,source,title,published,indexed_at,'
-                     "extracted_at,promo_level) VALUES(?,?,?,?,?,?,'')",
+                     "extracted_at,promo_level,content_hash) VALUES(?,?,?,?,?,?,'',?)",
                      (path, 'dr-gzh', '补判目标', '2026-09-01 08:00',
-                      '2026-10-01 09:00:00', '2026-10-01 09:00:00'))
+                      '2026-10-01 09:00:00', '2026-10-01 09:00:00',
+                      scanner.file_hash(full.read_text(encoding='utf-8'))))
         conn.execute('INSERT INTO chunks(path,seq,text) VALUES(?,?,?)',
                      (path, 0, body))
         conn.commit(); conn.close()
@@ -142,8 +146,9 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
 
     def test_the_pipeline_writeback_cannot_recreate_a_file_the_cleanup_deleted(self):
         """同步的并行存量提取走的是另一条路(`_extract_pass`),同样不许重建。"""
-        stats = {'ok': 0, 'promo': 0, 'failed_paths': set(),
-                 'empty_paths': set(), 'no_text_paths': set(), 'failures': {}}
+        # 用生产那个构造器,别在用例里手抄一份键集合:`_extract_pass` 以后
+        # 多记一个维度时,手抄的那份会在它第一次被写到的时候 KeyError。
+        stats = pipeline_stages._new_extract_stats()
         seen, item = self.a_writeback_racing_a_cleanup(
             lambda: pipeline_stages._extract_pass('存量', stats))
         self.assert_the_cleanup_stuck(seen, item)
@@ -172,27 +177,35 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         """
         ep, pb = self.script('extract_parallel'), self.script('promo_backfill')
         args = argparse.Namespace(limit=0, writeback=True)
-        stats = {'ok': 0, 'promo': 0, 'failed_paths': set(),
-                 'empty_paths': set(), 'no_text_paths': set(), 'failures': {}}
-        for i, (label, runner, where, model, back) in enumerate((
+        stats = pipeline_stages._new_extract_stats()
+        # 打桩点分两处:模型在各自那条路自己的模块里,回写则在它**实际被调到**
+        # 的那个模块里 —— 提取那三条路现在经 `extract.commit_extraction` 转发,
+        # 所以回写要 patch 在 `extract` 上(`extract_parallel` 自己压根不再
+        # import 它)。
+        for i, (label, runner, mwhere, model, bwhere, back) in enumerate((
                 ('kb extract --writeback', lambda: cli.cmd_extract(args),
-                 extract, 'extract_with_llm', 'writeback_extraction'),
+                 extract, 'extract_with_llm', extract, 'writeback_extraction'),
                 ('管道存量提取', lambda: pipeline_stages._extract_pass('存量', stats),
-                 extract, 'extract_with_llm', 'writeback_extraction'),
-                ('extract_parallel.py', ep.main, ep,
-                 'extract_with_llm', 'writeback_extraction'),
+                 extract, 'extract_with_llm', extract, 'writeback_extraction'),
+                ('extract_parallel.py', ep.main, ep, 'extract_with_llm',
+                 extract, 'writeback_extraction'),
                 ('promo_backfill.py',
                  lambda: pb.cmd_run(argparse.Namespace(limit=0, dry_run=False)),
-                 pb, 'judge_promo', 'sync_promo_tag'))):
+                 pb, 'judge_promo', pb, 'sync_promo_tag'))):
             with self.subTest(label):
                 self.seed(self.legacy(self.sub(label, f'https://example.org/w{i}.xml')),
                           self.entry(url=f'https://example.org/old-w{i}'))
                 self.seed_gzh(f'source/dr-gzh/w{i}.md')
                 seen = []
-                with patch.object(where, model, lambda *a, **k: dict(self.JUDGED)
+                # VAULT_ROOT 也得指到 tmp:协调入口在锁内会先问一次「这一篇
+                # 还在吗」(`_still_indexed`),照生产 vault 问的话它说"不在"、
+                # 回写压根不会被调到 —— 摆出来的就是一个生产里不存在的状态
+                # (documents 行指着 VAULT_ROOT 下没有的文件)。
+                with patch.object(extract, 'VAULT_ROOT', self.vault), \
+                     patch.object(mwhere, model, lambda *a, **k: dict(self.JUDGED)
                                   if model == 'judge_promo' else dict(self.EXTRACTED)), \
-                     patch.object(where, back,
-                                  lambda conn, *a: seen.append(conn.in_transaction)):
+                     patch.object(bwhere, back,
+                                  lambda conn, *a, **kw: seen.append(conn.in_transaction)):
                     runner()
                 # 补判那一轮会把前几格摆下的 dr-gzh 文档一起判掉(它按
                 # `promo_level=''` 捞全库),所以数量不定、按集合判
@@ -225,6 +238,38 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         with patch.object(extract, 'VAULT_ROOT', self.vault), \
              patch.object(maintenance, 'maintenance_lock', watched):
             extract.sync_promo_tag(conn, item['path'], 'hard', False)
+        self.assertIn('in_txn', seen, '压根没去取锁')
+        self.assertFalse(seen['in_txn'], '带着没提交的写事务去等维护锁了')
+        self.assertFalse(conn.in_transaction)
+
+    def test_the_commit_entry_flushes_before_it_queues_for_the_lock(self):
+        """协调入口自己也得先 flush 再去排队 —— 它比回写更早取那把锁。
+
+        上面那条钉的是 `writeback_extraction`;提取那三条路现在经
+        `commit_extraction` 进来,取锁的那一下**提前到了落库之前**,所以这道
+        锁序关口得自己有一条。攥着一个没提交的写事务去等维护锁,持锁的清理
+        就卡在它自己的 DELETE 上(SQLite 的写锁不认那把锁)。
+        """
+        source = self.legacy(self.sub())
+        item = self.seed(source)
+        conn = store.connect()
+        self.addCleanup(conn.close)
+        seen_body = extract.body_fingerprint(store.doc_body(conn, item['path']))
+        conn.execute("UPDATE documents SET summary='x' WHERE path=?", (item['path'],))
+        self.assertTrue(conn.in_transaction, '摆盘没摆出一个开着的写事务')
+
+        seen, real_lock = {}, maintenance.maintenance_lock
+
+        @contextlib.contextmanager
+        def watched(*a, **kw):
+            seen.setdefault('in_txn', conn.in_transaction)   # 就要去排队了
+            with real_lock(*a, **kw):
+                yield
+
+        with patch.object(extract, 'VAULT_ROOT', self.vault), \
+             patch.object(maintenance, 'maintenance_lock', watched):
+            extract.commit_extraction(conn, item['path'], dict(self.EXTRACTED),
+                                      seen_body)
         self.assertIn('in_txn', seen, '压根没去取锁')
         self.assertFalse(seen['in_txn'], '带着没提交的写事务去等维护锁了')
         self.assertFalse(conn.in_transaction)
@@ -314,15 +359,19 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         第 3 轮那条缺陷的形态就是「名单之外还有一个调用方」,所以名单本身也要
         钉住:新加一处会在这里红,而不是在某次清理报 `database is locked` 时
         才被发现。
+
+        `commit_extraction` 一并数进来:提取那三条路现在经它进来,而它自己就是
+        「维护锁 → SQLite 写锁」这道锁序的关口(见 `extract.commit_extraction`)。
         """
-        call = re.compile(r'\b(?:writeback_extraction|sync_promo_tag)\s*\(')
+        call = re.compile(
+            r'\b(?:writeback_extraction|sync_promo_tag|commit_extraction)\s*\(')
         found = {}
         for py in sorted(ROOT.glob('kb/*.py')) + sorted(ROOT.glob('scripts/*.py')):
             hits = [ln for ln in py.read_text(encoding='utf-8').splitlines()
                     if call.search(ln) and not ln.lstrip().startswith('def ')]
             if hits:
                 found[py.relative_to(ROOT).as_posix()] = len(hits)
-        self.assertEqual({'kb/cli.py': 1, 'kb/extract.py': 1,
+        self.assertEqual({'kb/cli.py': 1, 'kb/extract.py': 2,
                           'kb/pipeline_stages.py': 1,
                           'scripts/extract_parallel.py': 1,
                           'scripts/promo_backfill.py': 1}, found)

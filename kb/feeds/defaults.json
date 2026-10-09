@@ -403,7 +403,8 @@
     "name": "HN Buzzing",
     "url": "https://hn.buzzing.cc/feed.xml",
     "mode": "feed",
-    "group_name": "聚合订阅"
+    "group_name": "聚合订阅",
+    "fulltext": true
   },
   {
     "kind": "rss",
