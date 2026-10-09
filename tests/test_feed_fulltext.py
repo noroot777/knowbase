@@ -372,18 +372,88 @@ class BinaryBodyTests(FullTextCase):
         self.assertIn('The runtime schedules tools for coding agents', row['body'])
         self.assertEqual('', row['fulltext_error'])
 
-    def test_wide_encodings_are_recognised_by_what_they_declare(self):
-        """三种写法各一次:带 BOM 而没声明、声明了而没 BOM、UTF-32。
+    # 六种写法,每一种都**端到端**走一遍补抓,断言正文真的解对了。
+    # BOM 一律显式拼(`encode('utf-16')` 的字节序跟着本机走,而倒序那个缺口
+    # 恰恰只在 LE 上踩)。
+    WIDE = (
+        (b'\xff\xfe' + PAGE.encode('utf-16-le'), None, 'UTF-16 LE BOM,压根没发 content-type'),
+        (b'\xfe\xff' + PAGE.encode('utf-16-be'), 'text/html', 'UTF-16 BE BOM,content-type 不带 charset'),
+        (b'\xff\xfe\x00\x00' + PAGE.encode('utf-32-le'), 'text/html', 'UTF-32 LE BOM'),
+        (b'\x00\x00\xfe\xff' + PAGE.encode('utf-32-be'), 'text/html', 'UTF-32 BE BOM'),
+        (PAGE.encode('utf-16-le'), 'text/html; charset=utf-16le', '没 BOM,声明了 charset'),
+        (PAGE.encode('utf-32-be'), 'text/html; charset=utf-32be', '没 BOM,声明了 utf-32'),
+    )
 
-        判据是**声明的编码**或 **BOM**,不是"内容里有没有 NUL" —— 后者在这
-        三种上一律误判。真二进制照旧由魔数和声明类型那两道挡住(上面几条)。
+    def test_wide_encodings_are_decoded_by_bom_or_charset(self):
+        """宽编码的六种写法:放行**而且**正文解对了,两半都要断言。
+
+        **只断言"放行了"是不够的** —— 那正是上一版的缺口:放行判据另开了一张
+        名单(BOM 或声明的 charset 命中就放过),而 `decode` 压根没有 BOM 分支。
+        两张名单一漂,**只有 BOM、不声明 charset** 的那几格就从「安全失败」变成
+        了「错误覆盖 + 成功退出队列」:按 UTF-8 解成乱码、NUL 留在里面,HTML
+        解析认不出结构,`plain` 清掉 NUL 之后反倒把整段 HTML 源码当成了正文,
+        长度轻松过 `MIN_CHARS` —— 补抓**报成功**、`fulltext_at` 落下、这一篇
+        **永远**离不开壳(2026-10-09 第 3 轮审查实测)。所以判据是正文保真:
+        文字在、源码不在、站点外围部件剔掉了、一个替换字符都没有。
+
+        **UTF-32 LE 那一格另有一件事**:`\xff\xfe\x00\x00` 以 UTF-16 LE 的
+        BOM 开头,`_BOM_CODECS` 把 UTF-16 排在前面的话它整篇被当成 UTF-16 解。
         """
-        cases = ((PAGE.encode('utf-16'), 'text/html'),                  # 只有 BOM
-                 (PAGE.encode('utf-16-le'), 'text/html; charset=utf-16le'),
-                 (PAGE.encode('utf-32-be'), 'text/html; charset=utf-32be'))
-        for body, mime in cases:
-            with self.subTest(mime=mime):
-                self.assertEqual('', readable.html_problem(body, {'content-type': mime}))
+        key = self.put()
+        for body, mime, label in self.WIDE:
+            with self.subTest(label):
+                with reg.db() as c:
+                    c.execute("UPDATE feed_items SET body=?,fulltext_at='',fulltext_tries=0"
+                              ' WHERE key=?', (SHELL, key))
+                with patch.object(fulltext, 'request', Mock(return_value=raw(body, mime))):
+                    summary = fulltext.fetch_pending('rss')
+                got = self.row(key)['body']
+                self.assertEqual((1, 0), (summary['done'], summary['failed']))
+                self.assertIn('The runtime schedules tools for coding agents', got)
+                self.assertNotIn('<html>', got)             # 没把源码当正文
+                self.assertNotIn('Home', got)               # 站点导航照旧剔掉
+                self.assertNotIn('Nice post', got)          # 评论区照旧剔掉
+                self.assertEqual(0, got.count('\ufffd'))
+                self.assertFalse(got.startswith('\ufeff'))  # UTF-8 BOM 不许留在正文头上
+                self.assertEqual('', self.row(key)['fulltext_error'])
+
+    def test_a_utf8_bom_does_not_leak_into_the_body(self):
+        """UTF-8 的 BOM 同理要在 `decode` 里吃掉:`plain` 的空白折叠不吃 `\ufeff`。"""
+        key = self.put()
+        with patch.object(fulltext, 'request',
+                          Mock(return_value=raw(b'\xef\xbb\xbf' + PAGE.encode(), 'text/html'))):
+            self.assertEqual(1, fulltext.fetch_pending('rss')['done'])
+        got = self.row(key)['body']
+        self.assertFalse(got.startswith('\ufeff'))
+        self.assertIn('The runtime schedules tools for coding agents', got)
+
+    def test_a_wide_page_with_neither_bom_nor_charset_fails_safe(self):
+        """两样都没有的那一格:照旧安全失败,不许冒充"已取得正文"。
+
+        猜编码不是这一轮要做的事。NUL 还在就拦下、计次重试,壳原样留着 ——
+        「可以不支持某种编码,但不能把"没读对"说成"已取得正文"」。
+        """
+        key = self.put()
+        with patch.object(fulltext, 'request',
+                          Mock(return_value=raw(PAGE.encode('utf-16-le'), 'text/html'))):
+            summary = fulltext.fetch_pending('rss')
+        row = self.row(key)
+        self.assertEqual((0, 1), (summary['done'], summary['failed']))
+        self.assertEqual(SHELL, row['body'])
+        self.assertEqual('', row['fulltext_at'])
+        self.assertEqual(1, row['fulltext_tries'])
+        self.assertEqual(1, fulltext.pending('rss'))
+
+    def test_the_release_check_asks_the_real_decoder(self):
+        """直测那道放行判据:它拿 `decode` 真解一次,不是另问一张编码名单。
+
+        名单那种写法在上面那几条端到端用例里会红,这一条是早期信号 —— 同一份
+        字节,声明了 charset 和只带 BOM 必须得到同一个结论。
+        """
+        for body, mime, label in self.WIDE:
+            with self.subTest(label):
+                head = {'content-type': mime} if mime else {}
+                self.assertEqual('', readable.html_problem(body, head))
 
     def test_the_exhausted_pdf_link_still_leaves_the_queue(self):
         """出口还在:试满 MAX_TRIES 之后它按壳入库,不会永远挡在知识库外面。"""

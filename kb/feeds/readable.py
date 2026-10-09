@@ -86,20 +86,13 @@ _MAGIC = ((b'%PDF', 'PDF'), (b'%!PS', 'PostScript'), (b'\x89PNG', 'PNG 图片'),
           (b'RIFF', 'RIFF 媒体'), (b'OggS', 'Ogg 媒体'), (b'\x1aE\xdf\xa3', 'Matroska 媒体'),
           (b'ID3', 'MP3 音频'), (b'\x7fELF', '可执行文件'), (b'\xca\xfe\xba\xbe', '可执行文件'))
 _SNIFF = 4096
-# UTF-16/32 的**正常文本**每隔一个字节就是 \x00,所以下面那道 NUL 兜底对它必然
-# 误判。这一档交给 `decode`(它按 HTTP 头的 charset / BOM 本来就读得出来),判据
-# 是**声明的编码**或**BOM**,不是"内容里有没有 NUL" —— 后者是在拿编码本身的
-# 产物当二进制的证据。魔数和声明类型那两道照旧跑在前面。
-_WIDE_BOMS = (b'\x00\x00\xfe\xff', b'\xff\xfe\x00\x00', b'\xff\xfe', b'\xfe\xff')
-_WIDE_NAMES = ('utf-16', 'utf16', 'utf-32', 'utf32', 'ucs-2', 'ucs2', 'ucs-4', 'ucs4')
-
-
-def _wide_text(body: bytes, ctype: str) -> bool:
-    """这份字节是不是一份 UTF-16/32 文本(按它自己声明的东西判)。"""
-    if body.startswith(_WIDE_BOMS):
-        return True
-    m = _HTTP_CHARSET.search(ctype)
-    return bool(m) and m[1].strip().lower().startswith(_WIDE_NAMES)
+# BOM 定下的编码。**UTF-32 必须排在 UTF-16 前面**:`\xff\xfe\x00\x00`(UTF-32 LE)
+# 以 `\xff\xfe`(UTF-16 LE)开头,反过来排的话每一篇 UTF-32 页面都被当成 UTF-16
+# 解,解出来是一堆 CJK 乱码。顺序照 WHATWG 那套编码嗅探:BOM 比 HTTP charset
+# 和 `<meta>` 都更可信 —— 它是内容自己带上来的。
+_BOM_CODECS = ((b'\x00\x00\xfe\xff', 'utf-32-be'), (b'\xff\xfe\x00\x00', 'utf-32-le'),
+               (b'\xef\xbb\xbf', 'utf-8-sig'),
+               (b'\xff\xfe', 'utf-16-le'), (b'\xfe\xff', 'utf-16-be'))
 
 
 def html_problem(body: bytes, headers: dict | None = None) -> str:
@@ -118,10 +111,20 @@ def html_problem(body: bytes, headers: dict | None = None) -> str:
     ②**文件头**命中已知魔数 —— content-type 配错或压根没发时(小站常态)靠它;
     ③头部出现 **NUL 字节** —— 没见过的二进制格式兜底。文本里不会有它,
       `fetching.plain` 的入口本来也要把 `\x00` 清掉(那是它的占位符)。
-      **UTF-16/32 文本除外**(`_wide_text`):它的 NUL 是编码的一部分,而
-      `decode` 按声明的 charset / BOM 本来就读得出来 —— 把这一档也拒掉等于
-      让一篇正常的宽编码网页永远补不到正文(审查实测 914 字的正文被判成
-      「像是二进制文件」)。
+      **UTF-16/32 的正常文本每隔一个字节就是 `\x00`,所以这一道不能裸着问
+      「有没有 NUL」** —— 那是拿编码本身的产物当二进制的证据,一篇正常的宽编码
+      网页会因此永远补不到正文(第 2 轮审查实测 914 字的正文被判成「像是二进制
+      文件」)。
+
+      **判据因此是「拿真正会用的那个解码器解一次,NUL 还在才算二进制」。**
+      上一版是另开一张名单(`_wide_text`:BOM 或声明的 charset 命中就放行),
+      而 `decode` 压根没有 BOM 分支 —— 两张名单一漂,**只有 BOM、不声明 charset**
+      的 UTF-16/32 页面就从「安全失败」变成了「错误覆盖 + 成功退出队列」:放行
+      之后按 UTF-8 解成乱码、NUL 留在里面,HTML 解析认不出结构,`plain` 清掉 NUL
+      之后反倒把整段 HTML 源码当成了正文,长度轻松过门槛 —— 补抓**报成功**、
+      `fulltext_at` 落下、这一篇**永远**离不开壳(2026-10-09 第 3 轮审查实测:
+      中文标题丢失、导航和评论全混进正文、7 个替换字符,UTF-16/UTF-32 各一次)。
+      直接调 `decode` 就没有"两张名单"可言:解对了没有 NUL,解不出来 NUL 还在。
 
     调用方把它当抓取失败处理(计次、保留 feed 原本那份壳):PDF 这种链接重试
     三轮都不会变成网页,而那正是 `fulltext.MAX_TRIES` 这个出口要收的东西 ——
@@ -138,17 +141,26 @@ def html_problem(body: bytes, headers: dict | None = None) -> str:
     for magic, label in _MAGIC:
         if head.startswith(magic):
             return f'原文返回的不是网页（{label}），没有可提取的正文'
-    if b'\x00' in body[:_SNIFF] and not _wide_text(body, ctype):
+    if b'\x00' in head and '\x00' in decode(body[:_SNIFF], headers):
         return '原文返回的像是二进制文件，没有可提取的正文'
     return ''
 
 
 def decode(body: bytes, headers: dict | None = None) -> str:
-    """按 HTTP 头 → <meta charset> → UTF-8 的顺序解码,一律不抛。
+    """按 BOM → HTTP 头 → <meta charset> → UTF-8 的顺序解码,一律不抛。
 
     `errors='replace'` 而不是 `strict`:猜错编码只会让几个字变成问号,而抛出去
     就是整篇正文都没有 —— 那一条会记成抓取失败、重试三轮,最后还是壳。
+
+    **BOM 排在最前面,而且这是 `html_problem` 那道 NUL 判据的前提**:它就是拿
+    这个函数解一次来回答「这堆 NUL 是编码的一部分还是二进制」。少了 BOM 这一
+    分支,只带 BOM、不声明 charset 的 UTF-16/32 页面会被 UTF-8 解成乱码(NUL
+    照旧留着)—— 见 `html_problem` 第三道那段实测。顺带认 UTF-8 的 BOM:不认
+    的话正文开头会多一个 `\ufeff`,而 `fetching.plain` 的空白折叠不吃它。
     """
+    for bom, codec in _BOM_CODECS:
+        if body.startswith(bom):
+            return body.decode(codec, errors='replace')
     names = []
     if m := _HTTP_CHARSET.search((headers or {}).get('content-type', '')):
         names.append(m[1])

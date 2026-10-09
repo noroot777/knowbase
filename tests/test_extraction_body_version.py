@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from kb import cli, config, extract, llm_stages, store
+from kb import cli, config, extract, llm_stages, maintenance, store
 from kb.feeds import fulltext
 from kb.extract import StaleBody
 from tests.test_fulltext_extract_stale import OLD, StaleCase
@@ -51,6 +51,13 @@ class BodyVersionCase(StaleCase):
                 patch.object(llm_stages, 'stage_model', Mock(return_value='stub')), \
                 patch.object(extract, 'extract_with_llm', model):
             return cli.cmd_extract(SimpleNamespace(limit=100, writeback=True))
+
+    def content_hash(self, rel: str) -> str:
+        """索引记着的那份 md 指纹 —— 回写改了文件才该刷新它。"""
+        with self.kb() as c:
+            row = c.execute('SELECT content_hash FROM documents WHERE path=?',
+                            (rel,)).fetchone()
+        return row and row['content_hash']
 
     def seen_model(self, data: dict):
         """一个记下"模型读到的正文"的假提取器。"""
@@ -286,13 +293,27 @@ class CallSiteTests(unittest.TestCase):
     """
 
     # 读 chunks 正文 + 调 LLM 的那几条:模型那几十秒里正文可能整篇换掉,必须校验
-    LLM_PATHS = {'kb/cli.py': 'save_extraction(conn, row["path"], data, seen)',
-                 'kb/pipeline_stages.py': 'save_extraction(conn, row["path"], data, seen)',
-                 'scripts/extract_parallel.py': 'save_extraction(conn, path, data, seen)'}
-    # 不读 chunks 正文的那几条:`parse_pretagged` 直接解析 frontmatter(同步、没有
-    # 模型往返),软广补判经 `sync_promo_tag` 进来、只改 promo —— 它们没有"基于哪
-    # 一份正文"可言,传指纹反而会把一次合法的刷新判成作废。
-    PLAIN_PATHS = {'kb/extract.py', 'scripts/pretagged_refresh.py'}
+    # ——而且必须走**协调入口**(`commit_extraction`):裸调 `save_extraction` 的话
+    # 校验和写入之间、以及落库和回写之间各留一个窗口(见第 3 轮审查那两份证据)。
+    LLM_PATHS = {'kb/cli.py': 'commit_extraction(\n                conn, row["path"], data, seen,',
+                 'kb/pipeline_stages.py': 'commit_extraction(conn, row["path"], data, seen)',
+                 'scripts/extract_parallel.py': 'commit_extraction(\n                    conn, path, data, seen,'}
+    # 裸 `save_extraction(` 剩下的那几处都是**不读 chunks 正文**的:条目化就地
+    # 入库走 `parse_pretagged` 解 frontmatter(同步、没有模型往返,三处:索引那
+    # 两条入口 + `pretagged_refresh.py`),软广补判经 `sync_promo_tag` 进来、只改
+    # promo —— 它们没有"基于哪一份正文"可言,传指纹反而会把一次合法的刷新判成
+    # 作废。按**文件**比,所以 `kb/cli.py` / `kb/pipeline_stages.py` 两边都在
+    # (它们各有一条 LLM 路径和一条条目化路径);「LLM 那三条真的走了协调入口」
+    # 由上面那张字面量锚点的表钉住。
+    PLAIN_PATHS = {'kb/cli.py', 'kb/extract.py', 'kb/pipeline_stages.py',
+                   'scripts/pretagged_refresh.py'}
+
+    def grep(self, needle):
+        import subprocess
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        return set(subprocess.run(['grep', '-rln', needle, 'kb', 'scripts'],
+                                  cwd=root, capture_output=True, text=True).stdout.split())
 
     def test_every_llm_extraction_path_passes_the_fingerprint(self):
         from pathlib import Path
@@ -303,14 +324,19 @@ class CallSiteTests(unittest.TestCase):
                 self.assertIn(call, text)
                 self.assertIn('StaleBody', text)
 
-    def test_no_other_path_calls_save_extraction(self):
-        """全仓调用点名单:新增一处就在这里红,逼它自己决定传不传指纹。"""
-        import subprocess
-        from pathlib import Path
-        root = Path(__file__).resolve().parent.parent
-        out = subprocess.run(['grep', '-rln', 'save_extraction(', 'kb', 'scripts'],
-                             cwd=root, capture_output=True, text=True).stdout.split()
-        self.assertEqual(self.PLAIN_PATHS | set(self.LLM_PATHS), set(out))
+    def test_no_other_path_commits_an_extraction(self):
+        """协调入口的调用点名单:新增一处就在这里红,逼它自己决定传不传指纹。"""
+        self.assertEqual(set(self.LLM_PATHS) | {'kb/extract.py'},
+                         self.grep('commit_extraction('))
+
+    def test_no_llm_path_calls_the_bare_save(self):
+        """裸 `save_extraction` 只剩不读正文的那几条 —— 读正文的一律走协调入口。
+
+        漏一条就是那条路上「校验通过了、写进去的却是另一个版本」:第 3 轮审查
+        实测新全文配旧摘要(`entities=["htmx"]`)、`extracted_at` 非空、
+        `pending=[]`,再同步一轮也不变。
+        """
+        self.assertEqual(self.PLAIN_PATHS, self.grep('save_extraction('))
 
 
 class PipelineStageTests(StaleCase):
@@ -385,3 +411,93 @@ class PipelineStageTests(StaleCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CommitWindowTests(BodyVersionCase):
+    """校验之后那两个窗口:落库前、回写前,换正文那条路都不许挤进来。
+
+    上面两组钉的是「检查认不认得出来」,这一组钉的是「检查和写入之间还有没有
+    缝」—— 两件事,第 2 轮只修了前者。第 3 轮审查两种交错各三次稳定复现:
+
+    - **校验到第一条 SQL**:校验合法通过,随后另一边走完补抓、翻译、导出、作废
+      和索引(`extract_stale` 也清了零),这才放行旧结果落库 —— 末态是新全文配
+      旧结论(`summary="只有一条链接和 HN 得分。"`、`entities=["htmx"]`),
+      `extracted_at` 非空、`pending=[]`,**再同步一轮也不变**。原来那条兜底论证
+      (「待办会再作废一次」)在这个顺序下不成立:待办已经清零了。
+    - **落库到回写**:旧结果合法落库并提交,期间新全文进了索引、md 里那批旧 tag
+      已经被作废摘掉,这才放行回写 —— `topic/link-only` 重新写进新全文的
+      frontmatter,而 `writeback_tags` 只追加不摘除、还顺手刷了 content_hash。
+
+    关掉它们的办法是把两头圈进同一个「维护锁 → kb.db 写锁」区间
+    (`extract.commit_extraction`):把正文整篇换掉的那条路全程持着**同一把**
+    维护锁(`sync._save_result`、`sync.export`、索引整段都认它),进不来。
+    """
+
+    def test_nobody_can_touch_the_body_between_the_check_and_the_commit(self):
+        """校验刚通过那一刻,换正文那条路真的被挡在维护锁外面。
+
+        **屏障摆在校验刚返回的位置**,不是摆在取锁之后:摆在后面的话,「校验在
+        锁外、只把那串 SQL 圈进锁里」这种写法也能混过去 —— 而那正是被审那一版
+        的形状(它压根没有锁)。
+        """
+        _, rel = self.shell_in_the_vault()
+        self.fetch_and_translate()                 # 补抓之后的常规状态:正文已换、
+        self.index(rel)                            # 索引已跟上、这一篇排回了队列
+        self.assertEqual([rel], self.state(rel)['pending'])
+        checked, release, rival = threading.Event(), threading.Event(), {}
+        real = extract._require_current_body
+
+        def checked_then_hold(conn, path, seen):
+            real(conn, path, seen)
+            checked.set()
+            release.wait(10)
+
+        model, _ = self.seen_model(NEW)
+        with patch.object(extract, '_require_current_body', checked_then_hold):
+            worker = threading.Thread(target=lambda: self.extract_cli(model))
+            worker.start()
+            try:
+                self.assertTrue(checked.wait(10), '压根没走到校验那一步')
+                try:
+                    # 换正文那条路要的就是这把锁。拿不到 = 这个窗口是关着的。
+                    with maintenance.maintenance_lock(wait=0):
+                        rival['got'] = True
+                except maintenance.LockBusy:
+                    rival['got'] = False
+            finally:
+                release.set()
+                worker.join(20)
+        self.assertFalse(rival.get('got', True),
+                         '校验通过了、还没落库,换正文那条路却进得来')
+
+    def test_a_writeback_of_a_body_that_moved_is_thrown_away(self):
+        """按旧正文算出来的那批 tag,一个都不许写进换好的新全文。"""
+        _, rel = self.shell_in_the_vault()
+        with self.kb() as c:
+            seen = extract.body_fingerprint(store.doc_body(c, rel))
+        self.fetch_and_translate()                 # 正文换成全文
+        self.index(rel)                            # 索引跟上
+        before = self.content_hash(rel)
+        with self.kb() as c:
+            changed = extract.writeback_extraction(c, rel, dict(OLD), False,
+                                                   body_seen=seen)
+        self.assertFalse(changed, '按旧正文算出来的 tag 被写进了新全文')
+        self.assertEqual([], [t for t in self.md_tags(rel) if 'link-only' in t],
+                         'md 的 frontmatter 里混进了按旧壳算出来的主题')
+        self.assertEqual(before, self.content_hash(rel),
+                         '什么都没写却刷了 content_hash,下一轮索引会跳过它')
+
+    def test_a_writeback_of_the_current_body_still_lands(self):
+        """反过来钉一边:正文没动的那一次照旧写得进去。
+
+        不钉的话"拦住了"和"这个入口压根不写文件"长得一模一样。
+        """
+        _, rel = self.shell_in_the_vault()
+        self.fetch_and_translate()
+        self.index(rel)
+        with self.kb() as c:
+            seen = extract.body_fingerprint(store.doc_body(c, rel))
+            changed = extract.writeback_extraction(c, rel, dict(NEW), False,
+                                                   body_seen=seen)
+        self.assertTrue(changed, '正文还是当前那一份,tag 却没写进去')
+        self.assertIn('topic/ai-coding', self.md_tags(rel))

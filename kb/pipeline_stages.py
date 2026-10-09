@@ -295,8 +295,7 @@ def _extract_pass(label: str, stats: dict) -> None:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from kb import store
-    from kb.extract import (StaleBody, pending_docs, save_extraction,
-                            writeback_extraction)
+    from kb.extract import StaleBody, commit_extraction, pending_docs
 
     conn = store.connect()
     try:
@@ -323,17 +322,16 @@ def _extract_pass(label: str, stats: dict) -> None:
                         _log(f"extract: SKIP 正文为空 {row['title'][:24]}")
                     else:
                         data, seen = done_one
-                        stale_flag = save_extraction(conn, row["path"], data, seen)
-                        conn.commit()
+                        # 校验 → 落库 → 提交 → tag 回写 frontmatter(决策:自动
+                        # 回写)整段在「维护锁 → kb.db 写锁」里,这中间没有别人
+                        # 能把正文换掉;回写改了文件会顺手刷新 hash,免得下次
+                        # index 白白重建这批文档。见 extract.commit_extraction。
+                        commit_extraction(conn, row["path"], data, seen)
                         promo = data.get("promo") or {}
                         if promo.get("level") == "hard":
                             stats["promo"] += 1
                             _log(f"extract: 软广 {row['title'][:24]} — "
                                  f"{promo.get('reason', '')[:40]}")
-                        # tag 回写 obs frontmatter(决策:自动回写);回写改了文件,
-                        # 同步刷新 hash 免得下次 index 白白重建这批文档
-                        if writeback_extraction(conn, row["path"], data, stale_flag):
-                            conn.commit()
                         stats["ok"] += 1
                         # 存量轮失败、增量轮成功:清掉旧失败记录,计数才是最终状态
                         stats["failed_paths"].discard(row["path"])

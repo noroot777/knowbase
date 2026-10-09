@@ -89,8 +89,8 @@ def _index_pass(args) -> int:
 
 
 def cmd_extract(args) -> int:
-    from kb.extract import (StaleBody, body_fingerprint, extract_with_llm,
-                            pending_docs, save_extraction, writeback_extraction)
+    from kb.extract import (StaleBody, body_fingerprint, commit_extraction,
+                            extract_with_llm, pending_docs)
     from kb.llm_stages import stage_model
     conn = store.connect()
     todo = pending_docs(conn, args.limit)
@@ -108,8 +108,12 @@ def cmd_extract(args) -> int:
         seen = body_fingerprint(body)
         try:
             data = extract_with_llm(row["title"], body)
-            stale = save_extraction(conn, row["path"], data, seen)
-            conn.commit()
+            # 校验 → 落库 → 提交 → 回写整段在「维护锁 → kb.db 写锁」里:这中间
+            # 没有别人能把正文换掉(见 commit_extraction)。回写失败只打一行 ——
+            # 判定已经落库了,不该把这一篇记成 FAIL。
+            commit_extraction(
+                conn, row["path"], data, seen, writeback=args.writeback,
+                on_error=lambda e, p=row["path"]: print(f"    [writeback-fail] {p}: {e}"))
             ok += 1
             ents = ", ".join(e["name"] for e in data["entities"][:4])
             print(f"[{i}/{len(todo)}] OK {row['title'][:28]} → [{ents}]")
@@ -123,13 +127,6 @@ def cmd_extract(args) -> int:
             failed += 1
             print(f"[{i}/{len(todo)}] FAIL {row['title'][:28]}: {e}")
             continue
-        if args.writeback:
-            # 判定已经落库了,回写只是展示层;单篇失败不该把这篇记成 FAIL
-            try:
-                if writeback_extraction(conn, row["path"], data, stale):
-                    conn.commit()
-            except Exception as e:
-                print(f"    [writeback-fail] {row['path']}: {e}")
     line = f"[extract] 完成: 成功 {ok}, 失败 {failed}"
     if empty:
         line += f", 跳过 {empty}(正文空)"

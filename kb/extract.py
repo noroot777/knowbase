@@ -300,8 +300,12 @@ def sync_promo_tag(conn, doc_path: str, level: str, stale: bool) -> None:
     writeback_extraction(conn, doc_path, {"promo": {"level": level}}, stale)
 
 
-def _require_current_body(conn, path: str, body_seen: str) -> None:
-    """确认这次提取结果针对的就是**当前**那份正文,否则抛 `StaleBody`。
+def _body_moved(conn, path: str, body_seen: str) -> str:
+    """这次结果针对的那份正文还是**当前**那一份吗 —— 变了就返回一句原因。
+
+    **口径只有这一份,两个消费点**:落库前 `_require_current_body` 拿它抛
+    `StaleBody`,回写前 `writeback_extraction` 在同一把维护锁里拿它判一次布尔。
+    两处各写一遍的话,拦下来的和写回去的不是同一批。
 
     两道各管一种交错时序,少哪一道哪一种就漏过去:
 
@@ -325,22 +329,31 @@ def _require_current_body(conn, path: str, body_seen: str) -> None:
     却是实打实的:回写压根不会被调到,**于是"回写在锁里、读也不许读"那组回归对它
     不再敏感**(把回写那把锁去掉也照样全绿)。这道判据只回答「我读到的正文还是
     当前那一份吗」,"这一篇还在不在"不是它的问题。
-
-    残余窗口(校验到提交之间)不单开 `BEGIN IMMEDIATE`:那会把 kb.db 写锁排在
-    维护锁前面,锁序反过来(见 `writeback_extraction` 那段)。而窗口里真被写进
-    去了也不是死局 —— `feed_items.extract_stale` 那个待办只在作废**做完**之后
-    才放下,所以下一轮导出会再作废一次、重排进队列。
     """
     from kb import store
     from kb.scanner import file_hash
     try:
         text = (VAULT_ROOT / path).read_text(encoding="utf-8")
     except OSError:
-        return                      # 见 docstring:这一档交给回写那道锁内复查
+        return ""                   # 见 docstring:这一档交给回写那道锁内复查
     if store.doc_needs_reindex(conn, path, file_hash(text)):
-        raise StaleBody(f"索引还没扫到当前这份 md,提取结果作废: {path}")
+        return "索引还没扫到当前这份 md,提取结果作废"
     if body_fingerprint(store.doc_body(conn, path)) != body_seen:
-        raise StaleBody(f"正文已更新,提取结果作废: {path}")
+        return "正文已更新,提取结果作废"
+    return ""
+
+
+def _require_current_body(conn, path: str, body_seen: str) -> None:
+    """落库之前确认正文版本,对不上抛 `StaleBody`(判据见 `_body_moved`)。
+
+    **这道检查本身给不了保证,得由 `commit_extraction` 把它和写入圈进同一个
+    维护锁 + 写事务里。** 单独跑只回答"检查的那一瞬间正文还是不是我读到的
+    那份",答不了"我写进去的那一瞬间还是不是" —— 两者之间那个窗口有一份实测
+    后果,见 `commit_extraction` 的说明。
+    """
+    reason = _body_moved(conn, path, body_seen)
+    if reason:
+        raise StaleBody(f"{reason}: {path}")
 
 
 def save_extraction(conn, path: str, data: dict, body_seen: str | None = None) -> bool:
@@ -354,7 +367,9 @@ def save_extraction(conn, path: str, data: dict, body_seen: str | None = None) -
     第 2 轮审查两种交错时序各三次稳定复现)。所以落库之前比一次指纹,
     对不上就整份丢掉。
 
-    判据有两道,**各管一种交错时序、缺一不可**(都在 `_require_current_body`)。
+    判据有两道,**各管一种交错时序、缺一不可**(都在 `_body_moved`)。校验和这
+    一串写入之间还有个窗口,**那由 `commit_extraction` 把两头圈进同一个维护锁
+    + 写事务里关掉** —— 三条读正文的提取路径一律走它,不要在外面自己拼。
     不校验的那几条路(`body_seen=None`)是压根不读索引正文的:`parse_pretagged`
     直接解析 frontmatter,软广补判只改 promo —— 它们没有"基于哪一份正文"可言。
     """
@@ -426,7 +441,8 @@ def _still_indexed(conn, doc_path: str) -> bool:
                         (doc_path,)).fetchone() is not None
 
 
-def writeback_extraction(conn, doc_path: str, data: dict, stale: bool) -> bool:
+def writeback_extraction(conn, doc_path: str, data: dict, stale: bool,
+                         body_seen: str | None = None) -> bool:
     """把提取结果的 tag 对齐到 md frontmatter,改了文件就刷新 content_hash。
 
     提取有三条路(管道 `_extract_pass`、`kb extract --writeback`、
@@ -454,6 +470,16 @@ def writeback_extraction(conn, doc_path: str, data: dict, stale: bool) -> bool:
     很可能正是把它删掉了,那就什么都不做、返回 False(「没改文件」)。不抛异常:
     文章是用户主动清理掉的,把它记成提取失败会让面板标红、谎报一次故障,而判定
     本身早就落库了(随后被外键级联一并删掉,末态干净)。
+
+    **给了 `body_seen` 就在锁内再确认一次「这份 tag 算的还是当前那份正文吗」**
+    (`_body_moved`,和落库那道同一份口径)。正常路径上 `commit_extraction` 已经
+    把落库和回写圈在同一个锁区间里、中间没有窗口,所以这一道是**这个公开入口
+    自己的契约**:谁在锁外隔着一段时间拿一份基于旧正文的结果来回写,都该被挡
+    下来 —— 旧 tag 一写进新全文就摘不掉了(`writeback_tags` 只追加),而它还顺手
+    刷了 content_hash,下一次索引未必重建(2026-10-09 第 3 轮审查实测:新全文的
+    frontmatter 里混着 `topic/link-only` + `topic/ai-coding` 两代主题)。
+    同样返回 False、不抛异常 —— 判定要么已经落库、要么由落库那道挡掉了,这里
+    没有任何坏事发生,下一轮按新正文重提会写进对的那一批。
     """
     tags = extraction_tags(data)
     need_remove = stale and (data.get("promo") or {}).get("level") != "hard"
@@ -478,6 +504,8 @@ def writeback_extraction(conn, doc_path: str, data: dict, stale: bool) -> bool:
     with maintenance_lock():
         if not _still_indexed(conn, doc_path):
             return False
+        if body_seen is not None and _body_moved(conn, doc_path, body_seen):
+            return False            # 见 docstring:旧 tag 贴到新全文上就摘不掉了
         changed = writeback_tags(doc_path, tags) if tags else False
         if need_remove:
             changed = remove_writeback_tag(doc_path, PROMO_TAG) or changed
@@ -487,6 +515,77 @@ def writeback_extraction(conn, doc_path: str, data: dict, stale: bool) -> bool:
             # 会卡在它的 DELETE 上(SQLite 的写锁不认我们这把锁)。
             conn.commit()
         return changed
+
+
+def commit_extraction(conn, path: str, data: dict, body_seen: str, *,
+                      writeback: bool = True, on_error=None) -> bool:
+    """交付一次提取的结果:校验正文版本 → 落库 → 提交 → 回写 md,整段在
+    「维护锁 → kb.db 写锁」里。返回回写有没有改文件。
+
+    **这个协调区间就是它存在的理由。** `save_extraction` 里那道版本校验只回答
+    "检查的那一瞬间正文还是不是我读到的那份",答不了"我写进去的那一瞬间还是
+    不是" —— 校验到第一条 SQL、以及落库到回写之间各有一个窗口,而把正文整篇
+    换掉的那条路(补抓 → 翻译 → 导出 → 作废旧提取 → 索引)全程持着**同一把**
+    维护锁。两个窗口各有一份实测后果(2026-10-09 第 3 轮审查,各三次稳定复现):
+
+    - **校验到写入**:校验合法通过,随后另一边走完补抓和索引、`extract_stale`
+      也清了零,这才放行旧结果落库 —— 末态是新全文配旧结论
+      (`summary="只有一条链接和 HN 得分。"`、`entities=["htmx"]`),`extracted_at`
+      非空、`pending=[]`,**再同步一轮也不变**。
+    - **落库到回写**:旧结果合法落库并提交,期间新全文进了索引、md 里那批旧 tag
+      已经被作废摘掉,这才放行回写 —— `topic/link-only` 重新写进新全文的
+      frontmatter,而 `writeback_tags` 只追加不摘除、还顺手刷了 content_hash,
+      所以下一次索引未必重建它。
+
+    **原来那条兜底论证不成立,记在这儿备查**:`_require_current_body` 曾写着
+    「窗口里真被写进去了也不是死局 —— `feed_items.extract_stale` 那个待办只在
+    作废**做完**之后才放下,下一轮导出会再作废一次」。那句话的前提是旧保存落在
+    作废**之前**;上面第一个时序正好相反 —— 待办已经清零,没有第二次作废。
+
+    **锁序是维护锁 → SQLite 写锁,不许反过来**(见 `kb.maintenance` 和
+    `writeback_extraction` 里 `conn.in_transaction` 那两段):攥着一个没提交的写
+    事务去等维护锁,持锁的清理会卡在它自己的 DELETE 上,两边互等到 SQLite 的
+    busy 超时把清理打断。所以进锁之前先 flush,进锁之后才 `BEGIN IMMEDIATE`。
+
+    **模型请求留在锁外,粒度是每篇各取一次。** 这一趟几千篇要跑几十分钟,把整趟
+    圈起来等于攥着锁等几十次 LLM 往返,面板上的同步、定时同步和日报一起冻住。
+
+    **锁拿到手之后先确认这一篇还在**(`_still_indexed`,原来只有回写那一侧问)。
+    等锁的这段时间里清理很可能正是把它删掉了,而 `doc_tags` / `entities` 对
+    `documents(path)` 都是外键 —— 落库会当场报 `FOREIGN KEY constraint failed`,
+    被调用方记成一次提取失败、面板标红,而文章是用户主动清理掉的。安静返回
+    False(什么都没写、`extracted_at` 一个字没动)才是这一档的末态。
+    把 save 挪进锁里之后这道检查就只能在这儿问:原来它赶在清理之前跑完,所以
+    外键那时是合法的。
+
+    `writeback=False` 给 `kb extract` 不带 `--writeback` 的那条路。`on_error`
+    收回写阶段的异常:判定已经落库了,回写只是展示层,单篇回写失败不该把这一篇
+    记成提取失败 —— 不给就原样抛出去(管道那条路靠外层统一记账)。
+    """
+    from kb.maintenance import maintenance_lock
+
+    if conn.in_transaction:
+        conn.commit()           # 取维护锁之前先落盘,理由同 writeback_extraction
+    with maintenance_lock():
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if not _still_indexed(conn, path):
+                return False    # 见 docstring:等锁期间清理把这一篇删掉了
+            stale = save_extraction(conn, path, data, body_seen)
+            conn.commit()
+        finally:
+            if conn.in_transaction:
+                conn.rollback()
+        if not writeback:
+            return False
+        try:
+            return writeback_extraction(conn, path, data, stale,
+                                        body_seen=body_seen)
+        except Exception as e:
+            if on_error is None:
+                raise
+            on_error(e)
+            return False
 
 
 def writeback_tags(doc_path: str, new_tags: list[str]) -> bool:

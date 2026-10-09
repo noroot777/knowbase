@@ -8,8 +8,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from kb import store
-from kb.extract import (StaleBody, body_fingerprint, extract_with_llm,
-                        pending_docs, save_extraction, writeback_extraction)
+from kb.extract import (StaleBody, body_fingerprint, commit_extraction,
+                        extract_with_llm, pending_docs)
 
 WORKERS = 6
 
@@ -39,23 +39,20 @@ def main():
                 print(f"[{i}/{len(jobs)}] FAIL {title[:28]}: {str(e)[:80]}", flush=True)
                 continue
             try:
-                stale = save_extraction(conn, path, data, seen)
+                # 校验 → 落库 → 提交 → 回写整段在「维护锁 → kb.db 写锁」里,
+                # 和另外两条路同一个入口:这中间没有别人能把正文换掉,而攥着一个
+                # 没提交的写事务去等维护锁会把持锁的清理卡死在它自己的 DELETE 上
+                # (SQLite 的写锁不认那把锁)。见 extract.commit_extraction。
+                commit_extraction(
+                    conn, path, data, seen,
+                    on_error=lambda e, p=path: print(f"    [writeback-fail] {p}: {e}",
+                                                     flush=True))
             except StaleBody:
                 # 不是失败:这一篇还在待提取集合里,下一轮按新正文重提。
                 stale_body += 1
                 print(f"[{i}/{len(jobs)}] SKIP {title[:28]}: 正文已更新,这次结果作废",
                       flush=True)
                 continue
-            # 先把判定落盘,再去回写 —— 和另外两条路同一个时序。回写整段要取
-            # kb.maintenance 那把维护锁,攥着一个没提交的 SQLite 写事务去等它的话,
-            # 持锁的清理会卡在自己的 DELETE 上(SQLite 的写锁不认那把锁),两边
-            # 互相等到我们超时放弃为止。
-            conn.commit()
-            try:
-                writeback_extraction(conn, path, data, stale)
-            except Exception as e:
-                print(f"    [writeback-fail] {path}: {e}", flush=True)
-            conn.commit()
             ok += 1
             if i % 10 == 0 or i == len(jobs):
                 print(f"[{i}/{len(jobs)}] ok={ok} fail={failed}", flush=True)
