@@ -37,6 +37,7 @@ from unittest.mock import patch
 from kb import pipeline_retry, pipeline_state, pipeline_stages
 from kb.feeds import registry as reg, sync
 from kb.feeds.fetching import FeedError
+from kb.collectors.feeds import FeedCollector
 from tests.retry_scope_fixture import RetryScopeBase
 
 
@@ -341,6 +342,133 @@ class RetryNoteContractTests(RetryScopeBase):
         self.assertEqual(
             [{'channel': 'wechat_local', 'accounts': ['号A'], 'retry': 'all'}],
             pipeline_retry.retry_crawl_scopes(prev))
+
+
+class StartupIsolationTests(RetryScopeBase):
+    """造范围这一步的故障,不许扩散到跟它无关的阶段上。
+
+    这颗按钮的射程远不止抓取:上一轮只有索引失败、这会儿订阅库又恰好打不开
+    (锁着、权限、路径没挂上)时,启动路径无条件先去问一遍各来源的失败名单,
+    那个异常就一路冒到 HTTP 层 —— 用户收到的是一句「Internal Server Error」,
+    索引和后面的提取一步都没起跑(2026-10-09 第 2 轮审查实测)。
+
+    判据一律是**后果**:哪几个阶段真的跑起来了、哪几个来源真的被抓了。
+    """
+
+    def broken_db(self):
+        """把订阅库换成一个**目录**:`reg.db()` 那句 connect 当场抛
+        `OperationalError: unable to open database file`。
+
+        不能"指到一个不存在的目录" —— `reg.db()` 自己会 `mkdir(parents=True)`,
+        那样它照样连得上一个空库。
+        """
+        path = self.root / 'broken-feeds.db'
+        path.mkdir()
+        return patch.object(reg, 'DB_PATH', path)
+
+    def index_only_round(self):
+        """摆一轮「crawl 全成功、只有 index 失败」的已完成运行。"""
+        crawl_filter = {'channel': 'rss', 'accounts': []}
+        self._begin(crawl_filter, stages=('crawl', 'index'))
+        with patch.object(sync, 'fetch_source',
+                          side_effect=self._fetcher(set(), (), 'p1')):
+            pipeline_stages._run_crawl(crawl_filter)
+        self.assertEqual('ok', self.stage()['status'], '这一局的前提:抓取成功')
+        pipeline_state._stage('index', 'error', '索引失败')
+        pipeline_state._end_run()
+        self.assertEqual(['index', 'extract'], pipeline_retry.retry_failed_plan(),
+                         '这一局的前提:计划里压根没有 crawl/export')
+
+    def test_an_index_only_retry_survives_an_unusable_feeds_db(self):
+        """**后果那一条**:复现审查那份证据(HTTP 500、索引压根没起跑)。
+
+        它要**两道同时失效**才红(实测:退回被审那一版红在这里,单退任一道时
+        另一道兜住了它)—— 两道各自的契约由下面两条分别钉着,这一条钉的是
+        "合起来真的把那件事挡住了"。
+        """
+        self.index_only_round()
+        ran: list[str] = []
+        with self.broken_db(), \
+             patch.object(pipeline_retry, '_run_crawl',
+                          side_effect=AssertionError('crawl 不在这一轮的计划里')), \
+             patch.object(pipeline_retry, '_run_export',
+                          side_effect=AssertionError('export 不在这一轮的计划里')), \
+             patch.object(pipeline_retry, '_run_index',
+                          side_effect=lambda: ran.append('index')), \
+             patch.object(pipeline_retry, '_run_extract',
+                          side_effect=lambda: ran.append('extract')), \
+             patch.object(pipeline_retry, '_run_projects'), \
+             patch.object(pipeline_retry, '_run_wiki'):
+            # 抛出来的话 HTTP 层就是 500 —— 这一句本身就是那条断言
+            ok, msg = pipeline_retry.start_retry_failed()
+            self.assertTrue(ok, msg)
+            self._wait_idle('重试那一轮没有收尾')
+        self.assertEqual(['index', 'extract'], ran,
+                         '索引和提取一步都没起跑,而故障在一个它们不碰的库上')
+
+    def test_the_plan_decides_before_any_target_lookup(self):
+        """crawl 不在计划里 → 一次名单查询都不该发生。
+
+        **这一道和采集器无关**,所以它必须自己有一条用例:下面那条"空名单不开库"
+        是 feeds 这个采集器自己的早返回,换一个无条件读自己库的采集器就不成立了;
+        而顺序这一道管的是"压根不去问",对谁都成立。
+
+        判据是**问了几次**,不是"抛没抛异常" —— `retry_crawl_scopes` 那道
+        `except Exception` 把 AssertionError 也一并吞掉(它正是为了"别把整次重试
+        带走"),拿一个会被吞掉的异常当判据,这条用例对顺序压根不敏感。
+        """
+        self.index_only_round()
+        asked: list[dict] = []
+        with patch.object(FeedCollector, 'retry_targets', autospec=True,
+                          side_effect=lambda _self, note: asked.append(note) or []), \
+             patch.object(pipeline_retry, '_run_index'), \
+             patch.object(pipeline_retry, '_run_extract'), \
+             patch.object(pipeline_retry, '_run_projects'), \
+             patch.object(pipeline_retry, '_run_wiki'):
+            ok, msg = pipeline_retry.start_retry_failed()
+            self.assertTrue(ok, msg)
+            self._wait_idle('重试那一轮没有收尾')
+        self.assertEqual([], asked,
+                         '这一轮压根不重抓,却先去问了各来源的失败名单')
+
+    def test_an_empty_note_never_opens_the_subscription_db(self):
+        """那个来源这一轮扫完了、没有要重抓的 → 答案只能是空集,别去开库。
+
+        这是第三道:上面那条管的是"crawl 不在计划里",这条管的是"在计划里、
+        而这个来源没有要重抓的"。
+        """
+        with patch.object(reg, 'subscriptions',
+                          side_effect=AssertionError('名单是空的,不该读订阅库')):
+            self.assertEqual([], sync.still_failing('rss', {'targets': [],
+                                                            'at': reg.now()}))
+
+    def test_a_broken_db_falls_back_to_the_original_range_for_that_source(self):
+        """名单问不出来 = 这个来源收窄不了,按原范围重跑,**别把整次重试带走**。
+
+        故障只圈在这一个来源里:认名字和问名单两件事都在那道 try 里面
+        (问名单要读这个来源自己的订阅库)。
+        """
+        self.crawl({'channel': 'rss', 'accounts': []}, broken=[self.a])
+        note = pipeline_state.retry_notes(pipeline_state.load_last_run() or {})
+        self.assertEqual([str(self.a['id'])], note['rss']['targets'],
+                         '这一局的前提:名单里有那条失败的订阅')
+
+        seen: list[dict] = []
+        with self.broken_db(), \
+             patch.object(pipeline_retry, '_run_crawl',
+                          side_effect=lambda f=None: seen.append(f)), \
+             patch.object(pipeline_retry, '_run_export'), \
+             patch.object(pipeline_retry, '_run_index'), \
+             patch.object(pipeline_retry, '_run_extract'), \
+             patch.object(pipeline_retry, '_run_projects'), \
+             patch.object(pipeline_retry, '_run_wiki'):
+            ok, msg = pipeline_retry.start_retry_failed()
+            self.assertTrue(ok, msg)
+            self._wait_idle('重试那一轮没有收尾')
+        self.assertEqual(1, len(seen), '抓取这一步没起跑')
+        self.assertEqual([{'channel': 'rss', 'accounts': []}],
+                         pipeline_stages.crawl_channels(seen[0]),
+                         '收窄不了就该按原范围重跑,不是收成空集')
 
 
 if __name__ == '__main__':

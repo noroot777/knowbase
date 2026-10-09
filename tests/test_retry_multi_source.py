@@ -23,8 +23,8 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
-from kb import pipeline_retry, pipeline_stages, pipeline_state
-from kb.feeds import registry as reg, sync, x_channels
+from kb import pipeline, pipeline_retry, pipeline_stages, pipeline_state
+from kb.feeds import registry as reg, sync, translate, x_channels
 
 from tests.retry_scope_fixture import FeedError, RoundBase, _entry
 
@@ -185,6 +185,111 @@ class ExportScopeTests(MultiSourceBase):
         self.assertEqual(['social', 'rss'],
                          [s['channel'] for s in pipeline_stages.crawl_channels(seen[0])],
                          'export 的范围该是上一轮原来那两个来源')
+
+
+class RepeatedExportScopeTests(MultiSourceBase):
+    """连着点两次「重试失败项」:导出范围不许在落盘那一步被抓取范围替掉。
+
+    第一次重试里 crawl 收窄成 RSS 那一条、export 照旧跑 social+rss —— 可只把
+    **收窄后的抓取范围**落盘的话,第二次重试会从它再派生一次导出范围,于是第一次
+    重试里**仍然导出失败**的 social 就此被摘掉:面板报「导出完成 · 已保存 0 条」,
+    而它那几条一篇都没落进 vault,再点重试也不会回来(2026-10-09 第 2 轮审查实测)。
+
+    上一条 `ExportScopeTests` 只验了**第一次**重试,范围是在落盘之后丢的,所以
+    它对这件事压根不敏感 —— 两条都得有。
+    """
+
+    def blocker(self):
+        """用一个普通文件占住 `source/social` 该在的位置。
+
+        真实 `sync.export` 开头就是 `root.mkdir(parents=True, exist_ok=True)`,
+        那个位置是文件时它当场抛 `FileExistsError`。**不打桩 `_run_export` 或
+        `materialize`** —— 那样阶段分段、失败落盘和 `retry_failed_plan` 看到的
+        东西全是我们摆的,而这一组要验的正是"第二次重试还认不认得出 export
+        失败过、它的范围里还有没有这个来源"。
+        """
+        path = self.root / 'vault' / 'source' / 'social'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('占位', encoding='utf-8')
+        return path
+
+    def exported(self, kind):
+        """这个来源在 vault 里真的落了哪几篇 md(后果,不是过程)。"""
+        folder = self.root / 'vault' / 'source' / kind
+        return sorted(f.name for f in folder.glob('*.md')) if folder.is_dir() else []
+
+    def run_export(self, crawl_filter):
+        """真跑一遍导出阶段。只把"配了 key 吗"按死成没配 —— 那是真实的
+        `skipped` 那一档(`materialize` 据此不扣留未译条目),也顺手保证这组
+        用例一次模型请求都不发。"""
+        with patch.object(translate, '_model', side_effect=RuntimeError('未配置模型')):
+            pipeline_stages._run_export(crawl_filter)
+
+    def retry_round(self, got):
+        """点一次「重试失败项」,crawl 和 export 两条链一行不打桩。"""
+        with patch.object(sync, 'fetch_source',
+                          side_effect=self._recorder(got, (), 'p2')), \
+             patch.object(translate, '_model',
+                          side_effect=RuntimeError('未配置模型')), \
+             patch.object(pipeline_retry, '_run_index'), \
+             patch.object(pipeline_retry, '_run_extract'), \
+             patch.object(pipeline_retry, '_run_projects'), \
+             patch.object(pipeline_retry, '_run_wiki'):
+            ok, msg = pipeline_retry.start_retry_failed()
+            self.assertTrue(ok, msg)
+            self._wait_idle('重试那一轮没有收尾')
+
+    def test_a_source_that_keeps_failing_export_is_still_retried_next_time(self):
+        # 第一轮:social 三条都抓到了,RSS 的 A 抓取失败;导出时 social 那边
+        # 的位置被占住 → 真实 export 抛 FileExistsError。
+        blocker = self.blocker()
+        first = {}
+        self.round_one(first, broken=[self.rss[0]], stages=('crawl', 'export'))
+        self.run_export(self.both())
+        self.assertEqual('error', self.stage('export')['status'],
+                         '这一局的前提:导出阶段真失败了')
+        pipeline_state._end_run()
+        self.assertEqual([], self.exported('social'),
+                         '这一局的前提:social 一篇都没落盘')
+
+        # 第一次重试:crawl 只重抓 A(它成功了),export 照旧两个来源都跑,
+        # 而 social 那个障碍还在 —— 它再次失败。
+        self.retry_round({})
+        self.assertEqual('error', self.stage('export')['status'],
+                         '这一局的前提:第一次重试里 social 的导出仍然失败')
+        self.assertEqual([], self.exported('social'))
+
+        # 排除障碍,第二次重试。
+        blocker.unlink()
+        self.retry_round({})
+        self.assertEqual(3, len(self.exported('social')),
+                         'social 那几条文章一篇都没落盘,而面板说导出完成了')
+        self.assertEqual('ok', self.stage('export')['status'])
+
+    def test_a_plain_sync_resets_the_export_scope(self):
+        """反过来钉一边:常规同步要把导出范围重写成**它自己**那一份。
+
+        `_state` 是模块级常驻的,上一轮如果是重试,里面躺着的是那一轮的导出范围
+        —— 不覆盖的话这一轮的落盘把它原样带走,下一次重试就按一份跟这一轮毫无
+        关系的范围去导出。
+
+        这一条**真走 `pipeline.start_pipeline`**,不用摆盘那个 `_begin`:要验的
+        正是生产启动路径有没有重写这个字段,拿摆盘替它写一遍就把它挡在射程外了
+        (第一版就是这么写的,注入"生产那一行去掉"全绿)。
+        """
+        self.round_one({}, broken=[self.rss[0]], stages=('crawl', 'export'))
+        pipeline_state._stage('export', 'error', '导出失败')
+        pipeline_state._end_run()
+        self.retry_round({})                       # 这一轮的导出范围 = 两个来源
+
+        with patch.object(pipeline, '_run_crawl'):
+            self.assertTrue(pipeline.start_pipeline(
+                ['crawl'], crawl_filter={'channel': 'rss', 'accounts': []}))
+            self._wait_idle('常规同步那一轮没有收尾')
+        saved = pipeline_state.load_last_run() or {}
+        self.assertEqual(['rss'], [s['channel'] for s in
+                                   pipeline_stages.crawl_channels(saved.get('export_filter'))],
+                         '常规同步落盘的导出范围该是它自己选的那个来源')
 
 
 class BrowserPrefetchScopeTests(MultiSourceBase):

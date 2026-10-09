@@ -225,6 +225,11 @@ def still_failing(kind, note):
     """
     at = note.get('at') or ''
     ids = {str(t) for t in (note.get('targets') or [])}
+    # 名单是空的(这个来源那一轮扫完了、没有要重抓的)就别去开订阅库:答案只能是
+    # 空集,而读库会在库打不开时抛 —— 那个故障跟同一轮里的 index/extract 毫无
+    # 关系,不该由它们承担(调用方另有一道按来源的隔离,见 `retry_crawl_scopes`)。
+    if not ids:
+        return []
     live = []
     for source in reg.subscriptions(kind):
         if str(source['id']) not in ids or not source['enabled']:

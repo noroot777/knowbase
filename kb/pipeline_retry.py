@@ -272,12 +272,15 @@ def retry_crawl_scopes(prev: dict) -> list[dict]:
         if (note := notes.get(scope["channel"])) is not None:
             try:
                 narrower = retry_narrower(active_collector(scope["channel"]))
+                targets = narrower.retry_targets(note) if narrower else None
             except Exception:
-                # 来源名现在认不出来了(改名/退役):按原范围重跑,别让生成计划
-                # 这一步抛到 HTTP 层 —— 那会把同一轮里本该重试的 index/extract
-                # 一起带走(同 `refill_script` 那条"永不抛"的理由)。
-                narrower = None
-            targets = narrower.retry_targets(note) if narrower else None
+                # **认名字和问名单两件事一起护住,而且故障只圈在这一个来源里。**
+                # 认不出名字(改名/退役)是一种;问名单那一下也会炸 —— 它要读这个
+                # 来源自己的订阅库(见 `sync.still_failing`),库打不开就抛。
+                # 两种都只能按原范围重跑,**不许抛到 HTTP 层**:那会把同一轮里
+                # 本该重试的 index/extract 一起带走(同 `refill_script` 那条
+                # "永不抛"的理由),而那两步跟这个来源的订阅库毫无关系。
+                targets = None
         if targets is None:
             # 这个来源**没留下名单**(整批失败,那时一条订阅都还没被碰到),或者它
             # 压根报不出名单(公众号的失败是文章级的,`--targets` 是账号级的)——
@@ -295,8 +298,14 @@ def retry_crawl_scopes(prev: dict) -> list[dict]:
 def start_retry_failed() -> tuple[bool, str]:
     """一键重试所有失败项。返回 (started, msg);无失败项或已在跑时 False。"""
     prev = load_last_run() or {}
-    scopes = retry_crawl_scopes(prev)
     plan = retry_failed_plan()
+    # **先定计划,只有真要重抓才去问各来源的失败名单。** 问名单要读那个来源自己
+    # 的订阅库,而这颗按钮的射程远不止抓取:上一轮只有 index 失败、这会儿订阅库
+    # 又恰好打不开(锁着、权限、路径没挂上)时,无条件先问一遍等于让一个跟 index
+    # 毫无关系的故障把整次重试顶成 HTTP 500 —— 索引和后面的提取一步都没起跑
+    # (2026-10-09 第 2 轮审查实测)。顺序反过来就没有这条路:crawl 不在计划里
+    # 时压根不碰订阅库。
+    scopes = retry_crawl_scopes(prev) if "crawl" in plan else []
     # 上一轮 crawl 确实失败过,可那几个目标现在一个都不用重抓了:把 crawl 摘出
     # 计划(范围是空的,真让它跑会按"没指定来源"回落到默认采集器),并在它那张
     # 卡片上说清为什么 —— 一张绿色的「检查 0/0 个来源」和"这个按钮坏了"长得
@@ -304,8 +313,15 @@ def start_retry_failed() -> tuple[bool, str]:
     crawl_resolved = "crawl" in plan and not scopes
     if crawl_resolved:
         plan = retry_failed_plan(nothing_to_crawl=True)
-    export_filter = deepcopy(prev.get("crawl_filter") or {})
-    crawl_filter = deepcopy(export_filter)
+    # **导出范围从上一轮的导出范围恢复,不是从它的抓取范围派生。** 两者在重试轮
+    # 里本来就不一样(crawl 收窄、export 照旧走全部来源),而落盘只存一份收窄后
+    # 的抓取范围的话,第二次重试就从那份收窄范围再派生一次导出范围 —— 第一次
+    # 重试里仍然导出失败的那个来源就此被摘掉,面板报「导出完成·已保存 0 条」,
+    # 它那几篇文章一个都没落盘,再点也不回来(2026-10-09 第 2 轮审查实测)。
+    # 回落到 `crawl_filter` 是给升级前那些没有这个字段的旧记录用的。
+    export_filter = deepcopy(prev.get("export_filter")
+                             or prev.get("crawl_filter") or {})
+    crawl_filter = deepcopy(prev.get("crawl_filter") or {})
     # 退避是失败自己留下的(最短 1800 秒,见 `sync._save_failure`),手动重试必须
     # 跳过它 —— 不跳的话失败后半小时内点这颗按钮,唯一该抓的那条被记成
     # `deferred` 跳过:该抓的不抓,正好和上面那个"不该抓的全抓"凑成一对。
@@ -333,6 +349,8 @@ def start_retry_failed() -> tuple[bool, str]:
             "run_id": new_run_id(),
             "started_at": _now(), "finished_at": "",
             "crawl_filter": crawl_filter,
+            # 导出范围单独存一份,下一次重试从它恢复(见上面那段)
+            "export_filter": export_filter,
             "run_kind": "retry",
             "planned_stages": [s for s in STAGES if card[s]],
             "stages": {s: {"status": "pending" if card[s] else "skipped",

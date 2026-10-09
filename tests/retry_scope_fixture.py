@@ -61,7 +61,13 @@ class RoundBase(unittest.TestCase):
             'running': True, 'stop_requested': False, 'stopped': False,
             'run_id': pipeline_state.new_run_id(), 'log': [],
             'started_at': pipeline_state._now(), 'finished_at': '',
-            'crawl_filter': deepcopy(crawl_filter), 'run_kind': kind,
+            'crawl_filter': deepcopy(crawl_filter),
+            # 常规同步里导出范围 = 抓取范围,`start_pipeline` 就是这么写的。
+            # 摆盘漏掉它的话,这几组用例会落在生产代码那条"没设过就回落到
+            # crawl_filter"的兜底上 —— 而那条兜底只为升级前的旧记录存在,
+            # 拿它当前提等于验的不是真实启动路径(而且 `_state` 是模块级的,
+            # 上一个用例留下的那份导出范围还会漏进来)。
+            'export_filter': deepcopy(crawl_filter), 'run_kind': kind,
             'current_stage': '', 'planned_stages': list(stages),
             'stages': {s: {'status': 'pending' if s in stages else 'skipped',
                            'detail': '' if s in stages else '本次未选择'}
@@ -169,4 +175,3 @@ class RetryScopeBase(RoundBase):
                 '''SELECT i.url FROM feed_items i JOIN subscription_items si
                    ON si.item_key=i.key WHERE si.subscription_id=?''',
                 (source['id'],)).fetchall()]
-

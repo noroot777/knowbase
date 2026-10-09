@@ -33,6 +33,13 @@ _state: dict = {
     "started_at": "",
     "finished_at": "",
     "crawl_filter": {},
+    # 导出阶段**自己**那一份来源范围。常规同步里它和 crawl_filter 一样,重试时
+    # 不一样:crawl 收窄到失败的那几个目标,而 export 要照旧走上一轮原来那几个
+    # 来源(一个来源完全可能 crawl 成功、export 失败)。**所以它必须单独存一份**
+    # —— 只存收窄后的 crawl_filter 的话,下一次重试会从那份收窄范围再派生一次
+    # 导出范围,仍然导出失败的那个来源就此被摘掉:面板报「导出完成·已保存 0 条」,
+    # 而它那几篇文章一个都没落盘,再点重试也不会回来(2026-10-09 第 2 轮审查实测)。
+    "export_filter": {},
     # 「重试失败项」要重试谁:{"run": 这一轮的身份, "channels": {来源: 失败名单}}。
     # 见 note_retry_targets —— 带着 run id,所以不需要在每条启动路径上各清一次。
     "crawl_retry": {},
@@ -215,6 +222,8 @@ def _save_last_run() -> None:
             "planned_stages": _state.get("planned_stages"),
             "stages": _state["stages"],
             "crawl_filter": _state["crawl_filter"],
+            # 导出范围单独落一份:下一次重试要从**它**恢复,不是从收窄后的抓取范围
+            "export_filter": _state.get("export_filter") or {},
             # run_id 跟名单一起落盘:retry_notes 要拿它认"这份名单是不是这一轮的"
             "run_id": _state.get("run_id", ""),
             "crawl_retry": _state.get("crawl_retry") or {},
