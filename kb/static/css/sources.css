@@ -95,10 +95,6 @@
 .source-editor label { display:block; margin:14px 0 5px; font-size:13px; }
 .source-editor input:not([type=checkbox]) { width:100%; }
 .source-form-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:22px; }
-.source-reader-dialog { width:min(760px,94vw); max-height:90vh; overflow-y:auto; }
-.source-reader-dialog h2 { font-size:22px; line-height:1.6; overflow-wrap:anywhere; }
-#source-reader-body { white-space:pre-wrap; overflow-wrap:anywhere; font-size:15px; line-height:1.95; margin:22px 0; }
-.source-reader-toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
 @media(max-width:1200px) { .source-workbench { grid-template-columns:minmax(0,1fr) 236px; gap:18px; } }
 @media(max-width:1050px) { .source-workbench { grid-template-columns:1fr; } .source-settings { order:2; } }
 @media(max-width:600px) {
