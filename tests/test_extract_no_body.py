@@ -24,6 +24,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -43,6 +44,18 @@ REAL = "首段正文。\n\n第二段正文,足够喂给模型。\n"
 # 图 + 一行**正文标题**:标题文字是真的,只是被 chunker 当成小节标题、而那一节
 # 清理完是空的,于是整段连标题一起丢掉 —— doc_body 照样返回空串
 HEADING_ONLY = "## 报名截止:2026年10月15日\n\n" + IMG_ONLY
+# wiki 阶段的阅读装饰。**不是内容**:scanner.normalize_body 把它整段丢掉,
+# 所以索引和 chunker 压根看不到它(见 kb/scanner.py 的 _GRAPH_FOOTER_RE)
+GRAPH_FOOTER = "\n<!-- kb-graph -->\n## 关联推荐\n[[项目A]]\n"
+
+
+def _wikilib():
+    """真的那个 linkify_doc(不自己编尾区长什么样)。"""
+    wiki = str(Path(__file__).resolve().parents[1] / "scripts" / "wiki")
+    if wiki not in sys.path:
+        sys.path.insert(0, wiki)
+    import wikilib
+    return wikilib
 
 
 def _md(body: str, title: str) -> str:
@@ -324,6 +337,73 @@ class EmptyStubTests(NoBodyBase, unittest.TestCase):
         self.assertIn("无正文 1", detail)
         self.assertEqual(1, len(failures))            # 只有 stub 那篇进明细
         self.assertNotIn(img, self.pending())
+
+
+class GraphFooterTests(NoBodyBase, unittest.TestCase):
+    """阅读装饰不是内容:「空没空」要在剥掉它之后问。
+
+    `wikilib.linkify_doc` 对正文为空的壳子**照样**追加图谱尾区,所以真实
+    vault 里「什么都没有」的常见形态是「只剩一行 <!-- kb-graph -->」。拿装饰
+    前的原文判空会把它顶成非空、落进 no_text 终态 —— 一篇真要回填的空文章
+    从此不再提醒、也不再提取(2026-10-09 第 2 轮审查实测)。
+    """
+
+    def _no_body_hash(self, path):
+        return self.conn.execute(
+            "SELECT no_body_hash FROM documents WHERE path=?", (path,)
+        ).fetchone()["no_body_hash"]
+
+    def test_an_empty_stub_wearing_a_footer_still_asks_for_refill(self):
+        path = self.write("decorated-empty", GRAPH_FOOTER)
+        self.index()
+        self.run_extract()
+
+        # 后果先断言:下一轮还选得到它、终态一个字都没写
+        self.assertEqual([path], self.pending(), "装饰过的空文章不许落终态")
+        self.assertEqual("", self._no_body_hash(path))
+        status, detail, failures = self.last_stage()
+        self.assertEqual("error", status)
+        self.assertIn("正文空", detail)                # 回填那条暗号照旧
+        self.assertEqual(["正文为空,需回填"], [f["reason"] for f in failures])
+        self.assertEqual(extract.NO_BODY_EMPTY, extract.body_gap(path, ""))
+
+    def test_the_real_linkifier_output_still_asks_for_refill(self):
+        """走一遍真的 linkify_doc,不自己编尾区的样子。"""
+        wikilib = _wikilib()
+        path = self.write("wiki-stub", STUB)
+        universe = SimpleNamespace(doc_ents={}, topic_docs={})
+        with patch.object(wikilib, "VAULT", self.vault):
+            decorated = wikilib.linkify_doc(universe, path)
+        self.assertIn(wikilib.GRAPH_MARK, decorated, "前提:空壳也被加了尾区")
+        (self.vault / path).write_text(decorated, encoding="utf-8")
+        self.index()
+        self.run_extract()
+
+        self.assertEqual([path], self.pending(), "真装饰过的空文章不许落终态")
+        self.assertEqual("", self._no_body_hash(path))
+        status, detail, failures = self.last_stage()
+        self.assertEqual("error", status)
+        self.assertEqual(["正文为空,需回填"], [f["reason"] for f in failures])
+
+    def test_an_image_wearing_the_same_footer_still_leaves_the_queue(self):
+        """反过来钉一边:尾区剥掉之后图还在,那一档照旧落终态、不重报。"""
+        path = self.write("poster", IMG_ONLY + GRAPH_FOOTER)
+        self.index()
+        self.run_extract()
+
+        self.assertEqual([], self.pending(), "有图无字的照旧离开队列")
+        self.assertEqual(self.conn.execute(
+            "SELECT content_hash FROM documents WHERE path=?", (path,)
+        ).fetchone()["content_hash"], self._no_body_hash(path))
+        status, detail, failures = self.last_stage()
+        self.assertEqual("ok", status)
+        self.assertIn("无正文 1", detail)
+        self.assertEqual([], failures)
+
+        self.run_extract()                             # 第二轮一个字都不说
+        status, detail, _ = self.last_stage()
+        self.assertEqual("ok", status)
+        self.assertNotIn("无正文", detail)
 
 
 class BodyGapTests(NoBodyBase, unittest.TestCase):

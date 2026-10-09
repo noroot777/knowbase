@@ -499,6 +499,15 @@ def body_gap(path: str, body: str) -> str:
     当成小节标题、小节正文清空之后整段丢掉了):那是**真有文字**,落终态等于
     把看得见的内容藏起来、从此不再提取 —— 一律按最保守的 EMPTY 办(继续进
     「需回填」清单,维持本档出现之前的行为)。读不到文件同理落 EMPTY。
+
+    **「空没空」要在剥掉阅读装饰之后问,整个判定只认 normalize_body 之后那份
+    正文。** 索引看到的就是它(`scanner.Doc.body`),所以「为什么一个 chunk
+    都没有」也只能问它;拿装饰前的原文判空,等于这一个函数的两半各用一份口径
+    —— 而 `wikilib.linkify_doc` **对正文为空的壳子照样追加图谱尾区**,于是
+    「什么都没有」被那行 `<!-- kb-graph -->` 顶成非空、落进 no_text 终态:
+    一篇真的需要回填的空文章从此不再提醒、也不再提取(2026-10-09 第 2 轮审查
+    实测,真走一遍 linkify_doc 的空壳 pending=[]、no_body_hash 等于
+    content_hash)。图片那一档不受影响:尾区剥掉之后 `![](…)` 还在。
     """
     if body.strip():
         return ""
@@ -509,10 +518,10 @@ def body_gap(path: str, body: str) -> str:
     except (OSError, UnicodeDecodeError):
         return NO_BODY_EMPTY
     _fm, md_body = parse_frontmatter(raw)
+    md_body = normalize_body(md_body)              # 先剥双链与图谱尾区
     if not md_body.strip():
         return NO_BODY_EMPTY                       # 真的什么都没有
-    return NO_BODY_EMPTY if strip_markup(normalize_body(md_body)).strip() \
-        else NO_BODY_NO_TEXT
+    return NO_BODY_EMPTY if strip_markup(md_body).strip() else NO_BODY_NO_TEXT
 
 
 def mark_no_body(conn, path: str, version: str) -> bool:

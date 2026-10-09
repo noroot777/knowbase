@@ -38,13 +38,19 @@ let state = {
   stages: okStages("成功 3,失败 0,跳过 1(正文空,需回填)"), log: ["管道结束"],
 };
 let pendingExtract = 1;
-let pendingCalls = 0, retryCalls = 0;
+let pendingCalls = 0, retryCalls = 0, heldCalls = 0;
+// 非 null = 下一次积压查询的回包按在这儿,等放行。回包内容在**收到请求那一刻**
+// 就生成好(和真后端一样),所以放行时它带的是旧那一轮的事实。
+let holdPending = null;
 
 // 重试那一轮:**从头到尾没有一个快照是 running=true** —— 它就是跑得比轮询快。
-// 真后端这时已经把那篇落成终态、积压数归零。
-const finishFastRun = (runId, detail, pending) => {
+// 真后端这时已经把那篇落成终态、积压数归零。每轮一个不同的 started_at(真后端
+// 本来如此);要摆「两轮落在同一秒」那一局时显式传同一个值。
+let fakeClock = 0;
+const finishFastRun = (runId, detail, pending, startedAt) => {
+  const at = startedAt || `2026-10-09 09:${String(++fakeClock).padStart(2, "0")}:00`;
   state = { ...state, run_id: runId, run_kind: "retry", running: false,
-            started_at: "2026-10-09 09:00:00", finished_at: "2026-10-09 09:00:01",
+            started_at: at, finished_at: at,
             stages: okStages(detail), log: ["管道结束"] };
   pendingExtract = pending;
 };
@@ -77,7 +83,12 @@ const server = createServer((req, res) => {
   if (path === "/api/pipeline/status" && req.method === "GET") {
     if (req.url.includes("pending=true")) {
       pendingCalls++;
-      return json({ ...state, pending: { extract: pendingExtract }, last_run: null });
+      const body = { ...state, pending: { extract: pendingExtract }, last_run: null };
+      if (holdPending) {
+        const gate = holdPending; holdPending = null; heldCalls++;
+        return void gate.then(() => json(body));
+      }
+      return json(body);
     }
     const extra = req.url.includes("source=false")
       ? {} : { source: { online: true, label: "测试来源", message: "已连接" } };
@@ -85,7 +96,9 @@ const server = createServer((req, res) => {
   }
   if (path === "/api/pipeline/retry-failed" && req.method === "POST") {
     retryCalls++;
-    finishFastRun("run-B", "成功 0,失败 0,无正文 1(仅图片等,已记录不再提示)", 0);
+    // 每次点都是一轮新运行,身份跟着换(真后端如此)
+    finishFastRun(`run-retry-${retryCalls}`,
+                  "成功 0,失败 0,无正文 1(仅图片等,已记录不再提示)", 0);
     return json({ ok: true });
   }
   if (path.startsWith("/api/")) return json(FIXTURES[path] ?? {});
@@ -169,10 +182,13 @@ await send("Emulation.setDeviceMetricsOverride",
 
 const fails = [], oks = [];
 const check = (name, cond, extra = "") => (cond ? oks : fails).push(name + (extra ? ` — ${extra}` : ""));
+// 摆局中断(前提没成立)也要落成一条红,别让它把已经跑过的那些检查一起带走
+const setup = async (name, ok) => { if (!await ok) { fails.push(`摆局没成:${name}`); throw new Error("stop"); } };
 
 await send("Page.navigate", { url: base + "/" });
 if (!await until(`typeof refreshPipe === 'function' && typeof switchTab === 'function'`, 20000))
   throw new Error("页面没起来");
+try {
 
 // ── 1. 打开同步中心,积压数显示上一轮留下的 1 ─────────────────────────────────
 await evalJs(`switchTab('pipe'); true`);
@@ -214,8 +230,70 @@ for (let i = 0; i < 3; i++) { await evalJs(`refreshPipe(); true`); await sleep(2
 check("同一轮结果反复轮询不会重复去扫积压数", pendingCalls === settled,
       `${settled} → ${pendingCalls}`);
 
-check("重试端点只被打了一次", retryCalls === 1, String(retryCalls));
+// ── 5. 交错:一次积压查询还在途时点重试,放行旧回包之后照旧要归零 ────────────
+// 在途那次查询只能回答它开跑那一刻的事实,而「出现了一轮新的已结束运行」一轮
+// 只说一次 —— 那一次刷新被在途查询吞掉,面板就永久停在旧数字,再轮询多少次也
+// 不消失,只有手动刷新页面才归零(2026-10-09 第 2 轮审查实测)。
+const armHold = () => {
+  let release = () => {};
+  holdPending = new Promise(r => { release = r; });
+  const t = setTimeout(release, 20000);          // 失败路径上别把服务挂死
+  return () => { clearTimeout(t); release(); };
+};
+const pendingIs = n => until(`document.querySelector('#pipe-stage-extract .pipe-stage-pending')
+                              ?.textContent === '当前待处理 ${n} 项'`, 12000);
+
+finishFastRun("run-D", "成功 3,失败 0,跳过 1(正文空,需回填)", 1);
+await evalJs(`refreshPipe(); true`);
+await setup("面板没先显示 1", pendingIs(1));
+
+const release = armHold();
+await evalJs(`switchTab('search'); switchTab('pipe'); true`);   // 真实路径:切走再切回
+check("切回同步中心引发的那次积压查询卡在途",
+      await until(`pipePendingRequest !== null`, 4000));
+const atClick = pendingCalls;
+check("在途期间「重试失败项」仍点得动",
+      await until(`!document.getElementById('pipe-retry').disabled`) && await clickAt("#pipe-retry"));
+check("新结果已经到了", await until(`pipeDoneRun === 'run-retry-2'`, 8000),
+      await evalJs(`pipeDoneRun`));
+check("这一刻刷新确实被在途查询挡着(所以得记一笔欠账)",
+      pendingCalls === atClick && await evalJs(`pipePendingWanted === true`),
+      `${atClick} → ${pendingCalls}`);
+release();
+check("放行旧回包之后,待处理数照旧自己归零", await pendingIs(0), await pendingText());
+check("欠的那次查询真的补发出去了", pendingCalls > atClick, `${atClick} → ${pendingCalls}`);
+check("补上了就把欠账清掉", await evalJs(`pipePendingWanted === false`));
+check("按住的那次回包确实是旧那一轮的事实(不是摆设)", heldCalls === 1, String(heldCalls));
+
+const settled5 = pendingCalls;
+for (let i = 0; i < 3; i++) { await evalJs(`refreshPipe(); true`); await sleep(250); }
+check("补完之后反复轮询同一结果仍然不重复扫积压", pendingCalls === settled5,
+      `${settled5} → ${pendingCalls}`);
+
+// ── 6. 两轮落在同一秒里:回包的身份认 run_id,不拿秒级时间戳当身份 ───────────
+finishFastRun("run-F", "成功 3,失败 0,跳过 1(正文空,需回填)", 1, "2026-10-09 10:00:00");
+await evalJs(`refreshPipe(); true`);
+await setup("面板没先显示 1", pendingIs(1));
+const release2 = armHold();
+await evalJs(`refreshPipePending(); true`);
+check("第二次也卡住了一个在途查询", await until(`pipePendingRequest !== null`, 4000));
+finishFastRun("run-G", "成功 0,失败 0,无正文 1(仅图片等,已记录不再提示)", 0, "2026-10-09 10:00:00");
+await evalJs(`refreshPipe(); true`);
+// **放行之前必须等页面真的看到了新那一轮**:不等的话旧回包可能赶在状态读完之前
+// 回来,那时快照还是上一轮、身份当然对得上,随后那次状态读又顺手补了一次查询 ——
+// 两种身份口径在这条时序上都是绿的,这一项就对判据不敏感了
+check("页面已经看到同一秒里的那一轮新结果",
+      await until(`pipeDoneRun === 'run-G' && pipePendingRequest !== null`, 8000),
+      await evalJs(`pipeDoneRun + '/' + (pipePendingRequest !== null)`));
+release2();
+check("同一秒里换了一轮时,旧回包不许被当成当前事实", await pendingIs(0), await pendingText());
+
+check("重试端点一共被打了两次(两个场景各一次)", retryCalls === 2, String(retryCalls));
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
+
+} catch (e) {
+  if (e.message !== "stop") fails.push(`探针中断 — ${e.message}`);
+}
 
 // ── 收尾 ─────────────────────────────────────────────────────────────────────
 const out = [...oks.map(n => `  ✓ ${n}`), ...fails.map(n => `  ✗ ${n}`)].join("\n");
