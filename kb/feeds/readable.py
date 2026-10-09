@@ -36,6 +36,14 @@ MAX_CANDIDATES = 4000
 MIN_CHARS = 400
 # 链接文字占比超过它 = 这是个链接堆(导航、相关阅读、归档列表),不是正文。
 MAX_LINK_DENSITY = 0.4
+# 授权/法律文字占到这个比例 = 这一块是版权区,不是文章(见 `boilerplate_reason`)。
+# 生产 441 条补抓成品实测:真文章最高 0.11,而审查抓出来那条是 0.96 —— 中间
+# 差 4.5 倍,线放在中点上。
+MAX_LEGAL_SHARE = 0.5
+# 作者简介抬头之后还不够长的,整块就是作者简介(同一份实测:441 条里只有审查
+# 点名那一条命中,474 字)。一篇长文章末尾挂着作者简介是常态,所以这一道**只看
+# 开头**、而且只在短块上成立。
+MAX_BYLINE_CHARS = 1500
 
 # 整块扔掉:它们要么不是内容(脚本、样式),要么在任何位置上都不是正文。
 # <form>/<button>/<select> 一起扔是因为订阅框、搜索框常常夹在正文中间;
@@ -51,12 +59,27 @@ _DROP_OUTSIDE = ('header', 'footer', 'aside')
 _DROP_ROLES = frozenset('navigation banner contentinfo complementary search form menu menubar'.split())
 # class / id 里的噪声词。连字符、下划线、空格都算分隔符,所以 `site-footer`、
 # `footer_wrap`、`post footer` 都认得出,而 `footerball` 这种词中词不会误伤。
+#
+# `author`/`byline` 在里面:作者卡是页面外围部件,而它**足够长、链接又不多**,
+# 一个没有文章正文的壳页面上它会直接赢(2026-10-09 审查实测:Stripe 那篇抽出来
+# 的"正文"是 `About the authors` 加三位作者简介,474 字、7 个段落、得分 532,
+# 而整页别的候选全是 0 分)。**`<article>` 里的作者署名不受影响**:`_noisy` 只
+# 对 div/section/ul/ol/figure/table 调用,`<article><header>` 里那行「By Carson
+# Gross, February 2026」由 `_DROP_OUTSIDE` 的位置规则保护着。
 _NOISE = re.compile(
     r'(?:^|[-_\s])(?:nav|navbar|menu|sidebar|side|footer|header|masthead|topbar|'
     r'comment|comments|disqus|respond|share|sharing|social|related|recommend|'
     r'promo|promotion|advert|ads|adsense|banner|breadcrumb|crumbs|pagination|pager|'
     r'popup|modal|overlay|cookie|consent|gdpr|subscribe|newsletter|signup|'
+    r'author|byline|'
     r'toolbar|widget|skip|hidden|offscreen|sr-only|screen-reader)(?:[-_\s]|$)', re.I)
+# **驼峰也算分隔符。** 上面那张名单要求噪声词两头是 `-`/`_`/空格,而 CSS Modules、
+# styled-components 和现代框架吐出来的 class 名是驼峰 —— 于是名单里明明有
+# `footer`/`related`/`share`/`nav`/`sidebar`,`siteFooter`、`relatedPosts`、
+# `shareBar`、`navMenu`、`sidebarWrap` **一个都认不出**(2026-10-09 审查实测:
+# Stripe 那块的 class 是 `BlogPost-module__ifVEqa__aboutAuthor`)。先在
+# 「小写或数字 → 大写」的边界插一个空格再匹配,名单一个字不用改。
+_CAMEL = re.compile(r'(?<=[a-z0-9])(?=[A-Z])')
 # 这几个标签说的是"这里是正文",给加权。<article> 最强:HTML5 里它的定义就是
 # 一篇可独立分发的内容。
 _SEMANTIC = {'article': 1.6, 'main': 1.4}
@@ -66,6 +89,21 @@ _CANDIDATE_TAGS = ('article', 'main', 'section', 'div', 'td')
 # 只多出几个字的边框文字却因为更长而得分更高 —— 取外层就会把面包屑、作者卡、
 # 下一篇链接一起带进正文。
 _SHRINK = 0.92
+
+# 版权区的措辞。这张名单小而极稳 —— 这几句话几十年没变过,而且它们**不会**
+# 成段出现在一篇文章里。
+_LEGAL = re.compile(
+    r'(?:all rights reserved|terms of (?:use|service)|privacy (?:policy|notice)'
+    r'|cookie policy|do not sell|is a (?:registered )?trademark|trademarks? of'
+    r'|subject to change without notice|may receive compensation|©|\(c\)\s*\d{4}'
+    r'|copyright\s+\d{4}|user agreement|acceptable use|notice at collection)', re.I)
+# 作者简介块的标准抬头。开头那个可选的 `/` 是面包屑残留(实测 Stripe 那块出来
+# 就是 `About the authors\n\n/About the authors`)。
+_BYLINE_HEAD = re.compile(
+    r'^\s*(?:/\s*)?(?:about\s+(?:the\s+)?(?:author|contributor)s?'
+    r'|author\s+bios?|written\s+by|作者简介|关于作者)\b', re.I)
+# 断句:句末标点 + 空白,或者块级边界。`plain` 已经把块级边界变成换行了。
+_SENTENCE = re.compile(r'(?<=[.!?。！？])\s+|\n+')
 
 _META_CHARSET = re.compile(rb'<meta[^>]+charset=["\']?\s*([\w.-]+)', re.I)
 _HTTP_CHARSET = re.compile(r'charset=\s*["\']?\s*([\w.-]+)', re.I)
@@ -180,9 +218,10 @@ def _noisy(tag) -> bool:
         return True
     if tag.get('aria-hidden') == 'true':
         return True
-    # class 是个列表,id 是个字符串;拼成一段文字一起匹配就行。
+    # class 是个列表,id 是个字符串;拼成一段文字一起匹配就行。驼峰先拆开
+    # (见 `_CAMEL`),否则 `siteFooter` 这类现代写法整条名单都对它失效。
     marks = ' '.join(tag.get('class') or []) + ' ' + (tag.get('id') or '')
-    return bool(_NOISE.search(marks))
+    return bool(_NOISE.search(_CAMEL.sub(' ', marks)))
 
 
 def _gone(node) -> bool:
@@ -259,21 +298,84 @@ def _shrink(best, score: float):
         node, score = picked[0]
 
 
-def extract(html: str) -> str:
-    """返回正文纯文本;提取不出来返回空串(调用方据此保留 feed 原本那份)。"""
-    if not html or len(html) > MAX_HTML:
+def boilerplate_reason(text: str) -> str:
+    """这段文字是页面样板区而不是文章主体吗 —— 是就返回一句人话,否则空串。
+
+    **缺这一道的后果不是"少补一篇",是把版权声明当文章正文覆盖掉原内容,而且
+    永久不再纠正。** `_score` 只问"够长吗、链接多吗、分了几段",那回答得了
+    "拿到了一段网页文字",回答不了"拿到的是文章主体"。于是纯 JS 渲染的页面上
+    (文章正文只在 `<script>` 的 flight payload 里、DOM 里压根没有)剩下的那点
+    边角文字成了唯一候选,长度又刚好越过 `MIN_CHARS` —— 补抓**报成功**、
+    `fulltext_at` 落下、条目离开重试队列,接着拿它去买一次翻译,页面上还标着
+    「订阅正文 · 已译为中文」(2026-10-09 审查在生产库里抓到两条成品:Fortune
+    那篇 455 字全是版权和隐私政策,Stripe 那篇 474 字是三位作者的简介)。
+
+    两道,**各管一类、各有真实样本,不是一道的两种写法**:
+    ①**版权区**:授权措辞占到句子的 `MAX_LEGAL_SHARE`。判据是**占比**而不是
+      命中次数 —— 长文章末尾挂一段版权声明是常态,按次数算会把它们一起毙掉,
+      按占比算那一档天然很低(生产 441 条实测:真文章最高 0.11)。
+    ②**作者简介区**:开头就是作者简介的抬头,而整块还不到 `MAX_BYLINE_CHARS`。
+      只看开头,因为一篇长文章**末尾**带作者简介同样是常态。
+
+    **为什么内容判据和 `_NOISE` 那道 class 判据都要有**:Stripe 那块的 class
+    自己报了身份(`aboutAuthor`),删掉它整页就只剩 306 字、全部 0 分 —— 那条路
+    更可靠,因为是页面自己说的。可 Fortune 那块是 `<div id="S:1">`,没有 class、
+    id 是 React 的 slot 编号,class 判据对它完全是瞎的。反过来,**存量修复手里
+    只有 `body`、没有 HTML**(`scripts/feed_fulltext_recheck.py`),那时只有这份
+    纯文本判据用得上。两道的射程不重叠。
+
+    判中之后 `extract` 返回空串,调用方按"这一页读不懂"处理:壳照旧留着、
+    `fulltext_tries` 计次、试满 `MAX_TRIES` 出队(口径同注释顶上那段)。
+    **宁可少补一篇**,也不能把版权声明译了写进知识库。
+    """
+    parts = [s for s in _SENTENCE.split(text) if s and s.strip()]
+    total = sum(len(s) for s in parts)
+    if not total:
         return ''
+    legal = sum(len(s) for s in parts if _LEGAL.search(s))
+    if legal / total >= MAX_LEGAL_SHARE:
+        return '原文页面上只有版权与授权声明，没有文章正文'
+    if len(text) <= MAX_BYLINE_CHARS and _BYLINE_HEAD.match(text):
+        return '原文页面上只有作者简介，没有文章正文'
+    return ''
+
+
+def extract_or_reason(html: str) -> tuple[str, str]:
+    """`(正文纯文本, 读不懂的原因)`。正文非空时原因必为空,反之不一定。
+
+    **带理由的那一半只有样板区这一档给得出来**(版权声明、作者简介),别的
+    读不懂(付费墙、纯 JS 渲染、整页一张图)压根没有判据可言,两个都是空串。
+    理由存在的意义是**面板上要说得出是哪一类** —— 口径同 `fetch_one` 对
+    `html_problem` 那段:"可能需要登录或由脚本渲染"这句通用文案对一个明确
+    判出"这页上只有版权声明"的页面是在少说一件已经知道的事。
+
+    最后那道 `boilerplate_reason` 判的是「赢出来这一块是不是文章主体」——
+    **判中就整个作废、不退而取次优**:次优候选在同一个页面上多半是同一摊边角
+    文字(Fortune 那页的次优是 `<body>` 自己,481 字里 455 字正是那段版权声明),
+    挑它只是把同一个错误换个来源。
+    """
+    if not html or len(html) > MAX_HTML:
+        return '', ''
     soup = BeautifulSoup(html, 'html.parser')
     _strip(soup)
     root = soup.find('body') or soup
     candidates = root.find_all(_CANDIDATE_TAGS)
     if len(candidates) > MAX_CANDIDATES:
-        return ''
+        return '', ''
     # root 自己也要参赛:很多页面清掉外围部件之后 <body> 下面就直接是 <p> 了,
     # 压根没有一个包住正文的容器。
     scored = [(root, _score(root)), *((c, _score(c)) for c in candidates)]
     best, score = max(scored, key=lambda pair: pair[1])
     if score <= 0:
-        return ''
+        return '', ''
     text = plain(str(_shrink(best, score)))
-    return text if len(text) >= MIN_CHARS else ''
+    if len(text) < MIN_CHARS:
+        return '', ''
+    if why := boilerplate_reason(text):
+        return '', why
+    return text, ''
+
+
+def extract(html: str) -> str:
+    """返回正文纯文本;提取不出来返回空串(调用方据此保留 feed 原本那份)。"""
+    return extract_or_reason(html)[0]

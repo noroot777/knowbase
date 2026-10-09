@@ -53,6 +53,10 @@ class FeedCollector:
         fetched = fulltext.fetch_pending(self.name, progress=fetch_progress)
         if note := fulltext.summarize(fetched):
             _log(f'export: {note}')
+        # 摘要一路交给 export,理由同下面翻译那一句:导出是这条链上最后一个报
+        # 阶段状态的人,只写进日志的话这个阶段照样以绿色收尾 —— 实测一条新条目
+        # 的原文回 403,阶段 ok、failures 空,而那篇文章一个字都没进知识库
+        # (2026-10-09 审查实测)。
 
         # 先把外文条目译成中文再落盘:vault 的 md 是索引/提取/日报共同的事实来源,
         # 导出完再翻等于先写一份英文进去,后面每一层都按英文处理过一遍。这一轮
@@ -63,7 +67,8 @@ class FeedCollector:
             _log(f'export: {note}')
         # 摘要一路交给 export:阶段状态由它最后落,翻译失败只写日志的话这个
         # 阶段会以绿色收尾,而那些文章一篇都没入库(见 `sync.export`)。
-        export(self.name, hold_untranslated=not summary['skipped'], translated=summary)
+        export(self.name, hold_untranslated=not summary['skipped'], translated=summary,
+               fetched=fetched)
 
     def pending(self):
         with reg.db() as c:

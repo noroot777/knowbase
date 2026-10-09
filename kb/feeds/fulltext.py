@@ -80,8 +80,12 @@ def pending(kind: str) -> int:
                          (kind, *args)).fetchone()[0]
 
 
-def fetch_one(url: str) -> str:
-    """抓一个原文链接,返回正文纯文本。抓得到页面但读不懂正文时返回空串。
+def fetch_one(url: str) -> tuple[str, str]:
+    """抓一个原文链接,返回 `(正文纯文本, 读不懂的原因)`。
+
+    抓得到页面但读不懂正文时正文是空串;**那时原因只有样板区这一档给得出来**
+    (版权声明、作者简介),别的读不懂没有判据可言,两个都是空串 —— 调用方据此
+    在通用文案和具体原因之间二选一。
 
     走 `fetching.request`,所以 SSRF 防护(只连公网地址)、重定向逐跳校验、
     8 MB 上限、超时这几件事都已经有人管了 —— 这里只是换一份 Accept。
@@ -96,7 +100,7 @@ def fetch_one(url: str) -> str:
     response = request(url, _HEADERS)
     if problem := readable.html_problem(response.body, response.headers):
         raise FeedError(problem)
-    return readable.extract(readable.decode(response.body, response.headers))
+    return readable.extract_or_reason(readable.decode(response.body, response.headers))
 
 
 def _save(key: str, body: str) -> None:
@@ -163,15 +167,16 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
 
     def one(item):
         if _state.get('stop_requested') or time.monotonic() >= deadline:
-            return item, None, None
+            return item, None, '', None
         try:
-            return item, fetch_one(item['url']), None
+            body, why = fetch_one(item['url'])
+            return item, body, why, None
         except Exception as e:               # noqa: BLE001 - 逐条隔离,一个坏链接不带掉整轮
             _fail(item['key'], e)
-            return item, None, e
+            return item, None, '', e
 
     with ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix='fulltext') as pool:
-        for item, body, error in pool.map(one, rows):
+        for item, body, why, error in pool.map(one, rows):
             if isinstance(error, Exception):
                 summary['failed'] += 1
                 summary['failed_keys'].append(item['key'])
@@ -184,11 +189,16 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
                 summary['done'] += 1
             else:
                 # 页面抓到了,但那上面认不出一块像正文的内容(付费墙、纯 JS 渲染、
-                # 一张图)。按失败计次:重试三轮之后它就离开队列,按壳入库 ——
-                # 不计次的话这条永远排在队首,每一轮都重抓同一个读不懂的页面。
-                _fail(item['key'], '页面上没有识别出正文，可能需要登录或由脚本渲染')
+                # 一张图,或者赢出来那一块判成了样板区)。按失败计次:重试三轮之后
+                # 它就离开队列,按壳入库 —— 不计次的话这条永远排在队首,每一轮都
+                # 重抓同一个读不懂的页面。
+                # `why` 非空就用它:样板区那一档的原因是明确的,面板上要说得出是
+                # 哪一类(口径同 `fetch_one` 对 `html_problem` 那段)。
+                _fail(item['key'], why or '页面上没有识别出正文，可能需要登录或由脚本渲染')
                 summary['empty'] += 1
                 summary['failed_keys'].append(item['key'])
+                summary['errors'].append({'title': item['title'][:120], 'reason': (
+                    why or '页面上没有识别出正文，可能需要登录或由脚本渲染')[:300]})
             if progress:
                 progress(summary['done'] + summary['failed'] + summary['empty'], len(rows))
     return summary

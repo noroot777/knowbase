@@ -348,12 +348,18 @@ def _kept_meta(path: Path) -> dict:
 
 
 def _new_failures(conn, queue: str, cond: str, args: list, extra: list,
-                  keys: list[str]) -> tuple[int, int]:
+                  keys: list[str], column: str = 'translate_error') -> tuple[int, int]:
     """这一轮刚失败、而且**还排在队列里**的那些,按"入没入过库"分两档。
 
-    返回 `(未入库的, 已入库的)`。`keys` 是 `translate.translate_pending` 这一轮
-    真失败的条目;空列表(比如 `export` 被单独调用、这一轮压根没跑翻译)时两档
-    都是 0 —— 没跑翻译就没有"本轮新失败"可言,队列里那些错误全是此前留下的。
+    返回 `(未入库的, 已入库的)`。`keys` 是这一轮真失败的那几个条目;空列表
+    (比如 `export` 被单独调用、这一轮压根没跑那一步)时两档都是 0 —— 没跑就没有
+    "本轮新失败"可言,队列里那些错误全是此前留下的。
+
+    **翻译和正文补抓共用这一份**(`column` 选哪一列的错误,`cond`/`extra` 给各自
+    那个队列判据)。两边要回答的是同一个问题:"这一轮真失败的那几条,现在还被
+    扣在队列里吗" —— 各写一遍的话,一边判红一边不判,而两处的出口规则
+    (试满 MAX_TRIES 就离开队列、不该判红)一模一样。`column` 只在这个模块里被
+    两个字面量调用,没有外部输入拼进 SQL。
     """
     if not keys:
         return 0, 0
@@ -361,7 +367,7 @@ def _new_failures(conn, queue: str, cond: str, args: list, extra: list,
     ph = ','.join('?' * len(keys))
     for t in conn.execute(
             f"SELECT exported_hash='' AS fresh, count(*) AS n {queue} AND ({cond})"
-            f" AND translate_error<>'' AND key IN ({ph}) GROUP BY fresh",
+            f" AND {column}<>'' AND key IN ({ph}) GROUP BY fresh",
             (*args, *extra, *keys)):
         if t['fresh']:
             fresh = t['n']
@@ -371,18 +377,18 @@ def _new_failures(conn, queue: str, cond: str, args: list, extra: list,
 
 
 def export(kind: str, hold_untranslated: bool = False,
-           translated: dict | None = None):
+           translated: dict | None = None, fetched: dict | None = None):
     # 整段在维护锁里:导出是「选出待导出的行 → 逐篇写 vault」,存量清理是
     # 「删 feeds.db 行 → 删 vault 文件」。不互斥的话清理删掉行、导出随后按
     # 自己那份快照把文件写回去,而 feed_items 里已经没有这一条——vault 里从此
     # 躺着一篇谁也管不着的旧文,索引照样收它,下一次清理也找不到它
     # (见 `kb.maintenance`)。
     with maintenance_lock():
-        return _export(kind, hold_untranslated, translated)
+        return _export(kind, hold_untranslated, translated, fetched)
 
 
 def _export(kind: str, hold_untranslated: bool = False,
-            translated: dict | None = None):
+            translated: dict | None = None, fetched: dict | None = None):
     # hold_untranslated:还排在翻译队列里的条目这一轮不写 vault。一轮只译
     # MAX_ITEMS 条,不拦的话第 41 条会先以英文落盘,索引/提取/检索/日报都按
     # 英文处理过一遍。翻译整个跳过时(没配 key)不能拦,否则这些条目永远进
@@ -393,11 +399,20 @@ def _export(kind: str, hold_untranslated: bool = False,
     # 进日志的话,这一行 _stage 随后把阶段刷成绿色,而实测那一轮确实有新文章
     # 因为翻译 503 一篇都没进知识库,日报那头照样记「同步完成」
     # (2026-09-30 审查实测)。
+    #
+    # fetched:这一轮正文补抓的成品摘要(`fulltext.fetch_pending` 的返回值)。
+    # 理由和 translated 逐字相同 —— 它原来只写进日志,而 `_stage` 随后把这个
+    # 阶段刷成绿色:实测一条新条目的原文回 403,面板报「已保存 0 条到知识库,
+    # 1 条待补抓原文正文」、阶段 ok、failures 空,而那篇文章一个字都没进知识库
+    # (2026-10-09 审查实测)。补抓是这条链上最前面那一步,它失败和翻译失败一样
+    # 要在收尾处汇总。
     queue = 'FROM feed_items WHERE kind=?'
     base = queue + ' AND exported_hash<>content_hash'
     args: list = [kind]
     held = stuck = shipped = shipped_stuck = 0
     fresh_new = shipped_new = 0
+    unfetched = unfetched_bad = refetch = refetch_bad = 0
+    fetch_fresh_new = fetch_shipped_new = 0
     # **还排在正文补抓队列里的条目这一轮不写 vault**(见 `kb.feeds.fulltext`)。
     # 它们此刻的 body 是 feed 给的跳转壳,正文马上要被整条换掉 —— 先按壳落盘
     # 的话,索引、提取打标、检索、日报全都按那几十个字处理过一遍,而一轮之后
@@ -413,8 +428,31 @@ def _export(kind: str, hold_untranslated: bool = False,
     # 整个导出阶段抛 `ProgrammingError`(写这段时就是这么先红的一次)。
     fetch_cond, fetch_args = fulltext.queued_sql()
     with reg.db() as c:
-        unfetched = c.execute(f'SELECT count(*) {queue} AND ({fetch_cond})'
-                              " AND exported_hash=''", (*args, *fetch_args)).fetchone()[0]
+        # 四档,和翻译那边同一个形状:**积压、这一轮的故障、此前的故障、已经
+        # 降级出队**是四件事,合成一个数就既说不清这一轮出没出故障,也说不清
+        # 那个数字为什么天天不变。
+        #   fresh(exported_hash='') 还没入库,导出闸门确实扣着它
+        #   bad(fulltext_error<>'') 抓过、报了错、还可以再试
+        # 已入库那一档(旧链接后来才打开补抓开关)照旧读得到,可库里躺的是那个
+        # 几十字的跳转壳 —— 说成「同步完成」和翻译那一档一样是谎报。
+        ftally = c.execute(
+            f"SELECT exported_hash='' AS fresh, fulltext_error<>'' AS bad,"
+            f' count(*) AS n {queue} AND ({fetch_cond}) GROUP BY fresh, bad',
+            (*args, *fetch_args)).fetchall()
+        # 口径取 `fetch_pending` 这一轮真失败的那几个 key 再回库查一次,不直接用
+        # 摘要里的 `failed`/`empty` 计数:本轮失败之后试满 `fulltext.MAX_TRIES`
+        # 的条目已经离开队列、按壳入库了,那是设计好的降级出口,不该判红
+        # (见 `fulltext.queued_sql`)。回查天然把它们排除在外。
+        fetch_fresh_new, fetch_shipped_new = _new_failures(
+            c, queue, fetch_cond, args, fetch_args,
+            list((fetched or {}).get('failed_keys') or []), 'fulltext_error')
+    for t in ftally:
+        if t['fresh']:
+            unfetched += t['n']
+            unfetched_bad += t['n'] if t['bad'] else 0
+        else:
+            refetch += t['n']
+            refetch_bad += t['n'] if t['bad'] else 0
     if hold_untranslated:
         cond, extra = translate.queued_sql()
         with reg.db() as c:
@@ -530,8 +568,25 @@ def _export(kind: str, hold_untranslated: bool = False,
     except Exception as e:               # noqa: BLE001
         errors.append({'title': '让补抓条目的旧摘要作废', 'reason': str(e)[:300]})
     note = f'已保存 {done} 条到知识库'
-    if unfetched:
-        note += f'，{unfetched} 条待补抓原文正文（抓到正文再入库）'
+    # 补抓那几档,拆法和下面翻译那几档逐字对应:本轮故障 / 此前故障（排队重试）
+    # / 还没轮到。混成一个「N 条待补抓」的话,一条原文 403 的新文章和一条排在
+    # 第 21 位还没轮到的新文章在面板上长得一模一样,而前者这一轮确实出了故障。
+    if fetch_fresh_new:
+        note += f'，本轮 {fetch_fresh_new} 条原文抓取失败（暂未入库）'
+    if unfetched_bad - fetch_fresh_new > 0:
+        note += f'，{unfetched_bad - fetch_fresh_new} 条此前原文抓取失败（排队重试，暂未入库）'
+    if unfetched - unfetched_bad > 0:
+        note += f'，{unfetched - unfetched_bad} 条待补抓原文正文（抓到正文再入库）'
+    # 已经按壳入库的那一档:抓取失败不影响"读得到",可库里躺的是那个几十字的
+    # 跳转壳 —— 检索搜不到文章里的任何一句话,提取打标判不出实体。所以本轮
+    # 新失败的照样判红,只是文案说清库里此刻是什么。
+    if fetch_shipped_new:
+        note += f'，本轮 {fetch_shipped_new} 条原文抓取失败（库里仍是链接内容）'
+    if refetch_bad - fetch_shipped_new > 0:
+        note += (f'，{refetch_bad - fetch_shipped_new} 条此前原文抓取失败'
+                 f'（排队重试，库里仍是链接内容）')
+    if refetch - refetch_bad > 0:
+        note += f'，{refetch - refetch_bad} 条等待原文正文覆盖'
     # 失败那两档各拆成「本轮」和「此前」:它们是两件事,混成一个数就既说不清
     # 这一轮到底出没出故障,也说不清那个数字为什么天天不变(2026-10-08 实测:
     # 63 条陈年失败连着让每一轮导出判红,而那几轮一次模型调用都没失败)。
@@ -557,6 +612,13 @@ def _export(kind: str, hold_untranslated: bool = False,
     # 下一轮就会被优先取走(见 `translate.translate_pending` 的取数顺序),
     # 让它们把每一轮都染红,红点就不再指向任何一次真实故障。文案里照样如实
     # 列着,只是不判红。
+    #
+    # 补抓那两档同理只认本轮:口径、理由和出口规则(试满 `fulltext.MAX_TRIES`
+    # 按壳入库)跟翻译一模一样,所以两边共用 `_new_failures`。
     bad = fresh_new + shipped_new
+    fetch_bad = fetch_fresh_new + fetch_shipped_new
     fails = errors + ([] if not bad else (translated or {}).get('errors') or [])
-    _stage('export', 'error' if errors or bad else 'ok', note, failures=fails)
+    # 补抓的失败明细也要进 failures:它是面板卡片里可展开的那一份,只写进运行
+    # 日志的话用户看到的是一句没有信息的「1 条原文抓取失败」,点进去什么都没有。
+    fails += [] if not fetch_bad else (fetched or {}).get('errors') or []
+    _stage('export', 'error' if errors or bad or fetch_bad else 'ok', note, failures=fails)
