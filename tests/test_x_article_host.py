@@ -20,12 +20,15 @@
 地址照旧摘得掉、判据① 照旧为真** —— 其中英文冒号那条是"`:` 故意不在禁止集里"
 那个取舍的射程,把它加进禁止集的实现会在那里红。
 
-**这道闸按候选带不带 scheme 分两档,所以 `PunctuationLeadInTests` 管的是另一头**:
-把两档合成一档(一律禁"URL 内部字符紧贴")会让 `新文章...<地址>` 这种**真**地址
-被自己前面那个标点挡住 —— 判据① 一条都不命中,那条链接本身当成正文入库,而
-`DO NOTHING` 之下重复同步也补不回来(2026-10-09 实测,两种前导 × 两条保留通道)。
-那一族里也反过来钉着:放行正文标点不许顺带放行别人家的地址,嵌套的 X 文章地址
-照旧一个字不动。
+**这道闸分三层,所以另两族管的是另外两头**:
+①`PunctuationLeadInTests` —— 两档合成一档(一律禁"URL 内部字符紧贴")会让
+  `新文章...<地址>` 这种**真**地址被自己前面那个标点挡住;
+②`QuestionMarkLeadInTests` —— 分了档也不够,`?` 和 `#` 在①档里还得按上下文判
+  (`_nested`),一律拒的话 `读过这篇吗?<地址>` 同样被挡住(第 4 轮审查那条)。
+两种漏认的末态逐字相同:判据① 一条都不命中,那条链接本身当成正文入库,而
+`DO NOTHING` 之下重复同步也补不回来(2026-10-09 实测,各两种前导 × 两条保留
+通道)。两族里都反过来钉着:放行正文标点不许顺带放行别人家的地址,嵌套的 X 文章
+地址照旧一个字不动、一次询问都不发。
 
 **另拆一个文件**是因为 `test_x_article_gap.py` 已经 603 行,再加一族越过仓库那条
 700 行上限;摆盘(`FeedgrabRound`、④族那两个 round helper)仍共用它那一份。
@@ -197,40 +200,78 @@ class HostBoundaryFormTests(unittest.TestCase):
     # 裸域名形式的同一条地址(没有 scheme),用来直测第二档。
     BARE = 'x.com/Example/article/10001'
 
+    @staticmethod
+    def hit(text):
+        """走**对外那个入口**,不是裸 `.search`。
+
+        起点判据现在是两道:定宽后视在正则里,`?`/`#` 那一道上下文判断在正则
+        外面(`_nested`)。只测正则的话后一道压根不在射程里,而 `needs_article`
+        判据① 和 `lead_text` 走的都是这个入口。
+        """
+        return x_article._first(x_article._ARTICLE_LINK, text)
+
     def test_the_scheme_arm_only_rejects_url_structure_separators(self):
         """直测第一档:`https://` 自带起点宣告,所以只排"嵌在另一条 URL 里"。
 
-        嵌套只发生在外层 URL 的结构位置(查询值、片段、路径段),那几个位置的紧前
-        一个字符必然是 `=` `&` `?` `#` `/` 之一。**正文标点一律放行** —— 把它们
-        也禁掉的实现会让 `新文章...<地址>` 这种真地址漏认,而漏认 = 空正文永久
-        固定(第 3 轮审查那份证据)。
+        嵌套只发生在外层 URL 的结构位置(查询值、片段、路径段)。**正文标点一律
+        放行** —— 把它们也禁掉的实现会让 `新文章...<地址>` 这种真地址漏认,而
+        漏认 = 空正文永久固定(第 3 轮审查那份证据)。
+        `?` 和 `#` **不在这道定宽后视里**:它们同时也是作者的句读,归 `_nested`
+        按上下文判(见下一条),所以这里只剩 `=` `&` `/` 三个。
         """
-        hit = x_article._ARTICLE_LINK.search
         for lead in ('.', '..', '...', '~', '-', ':', 'x', '9', '@', '%', '+', '_',
-                     '中文', '', ' ', '('):
+                     '中文', '', ' ', '(', '?', '#'):
             with self.subTest(ok=lead):
-                self.assertTrue(hit(lead + CANON),
+                self.assertTrue(self.hit(lead + CANON),
                                 '带 scheme 的真地址不许被正文标点挡住')
-        for bad in ('=', '&', '?', '#', '/'):
+        for bad in ('=', '&', '/'):
             with self.subTest(bad=bad):
-                self.assertIsNone(hit(bad + CANON),
+                self.assertIsNone(self.hit(bad + CANON),
                                   'URL 的结构分隔符后面是一条嵌套地址,不是我们的')
+
+    def test_a_question_mark_is_judged_by_what_sits_left_of_it(self):
+        """直测 `_nested`:`?` 和 `#` 判的是**左边那一段自己是不是一条 URL**。
+
+        它们有两个身份,光看紧贴的那一个字符分不开:`读过这篇吗?<地址>` 里是作者
+        的句读(那条地址是他自己的),`https://example.org/#<地址>` 里是外层 URL 的
+        片段符(那条地址是别人家的)。第 4 轮审查那份证据正是前一种被当成了后一种
+        —— 判据① 一条都不命中,那条链接本身当成正文入库,`DO NOTHING` 之下重复
+        同步也补不回来。
+
+        后两个样本钉的是"**只往左吃 URL 合法字符**,不是数到最近的空白"这个选择:
+        外层 URL 早在中文处断了、或者两条地址用逗号紧连时,那条 X 地址是**真的**
+        —— 数到空白的实现会把它们一起误拒,而误拒 = 漏认。
+        """
+        for ok in ('Have you read this?', '读过这篇吗?', 'What#', '第三节#',
+                   'Really??', 'v1.2?', 'x=1?',
+                   '参考https://example.org/说明?', 'https://example.org/doc,'):
+            with self.subTest(ok=ok):
+                self.assertTrue(self.hit(ok + CANON),
+                                '句读紧贴的是作者自己那条地址')
+        for bad in ('https://example.org/#', 'https://example.org?',
+                    'www.example.org/a#', 'WWW.example.org/a#',
+                    'https://example.org/a:b#', '参考 https://example.org/p#'):
+            with self.subTest(bad=bad):
+                self.assertIsNone(self.hit(bad + CANON),
+                                  '左边是一条 URL,这个 ?/# 是它的结构字符')
 
     def test_the_bare_arm_still_rejects_every_url_character(self):
         """直测第二档:裸域名的起点就是主机名第一个字符,禁止集一个都不许少。
 
         它和分档之前那道闸**逐字相同** —— 域名后缀(`fx`/`not`/`help.`/`my-`)和
         路径嵌套全靠它挡着,放宽一个字符就会把**别人的文章**记成这条推文的内容。
-        `:` 两档都放行,所以它单列在下面那条用例里。
+        `?` 和 `#` 在这一档里照旧一律拒(**不走** `_nested`):"标点 + 裸域名"被拒
+        是故意的取舍 —— 裸写法不是 X 展开出来的形态,给它开口子得把字符集拆成两份
+        (`_URL_RUN` 必须留着这两个字符),换一种没有真实触发路径的写法,不值。
+        `:` 两档都放行,所以它单列在上面那条用例里。
         """
-        hit = x_article._ARTICLE_LINK.search
-        self.assertTrue(hit(f'中文{self.BARE}'), '汉字前导不许挡住真地址')
-        self.assertTrue(hit(f'见:{self.BARE}'))
-        self.assertTrue(hit(self.BARE))
+        for ok in (f'中文{self.BARE}', f'见:{self.BARE}', self.BARE):
+            with self.subTest(ok=ok):
+                self.assertTrue(self.hit(ok), '汉字/英文冒号前导不许挡住真地址')
         for bad in ('x', '.', '/', '-', '=', '?', '#', '@', '%', '&', '~', '+',
                     '_', '9'):
             with self.subTest(bad=bad):
-                self.assertIsNone(hit(bad + self.BARE),
+                self.assertIsNone(self.hit(bad + self.BARE),
                                   'URL 内部字符后面不是主机名起点')
 
 
@@ -280,23 +321,26 @@ class PunctuationLeadInTests(FeedgrabRound):
         """同一轮的第二个样本:`新文章~<地址>`。"""
         self.check_feedgrab('新文章~')
 
-    def test_punctuation_hugging_the_link_works_on_the_browser_channel(self):
+    def check_browser(self, lead):
         """另一条保留通道,而且是**没有卡片信号**那一档。
 
         有卡片时判据② 会把这一条救回来,漏判就看不出来了 —— 正文里那条地址本来
         就该是独立的第二道信号。
         """
+        got, calls = self.browser_round(f'{lead}https://x.com/example/article/9')
+        text = got['entries'][0]['body']
+        self.assertIn(FULL, text, '标点紧贴时长文全文没补进来')
+        self.assertNotIn('/example/article/9', text)
+        self.assertIn(lead, text)
+        self.assertEqual('', got['incomplete'], '补到了,这一轮算读全了')
+        self.assertNotEqual(OLD_WATER, got['watermark'])
+        self.assertEqual(1, len(calls.urls))
+
+    def test_punctuation_hugging_the_link_works_on_the_browser_channel(self):
+        """两个样本各在浏览器通道上走一遍。"""
         for lead in self.LEAD_INS:
             with self.subTest(lead=lead):
-                got, calls = self.browser_round(
-                    f'{lead}https://x.com/example/article/9')
-                text = got['entries'][0]['body']
-                self.assertIn(FULL, text, '标点紧贴时长文全文没补进来')
-                self.assertNotIn('/example/article/9', text)
-                self.assertIn(lead, text)
-                self.assertEqual('', got['incomplete'], '补到了,这一轮算读全了')
-                self.assertNotEqual(OLD_WATER, got['watermark'])
-                self.assertEqual(1, len(calls.urls))
+                self.check_browser(lead)
 
     def test_an_external_address_after_the_same_punctuation_is_still_left_alone(self):
         """**反过来钉一边**:放行正文标点不许顺带放行别人家的地址。
@@ -314,8 +358,11 @@ class PunctuationLeadInTests(FeedgrabRound):
     def test_an_x_article_nested_in_someone_elses_url_is_still_left_alone(self):
         """放宽第一档之后新的风险点:**嵌套**的 X 文章地址照旧一个字不许动。
 
-        它靠的是那五个结构分隔符(`=` `&` `?` `#` `/`)—— 真实的嵌套入口全在里面。
-        把它们也放行的实现会把别人那条地址从中间剪断,而剪断永久固定。
+        四种真实的嵌套入口分走两道判据:`=` `&` `/` 那三条靠 `_SCHEME_HEAD` 那道
+        定宽后视,`#`(以及 `?`)那条靠 `_nested` 看一眼左边是不是一条 URL —— 后者
+        是第 4 轮之后的事,在那之前 `#` 也在后视里,代价是句末问号紧贴的真地址一起
+        被挡住(见 `QuestionMarkLeadInTests`)。放行它们的实现会把别人那条地址从
+        中间剪断,而剪断永久固定。
         """
         for url in (f'https://evil.example/?u={CANON}',
                     f'https://evil.example/p#{CANON}',
@@ -324,6 +371,67 @@ class PunctuationLeadInTests(FeedgrabRound):
             with self.subTest(url=url):
                 self.assertEqual(url, lead_text(url))
                 self.assertFalse(needs_article({'url': TWEET, 'body': url}))
+
+
+class QuestionMarkLeadInTests(FeedgrabRound):
+    """第 4 轮审查那条:**句末英文问号**紧贴时长文照旧补得到。
+
+    `?` 和 `#` 比 `.` `~` 还难办 —— 它们在一条已经开始的 URL 里是查询串/片段的
+    分隔符(真实的嵌套入口),在正文里却是作者的句读,而**两头都有真实写法**。
+    上一轮把它们留在定宽后视里一律拒,于是
+    `Have you read this?<文章地址>` 和 `读过这篇吗?<文章地址>`(中文不带空格,
+    半角问号紧贴是常见写法)里那条**真**地址被自己的句末问号挡住:`needs_article`
+    三条判据一条都不命中,那条链接本身当成正文入库 —— `added=1`、`errors=[]`、
+    `partial=[]`、水位照常推进、标题回落成「某某 的动态」,而 `DO NOTHING` 之下
+    重复同步也补不回来(2026-10-09 实测,两种路径形式、两条通道逐字一样)。
+
+    **后果先断言**:只验"问过那次接口"的话,一个把链接当正文存下来、却顺手问了
+    一次的实现也能过。摆盘和判据共用 `PunctuationLeadInTests` 那一份 —— 两族验的
+    是同一道闸的两类前导字符,各写一份必然漂。
+    """
+
+    feedgrab_round = ArticlePathFormTests.feedgrab_round
+    browser_round = ArticlePathFormTests.browser_round
+    check_feedgrab = PunctuationLeadInTests.check_feedgrab
+    check_browser = PunctuationLeadInTests.check_browser
+
+    # 前两个逐字取自第 4 轮审查报告的输入,`What#` 是同一道闸上的另一个字符。
+    LEAD_INS = ['Have you read this?', '读过这篇吗?', 'What#']
+
+    def test_an_english_question_mark_hugging_the_link_reaches_the_knowledge_base(self):
+        """审查报告那个样本:`Have you read this?<地址>`。"""
+        self.check_feedgrab('Have you read this?')
+
+    def test_a_question_mark_after_chinese_text_reaches_the_knowledge_base(self):
+        """同一轮的第二个样本 —— 中文不带空格,所以这种写法最常见。"""
+        self.check_feedgrab('读过这篇吗?')
+
+    def test_a_hash_hugging_the_link_reaches_the_knowledge_base(self):
+        """`#` 和 `?` 是同一道闸上的同一个二义性,所以它也得有自己那一条。"""
+        self.check_feedgrab('What#')
+
+    def test_a_question_mark_works_on_the_browser_channel(self):
+        """另一条保留通道,同样是**没有卡片信号**那一档。"""
+        for lead in self.LEAD_INS:
+            with self.subTest(lead=lead):
+                self.check_browser(lead)
+
+    def test_an_address_in_someone_elses_fragment_is_never_asked_about(self):
+        """**反过来钉一边(端到端)**:嵌在别人片段里的那条地址,一次都不问。
+
+        这是放宽 `#` 之后新的风险面:它从定宽后视里拿掉了,只剩 `_nested` 挡着。
+        判据不能只是"正文没被改" —— 那条地址被误认时还会白买一次询问,而答复会
+        是别人那篇文章的全文,真写进库里就是把**别人的内容**记成这条推文的观点。
+        """
+        body = f'参考 https://evil.example/p#{CANON}'
+        summary, row, calls, s = self.feedgrab_round(body)
+        self.assertEqual([], calls.urls, '别人家的地址不许触发一次询问')
+        self.assertEqual(body, (row.get('body') or '').strip(),
+                         '别人那条地址一个字都不许少')
+        self.assertNotIn(FULL, row.get('body') or '', '别人的全文不许写进来')
+        self.assertEqual([], summary['errors'])
+        self.assertEqual(1, summary['added'])
+        self.assertEqual(TODAY, self.water(s['id']))
 
 
 if __name__ == '__main__':
