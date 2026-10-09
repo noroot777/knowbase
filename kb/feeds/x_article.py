@@ -197,6 +197,29 @@ def _entities(content: dict) -> dict:
     return out
 
 
+def _code_body(lines: list[str]) -> str:
+    """把攒起来的代码行拼成围栏内容。**行内容一律原样,一个字节都不改。**
+
+    行尾空白**可能正是数据** —— 多行字符串、提示词模板、定宽文本、字符画都把它
+    当内容。逐行 `rstrip` 的那一版实测过:一段三引号字符串里第二行末尾那两个
+    空格被删掉之后,代码照旧 `compile()` 得过,而里面那句 `assert` 当场失败
+    (2026-10-09 第 4 轮审查,接口、后路、导出到阅读页复制四条路各复现一次)
+    —— **「编译得过」证明不了字符串的值没被改写**,所以回归的判据是执行输出。
+
+    真实 Draft.js 的代码块是**一行一个块**,所以「每块收尾」就等于「每行收尾」:
+    这件事只能在**整组边界**做。而且只削**完全空**的行:纯空格的行同样可能是
+    数据,代码**中间**的空行照旧原样留着。
+    """
+    rows = '\n'.join(lines).split('\n')
+    a, b = 0, len(rows)
+    while a < b and not rows[a]:
+        a += 1
+    while b > a and not rows[b - 1]:
+        b -= 1
+    body = '\n'.join(rows[a:b])
+    return body if body.strip() else ''
+
+
 def _fence(code: str) -> str:
     """把一段代码包成 markdown 代码围栏。
 
@@ -229,9 +252,9 @@ def render(article: dict) -> str:
     code: list[str] = []
 
     def flush() -> None:
-        if code:
-            out.append(_fence('\n'.join(code)))
-            code.clear()
+        if body := _code_body(code):
+            out.append(_fence(body))
+        code.clear()
 
     for block in content.get('blocks') or []:
         if not isinstance(block, dict):
@@ -246,11 +269,10 @@ def render(article: dict) -> str:
         if kind == 'code-block':
             # Draft.js 的代码块是**一行一个块**(`blockRenderMap` 把相邻的几个包进
             # 同一个 `<pre>`),所以攒起来合并成**一个**围栏 —— 每行各发一个围栏的话
-            # 复制出来是一堆分散的小代码块。**行首缩进是内容,只去行尾空白**;空行
-            # 只在代码**中间**才算内容。
-            line = text.rstrip()
-            if line or code:
-                code.append(line)
+            # 复制出来是一堆分散的小代码块。**每一行都原样攒着,行首缩进和行尾空白
+            # 都是内容**(理由见 `_code_body`)—— 占位空块的处理**只在整组边界**
+            # 发生,这里一个字节都不判、不改。
+            code.append(text)
             continue
         flush()
         if stripped := text.strip():
@@ -430,21 +452,33 @@ _READ_JS = r'''(() => {
     const all = (el.textContent || '').replace(/\s+/g, '');
     return !!all && all === (inner.textContent || '').replace(/\s+/g, '');
   };
-  // 代码块收尾只去首尾的空行,**不去行首空格** —— 那是缩进。
-  const codeTrim = (s) => s.replace(/^(?:[ \t]*\r?\n)+/, '').replace(/\s+$/, '');
   const blocks = [];
   // 真实 Draft.js 的代码块是**一行一个 block**(`blockRenderMap` 把相邻的几个
   // 包进同一个 `<pre>`),所以相邻的预格式化块要合并成**一个**围栏 —— 每行各发
   // 一个围栏的话,复制出来是一堆分散的小代码块。「一个块里装多行」走同一条路。
   let pend = [];
+  // 围栏内容**一律原样,一个字节都不改**,口径同 `_code_body`:只在**整组边界**
+  // 削**完全空**的行。真实 Draft.js 一行一个块,所以「每块收尾」就等于「每行
+  // 收尾」—— 而行尾那几个空格可能正是多行字符串、提示词模板、定宽文本的数据,
+  // 删掉之后代码照旧 `compile()` 得过而里面的 `assert` 当场失败(2026-10-09
+  // 第 4 轮审查实测)。纯空格的行同样可能是数据,所以只削完全空的。
+  const codeBody = (lines) => {
+    const rows = lines.join('\n').split('\n');
+    let a = 0, b = rows.length;
+    while (a < b && rows[a] === '') a++;
+    while (b > a && rows[b - 1] === '') b--;
+    const body = rows.slice(a, b).join('\n');
+    return body.trim() ? body : '';
+  };
   const flush = () => {
     if (!pend.length) return;
-    const body = pend.join('\n');
+    const body = codeBody(pend);
+    pend = [];
+    if (!body) return;
     let n = 3;
     for (const t of body.match(/`{3,}/g) || []) n = Math.max(n, t.length + 1);
     const bar = '`'.repeat(n);
     blocks.push(bar + '\n' + body + '\n' + bar);
-    pend = [];
   };
   if (root) for (const b of root.querySelectorAll('[data-block="true"]')) {
     const isCode = codeish(b);
@@ -452,16 +486,15 @@ _READ_JS = r'''(() => {
     // 不许动** —— 它们是组合表情的一部分,删掉之后一个组合表情当场裂成几个。
     const raw = textOf(b, preish(b)).replace(/[\u200b\ufeff]/g, '')
                                     .replace(/\u00a0/g, ' ');
-    const txt = isCode ? codeTrim(raw) : raw.trim();
-    if (!txt) {
-      // 代码**中间**的空行是内容;代码块外的空块照旧丢掉。
-      if (isCode && pend.length) pend.push('');
-      else if (!isCode) flush();
+    if (isCode) {
+      // **每一行都原样攒着,行尾空白一个都不许当装饰删掉**(理由见 `codeBody`)。
+      // 占位空块的处理**只在整组边界**发生,这里一个字节都不判、不改。
+      pend.push(raw);
       continue;
     }
-    if (isCode) { pend.push(txt); continue; }
     flush();
-    blocks.push(txt);
+    const txt = raw.trim();
+    if (txt) blocks.push(txt);
   }
   flush();
   let title = '', big = 0;

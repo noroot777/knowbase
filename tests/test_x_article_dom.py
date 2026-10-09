@@ -21,6 +21,7 @@ from tempfile import TemporaryDirectory
 from kb.feeds import x_article, x_browser
 from kb.feeds.x_cdp import Chrome
 from tests.headless import INSTALL_HINT, SHELL
+from tests.test_x_article_fidelity import DATA_CODE, _SP as SP
 from tests.test_x_article import _FakeChrome, snapshot
 
 _NEEDS_SHELL = unittest.skipUnless(
@@ -40,6 +41,20 @@ CODE = 'def answer():' + chr(10) + '    if True:' + chr(10) + '        return 42
 SNIPPET = '    .deep {' + chr(10) + '       color: red;' + chr(10) + '     }'
 # 代码里**独占一行**的 ```:围栏长度得避开它,否则它把围栏提前收尾。
 NESTED = '示例:' + chr(10) + chr(96) * 3 + chr(10) + '里面' + chr(10) + chr(96) * 3
+# **行尾空白可能是数据**:下面这段的第二行末尾有两个空格,它们在三引号字符串
+# **里面**。真实 Draft.js 是一行一个 block,所以"每块收尾去空白"就等于"每行
+# 收尾去空白" —— 那一版照旧 `compile()` 得过、围栏也在,只有**执行输出**看得
+# 出来(2026-10-09 第 4 轮审查实测)。样本和主路那条用例共用一份,别各写一份。
+DATA_PRE = '<pre>' + ''.join(
+    '<div data-block="true"><span data-text="true">' + ln + '</span></div>'
+    for ln in DATA_CODE.split(chr(10))) + '</pre>'
+# 组边界那一道:Draft.js 的**占位空块**(零宽)该削,而**一行空格不该** —— 它
+# 可能是字符画、定宽表格、多行字符串的内容。后路这一侧有自己那份实现,所以单独
+# 再钉一遍:拿 `trim()` 判边界的那一版在主路那条直测用例上是绿的(自查发现)。
+PAD_BODY = SP + chr(10) + '|  x  |' + chr(10) + SP
+PAD_PRE = '<pre>' + ''.join(
+    '<div data-block="true"><span data-text="true">' + ln + '</span></div>'
+    for ln in ['&#8203;', SP, '|  x  |', SP, '&#8203;']) + '</pre>'
 
 # Draft.js 的真实形状:每个段落一个 `[data-block="true"]`,文字包在
 # `[data-text="true"]` 里,表情是一个带 alt 的 `<img>`(twemoji),配图单独
@@ -79,7 +94,10 @@ ARTICLE_HTML = f'''<!doctype html><meta charset="utf-8"><title>Article</title>
         ><span data-text="true"> 就能用。</span></div>
       <pre><div data-block="true"><span data-text="true">for i in range(3):</span></div
         ><div data-block="true"><span data-text="true">    print(i)</span></div></pre>
+      <div data-block="true"><span data-text="true">下面那段的行尾有空白。</span></div>
+      {DATA_PRE}
       <div data-block="true"><span data-text="true">&#8203;</span></div>
+      {PAD_PRE}
     </div>
   </div>
 </div>'''
@@ -131,8 +149,10 @@ class DomTests(unittest.TestCase):
         cls.tmp.cleanup()
 
     def open(self, name):
+        # 等得宽一点:机器负载上来时 4 秒等不到 `complete`,红的是一条跟它毫无
+        # 关系的用例(两轮审查各撞到一次这条 flaky,报告里都单独解释了一遍)。
         self.page.goto((self.root / name).as_uri())
-        for _ in range(40):
+        for _ in range(100):
             if self.page.eval('document.readyState') == 'complete':
                 return
             time.sleep(0.1)
@@ -225,6 +245,34 @@ class DomTests(unittest.TestCase):
                          f'相邻的预格式化块要合并成一个围栏:{fences}')
         compile(got.split('\n', 1)[1].rsplit('\n', 1)[0], '<extracted>', 'exec')
 
+    def test_a_trailing_space_inside_a_string_is_data(self):
+        """**后果先断言**:真浏览器读出来的这段代码,跑起来那句 `assert` 得过。
+
+        和上一条同一个形状(`<pre>` 包着一行一个块),差别在**行尾有空白**:
+        逐块收尾去空白就等于逐行去,而那两个空格在三引号字符串里面。那一版
+        围栏在、`compile()` 也过,**只有执行输出看得出来**。
+        """
+        self.open('article.html')
+        blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
+        got = next((b for b in blocks if 'record = ' in b), '')
+        self.assertEqual(chr(96) * 3 + chr(10) + DATA_CODE + chr(10) + chr(96) * 3,
+                         got, f'行尾那两个空格被删了:{got!r}')
+        code = got.split(chr(10), 1)[1].rsplit(chr(10), 1)[0]
+        exec(compile(code, '<extracted>', 'exec'), {})   # 删掉空格时 AssertionError
+
+    def test_only_a_fully_empty_block_is_trimmed_at_the_code_edges(self):
+        """组边界那一道:**占位空块该削,一行空格不该。**
+
+        一行只有空格同样可能是内容(字符画、定宽表格、多行字符串),而 Draft.js
+        的占位空块是空字符串 —— 两者分得开。后路有自己那份实现,所以这里单独
+        钉一遍:拿 `trim()` 判边界的那一版在主路那条直测用例上是绿的。
+        """
+        self.open('article.html')
+        blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
+        got = next((b for b in blocks if '|  x  |' in b), '')
+        self.assertEqual(chr(96) * 3 + chr(10) + PAD_BODY + chr(10) + chr(96) * 3,
+                         got, f'边界只许削完全空的行:{got!r}')
+
     def test_an_inline_code_span_does_not_fence_the_paragraph(self):
         """**反过来钉一边**:段落里插一个行内 `<code>` 不许把整段包成代码块。
 
@@ -268,7 +316,7 @@ class DomTests(unittest.TestCase):
         self.open('article.html')
         snap = json.loads(self.page.eval(x_article._READ_JS))
         blocks = snap['blocks']
-        self.assertEqual(15, len(blocks), f'零宽占位块不该成段:{blocks}')
+        self.assertEqual(18, len(blocks), f'零宽占位块不该成段:{blocks}')
         self.assertEqual('第二段正文独立成段。', blocks[1])
         self.assertEqual('第三段\n换行之后还在同一段里。', blocks[3])
         self.assertEqual('第四段。', blocks[4], 'display:none 的辅助节点不进正文')
@@ -285,7 +333,7 @@ class DomTests(unittest.TestCase):
         self.assertIn('🙂', got['body'])
         self.assertIn(f'![]({PHOTO})', got['body'])
         self.assertEqual('X书签保存Skill x Teamily', got['title'])
-        self.assertEqual(15, len(got['body'].split('\n\n')))
+        self.assertEqual(18, len(got['body'].split('\n\n')))
 
     # ── 时间线的长文卡片 ────────────────────────────────────────────────────
 

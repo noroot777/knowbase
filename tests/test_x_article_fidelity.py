@@ -44,6 +44,20 @@ _NEEDS_SHELL = unittest.skipUnless(
 CODE = 'def answer():\n    if True:\n        return 42'
 REPOST = 'Example reposted'
 
+_SP = ' ' * 2      # 行尾那两个空格 —— 它在三引号字符串**里面**,是数据不是排版
+_BS = chr(92)
+# **判据是执行输出,不是能不能编译。** 逐行 `rstrip` 删掉上面那两个空格之后,
+# 这段代码照旧 `compile()` 得过,而跑起来那句 `assert` 当场失败 —— 多行字符串、
+# 提示词模板、定宽文本、字符画都把行尾空白当内容(2026-10-09 第 4 轮审查:接口、
+# 后路、导出到阅读页复制四条路各复现一次)。常量摆在这里给 `test_x_article_dom`
+# 那条真浏览器用例共用,两边各写一份的话样本会漂。
+DATA_CODE = '\n'.join([
+    'record = """first line',
+    'second line' + _SP,
+    'third line"""',
+    f'assert record == "first line{_BS}nsecond line{_SP}{_BS}nthird line"',
+])
+
 
 def _code_blocks(lines):
     return [{'type': 'code-block', 'text': ln} for ln in lines]
@@ -112,6 +126,47 @@ class FenceTests(unittest.TestCase):
             'blocks': _code_blocks(lines), 'entityMap': []}})
         self.assertEqual(['\n'.join(lines)], self.md_code(body),
                          f'围栏长度没避开内容里那一行反引号:{body!r}')
+
+    def test_a_trailing_space_inside_a_string_is_data(self):
+        """**后果先断言**:这段代码跑起来,里面那句 `assert` 得过。
+
+        行尾空白**可能正是数据**。真实 Draft.js 是一行一个 `code-block`,所以
+        "每块收尾去空白"就等于"每行收尾去空白" —— 逐行 `rstrip` 的那一版照旧
+        `compile()` 得过,**编译通过证明不了字符串的值没被改写**,所以判据只能是
+        执行输出(2026-10-09 第 4 轮审查实测:`record` 少了那两个空格)。
+        """
+        body = x_article.render({'content': {
+            'blocks': _code_blocks(DATA_CODE.split('\n')), 'entityMap': []}})
+        got = self.md_code(body)
+        self.assertEqual(1, len(got), f'没有围栏:{body!r}')
+        exec(compile(got[0], '<rendered>', 'exec'), {})    # 删掉空格时 AssertionError
+        self.assertEqual(DATA_CODE, got[0], f'行尾那两个空格被删了:{body!r}')
+
+    def test_only_fully_empty_lines_are_trimmed_at_the_edges(self):
+        """直测边界口径:**完全空**的行在整组首尾削掉,纯空格的一个都不削。
+
+        Draft.js 的占位空块是空字符串;而一行空格可能是定宽文本、字符画、多行
+        字符串的内容 —— 拿 `strip()` 判边界的实现会把它一起吃掉。两头各钉一边:
+        该削的还得削,不然围栏里凭空多出空行。
+        """
+        self.assertEqual('a', x_article._code_body(['', '', 'a', '', '']))
+        self.assertEqual(_SP + '\na\n' + _SP,
+                         x_article._code_body([_SP, 'a', _SP]))
+        self.assertEqual('', x_article._code_body(['', '']))
+
+    def test_a_whitespace_only_line_at_the_code_edge_survives(self):
+        """走一遍 `render`:组**边界**上那行空格也留着,占位空块照旧削掉。
+
+        上一条是直测 `_code_body`,这一条管的是它外面那段循环 —— 在那里按
+        `strip()` 跳过"开头的空块"的实现,交给 `_code_body` 的已经少了一行,
+        直测用例对它压根不敏感(自查发现)。后路那一侧在 `test_x_article_dom`
+        里各钉一条,两份实现各有自己的用例。
+        """
+        lines = [_SP, '|  x  |', _SP]
+        body = x_article.render({'content': {
+            'blocks': _code_blocks([''] + lines + ['']), 'entityMap': []}})
+        self.assertEqual(['\n'.join(lines)], self.md_code(body),
+                         f'边界只许削完全空的行:{body!r}')
 
     def test_prose_is_not_fenced(self):
         """**反过来钉一边**:普通段落、标题、列表、引用一个都不许被包成代码块。
@@ -248,6 +303,22 @@ class ReaderRoundTripTests(ChannelBase):
         code = re.sub(r'\n+$', '', seen['text'].split('代码示例长文', 1)[-1].strip('\n'))
         self.assertEqual(CODE, code, f'页面上的代码和原文不一致:{code!r}')
         compile(code, '<copied-from-reader>', 'exec')
+
+    def test_a_trailing_space_survives_export_and_the_reader(self):
+        """**后果先断言**:从阅读页上取走的那段代码**跑起来那句 `assert` 得过**。
+
+        这是最远的那个终点:接口解析 → 入库 → 导出 → 真 marked/DOMPurify 渲染。
+        行尾空白被当装饰删掉时这一路一个字都不报错,只有执行输出看得出来。
+        """
+        req, _ = answering(article_payload(
+            blocks=_code_blocks(DATA_CODE.split('\n'))))
+        with req:
+            got = x_article.fetch('https://x.com/Example/status/900')
+        seen = self.read(got['body'])
+        self.assertEqual(1, seen['pre'], f'阅读页上没有代码块:{seen["text"]!r}')
+        code = re.sub(r'\n+$', '', seen['text'].split('代码示例长文', 1)[-1].strip('\n'))
+        exec(compile(code, '<copied-from-reader>', 'exec'), {})
+        self.assertEqual(DATA_CODE, code, f'页面上的代码和原文不一致:{code!r}')
 
     def test_a_bare_code_paragraph_is_how_it_used_to_break(self):
         """**阴性对照**:同一段代码不带围栏时,页面上真的塌成一行、编译不过。
