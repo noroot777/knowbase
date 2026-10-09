@@ -69,13 +69,16 @@ function resetSourceReader(message = '') {
 }
 
 function sourceReadingContext() {
-  return JSON.stringify([sourceKind, $('source-q').value.trim(), $('source-filter').value]);
+  const selectedId = $('source-filter').value;
+  const source = sourceData?.sources.find(item => String(item.id) === selectedId);
+  return JSON.stringify([sourceKind, $('source-q').value.trim(), selectedId,
+    source?.url || '', source?.feed_url || '', source?.mode || '']);
 }
 
 function syncSourceReader() {
   const key = sourceReaderKeys.get(sourceKind);
   const retained = sourceReaderItem && sourceReaderItem.key === key && sourceItemReadable(sourceReaderItem)
-    && sourceReaderContext === sourceReadingContext() && sourceTotal > 0
+    && sourceReaderContext === sourceReadingContext() && sourceOffset < sourceTotal
     && !sourceRows.some(item => item.key === key) ? sourceReaderItem : null;
   const selected = sourceRows.find(item => item.key === key && sourceItemReadable(item))
     || retained || sourceRows.find(sourceItemReadable);

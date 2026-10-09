@@ -120,6 +120,15 @@ async page => {
     check('恢复导航后上一篇仍按列表顺序切换', await page.evaluate(() => sourceReaderItem.key === 'boundary-29'));
     await page.locator('#source-reader-next').click();
     check('恢复导航后可以回到原文章', await page.evaluate(() => sourceReaderItem.key === 'boundary-30'));
+    items = items.filter(item => item.key !== lastItem.key);
+    await page.locator('#source-view-items').click();
+    await page.waitForFunction(() => sourceRows.length === 30 && sourceTotal === 30);
+    check('完整结果排除当前文章时不保留旧正文', await page.evaluate(() => sourceReaderItem?.key === 'boundary-31'));
+    check('完整结果重新选中有效文章并恢复导航', await page.locator('.source-entry.is-selected').count() === 1
+      && await page.locator('#source-reader-position').textContent() === '1 / 30'
+      && !await page.locator('#source-reader-next').isDisabled());
+    check('完整结果不误导用户继续加载已不存在的文章', await page.locator('#source-more').isHidden()
+      && await page.locator('#source-reader-scroll').evaluate(node => node.scrollTop === 0));
     await page.locator('#source-view-manage').click();
     await page.locator('#source-q').fill('阅读边界文章 02');
     await page.locator('#source-view-items').click();
@@ -128,7 +137,9 @@ async page => {
     await page.locator('#source-q').fill('');
     await page.waitForFunction(() => sourceRows.length === 30);
     await page.locator('#source-filter').selectOption(String(sourceId));
-    await page.waitForFunction(() => sourceRows.length === 30 && sourceReaderItem?.source_id === Number(document.getElementById('source-filter').value));
+    const filteredCount = items.filter(item => item.source_id === sourceId).length;
+    await page.waitForFunction(count => sourceRows.length === count && sourceTotal === count
+      && sourceReaderItem?.source_id === Number(document.getElementById('source-filter').value), filteredCount);
     check('改变订阅筛选后不泄漏其他订阅的旧正文', await page.evaluate(() => sourceReaderItem.key !== 'boundary-2'));
     await page.locator('#source-filter').selectOption('');
     await page.locator('#source-q').fill('没有任何匹配内容');

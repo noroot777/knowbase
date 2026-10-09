@@ -66,3 +66,7 @@ playwright-cli --session kb-subscription-reader close
 
 专注阅读跨断点和新内容挤出已加载窗口时的阅读状态问题已修复，补充边界检查见 `design/subscription-reading-fix-r1.md`。
 原轮验证产物已由审查回合移至其证据目录的 `pre-existing-artifacts/`；本轮复测证据在新修复报告指定的仓库外目录保存。
+
+## 第 2 轮审查修复
+
+阅读缓存现在区分配置变更、完整结果排除与真正分页外的文章；真实接口回归及证据见 `design/subscription-reading-fix-r2.md`。
