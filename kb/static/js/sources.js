@@ -130,9 +130,11 @@ async function openSourceModule(kind) {
   clearTimeout(sourceSearchTimer);
   sourceKind = kind; sourceVersion++; sourceItemsVersion++; sourceItemsFailed = false;
   sourceData = null; sourceRows = []; sourceOffset = 0;
+  resetSourceReader('正在读取内容…');
   const spec = sourceModules.get(kind);
   const filter = sourceFilters.get(kind) || { view: 'items', q: '', id: '' };
   sourceView = filter.view;
+  updateSourceReadingView();
   $('source-title').textContent = spec.label;
   $('source-description').textContent = spec.description;
   $('source-note').textContent = spec.note;
@@ -219,11 +221,13 @@ function updateSourceRunStatus() {
 }
 function switchSourceView(view) {
   sourceView = view; sourceOffset = 0;
+  updateSourceReadingView();
   renderSourceView(true).catch(e => sourceError(e.message));
 }
 function sourceFilterChanged() {
   clearTimeout(sourceSearchTimer);
   sourceItemsVersion++; // Invalidate responses immediately, including during debounce.
+  if (sourceView === 'items') resetSourceReader('正在筛选内容…');
   sourceSearchTimer = setTimeout(() => renderSourceView(true).catch(e => sourceError(e.message)), 220);
 }
 async function renderSourceView(reset = false) {
@@ -237,6 +241,7 @@ async function renderSourceView(reset = false) {
   $('source-filter').hidden = sourceView === 'manage';
   $('source-more').hidden = true;
   $('source-more').disabled = false;
+  updateSourceReadingView();
   const q = $('source-q').value.trim(), id = $('source-filter').value;
   sourceFilters.set(kind, { view: sourceView, q, id });
   if (sourceView === 'manage') {
@@ -248,7 +253,10 @@ async function renderSourceView(reset = false) {
   }
   const count = !reset && sourceOffset ? sourceOffset : 30;
   // Reload the visible window to avoid duplicates when a sync inserts new entries.
-  if (reset) $('source-list').innerHTML = '<div class="source-empty">正在读取内容…</div>';
+  if (reset) {
+    $('source-list').innerHTML = '<div class="source-empty">正在读取内容…</div>';
+    $('source-list-pane').scrollTop = 0;
+  }
   try {
     const data = await pipeJson(`/api/intake/${kind}/items?limit=${Math.min(count,100)}&offset=0&q=${encodeURIComponent(q)}${id ? '&source_id='+id : ''}`);
     if (!currentSourceItems(kind, version, q, id)) return;
@@ -259,6 +267,7 @@ async function renderSourceView(reset = false) {
   } catch (e) {
     if (!currentSourceItems(kind, version, q, id)) return;
     sourceItemsFailed = true;
+    resetSourceReader('内容读取失败，请重新读取。');
     $('source-list').innerHTML = `<div class="source-empty" role="alert"><h3>内容读取失败</h3><p>${esc(e.message)}</p><p>稍后会自动重试，也可以立即重新读取。</p><button class="ghost" data-retry-items>重新读取</button></div>`;
   }
 }
@@ -321,53 +330,7 @@ function sourceText(item) {
            fetching: !!item.fetching, refetching: !!item.refetching };
 }
 function renderSourceItems() {
-  const rows = sourceRows.map(item => { const t = sourceText(item); return `<article class="source-entry">
-    <div class="source-entry-meta"><span>${esc(item.author)}</span><time>${item.published ? sourceTime(item.published) : '发布时间未知'}</time></div>
-    ${t.translating
-      // 等翻译的条目不给“展开阅读”:知识库里这一条还不存在,展开只能展开英文
-      // 原文。标题和正文都换成中文状态文案,原文入口留在右下角那个链接上。
-      // **这一行在社交观点上照旧显示**:它回答的是"这张卡片为什么没有内容",
-      // 不是"这条内容叫什么" —— 和下面去掉的那个标题不是一回事。
-      ? `<h3 class="source-entry-name">外文内容，正在等翻译</h3>
-    <p class="source-excerpt">译成中文之后才写进知识库；这一条现在只有原文，点右下角“原文”可以直接看。</p>`
-      // 等补抓的条目**标题照显示**:它是这条内容的标题,不是占位文字,而且
-      // 用户正是靠它认出这一条。换掉的只有正文那一段 —— 那里此刻是 feed 给
-      // 的跳转壳(“标题（域名）↑ 101 HN Points”),照显示等于让人以为这条内容
-      // 就只有这些。也不给“展开阅读”:库里压根还没有这一条(exported_hash 空,
-      // 导出闸门扣着它)。
-      //
-      // **这一档不按 `content_kind` 省掉标题**(下面那个普通分支会):省标题的
-      // 理由是"推文的标题就是正文,摆在正文上面等于同一段话读两遍",而这一档的
-      // 正文位置换成了状态文案 —— 标题是卡片上唯一的内容标识,省掉就只剩一句
-      // 谁都一样的提示,认不出是哪一条了。
-      //
-      // **已经导出过的那一档(`refetching`)走下面的普通分支**:库里此刻就是
-      // 这份壳,如实显示、照旧可以展开,只在页脚说清正文还在补。说它"抓到之后
-      // 才写进知识库"和文件、索引的事实正相反 —— 而打开这个开关最常见的时机
-      // 恰恰是"已经同步过、几百条壳就摆在眼前",那一句加上"不给展开"等于把一批
-      // 本来读得到的条目一起藏起来(口径同翻译那边的 retranslating)。
-      : t.fetching
-      ? `<h3 class="source-entry-name">${esc(t.title)}</h3>
-    <p class="source-excerpt">这个来源只给了一条链接，正在去原文把正文抓回来；抓到之后才翻译、写进知识库。点右下角“原文”可以直接看。</p>`
-      // **社交观点没有「标题」这回事**:采集器把推文正文的前 500 字符原样当成
-      // title(`x_browser._entry` / `x_feedgrab._entry`;桥接那条走
-      // `fetching.parse_feed`,源没给标题时回退成正文首行),于是这一档的标题
-      // 和紧跟着的正文是同一句话连着显示两遍 —— 而标题那个 <button> 继承了
-      // base.css 的 `white-space: nowrap`(按钮文字本来就不该折行),旁边那句
-      // `overflow-wrap:anywhere` 在 nowrap 之下压根不起作用,于是一条长推文
-      // 一行到底、直接撑出卡片右边界。
-      // **判据用条目自己的 `content_kind`**(只有 social 来源的条目是 `post`),
-      // 不问当前视图选的是哪个来源:要回答的是"这一条内容有没有标题",那是内容
-      // 自己的属性。如实记一笔:今天 `sourceKind === 'social'` 和它逐条等价
-      // (social 来源的每一条都是 post,而弹窗是模态的、开着时切不了视图),
-      // 定点注入换成按视图判一条都不红 —— 选它不是因为防住了某个事故,是因为
-      // 另一个问句(现在在看哪个来源)恰好同解,而同解是会变的。页脚那句
-      // 「社交观点 / 订阅正文」问的才是来源,所以它照旧按视图走。
-      // 去掉标题之后正文是卡片上唯一的内容,所以从 muted 的"摘要"提成次要
-      // 正文(`is-post`)。展开阅读原来有标题和页脚两个入口,现在只剩页脚那个。
-      : `${item.content_kind === 'post' ? '' : `<h3><button class="source-entry-title" data-read-item="${item.key}">${esc(t.title)}</button></h3>`}
-    <p class="source-excerpt${item.content_kind === 'post' ? ' is-post' : ''}">${esc(t.body.slice(0,380))}${t.body.length>380?'…':''}</p>`}
-    <div class="source-entry-footer"><span>${t.fetching || t.refetching ? '链接条目' : item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}${t.fetching ? ' · 正在补抓原文正文' : t.refetching ? ' · 只有链接的壳已入库，正在补抓原文正文覆盖' : t.translating ? ' · 外文原文，正在等翻译' : t.translated ? ' · 已译为中文' : t.retranslating ? ' · 外文原文已入库，正在等中文译文覆盖' : t.partial ? ' · 正文已译为中文，标题还是原文（下次同步补译）' : ''}</span>${t.translating || t.fetching ? '' : `<button class="text-button" data-read-item="${item.key}">展开阅读</button>`}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`; }).join('');
+  const rows = sourceRows.map(renderSourceEntry).join('');
   // 两句提示各说各的一档,都有就都说:它们是流水线上先后两步,数字也不是一回事
   // (补抓那一档还没轮到翻译,翻译那一档的正文早就到手了)。
   const notes = [
@@ -379,6 +342,8 @@ function renderSourceItems() {
     `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value ? '换个关键词或切换订阅试试。' : sourceData?.unconfigured && !sourceData?.ready ? sourceConfigHint() : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p></div>`;
   $('source-more').hidden = sourceOffset >= sourceTotal;
   $('source-more').textContent = `加载更多（已显示 ${sourceRows.length} / ${sourceTotal}）`;
+  $('source-items-count').textContent = `${sourceTotal} 条`;
+  syncSourceReader();
 }
 async function moreSourceItems() {
   const kind = sourceKind, version = ++sourceItemsVersion;
@@ -406,37 +371,18 @@ async function syncSource(ids = []) {
   } catch(e) { toast('未能开始同步', { detail:e.message }); }
   finally { sourceBusy=false; updateSourceRunStatus(); }
 }
-let sourceReaderItem = null, sourceReaderOriginal = false;
-function readSourceItem(key) {
-  const item = sourceRows.find(r => r.key === key);
-  if (!item) return;
-  sourceReaderItem = item; sourceReaderOriginal = false;
-  renderSourceReader();
-  $('source-reader-link').href = safeUrl(item.url);
-  $('source-reader').style.display = '';
-}
-function renderSourceReader() {
-  const item = sourceReaderItem, t = sourceText(item);
-  const original = sourceReaderOriginal;
-  // 社交观点同样不显示标题(理由见 renderSourceItems):那是正文的前 500 字符,
-  // 摆在正文正上方就是同一段话连着读两遍。作者和时间留在下面那行 meta 上,
-  // 这一条是谁什么时候发的不会因此丢掉。
-  const post = item.content_kind === 'post';
-  $('source-reader-title').hidden = post;
-  $('source-reader-title').textContent = post ? '' : (original ? item.title : t.title);
-  $('source-reader-meta').textContent = `${item.author} · ${item.published ? sourceTime(item.published) : '发布时间未知'}${item.content_kind==='summary'?' · 订阅摘要，全文请打开原文':''}${t.translated ? (original ? ' · 英文原文' : ' · 自动翻译') : ''}`;
-  $('source-reader-body').textContent = original ? item.body : t.body;
-  $('source-reader-original').hidden = !t.translated;
-  $('source-reader-original').textContent = original ? '看中文译文' : '看英文原文';
-}
-function toggleSourceOriginal() {
-  sourceReaderOriginal = !sourceReaderOriginal;
-  renderSourceReader();
-}
 $('source-list').addEventListener('click', e => {
   if (e.target.closest('[data-retry-items]')) renderSourceView(true);
   const read = e.target.closest('[data-read-item]');
   if (read) readSourceItem(read.dataset.readItem);
+  const entry = e.target.closest('[data-source-key]');
+  if (entry && !e.target.closest('a,button')) readSourceItem(entry.dataset.sourceKey);
   const action = e.target.closest('[data-source-action]');
   if (action && !action.disabled) actOnSource(action.dataset.sourceAction, Number(action.dataset.sourceId));
+});
+$('source-list').addEventListener('keydown', event => {
+  const entry = event.target.closest('[data-source-key]');
+  if (!entry || event.target !== entry || !['Enter', ' '].includes(event.key)) return;
+  event.preventDefault();
+  readSourceItem(entry.dataset.sourceKey);
 });

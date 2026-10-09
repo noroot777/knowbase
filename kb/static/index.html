@@ -18,6 +18,7 @@
 <link rel="stylesheet" href="/static/css/navigation.css">
 <link rel="stylesheet" href="/static/css/pipeline.css">
 <link rel="stylesheet" href="/static/css/sources.css">
+<link rel="stylesheet" href="/static/css/source_reader.css">
 <link rel="stylesheet" href="/static/css/daily.css">
 <link rel="stylesheet" href="/static/css/wechat_setup.css">
 </head>
@@ -261,13 +262,27 @@
   <div id="source-configuration" class="source-banner" hidden role="status"></div>
   <div id="source-progress" class="source-banner" hidden role="status"><span id="source-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度<i data-arrow="right"></i></button></div>
   <button id="source-issues" hidden onclick="switchSourceView('manage')"></button>
-  <div class="source-workbench">
+  <div class="source-view-tabs"><button id="source-view-items" class="on" aria-pressed="true" onclick="switchSourceView('items')">最新内容</button><button id="source-view-manage" aria-pressed="false" onclick="switchSourceView('manage')">订阅管理 <small id="source-subscriptions-count"></small></button></div>
+  <div id="source-workbench" class="source-workbench">
     <section class="source-stream" aria-label="订阅内容与来源">
-      <div class="source-view-tabs"><button id="source-view-items" class="on" aria-pressed="true" onclick="switchSourceView('items')">最新内容</button><button id="source-view-manage" aria-pressed="false" onclick="switchSourceView('manage')">订阅管理 <small id="source-subscriptions-count"></small></button></div>
       <div class="source-filters"><input id="source-q" type="search" placeholder="搜索已收录的内容…" aria-label="搜索来源内容" oninput="sourceFilterChanged()"><select id="source-filter" aria-label="筛选订阅来源" onchange="sourceFilterChanged()"><option value="">全部订阅</option></select></div>
-      <div id="source-list" aria-live="polite"></div><button id="source-more" class="ghost" hidden onclick="moreSourceItems()">加载更多</button>
+      <div class="source-list-heading"><span>内容列表</span><span id="source-items-count" role="status"></span></div>
+      <div id="source-list-pane" tabindex="0" aria-label="订阅内容列表"><div id="source-list" aria-live="polite"></div><button id="source-more" class="ghost" hidden onclick="moreSourceItems()">加载更多</button></div>
     </section>
-    <aside class="source-settings" aria-label="此来源的同步设置"><h2>持续收集</h2>
+    <section id="source-reader" class="source-reader" aria-label="订阅内容阅读" tabindex="-1">
+      <div id="source-reader-empty" class="source-reader-empty"><i data-icon="paper"></i><h3>在这里安心阅读</h3><p>从左侧选择一篇内容，正文会在这里展开。</p></div>
+      <div id="source-reader-content" class="source-reader-content" hidden>
+        <div class="source-reader-toolbar"><button class="text-button source-reader-back" onclick="backToSourceList()"><i data-arrow="left"></i>返回列表</button><span id="source-reader-position" title="当前已加载的可阅读内容"></span><div class="source-reader-actions"><button id="source-reader-prev" class="ghost" onclick="stepSourceReader(-1)" aria-label="上一篇"><i data-arrow="left"></i></button><button id="source-reader-next" class="ghost" onclick="stepSourceReader(1)" aria-label="下一篇"><i data-arrow="right"></i></button><button id="source-reader-expand" class="ghost" onclick="expandSourceReader()" aria-pressed="false" aria-label="专注阅读"><i data-icon="paper"></i><span>专注阅读</span></button></div></div>
+        <div id="source-reader-scroll" class="source-reader-scroll" tabindex="0" aria-label="文章正文">
+          <header class="source-reader-heading"><div class="source-reader-byline"><span id="source-reader-avatar" class="source-avatar" aria-hidden="true"></span><p id="source-reader-meta"></p></div><h2 id="source-reader-title"></h2><p id="source-reader-subtitle" hidden></p>
+            <div class="source-reader-links"><span id="source-reader-kind"></span><a id="source-reader-link" target="_blank" rel="noopener noreferrer">打开原文<i data-arrow="ext"></i></a></div>
+          </header>
+          <div id="source-reader-language" class="source-reader-language" role="group" aria-label="阅读语言" hidden><button id="source-reader-translated" class="on" aria-pressed="true" onclick="setSourceOriginal(false)">中文译文</button><button id="source-reader-original" aria-pressed="false" onclick="setSourceOriginal(true)">原文</button></div>
+          <div id="source-reader-note" class="source-reader-note" role="status" hidden></div><div id="source-reader-body"></div><div class="source-reader-end">— 阅读至此 —</div>
+        </div>
+      </div>
+    </section>
+    <aside id="source-settings" class="source-settings" aria-label="此来源的同步设置" hidden><h2>持续收集</h2>
       <form id="source-settings-form" onsubmit="saveSourceSettings(event)"><fieldset id="source-settings-fields" disabled>
         <label><input id="source-auto" type="checkbox"> 自动同步</label>
         <label for="source-interval">同步间隔<br>每 <input id="source-interval" type="number" min="15" max="10080" value="60" required> 分钟</label>
@@ -315,10 +330,6 @@
   <label><input id="source-edit-fulltext" type="checkbox"> 去原文链接补抓正文</label><p class="hint">给只提供链接和摘要的聚合源用（例如 HN Buzzing）：同步时顺着每条的原文链接把正文抓回来，再翻译、写进知识库。本来就提供全文的订阅不要开，那会拿自动提取的结果换掉作者给的全文。打开之后，这个来源已收录的旧条目也会分批补抓并重新翻译。</p>
   <div id="source-edit-error" class="field-err" role="alert"></div><div class="source-form-actions"><button type="button" class="ghost" onclick="closeSourceEditor()">取消</button><button type="submit" id="source-edit-save">保存订阅</button></div>
   </form></div></div>
-<div id="source-reader" class="modal-mask" style="display:none" onclick="if(event.target===this)$('source-reader').style.display='none'"><div class="modal source-reader-dialog">
-  <div class="source-reader-toolbar"><a id="source-reader-link" target="_blank" rel="noopener noreferrer">打开原文<i data-arrow="ext"></i></a><button class="text-button" id="source-reader-original" hidden onclick="toggleSourceOriginal()">看英文原文</button><button class="ghost" onclick="$('source-reader').style.display='none'" aria-label="关闭内容阅读">关闭</button></div>
-  <h2 id="source-reader-title"></h2><p id="source-reader-meta" class="hint"></p><div id="source-reader-body"></div>
-</div></div>
 
 <div id="pipe-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closePipeModal()">
   <div class="modal pipe-setup">
@@ -516,6 +527,7 @@
 <script src="/static/js/gallery.js"></script>
 <script src="/static/js/daily.js"></script>
 <script src="/static/js/sources.js"></script>
+<script src="/static/js/source_reader.js"></script>
 <script src="/static/js/source_forms.js"></script>
 <script src="/static/js/x_channel.js"></script>
 <script src="/static/js/wechat_setup.js"></script>
