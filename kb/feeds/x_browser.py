@@ -34,6 +34,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from kb.feeds import x_article
 from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
@@ -419,6 +420,12 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 started = water or floor.isoformat()
                 try:
                     entries, incomplete = _harvest_one(page, handle, floor)
+                    # 长文(Article)推文在时间线上一个字都没有,正文要单独取一次。
+                    # 取不到的那几条本轮不入库、并按"没读完"办 —— 空正文一旦落库
+                    # 就再也更新不了(`put_items` 是 DO NOTHING),见 `x_article`。
+                    entries, missing = x_article.fill(entries)
+                    if missing:
+                        incomplete = f'{incomplete};{missing}' if incomplete else missing
                     # **没读完就不推进水位**:这一轮停在时间线半中间,下面那一段
                     # 既没读也没入库,而把水位推到"这一轮见过的最新"就等于宣布
                     # 那一段已经收过 —— 它们比旧水位新、又比新水位老,从此任何

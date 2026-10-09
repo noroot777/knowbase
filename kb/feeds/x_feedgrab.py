@@ -33,6 +33,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from kb.feeds import x_article
 from kb.scanner import parse_frontmatter
 
 # **产物路径不许写死**:feedgrab 的保存位置是「平台目录 + category」拼出来的
@@ -394,6 +395,9 @@ def harvest(jobs: list[tuple[str, str]], *, binary: str = '', data_dir: str,
         try:
             output = _run(exe, handle, _env(out, data_dir, since), base)
             entries = _read_output(out, handle)
+            # 长文(Article)推文的产物正文就是一条指向 `x.com/i/article/<id>` 的
+            # 链接,正文要单独取一次(见 `x_article`)。
+            entries, missing = x_article.fill(entries)
             # **没抓全就不推进水位 —— 存回这一轮真正用过的那个下界**(口径同浏览器
             # 通道那句 `started if incomplete`)。抓到的照旧入库,漏掉的那几条下
             # 一轮重叠重抓,`put_items` 按 `sha256(kind:url)` +
@@ -411,6 +415,8 @@ def harvest(jobs: list[tuple[str, str]], *, binary: str = '', data_dir: str,
             # `tweet_date < since_date` 才丢(`fetchers/twitter_user_tweets.py`,
             # 含下界当天),所以下一轮的窗口和这一轮逐字相同。
             note = _incomplete(output, out)
+            if missing:
+                note = f'{note};{missing}' if note else missing
             results[handle] = {'entries': entries, 'error': '', 'incomplete': note,
                                'watermark': since if note else _newest(entries, water)}
         except FeedgrabError as e:
