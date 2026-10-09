@@ -89,16 +89,38 @@ def _index_pass(args) -> int:
 
 
 def cmd_extract(args) -> int:
-    from kb.extract import (StaleBody, body_fingerprint, commit_extraction,
-                            extract_with_llm, pending_docs)
+    from kb.extract import (NO_BODY_NO_TEXT, StaleBody, body_fingerprint,
+                            body_gap, commit_extraction, extract_with_llm,
+                            mark_no_body, pending_docs)
     from kb.llm_stages import stage_model
     conn = store.connect()
     todo = pending_docs(conn, args.limit)
     print(f"[extract] 待提取 {len(todo)} 篇 (model={stage_model('extract')})")
-    ok = failed = empty = stale_body = 0
+    ok = failed = empty = no_text = stale_body = 0
     for i, row in enumerate(todo, 1):
-        body = store.doc_body(conn, row["path"])
-        if not body.strip():
+        # 正文和它所属的那一版一条语句读出来(见 store.doc_body_version):拆成
+        # 两句的话,「这一版没有文字」那个终态会落到另一版正文上。顺带这也是
+        # commit_extraction 那道版本校验的取样点 —— 两个机制问的不是一件事
+        # (version 是"索引里哪一版文件",指纹是"我读到的正文长什么样"),但都
+        # 该取自同一个快照。
+        version, body = store.doc_body_version(conn, row["path"])
+        # 空正文的两档判定与管道共用 kb.extract 那一份,别在这儿另写一套 ——
+        # 两处各判各的话,命令行跑完不落终态,下一轮管道又把它报成「需回填」
+        gap = body_gap(row["path"], body)
+        if gap == NO_BODY_NO_TEXT:
+            # 终态按判定时那一版写(条件 UPDATE):这期间别的进程把正文索引进来了
+            # 就一行都不写,留给下一轮按新版重判(见 extract.mark_no_body)
+            if not mark_no_body(conn, row["path"], version):
+                conn.commit()
+                print(f"[{i}/{len(todo)}] SKIP {row['title'][:28]}: 正文在判定"
+                      f"期间更新,留待下一轮")
+                continue
+            conn.commit()
+            no_text += 1
+            print(f"[{i}/{len(todo)}] SKIP {row['title'][:28]}: 无正文可提取"
+                  f"(仅图片等,已记录;正文补回来会自动重进队列)")
+            continue
+        if gap:
             empty += 1
             print(f"[{i}/{len(todo)}] SKIP {row['title'][:28]}: 正文为空"
                   f"(先把正文补回来再 kb index)")
@@ -130,12 +152,13 @@ def cmd_extract(args) -> int:
     line = f"[extract] 完成: 成功 {ok}, 失败 {failed}"
     if empty:
         line += f", 跳过 {empty}(正文空)"
+    if no_text:
+        line += f", 无正文 {no_text}(仅图片等)"
     if stale_body:
         line += f", 跳过 {stale_body}(正文已更新)"
     print(line)
     conn.close()
     return 0
-
 
 def _build_filters(args) -> Filters:
     return Filters(

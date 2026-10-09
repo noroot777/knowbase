@@ -8,8 +8,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from kb import store
-from kb.extract import (StaleBody, body_fingerprint, commit_extraction,
-                        extract_with_llm, pending_docs)
+from kb.extract import (NO_BODY_NO_TEXT, StaleBody, body_fingerprint, body_gap,
+                        commit_extraction, extract_with_llm, mark_no_body,
+                        pending_docs)
 
 WORKERS = 6
 
@@ -19,12 +20,38 @@ def main():
     todo = pending_docs(conn, 0)
     print(f"[extract-p] 待提取 {len(todo)} 篇, {WORKERS} 并发", flush=True)
 
-    # 预取正文,worker 不碰数据库。连指纹一起记下:这一趟几千篇要跑几十分钟,
-    # 期间某一篇的正文完全可能被整篇换掉(补抓把跳转壳换成全文),落库前比一次。
+    # 预取正文,worker 不碰数据库。空正文在这儿就筛掉:拿空串去调 LLM 必然
+    # 产出一份只凭标题编的判定,还要按 token 付钱。两档判定与另外两条路共用
+    # kb.extract 那一份(这个脚本自称与 `kb extract --writeback` 等价)。
+    #
+    # 版本号和指纹都取自同一个快照(doc_body_version 一条语句),回答的不是一件
+    # 事:版本号给 mark_no_body 做条件 UPDATE,指纹给 commit_extraction 比对
+    # ——这一趟几千篇要跑几十分钟,期间某一篇的正文完全可能被整篇换掉(补抓把
+    # 跳转壳换成全文),落库前拿它比一次。
     jobs = []
+    empty = no_text = tried = 0
     for row in todo:
-        body = store.doc_body(conn, row["path"])
+        version, body = store.doc_body_version(conn, row["path"])
+        gap = body_gap(row["path"], body)
+        if gap == NO_BODY_NO_TEXT:
+            # 条件 UPDATE:判定期间内容换版了就一行都不写(见 mark_no_body)
+            tried += 1
+            if mark_no_body(conn, row["path"], version):
+                no_text += 1
+            continue
+        if gap:
+            empty += 1
+            continue
         jobs.append((row["path"], row["title"], body, body_fingerprint(body)))
+    if tried:
+        # 0 行的那次 UPDATE 也把事务开着了,所以按「试过几次」提交、不按
+        # 「写进去几条」:后面的 tag 回写要先取维护锁,攥着没提交的写事务
+        # 去等锁会把持锁那边卡死(见 CLAUDE.md 「kb.db 的维护互斥锁」锁序那条)
+        conn.commit()
+    if no_text:
+        print(f"[extract-p] 无正文可提取 {no_text} 篇(仅图片等,已记录)", flush=True)
+    if empty:
+        print(f"[extract-p] 正文为空 {empty} 篇(待回填,本轮跳过)", flush=True)
 
     ok = failed = stale_body = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:

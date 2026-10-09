@@ -10,7 +10,17 @@ const STAGE_META = {
 let pipeTimer = null, pipeSnapshot = null, pipePending = {};
 let pipeRequest = null, pipeStatusAbort = null, pipeStatusVersion = 0;
 let pipeAction = '', pipeConnected = false, pipeLastRead = 0;
+// 上一次见到的「已结束运行」身份。null = 这个页面还没读到过任何状态
+// (那一档只记基线、不刷新:初始化本来就会拉一次待处理数)。
+let pipeDoneRun = null;
 let pipeSourceVersion = 0, pipePendingRequest = null;
+// 「还欠一次待处理数刷新」。在途的那次查询只能回答它开跑那一刻的事实,
+// 新结果来了得补一次,而「有新结果」这件事一轮只说一次。
+let pipePendingWanted = false;
+// 「这份回包是哪一轮的」。身份认 run_id —— started_at 只精确到秒,而这一档
+// 治的正是「几百毫秒就结束」那种运行:两轮落在同一秒里时拿它当身份分不开,
+// 上一轮的积压数会被当成当前事实应用上去。跟 pipeDoneRun 同一个口径。
+const pipeRunKey = s => (s ? (s.run_id || s.started_at || '') : '');
 
 async function pipeJson(path, options = {}, timeout = 15000) {
   const controller = new AbortController();
@@ -55,6 +65,14 @@ async function refreshPipe(withPending = false) {
       const s = await pipeJson('/api/pipeline/status?source=false', { signal: pipeStatusAbort.signal });
       if (version !== pipeStatusVersion) return;
       const wasRunning = pipeSnapshot?.running;
+      // 「有没有出现一轮新的已结束运行」。只靠 running→idle 这个跳变是不够的:
+      // 跑得极快的那一轮(纯图片文章落终态、全是跳过)在两次轮询之间就结束了,
+      // 页面一次都没见过 running=true，于是待处理数停在旧值 —— 后端已经是 0 了,
+      // 面板还写着「当前待处理 1 项」，只有手动刷新页面才归零(2026-10-09 审查
+      // 实测:状态接口 pending.extract=0 而 UI 显示 1)。后台定时跑的那一轮同理。
+      const doneRun = s.running ? '' : (s.run_id || s.finished_at || '');
+      const newResult = pipeDoneRun !== null && doneRun && doneRun !== pipeDoneRun;
+      pipeDoneRun = doneRun;
       pipeSnapshot = s; pipeConnected = true; pipeLastRead = Date.now();
       $('pipe-connection').hidden = true;
       renderPipeState(s);
@@ -66,6 +84,10 @@ async function refreshPipe(withPending = false) {
           $('stats').textContent = `${stats.documents.toLocaleString()} 篇内容已收录`;
         }).catch(() => {});
         toast(pipeRunLabel(pipeResult(s)) + (s.stopped || s.last_run?.stopped ? '已停止' : '已结束'), { key: 'pipeline', type: 'info', detail: '各步骤结果已更新，可查看待处理明细。' });
+      } else if (newResult) {
+        // 没见过 running 的那一轮:只把积压数补上,不弹「已结束」——
+        // 这条路也会在页面打开期间别处跑完一轮时走到，弹窗就成了噪音。
+        refreshPipePending();
       }
     } catch (e) {
       if (version !== pipeStatusVersion) return;
@@ -109,16 +131,33 @@ async function refreshPipeSource() {
   }
 }
 async function refreshPipePending() {
-  if (pipePendingRequest || pipeSnapshot?.running) return;
-  const startedAt = pipeSnapshot?.started_at;
-  pipePendingRequest = pipeJson(channelUrl('/api/pipeline/status?source=false&pending=true'), {}, 60000);
-  try {
-    const s = await pipePendingRequest;
-    if (!pipeSnapshot?.running && (!startedAt || startedAt === pipeSnapshot?.started_at)) {
-      pipePending = s.pending || {}; if (pipeSnapshot) renderPipeState(pipeSnapshot);
-    }
-  } catch { /* Backlog estimates never replace live progress or block actions. */ }
-  finally { pipePendingRequest = null; }
+  if (pipeSnapshot?.running) return;
+  // 在途那次查询是上一轮的事实:它的回包会被下面那道身份闸丢掉,而
+  // 「出现了一轮新的已结束运行」一轮只说一次(pipeDoneRun 已经更新成新身份),
+  // 直接 return 就等于把唯一那次机会扔了 —— 后端待处理已经是 0,面板永久停在
+  // 「当前待处理 1 项」,再轮询多少次也不消失(2026-10-09 第 2 轮审查实测:
+  // 切到检索再切回来引发一次查询、趁它在途点「重试失败项」,放行旧回包之后
+  // done="run-2"、inFlight=false 而界面仍是 1,只有手动刷新页面才归零)。
+  // 所以记下「还欠一次」,等在途那次收尾了补发,**真的应用了才算刷新完**。
+  if (pipePendingRequest) { pipePendingWanted = true; return; }
+  pipePendingWanted = true;
+  while (pipePendingWanted) {
+    // 跑起来了就别再扫文件:积压数由这一轮结束时那次刷新给出。欠着的那一笔
+    // 留着,下一次进来接着补。
+    if (pipeSnapshot?.running) return;
+    const runKey = pipeRunKey(pipeSnapshot);
+    pipePendingRequest = pipeJson(channelUrl('/api/pipeline/status?source=false&pending=true'), {}, 60000);
+    try {
+      const s = await pipePendingRequest;
+      if (!pipeSnapshot?.running && (!runKey || runKey === pipeRunKey(pipeSnapshot))) {
+        pipePending = s.pending || {}; pipePendingWanted = false;
+        if (pipeSnapshot) renderPipeState(pipeSnapshot);
+      }
+      // 回包被丢掉(这期间换了一轮运行)时 wanted 还是 true,循环里按新快照
+      // 再查一次 —— 快照不再变动就收敛,它只随真实运行的起止变化。
+    } catch { pipePendingWanted = false; /* 查不到不无限重试,积压数从不挡操作 */ }
+    finally { pipePendingRequest = null; }
+  }
 }
 function renderPipeButtons() {
   const running = !!pipeSnapshot?.running;

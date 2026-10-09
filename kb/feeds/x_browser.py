@@ -34,7 +34,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from kb.feeds.x_cdp import Chrome, CdpError
+from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 # 连续多少条老推文算"翻到底了"。1 不够:转推带的是原推时间,单条老的很常见。
@@ -354,15 +354,37 @@ def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list
     return out
 
 
+def browser_session(profile: str, chrome_path: str = '', *, attach: bool = False):
+    """这一轮用哪个浏览器。返回一个还没进入的上下文管理器。
+
+    两条路暴露的是同一套 `open_page/goto/eval`(都继承 `x_cdp.Session`),所以
+    底下那些页面脚本一行都不用知道自己跑在哪条上 —— 差别全在这一个函数里:
+
+    - `attach=False`:我们自己起一个独立 profile 的无头 Chrome(`x_cdp.Chrome`);
+    - `attach=True`:连用户日常那个浏览器(`cdp_attach.Attached`),`profile` 和
+      `chrome_path` 这时都没有意义 —— 浏览器不是我们起的。
+    """
+    if attach:
+        from kb.feeds.cdp_attach import Attached
+        return Attached()
+    return Chrome(profile, headless=True, chrome_path=chrome_path)
+
+
 def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
-            budget: float = 0.0, on_progress=None, should_stop=None) -> dict[str, dict]:
+            budget: float = 0.0, on_progress=None, should_stop=None,
+            attach: bool = False) -> dict[str, dict]:
     """一次会话抓完所有账号。
 
     jobs:  [(handle, 水位 ISO 或空串)]
     返回:  {handle: {'entries': [...], 'error': '', 'watermark': ISO}}
 
-    整批共用一个 Chrome;任何一个账号的失败只落在它自己那一项上,不影响其余
+    整批共用一个浏览器会话;任何一个账号的失败只落在它自己那一项上,不影响其余
     ——这条通道一轮跑几十个账号,一个改名的号不该把整轮带掉。
+
+    `attach` 决定浏览器从哪儿来(见 `browser_session`)。整批共用一个会话这件事
+    两条路都成立,只是理由不同:独立 profile 那条是因为起一个 Chrome 要两三秒、
+    而同一个 profile 目录同时只能被一个实例打开;直连那条是因为每次连接都可能
+    让浏览器弹一次授权。
     """
     results: dict[str, dict] = {}
     if not jobs:
@@ -374,7 +396,7 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 for h, _ in jobs}
     deadline = time.monotonic() + budget if budget else None
     try:
-        with Chrome(profile, headless=True, chrome_path=chrome_path) as page:
+        with browser_session(profile, chrome_path, attach=attach) as page:
             page.open_page('about:blank')
             for index, (handle, water) in enumerate(jobs, 1):
                 stopping = should_stop() if should_stop else False
@@ -440,15 +462,15 @@ def open_login_window(profile: str, chrome_path: str = '') -> str:
     得他本人做。起完立刻返回 —— 等他登录完是几分钟的事,一个 HTTP 请求不该
     挂在那里。登录态落在 profile 目录里,之后的定时抓取无头复用它。
 
-    **用的是一个独立 profile,不是用户日常那个 Chrome**。连日常浏览器要开调试
-    端口(本机任何进程都能接管它),而且日常窗口一关、或者 Chrome 一重启,定时
-    抓取就断了;独立 profile 里登录一次,之后每天无头跑,互不干扰。代价是要在
-    这个窗口里再登录一次。
+    **这一档用的是一个独立 profile,不是用户日常那个 Chrome** —— 所以要在这里
+    单独登录一次。好处是它不依赖用户:日常窗口关了、浏览器重启了,定时抓取照旧
+    无头跑。想免掉这次登录就换成「我日常用的浏览器」那一档(`x_channels.ATTACH`,
+    直连已经登录好的浏览器),它的边界和代价写在 `cdp_attach` 的模块注释里。
     """
     from kb.feeds.x_cdp import find_chrome
     binary = find_chrome(chrome_path)
     os.makedirs(profile, exist_ok=True)
-    if os.path.lexists(os.path.join(profile, 'SingletonLock')):
+    if profile_busy(profile):
         raise XBrowserError('登录窗口已经开着了,请在那个窗口里完成登录')
     try:
         subprocess.Popen(
@@ -462,24 +484,42 @@ def open_login_window(profile: str, chrome_path: str = '') -> str:
             '(抓取时要独占这个 profile),再回来点一次「检查连接」。')
 
 
-def probe(profile: str, chrome_path: str = '') -> tuple[bool, str]:
-    """真开一次无头浏览器,看这份登录态还读不读得到时间线。
+def probe(profile: str, chrome_path: str = '', *,
+          attach: bool = False) -> tuple[bool, str]:
+    """真连一次浏览器,看这份登录态还读不读得到时间线。
 
-    用户点「检查连接」才走这条,所以允许慢(几秒到几十秒)。它和抓取用的是
-    同一个 profile、同一条 CDP 路径,所以结论是真的;`x_channels.readiness`
-    那道便宜判断只看 Cookies 文件在不在,而**cookie 过期在文件上看不出来**。
+    用户点「检查连接」才走这条,所以允许慢(几秒到几十秒)。它和抓取走的是
+    **同一条路**(同一个 `browser_session`、同一套页面脚本),所以结论是真的;
+    `x_channels.readiness` 那道便宜判断只看文件在不在、端口活不活,而
+    **cookie 过期在文件上看不出来**。
+
+    前置检查两条路不同,但判的是同一件事「现在这个浏览器用得上吗」:独立
+    profile 那条怕被登录窗口占着(同一个目录只能开一个实例),直连那条怕压根
+    没开调试开关。
     """
-    if os.path.lexists(os.path.join(profile, 'SingletonLock')):
+    if attach:
+        from kb.feeds import cdp_attach
+        if cdp_attach.discover() is None:
+            if problem := cdp_attach.explicit_problem():
+                return False, f'{problem}。{cdp_attach.ENDPOINT_HINT}'
+            return False, '没有发现开着远程调试的浏览器。' + cdp_attach.ENABLE_HINT
+    elif profile_busy(profile):
         return False, '这个 profile 正被另一个窗口占着(登录窗口还开着?)。关掉它再试'
     try:
-        with Chrome(profile, headless=True, chrome_path=chrome_path) as page:
+        with browser_session(profile, chrome_path, attach=attach) as page:
             page.open_page('about:blank')
             page.goto('https://x.com/home')
             deadline, last = time.monotonic() + ACCOUNT_SECONDS, {}
             while time.monotonic() < deadline:
                 last = json.loads(page.eval(_STATE_JS))
                 if last['login']:
-                    return False, 'X 登录态已失效,点「打开登录窗口」重新登录一次'
+                    # 两条路的下一步不一样:独立 profile 要点那颗按钮再登一次,
+                    # 直连那条得在他自己的浏览器里登 —— 我们没有也不该有那个
+                    # 窗口的控制权。指错地方等于让人白跑一趟。
+                    return False, ('这个浏览器里的 X 登录态已失效,'
+                                   '请在它里面打开 x.com 登录一次,再回来检查'
+                                   if attach else
+                                   'X 登录态已失效,点「打开登录窗口」重新登录一次')
                 if last['limited']:
                     return False, 'X 暂时限制了访问频率,稍后再试'
                 if last['articles'] and last['ready'] == 'complete':

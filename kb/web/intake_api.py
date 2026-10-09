@@ -163,10 +163,31 @@ def x_channel(kind: str):
 
 @router.post('/{kind}/x-channel/login')
 def x_channel_login(kind: str):
-    """开一个有头窗口让用户登录(只有浏览器通道走这条)。起完就返回。"""
+    """开一个有头窗口让用户登录(只有浏览器通道走这条)。起完就返回。
+
+    **拒绝的文案要说清「现在是哪一档」和「下一步怎么办」。** 这条路最常见的来法
+    不是"用户在桥接通道上点了登录",而是**他已经把下拉改成了浏览器登录态、只是
+    还没点「保存设置」** —— 这里读的是**存下来**的那一份(`reg.get_settings`),
+    页面上那个下拉是还没提交的草稿。原来只说"只有「我的浏览器登录态」这条通道
+    需要在这里登录",于是用户对着一个明明选着「我的浏览器登录态」的下拉,收到
+    一句自相矛盾的拒绝,看不出差在哪一步(2026-10-09 实测:`feed_settings` 里
+    压根没有 social 这一行,通道是默认的 bridge)。前端另有一道闸(未保存时这颗
+    按钮是禁用的),这里是它漏掉时的兜底 —— 两道各有射程,别只留一道。
+    """
     settings = _x_kind(kind)
-    if x_channels.channel_of(settings) != x_channels.BROWSER:
-        raise HTTPException(400, '只有「我的浏览器登录态」这条通道需要在这里登录')
+    current = x_channels.channel_of(settings)
+    if current == x_channels.ATTACH:
+        # 这一档不该建议他换档:他要的登录态就在自己那个浏览器里,我们开一个
+        # 独立 profile 的窗口对他毫无用处。说清「在哪儿登录」就够了。
+        from kb.feeds import cdp_attach
+        raise HTTPException(400, '这一档用的是你日常浏览器里现成的登录态，不在这里'
+                                 '登录。要是它还没登录 X，在那个浏览器里打开 x.com '
+                                 '登录一次就行。' + cdp_attach.ENABLE_HINT)
+    if current != x_channels.BROWSER:
+        raise HTTPException(400, f'当前保存的取法是「{x_channels.label(current)}」，'
+                                 f'不在这里登录。先把取法改成'
+                                 f'「{x_channels.LABELS[x_channels.BROWSER]}」'
+                                 f'并点「保存设置」，再打开登录窗口。')
     from kb.feeds import x_browser
     try:
         detail = x_browser.open_login_window(str(x_channels.BROWSER_PROFILE),

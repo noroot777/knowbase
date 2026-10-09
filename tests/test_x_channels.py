@@ -440,6 +440,23 @@ class ChannelApiTests(ChannelBase):
             r = self.client.post('/api/intake/social/x-channel/login')
         self.assertEqual(400, r.status_code)
 
+    def test_the_refusal_names_the_saved_channel_and_the_next_step(self):
+        """这条路最常见的来法是**下拉已经改成浏览器登录态、只是还没点保存**:
+        端点读的是存下来的那一份,页面上那个是草稿。原来只说"只有「我的浏览器
+        登录态」这条通道需要在这里登录",于是用户对着一个明明选着它的下拉收到
+        一句自相矛盾的拒绝(2026-10-09 实测:`feed_settings` 里压根没有 social
+        这一行,通道是默认的 bridge)。判据是**说清哪一档 + 下一步怎么办**。"""
+        for channel in (x_channels.BRIDGE, x_channels.FEEDGRAB):
+            with self.subTest(channel=channel):
+                self.settings(channel)
+                with patch.object(x_browser, 'open_login_window',
+                                  side_effect=AssertionError('不该开窗口')):
+                    detail = self.client.post(
+                        '/api/intake/social/x-channel/login').json()['detail']
+                self.assertIn(x_channels.LABELS[channel], detail)       # 哪一档
+                self.assertIn('保存设置', detail)                        # 下一步
+                self.assertIn(x_channels.LABELS[x_channels.BROWSER], detail)
+
     def test_opening_a_login_window_reports_what_to_do_next(self):
         self.settings(x_channels.BROWSER)
         with patch.object(x_browser, 'open_login_window', return_value='已打开登录窗口。'):

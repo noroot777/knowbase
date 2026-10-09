@@ -190,6 +190,9 @@ def retry_failed_plan() -> list[str]:
         plan.append("export")
     # 没配回填脚本时这一步压根不进计划:让外部用户看一张"本次跳过"的卡片,
     # 比不显示更糟——那个功能对他们不存在。
+    # 「正文空」这三个字是和 pipeline_stages._finish_extract_stage 约好的暗号,
+    # **只有回填救得了的那一档才写它**。整篇是一张长海报图那种(detail 里写的是
+    # 「无正文 N」)绝不能进来:重抓回来还是同一张图,每一轮都在白跑一遍脚本。
     if "正文空" in _detail("extract") and refill_script() is not None:
         plan.append("refill")
     if plan or _failed("index") or projects_ingest_only:

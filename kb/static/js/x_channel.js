@@ -24,11 +24,49 @@ function xChannelPicked() {
   $('source-x-hint').textContent = meta?.hint || '';
   // 这几行只在"选择没变"时才是当前通道的事实;改了选择就是一句过期的话。
   const same = now === xChan.current;
-  $('source-x-state').textContent = same
-    ? (xChan.ready ? '当前通道已就绪。' : (xChan.why || '当前通道还没有配好。'))
-    : '改完记得点「保存设置」,保存之后才会生效。';
   $('source-x-login').textContent = xChan.login_command || '';
+  xChannelSay(same
+    ? (xChan.ready ? '当前通道已就绪。' : (xChan.why || '当前通道还没有配好。'))
+    : '改完记得点「保存设置」,保存之后才会生效。');
   $('source-x-check').hidden = !same;
+  // 「打开登录窗口」同理不能在改了选择还没保存时点:后端读的是**存下来**的那一份
+  // 通道,于是它只会回一句"当前保存的取法不是浏览器登录态" —— 用户对着一个明明
+  // 选着「我的浏览器登录态」的下拉收到这句拒绝,看不出差在哪一步(2026-10-09 实测)。
+  // **这里禁用而不是藏掉**(「检查连接」是藏的):那颗按钮产出的是一个**结论**,
+  // 贴在新选择旁边就是谎话,没有结论可给就不该出现;这颗是一个**动作**,而且上面
+  // 那段说明("在一个独立 profile 里登录一次")指的就是它 —— 藏掉它说明就悬空了,
+  // 灰着反倒说得清"现在点不了"。
+  const loginBtn = $('source-x-login-btn');
+  loginBtn.disabled = !same;
+  loginBtn.title = same ? '' : '先点「保存设置」,保存之后才能在这里登录';
+}
+
+// 状态行 + 「下一步怎么办」一起写,**去重按内容判**。
+//
+// 「下一步」由后端给(`readiness` 的第三项),前端只负责显示:有些通道要做的事
+// 塞不进一个输入框(比如去浏览器地址栏开一次远程调试开关),它就从这里出来 ——
+// 这样**新增一条通道不用改这个文件**,口径同顶上那句"不许把通道和它们各自要填
+// 什么写死成一张表"。它和状态行一样,只在选择没变时才是事实。
+//
+// 两个显示位的内容却可能是同一句话,所以同一条去重规则要管两头:
+//  ①feedgrab 那档的「下一步」就是上面那条可复制的命令本身(它的第三项必须带着
+//    它 —— 待配置横幅那边没有可复制块,见 `x_channels.readiness`);
+//  ②「检查连接」返回的 detail 已经把原因和地址写法指引拼在一起了
+//    (`x_browser.probe`),而「下一步」装的正是同一条指引 —— 原来只在
+//    `xChannelPicked` 里对①去过重、检查那一下直接改状态行,于是合法写法和
+//    「清掉它就回到自动发现」连着显示两遍(2026-10-09 第 2 轮审查截图)。
+// 按内容判而不是按通道写死一张表,所以两档共用这一份。
+function xChannelSay(state) {
+  $('source-x-state').textContent = state;
+  // 只有选择没变时「下一步」才是事实(口径同状态行)。
+  const next = xChannelSaved() ? (xChan.hint || '') : '';
+  const dup = !next || next === $('source-x-login').textContent || state.includes(next);
+  $('source-x-next').textContent = dup ? '' : next;
+}
+
+// 「页面上选的这条通道,后端已经存下来了吗」。禁用登录按钮和恢复它都认这一份。
+function xChannelSaved() {
+  return !!xChan && xChannelValue() === xChan.current;
 }
 
 async function loadXChannel(kind) {
@@ -49,6 +87,7 @@ async function loadXChannel(kind) {
     $('source-bridge-field').hidden = false;
     $('source-x-feedgrab').hidden = $('source-x-browser').hidden = true;
     $('source-x-check').hidden = true;
+    $('source-x-next').textContent = '';
     $('source-x-state').textContent = `读不出可选的取法（${e.message}）。`;
     return;
   }
@@ -81,13 +120,16 @@ function fillXChannelFields(settings) {
 }
 
 async function openXLoginWindow() {
-  if (xChanBusy) return;
+  // 未保存时这颗按钮本来就是禁用的;这一句是给别的入口(键盘、脚本)兜底 ——
+  // 发上去只会换回一句"当前保存的取法不是……",白跑一趟还留个看不懂的提示。
+  if (xChanBusy || !xChannelSaved()) return;
   xChanBusy = true; $('source-x-login-btn').disabled = true;
   try {
     const r = await pipePost(`/api/intake/${xChanKind}/x-channel/login`);
     toast(r.detail, { type: 'info', ms: 12000 });
   } catch (e) { toast('打不开登录窗口', { detail: e.message }); }
-  finally { xChanBusy = false; $('source-x-login-btn').disabled = false; }
+  // 恢复成"此刻该不该能点",不是无条件放开:这期间下拉可能已经被改走了。
+  finally { xChanBusy = false; $('source-x-login-btn').disabled = !xChannelSaved(); }
 }
 
 async function checkXChannel() {
@@ -98,10 +140,10 @@ async function checkXChannel() {
     // 这一步会真起一个 Chrome 或真跑一次 feedgrab doctor,比普通请求慢得多。
     const r = await pipePost(`/api/intake/${xChanKind}/x-channel/check`, {}, 120000);
     if (xChan) { xChan.ready = r.ready; xChan.why = r.detail; }
-    $('source-x-state').textContent = r.detail;
+    xChannelSay(r.detail);
     toast(r.detail, { type: r.ready ? 'ok' : 'err' });
   } catch (e) {
-    $('source-x-state').textContent = e.message;
+    xChannelSay(e.message);
     toast('检查没跑完', { detail: e.message });
   } finally { xChanBusy = false; $('source-x-check').disabled = false; }
 }
