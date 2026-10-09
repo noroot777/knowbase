@@ -28,11 +28,20 @@ _NEEDS_SHELL = unittest.skipUnless(
 
 EMOJI = 'https://abs-0.twimg.com/emoji/v2/svg/1f642.svg'
 PHOTO = 'https://pbs.twimg.com/media/HUIE7DSbEAEJXcR.jpg'
+DIAGRAM = 'https://pbs.twimg.com/media/HUIE7DSbEAEJXcS.png'
+# 带描述的配图:`alt` 是给人读的说明,不是一个表情字符。
+CAPTION = '系统架构示意图'
+# 一个 ZWJ 组合表情(女 + ZWJ + 电脑)。删掉 ZWJ 它就裂成两个字符。
+COMBO = chr(0x1F469) + chr(0x200D) + chr(0x1F4BB)
+# 真实缩进:`if` 下面四格、`return` 下面八格,压成一格就编译不过。
+CODE = 'def answer():' + chr(10) + '    if True:' + chr(10) + '        return 42'
 
 # Draft.js 的真实形状:每个段落一个 `[data-block="true"]`,文字包在
 # `[data-text="true"]` 里,表情是一个带 alt 的 `<img>`(twemoji),配图单独
-# 占一个 atomic 块。另外摆两样容易出错的:`display:none` 的辅助节点(innerText
-# 不会带它,我们按子节点遍历就得自己跳过)和一个 `<br>`。
+# 占一个 atomic 块。另外摆上几样容易出错的:`display:none` 的辅助节点
+# (innerText 不会带它,我们按子节点遍历就得自己跳过)、一个 `<br>`、一张**带
+# 描述**的配图、一段真缩进的代码、一个声明了 `white-space: pre-wrap` 的容器、
+# 一个 ZWJ 组合表情,以及一处只存在于 HTML 源码里的换行缩进(该折叠成空格)。
 ARTICLE_HTML = f'''<!doctype html><meta charset="utf-8"><title>Article</title>
 <div data-testid="twitterArticleReadView">
   <h1 style="font-size:34px">X书签保存Skill x Teamily</h1>
@@ -48,6 +57,13 @@ ARTICLE_HTML = f'''<!doctype html><meta charset="utf-8"><title>Article</title>
         ><span data-text="true">换行之后还在同一段里。</span></div>
       <div data-block="true"><span data-text="true">第四段。</span
         ><span style="display:none">这句是辅助节点，不算正文</span></div>
+      <div data-block="true"><figure><img alt="{CAPTION}" src="{DIAGRAM}"></figure></div>
+      <div data-block="true"><pre><code>{CODE}</code></pre></div>
+      <div data-block="true"><div style="white-space:pre-wrap">行一
+  行二缩两格</div></div>
+      <div data-block="true"><span data-text="true">组合表情:{COMBO}。</span></div>
+      <div data-block="true"><span data-text="true">折叠前</span>
+        <span data-text="true">折叠后</span></div>
       <div data-block="true"><span data-text="true">&#8203;</span></div>
     </div>
   </div>
@@ -120,7 +136,10 @@ class DomTests(unittest.TestCase):
         self.assertIn('第一步，保存你真正想读的资料。', blocks[0])
         self.assertIn('然后安排每天二十分钟完成练习，别只收藏不行动。', blocks[0])
         self.assertIn('🙂', blocks[0], '表情按 alt 还原')
-        self.assertNotIn('![](', blocks[0], '行内表情不该写成 markdown 图片')
+        # 判据是「这一段里一张图片都没有」,**不是**「没有 `![](`」:后者被
+        # `![🙂](…emoji.svg)` 轻松绕过(里面照样有那个字符),于是「表情身份
+        # 判据失效、每个 emoji 都变成一条图片链接」这一版照样全绿(自查发现)。
+        self.assertNotIn('![', blocks[0], '行内表情不该写成 markdown 图片')
 
     def test_a_media_only_block_is_still_an_image(self):
         """反过来钉一边:独立配图块照旧是一张 markdown 图片。"""
@@ -128,12 +147,63 @@ class DomTests(unittest.TestCase):
         blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
         self.assertIn(f'![]({PHOTO})', blocks)
 
+    def test_a_captioned_photo_keeps_its_url(self):
+        """**后果先断言**:配图配了一句描述之后,图片地址还在。
+
+        红的那一版拿「alt 非空」当表情判据,于是 `alt="系统架构示意图"` 的配图
+        只剩那句描述、`src` 整个丢掉 —— 而**剩下的文字让正文看着非空**,
+        `browser_fetch` 那道「正文空不空」的判据发现不了图没了,一篇缺图的正文
+        照样落库,`put_items` 是 DO NOTHING、从此改不回来。
+        """
+        self.open('article.html')
+        blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
+        self.assertIn(f'![{CAPTION}]({DIAGRAM})', blocks,
+                      f'带描述的配图该连地址带说明一起留下:{blocks}')
+
+    def test_code_indentation_survives(self):
+        """**后果先断言**:读回来的代码**真的编译得过**。
+
+        红的那一版对所有块做 `[ \t]+` → 单空格,四格和八格缩进一起压成一格:
+        `compile()` 当场 `IndentationError`,照着复制的示例成了无效代码。
+        """
+        self.open('article.html')
+        blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
+        got = next((b for b in blocks if b.startswith('def answer()')), '')
+        self.assertEqual(CODE, got, '代码块里的空白是内容,一个空格都不许折叠')
+        compile(got, '<extracted>', 'exec')   # 红的那一版在这里抛 IndentationError
+
+    def test_a_preformatted_container_keeps_its_indent(self):
+        """计算样式那一道:`white-space: pre-wrap` 的容器同样不折叠。
+
+        和上一条两道判据各走一条 —— 标签名那道管 CSS 没加载的情况,计算样式
+        那道管「标签不是 pre、但页面说了它是预格式化」。
+        """
+        self.open('article.html')
+        blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
+        self.assertIn('行一' + chr(10) + '  行二缩两格', blocks)
+
+    def test_a_compound_emoji_stays_whole(self):
+        """ZWJ 不许当零宽字符删掉:删了 `COMBO` 就裂成两个独立表情。"""
+        self.open('article.html')
+        blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
+        self.assertIn('组合表情:' + COMBO + '。', blocks)
+
+    def test_ordinary_markup_whitespace_still_collapses(self):
+        """反过来钉一边:**只存在于 HTML 源码里**的那些换行和缩进照旧折叠。
+
+        不然「保住代码缩进」就会变成「把源码排版一起收进正文」—— 页面上这两段
+        之间只有一个空格。
+        """
+        self.open('article.html')
+        blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
+        self.assertIn('折叠前 折叠后', blocks)
+
     def test_the_whole_body_matches_what_the_page_shows(self):
         """整篇:段落边界、`<br>`、隐藏节点、零宽占位块各归各位。"""
         self.open('article.html')
         snap = json.loads(self.page.eval(x_article._READ_JS))
         blocks = snap['blocks']
-        self.assertEqual(5, len(blocks), f'零宽占位块不该成段:{blocks}')
+        self.assertEqual(10, len(blocks), f'零宽占位块不该成段:{blocks}')
         self.assertEqual('第二段正文独立成段。', blocks[1])
         self.assertEqual('第三段\n换行之后还在同一段里。', blocks[3])
         self.assertEqual('第四段。', blocks[4], 'display:none 的辅助节点不进正文')
@@ -150,7 +220,7 @@ class DomTests(unittest.TestCase):
         self.assertIn('🙂', got['body'])
         self.assertIn(f'![]({PHOTO})', got['body'])
         self.assertEqual('X书签保存Skill x Teamily', got['title'])
-        self.assertEqual(5, len(got['body'].split('\n\n')))
+        self.assertEqual(10, len(got['body'].split('\n\n')))
 
     # ── 时间线的长文卡片 ────────────────────────────────────────────────────
 

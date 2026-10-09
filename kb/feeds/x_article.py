@@ -296,35 +296,73 @@ _READ_JS = r'''(() => {
   const rich = document.querySelector('[data-testid="twitterArticleRichTextView"]');
   const read = document.querySelector('[data-testid="twitterArticleReadView"]');
   const root = document.querySelector('[data-contents="true"]');
-  // 一块的内容按**子节点顺序**拼出来,`<img>` 分两种:带 alt 的是行内表情
-  // (X 把 emoji 渲染成 twemoji 图片,alt 就是那个字符本身),按 alt 还原;
-  // 没有 alt 的是真·配图,写成 markdown 图片。
+  // 预格式化那几种标签里的空格、制表符和换行是**内容**,一个都不许折叠:一段
+  // Python 示例的四格/八格缩进被压成一格之后就是无效代码了 —— 照着复制当场
+  // `IndentationError`,而我们报的是成功、正文照样落库(`DO NOTHING` 之下永久
+  // 改不回来)。判据两道、任一成立即可:计算样式的 `white-space` 以 `pre` 开头
+  // (页面 CSS 说了话),或者标签本身是 `pre`/`code`/`samp`/`kbd`(CSS 没加载
+  // 时 UA 默认样式也是 `pre`)。
+  const PRE_WS = /^(pre|pre-wrap|pre-line|break-spaces)/;
+  const preish = (el) => {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'pre' || tag === 'code' || tag === 'samp' || tag === 'kbd') return true;
+    return PRE_WS.test(getComputedStyle(el).whiteSpace || '');
+  };
+  // 一块的内容按**子节点顺序**拼出来。`<img>` 分两种,判据是 **alt 的内容**:
+  // alt **整串都是表情字符**的是行内表情(X 把 emoji 渲染成 twemoji 图片,alt
+  // 就是那个字符本身),按 alt 还原;**其余一律是真·配图**,写成 markdown 图片
+  // 并把 alt 留在说明位上。
   //
-  // **不许写成「这一块里有 img 就只要图片」**:段落里插一个表情图是极常见的
+  // **不许拿「有没有 alt」当判据**:给配图配一句描述是无障碍的常规做法
+  // (`alt="系统架构示意图"`),按「非空 alt = 表情」会把图片地址整个丢掉,而
+  // 剩下那句描述让正文看着非空 —— `browser_fetch` 那道「正文空不空」的判据
+  // 发现不了图没了,于是一篇缺图的正文照样落库、从此改不回来。反过来万一 X
+  // 哪天把 emoji 的 alt 换成 `:smile:` 这种短代码,我们只是多写一条图片链接,
+  // 方向上安全。`<figure>` 里的那张一律按配图办(结构说了话)。
+  //
+  // **也不许写成「这一块里有 img 就只要图片」**:段落里插一个表情图是极常见的
   // 形态(emoji 全是这样),那一版会把**整段文字丢掉**只留一张小图,而且照样
-  // 报成功 —— 空/缺字的正文一旦落库就改不回来(`put_items` 是 DO NOTHING)。
-  // 也不能用 `innerText`:它压根不包含 img 的 alt,表情会静默消失。
-  const textOf = (node) => {
+  // 报成功。也不能用 `innerText`:它压根不包含 img 的 alt,表情会静默消失。
+  const EMOJI_CORE = /[\p{Extended_Pictographic}\u20e3\u{1F1E6}-\u{1F1FF}]/u;
+  const EMOJI_ONLY =
+    /^[\p{Extended_Pictographic}\p{Emoji_Component}\u200d\ufe0f\u20e3]+$/u;
+  const textOf = (node, pre) => {
     let s = '';
     for (const n of node.childNodes) {
-      if (n.nodeType === 3) { s += n.nodeValue; continue; }
+      if (n.nodeType === 3) {
+        let t = n.nodeValue;
+        if (!pre) {
+          // 非预格式化的那部分照 HTML 自己的空白折叠规则走(源码里的换行和缩进
+          // 不是内容),`<br>` 刚插下的那个换行后面不再留一个行首空格。
+          t = t.replace(/[\t\n\r\f ]+/g, ' ');
+          if (/\n$/.test(s)) t = t.replace(/^ /, '');
+        }
+        s += t;
+        continue;
+      }
       if (n.nodeType !== 1) continue;
       if (getComputedStyle(n).display === 'none') continue;
       const tag = n.tagName.toLowerCase();
       if (tag === 'br') { s += '\n'; continue; }
       if (tag === 'img') {
         const alt = (n.getAttribute('alt') || '').trim();
-        s += alt || (n.src ? '![](' + n.src + ')' : '');
+        const emoji = alt && EMOJI_CORE.test(alt) && EMOJI_ONLY.test(alt)
+                      && !n.closest('figure');
+        if (emoji) { s += alt; continue; }
+        const cap = alt.replace(/[\[\]]/g, ' ').trim();
+        s += n.src ? '![' + cap + '](' + n.src + ')' : cap;
         continue;
       }
-      s += textOf(n);
+      s += textOf(n, pre || preish(n));
     }
     return s;
   };
   const blocks = [];
   if (root) for (const b of root.querySelectorAll('[data-block="true"]')) {
-    const txt = textOf(b).replace(/[\u200b\u200c\u200d\ufeff]/g, '')
-                         .replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
+    // 零宽空格(Draft.js 的空块占位 `&#8203;`)和 BOM 要去掉,**但 ZWJ / ZWNJ
+    // 不许动** —— 它们是组合表情的一部分,删掉之后一个组合表情当场裂成几个。
+    const txt = textOf(b, preish(b)).replace(/[\u200b\ufeff]/g, '')
+                                    .replace(/\u00a0/g, ' ').trim();
     if (txt) blocks.push(txt);
   }
   let title = '', big = 0;
