@@ -233,15 +233,17 @@ def _new_extract_stats() -> dict:
     # failed/empty 按路径记 set:存量+增量两轮会重试同一篇,计数去重,
     # 面板上的"失败 N"才等于真正有问题的文档数
     # failures: path -> {"title", "reason"},重试成功会移除,只留最终仍失败的
+    # stale_paths: 正文在模型调用期间被换掉、这次结果作废的那些(不算失败)
     return {"ok": 0, "promo": 0, "failed_paths": set(), "empty_paths": set(),
-            "failures": {}}
+            "stale_paths": set(), "failures": {}}
 
 
 def _finish_extract_stage(stats: dict) -> None:
     ok = stats["ok"]
     failed = len(stats["failed_paths"])
     empty = len(stats["empty_paths"])
-    if ok + failed + empty == 0:
+    stale = len(stats["stale_paths"])
+    if ok + failed + empty + stale == 0:
         _stage("extract", "ok", "没有待提取的文档")
         return
     detail = f"成功 {ok},失败 {failed}"
@@ -249,6 +251,8 @@ def _finish_extract_stage(stats: dict) -> None:
         detail += f",软广 {stats['promo']}(已排除出条目化)"
     if empty:
         detail += f",跳过 {empty}(正文空,需回填)"
+    if stale:
+        detail += f",跳过 {stale}(正文已更新,下轮重提)"
     _stage("extract", "ok" if failed == 0 and empty == 0 else "error", detail,
            failures=list(stats["failures"].values()))
 
@@ -260,13 +264,18 @@ def _finish_extract_stage(stats: dict) -> None:
 EXTRACT_WORKERS = 6
 
 
-def _extract_one(path: str, title: str, account: str = "") -> dict | None:
+def _extract_one(path: str, title: str, account: str = "") -> tuple[dict, str] | None:
     """工作线程:读正文(独立连接,WAL 下并发读安全)→ 调 LLM。不碰共享连接。
 
     正文为空(转载 stub 等导致 md 没有正文)时返回 None——调 LLM 必然失败或
-    产出只凭标题的劣质结果,直接跳过留给"重试失败项"回填后再提。"""
+    产出只凭标题的劣质结果,直接跳过留给"重试失败项"回填后再提。
+
+    连**读到的那份正文的指纹**一起交回去:模型调用要几十秒,这期间正文可能
+    被整篇换掉(补抓把跳转壳换成全文),落库前主线程拿它比一次(见
+    `extract.save_extraction` 的 `body_seen`)。
+    """
     from kb import store
-    from kb.extract import extract_with_llm
+    from kb.extract import body_fingerprint, extract_with_llm
 
     conn = store.connect()
     try:
@@ -275,7 +284,7 @@ def _extract_one(path: str, title: str, account: str = "") -> dict | None:
         conn.close()
     if not body.strip():
         return None
-    return extract_with_llm(title, body, account=account)
+    return extract_with_llm(title, body, account=account), body_fingerprint(body)
 
 
 def _extract_pass(label: str, stats: dict) -> None:
@@ -286,7 +295,7 @@ def _extract_pass(label: str, stats: dict) -> None:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from kb import store
-    from kb.extract import (pending_docs, save_extraction,
+    from kb.extract import (StaleBody, pending_docs, save_extraction,
                             writeback_extraction)
 
     conn = store.connect()
@@ -306,14 +315,15 @@ def _extract_pass(label: str, stats: dict) -> None:
                 row = futs[fut]
                 done += 1
                 try:
-                    data = fut.result()
-                    if data is None:
+                    done_one = fut.result()
+                    if done_one is None:
                         stats["empty_paths"].add(row["path"])
                         stats["failures"][row["path"]] = {
                             "title": row["title"], "reason": "正文为空,需回填"}
                         _log(f"extract: SKIP 正文为空 {row['title'][:24]}")
                     else:
-                        stale_flag = save_extraction(conn, row["path"], data)
+                        data, seen = done_one
+                        stale_flag = save_extraction(conn, row["path"], data, seen)
                         conn.commit()
                         promo = data.get("promo") or {}
                         if promo.get("level") == "hard":
@@ -328,7 +338,16 @@ def _extract_pass(label: str, stats: dict) -> None:
                         # 存量轮失败、增量轮成功:清掉旧失败记录,计数才是最终状态
                         stats["failed_paths"].discard(row["path"])
                         stats["empty_paths"].discard(row["path"])
+                        stats["stale_paths"].discard(row["path"])
                         stats["failures"].pop(row["path"], None)
+                except StaleBody:
+                    # 不是故障:正文在模型调用期间被整篇换过(补抓补上了全文),
+                    # 这一篇还在待提取集合里,下一轮按新正文重提。记成失败会让
+                    # 面板标红,而这里什么都没坏。
+                    stats["stale_paths"].add(row["path"])
+                    stats["failed_paths"].discard(row["path"])
+                    stats["failures"].pop(row["path"], None)
+                    _log(f"extract: SKIP 正文已更新 {row['title'][:24]}")
                 except Exception as e:
                     stats["failed_paths"].add(row["path"])
                     stats["failures"][row["path"]] = {

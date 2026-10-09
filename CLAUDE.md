@@ -1568,8 +1568,8 @@
   论文"说成"已取得正文"** —— 后者是不可恢复的:那一条再也不会重试。
   **三道,各管一类撒谎方式,而且各有自己那条用例**:①**声明的类型**不在
   `_TEXT_TYPES` 里(站点自己说了这不是网页);②**文件头**命中已知魔数;③头部出现
-  **NUL 字节**。②不是①③的冗余:**PDF 的首个压缩流常常在几十 KB 之后**(前面是
-  一长串 ASCII 对象定义和 xref),RTF、PostScript 整份都是 ASCII —— 这一档 NUL
+  **NUL 字节**,**而 UTF-16/32 文本除外**(`_wide_text`)。②不是①③的冗余:
+  **PDF 的首个压缩流常常在几十 KB 之后**(前面是一长串 ASCII 对象定义和 xref),RTF、PostScript 整份都是 ASCII —— 这一档 NUL
   那道完全是瞎的,而 content-type 又正好配错成 `text/html` 时(小站常态)只剩魔数
   那一道。**这件事是反向验证逼出来的**:第一版的 PDF 样本头部带着压缩流(有 NUL),
   于是去掉魔数那一道整套测试照旧全绿 —— 现在另有一条头部全 ASCII 的样本钉着它。
@@ -1577,6 +1577,16 @@
   经提取器出来仍是可读文字(只是段落按 HTML 规则折叠),比一个跳转壳强;真要挡的
   二进制由②③管。抛异常而不是返回空串,是因为空串那条路的提示写的是"可能需要登录
   或由脚本渲染",而这里的原因明确得多 —— 面板上要说得出是哪一类。
+  **③那条 NUL 兜底对 UTF-16/32 必然误判,所以要给它开一个口**(`_wide_text`:
+  判据是**自己声明的编码**或**BOM**,不是"内容里有没有 NUL")。那两种编码的
+  **正常文本**每隔一个字节就是 `\x00` —— 拿它当二进制的证据,等于把编码本身的
+  产物当成了罪证。实测:一篇正常 HTML 文章编码成 UTF-16、响应明确声明
+  `text/html; charset=utf-16`,`decode`+`extract` 本来取得 914 字正文,而第一版
+  的 NUL 那道把它判成二进制,`done=0 / failed=1`(2026-10-09 第 2 轮审查,列为
+  不拦验收项)。口子**只开给 ③**:魔数和声明类型那两道照旧跑在前面,所以
+  "content-type 撒谎成 `text/html` 的 PDF"仍然被魔数挡住 —— 真要挡的二进制一个
+  都没放过去。放行判据不自己猜编码:`decode` 本来就按 HTTP 头的 charset / BOM
+  读得出来,这里只是别抢在它前面否掉它。
 - **重导出靠 `content_hash` 变了,`_save` 不许清 `exported_hash`。** 导出闸门是
   `exported_hash<>content_hash`,正文一换前者就自然成立;而 `exported_hash` 同时是
   **「这一篇入没入过库」的事实来源**(`registry.items` 的两态、`sync._export` 的四档
@@ -1625,12 +1635,66 @@
   kb.db 的连接现开现关、`config.DB_PATH` 现读(`connect` 的默认参数在函数定义时就
   绑死了,测试没法把它指到临时库上去);常态下那条查询是空集合,一次连接都不开。
   **测试里 `config.DB_PATH` 必须指到 tmp**,理由同 `maintenance.DATA_DIR` 那条。
-- 回归在 `tests/test_feed_fulltext.py`(43 条:提取本身那十一条 —— 认出正文、挡住外围
+- **一次提取的结果要和它基于的那份正文绑在一起**(`extract.body_fingerprint` +
+  `_require_current_body`,`save_extraction(..., body_seen=)`)。上面那条作废只负责
+  「把这一篇排回待提取队列」,它管不住**此刻正在提取的那一轮**读的是哪一份正文 ——
+  而补抓把「几十字的跳转壳」换成整篇文章,正是把「模型读走旧壳 → 期间正文换新并
+  重新索引 → 旧结论落库」从一种边角变成了**常规时序**。拦不住的后果是**永久的**:
+  落库把 `extracted_at` 设上,这一篇从此再也不进 `pending_docs`,摘要、主题、实体
+  永久停在那条链接上,再同步、再索引都不会自己纠正(2026-10-09 第 2 轮审查两种
+  交错时序各三次稳定复现,末态 `summary` 还是「只有一条链接和 HN 得分。」、
+  `tags=[entity/htmx, topic/link-only]`、`pending=[]`)。
+  **两道判据,各管一种时序、缺一不可,而且各有自己那条直测用例**:
+  ①**索引还没扫到当前这份 md**(`store.doc_needs_reindex(conn, path,
+    scanner.file_hash(md))`)。这是「导出完成、索引还没跟上」那一档 —— 管道顺序是
+    export → index → extract,可旁路的一轮 `kb extract` 正好落在这个缝里:
+    `retire_stale` 已经把它排回待提取集合了,而 `store.doc_body` 拼的是**索引里**
+    那份 chunks,读出来还是旧壳。**那一刻 chunks 压根没动过,所以 ② 对它是瞎的。**
+  ②**索引里那份正文已经不是我读到的那一份**(`body_fingerprint(doc_body(...)) !=
+    body_seen`)。这是「旧正文的提取请求在途、模型回包晚于全文更新」那一档 ——
+    中间那次 index 已经把 chunks 换成新正文、`content_hash` 跟着对上了文件,
+    **所以 ① 对它是瞎的。**
+  **判据待在 `save_extraction` 里,不在调用方各判一遍。** 四个调用点分两档:读
+  chunks 正文 + 有模型往返的那三条(`kb/cli.py`、`kb/pipeline_stages.py`、
+  `scripts/extract_parallel.py`)必须把开工时算的那个指纹传下来;**不读正文的两条
+  不传** —— `extract` 自己改判软广、`scripts/pretagged_refresh.py` 走
+  `parse_pretagged` 解 frontmatter,它们压根没有"读到的正文"可言。这份名单由回归
+  钉住(`grep` 全仓比全集),多一处会在那里红,而不是等某一轮静默写回旧摘要。
+  **`StaleBody` 不是故障,三条路径一律归到「跳过」那一档**:什么都没坏 ——
+  `extracted_at` 一个字没写、这一篇还在待提取集合里,下一轮按新正文重提一次就对
+  了。记成失败会让面板标红、CLI 收尾行多报一个数,而用户什么都不用做。
+  **不单开 `BEGIN IMMEDIATE` 去关掉「校验到提交」那条残余窗口**:那会把 kb.db
+  写锁排在维护锁前面,锁序反过来(见「kb.db 的维护互斥锁」:持锁的清理会卡在它
+  自己的 DELETE 上)。而窗口里真被写进去了也不是死局 —— `feed_items.extract_stale`
+  那个待办只在作废**做完**之后才放下,下一轮导出会再作废一次、重排进队列。
+  **也没有改成「等索引跟上了才作废」**(把判据挪去 `retire_stale`):那会让**正常
+  路径晚一轮同步**才重新提取(export 之后 index 才跑,这一轮的 extract 已经选过
+  待提取集合了),而判据集中在落库这一处,同一轮 export → index → extract 就走完。
+  **反过来,md 压根读不出来(清理正把这一篇删掉)不算「版本不对」,照旧放行。**
+  这一档本来就有人管:`writeback_extraction` 锁内复查「这一篇还在吗」,落进库的
+  判定随后被外键级联一并带走(真半途失败也由下一轮 `remove_missing_documents`
+  收掉),末态干净 —— 那是本来就对的一条路。在这里改判成作废只是把它换个形状,
+  代价却是实打实的:**回写压根不会被调到,于是 `test_writeback_lock` 那组
+  「回写在锁里、读也不许读」对它不再敏感**(把回写那把锁去掉也照样全绿)。
+  这道判据只回答「我读到的正文还是当前那一份吗」,"这一篇还在不在"不是它的问题。
+  **顺着这条判据抓出了三份测试摆盘的同一个毛病**:`tests/test_promo.py` 的
+  `_seed`(写 `content_hash='old'`)、`tests/test_writeback_lock.py` 的
+  `seed_gzh` 和 `tests/feed_trim_fixture.py` 的 `seed`(压根不写这一列)都在手摆
+  `documents` 行 —— 那摆出来的是一个**生产里不存在**的状态(「索引还没扫到当前
+  这份 md」),于是落库那道版本校验如实把提取作废,而那几条用例测的是软广回写和
+  锁序。**手摆 `documents` 就得把 `content_hash` 按 `scanner.file_hash` 算出来。**
+  同理 `_extract_pass` 的 `stats` 一律用 `pipeline_stages._new_extract_stats()`
+  构造,不许在用例里手抄一份键集合 —— 手抄的那份会在新维度第一次被写到时 KeyError。
+  **`documents.content_hash` 的口径抽成了 `scanner.file_hash`**(原来索引、
+  `refresh_content_hash` 各写一份 sha256 字面量):三处对「索引跟上了没有」的回答
+  必须是同一个,各写一遍就会各漂各的。
+- 回归在 `tests/test_feed_fulltext.py`(45 条:提取本身那十一条 —— 认出正文、挡住外围
   部件、嵌套销毁不崩、链接堆不当正文、包装链收缩、`<article>` 里的 header 留着、
   编码探测,外加**内容类型那三道各一条直测**;队列口径四条;抓一轮之后库里什么样
-  六条;**原文不是网页那五条**(端到端的 PDF、头部全 ASCII 的 PDF、撒谎的
-  content-type、试满之后照旧出队,以及反过来钉一边的"正常网页四种 mime 照旧抓得
-  到");**已入库状态那三条**(旧条目保住标题和阅读入口 / 新条目照旧扣在闸门外 /
+  六条;**原文不是网页那七条**(端到端的 PDF、头部全 ASCII 的 PDF、撒谎的
+  content-type、试满之后照旧出队、**端到端的 UTF-16 页照旧抓得到**、**宽编码那
+  三种写法各按自己声明的东西认出来**,以及反过来钉一边的"正常网页四种 mime 照旧
+  抓得到");**已入库状态那三条**(旧条目保住标题和阅读入口 / 新条目照旧扣在闸门外 /
   保留 `exported_hash` 没把重导出一起拦掉);**两道闸门**与面板那几档七条(含两态
   那一条);端到端两条;开关三条;trim 口径一条;defaults 一条)
   + `tests/test_fulltext_extract_stale.py`(**提取结果作废那一组**,6 条 ——
@@ -1641,6 +1705,25 @@
   summary 和 entities 真的空了、md 里那两类 tag 真的没了,外加反过来钉的三条
   —— 还在等翻译时一个字不许动、作废失败时待办留着且下一轮收得掉、**没补抓过的
   条目重导出时旧 tag 照旧原样留着**)
+  + `tests/test_extraction_body_version.py`(**提取结果跟正文版本绑在一起那一组**,
+  15 条 —— 同样按形状单独一个文件,脚手架复用 `test_fulltext_extract_stale.StaleCase`。
+  **两种时序各真跑一次**:时序 A 走完 `materialize()`、在索引之前真调一次
+  `cli.cmd_extract(limit=100, writeback=True)`(只打桩 `store.connect` 指 tmp、
+  stage_model 和模型本身),时序 B 用 `threading.Event` 把真 CLI 停在模型调用里、
+  期间主线程走完补抓/翻译/导出/索引再放行回包。**判据一律是后果先断言**
+  (`extracted_at` 还是空、summary/tags/entities 都没被旧结论填上、这一篇仍在
+  `pending_docs` 里、md 的 frontmatter 干净),**外加反过来钉一边的"模型真被调了
+  一次、而且读到的就是那个旧壳"** —— 不然"判据生效了"和"样本压根没进来"长得一样;
+  两种时序各配一条「索引跟上/重提一次就成功」的恢复用例。
+  **两道判据各有自己的独占射程用例**:只有 ① 能拦的那条额外断言「此刻 ② 是通过
+  的」(chunks 一个字没动),只有 ② 能拦的那条额外断言「此刻 ① 是通过的」
+  (`content_hash` 已经对上文件)—— 不这么写的话去掉任一道都不会红。另有:指纹
+  口径只有一份、不传就不校验、md 不在时交给回写那道、**四个调用点的名单**
+  (`grep` 全仓比全集,三条读正文的必须传、两条不读正文的不传)、
+  **`StaleBody` 不是失败** —— 这一条要**真跑一轮 `_extract_pass`**(作废落
+  `stale_paths`、不落 `failed_paths`、阶段仍是 `ok`、索引跟上之后下一轮真提得
+  出来);只喂一份现成 stats 给 `_finish_extract_stage` 的那条对「`except
+  StaleBody` 排在 `except Exception` 之前」是瞎的,反向验证实测红 0 条)
   + `tests/test_fulltext_browser.py` → `tests/fulltext_probe.mjs`(真页面 + 无头
   Chrome,35 项,其中 4c 那六项钉「补抓成功、还在等译文的旧条目」—— 沙箱第 ⑤ 条
   就是审查那张截图的形态)。沙箱是 `tests/fulltext_sandbox.py`,**单独一个脚本、不往
@@ -1669,6 +1752,22 @@
   那一版等于没注入 —— 它报"红 0 条",而我差点据此以为魔数那一道是冗余的。
   换成改掉 `for` 的遍历对象之后才发现真正的缺口:样本头部带着压缩流(有 NUL),
   魔数那一道压根没有自己的用例。
+  **第 2 轮审查那一条修完之后另注入 9 版**,各红 1~7 条:整条版本校验去掉
+  (就是第 2 轮被审的那一版)红 7 条 —— 其中两条正是审查那两份证据(时序 A
+  「导出完成、索引还没跟上」和时序 B「旧提取请求迟到」的旧摘要都重新写了回去);
+  **只去掉 ① 那道红 3 条**、**只去掉 ② 那道红 4 条**(两道各有射程,少哪一道
+  红哪一条 —— 两条独占射程用例各自额外断言「此刻另一道是通过的」,不这么写
+  的话去掉任一道都不会红);三条路径各自不传指纹红 4 / 2 / 1 条(`kb/cli.py`、
+  `kb/pipeline_stages.py`、`scripts/extract_parallel.py` —— 名单那条用例必红,
+  外加各自那条端到端);**`StaleBody` 当成提取失败红 1 条**;**md 不在那一档
+  也改判成作废红 4 条** —— 其中三条是 `test_writeback_lock` 的「回写之前先提交」
+  (回写压根不会被调到了),这正是那一档必须放行的依据;UTF-16 放行那道去掉红 4 条。
+  **注入脚本的坑第三次记一笔**:`stale_counts_as_failure` 第一轮报**红 0 条** ——
+  注入是生效的,是**用例不敏感**:那时只有一条喂现成 stats 给
+  `_finish_extract_stage` 的用例,对 `_extract_pass` 里「`except StaleBody` 排在
+  `except Exception` 之前」完全是瞎的。补了一条**真走一轮 `_extract_pass`** 的
+  (作废落 `stale_paths` / 不落 `failed_paths` / 阶段仍是 `ok` / 索引跟上之后下
+  一轮真提得出来)之后它才红 1 条。**"红 0 条"要先怀疑用例,别急着当成冗余。**
 
 ## 英文内容翻译(kb/feeds/translate.py)
 

@@ -354,6 +354,37 @@ class BinaryBodyTests(FullTextCase):
         self.assertEqual(1, row['fulltext_tries'])
         self.assertIn('不是网页', row['fulltext_error'])
 
+    def test_a_utf16_page_is_not_mistaken_for_a_binary(self):
+        """反过来钉一边:UTF-16/32 文本的 NUL 是编码的一部分,不是二进制的证据。
+
+        它每隔一个字节就是 `\x00`,于是那道 NUL 兜底会把一篇正常网页判成
+        「像是二进制文件」—— 而 `decode` 按 HTTP 头的 charset / BOM 本来就
+        读得出来(审查实测:单独走解码 + 提取拿到 914 字正文,经补抓入口却
+        `done=0`、`failed=1`)。
+        """
+        key = self.put()
+        wide = PAGE.encode('utf-16')
+        with patch.object(fulltext, 'request',
+                          Mock(return_value=raw(wide, 'text/html; charset=utf-16'))):
+            summary = fulltext.fetch_pending('rss')
+        row = self.row(key)
+        self.assertEqual((1, 0), (summary['done'], summary['failed']))
+        self.assertIn('The runtime schedules tools for coding agents', row['body'])
+        self.assertEqual('', row['fulltext_error'])
+
+    def test_wide_encodings_are_recognised_by_what_they_declare(self):
+        """三种写法各一次:带 BOM 而没声明、声明了而没 BOM、UTF-32。
+
+        判据是**声明的编码**或 **BOM**,不是"内容里有没有 NUL" —— 后者在这
+        三种上一律误判。真二进制照旧由魔数和声明类型那两道挡住(上面几条)。
+        """
+        cases = ((PAGE.encode('utf-16'), 'text/html'),                  # 只有 BOM
+                 (PAGE.encode('utf-16-le'), 'text/html; charset=utf-16le'),
+                 (PAGE.encode('utf-32-be'), 'text/html; charset=utf-32be'))
+        for body, mime in cases:
+            with self.subTest(mime=mime):
+                self.assertEqual('', readable.html_problem(body, {'content-type': mime}))
+
     def test_the_exhausted_pdf_link_still_leaves_the_queue(self):
         """出口还在:试满 MAX_TRIES 之后它按壳入库,不会永远挡在知识库外面。"""
         key = self.put(url='https://e.org/paper.pdf')

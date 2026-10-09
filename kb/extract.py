@@ -20,6 +20,7 @@ documents.promo_level,下游(条目化 gate、检索、wiki)一律读这一列�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -243,6 +244,24 @@ def judge_promo(title: str, body: str, account: str = "",
     raise last_err
 
 
+class StaleBody(Exception):
+    """这次提取结果针对的那份正文,已经不是当前那一份了 —— 结果作废。
+
+    不是故障:这一篇留在待提取集合里(`extracted_at` 一个字不写),下一轮按
+    新正文重提一次就对了。三条提取路径都把它归到「跳过」那一档,不记失败
+    ——记失败会让面板标红,而这里什么都没坏。
+    """
+
+
+def body_fingerprint(text: str) -> str:
+    """一份正文的指纹。提取开始时按读到的那份算一次,落库前再比一次。
+
+    口径只有这一份:调用方拿自己手里那份 body 算,`save_extraction` 落库前
+    按**索引里此刻**那份算,两个数相等才说明"这个结论还是针对当前正文的"。
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def save_promo(conn, path: str, promo: dict, now: str | None = None) -> bool:
     """写软广判定,并同步 doc_tags 里的 flag。
 
@@ -281,7 +300,66 @@ def sync_promo_tag(conn, doc_path: str, level: str, stale: bool) -> None:
     writeback_extraction(conn, doc_path, {"promo": {"level": level}}, stale)
 
 
-def save_extraction(conn, path: str, data: dict) -> bool:
+def _require_current_body(conn, path: str, body_seen: str) -> None:
+    """确认这次提取结果针对的就是**当前**那份正文,否则抛 `StaleBody`。
+
+    两道各管一种交错时序,少哪一道哪一种就漏过去:
+
+    ①**索引还没扫到当前这份 md**(`documents.content_hash` 对不上文件)。这是
+      「导出完成、索引还没跟上」那一档:`fulltext.retire_stale` 在导出之后就把
+      这一篇排回了待提取集合,而提取读的是**索引里**那份正文(`store.doc_body`
+      拼的是 chunks)—— 旁路的一轮 `kb extract` 正好落在这个缝里,就会拿旧壳
+      再提一遍。那一刻 chunks 压根没变,所以 ② 对它是瞎的。
+    ②**索引里那份正文已经和我读到的不是同一份了**。这是「旧正文的提取请求
+      在途、模型回包晚于全文更新」那一档:中间那次 index 已经把 chunks 换成
+      新正文,`content_hash` 跟着对上了文件 —— 所以 ① 对它是瞎的。
+
+    **拦不住的后果是永久的**:落库会把 `extracted_at` 设上,这一篇从此再也不进
+    `pending_docs`,摘要、主题、实体永久停在那个跳转壳上,再同步、再索引都不会
+    自己纠正(2026-10-09 第 2 轮审查两种时序各三次稳定复现)。
+
+    **md 压根读不出来(清理正把这一篇删掉)不算"版本不对",直接放行。** 这一档
+    本来就有人管:`writeback_extraction` 在锁内复查「这一篇还在吗」,落进库的判定
+    随后被外键级联一并带走(真半途失败也由下一轮 `remove_missing_documents` 收掉),
+    末态干净 —— 那是本来就对的一条路。在这里改判成作废只是把它换了个形状,代价
+    却是实打实的:回写压根不会被调到,**于是"回写在锁里、读也不许读"那组回归对它
+    不再敏感**(把回写那把锁去掉也照样全绿)。这道判据只回答「我读到的正文还是
+    当前那一份吗」,"这一篇还在不在"不是它的问题。
+
+    残余窗口(校验到提交之间)不单开 `BEGIN IMMEDIATE`:那会把 kb.db 写锁排在
+    维护锁前面,锁序反过来(见 `writeback_extraction` 那段)。而窗口里真被写进
+    去了也不是死局 —— `feed_items.extract_stale` 那个待办只在作废**做完**之后
+    才放下,所以下一轮导出会再作废一次、重排进队列。
+    """
+    from kb import store
+    from kb.scanner import file_hash
+    try:
+        text = (VAULT_ROOT / path).read_text(encoding="utf-8")
+    except OSError:
+        return                      # 见 docstring:这一档交给回写那道锁内复查
+    if store.doc_needs_reindex(conn, path, file_hash(text)):
+        raise StaleBody(f"索引还没扫到当前这份 md,提取结果作废: {path}")
+    if body_fingerprint(store.doc_body(conn, path)) != body_seen:
+        raise StaleBody(f"正文已更新,提取结果作废: {path}")
+
+
+def save_extraction(conn, path: str, data: dict, body_seen: str | None = None) -> bool:
+    """把一篇的提取结果落库。`body_seen` 给了就先校验正文版本(见 `StaleBody`)。
+
+    **提取是「读正文 → 等几十秒模型 → 落库」,正文在这中间可能整篇换掉。**
+    补抓把跳转壳换成全文正是这么一条路:它会把这一篇送回待提取集合,于是
+    「模型读走旧壳 → 期间正文换新并重新索引 → 旧结论落库」成了常规时序,
+    而落库会把 `extracted_at` 设上 —— 这一篇从此再也不进 `pending_docs`,
+    摘要、主题、实体永久停在那个壳上,再同步也不会自己纠正(2026-10-09
+    第 2 轮审查两种交错时序各三次稳定复现)。所以落库之前比一次指纹,
+    对不上就整份丢掉。
+
+    判据有两道,**各管一种交错时序、缺一不可**(都在 `_require_current_body`)。
+    不校验的那几条路(`body_seen=None`)是压根不读索引正文的:`parse_pretagged`
+    直接解析 frontmatter,软广补判只改 promo —— 它们没有"基于哪一份正文"可言。
+    """
+    if body_seen is not None:
+        _require_current_body(conn, path, body_seen)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn.execute("DELETE FROM entities WHERE path=?", (path,))
     for e in data["entities"]:
@@ -462,14 +540,14 @@ def remove_writeback_tag(doc_path: str, tag: str) -> bool:
 def refresh_content_hash(conn, doc_path: str) -> None:
     """writeback 改了 frontmatter 后刷新库里的 hash,避免下次 index 无谓重建。
     正文没变(chunker 只看 body),chunks/FTS/向量都无需动。"""
-    import hashlib
+    from kb.scanner import file_hash
     full = VAULT_ROOT / doc_path
     try:
         text = full.read_text(encoding="utf-8")
     except OSError:
         return
-    h = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-    conn.execute("UPDATE documents SET content_hash=? WHERE path=?", (h, doc_path))
+    conn.execute("UPDATE documents SET content_hash=? WHERE path=?",
+                 (file_hash(text), doc_path))
 
 
 def pending_docs(conn, limit: int = 0) -> list:

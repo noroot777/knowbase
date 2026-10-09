@@ -89,13 +89,13 @@ def _index_pass(args) -> int:
 
 
 def cmd_extract(args) -> int:
-    from kb.extract import (extract_with_llm, pending_docs,
-                            save_extraction, writeback_extraction)
+    from kb.extract import (StaleBody, body_fingerprint, extract_with_llm,
+                            pending_docs, save_extraction, writeback_extraction)
     from kb.llm_stages import stage_model
     conn = store.connect()
     todo = pending_docs(conn, args.limit)
     print(f"[extract] 待提取 {len(todo)} 篇 (model={stage_model('extract')})")
-    ok = failed = empty = 0
+    ok = failed = empty = stale_body = 0
     for i, row in enumerate(todo, 1):
         body = store.doc_body(conn, row["path"])
         if not body.strip():
@@ -103,13 +103,22 @@ def cmd_extract(args) -> int:
             print(f"[{i}/{len(todo)}] SKIP {row['title'][:28]}: 正文为空"
                   f"(先把正文补回来再 kb index)")
             continue
+        # 读到的这一份正文的指纹:落库前 save_extraction 拿它比一次,正文在
+        # 模型调用期间被整篇换过(补抓把跳转壳换成全文)就丢掉这次结果。
+        seen = body_fingerprint(body)
         try:
             data = extract_with_llm(row["title"], body)
-            stale = save_extraction(conn, row["path"], data)
+            stale = save_extraction(conn, row["path"], data, seen)
             conn.commit()
             ok += 1
             ents = ", ".join(e["name"] for e in data["entities"][:4])
             print(f"[{i}/{len(todo)}] OK {row['title'][:28]} → [{ents}]")
+        except StaleBody:
+            # 不是失败:这一篇还在待提取集合里,下一轮按新正文重提。
+            stale_body += 1
+            print(f"[{i}/{len(todo)}] SKIP {row['title'][:28]}: 正文已更新,"
+                  f"这次结果作废(下轮按新正文重提)")
+            continue
         except Exception as e:
             failed += 1
             print(f"[{i}/{len(todo)}] FAIL {row['title'][:28]}: {e}")
@@ -124,6 +133,8 @@ def cmd_extract(args) -> int:
     line = f"[extract] 完成: 成功 {ok}, 失败 {failed}"
     if empty:
         line += f", 跳过 {empty}(正文空)"
+    if stale_body:
+        line += f", 跳过 {stale_body}(正文已更新)"
     print(line)
     conn.close()
     return 0

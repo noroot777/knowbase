@@ -86,6 +86,20 @@ _MAGIC = ((b'%PDF', 'PDF'), (b'%!PS', 'PostScript'), (b'\x89PNG', 'PNG 图片'),
           (b'RIFF', 'RIFF 媒体'), (b'OggS', 'Ogg 媒体'), (b'\x1aE\xdf\xa3', 'Matroska 媒体'),
           (b'ID3', 'MP3 音频'), (b'\x7fELF', '可执行文件'), (b'\xca\xfe\xba\xbe', '可执行文件'))
 _SNIFF = 4096
+# UTF-16/32 的**正常文本**每隔一个字节就是 \x00,所以下面那道 NUL 兜底对它必然
+# 误判。这一档交给 `decode`(它按 HTTP 头的 charset / BOM 本来就读得出来),判据
+# 是**声明的编码**或**BOM**,不是"内容里有没有 NUL" —— 后者是在拿编码本身的
+# 产物当二进制的证据。魔数和声明类型那两道照旧跑在前面。
+_WIDE_BOMS = (b'\x00\x00\xfe\xff', b'\xff\xfe\x00\x00', b'\xff\xfe', b'\xfe\xff')
+_WIDE_NAMES = ('utf-16', 'utf16', 'utf-32', 'utf32', 'ucs-2', 'ucs2', 'ucs-4', 'ucs4')
+
+
+def _wide_text(body: bytes, ctype: str) -> bool:
+    """这份字节是不是一份 UTF-16/32 文本(按它自己声明的东西判)。"""
+    if body.startswith(_WIDE_BOMS):
+        return True
+    m = _HTTP_CHARSET.search(ctype)
+    return bool(m) and m[1].strip().lower().startswith(_WIDE_NAMES)
 
 
 def html_problem(body: bytes, headers: dict | None = None) -> str:
@@ -104,22 +118,27 @@ def html_problem(body: bytes, headers: dict | None = None) -> str:
     ②**文件头**命中已知魔数 —— content-type 配错或压根没发时(小站常态)靠它;
     ③头部出现 **NUL 字节** —— 没见过的二进制格式兜底。文本里不会有它,
       `fetching.plain` 的入口本来也要把 `\x00` 清掉(那是它的占位符)。
+      **UTF-16/32 文本除外**(`_wide_text`):它的 NUL 是编码的一部分,而
+      `decode` 按声明的 charset / BOM 本来就读得出来 —— 把这一档也拒掉等于
+      让一篇正常的宽编码网页永远补不到正文(审查实测 914 字的正文被判成
+      「像是二进制文件」)。
 
     调用方把它当抓取失败处理(计次、保留 feed 原本那份壳):PDF 这种链接重试
     三轮都不会变成网页,而那正是 `fulltext.MAX_TRIES` 这个出口要收的东西 ——
     比起"成功了"这个结论,多两次请求便宜得多。
     """
-    mime = ''
+    ctype = ''
     for name, value in (headers or {}).items():
         if str(name).lower() == 'content-type':
-            mime = str(value).split(';')[0].strip().lower()
+            ctype = str(value)
+    mime = ctype.split(';')[0].strip().lower()
     if mime and mime not in _TEXT_TYPES:
         return f'原文返回的不是网页（{mime}），没有可提取的正文'
     head = body[:_SNIFF].lstrip()
     for magic, label in _MAGIC:
         if head.startswith(magic):
             return f'原文返回的不是网页（{label}），没有可提取的正文'
-    if b'\x00' in body[:_SNIFF]:
+    if b'\x00' in body[:_SNIFF] and not _wide_text(body, ctype):
         return '原文返回的像是二进制文件，没有可提取的正文'
     return ''
 

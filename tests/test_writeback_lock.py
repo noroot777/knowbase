@@ -60,10 +60,14 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text(f'---\ntitle: 补判目标\n---\n{body}', encoding='utf-8')
         conn = store.connect()
+        # content_hash 照索引那条真路径算(`scanner.file_hash`):留空等于摆出
+        # 一个「索引还没扫到当前这份 md」的状态,`save_extraction` 的正文版本
+        # 校验会把这次提取如实作废 —— 这条用例测的是锁序,不是那件事。
         conn.execute('INSERT INTO documents(path,source,title,published,indexed_at,'
-                     "extracted_at,promo_level) VALUES(?,?,?,?,?,?,'')",
+                     "extracted_at,promo_level,content_hash) VALUES(?,?,?,?,?,?,'',?)",
                      (path, 'dr-gzh', '补判目标', '2026-09-01 08:00',
-                      '2026-10-01 09:00:00', '2026-10-01 09:00:00'))
+                      '2026-10-01 09:00:00', '2026-10-01 09:00:00',
+                      scanner.file_hash(full.read_text(encoding='utf-8'))))
         conn.execute('INSERT INTO chunks(path,seq,text) VALUES(?,?,?)',
                      (path, 0, body))
         conn.commit(); conn.close()
@@ -142,8 +146,9 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
 
     def test_the_pipeline_writeback_cannot_recreate_a_file_the_cleanup_deleted(self):
         """同步的并行存量提取走的是另一条路(`_extract_pass`),同样不许重建。"""
-        stats = {'ok': 0, 'promo': 0, 'failed_paths': set(),
-                 'empty_paths': set(), 'failures': {}}
+        # 用生产那个构造器,别在用例里手抄一份键集合:`_extract_pass` 以后
+        # 多记一个维度时,手抄的那份会在它第一次被写到的时候 KeyError。
+        stats = pipeline_stages._new_extract_stats()
         seen, item = self.a_writeback_racing_a_cleanup(
             lambda: pipeline_stages._extract_pass('存量', stats))
         self.assert_the_cleanup_stuck(seen, item)
@@ -172,8 +177,7 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         """
         ep, pb = self.script('extract_parallel'), self.script('promo_backfill')
         args = argparse.Namespace(limit=0, writeback=True)
-        stats = {'ok': 0, 'promo': 0, 'failed_paths': set(),
-                 'empty_paths': set(), 'failures': {}}
+        stats = pipeline_stages._new_extract_stats()
         for i, (label, runner, where, model, back) in enumerate((
                 ('kb extract --writeback', lambda: cli.cmd_extract(args),
                  extract, 'extract_with_llm', 'writeback_extraction'),

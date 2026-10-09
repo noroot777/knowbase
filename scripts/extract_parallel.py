@@ -8,8 +8,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from kb import store
-from kb.extract import (extract_with_llm, pending_docs, save_extraction,
-                        writeback_extraction)
+from kb.extract import (StaleBody, body_fingerprint, extract_with_llm,
+                        pending_docs, save_extraction, writeback_extraction)
 
 WORKERS = 6
 
@@ -19,23 +19,33 @@ def main():
     todo = pending_docs(conn, 0)
     print(f"[extract-p] 待提取 {len(todo)} 篇, {WORKERS} 并发", flush=True)
 
-    # 预取正文,worker 不碰数据库
+    # 预取正文,worker 不碰数据库。连指纹一起记下:这一趟几千篇要跑几十分钟,
+    # 期间某一篇的正文完全可能被整篇换掉(补抓把跳转壳换成全文),落库前比一次。
     jobs = []
     for row in todo:
-        jobs.append((row["path"], row["title"], store.doc_body(conn, row["path"])))
+        body = store.doc_body(conn, row["path"])
+        jobs.append((row["path"], row["title"], body, body_fingerprint(body)))
 
-    ok = failed = 0
+    ok = failed = stale_body = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futs = {pool.submit(extract_with_llm, t, b): (p, t) for p, t, b in jobs}
+        futs = {pool.submit(extract_with_llm, t, b): (p, t, seen)
+                for p, t, b, seen in jobs}
         for i, fut in enumerate(as_completed(futs), 1):
-            path, title = futs[fut]
+            path, title, seen = futs[fut]
             try:
                 data = fut.result()
             except Exception as e:
                 failed += 1
                 print(f"[{i}/{len(jobs)}] FAIL {title[:28]}: {str(e)[:80]}", flush=True)
                 continue
-            stale = save_extraction(conn, path, data)
+            try:
+                stale = save_extraction(conn, path, data, seen)
+            except StaleBody:
+                # 不是失败:这一篇还在待提取集合里,下一轮按新正文重提。
+                stale_body += 1
+                print(f"[{i}/{len(jobs)}] SKIP {title[:28]}: 正文已更新,这次结果作废",
+                      flush=True)
+                continue
             # 先把判定落盘,再去回写 —— 和另外两条路同一个时序。回写整段要取
             # kb.maintenance 那把维护锁,攥着一个没提交的 SQLite 写事务去等它的话,
             # 持锁的清理会卡在自己的 DELETE 上(SQLite 的写锁不认那把锁),两边
@@ -50,7 +60,10 @@ def main():
             if i % 10 == 0 or i == len(jobs):
                 print(f"[{i}/{len(jobs)}] ok={ok} fail={failed}", flush=True)
 
-    print(f"[extract-p] 完成: 成功 {ok}, 失败 {failed}", flush=True)
+    line = f"[extract-p] 完成: 成功 {ok}, 失败 {failed}"
+    if stale_body:
+        line += f", 跳过 {stale_body}(正文已更新)"
+    print(line, flush=True)
     conn.close()
     return 0
 
