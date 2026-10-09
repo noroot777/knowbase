@@ -20,6 +20,13 @@
 地址照旧摘得掉、判据① 照旧为真** —— 其中英文冒号那条是"`:` 故意不在禁止集里"
 那个取舍的射程,把它加进禁止集的实现会在那里红。
 
+**这道闸按候选带不带 scheme 分两档,所以 `PunctuationLeadInTests` 管的是另一头**:
+把两档合成一档(一律禁"URL 内部字符紧贴")会让 `新文章...<地址>` 这种**真**地址
+被自己前面那个标点挡住 —— 判据① 一条都不命中,那条链接本身当成正文入库,而
+`DO NOTHING` 之下重复同步也补不回来(2026-10-09 实测,两种前导 × 两条保留通道)。
+那一族里也反过来钉着:放行正文标点不许顺带放行别人家的地址,嵌套的 X 文章地址
+照旧一个字不动。
+
 **另拆一个文件**是因为 `test_x_article_gap.py` 已经 603 行,再加一族越过仓库那条
 700 行上限;摆盘(`FeedgrabRound`、④族那两个 round helper)仍共用它那一份。
 
@@ -153,6 +160,10 @@ class HostBoundaryFormTests(unittest.TestCase):
         ('【', '中文方括号'),
         ('前一句。', '中文句号'),
         ('第一条 https://x.com/Example/article/1,', '英文逗号接在另一条地址后面'),
+        ('我写了一篇新文章...', '英文省略号紧贴 —— 第 3 轮审查那个样本'),
+        ('新文章~', '波浪号紧贴 —— 同一轮的第二个样本'),
+        ('新文章--', '英文破折号'),
+        ('Check it out...', '英文词 + 省略号:连左边那个字母一起落在同一段里'),
     ]
 
     def test_a_real_article_link_is_still_stripped_after_any_lead_in(self):
@@ -183,22 +194,136 @@ class HostBoundaryFormTests(unittest.TestCase):
         """再钉一边:`_TCO` 那条也不许因为加了起点闸就摘不掉真短链。"""
         self.assertEqual('短链   完', lead_text('短链 https://t.co/aBcD1234 完'))
 
-    def test_the_guard_is_a_fixed_width_lookbehind_on_ascii_only(self):
-        """直测那道闸本身:汉字不在禁止集里,URL 内部字符在。
+    # 裸域名形式的同一条地址(没有 scheme),用来直测第二档。
+    BARE = 'x.com/Example/article/10001'
 
-        和上面那些走 `lead_text` / `needs_article` 的用例各管一头 —— 判据写错时
-        一个报"这一处该不该摘",一个报"这道闸自己认了什么"。
+    def test_the_scheme_arm_only_rejects_url_structure_separators(self):
+        """直测第一档:`https://` 自带起点宣告,所以只排"嵌在另一条 URL 里"。
+
+        嵌套只发生在外层 URL 的结构位置(查询值、片段、路径段),那几个位置的紧前
+        一个字符必然是 `=` `&` `?` `#` `/` 之一。**正文标点一律放行** —— 把它们
+        也禁掉的实现会让 `新文章...<地址>` 这种真地址漏认,而漏认 = 空正文永久
+        固定(第 3 轮审查那份证据)。
         """
         hit = x_article._ARTICLE_LINK.search
-        self.assertTrue(hit(f'中文{CANON}'), '汉字前导不许挡住真地址')
-        self.assertTrue(hit(f'见:{CANON}'))
-        self.assertTrue(hit(CANON))
-        for bad in ('x' + CANON, '.' + CANON, '/' + CANON, '-' + CANON,
-                    '=' + CANON, '?' + CANON, '#' + CANON, '@' + CANON,
-                    '%' + CANON, '&' + CANON, '~' + CANON, '+' + CANON,
-                    '_' + CANON, '9' + CANON):
-            with self.subTest(bad=bad[:1]):
-                self.assertIsNone(hit(bad), 'URL 内部字符后面不是主机名起点')
+        for lead in ('.', '..', '...', '~', '-', ':', 'x', '9', '@', '%', '+', '_',
+                     '中文', '', ' ', '('):
+            with self.subTest(ok=lead):
+                self.assertTrue(hit(lead + CANON),
+                                '带 scheme 的真地址不许被正文标点挡住')
+        for bad in ('=', '&', '?', '#', '/'):
+            with self.subTest(bad=bad):
+                self.assertIsNone(hit(bad + CANON),
+                                  'URL 的结构分隔符后面是一条嵌套地址,不是我们的')
+
+    def test_the_bare_arm_still_rejects_every_url_character(self):
+        """直测第二档:裸域名的起点就是主机名第一个字符,禁止集一个都不许少。
+
+        它和分档之前那道闸**逐字相同** —— 域名后缀(`fx`/`not`/`help.`/`my-`)和
+        路径嵌套全靠它挡着,放宽一个字符就会把**别人的文章**记成这条推文的内容。
+        `:` 两档都放行,所以它单列在下面那条用例里。
+        """
+        hit = x_article._ARTICLE_LINK.search
+        self.assertTrue(hit(f'中文{self.BARE}'), '汉字前导不许挡住真地址')
+        self.assertTrue(hit(f'见:{self.BARE}'))
+        self.assertTrue(hit(self.BARE))
+        for bad in ('x', '.', '/', '-', '=', '?', '#', '@', '%', '&', '~', '+',
+                    '_', '9'):
+            with self.subTest(bad=bad):
+                self.assertIsNone(hit(bad + self.BARE),
+                                  'URL 内部字符后面不是主机名起点')
+
+
+class PunctuationLeadInTests(FeedgrabRound):
+    """起点那道闸不许把紧贴**正文标点**的真地址挡住(第 3 轮审查那条)。
+
+    `.` 和 `~` 有两个互相冲突的身份:在 `help.x.com` / `my-x.com` 里它们是域名的
+    一部分,在 `新文章...<地址>` 里它们是作者的标点。合成一档去禁"URL 内部字符
+    紧贴"的后果实测过:`needs_article` 三条判据一条都不命中,那条链接本身当成正文
+    入库 —— `added=1`、`errors=[]`、`partial=[]`、水位照常推进、标题回落成
+    「某某 的动态」,而 `DO NOTHING` 之下重复同步也补不回来。
+
+    **后果先断言**:只验"问过那次接口"的话,一个把链接当正文存下来、却顺手问了
+    一次的实现也能过。
+    """
+
+    feedgrab_round = ArticlePathFormTests.feedgrab_round
+    browser_round = ArticlePathFormTests.browser_round
+
+    # 两个前导逐字取自审查报告的输入。
+    LEAD_INS = ['我写了一篇新文章...', '新文章~']
+
+    def check_feedgrab(self, lead):
+        """真跑一轮 feedgrab:库里那一行是全文,而且那个标点自己也还在。
+
+        一轮只建一个订阅,所以两个样本各走一次完整的摆盘(`subTest` 循环会撞上
+        「这个链接已经在订阅列表中」)。
+        """
+        summary, row, calls, s = self.feedgrab_round(f'{lead}{CANON}')
+        got = row.get('body') or ''
+        self.assertIn(FULL, got, '标点紧贴时长文全文没补进来')
+        self.assertNotIn(CANON, got, '那条地址照旧要摘掉')
+        self.assertIn(lead, got, '作者写的那几个字一个都不许少')
+        self.assertEqual('X书签保存Skill x Teamily', row.get('title'),
+                         '标题回落成「某某 的动态」= 压根没去补过')
+        self.assertEqual([], summary['errors'])
+        self.assertEqual(1, summary['added'])
+        self.assertEqual([], summary['partial'])
+        self.assertEqual(TODAY, self.water(s['id']))
+        self.assertEqual(1, len(calls.urls), '根本没去问那一次')
+
+    def test_an_ellipsis_hugging_the_link_still_reaches_the_knowledge_base(self):
+        """第 3 轮审查那个样本:`我写了一篇新文章...<地址>`。"""
+        self.check_feedgrab('我写了一篇新文章...')
+
+    def test_a_tilde_hugging_the_link_still_reaches_the_knowledge_base(self):
+        """同一轮的第二个样本:`新文章~<地址>`。"""
+        self.check_feedgrab('新文章~')
+
+    def test_punctuation_hugging_the_link_works_on_the_browser_channel(self):
+        """另一条保留通道,而且是**没有卡片信号**那一档。
+
+        有卡片时判据② 会把这一条救回来,漏判就看不出来了 —— 正文里那条地址本来
+        就该是独立的第二道信号。
+        """
+        for lead in self.LEAD_INS:
+            with self.subTest(lead=lead):
+                got, calls = self.browser_round(
+                    f'{lead}https://x.com/example/article/9')
+                text = got['entries'][0]['body']
+                self.assertIn(FULL, text, '标点紧贴时长文全文没补进来')
+                self.assertNotIn('/example/article/9', text)
+                self.assertIn(lead, text)
+                self.assertEqual('', got['incomplete'], '补到了,这一轮算读全了')
+                self.assertNotEqual(OLD_WATER, got['watermark'])
+                self.assertEqual(1, len(calls.urls))
+
+    def test_an_external_address_after_the_same_punctuation_is_still_left_alone(self):
+        """**反过来钉一边**:放行正文标点不许顺带放行别人家的地址。
+
+        这两件事靠的是不同的那一档 —— 外部地址被裸域名那一档的 `fx`/`not`/`help.`
+        挡着,跟它前面是什么标点没有关系。写成"标点后面一律放行"的实现会在这里红。
+        """
+        for lead in self.LEAD_INS:
+            for url, why in HostBoundaryFormTests.OUTSIDERS:
+                with self.subTest(lead=lead, why=why):
+                    body = f'我在读这一篇{lead}{url}'
+                    self.assertEqual(body, lead_text(body))
+                    self.assertFalse(needs_article({'url': TWEET, 'body': body}))
+
+    def test_an_x_article_nested_in_someone_elses_url_is_still_left_alone(self):
+        """放宽第一档之后新的风险点:**嵌套**的 X 文章地址照旧一个字不许动。
+
+        它靠的是那五个结构分隔符(`=` `&` `?` `#` `/`)—— 真实的嵌套入口全在里面。
+        把它们也放行的实现会把别人那条地址从中间剪断,而剪断永久固定。
+        """
+        for url in (f'https://evil.example/?u={CANON}',
+                    f'https://evil.example/p#{CANON}',
+                    f'https://evil.example/?a=1&u={CANON}',
+                    f'https://evil.example/go/{CANON}'):
+            with self.subTest(url=url):
+                self.assertEqual(url, lead_text(url))
+                self.assertFalse(needs_article({'url': TWEET, 'body': url}))
 
 
 if __name__ == '__main__':

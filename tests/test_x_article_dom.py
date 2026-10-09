@@ -99,12 +99,26 @@ class DomTests(unittest.TestCase):
         cls.page.__exit__(None, None, None)
         cls.tmp.cleanup()
 
-    def open(self, name):
+    def open(self, name, ready='[data-block="true"], article'):
+        """打开 fixture,等到**被测的那个 DOM 结构**出现为止。
+
+        **判据不是 `document.readyState == 'complete'`。** 那一档要等所有子资源,
+        而 fixture 里那两张图(`EMOJI` / `PHOTO`)指着**真实外网地址** —— 于是这条
+        等待的耗时取决于能不能连上 twimg,跑测试的机器离线或者网络抖一下就报
+        「页面没加载完」,栈停在这里、压根没走到断言,看着像被测的那两段 JS 回归了
+        (2026-10-09 实测:同一个 fixture 连开三次,`goto` 都是 0.01 秒,而等到
+        `complete` 用了 2.60 / 0.42 / 0.65 秒,**首态已经是 `interactive`**;那条
+        4 秒上限因此是概率性越线的)。
+        而这几条用例读的是 DOM 文本和 `img` 的 `alt` / `src` **属性**,图片加载
+        成不成功一点关系都没有 —— 被测的 `browser_fetch` 自己也不等 `complete`,
+        它只等自己要的那几个节点。
+        """
         self.page.goto((self.root / name).as_uri())
-        for _ in range(40):
-            if self.page.eval('document.readyState') == 'complete':
+        probe = f'document.readyState !== "loading" && !!document.querySelector({ready!r})'
+        for _ in range(100):
+            if self.page.eval(probe):
                 return
-            time.sleep(0.1)
+            time.sleep(0.05)
         self.fail('页面没加载完')
 
     # ── 文章页正文 ──────────────────────────────────────────────────────────
