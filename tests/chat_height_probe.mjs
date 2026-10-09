@@ -488,9 +488,26 @@ const bad = results.filter(r => !r.ok);
 // 七百多条之后两个流都越过了这条线,于是 test_chat_height.py 收到的 JSON 恰好在
 // 第 65536 字节处断在一个中文字符中间,报的是 UnicodeDecodeError,看着像超时或者
 // 编码问题,其实是输出被掐了(2026-09-30 复审第 2 轮补视口后踩到)。
+//
+// **而 writeSync 自己要顶住短写和 EAGAIN。** node 把管道上的这两个 fd 设成非阻塞,
+// 所以缓冲满的时候它不是等,而是**抛** `EAGAIN: resource temporarily unavailable`
+// ——七百多项一口气写出去时,读端(test_chat_height.py 那个 subprocess)只要晚一拍,
+// 整个探针就当场崩在一句跟布局毫无关系的 node 栈上,而单跑这一个文件又是绿的
+// (2026-10-09 全量跑里踩到一次)。所以:短写接着写剩下那段,EAGAIN 同步等一下再试。
+function out(fd, text) {
+  let buf = Buffer.from(text, "utf8");
+  while (buf.length) {
+    try {
+      buf = buf.subarray(writeSync(fd, buf));
+    } catch (e) {
+      if (e.code !== "EAGAIN") throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2);
+    }
+  }
+}
 for (const r of results)
-  writeSync(2, `${r.ok ? "  ok" : "FAIL"}  ${r.name}${r.detail ? " — " + r.detail : ""}\n`);
-writeSync(2, `${results.length - bad.length} ok, ${bad.length} failed\n`);
+  out(2, `${r.ok ? "  ok" : "FAIL"}  ${r.name}${r.detail ? " — " + r.detail : ""}\n`);
+out(2, `${results.length - bad.length} ok, ${bad.length} failed\n`);
 // 最后一行给 tests/test_chat_height.py 读(人看的那份走 stderr)
-writeSync(1, JSON.stringify(results) + "\n");
+out(1, JSON.stringify(results) + "\n");
 process.exitCode = bad.length ? 1 : 0;

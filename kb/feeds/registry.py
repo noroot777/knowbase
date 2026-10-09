@@ -6,7 +6,10 @@ import ipaddress
 import json
 import re
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
+# 直接按名字拿:`sqlite3` 这个模块名在测试里会被换成一个只有 connect/Row 的替身,
+# 而异常类不随连接工厂变 —— 走 `sqlite3.OperationalError` 会在那种替身下 AttributeError。
+from sqlite3 import OperationalError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -29,7 +32,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
  retry_at REAL NOT NULL DEFAULT 0, etag TEXT NOT NULL DEFAULT '',
  modified TEXT NOT NULL DEFAULT '', resolved_url TEXT NOT NULL DEFAULT '',
  -- 排在最后,和老库 ALTER 补出来的列序一致(见 _ADDED_COLUMNS)。
- history_floor TEXT NOT NULL DEFAULT '',
+ history_floor TEXT NOT NULL DEFAULT '', last_note TEXT NOT NULL DEFAULT '',
  UNIQUE(kind, url)
 );
 CREATE TABLE IF NOT EXISTS feed_items (
@@ -59,6 +62,11 @@ _ADDED_COLUMNS = {
     # 时静默丢内容,挡不住任何已经发生的事。
     'subscriptions': (
         ('history_floor', "TEXT NOT NULL DEFAULT ''"),
+        # 上一次同步**成功但没读完**的原因(登录态通道滚不到上次的位置)。
+        # 它不是 `last_error`:抓到的条目照旧入库,只是这一轮没读到水位 ——
+        # 记成失败会让面板显示"连接失败"并触发退避重试,而连接好得很。
+        # 每次成功同步都重写它(读完了就写空串),所以不会留下过期的提示。
+        ('last_note', "TEXT NOT NULL DEFAULT ''"),
     ),
     'feed_items': (
         ('lang', "TEXT NOT NULL DEFAULT ''"),              # '' 未判 / zh 无需翻译 / en 待翻译
@@ -210,7 +218,13 @@ def db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
-    conn.execute('PRAGMA journal_mode=WAL')
+    # 切 journal 模式要的是**排他锁**,而 SQLite 对这条语句**不走 busy handler**
+    # (`timeout=30` 管不着它):两个连接同时首访一个还是 rollback-journal 的库时,
+    # 输的那个当场 `database is locked` —— 而它想做的事已经由赢的那个做掉了,
+    # WAL 是写在库头里的持久状态。所以这里丢掉 BUSY 继续往下走:真写不进去,
+    # 两行之后的 BEGIN IMMEDIATE 会报一个说得清的错。
+    with suppress(OperationalError):
+        conn.execute('PRAGMA journal_mode=WAL')
     try:
         conn.executescript(SCHEMA)
         # One transaction: deleting a default never brings it back on restart.
@@ -240,13 +254,58 @@ def db():
         conn.close()
 
 
+# 设置的修订号。**存量设置里的旧默认值靠它迁移**:改 `SourceType.interval_minutes`
+# 只影响"压根没有设置行"的新库 —— 已经保存过的那份 JSON 在 `get_settings` 里盖在
+# 默认值上面,面板保存通道时又把旧间隔原样带回去,于是"social 改成每天一次"对所有
+# 老用户都没有发生(2026-10-08 审查实测:存量 `interval_minutes=60` 的设置行,真跑
+# 一次 `schedule.tick` 仍然安排一小时后再来)。
+_SETTINGS_REV = 1
+# rev → {kind: {键: (旧默认值, 新默认值)}}。**只改仍然等于旧默认值的那些**:
+# 用户自己挑过的间隔不是我们该动的东西,而"他挑的恰好等于旧默认值"这一档没有
+# 办法和"从没碰过"分开 —— 那就按从没碰过办,代价是他下次打开面板改回去一次,
+# 而反过来(谁都不迁)的代价是这条需求对存量库永久不生效。
+_SETTINGS_FIXUPS = {
+    1: {'social': {'interval_minutes': (60, 1440)}},
+}
+
+
+def _upgrade_settings(kind: str, settings: dict) -> dict:
+    """把存量设置里没人碰过的旧默认值迁到当前默认值。
+
+    **读的时候归一,写的时候盖章**(`save_settings` 把 `settings_rev` 一起存下去,
+    所以升级之后用户自己挑的值不会被再迁一次)。
+
+    反过来写 —— 首次访问这个库时就落一条"已迁移"的标记 —— 会在标记落下之后、
+    设置行写进来之前留一个窗口,那时这份设置永远不会被迁移;而这正是升级的常态:
+    老库里设置行早就有了,标记却是新代码第一次碰库才写的。读侧归一和顺序无关。
+    """
+    for rev in range(int(settings.get('settings_rev') or 0) + 1, _SETTINGS_REV + 1):
+        for key, (was, now_) in _SETTINGS_FIXUPS.get(rev, {}).get(kind, {}).items():
+            if settings.get(key) == was:
+                settings[key] = now_
+    settings['settings_rev'] = _SETTINGS_REV
+    return settings
+
+
 def get_settings(kind: str) -> dict:
     check_kind(kind)
     with db() as c:
         row = c.execute('SELECT value FROM feed_settings WHERE kind=?', (kind,)).fetchone()
     default = {'enabled': False, 'interval_minutes': feed_types()[kind].interval_minutes,
                'next_run': 0, 'bridges': []}
-    return {**default, **(json.loads(row['value']) if row else {})}
+    if feed_types()[kind].adapter == 'social':
+        # X 的取法是个设置,默认仍是桥接 —— 存量库里这一段压根没有这个键,
+        # 读出来必须和升级前逐字同义。
+        from kb.feeds import x_channels
+        default |= {'x_channel': x_channels.DEFAULT, 'x_feedgrab_bin': '',
+                    'x_chrome_path': ''}
+    settings = {**default, **(json.loads(row['value']) if row else {})}
+    if 'x_channel' in settings:
+        from kb.feeds import x_channels
+        # 存量里写着的可能是个退役名,现在就翻成现用名:各处读设置的地方
+        # 都从这里拿,翻译留在这一层就只有一份口径(见 `x_channels.resolve`)。
+        settings['x_channel'] = x_channels.resolve(settings['x_channel'])
+    return _upgrade_settings(kind, settings)
 
 
 def save_settings(kind: str, values: dict) -> dict:
@@ -261,20 +320,42 @@ def save_settings(kind: str, values: dict) -> dict:
         if value.count('{handle}') != 1:
             raise ValueError('桥接地址须包含一个 {handle}，用于替换账号名')
         normalize_url(value.replace('{handle}', 'example'))
+    if feed_types()[kind].adapter == 'social':
+        from kb.feeds import x_channels
+        x_channels.validate(cur)
     with db() as c:
         c.execute('INSERT OR REPLACE INTO feed_settings VALUES(?,?)', (kind, json.dumps(cur)))
     return cur
 
 
 def uses_bridge(source: dict) -> bool:
+    """这条订阅的内容是不是要走「X 通道」拿(而不是它自己那条 feed 地址)。
+
+    名字沿用桥接那一版:判据没变 —— social 来源 + 没填专用订阅链接 + 是个 X
+    账号。通道化之后它回答的是"这条订阅受 X 通道设置管吗",桥接只是其中一条
+    通道(见 `kb.feeds.x_channels`)。
+    """
     return (feed_types()[source['kind']].adapter == 'social' and not source['feed_url']
             and bool(x_handle(source['url'])))
 
 
 def configuration_error(source: dict, settings: dict) -> str:
-    if uses_bridge(source) and not settings['bridges']:
-        return '待配置：请在 X 订阅桥接设置中填写可用模板，或编辑账号的专用订阅链接'
-    return ''
+    """这条订阅现在能不能开工。空串 = 能。
+
+    判据按当前通道走:桥接要有模板,feedgrab 要有可执行文件和登录态,浏览器
+    要在那个独立 profile 里登录过。**问的必须是当前通道**——按桥接判的话,
+    选了浏览器通道的用户会看到一片"请填写 X 订阅桥接",而那个设置跟他这一轮
+    采集毫无关系。
+    """
+    if not uses_bridge(source):
+        return ''
+    from kb.feeds import x_channels
+    if x_channels.channel_of(settings) == x_channels.BRIDGE:
+        if not settings['bridges']:
+            return '待配置：请在 X 订阅桥接设置中填写可用模板，或编辑账号的专用订阅链接'
+        return ''
+    ready, why, _hint = x_channels.readiness(settings)
+    return '' if ready else f'待配置：{why}'
 
 
 def subscriptions(kind: str) -> list[dict]:
@@ -318,9 +399,13 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
                 if reset:
                     # 换了链接 = 这个订阅从头开始,历史下界也跟着重算:指向一个
                     # 全新的源时,旧订阅那个两年前的下界等于没有下界。
+                    # **上一轮那条「没读完」的提示也要一起清掉**(`last_note`):
+                    # 它说的是旧账号读到哪儿了,留着就是在新账号那一行显示
+                    # 「部分同步」——前端的状态链在 `last_success` 之前先看它,
+                    # 而 `last_success` 这里已经清了(2026-10-08 审查实测)。
                     c.execute("""UPDATE subscriptions SET etag='',modified='',resolved_url='',
                         last_error='',last_success='',last_attempt='',failures=0,retry_at=0,config='{}',
-                        history_floor=? WHERE id=?""", (history_floor(), source_id))
+                        last_note='',history_floor=? WHERE id=?""", (history_floor(), source_id))
                     c.execute('DELETE FROM subscription_items WHERE subscription_id=?', (source_id,))
             else:
                 source_id = c.execute('''INSERT INTO subscriptions
@@ -338,9 +423,46 @@ def delete_subscription(kind: str, source_id: int):
         c.execute('DELETE FROM subscriptions WHERE id=?', (source_id,))
 
 
-def put_items(source: dict, entries: list[dict]) -> int:
-    added = 0
+@contextmanager
+def _writing(conn=None):
+    """复用调用方的事务,没给就自己开一个。
+
+    存盘那条路要把"条目 + 水位 + 成功时间戳"放进同一个事务 —— 各自开一个的话
+    任意一步失败都会留下半个结果,而最坏的那半正是"水位推进了、条目没进去"
+    (见 `x_channels.watermark_patch`)。
+    """
+    if conn is not None:
+        yield conn
+        return
     with db() as c:
+        yield c
+
+
+def merge_config(source_id: int, patch: dict, conn=None) -> None:
+    """把几个键并进 `subscriptions.config`,别的键原样留着。
+
+    整份覆盖会把另一条通道的水位、以及将来别人加的字段一起抹掉;所以是读-改-写,
+    而且要和调用方在同一个事务里(`conn`)——否则读到的 config 可能已经过时。
+    """
+    if not patch:
+        return
+    with _writing(conn) as c:
+        row = c.execute('SELECT config FROM subscriptions WHERE id=?', (source_id,)).fetchone()
+        if not row:
+            return
+        try:
+            cfg = json.loads(row['config'] or '{}')
+            cfg = cfg if isinstance(cfg, dict) else {}
+        except (TypeError, ValueError):
+            cfg = {}
+        cfg.update(patch)
+        c.execute('UPDATE subscriptions SET config=? WHERE id=?',
+                  (json.dumps(cfg, ensure_ascii=False), source_id))
+
+
+def put_items(source: dict, entries: list[dict], conn=None) -> int:
+    added = 0
+    with _writing(conn) as c:
         for e in entries:
             key = hashlib.sha256((source['kind'] + ':' + e['url']).encode()).hexdigest()[:32]
             digest = hashlib.sha256(json.dumps(e, ensure_ascii=False, sort_keys=True).encode()).hexdigest()

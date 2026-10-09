@@ -13,13 +13,18 @@ import yaml
 from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
 from kb.maintenance import maintenance_lock
-from kb.feeds import translate
+from kb.feeds import translate, x_channels
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_state import _state, _stage
 from kb.scanner import parse_frontmatter
 
 FETCH_WORKERS = 4
 COLLECT_SECONDS = 90
+# X 的登录态通道(feedgrab / 浏览器)另算预算:它们是串行的 —— 同一个浏览器
+# profile 只能被一个实例打开 —— 而单个账号要滚时间线、必要时还要等懒加载,
+# 90 秒连五个号都跑不完。这条通道按天同步(见 `source_types` 里 social 的
+# interval),所以给得宽;用完的账号记成"留待下次",靠 last_attempt 轮转补齐。
+X_LOCAL_SECONDS = float(os.environ.get('KB_X_LOCAL_SECONDS', '1200'))
 BRIDGE_FAILURE_LIMIT = 3
 BUDGET_MESSAGE = '本轮采集时间预算不足，剩余订阅留待下次同步'
 
@@ -68,11 +73,68 @@ def _stored_floor(source) -> str:
     return (row['history_floor'] if row else source.get('history_floor')) or ''
 
 
+def _repointed(c, source) -> bool:
+    """手里这份结果还属于这条订阅吗? —— 存盘那个事务里现读一次身份再答。
+
+    这一轮的订阅快照是**发请求之前**读的,而中间用户完全可能把这条订阅改指到
+    另一个账号/另一个 feed(`registry.save_subscription` 的 `reset`:清 config、
+    清条目归属、重算历史下界)。那之后按 `source['id']` 把手里这份写回去就是:
+    旧账号的推文记成新账号的内容、旧账号那条 etag/resolved_url 盖在新 feed 上、
+    **旧账号的水位写进新账号那个键** —— 最后一条最狠,它让新账号比这个时间更早
+    的推文从此任何一轮增量都选不到(2026-10-08 审查实测:改成 NewExample 之后
+    库里躺着 `OldExample/status/900`,`next_sync_selection=[]`,而面板报 ok)。
+
+    **判据必须和这次写入同生共死,所以调用方得先拿到写锁(见 `_claim_write`),
+    不能在 API 入口先 SELECT 一次。** 入口那道 `intake_api.guard`(忙就 409)
+    是**早一道**:它只回答"这一刻在跑吗",答不了"我保存的这一瞬间还没在跑吗"
+    —— 已经通过检查、还在途中的那个修改请求照样会落在采集中间(审查就是这么
+    复现的:修改先过 guard,随后管道才起跑)。口径同 `collector` 那条"判据就在
+    UPSERT 自己的 WHERE 里"和清理脚本那条"真正的互斥是那把锁,问管道忙不忙只是
+    早一道":先查后写在两个进程之间压根不成立,而 SQLite 把写入串行化。
+
+    订阅行已经被删掉时同样返回 True:那一轮的结果不该把条目归属重新插回去。
+    """
+    row = c.execute('SELECT url, feed_url FROM subscriptions WHERE id=?',
+                    (source['id'],)).fetchone()
+    if not row:
+        return True
+    return (row['url'], row['feed_url']) != (source.get('url'), source.get('feed_url'))
+
+
+def _claim_write(c, source) -> bool:
+    """先拿写锁、再认身份,返回「这一轮的结果还写不写得进去」。
+
+    **两句的顺序就是这个函数存在的理由。** `reg.db()` 交出来的连接**不在事务
+    里** —— 它自己那个 `BEGIN IMMEDIATE` 在初始化/迁移之后就提交了(见
+    `registry.db`),而 python 的 `sqlite3` 在 legacy `isolation_level` 下
+    **SELECT 压根不开事务、不持任何锁**。所以光把 `_repointed` 搬进
+    `with reg.db()` 块里只是把窗口从「整轮采集」缩成「检查到第一笔写入之间」,
+    另一个连接的修改照样插得进来,后果和这道判据本来要挡的事故一模一样:
+    2026-10-08 第 3 轮审查实测检查那一刻 `in_transaction=false`,随后那次真
+    PATCH 以 200 提交,旧账号的 `/status/900` 照样记成了新账号的内容、水位也
+    跟着过去(`next_sync_selection=[]`),失败那一侧是旧账号的错误连同 1800 秒
+    退避记在了一条从没被访问过的新订阅头上。
+
+    `BEGIN IMMEDIATE` 当场拿到写锁,于是这期间的订阅修改只有两种结局,两种的
+    末态都是对的:①赶在取锁之前提交 —— 那就会被这次 `_repointed` 看见,整轮
+    作废;②等我们提交之后才落下 —— `save_subscription` 的 `reset` 会把刚写进去
+    的条目归属、config(两条通道的水位)、成功时间戳一并清掉,等于用户在一轮
+    采集**结束之后**改指,本来就是这个结果。不再有「检查通过了又被串号」这一档。
+
+    **不能反过来写成「先 SELECT 再升级成写事务」**:WAL 下拿不到快照报的是
+    `SQLITE_BUSY_SNAPSHOT`,`busy_timeout` 管不着它(口径同清理脚本那条)。
+    """
+    c.execute('BEGIN IMMEDIATE')
+    return not _repointed(c, source)
+
+
 def _save_result(source, result, scope):
     entries, validators = result
     if scope.ranged:
         entries = [e for e in entries if e['published'] and scope.since <= e['published'][:10] <= scope.until]
         # A ranged import must not cache away entries outside the selected dates.
+        # 重建这一份也顺手丢掉 `config_patch`(登录态通道的水位):区间补抓读的
+        # 是用户点名的那段日期,拿它当增量进度就是宣布中间那段已经收过。
         validators = {k: source[k] for k in ('etag', 'modified', 'resolved_url')}
     # 存盘整段在维护锁里:存量清理和索引持同一把锁,两边交错的话它删掉的旧文
     # 会被这一轮按旧快照原样写回去(见 `kb.maintenance`)。锁内再现读一次下界,
@@ -80,21 +142,70 @@ def _save_result(source, result, scope):
     with maintenance_lock():
         if not scope.ranged:
             entries = _within_history(source, entries)
-        added = reg.put_items(source, entries)
+        # **条目、水位、成功时间戳一个事务**。分成两个的话,`put_items` 失败那
+        # 一轮水位已经推进了,而这批推文一条都没入库 —— 它们比旧水位新、又比
+        # 新水位老,从此任何一轮增量都选不到(见 `x_channels.watermark_patch`)。
         with reg.db() as c:
+            if not _claim_write(c, source):
+                # 这条订阅在本轮采集期间被改指到别的源了 —— 手里这份属于旧的那个。
+                # 一个字都不写(条目、水位、成功时间戳一样都不写):这一轮作废,
+                # 下一轮按新身份重新抓。
+                return None
+            added = reg.put_items(source, entries, conn=c)
+            reg.merge_config(source['id'], validators.get('config_patch') or {}, conn=c)
             c.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
-                failures=0,retry_at=0,etag=?,modified=?,resolved_url=? WHERE id=?''',
-                (reg.now(),reg.now(),validators['etag'],validators['modified'],validators['resolved_url'],source['id']))
+                failures=0,retry_at=0,etag=?,modified=?,resolved_url=?,last_note=? WHERE id=?''',
+                (reg.now(),reg.now(),validators['etag'],validators['modified'],
+                 validators['resolved_url'],
+                 # 区间补抓不改日常增量的任何状态,这条提示也算 —— 清掉它等于替
+                 # 日常同步宣布"读完了",而那一边的进度一点没动。
+                 source.get('last_note','') if scope.ranged else validators.get('note',''),
+                 source['id']))
     return added
 
 
-def _save_failure(source, error, summary):
+def _save_failure(source, error, summary) -> bool:
+    """失败也要先拿写锁再认身份(见 `_claim_write`),返回这一笔记没记上。
+
+    被改指之后把旧账号那次失败记在新账号头上,是把一条好订阅按别人的毛病推进
+    退避(最长 24 小时),面板上还显示"连接失败" —— 而新账号一次都没被访问过。
+    """
     reason = str(error)[:1200] or type(error).__name__
-    summary['errors'].append({'title': source['name'], 'reason': reason})
     with reg.db() as c:
+        if not _claim_write(c, source):
+            return False
+        summary['errors'].append({'title': source['name'], 'reason': reason})
         c.execute('''UPDATE subscriptions SET last_attempt=?,last_error=?,failures=failures+1,
             retry_at=? WHERE id=?''', (reg.now(),reason,
             time.time() + min(86400, 1800 * 2 ** min(source['failures'], 6)),source['id']))
+    return True
+
+
+def _prefetch_x(kind, sources, settings, scope):
+    """X 登录态通道的整批预取。跑在起线程池之前,所以读侧不必加锁。
+
+    一个账号都抓不到也不抛:每个账号的失败已经落在它自己那一项上,随后
+    `fetch_source` 会把它翻成这条订阅的失败 —— 一个改了名的号不该把整轮带掉。
+    通道是 bridge(或这一类来源没有通道概念)时 `targets()` 返回空,直接空转。
+    """
+    x_channels.reset()
+    if not x_channels.supports_channels(kind):
+        return
+    picked = x_channels.targets(sources, settings)
+    if not picked:
+        return
+    name = x_channels.label(x_channels.channel_of(settings))
+    _stage('crawl', 'running', f'{reg.KINDS[kind]} · {name}:准备读取 {len(picked)} 个账号')
+
+    def progress(done, count, handle):
+        _stage('crawl', 'running', f'{reg.KINDS[kind]} · {name} {done}/{count} · @{handle}')
+
+    # 区间补抓把它那段日期的起点交给采集器当下界:日常水位可能已经停在那段
+    # 日期之后,按水位读的话用户点名的那几天一条都翻不到(见 `prefetch`)。
+    x_channels.prefetch(sources, settings, budget=X_LOCAL_SECONDS,
+                        since=scope.since if scope.ranged else '',
+                        on_progress=progress,
+                        should_stop=lambda: bool(_state.get('stop_requested')))
 
 
 def collect(kind, scope):
@@ -102,19 +213,33 @@ def collect(kind, scope):
     sources = [s for s in reg.subscriptions(kind) if s['enabled'] and
                (not scope.targets or str(s['id']) in scope.targets or s['name'] in scope.targets)]
     summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0,
-               'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [], 'stopped': False}
+               'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [],
+               'partial': [], 'repointed': 0, 'stopped': False}
     settings = reg.get_settings(kind)
-    pending = []
+    pending, unconfigured_why = [], ''
     for source in sources:
-        if reg.configuration_error(source, settings):
+        if problem := reg.configuration_error(source, settings):
             summary['unconfigured'] += 1
+            # 理由按当前通道走(桥接要模板、feedgrab 要登录态、浏览器要登录过),
+            # 所以收尾那行提示也从这里取,不写死"请填写 X 桥接"。
+            unconfigured_why = unconfigured_why or problem.removeprefix('待配置：')
         elif source['retry_at'] > time.time() and not scope.force:
             summary['deferred'] += 1
         else:
             pending.append(source)
     # Budget-limited runs continue with never/least recently attempted sources.
     pending.sort(key=lambda s: (s['last_attempt'], s['id']))
+    _prefetch_x(kind, pending, settings, scope)
+    # 预取可能跑十几分钟(见 X_LOCAL_SECONDS),所以 HTTP 那一侧的预算要在它
+    # **之后**才开始算。算在前面的话,预取一跑完每条订阅都已经超了预算,整轮
+    # 一条也取不走、全部记成"留待下次"—— 而东西明明已经抓在手里了。
     deadline = time.monotonic() + COLLECT_SECONDS
+    # 桥接熔断只对桥接通道成立:它防的是"公共实例挂了,别再拿 50 个账号去撞"。
+    # 登录态通道的内容已经在预取里抓完,这里只是逐条取走,断开只会白扔掉已经
+    # 付过代价的结果;而那两条通道真出问题(登录失效)时每个账号拿到的是同一
+    # 句话,熔断省不下任何东西。
+    shared_upstream = (x_channels.supports_channels(kind)
+                       and x_channels.channel_of(settings) == x_channels.BRIDGE)
     bridge_failures = 0
     # Fetches alone run concurrently; persistence and pipeline state have one writer.
     # Submit only one bounded batch so failures/stop never leave a 51-job backlog.
@@ -142,15 +267,30 @@ def collect(kind, scope):
                 source = futures[future]
                 try:
                     result = future.result()
-                    shared_ok |= reg.uses_bridge(source)
-                    summary['added'] += _save_result(source, result, scope)
+                    shared_ok |= shared_upstream and reg.uses_bridge(source)
+                    saved = _save_result(source, result, scope)
+                    if saved is None:
+                        # 这条订阅在采集期间被改指到别的源(见 `_repointed`):
+                        # 这一份结果作废,既不算新增也不算检查过 —— 说"检查过"
+                        # 等于替新账号宣布它同步过了。
+                        summary['repointed'] += 1
+                        continue
+                    summary['added'] += saved
+                    # **「没读完」不是失败,但也不许静默**:抓到的照旧入库、水位
+                    # 留在原处(下一轮接着读),可"停在时间线半中间"和"全读完了"
+                    # 在面板上不该长得一模一样。记成 error 更不对 —— 那会显示
+                    # "连接失败"并让这条订阅进退避重试,而连接好得很。
+                    if note := result[1].get('note'):
+                        summary['partial'].append({'title': source['name'], 'reason': note})
                 except CollectionBudgetExceeded:
                     summary['skipped'] += 1
                     summary['message'] = BUDGET_MESSAGE
                     continue
                 except Exception as e:
-                    shared_errors += int(reg.uses_bridge(source))
-                    _save_failure(source, e, summary)
+                    if not _save_failure(source, e, summary):
+                        summary['repointed'] += 1
+                        continue
+                    shared_errors += int(shared_upstream and reg.uses_bridge(source))
                 summary['checked'] += 1
                 _stage('crawl', 'running', f"{reg.KINDS[kind]} {summary['checked']}/{len(sources)} · {source['name']}")
             bridge_failures = 0 if shared_ok else bridge_failures + shared_errors
@@ -165,8 +305,12 @@ def collect(kind, scope):
         label += f"，{summary['deferred']} 个等待重试"
     if summary['errors']:
         label += f"，失败 {len(summary['errors'])} 个"
+    if summary['partial']:
+        label += f"，{len(summary['partial'])} 个没读完（{summary['partial'][0]['reason']}）"
+    if summary['repointed']:
+        label += f"，{summary['repointed']} 个采集期间改了订阅链接（这一轮的结果已丢弃）"
     if summary['unconfigured']:
-        label += f"，待配置 {summary['unconfigured']} 个（请填写 X 桥接或专用订阅链接）"
+        label += f"，待配置 {summary['unconfigured']} 个（{unconfigured_why}）"
     if summary['message']:
         label += f"，跳过 {summary['skipped']} 个；{summary['message']}"
     status = 'error' if summary['errors'] else 'skipped' if summary['unconfigured'] else 'ok'

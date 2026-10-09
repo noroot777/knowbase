@@ -11,8 +11,6 @@ Doc 完成 upsert —— 库里留下一行指向不存在文件的 documents:�
 —— 两边挤在一个文件里会越过 700 行上限。
 """
 import argparse
-import contextlib
-import re
 import struct
 import subprocess
 import sys
@@ -21,10 +19,9 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from unittest.mock import patch
 
-from kb import cli, embedder, extract, maintenance, pipeline_stages, scanner, store
+from kb import cli, embedder, maintenance, pipeline_stages, scanner, store
 from kb.config import EMBEDDING_DIM, Source
 from kb.feeds import sync
 from kb.pipeline_state import _state
@@ -34,7 +31,7 @@ from kb.pipeline_state import _state
 # 分批写回」的形状,只替掉最底层的模型调用。
 _real_embed = embedder.embed_pending_chunks
 
-from feed_trim_fixture import ROOT, TrimFixture, trim  # noqa: E402
+from feed_trim_fixture import TrimFixture, trim  # noqa: E402
 
 # 另一个进程持着维护锁。flock 认的是 open file description,所以只有真子进程
 # 才证明得了跨进程互斥(同进程换个 fd 的话重入保护会直接放行)。
@@ -390,7 +387,7 @@ class IndexLockTests(TrimFixture, unittest.TestCase):
         再锁会把自己锁死。
         """
         source = self.legacy(self.sub())
-        item = self.seed(source)
+        self.seed(source)
         self.assertEqual(0, trim.cmd_run(self.args(source)))
         sync.export('rss')                                   # 导出也取这把锁
         pipeline_stages._run_index()

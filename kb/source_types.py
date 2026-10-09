@@ -25,9 +25,10 @@ SOURCE_TYPES = {
     'wechat': SourceType('wechat', '公众号', '关注的公众号文章',
                          ('wechat_oa', 'wechat_local'), manager='wechat', icon='chat'),
     'social': SourceType('social', '大V观点', '关注的人，此刻的想法。', ('social',),
-                         icon='chat', interval_minutes=60,
+                         icon='chat', interval_minutes=1440,
                          url_hint='输入 X / Twitter 账号主页，或其他社交媒体的 RSS 地址',
-                         note='X 通过订阅桥接读取公开动态。若连接失败，可修改桥接地址或为账号填写专用订阅链接。', adapter='social'),
+                         note='X 可选三种取法：RSS 桥接、feedgrab（cookie）、你自己的浏览器登录态。'
+                              '也可以为单个账号填写专用订阅链接，它优先于任何通道。', adapter='social'),
     'rss': SourceType('rss', 'RSS', '让值得读的文章，自己来到这里。', ('rss',)),
 }
 

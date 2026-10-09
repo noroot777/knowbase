@@ -110,3 +110,9 @@
 .source-filters input:focus,.source-editor input:focus,.source-settings textarea:focus { border-color:var(--brand); }
 .source-settings textarea { font-family:var(--font-mono); font-size:11px; }
 .source-row-meta { font-size:12px; }
+.xchan { margin:15px 0; border-top:1px solid var(--line-soft); padding-top:15px; }
+.xchan select { margin-top:8px; width:100%; }
+.xchan input { margin-top:8px; width:100%; }
+.xchan code { font:11px/1.6 var(--font-mono); color:var(--ink-2); word-break:break-all; }
+.xchan button { margin-top:4px; }
+.xchan .hint { color:var(--muted); font-size:12px; margin:10px 0; }
