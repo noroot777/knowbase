@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
-"""X 采集通道:同一批账号,三条互斥的取法。选哪条是一个设置。
+"""X 采集通道:同一批账号,四条互斥的取法。选哪条是一个设置。
 
 | 通道 | 用谁的身份读 X | 要准备什么 | 边界精度 |
 |---|---|---|---|
 | `bridge`  | 桥接实例维护者的 | 一个返回 RSS 的 URL 模板 | 由 feed 自己给 |
 | `feedgrab`| 一份 X cookie    | 装 feedgrab + 跑一次 login | 天 |
 | `browser` | 你自己的登录态   | 在独立 profile 里登录一次 | 分钟 |
+| `attach`  | 你自己的登录态   | 在日常浏览器里开一次调试开关 | 分钟 |
+
+**后两条的差别是「谁的浏览器」**:`browser` 我们自己起一个独立 profile 的无头
+Chrome(所以要在那里面单独登录一次,但不依赖用户在不在);`attach` 直连用户
+日常那个浏览器(登录态现成,但只在它开着、而且开了远程调试时能用)。对照表和
+那条开关的代价写在 `kb/feeds/cdp_attach.py` 的模块注释里。
 
 **通道只管「走桥接的那些 X 账号」**。填了专用订阅链接(`feed_url`)的订阅照旧走
 HTTP、不受这里影响 —— 这条语义是现成的,而且是桥接全挂时唯一还能采的那批
@@ -32,13 +38,14 @@ from zoneinfo import ZoneInfo
 from kb.config import DATA_DIR
 from kb.source_types import feed_types
 
-BRIDGE, FEEDGRAB, BROWSER = 'bridge', 'feedgrab', 'browser'
+BRIDGE, FEEDGRAB, BROWSER, ATTACH = 'bridge', 'feedgrab', 'browser', 'attach'
 DEFAULT = BRIDGE
-CHANNELS = (BRIDGE, FEEDGRAB, BROWSER)
+CHANNELS = (BRIDGE, FEEDGRAB, BROWSER, ATTACH)
 LABELS = {
     BRIDGE: 'RSS 桥接',
     FEEDGRAB: 'feedgrab(cookie)',
-    BROWSER: '我的浏览器登录态',
+    BROWSER: '独立 profile 的登录态',
+    ATTACH: '我日常用的浏览器',
 }
 HINTS = {
     BRIDGE: '由第三方桥接服务把 X 转成 RSS。不占用你的账号,但公共实例常年不稳。',
@@ -46,6 +53,10 @@ HINTS = {
               '账号有被限制的可能。',
     BROWSER: '在一个独立浏览器 profile 里登录一次,之后无头复用这份登录态。'
              '用的是你登录的那个账号,风险同上,而且封的是这个号。',
+    ATTACH: '直连你正在用的那个 Chrome/Edge,用它里面现成的登录态,不必再登录一次。'
+            '要先在那个浏览器里开一次远程调试开关 —— 开着的时候本机任何程序都能'
+            '连上它(连同里面所有站点的登录态),所以用完建议关掉浏览器收回它。'
+            '只在它开着时能抓;账号风险同上。',
 }
 # 退役名 → 现用名。一个都不许删(见模块注释)。
 _RETIRED: dict[str, str] = {}
@@ -103,7 +114,13 @@ def validate(settings: dict) -> None:
 # 时分的值去填 `X_USER_TWEETS_SINCE`(它只认日期),那一轮的边界就错了。
 
 
-_WATER_KEY = {BROWSER: 'x_watermark_browser', FEEDGRAB: 'x_watermark_feedgrab'}
+# `attach` 和 `browser` **共用一个键**,这和 feedgrab 分开存的理由正好互为反面:
+# 分开是因为精度不同(浏览器到分钟、feedgrab 只到天,混用会把一个带时分的值填进
+# 只认日期的 `X_USER_TWEETS_SINCE`)。而这两条读的是同一个 profile 时间线、同一个
+# `<time datetime>`,精度和语义逐字相同 —— 分开存只会让「从独立 profile 换成日常
+# 浏览器」白白重抓一遍历史。
+_WATER_KEY = {BROWSER: 'x_watermark_browser', ATTACH: 'x_watermark_browser',
+              FEEDGRAB: 'x_watermark_feedgrab'}
 
 
 def _config(source: dict) -> dict:
@@ -230,12 +247,12 @@ def prefetch(sources: list[dict], settings: dict, *, since: str = '',
         with _lock:
             _harvest.clear()
         return {}
-    if channel == BROWSER:
+    if channel in (BROWSER, ATTACH):
         from kb.feeds import x_browser
         result = x_browser.harvest(
             jobs, profile=str(BROWSER_PROFILE), budget=budget,
             chrome_path=settings.get('x_chrome_path', ''), on_progress=on_progress,
-            should_stop=should_stop)
+            should_stop=should_stop, attach=channel == ATTACH)
     else:
         from kb.feeds import x_feedgrab
         result = x_feedgrab.harvest(
@@ -301,8 +318,14 @@ def reset() -> None:
 def readiness(settings: dict) -> tuple[bool, str, str]:
     """当前通道能不能开工。返回 (就绪, 说明, 下一步)。
 
-    只做**便宜**的判断(路径在不在、登录过没有),不去真连一次 —— 这个函数被
-    来源面板每次刷新都调。真实结论以同步结果为准。
+    只做**便宜**的判断(路径在不在、登录过没有、端口活不活),不去真连一次 ——
+    这个函数被来源面板每次刷新都调。真实结论以同步结果为准。
+
+    第三项是**下一步怎么办**,有两个消费方:设置面板那一行(`#source-x-next`)和
+    面板顶上那条待配置横幅(经 `registry.configuration_error`)。所以凡是"光说
+    没配好、不说怎么办"会让人卡住的档都要填它 —— feedgrab 填那条命令(横幅那边
+    没有可复制块),attach 填去哪儿开那个开关。独立 profile 那档的下一步是点
+    它自己那颗按钮,没有文字可给。
     """
     channel = channel_of(settings)
     if channel == BRIDGE:
@@ -315,10 +338,27 @@ def readiness(settings: dict) -> tuple[bool, str, str]:
             return False, str(e), ''
         sessions = FEEDGRAB_HOME / 'sessions'
         if not any(sessions.glob('*twitter*')) and not any(sessions.glob('*x*')):
+            # **这一档的第三项必须带上那条命令。** 它看着和
+            # `login_command` 重复(面板上那个可复制的 <code> 块给的是同一条),
+            # 但第三项还有**另一个消费方**:`registry.configuration_error` →
+            # 面板顶上那条待配置横幅,那里没有可复制块。留空等于让那条横幅只说
+            # 「还没有登录态」而不说怎么办,而命令里那个可执行文件路径正是最
+            # 容易填错的东西(回归在 `test_x_feedgrab_contract.LoginCommandTests`)。
+            # 设置面板上的重复由前端按内容去重(`x_channel.js`:`hint` 和
+            # `login_command` 一样时不再显示一遍)—— 那是显示层的事。
             return (False, 'feedgrab 还没有 X 登录态',
                     x_feedgrab.login_command(str(sessions),
                                              settings.get('x_feedgrab_bin', '')))
         return True, '', ''
+    if channel == ATTACH:
+        # 只问「现在有没有一个开着调试开关的浏览器」—— TCP 探活,不发 WebSocket
+        # (那会弹授权弹窗,而这个函数每次刷新面板都调,见 `cdp_attach` 注释)。
+        # 里面有没有 X 登录态在这一档看不出来:登录态在用户那个 profile 里,
+        # 要真连一次才知道(那是「检查连接」的事)。
+        from kb.feeds import cdp_attach
+        if cdp_attach.discover() is not None:
+            return True, '', ''
+        return False, '没有发现开着远程调试的浏览器', cdp_attach.ENABLE_HINT
     # browser:profile 里有 Cookies 文件就算登录过。真失效要等抓取时才知道
     # (那时 `x_browser` 会认出登录页并给出重新登录的提示)。
     if not (BROWSER_PROFILE / 'Default' / 'Cookies').exists():
@@ -350,9 +390,10 @@ def check(settings: dict) -> tuple[bool, str]:
     """真连一次。返回 (就绪, 成品文案)。
 
     和 `readiness` 分成两个函数是因为代价差着三个数量级:那个每次刷新面板都
-    调,这个是用户点「检查连接」才走的,会真起一个 Chrome 或真跑一次
-    `feedgrab doctor`。桥接通道没有"连一次"可言 —— 它的健康状况只有在真抓
-    的时候才知道(桥接实例挂没挂、限流没限流),所以这里直接说清楚。
+    调,这个是用户点「检查连接」才走的 —— 会真起一个 Chrome、真连一次用户那个
+    浏览器(那时他可能还要点一下授权弹窗),或者真跑一次 `feedgrab doctor`。
+    桥接通道没有"连一次"可言 —— 它的健康状况只有在真抓的时候才知道(桥接实例
+    挂没挂、限流没限流),所以这里直接说清楚。
     """
     channel = channel_of(settings)
     if channel == BRIDGE:
@@ -365,4 +406,5 @@ def check(settings: dict) -> tuple[bool, str]:
         return x_feedgrab.doctor(settings.get('x_feedgrab_bin', ''),
                                  str(FEEDGRAB_HOME / 'sessions'))
     from kb.feeds import x_browser
-    return x_browser.probe(str(BROWSER_PROFILE), settings.get('x_chrome_path', ''))
+    return x_browser.probe(str(BROWSER_PROFILE), settings.get('x_chrome_path', ''),
+                           attach=channel == ATTACH)
