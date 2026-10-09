@@ -103,6 +103,17 @@ def fetch_one(url: str) -> tuple[str, str]:
     return readable.extract_or_reason(readable.decode(response.body, response.headers))
 
 
+def body_hash(body: str) -> str:
+    """`feed_items.content_hash` 在这条路上的口径。
+
+    抽出来是因为**存量复查脚本也要换 body**(`scripts/feed_fulltext_recheck.py`
+    把已确认的样板文字换回壳),而 `content_hash` 决定「导出闸门开不开」——
+    两处各写一遍 sha256 的话,哪天这里改了口径,那边换出来的 hash 就和重抓
+    之后的对不上,一条内容会被白白多导出一轮。
+    """
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
 def _save(key: str, body: str) -> None:
     """正文落库。顺带把这一条**重新排进翻译队列**。
 
@@ -125,7 +136,7 @@ def _save(key: str, body: str) -> None:
     `extract_stale` 置 1 = 留一个待办:知识库里那份摘要/主题/实体是按**旧壳**
     算出来的,新正文落盘之后要让它作废(见 `retire_stale`)。
     """
-    digest = hashlib.sha256(body.encode()).hexdigest()
+    digest = body_hash(body)
     with reg.db() as c:
         row = c.execute('SELECT title FROM feed_items WHERE key=?', (key,)).fetchone()
         if not row:                      # 这期间被存量清理删掉了,没什么可写的

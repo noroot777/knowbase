@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""存量复查:把「补抓报了成功、而抓回来的其实不是文章正文」的条目放回队列。
+"""存量复查:把「补抓报了成功、而抓回来的其实不是文章正文」的条目收拾干净。
 
 `kb.feeds.readable.boilerplate_reason` 这道判据是 2026-10-09 审查之后才加的,
 而它要挡的东西**已经在库里了** —— 补抓一旦报成功,`fulltext_at` 落下、条目
@@ -7,26 +7,49 @@
 光修判据只管未来,存量得单独走一趟。
 
 **判据直接取 `readable.boilerplate_reason`,不在这里另写一遍。** 两处各判一遍
-的话,放回队列的和以后会被挡掉的不是同一批。它是个纯文本判据,所以这里拿库里
+的话,收拾掉的和以后会被挡掉的不是同一批。它是个纯文本判据,所以这里拿库里
 那份 `body` 就能问 —— 不必把 441 个原文链接重新请求一遍。
 
-**放回队列 = 清掉这三样**:`fulltext_at`(「抓到过」的事实来源)、`fulltext_error`、
-`fulltext_tries`(额度重新给满)。顺带清掉译文:那份译文译的是这段版样板文字,
-正文一换它就作废了(口径同 `fulltext._save`);`extract_stale=1` 留一个待办,
-新正文真的落盘之后由 `fulltext.retire_stale` 让旧摘要、主题和实体作废。
+**「放回队列」不够,必须连那份 body 一起换掉。** 第 1 轮只清了三个标记
+(`fulltext_at` / `fulltext_error` / `fulltext_tries`)和译文,body 原样留着 ——
+于是重抓三轮都失败之后它**离开补抓队列**,而 `translate.queued_sql` 这时不再
+排除它:那段版权声明被**重新翻译一遍、重新导出**,阶段还报「已保存 1 条到
+知识库」,`_suspect` 也再也选不中它(它只认 `fulltext_at<>''`)。换句话说清
+标记只是让已知的错误内容又走了一遍正文消费链,还多花一次翻译钱
+(2026-10-09 第 2 轮审查三轮实测)。
 
-**原始那份壳救不回来,这件事要说清楚。** `_save` 是就地覆盖 `body` 的,feed 里
-那一条也早就滚出去了 —— 重抓拿得到真正文最好,**拿不到的话试满
-`fulltext.MAX_TRIES` 之后库里仍然是这段样板文字**(Fortune 那页的正文只存在于
-`<script>` 里,重抓多少次都一样)。`scan` 把这一档如实列出来。
+**换完之后它就是一条「从没补抓过」的普通条目**:body 是壳、
+`content_kind='summary'`、`content_hash` 跟着重算。于是三轮重抓失败后按壳
+入库 —— 那和一条压根没开过补抓的条目待遇完全一样,**是正确的降级**,不需要
+任何新列、新标记或新的排除条件。判据自己也不会再选中它(壳过得了
+`boilerplate_reason`)。
+
+**壳从哪儿来,两条路,各有判据**:
+①**备份库**(`--backup`,或自动扫 `<data>/backups/*/feeds.db` 按新旧倒序)。
+  第 1 轮我断言"原始那份壳救不回来",**那是错的** —— 回填前自己做的那份备份
+  里就有(审查实测:Stripe 68 字、Fortune 118 字)。恢复回来的壳要**再过一遍
+  判据**:备份可能是在某一轮错误补抓之后做的,里面那份同样是样板文字,
+  那就不算有效壳。
+②**按标题和链接重建**。备份里没有(或者里面那份也过不了判据)时的兜底。
+  形态和 feed 原本那份壳一致(标题 + 链接),是从库里现成的字段拼的,不编造
+  任何内容。比留着 455 字版权声明严格地好:检索、提取打标、日报素材都不再
+  被它污染。
+
+**译文一并作废**:那份译文译的是这段样板文字,body 一换它就无效了(口径同
+`fulltext._save`)。`extract_stale=1` 留一个待办,新 body 落盘之后由
+`fulltext.retire_stale` 让按旧内容算出来的摘要、主题和实体作废。
+`exported_hash` 不动 —— body 一换 `content_hash` 就不一样了,导出闸门
+(`exported_hash<>content_hash`)自然成立,下一轮同步会把 vault 里那篇
+覆盖掉。
 
 **不取维护锁,也不问管道忙不忙。** 那两道是给不可逆删除用的(见
-`scripts/feed_trim_history.py`);这里改的是「抓到过没有」这个标记,幂等、可重跑,
-最坏的交错后果是某一条被多抓一次 —— 而 `_save` 本来就是覆盖写。
+`scripts/feed_trim_history.py`);这里改的是一条条目的正文和几个标记,幂等、
+可重跑,最坏的交错后果是某一条被多抓一次 —— 而 `_save` 本来就是覆盖写。
 """
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -36,8 +59,21 @@ from kb.feeds import fulltext, readable, registry as reg       # noqa: E402
 
 
 def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
-    """已经报过补抓成功、而正文过不了 `boilerplate_reason` 的那些。"""
-    where = ["fi.fulltext_at<>''"]
+    """开了补抓的订阅里,`body` 过不了 `boilerplate_reason` 的那些。
+
+    **射程是"开了补抓的订阅",不是"报过补抓成功"**(`fulltext_at<>''`)。后者
+    漏掉的恰恰是这个脚本自己制造出来的中间态:第 1 轮版本只清标记不换 body,
+    于是那两条生产条目的 `fulltext_at` 和 `fulltext_tries` 都归了零、body 还是
+    455 字版权声明 —— 和「从没补抓过」长得一模一样,再跑一次复查**一条都选不中**
+    (2026-10-09 第 2 轮审查点名的就是这个:「不再被复查选中」)。
+
+    **在这个射程里"body 是样板文字"就是充分判据**:HN Buzzing 这类聚合源的
+    feed 原本给的是跳转壳(标题 + 域名 + HN 得分),过得了判据;真正文同理。
+    一条 body 是版权声明或作者简介的,只能是补抓这条路写进去的。**没开补抓的
+    订阅一个都不碰** —— 它们的正文是 feed 自己给的,不在这个脚本的射程里。
+    """
+    where = ["EXISTS(SELECT 1 FROM subscription_items x JOIN subscriptions s"
+             ' ON s.id=x.subscription_id WHERE x.item_key=fi.key AND s.fulltext=1)']
     args: list = []
     if kind:
         where.append('fi.kind=?')
@@ -59,8 +95,58 @@ def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
     return out
 
 
+def _backups(explicit: str | None) -> list[Path]:
+    """备份库,新的在前。显式给了就只认那一个 —— 指错了要当场看出来。"""
+    if explicit:
+        path = Path(explicit)
+        if path.is_dir():
+            path = path / 'feeds.db'
+        return [path] if path.exists() else []
+    found = sorted((reg.DB_PATH.parent / 'backups').glob('*/feeds.db'),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    return found
+
+
+def _from_backup(paths: list[Path], key: str) -> tuple[str, str]:
+    """备份里那份原始 body。返回 `(壳, 来自哪个备份)`,没有就两个空串。
+
+    **恢复回来的要再过一遍判据**:备份可能是在某一轮错误补抓之后做的,里面
+    那份同样是样板文字 —— 那就不算有效壳,继续往更早的备份找。
+    """
+    for path in paths:
+        try:
+            conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+            conn.row_factory = sqlite3.Row
+            with conn:
+                row = conn.execute('SELECT body FROM feed_items WHERE key=?', (key,)).fetchone()
+        except sqlite3.Error:
+            continue                      # 老备份的 schema 不同、或者文件坏了
+        finally:
+            try:
+                conn.close()
+            except (sqlite3.Error, NameError, UnboundLocalError):
+                pass
+        body = (row['body'] if row else '') or ''
+        if body.strip() and not readable.boilerplate_reason(body):
+            return body, path.parent.name
+    return '', ''
+
+
+def _rebuild(row: dict) -> str:
+    """按标题和链接拼一份壳。形态同 feed 原本那份,不编造任何内容。"""
+    return '\n'.join(part for part in (row['title'], row['url']) if part)
+
+
+def _plan(rows: list[dict], backups: list[Path]) -> list[dict]:
+    for row in rows:
+        shell, origin = _from_backup(backups, row['key'])
+        row['shell'] = shell or _rebuild(row)
+        row['origin'] = origin or '标题与链接'
+    return rows
+
+
 def cmd_scan(args) -> int:
-    rows = _suspect(args.kind, args.source)
+    rows = _plan(_suspect(args.kind, args.source), _backups(getattr(args, 'backup', None)))
     if not rows:
         print('没有需要复查的条目。')
         return 0
@@ -69,32 +155,39 @@ def cmd_scan(args) -> int:
         mark = '已入库' if row['shipped'] else '未入库'
         print(f"  [{mark}] {row['title'][:48]}")
         print(f"      {row['why']}（{len(row['body'])} 字）")
+        print(f"      正文换成 → {row['origin']}（{len(row['shell'])} 字）")
         print(f"      {row['url']}")
+    restored = sum(1 for r in rows if r['origin'] != '标题与链接')
     shipped = sum(1 for r in rows if r['shipped'])
-    print('\n放回队列之后下一轮同步会重抓一次。原始那份壳已经被覆盖、救不回来:')
-    print('  重抓拿到真正文 → 译文和旧摘要跟着更新;')
-    print(f'  重抓仍然拿不到 → 试满 {fulltext.MAX_TRIES} 次之后库里仍是这段样板文字。')
+    print('\n要做的事:把这段样板文字换成壳、放回补抓队列、译文一并作废。')
+    print(f'  {restored} 条从备份里恢复原始内容，{len(rows) - restored} 条按标题与链接重建。')
+    print(f'  下一轮同步重抓一次:拿到真正文就补上;仍然拿不到 → 试满'
+          f' {fulltext.MAX_TRIES} 次之后按壳入库（和没开过补抓的条目一样）。')
     if shipped:
-        print(f'其中 {shipped} 条已经写进过 vault,那篇 md 要等重抓成功才会被覆盖。')
+        print(f'  其中 {shipped} 条已经写进过 vault，那篇 md 下一轮导出就会被覆盖。')
     print('\n真要改:feed_fulltext_recheck.py run --yes')
     return 1
 
 
 def cmd_run(args) -> int:
-    rows = _suspect(args.kind, args.source)
+    rows = _plan(_suspect(args.kind, args.source), _backups(getattr(args, 'backup', None)))
     if not rows:
         print('没有需要复查的条目。')
         return 0
     if not args.yes:
-        print(f'{len(rows)} 条待放回队列,加 --yes 才会真改。')
+        print(f'{len(rows)} 条待收拾,加 --yes 才会真改。')
         return 1
     with reg.db() as c:
         c.executemany(
-            "UPDATE feed_items SET fulltext_at='',fulltext_error='',fulltext_tries=0,"
-            "extract_stale=1,title_zh='',body_zh='',translated_at='',"
-            "translate_error='',translate_tries=0 WHERE key=?",
-            [(r['key'],) for r in rows])
-    print(f'已把 {len(rows)} 条放回正文补抓队列（译文一并作废，下一轮同步重抓）。')
+            """UPDATE feed_items SET body=?,content_kind='summary',content_hash=?,lang=?,
+               fulltext_at='',fulltext_error='',fulltext_tries=0,extract_stale=1,
+               title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
+               WHERE key=?""",
+            [(r['shell'], fulltext.body_hash(r['shell']),
+              reg.text_language(r['title'], r['shell']), r['key']) for r in rows])
+    restored = sum(1 for r in rows if r['origin'] != '标题与链接')
+    print(f'已收拾 {len(rows)} 条:正文换成壳（{restored} 条取自备份，'
+          f'{len(rows) - restored} 条按标题与链接重建）、放回补抓队列、译文一并作废。')
     return 0
 
 
@@ -106,6 +199,8 @@ def main() -> int:
         p = sub.add_parser(name)
         p.add_argument('--kind', help='只看这一类来源（rss / social …）')
         p.add_argument('--source', type=int, help='只看这一条订阅（subscriptions.id）')
+        p.add_argument('--backup', help='从这个备份里恢复原始正文（目录或 feeds.db）；'
+                                        '不给则自动扫 <data>/backups/*/feeds.db')
         if name == 'run':
             p.add_argument('--yes', action='store_true')
     args = ap.parse_args()

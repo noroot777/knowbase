@@ -99,9 +99,17 @@ _LEGAL = re.compile(
     r'|copyright\s+\d{4}|user agreement|acceptable use|notice at collection)', re.I)
 # 作者简介块的标准抬头。开头那个可选的 `/` 是面包屑残留(实测 Stripe 那块出来
 # 就是 `About the authors\n\n/About the authors`)。
+# **只认「这一块是作者简介区」的抬头,不认署名。** `written by` 一度在里面,
+# 那是错的:它是**正常文章的标准开头**(`<article><header>` 里那行署名),而
+# `boilerplate_reason` 只凭开头加一个长度上限就整篇拒绝 —— 于是一篇有署名、
+# 标题和三段正文的短文(580 字)被判成「只有作者简介」,连抓三轮都只留下链接
+# (2026-10-09 第 2 轮审查实测)。署名属于正文,CLAUDE.md 里早就记着
+# 「`<article><header>` 里那行『By Carson Gross, February 2026』」要留住。
+# 剩下这几项都是在声明"下面是作者简介",不是在署名:Stripe 那页开头逐字是
+# `About the authors`,照旧挡得住。
 _BYLINE_HEAD = re.compile(
     r'^\s*(?:/\s*)?(?:about\s+(?:the\s+)?(?:author|contributor)s?'
-    r'|author\s+bios?|written\s+by|作者简介|关于作者)\b', re.I)
+    r'|author\s+bios?|作者简介|关于作者)\b', re.I)
 # 断句:句末标点 + 空白,或者块级边界。`plain` 已经把块级边界变成换行了。
 _SENTENCE = re.compile(r'(?<=[.!?。！？])\s+|\n+')
 

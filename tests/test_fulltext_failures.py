@@ -19,6 +19,8 @@
 import contextlib
 import inspect
 import io
+import os
+import sqlite3
 import unittest
 from unittest.mock import Mock, patch
 
@@ -55,6 +57,21 @@ LEGAL_PAGE = ('<html><head><title>LeCun</title></head><body>'
               f'<div id="S:1"><p>{LEGAL_TEXT}</p></div>'
               '<script>self.__next_f.push([1,"the real article lives in here"])</script>'
               '</body></html>')
+# 一篇**有署名的正常短文**:`<article><header>` 里一行署名,然后是标题和三段
+# 正文。逐字取自第 2 轮审查的 `short-article.html` —— 它 580 字,过得了
+# MIN_CHARS,却因为开头那句 `Written by` 被整篇判成「只有作者简介」,连抓三轮
+# 都只留下链接。署名是文章自己的一部分,不是作者简介区。
+BYLINE_ARTICLE = (
+    '<html><body><article><header><p>Written by Alice Smith</p>'
+    '<h1>A recoverable job queue</h1></header>'
+    '<p>The scheduler records each tool call before sending it to a worker. When the worker '
+    'crashes, the next worker resumes from that record instead of repeating the whole job.</p>'
+    '<p>A job keeps its inputs and outputs together. This lets operators compare two runs and '
+    'explain why an unexpected result appeared, without reading every line of the transcript.</p>'
+    '<p>The queue applies a deadline to each request and returns unfinished work to the next '
+    'round. A short failure does not block unrelated tasks, and retries use the same request '
+    'identifier.</p></article></body></html>')
+
 # Stripe 那页的形态:class 自己报了身份,只是写成了 CSS Modules 的驼峰。
 BYLINE_PAGE = ('<html><head><title>Knowledge AI</title></head><body><main>'
                "<section><h1>Meet Stripe's Knowledge AI Platform</h1></section>"
@@ -121,6 +138,29 @@ class BoilerplateJudgementTests(unittest.TestCase):
                    + '\n\n' + BYLINE_TEXT)
         self.assertEqual('', readable.boilerplate_reason(article))
 
+    def test_a_byline_is_not_an_author_bio_section(self):
+        """`Written by` 是**正常文章的标准开头**,不是"下面是作者简介"的声明。
+
+        后果先断言:整篇 580 字正文照旧提得出来(第 2 轮审查实测这一版之前
+        它返回空串 + 「只有作者简介」,连抓三轮只留下链接)。
+        """
+        text = readable.extract(BYLINE_ARTICLE)
+        self.assertIn('A recoverable job queue', text)
+        self.assertIn('The scheduler records each tool call', text)
+        self.assertIn('retries use the same request identifier', text)
+        self.assertIn('Written by Alice Smith', text)      # 署名属于正文,留住
+        self.assertGreaterEqual(len(text), 400)
+        self.assertEqual('', readable.boilerplate_reason(text))
+
+    def test_the_author_bio_headings_still_hold(self):
+        """反过来钉一边:真正声明"下面是作者简介"的那几种抬头照旧挡住 ——
+        去掉 `written by` 不是把整道判据关掉。"""
+        tail = '\n\n' + 'Anna Mason is a technical writer at Stripe. ' * 8
+        for head in ('About the authors', 'About the author', 'About the contributors',
+                     'Author bio', 'Author bios', '作者简介', '关于作者'):
+            with self.subTest(head=head):
+                self.assertIn('作者简介', readable.boilerplate_reason(head + tail))
+
 
 class BoilerplateOutcomeTests(FullTextCase):
     """后果先断言:这两类输入不许覆盖旧正文、不许写成功时间、不许进翻译。"""
@@ -166,6 +206,16 @@ class BoilerplateOutcomeTests(FullTextCase):
         self.assertIn('The runtime schedules tools', row['body'])
         self.assertNotEqual('', row['fulltext_at'])
         self.assertEqual(1, translate.pending('rss'))
+
+    def test_the_byline_article_is_fetched_not_refused(self):
+        """那篇署名短文要真的补进库里,不是只在判据那一层放行。"""
+        key, summary, row = self._round(BYLINE_ARTICLE)
+        self.assertEqual(1, summary['done'])
+        self.assertEqual(0, summary['empty'])
+        self.assertIn('A recoverable job queue', row['body'])
+        self.assertEqual('content', row['content_kind'])
+        self.assertNotEqual('', row['fulltext_at'])
+        self.assertEqual(0, fulltext.pending('rss'))       # 不该再排队重试
 
 
 class StaleRecheckTests(FullTextCase):
@@ -224,6 +274,152 @@ class StaleRecheckTests(FullTextCase):
         self.assertEqual(1, self._recheck('run'))
         self.assertNotEqual('', self.row(key)['fulltext_at'])
         self.assertEqual(0, fulltext.pending('rss'))
+
+    def _backup(self, name, key, body):
+        """摆一个备份库。结构同生产那份(回填前自己做的 `hn-fulltext-*`)。"""
+        path = reg.DB_PATH.parent / 'backups' / name / 'feeds.db'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(path)
+        with conn:
+            conn.execute('CREATE TABLE feed_items(key TEXT PRIMARY KEY, body TEXT)')
+            conn.execute('INSERT INTO feed_items(key,body) VALUES(?,?)', (key, body))
+        conn.close()
+        return path
+
+    def _three_failed_rounds(self):
+        """复查之后连跑三轮 materialize,原文每一轮都被正确识别为非正文。
+
+        返回 `(末态阶段, 翻译器真正收到的 prompt, vault 里的 md)`。
+        **翻译器的入参必须捕获下来**:桩的返回值证明不了它看到了什么,而
+        「那段样板文字还会不会被买一次翻译」正是这条用例要回答的事。
+        """
+        chat = Mock(return_value='###TITLE###\n标题译文\n###BODY###\n正文译文')
+        stages = []
+        for _ in range(3):
+            with patch.object(fulltext, 'request', Mock(return_value=page(LEGAL_PAGE))), \
+                    patch.object(sync, '_stage', lambda *a, **k: stages.append((a, k))), \
+                    patch.object(llm, 'chat', chat), \
+                    patch.dict(pipeline_state._state, stop_requested=False):
+                FeedCollector('rss').materialize()
+        asked = ' '.join(str(c) for c in chat.call_args_list)
+        md = '\n'.join(f.read_text() for f in (self.root / 'vault').rglob('*.md'))
+        return stages[-1][0][1], asked, md
+
+    def test_three_failed_rounds_do_not_feed_the_bad_body_back_in(self):
+        """**报告那条拦验收证据的反面。** 隔离之后连抓三轮都失败,末态必须是
+        「按壳入库」—— 和一条压根没开过补抓的条目待遇完全一样。
+
+        修前(审查三轮实测):第三轮阶段转 ok、报「已保存 1 条到知识库」,而
+        `body` 仍是 455 字版权声明、`content_kind='content'`、`body_zh` 重新
+        产生、导出的 md 以正文形式收录版权译文,`_suspect` 再也选不中它。
+        """
+        key = self._already_wrong(LEGAL_TEXT)
+        self.assertEqual(0, self._recheck('run', '--yes'))
+        status, asked, md = self._three_failed_rounds()
+        row = self.row(key)
+        # ① 那段文字退出了正文消费链:库里、翻译器入参、vault 三处都没有它
+        self.assertEqual('', readable.boilerplate_reason(row['body']))
+        self.assertNotIn('Rights Reserved', row['body'])
+        self.assertNotIn('Rights Reserved', asked)
+        self.assertNotIn('Rights Reserved', md)
+        self.assertEqual('summary', row['content_kind'])    # 降级写明了
+        # ② 三轮之后正常出队:这是设计好的降级出口,不是故障
+        self.assertEqual(3, row['fulltext_tries'])
+        self.assertEqual(0, fulltext.pending('rss'))
+        self.assertEqual('ok', status)
+
+    def test_the_quarantined_body_is_clean_not_just_unselectable(self):
+        """分得清「已经干净」和「只是选不中」:判据不看任何成功标记,所以
+        「再扫一遍是 0 条」只能是因为 body 真的换了。成功时间人为填回去也一样。
+        """
+        key = self._already_wrong(LEGAL_TEXT)
+        self._recheck('run', '--yes')
+        import scripts.feed_fulltext_recheck as mod
+        self.assertEqual([], mod._suspect())
+        with reg.db() as c:
+            c.execute("UPDATE feed_items SET fulltext_at='2026-10-09T02:00:00+00:00'"
+                      ' WHERE key=?', (key,))
+        self.assertEqual([], mod._suspect())
+
+    def test_an_item_the_first_round_already_unmarked_is_still_found(self):
+        """**生产库此刻就是这个形态**(第 2 轮审查点名「不再被复查选中」):
+        第 1 轮版本只清标记不换 body,于是 `fulltext_at` 和 `fulltext_tries`
+        都归了零、body 还是那段样板文字 —— 和「从没补抓过」长得一模一样。
+
+        判据因此不许依赖成功标记:后果先断言 —— 再跑一次复查要真的把它收拾掉。
+        """
+        key = self._already_wrong(LEGAL_TEXT)
+        with reg.db() as c:                      # 把第 1 轮那次 run 的末态摆出来
+            c.execute("UPDATE feed_items SET fulltext_at='',fulltext_tries=0,"
+                      "body_zh='',title_zh='',translated_at='' WHERE key=?", (key,))
+        import scripts.feed_fulltext_recheck as mod
+        self.assertEqual(1, len(mod._suspect()))
+        self.assertEqual(0, self._recheck('run', '--yes'))
+        self.assertEqual('', readable.boilerplate_reason(self.row(key)['body']))
+        self.assertEqual('summary', self.row(key)['content_kind'])
+
+    def test_a_subscription_without_fulltext_is_never_touched(self):
+        """反过来钉一边:没开补抓的订阅一个都不碰 —— 它们的正文是 feed 自己
+        给的,不在这个脚本的射程里。放宽判据不等于把射程放宽到全库。"""
+        key = self.put(source=self.plain, url='https://solo.example.org/a')
+        with reg.db() as c:
+            c.execute("UPDATE feed_items SET body=?,content_kind='content' WHERE key=?",
+                      (LEGAL_TEXT, key))
+        import scripts.feed_fulltext_recheck as mod
+        self.assertEqual([], mod._suspect())
+        self.assertEqual(0, self._recheck('run', '--yes'))
+        self.assertEqual(LEGAL_TEXT, self.row(key)['body'])
+
+    def test_the_original_shell_comes_back_from_a_backup(self):
+        """**第 1 轮我断言「原始那份壳救不回来」,那是错的** —— 回填前自己做的
+        那份备份里就有(审查在生产备份里实测:Stripe 68 字、Fortune 118 字)。"""
+        key = self._already_wrong(LEGAL_TEXT)
+        self._backup('hn-fulltext-20261009-154149', key, SHELL)
+        self.assertEqual(0, self._recheck('run', '--yes'))
+        self.assertEqual(SHELL, self.row(key)['body'])
+
+    def test_a_backup_that_also_holds_boilerplate_is_not_a_shell(self):
+        """备份可能是在某一轮错误补抓**之后**做的,里面那份同样是样板文字 ——
+        那就不算有效壳,退回按标题和链接重建,不许把它恢复回来。"""
+        key = self._already_wrong(LEGAL_TEXT)
+        self._backup('after-the-bad-fetch', key, BYLINE_TEXT)
+        self.assertEqual(0, self._recheck('run', '--yes'))
+        body = self.row(key)['body']
+        self.assertEqual('', readable.boilerplate_reason(body))
+        self.assertNotIn('Stripe', body)
+        self.assertEqual('Yes, and\nhttps://e.org/post', body)
+
+    def test_a_newer_but_useless_backup_is_skipped(self):
+        """备份按新旧倒序,但"新而无效"的那个要跳过去接着往更早的找。"""
+        key = self._already_wrong(LEGAL_TEXT)
+        old = self._backup('older', key, SHELL)
+        new = self._backup('newer', key, LEGAL_TEXT)
+        os.utime(old, (1, 1))
+        os.utime(new, (2, 2))
+        self._recheck('run', '--yes')
+        self.assertEqual(SHELL, self.row(key)['body'])
+
+    def test_an_explicit_backup_that_is_wrong_does_not_fall_back(self):
+        """显式给了 `--backup` 就只认那一个 —— 指错了要当场看出来,不许悄悄回到
+        自动发现上去(口径同 `x_channels` 那条「显式指定了就不再去猜别的」)。"""
+        key = self._already_wrong(LEGAL_TEXT)
+        self._backup('hn-fulltext-20261009-154149', key, SHELL)
+        self.assertEqual(0, self._recheck('run', '--yes', '--backup',
+                                          str(self.root / 'nope')))
+        self.assertEqual('Yes, and\nhttps://e.org/post', self.row(key)['body'])
+
+    def test_the_content_hash_is_the_one_the_fetcher_writes(self):
+        """`content_hash` 决定导出闸门开不开。两处各写一遍 sha256 的话,哪天
+        这里改了口径,换出来的 hash 和重抓之后的对不上,一条内容会白白多导出
+        一轮 —— 所以脚本和 `fulltext._save` 共用 `fulltext.body_hash`。"""
+        key = self._already_wrong(LEGAL_TEXT)
+        self._recheck('run', '--yes')
+        row = self.row(key)
+        self.assertEqual(fulltext.body_hash(row['body']), row['content_hash'])
+        import scripts.feed_fulltext_recheck as mod
+        src = inspect.getsource(mod)
+        self.assertIn('fulltext.body_hash', src)
+        self.assertNotIn('sha256', src)                     # 不许在这儿另写一份
 
     def test_the_judgement_is_the_same_one_the_fetcher_uses(self):
         """口径只有一份:两处各判一遍的话,放回队列的和以后会被挡掉的不是同一批。"""
