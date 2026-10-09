@@ -487,7 +487,17 @@ def _export(kind: str, hold_untranslated: bool = False,
                 meta['original_title'] = item['title']
         # 留在最后:writeback_tags 是往 frontmatter 末尾追加 tag 的,tags 不在
         # 末尾的话新 tag 会落进别的键下面。
-        meta.update(_kept_meta(path))
+        kept = _kept_meta(path)
+        if item['extract_stale']:
+            # 这一条的正文刚被整篇换过(几十字的跳转壳 → 整篇文章),于是旧文件
+            # 里那些 `topic/`、`entity/` 是按**那个壳**算出来的。不摘的话重新
+            # 提取时 `writeback_tags` 往后追加,`topic/link-only` 这种会永久留
+            # 在这篇文章上。人工 tag 和 `flag/软广` 照留(口径在 `keep_tags`)。
+            if tags := fulltext.keep_tags(kept.get('tags')):
+                kept['tags'] = tags
+            else:
+                kept.pop('tags', None)
+        meta.update(kept)
         notice = '\n> 以下为订阅源提供的摘要；完整内容请打开原文。\n' if item['content_kind'] == 'summary' else ''
         if is_zh:
             notice += '\n' + translate.NOTE + '\n'
@@ -509,6 +519,16 @@ def _export(kind: str, hold_untranslated: bool = False,
         finally:
             if temp:
                 temp.unlink(missing_ok=True)
+    # 正文被整篇换过的那几篇:新 md 已经落盘,现在让知识库里那份按旧壳算出来的
+    # 摘要、主题和实体作废,下一轮提取重做一遍(见 `fulltext.retire_stale`)。
+    # **接住异常**:这一步失败只是"摘要还是旧的",不该把整个导出阶段带崩 ——
+    # 成功的文章已经落盘、`exported_hash` 也更新过了,异常冒上去会把
+    # materialize 连同后面的 index/extract 一起带掉(同 `is_zh` 那次事故)。
+    # 待办留在 `extract_stale` 上,下一轮导出自己会再来一次。
+    try:
+        fulltext.retire_stale(kind)
+    except Exception as e:               # noqa: BLE001
+        errors.append({'title': '让补抓条目的旧摘要作废', 'reason': str(e)[:300]})
     note = f'已保存 {done} 条到知识库'
     if unfetched:
         note += f'，{unfetched} 条待补抓原文正文（抓到正文再入库）'

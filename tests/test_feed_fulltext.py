@@ -12,10 +12,11 @@ HTTP 传输那一层(`fetching.request`)打桩,别的一行不打:解码、正�
 import hashlib
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from kb import llm, maintenance
+from kb import config, llm, maintenance
 from kb.collectors.feeds import FeedCollector
 from kb.feeds import fulltext, readable, registry as reg, sync, translate
 from kb.feeds.fetching import FeedError, Response
@@ -47,6 +48,37 @@ def page(html: str, status: int = 200, headers: dict | None = None) -> Response:
                     headers or {'content-type': 'text/html; charset=utf-8'})
 
 
+def raw(body: bytes, mime: str | None = 'text/html') -> Response:
+    """一份字节响应。`mime=None` = 这个站压根没发 content-type(小站常态)。"""
+    return Response(200, 'https://e.org/post', body, {'content-type': mime} if mime else {})
+
+
+def pdf_bytes() -> bytes:
+    """一份结构有效的单页 PDF:对象、xref 表、FlateDecode 内容流都在。
+
+    **不能是随便几个字节。** 要的正是审查实测出来那个形态 —— 解码之后看着像
+    一大段文字(文件语法 + 几百个替换字符),长度轻松越过 `readable.MIN_CHARS`,
+    于是提取器眼里"整篇都是正文"、补抓报成功。样本太短的话 `extract` 自己就
+    返回空串了,这条用例对"有没有问过 content-type"压根不敏感。
+    """
+    article = 'A valid research paper with original readable content. ' + ' '.join(
+        f'researchword{n}' for n in range(600))
+    stream = zlib.compress(('BT /F1 12 Tf 50 750 Td (' + article + ') Tj ET').encode())
+    objects = [b'<< /Type /Catalog /Pages 2 0 R >>',
+               b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+               b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>',
+               b'<< /Length ' + str(len(stream)).encode() + b' /Filter /FlateDecode >>\nstream\n'
+               + stream + b'\nendstream']
+    body, offsets = b'%PDF-1.4\n', []
+    for number, obj in enumerate(objects, 1):
+        offsets.append(len(body))
+        body += f'{number} 0 obj\n'.encode() + obj + b'\nendobj\n'
+    start = len(body)
+    body += b'xref\n0 5\n0000000000 65535 f \n'
+    body += b''.join(f'{at:010d} 00000 n \n'.encode() for at in offsets)
+    return body + f'trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{start}\n%%EOF'.encode()
+
+
 class FullTextCase(unittest.TestCase):
     """脚手架:临时 registry + 临时 vault + 一条开了补抓的订阅。自己不带断言。"""
 
@@ -56,8 +88,11 @@ class FullTextCase(unittest.TestCase):
         self.root = Path(temp.name)
         # 维护锁的 lockfile 在 DATA_DIR 下:不指到 tmp 的话这些用例会去 flock
         # 生产那一个,被 kb-web 正在跑的一轮索引挂住(见 kb.maintenance)。
+        # kb.db 同理指到 tmp:导出收尾会让补抓过的条目在知识库里那份旧提取结果
+        # 作废(`fulltext.retire_stale`),不指的话这些用例写的是生产索引库。
         for p in (patch.object(reg, 'DB_PATH', self.root / 'feeds.db'),
                   patch.object(maintenance, 'DATA_DIR', self.root),
+                  patch.object(config, 'DB_PATH', self.root / 'kb.db'),
                   patch.object(sync, 'VAULT_ROOT', self.root / 'vault'),
                   patch.object(translate, '_model', lambda: MODEL)):
             p.start(); self.addCleanup(p.stop)
@@ -132,6 +167,33 @@ class ExtractionTests(unittest.TestCase):
                  '<p>By Carson Gross, February 2026</p></header>' + ARTICLE_BODY + '</article></body></html>')
         self.assertIn('By Carson Gross', readable.extract(inner))
 
+    def test_an_unknown_binary_format_is_caught_by_the_nul_byte(self):
+        """没见过的二进制格式由 NUL 字节兜底 —— 文本里不会有它。"""
+        self.assertIn('二进制', readable.html_problem(b'\x04\x03ZZ\x00\x00payload', {}))
+        self.assertEqual('', readable.html_problem(b'<p>' + b'a' * 500, {}))
+
+    def test_an_all_ascii_file_header_is_caught_by_the_magic(self):
+        """头部一个 NUL 都没有的那几种 —— 这一档只有文件头那一道救得了它。
+
+        不是边角:PDF 的首个压缩流常常在几十 KB 之后(前面是一长串 ASCII 对象
+        定义和 xref),而 RTF、PostScript 整份都是 ASCII。NUL 那道兜底对它们
+        完全是瞎的,而声明的类型又正好配错成 `text/html` 时(小站常态),只剩
+        这一道。
+        """
+        head = b'%PDF-1.7\n' + b'% an ascii preamble before the first stream\n' * 120
+        self.assertNotIn(b'\x00', head[:readable._SNIFF])
+        self.assertIn('PDF', readable.html_problem(head, {'content-type': 'text/html'}))
+        self.assertIn('RTF', readable.html_problem(br'{\rtf1\ansi ' + b'x' * 500, {}))
+        self.assertIn('PostScript', readable.html_problem(b'%!PS-Adobe-3.0\n' + b'x' * 500, {}))
+
+    def test_the_declared_type_is_believed_before_the_bytes(self):
+        """站点自己说了这不是网页,就照它说的办(字节看起来像什么都不改变结论)。"""
+        self.assertIn('image/png', readable.html_problem(b'<html><p>hi</p>',
+                                                         {'Content-Type': 'image/png'}))
+        # 大小写和参数都不该影响判定:httpx 给的键是小写的,别人构造的未必。
+        self.assertEqual('', readable.html_problem(
+            b'<html><p>hi</p>', {'CONTENT-TYPE': 'TEXT/HTML; charset=UTF-8'}))
+
     def test_decode_prefers_the_declared_charset_and_never_raises(self):
         body = '<p>café</p>'.encode('iso-8859-1')
         self.assertIn('café', readable.decode(body, {'content-type': 'text/html; charset=iso-8859-1'}))
@@ -167,7 +229,7 @@ class QueueTests(FullTextCase):
         self.assertEqual(set(), self.queued())
 
     def test_a_fetched_item_leaves_the_queue(self):
-        key = self.put()
+        self.put()
         with patch.object(fulltext, 'request', Mock(return_value=page(PAGE))):
             fulltext.fetch_pending('rss')
         self.assertEqual(set(), self.queued())
@@ -197,7 +259,11 @@ class FetchTests(FullTextCase):
         self.assertNotIn('HN Points', after['body'])
         self.assertEqual('content', after['content_kind'])   # 不再是「订阅源提供的摘要」
         self.assertNotEqual(before, after['content_hash'])   # 导出闸门靠它重写 md
-        self.assertEqual('', after['exported_hash'])
+        # **`exported_hash` 原样留着**:它是「这一篇入没入过库」的事实来源,而
+        # 重导出已经由 content_hash 变了这件事担保。清掉它的代价是一篇已经能
+        # 展开阅读的旧条目在面板上连标题一起消失(见 `fulltext._save`)。
+        self.assertEqual('old', after['exported_hash'])
+        self.assertEqual(1, after['extract_stale'])          # 旧摘要/主题待作废
         self.assertEqual('en', after['lang'])
         # **旧译文必须一起作废**:它译的是那份壳,留着的话导出会把"壳的译文"
         # 当成这篇文章的中文正文写进 vault,而 translated_at 非空意味着再也
@@ -260,6 +326,138 @@ class FetchTests(FullTextCase):
         self.assertEqual(0, req.call_count)
         self.assertEqual({'done': 0, 'failed': 0, 'empty': 0, 'left': 0,
                           'errors': [], 'failed_keys': [], 'stopped': False}, summary)
+
+
+class BinaryBodyTests(FullTextCase):
+    """原文链接后面不是网页时:按抓取失败处理,不许把文件语法当成正文。
+
+    审查实测的那一档:PDF 论文。`decode` 按 `errors='replace'` 把那堆字节解成
+    一段 `%PDF-1.4 1 0 obj …` 加几百个替换字符,提取器眼里"整篇都是正文"、长度
+    又轻松越过 `MIN_CHARS` —— 于是补抓报成功、`fulltext_at` 落下、条目离开重试
+    队列,接着拿这堆乱码去买一次翻译。**可以不支持 PDF,不能把"没读到论文"说成
+    "已取得正文"。**
+    """
+
+    def test_a_pdf_paper_is_not_mistaken_for_a_body(self):
+        key = self.put(url='https://e.org/paper.pdf', title='Research paper')
+        with patch.object(fulltext, 'request',
+                          Mock(return_value=raw(pdf_bytes(), 'application/pdf'))):
+            summary = fulltext.fetch_pending('rss')
+        row = self.row(key)
+        # 后果先断言:壳原样留着、没拿乱码去买翻译、还排在补抓队列里。
+        self.assertEqual(SHELL, row['body'])
+        self.assertEqual(0, row['body'].count('\ufffd'))
+        self.assertEqual((0, 1), (translate.pending('rss'), fulltext.pending('rss')))
+        self.assertEqual('', row['fulltext_at'])
+        # 记成失败而不是"认不出正文":面板上要说得出是哪一类。
+        self.assertEqual((0, 1, 0), (summary['done'], summary['failed'], summary['empty']))
+        self.assertEqual(1, row['fulltext_tries'])
+        self.assertIn('不是网页', row['fulltext_error'])
+
+    def test_the_exhausted_pdf_link_still_leaves_the_queue(self):
+        """出口还在:试满 MAX_TRIES 之后它按壳入库,不会永远挡在知识库外面。"""
+        key = self.put(url='https://e.org/paper.pdf')
+        with reg.db() as c:
+            c.execute('UPDATE feed_items SET fulltext_tries=? WHERE key=?',
+                      (fulltext.MAX_TRIES - 1, key))
+        with patch.object(fulltext, 'request',
+                          Mock(return_value=raw(pdf_bytes(), 'application/pdf'))):
+            fulltext.fetch_pending('rss')
+        self.assertEqual(0, fulltext.pending('rss'))
+        sync.export('rss')
+        self.assertTrue((self.root / 'vault' / 'source' / 'rss' / (key + '.md')).exists())
+
+    def test_a_lying_content_type_does_not_get_it_through(self):
+        """content-type 说 text/html、字节是 PDF —— 文件头那一道管这个。"""
+        key = self.put(url='https://e.org/paper.pdf')
+        with patch.object(fulltext, 'request', Mock(return_value=raw(pdf_bytes(), 'text/html'))):
+            summary = fulltext.fetch_pending('rss')
+        self.assertEqual((0, 1), (summary['done'], summary['failed']))
+        self.assertEqual(SHELL, self.row(key)['body'])
+
+    def test_a_pdf_whose_head_has_no_nul_byte_is_still_caught(self):
+        """端到端走一遍上面那一档:撒谎的 content-type + 头部全 ASCII 的 PDF。
+
+        这个样本解码出来是 5000 多字的 `% an ascii preamble …`,提取器眼里
+        "整篇都是正文"、长度远超 `MIN_CHARS` —— 去掉文件头那一道它就被当成
+        补抓成功了。
+        """
+        key = self.put(url='https://e.org/paper.pdf')
+        head = b'%PDF-1.7\n' + b'% an ascii preamble before the first stream\n' * 120
+        with patch.object(fulltext, 'request', Mock(return_value=raw(head, 'text/html'))):
+            summary = fulltext.fetch_pending('rss')
+        self.assertEqual((0, 1), (summary['done'], summary['failed']))
+        self.assertEqual(SHELL, self.row(key)['body'])
+        self.assertIn('PDF', self.row(key)['fulltext_error'])
+
+    def test_a_real_page_is_still_fetched(self):
+        """反过来钉一边:正常网页照旧抓得到(一律拒绝的实现在这里会红)。"""
+        key = self.put()
+        for mime in ('text/html; charset=utf-8', 'application/xhtml+xml', 'text/plain', None):
+            with self.subTest(mime=mime):
+                with reg.db() as c:
+                    c.execute("UPDATE feed_items SET body=?,fulltext_at='',fulltext_tries=0"
+                              ' WHERE key=?', (SHELL, key))
+                with patch.object(fulltext, 'request',
+                                  Mock(return_value=raw(PAGE.encode(), mime))):
+                    summary = fulltext.fetch_pending('rss')
+                self.assertEqual(1, summary['done'])
+                self.assertIn('The runtime schedules tools', self.row(key)['body'])
+
+
+class ReadingStateTests(FullTextCase):
+    """补抓成功到译文落盘之间,已入库的旧条目不许丢掉"读得到"这个事实。
+
+    `exported_hash` 是「这一篇入没入过库」的事实来源。补抓时清掉它的代价实测
+    过:一篇**已经能展开阅读**的旧文章在面板上标题连同「展开阅读」一起消失、
+    换成一句"译成中文之后才写进知识库",而 vault 里那份 md 好好地躺着。而且这
+    不是一瞬间的事 —— 翻译排队或失败时它会一直这样(2026-10-09 审查实测+截图)。
+    """
+
+    def shipped(self):
+        """一条已经按壳导出过的旧条目(打开这个开关时看到的就是这一批)。"""
+        reg.save_subscription('rss', {'fulltext': False}, self.source['id'])
+        key = self.put()
+        sync.export('rss')
+        reg.save_subscription('rss', {'fulltext': True}, self.source['id'])
+        return key
+
+    def test_a_shipped_item_keeps_its_title_and_reader_after_the_fetch(self):
+        key = self.shipped()
+        before = self.item(key)
+        with patch.object(fulltext, 'request', Mock(return_value=page(PAGE))):
+            fulltext.fetch_pending('rss')
+        after = self.item(key)
+        # 后果先断言:这一档说的是「外文原文已入库,正在等中文译文覆盖」,而不是
+        # 「译成中文之后才写进知识库」—— 前端按 `translating` 收走标题和阅读入口。
+        self.assertEqual((False, True), (after['translating'], after['retranslating']))
+        self.assertFalse(after['fetching'] or after['refetching'])
+        self.assertTrue((self.root / 'vault' / after['path']).is_file())
+        self.assertEqual('Yes, and', after['title'])
+        # 反过来钉一边:抓之前它确实是"已入库 + 待补抓"那一档。
+        self.assertEqual((False, True), (before['fetching'], before['refetching']))
+
+    def test_a_brand_new_item_is_still_held_back(self):
+        """反过来钉一边:从没导出过的条目照旧扣在闸门外(一律放行的实现会红)。"""
+        key = self.put()
+        with patch.object(fulltext, 'request', Mock(return_value=page(PAGE))):
+            fulltext.fetch_pending('rss')
+        after = self.item(key)
+        self.assertEqual((True, False), (after['translating'], after['retranslating']))
+        self.assertEqual('', self.row(key)['exported_hash'])
+
+    def test_the_new_body_is_still_exported_over_the_old_shell(self):
+        """保留 `exported_hash` 不能顺带把重导出也拦掉:闸门靠 content_hash 变。"""
+        key = self.shipped()
+        with patch.object(fulltext, 'request', Mock(return_value=page(PAGE))), \
+                patch.object(llm, 'chat',
+                             Mock(return_value='###TITLE###\n是的，而且\n###BODY###\n正文译文')):
+            FeedCollector('rss').materialize()
+        text = (self.root / 'vault' / 'source' / 'rss' / (key + '.md')).read_text()
+        self.assertIn('正文译文', text)
+        self.assertNotIn('HN Points', text)
+        row = self.row(key)
+        self.assertEqual(row['content_hash'], row['exported_hash'])
 
 
 class GateTests(FullTextCase):

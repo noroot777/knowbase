@@ -70,6 +70,59 @@ _SHRINK = 0.92
 _META_CHARSET = re.compile(rb'<meta[^>]+charset=["\']?\s*([\w.-]+)', re.I)
 _HTTP_CHARSET = re.compile(r'charset=\s*["\']?\s*([\w.-]+)', re.I)
 
+# 能当网页解析的 content-type。`text/plain` 留在里面是因为实践中大量小站把
+# HTML 页配成了它,而真正的纯文本页经提取器出来仍是可读文字(只是段落按 HTML
+# 规则折叠了)——比一个跳转壳强。真正要挡的是二进制,那由下面两道管。
+_TEXT_TYPES = frozenset({'text/html', 'application/xhtml+xml', 'application/xhtml',
+                         'application/html', 'text/plain'})
+# 已知的二进制文件头。content-type 可以撒谎、也可以压根不发,而这些字节不会
+# 出现在一个网页的开头。
+_MAGIC = ((b'%PDF', 'PDF'), (b'%!PS', 'PostScript'), (b'\x89PNG', 'PNG 图片'),
+          (b'GIF8', 'GIF 图片'), (b'\xff\xd8\xff', 'JPEG 图片'), (b'BM', 'BMP 图片'),
+          (b'II*\x00', 'TIFF 图片'), (b'MM\x00*', 'TIFF 图片'), (b'\x00\x00\x01\x00', 'ICO 图标'),
+          (b'PK\x03\x04', 'ZIP 或 Office 文件'), (b'\x1f\x8b', 'gzip 压缩包'),
+          (b'7z\xbc\xaf', '7z 压缩包'), (b'Rar!', 'RAR 压缩包'),
+          (b'\xd0\xcf\x11\xe0', '旧版 Office 文档'), (b'{\\rtf', 'RTF 文档'),
+          (b'RIFF', 'RIFF 媒体'), (b'OggS', 'Ogg 媒体'), (b'\x1aE\xdf\xa3', 'Matroska 媒体'),
+          (b'ID3', 'MP3 音频'), (b'\x7fELF', '可执行文件'), (b'\xca\xfe\xba\xbe', '可执行文件'))
+_SNIFF = 4096
+
+
+def html_problem(body: bytes, headers: dict | None = None) -> str:
+    """这份响应能不能当网页解析 —— 不能就返回一句人话,否则返回空串。
+
+    **缺这一道的后果不是"少补一篇",是把文件语法当正文写进知识库。** 原文是
+    PDF 论文时,`decode` 按 `errors='replace'` 把那堆字节解成一段 `%PDF-1.4
+    1 0 obj << /Type /Catalog …` 加几百个问号,`extract` 眼里它只是一份没有
+    标签的文档、整篇就是"正文",长度又轻松越过 `MIN_CHARS` —— 于是补抓报成功、
+    `fulltext_at` 落下、条目离开重试队列,接着拿这堆乱码去买一次翻译
+    (2026-10-09 审查实测:1149 字正文、364 个替换字符,论文一个字都没有)。
+    **可以不支持 PDF,但不能把"没读到论文"说成"已取得正文"。**
+
+    三道,各管一类撒谎方式:
+    ①**声明的类型**不在名单里 —— 站点自己说了这不是网页,照它说的办;
+    ②**文件头**命中已知魔数 —— content-type 配错或压根没发时(小站常态)靠它;
+    ③头部出现 **NUL 字节** —— 没见过的二进制格式兜底。文本里不会有它,
+      `fetching.plain` 的入口本来也要把 `\x00` 清掉(那是它的占位符)。
+
+    调用方把它当抓取失败处理(计次、保留 feed 原本那份壳):PDF 这种链接重试
+    三轮都不会变成网页,而那正是 `fulltext.MAX_TRIES` 这个出口要收的东西 ——
+    比起"成功了"这个结论,多两次请求便宜得多。
+    """
+    mime = ''
+    for name, value in (headers or {}).items():
+        if str(name).lower() == 'content-type':
+            mime = str(value).split(';')[0].strip().lower()
+    if mime and mime not in _TEXT_TYPES:
+        return f'原文返回的不是网页（{mime}），没有可提取的正文'
+    head = body[:_SNIFF].lstrip()
+    for magic, label in _MAGIC:
+        if head.startswith(magic):
+            return f'原文返回的不是网页（{label}），没有可提取的正文'
+    if b'\x00' in body[:_SNIFF]:
+        return '原文返回的像是二进制文件，没有可提取的正文'
+    return ''
+
 
 def decode(body: bytes, headers: dict | None = None) -> str:
     """按 HTTP 头 → <meta charset> → UTF-8 的顺序解码,一律不抛。

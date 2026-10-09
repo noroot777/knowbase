@@ -17,13 +17,22 @@ subs_probe 的共同依赖,它们有好几条检查认的是"条目列表第一�
      面板不该说"抓到才写进知识库",也不该收走「展开阅读」。
   ③ 补抓过、译好了的(正常形态,证明补抓完成之后那几档状态照旧)
   ④ 试满 MAX_TRIES 的(两道闸门都该放它过去,面板上不该还挂着"正在补抓")
+  ⑤ **已经导出过 + 补抓成功 + 还在等译文** —— 第 1 轮审查那张截图里的形态。
+     它在 vault 里真的有一份(就是补抓之前那个壳),所以标题和「展开阅读」都该
+     留着、footer 说的是"正在等中文译文覆盖";换成"译成中文之后才写进知识库"
+     就是在说谎,而翻译排队或失败时它会一直这样。
 """
+import hashlib
 import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+WAITING_URL = 'https://news.example.org/post-fetched-shipped'
+WAITING_BODY = ('The body of this one did come back from the original link, and it is '
+                'still queued for translation. ' * 4)
 
 
 def main():
@@ -59,6 +68,9 @@ def main():
         {'url': 'https://news.example.org/post-3', 'published': at(4),
          'title': 'A link that could not be read',
          'body': 'Blocked (\nexample.dev\n)\n10-07\n↑ 42 HN Points'},
+        {'url': WAITING_URL, 'published': at(2.5),
+         'title': 'A fetched article still waiting for its translation',
+         'body': 'A fetched article still waiting (\nexample.org\n)\n10-08\n↑ 91 HN Points'},
     ])
     reg.put_items(plain, [
         {'url': 'https://solo.example.org/own-1', 'published': at(5),
@@ -76,6 +88,27 @@ def main():
         # ④ 试满重试上限:它离开补抓队列,两道闸门都放行(壳子照原样入库)。
         c.execute("UPDATE feed_items SET fulltext_tries=?, fulltext_error=? WHERE url=?",
                   (fulltext.MAX_TRIES, '抓取失败：HTTP 403', 'https://news.example.org/post-3'))
+        # ⑤ 壳先按原样进过 vault(md 真的写出来、path 和 exported_hash 都是真的),
+        #    再把正文换成整篇、`fulltext_at` 落下、译文还空着。`exported_hash`
+        #    必须**保留**那份旧壳的 hash:它是「这一篇入没入过库」的事实来源,
+        #    清掉的话面板会把它判成"还没入库、在等译文",标题连同「展开阅读」
+        #    一起消失(见 kb/feeds/fulltext.py 的 _save)。
+        key = hashlib.sha256(('rss:' + WAITING_URL).encode()).hexdigest()[:32]
+        rel = f'source/rss/{key}.md'
+        md = vault / rel
+        md.parent.mkdir(parents=True, exist_ok=True)
+        md.write_text('---\nsource: rss\ntitle: A fetched article still waiting for its'
+                      ' translation\naccount: Link Aggregator\n'
+                      f'url: {WAITING_URL}\ncontent_kind: summary\nlang: en\n---\n\n'
+                      '# A fetched article still waiting for its translation\n\n'
+                      'A fetched article still waiting (\nexample.org\n)\n10-08\n'
+                      '↑ 91 HN Points\n', encoding='utf-8')
+        shell_hash = c.execute('SELECT content_hash FROM feed_items WHERE key=?',
+                               (key,)).fetchone()[0]
+        c.execute("UPDATE feed_items SET exported_hash=?,path=?,body=?,content_kind='content',"
+                  "content_hash=?,fulltext_at=?,lang='en' WHERE key=?",
+                  (shell_hash, rel, WAITING_BODY,
+                   hashlib.sha256(WAITING_BODY.encode()).hexdigest(), reg.now(), key))
     print(f'agg_id={source["id"]} plain_id={plain["id"]}')
 
 

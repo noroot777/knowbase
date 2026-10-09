@@ -124,8 +124,8 @@ check("取消勾选之后后端真的关掉了(开关能来回切)",
 await evalJs(`sourceView = 'items'; renderSourceView(true)`);
 await until(`!$('source-filter').hidden && [...$('source-filter').options].some(o=>o.value==='${AGG}')`);
 await evalJs(`$('source-filter').value = '${AGG}'; renderSourceView(true)`);
-await until(`sourceRows.length === 4`);
-await until(`document.querySelectorAll('#source-list .source-entry').length >= 4`);
+await until(`sourceRows.length === 5`);
+await until(`document.querySelectorAll('#source-list .source-entry').length >= 5`);
 const cards = JSON.parse(await evalJs(`JSON.stringify([...document.querySelectorAll('#source-list .source-entry')].map(a => ({
   name: a.querySelector('.source-entry-name')?.textContent || '',
   titleBtn: a.querySelector('.source-entry-title')?.textContent || '',
@@ -160,6 +160,27 @@ check("它如实显示库里那份壳,不换成状态文案",
 check("它的标题是可点的那种(走普通分支)",
       shipped && shipped.titleBtn.includes("already made it into the vault"),
       shipped && (shipped.titleBtn || shipped.name));
+
+// ── 4c. 补抓成功、还在等译文的**旧**条目:「读得到」这个事实不许丢 ──────────
+// 第 1 轮审查那张截图:它的标题连同「展开阅读」一起消失、换成一句"译成中文
+// 之后才写进知识库",而 vault 里那份 md 好好地躺着。根因是补抓时清掉了
+// `exported_hash` —— 那是「入没入过库」的事实来源(见 fulltext._save)。
+const waitingZh = cards.find(c => c.origin === "https://news.example.org/post-fetched-shipped");
+check("补抓成功还在等译文的旧条目仍然在列表上", !!waitingZh,
+      JSON.stringify(cards.map(c => c.origin)));
+check("它的标题照显示(不是「外文内容，正在等翻译」那句占位文字)",
+      waitingZh && waitingZh.titleBtn.includes("still waiting for its translation"),
+      waitingZh && (waitingZh.titleBtn || waitingZh.name));
+check("它照旧能「展开阅读」(vault 里那份 md 还在)", waitingZh && waitingZh.read === true,
+      JSON.stringify(waitingZh || {}));
+check("footer 说的是「等中文译文覆盖」,不是「译成中文之后才写进知识库」",
+      waitingZh && waitingZh.footer.includes("外文原文已入库，正在等中文译文覆盖"),
+      waitingZh && waitingZh.footer);
+check("它的正文如实显示抓回来的那一篇,不换成状态文案",
+      waitingZh && waitingZh.body.includes("did come back from the original link")
+        && !waitingZh.body.includes("译成中文"), waitingZh && waitingZh.body.slice(0, 70));
+check("它也不该再挂着「正在补抓」(正文已经抓到了)",
+      waitingZh && !waitingZh.footer.includes("正在补抓"), waitingZh && waitingZh.footer);
 
 const done = cards.find(c => c.titleBtn.includes("正文确实抓回来了"));
 check("补抓完成并译好的那条恢复成普通形态(标题可点、能展开阅读)",

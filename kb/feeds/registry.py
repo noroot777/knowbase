@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS feed_items (
  key TEXT PRIMARY KEY, kind TEXT NOT NULL, url TEXT NOT NULL, title TEXT NOT NULL,
  author TEXT NOT NULL, published TEXT NOT NULL DEFAULT '', body TEXT NOT NULL,
  content_kind TEXT NOT NULL DEFAULT 'feed', fetched_at TEXT NOT NULL,
- content_hash TEXT NOT NULL, exported_hash TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT ''
+ content_hash TEXT NOT NULL, exported_hash TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '',
+ -- 排在最后,和老库 ALTER 补出来的列序一致(见 _ADDED_COLUMNS)。
+ extract_stale INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS feed_items_recent ON feed_items(kind, published DESC, fetched_at DESC);
 CREATE TABLE IF NOT EXISTS subscription_items (
@@ -92,6 +94,12 @@ _ADDED_COLUMNS = {
         ('fulltext_at', "TEXT NOT NULL DEFAULT ''"),
         ('fulltext_error', "TEXT NOT NULL DEFAULT ''"),
         ('fulltext_tries', 'INTEGER NOT NULL DEFAULT 0'),
+        # 「这一条的正文被整篇换过,知识库里那份旧提取结果作废」。老库里的条目
+        # 补成 0 = 没有待作废的东西,行为逐字不变。
+        # 它是一个**待办**而不是历史:由 `fulltext._save` 置 1,等新正文真的落进
+        # vault 之后由 `fulltext.retire_stale` 做完清理再放下 —— 所以这一步失败
+        # 时标记留在原处,下一轮导出会再来一次。
+        ('extract_stale', 'INTEGER NOT NULL DEFAULT 0'),
     ),
 }
 

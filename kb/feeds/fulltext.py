@@ -18,7 +18,16 @@ Lilian Weng、Karpathy 那类 feed 本来就给全文,对它们再抓一次是�
 
 **抓不到不挡路**:壳照旧留着、条目照旧入库,`fulltext_tries` 计次,试满
 `MAX_TRIES` 就离开队列(口径同 `translate`)。一个付费墙后面的链接不该让这条
-订阅的内容永远进不了知识库。
+订阅的内容永远进不了知识库。**而「原文链接后面压根不是网页」要认出来**
+(`readable.html_problem`):一份 PDF 论文解码出来是一段看着像文字的乱码,提取器
+眼里它就是"整篇正文",长度还轻松过关 —— 不认的话补抓报成功、条目离开重试队列、
+接着拿这堆乱码去买一次翻译,而且再也不会重试。
+
+**正文从壳换成全文之后,知识库里那份按旧壳算出来的提取结果要跟着作废**
+(`retire_stale`,由 `sync._export` 在导出之后调一次)。`documents.extracted_at`
+非空意味着这一篇永远不进 `extract.pending_docs`,而重导出又会把旧 `tags` 原样
+写回 frontmatter —— 不作废的话摘要、主题、实体永久停在那条链接上。时点是
+**新正文真的落了盘**,不是"网络抓到了":中间还隔着翻译那一段队列。
 """
 from __future__ import annotations
 
@@ -76,8 +85,17 @@ def fetch_one(url: str) -> str:
 
     走 `fetching.request`,所以 SSRF 防护(只连公网地址)、重定向逐跳校验、
     8 MB 上限、超时这几件事都已经有人管了 —— 这里只是换一份 Accept。
+
+    **先问"这是网页吗",再解码**(`readable.html_problem`)。不是网页的一律抛
+    出去按抓取失败处理:PDF 字节解出来是一段 `%PDF-1.4 1 0 obj …` 加几百个
+    替换字符,长度轻松越过 `readable.MIN_CHARS`,于是"补抓成功"、条目离开重试
+    队列、还拿这堆乱码去买一次翻译(见 `html_problem` 的注释)。抛而不是返回
+    空串,是因为空串那条路的提示写的是"可能需要登录或由脚本渲染",而这里的
+    原因明确得多 —— 面板上要说得出是哪一类。
     """
     response = request(url, _HEADERS)
+    if problem := readable.html_problem(response.body, response.headers):
+        raise FeedError(problem)
     return readable.extract(readable.decode(response.body, response.headers))
 
 
@@ -92,8 +110,16 @@ def _save(key: str, body: str) -> None:
     `content_kind` 从 `summary` 改成 `content`:导出那边据它决定要不要写
     「以下为订阅源提供的摘要」那句注记,而现在这就是全文了。
 
-    `content_hash` 按新正文重算、`exported_hash` 清空 —— 两件事合起来才让导出
-    阶段重写这篇 md(闸门是 `exported_hash<>content_hash`)。
+    **重导出靠 `content_hash` 变了,不许清 `exported_hash`。** 导出闸门是
+    `exported_hash<>content_hash`,正文一换前者就自然成立 —— 而 `exported_hash`
+    同时是「这一篇入没入过库」的事实来源(`registry.items` 的两态、`sync._export`
+    的四档都读它)。清掉它的代价实测过:一篇**已经能展开阅读**的旧条目补抓成功
+    之后,面板上标题连同「展开阅读」一起消失、换成一句"译成中文之后才写进知识
+    库",而 vault 里那份 md 好好地躺着 —— 而且这不是一瞬间的事,翻译排队或失败
+    时它会一直这样(2026-10-09 审查实测 + 截图)。
+
+    `extract_stale` 置 1 = 留一个待办:知识库里那份摘要/主题/实体是按**旧壳**
+    算出来的,新正文落盘之后要让它作废(见 `retire_stale`)。
     """
     digest = hashlib.sha256(body.encode()).hexdigest()
     with reg.db() as c:
@@ -101,7 +127,7 @@ def _save(key: str, body: str) -> None:
         if not row:                      # 这期间被存量清理删掉了,没什么可写的
             return
         c.execute("""UPDATE feed_items SET body=?,content_kind='content',content_hash=?,lang=?,
-            fulltext_at=?,fulltext_error='',exported_hash='',
+            fulltext_at=?,fulltext_error='',extract_stale=1,
             title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
             WHERE key=?""",
             (body, digest, reg.text_language(row['title'], body), reg.now(), key))
@@ -179,3 +205,89 @@ def summarize(summary: dict) -> str:
     if summary['left']:
         text += f",{summary['left']} 条留到下一轮"
     return text
+
+
+# 旧提取结果里**按正文算出来的**那两类 tag(口径同 `extract.extraction_tags`)。
+# 摘 frontmatter 和删 `doc_tags` 用的是这同一份:两处各写一遍的话,md 里摘掉的
+# 和库里删掉的不是同一批,而下一轮索引按 frontmatter 重建 doc_tags —— 差额会被
+# 原样补回去。`flag/软广` 和人工 tag 不在里面(见 `keep_tags`)。
+STALE_TAG_PREFIXES = ('topic/', 'entity/')
+
+
+def keep_tags(tags) -> list[str]:
+    """正文被整篇换掉之后,这篇 md 的 frontmatter 里还该留下的那些 tag。
+
+    摘掉 `topic/` 和 `entity/`:它们是提取阶段按**旧正文**算出来的,而旧正文是
+    一个几十字的跳转壳。不摘的话重新提取时 `writeback_tags` 是**往后追加**的,
+    `topic/link-only` 这种会永久留在这篇文章上。
+
+    **不摘 `flag/软广`**:它由 promo 判定管,而重新提取会顺带重判一次 —— 改判
+    时 `extract.sync_promo_tag` 自己会把 md 里那行摘掉(见 CLAUDE.md「软广筛选」)。
+    人工写进来的 tag 同理留着:这里要作废的是"按旧链接算出来的结论",不是别人
+    写进这篇 md 的东西(口径同 `sync._kept_meta`)。
+    """
+    if not isinstance(tags, list):
+        tags = [tags] if tags else []
+    return [s for t in tags if (s := str(t).strip()) and not s.startswith(STALE_TAG_PREFIXES)]
+
+
+def _drop_extraction(paths: list[str]) -> None:
+    """让这几篇在知识库里的旧提取结果作废,重新排进提取队列。
+
+    清 `documents.extracted_at`(置 NULL 才进 `extract.pending_docs`)、
+    `summary`、`entities`,以及 `doc_tags` 里按正文算出来的那两类。
+
+    **不清 `promo_level`**:重新提取时 `save_extraction` 会拿新判定覆盖它,
+    真改判了 `sync_promo_tag` 还会把 md 里那行标记一起摘掉 —— 在这里先清成
+    `''` 只会让它多走一趟存量补判。
+
+    kb.db 的连接现开现关:`kb/feeds` 这一侧平时压根不碰它(`store.connect` 还
+    要加载 sqlite_vec 扩展),只有真有条目换过正文时才付这笔钱。`config.DB_PATH`
+    现读而不是用 `connect` 的默认参数 —— 后者在函数定义时就绑死了,测试没法把
+    它指到临时库上去。
+    """
+    from kb import config, store        # 延迟导入:别让 kb/feeds 在导入期拖进 sqlite_vec
+    like = ' OR '.join(['tag LIKE ?'] * len(STALE_TAG_PREFIXES))
+    conn = store.connect(config.DB_PATH)
+    try:
+        for i in range(0, len(paths), 400):
+            batch = paths[i:i + 400]
+            ph = ','.join('?' * len(batch))
+            conn.execute(f'UPDATE documents SET extracted_at=NULL,summary=\'\''
+                         f' WHERE path IN ({ph})', batch)
+            conn.execute(f'DELETE FROM entities WHERE path IN ({ph})', batch)
+            conn.execute(f'DELETE FROM doc_tags WHERE path IN ({ph}) AND ({like})',
+                         [*batch, *(p + '%' for p in STALE_TAG_PREFIXES)])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def retire_stale(kind: str) -> int:
+    """把「新正文已经落进 vault、知识库里那份旧提取还没作废」的那几篇收掉。
+
+    **时点是「新正文真的落了盘」,不是「网络抓到了正文」。** 补抓成功之后这一条
+    要先排队等翻译(一轮只译 `translate.MAX_ITEMS` 条),那期间 vault 里还是旧
+    壳 —— 在补抓那一刻就清掉 `extracted_at` 的话,提取阶段会拿**旧壳**再买一次
+    提取、写回一个同样过时的结论,而 `extracted_at` 跟着又非空了:等正文译完
+    导出之后,摘要和主题照旧是壳的。所以判据是 `exported_hash=content_hash`
+    (这篇 md 已经是补抓来的那份全文了),由 `sync._export` 在导出之后调一次。
+
+    **做完才把标记放下,顺序不能反。** 这一步失败(kb.db 连不上、磁盘满)时
+    `extract_stale` 留在原处,下一轮导出再来一次;反过来写的话这几篇会永久停在
+    「摘要还是那个跳转壳」的状态 —— 它们的 `exported_hash` 已经等于
+    `content_hash`、压根不在待导出集合里,没有任何路径回来重试。
+
+    不漏:这里**不限于本轮刚落盘的那几篇**,所以上一轮失败留下的待办也一起收。
+    常态下那条查询是空集合,一次 kb.db 连接都不开。
+    """
+    with reg.db() as c:
+        rows = c.execute("SELECT key,path FROM feed_items WHERE kind=? AND extract_stale=1"
+                         " AND exported_hash=content_hash AND path<>''", (kind,)).fetchall()
+    if not rows:
+        return 0
+    _drop_extraction([r['path'] for r in rows])
+    with reg.db() as c:
+        c.executemany('UPDATE feed_items SET extract_stale=0 WHERE key=?',
+                      [(r['key'],) for r in rows])
+    return len(rows)
