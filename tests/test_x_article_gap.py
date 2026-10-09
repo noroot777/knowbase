@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""长文补全的三道缝:哪些形态会让一篇长文**悄悄**落成空正文/只有一个链接。
+"""长文补全的四道缝:哪些形态会让一篇长文**悄悄**落成空正文/只有一个链接。
 
-三族各管一种,共同的要害是同一个:`put_items` 是 `ON CONFLICT(key) DO NOTHING`
+四族各管一种,共同的要害是同一个:`put_items` 是 `ON CONFLICT(key) DO NOTHING`
 —— 缺正文的条目一旦落库就**再也更新不了**,下一轮重叠重抓也救不回来。所以每一
 条都**先断言后果**(这一篇的正文到底是什么、水位动没动、下一轮还取不取得到),
 不是"有没有调过那个接口"。
@@ -12,6 +12,11 @@
   `/i/article/<id>` 链接藏起来改渲染成卡片,所以正文**非空**,另两条判据都不
   命中 —— 整篇文章就这么漏掉了,面板上一切正常。
 ③`BridgeChannelTests`:桥接通道整个没接补全,长文只存下那条文章链接。
+④`ArticlePathFormTests`:X 的文章地址有两种路径形式,而判据只认 `/i/article/`
+  那一种。`/<handle>/article/<id>`(X 自己 302 到的规范形式,也正是
+  `article_page()` 生成的那个)在**三条保留通道**上各有一种末态:feedgrab 和
+  「浏览器通道没读到卡片」是那条链接当正文入库,「浏览器通道读到了卡片」是正文
+  补上了、而那条地址留在开头。
 
 和 `test_x_article.py` 按形状分开(那边是渲染、接口两档结局和浏览器后路):
 那个文件已经 661 行,贴着仓库那条 700 行上限。摆盘共用它和 `test_x_channels`。
@@ -36,6 +41,7 @@ from kb.feeds.fetching import FeedError, Response
 from tests.test_x_article import (BLANK, OLD_WATER, _FakeChrome, answering,
                                   article_payload, entry, harvest_round, snapshot)
 from tests.test_x_channels import ChannelBase
+from tests.test_x_feedgrab_contract import TODAY, FeedgrabRound, tweet
 
 FULL = '整理书签、做学习计划，我以前都是一个人对着 AI 来回问。'
 
@@ -271,3 +277,171 @@ class BridgeChannelTests(ChannelBase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# ------------------------------------------------------- ④ 文章地址的两种形式
+
+class ArticlePathFormTests(FeedgrabRound):
+    """**X 的文章地址有两种路径形式,只认一种就会漏掉另一种的全文。**
+
+    `/i/article/<article_id>` 是 t.co 展开出来的那种,`/<handle>/article/<tweet_id>`
+    是 X 自己 302 到的**规范形式** —— 后者正是本实现 `article_page()` 生成的那个
+    地址,不是一种我们不支持的 URL 规范。原来 `_ARTICLE_LINK` 只认前一种,于是后
+    一种在**三条保留通道**上各有一种末态(2026-10-09 实测,下面每条用例各钉一个):
+
+    - **feedgrab**:`needs_article` 三条判据一条都不命中(①看不见这个形式,③因为
+      "正文里有字"而不命中,②的卡片信号只有浏览器通道才有)—— 那条链接本身当成
+      正文入库,`added=1`、`errors=[]`、`partial=[]`、水位照常推进,标题回落成
+      「某某 的动态」;而 `put_items` 是 `DO NOTHING`,**下一轮重抓也更新不了它**。
+    - **浏览器 / attach,没有卡片信号**(某次滚动没渲染出来、或者那张卡片被引用推
+      容器那道排除规则挡掉):末态和上面逐字相同。
+    - **浏览器 / attach,有卡片信号**:卡片把这一条救回来了,可 `lead_text` 同样
+      认不出这个形式,于是那条地址原样留在库里那篇正文的开头。
+
+    判据只有 `_ARTICLE_LINK` 那一条正则(`needs_article` 判据① 和 `lead_text`
+    共用),所以这一族里既有真走一轮采集的末态,也有直接钉那条正则两头的 —— **认宽
+    了同样有代价**:它在 `lead_text` 里是拿去 `sub` 掉的,会删掉推文里真实的字。
+    """
+
+    LEGACY = 'https://x.com/i/article/2108252660529049601'
+    # = article_page('https://x.com/Example/status/10001'),feedgrab 那条推文的 id
+    CANON = 'https://x.com/Example/article/10001'
+
+    # --- feedgrab:真跑一轮 sync.collect(),一行不打桩 -------------------------
+
+    def feedgrab_round(self, body):
+        """真跑一轮 feedgrab 通道:只替掉那个外部程序本身和长文接口的回包。"""
+        s = self.start_from()
+        self.cli(example={'display': 'Example Person',
+                          'tweets': [tweet(title='', body=body)]})
+        req, calls = answering(article_payload())
+        with req:
+            summary = self.collect()
+        rows = self.rows(s['id'])['items']
+        return summary, (rows[0] if rows else {}), calls, s
+
+    def test_the_canonical_form_reaches_the_knowledge_base(self):
+        """**后果先断言**:库里那一行是全文,不是一条光秃秃的链接。
+
+        只验"问过那次接口"的话,一个把链接当正文存下来、却顺手问了一次的实现也能
+        过;而这一篇一旦以链接入库就永久改不回来。
+        """
+        summary, row, calls, s = self.feedgrab_round(self.CANON)
+        self.assertIn(FULL, row.get('body') or '')
+        self.assertNotIn('/article/', row.get('body') or '',
+                         '那条地址不是正文,它是 X 替作者渲染成卡片的链接')
+        self.assertEqual('X书签保存Skill x Teamily', row.get('title'),
+                         '标题回落成「某某 的动态」= 这一条压根没去补过')
+        self.assertEqual([], summary['errors'])
+        self.assertEqual(1, summary['added'])
+        self.assertEqual([], summary['partial'])
+        self.assertEqual(TODAY, self.water(s['id']))
+        self.assertEqual(['https://api.fxtwitter.com/Example/status/10001'],
+                         calls.urls)
+
+    def test_the_legacy_form_still_reaches_it(self):
+        """**反过来钉一边**:为了认规范形式而把旧式弄坏的实现会在这里红。"""
+        summary, row, calls, _ = self.feedgrab_round(self.LEGACY)
+        self.assertIn(FULL, row.get('body') or '')
+        self.assertEqual(1, summary['added'])
+        self.assertEqual(1, len(calls.urls))
+
+    def test_a_tweet_without_any_article_link_is_not_asked_about(self):
+        """**再钉一边**:认宽了会给一大半普通推文各买一次询问。"""
+        summary, row, calls, _ = self.feedgrab_round('今天读到一篇好文章，推荐大家看。')
+        self.assertEqual([], calls.urls, '普通推文不许去问长文接口')
+        self.assertEqual('今天读到一篇好文章，推荐大家看。', row.get('body'))
+        self.assertEqual(1, summary['added'])
+
+    # --- 浏览器通道:真跑一轮 harvest ---------------------------------------
+
+    def browser_round(self, body, *, hint=False):
+        """一条推文,正文由调用方给;`hint` 决定时间线上那张卡片读到没有。"""
+        def fake_one(page, handle, floor):
+            e = {**entry(url='https://x.com/example/status/9'), 'body': body}
+            if hint:
+                e[x_article.HINT] = 'https://x.com/example/article/9'
+            return [e], ''
+
+        _FakeChrome.reset(BLANK)
+        req, calls = answering(article_payload())
+        with contextlib.ExitStack() as es:
+            for cm in (req, patch.object(x_browser, '_harvest_one', fake_one),
+                       patch.object(x_browser, 'Chrome', _FakeChrome),
+                       patch.object(x_article, 'PAGE_WAIT', 0.0)):
+                es.enter_context(cm)
+            got = x_browser.harvest([('example', OLD_WATER)], profile='/tmp/p')
+        return got['example'], calls
+
+    # 这条推文的规范文章地址(= article_page('https://x.com/example/status/9'))。
+    CANON_9 = 'https://x.com/example/article/9'
+
+    def test_the_canonical_form_is_filled_without_a_card_hint(self):
+        """**没有卡片信号时,正文里那条地址是唯一的信号** —— 认不出它就是漏掉整篇。
+
+        卡片信号不是永远在:某次滚动它可能没渲染出来(所以 `_COLLECT_JS` 那边是
+        「只补不清」),引用推容器里的那张还会被故意排掉。判据① 本来就该是独立的
+        第二道。
+        """
+        got, calls = self.browser_round(f'我写了一篇新文章\n\n{self.CANON_9}')
+        body = got['entries'][0]['body']
+        self.assertIn(FULL, body)
+        self.assertNotIn('/article/', body)
+        self.assertEqual('X书签保存Skill x Teamily', got['entries'][0]['title'])
+        self.assertEqual('', got['incomplete'], '补到了,这一轮算读全了')
+        self.assertNotEqual(OLD_WATER, got['watermark'])
+        self.assertEqual(1, len(calls.urls))
+
+    def test_the_canonical_link_is_not_left_in_the_lead(self):
+        """卡片信号救回来的那一条:正文开头不许留着那条地址。
+
+        这一条钉的是 `lead_text` 那一半 —— 判据① 换了口径而 `lead_text` 没换时,
+        上面那条会绿而这条红。
+        """
+        got, _ = self.browser_round(f'我写了一篇新文章\n\n{self.CANON_9}', hint=True)
+        body = got['entries'][0]['body']
+        self.assertTrue(body.startswith('我写了一篇新文章'), body[:60])
+        self.assertNotIn('/article/', body)
+        self.assertIn(FULL, body)
+
+    def test_the_author_s_own_words_are_still_kept(self):
+        """**反过来钉一边**:作者写的那句介绍不许跟着链接一起被 `sub` 掉。"""
+        got, _ = self.browser_round(f'我写了一篇新文章\n\n{self.LEGACY}', hint=True)
+        self.assertTrue(got['entries'][0]['body'].startswith('我写了一篇新文章'))
+
+    # --- 判据本身:两头各钉一道 ---------------------------------------------
+
+    def test_both_path_forms_are_recognised(self):
+        """两种形式、四种写法(带/不带 scheme、x.com/twitter.com、带查询串)。"""
+        tw = 'https://x.com/Example/status/900'
+        for body in (self.LEGACY, 'x.com/i/article/900',
+                     x_article.article_page(tw), 'x.com/Example/article/900',
+                     'https://twitter.com/Example/article/900?s=20',
+                     f'我写了一篇新文章\n\n{x_article.article_page(tw)}'):
+            with self.subTest(body=body):
+                self.assertTrue(x_article.needs_article({'url': tw, 'body': body}),
+                                '漏认 = 这条地址当正文入库,DO NOTHING 之下改不回来')
+
+    def test_what_is_not_an_article_link_is_left_alone(self):
+        """**认宽了会删掉推文里真实的字** —— 这条正则在 `lead_text` 里是拿去
+        `sub(' ')` 的,所以 handle 的字符类不许放宽(同 `_STATUS`)。"""
+        tw = 'https://x.com/Example/status/900'
+        for body in ('今天读到一篇好文章，推荐给大家。',
+                     'https://x.com/Example/status/900',
+                     'https://example.org/Example/article/900',
+                     'https://x.com/i/articles/900',
+                     'https://x.com/' + 'a' * 21 + '/article/900',
+                     'https://x.com/Example/article/abc',
+                     'https://x.com/a/b/article/900'):
+            with self.subTest(body=body):
+                self.assertFalse(x_article._ARTICLE_LINK.search(body))
+                self.assertEqual(body, x_article.lead_text(body),
+                                 '一个字都不许被当成文章链接删掉')
+
+    def test_lead_text_strips_both_path_forms(self):
+        """`lead_text` 和判据① 共用那条正则,所以两种形式都该被摘掉。"""
+        for link in (self.LEGACY, 'https://x.com/Example/article/900'):
+            with self.subTest(link=link):
+                self.assertEqual('我写了一篇新文章',
+                                 x_article.lead_text(f'我写了一篇新文章\n\n{link}'))
+                self.assertEqual('', x_article.lead_text(link))
