@@ -12,8 +12,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
+import select
 import socket
 import threading
+import time
 from contextlib import contextmanager
 
 GUID = b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
@@ -123,3 +125,48 @@ def serving(handler):
     finally:
         srv.close()
         thread.join(timeout=5)
+
+
+@contextmanager
+def stuck_pair():
+    """一对真 socket,其中**我们那一头写不进去**:对端连上了但永远不读。
+
+    扮演的是"卡住的浏览器"。灌满内核缓冲之后任何一次写都只能等对端来读 ——
+    原来那条裸 `sendall` 在这里**无限**阻塞,而这条链的上游是采集阶段。
+
+    **「灌满」要连着几轮都不可写才算数,不能一轮就收手。** 实测:刚报过
+    `EAGAIN` 的 socket 过 0.3 秒又可写了(TCP 还在把数据搬去对端的接收缓冲),
+    那时一条几十字节的 CDP 命令照样挤得进去 —— 用这种半满的局摆出来的用例,
+    失败来自随后的读超时,对写路径压根不敏感。连着 `_QUIET` 轮不可写之后它才
+    真的停住(实测灌进去 ~514 KB,之后连续三秒都写不动)。
+
+    返回 `(我们这头, 对端)`;两头都在退出时关掉。
+    """
+    quiet_rounds, slice_seconds, cap_seconds = 3, 0.1, 5.0
+    srv = socket.socket()
+    srv.bind(('127.0.0.1', 0))
+    srv.listen(1)
+    mine = socket.create_connection(srv.getsockname())
+    peer, _ = srv.accept()
+    srv.close()
+    try:
+        mine.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2048)
+        peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+        mine.setblocking(False)
+        quiet, started = 0, time.monotonic()
+        while time.monotonic() - started < cap_seconds and quiet < quiet_rounds:
+            if select.select([], [mine], [], slice_seconds)[1]:
+                quiet = 0
+                try:
+                    mine.send(b'x' * 4096)
+                except BlockingIOError:
+                    pass
+            else:
+                quiet += 1
+        yield mine, peer
+    finally:
+        for sock in (peer, mine):
+            try:
+                sock.close()
+            except OSError:
+                pass

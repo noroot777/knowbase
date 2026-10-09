@@ -11,10 +11,12 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import patch
 
 from kb.feeds import cdp_attach, registry as reg, x_browser, x_channels
+from kb.source_types import SOURCE_TYPES
 from tests.test_x_channels import ChannelBase
 
 ATTACH = x_channels.ATTACH
@@ -85,7 +87,8 @@ class ReadinessTests(ChannelBase):
         """「没就绪」要带上下一步,而且下一步只能是**用户自己去勾那个开关** ——
         我们不改他的启动参数、不写他的 Local State、也不去唤起那个页面。
         """
-        with patch.object(cdp_attach, 'discover', return_value=None):
+        with patch.object(cdp_attach, 'discover', return_value=None), \
+             patch.dict(os.environ, {cdp_attach.ENDPOINT_ENV: ''}):
             ready, why, hint = x_channels.readiness(self.settings(ATTACH))
         self.assertFalse(ready)
         self.assertIn('远程调试', why)
@@ -173,6 +176,68 @@ class DispatchTests(ChannelBase):
             _ready, detail = x_browser.probe(str(profile), '', attach=True)
         self.assertNotIn('SingletonLock', detail)
         self.assertNotIn('登录窗口', detail)
+
+
+class StaticNoteTests(unittest.TestCase):
+    def test_the_note_does_not_hard_code_how_many_channels_there_are(self):
+        """那句静态说明不该因为新增一条通道就变成错的 —— 上一次正是「X 可选
+        三种取法」被第四条通道改没了,而页面上照旧那么写(2026-10-09 审查发现,
+        截图 `01-attach-disabled.png`)。所以它只说"在下面选",不数数。
+        """
+        note = SOURCE_TYPES['social'].note
+        self.assertTrue(note)
+        for count in ('一种', '两种', '三种', '四种', '五种', '两条', '三条', '四条'):
+            with self.subTest(count=count):
+                self.assertNotIn(count, note)
+        self.assertIn('取法', note)                 # 指到那个下拉
+
+
+class BadEndpointTests(ChannelBase):
+    """`KB_CDP_ENDPOINT` 填错的时候,面板要**看得见原因** —— 而不是整个接口 500。
+
+    `urlsplit(...).port` 对 `:not-a-port` 和 `:65536` 都抛 `ValueError`,而这条
+    判断躺在「面板每次刷新都走一遍」的那条路上(`readiness` →
+    `configuration_error`):2026-10-09 审查实测 `/api/intake/social` 和
+    `/api/intake/social/x-channel` 双双 500,大V观点那一页压根打不开。
+    """
+
+    BAD = ('ws://127.0.0.1:not-a-port', 'ws://127.0.0.1:65536')
+
+    def test_a_malformed_endpoint_keeps_the_panel_open(self):
+        self.settings(ATTACH)
+        self.sub()
+        for value in self.BAD:
+            with self.subTest(value=value), \
+                 patch.dict(os.environ, {cdp_attach.ENDPOINT_ENV: value}):
+                overview = self.client.get('/api/intake/social')
+                channels = self.client.get('/api/intake/social/x-channel')
+                self.assertEqual(200, overview.status_code)
+                self.assertEqual(200, channels.status_code)
+
+    def test_it_says_the_environment_variable_is_wrong(self):
+        """说的得是这件事。只说「去勾那个开关」是让他白跑一趟 —— 显式指定之后
+        `discover` 压根不去猜别的,开关勾好了也连不上。"""
+        self.settings(ATTACH)
+        source = self.sub()
+        value = self.BAD[0]
+        with patch.dict(os.environ, {cdp_attach.ENDPOINT_ENV: value}):
+            data = self.client.get('/api/intake/social/x-channel').json()
+            banner = self.client.get('/api/intake/social').json()
+        self.assertFalse(data['ready'])
+        self.assertIn(value, data['why'])
+        self.assertIn(cdp_attach.ENDPOINT_ENV, data['hint'])
+        self.assertNotIn('chrome://inspect', data['why'] + data['hint'])
+        row = next(s for s in banner['sources'] if s['id'] == source['id'])
+        self.assertIn(cdp_attach.ENDPOINT_ENV, row['configuration_error'])
+
+    def test_check_connection_says_the_same_thing(self):
+        """「检查连接」走的是另一条路(`x_browser.probe`),所以单独再钉一遍。"""
+        self.settings(ATTACH)
+        with patch.dict(os.environ, {cdp_attach.ENDPOINT_ENV: self.BAD[1]}):
+            ready, detail = x_browser.probe('', '', attach=True)
+        self.assertFalse(ready)
+        self.assertIn(cdp_attach.ENDPOINT_ENV, detail)
+        self.assertIn('1-65535', detail)
 
 
 class LoginEndpointTests(ChannelBase):

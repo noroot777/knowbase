@@ -358,6 +358,10 @@ def readiness(settings: dict) -> tuple[bool, str, str]:
         from kb.feeds import cdp_attach
         if cdp_attach.discover() is not None:
             return True, '', ''
+        # 填错了 `KB_CDP_ENDPOINT` 时要说的是那件事:显式指定之后 `discover` 压根
+        # 不去猜别的,再让用户去勾开关是让他白跑一趟。
+        if problem := cdp_attach.explicit_problem():
+            return False, problem, cdp_attach.ENDPOINT_HINT
         return False, '没有发现开着远程调试的浏览器', cdp_attach.ENABLE_HINT
     # browser:profile 里有 Cookies 文件就算登录过。真失效要等抓取时才知道
     # (那时 `x_browser` 会认出登录页并给出重新登录的提示)。

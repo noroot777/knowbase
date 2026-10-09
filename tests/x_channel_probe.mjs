@@ -76,7 +76,7 @@ const FIXTURES = {
       interval_minutes: 360, url_hint: "", note: "" },
     { id: "social", label: "大V观点", description: "关注的人，此刻的想法。",
       channels: ["social"], manager: "feeds", icon: "chat", adapter: "social",
-      interval_minutes: 1440, url_hint: "输入 X / Twitter 账号主页", note: "三种取法" },
+      interval_minutes: 1440, url_hint: "输入 X / Twitter 账号主页", note: "X 的取法在下面的「取法」里选" },
     { id: "rss", label: "RSS", description: "让值得读的文章，自己来到这里。",
       channels: ["rss"], manager: "feeds", icon: "rss", adapter: "rss",
       interval_minutes: 360, url_hint: "输入 RSS 地址", note: "" },

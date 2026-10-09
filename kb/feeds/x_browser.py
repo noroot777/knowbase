@@ -500,6 +500,8 @@ def probe(profile: str, chrome_path: str = '', *,
     if attach:
         from kb.feeds import cdp_attach
         if cdp_attach.discover() is None:
+            if problem := cdp_attach.explicit_problem():
+                return False, f'{problem}。{cdp_attach.ENDPOINT_HINT}'
             return False, '没有发现开着远程调试的浏览器。' + cdp_attach.ENABLE_HINT
     elif os.path.lexists(os.path.join(profile, 'SingletonLock')):
         return False, '这个 profile 正被另一个窗口占着(登录窗口还开着?)。关掉它再试'

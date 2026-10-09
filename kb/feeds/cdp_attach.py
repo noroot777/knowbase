@@ -64,6 +64,11 @@ FALLBACK_PORTS = (9222, 9229, 9333)
 #: 直接指定端点的逃生口:`9222` / `127.0.0.1:9222` / `ws://127.0.0.1:9222/devtools/browser/<id>`。
 #: 给「Chrome 用了非默认 user-data-dir」这类发现不到的情况用。
 ENDPOINT_ENV = 'KB_CDP_ENDPOINT'
+#: `KB_CDP_ENDPOINT` 填错时的下一步。它和 `ENABLE_HINT` 是两回事:那句说的是
+#: 「去把开关勾上」,而这一档的开关可能早就勾好了,坏的只是这个环境变量。
+ENDPOINT_HINT = (f'{ENDPOINT_ENV} 的写法是 `9222` / `127.0.0.1:9222` / '
+                 '`ws://127.0.0.1:9222/devtools/browser/<id>`,端口要在 1-65535。'
+                 '清掉它就回到自动发现那条路。')
 #: 首次连接的上限。比 `ws_client.HANDSHAKE_TIMEOUT` 宽得多:浏览器会弹一次授权
 #: 弹窗,而用户要看见它、读一遍、再点「允许」。
 ATTACH_TIMEOUT = 90.0
@@ -144,16 +149,26 @@ def port_alive(port: int, host: str = '127.0.0.1',
 
 
 def parse_endpoint(text: str) -> Endpoint | None:
-    """把 `KB_CDP_ENDPOINT` 的三种写法翻成一个 Endpoint。认不出返回 None。"""
+    """把 `KB_CDP_ENDPOINT` 的三种写法翻成一个 Endpoint。认不出返回 None。
+
+    **绝不抛异常。** 它的调用方是来源面板每次刷新都要走的那条判断
+    (`x_channels.readiness` → `registry.configuration_error`),抛出去就是一个
+    500:`urlsplit(...).port` 对 `:not-a-port` 和 `:65536` 都抛 `ValueError`,
+    于是「环境变量填错了」这件小事会让整个大V观点的订阅接口打不开(2026-10-09
+    审查实测 `/api/intake/social` 与 `/api/intake/social/x-channel` 双双 500)。
+    """
     value = (text or '').strip()
     if not value:
         return None
     if '://' in value:
         parts = urlsplit(value)
+        try:
+            port = parts.port or (80 if parts.scheme == 'http' else 0)
+        except ValueError:                 # 端口不是数字,或者越界
+            return None
         if parts.scheme not in ('ws', 'http') or not parts.hostname:
             return None
-        port = parts.port or (80 if parts.scheme == 'http' else 0)
-        if not port:
+        if not _ok_port(port):
             return None
         return Endpoint(parts.hostname, port, parts.path or '', f'{ENDPOINT_ENV} 指定')
     host, _, tail = value.rpartition(':')
@@ -161,7 +176,27 @@ def parse_endpoint(text: str) -> Endpoint | None:
         port = int(tail)
     except ValueError:
         return None
+    if not _ok_port(port):
+        return None
     return Endpoint(host or '127.0.0.1', port, '', f'{ENDPOINT_ENV} 指定')
+
+
+def _ok_port(port: int) -> bool:
+    return 0 < port < 65536
+
+
+def explicit_problem(env: dict | None = None) -> str:
+    """`KB_CDP_ENDPOINT` 填了、却认不出来时的人话原因;正常时返回空串。
+
+    **显式指定了就不再去猜别的**(见 `discover`),所以这个原因必须有人显示出来
+    —— 不说的话面板上只剩一句「没有发现开着远程调试的浏览器」,而真实原因是这个
+    环境变量写错了:用户照那句提示去勾开关,勾完还是连不上。
+    """
+    environ = os.environ if env is None else env
+    raw = (environ.get(ENDPOINT_ENV, '') or '').strip()
+    if not raw or parse_endpoint(raw) is not None:
+        return ''
+    return f'{ENDPOINT_ENV} 填的地址认不出来:{raw}'
 
 
 def _browser_ws_path(host: str, port: int) -> str:
@@ -189,7 +224,12 @@ def discover(*, browsers: list[Browser] | None = None,
     显式的那一档排在最前,因为它是「发现逻辑对我这台机器不成立」时唯一的出路。
     """
     environ = os.environ if env is None else env
-    if explicit := parse_endpoint(environ.get(ENDPOINT_ENV, '')):
+    if raw := (environ.get(ENDPOINT_ENV, '') or '').strip():
+        explicit = parse_endpoint(raw)
+        # 写错了也不回落去猜别的:指错了要当场看出来(原因由 `explicit_problem`
+        # 说清),而不是悄悄连上另一个浏览器。
+        if explicit is None:
+            return None
         if not port_alive(explicit.port, explicit.host):
             return None
         if explicit.path:
@@ -243,7 +283,9 @@ class Attached(Session):
     def __enter__(self) -> 'Attached':
         endpoint = self._ep or discover()
         if endpoint is None:
-            raise CdpError('没有发现开着远程调试的浏览器。' + ENABLE_HINT)
+            problem = explicit_problem()
+            raise CdpError(f'{problem}。{ENDPOINT_HINT}' if problem else
+                           '没有发现开着远程调试的浏览器。' + ENABLE_HINT)
         self._ep = endpoint
         try:
             self._ws = WebSocket.connect(endpoint.host, endpoint.port, endpoint.path,
@@ -271,18 +313,18 @@ class Attached(Session):
 
     # ── 页面 ────────────────────────────────────────────────────────────────
 
-    def open_page(self, url: str = 'about:blank') -> str:
-        sid = super().open_page(url)
-        self._opened.append(self._target)
-        return sid
+    def _adopt(self, target: str) -> None:
+        """认下这张刚创建出来的标签页。**创建一回来就登记**,不等后面的初始化
+        —— 理由和实测记在 `Session._adopt` 那条注释里。"""
+        self._opened.append(target)
 
     # ── 传输 ────────────────────────────────────────────────────────────────
 
-    def _post(self, msg: dict) -> None:
+    def _post(self, msg: dict, deadline: float) -> None:
         if self._ws is None:
             raise CdpError('浏览器连接已经关掉了')
         try:
-            self._ws.send(json.dumps(msg))
+            self._ws.send(json.dumps(msg), deadline)
         except WsError as e:
             raise CdpError(str(e)) from None
 

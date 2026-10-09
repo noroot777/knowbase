@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import select
 import time
 import unittest
 
@@ -92,7 +93,7 @@ class FrameTests(unittest.TestCase):
             ws = W.WebSocket.connect('127.0.0.1', port, '/x')
             try:
                 if send:
-                    ws.send(send)
+                    ws.send(send, deadline())
                 box['got'] = ws.recv(deadline())
             finally:
                 ws.close()
@@ -258,6 +259,93 @@ class ProtocolErrorTests(unittest.TestCase):
                     ws.recv(deadline())
             finally:
                 ws.close()
+
+
+class _Stuffed:
+    """一条写不进去的**真** socket + 一个裹着它的 `WebSocket`。
+
+    摆盘在 `tests/ws_stub.stuck_pair`(`test_cdp_attach` 共用同一份 —— 各写一份
+    的话两边"算不算卡住"的判据会各漂各的)。用真 socket 而不是桩:要验的正是
+    「写路径有没有超时」,把 socket 打桩掉正好绕开唯一要验的那件事。
+    """
+
+    #: 发多大都一样卡住(对端一个字节都不收),挑一条大的是顺带把"分段写"也走到。
+    BLOB = 'x' * (4 << 20)
+
+    def __init__(self, test: unittest.TestCase):
+        stuck = S.stuck_pair()
+        self.client, self.peer = stuck.__enter__()
+        test.addCleanup(lambda: stuck.__exit__(None, None, None))
+        self.ws = W.WebSocket(self.client)          # 跳过握手:这一层不关心它
+
+
+class WriteTimeoutTests(unittest.TestCase):
+    """**写也要带 deadline。** 原来 `_write` 是裸 `sendall`:对端卡住不读的时候
+    它无限阻塞,而这条链的上游是采集阶段 —— 那一下把整轮冻住,采集预算和用户
+    按的那颗「停止」谁都轮不到执行(2026-10-09 审查实测 0.61 秒后仍阻塞着)。
+    """
+
+    def test_a_stuck_peer_times_out_instead_of_blocking(self):
+        stuffed = _Stuffed(self)
+        started = time.monotonic()
+        with self.assertRaises(W.WsError) as caught:
+            stuffed.ws.send(stuffed.BLOB, time.monotonic() + 0.3)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 2.0, f'写了 {elapsed:.2f} 秒才回来')
+        self.assertIn('预期时间', str(caught.exception))
+
+    def test_the_call_deadline_wins_over_the_write_ceiling(self):
+        """`WRITE_TIMEOUT` 只是兜底,这条命令自己的 deadline 更短就按它来 ——
+        否则 `call(timeout=0.05)` 要等十秒才失败,等于把一个小上限架空。"""
+        stuffed = _Stuffed(self)
+        started = time.monotonic()
+        with self.assertRaises(W.WsError):
+            stuffed.ws.send(stuffed.BLOB, time.monotonic() + 0.05)
+        self.assertLess(time.monotonic() - started, W.WRITE_TIMEOUT / 2)
+
+    def test_a_little_room_is_not_an_invitation_to_block(self):
+        """**socket 必须是非阻塞的 —— select 挡不住这一档。**
+
+        BSD/macOS 的 `sosend` 对一条大于剩余空间的载荷会在内核里**循环等到全部
+        写完**,所以"灌满之后对端又读走几 KB"这种常态下,一次 `send` 照样无限
+        挂住(2026-10-09 实测:测试进程卡死,得 kill)。**灌到彻底写不动的那种
+        局验不出这件事** —— 那时 select 自己就把我们挡在门外了,阻塞不阻塞都一样
+        (定点注入实测:只把 socket 改回阻塞,那组用例全绿)。
+        """
+        stuffed = _Stuffed(self)
+        # 让对端读走一点,直到我们这头**又可写了** —— 这才是要摆的那个形状:
+        # select 说可写、可剩下的空间远小于要发的量。排空多少不固定(灌进去的
+        # 量取决于内核的缓冲自动调参),所以读到可写为止、按量设上限。
+        drained = 0
+        while drained < (1 << 20):
+            if select.select([], [stuffed.client], [], 0.05)[1]:
+                break
+            drained += len(stuffed.peer.recv(1 << 16))
+        else:
+            self.fail('摆盘没摆成「有一点空间」那个形状')
+        started = time.monotonic()
+        with self.assertRaises(W.WsError):
+            stuffed.ws.send(stuffed.BLOB, time.monotonic() + 0.3)
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_a_half_written_frame_kills_the_connection(self):
+        """帧只出去一半,之后发什么都会接在那半截后面被对端当成协议错。
+        **当场断掉比留着错位好**,而且下一条命令要立刻失败、不是再等一个超时。"""
+        stuffed = _Stuffed(self)
+        with self.assertRaises(W.WsError):
+            stuffed.ws.send(stuffed.BLOB, time.monotonic() + 0.2)
+        started = time.monotonic()
+        with self.assertRaises(W.WsError) as caught:
+            stuffed.ws.send('hi', time.monotonic() + 5)
+        self.assertLess(time.monotonic() - started, 0.5, '第二条命令又等了一次超时')
+        self.assertIn('废', str(caught.exception))
+
+    def test_closing_a_stuck_connection_does_not_block(self):
+        """收尾不许为了"干净"再无限阻塞一次:`close()` 跑在 `__exit__` 里。"""
+        stuffed = _Stuffed(self)
+        started = time.monotonic()
+        stuffed.ws.close()                          # 关闭帧也走 `_write`
+        self.assertLess(time.monotonic() - started, W.CLOSE_TIMEOUT + 1.0)
 
 
 class MaskTests(unittest.TestCase):

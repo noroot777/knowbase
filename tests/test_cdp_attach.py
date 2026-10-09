@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import tempfile
@@ -31,7 +32,9 @@ from shutil import rmtree
 from unittest import mock
 
 from kb.feeds import cdp_attach as A
+from kb.feeds import ws_client, x_browser, x_cdp
 from kb.feeds.x_cdp import CdpError
+from tests import ws_stub
 from tests.headless import INSTALL_HINT, SHELL
 
 _NEEDS_SHELL = unittest.skipUnless(
@@ -194,10 +197,184 @@ class ParseEndpointTests(unittest.TestCase):
                 self.assertEqual((got.host, got.port, got.path), want)
 
     def test_unparsable_values_are_none(self):
+        """**认不出一律返回 None,绝不抛。** 它的调用方是面板每次刷新都要走的
+        那条判断,抛出去就是一个 500:`urlsplit(...).port` 对 `:not-a-port` 和
+        `:65536` 都抛 `ValueError`(2026-10-09 审查实测两个接口双双 500)。
+        """
         for text in ('', '   ', 'not-a-port', 'ws://nohost', 'ftp://127.0.0.1:9222',
-                     'ws://127.0.0.1/devtools'):
+                     'ws://127.0.0.1/devtools',
+                     'ws://127.0.0.1:not-a-port',       # 端口不是数字
+                     'ws://127.0.0.1:65536',            # 越界
+                     'ws://127.0.0.1:0', '127.0.0.1:0', '127.0.0.1:65536',
+                     '127.0.0.1:-1', '0'):
             with self.subTest(text=text):
                 self.assertIsNone(A.parse_endpoint(text))
+
+    def test_the_edges_of_the_port_range_are_in(self):
+        for text in ('1', '65535', 'ws://h:65535/p'):
+            with self.subTest(text=text):
+                self.assertIsNotNone(A.parse_endpoint(text))
+
+    def test_a_malformed_explicit_endpoint_never_falls_back(self):
+        """**显式指定了就不再去猜别的。** 指错了要当场看出来,而不是悄悄连上
+        另一个浏览器 —— 所以这一档既不读端口文件、也不扫回落端口。"""
+        probed: list[int] = []
+        with mock.patch.object(A, 'port_alive',
+                               side_effect=lambda p, *a, **kw: probed.append(p) or True):
+            found = A.discover(env={A.ENDPOINT_ENV: 'ws://127.0.0.1:65536'})
+        self.assertIsNone(found)
+        self.assertEqual([], probed, '写错了还去探别的端口')
+
+    def test_a_malformed_explicit_endpoint_says_what_is_wrong(self):
+        """原因必须有人说出来:只说「没有发现开着远程调试的浏览器」的话,用户
+        照提示去勾开关,勾完还是连不上(真实原因是这个环境变量写错了)。"""
+        problem = A.explicit_problem({A.ENDPOINT_ENV: 'ws://127.0.0.1:65536'})
+        self.assertIn(A.ENDPOINT_ENV, problem)
+        self.assertIn('ws://127.0.0.1:65536', problem)        # 把填错的那串还给他
+        self.assertIn('1-65535', A.ENDPOINT_HINT)             # 下一步
+        for env in ({}, {A.ENDPOINT_ENV: ''}, {A.ENDPOINT_ENV: '9222'}):
+            with self.subTest(env=env):
+                self.assertEqual('', A.explicit_problem(env))
+
+
+class _StuckAttached(A.Attached):
+    """`__enter__` 不再去连 —— 传输已经由摆盘塞好了。
+
+    **不这么做的话这组用例压根走不到写路径**:真的 `__enter__` 会按那个假端点
+    重新握一次手、当场连不上,于是整条用例验的变成了"连不上"(定点注入时实测
+    各版本全绿,而写路径一行都没执行)。跳过它之后,第一条真命令就是采集自己
+    发的那一条,正是审查复现的那个形状。
+    """
+
+    def __enter__(self) -> '_StuckAttached':
+        return self
+
+
+@contextmanager
+def _stuck_attached():
+    """一个**真** `Attached`,它的传输是一条灌满了的真 socket。
+
+    对端扮演那个"卡住的浏览器":连上了、但永远不读数据。灌满内核缓冲之后任何
+    一次写都只能等它来读 —— 原来那条裸 `sendall` 在这里**无限**阻塞,而这条链
+    的上游是采集阶段(2026-10-09 审查实测:`call(timeout=0.05)` 0.61 秒后仍
+    阻塞着,只有强行关掉对端才解开)。摆盘和「怎么才算真的灌满」在
+    `tests/ws_stub.stuck_pair`(`test_ws_client` 共用同一份)。
+
+    `Session.call`、`ws_client._write` 一行不打桩 —— 打桩正好绕开唯一要验的
+    那件事。
+    """
+    with ws_stub.stuck_pair() as (mine, _peer):
+        session = _StuckAttached(A.Endpoint('127.0.0.1', 1, '/stub', '卡住的浏览器'))
+        session._ws = ws_client.WebSocket(mine)     # 构造时就设成非阻塞
+        yield session
+
+
+class _DeadlineProbe(x_cdp.Session):
+    """只记下 `_post` 收到的 deadline。两条传输共用 `Session.call`,所以这条
+    契约对管道那边同样成立。"""
+
+    def __init__(self):
+        super().__init__()
+        self.deadlines: list[float] = []
+
+    def _post(self, msg: dict, deadline: float) -> None:
+        self.deadlines.append(deadline)
+        raise CdpError('到这儿就够了')
+
+    def _take(self, deadline: float) -> dict:         # pragma: no cover
+        raise AssertionError('发都没发出去,不该来收')
+
+
+class CallDeadlineTests(unittest.TestCase):
+    """**一条命令的截止时刻要在发出去之前就算出来,而且发送也受它约束。**
+
+    原来是先 `_send` 再算 deadline,于是 `timeout` 只管收、不管发:对端卡住
+    不读数据时,一条命令停在写上无限等 —— 采集预算和用户按的那颗「停止」谁都
+    轮不到执行。
+    """
+
+    def test_the_deadline_is_computed_before_the_command_goes_out(self):
+        probe = _DeadlineProbe()
+        before = time.monotonic()
+        with self.assertRaises(CdpError):
+            probe.call('Browser.getVersion', timeout=7.0)
+        self.assertEqual(1, len(probe.deadlines))
+        # 发送拿到的就是「现在 + timeout」那一个,不是一个空值或者无限。
+        self.assertLessEqual(probe.deadlines[0], time.monotonic() + 7.0)
+        self.assertGreaterEqual(probe.deadlines[0], before)
+
+    def test_a_stuck_browser_does_not_block_a_call(self):
+        """后果那一半:卡住的对端只能让这条命令**按时失败**。
+
+        **载荷必须大、判据必须认写那一侧的文案**:灌满的 socket 过一会儿还会腾出
+        两 KB,一条几十字节的命令照样挤得进去 —— 那时失败来自随后的**读**超时,
+        这条用例对写路径压根不敏感(定点注入时实测全绿)。两条错误文案也不一样:
+        读是「没有在预期时间内响应」,写是「没有在预期时间内收下命令」。
+        """
+        big = {'expression': 'x' * (4 << 20)}
+        with _stuck_attached() as session:
+            started = time.monotonic()
+            with self.assertRaises(CdpError) as caught:
+                session.call('Runtime.evaluate', big, timeout=0.3)
+            elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 2.0, f'写了 {elapsed:.2f} 秒才回来')
+        self.assertIn('收下命令', str(caught.exception))
+
+    def test_a_stuck_browser_does_not_freeze_the_whole_round(self):
+        """后果那一半:`harvest` 要回来,而不是把整轮冻在第一条命令上。
+
+        **只替掉「浏览器从哪儿来」这一下**(口径同 `test_x_collectors._FakeChrome`)
+        —— 给它一个传输真的卡住的 `Attached`,`harvest` 自己那段编排、
+        `Session.call` 和写路径全是真的。
+        """
+        with _stuck_attached() as session:
+            jobs = [('alice', ''), ('bob', '')]
+            started = time.monotonic()
+            with mock.patch.object(x_browser, 'browser_session', return_value=session), \
+                 mock.patch.object(ws_client, 'WRITE_TIMEOUT', 0.3):
+                # `open_page` 用的是默认 45 秒的命令超时,真正救场的是写上限那一道
+                # —— 把它压到 0.3 秒只是别让这条用例真等十秒。
+                got = x_browser.harvest(jobs, profile='/tmp/nope', attach=True,
+                                        budget=30.0)
+            elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 10.0, f'整轮卡了 {elapsed:.1f} 秒')
+        self.assertEqual({'alice', 'bob'}, set(got))
+        for handle, row in got.items():
+            with self.subTest(handle=handle):
+                self.assertTrue(row['error'], '卡住了却没报错')
+                self.assertEqual([], row['entries'])
+
+
+class PipeWriteTests(unittest.TestCase):
+    """管道那条传输同样会在写上阻塞(缓冲 64 KB 一满 `os.write` 就停住),
+    而它攥着的也是整轮采集。这里不起浏览器,只把那条写路径摆进死局。"""
+
+    def test_our_write_end_is_non_blocking(self):
+        """契约那一半:`__enter__` 要把我们这个写端设成非阻塞 —— 阻塞的 `write`
+        对一条大于剩余空间的载荷会等到全部写完,下面那个循环就白设上限了。"""
+        chrome = x_cdp.Chrome('/tmp/nope')
+        r, w = os.pipe()                                 # 和生产一样:默认阻塞
+        self.addCleanup(lambda: [os.close(fd) for fd in (r, w)])
+        chrome._w = w
+        chrome._nonblocking_write()                      # `__enter__` 里就是这一句
+        self.assertFalse(os.get_blocking(w))
+
+    def test_a_full_pipe_times_out_instead_of_blocking(self):
+        chrome = x_cdp.Chrome('/tmp/nope')
+        r, w = os.pipe()
+        self.addCleanup(lambda: [os.close(fd) for fd in (r, w)])
+        os.set_blocking(w, False)                        # 灌满这一步由用例自己来
+        try:
+            while True:
+                os.write(w, b'x' * 4096)             # 灌满,没人读
+        except BlockingIOError:
+            pass
+        chrome._w = w
+        started = time.monotonic()
+        with self.assertRaises(CdpError) as caught:
+            chrome._post({'id': 1, 'method': 'X', 'params': {}}, time.monotonic() + 0.3)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertIn('预期时间', str(caught.exception))
 
 
 class _Recording(A.Attached):
@@ -210,7 +387,7 @@ class _Recording(A.Attached):
     def __enter__(self) -> '_Recording':
         return self                        # 跳过握手,这条用例不关心传输
 
-    def _post(self, msg: dict) -> None:
+    def _post(self, msg: dict, deadline: float) -> None:
         self.sent.append(msg)
 
     def _take(self, deadline: float) -> dict:
@@ -225,6 +402,21 @@ class _Recording(A.Attached):
     def methods(self) -> list[str]:
         return [m['method'] for m in self.sent]
 
+    def closed(self) -> list[str]:
+        return [m['params']['targetId'] for m in self.sent
+                if m['method'] == 'Target.closeTarget']
+
+
+class _FailingInit(_Recording):
+    """`createTarget` 成功、下一条 `attachToTarget` 失败 —— 「标签页已经开出来
+    了,初始化半途炸了」那个形状。"""
+
+    def _take(self, deadline: float) -> dict:
+        msg = self.sent[-1]
+        if msg['method'] == 'Target.attachToTarget':
+            return {'id': msg['id'], 'error': {'message': '注入:初始化失败'}}
+        return super()._take(deadline)
+
 
 class ContractTests(unittest.TestCase):
 
@@ -235,6 +427,20 @@ class ContractTests(unittest.TestCase):
         created = [m for m in page.sent if m['method'] == 'Target.createTarget']
         self.assertEqual(len(created), 1)
         self.assertIs(created[0]['params'].get('background'), True)
+
+    def test_a_tab_created_before_a_failed_init_is_still_ours_to_close(self):
+        """**所有权在 `createTarget` 一回来就登记,不等后面的初始化。**
+
+        原来是等整个 `open_page` 返回才登记,于是 `attachToTarget` / `Page.enable`
+        任何一步失败时,退出清理压根不知道有这张页 —— 一张空白页就永久留在
+        **用户自己的**浏览器里,「检查连接」反复失败会一直堆(2026-10-09 审查
+        拿真无头浏览器实测:`leftover_tabs: ['data:...review-leftover']`)。
+        """
+        page = _FailingInit()
+        with self.assertRaises(CdpError):
+            with page:                     # 退出清理照旧跑
+                page.open_page('https://example.org/')
+        self.assertEqual(['T-1'], page.closed(), '创建出来的那张标签页没被收掉')
 
     def test_exit_closes_only_our_own_tabs_and_never_the_browser(self):
         """`Browser.close` 会关掉用户整个浏览器 —— 连同他所有标签页和没提交的
@@ -327,12 +533,36 @@ class LiveBrowserTests(unittest.TestCase):
             self.assertTrue(any('user-tab' in url for url in left),
                             f'用户原来那个标签页不见了:{left}')
 
+    def test_a_tab_is_not_left_behind_when_init_fails(self):
+        """后果那一半,真浏览器:`createTarget` 成功、下一条命令失败,退出之后
+        那张页不许留在用户的浏览器里(而浏览器本身照旧活着)。"""
+        class _FailAttach(A.Attached):
+            def call(self, method, params=None, sid='', timeout=x_cdp.CALL_TIMEOUT):
+                if method == 'Target.attachToTarget':
+                    raise CdpError('注入:初始化失败')
+                return super().call(method, params, sid, timeout)
+
+        leftover = 'data:text/html,<title>kb-leftover</title>'
+        with _live_browser() as (proc, browser, _user_tab):
+            found = A.discover(browsers=[browser], env={})
+            self.assertIsNotNone(found)
+            with A.Attached(found) as page:
+                before = _pages(page)
+            session = _FailAttach(found)
+            with self.assertRaises(CdpError):
+                with session:
+                    session.open_page(leftover)
+            time.sleep(0.3)
+            with A.Attached(found) as again:
+                left = _pages(again)
+            self.assertEqual(before, left, f'初始化失败留下了标签页:{left}')
+            self.assertIsNone(proc.poll(), '退出之后用户的浏览器被关掉了')
+
     def test_probe_goes_through_the_same_path(self):
         """`x_browser.probe(attach=True)` 和抓取走同一条路。这里连的是一个
         没有 X 登录态的空浏览器,所以结论必然是"不就绪" —— 要验的是它**真连上
         了**并给出成品文案,而不是在前置检查上就返回。
         """
-        from kb.feeds import x_browser
         with _live_browser() as (_proc, browser, _tab):
             found = A.discover(browsers=[browser], env={})
             self.assertIsNotNone(found)
@@ -355,7 +585,7 @@ class AttachedTransportTests(unittest.TestCase):
     def test_posting_after_close_is_a_clean_error(self):
         session = A.Attached(A.Endpoint('127.0.0.1', 1, '/x', '桩'))
         with self.assertRaises(CdpError):
-            session._post({'id': 1, 'method': 'X', 'params': {}})
+            session._post({'id': 1, 'method': 'X', 'params': {}}, time.monotonic() + 1)
         with self.assertRaises(CdpError):
             session._take(time.monotonic() + 1)
 

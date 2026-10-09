@@ -27,8 +27,9 @@ SOURCE_TYPES = {
     'social': SourceType('social', '大V观点', '关注的人，此刻的想法。', ('social',),
                          icon='chat', interval_minutes=1440,
                          url_hint='输入 X / Twitter 账号主页，或其他社交媒体的 RSS 地址',
-                         note='X 可选三种取法：RSS 桥接、feedgrab（cookie）、你自己的浏览器登录态。'
-                              '也可以为单个账号填写专用订阅链接，它优先于任何通道。', adapter='social'),
+                         note='X 的取法在下面的「取法」里选：桥接、cookie、浏览器登录态几条路，'
+                              '各自要准备的东西不同。也可以为单个账号填写专用订阅链接，它优先于任何通道。',
+                         adapter='social'),
     'rss': SourceType('rss', 'RSS', '让值得读的文章，自己来到这里。', ('rss',)),
 }
 

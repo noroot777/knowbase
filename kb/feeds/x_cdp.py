@@ -46,6 +46,10 @@ import shutil
 import subprocess
 import time
 
+# 写超时的常量放在 `ws_client`(它谁都不依赖,判据也写在它的模块注释里)。
+# 两条传输共用一个值是有意的:「几 KB 写不进去就是对端卡住了」跟传输无关。
+from kb.feeds.ws_client import WRITE_TIMEOUT
+
 # F_DUPFD 的下界:躲开标准流和 Chrome 自己要用的 3/4。
 _FD_FLOOR = 10
 # Chrome 在 macOS 上的默认位置。装在别处时由设置里的 chrome_path 覆盖。
@@ -98,7 +102,8 @@ class Session:
 
     # ── 传输(子类实现)──────────────────────────────────────────────────────
 
-    def _post(self, msg: dict) -> None:
+    def _post(self, msg: dict, deadline: float) -> None:
+        """把一条消息发出去,**不许超过 deadline**(见 `call` 那条注释)。"""
         raise NotImplementedError
 
     def _take(self, deadline: float) -> dict:
@@ -106,19 +111,28 @@ class Session:
 
     # ── 协议 ────────────────────────────────────────────────────────────────
 
-    def _send(self, method: str, params: dict | None = None, sid: str = '') -> int:
+    def _send(self, method: str, params: dict | None = None, sid: str = '',
+              deadline: float = 0.0) -> int:
         self._seq += 1
         msg = {'id': self._seq, 'method': method, 'params': params or {}}
         if sid:
             msg['sessionId'] = sid
-        self._post(msg)
+        self._post(msg, deadline or time.monotonic() + CALL_TIMEOUT)
         return self._seq
 
     def call(self, method: str, params: dict | None = None, sid: str = '',
              timeout: float = CALL_TIMEOUT) -> dict:
-        """发一条命令,等它自己那条回复。期间的事件一律丢掉(我们不订阅事件)。"""
-        want = self._send(method, params, sid)
+        """发一条命令,等它自己那条回复。期间的事件一律丢掉(我们不订阅事件)。
+
+        **deadline 要在发出去之前就算出来,而且发送也受它约束。** 原来是先
+        `_send` 再算 deadline,于是 `timeout` 只管收、不管发 —— 对端卡住不读
+        数据的时候,一条命令会停在写上无限等:采集预算和用户按的那颗「停止」
+        谁都轮不到执行(2026-10-09 审查实测 `timeout=0.05` 的一次 call 0.61 秒
+        后仍阻塞着,只有强行关掉对端才解开)。两条传输的 `_post` 因此都收
+        deadline,写不动就报错,而不是替调用方把时间花在那儿。
+        """
         deadline = time.monotonic() + timeout
+        want = self._send(method, params, sid, deadline)
         while True:
             msg = self._take(deadline)
             if msg.get('id') != want:
@@ -129,11 +143,23 @@ class Session:
 
     # ── 页面 ────────────────────────────────────────────────────────────────
 
+    def _adopt(self, target: str) -> None:
+        """登记一个刚被创建出来的标签页。要记所有权的子类重写它。
+
+        **必须在 `Target.createTarget` 刚回来那一刻就调,不能等整个 `open_page`
+        返回。** 后面 `attachToTarget` / `Page.enable` 任何一步失败时,页面已经
+        在浏览器里了 —— 而退出清理只认登记过的那几个,晚一步就是把一张空白页
+        永久留在**用户自己的**浏览器里,反复重试会一直堆(2026-10-09 审查拿真
+        无头浏览器实测:注入一次 attach 失败,退出之后那张 `review-leftover`
+        还在)。
+        """
+
     def open_page(self, url: str = 'about:blank') -> str:
         params: dict = {'url': url}
         if self._BACKGROUND:
             params['background'] = True
         self._target = self.call('Target.createTarget', params)['targetId']
+        self._adopt(self._target)          # 先认下所有权,再做后面的初始化
         self._sid = self.call('Target.attachToTarget',
                               {'targetId': self._target, 'flatten': True})['sessionId']
         self.call('Page.enable', {}, self._sid)
@@ -199,6 +225,7 @@ class Chrome(Session):
                 if fd >= 0:
                     os.close(fd)
         self._r, self._w = pr, pw
+        self._nonblocking_write()
         try:
             self.call('Browser.getVersion', timeout=30)
         except (CdpError, EOFError, OSError) as e:
@@ -209,7 +236,9 @@ class Chrome(Session):
     def __exit__(self, *_exc) -> None:
         if self.proc and self.proc.poll() is None:
             try:
-                self._send('Browser.close')          # 让它自己把 profile 存盘
+                # 让它自己把 profile 存盘。这一下同样不许无限阻塞:它跑在
+                # `__exit__` 里,卡住就是连收尾都回不来。
+                self._send('Browser.close', deadline=time.monotonic() + 5)
                 self.proc.wait(timeout=10)
             except (OSError, subprocess.TimeoutExpired):
                 self.proc.kill()
@@ -225,8 +254,38 @@ class Chrome(Session):
 
     # ── 传输 ────────────────────────────────────────────────────────────────
 
-    def _post(self, msg: dict) -> None:
-        os.write(self._w, json.dumps(msg).encode('utf-8') + b'\0')
+    def _nonblocking_write(self) -> None:
+        """我们那个写端一律非阻塞。
+
+        理由同 `ws_client.WebSocket.__init__`:**阻塞的 `write` 对一条大于剩余
+        空间的载荷会一直等到全部写完**(POSIX 对管道就是这么规定的),select 在
+        它前面挡不住 —— 于是 `_post` 那个「等可写再写一段」的循环只有在非阻塞
+        之下才真的有上限。单拎成一个方法是为了让回归拿它摆局,不必真起一个
+        Chrome。只动我们这一端:Chrome 继承的是管道的另一头,两个独立的 open
+        file description,它那边的阻塞语义一个字没变。
+        """
+        os.set_blocking(self._w, False)
+
+    def _post(self, msg: dict, deadline: float) -> None:
+        """写也带 deadline(口径同 `ws_client._write`)。
+
+        管道这条会以同样的方式阻塞:Chrome 卡住不读的时候,管道缓冲(64 KB)
+        一满 `os.write` 就停在那儿,而那一下攥着的是整轮采集。健康的浏览器压根
+        不会在这里停住 —— 一条命令只有几 KB。
+        """
+        view = memoryview(json.dumps(msg).encode('utf-8') + b'\0')
+        limit = min(deadline, time.monotonic() + WRITE_TIMEOUT)
+        while view:
+            left = limit - time.monotonic()
+            if left <= 0 or not select.select([], [self._w], [], left)[1]:
+                raise CdpError('浏览器没有在预期时间内收下命令')
+            try:
+                sent = os.write(self._w, view)
+            except BlockingIOError:
+                continue                  # select 说可写、内核又改主意了
+            except OSError as e:
+                raise CdpError(f'写浏览器连接出错:{e}') from None
+            view = view[sent:]
 
     def _take(self, deadline: float) -> dict:
         while b'\0' not in self._buf:

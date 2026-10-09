@@ -12,6 +12,17 @@ recv 循环的事」。
 `x_cdp.CALL_TIMEOUT` 和 embed_pool 那次事故:攥着锁阻塞的 read 会把一整条链
 冻住,所以把「挂住」变成「报错重试」。
 
+**写也永远带 deadline,而且不许用 `sendall`**:对端(卡住的浏览器、或者一个
+压根不读数据的端口)不收的时候,`sendall` 在内核缓冲满了之后会**无限**阻塞 ——
+而这条链的上游是采集阶段,那一下把整轮冻住:采集预算和用户按的那颗「停止」谁
+都轮不到执行(2026-10-09 审查实测:`call(timeout=0.05)` 0.61 秒后仍阻塞着,
+只有测试主动把对端关掉才解开)。所以 socket 一律非阻塞(见 `__init__`:光
+「select 等可写 + send」挡不住,BSD 的 `sosend` 对大载荷会在内核里循环等到写完)、
+`_write` 按 select 等可写、一段段 `send`,
+而且 **超时之后这条连接就废了**:帧只发出去一半,之后发什么都会接在那半截后面
+被对端当成协议错 —— 比"再等一次"更坏的是把错位留着。握手、自动 pong、关闭帧
+走的是同一条写路径,所以同样受限。
+
 **不协商 permessage-deflate**(握手里压根不发 `Sec-WebSocket-Extensions`),
 于是收到的帧 RSV 位一定是 0 —— 置位就是对端在用我们没同意过的扩展,当协议
 错处理,不去猜它想压缩什么。
@@ -40,6 +51,13 @@ MAX_PAYLOAD = 64 << 20
 _MAX_HEAD = 1 << 16
 _CHUNK = 1 << 16
 HANDSHAKE_TIMEOUT = 10.0
+#: 单次写的上限,还会被这条命令自己的 deadline 压一道(`_write` 取两者的小者,
+#: 所以 `call(timeout=0.05)` 就是 0.05 秒失败,不是十秒)。本机 loopback 上一条
+#: CDP 命令只有几 KB、内核缓冲是几百 KB —— 健康的浏览器压根不会在写上停住,
+#: 十秒收不下几 KB 就是它卡住了。
+WRITE_TIMEOUT = 10.0
+#: 收尾那一下的上限。关连接不许为了"干净"再无限阻塞一次。
+CLOSE_TIMEOUT = 2.0
 
 OP_CONT, OP_TEXT, OP_BINARY = 0x0, 0x1, 0x2
 OP_CLOSE, OP_PING, OP_PONG = 0x8, 0x9, 0xA
@@ -80,9 +98,16 @@ class WebSocket:
     """一条客户端连接。用完要 `close()`(调用方多半是 `try/finally`)。"""
 
     def __init__(self, sock: socket.socket):
+        # **socket 必须是非阻塞的,超时一律由 select 按 deadline 管。**
+        # 光靠「select 等可写 + send」挡不住阻塞:BSD/macOS 的 `sosend` 对一条
+        # 大载荷会在内核里**循环等到全部写完**,于是一次 `send(4 MB)` 在没人读
+        # 的连接上照样无限挂住(2026-10-09 实测:测试进程卡死,要 kill)。
+        # 非阻塞之下 `send` 只写得进多少写多少、立刻返回,deadline 才真的管事。
+        sock.setblocking(False)
         self._sock = sock
         self._buf = bytearray()
         self._closed = False
+        self._broken = False
 
     # ── 建立 ────────────────────────────────────────────────────────────────
 
@@ -100,7 +125,7 @@ class WebSocket:
             sock = socket.create_connection((host, port), timeout)
         except OSError as e:
             raise WsError(f'连不上 {host}:{port} —— {e}') from None
-        sock.settimeout(None)            # 之后一律由 select 按 deadline 管超时
+        deadline = time.monotonic() + timeout
         key = base64.b64encode(os.urandom(16))
         request = (f'GET {path or "/"} HTTP/1.1\r\n'
                    f'Host: {host}:{port}\r\n'
@@ -110,8 +135,8 @@ class WebSocket:
                    'Sec-WebSocket-Version: 13\r\n\r\n')
         ws = cls(sock)
         try:
-            ws._write(request.encode('ascii'))
-            ws._handshake(key, time.monotonic() + timeout)
+            ws._write(request.encode('ascii'), deadline)
+            ws._handshake(key, deadline)
         except BaseException:
             ws._shutdown()
             raise
@@ -135,8 +160,9 @@ class WebSocket:
 
     # ── 收发 ────────────────────────────────────────────────────────────────
 
-    def send(self, text: str) -> None:
-        self._write(_frame(OP_TEXT, text.encode('utf-8')))
+    def send(self, text: str, deadline: float) -> None:
+        """发一条文本消息。`deadline` 是这条命令**整体**的截止时刻(含发送)。"""
+        self._write(_frame(OP_TEXT, text.encode('utf-8')), deadline)
 
     def recv(self, deadline: float) -> str:
         """收下一条**完整**消息。分片拼起来,控制帧就地处理掉。
@@ -149,14 +175,15 @@ class WebSocket:
         while True:
             fin, opcode, payload = self._read_frame(deadline)
             if opcode == OP_PING:
-                self._write(_frame(OP_PONG, payload))
+                self._write(_frame(OP_PONG, payload), deadline)
                 continue
             if opcode == OP_PONG:
                 continue
             if opcode == OP_CLOSE:
                 self._closed = True
                 try:
-                    self._write(_frame(OP_CLOSE, payload[:2]))
+                    self._write(_frame(OP_CLOSE, payload[:2]),
+                                min(deadline, time.monotonic() + CLOSE_TIMEOUT))
                 except WsError:
                     pass                  # 对端已经走了,回不回都一样
                 raise EOFError('浏览器关闭了 WebSocket 连接')
@@ -195,11 +222,32 @@ class WebSocket:
 
     # ── 字节层 ──────────────────────────────────────────────────────────────
 
-    def _write(self, data: bytes) -> None:
-        try:
-            self._sock.sendall(data)
-        except OSError as e:
-            raise WsError(f'写浏览器连接出错:{e}') from None
+    def _write(self, data: bytes, deadline: float) -> None:
+        """按 deadline 写完,写不动就废掉这条连接(见模块注释)。
+
+        上限取「这条命令的 deadline」和 `WRITE_TIMEOUT` 的小者:前者让
+        `call(timeout=0.05)` 真的在 0.05 秒失败,后者兜住压根没给 deadline 的
+        那些路(收尾、pong)。
+        """
+        if self._broken:
+            raise WsError('这条浏览器连接已经废了(上一次没写完,帧错位了)')
+        view = memoryview(data)
+        limit = min(deadline, time.monotonic() + WRITE_TIMEOUT)
+        while view:
+            left = limit - time.monotonic()
+            if left <= 0 or not select.select([], [self._sock], [], left)[1]:
+                # 半截帧已经出去了 —— 这条连接从此不可用,当场断掉比留着错位好。
+                self._broken = self._closed = True
+                self._shutdown()
+                raise WsError('浏览器没有在预期时间内收下命令(连接已断开)')
+            try:
+                sent = self._sock.send(view)
+            except BlockingIOError:
+                continue                  # select 说可写、内核又改主意了,重算 deadline
+            except OSError as e:
+                self._broken = True
+                raise WsError(f'写浏览器连接出错:{e}') from None
+            view = view[sent:]
 
     def _fill(self, deadline: float) -> None:
         left = deadline - time.monotonic()
@@ -209,6 +257,8 @@ class WebSocket:
             return                         # 超时由上面那句判,这里只管有没有数据
         try:
             chunk = self._sock.recv(_CHUNK)
+        except BlockingIOError:
+            return                        # 非阻塞下的空读:下一轮重新 select
         except OSError as e:
             raise WsError(f'读浏览器连接出错:{e}') from None
         if not chunk:
@@ -238,9 +288,10 @@ class WebSocket:
         if not self._closed:
             self._closed = True
             try:
-                self._write(_frame(OP_CLOSE, (1000).to_bytes(2, 'big')))
+                self._write(_frame(OP_CLOSE, (1000).to_bytes(2, 'big')),
+                            time.monotonic() + CLOSE_TIMEOUT)
             except WsError:
-                pass
+                pass                      # 对端已经走了或者卡住了,收尾不等它
         self._shutdown()
 
     def _shutdown(self) -> None:
