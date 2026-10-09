@@ -57,6 +57,12 @@ from kb.feeds.fetching import FeedError, request
 # 700 行硬上限,而它是纯数据、没有被任何测试打桩(见那个模块的注释)。绑回本模块
 # 的 `_READ_JS`,所以 dom 那组照旧按老名字把它丢给真浏览器 eval。
 from kb.feeds.x_article_js import READ_JS as _READ_JS
+# 回包的结构判定和块级零件也单独一个文件,同样**只因为行数**(见那个模块的
+# 注释)。原样 import 回本模块的全局,所以 `x_article._code_body` 这类直测、
+# 以及 `scripts/x_article_backfill` 里的 `x_article.ArticleUnavailable` 都照旧。
+from kb.feeds.x_article_shape import (
+    ArticleUnavailable, _code_body, _entities, _entity_image, _fence,
+    _media_urls, _must_block, _must_text, _rows)
 from kb.feeds.x_cdp import CdpError
 
 # 接口地址。设成空串 = 整个关掉这一步(不发请求、不拦任何条目)。
@@ -82,10 +88,6 @@ _PREFIX = {
     'header-four': '#### ', 'header-five': '##### ', 'header-six': '###### ',
     'unordered-list-item': '- ', 'ordered-list-item': '1. ', 'blockquote': '> ',
 }
-
-
-class ArticleUnavailable(RuntimeError):
-    """没问到。message 是成品文案。**和「它没有长文」是两回事** —— 后者返回 None。"""
 
 
 def lead_text(body: str) -> str:
@@ -162,114 +164,6 @@ def needs_article(entry: dict, *, links_only: bool = False) -> bool:
     return bool(entry.get(HINT)) or not lead_text(body)
 
 
-def _rows(value) -> list:
-    """上游给的「一串东西」。**非列表一律当空。**
-
-    这些字段全来自第三方回包,而 `for x in <标量>` 抛的是 `TypeError` —— 它会从
-    `render` 一路漏出 `fetch`、漏出 `fill`(只认 `ArticleUnavailable`)、再漏出
-    `harvest` 的账号隔离(只认 `XBrowserError`/`CdpError`),于是**后面的账号
-    一个都不同步**(2026-10-10 第 2 轮审查实测的正是这条链,只是入口换成了
-    `media_info`)。这里当空,结果就只是「这一处认不出来」:那张图跳过、那一块
-    跳过,**整篇正文照旧补得到**。
-    """
-    return value if isinstance(value, list) else []
-
-
-def _media_urls(article: dict) -> dict[str, str]:
-    """`media_id` → 图片地址。文章里的图是按 id 引用的,地址在另一张表里。
-
-    **每一层都明确判类型,不靠 `or {}` 兜底。** `x or {}` 只对**假值**生效,
-    而第三方回包给的是**非空**的错类型:`media_info` 是一个非空列表时
-    `(… or {}).get(…)` 当场 `AttributeError: 'list' object has no attribute
-    'get'`(2026-10-10 第 2 轮审查的最小受控输入就是它)。认不出的那一条跳过去,
-    和上面那条 `isinstance(media, dict)` 是同一条口径 —— 这篇文章的正文块是好的,
-    末态该是「正文照旧补到、只是那张图少一个地址」。
-    """
-    out = {}
-    for media in _rows(article.get('media_entities')):
-        if not isinstance(media, dict):
-            continue
-        info = media.get('media_info')
-        if not isinstance(info, dict):
-            continue
-        url = str(info.get('original_img_url') or '').strip()
-        if url and (mid := str(media.get('media_id') or '')):
-            out[mid] = url
-    return out
-
-
-def _entity_image(block: dict, entities: dict, media: dict) -> str:
-    """atomic 块指向的那张图。认不出来就返回空串(这一块整个跳过)。
-
-    三层嵌套各判一次类型,理由同 `_media_urls`:`data` 或 `mediaItems` 里的
-    元素换成别的类型时,这一块跳过去就是了,不该把整篇文章连同后面的账号带掉。
-    """
-    ranges = _rows(block.get('entityRanges'))
-    if not ranges or not isinstance(ranges[0], dict):
-        return ''
-    value = entities.get(str(ranges[0].get('key')))
-    if not isinstance(value, dict) or value.get('type') != 'MEDIA':
-        return ''
-    data = value.get('data')
-    if not isinstance(data, dict):
-        return ''
-    for item in _rows(data.get('mediaItems')):
-        if not isinstance(item, dict):
-            continue
-        if url := media.get(str(item.get('mediaId') or '')):
-            return url
-    return ''
-
-
-def _entities(content: dict) -> dict:
-    """`entityMap`。**它是一个列表,不是字典** —— 上游给的是 `[{key, value}, …]`,
-    而块里的 `entityRanges[].key` 是数字,所以键一律按字符串比。"""
-    raw = content.get('entityMap')
-    if isinstance(raw, dict):
-        return {str(k): v for k, v in raw.items()}
-    out = {}
-    for row in _rows(raw):
-        if isinstance(row, dict) and 'key' in row:
-            out[str(row['key'])] = row.get('value')
-    return out
-
-
-def _code_body(lines: list[str]) -> str:
-    """把攒起来的代码行拼成围栏内容。**行内容一律原样,一个字节都不改。**
-
-    行尾空白**可能正是数据** —— 多行字符串、提示词模板、定宽文本、字符画都把它
-    当内容。逐行 `rstrip` 的那一版实测过:一段三引号字符串里第二行末尾那两个
-    空格被删掉之后,代码照旧 `compile()` 得过,而里面那句 `assert` 当场失败
-    (2026-10-09 第 4 轮审查,接口、后路、导出到阅读页复制四条路各复现一次)
-    —— **「编译得过」证明不了字符串的值没被改写**,所以回归的判据是执行输出。
-
-    真实 Draft.js 的代码块是**一行一个块**,所以「每块收尾」就等于「每行收尾」:
-    这件事只能在**整组边界**做。而且只削**完全空**的行:纯空格的行同样可能是
-    数据,代码**中间**的空行照旧原样留着。
-    """
-    rows = '\n'.join(lines).split('\n')
-    a, b = 0, len(rows)
-    while a < b and not rows[a]:
-        a += 1
-    while b > a and not rows[b - 1]:
-        b -= 1
-    body = '\n'.join(rows[a:b])
-    return body if body.strip() else ''
-
-
-def _fence(code: str) -> str:
-    """把一段代码包成 markdown 代码围栏。
-
-    围栏是 markdown 里**唯一**能原样留住换行和缩进的结构:裸代码写进 md 之后,
-    阅读页按普通段落渲染,HTML 的空白折叠把四格/八格缩进一起吃掉 —— 复制出来
-    `compile()` 当场报错(2026-10-09 审查实测)。围栏长度避开代码里已有的反引号
-    串,否则内容里一行 ``` 就把围栏提前收尾。
-    """
-    n = max([3] + [len(t) + 1 for t in re.findall(r'`{3,}', code)])
-    bar = '`' * n
-    return f'{bar}\n{code}\n{bar}'
-
-
 def render(article: dict) -> str:
     """文章 JSON → markdown 正文。
 
@@ -280,6 +174,11 @@ def render(article: dict) -> str:
     的图)没有这个问题,它们本来就是一整块。
 
     标题不写进正文:`sync.export` 自己会在 md 顶上写一行 `# <title>`。
+
+    **正文块**那一路只收合格结构,认不出来一律抛 `ArticleUnavailable`:整个成员
+    不是对象(`_must_block`)、块里的必需字段不是字符串(`_must_text`)都算 ——
+    丢掉它们之后剩下的正常块会拼出一段**非空**正文,那就是拿残缺内容盖「成功」
+    的章。可选的那些(图片地址)认不出来只跳过那一块。
     """
     content = article.get('content')
     if not isinstance(content, dict):
@@ -293,16 +192,17 @@ def render(article: dict) -> str:
             out.append(_fence(body))
         code.clear()
 
-    for block in _rows(content.get('blocks')):
-        if not isinstance(block, dict):
+    for row in _rows(content.get('blocks')):
+        block = _must_block(row)
+        if block is None:
             continue
-        kind = str(block.get('type') or 'unstyled')
+        kind = _must_text(block, 'type') or 'unstyled'
         if kind == 'atomic':
             flush()
             if url := _entity_image(block, entities, media):
                 out.append(f'![]({url})')
             continue
-        text = str(block.get('text') or '').replace('\x00', '')
+        text = _must_text(block, 'text').replace('\x00', '')
         if kind == 'code-block':
             # Draft.js 的代码块是**一行一个块**(`blockRenderMap` 把相邻的几个包进
             # 同一个 `<pre>`),所以攒起来合并成**一个**围栏 —— 每行各发一个围栏的话
@@ -350,13 +250,28 @@ def fetch(url: str, *, timeout: float = 0.0) -> dict | None:
         raise ArticleUnavailable('长文接口的回包里没有推文')
     article = payload['tweet'].get('article')
     if not isinstance(article, dict) or not article:
+        # 缺失、null、空对象(以及别的空值)都是在说「这条推文没有长文」——
+        # 那是一个**确定的结论**,调用方按它原样入库、不冻水位(纯图推文就是
+        # 这样)。**非空的错误类型不是**:那是回包在撒谎,而把它当成"确定没有"
+        # 会放行一条**空正文**落库、水位照常推进、后路压根不被触发,之后
+        # `DO NOTHING` 之下再也补不回来(2026-10-10 第 3 轮审查实测:`article`
+        # 换成一个非空列表,库里那条标题是「某某 的动态」、正文是空串、一次
+        # 导航都没发,而同一会话的 `browser_fetch` 读得到正文)。口径同
+        # `browser_fetch` 那条「判不准一律抛,不许返回 None」—— 两个方向的代价
+        # 差着一个量级:抛出去顶多重叠重抓一次(`put_items` 按 URL 去重)。
+        if article:
+            raise ArticleUnavailable(
+                f'长文接口给的 article 不是对象:{type(article).__name__}')
         return None                       # 确定的结论:这条推文没有长文
     try:
         body = render(article)
     except (AttributeError, TypeError, KeyError, IndexError, ValueError) as e:
-        # **兜底,不是承重的那一道。** 承重的是 `_rows` 和每一层的 `isinstance`
-        # (见 `_media_urls`):认得出的结构异常就地降级 —— 那张图跳过、那一块
-        # 跳过,**整篇正文照旧补得到**。这一道管没想到的形状:`render` 解析的
+        # **兜底,不是承重的那一道。** 承重的是两半:①`_rows` 和每一层的
+        # `isinstance`(见 `_media_urls`)—— **可选**数据认不出来就地降级,那张
+        # 图跳过、那一块跳过,**整篇正文照旧补得到**;②`_must_text` —— **必需**
+        # 的块结构(文字、类型)只收字符串,认不出来一律抛,因为强转出来的
+        # `"{'text': …}"` 非空、会被当成"正文补到了"落库,**兜底压根没有机会
+        # 介入**(强转不抛异常)。这一道管没想到的形状:`render` 解析的
         # 全部输入都来自第三方回包,而「上游还能给出什么形状」是一张**不会收敛**
         # 的名单,少想一种就是本轮那场事故(异常漏出 `fill`、漏出 `harvest` 的
         # 账号隔离,**后面的账号一个都不同步**)。归到这儿之后那一条只是扣留:
@@ -372,7 +287,8 @@ def fetch(url: str, *, timeout: float = 0.0) -> dict | None:
         # 而代价只有「这一条扣留 + 下一轮重试」—— 和整批中断差着一个量级。
         raise ArticleUnavailable(
             f'长文接口的回包解析不了:{type(e).__name__}: {e}') from None
-    title = str(article.get('title') or '').strip()
+    raw_title = article.get('title')
+    title = raw_title.strip() if isinstance(raw_title, str) else ''
     # **只有标题不算补到了。** 要补的是正文,而空正文一旦落库就**再也改不回来**
     # (`put_items` 是 `ON CONFLICT DO NOTHING`),下一轮重叠重抓也救不回来 ——
     # 口径同 `browser_fetch` 那条「判不准一律抛」。三种形态都归这儿:回包被截断、
@@ -499,10 +415,24 @@ def browser_fetch(session, url: str, *, wait: float | None = None,
             # 「接口挂了」那一刻走的,它自己也漏出 `TypeError` 的话,同一场
             # 事故只是换了个位置(整批账号一起带掉)。当空 = 这一页还没渲染
             # 出正文,交给下面那道超时。
-            blocks = [str(b) for b in _rows(snap.get('blocks')) if str(b).strip()]
+            #
+            # **而列表里那个成员不许丢掉** —— 口径同 `_must_block`,而且这是
+            # 同一条缺陷的两个位置:丢掉它之后剩下的正常段照样拼出一段**非空**
+            # 正文,于是「正文读到了」、水位照常推进,而丢掉的那一段是这篇文章
+            # 的正文,`put_items` 是 `ON CONFLICT DO NOTHING`、再也补不回来。
+            # 空值(`''` / `None` / `0`)跳过:它们携带不了任何内容线索。
+            blocks = []
+            for row in _rows(snap.get('blocks')):
+                if isinstance(row, str):
+                    if row.strip():
+                        blocks.append(row)
+                elif row:
+                    raise ArticleUnavailable(
+                        f'文章页读出来的正文块不是文字:{type(row).__name__}')
             if blocks:
                 body = '\n\n'.join(blocks)[:MAX_CHARS].strip()
-                title = str(snap.get('title') or '').strip()
+                seen_title = snap.get('title')
+                title = seen_title.strip() if isinstance(seen_title, str) else ''
                 return {'title': title, 'body': body}
         if time.monotonic() > limit:
             raise ArticleUnavailable(
