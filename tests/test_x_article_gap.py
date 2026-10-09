@@ -24,6 +24,10 @@
 和 `test_x_article.py` 按形状分开(那边是渲染、接口两档结局和浏览器后路):
 那个文件已经 661 行,贴着仓库那条 700 行上限。摆盘共用它和 `test_x_channels`。
 
+⑤族管的是地址**右边**那条缝;**左边**那条(起点必须是主机名的起点,别人家的地址
+不许被当成 X 文章链接剪断)在 `test_x_article_host.py` —— 本文件已经贴着那条
+700 行上限,它借④族这两个 round helper。
+
 跑:  python -m unittest tests.test_x_article_gap -v
 """
 import contextlib

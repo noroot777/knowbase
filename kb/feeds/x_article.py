@@ -69,6 +69,36 @@ MAX_CHARS = 60000
 # 推文 URL 里的 handle 和 id。
 _STATUS = re.compile(r'(?:x|twitter)\.com/([A-Za-z0-9_]{1,20})/status/(\d+)')
 
+# 一条 URL 写在推文正文里时,它从哪儿**起**算(主机名的起点)。下面两条正则都用它,
+# 而它们都是拿去 `sub` 掉的 —— 两条正则里的 `x.com` / `twitter.com` / `t.co` 都
+# 只是一段字符,**压根不要求它是主机名**,于是别人家的地址里出现这一段就被当成
+# 起点,后半截被删掉,而 `put_items` 的 `DO NOTHING` 让这种删除**永久固定**。
+#
+# 实测被改坏的形态(2026-10-09,每一种都是合法的外部地址):
+#   `https://fxtwitter.com/Example/article/10001` → `https://fx`(镜像站,`fx` 后面
+#     那一段逐字就是 `twitter.com/<handle>/article/<id>`)
+#   `https://notx.com/Example/article/10001`      → `https://not`
+#   `https://help.x.com/Example/article/10001`    → `https://help.`(子域名)
+#   `https://example.org/docs/x.com/Example/article/10001` → `https://example.org/docs/`
+#     (真实主机名是 `example.org`,`x.com` 只是它路径里的内容)
+#   `https://evil.example/?u=http://t.co/aBcD12&next=1` → 查询参数被删掉一截
+# 这四条同时还让 `needs_article` 判据① 误判成"要去问一次长文",白跑一次询问。
+#
+# 判据是**匹配起点不许紧跟在"URL 内部字符"后面**:字母数字、`.`、`-`、`_`、`~`、
+# `%`、`+`、`/`、`=`、`&`、`?`、`#`、`@`。放行的是空白、行首、中文字(含中文标点)
+# 和英文的开括号/引号/逗号 —— 真地址只会出现在这些后面。
+# **禁止集必须逐个列出 ASCII,不许写 `\w`**:Python 的 str 模式下它是 Unicode 的
+# (`re.match(r'\w+', '中文')` 当场命中),于是「我写了一篇新文章:<地址>」里那条
+# **真**地址会被自己的前一个汉字挡住 —— 那是漏认,而漏认 = 空正文永久固定,
+# 比多删一处还重一个量级(口径同 `_URL_TAIL` ① 那条坑,`_TCO` 原来就是这么漏的)。
+# **`:` 故意不在禁止集里**:`参考:https://x.com/…/article/1` 这种英文冒号紧贴的
+# 写法里那条地址是真的,禁掉它就摘不下来了;代价是某条外部地址正好在 `:` 后面
+# 嵌一个 X 文章地址时照旧会被摘,那比漏认轻。
+# **没有改成「先切出 URL 再 `urlsplit` 校验主机名」**:正文是自由文本,"从哪儿到
+# 哪儿是一条 URL"本来就是这条正则在回答的问题,再加一层解析只是把同一个边界问题
+# 挪到切分那一步,还多一份要对齐的口径;一道定宽后视直接回答"这个起点是不是主机名
+# 的起点",判据和匹配待在同一条规则里。
+_URL_HEAD = r'(?<![A-Za-z0-9._\-~%+/=&?#@])'
 # 一条 URL 写在推文正文里时,它的尾巴能长到哪儿(查询串、片段、尾斜杠)。下面两条
 # 正则都用它,而它们都是拿去 `sub` 掉的 —— 所以这里多认一个字符就是把作者写的字
 # 删掉一个,而 `put_items` 的 `DO NOTHING` 让这种删除**永久固定**。
@@ -112,12 +142,19 @@ _URL_TAIL = r'(?:[/?#][A-Za-z0-9_\-=&%.~+/?#:;,!]*[A-Za-z0-9_\-=&%~+/]|/)?'
 # `lead_text` 是 `sub`,宁可少删(多删 = 作者的字永久消失)。收窄尾巴恰好只动后者
 # —— 地址主体已经足够回答"有没有一条文章地址",尾巴匹配到哪儿对 `search` 的真假
 # 一点影响都没有(回归里反过来钉着这一边)。
+#
+# **起点那一头(`_URL_HEAD`)例外:它两个消费方一起收窄,而这不损害判据①。** 被它
+# 排掉的串本来就**不是** X 的文章地址(主机名是 `fxtwitter.com`/`notx.com`/
+# `example.org`),所以真地址的识别一个字都没变窄 —— 收窄的只有"误认"那一半,
+# 两个方向同时变好。回归里对着钉了反过来的一边:英文冒号、开括号、中文字、行首
+# 后面的真地址照旧摘得掉,判据① 照旧为真。
 _ARTICLE_LINK = re.compile(
-    r'(?:https?://)?(?:x|twitter)\.com/[A-Za-z0-9_]{1,20}/article/\d+' + _URL_TAIL)
+    _URL_HEAD + r'(?:https?://)?(?:x|twitter)\.com/[A-Za-z0-9_]{1,20}/article/\d+'
+    + _URL_TAIL)
 # t.co 短链:浏览器通道偶尔把它留在正文里。短码本身只有 ASCII —— 原来写的 `\w+`
 # 在 str 模式下是 Unicode 的,于是 `https://t.co/aBcD1234重点看第三节。` 里那句
 # 说明被整段吞掉(2026-10-09 实测 `lead_text` 只剩 `短链  。`)。
-_TCO = re.compile(r'https?://t\.co/[A-Za-z0-9_]+' + _URL_TAIL)
+_TCO = re.compile(_URL_HEAD + r'https?://t\.co/[A-Za-z0-9_]+' + _URL_TAIL)
 # Draft.js 的块类型 → markdown 前缀。认不出的块按普通段落走。
 _PREFIX = {
     'header-one': '# ', 'header-two': '## ', 'header-three': '### ',
@@ -152,6 +189,12 @@ def lead_text(body: str) -> str:
     只剩前半句 —— 重复同步也补不回来(2026-10-09 实测,中文括号/方括号、
     `?s=20` 或 `#sec3` 之后紧跟中文、以及英文的 `. ` `) ` 收尾逐字同样;两种路径
     形式和 t.co 那条都有这个病)。
+
+    **左边同理:起点必须是主机名的起点**(`_URL_HEAD`)。两条正则里的 `x.com` /
+    `twitter.com` / `t.co` 只是一段字符,不加这道闸时 `https://fxtwitter.com/
+    Example/article/10001` 这类**合法的外部地址**会从中间被当成起点、后半截删掉,
+    末态和上面逐字相同(2026-10-09 实测:库里和导出的 md 里那条参考地址只剩
+    `https://fx`,而 `added=1`、`errors=[]`、`partial=[]`、水位照常推进)。
     """
     lines = [ln for ln in (body or '').splitlines() if not ln.lstrip().startswith('>')]
     text = _ARTICLE_LINK.sub(' ', '\n'.join(lines))
