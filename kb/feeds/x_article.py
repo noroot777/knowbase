@@ -96,6 +96,23 @@ def lead_text(body: str) -> str:
     return _TCO.sub(' ', text).strip()
 
 
+def quote_lines(body: str) -> str:
+    """把正文里的转推/引用上下文摘出来 —— 就是 `lead_text` 滤掉的那几行 `> …`。
+
+    **`lead_text` 滤掉它们是对的,但补完文章正文不能跟着把它们一起丢掉。**
+    那一行是「谁转发了这篇文章」的唯一记录:`x_browser._entry` 把它放在正文开头
+    (`> {context}`),因为 `feed_items` 里没有别的地方放这个标记,而它决定了这
+    一条是不是本人的观点。原来 `fill` 拿 `lead_text` 的结果当重建正文的唯一依据,
+    于是**正文补上了、谁转发的没了** —— 数据库、导出的 md 和阅读页三处一起缺
+    (2026-10-09 审查实测,阴性对照是不开长文补全时上下文照旧留着),而
+    `put_items` 是 `DO NOTHING`,缺了就再也补不回来。
+
+    所以这两半各摘各的,再和文章正文按原顺序合并:上下文 → 介绍 → 正文。
+    """
+    keep = [ln for ln in (body or '').splitlines() if ln.lstrip().startswith('>')]
+    return '\n'.join(keep).strip()
+
+
 # 时间线采集给这条推文挂的「它带着一张长文卡片」信号(`x_browser._COLLECT_JS`
 # 从 DOM 里读那张卡片的链接)。**它只是信号,地址不用它** —— 文章页地址由推文
 # 自己的 URL 推出来(见 `article_page`),"有没有长文"的结论由接口/页面那一侧给。
@@ -180,6 +197,19 @@ def _entities(content: dict) -> dict:
     return out
 
 
+def _fence(code: str) -> str:
+    """把一段代码包成 markdown 代码围栏。
+
+    围栏是 markdown 里**唯一**能原样留住换行和缩进的结构:裸代码写进 md 之后,
+    阅读页按普通段落渲染,HTML 的空白折叠把四格/八格缩进一起吃掉 —— 复制出来
+    `compile()` 当场报错(2026-10-09 审查实测)。围栏长度避开代码里已有的反引号
+    串,否则内容里一行 ``` 就把围栏提前收尾。
+    """
+    n = max([3] + [len(t) + 1 for t in re.findall(r'`{3,}', code)])
+    bar = '`' * n
+    return f'{bar}\n{code}\n{bar}'
+
+
 def render(article: dict) -> str:
     """文章 JSON → markdown 正文。
 
@@ -196,17 +226,36 @@ def render(article: dict) -> str:
         return ''
     entities, media = _entities(content), _media_urls(article)
     out: list[str] = []
+    code: list[str] = []
+
+    def flush() -> None:
+        if code:
+            out.append(_fence('\n'.join(code)))
+            code.clear()
+
     for block in content.get('blocks') or []:
         if not isinstance(block, dict):
             continue
         kind = str(block.get('type') or 'unstyled')
         if kind == 'atomic':
+            flush()
             if url := _entity_image(block, entities, media):
                 out.append(f'![]({url})')
             continue
-        text = str(block.get('text') or '').replace('\x00', '').strip()
-        if text:
-            out.append(_PREFIX.get(kind, '') + text)
+        text = str(block.get('text') or '').replace('\x00', '')
+        if kind == 'code-block':
+            # Draft.js 的代码块是**一行一个块**(`blockRenderMap` 把相邻的几个包进
+            # 同一个 `<pre>`),所以攒起来合并成**一个**围栏 —— 每行各发一个围栏的话
+            # 复制出来是一堆分散的小代码块。**行首缩进是内容,只去行尾空白**;空行
+            # 只在代码**中间**才算内容。
+            line = text.rstrip()
+            if line or code:
+                code.append(line)
+            continue
+        flush()
+        if stripped := text.strip():
+            out.append(_PREFIX.get(kind, '') + stripped)
+    flush()
     return '\n\n'.join(out)[:MAX_CHARS].strip()
 
 
@@ -357,14 +406,64 @@ _READ_JS = r'''(() => {
     }
     return s;
   };
+  // **预格式化的块要写成 markdown 代码围栏,不能当普通段落交出去。** 读出来的
+  // 字符串保真只是半截:裸代码写进 md 之后,阅读页按 markdown 段落渲染,HTML
+  // 的空白折叠把换行和缩进一起吃掉 —— 页面上和复制出来都是
+  // `def answer(): if True: return 42`,`compile()` 当场 `invalid syntax`
+  // (2026-10-09 审查实测,走的是真导出 + 真 `/doc/` 阅读页 + 真选区复制)。
+  // markdown 里保住空白只有围栏这一条路:原始 HTML 在阅读页是按**字面文字**
+  // 显示的(见 `pages.py` 的 `_DOC_LITERAL_JS`),写 `<pre>` 进去没有用。
+  //
+  // **判据只认标签,不用计算样式** —— 这跟上面 `preish` 那两道分工不同:
+  // 「页面不折叠这一段的空白」证明不了「这一段是代码」。Draft.js 官方默认样式
+  // 给**每一个**块都加了 `white-space: pre-wrap`,按它写围栏会把整篇文章每一段
+  // 都包成代码块,那是不可逆的毁容;漏判只是回到现状(那一段的缩进在阅读页被
+  // 折叠)。两个方向差着一个量级,所以这里问的是「这一块的全部文字是不是都装在
+  // 一个 `pre`/`code`/`samp`/`kbd` 里」:块本身或祖先是(真实 Draft.js 代码块
+  // 就是 `<pre>` 包着多个 `data-block`),或者块里唯一那个预格式化容器装着这
+  // 一块的全部文字。**段落里插一个行内 `<code>` 时它必然为假**(还有别的文字
+  // 在外面),所以不会把一整段正文包成代码。
+  const codeish = (el) => {
+    if (el.closest('pre, code, samp, kbd')) return true;
+    const inner = el.querySelector('pre, code, samp, kbd');
+    if (!inner) return false;
+    const all = (el.textContent || '').replace(/\s+/g, '');
+    return !!all && all === (inner.textContent || '').replace(/\s+/g, '');
+  };
+  // 代码块收尾只去首尾的空行,**不去行首空格** —— 那是缩进。
+  const codeTrim = (s) => s.replace(/^(?:[ \t]*\r?\n)+/, '').replace(/\s+$/, '');
   const blocks = [];
+  // 真实 Draft.js 的代码块是**一行一个 block**(`blockRenderMap` 把相邻的几个
+  // 包进同一个 `<pre>`),所以相邻的预格式化块要合并成**一个**围栏 —— 每行各发
+  // 一个围栏的话,复制出来是一堆分散的小代码块。「一个块里装多行」走同一条路。
+  let pend = [];
+  const flush = () => {
+    if (!pend.length) return;
+    const body = pend.join('\n');
+    let n = 3;
+    for (const t of body.match(/`{3,}/g) || []) n = Math.max(n, t.length + 1);
+    const bar = '`'.repeat(n);
+    blocks.push(bar + '\n' + body + '\n' + bar);
+    pend = [];
+  };
   if (root) for (const b of root.querySelectorAll('[data-block="true"]')) {
+    const isCode = codeish(b);
     // 零宽空格(Draft.js 的空块占位 `&#8203;`)和 BOM 要去掉,**但 ZWJ / ZWNJ
     // 不许动** —— 它们是组合表情的一部分,删掉之后一个组合表情当场裂成几个。
-    const txt = textOf(b, preish(b)).replace(/[\u200b\ufeff]/g, '')
-                                    .replace(/\u00a0/g, ' ').trim();
-    if (txt) blocks.push(txt);
+    const raw = textOf(b, preish(b)).replace(/[\u200b\ufeff]/g, '')
+                                    .replace(/\u00a0/g, ' ');
+    const txt = isCode ? codeTrim(raw) : raw.trim();
+    if (!txt) {
+      // 代码**中间**的空行是内容;代码块外的空块照旧丢掉。
+      if (isCode && pend.length) pend.push('');
+      else if (!isCode) flush();
+      continue;
+    }
+    if (isCode) { pend.push(txt); continue; }
+    flush();
+    blocks.push(txt);
   }
+  flush();
   let title = '', big = 0;
   if (read) {
     for (const e of read.querySelectorAll('*')) {
@@ -487,10 +586,13 @@ def fill(entries: list[dict], *, session=None,
             missed += 1
             continue
         if got:
-            lead = lead_text(entry.get('body') or '')
+            src = entry.get('body') or ''
+            # 三段按原顺序:转推上下文(`> …`)→ 推文自己写的介绍 → 文章正文。
+            # 上下文那一段**不能漏**,理由见 `quote_lines`。
+            parts = (quote_lines(src), lead_text(src), got['body'])
             entry = {**entry,
                      'title': (got['title'] or entry.get('title') or '')[:500],
-                     'body': f"{lead}\n\n{got['body']}".strip() if lead else got['body']}
+                     'body': '\n\n'.join(p for p in parts if p)}
         kept.append(_strip_hint(entry))
     note = (f'有 {missed} 条推文的长文正文没取到,留到下次同步再试' if missed else '')
     return kept, note

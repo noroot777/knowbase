@@ -35,13 +35,21 @@ CAPTION = '系统架构示意图'
 COMBO = chr(0x1F469) + chr(0x200D) + chr(0x1F4BB)
 # 真实缩进:`if` 下面四格、`return` 下面八格,压成一格就编译不过。
 CODE = 'def answer():' + chr(10) + '    if True:' + chr(10) + '        return 42'
+# 片段式代码:从一段代码中间截出来的,**首行就带缩进**。收尾用 `.trim()` 的
+# 实现会把那一格吃掉,而它决定了这几行在不在一个块里面。
+SNIPPET = '    .deep {' + chr(10) + '       color: red;' + chr(10) + '     }'
+# 代码里**独占一行**的 ```:围栏长度得避开它,否则它把围栏提前收尾。
+NESTED = '示例:' + chr(10) + chr(96) * 3 + chr(10) + '里面' + chr(10) + chr(96) * 3
 
 # Draft.js 的真实形状:每个段落一个 `[data-block="true"]`,文字包在
 # `[data-text="true"]` 里,表情是一个带 alt 的 `<img>`(twemoji),配图单独
 # 占一个 atomic 块。另外摆上几样容易出错的:`display:none` 的辅助节点
 # (innerText 不会带它,我们按子节点遍历就得自己跳过)、一个 `<br>`、一张**带
 # 描述**的配图、一段真缩进的代码、一个声明了 `white-space: pre-wrap` 的容器、
-# 一个 ZWJ 组合表情,以及一处只存在于 HTML 源码里的换行缩进(该折叠成空格)。
+# 一个 ZWJ 组合表情、一处只存在于 HTML 源码里的换行缩进(该折叠成空格)、一段
+# **真实 Draft.js 形状**的代码块(`<pre>` 包着一行一个 `data-block`),以及一段
+# 带**行内** `<code>` 的普通正文(反过来钉一边:那一段不许被包成代码块),外加
+# 一段**首行就有缩进**的代码片段。
 ARTICLE_HTML = f'''<!doctype html><meta charset="utf-8"><title>Article</title>
 <div data-testid="twitterArticleReadView">
   <h1 style="font-size:34px">X书签保存Skill x Teamily</h1>
@@ -64,6 +72,13 @@ ARTICLE_HTML = f'''<!doctype html><meta charset="utf-8"><title>Article</title>
       <div data-block="true"><span data-text="true">组合表情:{COMBO}。</span></div>
       <div data-block="true"><span data-text="true">折叠前</span>
         <span data-text="true">折叠后</span></div>
+      <div data-block="true"><pre><code>{SNIPPET}</code></pre></div>
+      <div data-block="true"><span data-text="true">两个代码块之间的正文。</span></div>
+      <div data-block="true"><pre><code>{NESTED}</code></pre></div>
+      <div data-block="true"><span data-text="true">装上 </span><code>npm i</code
+        ><span data-text="true"> 就能用。</span></div>
+      <pre><div data-block="true"><span data-text="true">for i in range(3):</span></div
+        ><div data-block="true"><span data-text="true">    print(i)</span></div></pre>
       <div data-block="true"><span data-text="true">&#8203;</span></div>
     </div>
   </div>
@@ -161,16 +176,66 @@ class DomTests(unittest.TestCase):
                       f'带描述的配图该连地址带说明一起留下:{blocks}')
 
     def test_code_indentation_survives(self):
-        """**后果先断言**:读回来的代码**真的编译得过**。
+        """**后果先断言**:读回来的代码**真的编译得过**,而且装在围栏里。
 
-        红的那一版对所有块做 `[ \t]+` → 单空格,四格和八格缩进一起压成一格:
-        `compile()` 当场 `IndentationError`,照着复制的示例成了无效代码。
+        两道各管一截,少哪一道复制出来都跑不了:①读取时对所有块做
+        `[ \t]+` → 单空格,四格和八格缩进一起压成一格;②读对了却当普通段落
+        交出去,导出的 md 是裸代码,阅读页按 markdown 段落渲染、HTML 空白折叠
+        把换行和缩进一起吃掉 —— 页面上和复制出来都是一行(2026-10-09 审查实测)。
         """
         self.open('article.html')
         blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
-        got = next((b for b in blocks if b.startswith('def answer()')), '')
-        self.assertEqual(CODE, got, '代码块里的空白是内容,一个空格都不许折叠')
-        compile(got, '<extracted>', 'exec')   # 红的那一版在这里抛 IndentationError
+        got = next((b for b in blocks if 'def answer()' in b), '')
+        self.assertEqual(f'```\n{CODE}\n```', got,
+                         f'代码块要连围栏一起交出来:{got!r}')
+        code = got.split('\n', 1)[1].rsplit('\n', 1)[0]
+        self.assertEqual(CODE, code, '围栏里的空白是内容,一个空格都不许折叠')
+        compile(code, '<extracted>', 'exec')   # 红的那一版在这里抛 IndentationError
+
+    def test_the_first_line_of_a_snippet_keeps_its_indent(self):
+        """**首行缩进也是内容。** 收尾只许去首尾的空行,不许去行首空格。
+
+        片段式代码(从一段代码中间截出来)就是这个形状,而那一格缩进决定了这几行
+        在不在一个块里面 —— `.trim()` 把它吃掉之后照着复制同样跑不了。
+        """
+        self.open('article.html')
+        blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
+        self.assertIn('```\n' + SNIPPET + '\n```', blocks,
+                      f'片段首行那一格缩进没留住:{blocks}')
+
+    def test_the_fence_is_longer_than_the_backticks_inside(self):
+        """代码里独占一行的 ``` 要靠更长的围栏兜住 —— 和主路那条各一份实现。"""
+        self.open('article.html')
+        blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
+        bar = chr(96) * 4
+        self.assertIn(bar + '\n' + NESTED + '\n' + bar, blocks,
+                      f'围栏长度没避开内容里那一行反引号:{blocks}')
+
+    def test_adjacent_code_blocks_merge_into_one_fence(self):
+        """**真实 Draft.js 的形状:`<pre>` 包着一行一个 block。**
+
+        每行各发一个围栏的话,复制出来是一堆分散的小代码块、`compile()` 过不去;
+        合并成一个围栏才行。上一条那种「一个块里装多行」走的是同一条路。
+        """
+        self.open('article.html')
+        blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
+        fences = [b for b in blocks if b.startswith('```')]
+        got = next((b for b in fences if 'range(3)' in b), '')
+        self.assertEqual('```\nfor i in range(3):\n    print(i)\n```', got,
+                         f'相邻的预格式化块要合并成一个围栏:{fences}')
+        compile(got.split('\n', 1)[1].rsplit('\n', 1)[0], '<extracted>', 'exec')
+
+    def test_an_inline_code_span_does_not_fence_the_paragraph(self):
+        """**反过来钉一边**:段落里插一个行内 `<code>` 不许把整段包成代码块。
+
+        判据是「这一块的全部文字是不是都装在一个预格式化容器里」,所以这一段
+        (`code` 外面还有别的字)必然为假。拿「块里有没有 code 标签」当判据的
+        实现会在这里红 —— 那会把大半篇正文显示成代码。
+        """
+        self.open('article.html')
+        blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
+        self.assertIn('装上 npm i 就能用。', blocks)
+        self.assertNotIn('```\n装上 npm i 就能用。\n```', blocks)
 
     def test_a_preformatted_container_keeps_its_indent(self):
         """计算样式那一道:`white-space: pre-wrap` 的容器同样不折叠。
@@ -203,7 +268,7 @@ class DomTests(unittest.TestCase):
         self.open('article.html')
         snap = json.loads(self.page.eval(x_article._READ_JS))
         blocks = snap['blocks']
-        self.assertEqual(10, len(blocks), f'零宽占位块不该成段:{blocks}')
+        self.assertEqual(15, len(blocks), f'零宽占位块不该成段:{blocks}')
         self.assertEqual('第二段正文独立成段。', blocks[1])
         self.assertEqual('第三段\n换行之后还在同一段里。', blocks[3])
         self.assertEqual('第四段。', blocks[4], 'display:none 的辅助节点不进正文')
@@ -220,7 +285,7 @@ class DomTests(unittest.TestCase):
         self.assertIn('🙂', got['body'])
         self.assertIn(f'![]({PHOTO})', got['body'])
         self.assertEqual('X书签保存Skill x Teamily', got['title'])
-        self.assertEqual(10, len(got['body'].split('\n\n')))
+        self.assertEqual(15, len(got['body'].split('\n\n')))
 
     # ── 时间线的长文卡片 ────────────────────────────────────────────────────
 
