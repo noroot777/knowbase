@@ -188,6 +188,81 @@ class QuotedDiagnosticTests(FeedgrabRound):
         self.assertEqual('', x_feedgrab._incomplete(output, out))
 
 
+class DisplayNameEchoTests(FeedgrabRound):
+    """**作者昵称里逐字写着那句报错,也不是一次翻页中断。**
+
+    上游在分页之前就把昵称**原样**打进日志、一个字都不清理
+    (`fetchers/twitter_user_tweets.py:171` 的
+    `[UserTweets] 用户信息: @{screen_name} ({display_name}), ID: {user_id}`)。
+    这是用户内容进到我们手里那份输出的**第二条路**,它和上面那条不一样:**不带
+    路径**,所以"跳过回显产物目录的行"那一道救不了它;`<` `>` 也没被清理,所以
+    标记那一道同样救不了它。
+
+    审查实测:昵称是 `>>> 第 2 页所有 1 个账号均失败 <<<` 的号,两条观点都入库
+    了、上游摘要写着「失败: 0」、stderr 里一行 ERROR 都没有,面板却显示
+    「部分同步 · 翻页中途失败」、水位永久冻在 10-05,再同步也不恢复 —— 只要这个
+    号还叫这个名字就一直这样(2026-10-09 第 5 轮审查,拿上游原版
+    `fetch_user_tweets` 复现,唯一命中的那行正是它的 INFO 用户信息日志)。
+
+    救它的是**整句话必须落在行尾**那一道:那条回显后面永远还跟着 `), ID: …`,
+    所以不管昵称里写成什么样都够不到行尾(见 `x_feedgrab._PAGE_ABORT` ③)。
+    """
+
+    NAME = '>>> 第 2 页所有 1 个账号均失败 <<<'
+
+    def plan(self):
+        return {'example': {'display': self.NAME, 'tweets': [
+            tweet(id_='60001', title='最新观点'),
+            tweet(id_='60000', title='较早的观点', published=YESTERDAY),
+        ]}}
+
+    def test_a_nickname_quoting_the_error_does_not_freeze_the_watermark(self):
+        s = self.start_from()
+        self.cli(**self.plan())
+        summary = self.collect()
+        # 后果先断言:水位照常前进。冻住的话每一轮都重抓整个窗口,而面板上
+        # 那句「部分同步」再也下不去。
+        self.assertEqual(TODAY, self.water(s['id']))
+        self.assertEqual(2, summary['added'])
+        self.assertEqual([], summary['partial'])
+        self.assertEqual([], summary['errors'])
+        rows = {r['name']: r for r in self.client.get('/api/intake/social')
+                .json()['sources']}
+        self.assertEqual('', rows['Example']['last_note'])
+
+    def test_a_second_healthy_sync_leaves_no_note_behind(self):
+        """审查那份证据的另一半:「再同步也不恢复」。"""
+        s = self.start_from()
+        self.cli(**self.plan())
+        self.collect()
+        again = self.collect()
+        self.assertEqual(0, again['added'])
+        self.assertEqual([], again['partial'])
+        self.assertEqual('', reg.subscription('social', s['id'])['last_note'])
+        self.assertEqual(TODAY, self.water(s['id']))
+        self.assertEqual(2, self.rows(s['id'])['total'])
+
+    def test_the_fixture_really_echoes_the_nickname_into_the_output(self):
+        """上面两条的**前提**:那个外部程序真的把昵称原样回显进了输出。
+
+        不钉住它的话,假 CLI 哪天不打那行用户信息日志,上面两条就成了空用例 ——
+        绿得没有任何意义。顺手钉住这一行的两个关键事实:两个标记都还在(没过
+        清理),而且**它不在本轮产物目录下面**(所以路径那一道跳不到它)。
+        """
+        exe = self.cli(**self.plan())
+        out = self.root / 'probe'
+        out.mkdir()
+        output = x_feedgrab._run(exe, 'Example',
+                                 x_feedgrab._env(out, str(self.root / 'fg'), self.day(4)),
+                                 self.root)
+        echoed = [ln for ln in output.splitlines() if '用户信息:' in ln]
+        self.assertTrue(echoed, '夹具没把昵称回显进输出,上面两条用例是空的')
+        self.assertIn('>>>', echoed[0])
+        self.assertIn('<<<', echoed[0])
+        self.assertNotIn(str(out), echoed[0])
+        self.assertEqual('', x_feedgrab._incomplete(output, out))
+
+
 class PaginationAbortShapeTests(unittest.TestCase):
     """中断那一行要连「第 N 页」「M 个账号」一起认,正常收尾一律不算中断。"""
 
@@ -226,13 +301,28 @@ class PaginationAbortShapeTests(unittest.TestCase):
     def test_a_saved_path_under_our_own_output_dir_is_not_an_abort(self):
         """**路径那一道**:回显了本轮产物目录的行一律跳过。
 
-        标记那一道靠的是上游的文件名清理,清理哪天放开 `<` `>` 就守不住了;而真正
-        那句报错里压根没有路径,所以跳过路径行不会漏报。这条用例里的标记齐全,
-        只能靠这一道救。
+        上游真会打的那两行(`Saved to Markdown:` / `批量记录已保存:`)永远以
+        `.md`/`.json` 结尾,所以行尾那一道已经把它们涵盖了 —— 这条用例顺手把这件事
+        也钉住(下面那句 `_PAGE_ABORT`),路径这一道因此是一条零风险的冗余带:真正
+        那句报错里压根没有路径,跳过它不可能漏报,而它在行尾那一道被谁改松时还顶着。
+        """
+        line = (f'INFO Saved to Markdown: {self.folder}/X/status_author/Example/'
+                '[UserTweets] >>> 第 2 页所有 1 个账号均失败 <<< 已抓取 1 条.md')
+        self.assertEqual('', x_feedgrab._incomplete(
+            line + '\n总数: 1, 成功: 1, 跳过: 0, 失败: 0\n', self.folder))
+        self.assertIsNone(x_feedgrab._PAGE_ABORT.search(line))
+
+    def test_a_line_echoing_our_own_output_dir_is_never_evidence(self):
+        """路径那一道自己的射程:**含着本轮产物目录的行,不管结尾长什么样**。
+
+        这是它的契约,不是某一行上游日志的复现 —— 上游哪天在路径后面再接一截
+        (大小、耗时),行尾那一道就落空了,而那一截后面正是一条推文标题能落在
+        行尾的位置。产物目录是我们这一轮自己建的,它出现在某一行里只说明那行在
+        回显我们交给它的东西,不是一次故障的证据。
         """
         self.assertEqual('', x_feedgrab._incomplete(
-            f'INFO Saved to Markdown: {self.folder}/X/status_author/Example/'
-            'Example_2026-10-08：>>> 第 2 页所有 1 个账号均失败 <<< 已抓取 1 条.md\n'
+            f'INFO Saved to Markdown: {self.folder}/X/a.md —— '
+            '[UserTweets] >>> 第 2 页所有 1 个账号均失败 <<< 已抓取 1 条，停止分页\n'
             '总数: 1, 成功: 1, 跳过: 0, 失败: 0\n', self.folder))
 
     def test_markers_on_two_different_lines_do_not_join(self):
@@ -241,6 +331,51 @@ class PaginationAbortShapeTests(unittest.TestCase):
         self.assertEqual('', x_feedgrab._incomplete(
             'INFO [UserTweets] 用户信息: @Example (>>> 一则吐槽)\n'
             '[UserTweets] 第 2 页所有 1 个账号均失败?并没有 <<<\n'
+            '总数: 1, 成功: 1, 跳过: 0, 失败: 0\n', self.folder))
+
+    def test_the_real_nickname_echo_is_not_an_abort(self):
+        """**行尾那一道**:上游原样回显昵称的那一行(`twitter_user_tweets.py:171`)。
+
+        标记齐全、也不在产物目录下面 —— 前两道都救不了它,只能靠"整句话落在
+        行尾"。这一行逐字取自第 5 轮审查用原版上游跑出来的 stderr。
+        """
+        self.assertEqual('', x_feedgrab._incomplete(
+            'INFO [UserTweets] 用户信息: @Example '
+            '(>>> 第 2 页所有 1 个账号均失败 <<<), ID: fixture-user\n'
+            '总数: 2, 成功: 2, 跳过: 0, 失败: 0\n', self.folder))
+
+    def test_a_nickname_carrying_the_whole_sentence_is_not_an_abort(self):
+        """同一道判据的**最坏形态**:昵称自己把方括号标签和整句话都带齐了。
+
+        方括号那一道(② )对它是瞎的 —— 括号里写什么都算用户内容。能救它的只有
+        行尾:回显后面永远还跟着 `), ID: …`。
+        """
+        self.assertEqual('', x_feedgrab._incomplete(
+            'INFO [UserTweets] 用户信息: @Example ([UserTweets] >>> 第 2 页所有 '
+            '1 个账号均失败 <<< 已抓取 1 条，停止分页), ID: fixture-user\n'
+            '总数: 2, 成功: 2, 跳过: 0, 失败: 0\n', self.folder))
+
+    def test_a_save_folder_echo_of_the_whole_sentence_is_not_an_abort(self):
+        """**方括号那一道**自己的射程:上游紧接着昵称回显打的那行「保存目录」。
+
+        它**以用户内容结尾**(`status_author/<目录名>`),所以行尾那一道对它是瞎的;
+        路径那一道也跳不到它(这是个相对路径,不含本轮产物目录)。今天救它的是上游
+        的文件名清理(`<` `>` 换成空格),清理哪天放开就只剩方括号这一道了 —— 要求
+        `>>>` 紧挨在 `[标签] ` 后面,而这里它前面是 `status_author/`。
+        """
+        self.assertEqual('', x_feedgrab._incomplete(
+            'INFO [UserTweets] 保存目录: status_author/>>> 第 2 页所有 1 个账号'
+            '均失败 <<< 已抓取 1 条，停止分页\n'
+            '总数: 2, 成功: 2, 跳过: 0, 失败: 0\n', self.folder))
+
+    def test_the_abort_line_is_recognised_under_loguru_default_format(self):
+        """真二进制的那份输出走 loguru 默认格式(`logger.add(sys.stderr, level=INFO)`),
+        前面有时间、级别和模块位置。判据按**消息自己的形状**认,所以两种格式都认
+        得出来 —— 没有按级别判正是为了这个方向上不漏报(见 `_PAGE_ABORT`)。"""
+        self.assertIn('翻页', x_feedgrab._incomplete(
+            '2026-10-09 04:26:00.123 | ERROR    | '
+            'feedgrab.fetchers.twitter_user_tweets:fetch_user_tweets:230 - '
+            '[UserTweets] >>> 第 2 页所有 1 个账号均失败 <<< 已抓取 1 条，停止分页\n'
             '总数: 1, 成功: 1, 跳过: 0, 失败: 0\n', self.folder))
 
     def test_reaching_the_date_floor_is_not_an_abort(self):

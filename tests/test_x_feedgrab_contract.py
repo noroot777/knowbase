@@ -92,6 +92,17 @@ def main():
     # 不是批量记录(`_batch_failures` 那道形状判据正好把它排除掉)。
     (base / 'index').mkdir(parents=True, exist_ok=True)
     (base / 'index' / 'item_id_url.json').write_text('{}', encoding='utf-8')
+    # 上游在分页之前就把**作者昵称原样**打进日志,一个字都不清理
+    # (`fetchers/twitter_user_tweets.py` 的 `logger.info(f"[UserTweets] 用户信息:
+    # @{screen_name} ({display_name}), ID: {user_id}")`)。**照抄它是这个假 CLI
+    # 的职责之一** —— 那是用户内容进到我们手里那份输出的第二条路,而它不带路径,
+    # 所以"跳过回显产物目录的行"那一道救不了它(见 `x_feedgrab._PAGE_ABORT`)。
+    sys.stderr.write('INFO [UserTweets] 用户: @%s\\n' % handle)
+    sys.stderr.write('INFO [UserTweets] 用户信息: @%s (%s), ID: fixture-user\\n'
+                     % (handle, spec['display']))
+    # 紧接着那一行是过了清理的目录名(这条路和保存路径同一个清理规则)。
+    sys.stderr.write('INFO [UserTweets] 保存目录: status_author/%s\\n'
+                     % clean(spec['display']))
     # 上游按 `X_USER_TWEETS_SINCE` 把更早的推文整段丢掉(它那句 stop_pagination)。
     since = os.environ.get('X_USER_TWEETS_SINCE', '')
     # 翻页半途失败那一档:上游打一行 logger.error 就 break(`if not response`),
@@ -102,8 +113,11 @@ def main():
             if not (since and t['published'][:10] < since)
             and not (abort and t.get('page', 1) >= abort)]
     if abort:
-        sys.stderr.write('[UserTweets] >>> 第 %d 页所有 1 个账号均失败 <<< '
-                         '已抓取 %d 条，停止分页\\n' % (abort, len(kept)))
+        # 它走 `logger.error`,所以真输出里这一行带着级别(上游的 sink 是
+        # `logger.add(sys.stderr, level=INFO)`,默认格式)。判据按**消息自己的
+        # 形状**认,不按级别 —— 见 `x_feedgrab._PAGE_ABORT` 最后那两段。
+        sys.stderr.write('ERROR [UserTweets] >>> 第 %d 页所有 1 个账号均失败 '
+                         '<<< 已抓取 %d 条，停止分页\\n' % (abort, len(kept)))
     rows, fetched, failed = [], 0, 0
     for tweet in kept:
         bad = bool(tweet.get('fails'))
