@@ -21,12 +21,19 @@ feedgrab 那边的正文就是那条光秃秃的链接,两条路入库的都是�
   注释里写明不抄进来的那份维护量。FxTwitter(开源的 FixTweet)替我们背着它。
 ②**四条通道通用**。它只认推文 URL,不认我们这一轮用的是浏览器、cookie 还是桥接,
   所以 `bridge` 那条没有登录态的路也补得上。
-③**不开浏览器**。走登录态浏览器读 `/i/article/<id>` 当然也行,但那要在用户自己的
-  浏览器里多开一张标签页、等它渲染两三秒,还要押一个 X 改版就会坏的 DOM 选择器;
-  这边是一次 HTTP、一份结构化 JSON。
+③**不开浏览器**。走登录态浏览器读文章页当然也行,但那要在用户自己的浏览器里多开
+  一张标签页、等它渲染两三秒,还要押一个 X 改版就会坏的 DOM 选择器;这边是一次
+  HTTP、一份结构化 JSON。所以浏览器那条做成**后路**,不做主路。
 
-**代价如实记着**:这是一个第三方服务,推文 URL 会发给它(内容本来就是公开的),
-它挂了这一步就没了。`KB_X_ARTICLE_API` 设成空串可以整个关掉。
+**它是一个第三方服务,所以有后路**(开源的 FixTweet 跑的公共实例;推文 URL 会发
+给它,内容本来就是公开的)。它关停、限流、改接口的那一天,`browser` / `attach`
+两条通道手里**正好有一个已经登录的浏览器** —— 直接把文章页读出来即可,见下面
+`browser_fetch`。`bridge` / `feedgrab` 没有浏览器,那两条照旧按「补不到就不入库、
+不推进水位」办,下一轮重试。
+
+两个开关各管一条路:`KB_X_ARTICLE_API` 设成空串关掉接口(**手里有浏览器就只走
+后路** —— 这正是「不想把推文 URL 发给第三方」时要的那一档),`KB_X_ARTICLE_BROWSER`
+设成 '0' 关掉后路,两个都关 = 整条退回这一步出现之前。
 
 **取不到的那一条要退出这一轮,而且不推进水位**(`fill` 返回的 note 由两条通道的
 `harvest` 并进 `incomplete`)。原因是 `registry.put_items` 是
@@ -46,6 +53,7 @@ import re
 import time
 
 from kb.feeds.fetching import FeedError, request
+from kb.feeds.x_cdp import CdpError
 
 # 接口地址。设成空串 = 整个关掉这一步(不发请求、不拦任何条目)。
 API = os.environ.get('KB_X_ARTICLE_API', 'https://api.fxtwitter.com').rstrip('/')
@@ -215,14 +223,152 @@ def fetch(url: str, *, timeout: float = 0.0) -> dict | None:
     return {'title': title, 'body': body}
 
 
-def fill(entries: list[dict]) -> tuple[list[dict], str]:
+# ----------------------------------------------------------------- 后路:登录态浏览器
+
+# **后路**:接口不可用时,在一个已经登录的浏览器里直接把文章页读出来。只有
+# `browser` / `attach` 两条通道手里有浏览器(前者是我们自己起的独立 profile、
+# 后者是用户日常那个),`bridge` / `feedgrab` 走不到这里 —— 它们照旧按
+# 「补不到就不入库、不推进水位」办。设成 '0' 关掉这条后路。
+BROWSER_FALLBACK = os.environ.get('KB_X_ARTICLE_BROWSER', '1') != '0'
+# 文章页等多久。X 的长文是异步渲染的,实测首屏 2~5 秒。
+PAGE_WAIT = float(os.environ.get('KB_X_ARTICLE_PAGE_WAIT', '15'))
+_PAGE_POLL = 0.8
+
+# 文章页的地址 = 推文地址把 `/status/` 换成 `/article/`。**这是 X 自己的规范形式,
+# 不是我们凑的**:`/i/article/<article_id>` 实测 302 到
+# `/<handle>/article/<tweet_id>`(2026-10-09)。这件事是后路成立的前提 ——
+# `article_id` 只出现在那个接口的回包里,而后路要在接口**已经不可用**的时候跑,
+# 手里只有推文 URL;要是非得先知道 article_id,这条路压根立不起来。
+_ARTICLE_PATH = re.compile(r'^(https://(?:x|twitter)\.com/[A-Za-z0-9_]{1,20})/status/(\d+)')
+
+# 读一次文章页。三件事一起回答,因为它们在同一个 DOM 快照里才自洽:
+# ①**我们还在文章页上吗**(`at`),还是被 X 弹回了推文页(`back`);
+# ②正文块(`blocks`);③标题(`title`)。
+#
+# **`back` 是「这条没有长文」的判据,而且它不押任何 CSS 选择器** —— 实测一条纯图
+# 推文的 `/article/<id>` 会被 X 自己 302 回 `/status/<id>`(2026-10-09),那是它的
+# 路由行为,比任何 testid 都稳。有长文的那条则老老实实停在 `/article/` 上。
+#
+# 正文容器认 `[data-contents="true"]` 里的 `[data-block="true"]`(Draft.js 的块),
+# 所以**段落边界是按块拿的、不是切 innerText** —— 实测 47 块、2752 字纯正文,
+# 比整页 innerText 少掉 234 字的导航、作者简介和「升级 Premium」。
+#
+# 标题取 read view 里排除正文之后**字号最大的那个叶子**(实测标题 34px、其余
+# ≤15px),拿不到按 read view 的第一行 —— 实测两者是同一个值,互为冗余。
+_READ_JS = r'''(() => {
+  const path = location.pathname;
+  const rich = document.querySelector('[data-testid="twitterArticleRichTextView"]');
+  const read = document.querySelector('[data-testid="twitterArticleReadView"]');
+  const root = document.querySelector('[data-contents="true"]');
+  const blocks = [];
+  if (root) for (const b of root.querySelectorAll('[data-block="true"]')) {
+    const img = b.querySelector('img');
+    const txt = (b.innerText || '').trim();
+    if (img && img.src) blocks.push('![](' + img.src + ')');
+    else if (txt) blocks.push(txt);
+  }
+  let title = '', big = 0;
+  if (read) {
+    for (const e of read.querySelectorAll('*')) {
+      if (e.children.length) continue;
+      if (rich && rich.contains(e)) continue;
+      const t = (e.innerText || '').trim();
+      if (!t || t.length > 300) continue;
+      const fs = parseFloat(getComputedStyle(e).fontSize) || 0;
+      if (fs > big) { big = fs; title = t; }
+    }
+    if (!title) title = (read.innerText || '').split('\n')[0].trim();
+  }
+  return JSON.stringify({
+    at: /\/article\/\d+\/?$/.test(path),
+    back: /\/status\/\d+\/?$/.test(path),
+    blocks: blocks, title: title,
+  });
+})()'''
+
+
+def article_page(url: str) -> str:
+    """推文 URL → 文章页 URL。认不出来返回空串。"""
+    m = _ARTICLE_PATH.match((url or '').strip())
+    return f'{m.group(1)}/article/{m.group(2)}' if m else ''
+
+
+def browser_fetch(session, url: str, *, wait: float = 0.0) -> dict | None:
+    """后路:在 `session` 那个**已经登录**的浏览器里读这篇长文。
+
+    返回值的两档和 `fetch` 逐字同义:`{'title','body'}` 是读到了,`None` 是
+    **确定这条推文没有长文**,问不到一律抛 `ArticleUnavailable`。
+
+    **判不准的时候一律抛,不许返回 None。** 两个方向的代价差着一个量级:把
+    「有长文」说成「没有」会让一条空正文落库,而 `put_items` 是 DO NOTHING ——
+    那一篇从此永久是空的、下一轮重试也救不回来;反过来把「没有长文」说成
+    「问不到」只是让水位留在原处、下一轮重叠重抓一次(`put_items` 按 URL 去重)。
+    所以只有 X 自己把我们弹回推文页那一种才算「没有」,登录墙、空壳、渲染超时、
+    CDP 报错全部抛出去。
+    """
+    page = article_page(url)
+    if not page:
+        return None
+    deadline = time.monotonic() + (wait or PAGE_WAIT)
+    try:
+        session.goto(page)
+    except CdpError as e:
+        raise ArticleUnavailable(f'长文页面打不开:{e}') from None
+    while True:
+        try:
+            snap = json.loads(session.eval(_READ_JS))
+        except CdpError as e:
+            raise ArticleUnavailable(f'长文页面读不动:{e}') from None
+        except (ValueError, TypeError, UnicodeError) as e:
+            raise ArticleUnavailable(f'长文页面的回包读不懂:{e}') from None
+        if not isinstance(snap, dict):
+            raise ArticleUnavailable('长文页面的回包读不懂')
+        if snap.get('back'):
+            return None               # X 自己弹回推文页:这条确实没有长文
+        blocks = [str(b) for b in (snap.get('blocks') or []) if str(b).strip()]
+        if blocks:
+            body = '\n\n'.join(blocks)[:MAX_CHARS].strip()
+            title = str(snap.get('title') or '').strip()
+            return {'title': title, 'body': body}
+        if time.monotonic() > deadline:
+            raise ArticleUnavailable(
+                '长文页面没渲染出正文' if snap.get('at')
+                else '长文页面没打开(多半是这个浏览器没登录 X)')
+        time.sleep(_PAGE_POLL)
+
+
+def _one(entry: dict, session) -> dict | None:
+    """一条推文的长文:先问接口,接口不可用就走浏览器后路。
+
+    **两条路的「没有长文」都是确定结论**(返回 None),两条路都问不到才抛
+    `ArticleUnavailable`。接口答了「没有长文」时**不再走后路** —— 那是一个
+    确定的答复,再开一张标签页只是白等。
+    """
+    if API:
+        try:
+            return fetch(entry['url'])
+        except ArticleUnavailable:
+            if session is None or not BROWSER_FALLBACK:
+                raise
+        return browser_fetch(session, entry['url'])
+    # 接口被整个关掉(`KB_X_ARTICLE_API=''`):手里有浏览器就只走后路,没有就
+    # 什么都不做 —— 后者的行为逐字退回这一步出现之前。
+    if session is None or not BROWSER_FALLBACK:
+        return None
+    return browser_fetch(session, entry['url'])
+
+
+def fill(entries: list[dict], *, session=None) -> tuple[list[dict], str]:
     """把这一批里的长文正文补上。返回 (留下的条目, 没补全的原因)。
 
     **原因非空 = 这一轮没补全**,调用方把它并进 `incomplete`,于是水位留在原处、
     下一轮重叠重抓时再试(理由见模块注释:空正文入库之后就改不回来了)。补不到的
     那几条**本轮不入库** —— 入库了下一轮的重试也更新不了它们,留着等于白等。
+
+    `session` 是一个还活着的 CDP 会话(`browser` / `attach` 两条通道手里有),
+    接口不可用时拿它走后路。给 None 就只有接口这一条路。
     """
-    if not API:
+    if not API and (session is None or not BROWSER_FALLBACK):
         return entries, ''
     kept, missed, fails = [], 0, 0
     for entry in entries:
@@ -233,7 +379,7 @@ def fill(entries: list[dict]) -> tuple[list[dict], str]:
             kept.append(entry)
             continue
         try:
-            got = fetch(entry['url'])
+            got = _one(entry, session)
             fails = 0
         except ArticleUnavailable:
             fails += 1

@@ -15,6 +15,7 @@
 
 跑:  python -m unittest tests.test_x_article -v
 """
+import contextlib
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,7 @@ from unittest.mock import patch
 
 from kb.feeds import registry as reg, x_article, x_browser, x_feedgrab
 from kb.feeds.fetching import FeedError, Response
+from kb.feeds.x_cdp import CdpError
 from tests.test_x_feedgrab_contract import TODAY, FeedgrabRound, tweet
 
 FRESH = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -295,7 +297,25 @@ class FillTests(unittest.TestCase):
         self.assertEqual(([entry()], '', []), (kept, note, calls.urls))
 
 
+def snapshot(*, at=True, back=False, blocks=(), title=''):
+    """一份文章页的 DOM 快照,形状照 `_READ_JS` 真正返回的那个。"""
+    return json.dumps({'at': at, 'back': back,
+                       'blocks': list(blocks), 'title': title})
+
+
+# 后路读不到的那种形态:停在文章页上,一个块都没渲染出来(X 改版、没登录、
+# 渲染超时都长这样)。默认用它,所以**摆盘默认是"接口和后路都问不到"**。
+BLANK = snapshot(blocks=())
+
+
 class _FakeChrome:
+    """假的 CDP 会话。`script` 是 `eval` 要依次交出来的快照(或要抛的异常),
+    用完之后一直重复最后那一份;`visited` 记下 `goto` 去过哪儿 —— 「接口答了
+    没有长文就不该开浏览器」那几条用例数的就是它。"""
+
+    script: list = [BLANK]
+    visited: list = []
+
     def __init__(self, *a, **kw):
         pass
 
@@ -305,8 +325,52 @@ class _FakeChrome:
     def __exit__(self, *a):
         return False
 
-    def open_page(self, url):
-        pass
+    def open_page(self, url='about:blank'):
+        return 'sid'
+
+    def goto(self, url):
+        type(self).visited.append(url)
+
+    def eval(self, expression, timeout=0.0):
+        got = self.script[0] if len(self.script) == 1 else self.script.pop(0)
+        if isinstance(got, Exception):
+            raise got
+        return got
+
+    @classmethod
+    def reset(cls, *script):
+        cls.script = list(script) or [BLANK]
+        cls.visited = []
+
+
+OLD_WATER = '2026-10-01T00:00:00+00:00'
+
+
+def harvest_round(script, *, water=OLD_WATER, snaps=(), fallback=True, api=None):
+    """真跑一轮 `x_browser.harvest`:一条长文(空正文)+ 一条普通推文。
+
+    `script` 是长文接口依次要给的回答,`snaps` 是浏览器后路依次要交出的 DOM
+    快照。两条路**都在真实位置上**(`fill` / `browser_fetch` 一行不打桩),
+    所以这组用例对"后路接没接上"是敏感的。
+    """
+    def fake_one(page, handle, floor):
+        return [entry(url='https://x.com/example/status/9'),
+                {**entry(url='https://x.com/example/status/8', body='一条普通推文'),
+                 'published': '2026-10-07 20:30'}], ''
+
+    _FakeChrome.reset(*snaps)
+    req, calls = answering(*script)
+    stack = [req, patch.object(x_browser, '_harvest_one', fake_one),
+             patch.object(x_browser, 'Chrome', _FakeChrome),
+             patch.object(x_article, 'PAGE_WAIT', 0.0),
+             patch.object(x_article, 'BROWSER_FALLBACK', fallback)]
+    if api is not None:
+        stack.append(patch.object(x_article, 'API', api))
+    with contextlib.ExitStack() as es:
+        for cm in stack:
+            es.enter_context(cm)
+        got = x_browser.harvest([('example', water)], profile='/tmp/p')
+    return got['example'], calls
 
 
 class WatermarkTests(unittest.TestCase):
@@ -318,19 +382,12 @@ class WatermarkTests(unittest.TestCase):
 
     OLD = '2026-10-01T00:00:00+00:00'
 
-    def harvest(self, script):
-        def fake_one(page, handle, floor):
-            return [entry(url='https://x.com/example/status/9'),
-                    {**entry(url='https://x.com/example/status/8', body='一条普通推文'),
-                     'published': '2026-10-07 20:30'}], ''
-
-        req, calls = answering(*script)
-        with req, patch.object(x_browser, '_harvest_one', fake_one), \
-                patch.object(x_browser, 'Chrome', _FakeChrome):
-            got = x_browser.harvest([('example', self.OLD)], profile='/tmp/p')
-        return got['example'], calls
+    def harvest(self, script, **kw):
+        return harvest_round(script, water=self.OLD, **kw)
 
     def test_an_article_we_could_not_read_freezes_the_watermark(self):
+        """接口和后路**都**问不到:默认摆盘里浏览器停在文章页、一个块都没渲染
+        出来,所以这一条验的是两条路都用尽之后的末态。"""
         got, _ = self.harvest([FeedError('HTTP 500')])
         self.assertEqual(self.OLD, got['watermark'])
         self.assertIn('长文正文没取到', got['incomplete'])
@@ -435,3 +492,170 @@ class FeedgrabTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+ART = ['整理书签、做学习计划,我以前都是一个人对着 AI 来回问。',
+       '## 先说结论',
+       '![](https://pbs.twimg.com/media/Fx.jpg)',
+       '书签保存开源项目:https://github.com/example/x-bookmarks-archive']
+
+
+class BrowserFallbackTests(unittest.TestCase):
+    """**后路**:长文接口(FxTwitter)是个第三方服务,它关了这一步就没了 ——
+    而 `browser` / `attach` 两条通道手里正好有一个**已经登录**的浏览器,直接
+    把文章页读出来即可(`/<handle>/article/<tweet_id>`)。
+
+    这一组的重点是**判据的方向性**。把「有长文」说成「没有」会让一条空正文
+    落库,而 `put_items` 是 `DO NOTHING` —— 那一篇从此永久是空的、下一轮重试
+    也救不回来;反过来把「没有长文」说成「问不到」只是让水位留在原处、下一轮
+    重叠重抓一次。所以只有 X 自己把我们弹回推文页那一种才算「没有」,登录墙、
+    空壳、渲染超时、CDP 报错一律当成「问不到」。
+    """
+
+    def test_a_tweet_url_becomes_an_article_url(self):
+        """`/status/` 换成 `/article/`。**这是 X 自己的规范形式**,所以后路
+        不需要 `article_id` —— 那个 id 只出现在接口回包里,而后路恰恰要在
+        接口已经不可用的时候跑。"""
+        self.assertEqual(
+            'https://x.com/Pluvio9yte/article/2108346962986909740',
+            x_article.article_page(
+                'https://x.com/Pluvio9yte/status/2108346962986909740'))
+        for bad in ('https://x.com/i/article/123', 'https://x.com/someone',
+                    'https://example.org/a/status/1', '', 'not a url'):
+            self.assertEqual('', x_article.article_page(bad), bad)
+
+    def test_the_fallback_fills_the_body_when_the_endpoint_is_down(self):
+        """**后果先断言**:接口 500 而后路读到了 —— 这一轮就是读全了,水位
+        照常推进,正文真的落在条目上。"""
+        got, _ = harvest_round([FeedError('HTTP 500')],
+                               snaps=[snapshot(blocks=ART, title='X书签保存Skill')])
+        self.assertEqual('', got['incomplete'], '后路补上了,这一轮不算没读完')
+        self.assertEqual(datetime(2026, 10, 9, 0, 1, tzinfo=timezone.utc),
+                         x_browser._utc(got['watermark']))
+        article = [e for e in got['entries'] if e['url'].endswith('/9')][0]
+        self.assertIn('整理书签', article['body'])
+        self.assertIn('## 先说结论', article['body'], '块级结构照搬')
+        self.assertIn('![](https://pbs.twimg.com/media/Fx.jpg)', article['body'])
+        self.assertIn('\n\n', article['body'], '段落边界是按块拿的')
+        self.assertEqual('X书签保存Skill', article['title'])
+
+    def test_the_fallback_opens_the_article_page_of_that_tweet(self):
+        harvest_round([FeedError('x')], snaps=[snapshot(blocks=ART)])
+        self.assertEqual(['https://x.com/example/article/9'], _FakeChrome.visited)
+
+    def test_x_bouncing_us_back_means_this_tweet_has_no_article(self):
+        """纯图推文:实测 X 自己把 `/article/<id>` 302 回 `/status/<id>`。
+        那是一个确定的结论 —— 照旧入库、**不冻水位**,不然一条纯图推文能把
+        这个号的水位永久冻住。"""
+        got, _ = harvest_round([FeedError('x')],
+                               snaps=[snapshot(at=False, back=True)])
+        self.assertEqual('', got['incomplete'])
+        self.assertEqual(datetime(2026, 10, 9, 0, 1, tzinfo=timezone.utc),
+                         x_browser._utc(got['watermark']))
+        self.assertEqual(['https://x.com/example/status/9',
+                          'https://x.com/example/status/8'],
+                         [e['url'] for e in got['entries']], '照旧入库')
+
+    def test_a_login_wall_is_not_a_tweet_without_an_article(self):
+        """**方向性那条**:既不在文章页、又没有正文 —— 这是「这个浏览器没登录
+        X」的形态,不是「这条没有长文」。当成后者就是拿一次故障换一条永久
+        空正文。"""
+        got, _ = harvest_round([FeedError('x')],
+                               snaps=[snapshot(at=False, back=False)])
+        self.assertEqual(OLD_WATER, got['watermark'], '水位一步都不许动')
+        self.assertIn('长文正文没取到', got['incomplete'])
+        self.assertEqual(['https://x.com/example/status/8'],
+                         [e['url'] for e in got['entries']], '本轮不入库')
+        self.assertEqual('', got['error'], '这不是一次失败,只是没读完')
+
+    def test_a_blank_article_page_freezes_the_watermark_too(self):
+        got, _ = harvest_round([FeedError('x')], snaps=[snapshot(blocks=())])
+        self.assertEqual(OLD_WATER, got['watermark'])
+        self.assertIn('长文正文没取到', got['incomplete'])
+
+    def test_a_cdp_error_does_not_take_the_whole_round_down(self):
+        """单篇读不动只是这一条没取到,剩下的账号照旧跑完 —— 别让它冒到
+        `harvest` 外面那道「浏览器会话中断」上去。"""
+        got, _ = harvest_round([FeedError('x')], snaps=[CdpError('eval 超时')])
+        self.assertEqual(OLD_WATER, got['watermark'])
+        self.assertIn('长文正文没取到', got['incomplete'])
+        self.assertEqual('', got['error'])
+
+    def test_the_endpoint_saying_no_article_never_opens_a_browser(self):
+        """接口答「这条没有长文」是确定结论,不该再开一张标签页白等。"""
+        got, _ = harvest_round([{'tweet': {'text': 'hi'}}])
+        self.assertEqual([], _FakeChrome.visited)
+        self.assertEqual('', got['incomplete'])
+
+    def test_a_working_endpoint_never_opens_a_browser(self):
+        harvest_round([article_payload()])
+        self.assertEqual([], _FakeChrome.visited)
+
+    def test_turning_the_fallback_off_leaves_the_old_behaviour(self):
+        """`KB_X_ARTICLE_BROWSER=0`:接口失败就按没读完办,浏览器一次都不碰。"""
+        got, _ = harvest_round([FeedError('x')], snaps=[snapshot(blocks=ART)],
+                               fallback=False)
+        self.assertEqual([], _FakeChrome.visited)
+        self.assertEqual(OLD_WATER, got['watermark'])
+        self.assertIn('长文正文没取到', got['incomplete'])
+
+    def test_the_endpoint_off_but_a_browser_in_hand_still_fills(self):
+        """`KB_X_ARTICLE_API=''`(不想用那个第三方)+ 手里有浏览器:只走后路,
+        一次 HTTP 都不发,长文照旧补得到。"""
+        got, calls = harvest_round([], api='',
+                                   snaps=[snapshot(blocks=ART, title='标题')])
+        self.assertEqual([], calls.urls, '接口关掉了就一次都不该问')
+        self.assertEqual(['https://x.com/example/article/9'], _FakeChrome.visited)
+        article = [e for e in got['entries'] if e['url'].endswith('/9')][0]
+        self.assertIn('整理书签', article['body'])
+        self.assertEqual('', got['incomplete'])
+
+    def test_both_switches_off_is_a_full_stand_down(self):
+        got, calls = harvest_round([], api='', fallback=False,
+                                   snaps=[snapshot(blocks=ART)])
+        self.assertEqual(([], []), (calls.urls, _FakeChrome.visited))
+        self.assertEqual('', got['incomplete'])
+        self.assertEqual(2, len(got['entries']), '一条都不拦,逐字退回从前')
+
+    def test_the_fallback_resets_the_give_up_counter(self):
+        """接口整个挂了而后路都好时,**不许在第 3 条上放弃** —— `_GIVE_UP_AFTER`
+        防的是"每条各等满一次超时",而后路正常答得上来。"""
+        sess = _FakeChrome()
+        _FakeChrome.reset(snapshot(blocks=ART))
+        req, calls = answering(*[FeedError('down')] * 10)
+        with req, patch.object(x_article, 'PAGE_WAIT', 0.0):
+            kept, note = x_article.fill(
+                [entry(url=f'https://x.com/a/status/{i}') for i in range(10)],
+                session=sess)
+        self.assertEqual('', note)
+        self.assertEqual(10, len(kept))
+        self.assertTrue(all('整理书签' in e['body'] for e in kept))
+
+    def test_the_fallback_gives_up_when_it_is_broken_too(self):
+        """两条路都坏了时照旧要放弃,否则 10 条各等一次渲染超时。"""
+        sess = _FakeChrome()
+        _FakeChrome.reset(BLANK)
+        req, _ = answering(*[FeedError('down')] * 10)
+        with req, patch.object(x_article, 'PAGE_WAIT', 0.0):
+            kept, note = x_article.fill(
+                [entry(url=f'https://x.com/a/status/{i}') for i in range(10)],
+                session=sess)
+        self.assertEqual([], kept)
+        self.assertEqual(x_article._GIVE_UP_AFTER, len(_FakeChrome.visited))
+        self.assertIn('10', note)
+
+    def test_an_empty_title_falls_back_to_the_tweets_own(self):
+        sess = _FakeChrome()
+        _FakeChrome.reset(snapshot(blocks=ART, title=''))
+        req, _ = answering(FeedError('down'))
+        with req, patch.object(x_article, 'PAGE_WAIT', 0.0):
+            kept, _ = x_article.fill([entry(title='某人 的动态')], session=sess)
+        self.assertEqual('某人 的动态', kept[0]['title'])
+
+    def test_feedgrab_has_no_browser_so_nothing_changes(self):
+        """**反过来钉一边**:feedgrab 那条路压根没有浏览器,后路不许悄悄对它
+        生效 —— 它是子进程调用,手里没有任何 CDP 会话。"""
+        import inspect
+        src = inspect.getsource(x_feedgrab)
+        self.assertIn('x_article.fill(entries)', src)
+        self.assertNotIn('session=', src.split('x_article.fill')[1][:40])

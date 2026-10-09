@@ -423,7 +423,13 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # 长文(Article)推文在时间线上一个字都没有,正文要单独取一次。
                     # 取不到的那几条本轮不入库、并按"没读完"办 —— 空正文一旦落库
                     # 就再也更新不了(`put_items` 是 DO NOTHING),见 `x_article`。
-                    entries, missing = x_article.fill(entries)
+                    #
+                    # **`session=page` 就是那条后路**:长文接口(FxTwitter)是个
+                    # 第三方服务,它挂了的时候这条通道手里正好有一个**已经登录**
+                    # 的浏览器,直接把文章页读出来即可。导航安全 —— 这个账号的
+                    # 时间线已经读完了,下一个账号的 `_harvest_one` 自己会 goto
+                    # 回它的 profile。
+                    entries, missing = x_article.fill(entries, session=page)
                     if missing:
                         incomplete = f'{incomplete};{missing}' if incomplete else missing
                     # **没读完就不推进水位**:这一轮停在时间线半中间,下面那一段
