@@ -55,6 +55,19 @@ PAD_BODY = SP + chr(10) + '|  x  |' + chr(10) + SP
 PAD_PRE = '<pre>' + ''.join(
     '<div data-block="true"><span data-text="true">' + ln + '</span></div>'
     for ln in ['&#8203;', SP, '|  x  |', SP, '&#8203;']) + '</pre>'
+# **代码块里那几个不可见字符是数据**:不换行空格(U+00A0)、零宽空格(U+200B)、
+# BOM(U+FEFF)。归一成普通空格、或者当占位符删掉之后,代码照旧 `compile()` 得过
+# 而**字符串的值变了** —— 只有**执行输出**看得出来(2026-10-09 第 1 轮审查的不拦
+# 项①:接口那条路原样给出 `[97,160,98,8203,99,65279,100]`,这条路给的是
+# `[97,32,98,99,100]`)。源码里写成 HTML 实体,免得文件里躺着三个看不见的字符。
+BYTES_SAMPLE = 'a' + chr(0xA0) + 'b' + chr(0x200B) + 'c' + chr(0xFEFF) + 'd'
+BYTES_ORDS = '[97, 160, 98, 8203, 99, 65279, 100]'
+BYTES_CODE = ("sample = '" + BYTES_SAMPLE + "'" + chr(10)
+              + 'assert [ord(c) for c in sample] == ' + BYTES_ORDS)
+BYTES_PRE = '<pre>' + ''.join(
+    '<div data-block="true"><span data-text="true">' + ln + '</span></div>'
+    for ln in ["sample = 'a&#160;b&#8203;c&#65279;d'",
+               'assert [ord(c) for c in sample] == ' + BYTES_ORDS]) + '</pre>'
 
 # Draft.js 的真实形状:每个段落一个 `[data-block="true"]`,文字包在
 # `[data-text="true"]` 里,表情是一个带 alt 的 `<img>`(twemoji),配图单独
@@ -98,6 +111,8 @@ ARTICLE_HTML = f'''<!doctype html><meta charset="utf-8"><title>Article</title>
       {DATA_PRE}
       <div data-block="true"><span data-text="true">&#8203;</span></div>
       {PAD_PRE}
+      <div data-block="true"><span data-text="true">下面那段里有三个看不见的字符。</span></div>
+      {BYTES_PRE}
     </div>
   </div>
 </div>'''
@@ -273,6 +288,22 @@ class DomTests(unittest.TestCase):
         self.assertEqual(chr(96) * 3 + chr(10) + PAD_BODY + chr(10) + chr(96) * 3,
                          got, f'边界只许削完全空的行:{got!r}')
 
+    def test_invisible_characters_inside_code_are_data(self):
+        """**后果先断言**:读回来那段代码**跑一遍**,里面那句 `assert` 得过。
+
+        散文里 nbsp 是排版产物、零宽是 Draft.js 的占位,所以非代码段照旧归一;
+        代码块里它们是**数据**。两边用的是同一个 `textOf`,判据只有「这一块是
+        不是代码」那一道 —— 把归一写在那道**外面**的实现在这里红,而且
+        `compile()` 和围栏那几条照旧全绿(第 1 轮审查的不拦项①)。
+        """
+        self.open('article.html')
+        blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
+        got = next((b for b in blocks if 'sample = ' in b), '')
+        self.assertEqual(chr(96) * 3 + chr(10) + BYTES_CODE + chr(10) + chr(96) * 3,
+                         got, f'代码块里的不可见字符被动过了:{got!r}')
+        code = got.split(chr(10), 1)[1].rsplit(chr(10), 1)[0]
+        exec(compile(code, '<extracted>', 'exec'), {})   # 动过就 AssertionError
+
     def test_an_inline_code_span_does_not_fence_the_paragraph(self):
         """**反过来钉一边**:段落里插一个行内 `<code>` 不许把整段包成代码块。
 
@@ -316,7 +347,7 @@ class DomTests(unittest.TestCase):
         self.open('article.html')
         snap = json.loads(self.page.eval(x_article._READ_JS))
         blocks = snap['blocks']
-        self.assertEqual(18, len(blocks), f'零宽占位块不该成段:{blocks}')
+        self.assertEqual(20, len(blocks), f'零宽占位块不该成段:{blocks}')
         self.assertEqual('第二段正文独立成段。', blocks[1])
         self.assertEqual('第三段\n换行之后还在同一段里。', blocks[3])
         self.assertEqual('第四段。', blocks[4], 'display:none 的辅助节点不进正文')
@@ -333,7 +364,7 @@ class DomTests(unittest.TestCase):
         self.assertIn('🙂', got['body'])
         self.assertIn(f'![]({PHOTO})', got['body'])
         self.assertEqual('X书签保存Skill x Teamily', got['title'])
-        self.assertEqual(18, len(got['body'].split('\n\n')))
+        self.assertEqual(20, len(got['body'].split('\n\n')))
 
     # ── 时间线的长文卡片 ────────────────────────────────────────────────────
 

@@ -13,7 +13,10 @@
 
 跑:  python -m unittest tests.test_x_article_backfill -v
 """
+import contextlib
+import io
 import sys
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -54,6 +57,17 @@ class BackfillBase(FeedgrabRound):
         with req:
             code = bf.main(list(argv))
         return code, calls
+
+    def said(self, *argv, script=()):
+        """跑一次并把它**说出来的话**一起交回:`(退出码, stdout)`。
+
+        「报的是实际写进去了几条」只能从这里验 —— 库里没变化而命令说「已回填
+        N 条」,人看完就以为处理过了。"""
+        buf = io.StringIO()
+        req, _ = answering(*script)
+        with req, contextlib.redirect_stdout(buf):
+            code = bf.main(list(argv))
+        return code, buf.getvalue()
 
 
 class BackfillTests(BackfillBase):
@@ -138,6 +152,147 @@ class BackfillTests(BackfillBase):
         code, calls = self.run_cmd('run', '--yes')
         self.assertEqual(0, code)
         self.assertEqual([], calls.urls)
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+NEWER = '扫描之后另一个写入方补好的那份完整正文。'
+MINE = '这一趟自己从接口拿到的正文。'
+
+
+class ConcurrentWriteTests(BackfillBase):
+    """**扫描和写回之间,正文可能已经被别人补好了。**
+
+    扫描是「逐条问一次长文接口」,几十秒到几分钟;这期间一次成功的补抓
+    (`fulltext._save`)、一趟存量复查(`scripts/feed_fulltext_recheck`)、或者
+    另一个并发跑的这个脚本,完全可能已经把正文写好、翻译好。按 `key` 无条件盖
+    回去的后果实测过:正文从完整那份变回这一趟手里的旧结果、`body_zh` 和
+    `translated_at` 一并清空,而**两次命令都报成功**(2026-10-09 第 1 轮审查
+    双线程复现)。
+
+    **注入点选在扫描循环里**(`probe` 返回之后),因为真实的窗口就在那儿:
+    `empty_items` 的读事务早就结束了,主循环还在逐条问接口。`apply_one` /
+    `main` 一行不打桩 —— 打桩成功正好绕开唯一要验的那件事。
+
+    **断言一律先验后果**(库里那份正文、译文、命令说了什么),只验「返回 True
+    还是 False」的话,一个认出来却照样覆盖的实现也能全绿。
+    """
+
+    def meddle(self, body=NEWER, *, hash_too=True, extras=True):
+        """让"另一个写入方"在扫描期间插进来一次。"""
+        real = bf.probe
+
+        def probing(row):
+            got = real(row)
+            with reg.db() as conn:
+                sets = ['body=?']
+                args = [body]
+                if hash_too:
+                    sets.append('content_hash=?')
+                    args.append('hash-from-the-other-writer')
+                if extras:
+                    sets += ['body_zh=?', 'translated_at=?']
+                    args += ['另一个写入方留下的译文。', '2026-10-09T09:00:00+00:00']
+                conn.execute(f'UPDATE feed_items SET {", ".join(sets)} WHERE key=?',
+                             (*args, row['key']))
+                conn.commit()
+            return got
+        return patch.object(bf, 'probe', probing)
+
+    def test_a_body_filled_in_the_meantime_is_never_overwritten(self):
+        """**后果**:正文、译文、完成时间一个字节都不许动。"""
+        s = self.seed()
+        with self.meddle():
+            code, out = self.said('run', '--yes', script=[article_payload()])
+        self.assertEqual(0, code)
+        row = self.row(s['id'])
+        self.assertEqual(NEWER, row['body'], '不许拿旧结果盖掉完整正文')
+        with reg.db() as conn:
+            got = conn.execute('SELECT body_zh, translated_at FROM feed_items'
+                               ).fetchone()
+        self.assertEqual('另一个写入方留下的译文。', got['body_zh'])
+        self.assertTrue(got['translated_at'], '译文完成时间不许被清掉')
+
+    def test_it_says_plainly_that_nothing_was_written(self):
+        """**统计按实际写入结果报**:库里没变化就不许说「已回填 1 条」。"""
+        self.seed()
+        with self.meddle():
+            _, out = self.said('run', '--yes', script=[article_payload()])
+        self.assertNotIn('已回填 1 条', out)
+        self.assertIn('一条都没写', out)
+        self.assertIn('跳过 1 条', out)
+
+    def test_the_content_hash_half_stands_on_its_own(self):
+        """**契约**:只有「我扫到的还是当前这一版吗」那道挡得住的局 ——
+        正文仍然是空的,`content_hash` 换了(一个只刷 hash 的写入方、一次手工
+        迁移)。今天的写入方都连 body 一起换,所以这一道眼下是条冗余带;留着
+        它的理由是构造上的,用例因此是**契约**而不是某条真实路径的复现。"""
+        s = self.seed()
+        with self.meddle(body='', extras=False):
+            self.said('run', '--yes', script=[article_payload()])
+        self.assertEqual('', self.row(s['id'])['body'], '那一版已经不在了')
+
+    def test_the_empty_body_half_stands_on_its_own(self):
+        """**契约**:只有「正文此刻还是空的吗」那道挡得住的局 —— 正文被补好了,
+        而 `content_hash` 没动(手工 SQL、一个不刷 hash 的写入方)。"""
+        s = self.seed()
+        with self.meddle(hash_too=False):
+            self.said('run', '--yes', script=[article_payload()])
+        self.assertEqual(NEWER, self.row(s['id'])['body'])
+
+    def test_without_a_race_it_still_writes_everything(self):
+        """**反过来钉一边**:没有交错时照旧写进去,md 也照旧被重写。"""
+        s = self.seed()
+        code, out = self.said('run', '--yes', script=[article_payload()])
+        self.assertEqual(0, code)
+        self.assertIn('已回填 1 条', out)
+        self.assertNotIn('跳过', out)
+        self.assertIn('整理书签', self.row(s['id'])['body'])
+
+    def test_two_real_runs_cannot_leave_a_half_state(self):
+        """**真的两个执行体**:两条独立连接、屏障同时起跑、不人为排序。
+
+        两种交错都只有一个赢家,末态必须是**某一份完整正文配它自己那个 hash**
+        —— 不许留下「正文是 A 而 hash 是 B」或者「完整正文配一个被清空的译文」
+        那种半状态(口径同 `sync._claim_write` 那条「两种结局的末态都是对的」)。
+        """
+        for round_no in range(6):
+            with self.subTest(round=round_no):
+                self.setUp()
+                s = self.seed()
+                gate = threading.Barrier(2)
+                bodies = {w: f'正文 {w}' for w in ('A', 'B')}
+
+                # **一个 patch、按线程分派**:两个线程各自 `with patch` 的话,
+                # 后退出的那个会把前一个打过的桩恢复回去(典型的 patch 泄漏),
+                # 污染到同一个类里别的用例上。
+                def probing(row):
+                    who = threading.current_thread().name
+                    gate.wait(timeout=10)
+                    return bf.GOT, {'title': f'《{who}》', 'body': bodies[who]}
+
+                def one():
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        bf.main(['run', '--yes'])
+
+                with patch.object(bf, 'probe', probing):
+                    ts = [threading.Thread(target=one, name=w)
+                          for w in ('A', 'B')]
+                    for t in ts:
+                        t.start()
+                    for t in ts:
+                        t.join(timeout=20)
+
+                row = self.row(s['id'])
+                self.assertIn(row['body'], list(bodies.values()),
+                              '末态必须是某一份完整正文,不许是空的或混的')
+                self.assertEqual(bf._hash(
+                    {'url': row['url'], 'published': row['published'],
+                     'content_kind': row['content_kind']},
+                    f'《{row["body"][-1]}》', row['body']),
+                    row['content_hash'], '正文和 hash 必须出自同一个赢家')
 
 
 if __name__ == '__main__':

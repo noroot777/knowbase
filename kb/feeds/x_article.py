@@ -53,6 +53,10 @@ import re
 import time
 
 from kb.feeds.fetching import FeedError, request
+# 读文章页那段 JS 单独一个文件,**只因为行数** —— 160 多行源码会把这个文件顶出
+# 700 行硬上限,而它是纯数据、没有被任何测试打桩(见那个模块的注释)。绑回本模块
+# 的 `_READ_JS`,所以 dom 那组照旧按老名字把它丢给真浏览器 eval。
+from kb.feeds.x_article_js import READ_JS as _READ_JS
 from kb.feeds.x_cdp import CdpError
 
 # 接口地址。设成空串 = 整个关掉这一步(不发请求、不拦任何条目)。
@@ -345,176 +349,12 @@ _PAGE_POLL = 0.8
 # `article_id` 只出现在那个接口的回包里,而后路要在接口**已经不可用**的时候跑,
 # 手里只有推文 URL;要是非得先知道 article_id,这条路压根立不起来。
 _ARTICLE_PATH = re.compile(r'^(https://(?:x|twitter)\.com/[A-Za-z0-9_]{1,20})/status/(\d+)')
+# 浏览器**此刻**停在哪一篇。`/<handle>/article/<id>` 与 `/<handle>/status/<id>`
+# 两种形状各自带着那条推文的 id,而 id 是这条推文的唯一身份 —— **只比它,不比
+# handle**:X 的 handle 大小写不敏感、改名之后旧地址照样跳得到。
+_SPOT = re.compile(r'/(article|status)/(\d+)')
 
-# 读一次文章页。三件事一起回答,因为它们在同一个 DOM 快照里才自洽:
-# ①**我们还在文章页上吗**(`at`),还是被 X 弹回了推文页(`back`);
-# ②正文块(`blocks`);③标题(`title`)。
-#
-# **`back` 是「这条没有长文」的判据,而且它不押任何 CSS 选择器** —— 实测一条纯图
-# 推文的 `/article/<id>` 会被 X 自己 302 回 `/status/<id>`(2026-10-09),那是它的
-# 路由行为,比任何 testid 都稳。有长文的那条则老老实实停在 `/article/` 上。
-#
-# 正文容器认 `[data-contents="true"]` 里的 `[data-block="true"]`(Draft.js 的块),
-# 所以**段落边界是按块拿的、不是切 innerText** —— 实测 47 块、2752 字纯正文,
-# 比整页 innerText 少掉 234 字的导航、作者简介和「升级 Premium」。**块内按子节点
-# 顺序拼**,理由见 `textOf` 上面那段:行内表情是 `<img>`,一块里既有文字又有图
-# 是常态。
-#
-# 标题取 read view 里排除正文之后**字号最大的那个叶子**(实测标题 34px、其余
-# ≤15px),拿不到按 read view 的第一行 —— 实测两者是同一个值,互为冗余。
-_READ_JS = r'''(() => {
-  const path = location.pathname;
-  const rich = document.querySelector('[data-testid="twitterArticleRichTextView"]');
-  const read = document.querySelector('[data-testid="twitterArticleReadView"]');
-  const root = document.querySelector('[data-contents="true"]');
-  // 预格式化那几种标签里的空格、制表符和换行是**内容**,一个都不许折叠:一段
-  // Python 示例的四格/八格缩进被压成一格之后就是无效代码了 —— 照着复制当场
-  // `IndentationError`,而我们报的是成功、正文照样落库(`DO NOTHING` 之下永久
-  // 改不回来)。判据两道、任一成立即可:计算样式的 `white-space` 以 `pre` 开头
-  // (页面 CSS 说了话),或者标签本身是 `pre`/`code`/`samp`/`kbd`(CSS 没加载
-  // 时 UA 默认样式也是 `pre`)。
-  const PRE_WS = /^(pre|pre-wrap|pre-line|break-spaces)/;
-  const preish = (el) => {
-    const tag = el.tagName.toLowerCase();
-    if (tag === 'pre' || tag === 'code' || tag === 'samp' || tag === 'kbd') return true;
-    return PRE_WS.test(getComputedStyle(el).whiteSpace || '');
-  };
-  // 一块的内容按**子节点顺序**拼出来。`<img>` 分两种,判据是 **alt 的内容**:
-  // alt **整串都是表情字符**的是行内表情(X 把 emoji 渲染成 twemoji 图片,alt
-  // 就是那个字符本身),按 alt 还原;**其余一律是真·配图**,写成 markdown 图片
-  // 并把 alt 留在说明位上。
-  //
-  // **不许拿「有没有 alt」当判据**:给配图配一句描述是无障碍的常规做法
-  // (`alt="系统架构示意图"`),按「非空 alt = 表情」会把图片地址整个丢掉,而
-  // 剩下那句描述让正文看着非空 —— `browser_fetch` 那道「正文空不空」的判据
-  // 发现不了图没了,于是一篇缺图的正文照样落库、从此改不回来。反过来万一 X
-  // 哪天把 emoji 的 alt 换成 `:smile:` 这种短代码,我们只是多写一条图片链接,
-  // 方向上安全。`<figure>` 里的那张一律按配图办(结构说了话)。
-  //
-  // **也不许写成「这一块里有 img 就只要图片」**:段落里插一个表情图是极常见的
-  // 形态(emoji 全是这样),那一版会把**整段文字丢掉**只留一张小图,而且照样
-  // 报成功。也不能用 `innerText`:它压根不包含 img 的 alt,表情会静默消失。
-  const EMOJI_CORE = /[\p{Extended_Pictographic}\u20e3\u{1F1E6}-\u{1F1FF}]/u;
-  const EMOJI_ONLY =
-    /^[\p{Extended_Pictographic}\p{Emoji_Component}\u200d\ufe0f\u20e3]+$/u;
-  const textOf = (node, pre) => {
-    let s = '';
-    for (const n of node.childNodes) {
-      if (n.nodeType === 3) {
-        let t = n.nodeValue;
-        if (!pre) {
-          // 非预格式化的那部分照 HTML 自己的空白折叠规则走(源码里的换行和缩进
-          // 不是内容),`<br>` 刚插下的那个换行后面不再留一个行首空格。
-          t = t.replace(/[\t\n\r\f ]+/g, ' ');
-          if (/\n$/.test(s)) t = t.replace(/^ /, '');
-        }
-        s += t;
-        continue;
-      }
-      if (n.nodeType !== 1) continue;
-      if (getComputedStyle(n).display === 'none') continue;
-      const tag = n.tagName.toLowerCase();
-      if (tag === 'br') { s += '\n'; continue; }
-      if (tag === 'img') {
-        const alt = (n.getAttribute('alt') || '').trim();
-        const emoji = alt && EMOJI_CORE.test(alt) && EMOJI_ONLY.test(alt)
-                      && !n.closest('figure');
-        if (emoji) { s += alt; continue; }
-        const cap = alt.replace(/[\[\]]/g, ' ').trim();
-        s += n.src ? '![' + cap + '](' + n.src + ')' : cap;
-        continue;
-      }
-      s += textOf(n, pre || preish(n));
-    }
-    return s;
-  };
-  // **预格式化的块要写成 markdown 代码围栏,不能当普通段落交出去。** 读出来的
-  // 字符串保真只是半截:裸代码写进 md 之后,阅读页按 markdown 段落渲染,HTML
-  // 的空白折叠把换行和缩进一起吃掉 —— 页面上和复制出来都是
-  // `def answer(): if True: return 42`,`compile()` 当场 `invalid syntax`
-  // (2026-10-09 审查实测,走的是真导出 + 真 `/doc/` 阅读页 + 真选区复制)。
-  // markdown 里保住空白只有围栏这一条路:原始 HTML 在阅读页是按**字面文字**
-  // 显示的(见 `pages.py` 的 `_DOC_LITERAL_JS`),写 `<pre>` 进去没有用。
-  //
-  // **判据只认标签,不用计算样式** —— 这跟上面 `preish` 那两道分工不同:
-  // 「页面不折叠这一段的空白」证明不了「这一段是代码」。Draft.js 官方默认样式
-  // 给**每一个**块都加了 `white-space: pre-wrap`,按它写围栏会把整篇文章每一段
-  // 都包成代码块,那是不可逆的毁容;漏判只是回到现状(那一段的缩进在阅读页被
-  // 折叠)。两个方向差着一个量级,所以这里问的是「这一块的全部文字是不是都装在
-  // 一个 `pre`/`code`/`samp`/`kbd` 里」:块本身或祖先是(真实 Draft.js 代码块
-  // 就是 `<pre>` 包着多个 `data-block`),或者块里唯一那个预格式化容器装着这
-  // 一块的全部文字。**段落里插一个行内 `<code>` 时它必然为假**(还有别的文字
-  // 在外面),所以不会把一整段正文包成代码。
-  const codeish = (el) => {
-    if (el.closest('pre, code, samp, kbd')) return true;
-    const inner = el.querySelector('pre, code, samp, kbd');
-    if (!inner) return false;
-    const all = (el.textContent || '').replace(/\s+/g, '');
-    return !!all && all === (inner.textContent || '').replace(/\s+/g, '');
-  };
-  const blocks = [];
-  // 真实 Draft.js 的代码块是**一行一个 block**(`blockRenderMap` 把相邻的几个
-  // 包进同一个 `<pre>`),所以相邻的预格式化块要合并成**一个**围栏 —— 每行各发
-  // 一个围栏的话,复制出来是一堆分散的小代码块。「一个块里装多行」走同一条路。
-  let pend = [];
-  // 围栏内容**一律原样,一个字节都不改**,口径同 `_code_body`:只在**整组边界**
-  // 削**完全空**的行。真实 Draft.js 一行一个块,所以「每块收尾」就等于「每行
-  // 收尾」—— 而行尾那几个空格可能正是多行字符串、提示词模板、定宽文本的数据,
-  // 删掉之后代码照旧 `compile()` 得过而里面的 `assert` 当场失败(2026-10-09
-  // 第 4 轮审查实测)。纯空格的行同样可能是数据,所以只削完全空的。
-  const codeBody = (lines) => {
-    const rows = lines.join('\n').split('\n');
-    let a = 0, b = rows.length;
-    while (a < b && rows[a] === '') a++;
-    while (b > a && rows[b - 1] === '') b--;
-    const body = rows.slice(a, b).join('\n');
-    return body.trim() ? body : '';
-  };
-  const flush = () => {
-    if (!pend.length) return;
-    const body = codeBody(pend);
-    pend = [];
-    if (!body) return;
-    let n = 3;
-    for (const t of body.match(/`{3,}/g) || []) n = Math.max(n, t.length + 1);
-    const bar = '`'.repeat(n);
-    blocks.push(bar + '\n' + body + '\n' + bar);
-  };
-  if (root) for (const b of root.querySelectorAll('[data-block="true"]')) {
-    const isCode = codeish(b);
-    // 零宽空格(Draft.js 的空块占位 `&#8203;`)和 BOM 要去掉,**但 ZWJ / ZWNJ
-    // 不许动** —— 它们是组合表情的一部分,删掉之后一个组合表情当场裂成几个。
-    const raw = textOf(b, preish(b)).replace(/[\u200b\ufeff]/g, '')
-                                    .replace(/\u00a0/g, ' ');
-    if (isCode) {
-      // **每一行都原样攒着,行尾空白一个都不许当装饰删掉**(理由见 `codeBody`)。
-      // 占位空块的处理**只在整组边界**发生,这里一个字节都不判、不改。
-      pend.push(raw);
-      continue;
-    }
-    flush();
-    const txt = raw.trim();
-    if (txt) blocks.push(txt);
-  }
-  flush();
-  let title = '', big = 0;
-  if (read) {
-    for (const e of read.querySelectorAll('*')) {
-      if (e.children.length) continue;
-      if (rich && rich.contains(e)) continue;
-      const t = (e.innerText || '').trim();
-      if (!t || t.length > 300) continue;
-      const fs = parseFloat(getComputedStyle(e).fontSize) || 0;
-      if (fs > big) { big = fs; title = t; }
-    }
-    if (!title) title = (read.innerText || '').split('\n')[0].trim();
-  }
-  return JSON.stringify({
-    at: /\/article\/\d+\/?$/.test(path),
-    back: /\/status\/\d+\/?$/.test(path),
-    blocks: blocks, title: title,
-  });
-})()'''
+# 读一次文章页的那段脚本是 `_READ_JS`(在 `x_article_js` 里,见顶上那条 import)。
 
 
 def article_page(url: str) -> str:
@@ -523,7 +363,18 @@ def article_page(url: str) -> str:
     return f'{m.group(1)}/article/{m.group(2)}' if m else ''
 
 
-def browser_fetch(session, url: str, *, wait: float = 0.0) -> dict | None:
+def _spot(path: str) -> tuple[str, str]:
+    """一个路径(或地址)落在哪一篇上。返回 (`article`/`status`, 推文 id)。
+
+    认不出来返回 `('', '')` —— 那是「压根不在文章页也不在推文页上」(首页、
+    登录墙、`about:blank`),由调用方按"没打开"办。
+    """
+    m = _SPOT.search(path or '')
+    return (m.group(1), m.group(2)) if m else ('', '')
+
+
+def browser_fetch(session, url: str, *, wait: float | None = None,
+                  deadline: float | None = None) -> dict | None:
     """后路:在 `session` 那个**已经登录**的浏览器里读这篇长文。
 
     返回值的两档和 `fetch` 逐字同义:`{'title','body'}` 是读到了,`None` 是
@@ -533,17 +384,32 @@ def browser_fetch(session, url: str, *, wait: float = 0.0) -> dict | None:
     「有长文」说成「没有」会让一条空正文落库,而 `put_items` 是 DO NOTHING ——
     那一篇从此永久是空的、下一轮重试也救不回来;反过来把「没有长文」说成
     「问不到」只是让水位留在原处、下一轮重叠重抓一次(`put_items` 按 URL 去重)。
-    所以只有 X 自己把我们弹回推文页那一种才算「没有」,登录墙、空壳、渲染超时、
-    CDP 报错全部抛出去。
+    所以只有 X 自己把我们弹回**这一条推文自己的**推文页那一种才算「没有」,
+    登录墙、空壳、渲染超时、CDP 报错、以及**没跳过去**全部抛出去。
+
+    `wait` 是这一页最多等多久(默认 `PAGE_WAIT`),`deadline` 是整轮预取的
+    绝对截止时刻 —— 两者取先到的那个,所以一轮几十篇长文不会把整轮采集拖垮。
     """
     page = article_page(url)
     if not page:
         return None
-    deadline = time.monotonic() + (wait or PAGE_WAIT)
+    want = _spot(page)[1]
+    limit = time.monotonic() + (PAGE_WAIT if wait is None else wait)
+    if deadline is not None:
+        limit = min(limit, deadline)
     try:
-        session.goto(page)
+        nav = session.goto(page)
     except CdpError as e:
         raise ArticleUnavailable(f'长文页面打不开:{e}') from None
+    # **早一道**:导航明确失败时当场说出原因,既不去读页面、也不等满那一页的
+    # 上限。实测一篇 HTTP 204 的文章页会让 Chrome 的 `Page.navigate` 回包带
+    # `errorText: net::ERR_ABORTED` 而**页面停在原处**(2026-10-09 第 1 轮审查
+    # 用真无头浏览器复现)。**承重的是下面那道身份核对** —— 这一道只是把原因
+    # 说清、省掉一次满额等待,而且一个不交回导航结果的会话(老的假会话、别的
+    # 传输)下它压根不生效,所以不能靠它。
+    broke = str((nav or {}).get('errorText') or '') if isinstance(nav, dict) else ''
+    if broke:
+        raise ArticleUnavailable(f'长文页面没打开({broke})')
     while True:
         try:
             snap = json.loads(session.eval(_READ_JS))
@@ -553,21 +419,71 @@ def browser_fetch(session, url: str, *, wait: float = 0.0) -> dict | None:
             raise ArticleUnavailable(f'长文页面的回包读不懂:{e}') from None
         if not isinstance(snap, dict):
             raise ArticleUnavailable('长文页面的回包读不懂')
-        if snap.get('back'):
+        seen = _spot(str(snap.get('path') or ''))
+        # **承重那一道:这一页到底是不是我们要的那一篇。** 导航没生效时页面停在
+        # **上一篇文章**上,而那一页的正文是非空的 —— 不核对身份就会把上一篇的
+        # 标题和正文写进这一条,`fill` 报成功、水位照常推进,而 `put_items` 是
+        # `ON CONFLICT DO NOTHING`:**再同步也纠不回来**(2026-10-09 第 1 轮审查
+        # 实测:第二篇 `/Review/article/200` 真回 HTTP 204,库里第二条存成了第一
+        # 篇的标题和正文,拿正确正文重新入库返回新增 0 条)。
+        #
+        # 只比那个数字 id(见 `_spot`)。认不出 id 的路径(首页、登录墙、
+        # `about:blank`)不在这里拦 —— 那是「没打开」,交给下面两道:正文只在
+        # 身份对得上时才收,收不到就按超时抛。
+        if seen[1] and seen[1] != want:
+            raise ArticleUnavailable(
+                f'浏览器没跳到这一篇,还停在 /{seen[0]}/{seen[1]} 上')
+        if snap.get('back') and seen[1] == want:
             return None               # X 自己弹回推文页:这条确实没有长文
-        blocks = [str(b) for b in (snap.get('blocks') or []) if str(b).strip()]
-        if blocks:
-            body = '\n\n'.join(blocks)[:MAX_CHARS].strip()
-            title = str(snap.get('title') or '').strip()
-            return {'title': title, 'body': body}
-        if time.monotonic() > deadline:
+        # **正文只在"确实停在这一篇的文章页上"时才收。** 今天这和 JS 那边的
+        # `at` 同真同假(两者都从同一份 `path` 算),分成两处是因为它们回答的
+        # 不是一个问题:`at` 回答形状(还在文章页吗),这里回答身份(是哪一篇)。
+        if seen == ('article', want):
+            blocks = [str(b) for b in (snap.get('blocks') or []) if str(b).strip()]
+            if blocks:
+                body = '\n\n'.join(blocks)[:MAX_CHARS].strip()
+                title = str(snap.get('title') or '').strip()
+                return {'title': title, 'body': body}
+        if time.monotonic() > limit:
             raise ArticleUnavailable(
                 '长文页面没渲染出正文' if snap.get('at')
                 else '长文页面没打开(多半是这个浏览器没登录 X)')
         time.sleep(_PAGE_POLL)
 
 
-def _one(entry: dict, session) -> dict | None:
+def _over(deadline: float | None, should_stop=None) -> str:
+    """还能不能再为一条长文发请求。返回拦下的原因,空串 = 可以继续。
+
+    **这一步跑在账号的时间线已经读完之后**,所以它既不在 `_harvest_one` 那个
+    账号级上限(`ACCOUNT_SECONDS`)里,也不在整轮那道「进下一个账号之前检查」
+    里 —— 一个发了几十篇长文的账号会在这两道闸之间串行启动几十次新请求,而
+    `_GIVE_UP_AFTER` 只数**连续失败**:每一次成功都把它清零,所以它限不住
+    「大量慢但成功」的请求(2026-10-09 第 1 轮审查实测:预算 0.020 秒的一轮,
+    停止请求在第一条之后就置位了,后面照样新发 7 次请求、总耗时 0.323 秒,
+    8 条全部留下、`incomplete` 是空的、水位照常前进)。
+
+    两件事按同一个口径答,因为调用方的下一步是同一个:把这一条扣留下来。
+    """
+    if should_stop and should_stop():
+        return '已按停止请求中断'
+    if deadline is not None and time.monotonic() > deadline:
+        return '本轮时间预算用完'
+    return ''
+
+
+def _slice(deadline: float | None, cap: float) -> float:
+    """这一次请求最多还能花多久。没有整轮预算时就是 `cap`。
+
+    `_over` 已经保证进到这里时预算还没过,所以这个差值是正的;下界只是防
+    浮点边界,不是一个有意义的"最少给它这么久"。
+    """
+    if deadline is None:
+        return cap
+    return min(cap, max(0.01, deadline - time.monotonic()))
+
+
+def _one(entry: dict, session, *, deadline: float | None = None,
+         should_stop=None) -> dict | None:
     """一条推文的长文:先问接口,接口不可用就走浏览器后路。
 
     **两条路的「没有长文」都是确定结论**(返回 None),两条路都问不到才抛
@@ -576,20 +492,25 @@ def _one(entry: dict, session) -> dict | None:
     """
     if API:
         try:
-            return fetch(entry['url'])
+            return fetch(entry['url'], timeout=_slice(deadline, TIMEOUT))
         except ArticleUnavailable:
             if session is None or not BROWSER_FALLBACK:
                 raise
-        return browser_fetch(session, entry['url'])
+            # **接口切到浏览器之前再问一次。** 开一张标签页、等它渲染是这一步
+            # 最贵的动作(默认上限 15 秒),预算已经用完或用户已经按了停止时
+            # 别再启动它 —— 那一条照旧扣留,下一轮重试。
+            if _over(deadline, should_stop):
+                raise
+        return browser_fetch(session, entry['url'], deadline=deadline)
     # 接口被整个关掉(`KB_X_ARTICLE_API=''`):手里有浏览器就只走后路,没有就
     # 什么都不做 —— 后者的行为逐字退回这一步出现之前。
     if session is None or not BROWSER_FALLBACK:
         return None
-    return browser_fetch(session, entry['url'])
+    return browser_fetch(session, entry['url'], deadline=deadline)
 
 
-def fill(entries: list[dict], *, session=None,
-         links_only: bool = False) -> tuple[list[dict], str]:
+def fill(entries: list[dict], *, session=None, links_only: bool = False,
+         deadline: float | None = None, should_stop=None) -> tuple[list[dict], str]:
     """把这一批里的长文正文补上。返回 (留下的条目, 没补全的原因)。
 
     **原因非空 = 这一轮没补全**,调用方把它并进 `incomplete`,于是水位留在原处、
@@ -599,20 +520,29 @@ def fill(entries: list[dict], *, session=None,
     `session` 是一个还活着的 CDP 会话(`browser` / `attach` 两条通道手里有),
     接口不可用时拿它走后路。给 None 就只有接口这一条路(桥接、feedgrab)。
     `links_only` 见 `needs_article`:桥接那一档只认正文里明写的文章地址。
+
+    `deadline`(整轮预取的绝对截止时刻)和 `should_stop` 由两条预取通道按它们
+    自己那份预算传进来,**在每一条新请求之前各问一次**(见 `_over`):超限或
+    已按停止时,补到的照旧留下、没补到的扣留、原因并进 note —— 于是水位留在
+    原处,下一轮接着补。不传两者 = 没有上限,行为逐字同从前。
     """
     if not API and (session is None or not BROWSER_FALLBACK):
         return [_strip_hint(e) for e in entries], ''
-    kept, missed, fails = [], 0, 0
+    kept, missed, fails, halt = [], 0, 0, ''
     for entry in entries:
         want = needs_article(entry, links_only=links_only)
-        if not want or fails >= _GIVE_UP_AFTER:
-            if fails >= _GIVE_UP_AFTER and want:
-                missed += 1
+        # **每一条之前都重新问一次**,不是进这个函数时问一回:停止请求和预算
+        # 都可能在这一批跑到一半时才成立,而这一批正是几十次串行请求。
+        if want and not halt:
+            halt = _over(deadline, should_stop)
+        if not want or halt or fails >= _GIVE_UP_AFTER:
+            if want:
+                missed += 1          # 该补而没补:扣留,下一轮重试
                 continue
             kept.append(_strip_hint(entry))
             continue
         try:
-            got = _one(entry, session)
+            got = _one(entry, session, deadline=deadline, should_stop=should_stop)
             fails = 0
         except ArticleUnavailable:
             fails += 1
@@ -627,5 +557,9 @@ def fill(entries: list[dict], *, session=None,
                      'title': (got['title'] or entry.get('title') or '')[:500],
                      'body': '\n\n'.join(p for p in parts if p)}
         kept.append(_strip_hint(entry))
-    note = (f'有 {missed} 条推文的长文正文没取到,留到下次同步再试' if missed else '')
+    note = ''
+    if missed:
+        note = f'有 {missed} 条推文的长文正文没取到,留到下次同步再试'
+        if halt:
+            note = f'{note}({halt})'
     return kept, note

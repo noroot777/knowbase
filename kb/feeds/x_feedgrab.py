@@ -397,7 +397,12 @@ def harvest(jobs: list[tuple[str, str]], *, binary: str = '', data_dir: str,
             entries = _read_output(out, handle)
             # 长文(Article)推文的产物正文就是一条指向 `x.com/i/article/<id>` 的
             # 链接,正文要单独取一次(见 `x_article`)。
-            entries, missing = x_article.fill(entries)
+            # 预算和停止条件同浏览器通道那条:这一步在上游跑完之后串行
+            # 发请求,两条通道各挂一次,漏哪一条就是那条通道上的长文把整轮
+            # 拖垮。**不传 `session`** —— 它是子进程调用,手里没有任何 CDP
+            # 会话,后路对它压根不成立。
+            entries, missing = x_article.fill(
+                entries, deadline=deadline, should_stop=should_stop)
             # **没抓全就不推进水位 —— 存回这一轮真正用过的那个下界**(口径同浏览器
             # 通道那句 `started if incomplete`)。抓到的照旧入库,漏掉的那几条下
             # 一轮重叠重抓,`put_items` 按 `sha256(kind:url)` +
