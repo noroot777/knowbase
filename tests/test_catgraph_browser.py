@@ -34,7 +34,7 @@ sys.path.insert(0, str(REPO / "scripts" / "wiki"))
 import build_catgraph as B  # noqa: E402
 import taxonomy as T  # noqa: E402
 
-from tests.headless import probe_env, requires_headless  # noqa: E402
+from tests.headless import probe_env, requires_headless, run_probe  # noqa: E402
 from tests.test_catgraph import _group  # noqa: E402
 
 PROBE = Path(__file__).resolve().parent / "catgraph_probe.mjs"
@@ -96,10 +96,10 @@ class RelatedJumpTest(unittest.TestCase):
     @classmethod
     def _probe(cls, filters: list[str]) -> dict:
         """一次浏览器启动跑完所有筛选(每个之间重新加载页面)。"""
-        r = subprocess.run(
+        r = run_probe(
             [shutil.which("node"), str(PROBE), str(cls.page), ",".join(filters),
              "AAA工具", "BBB工具", SHARED],
-            capture_output=True, text=True, timeout=300, env=probe_env())
+            timeout=300, env=probe_env())
         if r.returncode != 0:
             raise AssertionError(r.stderr)
         return json.loads(r.stdout.strip().splitlines()[-1])

@@ -35,7 +35,7 @@ PROBE = HERE / "fulltext_probe.mjs"
 
 sys.path.insert(0, str(REPO))
 
-from tests.headless import NODE, probe_env, requires_headless  # noqa: E402
+from tests.headless import NODE, probe_env, requires_headless, run_probe  # noqa: E402
 
 
 def _free_port() -> int:
@@ -86,9 +86,9 @@ class FullTextPanelTest(unittest.TestCase):
         if not _wait(url + "/"):
             cls.web.kill(); cls.stub.kill()
             raise AssertionError("沙箱 kb-web 没起来")
-        run = subprocess.run(
+        run = run_probe(
             [str(NODE), str(PROBE), url, ids["agg_id"], ids["plain_id"]],
-            capture_output=True, text=True, timeout=300, env=probe_env(), cwd=str(REPO))
+            timeout=300, env=probe_env(), cwd=str(REPO))
         cls.stderr = run.stderr
         line = run.stdout.strip().splitlines()[-1] if run.stdout.strip() else ""
         if not line:

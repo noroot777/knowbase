@@ -26,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tests.headless import probe_env, requires_headless  # noqa: E402
+from tests.headless import probe_env, requires_headless, run_probe  # noqa: E402
 
 _PROBE = Path(__file__).resolve().parent / "source_post_probe.mjs"
 
@@ -66,9 +66,8 @@ class BrowserTests(unittest.TestCase):
     """真页面:大V观点不显示标题、正文不溢出卡片,而 RSS 照旧有标题。"""
 
     def test_posts_render_without_a_title(self):
-        r = subprocess.run([shutil.which("node"), str(_PROBE)],
-                           capture_output=True, text=True, timeout=300,
-                           env=probe_env())
+        r = run_probe([shutil.which("node"), str(_PROBE)],
+                      timeout=300, env=probe_env())
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
 
 
