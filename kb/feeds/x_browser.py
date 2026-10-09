@@ -450,7 +450,18 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # 的浏览器,直接把文章页读出来即可。导航安全 —— 这个账号的
                     # 时间线已经读完了,下一个账号的 `_harvest_one` 自己会 goto
                     # 回它的 profile。
-                    entries, missing = x_article.fill(entries, session=page)
+                    #
+                    # **整轮预算和停止条件要传下去。** 这一步跑在时间线已经读完
+                    # 之后,外面那两道闸(`_harvest_one` 的账号级上限、进下一个
+                    # 账号之前的检查)都够不着它:一个发了几十篇长文的账号会在
+                    # 两道闸之间串行启动几十次新请求,而 `_GIVE_UP_AFTER` 只数
+                    # 连续失败(每次成功都清零),限不住「大量慢但成功」那一种
+                    # (2026-10-09 第 1 轮审查实测:预算 0.020 秒的一轮,停止在
+                    # 第一条之后就置位了,后面照样新发 7 次请求、耗时 0.323 秒,
+                    # 8 条全留下、`incomplete` 空、水位照常前进)。
+                    entries, missing = x_article.fill(
+                        entries, session=page,
+                        deadline=deadline, should_stop=should_stop)
                     if missing:
                         incomplete = f'{incomplete};{missing}' if incomplete else missing
                     # **没读完就不推进水位**:这一轮停在时间线半中间,下面那一段

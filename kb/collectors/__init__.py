@@ -160,6 +160,32 @@ def target_manager(collector: SourceCollector | None = None) -> TargetManager | 
     return c if isinstance(c, TargetManager) else None
 
 
+# ── 「重试失败项」的范围收窄(可选能力)──────────────────────────────────────
+
+
+@runtime_checkable
+class RetryNarrowing(Protocol):
+    """能回答「上一轮失败的那几个目标,现在还要重抓哪些」的采集器。
+
+    名单是采集器自己在失败那一刻留下的(见 `pipeline_state.note_retry_targets`),
+    这里只回答"它们现在还要不要抓" —— 中间用户可能改过设置、也可能已经单独同步
+    成功了,而这两件事只有采集器分得清。
+
+    **不支持这个能力不是缺陷,是另一种真实情况**:公众号的失败是文章级的,而它的
+    `targets` 是账号级的,压根对不上 —— 返回 None(没有这个方法)的来源一律按原
+    范围重跑,比收窄成一个对不上的账号名单安全。
+    """
+
+    def retry_targets(self, note: dict) -> list[str]:
+        """note 形如 {"targets": [稳定身份...], "at": 记名单的时刻}。"""
+        ...
+
+
+def retry_narrower(collector: SourceCollector) -> RetryNarrowing | None:
+    """这个采集器能不能把重试范围收窄到失败项;不能返回 None。"""
+    return collector if isinstance(collector, RetryNarrowing) else None
+
+
 # ── 注册表 ──────────────────────────────────────────────────────────────────────
 # 目前只有一个来源。多来源时这里改成 list,管道对每个采集器跑一遍即可
 # ——fetch/materialize 之后的阶段(索引/提取/条目化)本来就是来源无关的。

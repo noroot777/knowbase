@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from kb import maintenance, store
+from kb import maintenance, scanner, store
 from kb.feeds import registry as reg, sync
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,9 +71,15 @@ class TrimFixture:
         with reg.db() as c:
             item = dict(c.execute('SELECT * FROM feed_items WHERE url=?', (e['url'],)).fetchone())
         conn = store.connect()
-        conn.execute('INSERT OR IGNORE INTO documents(path,source,title,published,indexed_at) '
-                     'VALUES(?,?,?,?,?)', (item['path'], 'rss', item['title'],
-                                           item['published'], '2026-10-01 09:00:00'))
+        # content_hash 照索引那条真路径算(`scanner.file_hash` 是唯一口径:索引
+        # 写它、`extract.refresh_content_hash` 刷它)。留空的话库里躺着的是一个
+        # 「索引还没扫到当前这份 md」的状态,`save_extraction` 的正文版本校验会
+        # 如实把提取结果作废 —— 而这几组用例测的是清理与锁,不是那件事。
+        conn.execute('INSERT OR IGNORE INTO documents(path,source,title,published,'
+                     'indexed_at,content_hash) VALUES(?,?,?,?,?,?)',
+                     (item['path'], 'rss', item['title'], item['published'],
+                      '2026-10-01 09:00:00',
+                      scanner.file_hash((self.vault / item['path']).read_text(encoding='utf-8'))))
         cid = conn.execute('INSERT INTO chunks(path,seq,text) VALUES(?,?,?)',
                            (item['path'], 0, e['body'])).lastrowid
         conn.execute('INSERT INTO chunks_fts(chunk_id,title_tok,text_tok) VALUES(?,?,?)',

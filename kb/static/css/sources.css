@@ -50,13 +50,19 @@
 .source-entry-meta span { font-weight:600; color:var(--brand-deep); }
 .source-entry-meta time { white-space:nowrap; font-variant-numeric:tabular-nums; }
 .source-entry h3 { margin:12px 0; }
-.source-entry-title { background:none; color:var(--ink); text-align:left; padding:0; font:600 18px/1.6 var(--font-display); overflow-wrap:anywhere; }
+/* `white-space:normal` 不能省:base.css 给所有 button 设了 nowrap(按钮文字
+   不该折行),而这个“按钮”是一整行标题 —— nowrap 之下旁边那句 overflow-wrap
+   压根不起作用,长标题一行到底撑出卡片右边界。 */
+.source-entry-title { background:none; color:var(--ink); text-align:left; padding:0; font:600 18px/1.6 var(--font-display); overflow-wrap:anywhere; white-space:normal; }
 .source-entry-title:hover { color:var(--brand); }
 /* 还在等翻译的条目:标题只是身份,不可点开——所以不用 .source-entry-title
    那套 hover 变色。 */
 .source-entry-name { font:600 18px/1.6 var(--font-display); overflow-wrap:anywhere; }
 .source-note { color:var(--muted); font-size:12px; margin:0 0 14px; }
 .source-excerpt { color:var(--muted); font-size:14px; line-height:1.9; white-space:pre-line; overflow-wrap:anywhere; }
+/* 社交观点那一档不显示标题(见 sources.js 的 renderSourceItems),正文成了卡片上
+   唯一的内容:继续用 muted 的摘要样式,整列卡片看起来就全是次要信息、没有主体。 */
+.source-excerpt.is-post { color:var(--ink-2); font-size:15px; }
 .source-entry-footer { margin-top:18px; display:flex; align-items:center; gap:16px; font-size:12px; }
 .source-entry-footer span { margin-right:auto; color:var(--muted); }
 .source-entry-footer a { color:var(--brand); }
@@ -89,10 +95,6 @@
 .source-editor label { display:block; margin:14px 0 5px; font-size:13px; }
 .source-editor input:not([type=checkbox]) { width:100%; }
 .source-form-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:22px; }
-.source-reader-dialog { width:min(760px,94vw); max-height:90vh; overflow-y:auto; }
-.source-reader-dialog h2 { font-size:22px; line-height:1.6; overflow-wrap:anywhere; }
-#source-reader-body { white-space:pre-wrap; overflow-wrap:anywhere; font-size:15px; line-height:1.95; margin:22px 0; }
-.source-reader-toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
 @media(max-width:1200px) { .source-workbench { grid-template-columns:minmax(0,1fr) 236px; gap:18px; } }
 @media(max-width:1050px) { .source-workbench { grid-template-columns:1fr; } .source-settings { order:2; } }
 @media(max-width:600px) {

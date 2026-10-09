@@ -38,7 +38,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb import collectors, daily_run, llm, pipeline  # noqa: E402
-from tests.headless import probe_env, requires_headless  # noqa: E402
+from tests.headless import probe_env, requires_headless, run_probe  # noqa: E402
 from kb.web import pipeline_api  # noqa: E402
 
 RETIRED = "wechat_oa"
@@ -179,9 +179,8 @@ class BrowserTests(unittest.TestCase):
     """浏览器里存着的旧通道名真的会被带到现役那条上,公众号不会静默消失。"""
 
     def test_a_stored_retired_name_still_syncs_wechat(self):
-        r = subprocess.run([shutil.which("node"), str(_PROBE)],
-                           capture_output=True, text=True, timeout=300,
-                           env=probe_env())
+        r = run_probe([shutil.which("node"), str(_PROBE)],
+                      timeout=300, env=probe_env())
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
 
 

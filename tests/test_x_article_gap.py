@@ -282,6 +282,31 @@ class BridgeChannelTests(ChannelBase):
         self.assertEqual([], api.urls, 'rss 订阅不许去问 X 长文接口')
 
 
+    def test_a_non_bridge_channel_is_left_to_the_prefetch(self):
+        """**契约**:这个钩子只管桥接那一档,另三条通道在预取里就补过了。
+
+        今天这是一条**零风险的冗余带**,如实记着:预取那一侧 `x_article.fill`
+        用的是完整判据,而 `lead_text` 把 article 链接从介绍里剔掉了 —— 于是补完
+        的条目在 `links_only` 之下必然不命中 ①,补不到的早被预取摘走,所以去掉
+        这个判据在今天的真实路径上行为等价(定点注入实测 0 红)。留着它的理由是
+        **构造上的**:「哪些订阅走这一步」只该由通道设置回答;而预取那一侧哪天把
+        那条链接留在正文里,它就从冗余带变成真防线,那时没有用例会告诉你它没了。
+        """
+        self.settings(x_channels.FEEDGRAB)
+        with reg.db() as c:
+            source = dict(c.execute(
+                "SELECT * FROM subscriptions WHERE kind='social'").fetchone())
+        kept = [entry(body='我写了一篇新文章 https://x.com/i/article/123456789')]
+        validators = {'etag': 'W/"v1"', 'modified': 'Thu, 09 Oct 2026 00:00:00 GMT'}
+        req, api = answering(article_payload())
+        with req:
+            out = x_channels.fill_bridge(
+                source, reg.get_settings('social'), (kept, validators))
+        self.assertEqual([], api.urls, '非桥接通道不在这儿补 —— 预取已经补过了')
+        self.assertIs(kept, out[0], '原样返回,一个条目都不摘')
+        self.assertEqual(validators, out[1], 'etag 照存,这一轮没有扣留')
+
+
 if __name__ == '__main__':
     unittest.main()
 

@@ -14,7 +14,13 @@ index 重建它的 chunk,而这些文档的 `extracted_at` 本来就是 NULL(正
 不在维护锁的射程里(口径见 CLAUDE.md「凡是写 kb.db 或 vault 文件的入口」);
 和采集并发也不冲突:采集那一侧的 `put_items` 是 DO NOTHING,覆盖不了这里改的行。
 
-**不需要备份**:被改写的原值是一个空正文和一个占位标题,没有东西可丢。
+**不需要备份,而这句话的依据是那道条件更新**:被改写的原值是一个空正文和一个
+占位标题,确实没有东西可丢 —— 可它只在「写回那一刻正文还是空的」时才成立。扫描
+(逐条问一次接口,几十秒到几分钟)和写回之间,另一个写入方完全可能已经把正文补好
+(一次成功的补抓、一趟存量复查、另一个并发跑的这个脚本),那时按 `key` 盖回去丢掉
+的就是一整篇正文连同它的译文 —— 而两次命令都报成功(2026-10-09 第 1 轮审查双线程
+实测)。所以判据待在 UPDATE 自己的 WHERE 里(见 `apply_one`),"没有东西可丢"由它
+保证,不靠一份备份去兜。
 
 `lang` 一并清成空串:空正文那会儿它是按占位标题判的(「GREG ISENBERG 的动态」里
 有「的动态」三个汉字 → 判成中文),正文补上之后那个结论对一篇英文长文就是错的,
@@ -75,21 +81,47 @@ def _hash(row, title, body):
 
 
 def apply_one(conn, row, title, body):
-    """把正文写回那一行。
+    """把正文写回那一行。**写进去了返回 True,期间已经被人改过返回 False。**
 
     导出那道闸门是 `exported_hash<>content_hash`,而这里**两道各自都够**:新的
     `content_hash` 和清空的 `exported_hash` 任意一道成立,那篇 md 下一轮就会被
     重写。定点注入实测:只去掉其中任一道,一条用例都不红;**两道一起失效**才让
     「md 真的被重写」那条当场红。都写上的理由是「内容变了」这件事在这两列上各有
     一个表达 —— 哪一列的口径以后变了,另一道还兜着。
+
+    **判据待在 UPDATE 自己的 WHERE 里,不许在 Python 那边先 SELECT 一次比对。**
+    扫描是「逐条问一次长文接口」,几十秒到几分钟;这期间另一个写入方
+    (`fulltext._save`、`scripts/feed_fulltext_recheck`、另一个并发跑的这个脚本)
+    完全可能已经把正文补好、翻译好。按 `key` 无条件盖回去的后果实测过:正文从
+    `CURRENT_BODY from later successful run` 变回 `OUTDATED_BODY from earlier
+    request`、`body_zh` 和 `translated_at` 一并清空,而**两次命令都报成功**
+    (2026-10-09 第 1 轮审查双线程复现)。`BEGIN IMMEDIATE` 挡不住它 —— 它只
+    串行化最后那个写事务,管不着「读到的那一版还是不是当前那一版」。先查后写同理
+    不成立:两个执行体之间那条缝关不掉,而 SQLite 把写入串行化,判据待在写语句的
+    WHERE 里才和这次写入同生共死(口径同 `feed_fulltext_recheck._downgrade`、
+    `sync._claim_write`、`store.mark_no_body` 和 collector 那条 UPSERT)。
+
+    **两道条件,各回答一件事**:`content_hash` 是"我扫到的还是当前这一版吗",
+    `length(trim(body))=0` 是"正文此刻还是空的吗"。**如实记一笔:今天这两道同真
+    同假** —— 现有的写入方都必然连 body 和 `content_hash` 一起换,所以只留任一道
+    在真实路径上行为等价。留着两道的理由是**构造上的**:这个脚本的前提是
+    `empty_items` 那两个条件(空正文 + 那一版内容),判据就该覆盖两项;哪天出现
+    一个只改其中一列的写入方(手工 SQL、一个只刷 hash 的迁移),另一道还兜着。
+    各有一条**契约**用例钉着(摆的局只有其中一道挡得住)。
+
+    **0 行不是失败,是我们想要的末态** —— 另一边已经把这件事做了,这一趟什么都
+    不该动。也**不就地重判**:`empty_items` 的判据是"正文是空的",现在它非空,
+    下一次 scan 自己就不会再选中它。
     """
-    conn.execute(
+    cur = conn.execute(
         """UPDATE feed_items
               SET title=?, body=?, content_hash=?, exported_hash='', lang='',
                   title_zh='', body_zh='', translated_at='', translate_error='',
                   translate_tries=0
-            WHERE key=?""",
-        (title or row['title'], body, _hash(row, title or row['title'], body), row['key']))
+            WHERE key=? AND content_hash=? AND length(trim(body))=0""",
+        (title or row['title'], body, _hash(row, title or row['title'], body),
+         row['key'], row['content_hash']))
+    return cur.rowcount > 0
 
 
 def main(argv=None):
@@ -131,13 +163,29 @@ def main(argv=None):
         print(f'要回填这 {len(plan)} 条请加 --yes(只改 feeds.db 的标题和正文)。')
         return 1
 
+    # **报的是实际写进去了几条,不是计划里有几条。** 按计划长度报的话,一趟
+    # 整批都被跳过的命令会说「已回填 N 条」而库里一个字节都没改 —— 人看完就以为
+    # 处理过了(口径同 `scripts/feed_fulltext_recheck`)。
+    done, skipped = 0, []
     with reg.db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         for row, title, body in plan:
-            apply_one(conn, row, title, body)
+            if apply_one(conn, row, title, body):
+                done += 1
+            else:
+                skipped.append(row)
         conn.commit()
-    print(f'已回填 {len(plan)} 条。下一轮同步(或 `./kb.sh sync`)的导出阶段会重写'
-          f'这几篇 vault md,之后索引和提取会自己把它们收掉。')
+    if done:
+        print(f'已回填 {done} 条。下一轮同步(或 `./kb.sh sync`)的导出阶段会重写'
+              f'这几篇 vault md,之后索引和提取会自己把它们收掉。')
+    else:
+        print('一条都没写:计划里那几条在这期间都已经被改过了,库里一个字节没动。')
+    if skipped:
+        print(f'跳过 {len(skipped)} 条 —— 扫描之后这几条的正文已经被别人改过'
+              f'(一次成功的补抓、一趟存量复查,或者另一个并发跑的本脚本),'
+              f'这一趟不覆盖它们:')
+        for row in skipped:
+            print(f'    {(row["title"] or "")[:18]:<20} {row["url"]}')
     if counts[FAIL]:
         print(f'另有 {counts[FAIL]} 条这一次问不到,过后再跑一次就是。')
     return 0

@@ -61,6 +61,17 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     return fm, text[m.end():]
 
 
+def file_hash(text: str) -> str:
+    """一份 md 文件的指纹 —— `documents.content_hash` 存的就是它。
+
+    口径只有这一份:索引按它判「这一篇要不要重建」(`store.doc_needs_reindex`)、
+    回写改完 frontmatter 按它刷新(`extract.refresh_content_hash`)、提取结果落库
+    前按它确认「索引已经扫过当前这份 md」(`extract._require_current_body`)。
+    各写一遍的话,三处对「索引跟上了没有」的回答会各漂各的。
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
     try:
         text = md_path.read_text(encoding="utf-8")
@@ -88,7 +99,7 @@ def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
         url=url,
         tags=tags,
         body=normalize_body(body),
-        content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+        content_hash=file_hash(text),
         meta=fm,
     )
 

@@ -28,7 +28,7 @@ from kb import maintenance, pipeline_state
 from kb.collectors import FetchScope
 from kb.feeds import fetching, registry as reg, sync, x_browser, x_channels, x_feedgrab
 from kb.web import intake_api
-from tests.headless import probe_env, requires_headless
+from tests.headless import probe_env, requires_headless, run_probe
 
 # 页面那一侧:probe 自带 mock 后端,CDP 直连 chrome-headless-shell
 # (不装 playwright、不连网、始终无头、临时 profile)。见 tests/headless.py。
@@ -618,8 +618,8 @@ class BrowserTests(unittest.TestCase):
     保存真把三个字段发出去、两个按钮各打各的端点、待配置横幅按当前通道说话。"""
 
     def test_the_channel_picker_works_on_a_real_page(self):
-        r = subprocess.run([shutil.which('node'), str(_PROBE)], capture_output=True,
-                           text=True, timeout=300, env=probe_env())
+        r = run_probe([shutil.which('node'), str(_PROBE)],
+                       timeout=300, env=probe_env())
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
 
 

@@ -17,24 +17,11 @@
 //
 // 用 CDP 直接驱动 playwright 缓存里的 chrome-headless-shell(不装 playwright、
 // 不连网、始终无头)。没有这个二进制时 Python 那边会跳过。
-import { spawn } from "node:child_process";
+import { launchShell } from "./probe_shell.mjs";
 
-const BIN = process.env.HEADLESS_SHELL;
 const [page, filters, aName, bName, shared] = process.argv.slice(2);
 
-const proc = spawn(BIN, ["--headless", "--remote-debugging-port=0", "--disable-gpu",
-                         "--hide-scrollbars", "--window-size=1400,1000", "about:blank"],
-                   { stdio: ["ignore", "pipe", "pipe"] });
-const port = await new Promise((res, rej) => {
-  let buf = "";
-  proc.stderr.on("data", d => {
-    buf += d;
-    const m = buf.match(/ws:\/\/127\.0\.0\.1:(\d+)\//);
-    if (m) res(+m[1]);
-  });
-  proc.on("exit", c => rej(new Error(`headless shell 退出 ${c}\n${buf}`)));
-  setTimeout(() => rej(new Error(`没等到 DevTools 端口\n${buf}`)), 20000);
-});
+const { proc, port } = await launchShell(["--window-size=1400,1000"]);
 
 const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const ws = new WebSocket(list.find(t => t.type === "page").webSocketDebuggerUrl);

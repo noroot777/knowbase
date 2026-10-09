@@ -9,7 +9,7 @@ let subsPendingKind = '';   // switchTab 接到老深链(#social 等)时暂存�
 try { subsKind = localStorage.getItem('kb-subs-kind') || ''; } catch {}
 let sourceKind = '', sourceView = 'items', sourceData = null, sourceRows = [];
 let sourceOffset = 0, sourceTotal = 0, sourceVersion = 0, sourcePoll = null, sourceSearchTimer;
-let sourceItemsVersion = 0, sourceItemsFailed = false, sourceTranslating = 0;
+let sourceItemsVersion = 0, sourceItemsFailed = false, sourceTranslating = 0, sourceFetching = 0;
 let sourceBusy = false;
 const sourceFilters = new Map();
 
@@ -130,9 +130,11 @@ async function openSourceModule(kind) {
   clearTimeout(sourceSearchTimer);
   sourceKind = kind; sourceVersion++; sourceItemsVersion++; sourceItemsFailed = false;
   sourceData = null; sourceRows = []; sourceOffset = 0;
+  resetSourceReader('正在读取内容…');
   const spec = sourceModules.get(kind);
   const filter = sourceFilters.get(kind) || { view: 'items', q: '', id: '' };
   sourceView = filter.view;
+  updateSourceReadingView();
   $('source-title').textContent = spec.label;
   $('source-description').textContent = spec.description;
   $('source-note').textContent = spec.note;
@@ -219,11 +221,13 @@ function updateSourceRunStatus() {
 }
 function switchSourceView(view) {
   sourceView = view; sourceOffset = 0;
+  updateSourceReadingView();
   renderSourceView(true).catch(e => sourceError(e.message));
 }
 function sourceFilterChanged() {
   clearTimeout(sourceSearchTimer);
   sourceItemsVersion++; // Invalidate responses immediately, including during debounce.
+  if (sourceView === 'items') resetSourceReader('正在筛选内容…');
   sourceSearchTimer = setTimeout(() => renderSourceView(true).catch(e => sourceError(e.message)), 220);
 }
 async function renderSourceView(reset = false) {
@@ -237,6 +241,7 @@ async function renderSourceView(reset = false) {
   $('source-filter').hidden = sourceView === 'manage';
   $('source-more').hidden = true;
   $('source-more').disabled = false;
+  updateSourceReadingView();
   const q = $('source-q').value.trim(), id = $('source-filter').value;
   sourceFilters.set(kind, { view: sourceView, q, id });
   if (sourceView === 'manage') {
@@ -248,17 +253,21 @@ async function renderSourceView(reset = false) {
   }
   const count = !reset && sourceOffset ? sourceOffset : 30;
   // Reload the visible window to avoid duplicates when a sync inserts new entries.
-  if (reset) $('source-list').innerHTML = '<div class="source-empty">正在读取内容…</div>';
+  if (reset) {
+    $('source-list').innerHTML = '<div class="source-empty">正在读取内容…</div>';
+    $('source-list-pane').scrollTop = 0;
+  }
   try {
     const data = await pipeJson(`/api/intake/${kind}/items?limit=${Math.min(count,100)}&offset=0&q=${encodeURIComponent(q)}${id ? '&source_id='+id : ''}`);
     if (!currentSourceItems(kind, version, q, id)) return;
     sourceItemsFailed = false;
     sourceRows = data.items; sourceOffset = data.items.length; sourceTotal = data.total;
-    sourceTranslating = data.translating || 0;
+    sourceTranslating = data.translating || 0; sourceFetching = data.fetching || 0;
     renderSourceItems();
   } catch (e) {
     if (!currentSourceItems(kind, version, q, id)) return;
     sourceItemsFailed = true;
+    resetSourceReader('内容读取失败，请重新读取。');
     $('source-list').innerHTML = `<div class="source-empty" role="alert"><h3>内容读取失败</h3><p>${esc(e.message)}</p><p>稍后会自动重试，也可以立即重新读取。</p><button class="ghost" data-retry-items>重新读取</button></div>`;
   }
 }
@@ -284,7 +293,7 @@ function renderSubscription(s) {
     <div class="source-avatar" aria-hidden="true">${esc(s.name.slice(0,1))}</div>
     <div class="source-subscription-body"><div class="source-row-title"><h3>${esc(s.name)}</h3><span class="source-state ${s.enabled && s.last_error ? 'failed' : ''}">${status}</span></div>
     <a class="source-url" href="${esc(safeUrl(s.url))}" target="_blank" rel="noopener noreferrer">${esc(s.url)}</a>
-    <div class="source-row-meta">${esc(s.group_name || '未分组')} · ${s.item_count} 条 · ${s.last_success ? '最近成功 '+sourceTime(s.last_success) : '尚未成功同步'}</div>
+    <div class="source-row-meta">${esc(s.group_name || '未分组')} · ${s.item_count} 条 · ${s.last_success ? '最近成功 '+sourceTime(s.last_success) : '尚未成功同步'}${s.fulltext ? ' · 补抓原文正文' : ''}</div>
     ${s.configuration_error ? `<p class="source-row-meta">${esc(s.configuration_error)}</p>` : ''}
     ${!s.last_error && s.last_note ? `<p class="source-row-meta">${esc(s.last_note)}；下次同步从上次的位置接着读。</p>` : ''}
     ${s.last_error ? `<details class="source-failure"><summary>查看失败原因与重试时间</summary><p>${esc(s.last_error)}</p><p>自动重试：${sourceTime(s.retry_at*1000)}；也可点击“同步”立即重试。</p></details>` : ''}</div>
@@ -313,25 +322,28 @@ function sourceText(item) {
   const title = item.title_zh || item.title, body = item.body_zh || item.body;
   const whole = !!item.body_zh && (!item.title || !!item.title_zh);
   return { title, body, translated: whole, translating: !!item.translating,
-           retranslating: !!item.retranslating, partial: !!item.partial };
+           retranslating: !!item.retranslating, partial: !!item.partial,
+           // 正文补抓那两档(kb/feeds/fulltext.py)。它排在翻译之前,所以后端
+           // 的 `translate.queued_sql` 已经把这批条目排除在翻译队列之外 ——
+           // 这里不会和上面几档同时为真。`refetching` 是"壳已经入库、正在补抓
+           // 正文覆盖它",和 `retranslating` 是同一个形状。
+           fetching: !!item.fetching, refetching: !!item.refetching };
 }
 function renderSourceItems() {
-  const rows = sourceRows.map(item => { const t = sourceText(item); return `<article class="source-entry">
-    <div class="source-entry-meta"><span>${esc(item.author)}</span><time>${item.published ? sourceTime(item.published) : '发布时间未知'}</time></div>
-    ${t.translating
-      // 等翻译的条目不给“展开阅读”:知识库里这一条还不存在,展开只能展开英文
-      // 原文。标题和正文都换成中文状态文案,原文入口留在右下角那个链接上。
-      ? `<h3 class="source-entry-name">外文内容，正在等翻译</h3>
-    <p class="source-excerpt">译成中文之后才写进知识库；这一条现在只有原文，点右下角“原文”可以直接看。</p>`
-      : `<h3><button class="source-entry-title" data-read-item="${item.key}">${esc(t.title)}</button></h3>
-    <p class="source-excerpt">${esc(t.body.slice(0,380))}${t.body.length>380?'…':''}</p>`}
-    <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}${t.translating ? ' · 外文原文，正在等翻译' : t.translated ? ' · 已译为中文' : t.retranslating ? ' · 外文原文已入库，正在等中文译文覆盖' : t.partial ? ' · 正文已译为中文，标题还是原文（下次同步补译）' : ''}</span>${t.translating ? '' : `<button class="text-button" data-read-item="${item.key}">展开阅读</button>`}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`; }).join('');
-  const note = sourceTranslating
-    ? `<p class="source-note" role="status">${sourceTranslating} 条外文内容还在等翻译：译成中文之后才写进知识库。</p>` : '';
+  const rows = sourceRows.map(renderSourceEntry).join('');
+  // 两句提示各说各的一档,都有就都说:它们是流水线上先后两步,数字也不是一回事
+  // (补抓那一档还没轮到翻译,翻译那一档的正文早就到手了)。
+  const notes = [
+    sourceFetching ? `${sourceFetching} 条只拿到链接，正在补抓原文正文：抓到之后才翻译、写进知识库。` : '',
+    sourceTranslating ? `${sourceTranslating} 条外文内容还在等翻译：译成中文之后才写进知识库。` : '',
+  ].filter(Boolean);
+  const note = notes.length ? `<p class="source-note" role="status">${notes.join('')}</p>` : '';
   $('source-list').innerHTML = rows ? note + rows :
     `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value ? '换个关键词或切换订阅试试。' : sourceData?.unconfigured && !sourceData?.ready ? sourceConfigHint() : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p></div>`;
   $('source-more').hidden = sourceOffset >= sourceTotal;
   $('source-more').textContent = `加载更多（已显示 ${sourceRows.length} / ${sourceTotal}）`;
+  $('source-items-count').textContent = `${sourceTotal} 条`;
+  syncSourceReader();
 }
 async function moreSourceItems() {
   const kind = sourceKind, version = ++sourceItemsVersion;
@@ -343,7 +355,8 @@ async function moreSourceItems() {
     const seen = new Set(sourceRows.map(r => r.key));
     sourceRows.push(...data.items.filter(r => !seen.has(r.key)));
     sourceOffset += data.items.length; sourceTotal = data.total;
-    sourceTranslating = data.translating || 0; renderSourceItems();
+    sourceTranslating = data.translating || 0; sourceFetching = data.fetching || 0;
+    renderSourceItems();
   } catch(e) { if (currentSourceItems(kind, version, q, id)) sourceError(e.message); }
   finally { if (version === sourceItemsVersion) $('source-more').disabled = false; }
 }
@@ -358,32 +371,18 @@ async function syncSource(ids = []) {
   } catch(e) { toast('未能开始同步', { detail:e.message }); }
   finally { sourceBusy=false; updateSourceRunStatus(); }
 }
-let sourceReaderItem = null, sourceReaderOriginal = false;
-function readSourceItem(key) {
-  const item = sourceRows.find(r => r.key === key);
-  if (!item) return;
-  sourceReaderItem = item; sourceReaderOriginal = false;
-  renderSourceReader();
-  $('source-reader-link').href = safeUrl(item.url);
-  $('source-reader').style.display = '';
-}
-function renderSourceReader() {
-  const item = sourceReaderItem, t = sourceText(item);
-  const original = sourceReaderOriginal;
-  $('source-reader-title').textContent = original ? item.title : t.title;
-  $('source-reader-meta').textContent = `${item.author} · ${item.published ? sourceTime(item.published) : '发布时间未知'}${item.content_kind==='summary'?' · 订阅摘要，全文请打开原文':''}${t.translated ? (original ? ' · 英文原文' : ' · 自动翻译') : ''}`;
-  $('source-reader-body').textContent = original ? item.body : t.body;
-  $('source-reader-original').hidden = !t.translated;
-  $('source-reader-original').textContent = original ? '看中文译文' : '看英文原文';
-}
-function toggleSourceOriginal() {
-  sourceReaderOriginal = !sourceReaderOriginal;
-  renderSourceReader();
-}
 $('source-list').addEventListener('click', e => {
   if (e.target.closest('[data-retry-items]')) renderSourceView(true);
   const read = e.target.closest('[data-read-item]');
   if (read) readSourceItem(read.dataset.readItem);
+  const entry = e.target.closest('[data-source-key]');
+  if (entry && !e.target.closest('a,button')) readSourceItem(entry.dataset.sourceKey);
   const action = e.target.closest('[data-source-action]');
   if (action && !action.disabled) actOnSource(action.dataset.sourceAction, Number(action.dataset.sourceId));
+});
+$('source-list').addEventListener('keydown', event => {
+  const entry = event.target.closest('[data-source-key]');
+  if (!entry || event.target !== entry || !['Enter', ' '].includes(event.key)) return;
+  event.preventDefault();
+  readSourceItem(entry.dataset.sourceKey);
 });

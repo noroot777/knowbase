@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from kb import cli, extract, maintenance, pipeline_retry, pipeline_stages, scanner, store
 from kb.chunker import split_chunks
 from kb.config import Source
-from tests.headless import probe_env, requires_headless
+from tests.headless import probe_env, requires_headless, run_probe
 
 _PROBE = Path(__file__).resolve().parent / "pipe_pending_probe.mjs"
 
@@ -571,9 +571,8 @@ class PendingCountTests(unittest.TestCase):
     """
 
     def test_the_panel_clears_the_backlog_without_a_reload(self):
-        r = subprocess.run([shutil.which("node"), str(_PROBE)],
-                           capture_output=True, text=True, timeout=300,
-                           env=probe_env())
+        r = run_probe([shutil.which("node"), str(_PROBE)],
+                      timeout=300, env=probe_env())
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
 
 

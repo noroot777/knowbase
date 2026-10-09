@@ -4,9 +4,11 @@
 **从 `x_article.py` 搬出来的一整块**(它越过了 700 行上限):那边是「取一次长文
 正文」(接口、浏览器后路、Draft.js 渲染),这边只回答两个问题 ——
 ①**这一条要不要去问一次长文**(`needs_article`);②**问到之后,正文开头留什么**
-(`lead_text`)。两个问题共用同一份地址识别(两条正则 + 起点闸 + 尾巴),所以
-它们必须待在一起:各写一份必然漂,而漂出来的后果是空正文或者作者的字永久消失
-(`put_items` 是 `ON CONFLICT(key) DO NOTHING`,一条推文入库之后就改不回来了)。
+(`lead_text`,连同它的对偶 `quote_lines` —— 它收回 `lead_text` 滤掉的那几行
+转推上下文,两半各摘各的才拼得出完整正文)。两个问题共用同一份地址识别(两条
+正则 + 起点闸 + 尾巴),所以它们必须待在一起:各写一份必然漂,而漂出来的后果是
+空正文或者作者的字永久消失(`put_items` 是 `ON CONFLICT(key) DO NOTHING`,
+一条推文入库之后就改不回来了)。
 
 **两个消费方的方向正好相反**,这是读这个模块时唯一要先记住的事:
 `needs_article` 是 `search`(漏认 = 空正文永久固定,所以宁可认宽),`lead_text`
@@ -300,6 +302,23 @@ def lead_text(body: str) -> str:
     """
     lines = [ln for ln in (body or '').splitlines() if not ln.lstrip().startswith('>')]
     return _drop(_TCO, _drop(_ARTICLE_LINK, '\n'.join(lines))).strip()
+
+
+def quote_lines(body: str) -> str:
+    """把正文里的转推/引用上下文摘出来 —— 就是 `lead_text` 滤掉的那几行 `> …`。
+
+    **`lead_text` 滤掉它们是对的,但补完文章正文不能跟着把它们一起丢掉。**
+    那一行是「谁转发了这篇文章」的唯一记录:`x_browser._entry` 把它放在正文开头
+    (`> {context}`),因为 `feed_items` 里没有别的地方放这个标记,而它决定了这
+    一条是不是本人的观点。原来 `fill` 拿 `lead_text` 的结果当重建正文的唯一依据,
+    于是**正文补上了、谁转发的没了** —— 数据库、导出的 md 和阅读页三处一起缺
+    (2026-10-09 审查实测,阴性对照是不开长文补全时上下文照旧留着),而
+    `put_items` 是 `DO NOTHING`,缺了就再也补不回来。
+
+    所以这两半各摘各的,再和文章正文按原顺序合并:上下文 → 介绍 → 正文。
+    """
+    keep = [ln for ln in (body or '').splitlines() if ln.lstrip().startswith('>')]
+    return '\n'.join(keep).strip()
 
 
 def article_page(url: str) -> str:
