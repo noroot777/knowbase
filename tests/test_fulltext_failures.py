@@ -218,8 +218,13 @@ class BoilerplateOutcomeTests(FullTextCase):
         self.assertEqual(0, fulltext.pending('rss'))       # 不该再排队重试
 
 
-class StaleRecheckTests(FullTextCase):
-    """存量复查:已经错误出队的那些要能放回队列(报告点名「不能只修新条目」)。"""
+class RecheckCase(FullTextCase):
+    """存量复查那一组的摆盘。自己不带断言。
+
+    **「复查与补抓交错」那一组在 `tests/test_fulltext_recheck_race.py` 里共用
+    它** —— 各写一份摆盘的话两边的前提会各漂各的,而那一组要钉的恰恰是"扫描
+    读到的那一份"和"写回那一刻库里的那一份"之间的关系。
+    """
 
     def _recheck(self, *argv):
         """跑一趟存量复查脚本。它那几行给人看的提示吞掉,不然测试输出里全是它。"""
@@ -228,16 +233,50 @@ class StaleRecheckTests(FullTextCase):
                 contextlib.redirect_stdout(io.StringIO()):
             return mod.main()
 
-    def _already_wrong(self, body):
+    def _already_wrong(self, body, url=None):
         """摆一条「补抓报过成功、正文其实是样板文字」的存量条目 —— 生产库里
         那两条就是这个形态:`fulltext_at` 和 `translated_at` 都非空、已导出。"""
-        key = self.put()
+        key = self.put(**({'url': url} if url else {}))
         with reg.db() as c:
             c.execute("UPDATE feed_items SET body=?,content_kind='content',"
                       "fulltext_at='2026-10-09T00:00:00+00:00',title_zh='版权声明',"
                       "body_zh='译文',translated_at='2026-10-09T01:00:00+00:00',"
                       'exported_hash=content_hash WHERE key=?', (body, key))
         return key
+
+    def _backup(self, name, key, body):
+        """摆一个备份库。结构同生产那份(回填前自己做的 `hn-fulltext-*`)。"""
+        path = reg.DB_PATH.parent / 'backups' / name / 'feeds.db'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(path)
+        with conn:
+            conn.execute('CREATE TABLE feed_items(key TEXT PRIMARY KEY, body TEXT)')
+            conn.execute('INSERT INTO feed_items(key,body) VALUES(?,?)', (key, body))
+        conn.close()
+        return path
+
+    def _three_failed_rounds(self):
+        """复查之后连跑三轮 materialize,原文每一轮都被正确识别为非正文。
+
+        返回 `(末态阶段, 翻译器真正收到的 prompt, vault 里的 md)`。
+        **翻译器的入参必须捕获下来**:桩的返回值证明不了它看到了什么,而
+        「那段样板文字还会不会被买一次翻译」正是这条用例要回答的事。
+        """
+        chat = Mock(return_value='###TITLE###\n标题译文\n###BODY###\n正文译文')
+        stages = []
+        for _ in range(3):
+            with patch.object(fulltext, 'request', Mock(return_value=page(LEGAL_PAGE))), \
+                    patch.object(sync, '_stage', lambda *a, **k: stages.append((a, k))), \
+                    patch.object(llm, 'chat', chat), \
+                    patch.dict(pipeline_state._state, stop_requested=False):
+                FeedCollector('rss').materialize()
+        asked = ' '.join(str(c) for c in chat.call_args_list)
+        md = '\n'.join(f.read_text() for f in (self.root / 'vault').rglob('*.md'))
+        return stages[-1][0][1], asked, md
+
+
+class StaleRecheckTests(RecheckCase):
+    """存量复查:已经错误出队的那些要能放回队列(报告点名「不能只修新条目」)。"""
 
     def test_scan_finds_them_and_changes_nothing(self):
         key = self._already_wrong(LEGAL_TEXT)
@@ -274,36 +313,6 @@ class StaleRecheckTests(FullTextCase):
         self.assertEqual(1, self._recheck('run'))
         self.assertNotEqual('', self.row(key)['fulltext_at'])
         self.assertEqual(0, fulltext.pending('rss'))
-
-    def _backup(self, name, key, body):
-        """摆一个备份库。结构同生产那份(回填前自己做的 `hn-fulltext-*`)。"""
-        path = reg.DB_PATH.parent / 'backups' / name / 'feeds.db'
-        path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(path)
-        with conn:
-            conn.execute('CREATE TABLE feed_items(key TEXT PRIMARY KEY, body TEXT)')
-            conn.execute('INSERT INTO feed_items(key,body) VALUES(?,?)', (key, body))
-        conn.close()
-        return path
-
-    def _three_failed_rounds(self):
-        """复查之后连跑三轮 materialize,原文每一轮都被正确识别为非正文。
-
-        返回 `(末态阶段, 翻译器真正收到的 prompt, vault 里的 md)`。
-        **翻译器的入参必须捕获下来**:桩的返回值证明不了它看到了什么,而
-        「那段样板文字还会不会被买一次翻译」正是这条用例要回答的事。
-        """
-        chat = Mock(return_value='###TITLE###\n标题译文\n###BODY###\n正文译文')
-        stages = []
-        for _ in range(3):
-            with patch.object(fulltext, 'request', Mock(return_value=page(LEGAL_PAGE))), \
-                    patch.object(sync, '_stage', lambda *a, **k: stages.append((a, k))), \
-                    patch.object(llm, 'chat', chat), \
-                    patch.dict(pipeline_state._state, stop_requested=False):
-                FeedCollector('rss').materialize()
-        asked = ' '.join(str(c) for c in chat.call_args_list)
-        md = '\n'.join(f.read_text() for f in (self.root / 'vault').rglob('*.md'))
-        return stages[-1][0][1], asked, md
 
     def test_three_failed_rounds_do_not_feed_the_bad_body_back_in(self):
         """**报告那条拦验收证据的反面。** 隔离之后连抓三轮都失败,末态必须是
@@ -419,7 +428,11 @@ class StaleRecheckTests(FullTextCase):
         import scripts.feed_fulltext_recheck as mod
         src = inspect.getsource(mod)
         self.assertIn('fulltext.body_hash', src)
-        self.assertNotIn('sha256', src)                     # 不许在这儿另写一份
+        # 不许在这儿另写一份。查的是**实现痕迹**(自己 import 一个摘要库、自己
+        # 调 hexdigest),不是「注释里提没提 sha256 这个名字」—— 后者会在解释
+        # 口径的时候误伤自己(`_downgrade` 的注释就得说清那一列有两套口径)。
+        for trace in ('hashlib', 'hexdigest', 'import sha'):
+            self.assertNotIn(trace, src)
 
     def test_the_judgement_is_the_same_one_the_fetcher_uses(self):
         """口径只有一份:两处各判一遍的话,放回队列的和以后会被挡掉的不是同一批。"""

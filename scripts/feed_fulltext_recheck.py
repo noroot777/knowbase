@@ -42,9 +42,17 @@
 (`exported_hash<>content_hash`)自然成立,下一轮同步会把 vault 里那篇
 覆盖掉。
 
-**不取维护锁,也不问管道忙不忙。** 那两道是给不可逆删除用的(见
-`scripts/feed_trim_history.py`);这里改的是一条条目的正文和几个标记,幂等、
-可重跑,最坏的交错后果是某一条被多抓一次 —— 而 `_save` 本来就是覆盖写。
+**不取维护锁,也不问管道忙不忙 —— 换来的那道保护在 `_downgrade` 的
+WHERE 里。** 那两道闸是给不可逆删除用的(见 `scripts/feed_trim_history.py`),
+而且对这件事压根不适用:补抓那一侧的 `fulltext._save` 自己就不持维护锁,
+这边取了也挡不住它。
+**原来这儿写着「最坏的交错后果是某一条被多抓一次」,那句话是错的。**
+第 1 轮版本只改几个标记(那些确实幂等、谁盖谁都一样),第 2 轮加上 `body=?`
+之后这条写回就变成了「拿一份旧快照覆盖正文」—— 而 `_suspect` 读完到真写回
+之间还隔着一段备份库 I/O:同步在这期间把这一条补抓成功、译文和 vault 都写
+好了,随后这份旧计划照样按 `key` 盖回去,914 字完整正文连同中文译文和成功
+标记一起变回 29 字的标题加链接,后面三轮再抓不到就永久停在壳上
+(2026-10-09 第 3 轮审查双线程实测,独立复现三次)。
 """
 from __future__ import annotations
 
@@ -169,6 +177,44 @@ def cmd_scan(args) -> int:
     return 1
 
 
+def _downgrade(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """把计划里的每一条换成壳。返回 `(真改了的, 这期间内容已经换过的)`。
+
+    **判据是「这一条还是我扫到的那份 body 吗」,而且待在 UPDATE 自己的 WHERE
+    里(`AND body=?`),不许在 Python 这边先 SELECT 一次比对。** 先查后写在两
+    个进程之间压根不成立(kb-web 的补抓 worker 是另一个写入方,`fulltext._save`
+    也不持任何跨进程锁),而 SQLite 把写入串行化 —— 判据待在写语句里才和那次
+    写入同生共死,放行不了就是 0 行。口径同 collector 那条「判据就在 UPDATE
+    自己的 WHERE 里」和 `sync._claim_write`。
+
+    **比的是旧 body 本身,不是 `content_hash`。** 那一列在这张表上有两个写入
+    方、两套口径(`registry.put_items` 写的是整个 entry 的 JSON 摘要,
+    `fulltext.body_hash` 写的是 `sha256(body)`),而这里要回答的恰恰是"我读到
+    的那份正文还是当前那一份吗" —— 直接比正文没有第二份口径可漂。
+
+    **0 行不是失败,是我们想要的末态**:同步在这期间把它补抓成功了,那份正文
+    (以及译文、`fulltext_at`、已经导出的 md)一个字都不许动。**也不在这里就地
+    重判**:重判会变成一个没有终点的循环,而第 2 轮放宽 `_suspect` 射程之后
+    「body 是样板文字」就是充分判据、与 `fulltext_at` 无关 —— 新内容要是又一份
+    样板文字,下一次 scan 自己就会再选中它。所以如实报出来、让人再跑一次。
+
+    整批在**一个**写事务里(`reg.db()` 退出时才 commit):第一条 UPDATE 就把写
+    锁攥住,后面每一条的判据都在锁内求值。
+    """
+    cut, moved = [], []
+    with reg.db() as c:
+        for row in rows:
+            cur = c.execute(
+                """UPDATE feed_items SET body=?,content_kind='summary',content_hash=?,lang=?,
+                   fulltext_at='',fulltext_error='',fulltext_tries=0,extract_stale=1,
+                   title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
+                   WHERE key=? AND body=?""",
+                (row['shell'], fulltext.body_hash(row['shell']),
+                 reg.text_language(row['title'], row['shell']), row['key'], row['body']))
+            (cut if cur.rowcount else moved).append(row)
+    return cut, moved
+
+
 def cmd_run(args) -> int:
     rows = _plan(_suspect(args.kind, args.source), _backups(getattr(args, 'backup', None)))
     if not rows:
@@ -177,17 +223,15 @@ def cmd_run(args) -> int:
     if not args.yes:
         print(f'{len(rows)} 条待收拾,加 --yes 才会真改。')
         return 1
-    with reg.db() as c:
-        c.executemany(
-            """UPDATE feed_items SET body=?,content_kind='summary',content_hash=?,lang=?,
-               fulltext_at='',fulltext_error='',fulltext_tries=0,extract_stale=1,
-               title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
-               WHERE key=?""",
-            [(r['shell'], fulltext.body_hash(r['shell']),
-              reg.text_language(r['title'], r['shell']), r['key']) for r in rows])
-    restored = sum(1 for r in rows if r['origin'] != '标题与链接')
-    print(f'已收拾 {len(rows)} 条:正文换成壳（{restored} 条取自备份，'
-          f'{len(rows) - restored} 条按标题与链接重建）、放回补抓队列、译文一并作废。')
+    cut, moved = _downgrade(rows)
+    restored = sum(1 for r in cut if r['origin'] != '标题与链接')
+    print(f'已收拾 {len(cut)} 条:正文换成壳（{restored} 条取自备份，'
+          f'{len(cut) - restored} 条按标题与链接重建）、放回补抓队列、译文一并作废。')
+    if moved:
+        print(f'\n另有 {len(moved)} 条在这一趟里内容已经换过，原样留着没动:')
+        for row in moved:
+            print(f"  {row['title'][:48]}")
+        print('  （同步可能刚把正文补上了。再跑一次 scan 看它现在是什么。）')
     return 0
 
 
