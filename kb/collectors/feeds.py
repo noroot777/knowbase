@@ -28,7 +28,7 @@ class FeedCollector:
         collect(self.name, scope)
 
     def materialize(self):
-        from kb.feeds import translate
+        from kb.feeds import fulltext, translate
         from kb.feeds.sync import export
         from kb.pipeline_state import _log, _stage
 
@@ -37,6 +37,22 @@ class FeedCollector:
         def progress(done, total):
             if done % 5 == 0 or done == total:
                 _stage('export', 'running', f'翻译外文内容 {done}/{total}')
+
+        def fetch_progress(done, total):
+            if done % 5 == 0 or done == total:
+                _stage('export', 'running', f'补抓原文正文 {done}/{total}')
+
+        # **补抓排在翻译前面**:聚合型订阅(HN Buzzing 那类)的 feed 正文只是
+        # 一个跳转壳,真正的内容在原文链接后面。反过来写的代价是同一条内容买
+        # 两次模型调用 —— 先按壳译一遍,补上正文再译一遍,而第一份译文随后就被
+        # 丢掉。还排在补抓队列里的条目既不翻译也不导出(两边各认一次
+        # `fulltext.queued_sql`),等正文落下来再一次性走完后面那一段。
+        #
+        # 没开这个开关的来源在这里是空转:队列判据的第一条就是"属于某条开了
+        # 补抓的订阅",一条都选不出来时 `fetch_pending` 当场返回。
+        fetched = fulltext.fetch_pending(self.name, progress=fetch_progress)
+        if note := fulltext.summarize(fetched):
+            _log(f'export: {note}')
 
         # 先把外文条目译成中文再落盘:vault 的 md 是索引/提取/日报共同的事实来源,
         # 导出完再翻等于先写一份英文进去,后面每一层都按英文处理过一遍。这一轮

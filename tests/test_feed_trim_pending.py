@@ -52,9 +52,12 @@ class PendingTranslationTests(TrimFixture, unittest.TestCase):
             queued = {r['url'] for r in c.execute(
                 'SELECT url FROM feed_items WHERE ' + translate.queued_sql()[0],
                 translate.queued_sql()[1])}
-        self.assertEqual({'https://example.org/queued'},
-                         {r['url'] for r in trim.pending_translation(rows)})
-        self.assertEqual(queued, {r['url'] for r in trim.pending_translation(rows)})
+            # 口径是把 `queued_sql()` 那段 SQL 真的拿去查(所以要一个连接),
+            # 不是在 Python 里按 Row 字段照抄一遍 —— 照抄的那一版会随判据
+            # 加条件而静默漂掉,见 `trim.pending_translation` 的注释。
+            cut = {r['url'] for r in trim.pending_translation(c, rows)}
+        self.assertEqual({'https://example.org/queued'}, cut)
+        self.assertEqual(queued, cut)
 
     def test_it_removes_the_queued_entry_from_all_three_places(self):
         s = self.legacy(self.sub())

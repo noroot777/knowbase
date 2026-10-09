@@ -186,8 +186,16 @@ def queued_sql() -> tuple[str, list]:
     判据是 `translated_at`(`_save` 只在整条译成时写它),不是"有没有 body_zh"
     ——只有标题的短动态译完之后 body_zh 仍然是空串,拿它判的话这一条译完了
     还赖在队列里,每轮重译一遍。
+
+    **还排在正文补抓队列里的条目不算待翻译**(见 `kb.feeds.fulltext`):它们
+    此刻手里那份正文是 feed 给的跳转壳,正文马上要被整条换掉。不排掉的话同一
+    条内容买两次模型调用 —— 先按壳译一遍,补上正文再译一遍,而第一份译文随后
+    就被 `fulltext._save` 丢掉。翻译是这条链上最贵的一步,顺序不能反。
     """
-    return "lang='en' AND translated_at='' AND translate_tries<?", [MAX_TRIES]
+    from kb.feeds import fulltext      # 函数内 import:两个模块互相认识对方的口径
+    cond, args = fulltext.queued_sql()
+    return (f"lang='en' AND translated_at='' AND translate_tries<? AND NOT ({cond})",
+            [MAX_TRIES, *args])
 
 
 def available() -> bool:

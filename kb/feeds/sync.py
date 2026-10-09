@@ -13,7 +13,7 @@ import yaml
 from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
 from kb.maintenance import maintenance_lock
-from kb.feeds import translate, x_channels
+from kb.feeds import fulltext, translate, x_channels
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_state import _state, _stage
 from kb.scanner import parse_frontmatter
@@ -398,6 +398,23 @@ def _export(kind: str, hold_untranslated: bool = False,
     args: list = [kind]
     held = stuck = shipped = shipped_stuck = 0
     fresh_new = shipped_new = 0
+    # **还排在正文补抓队列里的条目这一轮不写 vault**(见 `kb.feeds.fulltext`)。
+    # 它们此刻的 body 是 feed 给的跳转壳,正文马上要被整条换掉 —— 先按壳落盘
+    # 的话,索引、提取打标、检索、日报全都按那几十个字处理过一遍,而一轮之后
+    # 同一篇又要重做。队列有出口(试满 `fulltext.MAX_TRIES` 就按壳导出),所以
+    # 一个付费墙后面的链接不会让这条内容永远进不了知识库。
+    #
+    # 这里不像翻译那样留一个开关:翻译"整个被跳过"是有的(没配 key),那时扣着
+    # 就等于永久扣着;而补抓不需要任何配置,抓不动会自己计次出队。
+    #
+    # **收窄 base 的那一句排在所有统计之后**(和下面翻译那道同一个位置):
+    # `queue`/`cond` 那几条统计语句各自只带 `kind` 一个占位符,拼参数时用的是
+    # `(*args, *extra)` —— 在它们之前往 `args` 里追加,绑定数当场对不上,
+    # 整个导出阶段抛 `ProgrammingError`(写这段时就是这么先红的一次)。
+    fetch_cond, fetch_args = fulltext.queued_sql()
+    with reg.db() as c:
+        unfetched = c.execute(f'SELECT count(*) {queue} AND ({fetch_cond})'
+                              " AND exported_hash=''", (*args, *fetch_args)).fetchone()[0]
     if hold_untranslated:
         cond, extra = translate.queued_sql()
         with reg.db() as c:
@@ -438,6 +455,8 @@ def _export(kind: str, hold_untranslated: bool = False,
                 shipped_stuck += t['n'] if t['bad'] else 0
         base += f' AND NOT ({cond})'
         args += extra
+    base += f' AND NOT ({fetch_cond})'
+    args += fetch_args
     with reg.db() as c:
         rows = c.execute(f'SELECT * {base}', args).fetchall()
     errors, done = [], 0
@@ -491,6 +510,8 @@ def _export(kind: str, hold_untranslated: bool = False,
             if temp:
                 temp.unlink(missing_ok=True)
     note = f'已保存 {done} 条到知识库'
+    if unfetched:
+        note += f'，{unfetched} 条待补抓原文正文（抓到正文再入库）'
     # 失败那两档各拆成「本轮」和「此前」:它们是两件事,混成一个数就既说不清
     # 这一轮到底出没出故障,也说不清那个数字为什么天天不变(2026-10-08 实测:
     # 63 条陈年失败连着让每一轮导出判红,而那几轮一次模型调用都没失败)。

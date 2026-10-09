@@ -91,7 +91,7 @@ def below_floor(rows: list[sqlite3.Row], floor: str) -> list[dict]:
     return [dict(r) for r in rows if r['published'] and r['published'][:10] < floor]
 
 
-def pending_translation(rows: list[sqlite3.Row]) -> list[dict]:
+def pending_translation(conn, rows: list[sqlite3.Row]) -> list[dict]:
     """还排在翻译队列里的那些 —— `--pending-translation` 用这个口径。
 
     判据直接取 `translate.queued_sql()`,不在这里另写一遍:两处各判各的话,
@@ -100,13 +100,27 @@ def pending_translation(rows: list[sqlite3.Row]) -> list[dict]:
 
     用在服务已经停掉的源上:内容不会再更新,排着的那些译了也没人看,可它们
     每一轮都占着 `MAX_ITEMS` 的额度,把还活着的源挤到后面去。
+
+    **把那段 SQL 真的拿去查,不在 Python 里照着抄一遍。** 原来是只取
+    `extra[0]`(重试上限)、再用三个 Row 字段把条件复写一遍 —— 注释里那句
+    "直接取"当时就只兑现了一半,而判据一加条件就当场漂:正文补抓那一档
+    (`fulltext.queued_sql`,它问的是"这个条目属不属于某条开了补抓的订阅")
+    在 Row 上压根没有对应字段,照抄的那一版会把**还在等正文**的条目当成
+    "排在翻译队列里"清掉,而它们一次模型调用都还没花过。查一次库就不会有
+    下一个这样的缺口。
     """
     from kb.feeds import translate
     cond, extra = translate.queued_sql()
-    tries_cap = extra[0]
-    return [dict(r) for r in rows
-            if r['lang'] == 'en' and not r['translated_at']
-            and r['translate_tries'] < tries_cap]
+    picked: set[str] = set()
+    keys = [r['key'] for r in rows]
+    # SQLite 的变量上限(默认 32766)够用,但一个订阅的条目数没有上界,分批稳妥。
+    for i in range(0, len(keys), 400):
+        batch = keys[i:i + 400]
+        ph = ','.join('?' * len(batch))
+        picked |= {r[0] for r in conn.execute(
+            f'SELECT key FROM feed_items WHERE key IN ({ph}) AND ({cond})', (*batch, *extra))}
+    # 按 rows 的顺序返回:调用方拿它去建计划、打备份,顺序稳定才可复现。
+    return [dict(r) for r in rows if r['key'] in picked]
 
 
 def find_source(conn, token: str) -> tuple[dict | None, str]:
@@ -382,7 +396,7 @@ def cmd_scan(args) -> int:
             if not rows:
                 continue
             if args.pending_translation:
-                cut = pending_translation(rows)
+                cut = pending_translation(c, rows)
                 print(f"[{s['id']:>3}] {s['name'][:28]:30} {len(rows):>4} 条 "
                       f"最早 {rows[0]['published'][:10] or '—'}  "
                       f"还排在翻译队列里 {len(cut)}")
@@ -525,7 +539,7 @@ def _run_locked(args, override: str) -> int:
         return 2
     with reg.db() as c:
         rows = _items(c, source['id'])
-        cut = pending_translation(rows) if mode else below_floor(rows, floor)
+        cut = pending_translation(c, rows) if mode else below_floor(rows, floor)
         keys = [r['key'] for r in cut]
         shared = _shared_keys(c, keys, source['id'])
     if not cut and mode:

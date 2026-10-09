@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
  modified TEXT NOT NULL DEFAULT '', resolved_url TEXT NOT NULL DEFAULT '',
  -- 排在最后,和老库 ALTER 补出来的列序一致(见 _ADDED_COLUMNS)。
  history_floor TEXT NOT NULL DEFAULT '', last_note TEXT NOT NULL DEFAULT '',
+ fulltext INTEGER NOT NULL DEFAULT 0,
  UNIQUE(kind, url)
 );
 CREATE TABLE IF NOT EXISTS feed_items (
@@ -46,6 +47,11 @@ CREATE TABLE IF NOT EXISTS subscription_items (
  subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
  item_key TEXT NOT NULL REFERENCES feed_items(key), PRIMARY KEY(subscription_id, item_key)
 );
+-- 主键是 (subscription_id, item_key),**按 item_key 查用不上它**。而正文补抓的
+-- 队列判据正是"这个条目属不属于某条开了补抓的订阅"(见 `fulltext.queued_sql`),
+-- 它对每一行各查一次:没有这条索引就是逐行全表扫 subscription_items,而那张表
+-- 和条目数同量级 —— 面板翻一页、导出选一次待导出集合都要付这笔钱。
+CREATE INDEX IF NOT EXISTS subscription_items_item ON subscription_items(item_key);
 CREATE TABLE IF NOT EXISTS feed_settings (kind TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS feed_runs (
  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, started_at TEXT NOT NULL,
@@ -67,6 +73,11 @@ _ADDED_COLUMNS = {
         # 记成失败会让面板显示"连接失败"并触发退避重试,而连接好得很。
         # 每次成功同步都重写它(读完了就写空串),所以不会留下过期的提示。
         ('last_note', "TEXT NOT NULL DEFAULT ''"),
+        # 「去原文链接把正文抓回来」(见 kb/feeds/fulltext.py)。**独立一列、
+        # 不放 `config`**:换链接时 `save_subscription` 的 reset 会把 config
+        # 整个清成 '{}' —— 那是采集进度(水位、etag)该有的下场,而这是用户对
+        # 这条订阅的配置,不该因为改一次链接就被静默关掉。
+        ('fulltext', 'INTEGER NOT NULL DEFAULT 0'),
     ),
     'feed_items': (
         ('lang', "TEXT NOT NULL DEFAULT ''"),              # '' 未判 / zh 无需翻译 / en 待翻译
@@ -75,6 +86,12 @@ _ADDED_COLUMNS = {
         ('translated_at', "TEXT NOT NULL DEFAULT ''"),
         ('translate_error', "TEXT NOT NULL DEFAULT ''"),
         ('translate_tries', 'INTEGER NOT NULL DEFAULT 0'),
+        # 正文补抓的三列。老库里的条目补成空串 = 还没抓过:订阅开了补抓开关
+        # 之后它们会自动排进队列,一轮 MAX_ITEMS 条慢慢补齐 —— 那正是打开这个
+        # 开关的人想要的(存量那几百条壳才是他点开面板时看见的东西)。
+        ('fulltext_at', "TEXT NOT NULL DEFAULT ''"),
+        ('fulltext_error', "TEXT NOT NULL DEFAULT ''"),
+        ('fulltext_tries', 'INTEGER NOT NULL DEFAULT 0'),
     ),
 }
 
@@ -238,11 +255,14 @@ def db():
             # 同步就把几十个源的存档一起拖进来。
             floor = history_floor()
             for s in defaults:
+                # `fulltext` 只有链接聚合源标了(默认不标,见 kb/feeds/fulltext.py)。
+                # **只对新库生效**:老库里 `defaults-v1` 早就写过了,这段压根不跑
+                # —— 存量订阅要开这个开关在面板上点一下(订阅管理 → 编辑)。
                 conn.execute('''INSERT OR IGNORE INTO subscriptions
-                    (kind,name,url,mode,group_name,config,created_at,updated_at,history_floor)
-                    VALUES(?,?,?,?,?,?,?,?,?)''',
+                    (kind,name,url,mode,group_name,config,created_at,updated_at,history_floor,fulltext)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)''',
                     (s['kind'], s['name'], source_url(s['kind'],s['url']), s['mode'], s['group_name'],
-                     '{}', now(), now(), floor))
+                     '{}', now(), now(), floor, int(bool(s.get('fulltext')))))
             conn.execute("INSERT INTO feed_meta VALUES('defaults-v1',?)", (now(),))
         conn.commit()
         yield conn
@@ -390,12 +410,14 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
         raise ValueError('来源类型不正确')
     group = str(data.get('group_name', old.get('group_name', ''))).strip()[:80]
     enabled = bool(data.get('enabled', old.get('enabled', True)))
+    fulltext = bool(data.get('fulltext', old.get('fulltext', False)))
     reset = any(old.get(k) != v for k, v in [('url', url), ('feed_url', feed_url), ('mode', mode)])
     try:
         with db() as c:
             if source_id:
                 c.execute('''UPDATE subscriptions SET name=?,url=?,feed_url=?,mode=?,group_name=?,
-                    enabled=?,updated_at=? WHERE id=?''', (name,url,feed_url,mode,group,enabled,now(),source_id))
+                    enabled=?,fulltext=?,updated_at=? WHERE id=?''',
+                    (name,url,feed_url,mode,group,enabled,int(fulltext),now(),source_id))
                 if reset:
                     # 换了链接 = 这个订阅从头开始,历史下界也跟着重算:指向一个
                     # 全新的源时,旧订阅那个两年前的下界等于没有下界。
@@ -403,15 +425,18 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
                     # 它说的是旧账号读到哪儿了,留着就是在新账号那一行显示
                     # 「部分同步」——前端的状态链在 `last_success` 之前先看它,
                     # 而 `last_success` 这里已经清了(2026-10-08 审查实测)。
+                    # `fulltext` 不在这一排里:它是用户对这条订阅的配置,换个
+                    # 链接不该把它静默关掉(上面那句 UPDATE 已经按入参存过了)。
+                    # 被清掉的都是采集进度 —— 指向新的源之后它们本来就不作数。
                     c.execute("""UPDATE subscriptions SET etag='',modified='',resolved_url='',
                         last_error='',last_success='',last_attempt='',failures=0,retry_at=0,config='{}',
                         last_note='',history_floor=? WHERE id=?""", (history_floor(), source_id))
                     c.execute('DELETE FROM subscription_items WHERE subscription_id=?', (source_id,))
             else:
                 source_id = c.execute('''INSERT INTO subscriptions
-                    (kind,name,url,feed_url,mode,group_name,enabled,created_at,updated_at,history_floor)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)''', (kind,name,url,feed_url,mode,group,enabled,
-                    now(),now(),history_floor())).lastrowid
+                    (kind,name,url,feed_url,mode,group_name,enabled,fulltext,created_at,updated_at,history_floor)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)''', (kind,name,url,feed_url,mode,group,enabled,
+                    int(fulltext),now(),now(),history_floor())).lastrowid
     except sqlite3.IntegrityError:
         raise ValueError('这个链接已经在订阅列表中') from None
     return subscription(kind, source_id)
@@ -514,24 +539,49 @@ def items(kind: str, source_id: int | None = None, offset: int = 0, limit: int =
     # 中文"——页脚这么写而标题明明是英文,是三轮审查里同一处谎报的最后一块
     # (第 3 轮实测)。"完成"的判据前后端必须是同一个:正文有译文、而且标题
     # (只要原标题不空)也有译文。
-    from kb.feeds import translate
+    from kb.feeds import fulltext, translate
     queued, qargs = translate.queued_sql()
     holding = translate.available()
+    # **正文还没补抓回来**(见 `kb.feeds.fulltext`)。它排在翻译之前,所以这一档
+    # 的条目手里那份正文是 feed 给的跳转壳 —— 面板照它显示就是一行
+    # "标题(域名)↑ 101 HN Points",而知识库里马上要落的是整篇正文。不标的话
+    # 用户看到的是一条内容空空如也的条目,和它一分钟后的样子完全不同,却没有
+    # 任何东西解释这中间发生了什么。
+    #
+    # **「在队列里」和「没入库」是两件事,按 `exported_hash` 分两态** —— 口径
+    # 同下面翻译那两档,理由也一模一样。打开这个开关最常见的时机正是"已经同步
+    # 过、面板上几百条壳就摆在眼前",那批壳**早就在 vault 里了**(重新导出会
+    # 覆盖它们):对它们说"抓到之后才写进知识库"和文件、索引的事实正相反,而且
+    # 那句文案配着"不给展开阅读",等于把一批本来读得到的条目一起藏起来。
+    #   4 `fetching`    —— `exported_hash=''`,导出闸门确实扣着它(新条目)
+    #   5 `refetching`  —— 已经导出过,库里此刻就是那份壳:如实显示、可以展开
+    fetch_cond, fargs = fulltext.queued_sql()
     # 半成品那一档排在最前面,而且要求它**已经导出过**:库里此刻那篇 md 就是
     # "中文正文 + 原文标题",如实显示、可以展开,页脚写清标题还在等补译。清回
     # 队列之后它同时满足 queued,可"外文原文已入库"那句话对它就不准了(正文已经
     # 是中文)。没导出过的(极少见)照旧按队列那两档走——那时库里确实没有这一条,
     # 不能给展开。
     partial = f"({translate.PARTIAL_SQL}) AND exported_hash<>''"
-    state_sql, sargs = ((f"CASE WHEN ({partial}) THEN 3 WHEN ({queued}) THEN"
-                         " (CASE WHEN exported_hash='' THEN 1 ELSE 2 END) ELSE 0 END"),
-                        qargs) if holding else (
-                        f'CASE WHEN ({partial}) THEN 3 ELSE 0 END', [])
+    # 补抓那一档排在最前面:它在流水线上也排在翻译前面,而且 `translate.queued_sql`
+    # 已经把这批条目排除在翻译队列之外 —— 两处顺序一致,同一条内容不会既说
+    # "等翻译"又说"等正文"。
+    tail = ((f"WHEN ({partial}) THEN 3 WHEN ({queued}) THEN"
+             " (CASE WHEN exported_hash='' THEN 1 ELSE 2 END)"), qargs) if holding else (
+            f'WHEN ({partial}) THEN 3', [])
+    state_sql = (f"CASE WHEN ({fetch_cond}) THEN"
+                 " (CASE WHEN exported_hash='' THEN 4 ELSE 5 END) "
+                 f'{tail[0]} ELSE 0 END')
+    sargs = [*fargs, *tail[1]]
     with db() as c:
         total = c.execute('SELECT count(*) FROM feed_items WHERE ' + where, args).fetchone()[0]
         waiting = (c.execute(f'SELECT count(*) FROM feed_items WHERE {where}'
                              f" AND ({queued}) AND exported_hash=''",
                              [*args, *qargs]).fetchone()[0] if holding else 0)
+        # 顶上那句计数只数"还没入库"那一档(同 `waiting`):另一档已经读得到了,
+        # 把它算进"正在补抓、抓到才写进知识库"就是又说了一遍那句不准的话。
+        fetching = c.execute(f'SELECT count(*) FROM feed_items WHERE {where}'
+                             f" AND ({fetch_cond}) AND exported_hash=''",
+                             [*args, *fargs]).fetchone()[0]
         rows = c.execute(f'SELECT *, {state_sql} AS translate_state FROM feed_items WHERE ' + where +
                          " ORDER BY COALESCE(NULLIF(published,''),fetched_at) DESC,key DESC LIMIT ? OFFSET ?",
                          [*sargs,*args,limit,offset]).fetchall()
@@ -542,8 +592,11 @@ def items(kind: str, source_id: int | None = None, offset: int = 0, limit: int =
         d['translating'] = state == 1
         d['retranslating'] = state == 2
         d['partial'] = state == 3
+        d['fetching'] = state == 4
+        d['refetching'] = state == 5
         out.append(d)
-    return {'items': out, 'total': total, 'offset': offset, 'translating': waiting}
+    return {'items': out, 'total': total, 'offset': offset, 'translating': waiting,
+            'fetching': fetching}
 
 
 def latest_run(kind: str) -> dict | None:
