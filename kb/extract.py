@@ -477,7 +477,7 @@ def refresh_content_hash(conn, doc_path: str) -> None:
 #   NO_BODY_EMPTY  md 正文自己就是空的 —— 多半是抓取失败/转载 stub 留下的壳,
 #                  重抓原文有机会补上,该进「需回填」清单。
 #   NO_BODY_NO_TEXT md 正文有内容,只是一个文字都没有(整篇是一张长海报图、
-#                  纯表格、纯嵌入块)。chunker 的 _clean 把图片引用剥掉之后
+#                  一张图里套着的表格、纯嵌入块)。chunker 剥掉图片引用之后
 #                  不剩字,于是一个 chunk 都不产生。**回填脚本救不了它** ——
 #                  重抓回来还是同一张图,内容在像素里。
 # 不分档的后果实测过:2026-06-29 那篇「阿里硬核少年技术节」是一张 1080x7355
@@ -490,32 +490,54 @@ NO_BODY_NO_TEXT = "no_text"
 def body_gap(path: str, body: str) -> str:
     """正文为空时回答「空成哪一档」;正文非空返回空串。
 
-    判据是 **md 正文有没有东西**,不是「有没有图片」:纯表格、纯嵌入块和纯图片
-    是同一种形态(有内容、剥完不剩字),按图片特判只认得出其中一种。
+    **判据是「md 正文照 chunker 那套规则剥完还剩不剩字」,不是「md 正文是不是
+    空的」,也不是「有没有图片」。** 用的就是 chunker 自己那个 strip_markup ——
+    「为什么一个 chunk 都没有」只能由决定 chunk 存不存的那条规则来回答,另写一份
+    必然漂。按图片特判同样不行:图里套着的表格、纯嵌入块是同一种形态。
 
-    读不到文件时返回 EMPTY —— 这是保守的那一边:它会继续进「需回填」清单、
-    不会被落成终态,而终态是会让这一篇从提取队列里消失的。
+    剥完**还剩字**却一个 chunk 都没有是第三种形态(正文标题里的字被 chunker
+    当成小节标题、小节正文清空之后整段丢掉了):那是**真有文字**,落终态等于
+    把看得见的内容藏起来、从此不再提取 —— 一律按最保守的 EMPTY 办(继续进
+    「需回填」清单,维持本档出现之前的行为)。读不到文件同理落 EMPTY。
     """
     if body.strip():
         return ""
+    from kb.chunker import strip_markup
     from kb.scanner import normalize_body, parse_frontmatter
     try:
         raw = (VAULT_ROOT / path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return NO_BODY_EMPTY
     _fm, md_body = parse_frontmatter(raw)
-    return NO_BODY_NO_TEXT if normalize_body(md_body).strip() else NO_BODY_EMPTY
+    if not md_body.strip():
+        return NO_BODY_EMPTY                       # 真的什么都没有
+    return NO_BODY_EMPTY if strip_markup(normalize_body(md_body)).strip() \
+        else NO_BODY_NO_TEXT
 
 
-def mark_no_body(conn, path: str) -> None:
-    """记下「这一版内容确认没有可提取的文字」,让它离开提取队列。
+def mark_no_body(conn, path: str, version: str) -> bool:
+    """记下「**这一版**内容确认没有可提取的文字」,让它离开提取队列。
 
-    存的是**当下那份 content_hash**,所以这不是永久封死:回填脚本补上正文、
+    存的是判定时读到的那份 content_hash,所以这不是永久封死:回填脚本补上正文、
     用户手改 md、源内容变化都会让 index 写进一个新的 content_hash,下一轮
     pending_docs 立刻又选得到它(口径见那个查询的 NOT 子句)。
+
+    **判据待在 UPDATE 自己的 WHERE 里,不许在 Python 那边先读一次 content_hash
+    再比。** 判定是在工作线程里做的,落终态在主线程,这中间另一条连接的索引完全
+    可能把这一篇换成一版有正文的内容(提取不持维护锁,这是合法交错)。原来那句
+    `SET no_body_hash = content_hash` 无条件复制当下的版本号,于是终态被盖到了
+    **新**版上:新正文既不提取也不提醒,后续同内容的索引也不会让它回队列
+    (2026-10-09 审查实测:库里正文是真的,而 pending=[]、extracted_at=null、
+    no_body_hash 与新 content_hash 相等)。先读后写在两个线程之间压根不成立 ——
+    SQLite 把写入串行化,判据只有待在写语句里才和这次写入同生共死。
+
+    返回「写进去了没有」:0 行 = 这期间内容换版了,**这一轮不记终态**,
+    也别把新内容排除出队列,下一轮按新版重新判一次。
     """
-    conn.execute(
-        "UPDATE documents SET no_body_hash = content_hash WHERE path = ?", (path,))
+    cur = conn.execute(
+        "UPDATE documents SET no_body_hash = ? WHERE path = ? AND content_hash = ?",
+        (version, path, version))
+    return cur.rowcount > 0
 
 
 def pending_docs(conn, limit: int = 0) -> list:

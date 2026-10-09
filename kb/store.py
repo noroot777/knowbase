@@ -165,18 +165,52 @@ def _migrate_entities(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _add_columns(conn: sqlite3.Connection, table: str,
+                 cols: tuple[tuple[str, str], ...]) -> None:
+    """给老表补列。幂等。**缺列才取写锁,并在锁里重新读一次列集合。**
+
+    「读列集合」和 ALTER 分在两个语句里、中间不持锁的话,两个连接同时首访同一个
+    老库会读到同一份旧列集合,后一个 ALTER 撞 `duplicate column name` —— 那一个
+    请求当场 500,而 connect() 是页面 API、提取 worker、CLI 共用的入口,于是
+    「升级后第一次并发使用」有一批操作直接报错(2026-10-09 审查实测:12 个并发
+    连接 11 个抛 `duplicate column name`)。WAL 和 SQLite 的写锁不会自动把前面
+    那句 PRAGMA 一起包进事务,所以判据必须和这次 ALTER 待在同一个写事务里 ——
+    口径同 feeds registry 那次「补列和它前面那次列集合读取要在同一把写锁里」。
+
+    常态(列都在)只花一句 PRAGMA、不取锁:connect() 每次都会跑到这里,
+    为一件一辈子只发生一次的事去抢写锁是把升级的代价摊给了每一次连接。
+    """
+    def missing() -> list[tuple[str, str]]:
+        have = {r["name"] for r in conn.execute(
+            f"PRAGMA table_info({table})").fetchall()}
+        return [(n, d) for n, d in cols if n not in have]
+
+    if not missing():
+        return
+    # 这里只会是 connect() 自己前面几步迁移留下的事务(各自都 commit 过);
+    # 显式落一次是因为 BEGIN IMMEDIATE 不能嵌在事务里。
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for name, ddl in missing():          # 锁里重新读:别人刚补完就什么都不做
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def _migrate_promo(conn: sqlite3.Connection) -> None:
     """documents 加软广判定三列并建索引。幂等。
 
     老库 documents 已存在,_SCHEMA 的 CREATE TABLE IF NOT EXISTS 不会补列,
     只能 ALTER;索引要等列补完才能建,所以不写进 _SCHEMA(同 _migrate_entities)。
     """
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(documents)").fetchall()}
-    for name, ddl in (("promo_level", "TEXT NOT NULL DEFAULT ''"),
-                      ("promo_reason", "TEXT NOT NULL DEFAULT ''"),
-                      ("promo_at", "TEXT")):
-        if name not in cols:
-            conn.execute(f"ALTER TABLE documents ADD COLUMN {name} {ddl}")
+    _add_columns(conn, "documents",
+                 (("promo_level", "TEXT NOT NULL DEFAULT ''"),
+                  ("promo_reason", "TEXT NOT NULL DEFAULT ''"),
+                  ("promo_at", "TEXT")))
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_documents_promo ON documents(promo_level)")
     # 软广排除要按 url 从条目回溯原文(见 promo_exclude_sql),没索引就是每行一次全表扫
@@ -191,11 +225,8 @@ def _migrate_no_body(conn: sqlite3.Connection) -> None:
     不建索引:它只在 pending_docs 那一个查询里当过滤条件,而那个查询本来就
     已经被 extracted_at IS NULL 收窄到几十行。
     """
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(documents)").fetchall()}
-    if "no_body_hash" not in cols:
-        conn.execute(
-            "ALTER TABLE documents ADD COLUMN no_body_hash TEXT NOT NULL DEFAULT ''")
-    conn.commit()
+    _add_columns(conn, "documents",
+                 (("no_body_hash", "TEXT NOT NULL DEFAULT ''"),))
 
 
 def promo_exclude_sql(alias: str = "d") -> str:
@@ -390,3 +421,26 @@ def doc_body(conn: sqlite3.Connection, path: str) -> str:
         (path,),
     ).fetchone()
     return (row["body"] if row and row["body"] else "") or ""
+
+
+def doc_body_version(conn: sqlite3.Connection, path: str) -> tuple[str, str]:
+    """正文 + **它所属的那一版** content_hash,一条语句读出来。
+
+    拆成两句读是不安全的:提取 worker 读完正文、主线程落「这一版没有文字」终态
+    之间,另一条连接的索引完全可能把这一篇换成一版**有正文**的内容(合法交错,
+    提取不持维护锁)。那时两句分别落在换版前后,终态就会被盖到新版上 —— 新正文
+    从此既不提取也不提醒(2026-10-09 审查实测)。一条语句只有一个快照,正文和
+    版本号必然同属一版;「这一版还是不是当前那一版」由写入侧的条件 UPDATE 回答
+    (见 kb/extract.py 的 mark_no_body)。
+
+    没有这一行文档时返回 ("", "")。
+    """
+    row = conn.execute(
+        "SELECT (SELECT content_hash FROM documents WHERE path=?) AS version,"
+        " group_concat(text, char(10)) AS body FROM "
+        "(SELECT text FROM chunks WHERE path=? ORDER BY seq)",
+        (path, path),
+    ).fetchone()
+    if row is None:
+        return "", ""
+    return (row["version"] or ""), (row["body"] or "")

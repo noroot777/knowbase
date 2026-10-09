@@ -10,6 +10,9 @@ const STAGE_META = {
 let pipeTimer = null, pipeSnapshot = null, pipePending = {};
 let pipeRequest = null, pipeStatusAbort = null, pipeStatusVersion = 0;
 let pipeAction = '', pipeConnected = false, pipeLastRead = 0;
+// 上一次见到的「已结束运行」身份。null = 这个页面还没读到过任何状态
+// (那一档只记基线、不刷新:初始化本来就会拉一次待处理数)。
+let pipeDoneRun = null;
 let pipeSourceVersion = 0, pipePendingRequest = null;
 
 async function pipeJson(path, options = {}, timeout = 15000) {
@@ -55,6 +58,14 @@ async function refreshPipe(withPending = false) {
       const s = await pipeJson('/api/pipeline/status?source=false', { signal: pipeStatusAbort.signal });
       if (version !== pipeStatusVersion) return;
       const wasRunning = pipeSnapshot?.running;
+      // 「有没有出现一轮新的已结束运行」。只靠 running→idle 这个跳变是不够的:
+      // 跑得极快的那一轮(纯图片文章落终态、全是跳过)在两次轮询之间就结束了,
+      // 页面一次都没见过 running=true，于是待处理数停在旧值 —— 后端已经是 0 了,
+      // 面板还写着「当前待处理 1 项」，只有手动刷新页面才归零(2026-10-09 审查
+      // 实测:状态接口 pending.extract=0 而 UI 显示 1)。后台定时跑的那一轮同理。
+      const doneRun = s.running ? '' : (s.run_id || s.finished_at || '');
+      const newResult = pipeDoneRun !== null && doneRun && doneRun !== pipeDoneRun;
+      pipeDoneRun = doneRun;
       pipeSnapshot = s; pipeConnected = true; pipeLastRead = Date.now();
       $('pipe-connection').hidden = true;
       renderPipeState(s);
@@ -66,6 +77,10 @@ async function refreshPipe(withPending = false) {
           $('stats').textContent = `${stats.documents.toLocaleString()} 篇内容已收录`;
         }).catch(() => {});
         toast(pipeRunLabel(pipeResult(s)) + (s.stopped || s.last_run?.stopped ? '已停止' : '已结束'), { key: 'pipeline', type: 'info', detail: '各步骤结果已更新，可查看待处理明细。' });
+      } else if (newResult) {
+        // 没见过 running 的那一轮:只把积压数补上,不弹「已结束」——
+        // 这条路也会在页面打开期间别处跑完一轮时走到，弹窗就成了噪音。
+        refreshPipePending();
       }
     } catch (e) {
       if (version !== pipeStatusVersion) return;

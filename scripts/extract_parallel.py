@@ -24,20 +24,26 @@ def main():
     # 产出一份只凭标题编的判定,还要按 token 付钱。两档判定与另外两条路共用
     # kb.extract 那一份(这个脚本自称与 `kb extract --writeback` 等价)。
     jobs = []
-    empty = no_text = 0
+    empty = no_text = tried = 0
     for row in todo:
-        body = store.doc_body(conn, row["path"])
+        version, body = store.doc_body_version(conn, row["path"])
         gap = body_gap(row["path"], body)
         if gap == NO_BODY_NO_TEXT:
-            mark_no_body(conn, row["path"])
-            no_text += 1
+            # 条件 UPDATE:判定期间内容换版了就一行都不写(见 mark_no_body)
+            tried += 1
+            if mark_no_body(conn, row["path"], version):
+                no_text += 1
             continue
         if gap:
             empty += 1
             continue
         jobs.append((row["path"], row["title"], body))
-    if no_text:
+    if tried:
+        # 0 行的那次 UPDATE 也把事务开着了,所以按「试过几次」提交、不按
+        # 「写进去几条」:后面的 tag 回写要先取维护锁,攥着没提交的写事务
+        # 去等锁会把持锁那边卡死(见 CLAUDE.md 「kb.db 的维护互斥锁」锁序那条)
         conn.commit()
+    if no_text:
         print(f"[extract-p] 无正文可提取 {no_text} 篇(仅图片等,已记录)", flush=True)
     if empty:
         print(f"[extract-p] 正文为空 {empty} 篇(待回填,本轮跳过)", flush=True)

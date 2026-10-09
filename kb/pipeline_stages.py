@@ -268,25 +268,29 @@ EXTRACT_WORKERS = 6
 
 
 def _extract_one(path: str, title: str,
-                 account: str = "") -> tuple[dict | None, str]:
+                 account: str = "") -> tuple[dict | None, str, str]:
     """工作线程:读正文(独立连接,WAL 下并发读安全)→ 调 LLM。不碰共享连接。
 
-    返回 (判定结果, 空档位)。正文为空时不调 LLM —— 那必然失败,或者产出一份
-    只凭标题编出来的劣质判定。空档位由 extract.body_gap 给:`empty` 留给
-    「重试失败项」回填,`no_text` 是回填也救不了的那一种(内容在图里),交给
-    主线程落成终态。**写库留在主线程**,这里只回答判定。"""
+    返回 (判定结果, 空档位, 读到的那一版 content_hash)。正文为空时不调 LLM ——
+    那必然失败,或者产出一份只凭标题编出来的劣质判定。空档位由 extract.body_gap
+    给:`empty` 留给「重试失败项」回填,`no_text` 是回填也救不了的那一种
+    (内容在图里),交给主线程落成终态。**写库留在主线程**,这里只回答判定。
+
+    版本号要和正文**在同一个快照里**读出来(doc_body_version),并且一路带到
+    落终态那一步:判定和写入之间另一条连接的索引可能把这一篇换成一版有正文的
+    内容,那时终态必须落空而不是盖到新版上(见 extract.mark_no_body)。"""
     from kb import store
     from kb.extract import body_gap, extract_with_llm
 
     conn = store.connect()
     try:
-        body = store.doc_body(conn, path)
+        version, body = store.doc_body_version(conn, path)
     finally:
         conn.close()
     gap = body_gap(path, body)
     if gap:
-        return None, gap
-    return extract_with_llm(title, body, account=account), ""
+        return None, gap, version
+    return extract_with_llm(title, body, account=account), "", version
 
 
 def _extract_pass(label: str, stats: dict) -> None:
@@ -317,17 +321,27 @@ def _extract_pass(label: str, stats: dict) -> None:
                 row = futs[fut]
                 done += 1
                 try:
-                    data, gap = fut.result()
+                    data, gap, version = fut.result()
                     if gap == NO_BODY_NO_TEXT:
                         # 终态:这一版内容里没有字可提。不进 failures、不判红 ——
                         # 它不是「还没做完的事」,是「做不了也不用再问的事」。
                         # 标记跟着 content_hash 走,正文哪天补回来会自己回队列。
-                        mark_no_body(conn, row["path"])
+                        marked = mark_no_body(conn, row["path"], version)
                         conn.commit()
-                        stats["no_text_paths"].add(row["path"])
-                        stats["empty_paths"].discard(row["path"])
-                        stats["failures"].pop(row["path"], None)
-                        _log(f"extract: 无正文可提取(仅图片等) {row['title'][:24]}")
+                        if marked:
+                            stats["no_text_paths"].add(row["path"])
+                            stats["empty_paths"].discard(row["path"])
+                            # 存量轮失败、增量轮落终态:旧失败计数要一起清掉,
+                            # 否则收尾按它判红,而「需处理」明细里一条都没有
+                            stats["failed_paths"].discard(row["path"])
+                            stats["failures"].pop(row["path"], None)
+                            _log("extract: 无正文可提取(仅图片等) "
+                                 f"{row['title'][:24]}")
+                        else:
+                            # 判定期间内容换版了:这一轮什么都不记,留在队列里
+                            # 等下一轮按新版重新判(见 extract.mark_no_body)
+                            _log("extract: 正文在判定期间更新,留待下一轮 "
+                                 f"{row['title'][:24]}")
                     elif data is None:
                         stats["empty_paths"].add(row["path"])
                         stats["failures"][row["path"]] = {
