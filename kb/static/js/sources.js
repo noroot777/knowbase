@@ -321,10 +321,28 @@ function renderSourceItems() {
     ${t.translating
       // 等翻译的条目不给“展开阅读”:知识库里这一条还不存在,展开只能展开英文
       // 原文。标题和正文都换成中文状态文案,原文入口留在右下角那个链接上。
+      // **这一行在社交观点上照旧显示**:它回答的是"这张卡片为什么没有内容",
+      // 不是"这条内容叫什么" —— 和下面去掉的那个标题不是一回事。
       ? `<h3 class="source-entry-name">外文内容，正在等翻译</h3>
     <p class="source-excerpt">译成中文之后才写进知识库；这一条现在只有原文，点右下角“原文”可以直接看。</p>`
-      : `<h3><button class="source-entry-title" data-read-item="${item.key}">${esc(t.title)}</button></h3>
-    <p class="source-excerpt">${esc(t.body.slice(0,380))}${t.body.length>380?'…':''}</p>`}
+      // **社交观点没有「标题」这回事**:采集器把推文正文的前 500 字符原样当成
+      // title(`x_browser._entry` / `x_feedgrab._entry`;桥接那条走
+      // `fetching.parse_feed`,源没给标题时回退成正文首行),于是这一档的标题
+      // 和紧跟着的正文是同一句话连着显示两遍 —— 而标题那个 <button> 继承了
+      // base.css 的 `white-space: nowrap`(按钮文字本来就不该折行),旁边那句
+      // `overflow-wrap:anywhere` 在 nowrap 之下压根不起作用,于是一条长推文
+      // 一行到底、直接撑出卡片右边界。
+      // **判据用条目自己的 `content_kind`**(只有 social 来源的条目是 `post`),
+      // 不问当前视图选的是哪个来源:要回答的是"这一条内容有没有标题",那是内容
+      // 自己的属性。如实记一笔:今天 `sourceKind === 'social'` 和它逐条等价
+      // (social 来源的每一条都是 post,而弹窗是模态的、开着时切不了视图),
+      // 定点注入换成按视图判一条都不红 —— 选它不是因为防住了某个事故,是因为
+      // 另一个问句(现在在看哪个来源)恰好同解,而同解是会变的。页脚那句
+      // 「社交观点 / 订阅正文」问的才是来源,所以它照旧按视图走。
+      // 去掉标题之后正文是卡片上唯一的内容,所以从 muted 的"摘要"提成次要
+      // 正文(`is-post`)。展开阅读原来有标题和页脚两个入口,现在只剩页脚那个。
+      : `${item.content_kind === 'post' ? '' : `<h3><button class="source-entry-title" data-read-item="${item.key}">${esc(t.title)}</button></h3>`}
+    <p class="source-excerpt${item.content_kind === 'post' ? ' is-post' : ''}">${esc(t.body.slice(0,380))}${t.body.length>380?'…':''}</p>`}
     <div class="source-entry-footer"><span>${item.content_kind === 'summary' ? '订阅摘要' : sourceKind === 'social' ? '社交观点' : '订阅正文'}${t.translating ? ' · 外文原文，正在等翻译' : t.translated ? ' · 已译为中文' : t.retranslating ? ' · 外文原文已入库，正在等中文译文覆盖' : t.partial ? ' · 正文已译为中文，标题还是原文（下次同步补译）' : ''}</span>${t.translating ? '' : `<button class="text-button" data-read-item="${item.key}">展开阅读</button>`}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></article>`; }).join('');
   const note = sourceTranslating
     ? `<p class="source-note" role="status">${sourceTranslating} 条外文内容还在等翻译：译成中文之后才写进知识库。</p>` : '';
@@ -370,7 +388,12 @@ function readSourceItem(key) {
 function renderSourceReader() {
   const item = sourceReaderItem, t = sourceText(item);
   const original = sourceReaderOriginal;
-  $('source-reader-title').textContent = original ? item.title : t.title;
+  // 社交观点同样不显示标题(理由见 renderSourceItems):那是正文的前 500 字符,
+  // 摆在正文正上方就是同一段话连着读两遍。作者和时间留在下面那行 meta 上,
+  // 这一条是谁什么时候发的不会因此丢掉。
+  const post = item.content_kind === 'post';
+  $('source-reader-title').hidden = post;
+  $('source-reader-title').textContent = post ? '' : (original ? item.title : t.title);
   $('source-reader-meta').textContent = `${item.author} · ${item.published ? sourceTime(item.published) : '发布时间未知'}${item.content_kind==='summary'?' · 订阅摘要，全文请打开原文':''}${t.translated ? (original ? ' · 英文原文' : ' · 自动翻译') : ''}`;
   $('source-reader-body').textContent = original ? item.body : t.body;
   $('source-reader-original').hidden = !t.translated;
