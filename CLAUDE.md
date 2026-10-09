@@ -3753,6 +3753,130 @@
   空闲超时能兜住,但同时活跃时仍是几倍开销。真要治得让它们共用一个常驻
   worker(要 socket + 守护进程),现在没做。
 
+## 浏览器探针起的无头壳(tests/probe_shell.mjs + headless.py 的 run_probe)
+
+- **探针起的 chrome-headless-shell,在任何一条退出路径上都必须被收掉。** 原来 12 个
+  探针各写一份 `spawn` + 等端口,而收尾那句 `proc.kill()` 一律写在**正常路径的末尾**
+  —— 探针整个是 ESM 顶层 await,中间任何一步抛异常(页面里 eval 报错、等不到元素、
+  后端沙箱没起来、摆局中断)都让 node 以 unhandled rejection 退出,那一句**永远到
+  不了**。而 node 死掉不会带走 spawn 出来的子进程,于是 chrome 被 init 收养
+  (ppid=1)、永久活着。
+  **2026-10-09 在本机实测到 16 个这样的孤儿**:存活 6 小时到 1 天 11 小时,连同渲染
+  子进程共 66 个进程、3.8 GB,全部 ppid=1、0 条活跃 CDP 连接,而当时一个测试都没在跑
+  (用户是在端口监控面板上看到十几个名叫 knowbase 的条目才发现的 —— 那个名字是**工作
+  目录归属**,不是进程名,所以从面板上完全看不出它们是浏览器)。
+- **三条泄漏路径、三层防线,谁也兜不住另外两档,所以各有自己的用例**:
+  ①**探针自己抛异常** → `probe_shell.mjs` 的 `process.on('exit')` 里**同步** SIGKILL。
+    'exit' 覆盖三条路:正常退出、抛异常退出、`process.exit()`。
+  ②**Python 侧 timeout** → `headless.py` 的 `run_probe()` 按**进程组**收。
+    `subprocess.run(timeout=)` 超时调的是 `kill()`,也就是 **SIGKILL** —— node 连
+    'exit' 事件都来不及触发,①那一层在这一档上完全是瞎的。
+  ③**调用方被取消** → `probe_shell.mjs` 的 `watchParent()` 由**子进程自己**盯
+    `process.ppid`。这一档是 ② **自己开出来的**:见下一条。
+- **②的独立会话反过来开出第三条泄漏路,而且它是这次用户看到的那一批的另一半来源。**
+  node 不在调用方的进程组里了,于是取消调用方(CI 取消作业、`kill` 那个 pytest、
+  `kill -- -<pgid>`)再也波及不到它 —— 而 Python 对**没有 handler** 的 SIGTERM 是
+  直接结束,`run_probe` 的 `finally` 一行都不跑。①②在这一档上**都是瞎的**:node 既
+  没抛异常也没收到任何信号,而那个 300 秒的超时保护随调用方一起没了。实测(改之前):
+  调用方以 -15 退出,node 被过继给 init 之后照旧活着、chrome 挂在它下面、DevTools
+  端口继续监听 —— **换成旧的裸 `subprocess.run()` 反而全都收掉了**(那时 node 就在
+  调用方的组里),所以这是加②换来的回归,不是既有问题。
+- **③的判据是 `process.ppid`,而且必须待在子进程里。** `process.ppid` 是实时 getter
+  (每次都 `uv_os_getppid`),调用方一死内核立刻把我们过继给 init,这个值就变了 ——
+  它是**唯一不依赖调用方跑任何代码**的信号,因此连调用方被 SIGKILL 那一档也盖得住。
+  **没有改成在 `run_probe` 里装 SIGTERM handler**:那要在一个库函数里换掉跑测试那个
+  进程自己的信号行为(pytest/unittest 各有一套),而且照样盖不住调用方被 SIGKILL ——
+  两个方向上它都更差。轮询间隔 `PARENT_POLL_MS`(400ms)就是「调用方死了到浏览器被
+  收掉」的上界。
+- **③那个 interval 必须 `unref()`。** 它只是「探针还活着的时候顺便盯一眼」,ref 的话
+  每个探针跑完都要挂到它被清掉为止(永远不会)—— 同下面 `setTimeout` 那条事故。unref
+  的 timer 照旧会在 event loop 因为别的事活着时触发,所以"探针正忙"那一段盯得到;
+  探针闲下来那一刻 node 本来就退出了,①接着收尾。
+  **顺带的后果,知情**:把探针脱离终端跑(`node tests/x_probe.mjs &` 之后关掉那个
+  shell)会让它自己结束。那正是这条防线要的行为 —— 没有调用方在等结果的探针,留着的
+  只有浏览器。
+- **信号要单独挂一遍。** node 对**没有 handler** 的 SIGINT/SIGTERM 是直接终止、
+  **不触发 'exit' 事件**;挂了 handler 就得自己 `process.exit()`。
+- **杀用 SIGKILL,理由是构造上的,不是「SIGTERM 不够」** —— 后者**实测是够的**,
+  如实记着:信号投递是内核的事,发送方随后死掉不影响已经投递的那一下,chrome 自己
+  响应 SIGTERM 就退了(2026-10-09 直接实验:SIGTERM 收掉了那个 chrome;注入
+  「'exit' 里改发 SIGTERM」跑回归**红 0 条**)。选 SIGKILL 是因为**这是最后一道
+  防线**,而 SIGTERM 要对端配合:chrome 卡住(正在处理崩溃、被 SIGSTOP 停住、信号被
+  屏蔽)时它不退出,而 'exit' 回调只跑得了同步代码、**没法等**,node 一返回就没有
+  第二次机会了。SIGKILL 由内核执行,不需要对端配合。代价是 chrome 自建的临时 profile
+  目录留在 /var/folders 下,那是几十 KB 的空目录、系统会清,比留一个 80 MB 的进程
+  轻得多。
+- **测「挂住」的用例必须拿一个 ref 的 handle 挂住,`await new Promise(() => {})` 挂不住**
+  (`tests/test_probe_leak.py` 的 `HANG` 常量)。它不是 event loop handle,循环一空
+  node 就以 **exit 13** 正常退出(`unsettled top-level await`)—— 而那条路上第一层的
+  'exit' 钩子把浏览器收得好好的,于是**本该验第二层的用例测的是第一层**:去掉
+  `run_probe` 里那两处 `killpg` 照样全绿。这是「红 0 条先怀疑用例」又一次应验,而且
+  连带查出了下面那个 timer 缺陷。
+- **`launchShell` 等端口那个 `setTimeout` 非清不可。** 它是一个 **ref 的** handle,
+  拿到端口之后还挂在 event loop 里,于是**探针主体跑完 node 也不退出、要等它到期**
+  —— 实测每个探针白挂满 20 秒(回归全套从 40.6 秒降到 20.9 秒就是清掉它换来的)。
+  上面那几个 `unref()` 管不着它,那是子进程和管道的事。
+- **`run_probe` 要 `start_new_session=True`。** 它让 node 成为新会话的首进程
+  (pgid = node 的 pid),chrome 是它的后代、自动在同一个组里,`killpg` 一起带走;
+  新开会话同时保证这个组里**只有** node 和它的后代 —— 不然那一下 killpg 会把跑测试
+  的进程自己带走。收尾在 `finally` 里**无条件**做一次:正常跑完的那一轮探针已经自己
+  kill 过了,对已退出的组成员再发一次信号是空操作。代价就是上面③那条,由子进程自己补。
+- **`launchShell` 拿到端口后要 `unref()`。** 子进程 handle 和它的 stdio 管道都是
+  ref 的,不摘的话**探针跑完 node 也不退出**。原来那 12 个探针看不出这件事,是因为
+  末尾那句 `proc.kill()` 顺手把这几个 handle 释放掉了(它们当中只有 10 个还写了
+  `process.exit()`,所以**不是**靠它强行收场);而一个忘了收尾的新探针会直接挂死
+  (回归里 `fine.mjs` 当场挂满 90 秒超时,就是这么暴露的)。unref 只改「要不要为它等
+  下去」,不影响 'exit' 钩子(那跟 handle 引用无关),所以回收照旧。
+- **把 12 个探针改到共用这个模块之后,必须真跑那几组页面回归 —— `node --check` 只过
+  语法。** 迁移时顺手删掉了各探针顶上那句 `const BIN = process.env.HEADLESS_SHELL`,
+  有四个文件把紧跟着的 `if (!BIN) {...}` 留在了原处:`node --check`、`git diff --check`
+  和逐文件编译全都通过,而真跑起来是顶层 `ReferenceError: BIN is not defined` ——
+  四组页面检查(待提取数量 / 旧通道兼容 / 观点卡片 / X 通道)**一条都起不来**,跟
+  有没有装无头壳毫无关系(2026-10-09 第 1 轮审查发现,它拿 HEAD 的旧探针跑了对照组,
+  四个全过,确认是本轮引入的)。新增的那 10 条生命周期回归全绿也发现不了 —— 它们用
+  的是自己摆的最小探针,碰不到那 12 个文件。
+- **回归在 `tests/test_probe_leak.py`(10 条),判据一律是「那个 pid 还在不在」这个
+  后果。** 只验「注册了钩子没有」的话,一个注册完却杀不掉它的实现(比如 'exit' 里发
+  SIGTERM)照样全绿。四条退出路径各一条(抛异常 / `process.exit` / 正常跑完 /
+  SIGTERM),超时那一档单独一条,**调用方被取消那一档单独一条**,外加 `run_probe` 的
+  形状与独立会话各一条。
+  **调用方那一条要起一个真的第二个 Python 进程、`start_new_session` 之后取消它的
+  整个进程组**:只对 node 发信号走的是①那条路(它的 handler 接得住),验不出这一档;
+  而调用方要是跑测试的自己,那一下 killpg 会把测试进程一起带走。它另外断言调用方的
+  `returncode` 真的是 `-SIGTERM` —— 不然「调用方自己跑完了」和「被取消了」长得一样,
+  后面两条断言就不作数了。pid 走**盘上一份 pid 文件**(`PROBE_PID_FILE`),不走
+  stdout:探针的 stdout 被调用方的 `run_probe` 收进管道,调用方一死就读不到了。
+  **两条契约不挂 `@requires_headless`** —— 没装无头壳的机器上靠它们守住结构:
+  探针不许再自己 `spawn` 浏览器、测试不许再裸 `subprocess.run` 跑探针。
+  **`test_probe_leak.py` 自己是后一条唯一的例外,而且必须是**:第一层那几条验的正是
+  探针自己退出时收不收得干净,走 `run_probe` 的话它那道 killpg 会把结论盖掉 ——
+  被测的实现坏掉了也照样全绿。
+  **反向验证定点注入六版,各红 1~4 条**:③那一层整个不装(就是第 1 轮被审的那一版)
+  红 1 条 —— 红的正是审查那份证据(调用方的进程组被取消之后,node 和 chrome 都还
+  活着、端口还在监听);③那个 interval 不 `unref()` 红 1 条,而且**红的是「正常跑完」
+  那一条** —— 也就是上面那个「探针跑完 node 也不退出」的后果,所以这条用例对它有射程;
+  **把悬空的 `if (!BIN)` 塞回一个探针**红 1 条(那组页面回归压根起不来,正是第 2 条
+  拦验收的形状);①的 `'exit'` 钩子去掉红 4 条 —— 抛异常 / `process.exit` / 正常跑完 /
+  调用方被取消四条全红,**而 SIGTERM 那一条不红**:它走的是信号 handler 里那句直接
+  `reap()`,跟 'exit' 无关。这也说明③只负责把 node 推向退出,真正收浏览器的仍然是①,
+  两层不是一件事的两种写法;②的两处 `killpg` 去掉红 1 条(超时那一条);
+  `run_probe` 不开新会话红 2 条(独立进程组那条契约 + 超时那一条的后果)。
+- **同形状但本轮没动的是沙箱服务那一半,记在这儿备查。** `test_chat_height` /
+  `test_reading_literal` / `test_fulltext_browser` 的 `setUpClass` 自己 `Popen` 一个
+  预览服务,每条**显式**的失败路径上都记得 `kill()`,可 `run_probe` 本身抛出来那一档
+  (超时、回包不是 JSON)没人管 —— 而 setUpClass 抛异常之后 unittest **不调**
+  `tearDownClass`,于是那个服务连同它监听的端口留在后台(第 1 轮审查注入
+  `TimeoutExpired` 实测:服务还活着、端口还在监听)。它在 HEAD 里就是这样,本轮只
+  换了探针的调用方式,所以没碰。要修是起完服务**立刻** `cls.addClassCleanup(...)`
+  —— setUpClass 失败时 unittest 会跑 `doClassCleanups()`,这是它和 `tearDownClass`
+  的唯一区别;那时顺手把各失败路径上那几句手写 `kill()` 一并收成这一处。
+
+- **「有没有漏」按**工作目录归属**数,不按进程名。** 本机常常同时开着好几条 worktree
+  在跑各自的探针,`ps | grep chrome-headless-shell` 数出来的那些多半是别人的 ——
+  审查那一轮就有两条别的 worktree 正在跑 `x_channel_probe.mjs`。判据是
+  `lsof -p <pid> -a -d cwd` 落在本 worktree 下、且 `ppid=1`;前后各取一次差集,
+  本轮 110 条跑完**差集为空**。别去动不归自己的那些。
+
 ## 视觉语言(硬性)
 
 - **一套色板:瓷白 `#F3F5F4` × 墨蓝黑 `#14202B` × 深松绿 `#17604F`。**

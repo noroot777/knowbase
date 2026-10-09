@@ -16,15 +16,13 @@
 // (不装 playwright、不连网、始终无头、临时 profile)。
 //
 //   HEADLESS_SHELL=<bin> node tests/source_post_probe.mjs
-import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, normalize } from "node:path";
+import { launchShell } from "./probe_shell.mjs";
 
 const STATIC = join(dirname(fileURLToPath(import.meta.url)), "..", "kb", "static");
-const BIN = process.env.HEADLESS_SHELL;
-if (!BIN) { console.error("需要 HEADLESS_SHELL=<chrome-headless-shell 路径>"); process.exit(2); }
 
 // ── 样本 ─────────────────────────────────────────────────────────────────────
 // 用户截图里那条:正文四段,title 是采集器截出来的那 500 字符(这里整条都在 500 内,
@@ -122,15 +120,7 @@ await new Promise(r => server.listen(0, "127.0.0.1", r));
 const base = `http://127.0.0.1:${server.address().port}`;
 
 // ── 无头浏览器 ───────────────────────────────────────────────────────────────
-const proc = spawn(BIN, ["--headless", "--remote-debugging-port=0", "--disable-gpu",
-                         "--hide-scrollbars", "--window-size=1440,1000", "about:blank"],
-                   { stdio: ["ignore", "pipe", "pipe"] });
-const port = await new Promise((res, rej) => {
-  let buf = "";
-  proc.stderr.on("data", d => { buf += d; const m = buf.match(/ws:\/\/127\.0\.0\.1:(\d+)\//); if (m) res(+m[1]); });
-  proc.on("exit", c => rej(new Error(`exit ${c}\n${buf}`)));
-  setTimeout(() => rej(new Error("no devtools port")), 20000);
-});
+const { proc, port } = await launchShell(["--window-size=1440,1000"]);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const ws = new WebSocket(list.find(t => t.type === "page").webSocketDebuggerUrl);

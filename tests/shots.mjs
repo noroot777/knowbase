@@ -5,27 +5,13 @@
 //
 // 每个视图一张:图鉴/搜索/问答/收藏/管道 + 详情抽屉 + 手机导航,
 // 外加两张图谱页(如果 vault 里有产物)。
-import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { launchShell } from "./probe_shell.mjs";
 
-const BIN = process.env.HEADLESS_SHELL;
 const [base, outDir, label = "now"] = process.argv.slice(2);
 mkdirSync(outDir, { recursive: true });
 
-const proc = spawn(BIN, ["--headless", "--remote-debugging-port=0", "--disable-gpu",
-                         "--hide-scrollbars", "--force-color-profile=srgb",
-                         "--window-size=1440,1000", "about:blank"],
-                   { stdio: ["ignore", "pipe", "pipe"] });
-const port = await new Promise((res, rej) => {
-  let buf = "";
-  proc.stderr.on("data", d => {
-    buf += d;
-    const m = buf.match(/ws:\/\/127\.0\.0\.1:(\d+)\//);
-    if (m) res(+m[1]);
-  });
-  proc.on("exit", c => rej(new Error(`headless shell 退出 ${c}\n${buf}`)));
-  setTimeout(() => rej(new Error(`没等到 DevTools 端口\n${buf}`)), 20000);
-});
+const { proc, port } = await launchShell(["--force-color-profile=srgb", "--window-size=1440,1000"]);
 
 const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const ws = new WebSocket(list.find(t => t.type === "page").webSocketDebuggerUrl);
