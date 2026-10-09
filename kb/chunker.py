@@ -56,7 +56,12 @@ def _split_long(para: str) -> list[str]:
     return out
 
 
-def _clean(text: str) -> str:
+def strip_markup(text: str) -> str:
+    """剥掉图片引用和 md 语法噪音,只留可检索的文字。
+
+    **「这一段有没有字」的唯一口径**:chunk 清理完是空的就不产生 chunk,所以
+    「为什么一个 chunk 都没有」也只能问它(见 kb/extract.py 的 body_gap)。
+    """
     text = _IMG_RE.sub("", text)
     text = _LINK_RE.sub(r"\1", text)       # 链接保留文字
     text = re.sub(r"[*_`>#]+", "", text)   # md 标记剥掉
@@ -88,7 +93,7 @@ def split_chunks(body: str) -> list[Chunk]:
 
     def flush():
         nonlocal buf
-        cleaned = _clean(buf)
+        cleaned = strip_markup(buf)
         if cleaned:
             chunks.append(Chunk(seq=len(chunks), heading=buf_head, text=cleaned))
         buf = ""

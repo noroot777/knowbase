@@ -94,7 +94,8 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
                     _extract_pass("存量", ex_stats)
                     # 管道还没走到 extract 阶段:别让卡片停在"running"误导人
                     if ex_stats["ok"] + len(ex_stats["failed_paths"]) \
-                            + len(ex_stats["empty_paths"]) > 0:
+                            + len(ex_stats["empty_paths"]) \
+                            + len(ex_stats["no_text_paths"]) > 0:
                         _state["stages"]["extract"] = {
                             "status": "pending",
                             "detail": f"存量已提取 {ex_stats['ok']} 篇,等索引后做增量"}

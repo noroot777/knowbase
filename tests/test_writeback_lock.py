@@ -143,7 +143,7 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
     def test_the_pipeline_writeback_cannot_recreate_a_file_the_cleanup_deleted(self):
         """同步的并行存量提取走的是另一条路(`_extract_pass`),同样不许重建。"""
         stats = {'ok': 0, 'promo': 0, 'failed_paths': set(),
-                 'empty_paths': set(), 'failures': {}}
+                 'empty_paths': set(), 'no_text_paths': set(), 'failures': {}}
         seen, item = self.a_writeback_racing_a_cleanup(
             lambda: pipeline_stages._extract_pass('存量', stats))
         self.assert_the_cleanup_stuck(seen, item)
@@ -173,7 +173,7 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         ep, pb = self.script('extract_parallel'), self.script('promo_backfill')
         args = argparse.Namespace(limit=0, writeback=True)
         stats = {'ok': 0, 'promo': 0, 'failed_paths': set(),
-                 'empty_paths': set(), 'failures': {}}
+                 'empty_paths': set(), 'no_text_paths': set(), 'failures': {}}
         for i, (label, runner, where, model, back) in enumerate((
                 ('kb extract --writeback', lambda: cli.cmd_extract(args),
                  extract, 'extract_with_llm', 'writeback_extraction'),

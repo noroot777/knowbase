@@ -472,13 +472,96 @@ def refresh_content_hash(conn, doc_path: str) -> None:
     conn.execute("UPDATE documents SET content_hash=? WHERE path=?", (h, doc_path))
 
 
+# ── 「这一篇没有正文」的两档 ────────────────────────────────────────────────────
+# 都是 store.doc_body() 返回空串,但下一步完全不同,所以不能合成一句话:
+#   NO_BODY_EMPTY  md 正文自己就是空的 —— 多半是抓取失败/转载 stub 留下的壳,
+#                  重抓原文有机会补上,该进「需回填」清单。
+#   NO_BODY_NO_TEXT md 正文有内容,只是一个文字都没有(整篇是一张长海报图、
+#                  一张图里套着的表格、纯嵌入块)。chunker 剥掉图片引用之后
+#                  不剩字,于是一个 chunk 都不产生。**回填脚本救不了它** ——
+#                  重抓回来还是同一张图,内容在像素里。
+# 不分档的后果实测过:2026-06-29 那篇「阿里硬核少年技术节」是一张 1080x7355
+# 的活动海报,正文容器里 1 个 <img>、0 个字。它被当成「正文为空,需回填」整整
+# 半个月,每一轮同步重报一次、把 extract 阶段标红,而回填每次都在白跑。
+NO_BODY_EMPTY = "empty"
+NO_BODY_NO_TEXT = "no_text"
+
+
+def body_gap(path: str, body: str) -> str:
+    """正文为空时回答「空成哪一档」;正文非空返回空串。
+
+    **判据是「md 正文照 chunker 那套规则剥完还剩不剩字」,不是「md 正文是不是
+    空的」,也不是「有没有图片」。** 用的就是 chunker 自己那个 strip_markup ——
+    「为什么一个 chunk 都没有」只能由决定 chunk 存不存的那条规则来回答,另写一份
+    必然漂。按图片特判同样不行:图里套着的表格、纯嵌入块是同一种形态。
+
+    剥完**还剩字**却一个 chunk 都没有是第三种形态(正文标题里的字被 chunker
+    当成小节标题、小节正文清空之后整段丢掉了):那是**真有文字**,落终态等于
+    把看得见的内容藏起来、从此不再提取 —— 一律按最保守的 EMPTY 办(继续进
+    「需回填」清单,维持本档出现之前的行为)。读不到文件同理落 EMPTY。
+
+    **「空没空」要在剥掉阅读装饰之后问,整个判定只认 normalize_body 之后那份
+    正文。** 索引看到的就是它(`scanner.Doc.body`),所以「为什么一个 chunk
+    都没有」也只能问它;拿装饰前的原文判空,等于这一个函数的两半各用一份口径
+    —— 而 `wikilib.linkify_doc` **对正文为空的壳子照样追加图谱尾区**,于是
+    「什么都没有」被那行 `<!-- kb-graph -->` 顶成非空、落进 no_text 终态:
+    一篇真的需要回填的空文章从此不再提醒、也不再提取(2026-10-09 第 2 轮审查
+    实测,真走一遍 linkify_doc 的空壳 pending=[]、no_body_hash 等于
+    content_hash)。图片那一档不受影响:尾区剥掉之后 `![](…)` 还在。
+    """
+    if body.strip():
+        return ""
+    from kb.chunker import strip_markup
+    from kb.scanner import normalize_body, parse_frontmatter
+    try:
+        raw = (VAULT_ROOT / path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return NO_BODY_EMPTY
+    _fm, md_body = parse_frontmatter(raw)
+    md_body = normalize_body(md_body)              # 先剥双链与图谱尾区
+    if not md_body.strip():
+        return NO_BODY_EMPTY                       # 真的什么都没有
+    return NO_BODY_EMPTY if strip_markup(md_body).strip() else NO_BODY_NO_TEXT
+
+
+def mark_no_body(conn, path: str, version: str) -> bool:
+    """记下「**这一版**内容确认没有可提取的文字」,让它离开提取队列。
+
+    存的是判定时读到的那份 content_hash,所以这不是永久封死:回填脚本补上正文、
+    用户手改 md、源内容变化都会让 index 写进一个新的 content_hash,下一轮
+    pending_docs 立刻又选得到它(口径见那个查询的 NOT 子句)。
+
+    **判据待在 UPDATE 自己的 WHERE 里,不许在 Python 那边先读一次 content_hash
+    再比。** 判定是在工作线程里做的,落终态在主线程,这中间另一条连接的索引完全
+    可能把这一篇换成一版有正文的内容(提取不持维护锁,这是合法交错)。原来那句
+    `SET no_body_hash = content_hash` 无条件复制当下的版本号,于是终态被盖到了
+    **新**版上:新正文既不提取也不提醒,后续同内容的索引也不会让它回队列
+    (2026-10-09 审查实测:库里正文是真的,而 pending=[]、extracted_at=null、
+    no_body_hash 与新 content_hash 相等)。先读后写在两个线程之间压根不成立 ——
+    SQLite 把写入串行化,判据只有待在写语句里才和这次写入同生共死。
+
+    返回「写进去了没有」:0 行 = 这期间内容换版了,**这一轮不记终态**,
+    也别把新内容排除出队列,下一轮按新版重新判一次。
+    """
+    cur = conn.execute(
+        "UPDATE documents SET no_body_hash = ? WHERE path = ? AND content_hash = ?",
+        (version, path, version))
+    return cur.rowcount > 0
+
+
 def pending_docs(conn, limit: int = 0) -> list:
-    """还没提取过的、需要走 LLM 的文档(pre_tagged 来源除外)。"""
+    """还没提取过的、需要走 LLM 的文档(pre_tagged 来源除外)。
+
+    排掉「这一版内容已经确认没有文字可提取」的那些(见 mark_no_body)。比的是
+    hash 而不是一个标记位:内容一变就自动回到队列。`no_body_hash <> ''` 不能省
+    —— 少了它,万一某篇的 content_hash 也是空串,两个空串相等会把它悄悄排掉。
+    """
     pre_tagged_sources = {s.name for s in SOURCES if s.pre_tagged}
     ph = ",".join("?" * len(pre_tagged_sources))
     sql = f"""
         SELECT path, title, account FROM documents
         WHERE extracted_at IS NULL AND source NOT IN ({ph})
+          AND NOT (no_body_hash <> '' AND no_body_hash = content_hash)
         ORDER BY published DESC
     """
     rows = conn.execute(sql, list(pre_tagged_sources)).fetchall()

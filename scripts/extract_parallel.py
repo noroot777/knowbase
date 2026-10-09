@@ -8,7 +8,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from kb import store
-from kb.extract import (extract_with_llm, pending_docs, save_extraction,
+from kb.extract import (NO_BODY_NO_TEXT, body_gap, extract_with_llm,
+                        mark_no_body, pending_docs, save_extraction,
                         writeback_extraction)
 
 WORKERS = 6
@@ -19,10 +20,33 @@ def main():
     todo = pending_docs(conn, 0)
     print(f"[extract-p] 待提取 {len(todo)} 篇, {WORKERS} 并发", flush=True)
 
-    # 预取正文,worker 不碰数据库
+    # 预取正文,worker 不碰数据库。空正文在这儿就筛掉:拿空串去调 LLM 必然
+    # 产出一份只凭标题编的判定,还要按 token 付钱。两档判定与另外两条路共用
+    # kb.extract 那一份(这个脚本自称与 `kb extract --writeback` 等价)。
     jobs = []
+    empty = no_text = tried = 0
     for row in todo:
-        jobs.append((row["path"], row["title"], store.doc_body(conn, row["path"])))
+        version, body = store.doc_body_version(conn, row["path"])
+        gap = body_gap(row["path"], body)
+        if gap == NO_BODY_NO_TEXT:
+            # 条件 UPDATE:判定期间内容换版了就一行都不写(见 mark_no_body)
+            tried += 1
+            if mark_no_body(conn, row["path"], version):
+                no_text += 1
+            continue
+        if gap:
+            empty += 1
+            continue
+        jobs.append((row["path"], row["title"], body))
+    if tried:
+        # 0 行的那次 UPDATE 也把事务开着了,所以按「试过几次」提交、不按
+        # 「写进去几条」:后面的 tag 回写要先取维护锁,攥着没提交的写事务
+        # 去等锁会把持锁那边卡死(见 CLAUDE.md 「kb.db 的维护互斥锁」锁序那条)
+        conn.commit()
+    if no_text:
+        print(f"[extract-p] 无正文可提取 {no_text} 篇(仅图片等,已记录)", flush=True)
+    if empty:
+        print(f"[extract-p] 正文为空 {empty} 篇(待回填,本轮跳过)", flush=True)
 
     ok = failed = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
