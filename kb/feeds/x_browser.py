@@ -34,7 +34,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from kb.feeds.x_cdp import Chrome, CdpError
+from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 # 连续多少条老推文算"翻到底了"。1 不够:转推带的是原推时间,单条老的很常见。
@@ -470,7 +470,7 @@ def open_login_window(profile: str, chrome_path: str = '') -> str:
     from kb.feeds.x_cdp import find_chrome
     binary = find_chrome(chrome_path)
     os.makedirs(profile, exist_ok=True)
-    if os.path.lexists(os.path.join(profile, 'SingletonLock')):
+    if profile_busy(profile):
         raise XBrowserError('登录窗口已经开着了,请在那个窗口里完成登录')
     try:
         subprocess.Popen(
@@ -503,7 +503,7 @@ def probe(profile: str, chrome_path: str = '', *,
             if problem := cdp_attach.explicit_problem():
                 return False, f'{problem}。{cdp_attach.ENDPOINT_HINT}'
             return False, '没有发现开着远程调试的浏览器。' + cdp_attach.ENABLE_HINT
-    elif os.path.lexists(os.path.join(profile, 'SingletonLock')):
+    elif profile_busy(profile):
         return False, '这个 profile 正被另一个窗口占着(登录窗口还开着?)。关掉它再试'
     try:
         with browser_session(profile, chrome_path, attach=attach) as page:

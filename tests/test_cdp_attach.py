@@ -199,14 +199,18 @@ class ParseEndpointTests(unittest.TestCase):
     def test_unparsable_values_are_none(self):
         """**认不出一律返回 None,绝不抛。** 它的调用方是面板每次刷新都要走的
         那条判断,抛出去就是一个 500:`urlsplit(...).port` 对 `:not-a-port` 和
-        `:65536` 都抛 `ValueError`(2026-10-09 审查实测两个接口双双 500)。
+        `:65536` 都抛 `ValueError`(2026-10-09 审查实测两个接口双双 500),而
+        `urlsplit` **自己**对 `ws://[::1`(IPv6 少一个右方括号)也抛 —— 只圈那几个
+        取值的写法等于把判据定在「哪一步会抛」上(第 2 轮审查实测照旧 500)。
         """
         for text in ('', '   ', 'not-a-port', 'ws://nohost', 'ftp://127.0.0.1:9222',
                      'ws://127.0.0.1/devtools',
                      'ws://127.0.0.1:not-a-port',       # 端口不是数字
                      'ws://127.0.0.1:65536',            # 越界
                      'ws://127.0.0.1:0', '127.0.0.1:0', '127.0.0.1:65536',
-                     '127.0.0.1:-1', '0'):
+                     '127.0.0.1:-1', '0',
+                     'ws://[::1', 'ws://[::1]extra:9222',   # 地址自己拆不开
+                     'http://[::1', 'ws://[::1:9222'):
             with self.subTest(text=text):
                 self.assertIsNone(A.parse_endpoint(text))
 

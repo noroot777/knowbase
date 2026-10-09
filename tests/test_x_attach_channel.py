@@ -199,9 +199,14 @@ class BadEndpointTests(ChannelBase):
     判断躺在「面板每次刷新都走一遍」的那条路上(`readiness` →
     `configuration_error`):2026-10-09 审查实测 `/api/intake/social` 和
     `/api/intake/social/x-channel` 双双 500,大V观点那一页压根打不开。
+
+    **`ws://[::1` 是同一个病的第三种形态**:抛的是 `urlsplit` 自己,而第 1 轮只把
+    那几个取值圈进了 `try` —— 两个接口照旧 500(第 2 轮审查实测)。所以这张名单
+    里两类都要有,判据是「认不出就返回 None」,不是「哪一步会抛」。
     """
 
-    BAD = ('ws://127.0.0.1:not-a-port', 'ws://127.0.0.1:65536')
+    BAD = ('ws://127.0.0.1:not-a-port', 'ws://127.0.0.1:65536',
+           'ws://[::1', 'http://[::1')
 
     def test_a_malformed_endpoint_keeps_the_panel_open(self):
         self.settings(ATTACH)
@@ -238,6 +243,10 @@ class BadEndpointTests(ChannelBase):
         self.assertFalse(ready)
         self.assertIn(cdp_attach.ENDPOINT_ENV, detail)
         self.assertIn('1-65535', detail)
+        # 这条结论里**整条带着**那份指引,而面板的「下一步」装的正是同一句话 ——
+        # 所以前端那一下必须按内容去重(探针第 10 节那三项)。前提钉在这里:哪天
+        # 后端改成只给原因、不拼指引,那三项就成了无源之水。
+        self.assertIn(cdp_attach.ENDPOINT_HINT, detail)
 
 
 class LoginEndpointTests(ChannelBase):

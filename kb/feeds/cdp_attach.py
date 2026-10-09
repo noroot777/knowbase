@@ -156,21 +156,27 @@ def parse_endpoint(text: str) -> Endpoint | None:
     500:`urlsplit(...).port` 对 `:not-a-port` 和 `:65536` 都抛 `ValueError`,
     于是「环境变量填错了」这件小事会让整个大V观点的订阅接口打不开(2026-10-09
     审查实测 `/api/intake/social` 与 `/api/intake/social/x-channel` 双双 500)。
+
+    **`urlsplit` 自己也要圈进来,不能只圈那几个取值。** 它对
+    `ws://[::1`(IPv6 少一个右方括号)当场抛 `ValueError`,那两个接口照旧 500
+    —— 只挡取值的写法等于把判据定在「哪一步会抛」上,而那取决于标准库的实现
+    (2026-10-09 第 2 轮审查实测)。整段一律「认不出就返回 None」。
     """
     value = (text or '').strip()
     if not value:
         return None
     if '://' in value:
-        parts = urlsplit(value)
         try:
+            parts = urlsplit(value)
             port = parts.port or (80 if parts.scheme == 'http' else 0)
-        except ValueError:                 # 端口不是数字,或者越界
+            host = parts.hostname or ''
+        except ValueError:                 # 地址拆不开,或者端口不是数字/越界
             return None
-        if parts.scheme not in ('ws', 'http') or not parts.hostname:
+        if parts.scheme not in ('ws', 'http') or not host:
             return None
         if not _ok_port(port):
             return None
-        return Endpoint(parts.hostname, port, parts.path or '', f'{ENDPOINT_ENV} 指定')
+        return Endpoint(host, port, parts.path or '', f'{ENDPOINT_ENV} 指定')
     host, _, tail = value.rpartition(':')
     try:
         port = int(tail)

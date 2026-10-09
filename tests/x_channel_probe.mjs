@@ -394,6 +394,34 @@ check("状态行说的是这一档缺什么,不是桥接",
       await evalJs(`document.getElementById('source-x-state').textContent`));
 check("「打开登录窗口」在这一档上压根不出现(它属于独立 profile 那一块)",
       !await shown("#source-x-login-btn"));
+// 「检查连接」返回的 detail 已经把原因和地址写法指引拼在一起了(真后端
+// `x_browser.probe` 就是 `f'{problem}。{ENDPOINT_HINT}'`),而「下一步」那行装的
+// 正是同一条指引 —— 原来检查那一下只改状态行、不碰「下一步」,于是同一句话在同
+// 一屏上连着显示两遍(2026-10-09 第 2 轮审查截图 `02-check-endpoint-error.png`)。
+// 去重按**内容**判,所以这一项数的是它在整块面板上出现几次。
+const hintTimes = async () => Number(await evalJs(
+  `(() => { const t = document.getElementById('source-xchan').textContent;
+            const n = ${JSON.stringify(NEXT_STEP.attach)};
+            let i = 0, at = 0;
+            while ((at = t.indexOf(n, at)) >= 0) { i++; at += n.length; }
+            return i; })()`));
+checkReply = { ready: false,
+               detail: `KB_CDP_ENDPOINT 填的地址认不出来：ws://127.0.0.1:65536。${NEXT_STEP.attach}` };
+await clickAt("#source-x-check");
+await until(`document.getElementById('source-x-state').textContent.includes('认不出来')`, 20000);
+check("检查结论里带着指引时,「下一步」不再并排写第二遍",
+      (await evalJs(`document.getElementById('source-x-next').textContent`)) === "",
+      await evalJs(`document.getElementById('source-x-next').textContent`));
+check("整块面板上那条指引只出现一次", (await hintTimes()) === 1, String(await hintTimes()));
+// 反过来钉一边:结论里没有那条指引时「下一步」照旧要显示 —— 否则一个
+// 「检查完就把下一步清空」的实现也能过,而那是把真有用的那句话丢掉。
+checkReply = { ready: false, detail: "连不上那个浏览器" };
+await clickAt("#source-x-check");
+await until(`document.getElementById('source-x-state').textContent.includes('连不上')`, 20000);
+check("结论里没有指引时,「下一步」照旧显示",
+      (await evalJs(`document.getElementById('source-x-next').textContent`))
+        .includes("chrome://inspect"),
+      await evalJs(`document.getElementById('source-x-next').textContent`));
 // 这一档的拒绝文案不许建议他换档 —— 他要的登录态就在自己那个浏览器里。
 // 按钮看不见,所以走 JS 入口兜底那条路(真实来法:键盘/脚本)。
 await evalJs(`openXLoginWindow(); true`);

@@ -234,23 +234,57 @@ class Chrome(Session):
         return self
 
     def __exit__(self, *_exc) -> None:
-        if self.proc and self.proc.poll() is None:
-            try:
-                # 让它自己把 profile 存盘。这一下同样不许无限阻塞:它跑在
-                # `__exit__` 里,卡住就是连收尾都回不来。
-                self._send('Browser.close', deadline=time.monotonic() + 5)
-                self.proc.wait(timeout=10)
-            except (OSError, subprocess.TimeoutExpired):
-                self.proc.kill()
-                self.proc.wait(timeout=5)
-        for fd in (self._r, self._w):
-            if fd >= 0:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-        self._r = self._w = -1
-        self.proc = None
+        """收尾一定做完:关浏览器这一步**怎么失败都不许把后面那几步跳过**。
+
+        原来是「发 `Browser.close` → `wait`」裹在一个
+        `except (OSError, subprocess.TimeoutExpired)` 里,而 `_post` 带上 deadline
+        之后写不动报的是 `CdpError`(写出错的 `OSError` 也在那儿翻成了它)——
+        于是异常从关闭路径冒出去,后面的 `kill`/`wait`、关那两个 fd、
+        `self.proc = None` 一步都没执行。**留下的不是用户能看见并关掉的登录窗口,
+        是一个还活着的无头浏览器**,而它攥着 profile 的 `SingletonLock`:下一次
+        「检查连接」被那把锁挡住、报的是「登录窗口还开着?关掉它再试」,再起一次
+        也被目录占用挡住 —— 这条通道从此用不了,而用户没有任何窗口可关
+        (2026-10-09 第 2 轮审查拿真浏览器实测:`SIGSTOP` 停住它、灌满管道,
+        `__exit__` 抛 `CdpError` 之后进程还活着、两个 fd 都还开着、锁还在,
+        `SIGCONT` 恢复运行也不自愈)。`__enter__` 起不来时兜底走的也是这条路,
+        所以同一个缺口在启动失败那一侧一模一样。
+        """
+        try:
+            self._shutdown()
+        finally:
+            for fd in (self._r, self._w):
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            self._r = self._w = -1
+            self._buf = b''
+            self.proc = None
+
+    def _shutdown(self) -> None:
+        """先好好说一次,不行就 kill。**两步都有界,而且都不往外抛。**
+
+        `Browser.close` 值得先试一次 —— 它会让浏览器把 profile 存盘,而登录态
+        就在那里面;但一个卡住的浏览器连这条命令都收不下,那时唯一有意义的事是
+        把它结束掉。`kill` 之后仍然等不到也不抛:我们这头的 fd 马上要关,它那端
+        跟着收到 EOF,最坏留下一个正在退出的进程 —— 而抛出去的代价是连 fd 都
+        不关、`proc` 也不复位(见 `__exit__` 那条注释)。
+        """
+        proc = self.proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            self._send('Browser.close', deadline=time.monotonic() + 5)
+            proc.wait(timeout=10)
+            return
+        except (CdpError, EOFError, OSError, subprocess.TimeoutExpired):
+            pass
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
     # ── 传输 ────────────────────────────────────────────────────────────────
 
@@ -302,9 +336,50 @@ class Chrome(Session):
         return json.loads(raw)
 
 
+def profile_busy(profile: str) -> bool:
+    """这个 profile 目录此刻是不是**真的**被一个活着的浏览器占着。
+
+    判据不是「`SingletonLock` 在不在」。那个链接是 Chrome 的 ProcessSingleton
+    留下的,内容正是 `<主机名>-<pid>`;**它崩了、或者被我们 kill 掉,链接就留在
+    原处**,而 Chrome 自己也是读这个 pid、发现死了就把锁抢过来(2026-10-09 实测:
+    优雅退出之后链接没了;SIGKILL 之后链接还在、指着那个已经死掉的 pid,下一次
+    启动照样成功并把链接改写成自己的 pid)。
+
+    **只看文件在不在的后果是把用户堵死**:收尾哪一次没能优雅关闭(浏览器卡住,
+    只剩 kill 这一条路 —— 见 `Chrome._shutdown`),「检查连接」和「打开登录窗口」
+    就一起报「登录窗口还开着,关掉它再试」,而**根本没有窗口可关**,这条通道从此
+    没有任何出路(同一轮审查实测)。采集那一侧压根不看这个文件,所以只有这两处
+    被堵 —— 它们偏偏是用户唯一能自救的两个入口。
+
+    规则只有一句:**链接指着一个活着的 pid 才叫占着**,别的形态(没有这个文件、
+    它不是链接、链接内容看不懂)一律不是占用的证据,照常去启动 —— 真有另一个
+    活着的实例时由 Chrome 自己仲裁,而那种情况下这个 pid 本来就是活的、上面
+    那条规则已经答对了。不设「看不懂就当占着」的特例:那是在没有证据的时候
+    堵用户唯一的两个自救入口,正是这条判据要改掉的毛病。
+    """
+    try:
+        target = os.readlink(os.path.join(profile, 'SingletonLock'))
+    except OSError:
+        return False                       # 没有这个锁,或者它压根不是个链接
+    pid = target.rpartition('-')[2]
+    return pid.isdigit() and _alive(int(pid))
+
+
+def _alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True                        # 在,只是不归我们这个用户管
+    return True
+
+
 def _launch_hint(profile: str, err: Exception) -> str:
     """起不来的原因里,只有一种是用户当场能处置的:profile 正被别的窗口占着。"""
-    if os.path.lexists(os.path.join(profile, 'SingletonLock')):
+    if profile_busy(profile):
         return ('浏览器 profile 正被另一个窗口占用。请关掉之前打开的登录窗口再试'
                 f'(目录:{profile})')
     return f'浏览器启动失败:{err}'
