@@ -68,6 +68,21 @@ BYTES_PRE = '<pre>' + ''.join(
     '<div data-block="true"><span data-text="true">' + ln + '</span></div>'
     for ln in ["sample = 'a&#160;b&#8203;c&#65279;d'",
                'assert [ord(c) for c in sample] == ' + BYTES_ORDS]) + '</pre>'
+# **组中间整行只有零宽字符时它是数据,不是占位符。** 下面这段三引号字符串里
+# 第二、三行各只有一个零宽码点(U+200B / U+FEFF)。逐块判「整行是不是只有零宽」
+# 的那一版把它们清成空行 —— 代码照旧 `compile()` 得过、围栏也在,只有**执行
+# 输出**看得出来(2026-10-10 第 2 轮审查的不拦项:接口那条路原样保留两个码点,
+# 这条路删掉了它们)。**和组边界那一道的区别就是位置**:`PAD_PRE` 里零宽在
+# 首尾(那只能是 Draft.js 的占位符),这里在中间(那只能是内容)。
+# 三个常量就地定义:源码里写出这几个看不见的字符会让文件本身带上它们。
+LF, Z, B = chr(10), chr(0x200B), chr(0xFEFF)
+GAP_ORDS = '[8203, 65279]'
+GAP_CODE = ('gap = """before' + LF + Z + LF + B + LF + 'after"""' + LF
+            + 'assert [ord(c) for c in gap if ord(c) > 127] == ' + GAP_ORDS)
+GAP_PRE = '<pre>' + ''.join(
+    '<div data-block="true"><span data-text="true">' + ln + '</span></div>'
+    for ln in ['gap = """before', '&#8203;', '&#65279;', 'after"""',
+               'assert [ord(c) for c in gap if ord(c) > 127] == ' + GAP_ORDS]) + '</pre>'
 
 # Draft.js 的真实形状:每个段落一个 `[data-block="true"]`,文字包在
 # `[data-text="true"]` 里,表情是一个带 alt 的 `<img>`(twemoji),配图单独
@@ -113,6 +128,8 @@ ARTICLE_HTML = f'''<!doctype html><meta charset="utf-8"><title>Article</title>
       {PAD_PRE}
       <div data-block="true"><span data-text="true">下面那段里有三个看不见的字符。</span></div>
       {BYTES_PRE}
+      <div data-block="true"><span data-text="true">下面那段里有两行只有零宽字符。</span></div>
+      {GAP_PRE}
     </div>
   </div>
 </div>'''
@@ -304,6 +321,23 @@ class DomTests(unittest.TestCase):
         code = got.split(chr(10), 1)[1].rsplit(chr(10), 1)[0]
         exec(compile(code, '<extracted>', 'exec'), {})   # 动过就 AssertionError
 
+    def test_a_whole_line_of_zero_width_inside_code_is_data(self):
+        """**后果先断言**:读回来那段代码**跑一遍**,里面那句 `assert` 得过。
+
+        组**中间**整行只有零宽码点时它是三引号字符串里的数据;只有组**边界**上
+        的那种才是 Draft.js 的占位空块(`PAD_PRE` 那条钉的就是边界那一道)。
+        **位置是唯一分得开它们的证据** —— 逐块无条件清掉的那一版在这里红,而
+        `compile()`、围栏、边界那几条照旧全绿:值变了,只有执行输出看得出来
+        (2026-10-10 第 2 轮审查的不拦项)。
+        """
+        self.open('article.html')
+        blocks = json.loads(self.page.eval(x_article._READ_JS))['blocks']
+        got = next((b for b in blocks if 'gap = ' in b), '')
+        self.assertEqual(chr(96) * 3 + LF + GAP_CODE + LF + chr(96) * 3, got,
+                         f'组中间那两行零宽被当成占位符清掉了:{got!r}')
+        code = got.split(LF, 1)[1].rsplit(LF, 1)[0]
+        exec(compile(code, '<extracted>', 'exec'), {})   # 清掉了就 AssertionError
+
     def test_an_inline_code_span_does_not_fence_the_paragraph(self):
         """**反过来钉一边**:段落里插一个行内 `<code>` 不许把整段包成代码块。
 
@@ -347,7 +381,7 @@ class DomTests(unittest.TestCase):
         self.open('article.html')
         snap = json.loads(self.page.eval(x_article._READ_JS))
         blocks = snap['blocks']
-        self.assertEqual(20, len(blocks), f'零宽占位块不该成段:{blocks}')
+        self.assertEqual(22, len(blocks), f'零宽占位块不该成段:{blocks}')
         self.assertEqual('第二段正文独立成段。', blocks[1])
         self.assertEqual('第三段\n换行之后还在同一段里。', blocks[3])
         self.assertEqual('第四段。', blocks[4], 'display:none 的辅助节点不进正文')
@@ -364,7 +398,7 @@ class DomTests(unittest.TestCase):
         self.assertIn('🙂', got['body'])
         self.assertIn(f'![]({PHOTO})', got['body'])
         self.assertEqual('X书签保存Skill x Teamily', got['title'])
-        self.assertEqual(20, len(got['body'].split('\n\n')))
+        self.assertEqual(22, len(got['body'].split('\n\n')))
 
     # ── 时间线的长文卡片 ────────────────────────────────────────────────────
 

@@ -162,28 +162,61 @@ def needs_article(entry: dict, *, links_only: bool = False) -> bool:
     return bool(entry.get(HINT)) or not lead_text(body)
 
 
+def _rows(value) -> list:
+    """上游给的「一串东西」。**非列表一律当空。**
+
+    这些字段全来自第三方回包,而 `for x in <标量>` 抛的是 `TypeError` —— 它会从
+    `render` 一路漏出 `fetch`、漏出 `fill`(只认 `ArticleUnavailable`)、再漏出
+    `harvest` 的账号隔离(只认 `XBrowserError`/`CdpError`),于是**后面的账号
+    一个都不同步**(2026-10-10 第 2 轮审查实测的正是这条链,只是入口换成了
+    `media_info`)。这里当空,结果就只是「这一处认不出来」:那张图跳过、那一块
+    跳过,**整篇正文照旧补得到**。
+    """
+    return value if isinstance(value, list) else []
+
+
 def _media_urls(article: dict) -> dict[str, str]:
-    """`media_id` → 图片地址。文章里的图是按 id 引用的,地址在另一张表里。"""
+    """`media_id` → 图片地址。文章里的图是按 id 引用的,地址在另一张表里。
+
+    **每一层都明确判类型,不靠 `or {}` 兜底。** `x or {}` 只对**假值**生效,
+    而第三方回包给的是**非空**的错类型:`media_info` 是一个非空列表时
+    `(… or {}).get(…)` 当场 `AttributeError: 'list' object has no attribute
+    'get'`(2026-10-10 第 2 轮审查的最小受控输入就是它)。认不出的那一条跳过去,
+    和上面那条 `isinstance(media, dict)` 是同一条口径 —— 这篇文章的正文块是好的,
+    末态该是「正文照旧补到、只是那张图少一个地址」。
+    """
     out = {}
-    for media in article.get('media_entities') or []:
+    for media in _rows(article.get('media_entities')):
         if not isinstance(media, dict):
             continue
-        url = ((media.get('media_info') or {}).get('original_img_url') or '').strip()
+        info = media.get('media_info')
+        if not isinstance(info, dict):
+            continue
+        url = str(info.get('original_img_url') or '').strip()
         if url and (mid := str(media.get('media_id') or '')):
             out[mid] = url
     return out
 
 
 def _entity_image(block: dict, entities: dict, media: dict) -> str:
-    """atomic 块指向的那张图。认不出来就返回空串(这一块整个跳过)。"""
-    ranges = block.get('entityRanges') or []
+    """atomic 块指向的那张图。认不出来就返回空串(这一块整个跳过)。
+
+    三层嵌套各判一次类型,理由同 `_media_urls`:`data` 或 `mediaItems` 里的
+    元素换成别的类型时,这一块跳过去就是了,不该把整篇文章连同后面的账号带掉。
+    """
+    ranges = _rows(block.get('entityRanges'))
     if not ranges or not isinstance(ranges[0], dict):
         return ''
     value = entities.get(str(ranges[0].get('key')))
     if not isinstance(value, dict) or value.get('type') != 'MEDIA':
         return ''
-    for item in (value.get('data') or {}).get('mediaItems') or []:
-        if url := media.get(str((item or {}).get('mediaId') or '')):
+    data = value.get('data')
+    if not isinstance(data, dict):
+        return ''
+    for item in _rows(data.get('mediaItems')):
+        if not isinstance(item, dict):
+            continue
+        if url := media.get(str(item.get('mediaId') or '')):
             return url
     return ''
 
@@ -195,7 +228,7 @@ def _entities(content: dict) -> dict:
     if isinstance(raw, dict):
         return {str(k): v for k, v in raw.items()}
     out = {}
-    for row in raw or []:
+    for row in _rows(raw):
         if isinstance(row, dict) and 'key' in row:
             out[str(row['key'])] = row.get('value')
     return out
@@ -260,7 +293,7 @@ def render(article: dict) -> str:
             out.append(_fence(body))
         code.clear()
 
-    for block in content.get('blocks') or []:
+    for block in _rows(content.get('blocks')):
         if not isinstance(block, dict):
             continue
         kind = str(block.get('type') or 'unstyled')
@@ -308,14 +341,37 @@ def fetch(url: str, *, timeout: float = 0.0) -> dict | None:
         # 毫无关系,照原样带出去只会把人指到一个改不出结果的设置上。
         raise ArticleUnavailable(
             f'长文接口没答复:{re.split(r"[;；]", str(e))[0].strip()}') from None
-    except (OSError, ValueError, UnicodeError) as e:
+    except (OSError, ValueError, UnicodeError, RecursionError) as e:
+        # `RecursionError` 不是 `ValueError`(它是 `RuntimeError` 的子类):一份
+        # 嵌套几千层的回包让 `json.loads` 抛的正是它,而它原来从这道 except
+        # 旁边漏过去、一路把整批采集带掉(2026-10-10 实测 3000 层当场复现)。
         raise ArticleUnavailable(f'长文接口的回包读不懂:{e}') from None
     if not isinstance(payload, dict) or not isinstance(payload.get('tweet'), dict):
         raise ArticleUnavailable('长文接口的回包里没有推文')
     article = payload['tweet'].get('article')
     if not isinstance(article, dict) or not article:
         return None                       # 确定的结论:这条推文没有长文
-    body = render(article)
+    try:
+        body = render(article)
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError) as e:
+        # **兜底,不是承重的那一道。** 承重的是 `_rows` 和每一层的 `isinstance`
+        # (见 `_media_urls`):认得出的结构异常就地降级 —— 那张图跳过、那一块
+        # 跳过,**整篇正文照旧补得到**。这一道管没想到的形状:`render` 解析的
+        # 全部输入都来自第三方回包,而「上游还能给出什么形状」是一张**不会收敛**
+        # 的名单,少想一种就是本轮那场事故(异常漏出 `fill`、漏出 `harvest` 的
+        # 账号隔离,**后面的账号一个都不同步**)。归到这儿之后那一条只是扣留:
+        # 手里有浏览器就走后路,没有就本轮不入库、水位留在原处、下一轮重试。
+        #
+        # **只圈这几类数据形状异常,不写 `except Exception`**,更不在采集外层
+        # 笼统吞 —— 后者会把浏览器会话中断那类真该往上报的故障一起吃掉。
+        #
+        # **如实记一笔:今天这一道是冗余带。** `json.loads` 产得出的类型只有
+        # dict/list/str/数字/bool/None 这几种,逐处类型检查补全之后构造不出能
+        # 走到这里的输入(定点注入实测 0 红,补一条**契约**用例才红)。留着它
+        # 的理由是构造上的:`render` 的形状约束不该取决于一张逐处枚举的名单,
+        # 而代价只有「这一条扣留 + 下一轮重试」—— 和整批中断差着一个量级。
+        raise ArticleUnavailable(
+            f'长文接口的回包解析不了:{type(e).__name__}: {e}') from None
     title = str(article.get('title') or '').strip()
     # **只有标题不算补到了。** 要补的是正文,而空正文一旦落库就**再也改不回来**
     # (`put_items` 是 `ON CONFLICT DO NOTHING`),下一轮重叠重抓也救不回来 ——
@@ -439,7 +495,11 @@ def browser_fetch(session, url: str, *, wait: float | None = None,
         # `at` 同真同假(两者都从同一份 `path` 算),分成两处是因为它们回答的
         # 不是一个问题:`at` 回答形状(还在文章页吗),这里回答身份(是哪一篇)。
         if seen == ('article', want):
-            blocks = [str(b) for b in (snap.get('blocks') or []) if str(b).strip()]
+            # `_rows`:非列表一律当空。同一条口径的另一侧 —— 后路恰恰是
+            # 「接口挂了」那一刻走的,它自己也漏出 `TypeError` 的话,同一场
+            # 事故只是换了个位置(整批账号一起带掉)。当空 = 这一页还没渲染
+            # 出正文,交给下面那道超时。
+            blocks = [str(b) for b in _rows(snap.get('blocks')) if str(b).strip()]
             if blocks:
                 body = '\n\n'.join(blocks)[:MAX_CHARS].strip()
                 title = str(snap.get('title') or '').strip()
