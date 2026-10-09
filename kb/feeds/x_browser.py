@@ -79,13 +79,29 @@ _COLLECT_JS = r'''
     const text = norm(art.querySelector('[data-testid="tweetText"]')?.innerText);
     // 作者块的第一行是显示名,后面跟着 @handle 和时间,只取第一行。
     const who = norm(art.querySelector('[data-testid="User-Name"]')?.innerText).split('\n')[0];
+    // **长文卡片**:X 把推文里那条 `/i/article/<id>` 链接藏起来、改渲染成一张
+    // 卡片,所以「写了一句介绍 + 一张长文卡片」的推文在 `tweetText` 上看不出
+    // 任何异样 —— 正文非空,补全那一步的另两条判据都不命中,整篇文章就这么漏
+    // 掉了。卡片本身在 DOM 里仍然是一条链接,把它读出来当信号(**地址不用它**,
+    // 见 `x_article.HINT`:文章页地址由推文自己的 URL 推出来)。
+    // **排掉引用推里面的那一张**(`div[role="link"]` 是引用容器):那是别人的
+    // 文章,按它去补就是把别人的正文记成这条推文的内容。排错了也只是回到漏掉
+    // 的现状,而收错了是污染 —— 这个方向上宁可多排。
+    const quote = art.querySelector('div[role="link"]');
+    const card = [...art.querySelectorAll('a[href*="/article/"]')]
+                   .find(a => !(quote && quote.contains(a)));
+    const art_url = card ? card.href : '';
     const id = m[2];
     const prev = S.seen.get(id);
     // 同一条推文会在多次滚动里重复出现;文本偶尔首次渲染不全(折叠/懒加载),
-    // 所以后出现的更长文本覆盖前一次。
+    // 所以后出现的更长文本覆盖前一次。卡片同理可能这一次没渲染出来,所以它
+    // **只补不清**:认过一次就记着。
     if (!prev || (text && text.length > (prev.text || '').length)) {
       S.seen.set(id, {id, author: m[1], name: who, datetime: time.getAttribute('datetime'),
-                      text, context: ctx, url: `https://x.com/${m[1]}/status/${id}`});
+                      text, context: ctx, url: `https://x.com/${m[1]}/status/${id}`,
+                      article: art_url || (prev && prev.article) || ''});
+    } else if (art_url && prev && !prev.article) {
+      prev.article = art_url;
     }
   }
   return JSON.stringify({articles, parsed, items: [...S.seen.values()]});
@@ -217,9 +233,14 @@ def _entry(item: dict) -> dict | None:
     # 转推/引用的上下文留在正文开头一行:它决定了这条是不是本人的观点,
     # 而 feed_items 里没有地方放这个标记。
     body = f'> {context}\n\n{text}' if context and not _is_pinned(context) else text
-    return {'url': item['url'], 'title': (text or f"{name} 的动态")[:500],
-            'body': body, 'author': name, 'published': published,
-            'content_kind': 'post'}
+    out = {'url': item['url'], 'title': (text or f"{name} 的动态")[:500],
+           'body': body, 'author': name, 'published': published,
+           'content_kind': 'post'}
+    # 「这条带着长文卡片」的信号,只在采集期间有意义:`x_article.fill` 用完就把
+    # 它摘掉(`_strip_hint`),不会进 `feed_items`。
+    if item.get('article'):
+        out[x_article.HINT] = str(item['article'])
+    return out
 
 
 def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:

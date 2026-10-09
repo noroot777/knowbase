@@ -13,7 +13,7 @@ import yaml
 from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
 from kb.maintenance import maintenance_lock
-from kb.feeds import translate, x_channels
+from kb.feeds import translate, x_article, x_channels
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_state import _state, _stage
 from kb.scanner import parse_frontmatter
@@ -35,8 +35,41 @@ def _fetch_with_budget(source, settings, scope, collect_deadline):
     deadline = time.monotonic() + SOURCE_SECONDS
     if deadline > collect_deadline:
         raise CollectionBudgetExceeded
-    return fetch_source(source, settings, unconditional=scope.ranged,
-                        deadline=deadline, collect_deadline=collect_deadline)
+    return _fill_articles(source, settings, fetch_source(
+        source, settings, unconditional=scope.ranged,
+        deadline=deadline, collect_deadline=collect_deadline))
+
+
+def _fill_articles(source, settings, result):
+    """桥接通道的 X 长文补全。
+
+    另三条通道在**预取**里就补过了(`x_channels.prefetch` → `harvest` →
+    `x_article.fill`,那边手里还有一个浏览器会话可以当后路);桥接这条走的是
+    HTTP + etag 那一套、压根不经过预取,所以要在这儿单独接一次 —— 不接的话它
+    的长文只存下那条文章链接当正文,而 `put_items` 是 `ON CONFLICT DO NOTHING`,
+    下一轮重抓也更新不了它,那一篇永久只有一个链接。
+
+    **补不到的那几条本轮不入库,而且这一轮的 etag / modified 一个都不存**:
+    存了的话下一轮的条件请求命中 304、整份 feed 一条都不返回,被扣下的那几条
+    再也没有第二次机会 —— 桥接没有水位可以留在原处,不存 validators 是它这条
+    路上唯一等价的扣留手段。`resolved_url` 照旧存着:它不参与条件请求的判定
+    (那一步要的是 etag/modified),清掉只会让下一轮多付一次重定向。
+
+    只认 `links_only`(见 `x_article.needs_article`):桥接给的是推文文本,长文
+    在那儿的形态只有"正文就是展开后的文章地址"一种。按空正文也问一遍的话,一轮
+    几十条纯图推文各买一次询问,换回来的都是"它没有长文"。
+    """
+    entries, validators = result
+    if not entries or not x_channels.supports_channels(source['kind']) \
+            or not reg.uses_bridge(source) \
+            or x_channels.channel_of(settings) != x_channels.BRIDGE:
+        return result
+    kept, note = x_article.fill(entries, links_only=True)
+    if not note:
+        return kept, validators
+    held = dict(validators)
+    held.update({'etag': '', 'modified': '', 'note': note})
+    return kept, held
 
 
 def _within_history(source, entries):

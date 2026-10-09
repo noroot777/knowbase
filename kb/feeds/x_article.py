@@ -96,25 +96,49 @@ def lead_text(body: str) -> str:
     return _TCO.sub(' ', text).strip()
 
 
-def needs_article(entry: dict) -> bool:
-    """这一条要不要去问一次长文。两条,各管一种形态:
+# 时间线采集给这条推文挂的「它带着一张长文卡片」信号(`x_browser._COLLECT_JS`
+# 从 DOM 里读那张卡片的链接)。**它只是信号,地址不用它** —— 文章页地址由推文
+# 自己的 URL 推出来(见 `article_page`),"有没有长文"的结论由接口/页面那一侧给。
+# 所以信号误判的代价只是一次白跑的询问(答复正好是"它没有长文"、照旧入库),
+# 绝不会把别人的文章记到这条推文头上。
+HINT = 'article_hint'
+
+
+def _strip_hint(entry: dict) -> dict:
+    """摘掉那个内部信号键 —— 它不进 `feed_items`:`put_items` 把**整份条目**
+    哈希成 `content_hash`,多一个只有采集期间才有意义的键会让同一条推文在两条
+    通道上算出不同的哈希。"""
+    return {k: v for k, v in entry.items() if k != HINT} if HINT in entry else entry
+
+
+def needs_article(entry: dict, *, links_only: bool = False) -> bool:
+    """这一条要不要去问一次长文。三条,各管一种形态:
 
     ①**正文里明写着一条 `x.com/i/article/<id>`** —— 这是确定的信号,feedgrab 的
       产物正文就是它(推文的 t.co 被展开成了文章地址),哪怕作者还写了别的话。
-    ②**推文自己一个字都没说** —— 浏览器通道那边 X 把那条链接藏起来改渲染成卡片,
-      `tweetText` 压根不存在,于是我们手里只剩一条空正文。纯图、纯视频推文也满足
-      它,那是故意的:没有别的办法分辨,而问一次的答复正好把它们分开(返回
-      None = 它没有长文)。
+    ②**时间线上看见了那张长文卡片**(`HINT`)—— 浏览器通道那边 X 把链接藏起来
+      改渲染成卡片,所以「写了一句介绍 + 一张卡片」的推文正文**非空**,①②之外
+      没有任何信号;而卡片本身在 DOM 里是一条 `/i/article/<id>` 或
+      `/<handle>/article/<id>` 链接,读出来当信号正好。
+    ③**推文自己一个字都没说** —— 同样是卡片那条路,只是作者没写介绍,于是我们
+      手里只剩一条空正文。纯图、纯视频推文也满足它,那是故意的:没有别的办法
+      分辨,而问一次的答复正好把它们分开(返回 None = 它没有长文)。
 
     **不拿「正文里有 t.co 短链」当信号**:那可能是图片、引用推、任意外链,按它
-    发请求等于给一大半推文各买一次调用,而换回来的多半是"它没有长文"。代价是
-    一条「写了话 + 带长文卡片」的推文在浏览器通道上补不到正文(那边看不见链接)
-    —— 已知的一道缝,记在这儿备查。
+    发请求等于给一大半推文各买一次调用,而换回来的多半是"它没有长文"。
+
+    `links_only` 是桥接通道那一档:它拿到的是桥接实例给的推文文本,长文在那儿
+    的形态**只有** ① 一种(正文就是展开后的文章地址),而 ③ 在那条路上多半是纯
+    图推文 —— 一轮几十条各买一次询问换不回东西,所以只认 ①。
     """
     if not entry.get('url'):
         return False
     body = entry.get('body') or ''
-    return bool(_ARTICLE_LINK.search(body)) or not lead_text(body)
+    if _ARTICLE_LINK.search(body):
+        return True
+    if links_only:
+        return False
+    return bool(entry.get(HINT)) or not lead_text(body)
 
 
 def _media_urls(article: dict) -> dict[str, str]:
@@ -218,8 +242,18 @@ def fetch(url: str, *, timeout: float = 0.0) -> dict | None:
         return None                       # 确定的结论:这条推文没有长文
     body = render(article)
     title = str(article.get('title') or '').strip()
-    if not body and not title:
-        raise ArticleUnavailable('长文接口给了一篇空文章')
+    # **只有标题不算补到了。** 要补的是正文,而空正文一旦落库就**再也改不回来**
+    # (`put_items` 是 `ON CONFLICT DO NOTHING`),下一轮重叠重抓也救不回来 ——
+    # 口径同 `browser_fetch` 那条「判不准一律抛」。三种形态都归这儿:回包被截断、
+    # `content.blocks` 缩成空、或者真是一篇空文章。抛出去之后手里有浏览器的
+    # 两条通道会接着走后路,两条都不行时这一条本轮不入库、水位留在原处。
+    #
+    # **不许退回「标题正文同时为空才算」**:那一版在"有标题、没正文"这个形状上
+    # 返回成功,于是 `fill` 留下一条空正文、水位照常推进,而那一篇永久空着。
+    if not body:
+        raise ArticleUnavailable(
+            f'长文接口只给了标题「{title[:40]}」、没有正文' if title
+            else '长文接口给了一篇空文章')
     return {'title': title, 'body': body}
 
 
@@ -251,7 +285,9 @@ _ARTICLE_PATH = re.compile(r'^(https://(?:x|twitter)\.com/[A-Za-z0-9_]{1,20})/st
 #
 # 正文容器认 `[data-contents="true"]` 里的 `[data-block="true"]`(Draft.js 的块),
 # 所以**段落边界是按块拿的、不是切 innerText** —— 实测 47 块、2752 字纯正文,
-# 比整页 innerText 少掉 234 字的导航、作者简介和「升级 Premium」。
+# 比整页 innerText 少掉 234 字的导航、作者简介和「升级 Premium」。**块内按子节点
+# 顺序拼**,理由见 `textOf` 上面那段:行内表情是 `<img>`,一块里既有文字又有图
+# 是常态。
 #
 # 标题取 read view 里排除正文之后**字号最大的那个叶子**(实测标题 34px、其余
 # ≤15px),拿不到按 read view 的第一行 —— 实测两者是同一个值,互为冗余。
@@ -260,12 +296,36 @@ _READ_JS = r'''(() => {
   const rich = document.querySelector('[data-testid="twitterArticleRichTextView"]');
   const read = document.querySelector('[data-testid="twitterArticleReadView"]');
   const root = document.querySelector('[data-contents="true"]');
+  // 一块的内容按**子节点顺序**拼出来,`<img>` 分两种:带 alt 的是行内表情
+  // (X 把 emoji 渲染成 twemoji 图片,alt 就是那个字符本身),按 alt 还原;
+  // 没有 alt 的是真·配图,写成 markdown 图片。
+  //
+  // **不许写成「这一块里有 img 就只要图片」**:段落里插一个表情图是极常见的
+  // 形态(emoji 全是这样),那一版会把**整段文字丢掉**只留一张小图,而且照样
+  // 报成功 —— 空/缺字的正文一旦落库就改不回来(`put_items` 是 DO NOTHING)。
+  // 也不能用 `innerText`:它压根不包含 img 的 alt,表情会静默消失。
+  const textOf = (node) => {
+    let s = '';
+    for (const n of node.childNodes) {
+      if (n.nodeType === 3) { s += n.nodeValue; continue; }
+      if (n.nodeType !== 1) continue;
+      if (getComputedStyle(n).display === 'none') continue;
+      const tag = n.tagName.toLowerCase();
+      if (tag === 'br') { s += '\n'; continue; }
+      if (tag === 'img') {
+        const alt = (n.getAttribute('alt') || '').trim();
+        s += alt || (n.src ? '![](' + n.src + ')' : '');
+        continue;
+      }
+      s += textOf(n);
+    }
+    return s;
+  };
   const blocks = [];
   if (root) for (const b of root.querySelectorAll('[data-block="true"]')) {
-    const img = b.querySelector('img');
-    const txt = (b.innerText || '').trim();
-    if (img && img.src) blocks.push('![](' + img.src + ')');
-    else if (txt) blocks.push(txt);
+    const txt = textOf(b).replace(/[\u200b\u200c\u200d\ufeff]/g, '')
+                         .replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
+    if (txt) blocks.push(txt);
   }
   let title = '', big = 0;
   if (read) {
@@ -358,7 +418,8 @@ def _one(entry: dict, session) -> dict | None:
     return browser_fetch(session, entry['url'])
 
 
-def fill(entries: list[dict], *, session=None) -> tuple[list[dict], str]:
+def fill(entries: list[dict], *, session=None,
+         links_only: bool = False) -> tuple[list[dict], str]:
     """把这一批里的长文正文补上。返回 (留下的条目, 没补全的原因)。
 
     **原因非空 = 这一轮没补全**,调用方把它并进 `incomplete`,于是水位留在原处、
@@ -366,17 +427,19 @@ def fill(entries: list[dict], *, session=None) -> tuple[list[dict], str]:
     那几条**本轮不入库** —— 入库了下一轮的重试也更新不了它们,留着等于白等。
 
     `session` 是一个还活着的 CDP 会话(`browser` / `attach` 两条通道手里有),
-    接口不可用时拿它走后路。给 None 就只有接口这一条路。
+    接口不可用时拿它走后路。给 None 就只有接口这一条路(桥接、feedgrab)。
+    `links_only` 见 `needs_article`:桥接那一档只认正文里明写的文章地址。
     """
     if not API and (session is None or not BROWSER_FALLBACK):
-        return entries, ''
+        return [_strip_hint(e) for e in entries], ''
     kept, missed, fails = [], 0, 0
     for entry in entries:
-        if not needs_article(entry) or fails >= _GIVE_UP_AFTER:
-            if fails >= _GIVE_UP_AFTER and needs_article(entry):
+        want = needs_article(entry, links_only=links_only)
+        if not want or fails >= _GIVE_UP_AFTER:
+            if fails >= _GIVE_UP_AFTER and want:
                 missed += 1
                 continue
-            kept.append(entry)
+            kept.append(_strip_hint(entry))
             continue
         try:
             got = _one(entry, session)
@@ -390,6 +453,6 @@ def fill(entries: list[dict], *, session=None) -> tuple[list[dict], str]:
             entry = {**entry,
                      'title': (got['title'] or entry.get('title') or '')[:500],
                      'body': f"{lead}\n\n{got['body']}".strip() if lead else got['body']}
-        kept.append(entry)
+        kept.append(_strip_hint(entry))
     note = (f'有 {missed} 条推文的长文正文没取到,留到下次同步再试' if missed else '')
     return kept, note
