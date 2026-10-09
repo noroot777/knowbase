@@ -61,3 +61,8 @@ playwright-cli --session kb-subscription-reader close
 - `output/playwright/subscription-reader-tablet.png`：1024 × 900 平板。
 - `output/playwright/subscription-reader-mobile.png`：390 × 844 手机。
 - `output/playwright/subscription-reader-results.log`、`subscription-management-results.log`、`subscription-regressions.log`：检查结果。
+
+## 第 1 轮审查修复
+
+专注阅读跨断点和新内容挤出已加载窗口时的阅读状态问题已修复，补充边界检查见 `design/subscription-reading-fix-r1.md`。
+原轮验证产物已由审查回合移至其证据目录的 `pre-existing-artifacts/`；本轮复测证据在新修复报告指定的仓库外目录保存。

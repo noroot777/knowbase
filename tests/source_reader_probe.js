@@ -8,11 +8,9 @@ async page => {
   page.on('pageerror', onError);
   const base = new URL(page.url()).origin;
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto(base + '/?reading-qa=' + Date.now() + '#rss');
-  await page.waitForFunction(() => sourceData?.sources.length > 1 && sourceKind === 'rss');
-  const sourceIds = await page.evaluate(() => sourceData.sources.slice(0, 2).map(source => source.id));
-  const sourceCount = await page.evaluate(() => sourceData.sources.length);
-  const rssOverview = await page.evaluate(() => sourceData);
+  const rssOverview = await (await page.request.get(base + '/api/intake/rss')).json();
+  const sourceIds = rssOverview.sources.slice(0, 2).map(source => source.id);
+  const sourceCount = rssOverview.sources.length;
   const chinese = [
     '阅读不是收集更多链接，而是为下一次行动积累更好的判断。',
     '一、为长期思考留出空间',
@@ -67,8 +65,7 @@ async page => {
   await page.route('**/api/intake/*/items?*', handler);
   await page.route('**/api/intake/rss', overviewHandler);
   try {
-    await page.evaluate(() => loadSourceModule(false));
-    await page.locator('#source-view-items').click();
+    await page.goto(base + '/?reading-qa=' + Date.now() + '#rss');
     await page.waitForFunction(() => sourceReaderItem?.key === 'reading-1' && !!document.querySelector('.source-entry.is-selected'));
     check('自动选中第一篇可阅读内容', await page.locator('.source-entry.is-selected').count() === 1);
     check('默认显示中文译文和原文标题', await page.locator('#source-reader-body').textContent() === first.body_zh

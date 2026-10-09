@@ -1,4 +1,4 @@
-let sourceReaderItem = null, sourceReaderOriginal = false;
+let sourceReaderItem = null, sourceReaderOriginal = false, sourceReaderContext = '';
 const sourceReaderKeys = new Map();
 
 function sourceItemReadable(item) {
@@ -53,6 +53,7 @@ function updateSourceReadingView() {
 function resetSourceReader(message = '') {
   sourceReaderItem = null;
   sourceReaderOriginal = false;
+  sourceReaderContext = '';
   $('source-reader-content').hidden = true;
   $('source-reader-empty').hidden = false;
   $('source-reader-empty').querySelector('h3').textContent = message || '在这里安心阅读';
@@ -67,18 +68,28 @@ function resetSourceReader(message = '') {
   highlightSourceEntry();
 }
 
+function sourceReadingContext() {
+  return JSON.stringify([sourceKind, $('source-q').value.trim(), $('source-filter').value]);
+}
+
 function syncSourceReader() {
   const key = sourceReaderKeys.get(sourceKind);
+  const retained = sourceReaderItem && sourceReaderItem.key === key && sourceItemReadable(sourceReaderItem)
+    && sourceReaderContext === sourceReadingContext() && sourceTotal > 0
+    && !sourceRows.some(item => item.key === key) ? sourceReaderItem : null;
   const selected = sourceRows.find(item => item.key === key && sourceItemReadable(item))
-    || sourceRows.find(sourceItemReadable);
+    || retained || sourceRows.find(sourceItemReadable);
   if (!selected) {
     resetSourceReader(sourceRows.length ? '内容正在准备中' : '没有可阅读的内容');
     $('source-items-count').textContent = `${sourceTotal} 条`;
     return;
   }
   if (sourceReaderItem?.key === selected.key) {
+    const scroll = $('source-reader-scroll').scrollTop;
     sourceReaderItem = selected;
+    sourceReaderContext = sourceReadingContext();
     renderSourceReader();
+    $('source-reader-scroll').scrollTop = scroll;
     highlightSourceEntry();
   } else {
     readSourceItem(selected.key, false);
@@ -98,6 +109,7 @@ function readSourceItem(key, focus = true) {
   if (!item || !sourceItemReadable(item) || sourceView !== 'items') return;
   sourceReaderItem = item;
   sourceReaderOriginal = false;
+  sourceReaderContext = sourceReadingContext();
   sourceReaderKeys.set(sourceKind, key);
   $('source-reader').style.display = '';
   $('source-reader-content').hidden = false;
@@ -134,9 +146,10 @@ function renderSourceReader() {
   $('source-reader-original').setAttribute('aria-pressed', String(original));
   $('source-reader-translated').classList.toggle('on', !original);
   $('source-reader-translated').setAttribute('aria-pressed', String(!original));
-  $('source-reader-position').textContent = `${position + 1} / ${readable.length}`;
+  $('source-reader-position').textContent = position < 0 ? '继续阅读' : `${position + 1} / ${readable.length}`;
+  $('source-reader-position').title = position < 0 ? '当前文章暂不在已加载列表中，加载更多可重新定位。' : '当前已加载的可阅读内容';
   $('source-reader-prev').disabled = position <= 0;
-  $('source-reader-next').disabled = position >= readable.length - 1;
+  $('source-reader-next').disabled = position < 0 || position >= readable.length - 1;
   const note = [item.content_kind === 'summary' ? '当前收录的是订阅摘要，阅读全文请打开原文。' : '',
     text.refetching || text.retranslating || text.partial ? sourceItemStatus(item) + '。' : ''].filter(Boolean).join('');
   $('source-reader-note').hidden = !note;
@@ -157,6 +170,7 @@ function toggleSourceOriginal() {
 function stepSourceReader(direction) {
   const readable = sourceRows.filter(sourceItemReadable);
   const position = readable.findIndex(item => item.key === sourceReaderItem?.key);
+  if (position < 0) return;
   const next = readable[position + direction];
   if (!next) return;
   readSourceItem(next.key);
@@ -172,7 +186,8 @@ function updateSourceExpandButton() {
 }
 
 function expandSourceReader() {
-  $('source-workbench').classList.toggle('is-focused');
+  const focused = $('source-workbench').classList.toggle('is-focused');
+  if (focused) $('source-workbench').classList.add('has-mobile-reader');
   updateSourceExpandButton();
 }
 
@@ -180,6 +195,6 @@ function backToSourceList() {
   $('source-workbench').classList.remove('has-mobile-reader', 'is-focused');
   updateSourceExpandButton();
   const entry = [...$('source-list').querySelectorAll('[data-source-key]')].find(node => node.dataset.sourceKey === sourceReaderItem?.key);
-  entry?.focus({ preventScroll: true });
+  (entry || $('source-list-pane')).focus({ preventScroll: true });
   if (window.matchMedia('(max-width:760px)').matches) document.querySelector('.source-stream').scrollIntoView({ block: 'start' });
 }
