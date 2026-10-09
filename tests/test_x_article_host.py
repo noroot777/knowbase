@@ -20,15 +20,18 @@
 地址照旧摘得掉、判据① 照旧为真** —— 其中英文冒号那条是"`:` 故意不在禁止集里"
 那个取舍的射程,把它加进禁止集的实现会在那里红。
 
-**这道闸分三层,所以另两族管的是另外两头**:
+**这道闸分四层,所以另三族管的是另外几头**:
 ①`PunctuationLeadInTests` —— 两档合成一档(一律禁"URL 内部字符紧贴")会让
   `新文章...<地址>` 这种**真**地址被自己前面那个标点挡住;
 ②`QuestionMarkLeadInTests` —— 分了档也不够,`?` 和 `#` 在①档里还得按上下文判
-  (`_nested`),一律拒的话 `读过这篇吗?<地址>` 同样被挡住(第 4 轮审查那条)。
-两种漏认的末态逐字相同:判据① 一条都不命中,那条链接本身当成正文入库,而
+  (`_nested`),一律拒的话 `读过这篇吗?<地址>` 同样被挡住(第 4 轮审查那条);
+③`OuterPathCharTests` —— 那个上下文判据往左追外层起点时的字符集少认一个合法
+  路径字符,外层起点就追不回来,别人那条参考地址被从中间剪断(第 5 轮审查那条)。
+①②两种漏认的末态逐字相同:判据① 一条都不命中,那条链接本身当成正文入库,而
 `DO NOTHING` 之下重复同步也补不回来(2026-10-09 实测,各两种前导 × 两条保留
-通道)。两族里都反过来钉着:放行正文标点不许顺带放行别人家的地址,嵌套的 X 文章
-地址照旧一个字不动、一次询问都不发。
+通道);③是反方向的同一种永久损坏 —— 删掉的是作者明确附带的外部地址。三族里都
+反过来钉着:放行正文标点不许顺带放行别人家的地址、嵌套的 X 文章地址照旧一个字
+不动、一次询问都不发,而加宽那个集合也不许把句读后面的真地址一起关掉。
 
 **另拆一个文件**是因为 `test_x_article_gap.py` 已经 603 行,再加一族越过仓库那条
 700 行上限;摆盘(`FeedgrabRound`、④族那两个 round helper)仍共用它那一份。
@@ -41,7 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb.feeds import x_article
+from kb.feeds import sync, x_article
 from kb.feeds.x_article import lead_text, needs_article
 from tests.test_x_article import OLD_WATER
 from tests.test_x_article_gap import FULL, ArticlePathFormTests
@@ -54,6 +57,8 @@ CANON = 'https://x.com/Example/article/10001'
 # 审查那份证据里的外部参考地址:`fx` 后面那一段逐字就是
 # `twitter.com/<handle>/article/<id>`,所以它是最容易被当成起点的一种。
 MIRROR = 'https://fxtwitter.com/Example/article/10001'
+# **别人**那篇长文的规范地址,用来摆"嵌在外层 URL 的片段/查询里"那一族。
+OTHER = 'https://x.com/Other/article/20002'
 
 
 class HostBoundaryTests(FeedgrabRound):
@@ -432,6 +437,137 @@ class QuestionMarkLeadInTests(FeedgrabRound):
         self.assertEqual([], summary['errors'])
         self.assertEqual(1, summary['added'])
         self.assertEqual(TODAY, self.water(s['id']))
+
+
+class OuterPathCharTests(FeedgrabRound):
+    """第 5 轮审查那条:外层 URL 的**合法路径字符**不许让 `_nested` 失效。
+
+    `_nested` 回答的是"紧贴这个 `?`/`#` 左边那一段是不是一条 URL",办法是往左吃
+    一段 URL 合法字符再找起手式 —— 所以**那个字符集少认一个合法字符,外层起点就
+    追不回来**:`_nested` 误答"不是嵌套",于是别人家片段/查询里那条 X 文章地址被
+    当成这条推文自己的地址,`_drop` 把它删掉,别人那条参考地址从中间被剪断。
+    `put_items` 的 `DO NOTHING` 让这种删除**永久固定**,重复同步也补不回来。
+
+    原来这个集合复用②档的禁止集 `_URL_CHARS` 再补一个 `:`,于是 RFC 3986 里
+    `(` `)` `;` `$` `\'` `,` `!` `*` 这八个合法路径字符一个都不认(2026-10-09 实测:
+    `…/docs(v2)#<别人的文章地址>` 在库里和导出的 md 里都只剩 `…/docs(v2)#`,而
+    `added=1`、`errors=[]`、`partial=[]`、水位照常推进、一行提示都没有)。
+
+    **两头都要钉**:只验"外部地址还在"的话,一个压根不摘地址的实现也能全绿;而
+    把这个集合加宽**加过头**(比如把汉字也收进来)会反过来让句读紧贴的真地址被判
+    成嵌套 —— 那是漏认、空正文永久固定,所以反钉那条用例一条都不许少。
+    """
+
+    LEAD = '我写了一篇新文章：'
+    feedgrab_round = ArticlePathFormTests.feedgrab_round
+    browser_round = ArticlePathFormTests.browser_round
+
+    # 八个合法路径字符各一条,外加三条本来就判得对的作对照(普通片段、路径里的
+    # `:`、百分号编码的中文路径)—— 后三条让这套用例分得出"少认了几个字符"和
+    # "整道判据没了"。
+    OUTER = [
+        ('https://example.org/docs(v2)#' + OTHER, '括号'),
+        ('https://example.org/path;v=2?' + OTHER, '分号'),
+        ('https://example.org/$docs#' + OTHER, '美元号'),
+        ("https://example.org/a'q'#" + OTHER, '单引号'),
+        ('https://example.org/a,b?' + OTHER, '逗号'),
+        ('https://example.org/a!b#' + OTHER, '叹号'),
+        ('https://example.org/a*b?' + OTHER, '星号'),
+        ('https://example.org/go(1)/x?' + OTHER, '括号在路径段里'),
+        ('https://example.org/p#' + OTHER, '普通片段'),
+        ('https://example.org/a:b?' + OTHER, '路径里的冒号'),
+        ('https://example.org/%E6%96%87%E6%A1%A3#' + OTHER, '百分号编码的路径'),
+    ]
+
+    def check_feedgrab(self, ref):
+        """真跑一轮 feedgrab,**连导出的那篇 md 一起核**。
+
+        报告那份证据两处都看了:库里那一行和 vault 里那篇 —— 后者才是用户真正
+        读到的东西,而它是 `sync.export` 另写一遍的,少钉一处就少一个消费方。
+        """
+        summary, row, calls, s = self.feedgrab_round(f'{self.LEAD}{CANON}\n参考：{ref}')
+        got = row.get('body') or ''
+        self.assertIn(ref, got, '别人那条参考地址被从中间剪断了')
+        self.assertNotIn(CANON, got, '而真的那条照旧要摘掉')
+        self.assertIn(FULL, got, '这条推文自己的全文还是要补上')
+        self.assertEqual('X书签保存Skill x Teamily', row.get('title'),
+                         '标题回落成「某某 的动态」= 压根没去补过')
+        self.assertEqual([], summary['errors'])
+        self.assertEqual(1, summary['added'])
+        self.assertEqual([], summary['partial'])
+        self.assertEqual(TODAY, self.water(s['id']))
+        self.assertEqual(1, len(calls.urls), '只问这条推文自己那一次')
+        sync.export('social')
+        mds = list(sync.VAULT_ROOT.rglob('*.md'))
+        self.assertEqual(1, len(mds), mds)
+        md = mds[0].read_text(encoding='utf-8')
+        self.assertIn(ref, md, '导出的 md 里那条参考地址也被剪断了')
+        self.assertIn(FULL, md)
+
+    def test_parentheses_in_the_outer_path_keep_the_reference_intact(self):
+        """审查报告第一组输入:`…/docs(v2)#<别人的文章地址>`。"""
+        self.check_feedgrab('https://example.org/docs(v2)#' + OTHER)
+
+    def test_a_semicolon_in_the_outer_path_keeps_the_reference_intact(self):
+        """审查报告第二组输入:`…/path;v=2?<别人的文章地址>`。"""
+        self.check_feedgrab('https://example.org/path;v=2?' + OTHER)
+
+    def test_the_browser_channel_keeps_it_intact_too(self):
+        """另一条保留通道,而且是**没有卡片信号**那一档。"""
+        ref = 'https://example.org/docs(v2)#' + OTHER
+        got, calls = self.browser_round(
+            f'{self.LEAD}https://x.com/example/article/9\n参考：{ref}')
+        text = got['entries'][0]['body']
+        self.assertIn(ref, text, '别人那条参考地址被从中间剪断了')
+        self.assertNotIn('/example/article/9', text, '而真的那条照旧要摘掉')
+        self.assertIn(FULL, text)
+        self.assertEqual('', got['incomplete'], '补到了,这一轮算读全了')
+        self.assertNotEqual(OLD_WATER, got['watermark'])
+        self.assertEqual(1, len(calls.urls))
+
+    def test_every_legal_path_character_still_hides_the_nested_address(self):
+        """逐个形态直测两个消费方:正文一个字不许动,判据① 也不许为真。
+
+        后半句是同一道缺口的另一半后果 —— 误认之后每条推文白买一次询问,而答复
+        会是**别人那篇文章**的全文,真写进库里就是把别人的内容记成这条推文的观点。
+        """
+        for url, why in self.OUTER:
+            with self.subTest(why=why):
+                body = f'参考：{url}'
+                self.assertEqual(body, lead_text(body))
+                self.assertFalse(needs_article({'url': TWEET, 'body': body}))
+
+    def test_widening_the_run_does_not_swallow_a_real_address(self):
+        """**反过来钉一边**:加宽那个集合不许把句读紧贴的真地址判成嵌套。
+
+        这一族和 `QuestionMarkLeadInTests` 是同一道判据的两个方向:那边要的是
+        "句读后面的真地址认得出",这边要的是"外层 URL 内部的地址认不出"。往这个
+        集合里多塞一个**正文里也会出现**的字符(汉字、空白)就会把前者一起关掉,
+        而那是漏认 = 空正文永久固定。
+        """
+        for lead in ('Have you read this?', '读过这篇吗?', 'What#', '第三节#',
+                     'Really??', 'v1.2?', 'x=1?', '完(1)?', '见[2]#', '算了!?',
+                     '参考https://example.org/说明?', 'https://example.org/doc,'):
+            with self.subTest(lead=lead):
+                self.assertTrue(x_article._first(x_article._ARTICLE_LINK,
+                                                 lead + CANON),
+                                '句读紧贴的是作者自己那条地址')
+                self.assertNotIn(CANON, lead_text(lead + CANON),
+                                 '认出来了就得摘掉')
+
+    def test_a_non_ascii_outer_path_is_a_known_gap(self):
+        """**已知留着的一道缝**,如实钉成当前取舍:非 ASCII 的外层路径。
+
+        汉字加不进那个集合 —— `…/文档#<地址>`(这里)和
+        `参考https://example.org/说明?<地址>`(上一条用例里那个**真**地址)
+        **完全同形**:都是"往左吃到一个汉字就断"。两个方向都是永久损坏,所以这不是
+        "哪个对"的问题;线划在 ASCII 上的理由是它可解释(非 ASCII 不是 URL 的原生
+        形态,浏览器要先百分号编码,而编码之后的写法上一条用例里钉着)。
+        **改方向时这两条用例要一起改**,只改一条就是把另一头静默打开。
+        """
+        body = '参考：https://example.org/文档#' + OTHER
+        self.assertNotIn(OTHER, lead_text(body),
+                         '这一档目前判成"不是嵌套",改了就要一起改反钉那条')
 
 
 if __name__ == '__main__':
