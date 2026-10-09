@@ -14,6 +14,7 @@ import threading
 from copy import deepcopy
 from pathlib import Path
 
+from kb.collectors import active_collector, retry_narrower
 from kb.pipeline_state import (
     STAGES,
     _end_run,
@@ -24,8 +25,10 @@ from kb.pipeline_state import (
     _state,
     load_last_run,
     new_run_id,
+    retry_notes,
 )
 from kb.pipeline_stages import (
+    crawl_channels,
     _run_crawl,
     _run_export,
     _run_extract,
@@ -154,8 +157,12 @@ def _run_refill() -> None:
            failures=fail_items)
 
 
-def retry_failed_plan() -> list[str]:
+def retry_failed_plan(nothing_to_crawl: bool = False) -> list[str]:
     """按上次运行的失败状态编排重试链(面板全局"重试失败项"按钮的后端)。
+
+    `nothing_to_crawl`:上一轮失败的那几个目标现在一个都不用重抓了(它们后来都已
+    成功同步,见 `retry_crawl_scopes`)。这一档不能把 crawl 排进计划 —— 范围是空的,
+    真让它跑,`crawl_channels` 会按"没指定来源"回落到默认采集器,抓的是另一个来源。
 
     - crawl 有账号失败/出错 → 重抓(增量爬取,便宜)
     - export 有失败/出错、或链里重抓过 → 重导出
@@ -184,7 +191,7 @@ def retry_failed_plan() -> list[str]:
                             and _detail("projects").startswith("入库失败"))
 
     plan: list[str] = []
-    if _failed("crawl"):
+    if _failed("crawl") and not nothing_to_crawl:
         plan.append("crawl")
     if _failed("export") or "crawl" in plan:
         plan.append("export")
@@ -216,10 +223,19 @@ def retry_failed_plan() -> list[str]:
     return plan
 
 
-def _run_retry_failed(plan: list[str], crawl_filter: dict | None = None) -> None:
+def _run_retry_failed(plan: list[str], crawl_filter: dict | None = None,
+                      export_filter: dict | None = None) -> None:
+    """crawl 走收窄过的范围,export 走上一轮**原来**那几个来源。
+
+    两份不是同一个:收窄会把"这一轮没有要重抓的"那个来源整个摘掉(摘不掉的话
+    这颗按钮又变成"把全部订阅再抓一遍"),而 export 的失败是它自己那一档 ——
+    一个 crawl 成功、export 失败的来源会跟着被摘掉,它那一步就再也没人重试了。
+    """
     try:
         runners = {"crawl": lambda: _run_crawl(crawl_filter),
-                   "export": lambda: _run_export(crawl_filter),
+                   "export": lambda: _run_export(export_filter
+                                                 if export_filter is not None
+                                                 else crawl_filter),
                    "refill": _run_refill, "index": _run_index,
                    "extract": _run_extract, "projects": _run_projects, "wiki": _run_wiki}
         for stage in plan:
@@ -230,12 +246,75 @@ def _run_retry_failed(plan: list[str], crawl_filter: dict | None = None) -> None
         _end_run()
 
 
+# 上一轮失败的那几条后来都已经不用重抓了。两件事都要说:为什么是空的、以及真想
+# 重抓某一条该走哪个入口 —— 否则用户看到的是一句"上次运行没有失败项",而面板上
+# 明明还显示着上一轮的失败。
+RETRY_NOTHING = ("上一轮失败的那几个来源后来都已成功同步（或已删除、停用），"
+                 "没有要重抓的；要重新抓某一条，请在「我的订阅」里单独同步它")
+
+
+def retry_crawl_scopes(prev: dict) -> list[dict]:
+    """这一轮重试要抓哪几个来源、各抓哪几个目标([] = 一个都不用抓)。
+
+    继承的是上一轮的**来源**(哪几个 channel、上次点名了哪几个目标),范围则按
+    **各来源自己留下的失败名单**逐个收窄(见 `pipeline_state.note_retry_targets`)。
+    每项多一个 `retry` 说明这一项是怎么来的:`targets` = 收窄到了失败的那几个,
+    `all` = 这个来源没法收窄,按原范围重跑。面板那行「本次范围」照它说话。
+
+    **不能用一个全局布尔值管所有来源**:大V整批失败 + RSS 一条逐项失败那一轮,
+    全局开关会让两个来源都按失败项收窄,而整批失败的大V一份名单都没留下 ——
+    收窄成空集,恢复之后点重试它一条也不抓(2026-10-09 第 1 轮审查实测)。
+    """
+    notes = retry_notes(prev)
+    scopes: list[dict] = []
+    for scope in crawl_channels(prev.get("crawl_filter")):
+        targets = None
+        if (note := notes.get(scope["channel"])) is not None:
+            try:
+                narrower = retry_narrower(active_collector(scope["channel"]))
+            except Exception:
+                # 来源名现在认不出来了(改名/退役):按原范围重跑,别让生成计划
+                # 这一步抛到 HTTP 层 —— 那会把同一轮里本该重试的 index/extract
+                # 一起带走(同 `refill_script` 那条"永不抛"的理由)。
+                narrower = None
+            targets = narrower.retry_targets(note) if narrower else None
+        if targets is None:
+            # 这个来源**没留下名单**(整批失败,那时一条订阅都还没被碰到),或者它
+            # 压根报不出名单(公众号的失败是文章级的,`--targets` 是账号级的)——
+            # 两种都只能按原范围重跑:收窄成空集就是"一条也不抓",而它恰恰是最该
+            # 重抓一遍的那个。
+            scopes.append({**scope, "retry": "all"})
+        elif targets:
+            scopes.append({"channel": scope["channel"], "accounts": list(targets),
+                           "retry": "targets"})
+        # 名单是空的:这个来源这一轮没有要重抓的,整个来源都不进这一轮 —— 留着它
+        # 等于"把它的全部订阅再抓一遍",而那正是这颗按钮的老毛病。
+    return scopes
+
+
 def start_retry_failed() -> tuple[bool, str]:
     """一键重试所有失败项。返回 (started, msg);无失败项或已在跑时 False。"""
+    prev = load_last_run() or {}
+    scopes = retry_crawl_scopes(prev)
     plan = retry_failed_plan()
-    crawl_filter = deepcopy((load_last_run() or {}).get("crawl_filter") or {})
+    # 上一轮 crawl 确实失败过,可那几个目标现在一个都不用重抓了:把 crawl 摘出
+    # 计划(范围是空的,真让它跑会按"没指定来源"回落到默认采集器),并在它那张
+    # 卡片上说清为什么 —— 一张绿色的「检查 0/0 个来源」和"这个按钮坏了"长得
+    # 一模一样。
+    crawl_resolved = "crawl" in plan and not scopes
+    if crawl_resolved:
+        plan = retry_failed_plan(nothing_to_crawl=True)
+    export_filter = deepcopy(prev.get("crawl_filter") or {})
+    crawl_filter = deepcopy(export_filter)
+    # 退避是失败自己留下的(最短 1800 秒,见 `sync._save_failure`),手动重试必须
+    # 跳过它 —— 不跳的话失败后半小时内点这颗按钮,唯一该抓的那条被记成
+    # `deferred` 跳过:该抓的不抓,正好和上面那个"不该抓的全抓"凑成一对。
+    crawl_filter["force"] = True
+    if scopes:
+        crawl_filter["channels"] = scopes
+        crawl_filter["channel"] = scopes[0]["channel"]
     if not plan:
-        return False, "上次运行没有失败项,也没有提取积压"
+        return False, RETRY_NOTHING if crawl_resolved else "上次运行没有失败项,也没有提取积压"
     with _lock:
         if _state["running"]:
             return False, "管道已在运行中"
@@ -243,6 +322,9 @@ def start_retry_failed() -> tuple[bool, str]:
         # refill 不是独立卡片,占用 export 那张展示进度。
         card = {s: s in plan for s in STAGES}
         card["export"] = card["export"] or "refill" in plan
+        detail = {s: "" if card[s] else "本次无需重试" for s in STAGES}
+        if crawl_resolved:
+            detail["crawl"] = RETRY_NOTHING
         # 这条也是一次"新的运行":发个新身份,别让它继承上一轮的 id
         # (日报只停自己那一轮,靠的就是这个 id 不复用)。
         _state.update({
@@ -254,9 +336,10 @@ def start_retry_failed() -> tuple[bool, str]:
             "run_kind": "retry",
             "planned_stages": [s for s in STAGES if card[s]],
             "stages": {s: {"status": "pending" if card[s] else "skipped",
-                           "detail": "" if card[s] else "本次无需重试"}
+                           "detail": detail[s]}
                        for s in STAGES},
         })
     _log("重试失败项: " + " → ".join(plan))
-    threading.Thread(target=_run_retry_failed, args=(plan, crawl_filter), daemon=True).start()
+    threading.Thread(target=_run_retry_failed,
+                     args=(plan, crawl_filter, export_filter), daemon=True).start()
     return True, " → ".join(plan)

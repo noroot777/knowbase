@@ -27,6 +27,11 @@ class FeedCollector:
         from kb.feeds.sync import collect
         collect(self.name, scope)
 
+    def retry_targets(self, note):
+        """「重试失败项」要重抓的订阅(见 `kb.collectors.RetryNarrowing`)。"""
+        from kb.feeds.sync import still_failing
+        return still_failing(self.name, note)
+
     def materialize(self):
         from kb.feeds import translate
         from kb.feeds.sync import export

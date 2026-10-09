@@ -15,7 +15,7 @@ from kb.feeds import registry as reg
 from kb.maintenance import maintenance_lock
 from kb.feeds import translate, x_channels
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
-from kb.pipeline_state import _state, _stage
+from kb.pipeline_state import _state, _stage, note_retry_targets
 from kb.scanner import parse_frontmatter
 
 FETCH_WORKERS = 4
@@ -175,6 +175,9 @@ def _save_failure(source, error, summary) -> bool:
         if not _claim_write(c, source):
             return False
         summary['errors'].append({'title': source['name'], 'reason': reason})
+        # 「重试失败项」靠这份身份收窄下一轮的范围(见 `note_retry_targets`)。
+        # 记 id 而不是名字:名字会被改,而改完之后这条订阅还是同一条。
+        summary['failed_ids'].append(str(source['id']))
         c.execute('''UPDATE subscriptions SET last_attempt=?,last_error=?,failures=failures+1,
             retry_at=? WHERE id=?''', (reg.now(),reason,
             time.time() + min(86400, 1800 * 2 ** min(source['failures'], 6)),source['id']))
@@ -208,13 +211,39 @@ def _prefetch_x(kind, sources, settings, scope):
                         should_stop=lambda: bool(_state.get('stop_requested')))
 
 
+def still_failing(kind, note):
+    """上一轮失败的那几条订阅里,现在仍然需要重抓的那些(返回订阅 id)。
+
+    判据**不是** `last_error` 还在不在:改链接时 `save_subscription` 的 reset 会把
+    它连同退避一起清空,照它筛就把「已改正、还没验证过」的那条当成「已经恢复」漏掉
+    —— 用户修完地址点「重试失败项」,那个账号一条都不抓(见 `note_retry_targets`)。
+
+    判据是**那一轮失败之后有没有成功同步过**:`last_success` 比名单的时刻新,说明它
+    后来已经成功了(比如用户在「我的订阅」里单独同步过一次),不必再抓一遍 —— 而改过
+    链接的那条 `last_success` 被 reset 清成了空串,所以它留在名单里。订阅被删掉、
+    停用、或者名单里那个 id 压根不存在时一并摘掉:没有可抓的东西。
+    """
+    at = note.get('at') or ''
+    ids = {str(t) for t in (note.get('targets') or [])}
+    live = []
+    for source in reg.subscriptions(kind):
+        if str(source['id']) not in ids or not source['enabled']:
+            continue
+        if at and source['last_success'] and source['last_success'] > at:
+            continue
+        live.append(str(source['id']))
+    return live
+
+
 def collect(kind, scope):
     started = reg.now()
     sources = [s for s in reg.subscriptions(kind) if s['enabled'] and
                (not scope.targets or str(s['id']) in scope.targets or s['name'] in scope.targets)]
     summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0,
                'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [],
-               'partial': [], 'repointed': 0, 'stopped': False}
+               'partial': [], 'repointed': 0, 'stopped': False,
+               # 这一轮失败的那几条订阅的稳定身份,留给「重试失败项」收窄范围
+               'failed_ids': []}
     settings = reg.get_settings(kind)
     pending, unconfigured_why = [], ''
     for source in sources:
@@ -300,6 +329,16 @@ def collect(kind, scope):
                   (kind,started,reg.now(),json.dumps(summary,ensure_ascii=False)))
         c.execute('DELETE FROM feed_runs WHERE kind=? AND id NOT IN '
                   '(SELECT id FROM feed_runs WHERE kind=? ORDER BY id DESC LIMIT 30)', (kind,kind))
+    # 把这一轮失败的那几条留给「重试失败项」。**一条都没失败也要记**:那份空名单
+    # 本身就是"这个来源这一轮扫完了、没有要重抓的"这句话,而「压根没留下名单」另有
+    # 含义 —— 整批失败,按原范围重跑(见 `note_retry_targets`)。
+    #
+    # 被停掉、或者有订阅因为预算/退避没轮到的那一轮,名单里只有**真失败过**的那几
+    # 条:没轮到的不是失败项,它们照旧按 `last_attempt` 轮转,下一轮常规同步自己会
+    # 补上(水位一个字没动),不该借这颗按钮把整个来源再抓一遍。
+    # 时刻用 `reg.now()`:它要和 `subscriptions.last_success` 比(见 `still_failing`),
+    # 两边必须是同一套格式。
+    note_retry_targets(kind, summary['failed_ids'], reg.now())
     label = f"检查 {summary['checked']}/{len(sources)} 个来源，新增 {summary['added']} 条"
     if summary['deferred']:
         label += f"，{summary['deferred']} 个等待重试"
