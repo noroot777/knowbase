@@ -89,16 +89,27 @@ def _index_pass(args) -> int:
 
 
 def cmd_extract(args) -> int:
-    from kb.extract import (extract_with_llm, pending_docs,
-                            save_extraction, writeback_extraction)
+    from kb.extract import (NO_BODY_NO_TEXT, body_gap, extract_with_llm,
+                            mark_no_body, pending_docs, save_extraction,
+                            writeback_extraction)
     from kb.llm_stages import stage_model
     conn = store.connect()
     todo = pending_docs(conn, args.limit)
     print(f"[extract] 待提取 {len(todo)} 篇 (model={stage_model('extract')})")
-    ok = failed = empty = 0
+    ok = failed = empty = no_text = 0
     for i, row in enumerate(todo, 1):
         body = store.doc_body(conn, row["path"])
-        if not body.strip():
+        # 空正文的两档判定与管道共用 kb.extract 那一份,别在这儿另写一套 ——
+        # 两处各判各的话,命令行跑完不落终态,下一轮管道又把它报成「需回填」
+        gap = body_gap(row["path"], body)
+        if gap == NO_BODY_NO_TEXT:
+            mark_no_body(conn, row["path"])
+            conn.commit()
+            no_text += 1
+            print(f"[{i}/{len(todo)}] SKIP {row['title'][:28]}: 无正文可提取"
+                  f"(仅图片等,已记录;正文补回来会自动重进队列)")
+            continue
+        if gap:
             empty += 1
             print(f"[{i}/{len(todo)}] SKIP {row['title'][:28]}: 正文为空"
                   f"(先把正文补回来再 kb index)")
@@ -124,6 +135,8 @@ def cmd_extract(args) -> int:
     line = f"[extract] 完成: 成功 {ok}, 失败 {failed}"
     if empty:
         line += f", 跳过 {empty}(正文空)"
+    if no_text:
+        line += f", 无正文 {no_text}(仅图片等)"
     print(line)
     conn.close()
     return 0

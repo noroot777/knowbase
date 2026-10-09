@@ -34,7 +34,11 @@ CREATE TABLE IF NOT EXISTS documents (
   -- 软广判定(提取阶段顺带产出,见 kb/extract.py)
   promo_level   TEXT NOT NULL DEFAULT '',  -- '' = 未判定;none/soft/hard
   promo_reason  TEXT NOT NULL DEFAULT '',
-  promo_at      TEXT
+  promo_at      TEXT,
+  -- 「这一版内容里没有可提取的文字」的终态(见 kb/extract.py 的 body_gap)。
+  -- 存的是当时那份 content_hash,不是一个布尔:正文哪天被补回来、或者 md 以
+  -- 任何方式变了,hash 就对不上,这一篇自动回到提取队列。
+  no_body_hash  TEXT NOT NULL DEFAULT ''
 );
 -- idx_documents_promo 在 _migrate_promo 里建(老库先补列才能建索引)
 
@@ -181,6 +185,19 @@ def _migrate_promo(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_no_body(conn: sqlite3.Connection) -> None:
+    """documents 加 no_body_hash 列。幂等(理由同 _migrate_promo:老库只能 ALTER)。
+
+    不建索引:它只在 pending_docs 那一个查询里当过滤条件,而那个查询本来就
+    已经被 extracted_at IS NULL 收窄到几十行。
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(documents)").fetchall()}
+    if "no_body_hash" not in cols:
+        conn.execute(
+            "ALTER TABLE documents ADD COLUMN no_body_hash TEXT NOT NULL DEFAULT ''")
+    conn.commit()
+
+
 def promo_exclude_sql(alias: str = "d") -> str:
     """软广排除子句,检索(kb.search)和枚举(kb.aggregate)共用同一份。
 
@@ -257,6 +274,7 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.executescript(_VEC_SCHEMA)
     _migrate_entities(conn)
     _migrate_promo(conn)
+    _migrate_no_body(conn)
     return conn
 
 

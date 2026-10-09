@@ -472,13 +472,65 @@ def refresh_content_hash(conn, doc_path: str) -> None:
     conn.execute("UPDATE documents SET content_hash=? WHERE path=?", (h, doc_path))
 
 
+# ── 「这一篇没有正文」的两档 ────────────────────────────────────────────────────
+# 都是 store.doc_body() 返回空串,但下一步完全不同,所以不能合成一句话:
+#   NO_BODY_EMPTY  md 正文自己就是空的 —— 多半是抓取失败/转载 stub 留下的壳,
+#                  重抓原文有机会补上,该进「需回填」清单。
+#   NO_BODY_NO_TEXT md 正文有内容,只是一个文字都没有(整篇是一张长海报图、
+#                  纯表格、纯嵌入块)。chunker 的 _clean 把图片引用剥掉之后
+#                  不剩字,于是一个 chunk 都不产生。**回填脚本救不了它** ——
+#                  重抓回来还是同一张图,内容在像素里。
+# 不分档的后果实测过:2026-06-29 那篇「阿里硬核少年技术节」是一张 1080x7355
+# 的活动海报,正文容器里 1 个 <img>、0 个字。它被当成「正文为空,需回填」整整
+# 半个月,每一轮同步重报一次、把 extract 阶段标红,而回填每次都在白跑。
+NO_BODY_EMPTY = "empty"
+NO_BODY_NO_TEXT = "no_text"
+
+
+def body_gap(path: str, body: str) -> str:
+    """正文为空时回答「空成哪一档」;正文非空返回空串。
+
+    判据是 **md 正文有没有东西**,不是「有没有图片」:纯表格、纯嵌入块和纯图片
+    是同一种形态(有内容、剥完不剩字),按图片特判只认得出其中一种。
+
+    读不到文件时返回 EMPTY —— 这是保守的那一边:它会继续进「需回填」清单、
+    不会被落成终态,而终态是会让这一篇从提取队列里消失的。
+    """
+    if body.strip():
+        return ""
+    from kb.scanner import normalize_body, parse_frontmatter
+    try:
+        raw = (VAULT_ROOT / path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return NO_BODY_EMPTY
+    _fm, md_body = parse_frontmatter(raw)
+    return NO_BODY_NO_TEXT if normalize_body(md_body).strip() else NO_BODY_EMPTY
+
+
+def mark_no_body(conn, path: str) -> None:
+    """记下「这一版内容确认没有可提取的文字」,让它离开提取队列。
+
+    存的是**当下那份 content_hash**,所以这不是永久封死:回填脚本补上正文、
+    用户手改 md、源内容变化都会让 index 写进一个新的 content_hash,下一轮
+    pending_docs 立刻又选得到它(口径见那个查询的 NOT 子句)。
+    """
+    conn.execute(
+        "UPDATE documents SET no_body_hash = content_hash WHERE path = ?", (path,))
+
+
 def pending_docs(conn, limit: int = 0) -> list:
-    """还没提取过的、需要走 LLM 的文档(pre_tagged 来源除外)。"""
+    """还没提取过的、需要走 LLM 的文档(pre_tagged 来源除外)。
+
+    排掉「这一版内容已经确认没有文字可提取」的那些(见 mark_no_body)。比的是
+    hash 而不是一个标记位:内容一变就自动回到队列。`no_body_hash <> ''` 不能省
+    —— 少了它,万一某篇的 content_hash 也是空串,两个空串相等会把它悄悄排掉。
+    """
     pre_tagged_sources = {s.name for s in SOURCES if s.pre_tagged}
     ph = ",".join("?" * len(pre_tagged_sources))
     sql = f"""
         SELECT path, title, account FROM documents
         WHERE extracted_at IS NULL AND source NOT IN ({ph})
+          AND NOT (no_body_hash <> '' AND no_body_hash = content_hash)
         ORDER BY published DESC
     """
     rows = conn.execute(sql, list(pre_tagged_sources)).fetchall()
