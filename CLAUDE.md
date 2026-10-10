@@ -3784,6 +3784,41 @@
 
 - 管道跑在 kb-web 进程内,杀 8787 前先 `curl -s http://127.0.0.1:8787/api/pipeline/status` 确认 `"running": false`。
 - server.py / projects.py 改动要重启才生效;kb/static/ 下静态文件每次请求从磁盘读,免重启。
+- **「改了不生效」只是这件事良性的那一半:坏的那一半是同一个进程里新旧两个版本的
+  模块混跑。** kb 里有一批模块是**延迟 import** 的(`kb.feeds.sync` 要等管道真跑一轮
+  crawl 才进来),而 Python 不热加载 —— 于是服务运行期间一次 `git checkout` 就够:
+  2026-10-10 实测,kb-web **10-09 21:23** 起(那一刻 main 还是 `e16c6fa`,
+  `x_channels` 里**没有** `fill_bridge`),**07:08** 换成 `1d2adef`,**08:03** 第一次
+  跑同步时 `kb.feeds.sync` 才被 import、从磁盘读到**新版**并调用
+  `x_channels.fill_bridge` —— 而 `x_channels` 早在启动后不久就被
+  `registry.get_settings` 拉进 `sys.modules`,是**旧版**。七条 RSS 订阅于是一起报
+  `module 'kb.feeds.x_channels' has no attribute 'fill_bridge'`,各自被
+  `sync._save_failure` 推进最长 24 小时的退避,而面板上显示的是「连接失败」。
+  **那句话指不到任何跟订阅、跟网络有关的东西**,人只会去查源站。
+  **定位的铁证是 `__pycache__` 的时间戳**:`sync.cpython-311.pyc` 是 10-10 08:03:51
+  新编译的(和 `x_article*.pyc` 同一秒),而 `x_channels.cpython-311.pyc` 停在
+  **10-09 14:48** —— 那次 import 链因为它已在 `sys.modules` 里而直接跳过了它。
+  **出路只有重启**(进程边界,同 bge-m3 那条);重启之后退避还挂着,得手动点一次
+  同步(或 `POST /api/intake/{kind}/sync` 带 `source_ids`,它自带 `force`)。
+- **所以 `./kb.sh` 在服务已经起着时会提示一句「代码比跑着的进程新」**
+  (`code_stale`,挂在 `web_start` 的「已在」分支和 `web_status` 两处 —— 前者覆盖
+  `sync`/`collect`/`export`/`index`/`extract` 全部命令,也就是这个 bug 真正发作的
+  那条路;后者让 `./kb.sh status` 那一屏看得见)。判据是 **pidfile 比 `$ROOT/kb` 下
+  任何一个 `.py` 旧**:`daemonize` 写 pidfile 的那一刻就是进程启动那一刻,而别处只
+  删它、不写它。**只看 `.py`** —— `kb/static/` 下的 js/css 每次请求从磁盘读,算进来
+  就是每改一行样式催一次重启,那种提示两天就没人看了;`scripts/` 和 `collector/`
+  同理不算,它们每次都是新起的子进程。口径同 `graph_stale`:**提示而不代劳,也不拦**
+  (重启会把正在跑的同步断在半路,什么时候重启由人定;而且新旧混跑未必每次都撞上)。
+  回归在 `tests/test_kb_code_stale.py`(9 条,**判据一律是后果** —— 那句提示出没出现、
+  里面有没有可执行的下一步,而不是"函数定义在不在":定义对了却没人调的实现,只验
+  定义的话照样全绿)。**挂载点那两条真跑 `web_start` / `web_status` 的代码**,只把
+  `service_pids`(进程在不在跑)这个外部事实替掉。反向验证定点注入六版,各红 1~2 条:
+  两处调用都去掉(= 加它之前的状态)红 2 条、只去掉任一处各红 1 条(**两组不重叠,所以
+  这套用例分得出是哪一处漏了**)、判据放宽成所有文件红 2 条、提示里不写下一步红 1 条、
+  判据写反红 2 条。**「没有 pidfile 就安静」那道守卫今天是冗余带,如实记着**:
+  `find -newer <不存在的文件>` 在系统 find 和 bfs 上都是报错 + 输出空,后面那句判断
+  自己也会安静 —— 留它的理由是构造上的,"服务没跑"该由我们自己回答,不该押在某个
+  find 实现对缺失参照物的处理上。
 - 重启用 `env -i` 干净环境(继承嵌套 claude 的环境变量会导致 Not logged in)。
 - **起服务那条命令一律 `uv run --offline`,「要不要联网装东西」挪到前台问**
   (`kb.sh` 的 `web_prepare_env`)。`uv run` 每次都要先确认一遍项目环境,而
