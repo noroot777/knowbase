@@ -248,6 +248,10 @@ check("后端把这个计数一起给了出来",
       await evalJs(`(async () => {
         const w = await (await fetch('/api/daily/window')).json();
         return w.pending && typeof w.pending.total === 'number'; })()`));
+// 素材是从**外面**进来的(同步中心跑完一轮、CLI 补抓、定时同步),页面收不到任何
+// 事件。这里绕开界面直接打删除接口(删一份日报会把它带走的条目放回队列),页面
+// 自己不知道发生了什么 —— 空闲那一跳必须把数字问回来。无头浏览器会把后台页面的
+// 定时器节流到分钟级,所以照例自己驱动一次 refreshDailyStatus()。
 await evalJs(`toggleDailyWindow()`);
 check("改区间能展开两个时刻输入",
       await evalJs(`!document.getElementById('daily-window').hidden
@@ -382,6 +386,30 @@ check("半成品不谎称整条已译为中文", !!half && !/·\s*已译为中�
 check("半成品页脚写清标题还是原文", !!half && /标题还是原文/.test(h.foot), h.foot);
 check("半成品的中文正文照常显示", !!half && /这一条只有正文回来了中文/.test(h.excerpt),
       h.excerpt.slice(0, 60));
+
+// ── 后台改了素材,页面自己把数字问回来 ──────────────────────────────────────
+// 素材是从**外面**进来的(同步中心跑完一轮、CLI 补抓、定时同步),页面收不到任何
+// 事件。只在"日报从运行变成完成"那一跳重读的话,按钮上的数字会一直停在打开页面
+// 那一刻。这里绕开界面直接打删除接口(删一份日报会把它带走的条目放回队列),页面
+// 自己不知道发生了什么。无头浏览器把后台页面的定时器节流到分钟级,所以照例自己
+// 驱动一次 refreshDailyStatus()。
+//
+// **这一段要放在最后**:它删掉今天那一份,前面那些依赖"今天已有日报"的检查都得
+// 先做完。
+await evalJs(`switchTab('daily')`);
+await waitFor(`document.getElementById('dailypanel').style.display !== 'none'`);
+await evalJs(`resetDailyWindow()`);
+const sinceBefore = await evalJs(`document.getElementById('daily-since').value`);
+const countBefore = await evalJs(`document.getElementById("daily-gen-count").textContent`);
+const reborn = await evalJs(`(async () => {
+  await fetch('/api/daily/reports/${today}', { method: 'DELETE' });
+  await refreshDailyStatus();
+  return document.getElementById('daily-gen-count').textContent; })()`);
+check("后台改了素材之前按钮上是零", countBefore === "没有新内容", countBefore);
+check("后台改了素材之后,空闲那一跳把数字问回来", /^\+\d+ 条新内容$/.test(reborn), reborn);
+check("那一跳没有顺手改写两个时刻输入",
+      (await evalJs(`document.getElementById('daily-since').value`)) === sinceBefore,
+      await evalJs(`document.getElementById('daily-since').value`));
 
 check("页面没有脚本报错", pageErrors.length === 0, pageErrors.join(" | "));
 

@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb import daily, daily_run, llm, llm_stages, store
+from kb import daily, daily_carry, daily_run, llm, llm_stages, store
 from kb.scanner import parse_frontmatter
 from kb.web import daily_api
 
@@ -57,7 +57,10 @@ class DailyReportTests(unittest.TestCase):
         self.addCleanup(self.conn.close)
         for p in (patch.object(daily, 'VAULT_ROOT', self.root / 'vault'),
                   patch.object(store, 'connect', lambda *a, **k: connect(self.db)),
-                  patch.object(llm_stages, 'stage_model', Mock(return_value=MODEL))):
+                  patch.object(llm_stages, 'stage_model', Mock(return_value=MODEL)),
+                  # 不指的话落盘/删除那把锁会去 flock **生产** data/ 下的
+                  # lockfile(同 maintenance 那条)。
+                  patch.object(daily_carry, 'DATA_DIR', self.root)):
             p.start(); self.addCleanup(p.stop)
         self.chat = Mock(return_value='## 今日要点\n\n- **有事发生**:说明 [1]')
         p = patch.object(llm, 'chat', self.chat)

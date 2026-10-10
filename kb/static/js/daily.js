@@ -467,7 +467,22 @@ async function refreshDailyStatus() {
       await Promise.all([loadDailyReports(), loadDailyWindow()]);
     }
   }
+  // 素材是**从外面**进来的:同步中心那边跑完一轮、CLI 补抓、定时同步,页面这边
+  // 一个事件都收不到。只在"日报从运行变成完成"那一跳重读的话,按钮上的数字会
+  // 一直停在打开页面那一刻(审查实测:后台插进一篇,页面仍写着「没有新内容」,
+  // 要点一次「改区间」再「接上一份日报」才更新)。所以空闲时每一跳都问一次。
+  if (!s.running && dailyActive()) await refreshDailyPending();
   queueDailyPoll();
+}
+
+async function refreshDailyPending() {
+  // 只更新按钮上那个数字,**不碰两个时刻输入框**:默认区间的截止时刻是"此刻",
+  // 每跳重填一次会让展开着的「改区间」里的值自己往前跳。
+  if (dailyWindowDirty || !dailyWindow) return;
+  try {
+    dailyWindow.pending = (await pipeJson('/api/daily/window')).pending;
+  } catch { return; }
+  renderDailyGenButton();
 }
 
 function queueDailyPoll() {
