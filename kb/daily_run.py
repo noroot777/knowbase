@@ -442,11 +442,11 @@ def start(since: datetime | None = None, until: datetime | None = None,
     if since and until and since >= until:
         raise ValueError('日报的起始时刻必须早于截止时刻')
     # 勾了"先同步"却一个来源都没选,同步阶段会静静地什么都不做,面板上仍旧
-    # 一路"成功"——"同步全部并生成"被悄悄降级成"直接生成",用户不知道素材
-    # 根本没刷新(2026-09-30 审查实测)。要么给个来源,要么明确走"直接生成"。
+    # 一路"成功"——"同步全部并生成"被悄悄降级成"不同步直接出报",用户不知道
+    # 素材根本没刷新(2026-09-30 审查实测)。要么给个来源,要么明确走不同步那条。
     if sync and not picked:
         raise ValueError('同步范围里一个可用来源都没有:先勾选至少一个,'
-                         '或者改用"直接生成"(只用已入库的内容出报)')
+                         '或者改用不同步那颗生成按钮(只用已入库的内容出报)')
     with _lock:
         if _state['running']:
             return False

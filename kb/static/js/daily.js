@@ -49,27 +49,52 @@ function dailyClock(iso) {
 function renderDailyWindowLabel() {
   if (!dailyWindow) return;
   const since = dailyClock($('daily-since').value || dailyWindow.since);
-  const range = dailyWindowDirty
+  $('daily-window-label').textContent = dailyWindowDirty
     ? `覆盖 ${since} → ${dailyClock($('daily-until').value)}`
     : `覆盖 ${since} 起到生成时刻`;
-  $('daily-window-label').textContent = range + dailyPendingNote();
+  renderDailyGenButton();
 }
 
-function dailyPendingNote() {
-  // 「还有多少素材没进过任何一份日报」。日报是钉在某一天的产物,生成完不会自己
-  // 跟着新内容变 —— 重试失败项或新加一个订阅之后,得有个地方让人看出"攒下了
-  // 东西",再决定要不要再花一次模型钱重新生成。
+function dailyTargetDate() {
+  // 这一次会写到哪一天那份日报上。**只有这一份口径**:按钮叫"生成"还是"重新
+  // 生成"、要不要先弹覆盖确认,问的是同一件事,两处各判一遍必然各漂各的。
+  // 自定义区间落在截止时刻那天,默认区间落在今天(生成时刻)。
+  return dailyWindowDirty && $('daily-until').value
+    ? $('daily-until').value.slice(0, 10)
+    : new Date().toLocaleDateString('sv');
+}
+
+function renderDailyGenButton() {
+  // 这颗按钮的名字跟着"那一天有没有日报"走:已经有就是**重新生成**(点下去会
+  // 覆盖它,所以还会弹一次确认),没有就是头一份。写死成"重新生成"的话,第一次
+  // 用的人会以为自己漏掉了一步。
+  const exists = dailyReports.some(r => r.date === dailyTargetDate());
+  $('daily-gen-label').textContent = exists ? '重新生成日报' : '生成日报';
+
+  // 「再出一份能多带进来多少」。日报是钉在某一天的产物,生成完不会自己跟着新
+  // 内容变 —— 重试失败项、新加一个订阅之后,得有个地方让人看出攒下了东西,再
+  // 决定要不要为这些内容再花一次模型钱。它长在按钮里:回答的是"点这颗会得到
+  // 什么",贴在覆盖区间那行字后面就成了另一个问题的答案。
   //
-  // 自定义区间时不报这个数:后端算的是默认区间(接上一份日报)那一段,贴在一个
-  // 用户刚改过的区间旁边就是另一个问题的答案。查不出来时(后端给 null)整句不写,
-  // 不写成「0 条」—— 那是在把"不知道"说成"没有"。
+  // 自定义区间时不报这个数——后端算的是默认区间(接上一份日报)那一段。
+  // 后端查不出来(pending 给 null)时整颗藏掉,**不写成「没有新内容」**:
+  // 那是在把"不知道"说成"没有"。
+  const chip = $('daily-gen-count');
   const p = dailyWindowDirty ? null : dailyWindow?.pending;
-  if (!p) return '';
-  return p.total ? ` · 已攒 ${p.total} 条未上报素材` : ' · 暂无新素材';
+  chip.hidden = !p;
+  if (!p) { $('daily-gen').title = ''; return; }
+  chip.textContent = p.total ? `+${p.total} 条新内容` : '没有新内容';
+  chip.classList.toggle('is-none', !p.total);
+  $('daily-gen').title = p.total
+    ? `有 ${p.total} 条内容还没进过任何一份日报（${p.items} 条在本段窗口内发布、`
+      + `${p.late} 条发布得更早）。再生成一次会把它们带进来。`
+    : '上一份日报之后没有新内容进来，再生成一次得到的基本是同一份。';
 }
 
 async function loadDailyWindow() {
-  if (dailyWindowDirty) return;
+  // 改过区间就不覆盖用户填的那两个时刻,但按钮上的名字和计数照样要重算一次
+  // ——「这一天有没有日报」是跟着列表变的,和区间改没改无关。
+  if (dailyWindowDirty) { renderDailyGenButton(); return; }
   try {
     dailyWindow = await pipeJson('/api/daily/window');
   } catch { return; }
@@ -99,7 +124,7 @@ async function resetDailyWindow() {
 function dailyScheduleMessage(s) {
   if (!s.enabled) return '定时生成未启用';
   const next = s.next_run ? ` · 下次 ${dailyTime(s.next_run)}` : '';
-  return `已保存：每天 ${s.time} ${s.sync ? '先同步再生成' : '直接生成'}${next}`;
+  return `已保存：每天 ${s.time} ${s.sync ? '先同步再生成' : '只用已入库的内容生成'}${next}`;
 }
 
 async function loadDailySettings() {
@@ -181,6 +206,8 @@ async function loadDailyReports(keepSelection = true) {
   // "列表请求回来了"。不等的话阅读区还挂着上一份的正文和元信息,看起来像是
   // 生成没生效(2026-09-30 复审在全新沙箱上抓到,回归因此假红)。
   if (wanted) await openDailyReport(wanted);
+  // 按钮叫"生成"还是"重新生成"取决于目标那天有没有日报,而那正是这份列表。
+  renderDailyGenButton();
 }
 
 function renderDailyList() {
@@ -316,7 +343,9 @@ async function deleteDailyReport() {
     $('daily-reader-title').textContent = '还没有选中日报';
     $('daily-reader-meta').textContent = '';
     $('daily-reader-body').innerHTML = '<div class="daily-empty"><h3>已删除</h3><p>可以重新生成这一天的日报。</p></div>';
-    await loadDailyReports(false);
+    // 删一份日报会把它带走的条目放回队列,所以按钮上那个计数也得重新问一次
+    // ——不问的话页面上还写着「没有新内容」,而此刻明明又有了。
+    await Promise.all([loadDailyReports(false), loadDailyWindow()]);
   } catch (e) { toast('删除失败', { detail: e.message }); }
 }
 
@@ -338,12 +367,11 @@ async function runDaily(sync) {
   const channels = pickedDailyChannels();
   if (sync && !channels.length) {
     toast('先勾选至少一个同步范围', { key: 'daily',
-      detail: '同步范围在下面的「每天定时生成」里；只想用已入库的内容出报就点「直接生成」。' });
+      detail: '同步范围在下面的「每天定时生成」里；只想用已入库的内容出报，点左边那颗生成按钮。' });
     return;
   }
-  // 覆盖提示按「这一份会写到哪一天」判:自定义区间落在截止时刻那天,
-  // 默认区间落在今天(生成时刻)。
-  const date = custom.until ? custom.until.slice(0, 10) : new Date().toLocaleDateString('sv');
+  // 覆盖提示按「这一份会写到哪一天」判,和按钮叫什么名字共用 dailyTargetDate()。
+  const date = dailyTargetDate();
   if (dailyReports.some(r => r.date === date) &&
       !await confirmBox({ title: `重新生成 ${date} 的日报？`,
         body: '这一天已经有一份日报，重新生成会覆盖它。', ok: '重新生成' })) return;
@@ -371,6 +399,7 @@ function renderDailyButtons() {
   const running = !!dailyState?.running;
   $('daily-gen').disabled = $('daily-sync-gen').disabled = dailyBusy || running;
   $('daily-sync-gen').textContent = running ? '生成中…' : '同步全部并生成';
+  renderDailyGenButton();
   // 进了生成阶段就停不了了:模型已经在出稿,daily.generate() 自己把文件写完
   // 才返回。按钮留着能点、点了又被拒,不如置灰并把原因写在上面。
   const generating = running && dailyState?.phase === 'generate';
