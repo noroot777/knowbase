@@ -38,11 +38,34 @@
 是 RFC 3986 的字符表、**既没有反斜杠也没有反引号** —— `tail` 里的 `[` / `]` 在结构
 上不可能被转义或在代码里。本文件有一条契约钉住这个不变量。
 
+**第 9 轮管的是同一个零件的另一头 —— 跨度的边界到哪儿**(2026-10-10 自由工作流
+第 9 轮审查)。第 8 轮找闭合串时照抄了跨度**外**的反斜杠转义规则,于是
+`` `note\\` `` 这段**闭合**代码的收尾反引号被当成"被转义了"跳过去,跨度一路吃到
+下一段代码的起手(报告那份轨迹:给出 `(0, 16)`,实际是 `(0, 7)` 和 `(15, 24)`)。
+两个方向同时坏:
+①两段代码**之间**那个真正属于显示文字的 `[` 被判成字面 —— 这条推文**自己的**文章
+  地址被当成"嵌在别人查询值里",`needs_article` 返回 False,**长文整个漏掉**
+  (四种形态:查询值容器 / 片段容器 / 旧式文章路径 / 双反引号前缀);
+②`` `[\\` `` 那一档跳过收尾反引号之后压根找不到等长串、返回**空区间**,于是那个
+  字面 `[` 又被当成链接起手,**别人那条参考地址被剪断**(这一档第 8 轮也坏,是同
+  根因的变体)。
+两边的末态都是 `added=1`、`errors=[]`、`partial=[]`、水位照常推进,而 `DO NOTHING`
+让它**永久**固定。修法:找闭合串按**字面**来,跨度内部不认转义(CommonMark 明文说
+backslash escape 在 code span 里不生效,真 `marked` 把 `` `foo\\`bar` `` 渲染成
+`<code>foo\\</code>bar` 加一个字面反引号)。**跨度外那个转义分支照旧留着** ——
+两处的范围不同(一个在自由文本里找起手,一个在跨度内容里找收尾),判据也就不同,
+文件里两条契约各钉一头。
+
 **判据一律是后果**(库里那一行到底是什么、导出的 md 里那条参考地址全不全),不是
 "有没有发过那次询问":只验后者的话,一个把地址剪断了、却恰好没多问一次的实现也能
 全绿;而剪断之后那一篇永久改不回来。本文件两头各钉一条 —— 字面方括号旁边那条参考
 地址一个字不许动(族一、族二的矩阵),而**真的**链接起手照旧要认(族二那两条反向钉
 和第 5~7 轮那几族的回归)。
+
+**第 9 轮那两族留在这个文件里**:根因是同一个零件(`_code_spans` 的跨度边界),
+形状也同 —— 「范围里那个 `[` 算不算 markdown 结构」。两头各占一族:
+`LiteralBracket*` 要「字面方括号旁边那条参考地址一个字不许动」,`ClosedCodeSpan*`
+要「两段代码都闭合时,它们之间那个 `[` 是真的起手、自己那篇长文必须补到」。
 
 **另拆一个文件**是因为 `tests/test_x_article_label_bounds.py` 已经 350 行、
 `test_x_article_label.py` 490 行,再加这一族越过仓库那条 700 行上限;而形状本来就
@@ -92,6 +115,14 @@ LITERAL = (
     ('escaped_fragment', f'\\[<https://example.org/a](b)#{OTHER}>]', OTHER),
     ('escaped_legacy', f'\\[<{SHARE}]({LEGACY})>]', LEGACY),
     ('escaped_tco', f'\\[<{SHARE}]({TCO})>]', TCO),
+    # 第 9 轮那两种(2026-10-10 自由工作流第 9 轮审查):同样是"代码里那个字面 `[`",
+    # 只是这一次跨度的**收尾反引号前面有一个反斜杠** —— `` `[\` `` 是一段闭合代码
+    # (内容 `[\`),真 `marked` 渲染成 `<code>[\</code>` 加**一条**完整的
+    # `example.org` 链接,没有独立的 X 链接。第 8 轮找闭合串时照抄了跨度**外**的转义
+    # 规则,于是收尾反引号被跳过、压根找不到等长串、返回空区间,那个字面 `[` 又被当
+    # 成链接起手,参考地址被摘成 `…?text=read]( )`。这一档在第 8 轮**也坏**。
+    ('code_closing_backslash', f'`[\\` <{SHARE}]({OTHER})>]', OTHER),
+    ('double_code_closing_backslash', f'``[\\`` <{SHARE}]({OTHER})>]', OTHER),
 )
 # 审查者那四个**单变量对照**,它们本来就对 —— 留着是为了让这套用例分得出"转义/代码
 # 那一道失效了"和"整条左边判据都没了"。
@@ -104,6 +135,29 @@ CONTROLS = (
 # **反过来钉的那一边**:未转义的 `[` 真的开启一段 link text,`marked` 把它解释成
 # 一条独立的 X 链接(`semantic-probe.json`),所以那条地址该摘。
 RAW = f'分享参考 [<{SHARE}]({OTHER})>]'
+# 第 9 轮那四种输入(2026-10-10 自由工作流第 9 轮审查):两段**闭合**的行内代码,
+# 前一段的收尾反引号前面有一个字面反斜杠,而两段**之间**那个 `[` 是**真的**显示文字
+# 起手 —— 真 `marked` 把整条渲染成一条 `example.org` 链接(显示文字是
+# `Visit <code>caption</code> www.example.org`)加**一条独立的** X 文章链接
+# (`markdown-code-proof.json`)。所以这几条的后果方向和上面那一批正好相反:上面要
+# 「别人那条参考地址一个字不许动」,这里要「自己那篇长文必须补到」。
+REF = 'https://example.org/?q=foo'
+
+
+def coded(url, ref=None, fence='`'):
+    """报告那份最小完整输入的形状:两段闭合代码 + 显示文字像网址的参考链接 + 紧跟
+    着的自己那条文章地址。`fence` 传双反引号就是报告里那个 double 版本。"""
+    return (f'{fence}note\\{fence} [Visit {fence}caption{fence} '
+            f'www.example.org]({ref or REF})[article]({url})')
+
+
+FRAG = f'{REF}#section'
+CLOSED = (
+    ('closed_code_then_label', coded(CANON), CANON, REF),
+    ('closed_code_then_fragment', coded(CANON, FRAG), CANON, FRAG),
+    ('closed_code_then_legacy', coded(LEGACY), LEGACY, REF),
+    ('double_prefix_then_label', coded(CANON, fence='``'), CANON, REF),
+)
 
 
 def paired(reference, url=CANON):
@@ -173,6 +227,20 @@ class LiteralBracketTests(FeedgrabRound):
         """嵌套的是 t.co 短链:候选是 t.co 自己,`_ARTICLE_LINK` 压根不认它 ——
         这一条只有 `_drop(_TCO, …)` 那一路会碰,是另一个独立射程。"""
         self.check_feedgrab(f'\\[<{SHARE}]({TCO})>]', TCO)
+
+    def test_a_backslash_before_the_closing_fence_too(self):
+        """第 9 轮那一档:跨度的**收尾反引号前面有一个反斜杠**(`` `[\\` ``)。
+
+        第 8 轮找闭合串时照抄了跨度外的转义规则,于是那个收尾反引号被跳过、整条
+        返回**空区间**,字面的 `[` 又被当成链接起手 —— 后果和上面那几条逐字相同
+        (参考地址被摘成 `…?text=read]( )`、`DO NOTHING` 之下永久固定)。
+        """
+        self.check_feedgrab(f'`[\\` <{SHARE}]({OTHER})>]', OTHER)
+
+    def test_a_double_backtick_version_of_the_closing_backslash_too(self):
+        """双反引号版本 —— 报告说两个版本都实际跑过。等长闭合那条规则和反斜杠
+        那条是两件事,少认哪一件这里都红。"""
+        self.check_feedgrab(f'``[\\`` <{SHARE}]({OTHER})>]', OTHER)
 
     def test_the_browser_channel_too(self):
         """另一条保留通道,同样是**没有卡片信号**那一档(有卡片时判据② 会把自己
@@ -392,6 +460,183 @@ class LiteralBracketShapeTests(unittest.TestCase):
         self.assertNotIn('`', _URL_RUN)
         for ch in '[]':
             self.assertIn(ch, _URL_RUN, 'gen-delims 那两个方括号本来就要认')
+
+
+class ClosedCodeSpanTests(FeedgrabRound):
+    """**两段代码都闭合时,它们之间那个 `[` 是真的显示文字起手 —— 自己那篇长文
+    还得补到。**
+
+    这一族管第 8 轮那次修法自己写错的那一半(2026-10-10 自由工作流第 9 轮审查)。
+    `_code_spans` 找闭合串时照抄了跨度**外**的反斜杠转义规则,于是:
+
+    ```text
+    `note\` [Visit `caption` www.example.org](https://example.org/?q=foo)[article](<真地址>)
+    ```
+
+    `` `note\` `` 是一段**闭合**的代码(内容 `note\`),可那个收尾反引号被当成"被
+    `\` 转义了"跳过去,跨度一路吃到第二段代码的起手 —— 报告那份轨迹逐字写着
+    `_code_spans` 给出 `(0, 16)`,而实际区间是 `(0, 7)` 和 `(15, 24)`。两段代码
+    **之间**那个真正属于显示文字的 `[` 于是被判成字面,这条推文**自己的**文章地址
+    被当成"嵌在别人查询值里":`added=1`、`errors=[]`、`partial=[]`、**接口调用
+    0 次**、水位照常推进、标题回落成「某某 的动态」,而 `put_items` 是
+    `ON CONFLICT(key) DO NOTHING` —— 删掉那个反斜杠再同步 `added=0`,库里和导出的
+    md 里仍然只有那几条链接。**重复同步补不回来。**
+
+    **分界线有真 `marked` 的实证**(`markdown-code-proof.json`):同一份输入渲染成
+    `<code>note\</code>` + `<code>caption</code>` + 一条 `example.org` 链接(显示
+    文字是 `Visit <code>caption</code> www.example.org`)+ **一条独立的 X 文章
+    链接**。两段代码各自闭合,自己那条地址真的是一条独立链接。
+
+    判据和第 5~7 轮那几族一致:库里那一行、**以及 `sync.export` 另写一遍的那篇
+    md** 里要有全文,而前面那条参考地址逐字还在。只钉"有没有发那次询问"的话,一个
+    把参考地址也剪断了、却恰好问过一次的实现也能全绿。
+    """
+
+    feedgrab_round = _gap.ArticlePathFormTests.feedgrab_round
+    browser_round = _gap.ArticlePathFormTests.browser_round
+
+    def check_feedgrab(self, body, url, ref=None):
+        summary, row, calls, s = self.feedgrab_round(body)
+        got = row.get('body') or ''
+        self.assertIn(FULL, got, '两段闭合代码之间那个 `[` 被当成了字面的,'
+                                 '这一篇的长文整个漏掉了')
+        self.assertNotIn(url, got, '这条推文自己那条地址照旧要摘掉')
+        self.assertIn(ref or REF, got, '前面那条参考地址一个字都不许动')
+        self.assertEqual('X书签保存Skill x Teamily', row.get('title'),
+                         '标题回落成「某某 的动态」= 压根没去补过')
+        self.assertEqual([], summary['errors'])
+        self.assertEqual(1, summary['added'])
+        self.assertEqual([], summary['partial'])
+        self.assertEqual(TODAY, self.water(s['id']))
+        self.assertEqual(1, len(calls.urls), '那一次询问根本没发出去')
+
+        sync.export('social')
+        mds = list(sync.VAULT_ROOT.rglob('*.md'))
+        self.assertEqual(1, len(mds), mds)
+        md = mds[0].read_text(encoding='utf-8')
+        self.assertIn(FULL, md, '导出的 md 里只有那几条链接,没有全文')
+        self.assertIn(ref or REF, md)
+        return s
+
+    def test_the_report_minimal_input_reaches_the_knowledge_base(self):
+        """报告那份最小完整输入逐字。"""
+        self.check_feedgrab(coded(CANON), CANON)
+
+    def test_a_fragment_container_too(self):
+        """参考地址改用 `#section` —— 嵌套那两种证据不是同一半,所以单独走一轮。"""
+        ref = f'{REF}#section'
+        self.check_feedgrab(coded(CANON, ref), CANON, ref)
+
+    def test_the_legacy_article_path_too(self):
+        """自己那条换成 `/i/article/<id>` —— 两种路径逐字复现同一根因。"""
+        self.check_feedgrab(coded(LEGACY), LEGACY)
+
+    def test_a_double_backtick_prefix_too(self):
+        """两段代码都用双反引号 —— 等长闭合那条规则和反斜杠那条是两件事,少认
+        哪一件这里都红。"""
+        self.check_feedgrab(coded(CANON, fence='``'), CANON)
+
+    def test_the_browser_channel_too(self):
+        """另一条保留通道,同样是**没有卡片信号**那一档(有卡片时判据② 会把自己
+        那篇救回来,漏判就看不出是哪一道失效了)。"""
+        got, calls = self.browser_round(coded(CANON_9))
+        text = got['entries'][0]['body']
+        self.assertIn(FULL, text, '两段闭合代码之间那个 `[` 被当成了字面的')
+        self.assertNotIn(CANON_9, text)
+        self.assertIn(REF, text, '前面那条参考地址一个字都不许动')
+        self.assertEqual('', got['incomplete'])
+        self.assertNotEqual(OLD_WATER, got['watermark'])
+        self.assertEqual(1, len(calls.urls))
+
+    def test_a_second_sync_cannot_undo_a_missing_fulltext(self):
+        """报告第 4 步说的是 `DO NOTHING` 让这一篇永久固定:删掉输入里唯一那个
+        反斜杠再同步,全文确实补到了、也确实交给了真实 `put_items`,`added` 仍是 0。
+
+        反面:第一轮就存对了,第二轮 `added=0` 而库里那一行逐字不变。
+        """
+        s = self.check_feedgrab(coded(CANON), CANON)
+        first = self.rows(s['id'])['items'][0].get('body') or ''
+
+        req, calls = answering(article_payload())
+        with req:
+            second = self.collect()
+        rows = self.rows(s['id'])['items']
+        self.assertEqual([], second['errors'])
+        self.assertEqual(0, second['added'])
+        self.assertEqual(1, len(rows))
+        self.assertEqual(first, rows[0].get('body') or '', '第二轮把库里那一行改坏了')
+        self.assertIn(FULL, rows[0].get('body') or '')
+
+
+class ClosedCodeSpanShapeTests(unittest.TestCase):
+    """两个消费方逐形态直测 —— 报告给了四种漏全文输入和三个单变量对照,而端到端
+    一轮只摆得下一种。
+
+    外加两条**契约**,各守着这条修法的一头:
+    ①闭合串是按**字面**找的(跨度内部不认反斜杠转义);
+    ②跨度**外**那个转义分支照旧留着 —— 两处的范围不同,判据也就不同。
+    """
+
+    def test_every_closed_code_span_still_finds_the_article(self):
+        """报告那四种输入:自己那条文章地址要认得出、摘得掉,**而且**前面那条参考
+        地址逐字保留。只钉前半句的话,一个把两条都摘掉的实现也能过。
+        """
+        for name, body, url, ref in CLOSED:
+            with self.subTest(case=name, body=body):
+                self.assertTrue(needs_article({'url': TWEET, 'body': body}),
+                                '自己那条文章地址漏认了')
+                lead = lead_text(body)
+                self.assertNotIn(url, lead, '自己那条地址照旧要摘掉')
+                self.assertIn(ref, lead, '前面那条参考地址被一起剪断了')
+
+    def test_the_one_variable_controls_still_pass(self):
+        """报告那三个**本来就对的**变量对照:删掉那个反斜杠、去掉第二段代码的反
+        引号、两条链接之间加一个空格。
+
+        它们让这套用例分得出"闭合判据写错了"和"整条左边判据都没了"。
+        """
+        controls = (
+            ('no_backslash', f'`note` [Visit `caption` www.example.org]({REF})'
+                             f'[article]({CANON})'),
+            ('no_second_code', f'`note\\` [Visit caption www.example.org]({REF})'
+                               f'[article]({CANON})'),
+            ('spaced', f'`note\\` [Visit `caption` www.example.org]({REF}) '
+                       f'[article]({CANON})'),
+        )
+        for name, body in controls:
+            with self.subTest(case=name, body=body):
+                self.assertTrue(needs_article({'url': TWEET, 'body': body}),
+                                '这一档本来就对,现在漏认了')
+                self.assertIn(REF, lead_text(body))
+
+    def test_a_closing_fence_is_found_literally(self):
+        """**契约①**:闭合串按**字面**找 —— 跨度里的反斜杠是内容,不是转义符。
+
+        第一行逐字取自报告那份误判轨迹:`head` 给出的必须是两段
+        (`(0, 7)` 和 `(15, 24)`),而不是一段 `(0, 16)`。后两行是 CommonMark 自己
+        那个例子:`` `foo\`bar` `` 只有一段跨度(内容 `foo\`),后面那个落单的反引号
+        是字面文本 —— 真 `marked` 渲染成 `<code>foo\</code>bar` 加一个反引号。
+        """
+        self.assertEqual(((0, 7), (15, 24)), _code_spans('`note\\` [Visit `caption` '))
+        self.assertEqual(((0, 4),), _code_spans('`a\\`b`'), '闭合串不许被反斜杠跳过')
+        self.assertEqual(((0, 3),), _code_spans('`\\`'), '内容就是一个反斜杠')
+        self.assertEqual(((0, 9), (17, 28)),
+                         _code_spans('``note\\`` [Visit ``caption`` '), '双反引号同理')
+        # 后果那一头:两段闭合代码**之间**那个 `[` 是真的结构字符。
+        self.assertFalse(_inert('`note\\` [', 8, _code_spans('`note\\` [')))
+
+    def test_the_two_escape_rules_stay_on_their_own_side(self):
+        """**契约②**:跨度**外**那个转义分支照旧留着 —— `` \`x` `` 渲染成纯文本
+        (真 `marked` 实测),所以它不构成跨度。
+
+        两道判据各管一段范围:一个在自由文本里找**起手**,一个在跨度内容里找
+        **收尾**。把内层那条删掉不许顺手把外层也删掉 —— 那会让 `` \`[` `` 里那个
+        `[` 变成"代码里的字面字符",第 8 轮那六种当场重开。
+        """
+        self.assertEqual((), _code_spans('\\`x`'), '转义过的反引号不开启跨度')
+        self.assertEqual((), _code_spans('\\`[`'))
+        self.assertEqual(((2, 5),), _code_spans('\\\\`[`'),
+                         '两个反斜杠 = 字面反斜杠 + 一个真的跨度起手')
 
 
 if __name__ == '__main__':
