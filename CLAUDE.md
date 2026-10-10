@@ -1050,6 +1050,24 @@
   确认 `"running": false`。server.py / projects.py 改动要重启才生效;`kb/static/` 下静态文件每次
   请求从磁盘读,免重启。重启用 `env -i` 干净环境(继承嵌套 claude 的环境变量会导致 Not logged in)。
   **不要用 preview_start 托管 kb-web**(会接管生命周期,杀掉管道)。
+- **「改了不生效」只是这件事良性的那一半:坏的那一半是同一个进程里新旧两个版本的模块混跑。**
+  kb 有一批模块是**延迟 import** 的(`kb.feeds.sync` 要等管道真跑一轮 crawl 才进来),而 Python
+  不热加载 —— 服务跑着的时候一次 `git checkout` 就够:先被拉进 `sys.modules` 的那个是旧版,后来才 import 的从磁盘读到新版,于是新版调不到
+  旧版里还没有的函数。**报出来的话指不到任何跟业务有关的东西**(实测七条 RSS 一起报
+  `x_channels has no attribute 'fill_bridge'`、面板显示「连接失败」,人只会去查源站),
+  **定位的铁证在 `__pycache__` 各文件的时间戳上**。**出路只有重启**(进程边界,同 bge-m3 那条);
+  **重启之后退避还挂着**,得手动点一次同步(或 `POST /api/intake/{kind}/sync` 带 `source_ids`,
+  它自带 `force`)。
+- **所以服务已经起着时 `./kb.sh` 会提示一句「代码比跑着的进程新」**(`code_stale`;判据是 pidfile
+  比 `$ROOT/kb` 下任何一个 `.py` 旧 —— `daemonize` 写 pidfile 那一刻就是进程启动那一刻,别处只
+  删它、不写它)。**挂在两处**:`web_start` 的「已在」分支(覆盖 `sync`/`collect`/`export`/
+  `index`/`extract` 全部命令,也就是这个 bug 真正发作的那条路)和 `web_status`(让
+  `./kb.sh status` 那一屏看得见)。**只看 `.py`** —— `kb/static/` 下的 js/css 每次请求从磁盘读,
+  算进来就是每改一行样式催一次重启;`scripts/` 和 `collector/` 每次都是新起的子进程,同理不算。
+  口径同 `graph_stale`:**提示而不代劳,也不拦**(重启会把正在跑的同步断在半路)。
+  回归在 `tests/test_kb_code_stale.py`。**「没有 pidfile 就安静」那道守卫是冗余带,别删** ——
+  `find -newer <不存在的文件>` 在系统 find 和 bfs 上都是报错 + 输出空,后面那句判断自己也会安静;
+  留它的理由是构造上的:「服务没跑」该由我们自己回答,不该押在某个 find 实现对缺失参照物的处理上。
 - **地址栏的 `#tab` 被读走之前,谁都不许写它**(`workspace.js` 的 `workspaceLocated`)——
   `restoreWorkspaceLocation()` 在 `initWorkspace` 收尾时才读 hash,而 `loadGallery()` 是和它并排
   起跑的,图鉴接口先回来时 `applyGalleryFilter()` 会把 `#daily` 覆盖成 `#gallery`。
@@ -1068,7 +1086,7 @@
   重试」。
 - 已知遗留:`kb-mcp` 有好几个进程,各自会起自己的 worker。空闲超时能兜住,但同时活跃时仍是几倍
   开销。真要治得让它们共用一个常驻 worker(要 socket + 守护进程),现在没做。
-- 详细事故形态见 `docs/decisions/embedding.md`。
+- 详细事故形态见 `docs/decisions/embedding.md`、`docs/decisions/code-stale.md`。
 
 ## 浏览器探针起的无头壳(tests/probe_shell.mjs + headless.py 的 run_probe)
 
