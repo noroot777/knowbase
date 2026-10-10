@@ -25,10 +25,29 @@ RFC 3986 把 `(` `)` `[` `]` 都算合法 URL 字符、feedgrab 的产物正文�
 网址当链接的显示文字是极常见的写法,所以这不是边角。
 
 修法是给另一半也配一条收尾判据(`_text_closed`):`]` 紧跟一个 `(` 时它结束的是 link
-**text**,而"落单"(扫到它时 `[` 深度为 0)等价于**那个 `[` 在起手式之前** —— 也就是
-起手式本身落在显示文字里面。`test_x_article_markdown.py` 第三族那条
-`?text=[read](<别人的地址>)` 里的 `[` 在起手式**之后**、配对,所以不落单、外层 URL
-还开着、照旧判嵌套:**两族的分界线就是这个深度计数**,这个文件两头各钉一条。
+**text**。`test_x_article_markdown.py` 第三族那条 `?text=[read](<别人的地址>)` 里的
+`[` 在起手式**之后**、配对,所以不落单、外层 URL 还开着、照旧判嵌套:**两族的分界线
+就是那个 `[` 在起手式的哪一边**,这个文件两头各钉一条。
+
+**而"落单"只是必要条件 —— 第 6 轮(同一天)补上了左边那一半。** 第 5 轮写的理由是
+「落单等价于那个 `[` 在起手式之前」,那句话是错的:落单只说明 `tail` 里没有配对的
+`[`,它既可能是"`[` 在左边"(真·显示文字),也可能是"压根没有 `[`" —— 而后者正是
+**一条外层 URL 自己内容里**的 `](`:
+
+```text
+分享参考 <https://example.org/share?text=read](https://x.com/Other/article/20002)>
+```
+
+唯一那个外层起手式的 `head` 是**空的**,落单判据照样成立,于是这条完整的外部参考
+链接被当成"显示文字"跳过、容器找不到,别人那条地址被摘成 `…?text=read]( )` 并由
+`DO NOTHING` 永久固定(把 `]` 改成 `%5D` 再同步,真实 SQL 调用前的正文已经完整而
+`added` 仍是 0)。**而 `](` 出现在一条 URL 的查询值里是真实写法** —— 分享按钮把一段
+markdown 塞进 `?text=` 就是它(同一条在真 `marked` 里渲染成**一条**指向
+`example.org/share` 的链接,向本地回显端点发真实请求收到的查询值也逐字完整)。
+片段容器、真正的 markdown 链接目标、旧式文章路径、t.co 短链,五种形态逐字相同,而
+上一轮版本 `90f949f` 对同一份输入全部逐字保留 —— 所以它是第 5 轮那次修法自己开出来
+的缺口。两族(`UrlOwnBracket*`)钉的就是这一半:**左边真有一个还开着的 `[`** 才算
+显示文字,两头的射程不重叠。
 
 **判据一律是后果**(库里那一行到底是什么、导出的 md 里有没有全文),不是"有没有发过
 那次询问":只验后者的话,一个把链接当正文存下来、却顺手问了一次的实现也能全绿;而
@@ -36,9 +55,9 @@ RFC 3986 把 `(` `)` `[` `]` 都算合法 URL 字符、feedgrab 的产物正文�
 
 **另拆一个文件**是因为 `tests/test_x_article_markdown.py` 已经 694 行、贴着仓库那条
 700 行上限;而形状本来就不同 —— 那边的样本是"候选紧前那两个字符就是 `](`",这一族是
-"最左那个起手式落在一段**显示文字**里"。摆盘(`FeedgrabRound`、
-`ArticlePathFormTests` 那两个 round helper)仍共用 `test_x_article_gap.py` 那一份,
-各写一份的话两边的前提会各漂各的。
+"最左那个起手式落在一段**显示文字**里"(以及第 6 轮那一半:"它看着像显示文字,其实
+是外层 URL 自己的内容")。摆盘(`FeedgrabRound`、`ArticlePathFormTests` 那两个 round
+helper)仍共用 `test_x_article_gap.py` 那一份,各写一份的话两边的前提会各漂各的。
 
 跑:  python -m unittest tests.test_x_article_label -v
 """
@@ -244,15 +263,228 @@ class LinkLabelUrlShapeTests(unittest.TestCase):
         **之后**,也就是第三族那条"分享查询值里装着一段 markdown" —— 那时外层
         URL 还开着。两族的分界线就在这里。
         """
-        self.assertTrue(_text_closed('example.org]('))
-        self.assertTrue(_text_closed('example.org/a](https://e.org/)[b]('))
+        self.assertTrue(_text_closed('[', 'example.org]('))
+        self.assertTrue(_text_closed('[[1]', 'example.org/a](https://e.org/)[b]('))
         # 配对:`[` 在起手式之后 —— 第三族那条分享查询值。
-        self.assertFalse(_text_closed('example.org/share?text=[read]('))
+        self.assertFalse(_text_closed('[', 'example.org/share?text=[read]('))
         # IPv6 字面量那对方括号同样是配对的。
-        self.assertFalse(_text_closed('[2001:db8::1]/docs#'))
+        self.assertFalse(_text_closed('[', '[2001:db8::1]/docs#'))
         # 落单但不紧跟 `(` —— 路径里一个孤立的 `]`,这条 URL 还开着。
-        self.assertFalse(_text_closed('example.org/a]b?u='))
-        self.assertFalse(_text_closed('example.org/?u='))
+        self.assertFalse(_text_closed('[', 'example.org/a]b?u='))
+        self.assertFalse(_text_closed('[', 'example.org/?u='))
+
+    def test_a_label_needs_an_open_bracket_on_its_left(self):
+        """**契约③**(第 6 轮):`tail` 里那个落单的 `](` 只是**必要**条件 ——
+        左边真有一个**还开着**的 `[` 才说明这个起手式落在显示文字里面。
+
+        少了左边这一半,一条外层 URL **自己内容里**的 `](` 就被当成显示文字收尾
+        (`head` 为空,也就是整个 run 就是那条外层 URL),它里面嵌的地址被永久摘掉
+        —— 见下面那两族端到端。
+        """
+        tail = 'example.org/share?text=read]('
+        # 左边什么都没有 = 整个 run 就是一条外层 URL,那个 `](` 是它自己的内容。
+        self.assertFalse(_text_closed('', tail))
+        # 左边那个 `[` 已经配对了(它是一条写完的链接),同样不是显示文字的开头。
+        self.assertFalse(_text_closed('[share](', tail))
+        self.assertFalse(_text_closed('[a](https://e.org/)', tail))
+        # 真的显示文字开头:一个还开着的 `[`。
+        self.assertTrue(_text_closed('[', tail))
+        self.assertTrue(_text_closed('a]b[', tail))
+
+
+# 报告那五种形态的参考链接。共同点:那个 `](` 是**外层 URL 自己内容里**的字符,
+# 它左边压根没有 `[` —— 所以"落单的 `](`"这一道单独用不住。
+# ①查询值里装着别人的文章地址,整条用尖括号包成一条 autolink。
+OWN_BRACKET = f'https://example.org/share?text=read]({OTHER})'
+# ②片段容器,而且 `](` 落在路径里。
+FRAG_BRACKET = f'https://example.org/a](b)#{OTHER}'
+# ③真正的 markdown 链接**目标**,它自己的路径里带着 `](`。
+TARGET_REF = f'https://example.org/a](b)?url={OTHER}'
+TARGET_BRACKET = f'[share]({TARGET_REF})'
+# ④同①但换成旧式文章路径;⑤同①但内层是一条 t.co 短链(`_TCO` 那一侧的射程)。
+TCO_BRACKET = 'https://example.org/share?text=read](https://t.co/AbCdEf)'
+
+
+class UrlOwnBracketTests(FeedgrabRound):
+    """**外层 URL 自己内容里的 `](` 不是显示文字的收尾 —— 它里面那条地址一个字
+    不许动。**
+
+    第 5 轮给显示文字那一半配收尾判据时只问了右边("`tail` 里有没有一个落单的
+    `](`"),理由写的是「落单等价于那个 `[` 在起手式之前」。**那句话是错的**:落单
+    只说明 `tail` 里没有配对的 `[`,它既可能是"`[` 在左边"(真·显示文字),也可能是
+    "压根没有 `[`" —— 而后者正是一条外层 URL 自己内容里的 `](`。
+
+    于是
+    `<https://example.org/share?text=read](https://x.com/Other/article/20002)>`
+    这条完整的外部参考链接(它的查询值里装着别人的文章地址)里,唯一那个外层起手式
+    的 `head` 是**空的**,落单判据照样成立 —— 它被当成"显示文字"跳过,容器找不到,
+    别人那条地址被 `_drop` 摘成 `…?text=read]( )`:`added=1`、`errors=[]`、
+    `partial=[]`、全文照旧补上、水位照常推进、一行提示都没有,而 `DO NOTHING` 让
+    这一篇**永久**停在残稿上(2026-10-10 自由工作流第 6 轮审查;把 `]` 改成 `%5D`
+    再同步,真实 SQL 调用前的正文已经完整而 `added` 仍是 0)。
+
+    **而 `](` 出现在一条 URL 的查询值里是真实写法**:分享按钮把一段 markdown 塞进
+    `?text=` 就是它 —— 同一条在真 `marked` 里渲染成**一条**指向 `example.org/share`
+    的链接,向本地回显端点发真实请求收到的查询值也逐字完整。
+
+    判据一律是后果:库里那一行、**以及导出的 md**(`sync.export` 另写一遍)里要有
+    全文,而那条参考地址**整条**逐字还在。
+    """
+
+    feedgrab_round = _gap.ArticlePathFormTests.feedgrab_round
+    browser_round = _gap.ArticlePathFormTests.browser_round
+
+    def check_feedgrab(self, body, url, ref):
+        summary, row, calls, s = self.feedgrab_round(body)
+        got = row.get('body') or ''
+        self.assertIn(ref, got, '外层 URL 自己那个 `](` 被当成显示文字收尾,'
+                                '它里面那条地址被剪断了')
+        self.assertIn(FULL, got, '这一篇的长文整个漏掉了')
+        self.assertNotIn(url, got, '这条推文自己那条地址照旧要摘掉')
+        self.assertEqual('X书签保存Skill x Teamily', row.get('title'),
+                         '标题回落成「某某 的动态」= 压根没去补过')
+        self.assertEqual([], summary['errors'])
+        self.assertEqual(1, summary['added'])
+        self.assertEqual([], summary['partial'])
+        self.assertEqual(TODAY, self.water(s['id']))
+        self.assertEqual(1, len(calls.urls))
+
+        sync.export('social')
+        mds = list(sync.VAULT_ROOT.rglob('*.md'))
+        self.assertEqual(1, len(mds), mds)
+        md = mds[0].read_text(encoding='utf-8')
+        self.assertIn(ref, md, '导出的 md 里那条参考地址被剪断了')
+        self.assertIn(FULL, md)
+        return s
+
+    def test_the_report_input_reaches_the_knowledge_base(self):
+        """报告那份输入逐字:自己的长文 + 一条查询值里装着别人地址的 autolink。"""
+        self.check_feedgrab(f'我的长文 {CANON}\n分享参考 <{OWN_BRACKET}>',
+                            CANON, OWN_BRACKET)
+
+    def test_the_legacy_article_path_too(self):
+        """换成 `/i/article/<id>` —— 报告说两种路径逐字复现同一个根因。"""
+        self.check_feedgrab(f'我的长文 {LEGACY}\n分享参考 <{OWN_BRACKET}>',
+                            LEGACY, OWN_BRACKET)
+
+    def test_a_fragment_container_too(self):
+        """片段那一档:`](` 落在外层的**路径**里,容器是它后面那个 `#`。"""
+        self.check_feedgrab(f'我的长文 {CANON}\n分享参考 <{FRAG_BRACKET}>',
+                            CANON, FRAG_BRACKET)
+
+    def test_a_real_markdown_target_too(self):
+        """真正的 markdown 链接**目标**,它自己的路径里带着 `](`。
+
+        这一档的 `head` 不是空的(它是 `[share](`),可那个 `[` 已经配对了 ——
+        所以"左边有没有**还开着**的 `[`"才是判据,不是"左边有没有 `[`"。而目标那
+        一半的闭合判据(`_target_closed`)对它答"还开着",照旧是容器。
+        """
+        self.check_feedgrab(f'我的长文 {CANON}\n分享参考 {TARGET_BRACKET}',
+                            CANON, TARGET_REF)
+
+    def test_the_browser_channel_too(self):
+        """另一条保留通道,同样是**没有卡片信号**那一档(有卡片时判据② 会把它救
+        回来,漏判就看不出来了)。"""
+        got, calls = self.browser_round(
+            f'我的长文 {CANON_9}\n分享参考 <{OWN_BRACKET}>')
+        text = got['entries'][0]['body']
+        self.assertIn(OWN_BRACKET, text, '那条参考地址被剪断了')
+        self.assertIn(FULL, text, '长文整个漏掉了')
+        self.assertNotIn(CANON_9, text)
+        self.assertEqual('', got['incomplete'])
+        self.assertNotEqual(OLD_WATER, got['watermark'])
+        self.assertEqual(1, len(calls.urls))
+
+    def test_a_reference_alone_asks_nothing(self):
+        """**承重的反向钉**(报告:"仅含这些参考链接、没有自己文章地址的正文,也会
+        被当前版本误删;其中四个包含文章地址的输入还会误触发 `needs_article`"):
+        一次长文询问都不许发、那条地址一个字不动,而且**别人那篇文章的全文不许写
+        进来** —— 最后半句最重:误认不只是改坏别人的链接,还会把别人那篇的全文当成
+        这条推文的观点存进知识库,而 `DO NOTHING` 让它永久固定。
+        """
+        summary, row, calls, s = self.feedgrab_round(f'分享参考 <{OWN_BRACKET}>')
+        got = row.get('body') or ''
+        self.assertEqual([], calls.urls, '别人的参考链接不许触发一次长文询问')
+        self.assertIn(OWN_BRACKET, got, '那条地址一个字都不许动')
+        self.assertNotIn(FULL, got, '别人那篇文章的全文被当成这条推文的观点存下来了')
+        self.assertEqual(1, summary['added'])
+        self.assertEqual(TODAY, self.water(s['id']))
+
+    def test_a_second_sync_keeps_the_reference_whole(self):
+        """报告表格第 3 行说的是 `DO NOTHING` 让残稿**永久**固定(把 `]` 改成
+        `%5D` 再同步,真实 SQL 调用前的正文已经完整而 `added` 仍是 0)。反面:
+        第一轮就存对了,第二轮 `added=0` 而库里那一行逐字不变。"""
+        s = self.check_feedgrab(f'我的长文 {CANON}\n分享参考 <{OWN_BRACKET}>',
+                                CANON, OWN_BRACKET)
+        first = self.rows(s['id'])['items'][0].get('body') or ''
+
+        req, calls = answering(article_payload())
+        with req:
+            second = self.collect()
+        rows = self.rows(s['id'])['items']
+        self.assertEqual([], second['errors'])
+        self.assertEqual(0, second['added'])
+        self.assertEqual(1, len(rows))
+        self.assertEqual(first, rows[0].get('body') or '', '第二轮把库里那一行改坏了')
+        self.assertIn(OWN_BRACKET, rows[0].get('body') or '')
+
+
+class UrlOwnBracketShapeTests(unittest.TestCase):
+    """两个消费方逐形态直测 —— 报告给了五种形态,而端到端一轮只摆得下一种。"""
+
+    def hits(self, body):
+        return bool(_first(_ARTICLE_LINK, body))
+
+    def test_every_container_keeps_its_nested_address(self):
+        """五种形态里那条嵌着的地址都不许被摘,判据① 也不许为它白发一次询问。
+
+        后两条是**本来就对的**对照(没有 `](` 的普通查询值、`](` 之后不接地址),
+        它们让这套用例分得出"左边那一道失效了"和"整条容器判据都没了"。
+        """
+        cases = (
+            f'<{OWN_BRACKET}>',
+            f'<{FRAG_BRACKET}>',
+            TARGET_BRACKET,
+            f'<https://example.org/share?text=read]({LEGACY})>',
+            # 对照一:同一个容器,不带 `](`。
+            f'<https://example.org/share?text=read+{OTHER}>',
+            # 对照二:`](` 在容器里,而嵌的是路径段那一档。
+            f'<https://example.org/a](b)/go/{OTHER}>',
+        )
+        for body in cases:
+            with self.subTest(body=body):
+                self.assertFalse(needs_article({'url': TWEET, 'body': body}),
+                                 '别人链接里那条地址不是这条推文的长文')
+                self.assertEqual(body, lead_text(body).strip(),
+                                 '别人那条地址被从中间剪断了')
+
+    def test_a_tco_inside_an_own_bracket_container_stays_whole(self):
+        """t.co 那一侧的独立射程:候选是短链本身,`_ARTICLE_LINK` 压根不认它。
+
+        配一条**阴性对照** —— 裸写的同一条短链照旧摘得掉,不然"判据生效了"和
+        "`_TCO` 那一侧压根不摘"长得一模一样。
+        """
+        tco = 'https://t.co/AbCdEf'
+        body = f'<{TCO_BRACKET}>'
+        self.assertEqual(body, lead_text(body).strip(),
+                         '容器里那条短链被摘掉了')
+        bare = f'看这个 {tco}'
+        lead = lead_text(bare)
+        self.assertNotIn(tco, lead, '裸写的短链照旧要摘掉')
+        self.assertIn('看这个', lead)
+
+    def test_a_url_like_label_beside_them_still_works(self):
+        """**反过来钉一边**:第 5 轮那一族(显示文字真的像网址)不许跟着回退 ——
+        同一个 run 里既有一段像网址的显示文字、又有外层自己的 `](` 时,真地址照旧
+        认得出、摘得掉,而参考地址一个字不动。
+        """
+        ref = 'https://example.org/?q=foo'
+        body = f'[www.example.org]({ref})[article]({CANON})'
+        self.assertTrue(needs_article({'url': TWEET, 'body': body}))
+        lead = lead_text(body)
+        self.assertNotIn(CANON, lead)
+        self.assertIn(ref, lead)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -247,13 +247,37 @@ def _target_closed(tail: str) -> bool:
     return False
 
 
-def _text_closed(tail: str) -> bool:
-    """这个起手式在 `tail` 里撞上一个**落单**的 `](` —— 它压根不是一条 URL 的
-    起点,是一段 markdown 链接**显示文字**里的字。
+def _text_closed(head: str, tail: str) -> bool:
+    """这个起手式落在一段 markdown 链接的**显示文字**里,而那段显示文字在候选之前
+    就收尾了 —— 它压根不是一条 URL 的起点,是显示文字里的字。
 
     判据同样取自 CommonMark 对 `[text](dest)` 的定义,只是换成前一半:`]` 紧跟一个
-    `(` 时它结束的是 link **text**。而"落单"(扫到它时 `[` 深度为 0)等价于**它的
-    `[` 在这个起手式之前** —— 也就是起手式本身落在那段显示文字里面。
+    `(` 时它结束的是 link **text**。**而这要两头的证据,缺一头就不是显示文字:**
+    - **左边**(`head`,起手式到 run 开头那一段)里有一个**还开着**的 `[` —— 那就是
+      这段显示文字的开头;
+    - **右边**(`tail`,起手式到候选那一段)里有一个**落单**的 `]` 紧跟着 `(` ——
+      那是它的收尾,也就是紧接着的链接目标起手标记。
+
+    **左边那一半是第 6 轮补的,而且它承重。** 第 5 轮只问了右边,理由写的是
+    「"落单"(扫到它时 `[` 深度为 0)等价于它的 `[` 在这个起手式之前」—— **那句话
+    是错的**:落单只说明"`tail` 里没有配对的 `[`",它既可能是「`[` 在起手式左边」
+    (真·显示文字),也可能是「压根没有 `[`」 —— 而后者正是**一条外层 URL 自己
+    内容里**的 `](`。于是
+    `<https://example.org/share?text=read](https://x.com/Other/article/20002)>`
+    这条完整的外部参考链接(尖括号 autolink,它的查询值里装着别人的文章地址)里,
+    唯一那个外层起手式 `https://` 的 `head` 是**空的**、`tail` 是
+    `example.org/share?text=read](` —— 落单的 `](` 成立,于是它被当成"显示文字"
+    跳过,容器找不到、`nested=False`,别人那条地址被 `_drop` 摘成
+    `…?text=read]( )`:`added=1`、`errors=[]`、`partial=[]`、全文照旧补上、
+    水位照常推进、一行提示都没有,而 `DO NOTHING` 让这一篇**永久**停在残稿上
+    —— 把 `]` 改成 `%5D` 再同步,真实 SQL 调用前的正文已经完整、`added` 仍是 0
+    (2026-10-10 自由工作流第 6 轮审查实测;片段容器 `…/a](b)#<地址>`、真正的
+    markdown 链接目标 `[share](https://example.org/a](b)?url=<地址>)`、旧式文章
+    路径、t.co 短链,五种形态逐字相同,而上一轮版本 `90f949f` 对同一份输入全部
+    逐字保留)。**而 `](` 出现在一条 URL 的查询值里是真实写法** —— 分享按钮把
+    一段 markdown 塞进 `?text=` 就是它(同一条在真 `marked` 里渲染成**一条**
+    指向 `example.org/share` 的链接,向本地回显端点发真实请求收到的查询值也逐字
+    完整,见 `_nested` 第①步那段)。
 
     **这一道和 `_target_closed` 正好分开两族真实写法,差别只在"那个 `[` 在起手式的
     哪一边",而那正是这个深度计数回答的事:**
@@ -281,7 +305,19 @@ def _text_closed(tail: str) -> bool:
     **第一个落单的 `]` 定胜负,不再往后找**:它不紧跟 `(` 时这条 URL 还开着
     (返回 False、照旧判嵌套),方向上偏向"保护别人的地址"。markdown 产物里显示
     文字一旦含 `]` 必然转义,所以这一档没有真实写法。
+
+    **两头各有一条回归钉着**,而且它们的射程不重叠:去掉左边那一半,上面那五种
+    参考链接的地址被永久剪断;去掉右边那一半(或者不数深度/不要求紧跟 `(`),
+    第 4、5 轮那两族回来。
     """
+    depth = 0
+    for ch in head:
+        if ch == '[':
+            depth += 1
+        elif ch == ']' and depth:
+            depth -= 1
+    if not depth:
+        return False
     depth = 0
     for i, ch in enumerate(tail):
         if ch == '[':
@@ -340,8 +376,8 @@ def _nested(m: re.Match) -> bool:
         谁成立都跳过这个起手式**:
           - 它是一条链接的**目标**(紧前是 `](`)→ `_target_closed`,第一个落单的
             `)` 收尾它;
-          - 它落在一段链接的**显示文字**里 → `_text_closed`,第一个落单的 `](`
-            收尾它。
+          - 它落在一段链接的**显示文字**里 → `_text_closed`,**左边**有一个还开着
+            的 `[`(那段显示文字的开头)、**右边**有一个落单的 `](`(它的收尾)。
         **第二道是第 5 轮补的,而且它不是第一道的冗余**:`[www.example.org](https://
         example.org/?q=foo)[article](<真地址>)` 里最左那个起手式 `www.` 紧前是 `[`
         —— 第一道压根不问它,于是它被当成一条"还开着"的外层 URL,而它的 tail 里有
@@ -349,11 +385,22 @@ def _nested(m: re.Match) -> bool:
         那两条链接当成正文入库、接口调用 **0** 次、`DO NOTHING` 永久固定(2026-10-10
         自由工作流第 5 轮审查实测;**只把显示文字换成 `docs` 就拿得到全文** ——
         变量就是"显示文字像不像网址",而用网址当链接文字是极常见的写法)。
-        两道的分界线在 `_text_closed` 的 docstring 里:**那个 `[` 在起手式的哪一边**。
-        四件事各有一条回归钉着:**两条紧跟限定都不能省**(裸 URL 路径里孤立的 `)`
+        两道的分界线是**那个 `[` 在起手式的哪一边**:落单 ⇒ 它在左边、起手式在显示
+        文字里;配对 ⇒ 它在右边、起手式所在的那条外层 URL 还开着(上面那条分享
+        查询值就是)。
+        **而"落单"只是必要条件,左边真的有那个 `[` 才是充分条件 —— 第 5 轮漏了这
+        一半,第 6 轮补上**:`head` 为空(也就是整个 run 就是一条外层 URL)时落单
+        照样成立,于是
+        `<https://example.org/share?text=read](https://x.com/Other/article/20002)>`
+        这条完整的外部参考链接被当成"显示文字"跳过,别人那条地址被摘成
+        `…?text=read]( )` 并由 `DO NOTHING` 永久固定(2026-10-10 自由工作流第 6 轮
+        审查实测,五种形态见 `_text_closed` 的 docstring)。两头各有自己的回归,
+        射程不重叠。
+        五件事各有一条回归钉着:**两条紧跟限定都不能省**(裸 URL 路径里孤立的 `)`
         和 `]` 都是合法字符,不限定会把还开着的外层误判成闭合)、**只认不平衡的 `)`**
         (链接目标里的平衡括号是它路径的内容,`[a](https://example.org/docs(v2)#<地址>)`
-        照旧是容器)、**闭合了要继续往后找下一个起手式**
+        照旧是容器)、**显示文字那一道要左右两头都有证据**、**闭合了要继续往后找下
+        一个起手式**
         (`[a](…?q=1)https://evil.example/?u=<地址>` 的容器是后面那条)。
         **没有引入 markdown 解析**:三条判据都取自 CommonMark 对 `[text](dest)` 的
         定义(目标起手是 `](`、不带尖括号的目标由第一个落单的 `)` 终止、`]` 紧跟
@@ -435,10 +482,10 @@ def _nested(m: re.Match) -> bool:
         i -= 1
     run = text[i:start]
     for outer in _OUTER_START.finditer(run):
-        tail = run[outer.end():]
-        if run[:outer.start()].endswith('](') and _target_closed(tail):
+        head, tail = run[:outer.start()], run[outer.end():]
+        if head.endswith('](') and _target_closed(tail):
             continue
-        if _text_closed(tail):
+        if _text_closed(head, tail):
             continue
         return text[start - 1] in _SEPARATORS or any(c in '?#' for c in tail)
     return False
