@@ -224,6 +224,29 @@ _TCO = re.compile(r'https?://t\.co/[A-Za-z0-9_]+' + _URL_TAIL)
 _ARTICLE_PATH = re.compile(r'^(https://(?:x|twitter)\.com/[A-Za-z0-9_]{1,20})/status/(\d+)')
 
 
+def _target_closed(tail: str) -> bool:
+    """这条 markdown 链接的目标在 `tail` 里就收尾了 —— 第一个**不平衡**的 `)`。
+
+    判据取自 CommonMark 对 link destination 的定义:不带尖括号的目标里括号必须
+    成对,第一个落单的 `)` 终止它。所以它回答的是「这条外层 URL 还开着吗」,
+    不是"有没有括号"。
+
+    **只对"紧前是 `](` 的起手式"问这一句**(见 `_nested` 第①步)。裸 URL 的路径里
+    一个孤立的 `)` 是 sub-delims、完全合法(`https://example.org/a)b?u=<地址>`),
+    拿这条去问它就会把一条**还开着**的外层 URL 误判成闭合 —— 容器找不到、候选被
+    当成独立地址,别人那条地址被 `_drop` 永久摘掉。限定之后它当"开着",照旧判嵌套。
+    """
+    depth = 0
+    for ch in tail:
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            if not depth:
+                return True
+            depth -= 1
+    return False
+
+
 def _nested(m: re.Match) -> bool:
     """这个匹配是嵌在**别人**那条 URL 里,不是这条推文自己写的地址。
 
@@ -243,28 +266,46 @@ def _nested(m: re.Match) -> bool:
       - **起手式只认 `https?://` 和 `www.`**(口径同 `daily_refs._autolinked`,
         大小写不敏感)。于是「裸域名 + 结构字符 + 嵌一条完整 X 地址」
         (`example.org?<地址>`)这道缝留着 —— 那不是任何真实写法。
-      - **`](` 是终止符,往左不许跨过它**。RFC 3986 把 `(` `)` `[` `]` 都算合法
-        URL 字符,而 feedgrab 的产物正文是 **markdown** —— 相邻的几条链接之间一个
-        空白都没有,整段连成一个 run。于是
+      - **`](` 是一条 markdown 链接目标的「起手标记」,不是「扫描终止符」。**
+        RFC 3986 把 `(` `)` `[` `]` 都算合法 URL 字符,而 feedgrab 的产物正文是
+        **markdown** —— 相邻的几条链接之间一个空白都没有,整段连成一个 run。于是
         `[share](https://example.org/?q=foo)[docs](https://docs.example.org/)[article](<真地址>)`
-        里这条推文**自己的**地址被判成"嵌在第一条参考链接的查询值里",
-        `needs_article` 三条判据一条都不命中:那几条链接本身当成正文入库,
-        `added=1`、`errors=[]`、`partial=[]`、接口调用 **0** 次、水位照常推进、
-        标题回落成「某某 的动态」,而 `DO NOTHING` 让它**永久**固定 ——
-        加空格再同步 `added=0`、库里和导出的 md 里仍然只有那三条链接
-        (2026-10-10 自由工作流第 3 轮审查实测,两种文章路径逐字相同)。
-        **判据是 `](` 这两个字符,不是"任何括号"**:`]` 在一条合法 URL 里**只**用于
-        IPv6 字面量收尾(`https://[2001:db8::1]/…`),后面只能跟 `:port`、`/path`
-        或结束 —— **紧跟一个 `(` 在 URL 语法里不可能出现**,所以这条可解释。
-        放宽到"任何 `(`"会把 `?target=(<地址>)` 那种分享参数重新破掉(第 1 轮修的),
-        放宽到"任何 `)`"会把 `…/docs(v2)#<地址>` 重新破掉(第 5 轮修的),只认 `]`
-        会把 IPv6 那一档重新破掉(第 6 轮修的)—— 三种都有回归钉着。
-        **没有引入 markdown 解析**:要判的是"这一个起点是不是一条 URL 的起点",
-        那是**切分**问题、不是解析问题(口径同第 4、5、6 轮答复的 `urlsplit` 路线)。
-        **"停下"不等于"放行"** —— 边界之后到候选之间那一段恰好是**同一条链接的
-        目标**,也就是同一条 URL,照旧逐字过下面那两种证据:
-        `[a](https://example.org/?u=<别人的文章地址>)` 里那条照旧判成嵌套、
-        一个字不动。
+        里这条推文**自己的**地址被判成"嵌在第一条参考链接的查询值里",三条判据一条
+        都不命中:那几条链接本身当成正文入库,`added=1`、`errors=[]`、`partial=[]`、
+        接口调用 **0** 次、水位照常推进、标题回落成「某某 的动态」,而 `DO NOTHING`
+        让它**永久**固定(2026-10-10 自由工作流第 3 轮审查实测,两种文章路径逐字
+        相同)。
+        **第 3 轮把它当终止符,那个前提被第 4 轮审查用三项实证推翻了** ——
+        依据原来是"`]` 在一条合法 URL 里只用于 IPv6 字面量收尾,后面紧跟一个 `(`
+        不可能出现";而同一条
+        `<https://example.org/share?text=[read](<别人的地址>)>` 在页面加载的真
+        `marked` 里渲染成**一条**指向 `example.org/share` 的链接、Chromium 的
+        `new URL()` 原样保留它且 `searchParams.get('text')` 返回完整的
+        `[read](<别人的地址>)`、向本地回显端点发真实 HTTP 请求收到的原始查询也逐字
+        完整。**分享按钮把一段 markdown 塞进查询值是真实写法**,那个 `](` 是**外层
+        URL 的内容**。停在那里的后果是 run 丢掉外层起点和 `?`、容器找不到,别人那条
+        地址被摘成 `…?text=[read]( )`,`_first` 还为它白发一次长文询问,而
+        `DO NOTHING` 让这一篇永久停在残稿上(把方括号改成 `%5B`/`%5D` 再同步,真实
+        SQL 调用前的正文已经完整、`added` 仍是 0;片段里同形、t.co、两种文章路径
+        逐字相同)。
+        **所以 `](` 只用来分类起手式,不用来截断扫描**:往左一路扫到底,再逐个起手式
+        找"还开着"的那条外层 URL —— 紧前是 `](` 的那个过 `_target_closed`(闭合了
+        就不可能是容器、跳过),其余一律当"开着"。三件事各有一条回归钉着:**那个
+        紧前限定不能省**(裸 URL 路径里一个孤立 `)` 合法,不限定会把还开着的外层误判
+        成闭合)、**只认不平衡的 `)`**(链接目标里的平衡括号是它路径的内容,
+        `[a](https://example.org/docs(v2)#<地址>)` 照旧是容器)、**闭合了要继续往后
+        找下一个起手式**(`[a](…?q=1)https://evil.example/?u=<地址>` 的容器是后面
+        那条)。
+        **没有引入 markdown 解析**:两条判据都取自 CommonMark 对 link destination
+        的定义(起手是 `](`、不带尖括号的目标由第一个落单的 `)` 终止),而要判的是
+        "这一个起点是不是一条 URL 的起点" —— **切分**问题、不是解析问题(口径同
+        第 4、5、6 轮答复的 `urlsplit` 路线)。
+        **边界之后那一段仍然是同一条 URL** —— 它恰好是**同一条链接的目标**,照旧
+        逐字过下面那两种证据:`[a](https://example.org/?u=<别人的文章地址>)` 里那条
+        照旧判成嵌套、一个字不动。
+        **换成闭合判据之后第 3 轮记的那道缝顺手好了**:一条链接闭合之后**紧贴**一个
+        裸 URL(`[share](https://example.org/?q=foo)https://x.com/…`)原来会被判成
+        嵌套(那里没有 `](` 可认),现在那条闭合的目标被正确跳过。
       **多个起手式时取最左那一个**(`search` 而不是 `finditer` 的末项)。它回答的是
       「候选落在**哪一条**外层 URL 里」,而那永远是最外面那条:一条 URL 的查询串
       和片段**只被空白和 `<` 终止**,所以最左那个起手式一旦进了 `?` / `#`,从那里
@@ -283,7 +324,7 @@ def _nested(m: re.Match) -> bool:
       成立即算嵌套:
       - (a) 紧前那**一个**字符是 `_SEPARATORS` 之一 —— 它占着一个路径段 / 查询值
         / 片段的位置(`?u=<地址>`、`#<地址>`、`&u=<地址>`、`/go/<地址>`);
-      - (b) **最左那个**外层起手式之后出现过 `?` 或 `#` —— 候选落在**查询串或
+      - (b) **最左那个「还开着」的**外层起手式之后出现过 `?` 或 `#` —— 候选落在**查询串或
         片段**里,而那是不透明的值容器,里面写着一条完整 URL 几乎必然是转发/重
         定向/分享参数(`?text=Read+<地址>`、`?text=Read%20<地址>`、
         `?target=(<地址>)`)。**值里装着不止一条网址时也是同一个答案** ——
@@ -331,14 +372,14 @@ def _nested(m: re.Match) -> bool:
         return False
     i = start
     while i and text[i - 1] in _URL_RUN:
-        if text[i - 1] == '(' and i >= 2 and text[i - 2] == ']':
-            break
         i -= 1
     run = text[i:start]
-    outer = _OUTER_START.search(run)
-    if outer is None:
-        return False
-    return text[start - 1] in _SEPARATORS or any(c in '?#' for c in run[outer.end():])
+    for outer in _OUTER_START.finditer(run):
+        tail = run[outer.end():]
+        if run[:outer.start()].endswith('](') and _target_closed(tail):
+            continue
+        return text[start - 1] in _SEPARATORS or any(c in '?#' for c in tail)
+    return False
 
 
 def _first(pat: re.Pattern, text: str) -> re.Match | None:
