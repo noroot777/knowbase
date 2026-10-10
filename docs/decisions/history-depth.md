@@ -1,4 +1,4 @@
-# 订阅的历史深度(kb/feeds/registry.py + sync.py)
+# 订阅的历史深度(kb/feeds/history.py + registry.py + sync.py)
 
 > 从 CLAUDE.md 外移的决策记录。CLAUDE.md 只留硬约束和一行指针,
 > 这里是完整的事故形态、实测证据、回归清单和反向验证红数。原文逐字搬运。

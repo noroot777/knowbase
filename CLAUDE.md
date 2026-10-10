@@ -654,7 +654,7 @@
 - 详细事故形态见 `docs/decisions/feed-plain.md`、`docs/decisions/doc-reader.md`、
   `docs/decisions/source-cards.md`。
 
-## 订阅的历史深度(kb/feeds/registry.py + sync.py)
+## 订阅的历史深度(kb/feeds/history.py + registry.py + sync.py)
 
 - **新订阅只收最近 `reg.HISTORY_DAYS`(5)天的内容**(`sync._within_history`)。一个刚添加的源
   常常把整个存档一次交出来(实测 500 条、最早到两年前),这些旧文随后逐批翻译、逐批重新导出,
