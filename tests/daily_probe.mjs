@@ -217,6 +217,23 @@ await waitFor(`document.getElementById('daily-reader-title').textContent === '�
 // 覆盖区间:默认接上一份日报,截止时刻是生成那一刻(不预先钉死)
 const label = await evalJs(`document.getElementById('daily-window-label').textContent`);
 check("页头写着这一份要覆盖哪一段", /覆盖 \d\d-\d\d \d\d:\d\d 起到生成时刻/.test(label), label);
+// 日报是钉在某一天的产物,生成完不会自己跟着新内容变 —— 重试失败项或新加一个
+// 订阅之后,页头得看得出"攒下了东西",否则用户没有任何线索去重新生成。
+// 这一份刚生成过,所以此刻该是"暂无新素材"而不是一个数字。
+check("页头报出还有多少素材没进过日报", /· (已攒 \d+ 条未上报素材|暂无新素材)$/.test(label), label);
+check("刚生成完就不该再说有积压", /暂无新素材$/.test(label), label);
+// 有积压时那句话长什么样。摆盘自检:探针跑到这里时今天那一份刚生成完,真实状态
+// 必然是"暂无新素材",所以这一档只能把 pending 摆进去再渲染一次(摆完复原)。
+check("有积压时页头报出条数", /· 已攒 7 条未上报素材$/.test(await evalJs(
+  `(() => { const keep = dailyWindow.pending;
+            dailyWindow.pending = { items: 5, late: 2, total: 7 };
+            renderDailyWindowLabel();
+            const t = document.getElementById('daily-window-label').textContent;
+            dailyWindow.pending = keep; renderDailyWindowLabel(); return t; })()`)));
+check("后端把这个计数一起给了出来",
+      await evalJs(`(async () => {
+        const w = await (await fetch('/api/daily/window')).json();
+        return w.pending && typeof w.pending.total === 'number'; })()`));
 await evalJs(`toggleDailyWindow()`);
 check("改区间能展开两个时刻输入",
       await evalJs(`!document.getElementById('daily-window').hidden
@@ -235,12 +252,12 @@ await evalJs(`(() => {
 await waitStatus(`!document.getElementById('daily-error').hidden`);
 await evalJs(`loadDailyReports()`);
 const banner = await evalJs(`document.getElementById('daily-error-text').textContent`);
-check("没有内容的区间给出原因而不是空日报", /没有已入库的内容/.test(banner),
+check("没有内容的区间给出原因而不是空日报", /没有未上报过的新内容/.test(banner),
       banner || await evalJs(`JSON.stringify(dailyState)`));
 check("这一段没有被写成日报",
       !(await evalJs(`[...document.querySelectorAll('[data-report]')].some(b => b.dataset.report === '2026-01-02')`)));
 check("改过的区间照原样显示",
-      /覆盖 01-01 00:00 → 01-02 00:00/.test(
+      /覆盖 01-01 00:00 → 01-02 00:00$/.test(
         await evalJs(`document.getElementById('daily-window-label').textContent`)));
 await evalJs(`resetDailyWindow()`);
 check("「接上一份日报」能把区间收回默认",

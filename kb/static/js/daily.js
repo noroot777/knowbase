@@ -49,9 +49,23 @@ function dailyClock(iso) {
 function renderDailyWindowLabel() {
   if (!dailyWindow) return;
   const since = dailyClock($('daily-since').value || dailyWindow.since);
-  $('daily-window-label').textContent = dailyWindowDirty
+  const range = dailyWindowDirty
     ? `覆盖 ${since} → ${dailyClock($('daily-until').value)}`
     : `覆盖 ${since} 起到生成时刻`;
+  $('daily-window-label').textContent = range + dailyPendingNote();
+}
+
+function dailyPendingNote() {
+  // 「还有多少素材没进过任何一份日报」。日报是钉在某一天的产物,生成完不会自己
+  // 跟着新内容变 —— 重试失败项或新加一个订阅之后,得有个地方让人看出"攒下了
+  // 东西",再决定要不要再花一次模型钱重新生成。
+  //
+  // 自定义区间时不报这个数:后端算的是默认区间(接上一份日报)那一段,贴在一个
+  // 用户刚改过的区间旁边就是另一个问题的答案。查不出来时(后端给 null)整句不写,
+  // 不写成「0 条」—— 那是在把"不知道"说成"没有"。
+  const p = dailyWindowDirty ? null : dailyWindow?.pending;
+  if (!p) return '';
+  return p.total ? ` · 已攒 ${p.total} 条未上报素材` : ' · 暂无新素材';
 }
 
 async function loadDailyWindow() {

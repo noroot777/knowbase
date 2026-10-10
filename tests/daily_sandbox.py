@@ -112,6 +112,18 @@ def main():
     env = {**os.environ, 'KB_DATA_DIR': str(data), 'KB_VAULT_ROOT': str(vault)}
     subprocess.run(['uv', 'run', 'kb', 'index', '--no-vector'], cwd=ROOT, env=env, check=True)
 
+    # 上报账本的启用分界线:钉在所有素材之前,所以一个章都不盖。
+    # 不钉的话第一次打开面板会走"启用时一次性盖章",把 `old.md`(四天前发布)
+    # 当成历史存量写掉 —— 那是**迁移那一刻**该有的行为,而这个沙箱要摆的是稳态
+    # (账本一直开着、`old.md` 是真·迟到的内容),否则探针那条「补录 1 条」验的
+    # 是另一回事。迁移那一刻的行为在 tests/test_daily_carried.py 里测。
+    import sqlite3 as _sq
+    with _sq.connect(data / 'kb.db') as _c:
+        _c.execute('CREATE TABLE IF NOT EXISTS daily_state(key TEXT PRIMARY KEY,'
+                   ' value TEXT NOT NULL)')
+        _c.execute('INSERT OR REPLACE INTO daily_state(key,value) VALUES(?,?)',
+                   ('carry_epoch', (now - timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')))
+
     # 模型:全部指到本地桩,不连外网、不花钱。
     (data / 'secrets.json').write_text(json.dumps({
         'openai': {'key': 'stub', 'base_url': f'http://127.0.0.1:{stub_port}/v1'},

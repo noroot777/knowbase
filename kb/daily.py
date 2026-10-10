@@ -20,11 +20,25 @@
 不该把它弄丢;放进 vault 也顺带让 Obsidian 那头能直接读。这个目录不在
 `kb.config.SOURCES` 的任何一棵树下,所以日报自己不会被索引进库、更不会成为
 下一份日报的素材。
+
+**「这一条上报过没有」按账本判,不靠时间窗推断**(`daily_carried` 表)。原来两个
+取材桶都是"时间窗 + 取最新 N 条":要点桶取窗口内发布的最新 `MAX_ITEMS` 条,补录桶
+取这一轮入库的最新 `LATE_ITEMS` 条。没挤进名额的条目在下一个窗口里**两个桶都选
+不到** —— 它的 `published` 和 `indexed_at` 都已经早于新的起点,于是掉进两个桶中间
+的缝里**永久消失,一行提示都没有**。实测一份日报 `late_total=679` 而只带得走 30 条,
+96% 静默丢弃;而"重试失败项"和"新加一个订阅"抓回来的内容恰好全是这个形态(发布
+时间早于当天那份日报的截止时刻),于是"日报生成之后再抓到的东西再也不会出现"。
+
+换成账本之后:没带走的条目**留在队列里**,下一份接着带;条数上限从"丢弃线"变成
+"每份带多少条"的限流。顺带治好了另一件事 —— 老文章重新导出会刷新 `indexed_at`,
+旧口径下它每天都重新算一次"这一轮才入库",连着十几天占满补录;账本只认"带走过
+没有",带走一次就再也不是候选。
 """
 
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 from dataclasses import dataclass, field
 from datetime import date as Date
@@ -42,9 +56,20 @@ from kb.store import promo_exclude_sql
 # 一份日报最多带多少条素材进 prompt。一天正常十几到几十条;真有几百条时
 # 取最新的那批,并在日报里如实写明"另有 N 条未纳入"。
 MAX_ITEMS = 120
-LATE_ITEMS = 30         # 补录那一段最多带多少条
+LATE_ITEMS = 60         # 补录那一段最多带多少条
+# 补录席位里保底留给"发布得最早、下一轮就要被 BACKLOG_DAYS 挡掉"的那几条。
+# 不留的话,只要持续有新内容进来,积压里最老的那些永远排不上队 —— 账本保证了
+# 它们还在队列里,席位分配却让它们等到过期,等于换一种方式再丢一次。
+LATE_DRAIN = 10
+# 补录最多往回捡多久**发布**的内容。这不是"丢弃线"而是编辑口径:日报不该回头
+# 报一个月前发布的东西。超出的条数照旧如实计入 `late_total`。
+BACKLOG_DAYS = 30
 EXCERPT = 400           # 每条素材的摘要上限(字符)
 DIR_NAME = 'daily'
+# 账本里那一批"启用时一次性盖的章"用的 day 值。真实日期一律是 YYYY-MM-DD,
+# 所以它不会和任何一份日报撞上,也不会被 `release()` 误删。
+SEED_DAY = '#seed'
+_EPOCH_KEY = 'carry_epoch'
 # **只有**在一份日报都没有、接不上任何截止时刻时回溯多久(天)。
 FIRST_DAYS = 1
 STAMP = '%Y-%m-%d %H:%M:%S'
@@ -180,38 +205,183 @@ def _enrich(conn, row, when: datetime | None, late: bool) -> dict:
     return doc
 
 
-def collect(conn, since: datetime, until: datetime, limit: int = MAX_ITEMS) -> Material:
-    """取窗口 (since, until] 内**发布**的素材,外加这一轮才入库的早前内容。
+# 「这一条还没有被**别的**日报带走过」。`day` 是正在写的那一份自己的日期:重新
+# 生成同一天的日报时,它上一版带走的那些必须重新可选 —— 同名文件是整份覆盖的,
+# 排除掉自己的章就等于新版本把早上已经报过的内容整段丢掉。
+_UNCARRIED = (' AND NOT EXISTS(SELECT 1 FROM daily_carried c'
+              ' WHERE c.path=d.path AND c.day<>?)')
+
+
+def _day_key(day: str | None, until: datetime) -> str:
+    return day or until.date().isoformat()
+
+
+def _select(conn, since: datetime, until: datetime,
+            day: str) -> tuple[list, list]:
+    """两个桶各自的候选(已解析时间、未取摘要)。返回 (要点候选, 补录候选)。
 
     SQL 那一层只按日期前缀粗筛(两头各放一天,给时区换算留余量),精确到分钟的
     判断在 Python 里按解析出来的时间做 —— 库里四种时间写法互相之间没法用字符串
     比大小,见 `parse_ts`。粗筛之后只剩两三天的量,排序开销可以忽略。
+
+    两个桶都只看**账本里没有**的条目,所以这个函数同时是 `collect`(真取材)和
+    `pending`(面板上"又攒了多少")的唯一口径 —— 两处各判一遍的话必然各漂各的。
+    返回的补录候选已经排好序:`[:LATE_ITEMS]` 就是该带走的那一批。
     """
     where, args = _scope()
+    args = [*args, day]
     lo = (since.date() - timedelta(days=1)).isoformat()
     hi = (until.date() + timedelta(days=1)).isoformat()
     picked = []
-    for row in conn.execute(_FIELDS + where + ' AND substr(d.published,1,10) BETWEEN ? AND ?',
+    for row in conn.execute(_FIELDS + where + _UNCARRIED
+                            + ' AND substr(d.published,1,10) BETWEEN ? AND ?',
                             [*args, lo, hi]):
         when = parse_ts(row['published'])
         if when and since < when <= until:
             picked.append((when, row))
     picked.sort(key=lambda p: p[0], reverse=True)
-    items = [_enrich(conn, row, when, False) for when, row in picked[:limit]]
 
-    # 补录:发布时间落在窗口之前(或者压根没有发布时间),但这一轮才入库。
-    # 不捡回来的话它永远进不了任何一份日报 —— 实测 RSS 差三天是常事。
-    # 判据用 indexed_at,它在库里只有 `YYYY-MM-DD HH:MM:SS` 一种写法,可以直接比。
-    late = []
-    for row in conn.execute(_FIELDS + where + ' AND d.indexed_at > ? AND d.indexed_at <= ?'
-                            ' ORDER BY d.indexed_at DESC',
-                            [*args, since.strftime(STAMP), until.strftime(STAMP)]):
+    # 补录:发布时间落在窗口之前(或者压根没有发布时间),一份日报都还没带走过。
+    # 不捡回来的话它永远进不了任何一份日报 —— 实测 RSS 差三天是常事,而"重试
+    # 失败项"抓回来的整批都是这个形态。判据是账本而**不是** `indexed_at`:后者
+    # 每次重新导出都会刷新,既会把老文章反复算成"刚入库",又答不出"这一条到底
+    # 报过没有"。
+    floor = until - timedelta(days=BACKLOG_DAYS)
+    pool = []
+    for row in conn.execute(_FIELDS + where + _UNCARRIED
+                            + " AND (d.published='' OR substr(d.published,1,10) >= ?)",
+                            [*args, floor.date().isoformat()]):
         when = parse_ts(row['published'])
-        if when is None or when <= since:
-            late.append((when, row))
-    return Material(items=items, total=len(picked),
-                    late=[_enrich(conn, row, when, True) for when, row in late[:LATE_ITEMS]],
-                    late_total=len(late))
+        if when is None or (floor < when <= since):
+            pool.append((when, row))
+    # 新的在前,读起来才像日报;末尾几个席位留给发布得最早的那些(见 LATE_DRAIN)。
+    # 没有发布时间的永远不会被 BACKLOG_DAYS 挡掉,所以不需要救,按最新排。
+    pool.sort(key=lambda p: p[0] or until, reverse=True)
+    head = pool[:max(0, LATE_ITEMS - LATE_DRAIN)]
+    rest = pool[len(head):]
+    tail = rest[len(rest) - LATE_DRAIN:] if LATE_DRAIN else []
+    return picked, head + tail + rest[:len(rest) - len(tail)]
+
+
+def collect(conn, since: datetime, until: datetime, limit: int | None = None,
+            day: str | None = None) -> Material:
+    """取这一份日报该带走的素材。`day` 缺省是 until 那一天(正在写的那一份)。
+
+    `limit` 缺省**在调用时**取 `MAX_ITEMS`,不写成形参默认值 —— 后者在 def 那一刻
+    就把当时的值绑死了,回归里 `patch.object(daily, 'MAX_ITEMS', 2)` 改到的是另一
+    份副本,于是一条本该验"名额装不下的留在队列里"的用例实际上一条都没落选。
+    """
+    cap = MAX_ITEMS if limit is None else limit
+    picked, late = _select(conn, since, until, _day_key(day, until))
+    return Material(
+        items=[_enrich(conn, row, when, False) for when, row in picked[:cap]],
+        total=len(picked),
+        late=[_enrich(conn, row, when, True) for when, row in late[:LATE_ITEMS]],
+        late_total=len(late))
+
+
+# ── 上报账本 ───────────────────────────────────────────────────────────────────
+
+def _ensure_ledger(conn, first_days: int = FIRST_DAYS,
+                   now: datetime | None = None) -> str:
+    """账本首次启用时一次性盖章,返回那条分界线。幂等。
+
+    不盖的话账本一启用,库里两万多篇历史文章全都算"没上报过",第一份日报的补录
+    候选是上千条、要几十份日报才排得空 —— 而那些内容在旧实现下早就永久落选了,
+    翻出来不是修复、是倒灌。
+
+    **分界线取"最新那一份日报的窗口起点"**,不是一个拍出来的天数:那一刻之后
+    发布的内容在新口径下仍然该被判一次(刚刚重试抓回来的、发布时间落在昨天的
+    那一批正是这个形态),之前的则已经走完了它们唯一的机会。一份日报都没有时
+    退回"`first_days` 天前",那正是第一份日报的窗口起点。
+
+    **比的是日期前缀,不是整串时间。** `published` 在库里有四种写法,同一天里
+    `T` 排在空格后面(见 `parse_ts`),按整串比会让同一天的两种写法一个盖上章、
+    一个漏掉。按日期比则是"严格早于那一天的才盖章",方向偏向多报一遍。
+    """
+    row = conn.execute('SELECT value FROM daily_state WHERE key=?',
+                       (_EPOCH_KEY,)).fetchone()
+    if row:
+        return str(row['value'])
+    until = (now or datetime.now()).replace(microsecond=0)
+    marks = [m for m in (parse_ts(r.get('window_since')) for r in reports()) if m]
+    cut = (max(marks) if marks else
+           until - timedelta(days=max(1, int(first_days or FIRST_DAYS))))
+    stamp = cut.strftime(STAMP)
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        # 锁里再查一次:两个进程同时首访时,后一个在这里就看得见前一个盖的章。
+        row = conn.execute('SELECT value FROM daily_state WHERE key=?',
+                           (_EPOCH_KEY,)).fetchone()
+        if row:
+            conn.commit()
+            return str(row['value'])
+        conn.execute(
+            'INSERT OR IGNORE INTO daily_carried(path,day,carried_at)'
+            " SELECT path,?,? FROM documents WHERE published='' OR substr(published,1,10)<?",
+            (SEED_DAY, datetime.now().strftime(STAMP), cut.date().isoformat()))
+        conn.execute('INSERT INTO daily_state(key,value) VALUES(?,?)',
+                     (_EPOCH_KEY, stamp))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return stamp
+
+
+def mark_carried(conn, day: str, paths) -> int:
+    """记下这一份日报带走了哪些条目;重新生成同一天时整批替换。返回条数。
+
+    **只能在日报文件真的落盘之后调。** 反过来的话,模型钱花掉、文件没写成,这批
+    素材已经被盖成"报过了" —— 下一份日报再也选不到它们,不可恢复。顺序不许反。
+    """
+    if day == SEED_DAY:
+        raise ValueError('不能用启用时那批章的 day 值记一份日报')
+    rows = [(p, day, datetime.now().strftime(STAMP)) for p in dict.fromkeys(paths) if p]
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        conn.execute('DELETE FROM daily_carried WHERE day=?', (day,))
+        conn.executemany('INSERT OR IGNORE INTO daily_carried(path,day,carried_at)'
+                         ' VALUES(?,?,?)', rows)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return len(rows)
+
+
+def release(conn, day: str) -> int:
+    """删掉一份日报 ⇒ 它带走的那些条目回到队列,下一份会重新覆盖它们。"""
+    if day == SEED_DAY:
+        raise ValueError('启用时那批章不随日报删除')
+    cur = conn.execute('DELETE FROM daily_carried WHERE day=?', (day,))
+    conn.commit()
+    return cur.rowcount
+
+
+def pending(first_days: int = FIRST_DAYS,
+            now: datetime | None = None) -> dict:
+    """下一份日报现在攒了多少素材 —— 面板用,零模型调用。
+
+    判据和真取材共用 `_select`,所以面板上那个数字和真生成时带走的是同一批。
+    """
+    from kb import store
+    since, until = next_window(first_days, now)
+    conn = store.connect()
+    try:
+        _ensure_ledger(conn, first_days, until)
+        # `day=''` ⇒ 一个章都不排除。`_select` 平时要放过"正在写的那一份自己盖的
+        # 章"(重新生成时它上一版带走的内容必须重新可选),而这里问的是另一个问题:
+        # "进过**任何**一份日报没有"。传当天日期的话,今天那份刚带走的内容会被
+        # 重新数成"又攒下的新素材",面板上永远有一个消不掉的数字。
+        picked, late = _select(conn, since, until, '')
+    finally:
+        conn.close()
+    return {'since': since, 'until': until, 'items': len(picked), 'late': len(late)}
 
 
 def _material(items: list[dict]) -> str:
@@ -323,7 +493,12 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
     if mat.total > len(mat.items):
         more.append(f'窗口内共 {mat.total} 条,以上列出最新的 {len(mat.items)} 条。')
     if mat.late_total > len(mat.late):
-        more.append(f'补录共 {mat.late_total} 条,以上列出最近入库的 {len(mat.late)} 条。')
+        more.append(f'补录共 {mat.late_total} 条,以上列出 {len(mat.late)} 条。')
+    # 说清"没列出的去哪了"。条数上限是**限流**而不是丢弃线:没带走的条目留在
+    # 账本外面,下一份日报接着带。不写这一句的话,"共 679 条、列出 30 条"读起来
+    # 就是"另外 649 条你再也见不到了"—— 那正是旧实现的真实行为。
+    if more:
+        more.append('没列出的留在队列里,下一份日报接着带。')
     tail = ('\n\n> ' + ' '.join(more)) if more else ''
     head = (f'# 日报 · {until:%Y-%m-%d}\n\n'
             f'> 覆盖 {_label_window(since, until)} 发布的内容(按发布时间,不是抓取时间)。\n\n')
@@ -361,7 +536,7 @@ def next_window(first_days: int = FIRST_DAYS,
     **这里没有"最长回溯几天"的上限。** 上限会把起点往后挪,被挪过去的那段
     内容就再也进不了任何一份日报:服务停四天、上限三天的话,第一天整段永久
     消失,而且一行提示都没有。素材太多是"限量"问题——`collect` 按条数截到
-    MAX_ITEMS,日报里如实写明"窗口内共 N 条,以上列出最新的 M 条",能补;
+    MAX_ITEMS、其余留在队列里等下一份,日报里也如实写明条数),能补;
     窗口断链不能补。只有一份日报都没有、接不上任何截止时刻时才回溯
     `first_days` 天,那时没有"上一份"可言,回溯多久是个纯粹的偏好。
     """
@@ -391,13 +566,15 @@ def generate(since: datetime | None = None, until: datetime | None = None,
         since, until = since or auto_since, until or auto_until
     if since >= until:
         raise ValueError('日报的起始时刻必须早于截止时刻')
+    day = until.date().isoformat()
     conn = store.connect()
     try:
-        mat = collect(conn, since, until)
+        _ensure_ledger(conn, first_days, until)
+        mat = collect(conn, since, until, day=day)
     finally:
         conn.close()
     if not mat:
-        raise LookupError(f'{_label_window(since, until)} 没有已入库的内容,先同步再生成日报')
+        raise LookupError(f'{_label_window(since, until)} 没有未上报过的新内容,先同步再生成日报')
     picked = model or llm_stages.stage_model('daily')
     shown = mat.all()
     if progress:
@@ -408,11 +585,24 @@ def generate(since: datetime | None = None, until: datetime | None = None,
                     picked, max_tokens=8192, timeout=600)
     if not body.strip():
         raise RuntimeError('模型返回了空日报,请稍后重试或换一个模型')
-    path = report_dir() / f'{until.date().isoformat()}.md'
+    path = report_dir() / f'{day}.md'
     _write(path, _page(since, until, mat, body, str(picked), sync_issues))
-    return {'date': until.date().isoformat(), 'since': since.strftime(STAMP),
-            'until': until.strftime(STAMP), 'path': str(path), 'docs': len(mat.items),
-            'total': mat.total, 'late': len(mat.late), 'model': str(picked)}
+    # 盖章排在落盘**之后**。章盖不上只是这批素材下一份会再出现一遍(多报一次,
+    # 看得见);反过来落盘失败而章已经盖上,这批素材就再也选不到了,不可恢复。
+    out = {'date': day, 'since': since.strftime(STAMP),
+           'until': until.strftime(STAMP), 'path': str(path), 'docs': len(mat.items),
+           'total': mat.total, 'late': len(mat.late), 'model': str(picked)}
+    try:
+        conn = store.connect()
+        try:
+            out['carried'] = mark_carried(conn, day, [d['path'] for d in shown])
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError) as e:          # 日报已经在盘上了,别带崩这一轮
+        out['carry_error'] = str(e)
+        if progress:
+            progress(f'日报已生成,但上报记录没写进库({e});这批素材可能在下一份里重复出现')
+    return out
 
 
 # ── 已生成的日报 ────────────────────────────────────────────────────────────────
@@ -458,8 +648,21 @@ def report(day: str) -> dict | None:
 
 
 def delete(day: str) -> bool:
+    """删一份日报,顺带把它带走的条目放回队列。
+
+    **先放回、再删文件。** 反过来的话,放回那一步失败时文件已经没了而章还盖着,
+    那批内容从此两头落空:日报里看不到、也再不会被下一份选中。按这个顺序最坏
+    情况是章放回了文件还在,那只是下一份日报多报一遍。
+    """
+    from kb import store
+
     path = _path_for(day)
     if not path.is_file():
         return False
+    conn = store.connect()
+    try:
+        release(conn, Date.fromisoformat(day).isoformat())
+    finally:
+        conn.close()
     path.unlink()
     return True
