@@ -29,7 +29,7 @@
 **另拆一个文件**是因为 `tests/test_x_article_host.py` 已经 689 行,再加两族越过
 仓库那条 700 行上限;摆盘(`FeedgrabRound`、`ArticlePathFormTests` 那两个 round
 helper)仍共用 `test_x_article_gap.py` 那一份 —— 各写一份的话两边的前提会各漂各的。
-`test_x_article_host.py` 的文件头列着这道闸的七族,③就是本文件的 `SeparatorLeadInTests`。
+`test_x_article_host.py` 的文件头列着这道闸的八族,③就是本文件的 `SeparatorLeadInTests`。
 
 跑:  python -m unittest tests.test_x_article_nested -v
 """

@@ -54,6 +54,10 @@ link destination 的定义判(不带尖括号的目标里括号必须成对,第�
 **边界之后那一段仍然是同一条 URL** —— `[a](https://example.org/?u=<别人的文章
 地址>)` 里那条照旧判成嵌套、一个字不动。这一族两头各钉一条。
 
+**这个文件只管 `[text](dest)` 的**后一半**(链接目标);前一半(显示文字像一条网址)
+在 `tests/test_x_article_label.py` —— 第 5 轮补的那条收尾判据和它的两族。分开它们
+的是"那个 `[` 在起手式的哪一边",两边的摆盘共用同一份。
+
 **判据一律是后果**(库里那一行到底是什么、导出的 md 里有没有全文),不是"有没有
 发过那次询问":只验后者的话,一个把链接当正文存下来、却顺手问了一次的实现也能
 全绿;而那一篇一旦以链接入库就永久改不回来。
@@ -478,7 +482,6 @@ class ShareValueBracketShapeTests(unittest.TestCase):
         self.assertFalse(_target_closed('example.org/docs(v2)#'))
         self.assertFalse(_target_closed('example.org/?u='))
         self.assertFalse(_target_closed('example.org/p(a)?u='))
-
 
 
 if __name__ == '__main__':
