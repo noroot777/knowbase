@@ -94,7 +94,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn('> 每天最多 20 分钟', text)
 
     def test_paragraphs_are_separated_by_a_blank_line(self):
-        """段落边界是项目里反复栽过的那件事(见 CLAUDE.md「订阅正文转纯文本」):
+        """段落边界是项目里反复栽过的那件事(见 CLAUDE.md「正文纯文本化与阅读渲染」):
         单换行在 vault md 里会被 markdown 合并成一段,翻译那边也按 `\\n\\n` 切块。"""
         text = self.body()
         self.assertIn('来回问。\n\n## Teamily', text)
