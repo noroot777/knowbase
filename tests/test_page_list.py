@@ -23,8 +23,8 @@ from kb import config, maintenance
 from kb.collectors import FetchScope
 from kb.feeds import fetching, fulltext, page_list, registry as reg, sync, translate
 from kb.feeds.fetching import FeedError, Response
-from kb.feeds.page_list import (item_published, item_subject, item_title,
-                                parse_page_list, read_published, shell_body)
+from kb.feeds.page_list import (item_published, item_subject, parse_page_list,
+                                read_published, shell_body)
 from kb.source_types import feed_types
 
 SAMPLE = (Path(__file__).parent / 'page_list_sample.html').read_bytes()

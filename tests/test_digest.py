@@ -51,6 +51,16 @@ def block(n, *, title=None, host='example.org', text=None):
             text or ('Body text for story %s. ' % n) * 8)
 
 
+# 每期三条**各自不同链接**的简讯。真样本(SAMPLE)每期的外链是同一批,而
+# `put_items` 按 `sha256(kind:url)` 去重 —— 拿它当多期样本的话"第二期一条都
+# 没新增"会被误读成去重正常,正好把漏期这件事盖掉。
+def issue_page(day: str, n: int = 3) -> bytes:
+    return page([block(f'{day}-{i}') for i in range(n)])
+
+
+DAYS9 = [f'2026-10-{d:02d}' for d in range(1, 10)]
+
+
 class SplitTests(unittest.TestCase):
     """拆块的判据:并列的、结构相同的块,每块一个外链 + 一段够长的文字。"""
 
@@ -214,9 +224,25 @@ class WatermarkTests(unittest.TestCase):
             out = digest.prefetch([source], {})
         return out[source['id']], seen
 
-    def source(self, water='', sid=1):
+    def run_days(self, source, days, **kw):
+        """每期一份**自己的**内容(见 `issue_page`),返回请求过的期号页面。"""
+        seen = []
+
+        def fake(url, headers=None, **kwargs):
+            if 'api/rss' in url:
+                return fetching.Response(status=200, url=url, body=rss(*days), headers={})
+            seen.append(url)
+            return fetching.Response(status=200, url=url,
+                                     body=issue_page(url.rsplit('/', 1)[-1]), headers={})
+
+        with patch.object(digest, 'request', fake):
+            out = digest.prefetch([source], {}, **kw)
+        return out[source['id']], seen
+
+    def source(self, water='', sid=1, floor=''):
         return {'id': sid, 'kind': 'digest', 'url': FEED, 'etag': '', 'modified': '',
-                'resolved_url': '', 'config': json.dumps({'digest_issue': water} if water else {})}
+                'resolved_url': '', 'history_floor': floor,
+                'config': json.dumps({'digest_issue': water} if water else {})}
 
     def test_only_issues_newer_than_the_watermark_are_fetched(self):
         # 水位和期号都按项目时区(`parse_feed` 把 GMT 换算成 Asia/Shanghai),
@@ -249,6 +275,81 @@ class WatermarkTests(unittest.TestCase):
         days = [f'2026-09-{d:02d}' for d in range(10, 30)]
         _, seen = self.run_prefetch(self.source(), days=days)
         self.assertEqual(len([u for u in seen if 'api/rss' not in u]), digest.MAX_ISSUES)
+
+    def test_the_round_budget_truncates_the_new_end_not_the_old_one(self):
+        """**后果先断言**:水位只能连续推进,所以额度必须截掉**新**的那一头。
+
+        照 RSS 的新到旧顺序先截再排的话,取到的是最新六期、水位跟着推到最新,
+        被截掉的三期从此任何一轮增量都选不到(2026-10-10 审查那份证据)。
+        """
+        got, seen = self.run_days(self.source(), DAYS9)
+        self.assertEqual([u.rsplit('/', 1)[-1] for u in seen], DAYS9[:digest.MAX_ISSUES])
+        self.assertEqual(got['watermark'], '2026-10-06 08:00')
+
+    def test_the_leftover_issues_are_spelled_out(self):
+        """"攒了九期只读了六期"和"全读完了"在面板上不该长得一模一样。"""
+        got, _ = self.run_days(self.source(), DAYS9)
+        self.assertIn('还有 3 期没读', got['incomplete'])
+        self.assertIn('2026-10-07', got['incomplete'])
+
+    def test_reading_everything_leaves_no_note(self):
+        got, _ = self.run_days(self.source(), DAYS9[:3])
+        self.assertNotIn('incomplete', got)
+
+    def test_a_ranged_backfill_ignores_the_daily_watermark(self):
+        """区间补抓读的是用户点名的那段日期,日常水位可能早就越过它了。"""
+        got, seen = self.run_days(self.source('2026-10-09 08:00'), DAYS9,
+                                  since='2026-10-01', until='2026-10-03')
+        self.assertEqual([u.rsplit('/', 1)[-1] for u in seen], DAYS9[:3])
+        self.assertTrue(got['entries'])
+
+    def test_a_ranged_backfill_does_not_touch_the_daily_watermark(self):
+        got, _ = self.run_days(self.source('2026-10-05 08:00'), DAYS9,
+                               since='2026-10-01', until='2026-10-03')
+        # 空串 = 不产生补丁,所以日常那一侧一个字都没动(第二道在
+        # `sync._save_result` 重建 validators 那一句)。
+        self.assertEqual(got['watermark'], '')
+        self.assertEqual(digest.watermark_patch(got['watermark']), {})
+
+    def test_a_ranged_backfill_rereads_a_day_the_daily_round_already_took(self):
+        """审查 CASE 3:删掉已收录的那一期再补抓当天,得真去读那一页。"""
+        _, seen = self.run_days(self.source('2026-10-09 08:00'), DAYS9,
+                                since='2026-10-09', until='2026-10-09')
+        self.assertEqual([u.rsplit('/', 1)[-1] for u in seen], ['2026-10-09'])
+
+    def test_a_ranged_backfill_says_how_to_get_the_rest(self):
+        """区间那一侧不推水位,下一轮不会自动接上 —— 重复点同一个区间永远只
+        读最旧那几期,所以提示必须给出可操作的下一步。"""
+        got, _ = self.run_days(self.source(), DAYS9, since='2026-10-01', until='2026-10-09')
+        self.assertIn('还有 3 期没读', got['incomplete'])
+        self.assertIn('把起始日期改到 2026-10-07', got['incomplete'])
+
+    def test_a_range_older_than_the_feed_says_why_nothing_came_back(self):
+        """期号清单只能从 RSS 拿,它只留最近几十期 —— 更早的日期无从抓起。
+        不说的话面板上就是"新增 0 条、同步已完成",和"筛选把它排空了"同形。"""
+        got, seen = self.run_days(self.source(), DAYS9,
+                                  since='2026-09-01', until='2026-09-05')
+        self.assertEqual(seen, [])
+        self.assertIn('不在简报还列着的 9 期里', got['incomplete'])
+        self.assertIn('2026-10-01', got['incomplete'])
+
+    def test_issues_below_the_history_floor_are_not_even_requested(self):
+        """下界之前的期号无论如何都入不了库(`sync._within_history` 会丢掉),
+        而这条通道是"一期一次 HTTP" —— 不筛的话新订阅第一轮的额度全花在下界
+        之前那几期上,一条都入不了库,要连抓三轮才够到今天的内容。"""
+        _, seen = self.run_days(self.source(floor='2026-10-07'), DAYS9)
+        self.assertEqual([u.rsplit('/', 1)[-1] for u in seen], DAYS9[6:])
+
+    def test_a_ranged_backfill_is_the_escape_hatch_from_the_history_floor(self):
+        """反过来钉一边:区间是那道闸的逃生口(口径同 `_within_history`)。"""
+        _, seen = self.run_days(self.source(floor='2026-10-07'), DAYS9,
+                                since='2026-10-01', until='2026-10-02')
+        self.assertEqual([u.rsplit('/', 1)[-1] for u in seen], DAYS9[:2])
+
+    def test_a_daily_round_still_filters_by_the_watermark(self):
+        """反过来钉一边:只给一头日期不算区间,日常增量照旧。"""
+        _, seen = self.run_days(self.source('2026-10-07 08:00'), DAYS9, since='2026-10-01')
+        self.assertEqual([u.rsplit('/', 1)[-1] for u in seen], ['2026-10-08', '2026-10-09'])
 
     def test_take_hands_the_watermark_back_as_a_config_patch(self):
         """水位和条目要在**同一个事务**里提交,所以它是交回去的一份补丁,不是
@@ -347,6 +448,31 @@ class EndToEndTests(unittest.TestCase):
         with patch.object(digest, 'request', fake), patch.object(fetching, 'request', fake):
             return sync.collect('digest', FetchScope())
 
+    def collect_days(self, days, scope=FetchScope()):
+        """每期一份自己的内容,返回 `(summary, 请求过的期号页面)`。"""
+        from kb.feeds import sync
+        seen = []
+
+        def fake(url, headers=None, **kw):
+            if 'api/rss' in url:
+                return fetching.Response(status=200, url=url, body=rss(*days), headers={})
+            seen.append(url.rsplit('/', 1)[-1])
+            return fetching.Response(status=200, url=url,
+                                     body=issue_page(url.rsplit('/', 1)[-1]), headers={})
+
+        with patch.object(digest, 'request', fake), patch.object(fetching, 'request', fake):
+            return sync.collect('digest', scope), seen
+
+    def stored(self):
+        with self.reg.db() as c:
+            return sorted(r[0] for r in c.execute(
+                "SELECT url FROM feed_items WHERE kind='digest'"))
+
+    def water(self):
+        with self.reg.db() as c:
+            cfg = c.execute("SELECT config FROM subscriptions WHERE kind='digest'").fetchone()[0]
+        return (json.loads(cfg) or {}).get('digest_issue', '')
+
     def test_stories_land_with_their_blurb_and_the_watermark_moves(self):
         summary = self.collect()
         self.assertEqual(summary['errors'], [])
@@ -363,3 +489,56 @@ class EndToEndTests(unittest.TestCase):
     def test_a_second_round_re_reads_nothing(self):
         self.collect()
         self.assertEqual(self.collect()['added'], 0)
+
+    def test_a_backlog_is_caught_up_round_by_round_without_losing_the_oldest(self):
+        """**后果先断言**:九期积压分两轮收完,一期都不许静默消失。
+
+        2026-10-10 审查那份证据的反面 —— 当时第一轮收最新六期(18 条)、水位
+        推到 10-09,第二轮一期页面都不请求、新增 0 条,10-01~10-03 那九条简讯
+        永久缺失。
+        """
+        first, seen1 = self.collect_days(DAYS9)
+        self.assertEqual(first['errors'], [])
+        self.assertEqual(first['added'], 18)
+        self.assertEqual(seen1, DAYS9[:6])
+        self.assertEqual(len(first['partial']), 1)
+        self.assertIn('还有 3 期没读', first['partial'][0]['reason'])
+
+        second, seen2 = self.collect_days(DAYS9)
+        self.assertEqual(second['added'], 9)
+        self.assertEqual(seen2, DAYS9[6:])
+        self.assertEqual(self.water(), '2026-10-09 08:00')
+        self.assertEqual(self.stored(),
+                         sorted(f'https://example.org/{d}-{i}' for d in DAYS9 for i in range(3)))
+        # 读完了就不该再留着"还没读完"那句提示。
+        self.assertEqual(second['partial'], [])
+
+    def test_a_ranged_backfill_reaches_days_the_daily_watermark_passed(self):
+        """审查 CASE 2:日常水位已经越过那段日期,用户点名补抓时得真去读。"""
+        self.collect_days(DAYS9[6:])                       # 日常先收最新三期
+        self.assertEqual(self.water(), '2026-10-09 08:00')
+        summary, seen = self.collect_days(
+            DAYS9, FetchScope(since='2026-10-01', until='2026-10-03'))
+        self.assertEqual(summary['errors'], [])
+        self.assertEqual(summary['added'], 9)
+        self.assertEqual(seen, DAYS9[:3])
+        for d in DAYS9[:3]:
+            self.assertIn(f'https://example.org/{d}-0', self.stored())
+        # 区间补抓不改日常增量的任何状态。
+        self.assertEqual(self.water(), '2026-10-09 08:00')
+
+    def test_a_ranged_backfill_can_bring_back_a_day_that_was_deleted(self):
+        """审查 CASE 3:收过、又被清掉的那一天,点名补抓要能回来。"""
+        self.collect_days(DAYS9[8:])
+        with self.reg.db() as c:
+            # 顺序同 `scripts/feed_trim_history._cut_feeds`:先摘归属再删条目。
+            c.execute("DELETE FROM subscription_items WHERE item_key IN "
+                      "(SELECT key FROM feed_items WHERE kind='digest')")
+            c.execute("DELETE FROM feed_items WHERE kind='digest'")
+        self.assertEqual(self.stored(), [])
+        summary, seen = self.collect_days(
+            DAYS9, FetchScope(since='2026-10-09', until='2026-10-09'))
+        self.assertEqual(seen, ['2026-10-09'])
+        self.assertEqual(summary['added'], 3)
+        self.assertEqual(self.stored(),
+                         sorted(f'https://example.org/2026-10-09-{i}' for i in range(3)))

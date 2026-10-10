@@ -214,11 +214,16 @@ def _prefetch_x(kind, sources, settings, scope):
                         should_stop=lambda: bool(_state.get('stop_requested')))
 
 
-def _prefetch_digest(kind, sources, settings):
+def _prefetch_digest(kind, sources, settings, scope):
     """简报通道的整批预取。跑在起线程池之前,所以读侧不必加锁。
 
     一期都抓不到也不抛:失败落在它自己那一项上,随后 `fetch_source` 会把它
     翻成这条订阅的失败 —— 口径同 `_prefetch_x`。
+
+    **区间补抓那段日期要在这儿交下去**(口径同 `_prefetch_x`)。这条通道是预取
+    的:`unconditional` 压根到不了它,而 `_save_result` 的日期筛选排在拿到结果
+    之后 —— 预取时按日常水位筛掉的期号,后面没有任何一步救得回来(实测点名一段
+    旧日期时一期页面都不请求、报"新增 0 条、同步已完成",2026-10-10 审查)。
     """
     digest.reset()
     picked = digest.targets(sources) if digest.supports(kind) else []
@@ -229,7 +234,10 @@ def _prefetch_digest(kind, sources, settings):
     def progress(url):
         _stage('crawl', 'running', f'{reg.KINDS[kind]} · {url}')
 
-    digest.prefetch(sources, settings, budget=DIGEST_SECONDS, on_progress=progress,
+    digest.prefetch(sources, settings, budget=DIGEST_SECONDS,
+                    since=scope.since if scope.ranged else '',
+                    until=scope.until if scope.ranged else '',
+                    on_progress=progress,
                     should_stop=lambda: bool(_state.get('stop_requested')))
 
 
@@ -286,7 +294,7 @@ def collect(kind, scope):
     # Budget-limited runs continue with never/least recently attempted sources.
     pending.sort(key=lambda s: (s['last_attempt'], s['id']))
     _prefetch_x(kind, pending, settings, scope)
-    _prefetch_digest(kind, pending, settings)
+    _prefetch_digest(kind, pending, settings, scope)
     # 预取可能跑十几分钟(见 X_LOCAL_SECONDS),所以 HTTP 那一侧的预算要在它
     # **之后**才开始算。算在前面的话,预取一跑完每条订阅都已经超了预算,整轮
     # 一条也取不走、全部记成"留待下次"—— 而东西明明已经抓在手里了。
