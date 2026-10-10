@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import bisect
 import re
 
 # 外层 URL 的**结构分隔符**:候选紧贴在它们右边时,占的正是一个路径段 / 查询值 /
@@ -120,6 +121,90 @@ def _target_closed(tail: str) -> bool:
                 return True
             depth -= 1
     return False
+
+
+# 二分 `_code_spans` 的区间时用的右哨兵:跨度的终点永远 ≤ 行长,所以拿它当
+# 「这个位置之后」的上界,`(at, _SPAN_END)` 必然排在所有起点为 `at` 的跨度后面。
+_SPAN_END = 1 << 62
+
+
+def _code_spans(line: str) -> tuple[tuple[int, int], ...]:
+    """这一行里**行内代码跨度**占的区间 —— 里面的 `[` / `]` 不是链接结构字符。
+
+    CommonMark 把 code span 的识别排在 link 之前,所以 `` `[` `` 里那个左括号压根
+    不开启一段 link text(真 `marked` 实测:它渲染成 `<code>[</code>`,而紧跟着那条
+    autolink 仍是**一条**完整的外部链接)。`_text_closed` 的左半边要回答的正是
+    「这个 `[` 是一段显示文字的开头吗」,所以它得先知道哪些位置在代码里。
+
+    判据逐字取自规范,两条:①一串 N 个反引号开启,**下一个恰好 N 个**的串闭合
+    (所以 `` `a``b` `` 整条是一个跨度,内容是 ``a``b``,不是两个);②找不到那样的
+    闭合串时,这串反引号就是**字面文本** —— 那时它不构成跨度,后面的 `[` 照旧是
+    结构字符。顺带认反斜杠转义:`` \\` `` 不开启跨度(backslash escape 对 ASCII
+    标点有效),而跨度**里面**的反斜杠是字面(所以先判跨度、再判转义,见 `_inert`)。
+
+    **范围是本行,和 `head` 一致**(见 `_text_closed` 那段三档取舍)。跨软换行的
+    代码跨度因此看不见 —— 那是「本行」这个范围固有的那道缝的另一面,和跨行显示
+    文字同族:两头都是永久损坏,线划在"一条链接、一段代码写在一行内"上。
+    """
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(line)
+    while i < n:
+        if line[i] == '\\':
+            i += 2
+            continue
+        if line[i] != '`':
+            i += 1
+            continue
+        run = i
+        while run < n and line[run] == '`':
+            run += 1
+        fence, k, i = run - i, run, run
+        while k < n:
+            if line[k] == '\\':
+                k += 2
+                continue
+            if line[k] != '`':
+                k += 1
+                continue
+            end = k
+            while end < n and line[end] == '`':
+                end += 1
+            if end - k == fence:
+                spans.append((run - fence, end))
+                i = end
+                break
+            k = end
+    return tuple(spans)
+
+
+def _inert(line: str, at: int, spans: tuple[tuple[int, int], ...]) -> bool:
+    """这个位置上的 `[` / `]` **不是** markdown 链接的结构字符:它被反斜杠转义了,
+    或者落在一段行内代码里 —— 两种写法里它都只是一个字面的方括号。
+
+    **奇数个**连续反斜杠才算转义:`\\[` 是字面左括号,`\\\\[` 是字面反斜杠加一个真的
+    link text 起手。先查代码跨度再数反斜杠,因为跨度里面的反斜杠是字面 —— 不过
+    这两道的顺序其实不影响结果:跨度以反引号收尾,所以一个在跨度内的 `\\` 和跨度外
+    的 `[` 之间必然隔着那个反引号,数不到它。
+
+    **只有 `_text_closed` 的左半边问这一句,右半边(`tail`)不问,而这不是漏掉的。**
+    `tail` 整段落在 `run` 里面,而 `run` 是按 `_URL_RUN` 往左吃出来的 —— 那个集合
+    是 RFC 3986 的字符表,**既没有反斜杠也没有反引号**。于是 `tail` 里的 `[` / `]`
+    在结构上不可能被转义、也不可能在代码里,`_target_closed` 同理。两边的范围不同,
+    所以判据也不同:`head` 是本行的**自由文本**,`tail` 是一段 URL 字符。
+    """
+    # 二分而不是逐段扫:`spans` 按位置有序、互不重叠,而这个函数被
+    # 「每个候选 × 每个起手式 × 本行每个方括号」各调一次 —— 逐段扫是
+    # `O(方括号数 × 跨度数)`,实测一行 20000 字符的 `` `[` `` 要 0.93 秒
+    # (10000 字符 0.23 秒,正好四倍),而二分之后是 0.0017 秒。那不是真实写法,
+    # 但推文正文对 premium 用户能写到两万字,口径同第 6 轮把往左扫描从
+    # `re.search` 换成逐字走那次。
+    at_or_before = bisect.bisect_right(spans, (at, _SPAN_END)) - 1
+    if at_or_before >= 0 and at < spans[at_or_before][1]:
+        return True
+    slashes = 0
+    while at - slashes and line[at - slashes - 1] == '\\':
+        slashes += 1
+    return slashes % 2 == 1
 
 
 def _text_closed(head: str, tail: str) -> bool:
@@ -226,23 +311,67 @@ def _text_closed(head: str, tail: str) -> bool:
     (返回 False、照旧判嵌套),方向上偏向"保护别人的地址"。markdown 产物里显示
     文字一旦含 `]` 必然转义,所以这一档没有真实写法。
 
-    **三件事各有一条回归钉着**,而且射程不重叠:去掉左边那一半,上面那五种参考
+    **而范围里哪些 `[` 算 markdown 结构字符,是第 8 轮的根因 —— 范围对了,可这
+    一半只会数括号。** CommonMark 里被**转义**的、以及落在一段**行内代码**里的
+    方括号是**字面文本**,压根不开启 link text;而这个深度计数把它们一并数了进去。
+    于是一条完整的外部参考地址里那个字面方括号被当成显示文字的开头,它的 tail
+    又继承了真目标的 `?text=`,这条推文**自己的**文章地址第四次被判成"嵌在别人的
+    查询值里":
+
+        我的长文 https://x.com/Example/article/10001
+        分享参考 \[<https://example.org/share?text=read](https://x.com/Other/article/20002)>]
+
+    (`\[` 是字面方括号,尖括号包着的是一整条 `example.org` 参考地址、内部那条 X
+    地址是它的查询内容。) 末态和前几轮逐字相同:`added=1`、`errors=[]`、
+    `partial=[]`、水位照常推进、自己的长文照旧补到、一行提示都没有,而别人那条
+    地址被 `_drop` 摘成 `…?text=read]( )`;`DO NOTHING` 之下把 `]` 换成 `%5D` 再
+    同步 `added=0`、库里和导出的 md 逐字还是坏正文 —— **重复同步补不回来**
+    (2026-10-10 自由工作流第 8 轮审查实测;转义 + 中文说明、行内代码 `` `[` ``、
+    片段容器 `…/a](b)#<地址>`、旧式文章路径、t.co 短链,六种形态逐字相同,而上一轮
+    版本 `7f184c5` 对同一份输入全部逐字保留 —— 所以它是第 7 轮扩大范围自己开出来
+    的缺口)。
+
+    **分界线是那个 `[` 到底开不开启 link text,不是"它长什么样"。** 真 `marked` +
+    `DOMPurify` 实证(同一次审查):上面六种**各渲染成恰好一条完整的外部链接**
+    (`href` 经 `unquote` 后逐字等于输入那条地址);而**未转义**的
+    `[<https://example.org/share?text=read](<别人的地址>)>]` 被 marked 解释成**一条
+    独立的 X 链接** —— 那一档摘掉是对的,照旧走上面那条显示文字的路。同一行里
+    落单的未转义 `[`(`注:[ <…>`)也是这一档。
+
+    **所以往左扫描时跳过"不是结构字符"的那些**(`_inert`,判据逐字取自 CommonMark,
+    仍然没有引入 markdown 解析):①被**奇数个**连续反斜杠转义的;②落在一段
+    **闭合的**行内代码跨度里的(`_code_spans`:N 个反引号由**恰好 N 个**的串闭合,
+    找不到闭合串时它就是字面文本、不构成跨度)。
+
+    **右半边(`tail`)不问这一道,而且不是漏掉的** —— 它整段落在 `run` 里,而
+    `_URL_RUN` 是 RFC 3986 的字符表、**既没有反斜杠也没有反引号**:`tail` 里的
+    方括号结构上不可能被转义或写在代码里(`_target_closed` 同理)。回归里有一条
+    **契约**钉住这个不变量,改 `_URL_RUN` 时它会红。
+
+    **这里也留着对称的一道缝**:跨**软换行**的行内代码跨度看不见(开头在上一行、
+    `[` 在本行时它被当成结构字符)—— 和上面那道跨行 link text 的缝同族,线划在
+    同一处「一条链接、一段代码写在一行内」。
+
+    **四件事各有一条回归钉着**,而且射程不重叠:去掉左边那一半,上面那五种参考
     链接的地址被永久剪断;把左边的范围退回 run 的左边界,六种带说明的显示文字
-    一律漏抓自己的长文;去掉右边那一半(或者不数深度/不要求紧跟 `(`),第 4、5 轮
-    那两族回来。
+    一律漏抓自己的长文;不跳过字面方括号,第 8 轮那六种参考地址被永久剪断;
+    去掉右边那一半(或者不数深度/不要求紧跟 `(`),第 4、5 轮那两族回来。
     """
     if '[' not in head:
         return False
+    spans = _code_spans(head) if '`' in head else ()
     pending, standing = 0, False
-    for ch in reversed(head):
+    for at in range(len(head) - 1, -1, -1):
+        ch = head[at]
+        if ch not in '[]' or _inert(head, at, spans):
+            continue
         if ch == ']':
             pending += 1
-        elif ch == '[':
-            if pending:
-                pending -= 1
-            else:
-                standing = True
-                break
+        elif pending:
+            pending -= 1
+        else:
+            standing = True
+            break
     if not standing:
         return False
     depth = 0
@@ -423,5 +552,3 @@ def _nested(m: re.Match) -> bool:
             continue
         return text[start - 1] in _SEPARATORS or any(c in '?#' for c in tail)
     return False
-
-
