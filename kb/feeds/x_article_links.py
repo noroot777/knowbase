@@ -253,8 +253,8 @@ def _text_closed(head: str, tail: str) -> bool:
 
     判据同样取自 CommonMark 对 `[text](dest)` 的定义,只是换成前一半:`]` 紧跟一个
     `(` 时它结束的是 link **text**。**而这要两头的证据,缺一头就不是显示文字:**
-    - **左边**(`head`,起手式到 run 开头那一段)里有一个**还开着**的 `[` —— 那就是
-      这段显示文字的开头;
+    - **左边**(`head`,**本行行首**到起手式那一段 —— 不是 run 开头,见下面第 7 轮
+      那段)里有一个**还开着**的 `[` —— 那就是这段显示文字的开头;
     - **右边**(`tail`,起手式到候选那一段)里有一个**落单**的 `]` 紧跟着 `(` ——
       那是它的收尾,也就是紧接着的链接目标起手标记。
 
@@ -278,6 +278,51 @@ def _text_closed(head: str, tail: str) -> bool:
     一段 markdown 塞进 `?text=` 就是它(同一条在真 `marked` 里渲染成**一条**
     指向 `example.org/share` 的链接,向本地回显端点发真实请求收到的查询值也逐字
     完整,见 `_nested` 第①步那段)。
+
+    **而左边那一半问的是 markdown 结构,所以它的扫描范围不能是 URL 字符段 ——
+    第 6 轮把它写成 run 的左边界,那是第 7 轮的根因。** `_URL_RUN` 是 RFC 3986 的
+    字符全集,里面**没有空白、没有非 ASCII**;而 CommonMark 的 link text 可以装
+    任意字符(除了未转义的 `]`)—— 显示文字里只要有一个空格、一个汉字、一个 emoji,
+    那个 `[` 就被截在 run 的范围之外,`head` 成了空的,这道闸当场答反:
+    `[Visit www.example.org](https://example.org/?q=foo)[article](<真地址>)` 里
+    扫描停在第 7 个字符,排除掉的前缀恰好是 `[Visit ` —— 于是最左那个起手式 `www.`
+    被当成一条"还开着"的外层 URL,它的 tail 里有真目标的 `?q=foo`,这条推文
+    **自己的**文章地址又一次被判成"嵌在别人的查询值里":那两条链接本身当成正文
+    入库,`added=1`、`errors=[]`、`partial=[]`、**接口调用 0 次**、水位照常推进、
+    标题回落成「某某 的动态」,而 `DO NOTHING` 让它**永久**固定 —— 两条链接之间
+    **加一个空格再同步 `added=0`**,库里和导出的 md 里仍然只有那两条链接
+    (2026-10-10 自由工作流第 7 轮审查实测;中文说明 `[阅读www.example.org]`、
+    emoji 前缀 `[🔗www.example.org]`、显示文字自带 scheme
+    `[Visit https://example.org/]`、片段容器、旧式文章路径,六种形态逐字相同,而
+    上一轮版本 `7f184c5` 对同一份输入全部拿得到全文)。**变量就是"显示文字里有
+    没有非 URL 字符"** —— 把说明改成全 ASCII 无空格的 `Visit:` 就又对了,而
+    「链接文字前面写一句说明」是最常见的写法之一。
+
+    **所以 `head` 取**本行行首**到起手式那一段,而不是整篇正文。** 三档里行是那个
+    可解释的中间点:
+    - 取 run 的左边界(第 6 轮那版)= 用 URL 字符集给 markdown 划界,上面那六种
+      真实写法一律漏判,**自己的长文永久漏抓**;
+    - 取整篇正文 = 正文里**任何**一个落单的 `[`(`[注`、一段 `arr[0` 的代码)都让
+      这道闸成立,而第 6 轮那一档的全部特征就是"`head` 为空" —— 它当场重开,
+      **别人的地址被永久剪断**;
+    - 取本行 = 覆盖上面那六种(markdown 产物和推文正文里一条链接必然写在一行内:
+      分享按钮生成的 md 不跨行,X 的正文也不会把一条链接拆开),同时把误判面关在
+      同一行里。**而在一行之内它和 CommonMark 是一致的**:同一行里一个落单的 `[`
+      真的开启一段 link text —— `见 [注 分享参考 https://example.org/share?text=
+      read](<别人的地址>)` 在 `markdown-it` 的 `gfm-like` 方言里渲染成**一条**
+      链接,text 是 `注 分享参考 https://example.org/share?text=read`、目标就是那条
+      X 地址(2026-10-10 实测),所以那条地址是**一个链接目标**、不嵌在任何别的 URL
+      里,照 `[article](<地址>)` 同一条口径摘掉它是语法正确的那一边。
+    **已知留着一道缝,它是这个取舍的另一头**:显示文字跨**软换行**时
+    (`见 [注\n说明 www.example.org](https://example.org/?q=foo)[article](<真地址>)`)
+    CommonMark 照旧把它当成一段 link text(同一次实测:两条独立链接,第一条的 text
+    逐字是 `注\n说明 www.example.org`),而我们判成嵌套 —— 自己的长文在这一档漏抓,
+    也就是上面那一档重现。不往 block(空行)放宽是因为那会把误判面扩到整段,而段内
+    落单的 `[` 之后 CommonMark 的结论和这条判据未必一致(`见 [注
+    https://example.org/a](b)#<别人的地址>` 渲染出的链接目标是 `b`,那条 X 地址压根
+    不在链接里),于是第 6 轮那一档就从"head 为空"扩散成"段内有没有落单的 `[`"。
+    两头都是永久损坏,线划在"一条链接写在一行内"上 —— 这一条可解释,而且是 markdown
+    产物与推文正文的事实。**两头各有一条回归钉着这个取舍,改方向时要一起改。**
 
     **这一道和 `_target_closed` 正好分开两族真实写法,差别只在"那个 `[` 在起手式的
     哪一边",而那正是这个深度计数回答的事:**
@@ -306,17 +351,24 @@ def _text_closed(head: str, tail: str) -> bool:
     (返回 False、照旧判嵌套),方向上偏向"保护别人的地址"。markdown 产物里显示
     文字一旦含 `]` 必然转义,所以这一档没有真实写法。
 
-    **两头各有一条回归钉着**,而且它们的射程不重叠:去掉左边那一半,上面那五种
-    参考链接的地址被永久剪断;去掉右边那一半(或者不数深度/不要求紧跟 `(`),
-    第 4、5 轮那两族回来。
+    **三件事各有一条回归钉着**,而且射程不重叠:去掉左边那一半,上面那五种参考
+    链接的地址被永久剪断;把左边的范围退回 run 的左边界,六种带说明的显示文字
+    一律漏抓自己的长文;去掉右边那一半(或者不数深度/不要求紧跟 `(`),第 4、5 轮
+    那两族回来。
     """
-    depth = 0
-    for ch in head:
-        if ch == '[':
-            depth += 1
-        elif ch == ']' and depth:
-            depth -= 1
-    if not depth:
+    if '[' not in head:
+        return False
+    pending, standing = 0, False
+    for ch in reversed(head):
+        if ch == ']':
+            pending += 1
+        elif ch == '[':
+            if pending:
+                pending -= 1
+            else:
+                standing = True
+                break
+    if not standing:
         return False
     depth = 0
     for i, ch in enumerate(tail):
@@ -396,11 +448,18 @@ def _nested(m: re.Match) -> bool:
         `…?text=read]( )` 并由 `DO NOTHING` 永久固定(2026-10-10 自由工作流第 6 轮
         审查实测,五种形态见 `_text_closed` 的 docstring)。两头各有自己的回归,
         射程不重叠。
-        五件事各有一条回归钉着:**两条紧跟限定都不能省**(裸 URL 路径里孤立的 `)`
+        **而左边那一半的扫描范围是**本行**,不是这个 run** —— 第 6 轮按 run 的
+        左边界取 `head`,那是第 7 轮的根因:`_URL_RUN` 里没有空白也没有非 ASCII,
+        而显示文字可以装任意字符,于是
+        `[Visit www.example.org](https://example.org/?q=foo)[article](<真地址>)`
+        里那个 `[` 被一个空格截在 run 之外、`head` 成了空的,这条推文**自己的**地址
+        被判成嵌套、长文永久漏抓(2026-10-10 自由工作流第 7 轮审查实测,六种形态和
+        三档范围的取舍写在 `_text_closed` 的 docstring 里)。
+        六件事各有一条回归钉着:**两条紧跟限定都不能省**(裸 URL 路径里孤立的 `)`
         和 `]` 都是合法字符,不限定会把还开着的外层误判成闭合)、**只认不平衡的 `)`**
         (链接目标里的平衡括号是它路径的内容,`[a](https://example.org/docs(v2)#<地址>)`
-        照旧是容器)、**显示文字那一道要左右两头都有证据**、**闭合了要继续往后找下
-        一个起手式**
+        照旧是容器)、**显示文字那一道要左右两头都有证据**、**左边那一头按本行取而
+        不是按 run 取**、**闭合了要继续往后找下一个起手式**
         (`[a](…?q=1)https://evil.example/?u=<地址>` 的容器是后面那条)。
         **没有引入 markdown 解析**:三条判据都取自 CommonMark 对 `[text](dest)` 的
         定义(目标起手是 `](`、不带尖括号的目标由第一个落单的 `)` 终止、`]` 紧跟
@@ -480,9 +539,9 @@ def _nested(m: re.Match) -> bool:
     i = start
     while i and text[i - 1] in _URL_RUN:
         i -= 1
-    run = text[i:start]
+    run, line = text[i:start], text.rfind('\n', 0, start) + 1
     for outer in _OUTER_START.finditer(run):
-        head, tail = run[:outer.start()], run[outer.end():]
+        head, tail = text[line:i + outer.start()], run[outer.end():]
         if head.endswith('](') and _target_closed(tail):
             continue
         if _text_closed(head, tail):
