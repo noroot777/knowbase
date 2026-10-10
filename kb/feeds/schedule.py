@@ -16,7 +16,10 @@ def tick(start_pipeline, current_time=None):
                 continue
             due.append((s['next_run'],kind,s))
     for _,kind,s in sorted(due):
-        if start_pipeline(['crawl','export','index'], crawl_filter={'channel':kind, 'scheduled':True}):
+        # extract 跟着跑:要不要买提取由订阅级开关回答(默认关,见
+        # `kb.extract.pending_docs`),没开过的库在这一步是「没有待提取的文档」。
+        if start_pipeline(['crawl','export','index','extract'],
+                          crawl_filter={'channel':kind, 'scheduled':True}):
             reg.save_settings(kind, {'next_run':now + s['interval_minutes'] * 60})
             return kind
     return None

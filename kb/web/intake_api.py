@@ -76,6 +76,9 @@ class Subscription(BaseModel):
     # 聚合源需要它,对本来就给全文的 feed 再抓一次是拿启发式提取的结果去换
     # 作者亲手给的全文。
     fulltext: bool = False
+    # 「这条订阅的内容要不要买一次大模型提取(实体/主题/摘要)」。**默认关** ——
+    # 不开也照样全文/语义检索得到,只是没有标签(见 kb.extract.pending_docs)。
+    extract: bool = False
 
 
 class SubscriptionPatch(BaseModel):
@@ -85,6 +88,7 @@ class SubscriptionPatch(BaseModel):
     group_name: str | None = Field(default=None,max_length=80)
     enabled: bool | None = None
     fulltext: bool | None = None
+    extract: bool | None = None
 
 
 @router.post('/{kind}/sources',status_code=201)
@@ -219,7 +223,11 @@ def sync(kind: str,body: SyncRequest):
     settings = reg.get_settings(kind)
     if all(reg.configuration_error(s, settings) for s in selected):
         raise HTTPException(400, reg.configuration_error(selected[0], settings))
-    if not pipeline.start_pipeline(['crawl','export','index'],crawl_filter={
+    # extract 在列里,但「哪些条目值得提取」由订阅级开关回答(默认关,见
+    # `kb.extract.pending_docs`):没开过开关的库跑到这一步是「没有待提取的
+    # 文档」,一次模型都不调。把它排除在计划外才是错的 —— 那样用户给某条
+    # 订阅开了提取,它同步完也不会提取,得等绿泡泡那轮全流程定时同步顺手捎上。
+    if not pipeline.start_pipeline(['crawl','export','index','extract'],crawl_filter={
             'channel':kind,'accounts':[str(s['id']) for s in selected], 'force':True}):
         raise HTTPException(409,'其他同步正在运行，请结束后重试；自动同步会顺延')
     return {'ok':True,'detail':'同步已开始，完成后可在全文检索中查找'}

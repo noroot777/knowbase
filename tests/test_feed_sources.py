@@ -310,7 +310,11 @@ class FeedTests(unittest.TestCase):
         self.assertEqual('New',response.json()['name'])
         with patch.object(pipeline,'start_pipeline',return_value=True) as start:
             self.assertEqual(200,self.client.post('/api/intake/rss/sync',json={'source_ids':[s['id']]}).status_code)
-            self.assertEqual(['crawl','export','index'],start.call_args.args[0])
+            # extract 在列里:这颗按钮同步完就该把该提取的提取掉。「哪些条目
+            # 值得提取」由订阅级开关回答(默认关,见 `extract.pending_docs`),
+            # 不是靠把这一步排除在计划外 —— 那样用户给某条订阅开了提取,它
+            # 同步完也不会提取,得等绿泡泡那轮全流程定时同步顺手捎上。
+            self.assertEqual(['crawl','export','index','extract'],start.call_args.args[0])
             self.assertEqual([str(s['id'])],start.call_args.kwargs['crawl_filter']['accounts'])
         with patch.object(pipeline,'start_pipeline',return_value=False):
             self.assertEqual(409,self.client.post('/api/intake/rss/sync',json={}).status_code)

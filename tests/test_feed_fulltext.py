@@ -68,8 +68,14 @@ class FullTextCase(unittest.TestCase):
                   patch.object(sync, 'VAULT_ROOT', self.root / 'vault'),
                   patch.object(translate, '_model', lambda: MODEL)):
             p.start(); self.addCleanup(p.stop)
+        # `extract: True` 不是顺手加的:feeds 那几类来源默认不买提取(订阅级
+        # 开关,见 `extract.pending_docs`),不开的话「正文从壳换成全文之后要
+        # 重新提取」那一组(test_fulltext_extract_stale / test_extraction_
+        # body_version)的 `pending` 恒为空 —— 它们要验的东西会被另一道闸遮掉。
+        # 这条订阅在语境里正是「值得提取的聚合源」,开着才对得上。
         self.source = reg.save_subscription(
-            'rss', {'name': '聚合源', 'url': 'https://agg.example.org/feed.xml', 'fulltext': True})
+            'rss', {'name': '聚合源', 'url': 'https://agg.example.org/feed.xml',
+                    'fulltext': True, 'extract': True})
         self.plain = reg.save_subscription(
             'rss', {'name': '单号源', 'url': 'https://solo.example.org/feed.xml'})
 

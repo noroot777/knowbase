@@ -51,7 +51,12 @@ class TrimFixture:
             p.start(); self.addCleanup(p.stop)
 
     def sub(self, name='Review A', url='https://example.org/a.xml'):
-        return reg.save_subscription('rss', {'name': name, 'url': url})
+        # `extract: True`:feeds 那几类来源默认不买提取(订阅级开关,见
+        # `extract.pending_docs`)。靠这份脚手架验「回写/维护锁」那几组要真走到
+        # 提取里去,不开的话 `pending_docs` 恒为空,红出来的是「压根没调到回写」
+        # —— 跟它们要钉的事没有一点关系。那道闸自己的回归在
+        # `tests/test_extract_optin.py`。
+        return reg.save_subscription('rss', {'name': name, 'url': url, 'extract': True})
 
     def entry(self, url=OLD, published='2026-07-01 08:00'):
         return dict(url=url, title='Historical post', body='historical review content',

@@ -2,6 +2,11 @@
 // 保存时真的发出去、订阅行上标得出来、待补抓的条目换掉正文而不是标题、也不给
 // 「展开阅读」,以及**别人家的条目不受影响**。
 //
+// 第 3.5 组验的是另一个订阅级开关「提取知识标签」(`subscriptions.extract`,
+// 后端口径在 kb/extract.py 的 `pending_docs`)。它和补抓**挤在同一个弹窗、同一次
+// PATCH 里**,所以放在一起验不是图省事:保存走的是整份表单,前端漏读任一个字段
+// 都会让「改 A 把 B 静默重置」—— 那种缺陷只有两个开关一起摆进同一条用例才看得见。
+//
 // 需要一个跑着沙箱数据的 kb-web:
 //   python3 tests/llm_stub.py --port 8803 &
 //   python3 tests/daily_sandbox.py /tmp/kb-fulltext-sandbox 8803
@@ -110,6 +115,70 @@ await sleep(600);
 check("取消勾选之后后端真的关掉了(开关能来回切)",
       (await (await fetch(`${base}/api/intake/rss`)).json()).sources
         .find(s => String(s.id) === PLAIN)?.fulltext == 0);
+
+// ── 3.5 另一个订阅级开关:提取知识标签(默认关,改它不许把补抓一起改掉)──────
+await evalJs(`closeSourceEditor(); openSourceEditor(${AGG})`);
+await until(`document.getElementById('source-editor').style.display !== 'none'`);
+check("弹窗里有「提取知识标签」这个开关",
+      await evalJs(`!!document.getElementById('source-edit-extract')`));
+check("默认是没勾的(feeds 来源不默认买提取)",
+      await evalJs(`document.getElementById('source-edit-extract').checked === false`));
+check("说明里写清楚了「不开也能搜到」", await evalJs(`(() => {
+  const t = document.getElementById('source-edit-extract').closest('label')?.nextElementSibling?.textContent || '';
+  // 这句是承重的:没有它,「不提取」会被读成「这条订阅的内容进不了知识库」,
+  // 而事实是全文和语义检索照旧搜得到,少的只是实体/主题标签。
+  return t.includes('不开也能被全文和语义检索搜到');
+})()`));
+const extractSent = await evalJs(`(async () => {
+  const seen = [];
+  const real = window.fetch;
+  window.fetch = (u, o) => { if (String(u).includes('/sources/')) seen.push({method:o?.method, body:o?.body}); return real(u, o); };
+  document.getElementById('source-edit-extract').checked = true;
+  await saveSourceEditor(new Event('submit'));
+  window.fetch = real;
+  return JSON.stringify(seen);
+})()`);
+const extractPatch = JSON.parse(extractSent).find(c => c.method === "PATCH");
+check("保存时 body 里带着 extract:true",
+      extractPatch && JSON.parse(extractPatch.body).extract === true, extractSent.slice(0, 220));
+check("同一次 PATCH 还把 fulltext 原样带上了(改一个开关不许把另一个静默重置)",
+      extractPatch && JSON.parse(extractPatch.body).fulltext === true, extractSent.slice(0, 220));
+await sleep(600);
+const afterExtract = (await (await fetch(`${base}/api/intake/rss`)).json()).sources
+  .find(s => String(s.id) === AGG);
+check("后端真的开了", afterExtract?.extract == 1, JSON.stringify(afterExtract?.extract));
+check("后端那边补抓开关也还开着", afterExtract?.fulltext == 1, JSON.stringify(afterExtract?.fulltext));
+// 回显:开着的订阅再打开弹窗必须是勾上的。**这一条不能省** —— 少了它,一个
+// 「永远渲染成未勾」的实现在上面几条下全绿(摆盘时它本来就是未勾的),而那正是
+// 最坏的那种缺陷:用户开了提取,过几天回来改一下名字再保存,这个开关就被静默
+// 关掉了,而面板上什么都看不出来(2026-10-10 定点注入实测:只验「默认未勾」时
+// 注入「永远未勾」红 0 条)。
+await evalJs(`closeSourceEditor(); openSourceEditor(${AGG})`);
+await until(`document.getElementById('source-editor').style.display !== 'none'`);
+check("开着的订阅再打开弹窗是勾上的(不然改个名字保存就把它静默关了)",
+      await evalJs(`document.getElementById('source-edit-extract').checked === true`));
+await evalJs(`closeSourceEditor()`);
+await evalJs(`sourceView = 'manage'; renderSourceView(true)`);
+await until(`[...document.querySelectorAll('.source-subscription .source-row-meta')]
+  .some(e => e.textContent.includes('提取知识标签'))`);
+const metaOn = await evalJs(`(() => {
+  const rows = [...document.querySelectorAll('.source-subscription')];
+  const find = n => rows.find(r => r.querySelector('h3')?.textContent === n);
+  return JSON.stringify({agg: find('Link Aggregator')?.querySelector('.source-row-meta')?.textContent || '',
+                         plain: find('Full Text Blog')?.querySelector('.source-row-meta')?.textContent || ''});
+})()`);
+const mo = JSON.parse(metaOn);
+check("开了的订阅行上写着「提取知识标签」", mo.agg.includes("提取知识标签"), mo.agg);
+check("没开的那条不写(反过来钉一边)", mo.plain && !mo.plain.includes("提取知识标签"), mo.plain);
+// 存回去,后面几组看的是这条订阅的条目,别把沙箱改脏
+await evalJs(`(async () => { openSourceEditor(${AGG});
+  document.getElementById('source-edit-extract').checked = false;
+  await saveSourceEditor(new Event('submit')); })()`);
+await sleep(600);
+const restored = (await (await fetch(`${base}/api/intake/rss`)).json()).sources
+  .find(s => String(s.id) === AGG);
+check("关回去也是立刻生效的(开关能来回切)", restored?.extract == 0, JSON.stringify(restored?.extract));
+check("来回切一遍之后补抓开关一个字没动", restored?.fulltext == 1, JSON.stringify(restored?.fulltext));
 
 // ── 4. 条目列表:待补抓那一条换掉的是正文,不是标题 ───────────────────────────
 await evalJs(`sourceView = 'items'; renderSourceView(true)`);

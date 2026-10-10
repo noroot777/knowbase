@@ -218,6 +218,13 @@ def retry_failed_plan(nothing_to_crawl: bool = False) -> list[str]:
         try:
             if pending_docs(conn, limit=1):
                 plan = ["extract"]
+        except Exception:
+            # 积压要跨库问一次订阅的提取开关(见 `kb.extract.pending_docs`),
+            # 问不到时**照样把 extract 排进计划**:这条路只是在决定「要不要
+            # 跑这一步」,真正的诊断归 `_extract_pass` —— 它会把同一个异常落成
+            # 一句红色的阶段文案。在这里吞掉的话用户收到的是 409「上次运行
+            # 没有失败项」,而真实情况是库读不到,两者指向完全相反的下一步。
+            plan = ["extract"]
         finally:
             conn.close()
     return plan

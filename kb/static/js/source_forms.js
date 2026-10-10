@@ -9,6 +9,7 @@ function openSourceEditor(id = null) {
   $('source-edit-feed').value = s?.feed_url || '';
   $('source-edit-enabled').checked = s ? !!s.enabled : true;
   $('source-edit-fulltext').checked = !!s?.fulltext;
+  $('source-edit-extract').checked = !!s?.extract;
   $('source-edit-hint').textContent = sourceModules.get(sourceKind).url_hint;
   $('source-edit-error').textContent = '';
   $('source-edit-save').disabled = false;
@@ -23,7 +24,8 @@ async function saveSourceEditor(e) {
   $('source-edit-error').textContent = '';
   const body = { name:$('source-edit-name').value.trim(), url:$('source-edit-url').value.trim(),
     group_name:$('source-edit-group').value.trim(), feed_url:$('source-edit-feed').value.trim(),
-    enabled:$('source-edit-enabled').checked, fulltext:$('source-edit-fulltext').checked };
+    enabled:$('source-edit-enabled').checked, fulltext:$('source-edit-fulltext').checked,
+    extract:$('source-edit-extract').checked };
   try {
     await pipeJson(`/api/intake/${sourceEditKind}/sources${sourceEditId ? '/'+sourceEditId : ''}`, {
       method:sourceEditId?'PATCH':'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),

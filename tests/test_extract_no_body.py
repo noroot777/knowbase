@@ -59,25 +59,34 @@ def _wikilib():
 
 
 def _md(body: str, title: str) -> str:
-    return (f'---\ntitle: "{title}"\nsource: "rss"\naccount: "A"\n'
+    return (f'---\ntitle: "{title}"\nsource: "dr-gzh"\naccount: "A"\n'
             f'published: "2026-06-29 18:29"\nurl: "https://example.org/x"\n'
             f'---\n{body}')
 
 
 class NoBodyBase:
+    """摆盘用的是 `dr-gzh`(非 feeds 来源),**别改回 `rss`**。
+
+    这一组验的是「空正文的两档终态」,和内容从哪来毫无关系。而 feeds 那几类
+    来源(rss/social/web/digest)的文档要多过一道订阅级的提取开关
+    (`extract.pending_docs`,默认关):摆成 rss 的话这些 md 在库里没有任何订阅
+    归属,整组会被那道闸拦在 `pending_docs` 外面,红的地方跟空正文判定没有
+    一点关系。那道闸自己的回归在 `tests/test_extract_optin.py`。
+    """
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.vault = self.root / "vault"
-        self.src = self.vault / "source" / "rss"
+        self.src = self.vault / "source" / "dr-gzh"
         self.src.mkdir(parents=True)
         for target, attr, value in (
                 (scanner, "VAULT_ROOT", self.vault),
                 (extract, "VAULT_ROOT", self.vault),
                 (maintenance, "DATA_DIR", self.root),   # 别去 flock 生产那把锁
-                (scanner, "SOURCES", [Source(name="rss", root=self.src)]),
-                (extract, "SOURCES", [Source(name="rss", root=self.src)])):
+                (scanner, "SOURCES", [Source(name="dr-gzh", root=self.src)]),
+                (extract, "SOURCES", [Source(name="dr-gzh", root=self.src)])):
             p = patch.object(target, attr, value)
             p.start(); self.addCleanup(p.stop)
         p = patch.object(store, "connect",
@@ -96,7 +105,7 @@ class NoBodyBase:
     # ── 摆盘 ────────────────────────────────────────────────────────────────
     def write(self, name: str, body: str) -> str:
         (self.src / f"{name}.md").write_text(_md(body, name), encoding="utf-8")
-        return f"source/rss/{name}.md"
+        return f"source/dr-gzh/{name}.md"
 
     def index(self) -> None:
         """真走一遍索引(scan → split_chunks → upsert),content_hash 由它落。"""
@@ -287,7 +296,7 @@ class ConcurrentReindexTests(NoBodyBase, unittest.TestCase):
             "SELECT content_hash FROM documents WHERE path=?", (path,)
         ).fetchone()["content_hash"])
         self.assertEqual(store.doc_body(self.conn, path), body)
-        self.assertEqual(("", ""), store.doc_body_version(self.conn, "source/rss/nope.md"))
+        self.assertEqual(("", ""), store.doc_body_version(self.conn, "source/dr-gzh/nope.md"))
 
 
 class EmptyStubTests(NoBodyBase, unittest.TestCase):
@@ -410,18 +419,18 @@ class BodyGapTests(NoBodyBase, unittest.TestCase):
     """判定本身。读不到文件要落在保守的那一边。"""
 
     def test_non_empty_body_is_not_a_gap(self):
-        self.assertEqual("", extract.body_gap("source/rss/whatever.md", "有字"))
+        self.assertEqual("", extract.body_gap("source/dr-gzh/whatever.md", "有字"))
 
     def test_missing_file_falls_back_to_empty(self):
         # 保守档:继续进待办,**不**落成会让它消失的终态
         self.assertEqual(extract.NO_BODY_EMPTY,
-                         extract.body_gap("source/rss/gone.md", ""))
+                         extract.body_gap("source/dr-gzh/gone.md", ""))
 
     def test_several_images_and_nothing_else_counts_as_no_text(self):
         """判据是「剥完还剩不剩字」,不是「有没有图片」(这里是两张,不是一张)。"""
         self.write("imgs", "![](a.png)\n\n![](b.png)\n")
         self.assertEqual(extract.NO_BODY_NO_TEXT,
-                         extract.body_gap("source/rss/imgs.md", ""))
+                         extract.body_gap("source/dr-gzh/imgs.md", ""))
 
     def test_text_the_chunker_threw_away_is_not_no_text(self):
         """剥完**还剩字**就不是「没有文字」,哪怕一个 chunk 都没产生。
@@ -433,7 +442,7 @@ class BodyGapTests(NoBodyBase, unittest.TestCase):
         self.write("heading", HEADING_ONLY)
         self.assertEqual([], split_chunks(HEADING_ONLY), "前提:它确实一个 chunk 都没有")
         self.assertEqual(extract.NO_BODY_EMPTY,
-                         extract.body_gap("source/rss/heading.md", ""))
+                         extract.body_gap("source/dr-gzh/heading.md", ""))
 
     def test_judgment_uses_the_chunkers_own_rule(self):
         """口径只有一份:问的就是 chunker 决定 chunk 存不存的那条规则。"""

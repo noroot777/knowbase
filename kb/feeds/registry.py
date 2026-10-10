@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
  modified TEXT NOT NULL DEFAULT '', resolved_url TEXT NOT NULL DEFAULT '',
  -- 排在最后,和老库 ALTER 补出来的列序一致(见 _ADDED_COLUMNS)。
  history_floor TEXT NOT NULL DEFAULT '', last_note TEXT NOT NULL DEFAULT '',
- fulltext INTEGER NOT NULL DEFAULT 0,
+ fulltext INTEGER NOT NULL DEFAULT 0, extract INTEGER NOT NULL DEFAULT 0,
  UNIQUE(kind, url)
 );
 CREATE TABLE IF NOT EXISTS feed_items (
@@ -80,6 +80,14 @@ _ADDED_COLUMNS = {
         # 整个清成 '{}' —— 那是采集进度(水位、etag)该有的下场,而这是用户对
         # 这条订阅的配置,不该因为改一次链接就被静默关掉。
         ('fulltext', 'INTEGER NOT NULL DEFAULT 0'),
+        # 「这条订阅的内容要不要买一次大模型提取(实体/主题/摘要)」。
+        # **默认 0,老库里的订阅一律补 0** —— 这是一次有意的口径收紧:聚合类
+        # 来源的长文章每篇能抽出一堆只出现过一次的细碎实体,实测 rss 那 778 篇
+        # 贡献了 1024 种全库独有的标签,把标签检索和主题页稀释成噪声。谁值得
+        # 提取改由用户逐条拍板(见 `kb.extract.pending_docs` 的判据)。
+        # 存量已经提取过的不回滚:钱已经付过,标签也已经在图谱和检索里。
+        # **独立一列、不放 `config`**,理由同 `fulltext`。
+        ('extract', 'INTEGER NOT NULL DEFAULT 0'),
     ),
     'feed_items': (
         ('lang', "TEXT NOT NULL DEFAULT ''"),              # '' 未判 / zh 无需翻译 / en 待翻译
@@ -268,10 +276,11 @@ def _seed_defaults(conn) -> None:
         # `fulltext` 只有链接聚合源标了(默认不标,见 kb/feeds/fulltext.py)。
         # `INSERT OR IGNORE`:用户自己手工加过同一个地址时不重复插。
         conn.execute('''INSERT OR IGNORE INTO subscriptions
-            (kind,name,url,mode,group_name,config,created_at,updated_at,history_floor,fulltext)
-            VALUES(?,?,?,?,?,?,?,?,?,?)''',
+            (kind,name,url,mode,group_name,config,created_at,updated_at,history_floor,fulltext,extract)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
             (s['kind'], s['name'], source_url(s['kind'],s['url']), s['mode'], s['group_name'],
-             '{}', now(), now(), floor, int(bool(s.get('fulltext')))))
+             '{}', now(), now(), floor, int(bool(s.get('fulltext'))),
+             int(bool(s.get('extract')))))
     if not seeded:
         conn.execute("INSERT INTO feed_meta VALUES('defaults-v1',?)", (now(),))
     conn.execute("INSERT OR REPLACE INTO feed_meta VALUES('defaults-rev',?)", (str(DEFAULTS_REV),))
@@ -447,13 +456,16 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
     group = str(data.get('group_name', old.get('group_name', ''))).strip()[:80]
     enabled = bool(data.get('enabled', old.get('enabled', True)))
     fulltext = bool(data.get('fulltext', old.get('fulltext', False)))
+    # 「这条订阅要不要买提取」。默认关,理由见 `_ADDED_COLUMNS` 里那一段。
+    extract = bool(data.get('extract', old.get('extract', False)))
     reset = any(old.get(k) != v for k, v in [('url', url), ('feed_url', feed_url), ('mode', mode)])
     try:
         with db() as c:
             if source_id:
                 c.execute('''UPDATE subscriptions SET name=?,url=?,feed_url=?,mode=?,group_name=?,
-                    enabled=?,fulltext=?,updated_at=? WHERE id=?''',
-                    (name,url,feed_url,mode,group,enabled,int(fulltext),now(),source_id))
+                    enabled=?,fulltext=?,extract=?,updated_at=? WHERE id=?''',
+                    (name,url,feed_url,mode,group,enabled,int(fulltext),int(extract),
+                     now(),source_id))
                 if reset:
                     # 换了链接 = 这个订阅从头开始,历史下界也跟着重算:指向一个
                     # 全新的源时,旧订阅那个两年前的下界等于没有下界。
@@ -461,8 +473,9 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
                     # 它说的是旧账号读到哪儿了,留着就是在新账号那一行显示
                     # 「部分同步」——前端的状态链在 `last_success` 之前先看它,
                     # 而 `last_success` 这里已经清了(2026-10-08 审查实测)。
-                    # `fulltext` 不在这一排里:它是用户对这条订阅的配置,换个
-                    # 链接不该把它静默关掉(上面那句 UPDATE 已经按入参存过了)。
+                    # `fulltext` 和 `extract` 都不在这一排里:它们是用户对这条
+                    # 订阅的配置,换个链接不该把它们静默改掉(上面那句 UPDATE
+                    # 已经按入参存过了)。
                     # 被清掉的都是采集进度 —— 指向新的源之后它们本来就不作数。
                     c.execute("""UPDATE subscriptions SET etag='',modified='',resolved_url='',
                         last_error='',last_success='',last_attempt='',failures=0,retry_at=0,config='{}',
@@ -470,9 +483,10 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
                     c.execute('DELETE FROM subscription_items WHERE subscription_id=?', (source_id,))
             else:
                 source_id = c.execute('''INSERT INTO subscriptions
-                    (kind,name,url,feed_url,mode,group_name,enabled,fulltext,created_at,updated_at,history_floor)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?)''', (kind,name,url,feed_url,mode,group,enabled,
-                    int(fulltext),now(),now(),history_floor())).lastrowid
+                    (kind,name,url,feed_url,mode,group_name,enabled,fulltext,extract,
+                     created_at,updated_at,history_floor)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''', (kind,name,url,feed_url,mode,group,enabled,
+                    int(fulltext),int(extract),now(),now(),history_floor())).lastrowid
     except sqlite3.IntegrityError:
         raise ValueError('这个链接已经在订阅列表中') from None
     return subscription(kind, source_id)

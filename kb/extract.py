@@ -40,6 +40,13 @@ from kb.extract_llm import (  # noqa: F401  (原样再导出,见上面那段)
     BODY_HEAD, BODY_TAIL, PROMO_HEAD, PROMO_LEVELS, PROMO_TAIL, clip_body,
     extract_with_llm, judge_promo, normalize_promo)
 
+# feeds 来源那道「要不要买提取」的闸用到的几个零件(700 行上限逼出来的一次拆分,
+# 判据本身留在下面的 `pending_docs` —— 它是唯一口径)。**原样再导出**:
+# `extract._FEED_DOC_PATH` 这类写法一个字不用改。
+from kb.extract_optin import (  # noqa: F401  (原样再导出)
+    FEEDS_ALIAS as _FEEDS_ALIAS, FEED_DOC_PATH as _FEED_DOC_PATH,
+    attached_feeds as _attached_feeds, feed_kinds as _feed_kinds)
+
 # hard 软广在 obs 里也标出来。doc_tags 在重索引时会按 frontmatter 重建,所以
 # 这个 tag 跟 topic/entity 一样要靠 writeback 回写 md 才持久。**它留在这里**:
 # 回答的是"回写哪个标签",不是跟模型打交道的事。
@@ -576,16 +583,52 @@ def pending_docs(conn, limit: int = 0) -> list:
     排掉「这一版内容已经确认没有文字可提取」的那些(见 mark_no_body)。比的是
     hash 而不是一个标记位:内容一变就自动回到队列。`no_body_hash <> ''` 不能省
     —— 少了它,万一某篇的 content_hash 也是空串,两个空串相等会把它悄悄排掉。
+
+    **feeds 那几类来源(rss/social/web/digest)默认不提取**,只放行显式开了
+    `subscriptions.extract` 的订阅(见 `docs/decisions/extract-optin.md`)。绿泡泡
+    和别的非 feeds 来源不受这道闸影响,照旧全量进队列。一个条目可能同时属于
+    几条订阅,判据是**任一归属订阅开着就提取** —— 漏提取可恢复(开关一开就自动
+    回队列),静默多提取则会往标签里灌噪声。
+
+    这个函数是**唯一口径**:一处改动同时治提取队列和面板那个「当前待处理 N 项」
+    (`pipeline.pending_counts` 数的就是它)。
+
+    feeds.db 读不到时**抛**,不静默放行也不静默拦死 —— 调用方那三条路各自
+    都看得见(管道落红、面板那个数显示不出来、重试计划 500 改成报原因)。
+    只有「候选里压根没有 feeds 来源的文档」那一档不去碰 feeds.db:全新安装、
+    纯绿泡泡的库本来就没有那个文件,为它抛是在报一个不存在的故障。
     """
     pre_tagged_sources = {s.name for s in SOURCES if s.pre_tagged}
     ph = ",".join("?" * len(pre_tagged_sources))
-    sql = f"""
-        SELECT path, title, account FROM documents
+    base = f"""
+        FROM documents
         WHERE extracted_at IS NULL AND source NOT IN ({ph})
           AND NOT (no_body_hash <> '' AND no_body_hash = content_hash)
-        ORDER BY published DESC
     """
-    rows = conn.execute(sql, list(pre_tagged_sources)).fetchall()
+    args = list(pre_tagged_sources)
+    feed_kinds = sorted(_feed_kinds())
+    kph = ",".join("?" * len(feed_kinds))
+    # 先问一句「这一批候选里有没有 feeds 来源的」。有才去碰 feeds.db ——
+    # 这一句顺带让纯绿泡泡的库完全不付跨库的代价(实测整条判据 5ms,但
+    # 这个函数坐在面板每次刷新那条路上)。
+    has_feed = feed_kinds and conn.execute(
+        f"SELECT 1 {base} AND source IN ({kph}) LIMIT 1", args + feed_kinds).fetchone()
+    gate = ""
+    if has_feed:
+        gate = f"""
+          AND (source NOT IN ({kph}) OR path IN (
+                SELECT {_FEED_DOC_PATH}
+                FROM {_FEEDS_ALIAS}.subscriptions s
+                JOIN {_FEEDS_ALIAS}.subscription_items si ON si.subscription_id = s.id
+                WHERE s.extract = 1))
+        """
+        args = args + feed_kinds
+    sql = f"SELECT path, source, title, account {base} {gate} ORDER BY published DESC"
+    if not has_feed:
+        rows = conn.execute(sql, args).fetchall()
+    else:
+        with _attached_feeds(conn):
+            rows = conn.execute(sql, args).fetchall()
     return rows[:limit] if limit > 0 else rows
 
 

@@ -317,7 +317,15 @@ def _extract_pass(label: str, stats: dict) -> None:
 
     conn = store.connect()
     try:
-        todo = pending_docs(conn)
+        try:
+            todo = pending_docs(conn)
+        except Exception as e:
+            # 「哪些文档该提取」要跨库问一次 feeds.db 里的订阅开关
+            # (见 `kb.extract.pending_docs`)。问不到时既不能当成「没有待提取
+            # 的」放过去(那会静默停掉所有 feeds 来源的提取),也不该让异常冒出
+            # 这个阶段把状态机留在 running —— 落红、把原因说出来。
+            _stage("extract", "error", f"读不到订阅的提取开关:{e}")
+            return
         if not todo:
             if label:
                 _log(f"extract: {label}无待提取文档")
