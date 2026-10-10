@@ -141,15 +141,57 @@ class GroupTests(unittest.TestCase):
 
     def test_the_real_anthropic_page(self):
         got = parse_page_list(SAMPLE, BASE)
-        self.assertEqual(len(got), 10)
         titles = [e['title'] for e in got]
         self.assertIn('2026 Usage Policy update', titles)
         self.assertIn('Introducing the Anthropic Cyber Mission', titles)
-        # 页脚菜单、导航、featured 大卡那段摘要一条都没混进来。
+        # 页脚菜单、导航、以及那三条标题是 `Newsroom`、地址指向首页的噪音,
+        # 一条都没混进来。
+        self.assertNotIn('Newsroom', titles)
         for e in got:
-            self.assertTrue(e['url'].startswith('https://www.anthropic.com/news/'))
             self.assertTrue(e['published'], f'{e["title"]} 没有日期')
+            self.assertTrue(e['url'].startswith('https://www.anthropic.com/'))
         self.assertEqual(got[0]['published'][:10], '2026-10-08')
+
+    def test_the_featured_cards_on_the_real_page_are_not_dropped(self):
+        """**先验后果**:只断言"收了几条"的话,一个把 featured 换成别的噪音
+        的实现也能凑够数 —— 这里点名那三条真文章。
+
+        它们是 Anthropic 当前页面上单独展示的发布公告,地址**不在** `/news/`
+        下,所以旧版那句"只留胜出组"一条都收不到,而同步照常报成功(审查第 2
+        条,边界说明里写的"当前页面没发现漏掉"只比了 `/news/` 下的链接)。
+        """
+        got = {e['title']: e for e in parse_page_list(SAMPLE, BASE)}
+        for name, slug in (('Introducing Claude Haiku 5.5', 'claude-haiku-5-5'),
+                           ('Introducing Claude Sonnet 5.5', 'claude-sonnet-5-5'),
+                           ('Introducing Claude Opus 5.5', 'claude-opus-5-5')):
+            with self.subTest(name):
+                self.assertIn(name, got)
+                self.assertEqual(got[name]['url'], f'https://www.anthropic.com/{slug}')
+                self.assertTrue(got[name]['published'])
+        # 真列表那 10 条一条没少 —— 多收不等于换了一批。
+        news = [e for e in got.values() if '/news/' in e['url']]
+        self.assertEqual(len(news), 10)
+
+    def test_a_single_featured_card_above_the_list_is_kept(self):
+        """审查那份最小样本的形状:顶部 `<section>` 里 1 条头条 + 下面 2 条列表。
+
+        1 条够不着 `MIN_DATED`,靠的是"这一组里每条都带日期"那半句判据;而它
+        能认出自己那张卡片,靠的是容器在**整页**尺度上算 —— 组内算的话它的
+        容器是整份文档。
+        """
+        page = (b'<html><body><main>'
+                b'<section><a href="/latest"><time datetime="2026-10-10">2026-10-10</time>'
+                b'<h2>Newest announcement</h2></a></section>'
+                b'<ul><li><a href="/older"><time datetime="2026-10-09">2026-10-09</time>'
+                b'<h3>Older announcement</h3></a></li>'
+                b'<li><a href="/oldest"><time datetime="2026-10-08">2026-10-08</time>'
+                b'<h3>Oldest announcement</h3></a></li></ul>'
+                b'</main></body></html>')
+        got = parse_page_list(page, BASE)
+        self.assertEqual([e['title'] for e in got],
+                         ['Newest announcement', 'Older announcement', 'Oldest announcement'])
+        self.assertEqual(got[0]['url'], 'https://www.anthropic.com/latest')
+        self.assertEqual(got[0]['published'], '2026-10-10')
 
     def test_newest_first(self):
         got = parse_page_list(listing([row('/news/old', 'Sep 1, 2026', 'Older one'),
@@ -340,7 +382,7 @@ class WiringTests(unittest.TestCase):
         with patch.object(fetching, 'request', Mock(return_value=resp(SAMPLE))) as req:
             got, meta = fetching.fetch_source(source, {}, unconditional=True)
         self.assertEqual(req.call_args[0][0], BASE)
-        self.assertEqual(len(got), 10)
+        self.assertEqual(len([e for e in got if '/news/' in e['url']]), 10)
         self.assertEqual(meta['resolved_url'], BASE)
 
     def test_rss_still_goes_through_the_feed_parser(self):

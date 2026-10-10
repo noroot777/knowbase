@@ -1,5 +1,7 @@
 """Isolated source lifecycle, ingestion, scheduling and search regressions."""
 import json
+import shutil
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -481,6 +483,114 @@ class FeedTests(unittest.TestCase):
             self.assertTrue(_fts_leg(conn, 'Rust', Filters(source='rss')))
         finally:
             conn.close()
+
+
+class DefaultsUpgradeTests(unittest.TestCase):
+    """**存量库升级也要拿到后来新增的默认订阅。**
+
+    原来只有 `defaults-v1` 一个"种过没有"的标记,于是往 defaults.json 里加来源
+    这件事对所有存量库**永久不生效** —— 升级重启之后那一类来源是 0 个订阅、
+    「同步全部」还点不了,而新装的机器上它好好的(2026-10-10 审查第 1 条)。
+
+    下面是用**构造出来的旧库状态**跑的(删掉 `defaults-rev`、删掉标了 `since`
+    的那几条 = 旧代码留下的样子);另外拿主检出那份真旧代码建库、再用本分支打开
+    交叉验证过一次:60 → 61 → 61 条。
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.old, reg.DB_PATH = reg.DB_PATH, self.root / 'feeds.db'
+        self.addCleanup(lambda: setattr(reg, 'DB_PATH', self.old))
+        self.fresh = {s['name'] for s in self._defaults() if int(s.get('since', 1)) > 1}
+        self.assertTrue(self.fresh, 'defaults.json 里没有标 since 的条目,这组用例就空转了')
+
+    def _defaults(self):
+        return json.loads(Path(reg.__file__).with_name('defaults.json').read_text())
+
+    def _names(self):
+        with reg.db() as c:
+            return {r[0] for r in c.execute('SELECT name FROM subscriptions')}
+
+    def _raw_names(self):
+        """**不走 `reg.db()`** —— 它一打开就补种,拿它断言"旧库现在是空的"
+        等于自己把前提毁掉(第一版就是这么写的,当场红)。"""
+        conn = sqlite3.connect(reg.DB_PATH)
+        try:
+            return {r[0] for r in conn.execute('SELECT name FROM subscriptions')}
+        finally:
+            conn.close()
+
+    def _make_old_library(self):
+        """跑一次新代码建库,再把它改回旧代码留下的那个状态。"""
+        self._names()
+        with reg.db() as c:
+            c.execute("DELETE FROM feed_meta WHERE key='defaults-rev'")
+            c.executemany('DELETE FROM subscriptions WHERE name=?',
+                          [(n,) for n in self.fresh])
+
+    def test_an_old_library_gets_the_newly_added_defaults(self):
+        self._make_old_library()
+        self.assertFalse(self.fresh & self._raw_names())   # 旧库里确实没有
+        self.assertTrue(self.fresh <= self._names())       # 打开一次就补上了
+
+    def test_the_backfilled_rows_carry_their_own_settings(self):
+        """补种的那几条带着自己的开关和历史下界,不是插一行空壳。"""
+        self._make_old_library()
+        self._names()
+        want = {s['name']: s for s in self._defaults() if s['name'] in self.fresh}
+        with reg.db() as c:
+            rows = {r['name']: r for r in c.execute(
+                'SELECT name,kind,url,fulltext,history_floor,enabled FROM subscriptions')}
+        for name, spec in want.items():
+            with self.subTest(name):
+                got = rows[name]
+                self.assertEqual(got['kind'], spec['kind'])
+                self.assertEqual(got['fulltext'], int(bool(spec.get('fulltext'))))
+                self.assertEqual(got['history_floor'], reg.history_floor())
+                self.assertEqual(got['enabled'], 1)
+
+    def test_opening_it_again_changes_nothing(self):
+        self._make_old_library()
+        before = self._names()
+        for _ in range(3):
+            self.assertEqual(self._names(), before)
+
+    def test_a_default_the_user_deleted_does_not_come_back(self):
+        """**反过来钉一边。** 判据是"这个库种到第几号了",不是"这条订阅还在
+        不在" —— 补种要是按名字查一遍,删掉的默认订阅每次重启都会回来。"""
+        self._make_old_library()
+        victim = sorted(self.fresh)[0]
+        self._names()
+        with reg.db() as c:
+            c.execute('DELETE FROM subscriptions WHERE name=?', (victim,))
+        self.assertNotIn(victim, self._names())
+        self.assertNotIn(victim, self._names())
+
+    def test_a_url_the_user_already_added_is_not_duplicated(self):
+        self._make_old_library()
+        spec = next(s for s in self._defaults() if s['name'] in self.fresh)
+        url = reg.source_url(spec['kind'], spec['url'])
+        with reg.db() as c:
+            c.execute("DELETE FROM feed_meta WHERE key='defaults-rev'")
+            c.executemany('DELETE FROM subscriptions WHERE name=?',
+                          [(n,) for n in self.fresh])
+            cols = ('kind,name,url,mode,group_name,config,created_at,'
+                    'updated_at,history_floor,fulltext')
+            c.execute(f'INSERT INTO subscriptions({cols}) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                      (spec['kind'], '我自己加的', url, 'feed', '', '{}',
+                       reg.now(), reg.now(), '', 0))
+        with reg.db() as c:
+            n = c.execute('SELECT count(*) FROM subscriptions WHERE url=?',
+                          (url,)).fetchone()[0]
+        self.assertEqual(n, 1)
+        self.assertIn('我自己加的', self._names())
+
+    def test_a_fresh_library_still_gets_everything(self):
+        """反过来钉一边:补种那条路不许把全新安装弄少。"""
+        names = self._names()
+        self.assertTrue(self.fresh <= names)
+        self.assertEqual(len(names), len({s['name'] for s in self._defaults()}))
 
 
 if __name__ == '__main__':

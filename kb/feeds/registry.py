@@ -237,6 +237,46 @@ def source_url(kind: str, value: str) -> str:
     return url
 
 
+# 默认订阅的修订号。**新增一条默认订阅时 +1,并给那一条标上 `since`。**
+# 原来只有 `defaults-v1` 一个"种过没有"的标记,于是往 defaults.json 里加来源
+# 这件事对**所有存量库永久不生效** —— 升级重启之后面板上那一类来源是 0 个
+# 订阅、「同步全部」还点不了,而新装的机器上它好好的(2026-10-10 审查实测)。
+DEFAULTS_REV = 2
+
+
+def _seed_defaults(conn) -> None:
+    """按修订号补种默认订阅。**可重入**:号推到当前值之后这段再也不跑。
+
+    删掉的默认订阅不会在重启后回来 —— 判据是"这个库种到第几号了",不是
+    "这条订阅还在不在"。用户停用、改名、删除都是他的选择,补种只认号。
+    """
+    rows = dict(conn.execute(
+        "SELECT key,value FROM feed_meta WHERE key IN ('defaults-v1','defaults-rev')"))
+    seeded = 'defaults-v1' in rows
+    # 老库只有 `defaults-v1`、没有号:它种的是第 1 版。全新库两个都没有,从 0 起
+    # 种 —— 于是"全新安装"和"升级补种"是同一段代码的两个起点。
+    rev = int(rows.get('defaults-rev') or (1 if seeded else 0))
+    if rev >= DEFAULTS_REV:
+        return
+    defaults = json.loads(Path(__file__).with_name('defaults.json').read_text())
+    # 补种的这几条对**这个库**也是新的:照样只收最近几天,否则第一次同步就把
+    # 这个源的整个存档拖进来(口径同全新安装)。
+    floor = history_floor()
+    for s in defaults:
+        if int(s.get('since', 1)) <= rev:
+            continue
+        # `fulltext` 只有链接聚合源标了(默认不标,见 kb/feeds/fulltext.py)。
+        # `INSERT OR IGNORE`:用户自己手工加过同一个地址时不重复插。
+        conn.execute('''INSERT OR IGNORE INTO subscriptions
+            (kind,name,url,mode,group_name,config,created_at,updated_at,history_floor,fulltext)
+            VALUES(?,?,?,?,?,?,?,?,?,?)''',
+            (s['kind'], s['name'], source_url(s['kind'],s['url']), s['mode'], s['group_name'],
+             '{}', now(), now(), floor, int(bool(s.get('fulltext')))))
+    if not seeded:
+        conn.execute("INSERT INTO feed_meta VALUES('defaults-v1',?)", (now(),))
+    conn.execute("INSERT OR REPLACE INTO feed_meta VALUES('defaults-rev',?)", (str(DEFAULTS_REV),))
+
+
 @contextmanager
 def db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -257,21 +297,7 @@ def db():
         # 读到同一份旧列集合,后一个 ALTER 报 duplicate column(见 `_migrate`)。
         conn.execute('BEGIN IMMEDIATE')
         _migrate(conn)
-        if not conn.execute("SELECT 1 FROM feed_meta WHERE key='defaults-v1'").fetchone():
-            defaults = json.loads(Path(__file__).with_name('defaults.json').read_text())
-            # 全新安装 = 这 60 个默认订阅全是新的,同样只收最近几天,否则第一次
-            # 同步就把几十个源的存档一起拖进来。
-            floor = history_floor()
-            for s in defaults:
-                # `fulltext` 只有链接聚合源标了(默认不标,见 kb/feeds/fulltext.py)。
-                # **只对新库生效**:老库里 `defaults-v1` 早就写过了,这段压根不跑
-                # —— 存量订阅要开这个开关在面板上点一下(订阅管理 → 编辑)。
-                conn.execute('''INSERT OR IGNORE INTO subscriptions
-                    (kind,name,url,mode,group_name,config,created_at,updated_at,history_floor,fulltext)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)''',
-                    (s['kind'], s['name'], source_url(s['kind'],s['url']), s['mode'], s['group_name'],
-                     '{}', now(), now(), floor, int(bool(s.get('fulltext')))))
-            conn.execute("INSERT INTO feed_meta VALUES('defaults-v1',?)", (now(),))
+        _seed_defaults(conn)
         conn.commit()
         yield conn
         conn.commit()

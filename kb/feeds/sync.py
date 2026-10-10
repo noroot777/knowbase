@@ -13,13 +13,16 @@ import yaml
 from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
 from kb.maintenance import maintenance_lock
-from kb.feeds import fulltext, translate, x_channels
+from kb.feeds import digest, fulltext, translate, x_channels
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_state import _state, _stage, note_retry_targets
 from kb.scanner import parse_frontmatter
 
 FETCH_WORKERS = 4
 COLLECT_SECONDS = 90
+# 简报预取另算一份预算:它是串行的,每期一次 HTTP(RSS 一次 + 最多 `MAX_ISSUES`
+# 期),跟 HTTP 那一侧 90 秒的并发预算不是一回事 —— 口径同 `X_LOCAL_SECONDS`。
+DIGEST_SECONDS = 240
 # X 的登录态通道(feedgrab / 浏览器)另算预算:它们是串行的 —— 同一个浏览器
 # profile 只能被一个实例打开 —— 而单个账号要滚时间线、必要时还要等懒加载,
 # 90 秒连五个号都跑不完。这条通道按天同步(见 `source_types` 里 social 的
@@ -211,6 +214,25 @@ def _prefetch_x(kind, sources, settings, scope):
                         should_stop=lambda: bool(_state.get('stop_requested')))
 
 
+def _prefetch_digest(kind, sources, settings):
+    """简报通道的整批预取。跑在起线程池之前,所以读侧不必加锁。
+
+    一期都抓不到也不抛:失败落在它自己那一项上,随后 `fetch_source` 会把它
+    翻成这条订阅的失败 —— 口径同 `_prefetch_x`。
+    """
+    digest.reset()
+    picked = digest.targets(sources) if digest.supports(kind) else []
+    if not picked:
+        return
+    _stage('crawl', 'running', f'{reg.KINDS[kind]}:准备读取 {len(picked)} 份简报')
+
+    def progress(url):
+        _stage('crawl', 'running', f'{reg.KINDS[kind]} · {url}')
+
+    digest.prefetch(sources, settings, budget=DIGEST_SECONDS, on_progress=progress,
+                    should_stop=lambda: bool(_state.get('stop_requested')))
+
+
 def still_failing(kind, note):
     """上一轮失败的那几条订阅里,现在仍然需要重抓的那些(返回订阅 id)。
 
@@ -264,6 +286,7 @@ def collect(kind, scope):
     # Budget-limited runs continue with never/least recently attempted sources.
     pending.sort(key=lambda s: (s['last_attempt'], s['id']))
     _prefetch_x(kind, pending, settings, scope)
+    _prefetch_digest(kind, pending, settings)
     # 预取可能跑十几分钟(见 X_LOCAL_SECONDS),所以 HTTP 那一侧的预算要在它
     # **之后**才开始算。算在前面的话,预取一跑完每条订阅都已经超了预算,整轮
     # 一条也取不走、全部记成"留待下次"—— 而东西明明已经抓在手里了。

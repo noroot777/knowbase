@@ -374,6 +374,14 @@ def fetch_source(source: dict, settings: dict, *, unconditional: bool = False,
     if x_channels.supports_channels(source['kind']) and uses_bridge(source) \
             and x_channels.channel_of(settings) != x_channels.BRIDGE:
         return x_channels.take(source, settings)
+    # 简报同理不走 endpoint + etag:它要两跳(RSS 给期号 → 每期落地页给正文),
+    # 而这里只发一次 HTTP。整批在采集开头抓完,这里只取自己那一份(见
+    # `kb.feeds.digest` 的模块注释,三条"为什么绕不过去"都在那儿)。
+    # 延迟导入:`digest` 要用本模块的 request / parse_feed / plain,顶层导入
+    # 就是个环(方向同 `PageAdapter.parse` 里那句)。
+    from kb.feeds import digest
+    if digest.supports(source['kind']):
+        return digest.take(source, settings)
     deadline = deadline if deadline is not None else time.monotonic() + SOURCE_SECONDS
     adapter = ADAPTERS[feed_types()[source['kind']].adapter]
     errors = []

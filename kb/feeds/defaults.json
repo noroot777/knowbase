@@ -426,6 +426,15 @@
     "url": "https://www.anthropic.com/news",
     "mode": "feed",
     "group_name": "官方动态",
-    "fulltext": true
+    "fulltext": true,
+    "since": 2
+  },
+  {
+    "kind": "digest",
+    "name": "TLDR AI",
+    "url": "https://tldr.tech/api/rss/ai",
+    "mode": "feed",
+    "group_name": "行业简报",
+    "since": 2
   }
 ]

@@ -17,6 +17,15 @@ Anthropic 的 news 是典型形态 —— 整站一处 feed 都没有(五个常�
 开 —— 实测 Anthropic 那张页面上 featured 那条正因此落在另一组里,不会把
 它那段摘要当成标题。
 
+**但分开之后要全都收下,不是只取胜出那一组。** 只留带日期条目最多的那一
+组,等于把"单独展示的头条"整组丢掉,而漏掉的恰恰是最新那几条 —— 实测
+Anthropic 当前页面上 `Introducing Claude Haiku 5.5` / `Sonnet 5.5` /
+`Opus 5.5` 三条发布公告就在 featured 那一组里(它们的地址不在 `/news/`
+下,胜出的 10 条一条都不含),而同步照常报成功、没有任何提示。所以判据拆
+成两层:**整页至少有一组够 `MIN_DATED` 条带日期**(这一页是不是列表页),
+然后**收下每一个"够 `MIN_DATED` 条带日期、或者每条都带日期"的组**(这一
+组算不算文章区)。后半句那个"每条都带"是给单条头条卡片留的门。
+
 **"这一页上一条都没解析出来"一律抛异常,不返回空列表。** 口径同
 `x_browser` 那句 `if seen_articles and not parsed: raise`:静默返回空会让
 这条订阅从某天起永远是"今天没有新文章",而面板上一切正常 —— 站点改版、
@@ -198,8 +207,8 @@ def shell_body(subject: str, published: str, url: str) -> str:
 
 
 def _list_group(soup: BeautifulSoup, base_url: str):
-    """页面上的文章列表 → `[(容器, 绝对地址)]`,按带日期的条目数取胜出组。"""
-    buckets: dict[tuple, list] = {}
+    """页面上的文章区 → `[(容器, 绝对地址)]`,真列表排在单独的头条卡片前面。"""
+    pairs = []
     for anchor in soup.find_all('a', href=True):
         href = (anchor.get('href') or '').strip()
         if not href or href.startswith(('#', 'mailto:', 'javascript:', 'tel:')):
@@ -210,14 +219,39 @@ def _list_group(soup: BeautifulSoup, base_url: str):
             continue
         if urlsplit(url).scheme not in ('http', 'https'):
             continue
-        buckets.setdefault(_tag_path(anchor), []).append((anchor, url))
-    best, best_dated = [], 0
+        pairs.append((anchor, url))
+    if not pairs:
+        return []
+    # 记录容器在**整页**的尺度上算,不在组内算。组内计数时,只有一条链接的
+    # 那一组里**每一个祖先都"只属于它"**,容器于是一路长到根节点 —— 单独展
+    # 示的头条既认不出自己那张卡片,又会把页面别处的日期和最长的那段文字当
+    # 成自己的(审查那份最小样本实测:`<section>` 里那条头条的容器是
+    # `[document]`)。放到整页上算,它正好停在自己那张卡片上;反过来,真正
+    # 的孤立噪音(页头 logo、`Newsroom` 这种栏目名)容器跟着收缩之后读不到
+    # 日期,自己就落选了 —— 实测 Anthropic 那一页上 3 条这样的噪音因此消失。
+    boxes = _containers([a for a, _ in pairs])
+    buckets: dict[tuple, list] = {}
+    for (anchor, url), box in zip(pairs, boxes):
+        buckets.setdefault(_tag_path(anchor), []).append((box, url))
+    groups = []
     for items in buckets.values():
-        paired = list(zip(_containers([a for a, _ in items]), items))
-        dated = sum(1 for box, _ in paired if item_published(box))
-        if dated > best_dated:
-            best, best_dated = [(box, url) for box, (_, url) in paired], dated
-    return best if best_dated >= MIN_DATED else []
+        dated = sum(1 for box, _ in items if item_published(box))
+        if dated:
+            groups.append((dated, items))
+    if not groups or max(d for d, _ in groups) < MIN_DATED:
+        # 整页一组都不够 `MIN_DATED` = 这压根不是列表页。这道闸只问一次,
+        # 不逐组问 —— 逐组问就把单条头条卡片永久关在门外。
+        return []
+    # 够 `MIN_DATED` 条带日期的是列表区;**每一条都带日期**的也算(单独展示
+    # 的头条常常只有一条,够不着 `MIN_DATED`,而"这一组里每条都有发布时间"
+    # 本身就是"这是文章区"的证据)。代价是导航里一个孤立的、容器里又恰好有
+    # 日期的链接会被收进来 —— 那顶多多一条条目,而漏掉头条是静默丢数据,
+    # 两个方向差着一个量级。
+    picked = [(d, items) for d, items in groups if d >= MIN_DATED or d == len(items)]
+    # 带日期的条目越多越像"主列表",排在前面:`parse_page_list` 按地址先到
+    # 先得去重,而 featured 卡片的容器里连摘要一起,标题判定不如列表里那份准。
+    picked.sort(key=lambda g: (-g[0], len(g[1])))
+    return [item for _, items in picked for item in items]
 
 
 def _tag_path(node) -> tuple:
