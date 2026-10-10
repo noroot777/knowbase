@@ -61,10 +61,9 @@ from kb.feeds.x_article_js import READ_JS as _READ_JS
 # 再导出,所以 `x_article.lead_text` / `.quote_lines` / `.needs_article` /
 # `.HINT` / `._first` 这些对外和对测试的入口一个字都没变。
 from kb.feeds.x_article_links import (  # noqa: F401  (re-export)
-    HINT, _ARTICLE_LINK, _ARTICLE_PATH, _AMBIGUOUS, _BARE_HEAD, _drop, _first,
-    _nested, _OUTER_START, _SCHEME_HEAD, _strip_hint, _TCO, _URL_CHARS,
-    _URL_HOST, _URL_RUN, _URL_TAIL, article_page, lead_text, needs_article,
-    quote_lines)
+    HINT, _ARTICLE_LINK, _ARTICLE_PATH, _BARE_HEAD, _drop, _first, _nested,
+    _OUTER_START, _SEPARATORS, _strip_hint, _TCO, _URL_CHARS, _URL_HOST,
+    _URL_RUN, _URL_TAIL, article_page, lead_text, needs_article, quote_lines)
 # 回包的结构判定和块级零件也单独一个文件,同样**只因为行数**(见那个模块的
 # 注释)。原样 import 回本模块的全局,所以 `x_article._code_body` 这类直测、
 # 以及 `scripts/x_article_backfill` 里的 `x_article.ArticleUnavailable` 都照旧。
