@@ -266,17 +266,21 @@ class ShareQueryValueTests(FeedgrabRound):
         """逐形态直测两个消费方 —— 端到端一轮只摆得下一种,而这几种各有一个紧前
         字符(`+` / `0` / `(` / `=` / `#` / `,`),按形态摆才看得出少认了哪一个。
 
-        最后那条(`?x=1,<地址>`)是**一道已知的缝钉成当前取舍**:进了查询串之后再
-        用内容字符紧连一条并列地址,我们按嵌套办。线划在"查询串/片段是不透明值
-        容器、路径是层级结构"上 —— 它可解释,而"紧贴的那个字符是不是标点"不可解释
-        (那是前三轮栽的那条路)。改方向时要和下面那条放行用例一起改。
+        最后那两条是**一道已知的缝钉成当前取舍**:进了查询串之后再用内容字符紧连
+        一条并列地址,我们按嵌套办 —— **中间还夹着另一条完整 URL 时同样**
+        (`?k=1,www.b.org/doc,<地址>`,第 2 轮之前那个"取最后一个起手式"的实现正是
+        为了救它才开出了 F1 那个洞)。线划在"查询串/片段是不透明值容器、路径是
+        层级结构"上 —— 它可解释,而"紧贴的那个字符是不是标点"不可解释(那是前三轮
+        栽的那条路);而真实的并列写法必然带空白,空白是往左扫描的天然边界。
+        改方向时要和下面那条放行用例一起改。
         """
         for body in (f'https://example.org/share?text=Read+{OTHER}',
                      f'https://example.org/share?text=Read%20{OTHER}',
                      f'https://example.org/share?target=({OTHER})',
                      f'https://example.org/r?u={OTHER}',
                      f'https://example.org/p#{OTHER}',
-                     f'https://a.org/?x=1,{OTHER}'):
+                     f'https://a.org/?x=1,{OTHER}',
+                     f'https://a.org/?k=1,www.b.org/doc,{OTHER}'):
             with self.subTest(body=body):
                 self.assertFalse(needs_article({'url': TWEET, 'body': body}),
                                   '查询串/片段里那条地址不是这条推文的长文')
@@ -288,16 +292,178 @@ class ShareQueryValueTests(FeedgrabRound):
         放行(人读的时候那就是两条并列的地址)。
 
         这是 `_nested` 第三步唯一的落点,收窄过头会在这里红 —— 而漏认 = 空正文
-        永久固定,比多删一处还重一个量级。
+        永久固定,比多删一处还重一个量级。**最后那条(空格隔开)是上面那道已知缝的
+        出路**:真实的并列写法带空白,而空白是往左扫描的天然边界,所以那道缝换个
+        写法就绕开了。
         """
         for body in (f'https://example.org/doc,{CANON}',
                      f'https://example.org/doc;{CANON}',
-                     f'https://a.org/?k=1,www.b.org/doc,{CANON}'):
+                     f'www.example.org/doc,{CANON}',
+                     f'https://a.org/?k=1 {CANON}'):
             with self.subTest(body=body):
                 self.assertTrue(needs_article({'url': TWEET, 'body': body}),
                                 '并列写在外层路径后面的那条地址是真的')
                 self.assertNotIn('/article/', lead_text(body),
                                  '它照旧要摘掉')
+
+
+# ------------------------------------- F1 的未覆盖输入:查询值里装着不止一条网址
+
+class MultiUrlShareValueTests(FeedgrabRound):
+    """**分享链接的查询值里装着两条网址时,X 文章地址照旧消失**(2026-10-10
+    自由工作流第 2 轮审查)。
+
+    上一族把"外层起手式之后出现过 `?` `#`"这条证据补上了,但它拿的是
+    `finditer` 的**末项** —— 理由写的是"候选只可能嵌在紧挨着它左边那条 URL 里"。
+    **那句话对路径段成立、对不透明值容器不成立**:分享按钮生成的 `?text=` 常常
+    装着两条网址,取末项时 `head` 落在**内层**那条 `https://` 后面,只看得见
+    `docs.example.org/+`(没有 `?#`、紧前又是 `+`),于是判成"不是嵌套" ——
+    于是和上一族**逐字相同**的末态又回来了:库里和导出的 md 里那条参考地址都只剩
+    `…?text=Read+https://docs.example.org/+`,而 `added=1`、`errors=[]`、
+    `partial=[]`、接口照问了一次、水位照常推进到当天,一行提示都没有;`DO NOTHING`
+    让这种删除**永久固定**,重复同步 `added=0`、库里仍是坏链接。
+
+    那个查询值标准库解析出来逐字是
+    `Read https://docs.example.org/ https://x.com/Other/article/20002` ——
+    `+` 是**编码过的空格**,不是"外层 URL 到此为止、另起一条"的标记,两条都是分享
+    文字的内容。
+
+    修法是一处:`_nested` 的第二种证据改用**最左**那个起手式(`search` 而不是
+    `finditer` 的末项)。判据照上一族写:两条保留通道各走一轮真采集,断言库里和
+    导出的 md 里那条参考地址**逐字**还在、这条推文自己那条摘掉了、全文补上了。
+    """
+
+    feedgrab_round = _gap.ArticlePathFormTests.feedgrab_round
+    browser_round = _gap.ArticlePathFormTests.browser_round
+    check_feedgrab = ShareQueryValueTests.check_feedgrab
+    LEAD = '我的长文 '
+
+    # 报告那份输入里内层那条网址。它不是 X 文章地址,所以 `_ARTICLE_LINK` 压根
+    # 不认它 —— 它在这里的作用只有一个:在候选和外层起手式之间**再插一个起手式**。
+    INNER = 'https://docs.example.org/'
+
+    def test_the_multi_url_share_value_from_the_report_stays_intact(self):
+        """报告那份输入逐字:`?text=Read+<内层网址>+<别人的文章地址>`。"""
+        self.check_feedgrab(
+            f'https://example.org/share?text=Read+{self.INNER}+{OTHER}')
+
+    def test_an_inner_www_address_does_not_reset_the_container(self):
+        """内层换成 `www.` 那种起手式 —— 两种起手式都要认,各写一份必然漂。"""
+        self.check_feedgrab(
+            f'https://example.org/share?text=Read+www.docs.example.org/+{OTHER}')
+
+    def test_a_percent_encoded_multi_url_value_stays_intact(self):
+        """分隔换成 `%20`(百分号编码的空格) —— 紧前那个字符是 `0`,第一种证据
+        对它彻底是瞎的,而取末项的实现在这里同样漏。"""
+        self.check_feedgrab(
+            f'https://example.org/share?text=Read%20{self.INNER}%20{OTHER}')
+
+    def test_a_fragment_holding_two_urls_stays_intact(self):
+        """容器换成**片段**:`#Read+<内层网址>+<地址>`。`?` 和 `#` 是同一档不透明
+        值容器,只钉查询串的话片段这一侧没人管。"""
+        self.check_feedgrab(
+            f'https://example.org/p#Read+{self.INNER}+{OTHER}')
+
+    def test_an_inner_tco_link_inside_a_share_value_stays_intact(self):
+        """**`_TCO` 那一侧的独立射程**:内层换成一条 t.co 短链。
+
+        两条正则共用 `_nested`,而 t.co 那一条同样是拿去 `sub` 的 —— 它漏判就是把
+        别人分享文字里那条短链从中间剪断。这一条的候选是 t.co 自己(`_ARTICLE_LINK`
+        压根不认它),所以只有这条用例覆盖得到。
+        """
+        self.check_feedgrab(
+            f'https://example.org/share?text=Read+{self.INNER}+https://t.co/AbCdEf')
+
+    def test_the_browser_channel_too(self):
+        """另一条保留通道,而且是**没有卡片信号**那一档 —— 正文里那条地址是唯一的
+        信号。漏哪一条通道都是那条通道上的长文永久空正文。"""
+        ref = f'https://example.org/share?text=Read+{self.INNER}+{OTHER}'
+        got, calls = self.browser_round(f'我的长文 {CANON_9}\n参考：{ref}')
+        text = got['entries'][0]['body']
+        self.assertIn(ref, text, '别人那条分享地址被从中间剪断了')
+        self.assertNotIn(CANON_9, text, '而这条推文自己那条照旧要摘掉')
+        self.assertIn(FULL, text, '这条推文自己的全文还是要补上')
+        self.assertEqual('', got['incomplete'], '补到了,这一轮算读全了')
+        self.assertNotEqual(OLD_WATER, got['watermark'])
+        self.assertEqual(1, len(calls.urls), '只该为自己那条地址问一次')
+
+    def test_a_multi_url_share_link_alone_is_never_asked_about(self):
+        """**整条推文只有这一条分享链接时**:一次询问都不发、正文一个字不动,而且
+        **别人那篇文章的全文不许写进来**。
+
+        最后那半句是最重的 —— 误认不只是改坏别人的链接,还会把别人那篇文章的全文
+        当成这条推文的观点存进知识库,而 `DO NOTHING` 让它永久固定。
+        """
+        ref = f'https://example.org/share?text=Read+{self.INNER}+{OTHER}'
+        summary, row, calls, s = self.feedgrab_round(f'读到两篇好文章 {ref}')
+        got = row.get('body') or ''
+        self.assertEqual([], calls.urls, '别人的分享链接不许触发一次长文询问')
+        self.assertIn(ref, got, '那条分享地址一个字都不许动')
+        self.assertNotIn(FULL, got, '别人那篇文章的全文被当成这条推文的观点存下来了')
+        self.assertEqual(1, summary['added'])
+        self.assertEqual(TODAY, self.water(s['id']))
+
+    def test_a_second_sync_keeps_the_reference_intact(self):
+        """**重复同步那一半**:报告第 4 步是"同一完整输入再同步,`added=0`、库里
+        仍是坏链接"—— 它说的是 `DO NOTHING` 让这一篇**永久**改不回来。
+
+        修好之后的反面:第一轮就存对了,第二轮 `added=0` 而库里那一行**逐字不变**
+        (不许被第二轮反过来改坏)。
+        """
+        ref = f'https://example.org/share?text=Read+{self.INNER}+{OTHER}'
+        body = f'{self.LEAD}{CANON}\n参考：{ref}'
+        summary, row, _calls, s = self.feedgrab_round(body)
+        self.assertEqual(1, summary['added'])
+        first = row.get('body') or ''
+        self.assertIn(ref, first)
+
+        req, calls = answering(article_payload())
+        with req:
+            second = self.collect()
+        rows = self.rows(s['id'])['items']
+        self.assertEqual([], second['errors'])
+        self.assertEqual(0, second['added'], '同一条推文不该再入库一次')
+        self.assertEqual(1, len(rows))
+        self.assertEqual(first, rows[0].get('body') or '',
+                         '第二轮把库里那一行改坏了')
+        self.assertIn(ref, rows[0].get('body') or '')
+        self.assertEqual(1, len(calls.urls),
+                         '第二轮照旧要为自己那条地址问一次(入库那一步才 DO NOTHING)')
+
+    def test_every_multi_url_shape_hides_the_nested_address(self):
+        """逐形态直测两个消费方 —— 端到端一轮只摆得下一种,而这几种各有一个内层
+        起手式和一个紧前字符,按形态摆才看得出少认了哪一种。
+
+        最后那条(`,www.b.org/doc,`)是上一轮那个"取末项"实现专门为之开洞的写法:
+        它现在落进**已知那道缝**(进了查询串之后的并列地址按嵌套办)。
+        """
+        for body in (f'https://example.org/share?text=Read+{self.INNER}+{OTHER}',
+                     f'https://example.org/share?text=Read+www.docs.example.org/+{OTHER}',
+                     f'https://example.org/share?text=Read%20{self.INNER}%20{OTHER}',
+                     f'https://example.org/p#Read+{self.INNER}+{OTHER}',
+                     f'https://a.org/?k=1,www.b.org/doc,{OTHER}'):
+            with self.subTest(body=body):
+                self.assertFalse(needs_article({'url': TWEET, 'body': body}),
+                                 '查询串/片段里那条地址不是这条推文的长文')
+                self.assertEqual(body, lead_text(body).strip(),
+                                 '别人那条地址被从中间剪断了')
+
+    def test_the_inner_address_itself_is_left_alone_too(self):
+        """**反过来钉一边**:内层那条网址自己也一个字不许动 —— 包括它是一条
+        **真 t.co 短链**的时候(那一条 `_TCO` 认得出,所以它是真的会被 `sub` 掉的
+        那一档)。
+
+        配一条阴性对照:同一条 t.co 短链**不在**任何外层 URL 里时照旧摘得掉,
+        不然"判据生效了"和"t.co 那一侧压根不摘"长得一模一样。
+        """
+        inner = 'https://t.co/AbCdEf'
+        body = f'https://example.org/share?text=Read+{self.INNER}+{inner}'
+        self.assertEqual(body, lead_text(body).strip(),
+                         '别人分享文字里那条短链被剪断了')
+        self.assertEqual('读到一篇好文章',
+                         lead_text(f'读到一篇好文章 {inner}').strip(),
+                         '裸着写的 t.co 短链照旧要摘掉')
+
 
 
 # ------------------------------------------------- 判据本身:三步各自的射程
@@ -352,20 +518,30 @@ class NestedEvidenceTests(unittest.TestCase):
                 self.assertIsNone(self.hit(body),
                                   '查询串/片段是不透明值容器,里面那条是嵌套')
 
-    def test_the_last_outer_start_wins(self):
-        """**多个起手式时取最后那一个** —— 候选只可能嵌在**紧挨着它左边**那条
-        URL 里。
+    def test_the_leftmost_outer_start_defines_the_container(self):
+        """**多个起手式时取最左那一个** —— 它回答的是"候选落在**哪一条**外层 URL
+        里",而那永远是最外面那条。
 
-        拿更远那一条的查询符当证据等于张冠李戴,而这个方向上的错是**漏认**:
-        `https://a.org/?k=1,www.b.org/doc,<地址>` 里那条 X 地址是真的(它并列写在
-        `www.b.org` 的路径后面),取第一个起手式的实现会因为 `a.org` 那个 `?` 把它
-        判成嵌套、永久删掉。反过来钉一边:换成 `www.b.org/go/<地址>` 照旧是嵌套
-        —— 取最后那一个不等于放过真嵌套。
+        一条 URL 的查询串和片段只被空白和 `<` 终止,所以最左那个起手式一旦进了
+        `?` / `#`,从那里到候选之间的每一个字符 —— **包括中间又一条完整 URL** ——
+        都还在它的值里面。取末项的实现只看得见内层那一截
+        (`docs.example.org/+`:没有 `?#`、紧前又是 `+`),于是判成"不是嵌套",
+        别人那条参考地址被从中间永久剪断(2026-10-10 自由工作流第 2 轮审查实测,
+        上一族的端到端钉的就是这个后果)。
+
+        **三条一起钉**,因为这个方向上有一个真实的取舍:内层起手式**自己**还在
+        外层查询值里时算嵌套(前两条,`https://` 和 `www.` 各一个);而外层压根
+        没进查询串、候选并列在**路径**后面时照旧放行(第三条)—— 判据换的只有
+        "拿哪个起手式去问 `?#`",不是"一律按嵌套办"。
         """
-        ok = f'https://a.org/?k=1,www.b.org/doc,{CANON}'
-        self.assertIsNotNone(self.hit(ok), '它嵌的是紧挨着它左边那条 URL 的路径')
-        bad = f'https://a.org/?k=1,www.b.org/go/{OTHER}'
-        self.assertIsNone(self.hit(bad), '紧挨着它左边那条的路径段位,照旧是嵌套')
+        for body in (f'https://a.org/?k=1,www.b.org/doc,{OTHER}',
+                     f'https://example.org/share?text=Read+https://docs.example.org/+{OTHER}'):
+            with self.subTest(body=body):
+                self.assertIsNone(self.hit(body),
+                                  '内层那条起手式自己还在外层的查询值里')
+        free = f'https://a.org/p,www.b.org/doc,{CANON}'
+        self.assertIsNotNone(self.hit(free),
+                             '外层没进查询串,这是三条并列写在路径上的地址')
 
     def test_both_arms_run_through_the_same_judge(self):
         """**两档候选过的是同一份判据**,只是②档(裸域名)的正则已经把全部 URL
