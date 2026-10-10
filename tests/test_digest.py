@@ -28,14 +28,25 @@ FEED = 'https://tldr.tech/api/rss/ai'
 DAY = '2026-10-09 08:00'
 
 
-def rss(*days: str) -> bytes:
-    items = ''.join(
-        f'<item><title>Issue {d}</title><link>https://tldr.tech/ai/{d}</link>'
-        f'<guid>https://tldr.tech/ai/{d}</guid>'
-        f'<pubDate>{d[8:10]} Oct 2026 00:00:00 GMT</pubDate></item>'
-        for d in days)
+def feed_of(*items: tuple[str, str]) -> bytes:
+    """`(期号地址的末段, 日期或空串)` → 期号清单。
+
+    日期给空串 = **feed 没给 `pubDate`**;这时"地址末段像不像一个日期"就决定了
+    `digest._url_day` 认不认得出来 —— `('2026-10-08', '')` 是 TLDR 漏一期日期
+    的形态(地址里还有),`('issue-7', '')` 是两头都没有日期的形态。
+    """
+    xml = ''
+    for slug, day in items:
+        pub = f'<pubDate>{day[8:10]} Oct 2026 00:00:00 GMT</pubDate>' if day else ''
+        xml += (f'<item><title>Issue {slug}</title>'
+                f'<link>https://tldr.tech/ai/{slug}</link>'
+                f'<guid>https://tldr.tech/ai/{slug}</guid>{pub}</item>')
     return (f'<?xml version="1.0"?><rss version="2.0"><channel><title>TLDR AI</title>'
-            f'<link>https://tldr.tech</link>{items}</channel></rss>').encode()
+            f'<link>https://tldr.tech</link>{xml}</channel></rss>').encode()
+
+
+def rss(*days: str) -> bytes:
+    return feed_of(*((d, d) for d in days))
 
 
 def page(blocks, *, host='tldr.tech') -> bytes:
@@ -423,8 +434,12 @@ class WiringTests(unittest.TestCase):
                            feed_types()['rss'].interval_minutes)
 
 
-class EndToEndTests(unittest.TestCase):
-    """真走一轮 `sync.collect`,落进 feeds.db。"""
+class DigestDbCase(unittest.TestCase):
+    """真走一轮 `sync.collect`、落进 feeds.db 的摆盘。
+
+    **自己不带 `test_*`** —— `tests/test_digest_undated.py` 复用它(各写一份的话
+    两边的前提会各漂各的,而带 `test_*` 的基类会被 unittest 跑两遍)。
+    """
 
     def setUp(self):
         import kb.feeds.registry as reg
@@ -448,20 +463,28 @@ class EndToEndTests(unittest.TestCase):
         with patch.object(digest, 'request', fake), patch.object(fetching, 'request', fake):
             return sync.collect('digest', FetchScope())
 
-    def collect_days(self, days, scope=FetchScope()):
+    def collect_feed(self, feed, scope=FetchScope()):
         """每期一份自己的内容,返回 `(summary, 请求过的期号页面)`。"""
         from kb.feeds import sync
         seen = []
 
         def fake(url, headers=None, **kw):
             if 'api/rss' in url:
-                return fetching.Response(status=200, url=url, body=rss(*days), headers={})
+                return fetching.Response(status=200, url=url, body=feed, headers={})
             seen.append(url.rsplit('/', 1)[-1])
             return fetching.Response(status=200, url=url,
                                      body=issue_page(url.rsplit('/', 1)[-1]), headers={})
 
         with patch.object(digest, 'request', fake), patch.object(fetching, 'request', fake):
             return sync.collect('digest', scope), seen
+
+    def collect_days(self, days, scope=FetchScope()):
+        return self.collect_feed(rss(*days), scope)
+
+    def config(self) -> dict:
+        with self.reg.db() as c:
+            row = c.execute("SELECT config FROM subscriptions WHERE kind='digest'").fetchone()
+        return json.loads(row[0] or '{}')
 
     def stored(self):
         with self.reg.db() as c:
@@ -472,6 +495,10 @@ class EndToEndTests(unittest.TestCase):
         with self.reg.db() as c:
             cfg = c.execute("SELECT config FROM subscriptions WHERE kind='digest'").fetchone()[0]
         return (json.loads(cfg) or {}).get('digest_issue', '')
+
+
+class EndToEndTests(DigestDbCase):
+    """真走一轮 `sync.collect`,落进 feeds.db。"""
 
     def test_stories_land_with_their_blurb_and_the_watermark_moves(self):
         summary = self.collect()
