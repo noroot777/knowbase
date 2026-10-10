@@ -43,16 +43,40 @@ def attached_feeds(conn):
     官方行为,两个库现在都是 WAL),跨库写会在崩溃点留下半个结果。`mode=ro`
     把这件事从「约定」变成「物理上做不到」。
 
+    地址是 `db_uri` 给的规范 URI,**承重的是这一道**:路径里的 `#`/`?` 会被 URI
+    解析当成 fragment / query —— 那不是报错,是**打开了一个名字更短的别的库**,
+    顺带在那儿建一个文件,`mode=ro` 也一起丢了(2026-10-11 审查实测,数据目录叫
+    `reader#data` / `reader?data` 时各是一种)。`conn` 自己要带 SQLITE_OPEN_URI
+    才认这个地址,那是 `store.connect` 的 `uri=True` 负责的事。
+
+    **参数绑定今天是冗余带,如实记着**:`as_uri()` 会把单引号一并编码成 `%27`,
+    所以把地址拼进 SQL 字符串这个注入**红 0 条**(实测)。留着是构造上的 ——
+    「地址怎么来的」和「地址怎么进 SQL」是两件事,不该让后者押在前者一定会
+    编码上;而审查里那一档 `reader's data` 的 `near "s": syntax error` 正是
+    两道都没有时的样子。
+
     进来之前先 DETACH 一次:上一次如果死在异常里没摘干净,同名 ATTACH 会报
     「already in use」,而那跟这次要回答的问题毫无关系。
     """
-    from kb.feeds.registry import DB_PATH as FEEDS_DB
+    from kb.feeds import registry as reg
+    from kb.store import db_uri
     with suppress(Exception):
         conn.execute(f"DETACH DATABASE {FEEDS_ALIAS}")
-    # URI 之前先确认真实文件在:万一某个 SQLite 构建没开 URI 处理,这个字符串
-    # 会被当成字面文件名,ATTACH 一个不存在的名字等于**凭空建一个空库**,
-    # 接着查 subscriptions 报 no such table —— 抛出去是对的,但别留下垃圾文件。
-    conn.execute(f"ATTACH DATABASE 'file:{FEEDS_DB}?mode=ro' AS {FEEDS_ALIAS}")
+    # 文件不在就别往下走:下一句 `reg.db()` 会**把它建出来**(建表 + 补种默认
+    # 订阅),于是「库被删了」这种该让人看一眼的状态被静默抹平成「一条开着
+    # 提取的订阅都没有」,所有 feeds 文档从此不提取而面板一切正常。
+    if not reg.DB_PATH.exists():
+        raise FileNotFoundError(f"订阅库不在:{reg.DB_PATH}")
+    # **补列迁移要先于这次只读 JOIN 发生。** `subscriptions.extract` 是 ALTER
+    # 补出来的,而补列只在 `reg.db()` 里跑 —— 升级后第一条命令如果是
+    # `kb extract`(或管道的并行存量提取),它压根没碰过注册库,JOIN 当场
+    # `no such column: s.extract`,退出码 1;而先打开一次面板再跑同一条命令
+    # 就好了(2026-10-11 审查实测)。这里借 `reg.db()` 跑一遍:它幂等,口径也
+    # 只有那一份(建表 + 补列 + 按修订号补种都在它的写锁里)。
+    with reg.db():
+        pass
+    conn.execute(f"ATTACH DATABASE ? AS {FEEDS_ALIAS}",
+                 (db_uri(reg.DB_PATH) + "?mode=ro",))
     try:
         yield
     finally:

@@ -290,9 +290,31 @@ def effective_promo_levels(conn, paths: list[str]) -> dict[str, str]:
     return out
 
 
+def db_uri(db_path: Path) -> str:
+    """一个库文件的规范 `file:` URI。口径只有这一份。
+
+    `Path.as_uri()` 会把路径里的 `#` `?` `\'` 空格一并 percent-encode —— 手写
+    `f"file:{path}"` 的话,`#` 和 `?` 会把地址在那儿截断(SQLite 把后半截当成
+    fragment / query),于是打开的是一个**名字更短的别的库**,顺带在那个位置
+    凭空建一个文件(2026-10-11 审查实测:数据目录叫 `reader#data` 时建出一个
+    叫 `reader` 的文件,而 `mode=ro` 连带失效)。
+    """
+    return Path(db_path).absolute().as_uri()
+
+
 def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=30)
+    # **`uri=True` 不是为了主库,是为了这条连接上后来的 ATTACH**
+    # (`extract_optin.attached_feeds` 要以只读挂 feeds.db)。ATTACH 认不认
+    # `file:…?mode=ro` 取决于**连接**有没有带 SQLITE_OPEN_URI —— 而 Python 的
+    # `uri=` 参数正是它。不带时只能靠 SQLite 编译默认值 `SQLITE_USE_URI`,
+    # 本机 Homebrew 的 3.53.2 开着、项目实际用的 uv 那份 3.50.4 **没开**
+    # (2026-10-11 审查实测:后者上 ATTACH 一律 `unable to open database`,
+    # 连普通目录都失败,整个待提取查询取不到结果 —— 混在里面的绿泡泡积压
+    # 也跟着不处理)。所以显式开,不押在构建选项上。
+    # 开了之后主库路径自己也必须是规范 URI,否则含 `#`/`?` 的数据目录会被
+    # 当成 query/fragment 截断 —— 那是同一枚硬币的另一面,见 `db_uri`。
+    conn = sqlite3.connect(db_uri(db_path), uri=True, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")

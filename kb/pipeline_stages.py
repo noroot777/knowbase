@@ -236,11 +236,25 @@ def _new_extract_stats() -> dict:
     # stale_paths: 正文在模型调用期间被换掉、这次结果作废的那些(不算失败)
     # no_text_paths: 有内容但一个字都没有(整篇一张图之类)。和 empty_paths 分开,
     # 因为它不进「需处理」明细、不判红、也不该触发回填(见 extract.body_gap)
+    # blocked: 队列**压根没读出来**(跨库问订阅的提取开关失败,见
+    # `extract.pending_docs`)。它和上面那几项不是一回事:那些数的是「处理过的
+    # 文档」,而这一档下一篇都没看到 —— 不单记一档的话,收尾那句
+    # `ok+failed+empty+no_text+stale == 0` 会把它当成「没有待提取的文档」,
+    # 把阶段刷成绿色(2026-10-11 审查实测:真页面上同时显示红色错误日志和绿色
+    # 「同步已完成」「提取知识:已完成」)。
     return {"ok": 0, "promo": 0, "failed_paths": set(), "empty_paths": set(),
-            "no_text_paths": set(), "stale_paths": set(), "failures": {}}
+            "no_text_paths": set(), "stale_paths": set(), "failures": {},
+            "blocked": ""}
 
 
 def _finish_extract_stage(stats: dict) -> None:
+    # **排在所有计数之前**:队列没读出来时那几个计数全是 0,而 0 在下面那句里
+    # 的含义是「没有待提取的文档」—— 两种完全相反的情况长得一模一样。
+    # 单独一条 failures 明细,面板上展开就能看见原因。
+    if stats.get("blocked"):
+        _stage("extract", "error", stats["blocked"],
+               failures=[{"title": "提取队列", "reason": stats["blocked"]}])
+        return
     ok = stats["ok"]
     failed = len(stats["failed_paths"])
     empty = len(stats["empty_paths"])
@@ -323,8 +337,14 @@ def _extract_pass(label: str, stats: dict) -> None:
             # 「哪些文档该提取」要跨库问一次 feeds.db 里的订阅开关
             # (见 `kb.extract.pending_docs`)。问不到时既不能当成「没有待提取
             # 的」放过去(那会静默停掉所有 feeds 来源的提取),也不该让异常冒出
-            # 这个阶段把状态机留在 running —— 落红、把原因说出来。
-            _stage("extract", "error", f"读不到订阅的提取开关:{e}")
+            # 这个阶段把状态机留在 running。
+            # **记进 stats、让收尾去落阶段**,不在这里自己 `_stage` 一次就
+            # return:这个函数的两个调用方(`_run_extract` 单轮、管道的
+            # 存量+增量双轮)随后都无条件走 `_finish_extract_stage`,而那边
+            # 按「计数全 0」把阶段刷成绿色的「没有待提取的文档」,红的那一句
+            # 当场被盖掉。
+            stats["blocked"] = f"读不到订阅的提取开关:{e}"
+            _stage("extract", "error", stats["blocked"])
             return
         if not todo:
             if label:
