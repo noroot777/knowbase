@@ -419,5 +419,13 @@
     "url": "https://huggingface.co/blog/feed.xml",
     "mode": "feed",
     "group_name": "博客订阅"
+  },
+  {
+    "kind": "web",
+    "name": "Anthropic 官方",
+    "url": "https://www.anthropic.com/news",
+    "mode": "feed",
+    "group_name": "官方动态",
+    "fulltext": true
   }
 ]

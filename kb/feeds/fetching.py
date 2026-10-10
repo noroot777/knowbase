@@ -347,7 +347,17 @@ class SocialAdapter(RSSAdapter):
         return parse_feed(body, url, social=True)
 
 
-ADAPTERS = {'rss': RSSAdapter(), 'social': SocialAdapter()}
+class PageAdapter(RSSAdapter):
+    """没有 feed 的站点:把列表页拆成条目(见 `kb.feeds.page_list`)。"""
+
+    def parse(self, body: bytes, url: str) -> list[dict]:
+        # 延迟导入:`page_list` 要用这个模块的 FeedError / canonical_url /
+        # discover_feed,顶层导入就是个环(方向同 `readable` 导入 `plain`)。
+        from kb.feeds import page_list
+        return page_list.parse_page_list(body, url)
+
+
+ADAPTERS = {'rss': RSSAdapter(), 'social': SocialAdapter(), 'page': PageAdapter()}
 
 
 def fetch_source(source: dict, settings: dict, *, unconditional: bool = False,

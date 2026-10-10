@@ -38,6 +38,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb import collectors, daily_run, llm, pipeline  # noqa: E402
+from kb.source_types import feed_types  # noqa: E402
 from tests.headless import probe_env, requires_headless  # noqa: E402
 from kb.web import pipeline_api  # noqa: E402
 
@@ -66,7 +67,10 @@ class RegistryTests(_Sandbox):
 
     def test_exactly_one_wechat_channel_and_it_is_the_default(self):
         offered = [c["id"] for c in collectors.collection_channels()]
-        self.assertEqual([LIVE, "social", "rss"], offered)
+        # 清单跟着来源注册表走,**不写死几条**:这条用例钉的是「公众号只有一条
+        # 通道」,跟来源总数无关 —— 写死的话加一个来源就红,而红的地方跟改动
+        # 毫无关系(口径同面板那句静态说明不许写死通道条数)。
+        self.assertEqual([LIVE, *feed_types()], offered)
         self.assertEqual(LIVE, collectors.active_collector().name)
         self.assertEqual(LIVE, collectors.wechat_channel())
         self.assertNotIn(RETIRED, collectors._REGISTRY)
@@ -161,7 +165,7 @@ class ChannelApiTests(_Sandbox):
     def test_channels_endpoint_offers_one_wechat_and_labels_the_retired_one(self):
         data = self.client.get("/api/pipeline/channels").json()
         self.assertEqual(LIVE, data["default"])
-        self.assertEqual([LIVE, "social", "rss"], [c["id"] for c in data["channels"]])
+        self.assertEqual([LIVE, *feed_types()], [c["id"] for c in data["channels"]])
         self.assertNotIn(RETIRED, [c["id"] for c in data["channels"]])
         self.assertIn(RETIRED, data["labels"])
         self.assertEqual({RETIRED: LIVE}, data["aliases"])

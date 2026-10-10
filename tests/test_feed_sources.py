@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from kb import maintenance, pipeline, pipeline_state
 from kb.collectors import FetchScope, get_collector
 from kb.feeds import registry as reg, fetching, sync, schedule
+from kb.source_types import feed_types
 from kb.web import intake_api
 
 # 固定日期会让这套测试在几天后自己变红:新订阅只收最近 `reg.HISTORY_DAYS` 天
@@ -68,7 +69,9 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(50,len(reg.subscriptions('social')))
         self.assertFalse(reg.get_settings('rss')['enabled'])
         data = self.client.get('/api/intake/modules').json()['modules']
-        self.assertEqual({'wechat','social','rss'},{d['id'] for d in data})
+        # 模块清单跟着注册表走,不写死 —— 这条用例钉的是「defaults 只跑一次、
+        # 没有 youtube 和博客页」,跟来源总数无关。
+        self.assertEqual({'wechat',*feed_types()},{d['id'] for d in data})
 
     def test_normalized_duplicate_edit_and_disable_survive_reconnect(self):
         s = self.source('https://twitter.com/NewPerson/with_replies',kind='social')
