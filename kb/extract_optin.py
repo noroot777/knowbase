@@ -60,24 +60,46 @@ def attached_feeds(conn):
     """
     from kb.feeds import registry as reg
     from kb.store import db_uri
+    uri = db_uri(reg.DB_PATH) + "?mode=ro"
     with suppress(Exception):
         conn.execute(f"DETACH DATABASE {FEEDS_ALIAS}")
-    # 文件不在就别往下走:下一句 `reg.db()` 会**把它建出来**(建表 + 补种默认
-    # 订阅),于是「库被删了」这种该让人看一眼的状态被静默抹平成「一条开着
-    # 提取的订阅都没有」,所有 feeds 文档从此不提取而面板一切正常。
-    if not reg.DB_PATH.exists():
-        raise FileNotFoundError(f"订阅库不在:{reg.DB_PATH}")
-    # **补列迁移要先于这次只读 JOIN 发生。** `subscriptions.extract` 是 ALTER
-    # 补出来的,而补列只在 `reg.db()` 里跑 —— 升级后第一条命令如果是
-    # `kb extract`(或管道的并行存量提取),它压根没碰过注册库,JOIN 当场
-    # `no such column: s.extract`,退出码 1;而先打开一次面板再跑同一条命令
-    # 就好了(2026-10-11 审查实测)。这里借 `reg.db()` 跑一遍:它幂等,口径也
-    # 只有那一份(建表 + 补列 + 按修订号补种都在它的写锁里)。
-    with reg.db():
-        pass
-    conn.execute(f"ATTACH DATABASE ? AS {FEEDS_ALIAS}",
-                 (db_uri(reg.DB_PATH) + "?mode=ro",))
+    # **先只读挂上去看一眼,再决定要不要跑迁移。** 顺序反过来(先 `reg.db()`
+    # 后 ATTACH)有两个代价,都不小:
+    #
+    # ① `reg.db()` 是「幂等地确保库在」的入口 —— 它会建表、补种默认订阅。
+    #    拿「文件在不在」当前置判据挡不住**空文件**:`feeds.db` 被截成 0 字节
+    #    (配置被清空、恢复备份恢复了个空的)时 `exists()` 为真,于是那句
+    #    `reg.db()` 把它重建成一个全新的空库,原先开着提取的订阅归属没了,
+    #    JOIN 一切正常地返回 0 条 —— 该让人去恢复备份的状态被解释成「没有
+    #    待提取的文档」,页面上绿色的「同步已完成」(2026-10-11 第 2 轮审查
+    #    实测,截图里待提取从 1 篇变成 0 篇而终态是成功)。
+    # ② 常态下(列早就补齐了)根本不需要 `reg.db()`,而它每次都要
+    #    `BEGIN IMMEDIATE` 抢一次 feeds.db 的写锁 —— 这个函数坐在面板每次
+    #    刷新那条路上。
+    #
+    # 所以判据改成「挂上来之后有没有 `subscriptions` 表」:空库和垃圾文件都
+    # 过不了(前者 PRAGMA 返回空,后者 ATTACH/查询自己就报 not a database),
+    # 而真·旧库过得了、只是少一列。`mode=ro` 保证这一路**不会建出任何东西**。
+    conn.execute(f"ATTACH DATABASE ? AS {FEEDS_ALIAS}", (uri,))
     try:
+        cols = {r[1] for r in conn.execute(
+            f"PRAGMA {FEEDS_ALIAS}.table_info(subscriptions)")}
+        if not cols:
+            raise LookupError(
+                f"订阅库里没有 subscriptions 表,不像是一个可用的订阅库:{reg.DB_PATH}")
+        if "extract" not in cols:
+            # **补列迁移要先于这次只读 JOIN。** `subscriptions.extract` 是 ALTER
+            # 补出来的,而补列只在 `reg.db()` 里跑 —— 升级后第一条命令如果是
+            # `kb extract`(或管道的并行存量提取),它压根没碰过注册库,JOIN 当场
+            # `no such column: s.extract`、退出码 1;而先打开一次面板再跑同一条
+            # 命令就好了(2026-10-11 第 1 轮审查实测)。借 `reg.db()` 跑一遍:
+            # 它幂等,口径也只有那一份(建表 + 补列 + 按修订号补种都在它的写锁
+            # 里)。只读的这一份要先摘掉,否则同一进程里一边挂着只读快照一边
+            # 写它。
+            conn.execute(f"DETACH DATABASE {FEEDS_ALIAS}")
+            with reg.db():
+                pass
+            conn.execute(f"ATTACH DATABASE ? AS {FEEDS_ALIAS}", (uri,))
         yield
     finally:
         with suppress(Exception):

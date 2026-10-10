@@ -346,6 +346,14 @@ def _extract_pass(label: str, stats: dict) -> None:
             stats["blocked"] = f"读不到订阅的提取开关:{e}"
             _stage("extract", "error", stats["blocked"])
             return
+        # 读到了 = 上一轮那次失败**已经恢复**,把它清掉。两轮共用同一份 stats,
+        # 只在异常时赋值、不在成功时清除的话,存量那轮失败、增量那轮读到并且
+        # 真的提取成功之后,收尾仍然优先报那条过时的错误:面板上「1 个步骤需
+        # 处理」、要求重试失败项,而日志里增量明明是 1/1
+        # (2026-10-11 第 2 轮审查实测,真管道 + 真模型桩复现)。
+        # **必须排在下面那句空队列 return 之前** —— 后一轮合法地读到空队列
+        # (比如订阅那会儿正好被关掉)同样是恢复,在 return 之后清等于没清。
+        stats["blocked"] = ""
         if not todo:
             if label:
                 _log(f"extract: {label}无待提取文档")

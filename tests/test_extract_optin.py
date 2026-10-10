@@ -31,6 +31,10 @@ from kb.chunker import split_chunks
 from kb.config import Source
 from kb.feeds import registry as reg, sync
 
+# `store.connect` 的真身。`OptInCase` 会把模块上那个名字换成指向临时库的替身,
+# 而「它自己是怎么开连接的」那一条(ReadOnlyMountTests)要问的正是真身。
+_real_store_connect = store.connect
+
 
 class OptInCase(unittest.TestCase):
     """脚手架:临时 feeds.db + 临时 kb.db + 临时 vault。自己不带断言。"""
@@ -42,18 +46,24 @@ class OptInCase(unittest.TestCase):
         self.vault = self.root / 'vault'
         # 维护锁的 lockfile 在 DATA_DIR 下:不指到 tmp 的话这些用例会去 flock
         # 生产那一个,被 kb-web 正在跑的一轮索引挂住(见 kb.maintenance)。
+        real_connect = store.connect
         for p in (patch.object(reg, 'DB_PATH', self.root / 'feeds.db'),
                   patch.object(maintenance, 'DATA_DIR', self.root),
                   patch.object(config, 'DB_PATH', self.root / 'kb.db'),
                   patch.object(scanner, 'VAULT_ROOT', self.vault),
                   patch.object(extract, 'VAULT_ROOT', self.vault),
-                  patch.object(sync, 'VAULT_ROOT', self.vault)):
+                  patch.object(sync, 'VAULT_ROOT', self.vault),
+                  # **`store.connect` 本身也得换掉。** 它的默认参数
+                  # `db_path=DB_PATH` 在函数定义时就绑死了生产那条路径,而
+                  # `_extract_pass` / `_extract_one` 里是**裸调** `store.connect()`
+                  # —— 只 patch `config.DB_PATH` 的话,凡是走进管道那几步的用例
+                  # 读的都是生产 kb.db(口径同 tests/test_extract_no_body.py)。
+                  patch.object(store, 'connect',
+                               lambda *a, **k: real_connect(self.root / 'kb.db'))):
             p.start(); self.addCleanup(p.stop)
 
     def kb(self):
-        # `store.connect` 的默认参数在函数定义时就绑死了,所以和被测代码一样
-        # 显式现读 config.DB_PATH。
-        return closing(store.connect(config.DB_PATH))
+        return closing(store.connect())
 
     def doc(self, source: str, name: str, body: str = '正文若干字。') -> str:
         """往 vault 里放一篇 md 并按索引那条真路径扫进 kb.db,返回它的相对路径。
@@ -242,6 +252,28 @@ class UnreadableRegistryTests(OptInCase):
                 extract.pending_docs(c)
         self.assertFalse(reg.DB_PATH.exists(), '不许顺手把库建回来')
 
+    def test_an_empty_registry_file_raises_instead_of_being_rebuilt(self):
+        """`feeds.db` 被截成 0 字节:抛,而且不许把它重建成一个空库。
+
+        「文件在不在」挡不住这一档 —— `exists()` 为真,于是借来跑迁移的
+        `reg.db()` 把它建表、补种,JOIN 一切正常地返回 0 条:该让人去恢复备份
+        的状态被解释成「没有待提取的文档」,页面上是绿色的「同步已完成」
+        (2026-10-11 第 2 轮审查实测:待提取从 1 篇变成 0 篇而终态是成功)。
+        判据因此是「挂上来之后有没有 subscriptions 表」,不是「文件在不在」。
+        """
+        sub = reg.save_subscription('rss', {'name': '聚合源', 'extract': True,
+                                            'url': 'https://a.example.org/feed.xml'})
+        key = hashlib.sha256(b'rss:https://a.example.org/1').hexdigest()[:32]
+        reg.put_items(sub, [{'url': 'https://a.example.org/1', 'title': 'T', 'body': 'B',
+                             'published': '2026-10-08 09:00', 'content_kind': 'feed'}])
+        path = self.doc('rss', key)
+        self.assertEqual([path], self.pending(), '摆盘自检:截断之前它确实排着队')
+        reg.DB_PATH.write_bytes(b'')
+        with self.kb() as c:
+            with self.assertRaises(Exception):
+                extract.pending_docs(c)
+        self.assertEqual(0, reg.DB_PATH.stat().st_size, '不许顺手把它重建成一个空库')
+
     def test_missing_registry_is_fine_without_feed_candidates(self):
         """反向钉一边:纯绿泡泡的库根本不碰 feeds.db。
 
@@ -382,7 +414,7 @@ class AwkwardDataDirTests(unittest.TestCase):
         md.write_text('---\nsource: rss\ntitle: T\n---\n\n# T\n\n正文若干字。\n',
                       encoding='utf-8')
         d = scanner._doc_from_file(md, Source('rss', md.parent))
-        with closing(store.connect(config.DB_PATH)) as c:
+        with closing(store.connect(root / 'kb.db')) as c:
             store.upsert_document(c, d, split_chunks(d.body), reg.now())
             c.commit()
             rows = sorted(r['path'] for r in extract.pending_docs(c))
@@ -447,6 +479,54 @@ class StageOutcomeTests(OptInCase):
         failures = self.stages[-1][1].get('failures') or []
         self.assertTrue(any('库读不到' in (f.get('reason') or '') for f in failures), failures)
 
+    def test_a_recovered_second_pass_ends_green(self):
+        """存量轮读不到、增量轮读到了 —— 最终是绿的。
+
+        两轮共用同一份 stats:只在异常时写 `blocked`、不在成功时清掉的话,收尾
+        仍然优先报那条**已经恢复**的错误,面板上「1 个步骤需处理」要求重试,而
+        日志里增量那轮明明跑完了(2026-10-11 第 2 轮审查实测)。
+        """
+        with patch.object(extract, 'pending_docs',
+                          side_effect=[RuntimeError('库读不到'), []]):
+            stats = pipeline_stages._new_extract_stats()
+            pipeline_stages._extract_pass('存量', stats)
+            pipeline_stages._extract_pass('增量', stats)
+        pipeline_stages._finish_extract_stage(stats)
+        self.assertEqual('ok', self.final()[1], self.stages)
+
+    def test_a_recovered_pass_that_really_extracted_ends_green(self):
+        """另一条恢复路径:后一轮不只是读到空队列,是真的处理完了一篇。
+
+        单验空队列那条不够 —— 一个「只在空队列分支清 blocked」的实现在它下面
+        全绿,而真正提取成功的那一轮照样被报成需处理(审查两组各复现过一次)。
+        """
+        path = self.doc('dr-gzh', 'gzh-1')
+        judged = {'entities': [{'name': 'Knowbase', 'kind': 'project'}],
+                  'topics': ['知识库'], 'summary': '一句话摘要。'}
+        with self.kb() as probe:
+            rows = extract.pending_docs(probe)
+        self.assertEqual([path], [r['path'] for r in rows], '摆盘自检')
+        with patch.object(extract, 'pending_docs',
+                          side_effect=[RuntimeError('库读不到'), rows]), \
+             patch.object(extract, 'extract_with_llm', return_value=judged):
+            stats = pipeline_stages._new_extract_stats()
+            pipeline_stages._extract_pass('存量', stats)
+            pipeline_stages._extract_pass('增量', stats)
+        pipeline_stages._finish_extract_stage(stats)
+        self.assertEqual(1, stats['ok'], '后一轮真的提取成功了')
+        self.assertEqual('ok', self.final()[1], self.stages)
+        self.assertEqual([], self.pending(), '它已经离开队列')
+
+    def test_a_pass_that_keeps_failing_stays_red(self):
+        """反向钉一边:两轮都读不到时照旧是红的 ——
+        一个「无条件清掉 blocked」的实现在上面两条里全绿。"""
+        with patch.object(extract, 'pending_docs', side_effect=RuntimeError('库读不到')):
+            stats = pipeline_stages._new_extract_stats()
+            pipeline_stages._extract_pass('存量', stats)
+            pipeline_stages._extract_pass('增量', stats)
+        pipeline_stages._finish_extract_stage(stats)
+        self.assertEqual('error', self.final()[1], self.stages)
+
     def test_an_empty_queue_is_still_green(self):
         """反向钉一边:真的没有待提取文档时照旧是绿的 ——
         一个「一律报红」的实现在上面三条里全绿。"""
@@ -479,8 +559,10 @@ class ReadOnlyMountTests(OptInCase):
         (2026-10-11 审查实测)。
         跨构建的后果测不了,就把构造钉住。
         """
+        # 这一条要看 `store.connect` 真身怎么开连接,所以绕开脚手架那层替身
         with patch('sqlite3.connect', wraps=sqlite3.connect) as spy:
-            store.connect(config.DB_PATH).close()
+            with closing(_real_store_connect(config.DB_PATH)):
+                pass
         self.assertTrue(spy.call_args.kwargs.get('uri'),
                         f'store.connect 没开 URI 支持:{spy.call_args}')
 
