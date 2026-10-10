@@ -1,0 +1,63 @@
+# 大模型阶段配置(kb/llm_stages.py)
+
+> 从 CLAUDE.md 外移的决策记录。CLAUDE.md 只留硬约束和一行指针,
+> 这里是完整的事故形态、实测证据、回归清单和反向验证红数。原文逐字搬运。
+
+- **每一处会调大模型的活都是一个「阶段」**,注册表在 `kb/llm_stages.py` 的
+  `STAGES`:问答回答/意图规划/研究工具循环、收藏分诊、提取打标、条目化
+  gate/拆条目、wiki 摘要综述、skill 标签回填。面板在 kb-web 顶栏「模型」,
+  配置落 `data/secrets.json` 的 `stages` 段。**别再在各文件里写死模型字面量**
+  (原来 `EXTRACT_MODEL`/`GATE_MODEL`/`TRANSCRIBE_MODEL`/`LLM_MODEL`/
+  `JUDGE_MODEL` 五处各写一份),调用方一律 `stage_model("<key>")` 取。
+- **provider 是显式存下来的,不是从模型名猜的。** `_provider_of` 那套前缀规则
+  (`gpt-*` → openai)只是没有别的信息时的兜底:同一个 id 在两家中转站都可能
+  存在,猜错就是拿 Anthropic 的 key 去打 OpenAI 的站,报 401 还看不出为什么。
+  面板下拉的 value 是 `provider:model_id`,选项按供应商分组。字符串形式的
+  `openai:gpt-5.5` 在 `llm.resolve` / `--model` 参数上同样认。
+- **模型标识一出 Python 就得带家**(`llm.qualify`):`/api/models` 的 option
+  value、`get_default_model`/`get_plan_model`/`get_fav_model` 的返回、落进
+  messages 表的那一列,全是 `provider:model_id`。这三个 getter 一度只回裸 id,
+  于是「面板选 openai → 问答把裸 id 交回 `resolve()` → 按遍历顺序猜成
+  anthropic」,选哪家就用哪家当场不成立;同名 id 还会让下拉出现两个一样的
+  选项、`default` 两边同时为真(2026-09-14 审查发现)。界面上要显示模型名时
+  过 `modelLabel()`(core.js)剥掉前缀,别把带家的值直接印给人看。
+- **下拉的候选 = 勾选的模型 + 各阶段当前指向的模型**(`llm.model_pool()`)。阶段
+  模型不要求在「API Key」面板勾选过(API/命令行写的、老配置迁移的、选完又被
+  取消勾选的),而只要没有一个 option 匹配当前默认,浏览器就自动选中第一个候选,
+  chat.js 每次发送又都带上下拉的值——面板里配好的问答模型当场被顶掉,还看不出
+  是谁改的(2026-09-14 第 2 轮审查发现)。`loadModels()` 里另有一层兜底补项。
+- **逐条试候选只能用 `llm.parse_model`,不能用 `llm.resolve`。** 后者认不出家时
+  会去问默认模型,而默认模型自己也在走这段解析——旧配置里留一个谁也不认识的
+  `default_model` 就是无限递归。`tests/test_llm_stages.py` 钉住了这条。
+- 没配的阶段按 `Stage.default` 走,**那些 default 就是这套设置出现之前各文件里
+  写死的那个 id**,所以「一个都不配」等于行为不变;测试里逐个对过。
+- 阶段配置**读时不缓存**(每篇/每轮现取):面板改完不用重启 kb-web,也不用等
+  下一次管道。批量脚本例外——transcribe 这种在整批开始时定一次,免得中途改
+  面板出现半批新半批旧。
+- **改 `secrets.json` 一律走 `llm.update_settings(mutate)`,别在外面 read → 改 →
+  write。** 它在锁里重新读盘再交给 mutate 改,两次并发保存才会叠加:面板里
+  连着改两个阶段(或一边存 key 一边改阶段)时,各自基于同一份旧内容写回的话,后写
+  的那次把前一次整个吃掉,两个请求还都返回成功(2026-09-14 第 3 轮审查发现)。
+  **临界区里是两把锁,少一把都不够**:进程内 RLock 挡同一个 kb-web 里的并发,
+  `secrets.json.lock` 上的 flock 挡跨进程的——两个 kb-web 实例、或者服务进程
+  和一条命令行脚本同时存盘时,进程内锁形同虚设,丢更新的形态和第 3 轮一模一样
+  (2026-09-14 第 4 轮审查发现)。flock 锁的是**独立的 lockfile,不是
+  `secrets.json` 自己**:写盘是 rename 换文件,锁着的 inode 会被换走,后来者
+  锁到的就是另一个对象了;lockfile 也只创建不删除,unlink 会让
+  「A 持锁 → B 删文件 → C 新建再持锁」出现两个持锁者。
+  写盘是「唯一名字的临时文件 + rename」:截断重写会让并发读者读到半截 JSON,而
+  `_file_secrets` 把坏 JSON 吞成 `{}`,接着一存盘就把整份 key 抹了;临时文件名不
+  唯一则两个进程会抢同一个 tmp,先 rename 的把它搬走、后一个报 FileNotFoundError。
+- **面板上每一步都写着「推荐哪个模型」,但注册表里存的是档位不是 id**
+  (`Stage.rec` = `cheap`/`main`,`recommended()` 按 `_TIERS` 的关键词在**当前实际
+  可选的模型**里挑一个具体 id 出来)。写死 id 十有八九不在候选里 —— 内置默认表写的
+  是 `claude-sonnet-4-5`,用户的中转站开的是 `claude-sonnet-4-6`,那行字就成了一句
+  指不到任何选项的废话,点「改用推荐」也选不中。挑的时候**已配 key 的那几家优先**,
+  一个关键词都不沾时返回空串、面板退回 `_TIER_LABEL` 那句档位说法。口径:量大的
+  解析活(规划/提取/gate/标签回填)推便宜档,写给人读或决定产物质量的那几步
+  (回答/研究/分诊/拆条目/wiki/归类)推主力档。`tests/test_llm_stages.py` 钉住了
+  「推荐必须是 `llm.model_pool()` 里真有的选项」和「agent 限 Anthropic 时不推到别家」。
+- 收藏页那个模型下拉和面板里的「收藏 · 分诊与行动卡」**是同一处配置**
+  (`llm.set_fav_model` 直接写 stages)。两边各存一份的话,用户在一处改完,
+  另一处的值会悄悄把它压回去。旧的顶层键(`default_model`/`plan_model`/
+  `fav_model`/`agent_model`)还读得到,但一旦在面板里改过就会被清掉。
