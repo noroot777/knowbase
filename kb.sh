@@ -216,9 +216,36 @@ web_prepare_env() {
     || die "依赖装不上,kb-web 起不来。网络通了再跑一次 ./kb.sh web start"
 }
 
+# **跑着的进程端着的是它启动那一刻的代码,而 kb 里有一批模块是延迟 import 的。**
+# Python 不热加载,所以服务运行期间一次 git checkout 就能让同一个进程里**新旧两个
+# 版本的模块混跑**:2026-10-10 实测 —— kb-web 10-09 21:23 起(那时 `x_channels` 还
+# 没有 `fill_bridge`),07:08 换成新代码,08:03 第一次跑同步时 `kb.feeds.sync` 才被
+# import、从磁盘读到**新版**并调用 `x_channels.fill_bridge`,而 `x_channels` 早以
+# **旧版**驻留在 sys.modules 里(启动后不久就被 `registry.get_settings` 拉进来了,
+# 它的 .pyc 时间戳停在换代码之前,是这次定位的铁证)。七条 RSS 订阅于是一起报
+# `module 'kb.feeds.x_channels' has no attribute 'fill_bridge'`、各自被推进最长
+# 24 小时的退避,而面板上显示的是「连接失败」—— 那句话指不到任何跟订阅、跟网络
+# 有关的东西,人只会去查源站,查不出来。
+#
+# 判据是 **pidfile 比 `kb/` 下任何一个 .py 旧**:`daemonize` 写 pidfile 的那一刻就是
+# 进程启动那一刻,而别处只删它、不写它。**只看 .py** —— `kb/static/` 下的 js/css
+# 每次请求都从磁盘读(免重启),算进来就是每改一行样式催一次重启;`scripts/` 和
+# `collector/` 同理不算,它们每次都是新起的子进程,拿的本来就是磁盘上那一版。
+#
+# 口径同 `graph_stale`:**提示而不代劳**,也不拦。重启会把正在跑的同步断在半路,
+# 什么时候重启得由人定;而且新旧混跑未必每次都撞上(两个版本之间没有互相引用的
+# 新符号时一切照旧),拿它挡住命令比提示一句更坏。
+code_stale() {   # 永远返回 0:它只是提示,不能挡住任何命令
+  [ -s "$WEB_PID" ] || return 0
+  [ -n "$(find "$ROOT/kb" -name '*.py' -newer "$WEB_PID" -print -quit 2>/dev/null)" ] || return 0
+  say "[web] 代码比跑着的进程新(kb/ 下的 .py 改过)。Python 不热加载,而延迟 import
+     的模块会读到新版 —— 同一个进程里新旧混跑,报出来的是一句指不到真因的
+     AttributeError。要让它生效:./kb.sh restart"
+}
+
 web_start() {
   if [ -n "$(service_pids "$WEB_PID" "$WEB_PORT" "$WEB_PAT")" ]; then
-    say "[web] 已在 $API"; graph_stale; return 0
+    say "[web] 已在 $API"; code_stale; graph_stale; return 0
   fi
   # 端口有人占但不是 kb-web:说清楚,别等它"起完"再报一个莫名其妙的超时。
   if port_busy "$WEB_PORT"; then
@@ -260,7 +287,7 @@ web_restart() { web_stop; web_start; }
 
 web_status() {
   local pids; pids="$(service_pids "$WEB_PID" "$WEB_PORT" "$WEB_PAT")"
-  if [ -n "$pids" ]; then echo "kb-web    运行中 ($API)"
+  if [ -n "$pids" ]; then echo "kb-web    运行中 ($API)"; code_stale
   elif port_busy "$WEB_PORT"; then echo "kb-web    未运行(端口 $WEB_PORT 被别的进程占着)"
   else echo "kb-web    未运行"; fi
 }

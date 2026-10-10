@@ -39,7 +39,7 @@ SERVER = Path(__file__).resolve().parent / "serve_reading.py"
 
 sys.path.insert(0, str(REPO))
 
-from tests.headless import probe_env, requires_headless  # noqa: E402
+from tests.headless import probe_env, requires_headless, run_probe  # noqa: E402
 
 
 def _free_port() -> int:
@@ -71,9 +71,8 @@ class ReadingEntriesAgreeTest(unittest.TestCase):
         else:  # pragma: no cover - 起不来就没什么可测的
             cls.server.kill()
             raise AssertionError("沙箱 kb-web 没起来")
-        run = subprocess.run(
-            [shutil.which("node"), str(PROBE), base, str(manifest)],
-            capture_output=True, text=True, timeout=300, env=probe_env())
+        run = run_probe([shutil.which("node"), str(PROBE), base, str(manifest)],
+                        timeout=300, env=probe_env())
         cls.stderr = run.stderr
         line = run.stdout.strip().splitlines()[-1] if run.stdout.strip() else ""
         if not line:

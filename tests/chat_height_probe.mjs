@@ -9,25 +9,12 @@
 // 始终无头、临时 profile),口径同 tests/redesign_probe.mjs。
 //
 //   HEADLESS_SHELL=<bin> node tests/chat_height_probe.mjs <baseURL>
-import { spawn } from "node:child_process";
 import { writeSync } from "node:fs";
+import { launchShell } from "./probe_shell.mjs";
 
-const BIN = process.env.HEADLESS_SHELL;
 const base = process.argv[2];
 
-const proc = spawn(BIN, ["--headless", "--remote-debugging-port=0", "--disable-gpu",
-                         "--hide-scrollbars", "--window-size=1280,900", "about:blank"],
-                   { stdio: ["ignore", "pipe", "pipe"] });
-const port = await new Promise((res, rej) => {
-  let buf = "";
-  proc.stderr.on("data", d => {
-    buf += d;
-    const m = buf.match(/ws:\/\/127\.0\.0\.1:(\d+)\//);
-    if (m) res(+m[1]);
-  });
-  proc.on("exit", c => rej(new Error(`exit ${c}\n${buf}`)));
-  setTimeout(() => rej(new Error("no devtools port")), 20000);
-});
+const { proc, port } = await launchShell(["--window-size=1280,900"]);
 
 const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const ws = new WebSocket(list.find(t => t.type === "page").webSocketDebuggerUrl);

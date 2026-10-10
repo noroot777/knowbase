@@ -38,8 +38,12 @@ def _fetch_with_budget(source, settings, scope, collect_deadline):
     deadline = time.monotonic() + SOURCE_SECONDS
     if deadline > collect_deadline:
         raise CollectionBudgetExceeded
-    return fetch_source(source, settings, unconditional=scope.ranged,
-                        deadline=deadline, collect_deadline=collect_deadline)
+    # 桥接通道的 X 长文补全挂在这儿(另三条通道在预取里就补过了)。判据和动作
+    # 都在 `x_channels` 那一侧:它是「当前这套设置会怎么跑」的唯一口径,而
+    # `targets()` 回答的正是同一个问题的另一面(哪些订阅**不**走 HTTP)。
+    return x_channels.fill_bridge(source, settings, fetch_source(
+        source, settings, unconditional=scope.ranged,
+        deadline=deadline, collect_deadline=collect_deadline))
 
 
 def _within_history(source, entries):

@@ -243,7 +243,7 @@ def keep_tags(tags) -> list[str]:
     `topic/link-only` 这种会永久留在这篇文章上。
 
     **不摘 `flag/软广`**:它由 promo 判定管,而重新提取会顺带重判一次 —— 改判
-    时 `extract.sync_promo_tag` 自己会把 md 里那行摘掉(见 CLAUDE.md「软广筛选」)。
+    时 `extract.sync_promo_tag` 自己会把 md 里那行摘掉(见 CLAUDE.md「提取阶段的两道判定」)。
     人工写进来的 tag 同理留着:这里要作废的是"按旧链接算出来的结论",不是别人
     写进这篇 md 的东西(口径同 `sync._kept_meta`)。
     """

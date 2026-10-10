@@ -165,8 +165,19 @@ class Session:
         self.call('Page.enable', {}, self._sid)
         return self._sid
 
-    def goto(self, url: str) -> None:
-        self.call('Page.navigate', {'url': url}, self._sid)
+    def goto(self, url: str) -> dict:
+        """导航,并把 `Page.navigate` 的回包**原样交回去**。
+
+        **不在这里抛。** 导航失败的回包长这样:`{'frameId': …,
+        'errorText': 'net::ERR_ABORTED'}` —— 一个 HTTP 204 就够(实测),而
+        **页面停在原处**。时间线那两处调用(`x_browser` 的 profile 导航和收尾
+        回 `/home`)不看它:它们随后各自按 `_STATE_JS` 判页面状态,在这里抛会把
+        「登录失效 / 账号打不开 / 限流」那几句各自的话换成一句笼统的导航失败。
+        所以交回回包、由调用方自己决定 —— 长文那条路把它当成**早一道**提示,
+        真正承重的是落地之后那次身份核对(见 `x_article.browser_fetch`):老会话
+        和别的实现完全可能什么都不回,而「页面没跳过去」必须拦得住。
+        """
+        return self.call('Page.navigate', {'url': url}, self._sid)
 
     def eval(self, expression: str, timeout: float = CALL_TIMEOUT):
         """求值并按值取回。JS 抛错翻成 CdpError,不把失败留成一个 None。"""
