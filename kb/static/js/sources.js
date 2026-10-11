@@ -132,6 +132,7 @@ async function openSourceModule(kind) {
   sourceKind = kind; sourceVersion++; sourceItemsVersion++; sourceItemsFailed = false;
   sourceData = null; sourceRows = []; sourceOffset = 0;
   resetSourceReader('正在读取内容…');
+  $('source-notices').open = false;
   const spec = sourceModules.get(kind);
   const filter = sourceFilters.get(kind) || { view: 'items', q: '', id: '' };
   sourceView = filter.view;
@@ -150,6 +151,16 @@ async function openSourceModule(kind) {
 function sourceError(message = '') {
   $('source-error').hidden = !message;
   $('source-error-text').textContent = message;
+  updateSourceNotices();
+  if (message) $('source-notices').open = true;
+}
+function updateSourceNotices() {
+  const error = !$('source-error').hidden, running = !$('source-progress').hidden;
+  const issues = !$('source-issues').hidden, configuration = !$('source-configuration').hidden;
+  $('source-notices').hidden = !error && !running && !issues && !configuration;
+  $('source-notices').classList.toggle('has-error', error || issues);
+  $('source-notices-summary').textContent = error ? '读取失败，点击查看原因'
+    : running ? $('source-progress-text').textContent : issues ? '来源连接需处理' : '部分订阅待配置';
 }
 function sourceTime(value) {
   if (!value) return '尚未同步';
@@ -218,6 +229,7 @@ function updateSourceRunStatus() {
     b.disabled = sourceBusy || !!running || paused;
   });
   $('source-add').disabled = sourceBusy || !!ours;
+  updateSourceNotices();
 }
 function switchSourceView(view) {
   sourceView = view; sourceOffset = 0;

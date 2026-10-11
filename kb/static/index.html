@@ -254,17 +254,19 @@
   </section>
 
   <section id="subs-feeds" hidden>
-  <header class="source-heading"><div><h2 id="source-title"></h2><div id="source-summary" class="source-counts" role="status"></div></div>
-    <div class="source-heading-actions"><button class="ghost" id="source-add" onclick="openSourceEditor()">＋ 添加订阅</button><button id="source-sync" onclick="syncSource()">同步全部</button></div>
-  </header>
-  <div id="source-error" class="source-banner error" hidden role="alert"><span id="source-error-text"></span><button class="ghost" onclick="loadSourceModule(true)">重新读取</button></div>
-  <div id="source-configuration" class="source-banner" hidden role="status"></div>
-  <div id="source-progress" class="source-banner" hidden role="status"><span id="source-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度<i data-arrow="right"></i></button></div>
-  <button id="source-issues" hidden onclick="switchSourceView('manage')"></button>
-  <div class="source-view-tabs"><button id="source-view-items" class="on" aria-pressed="true" onclick="switchSourceView('items')">最新内容</button><button id="source-view-manage" aria-pressed="false" onclick="switchSourceView('manage')">订阅管理 <small id="source-subscriptions-count"></small></button></div>
   <div id="source-workbench" class="source-workbench">
     <section class="source-stream" aria-label="订阅内容与来源">
+      <header class="source-heading"><div><h2 id="source-title"></h2><div id="source-summary" class="source-counts" role="status"></div></div>
+        <div class="source-heading-actions"><button class="ghost" id="source-add" onclick="openSourceEditor()">＋ 添加订阅</button><button id="source-sync" onclick="syncSource()">同步全部</button></div>
+      </header>
+      <div class="source-view-tabs"><button id="source-view-items" class="on" aria-pressed="true" onclick="switchSourceView('items')">最新内容</button><button id="source-view-manage" aria-pressed="false" onclick="switchSourceView('manage')">订阅管理 <small id="source-subscriptions-count"></small></button></div>
       <div class="source-filters"><input id="source-q" type="search" placeholder="搜索已收录的内容…" aria-label="搜索来源内容" oninput="sourceFilterChanged()"><select id="source-filter" aria-label="筛选订阅来源" onchange="sourceFilterChanged()"><option value="">全部订阅</option></select></div>
+      <details id="source-notices" class="source-notices" hidden><summary><span id="source-notices-summary" role="status">来源状态</span></summary><div class="source-notices-body">
+        <div id="source-error" class="source-banner error" hidden role="alert"><span id="source-error-text"></span><button class="ghost" onclick="loadSourceModule(true)">重新读取</button></div>
+        <div id="source-configuration" class="source-banner" hidden role="status"></div>
+        <div id="source-progress" class="source-banner" hidden role="status"><span id="source-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度<i data-arrow="right"></i></button></div>
+        <button id="source-issues" hidden onclick="switchSourceView('manage')"></button>
+      </div></details>
       <div class="source-list-heading"><span>内容列表 <span id="source-items-count" role="status"></span></span><button id="source-list-expand" class="text-button" onclick="expandSourceList()" aria-pressed="false">只看列表</button></div>
       <div id="source-list-pane" tabindex="0" aria-label="订阅内容列表"><div id="source-list" aria-live="polite"></div><button id="source-more" class="ghost" hidden onclick="moreSourceItems()">加载更多</button></div>
     </section>

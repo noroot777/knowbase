@@ -81,12 +81,22 @@ try {
   check('默认列表至少占工作台 38%', metrics.listWidth / metrics.width >= .38, JSON.stringify(metrics));
   check('长观点单条不超过 150px', metrics.firstHeight <= 150, JSON.stringify(metrics));
   check('首屏至少完整显示五条长观点', metrics.fullRows >= 5, JSON.stringify(metrics));
-  check('工作台填满首屏且整页不滚动', metrics.pageHeight <= metrics.viewport + 1 && metrics.bottom >= metrics.viewport - 32, JSON.stringify(metrics));
+  check('工作台从单行工具栏延伸到视口底部', metrics.top <= 64 && metrics.height >= metrics.viewport * .9 && metrics.pageHeight <= metrics.viewport + 1 && metrics.bottom >= metrics.viewport - 1, JSON.stringify(metrics));
   check('列表自身可以滚动', await evaluate(`$('source-list-pane').scrollHeight > $('source-list-pane').clientHeight`));
   check('完整正文保留而非被摘要截断', await evaluate(`$('source-reader-body').textContent.length > 2000`));
   check('页尾没有同步设置', await evaluate(`!document.querySelector('#subspanel .pipe-schedule')`));
   check('页头显示真实定时状态', await evaluate(`$('sched-summary').textContent.includes('未启用')`));
   await screenshot('social-1440');
+  check('来源状态提示仍可见而详情默认收起', await evaluate(`!$('source-notices').hidden && !$('source-notices').open && $('source-notices-summary').textContent.includes('待配置')`));
+  await click('#source-notices > summary');
+  check('展开后能看到完整待配置原因', await evaluate(`$('source-notices').open && $('source-configuration').getClientRects().length > 0 && $('source-configuration').textContent.includes('51 个账号待配置')`));
+  const noticesMetrics = await measure();
+  check('展开状态详情不会挤压列表或正文', Math.abs(noticesMetrics.listHeight - metrics.listHeight) < 1 && noticesMetrics.pageHeight <= noticesMetrics.viewport + 1, JSON.stringify(noticesMetrics));
+  await screenshot('source-notices-1440');
+  await click('#source-notices > summary');
+  await evaluate(`sourceError('示例读取失败：本地服务暂不可用'); true`);
+  check('读取失败自动展开原因及重试入口', await evaluate(`$('source-notices').open && $('source-error').getClientRects().length > 0 && $('source-error-text').textContent.includes('本地服务暂不可用')`));
+  await evaluate(`sourceError(); $('source-notices').open = false; true`);
 
   await evaluate(`$('source-list-pane').scrollTop = 350; true`);
   check('滚列表不带动整页与正文', await evaluate(`window.scrollY === 0 && $('source-reader-scroll').scrollTop === 0 && $('source-list-pane').scrollTop > 0`));
@@ -118,18 +128,25 @@ try {
     await wait(`sourceKind === '${kind}' && sourceRows.length >= 30 && sourceReaderItem`);
     await evaluate(`clearTimeout(sourcePoll); true`);
     metrics = await measure();
-    check(`${kind} 共用紧凑页头`, await evaluate(`document.querySelector('.source-heading').getBoundingClientRect().height <= 48 && !document.getElementById('source-description')`));
+    check(`${kind} 的来源工具栏位于列表内`, await evaluate(`!!document.querySelector('.source-stream > .source-heading') && !!document.querySelector('.source-stream > .source-view-tabs') && !document.getElementById('source-description')`));
     check(`${kind} 使用加宽列表`, metrics.listWidth / metrics.width >= .38, JSON.stringify(metrics));
     check(`${kind} 有数据也不撑高整页`, metrics.pageHeight <= metrics.viewport + 1, JSON.stringify(metrics));
   }
   await screenshot('column-1440');
-  await evaluate(`$('source-progress').hidden = false; $('source-progress-text').textContent = '正在同步'; $('source-issues').hidden = false; $('source-issues').textContent = '部分来源需重试'; true`);
+  await evaluate(`$('source-progress').hidden = false; $('source-progress-text').textContent = '正在同步'; $('source-issues').hidden = false; $('source-issues').textContent = '部分来源需重试'; updateSourceNotices(); true`);
   metrics = await measure();
-  check('出现两条横幅仍在首屏内', metrics.pageHeight <= metrics.viewport + 1 && metrics.bottom <= metrics.viewport, JSON.stringify(metrics));
+  check('同步及失败状态不会占整页横幅', metrics.pageHeight <= metrics.viewport + 1 && metrics.top <= 64 && metrics.bottom <= metrics.viewport && await evaluate(`!$('source-notices').hidden && $('source-notices-summary').textContent === '正在同步'`), JSON.stringify(metrics));
   await evaluate(`$('wechat-welcome').hidden = false; true`);
   metrics = await measure();
   check('首次连接提示不会顶出工作台', metrics.pageHeight <= metrics.viewport + 1, JSON.stringify(metrics));
-  await evaluate(`$('wechat-welcome').hidden = true; $('source-progress').hidden = true; $('source-issues').hidden = true; true`);
+  await evaluate(`$('wechat-welcome').hidden = true; $('source-progress').hidden = true; $('source-issues').hidden = true; updateSourceNotices(); true`);
+
+  await viewport(2160, 1600);
+  metrics = await measure();
+  check('大屏没有旧的 1600px 总宽上限', metrics.width >= 2100, JSON.stringify(metrics));
+  check('高窗口工作区也随视口长高而不封顶', metrics.height >= 1500 && metrics.bottom >= metrics.viewport - 1 && metrics.pageHeight <= metrics.viewport + 1, JSON.stringify(metrics));
+  await screenshot('large-2160-1600');
+  await viewport(1440, 1000);
 
   for (const [width, height] of [[900, 900], [820, 760], [390, 844], [1440, 420]]) {
     await viewport(width, height);
