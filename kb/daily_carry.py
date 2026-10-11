@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from kb.config import DATA_DIR
+# 叶子模块(只认字符串),直接取口径不会绕回 `kb.daily`
+from kb.daily_page import flat as page_flat
 
 STAMP = '%Y-%m-%d %H:%M:%S'
 # 启用账本那一刻盖的那批章用的 day 值。真实日期一律是 YYYY-MM-DD,所以它不会和
@@ -31,7 +33,10 @@ EPOCH_KEY = 'carry_epoch'
 # 整张表按当前算法重算 —— 证据(每一份日报自己的素材清单)一直在文件里,所以
 # 重算得到的归属和当初 `mark_carried` 记下的是同一份。
 SEED_REV_KEY = 'carry_seed_rev'
-SEED_REV = '2'
+# 版本 2 = 归属只认素材清单那一版;3 = 清单解析顶住了「裸方括号开头的无链接标题」
+# 和「标题末尾的成对反斜杠」两种真实写法。**解析器也是盖章算法的一部分** —— 版本
+# 不跟着动的话,前一版真实盖错过的那些库命中快路径,修好的解析器一次都跑不到。
+SEED_REV = '3'
 # 落盘与记账、放回与删文件、启用时盖章,三段之间要整体互斥(见 `commit_lock`)。
 LOCK_NAME = 'daily-report.lock'
 
@@ -49,11 +54,16 @@ class PastReport:
     `keys` 是素材身份的集合,由 `kb.daily` 从那一份自己的「素材清单」里读回来
     (口径是 `daily._doc_key`,盖章和读清单两侧共用同一个函数)。读不出清单的
     那一份交一个空集合 —— 它对归属一个字的证据都提供不了,不是"它什么都没带走"。
+
+    `rows` 是那份清单一条一条的**原文**(归一过)。解析不出身份的条目靠它兜
+    一道:在清单上露过面就不许判成"链条之前的历史存量"(理由见
+    `daily_page.material_rows`)。
     """
     since: datetime
     until: datetime
     day: str
     keys: frozenset
+    rows: tuple = ()
 
 
 def parse_ts(value) -> datetime | None:
@@ -190,6 +200,13 @@ def seed_locked(conn, chain_of, key_of, fallback_days: int, now: datetime) -> st
     # 先在锁内把章算好(两万行读一遍、纯内存分类),再一个事务落盘。
     # `indexed_at` 库里只有 `YYYY-MM-DD HH:MM:SS` 一种写法,可以直接比字符串;
     # `published` 有四种写法,必须 parse_ts 之后再比(见那个函数的说明)。
+    listed = _listing(chain)
+    # 库里独一份的标题。同稿副本不许靠标题兜底(见 `_on_a_list`)
+    seen_titles: dict[str, int] = {}
+    for row in conn.execute('SELECT title FROM documents'):
+        key = page_flat(row['title'])
+        seen_titles[key] = seen_titles.get(key, 0) + 1
+    once = {k for k, n in seen_titles.items() if n == 1}
     marked, at = [], datetime.now().strftime(STAMP)
     for row in conn.execute('SELECT path,url,title,published,indexed_at'
                             ' FROM documents'):
@@ -201,6 +218,8 @@ def seed_locked(conn, chain_of, key_of, fallback_days: int, now: datetime) -> st
             continue                  # 到得比分界线还晚 ⇒ 不可能被哪一份带走过
         when = parse_ts(row['published'])
         if when is None or when <= start:
+            if _on_a_list(row['url'], row['title'], listed, once):
+                continue      # 露过面 ⇒ 证据不全,不许下"历史存量"这个终态
             marked.append((row['path'], SEED_DAY, at))
         # 剩下这一档不盖:到得不晚、发布在链条覆盖的那段里、却不在任何一份的
         # 清单上 —— 那就是当时名额装不下、被静默丢掉的那批,留在队列里等下一
@@ -222,6 +241,46 @@ def seed_locked(conn, chain_of, key_of, fallback_days: int, now: datetime) -> st
         conn.rollback()
         raise
     return stamp
+
+
+def _listing(chain) -> tuple:
+    """把各份清单预处理成"查得快"的样子:(全文, 按首字符分桶的条目)。
+
+    标题那一支要逐条 `startswith`,而库里两万多篇 × 六百多条就是一千四百万次
+    比较(实测 1.6 秒,全程攥着提交锁)。标题只可能命中**首字符相同**的那几条,
+    分桶之后每篇只比几条。
+    """
+    rows = [row for c in chain for row in c.rows]
+    buckets: dict[str, list[str]] = {}
+    for row in rows:
+        buckets.setdefault(row[:1], []).append(row)
+    return '\n'.join(rows), buckets
+
+
+def _on_a_list(url, title, listed: tuple, once: set) -> bool:
+    """这一篇在某一份日报的素材清单上露过面吗(按原文找,写法差异先归一掉)。
+
+    只用来**否决** `#seed` 这个终态,不用来盖归属 —— 方向见
+    `daily_page.material_text`。空值不参与:空串在任何字符串里都"找得到",
+    那会把整库豁免掉。
+
+    **标题这一支只认库里独一份的标题**(`once`)。同一份稿子在库里有一堆副本
+    (实测:每天重发的「量子位编辑作者招聘」一类,324 篇里 323 篇是这个形态),
+    其中一份被某日报带走过,剩下几份是**另外的文档**、确实从没报道过 ——
+    `#seed` 对它们是正确结论,拿标题兜底只会把几百条同名稿子倒灌进后面几份
+    日报。url 那一支不设这道:它本来就是身份。
+    """
+    joined, buckets = listed
+    u = page_flat(url)
+    if u and u in joined:
+        return True
+    t = page_flat(title)
+    if not t or t not in once:
+        return False
+    # 标题**总在一条的开头**(链接那一支多一个 `[`)。裸子串会被短标题
+    # (「git」「测试」「-」)在任意一条的中间撞上,实测 7 条里 6 条如此。
+    return any(row.startswith(t) for row in buckets.get(t[:1], ())) or \
+        any(row.startswith('[' + t) for row in buckets.get('[', ()))
 
 
 def mark_carried(conn, day: str, paths) -> int:

@@ -59,6 +59,7 @@ from kb.daily_carry import SEED_DAY  # noqa: F401
 from kb.daily_carry import day_key as _day_key
 from kb.daily_page import REF_SEP as _REF_SEP
 from kb.daily_page import carried_keys as _carried_keys
+from kb.daily_page import material_rows as _material_rows
 from kb.daily_page import doc_key as _doc_key
 from kb.daily_page import md_dest as _md_dest
 from kb.daily_page import md_text as _md_text
@@ -285,7 +286,7 @@ def _report_chain() -> list[carry.PastReport]:
         if since and until and since < until:
             chain.append(carry.PastReport(
                 since, until, str(meta.get('date') or path.stem),
-                frozenset(_carried_keys(body))))
+                frozenset(_carried_keys(body)), _material_rows(body)))
     chain.sort(key=lambda c: c.until)
     return chain
 

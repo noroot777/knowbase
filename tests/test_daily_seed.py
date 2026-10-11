@@ -266,6 +266,59 @@ class DailyLedgerSeedTests(_Base):
         self.assertEqual(1, daily.pending(first_days=1,
                                           now=T('2026-09-29 08:00'))['late'])
 
+    def test_a_ledger_from_the_previous_revision_is_recomputed(self):
+        """上一版**真实留下**的版本标记也要能升上来。
+
+        改的是解析器而不是分类规则时最容易漏掉这一条:版本号不动,上一版按旧
+        解析器盖错过的那些库就命中快路径,修好的解析器一次都跑不到 —— 用户装了
+        修复版,原补录照样回不来(真实页面复现:上一版初始化过的库升级后仍然
+        少一条)。所以**解析器也是盖章算法的一部分**。
+        """
+        self._chain(carried=[('[视频] 旧日报带走的补录', '')])
+        add_doc(self.conn, 'source/rss/late.md', title='[视频] 旧日报带走的补录',
+                published='2026-09-25 20:00', indexed='2026-09-27 21:00')
+        # 上一版(解析器读不出裸方括号标题)真实留下的状态:章盖错成了存量
+        self.conn.execute(
+            'INSERT INTO daily_carried(path,day,carried_at) VALUES(?,?,?)',
+            ('source/rss/late.md', daily_carry.SEED_DAY, '2026-09-28 08:00:00'))
+        self.conn.executemany(
+            'INSERT INTO daily_state(key,value) VALUES(?,?)',
+            [('carry_epoch', '2026-09-28 08:00:00'), ('carry_seed_rev', '2')])
+        self.conn.commit()
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({'source/rss/late.md': '2026-09-28'}, self.carried(),
+                         '上一版盖错的 #seed 必须在升级时改回真正的归属')
+
+    def test_changing_the_material_parser_requires_bumping_the_seed_revision(self):
+        """改了清单解析就必须把 `SEED_REV` 加一 —— 这条按名单钉住。
+
+        盖过章的库走快路径,所以"解析修好了"只对从空库开始的人成立。这件事
+        没法由行为回归抓住(新版本号下的库怎么跑都是对的),只能钉住**名单**:
+        下面这几个符号的逻辑一变,这里就红,提醒把版本号也带上。
+
+        指纹走 AST,所以改注释、改 docstring 不会红;改判据才红。红了之后两处
+        一起改:`daily_carry.SEED_REV` 加一,再把新指纹填回来。
+        """
+        import ast
+        import hashlib
+        import inspect
+        import textwrap
+
+        from kb import daily_page as page
+        parts = [page._MATERIAL_ROW.pattern, page._MATERIAL_LINK.pattern,
+                 page._ENTRY_TAIL.pattern, page.REF_SEP, page._MATERIAL_HEAD]
+        for fn in (page._closed, page._ref_key, page._rows, page.doc_key,
+                   page.flat, page.md_dest, page.carried_keys, page.material_rows):
+            node = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
+            if (node.body and isinstance(node.body[0], ast.Expr)
+                    and isinstance(node.body[0].value, ast.Constant)):
+                node.body.pop(0)                      # docstring 不算逻辑
+            parts.append(ast.dump(node))
+        self.assertEqual(
+            'bbdb1c11cd64269e',
+            hashlib.sha256('\x00'.join(parts).encode()).hexdigest()[:16],
+            '清单解析变了:把 daily_carry.SEED_REV 加一,再把新指纹填到这里')
+
     def test_a_revision_upgrade_does_not_move_the_epoch(self):
         """算法升版重算时,分界线不许跟着往前挪。
 
