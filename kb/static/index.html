@@ -228,13 +228,14 @@
 </div>
 
 <div id="subspanel" style="display:none">
-  <div class="pipe-page-heading"><div><h1>我的订阅</h1></div>
+  <div class="pipe-page-heading"><div class="subs-title"><h1>我的订阅</h1><button id="sched-open" class="ghost" onclick="openSched()" aria-haspopup="dialog"><i data-icon="clock"></i><span id="sched-summary">定时同步</span></button></div>
     <div id="subs-switch" class="subs-switch" role="tablist" aria-label="订阅来源"></div>
   </div>
   <div id="subs-error" class="source-banner error" hidden role="alert"><span id="subs-error-text"></span><button class="ghost" onclick="openSubsPanel()">重新读取</button></div>
 
   <section id="subs-wechat" hidden aria-label="公众号订阅">
-    <div class="pipe-source" id="pipe-source">
+    <header class="source-heading"><div><h2 id="tgt-title">公众号</h2><p id="tgt-count" class="source-counts" role="status"></p></div><div class="source-heading-actions"><button id="subs-wechat-sync" onclick="syncWechatSubs()">同步全部</button></div></header>
+    <div class="pipe-source subs-connection" id="pipe-source">
       <div><strong id="src-label">公众号采集器</strong><span id="src-status" class="badge">检查中…</span><p id="src-detail">正在检查来源连接</p></div>
       <div class="pipe-source-actions"><a id="src-console" href="#" target="_blank" rel="noopener" style="display:none">采集器配置<i data-arrow="ext"></i></a>
         <button class="text-button" onclick="openWechatSetup()">检查并接入绿泡泡</button>
@@ -242,8 +243,6 @@
     </div>
     <div id="subs-wechat-progress" class="source-banner" hidden role="status"><span id="subs-wechat-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度<i data-arrow="right"></i></button></div>
     <div id="subs-wechat-manage" class="subs-manage-card">
-      <div class="subs-manage-head"><div><h2 id="tgt-title">订阅的公众号</h2><p id="tgt-count" class="hint"></p></div>
-        <button id="subs-wechat-sync" onclick="syncWechatSubs()">同步全部</button></div>
       <div class="subs-target-search">
         <input id="tgt-search" placeholder="输入名字搜索并添加…" aria-label="搜索并添加公众号">
         <button id="tgt-search-btn" class="ghost" onclick="searchTargets()">搜索</button>
@@ -255,7 +254,7 @@
   </section>
 
   <section id="subs-feeds" hidden>
-  <header class="source-heading"><div><h2 id="source-title"></h2><p id="source-description"></p><div id="source-summary" class="source-counts" role="status"></div></div>
+  <header class="source-heading"><div><h2 id="source-title"></h2><div id="source-summary" class="source-counts" role="status"></div></div>
     <div class="source-heading-actions"><button class="ghost" id="source-add" onclick="openSourceEditor()">＋ 添加订阅</button><button id="source-sync" onclick="syncSource()">同步全部</button></div>
   </header>
   <div id="source-error" class="source-banner error" hidden role="alert"><span id="source-error-text"></span><button class="ghost" onclick="loadSourceModule(true)">重新读取</button></div>
@@ -266,7 +265,7 @@
   <div id="source-workbench" class="source-workbench">
     <section class="source-stream" aria-label="订阅内容与来源">
       <div class="source-filters"><input id="source-q" type="search" placeholder="搜索已收录的内容…" aria-label="搜索来源内容" oninput="sourceFilterChanged()"><select id="source-filter" aria-label="筛选订阅来源" onchange="sourceFilterChanged()"><option value="">全部订阅</option></select></div>
-      <div class="source-list-heading"><span>内容列表</span><span id="source-items-count" role="status"></span></div>
+      <div class="source-list-heading"><span>内容列表 <span id="source-items-count" role="status"></span></span><button id="source-list-expand" class="text-button" onclick="expandSourceList()" aria-pressed="false">只看列表</button></div>
       <div id="source-list-pane" tabindex="0" aria-label="订阅内容列表"><div id="source-list" aria-live="polite"></div><button id="source-more" class="ghost" hidden onclick="moreSourceItems()">加载更多</button></div>
     </section>
     <section id="source-reader" class="source-reader" aria-label="订阅内容阅读" tabindex="-1">
@@ -310,14 +309,15 @@
   </div>
   </section>
 
-  <section class="pipe-schedule"><div><h2>每日定时同步</h2><p>每天在固定时间把勾选来源的全部订阅同步一遍。修改后保存，下一次定时任务生效。</p></div>
+</div>
+</main>
+
+<div id="sched-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeSched()"><section class="modal pipe-schedule" role="dialog" aria-modal="true" aria-labelledby="sched-title"><div class="sched-heading"><h2 id="sched-title">每日定时同步</h2><button class="icon-button" onclick="closeSched()" aria-label="关闭定时同步设置"><i data-icon="close"></i></button></div><p>统一设置所有来源的每日同步。修改后保存，下一次定时任务生效。</p>
     <fieldset id="sched-fields" disabled><label><input type="checkbox" id="sched-on" onchange="markSchedDirty()"> 启用定时</label><label>每天 <input type="time" id="sched-time" value="07:30" required oninput="markSchedDirty()"></label>
       <div id="sched-channels" class="pipe-channel-list" role="group" aria-label="定时同步的来源"></div>
     </fieldset>
     <div class="pipe-schedule-footer"><span id="sched-msg" role="status">正在读取定时设置…</span><button id="sched-reload" class="ghost" onclick="loadSched()" hidden>重新读取</button><button id="sched-save" class="ghost" onclick="saveSched()" disabled>保存设置</button></div>
-  </section>
-</div>
-</main>
+  </section></div>
 
 
 <div id="source-editor" class="modal-mask" style="display:none" onclick="if(event.target===this)closeSourceEditor()"><div class="modal source-editor">

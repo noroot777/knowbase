@@ -43,10 +43,12 @@ function renderSourceEntry(item) {
 
 function updateSourceReadingView() {
   const manage = sourceView === 'manage';
+  document.body.classList.toggle('subs-reading', activeTab === 'subs' && !$('subs-feeds').hidden && !manage);
   $('source-workbench').classList.toggle('is-managing', manage);
   $('source-reader').hidden = manage;
   $('source-settings').hidden = !manage;
-  if (manage) $('source-workbench').classList.remove('is-focused', 'has-mobile-reader');
+  if (manage) $('source-workbench').classList.remove('is-focused', 'has-mobile-reader', 'is-list-only');
+  updateSourceListButton();
   updateSourceExpandButton();
 }
 
@@ -114,6 +116,10 @@ function readSourceItem(key, focus = true) {
   sourceReaderOriginal = false;
   sourceReaderContext = sourceReadingContext();
   sourceReaderKeys.set(sourceKind, key);
+  if (focus) {
+    $('source-workbench').classList.remove('is-list-only');
+    updateSourceListButton();
+  }
   $('source-reader').style.display = '';
   $('source-reader-content').hidden = false;
   $('source-reader-empty').hidden = true;
@@ -189,8 +195,23 @@ function updateSourceExpandButton() {
 }
 
 function expandSourceReader() {
+  $('source-workbench').classList.remove('is-list-only');
+  updateSourceListButton();
   const focused = $('source-workbench').classList.toggle('is-focused');
   if (focused) $('source-workbench').classList.add('has-mobile-reader');
+  updateSourceExpandButton();
+}
+
+function updateSourceListButton() {
+  const listOnly = $('source-workbench').classList.contains('is-list-only');
+  $('source-list-expand').setAttribute('aria-pressed', String(listOnly));
+  $('source-list-expand').textContent = listOnly ? '显示正文' : '只看列表';
+}
+
+function expandSourceList() {
+  $('source-workbench').classList.remove('is-focused', 'has-mobile-reader');
+  $('source-workbench').classList.toggle('is-list-only');
+  updateSourceListButton();
   updateSourceExpandButton();
 }
 

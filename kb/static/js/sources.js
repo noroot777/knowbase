@@ -27,6 +27,7 @@ async function initSourceModules() {
 
 async function openSubsPanel(kind = '') {
   if (kind) subsKind = kind;
+  document.body.classList.remove('subs-reading');
   if (!subsCatalog.length) {
     $('subs-error').hidden = true;
     await initSourceModules();
@@ -136,7 +137,6 @@ async function openSourceModule(kind) {
   sourceView = filter.view;
   updateSourceReadingView();
   $('source-title').textContent = spec.label;
-  $('source-description').textContent = spec.description;
   $('source-note').textContent = spec.note;
   $('source-q').value = filter.q;
   $('source-filter').innerHTML = '<option value="">全部订阅</option>';

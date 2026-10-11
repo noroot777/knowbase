@@ -13,6 +13,7 @@ from pathlib import Path
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--port',type=int,default=8879)
+    parser.add_argument('--layout-fixture',action='store_true')
     args=parser.parse_args()
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
     with tempfile.TemporaryDirectory(prefix='kb-source-qa-') as temp:
@@ -22,6 +23,9 @@ def main():
         from kb.feeds import sync
         from kb.feeds.fetching import FeedError
         from kb.feeds import registry as reg
+        if args.layout_fixture:
+            from tests.subs_layout_fixture import populate
+            populate()
         pipeline.start_scheduler=lambda: None
         embedder.embed_pending_chunks=lambda *a,**k: 0
 

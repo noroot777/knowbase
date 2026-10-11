@@ -52,7 +52,7 @@ function tgtTone(t) {
 
 function renderTargets() {
   const on = tgtList.filter(t => t.enabled).length;
-  $('tgt-title').textContent = `订阅的${tgtLabel}`;
+  $('tgt-title').textContent = tgtLabel;
   $('tgt-count').textContent = `共 ${tgtList.length} 个,${on} 个参与采集`;
 
   // 按名字排,不按启用状态:后端是"启用的在前",那样一点停用行就沉底、

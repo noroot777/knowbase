@@ -13,6 +13,7 @@ function switchTab(t) {
     $('tab-' + k).classList.toggle('on', t === k);
   }
   document.body.classList.toggle('chat-mode', t === 'ask');
+  if (t !== 'subs') document.body.classList.remove('subs-reading');
   if (typeof updateWorkspaceTab === 'function') updateWorkspaceTab(t, previousScroll);
   if (t === 'pipe') refreshPipe(true);
   if (t === 'daily') loadDailyPanel();

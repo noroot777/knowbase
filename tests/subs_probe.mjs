@@ -1,4 +1,4 @@
-// 「我的订阅」/「同步中心」拆分后的浏览器回归:三类来源并列的页内切换、连接卡与
+// 「我的订阅」/「同步中心」拆分后的浏览器回归:五类来源并列的页内切换、连接卡与
 // 订阅管理就地在订阅页、定时同步跟着搬家、老深链(#social 等)落到对应视图、
 // 同步中心跑完后把失败步骤统一列进总览问题块(运行中不弹,最后统一处理)。
 //
@@ -37,19 +37,20 @@ const fails = [], oks = [];
 const check = (name, cond, extra = "") => (cond ? oks : fails).push(name + (extra ? ` — ${extra}` : ""));
 
 await send("Page.navigate", { url: base + "/" });
-await until(`typeof openSubsPanel === 'function' && typeof subsCatalog !== 'undefined' && subsCatalog.length === 3`, 20000);
+await until(`typeof openSubsPanel === 'function' && typeof subsCatalog !== 'undefined' && subsCatalog.length === 5`, 20000);
 
 // 1. 订阅页:三类来源并列,默认落公众号视图
 await evalJs(`switchTab('subs')`);
-await until(`document.querySelectorAll('#subs-switch button').length === 3`);
-check("切换器列出三类并列来源",
-      await evalJs(`[...document.querySelectorAll('#subs-switch button span')].map(e=>e.textContent).join()`) === "公众号,大V观点,RSS",
+await until(`document.querySelectorAll('#subs-switch button').length === 5`);
+check("切换器列出五类并列来源",
+      await evalJs(`[...document.querySelectorAll('#subs-switch button span')].map(e=>e.textContent).join()`) === "公众号,大V观点,RSS,邮件简报,网页专栏",
       await evalJs(`[...document.querySelectorAll('#subs-switch button span')].map(e=>e.textContent).join()`));
 check("默认打开公众号视图", await evalJs(`!document.getElementById('subs-wechat').hidden && document.getElementById('subs-feeds').hidden`));
 check("地址栏是 #subs", await evalJs(`location.hash`) === "#subs", await evalJs(`location.hash`));
 check("连接卡在订阅页上", await evalJs(`!!document.querySelector('#subs-wechat .pipe-source')`));
-check("定时同步落在订阅页底部", await evalJs(`!!document.querySelector('#subspanel .pipe-schedule')
-      && document.querySelector('#subspanel .pipe-schedule').getClientRects().length > 0`));
+check("定时同步共用页头入口,表单默认收起", await evalJs(`!!document.querySelector('#subspanel #sched-open')
+      && !document.querySelector('#subspanel .pipe-schedule')
+      && !document.querySelector('#sched-modal').getClientRects().length`));
 await until(`document.getElementById('tgt-list').textContent.length > 0`, 12000);
 check("订阅列表就地渲染(沙箱无采集器,如实报原因)",
       (await evalJs(`document.getElementById('tgt-list').textContent`)).length > 0,

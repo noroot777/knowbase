@@ -1,5 +1,13 @@
 // Edit a complete schedule, then save once; do not write on every field change.
 let schedLoaded = false, schedDirty = false, schedSaving = false, schedLoading = false;
+function openSched() {
+  $('sched-modal').style.display = '';
+  loadSched();
+}
+function closeSched() { $('sched-modal').style.display = 'none'; }
+function renderSchedSummary(schedule) {
+  $('sched-summary').textContent = schedule.enabled ? `定时同步 · 每天 ${schedule.time}` : '定时同步 · 未启用';
+}
 function scheduleMessage(s) {
   if (!s.enabled) return '定时同步未启用';
   const next = s.next_run ? ` · 下次 ${new Date(s.next_run).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}` : '';
@@ -17,6 +25,8 @@ function schedChannels() {
 async function loadSched() {
   if (schedLoading || schedSaving || schedDirty) return;
   schedLoading = true; $('sched-reload').hidden = true;
+  $('sched-fields').disabled = true;
+  $('sched-save').disabled = true;
   $('sched-msg').textContent = '正在读取定时设置…';
   try {
     await loadPipeChannels();
@@ -25,11 +35,12 @@ async function loadSched() {
     renderSchedChannels(s.channels?.length ? s.channels : [s.channel || pipeChannel]);
     schedLoaded = true; $('sched-fields').disabled = false;
     $('sched-msg').textContent = scheduleMessage(s);
+    renderSchedSummary(s);
   } catch (e) { $('sched-msg').textContent = '读取失败：' + e.message; $('sched-reload').hidden = false; }
   finally { schedLoading = false; }
 }
 function markSchedDirty() {
-  if (!schedLoaded || schedSaving) return;
+  if (!schedLoaded || schedSaving || schedLoading) return;
   schedDirty = true; $('sched-save').disabled = false; $('sched-msg').textContent = '有未保存的修改';
 }
 async function saveSched() {
@@ -43,6 +54,7 @@ async function saveSched() {
   try {
     const saved = await pipePost('/api/pipeline/schedule', body); schedDirty = false;
     $('sched-msg').textContent = scheduleMessage(saved);
+    renderSchedSummary(saved);
   } catch (e) { $('sched-msg').textContent = '未保存：' + e.message + '。修改已保留，可重试。'; }
   finally { schedSaving = false; $('sched-fields').disabled = false; $('sched-save').disabled = !schedDirty; $('sched-save').textContent = '保存设置'; }
 }
