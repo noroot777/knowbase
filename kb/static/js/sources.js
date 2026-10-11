@@ -34,6 +34,7 @@ async function openSubsPanel(kind = '') {
       $('subs-switch').innerHTML = '';
       $('subs-wechat').hidden = true;
       $('subs-feeds').hidden = true;
+      applySubsReadingLayout();
       $('subs-error').hidden = false;
       $('subs-error-text').textContent = '来源目录暂时读不到，请确认服务后重试。';
       return;
@@ -45,6 +46,7 @@ async function openSubsPanel(kind = '') {
   const feeds = sourceModules.has(subsKind);
   $('subs-wechat').hidden = feeds;
   $('subs-feeds').hidden = !feeds;
+  applySubsReadingLayout();
   if (feeds) {
     openSourceModule(subsKind);
   } else {
@@ -54,6 +56,18 @@ async function openSubsPanel(kind = '') {
     sourceKind = '';
     openWechatSubs();
   }
+}
+
+/* 「最新内容」视图把工作台锁在可用视口高度上(CSS 在 source_reader.css)。口径同
+   问答面板(workspace.css 的 body.chat-mode):**别按「上面还有多少东西」估一个常数**
+   —— 页头折成几行、#source-progress / #source-configuration / #source-issues 这几条
+   横幅在不在,原来那个 calc(100dvh - 290px) 一条都算不进去,横幅一出现工作台就被顶出
+   首屏、整页跟着出现滚动条。锁的只有这一个视图:公众号视图和「订阅管理」都是自然流,
+   锁住它们只会把列表挤进一个矮框里。 */
+function applySubsReadingLayout() {
+  const on = typeof activeTab !== 'undefined' && activeTab === 'subs'
+    && sourceModules.has(subsKind) && !$('subs-feeds').hidden && sourceView === 'items';
+  document.body.classList.toggle('subs-reading', on);
 }
 
 function renderSubsSwitch() {
@@ -136,7 +150,6 @@ async function openSourceModule(kind) {
   sourceView = filter.view;
   updateSourceReadingView();
   $('source-title').textContent = spec.label;
-  $('source-description').textContent = spec.description;
   $('source-note').textContent = spec.note;
   $('source-q').value = filter.q;
   $('source-filter').innerHTML = '<option value="">全部订阅</option>';

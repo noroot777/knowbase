@@ -53,7 +53,8 @@ function tgtTone(t) {
 function renderTargets() {
   const on = tgtList.filter(t => t.enabled).length;
   $('tgt-title').textContent = `订阅的${tgtLabel}`;
-  $('tgt-count').textContent = `共 ${tgtList.length} 个,${on} 个参与采集`;
+  // 页头那行事实数字,写法跟 feeds 的 #source-summary 对齐(「N / M 个订阅启用」)
+  $('tgt-count').textContent = `${on} / ${tgtList.length} 个订阅参与采集`;
 
   // 按名字排,不按启用状态:后端是"启用的在前",那样一点停用行就沉底、
   // 下一行顶上来接住第二次点击——连着停用几个时会误伤。位置稳定才点得准。

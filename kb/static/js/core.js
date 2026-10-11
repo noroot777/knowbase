@@ -14,6 +14,7 @@ function switchTab(t) {
   }
   document.body.classList.toggle('chat-mode', t === 'ask');
   if (typeof updateWorkspaceTab === 'function') updateWorkspaceTab(t, previousScroll);
+  if (typeof applySubsReadingLayout === 'function') applySubsReadingLayout();
   if (t === 'pipe') refreshPipe(true);
   if (t === 'daily') loadDailyPanel();
   if (t === 'ask') initChat();
