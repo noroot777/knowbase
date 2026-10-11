@@ -132,8 +132,12 @@ async page => {
     await page.locator('#source-view-manage').click();
     await page.locator('#source-q').fill('阅读边界文章 02');
     await page.locator('#source-view-items').click();
+    await page.waitForFunction(() => sourceView === 'items' && sourceRows.length === 30 && sourceReaderItem?.key === 'boundary-31');
+    check('管理关键词不影响阅读列表和正在读的文章', await page.locator('#source-q').inputValue() === ''
+      && await page.locator('#source-reader-title').textContent() === '阅读边界文章 31');
+    await page.locator('#source-q').fill('阅读边界文章 02');
     await page.waitForFunction(() => sourceRows.length === 1 && sourceReaderItem?.key === 'boundary-2');
-    check('管理模式改变关键词后不保留不匹配的旧文章', await page.locator('#source-reader-title').textContent() === '阅读边界文章 02');
+    check('阅读模式改变关键词后不保留不匹配的旧文章', await page.locator('#source-reader-title').textContent() === '阅读边界文章 02');
     await page.locator('#source-q').fill('');
     await page.waitForFunction(() => sourceRows.length === 30);
     await page.locator('#source-filter').selectOption(String(sourceId));

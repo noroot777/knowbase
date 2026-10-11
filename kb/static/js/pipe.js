@@ -109,6 +109,7 @@ function setSourceDetail(text, bad) {
   box.textContent = text;
   box.classList.toggle('error', !!bad);
   box.hidden = !text;
+  updateWechatNotices();
 }
 async function refreshPipeSource() {
   const version = ++pipeSourceVersion;
