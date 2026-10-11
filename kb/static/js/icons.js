@@ -8,7 +8,6 @@ const ICON_PATHS = {
   spark: '<path d="m12 3 2.6 6.4L21 12l-6.4 2.6L12 21l-2.6-6.4L3 12l6.4-2.6L12 3ZM20 2v4M18 4h4"/>',
   bookmark: '<path d="M6 4h12v17l-6-4-6 4V4Z"/>',
   sync: '<path d="M20 10a8 8 0 0 0-14-5L3 8M3 3v5h5M4 14a8 8 0 0 0 14 5l3-3M21 21v-5h-5"/>',
-  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   close: '<path d="m6 6 12 12M18 6 6 18"/>',
   network: '<circle cx="5" cy="6" r="2.5"/><circle cx="19" cy="5" r="2.5"/><circle cx="13" cy="19" r="2.5"/><path d="m7.5 6 9-1M6 8l6 9M18 7l-4 10"/>',
   layers: '<path d="m12 3 10 5-10 5L2 8l10-5ZM2 12l10 5 10-5M2 17l10 5 10-5"/>',
@@ -26,6 +25,7 @@ const ICON_PATHS = {
   code: '<path d="m8 7-5 5 5 5m8-10 5 5-5 5M14 4l-4 16"/>',
   box: '<path d="m12 3 9 5v9l-9 5-9-5V8l9-5ZM3 8l9 5 9-5M12 13v9M7.5 5.5l9 5"/>',
   paper: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 8h3M9 12h6M9 16h6"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 6.8V12l3.6 2.1"/>',
 };
 function icon(name, cls = '') {
   return `<svg class="icon ${cls}" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name] || ICON_PATHS.box}</svg>`;

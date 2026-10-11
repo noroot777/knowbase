@@ -6,11 +6,18 @@
 .subs-switch button:hover { border-color:var(--brand); }
 .subs-switch button.on { background:var(--brand); border-color:var(--brand); color:var(--card); }
 .subs-switch .icon { width:15px; height:15px; }
+/* 定时同步是整页一份的设置(五类来源都归它管),所以挂在页名旁边而不是某个来源
+   的动作区里;当前状态写在按钮上,不点开也看得见。 */
+.subs-page-heading { flex-wrap:wrap; }
+.subs-title { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+.subs-sched { display:inline-flex; align-items:center; gap:7px; padding:7px 14px; font-size:13px;
+  background:var(--card); color:var(--ink-2); border:1px solid var(--line); border-radius:999px; }
+.subs-sched:hover { border-color:var(--brand); color:var(--ink); }
+.subs-sched.is-on { color:var(--brand-deep); border-color:var(--brand-soft); background:var(--brand-tint); }
+.subs-sched .icon { width:15px; height:15px; }
 /* 公众号视图:订阅管理卡(搜索添加 + 已订阅列表,原来在弹窗里) */
 .subs-manage-card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px 24px; }
-.subs-manage-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:14px; }
-.subs-manage-head h2 { font-size:16px; font-weight:650; }
-.subs-manage-head .hint { margin-top:5px; }
+.subs-manage-title { font-size:15px; font-weight:650; margin-bottom:12px; }
 .subs-target-search { display:flex; gap:8px; margin-bottom:10px; }
 .subs-target-search input { flex:1; min-width:0; border:1px solid var(--line); border-radius:10px;
   background:var(--bg); color:var(--ink); padding:9px 14px; font:inherit; font-size:13.5px; outline:none; }
@@ -19,23 +26,19 @@
 #tgt-cands { border:1px solid var(--line); border-radius:10px; max-height:240px; overflow-y:auto; margin-bottom:10px; }
 #tgt-list { border:1px solid var(--line); border-radius:10px; max-height:460px; overflow-y:auto; }
 #tgt-list .empty { padding:28px; text-align:center; color:var(--muted); font-size:13px; }
-.subs-title { display:flex; align-items:center; flex-wrap:wrap; gap:14px; }
-.subs-title button { display:inline-flex; align-items:center; gap:7px; border:1px solid var(--line); background:var(--card); border-radius:999px; font-size:12px; }
-.subs-title .icon { width:14px; height:14px; }
-.sched-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-#sched-modal .pipe-schedule { margin:0; max-width:660px; max-height:90dvh; overflow-y:auto; }
-#sched-modal .pipe-schedule > p { margin-top:10px; }
-.subs-connection { padding:10px 16px; background:var(--brand-tint); }
-.subs-connection > div:first-child { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
-.subs-connection p { margin:0; }
-.subs-connection .badge { margin:0; }
-.source-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:0 0 16px; flex-wrap:wrap; }
-.source-heading > div:first-child { display:flex; align-items:baseline; flex-wrap:wrap; gap:10px; min-width:0; }
-/* 订阅页里的来源名是二级标题(页名是「我的订阅」),比原来独立页面的 h1 收一号 */
-.source-heading h2 { font:650 16px/1.5 var(--font-body); }
-.source-heading p { margin-top:8px; color:var(--muted); }
-.source-heading-actions { display:flex; gap:10px; flex-wrap:wrap; }
-.source-counts,.source-heading .source-counts { margin:0; font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
+/* 五类来源(公众号在内)共用这一行页头:来源名 + 事实数字 + 动作,一行放完。
+   原来是 24px 宋体标题 + 一句标语 + 计数,三行吃掉 130px,而这一页的主体恰恰是
+   底下那块正文阅读区。来源名在上面那排胶囊里已经高亮着,这里收成小节标题;
+   标语整句去掉 —— 视觉语言那节写死了「页头就一行:标题 + 同一行上的事实数字」,
+   副标题/标语是落地页的东西。 */
+.source-heading { display:flex; align-items:baseline; justify-content:space-between; gap:16px 24px; flex-wrap:wrap; margin:0 0 16px; }
+.source-ident { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; min-width:0; }
+.source-heading h2 { font:650 17px/1.5 var(--font-body); }
+.source-heading-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+/* 公众号那一档的「采集器配置」是个外链,原来靠 .pipe-source-actions 给字号和颜色;
+   连接卡拆掉之后它落在这个动作区里,样式得跟着搬过来,别退回浏览器默认的蓝下划线。*/
+.source-heading-actions a { display:inline-flex; align-items:center; gap:4px; font-size:13px; color:var(--brand); }
+.source-counts { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
 .source-workbench { display:grid; grid-template-columns:minmax(0,1fr) 276px; gap:26px; align-items:start; }
 .source-view-tabs { display:flex; gap:24px; border-bottom:1px solid var(--line); margin-bottom:18px; }
 .source-view-tabs button { background:none; border-radius:0; color:var(--muted); padding:8px 0 13px; border-bottom:3px solid transparent; }
@@ -109,8 +112,9 @@
 @media(max-width:1200px) { .source-workbench { grid-template-columns:minmax(0,1fr) 236px; gap:18px; } }
 @media(max-width:1050px) { .source-workbench { grid-template-columns:1fr; } .source-settings { order:2; } }
 @media(max-width:600px) {
-  .source-heading { gap:10px; }
-  .subs-manage-head { flex-direction:column; } .subs-manage-card { padding:16px; }
+  .source-heading { flex-direction:column; align-items:stretch; gap:12px; }
+  .source-heading-actions { justify-content:flex-start; }
+  .subs-manage-card { padding:16px; }
   .source-filters { flex-wrap:wrap; } .source-filters select { max-width:100%; width:100%; }
   .source-subscription { flex-wrap:wrap; padding:15px; } .source-row-actions { max-width:none; width:100%; justify-content:flex-end; gap:18px; }
   .source-entry { padding:18px; } .source-entry-meta { flex-wrap:wrap; gap:4px; }

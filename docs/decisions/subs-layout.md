@@ -1,4 +1,143 @@
-# 订阅页：列表要能浏览，不只是给正文留一条侧栏
+# 订阅页布局整合记录
+
+## 合并前方案与审查记录
+
+以下保留 `main` 的原始决策与故障分析；工作区几何和最小高度以文末后续方案为准。
+
+
+> 决策记录。本页的改动起点是一张用户截图:RSS 视图上真正能读正文的那块只剩中间
+> 一条,页头占掉三行、页尾还常驻着一张「每日定时同步」大卡片。
+
+## 定时同步:从页尾常驻卡片改成页头入口 + 弹窗
+
+- **它是整页一份的设置,不属于任何一个来源。** 五类来源(公众号 / 大V观点 / RSS /
+  邮件简报 / 网页专栏)早就并到同一页、靠顶上那排胶囊切换了,而这张卡片贴在
+  `#subspanel` 的末尾 —— 于是**每切一个来源它都跟着出现一次**,看上去像"每个来源
+  各有一份定时设置",实际只有一份。
+- **它一天也调不了一次,却按天天要用的频率占着版面。** 实测 1440×1000 的窗口上,
+  这张卡片 250px 左右,加上三行页头,整页比视口高出近 300px —— 用户要滚动才能看全
+  正文区,而一滚页头就把阅读区顶出去一截。这正是那张截图里"只剩一条"的由来。
+- 现在的形态:页名旁边一颗带状态的按钮(`#subs-sched-open`,
+  `定时同步 · 每天 07:30` / `定时同步 · 未启用`),点开是 `#sched-modal`。
+  **状态写在按钮上**是刻意的 —— 收进弹窗之后它就是这份设置在页面上唯一的露头,
+  不点开也得看得见"几点跑、开没开"。读不到设置时按钮保持裸标签「定时同步」,
+  **不许写死一个"未启用"**:那是在报一个没查到的结论(`renderSchedEntry(null)`)。
+- 表单一个字段都没动:`#sched-fields` / `#sched-channels` / `#sched-msg` /
+  `#sched-save` 原样搬进弹窗,`pipe_schedule.js` 只多了开关和那颗按钮的文案。
+  `tests/pipeline_probe.js` 那一组按 id 操作的用例因此不受影响。
+- `loadSched()` 仍在页面加载时跑一次(`index.html` 末尾),所以按钮上的状态不等
+  用户点开就是对的;`openSchedModal()` 里再调一次,而 `loadSched` 开头那道
+  `schedDirty` 闸保证**没保存的编辑不会被重新打开冲掉**。
+
+## 页头:五类来源共用一行
+
+- 原来 feeds 的页头是 `h2(24px 宋体) + 一句标语 + 计数` 三行,实测 132px;公众号
+  那一档则完全是另一套(一张 `.pipe-source` 连接卡 + 一张带自己标题和「同步全部」
+  的管理卡)。两边既不一样、又都浪费。
+- 现在统一成 `.source-heading` 一行:**来源名(h2,17px)+ 事实数字 + 动作**。
+  口径取自 CLAUDE.md 视觉语言那节 ——「页头就一行:标题 + 同一行上的事实数字」,
+  副标题/标语是落地页的东西。`#source-description` 整个删掉(来源名在上面那排胶囊
+  里已经高亮着,标语每次切来源都要再读一遍)。
+- 公众号那一档改成同一个部件:`#src-label` 成了它的 h2,`#src-status` 徽章和
+  `#tgt-count` 跟在后面,动作区收「检查并接入绿泡泡 / 检查连接 / 同步全部」。
+  原来那张连接卡的说明文字降级成一条横幅 `#src-detail`(形状同 feeds 的
+  `#source-configuration`),**有话才出现** —— 接通且采集器没话说时那句
+  「来源可用，可以开始同步。」只是在复述徽章。反过来,**采集器自己给的
+  `message`/`hint` 一个字都不许吞**:接通之后它照样会说要紧事。
+- 配套:`.pipe-source` / `.pipe-source-actions` 两套样式没有消费方了,一并删掉。
+
+## 阅读区:锁在可用视口高度上,不再估常数
+
+- 原来是 `.source-workbench:not(.is-managing) { height: clamp(460px, calc(100dvh -
+  290px), 1000px) }`。**那个 290 是照着"没有任何横幅"的页头量出来的**,而页头并不
+  稳定:`#source-progress`(同步中)、`#source-configuration`(账号待配置)、
+  `#source-issues`(来源连接失败)、`#subs-error` 随时会冒出来,页头在窄屏上还会
+  折行 —— 每多一条,工作台就被整体顶下去一截,整页出现滚动条。这和问答面板那条
+  `calc(100dvh - N)` 是同一种缺陷(见 `frontend-feedback.md`:首次配置横幅不在
+  估算里,输入区被顶出首屏)。
+- 现在照 `body.chat-mode` 那套做:`body.subs-reading` 下 `#main-content` 自己变成
+  flex 列、`height: calc(100dvh - var(--topbar-h))` + `min-height: 0`,
+  `#subspanel` → `#subs-feeds` → `.source-workbench` 逐层 `flex:1` + `min-height:0`。
+  横幅在与不在、页头折几行,都不用再改任何数字。
+- **高度必须是 definite 的(`height`),`min-height` 不行 —— 这一条是第 1 轮审查
+  实测打回来的。** 中途为了照顾矮窗口改成过 `min-height: calc(...)`,它只是下限,
+  盒子的高度仍然按内容算;而一个高度不确定的 flex 列,`flex:1` 没有"可用空间"可分,
+  它只会按子项的 **max-content 贡献**把自己撑开。空列表上完全看不出来(内容本来就
+  矮,盒子"刚好"等于视口),列表里一有 30 条文章就当场发作:工作台 7598px、整页
+  7823px,两栏各自那条 `overflow-y:auto` 一行都滚不动(`clientHeight ==
+  scrollHeight`,`scrollTop` 写进去还是 0),只能滚整页 —— 正文一滚,列表和页头
+  跟着跑掉。**这正是这次改动要治的那个毛病本身**,换了个更难发现的形态回来。
+- `min-height: 0` 配套不能省:base 那条 `#main-content { min-height: 100vh }` 会盖过
+  `height`(min-height 优先于 height),盒子被顶回 100vh、内容掉到首屏外。口径同
+  `workspace.css` 的 `body.chat-mode`,那里也写着同一句。
+- **矮窗口交给地板,不交给 `min-height`**:`height` 定死之后空间不够分时工作台会被
+  flex 压到几十像素(1440×420 + 三条横幅实测只剩 10px),所以给
+  `min-height: 360px` —— 压不下去就从 `#main-content` 溢出,整页照旧滚得到
+  (1440×420 实测 `scrollHeight` 744、工作台 360)。
+- **地板 360px,不许抬回原来那个 clamp 的 460**:820×760 这种窗口页头会折成三行,
+  460 的地板反倒**自己制造出 32px 的滚动条**(实测),而不设地板时那里本来正好
+  放得下。地板只管"矮到放不下"那一档。
+- **只锁 feeds 的「最新内容」视图**(`sources.js` 的 `applySubsReadingLayout()`)。
+  公众号视图和「订阅管理」都是自然流的长列表,锁住它们只会把列表挤进一个矮框里。
+  类名在 `switchTab`、`openSubsPanel`、`updateSourceReadingView` 三处各挂一次 ——
+  前两处管"离开/切到别的来源",第三处管"在 feeds 内部换视图"。
+- 窄屏(≤760px)那套上下堆叠的布局不进这道锁,`@media (min-width:761px)` 圈住。
+
+## 定时设置的「慢读取 × 用户编辑」(第 1 轮审查打回)
+
+- `loadSched()` 原来**只在开机时跑一次**,那会儿 `schedLoaded` 为假、fieldset 本来就
+  禁用着,编辑和读取碰不到一起。搬进弹窗之后 `openSchedModal()` **每打开一次就重读
+  一次**,而这时 `schedLoaded` 已经为真、字段是启用的 —— 慢一点的那次回包会把用户这
+  期间敲进去的时间和来源**原样盖回去**,接着点「保存设置」存下去的还是被盖回的那份
+  (审查实测:读取中改成 18:10,约两秒后变回 16:45,POST 和服务端读回的都是 16:45)。
+- 入口处那道 `if (schedLoading || schedSaving || schedDirty) return` 只拦得住"**再开
+  一个**请求",拦不住**已经在途**的那个回来覆盖 —— 这是两件事。
+- 修法:**读取期间把 fieldset 禁掉**(`$('sched-fields').disabled = true`),读完再放开。
+  读失败时按"这一趟是不是从没读成功过"分两档:从没读成功过留在禁用态(没有值可编辑),
+  重读失败则放开 —— 屏幕上那份仍是上一次读到的真实设置,照旧可编辑可保存。
+- 没保存的草稿照旧不被动:入口那道 `schedDirty` 早退在禁用之前,关掉弹窗再打开,
+  草稿和启用态都还在。
+
+## 回归与反向验证
+
+回归在 `tests/subs_probe.mjs`(37 项,全绿)。几条判据的射程,如实记下:
+
+- **空列表上问"整页滚不滚"是不敏感的 —— 这是第 1 轮审查指出来的,如实记着。**
+  「整页不出现滚动条」「工作台底边落在视口里」在**没有横幅、列表也是空的**那一档,
+  对 `min-height` 版实现(问题形态)和旧常数版实现**都是绿的**:内容本来就矮,盒子
+  "刚好"等于视口。所以现在探针里摆了两档更硬的:①把 `#source-progress` /
+  `#source-configuration` 两条横幅打开再问一遍;②**走真实渲染路径灌 30 条带长正文的
+  条目**,判据钉在"整页不滚 + 列表自己滚得动 + 正文自己滚得动"。
+- 定点注入「高度退回 `min-height`」(审查实测那个缺陷原样):**3 红**,全在非空列表
+  那一档(page 8259 / view 1000,工作台 7959,两栏 `scrollTop` 都是 0),而空列表的
+  三条**照旧全绿** —— 逐字复现了"空内容吃不住这条判据"。
+- 定点注入「撤掉整个 `body.subs-reading` 规则块」:**1 红**(摆了横幅那一档,
+  scroll 1010 / view 1000)。
+- 定点注入「拿掉读取期间那句 `disabled = true`」:**2 红** ——「读取还没回来时字段是
+  禁用的」和「刚读完的这一份不是草稿」,后者的证据正是审查描述的那个形态:
+  `{"dirty":true,"msg":"已保存：每天 16:45 自动同步","saveOff":false}`(屏幕上是服务端
+  那份,底下却写着有未保存的修改,保存键还亮着)。
+- **那次点击必须是真实鼠标事件**(`clickAt`,口径同 `tests/x_channel_probe.mjs`):
+  `el.dispatchEvent(new Event('input'))` 对**禁用**控件照样触发、照样把 `schedDirty`
+  设成真,拿它去验"读取期间改不进去"等于自己把结论做没了(第一版就是这么写的,
+  修好之后那条用例反而红)。
+- **反向钉一边**:字段放开之后改的那一笔必须活到保存 —— 探针接着改成 18:10 再
+  `saveSched()`,断言 POST body 里是 `"time":"18:10"`(别为了防覆盖把正常编辑也吃掉)。
+- 「页头只剩标题 + 事实数字」有两半,各有独立射程:把 `#source-description` 加回来
+  → 元素存在那一半红;只把 `.source-heading` 的样式退回旧版(24px 宋体 + 12/28 边距)
+  → 高度那一半红(57 > 56)。
+- 定点注入「定时设置退回页尾常驻 + 拿掉页头入口和弹窗」→ **5 红**(四条定时相关 +
+  「工作台吃掉页头之外的剩余高度」,工作台被挤到 579px、掉到视口的 60% 以下)。
+- 定点注入「公众号退回独立连接卡」→ **2 红**。
+- **探针不许因为元素缺失就抛异常中断**:第一次做定点注入时,`openSchedModal()` 在
+  弹窗被拿掉之后当场抛错,整趟探针死在那儿、一条红都报不出来。现在那几处用
+  `?.` 和 `try{}catch{}` 包住,缺元素报红而不是打断。
+- `tests/subs_probe.mjs` 里原来写死的 `subsCatalog.length === 3` /
+  `"公众号,大V观点,RSS"` 顺手改成跟着目录走(口径同 CLAUDE.md「没有 feed 的站点」
+  那节)—— 仓库早就有五类来源了,那两条在改动之前就是红的,而红的地方跟改动毫无关系。
+
+## 后续方案：满高分栏与紧凑内容列表
+
 
 ## 问题
 
@@ -73,3 +212,20 @@ python -m unittest tests.test_subs_layout tests.test_source_post_title \
   tests.test_daily_schedule tests.test_feed_sources tests.test_retired_channel \
   tests.test_reading_literal tests.test_chat_height
 ```
+
+## 2026-10-11 合并冲突整合
+
+- 保留 `main` 的公众号统一页头、仅有说明时显示连接横幅及采集器错误提示。
+- 定时弹窗统一使用 `subs-sched-open`、`subs-sched-label` 和 `openSchedModal`／`closeSchedModal`；保留读取期间禁用编辑、未保存数据保护、首次失败禁用与重读失败保留上次真实设置的行为。
+- 保留满高分栏、480px 极矮窗口地板、列表模式及浮层状态详情；视口锁只由 `applySubsReadingLayout` 维护，移除重复的旧 CSS 高度规则。
+- 两套浏览器探针均保留，页头断言改为验证 feeds 列表内真实可见的工具栏。
+- 浏览器扩展本轮检查仍报 `unsupported Codex auth method: apikey`；按规定降级到独立无头 Chrome 与临时 profile，不接管普通标签、不启动有头浏览器。
+
+### 合并后验证结果
+
+- `.venv/bin/python -m unittest tests.test_subs_layout tests.test_source_post_title tests.test_daily_schedule tests.test_feed_sources tests.test_retired_channel tests.test_reading_literal tests.test_chat_height`：64 项通过；其中有数据布局探针 62／62 项通过。
+- 通过 `tests.headless.run_probe` 在隔离数据服务运行 `tests/subs_probe.mjs`：40／40 项通过。新增验证已连接时无冗余横幅、重要采集器提示不被隐藏、连接失败仍有原因和配置入口。
+- `.venv/bin/python -m unittest tests.test_wechat_setup tests.test_wechat_discovery_integration tests.test_pipeline_stop`：30 项通过，1 项因未配置 `KB_WECHAT_TEST_RUNTIME` 的隔离 Reader 运行时跳过；未读取用户真实微信数据库。
+- 修改过的 JavaScript 与探针均通过 `node --check`，HTML 的 329 个 ID 无重复，`git diff --check` 通过，代码文件均少于 700 行。
+- 截图：`output/subs-layout/social-1440.png`、`schedule-1440.png`、`source-notices-1440.png`、`large-2160-1600.png`。1440×1000 工作区仍从 y=53 铺到 y=1000；列表与正文均可独立滚动，弹窗可关闭并返回入口焦点。
+- 在任务分支 `ash/waO-34BV` 内合入 `main`；没有检出、提交或修改目标分支，也没有删除分支或 worktree。

@@ -43,12 +43,12 @@ function renderSourceEntry(item) {
 
 function updateSourceReadingView() {
   const manage = sourceView === 'manage';
-  document.body.classList.toggle('subs-reading', activeTab === 'subs' && !$('subs-feeds').hidden && !manage);
   $('source-workbench').classList.toggle('is-managing', manage);
   $('source-reader').hidden = manage;
   $('source-settings').hidden = !manage;
   if (manage) $('source-workbench').classList.remove('is-focused', 'has-mobile-reader', 'is-list-only');
   updateSourceListButton();
+  applySubsReadingLayout();
   updateSourceExpandButton();
 }
 

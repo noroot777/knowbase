@@ -162,8 +162,7 @@ const overlayClosers = {
   'tool-drawer': closeToolDrawer, reader: closeReader, 'pipe-modal': closePipeModal,
   'stages-modal': closeStages, 'keys-modal': closeKeys,
   'mcp-modal': closeMcp, 'shortcuts-modal': closeShortcuts,
-  'sched-modal': closeSched,
-  'source-editor': closeSourceEditor, 'source-reader': () => { $('source-reader').style.display = 'none'; },
+  'sched-modal': closeSchedModal, 'source-editor': closeSourceEditor, 'source-reader': () => { $('source-reader').style.display = 'none'; },
   'wechat-modal': closeWechatSetup,
   sidebar: () => toggleNavigation(false),
 };

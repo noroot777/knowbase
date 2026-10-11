@@ -85,7 +85,7 @@ try {
   check('列表自身可以滚动', await evaluate(`$('source-list-pane').scrollHeight > $('source-list-pane').clientHeight`));
   check('完整正文保留而非被摘要截断', await evaluate(`$('source-reader-body').textContent.length > 2000`));
   check('页尾没有同步设置', await evaluate(`!document.querySelector('#subspanel .pipe-schedule')`));
-  check('页头显示真实定时状态', await evaluate(`$('sched-summary').textContent.includes('未启用')`));
+  check('页头显示真实定时状态', await evaluate(`$('subs-sched-label').textContent.includes('未启用')`));
   await screenshot('social-1440');
   check('来源状态提示仍可见而详情默认收起', await evaluate(`!$('source-notices').hidden && !$('source-notices').open && $('source-notices-summary').textContent.includes('待配置')`));
   await click('#source-notices > summary');
@@ -163,7 +163,7 @@ try {
   check('手机可以返回列表', await evaluate(`document.querySelector('.source-stream').getClientRects().length > 0`));
   await viewport(1440, 1000);
   await evaluate(`window.scrollTo(0, 0); true`);
-  await click('#sched-open');
+  await click('#subs-sched-open');
   await wait(`!schedLoading && $('sched-modal').style.display === ''`);
   check('统一设置弹窗列出五类来源', await evaluate(`$('sched-channels').querySelectorAll('input').length === 5`));
   check('弹窗焦点被约束在弹窗内', await evaluate(`$('sched-modal').contains(document.activeElement) && $('main-content').inert`));
@@ -171,12 +171,12 @@ try {
   await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
   await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
   await wait(`$('sched-modal').style.display === 'none'`);
-  check('Escape 关闭并返回入口', await evaluate(`$('sched-modal').style.display === 'none' && document.activeElement === $('sched-open')`));
+  check('Escape 关闭并返回入口', await evaluate(`$('sched-modal').style.display === 'none' && document.activeElement === $('subs-sched-open')`));
   await evaluate(`window.qaRealFetch = window.fetch;
     window.fetch = (url, options) => String(url).endsWith('/api/pipeline/schedule')
       ? new Promise(resolve => { window.qaReleaseSchedule = () => resolve(new Response(JSON.stringify({enabled:true,time:'16:45',channels:['rss','social']}), {status:200})); })
       : window.qaRealFetch(url, options);
-    openSched(); true`);
+    openSchedModal(); true`);
   await wait(`schedLoading && typeof window.qaReleaseSchedule === 'function'`);
   check('重读时禁用全部字段及保存按钮', await evaluate(`$('sched-fields').disabled && $('sched-save').disabled`));
   await click('#sched-on');
@@ -184,14 +184,14 @@ try {
   await evaluate(`window.qaReleaseSchedule(); true`);
   await wait(`!schedLoading`);
   await evaluate(`$('sched-time').value = '18:10'; $('sched-time').dispatchEvent(new Event('input'));
-    closeSched(); openSched(); true`);
+    closeSchedModal(); openSchedModal(); true`);
   check('关掉再打开保留未保存的修改', await evaluate(`schedDirty && $('sched-time').value === '18:10' && !schedLoading`));
   await evaluate(`window.fetch = (url, options) => String(url).endsWith('/api/pipeline/schedule')
     ? Promise.resolve(new Response(JSON.stringify({detail:'临时保存失败'}), {status:503}))
     : window.qaRealFetch(url, options); saveSched(); true`);
   await wait(`!schedSaving`);
   check('保存失败保留编辑并允许重试', await evaluate(`schedDirty && !$('sched-fields').disabled && !$('sched-save').disabled && $('sched-msg').textContent.includes('未保存')`));
-  check('保存失败不会把页头状态写成新时间', await evaluate(`!$('sched-summary').textContent.includes('18:10')`));
+  check('保存失败不会把页头状态写成新时间', await evaluate(`!$('subs-sched-label').textContent.includes('18:10')`));
   await evaluate(`window.fetch = (url, options) => {
     if (!String(url).endsWith('/api/pipeline/schedule')) return window.qaRealFetch(url, options);
     window.qaSavedSchedule = JSON.parse(options.body);
@@ -199,16 +199,19 @@ try {
   }; saveSched(); true`);
   await wait(`!schedSaving`);
   check('保存请求含跨来源选择及修改时间', await evaluate(`window.qaSavedSchedule.time === '18:10' && window.qaSavedSchedule.channels.includes('social') && window.qaSavedSchedule.channels.includes('rss')`));
-  check('保存成功才更新页头状态', await evaluate(`!schedDirty && $('sched-summary').textContent.includes('18:10')`));
-  await evaluate(`closeSched(); window.fetch = (url, options) => String(url).endsWith('/api/pipeline/schedule')
+  check('保存成功才更新页头状态', await evaluate(`!schedDirty && $('subs-sched-label').textContent.includes('18:10')`));
+  await evaluate(`closeSchedModal(); window.fetch = (url, options) => String(url).endsWith('/api/pipeline/schedule')
     ? Promise.resolve(new Response('读取失败', {status:503})) : window.qaRealFetch(url, options);
-    openSched(); true`);
+    openSchedModal(); true`);
   await wait(`!schedLoading`);
-  check('重读失败不会允许修改旧数据', await evaluate(`$('sched-fields').disabled && $('sched-save').disabled && !$('sched-reload').hidden`));
+  check('重读失败保留上次真实设置且不会自动变成草稿', await evaluate(`!$('sched-fields').disabled && $('sched-save').disabled && !$('sched-reload').hidden && $('sched-time').value === '18:10' && !schedDirty`));
+  await evaluate(`schedLoaded = false; loadSched(); true`);
+  await wait(`!schedLoading`);
+  check('首次读取失败不能编辑或保存未经确认的设置', await evaluate(`!schedLoaded && $('sched-fields').disabled && $('sched-save').disabled && !$('sched-reload').hidden`));
   await evaluate(`window.fetch = window.qaRealFetch; loadSched(); true`);
   await wait(`!schedLoading`);
   check('重新读取可以恢复编辑', await evaluate(`!$('sched-fields').disabled && $('sched-reload').hidden`));
-  await evaluate(`closeSched(); true`);
+  await evaluate(`closeSchedModal(); true`);
   await evaluate(`openSubsPanel('wechat'); true`);
   await wait(`!$('subs-wechat').hidden`);
   check('公众号也使用统一页头', await evaluate(`!!document.querySelector('#subs-wechat > .source-heading') && !$('subs-wechat-sync').hidden && !document.body.classList.contains('subs-reading')`));
