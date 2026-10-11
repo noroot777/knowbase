@@ -3,6 +3,42 @@
   height:clamp(460px,calc(100dvh - 290px),1000px); align-items:stretch;
   background:var(--card); border:1px solid var(--line); border-radius:16px; overflow:hidden;
 }
+/* ── 「最新内容」视图锁在可用视口高度上 ─────────────────────────────────────
+   上面那个 clamp 里的 290px 是照着当时的页头量出来的,而页头并不稳定:
+   #source-progress / #source-configuration / #source-issues / #subs-error 这几条
+   横幅随时会冒出来,页头在窄屏上还会折行 —— 每多一条,工作台就被整体顶下去一截,
+   整页出现滚动条,正文阅读区被切掉底下一块(用户截图里只剩中间一条)。
+   口径同问答面板(workspace.css 的 body.chat-mode):**不估常数**,让 #main-content
+   自己锁在可用视口高度、变成 flex 列,工作台吃掉页头之外的全部剩余。横幅在与不在、
+   页头折几行,都不用再改任何数字。
+   `body.subs-reading` 由 sources.js 的 applySubsReadingLayout() 挂,只在 feeds 来源
+   的「最新内容」视图上成立 —— 公众号视图和「订阅管理」是自然流的长列表,锁住它们
+   只会把列表挤进一个矮框里。
+   `min-height:0` 一处都不能省:flex 项的自动最小尺寸按内容算,一列几百条内容会把
+   盒子顶到几千像素高,两个面板各自那条 overflow-y 就再没机会滚动。
+   窄屏(≤760px)另有一套上下堆叠的布局,不进这道锁。 */
+@media (min-width:761px) {
+  /* **高度必须是 definite 的(`height`,不是 `min-height`)**:`min-height` 只是下限,
+     这个盒子的高度仍然按内容算 —— 而一个高度不确定的 flex 列,`flex:1` 没有"可用空间"
+     可分,它只会按子项的 max-content 贡献把自己撑开。空列表上看不出来(内容本来就矮),
+     列表里一有 30 条文章就当场发作:工作台 7598px、整页 7823px,两栏各自那条
+     `overflow-y:auto` 从此一行都滚不动(clientHeight == scrollHeight,scrollTop 永远 0),
+     只能滚整页 —— 正文一滚,列表和页头跟着跑掉(2026-10-11 审查实测)。
+     `min-height:0` 配套不能省:base 那条 `#main-content{min-height:100vh}` 会盖过
+     `height`(min-height 优先),盒子又被顶回 100vh、内容掉到首屏外(口径同
+     workspace.css 的 body.chat-mode)。 */
+  body.subs-reading #main-content { display:flex; flex-direction:column; height:calc(100dvh - var(--topbar-h)); min-height:0; }
+  /* width 不能省:flex 项一旦有 auto 的横向外边距就放弃 stretch,宽度会塌成
+     fit-content(#main-content > div 那条规则正是 margin:0 auto)。 */
+  body.subs-reading #subspanel { display:flex; flex-direction:column; width:100%; flex:1; min-height:0; }
+  body.subs-reading #subs-feeds:not([hidden]) { display:flex; flex-direction:column; flex:1; min-height:0; }
+  /* 地板只管"矮到放不下"那一档:上面那个 definite 高度一旦不够分,工作台会被 flex
+     压到几十像素(实测 420px 高的窗口 + 三条横幅只剩 10px),那时它已经不是"挤一点"
+     是"没了"。压不下去就从 #main-content 溢出,整页照旧能滚到。
+     **不许抬到原来那个 clamp 的 460**:820×760 这种窗口页头会折成三行,460 的地板
+     反倒自己制造出 32px 的滚动条,而不设地板时那里本来正好放得下。 */
+  body.subs-reading .source-workbench:not(.is-managing) { height:auto; flex:1; min-height:360px; }
+}
 .source-workbench [hidden] { display:none !important; }
 .source-workbench:not(.is-managing) .source-stream { display:flex; flex-direction:column; min-height:0; background:var(--bg); border-right:1px solid var(--line); }
 .source-workbench:not(.is-managing) .source-filters { flex-direction:column; gap:8px; padding:16px 18px 10px; margin:0; }

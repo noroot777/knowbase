@@ -103,6 +103,13 @@ async function refreshPipe(withPending = false) {
   renderPipeButtons();
   return request;
 }
+// 公众号那条连接说明:空串 = 没什么要说的,整条横幅收起来
+function setSourceDetail(text, bad) {
+  const box = $('src-detail');
+  box.textContent = text;
+  box.classList.toggle('error', !!bad);
+  box.hidden = !text;
+}
 async function refreshPipeSource() {
   const version = ++pipeSourceVersion;
   $('src-status').textContent = '检查中…';
@@ -121,13 +128,19 @@ async function refreshPipeSource() {
     $('src-label').textContent = src.channel_label || src.label || '来源采集器';
     $('src-status').textContent = src.online ? '已连接' : '未连接';
     $('src-status').style.color = src.online ? 'var(--ok)' : 'var(--danger)';
-    $('src-detail').textContent = [src.message, src.hint].filter(Boolean).join(' · ') || (src.online ? '来源可用，可以开始同步。' : '可检查采集器配置。来源离线时抓取会跳过，已有内容仍可处理。');
+    // 说明挪成一条横幅(口径同 feeds 的 #source-configuration),所以**有话才出现**:
+    // 接通且采集器没话说时那句「来源可用，可以开始同步。」是复述徽章,页头上白占一行。
+    // 采集器自己给的 message/hint 一个字都不许吞 —— 接通之后它照样会说"本机库只读到
+    // N 个会话"这类要紧事,那正是该看见的那一句。
+    setSourceDetail([src.message, src.hint].filter(Boolean).join(' · ')
+      || (src.online ? '' : '可检查采集器配置。来源离线时抓取会跳过，已有内容仍可处理。'), !src.online);
     $('src-console').style.display = src.console_url ? '' : 'none';
     if (src.console_url) $('src-console').href = safeUrl(src.console_url);
   } catch (e) {
     if (version !== pipeSourceVersion) return;
     $('src-status').textContent = '连接未确认';
-    $('src-detail').textContent = e.message + '。可以重新检查连接，运行进度不受影响。';
+    $('src-status').style.color = 'var(--danger)';
+    setSourceDetail(e.message + '。可以重新检查连接，运行进度不受影响。', true);
   }
 }
 async function refreshPipePending() {

@@ -24,6 +24,7 @@ const ICON_PATHS = {
   code: '<path d="m8 7-5 5 5 5m8-10 5 5-5 5M14 4l-4 16"/>',
   box: '<path d="m12 3 9 5v9l-9 5-9-5V8l9-5ZM3 8l9 5 9-5M12 13v9M7.5 5.5l9 5"/>',
   paper: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 8h3M9 12h6M9 16h6"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 6.8V12l3.6 2.1"/>',
 };
 function icon(name, cls = '') {
   return `<svg class="icon ${cls}" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name] || ICON_PATHS.box}</svg>`;
