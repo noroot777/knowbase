@@ -38,6 +38,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import tempfile
 from dataclasses import dataclass, field
@@ -75,6 +76,9 @@ LATE_DRAIN = 10
 # 两回事:那两个是"这一份带多少条",没带走的留在队列里;这一条是"压根不考虑"。
 BACKLOG_DAYS = 30
 EXCERPT = 400           # 每条素材的摘要上限(字符)
+# 素材清单里「标题」和「来源·账号」之间的分隔符。拼装(`_page`)和读回来
+# (`_carried_keys`)共用这一份 —— 迁移盖章靠它把标题从那一行里切出来。
+_REF_SEP = ' — '
 DIR_NAME = 'daily'
 # **只有**在一份日报都没有、接不上任何截止时刻时回溯多久(天)。
 FIRST_DAYS = 1
@@ -256,18 +260,95 @@ def collect(conn, since: datetime, until: datetime, limit: int | None = None,
 
 # ── 上报账本 ───────────────────────────────────────────────────────────────────
 
-def _report_chain() -> list[tuple[datetime, datetime, str]]:
-    """已有的日报链:每一份一条 (窗口起, 窗口止, 日期),按截止时刻升序。
+# 「素材清单」那一节(`_page` 写的):每一份日报自己记着它到底带走了哪些条目。
+# 迁移盖章只认这一份证据,所以下面这几个和 `_page` 里拼 `refs` 那几行是一对 ——
+# 分隔符共用 `_REF_SEP` 一份,改那边的格式要跟着改这边。认不出来的行当成"这一条
+# 没有证据",不盖章(方向按元规则:多报一遍,不写死)。
+_MATERIAL_HEAD = '## 素材清单'
+_MATERIAL_ROW = re.compile(r'^\s*\d+\.\s+(.+)$')
+# 链接那一支要同时顶住几种真实写法,各踩过一次:①最老那几份日报的链接目标是
+# **裸** `(url)` —— `_md_dest` 是后来才加的(实测生产库 2026-09-30 那一份整份
+# 如此),只认尖括号就读不出它的归属;②**账号名里带圆括号**(`歸藏(guizang.ai)`)
+# —— 所以不能贪婪吃到最后一个 `)`,`.+?` 配上「右括号后面紧跟分隔符或行尾」这个
+# 锚点才落在 url 自己那一个上;③**url 自己带圆括号**(那正是 `_md_dest` 存在的
+# 理由)—— 非贪婪会在它那里先试一次、锚点不成立再往后退;④**匹配到分隔符就收工,
+# 不要求吃到字符串末尾** —— 清单末尾那句引用块会跟着并进最后一条里来。
+_MATERIAL_LINK = re.compile(
+    r'^\[[\s\S]*?\]\((.+?)\)(?:' + _REF_SEP + r'|$)', re.M)
 
-    窗口写在每一份自己的 frontmatter 里,链条自描述 —— 启用账本时要靠它回答
+
+def _doc_key(url, title) -> str:
+    """一条素材在日报「素材清单」里的身份。盖章和读清单两侧共用这一份口径。
+
+    有 url 就按 url、没有的按标题(清单里那一行也正是这么分的两支)。url 一律
+    过一遍 `_md_dest` 归一(包尖括号、把 `<>|` 编码掉、空白压掉),它幂等,所以
+    裸写法和尖括号写法、库里的原值和文件里那串字符会落到同一个键上 —— 两侧各
+    归一各的,匹配率是 0。标题同理压掉空白:推文标题里带换行,清单里也原样带着。
+    """
+    return (_md_dest(url) if str(url or '').strip()
+            else '题:' + ' '.join(str(title or '').split()))
+
+
+def _ref_key(text: str) -> str:
+    """素材清单里一条(可能跨行)的身份。"""
+    link = _MATERIAL_LINK.match(text)
+    if not link:
+        # 没有链接的那一支:尾巴上的「— 来源·账号」摘掉,剩下的是原样写进去的标题
+        return _doc_key('', text.rsplit(_REF_SEP, 1)[0])
+    dest = link.group(1).strip()
+    # 括号里那一截交给 `_doc_key` 归一,这里只剥掉尖括号那层壳
+    return _doc_key(dest[1:-1] if dest[:1] == '<' and dest[-1:] == '>' else dest, '')
+
+
+def _carried_keys(body: str) -> set[str]:
+    """一份已有日报**实际带走了**哪些素材 —— 从它自己的素材清单里读回来。
+
+    为什么非得读清单、不能按发布时间推断,见 `daily_carry.ensure_ledger`:推断在
+    两头各错一次(补录被当成链条之前的存量、名额装不下的被记成报过了),两处都
+    不可恢复。读不出来的那一份交空集合,它提供不了任何归属证据。
+
+    **一条素材不一定只占一行,而且断不开**:大V观点那一档的"标题"是推文正文的前
+    500 字符,里面既有换行**也有空行**(实测生产库一份日报里 31 条都是这个形态)。
+    按行各认各的会把它们全判成认不出来 —— 它们明明在库里、发布时间也在链条覆盖
+    的那段里,于是被当成"没报过"重新倒灌进下一份日报。所以除了编号开头的那种行,
+    其余一律并回上一条,**不拿空行当分界**;末尾那句引用块也会并进最后一条,由
+    `_MATERIAL_LINK` 那条"匹配到分隔符就收工"消化掉。
+    """
+    head = body.rfind(_MATERIAL_HEAD)      # 取最后一处:正文里要是也写了这四个字
+    if head < 0:                           # (模型偶尔会),清单永远在它后面
+        return set()
+    rows: list[list[str]] = []
+    for line in body[head:].splitlines()[1:]:
+        if m := _MATERIAL_ROW.match(line):
+            rows.append([m.group(1)])
+        elif rows:
+            rows[-1].append(line)
+    return {_ref_key('\n'.join(r)) for r in rows}
+
+def _report_chain() -> list[carry.PastReport]:
+    """已有的日报:每一份的窗口、日期,和它实际带走的素材,按截止时刻升序。
+
+    窗口和清单都写在每一份自己的文件里,链条自描述 —— 启用账本时要靠它回答
     "这一条当初是哪一份带走的"。读不出窗口的(手工放进来的文件)直接跳过。
+
+    **不设条数上限**(`reports()` 那个 limit 管的是面板列表):链起点决定"多早
+    算链条之前的存量",砍掉最老的几份会让它们覆盖过的内容在迁移时重新变成候选、
+    倒灌进下一份日报。这个函数只在真要盖章那一次跑。
     """
     chain = []
-    for r in reports():
-        since, until = parse_ts(r.get('window_since')), parse_ts(r.get('window_until'))
+    root = report_dir()
+    for path in sorted(root.glob('*.md')) if root.is_dir() else []:
+        try:
+            meta, body = parse_frontmatter(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        since = parse_ts(meta.get('window_since'))
+        until = parse_ts(meta.get('window_until'))
         if since and until and since < until:
-            chain.append((since, until, str(r['date'])))
-    chain.sort(key=lambda c: c[1])
+            chain.append(carry.PastReport(
+                since, until, str(meta.get('date') or path.stem),
+                frozenset(_carried_keys(body))))
+    chain.sort(key=lambda c: c.until)
     return chain
 
 
@@ -275,13 +356,13 @@ def _ensure_ledger(conn, first_days: int = FIRST_DAYS,
                    now: datetime | None = None) -> str:
     """启用账本那一次的一次性盖章(判据和理由都在 `daily_carry.ensure_ledger`)。
 
-    日报链只有这边读得到(它在各份日报的 frontmatter 里),所以在这里组好再传
-    下去 —— 账本那边不认识 vault,两个模块也就不用互相 import。
+    已有的日报只有这边读得到(窗口在 frontmatter 里、带走了什么在正文的素材清单
+    里),所以在这里读好再传下去 —— 账本那边不认识 vault,两个模块也就不用互相
+    import。素材身份那一份口径(`_doc_key`)同理跟着传过去。
     """
-    return carry.ensure_ledger(conn, _report_chain,
+    return carry.ensure_ledger(conn, _report_chain, _doc_key,
                                max(1, int(first_days or FIRST_DAYS)),
                                (now or datetime.now()).replace(microsecond=0))
-
 
 def pending(first_days: int = FIRST_DAYS,
             now: datetime | None = None) -> dict:
@@ -403,10 +484,10 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
         meta['sync_failed'] = issues
     refs = '\n'.join(
         f"{i}. [{_md_text(d['title'])}]({_md_dest(d['url'])})"
-        f" — {_label(d['source'])}·{d['account'] or '未署名'}"
+        f"{_REF_SEP}{_label(d['source'])}·{d['account'] or '未署名'}"
         f"{' · 补录' if d['late'] else ''}"
         if d['url'] else
-        f"{i}. {d['title']} — {_label(d['source'])}·{d['account'] or '未署名'}"
+        f"{i}. {d['title']}{_REF_SEP}{_label(d['source'])}·{d['account'] or '未署名'}"
         f"{' · 补录' if d['late'] else ''}"
         for i, d in enumerate(shown, 1))
     more = []

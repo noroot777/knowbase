@@ -275,25 +275,35 @@ class DailyLedgerSeedTests(_Base):
     """
 
     def _chain(self, date='2026-09-28', since='2026-09-27 08:00:00',
-               until='2026-09-28 08:00:00', body='正文'):
-        """摆一份已有的日报(窗口写在它自己的 frontmatter 里)。"""
+               until='2026-09-28 08:00:00', body='正文', carried=()):
+        """摆一份已有的日报:窗口在 frontmatter 里,**带走了哪些在素材清单里**。
+
+        清单按 `daily._page` 的真实格式写(链接目标套尖括号、尾巴是「— 来源·
+        账号」),迁移盖章认的就是这一节。不传 `carried` 就是摆一份"读不出清单"
+        的日报 —— 它对归属提供不了任何证据,那一档照约定一个章都不盖。
+        """
         daily.report_dir().mkdir(parents=True, exist_ok=True)
+        refs = '\n'.join(
+            f'{i}. [{t}](<{u}>) — RSS·某号' if u else f'{i}. {t} — RSS·某号'
+            for i, (t, u) in enumerate(carried, 1))
+        tail = (f'\n\n## 素材清单({len(carried)} 条)\n\n{refs}\n') if carried else ''
         (daily.report_dir() / f'{date}.md').write_text(
             f'---\ntype: daily-report\ndate: {date}\n'
-            f"window_since: '{since}'\nwindow_until: '{until}'\n---\n\n{body}\n",
-            encoding='utf-8')
+            f"window_since: '{since}'\nwindow_until: '{until}'\n---\n\n{body}\n"
+            + tail, encoding='utf-8')
 
     def test_the_archive_is_written_off_and_attributed_to_its_own_report(self):
         """盖章落到「当初是哪一份带走的」那一天上,不是一律 `#seed`。
 
-        比链起点还早的(和没有发布时间的)记 `#seed`;落在某一份窗口里的记那一
+        比链起点还早的(和没有发布时间的)记 `#seed`;**那一份清单上有的**记那一
         份的日期 —— 后者是「重新生成那一份时它还选得到」的前提,统一记 `#seed`
-        会让覆盖旧日报把它原有的报道一条不剩地抹掉(见下一条用例)。
+        会让覆盖旧日报把它原有的报道一条不剩地抹掉(见后面那条用例)。
         """
-        self._chain()
+        self._chain(carried=[('那一份窗口里的', 'https://x/inside')])
         add_doc(self.conn, 'source/rss/ancient.md', title='上个月的',
                 published='2026-08-20 09:00', indexed='2026-08-20 10:00')
         add_doc(self.conn, 'source/rss/inside.md', title='那一份窗口里的',
+                url='https://x/inside',
                 published='2026-09-27 20:00', indexed='2026-09-27 21:00')
         add_doc(self.conn, 'source/rss/nodate.md', title='没有发布时间的',
                 published='', indexed='2026-09-20 10:00')
@@ -338,10 +348,12 @@ class DailyLedgerSeedTests(_Base):
         self._chain(date='2026-09-26', since='2026-09-25 08:00:00',
                     until='2026-09-26 08:00:00')
         self._chain(date='2026-09-28', since='2026-09-27 08:00:00',
-                    until='2026-09-28 08:00:00')          # 中间缺了 09-27 那一份
+                    until='2026-09-28 08:00:00',          # 中间缺了 09-27 那一份
+                    carried=[('有归属的', 'https://x/kept')])
         add_doc(self.conn, 'source/rss/gap.md', title='缺口里的',
                 published='2026-09-26 20:00', indexed='2026-09-26 21:00')
         add_doc(self.conn, 'source/rss/kept.md', title='有归属的',
+                url='https://x/kept',
                 published='2026-09-27 20:00', indexed='2026-09-27 21:00')
         daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
         self.assertEqual({'source/rss/kept.md': '2026-09-28'}, self.carried())
@@ -355,8 +367,10 @@ class DailyLedgerSeedTests(_Base):
         旧日报的素材要是统一记成 `#seed`,重新生成时一条都选不回来,产物里只剩
         这期间新补抓的那几条,已经交付的内容当场消失。
         """
-        self._chain(body='## 今日要点\n\n- 甲文 [1]')
+        self._chain(body='## 今日要点\n\n- 甲文 [1]',
+                    carried=[('原日报里已有的甲文', 'https://x/a')])
         add_doc(self.conn, 'source/rss/original.md', title='原日报里已有的甲文',
+                url='https://x/a',
                 published='2026-09-27 20:00', indexed='2026-09-27 21:00')
         daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
         # 迁移之后才补抓回来的乙文,发布时间同样落在那一份的窗口里
@@ -367,6 +381,161 @@ class DailyLedgerSeedTests(_Base):
         self.assertIn('原日报里已有的甲文', text, '覆盖旧日报不能抹掉它已有的报道')
         self.assertIn('补抓回来的乙文', text)
         self.assertEqual(2, out['docs'])
+
+    def test_a_late_entry_the_old_report_carried_is_attributed_to_that_report(self):
+        """旧日报里的**补录**要记在它自己那一份头上,不能记成 `#seed`。
+
+        补录的发布时间按定义早于它那一份的窗口(那正是它叫补录的原因),所以
+        "按窗口推断归属"会把它当成链条之前的历史存量 —— 而 `#seed` 对任何一天的
+        重新生成都满足排除条件,于是覆盖那一份旧日报时它一条都选不回来,已经交付
+        的内容当场消失(自由工作流审查第 2 轮在真实页面上复现:原补录没了,产物
+        里只剩新补抓的那条)。
+        """
+        self._chain(body='## 今日要点\n\n- 甲文 [1]\n\n## 补录\n\n- 乙文 [2]',
+                    carried=[('窗口里的甲文', 'https://x/a'),
+                             ('更早发布的乙文', 'https://x/b')])
+        add_doc(self.conn, 'source/rss/a.md', title='窗口里的甲文', url='https://x/a',
+                published='2026-09-27 20:00', indexed='2026-09-27 21:00')
+        add_doc(self.conn, 'source/rss/b.md', title='更早发布的乙文', url='https://x/b',
+                published='2026-09-20 09:00',      # 比链起点(09-27 08:00)还早
+                indexed='2026-09-27 10:00')
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({'source/rss/a.md': '2026-09-28',
+                          'source/rss/b.md': '2026-09-28'}, self.carried())
+        out = daily.generate(since=T('2026-09-27 08:00'), until=T('2026-09-28 08:00'))
+        text = Path(out['path']).read_text(encoding='utf-8')
+        self.assertIn('更早发布的乙文', text, '重新生成不能抹掉它原有的补录')
+        self.assertIn('窗口里的甲文', text)
+
+    def test_an_item_the_old_report_did_not_carry_stays_queued(self):
+        """窗口里**当时装不下**的那些留在队列里 —— 它们正是这次要救的那批。
+
+        旧实现的条数上限是丢弃线:一份日报 `total=121` 却只列得下 120 条,落选那条
+        的 `published` 从此早于任何后续窗口的起点。迁移要是按窗口推断,就会把整个
+        窗口里的现存文章一律记成"报过了",于是那一条再也选不到 —— 原任务要修的
+        那条缝在迁移这一步原地复发(自由工作流审查第 2 轮反例)。
+        """
+        self._chain(carried=[('装下了的', 'https://x/in')])
+        add_doc(self.conn, 'source/rss/in.md', title='装下了的', url='https://x/in',
+                published='2026-09-27 20:00', indexed='2026-09-27 21:00')
+        add_doc(self.conn, 'source/rss/out.md', title='名额装不下的', url='https://x/out',
+                published='2026-09-27 19:00', indexed='2026-09-27 21:00')
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({'source/rss/in.md': '2026-09-28'}, self.carried())
+        info = daily.pending(first_days=1, now=T('2026-09-29 08:00'))
+        self.assertEqual(1, info['late'], '当初没带走的必须还在队列里')
+        out = daily.generate(since=T('2026-09-28 08:00'), until=T('2026-09-29 08:00'))
+        self.assertIn('名额装不下的', Path(out['path']).read_text(encoding='utf-8'))
+
+    def test_a_real_report_is_read_back_by_its_own_material_list(self):
+        """素材清单是**拼装**出来的,所以回归要拿真产物回读一遍。
+
+        手写的摆盘永远跟着实现一起改,证明不了「写」和「读」两侧还对得上
+        (`_page` 拼 refs / `_carried_keys` 解析,分隔符共用 `_REF_SEP`)。样本
+        故意带上两种硬写法:url 里有圆括号(那正是 `_md_dest` 存在的理由)、
+        标题里有方括号(`_md_text` 会转义它)。
+
+        kb.db 是可以删掉重建的索引、日报不是,所以"账本从头来一遍"是真实场景:
+        归属只能从那一份日报自己的清单里读回来。
+        """
+        daily._ensure_ledger(self.conn, now=T('2026-09-01 00:00'))   # 先启用
+        add_doc(self.conn, 'source/rss/a.md', title='带链接的 [视频] 甲文',
+                url='https://x/a?b=1&c=(2)', published='2026-09-28 09:00')
+        add_doc(self.conn, 'source/rss/b.md', title='没有链接的乙文',
+                published='2026-09-28 10:00')
+        daily.generate(since=T('2026-09-28 08:00'), until=T('2026-09-29 08:00'))
+        self.conn.execute('DELETE FROM daily_carried')
+        self.conn.execute('DELETE FROM daily_state')
+        self.conn.commit()
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 09:00'))
+        self.assertEqual({'source/rss/a.md': '2026-09-29',
+                          'source/rss/b.md': '2026-09-29'}, self.carried())
+
+    def test_the_oldest_reports_bare_links_are_still_read(self):
+        """最老那几份日报的链接目标是**裸** `(url)`。
+
+        `_md_dest` 是后来才加的(实测生产库里 2026-09-30 那一份整份都是裸写法)。
+        只认尖括号的话那一份的归属一条都读不出来,它带走过的内容会被当成"没报过"
+        重新倒灌进下一份日报 —— 而这正是审查第 2 轮那份反例摆出来的形状。
+        """
+        daily.report_dir().mkdir(parents=True, exist_ok=True)
+        (daily.report_dir() / '2026-09-28.md').write_text(
+            '---\ntype: daily-report\ndate: 2026-09-28\n'
+            "window_since: '2026-09-27 08:00:00'\n"
+            "window_until: '2026-09-28 08:00:00'\n---\n\n正文\n\n"
+            '## 素材清单(1 条)\n\n'
+            '1. [裸链接的甲文](https://x/a?b=(1)) — RSS·某号\n', encoding='utf-8')
+        add_doc(self.conn, 'source/rss/a.md', title='裸链接的甲文',
+                url='https://x/a?b=(1)',
+                published='2026-09-27 20:00', indexed='2026-09-27 21:00')
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({'source/rss/a.md': '2026-09-28'}, self.carried())
+
+    def test_a_ledger_seeded_by_the_old_algorithm_is_recomputed(self):
+        """已经盖过章的库必须跟着新算法重算一次。
+
+        账本是懒初始化的,盖过章的库直接走快路径返回 —— 于是修好的归属只对"从空
+        库开始"的人成立,而最需要修的恰好是按旧算法盖错过的那些库(自由工作流
+        审查第 2 轮点出这一条)。版本号不一致时整张表重算,证据(每一份日报自己的
+        素材清单)一直在文件里。
+        """
+        self._chain(carried=[('装下了的', 'https://x/in')])
+        add_doc(self.conn, 'source/rss/in.md', title='装下了的', url='https://x/in',
+                published='2026-09-27 20:00', indexed='2026-09-27 21:00')
+        add_doc(self.conn, 'source/rss/out.md', title='名额装不下的', url='https://x/out',
+                published='2026-09-27 19:00', indexed='2026-09-27 21:00')
+        # 旧算法留下的状态:分界线盖着、没有版本标记,窗口里那两条都记成报过了
+        self.conn.executemany(
+            'INSERT INTO daily_carried(path,day,carried_at) VALUES(?,?,?)',
+            [('source/rss/in.md', '2026-09-28', '2026-09-28 08:00:00'),
+             ('source/rss/out.md', '2026-09-28', '2026-09-28 08:00:00')])
+        self.conn.execute('INSERT INTO daily_state(key,value) VALUES(?,?)',
+                          ('carry_epoch', '2026-09-28 08:00:00'))
+        self.conn.commit()
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({'source/rss/in.md': '2026-09-28'}, self.carried())
+        self.assertEqual(1, daily.pending(first_days=1,
+                                          now=T('2026-09-29 08:00'))['late'])
+
+    def test_deleting_a_report_while_the_ledger_is_seeded_does_not_strand_it(self):
+        """盖章途中删掉一份日报,它带走过的内容必须回到队列。
+
+        「读日报 → 分类 → 落账本」整段要和删除互斥:读完之后另一个页面把其中一份
+        删掉(放回它的章 + 删文件),这边再按过期的清单把那些章补回去 —— 那一份
+        日报已经不在了,它的内容从此两头落空(自由工作流审查第 2 轮用线程屏障实测
+        到这个顺序)。两份日报的列表和窗口是并行请求、删除入口在阅读区一直点得到,
+        所以这不是理论上的交错。
+
+        断言落在**末态**上(文件没了 ⇒ 章不许还盖着 ⇒ 下一份捡得回来):只验"锁
+        取了没有"的话,一个什么都没防住的实现也能全绿。
+        """
+        self._chain(carried=[('那一份带走的', 'https://x/r')])
+        add_doc(self.conn, 'source/rss/r.md', title='那一份带走的', url='https://x/r',
+                published='2026-09-27 20:00', indexed='2026-09-27 21:00')
+        read, done = threading.Event(), []
+        real_chain = daily._report_chain
+
+        def slow_chain():
+            out = real_chain()            # 清单已经读进内存,章还没落盘
+            read.set()
+            time.sleep(0.2)               # 给删除线程一个真实的插入机会
+            return out
+
+        def deleting():
+            read.wait(5)
+            done.append(daily.delete('2026-09-28'))
+
+        t = threading.Thread(target=deleting)
+        with patch.object(daily, '_report_chain', slow_chain):
+            t.start()
+            daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        t.join(10)
+
+        self.assertEqual([True], done)
+        self.assertFalse((daily.report_dir() / '2026-09-28.md').exists())
+        self.assertEqual({}, self.carried(), '日报文件没了,章不能还盖着')
+        mat = daily.collect(self.conn, T('2026-09-28 08:00'), T('2026-09-29 08:00'))
+        self.assertEqual(['那一份带走的'], [i['title'] for i in mat.late])
 
     def test_entries_that_arrive_after_the_epoch_are_never_written_off(self):
         """盖章只盖"启用那一刻库里已经有的";之后进来的内容无论发布多早都留着
@@ -384,6 +553,11 @@ class DailyLedgerSeedTests(_Base):
         again = daily._ensure_ledger(self.conn, now=T('2026-10-20 08:00'))
         self.assertEqual(first, again)                 # 分界线不会被重算
         self.assertEqual(['source/rss/a.md'], list(self.carried()))
+        # 反过来钉一边:盖过章之后真生成的那几份,不许被"版本重算"顺手清掉 ——
+        # 重算只在版本号不一致那一次跑,而那一次会把它们从清单里再读回来。
+        daily.mark_carried(self.conn, '2026-09-29', ['source/rss/b.md'])
+        daily._ensure_ledger(self.conn, now=T('2026-10-21 08:00'))
+        self.assertEqual('2026-09-29', self.carried().get('source/rss/b.md'))
 
     def test_the_seed_batch_is_not_released_by_deleting_a_report(self):
         add_doc(self.conn, 'source/rss/a.md', published='2026-08-01 09:00')

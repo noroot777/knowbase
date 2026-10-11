@@ -3,8 +3,9 @@
 
 从 `kb.daily` 里拆出来**只因为行数**(那边到了 700 行上限)。这边不认识 vault
 里的日报文件,也不认识取材口径 —— 它只管一张表和三件事:启用时一次性盖章、
-一份日报带走了哪些、删一份日报把它们放回去。日报链(每一份覆盖哪一段)由
-`kb.daily` 从各份日报的 frontmatter 读出来传进来,免得两个模块互相 import。
+一份日报带走了哪些、删一份日报把它们放回去。已有的那几份日报(各自的窗口和
+**实际带走的素材清单**)由 `kb.daily` 从文件里读出来传进来,免得两个模块互相
+import。
 
 `STAMP` / `parse_ts` 也落在这里(账本自己要用),`kb.daily` 原样绑回它的模块
 全局,所以 `daily.parse_ts` / `daily.STAMP` 这些既有写法照旧有效。
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import fcntl
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from kb.config import DATA_DIR
@@ -23,7 +25,14 @@ STAMP = '%Y-%m-%d %H:%M:%S'
 # 任何一份日报撞上,也不会被 `release()` 误删。
 SEED_DAY = '#seed'
 EPOCH_KEY = 'carry_epoch'
-# 落盘与记账、放回与删文件各自成段,两段之间要整体互斥(见 `commit_lock`)。
+# 盖章算法的版本。**改了算法必须跟着加一**:账本是懒初始化的,已经盖过章的库
+# 会直接走快路径返回,于是修好的归属只对"从空库开始"的人成立,而最需要修的恰好
+# 是已经按旧算法盖错过的那些库(自由工作流审查第 2 轮点出这一条)。版本不一致时
+# 整张表按当前算法重算 —— 证据(每一份日报自己的素材清单)一直在文件里,所以
+# 重算得到的归属和当初 `mark_carried` 记下的是同一份。
+SEED_REV_KEY = 'carry_seed_rev'
+SEED_REV = '2'
+# 落盘与记账、放回与删文件、启用时盖章,三段之间要整体互斥(见 `commit_lock`)。
 LOCK_NAME = 'daily-report.lock'
 
 # 「这一条还没有被**别的**日报带走过」。`day` 是正在写的那一份自己的日期:重新
@@ -31,6 +40,20 @@ LOCK_NAME = 'daily-report.lock'
 # 排除掉自己的章就等于新版本把早上已经报过的内容整段丢掉。
 UNCARRIED = (' AND NOT EXISTS(SELECT 1 FROM daily_carried c'
              ' WHERE c.path=d.path AND c.day<>?)')
+
+
+@dataclass(frozen=True)
+class PastReport:
+    """一份已经生成过的日报:窗口、日期,和它**实际带走的**那些素材。
+
+    `keys` 是素材身份的集合,由 `kb.daily` 从那一份自己的「素材清单」里读回来
+    (口径是 `daily._doc_key`,盖章和读清单两侧共用同一个函数)。读不出清单的
+    那一份交一个空集合 —— 它对归属一个字的证据都提供不了,不是"它什么都没带走"。
+    """
+    since: datetime
+    until: datetime
+    day: str
+    keys: frozenset
 
 
 def parse_ts(value) -> datetime | None:
@@ -82,92 +105,112 @@ def commit_lock():
         fh.close()                       # 关闭即释放 flock
 
 
-def ensure_ledger(conn, chain_of, fallback_days: int, now: datetime) -> str:
+def _seeded(conn) -> str:
+    """已经按**当前**算法盖过章了吗 —— 是就给那条分界线,否则空串。"""
+    state = {r['key']: str(r['value'])
+             for r in conn.execute('SELECT key,value FROM daily_state')}
+    return state.get(EPOCH_KEY, '') if state.get(SEED_REV_KEY) == SEED_REV else ''
+
+
+def ensure_ledger(conn, chain_of, key_of, fallback_days: int, now: datetime) -> str:
     """账本首次启用时一次性盖章,返回那条分界线(链头的截止时刻)。幂等。
 
-    `chain_of` 是一个**取日报链的函数**(每一份一条 (窗口起, 窗口止, 日期),按截止
-    时刻升序),只有真要盖章那一次才调用它 —— 取链要把 vault 里每一份日报的
-    frontmatter 都读一遍,而这个函数坐在面板每一跳那条路上(`daily.pending`),
-    常态只该花一句 SELECT。
+    `chain_of` 是一个**取已有日报的函数**(每一份一条 `PastReport`,按截止时刻
+    升序),只有真要盖章那一次才调用它 —— 取它要把 vault 里每一份日报整份读一遍,
+    而这个函数坐在面板每一跳那条路上(`daily.pending`),常态只该花一句 SELECT。
+    `key_of(url, title)` 是素材身份的口径,和各份日报的素材清单那一侧共用。
 
     不盖的话账本一启用,库里两万多篇历史文章全都算"没上报过",第一份日报的补录
     候选是上千条、要几十份日报才排得空 —— 而那些内容在旧实现下早就永久落选了,
     翻出来不是修复、是倒灌。
 
-    **盖不盖,判据是「它到得比最后一份日报还晚吗」**(`indexed_at > 链头的
-    window_until`),不是只看发布时间。这一道承重:账本是**懒初始化**的,第一次
-    真正跑到它可能已经是升级之后好几天 —— 用户先点「重试失败项」补抓一批、再
-    打开日报面板,那一批的发布时间多半早于链头,只看发布时间就会把它们一律当成
-    历史存量盖掉,于是**正好是这次要救的那批内容被永久写死**(自由工作流审查
-    第 1 轮实测:补抓一篇发布于前天的文章,首次初始化后 pending=0、generate 抛
-    「没有未上报过的新内容」,之后每一天也都选不到)。同一条路还覆盖定时那条
-    入口 ——「先同步再生成」是同步**跑完**才进 generate(),初始化必然晚于补抓。
-    `indexed_at` 只会往前走,所以"到得晚"证得死;反过来老文章重新导出也会刷新
-    它,那只是多报一遍,方向是安全的那一边。
+    **归属只认「那一份自己的素材清单」,不按发布时间推断。** 清单就在每一份日报
+    的文件里(`daily._page` 写的),而推断在两头各错一次,两处都不可恢复:
+    ①**补录**的发布时间本来就早于它那一份的窗口,按窗口推断会把它当成"链条之前
+    的存量"记成 `#seed`,于是重新生成那一份时它一条都选不回来、已经交付的内容
+    被整份覆盖掉;②窗口里**当时装不下**的那些反倒被记成"报过了",从此任何一份
+    日报都选不到 —— 那正是这次要修的那条缝,按窗口推断等于原地复发(自由工作流
+    审查第 2 轮两条独立反例)。清单里认不出的条目一律不盖章:方向按元规则取宽的
+    那一边,放回队列最多多报一遍,盖错了是永久写死。
 
-    **盖章要落到「当初是哪一份带走的」那一天上,不能一律 `#seed`。** 同一天重新
-    生成时 `UNCARRIED` 放行的是**这一份自己**盖的章;统一记成 `#seed` 的话,把
-    区间改回某份旧日报再重新生成,它原有的报道会被整份覆盖掉、一条不剩(同一轮
-    审查实测:甲文在原文件里,覆盖后只剩新补抓的乙文)。所以按窗口归属:落在某
-    一份窗口里的记那一份,比链起点还早的(以及没有发布时间的)记 `#seed`,
-    **发布在链头之后的不盖**(它属于下一份日报的要点桶),**落在链条缺口里的也
-    不盖**(那一份已经被删了,它本就该重新回到队列)。
+    **盖不盖,另一道判据是「它到得比最后一份日报还晚吗」**(`indexed_at > 链头的
+    window_until`)。这一道承重:账本是**懒初始化**的,第一次真正跑到它可能已经
+    是升级之后好几天 —— 用户先点「重试失败项」补抓一批、再打开日报面板,那一批的
+    发布时间多半早于链头,只看发布时间就会把它们一律当成历史存量盖掉,于是**正好
+    是这次要救的那批内容被永久写死**(审查第 1 轮实测:补抓一篇发布于前天的文章,
+    首次初始化后 pending=0、generate 抛「没有未上报过的新内容」)。同一条路还覆盖
+    定时那条入口 ——「先同步再生成」是同步**跑完**才进 generate()。`indexed_at`
+    只会往前走,所以"到得晚"证得死;反过来老文章重新导出也会刷新它,那只是多报
+    一遍,方向是安全的那一边。**清单上有它就不问这一道** —— 实际带走过是正面
+    证据,比任何推断都硬。
 
     一份日报都没有时没有"链头"可言:分界线取 `fallback_days` 天前(那正是第一份
     日报的窗口起点),到达分界取"此刻"—— 库里现有的一律算存量。那时也确实没有
     任何证据说明哪一条被报道过,而让头一份日报去回顾整个存档只会是一份噪音。
+
+    **整段(读日报、分类、落账本)在 `commit_lock` 里**,和生成、删除互斥:读完
+    日报链之后另一个页面把其中一份删掉(`release` 放回它的章 + 删文件),接着这边
+    按过期的链条把那些章又补了回去 —— 那一份日报已经不在了,它带走过的内容从此
+    两头落空(审查第 2 轮用线程屏障实测到这个顺序)。两份日报的列表和窗口是并行
+    请求,删除入口在阅读区一直点得到,所以这不是理论上的交错。模型请求留在锁外。
     """
-    row = conn.execute('SELECT value FROM daily_state WHERE key=?',
-                       (EPOCH_KEY,)).fetchone()
-    if row:
-        return str(row['value'])
-    chain = chain_of()
-    head = chain[-1][1] if chain else now
-    start = chain[0][0] if chain else now - timedelta(days=max(1, fallback_days))
-    stamp = head.strftime(STAMP)
-
-    # 先在锁外把章算好(两万行读一遍、纯内存分类),锁里只落盘。
-    # `indexed_at` 库里只有 `YYYY-MM-DD HH:MM:SS` 一种写法,可以直接比字符串;
-    # `published` 有四种写法,必须 parse_ts 之后再比(见那个函数的说明)。
-    marked, at = [], datetime.now().strftime(STAMP)
-    for row in conn.execute('SELECT path,published,indexed_at FROM documents'):
-        if str(row['indexed_at'] or '') > stamp:
-            continue                      # 到得比链头还晚 ⇒ 不可能被哪一份带走过
-        when = parse_ts(row['published'])
-        if when is None or when <= start:
-            marked.append((row['path'], SEED_DAY, at))
-            continue
-        if when > head:
-            # 发布在链头之后 ⇒ 属于下一份日报的要点桶。**这一档是冗余带**
-            # (定点注入实测红 0 条):链条最后一个窗口就止于 head,所以这种
-            # 条目在下面那句 next(...) 里本来也找不到归属、落 None 不盖章。
-            # 留着是构造上的理由 —— 这一档该被显式处理过,而不是靠读代码的人
-            # 去推 next() 的默认值。
-            continue
-        day = next((d for s, u, d in chain if s < when <= u), None)
-        if day:
-            marked.append((row['path'], day, at))
-
-    if conn.in_transaction:
-        conn.commit()
-    conn.execute('BEGIN IMMEDIATE')
-    try:
-        # 锁里再查一次:两个进程同时首访时,后一个在这里就看得见前一个盖的章。
-        row = conn.execute('SELECT value FROM daily_state WHERE key=?',
-                           (EPOCH_KEY,)).fetchone()
-        if row:
+    done = _seeded(conn)
+    if done:
+        return done
+    with commit_lock():
+        # 取锁之后先落盘:下面那次状态读要看得见别人刚提交的,后面还要 BEGIN
+        # IMMEDIATE(攥着没提交的写事务去等锁会把持锁者卡在它自己的写上)。
+        if conn.in_transaction:
             conn.commit()
-            return str(row['value'])
-        conn.executemany('INSERT OR IGNORE INTO daily_carried(path,day,carried_at)'
-                         ' VALUES(?,?,?)', marked)
-        conn.execute('INSERT INTO daily_state(key,value) VALUES(?,?)',
-                     (EPOCH_KEY, stamp))
-        conn.commit()
-    except BaseException:
-        conn.rollback()
-        raise
-    return stamp
+        # 锁内再问一次:两个进程同时首访时,后一个在这里就看得见前一个盖的章 ——
+        # 不问的话它会把前一个盖完、之后又真生成过日报的那些章一起 DELETE 掉。
+        done = _seeded(conn)
+        if done:
+            return done
+        chain = chain_of()
+        head = chain[-1].until if chain else now
+        start = chain[0].since if chain else now - timedelta(days=max(1, fallback_days))
+        stamp = head.strftime(STAMP)
+        # 同一条素材出现在两份清单里时按**最后**带走它的那一份记(链条按截止时刻
+        # 升序,所以后面的盖掉前面的)。记两份也救不了更早那一份的重新生成
+        # (`UNCARRIED` 排除的是"别的日报盖的章"),白多一行。
+        owner = {k: c.day for c in chain for k in c.keys}
 
+        # 先在锁内把章算好(两万行读一遍、纯内存分类),再一个事务落盘。
+        # `indexed_at` 库里只有 `YYYY-MM-DD HH:MM:SS` 一种写法,可以直接比字符串;
+        # `published` 有四种写法,必须 parse_ts 之后再比(见那个函数的说明)。
+        marked, at = [], datetime.now().strftime(STAMP)
+        for row in conn.execute('SELECT path,url,title,published,indexed_at'
+                                ' FROM documents'):
+            day = owner.get(key_of(row['url'], row['title']))
+            if day:
+                marked.append((row['path'], day, at))
+                continue
+            if str(row['indexed_at'] or '') > stamp:
+                continue                  # 到得比链头还晚 ⇒ 不可能被哪一份带走过
+            when = parse_ts(row['published'])
+            if when is None or when <= start:
+                marked.append((row['path'], SEED_DAY, at))
+            # 剩下这一档不盖:到得不晚、发布在链条覆盖的那段里、却不在任何一份的
+            # 清单上 —— 那就是当时名额装不下、被静默丢掉的那批,留在队列里等下一
+            # 份接着带。落在链条缺口里(那一份已经被删了)的也走这里。
+
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            # 版本升级那一次整张表重算。清掉的那些章全都能从日报文件里再读回来
+            # (包括启用之后真生成的那几份 —— `mark_carried` 记的就是清单里那批),
+            # 读不回来的按不盖章办,方向同上:多报一遍,不写死。
+            conn.execute('DELETE FROM daily_carried')
+            conn.executemany('INSERT OR IGNORE INTO daily_carried(path,day,carried_at)'
+                             ' VALUES(?,?,?)', marked)
+            conn.executemany('INSERT OR REPLACE INTO daily_state(key,value)'
+                             ' VALUES(?,?)',
+                             ((EPOCH_KEY, stamp), (SEED_REV_KEY, SEED_REV)))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    return stamp
 
 def mark_carried(conn, day: str, paths) -> int:
     """记下这一份日报带走了哪些条目;重新生成同一天时整批替换。返回条数。
