@@ -38,7 +38,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sqlite3
 import tempfile
 from dataclasses import dataclass, field
@@ -58,6 +57,12 @@ from kb.daily_carry import UNCARRIED as _UNCARRIED
 # **各个名字所在的行**报的,挂在括号那一行压不住它。
 from kb.daily_carry import SEED_DAY  # noqa: F401
 from kb.daily_carry import day_key as _day_key
+from kb.daily_page import REF_SEP as _REF_SEP
+from kb.daily_page import carried_keys as _carried_keys
+from kb.daily_page import doc_key as _doc_key
+from kb.daily_page import md_dest as _md_dest
+from kb.daily_page import md_text as _md_text
+from kb.daily_page import md_title as _md_title
 from kb.scanner import parse_frontmatter
 from kb.source_types import SOURCE_TYPES
 from kb.store import promo_exclude_sql
@@ -76,9 +81,6 @@ LATE_DRAIN = 10
 # 两回事:那两个是"这一份带多少条",没带走的留在队列里;这一条是"压根不考虑"。
 BACKLOG_DAYS = 30
 EXCERPT = 400           # 每条素材的摘要上限(字符)
-# 素材清单里「标题」和「来源·账号」之间的分隔符。拼装(`_page`)和读回来
-# (`_carried_keys`)共用这一份 —— 迁移盖章靠它把标题从那一行里切出来。
-_REF_SEP = ' — '
 DIR_NAME = 'daily'
 # **只有**在一份日报都没有、接不上任何截止时刻时回溯多久(天)。
 FIRST_DAYS = 1
@@ -260,70 +262,6 @@ def collect(conn, since: datetime, until: datetime, limit: int | None = None,
 
 # ── 上报账本 ───────────────────────────────────────────────────────────────────
 
-# 「素材清单」那一节(`_page` 写的):每一份日报自己记着它到底带走了哪些条目。
-# 迁移盖章只认这一份证据,所以下面这几个和 `_page` 里拼 `refs` 那几行是一对 ——
-# 分隔符共用 `_REF_SEP` 一份,改那边的格式要跟着改这边。认不出来的行当成"这一条
-# 没有证据",不盖章(方向按元规则:多报一遍,不写死)。
-_MATERIAL_HEAD = '## 素材清单'
-_MATERIAL_ROW = re.compile(r'^\s*\d+\.\s+(.+)$')
-# 链接那一支要同时顶住几种真实写法,各踩过一次:①最老那几份日报的链接目标是
-# **裸** `(url)` —— `_md_dest` 是后来才加的(实测生产库 2026-09-30 那一份整份
-# 如此),只认尖括号就读不出它的归属;②**账号名里带圆括号**(`歸藏(guizang.ai)`)
-# —— 所以不能贪婪吃到最后一个 `)`,`.+?` 配上「右括号后面紧跟分隔符或行尾」这个
-# 锚点才落在 url 自己那一个上;③**url 自己带圆括号**(那正是 `_md_dest` 存在的
-# 理由)—— 非贪婪会在它那里先试一次、锚点不成立再往后退;④**匹配到分隔符就收工,
-# 不要求吃到字符串末尾** —— 清单末尾那句引用块会跟着并进最后一条里来。
-_MATERIAL_LINK = re.compile(
-    r'^\[[\s\S]*?\]\((.+?)\)(?:' + _REF_SEP + r'|$)', re.M)
-
-
-def _doc_key(url, title) -> str:
-    """一条素材在日报「素材清单」里的身份。盖章和读清单两侧共用这一份口径。
-
-    有 url 就按 url、没有的按标题(清单里那一行也正是这么分的两支)。url 一律
-    过一遍 `_md_dest` 归一(包尖括号、把 `<>|` 编码掉、空白压掉),它幂等,所以
-    裸写法和尖括号写法、库里的原值和文件里那串字符会落到同一个键上 —— 两侧各
-    归一各的,匹配率是 0。标题同理压掉空白:推文标题里带换行,清单里也原样带着。
-    """
-    return (_md_dest(url) if str(url or '').strip()
-            else '题:' + ' '.join(str(title or '').split()))
-
-
-def _ref_key(text: str) -> str:
-    """素材清单里一条(可能跨行)的身份。"""
-    link = _MATERIAL_LINK.match(text)
-    if not link:
-        # 没有链接的那一支:尾巴上的「— 来源·账号」摘掉,剩下的是原样写进去的标题
-        return _doc_key('', text.rsplit(_REF_SEP, 1)[0])
-    dest = link.group(1).strip()
-    # 括号里那一截交给 `_doc_key` 归一,这里只剥掉尖括号那层壳
-    return _doc_key(dest[1:-1] if dest[:1] == '<' and dest[-1:] == '>' else dest, '')
-
-
-def _carried_keys(body: str) -> set[str]:
-    """一份已有日报**实际带走了**哪些素材 —— 从它自己的素材清单里读回来。
-
-    为什么非得读清单、不能按发布时间推断,见 `daily_carry.ensure_ledger`:推断在
-    两头各错一次(补录被当成链条之前的存量、名额装不下的被记成报过了),两处都
-    不可恢复。读不出来的那一份交空集合,它提供不了任何归属证据。
-
-    **一条素材不一定只占一行,而且断不开**:大V观点那一档的"标题"是推文正文的前
-    500 字符,里面既有换行**也有空行**(实测生产库一份日报里 31 条都是这个形态)。
-    按行各认各的会把它们全判成认不出来 —— 它们明明在库里、发布时间也在链条覆盖
-    的那段里,于是被当成"没报过"重新倒灌进下一份日报。所以除了编号开头的那种行,
-    其余一律并回上一条,**不拿空行当分界**;末尾那句引用块也会并进最后一条,由
-    `_MATERIAL_LINK` 那条"匹配到分隔符就收工"消化掉。
-    """
-    head = body.rfind(_MATERIAL_HEAD)      # 取最后一处:正文里要是也写了这四个字
-    if head < 0:                           # (模型偶尔会),清单永远在它后面
-        return set()
-    rows: list[list[str]] = []
-    for line in body[head:].splitlines()[1:]:
-        if m := _MATERIAL_ROW.match(line):
-            rows.append([m.group(1)])
-        elif rows:
-            rows[-1].append(line)
-    return {_ref_key('\n'.join(r)) for r in rows}
 
 def _report_chain() -> list[carry.PastReport]:
     """已有的日报:每一份的窗口、日期,和它实际带走的素材,按截止时刻升序。
@@ -352,17 +290,22 @@ def _report_chain() -> list[carry.PastReport]:
     return chain
 
 
-def _ensure_ledger(conn, first_days: int = FIRST_DAYS,
-                   now: datetime | None = None) -> str:
-    """启用账本那一次的一次性盖章(判据和理由都在 `daily_carry.ensure_ledger`)。
+def _seed_args(first_days: int = FIRST_DAYS, now: datetime | None = None) -> tuple:
+    """盖章要的那几样东西。
 
     已有的日报只有这边读得到(窗口在 frontmatter 里、带走了什么在正文的素材清单
     里),所以在这里读好再传下去 —— 账本那边不认识 vault,两个模块也就不用互相
     import。素材身份那一份口径(`_doc_key`)同理跟着传过去。
     """
-    return carry.ensure_ledger(conn, _report_chain, _doc_key,
-                               max(1, int(first_days or FIRST_DAYS)),
-                               (now or datetime.now()).replace(microsecond=0))
+    return (_report_chain, _doc_key, max(1, int(first_days or FIRST_DAYS)),
+            (now or datetime.now()).replace(microsecond=0))
+
+
+def _ensure_ledger(conn, first_days: int = FIRST_DAYS,
+                   now: datetime | None = None) -> str:
+    """启用账本那一次的一次性盖章(判据和理由都在 `daily_carry.seed_locked`)。"""
+    return carry.ensure_ledger(conn, *_seed_args(first_days, now))
+
 
 def pending(first_days: int = FIRST_DAYS,
             now: datetime | None = None) -> dict:
@@ -399,42 +342,6 @@ def _material(items: list[dict]) -> str:
         lines.append(head + '\n   ' + (d['excerpt'] or '(无摘要)')
                      + ('\n   ' + ';'.join(tail) if tail else ''))
     return '\n'.join(lines)
-
-
-def _md_dest(url: str) -> str:
-    r"""markdown 链接的目标一律用尖括号包起来。
-
-    库里的 url 实测有带圆括号的(`…-(clean).pdf`、`S2589-0042(26)00811-4`),
-    裸写进 `](…)` 里会在第一个 `)` 处提前收尾,链接当场断掉、后半截漏成正文。
-    尖括号里唯一不能裸出现的是 `<` `>` 本身,转义掉。
-
-    `|` 也得编码:GFM 是**先按行拆单元格再解析 inline** 的,尖括号拦不住它 ——
-    一条目标带 `|` 的链接写进表格,那一格从 `|` 处当场裂成两格,右边的内容被挤
-    出表外(2026-09-30 第 4 轮审查实测)。`%7C` 和 `\|` 渲染出来的 href 逐字
-    相同,编码那种在非 markdown 场景下也对。
-    """
-    return ('<' + ' '.join(str(url or '').split())
-            .replace('<', '%3C').replace('>', '%3E').replace('|', '%7C') + '>')
-
-
-def _md_text(text: str) -> str:
-    """链接文字里的方括号一律转义。
-
-    库里十来篇标题带着 `[视频]`、`[四川话、粤语等]` 这种写法,平衡的还好,
-    落单一个就能把素材清单那条链接从中间截断 —— 后半截标题漏成正文、url
-    露在外面。
-    """
-    return (str(text or '').replace('\\', '\\\\')
-            .replace('[', '\\[').replace(']', '\\]'))
-
-
-def _md_title(text: str) -> str:
-    """链接标题里的 `|` 要转义 —— 库里 215 篇文章标题带着它(`AI Weekly 016 | 开源
-    项目与科技进展` 那种)。GFM 先拆单元格再解析 inline,标题里一个裸 `|` 就把那
-    一格从中间劈开:出处那格变成半截标题,右边「已可用」被挤出表外、页面上再也
-    看不见(2026-09-30 第 4 轮审查实测)。`\\|` 在表格内外渲染结果一致。"""
-    return (' '.join(str(text or '').split())
-            .replace('\\', '\\\\').replace('"', '\\"').replace('|', '\\|'))
 
 
 def _link_refs(body: str, shown: list[dict]) -> str:
@@ -672,6 +579,13 @@ def delete(day: str) -> bool:
             return False
         conn = store.connect()
         try:
+            # **先把账本启用了再放回。** 这一份马上就没了,而"它带走过哪些素材"
+            # 只写在它自己的文件里 —— 账本还没启用就先删,随后那次首访读不到这
+            # 一份,它报道过的内容会按发布时间被判成历史存量、记成 `#seed` 永久
+            # 写死(自由工作流审查第 3 轮:删掉唯一一份昨天的日报,里面的文章从此
+            # 再也选不回来)。盖完再 release,那批章当场回到队列。
+            # 这里已经持着 `commit_lock`,所以走不取锁的那个入口。
+            carry.seed_locked(conn, *_seed_args())
             release(conn, Date.fromisoformat(day).isoformat())
         finally:
             conn.close()

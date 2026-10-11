@@ -105,19 +105,36 @@ def commit_lock():
         fh.close()                       # 关闭即释放 flock
 
 
-def _seeded(conn) -> str:
+def _state(conn) -> dict:
+    return {r['key']: str(r['value'])
+            for r in conn.execute('SELECT key,value FROM daily_state')}
+
+
+def _seeded(state: dict) -> str:
     """已经按**当前**算法盖过章了吗 —— 是就给那条分界线,否则空串。"""
-    state = {r['key']: str(r['value'])
-             for r in conn.execute('SELECT key,value FROM daily_state')}
     return state.get(EPOCH_KEY, '') if state.get(SEED_REV_KEY) == SEED_REV else ''
 
 
 def ensure_ledger(conn, chain_of, key_of, fallback_days: int, now: datetime) -> str:
-    """账本首次启用时一次性盖章,返回那条分界线(链头的截止时刻)。幂等。
+    """账本首次启用时一次性盖章,返回那条分界线。幂等。本体见 `seed_locked`。
+
+    常态只花一句 SELECT:盖过章就直接返回,连锁都不取 —— 这个函数坐在面板每一跳
+    那条路上(`daily.pending`)。
+    """
+    done = _seeded(_state(conn))
+    return done or _lock_and_seed(conn, chain_of, key_of, fallback_days, now)
+
+
+def _lock_and_seed(conn, chain_of, key_of, fallback_days, now) -> str:
+    with commit_lock():
+        return seed_locked(conn, chain_of, key_of, fallback_days, now)
+
+
+def seed_locked(conn, chain_of, key_of, fallback_days: int, now: datetime) -> str:
+    """盖章本体。**调用方必须已经持有 `commit_lock()`**(别在里面再取一次)。
 
     `chain_of` 是一个**取已有日报的函数**(每一份一条 `PastReport`,按截止时刻
-    升序),只有真要盖章那一次才调用它 —— 取它要把 vault 里每一份日报整份读一遍,
-    而这个函数坐在面板每一跳那条路上(`daily.pending`),常态只该花一句 SELECT。
+    升序),只有真要盖章那一次才调用它 —— 取它要把 vault 里每一份日报整份读一遍。
     `key_of(url, title)` 是素材身份的口径,和各份日报的素材清单那一侧共用。
 
     不盖的话账本一启用,库里两万多篇历史文章全都算"没上报过",第一份日报的补录
@@ -129,88 +146,83 @@ def ensure_ledger(conn, chain_of, key_of, fallback_days: int, now: datetime) -> 
     ①**补录**的发布时间本来就早于它那一份的窗口,按窗口推断会把它当成"链条之前
     的存量"记成 `#seed`,于是重新生成那一份时它一条都选不回来、已经交付的内容
     被整份覆盖掉;②窗口里**当时装不下**的那些反倒被记成"报过了",从此任何一份
-    日报都选不到 —— 那正是这次要修的那条缝,按窗口推断等于原地复发(自由工作流
-    审查第 2 轮两条独立反例)。清单里认不出的条目一律不盖章:方向按元规则取宽的
-    那一边,放回队列最多多报一遍,盖错了是永久写死。
+    日报都选不到 —— 那正是这次要修的那条缝,按窗口推断等于原地复发。清单里认不出
+    的条目一律不盖章:方向按元规则取宽的那一边,放回队列最多多报一遍,盖错了是
+    永久写死。
 
-    **盖不盖,另一道判据是「它到得比最后一份日报还晚吗」**(`indexed_at > 链头的
-    window_until`)。这一道承重:账本是**懒初始化**的,第一次真正跑到它可能已经
-    是升级之后好几天 —— 用户先点「重试失败项」补抓一批、再打开日报面板,那一批的
-    发布时间多半早于链头,只看发布时间就会把它们一律当成历史存量盖掉,于是**正好
-    是这次要救的那批内容被永久写死**(审查第 1 轮实测:补抓一篇发布于前天的文章,
-    首次初始化后 pending=0、generate 抛「没有未上报过的新内容」)。同一条路还覆盖
-    定时那条入口 ——「先同步再生成」是同步**跑完**才进 generate()。`indexed_at`
-    只会往前走,所以"到得晚"证得死;反过来老文章重新导出也会刷新它,那只是多报
-    一遍,方向是安全的那一边。**清单上有它就不问这一道** —— 实际带走过是正面
-    证据,比任何推断都硬。
+    **盖不盖,另一道判据是「它到得比分界线还晚吗」**(`indexed_at > 分界线)。这
+    一道承重:账本是**懒初始化**的,第一次真正跑到它可能已经是升级之后好几天 ——
+    用户先点「重试失败项」补抓一批、再打开日报面板,那一批的发布时间多半早于链头,
+    只看发布时间就会把它们一律当成历史存量盖掉,于是**正好是这次要救的那批内容被
+    永久写死**。`indexed_at` 只会往前走,所以"到得晚"证得死;反过来老文章重新导出
+    也会刷新它,那只是多报一遍,方向是安全的那一边。**清单上有它就不问这一道** ——
+    实际带走过是正面证据,比任何推断都硬。
+
+    **分界线一旦钉下就不再往前挪**(`prior or …`)。算法升版重算时如果改用当下的
+    链头,那些"在旧分界之后到达、还排在队列里等补录名额"的文章就会突然变成"到得
+    不晚",再被发布时间判成历史存量、永久写死 —— 实测:61 篇补抓回来的文章里 60
+    篇被一份日报带走,剩下 1 篇在升级后彻底消失(自由工作流审查第 3 轮反例)。
+    重算要修的只是**归属**,分界线那一维没有任何理由跟着动。
 
     一份日报都没有时没有"链头"可言:分界线取 `fallback_days` 天前(那正是第一份
     日报的窗口起点),到达分界取"此刻"—— 库里现有的一律算存量。那时也确实没有
     任何证据说明哪一条被报道过,而让头一份日报去回顾整个存档只会是一份噪音。
-
-    **整段(读日报、分类、落账本)在 `commit_lock` 里**,和生成、删除互斥:读完
-    日报链之后另一个页面把其中一份删掉(`release` 放回它的章 + 删文件),接着这边
-    按过期的链条把那些章又补了回去 —— 那一份日报已经不在了,它带走过的内容从此
-    两头落空(审查第 2 轮用线程屏障实测到这个顺序)。两份日报的列表和窗口是并行
-    请求,删除入口在阅读区一直点得到,所以这不是理论上的交错。模型请求留在锁外。
     """
-    done = _seeded(conn)
+    # 取锁之后先落盘:下面那次状态读要看得见别人刚提交的,后面还要 BEGIN
+    # IMMEDIATE(攥着没提交的写事务去等锁会把持锁者卡在它自己的写上)。
+    if conn.in_transaction:
+        conn.commit()
+    # 锁内再问一次:两个进程同时首访时,后一个在这里就看得见前一个盖的章 ——
+    # 不问的话它会把前一个盖完、之后又真生成过日报的那些章一起 DELETE 掉。
+    state = _state(conn)
+    done = _seeded(state)
     if done:
         return done
-    with commit_lock():
-        # 取锁之后先落盘:下面那次状态读要看得见别人刚提交的,后面还要 BEGIN
-        # IMMEDIATE(攥着没提交的写事务去等锁会把持锁者卡在它自己的写上)。
-        if conn.in_transaction:
-            conn.commit()
-        # 锁内再问一次:两个进程同时首访时,后一个在这里就看得见前一个盖的章 ——
-        # 不问的话它会把前一个盖完、之后又真生成过日报的那些章一起 DELETE 掉。
-        done = _seeded(conn)
-        if done:
-            return done
-        chain = chain_of()
-        head = chain[-1].until if chain else now
-        start = chain[0].since if chain else now - timedelta(days=max(1, fallback_days))
-        stamp = head.strftime(STAMP)
-        # 同一条素材出现在两份清单里时按**最后**带走它的那一份记(链条按截止时刻
-        # 升序,所以后面的盖掉前面的)。记两份也救不了更早那一份的重新生成
-        # (`UNCARRIED` 排除的是"别的日报盖的章"),白多一行。
-        owner = {k: c.day for c in chain for k in c.keys}
+    chain = chain_of()
+    head = chain[-1].until if chain else now
+    start = chain[0].since if chain else now - timedelta(days=max(1, fallback_days))
+    stamp = state.get(EPOCH_KEY, '') or head.strftime(STAMP)
+    # 同一条素材出现在两份清单里时按**最后**带走它的那一份记(链条按截止时刻
+    # 升序,所以后面的盖掉前面的)。记两份也救不了更早那一份的重新生成
+    # (`UNCARRIED` 排除的是"别的日报盖的章"),白多一行。
+    owner = {k: c.day for c in chain for k in c.keys}
 
-        # 先在锁内把章算好(两万行读一遍、纯内存分类),再一个事务落盘。
-        # `indexed_at` 库里只有 `YYYY-MM-DD HH:MM:SS` 一种写法,可以直接比字符串;
-        # `published` 有四种写法,必须 parse_ts 之后再比(见那个函数的说明)。
-        marked, at = [], datetime.now().strftime(STAMP)
-        for row in conn.execute('SELECT path,url,title,published,indexed_at'
-                                ' FROM documents'):
-            day = owner.get(key_of(row['url'], row['title']))
-            if day:
-                marked.append((row['path'], day, at))
-                continue
-            if str(row['indexed_at'] or '') > stamp:
-                continue                  # 到得比链头还晚 ⇒ 不可能被哪一份带走过
-            when = parse_ts(row['published'])
-            if when is None or when <= start:
-                marked.append((row['path'], SEED_DAY, at))
-            # 剩下这一档不盖:到得不晚、发布在链条覆盖的那段里、却不在任何一份的
-            # 清单上 —— 那就是当时名额装不下、被静默丢掉的那批,留在队列里等下一
-            # 份接着带。落在链条缺口里(那一份已经被删了)的也走这里。
+    # 先在锁内把章算好(两万行读一遍、纯内存分类),再一个事务落盘。
+    # `indexed_at` 库里只有 `YYYY-MM-DD HH:MM:SS` 一种写法,可以直接比字符串;
+    # `published` 有四种写法,必须 parse_ts 之后再比(见那个函数的说明)。
+    marked, at = [], datetime.now().strftime(STAMP)
+    for row in conn.execute('SELECT path,url,title,published,indexed_at'
+                            ' FROM documents'):
+        day = owner.get(key_of(row['url'], row['title']))
+        if day:
+            marked.append((row['path'], day, at))
+            continue
+        if str(row['indexed_at'] or '') > stamp:
+            continue                  # 到得比分界线还晚 ⇒ 不可能被哪一份带走过
+        when = parse_ts(row['published'])
+        if when is None or when <= start:
+            marked.append((row['path'], SEED_DAY, at))
+        # 剩下这一档不盖:到得不晚、发布在链条覆盖的那段里、却不在任何一份的
+        # 清单上 —— 那就是当时名额装不下、被静默丢掉的那批,留在队列里等下一
+        # 份接着带。落在链条缺口里(那一份已经被删了)的也走这里。
 
-        conn.execute('BEGIN IMMEDIATE')
-        try:
-            # 版本升级那一次整张表重算。清掉的那些章全都能从日报文件里再读回来
-            # (包括启用之后真生成的那几份 —— `mark_carried` 记的就是清单里那批),
-            # 读不回来的按不盖章办,方向同上:多报一遍,不写死。
-            conn.execute('DELETE FROM daily_carried')
-            conn.executemany('INSERT OR IGNORE INTO daily_carried(path,day,carried_at)'
-                             ' VALUES(?,?,?)', marked)
-            conn.executemany('INSERT OR REPLACE INTO daily_state(key,value)'
-                             ' VALUES(?,?)',
-                             ((EPOCH_KEY, stamp), (SEED_REV_KEY, SEED_REV)))
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        # 版本升级那一次整张表重算。清掉的那些章全都能从日报文件里再读回来
+        # (包括启用之后真生成的那几份 —— `mark_carried` 记的就是清单里那批),
+        # 读不回来的按不盖章办,方向同上:多报一遍,不写死。
+        conn.execute('DELETE FROM daily_carried')
+        conn.executemany('INSERT OR IGNORE INTO daily_carried(path,day,carried_at)'
+                         ' VALUES(?,?,?)', marked)
+        conn.executemany('INSERT OR REPLACE INTO daily_state(key,value)'
+                         ' VALUES(?,?)',
+                         ((EPOCH_KEY, stamp), (SEED_REV_KEY, SEED_REV)))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     return stamp
+
 
 def mark_carried(conn, day: str, paths) -> int:
     """记下这一份日报带走了哪些条目;重新生成同一天时整批替换。返回条数。
