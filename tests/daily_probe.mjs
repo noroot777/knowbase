@@ -444,7 +444,9 @@ const quietRun = await evalJs(`(async () => {
   }
   return ''; })()`);
 check("后端自己跑完了一轮", /"phase":"done"/.test(quietRun), quietRun);
-check("那一轮带着自己的身份", /"id":"daily-\d+"/.test(quietRun), quietRun);
+// 身份里那段十六进制是**进程启动时现取的**:重启后计数器归零,只有它能让新一轮
+// 不跟旧页面手里记着的那个撞上。
+check("那一轮带着自己的身份", /"id":"daily-[0-9a-f]+-\d+"/.test(quietRun), quietRun);
 check("摆盘:页面从头到尾没见过 running=true",
       await evalJs(`!dailyState.running && !dailyReports.some(r => r.date === '${today}')`),
       await evalJs(`JSON.stringify({running: dailyState.running,
@@ -470,6 +472,54 @@ check("同一轮结果反复轮询不会把用户选的那一份顶掉",
       (await evalJs(`document.getElementById('daily-reader-title').textContent`)) === `日报 · ${other}`
       && (await evalJs(`dailyCurrent`)) === other,
       await evalJs(`dailyCurrent + ' / ' + document.getElementById('daily-reader-title').textContent`));
+
+// ── 身份撞号了也不许停在旧正文上(重启那一档的兜底) ──────────────────────────
+// 承重的那道在后端:run id 带一段进程启动时现取的命名空间,所以重启后那一轮不会
+// 和重启前的任何一轮同号(回归在 tests/test_daily_carried.py)。这里钉的是前端
+// 那道兜底 —— **身份是 run_id 和完成时刻两段拼起来的**,所以万一哪天 id 又撞上
+// (另一种归零写法、另一个进程),完成时刻变了照样刷。
+// 伪造的是**后端回包**那一个字段,不是页面状态:把 status 里的 run_id 换回页面
+// 记着的那一段,正是「重启后序号归零」在页面看到的形态。
+await evalJs(`(async () => {
+  await fetch('/api/daily/reports/${today}', { method: 'DELETE' });
+  await loadDailyReports(); })()`);
+await evalJs(`(() => { clearTimeout(dailyTimer); dailyTimer = null; })()`);
+check("摆盘:今天那一份又被删掉了",
+      await evalJs(`!dailyReports.some(r => r.date === '${today}')`),
+      await evalJs(`JSON.stringify(dailyReports.map(r => r.date))`));
+const stale = await evalJs(`(() => {
+  const real = window.fetch;
+  const keep = dailyDoneRun.split('|')[0];
+  window.__restoreFetch = () => { window.fetch = real; };
+  window.fetch = async (path, opts) => {
+    const r = await real(path, opts);
+    if (!String(path).startsWith('/api/daily/status')) return r;
+    const body = await r.json();
+    body.run_id = keep;            // 重启后序号归零 ⇒ 和页面记着的那一段撞上
+    return new Response(JSON.stringify(body),
+      { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  return keep; })()`);
+check("摆盘:拿得到页面记着的那一段身份", /^daily-/.test(stale), stale);
+const collided = await evalJs(`(async () => {
+  await fetch('/api/daily/run', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sync: false }) });
+  for (let i = 0; i < 60; i++) {
+    const s = await (await fetch('/api/daily/status')).json();
+    if (!s.running && s.phase !== 'starting') return JSON.stringify({ phase: s.phase, id: s.run_id });
+    await new Promise(r => setTimeout(r, 300));
+  }
+  return ''; })()`);
+check("后端又跑完了一轮,而回包里的身份和上一轮撞着",
+      new RegExp(`"phase":"done".*"id":"${stale}"`).test(collided), collided);
+await evalJs(`refreshDailyStatus()`);
+check("身份撞号时靠完成时刻认出新一轮,列表照样更新",
+      await waitFor(`dailyReports.some(r => r.date === '${today}')`, 8000),
+      await evalJs(`JSON.stringify(dailyReports.map(r => r.date))`));
+check("阅读区也跟着换成了新那一份",
+      await waitFor(`document.getElementById('daily-reader-title').textContent === '日报 · ${today}'`, 8000),
+      await evalJs(`document.getElementById('daily-reader-title').textContent`));
+await evalJs(`window.__restoreFetch(); delete window.__restoreFetch; true`);
 
 check("页面没有脚本报错", pageErrors.length === 0, pageErrors.join(" | "));
 

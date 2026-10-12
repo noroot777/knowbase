@@ -375,6 +375,9 @@ class RunIdentityTests(unittest.TestCase):
     后果在面板上(tests/daily_probe.mjs 那一组:没见过 running 的那一轮也要把
     列表和正文刷上),这里只钉住接口确实给得出这个身份、而且两轮不会同号:
     `finished_at` 只精确到秒,拿它当身份时同一秒里跑完的两轮分不开。
+
+    「同一进程里的两轮」和「跨重启的两轮」是**两条**,缺一不可:只钉前者的话,
+    一个纯进程内计数器也全绿,而重启恰好把它归零。
     """
 
     def setUp(self):
@@ -387,14 +390,32 @@ class RunIdentityTests(unittest.TestCase):
                   patch.object(daily_run.threading, 'Thread', Mock())):
             p.start(); self.addCleanup(p.stop)
 
+    def round_id(self) -> str:
+        """起一轮,返回它的身份。"""
+        daily_run._state.update({**self.before, 'running': False})
+        self.assertTrue(daily_run.start(sync=False))
+        got = daily_run.get_state()['run_id']
+        self.assertTrue(got, '状态接口得给得出这一轮的身份')
+        return got
+
     def test_two_rounds_never_share_an_identity(self):
-        ids = []
-        for _ in range(2):
-            daily_run._state.update({**self.before, 'running': False})
-            self.assertTrue(daily_run.start(sync=False))
-            ids.append(daily_run.get_state()['run_id'])
-        self.assertTrue(all(ids), ids)
-        self.assertEqual(2, len(set(ids)), ids)
+        self.assertNotEqual(self.round_id(), self.round_id())
+
+    def test_identities_do_not_repeat_across_a_restart(self):
+        """重启之后那一轮也不许和重启前的任何一轮同号。
+
+        计数器在模块加载时归零,而**旧页面还开着**、手里攥的是重启前那个 id ——
+        同号的话它把重启后这一轮判成"同一轮",列表和正文永永远远停在旧版(审查
+        实测:重启 + 生成都落在一次空闲轮询里,中间那个空状态页面压根没读到)。
+
+        这里模拟的就是重启:计数器归零 + 命名空间**重新现取一次**。所以把那段
+        命名空间写死成常量时这一条会红,而上一条不会。
+        """
+        before_restart = self.round_id()
+        with patch.object(daily_run, '_RUN_NS', daily_run._new_namespace()), \
+             patch.object(daily_run, '_run_seq', 0):
+            after_restart = self.round_id()
+        self.assertNotEqual(before_restart, after_restart)
 
 
 if __name__ == '__main__':

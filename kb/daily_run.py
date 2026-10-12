@@ -16,6 +16,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
 
@@ -37,9 +38,23 @@ RETRY_AFTER = timedelta(minutes=30)
 MAX_RETRIES = 2
 
 _lock = threading.RLock()
-# 给每一轮发一个身份,面板拿它认"有没有出现一轮新的已结束运行"。**不能拿
-# `finished_at` 当身份**:它只精确到秒,而这一档治的正是"跑得太快、页面一次都
-# 没见过 running=true"那种运行(同 pipeline_state.new_run_id 那条口径)。
+
+
+def _new_namespace() -> str:
+    """这个进程的身份段。**在模块加载时取一次**,重启就换一个。"""
+    return uuid.uuid4().hex[:8]
+
+
+# 给每一轮发一个身份,面板拿它认"有没有出现一轮新的已结束运行"。两件事:
+# ①**不能拿 `finished_at` 当身份** —— 它只精确到秒,而这一档治的正是"跑得太快、
+#   页面一次都没见过 running=true"那种运行;
+# ②**光一个进程内计数器不够,身份得跨重启也唯一。** 计数器在模块加载时归零,
+#   而旧页面手里还攥着重启前那个 id:重启之后紧接着生成一份(`./kb.sh restart`
+#   之后手点一次同步正是日常路径),新那一轮又叫 `daily-1`,和页面记着的逐字
+#   相同 —— 于是正文永远不刷新,新文章要整页刷新才看得见(审查实测:重启 + 生成
+#   都落在一次空闲轮询的 15 秒窗口里,页面连中间那个空状态都没读到)。所以前面
+#   再加一段**进程启动时现取的**命名空间。
+_RUN_NS = _new_namespace()
 _run_seq = 0
 _state: dict = {
     'running': False, 'phase': '', 'detail': '', 'date': '',
@@ -463,7 +478,7 @@ def start(since: datetime | None = None, until: datetime | None = None,
         _run_seq += 1
         _state.update({
             'running': True, 'phase': 'starting', 'detail': '',
-            'run_id': f'daily-{_run_seq}',
+            'run_id': f'daily-{_RUN_NS}-{_run_seq}',
             'date': until.date().isoformat() if until else '',
             'since': since.strftime(daily.STAMP) if since else '',
             'until': until.strftime(daily.STAMP) if until else '',

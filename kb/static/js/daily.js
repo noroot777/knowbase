@@ -4,7 +4,9 @@
 let dailySettings = null, dailyChannels = [], dailyReports = [], dailyWindow = null;
 let dailyCurrent = '', dailyState = null, dailyTimer = null;
 // 上一次看到的那一轮**已结束**运行的身份(还没查过状态是 null,正在跑是空串)。
-// 身份认 run_id —— `finished_at` 只精确到秒,两轮落在同一秒里时拿它当身份分不开。
+// 身份是 run_id 和完成时刻**两段拼起来的**,哪一段变了都算新一轮:承重的是
+// run_id(`finished_at` 只精确到秒,同一秒里跑完的两轮拿它分不开),而完成时刻
+// 是它撞号时的兜底 —— 多刷一次列表的代价,换"再不会静默停在旧正文上"。
 let dailyDoneRun = null;
 let dailyLoaded = false, dailyDirty = false, dailySaving = false, dailyBusy = false;
 let dailyWindowDirty = false;
@@ -452,7 +454,8 @@ async function refreshDailyStatus() {
   // 实测:接口已经是「素材清单(4 条)」,页面仍显示 3 条和旧的生成时刻,只有整页
   // 刷新才看得到新内容)。后台定时那一轮、别的页面点的那一轮同理。
   // 第一跳(dailyDoneRun === null)不算新结果:那时页面刚打开,正文本来就是现读的。
-  const doneRun = s.running ? '' : (s.run_id || s.finished_at || '');
+  const doneRun = s.running ? ''
+    : [s.run_id, s.finished_at].filter(Boolean).join('|');
   const fresh = dailyDoneRun !== null && doneRun && doneRun !== dailyDoneRun;
   dailyDoneRun = doneRun;
   dailyState = s;
