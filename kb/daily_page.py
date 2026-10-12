@@ -61,6 +61,12 @@ def md_title(text: str) -> str:
 # 分隔符共用 `REF_SEP` 一份,改那边的格式要跟着改这边。认不出来的行当成"这一条
 # 没有证据",不盖章(方向按元规则:多报一遍,不写死)。
 _MATERIAL_HEAD = '## 素材清单'
+# 真正的清单抬头:**行首** + 带着条数。这四个字在正文里到处都可能出现 —— 模型写
+# 要点时提一句、一篇文章的标题里写着「日报模板中的 ## 素材清单 应该怎样组织」、
+# 一条推文原样贴了一段 markdown 提示词模板(那一行就在行首)。按「最后一次出现」
+# 找起点时,后两种都落在清单**内部**,于是起点被挪到半截,**它前面那几条真素材
+# 连同它们的 url 一起读不出来**,全被判成 `#seed`(真实页面复现)。
+_HEAD_LINE = re.compile(r'^## 素材清单[(\uff08](\d+)\s*条', re.M)
 _MATERIAL_ROW = re.compile(r'^\s*(\d+)\.\s+(.+)$')
 # 链接那一支要同时顶住几种真实写法,各踩过一次:①最老那几份日报的链接目标是
 # **裸** `(url)` —— `md_dest` 是后来才加的(实测生产库 2026-09-30 那一份整份
@@ -137,6 +143,17 @@ def flat(text) -> str:
     return ' '.join(str(text or '').replace('\\', '').split())
 
 
+def material_text(body: str) -> str:
+    """整份日报正文(归一过)。兜底里按 url 找的那一支用它。
+
+    **不能跟着 `carried_keys` 共用那份切好的条目** —— 起点一旦被标题里的假抬头
+    带偏,切出来的东西和归属读取一起错,兜底也就拿不到完整原文、拦不住 `#seed`
+    (真实页面复现:两篇旧补录一起消失)。整份正文不依赖任何切分,起点选错它也
+    还在;url 是强身份,在要点那几行的出处链接里找到同样算"这一份带走过它"。
+    """
+    return flat(body)
+
+
 def material_rows(body: str) -> tuple[str, ...]:
     """这一份日报的素材清单,一条一条(归一过),用来回答"这一篇露过面吗"。
 
@@ -155,7 +172,12 @@ def material_rows(body: str) -> tuple[str, ...]:
     另一篇同名文章被当成报过了,方向是不可恢复的那一边)。这里只用来**否决**一个
     终态,同名撞上的后果仍然是多报一遍。
     """
-    return tuple(flat(t) for t in _rows(body))
+    # 兜底这一侧**不要求切得准**:不验条数、不管编号接不接得上,只要每一条的
+    # 开头落对就行。严格那一套(`_rows`)认不出来时交空集合是对的 —— 归属宁可
+    # 读不出;而这里交空集合等于把兜底也一起关掉,方向反了。
+    heads = list(_HEAD_LINE.finditer(body))
+    tail = body[heads[0].end():] if heads else body
+    return tuple(flat(t) for t in _split(tail))
 
 
 def carried_keys(body: str) -> set[str]:
@@ -183,12 +205,27 @@ def carried_keys(body: str) -> set[str]:
 
 
 def _rows(body: str) -> list[str]:
-    """把素材清单切成一条一条,每条给它的原文(可能跨好几行)。"""
-    head = body.rfind(_MATERIAL_HEAD)      # 取最后一处:正文里要是也写了这四个字
-    if head < 0:                           # (模型偶尔会),清单永远在它后面
-        return []
+    """把素材清单切成一条一条,每条给它的原文(可能跨好几行)。
+
+    **抬头自己说了有几条,切出来的就得是几条** —— 这一道是选起点的唯一判据。
+    假抬头有两个方向:模型在要点里提一句(落在真抬头**前面**),或者某条素材的
+    标题里带着这几个字(落在真抬头**后面**,而且可能正好在行首)。只按位置挑
+    (取最前或取最后)必然在另一个方向上错,而条数对不对是结构性的。
+
+    一条都对不上就交空的 —— 归属宁可读不出(多报一遍),不许读出半截(前面那几
+    条连 url 一起丢,全判成 `#seed`,不可恢复)。
+    """
+    for head in reversed(list(_HEAD_LINE.finditer(body))):
+        rows = _split(body[head.end():])
+        if len(rows) == int(head.group(1)):
+            return rows
+    return []
+
+
+def _split(text: str) -> list[str]:
+    """按编号行把一段文字切成一条一条(判据见 `carried_keys`)。"""
     rows: list[list[str]] = []
-    for line in body[head:].splitlines()[1:]:
+    for line in text.splitlines():
         m = _MATERIAL_ROW.match(line)
         if (m and int(m.group(1)) == len(rows) + 1
                 and (not rows or _closed('\n'.join(rows[-1])))):

@@ -283,7 +283,9 @@ class DailyLedgerSeedTests(_Base):
             ('source/rss/late.md', daily_carry.SEED_DAY, '2026-09-28 08:00:00'))
         self.conn.executemany(
             'INSERT INTO daily_state(key,value) VALUES(?,?)',
-            [('carry_epoch', '2026-09-28 08:00:00'), ('carry_seed_rev', '2')])
+            # 摆的是**上一版**那个号。写死一个更老的值等于把这条用例废掉 ——
+            # 版本一升它就不再命中快路径,注入「版本没跟着升」也照样绿。
+            [('carry_epoch', '2026-09-28 08:00:00'), ('carry_seed_rev', '3')])
         self.conn.commit()
         daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
         self.assertEqual({'source/rss/late.md': '2026-09-28'}, self.carried(),
@@ -306,16 +308,18 @@ class DailyLedgerSeedTests(_Base):
 
         from kb import daily_page as page
         parts = [page._MATERIAL_ROW.pattern, page._MATERIAL_LINK.pattern,
-                 page._ENTRY_TAIL.pattern, page.REF_SEP, page._MATERIAL_HEAD]
-        for fn in (page._closed, page._ref_key, page._rows, page.doc_key,
-                   page.flat, page.md_dest, page.carried_keys, page.material_rows):
+                 page._ENTRY_TAIL.pattern, page._HEAD_LINE.pattern,
+                 page.REF_SEP, page._MATERIAL_HEAD]
+        for fn in (page._closed, page._ref_key, page._rows, page._split,
+                   page.doc_key, page.flat, page.md_dest, page.carried_keys,
+                   page.material_rows, page.material_text):
             node = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
             if (node.body and isinstance(node.body[0], ast.Expr)
                     and isinstance(node.body[0].value, ast.Constant)):
                 node.body.pop(0)                      # docstring 不算逻辑
             parts.append(ast.dump(node))
         self.assertEqual(
-            'bbdb1c11cd64269e',
+            'd86a5367d51a63d2',
             hashlib.sha256('\x00'.join(parts).encode()).hexdigest()[:16],
             '清单解析变了:把 daily_carry.SEED_REV 加一,再把新指纹填到这里')
 

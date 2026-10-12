@@ -110,6 +110,110 @@ class MaterialRoundTripTests(_Base):
                             companion=False))
 
 
+class ListHeadingTests(_Base):
+    """清单从哪一行开始 —— 「## 素材清单」这几个字在正文里到处都可能出现。
+
+    起点选错一次,**它前面那几条真素材连同它们的 url 一起读不出来**,全被判成
+    `#seed`:用户重新生成那一天的日报时,好几篇已经交付过的补录一起消失,而页面
+    照样提示生成成功(真实页面复现)。假抬头有两个相反的方向,所以判据不能是
+    「取最前」或「取最后」—— 只能问抬头自己声明的条数对不对。
+    """
+
+    def _rebuild(self, *docs):
+        """真写一份日报,再把账本从头重建,返回重建出来的章。"""
+        daily._ensure_ledger(self.conn, now=T('2026-09-01 00:00'))
+        for n, (title, url) in enumerate(docs):
+            add_doc(self.conn, f'source/rss/{n}.md', title=title, url=url,
+                    source='social' if '\n' in title else 'rss',
+                    published=f'2026-09-28 0{n + 1}:00')
+        daily.generate(since=T('2026-09-28 00:00'), until=T('2026-09-29 08:00'))
+        self.conn.execute('DELETE FROM daily_carried')
+        self.conn.execute('DELETE FROM daily_state')
+        self.conn.commit()
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 09:00'))
+        return self.carried()
+
+    def test_the_heading_words_inside_a_title_do_not_move_the_start(self):
+        """一篇文章的标题里写着这几个字 —— 假抬头落在清单**内部**。
+
+        按「最后一次出现」找起点时它赢了真抬头,于是排在它前面的那几条真素材
+        一条都读不出来。
+        """
+        self.assertEqual(
+            {'source/rss/0.md': DAY, 'source/rss/1.md': DAY},
+            self._rebuild(('普通的一条旧补录', 'https://x/plain'),
+                          ('日报模板中的 ## 素材清单 应该怎样组织', 'https://x/howto')))
+
+    def test_a_markdown_template_in_a_tweet_does_not_move_the_start(self):
+        """推文原样贴了一段 markdown 提示词模板,那一行**就在行首**。
+
+        所以「行首」这一道拦不住它,拦得住的只有「抬头自己声明了几条」。
+        """
+        self.assertEqual(
+            {'source/rss/0.md': DAY, 'source/rss/1.md': DAY},
+            self._rebuild(
+                ('普通的一条旧补录', 'https://x/plain'),
+                ('分享我的信息整理提示词\n## 素材清单\n1. 收集原文\n2. 标注出处',
+                 'https://x.com/e/status/9')))
+
+    def test_the_heading_words_in_the_summary_do_not_move_the_start(self):
+        """反过来钉一边:模型在**要点**里提了这几个字 —— 假抬头落在真抬头前面。
+
+        这一档正是「取最后一次出现」当初要解决的,换判据不许把它弄丢。
+        """
+        self.chat.return_value = ('## 今日要点\n\n'
+                                  '- **有事发生**:这一份的 ## 素材清单 写得很全 [1]')
+        self.assertEqual({'source/rss/0.md': DAY},
+                         self._rebuild(('普通的一条旧补录', 'https://x/plain')))
+
+    def test_a_fake_heading_with_a_count_before_the_list(self):
+        """假抬头带着条数、而且落在真抬头**前面**(模型在要点里照抄了一行)。
+
+        这一档单靠「取最前」会选中它:要点自己是有序列表时,那几行当场被当成
+        素材切出来,真清单里的编号反倒接不上、被并进去 —— 归属全错。
+        """
+        # 模型偶尔会把整份模板抄一遍,连带把这一行原样写进要点里
+        self.chat.return_value = (
+            '## 今日要点\n\n## 素材清单(9 条)\n\n'
+            '1. 第一件事 [1]\n2. 第二件事\n')
+        self.assertEqual({'source/rss/0.md': DAY},
+                         self._rebuild(('普通的一条旧补录', 'https://x/plain')))
+
+    def test_a_fake_heading_with_a_count_inside_a_title(self):
+        """假抬头带着条数、而且落在真抬头**后面**(一条推文里抄了一行)。
+
+        这一档单靠「取最后」会选中它。两条合起来说明:位置选不出真抬头,
+        能选出来的只有「它说有几条、就得切出几条」。
+        """
+        self.assertEqual(
+            {'source/rss/0.md': DAY, 'source/rss/1.md': DAY},
+            self._rebuild(
+                ('普通的一条旧补录', 'https://x/plain'),
+                ('日报长这样\n## 素材清单(9 条)\n1. 第一条\n2. 第二条',
+                 'https://x.com/e/status/8')))
+
+    def test_a_truncated_list_is_not_read_at_half(self):
+        """抬头说有 2 条、实际只切得出 1 条时,整份清单都不作数。
+
+        半截的清单比读不出来更坏:前面那几条交不出归属,随后被发布时间判成历史
+        存量、永久写死。读不出来只是多报一遍 —— 而"别写死"这一半靠的是兜底拿到
+        **整份正文**(它不经过切分),所以样本的发布时间特意压在链起点之前,好让
+        这一条真的走到"历史存量"那一档上。
+        """
+        daily.report_dir().mkdir(parents=True, exist_ok=True)
+        (daily.report_dir() / '2026-09-28.md').write_text(
+            '---\ntype: daily-report\ndate: 2026-09-28\n'
+            "window_since: '2026-09-27 08:00:00'\n"
+            "window_until: '2026-09-28 08:00:00'\n---\n\n正文\n\n"
+            '## 素材清单(2 条)\n\n'
+            '1. [只剩这一条](<https://x/kept>) — RSS·某号\n', encoding='utf-8')
+        add_doc(self.conn, 'source/rss/a.md', title='只剩这一条',
+                url='https://x/kept',
+                published='2026-09-26 20:00', indexed='2026-09-27 21:00')
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({}, self.carried(), '切不准就一条都别信,但也别写死')
+
+
 class UnreadableRowFallbackTests(_Base):
     """清单上露过面的内容,不许被判成「链条之前的历史存量」。
 
@@ -142,15 +246,19 @@ class UnreadableRowFallbackTests(_Base):
         这一条的射程是**兜底自己**:把 `_closed` 换回上一版那个读不出裸方括号
         标题的实现(模拟"将来又漏一种"),它的归属照样读不回来 —— 但它在清单上
         露过面,所以不该落 `#seed`,下一份日报还选得到它。
+
+        **这时候整份清单的归属都不作数**:两条被并成一条,切出来的条数和抬头
+        声明的对不上,`_rows` 按约定交空的(宁可读不出,不许读出半截)。所以
+        紧跟在后那条也一起回到队列 —— 一条都没被写死,代价只是多报一遍。
         """
         title = '[视频] 此前已经报道的补录文章'
         self._report_then_rebuild(title)
         with patch.object(daily_page, '_closed', self._old_closed):
             daily._ensure_ledger(self.conn, now=T('2026-09-29 09:00'))
-        self.assertNotIn('source/rss/a.md', self.carried(),
+        self.assertEqual({}, self.carried(),
                          '读不出归属就该留在队列里,不是记成历史存量')
         mat = daily.collect(self.conn, T('2026-09-29 08:00'), T('2026-09-30 08:00'))
-        self.assertEqual([title], [i['title'] for i in mat.late])
+        self.assertIn(title, [i['title'] for i in mat.late])
 
     def test_another_copy_of_the_same_title_is_still_written_off(self):
         """反过来钉一边:同一个标题在库里有好几份时,标题不作数。

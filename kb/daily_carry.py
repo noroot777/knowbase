@@ -34,9 +34,10 @@ EPOCH_KEY = 'carry_epoch'
 # 重算得到的归属和当初 `mark_carried` 记下的是同一份。
 SEED_REV_KEY = 'carry_seed_rev'
 # 版本 2 = 归属只认素材清单那一版;3 = 清单解析顶住了「裸方括号开头的无链接标题」
-# 和「标题末尾的成对反斜杠」两种真实写法。**解析器也是盖章算法的一部分** —— 版本
+# 和「标题末尾的成对反斜杠」两种真实写法;4 = 清单起点按抬头声明的条数挑,不再被
+# 标题里那几个字带偏。**解析器也是盖章算法的一部分** —— 版本
 # 不跟着动的话,前一版真实盖错过的那些库命中快路径,修好的解析器一次都跑不到。
-SEED_REV = '3'
+SEED_REV = '4'
 # 落盘与记账、放回与删文件、启用时盖章,三段之间要整体互斥(见 `commit_lock`)。
 LOCK_NAME = 'daily-report.lock'
 
@@ -55,15 +56,18 @@ class PastReport:
     (口径是 `daily._doc_key`,盖章和读清单两侧共用同一个函数)。读不出清单的
     那一份交一个空集合 —— 它对归属一个字的证据都提供不了,不是"它什么都没带走"。
 
-    `rows` 是那份清单一条一条的**原文**(归一过)。解析不出身份的条目靠它兜
-    一道:在清单上露过面就不许判成"链条之前的历史存量"(理由见
-    `daily_page.material_rows`)。
+    `rows` 是那份清单一条一条的**原文**(归一过),`text` 是整份正文(同样归一
+    过)。解析不出身份的条目靠这两样兜一道:在这一份上露过面就不许判成"链条
+    之前的历史存量"(理由见 `daily_page.material_rows`)。**两样分开取**,
+    `text` 不经过任何切分 —— 起点选错时切出来的东西和归属一起错,兜底再共用它
+    就什么都拦不住了。
     """
     since: datetime
     until: datetime
     day: str
     keys: frozenset
     rows: tuple = ()
+    text: str = ''
 
 
 def parse_ts(value) -> datetime | None:
@@ -250,11 +254,11 @@ def _listing(chain) -> tuple:
     比较(实测 1.6 秒,全程攥着提交锁)。标题只可能命中**首字符相同**的那几条,
     分桶之后每篇只比几条。
     """
-    rows = [row for c in chain for row in c.rows]
     buckets: dict[str, list[str]] = {}
-    for row in rows:
-        buckets.setdefault(row[:1], []).append(row)
-    return '\n'.join(rows), buckets
+    for c in chain:
+        for row in c.rows:
+            buckets.setdefault(row[:1], []).append(row)
+    return '\n'.join(c.text for c in chain), buckets
 
 
 def _on_a_list(url, title, listed: tuple, once: set) -> bool:
