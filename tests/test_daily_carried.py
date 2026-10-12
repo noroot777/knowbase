@@ -15,15 +15,17 @@
 迁移那一刻的"一次性盖章"在 tests/test_daily_seed.py;稳态取材与窗口语义在
 tests/test_daily_report.py。
 """
+import sqlite3
 import tempfile
 import threading
 import time
 import unittest
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from kb import daily, daily_carry, llm, llm_stages, store
+from kb import daily, daily_carry, daily_run, llm, llm_stages, store
 
 MODEL = llm.Model('openai', 'test-model')
 
@@ -183,6 +185,72 @@ class DailyCarriedTests(_Base):
         mat = daily.collect(self.conn, T('2026-09-28 08:00'), T('2026-09-29 08:00'))
         self.assertEqual(['删除后应该可重新报道的'], [i['title'] for i in mat.all()])
 
+    def test_overwriting_frees_the_old_stamps_before_the_new_file_lands(self):
+        """覆盖一份日报时,上一版带走、这一版没选上的素材必须回到队列。
+
+        覆盖是**整份替换文件**:被名额挤出去的那条从盘上消失了,而它的章还盖着
+        —— 日报里看不到、下一份也再选不到,两头落空且不可恢复(自由工作流审查
+        实测:120 条新素材挤掉旧那条,记账一失败,甲文在下一份的候选里就没了)。
+        所以「放回」排在落盘**之前**,三步的失败方向一律倒向「多报一遍」。
+
+        断言落在**后果**上:记账那一步失败之后,下一份日报还捡不捡得回来。只验
+        "放回那句执行了没有"的话,一个放回之后又把章补回去的实现也能全绿。
+        """
+        add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
+        self.gen('2026-09-28 08:00', '2026-09-29 08:00')
+        add_doc(self.conn, 'source/rss/b.md', title='乙文', published='2026-09-29 07:00')
+        with patch.object(daily, 'MAX_ITEMS', 1), \
+             patch.object(daily, 'mark_carried',
+                          Mock(side_effect=sqlite3.OperationalError('记账写失败'))):
+            out = self.gen('2026-09-28 08:00', '2026-09-29 09:00')
+        text = Path(out['path']).read_text(encoding='utf-8')
+        self.assertNotIn('甲文', text)      # 名额只有 1 个,甲文被挤出了这一份
+        self.assertIn('记账写失败', out.get('carry_error', ''))
+        self.assertEqual({}, self.carried())
+        mat = daily.collect(self.conn, T('2026-09-29 09:00'), T('2026-09-30 09:00'))
+        got = [i['title'] for i in mat.all()]
+        self.assertIn('甲文', got, '文件里已经没有它了,章还盖着 ⇒ 永久丢失')
+        self.assertIn('乙文', got, '这一份的章没盖上,下一份重复报一遍是预期代价')
+
+    def test_a_release_failure_leaves_the_previous_report_byte_for_byte(self):
+        """反过来钉一边:放回自己失败时整轮抛错,旧日报和旧账本都不许动。
+
+        上一条钉的是"放回必须排在落盘之前",这一条钉的是同一个顺序的另一头 ——
+        放回没做成就先把文件覆盖掉的话,留下的是一份新文件配一份旧账本,正是
+        上一条要治的那个末态。
+        """
+        add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
+        first = self.gen('2026-09-28 08:00', '2026-09-29 08:00')
+        before = Path(first['path']).read_text(encoding='utf-8')
+        add_doc(self.conn, 'source/rss/b.md', title='乙文', published='2026-09-29 07:00')
+        with patch.object(daily, 'release',
+                          Mock(side_effect=sqlite3.OperationalError('放回失败'))):
+            with self.assertRaises(sqlite3.Error):
+                self.gen('2026-09-28 08:00', '2026-09-29 09:00')
+        self.assertEqual(before, Path(first['path']).read_text(encoding='utf-8'))
+        self.assertEqual({'source/rss/a.md': '2026-09-29'}, self.carried())
+
+    def test_a_write_failure_while_overwriting_only_costs_a_repeat(self):
+        """三步顺序的第三个失败方向:覆盖时落盘失败。
+
+        旧日报逐字不变(`_write` 是临时文件 + rename),而这一天的章已经放回 ⇒
+        它报过的内容会在下一份里再出现一遍。**这是代价,不是最优末态** —— 理想是
+        连章一起恢复,但那又要一次可能同样失败的写入,所以按元规则倒向"多报一遍"。
+        钉住它是为了别让谁把放回改成"只在成功时放回":那时旧文件还在、章也还在,
+        看起来"没事发生",可覆盖那条路上的旧素材就又回到了两头落空的末态。
+        """
+        add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
+        first = self.gen('2026-09-28 08:00', '2026-09-29 08:00')
+        before = Path(first['path']).read_text(encoding='utf-8')
+        add_doc(self.conn, 'source/rss/b.md', title='乙文', published='2026-09-29 07:00')
+        with patch.object(daily, '_write', Mock(side_effect=OSError('磁盘满了'))):
+            with self.assertRaises(OSError):
+                self.gen('2026-09-28 08:00', '2026-09-29 09:00')
+        self.assertEqual(before, Path(first['path']).read_text(encoding='utf-8'))
+        self.assertEqual({}, self.carried())
+        mat = daily.collect(self.conn, T('2026-09-28 08:00'), T('2026-09-29 09:00'))
+        self.assertEqual({'甲文', '乙文'}, {i['title'] for i in mat.all()})
+
     def test_nothing_is_stamped_when_the_report_never_lands(self):
         """落盘之前一个章都不许盖。盖了的话模型钱花掉、文件没写成,这批素材
         再也选不到 —— 不可恢复。"""
@@ -264,6 +332,69 @@ class DailyCarriedTests(_Base):
         daily.generate(since=info['since'], until=info['until'])
         self.assertEqual(0, sum(daily.pending(first_days=1, now=now)[k]
                                 for k in ('items', 'late')))
+
+
+class CarryFailureNoticeTests(_Base):
+    """记账没写成是**降级完成**,不是干净的成功 —— 面板上那句话要说出来。
+
+    `daily_run` 的收尾文案另有一组在 tests/test_daily_report.py(通道缺口那几条),
+    这一条留在账本这边:它钉的是"记账失败那一档对外说什么",而同一档往哪边倒的
+    另一半(放回与盖章的顺序)就在上面那两条用例里,放一起才看得出是一对。
+    """
+
+    def test_the_finish_notice_says_the_accounting_did_not_land(self):
+        before = deepcopy(daily_run._state)
+        self.addCleanup(lambda: daily_run._state.update(before))
+        daily_run._state.update({**before, 'running': True, 'log': [], 'channels': []})
+        gen = Mock(return_value={'date': '2026-09-29', 'since': '', 'until': '', 'path': '',
+                                 'docs': 2, 'total': 2, 'late': 0, 'model': 'm',
+                                 'carry_error': 'database is locked'})
+        with patch.object(daily_run, 'STATE_FILE', self.root / 'last_run.json'), \
+             patch.object(daily, 'generate', gen):
+            daily_run._run(None, None, False, [], daily.FIRST_DAYS)
+        self.assertEqual('done', daily_run._state['phase'])
+        self.assertIn('database is locked', daily_run._state['detail'])
+        self.assertIn('重复出现', daily_run._state['detail'])
+
+    def test_a_clean_round_says_nothing_about_the_ledger(self):
+        """反过来钉一边:正常那一轮不许凭空多出一句"记录没写进库"。"""
+        before = deepcopy(daily_run._state)
+        self.addCleanup(lambda: daily_run._state.update(before))
+        daily_run._state.update({**before, 'running': True, 'log': [], 'channels': []})
+        gen = Mock(return_value={'date': '2026-09-29', 'since': '', 'until': '', 'path': '',
+                                 'docs': 2, 'total': 2, 'late': 0, 'model': 'm', 'carried': 2})
+        with patch.object(daily_run, 'STATE_FILE', self.root / 'last_run.json'), \
+             patch.object(daily, 'generate', gen):
+            daily_run._run(None, None, False, [], daily.FIRST_DAYS)
+        self.assertEqual('日报已生成:2 条素材', daily_run._state['detail'])
+
+
+class RunIdentityTests(unittest.TestCase):
+    """每一轮日报都有自己的身份 —— 面板拿它认"有没有出现一轮新的已结束运行"。
+
+    后果在面板上(tests/daily_probe.mjs 那一组:没见过 running 的那一轮也要把
+    列表和正文刷上),这里只钉住接口确实给得出这个身份、而且两轮不会同号:
+    `finished_at` 只精确到秒,拿它当身份时同一秒里跑完的两轮分不开。
+    """
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.before = deepcopy(daily_run._state)
+        self.addCleanup(lambda: daily_run._state.update(self.before))
+        for p in (patch.object(daily_run, 'STATE_FILE', Path(temp.name) / 'last_run.json'),
+                  patch.object(daily_run, 'SETTINGS_FILE', Path(temp.name) / 's.json'),
+                  patch.object(daily_run.threading, 'Thread', Mock())):
+            p.start(); self.addCleanup(p.stop)
+
+    def test_two_rounds_never_share_an_identity(self):
+        ids = []
+        for _ in range(2):
+            daily_run._state.update({**self.before, 'running': False})
+            self.assertTrue(daily_run.start(sync=False))
+            ids.append(daily_run.get_state()['run_id'])
+        self.assertTrue(all(ids), ids)
+        self.assertEqual(2, len(set(ids)), ids)
 
 
 if __name__ == '__main__':

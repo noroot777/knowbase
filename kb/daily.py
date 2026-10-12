@@ -500,23 +500,30 @@ def generate(since: datetime | None = None, until: datetime | None = None,
     out = {'date': day, 'since': since.strftime(STAMP),
            'until': until.strftime(STAMP), 'path': str(path), 'docs': len(mat.items),
            'total': mat.total, 'late': len(mat.late), 'model': str(picked)}
-    # 落盘 + 记账是**一段**,整段和「放回 + 删文件」互斥(见 commit_lock):
-    # 两件事交错时会留下"记着已上报、却没有任何日报文件"的条目。段内的顺序另管
-    # 一个方向 —— 盖章排在落盘**之后**:章盖不上只是这批素材下一份再出现一遍
-    # (多报一次,看得见),反过来落盘失败而章已经盖上,这批素材就再也选不到了。
+    # 放回 + 落盘 + 记账是**一段**,整段和「放回 + 删文件」互斥(见 commit_lock):
+    # 两件事交错时会留下"记着已上报、却没有任何日报文件"的条目。段内的顺序让三步
+    # 的失败方向**一律倒向「多报一遍」**:
+    # ①**先把这一天上一版的章放回。** 覆盖是整份替换文件,上一版带走、这一版没选
+    #   上的那些素材(名额挤出去的、补录轮不到的)会从盘上消失;放回排在落盘之后
+    #   的话,它们的章还盖着而文件里已经没有它们 —— 从此两头落空,不可恢复。放回
+    #   自己失败时文件一个字节都还没动,整轮抛错,旧日报和旧账本都完好。首次生成
+    #   时它删 0 行。
+    # ②**盖章排在落盘之后**:章盖不上只是这一天的素材下一份再出现一遍(多报一次,
+    #   看得见),反过来落盘失败而章已经盖上,这批素材就再也选不到了。
     with commit_lock():
-        _write(path, _page(since, until, mat, body, str(picked), sync_issues))
+        conn = store.connect()
         try:
-            conn = store.connect()
+            release(conn, day)
+            _write(path, _page(since, until, mat, body, str(picked), sync_issues))
             try:
                 out['carried'] = mark_carried(conn, day, [d['path'] for d in shown])
-            finally:
-                conn.close()
-        except (sqlite3.Error, OSError) as e:      # 日报已经在盘上了,别带崩这一轮
-            out['carry_error'] = str(e)
-            if progress:
-                progress(f'日报已生成,但上报记录没写进库({e});'
-                         '这批素材可能在下一份里重复出现')
+            except (sqlite3.Error, OSError) as e:  # 日报已经在盘上了,别带崩这一轮
+                out['carry_error'] = str(e)
+                if progress:
+                    progress(f'日报已生成,但上报记录没写进库({e});'
+                             '这一天的素材会在下一份日报里重复出现一遍')
+        finally:
+            conn.close()
     return out
 
 

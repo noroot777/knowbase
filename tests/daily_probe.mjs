@@ -411,6 +411,66 @@ check("那一跳没有顺手改写两个时刻输入",
       (await evalJs(`document.getElementById('daily-since').value`)) === sinceBefore,
       await evalJs(`document.getElementById('daily-since').value`));
 
+// ── 跑得太快、页面一次都没见过 running 的那一轮 ────────────────────────────────
+// 「列表和正文要不要刷新」原来只认 running→idle 那个跳变。不同步直接生成那条路
+// (素材不多时)在两次轮询之间就跑完了:按钮上那个数字归零了(空闲每跳都问),
+// 而列表和阅读区还停在上一版 —— 审查实测接口已经是「素材清单(4 条)」,页面仍
+// 显示 3 条和旧的生成时刻,只有整页刷新才看得到新内容。后台定时那一轮、别的
+// 标签页点的那一轮同理。
+//
+// 这里不靠时序赛跑:**绕开界面**打生成接口,再**直接查 API**等它跑完(全程不经
+// refreshDailyStatus),页面因此确定性地一次都没见过 running=true。
+// 摆盘:先让页面**真的**读一次列表(上一段打的是删除接口,页面还不知道今天那一份
+// 没了),这样「列表里出现了今天那一份」才是这一跳带来的新信息,而不是一个陈旧
+// 值冒充。顺带把 toast 清空 —— 下面要验这条路不弹「日报已生成」,留着上一轮的
+// 就分不清是谁弹的。清掉轮询那颗定时器:空闲一跳 15 秒,而下面等后端的那段可能
+// 更久,被它插一脚的话页面就看见 running=true 了,测到的是另一个时序。
+await evalJs(`loadDailyReports()`);
+await evalJs(`(() => { clearTimeout(dailyTimer); dailyTimer = null;
+                       document.getElementById('toast-host').innerHTML = ''; })()`);
+check("摆盘:今天那一份此刻已经被删掉了",
+      await evalJs(`!dailyReports.some(r => r.date === '${today}')`),
+      await evalJs(`JSON.stringify(dailyReports.map(r => r.date))`));
+check("摆盘:阅读区此刻是别的那一份",
+      (await evalJs(`document.getElementById('daily-reader-title').textContent`)) !== `日报 · ${today}`,
+      await evalJs(`document.getElementById('daily-reader-title').textContent`));
+const quietRun = await evalJs(`(async () => {
+  await fetch('/api/daily/run', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sync: false }) });
+  for (let i = 0; i < 60; i++) {
+    const s = await (await fetch('/api/daily/status')).json();
+    if (!s.running && s.phase !== 'starting') return JSON.stringify({ phase: s.phase, id: s.run_id });
+    await new Promise(r => setTimeout(r, 300));
+  }
+  return ''; })()`);
+check("后端自己跑完了一轮", /"phase":"done"/.test(quietRun), quietRun);
+check("那一轮带着自己的身份", /"id":"daily-\d+"/.test(quietRun), quietRun);
+check("摆盘:页面从头到尾没见过 running=true",
+      await evalJs(`!dailyState.running && !dailyReports.some(r => r.date === '${today}')`),
+      await evalJs(`JSON.stringify({running: dailyState.running,
+                     dates: dailyReports.map(r => r.date)})`));
+await evalJs(`refreshDailyStatus()`);
+check("没见过 running 的那一轮,列表里照样出现了新的那一份",
+      await waitFor(`dailyReports.some(r => r.date === '${today}')`, 8000),
+      await evalJs(`JSON.stringify(dailyReports.map(r => r.date))`));
+check("阅读区跟着换成了新生成的那一份",
+      await waitFor(`document.getElementById('daily-reader-title').textContent === '日报 · ${today}'`, 8000),
+      await evalJs(`document.getElementById('daily-reader-title').textContent`));
+check("这一轮没有冒出一句「日报已生成」—— 用户压根没见它开始",
+      !(await evalJs(`document.getElementById('toast-host')?.textContent || ''`)).includes("日报已生成"),
+      await evalJs(`document.getElementById('toast-host')?.textContent || ''`));
+
+// 反过来钉一边:同一轮结果反复轮询不许再刷一次。每跳都重拉列表会把用户自己点开
+// 的那一份顶掉 —— 他翻着上周的日报,十几秒后被拽回今天这一份。
+const other = await evalJs(`(dailyReports.find(r => r.date !== '${today}') || {}).date || ''`);
+check("摆盘:沙箱里还有另一份日报可以点开", !!other, other);
+await evalJs(`openDailyReport(${JSON.stringify(other)})`);
+for (let i = 0; i < 3; i++) { await evalJs(`refreshDailyStatus()`); await sleep(300); }
+check("同一轮结果反复轮询不会把用户选的那一份顶掉",
+      (await evalJs(`document.getElementById('daily-reader-title').textContent`)) === `日报 · ${other}`
+      && (await evalJs(`dailyCurrent`)) === other,
+      await evalJs(`dailyCurrent + ' / ' + document.getElementById('daily-reader-title').textContent`));
+
 check("页面没有脚本报错", pageErrors.length === 0, pageErrors.join(" | "));
 
 console.log(oks.map(o => "  ok  " + o).join("\n"));

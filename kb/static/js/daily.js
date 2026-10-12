@@ -3,6 +3,9 @@
 // "现在跑到哪个来源了"和结果,同一件事不做两套进度展示。
 let dailySettings = null, dailyChannels = [], dailyReports = [], dailyWindow = null;
 let dailyCurrent = '', dailyState = null, dailyTimer = null;
+// 上一次看到的那一轮**已结束**运行的身份(还没查过状态是 null,正在跑是空串)。
+// 身份认 run_id —— `finished_at` 只精确到秒,两轮落在同一秒里时拿它当身份分不开。
+let dailyDoneRun = null;
 let dailyLoaded = false, dailyDirty = false, dailySaving = false, dailyBusy = false;
 let dailyWindowDirty = false;
 
@@ -443,6 +446,15 @@ async function refreshDailyStatus() {
     queueDailyPoll(); return;          // 状态读不到不清空面板,下一跳再试
   }
   const finished = dailyState?.running && !s.running;
+  // 「有没有出现一轮新的已结束运行」。只认 running→idle 那个跳变是不够的:不同步
+  // 直接生成那条路(桩模型、素材不多时)在两次轮询之间就跑完了,页面一次都没见过
+  // running=true —— 于是按钮上那个数字归零了,而列表和阅读区还停在上一版(审查
+  // 实测:接口已经是「素材清单(4 条)」,页面仍显示 3 条和旧的生成时刻,只有整页
+  // 刷新才看得到新内容)。后台定时那一轮、别的页面点的那一轮同理。
+  // 第一跳(dailyDoneRun === null)不算新结果:那时页面刚打开,正文本来就是现读的。
+  const doneRun = s.running ? '' : (s.run_id || s.finished_at || '');
+  const fresh = dailyDoneRun !== null && doneRun && doneRun !== dailyDoneRun;
+  dailyDoneRun = doneRun;
   dailyState = s;
   $('daily-progress').hidden = !s.running;
   $('daily-progress-text').textContent = dailyPhaseText(s);
@@ -466,6 +478,12 @@ async function refreshDailyStatus() {
       // 上一份日报的截止时刻变了,默认区间跟着往前挪。
       await Promise.all([loadDailyReports(), loadDailyWindow()]);
     }
+  } else if (fresh && dailyActive()) {
+    // 没见过 running 的那一轮:把列表、正文和默认区间补上(loadDailyReports 自己
+    // 会重开当前选中那一份,所以阅读区跟着一起更新),**不弹 toast** —— 这条路也
+    // 会在别处(定时、CLI、另一个标签页)跑完一轮时走到,弹窗就成了噪音。
+    dailyCurrent = s.result?.date || dailyCurrent;
+    await Promise.all([loadDailyReports(), loadDailyWindow()]);
   }
   // 素材是**从外面**进来的:同步中心那边跑完一轮、CLI 补抓、定时同步,页面这边
   // 一个事件都收不到。只在"日报从运行变成完成"那一跳重读的话,按钮上的数字会

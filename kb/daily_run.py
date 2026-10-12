@@ -37,9 +37,13 @@ RETRY_AFTER = timedelta(minutes=30)
 MAX_RETRIES = 2
 
 _lock = threading.RLock()
+# 给每一轮发一个身份,面板拿它认"有没有出现一轮新的已结束运行"。**不能拿
+# `finished_at` 当身份**:它只精确到秒,而这一档治的正是"跑得太快、页面一次都
+# 没见过 running=true"那种运行(同 pipeline_state.new_run_id 那条口径)。
+_run_seq = 0
 _state: dict = {
     'running': False, 'phase': '', 'detail': '', 'date': '',
-    'since': '', 'until': '', 'sync': False,
+    'since': '', 'until': '', 'sync': False, 'run_id': '',
     'trigger': '', 'started_at': '', 'finished_at': '', 'error': '',
     'stop_requested': False, 'over_budget': False, 'sched_day': '',
     # 我们自己起的那一轮管道的 run id(没起就是空串)。日报允许在别人的管道
@@ -404,6 +408,11 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         if issues:
             note += (f";{len(issues)} 个来源未同步成功("
                      + '、'.join(i['label'] for i in issues) + ')')
+        # 记账没写成不该糊过去:日报是出了,但这一天的素材会在下一份里重复出现
+        # 一遍(`daily.generate` 的失败方向,见那一段的注释)。只写进 log 的话
+        # 面板上那句收尾文案仍是一句干净的"已生成",用户看不出这一轮是降级完成的。
+        if res.get('carry_error'):
+            note += f";上报记录没写进库({res['carry_error']}),这一天的素材会在下一份里重复出现"
         _set('done', note)
     except LookupError as e:
         # "这段时间没有新内容"不是故障,重试多少次都是同一个结果。
@@ -450,8 +459,11 @@ def start(since: datetime | None = None, until: datetime | None = None,
     with _lock:
         if _state['running']:
             return False
+        global _run_seq
+        _run_seq += 1
         _state.update({
             'running': True, 'phase': 'starting', 'detail': '',
+            'run_id': f'daily-{_run_seq}',
             'date': until.date().isoformat() if until else '',
             'since': since.strftime(daily.STAMP) if since else '',
             'until': until.strftime(daily.STAMP) if until else '',
