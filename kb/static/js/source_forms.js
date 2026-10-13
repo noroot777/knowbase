@@ -22,26 +22,32 @@ async function saveSourceEditor(e) {
   if (sourceSaving) return;
   sourceSaving = true; $('source-edit-save').disabled = true;
   $('source-edit-error').textContent = '';
-  const creating = !sourceEditId;
+  const creating = !sourceEditId, kind = sourceEditKind;
+  const inManager = () => sourceKind === kind && sourceView === 'manage' && sourceActive();
   const body = { name:$('source-edit-name').value.trim(), url:$('source-edit-url').value.trim(),
     group_name:$('source-edit-group').value.trim(), feed_url:$('source-edit-feed').value.trim(),
     enabled:$('source-edit-enabled').checked, fulltext:$('source-edit-fulltext').checked,
     extract:$('source-edit-extract').checked };
   try {
-    const saved = await pipeJson(`/api/intake/${sourceEditKind}/sources${sourceEditId ? '/'+sourceEditId : ''}`, {
+    const saved = await pipeJson(`/api/intake/${kind}/sources${sourceEditId ? '/'+sourceEditId : ''}`, {
       method:sourceEditId?'PATCH':'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
     });
     $('source-editor').style.display = 'none';
-    toast(sourceEditId ? '订阅已更新' : '订阅已添加', {type:'ok'});
-    await switchSourceView('manage'); await loadSourceModule(true);
-    if (creating && sourceData?.sources.some(source => source.id === saved.id)) {
+    toast(creating ? '订阅已添加' : '订阅已更新', {type:'ok'});
+    if (sourceKind !== kind || !sourceActive()) return;
+    await switchSourceView('manage');
+    if (!inManager()) return;
+    await loadSourceModule(false);
+    if (!creating || !inManager()) return;
+    if (!sourceData?.sources.some(source => source.id === saved.id)) await loadSourceModule(false);
+    if (inManager() && sourceData?.sources.some(source => source.id === saved.id)) {
       clearTimeout(sourceSearchTimer);
       const rowSelector = `[data-source-action="edit"][data-source-id="${saved.id}"]`;
       if (!$('source-list').querySelector(rowSelector)) {
         $('source-q').value = '';
         await renderSourceView(true);
       }
-      $('source-list').querySelector(rowSelector)?.closest('.source-subscription').scrollIntoView({block:'nearest'});
+      if (inManager()) $('source-list').querySelector(rowSelector)?.closest('.source-subscription').scrollIntoView({block:'nearest'});
     }
   } catch(e) { $('source-edit-error').textContent = e.message; }
   finally { sourceSaving=false; $('source-edit-save').disabled = false; }

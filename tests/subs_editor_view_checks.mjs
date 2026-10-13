@@ -3,6 +3,7 @@ export async function checkSubscriptionEditorViews({ evaluate, wait, check, clic
   const savedViews = await evaluate(`['rss:items', 'rss:manage'].map(key => ({ key, state:sourceViewState.get(key) || null }))`);
   const savedFilter = await evaluate(`sourceFilters.get('rss') || null`);
   const createdIds = [];
+  let savedSettings = null;
   const itemQuery = '知识', managerQuery = 'OpenAI';
   const type = async (id, text) => {
     await click('#' + id);
@@ -15,6 +16,37 @@ export async function checkSubscriptionEditorViews({ evaluate, wait, check, clic
       return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) === button;
     })()`);
   };
+  const replaceText = async (id, text) => {
+    const length = await evaluate(`$('${id}').value.length`);
+    await click('#' + id);
+    await send('Input.dispatchKeyEvent', { type:'keyDown', key:'End', code:'End', windowsVirtualKeyCode:35 });
+    await send('Input.dispatchKeyEvent', { type:'keyUp', key:'End', code:'End', windowsVirtualKeyCode:35 });
+    for (let removed = 0; removed < length; removed++) {
+      await send('Input.dispatchKeyEvent', { type:'keyDown', key:'Backspace', code:'Backspace', windowsVirtualKeyCode:8 });
+      await send('Input.dispatchKeyEvent', { type:'keyUp', key:'Backspace', code:'Backspace', windowsVirtualKeyCode:8 });
+    }
+    await send('Input.insertText', { text });
+  };
+  const holdRefreshes = () => evaluate(`(() => {
+    clearTimeout(sourcePoll);
+    window.subscriptionRefreshFetch = window.fetch;
+    window.subscriptionRefreshGates = [];
+    window.fetch = (request, options) => {
+      const response = window.subscriptionRefreshFetch(request, options);
+      const path = new URL(typeof request === 'string' ? request : request.url, location.href).pathname;
+      if (path !== '/api/intake/rss') return response;
+      const gate = new Promise(resolve => window.subscriptionRefreshGates.push(resolve));
+      return Promise.all([response, gate]).then(([result]) => result);
+    };
+    return true;
+  })()`);
+  const restoreRefreshes = () => evaluate(`(() => {
+    if (window.subscriptionRefreshFetch) window.fetch = window.subscriptionRefreshFetch;
+    window.subscriptionRefreshGates?.forEach(release => release());
+    delete window.subscriptionRefreshFetch; delete window.subscriptionRefreshGates;
+    delete window.subscriptionRefreshPoll;
+    return true;
+  })()`);
   const clearFilters = async () => {
     if (await evaluate(`!$('source-filter-reset').hidden`)) await click('#source-filter-reset');
     await wait(`!$('source-q').value && !$('source-filter').value`);
@@ -29,13 +61,16 @@ export async function checkSubscriptionEditorViews({ evaluate, wait, check, clic
     await wait(`sourceReaderItem?.key === sourceRows[2].key`);
     return evaluate(`({ key:sourceReaderItem.key, scroll:$('source-list-pane').scrollTop })`);
   };
-  const create = async (name, url) => {
+  const submitNewSource = async (name, url) => {
     await click('#source-add');
     await wait(`$('source-editor').style.display !== 'none' && document.activeElement === $('source-edit-name')`);
     await send('Input.insertText', { text:name });
     await type('source-edit-url', url);
     await revealEditorButton('#source-edit-save');
     await click('#source-edit-save');
+  };
+  const create = async (name, url) => {
+    await submitNewSource(name, url);
     await wait(`!sourceSaving && $('source-editor').style.display === 'none' && sourceView === 'manage'
       && sourceData.sources.some(source => source.url === ${JSON.stringify(url)})`);
     const id = await evaluate(`sourceData.sources.find(source => source.url === ${JSON.stringify(url)}).id`);
@@ -45,8 +80,8 @@ export async function checkSubscriptionEditorViews({ evaluate, wait, check, clic
   };
   const hasRow = id => evaluate(`!!document.querySelector('[data-source-action="edit"][data-source-id="${id}"]')`);
   const checkVisibleRow = async (id, label) => {
-    const name = `${label}保存后新增订阅已在可视区且编辑按钮可真实命中`;
-    if (!await hasRow(id)) { check(name, false, '新增订阅不在管理列表中'); return; }
+    const name = `${label}保存后订阅已在可视区且编辑按钮可真实命中`;
+    if (!await hasRow(id)) { check(name, false, '订阅不在管理列表中'); return; }
     const metrics = await evaluate(`(() => {
       const button = document.querySelector('[data-source-action="edit"][data-source-id="${id}"]'), box = button.getBoundingClientRect();
       const row = button.closest('.source-subscription').getBoundingClientRect(), pane = $('source-list-pane').getBoundingClientRect();
@@ -156,9 +191,95 @@ export async function checkSubscriptionEditorViews({ evaluate, wait, check, clic
     check('真实新增失败保持编辑窗口内容搜索与订阅数量', await evaluate(`$('source-editor').style.display !== 'none'
       && !$('source-edit-save').disabled && sourceView === 'items' && $('source-q').value === ${JSON.stringify(itemQuery)}
       && sourceData.sources.length === ${initialCount + 3}`));
+
+    await evaluate(`closeSourceEditor(); true`);
+    await click('#source-view-manage');
+    await clearFilters();
+    await wait(`document.querySelectorAll('.source-subscription').length === ${initialCount + 3}`);
+    savedSettings = await evaluate(`({ enabled:sourceData.settings.enabled, interval_minutes:sourceData.settings.interval_minutes })`);
+    const draftInterval = savedSettings.interval_minutes === 45 ? '90' : '45';
+    await replaceText('source-interval', draftInterval);
+    check('编辑前同步间隔确实是未保存的草稿', await evaluate(`$('source-interval').value === ${JSON.stringify(draftInterval)}`));
+    await evaluate(`document.querySelector('[data-source-action="edit"][data-source-id="${secondId}"]')
+      .closest('.source-subscription').scrollIntoView({ block:'end' }); clearTimeout(sourcePoll); true`);
+    await revealEditorButton(`[data-source-action="edit"][data-source-id="${secondId}"]`);
+    await wait(`$('source-list-pane').scrollTop > 150`);
+    const beforeEditScroll = await evaluate(`$('source-list-pane').scrollTop`);
+    await screenshot('editor-edit-before-scrolled-bottom');
+    await click(`[data-source-action="edit"][data-source-id="${secondId}"]`);
+    await wait(`$('source-editor').style.display !== 'none' && sourceEditId === ${secondId}`);
+    await type('source-edit-group', '滚动编辑回归');
+    await revealEditorButton('#source-edit-save');
+    await click('#source-edit-save');
+    await wait(`!sourceSaving && $('source-editor').style.display === 'none'
+      && sourceData.sources.some(source => source.id === ${secondId} && source.group_name === '滚动编辑回归')`);
+    const afterEdit = await evaluate(`({ scroll:$('source-list-pane').scrollTop, interval:$('source-interval').value })`);
+    check('编辑靠后订阅保存后保持列表滚动位置', Math.abs(afterEdit.scroll - beforeEditScroll) < 1,
+      JSON.stringify({ beforeEditScroll, afterEdit }));
+    await checkVisibleRow(secondId, '靠后订阅编辑');
+    check('编辑订阅不会覆盖未保存的同步间隔', afterEdit.interval === draftInterval, JSON.stringify(afterEdit));
+    check('编辑订阅没有提前保存设置草稿', await evaluate(`pipeJson('/api/intake/rss').then(data => data.settings.interval_minutes === ${savedSettings.interval_minutes})`));
+    await screenshot('editor-edit-preserves-scroll-and-settings');
+    await revealEditorButton('#source-settings-save');
+    await click('#source-settings-save');
+    await wait(`!$('source-settings-save').disabled`);
+    check('编辑后点击保存设置提交的仍是用户草稿', await evaluate(`pipeJson('/api/intake/rss').then(data => data.settings.interval_minutes === ${Number(draftInterval)})`));
+
+    await clearFilters();
+    await type('source-q', managerQuery);
+    await wait(`document.querySelectorAll('.source-subscription').length === 1`);
+    const raceReading = await contentSearch();
+    const switchUrl = 'https://example.org/editor-view-switch-race.xml';
+    await holdRefreshes();
+    await submitNewSource('视图切换新增订阅', switchUrl);
+    await wait(`window.subscriptionRefreshGates.length === 1 && sourceView === 'manage'`);
+    await click('#source-view-items');
+    await wait(`sourceView === 'items' && $('source-q').value === ${JSON.stringify(itemQuery)}
+      && sourceReaderItem?.key === ${JSON.stringify(raceReading.key)} && document.querySelectorAll('.source-entry').length > 0
+      && Math.abs($('source-list-pane').scrollTop - ${raceReading.scroll}) < 1`);
+    await evaluate(`window.subscriptionRefreshGates[0](); true`);
+    await wait(`!sourceSaving && sourceReaderItem && !sourceItemsFailed`);
+    await restoreRefreshes();
+    createdIds.push(await evaluate(`pipeJson('/api/intake/rss').then(data => data.sources.find(source => source.url === ${JSON.stringify(switchUrl)}).id)`));
+    check('保存刷新期间主动返回内容不清空搜索或抢回管理视图', await evaluate(`sourceView === 'items' && $('source-q').value === ${JSON.stringify(itemQuery)}`));
+    check('保存刷新期间返回内容仍保留阅读与列表位置', await evaluate(`sourceReaderItem.key === ${JSON.stringify(raceReading.key)}
+      && Math.abs($('source-list-pane').scrollTop - ${raceReading.scroll}) < 1`));
+    await screenshot('editor-save-switch-preserves-content');
+
+    await click('#source-view-manage');
+    await clearFilters();
+    await type('source-q', managerQuery);
+    await wait(`document.querySelectorAll('.source-subscription').length === 1`);
+    const pollUrl = 'https://example.org/editor-view-poll-race.xml';
+    await holdRefreshes();
+    await submitNewSource('轮询重入新增订阅', pollUrl);
+    await wait(`window.subscriptionRefreshGates.length === 1`);
+    await evaluate(`window.subscriptionRefreshPoll = loadSourceModule(false); true`);
+    await wait(`window.subscriptionRefreshGates.length === 2`);
+    await evaluate(`window.subscriptionRefreshGates[0](); true`);
+    await wait(`!sourceSaving || window.subscriptionRefreshGates.length > 2`);
+    if (await evaluate(`window.subscriptionRefreshGates.length > 2`)) {
+      await evaluate(`window.subscriptionRefreshGates[2](); true`);
+    }
+    await wait(`!sourceSaving`);
+    await evaluate(`window.subscriptionRefreshGates[1](); true`);
+    await evaluate(`window.subscriptionRefreshPoll`);
+    await restoreRefreshes();
+    const pollId = await evaluate(`pipeJson('/api/intake/rss').then(data => data.sources.find(source => source.url === ${JSON.stringify(pollUrl)}).id)`);
+    createdIds.push(pollId);
+    check('后台刷新抢占保存响应后新订阅仍展示且清除失配筛选', await hasRow(pollId)
+      && await evaluate(`sourceView === 'manage' && !$('source-q').value`));
+    await checkVisibleRow(pollId, '后台刷新抢占');
+    check('后台刷新重入不重复创建订阅', await evaluate(`sourceData.sources.length === ${initialCount + createdIds.length}`));
+    await screenshot('editor-add-background-refresh');
   } finally {
+    await restoreRefreshes();
+    await wait(`!sourceSaving`);
     await evaluate(`(async () => {
       closeSourceEditor(); clearTimeout(sourceSearchTimer); clearTimeout(sourcePoll);
+      if (${JSON.stringify(savedSettings)}) await pipeJson('/api/intake/rss/settings', {
+        method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(${JSON.stringify(savedSettings)}),
+      });
       for (const id of ${JSON.stringify(createdIds)}) await pipeJson('/api/intake/rss/sources/' + id, { method:'DELETE' });
       if (sourceKind === 'rss') await loadSourceModule(true);
       clearTimeout(sourcePoll);
