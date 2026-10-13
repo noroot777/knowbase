@@ -211,3 +211,103 @@
   去译一段空正文——那只会拿回空译文,白白耗掉三次重试额度。导出那边的
   `translated` 判据也要带上标题(`title != item['title']`),否则只有标题的译文
   在 vault 里看不出是译文、也丢掉了 `original_title` 这个回查入口。
+
+## 手动重试:面板上那颗「重新翻译」(2026-10-13)
+
+### 事故形态
+
+中转站(anthropic 那条 base_url)有一轮整站返回
+`503 service unavailable: no available account`。实测后果:
+
+| 来源 | 仍在队列(面板看得见) | 试满额度、已按原文入库(面板看不见) |
+|---|---|---|
+| rss | 22 | **42** |
+| social | 18 | **66** |
+| digest | 98 | 0(但 40 条已经 `tries=2`) |
+
+右边那一列是要紧的那一半。试满 `MAX_TRIES` 的条目按设计离开队列、按原文导出
+(见 `queued_sql` —— 那是**对的**:一条永远译不动的内容不该永远进不了知识库),
+于是:
+
+- vault 里躺着英文(抽查 `social/1d4a4a00….md`,`title: VIBE MANUFACTURING IS HERE`),
+  而且已经被索引、被 extract 打了 `topic/` 和 `entity/` 标签;
+- 顶上那句「N 条外文内容还在等翻译」**不数它们**,条目上也没有任何标记 ——
+  面板上没有一个字提到这 108 条的存在;
+- **系统里没有任何入口能把它们放回队列**:`queued_sql` 的
+  `translate_tries<MAX_TRIES` 把它们排除在外,所以「同步」和「重试失败项」点多少
+  次都选不到。原来只能靠手改 feeds.db 解除 —— 这正是用户提的那句「脱离了 AI 在
+  知识库这套系统里我都没法重新翻译他们」。
+
+另一半是**诊断信息缺口**:那行提示对「刚抓回来还没轮到」和「这一批已经失败两次、
+再失败一次就永久按英文入库」说同一句话,而两者的下一步完全相反。真正该报 503 的
+是导出阶段那个判红(`sync._new_failures`),但它只认本轮、`pipeline_state.json`
+又只留最后一轮 —— 当天上午那轮的红被晚上一次 `重试失败项` 覆盖掉了。
+
+### 口径
+
+- **射程 `RETRY_SQL = lang='en' AND translated_at='' AND translate_tries>0`。**
+  含试满额度的那批(它们是唯一救不回来的);**不含 `tries=0`** 的正常积压(额度
+  一次没动过,放回是空操作,算进去会把「还没轮到」说成「翻译失败」);**判据是
+  「试过至少一次」而不是「有错误信息」** —— `translate_error` 被 `_save` 清过,
+  库里也有 `tries=3` 而错误是空串的存量条目(实测 social 2 条),按错误信息筛会
+  把它们永久留在库外。
+- **`translate_manual` 这一列是承重的,不是装饰。** 取数是「失败过的优先」
+  (`translate_tries DESC`),而放回队列要把额度清零 —— 清零恰好把这一批变成
+  「从没试过」、排到队尾。队列积压超过一轮上限(`MAX_ITEMS`=40)时,用户点完按钮、
+  等完一整轮同步,库里一个字都不会变**而且什么都不报错**:实测点下那一刻队列
+  246 条,恢复的 108 条排在第 139 位往后。所以 `ORDER BY` 是
+  `translate_manual DESC, translate_tries DESC, fetched_at DESC, key`,`_save`
+  译成之后把标记清掉。
+- **不动 `exported_hash`。** 那 108 条英文此刻确实在 vault 里,清掉它等于让一篇
+  **已经能读、能搜到**的文章连同入口一起消失,而译文还没到手。`_save` 真拿到译文
+  时它自己会清(口径同 `fulltext._save`)。
+- **跑的阶段里没有 crawl**(`['export','index','extract']`):要重译的内容早就在
+  库里了,重跑采集既慢、又可能因为源站退避什么都拿不到,而翻译挂在 export 阶段上
+  (`kb/collectors/feeds.py` 的 `materialize`)。index/extract 跟在后面是因为译文
+  落盘之后那几篇 md 换了内容,不重建索引的话检索到的还是英文那一份。
+- **射程跟着选中的订阅收窄,但不跟搜索词走**(`_retry_where`)。按钮的射程必须
+  可预测:跟着搜索框里打了什么变的话,用户看着「3 条」点下去,放回队列的是这条
+  订阅的全部二十几条。顶上那个 `waiting` 跟着 `where`(含 q)走是对的 —— 它说的
+  是「这一屏列出来的内容里有几条扣着没入库」,不是按钮的射程。
+- **没有可用翻译模型时不给按钮**,给的是「去顶栏『模型』里配」这个下一步。那时
+  `translate_pending` 整个跳过、一次额度都不计,放过去就是:额度被清零(写进了
+  库)、管道跑一轮、一个字没翻,而面板上是一句「已开始重新翻译」。后端那道闸
+  (400)和前端这道各有射程,别只留一道。
+- **队列空了就别起管道**,判据是「现在队列里有没有东西」(`pending`)而不是
+  「放回了几条」—— 正常积压同样该被这颗按钮消化,而它们一条都不该被
+  `requeue_failed` 碰到。
+- **队列比一轮上限长时要如实说清只译得完一截。** 不说的话用户点一次、看到数字只
+  掉了 40,会以为按钮漏了东西 —— 而积压几百条正是这颗按钮最常见的使用场景。
+
+### 回归
+
+- `tests/test_translate_manual_retry.py` 的 `ManualRetryTests`(8 条):队列口径。判据一律
+  落在后果上 ——「库里那条有没有译文」「下一轮取数取到了它吗」。
+  `test_a_requeued_item_beats_a_full_queue` 是这一族里**唯一钉得住排序**的那条
+  (把一轮上限压到 1 条,让刚放回的那条和队列里失败过的那条抢同一个名额);两条
+  条目必须**分属不同订阅**,同一条订阅下 `requeue_failed` 会把它们一起放回、额度
+  一起清零,那时排序键逐字相同,这条用例就什么也证明不了(第一版实测如此)。
+- `tests/test_translate_manual_retry.py` 的 `EndpointTests`(8 条):端点那几道闸,每一道
+  对应一种「点了没反应又不报错」的形态。`test_the_pipeline_plan_never_includes_crawl`
+  的判据落在**真传给 `start_pipeline` 的那份计划**上,不是读一遍源码。
+- `tests/translate_manual_retry_probe.mjs`(25 项,自带 mock 后端、CDP 直连
+  chrome-headless-shell):页面上那句话说出三件事、按钮发出带射程的真实请求、
+  确认框是自绘的且说清了会按字数计费,外加三条反向边(没模型不给按钮 / 一条都没
+  失败整句不出现 / 筛到订阅时数字和射程一起收窄)。
+- **探针那条包装的断言不能只看退出码。** 探针在起浏览器之前就退出(找不到无头
+  壳、顶层那道孤儿检查判定没有调用方、mock 端口起不来)时同样是 `exit 0`,那时
+  `assertEqual(0, r.returncode)` 报的绿是假的 —— 它什么都没验。判据因此落在
+  **产出**上(`\d+ ok, 0 failed` 在不在、项数够不够)。定点注入
+  `process.exit(0)` 时只有这道断言红,退出码那道是瞎的。
+
+### 反向验证(逐处定点注入,红的条数)
+
+| 注入 | 红 |
+|---|---|
+| `ORDER BY` 去掉 `translate_manual DESC` | 1(`test_a_requeued_item_beats_a_full_queue`) |
+| `RETRY_SQL` 改成只认 `translate_error<>''` | 1(`test_the_reason_survives_a_cleared_error_column`) |
+| `RETRY_SQL` 排除试满额度的那批(= 原来那个无法解除的终态) | 5 |
+| `_save` 不清 `translate_manual` | 1 |
+| `_retry_where` 忽略 `source_id`(射程不收窄) | 1 |
+| `stuck` 不分 `shipped` 档 | 1 |
+| 探针干净 `exit 0`、零产出 | 1(只有产出那道断言红) |

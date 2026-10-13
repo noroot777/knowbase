@@ -219,6 +219,91 @@ def pending(kind: str) -> int:
                          (kind, *args)).fetchone()[0]
 
 
+# 「手动重试」的射程:判成外文、还没有译文、而且**试过至少一次**的条目。
+#
+# **为什么含试满 `MAX_TRIES` 的那一批** —— 它们正是面板上**看不见**的那一半。
+# 试满额度的条目按设计离开队列、按原文导出(见 `queued_sql`),于是 vault 里
+# 躺着英文、条目上一个标记都没有、顶上那句「N 条还在等翻译」也不数它们,而那
+# 批英文已经被索引、被打了标签。更要紧的是**系统里原来没有任何入口能把它们放
+# 回队列**:`queued_sql` 的 `translate_tries<MAX_TRIES` 把它们排除在外,所以面
+# 板上的「同步」和「重试失败项」点多少次都选不到它们 —— 中转站一轮 503 就能造
+# 出上百条(2026-10-13 实测 rss 42 条 + social 66 条),而这是一个**只能靠改库
+# 才能解除的终态**。
+#
+# **判据是「试过至少一次」,不是「有错误信息」。** `translate_error` 被 `_save`
+# 成功时清空过,库里也确实有 `translate_tries=3` 而错误是空串的存量条目
+# (2026-10-13 实测 social 2 条);按错误信息筛会把它们永久留在库外,而那正是
+# 这颗按钮唯一要救的东西。
+#
+# **也不含 `translate_tries=0` 的那些** —— 那是正常积压(一轮只译 MAX_ITEMS
+# 条),它们下一轮本来就会被取走,额度一条没动过,放回队列是空操作。
+RETRY_SQL = "lang='en' AND translated_at='' AND translate_tries>0"
+
+
+def _retry_where(source_id: int | None) -> tuple[str, list]:
+    """手动重试的 WHERE,按订阅收窄那一半只有这一份(计数和写回共用)。
+
+    面板上那行提示跟着当前筛选走(`registry.items` 的 `where` 带 source_id),
+    所以按钮的射程也得跟着收 —— 否则筛到一条订阅时显示「3 条译不动」、点下去
+    却把整个来源的上百条一起放回队列,代价是用户没点过的那一大笔模型调用。
+    """
+    if not source_id:
+        return '', []
+    return (' AND key IN (SELECT item_key FROM subscription_items'
+            ' WHERE subscription_id=?)', [source_id])
+
+
+def stuck(kind: str, source_id: int | None = None) -> dict:
+    """译不动的内容有多少条、其中几条已经按原文入库、最近一次是什么原因。
+
+    给面板那行提示用。它原来只说「N 条还在等翻译」,对「刚抓回来还没轮到」和
+    「这一批已经失败两次、再失败一次就永久按英文入库」说的是同一句话,而两者
+    的下一步完全相反:前者等下一轮就好,后者得有人去看一眼为什么。
+
+    `shipped` 单独数一档:那批条目**不在**「还在等翻译」的计数里(它们已经离开
+    队列、按英文入库了),不单独说出来的话面板上没有任何东西提到它们的存在。
+    """
+    extra, eargs = _retry_where(source_id)
+    with reg.db() as c:
+        row = c.execute(
+            f'SELECT count(*) AS failed, sum(translate_tries>=?) AS shipped'
+            f' FROM feed_items WHERE kind=? AND ({RETRY_SQL}){extra}',
+            (MAX_TRIES, kind, *eargs)).fetchone()
+        # 原因取**最近抓回来的那一条**的非空错误:一轮整批失败时它们的原因
+        # 一模一样,而要紧的是最近一次发生了什么,不是最早那次。
+        why = c.execute(
+            f'SELECT translate_error FROM feed_items WHERE kind=? AND ({RETRY_SQL})'
+            f"{extra} AND translate_error<>'' ORDER BY fetched_at DESC, key LIMIT 1",
+            (kind, *eargs)).fetchone()
+    return {'failed': row['failed'] or 0, 'shipped': row['shipped'] or 0,
+            'reason': (why['translate_error'] if why else '')[:300]}
+
+
+def requeue_failed(kind: str, source_id: int | None = None) -> int:
+    """把译不动的条目放回翻译队列**队首**。返回放回几条。
+
+    两件事缺一不可:
+    ①**额度清零** —— 试满 `MAX_TRIES` 的那批否则永远选不到(见 `RETRY_SQL`);
+    ②**置 `translate_manual`** —— 取数是「失败过的优先」(`translate_tries
+      DESC`),而第①步恰好把这一批变成「从没试过」、排到队尾。队列里积压超过
+      一轮上限(`MAX_ITEMS`)时,用户点完按钮、等完一整轮同步,库里一个字都不会
+      变:实测点按钮那一刻队列里 246 条,恢复的 108 条排在第 139 位往后,下一轮
+      取的 40 条里一条都没有它们。那是「按钮没用」里最难查的一种 —— 它什么都
+      不报错。
+
+    **不动 `exported_hash`**:那 108 条英文此刻确实就在 vault 里,清掉它等于让
+    一篇**已经能读、能搜到**的文章连同入口一起消失,而译文还没到手。等 `_save`
+    真拿到译文时它自己会清(口径同 `fulltext._save`)。
+    """
+    extra, eargs = _retry_where(source_id)
+    with reg.db() as c:
+        cur = c.execute(
+            "UPDATE feed_items SET translate_tries=0, translate_error='',"
+            f' translate_manual=1 WHERE kind=? AND ({RETRY_SQL}){extra}',
+            (kind, *eargs))
+        return cur.rowcount or 0
+
+
 # 复判的长度上限:判定规则收紧的只是"短文本"那一档,够长的条目在旧规则下
 # 就走不到那一档,不必每轮重新数一遍字符。
 _RECHECK_CHARS = 400
@@ -305,7 +390,7 @@ def _save(key: str, title_zh: str, body_zh: str, seen: tuple[str, str]) -> bool:
         # exported_hash 清空 = 让导出阶段重写这篇 md。译完不重导的话,vault 里
         # 留着的还是那份英文,索引/提取/日报读到的也还是英文,等于没译。
         cur = c.execute("""UPDATE feed_items SET title_zh=?,body_zh=?,translated_at=?,
-            translate_error='',translate_tries=0,exported_hash=''
+            translate_error='',translate_tries=0,translate_manual=0,exported_hash=''
             WHERE key=? AND title=? AND body=?""",
             (title_zh, body_zh, reg.now(), key, *seen))
         return bool(cur.rowcount)
@@ -352,10 +437,15 @@ def translate_pending(kind: str, limit: int | None = None, progress=None) -> dic
         # 就按原文导出、离开队列。而 tries=0 的那些只是正常积压,晚一轮无损。
         rows = [dict(r) for r in c.execute(
             f'SELECT * FROM feed_items WHERE kind=? AND ({cond})'
+            # **手动重试排在最前面**,压过「失败过的优先」:那颗按钮是用户的
+            # 显式指令,而第二段排序恰好把刚放回队列的那批排到队尾(额度清零
+            # = 从没试过)。队列积压超过一轮上限时,点按钮等一轮同步会是库里
+            # 一个字都没变 —— 见 `requeue_failed`。
             # `key` 收尾是为了定序:`fetched_at` 只精确到秒(`registry.now`),
-            # 一批抓回来的几百条时间戳一模一样,前两段排完仍然没有定序 —— 取
+            # 一批抓回来的几百条时间戳一模一样,前几段排完仍然没有定序 —— 取
             # 哪 40 条就交给 SQLite 的扫描顺序了,不可复现也没法测。
-            ' ORDER BY translate_tries DESC, fetched_at DESC, key LIMIT ?',
+            ' ORDER BY translate_manual DESC, translate_tries DESC,'
+            ' fetched_at DESC, key LIMIT ?',
             (kind, *cargs, max(1, limit or MAX_ITEMS))).fetchall()]
     summary['left'] = max(0, pending(kind) - len(rows))
     if not rows:

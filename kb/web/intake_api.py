@@ -209,6 +209,58 @@ def x_channel_check(kind: str):
     return {'ready': ready, 'detail': detail}
 
 
+class TranslateRetryRequest(BaseModel):
+    source_id: int | None = None
+
+
+@router.post('/{kind}/translate-retry')
+def translate_retry(kind: str, body: TranslateRetryRequest):
+    """把译不动的条目放回翻译队列队首,并立刻跑一轮翻译 + 导出。
+
+    **为什么要有这个端点**:试满 `MAX_TRIES` 的条目按设计离开翻译队列、按原文
+    导出,于是 vault 里躺着英文而面板上一个标记都没有;而 `queued_sql` 的
+    `translate_tries<MAX_TRIES` 让「同步」和「重试失败项」**都选不到它们** ——
+    中转站一轮 503 就能造出上百条,原来只能靠手改 feeds.db 才解除得了
+    (2026-10-13 实测 rss 42 条 + social 66 条)。
+
+    **跑的阶段里没有 crawl**:要重译的内容早就在库里了,重新采集一遍既慢又可能
+    因为源站退避什么都拿不到,而翻译就挂在 export 阶段上(见
+    `kb/collectors/feeds.py` 的 `materialize`)。index/extract 跟在后面是因为
+    译文落盘之后那几篇 md 换了内容,不重建索引的话检索到的还是英文那一份。
+    """
+    kind_checked(kind)
+    from kb.feeds import translate
+    # 没配 key 时 `translate_pending` 整个跳过、一次额度都不计 —— 这时放回队列
+    # 只是把标记写进库里,然后跑一轮什么也不翻的管道。如实拒掉,并说清下一步。
+    if not translate.available():
+        raise HTTPException(400, '还没有可用的翻译模型，先到顶栏「模型」里给'
+                                 '「外文翻译」这一步配好 API key，再回来重试。')
+    if body.source_id is not None:
+        ids = {s['id'] for s in reg.subscriptions(kind)}
+        if body.source_id not in ids:
+            raise HTTPException(404, '找不到这条订阅')
+    moved = translate.requeue_failed(kind, body.source_id)
+    # 判据是「现在队列里有没有东西」,不是「放回了几条」:正常积压(一轮只译
+    # MAX_ITEMS 条,剩下的 translate_tries 还是 0)同样该被这颗按钮消化,而它们
+    # 一条都不该被 `requeue_failed` 碰(额度没动过,放回是空操作)。
+    left = translate.pending(kind)
+    if not left:
+        raise HTTPException(400, '这个来源没有等待翻译的内容了。'
+                                 if not moved else
+                                 f'已把 {moved} 条放回队列，但它们此刻都在等正文'
+                                 '补抓，补抓完会自动翻译。')
+    if not pipeline.start_pipeline(['export','index','extract'],
+                                   crawl_filter={'channel':kind}):
+        raise HTTPException(409,'其他同步正在运行，请结束后重试；自动同步会顺延')
+    # 一轮上限是 `translate.MAX_ITEMS`,所以队列比它长时要如实说清这一轮只译得完
+    # 一截 —— 不说的话用户点一次、看到数字只掉了 40,会以为按钮漏了东西。
+    this_round = min(left, translate.MAX_ITEMS)
+    detail = (f'已重新排队 {moved} 条，' if moved else '') + \
+        (f'这一轮翻译 {this_round} 条' if this_round >= left else
+         f'队列共 {left} 条，这一轮先译 {this_round} 条，其余留到下一轮')
+    return {'ok':True,'requeued':moved,'pending':left,'detail':detail + '。译完会自动写入知识库。'}
+
+
 class SyncRequest(BaseModel):
     source_ids: list[int] = Field(default_factory=list,max_length=500)
 

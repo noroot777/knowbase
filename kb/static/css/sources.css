@@ -73,6 +73,15 @@
    那套 hover 变色。 */
 .source-entry-name { font:600 18px/1.6 var(--font-display); overflow-wrap:anywhere; }
 .source-note { color:var(--muted); font-size:12px; margin:0 0 14px; }
+/* 「译不动」那一句自己占一行(见 sources.js 的 stuckNote):它和前面那两句
+   「等下一轮就好」的下一步完全相反,挤在同一行里读起来像同一件事的续写。 */
+.source-note-line { display:block; margin-top:6px; color:var(--ink-2); }
+/* 正文里的文字按钮。写在这里而不是 base.css:它只在这行提示里用,而 base.css
+   那条 button 规则(含 white-space:nowrap)是全站的,别为一处改全站。 */
+.link-btn { background:none; border:0; padding:0; font:inherit; color:var(--brand);
+  text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
+.link-btn:hover:not(:disabled) { color:var(--brand-deep); }
+.link-btn:disabled { color:var(--muted); cursor:default; text-decoration:none; }
 .source-excerpt { color:var(--muted); font-size:14px; line-height:1.9; white-space:pre-line; overflow-wrap:anywhere; }
 /* 社交观点那一档不显示标题(见 sources.js 的 renderSourceItems),正文成了卡片上
    唯一的内容:继续用 muted 的摘要样式,整列卡片看起来就全是次要信息、没有主体。 */

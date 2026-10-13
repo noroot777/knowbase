@@ -96,6 +96,11 @@ _ADDED_COLUMNS = {
         ('translated_at', "TEXT NOT NULL DEFAULT ''"),
         ('translate_error', "TEXT NOT NULL DEFAULT ''"),
         ('translate_tries', 'INTEGER NOT NULL DEFAULT 0'),
+        # 「用户在面板上点过重试」。老库里的条目补成 0 = 没人点过,取数顺序
+        # 逐字不变。它存在的理由只有一个:让手动放回队列的条目排在**队首**
+        # —— 额度清零会把它们变成「从没试过」,而取数是「失败过的优先」
+        # (见 `translate.requeue_failed`)。`_save` 译成之后清掉。
+        ('translate_manual', 'INTEGER NOT NULL DEFAULT 0'),
         # 正文补抓的三列。老库里的条目补成空串 = 还没抓过:订阅开了补抓开关
         # 之后它们会自动排进队列,一轮 MAX_ITEMS 条慢慢补齐 —— 那正是打开这个
         # 开关的人想要的(存量那几百条壳才是他点开面板时看见的东西)。
@@ -645,8 +650,14 @@ def items(kind: str, source_id: int | None = None, offset: int = 0, limit: int =
         d['fetching'] = state == 4
         d['refetching'] = state == 5
         out.append(d)
+    # 「译不动的有几条」**不跟搜索词走,只跟选中的订阅走**(见
+    # `translate._retry_where`):它是面板上那颗重试按钮的射程说明,而按钮的
+    # 射程必须可预测 —— 跟着搜索框里打了什么变的话,用户看着「3 条」点下去,
+    # 放回队列的是这条订阅的全部二十几条。上面那个 `waiting` 跟着 `where`
+    # (含 q)走是对的:它说的是「这一屏列出来的内容里有几条扣着没入库」。
     return {'items': out, 'total': total, 'offset': offset, 'translating': waiting,
-            'fetching': fetching}
+            'fetching': fetching, 'translate_ready': holding,
+            'stuck': translate.stuck(kind, source_id)}
 
 
 def latest_run(kind: str) -> dict | None:
