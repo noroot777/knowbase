@@ -54,7 +54,7 @@ def queued_sql() -> tuple[str, list]:
 
 
 def pending(kind: str, source_id: int | None = None,
-            only_manual: bool = False) -> int:
+            only_manual: bool = False, conn=None) -> int:
     """还有多少条排在翻译队列里。
 
     两个可选的收窄各有用处,口径和 `translate_pending` 共用同一份判据:
@@ -65,10 +65,15 @@ def pending(kind: str, source_id: int | None = None,
     if only_manual:
         cond += ' AND translate_manual=1'
     extra, eargs = _retry_where(source_id)
+    sql = f'SELECT count(*) FROM feed_items WHERE kind=? AND {cond}{extra}'
+
+    def run(c):
+        return c.execute(sql, (kind, *args, *eargs)).fetchone()[0]
+
+    if conn is not None:          # 调用方已经在一个读事务里(见 `stuck`):别另开
+        return run(conn)          # 连接 —— 那次读就不在它那个快照里了
     with reg.db() as c:
-        return c.execute(f'SELECT count(*) FROM feed_items WHERE kind=?'
-                         f' AND {cond}{extra}',
-                         (kind, *args, *eargs)).fetchone()[0]
+        return run(c)
 
 
 # 「手动重试」的射程:判成外文、还没有译文、而且**试过至少一次**的条目。
@@ -132,6 +137,17 @@ def stuck(kind: str, source_id: int | None = None) -> dict:
     from kb.feeds import fulltext
     body_cond, body_args = fulltext.queued_sql()
     with reg.db() as c:
+        # **四样东西必须出自同一个数据库快照:两个数字、那句原因、那份指纹。**
+        # 「同一个连接」给不了这个保证 —— `sqlite3` 在 legacy `isolation_level`
+        # 下 SELECT **不开事务、不持任何锁**(元规则第一条说的就是它),于是几次
+        # 读之间能插进别人的提交。后果不是「数字晚一点更新」:确认框按前两个数字
+        # 说「1 条」,而带回去的指纹是那**两条**的,于是两道指纹校验都正确匹配
+        # 那两条、都把这个错误的确认当成有效授权 —— 确认 1 条、译 2 条
+        # (2026-10-14 第 6 轮审查实测:在数量读完、指纹未读的那一刻并发
+        # `PATCH {"fulltext": false}`,回包是 `exhausted=1` + `sig='2:…'`)。
+        # `BEGIN DEFERRED` 一上来就把这个连接钉在一个快照上(WAL 下读不挡写,
+        # 别人照旧提交得了,只是这一份回包不会半新半旧)。
+        c.execute('BEGIN DEFERRED')
         row = c.execute(
             f'SELECT count(*) AS failed,'
             f' sum(translate_tries>=? AND NOT ({body_cond})) AS exhausted,'
@@ -148,13 +164,16 @@ def stuck(kind: str, source_id: int | None = None) -> dict:
         # 变化会让前端拿着「1 条」的文案和「2 条」的指纹,后端必然拒绝,而用户
         # 看到的是一颗点不动的按钮。
         sig = scope_signature(kind, source_id, conn=c)
+        # 还排在队列里的有几条。**按订阅收窄、不跟搜索词走** —— 它是面板上
+        # 那颗按钮的射程说明,而顶上那个 `translating` 跟着搜索词变(它回答
+        # 的是「这一屏列出来的内容里有几条扣着没入库」,不是按钮会动谁)。
+        # **`conn=c` 不能省**:它原来在这个 `with` 之外、另开一个连接读,于是
+        # 哪怕上面那几次读锁在一个快照里,这一个数仍然可能来自另一个时点。
+        queued = pending(kind, source_id, conn=c)
     return {'failed': row['failed'] or 0, 'shipped': row['shipped'] or 0,
             'exhausted': row['exhausted'] or 0, 'sig': sig,
             'reason': (why['translate_error'] if why else '')[:300],
-            # 还排在队列里的有几条。**按订阅收窄、不跟搜索词走** —— 它是面板上
-            # 那颗按钮的射程说明,而顶上那个 `translating` 跟着搜索词变(它回答
-            # 的是「这一屏列出来的内容里有几条扣着没入库」,不是按钮会动谁)。
-            'queued': pending(kind, source_id)}
+            'queued': queued}
 
 
 def manual_sql() -> tuple[str, list]:
@@ -329,4 +348,3 @@ def clear_manual(kind: str) -> int:
     with reg.db() as c:
         cur = c.execute(_CLEAR_MANUAL, (kind,))
         return cur.rowcount or 0
-

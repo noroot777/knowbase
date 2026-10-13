@@ -265,8 +265,13 @@ def translate_retry(kind: str, body: TranslateRetryRequest):
     # 一个口径),所以「有失败过的、但现在一条都译不了」是一个**真实可达**的档:
     # 那批内容在等原文正文。如实说出来 —— 不说的话它和「压根没有外文内容」长得
     # 一模一样,而两者的下一步完全不同(一个是等补抓,一个是没什么可做的)。
+    # **两个数字都从 `stuck()` 那一份快照里取,不许另开一次读。** 它把两个数、
+    # 那句原因和那份指纹锁在一个读事务里给出来(见 `translate_scope.stuck`);
+    # 这里再调一次 `pending()` 的话就又是另一个时点,于是回包里能出现「这一轮
+    # 1 条」配着「那两条的指纹」—— 而两道指纹校验都会把它当成有效授权
+    # (2026-10-14 第 6 轮审查实测)。
     stuck = translate.stuck(kind, body.source_id)
-    queued = translate.pending(kind, body.source_id)
+    queued = stuck['queued']
     if not queued and not stuck['exhausted']:
         raise HTTPException(400, '这些内容此刻都在等正文补抓，补抓完会自动翻译。'
                             if stuck['failed'] else

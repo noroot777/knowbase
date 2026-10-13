@@ -108,8 +108,7 @@ class EndpointTests(unittest.TestCase):
             return 'run-test'
 
         with patch.object(translate, 'available', lambda: True), \
-             patch.object(translate, 'stuck', lambda *a, **k: _stuck(5, 0)), \
-             patch.object(translate, 'pending', lambda *a, **k: 7), \
+             patch.object(translate, 'stuck', lambda *a, **k: _stuck(5, 0, queued=7)), \
              patch.object(pipeline, 'start_pipeline', fake_start):
             r = self.client.post('/api/intake/rss/translate-retry', json={})
         self.assertEqual(200, r.status_code, r.text)
@@ -130,7 +129,6 @@ class EndpointTests(unittest.TestCase):
         started = []
         with patch.object(translate, 'available', lambda: True), \
              patch.object(translate, 'stuck', lambda *a, **k: _stuck(0, 0)), \
-             patch.object(translate, 'pending', lambda *a, **k: 0), \
              patch.object(pipeline, 'start_pipeline',
                           lambda *a, **k: started.append(1) or 'run-x'):
             r = self.client.post('/api/intake/rss/translate-retry', json={})
@@ -153,7 +151,6 @@ class EndpointTests(unittest.TestCase):
         with patch.object(translate, 'available', lambda: True), \
              patch.object(translate, 'stuck',
                           lambda *a, **k: _stuck(108, 66, queued=0)), \
-             patch.object(translate, 'pending', lambda *a, **k: 0), \
              patch.object(pipeline, 'start_pipeline',
                           lambda *a, **k: started.append(1) or 'run-e'):
             r = self.client.post('/api/intake/rss/translate-retry', json={})
@@ -177,7 +174,6 @@ class EndpointTests(unittest.TestCase):
         started = []
         with patch.object(translate, 'available', lambda: True), \
              patch.object(translate, 'stuck', lambda *a, **k: _stuck(0, 0, queued=18)), \
-             patch.object(translate, 'pending', lambda *a, **k: 18), \
              patch.object(pipeline, 'start_pipeline',
                           lambda *a, **k: started.append(1) or 'run-p'):
             r = self.client.post('/api/intake/rss/translate-retry', json={})
@@ -195,8 +191,7 @@ class EndpointTests(unittest.TestCase):
         from kb.feeds import translate
         with patch.object(translate, 'available', lambda: True), \
              patch.object(translate, 'stuck',
-                          lambda *a, **k: _stuck(108, 60, exhausted=66)), \
-             patch.object(translate, 'pending', lambda *a, **k: 180), \
+                          lambda *a, **k: _stuck(108, 60, exhausted=66, queued=180)), \
              patch.object(pipeline, 'start_pipeline', lambda *a, **k: 'run-y'):
             detail = self.client.post('/api/intake/rss/translate-retry',
                                       json={}).json()['detail']
@@ -216,8 +211,7 @@ class EndpointTests(unittest.TestCase):
         from kb import pipeline
         from kb.feeds import translate
         with patch.object(translate, 'available', lambda: True), \
-             patch.object(translate, 'stuck', lambda *a, **k: _stuck(3, 0)), \
-             patch.object(translate, 'pending', lambda *a, **k: 3), \
+             patch.object(translate, 'stuck', lambda *a, **k: _stuck(3, 0, queued=3)), \
              patch.object(pipeline, 'start_pipeline', lambda *a, **k: 'run-z'):
             detail = self.client.post('/api/intake/rss/translate-retry',
                                       json={}).json()['detail']
@@ -238,7 +232,6 @@ class EndpointTests(unittest.TestCase):
         start = Mock()
         with patch.object(translate, 'available', lambda: True), \
              patch.object(translate, 'stuck', lambda *a, **k: _stuck(1, 0, queued=1)), \
-             patch.object(translate, 'pending', lambda *a, **k: 1), \
              patch.object(translate, 'scope_signature', lambda *a, **k: '2:bbbbbbbb'), \
              patch.object(pipeline, 'start_pipeline', start):
             r = self.client.post('/api/intake/rss/translate-retry',
@@ -257,7 +250,6 @@ class EndpointTests(unittest.TestCase):
         from kb import pipeline
         with patch.object(translate, 'available', lambda: True), \
              patch.object(translate, 'stuck', lambda *a, **k: _stuck(1, 0, queued=1)), \
-             patch.object(translate, 'pending', lambda *a, **k: 1), \
              patch.object(translate, 'scope_signature', lambda *a, **k: '1:aaaaaaaa'), \
              patch.object(pipeline, 'start_pipeline', lambda *a, **k: 'run-1'):
             r = self.client.post('/api/intake/rss/translate-retry',
@@ -273,9 +265,28 @@ class EndpointTests(unittest.TestCase):
         from kb import pipeline
         with patch.object(translate, 'available', lambda: True), \
              patch.object(translate, 'stuck', lambda *a, **k: _stuck(1, 0, queued=1)), \
-             patch.object(translate, 'pending', lambda *a, **k: 1), \
              patch.object(translate, 'scope_signature',
                           Mock(side_effect=AssertionError('空指纹不该去算这一步'))), \
+             patch.object(pipeline, 'start_pipeline', lambda *a, **k: 'run-1'):
+            r = self.client.post('/api/intake/rss/translate-retry', json={})
+        self.assertEqual(200, r.status_code, r.text)
+
+    def test_the_endpoint_takes_its_numbers_from_one_snapshot(self):
+        """端点那两个数字只许来自 `stuck()` 那一份快照,不许自己另开一次读。
+
+        `stuck()` 把两个数、那句原因和那份指纹锁在一个读事务里给出来;端点再调
+        一次 `pending()` 就又是另一个时点,于是回包里能出现「这一轮 1 条」配着
+        「那两条的指纹」—— 而两道指纹校验都会正确匹配那两条、把这个错误的确认
+        当成有效授权(2026-10-14 第 6 轮审查实测)。
+
+        判据落在**「那次读压根没发生」**上:打桩成抛异常,比断言某个数字相等
+        更钉得住 —— 后者在两个时点恰好一样时(测试里几乎总是)是绿的。
+        """
+        from kb import pipeline
+        with patch.object(translate, 'available', lambda: True), \
+             patch.object(translate, 'stuck', lambda *a, **k: _stuck(1, 0, queued=1)), \
+             patch.object(translate, 'pending',
+                          Mock(side_effect=AssertionError('数字只能来自 stuck 那一份快照'))), \
              patch.object(pipeline, 'start_pipeline', lambda *a, **k: 'run-1'):
             r = self.client.post('/api/intake/rss/translate-retry', json={})
         self.assertEqual(200, r.status_code, r.text)
@@ -284,8 +295,7 @@ class EndpointTests(unittest.TestCase):
         from kb import pipeline
         from kb.feeds import translate
         with patch.object(translate, 'available', lambda: True), \
-             patch.object(translate, 'stuck', lambda *a, **k: _stuck(1, 0)), \
-             patch.object(translate, 'pending', lambda *a, **k: 1), \
+             patch.object(translate, 'stuck', lambda *a, **k: _stuck(1, 0, queued=1)), \
              patch.object(pipeline, 'start_pipeline', lambda *a, **k: ''):
             r = self.client.post('/api/intake/rss/translate-retry', json={})
         self.assertEqual(409, r.status_code)

@@ -526,6 +526,48 @@ class ScopeTests(ManualRetryCase):
         with self.assertRaises(translate.ScopeChanged):
             translate.requeue_failed('rss', self.source['id'], first)
 
+    def test_the_count_and_the_signature_come_from_one_snapshot(self):
+        """**同一份回包里,那个数字和那份指纹必须说同一件事。**
+
+        前一轮加的指纹只管「拿到回包之后集合再变」。这一条是**回包生成过程中**
+        就半新半旧:`sqlite3` 在 legacy `isolation_level` 下 SELECT 不开事务、
+        不持任何锁(元规则第一条),于是 `stuck()` 里几次读之间能插进别人的提交。
+        后果不是「数字晚一点更新」—— 确认框按前两个数字说「1 条」,而带回去的
+        指纹是那**两条**的,于是两道指纹校验都正确匹配那两条、都把这个错误的
+        确认当成有效授权:确认 1 条、译 2 条(2026-10-14 第 6 轮审查实测,
+        回包是 `exhausted=1` + `sig='2:…'`)。
+
+        **插桩只在原函数调用前改库,不替换任何计算结果** —— 打的是
+        `translate_scope.scope_signature`(不是 `translate.` 那个再导出的名字:
+        `stuck` 调的是本模块那一份)。这一刻正是「数量读完、指纹未读」。
+
+        判据是**回包自己自洽**:指纹那个条数前缀 == 两个数字之和。写成「断言
+        指纹等于某个值」就只是在重算一遍同一个函数。
+        """
+        from kb.feeds import translate_scope
+        # 这条订阅开着补抓:一条正文早补齐过、试满额度;另一条还在等正文
+        self._with_fulltext(self.source)
+        ready = self.exhaust('A new agent runtime')
+        with reg.db() as c:
+            c.execute("UPDATE feed_items SET fulltext_at='2026-10-01 09:00'"
+                      ' WHERE key=?', (ready,))
+        self.put('Waiting for its body', 'Shell only.')
+        real = translate_scope.scope_signature
+        sid = self.source['id']
+
+        def racing(*a, **kw):
+            # 数量已经读完、指纹还没读 —— 这一刻另一个窗口把补抓关掉并提交
+            with reg.db() as c2:
+                c2.execute('UPDATE subscriptions SET fulltext=0 WHERE id=?', (sid,))
+            return real(*a, **kw)
+
+        with patch.object(translate_scope, 'scope_signature', racing):
+            s = translate.stuck('rss', sid)
+        total = s['queued'] + s['exhausted']
+        self.assertEqual(1, total, '这一份回包里,数量该还是读事务那一刻的 1 条')
+        self.assertTrue(s['sig'].startswith(f'{total}:'),
+                        f"数字说 {total} 条、指纹说的是另一批:{s['sig']}")
+
     def test_a_refused_request_does_not_touch_the_database(self):
         """**忙碌拒绝时库里一个字节都不许动。**
 
