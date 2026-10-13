@@ -65,7 +65,15 @@ function stuckNote() {
 // (不重新采集)。射程跟着当前选中的订阅走,和那行提示里的数字是同一个范围。
 async function retryTranslate() {
   if (sourceRetryBusy) return;
-  const scope = $('source-filter').value ? '这条订阅' : '这个来源';
+  // **范围在打开确认框之前就定死,确认之后不再重读。** 确认框是一个 `await`:
+  // 它开着的那十几秒里面板自己会刷新一轮(`queueSourcePoll`),而被删掉的订阅
+  // 会让筛选值回退成空(`loadSourceModule` 重建选项那一句),**空在后端正好是
+  // 整个来源**。确认之后才读的话,用户确认的是「这条订阅的 1 条」、发出去的是
+  // 整个来源(2026-10-14 第 4 轮审查实测:确认框开着时在另一个窗口删掉那条
+  // 订阅,等面板自己刷新完再点确认,他压根没选的另一条订阅也被译了,确认
+  // 1 条、实际 2 条)。`sourceKind` 同理 —— 切来源 tab 就会改它。
+  const kind = sourceKind, sid = $('source-filter').value;
+  const scope = sid ? '这条订阅' : '这个来源';
   const s = sourceStuck || {};
   // **说的数字必须是真会动的那些**(同 `stuckNote` 的 `scopeTotal`),不是
   // "失败了几条" —— 后者只是其中一段,照它说就把花钱的规模说小了。
@@ -77,10 +85,20 @@ async function retryTranslate() {
         + '这一步要调用翻译模型（按字数计费），一轮译不完的留到下一轮同步继续。',
     ok: '开始翻译',
   })) return;
+  // **确认期间范围变了就停在这儿,不许改用别的范围。** 订阅被删、用户自己改了
+  // 筛选、刷新把值顶掉 —— 哪一种都让刚才那句承诺不再成立。这里只回答一个问题:
+  // 「他确认的那份范围此刻还是不是原样」;**不去判断新范围是大了还是小了** ——
+  // 两个方向的代价不对等,按他确认的那条 id 发出去顶多被后端 404 挡掉(它已经
+  // 不存在了),按漂过去的新范围发出去是花他没确认过的钱。
+  if (sourceKind !== kind || $('source-filter').value !== sid) {
+    toast('选中的范围在确认期间变了，没有开始翻译',
+          { detail: '先确认要译哪个范围，再点一次。' });
+    return;
+  }
   sourceRetryBusy = true; renderSourceItems();
-  const id = Number($('source-filter').value) || null;
+  const id = Number(sid) || null;
   try {
-    const r = await pipePost(`/api/intake/${sourceKind}/translate-retry`,
+    const r = await pipePost(`/api/intake/${kind}/translate-retry`,
                              id ? { source_id: id } : {});
     toast('已开始重新翻译', { type: 'ok', detail: r.detail });
     // **被接纳的那一刻就重读一次条目**:额度清零和"这一轮只译它们"的标记是

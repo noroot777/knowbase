@@ -117,7 +117,12 @@ const server = createServer((req, res) => {
     res.writeHead(code, { "Content-Type": "application/json", "Content-Length": body.length });
     res.end(body);
   };
-  if (path === "/api/intake/rss/translate-retry") {
+  // **任何来源的这个端点都记一笔,不只 rss 那一条。** 只认 rss 的话
+  // 「确认期间换了来源」那条检查是假绿:请求跟着 `sourceKind` 打到
+  // `/api/intake/social/translate-retry` 去了,这里看不见,于是
+  // `posted.length === 0` 成立而请求其实发出去了(实测:退回「确认之后才读」
+  // 的写法时那条检查照旧是绿的)。判据是「一个请求都没发」,那就得真的全看。
+  if (path.endsWith("/translate-retry")) {
     let raw = "";
     req.on("data", c => { raw += c; });
     return req.on("end", () => {
@@ -278,6 +283,52 @@ await clickAt('.confirm-mask [data-act="ok"]');
 for (let i = 0; i < 40 && !posted.length; i++) await sleep(120);
 check("请求的射程跟着筛选收窄(带上了那条订阅的 id)",
       posted[0] && JSON.parse(posted[0].body || "{}").source_id === 7, posted[0]?.body);
+
+// ── 3.5 确认期间范围漂了:一个请求都不许发出去 ───────────────────────────────
+// 确认框是一个 await。它开着的那十几秒里面板自己会刷新一轮,而**被删掉的订阅
+// 会让筛选值回退成空**(`loadSourceModule` 重建 option 那一句),空在后端正好是
+// 整个来源 —— 于是用户确认「这条订阅的 3 条」,发出去的是整个来源
+// (2026-10-14 第 4 轮审查实测:确认 1 条、实际译了 2 条,多出来那条属于他压根
+// 没选的订阅)。判据落在**请求上**:一个都没发,而不是"少发了点什么"。
+posted.length = 0;
+await evalJs(`$('source-filter').value = '7'`);
+await reload("one");
+await clickAt("[data-retry-translate]");
+await until(`!!document.querySelector('.confirm-mask [data-act="ok"]')`);
+check("(前提)确认框说的是那条订阅的条数",
+      (await evalJs(`document.querySelector('.confirm-mask h2')?.textContent || ''`)).includes("3 条"));
+// 原样照抄 `loadSourceModule` 那一句的后果:认不出的订阅 id 被顶回空串
+await evalJs(`$('source-filter').value = ''`);
+await clickAt('.confirm-mask [data-act="ok"]');
+await sleep(600);                       // 给它充分的时间把请求发出去
+check("确认期间订阅被删掉:一个请求都不发(不许降级成整个来源)",
+      posted.length === 0, JSON.stringify(posted));
+check("而且说清了为什么没开始",
+      await until(`!!document.querySelector('.toast.err')`)
+      && (await evalJs(`document.querySelector('.toast.err')?.textContent || ''`)).includes("确认期间"));
+// 切来源 tab 同理:`sourceKind` 决定这个请求打到哪条通道上,它也得在确认之前定死
+posted.length = 0;
+await evalJs(`$('source-filter').value = '7'`);
+await reload("one");
+await clickAt("[data-retry-translate]");
+await until(`!!document.querySelector('.confirm-mask [data-act="ok"]')`);
+await evalJs(`sourceKind = 'social'`);
+await clickAt('.confirm-mask [data-act="ok"]');
+await sleep(600);
+check("确认期间换了来源:同样一个请求都不发", posted.length === 0, JSON.stringify(posted));
+await evalJs(`sourceKind = 'rss'`);
+// **反过来钉一边**:范围一个字没变的那一次照旧发得出去(上面第 3 组那条检查
+// 已经钉住带 id 的情形,这里再钉一次「没筛订阅」那一档不被这道闸误伤)。
+posted.length = 0;
+await evalJs(`$('source-filter').value = ''`);
+await reload("all");
+await clickAt("[data-retry-translate]");
+await until(`!!document.querySelector('.confirm-mask [data-act="ok"]')`);
+await clickAt('.confirm-mask [data-act="ok"]');
+check("范围没变那一次照旧发得出去", await (async () => {
+  for (let i = 0; i < 40 && !posted.length; i++) await sleep(120);
+  return posted.length === 1 && !("source_id" in JSON.parse(posted[0].body || "{}"));
+})(), JSON.stringify(posted));
 
 // ── 4. ④ 没失败过的普通积压也要有入口 ───────────────────────────────────────
 // 定时同步默认关着,不给按钮的话那 18 条在系统里没有别的办法动起来 —— 而原来
