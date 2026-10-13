@@ -2,7 +2,7 @@
 
 > 2026-10-11 最新方案见 `design/subscription-usability.md`：所有视图统一使用
 > `subs-mode` 外壳，来源工具栏移出列表，管理也使用独立滚动区；以下记录保留历史方案。
-> 2026-10-13 第 1 轮审查修复及当前实跑结果见文末；历史通过数不作为当前验证结论。
+> 2026-10-13 第 1、2 轮审查修复及当前实跑结果见文末；历史通过数不作为当前验证结论。
 
 ## 合并前方案与审查记录
 
@@ -270,3 +270,28 @@ python -m unittest tests.test_subs_layout tests.test_source_post_title \
 因此按规定降级为独立无头 `chrome-headless-shell`，每次使用临时 profile；
 CDP 仅连接本次启动的隔离无头实例。未接管或直连用户普通标签，未激活 Chrome，
 未切换用户标签，也未启动有头浏览器。所有被测数据和服务均为本地隔离 fixture。
+
+## 2026-10-13 第 2 轮审查修复
+
+本轮只修复公众号侧同形状的状态浮层缺陷，不扩大到报告中的非阻塞观察项。
+
+- `updateWechatNotices()` 在连接说明和同步状态都消失时，同步复位 `open`；连接恢复后的后台同步，以及用户查看同步详情后开始的下一轮同步，都不会继承旧展开态。
+- 在 `tests/subs_notices_checks.mjs` 中增加 9 项公众号检查并接入布局探针。仅打桩隔离页面的状态接口，连接恢复走真实 `refreshPipeSource()`，开始／结束／再次同步走真实 `refreshPipe()` 和状态渲染，不直接操作提示的 `hidden` 来模拟恢复；详情展开和搜索聚焦使用鼠标事件。
+- 加入回归但未改状态逻辑时为 **121／127 项通过、6 项失败**；补上复位后为 **127／127 项通过**，原 feeds 的 15 项检查仍通过，浏览器无未捕获异常。
+- 原订阅页探针复跑 **40／40 项通过**；相关来源、定时同步、阅读、聊天布局和无正文提取 unittest **88 项通过**，加上布局测试共 **89 项 unittest 通过**。
+- JavaScript 与探针的 `node --check`、`git diff --check` 均通过，改动的代码文件均少于 700 行。
+- 截图已检查：`output/subs-layout/wechat-notices-recovered-1440.png`、`output/subs-layout/wechat-notices-next-sync-1440.png`；提示保持收起，添加公众号的搜索框没有被遮挡。完整结果见 `output/subs-layout/results.json` 和 `output/subs-layout/round2-subs-probe-results.log`（忽略的验证产物）。
+
+复跑命令（使用项目已有虚拟环境）：
+
+```sh
+python -m unittest tests.test_subs_layout tests.test_source_post_title \
+  tests.test_daily_schedule tests.test_feed_sources tests.test_retired_channel \
+  tests.test_reading_literal tests.test_chat_height tests.test_extract_no_body -v
+```
+
+本轮重新检查 Chrome 扩展，`cua.getState()` 仍返回
+`Browser 1: Error: unsupported Codex auth method: apikey`，无法建立具名后台标签会话。
+因此继续按规定降级为独立无头 `chrome-headless-shell` 与临时 profile，
+仅连接本次启动的隔离无头实例；未接管普通标签、未激活 Chrome、未切换用户标签、
+未启动有头浏览器。隔离 fixture 不访问真实微信数据，服务和浏览器均在验证结束后清理。

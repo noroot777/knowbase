@@ -96,6 +96,7 @@ $('subs-switch').addEventListener('keydown', event => {
 function updateWechatNotices() {
   const detail = !$('src-detail').hidden, running = !$('subs-wechat-progress').hidden;
   $('subs-wechat-notices').hidden = !detail && !running;
+  if ($('subs-wechat-notices').hidden) $('subs-wechat-notices').open = false;
   $('subs-wechat-notices').classList.toggle('has-error', detail && $('src-detail').classList.contains('error'));
   $('subs-wechat-notices-summary').textContent = running ? '同步进度' : '连接详情';
 }

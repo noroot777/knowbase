@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launchShell } from './probe_shell.mjs';
 import { checkSubscriptionUsability } from './subs_usability_checks.mjs';
-import { checkSubscriptionNotices } from './subs_notices_checks.mjs';
+import { checkSubscriptionNotices, checkWechatNotices } from './subs_notices_checks.mjs';
 
 const base = process.argv[2];
 const profile = mkdtempSync(join(tmpdir(), 'kb-subs-layout-'));
@@ -218,6 +218,7 @@ try {
   await evaluate(`openSubsPanel('wechat'); true`);
   await wait(`!$('subs-wechat').hidden`);
   check('公众号也使用统一页头', await evaluate(`!!document.querySelector('#subs-wechat > .source-heading') && !$('subs-wechat-sync').hidden && !document.body.classList.contains('subs-reading')`));
+  await checkWechatNotices({ evaluate, wait, check, click, screenshot });
   await checkSubscriptionUsability({ evaluate, wait, check, click, viewport, screenshot, send });
   await evaluate(`switchTab('gallery'); true`);
   check('离开订阅页面恢复普通布局', await evaluate(`!document.body.classList.contains('subs-reading') && !document.body.classList.contains('subs-mode')`));

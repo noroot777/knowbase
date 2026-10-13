@@ -60,3 +60,67 @@ export async function checkSubscriptionNotices({ evaluate, check, click, screens
       $('source-notices').open = false; updateSourceNotices(); true`);
   }
 }
+
+export async function checkWechatNotices({ evaluate, wait, check, click, screenshot }) {
+  await wait(`!$('subs-wechat').hidden && !!wechatSubsChannel() && $('src-status').textContent !== '检查中…'`);
+  await evaluate(`(async () => {
+    invalidatePipeStatus();
+    window.qaWechatNoticeState = { json:window.pipeJson, snapshot:pipeSnapshot, online:false, running:false };
+    window.pipeJson = (path, ...rest) => {
+      const state = window.qaWechatNoticeState;
+      if (path.startsWith('/api/pipeline/status')) {
+        if (path.includes('source=false')) return Promise.resolve({
+          running:state.running, planned_stages:['crawl'], current_stage:'crawl',
+          crawl_filter:{ channel:wechatSubsChannel(), accounts:[] },
+          stages:state.running ? { crawl:{ status:'running', detail:'正在同步公众号' } } : {}, log:[] });
+        return Promise.resolve({ source:{ online:state.online, channel_label:'公众号',
+          message:state.online ? '' : '验证采集器连接失败', hint:'' } });
+      }
+      return state.json(path, ...rest);
+    };
+    $('subs-wechat-notices').open = false;
+    await refreshPipe(); invalidatePipeStatus();
+    await refreshPipeSource();
+  })()`);
+  const syncState = running => evaluate(`(async () => {
+    window.qaWechatNoticeState.running = ${running};
+    await refreshPipe(); invalidatePipeStatus();
+    if (!${running}) await refreshPipeSource();
+  })()`);
+  const searchAccessible = () => evaluate(`(() => {
+    const input = $('tgt-search'), box = input.getBoundingClientRect();
+    return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) === input;
+  })()`);
+  try {
+    check('公众号连接失败保留详情入口且默认收起', await evaluate(`!$('subs-wechat-notices').hidden && !$('subs-wechat-notices').open && $('src-detail').classList.contains('error')`));
+    await click('#subs-wechat-notices > summary');
+    check('公众号连接失败原因可以手动展开', await evaluate(`$('subs-wechat-notices').open && $('src-detail').getClientRects().length > 0`));
+    await evaluate(`(async () => { window.qaWechatNoticeState.online = true; await refreshPipeSource(); })()`);
+    check('公众号连接恢复且无说明时隐藏并复位详情', await evaluate(`$('src-status').textContent === '已连接' && $('subs-wechat-notices').hidden && !$('subs-wechat-notices').open`));
+    await syncState(true);
+    check('公众号恢复后后台同步不继承旧展开态', await evaluate(`!$('subs-wechat-notices').hidden && !$('subs-wechat-notices').open && $('subs-wechat-progress-text').textContent === '正在同步公众号'`));
+    const accessible = await searchAccessible();
+    check('公众号恢复后同步不会遮挡添加搜索框', accessible);
+    await screenshot('wechat-notices-recovered-1440');
+    if (accessible) await click('#tgt-search');
+    check('公众号同步时添加搜索框仍可鼠标聚焦', accessible && await evaluate(`document.activeElement === $('tgt-search')`));
+    await evaluate(`$('subs-wechat-notices').open = false; true`);
+    await click('#subs-wechat-notices > summary');
+    check('公众号同步详情仍可由用户主动展开', await evaluate(`$('subs-wechat-notices').open && $('subs-wechat-progress').getClientRects().length > 0`));
+    await syncState(false);
+    check('公众号同步结束后隐藏提示也会清除展开态', await evaluate(`$('subs-wechat-notices').hidden && !$('subs-wechat-notices').open`));
+    await syncState(true);
+    check('公众号下一轮后台同步保持收起且搜索仍可用', await evaluate(`!$('subs-wechat-notices').hidden && !$('subs-wechat-notices').open`) && await searchAccessible());
+    await screenshot('wechat-notices-next-sync-1440');
+  } finally {
+    await evaluate(`(async () => {
+      invalidatePipeStatus();
+      window.pipeJson = window.qaWechatNoticeState.json;
+      pipeSnapshot = window.qaWechatNoticeState.snapshot;
+      delete window.qaWechatNoticeState;
+      $('subs-wechat-notices').open = false;
+      renderPipeState(pipeSnapshot || { running:false, stages:{}, log:[] });
+      await refreshPipeSource(); queuePipeRefresh();
+    })()`);
+  }
+}
