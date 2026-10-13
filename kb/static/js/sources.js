@@ -11,6 +11,7 @@ let sourceKind = '', sourceView = 'items', sourceData = null, sourceRows = [];
 let sourceOffset = 0, sourceTotal = 0, sourceVersion = 0, sourcePoll = null, sourceSearchTimer;
 let sourceItemsVersion = 0, sourceItemsFailed = false, sourceTranslating = 0, sourceFetching = 0;
 let sourceBusy = false;
+let sourceNoticesAutoOpened = false;
 const sourceFilters = new Map();
 const sourceViewState = new Map();
 
@@ -172,7 +173,8 @@ async function openSourceModule(kind) {
   sourceKind = kind; sourceVersion++; sourceItemsVersion++; sourceItemsFailed = false;
   sourceData = null; sourceRows = []; sourceOffset = 0;
   resetSourceReader('正在读取内容…');
-  $('source-notices').open = false;
+  closeSourceNotices();
+  sourceError();
   const spec = sourceModules.get(kind);
   const filter = sourceFilters.get(kind) || { view: 'items', q: '', id: '' };
   sourceView = filter.view;
@@ -193,13 +195,23 @@ function sourceError(message = '') {
   $('source-error').hidden = !message;
   $('source-error-text').textContent = message;
   updateSourceNotices();
-  if (message && changed) $('source-notices').open = true;
+  if (message && changed) {
+    if (!$('source-notices').open) sourceNoticesAutoOpened = true;
+    $('source-notices').open = true;
+  }
+}
+function closeSourceNotices(restoreFocus = false) {
+  const notices = $('source-notices');
+  const focused = restoreFocus && notices.contains(document.activeElement);
+  notices.open = false;
+  sourceNoticesAutoOpened = false;
+  if (focused) notices.querySelector('summary').focus({ preventScroll:true });
 }
 function updateSourceNotices() {
   const error = !$('source-error').hidden, running = !$('source-progress').hidden;
   const issues = !$('source-issues').hidden, configuration = !$('source-configuration').hidden;
   $('source-notices').hidden = !error && !running && !issues && !configuration;
-  if ($('source-notices').hidden) $('source-notices').open = false;
+  if ($('source-notices').hidden || (!error && sourceNoticesAutoOpened)) closeSourceNotices();
   $('source-notices').classList.toggle('has-error', error || issues);
   $('source-notices-summary').textContent = error ? '读取失败，点击查看原因'
     : running ? $('source-progress-text').textContent : issues ? '来源连接需处理' : '部分订阅待配置';
@@ -287,7 +299,7 @@ async function switchSourceView(view) {
   rememberSourceView();
   const kind = sourceKind, saved = sourceViewState.get(kind + ':' + view);
   sourceView = view; sourceOffset = 0;
-  $('source-notices').open = false;
+  closeSourceNotices();
   $('source-q').value = saved?.q || '';
   $('source-filter').value = saved?.id || '';
   updateSourceReadingView();
@@ -493,15 +505,22 @@ $('source-list').addEventListener('keydown', event => {
   readSourceItem(entry.dataset.sourceKey);
 });
 
-document.addEventListener('click', event => {
-  for (const id of ['source-notices', 'subs-wechat-notices']) {
-    if (!$(id).contains(event.target)) $(id).open = false;
-  }
+$('source-notices').querySelector('summary').addEventListener('click', () => {
+  sourceNoticesAutoOpened = false;
 });
+document.addEventListener('pointerdown', event => {
+  const notices = $('source-notices');
+  if (notices.open && !notices.contains(event.target)) closeSourceNotices();
+}, true);
+document.addEventListener('click', event => {
+  if (!$('source-notices').contains(event.target)) closeSourceNotices();
+  if (!$('subs-wechat-notices').contains(event.target)) $('subs-wechat-notices').open = false;
+}, true);
 document.addEventListener('keydown', event => {
   if (event.key !== 'Escape' || event.defaultPrevented) return;
   for (const id of ['source-notices', 'subs-wechat-notices']) {
     if (!$(id).open || $(id).hidden) continue;
+    if (id === 'source-notices') { closeSourceNotices(true); continue; }
     $(id).open = false;
     if ($(id).contains(document.activeElement)) $(id).querySelector('summary').focus({ preventScroll:true });
   }

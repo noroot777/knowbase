@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { launchShell } from './probe_shell.mjs';
 import { checkSubscriptionUsability } from './subs_usability_checks.mjs';
 import { checkSubscriptionNotices, checkWechatNotices } from './subs_notices_checks.mjs';
+import { checkSourceNoticeRecovery } from './subs_notice_recovery_checks.mjs';
 
 const base = process.argv[2];
 const profile = mkdtempSync(join(tmpdir(), 'kb-subs-layout-'));
@@ -64,10 +65,10 @@ const screenshot = async name => {
   const response = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
   writeFileSync(`${output}/${name}.png`, Buffer.from(response.result.data, 'base64'));
 };
-const click = async selector => {
+const click = async (selector, vertical = .5) => {
   const point = await evaluate(`(() => {
     const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
-    return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    return { x: box.x + box.width / 2, y: box.y + box.height * ${vertical} };
   })()`);
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
@@ -98,7 +99,8 @@ try {
   await click('#source-notices > summary');
   await evaluate(`sourceError('示例读取失败：本地服务暂不可用'); true`);
   check('读取失败自动展开原因及重试入口', await evaluate(`$('source-notices').open && $('source-error').getClientRects().length > 0 && $('source-error-text').textContent.includes('本地服务暂不可用')`));
-  await evaluate(`sourceError(); $('source-notices').open = false; true`);
+  await evaluate(`sourceError(); true`);
+  await checkSourceNoticeRecovery({ evaluate, wait, check, click, screenshot, send });
   await checkSubscriptionNotices({ evaluate, check, click, screenshot });
 
   await evaluate(`$('source-list-pane').scrollTop = 350; true`);
