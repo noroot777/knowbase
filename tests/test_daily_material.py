@@ -228,7 +228,8 @@ class UnreadableRowFallbackTests(_Base):
         return (daily_page._MATERIAL_LINK.match(text) is not None
                 if text.lstrip().startswith('[') else daily_page.REF_SEP in text)
 
-    def _report_then_rebuild(self, title, published='2026-09-27 20:00'):
+    def _report_then_rebuild(self, title, published='2026-09-27 20:00',
+                             drop_list=False):
         # 两条都发布在链起点之前(都是补录),无链接那条更新 ⇒ 它排清单第一位,
         # 后面紧跟一条有链接的 —— 这正是真实故障的形状。
         daily._ensure_ledger(self.conn, now=T('2026-09-01 00:00'))
@@ -236,9 +237,31 @@ class UnreadableRowFallbackTests(_Base):
         add_doc(self.conn, 'source/rss/b.md', title='紧跟在后的另一条',
                 url='https://x/companion', published='2026-09-26 20:00')
         daily.generate(since=T('2026-09-28 08:00'), until=T('2026-09-29 08:00'))
+        if drop_list:
+            self._drop_carried_list()
         self.conn.execute('DELETE FROM daily_carried')
         self.conn.execute('DELETE FROM daily_state')
         self.conn.commit()
+
+    def _drop_carried_list(self):
+        """把刚生成那份日报的 `carried_plain` 名单摘掉 —— 摆成**老日报**的形态。
+
+        名单(`daily._page` 写的)在 frontmatter 里、不经过清单解析器,所以带名单
+        的那几份压根不走清单那条兜底。而清单兜底的真实射程恰恰是**现有的每一份
+        日报**:名单是这一版才开始写的,库里躺着的那些一行都没有。摘掉它才测得到
+        这条兜底,不摘的话用例验的是名单、不是它自己宣称的那件事。
+        """
+        [path] = sorted(daily.report_dir().glob('*.md'))
+        keep, inside = [], False
+        for line in path.read_text(encoding='utf-8').splitlines():
+            if line.startswith('carried_plain:'):
+                inside = True
+                continue
+            if inside and line.startswith('- '):
+                continue
+            inside = False
+            keep.append(line)
+        path.write_text('\n'.join(keep) + '\n', encoding='utf-8')
 
     def test_an_entry_the_parser_cannot_read_is_not_written_off(self):
         """解析器又漏了一种写法时,那一条也只是多报一遍,不许被写死。
@@ -250,9 +273,12 @@ class UnreadableRowFallbackTests(_Base):
         **这时候整份清单的归属都不作数**:两条被并成一条,切出来的条数和抬头
         声明的对不上,`_rows` 按约定交空的(宁可读不出,不许读出半截)。所以
         紧跟在后那条也一起回到队列 —— 一条都没被写死,代价只是多报一遍。
+
+        摆的是**老日报**(`drop_list`):带名单的那几份直接按名单盖章,一道清单
+        推断都不走 —— 不摘掉名单的话这条用例验的是名单,不是它自己这道兜底。
         """
         title = '[视频] 此前已经报道的补录文章'
-        self._report_then_rebuild(title)
+        self._report_then_rebuild(title, drop_list=True)
         with patch.object(daily_page, '_closed', self._old_closed):
             daily._ensure_ledger(self.conn, now=T('2026-09-29 09:00'))
         self.assertEqual({}, self.carried(),

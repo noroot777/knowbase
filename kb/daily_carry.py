@@ -45,10 +45,15 @@ SEED_REV_KEY = 'carry_seed_rev'
 # 8 = 上界换成**取材快照**(`collected`)而不是出稿完成的 `generated`(差着一次模型
 # 请求,那中间入库的文章一个都没被这一份看见过),另加第四道:清单那一行记的
 # 「来源·账号」和这篇文档明确冲突时一律拒 —— 前三道都只能排除,这一道是正面证据。
+# 9 = 日报文件自己记下了「带走的无链接素材是哪几篇」(frontmatter 的 `carried_plain`,
+# 按文档路径),有这份名单的那几份**不再做任何推断**:名单就是全部真相,名额装不下
+# 而落选的同名同署名文章从此盖不上 —— 推断那四道加到头也只能排除"它不可能是那一
+# 篇",证不了"它就是那一篇"(审查第 5 轮:121 条素材撞上 120 条上限,落选那篇四道
+# 全过、被盖成已报道)。老日报没有这一行,照旧回落到四道推断。
 # **解析器也是盖章算法的一部分** —— 版本不跟着动的话,前一版真实盖错过的那些库
 # 命中快路径,修好的解析器一次都跑不到。**上面那条按名单钉住的回归只覆盖解析器那
 # 一半**,改这个函数自己的分类判据时要自己记得把版本加一。
-SEED_REV = '8'
+SEED_REV = '9'
 # 落盘与记账、放回与删文件、启用时盖章,三段之间要整体互斥(见 `commit_lock`)。
 LOCK_NAME = 'daily-report.lock'
 
@@ -72,6 +77,11 @@ class PastReport:
     是前者(见 `latest_pickup`)。`credits` 是清单里那些无链接条目各自记下的
     「来源·账号」,`_match_holds` 第四道拿它做唯一的**正面**身份证据。
 
+    `plain` 是那一份**实际带走的那些无链接素材各自的文档路径**(frontmatter 的
+    `carried_plain`,`daily._page` 写的)。它和上面几样都不是一类东西:那几样是
+    证据,要配着判据一起推断,这一份是**结论本身** —— 有它的那一份直接按它盖章。
+    老日报没有这一行,交空名单。
+
     `rows` 是那份清单一条一条的**原文**(归一过),`text` 是整份正文(同样归一
     过)。解析不出身份的条目靠这两样兜一道:在这一份上露过面就不许判成"链条
     之前的历史存量"(理由见 `daily_page.material_rows`)。**两样分开取**,
@@ -87,6 +97,7 @@ class PastReport:
     made: str = ''
     taken: str = ''
     credits: tuple = ()
+    plain: tuple = ()
 
     def latest_pickup(self) -> str:
         """这一份最晚可能带走东西的那一刻(拿来和 `indexed_at` 比字符串)。
@@ -104,6 +115,7 @@ class PastReport:
           窗口里的漏报风险仍在(由第四道「来源·账号」兜住大半);**精度只到分钟,
           字符串比较等于按那一分钟的开头算**,于是同一分钟入库、确实被带走过的
           文章会判成"到得太晚"、归属放回 —— 多报一遍,是安全的那一边,知情保留。
+          真正带名单的那几份压根不走这条推断(见 `seed_locked`)。
         ③**窗口截止 `until`** —— 连 `generated` 都读不出时的兜底,最严。
 
         不能反过来优先 `until`:自定义历史区间的 until 可能比真正取材早好几个月
@@ -254,6 +266,10 @@ def seed_locked(conn, chain_of, key_of, credit_of,
     # 记的是**那一份本身**:没有 url 的那条匹配要逐项问它自己的窗口和生成时刻
     # (见 `_match_holds`),拿整条链的分界去问是另一个问题的答案。
     owner = {k: c for c in chain for k in c.keys}
+    # 各份日报自己记下的「带走的无链接素材是哪几篇」(按文档路径)。**这是唯一
+    # 的硬证据** —— 底下那四道推断只能排除"它不可能是那一篇",证不了"它就是那一
+    # 篇"。同一个 path 出现在两份名单里时同样按**最后**那一份记(链条升序)。
+    by_path = {p: c.day for c in chain if c.day for p in c.plain}
 
     # 先在锁内把章算好(两万行读一遍、纯内存分类),再一个事务落盘。
     # `indexed_at` 库里只有 `YYYY-MM-DD HH:MM:SS` 一种写法,可以直接比字符串;
@@ -273,14 +289,25 @@ def seed_locked(conn, chain_of, key_of, credit_of,
         doc = Candidate(key_of(row['url'], row['title']), row['title'], when,
                         str(row['indexed_at'] or ''),
                         credit_of(row['source'], row['account']))
+        # **名单排在所有推断之前**:它记的就是当初 `mark_carried` 盖的那一批,
+        # 按文档路径、一一对应。顺带兜住"清单那一行解析不出身份"那一档 —— 名单
+        # 在 frontmatter 里,不经过清单解析器。
+        day = by_path.get(row['path'])
+        if day:
+            marked.append((row['path'], day, at))
+            continue
         past = owner.get(doc.key)
         if past and past.day:      # 盖章要落到某一天上,没有日期的那一份不作数
-            # **没有 url 的那条匹配不是「实际带走过」那种硬证据**,要过
-            # `_match_holds` 的四道(理由和各自的射程写在那个函数里)。证据不够就
-            # **一个章都不盖**:既不记这一份的归属,也不往下走到 `#seed` —— 它在
-            # 某份清单上露过面,判"链条之前的历史存量"同样是永久写死。留在队列里
-            # 最多多报一遍,看得见、补得回。
-            if url or _match_holds(past, doc, once):
+            # **没有 url 的那条匹配不是「实际带走过」那种硬证据**。那一份自己交了
+            # 名单的话**名单就是全部真相** —— 走到这里说明这一篇不在名单上,于是
+            # 它和那一份带走的只是**同名**,一个章都不盖(审查第 5 轮:窗口内 121
+            # 条撞上 120 条上限,落选的那篇同名同署名文章推断四道全过,照旧被盖成
+            # 这一份的已报道素材)。老日报没有名单,才回落到 `_match_holds` 的四道
+            # (理由和各自的射程写在那个函数里)。
+            # 两条路证据都不够时**一个章都不盖**:既不记这一份的归属,也不往下走到
+            # `#seed` —— 它在某份清单上露过面,判"链条之前的历史存量"同样是永久
+            # 写死。留在队列里最多多报一遍,看得见、补得回。
+            if url or (not past.plain and _match_holds(past, doc, once)):
                 marked.append((row['path'], past.day, at))
             continue
         if doc.arrived > stamp:
@@ -337,6 +364,13 @@ class Candidate(NamedTuple):
 def _match_holds(past: PastReport, doc: Candidate, once: set) -> bool:
     """没有 url 时,那条按标题匹配上的归属算不算数。
 
+    **射程只剩「没交名单的老日报」。** 交了名单的那几份(`PastReport.plain`)直接
+    按名单盖章,一道推断都不走 —— 下面这四道**加到头也只能排除「它不可能是那一
+    篇」,证不了「它就是那一篇」**:窗口内 121 条素材撞上 120 条上限时,落选的那篇
+    同名、同来源、同账号、入库早于取材快照、发布在窗口里的文章四道全过,照旧被盖
+    成已报道(审查第 5 轮实测,待报道 1 → 0)。这不是某一道判据写松了,是推断这条
+    路本身给不出正面证据 —— 所以修在上游:让日报自己把带走的那几篇记下来。
+
     `doc_key` 在 url 为空时退化成标题,于是**两篇同名文档共享一个身份** ——
     真正新抓到的那一篇被旧日报抢走归属,从此 `UNCARRIED` 永远排除它(实测:同名
     无 url 的新文章 `pending.items=0`,生成直接答"没有未上报过的新内容")。所以
@@ -345,7 +379,9 @@ def _match_holds(past: PastReport, doc: Candidate, once: set) -> bool:
     ①**库里只有这一篇叫这个名字**(口径同 `_on_a_list` 的 `once`)。同名的两篇
       都还在库里、又都发布在那一份的窗口里时,只有这一道分得开"该盖的只有一篇"。
     ②**到得不比那一份生成的时刻晚**(`latest_pickup`)。一份日报只可能带走它生成
-      那一刻已经在库里的东西。**判据必须是那一份自己的时刻,不是整条链的分界**
+      那一刻已经在库里的东西。**同那一刻一律算晚**:取材快照和 `indexed_at` 都只
+      到秒,同一秒里谁先谁后分不出来 —— 按元规则判不准就扣留(拒了最多多报一遍)。
+      **判据必须是那一份自己的时刻,不是整条链的分界**
       —— 拿分界来问,一篇"晚于它匹配的那份日报、却早于后面那几份"的补抓文章三道
       全过,照旧被抢走归属(实测:发布 09-27 20:00、入库 09-28 13:00 的新来源同名
       文章被盖上 `2026-09-28`,待报道归零、重新生成也找不回来)。反过来,一篇
@@ -367,7 +403,7 @@ def _match_holds(past: PastReport, doc: Candidate, once: set) -> bool:
     """
     recorded = past.credit_of(doc.key)
     return (page_flat(doc.title) in once
-            and not (doc.arrived > past.latest_pickup())
+            and not (doc.arrived >= past.latest_pickup())
             and not (doc.when is not None and doc.when > past.until)
             and not (recorded and doc.credit and recorded != doc.credit))
 

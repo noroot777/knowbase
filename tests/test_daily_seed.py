@@ -17,7 +17,7 @@ from tests.test_daily_carried import T, _Base, add_doc
 
 def write_report(date='2026-09-28', since='2026-09-27 08:00:00',
                  until='2026-09-28 08:00:00', body='正文', carried=(),
-                 generated='', collected='', credit='RSS·某号'):
+                 generated='', collected='', credit='RSS·某号', plain=None):
     """摆一份已有的日报:窗口在 frontmatter 里,**带走了哪些在素材清单里**。
 
     清单按 `daily._page` 的真实格式写(链接目标套尖括号、尾巴是「— 来源·
@@ -32,6 +32,11 @@ def write_report(date='2026-09-28', since='2026-09-27 08:00:00',
     (`rss` + `某号`)拼出来的逐字相同,所以默认摆盘下第四道判据不会插手 ——
     要验那一道就显式传一个不同的值。
 
+    `plain` 是那一份记下的**带走的无链接素材是哪几篇**(frontmatter 的
+    `carried_plain`,按文档路径)。**不传就是老日报那种没有这一行的形态** ——
+    盖章那边只好回落到按清单推断;传了的那几份直接按名单盖,一道推断都不走。
+    传空列表和不传是同一回事(`_page` 没有无链接素材时压根不写这一行)。
+
     **模块级函数、两个测试文件共用**(口径只有一份):这一份管「历史存量 / 清单
     解析 / 分界线」,`test_daily_seed_identity.py` 管「无 url 时那条归属匹配」。
     """
@@ -44,7 +49,8 @@ def write_report(date='2026-09-28', since='2026-09-27 08:00:00',
         for i, c in enumerate(carried, 1))
     tail = (f'\n\n## 素材清单({len(carried)} 条)\n\n{refs}\n') if carried else ''
     meta = (f'generated: {generated}\n' if generated else '') + \
-           (f'collected: {collected}\n' if collected else '')
+           (f'collected: {collected}\n' if collected else '') + \
+           ('carried_plain:\n' + ''.join(f'- {p}\n' for p in plain) if plain else '')
     (daily.report_dir() / f'{date}.md').write_text(
         f'---\ntype: daily-report\ndate: {date}\n'
         f"window_since: '{since}'\nwindow_until: '{until}'\n{meta}---\n\n{body}\n"

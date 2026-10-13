@@ -291,9 +291,22 @@ def _report_chain() -> list[carry.PastReport]:
                 frozenset(_carried_keys(body)), _material_rows(body),
                 _material_text(body), str(meta.get('generated') or ''),
                 str(meta.get('collected') or ''),
-                tuple(sorted(_carried_credits(body).items()))))
+                tuple(sorted(_carried_credits(body).items())),
+                _plain_paths(meta.get('carried_plain'))))
     chain.sort(key=lambda c: c.until)
     return chain
+
+
+def _plain_paths(value) -> tuple:
+    """frontmatter 里那份「带走的无链接素材」名单(`_page` 写的)。
+
+    手改过的文件什么都可能写,所以只收字符串成员、别的一概丢掉 —— 这份名单是
+    拿来**盖章**的,混进一个认不出的东西要么当场抛、要么盖到别处去。读不出就是
+    空名单,那一份照旧回落到按清单推断(老日报本来就没有这一行)。
+    """
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(v.strip() for v in value if isinstance(v, str) and v.strip())
 
 
 def _doc_credit(source, account) -> str:
@@ -411,6 +424,20 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
     }
     if issues:
         meta['sync_failed'] = issues
+    # 这一份带走的素材里**没有原文链接**那几条,各自的文档路径 —— 盖章时唯一的
+    # 硬证据。没有 url 的素材身份退化成标题(`daily_page.doc_key`),同名的两篇
+    # 共享一个身份,于是账本升版重算时只能靠推断去问"当初带走的是哪一篇",而
+    # 推断再多道也只能排除"它不可能是那一篇"(见 `daily_carry._match_holds`):
+    # 实测窗口内 121 条而上限 120 条时,落选的那篇同名同署名文章照样被盖成这一份
+    # 的已报道素材,待报道 1 → 0、当天生成直接答「没有未上报过的新内容」。
+    # **有链接的不记**:url 本身就是身份、清单那一行已经存着它,而 path 会随标题
+    # 或账号改名而变 —— 记下来反倒是个会过期的身份。
+    # 路径裸取,和 `mark_carried` 记账那一侧同一个写法:取不到就当场抛。`.get()`
+    # 会把"读不到 path"静默降级成"这一篇不在名单上",而名单少一条正是上面那个
+    # 漏洞的入口 —— 它会悄悄退回推断,恰恰是这次要修掉的那条路。
+    plain = [d['path'] for d in shown if not d['url']]
+    if plain:
+        meta['carried_plain'] = plain
     refs = '\n'.join(
         f"{i}. [{_md_text(d['title'])}]({_md_dest(d['url'])})"
         f"{_REF_SEP}{_label(d['source'])}·{d['account'] or '未署名'}"
