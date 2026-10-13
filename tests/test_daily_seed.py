@@ -24,13 +24,12 @@ def write_report(date='2026-09-28', since='2026-09-27 08:00:00',
     账号」),迁移盖章认的就是这一节。不传 `carried` 就是摆一份"读不出清单"
     的日报 —— 它对归属提供不了任何证据,那一档照约定一个章都不盖。
 
-    `generated` 是那一份自己记的**出稿完成**时刻(精度到分钟),`collected` 是
-    **取材快照**(秒精度)。都不传就是老日报那种只有窗口的形态 —— 盖章那边按
-    `collected` → `generated` → `until` 三档回落(见 `PastReport.latest_pickup`)。
+    `generated`(出稿完成,到分钟)和 `collected`(取材快照,到秒)都只是日报
+    frontmatter 里的元信息 —— 盖章**不读它们**(第 6 轮把那四道时间推断整个退役了)。
+    摆着是为了让这里写出来的日报和 `_page` 的真实产物同形。
 
     `credit` 是清单每一行收尾那个「来源·账号」。默认和 `add_doc` 的默认来源
-    (`rss` + `某号`)拼出来的逐字相同,所以默认摆盘下第四道判据不会插手 ——
-    要验那一道就显式传一个不同的值。
+    (`rss` + `某号`)拼出来的逐字相同 —— 同理只是为了同形,没有判据读它。
 
     `plain` 是那一份记下的**带走的无链接素材是哪几篇**(frontmatter 的
     `carried_plain`,按文档路径)。**不传就是老日报那种没有这一行的形态** ——
@@ -299,6 +298,12 @@ class DailyLedgerSeedTests(_Base):
         解析器盖错过的那些库就命中快路径,修好的解析器一次都跑不到 —— 用户装了
         修复版,原补录照样回不来(真实页面复现:上一版初始化过的库升级后仍然
         少一条)。所以**解析器也是盖章算法的一部分**。
+
+        摆的是上一版把它盖成 `#seed`(历史存量)那个形态 —— 那是**写死**:
+        `#seed <> 那一天` ⇒ 重新生成那一份时 `UNCARRIED` 把它排除掉。升级要把
+        这个章放回。无 url 的素材现在一律拿不到肯定归属(见
+        `test_daily_seed_identity`),所以正确的末态是**一个章都没有**,不是改成
+        那一份的日期:前者只是下一份多报一遍,后者才是补得回来的那一边。
         """
         self._chain(carried=[('[视频] 旧日报带走的补录', '')])
         add_doc(self.conn, 'source/rss/late.md', title='[视频] 旧日报带走的补录',
@@ -314,8 +319,12 @@ class DailyLedgerSeedTests(_Base):
             [('carry_epoch', '2026-09-28 08:00:00'), ('carry_seed_rev', '4')])
         self.conn.commit()
         daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
-        self.assertEqual({'source/rss/late.md': '2026-09-28'}, self.carried(),
-                         '上一版盖错的 #seed 必须在升级时改回真正的归属')
+        self.assertEqual({}, self.carried(),
+                         '上一版写死的那个 #seed 必须在升级时放回')
+        again = daily.collect(self.conn, T('2026-09-27 08:00'),
+                              T('2026-09-28 08:00'), day='2026-09-28').all()
+        self.assertIn('source/rss/late.md', [i['path'] for i in again],
+                      '放回之后重新生成那一份要选得到它(#seed 会挡住)')
 
     def test_changing_the_material_parser_requires_bumping_the_seed_revision(self):
         """改了清单解析就必须把 `SEED_REV` 加一 —— 这条按名单钉住。

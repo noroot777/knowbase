@@ -58,7 +58,6 @@ from kb.daily_carry import UNCARRIED as _UNCARRIED
 from kb.daily_carry import SEED_DAY  # noqa: F401
 from kb.daily_carry import day_key as _day_key
 from kb.daily_page import REF_SEP as _REF_SEP
-from kb.daily_page import carried_credits as _carried_credits
 from kb.daily_page import carried_keys as _carried_keys
 from kb.daily_page import material_rows as _material_rows
 from kb.daily_page import material_text as _material_text
@@ -289,9 +288,7 @@ def _report_chain() -> list[carry.PastReport]:
             chain.append(carry.PastReport(
                 since, until, str(meta.get('date') or path.stem),
                 frozenset(_carried_keys(body)), _material_rows(body),
-                _material_text(body), str(meta.get('generated') or ''),
-                str(meta.get('collected') or ''),
-                tuple(sorted(_carried_credits(body).items())),
+                _material_text(body),
                 _plain_paths(meta.get('carried_plain'))))
     chain.sort(key=lambda c: c.until)
     return chain
@@ -309,25 +306,14 @@ def _plain_paths(value) -> tuple:
     return tuple(v.strip() for v in value if isinstance(v, str) and v.strip())
 
 
-def _doc_credit(source, account) -> str:
-    """这篇文档在素材清单里该写的「来源·账号」—— `_page` 的收尾就是这么拼的。
-
-    无 url 时身份退化成标题,而清单那一行本来就记着来源和账号:它是唯一能把
-    「同名、但来自另一个号」分开的**正面**证据(三道时间判据只能排除不可能)。
-    口径必须和 `_page` 逐字一致,所以两处共用这一个函数。
-    """
-    return f"{_label(source)}·{account or '未署名'}"
-
-
 def _seed_args(first_days: int = FIRST_DAYS, now: datetime | None = None) -> tuple:
     """盖章要的那几样东西。
 
     已有的日报只有这边读得到(窗口在 frontmatter 里、带走了什么在正文的素材清单
     里),所以在这里读好再传下去 —— 账本那边不认识 vault,两个模块也就不用互相
-    import。素材身份那一份口径(`_doc_key`)和「来源·账号」那一份(`_doc_credit`)
-    同理跟着传过去。
+    import。素材身份那一份口径(`_doc_key`)同理跟着传过去。
     """
-    return (_report_chain, _doc_key, _doc_credit,
+    return (_report_chain, _doc_key,
             max(1, int(first_days or FIRST_DAYS)),
             (now or datetime.now()).replace(microsecond=0))
 
@@ -426,10 +412,12 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
         meta['sync_failed'] = issues
     # 这一份带走的素材里**没有原文链接**那几条,各自的文档路径 —— 盖章时唯一的
     # 硬证据。没有 url 的素材身份退化成标题(`daily_page.doc_key`),同名的两篇
-    # 共享一个身份,于是账本升版重算时只能靠推断去问"当初带走的是哪一篇",而
-    # 推断再多道也只能排除"它不可能是那一篇"(见 `daily_carry._match_holds`):
-    # 实测窗口内 121 条而上限 120 条时,落选的那篇同名同署名文章照样被盖成这一份
-    # 的已报道素材,待报道 1 → 0、当天生成直接答「没有未上报过的新内容」。
+    # 共享一个身份,于是账本升版重算时只能去问"当初带走的是哪一篇" —— 而那件事
+    # **推断不出来**:五轮审查逐个加判据,每一道都只是把"排除它不可能是那一篇"做得
+    # 更细,证不了"它就是那一篇"(实测窗口内 121 条而上限 120 条时,落选那篇同名
+    # 同署名文章照样被盖成已报道,待报道 1 → 0、当天生成答「没有未上报过的新内容」)。
+    # 判据因此整个退役,这份名单是无 url 素材唯一的身份来源(见 `daily_carry` 的
+    # `seed_locked`)。
     # **有链接的不记**:url 本身就是身份、清单那一行已经存着它,而 path 会随标题
     # 或账号改名而变 —— 记下来反倒是个会过期的身份。
     # 路径裸取,和 `mark_carried` 记账那一侧同一个写法:取不到就当场抛。`.get()`
@@ -532,9 +520,10 @@ def generate(since: datetime | None = None, until: datetime | None = None,
         conn.close()
     if not mat:
         raise LookupError(f'{_label_window(since, until)} 没有未上报过的新内容,先同步再生成日报')
-    # **取材快照就是这一刻。** 下面那次模型请求要跑几十秒到几分钟,所以"出稿完成"
-    # 的时刻证明不了"这篇文章进过这一份的输入" —— 那中间入库的文章一个都没被这一份
-    # 看见过(理由和事故形态见 `daily_carry.PastReport.latest_pickup`)。
+    # **取材快照就是这一刻。** 下面那次模型请求要跑几十秒到几分钟,所以 `generated`
+    # 记的"出稿完成"证明不了"这篇文章进过这一份的输入" —— 那中间入库的文章一个都
+    # 没被这一份看见过。两个时刻都写进 frontmatter,别混:盖章不读它们(归属只认
+    # `carried_plain` 那份名单),这一行是给人看的事实。
     taken = datetime.now()
     picked = model or llm_stages.stage_model('daily')
     shown = mat.all()
