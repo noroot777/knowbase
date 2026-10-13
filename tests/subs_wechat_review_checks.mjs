@@ -69,14 +69,9 @@ export async function checkWechatCollectorNotices({ evaluate, wait, check, click
     await refreshSource(connected);
     await refreshSource(silent);
     check('公众号手动查看期间提示恢复仍保留同步详情', await evaluate(`$('subs-wechat-notices').open`));
-    const search = await evaluate(`(() => {
-      const input = $('tgt-search'), box = input.getBoundingClientRect();
-      const point = { x:box.right - 6, y:box.top + box.height / 2 };
-      return { point, accessible:document.elementFromPoint(point.x, point.y) === input };
-    })()`);
-    await send('Input.dispatchMouseEvent', { type:'mousePressed', ...search.point, button:'left', clickCount:1 });
-    await send('Input.dispatchMouseEvent', { type:'mouseReleased', ...search.point, button:'left', clickCount:1 });
-    check('公众号外部点击一次即可收起详情并聚焦添加搜索', search.accessible && await evaluate(`!$('subs-wechat-notices').open && document.activeElement === $('tgt-search')`));
+    await click('#subs-wechat-manage');
+    await click('#tgt-search');
+    check('公众号手动详情可外部收起并恢复中心搜索焦点', await evaluate(`!$('subs-wechat-notices').open && document.activeElement === $('tgt-search')`));
     await setRunning(false);
     check('公众号没有采集器说明及同步时隐藏并复位入口', await evaluate(`$('subs-wechat-notices').hidden && !$('subs-wechat-notices').open`));
     await setRunning(true);

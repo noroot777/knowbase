@@ -240,6 +240,8 @@
         <details id="subs-wechat-notices" class="source-notices" hidden><summary><span id="subs-wechat-notices-summary" role="status">连接详情</span></summary><div class="source-notices-body">
           <div id="src-detail" class="source-banner" hidden role="status">正在检查来源连接</div>
           <div id="subs-wechat-progress" class="source-banner" hidden role="status"><span id="subs-wechat-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度<i data-arrow="right"></i></button></div>
+          <button type="button" class="source-notice-dismiss" tabindex="-1" aria-label="收起自动提示，继续操作"></button>
+          <span class="source-notice-dismiss-hint">点击任意位置收起提示，继续操作；也可按 Escape。</span>
         </div></details></div><span id="tgt-count" class="source-counts" role="status"></span></div>
       <div class="source-heading-actions"><a id="src-console" href="#" target="_blank" rel="noopener" style="display:none">采集器配置<i data-arrow="ext"></i></a>
         <button class="text-button" onclick="openWechatSetup()">检查并接入绿泡泡</button>
@@ -264,6 +266,8 @@
         <div id="source-configuration" class="source-banner" hidden role="status"></div>
         <div id="source-progress" class="source-banner" hidden role="status"><span id="source-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度<i data-arrow="right"></i></button></div>
         <button id="source-issues" hidden onclick="switchSourceView('manage')"></button>
+        <button type="button" class="source-notice-dismiss" tabindex="-1" aria-label="收起自动提示，继续操作"></button>
+        <span class="source-notice-dismiss-hint">点击任意位置收起提示，继续操作；也可按 Escape。</span>
       </div></details></div><div id="source-summary" class="source-counts" role="status"></div></div>
       <div class="source-view-tabs" role="group" aria-label="订阅工作区"><button id="source-view-items" class="on" aria-pressed="true" onclick="switchSourceView('items')">最新内容</button><button id="source-view-manage" aria-pressed="false" onclick="switchSourceView('manage')">订阅管理 <small id="source-subscriptions-count"></small></button></div>
       <div class="source-heading-actions"><button class="ghost" id="source-add" onclick="openSourceEditor()">添加订阅</button><button id="source-sync" onclick="syncSource()">同步全部</button></div>

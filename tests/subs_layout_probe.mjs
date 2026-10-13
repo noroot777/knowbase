@@ -6,6 +6,7 @@ import { checkSubscriptionUsability } from './subs_usability_checks.mjs';
 import { checkSubscriptionNotices, checkWechatNotices } from './subs_notices_checks.mjs';
 import { checkSourceNoticeRecovery } from './subs_notice_recovery_checks.mjs';
 import { checkWechatCollectorNotices, checkWechatTargetSizing } from './subs_wechat_review_checks.mjs';
+import { checkFirstWechatNotice, checkAutomaticSourceNotice } from './subs_notice_hit_checks.mjs';
 
 const base = process.argv[2];
 const profile = mkdtempSync(join(tmpdir(), 'kb-subs-layout-'));
@@ -101,6 +102,7 @@ try {
   await evaluate(`sourceError('示例读取失败：本地服务暂不可用'); true`);
   check('读取失败自动展开原因及重试入口', await evaluate(`$('source-notices').open && $('source-error').getClientRects().length > 0 && $('source-error-text').textContent.includes('本地服务暂不可用')`));
   await evaluate(`sourceError(); true`);
+  await checkAutomaticSourceNotice({ evaluate, wait, check, click, screenshot, send });
   await checkSourceNoticeRecovery({ evaluate, wait, check, click, screenshot, send });
   await checkSubscriptionNotices({ evaluate, check, click, screenshot });
 
@@ -221,6 +223,7 @@ try {
   await evaluate(`openSubsPanel('wechat'); true`);
   await wait(`!$('subs-wechat').hidden`);
   check('公众号也使用统一页头', await evaluate(`!!document.querySelector('#subs-wechat > .source-heading') && !$('subs-wechat-sync').hidden && !document.body.classList.contains('subs-reading')`));
+  await checkFirstWechatNotice({ evaluate, wait, check, click, screenshot, send });
   await checkWechatNotices({ evaluate, wait, check, click, screenshot });
   await checkWechatCollectorNotices({ evaluate, wait, check, click, screenshot, send });
   await checkWechatTargetSizing({ evaluate, wait, check, viewport, screenshot });
