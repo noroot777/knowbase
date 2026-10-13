@@ -13,7 +13,6 @@ let sourceItemsVersion = 0, sourceItemsFailed = false, sourceTranslating = 0, so
 // 后端给的「译不动」那一档(kb/feeds/translate.py 的 stuck):failed 条试过至少一次
 // 还没译出来、其中 shipped 条已经试满额度按原文入库了,reason 是最近一次的原因。
 // 它**不跟搜索词走**(见后端注释):这行提示底下那颗按钮的射程得可预测。
-let sourceStuck = null, sourceTranslateReady = true, sourceRetryBusy = false;
 let sourceBusy = false;
 let sourceNoticesAutoOpened = false;
 let wechatNoticesAutoOpened = false;
@@ -279,12 +278,36 @@ function sourceTime(value) {
 // feeds 视图还亮着才继续轮询/渲染:tab 在订阅页、页内选的就是这个来源
 function sourceActive() { return activeTab === 'subs' && subsKind === sourceKind && sourceModules.has(sourceKind); }
 
+// 「出现了一轮新的已结束运行,而且它带着本来源」—— 口径同 `pipe.js` 那个
+// 待处理计数:**不能只认 running→idle 那个跳变**,这条路一次模型都不调的情况下
+// 整轮可能几百毫秒,面板一次都没见过 `running=true`。认 `run_id` 而不是
+// `started_at`(后者只精确到秒,治不了这一档)。
+let sourceSeenRun = '';
+function sourceRunFinished(reset) {
+  const snap = pipeSnapshot;
+  const id = (snap && !snap.running && snap.run_id) || '';
+  // **头一次进来(或换来源)看到的那一轮是历史记录,不是"刚刚跑完"** —— 那时
+  // 本来就会整份重渲染。**吸收它的时点是 `reset` 自己,不是「至今见过 run_id
+  // 没有」**:面板打开时管道多半正空转,状态里压根没有 run_id,那个问法会让守卫
+  // 一直武装着、直到第一次真见到一个 —— 而那一次恰恰就是要认的那一轮(实测
+  // 这一档整组红:提示不消失、条目也不重读)。
+  if (reset) { sourceSeenRun = id; return false; }
+  if (!id || id === sourceSeenRun) return false;
+  sourceSeenRun = id;
+  return pipeRunScopes(snap.crawl_filter).some(s => s.channel === sourceKind);
+}
+
 async function loadSourceModule(reset = false, selectedId = null) {
   if (!sourceActive()) return;
   const kind = sourceKind, version = ++sourceVersion;
   try {
     const data = await pipeJson('/api/intake/' + kind);
     if (version !== sourceVersion || kind !== sourceKind || !sourceActive()) return;
+    // **「这一轮跑完了」要自己认一道,不能只比 `sources` 和 `total`** ——
+    // 重试那条路不跑采集:条目一条没新增(`total` 不变)、订阅行的
+    // `last_success` 也不动(那是采集阶段写的),于是两个判据对它都是瞎的,
+    // 而真正变了的恰恰是条目上那几档翻译状态和下面那行计数。
+    const finished = sourceRunFinished(reset);
     const changed = !sourceData || JSON.stringify(data.sources) !== JSON.stringify(sourceData.sources) || data.total !== sourceData.total;
     sourceData = data;
     sourceError();
@@ -306,7 +329,13 @@ async function loadSourceModule(reset = false, selectedId = null) {
     if (reset) fillSourceSettings(data.settings);
     const run = data.last_run;
     $('source-last-run').textContent = run ? `上次检查 ${sourceTime(run.finished_at)} · 新增 ${run.summary.added} 条${run.summary.errors.length ? ' · ' + run.summary.errors.length + ' 个来源失败' : ''}${run.summary.message ? ' · ' + run.summary.message : ''}` : '尚未同步。先检查订阅，再开始收集。';
-    if (reset || changed || sourceItemsFailed) await renderSourceView(reset);
+    // 显式把已加载条数传过去。**这一处今天是冗余带,如实记着**:
+    // `renderSourceView` 不给 `visibleCount` 时自己会回落到 `sourceOffset`,而
+    // 它和 `sourceRows.length` 在这条路上恒等(两者一起累加)—— 定点注入去掉这
+    // 个实参,探针红 0 条。留着是为了把"重读要保留已加载的那些"写在看得见的
+    // 地方:那个回落值换个人改一下,这条路就静默缩回默认一屏了。
+    if (reset || changed || sourceItemsFailed || finished)
+      await renderSourceView(reset, reset ? 0 : sourceRows.length);
     updateSourceRunStatus();
   } catch (e) {
     if (version === sourceVersion && kind === sourceKind && sourceActive()) sourceError(e.message);
@@ -489,56 +518,6 @@ function sourceText(item) {
            // 正文覆盖它",和 `retranslating` 是同一个形状。
            fetching: !!item.fetching, refetching: !!item.refetching };
 }
-// 「译不动」那一档的提示 + 重试入口。
-//
-// **为什么单独一句、不并进上面那两句**:上面说的是「等下一轮就好」(一轮只译
-// MAX_ITEMS 条,剩下的下一轮自然轮到),而这一句说的是「试过了,没成功」——
-// 两者的下一步完全相反。原来它们共用那句「还在等翻译」,于是一批已经失败两次、
-// 再失败一次就永久按英文入库的内容,和刚抓回来还没排到的内容在面板上长得一模
-// 一样(2026-10-13 实测:中转站 503 让 246 条卡住,面板只说「18 条还在等翻译」)。
-//
-// **`shipped` 那半必须说出来**:那批条目已经离开翻译队列、按英文写进了知识库,
-// 既不在上面那个计数里、条目上也没有任何标记 —— 不说的话面板上没有一个字提到
-// 它们存在,而它们正是这颗按钮唯一救得回来的东西。
-//
-// **没有可用翻译模型时只说事实、不给按钮**:那时点下去什么也不会翻(后端那道
-// 闸也会拒),按钮摆在那里是在承诺一件做不到的事。
-function stuckNote() {
-  const s = sourceStuck;
-  if (!s || !s.failed) return '';
-  const scope = $('source-filter').value ? '这条订阅' : '这个来源';
-  const shipped = s.shipped ? `，其中 ${s.shipped} 条已按原文写进知识库（不再自动重试）` : '';
-  const why = s.reason ? `最近一次失败：${esc(s.reason)}` : '';
-  const act = sourceTranslateReady
-    ? `<button class="link-btn" data-retry-translate ${sourceRetryBusy ? 'disabled' : ''}>重新翻译</button>`
-    : '还没有可用的翻译模型，先到顶栏「模型」里配好再重试。';
-  return `<span class="source-note-line">${scope}有 ${s.failed} 条外文内容翻译失败${shipped}。`
-       + `${why ? ' ' + why : ''} ${act}</span>`;
-}
-// 重试 = 把失败过的条目放回队列队首 + 立刻跑一轮翻译和导出(不重新采集)。
-// 射程跟着当前选中的订阅走,和那行提示里的数字是同一个范围。
-async function retryTranslate() {
-  if (sourceRetryBusy) return;
-  const scope = $('source-filter').value ? '这条订阅' : '这个来源';
-  const n = sourceStuck?.failed || 0;
-  // 会真的调模型花钱,而数量可能是上百条:先说清这一次要动多少、译完会怎样。
-  if (!await confirmBox({
-    title: `重新翻译${scope}失败的 ${n} 条内容？`,
-    body: '会把它们放回翻译队列最前面并立刻开始翻译，译完自动写进知识库并重建检索索引。'
-        + '这一步要调用翻译模型（按字数计费），一轮最多译 '
-        + '40 条，剩下的留到下一轮。',
-    ok: '开始翻译',
-  })) return;
-  sourceRetryBusy = true; renderSourceItems();
-  const id = Number($('source-filter').value) || null;
-  try {
-    const r = await pipePost(`/api/intake/${sourceKind}/translate-retry`,
-                             id ? { source_id: id } : {});
-    toast('已开始重新翻译', { type: 'ok', detail: r.detail });
-    await refreshPipe(); updateSourceRunStatus(); queueSourcePoll();
-  } catch (e) { toast('未能开始重新翻译', { detail: e.message }); }
-  finally { sourceRetryBusy = false; renderSourceItems(); }
-}
 function renderSourceItems() {
   const rows = sourceRows.map(renderSourceEntry).join('');
   // 两句提示各说各的一档,都有就都说:它们是流水线上先后两步,数字也不是一回事
@@ -548,8 +527,11 @@ function renderSourceItems() {
     sourceTranslating ? `${sourceTranslating} 条外文内容还在等翻译：译成中文之后才写进知识库。` : '',
   ].filter(Boolean);
   const note = notes.length || stuckNote() ? `<p class="source-note" role="status">${notes.join('')}${stuckNote()}</p>` : '';
-  $('source-list').innerHTML = rows ? note + rows :
-    `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value || $('source-filter').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value || $('source-filter').value ? '清除筛选，或换一个订阅来源试试。' : sourceData?.unconfigured && !sourceData?.ready ? sourceConfigHint() : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p>${$('source-q').value || $('source-filter').value ? '<button class="ghost" data-clear-source-filters>清除筛选</button>' : ''}</div>`;
+  // **提示挂在列表外面**:它的射程只跟选中的订阅走,而搜索词只决定列出哪几条。
+  // 写成"有内容才显示"的话,搜一个词恰好一条不中,那句"有 N 条翻译失败"和那颗
+  // 按钮会一起消失 —— 而它们说的事实一个字都没变。
+  $('source-list').innerHTML = note + (rows ||
+    `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value || $('source-filter').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value || $('source-filter').value ? '清除筛选，或换一个订阅来源试试。' : sourceData?.unconfigured && !sourceData?.ready ? sourceConfigHint() : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p>${$('source-q').value || $('source-filter').value ? '<button class="ghost" data-clear-source-filters>清除筛选</button>' : ''}</div>`);
   $('source-more').hidden = sourceOffset >= sourceTotal;
   $('source-more').textContent = `加载更多（已显示 ${sourceRows.length} / ${sourceTotal}）`;
   $('source-items-count').textContent = `${sourceTotal} 条`;

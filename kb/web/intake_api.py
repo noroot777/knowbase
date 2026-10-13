@@ -215,23 +215,32 @@ class TranslateRetryRequest(BaseModel):
 
 @router.post('/{kind}/translate-retry')
 def translate_retry(kind: str, body: TranslateRetryRequest):
-    """把译不动的条目放回翻译队列队首,并立刻跑一轮翻译 + 导出。
+    """把等待翻译的内容点名放到队首,并立刻跑一轮翻译 + 导出。
 
     **为什么要有这个端点**:试满 `MAX_TRIES` 的条目按设计离开翻译队列、按原文
     导出,于是 vault 里躺着英文而面板上一个标记都没有;而 `queued_sql` 的
     `translate_tries<MAX_TRIES` 让「同步」和「重试失败项」**都选不到它们** ——
     中转站一轮 503 就能造出上百条,原来只能靠手改 feeds.db 才解除得了
-    (2026-10-13 实测 rss 42 条 + social 66 条)。
+    (2026-10-13 实测 rss 42 条 + social 66 条)。只是还没轮到的普通积压同样
+    走这里:一轮只译 `MAX_ITEMS` 条,剩下的本来要等下一次同步。
+
+    **这里一个字节都不写库。** 要改的那一下(额度清零 + 点名)挪到了 export
+    阶段(`kb/collectors/feeds.py` 的 `materialize`),意图只放在
+    `start_pipeline` 原子写进去的那份 `crawl_filter` 里 —— 占不到管道就是这份
+    状态压根没写,库里什么都没变。原来是先写库再占管道,于是 409 拒绝之后额度
+    和标记已经落了盘,页面再读一次、失败说明和按钮一起消失,用户按拒绝文案说的
+    「结束后重试」已经没有入口可点(2026-10-13 第 1 轮审查实测)。在开头补一次
+    `running` 检查治不了它 —— 那和 `start_pipeline` 之间仍然能被抢占。
 
     **跑的阶段里没有 crawl**:要重译的内容早就在库里了,重新采集一遍既慢又可能
-    因为源站退避什么都拿不到,而翻译就挂在 export 阶段上(见
-    `kb/collectors/feeds.py` 的 `materialize`)。index/extract 跟在后面是因为
-    译文落盘之后那几篇 md 换了内容,不重建索引的话检索到的还是英文那一份。
+    因为源站退避什么都拿不到,而翻译就挂在 export 阶段上。index/extract 跟在
+    后面是因为译文落盘之后那几篇 md 换了内容,不重建索引的话检索到的还是英文
+    那一份。
     """
     kind_checked(kind)
     from kb.feeds import translate
-    # 没配 key 时 `translate_pending` 整个跳过、一次额度都不计 —— 这时放回队列
-    # 只是把标记写进库里,然后跑一轮什么也不翻的管道。如实拒掉,并说清下一步。
+    # 没配 key 时 `translate_pending` 整个跳过、一次额度都不计。如实拒掉,并说清
+    # 下一步 —— 放过去就是跑一轮什么也不翻的管道,而面板上是一句「已开始」。
     if not translate.available():
         raise HTTPException(400, '还没有可用的翻译模型，先到顶栏「模型」里给'
                                  '「外文翻译」这一步配好 API key，再回来重试。')
@@ -239,26 +248,40 @@ def translate_retry(kind: str, body: TranslateRetryRequest):
         ids = {s['id'] for s in reg.subscriptions(kind)}
         if body.source_id not in ids:
             raise HTTPException(404, '找不到这条订阅')
-    moved = translate.requeue_failed(kind, body.source_id)
-    # 判据是「现在队列里有没有东西」,不是「放回了几条」:正常积压(一轮只译
-    # MAX_ITEMS 条,剩下的 translate_tries 还是 0)同样该被这颗按钮消化,而它们
-    # 一条都不该被 `requeue_failed` 碰(额度没动过,放回是空操作)。
-    left = translate.pending(kind)
-    if not left:
-        raise HTTPException(400, '这个来源没有等待翻译的内容了。'
-                                 if not moved else
-                                 f'已把 {moved} 条放回队列，但它们此刻都在等正文'
-                                 '补抓，补抓完会自动翻译。')
-    if not pipeline.start_pipeline(['export','index','extract'],
-                                   crawl_filter={'channel':kind}):
+    # 判据是「这个射程里现在有没有要译的」,而且**按用户确认的那个范围数** ——
+    # 他筛着一条订阅时,确认框承诺的就是这条订阅的条数(见 `translate.stuck`)。
+    # 两段加起来才是射程:还排在队列里的 + 已经试满额度离开队列的(后者会被
+    # export 阶段那次 `requeue_failed` 放回来)。
+    #
+    # **判据不许写成「没失败过就拒」** —— 一条都没失败、只是还没轮到的积压正是
+    # 这颗按钮要消化的另一档(定时同步默认关着,它们没有别的办法动起来)。
+    # 反过来也不许只问 `failed`:`shipped`/`exhausted` 是 `RETRY_SQL` 的子集,
+    # `failed=0` 时它们必然也是 0,拿它们做第二分支是死代码。
+    #
+    # 两段都排除了「正文还在补抓队列里」的条目(`queued_sql` / `manual_sql` 同
+    # 一个口径),所以「有失败过的、但现在一条都译不了」是一个**真实可达**的档:
+    # 那批内容在等原文正文。如实说出来 —— 不说的话它和「压根没有外文内容」长得
+    # 一模一样,而两者的下一步完全不同(一个是等补抓,一个是没什么可做的)。
+    stuck = translate.stuck(kind, body.source_id)
+    queued = translate.pending(kind, body.source_id)
+    if not queued and not stuck['exhausted']:
+        raise HTTPException(400, '这些内容此刻都在等正文补抓，补抓完会自动翻译。'
+                            if stuck['failed'] else
+                            '这个范围里没有等待翻译的内容了。')
+    if not pipeline.start_pipeline(['export','index','extract'], crawl_filter={
+            'channel':kind, 'translate_retry':{'channel':kind,
+                                               'source_id':body.source_id}}):
         raise HTTPException(409,'其他同步正在运行，请结束后重试；自动同步会顺延')
     # 一轮上限是 `translate.MAX_ITEMS`,所以队列比它长时要如实说清这一轮只译得完
     # 一截 —— 不说的话用户点一次、看到数字只掉了 40,会以为按钮漏了东西。
-    this_round = min(left, translate.MAX_ITEMS)
-    detail = (f'已重新排队 {moved} 条，' if moved else '') + \
-        (f'这一轮翻译 {this_round} 条' if this_round >= left else
-         f'队列共 {left} 条，这一轮先译 {this_round} 条，其余留到下一轮')
-    return {'ok':True,'requeued':moved,'pending':left,'detail':detail + '。译完会自动写入知识库。'}
+    # `queued` 不含那些已经试满额度、离开队列的,所以总量要把它们加回来 ——
+    # 加的是 `exhausted` 而不是 `shipped`:后者只数真的落了盘的那些,而没落盘的
+    # 照样会被放回队列,按它算就又变成「说 3 条、动 4 条」(见 `translate.stuck`)。
+    total = queued + stuck['exhausted']
+    this_round = min(total, translate.MAX_ITEMS)
+    detail = (f'这一轮翻译 {this_round} 条' if this_round >= total else
+              f'共 {total} 条，这一轮先译 {this_round} 条，其余留到下一轮')
+    return {'ok':True,'pending':total,'detail':detail + '，译完会自动写入知识库。'}
 
 
 class SyncRequest(BaseModel):
