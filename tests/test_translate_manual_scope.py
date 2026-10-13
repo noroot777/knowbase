@@ -439,6 +439,93 @@ class ScopeTests(ManualRetryCase):
                              " WHERE kind='social'").fetchone()[0]
         self.assertEqual(1, kept, 'rss 那一轮的清场伸到了 social 的点名上')
 
+    def test_turning_off_fulltext_while_confirming_does_not_widen_the_round(self):
+        """**范围没换,范围里的那批内容变了 —— 这一轮一条都不许译。**
+
+        前三轮修的都是「范围」(哪条订阅、哪个 kind、上一轮的残留),这一条是
+        **范围里的集合**:`manual_sql` 排除「正文还在补抓队列里」的条目,而那一档
+        取决于订阅自己的 `fulltext` 开关。确认框开着的时候把它关掉,等正文的那几条
+        当场变成可译的 —— 订阅没换、请求里的 `source_id` 也没丢,漂的是集合本身
+        (2026-10-14 第 5 轮审查实测:确认框说 1 条,另一个窗口
+        `PATCH {"fulltext": false}`,点确认之后两条都译成了中文)。
+
+        判据落在**模型调用次数**上(一次都没有),外加「一条都没被点名」—— 清场
+        照旧生效,因为旧标记一个都不许留着(第 3 轮那条)。
+        """
+        from kb.collectors.feeds import FeedCollector
+        from kb import pipeline_state
+        from kb.feeds import fulltext
+        # 这条订阅开着补抓:一条正文早补齐过、试满额度(确认框里那 1 条),
+        # 另一条还在等正文(不算进确认数,见 `manual_sql`)
+        self._with_fulltext(self.source)
+        ready = self.exhaust('A new agent runtime')
+        with reg.db() as c:
+            c.execute("UPDATE feed_items SET fulltext_at='2026-10-01 09:00'"
+                      ' WHERE key=?', (ready,))
+        self.put('Waiting for its body', 'Shell only.')
+        before = translate.stuck('rss', self.source['id'])
+        self.assertEqual(1, before['exhausted'] + before['queued'])   # 确认框说 1 条
+        sig = before['sig']
+        # 确认框开着的时候,另一个窗口把这条订阅的「补抓原文正文」关掉
+        with reg.db() as c:
+            c.execute('UPDATE subscriptions SET fulltext=0 WHERE id=?',
+                      (self.source['id'],))
+        after = translate.stuck('rss', self.source['id'])
+        self.assertEqual(2, after['exhausted'] + after['queued'])     # 现在是 2 条
+        self.assertNotEqual(sig, after['sig'], '指纹没跟着集合变,它就什么也证明不了')
+        state = {'crawl_filter': {'channel': 'rss', 'translate_retry': {
+            'channel': 'rss', 'source_id': self.source['id'], 'scope_sig': sig}}}
+        chat = Mock(return_value='###TITLE###\n标题\n###BODY###\n正文。')
+        with patch.dict(pipeline_state._state, state, clear=False), \
+             patch.object(fulltext, 'fetch_one',
+                          lambda url: ('Full English body fetched. ' * 20, '')), \
+             patch.object(llm, 'chat', chat):
+            FeedCollector('rss').materialize()
+        self.assertEqual(0, chat.call_count, '确认的那一批已经不是这一批了,一条都不许译')
+        with reg.db() as c:
+            rows = [dict(r) for r in c.execute('SELECT * FROM feed_items')]
+        self.assertEqual([0, 0], [r['translate_manual'] for r in rows])
+        self.assertEqual(['', ''], [r['translated_at'] for r in rows])
+
+    def test_a_matching_confirmation_still_translates_its_round(self):
+        """反过来钉一边:集合一个字没变的那一次照旧译。
+
+        只钉「变了就不译」的话,一个**一律拒绝**的实现全绿,而那时这颗按钮
+        什么也做不了 —— 整个任务就是为了让它能做事。
+        """
+        from kb.collectors.feeds import FeedCollector
+        from kb import pipeline_state
+        self.exhaust('A new agent runtime')
+        sig = translate.stuck('rss', self.source['id'])['sig']
+        state = {'crawl_filter': {'channel': 'rss', 'translate_retry': {
+            'channel': 'rss', 'source_id': self.source['id'], 'scope_sig': sig}}}
+        chat = Mock(return_value='###TITLE###\n标题\n###BODY###\n正文。')
+        with patch.dict(pipeline_state._state, state, clear=False), \
+             patch.object(llm, 'chat', chat):
+            FeedCollector('rss').materialize()
+        self.assertEqual(1, chat.call_count)
+
+    def test_the_signature_follows_the_members_not_just_the_count(self):
+        """指纹认的是**成员**,不只是条数。
+
+        条数一样而动的是另一批内容时,用户确认的那句话("这个范围的 N 条")在
+        字面上仍然成立,可译的已经不是他看到的那些了。两个方向的代价不对等:
+        多拒一次他重点一下就是了,多译一条是花他没确认过的钱。
+        """
+        a = self.exhaust('A new agent runtime')
+        first = translate.stuck('rss', self.source['id'])['sig']
+        self.assertTrue(first.startswith('1:'), first)
+        # 那一条译完了,同时另一条新抓回来 —— 条数还是 1
+        with reg.db() as c:
+            c.execute("UPDATE feed_items SET translated_at='2026-10-14 10:00',"
+                      " title_zh='标题' WHERE key=?", (a,))
+        self.put('Another English post', 'English body here. ' * 10)
+        second = translate.stuck('rss', self.source['id'])['sig']
+        self.assertTrue(second.startswith('1:'), second)      # 条数相同
+        self.assertNotEqual(first, second)                    # 但不是同一批
+        with self.assertRaises(translate.ScopeChanged):
+            translate.requeue_failed('rss', self.source['id'], first)
+
     def test_a_refused_request_does_not_touch_the_database(self):
         """**忙碌拒绝时库里一个字节都不许动。**
 

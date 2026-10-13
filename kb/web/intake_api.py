@@ -211,6 +211,9 @@ def x_channel_check(kind: str):
 
 class TranslateRetryRequest(BaseModel):
     source_id: int | None = None
+    # 确认框弹出那一刻的候选集合指纹(`translate.scope_signature`)。面板一定
+    # 带着它;空串是「调用方没有确认快照」那一档,见下面那段。
+    scope_sig: str = Field(default='', max_length=120)
 
 
 @router.post('/{kind}/translate-retry')
@@ -268,9 +271,26 @@ def translate_retry(kind: str, body: TranslateRetryRequest):
         raise HTTPException(400, '这些内容此刻都在等正文补抓，补抓完会自动翻译。'
                             if stuck['failed'] else
                             '这个范围里没有等待翻译的内容了。')
+    # **范围固定住了,范围里的那批内容还会变。** 判据里有订阅自己的设置 ——
+    # 确认框开着的时候把那条订阅的「补抓原文正文」关掉,等正文的那几条当场
+    # 变成可译的(2026-10-14 第 5 轮审查实测:确认框说 1 条,实际译了 2 条,
+    # 而订阅没换、请求里的 `source_id` 也没丢)。所以除了「哪个范围」,还要比
+    # 一次「这个范围里的哪几条」。**这一道是早一道**,它赶在占管道之前,于是
+    # 用户点下去的那一刻就能看到为什么没开始;承重的是 `requeue_failed` 在
+    # 写事务里那一次(端点放行到真开跑之间还隔着整个 crawl 阶段)。
+    #
+    # 空指纹放行:没有确认框就没有「承诺过的数字」这回事(curl / 脚本直调),
+    # 拒绝一个什么都没被承诺的调用方没有意义。
+    if body.scope_sig:
+        now = translate.scope_signature(kind, body.source_id)
+        if now != body.scope_sig:
+            raise HTTPException(409, '这个范围里等着译的内容在你确认期间变过了'
+                                     '（比如这条订阅的「补抓原文正文」被改动）。'
+                                     '请回面板看一眼新的条数，再点一次。')
     if not pipeline.start_pipeline(['export','index','extract'], crawl_filter={
             'channel':kind, 'translate_retry':{'channel':kind,
-                                               'source_id':body.source_id}}):
+                                               'source_id':body.source_id,
+                                               'scope_sig':body.scope_sig}}):
         raise HTTPException(409,'其他同步正在运行，请结束后重试；自动同步会顺延')
     # 一轮上限是 `translate.MAX_ITEMS`,所以队列比它长时要如实说清这一轮只译得完
     # 一截 —— 不说的话用户点一次、看到数字只掉了 40,会以为按钮漏了东西。

@@ -75,6 +75,14 @@ async function retryTranslate() {
   const kind = sourceKind, sid = $('source-filter').value;
   const scope = sid ? '这条订阅' : '这个来源';
   const s = sourceStuck || {};
+  // **连「是哪几条」一起定死。** 范围(来源 + 订阅)固定住之后,范围里的集合
+  // 还会变:它的判据里有订阅自己的「补抓原文正文」开关,确认框开着的时候在
+  // 另一个窗口关掉它,等正文的那几条当场变成可译的 —— 确认 1 条、实际译 2 条
+  // (2026-10-14 第 5 轮审查实测)。这份指纹由后端按同一个口径算出来
+  // (`translate.scope_signature`,和下面那个数字出自同一个快照),我们只负责
+  // 把它原样带回去;变了就由后端拒绝,不在前端比数字 —— 请求发出之后、真正
+  // 开跑之前还会变,那一段只有后端够得着。
+  const sig = s.sig || '';
   // **说的数字必须是真会动的那些**(同 `stuckNote` 的 `scopeTotal`),不是
   // "失败了几条" —— 后者只是其中一段,照它说就把花钱的规模说小了。
   const n = (s.queued || 0) + (s.exhausted || 0);
@@ -99,7 +107,7 @@ async function retryTranslate() {
   const id = Number(sid) || null;
   try {
     const r = await pipePost(`/api/intake/${kind}/translate-retry`,
-                             id ? { source_id: id } : {});
+                             { ...(id ? { source_id: id } : {}), scope_sig: sig });
     toast('已开始重新翻译', { type: 'ok', detail: r.detail });
     // **被接纳的那一刻就重读一次条目**:额度清零和"这一轮只译它们"的标记是
     // 导出阶段落的,但条目上那几档状态文案(等翻译 / 已按原文入库)此刻就该跟着

@@ -46,14 +46,18 @@ const ALL = Array.from({ length: 45 },
 // `shipped`(真落了盘的)和 `exhausted`(试满额度、离开了队列的)**故意摆成不同
 // 的数**:射程必须按后者算(没落盘的照样会被放回队列),而那句「已按原文写进
 // 知识库」只能用前者。两个数字一样的话,前端错用哪一个都看不出来。
-const STUCK = { failed: 108, shipped: 60, exhausted: 66, queued: 180, reason: REASON };
+// `sig` 是确认那一刻「这个范围里是哪几条」的指纹(后端 `scope_signature` 算的,
+// 口径同那两个数字)。前端只负责原样带回去 —— 带丢了的话后端那道闸形同虚设。
+const STUCK = { failed: 108, shipped: 60, exhausted: 66, queued: 180, reason: REASON,
+                sig: "246:aaaaaaaabbbbbbbb" };
 let mode = "all";
 // 摆盘靠 query 切换。`queued` 是「还排在队列里的」(不含试满次数的那批),
 // `shipped` 是「已按原文入库」—— 两段互不重叠,按钮的射程是它们的和。
 const MODES = {
   all:    { stuck: STUCK, translate_ready: true, translating: 3 },
   // 筛到一条订阅:数字跟着那条订阅收窄(后端 `_retry_where` 那一半)
-  one:    { stuck: { failed: 3, shipped: 2, exhausted: 2, queued: 1, reason: REASON },
+  one:    { stuck: { failed: 3, shipped: 2, exhausted: 2, queued: 1, reason: REASON,
+                     sig: "3:ccccccccdddddddd" },
             translate_ready: true, translating: 1 },
   // ④ 没失败过、只是还没排到:照样要有入口
   plain:  { stuck: { failed: 0, shipped: 0, exhausted: 0, queued: 18, reason: "" },
@@ -106,6 +110,8 @@ const FIXTURES = {
 };
 
 const posted = [];      // 真实请求留痕:射程是不是跟着筛选收窄,只能看这里
+// 后端那道「确认期间集合变了」的闸(409)真的拦住时,页面该怎么说
+let retryStatus = 200, retryDetail = "";
 const itemReqs = [];    // ⑤ 刷新那一次带了多大的 limit、筛选还在不在
 const MIME = { html: "text/html", js: "text/javascript", css: "text/css", json: "application/json",
                svg: "image/svg+xml", ico: "image/x-icon" };
@@ -127,6 +133,7 @@ const server = createServer((req, res) => {
     req.on("data", c => { raw += c; });
     return req.on("end", () => {
       posted.push({ path, body: raw });
+      if (retryStatus !== 200) return json({ detail: retryDetail }, retryStatus);
       json({ ok: true, pending: 246,
              detail: "共 246 条，这一轮先译 40 条，其余留到下一轮，译完会自动写入知识库。" });
     });
@@ -329,6 +336,42 @@ check("范围没变那一次照旧发得出去", await (async () => {
   for (let i = 0; i < 40 && !posted.length; i++) await sleep(120);
   return posted.length === 1 && !("source_id" in JSON.parse(posted[0].body || "{}"));
 })(), JSON.stringify(posted));
+
+// ── 3.6 指纹:带得出去,而且后端拒了之后原因不许被吞掉 ──────────────────────
+// 范围(来源 + 订阅)固定住之后,**范围里的集合**还会变 —— 判据里有订阅自己的
+// 「补抓原文正文」开关,确认框开着的时候关掉它,等正文的那几条当场变成可译的
+// (2026-10-14 第 5 轮审查实测:确认 1 条、实际译了 2 条)。比数字拦不住它:
+// 请求发出之后、真正开跑之前还会变,那一段只有后端够得着。所以前端的职责只有
+// 两件:把指纹原样带过去,以及后端拒了之后如实说出原因。
+posted.length = 0;
+await evalJs(`$('source-filter').value = '7'`);
+await reload("one");
+await clickAt("[data-retry-translate]");
+await until(`!!document.querySelector('.confirm-mask [data-act="ok"]')`);
+await clickAt('.confirm-mask [data-act="ok"]');
+for (let i = 0; i < 40 && !posted.length; i++) await sleep(120);
+check("请求带上了确认那一刻的集合指纹",
+      JSON.parse(posted[0]?.body || "{}").scope_sig === "3:ccccccccdddddddd", posted[0]?.body);
+check("指纹是这个范围自己那一份(筛到订阅时不是整个来源那个)",
+      JSON.parse(posted[0]?.body || "{}").scope_sig !== "246:aaaaaaaabbbbbbbb", posted[0]?.body);
+posted.length = 0;
+await evalJs(`document.querySelectorAll('.toast').forEach(e => e.remove())`);
+retryStatus = 409;
+retryDetail = "这个范围里等着译的内容在你确认期间变过了（比如这条订阅的"
+            + "「补抓原文正文」被改动）。请回面板看一眼新的条数，再点一次。";
+await reload("one");
+await clickAt("[data-retry-translate]");
+await until(`!!document.querySelector('.confirm-mask [data-act="ok"]')`);
+await clickAt('.confirm-mask [data-act="ok"]');
+check("后端拒了之后如实说出原因(不是一句无信息的「失败」)",
+      await until(`!!document.querySelector('.toast.err')`)
+      && (await evalJs(`document.querySelector('.toast.err')?.textContent || ''`))
+         .includes("确认期间变过了"),
+      await evalJs(`document.querySelector('.toast.err')?.textContent || '(没有 err toast)'`));
+check("被拒之后按钮回到可点状态(他要能看一眼新数字再点一次)",
+      await until(`!document.querySelector('[data-retry-translate]')?.disabled`));
+retryStatus = 200; retryDetail = "";
+await evalJs(`document.querySelectorAll('.toast').forEach(e => e.remove())`);
 
 // ── 4. ④ 没失败过的普通积压也要有入口 ───────────────────────────────────────
 // 定时同步默认关着,不给按钮的话那 18 条在系统里没有别的办法动起来 —— 而原来

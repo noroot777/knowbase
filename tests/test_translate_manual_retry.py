@@ -42,14 +42,14 @@ from tests.test_feed_translate import FeedCase  # noqa: E402
 _PROBE = Path(__file__).resolve().parent / "translate_manual_retry_probe.mjs"
 
 
-def _stuck(failed, shipped, queued=0, reason='', exhausted=None):
+def _stuck(failed, shipped, queued=0, reason='', exhausted=None, sig='sig-now'):
     """`translate.stuck` 的回包形状。端点只读它,不写库 —— 见 `translate_retry`。
 
     `exhausted` 默认跟 `shipped` 一致(那是常态:试满额度的下一步就是按原文导出),
     两者分开摆是为了钉住「说的数字和动的那批对不对得上」。
     """
     return {'failed': failed, 'shipped': shipped, 'queued': queued, 'reason': reason,
-            'exhausted': shipped if exhausted is None else exhausted}
+            'exhausted': shipped if exhausted is None else exhausted, 'sig': sig}
 
 
 class EndpointTests(unittest.TestCase):
@@ -222,6 +222,63 @@ class EndpointTests(unittest.TestCase):
             detail = self.client.post('/api/intake/rss/translate-retry',
                                       json={}).json()['detail']
         self.assertNotIn('下一轮', detail)
+
+    def test_a_stale_confirmation_is_refused_before_anything_starts(self):
+        """**确认期间这个范围里的内容变了 —— 连管道都不占。**
+
+        范围(来源 + 哪条订阅)由前端在打开确认框之前定死,可**范围里的那批内容**
+        还会变:判据里有订阅自己的「补抓原文正文」开关,确认框开着的时候把它关掉,
+        等正文的那几条当场变成可译的(2026-10-14 第 5 轮审查实测:确认 1 条、实际
+        译了 2 条,而订阅没换、`source_id` 也没丢)。
+
+        判据落在**后果**上:409 + 说清为什么,而且 `start_pipeline` 一次都没被调
+        —— 占了管道再拒绝的话,这一轮什么也没干却把别人的同步挡在外面。
+        """
+        from kb import pipeline
+        start = Mock()
+        with patch.object(translate, 'available', lambda: True), \
+             patch.object(translate, 'stuck', lambda *a, **k: _stuck(1, 0, queued=1)), \
+             patch.object(translate, 'pending', lambda *a, **k: 1), \
+             patch.object(translate, 'scope_signature', lambda *a, **k: '2:bbbbbbbb'), \
+             patch.object(pipeline, 'start_pipeline', start):
+            r = self.client.post('/api/intake/rss/translate-retry',
+                                 json={'scope_sig': '1:aaaaaaaa'})
+        self.assertEqual(409, r.status_code)
+        self.assertIn('变过了', r.json()['detail'])
+        self.assertIn('补抓原文正文', r.json()['detail'])     # 说清了最常见的那个原因
+        start.assert_not_called()
+
+    def test_a_matching_confirmation_is_not_refused(self):
+        """反过来钉一边:指纹相符的那一次照旧放行。
+
+        只钉「不符就拒」的话,一个**一律拒绝**的实现也能全绿,而那时这颗按钮
+        压根点不动。
+        """
+        from kb import pipeline
+        with patch.object(translate, 'available', lambda: True), \
+             patch.object(translate, 'stuck', lambda *a, **k: _stuck(1, 0, queued=1)), \
+             patch.object(translate, 'pending', lambda *a, **k: 1), \
+             patch.object(translate, 'scope_signature', lambda *a, **k: '1:aaaaaaaa'), \
+             patch.object(pipeline, 'start_pipeline', lambda *a, **k: 'run-1'):
+            r = self.client.post('/api/intake/rss/translate-retry',
+                                 json={'scope_sig': '1:aaaaaaaa'})
+        self.assertEqual(200, r.status_code, r.text)
+
+    def test_a_caller_without_a_confirmation_snapshot_is_still_served(self):
+        """空指纹那一档放行:curl / 脚本直调没有确认框,也就没有承诺过的数字。
+
+        钉它是因为**这是所有既有调用路径的那一档** —— 写成「必填」的话这颗按钮
+        之外的每一处调用都变成 409,而它们从来没有被承诺过任何数字。
+        """
+        from kb import pipeline
+        with patch.object(translate, 'available', lambda: True), \
+             patch.object(translate, 'stuck', lambda *a, **k: _stuck(1, 0, queued=1)), \
+             patch.object(translate, 'pending', lambda *a, **k: 1), \
+             patch.object(translate, 'scope_signature',
+                          Mock(side_effect=AssertionError('空指纹不该去算这一步'))), \
+             patch.object(pipeline, 'start_pipeline', lambda *a, **k: 'run-1'):
+            r = self.client.post('/api/intake/rss/translate-retry', json={})
+        self.assertEqual(200, r.status_code, r.text)
 
     def test_a_busy_pipeline_is_reported_as_a_conflict(self):
         from kb import pipeline

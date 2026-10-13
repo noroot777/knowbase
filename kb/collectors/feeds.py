@@ -65,8 +65,17 @@ class FeedCollector:
         retry = self._manual_retry()
         picked = 0
         if retry is not None:
-            picked = translate.requeue_failed(self.name, retry.get('source_id'))
-            _log(f'export: 已点名 {picked} 条等待翻译的内容，这一轮只译它们')
+            try:
+                picked = translate.requeue_failed(
+                    self.name, retry.get('source_id'), retry.get('scope_sig') or '')
+                _log(f'export: 已点名 {picked} 条等待翻译的内容，这一轮只译它们')
+            except translate.ScopeChanged as e:
+                # **这一轮一条都不译,而且射程不许放开。** `only_manual` 照旧是
+                # True(判据是「这一轮是不是点名的」),而点名标记已经在那次清场
+                # 里全清掉了,于是取数取到 0 条。端点那一侧还有一道同样的校验,
+                # 它在用户点下去的那一刻就能把话说清楚;这一道是兜底 —— 端点
+                # 放行到这里开跑之间还隔着整个 crawl 阶段。
+                _log(f'export: {e}')
 
         # 进度每 5 条报一次:_stage 每次都往运行日志里写一行,逐条报会把
         # 只留 80 行的日志刷成一屏"翻译 17/40",别的阶段全被挤没。
