@@ -17,10 +17,19 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor
 
 from kb.feeds import registry as reg
+# 「哪些条目算在这一轮里」的判据全在那个模块里(搬出去只因为 700 行上限)。
+# **一律原样再导出**:外面照旧 `translate.queued_sql()` / `translate.stuck()`,
+# 测试照旧 `patch.object(translate, 'pending')` —— 这几个名字在本模块的全局里,
+# 打桩改的就是这一份,而 `translate_pending` 查的也是这一份。
+from kb.feeds.translate_scope import (            # noqa: F401 - 再导出
+    MAX_TRIES, RETRY_SQL, ScopeChanged, clear_manual, manual_sql, pending,
+    queued_sql, requeue_failed, scope_signature, stuck, _retry_where,
+)
 from kb.pipeline_state import _state
 
 # 一轮同步最多译多少条:存量几千条英文的话,一次全译会把一次同步拖成几小时、
@@ -31,7 +40,6 @@ MAX_ITEMS = int(os.environ.get('KB_TRANSLATE_MAX_ITEMS', '40'))
 MAX_BODY = int(os.environ.get('KB_TRANSLATE_MAX_BODY', '12000'))
 CHUNK = 3000            # 单次请求的正文上限,按段落切,不切断句子
 WORKERS = 3             # 并发度:中转站限流下 3 条并行已经够快,再高容易 429
-MAX_TRIES = 3
 
 _TRUNCATED = '\n\n> 原文较长，以上为前 {n} 字的中文翻译，完整内容请打开原文。'
 NOTE = '> 本文由英文原文自动翻译，专有名词保留原文；如有歧义请对照原文。'
@@ -176,29 +184,6 @@ def _has(item, column: str) -> bool:
         return False
 
 
-def queued_sql() -> tuple[str, list]:
-    """"还排在翻译队列里"的判据,只有这一份。
-
-    这些条目**不按英文导出**:一轮只译 MAX_ITEMS 条,一次进来 41 条英文的话
-    第 41 条会先以英文写进 vault,而索引、提取、检索、日报读的全是 vault 里
-    那份英文。等下一轮译完再落盘,晚一轮但是中文的。队列有出口——试满
-    MAX_TRIES 次仍然失败的就不在这个集合里了,那时按原文导出,免得一条
-    永远译不动的内容永远进不了知识库。
-
-    判据是 `translated_at`(`_save` 只在整条译成时写它),不是"有没有 body_zh"
-    ——只有标题的短动态译完之后 body_zh 仍然是空串,拿它判的话这一条译完了
-    还赖在队列里,每轮重译一遍。
-
-    **还排在正文补抓队列里的条目不算待翻译**(见 `kb.feeds.fulltext`):它们
-    此刻手里那份正文是 feed 给的跳转壳,正文马上要被整条换掉。不排掉的话同一
-    条内容买两次模型调用 —— 先按壳译一遍,补上正文再译一遍,而第一份译文随后
-    就被 `fulltext._save` 丢掉。翻译是这条链上最贵的一步,顺序不能反。
-    """
-    from kb.feeds import fulltext      # 函数内 import:两个模块互相认识对方的口径
-    cond, args = fulltext.queued_sql()
-    return (f"lang='en' AND translated_at='' AND translate_tries<? AND NOT ({cond})",
-            [MAX_TRIES, *args])
-
 
 def available() -> bool:
     """翻译这一步现在能不能真的发生(配了 key、解析得出模型)。
@@ -214,11 +199,7 @@ def available() -> bool:
         return False
 
 
-def pending(kind: str) -> int:
-    cond, args = queued_sql()
-    with reg.db() as c:
-        return c.execute(f'SELECT count(*) FROM feed_items WHERE kind=? AND {cond}',
-                         (kind, *args)).fetchone()[0]
+
 
 
 # 复判的长度上限:判定规则收紧的只是"短文本"那一档,够长的条目在旧规则下
@@ -307,7 +288,7 @@ def _save(key: str, title_zh: str, body_zh: str, seen: tuple[str, str]) -> bool:
         # exported_hash 清空 = 让导出阶段重写这篇 md。译完不重导的话,vault 里
         # 留着的还是那份英文,索引/提取/日报读到的也还是英文,等于没译。
         cur = c.execute("""UPDATE feed_items SET title_zh=?,body_zh=?,translated_at=?,
-            translate_error='',translate_tries=0,exported_hash=''
+            translate_error='',translate_tries=0,translate_manual=0,exported_hash=''
             WHERE key=? AND title=? AND body=?""",
             (title_zh, body_zh, reg.now(), key, *seen))
         return bool(cur.rowcount)
@@ -329,11 +310,31 @@ def _fail(key: str, error: Exception, seen: tuple[str, str]) -> bool:
         return bool(cur.rowcount)
 
 
-def translate_pending(kind: str, limit: int | None = None, progress=None) -> dict:
+def translate_pending(kind: str, limit: int | None = None, progress=None,
+                      only_manual: bool = False,
+                      source_id: int | None = None) -> dict:
     """把这个来源里待翻译的条目译成中文。返回一份成品摘要给调用方汇报。
 
     没配 key / 没有可用模型时直接跳过(skipped 带原因),不报错也不重试计数
     ——那是配置问题,不是这些条目有问题,按失败记会把重试次数白白耗光。
+
+    **`only_manual` 和 `source_id` 一起才是付费边界,缺一不可。** 面板上那颗
+    「重新翻译」按钮的射程跟着当前选中的订阅走,而这两个参数是那个射程唯一跟得到
+    取数这一步的东西:收窄只到 `requeue_failed`(它按 `source_id` 点名)的话,
+    这里照旧按整个 kind 取 `MAX_ITEMS` 条,于是用户确认「这条订阅的 1 条」却为
+    另一条订阅的内容也付了钱(2026-10-13 第 1 轮审查实测)。`crawl_filter`
+    到不了这里 —— `crawl_channels` 只留 `channel`/`accounts` 两个键。
+
+    **`source_id` 这一道是为了不把旧标记当成本次授权。** `translate_manual`
+    是落在库里的持久标记,而清它那一步**不保证跑得到**:同一轮里补抓阶段抛异常、
+    进程被 kill、机器断电,标记就留在那儿。下一次重试筛着另一条订阅点下去,
+    只按标记取数就会把上一轮残留的那些一起译掉 —— 用户确认 1 条、实际译 2 条,
+    多出来的那条属于他这次压根没选的订阅(2026-10-14 第 2 轮审查实测:在补抓
+    的正文保存处注入 `OSError`,随后筛另一条订阅重试,两条都译成了中文)。
+    判据因此是**本次点的那个范围**,不是「上一轮应该清掉了」。
+
+    **常规同步两个都不传**:那时照旧按「点名的 → 失败过的 → 新的」排序取数,
+    只是顺序上让残留的点名条目先走,不把别的内容关在门外。
     """
     # stale:这一轮的回包作废了几条(请求发出之后原文被换掉了,见 `_save`)。
     # 它既不算成功也不算失败 —— 什么都没坏,只是这份译文不是当前内容的译文;
@@ -344,6 +345,12 @@ def translate_pending(kind: str, limit: int | None = None, progress=None) -> dic
     _label_unknown(kind)
     _requeue_partial(kind)
     cond, cargs = queued_sql()          # 队列判据只有这一份,别在这里另写一遍
+    if only_manual:
+        cond += ' AND translate_manual=1'
+    # 本次点名的那个范围。**和标记是两道,不是一道** —— 见上面 docstring。
+    scope, sargs = _retry_where(source_id)
+    cond += scope
+    cargs = [*cargs, *sargs]
     with reg.db() as c:
         # **失败过的优先**。原来是 `ORDER BY translate_tries`(升序),于是译
         # 不动的那些永远排在"从没试过"的后面:实测队列里 833 条 tries=0 压着
@@ -354,19 +361,27 @@ def translate_pending(kind: str, limit: int | None = None, progress=None) -> dic
         # 就按原文导出、离开队列。而 tries=0 的那些只是正常积压,晚一轮无损。
         rows = [dict(r) for r in c.execute(
             f'SELECT * FROM feed_items WHERE kind=? AND ({cond})'
+            # **手动重试排在最前面**,压过「失败过的优先」:那颗按钮是用户的
+            # 显式指令,而第二段排序恰好把刚放回队列的那批排到队尾(额度清零
+            # = 从没试过)。队列积压超过一轮上限时,点按钮等一轮同步会是库里
+            # 一个字都没变 —— 见 `requeue_failed`。
             # `key` 收尾是为了定序:`fetched_at` 只精确到秒(`registry.now`),
-            # 一批抓回来的几百条时间戳一模一样,前两段排完仍然没有定序 —— 取
+            # 一批抓回来的几百条时间戳一模一样,前几段排完仍然没有定序 —— 取
             # 哪 40 条就交给 SQLite 的扫描顺序了,不可复现也没法测。
-            ' ORDER BY translate_tries DESC, fetched_at DESC, key LIMIT ?',
+            ' ORDER BY translate_manual DESC, translate_tries DESC,'
+            ' fetched_at DESC, key LIMIT ?',
             (kind, *cargs, max(1, limit or MAX_ITEMS))).fetchall()]
-    summary['left'] = max(0, pending(kind) - len(rows))
+    # 剩几条要按**这一轮的射程**数:只译点名条目时拿整个来源的队列长度去减,
+    # 报出来的「留到下一轮」里混着压根不在这一轮射程里的内容。
+    summary['left'] = max(0, pending(kind, source_id,
+                                     only_manual=only_manual) - len(rows))
     if not rows:
         return summary
     try:
         model = _model()
     except Exception as e:
         summary['skipped'] = str(e)
-        summary['left'] = pending(kind)
+        summary['left'] = pending(kind, source_id, only_manual=only_manual)
         return summary
 
     def one(item):
