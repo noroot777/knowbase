@@ -489,10 +489,14 @@ async function refreshDailyStatus() {
   dailyState = s;
   $('daily-progress').hidden = !s.running;
   $('daily-progress-text').textContent = dailyPhaseText(s);
-  // 失败原因留在横幅里,直到下一轮真的跑起来才清——列表读取失败的提示也用
-  // 这条横幅,顺手清掉的话用户只看到一片空白列表而没有任何原因。
+  // 失败原因留在横幅里,直到**下一轮有了新结果**才清——列表读取失败的提示也用
+  // 这条横幅,顺手清掉的话用户只看到一片空白列表而没有任何原因(所以清的只是
+  // 'run' 那一条)。**认「跑起来了」是不够的**:成功的那一轮同样可能整个落在两
+  // 次轮询之间(桩模型、素材不多、或者定时/CLI 跑的那一轮),页面一次都没见过
+  // running —— 于是正文和按钮都更新成了新的,顶上那条横幅还写着上一次失败的
+  // 原因,而面板上再没有任何操作能把它清掉。所以 `fresh` 那一跳也清。
   if (!s.running && s.phase === 'failed') dailyError(s.error || '日报生成失败', 'run');
-  else if (s.running) clearDailyError('run');
+  else if (s.running || fresh) clearDailyError('run');
   renderDailyButtons();
   renderDailySyncNote(s);
   if (finished) {

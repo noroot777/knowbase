@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from kb import daily, daily_carry
+from kb import daily, daily_carry, store
 from tests.test_daily_carried import T, _Base, add_doc
 
 
@@ -365,6 +365,84 @@ class DailyLedgerSeedTests(_Base):
         self.conn.executemany(
             'INSERT INTO daily_state(key,value) VALUES(?,?)',
             [('carry_epoch', '2026-09-28 08:00:00'), ('carry_seed_rev', '4')])
+        self.conn.commit()
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({}, self.carried(), '抢错的那条归属必须在升级时放回')
+        picked = daily.collect(self.conn, T('2026-09-28 08:00'),
+                               T('2026-09-29 08:00')).all()
+        self.assertIn('source/rss/new.md', [i['path'] for i in picked])
+
+    def test_the_last_copy_left_is_no_proof_once_it_postdates_that_report(self):
+        """旧那篇被清理之后,「库里独一份」这道判据当场失效。
+
+        `once` 数的是**当前** `documents`:`store.remove_missing_documents` 把旧
+        那篇收掉之后,撞了名字的新文章在库里就成了唯一叫这个名字的 —— 上一版那道
+        "标题独一份"检查于是放行,归属照旧被旧日报抢走(审查实测:新文章被盖上
+        `2026-09-28`、`pending.items` 归零、生成直接答"没有未上报过的新内容")。
+
+        拦下它的是另一个维度:**日报筛的是 `published`**,比那一份的窗口截止还晚
+        才发布的内容不可能出现在它的清单里。这一条的摆盘只让这一道成立 —— 新文章
+        到得**不**比分界线晚,所以另外两道在这里都是瞎的。
+        """
+        title = '每日 AI 资讯'
+        # 两份日报:第一份的清单里有那个无链接标题,第二份读不出清单(但它是链头,
+        # 分界线按它的截止算 ⇒ 下面那篇"到得不晚")。
+        self._chain(date='2026-09-27', since='2026-09-26 08:00:00',
+                    until='2026-09-27 08:00:00', carried=[(title, '')])
+        self._chain(date='2026-09-28')
+        add_doc(self.conn, 'source/rss/old.md', title=title,
+                published='2026-09-26 12:00', indexed='2026-09-26 13:00')
+        add_doc(self.conn, 'source/rss/new.md', title=title, source='social',
+                published='2026-09-27 12:00', indexed='2026-09-27 13:00')
+        # 旧那篇从 vault 里消失了(来源下线、被清理脚本删掉),索引跟着收掉它
+        self.assertEqual(1, store.remove_missing_documents(
+            self.conn, {'source/rss/new.md'}))
+        self.conn.commit()
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertNotIn('source/rss/new.md', self.carried(),
+                         '发布得比那一份的截止还晚,不可能被它带走过')
+        picked = daily.collect(self.conn, T('2026-09-28 08:00'),
+                               T('2026-09-29 08:00')).all()
+        self.assertIn('source/rss/new.md', [i['path'] for i in picked],
+                      '真的新抓到的那篇必须还选得到')
+
+    def test_the_last_copy_left_is_no_proof_once_it_arrived_after_the_epoch(self):
+        """同一条缺陷的另一半:只剩一篇、而它是分界线之后才入库的。
+
+        这一条的发布时间**落在那一份的窗口里**,所以上一条那道"发布晚于截止"在
+        这里是瞎的;分得开的只有到达时间 —— 账本的分界线之后才入库的内容,哪一份
+        日报都不可能带走过。这正是补抓回一批旧文章之后的真实形态。
+        """
+        title = '每日 AI 资讯'
+        self._chain(carried=[(title, '')])
+        add_doc(self.conn, 'source/rss/old.md', title=title,
+                published='2026-09-27 12:00', indexed='2026-09-27 13:00')
+        add_doc(self.conn, 'source/rss/new.md', title=title, source='social',
+                published='2026-09-27 20:00', indexed='2026-09-29 07:00')
+        self.assertEqual(1, store.remove_missing_documents(
+            self.conn, {'source/rss/new.md'}))
+        self.conn.commit()
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertNotIn('source/rss/new.md', self.carried(),
+                         '分界线之后才到的,不可能被哪一份日报带走过')
+
+    def test_an_upgrade_frees_a_slot_the_single_copy_check_had_taken(self):
+        """从上一版升级时要把"独一份"那道放行过的归属也改回候选。
+
+        盖过章的库走快路径,所以修好的判据只对从空库开始的人成立 —— 而最需要修的
+        恰好是已经按上一版盖错过的那些库(审查实测:从版本 4/5 升级同样失败)。
+        """
+        title = '每日 AI 资讯'
+        self._chain(carried=[(title, '')])
+        add_doc(self.conn, 'source/rss/new.md', title=title, source='social',
+                published='2026-09-28 12:00', indexed='2026-09-28 13:00')
+        # 上一版(只检查"标题独一份")真实留下的状态
+        self.conn.execute(
+            'INSERT INTO daily_carried(path,day,carried_at) VALUES(?,?,?)',
+            ('source/rss/new.md', '2026-09-28', '2026-09-28 08:00:00'))
+        self.conn.executemany(
+            'INSERT INTO daily_state(key,value) VALUES(?,?)',
+            [('carry_epoch', '2026-09-28 08:00:00'), ('carry_seed_rev', '5')])
         self.conn.commit()
         daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
         self.assertEqual({}, self.carried(), '抢错的那条归属必须在升级时放回')

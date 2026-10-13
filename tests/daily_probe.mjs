@@ -521,6 +521,60 @@ check("阅读区也跟着换成了新那一份",
       await evalJs(`document.getElementById('daily-reader-title').textContent`));
 await evalJs(`window.__restoreFetch(); delete window.__restoreFetch; true`);
 
+// ── 失败之后那一轮成功也没被看见:横幅不许一直挂着上一次的原因 ────────────────
+// 「什么时候清掉失败原因」原来只认 running=true 那一跳。而成功的那一轮同样可能
+// 整个落在两次轮询之间(上一组就是这个形态),于是列表、阅读区和按钮全更新成了
+// 新的,顶上那条横幅还写着上一次失败的原因 —— 面板上再没有任何操作能清掉它
+// (「重新读取」清的是 'list' 那一条)。
+await evalJs(`(() => {
+  document.getElementById('daily-since').value = '2026-01-01T00:00';
+  document.getElementById('daily-until').value = '2026-01-02T00:00';
+  markDailyWindow(); runDaily(false); })()`);
+const failBanner = await waitStatus(`!document.getElementById('daily-error').hidden`);
+check("摆盘:一轮失败之后横幅写着原因", failBanner
+      && /没有未上报过的新内容/.test(
+        await evalJs(`document.getElementById('daily-error-text').textContent`)),
+      await evalJs(`document.getElementById('daily-error-text').textContent`));
+// 反过来钉一边:同一轮结果反复轮询时那句原因要留得住。写成"只要不 running 就清"
+// 的话它会在十几秒内自己消失,用户抬头只看到按钮弹回去、什么也没发生。
+for (let i = 0; i < 3; i++) { await evalJs(`refreshDailyStatus()`); await sleep(300); }
+check("同一轮结果反复轮询,失败原因照旧留着",
+      !(await evalJs(`document.getElementById('daily-error').hidden`)),
+      await evalJs(`document.getElementById('daily-error-text').textContent`));
+await evalJs(`resetDailyWindow()`);
+// 摆盘同上一组:删掉今天那一份再让页面真读一次列表(顺带验一次列表读成功只清
+// 'list'、不碰这条失败原因),然后清掉轮询定时器 —— 下面等后端那段可能比一跳
+// 还久,被它插一脚页面就见到 running=true 了,测到的是另一个时序。
+await evalJs(`(async () => {
+  await fetch('/api/daily/reports/${today}', { method: 'DELETE' });
+  await loadDailyReports(); })()`);
+await evalJs(`(() => { clearTimeout(dailyTimer); dailyTimer = null; })()`);
+check("列表重读成功不会顺手清掉生成失败的原因",
+      !(await evalJs(`document.getElementById('daily-error').hidden`))
+      && (await evalJs(`dailyErrorKind`)) === "run",
+      await evalJs(`dailyErrorKind + ' / ' + document.getElementById('daily-error-text').textContent`));
+const quietOk = await evalJs(`(async () => {
+  await fetch('/api/daily/run', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sync: false }) });
+  for (let i = 0; i < 60; i++) {
+    const s = await (await fetch('/api/daily/status')).json();
+    if (!s.running && s.phase !== 'starting') return JSON.stringify({ phase: s.phase, id: s.run_id });
+    await new Promise(r => setTimeout(r, 300));
+  }
+  return ''; })()`);
+check("后端又悄悄跑成了一轮", /"phase":"done"/.test(quietOk), quietOk);
+check("摆盘:页面没见过这一轮,横幅还挂着上一次的失败",
+      !(await evalJs(`document.getElementById('daily-error').hidden`))
+      && !(await evalJs(`dailyState.running`)),
+      await evalJs(`JSON.stringify({running: dailyState.running,
+                     banner: document.getElementById('daily-error-text').textContent})`));
+await evalJs(`refreshDailyStatus()`);
+check("认出新一轮成功之后那条失败原因被清掉了",
+      await waitFor(`document.getElementById('daily-error').hidden`, 8000),
+      await evalJs(`document.getElementById('daily-error-text').textContent`));
+check("清的是整条状态,不是只藏起来", (await evalJs(`dailyErrorKind`)) === "",
+      await evalJs(`dailyErrorKind`));
+
 check("页面没有脚本报错", pageErrors.length === 0, pageErrors.join(" | "));
 
 console.log(oks.map(o => "  ok  " + o).join("\n"));

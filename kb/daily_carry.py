@@ -36,11 +36,13 @@ SEED_REV_KEY = 'carry_seed_rev'
 # 版本 2 = 归属只认素材清单那一版;3 = 清单解析顶住了「裸方括号开头的无链接标题」
 # 和「标题末尾的成对反斜杠」两种真实写法;4 = 清单起点按抬头声明的条数挑,不再被
 # 标题里那几个字带偏;5 = 没有 url 的那条归属匹配要求标题在库里独一份(同名的两篇
-# 原来共享一个身份,新那篇被旧日报抢走归属、永久漏报)。**解析器也是盖章算法的一
-# 部分** —— 版本不跟着动的话,前一版真实盖错过的那些库命中快路径,修好的解析器一次
+# 原来共享一个身份,新那篇被旧日报抢走归属、永久漏报);6 = 那条无 url 的匹配
+# 另加「到达不晚于分界线」和「发布不晚于那一份的截止」两道 —— 旧那篇被清理之后新
+# 来的同名文章在库里成了独一份,只凭"标题唯一"又会被旧日报抢走归属。
+# **解析器也是盖章算法的一部分** —— 版本不跟着动的话,前一版真实盖错过的那些库命中快路径,修好的解析器一次
 # 都跑不到。**上面那条按名单钉住的回归只覆盖解析器那一半**,改这个函数自己的分类
 # 判据时要自己记得把版本加一。
-SEED_REV = '5'
+SEED_REV = '6'
 # 落盘与记账、放回与删文件、启用时盖章,三段之间要整体互斥(见 `commit_lock`)。
 LOCK_NAME = 'daily-report.lock'
 
@@ -202,7 +204,9 @@ def seed_locked(conn, chain_of, key_of, fallback_days: int, now: datetime) -> st
     # 同一条素材出现在两份清单里时按**最后**带走它的那一份记(链条按截止时刻
     # 升序,所以后面的盖掉前面的)。记两份也救不了更早那一份的重新生成
     # (`UNCARRIED` 排除的是"别的日报盖的章"),白多一行。
-    owner = {k: c.day for c in chain for k in c.keys}
+    # 连那一份自己的**截止时刻**一起记:没有 url 的那条匹配要拿它排除
+    # 「比这一份的窗口还晚才发布」的新文章(见 `_match_holds` 的第三道)。
+    owner = {k: (c.day, c.until) for c in chain for k in c.keys}
 
     # 先在锁内把章算好(两万行读一遍、纯内存分类),再一个事务落盘。
     # `indexed_at` 库里只有 `YYYY-MM-DD HH:MM:SS` 一种写法,可以直接比字符串;
@@ -218,22 +222,22 @@ def seed_locked(conn, chain_of, key_of, fallback_days: int, now: datetime) -> st
     for row in conn.execute('SELECT path,url,title,published,indexed_at'
                             ' FROM documents'):
         url = str(row['url'] or '').strip()
-        day = owner.get(key_of(row['url'], row['title']))
+        when = parse_ts(row['published'])
+        late = str(row['indexed_at'] or '') > stamp
+        # 判据照旧是「有没有命中某一份的清单」(day 非空),`until` 只在命中那
+        # 一支用得上 —— 它那时必然是那一份真实的截止时刻。
+        day, until = owner.get(key_of(row['url'], row['title']), ('', None))
         if day:
-            # **没有 url 的那条匹配不是「实际带走过」那种硬证据。** `doc_key` 在
-            # url 为空时退化成标题,于是两篇同名文档共享一个身份 —— 真的新抓到的
-            # 那一篇被旧日报抢走归属,从此 `UNCARRIED` 永远排除它(审查实测:同名
-            # 无 url 的新文章 `pending.items=0`,生成直接答"没有未上报过的新内容")。
-            # 所以这一支只在**标题在库里独一份**时认(口径同 `_on_a_list` 的
-            # `once`);证据不够就**一个章都不盖**:既不记这一份的归属,也不往下走
-            # 到 `#seed` —— 它在某份清单上露过面,判"链条之前的历史存量"同样是
-            # 永久写死。留在队列里最多多报一遍,看得见、补得回。
-            if url or page_flat(row['title']) in once:
+            # **没有 url 的那条匹配不是「实际带走过」那种硬证据**,要过
+            # `_match_holds` 的三道(理由和各自的射程写在那个函数里)。证据不够就
+            # **一个章都不盖**:既不记这一份的归属,也不往下走到 `#seed` —— 它在
+            # 某份清单上露过面,判"链条之前的历史存量"同样是永久写死。留在队列里
+            # 最多多报一遍,看得见、补得回。
+            if url or _match_holds(row['title'], when, late, until, once):
                 marked.append((row['path'], day, at))
             continue
-        if str(row['indexed_at'] or '') > stamp:
+        if late:
             continue                  # 到得比分界线还晚 ⇒ 不可能被哪一份带走过
-        when = parse_ts(row['published'])
         if when is None or when <= start:
             if _on_a_list(row['url'], row['title'], listed, once):
                 continue      # 露过面 ⇒ 证据不全,不许下"历史存量"这个终态
@@ -272,6 +276,32 @@ def _listing(chain) -> tuple:
         for row in c.rows:
             buckets.setdefault(row[:1], []).append(row)
     return '\n'.join(c.text for c in chain), buckets
+
+
+def _match_holds(title, when: datetime | None, late: bool,
+                 until: datetime, once: set) -> bool:
+    """没有 url 时,那条按标题匹配上的归属算不算数。
+
+    `doc_key` 在 url 为空时退化成标题,于是**两篇同名文档共享一个身份** ——
+    真正新抓到的那一篇被旧日报抢走归属,从此 `UNCARRIED` 永远排除它(实测:同名
+    无 url 的新文章 `pending.items=0`,生成直接答"没有未上报过的新内容")。所以
+    这条匹配要三道各排除一种「它不可能是那一篇」,**缺一不可**:
+
+    ①**库里只有这一篇叫这个名字**(口径同 `_on_a_list` 的 `once`)。同名的两篇
+      都还在库里、又都发布在那一份的窗口里时,只有这一道分得开"该盖的只有一篇"。
+    ②**到得不比分界线晚**。晚于分界线的那批是账本启用之后才入库的,哪一份日报
+      都不可能带走过它们。
+    ③**发布不晚于那一份自己的截止时刻**。日报筛的是 `published`,比窗口截止还晚
+      才发布的内容不可能出现在它的清单里。**这一道是 ① 的独立补位**:旧那篇被
+      `remove_missing_documents` 清掉之后,新来的同名文章在库里就成了独一份、①
+      当场失效(实测:旧文章已清理时新文章被盖上 `2026-09-28`、待处理归零)。
+
+    三道都站在"宁可不盖"那一边:认不出就留在队列里,最多多报一遍;盖错是永久
+    写死。反过来,真的是那一篇旧素材重新导出时三道全过,照旧盖章 —— 不是把所有
+    无链接素材一概判新。
+    """
+    return (page_flat(title) in once and not late
+            and not (when is not None and when > until))
 
 
 def _on_a_list(url, title, listed: tuple, once: set) -> bool:
