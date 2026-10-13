@@ -35,9 +35,12 @@ EPOCH_KEY = 'carry_epoch'
 SEED_REV_KEY = 'carry_seed_rev'
 # 版本 2 = 归属只认素材清单那一版;3 = 清单解析顶住了「裸方括号开头的无链接标题」
 # 和「标题末尾的成对反斜杠」两种真实写法;4 = 清单起点按抬头声明的条数挑,不再被
-# 标题里那几个字带偏。**解析器也是盖章算法的一部分** —— 版本
-# 不跟着动的话,前一版真实盖错过的那些库命中快路径,修好的解析器一次都跑不到。
-SEED_REV = '4'
+# 标题里那几个字带偏;5 = 没有 url 的那条归属匹配要求标题在库里独一份(同名的两篇
+# 原来共享一个身份,新那篇被旧日报抢走归属、永久漏报)。**解析器也是盖章算法的一
+# 部分** —— 版本不跟着动的话,前一版真实盖错过的那些库命中快路径,修好的解析器一次
+# 都跑不到。**上面那条按名单钉住的回归只覆盖解析器那一半**,改这个函数自己的分类
+# 判据时要自己记得把版本加一。
+SEED_REV = '5'
 # 落盘与记账、放回与删文件、启用时盖章,三段之间要整体互斥(见 `commit_lock`)。
 LOCK_NAME = 'daily-report.lock'
 
@@ -214,9 +217,19 @@ def seed_locked(conn, chain_of, key_of, fallback_days: int, now: datetime) -> st
     marked, at = [], datetime.now().strftime(STAMP)
     for row in conn.execute('SELECT path,url,title,published,indexed_at'
                             ' FROM documents'):
+        url = str(row['url'] or '').strip()
         day = owner.get(key_of(row['url'], row['title']))
         if day:
-            marked.append((row['path'], day, at))
+            # **没有 url 的那条匹配不是「实际带走过」那种硬证据。** `doc_key` 在
+            # url 为空时退化成标题,于是两篇同名文档共享一个身份 —— 真的新抓到的
+            # 那一篇被旧日报抢走归属,从此 `UNCARRIED` 永远排除它(审查实测:同名
+            # 无 url 的新文章 `pending.items=0`,生成直接答"没有未上报过的新内容")。
+            # 所以这一支只在**标题在库里独一份**时认(口径同 `_on_a_list` 的
+            # `once`);证据不够就**一个章都不盖**:既不记这一份的归属,也不往下走
+            # 到 `#seed` —— 它在某份清单上露过面,判"链条之前的历史存量"同样是
+            # 永久写死。留在队列里最多多报一遍,看得见、补得回。
+            if url or page_flat(row['title']) in once:
+                marked.append((row['path'], day, at))
             continue
         if str(row['indexed_at'] or '') > stamp:
             continue                  # 到得比分界线还晚 ⇒ 不可能被哪一份带走过

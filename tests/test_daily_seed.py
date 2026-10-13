@@ -285,11 +285,92 @@ class DailyLedgerSeedTests(_Base):
             'INSERT INTO daily_state(key,value) VALUES(?,?)',
             # 摆的是**上一版**那个号。写死一个更老的值等于把这条用例废掉 ——
             # 版本一升它就不再命中快路径,注入「版本没跟着升」也照样绿。
-            [('carry_epoch', '2026-09-28 08:00:00'), ('carry_seed_rev', '3')])
+            [('carry_epoch', '2026-09-28 08:00:00'), ('carry_seed_rev', '4')])
         self.conn.commit()
         daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
         self.assertEqual({'source/rss/late.md': '2026-09-28'}, self.carried(),
                          '上一版盖错的 #seed 必须在升级时改回真正的归属')
+
+    def test_a_same_titled_newcomer_without_a_url_keeps_its_slot(self):
+        """没有 url 的那条归属匹配不是硬证据 —— 同名的新文章不许被它抢走。
+
+        `daily_page.doc_key` 在 url 为空时退化成标题,于是两篇同名文档共享一个
+        身份:旧那篇真的被旧日报带走过,新抓到的这篇只是撞了名字,却一起被盖成
+        「那一份带走了它」。`UNCARRIED` 从此永远排除它 —— **永久漏报,而面板上
+        写着「没有新内容」**(审查实测 `pending.items=0`,生成直接答"没有未上报
+        过的新内容")。
+
+        断言落在**后果**上:这一篇还捡不捡得回来。证据不足时两篇都不盖章,所以
+        旧那篇会多报一遍 —— 那是按元规则取的安全方向(多报看得见,写死补不回)。
+        """
+        title = '每日 AI 资讯'
+        self._chain(carried=[(title, '')])
+        add_doc(self.conn, 'source/rss/old.md', title=title, source='rss',
+                published='2026-09-27 12:00', indexed='2026-09-27 13:00')
+        add_doc(self.conn, 'source/rss/new.md', title=title, source='social',
+                published='2026-09-28 12:00', indexed='2026-09-28 13:00')
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({}, self.carried(), '证据不足的一律不盖章')
+        picked = daily.collect(self.conn, T('2026-09-28 08:00'),
+                               T('2026-09-29 08:00')).all()
+        self.assertIn('source/rss/new.md', [i['path'] for i in picked],
+                      '真的新抓到的那篇必须还选得到')
+
+    def test_a_same_titled_newcomer_arriving_after_the_epoch_keeps_its_slot(self):
+        """同名、无 url,而且**到得比分界线还晚** —— 那更不可能被哪一份带走过。
+
+        和上一条不是一回事:这一条的新文章在分界线**之后**才入库,所以连"它当时
+        可能在库里"都谈不上。原来那道迟到保护排在归属匹配**之后**,匹配一命中就
+        `continue`,这一档压根到不了它。
+        """
+        title = '每日 AI 资讯'
+        self._chain(carried=[(title, '')])
+        add_doc(self.conn, 'source/rss/old.md', title=title,
+                published='2026-09-27 12:00', indexed='2026-09-27 13:00')
+        add_doc(self.conn, 'source/rss/new.md', title=title,
+                published='2026-09-28 12:00', indexed='2026-09-29 07:00')
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertNotIn('source/rss/new.md', self.carried(),
+                         '分界线之后才到的,不可能被哪一份日报带走过')
+
+    def test_a_unique_title_without_a_url_still_gets_its_report(self):
+        """反过来钉一边:**没有重名**的无 url 条目照旧认那一份的归属。
+
+        不钉的话一个"无 url 一律不盖章"的实现也全绿,而那等于把补录的归属整类
+        丢掉 —— 重新生成那一份时它一条都选不回来(见前面那条覆盖用例)。
+        """
+        self._chain(carried=[('只有这一篇叫这个名字', '')])
+        add_doc(self.conn, 'source/rss/only.md', title='只有这一篇叫这个名字',
+                published='2026-09-25 20:00', indexed='2026-09-27 21:00')
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({'source/rss/only.md': '2026-09-28'}, self.carried())
+
+    def test_an_upgrade_frees_a_slot_the_previous_revision_had_taken(self):
+        """升版那一趟要把上一版**抢错的归属**改回候选,不是只修 `#seed` 那一档。
+
+        盖过章的库走快路径,所以这条缺陷"修好了"只对从空库开始的人成立 —— 而最
+        需要修的恰好是已经按旧算法盖错过的那些库。
+        """
+        title = '每日 AI 资讯'
+        self._chain(carried=[(title, '')])
+        add_doc(self.conn, 'source/rss/old.md', title=title,
+                published='2026-09-27 12:00', indexed='2026-09-27 13:00')
+        add_doc(self.conn, 'source/rss/new.md', title=title,
+                published='2026-09-28 12:00', indexed='2026-09-28 13:00')
+        # 上一版真实留下的状态:同名那两篇都被记成"2026-09-28 那一份带走了"
+        self.conn.executemany(
+            'INSERT INTO daily_carried(path,day,carried_at) VALUES(?,?,?)',
+            [('source/rss/old.md', '2026-09-28', '2026-09-28 08:00:00'),
+             ('source/rss/new.md', '2026-09-28', '2026-09-28 08:00:00')])
+        self.conn.executemany(
+            'INSERT INTO daily_state(key,value) VALUES(?,?)',
+            [('carry_epoch', '2026-09-28 08:00:00'), ('carry_seed_rev', '4')])
+        self.conn.commit()
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({}, self.carried(), '抢错的那条归属必须在升级时放回')
+        picked = daily.collect(self.conn, T('2026-09-28 08:00'),
+                               T('2026-09-29 08:00')).all()
+        self.assertIn('source/rss/new.md', [i['path'] for i in picked])
 
     def test_changing_the_material_parser_requires_bumping_the_seed_revision(self):
         """改了清单解析就必须把 `SEED_REV` 加一 —— 这条按名单钉住。

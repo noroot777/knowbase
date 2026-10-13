@@ -191,15 +191,28 @@ async function saveDailySettings() {
 
 // ── 历史日报 ────────────────────────────────────────────────────────────────
 
+// 「这次列表读取是不是还算数」。正文那边的序号只约束 `openDailyReport` 自己发的
+// 请求,**挡不住上游**:一次较早的列表响应后到,它会整份换掉 `dailyReports`、据此
+// 重选日报,再**新发起**一次旧日期的正文读取 —— 那一次恰好持有最新序号,于是落到
+// 屏幕上(审查实测:新生成的今天那一份先显示出来,旧列表一到就从列表里消失、阅读区
+// 跳回昨天、按钮退回「生成日报」,而后台列表一直有今天;完成身份已经消费过,后面
+// 多少轮轮询都不恢复,连覆盖确认都失效了 —— 文件还在,前端却认为今天还没生成)。
+// 所以成功、失败、重选、按钮重绘都在同一个代次里判。
+let dailyLoadSeq = 0;
+
 async function loadDailyReports(keepSelection = true) {
+  const seq = ++dailyLoadSeq;
+  let data;
   try {
-    const data = await pipeJson('/api/daily/reports');
-    dailyReports = data.reports;
-    clearDailyError('list');
+    data = await pipeJson('/api/daily/reports');
   } catch (e) {
+    if (seq !== dailyLoadSeq) return;   // 被更新的一次刷新替代了,连错也不报
     dailyError('日报列表读取失败：' + e.message, 'list');
     return;
   }
+  if (seq !== dailyLoadSeq) return;     // 整份结果丢掉:列表、选中、按钮都不动
+  dailyReports = data.reports;
+  clearDailyError('list');
   $('daily-count').textContent = dailyReports.length;
   $('daily-latest').textContent = dailyReports.length
     ? `最近一份 ${dailyReports[0].date}` : '还没有生成过日报';
@@ -211,6 +224,7 @@ async function loadDailyReports(keepSelection = true) {
   // "列表请求回来了"。不等的话阅读区还挂着上一份的正文和元信息,看起来像是
   // 生成没生效(2026-09-30 复审在全新沙箱上抓到,回归因此假红)。
   if (wanted) await openDailyReport(wanted);
+  if (seq !== dailyLoadSeq) return;     // 读正文期间又刷了一次,按钮归那一次画
   // 按钮叫"生成"还是"重新生成"取决于目标那天有没有日报,而那正是这份列表。
   renderDailyGenButton();
 }
