@@ -84,6 +84,8 @@ _MATERIAL_LINK = re.compile(
 # 那一档的"标题"是推文正文,里面自带一个 ` — ` 是很平常的事,而真正的收尾后面一定
 # 紧跟着 `来源·账号`(`_page` 拼的就是这个)。
 _ENTRY_TAIL = re.compile(REF_SEP + r'[^\n\u00b7]*\u00b7')
+# `_page` 给补录条目另加的后缀 —— 它不属于「来源·账号」。
+_LATE_MARK = ' · 补录'
 
 
 def doc_key(url, title) -> str:
@@ -202,6 +204,46 @@ def carried_keys(body: str) -> set[str]:
     「标题自带分隔符」,各自都有自己漏的那一种。
     """
     return {_ref_key(t) for t in _rows(body)}
+
+
+def carried_credits(body: str) -> dict:
+    """清单里**没有链接**的那些条目,各自记下的「来源·账号」(读不出的不收)。
+
+    无 url 时身份退化成标题(`doc_key`),于是两篇同名文档共享一个键。三道时间
+    判据只能排除「它不可能是那一篇」,而这一份是唯一的**正面**证据:清单那一行
+    本来就写着来源和账号(`daily._page` 的收尾)。盖章那边拿它只做一件事 ——
+    **两边都读得出、而且明确不同时拒掉**(`daily_carry._match_holds` 第四道)。
+
+    有链接的那些不收:它们的身份是 url,压根不走那条标题匹配。读不出收尾的也不
+    收 —— 那一档就当"这一份没记下来源",不问第四道(宁可少拒一次,也不拿一个没
+    读准的来源去否决真实归属)。
+    """
+    out = {}
+    for row in _rows(body):
+        if _MATERIAL_LINK.match(row):
+            continue
+        key, credit = _ref_key(row), _credit(row)
+        if credit:
+            out[key] = credit
+    return out
+
+
+def _credit(text: str) -> str:
+    """一条素材收尾记的「来源·账号」(认不出给空串)。
+
+    **只在最后一行上问,而且认整个收尾结构**(`_ENTRY_TAIL`:分隔符后面紧跟
+    `来源·账号`),理由同 `_closed` —— 大V观点那一档的"标题"是推文正文,里面
+    自带一个 ` — ` 是很平常的事。`· 补录` 那个后缀是 `_page` 另加的标记、不属于
+    来源,摘掉。
+    """
+    last = text.rsplit('\n', 1)[-1]
+    m = _ENTRY_TAIL.search(last)
+    if not m:
+        return ''
+    tail = last[m.start() + len(REF_SEP):].strip()
+    if tail.endswith(_LATE_MARK.strip()):
+        tail = tail[:tail.rfind('·')].strip()
+    return tail
 
 
 def _rows(body: str) -> list[str]:

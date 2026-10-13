@@ -17,6 +17,7 @@ import fcntl
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import NamedTuple
 
 from kb.config import DATA_DIR
 # 叶子模块(只认字符串),直接取口径不会绕回 `kb.daily`
@@ -40,11 +41,14 @@ SEED_REV_KEY = 'carry_seed_rev'
 # 另加「到达不晚于分界线」和「发布不晚于那一份的截止」两道 —— 旧那篇被清理之后新
 # 来的同名文章在库里成了独一份,只凭"标题唯一"又会被旧日报抢走归属;7 = 那两道
 # 改成问**所匹配的那一份自己的**时刻(生成时刻 + 窗口截止),不再拿整条链的分界
-# 当证据 —— 分界只回答"账本启用之后才到的",答不了"那一份生成时它在不在库里"。
+# 当证据 —— 分界只回答"账本启用之后才到的",答不了"那一份生成时它在不在库里";
+# 8 = 上界换成**取材快照**(`collected`)而不是出稿完成的 `generated`(差着一次模型
+# 请求,那中间入库的文章一个都没被这一份看见过),另加第四道:清单那一行记的
+# 「来源·账号」和这篇文档明确冲突时一律拒 —— 前三道都只能排除,这一道是正面证据。
 # **解析器也是盖章算法的一部分** —— 版本不跟着动的话,前一版真实盖错过的那些库
 # 命中快路径,修好的解析器一次都跑不到。**上面那条按名单钉住的回归只覆盖解析器那
 # 一半**,改这个函数自己的分类判据时要自己记得把版本加一。
-SEED_REV = '7'
+SEED_REV = '8'
 # 落盘与记账、放回与删文件、启用时盖章,三段之间要整体互斥(见 `commit_lock`)。
 LOCK_NAME = 'daily-report.lock'
 
@@ -63,8 +67,10 @@ class PastReport:
     (口径是 `daily._doc_key`,盖章和读清单两侧共用同一个函数)。读不出清单的
     那一份交一个空集合 —— 它对归属一个字的证据都提供不了,不是"它什么都没带走"。
 
-    `made` 是它自己 frontmatter 里记的生成时刻(`generated`),用来回答"这一份
-    生成的时候那篇文章在不在库里"(见 `latest_pickup`)。
+    `taken` 是**取材快照**时刻(frontmatter 的 `collected`,秒精度),`made` 是
+    **出稿完成**时刻(`generated`,只到分钟)—— 两件事,差着一次模型请求,判据要的
+    是前者(见 `latest_pickup`)。`credits` 是清单里那些无链接条目各自记下的
+    「来源·账号」,`_match_holds` 第四道拿它做唯一的**正面**身份证据。
 
     `rows` 是那份清单一条一条的**原文**(归一过),`text` 是整份正文(同样归一
     过)。解析不出身份的条目靠这两样兜一道:在这一份上露过面就不许判成"链条
@@ -79,16 +85,36 @@ class PastReport:
     rows: tuple = ()
     text: str = ''
     made: str = ''
+    taken: str = ''
+    credits: tuple = ()
 
     def latest_pickup(self) -> str:
-        """这一份最晚可能带走东西的那一刻(和 `indexed_at` 同格式,可直接比)。
+        """这一份最晚可能带走东西的那一刻(拿来和 `indexed_at` 比字符串)。
 
-        **有 `generated` 就用它** —— 自定义历史区间的 `until` 可能比真正生成的
-        那一刻早好几个月,拿 until 当生成时刻会把那一份合法带走的补录判成"到得
-        太晚"。读不出时回落到 `until`:那是**更严**的一边(常规日报两者本来就
-        相等),方向上只会多报一遍,不会写死。
+        三档,按证据强弱取:
+
+        ①**取材快照 `collected`** —— 这一份的输入定下来的那一刻,秒精度。**只有
+          它能证明"那篇文章当时在不在库里"**:出稿要先读素材、再等模型跑几十秒到
+          几分钟、最后才落盘,所以 `generated` 记的是**出稿完成**,拿它当上界会把
+          那中间入库的文章一并算进来 —— 审查实测:14:07:16 模型已拿到输入(里面
+          没有 B),B 在那之后入库,14:08 出稿写下 `generated: 14:08`;清单里只有
+          A,而升级重算把 B 盖成那一份的已报道素材,待报道 1 → 0,当天生成直接答
+          「没有未上报过的新内容」。
+        ②**出稿完成 `generated`** —— 老日报只有这一行。它比取材快照晚,所以那一段
+          窗口里的漏报风险仍在(由第四道「来源·账号」兜住大半);**精度只到分钟,
+          字符串比较等于按那一分钟的开头算**,于是同一分钟入库、确实被带走过的
+          文章会判成"到得太晚"、归属放回 —— 多报一遍,是安全的那一边,知情保留。
+        ③**窗口截止 `until`** —— 连 `generated` 都读不出时的兜底,最严。
+
+        不能反过来优先 `until`:自定义历史区间的 until 可能比真正取材早好几个月
+        (覆盖 2026-01-01→01-02 的那一份是今天生成的),而它确实带走了今天入库的
+        补录 —— 一律拿 until 当上界会把那条合法归属判成"到得太晚"。
         """
-        return self.made or self.until.strftime(STAMP)
+        return self.taken or self.made or self.until.strftime(STAMP)
+
+    def credit_of(self, key: str) -> str:
+        """清单里那一条记下的「来源·账号」(那一份没记下就空串)。"""
+        return dict(self.credits).get(key, '')
 
 
 def parse_ts(value) -> datetime | None:
@@ -150,27 +176,32 @@ def _seeded(state: dict) -> str:
     return state.get(EPOCH_KEY, '') if state.get(SEED_REV_KEY) == SEED_REV else ''
 
 
-def ensure_ledger(conn, chain_of, key_of, fallback_days: int, now: datetime) -> str:
+def ensure_ledger(conn, chain_of, key_of, credit_of,
+                  fallback_days: int, now: datetime) -> str:
     """账本首次启用时一次性盖章,返回那条分界线。幂等。本体见 `seed_locked`。
 
     常态只花一句 SELECT:盖过章就直接返回,连锁都不取 —— 这个函数坐在面板每一跳
     那条路上(`daily.pending`)。
     """
     done = _seeded(_state(conn))
-    return done or _lock_and_seed(conn, chain_of, key_of, fallback_days, now)
+    return done or _lock_and_seed(conn, chain_of, key_of, credit_of,
+                                  fallback_days, now)
 
 
-def _lock_and_seed(conn, chain_of, key_of, fallback_days, now) -> str:
+def _lock_and_seed(conn, chain_of, key_of, credit_of, fallback_days, now) -> str:
     with commit_lock():
-        return seed_locked(conn, chain_of, key_of, fallback_days, now)
+        return seed_locked(conn, chain_of, key_of, credit_of, fallback_days, now)
 
 
-def seed_locked(conn, chain_of, key_of, fallback_days: int, now: datetime) -> str:
+def seed_locked(conn, chain_of, key_of, credit_of,
+                fallback_days: int, now: datetime) -> str:
     """盖章本体。**调用方必须已经持有 `commit_lock()`**(别在里面再取一次)。
 
     `chain_of` 是一个**取已有日报的函数**(每一份一条 `PastReport`,按截止时刻
     升序),只有真要盖章那一次才调用它 —— 取它要把 vault 里每一份日报整份读一遍。
-    `key_of(url, title)` 是素材身份的口径,和各份日报的素材清单那一侧共用。
+    `key_of(url, title)` 是素材身份的口径,和各份日报的素材清单那一侧共用;
+    `credit_of(source, account)` 拼出这篇文档在清单里该写的「来源·账号」,口径
+    同样和写日报那一侧共用(`daily._doc_credit` / `_page` 的收尾)。
 
     不盖的话账本一启用,库里两万多篇历史文章全都算"没上报过",第一份日报的补录
     候选是上千条、要几十份日报才排得空 —— 而那些内容在旧实现下早就永久落选了,
@@ -235,22 +266,24 @@ def seed_locked(conn, chain_of, key_of, fallback_days: int, now: datetime) -> st
         seen_titles[key] = seen_titles.get(key, 0) + 1
     once = {k for k, n in seen_titles.items() if n == 1}
     marked, at = [], datetime.now().strftime(STAMP)
-    for row in conn.execute('SELECT path,url,title,published,indexed_at'
-                            ' FROM documents'):
+    for row in conn.execute('SELECT path,url,title,source,account,published,'
+                            'indexed_at FROM documents'):
         url = str(row['url'] or '').strip()
         when = parse_ts(row['published'])
-        arrived = str(row['indexed_at'] or '')
-        past = owner.get(key_of(row['url'], row['title']))
+        doc = Candidate(key_of(row['url'], row['title']), row['title'], when,
+                        str(row['indexed_at'] or ''),
+                        credit_of(row['source'], row['account']))
+        past = owner.get(doc.key)
         if past and past.day:      # 盖章要落到某一天上,没有日期的那一份不作数
             # **没有 url 的那条匹配不是「实际带走过」那种硬证据**,要过
-            # `_match_holds` 的三道(理由和各自的射程写在那个函数里)。证据不够就
+            # `_match_holds` 的四道(理由和各自的射程写在那个函数里)。证据不够就
             # **一个章都不盖**:既不记这一份的归属,也不往下走到 `#seed` —— 它在
             # 某份清单上露过面,判"链条之前的历史存量"同样是永久写死。留在队列里
             # 最多多报一遍,看得见、补得回。
-            if url or _match_holds(past, row['title'], when, arrived, once):
+            if url or _match_holds(past, doc, once):
                 marked.append((row['path'], past.day, at))
             continue
-        if arrived > stamp:
+        if doc.arrived > stamp:
             continue                  # 到得比分界线还晚 ⇒ 不可能被哪一份带走过
         if when is None or when <= start:
             if _on_a_list(row['url'], row['title'], listed, once):
@@ -292,8 +325,16 @@ def _listing(chain) -> tuple:
     return '\n'.join(c.text for c in chain), buckets
 
 
-def _match_holds(past: PastReport, title, when: datetime | None,
-                 arrived: str, once: set) -> bool:
+class Candidate(NamedTuple):
+    """一篇文档拿去和某一份日报的清单对质时要用到的几样东西。"""
+    key: str
+    title: str
+    when: datetime | None
+    arrived: str
+    credit: str
+
+
+def _match_holds(past: PastReport, doc: Candidate, once: set) -> bool:
     """没有 url 时,那条按标题匹配上的归属算不算数。
 
     `doc_key` 在 url 为空时退化成标题,于是**两篇同名文档共享一个身份** ——
@@ -313,14 +354,22 @@ def _match_holds(past: PastReport, title, when: datetime | None,
       才发布的内容不可能出现在它的清单里。**这一道是 ① 的独立补位**:旧那篇被
       `remove_missing_documents` 清掉之后,新来的同名文章在库里就成了独一份、①
       当场失效(实测:旧文章已清理时新文章被盖上 `2026-09-28`、待处理归零)。
+    ④**清单那一行记的「来源·账号」没有和这篇文档冲突**。前三道都只能排除「它不
+      可能是那一篇」,这一道是唯一的**正面**身份证据 —— 清单里本来就写着来源和
+      账号(`daily._page` 的收尾),丢掉它等于自愿只拿间接证据判身份。**两边都
+      读得出、而且明确不同时才拒**:那一份没记下(老格式、解析不出)就不问这一道
+      —— 宁可少拒一次,也不拿一个没读准的来源去否决真实归属。代价知情:公众号
+      改名、来源标签改写之后它会判成冲突、把归属放回,那是多报一遍,安全的一边。
 
-    三道都站在"宁可不盖"那一边:认不出就留在队列里,最多多报一遍;盖错是永久
-    写死。反过来,真的是那一篇旧素材重新导出时三道全过,照旧盖章 —— 不是把所有
+    四道都站在"宁可不盖"那一边:认不出就留在队列里,最多多报一遍;盖错是永久
+    写死。反过来,真的是那一篇旧素材重新导出时四道全过,照旧盖章 —— 不是把所有
     无链接素材一概判新。
     """
-    return (page_flat(title) in once
-            and not (arrived > past.latest_pickup())
-            and not (when is not None and when > past.until))
+    recorded = past.credit_of(doc.key)
+    return (page_flat(doc.title) in once
+            and not (doc.arrived > past.latest_pickup())
+            and not (doc.when is not None and doc.when > past.until)
+            and not (recorded and doc.credit and recorded != doc.credit))
 
 
 def _on_a_list(url, title, listed: tuple, once: set) -> bool:

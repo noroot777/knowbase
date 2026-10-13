@@ -58,6 +58,7 @@ from kb.daily_carry import UNCARRIED as _UNCARRIED
 from kb.daily_carry import SEED_DAY  # noqa: F401
 from kb.daily_carry import day_key as _day_key
 from kb.daily_page import REF_SEP as _REF_SEP
+from kb.daily_page import carried_credits as _carried_credits
 from kb.daily_page import carried_keys as _carried_keys
 from kb.daily_page import material_rows as _material_rows
 from kb.daily_page import material_text as _material_text
@@ -288,9 +289,21 @@ def _report_chain() -> list[carry.PastReport]:
             chain.append(carry.PastReport(
                 since, until, str(meta.get('date') or path.stem),
                 frozenset(_carried_keys(body)), _material_rows(body),
-                _material_text(body), str(meta.get('generated') or '')))
+                _material_text(body), str(meta.get('generated') or ''),
+                str(meta.get('collected') or ''),
+                tuple(sorted(_carried_credits(body).items()))))
     chain.sort(key=lambda c: c.until)
     return chain
+
+
+def _doc_credit(source, account) -> str:
+    """这篇文档在素材清单里该写的「来源·账号」—— `_page` 的收尾就是这么拼的。
+
+    无 url 时身份退化成标题,而清单那一行本来就记着来源和账号:它是唯一能把
+    「同名、但来自另一个号」分开的**正面**证据(三道时间判据只能排除不可能)。
+    口径必须和 `_page` 逐字一致,所以两处共用这一个函数。
+    """
+    return f"{_label(source)}·{account or '未署名'}"
 
 
 def _seed_args(first_days: int = FIRST_DAYS, now: datetime | None = None) -> tuple:
@@ -298,9 +311,11 @@ def _seed_args(first_days: int = FIRST_DAYS, now: datetime | None = None) -> tup
 
     已有的日报只有这边读得到(窗口在 frontmatter 里、带走了什么在正文的素材清单
     里),所以在这里读好再传下去 —— 账本那边不认识 vault,两个模块也就不用互相
-    import。素材身份那一份口径(`_doc_key`)同理跟着传过去。
+    import。素材身份那一份口径(`_doc_key`)和「来源·账号」那一份(`_doc_credit`)
+    同理跟着传过去。
     """
-    return (_report_chain, _doc_key, max(1, int(first_days or FIRST_DAYS)),
+    return (_report_chain, _doc_key, _doc_credit,
+            max(1, int(first_days or FIRST_DAYS)),
             (now or datetime.now()).replace(microsecond=0))
 
 
@@ -371,7 +386,8 @@ def _link_refs(body: str, shown: list[dict]) -> str:
 
 
 def _page(since: datetime, until: datetime, mat: Material, body: str,
-          model: str, sync_issues: list[dict] | None = None) -> str:
+          model: str, sync_issues: list[dict] | None = None,
+          taken: datetime | None = None) -> str:
     shown = mat.all()
     counts: dict[str, int] = {}
     for d in shown:
@@ -389,6 +405,9 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
         'late': len(mat.late), 'late_total': mat.late_total,
         'sources': counts, 'model': model,
         'generated': datetime.now().strftime('%Y-%m-%d %H:%M'),
+        # 取材快照(秒精度)。和 `generated` 是两件事:那一个是**出稿完成**、只到
+        # 分钟,这一个才是"这一份的输入定下来"的那一刻 —— 盖章要的是后者。
+        'collected': (taken or datetime.now()).strftime(STAMP),
     }
     if issues:
         meta['sync_failed'] = issues
@@ -486,6 +505,10 @@ def generate(since: datetime | None = None, until: datetime | None = None,
         conn.close()
     if not mat:
         raise LookupError(f'{_label_window(since, until)} 没有未上报过的新内容,先同步再生成日报')
+    # **取材快照就是这一刻。** 下面那次模型请求要跑几十秒到几分钟,所以"出稿完成"
+    # 的时刻证明不了"这篇文章进过这一份的输入" —— 那中间入库的文章一个都没被这一份
+    # 看见过(理由和事故形态见 `daily_carry.PastReport.latest_pickup`)。
+    taken = datetime.now()
     picked = model or llm_stages.stage_model('daily')
     shown = mat.all()
     if progress:
@@ -514,7 +537,8 @@ def generate(since: datetime | None = None, until: datetime | None = None,
         conn = store.connect()
         try:
             release(conn, day)
-            _write(path, _page(since, until, mat, body, str(picked), sync_issues))
+            _write(path, _page(since, until, mat, body, str(picked),
+                               sync_issues, taken))
             try:
                 out['carried'] = mark_carried(conn, day, [d['path'] for d in shown])
             except (sqlite3.Error, OSError) as e:  # 日报已经在盘上了,别带崩这一轮

@@ -35,11 +35,14 @@ def T(text):
 
 
 def add_doc(conn, path, *, source='rss', title='标题', published='2026-09-28 09:00',
-            indexed='2026-09-28 09:30', url=''):
+            indexed='2026-09-28 09:30', url='', account='某号'):
+    # `account` 默认和 `write_report` 清单里写的那个账号一致 —— 盖章第四道比的
+    # 就是「来源·账号」,两侧对不上会让别的用例各验一半(见
+    # test_daily_seed_identity 的 `_chain(credit=...)`)。
     conn.execute(
         'INSERT INTO documents(path,source,title,account,published,url,summary,'
         'indexed_at,extracted_at,promo_level) VALUES(?,?,?,?,?,?,?,?,?,?)',
-        (path, source, title, '某号', published, url, '摘要', indexed, indexed, ''))
+        (path, source, title, account, published, url, '摘要', indexed, indexed, ''))
     conn.commit()
 
 

@@ -8,6 +8,8 @@ url 为空时退化成标题,于是两篇同名文档共享一个身份,而三�
 `write_report` 也直接用它们的,保证两组摆出来的是同一个世界。
 """
 import unittest
+from datetime import datetime
+from unittest.mock import patch
 
 from kb import daily, store
 from tests.test_daily_carried import T, _Base, add_doc
@@ -35,7 +37,7 @@ class NoUrlAttributionTests(_Base):
         self._chain(carried=[(title, '')])
         add_doc(self.conn, 'source/rss/old.md', title=title, source='rss',
                 published='2026-09-27 12:00', indexed='2026-09-27 13:00')
-        add_doc(self.conn, 'source/rss/new.md', title=title, source='social',
+        add_doc(self.conn, 'source/rss/new.md', title=title,
                 published='2026-09-28 12:00', indexed='2026-09-28 13:00')
         daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
         self.assertEqual({}, self.carried(), '证据不足的一律不盖章')
@@ -120,7 +122,7 @@ class NoUrlAttributionTests(_Base):
                     generated='2026-09-27 20:00')
         add_doc(self.conn, 'source/rss/old.md', title=title,
                 published='2026-09-26 12:00', indexed='2026-09-26 13:00')
-        add_doc(self.conn, 'source/rss/new.md', title=title, source='social',
+        add_doc(self.conn, 'source/rss/new.md', title=title,
                 published='2026-09-27 12:00', indexed='2026-09-27 13:00')
         # 旧那篇从 vault 里消失了(来源下线、被清理脚本删掉),索引跟着收掉它
         self.assertEqual(1, store.remove_missing_documents(
@@ -145,7 +147,7 @@ class NoUrlAttributionTests(_Base):
         self._chain(carried=[(title, '')])
         add_doc(self.conn, 'source/rss/old.md', title=title,
                 published='2026-09-27 12:00', indexed='2026-09-27 13:00')
-        add_doc(self.conn, 'source/rss/new.md', title=title, source='social',
+        add_doc(self.conn, 'source/rss/new.md', title=title,
                 published='2026-09-27 20:00', indexed='2026-09-29 07:00')
         self.assertEqual(1, store.remove_missing_documents(
             self.conn, {'source/rss/new.md'}))
@@ -162,7 +164,7 @@ class NoUrlAttributionTests(_Base):
         """
         title = '每日 AI 资讯'
         self._chain(carried=[(title, '')])
-        add_doc(self.conn, 'source/rss/new.md', title=title, source='social',
+        add_doc(self.conn, 'source/rss/new.md', title=title,
                 published='2026-09-28 12:00', indexed='2026-09-28 13:00')
         # 上一版(只检查"标题独一份")真实留下的状态
         self.conn.execute(
@@ -188,7 +190,9 @@ class NoUrlAttributionTests(_Base):
         被盖上 `2026-09-28`,待报道归零、重新生成也找不回来。
 
         摆盘只让新那道成立:发布早于 09-28 那份的截止(第三道瞎)、库里标题唯一
-        (第一道瞎)、到达早于链头 09-29 08:00(旧那道瞎)。
+        (第一道瞎)、到达早于链头 09-29 08:00(旧那道瞎)、**来源和清单记的一致**
+        (第四道瞎 —— 审查那次实测用的是另一个来源,那会让第四道抢在前面拦住它,
+        这一条就验不到时间这一维了)。
         """
         title = '每日 AI 资讯'
         self._chain(date='2026-09-28', since='2026-09-27 08:00:00',
@@ -199,20 +203,20 @@ class NoUrlAttributionTests(_Base):
                     carried=[('另一篇有链接的', 'https://x/other')])
         add_doc(self.conn, 'source/rss/old.md', title=title,
                 published='2026-09-27 12:00', indexed='2026-09-27 13:00')
-        add_doc(self.conn, 'source/dr-gzh/new.md', title=title, source='dr-gzh',
+        add_doc(self.conn, 'source/rss/new.md', title=title,
                 published='2026-09-27 20:00', indexed='2026-09-28 13:00')
         add_doc(self.conn, 'source/rss/other.md', title='另一篇有链接的',
                 url='https://x/other',
                 published='2026-09-28 20:00', indexed='2026-09-28 21:00')
         self.assertEqual(1, store.remove_missing_documents(
-            self.conn, {'source/dr-gzh/new.md', 'source/rss/other.md'}))
+            self.conn, {'source/rss/new.md', 'source/rss/other.md'}))
         self.conn.commit()
         daily._ensure_ledger(self.conn, now=T('2026-09-30 08:00'))
-        self.assertNotIn('source/dr-gzh/new.md', self.carried(),
+        self.assertNotIn('source/rss/new.md', self.carried(),
                          '到得比 09-28 那一份生成还晚,它不可能带走过这一篇')
         picked = daily.collect(self.conn, T('2026-09-27 00:00'),
                                T('2026-09-30 08:00')).all()
-        self.assertIn('source/dr-gzh/new.md', [i['path'] for i in picked],
+        self.assertIn('source/rss/new.md', [i['path'] for i in picked],
                       '真的新抓到的那篇必须还选得到')
 
     def test_the_report_own_generation_time_counts_not_its_window_end(self):
@@ -268,12 +272,12 @@ class NoUrlAttributionTests(_Base):
         self._chain(date='2026-09-29', since='2026-09-28 08:00:00',
                     until='2026-09-29 08:00:00',
                     carried=[('另一篇有链接的', 'https://x/other')])
-        add_doc(self.conn, 'source/dr-gzh/new.md', title=title, source='dr-gzh',
+        add_doc(self.conn, 'source/rss/new.md', title=title,
                 published='2026-09-27 20:00', indexed='2026-09-28 13:00')
         # 上一版(按全局分界判到达)真实留下的状态
         self.conn.execute(
             'INSERT INTO daily_carried(path,day,carried_at) VALUES(?,?,?)',
-            ('source/dr-gzh/new.md', '2026-09-28', '2026-09-29 08:00:00'))
+            ('source/rss/new.md', '2026-09-28', '2026-09-29 08:00:00'))
         self.conn.executemany(
             'INSERT INTO daily_state(key,value) VALUES(?,?)',
             [('carry_epoch', '2026-09-29 08:00:00'), ('carry_seed_rev', '6')])
@@ -282,7 +286,191 @@ class NoUrlAttributionTests(_Base):
         self.assertEqual({}, self.carried(), '抢错的那条归属必须在升级时放回')
         picked = daily.collect(self.conn, T('2026-09-27 00:00'),
                                T('2026-09-30 08:00')).all()
-        self.assertIn('source/dr-gzh/new.md', [i['path'] for i in picked])
+        self.assertIn('source/rss/new.md', [i['path'] for i in picked])
+
+    def test_a_document_that_arrived_while_the_model_ran_is_not_material(self):
+        """出稿要等模型跑完,那中间入库的文章没被这一份看见过 —— 不许盖章。
+
+        `generated` 记的是**出稿完成**:先读素材、再等模型几十秒到几分钟、最后
+        才落盘。拿它当上界的话,取材之后、出稿之前入库的文章满足「到得不晚」,
+        却压根没进过模型输入和这一份的清单(审查实测:14:07:16 模型已拿到输入、
+        里面没有 B,B 随后入库,14:08 写下 `generated: 14:08`;升级重算把 B 盖成
+        那一份的已报道素材,待报道 1 → 0,当天生成直接答「没有未上报过的新内容」)。
+
+        所以判据要的是**取材快照**(`collected`)。摆盘只让这一道成立:来源和清单
+        记的一致、发布在窗口里、库里标题唯一、到达也早于 `generated`。
+        """
+        title = '每日 AI 资讯'
+        self._chain(date='2026-09-28', since='2026-09-27 08:00:00',
+                    until='2026-09-28 08:00:00', carried=[(title, '')],
+                    collected='2026-09-28 08:00:10',   # 素材定下来的那一刻
+                    generated='2026-09-28 08:03')      # 模型跑完、出稿落盘
+        add_doc(self.conn, 'source/rss/old.md', title=title,
+                published='2026-09-27 12:00', indexed='2026-09-27 13:00')
+        add_doc(self.conn, 'source/rss/new.md', title=title,
+                published='2026-09-27 20:00',
+                indexed='2026-09-28 08:01:00')         # 取材之后、出稿之前
+        self.assertEqual(1, store.remove_missing_documents(
+            self.conn, {'source/rss/new.md'}))
+        self.conn.commit()
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertNotIn('source/rss/new.md', self.carried(),
+                         '取材都定下来了它才入库,这一份不可能带走它')
+        picked = daily.collect(self.conn, T('2026-09-28 08:00'),
+                               T('2026-09-29 08:00')).all()
+        self.assertIn('source/rss/new.md', [i['path'] for i in picked])
+
+    def test_arriving_in_the_same_minute_as_the_materials_keeps_its_slot(self):
+        """反过来钉一边:取材**那一分钟**里入库的,归属要留着。
+
+        `collected` 是秒精度,所以同一分钟里"它到得早一点"分得清。换成只到分钟的
+        `generated` 去比字符串,`10:00:05` 字典序大于 `10:00`,一篇确实被带走过的
+        文章会被判成"到得太晚"、归属放回,下一份再报一遍(审查实测,列为不拦)。
+        """
+        title = '只有这一篇叫这个名字'
+        self._chain(date='2026-10-12', since='2026-10-11 08:00:00',
+                    until='2026-10-12 10:00:20', carried=[(title, '')],
+                    collected='2026-10-12 10:00:20', generated='2026-10-12 10:00')
+        add_doc(self.conn, 'source/rss/reported.md', title=title,
+                published='2026-10-12 09:00', indexed='2026-10-12 10:00:05')
+        daily._ensure_ledger(self.conn, now=T('2026-10-13 10:00'))
+        self.assertEqual({'source/rss/reported.md': '2026-10-12'}, self.carried(),
+                         '它在取材之前就入库了,归属是真的')
+
+    def test_a_source_that_clashes_with_the_list_is_not_that_material(self):
+        """清单那一行记着来源和账号 —— 和这篇文档明确冲突时一律拒。
+
+        前三道都只能排除「它不可能是那一篇」;清单里那半截「来源·账号」是唯一的
+        **正面**身份证据,丢掉它等于自愿只拿间接证据判身份。审查连着两轮点名:
+        无链接匹配仍不核对来源和账号,于是另一个号发的同名文章只要时间对得上就
+        被记到旧日报名下。
+
+        摆盘让三道时间判据**全部放行**:入库早于取材、发布在窗口里、库里标题唯一。
+        """
+        title = '每日 AI 资讯'
+        self._chain(carried=[(title, '')], credit='RSS·原来源A',
+                    collected='2026-09-28 08:00:10')
+        add_doc(self.conn, 'source/rss/new.md', title=title, account='新来源B',
+                published='2026-09-27 20:00', indexed='2026-09-27 21:00')
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({}, self.carried(),
+                         '清单记的是原来源A,这一篇是另一个号的')
+        picked = daily.collect(self.conn, T('2026-09-28 08:00'),
+                               T('2026-09-29 08:00')).all()
+        self.assertIn('source/rss/new.md', [i['path'] for i in picked])
+
+    def test_a_list_without_a_recorded_source_does_not_veto(self):
+        """反过来钉一边:那一份**没记下**来源时,第四道不许插手。
+
+        老格式的日报、或者收尾读不出来的那几行,拿一个没读准的来源去否决真实
+        归属就是把「证据缺失」当成「证据冲突」—— 那一份合法带走的素材会被放回
+        队列、重新报一遍。写成"读不出就拒"的实现在这一条上会红。
+        """
+        title = '只有这一篇叫这个名字'
+        self._chain(carried=[(title, '')], credit='')   # 收尾那半截整个没有
+        add_doc(self.conn, 'source/rss/only.md', title=title, account='某号',
+                published='2026-09-25 20:00', indexed='2026-09-27 21:00')
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({'source/rss/only.md': '2026-09-28'}, self.carried(),
+                         '那一份没记来源,不构成冲突')
+
+    def test_an_upgrade_frees_a_slot_the_generated_stamp_had_taken(self):
+        """从上一版升级时要把「按出稿时刻」放行过的归属也改回候选。
+
+        盖过章的库走快路径,所以修好的判据只对从空库开始的人成立 —— 而最需要修的
+        恰好是已经按上一版盖错过的那些库。
+        """
+        title = '每日 AI 资讯'
+        self._chain(date='2026-09-28', since='2026-09-27 08:00:00',
+                    until='2026-09-28 08:00:00', carried=[(title, '')],
+                    collected='2026-09-28 08:00:10', generated='2026-09-28 08:03')
+        add_doc(self.conn, 'source/rss/new.md', title=title,
+                published='2026-09-27 20:00', indexed='2026-09-28 08:01:00')
+        # 上一版(拿出稿完成的时刻当上界)真实留下的状态
+        self.conn.execute(
+            'INSERT INTO daily_carried(path,day,carried_at) VALUES(?,?,?)',
+            ('source/rss/new.md', '2026-09-28', '2026-09-28 08:03:00'))
+        self.conn.executemany(
+            'INSERT INTO daily_state(key,value) VALUES(?,?)',
+            [('carry_epoch', '2026-09-28 08:00:00'), ('carry_seed_rev', '7')])
+        self.conn.commit()
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({}, self.carried(), '抢错的那条归属必须在升级时放回')
+        picked = daily.collect(self.conn, T('2026-09-28 08:00'),
+                               T('2026-09-29 08:00')).all()
+        self.assertIn('source/rss/new.md', [i['path'] for i in picked])
+
+    def test_a_late_marker_is_not_part_of_the_recorded_source(self):
+        """补录那个后缀不属于「来源·账号」—— 不摘掉就会把真实归属判成冲突。
+
+        `_page` 给补录条目在收尾后面另加一个 ` · 补录`。读清单时不摘掉的话,那一行
+        记的来源变成 `RSS·某号 · 补录`、和文档拼出来的 `RSS·某号` 明确不同,第四道
+        当场把一条**真实的**归属否掉 —— 而补录正是最该保住归属的那一档(重新生成
+        那一份时它一条都选不回来)。
+        """
+        title = '只有这一篇叫这个名字'
+        self._chain(carried=[(title, '', True)])     # 第三项 = 这一条是补录
+        add_doc(self.conn, 'source/rss/only.md', title=title,
+                published='2026-09-25 20:00', indexed='2026-09-27 21:00')
+        daily._ensure_ledger(self.conn, now=T('2026-09-29 08:00'))
+        self.assertEqual({'source/rss/only.md': '2026-09-28'}, self.carried(),
+                         '补录标记不是来源的一部分')
+
+    def test_the_page_writes_down_when_the_materials_were_taken(self):
+        """落盘的 frontmatter 里要有**取材快照**,而且它不等于出稿完成的时刻。
+
+        盖章那边的第二道判据全靠这一行(`PastReport.latest_pickup`);`_page` 不写
+        它的话,所有新日报都退回到只有 `generated` 可用 —— 也就是审查复现的那个
+        漏报形态。这一条和下一条合起来钉住整条证据链:**写得下来**、而且**取的是
+        调模型之前那一刻**。
+        """
+        add_doc(self.conn, 'source/rss/a.md', title='一篇', url='https://x/a',
+                published='2026-09-28 09:00', indexed='2026-09-28 09:30')
+        daily._ensure_ledger(self.conn, now=T('2026-09-01 00:00'))
+        since, until = T('2026-09-28 08:00'), T('2026-09-29 08:00')
+        mat = daily.collect(self.conn, since, until)
+        self.assertTrue(mat, '摆盘自检:这一篇要选得上')
+        page = daily._page(since, until, mat, '正文', 'test-model', None,
+                           T('2026-09-28 08:00:10'))
+        # 断言落在**读回来的那一份**上:frontmatter 的序列化会给带冒号的值加引号,
+        # 验原始文本只能验到我自己这一行怎么写的,验不到盖章那边拿到的是什么。
+        daily.report_dir().mkdir(parents=True, exist_ok=True)
+        (daily.report_dir() / '2026-09-29.md').write_text(page, encoding='utf-8')
+        [past] = daily._report_chain()
+        self.assertEqual('2026-09-28 08:00:10', past.taken)
+        self.assertEqual('2026-09-28 08:00:10', past.latest_pickup(),
+                         '取材快照就是那个上界')
+        self.assertTrue(past.made.startswith(f'{datetime.now():%Y-%m-%d}'),
+                        '出稿完成照旧记当下 —— 两个时刻是两件事')
+
+    def test_generate_takes_the_snapshot_before_the_model_runs(self):
+        """取材快照要在**调模型之前**取 —— 取在之后就等于出稿完成的时刻。
+
+        真实顺序是读素材 → 关连接 → 调模型(几十秒到几分钟)→ 落盘。快照取晚一步,
+        模型跑那段时间里入库的文章就全部满足「到得不晚」,而它们一个都没进过这一份
+        的输入(审查实测的漏报形态)。这一条按**观测到的先后**断言,不依赖睡够一秒。
+        """
+        add_doc(self.conn, 'source/rss/a.md', title='一篇', url='https://x/a',
+                published='2026-09-28 09:00', indexed='2026-09-28 09:30')
+        daily._ensure_ledger(self.conn, now=T('2026-09-01 00:00'))
+        seen, asked = {}, []
+        real_page = daily._page
+
+        def spy(*a, **k):
+            seen['taken'] = a[6] if len(a) > 6 else k.get('taken')
+            return real_page(*a, **k)
+
+        def slow_model(*a, **k):
+            asked.append(datetime.now())
+            return '## 今日要点\n\n- **有事发生**:说明'
+
+        self.chat.side_effect = slow_model
+        with patch.object(daily, '_page', spy):
+            daily.generate(since=T('2026-09-28 08:00'), until=T('2026-09-29 08:00'))
+        self.assertEqual(1, len(asked), '摆盘自检:模型要真被问过一次')
+        self.assertIsNotNone(seen.get('taken'), '取材快照压根没传给 _page')
+        self.assertLessEqual(seen['taken'], asked[0],
+                             '快照取晚了:它必须早于(或等于)模型开跑那一刻')
 
 
 if __name__ == '__main__':

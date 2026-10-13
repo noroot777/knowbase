@@ -17,28 +17,37 @@ from tests.test_daily_carried import T, _Base, add_doc
 
 def write_report(date='2026-09-28', since='2026-09-27 08:00:00',
                  until='2026-09-28 08:00:00', body='正文', carried=(),
-                 generated=''):
+                 generated='', collected='', credit='RSS·某号'):
     """摆一份已有的日报:窗口在 frontmatter 里,**带走了哪些在素材清单里**。
 
     清单按 `daily._page` 的真实格式写(链接目标套尖括号、尾巴是「— 来源·
     账号」),迁移盖章认的就是这一节。不传 `carried` 就是摆一份"读不出清单"
     的日报 —— 它对归属提供不了任何证据,那一档照约定一个章都不盖。
 
-    `generated` 是那一份自己记的生成时刻(`daily._page` 写的那个字段,精度到
-    分钟)。不传就是老日报那种没有这一行的形态 —— 盖章那边会回落到 `until`。
+    `generated` 是那一份自己记的**出稿完成**时刻(精度到分钟),`collected` 是
+    **取材快照**(秒精度)。都不传就是老日报那种只有窗口的形态 —— 盖章那边按
+    `collected` → `generated` → `until` 三档回落(见 `PastReport.latest_pickup`)。
+
+    `credit` 是清单每一行收尾那个「来源·账号」。默认和 `add_doc` 的默认来源
+    (`rss` + `某号`)拼出来的逐字相同,所以默认摆盘下第四道判据不会插手 ——
+    要验那一道就显式传一个不同的值。
 
     **模块级函数、两个测试文件共用**(口径只有一份):这一份管「历史存量 / 清单
     解析 / 分界线」,`test_daily_seed_identity.py` 管「无 url 时那条归属匹配」。
     """
     daily.report_dir().mkdir(parents=True, exist_ok=True)
+    # `carried` 的每一项是 (标题, url) 或 (标题, url, 是不是补录) —— 补录那个
+    # 后缀是 `_page` 另加的标记,盖章那边读「来源·账号」时要摘掉它。
     refs = '\n'.join(
-        f'{i}. [{t}](<{u}>) — RSS·某号' if u else f'{i}. {t} — RSS·某号'
-        for i, (t, u) in enumerate(carried, 1))
+        (f'{i}. [{c[0]}](<{c[1]}>) — {credit}' if c[1] else f'{i}. {c[0]} — {credit}')
+        + (' · 补录' if len(c) > 2 and c[2] else '')
+        for i, c in enumerate(carried, 1))
     tail = (f'\n\n## 素材清单({len(carried)} 条)\n\n{refs}\n') if carried else ''
-    made = f'generated: {generated}\n' if generated else ''
+    meta = (f'generated: {generated}\n' if generated else '') + \
+           (f'collected: {collected}\n' if collected else '')
     (daily.report_dir() / f'{date}.md').write_text(
         f'---\ntype: daily-report\ndate: {date}\n'
-        f"window_since: '{since}'\nwindow_until: '{until}'\n{made}---\n\n{body}\n"
+        f"window_since: '{since}'\nwindow_until: '{until}'\n{meta}---\n\n{body}\n"
         + tail, encoding='utf-8')
 
 
