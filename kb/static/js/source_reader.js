@@ -47,6 +47,7 @@ function updateSourceReadingView() {
   $('source-reader').hidden = manage;
   $('source-settings').hidden = !manage;
   if (manage) $('source-workbench').classList.remove('is-focused', 'has-mobile-reader', 'is-list-only');
+  updateSourceFilterControls();
   updateSourceListButton();
   applySubsReadingLayout();
   updateSourceExpandButton();

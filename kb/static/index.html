@@ -19,6 +19,7 @@
 <link rel="stylesheet" href="/static/css/pipeline.css">
 <link rel="stylesheet" href="/static/css/sources.css">
 <link rel="stylesheet" href="/static/css/source_reader.css">
+<link rel="stylesheet" href="/static/css/subscriptions.css">
 <link rel="stylesheet" href="/static/css/daily.css">
 <link rel="stylesheet" href="/static/css/wechat_setup.css">
 </head>
@@ -235,41 +236,44 @@
   <div id="subs-error" class="source-banner error" hidden role="alert"><span id="subs-error-text"></span><button class="ghost" onclick="openSubsPanel()">重新读取</button></div>
 
   <section id="subs-wechat" hidden aria-label="公众号订阅">
-    <header class="source-heading"><div class="source-ident"><h2 id="src-label">公众号</h2><span id="src-status" class="badge">检查中…</span><span id="tgt-count" class="source-counts" role="status"></span></div>
+    <header class="source-heading"><div class="source-ident"><div class="source-title-row"><h2 id="src-label">公众号</h2><span id="src-status" class="badge">检查中…</span>
+        <details id="subs-wechat-notices" class="source-notices" hidden><summary><span id="subs-wechat-notices-summary" role="status">连接详情</span></summary><div class="source-notices-body">
+          <div id="src-detail" class="source-banner" hidden role="status">正在检查来源连接</div>
+          <div id="subs-wechat-progress" class="source-banner" hidden role="status"><span id="subs-wechat-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度<i data-arrow="right"></i></button></div>
+          <span class="source-notice-dismiss-hint">点击收起提示，拖选文字可复制；也可按 Escape。</span>
+        </div></details></div><span id="tgt-count" class="source-counts" role="status"></span></div>
       <div class="source-heading-actions"><a id="src-console" href="#" target="_blank" rel="noopener" style="display:none">采集器配置<i data-arrow="ext"></i></a>
         <button class="text-button" onclick="openWechatSetup()">检查并接入绿泡泡</button>
         <button id="src-recheck" class="ghost" onclick="openWechatSubs()">检查连接</button>
         <button id="subs-wechat-sync" onclick="syncWechatSubs()">同步全部</button></div>
     </header>
-    <div id="src-detail" class="source-banner" hidden role="status">正在检查来源连接</div>
-    <div id="subs-wechat-progress" class="source-banner" hidden role="status"><span id="subs-wechat-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度<i data-arrow="right"></i></button></div>
     <div id="subs-wechat-manage" class="subs-manage-card">
-      <h2 id="tgt-title" class="subs-manage-title">订阅的公众号</h2>
-      <div class="subs-target-search">
+      <div class="subs-target-toolbar"><h2 id="tgt-title" class="subs-manage-title">订阅的公众号</h2><div class="subs-target-search">
         <input id="tgt-search" placeholder="输入名字搜索并添加…" aria-label="搜索并添加公众号">
         <button id="tgt-search-btn" class="ghost" onclick="searchTargets()">搜索</button>
-      </div>
+      </div></div>
       <div id="tgt-cands" style="display:none"></div>
       <div id="tgt-list"></div>
-      <p class="hint" style="margin-top:12px">添加候选来自本机绿泡泡的会话列表，不走网络。移除订阅不影响已采集的文章。</p>
+      <p class="hint">添加候选来自本机绿泡泡的会话列表，不走网络。移除订阅不影响已采集的文章。</p>
     </div>
   </section>
 
-  <section id="subs-feeds" hidden>
-  <div id="source-workbench" class="source-workbench">
-    <section class="source-stream" aria-label="订阅内容与来源">
-      <header class="source-heading"><div class="source-ident"><h2 id="source-title"></h2><div id="source-summary" class="source-counts" role="status"></div></div>
-        <div class="source-heading-actions"><button class="ghost" id="source-add" onclick="openSourceEditor()">＋ 添加订阅</button><button id="source-sync" onclick="syncSource()">同步全部</button></div>
-      </header>
-      <div class="source-view-tabs"><button id="source-view-items" class="on" aria-pressed="true" onclick="switchSourceView('items')">最新内容</button><button id="source-view-manage" aria-pressed="false" onclick="switchSourceView('manage')">订阅管理 <small id="source-subscriptions-count"></small></button></div>
-      <div class="source-filters"><input id="source-q" type="search" placeholder="搜索已收录的内容…" aria-label="搜索来源内容" oninput="sourceFilterChanged()"><select id="source-filter" aria-label="筛选订阅来源" onchange="sourceFilterChanged()"><option value="">全部订阅</option></select></div>
+  <section id="subs-feeds" hidden aria-label="订阅阅读与管理">
+    <header class="source-heading source-toolbar"><div class="source-ident"><div class="source-title-row"><h2 id="source-title"></h2>
       <details id="source-notices" class="source-notices" hidden><summary><span id="source-notices-summary" role="status">来源状态</span></summary><div class="source-notices-body">
         <div id="source-error" class="source-banner error" hidden role="alert"><span id="source-error-text"></span><button class="ghost" onclick="loadSourceModule(true)">重新读取</button></div>
         <div id="source-configuration" class="source-banner" hidden role="status"></div>
         <div id="source-progress" class="source-banner" hidden role="status"><span id="source-progress-text"></span><button class="text-button" onclick="switchTab('pipe')">查看同步进度<i data-arrow="right"></i></button></div>
         <button id="source-issues" hidden onclick="switchSourceView('manage')"></button>
-      </div></details>
-      <div class="source-list-heading"><span>内容列表 <span id="source-items-count" role="status"></span></span><button id="source-list-expand" class="text-button" onclick="expandSourceList()" aria-pressed="false">只看列表</button></div>
+        <span class="source-notice-dismiss-hint">点击收起提示，拖选文字可复制；也可按 Escape。</span>
+      </div></details></div><div id="source-summary" class="source-counts" role="status"></div></div>
+      <div class="source-view-tabs" role="group" aria-label="订阅工作区"><button id="source-view-items" class="on" aria-pressed="true" onclick="switchSourceView('items')">最新内容</button><button id="source-view-manage" aria-pressed="false" onclick="switchSourceView('manage')">订阅管理 <small id="source-subscriptions-count"></small></button></div>
+      <div class="source-heading-actions"><button class="ghost" id="source-add" onclick="openSourceEditor()">添加订阅</button><button id="source-sync" onclick="syncSource()">同步全部</button></div>
+    </header>
+  <div id="source-workbench" class="source-workbench">
+    <section class="source-stream" aria-label="订阅内容与来源">
+      <div class="source-filters"><input id="source-q" type="search" placeholder="搜索已收录的内容…" aria-label="搜索来源内容" oninput="sourceFilterChanged()"><select id="source-filter" aria-label="筛选订阅来源" onchange="sourceFilterChanged()"><option value="">全部订阅</option></select></div>
+      <div class="source-list-heading"><span><span id="source-list-label">内容列表</span> <span id="source-items-count" role="status"></span></span><div class="source-list-tools"><button id="source-filter-reset" class="text-button" onclick="clearSourceFilters()" hidden>清除筛选</button><button id="source-list-expand" class="text-button" onclick="expandSourceList()" aria-pressed="false">只看列表</button></div></div>
       <div id="source-list-pane" tabindex="0" aria-label="订阅内容列表"><div id="source-list" aria-live="polite"></div><button id="source-more" class="ghost" hidden onclick="moreSourceItems()">加载更多</button></div>
     </section>
     <section id="source-reader" class="source-reader" aria-label="订阅内容阅读" tabindex="-1">
@@ -285,7 +289,7 @@
         </div>
       </div>
     </section>
-    <aside id="source-settings" class="source-settings" aria-label="此来源的同步设置" hidden><h2>持续收集</h2>
+    <aside id="source-settings" class="source-settings" aria-label="此来源的同步设置" hidden><h2>同步设置</h2>
       <form id="source-settings-form" onsubmit="saveSourceSettings(event)"><fieldset id="source-settings-fields" disabled>
         <label><input id="source-auto" type="checkbox"> 自动同步</label>
         <label for="source-interval">同步间隔<br>每 <input id="source-interval" type="number" min="15" max="10080" value="60" required> 分钟</label>

@@ -11,7 +11,11 @@ let sourceKind = '', sourceView = 'items', sourceData = null, sourceRows = [];
 let sourceOffset = 0, sourceTotal = 0, sourceVersion = 0, sourcePoll = null, sourceSearchTimer;
 let sourceItemsVersion = 0, sourceItemsFailed = false, sourceTranslating = 0, sourceFetching = 0;
 let sourceBusy = false;
+let sourceNoticesAutoOpened = false;
+let wechatNoticesAutoOpened = false;
+let sourceNoticeGesture = null;
 const sourceFilters = new Map();
+const sourceViewState = new Map();
 
 async function initSourceModules() {
   try {
@@ -41,6 +45,7 @@ async function openSubsPanel(kind = '') {
     }
   }
   if (!subsCatalog.some(m => m.id === subsKind)) subsKind = subsCatalog[0].id;
+  $('subs-error').hidden = true;
   try { localStorage.setItem('kb-subs-kind', subsKind); } catch {}
   renderSubsSwitch();
   const feeds = sourceModules.has(subsKind);
@@ -58,22 +63,60 @@ async function openSubsPanel(kind = '') {
   }
 }
 
-/* 「最新内容」视图把工作台锁在可用视口高度上(CSS 在 source_reader.css)。口径同
-   问答面板(workspace.css 的 body.chat-mode):**别按「上面还有多少东西」估一个常数**
-   —— 页头折成几行、#source-progress / #source-configuration / #source-issues 这几条
-   横幅在不在,原来那个 calc(100dvh - 290px) 一条都算不进去,横幅一出现工作台就被顶出
-   首屏、整页跟着出现滚动条。锁的只有这一个视图:公众号视图和「订阅管理」都是自然流,
-   锁住它们只会把列表挤进一个矮框里。 */
 function applySubsReadingLayout() {
-  const on = typeof activeTab !== 'undefined' && activeTab === 'subs'
+  const active = typeof activeTab !== 'undefined' && activeTab === 'subs';
+  const on = active
     && sourceModules.has(subsKind) && !$('subs-feeds').hidden && sourceView === 'items';
+  document.body.classList.toggle('subs-mode', active);
   document.body.classList.toggle('subs-reading', on);
 }
 
 function renderSubsSwitch() {
+  const focused = $('subs-switch').contains(document.activeElement);
   $('subs-switch').innerHTML = subsCatalog.map(m => `<button role="tab" id="subs-switch-${esc(m.id)}"
     class="${m.id === subsKind ? 'on' : ''}" aria-selected="${m.id === subsKind}"
+    tabindex="${m.id === subsKind ? '0' : '-1'}" aria-controls="${m.manager === 'feeds' ? 'subs-feeds' : 'subs-wechat'}"
     onclick="openSubsPanel('${esc(m.id)}')">${icon(m.icon)}<span>${esc(m.label)}</span></button>`).join('');
+  const selected = $('subs-switch-' + subsKind);
+  if (focused) selected?.focus({ preventScroll:true });
+  if (selected) {
+    const box = selected.getBoundingClientRect(), parent = $('subs-switch').getBoundingClientRect();
+    if (box.left < parent.left) $('subs-switch').scrollLeft -= parent.left - box.left;
+    if (box.right > parent.right) $('subs-switch').scrollLeft += box.right - parent.right;
+  }
+}
+
+$('subs-switch').addEventListener('keydown', event => {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  const current = subsCatalog.findIndex(module => 'subs-switch-' + module.id === event.target.id);
+  if (current < 0) return;
+  event.preventDefault();
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? subsCatalog.length - 1
+    : (current + (event.key === 'ArrowRight' ? 1 : -1) + subsCatalog.length) % subsCatalog.length;
+  openSubsPanel(subsCatalog[next].id);
+});
+
+function closeWechatNotices(restoreFocus = false) {
+  const notices = $('subs-wechat-notices');
+  const focused = restoreFocus && notices.contains(document.activeElement);
+  notices.open = false;
+  notices.classList.remove('is-auto-open');
+  wechatNoticesAutoOpened = false;
+  if (focused) notices.querySelector('summary').focus({ preventScroll:true });
+}
+function updateWechatNotices(detailChanged = false) {
+  const detail = !$('src-detail').hidden, running = !$('subs-wechat-progress').hidden;
+  const notices = $('subs-wechat-notices'), summary = $('subs-wechat-notices-summary');
+  notices.hidden = !detail && !running;
+  if (notices.hidden || (!detail && wechatNoticesAutoOpened)) closeWechatNotices();
+  notices.classList.toggle('has-error', detail && $('src-detail').classList.contains('error'));
+  summary.textContent = detail ? $('src-detail').textContent : $('subs-wechat-progress-text').textContent;
+  summary.title = summary.textContent;
+  if (detail && detailChanged) {
+    if (!notices.open) wechatNoticesAutoOpened = true;
+    notices.open = true;
+  }
+  notices.classList.toggle('is-auto-open', wechatNoticesAutoOpened && notices.open);
 }
 
 // ── 公众号视图:连接卡 + 订阅列表 + 同步全部 ────────────────────────────────
@@ -121,6 +164,7 @@ function renderWechatSubsStatus() {
   $('subs-wechat-progress-text').textContent = ours
     ? (pipeSnapshot.stages?.[pipeSnapshot.current_stage]?.detail || '正在同步公众号')
     : '其他来源正在同步，新任务会顺延。';
+  updateWechatNotices();
 }
 async function syncWechatSubs() {
   if (subsWechatBusy || pipeSnapshot?.running) return;
@@ -140,12 +184,14 @@ async function syncWechatSubs() {
 }
 
 async function openSourceModule(kind) {
+  rememberSourceView();
   clearTimeout(sourcePoll);
   clearTimeout(sourceSearchTimer);
   sourceKind = kind; sourceVersion++; sourceItemsVersion++; sourceItemsFailed = false;
   sourceData = null; sourceRows = []; sourceOffset = 0;
   resetSourceReader('正在读取内容…');
-  $('source-notices').open = false;
+  closeSourceNotices();
+  sourceError();
   const spec = sourceModules.get(kind);
   const filter = sourceFilters.get(kind) || { view: 'items', q: '', id: '' };
   sourceView = filter.view;
@@ -162,15 +208,61 @@ async function openSourceModule(kind) {
 }
 
 function sourceError(message = '') {
+  const changed = $('source-error-text').textContent !== message;
   $('source-error').hidden = !message;
   $('source-error-text').textContent = message;
   updateSourceNotices();
-  if (message) $('source-notices').open = true;
+  if (message && changed) {
+    if (!$('source-notices').open) sourceNoticesAutoOpened = true;
+    $('source-notices').open = true;
+  }
+  $('source-notices').classList.toggle('is-auto-open', sourceNoticesAutoOpened && $('source-notices').open);
+}
+function closeSourceNotices(restoreFocus = false) {
+  const notices = $('source-notices');
+  const focused = restoreFocus && notices.contains(document.activeElement);
+  notices.open = false;
+  notices.classList.remove('is-auto-open');
+  sourceNoticesAutoOpened = false;
+  if (focused) notices.querySelector('summary').focus({ preventScroll:true });
+}
+function dismissSourceNotice(noticesId, event) {
+  const notices = $(noticesId), gesture = sourceNoticeGesture;
+  sourceNoticeGesture = null;
+  const control = event.target.closest('button, a, input, select, textarea');
+  if (!control && event.detail > 0 && gesture?.notices === notices && gesture.textSelected) return;
+  if (noticesId === 'source-notices') closeSourceNotices(true);
+  else closeWechatNotices(true);
+  if (control) return;
+  const field = document.elementFromPoint(event.clientX, event.clientY);
+  if (field?.matches('input, select, textarea') && !field.disabled) field.focus({ preventScroll:true });
+}
+function trackSourceNoticeGesture(event) {
+  const gesture = sourceNoticeGesture;
+  if (!gesture || gesture.pointerId !== event.pointerId) return;
+  if (event.type === 'pointercancel') { sourceNoticeGesture = null; return; }
+  if (event.clientX !== gesture.x || event.clientY !== gesture.y) gesture.moved = true;
+  if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) >= 4) gesture.dragged = true;
+  if (event.type !== 'pointerup') return;
+  const selection = window.getSelection();
+  gesture.textSelected = gesture.moved && (gesture.dragged || gesture.startsOnText) && selection && !selection.isCollapsed
+    && gesture.notices.contains(selection.anchorNode) && gesture.notices.contains(selection.focusNode);
+}
+function sourceNoticeStartsOnText(body, event) {
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT), range = document.createRange();
+  for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+    if (!text.textContent.trim()) continue;
+    range.selectNodeContents(text);
+    if ([...range.getClientRects()].some(box => event.clientX >= box.left && event.clientX <= box.right
+      && event.clientY >= box.top && event.clientY <= box.bottom)) return true;
+  }
+  return false;
 }
 function updateSourceNotices() {
   const error = !$('source-error').hidden, running = !$('source-progress').hidden;
   const issues = !$('source-issues').hidden, configuration = !$('source-configuration').hidden;
   $('source-notices').hidden = !error && !running && !issues && !configuration;
+  if ($('source-notices').hidden || (!error && sourceNoticesAutoOpened)) closeSourceNotices();
   $('source-notices').classList.toggle('has-error', error || issues);
   $('source-notices-summary').textContent = error ? '读取失败，点击查看原因'
     : running ? $('source-progress-text').textContent : issues ? '来源连接需处理' : '部分订阅待配置';
@@ -244,26 +336,62 @@ function updateSourceRunStatus() {
   $('source-add').disabled = sourceBusy || !!ours;
   updateSourceNotices();
 }
-function switchSourceView(view) {
+function rememberSourceView() {
+  if (!sourceKind) return;
+  sourceViewState.set(sourceKind + ':' + sourceView, {
+    q:$('source-q').value, id:$('source-filter').value,
+    listScroll:$('source-list-pane').scrollTop, readerScroll:$('source-reader-scroll').scrollTop,
+    loaded:sourceOffset,
+  });
+}
+async function switchSourceView(view) {
+  if (!['items', 'manage'].includes(view) || sourceView === view) return;
+  clearTimeout(sourceSearchTimer);
+  rememberSourceView();
+  const kind = sourceKind, saved = sourceViewState.get(kind + ':' + view);
   sourceView = view; sourceOffset = 0;
+  closeSourceNotices();
+  $('source-q').value = saved?.q || '';
+  $('source-filter').value = saved?.id || '';
   updateSourceReadingView();
-  renderSourceView(true).catch(e => sourceError(e.message));
+  try {
+    const request = renderSourceView(true, saved?.loaded || 0), version = sourceItemsVersion;
+    await request;
+    if (saved && sourceKind === kind && sourceView === view && sourceItemsVersion === version) {
+      $('source-list-pane').scrollTop = saved.listScroll;
+      $('source-reader-scroll').scrollTop = saved.readerScroll;
+    }
+  } catch (e) { if (sourceKind === kind && sourceView === view) sourceError(e.message); }
+}
+function updateSourceFilterControls() {
+  const manage = sourceView === 'manage';
+  $('source-view-items').classList.toggle('on', !manage);
+  $('source-view-manage').classList.toggle('on', manage);
+  $('source-view-items').setAttribute('aria-pressed', String(!manage));
+  $('source-view-manage').setAttribute('aria-pressed', String(manage));
+  $('source-q').placeholder = manage ? '搜索名称、链接或分组…' : '搜索已收录的内容…';
+  $('source-q').setAttribute('aria-label', manage ? '搜索订阅名称、链接或分组' : '搜索来源内容');
+  $('source-filter').hidden = manage;
+  $('source-list-expand').hidden = manage;
+  $('source-list-label').textContent = manage ? '已订阅' : '内容列表';
+  $('source-filter-reset').hidden = !$('source-q').value.trim() && (manage || !$('source-filter').value);
+}
+function clearSourceFilters() {
+  $('source-q').value = '';
+  $('source-filter').value = '';
+  sourceFilterChanged();
+  $('source-q').focus({ preventScroll:true });
 }
 function sourceFilterChanged() {
   clearTimeout(sourceSearchTimer);
+  updateSourceFilterControls();
   sourceItemsVersion++; // Invalidate responses immediately, including during debounce.
   if (sourceView === 'items') resetSourceReader('正在筛选内容…');
   sourceSearchTimer = setTimeout(() => renderSourceView(true).catch(e => sourceError(e.message)), 220);
 }
-async function renderSourceView(reset = false) {
+async function renderSourceView(reset = false, visibleCount = 0) {
   if (!sourceData) return;
   const kind = sourceKind, version = ++sourceItemsVersion;
-  $('source-view-items').classList.toggle('on', sourceView === 'items');
-  $('source-view-manage').classList.toggle('on', sourceView === 'manage');
-  $('source-view-items').setAttribute('aria-pressed', String(sourceView === 'items'));
-  $('source-view-manage').setAttribute('aria-pressed', String(sourceView === 'manage'));
-  $('source-q').placeholder = sourceView === 'items' ? '搜索已收录的内容…' : '搜索名称、链接或分组…';
-  $('source-filter').hidden = sourceView === 'manage';
   $('source-more').hidden = true;
   $('source-more').disabled = false;
   updateSourceReadingView();
@@ -272,11 +400,13 @@ async function renderSourceView(reset = false) {
   if (sourceView === 'manage') {
     sourceItemsFailed = false;
     const rows = sourceData.sources.filter(s => (s.name+' '+s.url+' '+s.group_name).toLowerCase().includes(q.toLowerCase()));
-    $('source-list').innerHTML = rows.map(renderSubscription).join('') || '<div class="source-empty"><h3>没有匹配的订阅</h3><p>换个关键词，或添加新的来源。</p></div>';
+    $('source-list').innerHTML = rows.map(renderSubscription).join('') || `<div class="source-empty"><h3>${q ? '没有匹配的订阅' : '还没有订阅'}</h3><p>${q ? '清除筛选，重新查看全部订阅。' : '添加一个感兴趣的来源，之后在最新内容中阅读。'}</p><button class="ghost" ${q ? 'data-clear-source-filters' : 'data-add-source'}>${q ? '清除筛选' : '添加订阅'}</button></div>`;
+    $('source-items-count').textContent = `${rows.length} / ${sourceData.sources.length} 个`;
+    if (reset) $('source-list-pane').scrollTop = 0;
     updateSourceRunStatus();
     return;
   }
-  const count = !reset && sourceOffset ? sourceOffset : 30;
+  const count = visibleCount || (!reset && sourceOffset ? sourceOffset : 30);
   // Reload the visible window to avoid duplicates when a sync inserts new entries.
   if (reset) {
     $('source-list').innerHTML = '<div class="source-empty">正在读取内容…</div>';
@@ -317,7 +447,7 @@ function renderSubscription(s) {
   return `<article class="source-subscription ${!s.enabled ? 'is-paused' : ''}">
     <div class="source-avatar" aria-hidden="true">${esc(s.name.slice(0,1))}</div>
     <div class="source-subscription-body"><div class="source-row-title"><h3>${esc(s.name)}</h3><span class="source-state ${s.enabled && s.last_error ? 'failed' : ''}">${status}</span></div>
-    <a class="source-url" href="${esc(safeUrl(s.url))}" target="_blank" rel="noopener noreferrer">${esc(s.url)}</a>
+    <a class="source-url" href="${esc(safeUrl(s.url))}" title="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.url)}</a>
     <div class="source-row-meta">${esc(s.group_name || '未分组')} · ${s.item_count} 条 · ${s.last_success ? '最近成功 '+sourceTime(s.last_success) : '尚未成功同步'}${s.fulltext ? ' · 补抓原文正文' : ''}${s.extract ? ' · 提取知识标签' : ''}</div>
     ${s.configuration_error ? `<p class="source-row-meta">${esc(s.configuration_error)}</p>` : ''}
     ${!s.last_error && s.last_note ? `<p class="source-row-meta">${esc(s.last_note)}；下次同步从上次的位置接着读。</p>` : ''}
@@ -364,7 +494,7 @@ function renderSourceItems() {
   ].filter(Boolean);
   const note = notes.length ? `<p class="source-note" role="status">${notes.join('')}</p>` : '';
   $('source-list').innerHTML = rows ? note + rows :
-    `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value ? '换个关键词或切换订阅试试。' : sourceData?.unconfigured && !sourceData?.ready ? sourceConfigHint() : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p></div>`;
+    `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value || $('source-filter').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value || $('source-filter').value ? '清除筛选，或换一个订阅来源试试。' : sourceData?.unconfigured && !sourceData?.ready ? sourceConfigHint() : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p>${$('source-q').value || $('source-filter').value ? '<button class="ghost" data-clear-source-filters>清除筛选</button>' : ''}</div>`;
   $('source-more').hidden = sourceOffset >= sourceTotal;
   $('source-more').textContent = `加载更多（已显示 ${sourceRows.length} / ${sourceTotal}）`;
   $('source-items-count').textContent = `${sourceTotal} 条`;
@@ -397,6 +527,8 @@ async function syncSource(ids = []) {
   finally { sourceBusy=false; updateSourceRunStatus(); }
 }
 $('source-list').addEventListener('click', e => {
+  if (e.target.closest('[data-clear-source-filters]')) clearSourceFilters();
+  if (e.target.closest('[data-add-source]')) openSourceEditor();
   if (e.target.closest('[data-retry-items]')) renderSourceView(true);
   const read = e.target.closest('[data-read-item]');
   if (read) readSourceItem(read.dataset.readItem);
@@ -407,7 +539,55 @@ $('source-list').addEventListener('click', e => {
 });
 $('source-list').addEventListener('keydown', event => {
   const entry = event.target.closest('[data-source-key]');
-  if (!entry || event.target !== entry || !['Enter', ' '].includes(event.key)) return;
+  if (!entry || event.target !== entry) return;
+  if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+    event.preventDefault();
+    const entries = [...$('source-list').querySelectorAll('[data-source-key]')];
+    const current = entries.indexOf(entry);
+    const index = event.key === 'Home' ? 0 : event.key === 'End' ? entries.length - 1
+      : Math.max(0, Math.min(entries.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
+    entries[index].focus({ preventScroll:true });
+    entries[index].scrollIntoView({ block:'nearest' });
+    readSourceItem(entries[index].dataset.sourceKey, false);
+    return;
+  }
+  if (!['Enter', ' '].includes(event.key)) return;
   event.preventDefault();
   readSourceItem(entry.dataset.sourceKey);
+});
+
+$('source-notices').querySelector('summary').addEventListener('click', () => {
+  sourceNoticesAutoOpened = false;
+  $('source-notices').classList.remove('is-auto-open');
+});
+$('subs-wechat-notices').querySelector('summary').addEventListener('click', () => {
+  wechatNoticesAutoOpened = false;
+  $('subs-wechat-notices').classList.remove('is-auto-open');
+});
+document.addEventListener('pointerdown', event => {
+  const body = event.target.closest('#source-notices .source-notices-body, #subs-wechat-notices .source-notices-body');
+  sourceNoticeGesture = body && event.isPrimary && event.button === 0
+    ? { notices:body.closest('details'), pointerId:event.pointerId, x:event.clientX, y:event.clientY,
+        moved:false, dragged:false, startsOnText:sourceNoticeStartsOnText(body, event), textSelected:false }
+    : null;
+  const notices = $('source-notices');
+  if (notices.open && !notices.contains(event.target)) closeSourceNotices();
+  const wechatNotices = $('subs-wechat-notices');
+  if (wechatNotices.open && !wechatNotices.contains(event.target)) closeWechatNotices();
+}, true);
+for (const type of ['pointermove', 'pointerup', 'pointercancel']) document.addEventListener(type, trackSourceNoticeGesture, true);
+document.addEventListener('click', event => {
+  if (!$('source-notices').contains(event.target)) closeSourceNotices();
+  else if ($('source-notices').open && $('source-notices').querySelector('.source-notices-body').contains(event.target)) dismissSourceNotice('source-notices', event);
+  if (!$('subs-wechat-notices').contains(event.target)) closeWechatNotices();
+  else if ($('subs-wechat-notices').open && $('subs-wechat-notices').querySelector('.source-notices-body').contains(event.target)) dismissSourceNotice('subs-wechat-notices', event);
+  sourceNoticeGesture = null;
+}, true);
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || event.defaultPrevented) return;
+  for (const id of ['source-notices', 'subs-wechat-notices']) {
+    if (!$(id).open || $(id).hidden) continue;
+    if (id === 'source-notices') { closeSourceNotices(true); continue; }
+    closeWechatNotices(true);
+  }
 });

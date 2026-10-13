@@ -1,5 +1,9 @@
 # 订阅页布局整合记录
 
+> 2026-10-11 最新方案见 `design/subscription-usability.md`：所有视图统一使用
+> `subs-mode` 外壳，来源工具栏移出列表，管理也使用独立滚动区；以下记录保留历史方案。
+> 2026-10-13 审查修复、功能选择性吸收及当前实跑结果见文末；历史通过数不作为当前验证结论。
+
 ## 合并前方案与审查记录
 
 以下保留 `main` 的原始决策与故障分析；工作区几何和最小高度以文末后续方案为准。
@@ -221,11 +225,239 @@ python -m unittest tests.test_subs_layout tests.test_source_post_title \
 - 两套浏览器探针均保留，页头断言改为验证 feeds 列表内真实可见的工具栏。
 - 浏览器扩展本轮检查仍报 `unsupported Codex auth method: apikey`；按规定降级到独立无头 Chrome 与临时 profile，不接管普通标签、不启动有头浏览器。
 
-### 合并后验证结果
+### 合并后验证结果（2026-10-11 历史）
 
 - `.venv/bin/python -m unittest tests.test_subs_layout tests.test_source_post_title tests.test_daily_schedule tests.test_feed_sources tests.test_retired_channel tests.test_reading_literal tests.test_chat_height`：64 项通过；其中有数据布局探针 62／62 项通过。
-- 通过 `tests.headless.run_probe` 在隔离数据服务运行 `tests/subs_probe.mjs`：40／40 项通过。新增验证已连接时无冗余横幅、重要采集器提示不被隐藏、连接失败仍有原因和配置入口。
+- 通过 `tests.headless.run_probe` 在隔离数据服务运行 `tests/subs_probe.mjs`：当时 40／40 项通过。页头移动后的选择器修复与当前树复跑结果见下方 2026-10-13 记录。
 - `.venv/bin/python -m unittest tests.test_wechat_setup tests.test_wechat_discovery_integration tests.test_pipeline_stop`：30 项通过，1 项因未配置 `KB_WECHAT_TEST_RUNTIME` 的隔离 Reader 运行时跳过；未读取用户真实微信数据库。
 - 修改过的 JavaScript 与探针均通过 `node --check`，HTML 的 329 个 ID 无重复，`git diff --check` 通过，代码文件均少于 700 行。
 - 截图：`output/subs-layout/social-1440.png`、`schedule-1440.png`、`source-notices-1440.png`、`large-2160-1600.png`。1440×1000 工作区仍从 y=53 铺到 y=1000；列表与正文均可独立滚动，弹窗可关闭并返回入口焦点。
 - 在任务分支 `ash/waO-34BV` 内合入 `main`；没有检出、提交或修改目标分支，也没有删除分支或 worktree。
+
+## 2026-10-13 第 1 轮审查修复
+
+本轮只修复审查指出的两条阻塞项，不改动非阻塞观察项或已确认的 X 通道基线问题。
+
+- `sourceError()` 仅在非空错误文案变化时自动展开详情；同一错误的后续轮询保留用户的收起／展开选择。恢复后再发生同类错误仍会重新提醒。
+- `updateSourceNotices()` 在所有状态消失、整条提示被隐藏时同时复位 `open`，防止后续同步或待配置提示继承旧展开态、遮住搜索框。
+- `tests/subs_probe.mjs` 三处页头选择器统一为 `#subs-feeds > header.source-heading`，检查真实可见的工作区工具栏，不再访问已移除的列表内页头。
+- `tests/subs_notices_checks.mjs` 接入布局探针，增加 15 项定向浏览器检查：真实概览请求失败后的相同错误重试、错误文案变化、隐藏／重新出现、手动展开及搜索框命中和鼠标聚焦。
+
+### 复现与当前验证结果
+
+- 只加入回归、尚未修复状态逻辑时，布局探针为 **109／118 项通过、9 项失败**，可复现反复展开及搜索被遮挡；修复后为 **118／118 项通过**，浏览器无未捕获异常。
+- 在隔离 `tests/serve_sources.py --layout-fixture` 服务上，通过 `tests.headless.run_probe` 实跑修复后的 `tests/subs_probe.mjs`，当前结果为 **40／40 项通过**，进程正常结束，不再抛页头为 null 的 TypeError。
+- 相关来源、定时同步、阅读和聊天布局 unittest **63 项全部通过**；加上布局测试，共 **64 项 unittest 通过**。
+- 本轮修改的 JavaScript 和探针均通过 `node --check`；`git diff --check` 通过；修改过的代码文件均少于 700 行。
+- 截图已检查：`output/subs-layout/source-notices-repeated-error-1440.png` 和 `output/subs-layout/source-notices-recovered-1440.png`。相同错误重试后及恢复后开始同步时，详情保持收起，搜索框未被遮挡；检查结果见 `output/subs-layout/results.json`，旧探针输出见 `output/subs-layout/subs-probe-results.log`（均为忽略的验证产物）。
+
+复跑命令（使用项目已有虚拟环境）：
+
+```sh
+python -m unittest tests.test_subs_layout tests.test_source_post_title \
+  tests.test_daily_schedule tests.test_feed_sources tests.test_retired_channel \
+  tests.test_reading_literal tests.test_chat_height -v
+```
+
+旧探针使用隔离服务地址及 `tests.headless.probe_env()`，通过
+`tests.headless.run_probe(['node', 'tests/subs_probe.mjs', base], ...)` 执行，
+服务与浏览器均在结束后清理。
+
+### 本轮浏览器通道
+
+先重新检查 Chrome 扩展，`cua.getState()` 返回
+`Browser 1: Error: unsupported Codex auth method: apikey`，无法建立具名后台标签会话。
+因此按规定降级为独立无头 `chrome-headless-shell`，每次使用临时 profile；
+CDP 仅连接本次启动的隔离无头实例。未接管或直连用户普通标签，未激活 Chrome，
+未切换用户标签，也未启动有头浏览器。所有被测数据和服务均为本地隔离 fixture。
+
+## 2026-10-13 第 2 轮审查修复
+
+本轮只修复公众号侧同形状的状态浮层缺陷，不扩大到报告中的非阻塞观察项。
+
+- `updateWechatNotices()` 在连接说明和同步状态都消失时，同步复位 `open`；连接恢复后的后台同步，以及用户查看同步详情后开始的下一轮同步，都不会继承旧展开态。
+- 在 `tests/subs_notices_checks.mjs` 中增加 9 项公众号检查并接入布局探针。仅打桩隔离页面的状态接口，连接恢复走真实 `refreshPipeSource()`，开始／结束／再次同步走真实 `refreshPipe()` 和状态渲染，不直接操作提示的 `hidden` 来模拟恢复；详情展开和搜索聚焦使用鼠标事件。
+- 加入回归但未改状态逻辑时为 **121／127 项通过、6 项失败**；补上复位后为 **127／127 项通过**，原 feeds 的 15 项检查仍通过，浏览器无未捕获异常。
+- 原订阅页探针复跑 **40／40 项通过**；相关来源、定时同步、阅读、聊天布局和无正文提取 unittest **88 项通过**，加上布局测试共 **89 项 unittest 通过**。
+- JavaScript 与探针的 `node --check`、`git diff --check` 均通过，改动的代码文件均少于 700 行。
+- 截图已检查：`output/subs-layout/wechat-notices-recovered-1440.png`、`output/subs-layout/wechat-notices-next-sync-1440.png`；提示保持收起，添加公众号的搜索框没有被遮挡。完整结果见 `output/subs-layout/results.json` 和 `output/subs-layout/round2-subs-probe-results.log`（忽略的验证产物）。
+
+复跑命令（使用项目已有虚拟环境）：
+
+```sh
+python -m unittest tests.test_subs_layout tests.test_source_post_title \
+  tests.test_daily_schedule tests.test_feed_sources tests.test_retired_channel \
+  tests.test_reading_literal tests.test_chat_height tests.test_extract_no_body -v
+```
+
+本轮重新检查 Chrome 扩展，`cua.getState()` 仍返回
+`Browser 1: Error: unsupported Codex auth method: apikey`，无法建立具名后台标签会话。
+因此继续按规定降级为独立无头 `chrome-headless-shell` 与临时 profile，
+仅连接本次启动的隔离无头实例；未接管普通标签、未激活 Chrome、未切换用户标签、
+未启动有头浏览器。隔离 fixture 不访问真实微信数据，服务和浏览器均在验证结束后清理。
+
+## 2026-10-13 从 waO-34BVbB6G 选择性吸收功能
+
+用户希望保留本任务的页面方案，仅取另一任务有价值的功能修复。本轮未整支合并，
+没有改动 HTML、CSS、栏宽、页头结构、搜索布局或原有视图状态保存。
+
+### 改动核对与取舍
+
+- 核对来源任务对话、提交和工作区；初次检查时来源为干净的 `d897695`，与本任务共享 `0e658f3`。来源早期的 `8d6b8d4`、`da4b831`、`0e658f3` 已是本任务的祖先，统一定时设置、慢读取期间禁用编辑、失败后保留真实设置等功能已经包含；两边 `pipe_schedule.js` 相同，无需重复迁移。
+- 两个任务之间没有独立的服务端 API、数据库、采集器或抓取管道改动。来源本轮最新提交为 `3e5ec5b`，相对共同基线的独有文件只有 `sources.js`、`workspace.js`、`source_reader.css`、布局探针和决策记录，均为提示交互、旧布局修复及其回归，不是另一个后端功能分支。
+- 吸收来源的“自动展开／用户手动展开”区分：错误恢复时收起自动详情，即使还有待配置、同步或连接问题，也不继续遮挡搜索；用户主动查看的详情则保留。统一关闭函数同时清理自动展开标记并按需恢复焦点。
+- 吸收来源切换时清理旧错误的逻辑，避免新来源第一次失败且文案相同时被旧来源的去重状态吞掉；保留本任务原有的“同一错误不反复展开、错误文案变化时重新提醒”规则，不直接替换为来源的较弱去重条件。
+- 外部指针和点击在捕获阶段收起旧详情，避免快速失败回包展开的新提示又被同一次点击的尾部关闭逻辑吞掉。来源的 Escape 优先级改动未重复搬入 `workspace.js`：本任务已有捕获阶段的弹窗处理和 `defaultPrevented` 闸门，本轮补实测确认。
+- 来源旧布局探针没有整文件替换。新增 `tests/subs_notice_recovery_checks.mjs` 的 18 项定向检查，真实请求失败／恢复、真实鼠标命中与点击、手动查看、Escape 焦点与弹窗优先级、跨来源相同错误及专注阅读都接入本任务已有探针；移除首次错误恢复用例中的手工 `open = false`。
+- 检查期间来源任务仍在运行，新增的旧布局 CSS 与探针修改随后提交为 `3e5ec5b`。该提交修复专注阅读隐藏状态入口的问题；本任务的工具栏和状态提示本就位于被隐藏的 `.source-stream` 之外，无需引入其旧 CSS。本轮只补充专注阅读的可见性、真实点击重试、Escape 和返回双栏回归，确认保留当前页面方案即可覆盖。
+
+### 实跑验证
+
+- 仅加入最初回归、未迁移功能时，**136／141 项通过、5 项失败**，证实组合状态下恢复仍遮挡搜索和跨来源提示去重的遗漏；迁移后 **141／141 项通过**，再补充专注阅读回归后最终 **145／145 项通过**，原布局、feeds 和公众号回归全部保留，浏览器无未捕获异常。
+- 原订阅页探针 **40／40 项通过**；相关 unittest **88 项通过**，加上布局测试共 **89 项通过**。修改的 JavaScript 与探针通过 `node --check`，`git diff --check` 通过，代码文件均少于 700 行。
+- 截图 `output/subs-layout/notice-import-recovery-1440.png` 和 `output/subs-layout/notice-import-focused-1440.png` 已检查：恢复后待配置摘要仍可见而自动浮层收起，搜索框与内容列表可用；专注阅读时状态入口、故障原因及重试按钮仍可见。紧凑页头、满高双栏和专注阅读布局均保留。结果见 `output/subs-layout/results.json`、`output/subs-layout/import-subs-probe-results.log`（忽略的产物）。
+
+浏览器先重新检查扩展，`cua.getState()` 返回
+`Browser 1: Error: unsupported Codex auth method: apikey`，无法建立具名后台标签会话，
+故按规定降级为独立无头 `chrome-headless-shell` 与临时 profile。仅连接隔离无头实例，
+未激活 Chrome、未接管或切换用户标签、未启动有头浏览器。
+
+没有修改、停止、删除来源任务的工作区或分支，也未修改 `main`。
+有价值的功能已在本任务保存；后续可只验收本任务，另一任务如仍在运行，应先停止再从界面删除，
+不必把其旧页面方案整支合入。
+
+## 2026-10-13 选择性吸收后的首轮审查修复
+
+完整核对 `free-review/0Akrxx4BvOnf/round-1/report.md`，两条阻断意见成立。
+本轮基于 `a052b5b` 只修公众号提示可见性和短名单的空白边框，不重新规划页头、
+不搬回旧布局，也不改采集器、后端或同步设置。报告中的 X 通道既有基线失败不在本轮修复范围。
+
+### 提示不再吞掉采集器原话
+
+- `setSourceDetail()` 在更新前比较完整文案和错误等级，把变化标记交给 `updateWechatNotices()`；
+  有新的非空采集器说明时自动展开一次，接通后的 `message/hint` 和失败原因都立即可见。
+- 收起摘要显示采集器实际文案，并保留完整悬停提示，不再只写无信息的「连接详情」。
+  连接说明优先于同步进度，同时发生连接失败与同步时不会把失败原因盖掉。
+- 公众号同样区分自动提醒与用户主动查看：相同文案轮询不反复展开；文案或错误等级变化再提醒；
+  说明恢复为空时收起自动详情，即使同步仍在进行。用户手动打开的同步详情则保留。
+  外部指针、外部点击、Escape 和无状态隐藏都会清理自动标记，Escape 按需返回入口焦点。
+- 提示仍是页头浮层，页头高度与内容起点不因展开改变；普通后台同步不主动遮挡搜索。
+
+### 名单按内容收缩，超出才滚
+
+- `.subs-mode #tgt-list` 改为 `flex:0 1 auto; min-height:0; max-height:100%`。
+  少量订阅和空态按内容收缩；长名单只占工作区剩余高度，继续由列表自身滚动。
+- 1440×1000 实测：0 条空态容器约 80px；3 条约 191px；6 条约 382px，
+  均只有 2px 边框差值，不再附带 574px／384px 空白。收尾说明在名单下方 10px。
+  30 条时容器约 765px、内容约 1904px，可滚到最后一条的操作按钮，整页不滚。
+- 375×760 实测：3 条同样按内容收缩；30 条在约 328px 的容器内滚动，
+  页尾说明保留、没有横向溢出。
+
+### 回归与浏览器证据
+
+- 新增 `tests/subs_wechat_review_checks.mjs` 的 25 项定向检查，并改正旧探针中
+  「连接失败默认收起」的两项错误预期。使用隔离服务、模拟采集器状态响应和真实目标行渲染，
+  不连接真实微信库；覆盖采集器原话、变化提醒／去重、同步时错误优先、恢复、手动查看、
+  外部真实点击、Escape、0／3／6／30 条名单、桌面与手机及最后一条按钮的真实命中。
+- 修复前 **156／170 通过、14 项失败**；修复后 **170／170 通过**，浏览器没有未捕获异常。
+  原订阅探针 **40／40 通过**；相关 unittest **88 项通过**，加上布局测试共 **89 项通过**。
+  JavaScript 通过 `node --check`，`git diff --check` 通过，修改的代码文件均少于 700 行。
+- 截图包括 `output/subs-layout/review-wechat-connected-1440.png`、
+  `review-wechat-3-targets-1440.png`、`review-wechat-6-targets-1440.png`、
+  `review-wechat-30-targets-1440.png`、`review-wechat-3-targets-375.png`、
+  `review-wechat-30-targets-375.png`；截图前关闭测试状态切换产生的临时通知，未改产品通知逻辑。
+  完整结果、红灯结果与日志均位于忽略的 `output/subs-layout/`。
+
+本轮重新检查扩展，`cua.getState()` 返回
+`Browser 1: Error: unsupported Codex auth method: apikey`，无法建立具名后台会话。
+按规则降级为独立无头 `chrome-headless-shell` 和临时 profile，仅连接自己启动的实例；
+未接管、复用或切换用户普通标签，未激活 Chrome，未启动有头浏览器。
+隔离服务与无头实例在验证结束后由既有测试清理路径回收。
+
+## 2026-10-13 选择性吸收后的第二轮审查修复
+
+完整核对 `free-review/0Akrxx4BvOnf/round-2/report.md`，自动展开的状态提示
+遮住搜索框和来源筛选中心、导致点击无响应的阻断意见成立。报告确认同一问题
+已存在于 `bf69ccd` 的 feeds 自动错误提示，本轮修复这一共享易用性缺陷，
+不扩展到候选面板、摘要截断、下拉箭头等非阻断项，也不改既有 X 通道基线问题。
+
+### 自动提示可以直接收起并继续输入
+
+- 公众号和 feeds 共用自动展开标记 `is-auto-open`。只有自动提醒显示透明收起层
+  和「点击任意位置收起提示，继续操作；也可按 Escape」说明；手动查看仍保留普通详情交互。
+- 收起层使用绝对定位，仅覆盖提示自身，不覆盖整个视口；真实重试和同步进度入口
+  置于收起层之上。来源标签和其它未被提示覆盖的按钮仍可一次点击直接操作。
+- 文档捕获阶段识别自动提示内的点击并收起。点击被遮挡区域时，收起后在相同坐标
+  命中底下的可用输入或筛选控件并直接聚焦；搜索框中心一次点击即可输入，
+  无需先点空白或再点一次输入框。真实提示按钮保留原生处理，不转发或合成第二次点击。
+- 手动摘要点击、收起、恢复和无状态隐藏均清理自动标记。保留同文案去重、
+  Escape 与焦点恢复、模态优先级、错误重试和同步入口；页头高度与工作区起点不变。
+
+### 中心命中回归与验证
+
+- 新增 `tests/subs_notice_hit_checks.mjs` 的 12 项检查：公众号使用首次进入时真实状态流程，
+  RSS 仅模拟概览接口拒绝并调用真实 `loadSourceModule()`，验证搜索框和来源筛选中心。
+  搜索框首点击同时断言提示收起及焦点，再直接通过 `Input.insertText` 输入「科技」，
+  不补第二次点击；同时检查真实命中、页头与工作区几何不变及手动详情重试入口。
+- 删除旧公众号用例只探输入框最右侧 6px 的误导性采样；手动详情用例明确先外部收起、
+  再检查搜索中心，自动提醒则由新增首点击检查覆盖。测试清理输入值、搜索／轮询定时器
+  和临时接口替换，不接入真实微信库。
+- 修复前 **173／182 通过、9 项失败**，复现两类中心死区；最终 **182／182 通过**，
+  无浏览器未捕获异常。最终组合 unittest **89 项通过**（73.384 秒，含布局浏览器测试）；
+  原订阅探针 **40／40 通过**。相关日志和红灯结果均位于忽略的 `output/subs-layout/`。
+- 截图 `output/subs-layout/notice-center-tgt-search-before.png`、
+  `notice-center-tgt-search-typed.png`、`notice-center-source-q-before.png`、
+  `notice-center-source-q-typed.png` 对应自动提示与首点击直接输入的前后状态。
+  JavaScript 语法和差异空白检查通过，修改的代码文件均少于 700 行。
+
+本轮重新检查扩展，`cua.getState()` 返回
+`Browser 1: Error: unsupported Codex auth method: apikey`，无法建立具名后台会话。
+按规则降级为独立无头 `chrome-headless-shell` 和临时 profile，仅连接自己启动的实例；
+未接管、复用或切换用户普通标签，未激活 Chrome，未启动有头浏览器。
+隔离服务与无头实例在验证结束后由既有测试清理路径回收。
+
+## 2026-10-13 选择性吸收后的第三轮审查修复
+
+完整核对 `free-review/0Akrxx4BvOnf/round-3/report.md`，用户主动展开状态说明时
+仍存在搜索／筛选中心点击死区的阻断意见成立。`bf69ccd` 已有的手动浮层只响应外部点击，
+上一轮仅覆盖自动提醒，没有修好这一原始路径。本轮只统一这两种展开方式的点击行为，
+不重做页面布局，也不扩展到报告中的候选面板、摘要、下拉箭头和既有 X 通道问题。
+
+### 手动与自动展开共用交互
+
+- 文档捕获阶段以详情当前 `open` 状态判断是否处理内部点击，不再以自动提醒标记为门槛。
+  点击说明正文或留白收起提示后，同坐标命中的输入／筛选控件立即获得焦点；
+  手动点开的公众号说明、feeds 待配置、同步、连接问题及错误说明均覆盖此路径。
+- 没有直接把透明按钮扩展到手动详情：移除透明按钮和对应层级规则，使用原生点击目标。
+  这样不会破坏手动详情原本可选择的文字；检测到起止都在详情内的非空文字选择时，
+  保留浮层而不是把拖选误判成收起。自动提醒也共用此保护。
+- 所有已展开的详情均显示「点击收起提示，拖选文字可复制；也可按 Escape」。
+  真实重试和管理入口仍执行原生事件，不转发、不合成第二次点击。
+  自动提醒标记仍用于去重与恢复收起，手动查看仍不会被成功轮询或故障恢复擅自关闭。
+- 页头和工作区尺寸不随收起改变；保留外部点击、Escape、焦点恢复、来源切换和模态优先级。
+  被浮层盖住的非输入内容仍遵循先收起再操作的既有规则，不增加按钮／文章点击转发。
+
+### 回归与浏览器证据
+
+- 新增的手动路径均通过真实点击摘要进入，而不是直接设置 `open`：
+  公众号首访说明收起后重开、RSS 故障收起后重开、无故障待配置状态，
+  以及同步／连接问题与待配置并存的组件状态。搜索与筛选均探中心，搜索首点击后
+  直接通过 `Input.insertText` 输入「科技」，不先点空白、不补第二次输入框点击。
+- 真实鼠标拖选检查覆盖公众号说明、RSS 错误原文和待配置原因；
+  手动重试检查真实读取调用次数恰好增加一次，连接问题按钮检查首点击直接进入管理。
+  原恢复测试中「单击正文仍保持展开」的过时预期改为点击收起，再主动重开继续验证轮询。
+  公众号同步详情用例也移除先点外部空白的绕行。
+- 初始定向回归 **194／220 通过、26 项失败**，直接复现手动点击死区；修复后
+  **220／220 通过**，再补两项真实按钮检查，最终 **222／222 通过**、无未捕获异常。
+  最终组合 unittest **89 项通过**（74.293 秒，含布局浏览器测试）。
+  修改的 JavaScript 通过 `node --check`，`git diff --check` 通过，代码文件均少于 700 行。
+- 已检查 `output/subs-layout/notice-manual-configuration-source-q-before.png`、
+  `notice-manual-configuration-source-q-typed.png` 和 `notice-manual-wechat-tgt-search-typed.png`：
+  手动说明有明确收起提示，首点击后输入框已聚焦并显示「科技」，页头和满高列表不跳变。
+  其它手动状态截图、红灯结果与最终测试日志均位于忽略的 `output/subs-layout/`。
+
+本轮重新检查扩展，`cua.getState()` 返回
+`Browser 1: Error: unsupported Codex auth method: apikey`，无法建立具名后台会话。
+按规则降级为独立无头 `chrome-headless-shell` 和临时 profile，仅连接自己启动的实例；
+未接管、复用或切换用户普通标签，未激活 Chrome，未启动有头浏览器。
+隔离服务与无头实例由既有测试清理路径回收。
