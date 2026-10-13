@@ -69,9 +69,8 @@ export async function checkWechatCollectorNotices({ evaluate, wait, check, click
     await refreshSource(connected);
     await refreshSource(silent);
     check('公众号手动查看期间提示恢复仍保留同步详情', await evaluate(`$('subs-wechat-notices').open`));
-    await click('#subs-wechat-manage');
     await click('#tgt-search');
-    check('公众号手动详情可外部收起并恢复中心搜索焦点', await evaluate(`!$('subs-wechat-notices').open && document.activeElement === $('tgt-search')`));
+    check('公众号手动详情中心首点击收起并直接聚焦搜索', await evaluate(`!$('subs-wechat-notices').open && document.activeElement === $('tgt-search')`));
     await setRunning(false);
     check('公众号没有采集器说明及同步时隐藏并复位入口', await evaluate(`$('subs-wechat-notices').hidden && !$('subs-wechat-notices').open`));
     await setRunning(true);

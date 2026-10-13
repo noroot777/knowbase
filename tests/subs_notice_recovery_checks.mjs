@@ -46,7 +46,8 @@ export async function checkSourceNoticeRecovery({ evaluate, wait, check, click, 
     await recover();
     check('用户手动查看的详情不会被成功轮询收起', await evaluate(`$('source-notices').open`));
     await click('#source-configuration');
-    check('点击详情内部保留用户展开状态', await evaluate(`$('source-notices').open`));
+    check('手动详情正文可点击收起继续操作', await evaluate(`!$('source-notices').open`));
+    await openNotices();
     await failOverview('手动查看期间出现的读取失败');
     await recover();
     check('手动查看期间的故障恢复仍保留详情', await evaluate(`$('source-notices').open`));

@@ -225,12 +225,14 @@ function closeSourceNotices(restoreFocus = false) {
   sourceNoticesAutoOpened = false;
   if (focused) notices.querySelector('summary').focus({ preventScroll:true });
 }
-function dismissAutomaticNotice(noticesId, event) {
+function dismissSourceNotice(noticesId, event) {
+  const notices = $(noticesId), selection = window.getSelection();
   const control = event.target.closest('button, a, input, select, textarea');
-  const passive = !control || control.classList.contains('source-notice-dismiss');
+  if (!control && selection && !selection.isCollapsed
+    && notices.contains(selection.anchorNode) && notices.contains(selection.focusNode)) return;
   if (noticesId === 'source-notices') closeSourceNotices(true);
   else closeWechatNotices(true);
-  if (!passive) return;
+  if (control) return;
   const field = document.elementFromPoint(event.clientX, event.clientY);
   if (field?.matches('input, select, textarea') && !field.disabled) field.focus({ preventScroll:true });
 }
@@ -548,9 +550,9 @@ document.addEventListener('pointerdown', event => {
 }, true);
 document.addEventListener('click', event => {
   if (!$('source-notices').contains(event.target)) closeSourceNotices();
-  else if (sourceNoticesAutoOpened && $('source-notices').querySelector('.source-notices-body').contains(event.target)) dismissAutomaticNotice('source-notices', event);
+  else if ($('source-notices').open && $('source-notices').querySelector('.source-notices-body').contains(event.target)) dismissSourceNotice('source-notices', event);
   if (!$('subs-wechat-notices').contains(event.target)) closeWechatNotices();
-  else if (wechatNoticesAutoOpened && $('subs-wechat-notices').querySelector('.source-notices-body').contains(event.target)) dismissAutomaticNotice('subs-wechat-notices', event);
+  else if ($('subs-wechat-notices').open && $('subs-wechat-notices').querySelector('.source-notices-body').contains(event.target)) dismissSourceNotice('subs-wechat-notices', event);
 }, true);
 document.addEventListener('keydown', event => {
   if (event.key !== 'Escape' || event.defaultPrevented) return;
