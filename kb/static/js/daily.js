@@ -224,12 +224,24 @@ function renderDailyList() {
     || '<div class="daily-empty"><h3>还没有日报</h3><p>选好日期，点右上角生成。</p></div>';
 }
 
+// 「这次正文读取是不是还算数」。**两道各管一段,缺一不可**:
+// ①`dailyCurrent !== date` —— 选中的已经不是这一天了。删除那条路把 dailyCurrent 清成
+//   空串却**不经过本函数**(所以序号不动),在途的那次读取只有这一道挡得住,否则刚删掉的
+//   正文会被画回阅读区。
+// ②序号 —— **同一天又读了一次**,这一次已经被替代。原来只有①:用户点开今天这一份(请求
+//   慢),紧接着点「重新生成」,生成完那一跳自动重读同一天 —— 两次的 date 逐字相同,于是
+//   先发后到的那份旧正文把新的盖回去,新文章闪一下就消失,而完成身份已经记下、后面多少轮
+//   轮询都不会再补刷(审查实测:左边列表写着 5 条,正文只剩 4 条,只有手动再点一次才回来)。
+let dailyReadSeq = 0;
+
 async function openDailyReport(date) {
   dailyCurrent = date;
   renderDailyList();
+  const seq = ++dailyReadSeq;
+  const stale = () => dailyCurrent !== date || seq !== dailyReadSeq;
   try {
     const r = await pipeJson('/api/daily/reports/' + encodeURIComponent(date));
-    if (dailyCurrent !== date) return;
+    if (stale()) return;
     $('daily-reader-title').textContent = '日报 · ' + r.date;
     $('daily-reader-meta').textContent =
       `覆盖 ${dailyClock(r.window_since.replace(' ', 'T'))} → ${dailyClock(r.window_until.replace(' ', 'T'))} 发布的内容 · ` +
@@ -247,7 +259,9 @@ async function openDailyReport(date) {
     $('daily-copy').hidden = $('daily-del').hidden = false;
     $('daily-copy').dataset.body = r.body;
   } catch (e) {
-    if (dailyCurrent !== date) return;
+    // 失败这一侧走同一道判据:被替代的那次读取报出来的错也是陈旧的,
+    // 让它覆盖新正文等于拿一句「读取失败」盖掉一份读到了的日报。
+    if (stale()) return;
     $('daily-reader-body').innerHTML = `<div class="daily-empty" role="alert"><h3>读取失败</h3><p>${esc(e.message)}</p></div>`;
   }
 }
