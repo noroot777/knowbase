@@ -1,5 +1,7 @@
 """Bounded public HTTP transport and RSS/Atom parsing.
 
+正文转纯文本(`plain`)那一块的硬约束在 `docs/decisions/feed-plain.md` 第一节 —— 改这块之前先读那一份。**
+
 No browser/login side effects live here: X's logged-in channels do their work in
 `kb.feeds.x_channels` before the fetch phase fans out, and `fetch_source` only
 hands back what that prefetch already collected.

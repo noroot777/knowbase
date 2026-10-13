@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """重试失败项:按上次运行的失败状态编排 回填空正文 → 重建索引 → 重跑提取。
 
+**硬约束在 `docs/decisions/retry-scope.md` 第一节 —— 改这块之前先读那一份。**
+
 面板上那个全局「重试失败项」按钮的后端。计划由 retry_failed_plan 推导,
 执行复用 kb.pipeline_stages 里的阶段函数。
 """

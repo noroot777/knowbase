@@ -2,6 +2,8 @@
 /**
  * 起一个「一定会被收掉」的 chrome-headless-shell(12 个浏览器探针共用的唯一口径)。
  *
+ * 硬约束在 docs/decisions/probe-shell.md 第一节 —— 改这块之前先读那一份。
+ *
  * 原来 12 个探针各写一份 spawn + 等端口,而收尾那句 `proc.kill()` 一律写在
  * **正常路径的末尾** —— 探针整个是 ESM 顶层 await,中间任何一步抛异常(页面里
  * eval 报错、等不到元素、后端沙箱没起来、摆局中断)都让 node 以 unhandled

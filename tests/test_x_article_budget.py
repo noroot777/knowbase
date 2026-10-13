@@ -171,7 +171,7 @@ class FillBudgetTests(unittest.TestCase):
 
 class FeedgrabBudgetTests(unittest.TestCase):
     """**另一条通道的独立射程。** 两条通道各挂一次,漏哪一条就是那条通道上的
-    长文把整轮拖垮 —— 口径同 CLAUDE.md 里「两条通道各挂一次」那条。"""
+    长文把整轮拖垮 —— 口径同 `docs/decisions/x-article.md` 里「两条通道各挂一次」那条。"""
 
     def test_feedgrab_passes_the_budget_down_too(self):
         import inspect

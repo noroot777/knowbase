@@ -1,7 +1,115 @@
 # X 的采集通道(kb/feeds/x_channels.py + x_browser / x_feedgrab / x_cdp / cdp_attach)
 
-> 从 CLAUDE.md 外移的决策记录。CLAUDE.md 只留硬约束和一行指针,
-> 这里是完整的事故形态、实测证据、回归清单和反向验证红数。原文逐字搬运。
+> **这一份的第一节就是这一块的硬约束(不许怎样)—— 动这块代码之前先读它**,后面是完整的事故形态、
+> 实测证据、回归清单和反向验证红数。CLAUDE.md 只留跨块的元规则和一张索引。
+> 硬约束和下面的展开**说的是同一条口径,要改规则两边一起改**。
+
+## 硬约束(原 CLAUDE.md「X 的采集通道(kb/feeds/x_channels.py + x_browser / x_feedgrab / x_cdp / cdp_attach)」)
+
+- **同一批大V账号,四条互斥的取法,选哪条是一个设置**(`social` 的 `x_channel`,默认 `bridge` —— 存量库里
+  没这个键,读出来必须和升级前逐字同义):`bridge` 第三方 RSS 桥接、`feedgrab` 一份 X cookie 调 X 自己的接
+  口(子进程调用用户装好的 CLI)、`browser` 复用**独立 profile** 里的登录态(我们起的无头 Chrome,CDP over
+  管道)、`attach` 直连用户**已经开着**的日常浏览器(CDP over WebSocket)。**口径只有 `x_channels` 一份。**
+- **通道只管「走桥接的那些 X 账号」**(判据 `registry.uses_bridge`):填了 `feed_url` 的和非 X 的 social 订
+  阅照旧走 HTTP。
+- **后两条不是 HTTP feed,不走 adapter 的 `endpoints()/parse()`**,而是在 `sync.collect` 开头**整批预取**一
+  次(`x_channels.prefetch`),由 `fetch_source` 顶上那道分派按订阅各取自己那一份(`take`)——**同一个浏览器
+  profile 同时只能被一个实例打开**。
+- **HTTP 那一侧的采集预算要在预取之后才开始算。** 登录态通道另算一份串行预算(`X_LOCAL_SECONDS`,1200 秒)。
+- **「停止」要在起浏览器之前就认**(两条 harvest 开头各一道,每个账号之间再问一次)。
+- **水位按订阅存在 `subscriptions.config` 里,`attach` 和 `browser` 共用 `x_watermark_browser`,feedgrab 必
+  须另记 `x_watermark_feedgrab`**(它的下界只到天)。判据是「精度和语义一不一样」,不是「是不是浏览器」。
+- **没读到上次的位置,水位一步都不许动**(抓到的照旧入库)—— 推到「这一轮见过的最新」或「退到最老那条」都
+  会让那一段从此任何一轮增量都选不到。**首轮存回这一轮真正用过的那个下界**(`x_browser.started`、
+  `x_feedgrab.since`),**交空值回去等于什么都没存**。**读完的那一轮照旧 `_newest(...)`,不许一律存下界。**
+- **「滚不出新东西」要连着 `_BOTTOM_TRIES`(3)次、而且每次都停在页面底部,才算真到底了。**
+- **「翻到底」按页面出现顺序数,连续 `_OLD_STREAK`(3)条自己发的推都老于下界才算**(`_old_enough`):
+  ①**不能按时间排序数**(转推显示的是原推时间);②**只有原创推的时间能当证据**(`_own_tweet`)。
+  **任何一条新于下界的条目都把计数重置。**
+- **「算不算这条时间线的内容」(入库)和「它的时间算不算证据」(翻到底)是两个判据**(`_in_timeline` /
+  `_own_tweet`),别合成一个。入库排除推广位、以及作者不是这个号又没有转推那行 socialContext 的(推荐位);
+  **转推一定带着那行上下文,所以不会被丢掉**,正文里保留它。
+- **置顶要入库,只是不参与「翻到底」的证明**(旧置顶被 `put_items` 去重,而刚发就被钉上去的推文丢掉永久补
+  不回来)。
+- **「有推文卡片却一条都解析不出来」是 X 改版,不是「这个号今天没发推」**(`_harvest_one` 里
+  `if seen_articles and not parsed: raise`)。登录失效 / 账号打不开 / 限流同理各一句话,不许折叠。
+- **feedgrab 是子进程调用,环境变量白名单 + 显式清场,`OBSIDIAN_VAULT` 必须清掉** —— 它的输出目录**优先**认
+  这个变量,而这台机器上它指的正是知识库那个 vault。每个账号一个干净的输出目录。
+- **它的产物路径不许写死,只能整棵扫**(`_read_output` 走 `rglob('*.md')`;路径是「平台目录 + category」拼
+  的,**猜不出来**)。递归不放松归属:判据是 `_entry` 按推文 URL 里的 handle 过滤。
+- **它的退出码 0 不代表这一批抓全了,所以没抓全就不许推进水位**(`_incomplete` / `_batch_failures`)。两档各有独立
+  证据源,谁命中都算漏、同时命中就两句话都说,只有 `fetched`/`skipped` 算没问题:①**翻页半途中断**只有一行
+  `logger.error`(`_PAGE_ABORT`),判据要连「第 N 页」「M 个账号」一起认、**逐行看而不在整份输出上 `search`**,还要和
+  **回显了用户内容的日志**分开(三道各有射程);②**逐条失败**两道判据:批量记录**认形状不认路径**、收尾摘要里的
+  「失败: N」**必须带上「成功: N」那半截上下文**。放宽任何一道的后果见决策文档。
+- **不要把 feedgrab 抄进 kb**(它要 X 内部 GraphQL + 登录态 manifest 里的签名算法,为此背着 60 多个 fetcher
+  和 playwright)。模式同 `collector/`:kb 只知道一条命令行,升级是 `git pull` 的事。
+- **登录提示里的可执行文件必须就是采集时会调的那一个**(`x_feedgrab.login_command` 过一遍 `find_binary`;
+  `x_channels.login_command` 因此收**整份 settings**)。两头都 `shlex.quote`;配了路径但当下不可执行时照它
+  **原样显示**。
+- **拿到一个浏览器有两条路,各自是一条通道,不是一个实现细节**(`x_cdp.Chrome` 管道 / `cdp_attach.Attached`
+  WebSocket)。**不引入 playwright。**
+- **`attach` 那条的三条硬口径**:①**那个开关只能由用户自己去开**(`chrome://inspect` 勾一次),我们不代劳也
+  不绕开,「没就绪」那档给的下一步就是这句话(`ENABLE_HINT`);②**端口是读出来的,不是我们指定的** —— 读
+  user-data-dir 下的 `DevToolsActivePort` + TCP 探活,固定敲 9222 只作回落;出路是 `KB_CDP_ENDPOINT`,**显式
+  指定了就不再去猜别的**(写错了也不回落,而且要说出是哪儿错了),`parse_endpoint` **一个异常都不许抛出来**
+  (它坐在面板每次刷新那条路上;范围另用 `_ok_port` 卡住,`urlsplit` 本身也在 try 里);③**探活必须 TCP
+  connect,不能拿 WebSocket 去试**(首次 WebSocket 连接会弹授权窗)。
+- **独立 profile 那条的收尾一定做完:关浏览器怎么失败都不许把后面那几步跳过**(`__exit__` 只剩
+  `try: self._shutdown()` + `finally:` 关两个 fd、状态复位;先好好说一次再 kill 的两步都在 `_shutdown` 里,
+  **都有界、都不往外抛**)—— 异常冒出去留下的是一个还活着的无头浏览器。**反过来钉一边:好好退出的那一次不
+  许被 kill**(`Browser.close` 存在的理由就是让它把 profile 存盘)。
+- **「这个 profile 被占着吗」只认「`SingletonLock` 指着一个活着的 pid」**(`profile_busy`)—— 只看 `lexists`
+  会把「检查连接」和「打开登录窗口」这两个用户唯一能自救的入口一起堵死。不设「看不懂就当占着」的特例,也不
+  去替 Chrome 删那把锁。
+- **在别人的浏览器里干活的卫生规矩**:标签页一律 `Target.createTarget {background: true}` 开、退出时**只关自
+  己开的那几个**、**永远不发 `Browser.close`**、顺带路径上不列用户的标签页。**「这张标签页是我开的」要在
+  `createTarget` 刚回来那一刻就登记**(`Session._adopt`),不等后面的 attach/enable 成功。
+- **不抄 web-access 那道「拦截页面对调试端口的探测」**(要在协议层订阅事件,而 `Session.call` 把事件全丢掉;
+  不拦的后果是「和用户自己浏览时一样」)。
+- **这条通道不在面板上登录**,拒绝文案**不许建议他换档**。
+- **面板上那句静态说明不许写死通道有几条** —— 跟着通道清单变的东西一律让后端那份清单自己说。
+- **Chrome 把那两个 fd 的编号写死成「读 3 / 写 4」,而 `preexec_fn` 里 dup2 到 3 实测不成立。** 口径是:父进程先把两
+  端复制到一个空闲高位 fd、`pass_fds` 带过去,再由 shell 的 `exec 3<&N 4>&M` 落到位。**高位编号必须 `fcntl.F_DUPFD`
+  现取、不许写死常量**(dup2 会**静默关掉**目标 fd 原来那个对象)。
+- **读写都永远带 deadline,deadline 要在命令发出去之前算好**(`Session.call` 里 `deadline = ...` 排在 `self._send(...)`
+  **之前**,顺序不许反)。**socket 和管道一律设成非阻塞,超时由 `select` 按 deadline 管**:写是「select 等可写 →
+  `send` 一段 → 接着等」,`BlockingIOError` 当成「再等一轮」(光「select 等可写 + send」挡不住一条阻塞的连接)。
+  **写超时之后这条连接就废了**(`ws_client._broken` —— 半条帧已经进了对端缓冲,接着发就是帧错位,而错位之后的读是攥着
+  锁阻塞的那一种);**上限两头取小**(`min(这条命令的 deadline, now + WRITE_TIMEOUT)`),收尾另有更紧的
+  `CLOSE_TIMEOUT`。
+- **桥接熔断只对桥接通道成立**(`sync.collect` 的 `shared_upstream`)—— 登录态通道的内容已经在预取里抓完了。
+- **「这条订阅能不能开工」要问当前通道**(`registry.configuration_error` 按通道分支,`x_channels.readiness`
+  给 (就绪, 说明, 下一步)),收尾那行阶段文案和面板横幅都读它。
+- **`readiness` 只做便宜的判断,真连一次是 `check()`**,两个都要有(**cookie 过期在文件上看不出来**)。桥接通
+  道没有「连一次」可言,那一档如实说清楚,不许谎称已就绪。
+- **退役通道名的别名表只在服务端**(`_RETIRED` + `resolve()`)—— 浏览器手里永远拿不到一个退役名,跟公众号那
+  边不一样。
+- **同步间隔是一天一次**(1440)。**改 `interval_minutes` 只影响没有设置行的新库,存量要迁**(`_SETTINGS_REV`
+  + `_SETTINGS_FIXUPS`,在 `get_settings` 里归一):①只迁仍然等于旧默认值的那些;②**读的时候归一、写的时候
+  盖章**(反过来写会留一个永不迁移的窗口,而那正是升级的常态)。
+- **水位和条目必须在同一个事务里提交**(`watermark_patch` 交回 config 补丁,`sync._save_result` 在一个事务里跑
+  `put_items` + `merge_config` + 成功时间戳)。
+- **存盘之前在那个写事务里认一次「这条订阅还是同一个号吗」**(`sync._repointed`,成功和失败两条路各一次)——
+  采集手里那份快照是发请求之前读的,最狠的是**旧账号的水位写进新账号那个键**。判据按元规则排在 `_claim_write`
+  拿到写锁**之后**,判据是**身份**(`url`/`feed_url`)、不是「这一行被动过没有」。作废的那一轮**一个字都不
+  写**,记进 `summary['repointed']`;换链接那次 `reset` 要把 `last_note` 一起清掉。
+- **区间补抓要把它那段日期交给采集器当下界,而且不许动日常水位**(`prefetch(since=...)`)。**用户点的那个日期
+  要在一处换算成带时区、且把起点算在内的下界**(`since_floor`,时区按元规则;第二道在 `x_browser._utc`)——
+  下游那条选择规则是严格大于,所以给的是那一天零点前的最后一瞬。换算不许下移给下游:feedgrab 的
+  `X_USER_TWEETS_SINCE` 只认日期而且按 UTC 的日算。
+- **「这一轮没读完」要在面板上看得见,而且不是 `last_error`** —— 写进 `subscriptions.last_note`、显示成「部分
+  同步」;抓到的照旧入库、不进退避重试,读完的那一轮重写成空串。
+- 前端在 `kb/static/js/x_channel.js`。**哪条通道要填什么由后端给的 id 决定、前端不许写死一张表**;改了选择还没
+  保存时状态行要写明「保存之后才会生效」并**藏掉「检查连接」**。**「打开登录窗口」也跟着「保存了没有」走,而
+  且是禁用、不是藏掉**(「检查连接」产出的是**结论**,贴在新选择旁边就是谎话;这颗是一个**动作**,藏掉它上面
+  那段说明就悬空了)。`openXLoginWindow` 开头另有一道 `xChannelSaved()` 兜底,`finally` 里恢复成「此刻该不该
+  能点」。**那两颗按钮打的是动作端点,一律 `pipePost`** —— `pipeJson(path, {}, 120000)` 实际发的是 **GET**。
+- **面板空态那句「要先配置什么」不许写死桥接那一档**(`sources.js` 的 `sourceConfigHint()` 读后端给的
+  `configuration_error`)。
+- 详细见 `docs/decisions/x-channels.md`。
+
+## 事故形态与实测证据
 
 - **同一批大V账号,四条互斥的取法,选哪条是一个设置**(`social` 的
   `x_channel`,默认仍是 `bridge` —— 存量库里压根没这个键,读出来必须和升级前
@@ -880,7 +988,7 @@
   (`registry.configuration_error` → 面板顶上那条待配置横幅,那里**没有**可复制
   块),于是横幅只说「还没有登录态」而不说怎么办,而命令里那个可执行文件路径正是
   最容易填错的东西。`test_x_feedgrab_contract.LoginCommandTests` 当场红,红的正是
-  CLAUDE.md 里早就写着的那条(「`readiness` 那条横幅走的是另一条路所以单独再钉一
+  硬约束一节里早就写着的那条(「`readiness` 那条横幅走的是另一条路所以单独再钉一
   遍」)。**去重是显示层的事**:`x_channel.js` 按**内容**判(`hint` 和
   `login_command` 一样就不显示第二遍),不是按通道写死一张表 —— 口径同"前端不许
   把通道和它们各自要填什么写死"。探针里多一条钉它。

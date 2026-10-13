@@ -1,7 +1,48 @@
 # 浏览器探针起的无头壳(tests/probe_shell.mjs + headless.py 的 run_probe)
 
-> 从 CLAUDE.md 外移的决策记录。CLAUDE.md 只留硬约束和一行指针,
-> 这里是完整的事故形态、实测证据、回归清单和反向验证红数。原文逐字搬运。
+> **这一份的第一节就是这一块的硬约束(不许怎样)—— 动这块代码之前先读它**,后面是完整的事故形态、
+> 实测证据、回归清单和反向验证红数。CLAUDE.md 只留跨块的元规则和一张索引。
+> 硬约束和下面的展开**说的是同一条口径,要改规则两边一起改**。
+
+## 硬约束(原 CLAUDE.md「浏览器探针起的无头壳(tests/probe_shell.mjs + headless.py 的 run_probe)」)
+
+- **探针起的 chrome-headless-shell,在任何一条退出路径上都必须被收掉** —— 收尾那句 `proc.kill()` 写在正常路径末尾时,中间任何一步
+  抛异常都让 node 以 unhandled rejection 退出,那一句**永远到不了**,而 node 死掉不会带走 spawn 出来的子进程。
+- **三条泄漏路径、三层防线,谁也兜不住另外两档**:①**探针自己抛异常** → `probe_shell.mjs` 的 `process.on('exit')` 里**同步**
+  SIGKILL;②**Python 侧 timeout** → `run_probe()` 按**进程组**收(`subprocess.run(timeout=)` 调的是 SIGKILL,node 连 'exit' 都来不
+  及触发);③**调用方被取消** → 由**子进程自己**盯 `process.ppid`(node 不在调用方进程组里了,而 Python 对没有 handler 的 SIGTERM
+  直接结束,`finally` 一行不跑)。
+- **③的判据是 `process.ppid`,而且必须待在子进程里** —— 它是实时 getter,调用方一死内核立刻把我们过继给 init,是**唯一不依赖调用
+  方跑任何代码**的信号。轮询间隔 400ms,**那个 interval 必须 `unref()`**。
+- **「原调用方是谁」只能由调用方自己说(`KB_PROBE_PARENT`),不能让探针现读 `process.ppid`** —— 探针在起浏览器**之前**本来就有一
+  段异步,调用方死在那一段里时读到的 ppid 已经是 1,而「1」和「我本来就是从终端直接起的」长得**一模一样**。这个 env 只有一个写入方
+  (`run_probe` 无条件覆盖,`probe_env()` 把继承来的旧值摘掉)。
+- **口径两半:检查在模块一加载就装上,外加起任何长寿东西之前同步再问一次**(`bailIfOrphan()`)—— 装在 spawn 之后的话那段异步整个在
+  射程之外;而**node 是单线程的**,探针在起浏览器之前做一件**同步**的事时那个 400ms 轮询一次都跑不起来。**两道里只有顶层安装有独占
+  射程**,那道闸实测**红 0 条** —— 留它是构造上的理由,如实记着。
+- **调用方一死,探针往 stdout/stderr 写一个字节就会被 EPIPE 掐死 —— 这是一条巧合的自愈路径,不可依赖**,而且它会遮掉这几条用例的射
+  程:放行屏障之后**不能立刻**去查「起过浏览器没有」,要先 `_wait_gone(node)`。
+- **信号要单独挂一遍**(node 对没有 handler 的 SIGINT/SIGTERM 直接终止、**不触发 'exit'**)。**杀用 SIGKILL,理由是构造上的,不是
+  「SIGTERM 不够」** —— 这是最后一道防线,而 SIGTERM 要对端配合,'exit' 回调只跑得了同步代码、**没法等**。
+- **测「挂住」的用例必须拿一个 ref 的 handle 挂住,`await new Promise(() => {})` 挂不住**(它不是 event loop handle,循环一空 node
+  就以 exit 13 正常退出,于是**本该验第二层的用例测的是第一层**)。
+- **`launchShell` 等端口那个 `setTimeout` 非清不可**(它是 ref 的 handle,否则探针跑完 node 也不退出)。**拿到端口后要 `unref()`**
+  子进程 handle 和它的 stdio 管道。
+- **`run_probe` 要 `start_new_session=True`**(让 node 成为新会话首进程,chrome 自动在同一个组里,`killpg` 一起带走)。收尾在
+  `finally` 里**无条件**做一次。
+- **把探针改到共用这个模块之后,必须真跑那几组页面回归 —— `node --check` 只过语法。**
+- **两条契约不挂 `@requires_headless`**(没装无头壳的机器上靠它们守结构):探针不许再自己 `spawn` 浏览器、测试不许再裸
+  `subprocess.run` 跑探针。**`test_probe_leak.py` 自己是后一条唯一的例外,而且必须是**(走 `run_probe` 的话它那道 killpg 会把结论盖
+  掉)。
+- **同形状但没动的是沙箱服务那一半**:几个 `setUpClass` 自己 `Popen` 一个预览服务,而 `run_probe` 本身抛出来那一档没人管(setUpClass
+  抛异常之后 unittest **不调** `tearDownClass`)。要修是起完服务**立刻** `cls.addClassCleanup(...)`。
+- **探针里「等页面就绪」要等那个元素自己,不是等定义它的 JS 全局**(`typeof subsCatalog !== 'undefined'` 回答的根本不是「来源目录取
+  回来了吗」)。
+- **「有没有漏」按工作目录归属数,不按进程名**(`lsof -p <pid> -a -d cwd` 落在本 worktree 下且 `ppid=1`)—— 本机常常同时开着好几条
+  worktree 在跑各自的探针。别去动不归自己的那些。
+- 详细见 `docs/decisions/probe-shell.md`。
+
+## 事故形态与实测证据
 
 - **探针起的 chrome-headless-shell,在任何一条退出路径上都必须被收掉。** 原来 12 个
   探针各写一份 `spawn` + 等端口,而收尾那句 `proc.kill()` 一律写在**正常路径的末尾**

@@ -11,7 +11,7 @@
 管道:下一轮 `sync.export` 按 `exported_hash<>content_hash` 重写那篇 vault md,
 index 重建它的 chunk,而这些文档的 `extracted_at` 本来就是 NULL(正因如此才会被
 报成「需回填」),提取自然会把它们选上。**不写 kb.db、不写 vault 文件** —— 所以
-不在维护锁的射程里(口径见 CLAUDE.md「凡是写 kb.db 或 vault 文件的入口」);
+不在维护锁的射程里(口径见 `docs/decisions/maintenance-lock.md`「凡是写 kb.db 或 vault 文件的入口」);
 和采集并发也不冲突:采集那一侧的 `put_items` 是 DO NOTHING,覆盖不了这里改的行。
 
 **不需要备份,而这句话的依据是那道条件更新**:被改写的原值是一个空正文和一个

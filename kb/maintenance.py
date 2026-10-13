@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """kb.db + vault 的维护互斥锁:一把跨进程独占锁,写这两处的人全都认它。
 
+**硬约束在 `docs/decisions/maintenance-lock.md` 第一节 —— 改这块之前先读那一份。**
+
 **为什么要有它。** kb.db 和 vault 是同一份事实的两面,改它们的有五条路:存量
 清理脚本(`scripts/feed_trim_history.py`)、订阅同步的存盘与导出
 (`kb.feeds.sync`)、索引(管道的 index 阶段与 `kb index`)、条目化的就地入库

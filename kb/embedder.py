@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Embedding 抽象:检索层只面对 embed_texts / embed_query 两个函数。
 
+**硬约束在 `docs/decisions/embedding.md` 第一节 —— 改这块之前先读那一份。**
+
 当前实现是本地 bge-m3(sentence-transformers),**跑在子进程里**——模型一旦碰过
 MPS,那笔显存在本进程内就再也收不回来了,原委见 kb/embed_worker.py。子进程的
 起停由 kb/embed_pool.py 管,这里只负责把结果翻译成调用方要的形状。

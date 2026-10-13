@@ -70,7 +70,7 @@ class OptInCase(unittest.TestCase):
 
         走 `_doc_from_file` + `upsert_document` 而不是手摆 documents 行:
         `content_hash` 的口径只有 `scanner.file_hash` 一份,手摆出来的是一个
-        生产里不存在的状态(见 CLAUDE.md「提取阶段的两道判定」)。
+        生产里不存在的状态(见 `docs/decisions/fulltext.md` 的硬约束一节)。
         """
         md = self.vault / 'source' / source / f'{name}.md'
         md.parent.mkdir(parents=True, exist_ok=True)

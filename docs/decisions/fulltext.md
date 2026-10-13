@@ -1,7 +1,72 @@
 # 聚合源的正文补抓(kb/feeds/fulltext.py + readable.py)
 
-> 从 CLAUDE.md 外移的决策记录。CLAUDE.md 只留硬约束和一行指针,
-> 这里是完整的事故形态、实测证据、回归清单和反向验证红数。原文逐字搬运。
+> **这一份的第一节就是这一块的硬约束(不许怎样)—— 动这块代码之前先读它**,后面是完整的事故形态、
+> 实测证据、回归清单和反向验证红数。CLAUDE.md 只留跨块的元规则和一张索引。
+> 硬约束和下面的展开**说的是同一条口径,要改规则两边一起改**。
+
+## 硬约束(原 CLAUDE.md「聚合源的正文补抓(kb/feeds/fulltext.py + readable.py)」)
+
+- **feed 只给一个跳转壳时(标题 + 域名 + 得分),顺着原文链接把正文抓回来** —— 按壳入库的话 vault 里那篇 md 没
+  有内容:检索搜不到、打标判不出实体、日报里只剩一行标题。
+- **开关是订阅级的、默认关**(`subscriptions.fulltext`):对本来就给全文的源再抓一次是纯粹的降级。
+  `defaults.json` 里**只标了 HN Buzzing** 一条;那段只对新库跑,存量库要在面板上点一下。**给 defaults.json 加字
+  段必须同时改那条 INSERT。**
+- **独立一列,不放 `config`** —— 换链接时 `save_subscription` 的 `reset` 会把 config 整个清空。
+- **这一步排在翻译之前。还排在补抓队列里的条目既不翻译也不导出**,两边各认一次本模块的 `queued_sql`。队列判据:
+  属于某条开了补抓的订阅、`fulltext_at` 空、`fulltext_tries < MAX_TRIES`;**出口就是第三条**(试满仍抓不动的按
+  feed 原本那份壳走完翻译和导出)。`sync._export` 里收窄 base 那一句**必须排在所有统计之后**。
+- **「在队列里」和「没入库」是两件事,按 `exported_hash` 分两态**(4 `fetching` / 5 `refetching`)—— 打开这个开
+  关最常见的时机正是「几百条壳已经在 vault 里了」。已导出那一档如实显示库里那份壳、照旧能展开,顶上那句计数也只
+  数还没入库那一档。**待补抓的条目标题照显示**,换掉的只有正文那一段。
+- **提取器自己写,不装 readability/trafilatura**(我们要的输出是**纯文本**,而块级边界已经由 `fetching.plain` 定
+  死;而且 `pyproject.toml` 一动 `uv run` 就要重建 editable 包)。
+- **`find_all` 是快照,`decompose()` 之前必须先问「这个节点还在吗」**(`_gone`;bs4 把被销毁节点的 `attrs` 置成
+  None)。
+- **`header`/`footer`/`aside` 要看位置,不能无条件删** —— 只有落在 `<article>`/`<main>` **外面**的才是站点部件
+  (`_DROP_OUTSIDE`)。按 class 名剔噪声只对 `div`/`section` 做。
+- **提取不出来不是故障,是「这一页我们读不懂」**:保留原本那份壳、条目照旧入库、`fulltext_tries` 计次(不计次的
+  话这条永远排在队首)。宁可少补一篇,也不能把导航栏当正文译了写进知识库。
+- **「抓到了一页东西」不等于「拿到了正文」:版权声明和作者简介块要当成没拿到**(`readable.boilerplate_reason`,
+  两道:授权措辞句子占比 ≥ `MAX_LEGAL_SHARE`(0.5),或开头是作者简介区抬头而整块 ≤ `MAX_BYLINE_CHARS`)—— 这两
+  种页面**结构上完全正常**,于是补抓报成功、离开重试队列、接着买一次翻译,**这一档不可恢复**。
+- **署名不是作者简介,`_BYLINE_HEAD` 只认「这一块是作者简介区」的抬头**(`about the author(s)` / `author bios?`
+  / `作者简介` / `关于作者`)。`written by` 一度在名单里,而它是正常文章的标准开头。**判据是措辞,不是段落数。**
+- **原文链接后面不是网页时按抓取失败处理,绝不把文件语法当成正文**(`readable.html_problem`)。**三道,各管一类
+  撒谎方式**:①**声明的类型**不在 `_TEXT_TYPES` 里;②**文件头**命中已知魔数(PDF 的首个压缩流常在几十 KB 之后,
+  RTF/PostScript 整份都是 ASCII);③头部有 **NUL 字节**,**而且拿 `decode` 真解一次之后它还在**(UTF-16/32 的
+  **正常文本**每隔一个字节就是 `\x00`)。**判据是「拿真正会用的那个解码器解一次」,不是另开一张编码白名单。** 配套
+  `decode` 自己要认 BOM(`_BOM_CODECS` 排在 HTTP charset 和 meta 前面,**UTF-32 必须排在 UTF-16 前面**)。
+  `text/plain` 留在放行名单里。
+- **存量复查要连那份 body 一起换掉**(`scripts/feed_fulltext_recheck.py`)—— 光清三个标记的话,重抓三轮失败后它离
+  开补抓队列,那段版权声明会被**重新翻译一遍、重新导出**。换完它就是一条「从没补抓过」的普通条目
+  (`content_kind='summary'`、`content_hash` 重算),**是正确的降级**。壳从备份库恢复(`--backup`,显式给了就只认
+  那一个)或按标题链接重建;恢复回来的要**再过一遍判据**。`content_hash` 的口径抽成 `fulltext.body_hash`。**射程
+  是「属于开了补抓的订阅」,不是「报过补抓成功」**(`_suspect`;后者漏掉的恰恰是这个脚本自己制造的中间态)。写回
+  按元规则带 `AND body=?`(比旧 body 本身,不比 `content_hash` —— 那一列有两个写入方)。
+- **失败过的优先**(`ORDER BY fulltext_tries DESC, fetched_at DESC, key`)。
+- **`_save` 要把旧译文一起清掉**(旧译文译的是那份壳),`translate_tries` 归零。**但不许清 `exported_hash`** —— 导出闸门是
+  `exported_hash<>content_hash`,正文一换前者就自然成立;而它同时是「这一篇入没入过库」的事实来源,清掉会让一篇**已经能展开阅读**的旧条目标题连同入口一起消失。
+- **`subscription_items` 要一条按 `item_key` 的索引**(主键是复合的,按 item_key 查用不上)。
+- **正文从壳换成全文之后,按旧壳算出来的提取结果要作废**(`fulltext.retire_stale`,由 `sync._export` 在导出之后调
+  一次)—— 不作废不是「晚一点更新」:`extracted_at` 非空意味着这一篇**永远**不进 `pending_docs`。四件事:①**时点
+  是「新正文真的落了盘」**(`extract_stale=1 AND exported_hash=content_hash`),不是「网络抓到了」;②**做完才把标
+  记放下**,顺序不能反;③**异常要接住**;④**摘哪些 tag 只有一份口径**(`STALE_TAG_PREFIXES` + `keep_tags`,只摘
+  `topic/` 和 `entity/`,`flag/软广` 和人工 tag 留着)。不清 `promo_level`,也不动 `store.upsert_document` 的
+  `extracted_at` 语义。
+- **一次提取的结果要和它基于的那份正文绑在一起**(`extract.body_fingerprint` + `save_extraction(..., body_seen=)`)。
+  **两道判据各管一种时序、缺一不可**:①**索引还没扫到当前这份 md**(`store.doc_needs_reindex`);②**索引里那份正
+  文已经不是我读到的那一份**。判据待在 `save_extraction` 里,**读 chunks 正文 + 有模型往返的那三条路径**必须传指纹
+  (`kb/cli.py`、`kb/pipeline_stages.py`、`scripts/extract_parallel.py`),不读正文的两条不传。**`StaleBody` 不是故
+  障**,三条路径一律归到「跳过」。
+- **校验本身给不了保证,它必须和写入在同一个协调区间里**(`extract.commit_extraction`:维护锁 → `BEGIN IMMEDIATE`
+  → 锁内校验 → 落库 → 提交 → 回写),锁内还要先问一次「这一篇还在吗」。**粒度仍然是每篇各取一次锁、模型请求留在锁
+  外。** 反过来,**md 压根读不出来(清理正把它删掉)不算「版本不对」,照旧放行。**
+- **`documents.content_hash` 的口径抽成了 `scanner.file_hash`。手摆 `documents` 行的测试摆盘必须按它算
+  `content_hash`**,否则摆出来的是一个生产里不存在的状态。`_extract_pass` 的 `stats` 一律用 `_new_extract_stats()`
+  构造。
+- 详细见 `docs/decisions/fulltext.md`。
+
+## 事故形态与实测证据
 
 - **feed 只给一个跳转壳时,顺着原文链接把正文抓回来。** HN Buzzing 那类来源每条
   正文长这样 —— 标题、域名、发帖时刻、`↑ 101 HN Points`,一共几十个字符。按它
@@ -82,7 +147,7 @@
   `written by` 一度在那张名单里,而它是**正常文章的标准开头**(`<article><header>`
   里那行署名)—— 加上 `boilerplate_reason` 只凭开头和一个长度上限就整篇拒绝,
   一篇有署名、标题和三段正文的 580 字短文被判成「只有作者简介」,连抓三轮只留下
-  链接(2026-10-09 第 2 轮审查实测)。CLAUDE.md 里早就记着
+  链接(2026-10-09 第 2 轮审查实测)。本文件硬约束一节里早就记着
   「`<article><header>` 里那行『By Carson Gross, February 2026』」要留住,这是同
   一条规矩的另一面。剩下那几项(`about the author(s)` / `author bios?` /
   `作者简介` / `关于作者`)都在声明"下面是作者简介",Stripe 那页开头逐字是
