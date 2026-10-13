@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb import daily, daily_run, llm, llm_stages, store
+from kb import daily, daily_carry, daily_run, llm, llm_stages, store
 from kb.scanner import parse_frontmatter
 from kb.web import daily_api
 
@@ -57,12 +57,20 @@ class DailyReportTests(unittest.TestCase):
         self.addCleanup(self.conn.close)
         for p in (patch.object(daily, 'VAULT_ROOT', self.root / 'vault'),
                   patch.object(store, 'connect', lambda *a, **k: connect(self.db)),
-                  patch.object(llm_stages, 'stage_model', Mock(return_value=MODEL))):
+                  patch.object(llm_stages, 'stage_model', Mock(return_value=MODEL)),
+                  # 不指的话落盘/删除那把锁会去 flock **生产** data/ 下的
+                  # lockfile(同 maintenance 那条)。
+                  patch.object(daily_carry, 'DATA_DIR', self.root)):
             p.start(); self.addCleanup(p.stop)
         self.chat = Mock(return_value='## 今日要点\n\n- **有事发生**:说明 [1]')
         p = patch.object(llm, 'chat', self.chat)
         p.start(); self.addCleanup(p.stop)
         self.since, self.until = T('2026-09-28 08:00'), T('2026-09-29 08:00')
+        # 账本的启用分界线钉在所有样本之前(此刻库里一篇都没有,所以一个章都不盖)。
+        # 这一组用例要测的是稳态:不钉的话每个 generate() 都会先走一遍"启用时一次性
+        # 盖章",把发布时间早于样本窗口的那些当成历史存量写掉 —— 那是迁移那一刻的
+        # 行为,单独在 DailyLedgerSeedTests 里测。
+        daily._ensure_ledger(self.conn, now=T('2026-09-01 00:00'))
 
     def collect(self, since=None, until=None):
         return daily.collect(self.conn, since or self.since, until or self.until)
@@ -147,11 +155,19 @@ class DailyReportTests(unittest.TestCase):
 
     def test_entry_without_publish_time_is_reported_once(self):
         # 没有发布时间就没法归进任何一段"生产时间",但也不能让它人间蒸发:
-        # 按入库时间进补录,而且只进一次。
+        # 进补录,而且只进一次。
+        #
+        # 「只一次」由**账本**保证,不是由"入库时间落在哪个窗口里"保证。后者还
+        # 顺带定了另一件事:没挤进名额就永远没有第二次机会。所以这里要连着两个
+        # 窗口各看一眼 —— 真带走过的不再出现,**没带走的必须还在队列里**。
         add_doc(self.conn, 'source/rss/a.md', source='rss', published='',
                 indexed='2026-09-28 20:00')
         mat = self.collect()
         self.assertEqual(([], 1), (mat.items, len(mat.late)))
+        # 只取材、没出报 ⇒ 它还在队列里,下一个窗口照样选得到(旧实现在这里是 0)
+        self.assertEqual(1, len(self.collect(T('2026-09-29 08:00'),
+                                             T('2026-09-30 08:00')).late))
+        self.gen()
         self.assertEqual(0, len(self.collect(T('2026-09-29 08:00'),
                                              T('2026-09-30 08:00')).late))
 
