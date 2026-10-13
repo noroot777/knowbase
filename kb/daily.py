@@ -288,7 +288,7 @@ def _report_chain() -> list[carry.PastReport]:
             chain.append(carry.PastReport(
                 since, until, str(meta.get('date') or path.stem),
                 frozenset(_carried_keys(body)), _material_rows(body),
-                _material_text(body)))
+                _material_text(body), str(meta.get('generated') or '')))
     chain.sort(key=lambda c: c.until)
     return chain
 
