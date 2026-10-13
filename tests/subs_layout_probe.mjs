@@ -6,7 +6,7 @@ import { checkSubscriptionUsability } from './subs_usability_checks.mjs';
 import { checkSubscriptionNotices, checkWechatNotices } from './subs_notices_checks.mjs';
 import { checkSourceNoticeRecovery } from './subs_notice_recovery_checks.mjs';
 import { checkWechatCollectorNotices, checkWechatTargetSizing } from './subs_wechat_review_checks.mjs';
-import { checkFirstWechatNotice, checkAutomaticSourceNotice, checkManualSourceNotices } from './subs_notice_hit_checks.mjs';
+import { checkFirstWechatNotice, checkAutomaticSourceNotice, checkManualSourceNotices, checkNoticeGestureSequences } from './subs_notice_hit_checks.mjs';
 import { checkSubscriptionEditorViews } from './subs_editor_view_checks.mjs';
 
 const base = process.argv[2];
@@ -105,6 +105,7 @@ try {
   await evaluate(`sourceError(); true`);
   await checkAutomaticSourceNotice({ evaluate, wait, check, click, screenshot, send });
   await checkManualSourceNotices({ evaluate, check, click, screenshot, send });
+  await checkNoticeGestureSequences({ evaluate, wait, check, click, screenshot, send, viewport });
   await checkSourceNoticeRecovery({ evaluate, wait, check, click, screenshot, send });
   await checkSubscriptionNotices({ evaluate, check, click, screenshot });
 

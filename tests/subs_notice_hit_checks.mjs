@@ -26,24 +26,56 @@ async function checkNoticeCenterClicks({ label, noticesId, inputId, screenshotPr
   }
 }
 
-async function checkNoticeTextSelection({ label, noticesId, textId, evaluate, check, send }) {
+async function checkNoticeTextSelection({ label, noticesId, textId, evaluate, check, send, afterSelection, reverse = false, tiny = false }) {
   const points = await evaluate(`(() => {
     const text = $(${JSON.stringify(textId)}).firstChild, range = document.createRange();
-    range.setStart(text, 0); range.setEnd(text, Math.min(text.length, 6));
+    range.setStart(text, 0); range.setEnd(text, Math.min(text.length, ${tiny ? 1 : 6}));
     const box = range.getBoundingClientRect();
-    return { left:box.left + 1, right:box.right - 1, y:box.top + box.height / 2 };
+    return { left:${tiny ? 'box.left + box.width / 2 - 1' : 'box.left + 1'},
+      right:${tiny ? 'box.left + box.width / 2 + 1' : 'box.right - 1'}, y:box.top + box.height / 2 };
   })()`);
+  const start = reverse ? points.right : points.left, end = reverse ? points.left : points.right;
   try {
-    await send('Input.dispatchMouseEvent', { type:'mouseMoved', x:points.left, y:points.y });
-    await send('Input.dispatchMouseEvent', { type:'mousePressed', x:points.left, y:points.y, button:'left', buttons:1, clickCount:1 });
+    await send('Input.dispatchMouseEvent', { type:'mouseMoved', x:start, y:points.y });
+    await send('Input.dispatchMouseEvent', { type:'mousePressed', x:start, y:points.y, button:'left', buttons:1, clickCount:1 });
     for (let step = 1; step <= 5; step++) await send('Input.dispatchMouseEvent', {
-      type:'mouseMoved', x:points.left + (points.right - points.left) * step / 5, y:points.y, button:'left', buttons:1 });
-    await send('Input.dispatchMouseEvent', { type:'mouseReleased', x:points.right, y:points.y, button:'left', clickCount:1 });
+      type:'mouseMoved', x:start + (end - start) * step / 5, y:points.y, button:'left', buttons:1 });
+    await send('Input.dispatchMouseEvent', { type:'mouseReleased', x:end, y:points.y, button:'left', clickCount:1 });
     check(`${label}仍可真实拖选说明文字`, await evaluate(`window.getSelection().toString().length > 0`));
     check(`${label}拖选文字不会收起详情`, await evaluate(`$(${JSON.stringify(noticesId)}).open`));
+    if (afterSelection) await afterSelection();
   } finally {
     await evaluate(`window.getSelection().removeAllRanges(); true`);
   }
+}
+
+async function checkNoticeSelectionClicks(options) {
+  await checkNoticeTextSelection({ ...options, afterSelection:async () => {
+    const { label, noticesId, textId, inputId, evaluate, check } = options;
+    check(`${label}下一次点击前保留选区且输入框中心仍被说明遮挡`, await evaluate(`(() => {
+      const notices = $(${JSON.stringify(noticesId)}), box = $(${JSON.stringify(inputId)}).getBoundingClientRect();
+      const selection = window.getSelection(), target = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return !selection.isCollapsed && notices.contains(selection.anchorNode) && notices.contains(selection.focusNode)
+        && notices.querySelector('.source-notices-body').contains(target);
+    })()`));
+    const click = options.jitter ? async selector => {
+      if (selector !== '#' + inputId) return options.click(selector);
+      const point = await evaluate(`(() => {
+        const box = $(${JSON.stringify(inputId)}).getBoundingClientRect();
+        return { x:box.left + box.width / 2, y:box.top + box.height / 2 };
+      })()`);
+      check(`${label}微移点击的起点不命中说明文字`, await evaluate(`(() => {
+        const range = document.createRange(); range.selectNodeContents($(${JSON.stringify(textId)}));
+        return [...range.getClientRects()].every(box => ${point.x - 1} < box.left || ${point.x - 1} > box.right
+          || ${point.y} < box.top || ${point.y} > box.bottom);
+      })()`));
+      await options.send('Input.dispatchMouseEvent', { type:'mouseMoved', x:point.x - 1, y:point.y });
+      await options.send('Input.dispatchMouseEvent', { type:'mousePressed', x:point.x - 1, y:point.y, button:'left', buttons:1, clickCount:1 });
+      await options.send('Input.dispatchMouseEvent', { type:'mouseMoved', x:point.x + 1, y:point.y, button:'left', buttons:1 });
+      await options.send('Input.dispatchMouseEvent', { type:'mouseReleased', x:point.x + 1, y:point.y, button:'left', clickCount:1 });
+    } : options.click;
+    await checkNoticeCenterClicks({ ...options, click, label:options.label + '拖选后' });
+  } });
 }
 
 export async function checkFirstWechatNotice({ evaluate, wait, check, click, screenshot, send }) {
@@ -53,8 +85,7 @@ export async function checkFirstWechatNotice({ evaluate, wait, check, click, scr
   await click('#subs-wechat-notices > summary');
   check('公众号手动重新展开也显示收起说明', await evaluate(`$('subs-wechat-notices').open && !wechatNoticesAutoOpened
     && getComputedStyle(document.querySelector('#subs-wechat-notices .source-notice-dismiss-hint')).display !== 'none'`));
-  await checkNoticeTextSelection({ label:'公众号手动详情', noticesId:'subs-wechat-notices', textId:'src-detail', evaluate, check, send });
-  await checkNoticeCenterClicks({ label:'公众号手动详情', noticesId:'subs-wechat-notices', inputId:'tgt-search', screenshotPrefix:'notice-manual-wechat',
+  await checkNoticeSelectionClicks({ label:'公众号手动详情', noticesId:'subs-wechat-notices', textId:'src-detail', inputId:'tgt-search', screenshotPrefix:'notice-manual-wechat',
     evaluate, check, click, screenshot, send });
 }
 
@@ -78,8 +109,7 @@ export async function checkAutomaticSourceNotice({ evaluate, wait, check, click,
     await click('#source-notices > summary');
     check('RSS 错误手动重新展开也显示收起说明', await evaluate(`$('source-notices').open && !sourceNoticesAutoOpened
       && getComputedStyle(document.querySelector('#source-notices .source-notice-dismiss-hint')).display !== 'none'`));
-    await checkNoticeTextSelection({ label:'RSS 手动错误详情', noticesId:'source-notices', textId:'source-error-text', evaluate, check, send });
-    await checkNoticeCenterClicks({ label:'RSS 手动错误详情', noticesId:'source-notices', inputId:'source-q', screenshotPrefix:'notice-manual-rss',
+    await checkNoticeSelectionClicks({ label:'RSS 手动错误详情', noticesId:'source-notices', textId:'source-error-text', inputId:'source-q', screenshotPrefix:'notice-manual-rss',
       evaluate, check, click, screenshot, send });
     await fail('RSS 筛选读取失败：来源服务暂时不可用。');
     await click('#source-filter');
@@ -102,9 +132,21 @@ export async function checkAutomaticSourceNotice({ evaluate, wait, check, click,
       return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) === button;
     })()`));
     const retryCalls = await evaluate('window.qaNoticeHitCalls');
-    await click('#source-error button');
-    await wait(`window.qaNoticeHitCalls === ${retryCalls + 1} && !$('source-error').hidden`);
-    check('RSS 手动详情重试首点击仅调用一次真实读取', await evaluate(`window.qaNoticeHitCalls === ${retryCalls + 1} && !$('source-notices').open`));
+    await checkNoticeTextSelection({ label:'RSS 重试按钮前', noticesId:'source-notices', textId:'source-error-text', evaluate, check, send,
+      afterSelection:async () => {
+        await click('#source-error button');
+        await wait(`window.qaNoticeHitCalls === ${retryCalls + 1} && !$('source-error').hidden`);
+        check('RSS 拖选后重试首点击仅调用一次真实读取', await evaluate(`window.qaNoticeHitCalls === ${retryCalls + 1} && !$('source-notices').open`));
+      } });
+    await click('#source-notices > summary');
+    await checkNoticeTextSelection({ label:'RSS 键盘重试前', noticesId:'source-notices', textId:'source-error-text', evaluate, check, send,
+      afterSelection:async () => {
+        await evaluate(`$('source-error').querySelector('button').focus(); true`);
+        await send('Input.dispatchKeyEvent', { type:'keyDown', key:'Enter', code:'Enter', windowsVirtualKeyCode:13, text:'\r' });
+        await send('Input.dispatchKeyEvent', { type:'keyUp', key:'Enter', code:'Enter', windowsVirtualKeyCode:13 });
+        await wait(`window.qaNoticeHitCalls === ${retryCalls + 2} && !$('source-error').hidden`);
+        check('RSS 拖选后键盘重试仅触发一次且收起提示', await evaluate(`window.qaNoticeHitCalls === ${retryCalls + 2} && !$('source-notices').open`));
+      } });
   } finally {
     await evaluate(`window.pipeJson = window.qaNoticeHitJson;
       delete window.qaNoticeHitJson; delete window.qaNoticeHitMessage; delete window.qaNoticeHitCalls;
@@ -127,9 +169,8 @@ export async function checkManualSourceNotices({ evaluate, check, click, screens
       await click('#source-notices > summary');
       check(`${label}从摘要真实点击进入手动详情`, await evaluate(`$('source-notices').open && !sourceNoticesAutoOpened`));
       check(`${label}手动详情也显示收起说明`, await evaluate(`getComputedStyle(document.querySelector('#source-notices .source-notice-dismiss-hint')).display !== 'none'`));
-      if (state === 'configuration') await checkNoticeTextSelection({ label:'待配置手动详情', noticesId:'source-notices',
-        textId:'source-configuration', evaluate, check, send });
-      await checkNoticeCenterClicks({ label:label + '手动详情', noticesId:'source-notices', inputId:'source-q', screenshotPrefix:'notice-manual-' + state,
+      const centerCheck = state === 'configuration' ? checkNoticeSelectionClicks : checkNoticeCenterClicks;
+      await centerCheck({ label:label + '手动详情', noticesId:'source-notices', textId:'source-configuration', inputId:'source-q', screenshotPrefix:'notice-manual-' + state,
         evaluate, check, click, screenshot, send });
       await click('#source-notices > summary');
       await click('#source-filter');
@@ -143,5 +184,45 @@ export async function checkManualSourceNotices({ evaluate, check, click, screens
     await evaluate(`closeSourceNotices();
       for (const state of ${JSON.stringify(states)}) { $(state.id).hidden = state.hidden; $(state.id).innerHTML = state.html; }
       updateSourceNotices(); true`);
+  }
+}
+
+export async function checkNoticeGestureSequences({ evaluate, wait, check, click, screenshot, send, viewport }) {
+  const original = await evaluate(`({ kind:subsKind, width:innerWidth, height:innerHeight })`);
+  try {
+    for (const kind of ['rss', 'wechat']) {
+      await evaluate(`openSubsPanel(${JSON.stringify(kind)}); true`);
+      await wait(kind === 'rss' ? `sourceKind === 'rss' && sourceData && sourceRows.length > 0`
+        : `!$('subs-wechat').hidden && !$('src-detail').hidden && $('src-status').textContent !== '检查中…'`);
+      const noticesId = kind === 'rss' ? 'source-notices' : 'subs-wechat-notices';
+      const textId = kind === 'rss' ? 'source-error-text' : 'src-detail';
+      const inputId = kind === 'rss' ? 'source-q' : 'tgt-search';
+      for (const width of [1440, 375]) {
+        await viewport(width, 1000);
+        for (const automatic of [true, false]) {
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            const label = `${kind} ${width}px ${automatic ? '自动' : '手动'}说明第 ${attempt} 次${attempt === 3 ? '（2px 拖选）' : ''}`;
+            await evaluate(kind === 'rss'
+              ? `closeSourceNotices(); sourceError(${JSON.stringify(label + '：来源暂时不可用，请稍后重新读取。')}); true`
+              : `closeWechatNotices(); updateWechatNotices(true); true`);
+            if (!automatic) {
+              await click('#' + noticesId + ' > summary');
+              await click('#' + noticesId + ' > summary');
+            }
+            check(`${label}进入预期的展开模式`, await evaluate(`$(${JSON.stringify(noticesId)}).open
+              && ${kind === 'rss' ? 'sourceNoticesAutoOpened' : 'wechatNoticesAutoOpened'} === ${automatic}`));
+            await checkNoticeSelectionClicks({ label, noticesId, textId, inputId, reverse:attempt === 2, tiny:attempt === 3,
+              jitter:kind === 'rss' && width === 1440 && attempt === 1,
+              screenshotPrefix:`notice-gesture-${kind}-${width}-${automatic ? 'auto' : 'manual'}-${attempt}`,
+              evaluate, check, click, screenshot, send });
+          }
+        }
+      }
+    }
+  } finally {
+    await viewport(original.width, original.height);
+    await evaluate(`sourceError(); closeSourceNotices(); closeWechatNotices(); openSubsPanel(${JSON.stringify(original.kind)}); true`);
+    await wait(`subsKind === ${JSON.stringify(original.kind)} && sourceKind === ${JSON.stringify(original.kind)} && sourceData && sourceRows.length > 0`);
+    await evaluate(`clearTimeout(sourcePoll); true`);
   }
 }

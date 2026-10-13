@@ -20,11 +20,25 @@
 不该把它弄丢;放进 vault 也顺带让 Obsidian 那头能直接读。这个目录不在
 `kb.config.SOURCES` 的任何一棵树下,所以日报自己不会被索引进库、更不会成为
 下一份日报的素材。
+
+**「这一条上报过没有」按账本判,不靠时间窗推断**(`daily_carried` 表)。原来两个
+取材桶都是"时间窗 + 取最新 N 条":要点桶取窗口内发布的最新 `MAX_ITEMS` 条,补录桶
+取这一轮入库的最新 `LATE_ITEMS` 条。没挤进名额的条目在下一个窗口里**两个桶都选
+不到** —— 它的 `published` 和 `indexed_at` 都已经早于新的起点,于是掉进两个桶中间
+的缝里**永久消失,一行提示都没有**。实测一份日报 `late_total=679` 而只带得走 30 条,
+96% 静默丢弃;而"重试失败项"和"新加一个订阅"抓回来的内容恰好全是这个形态(发布
+时间早于当天那份日报的截止时刻),于是"日报生成之后再抓到的东西再也不会出现"。
+
+换成账本之后:没带走的条目**留在队列里**,下一份接着带;条数上限从"丢弃线"变成
+"每份带多少条"的限流。顺带治好了另一件事 —— 老文章重新导出会刷新 `indexed_at`,
+旧口径下它每天都重新算一次"这一轮才入库",连着十几天占满补录;账本只认"带走过
+没有",带走一次就再也不是候选。
 """
 
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 from dataclasses import dataclass, field
 from datetime import date as Date
@@ -33,8 +47,24 @@ from pathlib import Path
 
 import yaml
 
+from kb import daily_carry as carry
 from kb import daily_refs
 from kb.config import PRIMARY_SOURCE_NAMES, VAULT_ROOT
+from kb.daily_carry import STAMP, commit_lock, mark_carried, parse_ts, release
+from kb.daily_carry import UNCARRIED as _UNCARRIED
+# 账本那半拆到 daily_carry 了,这个名字这边自己不用、只为让 `daily.SEED_DAY`
+# 这类既有写法照旧可用。noqa 得待在它自己那一行上:多行 import 的 F401 是按
+# **各个名字所在的行**报的,挂在括号那一行压不住它。
+from kb.daily_carry import SEED_DAY  # noqa: F401
+from kb.daily_carry import day_key as _day_key
+from kb.daily_page import REF_SEP as _REF_SEP
+from kb.daily_page import carried_keys as _carried_keys
+from kb.daily_page import material_rows as _material_rows
+from kb.daily_page import material_text as _material_text
+from kb.daily_page import doc_key as _doc_key
+from kb.daily_page import md_dest as _md_dest
+from kb.daily_page import md_text as _md_text
+from kb.daily_page import md_title as _md_title
 from kb.scanner import parse_frontmatter
 from kb.source_types import SOURCE_TYPES
 from kb.store import promo_exclude_sql
@@ -42,12 +72,20 @@ from kb.store import promo_exclude_sql
 # 一份日报最多带多少条素材进 prompt。一天正常十几到几十条;真有几百条时
 # 取最新的那批,并在日报里如实写明"另有 N 条未纳入"。
 MAX_ITEMS = 120
-LATE_ITEMS = 30         # 补录那一段最多带多少条
+LATE_ITEMS = 60         # 补录那一段最多带多少条
+# 补录席位里保底留给"发布得最早、下一轮就要被 BACKLOG_DAYS 挡掉"的那几条。
+# 不留的话,只要持续有新内容进来,积压里最老的那些永远排不上队 —— 账本保证了
+# 它们还在队列里,席位分配却让它们等到过期,等于换一种方式再丢一次。
+LATE_DRAIN = 10
+# 补录最多往回捡多久**发布**的内容。这是编辑口径,不是限流:日报不该回头报一个
+# 月前发布的东西。**超出的条目在成为候选之前就被排除,所以也不计进 `late_total`**
+# —— 面板上那个"还有多少没进过日报"同理不含它们。跟 MAX_ITEMS / LATE_ITEMS 是
+# 两回事:那两个是"这一份带多少条",没带走的留在队列里;这一条是"压根不考虑"。
+BACKLOG_DAYS = 30
 EXCERPT = 400           # 每条素材的摘要上限(字符)
 DIR_NAME = 'daily'
 # **只有**在一份日报都没有、接不上任何截止时刻时回溯多久(天)。
 FIRST_DAYS = 1
-STAMP = '%Y-%m-%d %H:%M:%S'
 
 # 来源名 → 人话。feed 类来源的标签跟着 SOURCE_TYPES 走,其余几棵树是固定的。
 _SOURCE_LABEL = {
@@ -105,26 +143,6 @@ def _label(source: str) -> str:
     return _SOURCE_LABEL.get(source, source)
 
 
-def parse_ts(value) -> datetime | None:
-    """把库里的时间字符串解析成本地朴素时间;认不出来给 None。
-
-    `published` 在库里实测有四种写法:`2026-09-28 17:08`(2.1 万篇)、
-    `2026-06-14T11:29:37+08:00`(1178 篇)、`2026-09-29`(92 篇)、空(1 篇)。
-    **所以不能拿字符串直接比大小**:同一天里 `T`(0x54)排在空格(0x20)后面,
-    `2026-09-29T07:00:00+08:00` 字典序上大于 `2026-09-29 08:00`,按字符串筛
-    窗口会把早上七点发的内容算进八点才开始的窗口。带时区的先换算到本地,
-    只有日期的按当天 00:00 —— 那是这种写法唯一能确定的下界。
-    """
-    s = str(value or '').strip()
-    if not s:
-        return None
-    try:
-        dt = datetime.fromisoformat(s)
-    except ValueError:
-        return None
-    return dt.astimezone().replace(tzinfo=None) if dt.tzinfo else dt
-
-
 @dataclass
 class Material:
     """一次取材的结果。`late` 是"发布得更早、这一轮才入库"的那批。"""
@@ -180,38 +198,151 @@ def _enrich(conn, row, when: datetime | None, late: bool) -> dict:
     return doc
 
 
-def collect(conn, since: datetime, until: datetime, limit: int = MAX_ITEMS) -> Material:
-    """取窗口 (since, until] 内**发布**的素材,外加这一轮才入库的早前内容。
+def _select(conn, since: datetime, until: datetime,
+            day: str) -> tuple[list, list]:
+    """两个桶各自的候选(已解析时间、未取摘要)。返回 (要点候选, 补录候选)。
 
     SQL 那一层只按日期前缀粗筛(两头各放一天,给时区换算留余量),精确到分钟的
     判断在 Python 里按解析出来的时间做 —— 库里四种时间写法互相之间没法用字符串
     比大小,见 `parse_ts`。粗筛之后只剩两三天的量,排序开销可以忽略。
+
+    两个桶都只看**账本里没有**的条目,所以这个函数同时是 `collect`(真取材)和
+    `pending`(面板上"又攒了多少")的唯一口径 —— 两处各判一遍的话必然各漂各的。
+    返回的补录候选已经排好序:`[:LATE_ITEMS]` 就是该带走的那一批。
     """
     where, args = _scope()
+    args = [*args, day]
     lo = (since.date() - timedelta(days=1)).isoformat()
     hi = (until.date() + timedelta(days=1)).isoformat()
     picked = []
-    for row in conn.execute(_FIELDS + where + ' AND substr(d.published,1,10) BETWEEN ? AND ?',
+    for row in conn.execute(_FIELDS + where + _UNCARRIED
+                            + ' AND substr(d.published,1,10) BETWEEN ? AND ?',
                             [*args, lo, hi]):
         when = parse_ts(row['published'])
         if when and since < when <= until:
             picked.append((when, row))
     picked.sort(key=lambda p: p[0], reverse=True)
-    items = [_enrich(conn, row, when, False) for when, row in picked[:limit]]
 
-    # 补录:发布时间落在窗口之前(或者压根没有发布时间),但这一轮才入库。
-    # 不捡回来的话它永远进不了任何一份日报 —— 实测 RSS 差三天是常事。
-    # 判据用 indexed_at,它在库里只有 `YYYY-MM-DD HH:MM:SS` 一种写法,可以直接比。
-    late = []
-    for row in conn.execute(_FIELDS + where + ' AND d.indexed_at > ? AND d.indexed_at <= ?'
-                            ' ORDER BY d.indexed_at DESC',
-                            [*args, since.strftime(STAMP), until.strftime(STAMP)]):
+    # 补录:发布时间落在窗口之前(或者压根没有发布时间),一份日报都还没带走过。
+    # 不捡回来的话它永远进不了任何一份日报 —— 实测 RSS 差三天是常事,而"重试
+    # 失败项"抓回来的整批都是这个形态。判据是账本而**不是** `indexed_at`:后者
+    # 每次重新导出都会刷新,既会把老文章反复算成"刚入库",又答不出"这一条到底
+    # 报过没有"。
+    floor = until - timedelta(days=BACKLOG_DAYS)
+    pool = []
+    for row in conn.execute(_FIELDS + where + _UNCARRIED
+                            + " AND (d.published='' OR substr(d.published,1,10) >= ?)",
+                            [*args, floor.date().isoformat()]):
         when = parse_ts(row['published'])
-        if when is None or when <= since:
-            late.append((when, row))
-    return Material(items=items, total=len(picked),
-                    late=[_enrich(conn, row, when, True) for when, row in late[:LATE_ITEMS]],
-                    late_total=len(late))
+        if when is None or (floor < when <= since):
+            pool.append((when, row))
+    # 新的在前,读起来才像日报;末尾几个席位留给发布得最早的那些(见 LATE_DRAIN)。
+    # 没有发布时间的永远不会被 BACKLOG_DAYS 挡掉,所以不需要救,按最新排。
+    pool.sort(key=lambda p: p[0] or until, reverse=True)
+    head = pool[:max(0, LATE_ITEMS - LATE_DRAIN)]
+    rest = pool[len(head):]
+    tail = rest[len(rest) - LATE_DRAIN:] if LATE_DRAIN else []
+    return picked, head + tail + rest[:len(rest) - len(tail)]
+
+
+def collect(conn, since: datetime, until: datetime, limit: int | None = None,
+            day: str | None = None) -> Material:
+    """取这一份日报该带走的素材。`day` 缺省是 until 那一天(正在写的那一份)。
+
+    `limit` 缺省**在调用时**取 `MAX_ITEMS`,不写成形参默认值 —— 后者在 def 那一刻
+    就把当时的值绑死了,回归里 `patch.object(daily, 'MAX_ITEMS', 2)` 改到的是另一
+    份副本,于是一条本该验"名额装不下的留在队列里"的用例实际上一条都没落选。
+    """
+    cap = MAX_ITEMS if limit is None else limit
+    picked, late = _select(conn, since, until, _day_key(day, until))
+    return Material(
+        items=[_enrich(conn, row, when, False) for when, row in picked[:cap]],
+        total=len(picked),
+        late=[_enrich(conn, row, when, True) for when, row in late[:LATE_ITEMS]],
+        late_total=len(late))
+
+
+# ── 上报账本 ───────────────────────────────────────────────────────────────────
+
+
+def _report_chain() -> list[carry.PastReport]:
+    """已有的日报:每一份的窗口、日期,和它实际带走的素材,按截止时刻升序。
+
+    窗口和清单都写在每一份自己的文件里,链条自描述 —— 启用账本时要靠它回答
+    "这一条当初是哪一份带走的"。读不出窗口的(手工放进来的文件)直接跳过。
+
+    **不设条数上限**(`reports()` 那个 limit 管的是面板列表):链起点决定"多早
+    算链条之前的存量",砍掉最老的几份会让它们覆盖过的内容在迁移时重新变成候选、
+    倒灌进下一份日报。这个函数只在真要盖章那一次跑。
+    """
+    chain = []
+    root = report_dir()
+    for path in sorted(root.glob('*.md')) if root.is_dir() else []:
+        try:
+            meta, body = parse_frontmatter(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        since = parse_ts(meta.get('window_since'))
+        until = parse_ts(meta.get('window_until'))
+        if since and until and since < until:
+            chain.append(carry.PastReport(
+                since, until, str(meta.get('date') or path.stem),
+                frozenset(_carried_keys(body)), _material_rows(body),
+                _material_text(body),
+                _plain_paths(meta.get('carried_plain'))))
+    chain.sort(key=lambda c: c.until)
+    return chain
+
+
+def _plain_paths(value) -> tuple:
+    """frontmatter 里那份「带走的无链接素材」名单(`_page` 写的)。
+
+    手改过的文件什么都可能写,所以只收字符串成员、别的一概丢掉 —— 这份名单是
+    拿来**盖章**的,混进一个认不出的东西要么当场抛、要么盖到别处去。读不出就是
+    空名单,那一份照旧回落到按清单推断(老日报本来就没有这一行)。
+    """
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(v.strip() for v in value if isinstance(v, str) and v.strip())
+
+
+def _seed_args(first_days: int = FIRST_DAYS, now: datetime | None = None) -> tuple:
+    """盖章要的那几样东西。
+
+    已有的日报只有这边读得到(窗口在 frontmatter 里、带走了什么在正文的素材清单
+    里),所以在这里读好再传下去 —— 账本那边不认识 vault,两个模块也就不用互相
+    import。素材身份那一份口径(`_doc_key`)同理跟着传过去。
+    """
+    return (_report_chain, _doc_key,
+            max(1, int(first_days or FIRST_DAYS)),
+            (now or datetime.now()).replace(microsecond=0))
+
+
+def _ensure_ledger(conn, first_days: int = FIRST_DAYS,
+                   now: datetime | None = None) -> str:
+    """启用账本那一次的一次性盖章(判据和理由都在 `daily_carry.seed_locked`)。"""
+    return carry.ensure_ledger(conn, *_seed_args(first_days, now))
+
+
+def pending(first_days: int = FIRST_DAYS,
+            now: datetime | None = None) -> dict:
+    """下一份日报现在攒了多少素材 —— 面板用,零模型调用。
+
+    判据和真取材共用 `_select`,所以面板上那个数字和真生成时带走的是同一批。
+    """
+    from kb import store
+    since, until = next_window(first_days, now)
+    conn = store.connect()
+    try:
+        _ensure_ledger(conn, first_days, until)
+        # `day=''` ⇒ 一个章都不排除。`_select` 平时要放过"正在写的那一份自己盖的
+        # 章"(重新生成时它上一版带走的内容必须重新可选),而这里问的是另一个问题:
+        # "进过**任何**一份日报没有"。传当天日期的话,今天那份刚带走的内容会被
+        # 重新数成"又攒下的新素材",面板上永远有一个消不掉的数字。
+        picked, late = _select(conn, since, until, '')
+    finally:
+        conn.close()
+    return {'since': since, 'until': until, 'items': len(picked), 'late': len(late)}
 
 
 def _material(items: list[dict]) -> str:
@@ -228,42 +359,6 @@ def _material(items: list[dict]) -> str:
         lines.append(head + '\n   ' + (d['excerpt'] or '(无摘要)')
                      + ('\n   ' + ';'.join(tail) if tail else ''))
     return '\n'.join(lines)
-
-
-def _md_dest(url: str) -> str:
-    r"""markdown 链接的目标一律用尖括号包起来。
-
-    库里的 url 实测有带圆括号的(`…-(clean).pdf`、`S2589-0042(26)00811-4`),
-    裸写进 `](…)` 里会在第一个 `)` 处提前收尾,链接当场断掉、后半截漏成正文。
-    尖括号里唯一不能裸出现的是 `<` `>` 本身,转义掉。
-
-    `|` 也得编码:GFM 是**先按行拆单元格再解析 inline** 的,尖括号拦不住它 ——
-    一条目标带 `|` 的链接写进表格,那一格从 `|` 处当场裂成两格,右边的内容被挤
-    出表外(2026-09-30 第 4 轮审查实测)。`%7C` 和 `\|` 渲染出来的 href 逐字
-    相同,编码那种在非 markdown 场景下也对。
-    """
-    return ('<' + ' '.join(str(url or '').split())
-            .replace('<', '%3C').replace('>', '%3E').replace('|', '%7C') + '>')
-
-
-def _md_text(text: str) -> str:
-    """链接文字里的方括号一律转义。
-
-    库里十来篇标题带着 `[视频]`、`[四川话、粤语等]` 这种写法,平衡的还好,
-    落单一个就能把素材清单那条链接从中间截断 —— 后半截标题漏成正文、url
-    露在外面。
-    """
-    return (str(text or '').replace('\\', '\\\\')
-            .replace('[', '\\[').replace(']', '\\]'))
-
-
-def _md_title(text: str) -> str:
-    """链接标题里的 `|` 要转义 —— 库里 215 篇文章标题带着它(`AI Weekly 016 | 开源
-    项目与科技进展` 那种)。GFM 先拆单元格再解析 inline,标题里一个裸 `|` 就把那
-    一格从中间劈开:出处那格变成半截标题,右边「已可用」被挤出表外、页面上再也
-    看不见(2026-09-30 第 4 轮审查实测)。`\\|` 在表格内外渲染结果一致。"""
-    return (' '.join(str(text or '').split())
-            .replace('\\', '\\\\').replace('"', '\\"').replace('|', '\\|'))
 
 
 def _link_refs(body: str, shown: list[dict]) -> str:
@@ -290,7 +385,8 @@ def _link_refs(body: str, shown: list[dict]) -> str:
 
 
 def _page(since: datetime, until: datetime, mat: Material, body: str,
-          model: str, sync_issues: list[dict] | None = None) -> str:
+          model: str, sync_issues: list[dict] | None = None,
+          taken: datetime | None = None) -> str:
     shown = mat.all()
     counts: dict[str, int] = {}
     for d in shown:
@@ -308,22 +404,46 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
         'late': len(mat.late), 'late_total': mat.late_total,
         'sources': counts, 'model': model,
         'generated': datetime.now().strftime('%Y-%m-%d %H:%M'),
+        # 取材快照(秒精度)。和 `generated` 是两件事:那一个是**出稿完成**、只到
+        # 分钟,这一个才是"这一份的输入定下来"的那一刻 —— 盖章要的是后者。
+        'collected': (taken or datetime.now()).strftime(STAMP),
     }
     if issues:
         meta['sync_failed'] = issues
+    # 这一份带走的素材里**没有原文链接**那几条,各自的文档路径 —— 盖章时唯一的
+    # 硬证据。没有 url 的素材身份退化成标题(`daily_page.doc_key`),同名的两篇
+    # 共享一个身份,于是账本升版重算时只能去问"当初带走的是哪一篇" —— 而那件事
+    # **推断不出来**:五轮审查逐个加判据,每一道都只是把"排除它不可能是那一篇"做得
+    # 更细,证不了"它就是那一篇"(实测窗口内 121 条而上限 120 条时,落选那篇同名
+    # 同署名文章照样被盖成已报道,待报道 1 → 0、当天生成答「没有未上报过的新内容」)。
+    # 判据因此整个退役,这份名单是无 url 素材唯一的身份来源(见 `daily_carry` 的
+    # `seed_locked`)。
+    # **有链接的不记**:url 本身就是身份、清单那一行已经存着它,而 path 会随标题
+    # 或账号改名而变 —— 记下来反倒是个会过期的身份。
+    # 路径裸取,和 `mark_carried` 记账那一侧同一个写法:取不到就当场抛。`.get()`
+    # 会把"读不到 path"静默降级成"这一篇不在名单上",而名单少一条正是上面那个
+    # 漏洞的入口 —— 它会悄悄退回推断,恰恰是这次要修掉的那条路。
+    plain = [d['path'] for d in shown if not d['url']]
+    if plain:
+        meta['carried_plain'] = plain
     refs = '\n'.join(
         f"{i}. [{_md_text(d['title'])}]({_md_dest(d['url'])})"
-        f" — {_label(d['source'])}·{d['account'] or '未署名'}"
+        f"{_REF_SEP}{_label(d['source'])}·{d['account'] or '未署名'}"
         f"{' · 补录' if d['late'] else ''}"
         if d['url'] else
-        f"{i}. {d['title']} — {_label(d['source'])}·{d['account'] or '未署名'}"
+        f"{i}. {d['title']}{_REF_SEP}{_label(d['source'])}·{d['account'] or '未署名'}"
         f"{' · 补录' if d['late'] else ''}"
         for i, d in enumerate(shown, 1))
     more = []
     if mat.total > len(mat.items):
         more.append(f'窗口内共 {mat.total} 条,以上列出最新的 {len(mat.items)} 条。')
     if mat.late_total > len(mat.late):
-        more.append(f'补录共 {mat.late_total} 条,以上列出最近入库的 {len(mat.late)} 条。')
+        more.append(f'补录共 {mat.late_total} 条,以上列出 {len(mat.late)} 条。')
+    # 说清"没列出的去哪了"。条数上限是**限流**而不是丢弃线:没带走的条目留在
+    # 账本外面,下一份日报接着带。不写这一句的话,"共 679 条、列出 30 条"读起来
+    # 就是"另外 649 条你再也见不到了"—— 那正是旧实现的真实行为。
+    if more:
+        more.append('没列出的留在队列里,下一份日报接着带。')
     tail = ('\n\n> ' + ' '.join(more)) if more else ''
     head = (f'# 日报 · {until:%Y-%m-%d}\n\n'
             f'> 覆盖 {_label_window(since, until)} 发布的内容(按发布时间,不是抓取时间)。\n\n')
@@ -361,7 +481,7 @@ def next_window(first_days: int = FIRST_DAYS,
     **这里没有"最长回溯几天"的上限。** 上限会把起点往后挪,被挪过去的那段
     内容就再也进不了任何一份日报:服务停四天、上限三天的话,第一天整段永久
     消失,而且一行提示都没有。素材太多是"限量"问题——`collect` 按条数截到
-    MAX_ITEMS,日报里如实写明"窗口内共 N 条,以上列出最新的 M 条",能补;
+    MAX_ITEMS、其余留在队列里等下一份,日报里也如实写明条数),能补;
     窗口断链不能补。只有一份日报都没有、接不上任何截止时刻时才回溯
     `first_days` 天,那时没有"上一份"可言,回溯多久是个纯粹的偏好。
     """
@@ -391,13 +511,20 @@ def generate(since: datetime | None = None, until: datetime | None = None,
         since, until = since or auto_since, until or auto_until
     if since >= until:
         raise ValueError('日报的起始时刻必须早于截止时刻')
+    day = until.date().isoformat()
     conn = store.connect()
     try:
-        mat = collect(conn, since, until)
+        _ensure_ledger(conn, first_days, until)
+        mat = collect(conn, since, until, day=day)
     finally:
         conn.close()
     if not mat:
-        raise LookupError(f'{_label_window(since, until)} 没有已入库的内容,先同步再生成日报')
+        raise LookupError(f'{_label_window(since, until)} 没有未上报过的新内容,先同步再生成日报')
+    # **取材快照就是这一刻。** 下面那次模型请求要跑几十秒到几分钟,所以 `generated`
+    # 记的"出稿完成"证明不了"这篇文章进过这一份的输入" —— 那中间入库的文章一个都
+    # 没被这一份看见过。两个时刻都写进 frontmatter,别混:盖章不读它们(归属只认
+    # `carried_plain` 那份名单),这一行是给人看的事实。
+    taken = datetime.now()
     picked = model or llm_stages.stage_model('daily')
     shown = mat.all()
     if progress:
@@ -408,11 +535,36 @@ def generate(since: datetime | None = None, until: datetime | None = None,
                     picked, max_tokens=8192, timeout=600)
     if not body.strip():
         raise RuntimeError('模型返回了空日报,请稍后重试或换一个模型')
-    path = report_dir() / f'{until.date().isoformat()}.md'
-    _write(path, _page(since, until, mat, body, str(picked), sync_issues))
-    return {'date': until.date().isoformat(), 'since': since.strftime(STAMP),
-            'until': until.strftime(STAMP), 'path': str(path), 'docs': len(mat.items),
-            'total': mat.total, 'late': len(mat.late), 'model': str(picked)}
+    path = report_dir() / f'{day}.md'
+    out = {'date': day, 'since': since.strftime(STAMP),
+           'until': until.strftime(STAMP), 'path': str(path), 'docs': len(mat.items),
+           'total': mat.total, 'late': len(mat.late), 'model': str(picked)}
+    # 放回 + 落盘 + 记账是**一段**,整段和「放回 + 删文件」互斥(见 commit_lock):
+    # 两件事交错时会留下"记着已上报、却没有任何日报文件"的条目。段内的顺序让三步
+    # 的失败方向**一律倒向「多报一遍」**:
+    # ①**先把这一天上一版的章放回。** 覆盖是整份替换文件,上一版带走、这一版没选
+    #   上的那些素材(名额挤出去的、补录轮不到的)会从盘上消失;放回排在落盘之后
+    #   的话,它们的章还盖着而文件里已经没有它们 —— 从此两头落空,不可恢复。放回
+    #   自己失败时文件一个字节都还没动,整轮抛错,旧日报和旧账本都完好。首次生成
+    #   时它删 0 行。
+    # ②**盖章排在落盘之后**:章盖不上只是这一天的素材下一份再出现一遍(多报一次,
+    #   看得见),反过来落盘失败而章已经盖上,这批素材就再也选不到了。
+    with commit_lock():
+        conn = store.connect()
+        try:
+            release(conn, day)
+            _write(path, _page(since, until, mat, body, str(picked),
+                               sync_issues, taken))
+            try:
+                out['carried'] = mark_carried(conn, day, [d['path'] for d in shown])
+            except (sqlite3.Error, OSError) as e:  # 日报已经在盘上了,别带崩这一轮
+                out['carry_error'] = str(e)
+                if progress:
+                    progress(f'日报已生成,但上报记录没写进库({e});'
+                             '这一天的素材会在下一份日报里重复出现一遍')
+        finally:
+            conn.close()
+    return out
 
 
 # ── 已生成的日报 ────────────────────────────────────────────────────────────────
@@ -458,8 +610,34 @@ def report(day: str) -> dict | None:
 
 
 def delete(day: str) -> bool:
+    """删一份日报,顺带把它带走的条目放回队列。
+
+    **先放回、再删文件。** 反过来的话,放回那一步失败时文件已经没了而章还盖着,
+    那批内容从此两头落空:日报里看不到、也再不会被下一份选中。按这个顺序最坏
+    情况是章放回了文件还在,那只是下一份日报多报一遍。
+
+    **整段和生成那一段互斥**(`commit_lock`):这个顺序只管自己这一段失败时往
+    哪边倒,管不住"生成写完文件、还没记账"的那一瞬间插进来 —— 那时放回放了个
+    空,生成随后把章补上,条目就被记成已上报而文件并不存在。锁要连 `is_file()`
+    一起圈进去,不然判断和删除之间又开一道同样的缝。
+    """
+    from kb import store
+
     path = _path_for(day)
-    if not path.is_file():
-        return False
-    path.unlink()
+    with commit_lock():
+        if not path.is_file():
+            return False
+        conn = store.connect()
+        try:
+            # **先把账本启用了再放回。** 这一份马上就没了,而"它带走过哪些素材"
+            # 只写在它自己的文件里 —— 账本还没启用就先删,随后那次首访读不到这
+            # 一份,它报道过的内容会按发布时间被判成历史存量、记成 `#seed` 永久
+            # 写死(自由工作流审查第 3 轮:删掉唯一一份昨天的日报,里面的文章从此
+            # 再也选不回来)。盖完再 release,那批章当场回到队列。
+            # 这里已经持着 `commit_lock`,所以走不取锁的那个入口。
+            carry.seed_locked(conn, *_seed_args())
+            release(conn, Date.fromisoformat(day).isoformat())
+        finally:
+            conn.close()
+        path.unlink()
     return True

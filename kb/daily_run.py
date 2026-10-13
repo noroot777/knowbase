@@ -16,6 +16,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
 
@@ -37,9 +38,27 @@ RETRY_AFTER = timedelta(minutes=30)
 MAX_RETRIES = 2
 
 _lock = threading.RLock()
+
+
+def _new_namespace() -> str:
+    """这个进程的身份段。**在模块加载时取一次**,重启就换一个。"""
+    return uuid.uuid4().hex[:8]
+
+
+# 给每一轮发一个身份,面板拿它认"有没有出现一轮新的已结束运行"。两件事:
+# ①**不能拿 `finished_at` 当身份** —— 它只精确到秒,而这一档治的正是"跑得太快、
+#   页面一次都没见过 running=true"那种运行;
+# ②**光一个进程内计数器不够,身份得跨重启也唯一。** 计数器在模块加载时归零,
+#   而旧页面手里还攥着重启前那个 id:重启之后紧接着生成一份(`./kb.sh restart`
+#   之后手点一次同步正是日常路径),新那一轮又叫 `daily-1`,和页面记着的逐字
+#   相同 —— 于是正文永远不刷新,新文章要整页刷新才看得见(审查实测:重启 + 生成
+#   都落在一次空闲轮询的 15 秒窗口里,页面连中间那个空状态都没读到)。所以前面
+#   再加一段**进程启动时现取的**命名空间。
+_RUN_NS = _new_namespace()
+_run_seq = 0
 _state: dict = {
     'running': False, 'phase': '', 'detail': '', 'date': '',
-    'since': '', 'until': '', 'sync': False,
+    'since': '', 'until': '', 'sync': False, 'run_id': '',
     'trigger': '', 'started_at': '', 'finished_at': '', 'error': '',
     'stop_requested': False, 'over_budget': False, 'sched_day': '',
     # 我们自己起的那一轮管道的 run id(没起就是空串)。日报允许在别人的管道
@@ -404,6 +423,11 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         if issues:
             note += (f";{len(issues)} 个来源未同步成功("
                      + '、'.join(i['label'] for i in issues) + ')')
+        # 记账没写成不该糊过去:日报是出了,但这一天的素材会在下一份里重复出现
+        # 一遍(`daily.generate` 的失败方向,见那一段的注释)。只写进 log 的话
+        # 面板上那句收尾文案仍是一句干净的"已生成",用户看不出这一轮是降级完成的。
+        if res.get('carry_error'):
+            note += f";上报记录没写进库({res['carry_error']}),这一天的素材会在下一份里重复出现"
         _set('done', note)
     except LookupError as e:
         # "这段时间没有新内容"不是故障,重试多少次都是同一个结果。
@@ -442,16 +466,19 @@ def start(since: datetime | None = None, until: datetime | None = None,
     if since and until and since >= until:
         raise ValueError('日报的起始时刻必须早于截止时刻')
     # 勾了"先同步"却一个来源都没选,同步阶段会静静地什么都不做,面板上仍旧
-    # 一路"成功"——"同步全部并生成"被悄悄降级成"直接生成",用户不知道素材
-    # 根本没刷新(2026-09-30 审查实测)。要么给个来源,要么明确走"直接生成"。
+    # 一路"成功"——"同步全部并生成"被悄悄降级成"不同步直接出报",用户不知道
+    # 素材根本没刷新(2026-09-30 审查实测)。要么给个来源,要么明确走不同步那条。
     if sync and not picked:
         raise ValueError('同步范围里一个可用来源都没有:先勾选至少一个,'
-                         '或者改用"直接生成"(只用已入库的内容出报)')
+                         '或者改用不同步那颗生成按钮(只用已入库的内容出报)')
     with _lock:
         if _state['running']:
             return False
+        global _run_seq
+        _run_seq += 1
         _state.update({
             'running': True, 'phase': 'starting', 'detail': '',
+            'run_id': f'daily-{_RUN_NS}-{_run_seq}',
             'date': until.date().isoformat() if until else '',
             'since': since.strftime(daily.STAMP) if since else '',
             'until': until.strftime(daily.STAMP) if until else '',

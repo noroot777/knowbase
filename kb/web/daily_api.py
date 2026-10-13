@@ -68,12 +68,26 @@ def status():
 
 @router.get('/window')
 def window():
-    """下一份日报默认覆盖的区间:上一份的截止时刻 → 现在。界面拿它预填。"""
+    """下一份日报默认覆盖的区间 + 现在攒了多少还没上报过的素材。界面拿它预填。
+
+    `pending` 回答的是"上一份日报之后又进来了什么" —— 日报是一份钉在某一天的
+    产物,生成完不会自己跟着新内容变;重试失败项或新加一个订阅之后,用户得有
+    办法知道"有 N 条还没进过任何一份日报",再决定要不要重新生成(那会再花一次
+    模型钱)。零模型调用,所以放在这条每次打开面板都会调的路上。查不出来时整个
+    键给 null,窗口预填照旧 —— 它只是提示。
+    """
     settings = daily_run.load_settings()
-    since, until = daily.next_window(settings['first_days'])
-    return {'since': since.isoformat(timespec='minutes'),
-            'until': until.isoformat(timespec='minutes'),
-            'first_days': settings['first_days']}
+    try:
+        info = daily.pending(settings['first_days'])
+    except Exception:                               # noqa: BLE001 - 提示失败不该让面板打不开
+        since, until = daily.next_window(settings['first_days'])
+        info = {'since': since, 'until': until, 'items': None, 'late': None}
+    return {'since': info['since'].isoformat(timespec='minutes'),
+            'until': info['until'].isoformat(timespec='minutes'),
+            'first_days': settings['first_days'],
+            'pending': (None if info['items'] is None else
+                        {'items': info['items'], 'late': info['late'],
+                         'total': info['items'] + info['late']})}
 
 
 class RunRequest(BaseModel):

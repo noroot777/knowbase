@@ -8,6 +8,16 @@
 .daily-window[hidden] { display:none; }
 .daily-window label { display:flex; align-items:center; gap:8px; color:var(--muted); }
 .daily-window .hint { color:var(--muted); font-size:12px; }
+/* 「再出一份能多带进来多少」,长在生成按钮里面(不是贴在覆盖区间那行字后面)
+   —— 它回答的是"点这颗按钮会得到什么",所以就该跟着这颗按钮走。
+   区分两种状态**只靠字色**:有积压是品牌深绿,0 条退成灰。不画底色药丸——
+   brand-soft(#DFF0E9)和 ghost 按钮底(#EAEEED)差不到 2%,实测等于没画,
+   留着就是一行看不见的声明。"查不出来"那一档整颗藏掉(既不是有也不是没有)。 */
+.daily-gen-count { margin-left:8px; color:var(--brand-deep);
+  font:11px/1.6 var(--font-mono); font-variant-numeric:tabular-nums; }
+.daily-gen-count[hidden] { display:none; }
+.daily-gen-count.is-none { color:var(--muted); }
+
 #dailypanel button, #dailypanel input, #dailypanel select { min-height:38px; font-size:13px; }
 #dailypanel .text-button { min-height:0; }
 

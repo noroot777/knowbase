@@ -3,6 +3,11 @@
 // "现在跑到哪个来源了"和结果,同一件事不做两套进度展示。
 let dailySettings = null, dailyChannels = [], dailyReports = [], dailyWindow = null;
 let dailyCurrent = '', dailyState = null, dailyTimer = null;
+// 上一次看到的那一轮**已结束**运行的身份(还没查过状态是 null,正在跑是空串)。
+// 身份是 run_id 和完成时刻**两段拼起来的**,哪一段变了都算新一轮:承重的是
+// run_id(`finished_at` 只精确到秒,同一秒里跑完的两轮拿它分不开),而完成时刻
+// 是它撞号时的兜底 —— 多刷一次列表的代价,换"再不会静默停在旧正文上"。
+let dailyDoneRun = null;
 let dailyLoaded = false, dailyDirty = false, dailySaving = false, dailyBusy = false;
 let dailyWindowDirty = false;
 
@@ -52,10 +57,49 @@ function renderDailyWindowLabel() {
   $('daily-window-label').textContent = dailyWindowDirty
     ? `覆盖 ${since} → ${dailyClock($('daily-until').value)}`
     : `覆盖 ${since} 起到生成时刻`;
+  renderDailyGenButton();
+}
+
+function dailyTargetDate() {
+  // 这一次会写到哪一天那份日报上。**只有这一份口径**:按钮叫"生成"还是"重新
+  // 生成"、要不要先弹覆盖确认,问的是同一件事,两处各判一遍必然各漂各的。
+  // 自定义区间落在截止时刻那天,默认区间落在今天(生成时刻)。
+  return dailyWindowDirty && $('daily-until').value
+    ? $('daily-until').value.slice(0, 10)
+    : new Date().toLocaleDateString('sv');
+}
+
+function renderDailyGenButton() {
+  // 这颗按钮的名字跟着"那一天有没有日报"走:已经有就是**重新生成**(点下去会
+  // 覆盖它,所以还会弹一次确认),没有就是头一份。写死成"重新生成"的话,第一次
+  // 用的人会以为自己漏掉了一步。
+  const exists = dailyReports.some(r => r.date === dailyTargetDate());
+  $('daily-gen-label').textContent = exists ? '重新生成日报' : '生成日报';
+
+  // 「再出一份能多带进来多少」。日报是钉在某一天的产物,生成完不会自己跟着新
+  // 内容变 —— 重试失败项、新加一个订阅之后,得有个地方让人看出攒下了东西,再
+  // 决定要不要为这些内容再花一次模型钱。它长在按钮里:回答的是"点这颗会得到
+  // 什么",贴在覆盖区间那行字后面就成了另一个问题的答案。
+  //
+  // 自定义区间时不报这个数——后端算的是默认区间(接上一份日报)那一段。
+  // 后端查不出来(pending 给 null)时整颗藏掉,**不写成「没有新内容」**:
+  // 那是在把"不知道"说成"没有"。
+  const chip = $('daily-gen-count');
+  const p = dailyWindowDirty ? null : dailyWindow?.pending;
+  chip.hidden = !p;
+  if (!p) { $('daily-gen').title = ''; return; }
+  chip.textContent = p.total ? `+${p.total} 条新内容` : '没有新内容';
+  chip.classList.toggle('is-none', !p.total);
+  $('daily-gen').title = p.total
+    ? `有 ${p.total} 条内容还没进过任何一份日报（${p.items} 条在本段窗口内发布、`
+      + `${p.late} 条发布得更早）。再生成一次会把它们带进来。`
+    : '上一份日报之后没有新内容进来，再生成一次得到的基本是同一份。';
 }
 
 async function loadDailyWindow() {
-  if (dailyWindowDirty) return;
+  // 改过区间就不覆盖用户填的那两个时刻,但按钮上的名字和计数照样要重算一次
+  // ——「这一天有没有日报」是跟着列表变的,和区间改没改无关。
+  if (dailyWindowDirty) { renderDailyGenButton(); return; }
   try {
     dailyWindow = await pipeJson('/api/daily/window');
   } catch { return; }
@@ -85,7 +129,7 @@ async function resetDailyWindow() {
 function dailyScheduleMessage(s) {
   if (!s.enabled) return '定时生成未启用';
   const next = s.next_run ? ` · 下次 ${dailyTime(s.next_run)}` : '';
-  return `已保存：每天 ${s.time} ${s.sync ? '先同步再生成' : '直接生成'}${next}`;
+  return `已保存：每天 ${s.time} ${s.sync ? '先同步再生成' : '只用已入库的内容生成'}${next}`;
 }
 
 async function loadDailySettings() {
@@ -147,15 +191,28 @@ async function saveDailySettings() {
 
 // ── 历史日报 ────────────────────────────────────────────────────────────────
 
+// 「这次列表读取是不是还算数」。正文那边的序号只约束 `openDailyReport` 自己发的
+// 请求,**挡不住上游**:一次较早的列表响应后到,它会整份换掉 `dailyReports`、据此
+// 重选日报,再**新发起**一次旧日期的正文读取 —— 那一次恰好持有最新序号,于是落到
+// 屏幕上(审查实测:新生成的今天那一份先显示出来,旧列表一到就从列表里消失、阅读区
+// 跳回昨天、按钮退回「生成日报」,而后台列表一直有今天;完成身份已经消费过,后面
+// 多少轮轮询都不恢复,连覆盖确认都失效了 —— 文件还在,前端却认为今天还没生成)。
+// 所以成功、失败、重选、按钮重绘都在同一个代次里判。
+let dailyLoadSeq = 0;
+
 async function loadDailyReports(keepSelection = true) {
+  const seq = ++dailyLoadSeq;
+  let data;
   try {
-    const data = await pipeJson('/api/daily/reports');
-    dailyReports = data.reports;
-    clearDailyError('list');
+    data = await pipeJson('/api/daily/reports');
   } catch (e) {
+    if (seq !== dailyLoadSeq) return;   // 被更新的一次刷新替代了,连错也不报
     dailyError('日报列表读取失败：' + e.message, 'list');
     return;
   }
+  if (seq !== dailyLoadSeq) return;     // 整份结果丢掉:列表、选中、按钮都不动
+  dailyReports = data.reports;
+  clearDailyError('list');
   $('daily-count').textContent = dailyReports.length;
   $('daily-latest').textContent = dailyReports.length
     ? `最近一份 ${dailyReports[0].date}` : '还没有生成过日报';
@@ -167,6 +224,9 @@ async function loadDailyReports(keepSelection = true) {
   // "列表请求回来了"。不等的话阅读区还挂着上一份的正文和元信息,看起来像是
   // 生成没生效(2026-09-30 复审在全新沙箱上抓到,回归因此假红)。
   if (wanted) await openDailyReport(wanted);
+  if (seq !== dailyLoadSeq) return;     // 读正文期间又刷了一次,按钮归那一次画
+  // 按钮叫"生成"还是"重新生成"取决于目标那天有没有日报,而那正是这份列表。
+  renderDailyGenButton();
 }
 
 function renderDailyList() {
@@ -178,12 +238,24 @@ function renderDailyList() {
     || '<div class="daily-empty"><h3>还没有日报</h3><p>选好日期，点右上角生成。</p></div>';
 }
 
+// 「这次正文读取是不是还算数」。**两道各管一段,缺一不可**:
+// ①`dailyCurrent !== date` —— 选中的已经不是这一天了。删除那条路把 dailyCurrent 清成
+//   空串却**不经过本函数**(所以序号不动),在途的那次读取只有这一道挡得住,否则刚删掉的
+//   正文会被画回阅读区。
+// ②序号 —— **同一天又读了一次**,这一次已经被替代。原来只有①:用户点开今天这一份(请求
+//   慢),紧接着点「重新生成」,生成完那一跳自动重读同一天 —— 两次的 date 逐字相同,于是
+//   先发后到的那份旧正文把新的盖回去,新文章闪一下就消失,而完成身份已经记下、后面多少轮
+//   轮询都不会再补刷(审查实测:左边列表写着 5 条,正文只剩 4 条,只有手动再点一次才回来)。
+let dailyReadSeq = 0;
+
 async function openDailyReport(date) {
   dailyCurrent = date;
   renderDailyList();
+  const seq = ++dailyReadSeq;
+  const stale = () => dailyCurrent !== date || seq !== dailyReadSeq;
   try {
     const r = await pipeJson('/api/daily/reports/' + encodeURIComponent(date));
-    if (dailyCurrent !== date) return;
+    if (stale()) return;
     $('daily-reader-title').textContent = '日报 · ' + r.date;
     $('daily-reader-meta').textContent =
       `覆盖 ${dailyClock(r.window_since.replace(' ', 'T'))} → ${dailyClock(r.window_until.replace(' ', 'T'))} 发布的内容 · ` +
@@ -201,7 +273,9 @@ async function openDailyReport(date) {
     $('daily-copy').hidden = $('daily-del').hidden = false;
     $('daily-copy').dataset.body = r.body;
   } catch (e) {
-    if (dailyCurrent !== date) return;
+    // 失败这一侧走同一道判据:被替代的那次读取报出来的错也是陈旧的,
+    // 让它覆盖新正文等于拿一句「读取失败」盖掉一份读到了的日报。
+    if (stale()) return;
     $('daily-reader-body').innerHTML = `<div class="daily-empty" role="alert"><h3>读取失败</h3><p>${esc(e.message)}</p></div>`;
   }
 }
@@ -302,7 +376,9 @@ async function deleteDailyReport() {
     $('daily-reader-title').textContent = '还没有选中日报';
     $('daily-reader-meta').textContent = '';
     $('daily-reader-body').innerHTML = '<div class="daily-empty"><h3>已删除</h3><p>可以重新生成这一天的日报。</p></div>';
-    await loadDailyReports(false);
+    // 删一份日报会把它带走的条目放回队列,所以按钮上那个计数也得重新问一次
+    // ——不问的话页面上还写着「没有新内容」,而此刻明明又有了。
+    await Promise.all([loadDailyReports(false), loadDailyWindow()]);
   } catch (e) { toast('删除失败', { detail: e.message }); }
 }
 
@@ -324,12 +400,11 @@ async function runDaily(sync) {
   const channels = pickedDailyChannels();
   if (sync && !channels.length) {
     toast('先勾选至少一个同步范围', { key: 'daily',
-      detail: '同步范围在下面的「每天定时生成」里；只想用已入库的内容出报就点「直接生成」。' });
+      detail: '同步范围在下面的「每天定时生成」里；只想用已入库的内容出报，点左边那颗生成按钮。' });
     return;
   }
-  // 覆盖提示按「这一份会写到哪一天」判:自定义区间落在截止时刻那天,
-  // 默认区间落在今天(生成时刻)。
-  const date = custom.until ? custom.until.slice(0, 10) : new Date().toLocaleDateString('sv');
+  // 覆盖提示按「这一份会写到哪一天」判,和按钮叫什么名字共用 dailyTargetDate()。
+  const date = dailyTargetDate();
   if (dailyReports.some(r => r.date === date) &&
       !await confirmBox({ title: `重新生成 ${date} 的日报？`,
         body: '这一天已经有一份日报，重新生成会覆盖它。', ok: '重新生成' })) return;
@@ -357,6 +432,7 @@ function renderDailyButtons() {
   const running = !!dailyState?.running;
   $('daily-gen').disabled = $('daily-sync-gen').disabled = dailyBusy || running;
   $('daily-sync-gen').textContent = running ? '生成中…' : '同步全部并生成';
+  renderDailyGenButton();
   // 进了生成阶段就停不了了:模型已经在出稿,daily.generate() 自己把文件写完
   // 才返回。按钮留着能点、点了又被拒,不如置灰并把原因写在上面。
   const generating = running && dailyState?.phase === 'generate';
@@ -400,13 +476,27 @@ async function refreshDailyStatus() {
     queueDailyPoll(); return;          // 状态读不到不清空面板,下一跳再试
   }
   const finished = dailyState?.running && !s.running;
+  // 「有没有出现一轮新的已结束运行」。只认 running→idle 那个跳变是不够的:不同步
+  // 直接生成那条路(桩模型、素材不多时)在两次轮询之间就跑完了,页面一次都没见过
+  // running=true —— 于是按钮上那个数字归零了,而列表和阅读区还停在上一版(审查
+  // 实测:接口已经是「素材清单(4 条)」,页面仍显示 3 条和旧的生成时刻,只有整页
+  // 刷新才看得到新内容)。后台定时那一轮、别的页面点的那一轮同理。
+  // 第一跳(dailyDoneRun === null)不算新结果:那时页面刚打开,正文本来就是现读的。
+  const doneRun = s.running ? ''
+    : [s.run_id, s.finished_at].filter(Boolean).join('|');
+  const fresh = dailyDoneRun !== null && doneRun && doneRun !== dailyDoneRun;
+  dailyDoneRun = doneRun;
   dailyState = s;
   $('daily-progress').hidden = !s.running;
   $('daily-progress-text').textContent = dailyPhaseText(s);
-  // 失败原因留在横幅里,直到下一轮真的跑起来才清——列表读取失败的提示也用
-  // 这条横幅,顺手清掉的话用户只看到一片空白列表而没有任何原因。
+  // 失败原因留在横幅里,直到**下一轮有了新结果**才清——列表读取失败的提示也用
+  // 这条横幅,顺手清掉的话用户只看到一片空白列表而没有任何原因(所以清的只是
+  // 'run' 那一条)。**认「跑起来了」是不够的**:成功的那一轮同样可能整个落在两
+  // 次轮询之间(桩模型、素材不多、或者定时/CLI 跑的那一轮),页面一次都没见过
+  // running —— 于是正文和按钮都更新成了新的,顶上那条横幅还写着上一次失败的
+  // 原因,而面板上再没有任何操作能把它清掉。所以 `fresh` 那一跳也清。
   if (!s.running && s.phase === 'failed') dailyError(s.error || '日报生成失败', 'run');
-  else if (s.running) clearDailyError('run');
+  else if (s.running || fresh) clearDailyError('run');
   renderDailyButtons();
   renderDailySyncNote(s);
   if (finished) {
@@ -423,8 +513,29 @@ async function refreshDailyStatus() {
       // 上一份日报的截止时刻变了,默认区间跟着往前挪。
       await Promise.all([loadDailyReports(), loadDailyWindow()]);
     }
+  } else if (fresh && dailyActive()) {
+    // 没见过 running 的那一轮:把列表、正文和默认区间补上(loadDailyReports 自己
+    // 会重开当前选中那一份,所以阅读区跟着一起更新),**不弹 toast** —— 这条路也
+    // 会在别处(定时、CLI、另一个标签页)跑完一轮时走到,弹窗就成了噪音。
+    dailyCurrent = s.result?.date || dailyCurrent;
+    await Promise.all([loadDailyReports(), loadDailyWindow()]);
   }
+  // 素材是**从外面**进来的:同步中心那边跑完一轮、CLI 补抓、定时同步,页面这边
+  // 一个事件都收不到。只在"日报从运行变成完成"那一跳重读的话,按钮上的数字会
+  // 一直停在打开页面那一刻(审查实测:后台插进一篇,页面仍写着「没有新内容」,
+  // 要点一次「改区间」再「接上一份日报」才更新)。所以空闲时每一跳都问一次。
+  if (!s.running && dailyActive()) await refreshDailyPending();
   queueDailyPoll();
+}
+
+async function refreshDailyPending() {
+  // 只更新按钮上那个数字,**不碰两个时刻输入框**:默认区间的截止时刻是"此刻",
+  // 每跳重填一次会让展开着的「改区间」里的值自己往前跳。
+  if (dailyWindowDirty || !dailyWindow) return;
+  try {
+    dailyWindow.pending = (await pipeJson('/api/daily/window')).pending;
+  } catch { return; }
+  renderDailyGenButton();
 }
 
 function queueDailyPoll() {

@@ -13,6 +13,7 @@ let sourceItemsVersion = 0, sourceItemsFailed = false, sourceTranslating = 0, so
 let sourceBusy = false;
 let sourceNoticesAutoOpened = false;
 let wechatNoticesAutoOpened = false;
+let sourceNoticeGesture = null;
 const sourceFilters = new Map();
 const sourceViewState = new Map();
 
@@ -226,15 +227,36 @@ function closeSourceNotices(restoreFocus = false) {
   if (focused) notices.querySelector('summary').focus({ preventScroll:true });
 }
 function dismissSourceNotice(noticesId, event) {
-  const notices = $(noticesId), selection = window.getSelection();
+  const notices = $(noticesId), gesture = sourceNoticeGesture;
+  sourceNoticeGesture = null;
   const control = event.target.closest('button, a, input, select, textarea');
-  if (!control && selection && !selection.isCollapsed
-    && notices.contains(selection.anchorNode) && notices.contains(selection.focusNode)) return;
+  if (!control && event.detail > 0 && gesture?.notices === notices && gesture.textSelected) return;
   if (noticesId === 'source-notices') closeSourceNotices(true);
   else closeWechatNotices(true);
   if (control) return;
   const field = document.elementFromPoint(event.clientX, event.clientY);
   if (field?.matches('input, select, textarea') && !field.disabled) field.focus({ preventScroll:true });
+}
+function trackSourceNoticeGesture(event) {
+  const gesture = sourceNoticeGesture;
+  if (!gesture || gesture.pointerId !== event.pointerId) return;
+  if (event.type === 'pointercancel') { sourceNoticeGesture = null; return; }
+  if (event.clientX !== gesture.x || event.clientY !== gesture.y) gesture.moved = true;
+  if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) >= 4) gesture.dragged = true;
+  if (event.type !== 'pointerup') return;
+  const selection = window.getSelection();
+  gesture.textSelected = gesture.moved && (gesture.dragged || gesture.startsOnText) && selection && !selection.isCollapsed
+    && gesture.notices.contains(selection.anchorNode) && gesture.notices.contains(selection.focusNode);
+}
+function sourceNoticeStartsOnText(body, event) {
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT), range = document.createRange();
+  for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+    if (!text.textContent.trim()) continue;
+    range.selectNodeContents(text);
+    if ([...range.getClientRects()].some(box => event.clientX >= box.left && event.clientX <= box.right
+      && event.clientY >= box.top && event.clientY <= box.bottom)) return true;
+  }
+  return false;
 }
 function updateSourceNotices() {
   const error = !$('source-error').hidden, running = !$('source-progress').hidden;
@@ -543,16 +565,23 @@ $('subs-wechat-notices').querySelector('summary').addEventListener('click', () =
   $('subs-wechat-notices').classList.remove('is-auto-open');
 });
 document.addEventListener('pointerdown', event => {
+  const body = event.target.closest('#source-notices .source-notices-body, #subs-wechat-notices .source-notices-body');
+  sourceNoticeGesture = body && event.isPrimary && event.button === 0
+    ? { notices:body.closest('details'), pointerId:event.pointerId, x:event.clientX, y:event.clientY,
+        moved:false, dragged:false, startsOnText:sourceNoticeStartsOnText(body, event), textSelected:false }
+    : null;
   const notices = $('source-notices');
   if (notices.open && !notices.contains(event.target)) closeSourceNotices();
   const wechatNotices = $('subs-wechat-notices');
   if (wechatNotices.open && !wechatNotices.contains(event.target)) closeWechatNotices();
 }, true);
+for (const type of ['pointermove', 'pointerup', 'pointercancel']) document.addEventListener(type, trackSourceNoticeGesture, true);
 document.addEventListener('click', event => {
   if (!$('source-notices').contains(event.target)) closeSourceNotices();
   else if ($('source-notices').open && $('source-notices').querySelector('.source-notices-body').contains(event.target)) dismissSourceNotice('source-notices', event);
   if (!$('subs-wechat-notices').contains(event.target)) closeWechatNotices();
   else if ($('subs-wechat-notices').open && $('subs-wechat-notices').querySelector('.source-notices-body').contains(event.target)) dismissSourceNotice('subs-wechat-notices', event);
+  sourceNoticeGesture = null;
 }, true);
 document.addEventListener('keydown', event => {
   if (event.key !== 'Escape' || event.defaultPrevented) return;

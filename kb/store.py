@@ -95,6 +95,26 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
+
+-- 日报的「这一条上报过没有」账本。日报原来只按时间窗 + top-N 取材,于是没挤进
+-- 名额的条目在下一个窗口里两个桶都选不到,**静默永久丢失**(实测一份日报
+-- late_total=679 而只带得走 30 条)。判据换成「这一条有没有被哪一份日报带走过」,
+-- 没带走的就留在队列里等下一份 —— 口径在 kb/daily.py。
+--
+-- 故意**不**对 documents 建外键:清理脚本删掉一篇文章不该让它重新变成未上报
+-- (它确实报过),而残留的孤儿行是惰性的。
+CREATE TABLE IF NOT EXISTS daily_carried (
+  path       TEXT NOT NULL,
+  day        TEXT NOT NULL,   -- 带走它的那一份日报的日期;'#seed' = 启用账本时一次性盖的章
+  carried_at TEXT NOT NULL,
+  PRIMARY KEY (path, day)
+);
+
+-- 日报自己的几个标量状态(目前只有 carry_epoch:账本是什么时候启用的)。
+CREATE TABLE IF NOT EXISTS daily_state (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 """
 
 # 收藏(web UI;整篇或片段,语义是"待试备忘"而非典藏,所以带状态流转。
