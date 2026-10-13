@@ -188,15 +188,17 @@ async function openSourceModule(kind) {
 }
 
 function sourceError(message = '') {
+  const changed = $('source-error-text').textContent !== message;
   $('source-error').hidden = !message;
   $('source-error-text').textContent = message;
   updateSourceNotices();
-  if (message) $('source-notices').open = true;
+  if (message && changed) $('source-notices').open = true;
 }
 function updateSourceNotices() {
   const error = !$('source-error').hidden, running = !$('source-progress').hidden;
   const issues = !$('source-issues').hidden, configuration = !$('source-configuration').hidden;
   $('source-notices').hidden = !error && !running && !issues && !configuration;
+  if ($('source-notices').hidden) $('source-notices').open = false;
   $('source-notices').classList.toggle('has-error', error || issues);
   $('source-notices-summary').textContent = error ? '读取失败，点击查看原因'
     : running ? $('source-progress-text').textContent : issues ? '来源连接需处理' : '部分订阅待配置';

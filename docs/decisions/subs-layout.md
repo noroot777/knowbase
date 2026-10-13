@@ -2,6 +2,7 @@
 
 > 2026-10-11 最新方案见 `design/subscription-usability.md`：所有视图统一使用
 > `subs-mode` 外壳，来源工具栏移出列表，管理也使用独立滚动区；以下记录保留历史方案。
+> 2026-10-13 第 1 轮审查修复及当前实跑结果见文末；历史通过数不作为当前验证结论。
 
 ## 合并前方案与审查记录
 
@@ -224,11 +225,48 @@ python -m unittest tests.test_subs_layout tests.test_source_post_title \
 - 两套浏览器探针均保留，页头断言改为验证 feeds 列表内真实可见的工具栏。
 - 浏览器扩展本轮检查仍报 `unsupported Codex auth method: apikey`；按规定降级到独立无头 Chrome 与临时 profile，不接管普通标签、不启动有头浏览器。
 
-### 合并后验证结果
+### 合并后验证结果（2026-10-11 历史）
 
 - `.venv/bin/python -m unittest tests.test_subs_layout tests.test_source_post_title tests.test_daily_schedule tests.test_feed_sources tests.test_retired_channel tests.test_reading_literal tests.test_chat_height`：64 项通过；其中有数据布局探针 62／62 项通过。
-- 通过 `tests.headless.run_probe` 在隔离数据服务运行 `tests/subs_probe.mjs`：40／40 项通过。新增验证已连接时无冗余横幅、重要采集器提示不被隐藏、连接失败仍有原因和配置入口。
+- 通过 `tests.headless.run_probe` 在隔离数据服务运行 `tests/subs_probe.mjs`：当时 40／40 项通过。页头移动后的选择器修复与当前树复跑结果见下方 2026-10-13 记录。
 - `.venv/bin/python -m unittest tests.test_wechat_setup tests.test_wechat_discovery_integration tests.test_pipeline_stop`：30 项通过，1 项因未配置 `KB_WECHAT_TEST_RUNTIME` 的隔离 Reader 运行时跳过；未读取用户真实微信数据库。
 - 修改过的 JavaScript 与探针均通过 `node --check`，HTML 的 329 个 ID 无重复，`git diff --check` 通过，代码文件均少于 700 行。
 - 截图：`output/subs-layout/social-1440.png`、`schedule-1440.png`、`source-notices-1440.png`、`large-2160-1600.png`。1440×1000 工作区仍从 y=53 铺到 y=1000；列表与正文均可独立滚动，弹窗可关闭并返回入口焦点。
 - 在任务分支 `ash/waO-34BV` 内合入 `main`；没有检出、提交或修改目标分支，也没有删除分支或 worktree。
+
+## 2026-10-13 第 1 轮审查修复
+
+本轮只修复审查指出的两条阻塞项，不改动非阻塞观察项或已确认的 X 通道基线问题。
+
+- `sourceError()` 仅在非空错误文案变化时自动展开详情；同一错误的后续轮询保留用户的收起／展开选择。恢复后再发生同类错误仍会重新提醒。
+- `updateSourceNotices()` 在所有状态消失、整条提示被隐藏时同时复位 `open`，防止后续同步或待配置提示继承旧展开态、遮住搜索框。
+- `tests/subs_probe.mjs` 三处页头选择器统一为 `#subs-feeds > header.source-heading`，检查真实可见的工作区工具栏，不再访问已移除的列表内页头。
+- `tests/subs_notices_checks.mjs` 接入布局探针，增加 15 项定向浏览器检查：真实概览请求失败后的相同错误重试、错误文案变化、隐藏／重新出现、手动展开及搜索框命中和鼠标聚焦。
+
+### 复现与当前验证结果
+
+- 只加入回归、尚未修复状态逻辑时，布局探针为 **109／118 项通过、9 项失败**，可复现反复展开及搜索被遮挡；修复后为 **118／118 项通过**，浏览器无未捕获异常。
+- 在隔离 `tests/serve_sources.py --layout-fixture` 服务上，通过 `tests.headless.run_probe` 实跑修复后的 `tests/subs_probe.mjs`，当前结果为 **40／40 项通过**，进程正常结束，不再抛页头为 null 的 TypeError。
+- 相关来源、定时同步、阅读和聊天布局 unittest **63 项全部通过**；加上布局测试，共 **64 项 unittest 通过**。
+- 本轮修改的 JavaScript 和探针均通过 `node --check`；`git diff --check` 通过；修改过的代码文件均少于 700 行。
+- 截图已检查：`output/subs-layout/source-notices-repeated-error-1440.png` 和 `output/subs-layout/source-notices-recovered-1440.png`。相同错误重试后及恢复后开始同步时，详情保持收起，搜索框未被遮挡；检查结果见 `output/subs-layout/results.json`，旧探针输出见 `output/subs-layout/subs-probe-results.log`（均为忽略的验证产物）。
+
+复跑命令（使用项目已有虚拟环境）：
+
+```sh
+python -m unittest tests.test_subs_layout tests.test_source_post_title \
+  tests.test_daily_schedule tests.test_feed_sources tests.test_retired_channel \
+  tests.test_reading_literal tests.test_chat_height -v
+```
+
+旧探针使用隔离服务地址及 `tests.headless.probe_env()`，通过
+`tests.headless.run_probe(['node', 'tests/subs_probe.mjs', base], ...)` 执行，
+服务与浏览器均在结束后清理。
+
+### 本轮浏览器通道
+
+先重新检查 Chrome 扩展，`cua.getState()` 返回
+`Browser 1: Error: unsupported Codex auth method: apikey`，无法建立具名后台标签会话。
+因此按规定降级为独立无头 `chrome-headless-shell`，每次使用临时 profile；
+CDP 仅连接本次启动的隔离无头实例。未接管或直连用户普通标签，未激活 Chrome，
+未切换用户标签，也未启动有头浏览器。所有被测数据和服务均为本地隔离 fixture。

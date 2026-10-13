@@ -71,7 +71,7 @@ check("切换器逐项列出来源目录、顺序一致",
 check("默认打开公众号视图", await evalJs(`!document.getElementById('subs-wechat').hidden && document.getElementById('subs-feeds').hidden`));
 check("地址栏是 #subs", await evalJs(`location.hash`) === "#subs", await evalJs(`location.hash`));
 check("公众号视图和 feeds 用同一个页头部件", await evalJs(`!!document.querySelector('#subs-wechat > header.source-heading')
-      && !!document.querySelector('#subs-feeds .source-stream > header.source-heading')`));
+      && !!document.querySelector('#subs-feeds > header.source-heading')`));
 check("公众号的连接说明是一条横幅,不再是独立的连接卡", await evalJs(`!document.querySelector('#subs-wechat .pipe-source')
       && document.getElementById('src-detail').classList.contains('source-banner')`));
 // 定时同步是整页一份的设置:入口收在页头,正文区不再被页尾那张常驻大卡片挤掉一截
@@ -173,12 +173,12 @@ await evalJs(`document.getElementById('subs-switch-rss').click()`);
 await until(`!document.getElementById('subs-feeds').hidden`);
 check("RSS 视图接管页面、公众号视图收起", await evalJs(`document.getElementById('subs-wechat').hidden`));
 check("来源名降为二级标题", await evalJs(`document.getElementById('source-title').tagName`) === "H2");
-check("列表内页头只剩标题 + 事实数字(标语整段去掉)", await evalJs(`(() => {
-      const header = document.querySelector('#subs-feeds .source-stream > header.source-heading');
+check("工作区页头紧凑且不再显示标语", await evalJs(`(() => {
+      const header = document.querySelector('#subs-feeds > header.source-heading');
       return !document.getElementById('source-description') && header.getClientRects().length > 0
         && header.getBoundingClientRect().height > 0 && header.getBoundingClientRect().height <= 64;
     })()`),
-      await evalJs(`Math.round(document.querySelector('#subs-feeds .source-stream > header.source-heading').getBoundingClientRect().height)`));
+      await evalJs(`Math.round(document.querySelector('#subs-feeds > header.source-heading').getBoundingClientRect().height)`));
 // 阅读区锁在可用视口高度上。判据钉的是**后果**(整页要不要滚、工作台底边在不在
 // 视口里),不是"类名挂上了没有"。
 await until(`document.body.classList.contains('subs-reading')`, 8000);

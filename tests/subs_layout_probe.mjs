@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launchShell } from './probe_shell.mjs';
 import { checkSubscriptionUsability } from './subs_usability_checks.mjs';
+import { checkSubscriptionNotices } from './subs_notices_checks.mjs';
 
 const base = process.argv[2];
 const profile = mkdtempSync(join(tmpdir(), 'kb-subs-layout-'));
@@ -98,6 +99,7 @@ try {
   await evaluate(`sourceError('示例读取失败：本地服务暂不可用'); true`);
   check('读取失败自动展开原因及重试入口', await evaluate(`$('source-notices').open && $('source-error').getClientRects().length > 0 && $('source-error-text').textContent.includes('本地服务暂不可用')`));
   await evaluate(`sourceError(); $('source-notices').open = false; true`);
+  await checkSubscriptionNotices({ evaluate, check, click, screenshot });
 
   await evaluate(`$('source-list-pane').scrollTop = 350; true`);
   check('滚列表不带动整页与正文', await evaluate(`window.scrollY === 0 && $('source-reader-scroll').scrollTop === 0 && $('source-list-pane').scrollTop > 0`));
