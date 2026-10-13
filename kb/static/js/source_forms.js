@@ -32,7 +32,7 @@ async function saveSourceEditor(e) {
     });
     $('source-editor').style.display = 'none';
     toast(sourceEditId ? '订阅已更新' : '订阅已添加', {type:'ok'});
-    sourceView = 'manage'; await loadSourceModule(true);
+    await switchSourceView('manage'); await loadSourceModule(true);
   } catch(e) { $('source-edit-error').textContent = e.message; }
   finally { sourceSaving=false; $('source-edit-save').disabled = false; }
 }
