@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """没有 RSS 的站点:把它的文章列表页拆成条目。
 
+**硬约束在 `docs/decisions/page-list.md` 第一节 —— 改这块之前先读那一份。**
+
 Anthropic 的 news 是典型形态 —— 整站一处 feed 都没有(五个常见 feed 路径
 全是 404、页面上没有 `<link rel=alternate>`、公共 RSS 桥接实例要么 403
 要么连不上),而它恰恰是最该收的来源之一。

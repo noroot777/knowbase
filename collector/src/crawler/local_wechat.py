@@ -1,4 +1,7 @@
-"""通过 rion-wechat-cli 只读公众号推送；不接触密钥、私聊或绿泡泡界面。"""
+"""通过 rion-wechat-cli 只读公众号推送；不接触密钥、私聊或绿泡泡界面。
+
+**硬约束在 `docs/decisions/collector.md` 第一节 —— 改这块之前先读那一份。**
+"""
 
 from __future__ import annotations
 

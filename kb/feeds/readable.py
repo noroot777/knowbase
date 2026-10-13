@@ -103,7 +103,7 @@ _LEGAL = re.compile(
 # 那是错的:它是**正常文章的标准开头**(`<article><header>` 里那行署名),而
 # `boilerplate_reason` 只凭开头加一个长度上限就整篇拒绝 —— 于是一篇有署名、
 # 标题和三段正文的短文(580 字)被判成「只有作者简介」,连抓三轮都只留下链接
-# (2026-10-09 第 2 轮审查实测)。署名属于正文,CLAUDE.md 里早就记着
+# (2026-10-09 第 2 轮审查实测)。署名属于正文,本块的硬约束(`docs/decisions/fulltext.md`)里早就记着
 # 「`<article><header>` 里那行『By Carson Gross, February 2026』」要留住。
 # 剩下这几项都是在声明"下面是作者简介",不是在署名:Stripe 那页开头逐字是
 # `About the authors`,照旧挡得住。

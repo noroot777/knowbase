@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """entity/topic/summary/软广 提取。
 
+**软广与「正文空」两道判定的硬约束在 `docs/decisions/promo.md` / `body-gap.md` 第一节;提取结果
+与正文版本绑定那条在 `fulltext.md` —— 改这块之前先读。**
+
 两条路:
 - pre_tagged 来源(dr-youtube-dig):frontmatter 里已有 entity/xxx、topic/xxx
   标签,直接解析进 entities 表,零成本。

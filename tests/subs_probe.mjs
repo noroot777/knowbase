@@ -58,7 +58,7 @@ await send("Page.navigate", { url: base + "/" });
 await until(`typeof openSubsPanel === 'function' && typeof subsCatalog !== 'undefined' && subsCatalog.length > 0`, 20000);
 
 // 1. 订阅页:各类来源并列,默认落公众号视图
-// **来源清单不许写死**(口径同 CLAUDE.md「没有 feed 的站点」那节):写死
+// **来源清单不许写死**(口径同 `docs/decisions/page-list.md` 的硬约束一节):写死
 // `公众号,大V观点,RSS` 的话,加任何一类来源都会红,而红的地方跟改动毫无关系 ——
 // 这一条真正要钉的是「切换器把目录里的每一类都列出来、顺序和目录一致」。
 await evalJs(`switchTab('subs')`);

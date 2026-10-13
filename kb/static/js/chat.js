@@ -1,4 +1,5 @@
 // ── 问答 chatbox ──────────────────────────────────────────────────────────
+// 面板高度/留白/文本域增长那几条硬约束在 docs/decisions/frontend-feedback.md 第一节,先读再改。
 let chatConvId = null;      // 当前会话 id;null = 新对话(首次提问时由后端创建)
 let chatConvs = [];         // 会话列表缓存
 let chatBusy = false;       // 生成中(只禁并发发送,浏览/切换会话不受限)

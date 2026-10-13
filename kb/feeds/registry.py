@@ -1,4 +1,9 @@
-"""Persistent subscriptions and fetched items, independent of the rebuildable search index."""
+"""Persistent subscriptions and fetched items, independent of the rebuildable search index.
+
+这个模块被好几块的硬约束管着,改之前先读对应那一份 `docs/decisions/`:默认订阅补种
+(`defaults-backfill.md`)、新订阅的历史下界(`history-depth.md`)、语言判定与翻译队列
+(`translate.md`)、`uses_bridge` 与通道就绪(`x-channels.md`)。
+"""
 from __future__ import annotations
 
 import hashlib

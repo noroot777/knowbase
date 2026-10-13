@@ -1,7 +1,72 @@
 # collector 采集器
 
-> 从 CLAUDE.md 外移的决策记录。CLAUDE.md 只留硬约束和一行指针,
-> 这里是完整的事故形态、实测证据、回归清单和反向验证红数。原文逐字搬运。
+> **这一份的第一节就是这一块的硬约束(不许怎样)—— 动这块代码之前先读它**,后面是完整的事故形态、
+> 实测证据、回归清单和反向验证红数。CLAUDE.md 只留跨块的元规则和一张索引。
+> 硬约束和下面的展开**说的是同一条口径,要改规则两边一起改**。
+
+## 硬约束(原 CLAUDE.md「collector 采集器」)
+
+- **公众号只有一条通道 `wechat_local`(读本机绿泡泡数据库)。** `wechat_oa` 在另一分支、主干注册表里压
+  根没有它,所以「两条通道互斥、选哪条是个设置」那一整套全删了。手动请求、定时配置和失败重试照旧显式
+  携带 `channel`,不修改进程全局环境。
+- **退役的通道名要留成别名,不能当「不认识的来源」丢掉**(`_RETIRED_CHANNELS`
+  = `{"wechat_oa": "wechat_local"}`,`resolve_channel` / `known_channels` 是唯一口径)—— 存量
+  `schedule.json` / `daily.json` 里写的正是旧名字,丢掉的话**公众号从此不再定时同步、不再进日报,而面
+  板上完全看不出少了什么**。配套:①退役名也要能翻成人话(`channel_labels()`,API 的 `labels`);②别名
+  表要发到浏览器(`/api/pipeline/channels` 的 `aliases`),前端不许写死 `wechat_oa`。
+- **「我的订阅」的公众号视图不信 `kb-sync-channel` 那份全局选择**(`sources.js` 的
+  `wechatSubsChannel()` 按来源目录声明的通道过别名表解析)。**检查/重试入口同理**自己按目录现解析
+  (`refreshPipeSource()`,「检查连接」重跑整个 `openWechatSubs`)。
+- **逐号「就绪」那套在主干上永久是空的**(一律 `ready=None` / `state="按本机推送采集"`)。
+  `Target.ready/tone/state` 和前端那条 `ready === null` 分支留着 —— 契约是通用的。别再把「刷新凭证」
+  「去 Mac 绿泡泡里各点开一篇文章」那类文案加回来。
+- **「翻过、确实没有图文」和「这一次没翻」不是一件事**(`local_accounts.discover` 给每行一个 `probe`:
+  `index`/`live`/`none`/`unchecked`/`error`;文案是 `cli._NO_BIZ_STATE`(哪一档)+ `_NO_BIZ_FIX`(下一
+  步)两半)。`discover` 裸列时一个会话都不翻,给了查询词也只翻前 `RESOLVE_LIMIT`(12)个。**「加号失
+  败」这条提示也归这份口径管**(`_accounts_add` 的 `_worst_probe`):只有 `none` 那档该去同步一篇,另两档给「缩小关键词,或用 `--fakeid` 直接指定」。
+- **同名会话里只要有一条没解析出归属,按名字添加就是歧义,一律拒掉**(`_accounts_add` 的 `blind`)。
+  **归属只认 `__biz`,同名不是线索**,无 biz 的同名会话只生成「归属待核实」诊断、不能成为身份映射。配套
+  两条在 `targets.js` 的 `renderTgtCands`:①归属是空的候选不许点添加(按钮禁用 + 写清下一步);②**「已
+  订阅」只按身份(`byId`)认,名字一律不作数**。
+- **一个档案名不许改挂到另一个 `__biz` 上**(`enable_crawl_account` 抛 `AccountNameTaken`)—— `name` 是
+  主键、`articles.account_name` 是外键、vault 目录也按它归档,碰上同名就是把第一个号的**全部历史文章连
+  同导出目录**接到第二个号身上。判据按元规则待在那条 UPSERT 自己的 `DO UPDATE … WHERE` 里。**四句豁免
+  缺一不可**:①`excluded.fakeid = ''`;②`accounts.fakeid = ''`;③`accounts.fakeid = excluded.fakeid`;
+  ④`import:` 开头的占位键。
+- **本地库只负责文章发现,正文继续按链接抓取。** 本地读取只能通过已配置的 `rion-wechat-cli`,须确认
+  `live_database_read_ok`,不允许通知预览替代、自动获取密钥或操作绿泡泡。归属最终按推送 URL 的 `__biz`
+  核实,不能以同名自动匹配。
+- **文章身份是 `article_identity` 的 `__biz + mid + idx`,保留已有文章 ID 和归属**(存量是凭证通道采
+  的、ID 另一套规则,本地库再发现同一篇时必须认出来、不能新开一行);用户删除时同时记进链接身份黑名单。
+  不要把推送接收时间或带跟踪参数的完整 URL 当成唯一键。
+- **本机推送链接须保留正文校验参数 `chksm`,仅剔除跟踪参数。** 发现阶段用分片/表级 `local_id` 游标 ——
+  不要用 timeline 的 after-local-id 做增量分页(读取器是在 LIMIT 后过滤 ID),也不能拿发布时间当消息水
+  位;**分页/读取失败不推进对应游标**。未选公众号只进本地发现索引,不下载正文、不写共享 articles、不导
+  出。正文失败存 `article_fetch_state` 按退避重试,**不能用发布日期判断删除**;本地正文暂不可读走
+  `body_failures` 明细,不进 `errors`、不使抓取阶段判红。`is_wx_deleted` 的历史自动退休记录允许重新入
+  库,用户删除及身份黑名单仍拦截。其余(源指纹重扫、异常表、XML 内存解码、`no_body` 明细协议)见决策
+  文档。
+- **`collector/data` 和 `collector/.venv` 丢了就跑 `./collector/setup.sh`**(两者都是指向仓库外的软链
+  接,新开的 worktree 只带源码;脚本幂等)。缺链时面板顶栏报「采集器还没装好」,抓取/导出落 skipped 而
+  不是 error。**别再让它退回 `sys.executable`**(判定在 `wechat_local._backend_problem()`)。
+- 采集器是**一次性 CLI,不是常驻服务**:`cd collector && ./.venv/bin/python -m cli <命令>`(常用 `status` / `collect` / `export` /
+  `accounts list|add|remove` / `login`)。stdout 只出
+  NDJSON 给程序读,人看的提示走 stderr。
+- **公众号列表**存在 `collector/data/wechatoa.db` 的 `accounts` 表,日常维护走 kb-web「我的订阅」页,
+  **不要直接改库**;终端等价物是 `cli accounts list|discover|add|remove|enable|disable`。**添加候选来自
+  本机绿泡泡的会话列表**(`cli accounts discover`):不登录公众平台、不走网络。
+- **公众号改名只更新 `accounts.display_name`,永远不动 `name`**(主键 + 外键 + vault 目录都按它)。**主
+  路是本机会话列表**(`local_accounts.refresh_display_names`,每次同步在发现阶段之后跑一次)。抓正文时
+  读到的 `var nickname` 照旧写回;别用页里裸的 `nickname:`(那可能是推荐位里别人家的号)。**按 biz 一一
+  对应,不许「只有一个就配上」**,否则两个号的名字会互换。`GZH_DISPLAY_RECHECK_DAYS` 和
+  `display_checked_at` 都没了,别再加回来。
+- **`enable_crawl_account` 先按 fakeid 认号,认出来只更新、不插新行**(否则同一个号两套主键、vault 目录
+  裂开,而外键全合法)。它返回**实际入库的档案键**,调用方据此区分「新添加」和「这就是那个改了名的号」。
+- 别把 `collector/data` 或 `collector/.venv` 加进版本库 —— 它们是符号链接,`data/` 那条带斜杠的规则挡不
+  住,.gitignore 里另有不带斜杠的显式两行,别删。
+- 详细见 `docs/decisions/collector.md`。
+
+## 事故形态与实测证据
 
 - **公众号只有一条通道 `wechat_local`(读本机绿泡泡数据库)。** 原来那条逐号文章凭证的
   `wechat_oa` 在 `wechat-oa` 分支上,主干的注册表里压根没有它,所以「两条通道互斥、

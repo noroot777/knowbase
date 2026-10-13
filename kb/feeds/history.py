@@ -1,8 +1,8 @@
 """新订阅的历史下界:那道「只收最近几天」的闸,以及它现读的那个下界。
 
 从 `kb.feeds.sync` 拆出来的 —— 合并主干之后 `sync.py` 到了 703 行,越过本仓
-700 行硬上限,而这一块是它里面最独立的一个职责(CLAUDE.md 有自己的一节
-「订阅的历史深度」,事故形态在 `docs/decisions/history-depth.md`):只依赖
+700 行硬上限,而这一块是它里面最独立的一个职责(硬约束和事故形态都在
+`docs/decisions/history-depth.md`):只依赖
 `registry`,不碰 `_stage` / `_state` / `VAULT_ROOT` 这些**被测试打桩的模块
 变量** —— 那种名字搬走之后 `patch.object(sync, ...)` 只改到一份副本,所以
 预取和 `_repointed` 那两组都留在原处。

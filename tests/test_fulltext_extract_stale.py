@@ -162,7 +162,7 @@ class StaleExtractionTests(StaleCase):
     def test_a_plain_retranslation_still_keeps_the_old_tags(self):
         """反过来钉一边:没补抓过的条目重导出时,提取回写的 tag 照旧原样留着。
 
-        那是 `sync._kept_meta` 原本的契约(见 CLAUDE.md「英文内容翻译」):同一篇
+        那是 `sync._kept_meta` 原本的契约(见 `docs/decisions/translate.md` 的硬约束一节):同一篇
         换个语言,标签口径没变,再买一次提取只是重复付钱。摘 tag 只在正文被
         **整篇换掉**时发生 —— 一律摘的实现会在这里红。
         """

@@ -46,7 +46,7 @@ def main():
     if tried:
         # 0 行的那次 UPDATE 也把事务开着了,所以按「试过几次」提交、不按
         # 「写进去几条」:后面的 tag 回写要先取维护锁,攥着没提交的写事务
-        # 去等锁会把持锁那边卡死(见 CLAUDE.md 「kb.db 的维护互斥锁」锁序那条)
+        # 去等锁会把持锁那边卡死(见 `docs/decisions/maintenance-lock.md` 锁序那条)
         conn.commit()
     if no_text:
         print(f"[extract-p] 无正文可提取 {no_text} 篇(仅图片等,已记录)", flush=True)

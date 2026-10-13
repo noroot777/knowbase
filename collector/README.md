@@ -55,7 +55,7 @@ local_wechat_articles  --(按 __biz + mid + idx 认身份)-->  articles
 两件事分开:**发现**只读本机库,**正文**照旧按 `mp.weixin.qq.com` 的文章链接抓。
 本机库只提供「有哪些推送、各属于谁」。
 
-几条硬约束(详见仓库根目录 `CLAUDE.md` 的「collector 采集器」一节):
+几条硬约束(详见仓库根目录 `docs/decisions/collector.md` 的硬约束一节):
 
 - 只能通过已配置的 `rion-wechat-cli` 读,须确认 `live_database_read_ok`;不自动
   获取密钥、不操作绿泡泡、不用通知预览替代。

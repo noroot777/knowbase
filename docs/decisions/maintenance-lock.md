@@ -1,7 +1,46 @@
 # kb.db 的维护互斥锁(kb/maintenance.py)
 
-> 从 CLAUDE.md 外移的决策记录。CLAUDE.md 只留硬约束和一行指针,
-> 这里是完整的事故形态、实测证据、回归清单和反向验证红数。原文逐字搬运。
+> **这一份的第一节就是这一块的硬约束(不许怎样)—— 动这块代码之前先读它**,后面是完整的事故形态、
+> 实测证据、回归清单和反向验证红数。CLAUDE.md 只留跨块的元规则和一张索引。
+> 硬约束和下面的展开**说的是同一条口径,要改规则两边一起改**。
+
+## 硬约束(原 CLAUDE.md「kb.db 的维护互斥锁(kb/maintenance.py)」)
+
+- **写 kb.db + vault 的几条路共用一把跨进程独占锁**(`maintenance_lock()`,flock 在 `data/feeds-trim.lock` 上):存量清
+  理脚本、订阅同步的存盘与导出、索引的两条入口(`pipeline_stages._run_index`、`cli.cmd_index`)、条目化的就地入库、提取
+  的 tag 回写(**四个**调用方:管道 `_extract_pass`、`kb extract --writeback`、`scripts/extract_parallel.py`、软广补判经
+  `sync_promo_tag` 进来的)、提取结果的交付(`commit_extraction`)。
+- **口径是「凡是写 kb.db 或 vault 文件的入口」,不是「两条索引入口」** —— 条目化那条自称「只增不删」,可它末尾照样调
+  `embed_pending_chunks`,而那个函数补的是**全库**待编码的 chunk。判据只能是**写哪张表** + **写不写 vault 里的文章文
+  件**。
+- **粒度是整趟,不是只圈写的那几句**(竞态的那一半在「读」),所以 scan → upsert → remove 一整段都在锁里。**向量编码也
+  在锁里**:`chunk_vec` 是 sqlite_vec 虚表、**没有外键级联**,清理在中间删掉那些 chunk 的话后面几批会按不存在的 chunk
+  id 插回向量,而这些孤儿行**照样占着语义检索的候选名额**。代价是一轮大编码会攥着锁几分钟,这是统一互斥的标价。
+- **等待有上限,而且等的时候要出声**(`KB_MAINT_LOCK_WAIT`,默认 900 秒;`on_wait` 立刻一次、之后每 60 秒一次)。超时抛
+  `LockBusy`,三处一律「什么都没动」收场。**无限等更坏**:管道是单例,一个卡住的持锁者会把面板同步、定时同步和日报一起
+  冻死。
+- **等锁期间还认「停止」,而且认它的回调跟出声那个分开**(`on_poll` 每 0.25 秒一次,抛 `_StopWhileWaiting` 让阶段落
+  `stopped` 而不是红)。**`flock` 一成功就返回,所以拿到锁之后还要再认一次**,但**只在真等过锁时才补这一次**(无条件检
+  查会把刚放进 index 的那一轮当场顶成 stopped)。
+- **提取的 tag 回写也在锁里,而且锁内要先确认这一篇还在**(`_still_indexed`,不在就返回 False、**不抛异常**)——
+  `writeback_tags` 是整份读改写,清理在中间把这一篇删干净的话那次写回**把 md 文件重新创建出来**,比 index 那条更糟(文件
+  回来之后谁也收不掉)。**回写的粒度是「每篇各取一次」,不是整趟提取**,模型请求留在锁外。
+- **取锁之前必须先把写事务落盘,而这件事由共用入口自己负责**(`if conn.in_transaction: conn.commit()`)—— **SQLite 的写
+  锁不认这把维护锁**,攥着没提交的写事务去等锁,持锁的清理就卡在自己的 DELETE 上。判据是**两层**:共用入口自己 flush +
+  调用点时序照旧写明白,另有一条回归把全仓调用点的名单钉住。
+- **补判等不到锁时 `LockBusy` 照常抛出去、整轮中止**(`_flag_in_vault` 只接 `OSError`)。
+- **同形状但没闭合的是 `wiki_daily.step_linkify`** —— 分界线:**管道自动跑的写 vault 入口都该取这把锁**,手工一次性运维
+  脚本留在外面。
+- **不会抱死**:这是唯一一把跨进程维护锁,没有任何路径持着它再去取别的锁;同线程重入直接放行(flock 认的是 open file
+  description)。锁的是 `data/` 下**单独的 lockfile**,只创建不删除;**文件名沿用 `feeds-trim.lock`**,改名等于在升级窗
+  口里让两个持锁者同时写。
+- **`test_feed_translate.ColumnBackfillTests.test_two_first_accesses_both_succeed` 是一条已知的负载敏感 flaky,红了先别当
+  回归。** 判据是它自己的报错内容:`duplicate column name` 才是它要抓的回归,`database is locked` 是 `reg.db()` 在
+  `BEGIN IMMEDIATE` 之前那两句 DDL/PRAGMA 上的争锁窗口。
+- **测试里必须把 `maintenance.DATA_DIR` 指到 tmp**,不指的话会去 flock **生产**那个 lockfile。
+- 详细见 `docs/decisions/maintenance-lock.md`。
+
+## 事故形态与实测证据
 
 - **写 kb.db + vault 的几条路共用一把跨进程独占锁**(`maintenance_lock()`,flock 在
   `data/feeds-trim.lock` 上):存量清理脚本、订阅同步的存盘(`sync._save_result`)与
