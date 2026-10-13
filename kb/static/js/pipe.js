@@ -106,10 +106,11 @@ async function refreshPipe(withPending = false) {
 // 公众号那条连接说明:空串 = 没什么要说的,整条横幅收起来
 function setSourceDetail(text, bad) {
   const box = $('src-detail');
+  const changed = box.textContent !== text || box.classList.contains('error') !== !!bad;
   box.textContent = text;
   box.classList.toggle('error', !!bad);
   box.hidden = !text;
-  updateWechatNotices();
+  updateWechatNotices(changed);
 }
 async function refreshPipeSource() {
   const version = ++pipeSourceVersion;

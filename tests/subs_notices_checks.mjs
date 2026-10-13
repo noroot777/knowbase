@@ -92,9 +92,9 @@ export async function checkWechatNotices({ evaluate, wait, check, click, screens
     return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) === input;
   })()`);
   try {
-    check('公众号连接失败保留详情入口且默认收起', await evaluate(`!$('subs-wechat-notices').hidden && !$('subs-wechat-notices').open && $('src-detail').classList.contains('error')`));
+    check('公众号连接失败自动展开完整原因', await evaluate(`!$('subs-wechat-notices').hidden && $('subs-wechat-notices').open && $('src-detail').classList.contains('error')`));
     await click('#subs-wechat-notices > summary');
-    check('公众号连接失败原因可以手动展开', await evaluate(`$('subs-wechat-notices').open && $('src-detail').getClientRects().length > 0`));
+    check('公众号连接失败可主动收起但摘要仍保留原因', await evaluate(`!$('subs-wechat-notices').open && $('subs-wechat-notices-summary').textContent.includes('验证采集器连接失败')`));
     await evaluate(`(async () => { window.qaWechatNoticeState.online = true; await refreshPipeSource(); })()`);
     check('公众号连接恢复且无说明时隐藏并复位详情', await evaluate(`$('src-status').textContent === '已连接' && $('subs-wechat-notices').hidden && !$('subs-wechat-notices').open`));
     await syncState(true);

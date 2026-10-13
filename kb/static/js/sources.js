@@ -12,6 +12,7 @@ let sourceOffset = 0, sourceTotal = 0, sourceVersion = 0, sourcePoll = null, sou
 let sourceItemsVersion = 0, sourceItemsFailed = false, sourceTranslating = 0, sourceFetching = 0;
 let sourceBusy = false;
 let sourceNoticesAutoOpened = false;
+let wechatNoticesAutoOpened = false;
 const sourceFilters = new Map();
 const sourceViewState = new Map();
 
@@ -94,12 +95,25 @@ $('subs-switch').addEventListener('keydown', event => {
   openSubsPanel(subsCatalog[next].id);
 });
 
-function updateWechatNotices() {
+function closeWechatNotices(restoreFocus = false) {
+  const notices = $('subs-wechat-notices');
+  const focused = restoreFocus && notices.contains(document.activeElement);
+  notices.open = false;
+  wechatNoticesAutoOpened = false;
+  if (focused) notices.querySelector('summary').focus({ preventScroll:true });
+}
+function updateWechatNotices(detailChanged = false) {
   const detail = !$('src-detail').hidden, running = !$('subs-wechat-progress').hidden;
-  $('subs-wechat-notices').hidden = !detail && !running;
-  if ($('subs-wechat-notices').hidden) $('subs-wechat-notices').open = false;
-  $('subs-wechat-notices').classList.toggle('has-error', detail && $('src-detail').classList.contains('error'));
-  $('subs-wechat-notices-summary').textContent = running ? '同步进度' : '连接详情';
+  const notices = $('subs-wechat-notices'), summary = $('subs-wechat-notices-summary');
+  notices.hidden = !detail && !running;
+  if (notices.hidden || (!detail && wechatNoticesAutoOpened)) closeWechatNotices();
+  notices.classList.toggle('has-error', detail && $('src-detail').classList.contains('error'));
+  summary.textContent = detail ? $('src-detail').textContent : $('subs-wechat-progress-text').textContent;
+  summary.title = summary.textContent;
+  if (detail && detailChanged) {
+    if (!notices.open) wechatNoticesAutoOpened = true;
+    notices.open = true;
+  }
 }
 
 // ── 公众号视图:连接卡 + 订阅列表 + 同步全部 ────────────────────────────────
@@ -508,20 +522,24 @@ $('source-list').addEventListener('keydown', event => {
 $('source-notices').querySelector('summary').addEventListener('click', () => {
   sourceNoticesAutoOpened = false;
 });
+$('subs-wechat-notices').querySelector('summary').addEventListener('click', () => {
+  wechatNoticesAutoOpened = false;
+});
 document.addEventListener('pointerdown', event => {
   const notices = $('source-notices');
   if (notices.open && !notices.contains(event.target)) closeSourceNotices();
+  const wechatNotices = $('subs-wechat-notices');
+  if (wechatNotices.open && !wechatNotices.contains(event.target)) closeWechatNotices();
 }, true);
 document.addEventListener('click', event => {
   if (!$('source-notices').contains(event.target)) closeSourceNotices();
-  if (!$('subs-wechat-notices').contains(event.target)) $('subs-wechat-notices').open = false;
+  if (!$('subs-wechat-notices').contains(event.target)) closeWechatNotices();
 }, true);
 document.addEventListener('keydown', event => {
   if (event.key !== 'Escape' || event.defaultPrevented) return;
   for (const id of ['source-notices', 'subs-wechat-notices']) {
     if (!$(id).open || $(id).hidden) continue;
     if (id === 'source-notices') { closeSourceNotices(true); continue; }
-    $(id).open = false;
-    if ($(id).contains(document.activeElement)) $(id).querySelector('summary').focus({ preventScroll:true });
+    closeWechatNotices(true);
   }
 });
