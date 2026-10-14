@@ -11,15 +11,12 @@
 // 同步来源」,一个都选不了、也没法重读,关掉重开还会被草稿守卫挡住,只能刷新整页。
 //
 //   HEADLESS_SHELL=<bin> node tests/sched_catalog_probe.mjs http://127.0.0.1:<port>
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+
 import { launchShell } from './probe_shell.mjs';
 
 const base = process.argv[2];
-const profile = mkdtempSync(join(tmpdir(), 'kb-sched-catalog-'));
 const results = [];
-const { proc, port } = await launchShell(['--window-size=1440,1000', `--user-data-dir=${profile}`]);
+const { proc, port } = await launchShell(['--window-size=1440,1000'], { profile: 'kb-sched-catalog-' });
 const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const socket = new WebSocket(tabs.find(tab => tab.type === 'page').webSocketDebuggerUrl);
 await new Promise(resolve => socket.addEventListener('open', resolve, { once: true }));
@@ -139,6 +136,5 @@ try {
   proc.ref();
   proc.kill();
   await new Promise(resolve => proc.once('exit', resolve));
-  rmSync(profile, { recursive: true, force: true });
 }
 process.exitCode = results.some(result => !result.ok) ? 1 : 0;

@@ -10,13 +10,10 @@
 // CDP 直连 playwright 缓存里的 chrome-headless-shell(不装 playwright、不连网)。
 //
 //   HEADLESS_SHELL=<bin> node tests/subs_probe.mjs http://127.0.0.1:8799
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join } from "node:path";
 import { launchShell } from "./probe_shell.mjs";
 const base = process.argv[2];
-const profile = mkdtempSync(join(tmpdir(), "kb-subs-merge-"));
-const { proc, port } = await launchShell(["--window-size=1440,1000", `--user-data-dir=${profile}`]);
+const { proc, port } = await launchShell(["--window-size=1440,1000"], { profile: "kb-subs-" });
 const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const ws = new WebSocket(list.find(t => t.type === "page").webSocketDebuggerUrl);
 await new Promise(r => ws.addEventListener("open", r, { once: true }));
@@ -300,5 +297,4 @@ process.stdout.write(`${out}\n${fails.length ? "FAIL" : "PASS"} ${oks.length}/${
 ws.close();
 proc.ref();
 await new Promise(resolve => { proc.once('exit', resolve); proc.kill(); });
-rmSync(profile, { recursive: true, force: true });
 process.exitCode = fails.length ? 1 : 0;

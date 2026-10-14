@@ -17,6 +17,7 @@ stdout 就继续往下走,最后照样 `WIKI_DAILY_DONE`、退出码 0;而 kb �
 from __future__ import annotations
 
 import io
+import shutil
 import sys
 import tempfile
 import unittest
@@ -47,6 +48,8 @@ class WikiDailyExitTest(unittest.TestCase):
 
     def _run(self, graph: str, catgraph: str):
         tmp = Path(tempfile.mkdtemp())
+        # 建完立刻登记删除:下面每一步都可能抛,而这个目录归这条用例
+        self.addCleanup(shutil.rmtree, tmp, True)
         (tmp / "build_graph_html.py").write_text(graph, encoding="utf-8")
         (tmp / "build_catgraph.py").write_text(catgraph, encoding="utf-8")
         vault = tmp / "vault"
@@ -120,6 +123,7 @@ class RunWikiStageTest(unittest.TestCase):
 
     def _run(self, stdout: str, rc: int, stderr: str = ""):
         tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
         stub = tmp / "wiki_daily_stub.py"
         stub.write_text(
             f"import sys\nsys.stdout.write({stdout!r})\n"

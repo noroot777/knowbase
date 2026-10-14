@@ -22,13 +22,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 #: 装一份无头壳的办法,skip 消息里原样带给用户。
@@ -179,6 +185,60 @@ def _killpg(pgid: int) -> None:
         os.killpg(pgid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
+
+
+@contextlib.contextmanager
+def fixture_server(*extra_args: str, script: str = "serve_sources.py",
+                   ready: str = "/", timeout: float = 30):
+    """起 `tests/serve_*.py` 里某个一次性全栈沙箱(默认来源页那个),`yield` base URL。
+
+    **临时库由这一侧拥有。** 服务进程是被 SIGTERM 收掉的,而 Python 对没有 handler
+    的 SIGTERM 是直接结束 —— 它那边 `with tempfile.TemporaryDirectory()` 的清理一行
+    都不跑,一份完整的沙箱库就留在盘上(第 5 轮实测:定向回归跑完仍残留
+    `kb-source-qa-*`,全量回归留下两个;阅读页那条链留的是 `kb-reading-qa-*`)。
+    所以这里建根、用 `KB_FIXTURE_ROOT` 告诉它、在 `finally` 里删;子进程那一侧认这个
+    变量的口径只有一份,在 `tests/fixture_root.py`。**不要再在调用点各自 `Popen` +
+    `terminate`** —— 那个写法里目录的所有权在一个收不到清理机会的进程手上,而且端口
+    也得各挑一次。结构守卫在 `tests/test_probe_contract.py`。
+
+    `script` 给的是 `tests/` 下那个沙箱脚本名(默认来源页那个);`ready` 是判「起来了」
+    用的路径;`timeout` 要按它摆盘的工夫给(阅读页那个先跑完导出和建索引才监听)。
+
+    端口也在这里挑(绑 0 让内核给一个空闲的,随即关掉再交给子进程):调用点各写一份
+    的话两个测试同跑会撞端口,而撞上之后的症状是探针等不到页面,看不出真因。
+    """
+    assert NODE is not None, "没有 node 就不该走到这里,用 @requires_headless 拦住"
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    root = tempfile.TemporaryDirectory(prefix="kb-fixture-")
+    base = f"http://127.0.0.1:{port}"
+    env = {**os.environ, "KB_FIXTURE_ROOT": root.name}
+    server = subprocess.Popen(
+        [sys.executable, f"tests/{script}", "--port", str(port), *extra_args],
+        cwd=Path(__file__).resolve().parents[1], env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if server.poll() is not None:
+                raise AssertionError("隔离沙箱服务启动失败(进程已退出)")
+            try:
+                urllib.request.urlopen(base + ready, timeout=1).read()
+                break
+            except (urllib.error.URLError, OSError):
+                time.sleep(0.2)
+        else:
+            raise AssertionError("隔离沙箱服务没有响应")
+        yield base
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=10)
+        except subprocess.TimeoutExpired:          # pragma: no cover - 收不掉才走这条
+            server.kill()
+            server.wait(timeout=10)
+        root.cleanup()
 
 
 def probe_env() -> dict[str, str]:

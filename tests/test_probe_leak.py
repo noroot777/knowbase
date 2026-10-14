@@ -25,6 +25,9 @@
 
 判据一律是**后果**:那个 pid 还在不在。只验「注册了钩子没有」的话,一个注册完
 却杀不掉它的实现照样全绿。
+
+同一个所有权问题的另一半是**目录**(浏览器 profile、沙箱那份临时库):那几条靠源码
+结构钉,在 `tests/test_probe_contract.py`。
 """
 
 from __future__ import annotations
@@ -167,6 +170,40 @@ class ProbeShellReapTests(unittest.TestCase):
         self.assertTrue(_wait_gone(pid),
                         f"探针抛异常退出之后 chrome {pid} 还活着(就是那 16 个孤儿的形态)")
 
+    def test_a_temporary_profile_is_removed_on_the_throwing_path_too(self):
+        """**profile 目录跟浏览器同一条口径:谁都不许留在盘上。**
+
+        原来是各探针自己 `mkdtempSync` + `finally` 里 `rmSync`:建目录、起浏览器、
+        连 CDP 这几步**在 try 之前**,那一段抛异常时 finally 一行都不跑,目录就留着
+        (第 5 轮按代码指出;另一处实测的沙箱库残留是同一个所有权问题)。所以改成
+        `launchShell({profile: 前缀})` 自己建、挂在同一个 'exit' 钩子上删。
+
+        判据是后果:**那个目录还在不在**。
+        """
+        import tempfile
+        lines = [
+            'import { launchShell } from "%s";' % (HERE / "probe_shell.mjs"),
+            'const { proc, profile } = await launchShell(["--window-size=800,600"],',
+            '                                           { profile: "kb-leak-probe-" });',
+            'process.stdout.write("CHROME_PID=" + proc.pid + "\\n");',
+            'process.stdout.write("PROFILE=" + profile + "\\n");',
+            'throw new Error("模拟一条检查失败");',
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            probe = Path(td) / "profile.mjs"
+            probe.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            r = subprocess.run([NODE, str(probe)], capture_output=True, text=True,
+                               timeout=90, env=probe_env())
+        found = [l.split("=", 1)[1] for l in r.stdout.splitlines()
+                 if l.startswith("PROFILE=")]
+        self.assertTrue(found, f"探针没报出 profile 路径\nstdout={r.stdout}\nstderr={r.stderr}")
+        self.assertNotIn(found[0], ("", "null"), found)
+        for _ in range(50):          # 钩子是同步的,但进程退出本身要一点时间
+            if not Path(found[0]).exists():
+                break
+            time.sleep(0.1)
+        self.assertFalse(Path(found[0]).exists(),
+                         f"探针抛异常退出之后 profile 目录 {found[0]} 还留着")
     def test_process_exit_takes_the_browser_with_it(self):
         """`process.exit(1)` —— 探针报完失败就是这么收场的。"""
         pid = self._run_and_get_pid("process.exit(1);", "bail.mjs")
@@ -512,47 +549,6 @@ class CallerCancelledReapTests(unittest.TestCase):
         self.assertNotIn("CHROME_PID=", r.stdout, "launchShell 居然返回了")
         self.assertEqual(143, r.returncode,
                          f"该以 143 收场(被取消的惯例)\nstderr={r.stderr}")
-
-
-
-class ProbeSourceContractTests(unittest.TestCase):
-    """口径只有一份:探针不许再自己 spawn 浏览器,测试不许再裸 subprocess.run 探针。
-
-    这两条不需要浏览器,所以不挂 @requires_headless —— 没装无头壳的机器上它们
-    照样是有效的回归(上面那几条 skip 掉之后,靠它们守住结构)。
-    """
-
-    def test_no_probe_spawns_the_shell_itself(self):
-        offenders = []
-        for f in sorted(HERE.glob("*.mjs")):
-            if f.name == "probe_shell.mjs":
-                continue
-            s = f.read_text(encoding="utf-8")
-            if "HEADLESS_SHELL" in s and "spawn(" in s and "launchShell" not in s:
-                offenders.append(f.name)
-        self.assertEqual([], offenders,
-                         "这些探针又自己 spawn 浏览器了,收尾就不归 probe_shell 管了")
-
-    def test_no_test_runs_a_browser_probe_bare(self):
-        offenders = []
-        for f in sorted(HERE.glob("test_*.py")):
-            # 本文件是唯一的例外,而且必须是:上面第一层那几条验的正是**探针自己**
-            # 退出时收不收得干净,走 run_probe 的话它那道 killpg 会把结论盖掉 ——
-            # 被测的实现坏掉了也照样全绿。
-            if f.name == Path(__file__).name:
-                continue
-            s = f.read_text(encoding="utf-8")
-            if "probe_env()" not in s:
-                continue
-            for i, line in enumerate(s.splitlines(), 1):
-                if "subprocess.run(" in line and "run_probe" not in line:
-                    tail = "\n".join(s.splitlines()[i - 1:i + 3])
-                    if "probe_env()" in tail:
-                        offenders.append(f"{f.name}:{i}")
-        self.assertEqual(
-            [], offenders,
-            "这些地方又裸 subprocess.run 跑探针了 —— 它的 timeout 是 SIGKILL,"
-            "探针起的浏览器会被漏在外面,要走 tests.headless.run_probe")
 
 
 if __name__ == "__main__":

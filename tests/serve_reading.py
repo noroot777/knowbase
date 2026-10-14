@@ -16,10 +16,10 @@ documents 行;没有网络请求、没有模型调用(沙箱里没有 secrets.js
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
-import tempfile
 from argparse import Namespace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -127,7 +127,10 @@ def main() -> None:
     parser.add_argument('--manifest', default='')
     args = parser.parse_args()
     sys.path.insert(0, str(ROOT))
-    with tempfile.TemporaryDirectory(prefix='kb-reading-qa-') as temp:
+    from tests.fixture_root import fixture_root
+    # 临时库**优先由父进程拥有**:口径和理由都在 tests/fixture_root.py
+    with contextlib.ExitStack() as stack:
+        temp = fixture_root(stack, 'kb-reading-qa-')
         data, vault = Path(temp) / 'data', Path(temp) / 'vault'
         os.environ['KB_DATA_DIR'] = str(data)
         os.environ['KB_VAULT_ROOT'] = str(vault)

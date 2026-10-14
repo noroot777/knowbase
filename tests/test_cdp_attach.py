@@ -486,11 +486,15 @@ def _live_browser():
     """
     tmp = Path(tempfile.mkdtemp(prefix='kb-live-cdp-'))
     user_tab = 'data:text/html,<title>user-tab</title>'
-    proc = subprocess.Popen(
-        [str(SHELL), '--remote-debugging-port=0', f'--user-data-dir={tmp}',
-         '--no-first-run', '--no-default-browser-check', user_tab],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # **起浏览器这一步也在 try 里面**:它在 try 之前的话,`Popen` 自己抛出来那一下
+    # (exec 失败、内存不够)就把目录留在盘上 —— 跟探针那边"建目录、起浏览器、连 CDP
+    # 都在 try 之前"是同一个形状(见 docs/decisions/probe-shell.md 的所有权那条)。
+    proc = None
     try:
+        proc = subprocess.Popen(
+            [str(SHELL), '--remote-debugging-port=0', f'--user-data-dir={tmp}',
+             '--no-first-run', '--no-default-browser-check', user_tab],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         port_file = tmp / 'DevToolsActivePort'
         for _ in range(100):
             if port_file.exists() and A.read_port_file(port_file)[0]:
@@ -498,7 +502,7 @@ def _live_browser():
             time.sleep(0.1)
         yield proc, A.Browser('live', '探针浏览器', port_file), user_tab
     finally:
-        if proc.poll() is None:
+        if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
                 proc.wait(timeout=10)

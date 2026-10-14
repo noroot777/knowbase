@@ -18,34 +18,25 @@ marked,原来会把这些字当原始 HTML —— `Use List<T>` 显示成 `Use L
 
 驱动是 CDP 直连 chrome-headless-shell(不装 playwright、不连网、始终无头、临时
 profile);怎么找那个二进制的口径在 tests/headless.py,几个浏览器回归共用。
-数据由 tests/serve_reading.py 真走 put_items → export → index 摆出来。
+数据由 tests/serve_reading.py 真走 put_items → export → index 摆出来;那个沙箱
+连同它的临时库由 tests.headless.fixture_server 起和收(所有权见 tests/fixture_root.py)。
 """
 
+import contextlib
 import json
 import shutil
-import socket
-import subprocess
 import sys
 import tempfile
-import time
 import unittest
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 PROBE = Path(__file__).resolve().parent / "reading_probe.mjs"
-SERVER = Path(__file__).resolve().parent / "serve_reading.py"
 
 sys.path.insert(0, str(REPO))
 
-from tests.headless import probe_env, requires_headless, run_probe  # noqa: E402
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+from tests.headless import (  # noqa: E402
+    fixture_server, probe_env, requires_headless, run_probe)
 
 
 @requires_headless
@@ -53,38 +44,34 @@ class ReadingEntriesAgreeTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.port = _free_port()
-        cls.tmp = tempfile.TemporaryDirectory(prefix="kb-reading-manifest-")
-        manifest = Path(cls.tmp.name) / "docs.json"
-        cls.server = subprocess.Popen(
-            [sys.executable, str(SERVER), "--port", str(cls.port),
-             "--manifest", str(manifest)],
-            cwd=str(REPO), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        base = f"http://127.0.0.1:{cls.port}"
-        # 摆盘(导出 + 建索引)在起服务之前跑完,所以这里要等得比别的探针久一点
-        for _ in range(600):
-            try:
-                urllib.request.urlopen(base + "/", timeout=1).read()
-                break
-            except (urllib.error.URLError, OSError):
-                time.sleep(0.2)
-        else:  # pragma: no cover - 起不来就没什么可测的
-            cls.server.kill()
-            raise AssertionError("沙箱 kb-web 没起来")
-        run = run_probe([shutil.which("node"), str(PROBE), base, str(manifest)],
-                        timeout=300, env=probe_env())
+        # 沙箱服务、端口、那份临时库全部交给 fixture_server:它建根、用
+        # KB_FIXTURE_ROOT 传下去、在自己的 finally 里删。这里自己 Popen +
+        # terminate 的旧写法把库的所有权留在一个**收不到清理机会**的进程手上
+        # (SIGTERM 之后它那边的 with 一行都不跑,盘上留下 kb-reading-qa-*)。
+        cls.stack = contextlib.ExitStack()
+        # manifest 不放沙箱根里:探针读它,而它的生死应当跟这条用例一致
+        cls.tmp = cls.stack.enter_context(
+            tempfile.TemporaryDirectory(prefix="kb-reading-manifest-"))
+        manifest = Path(cls.tmp) / "docs.json"
+        try:
+            # 摆盘(导出 + 建索引)在起服务之前跑完,所以要等得比别的沙箱久
+            base = cls.stack.enter_context(fixture_server(
+                "--manifest", str(manifest), script="serve_reading.py", timeout=150))
+            run = run_probe([shutil.which("node"), str(PROBE), base, str(manifest)],
+                            timeout=300, env=probe_env())
+        except BaseException:
+            cls.stack.close()
+            raise
         cls.stderr = run.stderr
         line = run.stdout.strip().splitlines()[-1] if run.stdout.strip() else ""
         if not line:
-            cls.server.kill()
+            cls.stack.close()
             raise AssertionError(run.stderr)
         cls.results = json.loads(line)
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.terminate()
-        cls.server.wait(timeout=10)
-        cls.tmp.cleanup()
+        cls.stack.close()
 
     def test_both_reading_entries_show_the_same_text(self):
         self.assertTrue(self.results, "探针一条都没跑")

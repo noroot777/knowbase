@@ -4,6 +4,7 @@
 从 tests/test_daily_report.py 拆出来的(那份写到 682 行、逼近 700 行上限,而
 翻译这一块最独立:只碰 kb/feeds/,不需要日报那套窗口与定时脚手架)。
 """
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -43,7 +44,13 @@ class FeedCase(unittest.TestCase):
         self.source = reg.save_subscription('rss', {'name': 'Blog', 'url': 'https://e.org/f.xml'})
 
     def put(self, title, body, published='2026-09-28 09:00'):
-        reg.put_items(self.source, [{'url': 'https://e.org/p' + str(abs(hash(title)) % 999),
+        # URL 按标题取**稳定**摘要,不许用 `hash()`:字符串 hash 每个进程随机化,
+        # 两个标题会按 `% 999` 撞到同一个 URL,第二条当场被按 URL 去重掉 —— 那一轮
+        # 只剩一条,「还有几条待翻译」这类判据就失效(PYTHONHASHSEED=259 稳定复现,
+        # 全量回归里偶发红一次)。同一个标题照旧映射到同一个 URL(去重那几条用例
+        # 要的就是这个)。
+        digest = hashlib.sha1(title.encode('utf-8')).hexdigest()[:10]
+        reg.put_items(self.source, [{'url': 'https://e.org/p' + digest,
                                      'title': title, 'body': body, 'published': published}])
 
     def item(self, index=0):
