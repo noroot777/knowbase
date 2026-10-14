@@ -515,12 +515,15 @@ class PublishRefused(Exception):
         self.reason = reason
 
 
-def publish_batch(records: list[dict]) -> dict | None:
-    """把一次业务轮里跑过的几轮管道合并成一份,发布成「最近一次运行」。
+def _publish_locked(records: list[dict]) -> dict:
+    """把一个业务批次里跑过的几轮管道合并成一份,发布成「最近一次运行」。
 
-    `records` 是各轮的终态快照(`get_state()` 在它 running 放下之后的那一份,
-    或者照 id 取回来的 `run_result`,两者同一个契约见 `run_payload`),按时间顺序。
-    少于两轮就不发布 —— 那时管道自己落的那份已经代表整轮了。
+    `records` 是各轮的终态快照(`run_payload`),按时间顺序。**唯一的调用方是
+    `_publish_in_batch`**,所以这里不取锁(`_end_run` 那条路已经持着了),也不更新
+    内存里那份权威记录 —— 调用方要先确认写成功了才算记下。
+    **不要再开一个"事后聚合"的公开出口**:那正是这件事原来错的地方 —— 子轮先写
+    一份会删掉前序失败的局部结果,再指望还活着的调用方稍后补回,中间进程一死
+    那几条红就永远不在了。合并要么发生在子轮收尾的同一步里,要么不发生。
 
     **逐阶段合成不丢东西的一份**(见 `_merge_stage`),而且只在计划过这个阶段的
     记录之间比。来源范围、失败名单(`crawl_retry`)按来源并起来,这样「重试失败项」
@@ -529,29 +532,14 @@ def publish_batch(records: list[dict]) -> dict | None:
     合并后的身份**沿用这一批最后那一轮的 run_id**,不另发一个:另发等于把一份
     早先的批次伪装成"刚刚产生的最新结果",而最新指针是有先后的。
 
-    **发布权**:只有当盘上那份「最近一次运行」仍然是这一批里的某一轮时才替换。
-    期间要是另一轮独立运行已经收尾(手动同步在日报收尾前跑完一轮),盘上那份是
-    **比我们新**的结果,替换掉它等于把一次刚失败的手动同步改写成成功、顺带让它的
-    「重试失败项」消失 —— 那一档拒绝发布并抛 `PublishRefused`,由调用方如实说出来。
-    一把锁只防同时写,答不了"我有没有资格当最新"。
+    **发布权**:只有当那份「最近一次运行」仍然是这一批里的某一轮时才替换。期间
+    要是另一轮独立运行已经收尾(用户自己点了同步),它是**比我们新**的结果,替换
+    掉它等于把一次刚失败的手动同步改写成成功、顺带让它的「重试失败项」消失 ——
+    那一档抛 `PublishRefused`,由调用方如实说出来。一把锁只防同时写,答不了
+    "我有没有资格当最新"。
 
     写不进去(OSError)同样抛:静默返回会让日报带着一份"失败已经没人看得到"的
     状态照常出报。
-    """
-    records = [r for r in records if r]
-    if len(records) < 2:
-        return None
-    with _lock:
-        merged = _publish_locked(records)
-    _remember_result(merged)
-    return merged
-
-
-def _publish_locked(records: list[dict]) -> dict:
-    """`publish_batch` 的本体,**不取锁** —— `_end_run` 那条路已经持着了。
-
-    也不更新内存里那份权威记录:两条调用路径对"什么时候算记下了"的要求不一样
-    (批次那条要等确认写成功),由各自的调用点自己调 `_remember_result`。
     """
     ours = {r.get("run_id") for r in records if r.get("run_id")}
     # **判据是内存里那份权威身份,不是磁盘。** 磁盘写会失败而且是吞掉的:

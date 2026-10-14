@@ -52,7 +52,6 @@ from kb.pipeline_state import (
     open_batch,
     PublishRefused,
     new_run_id,
-    publish_batch,
     request_stop,
     run_result,
 )
@@ -69,7 +68,6 @@ __all__ = [
     "load_schedule",
     "PublishRefused",
     "pending_counts",
-    "publish_batch",
     "request_stop",
     "retry_failed_plan",
     "run_result",

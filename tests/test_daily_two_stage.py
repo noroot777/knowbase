@@ -230,7 +230,8 @@ class DailyBatchResultTests(unittest.TestCase):
     后跑的会把先跑的盖掉 —— 抓取失败的明细、失败名单和「重试失败项」会被最后那
     一轮入库的成功一起抹掉(`retry_failed_plan` 读的就是这一份)。两段式之前只有
     最后一个来源的结果留得下来,改成两段式之后变成**每次必然发生**。所以收尾时把
-    这一批合并成一份发布(`pipeline_state.publish_batch`)。
+    这一批合并成一份(`pipeline_state._publish_locked`),而且**在子轮收尾的同一步里
+    就写进去**(`_publish_in_batch`)。
 
     钉的是后果:库里那份最近运行里还有没有那条红、点重试还排不排得出计划。
     """
@@ -270,7 +271,7 @@ class DailyBatchResultTests(unittest.TestCase):
                            crawl_retry={'run': 'run-1', 'channels': {'rss': {'ids': [7]}}})
         digest = self.round(['index', 'extract'], {}, run_id='run-2',
                             crawl_filter={'channel': 'wechat_local'})
-        ps.publish_batch([fetch, digest])
+        ps._publish_locked([fetch, digest])
         last = pipeline.load_last_run()
         # 那条红还在,明细也在 —— 这是用户点进同步中心要看的东西
         self.assertEqual('error', last['stages']['crawl']['status'])
@@ -296,7 +297,7 @@ class DailyBatchResultTests(unittest.TestCase):
         # 反过来钉一边:入库轮没计划 crawl(落的是 skipped/未选择),不许拿它把
         # 抓取轮真实的 ok 盖成「跳过」—— 那会让面板报一轮根本没发生的跳过。
         from kb import pipeline, pipeline_state as ps
-        ps.publish_batch([self.round(['crawl', 'export'], {}, run_id='run-1',
+        ps._publish_locked([self.round(['crawl', 'export'], {}, run_id='run-1',
                                      crawl_filter={'channel': 'rss'}),
                           self.round(['index', 'extract'], {}, run_id='run-2')])
         last = pipeline.load_last_run()
@@ -305,10 +306,23 @@ class DailyBatchResultTests(unittest.TestCase):
         # 谁都没计划过的阶段照旧是「未选择」
         self.assertEqual('未选择', last['stages']['wiki']['detail'])
 
-    def test_one_round_alone_is_left_to_the_pipeline_itself(self):
-        from kb import pipeline_state as ps
-        self.assertIsNone(ps.publish_batch([self.round(['crawl'], {})]))
-        self.assertIsNone(ps.publish_batch([]))
+    def test_the_first_round_of_a_batch_lands_as_itself(self):
+        """一轮单独的时候不走合并 —— 它自己就是整批。
+
+        这条原来钉在 `publish_batch` 的「少于两轮回 None」上,那个公开出口已经
+        收掉了(留着等于给人留一条"事后再聚合"的路);契约搬到
+        `_publish_in_batch` 的头一轮分支。判据是**合并留下的痕迹**:合过的那份
+        detail 前面会挂来源名(`_scope_name`),没合过的就是阶段自己那句话。
+        """
+        batch = ps.open_batch()
+        self.addCleanup(ps.close_batch)
+        finish_round(['crawl'], {'channel': 'rss'}, batch, run_id='run-1',
+                     results={'crawl': {'status': 'error', 'detail': '失败 1 个'}})
+        self.fresh_process()
+        last = ps.load_last_run()
+        self.assertEqual(('run-1', '失败 1 个'),
+                         (last['run_id'], last['stages']['crawl']['detail']))
+        self.assertEqual('sync', last['run_kind'])
 
     def test_a_takeover_leaves_a_record_complete_enough_to_merge(self):
         """没亲眼看到自己那一轮收尾、照 id 取回来的那份,也要能合进去。
@@ -337,7 +351,7 @@ class DailyBatchResultTests(unittest.TestCase):
         # 契约:后备记录带着计划、来源范围和失败名单,不是一份只有 stages 的壳
         for key in ('planned_stages', 'crawl_filter', 'export_filter', 'crawl_retry'):
             self.assertIn(key, fetched, key)
-        ps.publish_batch([fetched, self.round(['index', 'extract'], {}, run_id='run-10')])
+        ps._publish_locked([fetched, self.round(['index', 'extract'], {}, run_id='run-10')])
         last = pipeline.load_last_run()
         self.assertEqual('error', last['stages']['crawl']['status'])
         self.assertEqual(['crawl', 'export', 'index', 'extract'],
@@ -356,7 +370,7 @@ class DailyBatchResultTests(unittest.TestCase):
                                          'failures': [{'title': title, 'reason': '连不上'}]}},
                               run_id=f'run-{channel}', crawl_filter={'channel': channel},
                               export_filter={'channel': channel})
-        ps.publish_batch([failing('rss', 'RSS 源'), failing('web', '网页源'),
+        ps._publish_locked([failing('rss', 'RSS 源'), failing('web', '网页源'),
                           self.round(['index', 'extract'], {}, run_id='run-z')])
         crawl = pipeline.load_last_run()['stages']['crawl']
         self.assertEqual({'RSS 源', '网页源'}, {f['title'] for f in crawl['failures']})
@@ -383,7 +397,7 @@ class DailyBatchResultTests(unittest.TestCase):
         ps._state['stages']['index'] = {'status': 'error', 'detail': '索引失败'}
         ps._save_last_run()
         with self.assertRaises(ps.PublishRefused) as caught:
-            ps.publish_batch([self.round(['crawl', 'export'], {}, run_id='run-1',
+            ps._publish_locked([self.round(['crawl', 'export'], {}, run_id='run-1',
                                          crawl_filter={'channel': 'rss'}),
                               self.round(['index', 'extract'], {}, run_id='run-2')])
         self.assertIn('run-manual', caught.exception.reason)
@@ -538,7 +552,7 @@ class DailyBatchResultTests(unittest.TestCase):
                                                       for t in titles]}},
                               run_id=f'run-{channel}', crawl_filter={'channel': channel},
                               export_filter={'channel': channel})
-        ps.publish_batch([failing('rss', ['每日速览', '每日速览']),
+        ps._publish_locked([failing('rss', ['每日速览', '每日速览']),
                           failing('web', ['每日速览']),
                           self.round(['index', 'extract'], {}, run_id='run-z')])
         crawl = pipeline.load_last_run()['stages']['crawl']
@@ -555,7 +569,7 @@ class DailyBatchResultTests(unittest.TestCase):
         # (挂上去的话,`start_pipeline` 盖的那个默认采集器会被念成"公众号:索引
         # 失败" —— 磁盘满跟公众号没有半点关系)。
         from kb import pipeline, pipeline_state as ps
-        ps.publish_batch([self.round(['crawl', 'export'], {}, run_id='run-1',
+        ps._publish_locked([self.round(['crawl', 'export'], {}, run_id='run-1',
                                      crawl_filter={'channel': 'rss'}),
                           self.round(['index', 'extract'],
                                      {'index': {'status': 'error', 'detail': '磁盘满'}},
@@ -584,7 +598,7 @@ class DailyBatchResultTests(unittest.TestCase):
             ps._save_last_run()
         self.assertFalse(ps._STATE_FILE.exists(), '这一局的前提:磁盘上压根没有它')
         with self.assertRaises(ps.PublishRefused) as caught:
-            ps.publish_batch([self.round(['crawl', 'export'], {}, run_id='run-1',
+            ps._publish_locked([self.round(['crawl', 'export'], {}, run_id='run-1',
                                          crawl_filter={'channel': 'rss'}),
                               self.round(['index', 'extract'], {}, run_id='run-2')])
         self.assertIn('run-manual', caught.exception.reason)
@@ -611,14 +625,14 @@ class DailyBatchResultTests(unittest.TestCase):
         broken = '{"run_id": "run-'
         ps._STATE_FILE.write_text(broken, encoding='utf-8')
         with self.assertRaises(ps.PublishRefused) as caught:
-            ps.publish_batch(deepcopy(batch))
+            ps._publish_locked(deepcopy(batch))
         self.assertIn('读不出', caught.exception.reason)
         self.assertEqual(broken, ps._STATE_FILE.read_text(encoding='utf-8'),
                          '拒绝发布就不许动它')
         # 反过来钉一边:**文件压根不存在**是合法的头一轮,照旧发布得出去 ——
         # 一律失败关闭会让新装的库永远发布不了第一批
         ps._STATE_FILE.unlink()
-        published = ps.publish_batch(deepcopy(batch))
+        published = ps._publish_locked(deepcopy(batch))
         self.assertEqual('error', published['stages']['crawl']['status'])
 
     def test_a_write_failure_is_not_a_silent_success(self):
@@ -627,7 +641,7 @@ class DailyBatchResultTests(unittest.TestCase):
         from kb import pipeline_state as ps
         with patch.object(Path, 'write_text', Mock(side_effect=OSError('磁盘满'))), \
              self.assertRaises(ps.PublishRefused) as caught:
-            ps.publish_batch([self.round(['crawl', 'export'], {}, run_id='run-1',
+            ps._publish_locked([self.round(['crawl', 'export'], {}, run_id='run-1',
                                          crawl_filter={'channel': 'rss'}),
                               self.round(['index', 'extract'], {}, run_id='run-2')])
         self.assertIn('磁盘满', caught.exception.reason)
