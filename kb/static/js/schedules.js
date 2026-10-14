@@ -93,6 +93,30 @@ function schedulesRead(...keys) {
   };
 }
 
+/**
+ * 一张定时表单这一趟读取该落到哪个**终态**。判据收在这里,两张表单共用。
+ *
+ * **配置可用 ≠ 这张表单的依赖都可用。** 它们除了定时本身还要一份「可勾选的来源
+ * 目录」,而目录和设置是**两趟请求、各自会失败**。只看配置就进"已加载"的后果(第 4 轮
+ * 真实鼠标实测):弹窗写着「已保存:每天 07:30 自动同步」、字段开放、重读藏着,而来源
+ * 一个都没有 —— 用户关掉定时去保存,只换来一句「请至少选择一个同步来源」,一个都选不
+ * 了、也没法重读,关掉重开又被草稿守卫挡住,只能刷新整页。
+ *
+ * 四个终态,只有这四个:
+ * - `saving` 保存那条路自己会收尾,这里一个字都不许动;
+ * - `draft` 用户有未保存的改动,优先保住它(草稿不进代次:没保存就没有新事实);
+ * - `ready` 配置和依赖都齐了,这才允许进"已加载";
+ * - `unknown` 当前不知道 —— `missing` 非空时是"定时读到了、某份依赖没读到",调用方
+ *   照它说清是哪一份,别把"没得选"说成"请选一个"。
+ */
+function scheduleSettle({ fact, deps = [], saving, dirty }) {
+  if (saving) return { state: 'saving' };
+  if (dirty) return { state: 'draft' };
+  if (!fact) return { state: 'unknown', missing: '' };
+  const gap = deps.find(d => !d.ready);
+  return gap ? { state: 'unknown', missing: gap.what } : { state: 'ready' };
+}
+
 /** 两条定时各读一次。读不到的那条留 null(= 不知道),不当成"没开"。 */
 async function loadSchedules() {
   const accept = schedulesRead('daily', 'pipe');

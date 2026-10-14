@@ -345,6 +345,36 @@ watchSchedules(() => renderSourceScheduleNote());
         self.assertIn('每天 09:00 跟着日报那一轮同步', out)
         self.assertNotIn('没法确定', out)
 
+    def test_a_form_is_not_ready_until_every_dependency_is_read(self):
+        """**配置可用 ≠ 这张表单的依赖都可用。**
+
+        两张定时表单除了定时本身还要一份「可勾选的来源目录」,而目录和设置是两趟
+        请求、各自会失败。只看配置就进"已加载"的后果(第 4 轮真实鼠标实测):弹窗
+        写着「已保存:每天 07:30 自动同步」、字段开放、重读藏着,而来源一个都没有 ——
+        关掉定时去保存只换来一句「请至少选择一个同步来源」,一个都选不了也没法重读。
+
+        这一层钉的是判据本身(`scheduleSettle`),**钉不住某张表单有没有按它接线**:
+        那部分在 `tests/subs_schedule_note_checks.mjs` 的真浏览器那一组。
+        """
+        out = self.run_js("""
+            const fact = { enabled: true, time: '07:30', channels: ['rss'] };
+            const deps = ready => [{ ready, what: '来源目录' }];
+            const verdict = (o) => {
+              const v = scheduleSettle(o);
+              return v.state + (v.missing ? ':' + v.missing : '');
+            };
+            box.textContent = [
+              verdict({ fact, deps: deps(3) }),                        // 齐了
+              verdict({ fact, deps: deps(0) }),                        // 目录没读到
+              verdict({ fact: null, deps: deps(3) }),                  // 配置不知道
+              verdict({ fact, deps: deps(0), dirty: true }),           // 草稿优先
+              verdict({ fact, deps: deps(0), saving: true }),          // 保存自己收尾
+              verdict({ fact }),                                       // 没声明依赖
+            ].join(' | ');
+        """, daily=self.DAILY_OFF, pipe=self.PIPE_OFF)
+        self.assertEqual('ready | unknown:来源目录 | unknown | draft | saving | ready', out)
+
+
     def test_manual_sync_is_always_true(self):
         for args in ({'daily': self.DAILY_ON}, {'pipe': self.PIPE_OFF}, {}):
             self.assertIn('手动同步随时可用', self.line(**args))

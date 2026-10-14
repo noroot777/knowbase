@@ -145,14 +145,19 @@ function dailyScheduleMessage(s) {
 // 原来成功和失败两条分支各有一处早退,早退之后这一片就永远停在「正在读取定时
 // 设置…」:字段禁用、没有重读入口,而后端和共享事实都是好的。
 function settleDaily(fact, failure) {
-  if (dailySaving) return;         // 保存那条路自己会收尾
-  if (dailyDirty) {                // 草稿优先:一个字都不许覆盖
+  // **就绪判据只有一份**(`schedules.js` 的 `scheduleSettle`):配置**和**可选来源
+  // 目录都到位才算"已加载" —— 目录没拿到就画不出同步范围,硬开放字段只会让他存出
+  // 一份空范围(保存那边会当场拒绝)。这一档照"不知道"走,重读把目录一起补上。
+  const { state, missing } = scheduleSettle({
+    fact, saving: dailySaving, dirty: dailyDirty,
+    deps: [{ ready: dailyChannels.length, what: '同步范围' }],
+  });
+  if (state === 'saving') return;  // 保存那条路自己会收尾
+  if (state === 'draft') {         // 草稿优先:一个字都不许覆盖
     $('daily-sched-fields').disabled = false; $('daily-sched-save').disabled = false;
     return;
   }
-  // 画得出来才算采用:**可选来源目录还没拿到就画不出同步范围**,硬开放字段只会让他
-  // 存出一份空范围(保存那边会当场拒绝)。这一档照"不知道"走,重读能把目录一起补上。
-  if (fact && dailyChannels.length) {
+  if (state === 'ready') {
     dailySettings = fact;
     $('daily-on').checked = !!fact.enabled;
     $('daily-time').value = fact.time;
@@ -165,11 +170,11 @@ function settleDaily(fact, failure) {
     $('daily-sched-msg').textContent = dailyScheduleMessage(fact);
     return;
   }
-  // 三句话分得清三件事:**这趟真失败了**、**定时读到了但目录没读到**、**当前不知道**
+  // 三句话分得清三件事:**这趟真失败了**、**定时读到了但依赖没读到**、**当前不知道**
   // (更晚那趟失败把事实抹成了未知)。都给重读入口,一句含糊的「失败」救不了用户。
   $('daily-sched-msg').textContent =
     failure ? '读取定时设置失败：' + failure
-    : fact ? '同步范围还没读到，点「重新读取」再试一次'
+    : missing ? missing + '还没读到，点「重新读取」再试一次'
     : '读不到定时设置';
   $('daily-sched-reload').hidden = false;
   // 重读失败时屏幕上那份仍是上一次读到的真实设置,照旧可编辑可保存;
@@ -233,8 +238,20 @@ async function saveDailySettings() {
   if (!dailyLoaded || dailySaving || !dailyDirty) return;
   if (!$('daily-time').reportValidity() || !$('daily-firstdays').reportValidity()) return;
   const channels = pickedDailyChannels();
-  if (!channels.length) { $('daily-sched-msg').textContent = '至少勾选一个同步范围'; return; }
-  dailySaving = true; $('daily-sched-save').disabled = true;
+  if (!channels.length) {
+    // 同页头那张:**"一个都没勾"和"一个都没有可勾的"是两件事**,后者该说重读。
+    if (!dailyChannels.length) {
+      $('daily-sched-msg').textContent = '同步范围还没读到，点「重新读取」再试一次';
+      $('daily-sched-reload').hidden = false;
+    } else $('daily-sched-msg').textContent = '至少勾选一个同步范围';
+    return;
+  }
+  // **保存期间把整片字段一起禁掉**(同页头那张 `saveSched`)。只禁保存按钮的话:
+  // 这期间改的开关/时刻/范围进不了已经发出去的那个请求,`markDailyDirty` 又因为
+  // 正在保存直接返回 —— 保存成功后 dirty 被清掉、按钮继续禁着,那几下修改**既没
+  // 保存也存不了**,而面板写着「已保存」。
+  dailySaving = true; $('daily-sched-fields').disabled = true;
+  $('daily-sched-save').disabled = true;
   $('daily-sched-save').textContent = '正在保存…';
   try {
     dailySettings = await pipePost('/api/daily/settings', {
@@ -251,6 +268,7 @@ async function saveDailySettings() {
     $('daily-sched-msg').textContent = '未保存：' + e.message + '。修改已保留，可重试。';
   } finally {
     dailySaving = false; $('daily-sched-save').textContent = '保存设置';
+    $('daily-sched-fields').disabled = false;
     $('daily-sched-save').disabled = !dailyDirty;
   }
 }

@@ -141,7 +141,8 @@ export async function checkDailyFormSettles({ evalJs, waitFor, check }) {
   const form = () => evalJs(`JSON.stringify({
     msg: $('daily-sched-msg').textContent, fields: $('daily-sched-fields').disabled,
     reload: $('daily-sched-reload').hidden, on: $('daily-on').checked,
-    time: $('daily-time').value, loaded: dailyLoaded })`);
+    save: $('daily-sched-save').disabled, time: $('daily-time').value,
+    loaded: dailyLoaded })`);
 
   // 摆局:后端那条日报定时先关着,面板读到它
   await evalJs(`pipePost('/api/daily/settings', {enabled: false, time: '09:00',
@@ -185,6 +186,33 @@ export async function checkDailyFormSettles({ evalJs, waitFor, check }) {
   check('日报面板:过期的失败落地之后收尾成当前事实(不许留在正在读取)',
         !settled.fields && settled.loaded && settled.on && settled.time === '06:05'
         && settled.reload && /每天 06:05/.test(settled.msg), JSON.stringify(settled));
+
+  // 保存期间整片字段要禁掉:只禁保存按钮的话,这期间改的那几下进不了已经发出去的
+  // 请求,`markDailyDirty` 又因为正在保存直接返回 —— 成功后 dirty 被清、按钮继续
+  // 禁着,那几下**既没保存也存不了**,而面板写着「已保存」(第 4 轮按代码指出,
+  // 基线也是这样)。按住这次真实的 POST,看那一刻字段是不是禁着。
+  await evalJs(`(() => {
+    window.__realPipePost = pipePost;
+    window.__releasePost = null;
+    pipePost = async (path, body, ...rest) => {
+      if (path !== '/api/daily/settings') return __realPipePost(path, body, ...rest);
+      const answer = __realPipePost(path, body, ...rest);
+      return new Promise(resolve => { window.__releasePost = () => resolve(answer); });
+    };
+    $('daily-on').checked = true; $('daily-time').value = '06:05';
+    [...$('daily-channels').querySelectorAll('input')].forEach(
+      i => { i.checked = i.dataset.channel === 'rss'; });
+    markDailyDirty(); return true; })()`);
+  await evalJs(`(() => { saveDailySettings(); return true; })()`);
+  await waitFor(`typeof window.__releasePost === 'function'`);
+  const saving = JSON.parse(await form());
+  check('保存期间整片字段禁着(改不动,也就丢不了)',
+        saving.fields && saving.save, JSON.stringify(saving));
+  await evalJs(`(() => { window.__releasePost(); pipePost = __realPipePost; return true; })()`);
+  await waitFor(`!dailySaving`);
+  const saved = JSON.parse(await form());
+  check('保存完字段放开,说的是刚存进去的那一份',
+        !saved.fields && /每天 06:05/.test(saved.msg) && saved.on, JSON.stringify(saved));
 
   // 自己这趟真失败那一档:给原因、放出重读;**晚到的共享事实再把它补完**
   // (先把后端换个值,免得"补完"跟当前显示的一样、什么都验不到)
