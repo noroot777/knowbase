@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb import store                                            # noqa: E402
 from kb.extract import (PROMO_HEAD, PROMO_TAIL, PROMO_TAG,       # noqa: E402
-                        align_promo_tag, body_fingerprint, commit_promo,
+                        align_promo_tag, commit_promo, input_fingerprint,
                         judge_promo, pending_promo_docs,
                         promo_tag_pending_docs)
 
@@ -86,6 +86,11 @@ def _candidates(conn, limit: int = 0, accounts: list[str] | None = None,
     指着一份我们没读过的正文,而后面那道条件写照旧放行 —— 判的是一份没人写过
     的东西(理由同 `kb.extract.mark_no_body`)。上一轮这里是「名单一次查询、
     正文另一次查询」,缺口就在这。
+
+    **候选就是那个快照本身,不在上面挂别的键。** 指纹由消费方各自按
+    `extract.input_fingerprint` 算(归组、交付核对都是它,口径只有那一份)——
+    算一次缓存在候选里反倒把这个字典的形状和「一条语句读出来的那份」拆开了,
+    夹具再也没法用同一条语句摆出一个真候选,而那种红证明不了被测的行为。
     """
     rows = pending_promo_docs(conn, SOURCES, limit, accounts, recheck)
     out = []
@@ -119,11 +124,15 @@ def _group(cands: list[dict]) -> list[list[dict]]:
     是一次调用(约 $0.004),并错一组的代价是一篇正常文章被永久隐藏。
 
     账号和标题留在键里不是为了「证明同稿」,它们本来就是 prompt 的一部分
-    (判定要看「这个号在卖什么」),逐字相同才谈得上共用答案。
+    (判定要看「这个号在卖什么」),逐字相同才谈得上共用答案。所以键直接用
+    `extract.input_fingerprint` —— **「两篇文章喂给模型的是不是同一组输入」
+    这个判据只有一份**,落库那一侧(`_input_moved`)比的也是它。各算一遍的话,
+    这边认为"同一组、可以共用答案",那边认为"不是同一组、这个结论作废",一次
+    广播出去的判定全被拦在门外,而脚本报的是"软广 ×N"。
     """
-    buckets: dict[tuple, list[dict]] = {}
+    buckets: dict[str, list[dict]] = {}
     for c in cands:
-        key = (c["account"], c["title"], body_fingerprint(c["body"]))
+        key = input_fingerprint(c["title"], c["account"], c["body"])
         buckets.setdefault(key, []).append(c)
     # 组内顺序只决定谁当代表、谁的 path 写进广播理由里;正文逐字相同,取谁都
     # 判得出同一个结论。按 path 定序是为了让同一批输入每次跑出同样的归属。
@@ -212,8 +221,10 @@ def _deliver(conn, cand: dict, promo: dict) -> tuple[str, bool]:
         print(f"      (同步 {cand['path']} 的 {PROMO_TAG} 失败: {e};"
               f" 已记待办,跑 sync-tags 修)", flush=True)
 
-    return commit_promo(conn, cand["path"], promo, cand["version"],
-                        body_fingerprint(cand["body"]), on_error=note)
+    return commit_promo(
+        conn, cand["path"], promo, cand["version"],
+        input_fingerprint(cand["title"], cand["account"], cand["body"]),
+        on_error=note)
 
 
 def cmd_run(args) -> int:

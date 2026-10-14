@@ -285,37 +285,40 @@ def _finish_extract_stage(stats: dict) -> None:
 EXTRACT_WORKERS = 6
 
 
-def _extract_one(path: str, title: str,
-                 account: str = "") -> tuple[dict | None, str, str, str]:
-    """工作线程:读正文(独立连接,WAL 下并发读安全)→ 调 LLM。不碰共享连接。
+def _extract_one(path: str) -> tuple[dict | None, str, str, str]:
+    """工作线程:读模型输入(独立连接,WAL 下并发读安全)→ 调 LLM。不碰共享连接。
 
-    返回 (判定结果, 空档位, 读到的那一版 content_hash, 那份正文的指纹)。正文为空
+    返回 (判定结果, 空档位, 读到的那一版 content_hash, 那组输入的指纹)。正文为空
     时不调 LLM —— 那必然失败,或者产出一份只凭标题编出来的劣质判定。空档位由
     extract.body_gap 给:`empty` 留给「重试失败项」回填,`no_text` 是回填也救不了
     的那一种(内容在图里),交给主线程落成终态。**写库留在主线程**,这里只回答判定。
 
-    **后两个值取自同一个快照**(doc_body_version 一条语句读出来),但回答的不是
-    一件事,缺哪个就漏掉哪一种交错:
+    **标题、账号、正文、版本号四样都取自 `extract.model_input` 那一个快照** ——
+    原来标题和账号是调用方从待提取名单里带进来的、正文在这儿另读一次,两次读
+    之间索引可以把这一篇换掉,于是模型收到旧标题配新正文(后果见
+    `extract.input_fingerprint`)。
+    后两个返回值出自同一个快照,但回答的不是一件事,缺哪个就漏掉哪一种交错:
     - **版本号**("索引里这一篇是哪一版文件")一路带到落终态那一步:判定和写入
       之间另一条连接的索引可能把这一篇换成一版有正文的内容,那时终态必须落空而
       不是盖到新版上(见 extract.mark_no_body)。
-    - **指纹**("我读到的正文长什么样")一路带到落库那一步:模型调用要几十秒,
+    - **指纹**("我读到的那组输入长什么样")一路带到落库那一步:模型调用要几十秒,
       这期间正文可能被整篇换掉(补抓把跳转壳换成全文),那次结果就得作废
       (见 extract.commit_extraction)。
     """
     from kb import store
-    from kb.extract import body_fingerprint, body_gap, extract_with_llm
+    from kb.extract import body_gap, extract_with_llm, model_input
 
     conn = store.connect()
     try:
-        version, body = store.doc_body_version(conn, path)
+        snap = model_input(conn, path)
     finally:
         conn.close()
-    gap = body_gap(path, body)
+    gap = body_gap(path, snap["body"])
     if gap:
-        return None, gap, version, ""
-    return (extract_with_llm(title, body, account=account), "",
-            version, body_fingerprint(body))
+        return None, gap, snap["version"], ""
+    return (extract_with_llm(snap["title"], snap["body"],
+                             account=snap["account"]), "",
+            snap["version"], snap["seen"])
 
 
 def _extract_pass(label: str, stats: dict) -> None:
@@ -361,8 +364,9 @@ def _extract_pass(label: str, stats: dict) -> None:
         _stage("extract", "running", f"{label}提取 0/{len(todo)}")
         done = 0
         with ThreadPoolExecutor(max_workers=EXTRACT_WORKERS) as pool:
-            futs = {pool.submit(_extract_one, row["path"], row["title"],
-                                row["account"]): row
+            # 只传 path:标题和账号由工作线程从**同一个快照**里取,不从这份
+            # 待提取名单带过去(名单是上面那次查询的快照,会比正文旧)。
+            futs = {pool.submit(_extract_one, row["path"]): row
                     for row in todo}
             for fut in as_completed(futs):
                 row = futs[fut]

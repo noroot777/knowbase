@@ -24,7 +24,6 @@
 
 from __future__ import annotations
 
-import re
 import sys
 import tempfile
 import unittest
@@ -418,6 +417,10 @@ class BackfillWritebackTest(unittest.TestCase):
     def _candidate(self, vault, body="正文"):
         """摆一个**真实**候选:落库那道条件写比 `documents.content_hash`,
         夹具里对不上的话红出来的是「压根没走到回写」而不是回写本身。
+
+        候选本身从 `store.doc_input_snapshot` 取 —— 和 `_candidates` 同一条
+        语句。手写字典的话,交付层哪天多要一样输入(标题、账号都进 prompt)
+        夹具就对不上,红出来的是 `KeyError`,证明不了被测的行为。
         """
         md = vault / "a.md"
         text = md.read_text(encoding="utf-8")
@@ -426,8 +429,7 @@ class BackfillWritebackTest(unittest.TestCase):
         self.conn.execute("INSERT INTO chunks (path, seq, text)"
                           " VALUES ('a.md', 0, ?)", (body,))
         self.conn.commit()
-        return {"path": "a.md", "version": scanner.file_hash(text),
-                "body": body}
+        return store.doc_input_snapshot(self.conn, "a.md")
 
     def test_writes_tag_into_frontmatter(self):
         vault = Path(self._tmp.name) / "vault"
@@ -455,7 +457,8 @@ class BackfillWritebackTest(unittest.TestCase):
         """
         vault = Path(self._tmp.name) / "empty"
         vault.mkdir(parents=True, exist_ok=True)
-        cand = {"path": "a.md", "version": "old", "body": "正文"}
+        cand = {"path": "a.md", "title": "广告", "account": "dr-gzh",
+                "version": "old", "body": "正文"}
         with mock.patch.object(extract, "VAULT_ROOT", vault):
             why, _ = self.mod._deliver(self.conn, cand,
                                        {"level": "hard"})      # 不抛

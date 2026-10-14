@@ -22,6 +22,7 @@ import sys
 from kb import store
 from kb.config import VAULT_ROOT
 from kb.extract import refresh_content_hash
+from kb.scanner import file_hash
 
 MAX_LEN = 160
 
@@ -97,7 +98,11 @@ def main() -> int:
         new_text = add_summary_to_frontmatter(text, summ)
         if new_text is not None:
             full.write_text(new_text, encoding="utf-8")
-            refresh_content_hash(conn, path)
+            # 刷新只认「库里记的还是我动手之前那一份」(refresh_content_hash
+            # 没有无条件分支了)。`text` 就是上面读出来的那份原文 —— 库里记的
+            # 要是别的值,说明磁盘已经领先于索引,这一行就不该写:那等于替别人
+            # 的改动签一张已索引的收据。0 行是对的末态,下一轮重建一次。
+            refresh_content_hash(conn, path, file_hash(text))
         conn.execute("UPDATE documents SET summary=? WHERE path=?", (summ, path))
         done += 1
     conn.commit()

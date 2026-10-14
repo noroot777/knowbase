@@ -217,7 +217,12 @@ class _Vault(unittest.TestCase):
         各有各的链接,`content_hash` 必然不同 —— 写成逐字相同的话,「每篇各按
         自己那一版的号判」就区分不出来了。"""
         flag = f"  - {extract.PROMO_TAG}\n" if flagged else ""
-        return (f'---\ntitle: "稿子"\nurl: "https://example.org/{Path(path).stem}"\n'
+        # **account 要写进 frontmatter**:库里那一列就是索引从这里读出来的
+        # (`scanner.frontmatter_input`),夹具里只给库不给 md 等于摆出一个真实
+        # 数据里不存在的状态 —— 而交付前那道「磁盘上那组输入进索引了吗」正是
+        # 拿这两边比,会一直判「没进」。
+        return (f'---\ntitle: "稿子"\naccount: "{ACCOUNT}"\n'
+                f'url: "https://example.org/{Path(path).stem}"\n'
                 f'tags:\n  - source/dr-gzh\n{flag}---\n{body}\n')
 
     def seed(self, level: str, body: str, flagged: bool,
@@ -257,6 +262,15 @@ class _Vault(unittest.TestCase):
                 with mock.patch.object(self.pb, "judge_promo",
                                        side_effect=judge):
                     yield out
+
+    def cand(self, path: str = PATH) -> dict:
+        """一个**真实形状**的候选 —— 从 `_candidates` 用的那同一条语句里取。
+
+        手写字典的话,交付层哪天多要一样输入夹具就对不上:实测把标题和账号
+        圈进指纹之后,手写的那几个 cand 红出来的是 `KeyError`,而真实的
+        `_candidates` 一直给齐着 —— 那种红证明不了被测的行为。
+        """
+        return store.doc_input_snapshot(self.conn, path)
 
     def level(self, path: str = PATH) -> str:
         return self.conn.execute(
@@ -332,6 +346,34 @@ class StagedBodyTest(_Vault):
                 self.md.read_text(encoding="utf-8"))),
             "索引认为这一篇「未变」—— 新正文永远进不了 chunks")
 
+    def _swap_the_title_midflight(self, title, body, account, **kw):
+        """另一边只换**标题**:正文一个字不动,索引也还没跟上。"""
+        self.assertEqual("稿子", title, "worker 读到的该是旧标题")
+        self.md.write_text(
+            self.md_text(OLD_BODY, flagged=True).replace(
+                'title: "稿子"', 'title: "换成另一篇了"', 1),
+            encoding="utf-8")
+        return {"level": "none", "reason": "旧标题下是正常资讯"}
+
+    def test_a_staged_title_is_not_certified_as_indexed_either(self):
+        """只换标题也要拦:它和正文一样进 prompt,换了就不是同一篇文章了。
+
+        只比正文的那一版在这里放行,末态是旧标题下判出的 none 固化到新标题上
+        —— 界面上已经是另一篇文章,带着别人的判定;再加上回写那一下把新文件的
+        hash 刷进库,新标题连索引都进不去。
+        """
+        v1 = self.seed("hard", OLD_BODY, flagged=True)
+        with self.env(judge=self._swap_the_title_midflight) as out:
+            self.assertEqual(0, self.pb.cmd_run(self.args()))
+        self.assertEqual("hard", self.level(), "针对旧标题的 none 不许落库")
+        self.assertTrue(self.md_flag())
+        self.assertIn("跳过 1 篇", out.getvalue())
+        self.assertEqual(v1, self.version(), "content_hash 被刷成新文件的了")
+        self.assertTrue(store.doc_needs_reindex(
+            self.conn, PATH, scanner.file_hash(
+                self.md.read_text(encoding="utf-8"))),
+            "索引认为这一篇「未变」—— 新标题永远进不了库")
+
     def _scan_the_fixture(self):
         """索引那一趟的扫描结果 —— 只给夹具这一篇,别的全是真的。
 
@@ -400,7 +442,8 @@ class RefreshHashTest(_Vault):
         v1 = self.seed("hard", OLD_BODY, flagged=True)
         self.md.write_text(self.md.read_text(encoding="utf-8").replace(
             "title:", "wiki_round: 2\ntitle:", 1), encoding="utf-8")
-        cand = {"path": PATH, "version": v1, "body": OLD_BODY}
+        cand = self.cand()
+        self.assertEqual(v1, cand["version"], "夹具没摆成「磁盘领先于索引」")
         with self.env():
             self.assertEqual(("", True), self.pb._deliver(
                 self.conn, cand, {"level": "none", "reason": "正常资讯"}))
@@ -437,7 +480,7 @@ class TagRepairTest(_Vault):
         """真实注入一次写失败:把 md 文件本身设成只读,交付完再恢复。"""
         self.md.chmod(0o444)
         try:
-            cand = {"path": PATH, "version": self.version(), "body": OLD_BODY}
+            cand = self.cand()
             with self.env():
                 return self.pb._deliver(self.conn, cand,
                                         {"level": "none", "reason": "正常资讯"})
@@ -489,7 +532,7 @@ class TagRepairTest(_Vault):
         self.seed("", OLD_BODY, flagged=False)
         data = {"entities": [], "topics": [], "summary": "s",
                 "promo": {"level": "hard", "reason": "文末在卖代充值"}}
-        seen = extract.body_fingerprint(OLD_BODY)
+        seen = extract.model_input(self.conn, PATH)["seen"]
         self.md.chmod(0o444)
         try:
             with self.env(), self.assertRaises(OSError):
@@ -542,7 +585,7 @@ class QuotedTagTest(_Vault):
         self.seed("none", OLD_BODY, flagged=False)
         text = self.md.read_text(encoding="utf-8")
         self.md.write_text(
-            text.replace(f"tags:\n  - source/dr-gzh\n",
+            text.replace("tags:\n  - source/dr-gzh\n",
                          f'tags: [source/dr-gzh, "{extract.PROMO_TAG}"]\n'),
             encoding="utf-8")
         self.assertTrue(extract.promo_tag_in_md(PATH), "夹具没摆对")

@@ -86,6 +86,15 @@ def save_promo(conn, path: str, promo: dict, now: str | None = None,
         # 重跑改判时把旧标记摘掉,不然面板上永远挂着
         conn.execute("DELETE FROM doc_tags WHERE path=? AND tag=?",
                      (path, PROMO_TAG))
+    # **判定落了,md 那行就欠一次对齐 —— 这条待办和判定同一个事务。** 不是在
+    # 失败之后补记:它要防的是「提交完 DB、写 md 之前进程没了」,那时没有任何
+    # except 会跑(理由和实测见 `mark_promo_tag_pending`)。回写对齐成功之后由
+    # `align_promo_tag` 清掉,所以正常路径上它只在库里存在几毫秒;真被打断就
+    # 留在那儿等 `promo_backfill sync-tags`。
+    # `commit_extraction(writeback=False)` 那条路(`kb extract` 不带 `--writeback`)
+    # 同样会留下它 —— 那条路确实只落库不碰文件,md 那行确实还欠着一次对齐,
+    # 交给 `promo_backfill sync-tags` 不花钱地补上。
+    mark_promo_tag_pending(conn, path, True)
     return True
 
 
@@ -107,40 +116,55 @@ def promo_tag_in_md(doc_path: str) -> bool:
     return PROMO_TAG in frontmatter_tags(fm)
 
 
-def disk_body_indexed(conn, path: str) -> bool:
-    """磁盘上这一篇的**正文**已经进索引了吗 —— 只改过 frontmatter 不算没进。
+def disk_input_indexed(conn, path: str) -> bool:
+    """磁盘上这一篇喂给模型的那**组**输入(标题 / 账号 / 正文)已经进索引了吗。
 
     `version_seen`(= `documents.content_hash`)只证明**索引记录**没换版,证明
     不了磁盘上那份 md 还是模型读过的内容:导出和索引各自取锁、按两个阶段依次
     调用(`feeds.sync` → `pipeline_stages`),一次补判完全可以插在两者之间 ——
-    那时磁盘上已经是新正文、chunks 和 `content_hash` 还是旧的,而落库那道条件
+    那时磁盘上已经是新内容、chunks 和 `content_hash` 还是旧的,而落库那道条件
     写照旧放行。
 
-    **判据只能是正文,不能是整个文件的 hash。** 后者会把「只改了 frontmatter」
-    (翻译回写、tag 回写、wiki 追加图谱尾区,都是常态)也算成"没进索引",于是
-    一次正文压根没动的合法改判被拦掉。所以这里走索引自己的那条路:把磁盘正文
-    按 `normalize_body` → `split_chunks` 过一遍(**和 `cli.cmd_index` 同一对
-    函数**),再和库里的 chunks 拼回来比。相等 = 现在重新索引一次也不会改动
-    chunks = 判定针对的那份正文就是磁盘上那份。
+    **判据是模型输入那三样,不是整个文件的 hash。** 后者会把「只改了别的
+    frontmatter 字段」(翻译回写 summary、tag 回写、wiki 追加图谱尾区,都是
+    常态)也算成"没进索引",于是一次输入压根没动的合法改判被拦掉。所以这里
+    走索引自己的那条路:标题和账号按 `scanner.frontmatter_input` 读(**和索引
+    upsert 进库的是同一份口径**),正文按 `normalize_body` → `split_chunks`
+    过一遍(**和 `cli.cmd_index` 同一对函数**)再和库里的 chunks 拼回来比。
+    三样都对得上 = 现在重新索引一次也不会改动模型看到的任何东西 = 判定针对的
+    那组输入就是磁盘上那组。
+
+    **反过来只比正文也不够。** 一次补判的模型请求在途时磁盘上的**标题**被换掉
+    (正文一个字没动)是常态 —— 补抓回来的正文和原标题各走各的回写。只比正文
+    的话这次放行,旧标题下判出的 hard 就固化到新标题上:文章在界面上已经是另
+    一篇,却带着别人的广告判定被永久隐藏(2026-10-14 审查复现)。
 
     读不出来**不吞**(让调用方记成一次没完成的交付):这一篇的 md 还在不在,
     由 `_still_indexed` 在同一把锁里先问过了,再读不出来就是真的出了事。
     """
     from kb import store
     from kb.chunker import split_chunks
-    from kb.extract import VAULT_ROOT, body_fingerprint
-    from kb.scanner import file_hash, normalize_body, parse_frontmatter
+    from kb.extract import VAULT_ROOT, input_fingerprint
+    from kb.scanner import (file_hash, frontmatter_input, normalize_body,
+                            parse_frontmatter)
 
-    text = (VAULT_ROOT / path).read_text(encoding="utf-8")
+    full = VAULT_ROOT / path
+    text = full.read_text(encoding="utf-8")
     if not store.doc_needs_reindex(conn, path, file_hash(text)):
-        return True                 # 整个文件都对得上,正文自然对得上
-    _, md_body = parse_frontmatter(text)
+        return True                 # 整个文件都对得上,那三样自然对得上
+    snap = store.doc_input_snapshot(conn, path)
+    if snap is None:
+        return False                # 库里压根没这一行,谈不上"进过索引"
+    fm, md_body = parse_frontmatter(text)
+    title, account = frontmatter_input(fm, full)
     fresh = "\n".join(c.text for c in split_chunks(normalize_body(md_body)))
-    return body_fingerprint(fresh) == body_fingerprint(store.doc_body(conn, path))
+    return (input_fingerprint(title, account, fresh)
+            == input_fingerprint(snap["title"], snap["account"], snap["body"]))
 
 
 def mark_promo_tag_pending(conn, path: str, pending: bool) -> None:
-    """落/清「md 那行 flag 还没对齐」这条待办,并立即提交。
+    """落/清「md 那行 flag 还没对齐」这条待办。**只发一条 UPDATE,提交点由
+    调用方定** —— 落那一次要和判定同一个事务,清那一次要在回读确认之后。
 
     **这条待办是交付跨两个存储的唯一兜底。** 判定进的是 kb.db 的事务,md 那行
     进的是 vault 文件,没有一个事务能同时管住两者:提交完 DB、写文件之前进程
@@ -149,12 +173,17 @@ def mark_promo_tag_pending(conn, path: str, pending: bool) -> None:
     留下这一行,`promo_backfill sync-tags` 才有东西可修 —— 而且那条修复路**不
     花钱**:目标状态就是库里那份判定,不必再问一次模型。
 
-    立即提交是故意的:它要在「随后那次失败」之后仍然在库里。调用方此刻可能
-    持着维护锁(写它的地方都在锁内),所以这里只发一条 UPDATE、不开新事务。
+    **落待办是「判定提交前的协议」,不是「失败之后的记账」。** 原来它只挂在
+    两个 `except` 上,于是这条兜底只在「我们还活着、还能执行一条 SQL」时才落
+    得下来 —— 而它要防的头号时序恰恰是进程在中间没了。实测:判定提交之后、
+    写 md 之前对进程下 `SIGKILL`(退出码 -9),末态是库里 none + md 里挂着
+    flag + `promo_tag_pending` 一行都没有,`promo_backfill sync-tags` 报
+    「待对齐 0 篇」,这一篇从此没人再看它一眼(2026-10-14 审查复现)。所以
+    `save_promo` 在判定那条 UPDATE 的**同一个事务里**把它置上:要么两样一起
+    进库(随后由回写清掉),要么两样一起回滚。
     """
     conn.execute("UPDATE documents SET promo_tag_pending=? WHERE path=?",
                  (1 if pending else 0, path))
-    conn.commit()
 
 
 def promo_tag_pending_docs(conn, accounts: list[str] | None = None) -> list[str]:
@@ -202,10 +231,10 @@ def align_promo_tag(conn, doc_path: str) -> bool:
         raise PromoTagNotAligned(
             f"{PROMO_TAG} 在 frontmatter 里仍然{'缺着' if want else '挂着'}:"
             f" {doc_path}")
-    # 对齐到了 —— 顺手把待办清掉(条件写,0 行就是「本来没有待办」)。清在这里
-    # 而不在某一条调用路上:四条路都从这个函数过,修复那条路(sync-tags)也一样。
-    conn.execute("UPDATE documents SET promo_tag_pending=0"
-                 " WHERE path=? AND promo_tag_pending<>0", (doc_path,))
+    # **回读确认通过了才清待办**,而且清在这里、不在某一条调用路上:四条路都从
+    # 这个函数过,修复那条路(sync-tags)也一样。顺序反过来(先清再写回)等于
+    # 把兜底让给了随后那一步的运气。
+    mark_promo_tag_pending(conn, doc_path, False)
     conn.commit()
     return changed
 
@@ -220,7 +249,7 @@ def sync_promo_tag(conn, doc_path: str, level: str) -> None:
 
     **这条路不往回写传正文指纹。** 不是忘了:判据提到了整个交付区间的入口 ——
     `commit_promo` 在落库**之前**就把「磁盘上这一篇还没进索引」和「索引里的
-    正文已经换了」两样一起判掉了(`_body_moved` 那两道)。拦下来的末态是**一个
+    正文已经换了」两样一起判掉了(`_input_moved` 那两道)。拦下来的末态是**一个
     字都没写**,库里和 md 里仍然是原来那份判定、彼此一致。在回写这一侧再判一次
     反而会造出不一致:那时判定已经落库了,摘不掉 md 那行就成了「库里 none、
     frontmatter 挂着 flag」,而只改 frontmatter 的流程(翻译回写、tag 回写、
@@ -232,7 +261,7 @@ def sync_promo_tag(conn, doc_path: str, level: str) -> None:
 
 
 def commit_promo(conn, path: str, promo: dict, version_seen: str,
-                 body_seen: str, *, on_error=None) -> tuple[str, bool]:
+                 input_seen: str, *, on_error=None) -> tuple[str, bool]:
     """交付一次软广重判:核对正文版本 → 条件写 → 对齐 `doc_tags` → 提交 →
     对齐 md 里那行,整段在**同一把**维护锁里。
 
@@ -264,7 +293,7 @@ def commit_promo(conn, path: str, promo: dict, version_seen: str,
     none,回写摘标签时 `refresh_content_hash` 又把新文件的 hash 写进库,于是
     索引认为「未变」—— 新正文一个字都搜不到,点开文章却是新的,再同步也不恢复
     (2026-10-14 审查三次稳定复现)。所以锁内、**落库之前**两道一起问:磁盘正文
-    进索引了吗(`disk_body_indexed`)、索引里那份正文换版了吗(`_body_moved`
+    进索引了吗(`disk_input_indexed`)、索引里那份正文换版了吗(`_input_moved`
     的 ②)。拦下来就是一个字都没写,库里和 md 里仍是原来那份判定、彼此一致,
     下一轮等索引跟上再判。那一侧的 `refresh_content_hash` 现在也只认「库里记
     的还是我动手之前那一份」,不会再替别人的改动签一张已索引的收据。
@@ -274,7 +303,7 @@ def commit_promo(conn, path: str, promo: dict, version_seen: str,
     返回 `("", False)`,别的异常一律原样抛 —— 判什么算「交付失败」是这一层的
     口径,不交给调用方放宽。
     """
-    from kb.extract import _body_moved, _still_indexed
+    from kb.extract import _input_moved, _still_indexed
     from kb.maintenance import maintenance_lock
 
     if conn.in_transaction:
@@ -287,13 +316,13 @@ def commit_promo(conn, path: str, promo: dict, version_seen: str,
                 # `documents(path)` 是外键,照写会当场报 FOREIGN KEY —— 被
                 # 调用方记成一次失败,而文章是用户主动清理掉的。
                 return "等锁期间这一篇被清理掉了", False
-            if not disk_body_indexed(conn, path):
-                # 磁盘上是新正文、chunks 还是旧的:我们判的是旧那一份。
-                return "磁盘上这一篇的正文还没进索引", False
+            if not disk_input_indexed(conn, path):
+                # 磁盘上是新标题/新正文、库里还是旧的:我们判的是旧那一组。
+                return "磁盘上这一篇的标题或正文还没进索引", False
             # ② 索引里那份正文自己换过版了吗。**只要 ②,不要 ①** —— ① 比的是
             # 整个文件的 hash,会把只改 frontmatter 的合法改动也算成"版本不对"
-            # (理由见 `_body_moved` 的 file_must_match 那段)。
-            moved = _body_moved(conn, path, body_seen, file_must_match=False)
+            # (理由见 `_input_moved` 的 file_must_match 那段)。
+            moved = _input_moved(conn, path, input_seen, file_must_match=False)
             if moved:
                 return moved, False      # 见 docstring:落库之前就拦住
             written = save_promo(conn, path, promo, version_seen=version_seen)
@@ -308,9 +337,10 @@ def commit_promo(conn, path: str, promo: dict, version_seen: str,
         try:
             sync_promo_tag(conn, path, promo["level"])
         except (OSError, PromoTagNotAligned) as e:
-            # 兜底再标一次(幂等):共用入口 `writeback_extraction` 已经为对齐
-            # 那一步标过了,而这里收得更宽 —— 异常也可能来自它之前的某一步。
-            mark_promo_tag_pending(conn, path, True)
+            # **这里不补记待办** —— 它早在上面那次 `save_promo` 的事务里就落下
+            # 了(见 `mark_promo_tag_pending`)。在 except 里再标一次读起来像是
+            # 「失败了才记」,而真正要防的那个时序(进程在中间没了)压根不会
+            # 走到这儿。
             if on_error is not None:
                 on_error(e)
             return "", False

@@ -9,7 +9,7 @@
 `extract.pending_docs`,摘要、主题、实体永久停在那个壳上,再同步、再索引都不会
 自己纠正(2026-10-09 第 2 轮审查两种交错时序各三次稳定复现)。
 
-两种时序各一道判据(`extract._require_current_body`),**各有射程、缺一不可**:
+两种时序各一道判据(`extract._require_current_input`),**各有射程、缺一不可**:
 - **导出完成、索引还没跟上**:提取读的是索引里那份正文(`store.doc_body` 拼的是
   chunks),而 md 已经是全文了。那一刻 chunks 压根没变,所以只能靠
   「`documents.content_hash` 对不上当前这份 md」认出来。
@@ -58,6 +58,16 @@ class BodyVersionCase(StaleCase):
             row = c.execute('SELECT content_hash FROM documents WHERE path=?',
                             (rel,)).fetchone()
         return row and row['content_hash']
+
+    def account_model(self):
+        """一个记下"模型收到的账号"的假提取器。account 走关键字 —— 位置传参的
+        实现(把它塞到 timeout 上)会在这儿红,而不是等真实判定跑偏。"""
+        seen: list[str] = []
+
+        def model(title, body, timeout=120, account=''):
+            seen.append(account)
+            return dict(NEW)
+        return model, seen
 
     def seen_model(self, data: dict):
         """一个记下"模型读到的正文"的假提取器。"""
@@ -189,7 +199,7 @@ class FingerprintTests(StaleCase):
         """反过来钉一边:正文没变时照常落库 —— 一律丢弃的实现会在这里红。"""
         _, rel = self.shell_in_the_vault()
         with self.kb() as c:
-            seen = extract.body_fingerprint(store.doc_body(c, rel))
+            seen = extract.model_input(c, rel)["seen"]
             extract.save_extraction(c, rel, NEW, seen)
             c.commit()
         self.assertEqual(NEW['summary'], self.state(rel)['summary'])
@@ -213,12 +223,12 @@ class FingerprintTests(StaleCase):
         _, rel = self.shell_in_the_vault()
         before = self.state(rel)
         with self.kb() as c:
-            seen = extract.body_fingerprint(store.doc_body(c, rel))
+            seen = extract.model_input(c, rel)["seen"]
         full = self.root / 'vault' / rel
         full.write_text(full.read_text() + '\n新正文来了。\n', encoding='utf-8')
         with self.kb() as c:
-            # 反过来确认 chunks 真的没变:②判据此刻是通过的。
-            self.assertEqual(seen, extract.body_fingerprint(store.doc_body(c, rel)))
+            # 反过来确认索引里那组输入真的没变:②判据此刻是通过的。
+            self.assertEqual(seen, extract.model_input(c, rel)["seen"])
             with self.assertRaises(StaleBody):
                 extract.save_extraction(c, rel, NEW, seen)
             c.commit()
@@ -232,7 +242,7 @@ class FingerprintTests(StaleCase):
         _, rel = self.shell_in_the_vault()
         before = self.state(rel)
         with self.kb() as c:
-            seen = extract.body_fingerprint(store.doc_body(c, rel))
+            seen = extract.model_input(c, rel)["seen"]
         full = self.root / 'vault' / rel
         full.write_text(full.read_text().replace('HN Points', '整篇文章的正文在这里'),
                         encoding='utf-8')
@@ -258,7 +268,7 @@ class FingerprintTests(StaleCase):
         """
         _, rel = self.shell_in_the_vault()
         with self.kb() as c:
-            seen = extract.body_fingerprint(store.doc_body(c, rel))
+            seen = extract.model_input(c, rel)["seen"]
         (self.root / 'vault' / rel).unlink()
         with self.kb() as c:
             extract.save_extraction(c, rel, NEW, seen)
@@ -283,11 +293,123 @@ class FingerprintTests(StaleCase):
         self.assertNotEqual(extract.body_fingerprint(body),
                             extract.body_fingerprint(body + ' '))
 
+    def test_the_fingerprint_covers_every_field_the_model_reads(self):
+        """指纹盖的是**整组**输入:标题、账号、正文,换哪一样都得换个数。
+
+        只盖正文的话,"这个结论还是针对当前那篇文章的吗"这个问题在标题或账号
+        被换掉时答错 —— 而那两样都进 prompt(软广判定按「这个号在卖什么」读
+        文末那段)。少盖一样,那一样就成了可以静默替换的输入。
+        """
+        base = extract.input_fingerprint('标题', '账号', '正文')
+        self.assertEqual(base, extract.input_fingerprint('标题', '账号', '正文'))
+        for label, args in (('标题', ('别的标题', '账号', '正文')),
+                            ('账号', ('标题', '别的账号', '正文')),
+                            ('正文', ('标题', '账号', '别的正文'))):
+            with self.subTest(changed=label):
+                self.assertNotEqual(base, extract.input_fingerprint(*args))
+        # 三段不许能拼出歧义:'a|b' + 'c' 不该等于 'a' + 'b|c'
+        self.assertNotEqual(extract.input_fingerprint('a', 'b', 'c'),
+                            extract.input_fingerprint('ab', '', 'c'))
+
+    def test_a_changed_title_voids_the_result_too(self):
+        """② 的新射程:正文一个字没动,**标题**换了 —— 这次结果照样作废。
+
+        模型是按旧标题判的。只比正文的话这一次放行,旧标题下的摘要、主题、
+        软广判定就固化到新标题上,而 `extracted_at` 一落这一篇再也不进待提取
+        集合:界面上已经是另一篇文章,带着别人的结论,再同步也不纠正。
+        """
+        _, rel = self.shell_in_the_vault()
+        before = self.state(rel)
+        with self.kb() as c:
+            seen = extract.model_input(c, rel)["seen"]
+            # 只换标题:文件没动,chunks 没动,`content_hash` 也没动 —— ① 那道
+            # 判据此刻完全是瞎的,所以这一条钉的是 ② 自己。
+            c.execute('UPDATE documents SET title=? WHERE path=?',
+                      ('换掉的标题', rel))
+            c.commit()
+            from kb.scanner import file_hash
+            full = self.root / 'vault' / rel
+            self.assertFalse(store.doc_needs_reindex(
+                c, rel, file_hash(full.read_text(encoding='utf-8'))),
+                '夹具没摆成「只有标题换了」')
+            with self.assertRaises(StaleBody):
+                extract.save_extraction(c, rel, NEW, seen)
+            c.commit()
+        after = self.state(rel)
+        self.assertEqual(before['summary'], after['summary'])
+        self.assertEqual(before['extracted_at'], after['extracted_at'],
+                         'extracted_at 被这次作废的结果刷新了')
+        self.assertEqual(before['entities'], after['entities'],
+                         '按旧标题算出来的实体落了库')
+
+
+class ModelInputTests(BodyVersionCase):
+    """模型读到的那组输入,和落库校验的那组,必须出自**同一个快照**。
+
+    三条提取路径原先是「标题、账号从待提取名单里带过来,正文稍后另读一次」。
+    那两次读之间另一条连接的索引可以把这一篇整篇换掉,于是模型收到旧标题配新
+    正文 —— 判出来的结论落在一份没人写过的东西上,而按正文比的那道判据看不出
+    任何异常(正文确实是当前那一份)。`extract.model_input` 把四样收进一条语句,
+    这一组钉住「名单那一份不会混进模型输入」和「账号真的传到了模型」。
+    """
+
+    def test_the_model_does_not_read_the_title_from_the_todo_list(self):
+        """名单里的标题是旧快照:模型必须拿当前那一份,不是名单那一份。"""
+        _, rel = self.shell_in_the_vault()
+        with self.kb() as c:
+            c.execute('UPDATE documents SET title=? WHERE path=?',
+                      ('索引刚换上的新标题', rel))
+            c.commit()
+        stale_row = {'path': rel, 'title': '名单里那份旧标题', 'account': ''}
+        seen = {}
+
+        def model(title, body, **kw):
+            seen.update(title=title, account=kw.get('account'))
+            return dict(NEW)
+
+        with patch.object(extract, 'pending_docs',
+                          Mock(return_value=[stale_row])):
+            self.assertEqual(0, self.extract_cli(model))
+        self.assertEqual('索引刚换上的新标题', seen['title'],
+                         '名单那一份旧标题被喂给了模型')
+        # 后果:这次结果落得下来(校验的和模型读的是同一组输入)
+        self.assertEqual(NEW['summary'], self.state(rel)['summary'])
+
+    def test_the_account_reaches_the_model_on_the_cli_path(self):
+        """账号也得传下去 —— 它是软广判定的判据之一,不是展示字段。"""
+        _, rel = self.shell_in_the_vault()
+        fulltext._drop_extraction([rel])              # 回到待提取集合
+        with self.kb() as c:
+            c.execute('UPDATE documents SET account=? WHERE path=?',
+                      ('卖代充值的号', rel))
+            c.commit()
+        model, seen = self.account_model()
+        self.assertEqual(0, self.extract_cli(model))
+        self.assertEqual(['卖代充值的号'], seen)
+
+    def test_the_account_reaches_the_model_on_the_pipeline_path(self):
+        """管道那条路同一件事 —— 三条路的输入口径必须一样。"""
+        from kb import pipeline_stages as ps
+        _, rel = self.shell_in_the_vault()
+        fulltext._drop_extraction([rel])              # 回到待提取集合
+        with self.kb() as c:
+            c.execute('UPDATE documents SET account=? WHERE path=?',
+                      ('卖代充值的号', rel))
+            c.commit()
+        model, seen = self.account_model()
+        real = store.connect
+        with patch.object(store, 'connect', lambda *a, **kw: real(config.DB_PATH)), \
+                patch.object(extract, 'extract_with_llm', model), \
+                patch.object(llm_stages, 'stage_model', Mock(return_value='stub')), \
+                patch.object(ps, '_stage', Mock()), patch.object(ps, '_log', Mock()):
+            ps._extract_pass('存量', ps._new_extract_stats())
+        self.assertEqual(['卖代充值的号'], seen)
+
 
 class CallSiteTests(unittest.TestCase):
     """三条提取路径都得把指纹传下去 —— 漏一条就是那条路上静默覆盖旧结论。
 
-    判据钉在调用点上(不是"有没有这个参数"):`body_seen` 默认 None = 不校验,
+    判据钉在调用点上(不是"有没有这个参数"):`input_seen` 默认 None = 不校验,
     所以忘了传的那条路**一条测试都不会红**,只会在某天把一篇文章的摘要永久
     冻在旧正文上。多一条提取路径就在这里红,而不是等用户看见错摘要。
     """
@@ -304,13 +426,14 @@ class CallSiteTests(unittest.TestCase):
     # **软广补判不在这张名单上,因为它压根不是 `save_extraction` 的调用方**:
     # 它照样读 chunks 正文、照样等模型回包那几十秒,所以也校验,**只是判据和这里
     # 不是同一组**:`commit_promo` 在锁内、落库**之前**问两件事 —— 磁盘正文进索引
-    # 了吗(`disk_body_indexed`,按索引那对函数切一遍再和 chunks 比)、索引里那份
-    # 换版了吗(`_body_moved(file_must_match=False)`);落库那条 UPDATE 自己的
+    # 了吗(`disk_input_indexed`,标题/账号按索引的读法读一遍、正文按索引那对
+    # 函数切一遍再和库里比)、索引里那组换版了吗(`_input_moved` 关掉第一道);
+    # 落库那条 UPDATE 自己的
     # WHERE 再比一次 `content_hash`。**它的回写那一侧不传指纹**(理由见
     # `extract_promo.sync_promo_tag`):判据已经提到交付区间的入口了,拦下来是
     # 一个字都没写、两处仍然一致;在回写那一侧再判一次反而会造出不一致 ——
-    # 那时判定已经落库,而第一道比的是整个**文件**的 hash,只改 frontmatter 的
-    # 流程是常态(翻译回写、tag 回写、wiki 追加图谱尾区)。这几件事由
+    # 那时判定已经落库,而第一道比的是整个**文件**的 hash,只改别的 frontmatter
+    # 字段的流程是常态(翻译回写、tag 回写、wiki 追加图谱尾区)。这几件事由
     # `tests/test_promo_recheck.py` 和 `tests/test_promo_delivery.py` 钉着。
     # 按**文件**比,所以 `kb/cli.py` / `kb/pipeline_stages.py` 两边都在
     # (它们各有一条 LLM 路径和一条条目化路径);「LLM 那三条真的走了协调入口」
@@ -319,11 +442,21 @@ class CallSiteTests(unittest.TestCase):
                    'scripts/pretagged_refresh.py'}
 
     def grep(self, needle):
-        import subprocess
+        """全仓(kb/ 和 scripts/,递归)含 `needle` 的文件 —— **注释行不算**。
+
+        注释里提到一个函数名不是一处调用点。不跳的话写一句解释性注释就会把
+        下面那两张名单弄红,而真要新增一处调用点的人只会顺手把名单改掉 ——
+        那就把这条用例从「拦住新调用点」变成了「拦住写注释的人」。
+        """
         from pathlib import Path
         root = Path(__file__).resolve().parent.parent
-        return set(subprocess.run(['grep', '-rln', needle, 'kb', 'scripts'],
-                                  cwd=root, capture_output=True, text=True).stdout.split())
+        hit = set()
+        for py in sorted(root.glob('kb/**/*.py')) + sorted(root.glob('scripts/**/*.py')):
+            for ln in py.read_text(encoding='utf-8').splitlines():
+                if needle in ln and not ln.lstrip().startswith('#'):
+                    hit.add(py.relative_to(root).as_posix())
+                    break
+        return hit
 
     def test_every_llm_extraction_path_passes_the_fingerprint(self):
         from pathlib import Path
@@ -338,6 +471,28 @@ class CallSiteTests(unittest.TestCase):
         """协调入口的调用点名单:新增一处就在这里红,逼它自己决定传不传指纹。"""
         self.assertEqual(set(self.LLM_PATHS) | {'kb/extract.py'},
                          self.grep('commit_extraction('))
+
+    def test_every_hash_refresh_proves_the_version_it_overwrites(self):
+        """刷「已索引」那张收据的每一处调用点都得拿出「动手之前」那份 hash。
+
+        判据钉在调用点上:`expect` 一旦有默认值,忘了传的那条路**一条测试都不会
+        红**,只会在某天把别人那份还没索引的改动认证成「已索引」—— 那份改动从此
+        永远进不了 chunks(实测最坏的一种:磁盘上换成了新正文、chunks 还是旧的,
+        新正文一个字都搜不到,点开文章却是新的,再同步也不恢复)。
+        所以这里既钉「只有这几处在调它」,也钉「它压根没有默认值可漏」。
+        """
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        self.assertEqual(
+            {'kb/extract.py', 'kb/extract_writeback.py',
+             'scripts/backfill_youtube_summaries.py',
+             'scripts/wiki/wiki_daily.py'},
+            self.grep('refresh_content_hash(conn'),
+            '多了一处刷新索引收据的调用点 —— 它拿出「动手之前」那份 hash 了吗')
+        src = (root / 'kb/extract_writeback.py').read_text(encoding='utf-8')
+        self.assertIn('def refresh_content_hash(conn, doc_path: str, expect: str)',
+                      src, '`expect` 又有默认值了:漏传的那条路会静默无条件刷新')
+        self.assertIn('WHERE path=? AND content_hash=?', src)
 
     def test_no_llm_path_calls_the_bare_save(self):
         """裸 `save_extraction` 只剩不读正文的那几条 —— 读正文的一律走协调入口。
@@ -455,7 +610,7 @@ class CommitWindowTests(BodyVersionCase):
         self.index(rel)                            # 索引已跟上、这一篇排回了队列
         self.assertEqual([rel], self.state(rel)['pending'])
         checked, release, rival = threading.Event(), threading.Event(), {}
-        real = extract._require_current_body
+        real = extract._require_current_input
 
         def checked_then_hold(conn, path, seen):
             real(conn, path, seen)
@@ -463,7 +618,7 @@ class CommitWindowTests(BodyVersionCase):
             release.wait(10)
 
         model, _ = self.seen_model(NEW)
-        with patch.object(extract, '_require_current_body', checked_then_hold):
+        with patch.object(extract, '_require_current_input', checked_then_hold):
             worker = threading.Thread(target=lambda: self.extract_cli(model))
             worker.start()
             try:
@@ -484,13 +639,13 @@ class CommitWindowTests(BodyVersionCase):
         """按旧正文算出来的那批 tag,一个都不许写进换好的新全文。"""
         _, rel = self.shell_in_the_vault()
         with self.kb() as c:
-            seen = extract.body_fingerprint(store.doc_body(c, rel))
+            seen = extract.model_input(c, rel)["seen"]
         self.fetch_and_translate()                 # 正文换成全文
         self.index(rel)                            # 索引跟上
         before = self.content_hash(rel)
         with self.kb() as c:
             changed = extract.writeback_extraction(c, rel, dict(OLD),
-                                                   body_seen=seen)
+                                                   input_seen=seen)
         self.assertFalse(changed, '按旧正文算出来的 tag 被写进了新全文')
         self.assertEqual([], [t for t in self.md_tags(rel) if 'link-only' in t],
                          'md 的 frontmatter 里混进了按旧壳算出来的主题')
@@ -506,8 +661,8 @@ class CommitWindowTests(BodyVersionCase):
         self.fetch_and_translate()
         self.index(rel)
         with self.kb() as c:
-            seen = extract.body_fingerprint(store.doc_body(c, rel))
+            seen = extract.model_input(c, rel)["seen"]
             changed = extract.writeback_extraction(c, rel, dict(NEW),
-                                                   body_seen=seen)
+                                                   input_seen=seen)
         self.assertTrue(changed, '正文还是当前那一份,tag 却没写进去')
         self.assertIn('topic/ai-coding', self.md_tags(rel))

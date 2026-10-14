@@ -89,21 +89,22 @@ def _index_pass(args) -> int:
 
 
 def cmd_extract(args) -> int:
-    from kb.extract import (NO_BODY_NO_TEXT, StaleBody, body_fingerprint,
-                            body_gap, commit_extraction, extract_with_llm,
-                            mark_no_body, pending_docs)
+    from kb.extract import (NO_BODY_NO_TEXT, StaleBody, body_gap,
+                            commit_extraction, extract_with_llm, mark_no_body,
+                            model_input, pending_docs)
     from kb.llm_stages import stage_model
     conn = store.connect()
     todo = pending_docs(conn, args.limit)
     print(f"[extract] 待提取 {len(todo)} 篇 (model={stage_model('extract')})")
     ok = failed = empty = no_text = stale_body = 0
     for i, row in enumerate(todo, 1):
-        # 正文和它所属的那一版一条语句读出来(见 store.doc_body_version):拆成
-        # 两句的话,「这一版没有文字」那个终态会落到另一版正文上。顺带这也是
-        # commit_extraction 那道版本校验的取样点 —— 两个机制问的不是一件事
-        # (version 是"索引里哪一版文件",指纹是"我读到的正文长什么样"),但都
-        # 该取自同一个快照。
-        version, body = store.doc_body_version(conn, row["path"])
+        # 标题、账号、正文、版本号一条语句读出来(见 extract.model_input):拆成
+        # 几句的话,「这一版没有文字」那个终态会落到另一版正文上,而模型会收到
+        # 一份跨版拼出来的输入。顺带这也是 commit_extraction 那道校验的取样点
+        # —— 两个机制问的不是一件事(version 是"索引里哪一版文件",指纹是"我
+        # 读到的那组输入长什么样"),但都该取自同一个快照。
+        snap = model_input(conn, row["path"])
+        version, body = snap["version"], snap["body"]
         # 空正文的两档判定与管道共用 kb.extract 那一份,别在这儿另写一套 ——
         # 两处各判各的话,命令行跑完不落终态,下一轮管道又把它报成「需回填」
         gap = body_gap(row["path"], body)
@@ -125,11 +126,15 @@ def cmd_extract(args) -> int:
             print(f"[{i}/{len(todo)}] SKIP {row['title'][:28]}: 正文为空"
                   f"(先把正文补回来再 kb index)")
             continue
-        # 读到的这一份正文的指纹:落库前 save_extraction 拿它比一次,正文在
-        # 模型调用期间被整篇换过(补抓把跳转壳换成全文)就丢掉这次结果。
-        seen = body_fingerprint(body)
+        # 读到的这一组输入的指纹:落库前 save_extraction 拿它比一次,正文或
+        # 标题在模型调用期间被换过(补抓把跳转壳换成全文)就丢掉这次结果。
+        seen = snap["seen"]
         try:
-            data = extract_with_llm(row["title"], body)
+            # **account 也要传** —— 软广判定按「这个号在卖什么」读文末那段,
+            # 账号名是判据的一部分(模板见 kb.extract_llm)。三条提取路径的
+            # 输入口径必须一样,不然同一篇文章在命令行和管道上判出不同结果。
+            data = extract_with_llm(snap["title"], body,
+                                    account=snap["account"])
             # 校验 → 落库 → 提交 → 回写整段在「维护锁 → kb.db 写锁」里:这中间
             # 没有别人能把正文换掉(见 commit_extraction)。回写失败只打一行 ——
             # 判定已经落库了,不该把这一篇记成 FAIL。

@@ -62,7 +62,7 @@ from kb.extract_writeback import (  # noqa: F401  (原样再导出)
     refresh_content_hash, remove_writeback_tag, writeback_tags)
 from kb.extract_promo import (  # noqa: F401  (原样再导出)
     PROMO_TAG, PromoTagNotAligned, align_promo_tag, commit_promo,
-    disk_body_indexed, mark_promo_tag_pending, promo_tag_in_md,
+    disk_input_indexed, mark_promo_tag_pending, promo_tag_in_md,
     promo_tag_pending_docs, save_promo, sync_promo_tag)
 
 
@@ -126,14 +126,60 @@ def body_fingerprint(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def _body_moved(conn, path: str, body_seen: str, *,
-                file_must_match: bool = True) -> str:
-    """这次结果针对的那份正文还是**当前**那一份吗 —— 变了就返回一句原因。
+def input_fingerprint(title: str, account: str, body: str) -> str:
+    """喂给模型的那**一组**输入的指纹:标题 + 账号 + 正文。口径只有这一份。
 
-    **口径只有这一份,三个消费点**:落库前 `_require_current_body` 拿它抛
+    **判定针对的不只是正文。** 软广那一档按「这个号在卖什么」读文末那段,标题
+    和账号跟正文一起进 prompt(`extract_llm` 的两个模板),所以「这个结论还是
+    针对当前那一份输入吗」必须把三样一起钉上。只钉正文的后果实测过:提取管道
+    把标题取自待提取名单、正文取自稍后那个快照,两次读之间另一条连接的索引把
+    这一篇整篇换掉,于是模型收到**旧标题配新正文**,判出来的 hard 落在库里 ——
+    而按正文指纹比的那道判据看不出任何异常(正文确实是当前那一份),`extracted_at`
+    一落这一篇就掉出所有待办:一篇已经改成普通教程的文章被永久当广告隐藏,
+    再同步、再索引都不会自己纠正(2026-10-14 审查复现)。
+
+    分隔符用 `\x00`:`normalize_body` 过的正文里不会有它,所以三段拼不出歧义。
+    """
+    return body_fingerprint("\x00".join((title, account, body)))
+
+
+def model_input(conn, path: str) -> dict:
+    """一篇文章喂给模型的那组输入 + 它的指纹,**三条提取路径的唯一取样点**。
+
+    返回 `doc_input_snapshot` 那四样(title / account / version / body)再加一个
+    `seen`(= `input_fingerprint`)。三条路(管道 `_extract_one`、`kb extract`、
+    `scripts/extract_parallel.py`)一律从这里取,不要在外面自己拼 —— 各拼一遍
+    的话,少传一样给模型(实测:`kb extract` 和并发脚本都没把 account 传进去,
+    于是同一篇文章在三条路上判出不同结果)或者少钉一样进指纹,都只在其中一条
+    路上出事,而回归枚举另外两条照样全绿。
+
+    **四样必须同属一版**,所以底下那层是一条语句一个快照(见
+    `store.doc_input_snapshot`);「这一版还是不是当前那一版」由写入侧回答
+    (`commit_extraction` → `_input_moved`、`mark_no_body` 的条件写)。
+
+    这一篇已经不在库里时给一份全空的快照 —— 和原来 `doc_body_version` 对不存在
+    的文档返回 `("", "")` 是同一个末态:`body_gap` 把它归到「正文空」,主线程
+    按那一档落终态(或者由锁内那道 `_still_indexed` 拦掉),不在这里另造一条路。
+    """
+    from kb import store
+    snap = store.doc_input_snapshot(conn, path) or {
+        "path": path, "title": "", "account": "", "version": "", "body": ""}
+    snap["seen"] = input_fingerprint(snap["title"], snap["account"],
+                                     snap["body"])
+    return snap
+
+
+def _input_moved(conn, path: str, input_seen: str, *,
+                 file_must_match: bool = True) -> str:
+    """这次结果针对的那组输入还是**当前**那一组吗 —— 变了就返回一句原因。
+
+    **口径只有这一份,三个消费点**:落库前 `_require_current_input` 拿它抛
     `StaleBody`,回写前 `writeback_extraction` 在同一把维护锁里拿它判一次布尔,
     软广补判的交付入口拿它判 ②(见下面 `file_must_match`)。
     两处各写一遍的话,拦下来的和写回去的不是同一批。
+
+    **比的是整组输入(标题 + 账号 + 正文),不是只比正文**(`input_fingerprint`)。
+    标题和账号同样进 prompt,换掉任何一样这个结论就不再是针对当前那篇文章的了。
 
     两道各管一种交错时序,少哪一道哪一种就漏过去:
 
@@ -142,7 +188,7 @@ def _body_moved(conn, path: str, body_seen: str, *,
       这一篇排回了待提取集合,而提取读的是**索引里**那份正文(`store.doc_body`
       拼的是 chunks)—— 旁路的一轮 `kb extract` 正好落在这个缝里,就会拿旧壳
       再提一遍。那一刻 chunks 压根没变,所以 ② 对它是瞎的。
-    ②**索引里那份正文已经和我读到的不是同一份了**。这是「旧正文的提取请求
+    ②**索引里那组输入已经和我读到的不是同一组了**。这是「旧正文的提取请求
       在途、模型回包晚于全文更新」那一档:中间那次 index 已经把 chunks 换成
       新正文,`content_hash` 跟着对上了文件 —— 所以 ① 对它是瞎的。
 
@@ -154,9 +200,10 @@ def _body_moved(conn, path: str, body_seen: str, *,
     的正文还是当前那一份吗",而 ① 回答的是另一个问题:"整个**文件**都已经索引
     过了吗" —— 它为回写 tag 服务(旧 tag 贴到新全文上就摘不掉了),所以把只改
     frontmatter 的那一类合法改动也算进"版本不对"。补判拿 ① 当判据会把一次正文
-    压根没动的改判拦掉,而它真正要防的「磁盘上的正文还没进索引」由
-    `kb.extract_promo.disk_body_indexed` 更精确地回答(它会把磁盘正文按索引的
-    口径切一遍再和 chunks 比,frontmatter 的差异不影响结论)。
+    压根没动的改判拦掉,而它真正要防的「磁盘上那组输入还没进索引」由
+    `kb.extract_promo.disk_input_indexed` 更精确地回答(它按索引的口径把磁盘上
+    的标题/账号/正文各读一遍再和库里比,**别的** frontmatter 字段的差异不影响
+    结论)。
 
     **md 压根读不出来(清理正把这一篇删掉)不算"版本不对",直接放行。** 这一档
     本来就有人管:`writeback_extraction` 在锁内复查「这一篇还在吗」,落进库的判定
@@ -166,36 +213,39 @@ def _body_moved(conn, path: str, body_seen: str, *,
     不再敏感**(把回写那把锁去掉也照样全绿)。这道判据只回答「我读到的正文还是
     当前那一份吗」,"这一篇还在不在"不是它的问题。
     """
-    from kb import store
     from kb.scanner import file_hash
     if file_must_match:
         try:
             text = (VAULT_ROOT / path).read_text(encoding="utf-8")
         except OSError:
             return ""               # 见 docstring:这一档交给回写那道锁内复查
+        from kb import store
         if store.doc_needs_reindex(conn, path, file_hash(text)):
             return "索引还没扫到当前这份 md,提取结果作废"
-    if body_fingerprint(store.doc_body(conn, path)) != body_seen:
-        return "正文已更新,提取结果作废"
+    # 一条语句一个快照(`model_input` 取样时也是):拆成几句读的话,② 比的
+    # 标题和正文可能来自两版,一边对得上一边对不上,结论取决于读的顺序。
+    if model_input(conn, path)["seen"] != input_seen:
+        return "喂给模型的输入已更新(标题/账号/正文),提取结果作废"
     return ""
 
 
-def _require_current_body(conn, path: str, body_seen: str) -> None:
-    """落库之前确认正文版本,对不上抛 `StaleBody`(判据见 `_body_moved`)。
+def _require_current_input(conn, path: str, input_seen: str) -> None:
+    """落库之前确认模型输入那一组还是当前那一组,对不上抛 `StaleBody`
+    (判据见 `_input_moved`)。
 
     **这道检查本身给不了保证,得由 `commit_extraction` 把它和写入圈进同一个
     维护锁 + 写事务里。** 单独跑只回答"检查的那一瞬间正文还是不是我读到的
     那份",答不了"我写进去的那一瞬间还是不是" —— 两者之间那个窗口有一份实测
     后果,见 `commit_extraction` 的说明。
     """
-    reason = _body_moved(conn, path, body_seen)
+    reason = _input_moved(conn, path, input_seen)
     if reason:
         raise StaleBody(f"{reason}: {path}")
 
 
 def save_extraction(conn, path: str, data: dict,
-                    body_seen: str | None = None) -> None:
-    """把一篇的提取结果落库。`body_seen` 给了就先校验正文版本(见 `StaleBody`)。
+                    input_seen: str | None = None) -> None:
+    """把一篇的提取结果落库。`input_seen` 给了就先校验模型输入(见 `StaleBody`)。
 
     **提取是「读正文 → 等几十秒模型 → 落库」,正文在这中间可能整篇换掉。**
     补抓把跳转壳换成全文正是这么一条路:它会把这一篇送回待提取集合,于是
@@ -205,14 +255,15 @@ def save_extraction(conn, path: str, data: dict,
     第 2 轮审查两种交错时序各三次稳定复现)。所以落库之前比一次指纹,
     对不上就整份丢掉。
 
-    判据有两道,**各管一种交错时序、缺一不可**(都在 `_body_moved`)。校验和这
+    判据有两道,**各管一种交错时序、缺一不可**(都在 `_input_moved`)。校验和这
     一串写入之间还有个窗口,**那由 `commit_extraction` 把两头圈进同一个维护锁
     + 写事务里关掉** —— 三条读正文的提取路径一律走它,不要在外面自己拼。
-    不校验的那几条路(`body_seen=None`)是压根不读索引正文的:`parse_pretagged`
-    直接解析 frontmatter,软广补判只改 promo —— 它们没有"基于哪一份正文"可言。
+    不校验的那几条路(`input_seen=None`)是压根不读索引正文的:`parse_pretagged`
+    直接解析 frontmatter,软广补判走自己那个交付入口(`commit_promo` 在落库
+    之前把磁盘侧和索引侧两道一起判掉)—— 它们没有"基于哪一组输入"可言。
     """
-    if body_seen is not None:
-        _require_current_body(conn, path, body_seen)
+    if input_seen is not None:
+        _require_current_input(conn, path, input_seen)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn.execute("DELETE FROM entities WHERE path=?", (path,))
     for e in data["entities"]:
@@ -247,7 +298,7 @@ def save_extraction(conn, path: str, data: dict,
     promo = data.get("promo")
     if isinstance(promo, dict) and promo.get("level"):
         # 不传 version_seen:这条路的正文版本由 commit_extraction 在维护锁 +
-        # 写事务里校验(`_require_current_body`),比单条语句的条件写更严。
+        # 写事务里校验(`_require_current_input`),比单条语句的条件写更严。
         # **不往上透传「md 里的 flag 该摘了」那个信号了**:它只在「这一次恰好
         # 改判了」时为真,一次回写失败之后就再也没有第二次机会。md 那行现在
         # 按库里的判定幂等对齐(`extract_promo.align_promo_tag`),不看信号。
@@ -283,7 +334,7 @@ def _still_indexed(conn, doc_path: str) -> bool:
 
 
 def writeback_extraction(conn, doc_path: str, data: dict,
-                         body_seen: str | None = None) -> bool:
+                         input_seen: str | None = None) -> bool:
     """把提取结果的 tag 对齐到 md frontmatter,改了文件就刷新 content_hash。
 
     提取有三条路(管道 `_extract_pass`、`kb extract --writeback`、
@@ -312,8 +363,8 @@ def writeback_extraction(conn, doc_path: str, data: dict,
     文章是用户主动清理掉的,把它记成提取失败会让面板标红、谎报一次故障,而判定
     本身早就落库了(随后被外键级联一并删掉,末态干净)。
 
-    **给了 `body_seen` 就在锁内再确认一次「这份 tag 算的还是当前那份正文吗」**
-    (`_body_moved`,和落库那道同一份口径)。正常路径上 `commit_extraction` 已经
+    **给了 `input_seen` 就在锁内再确认一次「这份 tag 算的还是当前那组输入吗」**
+    (`_input_moved`,和落库那道同一份口径)。正常路径上 `commit_extraction` 已经
     把落库和回写圈在同一个锁区间里、中间没有窗口,所以这一道是**这个公开入口
     自己的契约**:谁在锁外隔着一段时间拿一份基于旧正文的结果来回写,都该被挡
     下来 —— 旧 tag 一写进新全文就摘不掉了(`writeback_tags` 只追加),而它还顺手
@@ -350,13 +401,17 @@ def writeback_extraction(conn, doc_path: str, data: dict,
     with maintenance_lock():
         if not _still_indexed(conn, doc_path):
             return False
-        if body_seen is not None and _body_moved(conn, doc_path, body_seen):
+        if input_seen is not None and _input_moved(conn, doc_path, input_seen):
             return False            # 见 docstring:旧 tag 贴到新全文上就摘不掉了
         try:
             before = file_hash(
                 (VAULT_ROOT / doc_path).read_text(encoding="utf-8"))
         except OSError:
-            before = None           # 读不出来就别拿 hash 当条件,下面那两步会抛
+            # 读不出来就给一个不可能匹配的值:库里的 `content_hash` 一律是
+            # `file_hash` 的输出(非空),所以刷新那一句必然 0 行。下面那两步
+            # 本来也会抛、异常才是这一档的主路径 —— 这里只保证万一走到刷新,
+            # 也不会替谁签一张「已索引」的收据。
+            before = ""
         changed = False
         try:
             if tags:
@@ -364,15 +419,13 @@ def writeback_extraction(conn, doc_path: str, data: dict,
             if has_promo:
                 changed = align_promo_tag(conn, doc_path) or changed
         except (OSError, PromoTagNotAligned):
-            # **留待办再抛。** 判定早就落库了,md 那行没对齐的话两处就此永久
-            # 不一致,而这一篇按 `promo_level <> ''` 掉出所有默认候选 —— 没有
-            # 这条待办,谁也不会再回来看它一眼(`mark_promo_tag_pending`)。
-            # 标在这个共用入口而不是某一条调用路上:四条路都从这里过。
-            # **两步一起圈进来**:hard 那一行是 `writeback_tags` 写的,它抛的时候
-            # md 里同样缺着那行。topic/entity 跟着一起丢不要紧 —— 下一轮重提会
-            # 补回来,而 promo 那行丢了没人补(这一篇已经掉出待办)。
-            if has_promo:
-                mark_promo_tag_pending(conn, doc_path, True)
+            # **待办不在这里记** —— 它在判定那个事务里就落下了
+            # (`save_promo` → `mark_promo_tag_pending`),所以进程在这中间被杀
+            # 也留得住;这里只是让异常飞出去。**两步一起圈进这个 try**:hard
+            # 那一行是 `writeback_tags` 写的,它抛的时候 md 里同样缺着那行,
+            # 而 `align_promo_tag` 压根没机会跑 —— 清待办那一步因此不会发生,
+            # 这正是我们要的末态。topic/entity 跟着一起丢不要紧(下一轮重提会
+            # 补回来),promo 那行丢了没人补:这一篇已经掉出所有默认候选。
             raise
         finally:
             # **先把已经改掉的文件登记上,再让异常飞出去。** 对齐那一步抛的时候
@@ -386,13 +439,13 @@ def writeback_extraction(conn, doc_path: str, data: dict,
         return changed
 
 
-def commit_extraction(conn, path: str, data: dict, body_seen: str, *,
+def commit_extraction(conn, path: str, data: dict, input_seen: str, *,
                       writeback: bool = True, on_error=None) -> bool:
-    """交付一次提取的结果:校验正文版本 → 落库 → 提交 → 回写 md,整段在
+    """交付一次提取的结果:校验模型输入 → 落库 → 提交 → 回写 md,整段在
     「维护锁 → kb.db 写锁」里。返回回写有没有改文件。
 
     **这个协调区间就是它存在的理由。** `save_extraction` 里那道版本校验只回答
-    "检查的那一瞬间正文还是不是我读到的那份",答不了"我写进去的那一瞬间还是
+    "检查的那一瞬间输入还是不是我读到的那组",答不了"我写进去的那一瞬间还是
     不是" —— 校验到第一条 SQL、以及落库到回写之间各有一个窗口,而把正文整篇
     换掉的那条路(补抓 → 翻译 → 导出 → 作废旧提取 → 索引)全程持着**同一把**
     维护锁。两个窗口各有一份实测后果(2026-10-09 第 3 轮审查,各三次稳定复现):
@@ -406,7 +459,7 @@ def commit_extraction(conn, path: str, data: dict, body_seen: str, *,
       frontmatter,而 `writeback_tags` 只追加不摘除、还顺手刷了 content_hash,
       所以下一次索引未必重建它。
 
-    **原来那条兜底论证不成立,记在这儿备查**:`_require_current_body` 曾写着
+    **原来那条兜底论证不成立,记在这儿备查**:`_require_current_input` 曾写着
     「窗口里真被写进去了也不是死局 —— `feed_items.extract_stale` 那个待办只在
     作废**做完**之后才放下,下一轮导出会再作废一次」。那句话的前提是旧保存落在
     作废**之前**;上面第一个时序正好相反 —— 待办已经清零,没有第二次作废。
@@ -440,7 +493,7 @@ def commit_extraction(conn, path: str, data: dict, body_seen: str, *,
         try:
             if not _still_indexed(conn, path):
                 return False    # 见 docstring:等锁期间清理把这一篇删掉了
-            save_extraction(conn, path, data, body_seen)
+            save_extraction(conn, path, data, input_seen)
             conn.commit()
         finally:
             if conn.in_transaction:
@@ -449,7 +502,7 @@ def commit_extraction(conn, path: str, data: dict, body_seen: str, *,
             return False
         try:
             return writeback_extraction(conn, path, data,
-                                        body_seen=body_seen)
+                                        input_seen=input_seen)
         except Exception as e:
             if on_error is None:
                 raise

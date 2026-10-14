@@ -254,7 +254,7 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         item = self.seed(source)
         conn = store.connect()
         self.addCleanup(conn.close)
-        seen_body = extract.body_fingerprint(store.doc_body(conn, item['path']))
+        seen_input = extract.model_input(conn, item['path'])['seen']
         conn.execute("UPDATE documents SET summary='x' WHERE path=?", (item['path'],))
         self.assertTrue(conn.in_transaction, '摆盘没摆出一个开着的写事务')
 
@@ -269,7 +269,7 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         with patch.object(extract, 'VAULT_ROOT', self.vault), \
              patch.object(maintenance, 'maintenance_lock', watched):
             extract.commit_extraction(conn, item['path'], dict(self.EXTRACTED),
-                                      seen_body)
+                                      seen_input)
         self.assertIn('in_txn', seen, '压根没去取锁')
         self.assertFalse(seen['in_txn'], '带着没提交的写事务去等维护锁了')
         self.assertFalse(conn.in_transaction)
@@ -373,8 +373,12 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
             r'|commit_extraction|commit_promo)\s*\(')
         found = {}
         for py in sorted(ROOT.glob('kb/*.py')) + sorted(ROOT.glob('scripts/*.py')):
+            # 跳过 `def` 行和**注释行**:注释里提到一个函数名不是一处调用点。
+            # 不跳的话写一句解释性注释就会把名单弄红,而真要新增调用点的人只会
+            # 顺手改名单 —— 那就把这条用例从「拦住新调用点」变成了「拦住写注释」。
             hits = [ln for ln in py.read_text(encoding='utf-8').splitlines()
-                    if call.search(ln) and not ln.lstrip().startswith('def ')]
+                    if call.search(ln)
+                    and not ln.lstrip().startswith(('def ', '#'))]
             if hits:
                 found[py.relative_to(ROOT).as_posix()] = len(hits)
         self.assertEqual({'kb/cli.py': 1, 'kb/extract.py': 2,

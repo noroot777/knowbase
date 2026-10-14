@@ -53,11 +53,18 @@
   记放下**,顺序不能反;③**异常要接住**;④**摘哪些 tag 只有一份口径**(`STALE_TAG_PREFIXES` + `keep_tags`,只摘
   `topic/` 和 `entity/`,`flag/软广` 和人工 tag 留着)。不清 `promo_level`,也不动 `store.upsert_document` 的
   `extracted_at` 语义。
-- **一次提取的结果要和它基于的那份正文绑在一起**(`extract.body_fingerprint` + `save_extraction(..., body_seen=)`)。
-  **两道判据各管一种时序、缺一不可**:①**索引还没扫到当前这份 md**(`store.doc_needs_reindex`);②**索引里那份正
-  文已经不是我读到的那一份**。判据待在 `save_extraction` 里,**读 chunks 正文 + 有模型往返的那三条路径**必须传指纹
+- **一次提取的结果要和它基于的那**组**输入绑在一起 —— 标题 + 账号 + 正文,不只是正文**
+  (`extract.input_fingerprint` + `save_extraction(..., input_seen=)`)。那两样同样进 prompt(软广判定按「这个号在
+  卖什么」读文末那段),换掉任何一样这个结论就不再是针对当前那篇文章的。
+  **两道判据各管一种时序、缺一不可**:①**索引还没扫到当前这份 md**(`store.doc_needs_reindex`);②**索引里那组输
+  入已经不是我读到的那一组**。判据待在 `save_extraction` 里,**读 chunks 正文 + 有模型往返的那三条路径**必须传指纹
   (`kb/cli.py`、`kb/pipeline_stages.py`、`scripts/extract_parallel.py`),不读正文的两条不传。**`StaleBody` 不是故
   障**,三条路径一律归到「跳过」。
+- **那三条路的模型输入一律从 `extract.model_input` 一个口子取,四样同属一条语句的快照。** 原先标题和账号是从待提取
+  名单里带过来的、正文稍后另读一次 —— 两次读之间另一条连接的索引可以把这一篇整篇换掉,于是**模型收到旧标题配新正文**,
+  判出来的结论落在一份没人写过的东西上,而按正文比的那道判据看不出任何异常(正文确实是当前那一份)。软广那一档的后果
+  最重:一篇已经改成普通教程的文章被判 hard 永久隐藏,`extracted_at` 一落就掉出所有待办。**account 也必须传进模型** ——
+  原来只有管道那条路传了,另两条没传,同一篇文章在三条路上判出不同结果(口径只有一份)。
 - **校验本身给不了保证,它必须和写入在同一个协调区间里**(`extract.commit_extraction`:维护锁 → `BEGIN IMMEDIATE`
   → 锁内校验 → 落库 → 提交 → 回写),锁内还要先问一次「这一篇还在吗」。**粒度仍然是每篇各取一次锁、模型请求留在锁
   外。** 反过来,**md 压根读不出来(清理正把它删掉)不算「版本不对」,照旧放行。**
@@ -324,7 +331,7 @@
   绑死了,测试没法把它指到临时库上去);常态下那条查询是空集合,一次连接都不开。
   **测试里 `config.DB_PATH` 必须指到 tmp**,理由同 `maintenance.DATA_DIR` 那条。
 - **一次提取的结果要和它基于的那份正文绑在一起**(`extract.body_fingerprint` +
-  `_require_current_body`,`save_extraction(..., body_seen=)`)。上面那条作废只负责
+  `_require_current_input`,`save_extraction(..., input_seen=)`)。上面那条作废只负责
   「把这一篇排回待提取队列」,它管不住**此刻正在提取的那一轮**读的是哪一份正文 ——
   而补抓把「几十字的跳转壳」换成整篇文章,正是把「模型读走旧壳 → 期间正文换新并
   重新索引 → 旧结论落库」从一种边角变成了**常规时序**。拦不住的后果是**永久的**:
@@ -338,8 +345,9 @@
     export → index → extract,可旁路的一轮 `kb extract` 正好落在这个缝里:
     `retire_stale` 已经把它排回待提取集合了,而 `store.doc_body` 拼的是**索引里**
     那份 chunks,读出来还是旧壳。**那一刻 chunks 压根没动过,所以 ② 对它是瞎的。**
-  ②**索引里那份正文已经不是我读到的那一份**(`body_fingerprint(doc_body(...)) !=
-    body_seen`)。这是「旧正文的提取请求在途、模型回包晚于全文更新」那一档 ——
+  ②**索引里那组输入已经不是我读到的那一组**(`model_input(conn, path)["seen"] !=
+    input_seen`,盖的是标题 + 账号 + 正文)。这是「旧正文的提取请求在途、模型回包
+    晚于全文更新」那一档 ——
     中间那次 index 已经把 chunks 换成新正文、`content_hash` 跟着对上了文件,
     **所以 ① 对它是瞎的。**
   **判据待在 `save_extraction` 里,不在调用方各判一遍。** 四个调用点分两档:读
@@ -373,8 +381,8 @@
   那会把 kb.db 写锁排在维护锁前面」:**那是把"顺序"当成了"要不要"** —— 先取
   维护锁、再 `BEGIN IMMEDIATE` 就是正确的锁序,和 `sync._claim_write`、清理
   脚本的 `_apply` 一个写法。
-  **回写那一侧也带上版本、锁内复查一次**(`writeback_extraction(..., body_seen=)`
-  过同一份 `_body_moved`,口径只有这一份)。正常路径上协调区间已经把 ② 那个窗口
+  **回写那一侧也带上版本、锁内复查一次**(`writeback_extraction(..., input_seen=)`
+  过同一份 `_input_moved`,口径只有这一份)。正常路径上协调区间已经把 ② 那个窗口
   关掉了,所以这一道是**这个公开入口自己的契约**:谁在锁外隔着一段时间拿一份
   基于旧正文的结果来回写都该被挡下。返回 False、不抛异常 —— 判定要么已经落库、
   要么由落库那道挡掉了,这里没有坏事发生。

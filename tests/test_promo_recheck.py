@@ -61,7 +61,11 @@ def _md(body: str, flagged: bool, path: str = PATH) -> str:
     「每篇各按自己那一版的号判」和「整组共用代表篇那一版的号」就区分不出来。
     """
     flag = f"  - {extract.PROMO_TAG}\n" if flagged else ""
-    return (f'---\ntitle: "稿子"\nurl: "https://example.org/{Path(path).stem}"\n'
+    # **account 要写进 frontmatter**:库里那一列就是索引从这里读出来的
+    # (`scanner.frontmatter_input`),只给库不给 md 等于摆出一个真实数据里不存在
+    # 的状态 —— 而交付前那道「磁盘上那组输入进索引了吗」正是拿这两边比。
+    return (f'---\ntitle: "稿子"\naccount: "{ACCOUNT}"\n'
+            f'url: "https://example.org/{Path(path).stem}"\n'
             f'tags:\n  - source/dr-gzh\n{flag}---\n{body}\n')
 
 
@@ -568,9 +572,9 @@ class AtomicDeliveryTest(_Fixture):
     def test_a_frontmatter_only_edit_still_lets_the_flag_come_off(self):
         """别的流程只改过 frontmatter(正文一个字没动)—— 改判照样摘得掉那行。
 
-        反过来钉住上一条的代价:回写那一侧**不许**比正文指纹。`_body_moved` 的
-        第一道比的是整个**文件**的 hash,只改 frontmatter 也会让它说"版本不对";
-        传下去的话这一次完全合法的改判就被判成作废,末态是库里 none、
+        反过来钉住上一条的代价:回写那一侧**不许**比整份文件。`_input_moved` 的
+        第一道比的是整个**文件**的 hash,改了别的 frontmatter 字段也会让它说
+        "版本不对";传下去的话这一次完全合法的改判就被判成作废,末态是库里 none、
         frontmatter 还挂着 flag —— 下一次索引按 frontmatter 重建 `doc_tags`,
         错的那行又回来了,而 `promo_level` 已经非空、默认补判再也不会选它。
         """
