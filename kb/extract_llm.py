@@ -128,11 +128,17 @@ def clip_body(body: str, head: int = BODY_HEAD, tail: int = BODY_TAIL) -> str:
     return f"{body[:head]}\n\n……(中间略)……\n\n{body[-tail:]}"
 
 
-def normalize_promo(raw) -> dict:
+def normalize_promo(raw, strict: bool = False) -> dict:
     """把模型给的 promo 归一成 {level, reason}。
 
     认不出的一律落 none:软广判定是「宁可漏、不可错杀」——错杀会让一篇正常
     文章连同它的实体一起从条目化和检索里消失,而漏判只是留着一篇广告。
+
+    **这条兜底只在「这一篇还没有结论」时成立**,`strict=True` 就是给另一种
+    场合用的:这一篇**已经有**结论、这次是去覆盖它(存量重判)。那时兜底的
+    none 不再是「保守」而是「把已经判出来的 hard 擦掉」——广告重新进检索、
+    `flag/软广` 一起摘掉,而调用方以为自己拿到了一个判定。所以严格模式下
+    认不出就抛 `ValueError`,由调用方重试或扣留,**不许返回「确定没有」**。
     """
     if isinstance(raw, str):                    # 模型偶尔直接给 "hard"
         raw = {"level": raw}
@@ -140,6 +146,8 @@ def normalize_promo(raw) -> dict:
         raw = {}
     level = str(raw.get("level") or "").strip().lower()
     if level not in PROMO_LEVELS:
+        if strict:
+            raise ValueError(f"没有拿到合法的 level: {str(raw)[:120]}")
         level = "none"
     return {"level": level, "reason": str(raw.get("reason") or "").strip()[:200]}
 
@@ -180,10 +188,15 @@ def _extract_once(title: str, body: str, timeout: int, account: str = "") -> dic
 
 
 def judge_promo(title: str, body: str, account: str = "",
-                timeout: int = 120) -> dict:
+                timeout: int = 120, require_verdict: bool = False) -> dict:
     """只判软广,不重做 entity/topic/summary(存量补判走这条)。
 
     重试语义与 extract_with_llm 一致:坏 JSON 原地重试一次,API 报错直接抛。
+
+    `require_verdict=True` 把「回包里没有合法 level」也算进那次重试,两次都
+    拿不到就抛 —— **重判已有结论的那条路必须给它开**,否则一个 `{}` 回包会
+    经 `normalize_promo` 的兜底变成「这篇不是广告」,把已经判出来的 hard 擦掉
+    (判据和理由都在 `normalize_promo` 的 strict 那一段)。
     """
     from kb.llm import chat
     from kb.llm_stages import stage_model
@@ -199,7 +212,8 @@ def judge_promo(title: str, body: str, account: str = "",
             last_err = ValueError(f"输出里没有 JSON: {out[:200]}")
             continue
         try:
-            return normalize_promo(json.loads(m.group(0)))
-        except json.JSONDecodeError as e:
+            return normalize_promo(json.loads(m.group(0)),
+                                   strict=require_verdict)
+        except (json.JSONDecodeError, ValueError) as e:
             last_err = e
     raise last_err

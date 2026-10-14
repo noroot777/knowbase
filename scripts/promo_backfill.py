@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb import store                                            # noqa: E402
 from kb.extract import (PROMO_HEAD, PROMO_TAIL, PROMO_TAG,       # noqa: E402
-                        judge_promo, pending_promo_docs,
+                        body_fingerprint, judge_promo, pending_promo_docs,
                         save_promo, sync_promo_tag)
 
 # 软广只在公众号来源里成气候。dr(英文博客/HN 汇总)与 pre_tagged 的视频系
@@ -78,15 +78,22 @@ def _scope_args(args) -> tuple[list[str], bool]:
 
 def _candidates(conn, limit: int = 0, accounts: list[str] | None = None,
                 recheck: bool = False) -> list[dict]:
-    """待补判的文档 + 正文。正文为空的跳过(判不了,也没内容可污染)。"""
+    """待补判的文档 + 正文。正文为空的跳过(判不了,也没内容可污染)。
+
+    正文和**它所属的那一版** `content_hash` 从 `store.doc_body_version` 一条
+    语句里读:拆成两句的话,两句之间另一条连接的索引就可能把这一篇换版,于是
+    带回来的版本号指着一份我们没读过的正文,后面那道条件写反而会放行
+    (理由同 `kb.extract.mark_no_body` / `store.doc_body_version`)。
+    """
     rows = pending_promo_docs(conn, SOURCES, limit, accounts, recheck)
     out = []
     for r in rows:
-        body = store.doc_body(conn, r["path"])
+        version, body = store.doc_body_version(conn, r["path"])
         if not body.strip():
             continue
         out.append({"path": r["path"], "title": r["title"],
-                    "account": r["account"], "body": body})
+                    "account": r["account"], "body": body,
+                    "version": version, "seen": body_fingerprint(body)})
     return out
 
 
@@ -156,12 +163,16 @@ def cmd_scan(args) -> int:
     return 0
 
 
-def _judge_group(group: list[dict]) -> tuple[list[dict], dict]:
+def _judge_group(group: list[dict],
+                 require_verdict: bool = False) -> tuple[list[dict], dict]:
+    """判一组里的代表篇。重判时要求回包带明确判定,见 `judge_promo`。"""
     rep = group[0]
-    return group, judge_promo(rep["title"], rep["body"], rep["account"])
+    return group, judge_promo(rep["title"], rep["body"], rep["account"],
+                              require_verdict=require_verdict)
 
 
-def _flag_in_vault(conn, path: str, level: str, stale: bool) -> None:
+def _flag_in_vault(conn, path: str, level: str, stale: bool,
+                   body_seen: str | None = None) -> None:
     """把 flag/软广 在 md frontmatter 里对齐到当前判定,跟提取流水线一个做法。
 
     只写 doc_tags 是留不住的:下次这篇文档内容有变动、走到 upsert_document 时,
@@ -179,7 +190,7 @@ def _flag_in_vault(conn, path: str, level: str, stale: bool) -> None:
     每篇再各等 `KB_MAINT_LOCK_WAIT` 才是更坏的一种。
     """
     try:
-        sync_promo_tag(conn, path, level, stale)
+        sync_promo_tag(conn, path, level, stale, body_seen)
     except OSError as e:
         print(f"      (同步 {path} 的 {PROMO_TAG} 失败: {e})", flush=True)
 
@@ -187,8 +198,9 @@ def _flag_in_vault(conn, path: str, level: str, stale: bool) -> None:
 def cmd_run(args) -> int:
     conn = store.connect()
     try:
+        accounts, recheck = _scope_args(args)
         cands = _candidates(conn, args.limit * 4 if args.limit else 0,
-                            *_scope_args(args))
+                            accounts, recheck)
         groups = _group(cands)
         if args.limit:
             groups = groups[: args.limit]
@@ -199,25 +211,38 @@ def cmd_run(args) -> int:
             print("[promo] --dry-run,不实际调用")
             return 0
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        done = failed = hard = soft = 0
+        done = failed = hard = soft = skipped = 0
         with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-            futs = [pool.submit(_judge_group, g) for g in groups]
+            futs = [pool.submit(_judge_group, g, recheck) for g in groups]
             for i, fut in enumerate(as_completed(futs), 1):
                 try:
                     group, promo = fut.result()
                 except Exception as e:
+                    # 重判时「回包里没有合法 level」也走到这里(judge_promo 的
+                    # require_verdict):**这一篇的旧结论一个字没动**,下次重跑。
                     failed += 1
                     print(f"[{i}/{len(groups)}] FAIL {str(e)[:120]}", flush=True)
                     continue
                 reason = promo["reason"]
                 flags = []
+                wrote = 0
                 for j, c in enumerate(group):
                     p = dict(promo)
                     if j:   # 广播给同稿副本,注明结论不是它自己判的
                         p["reason"] = f"{reason}(同稿判定:{group[0]['path']})"
-                    stale = save_promo(conn, c["path"], p, now)
-                    flags.append((c["path"], p["level"], stale))
+                    written, stale = save_promo(conn, c["path"], p, now,
+                                                c["version"])
+                    if not written:
+                        # 读走正文到现在这一篇换版了(补抓 → 导出 → 索引)。
+                        # 新那版多半已由正常提取判过,旧结论不许盖上去;如实
+                        # 记成跳过,下一轮按新版重判(见 save_promo 的条件写)。
+                        skipped += 1
+                        print(f"[{i}/{len(groups)}] 跳过(正文已换版) "
+                              f"{c['path']}", flush=True)
+                        continue
+                    flags.append((c["path"], p["level"], stale, c["seen"]))
                     done += 1
+                    wrote += 1
                 # 整组判定先落盘,**再**逐篇回写 —— 和另外三条提取路径同一个时序。
                 # 回写要取 kb.maintenance 那把维护锁,而 SQLite 的写锁不认它:
                 # 攥着这一组没提交的写事务去等锁,持锁的清理会卡在自己的 DELETE
@@ -225,19 +250,22 @@ def cmd_run(args) -> int:
                 # 审查实测)。共用入口自己也会 flush,这里写明顺序是为了在调用
                 # 点上就看得出来。
                 conn.commit()
-                for path, level, stale in flags:
-                    _flag_in_vault(conn, path, level, stale)
+                for path, level, stale, seen in flags:
+                    _flag_in_vault(conn, path, level, stale, seen)
                 conn.commit()
-                if promo["level"] == "hard":
-                    hard += len(group)
-                    print(f"[{i}/{len(groups)}] 软广 ×{len(group)} "
+                # 计数按**实际写进去的**篇数,不按组的长度 —— 换版跳过的那几篇
+                # 什么都没写,算进去就是报一个没发生的结果。
+                if promo["level"] == "hard" and wrote:
+                    hard += wrote
+                    print(f"[{i}/{len(groups)}] 软广 ×{wrote} "
                           f"{group[0]['title'][:34]} — {reason[:40]}", flush=True)
                 elif promo["level"] == "soft":
-                    soft += len(group)
+                    soft += wrote
                 if i % 50 == 0:
                     print(f"[{i}/{len(groups)}] 已判 {done} 篇", flush=True)
         print(f"[promo] 完成: 判定 {done} 篇,hard {hard},soft {soft},"
-              f"失败组 {failed}(失败的下次重跑)", flush=True)
+              f"失败组 {failed},跳过 {skipped} 篇(失败和跳过的下次重跑)",
+              flush=True)
     finally:
         conn.close()
     return 0

@@ -300,9 +300,13 @@ class CallSiteTests(unittest.TestCase):
                  'scripts/extract_parallel.py': 'commit_extraction(\n                    conn, path, data, seen,'}
     # 裸 `save_extraction(` 剩下的那几处都是**不读 chunks 正文**的:条目化就地
     # 入库走 `parse_pretagged` 解 frontmatter(同步、没有模型往返,三处:索引那
-    # 两条入口 + `pretagged_refresh.py`),软广补判经 `sync_promo_tag` 进来、只改
-    # promo —— 它们没有"基于哪一份正文"可言,传指纹反而会把一次合法的刷新判成
-    # 作废。按**文件**比,所以 `kb/cli.py` / `kb/pipeline_stages.py` 两边都在
+    # 两条入口 + `pretagged_refresh.py`)—— 它们没有"基于哪一份正文"可言。
+    # **软广补判不在这张名单上,不是因为它不用校验**:它照样读 chunks 正文、照样
+    # 等模型回包那几十秒,所以两头都校验 —— 落库侧判据进 `save_promo` 的 UPDATE
+    # WHERE(比 `content_hash`,0 行就是拒绝),回写侧经 `sync_promo_tag` 把指纹
+    # 透传给 `writeback_extraction`。它压根不是 `save_extraction` 的调用方,这条
+    # grep 看不见它,那两道闸由 `tests/test_promo_recheck.py` 钉着。
+    # 按**文件**比,所以 `kb/cli.py` / `kb/pipeline_stages.py` 两边都在
     # (它们各有一条 LLM 路径和一条条目化路径);「LLM 那三条真的走了协调入口」
     # 由上面那张字面量锚点的表钉住。
     PLAIN_PATHS = {'kb/cli.py', 'kb/extract.py', 'kb/pipeline_stages.py',

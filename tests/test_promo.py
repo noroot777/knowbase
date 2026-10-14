@@ -467,8 +467,9 @@ class ReclassifyVaultTest(unittest.TestCase):
 
     def _judge(self, level: str):
         with mock.patch.object(extract, "VAULT_ROOT", self.vault):
-            stale = extract.save_promo(self.conn, "a.md",
-                                       {"level": level, "reason": "r"})
+            written, stale = extract.save_promo(self.conn, "a.md",
+                                                {"level": level, "reason": "r"})
+            self.assertTrue(written)
             extract.sync_promo_tag(self.conn, "a.md", level, stale)
         self.conn.commit()
         return stale
