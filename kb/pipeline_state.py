@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from contextlib import contextmanager
 from copy import deepcopy
@@ -17,6 +18,26 @@ from datetime import datetime
 from kb.config import DATA_DIR
 
 _STATE_FILE = DATA_DIR / "pipeline_state.json"
+
+# 给人翻的那几轮,**单独一个文件**。不和 `_STATE_FILE` 合并:那一份喂的是「重试
+# 失败项」的范围派生(`pipeline_retry` 从它恢复 crawl_filter / export_filter /
+# 失败名单),而那条路径读错一个字段的后果是**静默不抓** —— 用户点重试、面板报
+# 「已跳过」,该补的那几条一个都没抓(见 docs/decisions/retry-scope.md)。拿一条
+# 不可恢复的路径去换一个只读展示不值,所以那份文件的形状一个字节都没动,代价是
+# 最新那一轮在两处各存一份(约 6 KB),有意的冗余。
+_HISTORY_KEEP = 20
+
+
+def _history_file():
+    """历史文件就在 `_STATE_FILE` 旁边。
+
+    **从它派生,不另立一个模块变量**:测试隔离落盘状态时 patch 的是 `_STATE_FILE`
+    (`tests/test_pipeline_stop.py` 那一套),另立一个的话每个走到 `_end_run()` 的
+    测试都得记着再 patch 一次 —— 漏掉的那个会去写**生产**那份历史,而漏没漏在
+    测试输出上一个字都看不见(同 `maintenance.DATA_DIR` 那条)。派生之后隔离点
+    只有一个,不可能漏。
+    """
+    return _STATE_FILE.with_name(f"{_STATE_FILE.stem}_runs{_STATE_FILE.suffix}")
 
 STAGES = ("crawl", "export", "index", "extract", "projects", "wiki")
 
@@ -59,6 +80,8 @@ _run_seq = 0
 # (2026-09-30 第 3 轮审查实测)。只留最近几轮:够覆盖"等的那一轮刚被接替"这个
 # 窄窗口,又不让状态无限长。
 _finished: dict[str, dict] = {}
+# 跟落盘那份历史的 `_HISTORY_KEEP` **不是一个数,也不该统一**:这一份只为"等的那
+# 一轮刚被接替"这个窄窗口,几轮就够;那一份是给人翻的,留得住两三周才有用。
 _FINISHED_KEEP = 8
 
 
@@ -233,6 +256,72 @@ def _save_last_run() -> None:
         pass
 
 
+def _run_record() -> dict:
+    """这一轮的终态,给人翻的那一份。
+
+    字段取「面板渲染一轮运行要哪些」那一套(`pipe_view.js` 的 `renderPipeState`),
+    不含 `export_filter` / `crawl_retry` —— 那两个是重试派生用的,只有最新那一轮
+    的才有意义。
+    """
+    return {
+        "run_id": _state.get("run_id", ""),
+        "started_at": _state["started_at"],
+        "finished_at": _state["finished_at"],
+        "stopped": bool(_state.get("stopped", False)),
+        "run_kind": _state.get("run_kind", ""),
+        "planned_stages": _state.get("planned_stages"),
+        "stages": deepcopy(_state["stages"]),
+        "crawl_filter": deepcopy(_state["crawl_filter"]),
+        "log": list(_state["log"]),
+    }
+
+
+def _save_history() -> None:
+    """把这一轮的终态记进历史。
+
+    **按 run id 幂等**(身份非空时):同一轮重复落盘时替换那一条、不追加 —— 否则一次
+    重复调用就在历史里留下两条一模一样的记录,而它们的区别只有写入顺序。
+
+    **原子换文件**:面板那条读历史的请求随时在跑,而这份文件比状态文件大得多
+    (带着每轮 80 行日志),截断重写的窗口里读到的是半截 JSON(同
+    `docs/decisions/llm-stages.md` 那条)。写失败只是少一条历史记录,不出声 ——
+    这一份是只读展示,它写不写得上不该影响这一轮同步的结论。
+    """
+    record = _run_record()
+    rid = record["run_id"]
+    # **空身份一律追加,不去重。** 空串不是身份 —— 拿它当键会把两轮各自跑过的运行
+    # 合成一条(没经过 `start_pipeline` 的那条路身份就是空的)。历史里少一轮是静默
+    # 丢数据,多留一条只是多一行。
+    runs = [r for r in load_history() if not rid or r.get("run_id") != rid]
+    runs.insert(0, record)
+    del runs[_HISTORY_KEEP:]
+    path = _history_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"runs": runs}, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def load_history() -> list[dict]:
+    """最近几轮的终态,**最新排在最前**。
+
+    文件还没有、读不出来、或者内容不是预期的形状,一律空列表 —— 这一份是只读
+    展示,报错不如少显示几行。
+    """
+    try:
+        raw = json.loads(_history_file().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    runs = raw.get("runs") if isinstance(raw, dict) else None
+    if not isinstance(runs, list):
+        return []
+    return [r for r in runs if isinstance(r, dict)]
+
+
 def load_last_run() -> dict | None:
     try:
         return json.loads(_STATE_FILE.read_text(encoding="utf-8"))
@@ -280,6 +369,8 @@ def _end_run() -> None:
         _state["finished_at"] = _now()
         _log("同步已停止，已完成的结果保留" if stopped else "管道结束")
         _save_last_run()
+        # 历史在状态文件**之后**写:那一份承重(重试范围从它派生),这一份只给人翻。
+        _save_history()
         # 收尾状态按 run id 留一份,再把 running 放下:等这一轮的人晚一步来取
         # 也还拿得到自己那一轮的结果(阶段修正已经在上面做完了,存的就是终态)。
         run_id = _state.get("run_id") or ""

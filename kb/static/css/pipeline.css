@@ -56,6 +56,27 @@
 #pipe-log { font: 12px/1.9 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pipe-log-footer { padding: 11px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
 .pipe-log-footer > :last-child { margin-left: auto; }
+/* 历史运行:一行一轮,点进去整屏按那一轮渲染。一轮的红很容易在被人看见之前就被
+   下一轮覆盖掉,这是唯一查得到它的地方。 */
+.pipe-history-panel { background: white; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-top: 20px; }
+.pipe-history-empty { padding: 18px 20px; font-size: 13px; color: var(--muted); }
+.pipe-history-row { display: grid; grid-template-columns: 5.5em 3em minmax(0,1fr) auto; align-items: center; gap: 14px;
+  width: 100%; padding: 13px 20px; border: none; border-bottom: 1px solid var(--line); border-radius: 0;
+  background: none; text-align: left; font-size: 13px; color: var(--ink); cursor: pointer; white-space: normal; }
+.pipe-history-row:last-child { border-bottom: none; }
+.pipe-history-row:hover { background: var(--paper); }
+.pipe-history-row.on { background: var(--brand-tint); }
+.pipe-history-when { font: 12px var(--font-mono); color: var(--ink-2); }
+.pipe-history-kind { color: var(--muted); font-size: 12px; }
+.pipe-history-where { color: var(--ink-2); overflow-wrap: anywhere; }
+.pipe-history-result { font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.pipe-history-row[data-status=error] .pipe-history-result { color: var(--danger); }
+.pipe-history-row[data-status=ok] .pipe-history-result { color: var(--ok); }
+@media (max-width: 720px) {
+  .pipe-history-row { grid-template-columns: 5.5em minmax(0,1fr); row-gap: 4px; }
+  .pipe-history-result { grid-column: 2; justify-self: start; }
+}
+
 /* 每日定时同步:原来是「我的订阅」页尾一张常驻大卡片,把正文阅读区挤成一条缝,
    而它一天也调不了一次。现在收进这个弹窗,入口是页头上那颗带状态的按钮。 */
 .sched-modal { width: min(640px, 94vw); max-height: 90dvh; overflow-y: auto; }

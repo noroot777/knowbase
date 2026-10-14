@@ -81,6 +81,19 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     return state
 
 
+@router.get("/api/pipeline/runs")
+def pipeline_runs():
+    """最近几轮同步的终态,最新在前。
+
+    **面板上那份当前状态只留最后一轮**,而一轮的红很容易在被人看见之前就被下一轮
+    覆盖掉:上午那轮翻译报了 503、导出阶段判了红,晚上一次「重试失败项」跑完,
+    面板上就只剩那一轮的结论了 —— 那个红没有任何地方查得到。所以历史单独落一份。
+
+    形状和 `/api/pipeline/status` 里的 `last_run` 一致,前端用同一套渲染。
+    """
+    return {"runs": pl.load_history()}
+
+
 class ChannelScope(BaseModel):
     """一次同步里的一个来源:抓它的哪些订阅。accounts 空 = 该来源的全部订阅。"""
 

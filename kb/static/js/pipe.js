@@ -78,6 +78,7 @@ async function refreshPipe(withPending = false) {
       renderPipeState(s);
       if (wasRunning && !s.running) {
         refreshPipePending();
+        loadPipeHistory();
         // 来源连接卡在「我的订阅」的公众号视图上,只有它亮着才值得探一次
         if (!$('subs-wechat').hidden) refreshPipeSource();
         pipeJson('/api/stats').then(stats => {
@@ -87,7 +88,10 @@ async function refreshPipe(withPending = false) {
       } else if (newResult) {
         // 没见过 running 的那一轮:只把积压数补上,不弹「已结束」——
         // 这条路也会在页面打开期间别处跑完一轮时走到，弹窗就成了噪音。
+        // **历史照旧要刷**:那一轮也该在列表里留档,而它恰恰是最容易没人看见的
+        // 那一档(几百毫秒就结束、或者后台定时跑的)。
         refreshPipePending();
+        loadPipeHistory();
       }
     } catch (e) {
       if (version !== pipeStatusVersion) return;
@@ -179,7 +183,9 @@ function renderPipeButtons() {
   // Opening a draft is local; only the actual start requires a confirmed connection.
   $('pipe-run').disabled = running || !!pipeAction;
   $('pipe-run').textContent = pipeAction === 'start' ? '正在启动…' : running ? pipeRunLabel(pipeSnapshot) + '进行中' : '新建同步';
-  $('pipe-retry').disabled = !pipeConnected || running || !!pipeAction;
+  // 翻历史时按不下去 —— 见 pipe_view.js 里那道 hidden 旁边的理由
+  $('pipe-retry').disabled = !pipeConnected || running || !!pipeAction
+    || (typeof pipeViewing !== 'undefined' && !!pipeViewing);
   $('pipe-retry').textContent = pipeAction === 'retry' ? '正在启动重试…' : '重试失败项';
   $('pipe-stop').hidden = !running || !pipeSnapshot?.stop_supported;
   $('pipe-stop').disabled = !pipeConnected || !!pipeAction || !!pipeSnapshot?.stop_requested;
