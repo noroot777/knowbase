@@ -170,6 +170,19 @@ def save_settings(enabled: bool, time_str: str, channels: list[str] | None = Non
 
 
 def _write_settings(**changes) -> None:
+    """改定时状态的那几格(last_fired / next_run / 失败计数)并落盘。
+
+    **调用方必须已经持着 `_lock`,而且从"算出要写什么"到这里是同一个临界区。**
+    不然就有这条(第 5 轮用真实工作线程确定性复现):起跑那一步算好了「下一次 =
+    今天 08:00」,还没写进去,工作线程先收尾、在锁里把配置写成「明天 07:30」;
+    这一步再拿着那份更旧的参数写一遍,盘上就倒退成今天 08:00 —— 当天由账本的
+    done 挡住看不出异常,**第二天 00:05 那一跳就判到期**,凌晨跑出一份日报,
+    到了 07:30 反而因为"今天已经跑过"不再生成。
+    原子替换只保证一份文件不会写一半,**保证不了两次更新的先后**。
+    """
+    if not _lock._is_owned():          # noqa: SLF001 - RLock 自带的持有判断
+        raise RuntimeError('改定时状态要在 _lock 里:判断、账本、算参数、写盘'
+                           '必须是同一个临界区(见本函数 docstring)')
     with _lock:
         try:
             cur = _raw_settings()
@@ -230,14 +243,18 @@ def _mark_attempt(now: datetime, day: str) -> None:
     **账本先推进,再去写盘。** 盘上那份写不进去是常事(配置一时读不出、满盘),
     而"下一次最早什么时候"跟着写失败一起丢掉的话,30 秒后这一跳又判到期 ——
     失败的日报会每 30 秒重起一轮,各花一次模型钱(第 3 轮实测 3 分钟 7 轮)。
+
+    **判断 done、推进账本、算参数、写盘必须在同一把锁里**(见 `_write_settings`):
+    中间放开锁的话,工作线程的收尾能插进来,然后这一步拿更旧的计划把它盖回去。
     """
-    book = _book.book(day)
-    if book.done:
-        # 这一轮跑得极快,已经收尾了(出报成功 / 补满次数):它写的 last_fired 和
-        # "明天那一格"才是最新的,这里再写一次会把明天那一格盖成今天 + 30 分钟。
-        return
-    book.attempt((now + RETRY_AFTER).isoformat(timespec='minutes'))
-    _write_settings(next_run=book.next_due)
+    with _lock:
+        book = _book.book(day)
+        if book.done:
+            # 这一轮已经收尾了(出报成功 / 补满次数):它写的 last_fired 和"明天那
+            # 一格"才是最新的,这里再写一次会把明天那一格盖成今天 + 30 分钟。
+            return
+        book.attempt((now + RETRY_AFTER).isoformat(timespec='minutes'))
+        _write_settings(next_run=book.next_due)
 
 
 def _finish_schedule(day: str, retry: bool) -> None:
@@ -618,20 +635,23 @@ def tick() -> bool:
         # 一次写失败就会让同一天再自动跑一整轮(还要再花一次模型钱)。
         if book.done or today == s['last_fired'] or _report_done(today):
             return False
-    # **退避是"受理过一轮"的记账,不是"试过一下"的记账。** 下面这两步都可能
-    # 一轮都没起来:起跑前还要再读一次设置(可能一时读不出),`start` 自己也会
-    # 拒(别人占着、一个来源都没剩)。在它们之前就把下一次推后 30 分钟的话,一次
-    # 瞬时失败就把今天的日报推迟半小时,而本来下一跳(30 秒后)就能恢复。
-    try:
-        settings = load_settings()
-    except ScheduleUnreadable as e:
-        announce_config_issue('日报定时设置', f'{e};这一跳跳过,定时暂停')
-        return False
-    # 定时这一轮不指定窗口:起点接上一份日报的截止时刻,终点是同步跑完的那一刻。
-    started = start(sync=settings['sync'], channels=settings['channels'],
-                    first_days=settings['first_days'], trigger='schedule', sched_day=today)
-    if started:
-        # 受理了才记:账本先推进再写盘(见 `_mark_attempt`)。这一轮可能已经在这几
-        # 毫秒里收尾了 —— 那一步写的退避更新,`attempt` 只许往后推,不会盖回去。
-        _mark_attempt(now, today)
-    return started
+        # **退避是"受理过一轮"的记账,不是"试过一下"的记账。** 下面这两步都可能
+        # 一轮都没起来:起跑前还要再读一次设置(可能一时读不出),`start` 自己也会
+        # 拒(别人占着、一个来源都没剩)。在它们之前就把下一次推后 30 分钟的话,
+        # 一次瞬时失败就把今天的日报推迟半小时,而本来下一跳(30 秒后)就能恢复。
+        try:
+            settings = load_settings()
+        except ScheduleUnreadable as e:
+            announce_config_issue('日报定时设置', f'{e};这一跳跳过,定时暂停')
+            return False
+        # **受理和记账在同一个临界区里。** 放开锁再记的话,`start` 起的那条工作线程
+        # 能在"算好下一次"和"写进去"之间收尾,于是更旧的计划把它的收尾计划盖回去
+        # (第 5 轮真实线程实测:第二天 00:05 就跑出一份日报)。工作线程一进来就要
+        # 这把锁(`_set` / `_log` / `_finish_schedule`),所以它只会排在这之后。
+        # 定时这一轮不指定窗口:起点接上一份日报的截止时刻,终点是同步跑完的那一刻。
+        started = start(sync=settings['sync'], channels=settings['channels'],
+                        first_days=settings['first_days'],
+                        trigger='schedule', sched_day=today)
+        if started:
+            _mark_attempt(now, today)      # 受理了才记
+        return started

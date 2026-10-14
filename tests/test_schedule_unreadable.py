@@ -13,6 +13,9 @@
 
 **反过来钉一边**:没有这个文件(还没设置过)照旧是干干净净的「未启用」——
 一律按"不知道"处理会让新装的库永远说不清自己开没开。
+
+**账本那几组在 `tests/test_schedule_ledger.py`**(同日不重复跑、补跑的退避与次数、
+受理边界、起跑记账与收尾的竞态):拆出去只因为 700 行上限。
 """
 import json
 import os
@@ -162,7 +165,8 @@ class DailySettingsUnreadableTests(_Base):
         一时读不出(权限、介质)。"""
         broken = '{"enabled": true, "time": "09:00"'
         self.path.write_text(broken, encoding='utf-8')
-        daily_run._write_settings(next_run='2026-10-14T08:00')
+        with daily_run._lock:          # 产品里这一步一定在锁里(见 _write_settings)
+            daily_run._write_settings(next_run='2026-10-14T08:00')
         self.assertEqual(broken, self.path.read_text(encoding='utf-8'))
 
     def test_saving_refuses_instead_of_resetting_the_file(self):
@@ -229,7 +233,8 @@ class SettingsWriteFailureTests(_Base):
         daily_run.save_settings(True, '09:00', ['rss'], True, 1)
         before = self.path.read_bytes()
         with patch('kb.config.os.replace', Mock(side_effect=OSError('配额不够'))):
-            daily_run._write_settings(next_run='2026-10-15T08:00')
+            with daily_run._lock:      # 同上:回写只发生在临界区里
+                daily_run._write_settings(next_run='2026-10-15T08:00')
         self.assertEqual(before, self.path.read_bytes())
         self.assertTrue(daily_run.load_settings()['enabled'])
         self.assertTrue(any('没能写进磁盘' in line for line in self.said), self.said)
@@ -360,239 +365,6 @@ class TaskIsolationTests(_Base):
                 patch.object(daily_run, 'is_running', Mock(return_value=False)):
             pipeline._scheduler_tick()
         self.assertTrue(any('日报那边炸了' in line for line in self.said), self.said)
-
-
-class SameDayRerunTests(unittest.TestCase):
-    """**不许用"配置里没写上当天标记"证明"当天还没跑过"。**
-
-    两条定时都是"先起跑、再回写当天标记"。回写那一步失败(配置一时读不出、满盘、
-    进程在写之前被杀)之后,只认盘上那一格的话:等到下一跳,同一天又会自动跑一整
-    轮 —— 日报那一轮要再花一次模型钱,页头那一轮要再跑一遍六段(含 extract)。
-    没有重启、也没有用户点重试。所以进程里另记一格,**而且它只记"今天到此为止",
-    不记"今天起过"**(起过 ≠ 出报:一次模型 502 之后同一天还要补几次)。
-    """
-
-    def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.path = Path(temp.name) / 'cfg.json'
-        for p in (patch.object(daily_run, 'SETTINGS_FILE', self.path),
-                  patch.object(pipeline, '_SCHED_FILE', self.path),
-                  patch.object(daily_run, '_log'), patch.object(pipeline, '_log'),
-                  patch('kb.config._announced', {}),
-                  patch.object(daily_run, '_report_done', Mock(return_value=False))):
-            p.start(); self.addCleanup(p.stop)
-        self.said: list[str] = []
-        for module in (daily_run, pipeline):      # 接住"留原因"那句话,顺带别刷屏
-            p = patch.object(module, 'announce_config_issue',
-                             lambda what, reason: self.said.append(f'{what}:{reason}'))
-            p.start(); self.addCleanup(p.stop)
-        self.clock = Mock(wraps=datetime)
-        # 保存那一刻要**早于**定时时刻:保存只安排下一次、绝不补跑今天已经过去的
-        # 时刻,在 07:30 存一条 07:30 的定时会被排到明天,"到点了"压根不成立。
-        self.clock.now.return_value = datetime(2026, 10, 15, 7, 0)
-        for p in (patch.object(daily_run, 'datetime', self.clock),
-                  patch.object(pipeline, 'datetime', self.clock)):
-            p.start(); self.addCleanup(p.stop)
-
-    def at(self, hour: int, minute: int, day: int = 15) -> None:
-        self.clock.now.return_value = datetime(2026, 10, day, hour, minute)
-
-    def test_the_daily_round_does_not_run_twice_when_the_mark_is_lost(self):
-        daily_run.save_settings(True, '07:30', ['rss'], True, 1)
-        self.at(7, 30)
-        with patch.object(daily_run, 'start', Mock(return_value=True)) as start:
-            self.assertTrue(daily_run.tick())
-            start.assert_called_once()
-            # 收尾那一步读不出配置(权限/介质),当天标记没能写上
-            with patch.object(daily_run, '_raw_settings',
-                              Mock(side_effect=ScheduleUnreadable('一时读不出'))):
-                daily_run._finish_schedule('2026-10-15', retry=False)
-            self.assertEqual('', daily_run.load_settings()['last_fired'])
-            self.assertTrue(any('一时读不出' in line for line in self.said), self.said)
-            # 盘上没有标记,但今天已经跑完了 —— 下一跳不许再起一轮
-            self.at(8, 5)
-            self.assertFalse(daily_run.tick())
-            self.assertEqual(1, start.call_count)
-            # 反过来钉一边:**第二天照常跑**(别把定时永久按住)
-            self.at(7, 30, day=16)
-            self.assertTrue(daily_run.tick())
-
-    def test_a_transient_failure_still_gets_its_same_day_retries(self):
-        # 钉边:只记"到此为止"而不是"起过一轮" —— 失败重试那条路不许被挡掉
-        daily_run.save_settings(True, '07:30', ['rss'], True, 1)
-        self.at(7, 30)
-        with patch.object(daily_run, 'start', Mock(return_value=True)) as start:
-            self.assertTrue(daily_run.tick())
-            daily_run._finish_schedule('2026-10-15', retry=True)
-            self.at(8, 5)
-            self.assertTrue(daily_run.tick())
-            self.assertEqual(2, start.call_count)
-
-    def test_the_head_round_does_not_run_twice_when_the_mark_is_lost(self):
-        pipeline.save_schedule(True, '07:30', ['rss'])
-        self.at(7, 30)
-        with patch.object(pipeline, 'start_pipeline', Mock(return_value=True)) as start, \
-                patch('kb.config.os.replace', Mock(side_effect=OSError('配额不够'))):
-            self.assertTrue(pipeline._fire_head_schedule())   # 起了,但标记写不进去
-            start.assert_called_once()
-        self.assertEqual('', pipeline.load_schedule()['last_fired'])
-        with patch.object(pipeline, 'start_pipeline', Mock(return_value=True)) as start:
-            self.at(8, 5)
-            self.assertFalse(pipeline._fire_head_schedule())
-            start.assert_not_called()
-            self.at(7, 30, day=16)
-            self.assertTrue(pipeline._fire_head_schedule())   # 第二天照常
-
-    def test_todays_report_on_disk_also_counts_as_done(self):
-        """重启之后进程里那一格空了,**已经落盘的产物**仍然作数 —— 它比配置里那个
-        标记更硬(标记可能根本没写上)。查不出来时说"不知道",照常跑。"""
-        daily_run.save_settings(True, '07:30', ['rss'], True, 1)
-        self.at(7, 30)
-        with patch.object(daily_run, 'start', Mock(return_value=True)) as start, \
-                patch.object(daily_run, '_report_done', Mock(return_value=True)):
-            self.assertFalse(daily_run.tick())
-            start.assert_not_called()
-        with patch.object(daily_run, 'start', Mock(return_value=True)) as start, \
-                patch.object(daily_run, '_report_done', Mock(side_effect=OSError)):
-            with self.assertRaises(OSError):
-                daily_run.tick()      # 这一层不吞:吞了就看不出"产物查不了"
-            start.assert_not_called()
-
-
-class RetryBudgetTests(unittest.TestCase):
-    """**不许用「回写没成功」证明「没到次数上限 / 已经可以再试了」。**
-
-    日报失败之后的补跑有两道闸:退避(`RETRY_AFTER`)和次数上限(`MAX_RETRIES`)。
-    两道都持久化在盘上那份配置里(`next_run` / `fail_count`),而那一次回写失败
-    (满盘、配置一时读不出)之后只认盘上那份的话:退避丢了 —— 每一跳(30 秒)都判
-    到期;次数也丢了 —— 每次失败都算第一次。实测形态是**失败的日报每 30 秒重起
-    一轮,三分钟七轮**,每轮各花一次模型钱。
-
-    这两条跟上面 `SameDayRerunTests` 钉的是**同一个不变量的另外两格**:那边钉
-    done(今天跑完了别再起),这边钉 attempt / 退避 / 次数(没跑完也别每 30 秒起)。
-    判据一律落在「下一跳还起不起」和「总共起了几轮」,不看标志位。
-    """
-
-    def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.path = Path(temp.name) / 'cfg.json'
-        for p in (patch.object(daily_run, 'SETTINGS_FILE', self.path),
-                  patch.object(daily_run, '_log'), patch('kb.config._announced', {}),
-                  patch.object(daily_run, '_report_done', Mock(return_value=False))):
-            p.start(); self.addCleanup(p.stop)
-        self.said: list[str] = []
-        p = patch.object(daily_run, 'announce_config_issue',
-                         lambda what, reason: self.said.append(f'{what}:{reason}'))
-        p.start(); self.addCleanup(p.stop)
-        self.clock = Mock(wraps=datetime)
-        self.clock.now.return_value = datetime(2026, 10, 15, 7, 0)   # 保存早于定时时刻
-        p = patch.object(daily_run, 'datetime', self.clock)
-        p.start(); self.addCleanup(p.stop)
-
-    def at(self, hour: int, minute: int, day: int = 15) -> None:
-        self.clock.now.return_value = datetime(2026, 10, day, hour, minute)
-
-    def test_a_failed_round_keeps_its_backoff_and_budget_when_the_write_fails(self):
-        """生成临时失败,而且这一轮的收尾状态**一个字也没能写进盘**。"""
-        daily_run.save_settings(True, '07:30', ['rss'], True, 1)
-        with patch.object(daily_run, 'start', Mock(return_value=True)) as start, \
-                patch('kb.config.os.replace', Mock(side_effect=OSError('满盘'))):
-            self.at(7, 30)
-            self.assertTrue(daily_run.tick())                 # 到点,起了第一轮
-            daily_run._finish_schedule('2026-10-15', retry=True)
-            self.assertEqual(0, daily_run.load_settings()['fail_count'])   # 盘上没记上
-            self.at(7, 31)
-            self.assertFalse(daily_run.tick())                # 退避还在:30 秒后不许再起
-            self.at(8, 5)
-            self.assertTrue(daily_run.tick())                 # 过了退避才补第二次
-            daily_run._finish_schedule('2026-10-15', retry=True)
-            self.at(8, 40)
-            self.assertTrue(daily_run.tick())
-            daily_run._finish_schedule('2026-10-15', retry=True)
-            self.at(9, 20)
-            self.assertFalse(daily_run.tick())                # 补满次数,今天到此为止
-            self.at(23, 59)
-            self.assertFalse(daily_run.tick())
-            self.assertEqual(daily_run.MAX_RETRIES + 1, start.call_count)
-            # 盘上那份从头到尾一个字没改(原子替换守住上一份,见 kb.config)
-            self.assertEqual((0, '', '2026-10-15T07:30'),
-                             tuple(daily_run.load_settings()[k]
-                                   for k in ('fail_count', 'last_fired', 'next_run')))
-        # 反过来钉一边:**第二天照常跑**(昨天补满的次数不许把今天按住)
-        self.at(7, 30, day=16)
-        with patch.object(daily_run, 'start', Mock(return_value=True)) as start:
-            self.assertTrue(daily_run.tick())
-            start.assert_called_once()
-
-    def test_an_unaccepted_start_does_not_spend_the_backoff(self):
-        """**退避是「受理过一轮」的记账,不是「试过一下」的记账。**
-
-        起跑前还要再读一次设置(可能一时读不出),`start` 自己也会拒(别人占着全局
-        管道、一个来源都没剩)。在它们之前就把下一次推后 30 分钟的话,一次瞬时失败
-        就把今天的日报推迟半小时 —— 而本来下一跳(30 秒后)就能恢复。
-        """
-        daily_run.save_settings(True, '07:30', ['rss'], True, 1)
-        # ① `start` 拒了:这一跳一轮都没起,退避不许被消耗
-        self.at(7, 30)
-        with patch.object(daily_run, 'start', Mock(return_value=False)) as start:
-            self.assertFalse(daily_run.tick())
-            start.assert_called_once()
-        self.assertEqual('2026-10-15T07:30', daily_run.load_settings()['next_run'])
-        # ② 起跑前那次读设置一时读不出:同样不许消耗,而且要留原因
-        self.at(7, 31)
-        with patch.object(daily_run, 'start', Mock(return_value=True)) as start, \
-                patch.object(daily_run, 'load_settings',
-                             Mock(side_effect=ScheduleUnreadable('一时读不出'))):
-            self.assertFalse(daily_run.tick())
-            start.assert_not_called()
-        self.assertTrue(any('一时读不出' in line for line in self.said), self.said)
-        self.assertEqual('2026-10-15T07:30', daily_run.load_settings()['next_run'])
-        # ③ 下一跳恢复了就该照常起 —— 前两次都没把今天这一轮推到半小时后
-        self.at(7, 32)
-        with patch.object(daily_run, 'start', Mock(return_value=True)) as start:
-            self.assertTrue(daily_run.tick())
-            start.assert_called_once()
-        self.assertEqual('2026-10-15T08:02', daily_run.load_settings()['next_run'])
-
-    def test_a_round_that_already_finished_is_not_pushed_back(self):
-        """起跑那一轮快到在同一毫秒里就收尾了(不同步、当场报错):**收尾写的那份
-        才是最新的**,记 attempt 不许把「明天那一格」盖成今天 + 30 分钟 —— 盖回去
-        的话第二天那一跳在 00:00 就判到期,日报提前一整天的量跑出来。"""
-        daily_run.save_settings(True, '07:30', ['rss'], True, 1)
-        self.at(7, 30)
-        # start 里"这一轮当场跑完并收尾"(产品里是另一个线程,这里就地做掉)
-        def run_and_finish(**kwargs):
-            daily_run._finish_schedule(kwargs['sched_day'], retry=False)
-            return True
-        with patch.object(daily_run, 'start', Mock(side_effect=run_and_finish)):
-            self.assertTrue(daily_run.tick())
-        s = daily_run.load_settings()
-        self.assertEqual(('2026-10-15', '2026-10-16T07:30'), (s['last_fired'], s['next_run']))
-        # 第二天那一跳还在定时时刻才起
-        self.at(0, 5, day=16)
-        with patch.object(daily_run, 'start', Mock(return_value=True)) as start:
-            self.assertFalse(daily_run.tick())
-        self.at(7, 30, day=16)
-        with patch.object(daily_run, 'start', Mock(return_value=True)) as start:
-            self.assertTrue(daily_run.tick())
-
-
-    def test_the_retry_budget_also_advances_while_the_config_cannot_be_read(self):
-        """收尾那一刻配置读不出来:同样不许把这回失败当成第一次。"""
-        daily_run.save_settings(True, '07:30', ['rss'], True, 1)
-        unreadable = Mock(side_effect=ScheduleUnreadable('一时读不出'))
-        with patch.object(daily_run, 'start', Mock(return_value=True)) as start:
-            for when, expect in (((7, 30), True), ((7, 31), False), ((8, 5), True),
-                                 ((8, 40), True), ((9, 20), False), ((23, 59), False)):
-                self.at(*when)
-                self.assertEqual(expect, daily_run.tick(), when)
-                if expect:
-                    with patch.object(daily_run, '_raw_settings', unreadable):
-                        daily_run._finish_schedule('2026-10-15', retry=True)
-            self.assertEqual(daily_run.MAX_RETRIES + 1, start.call_count)
-        self.assertTrue(any('一时读不出' in line for line in self.said), self.said)
 
 
 if __name__ == '__main__':
