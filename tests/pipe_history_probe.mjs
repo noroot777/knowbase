@@ -62,7 +62,12 @@ const server = createServer((req, res) => {
   // 「这份回包对应哪一轮终态」,口径抄后端 `result_version`:身份没有就用收尾时间,
   // 再没有就是「从没跑过」。空闲时报最新那一轮的、跑着时报正在跑这一轮的。
   const versionOf = r => String((r && (r.run_id || r.finished_at)) || "") || "none";
-  const statusVersion = () => versionOf(state.running ? state : runs?.[0]);
+  // 空闲时报最新那一轮的版本。**跳过无效记录** —— 真后端这一条走的是内存里那份
+  // 终态(`last_result`),它不可能是个 `{}`;mock 从清单首条取,所以得自己跳一下,
+  // 否则历史里混进一行坏记录就让状态端点也报 "none"
+  const latestRun = () => (Array.isArray(runs)
+    ? runs.find(r => r && typeof r === "object" && r.finished_at) : undefined);
+  const statusVersion = () => versionOf(state.running ? state : latestRun());
   if (path === "/api/pipeline/status") {
     // 最新那一轮全绿,但还有 2 项待提取 —— 于是「重试失败项」在最新视图下是**可见**的,
     // 翻历史时藏没藏掉才看得出来
@@ -99,9 +104,15 @@ const server = createServer((req, res) => {
       taken.add(key);
       return key;
     };
-    const body = { runs: Array.isArray(runs)
-                     ? runs.map(r => ({ ...r, version: versionOf(r), key: keyOf(r) })) : runs,
-                   error: runsError, version: versionOf(runs?.[0]) };
+    // 「这一行算不算一轮运行」:真后端过 `valid_round`(是字典、而且有收尾时间)
+    const validOf = r => !!(r && typeof r === "object" && r.finished_at);
+    const rows = Array.isArray(runs)
+      ? runs.map(r => ({ ...r, version: versionOf(r), key: keyOf(r), invalid: !validOf(r) }))
+      : runs;
+    // **清单版本取第一个有效行**(真后端如此):拿无效首行算出来是 "none",和状态
+    // 端点永远对不上,面板就一直提示「历史还没追平」
+    const body = { runs: rows, error: runsError,
+                   version: versionOf(Array.isArray(runs) ? runs.find(validOf) : undefined) };
     if (holdRuns) { const gate = holdRuns; holdRuns = null; return void gate.then(() => json(body)); }
     return json(body);
   }
@@ -621,6 +632,33 @@ check("好的那一行照旧渲染得出来", twoRows && await evalJs(
 check("坏的那一行就地说明,不替换整屏", twoRows && await evalJs(
   `document.getElementById('pipe-history-list').textContent.includes('有一轮记录读不出来')`),
   await evalJs(`document.getElementById('pipe-history-list').textContent.slice(0, 160)`));
+
+// ── 22. 「不算一轮运行」的那种记录:不许显示成一轮成功 ───────────────────────
+// 上一组那条坏记录是**渲染时抛**(时间戳落成数字)。这一组摆的是**不抛的那种**:
+// 一个 `{}`(坏文件、半截写入)。它字段「齐」,照常渲染就是一行「时间未知 · 同步 ·
+// 未记录来源 · 已完成」—— 一轮根本没跑过的「成功」。后端标 `invalid`、前端走同一个
+// 坏行出口。顺带钉住**清单版本取第一个有效行**:拿无效首行算出来和状态端点永远
+// 对不上,面板会一直提示「历史还没追平」,点「重新读取」也不消失。
+await evalJs(`pipeHistory = []; renderPipeHistory(); true`);
+await setup("列表没清空(开局得是已知状态)",
+            until(`document.querySelectorAll('.pipe-history-row').length === 0`, 6000));
+runs = [{}, EVENING, MORNING];
+state = { ...state, ...EVENING, running: false };
+await evalJs(`refreshPipe(); loadPipeHistory(); true`);
+await setup("那份带坏行的清单没应用上去",
+            until(`document.getElementById('pipe-history-list').children.length === 3`, 8000));
+check("坏的那一行没显示成「已完成」", await evalJs(
+  `![...document.querySelectorAll('.pipe-history-row')]
+      .some(e => e.textContent.includes('时间未知'))`),
+  await evalJs(`[...document.querySelectorAll('.pipe-history-row')]
+                 .map(e => e.textContent.replace(/\s+/g, ' ').trim()).join(' | ')`));
+check("它就地说明,两行好的照旧渲染得出来", await evalJs(
+  `document.getElementById('pipe-history-list').textContent.includes('有一轮记录读不出来')
+   && [...document.querySelectorAll('.pipe-history-row')].length === 2`),
+  await evalJs(`document.getElementById('pipe-history-list').textContent.slice(0, 160)`));
+check("清单版本跳过坏行,所以没有永久落后的提示", await evalJs(
+  `PIPE_FRESH.history.applied === PIPE_FRESH.history.desired`),
+  await evalJs(`PIPE_FRESH.history.applied + ' vs ' + PIPE_FRESH.history.desired`));
 
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 

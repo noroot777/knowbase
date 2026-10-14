@@ -53,7 +53,13 @@ def _load_json_strict(path: Path):
     """
     if not path.exists():
         return None
-    return json.loads(path.read_bytes().decode("utf-8", "replace"))
+    got = json.loads(path.read_bytes().decode("utf-8", "replace"))
+    if got is None:
+        # **「文件里是 `null`」不是「文件不存在」。** 两者都返回 `None` 的话,上面
+        # 那些「`None` = 确定没有」的判据就把一份坏文件当成了空库:恢复静默认可
+        # 另一份(可能正是旧的那一轮),追加拿空集合整份替换。
+        raise ValueError(f'{path.name} 存在,但内容是 null')
+    return got
 
 
 def _dump_bytes(obj) -> bytes:
@@ -97,6 +103,16 @@ def _history_runs(raw) -> list[dict]:
     return [r for r in runs if isinstance(r, dict)]
 
 
+def _state_shape_ok(raw) -> bool:
+    """状态文件的根形状:要么文件不存在(`None`),要么是个字典。
+
+    和历史那边(下面)**一个口径** —— 发号、恢复都过它,不在各自那边另写一遍。
+    各写一遍的话两处会在某一档上岔开:发号层把坏根当成「没有记录」照旧发号、恢复
+    层却拒绝,而「这一份算不算有」在两处必须是同一个答案。
+    """
+    return raw is None or isinstance(raw, dict)
+
+
 def _history_shape_ok(raw) -> bool:
     """这份读出来的历史**形状对不对**:要么文件不存在(`None`),要么是
     `{"runs": [...]}`。
@@ -124,9 +140,24 @@ def result_version(run: dict) -> str:
 
 
 
+# 发号世代。**只有同一个世代的号才比得**:单调性是发号那一步的性质,不是数值
+# 本身的性质 —— 换一套发号逻辑就换一个世代,跨世代一律不比(退到位置证据,没有
+# 就报「证明不了」)。老记录没有这个字段,所以它们的号一个都不信。
+_SEQ_GEN = 2
+
+
 def _seq_of(run) -> int:
-    """这一轮的完成序号;没有(升级前的记录)就是 0。"""
-    got = run.get("run_seq") if isinstance(run, dict) else None
+    """这一轮**可信的**完成序号;不可信或者没有就是 0。
+
+    可信的判据是**它出自当前这一代发号逻辑**(`seq_gen`),不是「是个正整数」。
+    老代码在发号读失证时从 1 重新开始,那些**回退号已经落在盘上了**,修了发号也
+    追不回来 —— 单看一个正整数分不出它是哪一代发的,而拿回退号当顺序凭据的后果是
+    「旧那一轮被判成最新」:页头显示它的失败、点「重试失败项」去抓它那个来源。
+    所以**凭据要自己带出处**,没出处的一律当没有。
+    """
+    if not isinstance(run, dict) or run.get("seq_gen") != _SEQ_GEN:
+        return 0
+    got = run.get("run_seq")
     return got if isinstance(got, int) and got > 0 else 0
 
 
@@ -140,6 +171,11 @@ def _valid_round(run) -> bool:
     return isinstance(run, dict) and bool(run.get("finished_at"))
 
 
+# 公开名:历史端点标「这一行有效吗」时过的是**同一个判据** —— 各写一遍的话恢复拒绝
+# 的那种记录会在清单上显示成一轮正常运行。
+valid_round = _valid_round
+
+
 def _newest_round(runs: list[dict], saved: dict | None) -> tuple[dict | None, str]:
     """两份落盘里挑出最新那一轮,并说明这一份**可信到什么程度**。
 
@@ -147,7 +183,8 @@ def _newest_round(runs: list[dict], saved: dict | None) -> tuple[dict | None, st
 
     - `''`      两份对得上、或者顺序凭据证明了谁更新,而且挑中的那份是完整的
     - `'scope'` 挑中的是历史那一份 —— 它**没有重试派生字段**
-    - `'order'` 谁更新**证明不了**(两份都没有顺序凭据,收尾时间也分不出先后)
+    - `'order'` 谁更新**证明不了** —— 两样凭据(同一份历史里的位置、同一代发出来的
+                完成序号)都不成立。**这一档不许用收尾时间凑**,理由在下面
 
     **两份独立可失败的副本加墙上时钟构不成可靠总序。** 实测形态:A 轮的历史没写
     上、紧接着 B 轮的状态没写上,磁盘上状态记着 A、历史只有 B,而两轮**落在同一
@@ -158,12 +195,16 @@ def _newest_round(runs: list[dict], saved: dict | None) -> tuple[dict | None, st
     失败都不影响下一轮继续递增。序号缺失(升级前的记录)时退回历史位置和时间,
     **而那两样都分不出先后时一律报 `order`,不许默认旧那一份完整**。
 
-    **判据按「不依赖别处做对」排序**,不按强弱直觉:位置证据 → 序号 → 收尾时间。
-    序号看着最硬,可它的单调性要靠发号那一步做对,而发号要读磁盘、读得失证时根本
-    发不出来(`_next_seq` 那时返回 0);位置证据只用同一份文件内部的先后次序,这份
-    文件读出来了就成立。序号排在位置前面的败法实测过:发号读失证的那一轮拿到小号
-    落进历史首条,状态文件记着的上一轮号更大 —— 序号这一档当场判出「旧那一轮更
-    新」,而历史里明明还留着它、位置已经证明了它是过去的一轮。
+    **凭据只认两样:同一份历史里的位置、同一代发出来的完成序号。** 墙上时间不在
+    其内 —— 它不是顺序凭据,时钟回拨(手动改、NTP 校正、夏令时)之后后跑完的那一轮
+    时间更早。拿它凑一个「先后」出来,判据就反过来指向旧那一轮,**而且报「完整」**:
+    页头显示旧那一轮的失败、重试可点,点下去抓的是它那个来源。
+
+    **位置排在序号前面**:它只用同一份文件内部的先后次序,这份文件读出来了就成立;
+    序号的单调性要靠发号那一步做对,而发号要读磁盘、读失证时根本发不出来
+    (`_next_seq` 那时返回 0)。反过来的败法实测过:发号读失证的那一轮拿到小号落进
+    历史首条,状态文件记着的上一轮号更大 —— 序号这一档当场判出「旧那一轮更新」,
+    而历史里明明还留着它、位置已经证明了它是过去的一轮。
     """
     saved = saved if _valid_round(saved) else None
     runs = [r for r in runs if _valid_round(r)]
@@ -174,30 +215,23 @@ def _newest_round(runs: list[dict], saved: dict | None) -> tuple[dict | None, st
         return newest, 'scope'
     if result_version(newest) == result_version(saved):
         return saved, ''                       # 同一轮 —— 用完整那一份
-    at_new = str(newest.get("finished_at") or "")
-    at_old = str(saved.get("finished_at") or "")
-    # ① **结构性凭据排在最前**:历史是倒序的,状态文件那一轮出现在首条后面,就证明
-    #    首条更新。它是同一份文件内部的位置关系,**不依赖发号这件事做对** —— 而序号
-    #    是发得出来才有的,发号那一步读失证就没有(见 `_next_seq`)。
+    # ① **结构性凭据**:历史是倒序的,状态文件那一轮出现在首条后面,就证明首条
+    #    更新。它是同一份文件内部的位置关系,**不依赖发号这件事做对** —— 而序号是
+    #    发得出来才有的,发号那一步读失证就没有(见 `_next_seq`)。
     want = result_version(saved)
     if any(result_version(r) == want for r in runs[1:]):
         return newest, 'scope'
-    # ② 完成序号
+    # ② 同一代发出来的完成序号。**不等就是先后**,不拿收尾时间去反驳它 ——
+    #    时钟回拨的时候序号才是对的那一个。
     seq_new, seq_old = _seq_of(newest), _seq_of(saved)
     if seq_new and seq_old and seq_new != seq_old:
-        by_seq = newest if seq_new > seq_old else saved
-        # **序号和收尾时间指向不同的一轮 = 发号一度回退过**(存量记录里就可能有:
-        # 发号那一步读失证时,老代码会从 1 重新开始)。这种时候两样凭据互相矛盾,
-        # **不许挑一个** —— 报「证明不了」,拦住重试,跑完一轮自己就好了。
-        if at_new and at_old and at_new != at_old:
-            if by_seq is not (newest if at_new > at_old else saved):
-                return saved, 'order'
-        return (newest, 'scope') if by_seq is newest else (saved, '')
-    # ③ 两样都证明不了:收尾时间能分出先后就用它,**分不出就如实报「不确定」**
-    if at_new > at_old:
-        return newest, 'scope'
-    if at_new < at_old:
-        return saved, ''
+        return (newest, 'scope') if seq_new > seq_old else (saved, '')
+    # ③ **两样都没有就是证明不了,不许拿墙上时间凑一个。** 这里原来比收尾时间,
+    #    而那不是顺序凭据:时钟回拨(手动改、NTP 校正、夏令时)之后,后跑完的那一轮
+    #    时间更早 —— 判据于是反过来指向旧那一轮,还报「完整」。实测形态:A 轮失败
+    #    (状态写上了、历史没写上)、B 轮成功(历史写上了、状态没写上),两轮的收尾
+    #    时间因为回拨成了 18:30:05 和 18:30:00 —— 重启之后页头显示 A 的失败、重试
+    #    可点,点下去导出阶段收到的是 A 那个来源,而历史里唯一那行写着 B 已完成。
     return saved, 'order'
 
 

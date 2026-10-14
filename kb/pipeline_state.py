@@ -17,16 +17,19 @@ from datetime import datetime
 
 from kb.config import DATA_DIR
 from kb.pipeline_persist import (
+    _SEQ_GEN,
     _dump_bytes,
     _history_runs,
     _history_shape_ok,
     _load_json,
+    _state_shape_ok,
     _load_json_strict,
     _newest_round,
     _seq_of,
     _write_atomic,
     result_version as _version_of,
     row_key as row_key,          # 面板那条历史清单的公开入口,这里只是过一道
+    valid_round as valid_round,  # 同上:历史端点标「这一行有效吗」过的也是它
 )
 
 _STATE_FILE = DATA_DIR / "pipeline_state.json"
@@ -292,7 +295,7 @@ def _next_seq() -> int:
     """
     global _seq_hwm
     try:
-        seen = [_seq_of(_load_json_strict(_STATE_FILE) or {})]
+        seen = [_seq_of(_saved_round_strict() or {})]
         seen += [_seq_of(r) for r in _history_rounds_strict()]
     except Exception:  # noqa: BLE001 - 理由就在上面那段:失证发 0
         return 0
@@ -311,6 +314,14 @@ def _history_rounds_strict() -> list[dict]:
     if not _history_shape_ok(raw):
         raise ValueError(f'历史文件形状不对：{type(raw).__name__}')
     return _history_runs(raw)
+
+
+def _saved_round_strict() -> dict | None:
+    """状态文件里那一轮的**严格版**,口径同上。发号和恢复共用它。"""
+    raw = _load_json_strict(_STATE_FILE)
+    if not _state_shape_ok(raw):
+        raise ValueError(f'状态文件形状不对：{type(raw).__name__}')
+    return raw
 
 
 def _save_last_run() -> None:
@@ -333,6 +344,8 @@ def _save_last_run() -> None:
             "run_id": _state.get("run_id", ""),
             # 完成序号:恢复时靠它分出两份落盘各记着哪一轮
             "run_seq": _state.get("run_seq", 0),
+            # 发号世代:**凭据自己带出处**,老记录那些号一个都不信(`_seq_of`)
+            "seq_gen": _SEQ_GEN,
             "crawl_retry": _state.get("crawl_retry") or {},
             "log": _state["log"],
         }))
@@ -348,6 +361,8 @@ def _run_record() -> dict:
     return {
         "run_id": _state.get("run_id", ""),
         "run_seq": _state.get("run_seq", 0),
+        # 发号世代:**凭据自己带出处**,老记录那些号一个都不信(`_seq_of`)
+        "seq_gen": _SEQ_GEN,
         "started_at": _state["started_at"],
         "finished_at": _state["finished_at"],
         "stopped": bool(_state.get("stopped", False)),
@@ -471,11 +486,11 @@ def _restore_once() -> None:
             _restored = 'ok'
             return
         try:
-            saved = _load_json_strict(_STATE_FILE)
-            # **形状不对和读不出来同一档。** 「可解析但形状不是预期的」当成「这份
-            # 副本没有」的话,恢复就静默认可了另一份 —— 而它可能正是旧的那一轮。
-            if not (saved is None or isinstance(saved, dict)):
-                raise ValueError(f'状态文件形状不对：{type(saved).__name__}')
+            # **形状不对和读不出来同一档**(判据在 `_state_shape_ok` /
+            # `_history_shape_ok`,发号那边过的是同两个):「可解析但形状不是预期
+            # 的」当成「这份副本没有」的话,恢复就静默认可了另一份 —— 而它可能正是
+            # 旧的那一轮。
+            saved = _saved_round_strict()
             runs = _history_rounds_strict()
         except Exception:  # noqa: BLE001 - 理由在 `_load_json_strict` 的 docstring
             # **读不通不许固化成「从没跑过」**:下一次读状态时再试一遍。

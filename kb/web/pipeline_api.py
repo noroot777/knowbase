@@ -116,14 +116,24 @@ def pipeline_runs():
     #   查找要求 `undefined === ''`,那一行看得到却打不开);而完成版本在「两条都
     #   缺身份、收尾时间又相同」时会撞,点较早那行打开的是较新那行。
     #   两件事共用一个字段的话,一边的降级口径就会变成另一边的 bug。
+    # `invalid`:这一行**算不算一轮运行**,判据过的是恢复那边同一个 `valid_round`
+    #   (要是字典、而且有收尾时间)。各写一遍的话恢复拒绝的那种记录会在清单上显示
+    #   成一轮正常运行 —— 实测形态是历史首部多了个 `{}`(坏文件、半截写入),面板上
+    #   那一行写着「时间未知 · 同步 · 未记录来源 · 已完成」,一轮根本没跑过的
+    #   「成功」。
     taken: set[str] = set()
     for run in runs:
         run["version"] = pl.result_version(run)
         run["key"] = pl.row_key(run, taken)
+        run["invalid"] = not pl.valid_round(run)
     # **清单的版本和状态端点同一个口径**,前端才比得出「这份清单是不是最新那一轮
     # 的」。空清单也有值(「从没跑过」),理由在 `result_version` 那边。
+    # **版本取第一个有效行**:拿无效首行去算的话版本是 `none`,而状态端点报的是真实
+    # 那一轮 —— 两边永远对不上,于是面板一直提示「历史还没追平」、补读一直在跑,点
+    # 「重新读取」也不消失。
+    first = next((r for r in runs if not r["invalid"]), {})
     return {"runs": runs, "error": pl.persist_error(),
-            "version": pl.result_version(runs[0] if runs else {})}
+            "version": pl.result_version(first)}
 
 
 class ChannelScope(BaseModel):

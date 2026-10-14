@@ -8,8 +8,10 @@
 顺带钉住了"隔离点只有一个"。另立一个模块变量的话,每个走到 `_end_run()` 的既有
 测试都得记着再 patch 一次,漏掉的那个会去写**生产**那份历史。
 
-「最新那一轮是哪一份」和「重启之后怎么恢复」在 `test_pipeline_restore.py`,
-两边共用这里的 `HistoryCase`。
+「最新那一轮是哪一份」和「重启之后怎么恢复」在 `test_pipeline_restore.py`、
+「两份各记着不同一轮时谁更新」在 `test_pipeline_order.py`,两边都共用这里的
+`HistoryCase` —— 模拟重启(`restart`)和那三种定点注入(两份落盘分别写失败、读失败)
+也放在它身上,因为那三家都要用。
 """
 import json
 import os
@@ -60,6 +62,45 @@ class HistoryCase(TestCase):
             planned_stages=None, current_stage='', run_id=run_id,
             started_at='2026-10-14 09:00:00', finished_at='', crawl_filter={}, log=[],
             stages={name: {'status': 'pending', 'detail': ''} for name in state.STAGES})
+
+    def restart(self):
+        """模拟重启:内存清空、没跑过任何一轮,磁盘那份还在。"""
+        self.reset()
+        state._state.update(
+            running=False, run_id='', started_at='', finished_at='', crawl_filter={},
+            export_filter={}, crawl_retry={}, log=[],
+            stages={name: {'status': '', 'detail': ''} for name in state.STAGES})
+
+    def only_state_write_fails(self):
+        """状态文件写不上、历史写得上 —— 磁盘上最新那一轮**只在历史里**。"""
+        return self._write_fails_on(lambda path: path == state._STATE_FILE)
+
+    def only_history_write_fails(self):
+        """历史写不上、状态写得上 —— 那一轮**不在历史里**(位置证据就此缺失)。"""
+        return self._write_fails_on(lambda path: path != state._STATE_FILE)
+
+    def _write_fails_on(self, hit):
+        real = state._write_atomic
+
+        def pick(path, data):
+            if hit(path):
+                raise PermissionError('read-only')
+            return real(path, data)
+
+        return patch.object(state, '_write_atomic', side_effect=pick)
+
+    def read_fails_on(self, hit):
+        """**注入打在真实的那次 IO 上**(`Path.read_bytes`)。打在
+        `_load_json_strict` 上的话「读不出来一律抛」那一道就被 patch 盖掉了。
+        """
+        real = Path.read_bytes
+
+        def pick(path, *args, **kwargs):
+            if hit(path):
+                raise PermissionError('read-only')
+            return real(path, *args, **kwargs)
+
+        return patch.object(Path, 'read_bytes', pick)
 
     def run_round(self, run_id, export_status, detail, failures=None):
         """跑一轮 crawl + export,export 按给的档位收尾。"""
@@ -394,6 +435,32 @@ class HistoryEndpointTests(HistoryCase):
         keys = [r['key'] for r in runs]
         self.assertEqual(len(keys), len(set(keys)), f'选择键必须逐行唯一:{keys}')
         self.assertTrue(all(keys), '一条都不许是空键')
+
+    def test_an_invalid_row_is_marked_and_never_stamps_the_list(self):
+        """坏行要**标出来**,而且**不许当清单版本凭据**。
+
+        形状没有任何保证(坏文件、半截写入),历史首部多个 `{}` 就够:它不抛、字段
+        「齐」,照常渲染就是一行「时间未知 · 已完成」—— 一轮根本没跑过的「成功」。
+        恢复那边早就拒绝这种记录(`valid_round`),清单这边却照收 —— **同一个判据在
+        两处给出两个答案**,这是要钉的第一件事。
+
+        第二件是版本:拿无效首行算出来是 `none`,而状态端点报的是真实那一轮,两边
+        永远对不上 —— 面板于是一直提示「历史还没追平」、补读一直在跑,点「重新读取」
+        也不消失。所以清单版本取**第一个有效行**。
+        """
+        self.run_round('run-a', 'ok', '已保存 3 条到知识库')
+        raw = json.loads(state._history_file().read_text())
+        raw['runs'].insert(0, {})
+        state._history_file().write_text(json.dumps(raw, ensure_ascii=False))
+
+        got = self.client.get('/api/pipeline/runs').json()
+        self.assertTrue(got['runs'][0]['invalid'], '坏行要标出来')
+        self.assertFalse(got['runs'][1]['invalid'],
+                         '**反过来钉一边**:好行不许被连带标成坏的')
+        self.assertEqual('run-a', got['version'],
+                         '清单版本取第一个有效行,不是 none')
+        self.assertEqual(self.client.get('/api/pipeline/status').json()['result_version'],
+                         got['version'], '于是两个端点照旧对得上,面板不会一直提示落后')
 
     def test_a_normal_row_is_keyed_by_its_completion_sequence(self):
         """**反过来钉一边**:正常跑出来的那几轮各有完成序号,键就按它。"""
