@@ -463,12 +463,18 @@ class Rewriting:
             raise RuntimeError(f"一个协调区间只许写回一次:{self.path}")
         if new_text == self.text:
             return
-        # **先记下要写的那一份,再写。** 顺序反过来不安全:`write_text` 抛在
-        # 截断之后(磁盘满、权限中途变了)时文件已经坏了,而 `new_text` 还是
-        # None —— 收尾那一步就什么也不核对、直接放过去了。记在前面的话它会读到
-        # 一份对不上的内容,如实留着「待索引」。
+        # **先记下要写的那一份,再写。** 顺序反过来不安全:写回抛在半路(磁盘满、
+        # 权限中途变了)时 `new_text` 还是 None —— 收尾那一步就什么也不核对、
+        # 直接放过去了。记在前面的话它会读到一份对不上的内容,如实留着「待索引」。
         self.new_text = new_text
-        self.full.write_text(new_text, encoding="utf-8")
+        # **原子替换,不就地截断** —— 口径只有 `extract_writeback.replace_md`
+        # 这一份(同目录临时文件 → `flush` + `fsync` → `os.replace`)。
+        # `write_text` 是 `open("w")`:先把原文截成 0 字节再写,那中间进程没了
+        # (SIGKILL、OOM、掉电)磁盘上剩的是个空文件,而**这条路连待办都没有**
+        # (tag 回写那一侧至少还有 `promo_tag_pending`)—— 导语补回来的那一篇
+        # 正文就永久没了。函数内 import:那个模块的协调入口反过来要用本模块。
+        from kb.extract_writeback import replace_md
+        replace_md(self.full, new_text)
         self.changed = True
 
     def _settle(self, conn) -> None:

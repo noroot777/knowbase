@@ -114,6 +114,25 @@
   报「待对齐 0 篇」。出口是 `promo_backfill sync-tags`:目标状态就是库里那份判定,所以**不花钱**。脚本把这一档和成功
   **分开报**(`unsynced`),报成功就是说末态是一致的。**反过来钉一边:没被打断的那一次不许留着待办**,不然 `sync-tags` 每次
   把整库重走一遍,真被打断的那几篇淹在里面。
+- **「欠一次对齐」看的是「这次会去对齐 ∧ 库里有明确判定」,不是「这次写进去了没有」**(`extract_promo.promo_tag_owed`,
+  口径只有这一份)。`save_promo` 返回 False 的两档都仍然留着一份明确判定要对齐:兜底的 none 不许盖掉已有结论(于是**复用**
+  旧的那份 hard)、这一版换过版所以一个字都没写(库里还是上一份判定)—— 而回写那一步照旧会按**库里**那份判定去幂等对齐 md
+  那行。把登记挂在「写进去了」上面,这两档就都是裸的:实测补抓过正文的文章带着 hard 重新排进提取、模型这回没给 promo,
+  回写撞上一次 `OSError` 之后末态是库里 hard + md 里没那行 + 待办 0,`sync-tags` 报「待对齐 0 篇」,而 `extracted_at` 已经
+  非空 —— 这一篇掉出所有候选,不花钱那条修复路和默认重提都不会再选中它(三条提取入口各实测一次)。登记发生在**提取那个
+  事务里**(`commit_extraction` 的 `BEGIN IMMEDIATE`),所以「提交完 DB、写 md 之前进程没了」也留得住。**反过来钉一边**:
+  产物里压根没有 promo 字段的那条路(pre_tagged)不碰 md 那行,所以不该替它登记 —— 条件写宽成「库里有判定就登记」的话,
+  没有人会回来清这条待办。
+- **改 md frontmatter 一律原子替换,不许就地截断**(`extract_writeback.replace_md`:同目录临时文件 → `flush` + `fsync` →
+  `os.replace`,两个 tag 写点都走它)。`Path.write_text` 是 `open(mode="w")` —— 它**先把原文件截成 0 字节**再写新内容,
+  那中间进程没了(SIGKILL、OOM、掉电)磁盘上剩的是个空文件,而**待办认不出这件事**:它存的是目标标签,不是原文。实测:在
+  `write` 还没发生的那一刻 SIGKILL,加一行 tag 和摘一行 tag 两个方向都把整篇原文变成 0 字节;重启后 `sync-tags` 修不回来
+  (空文件压根没有 frontmatter,摘标签那一侧还会因为「确实没有这个 tag」把待办**清零**),再索引一次反而把空正文收进库,
+  `doc_body` 从此是空串、阅读页一片空白,正文永久没了。**维护锁防不了这一档**:它挡的是别的协作进程插进来,挡不住本进程
+  在打开写模式之后没了。原子替换把末态收到两个 —— 要么还是原来那一份完整的,要么已经是新的那一份完整的。两处细节都钉着:
+  **临时文件后缀是 `.tmp` 不是 `.md`**(索引扫 `rglob("*.md")`,残骸不许被当成一篇文档)、**权限位沿用原文件**(replace
+  之后留下的是临时文件那个 inode,`mkstemp` 给 0600 会让别的工具读不了它)。**注入写失败要用「目录只读」,不能再用「文件
+  只读」** —— `os.replace` 只要目录的写权限,`mv` 覆盖一个只读文件本来就成功。
 - **索引重建 `doc_tags` 时,`flag/软广` 那一行以库里的判定为准,不以 frontmatter 为准**(`store._align_promo_tag`,判据待在
   两条写语句自己的 WHERE 里)。`upsert_document` 把 doc_tags 整表删掉再按 md 的 tags 重建,而它不碰 `promo_level` —— 于是 md
   里一行过时的 flag 就成了这张表的唯一真相来源,一次完全合法的索引就能把它插回库里,按这个标签过滤的查询从此照旧捞得到这篇
@@ -391,7 +410,9 @@ DB `promo_level=none`、DB flag 已摘、md flag 还在,脚本只打印一句同
 - **对齐完回读确认**(`promo_tag_in_md`,走索引那套 `yaml.safe_load` 的读法),
   对不上就抛 `PromoTagNotAligned` —— 按行删的正则覆盖不到 flow-style
   (`tags: [flag/软广]`),而 `remove_writeback_tag` 的 False 和「本来就没有」
-  长得一模一样;`read_text` 的 `OSError` 也不再静默换成 False;
+  长得一模一样;`read_text` 的 `OSError` 也不再静默换成 False(落库那一侧同理:
+  **「这一刻读不出来」不等于「输入没变」**,只有文件真不在了才放行,见
+  `docs/decisions/fulltext.md` 的输入版本判据那条);
 - **待办在判定提交前就落下**(`promo_tag_pending`,`save_promo` 的最后一句,和判定
   同一个事务),出口是 `promo_backfill sync-tags`(目标状态就是库里那份判定,
   不花钱);脚本把这一档和成功分开报(`unsynced`)。

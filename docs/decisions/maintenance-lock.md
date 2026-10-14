@@ -32,6 +32,12 @@
 - **「改一篇已索引 md 的展示层」只有一个入口:`kb.doc_rewrite.rewriting()`**(读原文 → 变换 → 写回 → 登记
   `content_hash` → 提交,整段在锁里、全程**同一份快照**)。`wiki_daily.step_linkify` 和
   `scripts/backfill_youtube_summaries.py` 两条旁路都走它;绕过去自己 `write_text` + 刷 hash 就等于绕过下面那两道证明。
+- **`Rewriting.write` 写回走原子替换,口径和 tag 回写同一份**(`extract_writeback.replace_md`:同目录临时文件 →
+  `flush` + `fsync` → `os.replace`;前因后果在 `promo.md`)。`write_text` 是 `open("w")`,先把原文截成 0 字节再写,
+  那中间进程没了磁盘上剩的是个空文件 —— 而**这条路连待办都没有**(tag 回写那一侧至少还有 `promo_tag_pending`),
+  导语补回来的那一篇正文就永久没了,下一轮索引还会把空正文收进库。钉在
+  `tests/test_doc_rewrite.py::test_the_write_back_never_truncates_the_file_in_place`(走到替换那一步之前磁盘上
+  还是完整的旧那一份;就地截断那一版压根不会有「替换那一步」)。
 - **登记 `documents.content_hash` = 声明「这份文件已经索引过了」,要三样证明,而且三样都在
   `doc_rewrite.register_written` 这一个边界上 —— 不许在某个调用者里自证。**
   ①**登记的是调用方本次真正写出去的那一份**(交付写出快照,退出前再读一次磁盘比对;管「别人插进来改了这个文件」);

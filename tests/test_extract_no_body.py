@@ -456,7 +456,7 @@ class RefillPlanTests(NoBodyBase, unittest.TestCase):
 
     def _plan(self, detail):
         prev = {"stages": {"extract": {"status": "ok", "detail": detail}}}
-        with patch.object(pipeline_retry, "load_last_run", return_value=prev), \
+        with patch.object(pipeline_retry, "last_result", return_value=prev), \
                 patch.object(pipeline_retry, "refill_script",
                              return_value=Path("/tmp/refill.py")), \
                 patch.object(extract, "pending_docs", return_value=[]):

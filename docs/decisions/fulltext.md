@@ -67,7 +67,15 @@
   原来只有管道那条路传了,另两条没传,同一篇文章在三条路上判出不同结果(口径只有一份)。
 - **校验本身给不了保证,它必须和写入在同一个协调区间里**(`extract.commit_extraction`:维护锁 → `BEGIN IMMEDIATE`
   → 锁内校验 → 落库 → 提交 → 回写),锁内还要先问一次「这一篇还在吗」。**粒度仍然是每篇各取一次锁、模型请求留在锁
-  外。** 反过来,**md 压根读不出来(清理正把它删掉)不算「版本不对」,照旧放行。**
+  外。** **「真的不在了」和「这一刻读不出来」是两档,不是一档**:文件真被清理掉(`FileNotFoundError`)不算「版本不对」
+  照旧放行(由锁内那道「这一篇还在吗」和外键级联管);**别的读取失败一律拒** —— 文件还在、只是没权限或正被别人换着
+  写,那一刻答不出「索引扫到当前这份 md 了吗」,而**「没读到」不等于「证明了没变」**。**索引指纹那一道(②)要问在读
+  磁盘那一道(①)前面**:它只读库、一定问得出结果,反过来排的话一次读取失败会把这道**能**答出来的判据一起跳过。
+- **判「还是不是同一组输入」那一族住在 `kb/extract_version.py`**(`input_fingerprint` / `model_input` / `_input_moved` /
+  `_require_current_input` / `_still_indexed` / `StaleBody`,700 行上限逼出来的第四次拆分)。`kb.extract` **原样再导出**它们,
+  所以 `extract.model_input`、`extract._input_moved` 这些写法和打桩一个字不用改。**要用 `VAULT_ROOT` 一律函数内
+  `from kb.extract import VAULT_ROOT`** —— 夹具打桩的是 `extract.VAULT_ROOT`,在新模块里绑成模块级全局就等于在测试里读真实
+  vault(理由同 `kb.extract_writeback`)。
 - **`documents.content_hash` 的口径抽成了 `scanner.file_hash`。手摆 `documents` 行的测试摆盘必须按它算
   `content_hash`**,否则摆出来的是一个生产里不存在的状态。`_extract_pass` 的 `stats` 一律用 `_new_extract_stats()`
   构造。
@@ -403,6 +411,16 @@
   代价却是实打实的:**回写压根不会被调到,于是 `test_writeback_lock` 那组
   「回写在锁里、读也不许读」对它不再敏感**(把回写那把锁去掉也照样全绿)。
   这道判据只回答「我读到的正文还是当前那一份吗」,"这一篇还在不在"不是它的问题。
+  **但「读不出来」当初和「不在了」合成了一档,那是另一个静默丢数据的末态。**
+  `except OSError` 是**整个函数**提前返回,于是连只读库、压根不会失败的 ② 也一起
+  被跳过:一篇刚更新成普通教程、索引也已经跟上的文章,此刻恰好读不出来(没权限、
+  正被别人换着写),旧稿那次 `hard` 就连同旧摘要和 `extracted_at` 一起落了库。
+  末态是**页面上一切正常、库里全错**:这一篇从普通搜索里消失(按广告隐藏)、点开
+  却是新内容,`kb index` + `kb extract` 连跑都不恢复(`extracted_at` 一设上它再也
+  不进 `pending_docs`),连 `promo_backfill sync-tags` 那条免费修复路都会照着错的
+  `hard` 把广告标签补到新版教程上(2026-10-14 实测三次稳定复现,外加两组页面
+  截图:搜索里只剩另一篇、直接打开却是当前正文)。所以现在分成两档,**误报的代价
+  只是这一篇下一轮重提一次,漏报是永久的**。
   **顺着这条判据抓出了三份测试摆盘的同一个毛病**:`tests/test_promo.py` 的
   `_seed`(写 `content_hash='old'`)、`tests/test_writeback_lock.py` 的
   `seed_gzh` 和 `tests/feed_trim_fixture.py` 的 `seed`(压根不写这一列)都在手摆
@@ -483,6 +501,16 @@
   summary 和 entities 真的空了、md 里那两类 tag 真的没了,外加反过来钉的三条
   —— 还在等翻译时一个字不许动、作废失败时待办留着且下一轮收得掉、**没补抓过的
   条目重导出时旧 tag 照旧原样留着**)
+  + `tests/test_input_unreadable.py`(**磁盘上这一份读不出来时那一组**,8 条 ——
+  按形状单独一个文件,脚手架复用 `test_promo_delivery._Vault`。`chmod(0)` 和
+  `unlink()` 都真做,不打桩 `read_text`。**正反两边都钉**:换版 + 索引跟上 + 读不
+  出来要拒(后果按「下一轮还补不补得回来」钉:判定还是新版那个、摘要没被盖、
+  `extracted_at` 还空着、这一篇还在 `pending_docs` 里),可读换版照样拒(上一条不
+  是靠「读不出来」才拒的),**读不出来而索引里那组压根没变也拒**(① 这一刻答不出
+  话),没人动过的那一篇照旧落库成功(少了它,把判据写成「一律拒」也全绿),文件
+  真不在了照旧放行,软广补判那条路的射程不受影响,外加真实 `cli.cmd_extract`
+  不许把它报成「成功 1」。**「文件真不在了」那条要连判据一起钉**:末态那两行单独
+  立不住 —— 锁内那道「还在吗」会先一步 return False,判据改判成拒也看不出差别。)
   + `tests/test_extraction_body_version.py`(**提取结果跟正文版本绑在一起那一组**,
   19 条 —— 同样按形状单独一个文件,脚手架复用 `test_fulltext_extract_stale.StaleCase`。
   **两种时序各真跑一次**:时序 A 走完 `materialize()`、在索引之前真调一次

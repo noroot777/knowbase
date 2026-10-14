@@ -292,11 +292,15 @@ def translate_retry(kind: str, body: TranslateRetryRequest):
             raise HTTPException(409, '这个范围里等着译的内容在你确认期间变过了'
                                      '（比如这条订阅的「补抓原文正文」被改动）。'
                                      '请回面板看一眼新的条数，再点一次。')
-    if not pipeline.start_pipeline(['export','index','extract'], crawl_filter={
+    # 收下真实原因再报:没起跑的另一种是持久化边界落不下来(理由同 `pipeline_api`)。
+    why: list[str] = []
+    if not pipeline.start_pipeline(['export','index','extract'], refused=why,
+            crawl_filter={
             'channel':kind, 'translate_retry':{'channel':kind,
                                                'source_id':body.source_id,
                                                'scope_sig':body.scope_sig}}):
-        raise HTTPException(409,'其他同步正在运行，请结束后重试；自动同步会顺延')
+        raise HTTPException(409, why[0] if why
+                            else '其他同步正在运行，请结束后重试；自动同步会顺延')
     # 一轮上限是 `translate.MAX_ITEMS`,所以队列比它长时要如实说清这一轮只译得完
     # 一截 —— 不说的话用户点一次、看到数字只掉了 40,会以为按钮漏了东西。
     # `queued` 不含那些已经试满额度、离开队列的,所以总量要把它们加回来 ——
@@ -327,7 +331,10 @@ def sync(kind: str,body: SyncRequest):
     # `kb.extract.pending_docs`):没开过开关的库跑到这一步是「没有待提取的
     # 文档」,一次模型都不调。把它排除在计划外才是错的 —— 那样用户给某条
     # 订阅开了提取,它同步完也不会提取,得等绿泡泡那轮全流程定时同步顺手捎上。
-    if not pipeline.start_pipeline(['crawl','export','index','extract'],crawl_filter={
+    why: list[str] = []
+    if not pipeline.start_pipeline(['crawl','export','index','extract'], refused=why,
+            crawl_filter={
             'channel':kind,'accounts':[str(s['id']) for s in selected], 'force':True}):
-        raise HTTPException(409,'其他同步正在运行，请结束后重试；自动同步会顺延')
+        raise HTTPException(409, why[0] if why
+                            else '其他同步正在运行，请结束后重试；自动同步会顺延')
     return {'ok':True,'detail':'同步已开始，完成后可在全文检索中查找'}

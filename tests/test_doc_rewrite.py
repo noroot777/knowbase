@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-# -*- coding: utf-8 -*-
 """「登记 content_hash 即声明已索引」—— 两条旁路也得证得出来(kb/doc_rewrite.py)。
 
 被测的那件事:`documents.content_hash` 那一句写的是「这份文件已经索引过了」,
@@ -38,6 +37,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -332,6 +332,29 @@ class UncertifiedWriteTests(Vault):
         self.assertTrue(doc.changed)
         self.assertIn("甲", self.disk(rel))
         self.assertNotIn("乙", self.disk(rel))
+
+    def test_the_write_back_never_truncates_the_file_in_place(self):
+        """写回走原子替换:走到替换那一步之前,磁盘上还是完整的旧那一份。
+
+        `write_text` 那一版在这里压根不会有「替换那一步」(钩子一次都不被调到),
+        而它在第一个字节落盘之前就已经把原文截没了。这条路**连待办都没有**:
+        导语补回来的那一篇正文被截成 0 字节之后,没有人会回来补它,下一轮索引
+        还会把空正文收进库。口径和 tag 回写同一份(`extract_writeback.replace_md`)。
+        """
+        rel = self.seed("gzh")
+        before, seen, real = (self.vault / rel).read_bytes(), [], os.replace
+
+        def spy(src, dst):
+            seen.append((self.vault / rel).read_bytes())
+            return real(src, dst)
+
+        with mock.patch.object(os, "replace", spy):
+            with doc_rewrite.rewriting(self.conn, rel) as doc:
+                doc.write(doc.text + "\n甲\n")
+        self.assertEqual([before], seen,
+                         "替换那一步之前磁盘上那一份已经被动过了")
+        self.assertIn("甲", self.disk(rel))
+        self.assertTrue(doc.changed, "夹具压根没写回 —— 这条用例什么也没验到")
 
 
 class MainWritebackTests(Vault):

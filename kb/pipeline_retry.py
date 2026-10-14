@@ -18,15 +18,20 @@ from pathlib import Path
 
 from kb.collectors import active_collector, retry_narrower
 from kb.pipeline_state import (
+    _SEQ_GEN,
     STAGES,
     _end_run,
+    _latest_locked,
     _lock,
     _log,
     _now,
     _stage,
     _state,
-    load_last_run,
+    last_result,
+    mark_open,
     new_run_id,
+    restore_gap,
+    same_round,
     retry_notes,
 )
 from kb.pipeline_stages import (
@@ -159,7 +164,7 @@ def _run_refill() -> None:
            failures=fail_items)
 
 
-def retry_failed_plan(nothing_to_crawl: bool = False) -> list[str]:
+def retry_failed_plan(nothing_to_crawl: bool = False, run: dict | None = None) -> list[str]:
     """按上次运行的失败状态编排重试链(面板全局"重试失败项"按钮的后端)。
 
     `nothing_to_crawl`:上一轮失败的那几个目标现在一个都不用重抓了(它们后来都已
@@ -177,7 +182,12 @@ def retry_failed_plan(nothing_to_crawl: bool = False) -> list[str]:
     status=error,或 detail 里写了失败条数。两边不一致的话按钮会亮着但这里
     返回空计划,用户点下去只收到 409。
     """
-    prev = (load_last_run() or {}).get("stages", {})
+    # **`run` 由调用方传进来,不在这里另读一次。** `start_retry_failed` 的范围和
+    # 计划原来各读一次「最近一次」,两次之间别的窗口或调度器恰好跑完一轮的话,计划
+    # 来自新那一轮的失败、而导出范围还是旧那一轮的来源 —— 实测里重试去抓了订阅 A,
+    # 而导致这个计划的失败发生在订阅 B。缺省自己取是给单独问「有没有失败项」的调
+    # 用方用的。
+    prev = ((last_result() if run is None else run).get("stages") or {})
 
     def _detail(name: str) -> str:
         return (prev.get(name) or {}).get("detail") or ""
@@ -304,10 +314,36 @@ def retry_crawl_scopes(prev: dict) -> list[dict]:
     return scopes
 
 
+# 三档各自说清**为什么这会儿不能重试**,而不是笼统一句「恢复得不完整」——
+# 用户要据此决定下一步(三档都是「跑一次完整同步就好了」,但原因不同)。
+_GAP_REFUSED = {
+    'scope': ('重启时只从历史记录恢复到最新那一轮，这一轮的重试范围没能留档。'
+              '跑一次完整同步之后再重试'),
+    'unknown': ('重启时有一份留档读不出来，核对不了哪一轮是最新的。'
+                '跑一次完整同步之后再重试'),
+    'order': ('磁盘上两份留档各记着不同的一轮，先后分不出来。'
+              '跑一次完整同步之后再重试'),
+    'broken': ('最新那一轮的留档损坏，读不出它的结果和范围，页面显示的是更早一轮。'
+               '跑一次完整同步之后再重试'),
+    'lost': ('上一轮同步的结果一个字都没能留档，页面显示的是更早一轮、已经过期。'
+             '跑一次完整同步之后再重试'),
+}
+
+
 def start_retry_failed() -> tuple[bool, str]:
     """一键重试所有失败项。返回 (started, msg);无失败项或已在跑时 False。"""
-    prev = load_last_run() or {}
-    plan = retry_failed_plan()
+    # **整次重试只取一份快照**,下面的计划、范围、导出范围全从它派生(理由在
+    # `retry_failed_plan` 的 `run` 那段)。
+    prev = last_result()
+    # **欠账要在「有没有失败项」之前问。** 恢复得不完整时手上这份快照本来就不该拿来
+    # 派生计划:最新那一轮的留档坏到渲染不了时 `last_result()` 给的是空字典,计划于是
+    # 也是空的 —— 拒绝理由就成了「上次运行没有失败项」,而真相是「那一轮的留档坏了,
+    # 屏幕上这一轮不是最新的」。两句话会让人做出完全不同的下一步。锁内那一道照旧
+    # 保留(它读的是拿到锁那一刻的欠账,这一道只是**早一道、把话说准**)。
+    gap = restore_gap()
+    if gap:
+        return False, _GAP_REFUSED.get(gap, _GAP_REFUSED['order'])
+    plan = retry_failed_plan(run=prev)
     # **先定计划,只有真要重抓才去问各来源的失败名单。** 问名单要读那个来源自己
     # 的订阅库,而这颗按钮的射程远不止抓取:上一轮只有 index 失败、这会儿订阅库
     # 又恰好打不开(锁着、权限、路径没挂上)时,无条件先问一遍等于让一个跟 index
@@ -321,7 +357,7 @@ def start_retry_failed() -> tuple[bool, str]:
     # 一模一样。
     crawl_resolved = "crawl" in plan and not scopes
     if crawl_resolved:
-        plan = retry_failed_plan(nothing_to_crawl=True)
+        plan = retry_failed_plan(nothing_to_crawl=True, run=prev)
     # **导出范围从上一轮的导出范围恢复,不是从它的抓取范围派生。** 两者在重试轮
     # 里本来就不一样(crawl 收窄、export 照旧走全部来源),而落盘只存一份收窄后
     # 的抓取范围的话,第二次重试就从那份收窄范围再派生一次导出范围 —— 第一次
@@ -343,6 +379,36 @@ def start_retry_failed() -> tuple[bool, str]:
     with _lock:
         if _state["running"]:
             return False, "管道已在运行中"
+        # **取快照到现在这段时间里,别的窗口或调度器可能又跑完了一轮。** 那样上面
+        # 派生出来的计划、抓取范围和导出范围全是**上一轮**的,拿它起跑等于按一份跟
+        # 当前失败毫无关系的范围去抓。身份变了一律拒,让用户再点一次(那一下读到的
+        # 就是新快照)。
+        # **手上这一份不是「可信的最新且完整」时,一律拒绝起跑。** 三档各自的
+        # 后果都是**静默做错事**:范围不全会让导出把失败那个来源摘掉(面板报
+        # 「导出完成 · 已保存 0 条」,而它那几篇一个都没落盘,见 `retry-scope.md`);
+        # 核对不了或先后分不出时,拿到的可能是**上一轮**那份范围 —— 实测里导出
+        # 阶段真去抓了上一轮那个来源,而失败发生在另一个来源上。
+        # **「证明不了最新 / 恢复不了范围」要说出来并拦住,不许默认旧那一份可信。**
+        gap = restore_gap()
+        if gap:
+            return False, _GAP_REFUSED.get(gap, _GAP_REFUSED['order'])
+        # **核对无条件做,而且判据是 `same_round`**(「这两份是不是同一轮」)——
+        # 不是比展示版本。那个版本保证非空、**不保证一轮唯一**:两条都没有身份而
+        # 收尾时间又相同的旧记录版本就会撞,核对于是放行,而手上这份其实已经不是
+        # 最新那一轮了。**这一处要的是 `same_round` 而不是 `same_event`** ——
+        # 它问的是「这期间状态变没变」,而两边同源时(没跑新的一轮)必须判成真,
+        # 那只能靠内容那一级;真又跑完一轮的话,那一轮带着当前世代的身份,身份那一级
+        # 当场判出不等。**「谁是最新」那个问题不在这里问**(那边过 `same_event`)。
+        # 原来是「两边都得有 run_id 才
+        # 比、拿不准一律放行」—— 为的是别把重启后那一档和升级前的老记录误拒,可那
+        # 两档恰好也是**并发窗口**:实测里拿一份没有身份的旧快照、期间另一轮刚成功
+        # 结束,这道核对整条跳过,上一轮失败的那几个订阅又被抓了一遍,而失败其实
+        # 发生在另一个来源上。兼容旧记录是降级比对的事,不是放掉不变量的理由。
+        # **另一边走 `_latest_locked()` 而不是直读 `_state`** —— 跟 `prev` 同一份
+        # 口径(`last_result`)。直读内存的话「恢复还没成功」那一档上两边会岔开:
+        # `prev` 是磁盘上真实那一轮,内存却还是空的,于是每一次重试都被误拒。
+        if not same_round(prev, _latest_locked()):
+            return False, "这期间又跑完了一轮，请重新点一次「重试失败项」"
         # card 标记这一轮会碰哪些阶段:按 STAGES 生成,STAGES 加新阶段也不会漏 key。
         # refill 不是独立卡片,占用 export 那张展示进度。
         card = {s: s in plan for s in STAGES}
@@ -352,15 +418,22 @@ def start_retry_failed() -> tuple[bool, str]:
             detail["crawl"] = RETRY_NOTHING
         # 这条也是一次"新的运行":发个新身份,别让它继承上一轮的 id
         # (日报只停自己那一轮,靠的就是这个 id 不复用)。
+        # **先占住持久化边界,占不住就什么都不改**(口径和理由在
+        # `pipeline_state.mark_open`)—— 重试轮的终态同样只在收尾时写,它一样会整轮
+        # 失证,而失证之后这颗按钮下一次按的就是**上一轮**的范围。
+        begun = {"run_id": new_run_id(), "seq_gen": _SEQ_GEN,
+                 "started_at": _now(), "run_kind": "retry"}
+        err = mark_open(begun)
+        if err:
+            return False, err
         _state.update({
+            **begun,
             "running": True, "current_stage": "", "log": [],
             "stop_requested": False, "stopped": False,
-            "run_id": new_run_id(),
-            "started_at": _now(), "finished_at": "",
+            "finished_at": "",
             "crawl_filter": crawl_filter,
             # 导出范围单独存一份,下一次重试从它恢复(见上面那段)
             "export_filter": export_filter,
-            "run_kind": "retry",
             "planned_stages": [s for s in STAGES if card[s]],
             "stages": {s: {"status": "pending" if card[s] else "skipped",
                            "detail": detail[s]}

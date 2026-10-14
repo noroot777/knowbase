@@ -74,11 +74,66 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     if source:
         selected = channel or (state.get("crawl_filter") or {}).get("channel")
         state["source"] = pl.source_status(_channel(selected))
-    state["last_run"] = pl.load_last_run()
+    # **`last_result()` 而不是 `load_last_run()`** —— 前端空闲时优先渲染这一份
+    # (`pipeResult`),而磁盘那份在最近状态写失败那一轮会落后整整一轮:面板会显示
+    # 上一轮的结论,而日志写着这一轮的失败。判据放在这里一处,前端照旧。
+    latest = pl.last_result() or None
+    state["last_run"] = latest
+    # **这一份回包自证它对应哪一轮终态**,前端拿它当「待处理数 / 历史清单是不是
+    # 这一轮的」的凭据。顶层那几个字段不够:新进程里它们是空的(恢复之后才有),
+    # 而从没跑过任何一轮的新库里永远是空的 —— 前端只好把空串同时当成「还不知道」
+    # 和「已经追平」,两种处理都错过一档(忙着重查 / 永远不补)。
+    # 跑着的时候报的是**正在跑这一轮**的版本,附属数据本来就该等它收尾。
+    state["result_version"] = pl.result_version(state if state["running"] else (latest or {}))
+    # 非空 = 这个进程启动时只从历史恢复到最新那一轮,它的重试范围没留下。面板据此
+    # 把「重试失败项」按不下去并如实说一句(后端那道闸在 `start_retry_failed`)。
+    state["restore_gap"] = pl.restore_gap()
     # 待处理数要扫文件,只有显式要求且空闲时才算
     if pending and not state["running"]:
         state["pending"] = pl.pending_counts(_channel(channel)) if channel else pl.pending_counts()
     return state
+
+
+@router.get("/api/pipeline/runs")
+def pipeline_runs():
+    """最近几轮同步的终态,最新在前。
+
+    **面板上那份当前状态只留最后一轮**,而一轮的红很容易在被人看见之前就被下一轮
+    覆盖掉:上午那轮翻译报了 503、导出阶段判了红,晚上一次「重试失败项」跑完,
+    面板上就只剩那一轮的结论了 —— 那个红没有任何地方查得到。所以历史单独落一份。
+
+    形状和 `/api/pipeline/status` 里的 `last_run` 一致,前端用同一套渲染。
+    """
+    # `error` 如实带上最近一次留档失败的异常类型 —— 留档是旁路,它失败不该声张成
+    # 同步失败(那一轮的结论照旧发布),但也不许静默:只看页面的话,「历史里没有这
+    # 一轮」和「这一轮还没跑过」长得一模一样。
+    runs = pl.load_history()
+    # **每条记录附两个字段,它们是两个不同的契约。**
+    # `version`:这一轮的完成版本,前端拿首条那个判「清单是不是最新那一轮的」——
+    #   所以它要跟状态端点一个口径,空清单也得有值。
+    # `key`:**逐行唯一**的选择键,面板拿它认「点的是哪一行」、再次定位和高亮。
+    #   `run_id` 是后来才加的字段,升级前那几条没有它(属性里是空字符串,点下去
+    #   查找要求 `undefined === ''`,那一行看得到却打不开);而完成版本在「两条都
+    #   缺身份、收尾时间又相同」时会撞,点较早那行打开的是较新那行。
+    #   两件事共用一个字段的话,一边的降级口径就会变成另一边的 bug。
+    # `invalid`:这一行**算不算一轮运行**,判据过的是恢复那边同一个 `valid_round`
+    #   (要是字典、而且有收尾时间)。各写一遍的话恢复拒绝的那种记录会在清单上显示
+    #   成一轮正常运行 —— 实测形态是历史首部多了个 `{}`(坏文件、半截写入),面板上
+    #   那一行写着「时间未知 · 同步 · 未记录来源 · 已完成」,一轮根本没跑过的
+    #   「成功」。
+    taken: set[str] = set()
+    for run in runs:
+        run["version"] = pl.result_version(run)
+        run["key"] = pl.row_key(run, taken)
+        run["invalid"] = not pl.valid_round(run)
+    # **清单的版本和状态端点同一个口径**,前端才比得出「这份清单是不是最新那一轮
+    # 的」。空清单也有值(「从没跑过」),理由在 `result_version` 那边。
+    # **版本取第一个有效行**:拿无效首行去算的话版本是 `none`,而状态端点报的是真实
+    # 那一轮 —— 两边永远对不上,于是面板一直提示「历史还没追平」、补读一直在跑,点
+    # 「重新读取」也不消失。
+    first = next((r for r in runs if not r["invalid"]), {})
+    return {"runs": runs, "error": pl.persist_error(),
+            "version": pl.result_version(first)}
 
 
 class ChannelScope(BaseModel):
@@ -151,8 +206,12 @@ def pipeline_run(body: PipelineRunRequest | None = None):
             "since_date": body.since_date or "",
             "until_date": body.until_date or "",
         })
-    if not pl.start_pipeline(stages, crawl_filter=crawl_filter):
-        raise HTTPException(409, "管道已在运行中")
+    # **收下真实原因再报**:没起跑有两种,而「管道已在运行中」只覆盖一种 —— 另一种
+    # 是这一轮的持久化边界落不下来(数据目录写不进去),照着报前者等于把一个要动手的
+    # 故障说成「等一下再点」。
+    why: list[str] = []
+    if not pl.start_pipeline(stages, crawl_filter=crawl_filter, refused=why):
+        raise HTTPException(409, why[0] if why else "管道已在运行中")
     return {"ok": True}
 
 
