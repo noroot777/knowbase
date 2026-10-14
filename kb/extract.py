@@ -412,12 +412,16 @@ def writeback_extraction(conn, doc_path: str, data: dict,
             # 本来也会抛、异常才是这一档的主路径 —— 这里只保证万一走到刷新,
             # 也不会替谁签一张「已索引」的收据。
             before = ""
-        changed = False
+        # **记住最后一次真正写出去的那一份整文。** 登记那道边界要它当凭据
+        # (`doc_rewrite.register_written` 的第一样证明),事后再读一次磁盘是不
+        # 行的:那一份可能已经是别人的了。两步都可能写文件,后写的那一份才是
+        # 磁盘上该有的,所以用 `or written` 往后盖、不是往前。
+        written: str | None = None
         try:
             if tags:
-                changed = writeback_tags(doc_path, tags)
+                written = writeback_tags(doc_path, tags)
             if has_promo:
-                changed = align_promo_tag(conn, doc_path) or changed
+                written = align_promo_tag(conn, doc_path) or written
         except (OSError, PromoTagNotAligned):
             # **待办不在这里记** —— 它在判定那个事务里就落下了
             # (`save_promo` → `mark_promo_tag_pending`),所以进程在这中间被杀
@@ -431,12 +435,19 @@ def writeback_extraction(conn, doc_path: str, data: dict,
             # **先把已经改掉的文件登记上,再让异常飞出去。** 对齐那一步抛的时候
             # `writeback_tags` 可能已经写过文件了,hash 不刷新只会让下一轮索引
             # 白重建一次(良性);反过来漏刷才是坏的。
-            if changed:
-                refresh_content_hash(conn, doc_path, expect=before)
+            if written is not None:
+                reason = refresh_content_hash(conn, doc_path, written,
+                                              expect=before)
+                if reason:
+                    # **没登记上要出声。** 文件安全地留着「待索引」、下一轮重建
+                    # 就补上了(良性),可这一轮的输出里不说一句的话,「磁盘长期
+                    # 领先于索引」就只能从「每轮都在重建同几篇」里猜。
+                    print(f"回写: {doc_path} 改完没登记已索引({reason}),"
+                          f"留待下一轮重建")
                 # 在锁里提交:攥着 SQLite 写事务走出锁的话,下一个拿到维护锁的
                 # 清理会卡在它的 DELETE 上(SQLite 的写锁不认我们这把锁)。
                 conn.commit()
-        return changed
+        return written is not None
 
 
 def commit_extraction(conn, path: str, data: dict, input_seen: str, *,

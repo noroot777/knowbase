@@ -13,21 +13,28 @@
 import re
 
 
-def writeback_tags(doc_path: str, new_tags: list[str]) -> bool:
-    """把新 tag 合并进 md 的 frontmatter tags 列表。只改 frontmatter,不碰正文。"""
+def writeback_tags(doc_path: str, new_tags: list[str]) -> str | None:
+    """把新 tag 合并进 md 的 frontmatter tags 列表。只改 frontmatter,不碰正文。
+
+    **返回写出去的那一份整文,没改文件返回 None**(原来返回 bool)。改签名是因为
+    登记「这份文件已经索引过了」要的第一样证明是「登记的是本次**写出去**的那一
+    份」,而调用方拿不到它的话,只能事后再读一次磁盘充当凭据 —— 那一份可能已经
+    是别人的了(审查用独立子进程实测过,盖章盖在了外来编辑上)。口径见
+    `kb.doc_rewrite.register_written`。
+    """
     from kb.extract import VAULT_ROOT
 
     full = VAULT_ROOT / doc_path
     text = full.read_text(encoding="utf-8")
     m = re.match(r"\A(---\n.*?\n---\n)", text, re.S)
     if not m:
-        return False
+        return None
     fm_block, body = m.group(1), text[m.end():]
 
     existing = set(re.findall(r"^\s*-\s+(\S+)\s*$", fm_block, re.M))
     to_add = [t for t in new_tags if t not in existing]
     if not to_add:
-        return False
+        return None
 
     add_lines = "".join(f"  - {t}\n" for t in to_add)
     if re.search(r"^tags:\s*$", fm_block, re.M):
@@ -35,15 +42,17 @@ def writeback_tags(doc_path: str, new_tags: list[str]) -> bool:
         new_fm = re.sub(r"\n---\n\Z", f"\n{add_lines}---\n", fm_block)
     else:
         new_fm = re.sub(r"\n---\n\Z", f"\ntags:\n{add_lines}---\n", fm_block)
-    full.write_text(new_fm + body, encoding="utf-8")
-    return True
+    written = new_fm + body
+    full.write_text(written, encoding="utf-8")
+    return written
 
 
-def remove_writeback_tag(doc_path: str, tag: str) -> bool:
+def remove_writeback_tag(doc_path: str, tag: str) -> str | None:
     """从 md frontmatter 的 tags 列表里摘掉一个 tag。writeback_tags 的反向操作。
 
     只删 tags 列表里那一行,正文和其余 frontmatter 一个字节不碰。没有
-    frontmatter、本来就没这个 tag 都返回 False(没改文件)。
+    frontmatter、本来就没这个 tag 都返回 None(没改文件);改了就返回**写出去的
+    那一份整文**(理由同 `writeback_tags`)。
 
     **读不出来不吞。** 原来这里 `read_text` 的 `OSError` 被静默换成 False,
     而 False 跟「本来就没有」长得一模一样 —— 没权限、文件刚被挪走的那次「摘
@@ -63,29 +72,34 @@ def remove_writeback_tag(doc_path: str, tag: str) -> bool:
     text = full.read_text(encoding="utf-8")
     m = re.match(r"\A(---\n.*?\n---\n)", text, re.S)
     if not m:
-        return False
+        return None
     fm_block, body = m.group(1), text[m.end():]
     new_fm = re.sub(
         rf"""^[ \t]*-[ \t]+(?P<q>["']?){re.escape(tag)}(?P=q)[ \t]*\n""", "",
         fm_block, flags=re.M)
     if new_fm == fm_block:
-        return False
-    full.write_text(new_fm + body, encoding="utf-8")
-    return True
+        return None
+    written = new_fm + body
+    full.write_text(written, encoding="utf-8")
+    return written
 
 
-def refresh_content_hash(conn, doc_path: str, expect: str) -> str:
+def refresh_content_hash(conn, doc_path: str, written: str, expect: str) -> str:
     """writeback 改了 frontmatter 后刷新库里的 hash,避免下次 index 无谓重建。
-    正文没变(chunker 只看 body),chunks/FTS/向量都无需动。
     返回空串 = 刷了,非空 = 没刷的原因。
 
-    **判据不在这儿,在 `kb.doc_rewrite.register_indexed`** —— 那一份是「登记
-    `content_hash` 即声明已索引」这个不变量的唯一口径(两样证明:库里记的还是我
-    动手之前那一份、磁盘上那组索引输入还是索引里那一组)。这里只多做一件事:
-    把磁盘上**此刻**那一份读出来交给它。
+    **判据不在这儿,在 `kb.doc_rewrite.register_written`** —— 那一份是「登记
+    `content_hash` 即声明已索引」这个不变量的唯一边界(三样证明:磁盘上此刻还是
+    本次写出去的那一份、这一份现在重新索引一次库里不会变、库里记的还是动手之前
+    那个 hash)。这里剩下的只是转发。
 
-    **读不出来就什么都不刷。** 回写那条路上这一档的主路径本来就是异常(文件刚被
-    清理删掉),这里只保证万一走到刷新也不会替谁签一张「已索引」的收据。
+    **`written` 必须是本次真正写出去的那一份,这里不许自己去读磁盘。** 原来它
+    就是「读一次磁盘、把读到的交给登记」,于是那道「登记的是我写出去的那一份」
+    的证明在这条路上压根不成立:审查用独立子进程在 `writeback_tags` 写完之后
+    只改一行 tag(或 url / published / source / 小节标题),这里读到的就是外来
+    那一份、收据照签,而连跑两趟 `kb index` 都报「未变」—— 新标签查不到、小节
+    标题搜不到,再同步也不恢复。签名改成必须交付写出快照之后,这条路压根没有
+    「读到的」可以充当「写出的」。
 
     **没有「不给 expect」这一档。** 原来它有个无条件分支留给两个「自己刚写完这个
     文件、紧接着刷」的单线程脚本,理由是它们手里没有动手之前那个值 —— 可那个值它
@@ -94,11 +108,6 @@ def refresh_content_hash(conn, doc_path: str, expect: str) -> str:
     碰这一句;这个参数也没有默认值:新调用方要么拿得出动手之前那份 hash,要么
     别刷。
     """
-    from kb.doc_rewrite import register_indexed
-    from kb.extract import VAULT_ROOT
+    from kb.doc_rewrite import register_written
 
-    try:
-        text = (VAULT_ROOT / doc_path).read_text(encoding="utf-8")
-    except OSError as e:
-        return f"读不出来({e})"
-    return register_indexed(conn, doc_path, text, expect)
+    return register_written(conn, doc_path, written, expect)

@@ -101,8 +101,8 @@ class CallSiteRosterTests(unittest.TestCase):
     def test_every_caller_of_the_registration_is_accounted_for(self):
         """登记那张收据的入口只有两个,它们的调用方就这几处。"""
         self.assertEqual({"kb/doc_rewrite.py": 1, "kb/extract_writeback.py": 1},
-                         self.calls("register_indexed"),
-                         "`register_indexed` 多了一个直接调用方 —— 它拿得出"
+                         self.calls("register_written"),
+                         "`register_written` 多了一个直接调用方 —— 它拿得出"
                          "「动手之前那份 hash」和「本次写出去的那一份文本」吗")
         self.assertEqual({"kb/extract.py": 1},
                          self.calls("refresh_content_hash"),
@@ -126,12 +126,64 @@ class CallSiteRosterTests(unittest.TestCase):
                 f"{rel} 的 {fn}() 绕过协调入口自己写 vault")
 
     def test_the_index_input_criterion_has_a_single_source(self):
-        """「那三样一致吗」只有一份实现 —— 补判那道和登记那道共用它。"""
-        self.assertEqual({"kb/doc_rewrite.py": 1, "kb/extract_promo.py": 1},
-                         self.calls("index_input_matches"))
+        """「那三样一致吗」只有一份实现 —— 软广补判用它(**登记不用**)。
+
+        登记那张收据换成了更强的 `index_projection_matches`(整份索引投影),
+        理由见它自己的 docstring:模型输入那三样只是索引写进库的一部分。两道
+        判据各有射程,所以这里连「登记那边没有偷偷退回用这一道」一起钉住。
+        """
+        self.assertEqual({"kb/extract_promo.py": 1},
+                         self.calls("index_input_matches"),
+                         "模型输入那道判据多了一个消费方 —— 它判的是「能不能"
+                         "固化一个判定」,不是「能不能签已索引的收据」")
+        self.assertEqual({"kb/doc_rewrite.py": 1},
+                         self.calls("index_projection_matches"),
+                         "整份索引投影那道判据多了一个调用方,或者登记那边不"
+                         "再过它了")
         promo = (ROOT / "kb/extract_promo.py").read_text(encoding="utf-8")
         self.assertNotIn("input_fingerprint(title, account",
                          promo, "补判那边又自己拼了一遍索引输入指纹")
+
+    def test_the_index_projection_reads_the_same_fields_the_indexer_writes(self):
+        """投影判据比的那几样,要和 `store.upsert_document` 真正写的对得上。
+
+        这是**名单式**的钉法:`upsert_document` 哪天多写一列(或多一张表),
+        判据这边不跟着加,登记就又开始替一份「重新索引会变」的文件签收据,而
+        症状只有「那一列永远是旧值」。所以这里按它的 SQL 枚举列名。
+        """
+        src = (ROOT / "kb/store.py").read_text(encoding="utf-8")
+        head = src[src.index("def upsert_document"):src.index(
+            "def remove_missing_documents")]
+        # documents 的 INSERT 列表(content_hash / indexed_at 不是索引投影:
+        # 前者正是我们要写的,后者是时间戳)
+        cols = re.search(r"INSERT INTO documents \(([^)]*)\)", head, re.S)
+        wrote = {c.strip() for c in cols.group(1).replace("\n", " ").split(",")}
+        self.assertEqual(
+            {"path", "source", "title", "account", "published", "url",
+             "content_hash", "indexed_at"}, wrote,
+            "索引 upsert 的列变了 —— `index_projection_matches` 要跟着改")
+        for table in ("doc_tags", "chunks"):
+            self.assertIn(f"INSERT INTO {table} ", head.replace(" OR IGNORE", ""),
+                          f"索引不再写 {table} 了?判据跟着改")
+        proj = (ROOT / "kb/doc_rewrite.py").read_text(encoding="utf-8")
+        body = proj[proj.index("def index_projection_matches"):
+                    proj.index("def register_written")]
+        for col in ("source", "title", "account", "published", "url"):
+            self.assertIn(f'"{col}"', body, f"投影判据没比 {col}")
+        for table in ("doc_tags", "chunks"):
+            self.assertIn(table, body, f"投影判据没比 {table}")
+
+    def test_every_source_lives_under_the_path_shape_the_fallback_assumes(self):
+        """`source_name_of` 按 `source/<name>/...` 推来源名 —— 钉住这个前提。
+
+        `config.SOURCES` 里每一条现在都是 `root = VAULT_ROOT/"source"/name`。
+        哪天加一条 root 形状不同的来源,那个推法对它就只能退回库里那个值(判据
+        在那一篇上退化一档),这条红是来提醒改判据,不是来拦新来源的。
+        """
+        from kb.config import SOURCES, VAULT_ROOT
+        for src in SOURCES:
+            self.assertEqual(VAULT_ROOT / "source" / src.name, src.root,
+                             f"来源 {src.name} 的 root 不是那个形状了")
 
 
 if __name__ == "__main__":

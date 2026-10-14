@@ -197,9 +197,13 @@ def promo_tag_pending_docs(conn, accounts: list[str] | None = None) -> list[str]
     return [r["path"] for r in rows]
 
 
-def align_promo_tag(conn, doc_path: str) -> bool:
+def align_promo_tag(conn, doc_path: str) -> str | None:
     """把 md frontmatter 里那行 flag 对齐到**库里的判定**,回读确认后才算完。
-    返回「改了文件没有」;没对齐就抛(`OSError` / `PromoTagNotAligned`)。
+    **返回写出去的那一份整文**(没改文件返回 None);没对齐就抛
+    (`OSError` / `PromoTagNotAligned`)。
+
+    返回整文而不是 bool,是因为调用方要把它交给登记那道边界作为「本次写出去的
+    那一份」—— 口径见 `kb.doc_rewrite.register_written`。
 
     **目标状态取库里的 `promo_level`,不取这一次判定的结果,也不取「上一次是
     不是 hard」。** 原来那个信号(`save_promo` 返回的 stale)只在「这一次恰好
@@ -217,9 +221,9 @@ def align_promo_tag(conn, doc_path: str) -> bool:
                        (doc_path,)).fetchone()
     level = (row["promo_level"] if row else "") or ""
     if level not in PROMO_DECIDED:
-        return False
+        return None
     want = level == "hard"
-    changed = (writeback_tags(doc_path, [PROMO_TAG]) if want
+    written = (writeback_tags(doc_path, [PROMO_TAG]) if want
                else remove_writeback_tag(doc_path, PROMO_TAG))
     if promo_tag_in_md(doc_path) != want:
         raise PromoTagNotAligned(
@@ -230,7 +234,7 @@ def align_promo_tag(conn, doc_path: str) -> bool:
     # 把兜底让给了随后那一步的运气。
     mark_promo_tag_pending(conn, doc_path, False)
     conn.commit()
-    return changed
+    return written
 
 
 def sync_promo_tag(conn, doc_path: str, level: str) -> None:

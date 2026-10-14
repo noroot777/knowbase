@@ -421,6 +421,11 @@ class BackfillWritebackTest(unittest.TestCase):
         候选本身从 `store.doc_input_snapshot` 取 —— 和 `_candidates` 同一条
         语句。手写字典的话,交付层哪天多要一样输入(标题、账号都进 prompt)
         夹具就对不上,红出来的是 `KeyError`,证明不了被测的行为。
+
+        **md 上那组 tag 也要进 doc_tags。** 真实索引会把 frontmatter 的每个 tag
+        都插进去,而这里是手工摆盘。少插的话「登记已索引」那道判据从一开始就
+        看到两边不一致(它问的是「现在重新索引一次库里会变吗」),回写那一步于
+        是永远登记不上 —— 红的是 hash 没刷新,看上去像回写坏了。
         """
         md = vault / "a.md"
         text = md.read_text(encoding="utf-8")
@@ -428,6 +433,9 @@ class BackfillWritebackTest(unittest.TestCase):
                           (scanner.file_hash(text),))
         self.conn.execute("INSERT INTO chunks (path, seq, text)"
                           " VALUES ('a.md', 0, ?)", (body,))
+        for tag in scanner.frontmatter_tags(scanner.parse_frontmatter(text)[0]):
+            self.conn.execute("INSERT OR IGNORE INTO doc_tags (path, tag)"
+                              " VALUES ('a.md', ?)", (tag,))
         self.conn.commit()
         return store.doc_input_snapshot(self.conn, "a.md")
 

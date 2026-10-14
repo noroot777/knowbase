@@ -207,7 +207,7 @@ class Vault(unittest.TestCase):
                                              text: str | None = None):
         """把那个独立进程安排在「文件刚写回、还没登记」那一瞬 —— 原缺陷的窗口。
 
-        **注入点必须在写回之后、核对与登记之前。** 挂在 `register_indexed` 上是
+        **注入点必须在写回之后、核对与登记之前。** 挂在 `register_written` 上是
         不够的:核对那一步(再读一次磁盘)在它**之前**就跑完了,子进程插在后面
         只会被下一轮索引正常收掉 —— 那种绿证明不了这个窗口关上了(自测时先踩
         的就是这一脚)。所以挂在 `Rewriting.write` 的返回处,登记与核对两步
@@ -244,3 +244,76 @@ class Vault(unittest.TestCase):
         finally:
             child.stdin.close()               # 它读到 EOF 就退出,锁随之释放
             child.wait(timeout=30)
+
+    # ── 跑主回写那条路 ────────────────────────────────────────────────────────
+
+    def run_main_writeback(self, rel: str, topic: str = "审查复现") -> bool:
+        """真跑 `extract.writeback_extraction`(提取 tag 回写那条主路)。
+
+        **tag 先落库再回写**,顺序和真实链路一致(`save_extraction` 把
+        topic/entity `INSERT OR IGNORE` 进 `doc_tags`、提交,随后才回写 md)——
+        登记那道判据问的是「这一份现在重新索引一次库里会变吗」,所以这一步不做
+        的话,合法回写也会被正确地拒绝,而那不是这几条用例要摆的局。
+        """
+        from kb import extract
+        tag = f"topic/{topic}"
+        self.conn.execute("INSERT OR IGNORE INTO doc_tags (path, tag)"
+                          " VALUES (?, ?)", (rel, tag))
+        self.conn.commit()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            changed = extract.writeback_extraction(
+                self.conn, rel, {"topics": [topic], "entities": []})
+        self.said = out.getvalue()
+        return changed
+
+    @contextlib.contextmanager
+    def rival_slips_in_after_the_main_writeback(self, rel: str, *, lock: bool,
+                                                text: str | None = None):
+        """把独立进程安排在**主回写**刚写完文件、还没登记那一瞬。
+
+        和旁路那个注入点对称(那边挂 `Rewriting.write`),这边挂写文件的那一步
+        `extract_writeback.writeback_tags` 的返回处。原缺陷的窗口就在这里:
+        它之后那句登记原来会**再读一次磁盘**来当凭据。
+        """
+        from kb import extract_writeback
+        seen = {}
+        real = extract_writeback.writeback_tags
+
+        def write_then_rival(doc_path, new_tags):
+            written = real(doc_path, new_tags)
+            if doc_path == rel and "child" not in seen:
+                seen["child"] = self.rival(rel, lock=lock, text=text)
+            return written
+
+        with mock.patch.object(extract_writeback, "writeback_tags",
+                               write_then_rival), \
+             mock.patch("kb.extract.writeback_tags", write_then_rival):
+            yield seen
+
+    def md_with(self, kind: str, *, body: str | None = None,
+                tags: list[str] | None = None, url: str | None = None,
+                published: str | None = None, source: str | None = None,
+                heading: str | None = None) -> str:
+        """照 `md_text` 的模板摆一份,但按需换掉某一样索引看得见的东西。
+
+        五个字段各摆一次:审查那条发现就是「外来编辑只动其中任意一样,模型输入
+        那三样分毫不差」—— 判据只比那三样时全部放行。
+        """
+        source = source or self.SOURCES[kind]
+        tag_lines = "".join(f"  - {t}\n" for t in
+                            (tags if tags is not None
+                             else [f"source/{self.SOURCES[kind]}"]))
+        text = (f'---\ntitle: "并发登记审查"\nsource: {source}\n'
+                f'account: "审查隔离号"\npublished: "{published or "2026-10-14"}"\n'
+                f'url: "{url or f"https://example.invalid/{kind}-race"}"\n'
+                f"tags:\n{tag_lines}---\n")
+        if heading is not None:
+            text += f"## {heading}\n"
+        return text + (body or f"{OLD_TOKEN} 旧版导语与旧版正文。") + "\n"
+
+    def col(self, rel: str, name: str) -> str:
+        """`documents` 里某一列此刻的值(投影判据比的就是这几列)。"""
+        return self.conn.execute(
+            f"SELECT {name} FROM documents WHERE path=?", (rel,)
+        ).fetchone()[name] or ""

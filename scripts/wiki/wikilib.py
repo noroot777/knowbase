@@ -350,7 +350,7 @@ def linkify_text(u: Universe, p: str, text: str) -> str | None:
 
     **改的全是索引看不见的东西**:`scanner.normalize_body` 把双链语法和
     GRAPH_MARK 尾区都剥掉,所以装饰过的这一篇重新索引一次,chunks 一个字不变。
-    「真的没变」由登记那一步自己证一遍(`kb.doc_rewrite.register_indexed`),
+    「真的没变」由登记那一步自己证一遍(`kb.doc_rewrite.register_written`),
     不押在这句话上。
     """
     if GRAPH_MARK in text:

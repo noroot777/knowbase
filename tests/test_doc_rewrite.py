@@ -12,13 +12,19 @@
 只问「**库**里记的还是我动手之前那一份」,答不了「**磁盘**上还是我写的那一份」
 (2026-10-14 审查用独立子进程在两条旁路上都稳定复现了)。
 
-所以判据是两道,**各有射程、缺一不可**(`doc_rewrite.register_indexed`):
+所以判据是三样,**各有射程、缺一不可**(`doc_rewrite.register_written`,
+**所有登记都必经的那一个边界**):
 
-  1. **登记的是本次变换自己写出去的那一份** —— 写回之后再读一次比对。管的是
-     「写回到登记之间磁盘被换掉」。
-  2. **磁盘上那组索引输入(标题/账号/规范化后分块正文)还是索引里那一组** ——
+  1. **登记的是本次变换自己写出去的那一份** —— 调用方交付写出快照,退出前再读
+     一次磁盘比对。管的是「写回到登记之间磁盘被换掉」。**「刚读到」不能充当
+     「刚写出」**:主回写原来就是事后重读磁盘来当凭据,于是这道证明在那条路上
+     压根不成立 —— 审查用独立子进程只改一行 tag(或 url / published / source /
+     小节标题)就让它盖了章。
+  2. **这一份现在重新索引一次,库里不会变**(`index_projection_matches`)——
+     比的是 `store.upsert_document` 真正写进库的每一样,不是模型输入那三样。
      管的是「变换自己越界改了索引看得见的东西」,那一档磁盘上确实是我写的那份,
      ① 对它是瞎的。
+  3. **库里记的还是动手之前那个 hash** —— 条件 UPDATE 自己的 WHERE。
 
 外加一层:整段在维护锁里,认这把锁的那几条路(导出、索引、清理)压根进不来。
 **这一层和上面两道也要各自有红**:子进程认锁时取不到(窗口是关着的),子进程
@@ -211,8 +217,8 @@ class UncertifiedWriteTests(Vault):
         with doc_rewrite.rewriting(self.conn, rel) as doc:
             doc.write(doc.text.replace(OLD_TOKEN, "越界改动的正文"))
         self.assertTrue(doc.changed)
-        self.assertFalse(doc.indexed, "改了索引输入却被认证成「已索引」")
-        self.assertIn("索引输入", doc.reason)
+        self.assertFalse(doc.indexed, "改了索引看得见的东西却被认证成「已索引」")
+        self.assertIn("分块", doc.reason)
         self.assertEqual(v0, self.version(rel))
         self.assertTrue(self.needs_index(rel))
 
@@ -326,6 +332,165 @@ class UncertifiedWriteTests(Vault):
         self.assertTrue(doc.changed)
         self.assertIn("甲", self.disk(rel))
         self.assertNotIn("乙", self.disk(rel))
+
+
+class MainWritebackTests(Vault):
+    """提取的 tag 回写那条主路 —— 和两条旁路同一道边界、同一组证明。
+
+    它原来是另一个形状:`refresh_content_hash` 自己**再读一次磁盘**,把读到的
+    那一份当成「我写出去的那一份」交给登记。于是「登记的是本次写出去的那一份」
+    这道证明在这条路上压根不成立,而那三样模型输入(标题/账号/拼接正文)对下面
+    这五种外来编辑**全都看不出来**:审查按字段逐个实测,五种都被盖了章,连跑
+    两趟 `kb index` 都报「未变 1」——新标签查不到、小节标题搜不到、原文链接和
+    发布日期一直是旧的,再同步也不恢复。
+
+    这条路的消费方有四个(管道 `_extract_pass`、`kb extract --writeback`、
+    `scripts/extract_parallel.py`、软广补判经 `sync_promo_tag` 进来),它们共用
+    这一份,所以这里按**那一份**摆局,不逐个消费方重摆一遍。
+    """
+
+    def assert_a_foreign_edit_is_not_certified(self, **field):
+        """外来编辑只动一样索引看得见的东西 —— 不许登记,下一轮重建要补上。"""
+        rel = self.seed("gzh")
+        v0 = self.version(rel)
+        foreign = self.md_with("gzh", **field)
+        with self.rival_slips_in_after_the_main_writeback(
+                rel, lock=False, text=foreign) as seen:
+            self.assertTrue(self.run_main_writeback(rel), "主回写没改文件")
+        self.assertEqual(0, seen["child"].returncode, seen["child"].stderr)
+        self.assertEqual(foreign, self.disk(rel), "摆盘没摆成「外来那一份在磁盘上」")
+        self.assertEqual(v0, self.version(rel),
+                         "把另一个进程那份未索引的改动认证成「已索引」了")
+        self.assertTrue(self.needs_index(rel), "这一篇不再带着「待索引」")
+        self.assertIn("没登记已索引", self.said, "没登记却一声不出")
+        return rel
+
+    def test_a_foreign_tag_edit_is_not_certified(self):
+        rel = self.assert_a_foreign_edit_is_not_certified(
+            tags=["source/dr-gzh", "topic/手工加的"])
+        self.reindex()
+        self.assertIn("topic/手工加的", self.tags(rel),
+                      "那行手工 tag 永久进不了 doc_tags")
+
+    def test_a_foreign_url_edit_is_not_certified(self):
+        rel = self.assert_a_foreign_edit_is_not_certified(
+            url="https://example.invalid/moved")
+        self.reindex()
+        self.assertEqual("https://example.invalid/moved", self.col(rel, "url"),
+                         "原文链接永远停在旧地址")
+
+    def test_a_foreign_published_edit_is_not_certified(self):
+        rel = self.assert_a_foreign_edit_is_not_certified(published="2026-10-13")
+        self.reindex()
+        self.assertEqual("2026-10-13", self.col(rel, "published"),
+                         "发布日期永远停在旧值,按日期筛选也跟着错")
+
+    def test_a_foreign_source_edit_is_not_certified(self):
+        rel = self.assert_a_foreign_edit_is_not_certified(source="rss")
+        self.reindex()
+        self.assertEqual("rss", self.col(rel, "source"), "来源永远停在旧值")
+
+    def test_a_foreign_heading_edit_is_not_certified(self):
+        """小节标题那一档:拼接正文一个字没动,只有分块的 heading 变了。
+
+        `chunks.heading` 进 `chunks_fts` 的 text_tok,所以搜新标题该命中。判据
+        比的是逐块的 (seq, heading, text) 而不是拼起来的那一串,正是为了这一档。
+        """
+        rel = self.assert_a_foreign_edit_is_not_certified(heading="新小节标题")
+        self.assertEqual([], self.hits("新小节标题"), "摆盘没摆出「还没索引」")
+        self.reindex()
+        self.assertEqual([rel], self.hits("新小节标题"),
+                         "新小节标题永久搜不到 —— 索引被那张假收据跳过了")
+
+    def test_the_written_snapshot_is_what_gets_the_receipt(self):
+        """**第一道自己的红**:外来编辑没动索引投影,收据也不许盖到它头上。
+
+        这一档 ② 是瞎的 —— 别人改的是 `summary:`(或者正文里的双链语法、图谱
+        尾区),`normalize_body` 会把它们剥掉、frontmatter 里那个字段索引压根
+        不读,所以「重新索引一次库里会变吗」的答案确实是「不会」。两道判据的
+        射程在这里分开:**只有「登记的必须是我写出去的那一份」答得出来。**
+
+        要钉的不是「数据丢了」(这一档两种形状末态都安全,投影本来就一致),而是
+        `content_hash` 这一列的**语义只有一个**:它记的是我们验过投影、并且亲手
+        写出去的那一份。盖到别人那份上之后,这一篇从此说「已索引」,而谁都没有
+        对磁盘上**那一份**做过任何证明 —— 下一轮重建会正式过一遍判据,代价只是
+        白重建一次;反过来,② 哪天漏了一样(索引多写一列、判据没跟上)这一道就是
+        仅剩的那一层。
+        """
+        rel = self.seed("gzh")
+        v0 = self.version(rel)
+        # 外来那份要带上**这一轮已经落库**的那个 tag,否则不一致的是它、
+        # 摆出来的就不是「没动索引投影」那一档了
+        foreign = self.md_with(
+            "gzh", tags=[f"source/{self.SOURCES['gzh']}", "topic/审查复现"]
+        ).replace('account: "审查隔离号"',
+                  'account: "审查隔离号"\nsummary: "别人刚写的一句人工摘要"')
+        with self.rival_slips_in_after_the_main_writeback(
+                rel, lock=False, text=foreign) as seen:
+            self.assertTrue(self.run_main_writeback(rel))
+        self.assertEqual(0, seen["child"].returncode, seen["child"].stderr)
+        # 先钉住摆盘:这一档的 ② 确实没有意见
+        self.assertEqual("", doc_rewrite.index_projection_matches(
+            self.conn, rel, self.disk(rel)),
+            "摆盘没摆出「外来编辑没动索引投影」那一档")
+        self.assertEqual(v0, self.version(rel),
+                         "收据盖到了别人那一份上(我写出去的那一份已经没了)")
+        self.assertTrue(self.needs_index(rel),
+                        "这一篇被当成已索引,而磁盘上那一份谁都没证过")
+
+    def test_a_tag_that_has_not_landed_in_the_db_is_not_certified(self):
+        """**第二道自己的红**:回写写进 md 的 tag 还没落库,就不许登记。
+
+        这一档 ① 是瞎的 —— 磁盘上分毫不差就是主回写自己写出去的那一份。真实
+        链路是「落库 → 提交 → 回写 md」,所以两边本该一致;这里把落库那一步
+        去掉,摆的就是「md 领先于 doc_tags」。认证下去,那几个 topic/entity tag
+        永远进不了 `doc_tags`,按标签过滤的枚举和 wiki 层从此照旧看不见它们。
+        """
+        from kb import extract
+        rel = self.seed("gzh")
+        v0 = self.version(rel)
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):      # 落库那一步故意不做
+            self.assertTrue(extract.writeback_extraction(
+                self.conn, rel, {"topics": ["没落库的主题"], "entities": []}))
+        self.assertIn("topic/没落库的主题", self.disk(rel), "tag 没写进 md")
+        # 拒绝的理由必须是投影那一条 —— ① 对这一档没有意见(磁盘上分毫不差
+        # 就是主回写自己写出去的那一份),所以这条红只能由 ② 给出
+        self.assertIn("标签还没进 doc_tags", said.getvalue())
+        self.assertNotIn("不是本次写回的那一份", said.getvalue())
+        self.assertEqual(v0, self.version(rel),
+                         "md 上那组 tag 还没进 doc_tags,却被认证成「已索引」")
+        self.assertTrue(self.needs_index(rel))
+        self.assertIn("没登记已索引", said.getvalue())
+        self.reindex()
+        self.assertIn("topic/没落库的主题", self.tags(rel),
+                      "那组 tag 永久进不了 doc_tags")
+
+    def test_a_legitimate_writeback_still_gets_certified(self):
+        """反过来钉一边:正常那次回写照旧登记得上。
+
+        不钉的话「主回写从此一次都登记不上」也全绿,代价是每轮索引把回写过的
+        整批文章白重建一遍(chunk 重切 + 向量重编码),而且外面看不出来。
+        """
+        rel = self.seed("gzh")
+        v0 = self.version(rel)
+        self.assertTrue(self.run_main_writeback(rel))
+        self.assertIn("topic/审查复现", self.disk(rel), "tag 没写进 frontmatter")
+        self.assertNotEqual(v0, self.version(rel), "正常回写没登记上")
+        self.assertFalse(self.needs_index(rel), "正常回写之后还带着「待索引」")
+        self.assertNotIn("没登记已索引", self.said)
+
+    def test_a_lock_respecting_rival_cannot_get_in_mid_writeback(self):
+        """认锁的那个进程在主回写的窗口里拿不到锁 —— 这条路整段也在锁里。"""
+        rel = self.seed("gzh")
+        with self.rival_slips_in_after_the_main_writeback(
+                rel, lock=True) as seen:
+            self.assertTrue(self.run_main_writeback(rel))
+        child = seen["child"]
+        self.assertNotIn(NEW_TOKEN, self.disk(rel), "认锁的进程却改到了这篇")
+        self.assertNotEqual(0, child.returncode, "它居然拿到了锁")
+        self.assertIn("LockBusy", child.stderr)
+        self.assertFalse(self.needs_index(rel), "窗口关着,这一次该登记上")
 
 
 class BypassBehaviourTests(Vault):

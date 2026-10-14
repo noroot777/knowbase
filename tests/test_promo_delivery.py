@@ -241,9 +241,20 @@ class _Vault(unittest.TestCase):
              version, level))
         self.conn.execute("INSERT INTO chunks (path, seq, text) VALUES (?,0,?)",
                           (path, body))
+        # **md 上那组 tag 要跟着进 doc_tags** —— 这是手工摆盘,不走
+        # `store.upsert_document`,而真实索引会把 frontmatter 的每个 tag 都插
+        # 进去。少插的那几行会让「登记已索引」那道判据从一开始就看到两边不一致
+        # (它问的是「现在重新索引一次库里会变吗」),于是每条用例拒绝的理由都
+        # 变成了「标签还没进库」—— 末态照旧对,各自本来要钉的那个原因却没了。
+        for tag in scanner.frontmatter_tags(
+                scanner.parse_frontmatter(text)[0]):
+            if tag != extract.PROMO_TAG or flagged:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO doc_tags (path, tag) VALUES (?,?)",
+                    (path, tag))
         if flagged:
-            self.conn.execute("INSERT INTO doc_tags (path, tag) VALUES (?,?)",
-                              (path, extract.PROMO_TAG))
+            self.conn.execute("INSERT OR IGNORE INTO doc_tags (path, tag)"
+                              " VALUES (?,?)", (path, extract.PROMO_TAG))
         self.conn.commit()
         return version
 
@@ -424,8 +435,9 @@ class RefreshHashTest(_Vault):
         self.conn.execute("UPDATE documents SET content_hash='别人改之前那一版'"
                           " WHERE path=?", (PATH,))
         self.conn.commit()
-        disk = scanner.file_hash(self.md.read_text(encoding="utf-8"))
-        extract.refresh_content_hash(self.conn, PATH, expect=disk)
+        written = self.md.read_text(encoding="utf-8")
+        extract.refresh_content_hash(self.conn, PATH, written,
+                                     expect=scanner.file_hash(written))
         self.conn.commit()
         self.assertEqual("别人改之前那一版", self.version(),
                          "0 行才是对的末态:这一篇继续带着「待索引」")
@@ -458,14 +470,24 @@ class RefreshHashTest(_Vault):
 
     def test_the_normal_path_still_refreshes(self):
         """反过来钉一边:正常那条路(我动手之前库里记的就是这个文件)照旧刷新,
-        不然每次回写都会让下一轮索引白重建一遍。"""
+        不然每次回写都会让下一轮索引白重建一遍。
+
+        **tag 要同时落库**:真实链路是「落库 → 提交 → 回写 md」
+        (`save_extraction` 把 topic/entity `INSERT OR IGNORE` 进 `doc_tags`,
+        随后 `writeback_extraction` 才去改 frontmatter),所以登记那一步看到的
+        两边本来就是一致的。只写 md 不落库的那一档是**磁盘领先于索引**,新判据
+        拒绝它是对的 —— 那一档在 `tests/test_doc_rewrite.py` 里单独钉着。
+        """
         v1 = self.seed("none", OLD_BODY, flagged=False)
-        self.md.write_text(self.md.read_text(encoding="utf-8").replace(
-            "---\n这是", "  - topic/x\n---\n这是"), encoding="utf-8")
-        extract.refresh_content_hash(self.conn, PATH, expect=v1)
+        self.conn.execute("INSERT OR IGNORE INTO doc_tags (path, tag)"
+                          " VALUES (?, 'topic/x')", (PATH,))
         self.conn.commit()
-        self.assertEqual(scanner.file_hash(self.md.read_text(encoding="utf-8")),
-                         self.version())
+        written = self.md.read_text(encoding="utf-8").replace(
+            "---\n这是", "  - topic/x\n---\n这是")
+        self.md.write_text(written, encoding="utf-8")
+        extract.refresh_content_hash(self.conn, PATH, written, expect=v1)
+        self.conn.commit()
+        self.assertEqual(scanner.file_hash(written), self.version())
 
 
 class TagRepairTest(_Vault):

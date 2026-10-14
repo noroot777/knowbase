@@ -32,18 +32,41 @@
 - **「改一篇已索引 md 的展示层」只有一个入口:`kb.doc_rewrite.rewriting()`**(读原文 → 变换 → 写回 → 登记
   `content_hash` → 提交,整段在锁里、全程**同一份快照**)。`wiki_daily.step_linkify` 和
   `scripts/backfill_youtube_summaries.py` 两条旁路都走它;绕过去自己 `write_text` + 刷 hash 就等于绕过下面那两道证明。
-- **登记 `documents.content_hash` = 声明「这份文件已经索引过了」,要两样证明,少一样都不许登记。**
-  ①**登记的是本次变换自己写出去的那一份**(写回之后再读一次比对,管「别人插进来改了这个文件」);②**磁盘上那组索引输入
-  (标题/账号/规范化后分块正文)还是索引里那一组**(`doc_rewrite.index_input_matches`,管「变换自己越界改了索引看得见的
-  东西」)。**两道互相替不掉**:② 只比模型输入那三样,而索引 upsert 进库的还有 `doc_tags`/`url`/`published` —— 别人只加
-  一行 tag 那种改动 ② 完全看不出来;而越界的变换写出来的文件**就是**我写的那一份,① 对它是瞎的。
+- **登记 `documents.content_hash` = 声明「这份文件已经索引过了」,要三样证明,而且三样都在
+  `doc_rewrite.register_written` 这一个边界上 —— 不许在某个调用者里自证。**
+  ①**登记的是调用方本次真正写出去的那一份**(交付写出快照,退出前再读一次磁盘比对;管「别人插进来改了这个文件」);
+  ②**这一份现在重新索引一次,库里不会变**(`doc_rewrite.index_projection_matches`,管「变换自己越界改了索引看得见的
+  东西」);③**库里记的还是动手之前那个 hash**(条件 UPDATE 自己的 WHERE)。
   **不满足就保留待索引,不是认证**(0 行正是想要的末态)。
-- **① 自己是两件事叠起来的,主次别搞反**:登记用的 hash **取自本次写出去的那一份**(`new_text`),不是退出时重读磁盘的
-  那一份 —— 原来那条旁路正是重读磁盘来算,所以别人换上去的内容被盖了章。核对那一步(`on_disk != new_text`)在这之上再
-  挡一层:少了它,登记会把一个**磁盘上从未存在过**的 hash 写进库(我写的那份已经被覆盖了),而 `doc.indexed` 还谎报一句
-  「登记上了」。
-- **写 `documents.content_hash` 的语句全仓只许有两处**:索引自己的 upsert(`store.upsert_document`)和那道带两样证明的
-  登记(`doc_rewrite.register_indexed`)。`extract_writeback.refresh_content_hash` 只是「读磁盘那一份再交给它」的薄壳。
+- **「刚读到」不许充当「刚写出」。** 登记用的 hash 和 ① 比的那一份都**取自调用方交付的写出快照**,不是退出时重读磁盘
+  的那一份。所以写 md 的那几个函数一律**返回写出去的整文**(`writeback_tags`、`remove_writeback_tag`、
+  `align_promo_tag`、`Rewriting.write` 存的 `new_text`),`refresh_content_hash` 也要求必传 `written`、自己不读磁盘
+  (`tests/test_extraction_body_version.py` 钉着这条签名和「函数体里不许出现 read_text」)。
+- **② 比的是整份索引投影,不是模型输入那三样。** `index_input_matches`(标题/账号/拼接正文)**只给软广补判用** —— 它判
+  的是「能不能固化一个判定」。拿它签「已索引」会漏掉 `doc_tags`/`url`/`published`/`source`/`chunk.heading`,还会把**分块
+  边界**不同当成相同:审查按字段逐个用独立子进程实测,五种外来编辑全被盖了章,连跑两趟 `kb index` 都报「未变 1」。
+  投影本身走 `scanner.doc_from_text`(**和索引同一个函数**),比的是 `store.upsert_document` 真正写的每一样;
+  `tests/test_doc_rewrite_roster.py` 按它的 SQL 枚举列名,索引哪天多写一列就在那儿红。
+- **`flag/软广` 那一行不在 ② 的判据里**:它由库里的 `promo_level` 定、不由 frontmatter 定(索引重建 `doc_tags` 之后紧跟着
+  `store._align_promo_tag` 按落库那份判定纠正它)。算进来只会让每一次软广回写都登记不上、下一轮白重建一遍。
+- **①② 对「外来编辑改了索引投影」那一组互为备份,但各有独有射程,所以各要有自己的定点红。** 任一道单独拿掉,那五个字段
+  照旧拒得住(回归会全绿 —— 别据此以为某一道冗余)。① 独有的那一档是「外来编辑没动索引投影」(② 对它没意见,可收据不该
+  盖到别人那一份上);② 独有的那一档是「变换自己写进去的东西还没落库」(① 对它是瞎的,文件就是我写的那一份)。两道一起
+  退回就是被审那一版的形态,报告实测的五个字段全部变红。
+- **合法回写必须照旧登记得上。** 真实链路是**落库 → 提交 → 回写 md**(`save_extraction` 先把 topic/entity 插进
+  `doc_tags`),所以登记那一刻两边本来就一致。判据误报的代价不是「白重建一次」而是**永久拦住**:主回写从此一次都登记不
+  上,每轮索引把回写过的整批文章重切 chunk、重编码向量,而外面一点看不出来。所以两边各有一条反向钉
+  (`test_a_legitimate_writeback_still_gets_certified`、`test_the_normal_path_still_refreshes`);手工摆盘的夹具要把 md 上
+  那组 tag 一起插进 `doc_tags`,不然每条用例拒绝的理由都悄悄变成「标签还没进库」。
+- **写 `documents.content_hash` 的语句全仓只许有两处**:索引自己的 upsert(`store.upsert_document`)和那道带三样证明的
+  登记(`doc_rewrite.register_written`)。`extract_writeback.refresh_content_hash` 只是转发。
+- **`register_written` 里读几张表 + 那句条件 UPDATE 要在同一个事务里**(`BEGIN IMMEDIATE`;调用方已经在写事务里就沿用
+  它那一个,再 BEGIN 会抛)。跨三张表没法把判据塞进某一句的 WHERE,所以靠事务给一个快照;锁序仍是维护锁 → SQLite 写锁。
+- **投影判据里的来源名按路径推**(`source_name_of`:`source/<name>/...`),**不去遍历 `config.SOURCES` 比 root** —— 那张表
+  在模块加载时按当时的 `VAULT_ROOT` 把 root 算死了,而夹具一律打桩 `extract.VAULT_ROOT`,比 root 会在测试里全部失配、判据
+  退化成「永远不一致」。路径不是那个形状时退回库里那个值(漏的是「fm 原来写的 source 和 `src.name` 不同、这次又被外来
+  编辑删掉那行」这一窄档;宁可漏它,也不能把合法回写永久拦住)。`scanner.doc_from_text` 也因此接受 `rel_path`:让它
+  `relative_to(scanner.VAULT_ROOT)` 等于把判据押在「两个模块级 `VAULT_ROOT` 在每个夹具里都一起被打桩」上。
 - **分界线改了:「管道自动跑的写 vault 入口都该取这把锁,手工一次性运维脚本留在外面」这条分法对「登记已索引」不成立。**
   「人在边上看着」挡不住**另一个进程**里正在跑的定时同步 —— `backfill_youtube_summaries.py` 就是按手工脚本放在外面的,
   实测它和一个真·独立子进程交错时照样把一份未索引的新正文认证成「已索引」。**取不取锁按「写不写 vault 里的文章文件 +

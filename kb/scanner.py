@@ -103,11 +103,24 @@ def frontmatter_input(fm: dict, md_path: Path) -> tuple[str, str]:
     return title, account
 
 
-def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
-    try:
-        text = md_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
+def doc_from_text(text: str, md_path: Path, src: Source,
+                  rel_path: str | None = None) -> Doc:
+    """一份 md 文本在**索引眼里**的那篇 Doc —— upsert 进库的每一样都出自这里。
+
+    从 `_doc_from_file` 原样抽出来(它现在只管读文件)。抽的理由:登记「这份
+    文件已经索引过了」那张收据要回答的是「这份文本**现在**重新索引一次,库里
+    会不会变」(`kb.doc_rewrite.index_projection_matches`)。各写一遍读法的话,
+    那道判据按自己的理解说「一致」,索引随后按另一套读法把别的值 upsert 进库,
+    收据就签在一份没人索引过的东西上 —— 而签错不可恢复。**口径只有这一份,
+    两个消费方都过它。**
+
+    **`rel_path` 给了就直接用,不去 `relative_to(VAULT_ROOT)` 算。** 生产里
+    `scanner.VAULT_ROOT` 和 `extract.VAULT_ROOT` 是同一个值,可夹具各打桩哪一个
+    全凭各自的需要(`tests/test_promo_delivery.py` 只打 `extract` 那一份)——
+    让这个函数去比两个模块级常量,等于把判据押在「这两处在每个夹具里都一起被
+    打桩」上,而失配时它抛的是 `ValueError: not in the subpath`:登记那一步整个
+    炸掉,看上去像是回写坏了。调用方手里本来就有那个相对路径。
+    """
     fm, body = parse_frontmatter(text)
 
     tags = frontmatter_tags(fm)
@@ -119,7 +132,8 @@ def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
     published = str(fm.get("published") or fm.get("publish_time") or "").strip()
 
     return Doc(
-        path=str(md_path.relative_to(VAULT_ROOT)),
+        path=rel_path if rel_path is not None
+        else str(md_path.relative_to(VAULT_ROOT)),
         source=str(fm.get("source") or src.name),
         title=title,
         account=account,
@@ -130,6 +144,14 @@ def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
         content_hash=file_hash(text),
         meta=fm,
     )
+
+
+def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return doc_from_text(text, md_path, src)
 
 
 def scan_all() -> Iterator[Doc]:

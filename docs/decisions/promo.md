@@ -70,8 +70,11 @@
   (`backfill_youtube_summaries`、`wiki/wiki_daily`),理由是它们手里没有动手之前那个值 —— 可那个值它们一直有(写之前读的那份
   原文),而「单线程」只排除了自己,排除不掉另一个进程里正在跑的导出。一个无条件分支就够把上面那个末态造出来。
   **但 `expect` 这一道自己也不够,它只证明得了「库没换版」。** 「登记 `content_hash` = 声明已索引」这个不变量的完整判据
-  (再加上「登记的是本次写出去的那一份」和「磁盘那组索引输入还是索引里那一组」)和那两条旁路的接入,见
-  `maintenance-lock.md`;`disk_input_indexed` 和登记那一道现在共用 `kb.doc_rewrite.index_input_matches`。
+  (再加上「登记的是本次**写出去**的那一份」和「这一份现在重新索引一次库里不会变」)见 `maintenance-lock.md`。
+  **注意那两道判据不是一道**:`disk_input_indexed` 用的 `kb.doc_rewrite.index_input_matches` 比的是**模型输入那三样**
+  (标题/账号/拼接正文),够它判「能不能固化一个判定」——而**登记那张收据不用这一道**,它要整份索引等价
+  (`index_projection_matches`:还有 `doc_tags`/`url`/`published`/`source`/`chunk.heading`,以及逐块而不是拼接的正文)。
+  这两道各有射程,`tests/test_doc_rewrite_roster.py` 钉着「登记那边没有退回来用模型输入那一道」。
 - **`save_promo` 只返回「写进去了没有」,统计按它报。** 换版跳过的那几篇什么都没写,算进 hard/soft 计数就是报一个没发生的
   结果,而那是人决定「要不要接着跑几千篇」时唯一看得到的东西。**它原来还返回一个「要不要摘 flag」的一次性信号,那个信号连
   同参数一起删掉了** —— 判据见下面「幂等对齐」那条。**整组都没拿到判定时退出码非 0**:自动化按 0 判成功,而「一篇都没判成」
