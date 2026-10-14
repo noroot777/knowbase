@@ -383,7 +383,7 @@ def promo_tag_wanted(level: str, in_file: bool) -> bool:
 
     **这里和下面那两句 SQL 是两份实现**(判据必须待在写语句自己的 WHERE 里),
     所以有一条回归真跑 `upsert_document` 再和这个函数对账,四档判定 × 文件
-    有/无 六个组合全覆盖:哪天一边改了,那条会红。
+    有/无 八个组合全覆盖:哪天一边改了,那条会红。
     """
     if level == "hard":
         return True

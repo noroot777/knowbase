@@ -24,12 +24,14 @@
    是**真实索引从这一份文件派生出来的每一样**:`store.upsert_document` 直接写的
    那些(documents 五列、doc_tags、逐块的 seq/heading/text),**加上 upsert 之后
    那一步**(`parse_pretagged` → `save_extraction`)写的 `documents.summary` 和
-   `entities` 的 kind。**不是**模型输入那三样:后者漏掉 doc_tags / url /
+   `entities`。**不是**模型输入那三样:后者漏掉 doc_tags / url /
    published / source / 小节标题(审查按字段逐个实测,五种外来编辑全被盖了章)。
    这一道要**索引消费的那一份原文**(`before`)才判得全:库里专有的提取标签和
    「md 上刚被删掉的那行标签」在末态上长得一模一样,只有拿原文比才分得开,而
-   summary / kind 那两样库里的值可能压根不是从文件来的(模型给的),只能问
-   「文件自己这句话动没动」。
+   summary / 实体那几样库里的值可能压根不是从文件来的(模型给的),只能问
+   **文件自己声明的那句话动没动** —— 而「声明改了」和「`parse_pretagged` 被新加
+   的标签激活了」是两件事,混起来判会把最普通的那次提取交付拒掉(详见
+   `_extraction_claims`)。
 3. **库里记的还是动手之前那个 hash** —— 条件 UPDATE 自己的 WHERE,不在 Python
    那边先 SELECT 一次。
 
@@ -152,49 +154,61 @@ def source_name_of(doc_path: str, fallback: str) -> str:
     return parts[1] if len(parts) > 2 and parts[0] == "source" else fallback
 
 
-def _extraction_claims(doc) -> dict | None:
-    """这一份文本对**提取那一步**说的那两句话:summary、主实体的 kind。
+def _extraction_claims(doc) -> dict:
+    """这一份 md **自己声明**了什么 —— 真实索引 upsert 之后那一步会消费的那几样。
 
     **索引不是 upsert 完就完了。** 三个真实索引入口(`cli._index_pass`、
     `pipeline_stages._index_pass`、`pipeline_stages._ingest_pass`)都在
     `store.upsert_document` 之后接着跑 `parse_pretagged` → `save_extraction`,
-    把 frontmatter 里的 summary 和 project/kind 写进 `documents.summary` 和
-    `entities` —— 这两样同样在 `content_hash` 跳过的射程里,不是展示层
-    (`aggregate` 的实体枚举按 `entities.kind` 筛、把 `documents.summary` 返回
-    给用户)。名单钉在 `tests/test_doc_rewrite_roster.py`:索引那一趟哪天多一步
-    写库,那条红会来提醒这里跟着加。
+    把 frontmatter 的 summary、project/kind 和 `entity/*` 标签写进
+    `documents.summary` 和 `entities` —— 这两样同样在 `content_hash` 跳过的射程
+    里,不是展示层(`aggregate.enumerate_entities` 按 `entities.kind` 筛、把
+    `documents.summary` 返回给用户)。名单钉在
+    `tests/test_doc_rewrite_roster.py`:索引那一趟哪天多一步写库,那条红会来
+    提醒这里跟着加。
 
-    返回 None = 这一份压根不会触发那一步(`parse_pretagged` 没有 entity/topic
-    标签就返回 None),于是它对这两样一句话都没说。
+    **「文件自己这句话改了」和「解析被新加的标签激活了」是两件事,混起来会丢
+    数据。** `parse_pretagged` 没有 topic/entity 标签就整体返回 None,所以它的
+    输出会在**第一次回写补上标签**的那一刻从「什么都没有」跳成「有了一整套」,
+    而文件里那几行 frontmatter 一个字都没动。按它的输出比前后两份快照,那次
+    完全正常的提取交付(模型摘要和 kind 刚落库)就被判成「文件新改了元数据、
+    库里还没跟上」→ 拒绝登记 → 下一轮重建 → `save_extraction` 按文件把
+    `modelsummary` 盖成 `filesummary`(或空)、把 kind 盖成文件声明的那个,
+    而 `extracted_at` 非空、这一篇再也不会被重提(2026-10-14 审查两种元数据
+    各实测一次,连跑两轮普通索引后不恢复)。
+    **所以这里一律读 frontmatter 和标签本身,不看激活没激活**;激活只决定
+    「索引这一趟会不会去读 summary 那一行」,单独放在 `active` 里。
 
-    **「没说」和「说了空的」不是一回事,这是本模块最容易判错的地方。** 走
-    `kb extract --writeback` 回写过的普通文章:md 里有 topic/entity 标签、却
-    **没有** `summary:` / `project:` / `kind:` 那几行,而库里的 summary 和实体
-    kind 是模型给的。那种 md 重新索引一次,`parse_pretagged` 会拿 `""` 和
-    `other` 把它们盖掉 —— 所以「库里和这一份重新索引的结果不等」在那一篇上是
-    **常态**,拿它当拒绝理由就等于给主回写判了死刑:拒绝 → 下一轮重建 →
-    模型摘要和 kind 当场没了,而 `extracted_at` 非空、不会重提。判的只能是
-    **文件自己这句话动没动**(`index_projection_matches` 里那两段)。
+    `entities` 是**成员**(norm → 原始名),不带 kind:kind 由
+    `_kind_for()` 按 project/kind 那句话算,和 `parse_pretagged` 同一条规则。
+    两样分开判的理由见 `index_projection_matches`。
     """
     from kb.extract import parse_pretagged
-    from kb.norm import entity_norm
+    from kb.norm import entity_norm, kind_norm
 
-    pre = parse_pretagged(doc)
-    if pre is None:
-        return None
+    meta = getattr(doc, "meta", None) or {}
+    proj = str(meta.get("project") or "").strip()
+    kind = str(meta.get("kind") or "").strip()
+    names = [t.split("/", 1)[1] for t in doc.tags if t.startswith("entity/")]
     return {
-        "summary": str(pre.get("summary") or ""),
-        # **kind 这一句话只落在「文件自己点名指派过」的那几个实体上。**
-        # `parse_pretagged` 的规则是:project 和 kind 两样都写了、而且某个
-        # `entity/*` 标签归一后正好等于 project,那个实体才拿到这个 kind,
-        # 其余一律 "other"。所以这里只收下非默认的那几个 —— 把默认那一档也算成
-        # 「文件说过的话」会要命:走 `--writeback` 回写的普通文章 md 里压根没有
-        # project/kind,一算就是「文件说这个实体是 other」,而库里是模型给的
-        # kind,于是每次主回写都被拒,一拒就重建、模型那个 kind 当场没了。
-        "kinds": {entity_norm(str(e.get("name") or "").strip()): e["kind"]
-                  for e in pre["entities"]
-                  if str(e.get("name") or "").strip() and e["kind"] != "other"},
+        # 激活与否只有 `parse_pretagged` 一份口径,不在这儿另判一次
+        "active": parse_pretagged(doc) is not None,
+        "summary": str(meta.get("summary") or ""),
+        # 两样都写了才算一句话 —— `parse_pretagged` 也是这个条件
+        # (`if proj_norm and proj_kind`),缺一样它就按 "other" 走
+        "project": (entity_norm(proj), kind_norm(kind)) if proj and kind
+                   else None,
+        "entities": {entity_norm(n): n for n in names if n},
     }
+
+
+def _kind_for(claims: dict, norm: str) -> str:
+    """索引会给这个实体派哪个 kind —— 规则同 `extract.parse_pretagged`:
+    project 和 kind 两样都写了、而且这个实体归一后正好等于 project,才拿到那个
+    kind,其余一律 `other`(那个默认值是 `parse_pretagged` 里写死的字面量)。
+    """
+    proj = claims["project"]
+    return proj[1] if proj and proj[0] == norm else "other"
 
 
 def index_projection_matches(conn, doc_path: str, before: str | None,
@@ -214,12 +228,16 @@ def index_projection_matches(conn, doc_path: str, before: str | None,
       比了这几样就够)。这几样库里的值**就是**上一次索引从文件读出来的,所以
       直接和磁盘这一份比。
     - upsert 之后那一步(`parse_pretagged` → `save_extraction`)写的:
-      `documents.summary` 和 `entities` 的 kind。这一层**不能**和磁盘这一份比,
-      理由见 `_extraction_claims` —— 只问「文件自己这句话**动没动**,动了的话
-      库里跟上了吗」。**「库里和文件不等」在这两样上是常态**(模型提取会把自己
-      那句摘要和 kind 写进库,而 md 里可能压根没有这几行、或者仍写着旧的那句),
+      `documents.summary` 和 `entities`。这一层**不能**和磁盘这一份比,理由见
+      `_extraction_claims` —— 只问「文件自己**声明**的那句话动没动,动了的话库里
+      跟上了吗」。**「库里和文件不等」在这两样上是常态**(模型提取会把自己那句
+      摘要和 kind 写进库,而 md 里可能压根没有这几行、或者仍写着旧的那句),
       拿它当拒绝理由等于每次回写都触发一次重建,而重建会把模型那两样按文件重新
       派生一遍盖掉、顺手 `DELETE` 掉库里专有的提取标签。
+      **这一层分三句话判,混起来判过的两种后果都是永久丢数据**:summary 那一行
+      只在「改了 + 这一份会触发提取那一步」时要求库里跟上;实体**成员**变化只
+      问「entities 里在不在」(不问 kind —— 主回写补标签的同一次交付里库里那行
+      是模型给的 kind);project/kind 那句话**自己**改了才要求 kind 跟上。
 
     投影本身用 `scanner.doc_from_text` 算,**和索引走同一个函数**,不自己再读
     一遍 frontmatter。
@@ -296,36 +314,49 @@ def index_projection_matches(conn, doc_path: str, before: str | None,
     if promo_tag_wanted(level, PROMO_TAG in in_file) != (PROMO_TAG in in_db):
         return "磁盘上那行软广标记和索引重建之后该有的对不上"
 
-    # upsert 之后那一步(`parse_pretagged` → `save_extraction`)派生的两样。
-    # **只问「文件自己这句话动没动」**:库里那两样可能是模型给的,拿磁盘这一份
-    # 重新派生一次去比会把主回写全拦掉(详见 `_extraction_claims`)。
-    claims, was_claims = _extraction_claims(doc), _extraction_claims(was) or {}
-    if claims is not None:
-        # **只问「文件这句话动没动」,不问「库里和文件一样吗」。** 后者会把一个
-        # 合法末态判成不一致:模型提取(`kb extract`,带不带 `--writeback` 都是)
-        # 会把自己那句摘要写进 `documents.summary`,而条目化来源的 md 里仍写着
-        # frontmatter 那句 —— 两边不等是常态,拒绝它就等于每次回写都触发重建,
-        # 而重建会按文件把模型那句摘要盖回去、顺手 `DELETE` 掉库里专有的提取标签。
-        # 撤回也算动(原来说了一句、现在不说了),所以比的是两份快照而不是「现在
-        # 说了没有」:只看现在的话,撤回之后新值是空串,一句假的「一致」就把旧
-        # 摘要永久留在库里。
-        if (claims["summary"] != (was_claims.get("summary") or "")
-                and claims["summary"] != (row["summary"] or "")):
-            return "磁盘上那句 summary 还没进 documents.summary"
-        was_kinds = was_claims.get("kinds") or {}
-        for norm in set(claims["kinds"]) | set(was_kinds):
-            if claims["kinds"].get(norm) == was_kinds.get(norm):
-                continue                 # 文件对这个实体的说法没动
-            # 撤回了(文件不再指派它)就按 `parse_pretagged` 的默认档 "other"。
-            kind = claims["kinds"].get(norm, "other")
+    # upsert 之后那一步(`parse_pretagged` → `save_extraction`)派生的那几样。
+    # **只问「文件自己声明的那句话动没动」**:库里那两样可能是模型给的,拿磁盘
+    # 这一份重新派生一次去比会把主回写全拦掉(详见 `_extraction_claims`)。
+    # 三句话分开判 —— 混在一起判过的两种后果都是永久丢数据。
+    claims, was_claims = _extraction_claims(doc), _extraction_claims(was)
+
+    # ① summary 那一行:**改了**(含撤回)才要求库里已经跟上。只在这一份会触发
+    # 提取那一步时才问 —— 没有 topic/entity 标签的 md,索引压根不读它这一行。
+    if (claims["active"] and claims["summary"] != was_claims["summary"]
+            and claims["summary"] != (row["summary"] or "")):
+        return "磁盘上那句 summary 还没进 documents.summary"
+
+    # ② 实体**成员**:文件新声明/撤销了哪个实体,`entities` 里得跟上。
+    # **只问在不在,不问 kind** —— 主回写往 md 上补 `entity/*` 的同一次交付里,
+    # 库里那行是模型给的 kind,按 kind 要求就等于把那条路拒死。
+    # **`doc_tags` 里有那个标签不是「实体已入库」的证明**:`save_extraction` 对
+    # doc_tags 是 `INSERT OR IGNORE`(只增不删)、对 entities 是先 `DELETE` 再
+    # 重建,所以「历史标签还在、实体行早没了」是常规状态,而那时外来编辑往文件
+    # 里加同一个 `entity/*`,标签那几段全看不见(审查实测:两轮普通索引都报
+    # 「未变 1」,`enumerate_entities` 一直是空,强制重建才出现)。
+    for norm in set(claims["entities"]) ^ set(was_claims["entities"]):
+        landed = conn.execute(
+            "SELECT 1 FROM entities WHERE path=? AND norm=?",
+            (doc_path, norm)).fetchone() is not None
+        if norm in claims["entities"] and not landed:
+            return "磁盘上那个实体还没进 entities"
+        if norm not in claims["entities"] and landed:
+            return "磁盘上删掉的那个实体还留在 entities 里"
+
+    # ③ project/kind 那句话:**它自己改了**才要求库里那几行 kind 已经跟上。
+    # 只问它指到的实体,而且得是文件现在还声明着的那个(文件没有这个 `entity/*`
+    # 标签时索引压根不会给它写行)。
+    if claims["project"] != was_claims["project"]:
+        for norm in {p[0] for p in (claims["project"], was_claims["project"])
+                     if p}:
+            if norm not in claims["entities"]:
+                continue
+            want = _kind_for(claims, norm)
             kinds = [r["kind"] for r in conn.execute(
                 "SELECT kind FROM entities WHERE path=? AND norm=?",
                 (doc_path, norm))]
-            if not kinds or any(k != kind for k in kinds):
+            if not kinds or any(k != want for k in kinds):
                 return "磁盘上那句 project/kind 定的实体类型还没进 entities"
-    # `claims is None`(md 上 entity/topic 标签一个都没了)那一档不在这儿判:
-    # 真实索引那时压根不跑 `save_extraction`,库里那两样一个字不会变;而**标签
-    # 被删掉**这件事上面那句已经拒了,下一轮重建照旧会纠正。
 
     chunks = [(c.seq, c.heading, c.text) for c in split_chunks(doc.body)]
     indexed = [(r["seq"], r["heading"], r["text"]) for r in conn.execute(
@@ -365,9 +396,12 @@ def register_written(conn, doc_path: str, before: str | None,
     打出来即可。**但这不等于这个函数不抛**:读磁盘的 UTF-8 解码失败、那几句
     SQL 失败都会原样飞出去(读失败只捕获 `OSError`),见模块说明那条异常契约。
 
-    **「误报」在这里不是一律良性的。** 普通标签那一段之所以只比一个方向,正是
-    因为拒绝登记会把这一篇交给下一轮重建,而重建 `doc_tags` 是**破坏性**的
-    (`DELETE` 全部再只从文件重建)——详见 `index_projection_matches`。
+    **「误报」在这里不是一律良性的,整套判据的形状都是被这件事逼出来的。** 拒绝
+    登记会把这一篇交给下一轮重建,而重建对 `doc_tags` 是**破坏性**的(`DELETE`
+    全部再只从文件重建)、对 `documents.summary` 和 `entities` 是**按文件重新
+    派生**(模型给的那两样当场没了,`extracted_at` 非空也不会重提)。所以判据
+    一律只问「文件自己声明的那句话动没动」,不问「库里和文件一样吗」——详见
+    `index_projection_matches` 和 `_extraction_claims`。
     """
     from kb.extract import VAULT_ROOT
     from kb.scanner import file_hash

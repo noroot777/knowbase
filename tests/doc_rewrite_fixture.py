@@ -154,6 +154,49 @@ class Vault(unittest.TestCase):
                          "摆盘:实体 kind 没落库(归一值写错了?)")
         return rel
 
+    def seed_without_extraction_tags(self, metadata: str = "",
+                                     src: str = "gzh") -> str:
+        """摆一篇**已索引、待提取**的文档,frontmatter 可以先带上几行元数据。
+
+        和 `seed_with_extraction()` 的区别要紧:这一篇**没有** topic/entity 标签,
+        所以 `parse_pretagged` 返回 None、索引那一趟压根没跑 `save_extraction`。
+        第一次提取回写会把标签补上 —— 「解析从此激活」和「文件改了那几行元数据」
+        在那一刻长得一模一样,而判据必须分得开(审查实测:混起来判的话,那次
+        完全正常的交付被拒,下一轮重建把模型摘要和 kind 盖回文件声明的值)。
+
+        `metadata` 原样插在 `tags:` 之前,例如 `'summary: "filesummary"\n'`。
+        """
+        rel = self.seed(src)
+        (self.vault / rel).write_text(
+            self.disk(rel).replace("tags:\n", metadata + "tags:\n"),
+            encoding="utf-8")
+        self.reindex()
+        self.conn.execute("UPDATE documents SET extracted_at='' WHERE path=?",
+                          (rel,))
+        self.conn.commit()
+        from kb import extract
+        self.assertIsNone(extract.parse_pretagged(self.doc_of(rel)),
+                          "摆盘:这一篇该还没激活提取那一步")
+        self.assertFalse(self.needs_index(rel), "摆盘:这一篇该是已索引的")
+        return rel
+
+    def deliver_extraction(self, rel: str, data: dict,
+                           writeback: bool = True) -> tuple[bool, str]:
+        """真跑一次提取交付(`extract.commit_extraction`)—— 三条提取路径的那条路。
+
+        输入快照走 `extract.model_input`(生产里唯一的取样点),所以这里不自己
+        拼指纹。返回 `(改了文件没有, 它打印的那几行)`。
+        """
+        from kb import extract
+        seen = extract.model_input(self.conn, rel)["seen"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            changed = extract.commit_extraction(self.conn, rel, data, seen,
+                                                writeback=writeback)
+        self.conn.commit()
+        self.said = out.getvalue()
+        return changed, self.said
+
     # ── 读末态 ────────────────────────────────────────────────────────────────
 
     def version(self, rel: str) -> str:
@@ -173,6 +216,12 @@ class Vault(unittest.TestCase):
         """归一键是 `norm` 的那个实体此刻的 kind(没有这一行就是空串)。"""
         rows = [k for _, k, n in self.entities(rel) if n == norm]
         return rows[0] if rows else ""
+
+    def enumerated(self) -> list[str]:
+        """`aggregate.enumerate_entities` 真实枚举出来的那几个 norm ——
+        实体这一层的**用户侧后果**(它读的是 `entities`,不是 `doc_tags`)。"""
+        from kb import aggregate
+        return [row["norm"] for row in aggregate.enumerate_entities(self.conn)]
 
     def hits_tagged(self, token: str, tag: str) -> list[str]:
         """真走一次按标签过滤的搜索 —— 「库里那行标签还在」的用户侧后果。"""
@@ -293,6 +342,7 @@ class Vault(unittest.TestCase):
         finally:
             child.stdin.close()               # 它读到 EOF 就退出,锁随之释放
             child.wait(timeout=30)
+            child.stdout.close()              # 不关就是一条 ResourceWarning
 
     # ── 跑主回写那条路 ────────────────────────────────────────────────────────
 
@@ -386,18 +436,10 @@ class Vault(unittest.TestCase):
         末态是**库里有 `topic/*`、`entity/*`,md 文件上没有**,`extracted_at`
         非空。这是合法状态,不是「磁盘领先于索引」—— 它恰好是反方向。
         """
-        from kb import extract, store
-        snap = store.doc_input_snapshot(self.conn, rel)
-        # `input_seen` 是**模型输入那一组的指纹**,不是 content_hash
-        # (口径同 `extract._candidates` 给 snap 塞的那个 "seen")
-        seen = extract.input_fingerprint(snap["title"], snap["account"],
-                                         snap["body"])
-        extract.commit_extraction(
-            self.conn, rel,
-            {"summary": "审查复现", "topics": [topic],
-             "entities": [{"name": entity, "kind": "tool"}]},
-            seen, writeback=False)
-        self.conn.commit()
+        self.deliver_extraction(
+            rel, {"summary": "审查复现", "topics": [topic],
+                  "entities": [{"name": entity, "kind": "tool"}]},
+            writeback=False)
 
     def promo_level(self, rel: str) -> str:
         return self.conn.execute(
