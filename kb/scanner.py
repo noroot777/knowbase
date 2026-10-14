@@ -116,7 +116,7 @@ def doc_from_text(text: str, md_path: Path, src: Source,
 
     **`rel_path` 给了就直接用,不去 `relative_to(VAULT_ROOT)` 算。** 生产里
     `scanner.VAULT_ROOT` 和 `extract.VAULT_ROOT` 是同一个值,可夹具各打桩哪一个
-    全凭各自的需要(`tests/test_promo_delivery.py` 只打 `extract` 那一份)——
+    全凭各自的需要(`tests/promo_delivery_fixture.py` 只打 `extract` 那一份)——
     让这个函数去比两个模块级常量,等于把判据押在「这两处在每个夹具里都一起被
     打桩」上,而失配时它抛的是 `ValueError: not in the subpath`:登记那一步整个
     炸掉,看上去像是回写坏了。调用方手里本来就有那个相对路径。

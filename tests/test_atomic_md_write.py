@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from kb import config, extract, scanner                        # noqa: E402
-from tests.test_promo_delivery import OLD_BODY, PATH, _Vault   # noqa: E402
+from tests.promo_delivery_fixture import OLD_BODY, PATH, _Vault   # noqa: E402
 
 # 子进程:跑一次真实的 tag 变换,在 `os.replace` 那一瞬间给自己 -9。
 # 注入点挑 replace 是因为那正是旧写法最危险的那一点 —— `write_text` 走到这里

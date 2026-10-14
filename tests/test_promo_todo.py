@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from kb import extract, scanner, store                        # noqa: E402
-from tests.test_promo_delivery import OLD_BODY, PATH, _Vault   # noqa: E402
+from tests.promo_delivery_fixture import OLD_BODY, PATH, _Vault   # noqa: E402
 
 # 子进程:跑一次真实交付,在「判定已提交、md 那行还没写」那一瞬间给自己 -9。
 # 注入点挑 `sync_promo_tag` 是因为它就是回写那一步的入口 —— 判定此刻已经

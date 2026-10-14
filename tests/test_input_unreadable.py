@@ -28,7 +28,7 @@ from unittest import mock
 from kb import cli, extract, scanner, store
 from kb.chunker import split_chunks
 from kb.config import Source
-from tests.test_promo_delivery import OLD_BODY, PATH, _Vault
+from tests.promo_delivery_fixture import OLD_BODY, PATH, _Vault
 
 NEW_BODY = "新版普通教程 currenttutorialtoken。只讲本地部署,没有任何交易。"
 OLD_DATA = {"entities": [], "topics": ["旧广告主题"],

@@ -502,7 +502,7 @@
   —— 还在等翻译时一个字不许动、作废失败时待办留着且下一轮收得掉、**没补抓过的
   条目重导出时旧 tag 照旧原样留着**)
   + `tests/test_input_unreadable.py`(**磁盘上这一份读不出来时那一组**,8 条 ——
-  按形状单独一个文件,脚手架复用 `test_promo_delivery._Vault`。`chmod(0)` 和
+  按形状单独一个文件,脚手架复用 `promo_delivery_fixture._Vault`。`chmod(0)` 和
   `unlink()` 都真做,不打桩 `read_text`。**正反两边都钉**:换版 + 索引跟上 + 读不
   出来要拒(后果按「下一轮还补不补得回来」钉:判定还是新版那个、摘要没被盖、
   `extracted_at` 还空着、这一篇还在 `pending_docs` 里),可读换版照样拒(上一条不
