@@ -123,7 +123,7 @@ class ChannelDispatchTests(unittest.TestCase):
         detail = stage.call_args.args[2]
         self.assertIn("正文待重试 1 篇", detail)
         self.assertNotIn("失败", detail)
-        with patch.object(pipeline_retry, "load_last_run", return_value={
+        with patch.object(pipeline_retry, "last_result", return_value={
                 "stages": {"crawl": {"status": "ok", "detail": detail, "failures": [body]}}}), \
              patch("kb.store.connect"), patch("kb.extract.pending_docs", return_value=[]):
             self.assertEqual([], pipeline_retry.retry_failed_plan())
@@ -290,7 +290,7 @@ class ChannelDispatchTests(unittest.TestCase):
             self.assertIn("3 条推送无法解析", items[0]["reason"])
             self.assertIn("请检查读取器或推送格式", items[0]["reason"])
             self.assertEqual(not confirmed, "归属待核实" in items[0]["reason"])
-            with patch.object(pipeline_retry, "load_last_run", return_value={"stages": {
+            with patch.object(pipeline_retry, "last_result", return_value={"stages": {
                     "crawl": {"status": "ok", "detail": detail, "failures": items}}}), \
                  patch("kb.store.connect"), patch("kb.extract.pending_docs", return_value=[]):
                 self.assertEqual([], pipeline_retry.retry_failed_plan())

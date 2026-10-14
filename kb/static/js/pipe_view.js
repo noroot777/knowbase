@@ -19,6 +19,15 @@ function pipeRunLabel(result) {
   return result.run_kind === 'retry' || legacyRetry ? '重试' : '同步';
 }
 function pipeStateHint(s, result, failed, skipped, progress) {
+  // **翻历史时这句话要跟着换成只读语义。** 下面那几句写的是「可以重新配置一次同步,
+  // 或按上次抓取范围重试失败项」—— 而翻历史时那颗按钮已经藏掉也禁用了(理由在
+  // `renderPipeState` 里),提示还指着一个按不到的操作,说的又是**另一轮**的失败。
+  if (typeof pipeViewing !== 'undefined' && pipeViewing) {
+    if (failed) return `这一轮有 ${failed} 个步骤失败，记录只读。要处理当前的失败请先回到最新。`;
+    if (result.stopped) return '这一轮被停止了，已完成结果当时已保留。记录只读。';
+    if (skipped) return `这一轮有 ${skipped} 个步骤被跳过，具体原因见下方。记录只读。`;
+    return '这一轮的步骤都已完成。记录只读。';
+  }
   if (s.running) {
     if (s.stop_requested) return '正在等待执行中的步骤收尾；全部结束前暂不能新建同步，已完成结果会保留。';
     if (failed) return `已有 ${failed} 个步骤失败，本轮仍在执行。请等全部步骤结束后再新建同步；失败项不会阻止下一轮。`;
@@ -47,6 +56,15 @@ function initPipeStageRows() {
 }
 function renderPipeState(s) {
   initPipeStageRows();
+  // **翻历史时整屏按「那一轮已经结束」渲染。** `running` / `stop_requested` 说的是
+  // 此刻,而被翻到的那一轮早就收尾了 —— 混着用会把上午那一轮的阶段配上此刻的
+  // 「执行中」。只换一份快照进来就够了:下面整套渲染(阶段卡片、失败明细、进度条、
+  // 日志)一个字都不用改。
+  const viewing = typeof pipeViewing === 'undefined' ? null : pipeViewing;
+  if (viewing) s = { running: false, stopped: !!viewing.stopped, last_run: viewing, log: [] };
+  $('pipe-viewing').hidden = !viewing;
+  if (viewing) $('pipe-viewing-text').textContent =
+    `正在查看 ${pipeRunWhen(viewing)} 那一轮的结果，不是最新状态。`;
   const result = pipeResult(s), stages = result.stages || {};
   const planned = pipePlannedStages(result), label = pipeRunLabel(result);
   for (const key of Object.keys(STAGE_META)) {
@@ -56,7 +74,8 @@ function renderPipeState(s) {
     row.querySelector('.pipe-stage-status').textContent = PIPE_STATUS[status] || '状态未知';
     row.querySelector('.pipe-stage-detail').textContent = st.detail || (s.running && status === 'pending' ? '前序步骤结束后自动开始' : '');
     const pending = row.querySelector('.pipe-stage-pending');
-    pending.hidden = s.running || pipePending[key] == null;
+    // 待处理数说的是**此刻**,贴在被翻到的那一轮旁边就是一句谎话
+    pending.hidden = s.running || !!viewing || pipePending[key] == null;
     pending.textContent = pipePending[key] != null ? `当前待处理 ${pipePending[key]} 项` : '';
     const details = row.querySelector('details'), failures = st.failures || [];
     details.hidden = !failures.length;
@@ -105,7 +124,7 @@ function renderPipeState(s) {
   // 需处理的问题在整轮结束后统一收进总览卡片:哪几步、各自卡在什么,配一颗重试按钮,
   // 不用去每个步骤卡片里找「需处理」。运行中不出现(失败项不阻止本轮继续)。
   const failedStages = planned.filter(k => pipeHasFailure(stages[k]));
-  const backlog = !s.running && pipePending.extract > 0;
+  const backlog = !s.running && !viewing && pipePending.extract > 0;
   const issues = $('pipe-issues');
   issues.hidden = s.running || !(failedStages.length || backlog);
   if (!issues.hidden) {
@@ -116,7 +135,12 @@ function renderPipeState(s) {
       `<li><b>${STAGE_META[k].name}</b><span>${esc(stages[k]?.detail || '执行失败')}</span></li>`).join('')
       + (failedStages.length && backlog ? `<li><b>提取知识</b><span>另有 ${pipePending.extract} 项待提取</span></li>` : '');
   }
-  $('pipe-retry').hidden = s.running || !(failed || pipePending.extract > 0);
+  // **翻历史时这颗按钮一律藏掉。** 它重试的永远是**最后一轮**的范围
+  // (`pipeline_retry.retry_crawl_scopes` 读的是 `load_last_run()`),而屏幕上显示
+  // 的是上午那一轮 —— 「看到的那一轮」和「按下去会动的那一轮」必须是同一轮。
+  // `renderPipeButtons` 里另有一道 disabled:那一道跟着连接和在途动作走,轮询的
+  // finally 会单独调它,两道射程不同。
+  $('pipe-retry').hidden = s.running || !!viewing || !(failed || pipePending.extract > 0);
   renderPipeLog((s.log?.length ? s.log : result.log) || [], result.finished_at);
   renderPipeButtons();
 }
