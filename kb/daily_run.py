@@ -6,9 +6,10 @@
 来源,后两段没有「只做这个来源那一份」的概念)。依次而不是并发:管道是单例
 (全局一把运行锁,索引/提取都要单写者写 kb.db),两轮同时开等于一个必然被拒。
 
-于是一轮日报是 N+1 次管道运行,而「最近一次运行」只有一份 —— 收尾时要把这一批
-合并成一份发布(`pipeline.publish_batch`),否则抓取失败的明细和「重试失败项」会
-被最后那一轮入库的成功抹掉。细节仍旧点进同步中心看,这里只记每一项的成败。
+于是一轮日报是 N+1 次管道运行,而「最近一次运行」只有一个位子 —— 这几轮用
+`pipeline.open_batch()` 归成一个**业务批次**,每一轮收尾都由结果存储层把整批合并着
+落盘,否则抓取失败的明细和「重试失败项」会被最后那一轮入库的成功抹掉。细节仍旧
+点进同步中心看,这里只记每一项的成败。
 硬约束在 `docs/decisions/sync-schedule.md`。
 """
 
@@ -323,15 +324,16 @@ def _wait_idle(deadline: float, halted=None) -> bool:
 
 def _sync_round(stages: list[str], crawl_filter: dict | None, label: str,
                 deadline: float, channel: str = '', halted=None,
-                rounds: list[dict] | None = None) -> dict:
+                batch: str = '') -> dict:
     """跑一轮管道并等它结束,返回这一轮在成绩单上的那条记录。
 
     `channel` 只是成绩单上的身份:抓取那一段按通道一轮一个,入库那一段是全库的
     一次、不属于任何通道(空串)。判红只看 `stages` 里点名的那几个阶段。
 
-    看到自己那一轮收尾时,把那份终态快照塞进 `rounds` —— 收尾时要把这一批合并成
-    一份发布(见 `_run` 里的 `pl.publish_batch`)。拿不到自己那份结果的那一档
-    (被下一轮挤出记录)不塞:那时连它跑没跑完都不知道,合进去只会编造一份结果。
+    `batch` 原样传给 `start_pipeline`:带着它的几轮算同一个业务批次,每一轮收尾
+    都由结果存储层把整批合并着落盘。**这里不再自己攒结果** —— 账本由 `_end_run`
+    喂,所以"没亲眼看到自己那一轮收尾"的那一档(被下一轮挤出记录)照样进账,
+    不像这个函数还得去 `run_result` 找回来。
 
     `halted` 是"要不要半路收手"的判据,默认 `_halting`(停止 + 超预算都算)。
     入库那一段传的是**只认用户停止**的那一份:超预算的本意是"别再抓了,拿已经
@@ -346,7 +348,7 @@ def _sync_round(stages: list[str], crawl_filter: dict | None, label: str,
     if not _wait_idle(min(deadline, time.monotonic() + WAIT_BUSY), halted):
         entry.update(status='skipped', detail='同步管道一直被占用,本轮跳过')
         return entry
-    run = pl.start_pipeline(stages, crawl_filter=crawl_filter)
+    run = pl.start_pipeline(stages, crawl_filter=crawl_filter, batch=batch)
     if not run:
         entry.update(status='skipped', detail='同步管道已被其它任务占用,本轮跳过')
         return entry
@@ -404,12 +406,6 @@ def _sync_round(stages: list[str], crawl_filter: dict | None, label: str,
                             '成败未知')
         _log(f'{label}:{entry["detail"]}')
         return entry
-    if rounds is not None:
-        # **后备那条路也要收**:它和自观测那份现在是同一个契约(`run_payload`),
-        # 带着计划、来源范围和失败名单。原来这里拿 `run_id == run` 当"是不是
-        # 自观测"的判据 —— 两者的 run_id 本来就相同,等于没拦住,而当时后备记录
-        # 缺 `planned_stages`,合并时它那一轮真实的抓取失败会被整个过滤掉。
-        rounds.append(mine)
     # 只看这一轮请求了的那几个阶段:没选中的阶段一开跑就落 skipped(见
     # `pipeline.start_pipeline`),全收进来的话每一轮都要多报几句"条目化/
     # wiki 未执行"。
@@ -437,28 +433,13 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
             from kb import pipeline as pl     # 延迟:它反过来 import 本模块
             labels = _channel_labels()
             budget_end = time.monotonic() + SYNC_BUDGET
-            rounds: list[dict] = []
-            # **每收一轮就发布一次**,不攒到最后一把发。攒着的话,这一刻盘上那份
-            # 「最近一次运行」是刚收尾的**那一轮自己**(每轮收尾都会覆盖它),
-            # 前几轮的抓取失败和失败名单只活在这个列表里 —— 进程在这中间被杀掉
-            # (重启、停电、OOM),那几条红就永远不在了,而重试按钮读的就是盘上
-            # 那一份。增量发布让盘上那份**始终等于"已经收尾的这几轮合起来"**。
-            # 代价是多写几次状态文件(一轮一次,几 KB)。
-            # 每轮都重试发布,而**同一个原因只说一次**:被拒多半要一直拒到底
-            # (别人已经是最新的那一轮),一轮一条同样的话会把 80 行日志刷满。
-            # 后面某一轮发布成功就回空串 —— 那时盘上那份确实是全的,不该再挂着
-            # 一句旧抱怨(满盘腾出来了就是这个形状)。
-            def publish_so_far(seen: str) -> str:
-                try:
-                    pl.publish_batch(rounds)
-                except pl.PublishRefused as e:
-                    # 发布不成不是日报的失败(素材都在库里,照常出报),但**不许
-                    # 咽下去**:咽下去的后果是同步中心那边看不到这一轮的失败、也
-                    # 点不了重试,而日报这边一句"已生成"看着一切正常。
-                    if e.reason != seen:
-                        _log(f'同步结果未发布:{e.reason}')
-                    return e.reason
-                return ''
+            # 这一轮日报是 N+1 次管道运行,而「最近一次运行」只有一个位子。开一个
+            # **业务批次**,之后每一轮子轮收尾都由结果存储层把整批合并着写进去
+            # (见 `pipeline_state._publish_in_batch`)—— 盘上那份于是始终等于
+            # "已经收尾的这几轮合起来",进程在任何一刻退出都不会把前几轮的抓取
+            # 失败和失败名单弄丢。**这件事不能由这里事后补**:子轮收尾和我们下一
+            # 句之间进程就可能没了。
+            batch = pl.open_batch()
             for channel in channels:
                 if _halting():
                     _state['channels'].append(
@@ -470,8 +451,7 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                 _state['channels'].append(
                     _sync_round(FETCH_STAGES, {'channel': channel},
                                 labels.get(channel, channel), budget_end, channel,
-                                rounds=rounds))
-                publish_issue = publish_so_far(publish_issue)
+                                batch=batch))
             # 入库那一段:等所有通道都抓完才跑,跑一次 —— 这时待索引的文件和
             # 待提取的队列都最全。**用户按了停止才跳过**:接下来本来就不出报了。
             # 超预算照跑(见 DIGEST_BUDGET),所以这里不能用 `_halting()`。
@@ -483,8 +463,13 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                 _state['channels'].append(_sync_round(
                     DIGEST_STAGES, None, DIGEST_LABEL,
                     max(budget_end, time.monotonic() + DIGEST_BUDGET),
-                    halted=lambda: bool(_state['stop_requested']), rounds=rounds))
-            publish_issue = publish_so_far(publish_issue)
+                    halted=lambda: bool(_state['stop_requested']), batch=batch))
+            # 发布不成不是日报的失败(素材都在库里,照常出报),但**不许咽下去**:
+            # 咽下去的后果是同步中心那边看不到这一轮的失败、也点不了重试,而日报
+            # 这边一句"已生成"看着一切正常。
+            publish_issue = pl.close_batch()
+            if publish_issue:
+                _log(f'同步结果未发布:{publish_issue}')
         # 用户按的停止到此为止:接着生成等于把一份"同步到一半"的日报当成功交出去,
         # 还要再花一次模型钱。超预算是另一回事——那本来就是"别再同步了,拿现有的
         # 内容出报",继续生成正是它的目的。
@@ -530,6 +515,11 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         _state['error'] = str(e)
         _set('failed', f'日报生成失败: {e}')
     finally:
+        # 批次一定要关掉:半路抛出来的时候 `close_batch` 那一句走不到,而开着的
+        # 批次会把下一轮管道运行算进一个早就结束的批次(`_publish_in_batch` 还认
+        # `_state['batch']`,所以漏关不至于出错 —— 但也没有理由把它留着)。
+        from kb import pipeline as pl
+        pl.close_batch()
         with _lock:
             _state['pipeline_run'] = ''
             _state['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')

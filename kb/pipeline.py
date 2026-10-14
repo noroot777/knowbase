@@ -47,7 +47,9 @@ from kb.pipeline_state import (
     _stage,
     _state,
     get_state,
+    close_batch,
     load_last_run,
+    open_batch,
     PublishRefused,
     new_run_id,
     publish_batch,
@@ -61,7 +63,9 @@ __all__ = [
     "channel_filter",
     "crawl_channels",
     "get_state",
+    "close_batch",
     "load_last_run",
+    "open_batch",
     "load_schedule",
     "PublishRefused",
     "pending_counts",
@@ -146,11 +150,16 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
 
 
 def start_pipeline(stages: list[str] | None = None,
-                   crawl_filter: dict | None = None) -> str:
+                   crawl_filter: dict | None = None, batch: str = "") -> str:
     """启动管道线程。返回这一轮的 run id;已在跑返回空串(照旧可以当布尔用)。
 
     crawl_filter 见 _run_crawl:限定来源目标 + 时间段的范围抓取;
     同时抓几个来源时来源列表在 channels 里(见 crawl_channels)。
+
+    `batch` 是 `pipeline_state.open_batch()` 发的身份:带着它的几轮运行算同一个
+    业务批次,**每一轮收尾都把整批的汇总写进「最近一次运行」**(见
+    `pipeline_state._publish_in_batch`)。这里设进 `_state` 而不是事后再标,是因为
+    一轮运行完全可能比调用方的下一跳还快 —— 事后标就赶不上它的收尾了。
 
     返回 id 而不是 True,是为了让调用方**原子地**拿到"我起的是哪一轮":
     事后再去读状态的话,我们那一轮可能已经跑完、另一项同步已经接替,读回来
@@ -177,6 +186,7 @@ def start_pipeline(stages: list[str] | None = None,
             # 毫无关系的范围去导出。
             "export_filter": deepcopy(crawl_filter),
             "run_kind": "sync",
+            "batch": batch,
             "planned_stages": [s for s in STAGES if s in wanted],
             "stages": {s: {"status": "pending" if s in wanted else "skipped",
                            "detail": ""} for s in STAGES},

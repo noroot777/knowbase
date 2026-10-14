@@ -3,6 +3,7 @@
 从 `test_daily_report.py` 拆出来 —— 那份加上这一组会超过单文件 700 行上限。
 窗口/素材口径、落盘产物、定时与停止语义仍在那一份里。
 """
+import json
 import tempfile
 import unittest
 from copy import deepcopy
@@ -10,6 +11,33 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from kb import daily, daily_run
+from kb import pipeline_state as ps
+
+
+def finish_round(planned, crawl_filter, batch='', results=None, run_id='run-1',
+                 started='2026-10-14 09:00:00'):
+    """照 `start_pipeline` 的样子摆一轮管道运行,再**走真的收尾**(`_end_run`)。
+
+    两组用例共用一份摆盘:批次账本是由 `_end_run` 喂的,各写一份的话两边的前提
+    会各漂各的。含 `start_pipeline` 那个"没指定来源就盖默认采集器"的兜底 ——
+    全库那一轮的 `crawl_filter` 现实中就带着一个跟它无关的来源名。
+    """
+    from kb.collectors import active_collector
+    cf = deepcopy(crawl_filter or {})
+    cf['channel'] = active_collector(cf.get('channel')).name
+    full = {st: {'status': 'skipped', 'detail': '未选择'} for st in ps.STAGES}
+    full.update({st: {'status': 'ok', 'detail': f'{st} 好了'} for st in planned})
+    full.update(results or {})
+    ps._state.update({
+        'running': True, 'stop_requested': False, 'stopped': False,
+        'run_id': run_id, 'log': [], 'current_stage': '',
+        'started_at': started, 'finished_at': '',
+        'crawl_filter': cf, 'export_filter': deepcopy(cf),
+        'run_kind': 'sync', 'batch': batch, 'crawl_retry': {},
+        'planned_stages': [st for st in ps.STAGES if st in planned],
+        'stages': full})
+    ps._end_run()
+    return run_id
 
 
 class DailyTwoStageSyncTests(unittest.TestCase):
@@ -29,7 +57,6 @@ class DailyTwoStageSyncTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         labels = {'wechat_local': '公众号', 'social': '大V观点', 'rss': 'RSS'}
-        from kb import pipeline_state as ps
         for p in (patch.object(daily_run, 'STATE_FILE', Path(temp.name) / 'last_run.json'),
                   patch.object(daily_run, 'SETTINGS_FILE', Path(temp.name) / 'daily.json'),
                   patch.object(ps, '_STATE_FILE', Path(temp.name) / 'pipeline.json'),
@@ -37,42 +64,40 @@ class DailyTwoStageSyncTests(unittest.TestCase):
             p.start(); self.addCleanup(p.stop)
         self.before = deepcopy(daily_run._state)
         self.addCleanup(lambda: daily_run._state.update(self.before))
+        # `ps._state` / `ps._finished` 是模块级常驻的,下面要走真的收尾往里写东西,
+        # **走的时候一定要还回去**:不还的话同跑时会把别的用例带红,而单跑永远绿。
+        keep_state, keep_done = deepcopy(ps._state), deepcopy(ps._finished)
+        def restore():
+            ps._state.clear(); ps._state.update(keep_state)
+            ps._finished.clear(); ps._finished.update(keep_done)
+            ps.close_batch()
+        self.addCleanup(restore)
 
     def sync_run(self, channels=('wechat_local', 'social', 'rss'), rounds=None, **flags):
         """跑一轮带同步的 `_run`。返回每一轮管道的 (阶段清单, crawl_filter)。
 
         `rounds` 按轮次号(从 1 起)覆盖那一轮的阶段结果,用来注入某一轮的红。
+
+        打桩只打到 `start_pipeline` 这一层:**收尾(`_end_run`)和落盘都是真的**。
+        批次账本由 `_end_run` 喂,打掉它的话这一轮压根不会落盘,「有没有真的
+        合并发布」这件事就没有判据了(而用例照样全绿)。
         """
         from kb import pipeline as pl
-        from kb.pipeline_state import STAGES
         calls = []
 
-        # 每一轮开跑的那一刻,盘上那份「最近一次运行」长什么样 —— 进程在这里被
-        # 杀掉的话,留下的就是它。`self.on_disk[i]` = 第 i+1 轮起跑时的那一份。
-        self.on_disk = []
+        # `batch` 要原样传到 `start_pipeline`:每一轮收尾时由结果存储层把整批
+        # 合并着落盘,靠的就是这一格(见 `pipeline_state._publish_in_batch`)。
+        self.batches = []
 
-        def start(wanted, crawl_filter=None):
-            self.on_disk.append(deepcopy(pl.load_last_run()))
+        def start(wanted, crawl_filter=None, batch=''):
+            self.batches.append(batch)
             calls.append((list(wanted), deepcopy(crawl_filter)))
-            return f'run-{len(calls)}'
-
-        def state():
-            # 没点名的阶段一开跑就是 skipped(见 pipeline.start_pipeline)
-            full = {s: {'status': 'skipped', 'detail': '未选择'} for s in STAGES}
-            full.update({s: {'status': 'ok', 'detail': f'{s} 好了'} for s in calls[-1][0]})
-            full.update((rounds or {}).get(len(calls), {}))
-            # **形状要跟真的 `get_state()` 一致**:收尾合并读的是 planned_stages /
-            # crawl_filter / export_filter,缺了它们这几条用例就碰不到合并那一步,
-            # 「压根没合并」也照样全绿。
-            stages, crawl_filter = calls[-1]
-            return {'running': False, 'run_id': f'run-{len(calls)}',
-                    'current_stage': '', 'stages': full, 'stopped': False,
-                    'planned_stages': list(stages), 'log': [],
-                    'started_at': f'2026-10-14 09:0{len(calls)}:00',
-                    'finished_at': f'2026-10-14 09:1{len(calls)}:00',
-                    'crawl_filter': crawl_filter or {'channel': 'wechat_local'},
-                    'export_filter': crawl_filter or {'channel': 'wechat_local'},
-                    'crawl_retry': {}}
+            run = f'run-{len(calls)}'
+            # 照 `start_pipeline` 的样子摆一轮(含它那个"没指定来源就盖默认采集器"
+            # 的兜底),把阶段结果摆成终态,再走真的收尾。
+            return finish_round(wanted, crawl_filter, batch,
+                                (rounds or {}).get(len(calls)), run,
+                                f'2026-10-14 09:0{len(calls)}:00')
 
         daily_run._state.update({**self.before, 'running': True, 'log': [],
                                  'channels': [], **flags})
@@ -81,7 +106,6 @@ class DailyTwoStageSyncTests(unittest.TestCase):
                                       'model': 'm'})
         self.stopped = Mock()
         with patch.object(pl, 'start_pipeline', Mock(side_effect=start)), \
-             patch.object(pl, 'get_state', Mock(side_effect=state)), \
              patch.object(pl, 'request_stop', self.stopped), \
              patch.object(daily_run.time, 'sleep', Mock()), \
              patch.object(daily_run, '_wait_idle', Mock(return_value=True)), \
@@ -115,31 +139,40 @@ class DailyTwoStageSyncTests(unittest.TestCase):
                          [i['label'] for i in self.gen.call_args.kwargs['sync_issues']])
         self.assertIn(f'1 项未完成({daily_run.DIGEST_LABEL})', daily_run._state['detail'])
 
-    def test_each_round_is_published_as_it_finishes(self):
-        """**收一轮发一次**,不攒到最后一把发。
+    def test_every_round_runs_under_one_batch_and_the_batch_is_closed(self):
+        """这几轮必须是**同一个业务批次**,而且走完要关掉。
 
-        攒着的话,这一刻盘上那份「最近一次运行」是刚收尾的那一轮**自己**(每轮
-        收尾都覆盖它),前几轮的抓取失败和失败名单只活在进程内那个列表里 ——
-        进程在这中间被杀掉(重启、停电、OOM),那几条红就永远不在了,而「重试
-        失败项」读的就是盘上那一份。这里钉的是后果:第 3 轮起跑的那一刻,盘上
-        那份里**已经有**第 1 轮的失败。
+        「最近一次运行」只有一个位子,而一轮日报是 N+1 次运行。把它们归成一个
+        批次之后,每一轮收尾都由结果存储层把整批合并着落盘(不变量本身钉在
+        `DailyBatchResultTests`,那边验的是盘上那份)。这里只钉接线:批次身份
+        传到了每一轮,而且**不许漏关** —— 开着的批次会把下一轮独立运行算进一个
+        早就结束的批次。
         """
-        from kb import pipeline
-        self.sync_run(rounds={1: {'crawl': {
-            'status': 'error', 'detail': '失败 1 个',
-            'failures': [{'title': '某公众号', 'reason': '连不上'}]}}})
-        third = self.on_disk[2]
-        self.assertIsNotNone(third, '第 3 轮起跑时盘上还什么都没有 —— 攒到最后发的形状')
-        self.assertEqual('error', third['stages']['crawl']['status'])
-        self.assertEqual(['某公众号'], [f['title'] for f in
-                                        third['stages']['crawl']['failures']])
-        # 已经收尾的那两轮都在里面,不是只有最近那一轮
-        self.assertEqual(['wechat_local', 'social'],
-                         [sc['channel'] for sc in pipeline.run_scopes(third)])
-        # 收尾那一下照旧把整批发全(入库那一轮也进去了)
-        last = pipeline.load_last_run()
-        self.assertEqual('error', last['stages']['crawl']['status'])
-        self.assertEqual(['crawl', 'export', 'index', 'extract'], last['planned_stages'])
+        from kb import pipeline_state as ps
+        self.sync_run()
+        self.assertEqual(4, len(self.batches))
+        self.assertEqual(1, len(set(self.batches)), self.batches)
+        self.assertTrue(self.batches[0], '一轮都没带上批次身份')
+        self.assertEqual('', ps._batch_id, '走完没关批次')
+
+    def test_a_crash_inside_the_sync_block_still_closes_the_batch(self):
+        # 半路抛出来时 `close_batch` 那一句走不到,只有 finally 那次关得掉。开着的
+        # 批次会把下一轮独立运行算进一个早就结束的批次。
+        from kb import pipeline_state as ps
+        with patch.object(daily_run, '_sync_round',
+                          Mock(side_effect=RuntimeError('摆盘:同步那一步炸了'))):
+            self.sync_run()
+        self.assertEqual('failed', daily_run._state['phase'])
+        self.assertEqual('', ps._batch_id, '抛出来之后批次还开着')
+
+    def test_a_refused_publish_is_said_out_loud(self):
+        # 批次没发布出去不是日报的失败(素材都在库里,照常出报),但那句话要跟到
+        # 完成提示里:咽下去的后果是同步中心看不到这一轮的失败、也点不了重试,
+        # 而日报这边一句「已生成」看着一切正常。
+        from kb import pipeline as pl
+        with patch.object(pl, 'close_batch', Mock(return_value='盘上那份是更新的一轮')):
+            self.sync_run()
+        self.assertIn('盘上那份是更新的一轮', daily_run._state['detail'])
 
     def test_running_out_of_fetch_budget_still_runs_the_library_stages(self):
         # 超预算的本意是"别再抓了,拿已经抓到的内容出报"。入库那一段要是跟着跳过,
@@ -359,6 +392,135 @@ class DailyBatchResultTests(unittest.TestCase):
         self.assertEqual(('run-manual', 'error'),
                          (last['run_id'], last['stages']['index']['status']))
         self.assertIn('index', pipeline.retry_failed_plan())
+
+    def fresh_process(self):
+        """装成"另一个进程":内存里那份权威记录归零,只剩磁盘。"""
+        for name in ('_last_result', '_last_result_file'):
+            pa = patch.object(ps, name, None); pa.start(); self.addCleanup(pa.stop)
+
+    def test_a_finished_sub_round_never_leaves_only_itself_on_disk(self):
+        """进程在子轮收尾之后、日报收尾之前退出,前几轮的失败也不许没了。
+
+        这是第 3 轮「结果保全」那一条**没修全**的部分。原来每个子轮先把自己那份
+        写进唯一的状态文件,再由日报稍后合并发布 —— 中间那一刻盘上只有刚收尾的
+        那一轮(入库轮的 crawl 落「本次不执行」),进程这时退出(重启、OOM、
+        被杀),重启后同步中心只看到「同步已完成」,既没有 RSS 抓取失败,也没有
+        「重试失败项」。**窗口有多窄都不行**:那正是"写了一份会删掉前序失败的
+        局部结果,然后指望还活着的调用方稍后修好"。
+
+        所以钉的不是"下一轮起跑前看得到",而是**每个子轮收尾之后盘上就是全的**。
+        """
+        from kb import pipeline
+        batch = ps.open_batch()
+        self.addCleanup(ps.close_batch)
+        finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
+                     results={'crawl': {
+                         'status': 'error', 'detail': '失败 1 个',
+                         'failures': [{'title': '某订阅', 'reason': '连不上'}]}})
+        finish_round(['index', 'extract'], None, batch, run_id='run-2',
+                     started='2026-10-14 09:30:00')
+        # **只读磁盘**:日报那一句收尾还没跑到,进程就是在这一刻没的
+        on_disk = json.loads(ps._STATE_FILE.read_text(encoding='utf-8'))
+        self.assertEqual('error', on_disk['stages']['crawl']['status'])
+        self.assertEqual(['某订阅'],
+                         [f['title'] for f in on_disk['stages']['crawl']['failures']])
+        self.assertEqual(['crawl', 'export', 'index', 'extract'],
+                         on_disk['planned_stages'])
+        self.assertEqual(['rss'], [sc['channel'] for sc in
+                                   pipeline.run_scopes(on_disk)])
+        # 后果:重启之后那个新进程看到的还是这一份,重试照旧排得出计划
+        self.fresh_process()
+        self.assertEqual('error', pipeline.load_last_run()['stages']['crawl']['status'])
+        self.assertIn('crawl', pipeline.retry_failed_plan())
+
+    def test_start_pipeline_puts_the_batch_id_where_the_ledger_looks(self):
+        """`start_pipeline` 要把批次身份**原子地**放进 `_state`。
+
+        账本认的是 `_state['batch']`(见 `_publish_in_batch`),所以这一格丢了的话
+        整批退化成"每轮只写自己",而上面那条用例是自己摆盘的、看不见这一段真代码
+        (注入「丢掉 batch」时它红 0 条)。放进 `_state` 而不是事后标,是因为一轮
+        运行完全可能比调用方的下一句还快。
+        """
+        from kb import pipeline
+        with patch.object(pipeline.threading, 'Thread') as thread:
+            run = pipeline.start_pipeline(['index'], batch='batch-9')
+        self.addCleanup(ps._state.update, {'running': False})
+        self.assertTrue(run)
+        self.assertEqual('batch-9', ps._state['batch'])
+        thread.assert_called_once()
+        # 反过来钉一边:不传就是空串,**而且不许继承上一轮的**
+        ps._state['running'] = False
+        with patch.object(pipeline.threading, 'Thread'):
+            pipeline.start_pipeline(['index'])
+        self.assertEqual('', ps._state['batch'])
+
+    def test_a_refused_batch_remembers_why_for_close_batch(self):
+        """被拒的原因要留到 `close_batch` 手里,不许咽下去。
+
+        咽下去的后果:同步中心显示的是那一轮手动同步,而日报那边一句「已生成」
+        看着一切正常,没人知道这一轮日报的同步结果压根没进去。
+        """
+        batch = ps.open_batch()
+        self.addCleanup(ps.close_batch)
+        finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
+                     results={'crawl': {'status': 'error', 'detail': '失败 1 个'}})
+        # 期间用户自己点了一轮同步,它比我们这一批新
+        finish_round(['index'], None, '', run_id='run-manual',
+                     results={'index': {'status': 'error', 'detail': '索引失败'}},
+                     started='2026-10-14 10:00:00')
+        finish_round(['index', 'extract'], None, batch, run_id='run-2',
+                     started='2026-10-14 10:10:00')
+        issue = ps.close_batch()
+        self.assertIn('run-manual', issue)
+        # 退回只写自己那一份:**我们这一轮确实是此刻最新的**,但不许把前几轮一起
+        # 合进去盖掉人家那一轮
+        self.fresh_process()
+        last = ps.load_last_run()
+        self.assertEqual(('run-2', ['index', 'extract']),
+                         (last['run_id'], last['planned_stages']))
+
+    def test_a_run_outside_the_batch_is_not_merged_into_it(self):
+        # 反过来钉一边:不带批次身份的那一轮(手动同步、重试)就该只写它自己 ——
+        # 合进一个别人的批次等于把早先那几轮的结果说成"刚刚这一轮的成绩"。
+        from kb import pipeline
+        batch = ps.open_batch()
+        self.addCleanup(ps.close_batch)
+        finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
+                     results={'crawl': {'status': 'error', 'detail': '失败 1 个'}})
+        finish_round(['index'], None, '', run_id='run-own',
+                     started='2026-10-14 10:00:00')
+        self.fresh_process()
+        last = pipeline.load_last_run()
+        self.assertEqual(('run-own', ['index']), (last['run_id'], last['planned_stages']))
+        self.assertEqual('未选择', last['stages']['crawl']['detail'])
+
+    def test_a_half_written_state_file_cannot_eat_the_previous_result(self):
+        """落盘写到一半退出,旧那份要一字未动。
+
+        就地 `write_text` 的话盘上剩的是半截 JSON:读的那端只能当"读不出",而
+        被它截掉的旧结果也没了 —— 两份一起丢。写同目录的临时文件再原子替换,
+        断在中途只会留下一个临时文件,正式那份一字未动。
+
+        注入的是**写到一半就断**(写进去半截、然后抛) —— 这才是进程死在写盘
+        中间的形状。让它"写完半截正常返回"证明不了什么:那样后面那次原子替换
+        照旧会把这份残缺品摆上台。
+        """
+        from kb import pipeline
+        finish_round(['crawl'], {'channel': 'rss'}, run_id='run-good',
+                     results={'crawl': {'status': 'error', 'detail': '失败 1 个'}})
+        good = ps._STATE_FILE.read_text(encoding='utf-8')
+        real = Path.write_text
+
+        def half(self_path, data, *a, **kw):
+            real(self_path, data[:len(data) // 2], *a, **kw)
+            raise OSError('写到一半断了')
+
+        with patch.object(Path, 'write_text', half):
+            finish_round(['index'], None, run_id='run-cut')
+        self.assertEqual(good, ps._STATE_FILE.read_text(encoding='utf-8'),
+                         '旧那份被半截写坏了')
+        self.fresh_process()
+        self.assertEqual('run-good', pipeline.load_last_run()['run_id'])
 
     def test_two_same_named_subscriptions_both_keep_their_row(self):
         """两条订阅同名时,两条失败都要留下。**显示用的标题不是身份。**

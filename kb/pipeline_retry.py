@@ -361,6 +361,8 @@ def start_retry_failed() -> tuple[bool, str]:
             # 导出范围单独存一份,下一次重试从它恢复(见上面那段)
             "export_filter": export_filter,
             "run_kind": "retry",
+            # 重试是独立的一轮,不属于任何业务批次(见 `_state` 里那一格的说明)
+            "batch": "",
             "planned_stages": [s for s in STAGES if card[s]],
             "stages": {s: {"status": "pending" if card[s] else "skipped",
                            "detail": detail[s]}

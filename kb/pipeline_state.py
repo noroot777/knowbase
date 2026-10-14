@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from contextlib import contextmanager
 from copy import deepcopy
@@ -44,6 +45,10 @@ _state: dict = {
     # 见 note_retry_targets —— 带着 run id,所以不需要在每条启动路径上各清一次。
     "crawl_retry": {},
     "run_kind": "",
+    # 这一轮属于哪个业务批次(`open_batch` 发的身份),空串 = 不属于任何批次。
+    # **每条启动路径都要显式写一遍**:`_state` 是进程内常驻的,不写的话上一轮
+    # 日报的批次身份会漏进下一轮独立运行,于是它被合进一个早就结束的批次。
+    "batch": "",
     "planned_stages": None,
     # 每阶段: {status: pending/running/ok/skipped/error/stopped, detail: str}
     "stages": {s: {"status": "", "detail": ""} for s in STAGES},
@@ -263,17 +268,93 @@ def latest_run_id() -> str:
     return (_authoritative() or {}).get("run_id") or ""
 
 
+def _write_state(payload: dict) -> None:
+    """把一份结果落到状态文件。**原子替换**,不是就地改写。
+
+    就地 `write_text` 的话,写到一半退出(重启、OOM、断电)留下的是半截 JSON ——
+    读的那一端只能当"读不出",而旧那份已经被截掉了,两份都没了。先写同目录的
+    临时文件再 `os.replace`,中断只会留下一个临时文件,原来那份一字未动。
+    """
+    _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _STATE_FILE.with_name(_STATE_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, _STATE_FILE)
+
+
 def _save_last_run() -> None:
     """持久化最近一次结果,重启 kb-web 后仍能看到。"""
     try:
-        _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _STATE_FILE.write_text(json.dumps(run_payload(), ensure_ascii=False, indent=1),
-                               encoding="utf-8")
+        _write_state(run_payload())
     except OSError as e:
         # 不判这一轮失败,但**也不许一声不吭**:面板上那份结论从这一刻起只活在
         # 内存里,重启就没了。写进这一轮自己的日志,它跟着结论一起被人看到。
         _log(f"这一轮的结果没能写进磁盘({e});本进程内照常可查,重启后会丢")
     _remember_result(run_payload())
+
+
+# ── 业务批次:一轮日报 = N+1 次管道运行,而「最近一次运行」只有一个位子 ────────
+# **子轮一收尾就把整批的汇总写进去**,不是先写它自己、再等日报那边稍后补回。
+# 先写自己的后果:这一刻盘上那份只有刚收尾的这一轮(入库段那一轮 crawl 是
+# 「本次不执行」),前几轮的抓取失败只活在进程内 —— 进程在这中间退出(重启、
+# OOM、被杀),重启后同步中心只看到「同步已完成」,既没有那条 RSS 抓取失败,
+# 也没有「重试失败项」。那个窗口有多窄都不行:它正是"写了一份会删掉前序失败的
+# 局部结果,然后指望还活着的调用方稍后修好"。
+# 账本待在**结果存储这一层**,由 `_end_run` 喂:日报那边看不到自己那一轮收尾
+# (被下一轮挤出记录)的那一档也照样进账。
+_batch_id = ""              # 开着的批次身份,空串 = 没有批次
+_batch_runs: list[dict] = []        # 这一批里已经收尾的子轮终态,按时间顺序
+_batch_issue = ""           # 这一批没能发布出去的原因(人话),空串 = 一切正常
+_batch_seq = 0
+
+
+def open_batch() -> str:
+    """开一个业务批次,返回它的身份 —— 交给 `start_pipeline(batch=...)`。
+
+    **和 `close_batch()` 成对**,调用方放在 try/finally 里:不关的话下一轮管道
+    运行会被算进一个早就结束的批次。
+    """
+    global _batch_id, _batch_runs, _batch_issue, _batch_seq
+    with _lock:
+        _batch_seq += 1
+        _batch_id, _batch_runs, _batch_issue = f"batch-{_batch_seq}", [], ""
+        return _batch_id
+
+
+def close_batch() -> str:
+    """关掉批次,返回它没能发布出去的原因(空串 = 发布正常)。
+
+    盘上那份已经在最后一个子轮收尾时写全了,这里不再写 —— 所以**提早返回、
+    甚至中途崩掉都不会少东西**。
+    """
+    global _batch_id, _batch_runs, _batch_issue
+    with _lock:
+        issue, _batch_id, _batch_runs, _batch_issue = _batch_issue, "", [], ""
+        return issue
+
+
+def _publish_in_batch() -> None:
+    """子轮收尾时的落盘。只在 `_end_run` 里调(已持 `_lock`)。
+
+    不属于任何批次、或者这一批的头一轮:写自己那份就是全的。往后每一轮都把
+    **整批**合并着写,盘上那份于是始终等于"已经收尾的这几轮合起来"。
+    """
+    global _batch_issue
+    if not _batch_id or _state.get("batch") != _batch_id:
+        _save_last_run()
+        return
+    _batch_runs.append(run_payload())
+    if len(_batch_runs) < 2:
+        _save_last_run()
+        return
+    try:
+        _remember_result(_publish_locked(_batch_runs))
+    except PublishRefused as e:
+        # 期间有更新的一轮独立运行收尾(用户自己点了同步),这一批没资格替换它。
+        # 退回只写自己那一份:**我们这一轮确实是此刻最新的**,而把前几轮一起合
+        # 进去等于拿一批比那轮手动同步更早的结果去盖掉它。原因留给 `close_batch`
+        # 的调用方如实说出来。
+        _batch_issue = e.reason
+        _save_last_run()
 
 
 def load_last_run() -> dict | None:
@@ -331,7 +412,7 @@ def _end_run() -> None:
         _state["current_stage"] = ""
         _state["finished_at"] = _now()
         _log("同步已停止，已完成的结果保留" if stopped else "管道结束")
-        _save_last_run()
+        _publish_in_batch()
         # 收尾状态按 run id 留一份,再把 running 放下:等这一轮的人晚一步来取
         # 也还拿得到自己那一轮的结果(阶段修正已经在上面做完了,存的就是终态)。
         run_id = _state.get("run_id") or ""
@@ -461,72 +542,82 @@ def publish_batch(records: list[dict]) -> dict | None:
     if len(records) < 2:
         return None
     with _lock:
-        ours = {r.get("run_id") for r in records if r.get("run_id")}
-        # **判据是内存里那份权威身份,不是磁盘。** 磁盘写会失败而且是吞掉的:
-        # 那一轮手动同步明明已经收尾、结论也在内存里,磁盘上却还是我们这一批的
-        # 某一轮 —— 照磁盘判,我们就"有资格"把它刚刚的失败改写成成功。
-        latest = latest_run_id()
-        if latest:
-            if latest not in ours:
-                raise PublishRefused(
-                    f'期间已经有更新的一轮同步收尾({latest}),这一轮日报的'
-                    '同步结果没有写进「最近一次运行」——同步中心显示的是那一轮')
-        else:
-            # 这个进程还没见过任何一轮收尾(刚重启、这一批是从别处恢复的)。
-            # 只能问磁盘,而**读不出来时失败关闭**:一份读不出的状态既可能是
-            # 「没有更新的运行」也可能是「有而且更重要」,拿不准就不许替换。
-            try:
-                current = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                current = {}
-            except (OSError, json.JSONDecodeError) as e:
-                raise PublishRefused(
-                    f'读不出当前的「最近一次运行」({e}),不确定期间有没有更新的'
-                    '一轮收尾,这一批没有替换它') from e
-            if current.get("run_id") and current["run_id"] not in ours:
-                raise PublishRefused(
-                    f'期间已经有更新的一轮同步收尾({current["run_id"]}),这一轮日报的'
-                    '同步结果没有写进「最近一次运行」——同步中心显示的是那一轮')
-        run_id = records[-1].get("run_id") or new_run_id()
-        scopes = [_scope_name(r) for r in records]
-        stages: dict[str, dict] = {}
-        for name in STAGES:
-            owned = [(scopes[i], r["stages"][name]) for i, r in enumerate(records)
-                     if name in (r.get("planned_stages") or []) and (r.get("stages") or {}).get(name)]
-            stages[name] = (_merge_stage(owned) if owned
-                            else {"status": "skipped", "detail": "未选择"})
-        planned = [s for s in STAGES
-                   if any(s in (r.get("planned_stages") or []) for r in records)]
-        notes: dict = {}
-        for run in records:
-            note = run.get("crawl_retry") or {}
-            if note.get("run") == (run.get("run_id") or ""):
-                notes.update(note.get("channels") or {})
-        started = [r.get("started_at") for r in records if r.get("started_at")]
-        finished = [r.get("finished_at") for r in records if r.get("finished_at")]
-        merged = {
-            "started_at": min(started) if started else "",
-            "finished_at": max(finished) if finished else _now(),
-            "stopped": any(r.get("stopped") for r in records),
-            "run_kind": "sync",
-            "planned_stages": planned,
-            "stages": stages,
-            "crawl_filter": _merge_scopes(records, "crawl_filter"),
-            "export_filter": _merge_scopes(records, "export_filter"),
-            "run_id": run_id,
-            "crawl_retry": {"run": run_id, "channels": notes} if notes else {},
-            "log": [line for r in records for line in (r.get("log") or [])][-80:],
-        }
+        merged = _publish_locked(records)
+    _remember_result(merged)
+    return merged
+
+
+def _publish_locked(records: list[dict]) -> dict:
+    """`publish_batch` 的本体,**不取锁** —— `_end_run` 那条路已经持着了。
+
+    也不更新内存里那份权威记录:两条调用路径对"什么时候算记下了"的要求不一样
+    (批次那条要等确认写成功),由各自的调用点自己调 `_remember_result`。
+    """
+    ours = {r.get("run_id") for r in records if r.get("run_id")}
+    # **判据是内存里那份权威身份,不是磁盘。** 磁盘写会失败而且是吞掉的:
+    # 那一轮手动同步明明已经收尾、结论也在内存里,磁盘上却还是我们这一批的
+    # 某一轮 —— 照磁盘判,我们就"有资格"把它刚刚的失败改写成成功。
+    latest = latest_run_id()
+    if latest:
+        if latest not in ours:
+            raise PublishRefused(
+                f'期间已经有更新的一轮同步收尾({latest}),这一轮日报的'
+                '同步结果没有写进「最近一次运行」——同步中心显示的是那一轮')
+    else:
+        # 这个进程还没见过任何一轮收尾(刚重启、这一批是从别处恢复的)。
+        # 只能问磁盘,而**读不出来时失败关闭**:一份读不出的状态既可能是
+        # 「没有更新的运行」也可能是「有而且更重要」,拿不准就不许替换。
         try:
-            _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            _STATE_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=1),
-                                   encoding="utf-8")
-        except OSError as e:
-            raise PublishRefused(f'同步结果没写进「最近一次运行」({e})') from e
-        # 这一批的身份就是最后那一轮,所以这里是**把它那份记录补全成整轮的**,
-        # 不是再塞一条新的。
-        _finished[run_id] = deepcopy(merged)
-        _remember_result(merged)
-        for old_id in list(_finished)[:-_FINISHED_KEEP]:
-            del _finished[old_id]
-        return merged
+            current = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            current = {}
+        except (OSError, json.JSONDecodeError) as e:
+            raise PublishRefused(
+                f'读不出当前的「最近一次运行」({e}),不确定期间有没有更新的'
+                '一轮收尾,这一批没有替换它') from e
+        if current.get("run_id") and current["run_id"] not in ours:
+            raise PublishRefused(
+                f'期间已经有更新的一轮同步收尾({current["run_id"]}),这一轮日报的'
+                '同步结果没有写进「最近一次运行」——同步中心显示的是那一轮')
+    run_id = records[-1].get("run_id") or new_run_id()
+    scopes = [_scope_name(r) for r in records]
+    stages: dict[str, dict] = {}
+    for name in STAGES:
+        owned = [(scopes[i], r["stages"][name]) for i, r in enumerate(records)
+                 if name in (r.get("planned_stages") or []) and (r.get("stages") or {}).get(name)]
+        stages[name] = (_merge_stage(owned) if owned
+                        else {"status": "skipped", "detail": "未选择"})
+    planned = [s for s in STAGES
+               if any(s in (r.get("planned_stages") or []) for r in records)]
+    notes: dict = {}
+    for run in records:
+        note = run.get("crawl_retry") or {}
+        if note.get("run") == (run.get("run_id") or ""):
+            notes.update(note.get("channels") or {})
+    started = [r.get("started_at") for r in records if r.get("started_at")]
+    finished = [r.get("finished_at") for r in records if r.get("finished_at")]
+    merged = {
+        "started_at": min(started) if started else "",
+        "finished_at": max(finished) if finished else _now(),
+        "stopped": any(r.get("stopped") for r in records),
+        "run_kind": "sync",
+        "planned_stages": planned,
+        "stages": stages,
+        "crawl_filter": _merge_scopes(records, "crawl_filter"),
+        "export_filter": _merge_scopes(records, "export_filter"),
+        "run_id": run_id,
+        "crawl_retry": {"run": run_id, "channels": notes} if notes else {},
+        "log": [line for r in records for line in (r.get("log") or [])][-80:],
+    }
+    try:
+        _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _STATE_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=1),
+                               encoding="utf-8")
+    except OSError as e:
+        raise PublishRefused(f'同步结果没写进「最近一次运行」({e})') from e
+    # 这一批的身份就是最后那一轮,所以这里是**把它那份记录补全成整轮的**,
+    # 不是再塞一条新的。
+    _finished[run_id] = deepcopy(merged)
+    for old_id in list(_finished)[:-_FINISHED_KEEP]:
+        del _finished[old_id]
+    return merged
