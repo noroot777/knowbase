@@ -80,12 +80,9 @@ function renderPipeState(s) {
   else if (failed) title = `${label}结束，${failed} 个步骤需处理`;
   else if (result.finished_at) title = skipped ? `${label}结束，部分步骤已跳过` : planned.length && completed === planned.length ? `${label}已完成` : `${label}结束，本次步骤未全部完成`;
   if ($('pipe-state-title').textContent !== title) $('pipe-state-title').textContent = title;
-  const scopes = pipeRunScopes(result.crawl_filter), filter = result.crawl_filter || {};
-  // 一轮里既没有抓取也没有导出时,`crawl_filter` 里那个来源名**说明不了任何事**:
-  // 只有这两步认它,index 是全量扫 vault、extract 扫的是全库待提取队列(日报的
-  // 「入库处理」就是这样一轮)。而 `start_pipeline` 一律会往 filter 里盖一个来源名,
-  // 照着念等于告诉用户"这一轮在同步公众号",实际它跟来源毫无关系。
-  const libraryOnly = planned.length && !planned.includes('crawl') && !planned.includes('export');
+  const scopes = pipeRunScopes(result), filter = result.crawl_filter || {};
+  // 判据在 `pipe_channels.js`:同步中心、公众号页、订阅页共用那一份,别在这儿再判一遍。
+  const libraryOnly = pipeLibraryOnly(result);
   $('pipe-running-channel').textContent = libraryOnly
     ? `${s.running ? '本次' : '上次'}范围：全库（不按来源）`
     : scopes.length
@@ -102,8 +99,12 @@ function renderPipeState(s) {
     : item.accounts?.length ? item.accounts.length + ' 个指定订阅' : '全部订阅';
   const scope = scopes.map(item => `${scopes.length > 1 ? channelLabel(item.channel) + ' ' : ''}${scopeText(item)}`).join(' · ');
   // 同上:全库那一轮没有「订阅范围」可言,订阅数和日期窗口对它都不成立。
+  // 步骤名**按这一轮真正计划了什么念**,不许写死「索引与提取」——「不按来源」
+  // 的组合不止它一种(单独重跑一次 wiki、只重建索引都是),写死就会跟实际计划
+  // 对不上,而那一轮本身并没有选错阶段。
+  const libraryWhat = planned.map(k => STAGE_META[k]?.name).filter(Boolean).join(' · ');
   $('pipe-run-scope').textContent = libraryOnly
-    ? `索引与提取${result.finished_at ? ' · ' + result.finished_at + ' 结束' : ''}`
+    ? `${libraryWhat}${result.finished_at ? ' · ' + result.finished_at + ' 结束' : ''}`
     : scopes.length
     ? `${scope} · ${range}${result.finished_at ? ' · ' + result.finished_at + ' 结束' : ''}` : '';
   $('pipe-progress-label').textContent = planned.length ? `${completed} / ${planned.length} 完成` : '—';

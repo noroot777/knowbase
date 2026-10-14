@@ -22,7 +22,10 @@ def kind_checked(kind):
 def guard(kind):
     kind_checked(kind)
     state = pipeline.get_state()
-    running = {scope['channel'] for scope in pipeline.crawl_channels(state.get('crawl_filter'))}
+    # `run_scopes` 而不是 `crawl_channels`:全库那一轮(只跑 index/extract)的 filter 里
+    # 有一个自动盖上去的默认来源名,照它拦等于在一轮跟公众号无关的运行里锁住公众号的
+    # 订阅修改。口径只有那一份,见 `pipeline_stages.run_scopes`。
+    running = {scope['channel'] for scope in pipeline.run_scopes(state)}
     if state['running'] and kind in running:
         raise HTTPException(409,'该来源正在同步，请等待结束后修改订阅')
 

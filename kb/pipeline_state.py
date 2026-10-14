@@ -292,3 +292,108 @@ def _end_run() -> None:
             for old_id in list(_finished)[:-_FINISHED_KEEP]:
                 del _finished[old_id]
         _state["running"] = False
+
+
+# ── 一次业务轮里的几轮管道,合并成一份结果 ──────────────────────────────────────
+# 日报那一轮不是一次管道运行,而是 N+1 次:每个来源各一轮 crawl→export,再一轮
+# 全库的 index→extract。而「最近一次运行」只有一份,**后跑的会把先跑的盖掉** ——
+# 于是 RSS 抓取失败之后,同步中心显示的是最后那一轮入库的「同步已完成」,失败明细
+# 和「重试失败项」一起消失(`retry_failed_plan` 读的也是这一份)。两段式之前就已经
+# 是这样了(只有最后一个来源的结果留得下来),改成两段式之后变成每次必然发生。
+# 所以收尾时把这一批合并成一份发布,让查看和重试面对的是**整个业务轮**。
+
+# 合并时谁盖谁。只在**各自计划里有这个阶段**的记录之间比:没计划过的那一档是
+# `skipped/未选择`,让它参与比较会把另一轮真实的 ok 盖成「跳过」。
+_MERGE_RANK = {"error": 4, "stopped": 3, "skipped": 2, "pending": 1, "running": 1, "ok": 0}
+
+
+def _merge_rank(stage: dict) -> int:
+    from kb.pipeline_retry import _FAIL_DETAIL_RE
+    # status=ok 但 detail 里写着「失败 3 个」也是失败(判据和面板按钮、
+    # `retry_failed_plan` 共用那一条正则,三处不一致的话按钮会亮着而计划是空的)。
+    if _FAIL_DETAIL_RE.search(stage.get("detail") or ""):
+        return _MERGE_RANK["error"]
+    return _MERGE_RANK.get(stage.get("status") or "", 0)
+
+
+def _merge_scopes(records: list[dict], key: str) -> dict:
+    """把几轮的来源范围并起来。同一个来源出现多次时按先到的那份算。"""
+    from kb.pipeline_stages import crawl_channels   # 延迟:它反过来 import 本模块
+    merged: list[dict] = []
+    for run in records:
+        planned = run.get("planned_stages") or []
+        if not ({"crawl", "export"} & set(planned)):
+            continue              # 全库那一轮没有来源范围可言,见 `run_scopes`
+        for scope in crawl_channels(run.get(key) or run.get("crawl_filter")):
+            if scope["channel"] and not any(s["channel"] == scope["channel"] for s in merged):
+                merged.append(scope)
+    if not merged:
+        return {}
+    # 一个来源时写回老样子的 channel + accounts:存量读取方(和 `crawl_channels`
+    # 自己)两种都认,但旧的那种更窄,能被更多消费方直接读。
+    if len(merged) == 1:
+        return {"channel": merged[0]["channel"], "accounts": merged[0]["accounts"]}
+    return {"channel": merged[0]["channel"], "channels": merged}
+
+
+def publish_batch(records: list[dict]) -> dict | None:
+    """把一次业务轮里跑过的几轮管道合并成一份,发布成「最近一次运行」。
+
+    `records` 是各轮的终态快照(`get_state()` 在它 running 放下之后的那一份),
+    按时间顺序。少于两轮就不发布 —— 那时管道自己落的那份已经代表整轮了。
+
+    **逐阶段取最重的那一个**,而且只在计划过这个阶段的记录之间比。来源范围、
+    失败名单(`crawl_retry`)按来源并起来,这样「重试失败项」拿得到那一轮的目标
+    和原导出范围,不必从当前订阅状态反推。
+
+    合并后的 `run_id` 是新发的,`crawl_retry.run` 跟着它 —— `retry_notes` 要拿
+    这两个对得上才认这份名单(对不上就按原范围重跑,方向是安全的)。
+
+    期间要是已经有别的运行开跑了,这份发布会在它收尾时被盖掉,跟没有合并时的
+    行为一样(面板本来就优先显示正在跑的那一轮)。
+    """
+    records = [r for r in records if r]
+    if len(records) < 2:
+        return None
+    with _lock:
+        run_id = new_run_id()
+        stages: dict[str, dict] = {}
+        for name in STAGES:
+            owned = [r["stages"][name] for r in records
+                     if name in (r.get("planned_stages") or []) and (r.get("stages") or {}).get(name)]
+            stages[name] = (deepcopy(max(owned, key=_merge_rank)) if owned
+                            else {"status": "skipped", "detail": "未选择"})
+        planned = [s for s in STAGES
+                   if any(s in (r.get("planned_stages") or []) for r in records)]
+        notes: dict = {}
+        for run in records:
+            note = run.get("crawl_retry") or {}
+            if note.get("run") == (run.get("run_id") or ""):
+                notes.update(note.get("channels") or {})
+        started = [r.get("started_at") for r in records if r.get("started_at")]
+        finished = [r.get("finished_at") for r in records if r.get("finished_at")]
+        merged = {
+            "started_at": min(started) if started else "",
+            "finished_at": max(finished) if finished else _now(),
+            "stopped": any(r.get("stopped") for r in records),
+            "run_kind": "sync",
+            "planned_stages": planned,
+            "stages": stages,
+            "crawl_filter": _merge_scopes(records, "crawl_filter"),
+            "export_filter": _merge_scopes(records, "export_filter"),
+            "run_id": run_id,
+            "crawl_retry": {"run": run_id, "channels": notes} if notes else {},
+            "log": [line for r in records for line in (r.get("log") or [])][-80:],
+        }
+        try:
+            _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _STATE_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=1),
+                                   encoding="utf-8")
+        except OSError:
+            return None
+        _finished[run_id] = {"run_id": run_id, "stopped": merged["stopped"],
+                             "finished_at": merged["finished_at"],
+                             "stages": deepcopy(stages)}
+        for old_id in list(_finished)[:-_FINISHED_KEEP]:
+            del _finished[old_id]
+        return merged

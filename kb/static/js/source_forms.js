@@ -83,11 +83,36 @@ function fillSourceSettings(s) {
   fillXChannelFields(s);
   loadXChannel(sourceKind);
   // 「按来源类型每 N 分钟自动同步」那一档拆掉了(见 kb.pipeline._scheduler_tick),
-  // 所以这里不再报"下次计划几点" —— 这一类来源跟着日报那一轮走,而那一轮的时刻
-  // 在日报面板上,不在这儿。报一个本进程已经不会执行的计划时刻是在说假话。
-  $('source-settings-status').textContent =
-    '每天跟着日报那一轮同步；手动同步随时可用。';
+  // 这一类来源改成跟着日报那一轮走。**所以这一行必须去问日报到底开没开、这一类
+  // 在不在它的范围里** —— 无条件写「每天同步」在用户关掉日报定时、或者把 RSS 从
+  // 范围里去掉之后就是一句假话,而他会一直等一个不会来的自动同步。
+  renderSourceScheduleNote();
+  // 现读一次:日报那边改了设置之后,这一行不该还停在上次打开时的说法。
+  loadSourceScheduleNote();
 }
+// 日报定时的现状。读失败/还没读到时不猜,只说手动同步那一半(已知为真)。
+let sourceDailySettings = null;
+async function loadSourceScheduleNote() {
+  try { sourceDailySettings = await pipeJson('/api/daily/settings'); }
+  catch { sourceDailySettings = null; }
+  renderSourceScheduleNote();
+}
+function renderSourceScheduleNote() {
+  const box = $('source-settings-status');
+  if (!box) return;
+  const s = sourceDailySettings;
+  const manual = '手动同步随时可用。';
+  if (!s) { box.textContent = manual; return; }
+  const inScope = (s.channels || []).includes(sourceKind);
+  box.textContent = !s.enabled
+    ? `日报定时未启用，这一类来源目前不会自动同步。${manual}`
+    : !s.sync
+    ? `日报定时每天 ${s.time} 生成，但没开「生成前先同步」。${manual}`
+    : !inScope
+    ? `这一类来源不在日报的同步范围里，目前不会自动同步。${manual}`
+    : `每天 ${s.time} 跟着日报那一轮同步。${manual}`;
+}
+
 async function saveSourceSettings(e) {
   e.preventDefault();
   const kind = sourceKind;

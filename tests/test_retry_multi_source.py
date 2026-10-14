@@ -373,7 +373,10 @@ class PanelScopeLineTests(unittest.TestCase):
     def scopes(self, filters):
         src = (JS / 'pipe_channels.js').read_text(encoding='utf-8')
         view = (JS / 'pipe_view.js').read_text(encoding='utf-8')
-        func = re.search(r'function pipeRunScopes\(filter\) \{.*?\n\}', src, re.S)
+        # 参数名不写死:它从 `filter` 改成了整份运行结果(`result`),因为「这一轮
+        # 作用在哪些来源上」还要看 planned_stages —— 只跑 index/extract 的那一轮
+        # 不归任何来源。抠的仍是同一个函数。
+        func = re.search(r'function pipeRunScopes\(\w+\) \{.*?\n\}', src, re.S)
         text = re.search(r'  const scopeText = item =>.*?\n  const scope = .*?\n',
                          view, re.S)
         self.assertTrue(func and text, '面板那两行代码的形状变了,这条用例得跟着改')
@@ -392,6 +395,25 @@ console.log(JSON.stringify(out));
         self.assertEqual(0, done.returncode, done.stderr)
         import json
         return json.loads(done.stdout)
+
+    def test_a_library_round_belongs_to_no_source(self):
+        """全库那一轮(只跑 index/extract)不归任何来源。
+
+        `start_pipeline` **一律**会往 `crawl_filter` 里盖一个默认采集器名,照它念
+        的话公众号页会显示「同步中…」、而真正参与这一轮的 RSS 反倒被说成别人的
+        任务。判据在 `pipeRunScopes` 里,同步中心、公众号页、订阅页共用那一份。
+        后端那一份同口径是 `pipeline_stages.run_scopes`。
+        """
+        self.assertEqual([''], self.scopes(
+            """[{planned_stages: ['index', 'extract'],
+                 crawl_filter: {channel: 'wechat_local', accounts: []}}]"""))
+        # 反过来钉一边:抓取轮照旧报它自己的来源
+        self.assertEqual(['全部订阅'], self.scopes(
+            """[{planned_stages: ['crawl', 'export'],
+                 crawl_filter: {channel: 'rss', accounts: []}}]"""))
+        # 存量记录没有 planned_stages,照老样子摊平 —— 一律判成「不按来源」会让
+        # 订阅页对所有旧运行记录都说不出是谁在跑
+        self.assertEqual(['全部订阅'], self.scopes("[{channel: 'rss', accounts: []}]"))
 
     def test_the_line_says_what_each_source_actually_did(self):
         got = self.scopes('''[
@@ -414,6 +436,53 @@ console.log(JSON.stringify(out));
         ], got)
         self.assertNotIn('仅重试失败项', ''.join(got),
                          '那句话会把没发生的收窄也说成发生了')
+
+
+class SourceScheduleNoteTests(unittest.TestCase):
+    """订阅页那行「这一类来源什么时候自动同步」:抠真代码丢给 node 求值。
+
+    逐来源的间隔定时拆掉之后,这几类来源改成跟着日报那一轮走。所以这一行**必须
+    去问日报到底开没开、这一类在不在它的范围里** —— 无条件写「每天同步」在用户
+    关掉日报定时、或者把 RSS 从范围里去掉之后就是一句假话,而他会一直等一个不会
+    来的自动同步。
+    """
+
+    def line(self, settings, kind='rss'):
+        src = (JS / 'source_forms.js').read_text(encoding='utf-8')
+        func = re.search(r'function renderSourceScheduleNote\(\) \{.*?\n\}', src, re.S)
+        self.assertTrue(func, '那行代码的形状变了,这条用例得跟着改')
+        script = f'''
+let box = {{ textContent: '' }};
+function $(id) {{ return id === 'source-settings-status' ? box : null; }}
+const sourceKind = {kind!r};
+const sourceDailySettings = {settings};
+{func.group(0)}
+renderSourceScheduleNote();
+console.log(box.textContent);
+'''
+        done = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(0, done.returncode, done.stderr)
+        return done.stdout.strip()
+
+    def test_the_line_reports_what_the_daily_schedule_actually_does(self):
+        on = "{enabled: true, sync: true, time: '09:00', channels: ['rss', 'social']}"
+        self.assertIn('每天 09:00 跟着日报那一轮同步', self.line(on))
+        # 定时关着 / 没开「生成前先同步」/ 这一类不在范围里:三档都不许说"每天同步"
+        for settings, expect in (
+                ("{enabled: false, sync: true, time: '09:00', channels: ['rss']}",
+                 '日报定时未启用'),
+                ("{enabled: true, sync: false, time: '09:00', channels: ['rss']}",
+                 "没开「生成前先同步」"),
+                ("{enabled: true, sync: true, time: '09:00', channels: ['social']}",
+                 '不在日报的同步范围里')):
+            got = self.line(settings)
+            self.assertIn(expect, got)
+            self.assertNotIn('每天 09:00 跟着日报', got)
+        # 四档都要留着「手动同步随时可用」:那是唯一一句任何时候都为真的话
+        for settings in (on, 'null'):
+            self.assertIn('手动同步随时可用', self.line(settings))
+        # 读不到日报设置时**不猜**:只说已知为真的那一半
+        self.assertEqual('手动同步随时可用。', self.line('null'))
 
 
 if __name__ == '__main__':

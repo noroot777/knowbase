@@ -160,7 +160,9 @@ function renderWechatSubsStatus() {
   if (!section || section.hidden) return;
   const running = !!pipeSnapshot?.running;
   const mine = wechatSubsChannel();
-  const ours = running && !!mine && pipeRunScopes(pipeSnapshot?.crawl_filter).some(s => s.channel === mine);
+  // 整份快照递进去，不是只递 crawl_filter：一轮只跑 index/extract 的运行里，
+  // filter 上那个来源名是 `start_pipeline` 自动盖的，照着念会把公众号说成正在同步。
+  const ours = running && !!mine && pipeRunScopes(pipeSnapshot).some(s => s.channel === mine);
   $('subs-wechat-sync').disabled = subsWechatBusy || running || !!pipeAction;
   $('subs-wechat-sync').textContent = ours ? '同步中…' : '同步全部';
   $('subs-wechat-progress').hidden = !running;
@@ -294,7 +296,7 @@ function sourceRunFinished(reset) {
   if (reset) { sourceSeenRun = id; return false; }
   if (!id || id === sourceSeenRun) return false;
   sourceSeenRun = id;
-  return pipeRunScopes(snap.crawl_filter).some(s => s.channel === sourceKind);
+  return pipeRunScopes(snap).some(s => s.channel === sourceKind);
 }
 
 async function loadSourceModule(reset = false, selectedId = null) {
@@ -354,7 +356,7 @@ function queueSourcePoll() {
 function updateSourceRunStatus() {
   const running = pipeSnapshot?.running;
   // 一次同步可能带上好几个来源，本来源在不在这一批里决定了显示「同步中」还是「顺延」
-  const ours = running && pipeRunScopes(pipeSnapshot?.crawl_filter).some(scope => scope.channel === sourceKind);
+  const ours = running && pipeRunScopes(pipeSnapshot).some(scope => scope.channel === sourceKind);
   $('source-sync').disabled = sourceBusy || !!running || !sourceData?.ready;
   $('source-sync').textContent = ours ? '同步中…' : '同步全部';
   $('source-progress').hidden = !running;

@@ -33,6 +33,7 @@ from kb.pipeline_stages import (
     _run_projects,
     _run_wiki,
     crawl_channels,
+    run_scopes,
     source_pending,
     source_status,
     source_targets,
@@ -48,6 +49,7 @@ from kb.pipeline_state import (
     get_state,
     load_last_run,
     new_run_id,
+    publish_batch,
     request_stop,
     run_result,
 )
@@ -61,9 +63,11 @@ __all__ = [
     "load_last_run",
     "load_schedule",
     "pending_counts",
+    "publish_batch",
     "request_stop",
     "retry_failed_plan",
     "run_result",
+    "run_scopes",
     "save_schedule",
     "source_status",
     "source_targets",
@@ -290,9 +294,11 @@ def _scheduler_tick() -> None:
                 return
     daily_run.tick()
     # 这里原来还有第三档:每类订阅按自己的间隔自动同步(`kb.feeds.schedule`)。
-    # **整条拆掉了** —— 一天一次就够,三份各自到点的定时抢同一把管道锁,先到的
-    # 那个会把后到的挤成「跳过」。订阅内容的唯一定时入口现在是日报那一轮
+    # **整条拆掉了** —— 一天一次就够,几份各自到点的定时抢同一把管道锁,先到的
+    # 那个会把后到的挤成「跳过」。订阅内容现在跟着日报那一轮进库
     # (`daily_run.tick` 的同步范围),手动同步照旧随时可用。
+    # 上面那一档(`load_schedule`,我的订阅页头那颗「定时同步」)**是按要求暂留的**,
+    # 不是漏删:删它要等同步中心历史留档那条分支落地。见 `docs/decisions/sync-schedule.md`。
 
 
 def _scheduler_loop() -> None:

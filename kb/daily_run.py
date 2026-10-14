@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """日报的编排与定时:到点先把所有来源同步一遍,再生成当天的日报。
 
-同步这一步不自己造轮子,而是**依次**借用已有的管道(`kb.pipeline`)——每个通道
-跑一趟 抓取→导出→索引→提取。依次而不是并发:管道是单例(全局一把运行锁,
-索引/提取都要单写者写 kb.db),两个通道同时开等于一个必然被拒。
+同步这一步不自己造轮子,而是**依次**借用已有的管道(`kb.pipeline`),分两段:
+每个来源各跑一趟 抓取→导出,全部抓完再跑一趟全库的 索引→提取(只有前两段认
+来源,后两段没有「只做这个来源那一份」的概念)。依次而不是并发:管道是单例
+(全局一把运行锁,索引/提取都要单写者写 kb.db),两轮同时开等于一个必然被拒。
 
-进度和失败留在各自的管道运行状态里,这里只记"哪个通道跑完了、结果如何",
-面板要看细节仍旧点进同步中心——同一件事不做两套展示。
+于是一轮日报是 N+1 次管道运行,而「最近一次运行」只有一份 —— 收尾时要把这一批
+合并成一份发布(`pipeline.publish_batch`),否则抓取失败的明细和「重试失败项」会
+被最后那一轮入库的成功抹掉。细节仍旧点进同步中心看,这里只记每一项的成败。
+硬约束在 `docs/decisions/sync-schedule.md`。
 """
 
 from __future__ import annotations
@@ -319,11 +322,16 @@ def _wait_idle(deadline: float, halted=None) -> bool:
 
 
 def _sync_round(stages: list[str], crawl_filter: dict | None, label: str,
-                deadline: float, channel: str = '', halted=None) -> dict:
+                deadline: float, channel: str = '', halted=None,
+                rounds: list[dict] | None = None) -> dict:
     """跑一轮管道并等它结束,返回这一轮在成绩单上的那条记录。
 
     `channel` 只是成绩单上的身份:抓取那一段按通道一轮一个,入库那一段是全库的
     一次、不属于任何通道(空串)。判红只看 `stages` 里点名的那几个阶段。
+
+    看到自己那一轮收尾时,把那份终态快照塞进 `rounds` —— 收尾时要把这一批合并成
+    一份发布(见 `_run` 里的 `pl.publish_batch`)。拿不到自己那份结果的那一档
+    (被下一轮挤出记录)不塞:那时连它跑没跑完都不知道,合进去只会编造一份结果。
 
     `halted` 是"要不要半路收手"的判据,默认 `_halting`(停止 + 超预算都算)。
     入库那一段传的是**只认用户停止**的那一份:超预算的本意是"别再抓了,拿已经
@@ -396,6 +404,10 @@ def _sync_round(stages: list[str], crawl_filter: dict | None, label: str,
                             '成败未知')
         _log(f'{label}:{entry["detail"]}')
         return entry
+    if rounds is not None and mine.get('run_id') == run:
+        # 只收自己亲眼看到收尾的那一份:`run_result` 那条后路只留了 stages,
+        # 没有来源范围和失败名单,合进去会让重试拿到一份不完整的范围。
+        rounds.append(mine)
     # 只看这一轮请求了的那几个阶段:没选中的阶段一开跑就落 skipped(见
     # `pipeline.start_pipeline`),全收进来的话每一轮都要多报几句"条目化/
     # wiki 未执行"。
@@ -422,6 +434,7 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         if sync:
             labels = _channel_labels()
             budget_end = time.monotonic() + SYNC_BUDGET
+            rounds: list[dict] = []
             for channel in channels:
                 if _halting():
                     _state['channels'].append(
@@ -432,7 +445,8 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                     continue
                 _state['channels'].append(
                     _sync_round(FETCH_STAGES, {'channel': channel},
-                                labels.get(channel, channel), budget_end, channel))
+                                labels.get(channel, channel), budget_end, channel,
+                                rounds=rounds))
             # 入库那一段:等所有通道都抓完才跑,跑一次 —— 这时待索引的文件和
             # 待提取的队列都最全。**用户按了停止才跳过**:接下来本来就不出报了。
             # 超预算照跑(见 DIGEST_BUDGET),所以这里不能用 `_halting()`。
@@ -444,7 +458,13 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                 _state['channels'].append(_sync_round(
                     DIGEST_STAGES, None, DIGEST_LABEL,
                     max(budget_end, time.monotonic() + DIGEST_BUDGET),
-                    halted=lambda: bool(_state['stop_requested'])))
+                    halted=lambda: bool(_state['stop_requested']), rounds=rounds))
+            # 这一轮日报是 N+1 次管道运行,而「最近一次运行」只有一份:后跑的会把
+            # 先跑的盖掉,于是抓取失败的明细和「重试失败项」会被最后那一轮入库的
+            # 成功一起抹掉(`retry_failed_plan` 读的也是这一份)。把这一批合并成
+            # 一份发布,让同步中心和重试面对的是**整个业务轮**。
+            from kb import pipeline as pl
+            pl.publish_batch(rounds)
         # 用户按的停止到此为止:接着生成等于把一份"同步到一半"的日报当成功交出去,
         # 还要再花一次模型钱。超预算是另一回事——那本来就是"别再同步了,拿现有的
         # 内容出报",继续生成正是它的目的。
