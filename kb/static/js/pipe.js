@@ -71,7 +71,11 @@ async function refreshPipe(withPending = false) {
       // 面板还写着「当前待处理 1 项」，只有手动刷新页面才归零(2026-10-09 审查
       // 实测:状态接口 pending.extract=0 而 UI 显示 1)。后台定时跑的那一轮同理。
       const doneRun = s.running ? '' : (s.run_id || s.finished_at || '');
-      const newResult = pipeDoneRun !== null && doneRun && doneRun !== pipeDoneRun;
+      // 这一次只是**建立基线**:`pipeDoneRun` 还是初始的 null,「身份变了没有」无从
+      // 谈起。所以它不算「出现一轮新结果」,但它自己要补一次历史对齐 —— 见下面
+      // 那个 firstRead 分支。
+      const firstRead = pipeDoneRun === null;
+      const newResult = !firstRead && doneRun && doneRun !== pipeDoneRun;
       pipeDoneRun = doneRun;
       pipeSnapshot = s; pipeConnected = true; pipeLastRead = Date.now();
       $('pipe-connection').hidden = true;
@@ -91,6 +95,18 @@ async function refreshPipe(withPending = false) {
         // **历史照旧要刷**:那一轮也该在列表里留档,而它恰恰是最容易没人看见的
         // 那一档(几百毫秒就结束、或者后台定时跑的)。
         refreshPipePending();
+        loadPipeHistory();
+      } else if (firstRead && doneRun) {
+        // **首次读到的就是「一轮已结束」时,也要和历史对齐一次。** 这一次按定义不是
+        // 新结果(基线就是它),而历史查询是和状态查询**并排起跑**的:刷新页面后立刻
+        // 打开同步中心,恰好有一轮在这两个回包之间结束,历史取到的就是不含它的那一份。
+        // 之后身份不再变,`newResult` 永远为假,列表就**永久**少最新那一轮,得切走再
+        // 回来才补齐(实测:后端 4 轮、页面 3 行,等自动轮询也不补)。
+        //
+        // **两种回包顺序都靠这一道兜住**:状态先到时这一道撞上在途的历史查询、记一笔
+        // 欠账(`loadPipeHistory` 开头那一笔),等旧回包收尾后补发;历史先到时在途已经
+        // 空了,这一道直接发一次新的。所以不能改成「只去掉历史那边的空身份短路」——
+        // 那只治得了状态先到的一半。
         loadPipeHistory();
       }
     } catch (e) {

@@ -68,8 +68,9 @@ async function loadPipeHistory() {
     // 发请求**之前**记下「现在是哪一轮」。回包回来时它变了,说明这期间又跑完了
     // 一轮,而这份回包里没有它 —— 记一笔欠账,循环按新快照再查一次。身份认 run_id
     // (`pipeRunKey` 那一份口径:`started_at` 只精确到秒,分不开落在同一秒的两轮)。
-    // **这一道和上面那一笔各有射程**:首次进页面时还没有快照(`runKey` 是空的),
-    // 这一道短路,靠欠账补;而欠账在"身份变了"那一档本来就是 true,靠这一道补。
+    // **空身份(首次进页面,还没有快照)时这一道短路** —— 那一档由状态侧兜住:
+    // `refreshPipe` 首次读到一轮已结束时会补调一次本函数(那边的 firstRead 分支),
+    // 落到在途就是下面那笔欠账、落到空闲就是一次新查询。两边都不许单独拆掉。
     const runKey = pipeRunKey(pipeSnapshot);
     pipeHistoryRequest = pipeJson('/api/pipeline/runs');
     try {

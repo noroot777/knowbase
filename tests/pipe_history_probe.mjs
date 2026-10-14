@@ -48,6 +48,12 @@ let retryCalls = 0, runsCalls = 0;
 // 好**(和真后端一样),所以放行时它带的是请求发出时那一刻的事实 —— 这正是「旧回包
 // 迟到」那一局要的。
 let holdRuns = null;
+// 非 null = 下一次状态轮询(`refreshPipe` 那一条)的回包按在这儿等放行。**和
+// `holdRuns` 的生成时机刚好相反:它的回包是放行那一刻才生成的**,于是带的是那一轮
+// 已经结束之后的事实。两个合起来摆的就是生产那个窗口:两个请求一起发出,服务端先
+// 答完历史(此刻那一轮还没结束、回包里没有它),那一轮随后结束,服务端才答状态
+// (回包里有它)。顺序反过来也是同一个窗口,所以两种放行顺序各验一遍。
+let holdStatus = null;
 let state = {
   running: false, stop_supported: true, stop_requested: false, ...EVENING,
 };
@@ -88,6 +94,13 @@ const server = createServer((req, res) => {
     // 最新那一轮全绿,但还有 2 项待提取 —— 于是「重试失败项」在最新视图下是**可见**的,
     // 翻历史时藏没藏掉才看得出来
     const extra = req.url.includes("pending=true") ? { pending: { extract: 2 } } : {};
+    // 只按住 `refreshPipe` 那一条。待处理数(`pending=true`)和来源连接探测(带 channel)
+    // 走的是同一个路径,按住它们会把摆局卡在别处。
+    const poll = req.url.includes("source=false") && !req.url.includes("pending=true");
+    if (holdStatus && poll) {
+      const gate = holdStatus; holdStatus = null;
+      return void gate.then(() => json({ ...state, last_run: runs[0] || null, ...extra }));
+    }
     return json({ ...state, last_run: runs[0] || null, ...extra });
   }
   if (path === "/api/pipeline/runs") {
@@ -142,6 +155,13 @@ const evalJs = async expression => {
 const until = async (expr, ms = 8000) => {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) { if (await evalJs(expr)) return true; await sleep(120); }
+  return false;
+};
+// 等**这一侧**(node 侧)某个事实成立 —— 典型是「那个 hold 被哪个请求消费掉了」,
+// 那是服务端这边的事,页面上看不出来。
+const untilHere = async (fn, ms = 6000) => {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) { if (fn()) return true; await sleep(100); }
   return false;
 };
 // 真鼠标点在元素中心:按钮的 disabled / hidden 只有真实事件才算数。
@@ -304,10 +324,13 @@ check("第三轮那个红也列出来了",
       /09:12/.test(await evalJs(`document.querySelector('.pipe-history-row').textContent`)),
       await evalJs(`document.querySelector('.pipe-history-row').textContent.replace(/\s+/g, ' ').trim()`));
 
-// ── 11. 刚进页面、还没有快照那一刻又跑完一轮:靠在途那一笔欠账补 ───────────
-// 这一档 `runKey` 是空的(`switchTab('pipe')` 里 `refreshPipe` 和 `loadPipeHistory`
-// 并排起跑,历史先发时 `pipeSnapshot` 还是 null),上面那道身份校验短路 —— 能救它的
-// 只有"在途时记一笔欠账"。
+// ── 11. 还没有快照那一刻又来一次调用:在途那一笔欠账不许被吞掉(机制) ───────
+// **这一组摆的是机制,不是生产的首次加载**:它手工清掉快照、手工补调一次
+// `loadPipeHistory()`,验的只是「在途期间又来一次调用时,那一笔欠账保不保得住」
+// (`runKey` 是空的,身份校验那一道在这一档短路,能救它的只有欠账)。
+// **生产的首次加载路径上那第二次调用从哪来**,是另一件事 —— 它来自 `refreshPipe`
+// 的 firstRead 分支,由下面第 12、13 组验:那两组整局只有一个真实点击,不碰任何
+// 页面变量,也不手工补调。两边都得有,少哪边都会让另一边的红没人接。
 runs = [EVENING, MORNING];
 // **开局先把列表清空并渲染一次。** 上一组收尾时它正好是三行,不清的话下面那句
 // 「追平成三轮」在摆局那一刻就已经为真 —— 这一项会静默绿着,而它本来要验的是
@@ -327,6 +350,87 @@ check("没有快照那一刻的欠账也要补上",
       await until(`document.querySelectorAll('.pipe-history-row').length === 3`, 8000),
       `rows=${await evalJs(`document.querySelectorAll('.pipe-history-row').length`)}`);
 check("它也是靠补一次查询追平的", runsCalls > runsBefore2 + 1, `${runsBefore2} → ${runsCalls}`);
+
+// ── 12/13 组共用的摆局:刷新页面后立刻打开同步中心,一轮恰好在两个回包之间结束 ──
+// **整局只有一个真实动作(点「同步中心」)**,之后全靠页面自己的初始化和回包推进:
+// 不给页面变量赋值、不手工补调 `loadPipeHistory()`。这两组要验的恰恰是「生产那条
+// 首次加载路径自己会不会补上这一次历史对齐」—— 手工补一次调用就把它验没了。
+const freshOpen = async label => {
+  // 后端先回到两轮,面板上那一轮是晚上那次
+  runs = [EVENING, MORNING];
+  state = { running: false, stop_supported: true, stop_requested: false, ...EVENING };
+  await evalJs(`window.__beforeReload = 1; true`);
+  // **状态那次查询在页面加载时就发出了**,所以这个 hold 必须设在**导航之前**:
+  // `initWorkspace` 收尾处本来就有一次 `refreshPipe()`(「别的 tab 或调度器起的活,
+  // 在图鉴页也要发现」),而 `refreshPipe` 在途时复用同一个 promise —— 点「同步中心」
+  // 不会再发一次状态查询,只会发历史那一条。按住的正是生产里那次首次状态读取。
+  let releaseStatus, releaseRuns;
+  holdStatus = new Promise(r => { releaseStatus = r; });
+  await send("Page.navigate", { url: base + "/" });
+  // 判据是「上一张页面留的那个标记没了」—— 只看 `switchTab` 在不在会被旧页面蒙过去
+  await setup(`${label}:页面整个重建了`, until(
+    `typeof window.__beforeReload === 'undefined' && typeof switchTab === 'function'`, 20000));
+  await setup(`${label}:页面加载那次状态查询卡在途中`, untilHere(() => holdStatus === null));
+  const before = runsCalls;
+  holdRuns = new Promise(r => { releaseRuns = r; });
+  await setup(`${label}:点开了同步中心`, clickAt("#tab-pipe"));
+  await setup(`${label}:历史查询也卡在途中`, until(`pipeHistoryRequest !== null`, 6000));
+  // 历史这一条是**那一下点击**发出来的,不是页面加载时就有的(地址栏里残留的 #pipe
+  // 会让 `restoreWorkspaceLocation` 自己打开同步中心,那样这一局的起点就不干净了)
+  check(`${label}:历史查询是点开那一下发出来的`, runsCalls === before + 1,
+        `${before} → ${runsCalls}`);
+  // 真实的初始值如实记一笔:这两组成立的前提就是它 —— 快照和身份都还是初始的 null
+  check(`${label}:刚进页面时确实什么都还没有`, await evalJs(
+    `pipeSnapshot === null && pipeDoneRun === null && pipeHistoryWanted === false`),
+    await evalJs(`JSON.stringify({ snap: pipeSnapshot, done: pipeDoneRun, wanted: pipeHistoryWanted })`));
+  // 卡着的这段时间里,第三轮在后台跑完了
+  runs = [LATER, EVENING, MORNING];
+  state = { ...state, ...LATER };
+  return { releaseStatus, releaseRuns, before };
+};
+
+// ── 12. 全新页面、状态先到:首次那一次读取也要去对齐历史 ─────────────────────
+{
+  const { releaseStatus, releaseRuns, before } = await freshOpen("状态先到");
+  releaseStatus();
+  await setup("状态先到:顶上换成了第三轮", until(`pipeDoneRun === 'run-later'`, 8000));
+  // 历史这会儿还在途,首次那一次对齐只能先记一笔欠账
+  check("状态先到:首次读取登记了一次历史补刷", await evalJs(`pipeHistoryWanted === true`),
+        await evalJs(`JSON.stringify({ wanted: pipeHistoryWanted, inflight: pipeHistoryRequest !== null })`));
+  releaseRuns();
+  check("状态先到:历史列表自己补上了第三轮",
+        await until(`document.querySelectorAll('.pipe-history-row').length === 3`, 8000),
+        `rows=${await evalJs(`document.querySelectorAll('.pipe-history-row').length`)}`);
+  check("状态先到:补齐不靠切走再回来", runsCalls > before + 1, `${before} → ${runsCalls}`);
+  check("状态先到:第三轮那个红就在列表第一行",
+        /09:12/.test(await evalJs(`document.querySelector('.pipe-history-row')?.textContent || ''`)),
+        await evalJs(`(document.querySelector('.pipe-history-row')?.textContent || '').replace(/\s+/g, ' ').trim()`));
+}
+
+// ── 13. 全新页面、历史先到:在途已经空了,这一次对齐得自己发一次查询 ───────────
+// 这一档单靠「去掉历史那边的空身份短路」治不了 —— 旧回包落地的时候快照还是 null,
+// 拿什么都比不出来。
+{
+  const { releaseStatus, releaseRuns, before } = await freshOpen("历史先到");
+  releaseRuns();
+  await setup("历史先到:列表先按旧回包显示两轮", until(
+    `document.querySelectorAll('.pipe-history-row').length === 2 && pipeHistoryRequest === null`, 8000));
+  releaseStatus();
+  check("历史先到:历史列表自己补上了第三轮",
+        await until(`document.querySelectorAll('.pipe-history-row').length === 3`, 8000),
+        `rows=${await evalJs(`document.querySelectorAll('.pipe-history-row').length`)}`);
+  check("历史先到:补齐不靠切走再回来", runsCalls > before + 1, `${before} → ${runsCalls}`);
+}
+
+// ── 14. 反过来钉一边:这一次对齐只发生在首次,之后每轮轮询不许都多查一次 ───────
+// `pipeDoneRun === null` 按定义只有一次,但把条件写宽(比如漏掉 firstRead 那一档、
+// 改成每次都调)也能让上面两组绿 —— 那样空闲时每 6 秒多读一次历史,白费。
+const quiet = runsCalls;
+await evalJs(`refreshPipe(); true`);
+await sleep(500);
+await evalJs(`refreshPipe(); true`);
+await sleep(500);
+check("状态没变时后续轮询不再重复查历史", runsCalls === quiet, `${quiet} → ${runsCalls}`);
 
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 
