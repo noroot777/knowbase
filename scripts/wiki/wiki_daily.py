@@ -33,19 +33,28 @@ import wikilib as W  # noqa: E402
 def step_linkify(u: W.Universe) -> int:
     from kb import store
     from kb.extract import refresh_content_hash
+    from kb.scanner import file_hash
 
     changed = []
     for p in u.docs:
         new_text = W.linkify_doc(u, p)
         if new_text is None:
             continue
-        (W.VAULT / p).write_text(new_text, encoding="utf-8")
-        changed.append(p)
+        full = W.VAULT / p
+        try:
+            before = file_hash(full.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        full.write_text(new_text, encoding="utf-8")
+        # 带上「动手之前」那份 hash:刷新只认库里记的还是它
+        # (refresh_content_hash 没有无条件分支了)。磁盘已经领先于索引时这一行
+        # 不该写 —— 那等于替别人的改动签一张已索引的收据,它永远进不了 chunks。
+        changed.append((p, before))
     if changed:
         conn = store.connect()
         try:
-            for p in changed:
-                refresh_content_hash(conn, p)
+            for p, before in changed:
+                refresh_content_hash(conn, p, before)
             conn.commit()
         finally:
             conn.close()

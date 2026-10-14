@@ -21,9 +21,15 @@ import re
 # 软广的判定口径。抽成一份常量:提取阶段(随 entity/topic 顺带判)和存量补判
 # 脚本(只判软广)共用同一段文字,两处的标准才不会各漂各的。
 #
-# 「只看正文主体」那条是拿真实样本调出来的:GitHub猿 这类号在每篇文末固定挂
-# 一段代充值/加群广告,不写清楚的话模型会因为那条尾巴把正经资讯文也判成 hard
-# (2026-09-16 随机采样 50 篇时抓到两例误杀)。
+# 「只看正文主体」那条是拿真实样本调出来的:号主在每篇文末固定挂一段加群/课程
+# 广告,不写清楚的话模型会因为那条尾巴把这个号自己写的资讯文也判成 hard。
+# 后来发现这条当初放得过宽——「代充值」原先既列在 hard 的清单里、又列在「可以
+# 忽略的尾巴」里,同一个词在相邻两段里自相矛盾,模型只能在矛盾处抛硬币:同一份
+# 搬运稿的 53 个副本判出 52 个 none、1 个 hard,给的理由逐字是「文末的充值广告
+# 是公众号固定版位而非本篇文章内容」。所以把代充值/中转站这一类从「可忽略」里
+# 拿出来单列,并在规则里直接钉住反面(报道泄露事件、介绍镜像源项目、拿「中转站」
+# 当比喻的不算)——那 24 篇词面命中的全是这三种,语义上跟导流毫无关系。
+# 完整的事故形态和证据在 docs/decisions/promo.md。
 _PROMO_RULES = """\
   * hard:整篇就是为某个商业产品/服务服务的——通篇围绕它、只讲好话没有独立
     对比与缺点,并且在做转化引导:堆促销权益话术(免费不限量、注册就送、每天
@@ -33,10 +39,24 @@ _PROMO_RULES = """\
   * soft:有推广倾向但仍给了实质信息——厂商自家发布通稿、带邀请返利链接的推荐、
     通篇只夸一家产品但确实写清了能力和用法。
   * none:正常内容——开源项目介绍、技术教程、行业资讯报道、观点评论、论文解读。
-  只看正文主体,不看文末的固定推广位:公众号普遍在结尾挂加群、加客服、代充值
-  一类的尾巴,那是这个号每篇都有的版位,不是这一篇的性质。正文本身是资讯报道、
-  开源项目介绍或教程的,即便文末挂着广告也判 none/soft;
+  只看正文主体,不看文末的固定推广位:公众号普遍在结尾挂关注引导、加群、课程、
+  自家产品一类的尾巴,那是这个号每篇都有的版位,不是这一篇的性质。正文本身是
+  资讯报道、开源项目介绍或教程的,即便文末挂着这类广告也判 none/soft;
   hard 留给「把整篇文章买下来卖那个产品」的投放稿。
+  这一条不含「借壳」那一种:文末挂的是代充值、代开会员、共享账号、API 中转站
+  (加微信办理、扫码充值、「官方一半价格」「无需魔法」「无视封号」一类话术)时
+  一律 hard,不按「固定版位」放过。这类号的套路是把别人的资讯稿整篇搬过来当壳
+  (常能看到照抄的「XX报道」抬头和原号的编辑署名),文末接上那段联系方式,整篇的
+  存在就是为了把人导到那里;正文那段写得多正经也不是它自己的东西。
+  但只认真的在做这桩生意的那一种:文末那段自己得在提供交易——有具体对接方式
+  (微信号、二维码、落地页地址)加上「办理/代充/代开/续费」的动作。下面这些
+  一律不算,照旧按正文性质判:正文在报道中转站泄露事件、介绍镜像源监控项目,
+  或者把「中转站」当比喻用(「学术走向产业的中转站」「人肉中转站」);文末那串
+  是本号自己的历史文章导航、系列文章推荐,其中某条标题带「怎么买、怎么充值」;
+  正文是在讲官方自己的订阅档位、计费方式怎么选;文末那段是加本号社群、加作者
+  好友、关注引导,哪怕写了「加微信」也不算。分野在于那段在卖什么:代充、代开
+  会员、卖号、中转站额度才算,拉人进群聊天不算。光出现「充值」两个字更不构成
+  判据,要看那段是不是在卖代充服务。
   被推广的东西是开源项目(有公开仓库、能自己部署、不花钱)时一律不判 hard,
   最多 soft:号主把它吹上天、顺带拉群拉关注,那是这类号的文风,不是买量投放。
   hard 的推广对象必然是要花钱或要注册账号的商业产品/服务。
@@ -108,20 +128,40 @@ def clip_body(body: str, head: int = BODY_HEAD, tail: int = BODY_TAIL) -> str:
     return f"{body[:head]}\n\n……(中间略)……\n\n{body[-tail:]}"
 
 
-def normalize_promo(raw) -> dict:
-    """把模型给的 promo 归一成 {level, reason}。
+def normalize_promo(raw, strict: bool = False) -> dict:
+    """把模型给的 promo 归一成 {level, reason},认不出就带上 `fallback: True`。
 
     认不出的一律落 none:软广判定是「宁可漏、不可错杀」——错杀会让一篇正常
     文章连同它的实体一起从条目化和检索里消失,而漏判只是留着一篇广告。
+
+    **这条兜底只在「这一篇还没有结论」时成立**,`strict=True` 就是给另一种
+    场合用的:这一篇**已经有**结论、这次是去覆盖它(存量重判)。那时兜底的
+    none 不再是「保守」而是「把已经判出来的 hard 擦掉」——广告重新进检索、
+    `flag/软广` 一起摘掉,而调用方以为自己拿到了一个判定。所以严格模式下
+    认不出就抛 `ValueError`,由调用方重试或扣留,**不许返回「确定没有」**。
+
+    **strict 管不到的那条路另有一道闸,靠的就是 `fallback` 这个标记。**
+    全量提取(`_extract_once`)不能开 strict:绝大多数文章是第一次判,一个坏
+    回包不该把 entity/topic/summary 整份丢掉。但它同样会去覆盖已有结论 ——
+    正文补抓回来之后 `fulltext.retire_stale` 只清 `extracted_at`、**明确保留**
+    原来的 promo,这一篇于是带着一个 hard 重新排进提取,一个缺 promo 的回包
+    就把它擦成 none。所以归一结果里要分得出「模型真的说了 none」和「没说、
+    我们填的 none」:前者照旧覆盖,后者由 `kb.extract_promo.save_promo` 在
+    落库那一层拦住(明确的 none 仍然正常放行)。两件事分两层做 —— 这里只
+    如实标注结论的来源,要不要让它覆盖是落库那边的决定。
     """
     if isinstance(raw, str):                    # 模型偶尔直接给 "hard"
         raw = {"level": raw}
     if not isinstance(raw, dict):
         raw = {}
     level = str(raw.get("level") or "").strip().lower()
+    out = {"level": level,
+           "reason": str(raw.get("reason") or "").strip()[:200]}
     if level not in PROMO_LEVELS:
-        level = "none"
-    return {"level": level, "reason": str(raw.get("reason") or "").strip()[:200]}
+        if strict:
+            raise ValueError(f"没有拿到合法的 level: {str(raw)[:120]}")
+        out["level"], out["fallback"] = "none", True
+    return out
 
 
 def extract_with_llm(title: str, body: str, timeout: int = 120,
@@ -160,10 +200,15 @@ def _extract_once(title: str, body: str, timeout: int, account: str = "") -> dic
 
 
 def judge_promo(title: str, body: str, account: str = "",
-                timeout: int = 120) -> dict:
+                timeout: int = 120, require_verdict: bool = False) -> dict:
     """只判软广,不重做 entity/topic/summary(存量补判走这条)。
 
     重试语义与 extract_with_llm 一致:坏 JSON 原地重试一次,API 报错直接抛。
+
+    `require_verdict=True` 把「回包里没有合法 level」也算进那次重试,两次都
+    拿不到就抛 —— **重判已有结论的那条路必须给它开**,否则一个 `{}` 回包会
+    经 `normalize_promo` 的兜底变成「这篇不是广告」,把已经判出来的 hard 擦掉
+    (判据和理由都在 `normalize_promo` 的 strict 那一段)。
     """
     from kb.llm import chat
     from kb.llm_stages import stage_model
@@ -179,7 +224,8 @@ def judge_promo(title: str, body: str, account: str = "",
             last_err = ValueError(f"输出里没有 JSON: {out[:200]}")
             continue
         try:
-            return normalize_promo(json.loads(m.group(0)))
-        except json.JSONDecodeError as e:
+            return normalize_promo(json.loads(m.group(0)),
+                                   strict=require_verdict)
+        except (json.JSONDecodeError, ValueError) as e:
             last_err = e
     raise last_err

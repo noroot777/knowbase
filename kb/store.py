@@ -230,7 +230,13 @@ def _migrate_promo(conn: sqlite3.Connection) -> None:
     _add_columns(conn, "documents",
                  (("promo_level", "TEXT NOT NULL DEFAULT ''"),
                   ("promo_reason", "TEXT NOT NULL DEFAULT ''"),
-                  ("promo_at", "TEXT")))
+                  ("promo_at", "TEXT"),
+                  # 「判定落库了,但 md frontmatter 那行 flag 还没对齐」的持久化
+                  # 待办。交付分两步落在两个不同的存储上(kb.db 的事务管不着
+                  # vault 文件),第二步失败必须留下记录 —— 否则下一轮按
+                  # `promo_level` 非空把这一篇滤掉,两处永久不一致。
+                  # 写它的口径只有一份:`kb.extract_promo.mark_promo_tag_pending`。
+                  ("promo_tag_pending", "INTEGER NOT NULL DEFAULT 0")))
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_documents_promo ON documents(promo_level)")
     # 软广排除要按 url 从条目回溯原文(见 promo_exclude_sql),没索引就是每行一次全表扫
@@ -360,6 +366,36 @@ def doc_needs_reindex(conn: sqlite3.Connection, path: str, content_hash: str) ->
     return row is None or row["content_hash"] != content_hash
 
 
+def _align_promo_tag(conn: sqlite3.Connection, path: str) -> None:
+    """重建 doc_tags 时,`flag/软广` 那一行按**库里的判定**定,不按 frontmatter。
+
+    `upsert_document` 把 doc_tags 整表删掉再按 md 的 tags 重建,而它不碰
+    `promo_level` —— 于是 md 里一行过时的 flag 就成了这张表的唯一真相来源:
+    判定早已改成 none,一次完全合法的索引又把那行插回库里,而按 `flag/软广`
+    过滤的查询从此照旧捞得到这篇已经纠正为正常内容的文章。md 那行可能过时的
+    路子不止一条(回写摘标签时碰上没权限/磁盘满/进程中断,或者有人手工改了
+    frontmatter),**所以判据不能是「上一次回写成功了没有」,只能是落库的那份
+    判定**:判定明确不是 hard 就把那行摘掉,明确是 hard 就补上。
+
+    `promo_level = ''`(还没判过)两样都不做 —— 那时 md 那行是提取阶段写进去的
+    唯一记录(重建过 kb.db 的库就是这样),按「矛盾」摘掉等于凭空丢数据。
+
+    判据待在两条写语句自己的 WHERE 里(不在 Python 这边先 SELECT 一次),口径
+    同 `kb.extract_promo.save_promo`。
+    """
+    from kb.extract_promo import PROMO_TAG
+
+    conn.execute(
+        "DELETE FROM doc_tags WHERE path=? AND tag=?"
+        " AND (SELECT promo_level FROM documents WHERE path=?) IN ('none','soft')",
+        (path, PROMO_TAG, path))
+    conn.execute(
+        "INSERT OR IGNORE INTO doc_tags (path, tag)"
+        " SELECT ?, ? WHERE"
+        " (SELECT promo_level FROM documents WHERE path=?) = 'hard'",
+        (path, PROMO_TAG, path))
+
+
 def upsert_document(conn: sqlite3.Connection, doc, chunks, now: str) -> None:
     """写入/更新一篇文档及其 chunk 与 FTS。旧 chunk(含向量)全部删除重建。"""
     # 老 chunk 的向量一并清掉(chunk_id 会变)
@@ -391,6 +427,7 @@ def upsert_document(conn: sqlite3.Connection, doc, chunks, now: str) -> None:
         "INSERT OR IGNORE INTO doc_tags (path, tag) VALUES (?, ?)",
         [(doc.path, t) for t in doc.tags],
     )
+    _align_promo_tag(conn, doc.path)
 
     title_tok = tokenize(doc.title)
     for ch in chunks:
@@ -477,12 +514,34 @@ def doc_body_version(conn: sqlite3.Connection, path: str) -> tuple[str, str]:
 
     没有这一行文档时返回 ("", "")。
     """
+    snap = doc_input_snapshot(conn, path)
+    return (snap["version"], snap["body"]) if snap else ("", "")
+
+
+def doc_input_snapshot(conn: sqlite3.Connection, path: str) -> dict | None:
+    """一篇文章喂给模型的那组输入 + 它所属的那一版,**一条语句一个快照**。
+
+    `doc_body_version` 的全量版:多带上 title / account,因为这两样也进 prompt
+    (软广判定按「这个号在卖什么」读文末那段,账号名是判据的一部分)。分两次
+    查询读的话,两次之间另一条连接的索引可以把这一篇换版,于是候选里带的是
+    **旧标题配新正文**,而后面那道按 `content_hash` 的条件写拿到的是新版本号、
+    照样放行 —— 判的是一份没人写过的东西。一条语句只有一个快照,四样必然同属
+    一版;「这一版还是不是当前那一版」由写入侧回答(见 kb/extract.py 的
+    `mark_no_body` 与 `kb/extract_promo.py` 的 `commit_promo`)。
+
+    没有这一行文档时返回 None。chunks 一条都没有时 body 是空串(不是 None)。
+    """
     row = conn.execute(
-        "SELECT (SELECT content_hash FROM documents WHERE path=?) AS version,"
+        "SELECT (SELECT title FROM documents WHERE path=?) AS title,"
+        " (SELECT account FROM documents WHERE path=?) AS account,"
+        " (SELECT content_hash FROM documents WHERE path=?) AS version,"
+        " (SELECT count(*) FROM documents WHERE path=?) AS alive,"
         " group_concat(text, char(10)) AS body FROM "
         "(SELECT text FROM chunks WHERE path=? ORDER BY seq)",
-        (path, path),
+        (path, path, path, path, path),
     ).fetchone()
-    if row is None:
-        return "", ""
-    return (row["version"] or ""), (row["body"] or "")
+    if row is None or not row["alive"]:
+        return None
+    return {"path": path, "title": row["title"] or "",
+            "account": row["account"] or "",
+            "version": row["version"] or "", "body": row["body"] or ""}

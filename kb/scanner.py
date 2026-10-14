@@ -66,10 +66,41 @@ def file_hash(text: str) -> str:
 
     口径只有这一份:索引按它判「这一篇要不要重建」(`store.doc_needs_reindex`)、
     回写改完 frontmatter 按它刷新(`extract.refresh_content_hash`)、提取结果落库
-    前按它确认「索引已经扫过当前这份 md」(`extract._require_current_body`)。
+    前按它确认「索引已经扫过当前这份 md」(`extract._require_current_input`)。
     各写一遍的话,三处对「索引跟上了没有」的回答会各漂各的。
     """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def frontmatter_tags(fm: dict) -> list[str]:
+    """索引会从一份 frontmatter 里读到的 tags 列表。
+
+    抽出来是因为有第二个消费点:回写摘掉 `flag/软广` 之后,要确认「索引下次
+    读到的那一份里它真的不在了」(`kb.extract_promo.promo_tag_in_md`)。那道
+    确认必须和索引用同一份口径 —— 各写一遍的话,摘除那边按自己的理解判「摘
+    干净了」,而索引按另一套读法照旧把它读回 `doc_tags`。
+    """
+    tags = fm.get("tags") or []
+    if not isinstance(tags, list):
+        tags = [str(tags)]
+    return [str(t).strip() for t in tags if str(t).strip()]
+
+
+def frontmatter_input(fm: dict, md_path: Path) -> tuple[str, str]:
+    """索引会从一份 frontmatter 里读到的 title / account —— 也是**模型输入**那两样。
+
+    抽出来是因为有第二个消费点:软广补判要在落库之前确认「磁盘上这一篇喂给
+    模型的那组输入,还是索引里那一份吗」(`kb.extract_promo.disk_input_indexed`)。
+    磁盘可以领先于索引(导出完成、索引还没跟上),而这两样都进 prompt —— 各写
+    一遍读法的话,那道确认按自己的理解说「一致」,索引随后按另一套读法把别的
+    值 upsert 进库,判定就固化在了一份没人判过的输入上。
+
+    `title` 的兜底是文件名:frontmatter 里没有 title 的 md 在索引里就叫这个,
+    判定看到的也是这个。
+    """
+    account = str(fm.get("account") or fm.get("channel") or "").strip()
+    title = str(fm.get("title") or "").strip() or md_path.stem
+    return title, account
 
 
 def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
@@ -79,14 +110,11 @@ def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
         return None
     fm, body = parse_frontmatter(text)
 
-    tags = fm.get("tags") or []
-    if not isinstance(tags, list):
-        tags = [str(tags)]
-    tags = [str(t).strip() for t in tags if str(t).strip()]
+    tags = frontmatter_tags(fm)
 
-    # channel(youtube) 和 account(gzh) 语义相同,归一到 account
-    account = str(fm.get("account") or fm.get("channel") or "").strip()
-    title = str(fm.get("title") or "").strip() or md_path.stem
+    # channel(youtube) 和 account(gzh) 语义相同,归一到 account。这两样的读法
+    # 还有第二个消费点,所以在 frontmatter_input 里(别在这儿内联回来)。
+    title, account = frontmatter_input(fm, md_path)
     url = str(fm.get("url") or fm.get("youtube") or "").strip()
     published = str(fm.get("published") or fm.get("publish_time") or "").strip()
 

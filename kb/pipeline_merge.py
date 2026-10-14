@@ -149,6 +149,11 @@ def _merge_runs(records: list[dict], events: list[str] | None = None) -> dict:
         "crawl_filter": _merge_scopes(records, "crawl_filter"),
         "export_filter": _merge_scopes(records, "export_filter"),
         "run_id": run_id,
+        # 顺序凭据沿用**最后那一轮**的(身份也是它的):合并不是新发生的一轮,
+        # 而恢复要靠这两格分出谁更新(见 `pipeline_persist._seq_of`)。缺了它们
+        # 整批那一份一落盘就是「没有顺序凭据」,重启后反被判成比子轮更旧。
+        "run_seq": records[-1].get("run_seq", 0),
+        "seq_gen": records[-1].get("seq_gen"),
         "crawl_retry": {"run": run_id, "channels": notes} if notes else {},
         "log": _merge_log(records, events),
     }

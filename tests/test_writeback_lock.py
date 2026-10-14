@@ -179,9 +179,9 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         args = argparse.Namespace(limit=0, writeback=True)
         stats = pipeline_stages._new_extract_stats()
         # 打桩点分两处:模型在各自那条路自己的模块里,回写则在它**实际被调到**
-        # 的那个模块里 —— 提取那三条路现在经 `extract.commit_extraction` 转发,
-        # 所以回写要 patch 在 `extract` 上(`extract_parallel` 自己压根不再
-        # import 它)。
+        # 的那个模块里 —— 四条路现在都经协调入口转发(提取三条走
+        # `extract.commit_extraction`、补判走 `extract_promo.commit_promo`),
+        # 所以回写一律 patch 在 `extract` 上(各脚本自己压根不再 import 它)。
         for i, (label, runner, mwhere, model, bwhere, back) in enumerate((
                 ('kb extract --writeback', lambda: cli.cmd_extract(args),
                  extract, 'extract_with_llm', extract, 'writeback_extraction'),
@@ -191,7 +191,7 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
                  extract, 'writeback_extraction'),
                 ('promo_backfill.py',
                  lambda: pb.cmd_run(argparse.Namespace(limit=0, dry_run=False)),
-                 pb, 'judge_promo', pb, 'sync_promo_tag'))):
+                 pb, 'judge_promo', extract, 'writeback_extraction'))):
             with self.subTest(label):
                 self.seed(self.legacy(self.sub(label, f'https://example.org/w{i}.xml')),
                           self.entry(url=f'https://example.org/old-w{i}'))
@@ -237,7 +237,7 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
 
         with patch.object(extract, 'VAULT_ROOT', self.vault), \
              patch.object(maintenance, 'maintenance_lock', watched):
-            extract.sync_promo_tag(conn, item['path'], 'hard', False)
+            extract.sync_promo_tag(conn, item['path'], 'hard')
         self.assertIn('in_txn', seen, '压根没去取锁')
         self.assertFalse(seen['in_txn'], '带着没提交的写事务去等维护锁了')
         self.assertFalse(conn.in_transaction)
@@ -254,7 +254,7 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         item = self.seed(source)
         conn = store.connect()
         self.addCleanup(conn.close)
-        seen_body = extract.body_fingerprint(store.doc_body(conn, item['path']))
+        seen_input = extract.model_input(conn, item['path'])['seen']
         conn.execute("UPDATE documents SET summary='x' WHERE path=?", (item['path'],))
         self.assertTrue(conn.in_transaction, '摆盘没摆出一个开着的写事务')
 
@@ -269,7 +269,7 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         with patch.object(extract, 'VAULT_ROOT', self.vault), \
              patch.object(maintenance, 'maintenance_lock', watched):
             extract.commit_extraction(conn, item['path'], dict(self.EXTRACTED),
-                                      seen_body)
+                                      seen_input)
         self.assertIn('in_txn', seen, '压根没去取锁')
         self.assertFalse(seen['in_txn'], '带着没提交的写事务去等维护锁了')
         self.assertFalse(conn.in_transaction)
@@ -360,21 +360,32 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         钉住:新加一处会在这里红,而不是在某次清理报 `database is locked` 时
         才被发现。
 
-        `commit_extraction` 一并数进来:提取那三条路现在经它进来,而它自己就是
-        「维护锁 → SQLite 写锁」这道锁序的关口(见 `extract.commit_extraction`)。
+        **两个协调入口一并数进来**:提取那三条路经 `commit_extraction`、补判经
+        `commit_promo`,它们自己就是「维护锁 → SQLite 写锁」这道锁序的关口。
+        新开一个协调入口而忘了加进这条正则,等于把名单上的一处悄悄换成零处。
+
+        **`align_promo_tag` 也数进来**:它是真正动 md 那一行的那一下(回写
+        经它、`promo_backfill sync-tags` 那条修复路也经它),所以它的每个调用方
+        都得自己回答一次「锁取了没有、取之前 flush 了没有」。
         """
         call = re.compile(
-            r'\b(?:writeback_extraction|sync_promo_tag|commit_extraction)\s*\(')
+            r'\b(?:writeback_extraction|sync_promo_tag|align_promo_tag'
+            r'|commit_extraction|commit_promo)\s*\(')
         found = {}
         for py in sorted(ROOT.glob('kb/*.py')) + sorted(ROOT.glob('scripts/*.py')):
+            # 跳过 `def` 行和**注释行**:注释里提到一个函数名不是一处调用点。
+            # 不跳的话写一句解释性注释就会把名单弄红,而真要新增调用点的人只会
+            # 顺手改名单 —— 那就把这条用例从「拦住新调用点」变成了「拦住写注释」。
             hits = [ln for ln in py.read_text(encoding='utf-8').splitlines()
-                    if call.search(ln) and not ln.lstrip().startswith('def ')]
+                    if call.search(ln)
+                    and not ln.lstrip().startswith(('def ', '#'))]
             if hits:
                 found[py.relative_to(ROOT).as_posix()] = len(hits)
         self.assertEqual({'kb/cli.py': 1, 'kb/extract.py': 2,
+                          'kb/extract_promo.py': 2,
                           'kb/pipeline_stages.py': 1,
                           'scripts/extract_parallel.py': 1,
-                          'scripts/promo_backfill.py': 1}, found)
+                          'scripts/promo_backfill.py': 2}, found)
 
 
 if __name__ == '__main__':

@@ -36,6 +36,12 @@ let state = {
   stages: okStages("成功 3,失败 0,跳过 1(正文空,需回填)"), log: ["管道结束"],
 };
 let pendingExtract = 1;
+// 非空 = 这个进程启动时只从历史恢复到最新那一轮,它的重试范围没留下(真后端的
+// `restore_gap`)。面板据此把「重试失败项」按不下去并如实说一句。
+let restoreGap = "";
+// 非空 = 待处理数那个回包的版本固定报这个旧值(摆「请求成功了、取回来的却一直是
+// 另一轮」那一局)。真后端不该这样,但它是这块预算反馈的边界。
+let stalePending = "";
 let pendingCalls = 0, retryCalls = 0, heldCalls = 0;
 // 非 null = 下一次积压查询的回包按在这儿,等放行。回包内容在**收到请求那一刻**
 // 就生成好(和真后端一样),所以放行时它带的是旧那一轮的事实。
@@ -78,10 +84,15 @@ const server = createServer((req, res) => {
     res.writeHead(code, { "Content-Type": "application/json", "Content-Length": body.length });
     res.end(body);
   };
+  // 「这份回包对应哪一轮终态」,口径抄后端 `result_version`:身份没有就用收尾时间,
+  // 再没有就是「从没跑过」。前端拿它当应用凭据。
+  const versionOf = r => String((r && (r.run_id || r.finished_at)) || "") || "none";
   if (path === "/api/pipeline/status" && req.method === "GET") {
     if (req.url.includes("pending=true")) {
       pendingCalls++;
-      const body = { ...state, pending: { extract: pendingExtract }, last_run: null };
+      const body = { ...state, pending: { extract: pendingExtract }, last_run: null,
+                     result_version: stalePending || versionOf(state),
+                     restore_gap: restoreGap };
       if (holdPending) {
         const gate = holdPending; holdPending = null; heldCalls++;
         return void gate.then(() => json(body));
@@ -90,7 +101,16 @@ const server = createServer((req, res) => {
     }
     const extra = req.url.includes("source=false")
       ? {} : { source: { online: true, label: "测试来源", message: "已连接" } };
-    return json({ ...state, ...extra, last_run: null });
+    return json({ ...state, ...extra, last_run: null, result_version: versionOf(state),
+                  restore_gap: restoreGap });
+  }
+  // 历史清单。**本探针不验历史渲染**(那是 `pipe_history_probe.mjs` 的事),给一份
+  // 自洽的回包只为了让新鲜度那块能追平 —— 不给的话它永远落后,缺口提示条一直顶着,
+  // 下面那几项「不存在缺口」就无从断言了。
+  if (path === "/api/pipeline/runs") {
+    const rows = state.finished_at
+      ? [{ ...state, version: versionOf(state), key: `seq-${state.run_seq || 1}` }] : [];
+    return json({ runs: rows, error: "", version: versionOf(state) });
   }
   if (path === "/api/pipeline/retry-failed" && req.method === "POST") {
     retryCalls++;
@@ -314,6 +334,138 @@ check("写进去了就不挂降级提示",
       await persistText());
 
 check("重试端点一共被打了两次(两个场景各一次)", retryCalls === 2, String(retryCalls));
+
+// ── 7. 一轮跑得久不许把补读预算耗掉 ─────────────────────────────────────────
+// 跑着的时候没有终态可追平(目标是空的),而两块附属结果都算落后 —— 每次状态轮询
+// 都扣一次额度的话,一轮 29 秒的同步就把五次机会花在一个根本读不了的目标上(待处理
+// 数那个加载器在运行中本来就直接返回,一次请求都没发),跑完目标前移时额度已满:
+// 面板永久写着「还有 N 项内容待提取 · 已停止自动重试」,点一次「重新读取」才回来。
+state = { ...state, running: true, run_id: "run-H", run_kind: "sync",
+          started_at: "2026-10-09 11:00:00", finished_at: "" };
+for (let i = 0; i < 7; i++) { await evalJs(`refreshPipe(); true`); await sleep(160); }
+await setup("页面没进入运行中", until(`pipeSnapshot && pipeSnapshot.running === true`));
+check("跑着的那几轮轮询没有扣掉补读预算", await evalJs(
+  `PIPE_FRESH.pending.tries === 0 && PIPE_FRESH.history.tries === 0`),
+  await evalJs(`PIPE_FRESH.pending.tries + '/' + PIPE_FRESH.history.tries`));
+
+finishFastRun("run-I", "成功 2,失败 0,跳过 3(正文空,需回填)", 3);
+await evalJs(`refreshPipe(); true`);
+check("跑完之后待处理数照旧自己追平", await pendingIs(3), await pendingText());
+check("面板上没有「已停止自动重试」那句话", await evalJs(
+  `document.getElementById('pipe-fresh').hidden`),
+  await evalJs(`document.getElementById('pipe-fresh-text').textContent`));
+
+// ── 8. 从没跑过任何一轮的库:待处理数照旧显示,而且不许忙循环 ─────────────────
+// 新进程/新库里顶层身份是空的。前端原来拿「身份非空」当应用凭据,于是这一档既不
+// 应用、也不清欠账,循环立刻发下一次查询 —— 实测 1.3 秒里两千多次,每次都去扫一遍
+// 库,而页面上那个数始终是空的。版本改由服务端给之后这一档是「none」,是个确定的值。
+state = { running: false, run_kind: "", planned_stages: [...KEYS], stop_supported: true,
+          stop_requested: false, started_at: "", finished_at: "", run_id: "",
+          crawl_filter: {}, log: [],
+          stages: Object.fromEntries(KEYS.map(k => [k, { status: "", detail: "" }])) };
+pendingExtract = 2;
+// **基线取在导航之前**:页面加载时 `initWorkspace` 收尾那次状态读取就会引发一次
+// 待处理数查询,取在它之后的话忙循环已经发生完了,这一项就什么也拦不住。
+const n0 = pendingCalls;
+await send("Page.navigate", { url: base + "/" });
+await setup("页面没重建起来",
+            until(`typeof refreshPipe === 'function' && typeof switchTab === 'function'`, 20000));
+await evalJs(`switchTab('pipe'); true`);
+check("从没跑过一轮的库里,待处理数照旧显示得出来", await pendingIs(2), await pendingText());
+await sleep(1200);
+check("而且没有一直重查", pendingCalls - n0 <= 5, `${pendingCalls - n0} 次查询`);
+check("两边都报「从没跑过」,所以不存在缺口", await evalJs(
+  `PIPE_FRESH.pending.applied === 'none' && PIPE_FRESH.pending.desired === 'none'`),
+  await evalJs(`PIPE_FRESH.pending.applied + '/' + PIPE_FRESH.pending.desired`));
+
+// ── 9. 机制单测:补读预算属于**目标版本** ───────────────────────────────────
+// 手工摆 `PIPE_FRESH` 的槽位、直接调那三个出口:摆的是真实时序里要等上百秒才攒
+// 出来的状态(退避到第 5 次)。**射程只到这一层的判据** —— 它在真页面上确实生效
+// 由第 7、8 组管。
+const mech = JSON.parse(await evalJs(`(() => {
+  const r = {};
+  // ① 目标一换,预算重新给:上一个目标耗光了不许把后面每一轮都锁死
+  PIPE_FRESH.history = { label: '历史运行', applied: 'run-x', desired: 'run-old',
+                         tries: PIPE_FRESH_TRIES, due: 9999, reason: 'boom' };
+  let called = 0;
+  pipeFreshCheck('run-new', { history: () => { called++; } });
+  r.a = called === 1 && PIPE_FRESH.history.tries === 0 && PIPE_FRESH.history.reason === '';
+  // ② 跑着的时候(目标是空的)不读也不扣
+  PIPE_FRESH.pending = { label: '待处理数', applied: 'run-x', desired: 'run-x',
+                         tries: 0, due: 0, reason: '' };
+  let n = 0;
+  pipeFreshCheck('', { pending: () => { n++; } });
+  r.b = n === 0 && PIPE_FRESH.pending.tries === 0;
+  // ③ 预算由加载器回报结果时扣,不在调度这一步扣 —— 它可能一次请求都没发出去
+  PIPE_FRESH.history = { label: '历史运行', applied: 'a', desired: 'b',
+                         tries: 0, due: 0, reason: '' };
+  pipeFreshCheck('b', { history: () => {} });
+  r.c = PIPE_FRESH.history.tries === 0;
+  // ④ 「取到的还是旧那份」和「这次没取到」各算一次用掉的尝试
+  pipeFreshOk('history', 'a');
+  const afterOk = PIPE_FRESH.history.tries;
+  pipeFreshMiss('history', 'boom');
+  r.d = afterOk === 1 && PIPE_FRESH.history.tries === 2;
+  return JSON.stringify(r);
+})()`));
+check("目标一换,补读预算重新给", mech.a);
+check("跑着的时候不读也不扣预算", mech.b);
+check("加载器一次请求都没发时不扣预算", mech.c);
+check("取到旧数据、取不到,各算一次用掉的尝试", mech.d);
+
+// ── 10. 恢复不完整:重试按不下去,而且说清楚为什么 ───────────────────────────
+// 状态文件写失败那一轮,磁盘上最新的终态只在历史里 —— 它没有导出范围和失败名单。
+// 拿上一轮的范围去抓会把失败那个来源摘掉(面板报「已保存 0 条」,而那几篇一个都没
+// 落盘),所以后端那边直接拒绝起跑;这里是**先说清楚**,别让人点了才知道。
+restoreGap = "scope";
+await evalJs(`refreshPipe(); true`);
+await setup("页面没读到恢复欠账", until(`pipeRestoreGap === 'scope'`, 6000));
+check("恢复不完整时「重试失败项」按不下去",
+      await evalJs(`document.getElementById('pipe-retry').disabled === true`));
+check("而且如实说明了原因", await evalJs(
+  `!document.getElementById('pipe-fresh').hidden
+   && document.getElementById('pipe-fresh-text').textContent.includes('重试范围没能留档')`),
+  await evalJs(`document.getElementById('pipe-fresh-text').textContent`));
+check("「重新读取」不会把这一句擦掉(它不是读取问题)", await evalJs(
+  `pipeFreshRetry(); pipeRestoreGap === 'scope'
+   && document.getElementById('pipe-fresh-text').textContent.includes('重试范围没能留档')`));
+// 另两档各有自己的说法 —— 笼统一句「恢复得不完整」三档都对、哪一档都没说明白
+for (const [gap, said] of [["unknown", "核对不了哪一轮是最新的"],
+                           ["order", "先后分不出来"]]) {
+  restoreGap = gap;
+  await evalJs(`refreshPipe(); true`);
+  check(`恢复欠账「${gap}」有自己的说法`, await until(
+    `pipeRestoreGap === '${gap}'
+     && document.getElementById('pipe-fresh-text').textContent.includes('${said}')
+     && document.getElementById('pipe-retry').disabled === true`, 6000),
+    await evalJs(`document.getElementById('pipe-fresh-text').textContent`));
+}
+restoreGap = "scope";
+await evalJs(`refreshPipe(); true`);
+await setup("没回到 scope 那一档", until(`pipeRestoreGap === 'scope'`, 6000));
+restoreGap = "";
+await evalJs(`refreshPipe(); true`);
+check("跑过一轮之后那句话收起来、按钮也回来了", await until(
+  `pipeRestoreGap === '' && document.getElementById('pipe-retry').disabled === false`, 6000),
+  await evalJs(`pipeRestoreGap + '/' + document.getElementById('pipe-retry').disabled`));
+
+// ── 11. 「请求成功了、取回来的是另一轮」也要扣预算 ──────────────────────────
+// 不扣的话这一块的预算一次都不扣:每轮状态轮询都再补三次查询,既到不了上限、也到
+// 不了「连试两次才说」那个提示阈值 —— 面板一个字不说,而后台一直在扫库。历史那边
+// 的同类回包是扣预算的,两个 loader 要一个口径。
+stalePending = "run-stale";
+const staleBefore = pendingCalls;
+await evalJs(`refreshPipePending(); true`);
+const staleSettled = await until(`pipePendingWanted === false`, 8000);
+// 先钉那道循环封口:对不齐时最多再查几次就退出,交给有界补读
+check("对不齐时不会一直在循环里重查", staleSettled && pendingCalls - staleBefore <= 3,
+      `收尾=${staleSettled}，${pendingCalls - staleBefore} 次查询`);
+check("取到的一直是另一轮时,这次尝试要算进预算里", staleSettled && await evalJs(
+  `PIPE_FRESH.pending.tries >= 1 && PIPE_FRESH.pending.reason !== ''`),
+  await evalJs(`PIPE_FRESH.pending.tries + '/' + PIPE_FRESH.pending.reason`));
+stalePending = "";
+await sleep(300);
+
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 
 } catch (e) {

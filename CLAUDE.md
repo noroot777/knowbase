@@ -164,6 +164,7 @@
 | 订阅正文转纯文本、阅读页渲染、来源卡片(`kb/feeds/fetching.py` 的 `plain`、`kb/web/pages.py`) | `feed-plain.md`、`doc-reader.md`、`source-cards.md` |
 | 新订阅只收几天、存量清理(`kb/feeds/history.py`、`scripts/feed_trim_history.py`) | `history-depth.md` |
 | 「重试失败项」那颗按钮的范围(`kb/pipeline_retry.py`、`pipeline_state.py`) | `retry-scope.md` |
+| 同步的历史运行、一轮的红怎么留档、恢复时挑哪一轮(`kb/pipeline_state.py`、`pipeline_persist.py`、`pipeline_open.py`、`pipe_history.js`) | `pipeline-history.md` |
 | **任何写 kb.db 或 vault 文件的入口**(索引、导出、提取回写、条目化、清理脚本) | `maintenance-lock.md` |
 | 没有 feed 的站点、网页专栏解析(`kb/feeds/page_list.py`) | `page-list.md` |
 | 邮件简报 / TLDR(`kb/feeds/digest.py`) | `digest.md` |
@@ -172,7 +173,7 @@
 | 每日日报、素材账本、出处编号(`kb/daily*.py`、`kb/daily_refs.py`) | `daily.md` |
 | 同步的定时、日报那一轮的两段式编排(`kb/daily_run.py`、`kb/pipeline._scheduler_tick`) | `sync-schedule.md` |
 | 大模型阶段配置、`secrets.json`(`kb/llm_stages.py`、`kb/llm.py`) | `llm-stages.md` |
-| 软广判定与「正文空」判定(`kb/extract.py`、`scripts/promo_backfill.py`) | `promo.md`、`body-gap.md` |
+| 软广判定与「正文空」判定(`kb/extract.py`、`kb/extract_promo.py`、`kb/extract_writeback.py`、`scripts/promo_backfill.py`) | `promo.md`、`body-gap.md` |
 | 条目化提取的开关(`kb/extract_optin.py`) | `extract-optin.md` |
 | wiki 层、三张图谱、归类缓存与发布(`scripts/wiki/`) | `catgraph.md` |
 | 测试探针起无头浏览器(`tests/probe_shell.mjs`、`tests/headless.py`) | `probe-shell.md` |

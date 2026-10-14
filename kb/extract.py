@@ -23,7 +23,6 @@ documents.promo_level,下游(条目化 gate、检索、wiki)一律读这一列�
 
 from __future__ import annotations
 
-import hashlib
 import re
 from datetime import datetime
 
@@ -50,10 +49,27 @@ from kb.extract_optin import (  # noqa: F401  (原样再导出)
     FEEDS_ALIAS as _FEEDS_ALIAS, FEED_DOC_PATH as _FEED_DOC_PATH,
     attached_feeds as _attached_feeds, feed_kinds as _feed_kinds)
 
-# hard 软广在 obs 里也标出来。doc_tags 在重索引时会按 frontmatter 重建,所以
-# 这个 tag 跟 topic/entity 一样要靠 writeback 回写 md 才持久。**它留在这里**:
-# 回答的是"回写哪个标签",不是跟模型打交道的事。
-PROMO_TAG = "flag/软广"
+# 软广那一族的落库与交付(700 行上限逼出来的第二次拆分,手法同上面的
+# `extract_optin`)。**原样再导出**:`extract.PROMO_TAG` / `extract.save_promo` /
+# `extract.sync_promo_tag` 这些写法一个字不用改,调用方函数内 import 的也照旧
+# 拿到被打桩的那一份。判定怎么下仍然只有 `extract_llm` 那一份口径。
+# 回写那三件碰 md 文件的事(700 行上限逼出来的第三次拆分)。**原样再导出**:
+# `extract.writeback_tags` / `extract.refresh_content_hash` 这些写法一个字不用改,
+# 打桩的也照旧打得到。协调(取锁、确认这一篇还在、按判定对齐软广那行)留在本
+# 文件的 `writeback_extraction`。
+from kb.extract_writeback import (  # noqa: F401  (原样再导出)
+    refresh_content_hash, remove_writeback_tag, writeback_tags)
+# 输入版本判据那一族(700 行上限逼出来的第四次拆分,手法同上面两块)。
+# **原样再导出**:`extract.StaleBody` / `extract.model_input` / `extract._input_moved`
+# 这些写法一个字不用改,打桩 `extract._require_current_input` 的也照旧打得到
+# —— 本文件里那几处调用的就是这个全局名。
+from kb.extract_version import (  # noqa: F401  (原样再导出)
+    StaleBody, _input_moved, _require_current_input, _still_indexed,
+    body_fingerprint, input_fingerprint, model_input)
+from kb.extract_promo import (  # noqa: F401  (原样再导出)
+    PROMO_TAG, PromoTagNotAligned, align_promo_tag, commit_promo,
+    disk_input_indexed, mark_promo_tag_pending, promo_tag_in_md,
+    promo_tag_owed, promo_tag_pending_docs, save_promo, sync_promo_tag)
 
 
 def _tag_slug(name: str) -> str:
@@ -96,122 +112,9 @@ def parse_pretagged(doc) -> dict | None:
             "summary": str(meta.get("summary") or "")}
 
 
-
-
-class StaleBody(Exception):
-    """这次提取结果针对的那份正文,已经不是当前那一份了 —— 结果作废。
-
-    不是故障:这一篇留在待提取集合里(`extracted_at` 一个字不写),下一轮按
-    新正文重提一次就对了。三条提取路径都把它归到「跳过」那一档,不记失败
-    ——记失败会让面板标红,而这里什么都没坏。
-    """
-
-
-def body_fingerprint(text: str) -> str:
-    """一份正文的指纹。提取开始时按读到的那份算一次,落库前再比一次。
-
-    口径只有这一份:调用方拿自己手里那份 body 算,`save_extraction` 落库前
-    按**索引里此刻**那份算,两个数相等才说明"这个结论还是针对当前正文的"。
-    """
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
-def save_promo(conn, path: str, promo: dict, now: str | None = None) -> bool:
-    """写软广判定,并同步 doc_tags 里的 flag。
-
-    返回 True = **md 里那行 flag 需要调用方去摘掉**(原来判的是 hard,这次不是)。
-    DB 侧这里就清干净了,但 frontmatter 只有 writeback 那条路能碰,而且
-    writeback_tags 只会追加;不摘的话,这篇文件之后任何一次改动触发
-    upsert_document,doc_tags 都会按 frontmatter 重建,误判的标记又回来
-    (第 2 轮审查发现)。改判是小概率事件,所以做成「要不要碰文件」的信号
-    返回给调用方,而不是每篇都去读一次 md。
-    """
-    now = now or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    old = conn.execute("SELECT promo_level FROM documents WHERE path=?",
-                       (path,)).fetchone()
-    was_hard = bool(old and old["promo_level"] == "hard")
-    conn.execute(
-        "UPDATE documents SET promo_level=?, promo_reason=?, promo_at=? WHERE path=?",
-        (promo["level"], promo.get("reason") or "", now, path),
-    )
-    if promo["level"] == "hard":
-        conn.execute("INSERT OR IGNORE INTO doc_tags (path, tag) VALUES (?, ?)",
-                     (path, PROMO_TAG))
-        return False
-    # 重跑改判时把旧标记摘掉,不然面板上永远挂着
-    conn.execute("DELETE FROM doc_tags WHERE path=? AND tag=?", (path, PROMO_TAG))
-    return was_hard
-
-
-def sync_promo_tag(conn, doc_path: str, level: str, stale: bool) -> None:
-    """把 md frontmatter 里的 flag/软广 对齐到当前判定(存量补判走这条)。
-
-    存量补判不重做 entity/topic,所以喂给 writeback_extraction 的是一份只有
-    promo 的结果——口径仍然共用那一份,不另写一遍。stale 取自 save_promo:
-    只有「上一次判 hard、这次不是」才需要去摘那行,正常的 none 文章连文件
-    都不用读。
-    """
-    writeback_extraction(conn, doc_path, {"promo": {"level": level}}, stale)
-
-
-def _body_moved(conn, path: str, body_seen: str) -> str:
-    """这次结果针对的那份正文还是**当前**那一份吗 —— 变了就返回一句原因。
-
-    **口径只有这一份,两个消费点**:落库前 `_require_current_body` 拿它抛
-    `StaleBody`,回写前 `writeback_extraction` 在同一把维护锁里拿它判一次布尔。
-    两处各写一遍的话,拦下来的和写回去的不是同一批。
-
-    两道各管一种交错时序,少哪一道哪一种就漏过去:
-
-    ①**索引还没扫到当前这份 md**(`documents.content_hash` 对不上文件)。这是
-      「导出完成、索引还没跟上」那一档:`fulltext.retire_stale` 在导出之后就把
-      这一篇排回了待提取集合,而提取读的是**索引里**那份正文(`store.doc_body`
-      拼的是 chunks)—— 旁路的一轮 `kb extract` 正好落在这个缝里,就会拿旧壳
-      再提一遍。那一刻 chunks 压根没变,所以 ② 对它是瞎的。
-    ②**索引里那份正文已经和我读到的不是同一份了**。这是「旧正文的提取请求
-      在途、模型回包晚于全文更新」那一档:中间那次 index 已经把 chunks 换成
-      新正文,`content_hash` 跟着对上了文件 —— 所以 ① 对它是瞎的。
-
-    **拦不住的后果是永久的**:落库会把 `extracted_at` 设上,这一篇从此再也不进
-    `pending_docs`,摘要、主题、实体永久停在那个跳转壳上,再同步、再索引都不会
-    自己纠正(2026-10-09 第 2 轮审查两种时序各三次稳定复现)。
-
-    **md 压根读不出来(清理正把这一篇删掉)不算"版本不对",直接放行。** 这一档
-    本来就有人管:`writeback_extraction` 在锁内复查「这一篇还在吗」,落进库的判定
-    随后被外键级联一并带走(真半途失败也由下一轮 `remove_missing_documents` 收掉),
-    末态干净 —— 那是本来就对的一条路。在这里改判成作废只是把它换了个形状,代价
-    却是实打实的:回写压根不会被调到,**于是"回写在锁里、读也不许读"那组回归对它
-    不再敏感**(把回写那把锁去掉也照样全绿)。这道判据只回答「我读到的正文还是
-    当前那一份吗」,"这一篇还在不在"不是它的问题。
-    """
-    from kb import store
-    from kb.scanner import file_hash
-    try:
-        text = (VAULT_ROOT / path).read_text(encoding="utf-8")
-    except OSError:
-        return ""                   # 见 docstring:这一档交给回写那道锁内复查
-    if store.doc_needs_reindex(conn, path, file_hash(text)):
-        return "索引还没扫到当前这份 md,提取结果作废"
-    if body_fingerprint(store.doc_body(conn, path)) != body_seen:
-        return "正文已更新,提取结果作废"
-    return ""
-
-
-def _require_current_body(conn, path: str, body_seen: str) -> None:
-    """落库之前确认正文版本,对不上抛 `StaleBody`(判据见 `_body_moved`)。
-
-    **这道检查本身给不了保证,得由 `commit_extraction` 把它和写入圈进同一个
-    维护锁 + 写事务里。** 单独跑只回答"检查的那一瞬间正文还是不是我读到的
-    那份",答不了"我写进去的那一瞬间还是不是" —— 两者之间那个窗口有一份实测
-    后果,见 `commit_extraction` 的说明。
-    """
-    reason = _body_moved(conn, path, body_seen)
-    if reason:
-        raise StaleBody(f"{reason}: {path}")
-
-
-def save_extraction(conn, path: str, data: dict, body_seen: str | None = None) -> bool:
-    """把一篇的提取结果落库。`body_seen` 给了就先校验正文版本(见 `StaleBody`)。
+def save_extraction(conn, path: str, data: dict,
+                    input_seen: str | None = None) -> None:
+    """把一篇的提取结果落库。`input_seen` 给了就先校验模型输入(见 `StaleBody`)。
 
     **提取是「读正文 → 等几十秒模型 → 落库」,正文在这中间可能整篇换掉。**
     补抓把跳转壳换成全文正是这么一条路:它会把这一篇送回待提取集合,于是
@@ -221,14 +124,15 @@ def save_extraction(conn, path: str, data: dict, body_seen: str | None = None) -
     第 2 轮审查两种交错时序各三次稳定复现)。所以落库之前比一次指纹,
     对不上就整份丢掉。
 
-    判据有两道,**各管一种交错时序、缺一不可**(都在 `_body_moved`)。校验和这
+    判据有两道,**各管一种交错时序、缺一不可**(都在 `_input_moved`)。校验和这
     一串写入之间还有个窗口,**那由 `commit_extraction` 把两头圈进同一个维护锁
     + 写事务里关掉** —— 三条读正文的提取路径一律走它,不要在外面自己拼。
-    不校验的那几条路(`body_seen=None`)是压根不读索引正文的:`parse_pretagged`
-    直接解析 frontmatter,软广补判只改 promo —— 它们没有"基于哪一份正文"可言。
+    不校验的那几条路(`input_seen=None`)是压根不读索引正文的:`parse_pretagged`
+    直接解析 frontmatter,软广补判走自己那个交付入口(`commit_promo` 在落库
+    之前把磁盘侧和索引侧两道一起判掉)—— 它们没有"基于哪一组输入"可言。
     """
-    if body_seen is not None:
-        _require_current_body(conn, path, body_seen)
+    if input_seen is not None:
+        _require_current_input(conn, path, input_seen)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn.execute("DELETE FROM entities WHERE path=?", (path,))
     for e in data["entities"]:
@@ -260,11 +164,29 @@ def save_extraction(conn, path: str, data: dict, body_seen: str | None = None) -
     )
     # promo 单独一条 UPDATE:pre_tagged 来源走的是 parse_pretagged,产物里没有
     # promo 字段,一并写的话会把源头文章判过的结果覆盖成空。
-    # 返回值透传 save_promo 的「md 里的 flag 该摘了」,调用方据此决定碰不碰文件。
     promo = data.get("promo")
-    if isinstance(promo, dict) and promo.get("level"):
-        return save_promo(conn, path, promo, now)
-    return False
+    if isinstance(promo, dict):
+        if promo.get("level"):
+            # 不传 version_seen:这条路的正文版本由 commit_extraction 在维护锁 +
+            # 写事务里校验(`_require_current_input`),比单条语句的条件写更严。
+            # **不往上透传「md 里的 flag 该摘了」那个信号了**:它只在「这一次恰好
+            # 改判了」时为真,一次回写失败之后就再也没有第二次机会。md 那行现在
+            # 按库里的判定幂等对齐(`extract_promo.align_promo_tag`),不看信号。
+            save_promo(conn, path, promo, now)
+        # **待办不看「这次写进去了没有」,只看「接下来要对齐、而库里有明确
+        # 判定」。** 带着 promo 字段来的这一类,回写那一步一定会去对齐 md 那行
+        # (`writeback_extraction` 的 `has_promo`),而 `save_promo` 的两档
+        # False 都留着一份明确判定要对齐 —— 兜底 none 复用了旧的 hard、换过版
+        # 的那一篇库里还是上一份判定。把登记挂在「写进去了」上,这两档就都没有
+        # 兜底:实测过兜底那一档,回写撞上一次 PermissionError 之后末态是
+        # 库里 hard + md 里没那行 + 待办 0,`sync-tags` 报「待对齐 0 篇」,而
+        # `extracted_at` 已经非空 —— 这一篇掉出所有候选,不花钱的那条修复路和
+        # 默认重提都不会再选中它(2026-10-14 审查,三条提取入口各实测一次)。
+        # 登记在**提取那个事务里**(`commit_extraction` 的 `BEGIN IMMEDIATE`),
+        # 所以「提交完 DB、写 md 之前进程没了」也留得住;对齐成功后由
+        # `align_promo_tag` 清掉。多登记一次是幂等的,漏登记没人补。
+        if promo_tag_owed(conn, path):
+            mark_promo_tag_pending(conn, path, True)
 
 
 def extraction_tags(data: dict) -> list[str]:
@@ -287,16 +209,8 @@ def extraction_tags(data: dict) -> list[str]:
     return tags
 
 
-def _still_indexed(conn, doc_path: str) -> bool:
-    """这一篇此刻还在 vault、也还在库里吗。**只在持着维护锁时问才有意义。**"""
-    if not (VAULT_ROOT / doc_path).exists():
-        return False
-    return conn.execute("SELECT 1 FROM documents WHERE path=? LIMIT 1",
-                        (doc_path,)).fetchone() is not None
-
-
-def writeback_extraction(conn, doc_path: str, data: dict, stale: bool,
-                         body_seen: str | None = None) -> bool:
+def writeback_extraction(conn, doc_path: str, data: dict,
+                         input_seen: str | None = None) -> bool:
     """把提取结果的 tag 对齐到 md frontmatter,改了文件就刷新 content_hash。
 
     提取有三条路(管道 `_extract_pass`、`kb extract --writeback`、
@@ -325,8 +239,8 @@ def writeback_extraction(conn, doc_path: str, data: dict, stale: bool,
     文章是用户主动清理掉的,把它记成提取失败会让面板标红、谎报一次故障,而判定
     本身早就落库了(随后被外键级联一并删掉,末态干净)。
 
-    **给了 `body_seen` 就在锁内再确认一次「这份 tag 算的还是当前那份正文吗」**
-    (`_body_moved`,和落库那道同一份口径)。正常路径上 `commit_extraction` 已经
+    **给了 `input_seen` 就在锁内再确认一次「这份 tag 算的还是当前那组输入吗」**
+    (`_input_moved`,和落库那道同一份口径)。正常路径上 `commit_extraction` 已经
     把落库和回写圈在同一个锁区间里、中间没有窗口,所以这一道是**这个公开入口
     自己的契约**:谁在锁外隔着一段时间拿一份基于旧正文的结果来回写,都该被挡
     下来 —— 旧 tag 一写进新全文就摘不掉了(`writeback_tags` 只追加),而它还顺手
@@ -336,8 +250,11 @@ def writeback_extraction(conn, doc_path: str, data: dict, stale: bool,
     没有任何坏事发生,下一轮按新正文重提会写进对的那一批。
     """
     tags = extraction_tags(data)
-    need_remove = stale and (data.get("promo") or {}).get("level") != "hard"
-    if not tags and not need_remove:
+    # 带着一个 promo 结论来的,那行 flag 就得按库里的判定对齐一次 —— 不管这次
+    # 判的是哪一档、也不管上一次是哪一档(理由见 `extract_promo.align_promo_tag`)。
+    # pre_tagged 那条路产物里压根没有 promo 字段,它不碰这一行。
+    has_promo = isinstance(data.get("promo"), dict)
+    if not tags and not has_promo:
         return False     # 没什么要写的,不必为此读一遍文件
     if conn.in_transaction:
         # **取锁之前把调用方手里那个写事务落盘,这件事由这里负责、不靠调用方自觉。**
@@ -355,29 +272,56 @@ def writeback_extraction(conn, doc_path: str, data: dict, stale: bool,
         conn.commit()
     from kb.maintenance import maintenance_lock
 
+    from kb.scanner import file_hash
+
     with maintenance_lock():
         if not _still_indexed(conn, doc_path):
             return False
-        if body_seen is not None and _body_moved(conn, doc_path, body_seen):
+        if input_seen is not None and _input_moved(conn, doc_path, input_seen):
             return False            # 见 docstring:旧 tag 贴到新全文上就摘不掉了
-        changed = writeback_tags(doc_path, tags) if tags else False
-        if need_remove:
-            changed = remove_writeback_tag(doc_path, PROMO_TAG) or changed
-        if changed:
-            refresh_content_hash(conn, doc_path)
-            # 在锁里提交:攥着 SQLite 写事务走出锁的话,下一个拿到维护锁的清理
-            # 会卡在它的 DELETE 上(SQLite 的写锁不认我们这把锁)。
-            conn.commit()
+        try:
+            before = file_hash(
+                (VAULT_ROOT / doc_path).read_text(encoding="utf-8"))
+        except OSError:
+            # 读不出来就给一个不可能匹配的值:库里的 `content_hash` 一律是
+            # `file_hash` 的输出(非空),所以刷新那一句必然 0 行。下面那两步
+            # 本来也会抛、异常才是这一档的主路径 —— 这里只保证万一走到刷新,
+            # 也不会替谁签一张「已索引」的收据。
+            before = ""
+        changed = False
+        try:
+            if tags:
+                changed = writeback_tags(doc_path, tags)
+            if has_promo:
+                changed = align_promo_tag(conn, doc_path) or changed
+        except (OSError, PromoTagNotAligned):
+            # **待办不在这里记** —— 它在判定那个事务里就落下了
+            # (`save_promo` → `mark_promo_tag_pending`),所以进程在这中间被杀
+            # 也留得住;这里只是让异常飞出去。**两步一起圈进这个 try**:hard
+            # 那一行是 `writeback_tags` 写的,它抛的时候 md 里同样缺着那行,
+            # 而 `align_promo_tag` 压根没机会跑 —— 清待办那一步因此不会发生,
+            # 这正是我们要的末态。topic/entity 跟着一起丢不要紧(下一轮重提会
+            # 补回来),promo 那行丢了没人补:这一篇已经掉出所有默认候选。
+            raise
+        finally:
+            # **先把已经改掉的文件登记上,再让异常飞出去。** 对齐那一步抛的时候
+            # `writeback_tags` 可能已经写过文件了,hash 不刷新只会让下一轮索引
+            # 白重建一次(良性);反过来漏刷才是坏的。
+            if changed:
+                refresh_content_hash(conn, doc_path, expect=before)
+                # 在锁里提交:攥着 SQLite 写事务走出锁的话,下一个拿到维护锁的
+                # 清理会卡在它的 DELETE 上(SQLite 的写锁不认我们这把锁)。
+                conn.commit()
         return changed
 
 
-def commit_extraction(conn, path: str, data: dict, body_seen: str, *,
+def commit_extraction(conn, path: str, data: dict, input_seen: str, *,
                       writeback: bool = True, on_error=None) -> bool:
-    """交付一次提取的结果:校验正文版本 → 落库 → 提交 → 回写 md,整段在
+    """交付一次提取的结果:校验模型输入 → 落库 → 提交 → 回写 md,整段在
     「维护锁 → kb.db 写锁」里。返回回写有没有改文件。
 
     **这个协调区间就是它存在的理由。** `save_extraction` 里那道版本校验只回答
-    "检查的那一瞬间正文还是不是我读到的那份",答不了"我写进去的那一瞬间还是
+    "检查的那一瞬间输入还是不是我读到的那组",答不了"我写进去的那一瞬间还是
     不是" —— 校验到第一条 SQL、以及落库到回写之间各有一个窗口,而把正文整篇
     换掉的那条路(补抓 → 翻译 → 导出 → 作废旧提取 → 索引)全程持着**同一把**
     维护锁。两个窗口各有一份实测后果(2026-10-09 第 3 轮审查,各三次稳定复现):
@@ -391,7 +335,7 @@ def commit_extraction(conn, path: str, data: dict, body_seen: str, *,
       frontmatter,而 `writeback_tags` 只追加不摘除、还顺手刷了 content_hash,
       所以下一次索引未必重建它。
 
-    **原来那条兜底论证不成立,记在这儿备查**:`_require_current_body` 曾写着
+    **原来那条兜底论证不成立,记在这儿备查**:`_require_current_input` 曾写着
     「窗口里真被写进去了也不是死局 —— `feed_items.extract_stale` 那个待办只在
     作废**做完**之后才放下,下一轮导出会再作废一次」。那句话的前提是旧保存落在
     作废**之前**;上面第一个时序正好相反 —— 待办已经清零,没有第二次作废。
@@ -425,7 +369,7 @@ def commit_extraction(conn, path: str, data: dict, body_seen: str, *,
         try:
             if not _still_indexed(conn, path):
                 return False    # 见 docstring:等锁期间清理把这一篇删掉了
-            stale = save_extraction(conn, path, data, body_seen)
+            save_extraction(conn, path, data, input_seen)
             conn.commit()
         finally:
             if conn.in_transaction:
@@ -433,74 +377,13 @@ def commit_extraction(conn, path: str, data: dict, body_seen: str, *,
         if not writeback:
             return False
         try:
-            return writeback_extraction(conn, path, data, stale,
-                                        body_seen=body_seen)
+            return writeback_extraction(conn, path, data,
+                                        input_seen=input_seen)
         except Exception as e:
             if on_error is None:
                 raise
             on_error(e)
             return False
-
-
-def writeback_tags(doc_path: str, new_tags: list[str]) -> bool:
-    """把新 tag 合并进 md 的 frontmatter tags 列表。只改 frontmatter,不碰正文。"""
-    full = VAULT_ROOT / doc_path
-    text = full.read_text(encoding="utf-8")
-    m = re.match(r"\A(---\n.*?\n---\n)", text, re.S)
-    if not m:
-        return False
-    fm_block, body = m.group(1), text[m.end():]
-
-    existing = set(re.findall(r"^\s*-\s+(\S+)\s*$", fm_block, re.M))
-    to_add = [t for t in new_tags if t not in existing]
-    if not to_add:
-        return False
-
-    add_lines = "".join(f"  - {t}\n" for t in to_add)
-    if re.search(r"^tags:\s*$", fm_block, re.M):
-        # 已有 tags: 列表 → 追加到列表末尾(即 frontmatter 结束线前)
-        new_fm = re.sub(r"\n---\n\Z", f"\n{add_lines}---\n", fm_block)
-    else:
-        new_fm = re.sub(r"\n---\n\Z", f"\ntags:\n{add_lines}---\n", fm_block)
-    full.write_text(new_fm + body, encoding="utf-8")
-    return True
-
-
-def remove_writeback_tag(doc_path: str, tag: str) -> bool:
-    """从 md frontmatter 的 tags 列表里摘掉一个 tag。writeback_tags 的反向操作。
-
-    只删 tags 列表里那一行(格式与 writeback_tags 写进去的一致),正文和其余
-    frontmatter 一个字节不碰。文件不在/没有 frontmatter/本来就没这个 tag
-    都返回 False,调用方据此决定要不要刷新 hash。
-    """
-    full = VAULT_ROOT / doc_path
-    try:
-        text = full.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    m = re.match(r"\A(---\n.*?\n---\n)", text, re.S)
-    if not m:
-        return False
-    fm_block, body = m.group(1), text[m.end():]
-    new_fm = re.sub(rf"^[ \t]*-[ \t]+{re.escape(tag)}[ \t]*\n", "",
-                    fm_block, flags=re.M)
-    if new_fm == fm_block:
-        return False
-    full.write_text(new_fm + body, encoding="utf-8")
-    return True
-
-
-def refresh_content_hash(conn, doc_path: str) -> None:
-    """writeback 改了 frontmatter 后刷新库里的 hash,避免下次 index 无谓重建。
-    正文没变(chunker 只看 body),chunks/FTS/向量都无需动。"""
-    from kb.scanner import file_hash
-    full = VAULT_ROOT / doc_path
-    try:
-        text = full.read_text(encoding="utf-8")
-    except OSError:
-        return
-    conn.execute("UPDATE documents SET content_hash=? WHERE path=?",
-                 (file_hash(text), doc_path))
 
 
 # ── 「这一篇没有正文」的两档 ────────────────────────────────────────────────────
@@ -635,17 +518,31 @@ def pending_docs(conn, limit: int = 0) -> list:
     return rows[:limit] if limit > 0 else rows
 
 
-def pending_promo_docs(conn, sources: list[str], limit: int = 0) -> list:
+def pending_promo_docs(conn, sources: list[str], limit: int = 0,
+                       accounts: list[str] | None = None,
+                       recheck: bool = False) -> list:
     """已提取过、但还没做软广判定的文档(存量补判用)。
 
     新入库的文章在提取时就顺带判了,这个查询只会捞出「软广判定上线之前」
     提取的那批存量;补完一次就永远是空的。
+
+    `recheck=True` 时连已判过的一起捞 —— 判定口径改了之后要让存量跟上,
+    靠的就是这条路(改口径而不重判,等于新文章一套标准、存量另一套)。
+    它**覆盖**已有的 promo_level,所以默认是关的,而且调用方(补判脚本)还要求
+    必须同时给 `accounts`:无目标的全库重判是 9000 多篇、一次把所有历史结论
+    连人工核对过的那些一起盖掉,不该是一个标志位就能触发的事。
+
+    `accounts` 给了就只看这几个号。空列表当没给(别把它解释成「哪个号都不要」:
+    那会让调用方的一次参数失误静默变成「一篇都不判」,而脚本照旧报成功)。
     """
-    ph = ",".join("?" * len(sources))
-    sql = f"""
-        SELECT path, title, account FROM documents
-        WHERE promo_level = '' AND source IN ({ph})
-        ORDER BY published DESC
-    """
-    rows = conn.execute(sql, list(sources)).fetchall()
+    where = [f"source IN ({','.join('?' * len(sources))})"]
+    args = list(sources)
+    if not recheck:
+        where.append("promo_level = ''")
+    if accounts:
+        where.append(f"account IN ({','.join('?' * len(accounts))})")
+        args += list(accounts)
+    sql = (f"SELECT path, title, account FROM documents"
+           f" WHERE {' AND '.join(where)} ORDER BY published DESC")
+    rows = conn.execute(sql, args).fetchall()
     return rows[:limit] if limit > 0 else rows

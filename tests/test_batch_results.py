@@ -35,7 +35,7 @@ class DailyBatchResultTests(RoundStore):
                       results={'crawl': {'status': 'error', 'detail': '失败 10 个',
                                          'failures': [{'title': 'X', 'reason': '连不上'}]}}),
             self.spec(['index', 'extract'], run_id='run-2'))
-        last = pipeline.load_last_run()
+        last = pipeline.last_result()
         # 那条红还在,明细也在 —— 这是用户点进同步中心要看的东西
         self.assertEqual('error', last['stages']['crawl']['status'])
         self.assertEqual(1, len(last['stages']['crawl']['failures']))
@@ -62,7 +62,7 @@ class DailyBatchResultTests(RoundStore):
         self.run_batch(self.spec(['crawl', 'export'], run_id='run-1',
                                  crawl_filter={'channel': 'rss'}),
                        self.spec(['index', 'extract'], run_id='run-2'))
-        last = pipeline.load_last_run()
+        last = pipeline.last_result()
         self.assertEqual('ok', last['stages']['crawl']['status'])
         self.assertEqual([], pipeline.retry_failed_plan())
         # 谁都没计划过的阶段照旧是「未选择」
@@ -106,7 +106,7 @@ class DailyBatchResultTests(RoundStore):
         for key in ('planned_stages', 'crawl_filter', 'export_filter', 'crawl_retry'):
             self.assertIn(key, fetched, key)
         self.assertEqual('error', fetched['stages']['crawl']['status'])
-        last = pipeline.load_last_run()
+        last = pipeline.last_result()
         self.assertEqual('error', last['stages']['crawl']['status'])
         self.assertEqual(['crawl', 'export', 'index', 'extract'],
                          pipeline.retry_failed_plan())
@@ -126,14 +126,14 @@ class DailyBatchResultTests(RoundStore):
                                  'failures': [{'title': title, 'reason': '连不上'}]}})
         self.run_batch(failing('rss', 'RSS 源'), failing('web', '网页源'),
                        self.spec(['index', 'extract'], run_id='run-z'))
-        crawl = pipeline.load_last_run()['stages']['crawl']
+        crawl = pipeline.last_result()['stages']['crawl']
         self.assertEqual({'RSS 源', '网页源'}, {f['title'] for f in crawl['failures']})
         self.assertIn('rss 失败 1 个', crawl['detail'])
         self.assertIn('web 失败 1 个', crawl['detail'])
         # 两个来源都留在范围里,重试才两个都重抓
         self.assertEqual(['rss', 'web'], [s['channel'] for s in
                                           pipeline.crawl_channels(
-                                              pipeline.load_last_run()['crawl_filter'])])
+                                              pipeline.last_result()['crawl_filter'])])
 
     def test_a_finished_sub_round_never_leaves_only_itself_on_disk(self):
         """进程在子轮收尾之后、日报收尾之前退出,前几轮的失败也不许没了。
@@ -231,28 +231,60 @@ class DailyBatchResultTests(RoundStore):
         self.assertEqual(('run-own', ['index']), (last['run_id'], last['planned_stages']))
         self.assertEqual('未选择', last['stages']['crawl']['detail'])
 
+    def test_a_new_batch_does_not_show_the_previous_batch_as_latest(self):
+        """新一批的头一轮收尾之后,权威位上不许还挂着上一批那份汇总。
+
+        整批那份汇总是**进程内的权威**(落盘成不成功都照旧当权威),所以每一次
+        收尾都得重设它 —— 口径收在 `_save_own` 里。漏掉头一轮那一次的后果:新一批
+        的抓取段明明跑完了,面板显示的仍是上一批的结论(上一批的阶段、上一批那条
+        失败),「重试失败项」也跟着去抓上一批那几个来源 —— 而这两件事都没有任何
+        报错,因为磁盘上那一份是对的、只有内存里那份权威是旧的。
+        反过来钉一边:同一批之内汇总**就是**权威,那一档在
+        `test_a_fetch_failure_survives_the_library_round_that_follows_it` 钉着。
+        """
+        from kb import pipeline
+        first = ps.open_batch()
+        finish_round(['crawl', 'export'], {'channel': 'rss'}, first, run_id='old-1',
+                     results={'crawl': {
+                         'status': 'error', 'detail': '失败 1 个',
+                         'failures': [{'title': '上一批那条', 'reason': '连不上'}]}})
+        finish_round(['index', 'extract'], None, first, run_id='old-2',
+                     started='2026-10-14 09:30:00')
+        self.assertEqual('', ps.close_batch())
+        second = ps.open_batch()
+        self.addCleanup(ps.close_batch)
+        finish_round(['crawl', 'export'], {'channel': 'rss'}, second, run_id='new-1',
+                     started='2026-10-15 09:00:00')
+        last = pipeline.last_result()
+        self.assertEqual(('new-1', 'ok'),
+                         (last['run_id'], last['stages']['crawl']['status']))
+        self.assertNotIn('上一批那条', json.dumps(last, ensure_ascii=False))
+        self.assertEqual([], pipeline.retry_failed_plan())
+
     def test_a_half_written_state_file_cannot_eat_the_previous_result(self):
         """落盘写到一半退出,旧那份要一字未动。
 
-        就地 `write_text` 的话盘上剩的是半截 JSON:读的那端只能当"读不出",而
+        就地改写正式文件的话,盘上剩的是半截 JSON:读的那端只能当"读不出",而
         被它截掉的旧结果也没了 —— 两份一起丢。写同目录的临时文件再原子替换,
-        断在中途只会留下一个临时文件,正式那份一字未动。
+        断在中途只会留下一个临时文件(而且那个也收掉了),正式那份一字未动。
 
         注入的是**写到一半就断**(写进去半截、然后抛) —— 这才是进程死在写盘
         中间的形状。让它"写完半截正常返回"证明不了什么:那样后面那次原子替换
-        照旧会把这份残缺品摆上台。
+        照旧会把这份残缺品摆上台。**注入点钉在 `Path.write_bytes`**:原子替换
+        那一步(`pipeline_persist._write_atomic`)写的是临时文件,钉在别的写法上
+        等于注入压根没落在写盘那一步,一注就"正常写完"。
         """
         from kb import pipeline
         finish_round(['crawl'], {'channel': 'rss'}, run_id='run-good',
                      results={'crawl': {'status': 'error', 'detail': '失败 1 个'}})
         good = ps._STATE_FILE.read_text(encoding='utf-8')
-        real = Path.write_text
+        real = Path.write_bytes
 
         def half(self_path, data, *a, **kw):
             real(self_path, data[:len(data) // 2], *a, **kw)
             raise OSError('写到一半断了')
 
-        with patch.object(Path, 'write_text', half):
+        with patch.object(Path, 'write_bytes', half):
             finish_round(['index'], None, run_id='run-cut')
         self.assertEqual(good, ps._STATE_FILE.read_text(encoding='utf-8'),
                          '旧那份被半截写坏了')
@@ -278,7 +310,7 @@ class DailyBatchResultTests(RoundStore):
         self.run_batch(failing('rss', ['每日速览', '每日速览']),
                        failing('web', ['每日速览']),
                        self.spec(['index', 'extract'], run_id='run-z'))
-        crawl = pipeline.load_last_run()['stages']['crawl']
+        crawl = pipeline.last_result()['stages']['crawl']
         self.assertEqual(3, len(crawl['failures']),
                          f'同名同因被并掉了:{crawl["failures"]}')
         # detail 同理:两个来源各写一句「失败 1 个」,照文本去重就成了一句,
@@ -305,7 +337,7 @@ class DailyBatchResultTests(RoundStore):
                                               for i in range(count)]}})
         self.run_batch(failing('rss', 40), failing('web', 40),
                        self.spec(['index', 'extract'], run_id='run-z'))
-        crawl = pipeline.load_last_run()['stages']['crawl']
+        crawl = pipeline.last_result()['stages']['crawl']
         self.assertEqual(ps._FAILURES_KEEP, len(crawl['failures']))
         self.assertEqual(80, crawl['failures_total'])
         # 反过来钉一边:没截断的那一档不许带这一格(带了面板就会写一句
@@ -313,7 +345,7 @@ class DailyBatchResultTests(RoundStore):
         self.run_batch(failing('rss', 3),
                        self.spec(['index', 'extract'], run_id='run-y'))
         self.assertNotIn('failures_total',
-                         pipeline.load_last_run()['stages']['crawl'])
+                         pipeline.last_result()['stages']['crawl'])
 
     def test_each_truncation_layer_keeps_its_own_total(self):
         """失败明细有三处上限,**每一处都要自己留总数**。
@@ -350,10 +382,11 @@ class DailyBatchResultTests(RoundStore):
     def test_a_half_written_aggregate_cannot_eat_the_previous_batch_result(self):
         """汇总那一次写到一半断掉,**这一批上一轮的汇总要一字未动**。
 
-        第 5 轮实测:汇总那条路原来是就地 `write_text`,正式文件被写进半截 JSON、
+        第 5 轮实测:汇总那条路原来是就地改写正式文件,正式文件被写进半截 JSON、
         进程立刻退出 —— 新进程读出来是 null,连之前已经落盘的那份有效汇总一起
         没了(重启后页面像从没同步过)。写出口有两个,只把普通那一条改成原子
         替换等于没改:正常日报从第二个子轮起走的就是汇总这一条。
+        注入点同上一条,钉在 `Path.write_bytes`(原子替换写的是临时文件)。
         """
         from kb import pipeline
         batch = ps.open_batch()
@@ -363,13 +396,13 @@ class DailyBatchResultTests(RoundStore):
                          'status': 'error', 'detail': '失败 1 个',
                          'failures': [{'title': '某订阅', 'reason': '连不上'}]}})
         kept = ps._STATE_FILE.read_text(encoding='utf-8')
-        real = Path.write_text
+        real = Path.write_bytes
 
         def half(self_path, data, *a, **kw):
             real(self_path, data[:len(data) // 2], *a, **kw)
             raise OSError('写到一半断了')
 
-        with patch.object(Path, 'write_text', half):
+        with patch.object(Path, 'write_bytes', half):
             finish_round(['index', 'extract'], None, batch, run_id='run-2',
                          started='2026-10-14 09:30:00')
         self.assertEqual(kept, ps._STATE_FILE.read_text(encoding='utf-8'),
@@ -389,7 +422,7 @@ class DailyBatchResultTests(RoundStore):
                        self.spec(['index', 'extract'], run_id='run-2',
                                  results={'index': {'status': 'error',
                                                     'detail': '磁盘满'}}))
-        self.assertEqual('磁盘满', pipeline.load_last_run()['stages']['index']['detail'])
+        self.assertEqual('磁盘满', pipeline.last_result()['stages']['index']['detail'])
 
     def test_a_newer_run_blocks_this_batch_even_when_its_own_write_failed(self):
         """那一轮手动同步**没落盘成功**,照样是最新的一轮。
@@ -438,8 +471,8 @@ class DailyBatchResultTests(RoundStore):
         finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
                      results={'crawl': {'status': 'error', 'detail': '失败 10 个'}})
         ps._STATE_FILE.write_text('{"run_id": "run-', encoding='utf-8')
-        with patch.object(ps, '_last_result', None), \
-             patch.object(ps, '_last_result_file', None):
+        with patch.object(ps, '_last_settled', ''), \
+             patch.object(ps, '_last_settled_file', None):
             finish_round(['index', 'extract'], None, batch, run_id='run-2',
                          started='2026-10-14 09:30:00')
         self.assertIn('读不出', ps.close_batch())
@@ -458,8 +491,8 @@ class DailyBatchResultTests(RoundStore):
         finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
                      results={'crawl': {'status': 'error', 'detail': '失败 10 个'}})
         ps._STATE_FILE.unlink()
-        with patch.object(ps, '_last_result', None), \
-             patch.object(ps, '_last_result_file', None):
+        with patch.object(ps, '_last_settled', ''), \
+             patch.object(ps, '_last_settled_file', None):
             finish_round(['index', 'extract'], None, batch, run_id='run-2',
                          started='2026-10-14 09:30:00')
         self.assertEqual('', ps.close_batch())
@@ -489,7 +522,7 @@ class DailyBatchResultTests(RoundStore):
             finish_round(['index', 'extract'], None, batch, run_id='run-2',
                          started='2026-10-14 09:30:00')
         # 当前读取:显示和重试读的那一份是**整批**
-        last = pipeline.load_last_run()
+        last = pipeline.last_result()
         self.assertEqual('error', last['stages']['crawl']['status'])
         self.assertEqual(['某订阅'],
                          [f['title'] for f in last['stages']['crawl']['failures']])
@@ -502,11 +535,22 @@ class DailyBatchResultTests(RoundStore):
         self.assertIn('没能写进磁盘', last['persist_issue'])
         self.assertTrue(any('没能写进磁盘' in line for line in last['log']), last['log'])
         self.assertIn('没能写进磁盘', ps.close_batch())
-        # 新进程读到的是上一轮那份汇总 —— 那条失败和重试计划照旧在
+        # 重启之后:盘上那份(这一批上一轮的汇总)原样在,那条失败一个字没丢
         self.fresh_process()
         restarted = pipeline.load_last_run()
         self.assertEqual('error', restarted['stages']['crawl']['status'])
-        self.assertIn('crawl', pipeline.retry_failed_plan())
+        # **而重试不许静默拿它的范围去跑。** 这一档正是"状态文件写失败、历史写
+        # 成功":历史里那一轮(run-2)更新,但历史记录没有重试派生字段 —— 恢复只
+        # 证得出"有更新的一轮",证不出它的范围。如实报失证并拦住,不许退回盘上
+        # 那一轮的范围(那样导出会摘掉失败那个来源、面板报「已保存 0 条」,见
+        # `docs/decisions/retry-scope.md`)。失败原因本身没丢:盘上那份和历史里
+        # 那条都还在。
+        # 恢复是懒做的(`_restore_once`),先读一次权威触发它 —— 面板那条路也是
+        # 这个顺序。重启之后屏幕上是历史里更新的那一轮(入库那一轮),而不是盘上
+        # 这份更旧的汇总:**不许把更旧的那一份摆成「最新」**。
+        self.assertEqual('run-2', pipeline.last_result()['run_id'])
+        self.assertEqual('scope', pipeline.restore_gap())
+        self.assertEqual([], pipeline.retry_failed_plan())
 
     def test_a_later_successful_publish_clears_the_warning(self):
         """中间一轮写失败、后面写成功了,就不许还挂着「没写进」。
@@ -571,14 +615,14 @@ class DailyBatchResultTests(RoundStore):
         with patch.object(ps, '_write_state', Mock(side_effect=OSError('磁盘满'))):
             finish_round(['index'], None, run_id='run-own',
                          results={'index': {'status': 'error', 'detail': '索引失败'}})
-        last = ps.load_last_run()
+        last = ps.last_result()
         self.assertIn('磁盘满', last['persist_issue'])
         self.assertTrue(any('磁盘满' in line for line in last['log']), last['log'])
         self.assertEqual('error', last['stages']['index']['status'])
         # 反过来钉一边:写成功的那一轮不许带这一格(带了就是挂一句假警报)
         finish_round(['index'], None, run_id='run-ok',
                      started='2026-10-14 10:00:00')
-        self.assertNotIn('persist_issue', ps.load_last_run())
+        self.assertNotIn('persist_issue', ps.last_result())
 
 
 if __name__ == '__main__':

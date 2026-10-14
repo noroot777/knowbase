@@ -170,7 +170,10 @@ class RetryScopeTests(RetryScopeBase):
         一张写着「本次无需重试」的灰卡片和"这个按钮坏了"长得一模一样 ——
         而上一轮 crawl 明明是红的。
         """
-        # 让 index 也红:这一轮的计划里还有别的阶段,于是真的会起跑。
+        # 让 index 也红:这一轮的计划里还有别的阶段,于是真的会起跑。走产品自己那条路
+        # (`also_red` → `_stage` → `_end_run`),**两头都不手改**:重试读的是空闲时认
+        # 内存的那一份(`pipeline_state.last_result`),只改磁盘文件这一局在摆局那一步
+        # 就不成立;而手改内存又绕开了收尾,摆出来的跟真跑一轮留下的不是同一个东西。
         self.crawl({'channel': 'rss'}, broken=[self.a], also_red=('index',))
         self.succeeded_later(self.a)
         with patch.object(pipeline_retry, '_run_crawl') as crawl, \

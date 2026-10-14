@@ -204,6 +204,8 @@
     <div class="pipe-actions"><button id="pipe-run" onclick="openPipeModal()" aria-describedby="pipe-state-hint">新建同步</button></div>
   </div>
   <div id="pipe-connection" class="pipe-notice" hidden role="status"><span></span><button class="ghost" onclick="refreshPipe(true)">重新连接</button></div>
+  <div id="pipe-viewing" class="pipe-notice" hidden role="status"><span id="pipe-viewing-text"></span><button class="ghost" onclick="exitPipeHistory()">回到最新</button></div>
+  <div id="pipe-fresh" class="pipe-notice" hidden role="status"><span id="pipe-fresh-text"></span><button class="ghost" onclick="pipeFreshRetry()">重新读取</button></div>
   <section class="pipe-overview" aria-label="同步概况">
     <div class="pipe-overview-main"><div><span class="pipe-section-label">当前状态</span><h2 id="pipe-state-title" role="status" tabindex="-1">正在读取同步状态</h2><p id="pipe-running-channel"></p><p id="pipe-run-scope"></p><p id="pipe-persist-issue" class="field-err" role="status" hidden></p></div><div class="pipe-run-metrics"><b id="pipe-progress-label">—</b><span id="pipe-elapsed"></span></div></div>
     <div class="pipe-progress-track" aria-hidden="true"><span id="pipe-progress-fill"></span></div>
@@ -226,6 +228,10 @@
       <div class="pipe-log-footer"><span id="pipe-log-note">保留最近 80 条</span><button id="pipe-log-latest" class="text-button" onclick="followPipeLog()" hidden>查看最新<i data-arrow="down"></i></button><button class="text-button" onclick="downloadPipeLog()">下载日志</button></div>
     </section>
   </div>
+  <section class="pipe-history-panel" aria-label="历史运行">
+    <div class="pipe-section-heading"><h2>历史运行</h2><span id="pipe-history-note"></span></div>
+    <div id="pipe-history-list"><p class="pipe-history-empty">正在读取历史记录…</p></div>
+  </section>
 </div>
 
 <div id="subspanel" style="display:none">
@@ -530,6 +536,10 @@
 <script src="/static/js/schedules.js"></script>
 <script src="/static/js/pipe_channels.js"></script>
 <script src="/static/js/pipe.js"></script>
+<!-- pipe_fresh.js 排在两个消费者之前:`PIPE_FRESH` 是 const,const 有 TDZ -->
+<script src="/static/js/pipe_fresh.js"></script>
+<!-- pipe_history.js 排在 pipe_view.js 之前:`pipeViewing` 是 let,渲染要读它 -->
+<script src="/static/js/pipe_history.js"></script>
 <script src="/static/js/pipe_view.js"></script>
 <script src="/static/js/pipe_setup.js"></script>
 <script src="/static/js/pipe_schedule.js"></script>

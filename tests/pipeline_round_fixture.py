@@ -14,6 +14,11 @@ from unittest.mock import patch
 
 from kb import pipeline_state as ps
 
+# 进程内常驻、会在用例之间互相渗的那几格(理由见 `RoundStore.setUp`)
+_PROCESS_GLOBALS = ('_aggregate', '_aggregate_file', '_last_settled',
+                    '_last_settled_file', '_persist_error', '_restore_gap',
+                    '_restored', '_seq_hwm')
+
 
 def finish_round(planned, crawl_filter, batch='', results=None, run_id='run-1',
                  started='2026-10-14 09:00:00', crawl_retry=None):
@@ -52,17 +57,34 @@ class RoundStore(unittest.TestCase):
         # `_state` / `_finished` 是模块级常驻的:这几条要往里摆终态,**走的时候
         # 一定要还回去**,否则同跑时会把别的用例带红,而单跑永远是绿的。
         before_state, before_done = deepcopy(ps._state), deepcopy(ps._finished)
+        # 模块级常驻的还不止这两个:批次汇总、上一轮收尾身份、留档诊断、恢复那几格
+        # 都是进程内的。**同跑时它们会把别的用例带红,而单跑永远是绿的**,所以一律
+        # 存下来、走的时候还回去。
+        keep = {name: getattr(ps, name) for name in _PROCESS_GLOBALS}
 
         def restore():
             ps._state.clear(); ps._state.update(before_state)
             ps._finished.clear(); ps._finished.update(before_done)
+            for name, value in keep.items():
+                setattr(ps, name, value)
             ps.close_batch()
         self.addCleanup(restore)
 
     def fresh_process(self):
-        """装成"另一个进程":内存里那份权威记录归零,只剩磁盘。"""
-        for name in ('_last_result', '_last_result_file'):
-            pa = patch.object(ps, name, None); pa.start(); self.addCleanup(pa.stop)
+        """装成"另一个进程":进程内那几格归零,最新那一轮只能从磁盘恢复。
+
+        `_state` 里的身份和收尾时刻也要清掉 —— 留着的话 `last_result()` 认的是内存
+        那一份(新进程里它本来是空的),磁盘那条恢复路径压根走不到(口径见
+        `pipeline_state._latest_locked` / `_restore_once`)。
+        """
+        for name, value in (('_aggregate', None), ('_aggregate_file', None),
+                            ('_last_settled', ''), ('_last_settled_file', None),
+                            ('_restored', ''), ('_restore_gap', ''),
+                            ('_persist_error', '')):
+            pa = patch.object(ps, name, value); pa.start(); self.addCleanup(pa.stop)
+        was = deepcopy(ps._state)
+        self.addCleanup(lambda: ps._state.update(was))
+        ps._state.update(running=False, finished_at='', run_id='', started_at='')
 
     def spec(self, planned, results=None, run_id='run-x', crawl_filter=None,
              crawl_retry=None):
