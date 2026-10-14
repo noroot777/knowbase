@@ -77,6 +77,8 @@ async function loadPipeHistory() {
       const data = await pipeHistoryRequest;
       if (runKey && runKey !== pipeRunKey(pipeSnapshot)) { pipeHistoryWanted = true; continue; }
       pipeHistory = Array.isArray(data.runs) ? data.runs : [];
+      // 后端那边留档失败了没有 —— 和「这一屏取到没取到」是两件事
+      pipeFreshNote = typeof data.error === 'string' ? data.error : '';
       // 正在看的那一轮可能已经被挤出记录(或者刚被同一轮次的新结果替换):
       // 跟着那份新清单重新认一次,认不出来就退回最新 —— 留着一份谁都查不到的
       // 快照,屏幕上那条「正在查看」就指着一轮列表上没有的运行。
@@ -87,9 +89,14 @@ async function loadPipeHistory() {
       }
       renderPipeHistory();
       if (pipeViewing) renderPipeState(pipeSnapshot || { running: false });
+      // **渲染成功了才算追平这一轮**(`pipe_fresh.js` 那套 desired/applied)
+      pipeFreshOk('history', pipeRunKey(pipeSnapshot));
     } catch (e) {
-      // 读不到不无限重试 —— 靠的是循环开头已经把这一笔清了,这里不再置回去。
-      // 历史是只读展示,它读不到不该挡任何操作。
+      // 读不到**不在这里**无限重试(循环开头已经把那一笔欠账清了,这里也不置回去)
+      // —— 但缺口要如实留着:交给 `pipe_fresh.js`,由后续状态轮询按退避补读,面板上
+      // 同时说明这一块还是旧的。原来这里什么都不记,于是「见过这一轮」和「屏幕上对
+      // 上了」被当成同一件事,列表长期停在旧那份清单、一个字都不说。
+      pipeFreshMiss('history', e.message);
       if (!pipeHistory.length) {
         $('pipe-history-list').innerHTML =
           `<p class="pipe-history-empty">没能读到历史记录：${esc(e.message)}</p>`;

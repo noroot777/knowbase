@@ -16,6 +16,7 @@ import time
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 
 from kb.config import DATA_DIR
 
@@ -82,6 +83,11 @@ _lock = threading.Lock()
 # 罕见(口径同 `catgraph.md` 里发布序号那条 —— 自增计数 + 随机后缀)。
 _RUN_EPOCH = f'{int(time.time()):x}{secrets.token_hex(2)}'
 _run_seq = 0
+
+# 最近一次留档失败的异常类型,空串 = 上一次留档是成功的。面板拿它如实说一句 ——
+# **留档失败不许声张成同步失败,但也不许静默**:只看页面的话,「历史里没有这一轮」
+# 和「这一轮还没跑过」长得一模一样。
+_persist_error = ''
 
 # 已经收尾的那几轮运行的终态,按 run id 存着。等一轮同步的人(日报)靠两秒一跳的
 # 轮询取快照,而全局状态只有一份:我们那一轮收尾、另一轮马上接替时,轮询就再也
@@ -248,11 +254,59 @@ def retry_notes(run: dict) -> dict:
     return note.get("channels") or {}
 
 
-def _save_last_run() -> None:
-    """持久化最近一次结果,重启 kb-web 后仍能看到。"""
+def _load_json(path: Path):
+    """读一份落盘 JSON,读不出来一律 `None`。**两份落盘(状态、历史)都过它。**
+
+    **口径只有一份,而且兜住所有异常**,不只 `OSError` / `JSONDecodeError`:这两份
+    文件是外部状态(手改过、半截写入、别的工具碰过、坏块),而
+    `read_text(encoding='utf-8')` 碰上非 UTF-8 字节抛的是 `UnicodeDecodeError`、
+    深嵌套 JSON 抛的是 `RecursionError` —— 两个都不属于那两类,从这里逃出去会一路
+    冲到 `_end_run()`,把一轮**已经做完**的同步变成「永远进行中」(那一道不变量在
+    `_end_run` 自己那里另外钉着,这里是第一道)。
+    **先按字节读、再 `errors='replace'` 解码**,不直接 `read_text`:能读出来的尽量
+    读出来,坏字节变成 U+FFFD 而不是整份丢掉(「漏报是静默丢数据」)。
+    """
     try:
-        _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _STATE_FILE.write_text(json.dumps({
+        return json.loads(path.read_bytes().decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def _dump_bytes(obj) -> bytes:
+    """序列化成要落盘的字节。**不可编码的字符就地替换,这一步不许抛。**
+
+    `ensure_ascii=False` 是为了文件能给人读,代价是**编码**那一步会炸:某条记录里
+    混进一个孤立代理字符(`\ud800` 一类 —— JSON 里合法、UTF-8 里不合法,旧文件里
+    转义存着、读回来就是它),`UnicodeEncodeError` 就从写盘抛出来。按
+    `errors='replace'` 落盘:坏掉的是那一个字符,其余内容和其他几轮一个字节不差。
+    """
+    return json.dumps(obj, ensure_ascii=False, indent=1).encode("utf-8", "replace")
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    """同目录临时文件 + rename,**替换没成功一律把临时文件收掉**。
+
+    面板那两条读的请求随时在跑,截断重写的窗口里读到的是半截 JSON(同
+    `docs/decisions/llm-stages.md` 那条)。而 `replace()` 失败(权限、跨设备)时不清
+    的话,`*.<pid>.tmp` 就留在数据目录里 —— 同一个进程里重名覆盖,每次重启换一个
+    pid 就慢慢堆起来。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _save_last_run() -> None:
+    """持久化最近一次结果,重启 kb-web 后仍能看到。
+
+    **异常不在这里吞**:两份落盘都由 `_end_run()` 那段统一收尾兜住,并如实记一笔
+    诊断(`persist_error()`)。在这里各吞一次的话,「写没写上」就再也报不出去了。
+    """
+    _write_atomic(_STATE_FILE, _dump_bytes({
             "started_at": _state["started_at"],
             "finished_at": _state["finished_at"],
             "stopped": _state.get("stopped", False),
@@ -266,9 +320,7 @@ def _save_last_run() -> None:
             "run_id": _state.get("run_id", ""),
             "crawl_retry": _state.get("crawl_retry") or {},
             "log": _state["log"],
-        }, ensure_ascii=False, indent=1), encoding="utf-8")
-    except OSError:
-        pass
+        }))
 
 
 def _run_record() -> dict:
@@ -310,15 +362,7 @@ def _save_history() -> None:
     runs = [r for r in load_history() if not rid or r.get("run_id") != rid]
     runs.insert(0, record)
     del runs[_HISTORY_KEEP:]
-    path = _history_file()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({"runs": runs}, ensure_ascii=False, indent=1),
-                       encoding="utf-8")
-        tmp.replace(path)
-    except OSError:
-        pass
+    _write_atomic(_history_file(), _dump_bytes({"runs": runs}))
 
 
 def load_history() -> list[dict]:
@@ -327,21 +371,22 @@ def load_history() -> list[dict]:
     文件还没有、读不出来、或者内容不是预期的形状,一律空列表 —— 这一份是只读
     展示,报错不如少显示几行。
     """
-    try:
-        raw = json.loads(_history_file().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
+    raw = _load_json(_history_file())
     runs = raw.get("runs") if isinstance(raw, dict) else None
     if not isinstance(runs, list):
         return []
     return [r for r in runs if isinstance(r, dict)]
 
 
+def persist_error() -> str:
+    """最近一次留档失败的异常类型,空串 = 没失败。理由见 `_persist_error`。"""
+    return _persist_error
+
+
 def load_last_run() -> dict | None:
-    try:
-        return json.loads(_STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    """上一轮的终态。读不出来一律 `None` —— 口径和历史那份共用 `_load_json`。"""
+    raw = _load_json(_STATE_FILE)
+    return raw if isinstance(raw, dict) else None
 
 
 def get_state() -> dict:
@@ -383,18 +428,32 @@ def _end_run() -> None:
         _state["current_stage"] = ""
         _state["finished_at"] = _now()
         _log("同步已停止，已完成的结果保留" if stopped else "管道结束")
-        _save_last_run()
-        # 历史在状态文件**之后**写:那一份承重(重试范围从它派生),这一份只给人翻。
-        _save_history()
-        # 收尾状态按 run id 留一份,再把 running 放下:等这一轮的人晚一步来取
-        # 也还拿得到自己那一轮的结果(阶段修正已经在上面做完了,存的就是终态)。
-        run_id = _state.get("run_id") or ""
-        if run_id:
-            _finished[run_id] = {
-                "run_id": run_id, "stopped": stopped,
-                "finished_at": _state["finished_at"],
-                "stages": deepcopy(_state["stages"]),
-            }
-            for old_id in list(_finished)[:-_FINISHED_KEEP]:
-                del _finished[old_id]
-        _state["running"] = False
+        # **留档失败不许把一轮已经做完的正文工作变成「永远进行中」。** 这两份落盘
+        # 都是旁路:状态文件喂「重试失败项」的范围派生(重启之后才用得上),历史文件
+        # 只给人翻 —— 而下面 finally 里那两件事是**这一轮能不能收尾**。实测形态:
+        # 历史文件里一个非 UTF-8 字节,解码异常就从 `_save_history()` 逃出来,阶段
+        # 卡片和日志都已经写着「管道结束」,而标题是「同步正在启动」、按钮禁用,
+        # 新同步和重试一概被拒,点停止也救不回来(线程早退了);普通同步和失败重试
+        # 共用这段收尾,两条入口一起死。**判据只能钉在 `finally` 上** —— 光把某一种
+        # 坏字节的异常类型补进捕获里,下一种坏法照旧重现。
+        global _persist_error
+        try:
+            _save_last_run()
+            # 历史在状态文件**之后**写:那一份承重(重试范围从它派生),这一份只给人翻。
+            _save_history()
+            _persist_error = ''
+        except Exception as exc:          # noqa: BLE001 - 理由就在上面那段
+            _persist_error = type(exc).__name__
+        finally:
+            # 收尾状态按 run id 留一份,再把 running 放下:等这一轮的人晚一步来取
+            # 也还拿得到自己那一轮的结果(阶段修正已经在上面做完了,存的就是终态)。
+            run_id = _state.get("run_id") or ""
+            if run_id:
+                _finished[run_id] = {
+                    "run_id": run_id, "stopped": stopped,
+                    "finished_at": _state["finished_at"],
+                    "stages": deepcopy(_state["stages"]),
+                }
+                for old_id in list(_finished)[:-_FINISHED_KEEP]:
+                    del _finished[old_id]
+            _state["running"] = False

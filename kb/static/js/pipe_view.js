@@ -19,6 +19,15 @@ function pipeRunLabel(result) {
   return result.run_kind === 'retry' || legacyRetry ? '重试' : '同步';
 }
 function pipeStateHint(s, result, failed, skipped, progress) {
+  // **翻历史时这句话要跟着换成只读语义。** 下面那几句写的是「可以重新配置一次同步,
+  // 或按上次抓取范围重试失败项」—— 而翻历史时那颗按钮已经藏掉也禁用了(理由在
+  // `renderPipeState` 里),提示还指着一个按不到的操作,说的又是**另一轮**的失败。
+  if (typeof pipeViewing !== 'undefined' && pipeViewing) {
+    if (failed) return `这一轮有 ${failed} 个步骤失败，记录只读。要处理当前的失败请先回到最新。`;
+    if (result.stopped) return '这一轮被停止了，已完成结果当时已保留。记录只读。';
+    if (skipped) return `这一轮有 ${skipped} 个步骤被跳过，具体原因见下方。记录只读。`;
+    return '这一轮的步骤都已完成。记录只读。';
+  }
   if (s.running) {
     if (s.stop_requested) return '正在等待执行中的步骤收尾；全部结束前暂不能新建同步，已完成结果会保留。';
     if (failed) return `已有 ${failed} 个步骤失败，本轮仍在执行。请等全部步骤结束后再新建同步；失败项不会阻止下一轮。`;

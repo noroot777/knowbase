@@ -91,7 +91,10 @@ def pipeline_runs():
 
     形状和 `/api/pipeline/status` 里的 `last_run` 一致,前端用同一套渲染。
     """
-    return {"runs": pl.load_history()}
+    # `error` 如实带上最近一次留档失败的异常类型 —— 留档是旁路,它失败不该声张成
+    # 同步失败(那一轮的结论照旧发布),但也不许静默:只看页面的话,「历史里没有这
+    # 一轮」和「这一轮还没跑过」长得一模一样。
+    return {"runs": pl.load_history(), "error": pl.persist_error()}
 
 
 class ChannelScope(BaseModel):

@@ -172,6 +172,112 @@ class HistoryTests(HistoryCase):
         self.assertFalse(list(self.dir.glob('*.tmp')), '临时文件不留下')
 
 
+class PersistFailureTests(HistoryCase):
+    """留档失败不许把一轮**已经做完**的同步变成「永远进行中」。
+
+    判据一律落在**「这一轮收没收尾、下一轮开不开得起来」**上,不落在「异常捕获里
+    列了哪几个类型」上 —— 后者按坏法一种一种往里补,下一种坏法照旧重现。
+    """
+
+    def start_again(self):
+        """真走一次 `start_pipeline`(身份发放 + running 检查),正文换掉不跑。"""
+        with patch.object(pipeline, '_run_pipeline', lambda *a, **k: None):
+            got = pipeline.start_pipeline(['export'])
+        state._state['running'] = False      # 那个空线程不会自己收尾
+        return got
+
+    def test_a_corrupt_history_file_does_not_escape_the_persist_layer(self):
+        """三种实测过的坏法,**在留档这一层就要隔离掉**,不靠收尾那道兜底。
+
+        非 UTF-8 字节抛 `UnicodeDecodeError`、深嵌套 JSON 抛 `RecursionError`、
+        孤立代理字符在**写**那一步抛 `UnicodeEncodeError` —— 三个都不属于
+        `OSError` 和 `JSONDecodeError`。
+
+        **两道是冗余保护,各有自己的回归**(「两份实现各有自己的回归」):这一条
+        钉第一道,所以**直接调这两个函数、不经过 `_end_run`* ——走 `_end_run`
+        的话第二道会把异常吃掉,这一条在任何单道注入下都不红。第二道由
+        `test_the_invariant_is_the_finally_not_the_exception_list` 钉,那一条同时
+        断言用户遇到的后果。
+        """
+        for name, raw in (
+            ('非 UTF-8 字节', b'{"runs": [{"run_id": "\xff\xfe"}]}'),
+            ('深嵌套 JSON', b'[' * 2000 + b']' * 2000),
+            ('孤立代理字符', '{"runs": [{"run_id": "old", "log": ["\\ud800"]}]}'.encode()),
+        ):
+            with self.subTest(name):
+                state._history_file().write_bytes(raw)
+                self.reset('run-bad')
+                state._state.update(finished_at='2026-10-14 10:05:00', run_kind='sync',
+                                    planned_stages=['export'])
+                try:
+                    state.load_history()
+                    state._save_history()
+                except Exception as exc:        # noqa: BLE001 - 这正是要钉的
+                    self.fail(f'{name}:{type(exc).__name__} 从留档层逃出来了')
+                # 读出来的旧记录(坏字节换成 U+FFFD 之后)也还在,所以只认最前那一条
+                self.assertEqual('run-bad', (state.load_history() or [{}])[0].get('run_id'),
+                                 f'{name}:隔离掉之后这一轮还是要留下来、而且在最前')
+
+    def test_the_invariant_is_the_finally_not_the_exception_list(self):
+        """注入一个谁都没列进捕获的异常,收尾照旧,诊断如实记着是什么坏了。
+
+        这一条钉的是**第二道**(`_end_run` 那个 `finally`),判据落在用户遇到的
+        后果上:阶段卡片和日志已经写着「管道结束」,而标题是「同步正在启动」、按钮
+        禁用,新同步和失败重试一概被拒,点停止也救不回来(线程早退了)。
+        **用一个没人想过的异常类型**(`MemoryError`),正是因为不变量该钉在 finally
+        上、不该钉在「捕获里列了哪几个类型」上。
+
+        **反过来钉一边**:下一轮留档成功,那条诊断就撤掉 —— 不然面板会一直挂着
+        一句早就不成立的话。
+        """
+        with patch.object(state, '_write_atomic', side_effect=MemoryError('boom')):
+            self.run_round('run-x', 'error', '3 条翻译失败（服务返回 503），库里仍是原文')
+        self.assertFalse(state.get_state()['running'], '留档炸了,收尾也得完成')
+        self.assertTrue(state.run_result('run-x'), '等结果的人还要拿得到终态')
+        self.assertTrue(self.start_again(), '下一轮还要起得来')
+        self.assertEqual('MemoryError', state.persist_error(), '是什么坏了要如实记')
+
+        self.run_round('run-y', 'ok', '已保存 95 条到知识库')
+        self.assertEqual('', state.persist_error(), '留档又成功了,诊断要撤')
+        self.assertEqual(['run-y'], [r['run_id'] for r in state.load_history()])
+
+    def test_a_bad_byte_costs_one_character_not_the_whole_file(self):
+        """坏字节换成 U+FFFD,**其余几轮一个字节不差**。
+
+        「漏报是静默丢数据」:整份当读不出来扔掉的代价,是把本来好好的那几轮一起
+        扔了 —— 而历史文件里少一轮,在面板上和「还没跑过」长得一模一样。
+        """
+        good = {"run_id": "run-keep", "started_at": "2026-10-13 09:00:00",
+                "finished_at": "2026-10-13 09:10:00", "stopped": False,
+                "run_kind": "sync", "planned_stages": ["export"],
+                "stages": {"export": {"status": "error", "detail": "翻译 503"}},
+                "crawl_filter": {}, "log": ["[10-13 09:10:00] 管道结束"]}
+        raw = json.dumps({"runs": [good]}, ensure_ascii=False).encode()
+        state._history_file().write_bytes(raw.replace(b'503', b'5\xff3'))
+
+        kept = state.load_history()
+        self.assertEqual(['run-keep'], [r['run_id'] for r in kept], '那一轮要还在')
+        self.assertIn('翻译', kept[0]['stages']['export']['detail'], '坏的只有那一个字符')
+
+        self.run_round('run-new', 'ok', '已保存 95 条到知识库')
+        self.assertEqual(['run-new', 'run-keep'],
+                         [r['run_id'] for r in state.load_history()], '合并也不许丢它')
+
+    def test_a_failed_replace_leaves_no_temp_file(self):
+        """原子换文件那一步失败,不许把临时文件留在数据目录里。
+
+        单进程里重名覆盖,但每次重启换一个 pid —— 留下来的那些慢慢堆着,没人收。
+        """
+        def nope(_self, _target):
+            raise PermissionError('read-only')
+
+        with patch.object(Path, 'replace', nope):
+            self.run_round('run-z', 'ok', '已保存 95 条到知识库')
+        self.assertFalse(state.get_state()['running'], '收尾照旧要完成')
+        self.assertEqual([], sorted(p.name for p in self.dir.glob('*.tmp')),
+                         '临时文件要收掉')
+
+
 class HistoryEndpointTests(HistoryCase):
     def setUp(self):
         super().setUp()

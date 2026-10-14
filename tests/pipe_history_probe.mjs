@@ -48,6 +48,13 @@ let retryCalls = 0, runsCalls = 0;
 // 好**(和真后端一样),所以放行时它带的是请求发出时那一刻的事实 —— 这正是「旧回包
 // 迟到」那一局要的。
 let holdRuns = null;
+// >0 = 接下来这几次历史查询返回 503(每次扣 1)。摆的是「那一轮唯一的一次补刷恰好
+// 失败」:后端记录没丢,纯粹是这一屏没取到 —— 判据就落在「它自己补不补得回来」上。
+let failRuns = 0;
+// 同上,作用在待处理数那一条(`?pending=true`)。两条走同一套新鲜度,所以各摆一次。
+let failPending = 0;
+// 非空 = 后端最近一次留档失败了,`/api/pipeline/runs` 要如实带出来
+let runsError = '';
 // 非 null = 下一次状态轮询(`refreshPipe` 那一条)的回包按在这儿等放行。**和
 // `holdRuns` 的生成时机刚好相反:它的回包是放行那一刻才生成的**,于是带的是那一轮
 // 已经结束之后的事实。两个合起来摆的就是生产那个窗口:两个请求一起发出,服务端先
@@ -65,6 +72,17 @@ const LATER = {
   planned_stages: [...KEYS], crawl_filter: { channel: "rss" },
   stages: stagesOf({ export: { status: "error", detail: "第三轮又是 503" } }),
   log: ["[10-15 09:12:00] 管道结束"],
+};
+
+// 第四轮:专给待处理数那一组用 —— 「缺口」的定义是 desired 已经前移而 applied 还
+// 落在旧那一轮上,所以必须真有一轮新结果,不能在「已经追平」的状态下让它失败(那种
+// 失败本来就无害:屏幕上的数就是这一轮的)。
+const FOURTH = {
+  run_id: "run-fourth", run_kind: "sync", stopped: false,
+  started_at: "2026-10-16 09:00:00", finished_at: "2026-10-16 09:08:00",
+  planned_stages: [...KEYS], crawl_filter: { channel: "rss" },
+  stages: stagesOf({ export: { status: "ok", detail: "已保存 12 条到知识库" } }),
+  log: ["[10-16 09:08:00] 管道结束"],
 };
 
 const MIME = { html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8",
@@ -96,6 +114,9 @@ const server = createServer((req, res) => {
     const extra = req.url.includes("pending=true") ? { pending: { extract: 2 } } : {};
     // 只按住 `refreshPipe` 那一条。待处理数(`pending=true`)和来源连接探测(带 channel)
     // 走的是同一个路径,按住它们会把摆局卡在别处。
+    if (failPending > 0 && req.url.includes("pending=true")) {
+      failPending--; return json({ detail: "pending unavailable" }, 503);
+    }
     const poll = req.url.includes("source=false") && !req.url.includes("pending=true");
     if (holdStatus && poll) {
       const gate = holdStatus; holdStatus = null;
@@ -105,7 +126,8 @@ const server = createServer((req, res) => {
   }
   if (path === "/api/pipeline/runs") {
     runsCalls++;
-    const body = { runs };
+    if (failRuns > 0) { failRuns--; return json({ detail: "history unavailable" }, 503); }
+    const body = { runs, error: runsError };
     if (holdRuns) { const gate = holdRuns; holdRuns = null; return void gate.then(() => json(body)); }
     return json(body);
   }
@@ -250,6 +272,13 @@ check("那一行标成当前在看", await evalJs(
 
 // ── 4. 翻历史时「重试失败项」按不下去 ────────────────────────────────────────
 // 它重试的永远是**最后一轮**的范围,而屏幕上是上午那一轮
+// 那句提示也要跟着换成只读语义:最新视图下写的是「可重新配置一次同步,或按上次抓取
+// 范围重试失败项」,而这里那颗按钮已经藏掉也禁用了 —— 提示指着一个按不到的操作,说的
+// 又是**另一轮**的失败。
+check("翻历史时提示换成只读语义",
+      /只读/.test(await evalJs(`$('pipe-state-hint').textContent`))
+      && !/重试失败项/.test(await evalJs(`$('pipe-state-hint').textContent`)),
+      await evalJs(`$('pipe-state-hint').textContent`));
 check("翻历史时重试按钮藏起来了", await evalJs(`$('pipe-retry').hidden`));
 check("翻历史时重试按钮也是禁用的", await evalJs(`$('pipe-retry').disabled`));
 const before = retryCalls;
@@ -431,6 +460,74 @@ await sleep(500);
 await evalJs(`refreshPipe(); true`);
 await sleep(500);
 check("状态没变时后续轮询不再重复查历史", runsCalls === quiet, `${quiet} → ${runsCalls}`);
+
+// ── 15. 那一次历史补刷失败:缺口要留着、靠退避补回来、面板上还得说一句 ─────────
+// 原来这一档什么都不记:后续轮询只知道「这一轮见过了」、不知道「屏幕上还没对上」,
+// 列表长期停在旧那份清单,等多久都不补,页面上一个字都不说(实测后端 6 轮、页面 5 行,
+// 切走再回来才补齐)。所以判据有三条:**说了没有、补没补回来、靠的是不是退避补读**。
+runs = [EVENING, MORNING];
+state = { running: false, stop_supported: true, stop_requested: false, ...EVENING };
+await evalJs(`pipeHistory = []; pipeViewing = null; renderPipeHistory(); true`);
+await evalJs(`refreshPipe(); true`);
+await setup("列表先追平成两轮", until(`document.querySelectorAll('.pipe-history-row').length === 2`));
+
+failRuns = 1;                                 // 这一轮唯一的那次补刷会 503
+runs = [LATER, EVENING, MORNING];
+state = { ...state, ...LATER };
+const runsBefore4 = runsCalls;
+await evalJs(`refreshPipe(); true`);          // newResult → 补刷 → 503
+await setup("那次补刷确实失败了", until(`pipeFreshGaps().length === 1`, 8000));
+check("顶上已经换成第三轮了", await evalJs(`pipeDoneRun === 'run-later'`));
+check("读失败时列表如实停在旧那两行",
+      await evalJs(`document.querySelectorAll('.pipe-history-row').length === 2`),
+      `rows=${await evalJs(`document.querySelectorAll('.pipe-history-row').length`)}`);
+check("面板上如实说了一句这块是旧的",
+      await evalJs(`!$('pipe-fresh').hidden && /历史运行/.test($('pipe-fresh-text').textContent)`),
+      await evalJs(`JSON.stringify({ hidden: $('pipe-fresh').hidden, text: $('pipe-fresh-text').textContent })`));
+
+await evalJs(`refreshPipe(); true`);          // 退避到点,这一轮补读
+check("后续轮询把它补回来了",
+      await until(`document.querySelectorAll('.pipe-history-row').length === 3`, 8000),
+      `rows=${await evalJs(`document.querySelectorAll('.pipe-history-row').length`)}`);
+check("补回来之后那句提示撤掉", await until(`$('pipe-fresh').hidden`, 4000),
+      await evalJs(`JSON.stringify({ hidden: $('pipe-fresh').hidden, gaps: pipeFreshGaps().length })`));
+check("补齐靠的是多读一次,不是下一次切页", runsCalls > runsBefore4 + 1,
+      `${runsBefore4} → ${runsCalls}`);
+
+// ── 16. 待处理数那条是同一个形状(对称实例) ─────────────────────────────────────
+// 它那条 catch 原来也是「清掉欠账、保留旧值、什么都不说」。两者走同一套,所以各摆一次。
+failPending = 1;
+runs = [FOURTH, LATER, EVENING, MORNING];     // 第四轮跑完了
+state = { ...state, ...FOURTH };
+await evalJs(`refreshPipe(); true`);          // newResult → 待处理数那次 503、历史照旧
+await setup("待处理数那次失败了、而历史追平了",
+            until(`pipeFreshGaps().length === 1
+                   && document.querySelectorAll('.pipe-history-row').length === 4`, 8000));
+check("待处理数读失败时也如实说了一句",
+      await evalJs(`!$('pipe-fresh').hidden && /待处理数/.test($('pipe-fresh-text').textContent)`),
+      await evalJs(`$('pipe-fresh-text').textContent`));
+await evalJs(`refreshPipe(); true`);
+check("待处理数也是靠退避补回来的", await until(`$('pipe-fresh').hidden`, 8000),
+      await evalJs(`$('pipe-fresh-text').textContent`));
+
+// ── 17. 后端留档失败要如实说,但不许声张成同步失败 ─────────────────────────────
+runsError = "UnicodeDecodeError";
+await evalJs(`loadPipeHistory(); true`);
+await setup("那条诊断传到前端了", until(`pipeFreshNote === 'UnicodeDecodeError'`, 8000));
+check("留档失败在面板上说了一句",
+      await evalJs(`!$('pipe-fresh').hidden && /没能留档/.test($('pipe-fresh-text').textContent)`),
+      await evalJs(`$('pipe-fresh-text').textContent`));
+check("说清了是什么坏了",
+      /UnicodeDecodeError/.test(await evalJs(`$('pipe-fresh-text').textContent`)));
+// **反过来钉一边**:留档失败不许改写那一轮的结论
+check("同步结论没被改写", await exportStatus() === "ok" && /12 条/.test(await exportRow()),
+      `${await exportStatus()} / ${await exportRow()}`);
+runsError = "";
+check("「重新读取」真会再查一次", await (async () => {
+  const before = runsCalls;
+  if (!await clickAt("#pipe-fresh button")) return false;
+  return await until(`$('pipe-fresh').hidden`, 8000) && runsCalls > before;
+})(), `runsCalls=${runsCalls}`);
 
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 

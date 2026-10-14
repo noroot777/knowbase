@@ -109,6 +109,9 @@ async function refreshPipe(withPending = false) {
         // 那只治得了状态先到的一半。
         loadPipeHistory();
       }
+      // 上面那几个分支是**事件**(「又跑完一轮」一轮只说一次);这一道管的是
+      // 「那一次取失败之后谁来接」—— 记下要对齐哪一轮,到点的缺口按退避补一次。
+      pipeFreshCheck(doneRun, { history: loadPipeHistory, pending: refreshPipePending });
     } catch (e) {
       if (version !== pipeStatusVersion) return;
       pipeConnected = false;
@@ -187,10 +190,17 @@ async function refreshPipePending() {
       if (!pipeSnapshot?.running && (!runKey || runKey === pipeRunKey(pipeSnapshot))) {
         pipePending = s.pending || {}; pipePendingWanted = false;
         if (pipeSnapshot) renderPipeState(pipeSnapshot);
+        pipeFreshOk('pending', pipeRunKey(pipeSnapshot));
       }
       // 回包被丢掉(这期间换了一轮运行)时 wanted 还是 true,循环里按新快照
       // 再查一次 —— 快照不再变动就收敛,它只随真实运行的起止变化。
-    } catch { pipePendingWanted = false; /* 查不到不无限重试,积压数从不挡操作 */ }
+    } catch (e) {
+      // 和历史那条同一个形状:不在这里无限重试,但**缺口要留着**(`pipe_fresh.js`)。
+      // 只清欠账、保留旧值的话,后续轮询只知道「这一轮见过了」,面板上那个待处理数
+      // 就一直是处理前的数字,而且一个字都不说。
+      pipePendingWanted = false;
+      pipeFreshMiss('pending', e.message);
+    }
     finally { pipePendingRequest = null; }
   }
 }

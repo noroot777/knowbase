@@ -205,6 +205,7 @@
   </div>
   <div id="pipe-connection" class="pipe-notice" hidden role="status"><span></span><button class="ghost" onclick="refreshPipe(true)">重新连接</button></div>
   <div id="pipe-viewing" class="pipe-notice" hidden role="status"><span id="pipe-viewing-text"></span><button class="ghost" onclick="exitPipeHistory()">回到最新</button></div>
+  <div id="pipe-fresh" class="pipe-notice" hidden role="status"><span id="pipe-fresh-text"></span><button class="ghost" onclick="pipeFreshRetry()">重新读取</button></div>
   <section class="pipe-overview" aria-label="同步概况">
     <div class="pipe-overview-main"><div><span class="pipe-section-label">当前状态</span><h2 id="pipe-state-title" role="status" tabindex="-1">正在读取同步状态</h2><p id="pipe-running-channel"></p><p id="pipe-run-scope"></p></div><div class="pipe-run-metrics"><b id="pipe-progress-label">—</b><span id="pipe-elapsed"></span></div></div>
     <div class="pipe-progress-track" aria-hidden="true"><span id="pipe-progress-fill"></span></div>
@@ -536,6 +537,8 @@
 <script src="/static/js/settings.js"></script>
 <script src="/static/js/pipe_channels.js"></script>
 <script src="/static/js/pipe.js"></script>
+<!-- pipe_fresh.js 排在两个消费者之前:`PIPE_FRESH` 是 const,const 有 TDZ -->
+<script src="/static/js/pipe_fresh.js"></script>
 <!-- pipe_history.js 排在 pipe_view.js 之前:`pipeViewing` 是 let,渲染要读它 -->
 <script src="/static/js/pipe_history.js"></script>
 <script src="/static/js/pipe_view.js"></script>
