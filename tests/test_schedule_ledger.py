@@ -8,12 +8,13 @@
 """
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from kb import daily_run, pipeline
+from kb import daily, daily_run, pipeline
 from kb.config import ScheduleUnreadable
 
 
@@ -357,6 +358,152 @@ class RetryBudgetTests(unittest.TestCase):
                         daily_run._finish_schedule('2026-10-15', retry=True)
             self.assertEqual(daily_run.MAX_RETRIES + 1, start.call_count)
         self.assertTrue(any('一时读不出' in line for line in self.said), self.said)
+
+
+class ReleaseBoundaryTests(unittest.TestCase):
+    """**一轮的终态没提交之前,不许对调度器发布"可以受理下一轮"。**
+
+    上面那几组停在 `tick` / `_finish_schedule` 这两头,`start` 都是打的桩 —— 它们
+    钉不住**生产方**那一侧:工作线程原来是先在锁里发布空闲(`running=False`)、放开
+    锁之后才 `_finish_schedule`。调度线程挤进中间那一刻时"空闲"是真的,而"今天到此
+    为止 / 必须等到重试时刻"还没提交,于是同一天又受理一轮(第 6 轮审查用真实线程
+    两种异常各复现一次,生成各被调用 2 次)。一轮跑过 30 分钟是正常可达的 ——
+    抓取预算本来就是 3 小时。
+
+    所以这一组走**真实的 `start` → 真实工作线程 → 真实 `tick`**,只把 `daily.generate`
+    换成对应的异常桩,判据落在**生成一共被调用了几次**和**盘上那几格**上。
+    摆法:按住产品自己那次 `_finish_schedule`(刚进来、终态还没落下),这期间让另一条
+    线程去跑真实 `tick`;收尾那边**不等它跑完**(等的话修好之后它正堵在同一把锁上,
+    验证脚本自己就死锁了),只给它一个有界的窗口。
+    """
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.path = Path(temp.name) / 'cfg.json'
+        for p in (patch.object(daily_run, 'SETTINGS_FILE', self.path),
+                  patch.object(daily_run, '_log'), patch('kb.config._announced', {}),
+                  patch.object(daily_run, '_save_last_run', Mock()),
+                  patch.object(daily_run, '_channel_labels',
+                               Mock(return_value={'rss': 'RSS 订阅'})),
+                  patch.object(daily_run, '_report_done', Mock(return_value=False))):
+            p.start(); self.addCleanup(p.stop)
+        self.said: list[str] = []
+        p = patch.object(daily_run, 'announce_config_issue',
+                         lambda what, reason: self.said.append(f'{what}:{reason}'))
+        p.start(); self.addCleanup(p.stop)
+        self.clock = Mock(wraps=datetime)
+        self.clock.now.return_value = datetime(2026, 10, 15, 7, 0)
+        p = patch.object(daily_run, 'datetime', self.clock)
+        p.start(); self.addCleanup(p.stop)
+        self.addCleanup(self._let_the_round_settle)
+
+    def at(self, hour: int, minute: int, day: int = 15) -> None:
+        self.clock.now.return_value = datetime(2026, 10, day, hour, minute)
+
+    def _let_the_round_settle(self, timeout: float = 5.0) -> None:
+        """真实工作线程跑完(状态回到空闲)。它是 daemon,拿不到 handle,只能等后果。"""
+        deadline = time.monotonic() + timeout
+        while daily_run.is_running() and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+    def _one_round_with(self, failure: BaseException, retry_expected: bool) -> dict:
+        """跑完整一轮:真实受理 → 真实工作线程 → 收尾窗口里插一次真实 `tick`。
+
+        返回 `{'calls': 生成被调用几次, 'accepted': 窗口里那次 tick 的返回值}`。
+        """
+        daily_run.save_settings(True, '07:30', ['rss'], False, 1)   # sync=False:不碰管道
+        calls: list[dict] = []
+        at_finish = threading.Event()
+        probe_started, probe_returned = threading.Event(), threading.Event()
+        accepted: list[bool] = []
+        real_finish = daily_run._finish_schedule
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            raise failure
+
+        def pausing_finish(day, retry):
+            self.assertEqual(retry_expected, retry)
+            at_finish.set()                 # 刚进收尾:终态一格都还没提交
+            probe_started.wait(3.0)
+            probe_returned.wait(2.0)        # 有界:修好之后那次 tick 正堵在这把锁上
+            real_finish(day, retry)
+
+        def probe():
+            at_finish.wait(5.0)
+            self.at(8, 5)                   # 这一轮跑了 35 分钟,起跑那个退避早过了
+            probe_started.set()
+            accepted.append(daily_run.tick())
+            probe_returned.set()
+
+        watcher = threading.Thread(target=probe)
+        watcher.start()
+        self.at(7, 30)
+        with patch.object(daily_run, '_finish_schedule', pausing_finish), \
+                patch.object(daily, 'generate', generate):
+            self.assertTrue(daily_run.tick(), '到点了却没受理')
+            self._let_the_round_settle()
+        watcher.join(5)
+        self.assertFalse(watcher.is_alive(), '那条探针线程没跑完')
+        return {'calls': len(calls), 'accepted': accepted}
+
+    def test_no_new_content_does_not_let_the_same_day_start_again(self):
+        """"这段时间没有新内容"(`LookupError`):当天到此为止,窗口里不许再受理。
+
+        这一条最要命的地方是**没有补挡**:盘上既没有 last_fired、也没有当天的日报
+        文件给 `_report_done` 兜住,所以窗口一开就是真的又跑一轮。
+        """
+        out = self._one_round_with(LookupError('这段时间没有新内容'), retry_expected=False)
+        self.assertEqual(1, out['calls'], '同一天又生成了一次')
+        self.assertEqual([False], out['accepted'], '收尾还没提交就受理了新一轮')
+        s = daily_run.load_settings()
+        self.assertEqual(('2026-10-15', '2026-10-16T07:30'), (s['last_fired'], s['next_run']))
+        # 反过来钉一边:**第二天到点照常跑**(别把定时按死)
+        self.at(7, 30, day=16)
+        with patch.object(daily_run, 'start', Mock(return_value=True)) as start:
+            self.assertTrue(daily_run.tick())
+            start.assert_called_once()
+
+    def test_a_transient_failure_backs_off_from_when_it_ended(self):
+        """临时失败:退避从**收尾时刻**再算 30 分钟,窗口里不许提前重试。
+
+        提前那一次还会白消耗一格补跑次数 —— `MAX_RETRIES` 于是提前用完,当天真正
+        该补的那几次反而补不上了。
+        """
+        out = self._one_round_with(RuntimeError('模型 502'), retry_expected=True)
+        self.assertEqual(1, out['calls'], '退避还没写下来就重试了')
+        self.assertEqual([False], out['accepted'], '收尾还没提交就受理了新一轮')
+        s = daily_run.load_settings()
+        self.assertEqual((1, '2026-10-15T08:35'), (s['fail_count'], s['next_run']))
+        with patch.object(daily_run, 'start', Mock(return_value=True)) as start:
+            self.at(8, 10)
+            self.assertFalse(daily_run.tick(), '退避没到就起了')
+            self.at(8, 35)                  # 反过来钉一边:退避到了照常补跑
+            self.assertTrue(daily_run.tick())
+            start.assert_called_once()
+
+    def test_publishing_idle_has_exactly_one_exit(self):
+        """`running` 放回 False 的地方**只许有一处**,而且在 `_release_round` 里。
+
+        这一条是结构守卫:上面两条钉的是那一处的顺序,而顺序对不对只有在"发布空闲
+        就这一个出口"的前提下才有意义 —— 哪天又有人在别处写一句 `running=False`,
+        那两条照样全绿,窗口却重新开了。
+        """
+        source = (Path(daily_run.__file__).parent / 'daily_run.py').read_text(encoding='utf-8')
+        lines = [i for i, line in enumerate(source.splitlines(), 1)
+                 if "_state['running'] = False" in line]
+        self.assertEqual(1, len(lines), f'发布空闲的出口不止一处:{lines}')
+        state = (Path(daily_run.__file__).parent / 'daily_state.py').read_text(encoding='utf-8')
+        self.assertNotIn("_state['running'] = False", state, '状态模块里又多了一个出口')
+        head = source[source.index('def _release_round'):]
+        self.assertIn("_state['running'] = False", head[:head.index('\ndef ')],
+                      '那一处不在 _release_round 里')
+        # 顺序也按源码钉一道:终态提交要排在发布空闲之前
+        body = head[:head.index('\ndef ')]
+        self.assertLess(body.index('_finish_schedule('), body.index("_state['running'] = False"),
+                        '定时终态要在发布空闲之前提交')
+
 
 
 if __name__ == '__main__':

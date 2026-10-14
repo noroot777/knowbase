@@ -544,13 +544,40 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         # `_state['batch']`,所以漏关不至于出错 —— 但也没有理由把它留着)。
         from kb import pipeline as pl
         pl.close_batch()
-        with _lock:
-            _state['pipeline_run'] = ''
-            _state['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            _save_last_run()
-            _state['running'] = False
+        _release_round(sched_day, retry)
+
+
+def _release_round(sched_day: str, retry: bool) -> None:
+    """一轮跑完的收尾:**先把这一天的终态提交掉,最后才发布"可以受理下一轮"。**
+
+    这是唯一一处把 `running` 放回 False 的地方,而且这一整段是**一个临界区**。
+    拆成两段(先在锁里发布空闲、放开锁再 `_finish_schedule`)的话,调度线程能挤
+    进中间那一刻:那时"空闲"是真的,而"今天到此为止 / 必须等到重试时刻"这两件事
+    **还没提交**。一轮跑过了起跑时记的那 30 分钟退避就够(抓取预算本来就是 3 小时),
+    于是:
+    - **没有新内容**(`daily.generate` 抛 `LookupError`、retry=False):当天不该再自动
+      生成,可盘上既没有 last_fired、也没有当天的日报文件给 `_report_done` 补挡 ——
+      同一天又起一轮,再花一次模型钱;
+    - **临时失败**(retry=True):退避本该从**收尾时刻**再算 30 分钟,中间那一刻拿到的
+      还是起跑时那个旧的,于是提前重试、还白消耗一次补跑次数。
+    (第 6 轮用真实工作线程 + 真实调度器两种异常各确定性复现一次,生成各被调用 2 次。)
+
+    **给消费方加锁救不了这个** —— 尚未提交的事实不会因为读的人持了锁就提前存在。
+    所以不变量落在发布这一侧:`_finish_schedule` 在锁里先跑完,`running` 最后才放。
+    """
+    # 这里不写成"不在锁里就抛"(`_write_settings` 那道守卫的形状):本函数是在
+    # `finally` 里跑的,抛出去的话 `running` 永远回不到 False,面板从此卡在"正在
+    # 生成"。本函数自己**就是**那个临界区,所以直接取锁。
+    with _lock:
+        _state['pipeline_run'] = ''
+        _state['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        _save_last_run()
         if sched_day:
+            # 终态(done / 失败计数 / 退避)必须**先**落下来,它和下面那一句之间不许
+            # 放开锁 —— 放开就等于把"旧轮还没收尾"的状态当成"可以受理新轮"发布出去。
             _finish_schedule(sched_day, retry)
+        # **唯一一处**把它放回 False 的地方(回归按源码钉着这件事)。
+        _state['running'] = False
 
 
 def start(since: datetime | None = None, until: datetime | None = None,
