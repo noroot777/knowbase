@@ -106,7 +106,7 @@ check("状态接口带着各通道的结果",
         `(async () => JSON.stringify(await (await fetch('/api/daily/status')).json()))()`)));
 let gap = await noteOf({ phase: 'done', channels: [failed, okChannel] });
 check("没同步成功的来源写在面板上",
-      !gap.hidden && /没有同步成功/.test(gap.text) && /RSS/.test(gap.text)
+      !gap.hidden && /没有完成/.test(gap.text) && /RSS/.test(gap.text)
         && /无法连接来源/.test(gap.text) && !/公众号/.test(gap.text), JSON.stringify(gap));
 gap = await noteOf({ phase: 'done', channels: [], last_run: { channels: [failed] } });
 check("重启后从上一轮的落盘结果里读回来", !gap.hidden && /RSS/.test(gap.text),
@@ -174,7 +174,7 @@ await evalJs(`openDailyReport(${JSON.stringify(prev.date)})`);
 await waitFor(`document.getElementById('daily-reader-title').textContent === '日报 · ${prev.date}'`);
 const prevBody = await evalJs(`document.getElementById('daily-reader-body').innerHTML`);
 check("日报正文写明哪些来源没同步成功",
-      /本轮有 1 个来源没有同步成功/.test(prevBody) && /RSS/.test(prevBody),
+      /本轮有 1 项没有完成/.test(prevBody) && /RSS/.test(prevBody),
       prevBody.slice(0, 160));
 // 加链接之前生成的日报:正文里编号还是纯文本,素材清单的 url 也没套尖括号。
 // 它们是花过模型钱的产物,不该为了加链接重新生成一份(重算窗口还会换掉内容),

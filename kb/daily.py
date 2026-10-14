@@ -449,8 +449,12 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
     tail = ('\n\n> ' + ' '.join(more)) if more else ''
     head = (f'# 日报 · {until:%Y-%m-%d}\n\n'
             f'> 覆盖 {_label_window(since, until)} 发布的内容(按发布时间,不是抓取时间)。\n\n')
+    # **说「项」不说「来源」**:同步分两段,抓取那一段按来源一项,入库那一段
+    # (索引与提取)是全库的一次、自己占一项,它不属于任何来源
+    # (`daily_run.DIGEST_LABEL`)。日报是拿走就读的产物,把它写成"某个来源没同步
+    # 成功"是在文件里留一句假话。
     if issues:
-        head += (f'> **本轮有 {len(issues)} 个来源没有同步成功**,'
+        head += (f'> **本轮有 {len(issues)} 项没有完成**,'
                  '以下内容只来自已经入库的素材:\n'
                  + ''.join(f'> - {t}\n' for t in issues) + '\n')
     return ('---\n' + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + '---\n\n'

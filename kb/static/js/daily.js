@@ -265,7 +265,7 @@ async function openDailyReport(date) {
     // `# 日报 · 日期` 是给 Obsidian 看的,面板上标题栏已经写着同一句,渲染出来
     // 就是连着两行一模一样的标题;跟在它后面那句「> 覆盖 … 发布的内容」同理,
     // 元信息那一行已经写了。两处都只在面板上剥掉,vault 里的文件一个字不改。
-    // 正文里那段「本轮有 N 个来源没有同步成功」跟着 md 一起渲染出来(剥掉的只有
+    // 正文里那段「本轮有 N 项没有完成」跟着 md 一起渲染出来(剥掉的只有
     // 标题和覆盖区间这两行重复信息),所以历史日报翻回来也看得见当时的同步缺口。
     $('daily-reader-body').innerHTML =
       mdHtml(r.body.replace(/^\s*#\s+[^\n]*\n+(?:>\s*覆盖[^\n]*\n)?/, ''));
@@ -441,9 +441,11 @@ function renderDailyButtons() {
   $('nav-daily-dot').hidden = !running;
 }
 
-// 同步缺口横幅:哪些来源这一轮没同步成功。toast 会自己消失,而"这份日报只用了
+// 同步缺口横幅:这一轮有哪几项没跑成功。toast 会自己消失,而"这份日报只用了
 // 已入库的素材"是看这份日报时一直要知道的事——一个来源都没同步到的那一轮,页面
 // 原来只有一句绿色的「日报已生成」(2026-09-30 审查实测)。
+// **文案说「项」不说「来源」**:抓取那一段按来源一项,入库那一段(索引与提取)
+// 自己占一项,它不属于任何来源(`daily_run.DIGEST_LABEL`)。
 function dailyChannelResults(s) {
   // 重启 kb-web 之后进程内状态是空的,上一轮的通道结果留在落盘的 last_run 里。
   return (s?.channels?.length ? s.channels : s?.last_run?.channels) || [];
@@ -454,7 +456,7 @@ function renderDailySyncNote(s) {
   $('daily-sync-note').hidden = !bad.length;
   if (!bad.length) return;
   $('daily-sync-note-text').textContent =
-    `本轮有 ${bad.length} 个来源没有同步成功：`
+    `本轮有 ${bad.length} 项没有完成：`
     + bad.map(c => `${c.label}（${c.detail || '未同步成功'}）`).join('；')
     // 只有真出了报才提这一句;停止/失败那两档日报压根没生成。
     + (s?.phase === 'done' ? '。日报用的是已经入库的内容。' : '。');

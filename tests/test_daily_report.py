@@ -237,7 +237,7 @@ class DailyReportTests(unittest.TestCase):
             {'channel': 'social', 'label': '大V观点', 'status': 'unknown', 'detail': '成败未知'}])
         meta, body = parse_frontmatter(Path(out['path']).read_text(encoding='utf-8'))
         self.assertEqual(['RSS：无法连接来源', '大V观点：成败未知'], meta['sync_failed'])
-        self.assertIn('本轮有 2 个来源没有同步成功', body)
+        self.assertIn('本轮有 2 项没有完成', body)
         self.assertIn('> - RSS：无法连接来源', body)
         # 读回来也带着:历史日报翻回去仍然看得出当时缺了什么
         self.assertEqual(2, len(daily.report('2026-09-29')['sync_failed']))
@@ -248,7 +248,7 @@ class DailyReportTests(unittest.TestCase):
         out = daily.generate(since=self.since, until=self.until, sync_issues=[])
         meta, body = parse_frontmatter(Path(out['path']).read_text(encoding='utf-8'))
         self.assertNotIn('sync_failed', meta)
-        self.assertNotIn('没有同步成功', body)
+        self.assertNotIn('没有完成', body)
         self.assertEqual([], daily.report('2026-09-29')['sync_failed'])
 
     def test_body_citations_become_links_to_the_source(self):
@@ -541,7 +541,7 @@ class DailyStopTests(unittest.TestCase):
             ps._state.clear(); ps._state.update(state)
 
     def replaced_mid_poll(self, result=None):
-        """跑一趟 `_sync_channel`:我们那一轮在第一跳之前就收尾、别人顶了上来。"""
+        """跑一趟 `_sync_round`:我们那一轮在第一跳之前就收尾、别人顶了上来。"""
         from kb import pipeline as pl
         snapshots = [
             {'running': True, 'run_id': 'run-1', 'current_stage': 'crawl',
@@ -558,7 +558,8 @@ class DailyStopTests(unittest.TestCase):
              patch.object(pl, 'request_stop', Mock()) as stop, \
              patch.object(daily_run.time, 'sleep', Mock()), \
              patch.object(daily_run, '_wait_idle', Mock(return_value=True)):
-            entry = daily_run._sync_channel('rss', 'RSS', time.monotonic() + 600)
+            entry = daily_run._sync_round(daily_run.FETCH_STAGES, {'channel': 'rss'},
+                                          'RSS', time.monotonic() + 600, 'rss')
         stop.assert_not_called()                      # 别人那一轮不该被我们停
         self.assertEqual('', daily_run._state['pipeline_run'])
         return entry
@@ -615,10 +616,13 @@ class DailyStopTests(unittest.TestCase):
         issues = gen.call_args.kwargs['sync_issues']
         self.assertEqual(['RSS', '公众号'], [i['label'] for i in issues])  # ok 的不算
         self.assertEqual('done', daily_run._state['phase'])
-        self.assertIn('2 个来源未同步成功(RSS、公众号)', daily_run._state['detail'])
+        self.assertIn('2 项未完成(RSS、公众号)', daily_run._state['detail'])
 
-    def sync_once(self, stages):
-        """跑一趟 `_sync_channel` 到正常收尾,stages 之外的阶段按"没选中"处理。"""
+    def sync_once(self, stages, wanted=None):
+        """跑一趟 `_sync_round` 到正常收尾,stages 之外的阶段按"没选中"处理。
+
+        `wanted` 是这一轮点名的阶段(判红只看它们),默认四段齐全 —— 那是两段式
+        之前的形态,判红这套逻辑本身跟分不分段无关,所以这几条照旧按四段钉。"""
         from kb import pipeline as pl
         from kb.pipeline_state import STAGES
         # 没被选中的阶段一开跑就是 skipped(见 pipeline.start_pipeline)
@@ -632,7 +636,9 @@ class DailyStopTests(unittest.TestCase):
              patch.object(pl, 'request_stop', Mock()), \
              patch.object(daily_run.time, 'sleep', Mock()), \
              patch.object(daily_run, '_wait_idle', Mock(return_value=True)):
-            return daily_run._sync_channel('social', '大V观点', time.monotonic() + 600)
+            return daily_run._sync_round(
+                wanted or daily_run.FETCH_STAGES + daily_run.DIGEST_STAGES,
+                {'channel': 'social'}, '大V观点', time.monotonic() + 600, 'social')
 
     def test_a_skipped_stage_is_not_a_successful_sync(self):
         # 2026-09-30 实测:51 个大V账号全缺 X 桥接配置,crawl 整个落 skipped
@@ -663,14 +669,14 @@ class DailyStopTests(unittest.TestCase):
 
     def test_a_fully_green_round_still_reads_as_done(self):
         entry = self.sync_once({s: {'status': 'ok', 'detail': f'{s} 好了'}
-                                for s in daily_run.SYNC_STAGES})
+                                for s in daily_run.FETCH_STAGES + daily_run.DIGEST_STAGES})
         self.assertEqual(('ok', '同步完成'), (entry['status'], entry['detail']))
 
     def test_a_clean_round_keeps_its_plain_finish_notice(self):
         gen = self.run_once(channels=[
             {'channel': 'rss', 'label': 'RSS', 'status': 'ok', 'detail': '同步完成'}])
         self.assertEqual([], gen.call_args.kwargs['sync_issues'])
-        self.assertNotIn('未同步成功', daily_run._state['detail'])
+        self.assertNotIn('未完成', daily_run._state['detail'])
 
     def test_syncing_nothing_is_refused_at_both_layers(self):
         # 勾了"先同步"却一个来源都没选:同步阶段什么都不做、却一路报成功,
@@ -692,6 +698,116 @@ class DailyStopTests(unittest.TestCase):
         s = daily_run._raw_settings()
         self.assertEqual(('2026-09-29', '2026-09-30T07:30', 0),
                          (s['last_fired'], s['next_run'], s['fail_count']))
+
+
+class DailyTwoStageSyncTests(unittest.TestCase):
+    """同步分两段:**抓取按通道一轮一个,入库是全库的一次**。
+
+    只有 crawl / export 认 crawl_filter;`_run_index` 全量扫 vault、`_run_extract`
+    扫全库待提取队列,两个函数都不收通道参数。挨个通道各跑一遍四段,等于把同一件
+    全库的活重做 N 遍(5 个通道 = 5 次全量扫描、5 次抢维护锁)。
+
+    **合并不会放行本来不该提取的内容**:拦住大V那几类的是订阅级开关
+    (`kb.extract.pending_docs` 是唯一口径,钉在 tests/test_extract_optin.py),
+    跟这一轮由谁触发无关 —— 所以这里钉的是编排(谁跑几次、红算在谁头上),
+    不重复钉那道闸。
+    """
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        labels = {'wechat_local': '公众号', 'social': '大V观点', 'rss': 'RSS'}
+        for p in (patch.object(daily_run, 'STATE_FILE', Path(temp.name) / 'last_run.json'),
+                  patch.object(daily_run, 'SETTINGS_FILE', Path(temp.name) / 'daily.json'),
+                  patch.object(daily_run, '_channel_labels', Mock(return_value=labels))):
+            p.start(); self.addCleanup(p.stop)
+        self.before = deepcopy(daily_run._state)
+        self.addCleanup(lambda: daily_run._state.update(self.before))
+
+    def sync_run(self, channels=('wechat_local', 'social', 'rss'), rounds=None, **flags):
+        """跑一轮带同步的 `_run`。返回每一轮管道的 (阶段清单, crawl_filter)。
+
+        `rounds` 按轮次号(从 1 起)覆盖那一轮的阶段结果,用来注入某一轮的红。
+        """
+        from kb import pipeline as pl
+        from kb.pipeline_state import STAGES
+        calls = []
+
+        def start(wanted, crawl_filter=None):
+            calls.append((list(wanted), deepcopy(crawl_filter)))
+            return f'run-{len(calls)}'
+
+        def state():
+            # 没点名的阶段一开跑就是 skipped(见 pipeline.start_pipeline)
+            full = {s: {'status': 'skipped', 'detail': '未选择'} for s in STAGES}
+            full.update({s: {'status': 'ok', 'detail': f'{s} 好了'} for s in calls[-1][0]})
+            full.update((rounds or {}).get(len(calls), {}))
+            return {'running': False, 'run_id': f'run-{len(calls)}',
+                    'current_stage': '', 'stages': full}
+
+        daily_run._state.update({**self.before, 'running': True, 'log': [],
+                                 'channels': [], **flags})
+        self.gen = Mock(return_value={'date': '2026-09-29', 'since': '', 'until': '',
+                                      'path': '', 'docs': 2, 'total': 2, 'late': 0,
+                                      'model': 'm'})
+        self.stopped = Mock()
+        with patch.object(pl, 'start_pipeline', Mock(side_effect=start)), \
+             patch.object(pl, 'get_state', Mock(side_effect=state)), \
+             patch.object(pl, 'request_stop', self.stopped), \
+             patch.object(daily_run.time, 'sleep', Mock()), \
+             patch.object(daily_run, '_wait_idle', Mock(return_value=True)), \
+             patch.object(daily, 'generate', self.gen):
+            daily_run._run(None, None, True, list(channels), daily.FIRST_DAYS)
+        return calls
+
+    def test_fetch_is_per_channel_and_the_library_stages_run_once(self):
+        calls = self.sync_run()
+        self.assertEqual([daily_run.FETCH_STAGES] * 3 + [daily_run.DIGEST_STAGES],
+                         [stages for stages, _ in calls])
+        self.assertEqual([{'channel': 'wechat_local'}, {'channel': 'social'},
+                          {'channel': 'rss'}, None], [f for _, f in calls])
+        # 反过来钉一边:抓取那几轮一次都没要过 index/extract(那正是原来被重做
+        # N 遍的两段),入库那一轮也一次都没要过 crawl/export(不会顺手重抓)。
+        self.assertEqual([], [c for c in calls[:3] if {'index', 'extract'} & set(c[0])])
+        self.assertEqual([], [c for c in calls[3:] if {'crawl', 'export'} & set(c[0])])
+        self.assertEqual('done', daily_run._state['phase'])
+
+    def test_a_library_failure_is_not_blamed_on_any_channel(self):
+        # 两段式之前 index/extract 跟着每个通道跑,它们的红只能记到"当时那个
+        # 通道"头上 —— 磁盘满跟公众号没有半点关系,而面板和日报都照着念。
+        calls = self.sync_run(rounds={4: {'index': {'status': 'error', 'detail': '磁盘满'}}})
+        digest = daily_run._state['channels'][-1]
+        self.assertEqual(('', daily_run.DIGEST_LABEL, 'error'),
+                         (digest['channel'], digest['label'], digest['status']))
+        self.assertIn('index 磁盘满', digest['detail'])
+        self.assertEqual(['ok'] * 3, [c['status'] for c in daily_run._state['channels'][:3]])
+        # 这一条要一路传到日报正文和完成提示里,而且只认 label(它没有通道 id)
+        self.assertEqual([daily_run.DIGEST_LABEL],
+                         [i['label'] for i in self.gen.call_args.kwargs['sync_issues']])
+        self.assertIn(f'1 项未完成({daily_run.DIGEST_LABEL})', daily_run._state['detail'])
+
+    def test_running_out_of_fetch_budget_still_runs_the_library_stages(self):
+        # 超预算的本意是"别再抓了,拿已经抓到的内容出报"。入库那一段要是跟着跳过,
+        # 这一轮导出的文件就进不了索引,而 `daily.generate` 取材自 kb.db 的
+        # documents —— 抓回来的东西会整个落到这份日报外面,正好把它要保的丢了。
+        calls = self.sync_run(over_budget=True)
+        self.assertEqual([daily_run.DIGEST_STAGES], [stages for stages, _ in calls])
+        self.assertEqual(['超出时间预算,未同步'] * 3,
+                         [c['detail'] for c in daily_run._state['channels'][:3]])
+        self.assertEqual('ok', daily_run._state['channels'][-1]['status'])
+        # 入库那一轮的"要不要收手"判据**不认超预算**,否则它一起跑就被自己停掉
+        self.stopped.assert_not_called()
+        self.gen.assert_called_once()
+
+    def test_a_user_stop_skips_the_library_stages_too(self):
+        # 用户按的停止是"这一轮到此为止、也不出报",跟超预算是两件事。
+        calls = self.sync_run(stop_requested=True)
+        self.assertEqual([], calls)
+        digest = daily_run._state['channels'][-1]
+        self.assertEqual((daily_run.DIGEST_LABEL, 'skipped', '已停止,未入库'),
+                         (digest['label'], digest['status'], digest['detail']))
+        self.gen.assert_not_called()
+        self.assertEqual('stopped', daily_run._state['phase'])
 
 
 if __name__ == '__main__':

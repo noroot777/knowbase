@@ -25,12 +25,28 @@ from kb.config import DATA_DIR
 
 SETTINGS_FILE = DATA_DIR / 'daily_report.json'
 STATE_FILE = DATA_DIR / 'daily_last_run.json'
-# 同步阶段:抓取→导出→索引→提取。提取给每篇一句话摘要,日报的素材质量全靠它;
-# 条目化/wiki 两个重活不跑——日报不读它们的产物,跑一遍要几十分钟。
-SYNC_STAGES = ['crawl', 'export', 'index', 'extract']
-# 整个同步阶段的时间预算。超了就请求管道停下、跳过剩余通道,拿已有内容出日报
+# 同步分两段:**抓取那一段按通道分,入库那一段不分**。
+# 只有 crawl / export 认 crawl_filter;`_run_index` 是全量扫 vault、`_run_extract`
+# 扫的是全库待提取队列,两个函数都不收通道参数,压根没有"只做这个通道那一份"的
+# 概念。所以挨个通道各跑一遍四段,等于把同一件全库的活重做 N 遍(5 个通道 = 5 次
+# 全量扫描、5 次抢维护锁),而被处理的文档一篇不多一篇不少。
+#
+# **合并不会绕开任何一道闸**:哪些内容要买提取由**订阅级**开关回答
+# (`kb.extract.pending_docs` 是唯一口径,feeds 那几类默认不提取),拦它的不是
+# "这一轮由哪个通道起的"。条目化/wiki 两个重活仍旧不跑——日报不读它们的产物,
+# 跑一遍要几十分钟。
+FETCH_STAGES = ['crawl', 'export']
+DIGEST_STAGES = ['index', 'extract']
+# 入库那一段在成绩单上的身份。它不属于任何一个来源,所以 channel 留空 ——
+# `_sync_issues`、日报正文那几行、面板横幅都只读 label,不认通道 id。
+DIGEST_LABEL = '入库处理（索引与提取）'
+# 抓取那一段的时间预算。超了就请求管道停下、跳过剩余通道,拿已有内容出日报
 # ——"今天的日报没出来"比"日报少了两个来源"严重得多。
 SYNC_BUDGET = int(os.environ.get('KB_DAILY_SYNC_BUDGET', str(3 * 3600)))
+# 入库那一段的保底预算。**抓取超预算时它照样要跑**:新导出的文件没进索引,
+# `daily.generate` 就查不到(它取材自 kb.db 的 documents),这一轮抓回来的东西会
+# 整个落到这份日报外面 —— 那正是超预算本来想避免的"白跑一趟"。
+DIGEST_BUDGET = int(os.environ.get('KB_DAILY_DIGEST_BUDGET', str(1800)))
 # 管道被别人占着时,等它空出来的上限(每个通道各算各的)。
 WAIT_BUSY = 900
 # 定时那一轮临时失败后,隔多久重试、同一天最多补几次。
@@ -275,7 +291,11 @@ def _halting() -> bool:
 
 
 def _sync_issues() -> list[dict]:
-    """这一轮没同步成功的通道(error / unknown / 被跳过的都算)。
+    """这一轮没跑成功的那几项(error / unknown / 被跳过的都算)。
+
+    **不止是来源**:抓取那一段按通道一项,入库那一段(索引与提取)自己占一项。
+    它不属于任何通道,所以 `channel` 是空串、文案一律读 `label` —— 把全库那一段
+    的红记到某个来源头上是错的归因(改两段式之前就是这么记的)。
 
     降级拿已有内容出报是对的("今天的日报没出来"比"少了两个来源"严重),但这份
     名单必须一路传下去:面板上的横幅、完成提示、写进日报文件的那几行都读它。
@@ -287,26 +307,38 @@ def _sync_issues() -> list[dict]:
 
 # ── 执行 ────────────────────────────────────────────────────────────────────────
 
-def _wait_idle(deadline: float) -> bool:
+def _wait_idle(deadline: float, halted=None) -> bool:
     """等管道空下来。True = 空了;False = 等超时或被要求停止。"""
     from kb import pipeline as pl
+    halted = halted or _halting
     while pl.get_state()['running']:
-        if _halting() or time.monotonic() > deadline:
+        if halted() or time.monotonic() > deadline:
             return False
         time.sleep(2)
     return True
 
 
-def _sync_channel(channel: str, label: str, budget_end: float) -> dict:
-    """跑一个通道的完整同步,等它结束。返回这个通道的结果记录。"""
+def _sync_round(stages: list[str], crawl_filter: dict | None, label: str,
+                deadline: float, channel: str = '', halted=None) -> dict:
+    """跑一轮管道并等它结束,返回这一轮在成绩单上的那条记录。
+
+    `channel` 只是成绩单上的身份:抓取那一段按通道一轮一个,入库那一段是全库的
+    一次、不属于任何通道(空串)。判红只看 `stages` 里点名的那几个阶段。
+
+    `halted` 是"要不要半路收手"的判据,默认 `_halting`(停止 + 超预算都算)。
+    入库那一段传的是**只认用户停止**的那一份:超预算的本意是"别再抓了,拿已经
+    抓到的内容出报",而不入库的话这一轮抓回来的东西连 `daily.generate` 都查不到
+    (它取材自 kb.db 的 documents),那正好把它要保的东西丢了。
+    """
     from kb import pipeline as pl
 
+    halted = halted or _halting
     entry = {'channel': channel, 'label': label, 'status': 'pending', 'detail': ''}
     _set('sync', f'{label}:等待同步管道空闲')
-    if not _wait_idle(min(budget_end, time.monotonic() + WAIT_BUSY)):
+    if not _wait_idle(min(deadline, time.monotonic() + WAIT_BUSY), halted):
         entry.update(status='skipped', detail='同步管道一直被占用,本轮跳过')
         return entry
-    run = pl.start_pipeline(SYNC_STAGES, crawl_filter={'channel': channel})
+    run = pl.start_pipeline(stages, crawl_filter=crawl_filter)
     if not run:
         entry.update(status='skipped', detail='同步管道已被其它任务占用,本轮跳过')
         return entry
@@ -314,18 +346,19 @@ def _sync_channel(channel: str, label: str, budget_end: float) -> dict:
         _state['pipeline_run'] = run
     # 停止请求正好落在"等到空闲"和"起跑"之间时,request_stop 那一刻还不归我们,
     # 它不会去停这一轮;补一次,免得用户按了停止还要眼看着它跑完整个通道。
-    if _halting():
+    if halted():
         pl.request_stop(run)
     _set('sync', f'{label}:同步中')
     # 只认 run id 相同的快照。两秒一跳的轮询里,我们那一轮跑完、另一项同步
     # 马上接手全局管道是完全可能的:只看 running 的话看到的是连绵不断的 True,
-    # 既不知道已经换人,还会把别人的阶段结果当成自己这个通道的成绩单。
+    # 既不知道已经换人,还会把别人的阶段结果当成自己这一轮的成绩单。
     #
     # `mine` 只装**终态**(自己那一轮 running 已经放下的那份快照)。中途快照不算:
     # 那时阶段还是 running/pending,拿它数 error 一个都数不出来,于是"被接替"和
     # "跑完了还全是绿的"长得一模一样——报成功却没有任何证据。被接替的那条路统一
     # 去问管道按 id 留的收尾记录。
     mine: dict | None = None
+    over = False
     while True:
         snapshot = pl.get_state()
         if snapshot.get('run_id') != run:
@@ -336,8 +369,12 @@ def _sync_channel(channel: str, label: str, budget_end: float) -> dict:
         stage = snapshot.get('current_stage') or ''
         detail = (snapshot['stages'].get(stage) or {}).get('detail') or ''
         _state['detail'] = f'{label}:{detail}' if detail else f'{label}:同步中'
-        if time.monotonic() > budget_end and not _halting():
-            _log(f'{label}:同步超出时间预算,请求停止后直接生成日报')
+        # `over` 这个一次性开关**不能省**:原来靠 `not _halting()` 兼任"只说一次",
+        # 而入库那一段的 `halted` 不认超预算 —— 没有它的话,超时之后每两秒就会
+        # 重新 request_stop 一次、日志里刷同一行。
+        if not over and time.monotonic() > deadline and not halted():
+            over = True
+            _log(f'{label}:超出时间预算,请求停止后直接生成日报')
             _state['over_budget'] = True
             pl.request_stop(run)
         time.sleep(2)
@@ -360,18 +397,18 @@ def _sync_channel(channel: str, label: str, budget_end: float) -> dict:
         _log(f'{label}:{entry["detail"]}')
         return entry
     # 只看这一轮请求了的那几个阶段:没选中的阶段一开跑就落 skipped(见
-    # `pipeline.start_pipeline`),全收进来的话每个通道都要多报两句"条目化/
+    # `pipeline.start_pipeline`),全收进来的话每一轮都要多报几句"条目化/
     # wiki 未执行"。
-    stages = [(name, mine['stages'].get(name) or {}) for name in SYNC_STAGES]
+    graded = [(name, mine['stages'].get(name) or {}) for name in stages]
     bad = [f'{name} {s.get("detail") or "失败"}'
-           for name, s in stages if s.get('status') == 'error']
+           for name, s in graded if s.get('status') == 'error']
     # skipped / stopped = 这个阶段该做的事一件没做,**不能跟着算成功**。
     # 2026-09-30 实测:51 个大V账号全都缺 X 桥接配置,crawl 因此整个落 skipped
     # (「待配置 51 个」),而这里只数 error —— 那一轮 social 通道报的是绿色的
     # 「同步完成」,日报里那行只剩下 extract 的结果,"一条都没抓到"这件事连同
     # 原因一起看不见。超预算/被停止时管道落 stopped,同理。
     idle = [f'{name} {s.get("detail") or "本轮未执行"}'
-            for name, s in stages if s.get('status') in ('skipped', 'stopped')]
+            for name, s in graded if s.get('status') in ('skipped', 'stopped')]
     entry.update(status='error' if bad else 'skipped' if idle else 'ok',
                  detail='；'.join(bad + idle)[:400] if bad or idle else '同步完成')
     _log(f'{label}:{entry["detail"]}')
@@ -394,7 +431,20 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                                    else '超出时间预算,未同步'})
                     continue
                 _state['channels'].append(
-                    _sync_channel(channel, labels.get(channel, channel), budget_end))
+                    _sync_round(FETCH_STAGES, {'channel': channel},
+                                labels.get(channel, channel), budget_end, channel))
+            # 入库那一段:等所有通道都抓完才跑,跑一次 —— 这时待索引的文件和
+            # 待提取的队列都最全。**用户按了停止才跳过**:接下来本来就不出报了。
+            # 超预算照跑(见 DIGEST_BUDGET),所以这里不能用 `_halting()`。
+            if _state['stop_requested']:
+                _state['channels'].append(
+                    {'channel': '', 'label': DIGEST_LABEL, 'status': 'skipped',
+                     'detail': '已停止,未入库'})
+            else:
+                _state['channels'].append(_sync_round(
+                    DIGEST_STAGES, None, DIGEST_LABEL,
+                    max(budget_end, time.monotonic() + DIGEST_BUDGET),
+                    halted=lambda: bool(_state['stop_requested'])))
         # 用户按的停止到此为止:接着生成等于把一份"同步到一半"的日报当成功交出去,
         # 还要再花一次模型钱。超预算是另一回事——那本来就是"别再同步了,拿现有的
         # 内容出报",继续生成正是它的目的。
@@ -421,7 +471,7 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         if res['late']:
             note += f"(另有 {res['late']} 条补录)"
         if issues:
-            note += (f";{len(issues)} 个来源未同步成功("
+            note += (f";{len(issues)} 项未完成("
                      + '、'.join(i['label'] for i in issues) + ')')
         # 记账没写成不该糊过去:日报是出了,但这一天的素材会在下一份里重复出现
         # 一遍(`daily.generate` 的失败方向,见那一段的注释)。只写进 log 的话

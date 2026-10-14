@@ -81,7 +81,14 @@ function renderPipeState(s) {
   else if (result.finished_at) title = skipped ? `${label}结束，部分步骤已跳过` : planned.length && completed === planned.length ? `${label}已完成` : `${label}结束，本次步骤未全部完成`;
   if ($('pipe-state-title').textContent !== title) $('pipe-state-title').textContent = title;
   const scopes = pipeRunScopes(result.crawl_filter), filter = result.crawl_filter || {};
-  $('pipe-running-channel').textContent = scopes.length
+  // 一轮里既没有抓取也没有导出时,`crawl_filter` 里那个来源名**说明不了任何事**:
+  // 只有这两步认它,index 是全量扫 vault、extract 扫的是全库待提取队列(日报的
+  // 「入库处理」就是这样一轮)。而 `start_pipeline` 一律会往 filter 里盖一个来源名,
+  // 照着念等于告诉用户"这一轮在同步公众号",实际它跟来源毫无关系。
+  const libraryOnly = planned.length && !planned.includes('crawl') && !planned.includes('export');
+  $('pipe-running-channel').textContent = libraryOnly
+    ? `${s.running ? '本次' : '上次'}范围：全库（不按来源）`
+    : scopes.length
     ? `${s.running ? '本次' : '上次'}来源：${scopes.map(scope => channelLabel(scope.channel)).join(' + ')}`
     : '选择来源后开始一次同步';
   const range = filter.since_date ? filter.since_date + ' 至 ' + filter.until_date : '不限时间';
@@ -94,7 +101,10 @@ function renderPipeState(s) {
     ? `仅重试失败的 ${item.accounts.length} 个订阅`
     : item.accounts?.length ? item.accounts.length + ' 个指定订阅' : '全部订阅';
   const scope = scopes.map(item => `${scopes.length > 1 ? channelLabel(item.channel) + ' ' : ''}${scopeText(item)}`).join(' · ');
-  $('pipe-run-scope').textContent = scopes.length
+  // 同上:全库那一轮没有「订阅范围」可言,订阅数和日期窗口对它都不成立。
+  $('pipe-run-scope').textContent = libraryOnly
+    ? `索引与提取${result.finished_at ? ' · ' + result.finished_at + ' 结束' : ''}`
+    : scopes.length
     ? `${scope} · ${range}${result.finished_at ? ' · ' + result.finished_at + ' 结束' : ''}` : '';
   $('pipe-progress-label').textContent = planned.length ? `${completed} / ${planned.length} 完成` : '—';
   const duration = pipeDuration(result.started_at, s.running ? '' : result.finished_at);
