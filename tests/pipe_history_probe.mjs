@@ -44,8 +44,21 @@ const EVENING = {
 
 let runs = [EVENING, MORNING];
 let retryCalls = 0, runsCalls = 0;
+// 非 null = 下一次历史查询的回包按在这儿等放行。**回包内容在收到请求那一刻就生成
+// 好**(和真后端一样),所以放行时它带的是请求发出时那一刻的事实 —— 这正是「旧回包
+// 迟到」那一局要的。
+let holdRuns = null;
 let state = {
   running: false, stop_supported: true, stop_requested: false, ...EVENING,
+};
+
+// 第三轮:后台刚跑完的一轮,又红了
+const LATER = {
+  run_id: "run-later", run_kind: "sync", stopped: false,
+  started_at: "2026-10-15 09:00:00", finished_at: "2026-10-15 09:12:00",
+  planned_stages: [...KEYS], crawl_filter: { channel: "rss" },
+  stages: stagesOf({ export: { status: "error", detail: "第三轮又是 503" } }),
+  log: ["[10-15 09:12:00] 管道结束"],
 };
 
 const MIME = { html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8",
@@ -77,7 +90,12 @@ const server = createServer((req, res) => {
     const extra = req.url.includes("pending=true") ? { pending: { extract: 2 } } : {};
     return json({ ...state, last_run: runs[0] || null, ...extra });
   }
-  if (path === "/api/pipeline/runs") { runsCalls++; return json({ runs }); }
+  if (path === "/api/pipeline/runs") {
+    runsCalls++;
+    const body = { runs };
+    if (holdRuns) { const gate = holdRuns; holdRuns = null; return void gate.then(() => json(body)); }
+    return json(body);
+  }
   if (path === "/api/pipeline/retry-failed" && req.method === "POST") {
     retryCalls++; return json({ ok: true });
   }
@@ -256,6 +274,59 @@ await evalJs(`loadPipeHistory(); true`);
 check("读不到历史时列表里有一句说明",
       await until(`/历史记录|还没有跑完过/.test($('pipe-history-list').textContent)`),
       await evalJs(`$('pipe-history-list').textContent.trim()`));
+
+// ── 10. 旧历史回包迟到、期间又跑完一轮:列表要自己追平 ─────────────────────
+// 「又跑完一轮」这件事一轮只说一次(`refreshPipe` 的那两个分支)。在途时复用旧
+// promise 的话那一次机会就没了:旧回包把列表设成它取到的两轮,而 `pipeDoneRun`
+// 已经更新成第三轮,后续轮询再也不进那个分支 —— 列表永远少一轮,得切走再回来。
+runs = [EVENING, MORNING];
+await evalJs(`pipeHistory = []; pipeViewing = null; true`);
+await evalJs(`loadPipeHistory(); true`);
+await setup("列表先回到两轮", until(`document.querySelectorAll('.pipe-history-row').length === 2`));
+let release;
+holdRuns = new Promise(r => { release = r; });
+const runsBefore = runsCalls;
+await evalJs(`loadPipeHistory(); true`);          // 这一次的回包被按住了
+await setup("有一次历史查询卡在途中", until(`pipeHistoryRequest !== null`, 4000));
+// 它卡着的这段时间里,第三轮在后台跑完了
+runs = [LATER, EVENING, MORNING];
+state = { ...state, ...LATER };
+await evalJs(`refreshPipe(); true`);
+await setup("页面已经看到第三轮(顶上换了)",
+            until(`pipeDoneRun === 'run-later' && pipeHistoryRequest !== null`, 8000));
+release();
+check("旧回包迟到时,历史列表自己追平成三轮",
+      await until(`document.querySelectorAll('.pipe-history-row').length === 3`, 8000),
+      `rows=${await evalJs(`document.querySelectorAll('.pipe-history-row').length`)}`);
+check("追平是靠补一次查询,不是靠下一次切页", runsCalls > runsBefore + 1,
+      `${runsBefore} → ${runsCalls}`);
+check("第三轮那个红也列出来了",
+      /09:12/.test(await evalJs(`document.querySelector('.pipe-history-row').textContent`)),
+      await evalJs(`document.querySelector('.pipe-history-row').textContent.replace(/\s+/g, ' ').trim()`));
+
+// ── 11. 刚进页面、还没有快照那一刻又跑完一轮:靠在途那一笔欠账补 ───────────
+// 这一档 `runKey` 是空的(`switchTab('pipe')` 里 `refreshPipe` 和 `loadPipeHistory`
+// 并排起跑,历史先发时 `pipeSnapshot` 还是 null),上面那道身份校验短路 —— 能救它的
+// 只有"在途时记一笔欠账"。
+runs = [EVENING, MORNING];
+// **开局先把列表清空并渲染一次。** 上一组收尾时它正好是三行,不清的话下面那句
+// 「追平成三轮」在摆局那一刻就已经为真 —— 这一项会静默绿着,而它本来要验的是
+// 「从两行追平到三行」。
+await evalJs(`pipeHistory = []; pipeViewing = null; pipeSnapshot = null;
+             renderPipeHistory(); true`);
+await setup("列表先清空了", until(`document.querySelectorAll('.pipe-history-row').length === 0`));
+let release2;
+holdRuns = new Promise(r => { release2 = r; });
+const runsBefore2 = runsCalls;
+await evalJs(`loadPipeHistory(); true`);          // runKey 是空的,回包被按住
+await setup("又有一次历史查询卡在途中", until(`pipeHistoryRequest !== null`, 4000));
+runs = [LATER, EVENING, MORNING];                 // 这期间第三轮跑完了
+await evalJs(`loadPipeHistory(); true`);          // 这一下只能记一笔欠账
+release2();
+check("没有快照那一刻的欠账也要补上",
+      await until(`document.querySelectorAll('.pipe-history-row').length === 3`, 8000),
+      `rows=${await evalJs(`document.querySelectorAll('.pipe-history-row').length`)}`);
+check("它也是靠补一次查询追平的", runsCalls > runsBefore2 + 1, `${runsBefore2} → ${runsCalls}`);
 
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 

@@ -8,7 +8,11 @@
 顺带钉住了"隔离点只有一个"。另立一个模块变量的话,每个走到 `_end_run()` 的既有
 测试都得记着再 patch 一次,漏掉的那个会去写**生产**那份历史。
 """
+import json
+import os
 import shutil
+import subprocess
+import sys
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -188,6 +192,84 @@ class HistoryEndpointTests(HistoryCase):
         r = self.client.get('/api/pipeline/runs')
         self.assertEqual(200, r.status_code, r.text)
         self.assertEqual([], r.json()['runs'])
+
+
+# 一个独立进程:走**生产那条启动路径**(`start_pipeline` 发身份、起线程、`_end_run`
+# 落盘)跑一轮,把这一轮的身份打在最后一行。导出阶段的成败按参数给,不发任何外部请求。
+_ONE_ROUND = """
+import sys
+from unittest.mock import patch
+from kb import pipeline
+from kb.feeds import sync as feed_sync      # noqa: F401 - 让延迟 import 先落位
+
+status, detail = sys.argv[1], sys.argv[2]
+
+def export(*a, **kw):
+    pipeline._stage('export', status, detail,
+                    failures=[{'title': 'A new agent runtime', 'reason': 'HTTP 503'}]
+                    if status == 'error' else None)
+
+with patch.object(pipeline, '_run_export', side_effect=export):
+    run_id = pipeline.start_pipeline(['export'])
+    assert run_id, '没拿到身份'
+    for _ in range(600):
+        if not pipeline.get_state()['running']:
+            break
+        time.sleep(0.05)
+    else:
+        raise SystemExit('那一轮没有收尾')
+print(run_id)
+"""
+
+
+class RestartTests(TestCase):
+    """**身份要跨进程重启仍然唯一** —— 它同时是历史落盘的去重键。
+
+    这一族非得真起两个进程不可:`_run_seq` 归零**模拟不了重启**(真重启会连
+    `_RUN_EPOCH` 一起重新生成),而手工给两轮不同的身份恰恰把要验的那件事假设掉了。
+    判据落在**「第一轮那个红还在不在历史里」**上,不落在「两个身份长得一样吗」。
+    """
+
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.dir = Path(self.temp.name)
+        self.addCleanup(self.temp.cleanup)
+
+    def one_round(self, status, detail):
+        env = {**os.environ, 'KB_DATA_DIR': str(self.dir),
+               'PYTHONPATH': str(Path(__file__).resolve().parents[1])}
+        r = subprocess.run([sys.executable, '-c', 'import time\n' + _ONE_ROUND, status, detail],
+                           capture_output=True, text=True, timeout=240, env=env,
+                           cwd=str(Path(__file__).resolve().parents[1]))
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        return r.stdout.strip().splitlines()[-1]
+
+    def history(self):
+        path = self.dir / 'pipeline_state_runs.json'
+        return json.loads(path.read_text(encoding='utf-8'))['runs'] if path.exists() else []
+
+    def test_a_restart_does_not_overwrite_the_round_before_it(self):
+        """两个独立进程共享一个数据目录:第一轮的失败原因、明细和日志都要留住。
+
+        原来身份是进程内自增的 `run-{序号}`,重启后新的 `run-1` 把上个进程那个
+        `run-1` 从历史里替换掉 —— 远在保留上限之前就开始丢,而丢没丢在面板上一个字
+        都看不见。
+        """
+        first = self.one_round('error', '3 条翻译失败（服务返回 503），库里仍是原文')
+        second = self.one_round('ok', '已保存 95 条到知识库')
+
+        # **后果先断言。** 身份撞不撞是机制,「那个红还查不查得到」才是用户遇到的事
+        runs = self.history()
+        self.assertEqual(2, len(runs), '重启前那一轮不许被覆盖')
+        red = next((r for r in runs if r['stages']['export']['status'] == 'error'), None)
+        self.assertIsNotNone(red, '第一轮那个红还要查得到')
+        self.assertIn('503', red['stages']['export']['detail'], '当时为什么红,要还能读到')
+        self.assertEqual('HTTP 503', red['stages']['export']['failures'][0]['reason'])
+        self.assertTrue(any('503' in line for line in red['log']),
+                        '那一轮自己的日志也要留住')
+        # 机制排在后面
+        self.assertNotEqual(first, second, '两个进程发出来的身份不许相同')
+        self.assertEqual([second, first], [r['run_id'] for r in runs], '最新在最前')
 
 
 @requires_headless

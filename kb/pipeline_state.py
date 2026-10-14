@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import threading
+import time
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
@@ -71,6 +73,14 @@ _state: dict = {
     "log": [],          # 最近若干条进度行
 }
 _lock = threading.Lock()
+
+# 这个进程自己那一截身份。**`run-{序号}` 只在进程内唯一,而历史落盘按身份去重** ——
+# 重启之后序号从 1 重新开始,新的 `run-1` 和上个进程那个 `run-1` 并不是同一次运行,
+# 却会把它从历史里**替换掉**(连它的失败原因和日志一起),而且后面每一轮接着覆盖对应
+# 的那一轮:远在保留上限之前就开始丢,而丢没丢在面板上一个字都看不见。
+# 取「启动秒 + 随机两字节」而不是 pid:pid 会被系统复用,而同一秒里重启两次也不算
+# 罕见(口径同 `catgraph.md` 里发布序号那条 —— 自增计数 + 随机后缀)。
+_RUN_EPOCH = f'{int(time.time()):x}{secrets.token_hex(2)}'
 _run_seq = 0
 
 # 已经收尾的那几轮运行的终态,按 run id 存着。等一轮同步的人(日报)靠两秒一跳的
@@ -86,10 +96,15 @@ _FINISHED_KEEP = 8
 
 
 def new_run_id() -> str:
-    """给新一轮运行发一个身份。只在 `_lock` 里调(`start_pipeline` 那一段)。"""
+    """给新一轮运行发一个身份。只在 `_lock` 里调(`start_pipeline` 那一段)。
+
+    **跨进程唯一**,不只是进程内 —— 它同时是历史落盘的去重键,理由见 `_RUN_EPOCH`
+    那段注释。老库里 `run-N` 那种旧身份不会和新格式撞(新格式多一截),所以它们不会
+    被误替换,到点自然被保留上限挤出去。
+    """
     global _run_seq
     _run_seq += 1
-    return f'run-{_run_seq}'
+    return f'run-{_RUN_EPOCH}-{_run_seq}'
 
 
 def run_result(run_id: str) -> dict | None:

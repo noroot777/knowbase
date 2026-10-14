@@ -3,6 +3,13 @@
 // 上午那轮翻译报了 503、导出阶段判了红,晚上一次「重试失败项」跑完,面板上就只剩
 // 那一轮的结论,那个红没有任何地方查得到。后端为此单独落了一份历史。
 let pipeHistory = [], pipeViewing = null, pipeHistoryRequest = null;
+// 「还欠一次历史刷新」。在途那次请求只能回答它开跑那一刻的事实,而「又跑完一轮」
+// 这件事**一轮只说一次**(`refreshPipe` 的 wasRunning / newResult 两个分支)——
+// 在途时直接复用旧 promise 的话那一次机会就没了:旧回包把列表设成它取到的那两轮,
+// 而 `pipeDoneRun` 已经更新成第三轮,后续轮询再也不进那个分支,列表自己追不平,
+// 得切走再回来才补齐。所以记一笔欠账,等在途那次收尾了补发。
+// 口径同 `pipe.js` 的 `pipePendingWanted`。
+let pipeHistoryWanted = false;
 
 // 「这一轮结果怎么一句话说」。**判据复用阶段卡片那两个**(`pipePlannedStages` /
 // `pipeHasFailure`)—— 自己再数一遍的话,列表上写「已完成」而点进去是两个红。
@@ -52,10 +59,22 @@ function renderPipeHistory() {
 }
 
 async function loadPipeHistory() {
-  if (pipeHistoryRequest) return pipeHistoryRequest;
-  pipeHistoryRequest = (async () => {
+  if (pipeHistoryRequest) { pipeHistoryWanted = true; return; }
+  pipeHistoryWanted = true;
+  while (pipeHistoryWanted) {
+    // **这一笔欠账清在发请求之前。** 清在"接受回包之后"的话,在途期间别人记的那
+    // 一笔会被它一起清掉 —— 而那一笔恰恰是说"你这次取的已经不是最新的了"。
+    pipeHistoryWanted = false;
+    // 发请求**之前**记下「现在是哪一轮」。回包回来时它变了,说明这期间又跑完了
+    // 一轮,而这份回包里没有它 —— 记一笔欠账,循环按新快照再查一次。身份认 run_id
+    // (`pipeRunKey` 那一份口径:`started_at` 只精确到秒,分不开落在同一秒的两轮)。
+    // **这一道和上面那一笔各有射程**:首次进页面时还没有快照(`runKey` 是空的),
+    // 这一道短路,靠欠账补;而欠账在"身份变了"那一档本来就是 true,靠这一道补。
+    const runKey = pipeRunKey(pipeSnapshot);
+    pipeHistoryRequest = pipeJson('/api/pipeline/runs');
     try {
-      const data = await pipeJson('/api/pipeline/runs');
+      const data = await pipeHistoryRequest;
+      if (runKey && runKey !== pipeRunKey(pipeSnapshot)) { pipeHistoryWanted = true; continue; }
       pipeHistory = Array.isArray(data.runs) ? data.runs : [];
       // 正在看的那一轮可能已经被挤出记录(或者刚被同一轮次的新结果替换):
       // 跟着那份新清单重新认一次,认不出来就退回最新 —— 留着一份谁都查不到的
@@ -63,18 +82,19 @@ async function loadPipeHistory() {
       if (pipeViewing) {
         const again = pipeHistory.find(r => r.run_id === pipeViewing.run_id);
         if (again) pipeViewing = again;
-        else { exitPipeHistory(); return; }
+        else { exitPipeHistory(); break; }
       }
       renderPipeHistory();
       if (pipeViewing) renderPipeState(pipeSnapshot || { running: false });
     } catch (e) {
+      // 读不到不无限重试 —— 靠的是循环开头已经把这一笔清了,这里不再置回去。
+      // 历史是只读展示,它读不到不该挡任何操作。
       if (!pipeHistory.length) {
         $('pipe-history-list').innerHTML =
           `<p class="pipe-history-empty">没能读到历史记录：${esc(e.message)}</p>`;
       }
     } finally { pipeHistoryRequest = null; }
-  })();
-  return pipeHistoryRequest;
+  }
 }
 
 function viewPipeRun(runId) {
