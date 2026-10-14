@@ -179,9 +179,9 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         args = argparse.Namespace(limit=0, writeback=True)
         stats = pipeline_stages._new_extract_stats()
         # 打桩点分两处:模型在各自那条路自己的模块里,回写则在它**实际被调到**
-        # 的那个模块里 —— 提取那三条路现在经 `extract.commit_extraction` 转发,
-        # 所以回写要 patch 在 `extract` 上(`extract_parallel` 自己压根不再
-        # import 它)。
+        # 的那个模块里 —— 四条路现在都经协调入口转发(提取三条走
+        # `extract.commit_extraction`、补判走 `extract_promo.commit_promo`),
+        # 所以回写一律 patch 在 `extract` 上(各脚本自己压根不再 import 它)。
         for i, (label, runner, mwhere, model, bwhere, back) in enumerate((
                 ('kb extract --writeback', lambda: cli.cmd_extract(args),
                  extract, 'extract_with_llm', extract, 'writeback_extraction'),
@@ -191,7 +191,7 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
                  extract, 'writeback_extraction'),
                 ('promo_backfill.py',
                  lambda: pb.cmd_run(argparse.Namespace(limit=0, dry_run=False)),
-                 pb, 'judge_promo', pb, 'sync_promo_tag'))):
+                 pb, 'judge_promo', extract, 'writeback_extraction'))):
             with self.subTest(label):
                 self.seed(self.legacy(self.sub(label, f'https://example.org/w{i}.xml')),
                           self.entry(url=f'https://example.org/old-w{i}'))
@@ -360,18 +360,21 @@ class WritebackLockTests(TrimFixture, unittest.TestCase):
         钉住:新加一处会在这里红,而不是在某次清理报 `database is locked` 时
         才被发现。
 
-        `commit_extraction` 一并数进来:提取那三条路现在经它进来,而它自己就是
-        「维护锁 → SQLite 写锁」这道锁序的关口(见 `extract.commit_extraction`)。
+        **两个协调入口一并数进来**:提取那三条路经 `commit_extraction`、补判经
+        `commit_promo`,它们自己就是「维护锁 → SQLite 写锁」这道锁序的关口。
+        新开一个协调入口而忘了加进这条正则,等于把名单上的一处悄悄换成零处。
         """
         call = re.compile(
-            r'\b(?:writeback_extraction|sync_promo_tag|commit_extraction)\s*\(')
+            r'\b(?:writeback_extraction|sync_promo_tag'
+            r'|commit_extraction|commit_promo)\s*\(')
         found = {}
         for py in sorted(ROOT.glob('kb/*.py')) + sorted(ROOT.glob('scripts/*.py')):
             hits = [ln for ln in py.read_text(encoding='utf-8').splitlines()
                     if call.search(ln) and not ln.lstrip().startswith('def ')]
             if hits:
                 found[py.relative_to(ROOT).as_posix()] = len(hits)
-        self.assertEqual({'kb/cli.py': 1, 'kb/extract.py': 2,
+        self.assertEqual({'kb/cli.py': 1, 'kb/extract.py': 1,
+                          'kb/extract_promo.py': 2,
                           'kb/pipeline_stages.py': 1,
                           'scripts/extract_parallel.py': 1,
                           'scripts/promo_backfill.py': 1}, found)

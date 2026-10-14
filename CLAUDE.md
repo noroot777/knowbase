@@ -171,7 +171,7 @@
 | 英文内容翻译、译文显示口径(`kb/feeds/translate.py`) | `translate.md` |
 | 每日日报、素材账本、出处编号(`kb/daily*.py`、`kb/daily_refs.py`) | `daily.md` |
 | 大模型阶段配置、`secrets.json`(`kb/llm_stages.py`、`kb/llm.py`) | `llm-stages.md` |
-| 软广判定与「正文空」判定(`kb/extract.py`、`scripts/promo_backfill.py`) | `promo.md`、`body-gap.md` |
+| 软广判定与「正文空」判定(`kb/extract.py`、`kb/extract_promo.py`、`scripts/promo_backfill.py`) | `promo.md`、`body-gap.md` |
 | 条目化提取的开关(`kb/extract_optin.py`) | `extract-optin.md` |
 | wiki 层、三张图谱、归类缓存与发布(`scripts/wiki/`) | `catgraph.md` |
 | 测试探针起无头浏览器(`tests/probe_shell.mjs`、`tests/headless.py`) | `probe-shell.md` |

@@ -13,6 +13,10 @@
    拿不到就抛,整组记失败、旧结论一个字不动,下次重跑。
 2. **旧正文的判定不许盖掉新正文的结论。** 判据钉在 `save_promo` 那条 UPDATE
    自己的 WHERE 里(`content_hash`),0 行 = 这期间换版了 = 这一轮跳过。
+3. **判定、`doc_tags`、md 那行必须一起成立。** 三件事在 `commit_promo` 的同一个
+   协调区间(维护锁)里对齐,中间不许插进一次索引 —— 插进来就会按**还没摘**的
+   frontmatter 把 `flag/软广` 重新插回库里,而回写只摘 md、不再回头清它,还顺手
+   把 `content_hash` 刷成当前文件的,于是下一轮索引直接跳过,错的那行永久留下。
 
 判据一律落在「库里那行最后是什么」「md 里那行还在不在」「脚本报了几篇」,
 不落在「传了哪个参数」「抛没抛」。每条正断言都配一条反向的:默认那条路
@@ -28,7 +32,9 @@ import io as _io
 import json
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -36,7 +42,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from kb import extract, maintenance, store                     # noqa: E402
+from kb import extract, maintenance, scanner, store            # noqa: E402
 import promo_backfill                                          # noqa: E402
 
 _REAL_CONNECT = store.connect          # cmd_run 的 finally 会 close 它拿到的
@@ -404,6 +410,181 @@ class BroadcastCountTest(_Fixture):
         self.assertNotIn("软广 ×2", text)
         self.assertIn("判定 1 篇,hard 1,", text, "汇总行同理")
         self.assertIn("跳过 1 篇", text)
+
+
+class AtomicDeliveryTest(_Fixture):
+    """判定、`doc_tags`、md 那行在同一个协调区间里对齐 —— 中间插不进一次索引。
+
+    和上面两组的区别:那两组管的是「这一轮该不该写」,这一组管的是「写的那三处
+    会不会只成了一半」。半成品的末态**不可恢复**:`promo_level` 已经是 none、
+    `content_hash` 已经刷成当前文件的,所以普通检索正常、下一轮索引报「未变」,
+    唯独按 `flag/软广` 过滤仍然捞得到这篇已经纠正为正常内容的文章,再同步、
+    再索引多少轮都不会自己纠正。
+    """
+
+    def _touched_by_someone_else(self) -> None:
+        """摆一个合法的前置:别的流程刚改过这一篇的 frontmatter(正文没动)。
+
+        **少了这一步,交错那条用例对任何版本都是绿的**:索引拿到锁时会先问
+        `doc_needs_reindex`,文件和库里对得上就记一次「未变」直接跳过 ——
+        `upsert_document` 压根没进过执行路径,也就没有机会按旧 frontmatter 把
+        `flag/软广` 重建回来(实测注入旧结构红 0 条)。真实库里这一步天天发生:
+        翻译回写、tag 回写、wiki 追加图谱尾区都只改 frontmatter。
+        """
+        text = self.md.read_text(encoding="utf-8")
+        self.md.write_text(text.replace('title:', 'wiki_round: 2\ntitle:', 1),
+                           encoding="utf-8")
+
+    def _scan_at_index_time(self):
+        """索引那一趟的扫描结果 —— **被迭代时**才读磁盘。
+
+        真实 `cli.cmd_index` 是「取锁 → 扫描」,扫描读到的是**拿到锁那一刻**
+        磁盘上的内容(见它自己的 docstring)。预先构造好 Doc 再交给它,等于摆出
+        一个锁外读盘的时序:那样无论协调区间圈不圈得住,索引都会拿着带旧 flag
+        的 frontmatter 去重建 `doc_tags`,红绿都证明不了互斥。
+        """
+        text = self.md.read_text(encoding="utf-8")
+        fm, body = scanner.parse_frontmatter(text)
+        yield scanner.Doc(path=PATH, source="dr-gzh", title="稿子",
+                          account=ACCOUNT, published="2026-10-14",
+                          url=f"https://example.org/{Path(PATH).stem}",
+                          tags=fm.get("tags") or [], body=body,
+                          content_hash=scanner.file_hash(text), meta=fm)
+
+    def test_an_interleaved_index_cannot_restore_the_cleared_flag(self):
+        """改判落库之后、摘 md 那行之前跑一趟索引:摘掉的 flag 不许被带回来。
+
+        索引这一趟全程是真的(真实 `cmd_index`、真实维护锁、真实
+        `upsert_document` 按 frontmatter 重建 `doc_tags`、真实提交),只有
+        「它什么时候起跑」由夹具控制 —— 那是一个完全合法的交错,不是抢锁。
+        """
+        from kb import cli
+
+        self.seed("hard", OLD_BODY, flagged=True)
+        self._touched_by_someone_else()
+        main = threading.current_thread()
+        holding = threading.Event()
+        real_lock = maintenance.maintenance_lock
+        seen = {}
+
+        @contextlib.contextmanager
+        def watched(*a, **kw):
+            mine = threading.current_thread() is not main
+            with real_lock(*a, **kw):
+                if mine:
+                    # **索引真的拿到了那把锁** —— 判据钉在这里,不是钉在「它
+                    # 站到了要取锁的位置上」:后者在取锁**之前**就置位了,主线程
+                    # 收到之后照样可能先抢到锁,于是注入旧结构也有一半的运行是
+                    # 绿的(实测红 0 条)。
+                    holding.set()
+                yield
+
+        def index_now():
+            with mock.patch.object(cli, "scan_all", self._scan_at_index_time):
+                return cli.cmd_index(SimpleNamespace(reembed=False,
+                                                     no_vector=True))
+
+        real_save = promo_backfill.commit_promo.__globals__["save_promo"]
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fut = {}
+
+            def save_then_let_an_index_butt_in(conn, path, promo, **kw):
+                """钩子挂在**落库**上,不是挂在回写上。
+
+                这是两个版本都存在的那个点,所以它对「协调区间圈到哪儿」是敏感
+                的:修好之后这一下在锁内,索引只能排在后面;圈不住的话这一下在
+                锁外,索引整趟跑完还来得及按旧 frontmatter 把 flag 插回去。
+                挂在 `sync_promo_tag` 上**测不出**这件事 —— 回写那一下在两个
+                版本里都在锁内,索引一律被挡住,注入旧结构照样全绿(实测红 0 条)。
+                """
+                written, stale = real_save(conn, path, promo, **kw)
+                conn.commit()       # 旧结构里落库紧跟着就整组提交了
+                fut["f"] = pool.submit(index_now)
+                # 圈住了的话索引拿不到锁,这里必然等满 —— 那个超时就是互斥本身
+                seen["index_got_in"] = holding.wait(2)
+                return written, stale
+
+            # **索引线程要全程待在打桩范围里**(见 `_recheck_env` 的 docstring):
+            # 它此刻还在等锁,`store.connect` 的替身一旦提前恢复,它醒来后会连到
+            # 真实的 `$KB_DATA_DIR/kb.db`。
+            with self._recheck_env() as out, \
+                 mock.patch.object(maintenance, "maintenance_lock", watched), \
+                 mock.patch.dict(promo_backfill.commit_promo.__globals__,
+                                 {"save_promo": save_then_let_an_index_butt_in}):
+                self.assertEqual(0, promo_backfill.cmd_run(self._args()))
+                self.assertEqual(0, fut["f"].result(timeout=30),
+                                 "索引那一趟没跑成")
+            self.out = out
+
+        # 末态先断:三处必须一致,而且下一轮索引没有再纠正的机会
+        self.assertEqual("none", self.level(), "明确改判没落下来")
+        self.assertFalse(self.md_flag(), "md 里那行没摘掉")
+        self.assertFalse(self.db_flag(),
+                         "交错的那趟索引把摘掉的 flag 又插回库里了")
+        text = self.md.read_text(encoding="utf-8")
+        self.assertFalse(
+            store.doc_needs_reindex(self.conn, PATH, scanner.file_hash(text)),
+            "content_hash 已经刷成当前文件的了 —— 下一轮索引不会再看这一篇")
+        # 再断过程:那趟索引压根没能在协调区间里拿到锁
+        self.assertFalse(seen["index_got_in"],
+                         "索引在判定和两处标记对齐的中途拿到了维护锁")
+
+    def test_a_frontmatter_only_edit_still_lets_the_flag_come_off(self):
+        """别的流程只改过 frontmatter(正文一个字没动)—— 改判照样摘得掉那行。
+
+        反过来钉住上一条的代价:回写那一侧**不许**比正文指纹。`_body_moved` 的
+        第一道比的是整个**文件**的 hash,只改 frontmatter 也会让它说"版本不对";
+        传下去的话这一次完全合法的改判就被判成作废,末态是库里 none、
+        frontmatter 还挂着 flag —— 下一次索引按 frontmatter 重建 `doc_tags`,
+        错的那行又回来了,而 `promo_level` 已经非空、默认补判再也不会选它。
+        """
+        self.seed("hard", OLD_BODY, flagged=True)
+        self._touched_by_someone_else()
+        self.assertTrue(store.doc_needs_reindex(
+            self.conn, PATH, scanner.file_hash(
+                self.md.read_text(encoding="utf-8"))),
+            "夹具没摆出「md 比索引新」那个状态")
+        self.assertEqual(0, self._recheck_quietly())
+        self.assertEqual("none", self.level())
+        self.assertFalse(self.db_flag())
+        self.assertFalse(self.md_flag(), "正文没动,md 里那行 flag 必须摘掉")
+
+    @staticmethod
+    def _args():
+        return SimpleNamespace(account=[ACCOUNT], recheck=True,
+                               dry_run=False, limit=0)
+
+    @contextlib.contextmanager
+    def _recheck_env(self):
+        """重判这一轮要用到的全部打桩,**口径只有这一份**。
+
+        `maintenance.DATA_DIR` 也要指到 tmp —— 不指的话这一轮取的是真实数据
+        目录下那把维护锁,和别的测试抢。
+
+        **范围必须覆盖到索引线程跑完**:`store.connect` 的替身提前恢复的话,
+        还在等锁的那条索引线程醒来后会连到真实的 `$KB_DATA_DIR/kb.db`,把夹具
+        这篇文档写进共享库里 —— 之后任何一条「库里此刻有没有积压」的用例
+        (`test_retry_scope` 那两条)就被我们带红了,而且**只在同跑时红、单跑
+        这个文件永远是绿的**,查起来极费劲。实测过:基线上同一组合 192 条全绿,
+        带着泄漏的替身跑 196 条红 2 条。
+        """
+        out = _io.StringIO()
+        with contextlib.redirect_stdout(out), \
+             mock.patch.object(store, "connect",
+                               lambda *a, **k: _REAL_CONNECT(self.db)), \
+             mock.patch.object(maintenance, "DATA_DIR", Path(self._tmp.name)), \
+             mock.patch("kb.llm_stages.stage_model", return_value="stub"), \
+             mock.patch("kb.llm.chat", return_value=json.dumps(
+                 {"level": "none", "reason": "核对过,是正常资讯"},
+                 ensure_ascii=False)):
+            yield out
+
+    def _recheck_quietly(self) -> int:
+        with self._recheck_env() as out:
+            rc = promo_backfill.cmd_run(self._args())
+        self.out = out
+        return rc
 
 
 if __name__ == "__main__":

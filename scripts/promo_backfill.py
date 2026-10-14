@@ -29,15 +29,13 @@ from __future__ import annotations
 import argparse
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb import store                                            # noqa: E402
 from kb.extract import (PROMO_HEAD, PROMO_TAIL, PROMO_TAG,       # noqa: E402
-                        body_fingerprint, judge_promo, pending_promo_docs,
-                        save_promo, sync_promo_tag)
+                        commit_promo, judge_promo, pending_promo_docs)
 
 # 软广只在公众号来源里成气候。dr(英文博客/HN 汇总)与 pre_tagged 的视频系
 # 不进这个补判:前者没有投放稿,后者是衍生条目,源头文章判过就够了。
@@ -93,7 +91,7 @@ def _candidates(conn, limit: int = 0, accounts: list[str] | None = None,
             continue
         out.append({"path": r["path"], "title": r["title"],
                     "account": r["account"], "body": body,
-                    "version": version, "seen": body_fingerprint(body)})
+                    "version": version})
     return out
 
 
@@ -171,9 +169,8 @@ def _judge_group(group: list[dict],
                               require_verdict=require_verdict)
 
 
-def _flag_in_vault(conn, path: str, level: str, stale: bool,
-                   body_seen: str | None = None) -> None:
-    """把 flag/软广 在 md frontmatter 里对齐到当前判定,跟提取流水线一个做法。
+def _deliver(conn, cand: dict, promo: dict) -> str:
+    """交付一篇的判定 —— 落库、`doc_tags`、md 那行,整段经 `commit_promo`。
 
     只写 doc_tags 是留不住的:下次这篇文档内容有变动、走到 upsert_document 时,
     doc_tags 会被整表删掉再按 frontmatter 重建,补判打的标记当场消失
@@ -181,18 +178,26 @@ def _flag_in_vault(conn, path: str, level: str, stale: bool,
     反过来,重跑把 hard 改判成 none 时那行也得摘掉,否则重索引又把它带回来。
     回写改了文件,所以同步刷新 content_hash,免得下次 index 白白重建这批文档。
 
-    单篇回写失败(文件被删、没有 frontmatter)不该让整组判定作废——判定结果
-    已经落库了,这里只是补一个展示用的标记。
+    **这三件事必须在同一个协调区间里成立,所以整段挪进了 `commit_promo`**:
+    原来落库在锁外、只有摘 md 那一下在锁内,中间插进一次合法的索引就会按还
+    没摘的 frontmatter 把标记重新插回 `doc_tags`,而且之后再也不会自己纠正
+    (完整形态见 `kb.extract_promo.commit_promo`)。
 
-    **调用它之前整组判定必须已经提交**(见 `cmd_run`):回写整段在维护锁里,
-    攥着写事务等锁会把持锁的清理卡死。等不到锁时 `LockBusy` 照常抛出去、整轮
-    中止 —— 那说明另一头正在做维护,这个脚本本来就按 `promo_level=''` 可重跑,
-    每篇再各等 `KB_MAINT_LOCK_WAIT` 才是更坏的一种。
+    单篇**回写**失败(文件被删、没有 frontmatter)不该让整组判定作废——判定
+    结果已经落库了,md 那行只是补一个展示用的标记,所以只吞 `OSError`,别的
+    一律抛出去。等不到维护锁时 `LockBusy` 照常抛、整轮中止 —— 那说明另一头
+    正在做维护,每篇再各等 `KB_MAINT_LOCK_WAIT` 才是更坏的一种。**这一档现在
+    是干净的**:取锁挪到落库之前了,等不到锁就一个字都没写,下一轮按
+    `promo_level=''` 照旧捞得到这一篇;原先取锁在落库之后,`LockBusy` 时判定
+    已经落了库、`promo_level` 不再是空的,那一篇从此就掉出默认候选了。
     """
-    try:
-        sync_promo_tag(conn, path, level, stale, body_seen)
-    except OSError as e:
-        print(f"      (同步 {path} 的 {PROMO_TAG} 失败: {e})", flush=True)
+    def swallow(e):
+        if not isinstance(e, OSError):
+            raise e
+        print(f"      (同步 {cand['path']} 的 {PROMO_TAG} 失败: {e})", flush=True)
+
+    return commit_promo(conn, cand["path"], promo, cand["version"],
+                        on_error=swallow)
 
 
 def cmd_run(args) -> int:
@@ -210,7 +215,6 @@ def cmd_run(args) -> int:
         if args.dry_run:
             print("[promo] --dry-run,不实际调用")
             return 0
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         done = failed = hard = soft = skipped = 0
         with ThreadPoolExecutor(max_workers=WORKERS) as pool:
             futs = [pool.submit(_judge_group, g, recheck) for g in groups]
@@ -224,35 +228,25 @@ def cmd_run(args) -> int:
                     print(f"[{i}/{len(groups)}] FAIL {str(e)[:120]}", flush=True)
                     continue
                 reason = promo["reason"]
-                flags = []
                 wrote = 0
                 for j, c in enumerate(group):
                     p = dict(promo)
                     if j:   # 广播给同稿副本,注明结论不是它自己判的
                         p["reason"] = f"{reason}(同稿判定:{group[0]['path']})"
-                    written, stale = save_promo(conn, c["path"], p, now,
-                                                c["version"])
-                    if not written:
-                        # 读走正文到现在这一篇换版了(补抓 → 导出 → 索引)。
-                        # 新那版多半已由正常提取判过,旧结论不许盖上去;如实
-                        # 记成跳过,下一轮按新版重判(见 save_promo 的条件写)。
+                    # 逐篇一个协调区间:落库、doc_tags、md 那行在同一把维护锁
+                    # 里对齐。粒度按篇和另外三条提取路径一致 —— 整趟几千篇要
+                    # 跑几十分钟,圈起来等于攥着锁等几十次模型往返。
+                    why = _deliver(conn, c, p)
+                    if why:
+                        # 什么都没写:正文换版了(新那版多半已由正常提取判过,
+                        # 旧结论不许盖上去),或者等锁期间这一篇被清理掉了。
+                        # 如实记成跳过,下一轮重判一次就对了。
                         skipped += 1
-                        print(f"[{i}/{len(groups)}] 跳过(正文已换版) "
-                              f"{c['path']}", flush=True)
+                        print(f"[{i}/{len(groups)}] 跳过({why}) {c['path']}",
+                              flush=True)
                         continue
-                    flags.append((c["path"], p["level"], stale, c["seen"]))
                     done += 1
                     wrote += 1
-                # 整组判定先落盘,**再**逐篇回写 —— 和另外三条提取路径同一个时序。
-                # 回写要取 kb.maintenance 那把维护锁,而 SQLite 的写锁不认它:
-                # 攥着这一组没提交的写事务去等锁,持锁的清理会卡在自己的 DELETE
-                # 上,两边互等到清理报 `database is locked`(2026-10-01 第 3 轮
-                # 审查实测)。共用入口自己也会 flush,这里写明顺序是为了在调用
-                # 点上就看得出来。
-                conn.commit()
-                for path, level, stale, seen in flags:
-                    _flag_in_vault(conn, path, level, stale, seen)
-                conn.commit()
                 # 计数按**实际写进去的**篇数,不按组的长度 —— 换版跳过的那几篇
                 # 什么都没写,算进去就是报一个没发生的结果。
                 if promo["level"] == "hard" and wrote:

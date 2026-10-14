@@ -406,25 +406,89 @@ class BackfillWritebackTest(unittest.TestCase):
         self.conn.close()
         self._tmp.cleanup()
 
+    def _candidate(self, vault, body="正文"):
+        """摆一个**真实**候选:落库那道条件写比 `documents.content_hash`,
+        夹具里对不上的话红出来的是「压根没走到回写」而不是回写本身。
+        """
+        md = vault / "a.md"
+        text = md.read_text(encoding="utf-8")
+        self.conn.execute("UPDATE documents SET content_hash=? WHERE path='a.md'",
+                          (scanner.file_hash(text),))
+        self.conn.execute("INSERT INTO chunks (path, seq, text)"
+                          " VALUES ('a.md', 0, ?)", (body,))
+        self.conn.commit()
+        return {"path": "a.md", "version": scanner.file_hash(text)}
+
     def test_writes_tag_into_frontmatter(self):
         vault = Path(self._tmp.name) / "vault"
         (vault / "").mkdir(parents=True, exist_ok=True)
         md = vault / "a.md"
         md.write_text('---\ntitle: "广告"\ntags:\n  - source/dr-gzh\n---\n正文\n',
                       encoding="utf-8")
+        cand = self._candidate(vault)
         with mock.patch.object(extract, "VAULT_ROOT", vault):
-            self.mod._flag_in_vault(self.conn, "a.md", "hard", False)
+            self.assertEqual("", self.mod._deliver(self.conn, cand,
+                                                   {"level": "hard"}))
         self.assertIn(extract.PROMO_TAG, md.read_text(encoding="utf-8"))
         # 回写改了文件,hash 要跟着刷新,否则下次 index 白白重建
         self.assertNotEqual(self.conn.execute(
             "SELECT content_hash FROM documents WHERE path='a.md'"
-        ).fetchone()["content_hash"], "old")
+        ).fetchone()["content_hash"], cand["version"])
 
     def test_missing_file_does_not_raise(self):
+        """文件已经不在了:如实返回一句原因、一行都不写,不抛。
+
+        原来这一档靠回写那边吞 `OSError` 兜住;挪进协调入口之后由
+        `_still_indexed` 在**落库之前**就拦下 —— 这才是对的那一档:`doc_tags`
+        对 `documents(path)` 是外键,文章被清理掉之后照写会当场报 FOREIGN KEY,
+        被记成一次判定失败,而文件是用户自己清掉的。
+        """
         vault = Path(self._tmp.name) / "empty"
         vault.mkdir(parents=True, exist_ok=True)
+        cand = {"path": "a.md", "version": "old"}
         with mock.patch.object(extract, "VAULT_ROOT", vault):
-            self.mod._flag_in_vault(self.conn, "gone.md", "hard", False)  # 不抛
+            why = self.mod._deliver(self.conn, cand, {"level": "hard"})  # 不抛
+        self.assertTrue(why, "什么都没写却没说为什么")
+        self.assertEqual("", self.conn.execute(
+            "SELECT promo_level FROM documents WHERE path='a.md'"
+        ).fetchone()["promo_level"])
+
+
+    def test_a_write_error_on_the_file_does_not_void_the_verdict(self):
+        """摘 md 那行失败(文件只读、没有 frontmatter)不该让判定作废。
+
+        判定已经落库了,md 那行只是展示用的标记 —— 所以 `on_error` 吞掉
+        `OSError`、照常算这一篇写进去了。**反过来钉一边在下一条**:别的异常
+        不许跟着一起吞,那会把「协调区间里出了我们没想到的事」压成一次成功。
+        """
+        vault = Path(self._tmp.name) / "vault"
+        vault.mkdir(parents=True, exist_ok=True)
+        md = vault / "a.md"
+        md.write_text('---\ntitle: "广告"\ntags:\n  - source/dr-gzh\n---\n正文\n',
+                      encoding="utf-8")
+        cand = self._candidate(vault)
+        with mock.patch.object(extract, "VAULT_ROOT", vault), \
+             mock.patch.object(extract, "writeback_extraction",
+                               side_effect=OSError("只读文件系统")):
+            self.assertEqual("", self.mod._deliver(self.conn, cand,
+                                                   {"level": "hard"}))
+        self.assertEqual("hard", self.conn.execute(
+            "SELECT promo_level FROM documents WHERE path='a.md'"
+        ).fetchone()["promo_level"], "判定该落库的照样要落库")
+
+    def test_an_unexpected_error_is_not_swallowed(self):
+        """反过来钉一边:不是 `OSError` 的异常必须抛出去,不许压成一次成功。"""
+        vault = Path(self._tmp.name) / "vault"
+        vault.mkdir(parents=True, exist_ok=True)
+        md = vault / "a.md"
+        md.write_text('---\ntitle: "广告"\ntags:\n  - source/dr-gzh\n---\n正文\n',
+                      encoding="utf-8")
+        cand = self._candidate(vault)
+        with mock.patch.object(extract, "VAULT_ROOT", vault), \
+             mock.patch.object(extract, "writeback_extraction",
+                               side_effect=RuntimeError("没想到的事")):
+            with self.assertRaises(RuntimeError):
+                self.mod._deliver(self.conn, cand, {"level": "hard"})
 
 
 class ReclassifyVaultTest(unittest.TestCase):
