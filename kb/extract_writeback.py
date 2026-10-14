@@ -10,7 +10,50 @@
 绑成自己的全局:夹具一律打桩 `extract.VAULT_ROOT`(那是生产里唯一的那一份),
 绑成本模块的全局就等于在测试里读真实 vault。
 """
+import os
 import re
+import tempfile
+from pathlib import Path
+
+
+def replace_md(full: Path, text: str) -> None:
+    """把一份 md 整份换成 `text` —— **同目录临时文件 + 原子替换,不就地截断。**
+
+    `Path.write_text` 是 `open(mode="w")`:它**先把原文件截成 0 字节**,再写新
+    内容。那中间进程没了(SIGKILL、OOM、掉电),磁盘上剩的是个空文件,而我们
+    的兜底认不出这件事 —— 待办里存的是**目标标签**,不是原文。实测过:在
+    `open('w')` 刚返回、`write` 还没发生的那一刻 SIGKILL,加一行 tag 和摘一行
+    tag 两种变换都把整篇原文变成 0 字节;重启后 `sync-tags` 修不回来(空文件
+    压根没有 frontmatter,加标签那一侧直接报错、摘标签那一侧还会因为"确实没有
+    这个 tag"把待办清零),再索引一次反而把空正文收进库 —— `doc_body` 从此是
+    空串,阅读页上一片空白,文章正文永久没了(2026-10-14 审查,两个方向各一次
+    真实中断,外加页面截图)。**维护锁防不了这一档**:它挡的是别的协作进程插进
+    来,挡不住本进程在打开写模式之后没了。
+
+    原子替换把末态收到两个:**要么还是原来那一份完整的,要么已经是新的那一份
+    完整的。** 临时文件和目标同目录(`os.replace` 跨设备会抛),写完 `flush` +
+    `fsync` 再 replace,中途失败就把临时文件清掉。**后缀是 `.tmp` 不是 `.md`**
+    —— 索引扫的是 `rglob("*.md")`,真被 SIGKILL 留下一个临时文件也不会被当成
+    一篇文档收进库。**权限位要沿用原文件的**:replace 之后留下的是临时文件那个
+    inode,`mkstemp` 给的是 0600,别的工具(编辑器、同步)会读不了它。
+    """
+    try:
+        mode = full.stat().st_mode & 0o777
+    except OSError:
+        mode = None                 # 原来不在就按新建算,交给 umask
+    fd, tmp = tempfile.mkstemp(dir=full.parent, prefix=f".{full.name}.",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())    # 元数据落盘前被打断也不要留半份新内容
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, full)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def writeback_tags(doc_path: str, new_tags: list[str]) -> bool:
@@ -35,7 +78,7 @@ def writeback_tags(doc_path: str, new_tags: list[str]) -> bool:
         new_fm = re.sub(r"\n---\n\Z", f"\n{add_lines}---\n", fm_block)
     else:
         new_fm = re.sub(r"\n---\n\Z", f"\ntags:\n{add_lines}---\n", fm_block)
-    full.write_text(new_fm + body, encoding="utf-8")
+    replace_md(full, new_fm + body)
     return True
 
 
@@ -70,7 +113,7 @@ def remove_writeback_tag(doc_path: str, tag: str) -> bool:
         fm_block, flags=re.M)
     if new_fm == fm_block:
         return False
-    full.write_text(new_fm + body, encoding="utf-8")
+    replace_md(full, new_fm + body)
     return True
 
 

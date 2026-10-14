@@ -476,16 +476,30 @@ class TagRepairTest(_Vault):
     默认候选 —— 没有持久化待办,谁也不会再回来看它一眼。
     """
 
+    def _unwritable_dir(self):
+        """真实注入一次写失败:把 md 所在的目录设成只读。
+
+        **不能再拿「文件本身只读」注入了。** tag 回写走的是原子替换(同目录临时
+        文件 + `os.replace`,见 `extract_writeback.replace_md`),而 replace 只要
+        目录的写权限 —— `mv` 覆盖一个只读文件本来就成功,文件那个 0444 从此拦不
+        住任何东西。目录只读让 `tempfile.mkstemp` 当场抛,和磁盘满、vault 挂成
+        只读是同一档,仍然是真实的 `OSError`、不打桩。
+        """
+        d = self.md.parent
+        d.chmod(0o555)
+        self.addCleanup(lambda: d.exists() and d.chmod(0o755))
+        return d
+
     def _deliver_with_readonly_md(self):
-        """真实注入一次写失败:把 md 文件本身设成只读,交付完再恢复。"""
-        self.md.chmod(0o444)
+        """真实注入一次写失败,交付完再恢复。"""
+        cand = self.cand()
+        d = self._unwritable_dir()
         try:
-            cand = self.cand()
             with self.env():
                 return self.pb._deliver(self.conn, cand,
                                         {"level": "none", "reason": "正常资讯"})
         finally:
-            self.md.chmod(0o644)
+            d.chmod(0o755)
 
     def test_a_failed_write_leaves_a_repairable_todo(self):
         self.seed("hard", OLD_BODY, flagged=True)
@@ -533,12 +547,12 @@ class TagRepairTest(_Vault):
         data = {"entities": [], "topics": [], "summary": "s",
                 "promo": {"level": "hard", "reason": "文末在卖代充值"}}
         seen = extract.model_input(self.conn, PATH)["seen"]
-        self.md.chmod(0o444)
+        d = self._unwritable_dir()
         try:
             with self.env(), self.assertRaises(OSError):
                 extract.commit_extraction(self.conn, PATH, data, seen)
         finally:
-            self.md.chmod(0o644)
+            d.chmod(0o755)
         self.assertEqual("hard", self.level(), "判定该落库的照样要落库")
         self.assertFalse(self.md_flag(), "夹具没摆成「md 那行没写进去」")
         self.assertTrue(self.pending(), "提取那条路上的回写失败没留下待办")

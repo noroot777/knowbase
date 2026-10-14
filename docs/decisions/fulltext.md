@@ -71,6 +71,11 @@
   照旧放行(由锁内那道「这一篇还在吗」和外键级联管);**别的读取失败一律拒** —— 文件还在、只是没权限或正被别人换着
   写,那一刻答不出「索引扫到当前这份 md 了吗」,而**「没读到」不等于「证明了没变」**。**索引指纹那一道(②)要问在读
   磁盘那一道(①)前面**:它只读库、一定问得出结果,反过来排的话一次读取失败会把这道**能**答出来的判据一起跳过。
+- **判「还是不是同一组输入」那一族住在 `kb/extract_version.py`**(`input_fingerprint` / `model_input` / `_input_moved` /
+  `_require_current_input` / `_still_indexed` / `StaleBody`,700 行上限逼出来的第四次拆分)。`kb.extract` **原样再导出**它们,
+  所以 `extract.model_input`、`extract._input_moved` 这些写法和打桩一个字不用改。**要用 `VAULT_ROOT` 一律函数内
+  `from kb.extract import VAULT_ROOT`** —— 夹具打桩的是 `extract.VAULT_ROOT`,在新模块里绑成模块级全局就等于在测试里读真实
+  vault(理由同 `kb.extract_writeback`)。
 - **`documents.content_hash` 的口径抽成了 `scanner.file_hash`。手摆 `documents` 行的测试摆盘必须按它算
   `content_hash`**,否则摆出来的是一个生产里不存在的状态。`_extract_pass` 的 `stats` 一律用 `_new_extract_stats()`
   构造。

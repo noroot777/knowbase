@@ -98,6 +98,23 @@ def save_promo(conn, path: str, promo: dict, now: str | None = None,
     return True
 
 
+def promo_tag_owed(conn, path: str) -> bool:
+    """库里这一篇有一份**明确判定**要对齐到 md 那行吗。
+
+    「欠一次对齐」的判据只有这一份。**它问的是库里现在是什么,不是这一次写进去
+    了什么** —— `save_promo` 返回 False 的两档都仍然留着一个明确判定要对齐:
+    兜底的 none 不许盖掉已有结论(于是复用旧的那份 hard)、这一版换过版所以一个
+    字都没写(库里还是上一份判定)。而回写那一步照旧会按**库里**那份判定去幂等
+    对齐 md 那行。
+
+    `promo_level` 还空着(从没判过)时不欠:那时 md 那行是提取阶段写进去的唯一
+    记录,凭「库里没有」去动它等于丢数据(口径同 `align_promo_tag`)。
+    """
+    row = conn.execute("SELECT promo_level FROM documents WHERE path=?",
+                       (path,)).fetchone()
+    return ((row["promo_level"] if row else "") or "") in PROMO_DECIDED
+
+
 def promo_tag_in_md(doc_path: str) -> bool:
     """这篇 md 的 frontmatter 里现在有没有 `flag/软广` —— **按索引的读法**。
 
