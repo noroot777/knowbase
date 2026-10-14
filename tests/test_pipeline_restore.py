@@ -107,6 +107,38 @@ class LatestResultTests(HistoryCase):
         self.assertIn('又跑完', msg)
         self.assertFalse(thread.called, '一个线程都不许起')
 
+    def test_an_aliased_round_finishing_in_between_still_blocks_the_retry(self):
+        """期间又跑完一轮,而那两轮的**展示版本撞上了** —— 这道核对照旧要拦住。
+
+        上一条靠身份变了判出来;这一条摆的是旧格式:两轮都没有身份、收尾时间又相同,
+        展示版本于是相等。核对比版本的话整条放行,而手上那份快照其实已经不是最新那
+        一轮了 —— 按它的范围去抓就抓错了来源。所以判据是 `same_round`
+        (「这两份是不是同一轮」),和恢复那边同一份口径。
+        """
+        self.restart()                         # 开局得干净:上一条可能还留着 running
+        at = '2026-10-14 19:30:00'
+        common = {'finished_at': at, 'run_kind': 'sync', 'stopped': False,
+                  'planned_stages': list(state.STAGES), 'crawl_filter': {'channel': 'rss'}}
+        stale = dict(common, started_at='2026-10-14 19:20:00',
+                     export_filter={'accounts': ['A-failed']},
+                     stages={name: {'status': 'error' if name == 'export' else 'ok',
+                                    'detail': '3 条翻译失败（服务返回 503）'}
+                             for name in state.STAGES},
+                     log=['[10-14 19:30] 管道结束'])
+        fresh = dict(common, started_at='2026-10-14 19:25:00',
+                     stages={name: {'status': 'ok', 'detail': '完成'} for name in state.STAGES},
+                     log=['[10-14 19:30] 管道结束'])
+        self.assertEqual(state.result_version(stale), state.result_version(fresh),
+                         '摆局前提:两轮的展示版本确实撞上了')
+
+        with patch.object(pipeline_retry, 'last_result', return_value=stale), \
+             patch.object(pipeline_retry, '_latest_locked', return_value=fresh), \
+             patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, msg = pipeline_retry.start_retry_failed()
+        self.assertFalse(ok, '版本撞上不算「还是同一轮」')
+        self.assertIn('又跑完', msg)
+        self.assertFalse(thread.called)
+
     def test_a_restart_can_still_retry_from_the_disk_copy(self):
         """**反过来钉一边**:重启之后内存里没跑过任何一轮,照旧要能重试。
 

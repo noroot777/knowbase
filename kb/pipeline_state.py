@@ -30,6 +30,7 @@ from kb.pipeline_persist import (
     result_version as _version_of,
     row_key as row_key,          # 面板那条历史清单的公开入口,这里只是过一道
     valid_round as valid_round,  # 同上:历史端点标「这一行有效吗」过的也是它
+    same_round as same_round,    # 同上:起跑核对问「这两份是不是同一轮」也过它
 )
 
 _STATE_FILE = DATA_DIR / "pipeline_state.json"
@@ -69,6 +70,10 @@ _state: dict = {
     # 记着的可能是不同轮次 —— 而恢复时必须分得出谁更新,墙上时钟做不到(`_now()`
     # 只到秒,两轮落在同一秒不罕见)。收尾时发(`_next_seq`),和终态一起落进两份。
     "run_seq": 0,
+    # 发号世代。**内存这份终态也要带它** —— `event_id` 认的是出处,不带的话活进程
+    # 里那份快照的事件身份是空的,起跑核对就只剩「内容逐字相同」那一级兜底(那是给
+    # 旧格式留的退路,不该当主路使)。
+    "seq_gen": _SEQ_GEN,
     "current_stage": "",
     "started_at": "",
     "finished_at": "",

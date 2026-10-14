@@ -135,6 +135,10 @@ def result_version(run: dict) -> str:
     所以口径降一级:身份没有就用收尾时间(旧记录有),再没有就是「从没跑过」——
     **那也是一个确定的版本,不是「未知」**。前端拿它当应用凭据,就不必把空串
     同时当成「还不知道」和「已经追平」两件事。
+
+    **它是「展示版本」,不是事件身份:它保证非空,不保证一轮唯一。** 两条都没有身份
+    而收尾时间又相同的旧记录,版本就会撞 —— 拿它证明「这两份副本是同一轮」的后果是
+    旧那一轮被当成最新、还报「完整」。要证明同一轮用 `same_round`。
     """
     return str(run.get("run_id") or run.get("finished_at") or "") or "none"
 
@@ -161,6 +165,53 @@ def _seq_of(run) -> int:
     return got if isinstance(got, int) and got > 0 else 0
 
 
+def event_id(run) -> str:
+    """这一轮的**事件身份:要么能证明唯一,要么就是空串。**
+
+    和 `result_version`(展示版本)**不是一个契约**:那边保证非空,这边保证唯一 ——
+    两件事共用一个字段的话,一边的兜底口径就成了另一边的授权。
+
+    唯一的判据还是**凭据自己带出处**(`seq_gen`,同 `_seq_of`):当前这一代 writer
+    写的记录,它的 `run_id` 一定出自 `new_run_id()`,带着跨进程唯一的那一截。旧格式
+    那些 `run-1` / `run-2` 只有进程内自增、**重启之后会重复**,所以一个都不信。
+    """
+    if not isinstance(run, dict) or run.get("seq_gen") != _SEQ_GEN:
+        return ''
+    return str(run.get("run_id") or '')
+
+
+# 同一轮写出来的两份副本,在这些字段上**逐字相同**:它们都从同一份 `_state` 取。
+# 不含身份/序号/世代(旧格式缺这些,而那恰恰是要兼容的那一档),也不含
+# `export_filter` / `crawl_retry`(历史那一份本来就没有)。
+_ROUND_FIELDS = ("started_at", "finished_at", "run_kind", "stopped",
+                 "planned_stages", "stages", "crawl_filter", "log")
+
+
+def same_round(a, b) -> bool:
+    """这两份记录是不是**同一轮**。恢复判据和起跑核对共用它(「口径只有一份」)。
+
+    两级证明,都不依赖会碰撞的展示版本:
+
+    1. **可证明唯一的事件身份相等**(`event_id`)——当前格式走这条。
+    2. **两份副本的内容逐字相同** —— 旧格式没有可信身份,只能靠这个。同一轮的两份
+       是从同一份 `_state` 写出去的,所以这几个字段一字不差;不同轮的两份在起跑时刻、
+       阶段结果和日志上几乎必然不同。
+
+    少了第 2 条的话,升级前那最后一轮(两份都写成功、确实是同一轮)会被判成「先后
+    证明不了」—— 那是**误报**,代价只是拦一次重试;而少了「不许拿展示版本当证明」
+    这一道是**漏报**:实测两条旧记录都没有身份、收尾时间都是 19:30:00,版本于是
+    相等、被当成同一轮,恢复返回状态文件那一份(A 轮的翻译失败)并报空欠账 ——
+    页头显示 A 的失败、重试可点,点下去导出阶段收到的是 A 那个来源,而历史里唯一
+    那行写着 B 已经成功。
+    """
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    got = event_id(a)
+    if got and got == event_id(b):
+        return True
+    return all(a.get(k) == b.get(k) for k in _ROUND_FIELDS)
+
+
 def _valid_round(run) -> bool:
     """这是不是一份**能当终态用**的记录。
 
@@ -168,7 +219,15 @@ def _valid_round(run) -> bool:
     拿它当「最新」比一轮,把后面那些仍能证明更新的记录整段遮住 —— 恢复于是退回
     状态文件那一份,而它可能是旧的。
     """
-    return isinstance(run, dict) and bool(run.get("finished_at"))
+    if not isinstance(run, dict):
+        return False
+    # **时间字段得是字符串,不是「真值」就行。** 它们一路走到页面上按字符切
+    # (`pipe_view.js` 的 `replace` / `slice`),落成数字时那一下当场抛 —— 而那个异常
+    # 冒到状态渲染那层,整屏变成「状态暂时无法更新」,不是只跳过这一行。
+    if not isinstance(run.get("finished_at"), str) or not run["finished_at"]:
+        return False
+    started = run.get("started_at")
+    return started is None or isinstance(started, str)
 
 
 # 公开名:历史端点标「这一行有效吗」时过的是**同一个判据** —— 各写一遍的话恢复拒绝
@@ -192,8 +251,8 @@ def _newest_round(runs: list[dict], saved: dict | None) -> tuple[dict | None, st
     时间也分不开,于是默认旧那一份完整:页头显示 A 的 503,点「重试失败项」导出
     阶段收到的是 A 那个来源。
     所以每一轮落盘时带一个跨进程单调的完成序号(`run_seq`),按它比 —— 哪一份写
-    失败都不影响下一轮继续递增。序号缺失(升级前的记录)时退回历史位置和时间,
-    **而那两样都分不出先后时一律报 `order`,不许默认旧那一份完整**。
+    失败都不影响下一轮继续递增。**序号缺失(升级前的记录)时只剩位置证据**,它也不
+    成立就一律报 `order`,不许默认旧那一份完整。
 
     **凭据只认两样:同一份历史里的位置、同一代发出来的完成序号。** 墙上时间不在
     其内 —— 它不是顺序凭据,时钟回拨(手动改、NTP 校正、夏令时)之后后跑完的那一轮
@@ -213,13 +272,16 @@ def _newest_round(runs: list[dict], saved: dict | None) -> tuple[dict | None, st
         return saved, ''
     if not saved:
         return newest, 'scope'
-    if result_version(newest) == result_version(saved):
-        return saved, ''                       # 同一轮 —— 用完整那一份
+    # **「同一轮」要能证明,不许拿展示版本相等充当它**(`same_round` 的 docstring
+    # 写了那一局的后果)。证明得了就用完整那一份。
+    if same_round(newest, saved):
+        return saved, ''                      # 同一轮 —— 用完整那一份
     # ① **结构性凭据**:历史是倒序的,状态文件那一轮出现在首条后面,就证明首条
     #    更新。它是同一份文件内部的位置关系,**不依赖发号这件事做对** —— 而序号是
     #    发得出来才有的,发号那一步读失证就没有(见 `_next_seq`)。
-    want = result_version(saved)
-    if any(result_version(r) == want for r in runs[1:]):
+    # 位置锚点同样过 `same_round`:拿展示版本去找的话,**找到的可能是另一轮**
+    # (两条旧记录版本撞上),于是「首条更新」这个结论建在一个假的锚点上。
+    if any(same_round(r, saved) for r in runs[1:]):
         return newest, 'scope'
     # ② 同一代发出来的完成序号。**不等就是先后**,不拿收尾时间去反驳它 ——
     #    时钟回拨的时候序号才是对的那一个。

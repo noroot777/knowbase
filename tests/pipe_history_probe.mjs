@@ -36,6 +36,8 @@ let failRuns = 0;
 let failPending = 0;
 // 非空 = 后端最近一次留档失败了,`/api/pipeline/runs` 要如实带出来
 let runsError = '';
+// 非 null = 强制每行的 `invalid` 取这个值(摆「后端漏标了」那一局)
+let rowsValid = null;
 // 非 null = 下一次待处理数查询的回包按在这儿等放行。**内容在收到请求那一刻就生成
 // 好**(和 `holdRuns` 一样、和 `holdStatus` 相反)—— 摆的就是「这份回包属于上一轮」:
 // 放行时它带的是请求发出时那一刻的身份和数字。
@@ -104,10 +106,17 @@ const server = createServer((req, res) => {
       taken.add(key);
       return key;
     };
-    // 「这一行算不算一轮运行」:真后端过 `valid_round`(是字典、而且有收尾时间)
-    const validOf = r => !!(r && typeof r === "object" && r.finished_at);
+    // 「这一行算不算一轮运行」:真后端过 `valid_round` —— 是字典、收尾时间是**非空
+    // 字符串**(落成数字时页面上按字符切那一下会抛)、起跑时间有的话也得是字符串
+    const validOf = r => !!(r && typeof r === "object"
+                            && typeof r.finished_at === "string" && r.finished_at
+                            && (r.started_at === undefined
+                                || typeof r.started_at === "string"));
+    // `rowsValid` 不为 null 时**强制**每行的 invalid 取它 —— 摆「后端漏标了」那一局,
+    // 用来钉前端自己那道 try/catch(冗余带:上游漏标时它得接住)
+    const invalidOf = r => (rowsValid === null ? !validOf(r) : !rowsValid);
     const rows = Array.isArray(runs)
-      ? runs.map(r => ({ ...r, version: versionOf(r), key: keyOf(r), invalid: !validOf(r) }))
+      ? runs.map(r => ({ ...r, version: versionOf(r), key: keyOf(r), invalid: invalidOf(r) }))
       : runs;
     // **清单版本取第一个有效行**(真后端如此):拿无效首行算出来是 "none",和状态
     // 端点永远对不上,面板就一直提示「历史还没追平」
@@ -615,14 +624,19 @@ check("点第二行打开的是第二行(不是撞上的第一行)",
       await evalJs(`JSON.stringify(pipeViewing && pipeViewing.started_at)`));
 await evalJs(`exitPipeHistory(); true`);
 
-// ── 21. 一条坏记录只许坏它自己那一行 ────────────────────────────────────────
+// ── 21. 一条坏记录只许坏它自己那一行(后端漏标的那一档) ──────────────────────
 // 这些字段全来自落盘文件,形状没有任何保证(`finished_at` 落成数字时 `slice` 当场
 // 抛 TypeError)。原来是一次 map 渲染整表,于是一条坏记录把整屏历史换成一句
 // 「没能读到历史记录」,连那些好的一起 —— 而文件其实读到了。
+//
+// **这一组故意让后端不标 `invalid`**(`rowsValid = true`):真后端的 `valid_round`
+// 现在会把这种坏时间戳标出来,所以要钉前端自己那道 try/catch,就得摆「上游漏标」
+// —— 它是条冗余带,而冗余带的回归只能这么摆。下一组摆的是正常那一档(后端标了)。
 await evalJs(`pipeHistory = []; renderPipeHistory(); true`);
 await setup("列表没清空(开局得是已知状态)",
             until(`document.querySelectorAll('.pipe-history-row').length === 0`, 6000));
 runs = [{ ...EVENING, finished_at: 20261014, started_at: 20261014 }, MORNING];
+rowsValid = true;                             // 后端漏标:逼前端那道 try/catch 接住
 await evalJs(`loadPipeHistory(); true`);
 const twoRows = await until(
   `document.getElementById('pipe-history-list').children.length === 2`, 8000);
@@ -639,6 +653,7 @@ check("坏的那一行就地说明,不替换整屏", twoRows && await evalJs(
 // 未记录来源 · 已完成」—— 一轮根本没跑过的「成功」。后端标 `invalid`、前端走同一个
 // 坏行出口。顺带钉住**清单版本取第一个有效行**:拿无效首行算出来和状态端点永远
 // 对不上,面板会一直提示「历史还没追平」,点「重新读取」也不消失。
+rowsValid = null;                             // 回到真后端那套判据
 await evalJs(`pipeHistory = []; renderPipeHistory(); true`);
 await setup("列表没清空(开局得是已知状态)",
             until(`document.querySelectorAll('.pipe-history-row').length === 0`, 6000));

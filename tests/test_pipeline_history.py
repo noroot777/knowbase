@@ -462,6 +462,24 @@ class HistoryEndpointTests(HistoryCase):
         self.assertEqual(self.client.get('/api/pipeline/status').json()['result_version'],
                          got['version'], '于是两个端点照旧对得上,面板不会一直提示落后')
 
+    def test_a_non_string_timestamp_is_an_invalid_row_too(self):
+        """时间字段**得是字符串**,不是「真值」就行。
+
+        它们一路走到页面上按字符切(`pipe_view.js` 的 `replace` / `slice`),落成数字
+        时那一下当场抛 —— 而那个异常冒到状态渲染那层,整屏变成「状态暂时无法更新」,
+        不是只跳过这一行。`started_at` 同一条路,所以两个都验。
+        """
+        self.run_round('run-a', 'ok', '已保存 3 条到知识库')
+        raw = json.loads(state._history_file().read_text())
+        good = raw['runs'][0]
+        raw['runs'] = [dict(good, finished_at=20261014),
+                       dict(good, started_at=20261014), good]
+        state._history_file().write_text(json.dumps(raw, ensure_ascii=False))
+
+        rows = self.client.get('/api/pipeline/runs').json()['runs']
+        self.assertEqual([True, True, False], [r['invalid'] for r in rows],
+                         '两种坏时间都算无效行,**反过来钉一边**:好行照旧有效')
+
     def test_a_normal_row_is_keyed_by_its_completion_sequence(self):
         """**反过来钉一边**:正常跑出来的那几轮各有完成序号,键就按它。"""
         self.run_round('run-1', 'ok', '已保存 95 条')

@@ -29,7 +29,7 @@ from kb.pipeline_state import (
     last_result,
     new_run_id,
     restore_gap,
-    result_version,
+    same_round,
     retry_notes,
 )
 from kb.pipeline_stages import (
@@ -378,8 +378,10 @@ def start_retry_failed() -> tuple[bool, str]:
         gap = restore_gap()
         if gap:
             return False, _GAP_REFUSED.get(gap, _GAP_REFUSED['order'])
-        # **核对无条件做**(`result_version` 保证任何快照都有版本:没有 `run_id` 的
-        # 旧记录降级到收尾时间,从没跑过就是「none」)。原来是「两边都得有 run_id 才
+        # **核对无条件做,而且判据是 `same_round`**(「这两份是不是同一轮」)——
+        # 不是比展示版本。那个版本保证非空、**不保证一轮唯一**:两条都没有身份而
+        # 收尾时间又相同的旧记录版本就会撞,核对于是放行,而手上这份其实已经不是
+        # 最新那一轮了。口径和恢复那边同一份。原来是「两边都得有 run_id 才
         # 比、拿不准一律放行」—— 为的是别把重启后那一档和升级前的老记录误拒,可那
         # 两档恰好也是**并发窗口**:实测里拿一份没有身份的旧快照、期间另一轮刚成功
         # 结束,这道核对整条跳过,上一轮失败的那几个订阅又被抓了一遍,而失败其实
@@ -387,7 +389,7 @@ def start_retry_failed() -> tuple[bool, str]:
         # **另一边走 `_latest_locked()` 而不是直读 `_state`** —— 跟 `prev` 同一份
         # 口径(`last_result`)。直读内存的话「恢复还没成功」那一档上两边会岔开:
         # `prev` 是磁盘上真实那一轮,内存却还是空的,于是每一次重试都被误拒。
-        if result_version(prev) != result_version(_latest_locked()):
+        if not same_round(prev, _latest_locked()):
             return False, "这期间又跑完了一轮，请重新点一次「重试失败项」"
         # card 标记这一轮会碰哪些阶段:按 STAGES 生成,STAGES 加新阶段也不会漏 key。
         # refill 不是独立卡片,占用 export 那张展示进度。

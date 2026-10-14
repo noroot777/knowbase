@@ -97,6 +97,147 @@ class OrderTests(HistoryCase):
         self.assertIn('先后分不出来', msg)
         self.assertFalse(thread.called)
 
+    def _legacy(self, rid, at, *, failed, started):
+        """一份**旧格式**记录:没有世代标识,身份可有可无。
+
+        这是被兼容的格式,不是坏文件 —— 字段、阶段、日志都齐,只是升级前的 writer
+        没写身份/序号/世代。
+        """
+        run = {
+            'finished_at': at, 'started_at': started,
+            'run_kind': 'sync', 'stopped': False, 'planned_stages': list(state.STAGES),
+            'stages': {name: {'status': 'error' if (failed and name == 'export') else 'ok',
+                              'detail': '3 条翻译失败（服务返回 503）' if failed else '完成'}
+                       for name in state.STAGES},
+            'crawl_filter': {'channel': 'rss'},
+            'log': [f'[{at[5:16]}] 管道结束'],
+        }
+        if rid:
+            run['run_id'] = rid
+        return run
+
+    def _put(self, saved, runs):
+        state._STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state._STATE_FILE.write_text(json.dumps(saved, ensure_ascii=False))
+        state._history_file().write_text(json.dumps({'runs': runs}, ensure_ascii=False))
+
+    def test_an_aliased_display_version_does_not_prove_the_same_round(self):
+        """**展示版本相等不等于同一轮。**
+
+        `result_version` 保证非空(身份没有就降级到收尾时间),**不保证唯一** ——
+        两条都没有身份而收尾时间又相同的旧记录版本就会撞。拿它当「同一轮」的证明,
+        恢复就直接返回状态文件那一份并报空欠账:实测两轮都是 19:30:00,状态记着 A
+        的翻译失败、历史唯一那行是后来 B 的成功 —— 页头显示 A 的 503、重试可点,
+        点下去导出阶段收到的是 A 那个来源。
+
+        这条捷径排在顺序判据**前面**,所以位置和序号那两道连被问到的机会都没有。
+        """
+        at = '2026-10-14 19:30:00'
+        a = self._legacy('', at, failed=True, started='2026-10-14 19:20:00')
+        a['export_filter'] = {'accounts': ['A-failed']}
+        b = self._legacy('', at, failed=False, started='2026-10-14 19:25:00')
+        self._put(a, [b])
+        self.assertEqual(state.result_version(a), state.result_version(b),
+                         '摆局前提:两条的展示版本确实撞上了')
+
+        self.restart()
+        state.get_state()
+        self.assertEqual('order', state.restore_gap(),
+                         '版本撞上不算证明 —— 先后其实分不出来')
+        with patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, msg = pipeline_retry.start_retry_failed()
+        self.assertFalse(ok, '证明不了最新就不许按它的范围去抓')
+        self.assertIn('先后分不出来', msg)
+        self.assertFalse(thread.called, '更不许真起线程去抓 A')
+
+    def test_two_copies_of_one_round_are_still_recognised_without_an_id(self):
+        """**反过来钉一边**:升级前那最后一轮(两份都写成功)照旧认得出是同一轮。
+
+        它没有身份也没有序号,证明只能靠**两份副本的内容逐字相同** —— 同一轮的两份
+        是从同一份 `_state` 写出去的。少了这一级就是误报:升级后第一次打开面板,
+        重试被拦住说「先后分不出来」,而两份其实是同一轮。
+        """
+        at = '2026-10-14 19:30:00'
+        one = self._legacy('', at, failed=True, started='2026-10-14 19:20:00')
+        saved = dict(one, export_filter={'accounts': ['A-failed']})
+        self._put(saved, [dict(one)])            # 历史那份没有重试派生字段,其余一字不差
+
+        self.restart()
+        self.assertEqual('', state.restore_gap(),
+                         '内容逐字相同 —— 这就是同一轮的两份副本')
+        with patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, _ = pipeline_retry.start_retry_failed()
+        self.assertTrue(ok, '同一轮、而且状态文件那份完整 —— 重试照旧放行')
+        self.assertTrue(thread.called)
+
+    def test_a_legacy_round_still_gets_its_position_proof(self):
+        """**反过来钉一边**:旧格式照旧用得上位置证据。
+
+        捷径砍掉之后那一道才有机会被问到 —— 历史里留着状态文件那一轮(内容逐字
+        相同,所以认得出),它出现在首条后面就证明首条更新。原来版本一撞就直接返回
+        状态文件那一份,**行次序连被看一眼的机会都没有**。
+        """
+        at = '2026-10-14 19:30:00'
+        saved = self._legacy('', at, failed=True, started='2026-10-14 19:20:00')
+        saved['export_filter'] = {'accounts': ['A-failed']}
+        newest = self._legacy('', at, failed=False, started='2026-10-14 19:25:00')
+        self._put(saved, [newest, dict(saved)])   # 历史倒序:新那轮在前,旧那轮还留着
+
+        self.restart()
+        self.assertEqual('2026-10-14 19:25:00', state.get_state()['started_at'],
+                         '位置证据证明了首条更新 —— 展示它')
+        self.assertEqual('scope', state.restore_gap(),
+                         '挑中历史那一份,照旧要说「重试范围没留档」')
+        with patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, _ = pipeline_retry.start_retry_failed()
+        self.assertFalse(ok, '历史那份没有重试派生字段 —— 不许按上一轮的范围抓')
+        self.assertFalse(thread.called)
+
+    def test_a_legacy_id_that_repeats_across_restarts_is_not_an_event_id(self):
+        """旧格式那些 `run-1` / `run-2` **重启之后会重复**,不算事件身份。
+
+        它们只有进程内自增,没有跨进程唯一的那一截(当前格式的 `new_run_id()` 才
+        有)。按身份信它就判出「同一轮」,而两条的收尾时间、阶段、日志都不一样。
+        """
+        a = self._legacy('run-1', '2026-10-14 09:16:00', failed=True,
+                         started='2026-10-14 09:00:00')
+        a['export_filter'] = {'accounts': ['A-failed']}
+        b = self._legacy('run-1', '2026-10-14 21:04:00', failed=False,
+                         started='2026-10-14 21:00:00')
+        self._put(a, [b])
+
+        self.restart()
+        state.get_state()
+        self.assertEqual('order', state.restore_gap(),
+                         '旧身份撞上不算证明 —— 它跨重启会重复')
+        with patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, _ = pipeline_retry.start_retry_failed()
+        self.assertFalse(ok)
+        self.assertFalse(thread.called)
+
+    def test_the_position_anchor_does_not_settle_for_an_aliased_version(self):
+        """位置锚点也要过「同一轮」那道,**不许拿展示版本去找**。
+
+        两条旧记录版本撞上时,拿版本在历史后续行里找状态那一轮会**找到另一轮** ——
+        「首条更新」这个结论就建在一个假锚点上。这一局里历史后续行那条和状态文件
+        那条版本相同、内容不同:锚点不成立,所以先后仍然证明不了。
+        """
+        at = '2026-10-14 19:30:00'
+        saved = self._legacy('', at, failed=True, started='2026-10-14 19:20:00')
+        saved['export_filter'] = {'accounts': ['A-failed']}
+        newest = self._legacy('', '2026-10-14 21:04:00', failed=False,
+                              started='2026-10-14 21:00:00')
+        # 后续行:版本和状态那条一样(同秒、都没身份),但**是另一轮**
+        other = self._legacy('', at, failed=False, started='2026-10-14 19:00:00')
+        self._put(saved, [newest, other])
+        self.assertEqual(state.result_version(saved), state.result_version(other),
+                         '摆局前提:后续行那条的版本和状态那条撞上了')
+
+        self.restart()
+        state.get_state()
+        self.assertEqual('order', state.restore_gap(),
+                         '假锚点不算位置证据 —— 先后还是证明不了')
+
     def test_a_sequence_that_cannot_be_read_is_not_handed_out_as_a_small_number(self):
         """发号那一步读失证时**发 0,不许从 1 重新开始**。
 
