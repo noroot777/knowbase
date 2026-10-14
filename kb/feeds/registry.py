@@ -364,6 +364,10 @@ def get_settings(kind: str) -> dict:
     check_kind(kind)
     with db() as c:
         row = c.execute('SELECT value FROM feed_settings WHERE kind=?', (kind,)).fetchone()
+    # `enabled` / `interval_minutes` / `next_run` 是**按来源类型自动同步**那一档
+    # 留下的,那一档整条拆掉了(见 `kb.pipeline._scheduler_tick`),现在没有任何
+    # 地方读它们。**键一个都不删**(元规则「只增不减」):盘上存量里就有,摘掉
+    # 之后另一条分支或者还没重启的进程读到的就是一份缺字段的设置。
     default = {'enabled': False, 'interval_minutes': feed_types()[kind].interval_minutes,
                'next_run': 0, 'bridges': []}
     if feed_types()[kind].adapter == 'social':

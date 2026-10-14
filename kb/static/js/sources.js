@@ -485,7 +485,7 @@ function renderSubscription(s) {
     <div class="source-row-meta">${esc(s.group_name || '未分组')} · ${s.item_count} 条 · ${s.last_success ? '最近成功 '+sourceTime(s.last_success) : '尚未成功同步'}${s.fulltext ? ' · 补抓原文正文' : ''}${s.extract ? ' · 提取知识标签' : ''}</div>
     ${s.configuration_error ? `<p class="source-row-meta">${esc(s.configuration_error)}</p>` : ''}
     ${!s.last_error && s.last_note ? `<p class="source-row-meta">${esc(s.last_note)}；下次同步从上次的位置接着读。</p>` : ''}
-    ${s.last_error ? `<details class="source-failure"><summary>查看失败原因与重试时间</summary><p>${esc(s.last_error)}</p><p>自动重试：${sourceTime(s.retry_at*1000)}；也可点击“同步”立即重试。</p></details>` : ''}</div>
+    ${s.last_error ? `<details class="source-failure"><summary>查看失败原因与重试时间</summary><p>${esc(s.last_error)}</p><p>${sourceTime(s.retry_at*1000)} 之后的同步才会再试它；也可点击“同步”立即重试。</p></details>` : ''}</div>
     <div class="source-row-actions"><button class="text-button" data-source-action="edit" data-source-id="${s.id}">编辑</button><button class="text-button" data-source-action="toggle" data-source-id="${s.id}">${s.enabled ? '停用' : '启用'}</button><button class="text-button" data-source-action="sync" data-source-id="${s.id}" ${!s.enabled?'disabled':''}>同步</button><button class="text-button source-delete" data-source-action="delete" data-source-id="${s.id}">删除</button></div></article>`;
 }
 // 外文条目在入库前已经译成中文(kb/feeds/translate.py),面板一律显示译文:

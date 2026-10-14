@@ -289,10 +289,8 @@
         </div>
       </div>
     </section>
-    <aside id="source-settings" class="source-settings" aria-label="此来源的同步设置" hidden><h2>同步设置</h2>
+    <aside id="source-settings" class="source-settings" aria-label="此来源的设置" hidden><h2>来源设置</h2>
       <form id="source-settings-form" onsubmit="saveSourceSettings(event)"><fieldset id="source-settings-fields" disabled>
-        <label><input id="source-auto" type="checkbox"> 自动同步</label>
-        <label for="source-interval">同步间隔<br>每 <input id="source-interval" type="number" min="15" max="10080" value="60" required> 分钟</label>
         <div id="source-xchan" class="xchan" hidden>
           <label for="source-x-channel">X 的取法<select id="source-x-channel" onchange="xChannelPicked()"></select></label>
           <p id="source-x-hint" class="hint"></p>
@@ -312,7 +310,7 @@
         </div>
         <div id="source-settings-error" class="field-err" role="alert"></div><button id="source-settings-save" class="ghost" type="submit">保存设置</button>
       </fieldset></form>
-      <p id="source-settings-status" role="status"></p><div class="source-rule"><p id="source-last-run"></p><p id="source-note"></p><p>每源每次最多读取最近 500 条，后续按原文链接去重。删除订阅保留已收录内容。</p><p>自动同步需要知识库服务保持运行。与绿泡泡共用同步队列，繁忙时顺延。</p><p>保存后自动建立检索索引；知识提取可在同步中心继续执行。</p></div>
+      <p id="source-settings-status" role="status"></p><div class="source-rule"><p id="source-last-run"></p><p id="source-note"></p><p>每源每次最多读取最近 500 条，后续按原文链接去重。删除订阅保留已收录内容。</p><p>这一类来源每天跟着日报那一轮同步一次（范围在日报面板里勾）；要立刻拉一次就点上面的「同步全部」。</p><p>保存后自动建立检索索引；知识提取可在同步中心继续执行。</p></div>
     </aside>
   </div>
   </section>

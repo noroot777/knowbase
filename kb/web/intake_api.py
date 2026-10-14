@@ -1,5 +1,4 @@
 """Feed-backed module UI API; collector execution remains in the shared pipeline."""
-import time
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
@@ -111,8 +110,12 @@ def delete_source(kind: str,source_id: int):
 
 
 class Settings(BaseModel):
-    enabled: bool
-    interval_minutes: int = Field(ge=15,le=10080)
+    # `enabled` / `interval_minutes` 是**按来源类型自动同步**那一档留下的,那一档
+    # 整条拆掉了(见 `kb.pipeline._scheduler_tick`),现在没有任何地方读它们。
+    # **仍旧接受、仍旧原样存**:老页面和脚本还会发,拒掉等于让它们保存失败;照
+    # 收不存则是静默丢字段。改成可选是因为新页面不再发(那两个控件没了)。
+    enabled: bool | None = None
+    interval_minutes: int | None = Field(default=None,ge=15,le=10080)
     bridges: list[str] | None = None
     x_channel: str | None = None
     x_feedgrab_bin: str | None = None
@@ -128,10 +131,6 @@ def set_settings(kind: str,body: Settings):
         # (那一类压根不走 `x_channels.validate`),留下一份谁也不读、也没校验过的垃圾。
         for key in ('x_channel', 'x_feedgrab_bin', 'x_chrome_path'):
             values.pop(key, None)
-    # Changing the interval starts a new interval; enabling starts within the next tick.
-    old = reg.get_settings(kind)
-    values['next_run'] = (time.time() if body.enabled and not old['enabled'] else
-                          time.time()+body.interval_minutes*60)
     return call(reg.save_settings,kind,values)
 
 

@@ -288,10 +288,11 @@ def _scheduler_tick() -> None:
                 _mark_fired(today)
                 _log(f"定时任务触发全流程同步(每日 {s['time']})")
                 return
-    if daily_run.tick():
-        return
-    from kb.feeds.schedule import tick
-    tick(start_pipeline)
+    daily_run.tick()
+    # 这里原来还有第三档:每类订阅按自己的间隔自动同步(`kb.feeds.schedule`)。
+    # **整条拆掉了** —— 一天一次就够,三份各自到点的定时抢同一把管道锁,先到的
+    # 那个会把后到的挤成「跳过」。订阅内容的唯一定时入口现在是日报那一轮
+    # (`daily_run.tick` 的同步范围),手动同步照旧随时可用。
 
 
 def _scheduler_loop() -> None:

@@ -73,22 +73,27 @@ async function actOnSource(action, id) {
 function fillSourceSettings(s) {
   $('source-settings-error').textContent = '';
   $('source-settings-fields').disabled = false;
-  $('source-auto').checked = s.enabled;
-  $('source-interval').value = s.interval_minutes;
   $('source-bridges').value = (s.bridges || []).join('\n');
+  // 「自动同步 / 同步间隔」两个控件删掉之后(那一档整条拆了,见
+  // `kb.pipeline._scheduler_tick`),这张表单上只剩 X 的取法那一块 —— 别的来源
+  // 打开会看到一个空表单配一颗「保存设置」,点下去提交一个空对象。整张表单
+  // 跟着 X 那一块一起藏掉,面板剩下的说明文字照旧显示。
+  $('source-settings-form').hidden = sourceModules.get(sourceKind)?.adapter !== 'social';
   // 桥接只是三条 X 通道之一,显示哪一块由 x_channel.js 按当前通道决定。
   fillXChannelFields(s);
   loadXChannel(sourceKind);
-  $('source-settings-status').textContent = s.enabled
-    ? `已启用 · 下次计划 ${s.next_run ? sourceTime(s.next_run*1000) : '即将开始'}`
-    : '自动同步未开启。手动同步随时可用。';
+  // 「按来源类型每 N 分钟自动同步」那一档拆掉了(见 kb.pipeline._scheduler_tick),
+  // 所以这里不再报"下次计划几点" —— 这一类来源跟着日报那一轮走,而那一轮的时刻
+  // 在日报面板上,不在这儿。报一个本进程已经不会执行的计划时刻是在说假话。
+  $('source-settings-status').textContent =
+    '每天跟着日报那一轮同步；手动同步随时可用。';
 }
 async function saveSourceSettings(e) {
   e.preventDefault();
   const kind = sourceKind;
   $('source-settings-save').disabled = true;
   $('source-settings-error').textContent = '';
-  const body = { enabled:$('source-auto').checked, interval_minutes:Number($('source-interval').value) };
+  const body = {};
   if (sourceModules.get(kind).adapter === 'social') {
     body.bridges = $('source-bridges').value.split('\n').map(v=>v.trim()).filter(Boolean);
     Object.assign(body, xChannelPayload(kind));

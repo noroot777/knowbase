@@ -7,7 +7,6 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from kb import pipeline
-from kb.feeds import schedule
 
 
 class DailyScheduleTests(unittest.TestCase):
@@ -16,7 +15,7 @@ class DailyScheduleTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.path = Path(temp.name)/'schedule.json'
         for p in (patch.object(pipeline, '_SCHED_FILE', self.path),
-                  patch.object(schedule, 'tick'), patch.object(pipeline, '_log')):
+                  patch.object(pipeline, '_log')):
             p.start(); self.addCleanup(p.stop)
         self.clock = Mock(wraps=datetime)
         self.clock.now.return_value = datetime(2026,9,28,16,42)

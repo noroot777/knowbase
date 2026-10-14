@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from kb import maintenance, pipeline, pipeline_state
 from kb.collectors import FetchScope, get_collector
-from kb.feeds import registry as reg, fetching, sync, schedule
+from kb.feeds import registry as reg, fetching, sync
 from kb.source_types import feed_types
 from kb.web import intake_api
 
@@ -323,31 +323,65 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(200,self.client.delete(f"/api/intake/rss/sources/{s['id']}").status_code)
         self.assertEqual(404,self.client.delete(f"/api/intake/rss/sources/{s['id']}").status_code)
 
+    def test_per_kind_interval_scheduling_is_gone_but_the_rest_is_untouched(self):
+        """「按来源类型每 N 分钟自动同步」整条拆掉了(见 docs/decisions/sync-schedule.md)。
+
+        拆的是**定时**。三样东西一动没动,而且都很容易被这次改动误伤:
+        ①手动同步;②**逐条订阅**的启用开关(它跟 kind 级的 `enabled` 同名,
+        但从来是两回事);③订阅级的提取开关那道闸。
+        """
+        from kb import daily_run
+        # ① kind 级设置写成"开着、间隔 15 分钟、早就到点了",调度线程也不该起管道
+        reg.save_settings('rss', {'enabled': True, 'interval_minutes': 15, 'next_run': 1})
+        with patch.object(pipeline, 'load_schedule',
+                          return_value={'enabled': False, 'time': '00:00', 'last_fired': '',
+                                        'channel': 'wechat_local', 'channels': ['wechat_local'],
+                                        'next_run': ''}), \
+             patch.object(daily_run, 'tick', return_value=False), \
+             patch.object(pipeline, 'start_pipeline') as start:
+            pipeline._scheduler_tick()
+            start.assert_not_called()
+        # ② 手动同步照旧:这是删掉定时之后唯一的"我现在就要"入口
+        with patch.object(pipeline, 'start_pipeline', return_value='run-1') as start:
+            self.assertEqual(200, self.client.post('/api/intake/rss/sync', json={}).status_code)
+            start.assert_called_once()
+        # ③ 逐条订阅的启用开关没被误伤 —— `collectors.feeds.status` 和 `sync.collect`
+        #    读的始终是 `source['enabled']`,不是上面那个 kind 级的同名键
+        source = reg.subscriptions('rss')[0]
+        self.assertIn(source['name'], get_collector('rss').status().targets)
+        self.assertEqual(200, self.client.patch(f"/api/intake/rss/sources/{source['id']}",
+                                                json={'enabled': False}).status_code)
+        self.assertFalse(reg.subscriptions('rss')[0]['enabled'])
+        self.assertNotIn(source['name'], get_collector('rss').status().targets)
+
+    def test_settings_without_the_retired_keys_neither_fails_nor_drops_them(self):
+        """新页面不再发 `enabled` / `interval_minutes`(那两个控件删了)。
+
+        **仍旧接受、仍旧原样存**:老页面和脚本还会发,拒掉等于让它们保存失败;
+        照收不存则是静默丢字段。键按元规则「只增不减」留在盘上。
+        """
+        reg.save_settings('rss', {'enabled': True, 'interval_minutes': 120})
+        response = self.client.put('/api/intake/rss/settings', json={})
+        self.assertEqual(200, response.status_code, response.text)
+        kept = reg.get_settings('rss')
+        self.assertEqual((True, 120), (kept['enabled'], kept['interval_minutes']))
+        # 老调用方照旧发得上去,存下来的就是它发的那一份
+        self.assertEqual(200, self.client.put(
+            '/api/intake/rss/settings',
+            json={'enabled': False, 'interval_minutes': 240}).status_code)
+        self.assertEqual(240, reg.get_settings('rss')['interval_minutes'])
+
     def test_active_run_blocks_mutation(self):
         pipeline_state._state.update(running=True,crawl_filter={'channel':'rss'})
         response=self.client.post('/api/intake/rss/sources',json={'name':'x','url':'https://example.org/feed'})
         self.assertEqual(409,response.status_code)
 
-    def test_schedule_busy_retries_and_modules_keep_independent_settings(self):
-        reg.save_settings('rss',{'enabled':True,'interval_minutes':120,'next_run':10})
-        reg.save_settings('social',{'enabled':True,'interval_minutes':30,'next_run':20,
-                                  'bridges':['https://example.org/{handle}/rss']})
-        start=Mock(return_value=False)
-        self.assertIsNone(schedule.tick(start,current_time=100))
-        self.assertEqual(10,reg.get_settings('rss')['next_run'])
-        start.return_value=True
-        self.assertEqual('rss',schedule.tick(start,current_time=100))
-        self.assertEqual(7300,reg.get_settings('rss')['next_run'])
-        self.assertEqual(20,reg.get_settings('social')['next_run'])
-        self.assertEqual('social',schedule.tick(start,current_time=100))
-
     def test_a_stored_legacy_interval_is_migrated_to_the_new_default(self):
-        """改 `SourceType.interval_minutes` **只影响没有设置行的新库**。
+        """存量设置里没人碰过的旧默认值,读的时候按 `settings_rev` 归一。
 
-        已经保存过的那份 JSON 在 `get_settings` 里盖在默认值上面,面板保存通道时
-        又把旧间隔原样带回去 —— 于是「social 改成每天一次」对所有老用户都没有
-        发生(2026-10-08 审查实测:存量 60 的设置行,真跑一次 `tick` 仍然安排
-        一小时后再来)。所以迁移按 `settings_rev` 做,读的时候归一。
+        **`interval_minutes` 现在没有消费方了**(按来源类型的间隔定时整条拆掉,
+        见 `kb.pipeline._scheduler_tick`),所以这一条钉的只剩 `_upgrade_settings`
+        本身:读出来的形状一致、盖过章不再迁第二次。键按元规则「只增不减」留着。
         """
         with reg.db() as c:          # 旧版真实存下来的形状,没有 settings_rev
             c.execute('INSERT OR REPLACE INTO feed_settings VALUES(?,?)',
@@ -355,11 +389,9 @@ class FeedTests(unittest.TestCase):
                                              'next_run': 0, 'bridges':
                                              ['https://example.org/{handle}/rss']})))
         self.assertEqual(1440, reg.get_settings('social')['interval_minutes'])
-        reg.save_subscription('social', {'name': 'Someone',
-                                         'url': 'https://x.com/Someone'})
-        start = Mock(return_value=True)
-        self.assertEqual('social', schedule.tick(start, current_time=100))
-        self.assertEqual(100 + 1440 * 60, reg.get_settings('social')['next_run'])
+        # 盖过章之后不再迁第二次(这才是 settings_rev 要钉的东西)
+        reg.save_settings('social', {'bridges': []})
+        self.assertEqual(1440, reg.get_settings('social')['interval_minutes'])
 
     def test_an_interval_the_user_picked_himself_is_left_alone(self):
         """只迁"仍然等于旧默认值"的那些。升级之后他自己挑的值也不许被再迁一次
@@ -386,13 +418,14 @@ class FeedTests(unittest.TestCase):
 
     def test_wechat_daily_schedule_is_not_lost_while_feeds_run(self):
         saved = {'enabled':True,'time':'00:00','last_fired':'','channel':'wechat_local'}
+        from kb import daily_run
         with patch.object(pipeline,'load_schedule',return_value=saved), \
              patch.object(pipeline,'_mark_fired') as mark, \
              patch.object(pipeline,'start_pipeline',return_value=False) as start, \
-             patch.object(schedule,'tick') as feed_tick:
+             patch.object(daily_run,'tick') as daily_tick:
             pipeline._scheduler_tick()
             mark.assert_not_called()
-            feed_tick.assert_called_once()
+            daily_tick.assert_called_once()
             start.return_value=True
             pipeline._scheduler_tick()
             mark.assert_called_once()
@@ -412,10 +445,7 @@ class FeedTests(unittest.TestCase):
             summary = sync.collect('social', FetchScope(force=True))
             self.assertEqual(51, summary['unconfigured'])
             fetch.assert_not_called()
-        reg.save_settings('social', {'enabled':True, 'next_run':0})
-        start = Mock(return_value=True)
-        self.assertIsNone(schedule.tick(start, current_time=100))
-        start.assert_not_called()
+        # 一个都没抓成,但也不许给订阅记上"连接失败"——待配置不是失败
         self.assertFalse(any(s['last_error'] for s in reg.subscriptions('social')))
 
     def test_dedicated_feed_and_saved_bridges_remain_usable(self):
