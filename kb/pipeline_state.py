@@ -19,6 +19,17 @@ from datetime import datetime
 from pathlib import Path
 
 from kb.config import DATA_DIR
+from kb.pipeline_persist import (
+    _dump_bytes,
+    _history_runs,
+    _load_json,
+    _load_json_strict,
+    _newest_round,
+    _seq_of,
+    _write_atomic,
+    row_key,
+    result_version as _version_of,
+)
 
 _STATE_FILE = DATA_DIR / "pipeline_state.json"
 
@@ -53,6 +64,10 @@ _state: dict = {
     # 它看到的仍是连续的 running=True(2026-09-30 第 2 轮审查实测)。有了 id,
     # "停我自己那一轮"和"等我自己那一轮"才表达得出来。永不复用(进程内自增)。
     "run_id": "",
+    # 这一轮的**完成序号:跨进程单调**。两份落盘各自可能写失败,所以磁盘上它们
+    # 记着的可能是不同轮次 —— 而恢复时必须分得出谁更新,墙上时钟做不到(`_now()`
+    # 只到秒,两轮落在同一秒不罕见)。收尾时发(`_next_seq`),和终态一起落进两份。
+    "run_seq": 0,
     "current_stage": "",
     "started_at": "",
     "finished_at": "",
@@ -82,7 +97,9 @@ _lock = threading.Lock()
 # 取「启动秒 + 随机两字节」而不是 pid:pid 会被系统复用,而同一秒里重启两次也不算
 # 罕见(口径同 `catgraph.md` 里发布序号那条 —— 自增计数 + 随机后缀)。
 _RUN_EPOCH = f'{int(time.time()):x}{secrets.token_hex(2)}'
-_run_seq = 0
+# 身份里那一截自增。**跟 `_state["run_seq"]`(完成序号)不是一回事** ——
+# 这个只为了让 run id 在进程内不重复,那个是跨进程单调的落盘顺序凭据。
+_id_seq = 0
 
 # 最近一次留档失败的异常类型,空串 = 上一次留档是成功的。面板拿它如实说一句 ——
 # **留档失败不许声张成同步失败,但也不许静默**:只看页面的话,「历史里没有这一轮」
@@ -108,9 +125,9 @@ def new_run_id() -> str:
     那段注释。老库里 `run-N` 那种旧身份不会和新格式撞(新格式多一截),所以它们不会
     被误替换,到点自然被保留上限挤出去。
     """
-    global _run_seq
-    _run_seq += 1
-    return f'run-{_RUN_EPOCH}-{_run_seq}'
+    global _id_seq
+    _id_seq += 1
+    return f'run-{_RUN_EPOCH}-{_id_seq}'
 
 
 def run_result(run_id: str) -> dict | None:
@@ -254,68 +271,17 @@ def retry_notes(run: dict) -> dict:
     return note.get("channels") or {}
 
 
-def _load_json(path: Path):
-    """读一份落盘 JSON,读不出来一律 `None`。**两份落盘(状态、历史)都过它。**
+def _next_seq() -> int:
+    """给这一轮发一个完成序号,**比磁盘上记着的任何一轮都大**。
 
-    **口径只有一份,而且兜住所有异常**,不只 `OSError` / `JSONDecodeError`:这两份
-    文件是外部状态(手改过、半截写入、别的工具碰过、坏块),而
-    `read_text(encoding='utf-8')` 碰上非 UTF-8 字节抛的是 `UnicodeDecodeError`、
-    深嵌套 JSON 抛的是 `RecursionError` —— 两个都不属于那两类,从这里逃出去会一路
-    冲到 `_end_run()`,把一轮**已经做完**的同步变成「永远进行中」(那一道不变量在
-    `_end_run` 自己那里另外钉着,这里是第一道)。
-    **先按字节读、再 `errors='replace'` 解码**,不直接 `read_text`:能读出来的尽量
-    读出来,坏字节变成 U+FFFD 而不是整份丢掉(「漏报是静默丢数据」)。
+    取两份现有记录里的最大值 +1:哪一份写失败都不影响下一轮继续递增,所以
+    「状态记着第 1 轮、历史记着第 2 轮」这种失配也分得出先后(`_newest_round`)。
+    读不出来就从 1 开始 —— 那一档整个判据本来就不可靠,`_newest_round` 对「序号
+    相等」一律报「证明不了」,不会拿它当凭据。
     """
-    try:
-        return json.loads(path.read_bytes().decode("utf-8", "replace"))
-    except Exception:
-        return None
-
-
-def _load_json_strict(path: Path):
-    """读一份落盘 JSON。**文件不存在返回 `None`,其余读不出来一律抛。**
-
-    恢复那一步要分得开「这个库从没跑过」和「这一次没读到」—— 两者都当成 `None`
-    的话,一次瞬时读失败(权限、磁盘抖动)会被永久固化成「从没跑过」:内存里那份
-    终态一直是空的,而展示那条路照旧从磁盘读得到真实的那一轮,于是起跑核对拿一个
-    空版本去跟真实那一轮比,**每一次重试都报「这期间又跑完了一轮」,而其实什么都
-    没跑过**(实测:第一次读状态文件注入 `PermissionError`、之后全部正常,页面照旧
-    显示 503 和重试按钮,连点两次都被 409 顶回来)。
-    内容坏了(解码、JSON、嵌套过深)也抛:那一档重读多半还是坏的,但**「拿不准就
-    别固化终态」** —— 代价只是每次多读一次小文件。
-    展示那条路照旧用宽口径的 `_load_json`(读不出来少显示几行、不出声)。
-    """
-    if not path.exists():
-        return None
-    return json.loads(path.read_bytes().decode("utf-8", "replace"))
-
-
-def _dump_bytes(obj) -> bytes:
-    """序列化成要落盘的字节。**不可编码的字符就地替换,这一步不许抛。**
-
-    `ensure_ascii=False` 是为了文件能给人读,代价是**编码**那一步会炸:某条记录里
-    混进一个孤立代理字符(`\ud800` 一类 —— JSON 里合法、UTF-8 里不合法,旧文件里
-    转义存着、读回来就是它),`UnicodeEncodeError` 就从写盘抛出来。按
-    `errors='replace'` 落盘:坏掉的是那一个字符,其余内容和其他几轮一个字节不差。
-    """
-    return json.dumps(obj, ensure_ascii=False, indent=1).encode("utf-8", "replace")
-
-
-def _write_atomic(path: Path, data: bytes) -> None:
-    """同目录临时文件 + rename,**替换没成功一律把临时文件收掉**。
-
-    面板那两条读的请求随时在跑,截断重写的窗口里读到的是半截 JSON(同
-    `docs/decisions/llm-stages.md` 那条)。而 `replace()` 失败(权限、跨设备)时不清
-    的话,`*.<pid>.tmp` 就留在数据目录里 —— 同一个进程里重名覆盖,每次重启换一个
-    pid 就慢慢堆起来。
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        tmp.write_bytes(data)
-        tmp.replace(path)
-    finally:
-        tmp.unlink(missing_ok=True)
+    seen = [_seq_of(load_last_run() or {})]
+    seen += [_seq_of(r) for r in load_history()]
+    return max(seen) + 1
 
 
 def _save_last_run() -> None:
@@ -336,6 +302,8 @@ def _save_last_run() -> None:
             "export_filter": _state.get("export_filter") or {},
             # run_id 跟名单一起落盘:retry_notes 要拿它认"这份名单是不是这一轮的"
             "run_id": _state.get("run_id", ""),
+            # 完成序号:恢复时靠它分出两份落盘各记着哪一轮
+            "run_seq": _state.get("run_seq", 0),
             "crawl_retry": _state.get("crawl_retry") or {},
             "log": _state["log"],
         }))
@@ -350,6 +318,7 @@ def _run_record() -> dict:
     """
     return {
         "run_id": _state.get("run_id", ""),
+        "run_seq": _state.get("run_seq", 0),
         "started_at": _state["started_at"],
         "finished_at": _state["finished_at"],
         "stopped": bool(_state.get("stopped", False)),
@@ -392,16 +361,6 @@ def load_history() -> list[dict]:
     return _history_runs(_load_json(_history_file()))
 
 
-def _history_runs(raw) -> list[dict]:
-    """把读出来的那份历史文件解析成记录列表。**解析口径只有一份** —— 恢复那一步
-    也过它,不在那边另写一遍形状检查。
-    """
-    runs = raw.get("runs") if isinstance(raw, dict) else None
-    if not isinstance(runs, list):
-        return []
-    return [r for r in runs if isinstance(r, dict)]
-
-
 def persist_error() -> str:
     """最近一次留档失败的异常类型,空串 = 没失败。理由见 `_persist_error`。"""
     return _persist_error
@@ -427,40 +386,22 @@ _restore_gap = ''
 
 
 def restore_gap() -> str:
-    """恢复得不完整的话,这里是那一轮的版本;空串 = 完整(或者压根不需要恢复)。
+    """手上这一份终态**可信到什么程度**。空串 = 可信的最新,且完整。
 
-    非空意味着**这个进程手上没有最新那一轮的重试范围** —— 展示是对的(历史那份
-    的阶段、日志、抓取范围都齐),但「重试失败项」不能起跑,理由见
-    `pipeline_retry.start_retry_failed` 里那道闸。
+    三档非空值,**都意味着「重试失败项」不能起跑**(闸在
+    `pipeline_retry.start_retry_failed`,面板上那颗按钮同时按不下去并说明原因):
+
+    - `'scope'`   挑中的是历史那一份:它的阶段、日志、抓取范围都齐(所以展示是
+                  对的),但**没有导出范围和失败名单**
+    - `'unknown'` 恢复时有一份读不出来,**核对不了哪一轮更新** —— 展示的是能读到
+                  的那一份,它可能是旧的
+    - `'order'`   两份各记着不同的一轮,而**先后证明不了**(都没有完成序号,收尾
+                  时间也相同)
+
+    **跑完一轮就补回来了**(`_end_run` 收尾时清空):那一轮是在本进程里跑的,内存
+    里这份终态带着完整字段,也不存在「谁更新」的疑问。
     """
     return _restore_gap
-
-
-def _newest_round(runs: list[dict], saved: dict | None) -> tuple[dict | None, str]:
-    """两份落盘里挑出最新那一轮,顺带说明恢复完不完整。
-
-    返回 `(那一轮, 欠账版本)` —— 欠账非空 = 取的是历史那一份,它**没有重试派生
-    字段**(`export_filter` / `crawl_retry`)。
-
-    **不拿收尾时间直接比大小。** 两轮落在同一秒不罕见(几百毫秒就结束的那种:
-    纯图片文章落终态、全是跳过),那时两个时间串相等,「谁更新」就判不出来,于是
-    退回旧那一份 —— 而那正是这道核对要拦的事故。历史是**倒序**的,所以「状态
-    文件那一轮出现在首条后面」就足以证明首条更新;只有状态文件那一轮压根不在
-    历史里(它那一份历史没写上)才退回比时间。
-    """
-    newest = runs[0] if runs else None
-    if not newest:
-        return saved, ''
-    if not isinstance(saved, dict) or not saved.get("finished_at"):
-        return newest, result_version(newest)
-    if result_version(newest) == result_version(saved):
-        return saved, ''                     # 同一轮 —— 用完整那一份
-    want = result_version(saved)
-    if any(result_version(r) == want for r in runs[1:]):
-        return newest, result_version(newest)
-    if str(newest.get("finished_at") or "") > str(saved.get("finished_at") or ""):
-        return newest, result_version(newest)
-    return saved, ''
 
 
 def _restore_once() -> None:
@@ -497,8 +438,13 @@ def _restore_once() -> None:
             saved = _load_json_strict(_STATE_FILE)
             runs = _history_runs(_load_json_strict(_history_file()))
         except Exception:  # noqa: BLE001 - 理由在 `_load_json_strict` 的 docstring
-            # **读不通不许固化成「从没跑过」**:下一次读状态时再试一遍。这一档里
-            # 展示和起跑核对都走磁盘(`_latest_locked`),两边同源,不会互相误判。
+            # **读不通不许固化成「从没跑过」**:下一次读状态时再试一遍。
+            # 但**这一刻手上那一份不可信**:`_latest_locked()` 会回退到状态文件
+            # 那一份,而它可能是旧的(另一份这会儿读不出来、核对不了)。实测形态:
+            # 磁盘状态记着 A、历史记着更新的 B,只对历史文件注入读失败 —— 展示 A、
+            # 按钮可用,点一次重试导出阶段真去抓了 A 那个来源。**同源不等于最新**,
+            # 所以这一档要如实报出来并拦住重试。
+            _restore_gap = 'unknown'
             return
         if not isinstance(saved, dict):
             saved = None
@@ -521,18 +467,10 @@ def _restore_once() -> None:
 
 
 def result_version(run: dict | None = None) -> str:
-    """一份终态的「完成版本」:**任何一份快照都有值,包括从没跑过和旧格式记录。**
-
-    `run_id` 是后来才加的字段,所以凡是拿「有没有 run_id」当判据的地方都得另开一
-    条兜底分支,而兜底写成「拿不准一律放行」就把不变量放掉了:实测里升级后重启、
-    点一次「重试失败项」,期间另一轮刚好成功结束 —— 旧快照没有身份,起跑那道核对
-    整条跳过,上一轮失败的那几个订阅又被抓了一遍,而失败其实发生在另一个来源上。
-    所以口径降一级:身份没有就用收尾时间(旧记录有),再没有就是「从没跑过」——
-    **那也是一个确定的版本,不是「未知」**。前端拿它当应用凭据,就不必把空串
-    同时当成「还不知道」和「已经追平」两件事。
+    """「现在这一屏是哪个版本」。判据本身在 `pipeline_persist` 里,这一层只负责
+    **缺省拿当前运行状态**:调用方问的多半就是「此刻」,而那份状态只有这边有。
     """
-    run = _state if run is None else run
-    return str(run.get("run_id") or run.get("finished_at") or "") or "none"
+    return _version_of(_state if run is None else run)
 
 
 def last_result() -> dict:
@@ -606,6 +544,8 @@ def _end_run() -> None:
                        failures=stage.get("failures"))
         _state["current_stage"] = ""
         _state["finished_at"] = _now()
+        # **落盘之前发完成序号**,两份都带上它 —— 恢复时靠它分出谁更新
+        _state["run_seq"] = _next_seq()
         _log("同步已停止，已完成的结果保留" if stopped else "管道结束")
         # **留档失败不许把一轮已经做完的正文工作变成「永远进行中」。** 这两份落盘
         # 都是旁路:状态文件喂「重试失败项」的范围派生(重启之后才用得上),历史文件

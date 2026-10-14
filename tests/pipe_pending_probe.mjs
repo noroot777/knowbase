@@ -108,7 +108,8 @@ const server = createServer((req, res) => {
   // 自洽的回包只为了让新鲜度那块能追平 —— 不给的话它永远落后,缺口提示条一直顶着,
   // 下面那几项「不存在缺口」就无从断言了。
   if (path === "/api/pipeline/runs") {
-    const rows = state.finished_at ? [{ ...state, version: versionOf(state) }] : [];
+    const rows = state.finished_at
+      ? [{ ...state, version: versionOf(state), key: `seq-${state.run_seq || 1}` }] : [];
     return json({ runs: rows, error: "", version: versionOf(state) });
   }
   if (path === "/api/pipeline/retry-failed" && req.method === "POST") {
@@ -377,9 +378,9 @@ check("取到旧数据、取不到,各算一次用掉的尝试", mech.d);
 // 状态文件写失败那一轮,磁盘上最新的终态只在历史里 —— 它没有导出范围和失败名单。
 // 拿上一轮的范围去抓会把失败那个来源摘掉(面板报「已保存 0 条」,而那几篇一个都没
 // 落盘),所以后端那边直接拒绝起跑;这里是**先说清楚**,别让人点了才知道。
-restoreGap = "run-I";
+restoreGap = "scope";
 await evalJs(`refreshPipe(); true`);
-await setup("页面没读到恢复欠账", until(`pipeRestoreGap === 'run-I'`, 6000));
+await setup("页面没读到恢复欠账", until(`pipeRestoreGap === 'scope'`, 6000));
 check("恢复不完整时「重试失败项」按不下去",
       await evalJs(`document.getElementById('pipe-retry').disabled === true`));
 check("而且如实说明了原因", await evalJs(
@@ -387,8 +388,22 @@ check("而且如实说明了原因", await evalJs(
    && document.getElementById('pipe-fresh-text').textContent.includes('重试范围没能留档')`),
   await evalJs(`document.getElementById('pipe-fresh-text').textContent`));
 check("「重新读取」不会把这一句擦掉(它不是读取问题)", await evalJs(
-  `pipeFreshRetry(); pipeRestoreGap === 'run-I'
+  `pipeFreshRetry(); pipeRestoreGap === 'scope'
    && document.getElementById('pipe-fresh-text').textContent.includes('重试范围没能留档')`));
+// 另两档各有自己的说法 —— 笼统一句「恢复得不完整」三档都对、哪一档都没说明白
+for (const [gap, said] of [["unknown", "核对不了哪一轮是最新的"],
+                           ["order", "先后分不出来"]]) {
+  restoreGap = gap;
+  await evalJs(`refreshPipe(); true`);
+  check(`恢复欠账「${gap}」有自己的说法`, await until(
+    `pipeRestoreGap === '${gap}'
+     && document.getElementById('pipe-fresh-text').textContent.includes('${said}')
+     && document.getElementById('pipe-retry').disabled === true`, 6000),
+    await evalJs(`document.getElementById('pipe-fresh-text').textContent`));
+}
+restoreGap = "scope";
+await evalJs(`refreshPipe(); true`);
+await setup("没回到 scope 那一档", until(`pipeRestoreGap === 'scope'`, 6000));
 restoreGap = "";
 await evalJs(`refreshPipe(); true`);
 check("跑过一轮之后那句话收起来、按钮也回来了", await until(

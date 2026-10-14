@@ -17,30 +17,11 @@ import { readFileSync, writeSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, normalize } from "node:path";
 import { launchShell } from "./probe_shell.mjs";
+// 摆盘(四轮终态、阶段常量、静态回包)在隔壁,见那份文件的抬头
+import { MORNING, EVENING, LATER, FOURTH, MIME, FIXTURES }
+  from "./pipe_history_fixture.mjs";
 
 const STATIC = join(dirname(fileURLToPath(import.meta.url)), "..", "kb", "static");
-const KEYS = ["crawl", "export", "index", "extract", "projects", "wiki"];
-const stagesOf = over => Object.fromEntries(KEYS.map(
-  k => [k, over[k] || { status: "ok", detail: "完成" }]));
-
-// 上午那一轮:导出判了红,原因是翻译服务 503
-const MORNING = {
-  run_id: "run-morning", run_kind: "sync", stopped: false,
-  started_at: "2026-10-14 09:00:00", finished_at: "2026-10-14 09:16:00",
-  planned_stages: [...KEYS], crawl_filter: { channel: "rss" },
-  stages: stagesOf({ export: { status: "error",
-    detail: "3 条翻译失败（服务返回 503），库里仍是原文",
-    failures: [{ title: "A new agent runtime", reason: "HTTP 503 from the model gateway" }] } }),
-  log: ["[10-14 09:16:01] export: 3 条翻译失败（服务返回 503）", "[10-14 09:16:02] 管道结束"],
-};
-// 晚上那一轮「重试失败项」:全绿,于是面板上只剩它
-const EVENING = {
-  run_id: "run-evening", run_kind: "retry", stopped: false,
-  started_at: "2026-10-14 21:00:00", finished_at: "2026-10-14 21:04:00",
-  planned_stages: [...KEYS], crawl_filter: { channel: "rss" },
-  stages: stagesOf({ export: { status: "ok", detail: "已保存 95 条到知识库" } }),
-  log: ["[10-14 21:04:00] 管道结束"],
-};
 
 let runs = [EVENING, MORNING];
 let retryCalls = 0, runsCalls = 0;
@@ -70,41 +51,6 @@ let state = {
   running: false, stop_supported: true, stop_requested: false, ...EVENING,
 };
 
-// 第三轮:后台刚跑完的一轮,又红了
-const LATER = {
-  run_id: "run-later", run_kind: "sync", stopped: false,
-  started_at: "2026-10-15 09:00:00", finished_at: "2026-10-15 09:12:00",
-  planned_stages: [...KEYS], crawl_filter: { channel: "rss" },
-  stages: stagesOf({ export: { status: "error", detail: "第三轮又是 503" } }),
-  log: ["[10-15 09:12:00] 管道结束"],
-};
-
-// 第四轮:专给待处理数那一组用 —— 「缺口」的定义是 desired 已经前移而 applied 还
-// 落在旧那一轮上,所以必须真有一轮新结果,不能在「已经追平」的状态下让它失败(那种
-// 失败本来就无害:屏幕上的数就是这一轮的)。
-const FOURTH = {
-  run_id: "run-fourth", run_kind: "sync", stopped: false,
-  started_at: "2026-10-16 09:00:00", finished_at: "2026-10-16 09:08:00",
-  planned_stages: [...KEYS], crawl_filter: { channel: "rss" },
-  stages: stagesOf({ export: { status: "ok", detail: "已保存 12 条到知识库" } }),
-  log: ["[10-16 09:08:00] 管道结束"],
-};
-
-const MIME = { html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8",
-               css: "text/css; charset=utf-8", json: "application/json",
-               svg: "image/svg+xml", ico: "image/x-icon", woff2: "font/woff2" };
-const FIXTURES = {
-  "/api/stats": { documents: 21674 },
-  "/api/pipeline/channels": {
-    channels: [{ id: "rss", label: "订阅源", hint: "RSS / Atom" }],
-    default: "rss", labels: {}, aliases: {},
-  },
-  "/api/pipeline/accounts": { accounts: [] },
-  "/api/facets": { tags: [], entities: [], accounts: [] },
-  "/api/projects": { tools: [], kinds: {}, total_entries: 0 },
-  "/api/sources/catalog": { modules: [] },
-  "/api/daily/list": { days: [] },
-};
 
 const server = createServer((req, res) => {
   const path = req.url.split("?")[0];
@@ -145,7 +91,16 @@ const server = createServer((req, res) => {
     runsCalls++;
     if (failRuns > 0) { failRuns--; return json({ detail: "history unavailable" }, 503); }
     // 每条记录带一个选择键(真后端如此):面板拿它认点的是哪一行
-    const body = { runs: Array.isArray(runs) ? runs.map(r => ({ ...r, version: versionOf(r) })) : runs,
+    const taken = new Set();
+    const keyOf = r => {
+      const base = r?.run_seq ? `seq-${r.run_seq}` : versionOf(r);
+      let key = base, n = 1;
+      while (taken.has(key)) key = `${base}#${++n}`;
+      taken.add(key);
+      return key;
+    };
+    const body = { runs: Array.isArray(runs)
+                     ? runs.map(r => ({ ...r, version: versionOf(r), key: keyOf(r) })) : runs,
                    error: runsError, version: versionOf(runs?.[0]) };
     if (holdRuns) { const gate = holdRuns; holdRuns = null; return void gate.then(() => json(body)); }
     return json(body);
@@ -614,29 +569,48 @@ check("所以它算落后、补读还会继续",
 // `run_id` 是后来才加的字段。applied 原来取清单首条的 `run_id`,碰上这种记录就是
 // 空串 —— 缺口永远在、补读永远继续,而清单其实已经是最新的那一份了。版本改由后端
 // 给之后,这一档降级到收尾时间。
-const OLD_ROUND = { ...MORNING };
-delete OLD_ROUND.run_id;
-runs = [OLD_ROUND];
-state = { ...state, run_id: "", finished_at: OLD_ROUND.finished_at, stopped: false,
-          stages: OLD_ROUND.stages, log: OLD_ROUND.log };
+const OLD_A = { ...EVENING }, OLD_B = { ...MORNING };
+for (const r of [OLD_A, OLD_B]) { delete r.run_id; delete r.run_seq; }
+OLD_B.finished_at = OLD_A.finished_at;        // 同一秒 —— 完成版本就此撞上
+runs = [OLD_A, OLD_B];
+state = { ...state, run_id: "", run_seq: 0, finished_at: OLD_A.finished_at,
+          stopped: false, stages: OLD_A.stages, log: OLD_A.log };
+// **开局先清到已知状态**:上一组收尾时列表也是两行,不清的话下面那道 setup 在摆局
+// 那一刻就已为真,追平那一项会判在旧 DOM 上(两次跑诊断值还不一样,因为诊断是
+// 判据之后第二次求值 —— 那时新清单往往已经应用上了,于是红得像偶发)
+await evalJs(`pipeHistory = []; renderPipeHistory(); true`);
+await setup("列表没清空(开局得是已知状态)",
+            until(`document.querySelectorAll('.pipe-history-row').length === 0`, 6000));
 await evalJs(`refreshPipe(); loadPipeHistory(); true`);
+// 等「状态查询回来了」是摆局前提,「清单追平到它」才是下面要验的
 await setup("那份旧格式清单没应用上去",
-            until(`document.querySelectorAll('.pipe-history-row').length === 1`, 8000));
+            until(`document.querySelectorAll('.pipe-history-row').length === 2
+                   && PIPE_FRESH.history.desired === ${JSON.stringify(OLD_A.finished_at)}`, 8000));
 check("没有身份的记录按收尾时间追平,不留一个永久缺口", await evalJs(
   `PIPE_FRESH.history.applied === PIPE_FRESH.history.desired
-   && PIPE_FRESH.history.applied === ${JSON.stringify(OLD_ROUND.finished_at)}`),
+   && PIPE_FRESH.history.applied === ${JSON.stringify(OLD_A.finished_at)}`),
   await evalJs(`PIPE_FRESH.history.applied + ' vs ' + PIPE_FRESH.history.desired`));
-// 选择键也得认得出来:原来渲染和查找都按 `run_id`,这种记录属性里就是空字符串,
-// 点下去要求 `undefined === ''` —— 那一行**看得到却打不开**。
-check("没有身份的那一行点得开", await clickAt(".pipe-history-row")
-      && await until(`pipeViewing !== null`, 4000),
-      await evalJs(`JSON.stringify(pipeViewing && pipeViewing.version)`));
+// 选择键得逐行不同:原来按 `run_id`(这种记录属性里是空字符串,点下去要求
+// `undefined === ''`,那一行看得到却打不开),换成完成版本之后这两行又会**撞**。
+check("两行的选择键不一样", await evalJs(
+  `(() => { const k = [...document.querySelectorAll('.pipe-history-row')]
+      .map(e => e.dataset.run); return k.length === 2 && k[0] && k[1] && k[0] !== k[1]; })()`),
+  await evalJs(`[...document.querySelectorAll('.pipe-history-row')]
+                 .map(e => e.dataset.run).join(' | ')`));
+// 点**第二行**:键撞的话查找只找得到第一条,打开的就是另一轮
+check("点第二行打开的是第二行(不是撞上的第一行)",
+      await clickAt(".pipe-history-row:nth-of-type(2)")
+      && await until(`pipeViewing && pipeViewing.started_at === ${JSON.stringify(OLD_B.started_at)}`, 4000),
+      await evalJs(`JSON.stringify(pipeViewing && pipeViewing.started_at)`));
 await evalJs(`exitPipeHistory(); true`);
 
 // ── 21. 一条坏记录只许坏它自己那一行 ────────────────────────────────────────
 // 这些字段全来自落盘文件,形状没有任何保证(`finished_at` 落成数字时 `slice` 当场
 // 抛 TypeError)。原来是一次 map 渲染整表,于是一条坏记录把整屏历史换成一句
 // 「没能读到历史记录」,连那些好的一起 —— 而文件其实读到了。
+await evalJs(`pipeHistory = []; renderPipeHistory(); true`);
+await setup("列表没清空(开局得是已知状态)",
+            until(`document.querySelectorAll('.pipe-history-row').length === 0`, 6000));
 runs = [{ ...EVENING, finished_at: 20261014, started_at: 20261014 }, MORNING];
 await evalJs(`loadPipeHistory(); true`);
 const twoRows = await until(

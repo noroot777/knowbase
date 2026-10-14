@@ -58,14 +58,15 @@ function renderPipeHistory() {
 
 function pipeHistoryRow(run) {
   {
-    // 选择键认后端给的 `version`,不认 `run_id` —— 升级前那几条没有身份,属性里就
-    // 是空字符串,点下去那一行**看得到却打不开**。渲染、点击、定位、高亮共用它。
-    const sum = pipeRunSummary(run), on = pipeViewing && pipeViewing.version === run.version;
+    // 选择键认后端给的 `key`(**逐行唯一**),不认 `run_id` 也不认 `version`:
+    // 前者升级前那几条没有(属性里是空字符串,点下去打不开),后者在「两条都缺身份、
+    // 收尾时间又相同」时会撞(点较早那行打开较新那行)。渲染、点击、定位、高亮共用它。
+    const sum = pipeRunSummary(run), on = pipeViewing && pipeViewing.key === run.key;
     // 身份走 `data-run` 读、**不拼进 onclick**:`esc` 把引号转成实体,而属性值里的
     // 实体会在解析时还原 —— 拼进去的话一个带引号的身份就把那句 JS 拆了。这一行
     // 其余几个字段也都来自落盘文件,一处放松就是一个注入口。
     return `<button type="button" class="pipe-history-row${on ? ' on' : ''}" data-status="${esc(sum.status)}"
-      data-run="${esc(run.version)}" aria-current="${on ? 'true' : 'false'}"
+      data-run="${esc(run.key)}" aria-current="${on ? 'true' : 'false'}"
       onclick="viewPipeRun(this.dataset.run)">
       <span class="pipe-history-when">${esc(pipeRunWhen(run))}</span>
       <span class="pipe-history-kind">${esc(pipeRunLabel(run))}</span>
@@ -98,7 +99,7 @@ async function loadPipeHistory() {
       // 跟着那份新清单重新认一次,认不出来就退回最新 —— 留着一份谁都查不到的
       // 快照,屏幕上那条「正在查看」就指着一轮列表上没有的运行。
       if (pipeViewing) {
-        const again = pipeHistory.find(r => r.version === pipeViewing.version);
+        const again = pipeHistory.find(r => r.key === pipeViewing.key);
         if (again) pipeViewing = again;
         else { exitPipeHistory(); break; }
       }
@@ -129,10 +130,10 @@ async function loadPipeHistory() {
 }
 
 function viewPipeRun(key) {
-  const run = pipeHistory.find(r => r.version === key);
+  const run = pipeHistory.find(r => r.key === key);
   if (!run) return;
   // 同一行再点一次 = 回到最新
-  if (pipeViewing && pipeViewing.version === key) return exitPipeHistory();
+  if (pipeViewing && pipeViewing.key === key) return exitPipeHistory();
   pipeViewing = run;
   renderPipeHistory();
   renderPipeState(pipeSnapshot || { running: false });

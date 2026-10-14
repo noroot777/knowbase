@@ -41,6 +41,12 @@ let pipeFreshNote = '';
 // 范围没留下。**这不是缺口**(屏幕上这一轮就是最新的那一轮,补读多少次也不会变),
 // 所以它跟那两块分开记、也不参与退避 —— 它要说的是「重试这颗按钮现在不能用」。
 let pipeRestoreGap = '';
+// 后端那三档(`restore_gap`)各自的说法
+const PIPE_RESTORE_GAP = {
+  scope: '这一轮的结果是从历史记录恢复的，重试范围没能留档',
+  unknown: '重启时有一份留档读不出来，核对不了哪一轮是最新的',
+  order: '磁盘上两份留档各记着不同的一轮，先后分不出来',
+};
 
 function pipeFreshSlot(key) {
   const s = PIPE_FRESH[key];
@@ -110,9 +116,10 @@ function renderPipeFresh() {
     : `${s.label}还是上一轮的，没能对上这一轮`);
   // 后端留档失败单独一句:那一轮的结论是对的,只是没留下记录
   if (pipeFreshNote) lines.push(`上一轮的结果没能留档（${pipeFreshNote}），同步结论不受影响`);
-  // 重试不可用单独一句:屏幕上这一轮的结论是对的,只是它的重试范围没留下
-  if (pipeRestoreGap) lines.push('这一轮的结果是从历史记录恢复的，重试范围没能留档，'
-                                 + '所以「重试失败项」暂时不能用；跑一次完整同步就好了');
+  // 重试不可用单独一句。**三档各说清为什么** —— 用户要据此决定下一步,而「恢复得
+  // 不完整」这种笼统说法三档都对、哪一档都没说明白。
+  if (pipeRestoreGap) lines.push((PIPE_RESTORE_GAP[pipeRestoreGap] || '恢复得不完整')
+                                 + '，所以「重试失败项」暂时不能用；跑一次完整同步就好了');
   box.hidden = !lines.length;
   if (!lines.length) return;
   const stuck = gaps.some(s => s.tries >= PIPE_FRESH_TRIES);

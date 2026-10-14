@@ -321,26 +321,40 @@ class HistoryEndpointTests(HistoryCase):
                          self.client.get('/api/pipeline/runs').json()['version'],
                          '两个端点必须报同一个版本')
 
-    def test_every_row_carries_a_selection_key(self):
-        """每条历史记录都要带一个能选中它的键,**升级前那几条也要有**。
+    def test_every_row_carries_a_unique_selection_key(self):
+        """每条历史记录都要带一个**逐行唯一**的选择键,升级前那几条也要有。
 
-        面板拿它认「点的是哪一行」、再次定位和高亮当前行。原来渲染和查找都按
-        `run_id`,而那是后来才加的字段:没有它的那几条在属性里就是空字符串,点
-        下去查找要求 `undefined === ''` —— 那一行**看得到却打不开**。
+        面板拿它认「点的是哪一行」、再次定位和高亮当前行。原来按 `run_id`,而那是
+        后来才加的字段:没有它的那几条在属性里就是空字符串,点下去查找要求
+        `undefined === ''` —— 那一行**看得到却打不开**。而换成完成版本之后,
+        「两条都缺身份、收尾时间又相同」时两行的键会**撞**:点较早那行打开的是
+        较新那行。**选择键和新鲜度那个 `version` 不是一个契约。**
         """
         self.run_round('run-1', 'ok', '已保存 95 条')
         self.run_round('run-2', 'error', '3 条翻译失败（服务返回 503）')
-        # 升级前落的那种记录:直接改文件,去掉其中一条的身份
+        # 升级前落的那种记录:直接改文件,去掉身份和完成序号,两条还同一秒
         path = state._history_file()
         raw = json.loads(path.read_text())
-        legacy_at = raw['runs'][1]['finished_at']
-        del raw['runs'][1]['run_id']
+        at = raw['runs'][0]['finished_at']
+        for row in raw['runs']:
+            row.pop('run_id', None)
+            row.pop('run_seq', None)
+            row['finished_at'] = at
         path.write_text(json.dumps(raw, ensure_ascii=False))
 
         runs = self.client.get('/api/pipeline/runs').json()['runs']
-        self.assertEqual(['run-2', legacy_at], [r['version'] for r in runs],
-                         '有身份用身份,没有就降级到收尾时间')
-        self.assertTrue(all(r['version'] for r in runs), '一条都不许是空键')
+        self.assertEqual([at, at], [r['version'] for r in runs],
+                         '这一局的前提:两行的完成版本确实撞了')
+        keys = [r['key'] for r in runs]
+        self.assertEqual(len(keys), len(set(keys)), f'选择键必须逐行唯一:{keys}')
+        self.assertTrue(all(keys), '一条都不许是空键')
+
+    def test_a_normal_row_is_keyed_by_its_completion_sequence(self):
+        """**反过来钉一边**:正常跑出来的那几轮各有完成序号,键就按它。"""
+        self.run_round('run-1', 'ok', '已保存 95 条')
+        self.run_round('run-2', 'error', '3 条翻译失败（服务返回 503）')
+        runs = self.client.get('/api/pipeline/runs').json()['runs']
+        self.assertEqual(['seq-2', 'seq-1'], [r['key'] for r in runs])
 
     def test_no_history_yet_is_an_empty_list_not_an_error(self):
         r = self.client.get('/api/pipeline/runs')

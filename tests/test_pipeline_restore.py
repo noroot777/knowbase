@@ -5,6 +5,7 @@
 `test_pipeline_history.py` 那套摆盘(`HistoryCase`),但判据完全不同 —— 那边钉的是
 「落了盘没有、翻不翻得到」,这边钉的是「拿哪一份当最新、拿不准时说不说出来」。
 """
+import json
 from pathlib import Path
 from unittest import main
 from unittest.mock import patch
@@ -164,14 +165,34 @@ class RestoreTests(HistoryCase):
 
     def only_state_write_fails(self):
         """状态文件写不上、历史写得上 —— 磁盘上最新那一轮**只在历史里**。"""
+        return self._write_fails_on(lambda path: path == state._STATE_FILE)
+
+    def only_history_write_fails(self):
+        """历史写不上、状态写得上 —— 那一轮**不在历史里**(位置证据就此缺失)。"""
+        return self._write_fails_on(lambda path: path != state._STATE_FILE)
+
+    def _write_fails_on(self, hit):
         real = state._write_atomic
 
         def pick(path, data):
-            if path == state._STATE_FILE:
+            if hit(path):
                 raise PermissionError('read-only')
             return real(path, data)
 
         return patch.object(state, '_write_atomic', side_effect=pick)
+
+    def read_fails_on(self, hit):
+        """**注入打在真实的那次 IO 上**(`Path.read_bytes`)。打在
+        `_load_json_strict` 上的话「读不出来一律抛」那一道就被 patch 盖掉了。
+        """
+        real = Path.read_bytes
+
+        def pick(path, *args, **kwargs):
+            if hit(path):
+                raise PermissionError('read-only')
+            return real(path, *args, **kwargs)
+
+        return patch.object(Path, 'read_bytes', pick)
 
     def test_the_restore_prefers_the_newer_round_in_the_history(self):
         """恢复要核对两份落盘,不能只信状态文件。
@@ -287,22 +308,133 @@ class RestoreTests(HistoryCase):
             self.assertEqual('run-a', state.get_state()['run_id'],
                              '故障过去了,下一次读状态就该恢复')
 
-    def test_a_failed_restore_does_not_refuse_the_retry(self):
-        """恢复没成功时,展示和起跑核对必须**同源** —— 否则重试被永久误拒。
+    def test_a_transient_read_failure_does_not_refuse_the_retry(self):
+        """短暂读失败之后恢复正常,重试照旧能起 —— 展示和核对**同源**。
 
-        实测形态:连点两次都是 409「这期间又跑完了一轮，请重新点一次」,而其实
-        什么都没跑过 —— 展示从磁盘读到了真实那一轮,核对却拿空内存去跟它比。
+        实测形态(上一版):连点两次都是 409「这期间又跑完了一轮，请重新点一次」,
+        而其实什么都没跑过 —— 展示从磁盘读到了真实那一轮,核对却拿空内存去比。
+        **和下面那条的分界是「这一刻读不读得通」**:读通了就有可信的最新终态,
+        没有任何理由拦;读不通才核对不了哪一轮更新。
         """
         self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503），库里仍是原文')
         self.restart()
 
-        with patch.object(state, '_load_json_strict', side_effect=PermissionError('read-only')), \
+        real, seen = Path.read_bytes, []
+
+        def flaky(path, *args, **kwargs):
+            seen.append(path)
+            if len(seen) == 1:
+                raise PermissionError('read-only')
+            return real(path, *args, **kwargs)
+
+        with patch.object(Path, 'read_bytes', flaky), \
              patch.object(pipeline_retry.threading, 'Thread') as thread:
             self.assertEqual('', state.get_state()['run_id'],
-                             '这一局的前提:恢复确实没成功')
+                             '这一局的前提:第一次确实没读到')
+            self.assertEqual('unknown', state.restore_gap(),
+                             '那一刻要如实报「核对不了」')
             ok, msg = pipeline_retry.start_retry_failed()
-        self.assertTrue(ok, f'什么都没跑过,不许拒:{msg}')
+        self.assertTrue(ok, f'读通之后就该放行:{msg}')
         self.assertTrue(thread.called)
+        self.assertEqual('', state.restore_gap(), '欠账跟着清掉')
+
+    def test_a_restore_that_cannot_prove_latest_refuses_the_retry(self):
+        """**读不通那一刻,不许按最后能读到的那一份自动重试。**
+
+        实测形态:磁盘状态记着 A、历史记着更新的 B(B 那一轮的状态写失败),只对
+        历史文件注入读失败 —— 展示 A、按钮可用,点一次重试导出阶段真去抓了 A 那个
+        来源,而失败其实发生在另一个来源上。**同源不等于最新。**
+        """
+        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503），库里仍是原文')
+        with self.only_state_write_fails():
+            self.run_round('run-b', 'ok', '已保存 95 条到知识库')
+        self.restart()
+
+        with self.read_fails_on(lambda path: path == state._history_file()), \
+             patch.object(pipeline_retry.threading, 'Thread') as thread:
+            self.assertEqual('run-a', (state.last_result() or {}).get('run_id'),
+                             '这一局的前提:能读到的那一份就是旧那一轮')
+            self.assertEqual('unknown', state.restore_gap())
+            ok, msg = pipeline_retry.start_retry_failed()
+        self.assertFalse(ok, '核对不了哪一轮最新就不许起跑')
+        self.assertIn('核对不了', msg)
+        self.assertFalse(thread.called, '一个线程都不许起')
+
+    def test_two_rounds_in_the_same_second_are_told_apart_by_the_sequence(self):
+        """**两份独立可失败的副本加墙上时钟构不成总序。**
+
+        A 轮的历史没写上、紧接着 B 轮的状态没写上:磁盘状态记着 A、历史只有 B,
+        而 A **不在历史里**(位置证据缺失)、两轮又落在同一秒(自然时钟实测两个
+        收尾时间都是 16:08:29)。原来这一档默认旧那一份完整:页头显示 A 的 503,
+        点「重试失败项」导出阶段收到的是 A 那个来源。
+        """
+        with patch.object(state, '_now', return_value='2026-10-14 16:08:29'):
+            with self.only_history_write_fails():
+                self.run_round('run-a', 'error',
+                               '3 条翻译失败（服务返回 503），库里仍是原文')
+            with self.only_state_write_fails():
+                self.run_round('run-b', 'ok', '已保存 95 条到知识库')
+        self.assertEqual('run-a', (state.load_last_run() or {}).get('run_id'),
+                         '这一局的前提:状态文件记着 A')
+        self.assertEqual(['run-b'], [r['run_id'] for r in state.load_history()],
+                         '这一局的前提:历史里只有 B,A 不在里面')
+
+        self.restart()
+        self.assertEqual('run-b', state.get_state()['run_id'],
+                         '完成序号要分出 B 更新 —— 时间和位置都分不出来')
+        self.assertEqual('scope', state.restore_gap(),
+                         '挑中的是历史那一份,它没有重试范围')
+
+    def test_an_invalid_first_row_does_not_hide_the_newer_rounds(self):
+        """历史首条是个空对象时,不许把后面那些仍能证明更新的记录整段遮住。
+
+        坏文件、半截写入都会落出这种形状。原来只过滤非字典,于是拿那个空对象当
+        「最新」比一轮 —— 恢复退回状态文件那一份,而它可能是旧的。
+        """
+        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503），库里仍是原文')
+        with self.only_state_write_fails():
+            self.run_round('run-b', 'ok', '已保存 95 条到知识库')
+        path = state._history_file()
+        raw = json.loads(path.read_text())
+        raw['runs'].insert(0, {})
+        path.write_text(json.dumps(raw, ensure_ascii=False))
+
+        self.restart()
+        self.assertEqual('run-b', state.get_state()['run_id'],
+                         '那个空对象不许遮住后面仍能证明更新的 B')
+        self.assertEqual('scope', state.restore_gap())
+
+    def test_an_unprovable_order_is_reported_instead_of_trusting_the_old_copy(self):
+        """两份都没有完成序号(升级前的记录)、收尾时间又相同 —— 先后**证明不了**。
+
+        展示最后已知的那一份(它完整、带日志),但要如实说出来并拦住重试,
+        **不许默认它可信**。
+        """
+        at = '2026-10-14 16:08:29'
+        state._STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state._STATE_FILE.write_text(json.dumps({
+            'run_id': 'run-old-a', 'finished_at': at, 'started_at': at,
+            'stages': {name: {'status': 'error' if name == 'export' else 'ok',
+                              'detail': '3 条翻译失败（服务返回 503）'}
+                       for name in state.STAGES},
+            'crawl_filter': {'channel': 'rss'}, 'log': [],
+        }, ensure_ascii=False))
+        state._history_file().write_text(json.dumps({'runs': [{
+            'run_id': 'run-old-b', 'finished_at': at, 'started_at': at,
+            'stages': {name: {'status': 'ok', 'detail': '完成'} for name in state.STAGES},
+            'crawl_filter': {'channel': 'rss'}, 'log': [],
+        }]}, ensure_ascii=False))
+
+        self.restart()
+        self.assertEqual('run-old-a', state.get_state()['run_id'],
+                         '展示最后已知的那一份')
+        self.assertEqual('order', state.restore_gap(), '但要如实说先后分不出来')
+
+        with patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, msg = pipeline_retry.start_retry_failed()
+        self.assertFalse(ok, '证明不了最新就不许起跑')
+        self.assertIn('先后分不出来', msg)
+        self.assertFalse(thread.called)
 
     def test_a_snapshot_without_an_id_still_has_a_version(self):
         """升级前落的记录没有 `run_id` —— 版本降级到收尾时间,不是「没有版本」。"""
