@@ -52,6 +52,9 @@ class HistoryCase(TestCase):
         # 摆 `_state` 的用例没有影响;要试重启那一档的用例把 running 改成 False。
         state._restored = ''
         state._restore_gap = ''
+        # 完成序号的进程内高水位是模块级的,**跨用例会泄漏**:生产里它该跨轮累积,
+        # 测试里不清的话「磁盘上发到第几号」这个前提当场不成立
+        state._seq_hwm = 0
         state._state.update(
             running=True, stop_requested=False, stopped=False, run_kind='',
             planned_stages=None, current_stage='', run_id=run_id,
@@ -193,22 +196,24 @@ class PersistFailureTests(HistoryCase):
         state._state['running'] = False      # 那个空线程不会自己收尾
         return got
 
-    def test_a_corrupt_history_file_does_not_escape_the_persist_layer(self):
-        """三种实测过的坏法,**在留档这一层就要隔离掉**,不靠收尾那道兜底。
+    def test_a_readable_corrupt_history_file_does_not_escape_the_persist_layer(self):
+        """**读得出来**的那两种坏法,在留档这一层就要隔离掉,不靠收尾那道兜底。
 
-        非 UTF-8 字节抛 `UnicodeDecodeError`、深嵌套 JSON 抛 `RecursionError`、
-        孤立代理字符在**写**那一步抛 `UnicodeEncodeError` —— 三个都不属于
-        `OSError` 和 `JSONDecodeError`。
+        非 UTF-8 字节按 `errors='replace'` 读之后仍是合法 JSON、形状也对(坏的只有
+        那一个字符);孤立代理字符读得出来,抛在**写**那一步的 `UnicodeEncodeError`。
+        两个都不属于 `OSError` 和 `JSONDecodeError`。
 
         **两道是冗余保护,各有自己的回归**(「两份实现各有自己的回归」):这一条
-        钉第一道,所以**直接调这两个函数、不经过 `_end_run`* ——走 `_end_run`
+        钉第一道,所以**直接调这两个函数、不经过 `_end_run`** —— 走 `_end_run`
         的话第二道会把异常吃掉,这一条在任何单道注入下都不红。第二道由
         `test_the_invariant_is_the_finally_not_the_exception_list` 钉,那一条同时
         断言用户遇到的后果。
+
+        **和下面那条方向相反,分界是「这一份存量读不读得出来」**:读得出来就照旧
+        追加(这一轮留下、旧记录也还在),读不出来一律抛、原文件不许动。
         """
         for name, raw in (
             ('非 UTF-8 字节', b'{"runs": [{"run_id": "\xff\xfe"}]}'),
-            ('深嵌套 JSON', b'[' * 2000 + b']' * 2000),
             ('孤立代理字符', '{"runs": [{"run_id": "old", "log": ["\\ud800"]}]}'.encode()),
         ):
             with self.subTest(name):
@@ -224,6 +229,47 @@ class PersistFailureTests(HistoryCase):
                 # 读出来的旧记录(坏字节换成 U+FFFD 之后)也还在,所以只认最前那一条
                 self.assertEqual('run-bad', (state.load_history() or [{}])[0].get('run_id'),
                                  f'{name}:隔离掉之后这一轮还是要留下来、而且在最前')
+
+    def test_an_unprovable_history_read_never_replaces_the_file(self):
+        """**存量没读出来时不许整份替换** —— 那一步是把存量删掉。
+
+        追加之后是原子换文件,而原子性只保证新文件完整、**不保证旧记录还在**。拿一
+        个「因为读失败而空着」的集合去替换,库里几轮的失败原因和日志当场消失,而
+        两份都写成功、诊断是空的 —— 面板上一个字都不说。
+
+        判据落在**文件内容一个字节都没变**上,不是「抛了没有」:抛出去只是手段,
+        `_end_run` 那两份本来就是分别尝试、分别诊断的,这一份抛了只少一条历史记录、
+        面板会如实说一句。
+
+        三种摆法同一个根因(**读失败 / 形状不对都不授权破坏性替换**),所以一组里
+        一起摆:瞬时 IO 失败是报告实测那一个,另两种是同一条路上的坏形状。
+        """
+        good = {'runs': [{'run_id': 'old-a', 'finished_at': '2026-10-14 09:00:00',
+                          'stages': {}, 'log': ['旧那一轮的日志']},
+                         {'run_id': 'old-b', 'finished_at': '2026-10-13 09:00:00',
+                          'stages': {}, 'log': []}]}
+        cases = (('瞬时读失败', None), ('深嵌套 JSON', b'[' * 2000 + b']' * 2000),
+                 ('形状不对', b'{"runs": 3}'))
+        for name, raw in cases:
+            with self.subTest(name):
+                path = state._history_file()
+                path.write_bytes(raw if raw else json.dumps(good).encode())
+                before = path.read_bytes()
+                self.reset('run-new')
+                state._state.update(finished_at='2026-10-14 10:05:00', run_kind='sync',
+                                    planned_stages=['export'])
+                real = Path.read_bytes
+
+                def boom(self, *, _p=path, _r=real):
+                    if self == _p:
+                        raise PermissionError('读不了')
+                    return _r(self)
+
+                with patch.object(Path, 'read_bytes', boom if raw is None else real):
+                    with self.assertRaises(Exception):     # noqa: B017 - 坏法各抛各的
+                        state._save_history()
+                self.assertEqual(before, path.read_bytes(),
+                                 f'{name}:原文件被改了 —— 存量就是这样没的')
 
     def test_the_invariant_is_the_finally_not_the_exception_list(self):
         """注入一个谁都没列进捕获的异常,收尾照旧,诊断如实记着是什么坏了。

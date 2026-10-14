@@ -8,27 +8,25 @@
 
 from __future__ import annotations
 
-import json
-import os
 import secrets
 import threading
 import time
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
-from pathlib import Path
 
 from kb.config import DATA_DIR
 from kb.pipeline_persist import (
     _dump_bytes,
     _history_runs,
+    _history_shape_ok,
     _load_json,
     _load_json_strict,
     _newest_round,
     _seq_of,
     _write_atomic,
-    row_key,
     result_version as _version_of,
+    row_key as row_key,          # 面板那条历史清单的公开入口,这里只是过一道
 )
 
 _STATE_FILE = DATA_DIR / "pipeline_state.json"
@@ -100,6 +98,9 @@ _RUN_EPOCH = f'{int(time.time()):x}{secrets.token_hex(2)}'
 # 身份里那一截自增。**跟 `_state["run_seq"]`(完成序号)不是一回事** ——
 # 这个只为了让 run id 在进程内不重复,那个是跨进程单调的落盘顺序凭据。
 _id_seq = 0
+# 本进程发出去的最大**完成序号**。磁盘上那两份都可能写失败、还会被截断,所以
+# 「下一轮读磁盘拿到的最大值」不一定盖得住本进程发过的号 —— 理由在 `_next_seq`。
+_seq_hwm = 0
 
 # 最近一次留档失败的异常类型,空串 = 上一次留档是成功的。面板拿它如实说一句 ——
 # **留档失败不许声张成同步失败,但也不许静默**:只看页面的话,「历史里没有这一轮」
@@ -272,16 +273,44 @@ def retry_notes(run: dict) -> dict:
 
 
 def _next_seq() -> int:
-    """给这一轮发一个完成序号,**比磁盘上记着的任何一轮都大**。
+    """给这一轮发一个完成序号,**比磁盘上记着的任何一轮都大;证明不了就发 0**。
 
     取两份现有记录里的最大值 +1:哪一份写失败都不影响下一轮继续递增,所以
     「状态记着第 1 轮、历史记着第 2 轮」这种失配也分得出先后(`_newest_round`)。
-    读不出来就从 1 开始 —— 那一档整个判据本来就不可靠,`_newest_round` 对「序号
-    相等」一律报「证明不了」,不会拿它当凭据。
+
+    **读不出来一律发 0,不许从 1 重新开始。** 0 在 `_seq_of` 那边表示「这一轮没有
+    顺序凭据」,恢复时序号那一档直接走不通、退到位置和时间去证明。发一个看着合法的
+    小整数是**最坏的那一档**:它和磁盘上那些号不相等,于是恢复层拿它当成「谁更晚」
+    的证明用 —— 实测形态是磁盘上记着第 3 轮、这一轮读失证发了 1,恢复当场判出「第
+    3 轮更新」,页头显示那一轮的失败、点「重试失败项」去抓了它那个来源,而这一轮
+    明明已经成功。**失证必须是「没有凭据」,不是「一个小凭据」。**
+
+    `_seq_hwm` 是**本进程发出去的最大号**,一道**冗余带**:读成功时磁盘上最新那一轮
+    的号就是本进程上一轮发的(它写成功了),所以 +1 天然单调 —— 定点去掉它红 0 条,
+    是真冗余不是用例不敏感。留着是因为它兜的那一档(磁盘上的最大值比本进程发过的
+    还小)将来可能真出现:截断只留最近几轮、或者有谁写个清理脚本把老记录删掉。
     """
-    seen = [_seq_of(load_last_run() or {})]
-    seen += [_seq_of(r) for r in load_history()]
-    return max(seen) + 1
+    global _seq_hwm
+    try:
+        seen = [_seq_of(_load_json_strict(_STATE_FILE) or {})]
+        seen += [_seq_of(r) for r in _history_rounds_strict()]
+    except Exception:  # noqa: BLE001 - 理由就在上面那段:失证发 0
+        return 0
+    nxt = max(seen + [_seq_hwm]) + 1
+    _seq_hwm = nxt
+    return nxt
+
+
+def _history_rounds_strict() -> list[dict]:
+    """历史记录的**严格版**:读不出来、或者形状不对,一律抛。
+
+    「可解析但形状不对」和「读不出来」是同一档 —— 都不能当成「这份副本没有」。
+    展示那条路照旧走 `load_history()`(宽口径,少显示几行、不出声)。
+    """
+    raw = _load_json_strict(_history_file())
+    if not _history_shape_ok(raw):
+        raise ValueError(f'历史文件形状不对：{type(raw).__name__}')
+    return _history_runs(raw)
 
 
 def _save_last_run() -> None:
@@ -346,7 +375,14 @@ def _save_history() -> None:
     # **空身份一律追加,不去重。** 空串不是身份 —— 拿它当键会把两轮各自跑过的运行
     # 合成一条(没经过 `start_pipeline` 的那条路身份就是空的)。历史里少一轮是静默
     # 丢数据,多留一条只是多一行。
-    runs = [r for r in load_history() if not rid or r.get("run_id") != rid]
+    # **存量必须是「确实读出来了」或者「文件确实不存在」,别的一律抛。** 这一步之后
+    # 是整份原子替换,拿一个因为读失败而空着的集合去替换,就是把存量**删掉** ——
+    # 原子性只保证新文件完整,不保证旧记录还在。实测形态:库里已经三轮(其中一轮
+    # 带着失败原因和日志),第四轮成功、只在这一次读上注入一个 `PermissionError`,
+    # 历史当场从 3 条变 1 条、面板上一个字不说(两份都写成功了,诊断是空的)。
+    # 抛出去反而正好:`_end_run` 那两份是分别尝试、分别诊断的,这一份写不上只是
+    # 少一条历史记录,面板会如实说一句,而**原文件一个字节都没动**。
+    runs = [r for r in _history_rounds_strict() if not rid or r.get("run_id") != rid]
     runs.insert(0, record)
     del runs[_HISTORY_KEEP:]
     _write_atomic(_history_file(), _dump_bytes({"runs": runs}))
@@ -426,7 +462,7 @@ def _restore_once() -> None:
     范围」要如实说出来并拦住,不许静默退回上一轮的范围**(那一档的后果是导出摘掉
     失败那个来源、面板报「已保存 0 条」,见 `retry-scope.md`)。
     """
-    global _restored, _restore_gap
+    global _restored, _restore_gap, _seq_hwm
     if _restored:
         return
     with _lock:
@@ -436,7 +472,11 @@ def _restore_once() -> None:
             return
         try:
             saved = _load_json_strict(_STATE_FILE)
-            runs = _history_runs(_load_json_strict(_history_file()))
+            # **形状不对和读不出来同一档。** 「可解析但形状不是预期的」当成「这份
+            # 副本没有」的话,恢复就静默认可了另一份 —— 而它可能正是旧的那一轮。
+            if not (saved is None or isinstance(saved, dict)):
+                raise ValueError(f'状态文件形状不对：{type(saved).__name__}')
+            runs = _history_rounds_strict()
         except Exception:  # noqa: BLE001 - 理由在 `_load_json_strict` 的 docstring
             # **读不通不许固化成「从没跑过」**:下一次读状态时再试一遍。
             # 但**这一刻手上那一份不可信**:`_latest_locked()` 会回退到状态文件
@@ -446,16 +486,18 @@ def _restore_once() -> None:
             # 所以这一档要如实报出来并拦住重试。
             _restore_gap = 'unknown'
             return
-        if not isinstance(saved, dict):
-            saved = None
         pick, gap = _newest_round(runs, saved)
         if not isinstance(pick, dict) or not pick.get("finished_at"):
             _restored = 'ok'                      # 确定没跑过任何一轮
             return
         for key in ("started_at", "finished_at", "run_kind", "planned_stages",
-                    "run_id", "log"):
+                    "run_id", "run_seq", "log"):
             if key in pick:
                 _state[key] = deepcopy(pick[key])
+        # **恢复来的那一轮同时抬高水位**,和 `run_seq` 一起:内存里这份终态该和磁盘
+        # 那份一致。这两笔也是**冗余带**(定点去掉红 0 条,理由同 `_next_seq`)——
+        # 发号读的是磁盘不是内存,所以它们眼下改变不了任何可观测行为。
+        _seq_hwm = max(_seq_hwm, _seq_of(pick))
         _state["stopped"] = bool(pick.get("stopped", False))
         for key in ("stages", "crawl_filter", "export_filter", "crawl_retry"):
             got = pick.get(key)

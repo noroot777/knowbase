@@ -86,13 +86,26 @@ def _write_atomic(path: Path, data: bytes) -> None:
 
 
 def _history_runs(raw) -> list[dict]:
-    """把读出来的那份历史文件解析成记录列表。**解析口径只有一份** —— 恢复那一步
-    也过它,不在那边另写一遍形状检查。
+    """把读出来的那份历史文件解析成记录列表。**解析口径只有一份** —— 恢复和追加
+    那两步各有自己的严格版(下面两个),形状检查都过这里,不在那边另写一遍。
+
+    这一份是**宽口径**,给只读展示用:形状不对就少显示几行、不出声。
     """
     runs = raw.get("runs") if isinstance(raw, dict) else None
     if not isinstance(runs, list):
         return []
     return [r for r in runs if isinstance(r, dict)]
+
+
+def _history_shape_ok(raw) -> bool:
+    """这份读出来的历史**形状对不对**:要么文件不存在(`None`),要么是
+    `{"runs": [...]}`。
+
+    「可解析但形状不对」和「读不出来」是**同一档**,都不能当成「这份副本没有」:
+    恢复那一步会就此静默认可另一份旧结果,追加那一步会拿一个空集合整份替换掉存量。
+    `runs` 里个别元素不是字典不算形状坏(那一条过滤掉就是了,它只坏自己那一行)。
+    """
+    return raw is None or (isinstance(raw, dict) and isinstance(raw.get("runs"), list))
 
 
 
@@ -144,6 +157,13 @@ def _newest_round(runs: list[dict], saved: dict | None) -> tuple[dict | None, st
     所以每一轮落盘时带一个跨进程单调的完成序号(`run_seq`),按它比 —— 哪一份写
     失败都不影响下一轮继续递增。序号缺失(升级前的记录)时退回历史位置和时间,
     **而那两样都分不出先后时一律报 `order`,不许默认旧那一份完整**。
+
+    **判据按「不依赖别处做对」排序**,不按强弱直觉:位置证据 → 序号 → 收尾时间。
+    序号看着最硬,可它的单调性要靠发号那一步做对,而发号要读磁盘、读得失证时根本
+    发不出来(`_next_seq` 那时返回 0);位置证据只用同一份文件内部的先后次序,这份
+    文件读出来了就成立。序号排在位置前面的败法实测过:发号读失证的那一轮拿到小号
+    落进历史首条,状态文件记着的上一轮号更大 —— 序号这一档当场判出「旧那一轮更
+    新」,而历史里明明还留着它、位置已经证明了它是过去的一轮。
     """
     saved = saved if _valid_round(saved) else None
     runs = [r for r in runs if _valid_round(r)]
@@ -154,17 +174,26 @@ def _newest_round(runs: list[dict], saved: dict | None) -> tuple[dict | None, st
         return newest, 'scope'
     if result_version(newest) == result_version(saved):
         return saved, ''                       # 同一轮 —— 用完整那一份
-    # ① 顺序凭据:两边都有序号,按它比
-    seq_new, seq_old = _seq_of(newest), _seq_of(saved)
-    if seq_new and seq_old and seq_new != seq_old:
-        return (newest, 'scope') if seq_new > seq_old else (saved, '')
-    # ② 历史是倒序的:状态文件那一轮出现在首条后面,就证明首条更新
+    at_new = str(newest.get("finished_at") or "")
+    at_old = str(saved.get("finished_at") or "")
+    # ① **结构性凭据排在最前**:历史是倒序的,状态文件那一轮出现在首条后面,就证明
+    #    首条更新。它是同一份文件内部的位置关系,**不依赖发号这件事做对** —— 而序号
+    #    是发得出来才有的,发号那一步读失证就没有(见 `_next_seq`)。
     want = result_version(saved)
     if any(result_version(r) == want for r in runs[1:]):
         return newest, 'scope'
+    # ② 完成序号
+    seq_new, seq_old = _seq_of(newest), _seq_of(saved)
+    if seq_new and seq_old and seq_new != seq_old:
+        by_seq = newest if seq_new > seq_old else saved
+        # **序号和收尾时间指向不同的一轮 = 发号一度回退过**(存量记录里就可能有:
+        # 发号那一步读失证时,老代码会从 1 重新开始)。这种时候两样凭据互相矛盾,
+        # **不许挑一个** —— 报「证明不了」,拦住重试,跑完一轮自己就好了。
+        if at_new and at_old and at_new != at_old:
+            if by_seq is not (newest if at_new > at_old else saved):
+                return saved, 'order'
+        return (newest, 'scope') if by_seq is newest else (saved, '')
     # ③ 两样都证明不了:收尾时间能分出先后就用它,**分不出就如实报「不确定」**
-    at_new = str(newest.get("finished_at") or "")
-    at_old = str(saved.get("finished_at") or "")
     if at_new > at_old:
         return newest, 'scope'
     if at_new < at_old:
