@@ -27,6 +27,7 @@ from kb.pipeline_state import (
     _stage,
     _state,
     last_result,
+    mark_open,
     new_run_id,
     restore_gap,
     same_round,
@@ -321,6 +322,10 @@ _GAP_REFUSED = {
                 '跑一次完整同步之后再重试'),
     'order': ('磁盘上两份留档各记着不同的一轮，先后分不出来。'
               '跑一次完整同步之后再重试'),
+    'broken': ('最新那一轮的留档损坏，读不出它的结果和范围，页面显示的是更早一轮。'
+               '跑一次完整同步之后再重试'),
+    'lost': ('上一轮同步的结果一个字都没能留档，页面显示的是更早一轮、已经过期。'
+             '跑一次完整同步之后再重试'),
 }
 
 
@@ -329,6 +334,14 @@ def start_retry_failed() -> tuple[bool, str]:
     # **整次重试只取一份快照**,下面的计划、范围、导出范围全从它派生(理由在
     # `retry_failed_plan` 的 `run` 那段)。
     prev = last_result()
+    # **欠账要在「有没有失败项」之前问。** 恢复得不完整时手上这份快照本来就不该拿来
+    # 派生计划:最新那一轮的留档坏到渲染不了时 `last_result()` 给的是空字典,计划于是
+    # 也是空的 —— 拒绝理由就成了「上次运行没有失败项」,而真相是「那一轮的留档坏了,
+    # 屏幕上这一轮不是最新的」。两句话会让人做出完全不同的下一步。锁内那一道照旧
+    # 保留(它读的是拿到锁那一刻的欠账,这一道只是**早一道、把话说准**)。
+    gap = restore_gap()
+    if gap:
+        return False, _GAP_REFUSED.get(gap, _GAP_REFUSED['order'])
     plan = retry_failed_plan(run=prev)
     # **先定计划,只有真要重抓才去问各来源的失败名单。** 问名单要读那个来源自己
     # 的订阅库,而这颗按钮的射程远不止抓取:上一轮只有 index 失败、这会儿订阅库
@@ -381,7 +394,11 @@ def start_retry_failed() -> tuple[bool, str]:
         # **核对无条件做,而且判据是 `same_round`**(「这两份是不是同一轮」)——
         # 不是比展示版本。那个版本保证非空、**不保证一轮唯一**:两条都没有身份而
         # 收尾时间又相同的旧记录版本就会撞,核对于是放行,而手上这份其实已经不是
-        # 最新那一轮了。口径和恢复那边同一份。原来是「两边都得有 run_id 才
+        # 最新那一轮了。**这一处要的是 `same_round` 而不是 `same_event`** ——
+        # 它问的是「这期间状态变没变」,而两边同源时(没跑新的一轮)必须判成真,
+        # 那只能靠内容那一级;真又跑完一轮的话,那一轮带着当前世代的身份,身份那一级
+        # 当场判出不等。**「谁是最新」那个问题不在这里问**(那边过 `same_event`)。
+        # 原来是「两边都得有 run_id 才
         # 比、拿不准一律放行」—— 为的是别把重启后那一档和升级前的老记录误拒,可那
         # 两档恰好也是**并发窗口**:实测里拿一份没有身份的旧快照、期间另一轮刚成功
         # 结束,这道核对整条跳过,上一轮失败的那几个订阅又被抓了一遍,而失败其实
@@ -414,6 +431,9 @@ def start_retry_failed() -> tuple[bool, str]:
                            "detail": detail[s]}
                        for s in STAGES},
         })
+        # 开工标记:**两个起跑入口都要落**(口径在 `pipeline_state.mark_open`)——
+        # 重试轮的终态同样只在收尾时写,它一样会整轮失证。
+        mark_open()
     _log("重试失败项: " + " → ".join(plan))
     threading.Thread(target=_run_retry_failed,
                      args=(plan, crawl_filter, export_filter), daemon=True).start()

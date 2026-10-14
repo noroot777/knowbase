@@ -9,12 +9,14 @@
 另一个问题,这边只问恢复本身(内存读回来了没、活进程被盖没被盖、读失败之后还能不能
 重试)。
 """
+import json
 from pathlib import Path
 from unittest import main
 from unittest.mock import patch
 
-from kb import pipeline_retry, pipeline_state as state
-from tests.test_pipeline_history import HistoryCase
+from kb import (pipeline, pipeline_persist as persist, pipeline_retry,
+                pipeline_state as state)
+from tests.pipeline_case import HistoryCase
 
 
 class LatestResultTests(HistoryCase):
@@ -138,6 +140,39 @@ class LatestResultTests(HistoryCase):
         self.assertFalse(ok, '版本撞上不算「还是同一轮」')
         self.assertIn('又跑完', msg)
         self.assertFalse(thread.called)
+
+    def test_an_identical_looking_round_finishing_in_between_blocks_the_retry(self):
+        """期间又跑完一轮,而那两轮**内容逐字相同** —— 身份不同就得拦住。
+
+        上一条摆的是旧格式(没身份,只能靠内容判);这一条两轮都带身份,内容却一字
+        不差:同一秒收尾、阶段结果和日志相同。内容那一级比的字段里没有
+        `export_filter` —— 而两轮的导出范围恰恰是不同的订阅。让内容兜底盖过身份的
+        话整条放行,手上那份快照其实已经落后一轮:实测 `/api/pipeline/retry-failed`
+        返回 200(该是 409),重试线程收到的是上一轮那个订阅。
+        """
+        self.restart()                         # 开局得干净:上一条可能还留着 running
+        at = '2026-10-14 21:04:00'
+        common = {'finished_at': at, 'started_at': '2026-10-14 21:00:00',
+                  'run_kind': 'sync', 'stopped': False, 'seq_gen': state._SEQ_GEN,
+                  'planned_stages': list(state.STAGES), 'crawl_filter': {'channel': 'rss'},
+                  'stages': {name: {'status': 'error' if name == 'export' else 'ok',
+                                    'detail': '3 条翻译失败（服务返回 503）'}
+                             for name in state.STAGES},
+                  'log': ['[10-14 21:04] 管道结束']}
+        stale = dict(common, run_id='run-6acf76695d2e-1', run_seq=1,
+                     export_filter={'accounts': ['A订阅']})
+        fresh = dict(common, run_id='run-6acf76695d2e-2', run_seq=2,
+                     export_filter={'accounts': ['B订阅']})
+        self.assertTrue(all(stale.get(k) == fresh.get(k) for k in persist._ROUND_FIELDS),
+                        '摆局前提:内容那一级比的每个字段都逐字相同')
+
+        with patch.object(pipeline_retry, 'last_result', return_value=stale), \
+             patch.object(pipeline_retry, '_latest_locked', return_value=fresh), \
+             patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, msg = pipeline_retry.start_retry_failed()
+        self.assertFalse(ok, '身份不同就是另一轮,内容再像也不算')
+        self.assertIn('又跑完', msg)
+        self.assertFalse(thread.called, '更不许起线程去抓 A订阅')
 
     def test_a_restart_can_still_retry_from_the_disk_copy(self):
         """**反过来钉一边**:重启之后内存里没跑过任何一轮,照旧要能重试。
@@ -385,6 +420,189 @@ class RestoreTests(HistoryCase):
         self.assertFalse(ok, '没有身份也要按收尾时间比得出来')
         self.assertIn('又跑完', msg)
         self.assertFalse(thread.called, '一个线程都不许起')
+
+    def test_a_record_that_would_break_the_screen_is_not_the_latest_either(self):
+        """恢复拒掉的那种记录,**不许从磁盘回落那条路原样进来**。
+
+        回落走的是「恢复还没成功 / 恢复拒了磁盘那份」这一档,而拒的理由多半正是
+        形状不对。`load_last_run()` 是宽口径的「磁盘那份原样」(还有只取失败名单的
+        消费者在用它),回落时不过一遍形状判据的话,被挡在门外的那份记录从这里进来,
+        照旧交给面板整屏渲染和重试派生 —— 日志那一屏 `join()` 当场抛,整屏变成
+        「状态暂时无法更新」。**宁可报「尚无运行记录」**:那是实话,下一轮就补回来。
+        """
+        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）')
+        raw = json.loads(state._STATE_FILE.read_text())
+        state._STATE_FILE.write_text(json.dumps(dict(raw, log='管道结束'),
+                                                ensure_ascii=False))
+        state._history_file().write_text(json.dumps({'runs': []}, ensure_ascii=False))
+        self.assertEqual('管道结束', (state.load_last_run() or {}).get('log'),
+                         '摆局前提:磁盘那份原样读出来确实是那个字符串')
+
+        self.restart()
+        self.assertEqual({}, state.last_result(),
+                         '渲染不了的记录不算「最新那一轮」')
+        with patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, _ = pipeline_retry.start_retry_failed()
+        self.assertFalse(ok, '更不许按它派生一次重试')
+        self.assertFalse(thread.called)
+
+    def test_a_restored_legacy_round_does_not_borrow_the_current_generation(self):
+        """恢复回来的旧记录**不许借用内存里那份默认的世代标识**。
+
+        `_state` 初始带的是当前世代,恢复只覆盖它列出来的那几个字段 —— 漏掉出处的
+        话,升级前那一轮的 `run-1` / 回退过的 `run_seq` 在内存里就成了「当前这一代
+        writer 发的号」,而它们跨重启会重复。**出处是所有身份判据的输入**,改掉它
+        等于让 `event_id` / `_seq_of` 那两道自己的门槛失效。
+
+        反过来钉一边:恢复过一次之后**再跑一轮,出处要回到当前世代** —— 不然内存
+        那份终态永久失证,起跑核对就只剩内容兜底那一级(`_end_run` 发号时署名)。
+        """
+        at = '2026-10-14 09:16:00'
+        one = {'finished_at': at, 'started_at': '2026-10-14 09:00:00',
+               'run_kind': 'sync', 'stopped': False, 'run_id': 'run-1', 'run_seq': 3,
+               'planned_stages': list(state.STAGES), 'crawl_filter': {'channel': 'rss'},
+               'stages': {name: {'status': 'ok', 'detail': '完成'} for name in state.STAGES},
+               'log': ['[10-14 09:16] 管道结束']}
+        state._STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state._STATE_FILE.write_text(json.dumps(dict(one, export_filter={}),
+                                                ensure_ascii=False))
+        state._history_file().write_text(json.dumps({'runs': [dict(one)]},
+                                                    ensure_ascii=False))
+
+        self.restart()
+        got = state.get_state()
+        self.assertEqual('run-1', got['run_id'], '摆局前提:那个旧身份确实恢复进来了')
+        self.assertEqual('', persist.event_id(got), '旧记录拿不出可信的事件身份')
+        self.assertEqual(0, persist._seq_of(got), '它那个号也不算凭据')
+
+        self.run_round('run-after-restore', 'ok', '完成')
+        self.assertTrue(persist.event_id(state.get_state()),
+                        '这一代 writer 定稿时要署名 —— 不然内存那份永久失证')
+
+
+    def test_two_broken_copies_are_not_reported_as_never_having_run(self):
+        """两份都渲染不了时,**「一份都挑不出来」不等于「确定从没跑过」**。
+
+        那一轮确实发生过(时间、身份都在),只是两份副本都读不出来。把这一档固化成
+        「没跑过」会连同那道拦闸一起吞掉:面板报「尚无运行记录」,而「重试失败项」
+        照旧可点 —— 它会按磁盘上那份读得出来的旧范围去抓。所以这一档要:**什么都不
+        展示,但欠账如实记着、按钮按不下去。**
+        """
+        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）')
+        for path in (state._STATE_FILE, state._history_file()):
+            raw = json.loads(path.read_text())
+            if 'runs' in raw:
+                raw['runs'] = [dict(one, log='管道结束') for one in raw['runs']]
+            else:
+                raw['log'] = '管道结束'
+            path.write_text(json.dumps(raw, ensure_ascii=False))
+
+        self.restart()
+        self.assertEqual('', state.get_state()['finished_at'],
+                         '两份都渲染不了 —— 什么也不往屏幕上放')
+        self.assertEqual('broken', state.restore_gap(),
+                         '可那一轮发生过:不许说「从没跑过」')
+        with patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, msg = pipeline_retry.start_retry_failed()
+        self.assertFalse(ok)
+        self.assertIn('留档损坏', msg,
+                      '拒绝理由要说准 —— 不是「上次运行没有失败项」')
+        self.assertFalse(thread.called)
+
+
+    def test_a_round_whose_result_never_reached_the_disk_is_not_forgotten(self):
+        """两份终态都没写上时,**那一轮不许就此查无此事**。
+
+        两份都是收尾时才写的:都失败那一档,磁盘上一个字都没留下这一轮 —— 新身份、
+        完成序号、终态和那笔留档诊断全在内存里,而重启把内存清空。于是恢复看到的两份
+        都是上一轮,`same_event` 正确地证明「这两份是同一次事件」,可它证明不了「没有
+        更新的一轮」:实测 B 轮(成功、范围是 B订阅)两份写入都报满盘,重启后页头又显示
+        A 的 503、**空欠账、没有任何过期提示**,点下去导出阶段收到 A订阅。
+
+        所以开工标记要落在**起跑之前**,收尾两份都写上了才清掉。重启后它还在、而磁盘上
+        最新那一份不是它,就说明有一轮跑过而结果没落下来。
+        """
+        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）')
+        self.assertFalse(state._open_file().exists(), '摆局前提:上一轮正常收尾,标记清掉了')
+        with self._write_fails_on(lambda path: True):
+            self.run_round('run-b', 'ok', '已保存 95 条')
+        self.assertTrue(state._open_file().exists(), 'B 轮两份都没写上 —— 标记留着')
+        self.assertEqual('run-a', (state.load_last_run() or {}).get('run_id'),
+                         '摆局前提:磁盘上最新那一份还是 A')
+
+        self.restart()
+        state.get_state()                               # 恢复是懒做的
+        self.assertEqual('lost', state.restore_gap(),
+                         '有一轮跑过而结果没落下来 —— 屏幕上这一轮已经过期')
+        with patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, msg = pipeline_retry.start_retry_failed()
+        self.assertFalse(ok, '不许按一份已经过期的范围去抓')
+        self.assertIn('没能留档', msg)
+        self.assertFalse(thread.called)
+
+    def test_a_round_that_did_land_is_not_reported_as_lost(self):
+        """**反过来钉一边**:标记没清掉不等于失证。
+
+        只有一份写失败那一档(`scope`)标记也留着,可那一轮确实在历史里 —— 判据是
+        「标记不是磁盘上最新那一轮」,不是「标记还在」。按「标记还在就报失证」写的话,
+        每一次单写失败都被多报一档,而那一屏其实是最新的。
+        """
+        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）')
+        with self.only_state_write_fails():
+            self.run_round('run-b', 'ok', '已保存 95 条')
+        self.assertTrue(state._open_file().exists(), '摆局前提:有一份写失败,标记留着')
+
+        self.restart()
+        self.assertEqual('run-b', state.get_state()['run_id'],
+                         'B 轮在历史里 —— 展示的就是它')
+        self.assertEqual('scope', state.restore_gap(),
+                         '标记指着的就是这一轮:不是失证,只是重试范围没留档')
+
+    def test_a_readable_copy_of_the_same_round_is_not_called_an_earlier_one(self):
+        """退回到的是**同一轮的另一个副本**时,不许说「下面显示的是更早一轮」。
+
+        状态文件那份正文坏了、而历史里那份同一轮的副本正常:屏幕上显示的就是最新那
+        一轮自己,只是少了重试派生字段 —— 那恰恰是 `scope` 的处境。说成「更早一轮」
+        是假话,而人会据这句话去决定下一步。
+        """
+        self.run_round('run-a', 'ok', '已保存 95 条')
+        raw = json.loads(state._STATE_FILE.read_text())
+        state._STATE_FILE.write_text(json.dumps(dict(raw, log='管道结束'),
+                                                ensure_ascii=False))
+
+        self.restart()
+        self.assertEqual('run-a', state.get_state()['run_id'],
+                         '展示的是同一轮的历史副本')
+        self.assertEqual('scope', state.restore_gap(),
+                         '同一轮的副本 —— 报「范围没留档」,不是「更早一轮」')
+
+
+    def test_a_plain_sync_leaves_an_open_mark_before_it_starts(self):
+        """**普通同步那条起跑路要落开工标记** —— 而且落在起线程之前。
+
+        两个起跑入口各有自己的回归:任一处漏掉,那条路跑出来的轮次就回到「两份终态
+        都没写上时查无此事」那个病,而另一条路的用例全绿。
+        """
+        self.restart()
+        state._open_file().unlink(missing_ok=True)
+        with patch.object(pipeline.threading, 'Thread') as thread:
+            run_id = pipeline.start_pipeline(['crawl'])
+        self.assertTrue(thread.called, '摆局前提:起跑确实走到了起线程那一步')
+        mark = json.loads(state._open_file().read_text())
+        self.assertEqual(run_id, mark['run_id'], '标记记的是这一轮的身份')
+        self.assertEqual(state._SEQ_GEN, mark['seq_gen'], '而且带着出处')
+
+    def test_a_failed_retry_also_leaves_an_open_mark(self):
+        """**失败重试那条起跑路同样要落** —— 重试轮的终态也只在收尾时写。"""
+        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）')
+        self.assertFalse(state._open_file().exists(), '摆局前提:上一轮收尾清掉了标记')
+        with patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, _ = pipeline_retry.start_retry_failed()
+        self.assertTrue(ok and thread.called, '摆局前提:重试确实起跑了')
+        mark = json.loads(state._open_file().read_text())
+        self.assertEqual(state._state['run_id'], mark['run_id'])
+        self.assertEqual('retry', mark['run_kind'], '标记里认得出这是重试轮')
+
 
 if __name__ == '__main__':
     main()

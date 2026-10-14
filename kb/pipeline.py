@@ -55,6 +55,7 @@ from kb.pipeline_state import (
     same_round,
     valid_round,
     result_version,
+    mark_open,
     new_run_id,
     request_stop,
     run_result,
@@ -191,6 +192,10 @@ def start_pipeline(stages: list[str] | None = None,
             "stages": {s: {"status": "pending" if s in wanted else "skipped",
                            "detail": ""} for s in STAGES},
         })
+        # **开工标记落在锁里、起线程之前**:两份终态都是收尾时才写的,都写失败那一档
+        # 磁盘上一个字都不会留下这一轮(理由和实测形态在 `pipeline_open`)。放在锁外
+        # 的话「内存说在跑」和「磁盘说开工了」中间有个窗口。
+        mark_open()
     threading.Thread(target=_run_pipeline, args=(wanted, crawl_filter),
                      daemon=True).start()
     return run_id

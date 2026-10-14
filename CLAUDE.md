@@ -164,7 +164,7 @@
 | 订阅正文转纯文本、阅读页渲染、来源卡片(`kb/feeds/fetching.py` 的 `plain`、`kb/web/pages.py`) | `feed-plain.md`、`doc-reader.md`、`source-cards.md` |
 | 新订阅只收几天、存量清理(`kb/feeds/history.py`、`scripts/feed_trim_history.py`) | `history-depth.md` |
 | 「重试失败项」那颗按钮的范围(`kb/pipeline_retry.py`、`pipeline_state.py`) | `retry-scope.md` |
-| 同步的历史运行、一轮的红怎么留档、恢复时挑哪一轮(`kb/pipeline_state.py`、`pipeline_persist.py`、`pipe_history.js`) | `pipeline-history.md` |
+| 同步的历史运行、一轮的红怎么留档、恢复时挑哪一轮(`kb/pipeline_state.py`、`pipeline_persist.py`、`pipeline_open.py`、`pipe_history.js`) | `pipeline-history.md` |
 | **任何写 kb.db 或 vault 文件的入口**(索引、导出、提取回写、条目化、清理脚本) | `maintenance-lock.md` |
 | 没有 feed 的站点、网页专栏解析(`kb/feeds/page_list.py`) | `page-list.md` |
 | 邮件简报 / TLDR(`kb/feeds/digest.py`) | `digest.md` |

@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 
+from kb import pipeline_open as _open
 from kb.config import DATA_DIR
 from kb.pipeline_persist import (
     _SEQ_GEN,
@@ -26,8 +27,10 @@ from kb.pipeline_persist import (
     _load_json_strict,
     _newest_round,
     _seq_of,
+    run_record,
     _write_atomic,
     result_version as _version_of,
+    retry_notes as retry_notes,  # 失败名单那本账的读法:判据层一份,这里只是过一道
     row_key as row_key,          # 面板那条历史清单的公开入口,这里只是过一道
     valid_round as valid_round,  # 同上:历史端点标「这一行有效吗」过的也是它
     same_round as same_round,    # 同上:起跑核对问「这两份是不是同一轮」也过它
@@ -54,6 +57,23 @@ def _history_file():
     只有一个,不可能漏。
     """
     return _STATE_FILE.with_name(f"{_STATE_FILE.stem}_runs{_STATE_FILE.suffix}")
+
+
+def _open_file():
+    """开工标记也在 `_STATE_FILE` 旁边,**派生,理由同上**。"""
+    return _STATE_FILE.with_name(f"{_STATE_FILE.stem}_open{_STATE_FILE.suffix}")
+
+
+def mark_open() -> None:
+    """起跑前落一笔开工标记。**两个起跑入口都过这里**(「口径只有一份」)。
+
+    写不上只记一笔诊断,不拦起跑 —— 理由在 `pipeline_open.mark`。
+    """
+    global _persist_error
+    err = _open.mark(_open_file(), _state)
+    if err:
+        _persist_error = ' / '.join(x for x in (_persist_error, err) if x)
+        _log(f'{err}没能落盘，这一轮的结果万一也没留下就查不出来了')
 
 STAGES = ("crawl", "export", "index", "extract", "projects", "wiki")
 
@@ -268,18 +288,6 @@ def note_retry_targets(channel: str, targets, at: str) -> None:
     note["channels"][channel] = {"targets": [str(t) for t in targets], "at": at}
 
 
-def retry_notes(run: dict) -> dict:
-    """那一轮各来源留下的失败名单:{channel: {"targets": [...], "at": ts}}。
-
-    `run` 是 `load_last_run()` 或 `get_state()` 给的那份快照。身份对不上一律
-    当成"这一轮没有名单"(宁可按原范围重跑,也不拿上一轮的失败去收窄)。
-    """
-    note = run.get("crawl_retry") or {}
-    if note.get("run") != (run.get("run_id") or ""):
-        return {}
-    return note.get("channels") or {}
-
-
 def _next_seq() -> int:
     """给这一轮发一个完成序号,**比磁盘上记着的任何一轮都大;证明不了就发 0**。
 
@@ -357,26 +365,8 @@ def _save_last_run() -> None:
 
 
 def _run_record() -> dict:
-    """这一轮的终态,给人翻的那一份。
-
-    字段取「面板渲染一轮运行要哪些」那一套(`pipe_view.js` 的 `renderPipeState`),
-    不含 `export_filter` / `crawl_retry` —— 那两个是重试派生用的,只有最新那一轮
-    的才有意义。
-    """
-    return {
-        "run_id": _state.get("run_id", ""),
-        "run_seq": _state.get("run_seq", 0),
-        # 发号世代:**凭据自己带出处**,老记录那些号一个都不信(`_seq_of`)
-        "seq_gen": _SEQ_GEN,
-        "started_at": _state["started_at"],
-        "finished_at": _state["finished_at"],
-        "stopped": bool(_state.get("stopped", False)),
-        "run_kind": _state.get("run_kind", ""),
-        "planned_stages": _state.get("planned_stages"),
-        "stages": deepcopy(_state["stages"]),
-        "crawl_filter": deepcopy(_state["crawl_filter"]),
-        "log": list(_state["log"]),
-    }
+    """这一轮的终态,给人翻的那一份 —— 判据和字段取舍在 `pipeline_persist`。"""
+    return run_record(_state)
 
 
 def _save_history() -> None:
@@ -453,6 +443,12 @@ def restore_gap() -> str:
                   的那一份,它可能是旧的
     - `'order'`   两份各记着不同的一轮,而**先后证明不了**(都没有完成序号,收尾
                   时间也相同)
+    - `'lost'`    **有一轮开工过,而磁盘上最新那一份不是它** —— 它的终态一个字都
+                  没落下来(两份写入都失败、或者进程在收尾前没了)。屏幕上那一轮
+                  **已经过期**
+    - `'broken'`  **最新那一轮确实发生过,可它的留档渲染不了**(日志落成字符串、
+                  失败名单形状不对……)。展示退回到读得出来的更早那一份 —— 所以
+                  屏幕上那一轮**不是最新的**,它的范围更不能拿来重试
 
     **跑完一轮就补回来了**(`_end_run` 收尾时清空):那一轮是在本进程里跑的,内存
     里这份终态带着完整字段,也不存在「谁更新」的疑问。
@@ -507,13 +503,31 @@ def _restore_once() -> None:
             _restore_gap = 'unknown'
             return
         pick, gap = _newest_round(runs, saved)
+        # **现存的候选不等于「发生过的全部运行」。** 两份终态都没写上那一档,磁盘上
+        # 一个字都没留下这一轮 —— 剩下的两份旧副本彼此一致,`same_event` 于是正确地
+        # 证明「它们是同一次事件」,可那证明不了「没有更新的一轮」。开工标记就是为了
+        # 补上这一句,理由和实测形态都在 `pipeline_open`。
+        if _open.lost(_open_file(), [saved, *runs]):
+            gap = 'lost'
         if not isinstance(pick, dict) or not pick.get("finished_at"):
-            _restored = 'ok'                      # 确定没跑过任何一轮
+            # **「一份都挑不出来」不等于「确定从没跑过」。** 留档坏到渲染不了时那一轮
+            # 确实发生过(欠账是 `broken`),这里把欠账一起吞掉的话,面板报「尚无运行
+            # 记录」而「重试失败项」照旧可点 —— 它会按磁盘上那份读得出来的旧范围抓。
+            # 所以欠账原样记下来,再说「恢复这件事做完了」(坏正文不会自己变好,
+            # 不像 `unknown` 那一档要下次再试)。
+            _restore_gap = gap
+            _restored = 'ok'
             return
         for key in ("started_at", "finished_at", "run_kind", "planned_stages",
                     "run_id", "run_seq", "log"):
             if key in pick:
                 _state[key] = deepcopy(pick[key])
+        # **出处要跟着那一轮走,不许沿用内存里的默认值。** `_state` 初始带的是当前
+        # 世代,而恢复回来的可能是旧格式记录(压根没有这个字段)—— 不覆盖的话它在
+        # 内存里就**冒充**成了当前世代,于是它那个只有进程内自增的 `run_id` 和可能
+        # 回退过的 `run_seq` 都被当成可信凭据用。`seq_gen` 的全部意义就是「凭据自己
+        # 带出处」,这里沿用默认值等于把出处改掉了。
+        _state["seq_gen"] = pick.get("seq_gen")
         # **恢复来的那一轮同时抬高水位**,和 `run_seq` 一起:内存里这份终态该和磁盘
         # 那份一致。这两笔也是**冗余带**(定点去掉红 0 条,理由同 `_next_seq`)——
         # 发号读的是磁盘不是内存,所以它们眼下改变不了任何可观测行为。
@@ -564,7 +578,13 @@ def _latest_locked() -> dict:
     # 而它一样是一份已经收尾的终态。
     if not _state["running"] and _state.get("finished_at"):
         return deepcopy(_state)
-    return load_last_run() or {}
+    # 回落到磁盘那份时**要过同一道形状判据**。这一档走的是「恢复还没成功 / 恢复
+    # 拒了磁盘那份」,而拒的理由多半正是形状不对(`valid_round`)——
+    # `load_last_run()` 是宽口径的「磁盘那份原样」(还有只取失败名单的消费者在用
+    # 它),不加这一道的话被恢复挡在门外的那份记录从这里原路进来,照旧交给面板整屏
+    # 渲染和重试派生。**宁可报「尚无运行记录」**:那是实话,而且下一轮就补回来了。
+    disk = load_last_run()
+    return disk if valid_round(disk) else {}
 
 
 def get_state() -> dict:
@@ -606,7 +626,14 @@ def _end_run() -> None:
                        failures=stage.get("failures"))
         _state["current_stage"] = ""
         _state["finished_at"] = _now()
-        # **落盘之前发完成序号**,两份都带上它 —— 恢复时靠它分出谁更新
+        # **落盘之前发完成序号**,两份都带上它 —— 恢复时靠它分出谁更新。
+        # **出处和号是一对,在这同一处定。** 开新一轮那段(`pipeline.py` 的
+        # `_state.update`、`pipeline_retry` 的重试起跑)都不碰 `seq_gen`,而恢复会把
+        # 它改成被恢复那一轮自己的出处(可能是 None)—— 不在这里盖回当前世代的话,
+        # 恢复过一次之后内存那份终态就**永久失证**:它的 `event_id` 一直是空,起跑
+        # 核对只剩内容兜底那一级。写在发号旁边还顺带把口径收成一份:号出自哪一代
+        # 发号逻辑,就由那一代的 writer 在定稿时自己署名。
+        _state["seq_gen"] = _SEQ_GEN
         _state["run_seq"] = _next_seq()
         _log("同步已停止，已完成的结果保留" if stopped else "管道结束")
         # **留档失败不许把一轮已经做完的正文工作变成「永远进行中」。** 这两份落盘
@@ -635,6 +662,10 @@ def _end_run() -> None:
                     _log(f'结果没能留档（{type(exc).__name__}）：'
                          f'{save.__name__[6:]} 这一份没写上，同步结论不受影响')
             _persist_error = ' / '.join(errs)
+            # **两份都写上了才清开工标记。** 任一份失败就留着 —— 下一次启动据它
+            # 报失证(误报顶多多跑一轮完整同步;反过来是漏报,那一轮查不出来)。
+            if not errs:
+                _open.clear(_open_file())
         finally:
             # 收尾状态按 run id 留一份,再把 running 放下:等这一轮的人晚一步来取
             # 也还拿得到自己那一轮的结果(阶段修正已经在上面做完了,存的就是终态)。

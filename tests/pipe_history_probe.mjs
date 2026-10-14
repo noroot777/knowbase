@@ -16,7 +16,8 @@ import { createServer } from "node:http";
 import { readFileSync, writeSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, normalize } from "node:path";
-import { launchShell } from "./probe_shell.mjs";
+// 起无头壳、接 CDP、求值、轮询、真鼠标点击那一套在隔壁(页面无关的那部分)
+import { attachCdp, sleep } from "./pipe_history_cdp.mjs";
 // 摆盘(四轮终态、阶段常量、静态回包)在隔壁,见那份文件的抬头
 import { MORNING, EVENING, LATER, FOURTH, MIME, FIXTURES }
   from "./pipe_history_fixture.mjs";
@@ -108,10 +109,18 @@ const server = createServer((req, res) => {
     };
     // 「这一行算不算一轮运行」:真后端过 `valid_round` —— 是字典、收尾时间是**非空
     // 字符串**(落成数字时页面上按字符切那一下会抛)、起跑时间有的话也得是字符串
+    // 口径跟着真后端的 `valid_round`:时间之外,**被直接消费的那几个字段也要验**
     const validOf = r => !!(r && typeof r === "object"
                             && typeof r.finished_at === "string" && r.finished_at
-                            && (r.started_at === undefined
-                                || typeof r.started_at === "string"));
+                            && (r.started_at === undefined || r.started_at === null
+                                || typeof r.started_at === "string")
+                            && r.stages && typeof r.stages === "object"
+                            && Object.keys(r.stages).length
+                            && Object.values(r.stages).every(
+                                 st => st && typeof st === "object")
+                            && Array.isArray(r.log)
+                            && (r.planned_stages === undefined || r.planned_stages === null
+                                || Array.isArray(r.planned_stages)));
     // `rowsValid` 不为 null 时**强制**每行的 invalid 取它 —— 摆「后端漏标了」那一局,
     // 用来钉前端自己那道 try/catch(冗余带:上游漏标时它得接住)
     const invalidOf = r => (rowsValid === null ? !validOf(r) : !rowsValid);
@@ -142,70 +151,8 @@ const server = createServer((req, res) => {
 await new Promise(r => server.listen(0, "127.0.0.1", r));
 const base = `http://127.0.0.1:${server.address().port}`;
 
-const { proc, port } = await launchShell(["--window-size=1440,1000"]);
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-const ws = new WebSocket(list.find(t => t.type === "page").webSocketDebuggerUrl);
-await new Promise(r => ws.addEventListener("open", r, { once: true }));
-let msgId = 0;
-const pend = new Map();
-const pageErrors = [];
-ws.addEventListener("message", ev => {
-  const m = JSON.parse(ev.data);
-  if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); return; }
-  if (m.method === "Runtime.exceptionThrown")
-    pageErrors.push(m.params.exceptionDetails?.exception?.description
-                    || m.params.exceptionDetails?.text);
-  if (m.method === "Runtime.consoleAPICalled" && m.params.type === "error")
-    pageErrors.push(m.params.args.map(a => a.value ?? a.description ?? "").join(" "));
-});
-const send = (method, params = {}) => {
-  const id = ++msgId;
-  return new Promise(res => { pend.set(id, res); ws.send(JSON.stringify({ id, method, params })); });
-};
-const evalJs = async expression => {
-  const r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-  if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.text + " :: " + expression);
-  return r.result?.result?.value;
-};
-const until = async (expr, ms = 8000) => {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) { if (await evalJs(expr)) return true; await sleep(120); }
-  return false;
-};
-// 等**这一侧**(node 侧)某个事实成立 —— 典型是「那个 hold 被哪个请求消费掉了」,
-// 那是服务端这边的事,页面上看不出来。
-const untilHere = async (fn, ms = 6000) => {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) { if (fn()) return true; await sleep(100); }
-  return false;
-};
-// 真鼠标点在元素中心:按钮的 disabled / hidden 只有真实事件才算数。
-//
-// **先滚到它跟前** —— `dispatchMouseEvent` 用的是视口坐标,而历史列表在整页底部
-// (日志框自己就 440px 高),不滚的话算出来的 y 落在视口下方,点出去谁也没点到。
-//
-// **滚完还要做真实命中测试**:算出来的坐标上可能坐着别的东西(浮在页面底部的
-// toast 就正好压住历史列表),点出去的那一下落在它身上。这两种情况下
-// `getBoundingClientRect()` 照旧给一个有宽高、在视口里的矩形,于是"点了但什么也
-// 没发生"会静默绿着 —— 命中测试把它变成红。
-const clickAt = async sel => {
-  const box = await evalJs(`(() => { const e = document.querySelector('${sel}');
-    if (!e) return null;
-    e.scrollIntoView({ block: 'center', behavior: 'instant' });
-    const r = e.getBoundingClientRect();
-    if (!r.width || !r.height) return null;
-    const x = r.left + r.width / 2, y = r.top + r.height / 2;
-    if (y < 0 || y > innerHeight) return null;
-    const at = document.elementFromPoint(x, y);
-    if (!at || (at !== e && !e.contains(at))) return null;
-    return JSON.stringify({ x, y }); })()`);
-  if (!box) return false;
-  const { x, y } = JSON.parse(box);
-  for (const type of ["mousePressed", "mouseReleased"])
-    await send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
-  return true;
-};
+const { proc, ws, send, evalJs, until, untilHere, clickAt, pageErrors } = await attachCdp();
+
 const exportRow = () => evalJs(
   `document.querySelector('#pipe-stage-export .pipe-stage-detail').textContent`);
 const exportStatus = () => evalJs(`$('pipe-stage-export').dataset.status`);
@@ -674,6 +621,32 @@ check("它就地说明,两行好的照旧渲染得出来", await evalJs(
 check("清单版本跳过坏行,所以没有永久落后的提示", await evalJs(
   `PIPE_FRESH.history.applied === PIPE_FRESH.history.desired`),
   await evalJs(`PIPE_FRESH.history.applied + ' vs ' + PIPE_FRESH.history.desired`));
+
+// ── 22. 最新那一轮的留档坏了:面板要说清「这屏不是最新」,按钮按不下去 ───────────
+// 后端那几档欠账各有自己的说法,**`broken` 这一档的特别之处是屏幕上这一轮根本不是
+// 最新的**(另外三档都是最新那一轮、只是范围不全或核对不了)。`PIPE_RESTORE_GAP` 漏
+// 一个键的话这里回落到笼统的「恢复得不完整」—— 那句话四档都对、哪一档都没说明白。
+state = { ...state, restore_gap: '' };
+await evalJs(`refreshPipe(); true`);
+await setup("开局不在翻历史、那颗按钮本来是可点的",
+            until(`!pipeViewing && $('pipe-retry').disabled === false`, 8000));
+// **每一档都单独过一遍**:它们共用一句模板,漏一个键就回落到笼统的「恢复得不完整」
+// —— 后端全绿、页面上那句话却没说明白。
+for (const [gap, says] of [["broken", "最新那一轮的留档损坏"],
+                           ["lost", "一个字都没能留档"]]) {
+  state = { ...state, restore_gap: gap };
+  await evalJs(`refreshPipe(); true`);
+  await setup(`那份带 ${gap} 欠账的状态没应用上去`,
+              until(`pipeRestoreGap === '${gap}'`, 8000));
+  check(`面板说清了 ${gap} 这一档`, await evalJs(
+    `!$('pipe-fresh').hidden && ${JSON.stringify(says)}
+       .split('').every(c => $('pipe-fresh-text').textContent.includes(c))
+     && /${says}/.test($('pipe-fresh-text').textContent)`),
+    await evalJs(`$('pipe-fresh-text').textContent.slice(0, 160)`));
+  check(`${gap} 这一档下「重试失败项」按不下去`,
+        await evalJs(`$('pipe-retry').disabled === true`));
+}
+state = { ...state, restore_gap: '' };
 
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 

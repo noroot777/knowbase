@@ -28,94 +28,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from kb import pipeline, pipeline_state as state
+from tests.pipeline_case import HistoryCase
 from kb.web import pipeline_api
 from tests.headless import probe_env, requires_headless, run_probe
 
 _PROBE = Path(__file__).resolve().parent / "pipe_history_probe.mjs"
-
-
-class HistoryCase(TestCase):
-    def setUp(self):
-        self.saved = deepcopy(state._state)
-        self.temp = TemporaryDirectory()
-        self.dir = Path(self.temp.name)
-        self.file_patch = patch.object(state, '_STATE_FILE', self.dir / 'state.json')
-        self.file_patch.start()
-        self.reset()
-
-    def tearDown(self):
-        self.file_patch.stop()
-        self.temp.cleanup()
-        state._state.clear()
-        state._state.update(self.saved)
-
-    def reset(self, run_id=''):
-        # 「刚启动,还没从磁盘恢复过」。`running=True` 让恢复短路,所以这一句对自己
-        # 摆 `_state` 的用例没有影响;要试重启那一档的用例把 running 改成 False。
-        state._restored = ''
-        state._restore_gap = ''
-        # 完成序号的进程内高水位是模块级的,**跨用例会泄漏**:生产里它该跨轮累积,
-        # 测试里不清的话「磁盘上发到第几号」这个前提当场不成立
-        state._seq_hwm = 0
-        state._state.update(
-            running=True, stop_requested=False, stopped=False, run_kind='',
-            planned_stages=None, current_stage='', run_id=run_id,
-            started_at='2026-10-14 09:00:00', finished_at='', crawl_filter={}, log=[],
-            stages={name: {'status': 'pending', 'detail': ''} for name in state.STAGES})
-
-    def restart(self):
-        """模拟重启:内存清空、没跑过任何一轮,磁盘那份还在。"""
-        self.reset()
-        state._state.update(
-            running=False, run_id='', started_at='', finished_at='', crawl_filter={},
-            export_filter={}, crawl_retry={}, log=[],
-            stages={name: {'status': '', 'detail': ''} for name in state.STAGES})
-
-    def only_state_write_fails(self):
-        """状态文件写不上、历史写得上 —— 磁盘上最新那一轮**只在历史里**。"""
-        return self._write_fails_on(lambda path: path == state._STATE_FILE)
-
-    def only_history_write_fails(self):
-        """历史写不上、状态写得上 —— 那一轮**不在历史里**(位置证据就此缺失)。"""
-        return self._write_fails_on(lambda path: path != state._STATE_FILE)
-
-    def _write_fails_on(self, hit):
-        real = state._write_atomic
-
-        def pick(path, data):
-            if hit(path):
-                raise PermissionError('read-only')
-            return real(path, data)
-
-        return patch.object(state, '_write_atomic', side_effect=pick)
-
-    def read_fails_on(self, hit):
-        """**注入打在真实的那次 IO 上**(`Path.read_bytes`)。打在
-        `_load_json_strict` 上的话「读不出来一律抛」那一道就被 patch 盖掉了。
-        """
-        real = Path.read_bytes
-
-        def pick(path, *args, **kwargs):
-            if hit(path):
-                raise PermissionError('read-only')
-            return real(path, *args, **kwargs)
-
-        return patch.object(Path, 'read_bytes', pick)
-
-    def run_round(self, run_id, export_status, detail, failures=None):
-        """跑一轮 crawl + export,export 按给的档位收尾。"""
-        self.reset(run_id)
-
-        def crawl(_):
-            state._stage('crawl', 'ok', '检查 51/51 个来源，新增 105 条')
-
-        def export(_):
-            state._stage('export', export_status, detail, failures=failures)
-
-        with patch.object(pipeline, '_run_crawl', side_effect=crawl), \
-             patch.object(pipeline, '_run_export', side_effect=export):
-            pipeline._run_pipeline(['crawl', 'export'])
-
 
 class HistoryTests(HistoryCase):
     def test_a_red_round_is_still_there_after_the_next_round_goes_green(self):
@@ -479,6 +396,111 @@ class HistoryEndpointTests(HistoryCase):
         rows = self.client.get('/api/pipeline/runs').json()['runs']
         self.assertEqual([True, True, False], [r['invalid'] for r in rows],
                          '两种坏时间都算无效行,**反过来钉一边**:好行照旧有效')
+
+    def test_a_record_that_cannot_be_rendered_is_an_invalid_row_too(self):
+        """「有效」的意思是**拿它渲染一屏不会炸,而且那一屏说的是实话**。
+
+        时间验住了只堵住其中一个字段,而一轮运行被直接消费的还有阶段和日志:
+        `log` 落成字符串时日志那一屏 `lines.join()` 当场抛,`stages` 里混进 `null`
+        时 `pipeRunLabel` 的 `st.status` 当场抛 —— 两个异常都冒到状态渲染那层,整屏
+        变成「状态暂时无法更新」。空 `stages` 不抛,但它更坏:一个阶段都没有的记录
+        数不出红也数不出跳过,会被汇总成**「已完成」** —— 一轮根本没跑过的「成功」。
+
+        历史行那道 try/catch 只保护它自己那一行,**保护不了它被打开之后的整屏**,
+        所以判据待在读取边界(`valid_round`),恢复和清单共用。
+        """
+        self.run_round('run-a', 'ok', '已保存 3 条到知识库')
+        raw = json.loads(state._history_file().read_text())
+        good = raw['runs'][0]
+        raw['runs'] = [dict(good, log='[10-14 09:16] 管道结束'),
+                       dict(good, stages=dict(good['stages'], export=None)),
+                       dict(good, stages={}),
+                       dict(good, planned_stages='crawl'),
+                       good]
+        state._history_file().write_text(json.dumps(raw, ensure_ascii=False))
+
+        got = self.client.get('/api/pipeline/runs').json()
+        self.assertEqual([True, True, True, True, False],
+                         [r['invalid'] for r in got['runs']],
+                         '四种渲染不了的形状都算无效行,**反过来钉一边**:好行照旧有效')
+        self.assertEqual('run-a', got['version'],
+                         '清单版本取第一个有效行 —— 两个端点照旧对得上')
+
+    def test_a_record_broken_one_level_down_is_invalid_too(self):
+        """外层形状对、**里面那一层坏**的记录,同样渲染不了。
+
+        `stages` 是字典、每个阶段也是字典,可那个失败名单落成字符串时
+        `pipe_view.js` 的 `failures.every` / `.map` 当场抛 —— 实测打开同步中心就一直
+        停在「正在读取同步状态」,下面一句「状态暂时无法更新:failures.every is not a
+        function」,整屏不可用。来源清单(`crawl_filter.channels`,前端 `.map`、后端还要
+        按 scope 取 `accounts` 迭代)和失败名单那本账(`crawl_retry`,按字典访问)走的是
+        同一条路,所以消费契约要**验到被消费的那一层为止**。
+        """
+        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）')
+        raw = json.loads(state._history_file().read_text())
+        good = raw['runs'][0]
+        bad_stages = dict(good['stages'],
+                          export=dict(good['stages']['export'], failures='rss'))
+        # 失败名单那本账的形状**从生产代码取**,不手编:它外层是
+        # `{"run": 身份, "channels": {...}}`,按「每个值都得是字典」去验外层会把每一
+        # 份真实的重试终态都判成渲染不了。
+        state._state['run_id'], state._state['crawl_retry'] = 'run-a', {}
+        state.note_retry_targets('rss', ['sub-1'], '2026-10-14T09:00:00Z')
+        real_notes = deepcopy(state._state['crawl_retry'])
+        self.assertEqual('run-a', real_notes.get('run'), '摆局前提:外层带的是身份')
+        raw['runs'] = [dict(good, stages=bad_stages),
+                       dict(good, crawl_filter={'channel': 'rss', 'channels': 'rss'}),
+                       dict(good, crawl_filter={'channel': 'rss', 'channels': ['rss']}),
+                       dict(good, crawl_retry={'run': 'run-a', 'channels': 'rss'}),
+                       dict(good, crawl_retry={'run': 'run-a',
+                                               'channels': {'rss': 'targets'}}),
+                       dict(good, run_id='run-a', crawl_retry=real_notes),
+                       good]
+        state._history_file().write_text(json.dumps(raw, ensure_ascii=False))
+
+        rows = self.client.get('/api/pipeline/runs').json()['runs']
+        self.assertEqual([True, True, True, True, True, False, False],
+                         [r['invalid'] for r in rows],
+                         '嵌套那几种坏形状都算无效行,**反过来钉一边**:真实的重试'
+                         '名单和普通那一轮照旧有效')
+
+    def test_a_record_broken_at_a_leaf_is_invalid_too(self):
+        """**容器形状对、叶子坏**的记录,同样渲染不了或者会静默抓错。
+
+        验到容器为止还差一层:失败名单是列表了,里面混进一个 `null` 就在
+        `failures.every(f => f.pending)` 那一下抛 —— 实测页面一直停在「正在读取
+        同步状态」,下面一句「Cannot read properties of null (reading 'pending')」。
+        订阅名单那一层更阴:`accounts` 落成字符串时后端那一迭代把它**拆成一个个
+        字符**当订阅名,不抛 —— 静默按一串不存在的名字去抓,等于一条都不抓。
+        导出范围原来压根没验,而重试正是从它派生导出范围的;失败名单那本账里的
+        `targets` 同理。
+        """
+        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）',
+                       failures=[{'title': '某篇', 'reason': '503', 'pending': False}])
+        raw = json.loads(state._history_file().read_text())
+        good = raw['runs'][0]
+        leaf = dict(good['stages'],
+                    export=dict(good['stages']['export'], failures=[None]))
+        raw['runs'] = [dict(good, stages=leaf),
+                       dict(good, crawl_filter={'channel': 'rss',
+                                                'channels': [{'channel': 'rss',
+                                                              'accounts': 'A订阅'}]}),
+                       dict(good, crawl_filter={'channel': 'rss', 'accounts': 'A订阅'}),
+                       dict(good, export_filter='A订阅'),
+                       dict(good, crawl_retry={'run': 'run-a',
+                                               'channels': {'rss': {'targets': 's',
+                                                                    'at': ''}}}),
+                       dict(good, crawl_retry={'run': 'run-a',
+                                               'channels': {'rss': {'targets': [],
+                                                                    'at': 7}}}),
+                       good]
+        state._history_file().write_text(json.dumps(raw, ensure_ascii=False))
+
+        rows = self.client.get('/api/pipeline/runs').json()['runs']
+        self.assertEqual([True, True, True, True, True, True, False],
+                         [r['invalid'] for r in rows],
+                         '六种叶子坏法都算无效行,**反过来钉一边**:带真实失败明细的'
+                         '那一行照旧有效')
 
     def test_a_normal_row_is_keyed_by_its_completion_sequence(self):
         """**反过来钉一边**:正常跑出来的那几轮各有完成序号,键就按它。"""

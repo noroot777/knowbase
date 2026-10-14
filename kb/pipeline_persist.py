@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 
 
@@ -188,51 +189,244 @@ _ROUND_FIELDS = ("started_at", "finished_at", "run_kind", "stopped",
 
 
 def same_round(a, b) -> bool:
-    """这两份记录是不是**同一轮**。恢复判据和起跑核对共用它(「口径只有一份」)。
+    """这两份记录**看起来是不是同一轮** —— 用来认副本,**不用来授权**。
 
-    两级证明,都不依赖会碰撞的展示版本:
+    和 `same_event` 的分工:要据此放行重试的地方(恢复那条捷径)过那一个,只认可信
+    身份;这一个多出「内容逐字相同」那一级,够用来**找一份副本**,不够用来证明事件
+    唯一。所以它的消费者只剩两处,两处都不授权:
+    · **位置锚点**(`_pick_newest`):认错的后果是判出「首条更新」—— 展示较新那一份、
+      欠账记 `scope`、重试被拦,方向安全。
+    · **锁内起跑核对**(`pipeline_retry`):它问的是「这期间状态变没变」,两边同源时
+      必须为真,所以这里要的恰恰是内容那一级;而真又跑完一轮的话,那一轮带着当前
+      世代的身份,下面第 1 级当场判出不等。
 
-    1. **可证明唯一的事件身份相等**(`event_id`)——当前格式走这条。
-    2. **两份副本的内容逐字相同** —— 旧格式没有可信身份,只能靠这个。同一轮的两份
-       是从同一份 `_state` 写出去的,所以这几个字段一字不差;不同轮的两份在起跑时刻、
-       阶段结果和日志上几乎必然不同。
+    两级证明,都不依赖会碰撞的展示版本。**两级之间是互斥的,不是「先试一个再试
+    另一个」** —— 高一级的凭据在手时低一级一步都不许走:
 
-    少了第 2 条的话,升级前那最后一轮(两份都写成功、确实是同一轮)会被判成「先后
-    证明不了」—— 那是**误报**,代价只是拦一次重试;而少了「不许拿展示版本当证明」
-    这一道是**漏报**:实测两条旧记录都没有身份、收尾时间都是 19:30:00,版本于是
-    相等、被当成同一轮,恢复返回状态文件那一份(A 轮的翻译失败)并报空欠账 ——
-    页头显示 A 的失败、重试可点,点下去导出阶段收到的是 A 那个来源,而历史里唯一
-    那行写着 B 已经成功。
+    1. **可证明唯一的事件身份**(`event_id`)。任一边拿得出它,就**只看它相等不相等**。
+    2. **两份副本的内容逐字相同** —— 只在两边都拿不出身份时(旧格式)才谈。同一轮的
+       两份是从同一份 `_state` 写出去的,所以这几个字段一字不差;不同轮的两份在起跑
+       时刻、阶段结果和日志上几乎必然不同。
+
+    **让第 2 级盖过第 1 级是漏报**,形态见下面那段注释。反过来,第 2 级自己也只配
+    用在上面那两处 —— 旧格式下它证明不了事件唯一(见 `same_event`),所以升级前那最后
+    一轮(两份都写成功、确实是同一轮)在恢复那边落到「先后证明不了」:展示仍是它,
+    只是重试要先跑一次完整同步。那是误报,顶多多跑一轮。
+
+    少了「不许拿展示版本当证明」这一道同样是漏报:实测两条旧记录都没有身份、收尾
+    时间都是 19:30:00,版本于是相等、被当成同一轮,恢复返回状态文件那一份(A 轮的
+    翻译失败)并报空欠账 —— 页头显示 A 的失败、重试可点,点下去导出阶段收到的是 A
+    那个来源,而历史里唯一那行写着 B 已经成功。
     """
     if not isinstance(a, dict) or not isinstance(b, dict):
         return False
-    got = event_id(a)
-    if got and got == event_id(b):
-        return True
+    ia, ib = event_id(a), event_id(b)
+    if ia or ib:
+        # **只要有一边拿得出可信身份,就只看身份** —— 内容兜底在这里一步都不许走。
+        # 身份不等是**最强的「不是同一轮」证明**,而内容兜底比的那几个字段里没有
+        # `export_filter` / `crawl_retry`(重试范围和失败名单),所以两轮「看起来
+        # 一模一样」而该抓的来源完全不同:实测两次快速重试落在同一秒、阶段和日志
+        # 逐字相同,身份分别是 `...-1` / `...-2`,内容兜底把它们判成同一轮 ——
+        # 起跑核对于是放行,导出阶段收到的是上一轮那个订阅。
+        # **一边有出处一边没有也是 False**:同一轮的两份副本出自同一次 `_end_run`,
+        # 身份和世代必然一致 —— 一新一旧说明它们压根不是同一轮。
+        return ia == ib
     return all(a.get(k) == b.get(k) for k in _ROUND_FIELDS)
 
 
-def _valid_round(run) -> bool:
-    """这是不是一份**能当终态用**的记录。
+def _event_round(run) -> bool:
+    """这条记录**算不算一次发生过的运行**。判据只有「是字典 + 有收尾时间」。
 
-    候选要先验,不能只过滤非字典:历史首条是个空对象时(坏文件、半截写入),原来会
-    拿它当「最新」比一轮,把后面那些仍能证明更新的记录整段遮住 —— 恢复于是退回
-    状态文件那一份,而它可能是旧的。
+    **和「渲染得了没有」是两个契约,不许合成一个。** 一轮跑完过这件事由它的身份、
+    完成序号和在历史里的位置记着;正文(日志、阶段明细)坏掉只说明**这一份读不出来**,
+    不说明那一轮没发生。把两者合成一个判据,后果是**顺序凭据连同正文一起被丢掉**:
+    最新那一轮的日志落成字符串时整条记录被过滤,剩下的旧那一份于是成了「最新而且
+    完整」—— 实测 B 轮(成功、范围是 B订阅)只有 `log` 坏了,身份、当前世代、递增的
+    `run_seq` 全在,恢复却返回 A 轮(翻译失败、范围是 A订阅)并报**空欠账**:页头显示
+    A 的 503、按钮可点,点下去导出阶段收到的是 `accounts: ['A订阅']`。
+    **可显示性只能决定怎么呈现一条记录,不能决定这次运行有没有发生。**
+
+    候选仍要先验,不能只过滤非字典:历史首条是个空对象时(坏文件、半截写入),原来会
+    拿它当「最新」比一轮,把后面那些仍能证明更新的记录整段遮住。
     """
     if not isinstance(run, dict):
         return False
-    # **时间字段得是字符串,不是「真值」就行。** 它们一路走到页面上按字符切
-    # (`pipe_view.js` 的 `replace` / `slice`),落成数字时那一下当场抛 —— 而那个异常
-    # 冒到状态渲染那层,整屏变成「状态暂时无法更新」,不是只跳过这一行。
-    if not isinstance(run.get("finished_at"), str) or not run["finished_at"]:
+    # **拿得出事件元数据就够了,时间字段坏不坏都不改变这一点。** 可信身份和同代
+    # 完成序号都是**这一轮跑过**的直接凭据(出自 `new_run_id()` / `_next_seq()`);
+    # 时间是**显示字段**,拿它的类型当「发生过没有」的判据,等于让一处渲染问题去
+    # 否决一份完整的事件证据:实测 B 轮的 `started_at` 被改成数字,身份、当前世代、
+    # 完成序号 2 和成功阶段全在,整条却被过滤,恢复返回 A 轮并报空欠账 —— 页面上
+    # 重试又抓了 A订阅。下一次换个显示字段还是同一出戏,所以判据从根上改掉:
+    # **事件元数据优先,时间只是旧格式的兜底迹象。**
+    if event_id(run) or _seq_of(run):
+        return True
+    # 旧格式(升级前那些记录)没有任何事件元数据,只剩「有收尾时间」这一个迹象 ——
+    # 那也是「一轮跑完了」的最低限度:没收尾的不算一轮完成的运行。
+    got = run.get("finished_at")
+    return isinstance(got, str) and bool(got)
+
+
+def _filter_ok(filt) -> bool:
+    """抓取/导出范围那个字典的消费契约 —— **两处过同一份口径**。
+
+    前端 `pipe_channels.js` 拿 `filter.channels.map` 渲染,后端
+    `pipeline_stages.py` 还要按每个 scope 取 `accounts` 再迭代:`accounts` 落成
+    字符串时那一迭代会把它**拆成一个个字符**当订阅名 —— 不抛,而是静默按一串不存在
+    的名字去抓,等于一条都不抓。
+    """
+    if filt is None:
+        return True
+    if not isinstance(filt, dict):
         return False
-    started = run.get("started_at")
-    return started is None or isinstance(started, str)
+    scopes = filt.get("channels")
+    if not (scopes is None or isinstance(scopes, list)):
+        return False
+    for one in scopes or []:
+        if not isinstance(one, dict):
+            return False
+        names = one.get("accounts")
+        if not (names is None or isinstance(names, list)):
+            return False
+    names = filt.get("accounts")
+    return names is None or isinstance(names, list)
+
+
+def _valid_round(run) -> bool:
+    """这是不是一份**渲染得了、而且说的是实话**的记录。
+
+    **它只决定呈现,不决定「这一轮发生过没有」**(那是 `_event_round`)。两者分开之后,
+    最新那一轮渲染不了时的正确行为是:**承认它最新、如实说留档坏了、拦住按旧范围
+    重试**,而不是把它当不存在。
+    """
+    if not _event_round(run):
+        return False
+    # **判据是整份消费契约** —— 少验一个就是一处整屏抛。时间字段的**类型**也在这边
+    # 验:它们一路走到页面上按字符切(`pipe_view.js` 的 `replace` / `slice`),落成
+    # 数字时那一下当场抛。它是渲染契约,不是「这一轮发生过没有」的凭据(`_event_round`)。
+    for key in ("finished_at", "started_at"):
+        got = run.get(key)
+        if not (got is None or isinstance(got, str)):
+            return False
+    if not run.get("finished_at"):
+        return False
+    # · `log` 落成字符串:恢复进内存之后日志那一屏 `lines.join('\n')` 当场抛
+    #   (`pipe_view.js` 的 `renderPipeLog`),而那个异常冒到状态渲染那层,整屏变成
+    #   「状态暂时无法更新」—— 不是只跳过这一处。
+    # · `stages` 里混进 `null`:`pipeRunLabel` 的 `st.status` 没有可选链,同样当场抛。
+    # · `stages` 是空的:一轮运行的定义就是「跑过阶段」,一个阶段都没有的记录对人
+    #   没有任何信息,而 `pipeRunSummary` 数不出红也数不出跳过,会把它汇总成
+    #   **「已完成」** —— 那是在说假话。
+    # 历史行渲染那道 try/catch 只保护它自己那一行,**保护不了它被打开之后的整屏**,
+    # 所以判据必须待在读取边界这一处(恢复挑最新、端点标 `invalid` 都过这里)。
+    stages = run.get("stages")
+    if not isinstance(stages, dict) or not stages:
+        return False
+    for stage in stages.values():
+        if not isinstance(stage, dict):
+            return False
+        # **嵌套一层也要验**:外层形状对、里面那个失败名单落成字符串时,
+        # `pipe_view.js` 的 `failures.every` / `.map` 当场抛 —— 实测打开同步中心就
+        # 一直停在「正在读取同步状态」、下面一句「状态暂时无法更新:
+        # failures.every is not a function」,整屏不可用。
+        got = stage.get("failures")
+        if not (got is None or isinstance(got, list)):
+            return False
+        # **元素也要验到被取用的那一层**:前端逐条读 `f.pending` / `f.title` /
+        # `f.reason`,名单里混进一个 `null` 就在 `failures.every` 那一下抛 ——
+        # 实测页面一直停在「正在读取同步状态」,下面一句
+        # 「Cannot read properties of null (reading 'pending')」,整屏不可用。
+        if any(not isinstance(one, dict) for one in got or []):
+            return False
+    if not isinstance(run.get("log"), list):
+        return False
+    planned = run.get("planned_stages")
+    if not (planned is None or isinstance(planned, list)):
+        return False
+    # 抓取范围和导出范围**同一份口径**(`_filter_ok`):`export_filter` 原来压根没验,
+    # 而重试那边正是从它派生导出范围的(`pipeline_retry` 的 `export_filter`)。
+    for key in ("crawl_filter", "export_filter"):
+        if not _filter_ok(run.get(key)):
+            return False
+    notes = run.get("crawl_retry")
+    if not (notes is None or isinstance(notes, dict)):
+        return False
+    if notes is None:
+        return True
+    # 失败名单那本账的形状是 `{"run": 身份, "channels": {来源: {...}}}`
+    # (`note_retry_targets` 写、`retry_notes` 读)—— **被按字典取用的是里面那层
+    # `channels`,不是外层**。外层的 `"run"` 是个字符串,拿「每个值都得是字典」去验
+    # 外层会把每一份真实的重试终态都判成渲染不了:恢复于是报 `broken`、那颗按钮
+    # 再也按不下去,而那一轮一切正常。
+    chans = notes.get("channels")
+    if not (chans is None or isinstance(chans, dict)):
+        return False
+    for one in (chans or {}).values():
+        # 每本账里是 `{"targets": [...], "at": 时刻}`:名单要可按列表取(重试那边
+        # 拿它收窄范围),时刻要能和采集器自己那套时间字符串比。
+        if not isinstance(one, dict):
+            return False
+        if not (one.get("targets") is None or isinstance(one.get("targets"), list)):
+            return False
+        if not (one.get("at") is None or isinstance(one.get("at"), str)):
+            return False
+    return True
 
 
 # 公开名:历史端点标「这一行有效吗」时过的是**同一个判据** —— 各写一遍的话恢复拒绝
 # 的那种记录会在清单上显示成一轮正常运行。
 valid_round = _valid_round
+
+
+def same_event(a, b) -> bool:
+    """**能证明是同一次运行事件吗** —— 只认可信身份,一个字的内容都不比。
+
+    和 `same_round` 的分工:那一个还有「两份副本内容逐字相同」那一级,**够用来认一份
+    副本、不够用来授权**。旧格式(没有可信身份)下内容相等证明不了事件唯一:
+    `_ROUND_FIELDS` 里没有 `export_filter` / `crawl_retry`,因为给人翻的那份历史副本
+    本来就不写这两个字段 —— 不是它们无关紧要,恰恰是重试范围和失败名单。实测两次
+    不同的重试落在同一秒、步骤和日志相同、各自的导出范围是 A订阅 / B订阅:内容相等
+    把它们判成同一轮,于是「状态文件那份完整」这个结论成立、欠账报空,重试端点返回
+    200、线程收到 A订阅。
+    **所以凡是「要据此放行重试」的地方过这一个**(恢复那条捷径);只用来找副本、
+    不授权什么的地方(位置锚点)仍过 `same_round`。
+    """
+    ia = event_id(a) if isinstance(a, dict) else ''
+    return bool(ia) and ia == (event_id(b) if isinstance(b, dict) else '')
+
+
+def retry_notes(run: dict) -> dict:
+    """那一轮各来源留下的失败名单:{channel: {"targets": [...], "at": ts}}。
+
+
+    `run` 是 `load_last_run()` 或 `get_state()` 给的那份快照。身份对不上一律
+    当成"这一轮没有名单"(宁可按原范围重跑,也不拿上一轮的失败去收窄)。
+    """
+    note = run.get("crawl_retry") or {}
+    if note.get("run") != (run.get("run_id") or ""):
+        return {}
+    return note.get("channels") or {}
+
+def run_record(state: dict) -> dict:
+    """这一轮的终态,给人翻的那一份。
+
+    字段取「面板渲染一轮运行要哪些」那一套(`pipe_view.js` 的 `renderPipeState`),
+    不含 `export_filter` / `crawl_retry` —— 那两个是重试派生用的,只有最新那一轮
+    的才有意义。
+    """
+    return {
+        "run_id": state.get("run_id", ""),
+        "run_seq": state.get("run_seq", 0),
+        # 发号世代:**凭据自己带出处**,老记录那些号一个都不信(`_seq_of`)
+        "seq_gen": _SEQ_GEN,
+        "started_at": state["started_at"],
+        "finished_at": state["finished_at"],
+        "stopped": bool(state.get("stopped", False)),
+        "run_kind": state.get("run_kind", ""),
+        "planned_stages": state.get("planned_stages"),
+        "stages": deepcopy(state["stages"]),
+        "crawl_filter": deepcopy(state["crawl_filter"]),
+        "log": list(state["log"]),
+    }
 
 
 def _newest_round(runs: list[dict], saved: dict | None) -> tuple[dict | None, str]:
@@ -265,23 +459,54 @@ def _newest_round(runs: list[dict], saved: dict | None) -> tuple[dict | None, st
     历史首条,状态文件记着的上一轮号更大 —— 序号这一档当场判出「旧那一轮更新」,
     而历史里明明还留着它、位置已经证明了它是过去的一轮。
     """
-    saved = saved if _valid_round(saved) else None
-    runs = [r for r in runs if _valid_round(r)]
+    # **先按「发生过没有」过滤,不按「渲染得了没有」** —— 理由在 `_event_round`。
+    saved = saved if _event_round(saved) else None
+    runs = [r for r in runs if _event_round(r)]
+    pick, gap = _pick_newest(runs, saved)
+    if pick is None or _valid_round(pick):
+        return pick, gap
+    # 挑中的那一轮**确实是最新的,可它的留档渲染不了**。这一档既不能拿它去渲染
+    # (整屏会抛),也不能退回更早那一份说「最新而且完整」——**承认它最新、如实说
+    # 坏了、拦住按旧范围重试**才是实话。展示退回到读得出来的那一份(历史倒序,
+    # 所以越靠前越新;都读不出来就什么也不显示),欠账记 `broken`。
+    shown = next((r for r in runs if _valid_round(r)), None)
+    if shown is None and _valid_round(saved):
+        shown = saved
+    # **退回到的那一份要是最新这同一次事件的另一个副本,那就不是「更早一轮」。**
+    # 典型形态:状态文件那份的正文坏了,而历史里那份同一轮的副本正常 —— 屏幕上显示
+    # 的就是最新那一轮自己,只是少了重试派生字段。那恰恰是 `scope` 的处境(「展示是
+    # 对的,但没有导出范围和失败名单」),说成「下面显示的是更早一轮」是假话。
+    if same_event(shown, pick):
+        return shown, 'scope'
+    return shown, 'broken'
+
+
+def _pick_newest(runs: list[dict], saved: dict | None) -> tuple[dict | None, str]:
+    """挑最新那一轮:**只看顺序凭据**,不问正文读不读得出来(那是调用方的事)。"""
     newest = runs[0] if runs else None
     if not newest:
         return saved, ''
     if not saved:
         return newest, 'scope'
-    # **「同一轮」要能证明,不许拿展示版本相等充当它**(`same_round` 的 docstring
-    # 写了那一局的后果)。证明得了就用完整那一份。
-    if same_round(newest, saved):
+    # **「同一轮」要能证明,而且证明得够强到可以据此放行重试** —— 所以这里过的是
+    # `same_event`(只认可信身份),不是 `same_round`。旧格式下「内容逐字相同」认得出
+    # 一份副本,却证明不了事件唯一:两次不同的重试可以落在同一秒、步骤和日志相同,
+    # 而真正不同的那两个字段(导出范围、失败名单)压根不在给人翻的那份副本里。
+    # 代价换过来了,**而且换得对**:升级前那最后一轮(两份都写成功、确实是同一轮)
+    # 从此落到 `order` —— 展示仍是它,只是重试要先跑一次完整同步。那是**误报**,
+    # 顶多多跑一轮;反过来是**漏报**,静默按旧范围抓错来源。
+    if same_event(newest, saved):
         return saved, ''                      # 同一轮 —— 用完整那一份
     # ① **结构性凭据**:历史是倒序的,状态文件那一轮出现在首条后面,就证明首条
     #    更新。它是同一份文件内部的位置关系,**不依赖发号这件事做对** —— 而序号是
     #    发得出来才有的,发号那一步读失证就没有(见 `_next_seq`)。
-    # 位置锚点同样过 `same_round`:拿展示版本去找的话,**找到的可能是另一轮**
-    # (两条旧记录版本撞上),于是「首条更新」这个结论建在一个假的锚点上。
-    if any(same_round(r, saved) for r in runs[1:]):
+    # 位置锚点**也只认可信身份**(`same_event`)。原来这里过 `same_round`,于是内容
+    # 相等也能当成员证明 —— 而那不是唯一的:旧格式 saved 其实晚于首条,历史里还留着
+    # 更早的另一轮、它的显示字段恰好和 saved 相同,拿内容去找就「找到」了它,于是
+    # 断言首条更新、把更早那一轮摆上屏幕。重试那边是安全的(欠账非空、按钮按不下去),
+    # **可顶部那一屏在说假话** —— 而「展示对不对」是这颗判据的另一半职责。
+    # 没有身份就证明不了成员关系,那就降到下面的序号档、再不成就 `order`。
+    if any(same_event(r, saved) for r in runs[1:]):
         return newest, 'scope'
     # ② 同一代发出来的完成序号。**不等就是先后**,不拿收尾时间去反驳它 ——
     #    时钟回拨的时候序号才是对的那一个。
