@@ -205,27 +205,43 @@ def _input_moved(conn, path: str, input_seen: str, *,
     的标题/账号/正文各读一遍再和库里比,**别的** frontmatter 字段的差异不影响
     结论)。
 
-    **md 压根读不出来(清理正把这一篇删掉)不算"版本不对",直接放行。** 这一档
-    本来就有人管:`writeback_extraction` 在锁内复查「这一篇还在吗」,落进库的判定
-    随后被外键级联一并带走(真半途失败也由下一轮 `remove_missing_documents` 收掉),
-    末态干净 —— 那是本来就对的一条路。在这里改判成作废只是把它换了个形状,代价
-    却是实打实的:回写压根不会被调到,**于是"回写在锁里、读也不许读"那组回归对它
-    不再敏感**(把回写那把锁去掉也照样全绿)。这道判据只回答「我读到的正文还是
-    当前那一份吗」,"这一篇还在不在"不是它的问题。
+    **"读不出来"和"真的不在了"是两档,不是一档。**
+
+    文件真被清理掉(`FileNotFoundError`)照旧放行:那一档本来就有人管 ——
+    `writeback_extraction` 在锁内复查「这一篇还在吗」,落进库的判定随后被外键
+    级联一并带走(真半途失败也由下一轮 `remove_missing_documents` 收掉),末态
+    干净。在这里改判成作废只是把它换了个形状,代价却是实打实的:回写压根不会
+    被调到,**于是"回写在锁里、读也不许读"那组回归对它不再敏感**(把回写那把锁
+    去掉也照样全绿)。「这一篇还在不在」不是这道判据的问题。
+
+    **别的读取失败一律拒。** 没权限、IO 出错、这一刻正被别人换着写 —— 文件
+    都还在,而 ① 答不出「索引扫到当前这份 md 了吗」。**「没读到」不等于「证明
+    了没变」**:拿这一档当放行,旧判定就连同旧摘要和 `extracted_at` 一起固化到
+    新正文上。实测过的末态是库里 `promo_level=hard` + 旧稿的摘要、chunks 却是
+    新版普通教程:这一篇从普通搜索里消失、点开却是新内容,`kb index` + `kb
+    extract` 连跑都不恢复(`pending_docs` 已经空了),连「免费修复标签」那条路
+    都会照着错的 `hard` 把广告标签补到新版教程上(2026-10-14 审查三次稳定
+    复现)。误报的代价只是这一篇下一轮重提一次。
+
+    **② 问在 ① 前面,因为它只读库、一定问得出结果。** 反过来排的话,一次读取
+    失败会把这道**能**答出来的判据一起跳过 —— 那正是上面那个末态的来路:
+    `except OSError` 直接 return,而那一刻库里的指纹明明已经能证明输入换了。
     """
-    from kb.scanner import file_hash
-    if file_must_match:
-        try:
-            text = (VAULT_ROOT / path).read_text(encoding="utf-8")
-        except OSError:
-            return ""               # 见 docstring:这一档交给回写那道锁内复查
-        from kb import store
-        if store.doc_needs_reindex(conn, path, file_hash(text)):
-            return "索引还没扫到当前这份 md,提取结果作废"
     # 一条语句一个快照(`model_input` 取样时也是):拆成几句读的话,② 比的
     # 标题和正文可能来自两版,一边对得上一边对不上,结论取决于读的顺序。
     if model_input(conn, path)["seen"] != input_seen:
         return "喂给模型的输入已更新(标题/账号/正文),提取结果作废"
+    if file_must_match:
+        from kb import store
+        from kb.scanner import file_hash
+        try:
+            text = (VAULT_ROOT / path).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return ""               # 见 docstring:这一档交给回写那道锁内复查
+        except OSError as e:
+            return f"磁盘上这一份 md 读不出来({e}),证不明索引已经扫到它,提取结果作废"
+        if store.doc_needs_reindex(conn, path, file_hash(text)):
+            return "索引还没扫到当前这份 md,提取结果作废"
     return ""
 
 

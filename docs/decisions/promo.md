@@ -383,7 +383,9 @@ DB `promo_level=none`、DB flag 已摘、md flag 还在,脚本只打印一句同
 - **对齐完回读确认**(`promo_tag_in_md`,走索引那套 `yaml.safe_load` 的读法),
   对不上就抛 `PromoTagNotAligned` —— 按行删的正则覆盖不到 flow-style
   (`tags: [flag/软广]`),而 `remove_writeback_tag` 的 False 和「本来就没有」
-  长得一模一样;`read_text` 的 `OSError` 也不再静默换成 False;
+  长得一模一样;`read_text` 的 `OSError` 也不再静默换成 False(落库那一侧同理:
+  **「这一刻读不出来」不等于「输入没变」**,只有文件真不在了才放行,见
+  `docs/decisions/fulltext.md` 的输入版本判据那条);
 - **待办在判定提交前就落下**(`promo_tag_pending`,`save_promo` 的最后一句,和判定
   同一个事务),出口是 `promo_backfill sync-tags`(目标状态就是库里那份判定,
   不花钱);脚本把这一档和成功分开报(`unsynced`)。
