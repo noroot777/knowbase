@@ -441,48 +441,87 @@ console.log(JSON.stringify(out));
 class SourceScheduleNoteTests(unittest.TestCase):
     """订阅页那行「这一类来源什么时候自动同步」:抠真代码丢给 node 求值。
 
-    逐来源的间隔定时拆掉之后,这几类来源改成跟着日报那一轮走。所以这一行**必须
-    去问日报到底开没开、这一类在不在它的范围里** —— 无条件写「每天同步」在用户
-    关掉日报定时、或者把 RSS 从范围里去掉之后就是一句假话,而他会一直等一个不会
-    来的自动同步。
+    **喂的是两个接口的真实返回包**,不是手写的扁平设置对象 —— 上一版就是把
+    `/api/daily/settings` 的外层(`{settings, channels, default_channels}`)当设置
+    读,`enabled` 永远取不到,于是开着的定时被一律说成「未启用」;而那一版的用例
+    自己造了一个扁平对象喂进去,563 条回归一条都没红。
+
+    **要问遍所有还在生效的定时**:页头那颗「定时同步」(pipeline_schedule)按要求
+    暂留着,只看日报的话 B 开着时这里会说「不会自动同步」,跟页头那行当场打架。
     """
 
-    def line(self, settings, kind='rss'):
+    def line(self, daily=None, pipe=None, kind='rss'):
+        """按**两个接口各自的真实返回包**喂进去,从 `pipeJson` 这一层开始跑。
+
+        解包那一下必须由产品代码做:上一版在测试脚本里自己写死
+        `d.settings`,于是把「读错包形」注入进去照样全绿(红 0 条)—— 而那正是
+        这条用例要挡的那个 bug。None = 那个接口读不到(走 catch 那条路)。
+        """
         src = (JS / 'source_forms.js').read_text(encoding='utf-8')
-        func = re.search(r'function renderSourceScheduleNote\(\) \{.*?\n\}', src, re.S)
-        self.assertTrue(func, '那行代码的形状变了,这条用例得跟着改')
-        script = f'''
+        funcs = [re.search(rf'(?:async )?function {name}\([^)]*\) \{{.*?\n\}}', src, re.S)
+                 for name in ('loadSourceScheduleNote', 'sourceScheduleHits',
+                              'renderSourceScheduleNote')]
+        self.assertTrue(all(funcs), '那几行代码的形状变了,这条用例得跟着改')
+        script = f"""
 let box = {{ textContent: '' }};
 function $(id) {{ return id === 'source-settings-status' ? box : null; }}
 const sourceKind = {kind!r};
-const sourceDailySettings = {settings};
-{func.group(0)}
-renderSourceScheduleNote();
-console.log(box.textContent);
-'''
+const RESPONSES = {{ '/api/daily/settings': {daily or 'null'},
+                     '/api/pipeline/schedule': {pipe or 'null'} }};
+// 接口读不到时 `pipeJson` 是会抛的,这里照样抛 —— 那条 catch 分支也要被走到
+function pipeJson(url) {{
+  const body = RESPONSES[url];
+  return body === null ? Promise.reject(new Error('读不到')) : Promise.resolve(body);
+}}
+let sourceSchedules = null;
+{funcs[0].group(0)}
+{funcs[1].group(0)}
+{funcs[2].group(0)}
+loadSourceScheduleNote().then(() => console.log(box.textContent));
+"""
         done = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(0, done.returncode, done.stderr)
         return done.stdout.strip()
 
-    def test_the_line_reports_what_the_daily_schedule_actually_does(self):
-        on = "{enabled: true, sync: true, time: '09:00', channels: ['rss', 'social']}"
-        self.assertIn('每天 09:00 跟着日报那一轮同步', self.line(on))
-        # 定时关着 / 没开「生成前先同步」/ 这一类不在范围里:三档都不许说"每天同步"
-        for settings, expect in (
-                ("{enabled: false, sync: true, time: '09:00', channels: ['rss']}",
+    # `/api/daily/settings` 的真实包形:设置在 settings 里,外层那个 channels 是
+    # 可选来源目录(一堆 {id,label}),不是待同步名单 —— 拿它当名单也会判错。
+    DAILY_ON = ("{settings: {enabled: true, sync: true, time: '09:00', channels: ['rss']},"
+                " channels: [{id: 'rss', label: 'RSS'}, {id: 'social', label: '大V观点'}],"
+                " default_channels: ['wechat_local', 'rss']}")
+
+    def test_an_enabled_daily_schedule_is_not_reported_as_off(self):
+        self.assertIn('每天 09:00 跟着日报那一轮同步', self.line(daily=self.DAILY_ON))
+        self.assertNotIn('未启用', self.line(daily=self.DAILY_ON))
+
+    def test_the_retained_head_schedule_counts_too(self):
+        # A 关着、B 开着且范围含 RSS:页头写着「定时同步 · 每天 07:30」,这里不许
+        # 同时说「目前不会自动同步」。
+        off = "{settings: {enabled: false, sync: true, time: '09:00', channels: ['rss']}}"
+        b_on = "{enabled: true, time: '07:30', channel: 'rss', channels: ['rss']}"
+        got = self.line(daily=off, pipe=b_on)
+        self.assertIn('每天 07:30 跟着页头的定时同步那一轮同步', got)
+        self.assertNotIn('不会自动同步', got)
+        # 反过来钉一边:B 开着但范围里没有这一类,照旧如实说不会
+        b_other = "{enabled: true, time: '07:30', channel: 'wechat_local', channels: ['wechat_local']}"
+        self.assertIn('不会自动同步', self.line(daily=off, pipe=b_other))
+
+    def test_each_reason_for_no_automatic_sync_is_named(self):
+        for daily, expect in (
+                ("{settings: {enabled: false, sync: true, time: '09:00', channels: ['rss']}}",
                  '日报定时未启用'),
-                ("{enabled: true, sync: false, time: '09:00', channels: ['rss']}",
+                ("{settings: {enabled: true, sync: false, time: '09:00', channels: ['rss']}}",
                  "没开「生成前先同步」"),
-                ("{enabled: true, sync: true, time: '09:00', channels: ['social']}",
+                ("{settings: {enabled: true, sync: true, time: '09:00', channels: ['social']}}",
                  '不在日报的同步范围里')):
-            got = self.line(settings)
+            got = self.line(daily=daily)
             self.assertIn(expect, got)
             self.assertNotIn('每天 09:00 跟着日报', got)
-        # 四档都要留着「手动同步随时可用」:那是唯一一句任何时候都为真的话
-        for settings in (on, 'null'):
-            self.assertIn('手动同步随时可用', self.line(settings))
-        # 读不到日报设置时**不猜**:只说已知为真的那一半
-        self.assertEqual('手动同步随时可用。', self.line('null'))
+
+    def test_unknown_stays_unknown_and_manual_is_always_true(self):
+        # 两个接口都读不到时**不猜**:只说已知为真的那一半
+        self.assertEqual('手动同步随时可用。', self.line())
+        for args in ({'daily': self.DAILY_ON}, {}):
+            self.assertIn('手动同步随时可用', self.line(**args))
 
 
 if __name__ == '__main__':

@@ -71,7 +71,7 @@ C 另外还有两处说不通:它**管不到公众号**(`feed_types()` 只收 `m
 
 ## 回归
 
-- `tests/test_daily_report.py::DailyTwoStageSyncTests` —— 两段式编排:抓取按通道、
+- `tests/test_daily_two_stage.py` —— 两段式编排:抓取按通道、
   入库一次;全库那一段的红不记到通道头上;超预算仍入库;用户停止则跳过。
   反向验证(定点注入,各红一条):①入库段退回认超预算 → 超预算那条红;
   ②`FETCH_STAGES` 退回四段 → 编排那条红;③给入库段安一个 `channel` → 归因那条红。

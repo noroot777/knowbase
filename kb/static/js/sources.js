@@ -166,8 +166,12 @@ function renderWechatSubsStatus() {
   $('subs-wechat-sync').disabled = subsWechatBusy || running || !!pipeAction;
   $('subs-wechat-sync').textContent = ours ? '同步中…' : '同步全部';
   $('subs-wechat-progress').hidden = !running;
+  // 全库那一轮(索引/提取)不归任何来源,但它做的正是这些内容 —— 不能跟
+  // 「别的来源在抓取」共用一句话。判据和文案都在 pipe_channels.js。
   $('subs-wechat-progress-text').textContent = ours
-    ? (pipeSnapshot.stages?.[pipeSnapshot.current_stage]?.detail || '正在同步公众号')
+    ? pipeRunNote(pipeSnapshot, '正在同步公众号')
+    : pipeLibraryOnly(pipeSnapshot)
+    ? pipeRunNote(pipeSnapshot) + '，新任务会顺延。'
     : '其他来源正在同步，新任务会顺延。';
   updateWechatNotices();
 }
@@ -361,7 +365,9 @@ function updateSourceRunStatus() {
   $('source-sync').textContent = ours ? '同步中…' : '同步全部';
   $('source-progress').hidden = !running;
   $('source-progress-text').textContent = ours
-    ? (pipeSnapshot.stages[pipeSnapshot.current_stage]?.detail || '正在同步')
+    ? pipeRunNote(pipeSnapshot, '正在同步')
+    : pipeLibraryOnly(pipeSnapshot)
+    ? pipeRunNote(pipeSnapshot) + '，自动任务会顺延。'
     : '其他来源正在同步，自动任务会顺延。';
   $('source-list').querySelectorAll('[data-source-action]').forEach(b => {
     const source = sourceData?.sources.find(s=>s.id===Number(b.dataset.sourceId));

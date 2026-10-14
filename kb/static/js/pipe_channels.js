@@ -82,6 +82,18 @@ function pipeRunScopes(result) {
   if (filter?.channels?.length) return filter.channels.map(s => ({ channel: s.channel, accounts: s.accounts || [], retry: s.retry || '' }));
   return filter?.channel ? [{ channel: filter.channel, accounts: filter.accounts || [], retry: filter.retry || '' }] : [];
 }
+// 「这一轮现在在做什么」的一句话。**全库那一档要单独有话说** —— 它不归任何来源,
+// 但那不等于「别人在跑」:照「没有来源范围 = 其他来源正在同步」念,用户在 RSS 页和
+// 公众号页会同时看到「其他来源正在同步」,而那一轮做的正是他自己这些内容的索引与
+// 提取。三个页面共用这一份,别各写各的。
+function pipeRunNote(snapshot, fallback) {
+  const detail = snapshot?.stages?.[snapshot.current_stage]?.detail;
+  if (pipeLibraryOnly(snapshot)) {
+    const planned = (snapshot.planned_stages || []).map(k => STAGE_META[k]?.name).filter(Boolean);
+    return detail || `正在为全部来源${planned.join('、') || '处理入库'}`;
+  }
+  return detail || fallback;
+}
 // 这一轮是不是「不按来源」的全库处理（既没抓取也没导出）。文案要照它说话。
 function pipeLibraryOnly(result) {
   const planned = Array.isArray(result?.planned_stages) ? result.planned_stages : [];

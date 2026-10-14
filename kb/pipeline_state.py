@@ -210,25 +210,38 @@ def retry_notes(run: dict) -> dict:
     return note.get("channels") or {}
 
 
+def run_payload() -> dict:
+    """一轮运行的终态记录。**落盘的那份和按 id 留的那份是同一份**。
+
+    两处曾经各写各的:`_finished` 只留了身份、结束时刻、stopped 和 stages。于是
+    "没亲眼看到自己那一轮收尾、照 id 去取"的调用方(`daily_run._sync_round` 被
+    接替的那条路)拿到的是一份**缺计划、缺来源范围、缺失败名单**的记录 —— 它看着
+    像一份完整结果,合并时却因为没有 `planned_stages` 被整个过滤掉,那一轮真实
+    的抓取失败就此消失。契约只有一份,两边都用它。
+    """
+    return {
+        "started_at": _state["started_at"],
+        "finished_at": _state["finished_at"],
+        "stopped": _state.get("stopped", False),
+        "run_kind": _state.get("run_kind", ""),
+        "planned_stages": _state.get("planned_stages"),
+        "stages": deepcopy(_state["stages"]),
+        "crawl_filter": deepcopy(_state["crawl_filter"]),
+        # 导出范围单独落一份:下一次重试要从**它**恢复,不是从收窄后的抓取范围
+        "export_filter": deepcopy(_state.get("export_filter") or {}),
+        # run_id 跟名单一起落盘:retry_notes 要拿它认"这份名单是不是这一轮的"
+        "run_id": _state.get("run_id", ""),
+        "crawl_retry": deepcopy(_state.get("crawl_retry") or {}),
+        "log": list(_state["log"]),
+    }
+
+
 def _save_last_run() -> None:
     """持久化最近一次结果,重启 kb-web 后仍能看到。"""
     try:
         _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _STATE_FILE.write_text(json.dumps({
-            "started_at": _state["started_at"],
-            "finished_at": _state["finished_at"],
-            "stopped": _state.get("stopped", False),
-            "run_kind": _state.get("run_kind", ""),
-            "planned_stages": _state.get("planned_stages"),
-            "stages": _state["stages"],
-            "crawl_filter": _state["crawl_filter"],
-            # 导出范围单独落一份:下一次重试要从**它**恢复,不是从收窄后的抓取范围
-            "export_filter": _state.get("export_filter") or {},
-            # run_id 跟名单一起落盘:retry_notes 要拿它认"这份名单是不是这一轮的"
-            "run_id": _state.get("run_id", ""),
-            "crawl_retry": _state.get("crawl_retry") or {},
-            "log": _state["log"],
-        }, ensure_ascii=False, indent=1), encoding="utf-8")
+        _STATE_FILE.write_text(json.dumps(run_payload(), ensure_ascii=False, indent=1),
+                               encoding="utf-8")
     except OSError:
         pass
 
@@ -284,11 +297,9 @@ def _end_run() -> None:
         # 也还拿得到自己那一轮的结果(阶段修正已经在上面做完了,存的就是终态)。
         run_id = _state.get("run_id") or ""
         if run_id:
-            _finished[run_id] = {
-                "run_id": run_id, "stopped": stopped,
-                "finished_at": _state["finished_at"],
-                "stages": deepcopy(_state["stages"]),
-            }
+            # 跟落盘那份同一个契约(见 `run_payload`):少一个字段,照 id 来取的
+            # 调用方就会拿到一份"看着完整、其实合并不进去"的结果。
+            _finished[run_id] = run_payload()
             for old_id in list(_finished)[:-_FINISHED_KEEP]:
                 del _finished[old_id]
         _state["running"] = False
@@ -305,6 +316,33 @@ def _end_run() -> None:
 # 合并时谁盖谁。只在**各自计划里有这个阶段**的记录之间比:没计划过的那一档是
 # `skipped/未选择`,让它参与比较会把另一轮真实的 ok 盖成「跳过」。
 _MERGE_RANK = {"error": 4, "stopped": 3, "skipped": 2, "pending": 1, "running": 1, "ok": 0}
+
+
+def _merge_stage(entries: list[dict]) -> dict:
+    """同一个阶段在几轮里的结果,合成**不丢东西**的一份。
+
+    不能只挑最重的那一个对象:RSS 和网页专栏各挂一条订阅时,两轮的 crawl 都是
+    error,挑一个等于把另一个来源的原因和失败名单整个扔掉 —— 面板上「来源:
+    RSS + 网页专栏」却只列得出一条明细。detail 按分号接起来、`failures` 按
+    (标题, 原因) 去重后合并,status 仍取最重的那一档。
+    """
+    worst = max(entries, key=_merge_rank)
+    merged = {k: v for k, v in deepcopy(worst).items() if k not in ("detail", "failures")}
+    details, failures, seen = [], [], set()
+    for stage in entries:
+        text = (stage.get("detail") or "").strip()
+        if text and text not in details:
+            details.append(text)
+        for item in stage.get("failures") or []:
+            key = (item.get("title"), item.get("reason"))
+            if key not in seen:
+                seen.add(key)
+                failures.append(deepcopy(item))
+    if details:
+        merged["detail"] = "；".join(details)[:400]
+    if failures:
+        merged["failures"] = failures
+    return merged
 
 
 def _merge_rank(stage: dict) -> int:
@@ -336,32 +374,53 @@ def _merge_scopes(records: list[dict], key: str) -> dict:
     return {"channel": merged[0]["channel"], "channels": merged}
 
 
+class PublishRefused(Exception):
+    """这一批没能发布出去。`reason` 是人话原因,调用方要把它说出来。"""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def publish_batch(records: list[dict]) -> dict | None:
     """把一次业务轮里跑过的几轮管道合并成一份,发布成「最近一次运行」。
 
-    `records` 是各轮的终态快照(`get_state()` 在它 running 放下之后的那一份),
-    按时间顺序。少于两轮就不发布 —— 那时管道自己落的那份已经代表整轮了。
+    `records` 是各轮的终态快照(`get_state()` 在它 running 放下之后的那一份,
+    或者照 id 取回来的 `run_result`,两者同一个契约见 `run_payload`),按时间顺序。
+    少于两轮就不发布 —— 那时管道自己落的那份已经代表整轮了。
 
-    **逐阶段取最重的那一个**,而且只在计划过这个阶段的记录之间比。来源范围、
-    失败名单(`crawl_retry`)按来源并起来,这样「重试失败项」拿得到那一轮的目标
-    和原导出范围,不必从当前订阅状态反推。
+    **逐阶段合成不丢东西的一份**(见 `_merge_stage`),而且只在计划过这个阶段的
+    记录之间比。来源范围、失败名单(`crawl_retry`)按来源并起来,这样「重试失败项」
+    拿得到那一轮的目标和原导出范围,不必从当前订阅状态反推。
 
-    合并后的 `run_id` 是新发的,`crawl_retry.run` 跟着它 —— `retry_notes` 要拿
-    这两个对得上才认这份名单(对不上就按原范围重跑,方向是安全的)。
+    合并后的身份**沿用这一批最后那一轮的 run_id**,不另发一个:另发等于把一份
+    早先的批次伪装成"刚刚产生的最新结果",而最新指针是有先后的。
 
-    期间要是已经有别的运行开跑了,这份发布会在它收尾时被盖掉,跟没有合并时的
-    行为一样(面板本来就优先显示正在跑的那一轮)。
+    **发布权**:只有当盘上那份「最近一次运行」仍然是这一批里的某一轮时才替换。
+    期间要是另一轮独立运行已经收尾(手动同步在日报收尾前跑完一轮),盘上那份是
+    **比我们新**的结果,替换掉它等于把一次刚失败的手动同步改写成成功、顺带让它的
+    「重试失败项」消失 —— 那一档拒绝发布并抛 `PublishRefused`,由调用方如实说出来。
+    一把锁只防同时写,答不了"我有没有资格当最新"。
+
+    写不进去(OSError)同样抛:静默返回会让日报带着一份"失败已经没人看得到"的
+    状态照常出报。
     """
     records = [r for r in records if r]
     if len(records) < 2:
         return None
     with _lock:
-        run_id = new_run_id()
+        ours = {r.get("run_id") for r in records if r.get("run_id")}
+        current = load_last_run() or {}
+        if current and current.get("run_id") and current["run_id"] not in ours:
+            raise PublishRefused(
+                f'期间已经有更新的一轮同步收尾({current["run_id"]}),这一轮日报的'
+                '同步结果没有写进「最近一次运行」——同步中心显示的是那一轮')
+        run_id = records[-1].get("run_id") or new_run_id()
         stages: dict[str, dict] = {}
         for name in STAGES:
             owned = [r["stages"][name] for r in records
                      if name in (r.get("planned_stages") or []) and (r.get("stages") or {}).get(name)]
-            stages[name] = (deepcopy(max(owned, key=_merge_rank)) if owned
+            stages[name] = (_merge_stage(owned) if owned
                             else {"status": "skipped", "detail": "未选择"})
         planned = [s for s in STAGES
                    if any(s in (r.get("planned_stages") or []) for r in records)]
@@ -389,11 +448,11 @@ def publish_batch(records: list[dict]) -> dict | None:
             _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
             _STATE_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=1),
                                    encoding="utf-8")
-        except OSError:
-            return None
-        _finished[run_id] = {"run_id": run_id, "stopped": merged["stopped"],
-                             "finished_at": merged["finished_at"],
-                             "stages": deepcopy(stages)}
+        except OSError as e:
+            raise PublishRefused(f'同步结果没写进「最近一次运行」({e})') from e
+        # 这一批的身份就是最后那一轮,所以这里是**把它那份记录补全成整轮的**,
+        # 不是再塞一条新的。
+        _finished[run_id] = deepcopy(merged)
         for old_id in list(_finished)[:-_FINISHED_KEEP]:
             del _finished[old_id]
         return merged

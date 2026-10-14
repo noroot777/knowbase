@@ -90,27 +90,54 @@ function fillSourceSettings(s) {
   // 现读一次:日报那边改了设置之后,这一行不该还停在上次打开时的说法。
   loadSourceScheduleNote();
 }
-// 日报定时的现状。读失败/还没读到时不猜,只说手动同步那一半(已知为真)。
-let sourceDailySettings = null;
+// 「这一类来源什么时候会自动同步」。**要问遍所有还在生效的定时**,不是只问日报:
+// 页头那颗「定时同步」(pipeline_schedule)按仓库主人的要求暂留着,它照样会到点跑
+// 全流程。只看日报的话,B 开着而 A 关着时这里会写「目前不会自动同步」,而页面上方
+// 明明写着「定时同步 · 每天 07:30」—— 两句话当场打架。
+//
+// 两个接口的**包形不一样**,各按各的读:`/api/daily/settings` 外面套了一层
+// `{settings, channels, default_channels}`(`channels` 是可选来源目录,不是待同步
+// 名单),`/api/pipeline/schedule` 是扁的。把外层当设置对象读,`enabled` 永远取不到,
+// 于是开着的定时被一律说成「未启用」。
+let sourceSchedules = null;
 async function loadSourceScheduleNote() {
-  try { sourceDailySettings = await pipeJson('/api/daily/settings'); }
-  catch { sourceDailySettings = null; }
+  const ask = async (url, pick) => { try { return pick(await pipeJson(url)); } catch { return null; } };
+  const [daily, pipe] = await Promise.all([
+    ask('/api/daily/settings', d => d.settings),
+    ask('/api/pipeline/schedule', d => d),
+  ]);
+  // 两个都读不到才算"不知道";读到一个就按已知的那部分说话。
+  sourceSchedules = (daily || pipe) ? { daily, pipe } : null;
   renderSourceScheduleNote();
+}
+// 这一类来源会被哪几条定时带上。返回 [{时刻}],空数组 = 没有一条会带上它。
+function sourceScheduleHits(kind) {
+  const { daily, pipe } = sourceSchedules || {};
+  const hits = [];
+  // 日报那一轮:定时开着、勾了「生成前先同步」、而且这一类在它的同步范围里
+  if (daily?.enabled && daily.sync !== false && (daily.channels || []).includes(kind))
+    hits.push({ time: daily.time, what: '日报' });
+  if (pipe?.enabled && (pipe.channels || [pipe.channel]).includes(kind))
+    hits.push({ time: pipe.time, what: '页头的定时同步' });
+  return hits;
 }
 function renderSourceScheduleNote() {
   const box = $('source-settings-status');
   if (!box) return;
-  const s = sourceDailySettings;
   const manual = '手动同步随时可用。';
-  if (!s) { box.textContent = manual; return; }
-  const inScope = (s.channels || []).includes(sourceKind);
-  box.textContent = !s.enabled
-    ? `日报定时未启用，这一类来源目前不会自动同步。${manual}`
-    : !s.sync
-    ? `日报定时每天 ${s.time} 生成，但没开「生成前先同步」。${manual}`
-    : !inScope
-    ? `这一类来源不在日报的同步范围里，目前不会自动同步。${manual}`
-    : `每天 ${s.time} 跟着日报那一轮同步。${manual}`;
+  if (!sourceSchedules) { box.textContent = manual; return; }
+  const hits = sourceScheduleHits(sourceKind);
+  if (hits.length) {
+    box.textContent = hits.map(h => `每天 ${h.time} 跟着${h.what}那一轮同步`).join('；')
+      + `。${manual}`;
+    return;
+  }
+  // 一条都没带上它。**把原因说出来**,否则用户不知道该去哪儿改。
+  const daily = sourceSchedules.daily;
+  box.textContent = (!daily ? '没有定时会自动同步这一类来源。'
+    : !daily.enabled ? '日报定时未启用，这一类来源目前不会自动同步。'
+    : daily.sync === false ? `日报定时每天 ${daily.time} 生成，但没开「生成前先同步」。`
+    : '这一类来源不在日报的同步范围里，目前不会自动同步。') + manual;
 }
 
 async function saveSourceSettings(e) {

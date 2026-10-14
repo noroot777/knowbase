@@ -404,9 +404,11 @@ def _sync_round(stages: list[str], crawl_filter: dict | None, label: str,
                             '成败未知')
         _log(f'{label}:{entry["detail"]}')
         return entry
-    if rounds is not None and mine.get('run_id') == run:
-        # 只收自己亲眼看到收尾的那一份:`run_result` 那条后路只留了 stages,
-        # 没有来源范围和失败名单,合进去会让重试拿到一份不完整的范围。
+    if rounds is not None:
+        # **后备那条路也要收**:它和自观测那份现在是同一个契约(`run_payload`),
+        # 带着计划、来源范围和失败名单。原来这里拿 `run_id == run` 当"是不是
+        # 自观测"的判据 —— 两者的 run_id 本来就相同,等于没拦住,而当时后备记录
+        # 缺 `planned_stages`,合并时它那一轮真实的抓取失败会被整个过滤掉。
         rounds.append(mine)
     # 只看这一轮请求了的那几个阶段:没选中的阶段一开跑就落 skipped(见
     # `pipeline.start_pipeline`),全收进来的话每一轮都要多报几句"条目化/
@@ -429,7 +431,7 @@ def _sync_round(stages: list[str], crawl_filter: dict | None, label: str,
 
 def _run(since: datetime | None, until: datetime | None, sync: bool,
          channels: list[str], first_days: int) -> None:
-    sched_day, retry = _state['sched_day'], False
+    sched_day, retry, publish_issue = _state['sched_day'], False, ''
     try:
         if sync:
             labels = _channel_labels()
@@ -464,7 +466,14 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
             # 成功一起抹掉(`retry_failed_plan` 读的也是这一份)。把这一批合并成
             # 一份发布,让同步中心和重试面对的是**整个业务轮**。
             from kb import pipeline as pl
-            pl.publish_batch(rounds)
+            try:
+                pl.publish_batch(rounds)
+            except pl.PublishRefused as e:
+                # 发布不成不是日报的失败(素材都在库里,照常出报),但**不许咽下去**:
+                # 咽下去的后果是同步中心那边看不到这一轮的失败、也点不了重试,而
+                # 日报这边一句"已生成"看着一切正常。
+                publish_issue = e.reason
+                _log(f'同步结果未发布:{publish_issue}')
         # 用户按的停止到此为止:接着生成等于把一份"同步到一半"的日报当成功交出去,
         # 还要再花一次模型钱。超预算是另一回事——那本来就是"别再同步了,拿现有的
         # 内容出报",继续生成正是它的目的。
@@ -496,6 +505,8 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         # 记账没写成不该糊过去:日报是出了,但这一天的素材会在下一份里重复出现
         # 一遍(`daily.generate` 的失败方向,见那一段的注释)。只写进 log 的话
         # 面板上那句收尾文案仍是一句干净的"已生成",用户看不出这一轮是降级完成的。
+        if publish_issue:
+            note += f'；{publish_issue}'
         if res.get('carry_error'):
             note += f";上报记录没写进库({res['carry_error']}),这一天的素材会在下一份里重复出现"
         _set('done', note)

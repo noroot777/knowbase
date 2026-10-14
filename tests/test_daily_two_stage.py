@@ -177,6 +177,13 @@ class DailyBatchResultTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         p = patch.object(ps, '_STATE_FILE', Path(temp.name) / 'last_run.json')
         p.start(); self.addCleanup(p.stop)
+        # `_state` / `_finished` 是模块级常驻的:这几条要往里摆终态,**走的时候
+        # 一定要还回去**,否则同跑时会把别的用例带红,而单跑永远是绿的。
+        before_state, before_done = deepcopy(ps._state), deepcopy(ps._finished)
+        def restore():
+            ps._state.clear(); ps._state.update(before_state)
+            ps._finished.clear(); ps._finished.update(before_done)
+        self.addCleanup(restore)
 
     def round(self, planned, stages, **extra):
         from kb.pipeline_state import STAGES
@@ -238,6 +245,100 @@ class DailyBatchResultTests(unittest.TestCase):
         from kb import pipeline_state as ps
         self.assertIsNone(ps.publish_batch([self.round(['crawl'], {})]))
         self.assertIsNone(ps.publish_batch([]))
+
+    def test_a_takeover_leaves_a_record_complete_enough_to_merge(self):
+        """没亲眼看到自己那一轮收尾、照 id 取回来的那份,也要能合进去。
+
+        它和自观测那份现在是同一个契约(`pipeline_state.run_payload`)。缺
+        `planned_stages` 的那一版里,这一轮真实的抓取失败在合并时被整个过滤掉,
+        而 `_sync_round` 原来那道守卫拿 `run_id == run` 当"是不是自观测"的判据
+        —— 两者的 run_id 本来就相同,等于没拦住。
+        """
+        from kb import pipeline, pipeline_state as ps
+        ps._state.update({'run_id': 'run-9', 'started_at': 'A', 'finished_at': 'B',
+                          'run_kind': 'sync', 'planned_stages': ['crawl', 'export'],
+                          'crawl_filter': {'channel': 'rss'},
+                          'export_filter': {'channel': 'rss'},
+                          'crawl_retry': {'run': 'run-9', 'channels': {'rss': {'ids': [7]}}},
+                          'stopped': False, 'log': []})
+        ps._state['stages'] = {s: {'status': 'skipped', 'detail': '未选择'}
+                               for s in ps.STAGES}
+        ps._state['stages']['crawl'] = {'status': 'error', 'detail': '失败 10 个'}
+        ps._state['stages']['export'] = {'status': 'ok', 'detail': ''}
+        # **走真的收尾**,不是自己往 `_finished` 里摆一份:那样injection 打在
+        # `_end_run` 上这条用例一声不吭(2026-10-14 复审第 2 轮实测,红 0 条)。
+        ps._state['running'] = True
+        ps._end_run()
+        fetched = pipeline.run_result('run-9')
+        # 契约:后备记录带着计划、来源范围和失败名单,不是一份只有 stages 的壳
+        for key in ('planned_stages', 'crawl_filter', 'export_filter', 'crawl_retry'):
+            self.assertIn(key, fetched, key)
+        ps.publish_batch([fetched, self.round(['index', 'extract'], {}, run_id='run-10')])
+        last = pipeline.load_last_run()
+        self.assertEqual('error', last['stages']['crawl']['status'])
+        self.assertEqual(['crawl', 'export', 'index', 'extract'],
+                         pipeline.retry_failed_plan())
+
+    def test_every_failing_source_keeps_its_own_detail(self):
+        """同一个阶段在几个来源都失败时,合并不许只留一个。
+
+        只挑最重的那一个对象,等于把另一个来源的原因和失败名单整个扔掉 —— 面板上
+        「来源:RSS + 网页专栏」却只列得出一条明细。
+        """
+        from kb import pipeline, pipeline_state as ps
+        def failing(channel, title):
+            return self.round(['crawl', 'export'],
+                              {'crawl': {'status': 'error', 'detail': f'{channel} 失败 1 个',
+                                         'failures': [{'title': title, 'reason': '连不上'}]}},
+                              run_id=f'run-{channel}', crawl_filter={'channel': channel},
+                              export_filter={'channel': channel})
+        ps.publish_batch([failing('rss', 'RSS 源'), failing('web', '网页源'),
+                          self.round(['index', 'extract'], {}, run_id='run-z')])
+        crawl = pipeline.load_last_run()['stages']['crawl']
+        self.assertEqual({'RSS 源', '网页源'}, {f['title'] for f in crawl['failures']})
+        self.assertIn('rss 失败 1 个', crawl['detail'])
+        self.assertIn('web 失败 1 个', crawl['detail'])
+        # 两个来源都留在范围里,重试才两个都重抓
+        self.assertEqual(['rss', 'web'], [s['channel'] for s in
+                                          pipeline.crawl_channels(
+                                              pipeline.load_last_run()['crawl_filter'])])
+
+    def test_a_newer_finished_run_is_not_replaced_by_this_batch(self):
+        """期间另一轮独立运行已经收尾时,这一批没有资格当「最近一次运行」。
+
+        覆盖掉等于把一次刚失败的手动同步改写成成功,它的「重试失败项」跟着消失。
+        一把锁只防同时写,答不了"我有没有资格当最新"。
+        """
+        from kb import pipeline, pipeline_state as ps
+        ps._state.update({'run_id': 'run-manual', 'started_at': 'C', 'finished_at': 'D',
+                          'run_kind': 'sync', 'planned_stages': ['index'],
+                          'crawl_filter': {}, 'export_filter': {}, 'crawl_retry': {},
+                          'stopped': False, 'log': []})
+        ps._state['stages'] = {s: {'status': 'skipped', 'detail': '未选择'}
+                               for s in ps.STAGES}
+        ps._state['stages']['index'] = {'status': 'error', 'detail': '索引失败'}
+        ps._save_last_run()
+        with self.assertRaises(ps.PublishRefused) as caught:
+            ps.publish_batch([self.round(['crawl', 'export'], {}, run_id='run-1',
+                                         crawl_filter={'channel': 'rss'}),
+                              self.round(['index', 'extract'], {}, run_id='run-2')])
+        self.assertIn('run-manual', caught.exception.reason)
+        # 那一轮手动同步的失败原样留着,重试照旧排得出来
+        last = pipeline.load_last_run()
+        self.assertEqual(('run-manual', 'error'),
+                         (last['run_id'], last['stages']['index']['status']))
+        self.assertIn('index', pipeline.retry_failed_plan())
+
+    def test_a_write_failure_is_not_a_silent_success(self):
+        # 静默吞掉的后果:同步中心看不到这一轮的失败、也点不了重试,而日报那边
+        # 一句「已生成」看着一切正常。
+        from kb import pipeline_state as ps
+        with patch.object(Path, 'write_text', Mock(side_effect=OSError('磁盘满'))), \
+             self.assertRaises(ps.PublishRefused) as caught:
+            ps.publish_batch([self.round(['crawl', 'export'], {}, run_id='run-1',
+                                         crawl_filter={'channel': 'rss'}),
+                              self.round(['index', 'extract'], {}, run_id='run-2')])
+        self.assertIn('磁盘满', caught.exception.reason)
 
 
 class RunScopeTests(unittest.TestCase):
