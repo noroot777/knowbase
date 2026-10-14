@@ -206,8 +206,12 @@ def pipeline_run(body: PipelineRunRequest | None = None):
             "since_date": body.since_date or "",
             "until_date": body.until_date or "",
         })
-    if not pl.start_pipeline(stages, crawl_filter=crawl_filter):
-        raise HTTPException(409, "管道已在运行中")
+    # **收下真实原因再报**:没起跑有两种,而「管道已在运行中」只覆盖一种 —— 另一种
+    # 是这一轮的持久化边界落不下来(数据目录写不进去),照着报前者等于把一个要动手的
+    # 故障说成「等一下再点」。
+    why: list[str] = []
+    if not pl.start_pipeline(stages, crawl_filter=crawl_filter, refused=why):
+        raise HTTPException(409, why[0] if why else "管道已在运行中")
     return {"ok": True}
 
 

@@ -51,10 +51,18 @@ def _load_json_strict(path: Path):
     内容坏了(解码、JSON、嵌套过深)也抛:那一档重读多半还是坏的,但**「拿不准就
     别固化终态」** —— 代价只是每次多读一次小文件。
     展示那条路照旧用宽口径的 `_load_json`(读不出来少显示几行、不出声)。
+
+    **判「不存在」只认 `FileNotFoundError`,不许用 `Path.exists()`** —— 后者吞掉
+    `OSError`(父目录权限不足、路径里有一节不是目录、底层 I/O 错误)返回 False,于是
+    「看不见」和「没有」长成一个样,而这两件事在这里导出的结论完全相反:一个是
+    「这个库从没跑过」,另一个是「这一刻说不清」。**三份落盘(状态、历史、开工标记)
+    都过这一个函数**,「不知道不能算没有」在三处必须是同一句话。
     """
-    if not path.exists():
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
         return None
-    got = json.loads(path.read_bytes().decode("utf-8", "replace"))
+    got = json.loads(raw.decode("utf-8", "replace"))
     if got is None:
         # **「文件里是 `null`」不是「文件不存在」。** 两者都返回 `None` 的话,上面
         # 那些「`None` = 确定没有」的判据就把一份坏文件当成了空库:恢复静默认可
@@ -273,6 +281,15 @@ def _filter_ok(filt) -> bool:
     `pipeline_stages.py` 还要按每个 scope 取 `accounts` 再迭代:`accounts` 落成
     字符串时那一迭代会把它**拆成一个个字符**当订阅名 —— 不抛,而是静默按一串不存在
     的名字去抓,等于一条都不抓。
+
+    **验到叶子,不只验容器。** 容器对而元素坏的那几档后果一样静默、甚至更糟:
+    · `channel` 落成字典 —— 重试派生时 `retry_notes` 那边拿它当**字典键**去查失败
+      名单(`notes.get(scope["channel"])`),`TypeError: unhashable type` 从保护块
+      外抛出去,整次重试变成一个说不出原因的 500。
+    · `accounts` 的元素落成字典 —— 计划原样把它带进抓取阶段,而那边是跟字符串的
+      订阅 id / 名字做成员筛选,一个都不匹配:**面板报「已跳过」,一条也没抓**。
+    · 所以这两级一起验;验不过就是 `broken`(那一轮**照旧算发生过**,只是渲染不了、
+      不许据它派生范围)。
     """
     if filt is None:
         return True
@@ -284,11 +301,25 @@ def _filter_ok(filt) -> bool:
     for one in scopes or []:
         if not isinstance(one, dict):
             return False
-        names = one.get("accounts")
-        if not (names is None or isinstance(names, list)):
+        if not _names_ok(one.get("accounts")) or not _channel_ok(one.get("channel")):
             return False
-    names = filt.get("accounts")
-    return names is None or isinstance(names, list)
+    return _names_ok(filt.get("accounts")) and _channel_ok(filt.get("channel"))
+
+
+def _channel_ok(name) -> bool:
+    """来源名:缺省或字符串。**它是要当字典键用的**(见 `_filter_ok`)。"""
+    return name is None or isinstance(name, str)
+
+
+def _names_ok(names) -> bool:
+    """一份订阅名单:缺省,或者一个**元素全是字符串**的列表。
+
+    判据抽出来是因为它有两个落点(每个 scope 自己一份、范围根上还有一份),而
+    「元素是什么」这一级原来两处都没验。
+    """
+    if names is None:
+        return True
+    return isinstance(names, list) and all(isinstance(x, str) for x in names)
 
 
 def _valid_round(run) -> bool:
@@ -365,7 +396,10 @@ def _valid_round(run) -> bool:
         # 拿它收窄范围),时刻要能和采集器自己那套时间字符串比。
         if not isinstance(one, dict):
             return False
-        if not (one.get("targets") is None or isinstance(one.get("targets"), list)):
+        # 名单**验到元素**:重试那边把它直接当 `--targets` 的值传给采集器子进程,
+        # 那一步会把每个元素字符串化 —— 混进字典就变成一串 `{'id': 3}` 当订阅名,
+        # 不抛,静默把真正该重抓的那几条摘空。
+        if not _names_ok(one.get("targets")):
             return False
         if not (one.get("at") is None or isinstance(one.get("at"), str)):
             return False

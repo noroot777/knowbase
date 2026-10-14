@@ -64,16 +64,18 @@ def _open_file():
     return _STATE_FILE.with_name(f"{_STATE_FILE.stem}_open{_STATE_FILE.suffix}")
 
 
-def mark_open() -> None:
-    """起跑前落一笔开工标记。**两个起跑入口都过这里**(「口径只有一份」)。
+def mark_open(run: dict) -> str:
+    """占住这一轮的持久化边界。**空串 = 占住了;非空 = 这一轮不许起跑的理由。**
 
-    写不上只记一笔诊断,不拦起跑 —— 理由在 `pipeline_open.mark`。
+    **两个起跑入口都过这里**(「口径只有一份」),而且都在 `_lock` 里、`_state` 还没
+    认下这一轮之前调 —— 占不住就什么都没改,不用回滚。放在 `_state.update` 之后的话
+    「内存说在跑」和「磁盘说开工了」中间有个窗口,而拒绝起跑又得把那一堆字段挨个
+    撤回来(撤漏一个就是下一轮带着上一轮的范围)。`run` 的内容契约在 `_open.mark`。
     """
-    global _persist_error
-    err = _open.mark(_open_file(), _state)
+    err = _open.mark(_open_file(), run)
     if err:
-        _persist_error = ' / '.join(x for x in (_persist_error, err) if x)
-        _log(f'{err}没能落盘，这一轮的结果万一也没留下就查不出来了')
+        _log(f'{err}没能落盘，这一轮没有起跑')
+    return _open.NO_BOUNDARY.format(err=err) if err else ''
 
 STAGES = ("crawl", "export", "index", "extract", "projects", "wiki")
 
@@ -434,7 +436,7 @@ _restore_gap = ''
 def restore_gap() -> str:
     """手上这一份终态**可信到什么程度**。空串 = 可信的最新,且完整。
 
-    三档非空值,**都意味着「重试失败项」不能起跑**(闸在
+    五档非空值,**都意味着「重试失败项」不能起跑**(闸在
     `pipeline_retry.start_retry_failed`,面板上那颗按钮同时按不下去并说明原因):
 
     - `'scope'`   挑中的是历史那一份:它的阶段、日志、抓取范围都齐(所以展示是
@@ -507,8 +509,15 @@ def _restore_once() -> None:
         # 一个字都没留下这一轮 —— 剩下的两份旧副本彼此一致,`same_event` 于是正确地
         # 证明「它们是同一次事件」,可那证明不了「没有更新的一轮」。开工标记就是为了
         # 补上这一句,理由和实测形态都在 `pipeline_open`。
-        if _open.lost(_open_file(), [saved, *runs]):
-            gap = 'lost'
+        og = _open.gap(_open_file(), [saved, *runs])
+        if og == 'unknown':
+            # **读不出来不是「不存在」,而且不许固化**(同上面那一档):下一次读状态
+            # 时再试一遍。固化的后果是一次瞬时读失败就永久认定「没有未交付的运行」
+            # —— 实测解除注入之后同一份文件正确报出 `lost`,能力一直在。
+            _restore_gap = 'unknown'
+            return
+        if og:
+            gap = og
         if not isinstance(pick, dict) or not pick.get("finished_at"):
             # **「一份都挑不出来」不等于「确定从没跑过」。** 留档坏到渲染不了时那一轮
             # 确实发生过(欠账是 `broken`),这里把欠账一起吞掉的话,面板报「尚无运行
@@ -627,12 +636,12 @@ def _end_run() -> None:
         _state["current_stage"] = ""
         _state["finished_at"] = _now()
         # **落盘之前发完成序号**,两份都带上它 —— 恢复时靠它分出谁更新。
-        # **出处和号是一对,在这同一处定。** 开新一轮那段(`pipeline.py` 的
-        # `_state.update`、`pipeline_retry` 的重试起跑)都不碰 `seq_gen`,而恢复会把
-        # 它改成被恢复那一轮自己的出处(可能是 None)—— 不在这里盖回当前世代的话,
-        # 恢复过一次之后内存那份终态就**永久失证**:它的 `event_id` 一直是空,起跑
-        # 核对只剩内容兜底那一级。写在发号旁边还顺带把口径收成一份:号出自哪一代
-        # 发号逻辑,就由那一代的 writer 在定稿时自己署名。
+        # **出处和号是一对,号出自哪一代发号逻辑就由那一代在定稿时自己署名。** 恢复
+        # 会把 `seq_gen` 改成被恢复那一轮自己的出处(可能是 None),不在这里盖回当前
+        # 世代的话,恢复过一次之后内存那份终态就**永久失证**:`event_id` 一直是空,
+        # 起跑核对只剩内容兜底那一级。两个起跑入口另外也在开新一轮时署一次名(开工
+        # 标记要带着它,见 `mark_open`),所以这一笔眼下是**冗余带** —— 别删:那边署
+        # 的是「开工时的出处」,这边署的是「定稿时的出处」,两件事。
         _state["seq_gen"] = _SEQ_GEN
         _state["run_seq"] = _next_seq()
         _log("同步已停止，已完成的结果保留" if stopped else "管道结束")

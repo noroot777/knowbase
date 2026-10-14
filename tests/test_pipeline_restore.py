@@ -14,8 +14,7 @@ from pathlib import Path
 from unittest import main
 from unittest.mock import patch
 
-from kb import (pipeline, pipeline_persist as persist, pipeline_retry,
-                pipeline_state as state)
+from kb import pipeline_persist as persist, pipeline_retry, pipeline_state as state
 from tests.pipeline_case import HistoryCase
 
 
@@ -575,34 +574,6 @@ class RestoreTests(HistoryCase):
                          '展示的是同一轮的历史副本')
         self.assertEqual('scope', state.restore_gap(),
                          '同一轮的副本 —— 报「范围没留档」,不是「更早一轮」')
-
-
-    def test_a_plain_sync_leaves_an_open_mark_before_it_starts(self):
-        """**普通同步那条起跑路要落开工标记** —— 而且落在起线程之前。
-
-        两个起跑入口各有自己的回归:任一处漏掉,那条路跑出来的轮次就回到「两份终态
-        都没写上时查无此事」那个病,而另一条路的用例全绿。
-        """
-        self.restart()
-        state._open_file().unlink(missing_ok=True)
-        with patch.object(pipeline.threading, 'Thread') as thread:
-            run_id = pipeline.start_pipeline(['crawl'])
-        self.assertTrue(thread.called, '摆局前提:起跑确实走到了起线程那一步')
-        mark = json.loads(state._open_file().read_text())
-        self.assertEqual(run_id, mark['run_id'], '标记记的是这一轮的身份')
-        self.assertEqual(state._SEQ_GEN, mark['seq_gen'], '而且带着出处')
-
-    def test_a_failed_retry_also_leaves_an_open_mark(self):
-        """**失败重试那条起跑路同样要落** —— 重试轮的终态也只在收尾时写。"""
-        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）')
-        self.assertFalse(state._open_file().exists(), '摆局前提:上一轮收尾清掉了标记')
-        with patch.object(pipeline_retry.threading, 'Thread') as thread:
-            ok, _ = pipeline_retry.start_retry_failed()
-        self.assertTrue(ok and thread.called, '摆局前提:重试确实起跑了')
-        mark = json.loads(state._open_file().read_text())
-        self.assertEqual(state._state['run_id'], mark['run_id'])
-        self.assertEqual('retry', mark['run_kind'], '标记里认得出这是重试轮')
-
 
 if __name__ == '__main__':
     main()

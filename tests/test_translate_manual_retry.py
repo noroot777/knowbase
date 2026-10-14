@@ -102,7 +102,7 @@ class EndpointTests(unittest.TestCase):
         from kb.feeds import translate
         seen = {}
 
-        def fake_start(stages=None, crawl_filter=None):
+        def fake_start(stages=None, crawl_filter=None, refused=None):
             seen['stages'] = list(stages or [])
             seen['filter'] = dict(crawl_filter or {})
             return 'run-test'

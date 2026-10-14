@@ -474,6 +474,11 @@ class HistoryEndpointTests(HistoryCase):
         字符**当订阅名,不抛 —— 静默按一串不存在的名字去抓,等于一条都不抓。
         导出范围原来压根没验,而重试正是从它派生导出范围的;失败名单那本账里的
         `targets` 同理。
+
+        **容器对、元素坏**那一层是同一类的最后三个落点:来源名落成字典时重试派生拿
+        它当**字典键**去查失败名单,`TypeError: unhashable type` 从保护块外抛出去,
+        整次重试变成一个说不出原因的 500;订阅名和重试目标落成字典时都不抛,被当成
+        一串 `{'id': 3}` 去筛选/传给采集器,**静默一条都不抓**。
         """
         self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）',
                        failures=[{'title': '某篇', 'reason': '503', 'pending': False}])
@@ -493,13 +498,19 @@ class HistoryEndpointTests(HistoryCase):
                        dict(good, crawl_retry={'run': 'run-a',
                                                'channels': {'rss': {'targets': [],
                                                                     'at': 7}}}),
+                       dict(good, crawl_filter={'channel': {'name': 'rss'}}),
+                       dict(good, crawl_filter={'channel': 'rss',
+                                                'accounts': [{'id': 3}]}),
+                       dict(good, crawl_retry={'run': 'run-a',
+                                               'channels': {'rss': {'targets': [{}],
+                                                                    'at': ''}}}),
                        good]
         state._history_file().write_text(json.dumps(raw, ensure_ascii=False))
 
         rows = self.client.get('/api/pipeline/runs').json()['runs']
-        self.assertEqual([True, True, True, True, True, True, False],
+        self.assertEqual([True] * 9 + [False],
                          [r['invalid'] for r in rows],
-                         '六种叶子坏法都算无效行,**反过来钉一边**:带真实失败明细的'
+                         '九种叶子坏法都算无效行,**反过来钉一边**:带真实失败明细的'
                          '那一行照旧有效')
 
     def test_a_normal_row_is_keyed_by_its_completion_sequence(self):

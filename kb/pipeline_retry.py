@@ -18,6 +18,7 @@ from pathlib import Path
 
 from kb.collectors import active_collector, retry_narrower
 from kb.pipeline_state import (
+    _SEQ_GEN,
     STAGES,
     _end_run,
     _latest_locked,
@@ -417,23 +418,27 @@ def start_retry_failed() -> tuple[bool, str]:
             detail["crawl"] = RETRY_NOTHING
         # 这条也是一次"新的运行":发个新身份,别让它继承上一轮的 id
         # (日报只停自己那一轮,靠的就是这个 id 不复用)。
+        # **先占住持久化边界,占不住就什么都不改**(口径和理由在
+        # `pipeline_state.mark_open`)—— 重试轮的终态同样只在收尾时写,它一样会整轮
+        # 失证,而失证之后这颗按钮下一次按的就是**上一轮**的范围。
+        begun = {"run_id": new_run_id(), "seq_gen": _SEQ_GEN,
+                 "started_at": _now(), "run_kind": "retry"}
+        err = mark_open(begun)
+        if err:
+            return False, err
         _state.update({
+            **begun,
             "running": True, "current_stage": "", "log": [],
             "stop_requested": False, "stopped": False,
-            "run_id": new_run_id(),
-            "started_at": _now(), "finished_at": "",
+            "finished_at": "",
             "crawl_filter": crawl_filter,
             # 导出范围单独存一份,下一次重试从它恢复(见上面那段)
             "export_filter": export_filter,
-            "run_kind": "retry",
             "planned_stages": [s for s in STAGES if card[s]],
             "stages": {s: {"status": "pending" if card[s] else "skipped",
                            "detail": detail[s]}
                        for s in STAGES},
         })
-        # 开工标记:**两个起跑入口都要落**(口径在 `pipeline_state.mark_open`)——
-        # 重试轮的终态同样只在收尾时写,它一样会整轮失证。
-        mark_open()
     _log("重试失败项: " + " → ".join(plan))
     threading.Thread(target=_run_retry_failed,
                      args=(plan, crawl_filter, export_filter), daemon=True).start()

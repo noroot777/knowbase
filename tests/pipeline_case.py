@@ -37,8 +37,10 @@ class HistoryCase(TestCase):
         # 完成序号的进程内高水位是模块级的,**跨用例会泄漏**:生产里它该跨轮累积,
         # 测试里不清的话「磁盘上发到第几号」这个前提当场不成立
         state._seq_hwm = 0
+        # 出处跟着「开新一轮」一起署,和两个起跑入口一样(见 `pipeline_open.mark`)。
         state._state.update(
             running=True, stop_requested=False, stopped=False, run_kind='',
+            seq_gen=state._SEQ_GEN,
             planned_stages=None, current_stage='', run_id=run_id,
             started_at='2026-10-14 09:00:00', finished_at='', crawl_filter={}, log=[],
             stages={name: {'status': 'pending', 'detail': ''} for name in state.STAGES})
@@ -87,10 +89,11 @@ class HistoryCase(TestCase):
 
         **开工标记也落上** —— 那是两个起跑入口都做的第一件事(`mark_open`),而这里
         绕过起跑直接跑线程那一段。不落的话每个走到 `_end_run` 的用例都在一个「从来
-        没有标记」的世界里,而生产里永远有。
+        没有标记」的世界里,而生产里永远有。**传的是这一轮自己的身份**,和生产那两处
+        一样(口径在 `pipeline_open.mark`:借上一轮的出处会让标记认不出身份)。
         """
         self.reset(run_id)
-        state.mark_open()
+        state.mark_open(state._state)
 
         def crawl(_):
             state._stage('crawl', 'ok', '检查 51/51 个来源，新增 105 条')

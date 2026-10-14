@@ -38,6 +38,7 @@ from kb.pipeline_stages import (
     source_targets,
 )
 from kb.pipeline_state import (
+    _SEQ_GEN,
     STAGES,
     _end_run,
     _lock,
@@ -157,8 +158,9 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
 
 
 def start_pipeline(stages: list[str] | None = None,
-                   crawl_filter: dict | None = None) -> str:
-    """启动管道线程。返回这一轮的 run id;已在跑返回空串(照旧可以当布尔用)。
+                   crawl_filter: dict | None = None,
+                   refused: list[str] | None = None) -> str:
+    """启动管道线程。返回这一轮的 run id;没起跑返回空串(照旧可以当布尔用)。
 
     crawl_filter 见 _run_crawl:限定来源目标 + 时间段的范围抓取;
     同时抓几个来源时来源列表在 channels 里(见 crawl_channels)。
@@ -166,6 +168,13 @@ def start_pipeline(stages: list[str] | None = None,
     返回 id 而不是 True,是为了让调用方**原子地**拿到"我起的是哪一轮":
     事后再去读状态的话,我们那一轮可能已经跑完、另一项同步已经接替,读回来
     的就是别人的身份(见 `pipeline_state.request_stop` 的说明)。
+
+    **没起跑有两种,要说给用户听的话传一个 `refused` 列表进来收原因**:管道已在跑,
+    或者这一轮的持久化边界落不下来(数据目录写不进去,见 `mark_open`)。后者照着报
+    「管道已在运行中」就是把一个要动手的故障说成「等一下再点」。
+    原因**收在调用方自己的列表里,不放模块变量**:两个窗口同时点同步时,「刚才那次
+    为什么没起」只有自己这一次的调用答得准,放全局会被另一次的结论盖掉。
+    不关心原因的调用方(定时同步、日报、来源页那几条)照旧什么都不传。
     """
     wanted = [s for s in (stages or list(STAGES)) if s in STAGES]
     crawl_filter = deepcopy(crawl_filter or {})
@@ -173,29 +182,40 @@ def start_pipeline(stages: list[str] | None = None,
     # 每个来源都按注册表认一遍名字:认不出来在这里就抛,别等跑到一半才发现
     for scope in crawl_filter.get("channels") or []:
         scope["channel"] = active_collector(scope.get("channel")).name
+
+    def no(why: str) -> str:
+        if refused is not None:
+            refused.append(why)
+        return ""
     with _lock:
         if _state["running"]:
-            return ""
-        run_id = new_run_id()
+            return no("管道已在运行中")
+        # **先占住这一轮的持久化边界,占不住就什么都不改。** 两份终态是收尾时才写的,
+        # 都写失败那一档磁盘上一个字都不会留下这一轮:剩下的两份旧副本彼此一致,而
+        # 标记那一笔也没落上 —— 恢复把上一轮当成最新、重试去抓上一轮的范围(理由在
+        # `pipeline_open`)。顺序是「先落边界、再认这一轮」:反过来的话拒绝起跑得把
+        # 下面那一堆字段挨个撤回去,撤漏一个就是下一轮带着上一轮的范围。
+        begun = {"run_id": new_run_id(), "seq_gen": _SEQ_GEN,
+                 "started_at": _now(), "run_kind": "sync"}
+        err = mark_open(begun)
+        if err:
+            return no(err)
+        run_id = begun["run_id"]
         _state.update({
+            **begun,
             "running": True, "current_stage": "", "log": [],
-            "stop_requested": False, "stopped": False, "run_id": run_id,
-            "started_at": _now(), "finished_at": "",
+            "stop_requested": False, "stopped": False,
+            "finished_at": "",
             "crawl_filter": crawl_filter,
             # 常规同步的导出范围就是抓取范围。**显式写一份、不靠"没设过"兜底**:
             # 这是进程内的常驻状态,上一轮如果是重试,里面躺着的是那一轮的导出范围
             # —— 不覆盖的话这一轮的落盘会把它原样带走,下一次重试就按一份跟这一轮
             # 毫无关系的范围去导出。
             "export_filter": deepcopy(crawl_filter),
-            "run_kind": "sync",
             "planned_stages": [s for s in STAGES if s in wanted],
             "stages": {s: {"status": "pending" if s in wanted else "skipped",
                            "detail": ""} for s in STAGES},
         })
-        # **开工标记落在锁里、起线程之前**:两份终态都是收尾时才写的,都写失败那一档
-        # 磁盘上一个字都不会留下这一轮(理由和实测形态在 `pipeline_open`)。放在锁外
-        # 的话「内存说在跑」和「磁盘说开工了」中间有个窗口。
-        mark_open()
     threading.Thread(target=_run_pipeline, args=(wanted, crawl_filter),
                      daemon=True).start()
     return run_id
