@@ -61,8 +61,15 @@ class Ledger:
 
         **不在这里记"今天到此为止"** —— 起过 ≠ 出报:一次模型 502 之后同一天还要补
         几次(`MAX_RETRIES`),在起跑那一刻就记完成的话用户一整天等不到日报。
+
+        **只许往后推。** 记 attempt 的那一刻,这一轮可能已经收尾了:那一步写的退避
+        才是最新的,往回推等于把它作废。**这一条是带的:** 已经收尾成"今天到此为止"
+        那一档由调用方的 `done` 守卫挡住(`daily_run._mark_attempt`),剩下的只有
+        "补跑那一轮抢在记 attempt 之前收尾、而且跨了整分钟"这一种 —— 产品里起跑那
+        一步是另起线程、记 attempt 紧接着就执行,所以去掉这个 `max` 回归红 0 条,
+        如实记着:它挡的是以后有人把记账挪到工作线程里去。
         """
-        self.next_due = next_due
+        self.next_due = max(self.next_due, next_due)
 
     def finish(self, fails: int, done: bool, next_due: str) -> None:
         """这一轮收尾:补到第几次、今天到此为止没有、下一次最早什么时候。

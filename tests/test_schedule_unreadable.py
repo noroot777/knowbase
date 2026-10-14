@@ -72,6 +72,20 @@ class _Base(unittest.TestCase):
             '{"enabled": true, "time": "09:00", "next_run": "2026-10-15"}', encoding='utf-8')
         yield '当天标记不是日期', lambda: self.path.write_text(
             '{"enabled": true, "time": "09:00", "last_fired": "昨天"}', encoding='utf-8')
+        # **日历上不存在的日期**:只用 regex 的话它照样放行,而它比大小比得过任何
+        # 真实日期 —— "下一次"永远不到期、"今天已经跑过"永远成立,定时从此不再触发
+        # 而面板上一切正常。
+        yield '下次时刻不在日历上', lambda: self.path.write_text(
+            '{"enabled": true, "time": "09:00", "next_run": "2026-99-99T07:30"}',
+            encoding='utf-8')
+        # **falsey 但不是空**:`d.get(k) or default` 会把它们一起当成"没填"悄悄换成
+        # 缺省,于是盘上根本不是这么写的配置被读成一份正常定时。
+        yield '时刻是空数组', lambda: self.path.write_text(
+            '{"enabled": true, "time": []}', encoding='utf-8')
+        # **名单不是数组**:字符串会被逐字符当成通道名,一个都认不出来,于是同步
+        # 范围静默回落到默认范围 —— 用户以为只同步 RSS,实际跑的是别的。
+        yield '名单是字符串', lambda: self.path.write_text(
+            '{"enabled": true, "time": "09:00", "channels": "rss"}', encoding='utf-8')
         if os.geteuid() != 0:
             def no_permission():
                 self.path.write_text(json.dumps({'enabled': True, 'time': '09:00'}),
@@ -511,6 +525,59 @@ class RetryBudgetTests(unittest.TestCase):
         with patch.object(daily_run, 'start', Mock(return_value=True)) as start:
             self.assertTrue(daily_run.tick())
             start.assert_called_once()
+
+    def test_an_unaccepted_start_does_not_spend_the_backoff(self):
+        """**退避是「受理过一轮」的记账,不是「试过一下」的记账。**
+
+        起跑前还要再读一次设置(可能一时读不出),`start` 自己也会拒(别人占着全局
+        管道、一个来源都没剩)。在它们之前就把下一次推后 30 分钟的话,一次瞬时失败
+        就把今天的日报推迟半小时 —— 而本来下一跳(30 秒后)就能恢复。
+        """
+        daily_run.save_settings(True, '07:30', ['rss'], True, 1)
+        # ① `start` 拒了:这一跳一轮都没起,退避不许被消耗
+        self.at(7, 30)
+        with patch.object(daily_run, 'start', Mock(return_value=False)) as start:
+            self.assertFalse(daily_run.tick())
+            start.assert_called_once()
+        self.assertEqual('2026-10-15T07:30', daily_run.load_settings()['next_run'])
+        # ② 起跑前那次读设置一时读不出:同样不许消耗,而且要留原因
+        self.at(7, 31)
+        with patch.object(daily_run, 'start', Mock(return_value=True)) as start, \
+                patch.object(daily_run, 'load_settings',
+                             Mock(side_effect=ScheduleUnreadable('一时读不出'))):
+            self.assertFalse(daily_run.tick())
+            start.assert_not_called()
+        self.assertTrue(any('一时读不出' in line for line in self.said), self.said)
+        self.assertEqual('2026-10-15T07:30', daily_run.load_settings()['next_run'])
+        # ③ 下一跳恢复了就该照常起 —— 前两次都没把今天这一轮推到半小时后
+        self.at(7, 32)
+        with patch.object(daily_run, 'start', Mock(return_value=True)) as start:
+            self.assertTrue(daily_run.tick())
+            start.assert_called_once()
+        self.assertEqual('2026-10-15T08:02', daily_run.load_settings()['next_run'])
+
+    def test_a_round_that_already_finished_is_not_pushed_back(self):
+        """起跑那一轮快到在同一毫秒里就收尾了(不同步、当场报错):**收尾写的那份
+        才是最新的**,记 attempt 不许把「明天那一格」盖成今天 + 30 分钟 —— 盖回去
+        的话第二天那一跳在 00:00 就判到期,日报提前一整天的量跑出来。"""
+        daily_run.save_settings(True, '07:30', ['rss'], True, 1)
+        self.at(7, 30)
+        # start 里"这一轮当场跑完并收尾"(产品里是另一个线程,这里就地做掉)
+        def run_and_finish(**kwargs):
+            daily_run._finish_schedule(kwargs['sched_day'], retry=False)
+            return True
+        with patch.object(daily_run, 'start', Mock(side_effect=run_and_finish)):
+            self.assertTrue(daily_run.tick())
+        s = daily_run.load_settings()
+        self.assertEqual(('2026-10-15', '2026-10-16T07:30'), (s['last_fired'], s['next_run']))
+        # 第二天那一跳还在定时时刻才起
+        self.at(0, 5, day=16)
+        with patch.object(daily_run, 'start', Mock(return_value=True)) as start:
+            self.assertFalse(daily_run.tick())
+        self.at(7, 30, day=16)
+        with patch.object(daily_run, 'start', Mock(return_value=True)) as start:
+            self.assertTrue(daily_run.tick())
+
 
     def test_the_retry_budget_also_advances_while_the_config_cannot_be_read(self):
         """收尾那一刻配置读不出来:同样不许把这回失败当成第一次。"""

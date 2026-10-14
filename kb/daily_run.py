@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 
 from kb import daily
 from kb.config import (DATA_DIR, ScheduleUnreadable, announce_config_issue,
-                       config_clock, config_day, config_flag, config_stamp,
+                       config_clock, config_day, config_flag, config_names, config_stamp,
                        derive_config, read_config_file, write_config_file)
 # 运行状态那一块搬去了 `kb.daily_state`(行数上限)。**连 `_lock` 一起导进来**:
 # 设置回写、定时账本、运行状态共用同一把锁,这里导的就是那一把。
@@ -122,7 +122,7 @@ def _settings_from(d: dict) -> dict:
             # 改成一律接上一份日报的截止时刻之后,它只剩"第一份回溯几天"。
             'first_days': max(1, min(7, int(d.get('first_days') or d.get('max_days')
                                             or d.get('days') or 0) or daily.FIRST_DAYS)),
-            'channels': [str(c) for c in (d.get('channels') or [])],
+            'channels': config_names(d, 'channels'),
             'last_fired': config_day(d, 'last_fired'),
             'fail_day': config_day(d, 'fail_day'),
             'fail_count': int(d.get('fail_count') or 0),
@@ -231,9 +231,13 @@ def _mark_attempt(now: datetime, day: str) -> None:
     而"下一次最早什么时候"跟着写失败一起丢掉的话,30 秒后这一跳又判到期 ——
     失败的日报会每 30 秒重起一轮,各花一次模型钱(第 3 轮实测 3 分钟 7 轮)。
     """
-    nxt = (now + RETRY_AFTER).isoformat(timespec='minutes')
-    _book.book(day).attempt(nxt)
-    _write_settings(next_run=nxt)
+    book = _book.book(day)
+    if book.done:
+        # 这一轮跑得极快,已经收尾了(出报成功 / 补满次数):它写的 last_fired 和
+        # "明天那一格"才是最新的,这里再写一次会把明天那一格盖成今天 + 30 分钟。
+        return
+    book.attempt((now + RETRY_AFTER).isoformat(timespec='minutes'))
+    _write_settings(next_run=book.next_due)
 
 
 def _finish_schedule(day: str, retry: bool) -> None:
@@ -614,11 +618,20 @@ def tick() -> bool:
         # 一次写失败就会让同一天再自动跑一整轮(还要再花一次模型钱)。
         if book.done or today == s['last_fired'] or _report_done(today):
             return False
-        # 先把下一跳推到重试时刻,再起跑:反过来的话,一轮跑得极快(比如不同步、
-        # 当场报错)时它已经写完收尾状态了,这一行会把它盖回去。**账本跟受理同在
-        # 一把锁里推进**,别让"判到期"和"记下起过"之间插进另一跳。
-        _mark_attempt(now, today)
-    settings = load_settings()
+    # **退避是"受理过一轮"的记账,不是"试过一下"的记账。** 下面这两步都可能
+    # 一轮都没起来:起跑前还要再读一次设置(可能一时读不出),`start` 自己也会
+    # 拒(别人占着、一个来源都没剩)。在它们之前就把下一次推后 30 分钟的话,一次
+    # 瞬时失败就把今天的日报推迟半小时,而本来下一跳(30 秒后)就能恢复。
+    try:
+        settings = load_settings()
+    except ScheduleUnreadable as e:
+        announce_config_issue('日报定时设置', f'{e};这一跳跳过,定时暂停')
+        return False
     # 定时这一轮不指定窗口:起点接上一份日报的截止时刻,终点是同步跑完的那一刻。
-    return start(sync=settings['sync'], channels=settings['channels'],
-                 first_days=settings['first_days'], trigger='schedule', sched_day=today)
+    started = start(sync=settings['sync'], channels=settings['channels'],
+                    first_days=settings['first_days'], trigger='schedule', sched_day=today)
+    if started:
+        # 受理了才记:账本先推进再写盘(见 `_mark_attempt`)。这一轮可能已经在这几
+        # 毫秒里收尾了 —— 那一步写的退避更新,`attempt` 只许往后推,不会盖回去。
+        _mark_attempt(now, today)
+    return started

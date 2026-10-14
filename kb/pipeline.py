@@ -20,8 +20,9 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 
 from kb.config import (DATA_DIR, ScheduleUnreadable, announce_config_issue,
-                       config_clock, config_day, config_flag, config_stamp,
-                       derive_config, read_config_file, write_config_file)
+                       config_clock, config_day, config_flag, config_names,
+                       config_stamp, config_text, derive_config, read_config_file,
+                       write_config_file)
 from kb.sched_ledger import Ledger
 from kb.collectors import active_collector, known_channels, resolve_channel
 from kb.pipeline_retry import retry_failed_plan, start_retry_failed
@@ -242,8 +243,11 @@ def _schedule_from(d: dict) -> dict:
     """原样内容 → 带缺省值的定时。字段里的乱值由 `derive_config` 归一。"""
     # 读盘这一侧宽容:认不出的名字跳过(通道被删/改过名),绿泡泡那条跟着设置走。
     # 一个坏名字不该让整份定时配置读不出来。
-    channels = known_channels([c for c in (d.get("channels") or [d.get("channel")]) if c]) \
-        or [active_collector().name]
+    # 名单的**类型**先验(`config_names`:必须是数组、元素必须是字符串),再按
+    # 名字宽容:认不出的跳过。一个坏名字不该让整份配置读不出来,但一个坏**类型**
+    # 会让"同步范围"静默换成另一套。
+    names = config_names(d, "channels") or [config_text(d, "channel")]
+    channels = known_channels([c for c in names if c]) or [active_collector().name]
     return {"enabled": config_flag(d, "enabled"),
             "time": config_clock(d, "time", "07:30"),
             "channel": channels[0],

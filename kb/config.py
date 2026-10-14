@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from kb.source_types import feed_types
@@ -235,18 +236,47 @@ def config_flag(d: dict, key: str, default: bool = False) -> bool:
     raise ValueError(f'{key} 要的是 true 或 false,拿到 {v!r}')
 
 
+def config_text(d: dict, key: str, default: str = '') -> str:
+    """取一个字符串字段:**缺键或空串才用缺省值**,别的类型一律算读不懂。
+
+    `d.get(key) or default` 这个写法会把 `0`、`[]`、`{}`、`false` 一起当成"没填"
+    悄悄换成缺省 —— 于是 `"time": []` 的配置读出来是一份"每天 07:30 的正常定时",
+    面板照它显示,而盘上那份根本不是这么写的(第 4 轮按代码指出)。
+    """
+    if key not in d or d[key] == '' or d[key] is None:
+        return default
+    v = d[key]
+    if isinstance(v, str):
+        return v
+    raise ValueError(f'{key} 要的是字符串,拿到 {v!r}')
+
+
 def config_clock(d: dict, key: str, default: str) -> str:
-    """每天几点:HH:MM。空/缺 = 缺省值。"""
-    v = d.get(key) or default
-    if isinstance(v, str) and _CLOCK.fullmatch(v):
+    """每天几点:HH:MM。缺键/空串 = 缺省值。"""
+    v = config_text(d, key, default)
+    if _CLOCK.fullmatch(v):
         return v
     raise ValueError(f'{key} 要的是 HH:MM 时刻,拿到 {v!r}')
 
 
+def _calendar_day(text: str) -> bool:
+    """这一天**日历上真的存在**吗。
+
+    只用 regex 的话 `2026-99-99` 照样放行:它比大小比得过任何真实日期,于是"今天
+    已经跑过了"永远成立、"下一次"永远不到期 —— 定时从此不再触发,而面板上一切
+    正常(第 4 轮实测两个接口都回 200)。
+    """
+    try:
+        datetime.strptime(text, '%Y-%m-%d')
+        return True
+    except ValueError:
+        return False
+
+
 def config_day(d: dict, key: str) -> str:
-    """哪一天:YYYY-MM-DD。空 = 没有(还没跑过/没失败过)。"""
-    v = d.get(key) or ''
-    if not v or (isinstance(v, str) and _DAY.fullmatch(v)):
+    """哪一天:YYYY-MM-DD(日历上真的存在)。空 = 没有(还没跑过/没失败过)。"""
+    v = config_text(d, key, '')
+    if not v or (_DAY.fullmatch(v) and _calendar_day(v)):
         return v
     raise ValueError(f'{key} 要的是 YYYY-MM-DD 日期,拿到 {v!r}')
 
@@ -256,13 +286,28 @@ def config_stamp(d: dict, key: str) -> str:
 
     **要跟 `datetime.now().isoformat(timespec='minutes')` 逐字可比** —— 到期判据就是
     两个字符串比大小(见 `daily_run.tick`),格式不齐(多了秒、少了 T)比出来的结果
-    是错的,而面板上一切正常。
+    是错的,而面板上一切正常。日期那一半同样要日历上真的存在。
     """
-    v = d.get(key) or ''
-    if not v or (isinstance(v, str) and len(v) == 16 and v[10:11] == 'T'
-                 and _DAY.fullmatch(v[:10]) and _CLOCK.fullmatch(v[11:])):
+    v = config_text(d, key, '')
+    if not v or (len(v) == 16 and v[10:11] == 'T' and _DAY.fullmatch(v[:10])
+                 and _calendar_day(v[:10]) and _CLOCK.fullmatch(v[11:])):
         return v
     raise ValueError(f'{key} 要的是 YYYY-MM-DDTHH:MM 时刻,拿到 {v!r}')
+
+
+def config_names(d: dict, key: str) -> list[str]:
+    """一串名字(来源通道):**必须是数组,元素必须是字符串**。缺键/空 = 空数组。
+
+    不验类型的话 `"channels": "rss"` 会被逐字符当成四个通道名(`r`/`s`/`s`),一个
+    都认不出来,于是"同步范围"静默回落到默认范围 —— 用户以为只同步 RSS,实际跑的
+    是别的(第 4 轮实测接口回 200)。
+    """
+    if key not in d or d[key] is None:
+        return []
+    v = d[key]
+    if isinstance(v, list) and all(isinstance(x, str) for x in v):
+        return list(v)
+    raise ValueError(f'{key} 要的是一串字符串,拿到 {v!r}')
 
 
 def write_config_file(path, data: dict) -> None:
