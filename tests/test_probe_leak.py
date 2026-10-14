@@ -120,6 +120,7 @@ await new Promise(res => {
 
 
 def _write_probe(tmp: Path, name: str, body: str, *, before: str = "",
+                 profile: str = "",
                  args: tuple[str, ...] = ("--window-size=800,600",)) -> Path:
     """写一个用公共模块起浏览器的最小探针,把 chrome 的 pid 打在 stdout 上。
 
@@ -127,16 +128,19 @@ def _write_probe(tmp: Path, name: str, body: str, *, before: str = "",
     `before` 是「起浏览器之前先做点别的」那一段(见 BARRIER);`args` 是交给
     `launchShell` 的参数 —— 用 `--user-data-dir` 可以反过来验「有没有起过浏览器」:
     chrome 一启动就把那个目录建出来,它不存在就是**一个都没起过**。
+    `profile` 是让共享层给一个独立临时 profile(前缀),它的实际路径会一起打出来。
     """
     p = tmp / name
     arglist = ", ".join(f'"{a}"' for a in args)
+    opts = f', {{ profile: "{profile}" }}' if profile else ""
     p.write_text(textwrap.dedent(f'''\
         import {{ writeFileSync, existsSync }} from "node:fs";
         import {{ execSync }} from "node:child_process";
         import {{ launchShell }} from "{HERE / "probe_shell.mjs"}";
     ''') + before + textwrap.dedent(f'''\
-        const {{ proc }} = await launchShell([{arglist}]);
+        const {{ proc, profile }} = await launchShell([{arglist}]{opts});
         process.stdout.write("CHROME_PID=" + proc.pid + "\\n");
+        process.stdout.write("PROFILE=" + profile + "\\n");
         if (process.env.PROBE_PID_FILE) {{
           writeFileSync(process.env.PROBE_PID_FILE,
                         "node=" + process.pid + " chrome=" + proc.pid + "\\n");
@@ -258,6 +262,32 @@ class RunProbeGroupReapTests(unittest.TestCase):
         self.assertTrue(_wait_gone(pid),
                         f"run_probe 超时之后 chrome {pid} 还活着 —— 进程组没收干净")
 
+    def test_timeout_also_takes_the_temporary_profile(self):
+        """SIGKILL 杀的是子进程,**删目录是我们自己的事**。
+
+        探针那边只在 node 的 `'exit'` 里删它自己那一格,而这一层的 timeout 发的是
+        SIGKILL —— 钩子一行都不跑。所以 profile 建在 `run_probe` 给的那个根里
+        (`KB_PROBE_PROFILE_ROOT`),它在自己的 `finally` 里整根删掉。第 6 轮审查实测
+        的后果就是这一条:浏览器确实被组杀收掉了,**目录留在盘上**。
+
+        判据是后果 —— 那个目录还在不在、它所在的根还在不在;不看"注册了钩子没有"。
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            probe = _write_probe(Path(td), "stuck_profile.mjs", HANG,
+                                 profile="kb-timeout-profile-")
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                run_probe([NODE, str(probe)], timeout=20, env=probe_env())
+            out = caught.exception.output or ""
+        seen = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+        self.assertIn("PROFILE", seen, f"探针没打出 profile 路径\n{out!r}")
+        profile = Path(seen["PROFILE"])
+        self.assertTrue(profile.name.startswith("kb-timeout-profile-"), profile)
+        self.assertTrue(_wait_gone(int(seen["CHROME_PID"])), "进程组没收干净")
+        self.assertFalse(profile.exists(), f"超时之后 profile {profile} 留在盘上了")
+        self.assertFalse(profile.parent.exists(),
+                         f"那个根 {profile.parent} 也该由 run_probe 收掉")
+
     def test_output_and_returncode_match_subprocess_run(self):
         """形状得和 `subprocess.run` 一样,调用点才能原样读 .returncode/.stdout。"""
         import tempfile
@@ -340,7 +370,11 @@ class CallerCancelledReapTests(unittest.TestCase):
                 probe = _write_probe(tmp, "hang.mjs", HANG)
                 pidfile = tmp / "pids.txt"
                 caller = _write_caller(tmp)
-                env = {**probe_env(), "PROBE_PID_FILE": str(pidfile)}
+                # TMPDIR 指到**我们自己这份**临时目录:这个调用方待会要被 SIGKILL,
+                # 它 `run_probe` 建的那个 profile 根于是没人收(它自己的 finally 一行
+                # 都不跑)——所有权只能再往上挪一级,落到这条用例头上。
+                env = {**probe_env(), "PROBE_PID_FILE": str(pidfile),
+                       "TMPDIR": str(tmp)}
                 # 调用方自己也开一个新会话:它的 pgid 于是等于它的 pid,下面那一下
                 # killpg 只打到它,不会波及跑测试的这个进程。
                 with subprocess.Popen(
@@ -396,8 +430,12 @@ class CallerCancelledReapTests(unittest.TestCase):
                                      args=(f"--user-data-dir={profile}",))
                 pidfile, ready, go = tmp / "pids.txt", tmp / "ready.txt", tmp / "go.txt"
                 caller = _write_caller(tmp)
+                # TMPDIR 指到**我们自己这份**临时目录:这个调用方待会要被 SIGKILL,
+                # 它 `run_probe` 建的那个 profile 根于是没人收(它自己的 finally 一行
+                # 都不跑)——所有权只能再往上挪一级,落到这条用例头上。
                 env = {**probe_env(), "PROBE_PID_FILE": str(pidfile),
-                       "PROBE_READY_FILE": str(ready), "PROBE_GO_FILE": str(go)}
+                       "PROBE_READY_FILE": str(ready), "PROBE_GO_FILE": str(go),
+                       "TMPDIR": str(tmp)}
                 with subprocess.Popen(
                         [sys.executable, str(caller), str(probe)],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -450,8 +488,12 @@ class CallerCancelledReapTests(unittest.TestCase):
                                      args=(f"--user-data-dir={profile}",))
                 ready, go = tmp / "ready.txt", tmp / "go.txt"
                 caller = _write_caller(tmp)
+                # TMPDIR 指到**我们自己这份**临时目录:这个调用方待会要被 SIGKILL,
+                # 它 `run_probe` 建的那个 profile 根于是没人收(它自己的 finally 一行
+                # 都不跑)——所有权只能再往上挪一级,落到这条用例头上。
                 env = {**probe_env(), "PROBE_READY_FILE": str(ready),
-                       "PROBE_GO_FILE": str(go)}       # 这个 go 永远不会被写出来
+                       "PROBE_GO_FILE": str(go),      # 这个 go 永远不会被写出来
+                       "TMPDIR": str(tmp)}
                 with subprocess.Popen(
                         [sys.executable, str(caller), str(probe)],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -494,8 +536,12 @@ class CallerCancelledReapTests(unittest.TestCase):
                                      args=(f"--user-data-dir={profile}",))
                 ready, go = tmp / "ready.txt", tmp / "go.txt"
                 caller = _write_caller(tmp)
+                # TMPDIR 指到**我们自己这份**临时目录:这个调用方待会要被 SIGKILL,
+                # 它 `run_probe` 建的那个 profile 根于是没人收(它自己的 finally 一行
+                # 都不跑)——所有权只能再往上挪一级,落到这条用例头上。
                 env = {**probe_env(), "PROBE_READY_FILE": str(ready),
-                       "PROBE_GO_FILE": str(go)}
+                       "PROBE_GO_FILE": str(go),
+                       "TMPDIR": str(tmp)}
                 with subprocess.Popen(
                         [sys.executable, str(caller), str(probe)],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

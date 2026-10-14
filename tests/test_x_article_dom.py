@@ -166,6 +166,9 @@ class DomTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = TemporaryDirectory()
+        # 建完立刻登记(理由同 test_x_article_fidelity:setUpClass 抛异常时
+        # tearDownClass 不跑,只跑 doClassCleanups)
+        cls.addClassCleanup(cls.tmp.cleanup)
         root = Path(cls.tmp.name)
         (root / 'article.html').write_text(ARTICLE_HTML, encoding='utf-8')
         (root / 'timeline.html').write_text(TIMELINE_HTML, encoding='utf-8')
@@ -173,12 +176,8 @@ class DomTests(unittest.TestCase):
         # chrome-headless-shell 自己就是无头的,不要再加 --headless=new。
         cls.page = Chrome(str(root / 'profile'), headless=False, chrome_path=SHELL)
         cls.page.__enter__()
+        cls.addClassCleanup(cls.page.__exit__, None, None, None)
         cls.page.open_page('about:blank')
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.page.__exit__(None, None, None)
-        cls.tmp.cleanup()
 
     def open(self, name, ready='[data-block="true"], article'):
         """打开 fixture,等到**被测的那个 DOM 结构**出现为止。

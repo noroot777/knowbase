@@ -251,15 +251,15 @@ class ReaderRoundTripTests(ChannelBase):
     @classmethod
     def setUpClass(cls):
         cls.shell = TemporaryDirectory()
+        # 建完/进完**立刻**登记(LIFO:先退浏览器、再删目录)。只写在 tearDownClass
+        # 里的话,`__enter__` 或 `open_page` 抛出来时 unittest 不调它 —— 浏览器和那份
+        # profile 都留在后台。
+        cls.addClassCleanup(cls.shell.cleanup)
         cls.page = Chrome(str(Path(cls.shell.name) / 'profile'),
                           headless=False, chrome_path=SHELL)
         cls.page.__enter__()
+        cls.addClassCleanup(cls.page.__exit__, None, None, None)
         cls.page.open_page('about:blank')
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.page.__exit__(None, None, None)
-        cls.shell.cleanup()
 
     def read(self, body: str) -> dict:
         """把这份正文真走一遍导出和阅读页,返回页面上看得见的东西。"""

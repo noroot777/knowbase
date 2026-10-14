@@ -47,6 +47,9 @@ _GLOB = "chromium_headless_shell-*/*/chrome-headless-shell*"
 #: 把「原调用方是谁」告诉探针的环境变量;口径在 `tests/probe_shell.mjs` 的 CALLER。
 #: 唯一的写入方是 `run_probe`,别在调用点自己设。
 PARENT_ENV = "KB_PROBE_PARENT"
+# 临时 profile 建在这个**父进程拥有**的根里面(见 run_probe 的 docstring)。
+# 跟沙箱那份库同一条口径(`tests/fixture_root.py`):建在起它的这一侧、这一侧删。
+PROFILE_ROOT_ENV = "KB_PROBE_PROFILE_ROOT"
 
 
 def _cache_roots() -> list[Path]:
@@ -143,6 +146,14 @@ def run_probe(argv, *, timeout: int = 300, env=None, cwd=None,
     判据只能待在子进程里 —— `tests/probe_shell.mjs` 的 `watchParent()` 盯着
     `process.ppid`,调用方一死它自己退出,'exit' 钩子接着把浏览器收掉。
 
+    **临时 profile 的那个根也归这一侧**(`KB_PROBE_PROFILE_ROOT`)。探针那边只在
+    node 的 `'exit'` 钩子里删它自己那个目录,而上面说了:超时发的是 SIGKILL,钩子
+    一行都不跑 —— 浏览器确实被组杀收掉了,**目录留在盘上**(第 6 轮审查实测:真跑
+    一次共享 `launchShell` + `run_probe(timeout=6)`,壳死了、profile 还在)。所以这里
+    建一个根传下去、在自己的 `finally` 里整根删掉:SIGKILL 杀不动的是子进程,删不掉
+    的不是我们。**不要改成在这一层也挂钩子** —— 同一条路上"谁拥有、谁回收"只许有
+    一个答案,两边都删就又回到了"目录的所有权在一个收不到清理机会的进程手上"。
+
     **这里要做的那一半是:把「原调用方是谁」明确告诉它**(`KB_PROBE_PARENT`)。
     让它自己现读 `process.ppid` 不够 —— 探针在起浏览器之前本来就有一段异步(等沙箱
     后端监听、摆局),调用方死在那一段里时它读到的已经是 1,于是「本来就没有调用方,
@@ -155,28 +166,58 @@ def run_probe(argv, *, timeout: int = 300, env=None, cwd=None,
     """
     child_env = dict(os.environ if env is None else env)
     child_env[PARENT_ENV] = str(os.getpid())
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, env=child_env, cwd=cwd, start_new_session=True)
-    # pgid 现在就记下来:进程退出之后 os.getpgid() 会抛 ProcessLookupError,
-    # 而 start_new_session 保证了它恒等于 proc.pid,不必去问系统。
-    pgid = proc.pid
-    timed_out = False
+    # **`mkdtemp` + 自己 `rmtree`,不用 `TemporaryDirectory`**:后者的 GC finalizer 会
+    # 把这份目录也兜掉,于是"这一层到底有没有收"就验不出来了(定点注入去掉下面那句
+    # 收尾,回归红 0 条 —— 实测)。所有权要能被回归看见,只能由这一处独占。
+    profiles = tempfile.mkdtemp(prefix="kb-probe-profiles-")
+    child_env[PROFILE_ROOT_ENV] = profiles
     try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _killpg(pgid)
-        # 组杀完再收一次输出:探针可能已经打印了一半结果,那是排查超时的线索。
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=child_env, cwd=cwd, start_new_session=True)
+        # pgid 现在就记下来:进程退出之后 os.getpgid() 会抛 ProcessLookupError,
+        # 而 start_new_session 保证了它恒等于 proc.pid,不必去问系统。
+        pgid = proc.pid
+        timed_out = False
         try:
-            out, err = proc.communicate(timeout=10)
-        except subprocess.TimeoutExpired:          # pragma: no cover - 组都杀了还收不到
-            proc.kill()
-            out, err = proc.communicate()
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _killpg(pgid)
+            # 组杀完再收一次输出:探针可能已经打印了一半结果,那是排查超时的线索。
+            try:
+                out, err = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:      # pragma: no cover - 组都杀了还收不到
+                proc.kill()
+                out, err = proc.communicate()
+        finally:
+            _killpg(pgid)
     finally:
-        _killpg(pgid)
+        # 组杀完才轮到这一句(内层 finally 先跑):先把浏览器收掉,再删它的 profile,
+        # 反过来删的是一个**正在被写**的目录。`Popen` 自己抛出来那一下也走这里。
+        shutil.rmtree(profiles, ignore_errors=True)
     if timed_out:
         raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+def reap(proc: subprocess.Popen, timeout: float = 10.0) -> None:
+    """收掉一个由测试自己起的子进程(谁起的谁收)。
+
+    **起完立刻 `cls.addClassCleanup(reap, proc)`**,不要只写在 `tearDownClass` 里:
+    `setUpClass` 抛异常之后 unittest **不调** `tearDownClass`,只跑 `doClassCleanups`
+    —— 那个服务连同它监听的端口会留在后台(第 1 轮审查注入 `TimeoutExpired` 实测:
+    服务还活着、端口还在监听)。同一条口径的另一半是目录:`tests/fixture_root.py`。
+
+    已经退出的直接返回;`terminate` 收不动再 `kill`。
+    """
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:          # pragma: no cover - 收不掉才走这条
+        proc.kill()
+        proc.wait(timeout=timeout)
 
 
 def _killpg(pgid: int) -> None:
@@ -232,12 +273,7 @@ def fixture_server(*extra_args: str, script: str = "serve_sources.py",
             raise AssertionError("隔离沙箱服务没有响应")
         yield base
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=10)
-        except subprocess.TimeoutExpired:          # pragma: no cover - 收不掉才走这条
-            server.kill()
-            server.wait(timeout=10)
+        reap(server)                 # 收子进程的口径只有一份(见 reap)
         root.cleanup()
 
 

@@ -51,6 +51,8 @@ class GraphGuardTest(unittest.TestCase):
         # kb.sh 的 ROOT 取的是 cd+pwd(逻辑路径),git 回的是真实路径,不统一的话
         # 主检出那一格会被误判成 worktree。
         cls._tmp = tempfile.mkdtemp()
+        # 建完立刻登记(理由同其它类级 fixture:setUpClass 抛异常时 tearDownClass 不跑)
+        cls.addClassCleanup(shutil.rmtree, cls._tmp, True)
         base = Path(os.path.realpath(cls._tmp))
         cls.main = base / "repo"
         cls.wt = base / "wt"
@@ -80,10 +82,6 @@ class GraphGuardTest(unittest.TestCase):
         (stub / "uv").write_text(UV_STUB, encoding="utf-8")
         (stub / "uv").chmod(0o755)
         cls.path = f"{stub}{os.pathsep}{os.environ.get('PATH', '')}"
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        shutil.rmtree(cls._tmp, ignore_errors=True)
 
     @staticmethod
     def _seed_cache(d: Path) -> None:

@@ -175,6 +175,12 @@ export function reapOnExit(proc) {
  * `process.on('exit')` 上,**正常退出、抛异常、收到信号三条路都删**;顺序也是对的:
  * 先 SIGKILL 浏览器、再删目录(回收比这一行先注册)。
  *
+ * **第四条路只有调用方救得了:`run_probe` 的 timeout 发的是 SIGKILL,'exit' 一行都不跑。**
+ * 所以目录建在它给的那个根里(`KB_PROBE_PROFILE_ROOT`),它在自己的 finally 里整根删
+ * (`tests/headless.py`);跟沙箱那份临时库同一条口径(`tests/fixture_root.py`):
+ * **给了根就建在里面,没给(手动跑这个探针)才落到系统临时目录**。下面那个 'exit'
+ * 钩子两种情形都留着:有根时它只是先把自己那一格删掉,根照样由调用方收。
+ *
  * @param {string[]} extraArgs 这个探针自己要的参数(窗口尺寸、色彩配置…)
  * @param {{timeout?: number, profile?: string}} opts profile = 临时 profile 的目录名前缀
  * @returns {Promise<{proc: import("node:child_process").ChildProcess, port: number,
@@ -195,7 +201,9 @@ export async function launchShell(extraArgs = [], { timeout = 20000, profile } =
   bailIfOrphan();
   // profile 目录在 spawn **之前**建(浏览器要用它),但删它的那一下挂在 'exit' 上,
   // 所以这中间抛什么异常都不会把它留下。
-  const dir = profile ? mkdtempSync(join(tmpdir(), profile)) : null;
+  // 优先建在调用方拥有的那个根里(超时 SIGKILL 时钩子跑不了,得由它整根删)
+  const root = process.env.KB_PROBE_PROFILE_ROOT || tmpdir();
+  const dir = profile ? mkdtempSync(join(root, profile)) : null;
   const args = [...BASE_ARGS, ...extraArgs, ...(dir ? [`--user-data-dir=${dir}`] : []),
                 "about:blank"];
   const proc = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });

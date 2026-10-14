@@ -32,6 +32,40 @@ HERE = Path(__file__).resolve().parent
 LEAK_TESTS = "test_probe_leak.py"
 
 
+# 类级 fixture 会建出来的那几种东西,和"收尾"长什么样
+_MAKERS = ('TemporaryDirectory', 'mkdtemp', 'Popen', 'fixture_server', 'ExitStack')
+_CLEANERS = ('cleanup', 'rmtree', 'terminate', 'kill', 'close', '__exit__', 'reap')
+
+
+def _calls(node: ast.AST) -> list[str]:
+    """`node` 子树里所有被调用的名字(`a.b()` 取 `b`)。"""
+    out = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            out.append(getattr(sub.func, 'id', None) or getattr(sub.func, 'attr', '') or '')
+    return out
+
+
+def _class_fixture_offenders(path: Path) -> list[str]:
+    """`setUpClass` 建了资源、却把回收押在 `tearDownClass` 上的那些类。"""
+    bad = []
+    # 带上 filename:不带的话编译告警一律报 `<unknown>:行号`,看不出是哪份文件
+    for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'), str(path))):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        methods = {m.name: m for m in node.body
+                   if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        setup = methods.get('setUpClass')
+        if setup is None or not any(c in _MAKERS for c in _calls(setup)):
+            continue
+        if 'addClassCleanup' not in _calls(setup):
+            bad.append(f'{path.name}:{setup.lineno} {node.name} 没在建完时登记 class cleanup')
+        teardown = methods.get('tearDownClass')
+        if teardown is not None and any(c in _CLEANERS for c in _calls(teardown)):
+            bad.append(f'{path.name}:{teardown.lineno} {node.name} 的回收还押在 tearDownClass 上')
+    return bad
+
+
 def _server_names_in_code(path: Path, names: set[str]) -> list[int]:
     """`path` 的**代码**里提到这些沙箱服务名的行号(文档和注释不算)。
 
@@ -43,7 +77,7 @@ def _server_names_in_code(path: Path, names: set[str]) -> list[int]:
     走 AST 而不是逐行 `in`:docstring 里本来就会写「数据由 tests/serve_reading.py
     摆出来」,逐行扫会把它当违例(第一版就是这么误报的),而注释压根不进 AST。
     """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
     allowed: list[tuple[int, int]] = []
     docstrings: set[int] = set()
     for node in ast.walk(tree):
@@ -164,6 +198,49 @@ class ProbeSourceContractTests(unittest.TestCase):
         self.assertEqual([], offenders,
                          "这些地方又自己起沙箱服务了 —— 那份临时库会留在盘上,"
                          "要走 tests.headless.fixture_server(script=...)")
+
+
+    def test_class_fixtures_register_their_cleanup_when_they_build_it(self):
+        """类级 fixture 必须**建完就登记** `addClassCleanup`,不许只写 `tearDownClass`。
+
+        `setUpClass` 抛异常之后 unittest **不调** `tearDownClass`(只跑
+        `doClassCleanups`)—— 而 `setUpClass` 里建完资源之后往往还有一长段会抛的活:
+        摆盘、起服务、等端口、跑探针、解析回包。实测过的后果是服务连端口留在后台;
+        第 6 轮按代码指出的是"回包非空但不是合法 JSON"那一支(`json.loads` 在清理域
+        外面),服务和整份临时库都留着。
+
+        判据落在**源码结构**上,因为这几条路正常跑一次都走不到:行为用例全绿也证明
+        不了。`tearDownClass` 本身不禁止(恢复全局之类),禁的是把**回收**押在它上面。
+        """
+        offenders = []
+        for f in sorted(HERE.glob("test_*.py")):
+            offenders += _class_fixture_offenders(f)
+        self.assertEqual([], offenders,
+                         "这几处又把类级资源的回收押在 tearDownClass 上了:"
+                         "建完立刻 cls.addClassCleanup(...)")
+
+    def test_the_probe_profile_root_is_handed_over_by_the_caller(self):
+        """临时 profile 的根由 `run_probe` 给、由它删(`KB_PROBE_PROFILE_ROOT`)。
+
+        后果那一条在 `tests/test_probe_leak.py`(超时之后目录还在不在);这一条只
+        钉住两侧都认同一个变量名 —— 哪天一侧改了名字,两边各自都"正确",而目录又
+        回到那个会被 SIGKILL 的进程手上。
+        """
+        shell = (HERE / "probe_shell.mjs").read_text(encoding="utf-8")
+        headless = (HERE / "headless.py").read_text(encoding="utf-8")
+        # 判据要落在**真正读写它的那一句**上,不是"文件里出现过这个词":注释和
+        # docstring 里到处都写着它,按词找的话一侧改了名字照样全绿(实测注入 0 红)。
+        self.assertIn("process.env.KB_PROBE_PROFILE_ROOT", shell,
+                      "探针那一侧不认父进程给的根了")
+        self.assertIn('PROFILE_ROOT_ENV = "KB_PROBE_PROFILE_ROOT"', headless,
+                      "run_probe 那一侧的变量名改了")
+        self.assertIn("child_env[PROFILE_ROOT_ENV] = profiles", headless,
+                      "run_probe 不把根传下去了")
+        self.assertIn("rmtree(profiles", headless, "run_probe 自己不删那个根了")
+        others = [f.name for f in sorted(HERE.glob("*.mjs"))
+                  if f.name != "probe_shell.mjs"
+                  and "KB_PROBE_PROFILE_ROOT" in f.read_text(encoding="utf-8")]
+        self.assertEqual([], others, "这些探针自己去读那个根了 —— 口径只有一份")
 
 
 @requires_headless

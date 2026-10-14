@@ -28,7 +28,7 @@ SERVER = Path(__file__).resolve().parent / "serve_workspace.py"
 
 sys.path.insert(0, str(REPO))
 
-from tests.headless import probe_env, requires_headless, run_probe  # noqa: E402
+from tests.headless import probe_env, reap, requires_headless, run_probe  # noqa: E402
 
 
 def _free_port() -> int:
@@ -46,6 +46,9 @@ class ChatHeightTest(unittest.TestCase):
         cls.server = subprocess.Popen(
             [sys.executable, str(SERVER), "--port", str(cls.port)],
             cwd=str(REPO), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # 起完**立刻**登记:下面等端口、跑探针、解析回包每一步都可能抛,而 setUpClass
+        # 抛异常之后 unittest 不调 tearDownClass —— 服务和它的端口会留在后台。
+        cls.addClassCleanup(reap, cls.server)
         base = f"http://127.0.0.1:{cls.port}"
         for _ in range(100):
             try:
@@ -54,21 +57,14 @@ class ChatHeightTest(unittest.TestCase):
             except (urllib.error.URLError, OSError):
                 time.sleep(0.1)
         else:  # pragma: no cover - 起不来就没什么可测的
-            cls.server.kill()
             raise AssertionError("预览服务没起来")
         run = run_probe([shutil.which("node"), str(PROBE), base],
                         timeout=300, env=probe_env())
         cls.stderr = run.stderr
         line = run.stdout.strip().splitlines()[-1] if run.stdout.strip() else ""
         if not line:
-            cls.server.kill()
             raise AssertionError(run.stderr)
         cls.results = json.loads(line)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.server.terminate()
-        cls.server.wait(timeout=10)
 
     def test_input_bar_stays_on_screen(self):
         self.assertTrue(self.results, "探针一条都没跑")

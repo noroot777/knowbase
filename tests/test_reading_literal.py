@@ -49,29 +49,26 @@ class ReadingEntriesAgreeTest(unittest.TestCase):
         # terminate 的旧写法把库的所有权留在一个**收不到清理机会**的进程手上
         # (SIGTERM 之后它那边的 with 一行都不跑,盘上留下 kb-reading-qa-*)。
         cls.stack = contextlib.ExitStack()
+        # **建完立刻登记**,别靠 try/except 一处处补:`addClassCleanup` 在 setUpClass
+        # 抛异常时也会跑(那时 unittest 不调 tearDownClass,只跑 doClassCleanups),
+        # 于是"起服务 → 跑探针 → 解析回包"整段都在同一个清理域里。原来只有前两步
+        # 包在 try 里,**回包非空但不是合法 JSON** 时 `json.loads` 在域外抛 ——
+        # 服务和那份临时库都留着(第 6 轮审查按代码指出)。
+        cls.addClassCleanup(cls.stack.close)
         # manifest 不放沙箱根里:探针读它,而它的生死应当跟这条用例一致
         cls.tmp = cls.stack.enter_context(
             tempfile.TemporaryDirectory(prefix="kb-reading-manifest-"))
         manifest = Path(cls.tmp) / "docs.json"
-        try:
-            # 摆盘(导出 + 建索引)在起服务之前跑完,所以要等得比别的沙箱久
-            base = cls.stack.enter_context(fixture_server(
-                "--manifest", str(manifest), script="serve_reading.py", timeout=150))
-            run = run_probe([shutil.which("node"), str(PROBE), base, str(manifest)],
-                            timeout=300, env=probe_env())
-        except BaseException:
-            cls.stack.close()
-            raise
+        # 摆盘(导出 + 建索引)在起服务之前跑完,所以要等得比别的沙箱久
+        base = cls.stack.enter_context(fixture_server(
+            "--manifest", str(manifest), script="serve_reading.py", timeout=150))
+        run = run_probe([shutil.which("node"), str(PROBE), base, str(manifest)],
+                        timeout=300, env=probe_env())
         cls.stderr = run.stderr
         line = run.stdout.strip().splitlines()[-1] if run.stdout.strip() else ""
         if not line:
-            cls.stack.close()
             raise AssertionError(run.stderr)
         cls.results = json.loads(line)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.stack.close()
 
     def test_both_reading_entries_show_the_same_text(self):
         self.assertTrue(self.results, "探针一条都没跑")
