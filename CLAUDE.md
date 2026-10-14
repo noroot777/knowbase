@@ -170,6 +170,7 @@
 | 往 `defaults.json` 加来源、存量库补种(`kb/feeds/registry.py` 的 `DEFAULTS_REV`) | `defaults-backfill.md` |
 | 英文内容翻译、译文显示口径(`kb/feeds/translate.py`) | `translate.md` |
 | 每日日报、素材账本、出处编号(`kb/daily*.py`、`kb/daily_refs.py`) | `daily.md` |
+| 同步的定时、日报那一轮的两段式编排(`kb/daily_run.py`、`kb/pipeline._scheduler_tick`) | `sync-schedule.md` |
 | 大模型阶段配置、`secrets.json`(`kb/llm_stages.py`、`kb/llm.py`) | `llm-stages.md` |
 | 软广判定与「正文空」判定(`kb/extract.py`、`scripts/promo_backfill.py`) | `promo.md`、`body-gap.md` |
 | 条目化提取的开关(`kb/extract_optin.py`) | `extract-optin.md` |
