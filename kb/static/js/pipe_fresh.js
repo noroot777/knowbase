@@ -14,6 +14,13 @@
 //    提示不出现、补读也不会发生。**所以 applied 必须由回包自己证明**(pending 回包
 //    带 run_id;历史回包按它最新那一轮的身份,见 `pipeFreshDesired` 的用处)。
 //
+// ③ 补读预算要是记在**页面身上**(而不是「要追平哪个版本」),一次跑长的同步就把它
+//    耗光了:跑着的时候没有终态可追平(desired 是空的),而两块都算落后 —— 实测跑了
+//    29 秒,中途五次重试全扣在一个根本读不了的目标上(pending 那块跑着时本来就禁止
+//    查询,一次请求都没发出去),跑完目标前移时次数已经满额,于是面板永久写着「还有
+//    1 项内容待提取·已停止自动重试」,点一次「重新读取」才回来。
+//    **所以预算属于目标版本:目标一换就重新给;明摆着读不了的那一档不读也不扣。**
+//
 // **落后就补,不管上一次是「请求失败」还是「拿到的是旧数据」** —— 后者原来根本不算
 // 缺口(请求是成功的),而它恰恰是 ② 那条路。
 //
@@ -46,26 +53,38 @@ function pipeFreshOk(key, run) {
   const s = pipeFreshSlot(key);
   s.applied = run || '';
   if (s.applied === s.desired) Object.assign(s, { tries: 0, due: 0, reason: '' });
+  // 追不平就是**一次用掉的尝试**:请求成功了,可取回来的还是旧那份。
+  else s.tries++;
   renderPipeFresh();
 }
 
-// 这一次请求就没成:记下原因(退避和次数由 `pipeFreshCheck` 统一管)。
+// 这一次请求就没成:记下原因(退避由 `pipeFreshCheck` 统一管)。
 // reason 非空 = 请求失败,这一档**立刻**在面板上说;拿到旧数据那一档先补读再说。
 function pipeFreshMiss(key, reason) {
-  pipeFreshSlot(key).reason = reason || '未知原因';
+  const s = pipeFreshSlot(key);
+  s.reason = reason || '未知原因';
+  s.tries++;
   renderPipeFresh();
 }
 
 // 状态轮询每读到一次都调:记下要对齐哪一轮,落后的按退避补一次。
 function pipeFreshCheck(run, loaders) {
   pipeFreshTick++;
+  const target = run || '';
   for (const key of Object.keys(loaders)) {
     const s = pipeFreshSlot(key);
-    s.desired = run || '';
-    if (s.applied === s.desired) { Object.assign(s, { tries: 0, due: 0, reason: '' }); continue; }
+    // **目标一换,预算重新给**(理由见抬头 ③)。
+    if (s.desired !== target) Object.assign(s, { desired: target, tries: 0, due: 0, reason: '' });
+    if (s.applied === target) { Object.assign(s, { tries: 0, due: 0, reason: '' }); continue; }
+    // 跑着的时候没有终态可追平(`target` 是空的):这一档**不读也不扣预算** ——
+    // 待处理数那个加载器自己就会直接返回(跑着时不扫文件),扣掉的是一次根本没
+    // 发出去的查询。
+    if (!target) continue;
     if (pipeFreshTick < s.due || s.tries >= PIPE_FRESH_TRIES) continue;
     s.due = pipeFreshTick + (1 << Math.min(s.tries, 4));   // 1、2、4、8、16 轮
-    s.tries++;
+    // **次数不在这里扣**,由加载器回报结果时扣(`pipeFreshOk` / `pipeFreshMiss`):
+    // 它可能因为在途、或者这会儿又跑起来了而一次请求都没发 —— 那种空转扣掉的是
+    // 一次没用过的额度,攒够五次就把这一块锁死在旧数据上。
     loaders[key]();
   }
   renderPipeFresh();

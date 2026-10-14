@@ -27,6 +27,7 @@ from kb.pipeline_state import (
     _state,
     last_result,
     new_run_id,
+    result_version,
     retry_notes,
 )
 from kb.pipeline_stages import (
@@ -354,12 +355,13 @@ def start_retry_failed() -> tuple[bool, str]:
         # 派生出来的计划、抓取范围和导出范围全是**上一轮**的,拿它起跑等于按一份跟
         # 当前失败毫无关系的范围去抓。身份变了一律拒,让用户再点一次(那一下读到的
         # 就是新快照)。
-        # **两边都得有身份才比,拿不准一律放行**:`finished_at` 空的那一档是重启后
-        # 内存还没跑过任何一轮,快照来自磁盘;`prev` 没有 `run_id` 的那一档是升级前
-        # 落的老记录(那个字段是后来才加的)。这两档都无从比对 —— 拿它们当「身份变了」
-        # 会把一次本来正常的重试静默拒掉,而那正是这颗按钮的老毛病。
-        if (prev.get("run_id") and _state.get("finished_at")
-                and _state.get("run_id") != prev["run_id"]):
+        # **核对无条件做**(`result_version` 保证任何快照都有版本:没有 `run_id` 的
+        # 旧记录降级到收尾时间,从没跑过就是「none」)。原来是「两边都得有 run_id 才
+        # 比、拿不准一律放行」—— 为的是别把重启后那一档和升级前的老记录误拒,可那
+        # 两档恰好也是**并发窗口**:实测里拿一份没有身份的旧快照、期间另一轮刚成功
+        # 结束,这道核对整条跳过,上一轮失败的那几个订阅又被抓了一遍,而失败其实
+        # 发生在另一个来源上。兼容旧记录是降级比对的事,不是放掉不变量的理由。
+        if result_version(prev) != result_version(_state):
             return False, "这期间又跑完了一轮，请重新点一次「重试失败项」"
         # card 标记这一轮会碰哪些阶段:按 STAGES 生成,STAGES 加新阶段也不会漏 key。
         # refill 不是独立卡片,占用 export 那张展示进度。

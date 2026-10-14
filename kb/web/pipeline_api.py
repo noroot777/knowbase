@@ -77,7 +77,14 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     # **`last_result()` 而不是 `load_last_run()`** —— 前端空闲时优先渲染这一份
     # (`pipeResult`),而磁盘那份在最近状态写失败那一轮会落后整整一轮:面板会显示
     # 上一轮的结论,而日志写着这一轮的失败。判据放在这里一处,前端照旧。
-    state["last_run"] = pl.last_result() or None
+    latest = pl.last_result() or None
+    state["last_run"] = latest
+    # **这一份回包自证它对应哪一轮终态**,前端拿它当「待处理数 / 历史清单是不是
+    # 这一轮的」的凭据。顶层那几个字段不够:新进程里它们是空的(恢复之后才有),
+    # 而从没跑过任何一轮的新库里永远是空的 —— 前端只好把空串同时当成「还不知道」
+    # 和「已经追平」,两种处理都错过一档(忙着重查 / 永远不补)。
+    # 跑着的时候报的是**正在跑这一轮**的版本,附属数据本来就该等它收尾。
+    state["result_version"] = pl.result_version(state if state["running"] else (latest or {}))
     # 待处理数要扫文件,只有显式要求且空闲时才算
     if pending and not state["running"]:
         state["pending"] = pl.pending_counts(_channel(channel)) if channel else pl.pending_counts()
@@ -97,7 +104,11 @@ def pipeline_runs():
     # `error` 如实带上最近一次留档失败的异常类型 —— 留档是旁路,它失败不该声张成
     # 同步失败(那一轮的结论照旧发布),但也不许静默:只看页面的话,「历史里没有这
     # 一轮」和「这一轮还没跑过」长得一模一样。
-    return {"runs": pl.load_history(), "error": pl.persist_error()}
+    runs = pl.load_history()
+    # **版本和状态端点同一个口径**(`result_version`),前端才比得出「这份清单是不是
+    # 最新那一轮的」。空清单也有值(「从没跑过」),理由在 `result_version` 那边。
+    return {"runs": runs, "error": pl.persist_error(),
+            "version": pl.result_version(runs[0] if runs else {})}
 
 
 class ChannelScope(BaseModel):

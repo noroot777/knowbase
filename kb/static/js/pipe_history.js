@@ -43,7 +43,21 @@ function renderPipeHistory() {
     return;
   }
   note.textContent = `保留最近 ${pipeHistory.length} 轮`;
+  // **一行渲染不出来只能坏那一行。** 这些字段全来自落盘文件,形状没有任何保证
+  // (`finished_at` 落成数字时 `slice` 当场抛 TypeError),而原来是一次 map 渲染整
+  // 表 —— 一条坏记录就把整屏历史换成一句「没能读到历史记录」,连那些好的一起,
+  // 而文件其实读到了。
   list.innerHTML = pipeHistory.map(run => {
+    try {
+      return pipeHistoryRow(run);
+    } catch {
+      return '<p class="pipe-history-empty">有一轮记录读不出来，已跳过。</p>';
+    }
+  }).join('');
+}
+
+function pipeHistoryRow(run) {
+  {
     const sum = pipeRunSummary(run), on = pipeViewing && pipeViewing.run_id === run.run_id;
     // 身份走 `data-run` 读、**不拼进 onclick**:`esc` 把引号转成实体,而属性值里的
     // 实体会在解析时还原 —— 拼进去的话一个带引号的身份就把那句 JS 拆了。这一行
@@ -55,7 +69,7 @@ function renderPipeHistory() {
       <span class="pipe-history-kind">${esc(pipeRunLabel(run))}</span>
       <span class="pipe-history-where">${esc(pipeRunWhere(run))}</span>
       <span class="pipe-history-result">${esc(sum.text)}</span></button>`;
-  }).join('');
+  }
 }
 
 async function loadPipeHistory() {
@@ -66,16 +80,15 @@ async function loadPipeHistory() {
     // 一笔会被它一起清掉 —— 而那一笔恰恰是说"你这次取的已经不是最新的了"。
     pipeHistoryWanted = false;
     // 发请求**之前**记下「现在是哪一轮」。回包回来时它变了,说明这期间又跑完了
-    // 一轮,而这份回包里没有它 —— 记一笔欠账,循环按新快照再查一次。身份认 run_id
-    // (`pipeRunKey` 那一份口径:`started_at` 只精确到秒,分不开落在同一秒的两轮)。
-    // **空身份(首次进页面,还没有快照)时这一道短路** —— 那一档由状态侧兜住:
-    // `refreshPipe` 首次读到一轮已结束时会补调一次本函数(那边的 firstRead 分支),
-    // 落到在途就是下面那笔欠账、落到空闲就是一次新查询。两边都不许单独拆掉。
-    const runKey = pipeRunKey(pipeSnapshot);
+    // 一轮,而这份回包里没有它 —— 记一笔欠账,循环按新快照再查一次。版本走
+    // `pipeVersion`(服务端那一份口径 `result_version`)。
+    // **还没有快照(首次进页面)时这一道短路** —— 那一档由状态侧兜住:状态回包一到
+    // `pipeFreshCheck` 就看出这一块落后、按退避补读。两边都不许单独拆掉。
+    const runKey = pipeVersion(pipeSnapshot);
     pipeHistoryRequest = pipeJson('/api/pipeline/runs');
     try {
       const data = await pipeHistoryRequest;
-      if (runKey && runKey !== pipeRunKey(pipeSnapshot)) { pipeHistoryWanted = true; continue; }
+      if (runKey && runKey !== pipeVersion(pipeSnapshot)) { pipeHistoryWanted = true; continue; }
       pipeHistory = Array.isArray(data.runs) ? data.runs : [];
       // 后端那边留档失败了没有 —— 和「这一屏取到没取到」是两件事
       pipeFreshNote = typeof data.error === 'string' ? data.error : '';
@@ -94,8 +107,11 @@ async function loadPipeHistory() {
       // `pipe_fresh.js` 抬头那条 ②)。**例外是后端如实报了留档失败**:那一轮根本
       // 没写进文件,补读多少次也追不平 —— 后端能给的最新就是手上这一份,所以按
       // desired 盖章,面板另有一句如实说那一轮没留下。
+      // 版本由**后端**给(和状态端点同一个 `result_version`),不在这里从清单首条
+      // 自己拼 —— 自己拼的那份在「清单是空的」和「旧记录没有 run_id」两档上是空串,
+      // 而空串会被当成已追平。
       pipeFreshOk('history', pipeFreshNote ? pipeFreshDesired('history')
-                                           : (pipeHistory[0]?.run_id || ''));
+                                           : (data.version || ''));
     } catch (e) {
       // 读不到**不在这里**无限重试(循环开头已经把那一笔欠账清了,这里也不置回去)
       // —— 但缺口要如实留着:交给 `pipe_fresh.js`,由后续状态轮询按退避补读,面板上

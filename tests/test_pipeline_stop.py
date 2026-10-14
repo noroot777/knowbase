@@ -194,7 +194,10 @@ class PipelineStopTests(TestCase):
                  (['export', 'refill', 'index', 'extract'], ['export', 'index', 'extract'])]
         for plan, expected in cases:
             with self.subTest(plan=plan):
-                state._state['running'] = False
+                # 每个子用例是独立的一轮:身份也要清掉。留着上一轮的收尾时间的话,
+                # 下面 patch 出来的那份快照(没有身份)会被起跑核对认成「这期间又跑
+                # 完了一轮」—— 那道核对是对的,是这里的摆局该干净。
+                state._state.update(running=False, run_id='', finished_at='')
                 with patch.object(pipeline_retry, 'retry_failed_plan', return_value=plan), \
                      patch.object(pipeline_retry, 'last_result', return_value={'crawl_filter': {'channel': 'wechat_local'}}), \
                      patch.object(pipeline_retry.threading, 'Thread'):

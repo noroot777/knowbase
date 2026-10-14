@@ -392,6 +392,60 @@ def load_last_run() -> dict | None:
     return raw if isinstance(raw, dict) else None
 
 
+# 恢复只做一次。**懒做,不在模块级做** —— `_STATE_FILE` 的位置测试要 patch,
+# 模块 import 那一刻读到的是生产那一份。
+_restored = False
+
+
+def _restore_once() -> None:
+    """把磁盘终态恢复进 `_state`。**一律在 `_lock` 外面调。**
+
+    **「最新那一轮的终态在内存里」这个契约,重启之后也得成立** —— `last_result()`
+    和起跑核对都建在它上面,而新进程的 `_state` 里身份、起止时间全是空的,于是
+    重启之后那一档就有个洞:面板拿空身份当「这份附属数据不是这一轮的」,一条
+    待处理数查询刚回来就作废、紧接着再查一次,实测 1.3 秒里发出 2000 多次(每次
+    都去扫一遍库),而页面上那个数始终是空的;起跑核对那边反过来 —— 空身份对不上
+    磁盘上那份快照,就得靠「拿不准一律放行」绕过去,而那正好把并发不变量也一起
+    绕过了。
+    恢复进内存之后这三处都不必再各自处理「重启」这一档。
+    """
+    global _restored
+    if _restored:
+        return
+    _restored = True
+    with _lock:
+        # 已经跑过(或正在跑)就不是「刚启动」,磁盘那份不该盖掉内存里的。
+        if _state["running"] or _state.get("finished_at"):
+            return
+        saved = load_last_run()
+        if not isinstance(saved, dict) or not saved.get("finished_at"):
+            return
+        for key in ("started_at", "finished_at", "run_kind", "planned_stages",
+                    "run_id", "log"):
+            if key in saved:
+                _state[key] = deepcopy(saved[key])
+        _state["stopped"] = bool(saved.get("stopped", False))
+        for key in ("stages", "crawl_filter", "export_filter", "crawl_retry"):
+            got = saved.get(key)
+            if isinstance(got, dict):
+                _state[key] = deepcopy(got)
+
+
+def result_version(run: dict | None = None) -> str:
+    """一份终态的「完成版本」:**任何一份快照都有值,包括从没跑过和旧格式记录。**
+
+    `run_id` 是后来才加的字段,所以凡是拿「有没有 run_id」当判据的地方都得另开一
+    条兜底分支,而兜底写成「拿不准一律放行」就把不变量放掉了:实测里升级后重启、
+    点一次「重试失败项」,期间另一轮刚好成功结束 —— 旧快照没有身份,起跑那道核对
+    整条跳过,上一轮失败的那几个订阅又被抓了一遍,而失败其实发生在另一个来源上。
+    所以口径降一级:身份没有就用收尾时间(旧记录有),再没有就是「从没跑过」——
+    **那也是一个确定的版本,不是「未知」**。前端拿它当应用凭据,就不必把空串
+    同时当成「还不知道」和「已经追平」两件事。
+    """
+    run = _state if run is None else run
+    return str(run.get("run_id") or run.get("finished_at") or "") or "none"
+
+
 def last_result() -> dict:
     """「最新那一轮的终态」**只有这一份口径**,展示和重试都从这里取。
 
@@ -404,14 +458,17 @@ def last_result() -> dict:
     **`running` 时回退磁盘**:那时内存里躺的是正在跑的这一轮(阶段还是 pending),
     拿它派生重试计划会错 —— 这一档要的恰恰是「上一轮」,而那只有磁盘有。
     """
+    _restore_once()
     with _lock:
-        if (not _state["running"] and _state.get("run_id")
-                and _state.get("finished_at")):
+        # 判据是**收尾时间**,不是身份 —— 恢复进来的旧格式记录没有 `run_id`,
+        # 而它一样是一份已经收尾的终态。
+        if not _state["running"] and _state.get("finished_at"):
             return deepcopy(_state)
     return load_last_run() or {}
 
 
 def get_state() -> dict:
+    _restore_once()
     return deepcopy(_state)
 
 

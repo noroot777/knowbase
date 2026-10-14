@@ -113,6 +113,10 @@ const server = createServer((req, res) => {
     res.writeHead(code, { "Content-Type": "application/json", "Content-Length": body.length });
     res.end(body);
   };
+  // 「这份回包对应哪一轮终态」,口径抄后端 `result_version`:身份没有就用收尾时间,
+  // 再没有就是「从没跑过」。空闲时报最新那一轮的、跑着时报正在跑这一轮的。
+  const versionOf = r => String((r && (r.run_id || r.finished_at)) || "") || "none";
+  const statusVersion = () => versionOf(state.running ? state : runs?.[0]);
   if (path === "/api/pipeline/status") {
     // 最新那一轮全绿,但还有 2 项待提取 —— 于是「重试失败项」在最新视图下是**可见**的,
     // 翻历史时藏没藏掉才看得出来
@@ -121,7 +125,8 @@ const server = createServer((req, res) => {
     // 走的是同一个路径,按住它们会把摆局卡在别处。
     if (req.url.includes("pending=true")) {
       if (failPending > 0) { failPending--; return json({ detail: "pending unavailable" }, 503); }
-      const body = { ...state, last_run: runs[0] || null, pending: { extract: pendingExtract } };
+      const body = { ...state, last_run: runs[0] || null, result_version: statusVersion(),
+                     pending: { extract: pendingExtract } };
       if (holdPending) {
         const gate = holdPending; holdPending = null;
         return void gate.then(() => json(body));
@@ -131,14 +136,15 @@ const server = createServer((req, res) => {
     const poll = req.url.includes("source=false") && !req.url.includes("pending=true");
     if (holdStatus && poll) {
       const gate = holdStatus; holdStatus = null;
-      return void gate.then(() => json({ ...state, last_run: runs[0] || null, ...extra }));
+      return void gate.then(() => json({ ...state, last_run: runs[0] || null,
+                                         result_version: statusVersion(), ...extra }));
     }
-    return json({ ...state, last_run: runs[0] || null, ...extra });
+    return json({ ...state, last_run: runs[0] || null, result_version: statusVersion(), ...extra });
   }
   if (path === "/api/pipeline/runs") {
     runsCalls++;
     if (failRuns > 0) { failRuns--; return json({ detail: "history unavailable" }, 503); }
-    const body = { runs, error: runsError };
+    const body = { runs, error: runsError, version: versionOf(runs?.[0]) };
     if (holdRuns) { const gate = holdRuns; holdRuns = null; return void gate.then(() => json(body)); }
     return json(body);
   }
@@ -568,7 +574,7 @@ runs = [LATER, EVENING, MORNING];
 state = { ...state, ...LATER };
 pendingExtract = 0;
 releaseStatus3();
-await setup("顶上换成了第三轮", until(`pipeRunKey(pipeSnapshot) === 'run-later'`, 8000));
+await setup("顶上换成了第三轮", until(`pipeVersion(pipeSnapshot) === 'run-later'`, 8000));
 releasePending();                             // 旧回包这才落地
 
 check("旧那份待处理数不许被应用上去",
@@ -601,6 +607,38 @@ check("applied 记的是清单那一轮,不是页面快照那一轮",
 check("所以它算落后、补读还会继续",
       await evalJs(`PIPE_FRESH.history.applied !== PIPE_FRESH.history.desired`),
       await evalJs(`PIPE_FRESH.history.applied + ' vs ' + PIPE_FRESH.history.desired`));
+
+// ── 20. 升级前落的记录没有身份:照旧要追得平 ─────────────────────────────────
+// `run_id` 是后来才加的字段。applied 原来取清单首条的 `run_id`,碰上这种记录就是
+// 空串 —— 缺口永远在、补读永远继续,而清单其实已经是最新的那一份了。版本改由后端
+// 给之后,这一档降级到收尾时间。
+const OLD_ROUND = { ...MORNING };
+delete OLD_ROUND.run_id;
+runs = [OLD_ROUND];
+state = { ...state, run_id: "", finished_at: OLD_ROUND.finished_at, stopped: false,
+          stages: OLD_ROUND.stages, log: OLD_ROUND.log };
+await evalJs(`refreshPipe(); loadPipeHistory(); true`);
+await setup("那份旧格式清单没应用上去",
+            until(`document.querySelectorAll('.pipe-history-row').length === 1`, 8000));
+check("没有身份的记录按收尾时间追平,不留一个永久缺口", await evalJs(
+  `PIPE_FRESH.history.applied === PIPE_FRESH.history.desired
+   && PIPE_FRESH.history.applied === ${JSON.stringify(OLD_ROUND.finished_at)}`),
+  await evalJs(`PIPE_FRESH.history.applied + ' vs ' + PIPE_FRESH.history.desired`));
+
+// ── 21. 一条坏记录只许坏它自己那一行 ────────────────────────────────────────
+// 这些字段全来自落盘文件,形状没有任何保证(`finished_at` 落成数字时 `slice` 当场
+// 抛 TypeError)。原来是一次 map 渲染整表,于是一条坏记录把整屏历史换成一句
+// 「没能读到历史记录」,连那些好的一起 —— 而文件其实读到了。
+runs = [{ ...EVENING, finished_at: 20261014, started_at: 20261014 }, MORNING];
+await evalJs(`loadPipeHistory(); true`);
+const twoRows = await until(
+  `document.getElementById('pipe-history-list').children.length === 2`, 8000);
+check("好的那一行照旧渲染得出来", twoRows && await evalJs(
+  `[...document.querySelectorAll('.pipe-history-row')].length === 1`),
+  await evalJs(`document.getElementById('pipe-history-list').innerHTML.slice(0, 120)`));
+check("坏的那一行就地说明,不替换整屏", twoRows && await evalJs(
+  `document.getElementById('pipe-history-list').textContent.includes('有一轮记录读不出来')`),
+  await evalJs(`document.getElementById('pipe-history-list').textContent.slice(0, 160)`));
 
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 

@@ -17,10 +17,13 @@ let pipeSourceVersion = 0, pipePendingRequest = null;
 // 「还欠一次待处理数刷新」。在途的那次查询只能回答它开跑那一刻的事实,
 // 新结果来了得补一次,而「有新结果」这件事一轮只说一次。
 let pipePendingWanted = false;
-// 「这份回包是哪一轮的」。身份认 run_id —— started_at 只精确到秒,而这一档
-// 治的正是「几百毫秒就结束」那种运行:两轮落在同一秒里时拿它当身份分不开,
-// 上一轮的积压数会被当成当前事实应用上去。跟 pipeDoneRun 同一个口径。
-const pipeRunKey = s => (s ? (s.run_id || s.started_at || '') : '');
+// 「这份回包是哪一轮的」。**版本由服务端算**(`result_version`),前端不再从
+// run_id / 时间戳自己拼 —— 自己拼的那份在两档上没有值:新进程还没跑过任何一轮时
+// 顶层身份是空的,从没跑过的新库里永远是空的。而空串在这里要同时表达「还不知道」
+// 和「已经追平」两件事,两种处理各错一档(忙着重查 / 永远不补)。服务端那份口径
+// 恒非空(没跑过就是 "none"),也兼容升级前没有 run_id 的旧记录。
+// 快照还是 null 时才是空串 —— 那是「还没有任何回包」,确实不该拿来比。
+const pipeVersion = s => (s && s.result_version) || '';
 
 async function pipeJson(path, options = {}, timeout = 15000) {
   const controller = new AbortController();
@@ -70,7 +73,7 @@ async function refreshPipe(withPending = false) {
       // 页面一次都没见过 running=true，于是待处理数停在旧值 —— 后端已经是 0 了,
       // 面板还写着「当前待处理 1 项」，只有手动刷新页面才归零(2026-10-09 审查
       // 实测:状态接口 pending.extract=0 而 UI 显示 1)。后台定时跑的那一轮同理。
-      const doneRun = s.running ? '' : (s.run_id || s.finished_at || '');
+      const doneRun = s.running ? '' : pipeVersion(s);
       // 「最近一次读到的结束身份」。附属结果的刷新判据已经不看它了(见下面
       // `pipeFreshCheck` 那段),它留给 `queuePipeRefresh` 的节奏和探针当观测点。
       pipeDoneRun = doneRun;
@@ -161,7 +164,13 @@ async function refreshPipePending() {
   // 所以记下「还欠一次」,等在途那次收尾了补发,**真的应用了才算刷新完**。
   if (pipePendingRequest) { pipePendingWanted = true; return; }
   pipePendingWanted = true;
-  while (pipePendingWanted) {
+  // **对不齐就退出循环,交给 `pipeFreshCheck` 那道有界补读。** 原来只在「还没有
+  // 快照」那一档退出,别的对不上情形一律接着查 —— 而重启之后顶层身份是空的,
+  // 回包和快照都比不出版本:既不应用、也不清欠账,循环立刻发下一次查询,实测
+  // 1.3 秒里发出两千多次(每次都去扫一遍库)。这个上限是兜底,正常收敛只要一次:
+  // 服务端版本只会前进,再查一次就拿到了。
+  let spins = 0;
+  while (pipePendingWanted && spins++ < 3) {
     // 跑起来了就别再扫文件:积压数由这一轮结束时那次刷新给出。欠着的那一笔
     // 留着,下一次进来接着补。
     if (pipeSnapshot?.running) return;
@@ -174,19 +183,22 @@ async function refreshPipePending() {
       // 补读也不会发生,面板永久写着「还有 1 项内容待提取」而后端早就是 0(实测:
       // 旧回包 run_id 末尾 -10、extract=1,后端已经是 -11、extract=0,切走再回来
       // 才归零)。
-      const got = pipeRunKey(s);
-      if (!s.running && got && got === pipeRunKey(pipeSnapshot)) {
+      const got = pipeVersion(s);
+      const want = pipeVersion(pipeSnapshot);
+      if (!s.running && want && got === want) {
         pipePending = s.pending || {}; pipePendingWanted = false;
         renderPipeState(pipeSnapshot);
         pipeFreshOk('pending', got);
-      } else if (!pipeSnapshot) {
-        // 还没有快照(首次,状态回包还没到):比不出来就**不应用**,欠账留着 ——
-        // 在这里循环重查没用,快照一直是 null、一直对不上。等状态回包之后
-        // `refreshPipe` 那一道(`pipeFreshCheck`)来接。
+      } else if (!s.running && want) {
+        // 回包属于另一轮(在途期间又跑完了一轮)。服务端的版本只会前进,再查一次
+        // 就对上了 —— 欠账留着,接着循环。
+        continue;
+      } else {
+        // 还没有快照、或者这会儿又跑起来了:现在比不出来也不该读,**欠账留着、
+        // 退出循环**。在这里接着查没用(快照不会因为我们重查而出现),等状态回包
+        // 之后 `refreshPipe` 那一道(`pipeFreshCheck`)按退避来接。
         return;
       }
-      // 对不上(回包是上一轮的、或者这会儿又跑起来了)时 wanted 还是 true,循环里
-      // 按新快照再查一次 —— 快照不再变动就收敛,它只随真实运行的起止变化。
     } catch (e) {
       // 和历史那条同一个形状:不在这里无限重试,但**缺口要留着**(`pipe_fresh.js`)。
       // 只清欠账、保留旧值的话,后续轮询只知道「这一轮见过了」,面板上那个待处理数

@@ -45,6 +45,9 @@ class HistoryCase(TestCase):
         state._state.update(self.saved)
 
     def reset(self, run_id=''):
+        # 「刚启动,还没从磁盘恢复过」。`running=True` 让恢复短路,所以这一句对自己
+        # 摆 `_state` 的用例没有影响;要试重启那一档的用例把 running 改成 False。
+        state._restored = False
         state._state.update(
             running=True, stop_requested=False, stopped=False, run_kind='',
             planned_stages=None, current_stage='', run_id=run_id,
@@ -372,7 +375,8 @@ class LatestResultTests(HistoryCase):
     def test_a_restart_can_still_retry_from_the_disk_copy(self):
         """**反过来钉一边**:重启之后内存里没跑过任何一轮,照旧要能重试。
 
-        那一档快照来自磁盘、内存身份是空的,拿「身份有没有变」去拦会把它一起拦掉。
+        那一档的终态只在磁盘上,而起跑核对是无条件做的 —— 靠的是启动后第一次读
+        状态时把磁盘终态恢复进内存(`_restore_once`),不是靠「拿不准就放行」。
         """
         self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）')
         self.reset()                                # 模拟重启:内存清空、没跑过
@@ -383,6 +387,79 @@ class LatestResultTests(HistoryCase):
             ok, msg = pipeline_retry.start_retry_failed()
         self.assertTrue(ok, f'重启之后还要能重试:{msg}')
         self.assertTrue(thread.called)
+
+
+class RestoreTests(HistoryCase):
+    """重启之后「最新那一轮」照旧有版本,起跑核对也照旧做得了。
+
+    新进程的 `_state` 里身份、起止时间全是空的,而「最新那一轮的终态在内存里」这个
+    契约 `last_result()` 和起跑核对都建在它上面 —— 重启那一档原来是个洞,前后端各用
+    一条特例绕过去(前端把空身份当「已追平」、后端「拿不准一律放行」),而那两条特例
+    各自又带一个事故:一条待处理数查询刚回来就作废、紧接着再查,实测 1.3 秒两千多次;
+    另一条让旧快照绕过并发核对,去抓了跟当前失败无关的来源。
+    """
+
+    def restart(self):
+        """模拟重启:内存清空、没跑过任何一轮,磁盘那份还在。"""
+        self.reset()
+        state._state.update(
+            running=False, run_id='', started_at='', finished_at='', crawl_filter={},
+            export_filter={}, crawl_retry={}, log=[],
+            stages={name: {'status': '', 'detail': ''} for name in state.STAGES})
+
+    def test_a_restart_reads_the_last_round_back_into_memory(self):
+        """启动后第一次读状态,把磁盘终态恢复进来 —— 身份、阶段结果一起。"""
+        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503），库里仍是原文')
+        disk = state.load_last_run() or {}
+        self.restart()
+        self.assertEqual('', state._state['run_id'], '这一局的前提:内存里确实什么都没有')
+
+        got = state.get_state()
+        self.assertEqual('run-a', got['run_id'], '重启之后身份要从磁盘恢复')
+        self.assertEqual(disk['finished_at'], got['finished_at'])
+        self.assertEqual('error', got['stages']['export']['status'], '阶段结果也要跟着回来')
+        self.assertEqual('run-a', state.result_version(), '于是这一屏有版本可报')
+
+    def test_a_live_round_is_not_overwritten_by_the_disk_copy(self):
+        """**反过来钉一边**:已经跑过、或正在跑,磁盘那份都不许盖掉内存。"""
+        self.run_round('run-a', 'ok', '已保存 3 条到知识库')      # 磁盘 = run-a
+        self.reset('run-b')                                        # 内存 = 正在跑 run-b
+        self.assertEqual('run-b', state.get_state()['run_id'],
+                         '正在跑的那一轮不许被磁盘那份换掉')
+        state._state.update(running=False, finished_at='2026-10-14 10:00:00')
+        state._restored = False                                    # 装成「还没恢复过」
+        self.assertEqual('run-b', state.get_state()['run_id'],
+                         '已经收尾的那一轮也不许回头被磁盘盖掉')
+
+    def test_a_snapshot_without_an_id_still_has_a_version(self):
+        """升级前落的记录没有 `run_id` —— 版本降级到收尾时间,不是「没有版本」。"""
+        self.assertEqual('2026-10-14 09:05:00',
+                         state.result_version({'finished_at': '2026-10-14 09:05:00'}))
+        self.assertEqual('run-x', state.result_version(
+            {'run_id': 'run-x', 'finished_at': '2026-10-14 09:05:00'}), '有身份优先用身份')
+        self.assertEqual('none', state.result_version({}),
+                         '从没跑过也是一个**确定**的版本,不是「未知」')
+
+    def test_an_old_record_without_an_id_cannot_skip_the_start_check(self):
+        """**旧格式快照不许绕过起跑核对。**
+
+        实测:升级后重启、点一次「重试失败项」,期间另一轮刚成功结束 —— 旧快照没有
+        身份,「两边都有身份才比」那道核对整条跳过,上一轮失败的那几个订阅又被抓了
+        一遍,而失败其实发生在另一个来源上。
+        """
+        with patch.object(state, '_now', return_value='2026-10-14 09:05:00'):
+            self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503），库里仍是原文')
+        stale = state.last_result()
+        stale.pop('run_id')                        # 升级前落的那种记录
+        with patch.object(state, '_now', return_value='2026-10-14 09:30:00'):
+            self.run_round('run-b', 'ok', '已保存 95 条到知识库')
+
+        with patch.object(pipeline_retry, 'last_result', return_value=stale), \
+             patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, msg = pipeline_retry.start_retry_failed()
+        self.assertFalse(ok, '没有身份也要按收尾时间比得出来')
+        self.assertIn('又跑完', msg)
+        self.assertFalse(thread.called, '一个线程都不许起')
 
 
 class HistoryEndpointTests(HistoryCase):
@@ -400,6 +477,25 @@ class HistoryEndpointTests(HistoryCase):
         runs = r.json()['runs']
         self.assertEqual(['run-2', 'run-1'], [item['run_id'] for item in runs])
         self.assertIn('503', runs[1]['stages']['export']['detail'])
+
+    def test_both_endpoints_report_the_same_version(self):
+        """两个端点的版本是**同一份口径**,而且任何一次回包都有。
+
+        前端拿它判「手上这份待处理数 / 这份历史清单是不是这一轮的」。两边各算一遍
+        就会在某一档上岔开,而岔开的后果是静默的:对不上就一直补读(忙循环),或者
+        被当成已追平(面板永久停在旧数字)。
+        """
+        fresh = self.client.get('/api/pipeline/status?source=false')
+        self.assertEqual('none', fresh.json()['result_version'],
+                         '从没跑过也要有版本')
+        self.assertEqual('none', self.client.get('/api/pipeline/runs').json()['version'])
+
+        self.run_round('run-1', 'ok', '已保存 95 条')
+        got = self.client.get('/api/pipeline/status?source=false').json()
+        self.assertEqual('run-1', got['result_version'])
+        self.assertEqual(got['result_version'],
+                         self.client.get('/api/pipeline/runs').json()['version'],
+                         '两个端点必须报同一个版本')
 
     def test_no_history_yet_is_an_empty_list_not_an_error(self):
         r = self.client.get('/api/pipeline/runs')

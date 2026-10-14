@@ -217,7 +217,10 @@ class RefillScriptTests(unittest.TestCase):
              patch.object(pipeline_retry, "last_result", return_value=last), \
              patch.object(pipeline_retry, "_run_index", lambda: ran.append("index")), \
              patch.object(pipeline_retry, "_run_extract", lambda: ran.append("extract")):
-            pstate._state["running"] = running
+            # 每次调用是独立的一轮:身份也要一起清掉。留着上一轮的收尾时间的话,
+            # patch 出来的那份快照(没有身份)会被起跑那道并发核对认成「这期间又跑
+            # 完了一轮」—— 那道核对是对的,是这里的摆局该干净。
+            pstate._state.update(running=running, run_id="", finished_at="")
             client = TestClient(app, raise_server_exceptions=False)
             r = client.post("/api/pipeline/retry-failed")
             if r.status_code == 200:   # 真起了一条线程,等它收尾
