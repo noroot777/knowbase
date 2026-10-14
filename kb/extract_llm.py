@@ -129,7 +129,7 @@ def clip_body(body: str, head: int = BODY_HEAD, tail: int = BODY_TAIL) -> str:
 
 
 def normalize_promo(raw, strict: bool = False) -> dict:
-    """把模型给的 promo 归一成 {level, reason}。
+    """把模型给的 promo 归一成 {level, reason},认不出就带上 `fallback: True`。
 
     认不出的一律落 none:软广判定是「宁可漏、不可错杀」——错杀会让一篇正常
     文章连同它的实体一起从条目化和检索里消失,而漏判只是留着一篇广告。
@@ -139,17 +139,29 @@ def normalize_promo(raw, strict: bool = False) -> dict:
     none 不再是「保守」而是「把已经判出来的 hard 擦掉」——广告重新进检索、
     `flag/软广` 一起摘掉,而调用方以为自己拿到了一个判定。所以严格模式下
     认不出就抛 `ValueError`,由调用方重试或扣留,**不许返回「确定没有」**。
+
+    **strict 管不到的那条路另有一道闸,靠的就是 `fallback` 这个标记。**
+    全量提取(`_extract_once`)不能开 strict:绝大多数文章是第一次判,一个坏
+    回包不该把 entity/topic/summary 整份丢掉。但它同样会去覆盖已有结论 ——
+    正文补抓回来之后 `fulltext.retire_stale` 只清 `extracted_at`、**明确保留**
+    原来的 promo,这一篇于是带着一个 hard 重新排进提取,一个缺 promo 的回包
+    就把它擦成 none。所以归一结果里要分得出「模型真的说了 none」和「没说、
+    我们填的 none」:前者照旧覆盖,后者由 `kb.extract_promo.save_promo` 在
+    落库那一层拦住(明确的 none 仍然正常放行)。两件事分两层做 —— 这里只
+    如实标注结论的来源,要不要让它覆盖是落库那边的决定。
     """
     if isinstance(raw, str):                    # 模型偶尔直接给 "hard"
         raw = {"level": raw}
     if not isinstance(raw, dict):
         raw = {}
     level = str(raw.get("level") or "").strip().lower()
+    out = {"level": level,
+           "reason": str(raw.get("reason") or "").strip()[:200]}
     if level not in PROMO_LEVELS:
         if strict:
             raise ValueError(f"没有拿到合法的 level: {str(raw)[:120]}")
-        level = "none"
-    return {"level": level, "reason": str(raw.get("reason") or "").strip()[:200]}
+        out["level"], out["fallback"] = "none", True
+    return out
 
 
 def extract_with_llm(title: str, body: str, timeout: int = 120,

@@ -87,8 +87,10 @@ class _Fixture(unittest.TestCase):
              path: str = PATH) -> str:
         """落一篇文档,返回它此刻的 content_hash(= 正文那一版的号)。
 
-        `path` 给第二篇用:同账号、同标题、同长度桶 = 补判眼里的「同一份稿子」,
-        一组里只判一次、结论广播给其余篇(见 `promo_backfill._group`)。
+        `path` 给第二篇用:同账号、同标题、**同一份正文** = 补判眼里的「同一份
+        稿子」,一组里只判一次、结论广播给其余篇(见 `promo_backfill._group`)。
+        两篇的 frontmatter 各带自己的 url,所以 `content_hash` 必然不同 ——
+        「每篇各按自己那一版的号判」和「整组共用代表篇那一版」才区分得出来。
         """
         from kb.scanner import file_hash
         text = _md(body, flagged, path)
@@ -193,22 +195,18 @@ class ConditionalWriteTest(_Fixture):
         self.seed("hard", NEW_BODY, flagged=True)   # 重落一遍,换掉 content_hash
         self.conn.execute("UPDATE documents SET content_hash='换过版了'"
                           " WHERE path=?", (PATH,))
-        written, stale = extract.save_promo(
+        self.assertFalse(extract.save_promo(
             self.conn, PATH, {"level": "none", "reason": "旧正文的结论"},
-            version_seen=seen)
-        self.assertFalse(written)
-        self.assertFalse(stale, "没写进去就不许让调用方去摘 md 里那行")
+            version_seen=seen))
         self.assertEqual(self.level(), "hard", "库里那行一个字都不许动")
         self.assertEqual(self.reason(), "原判定")
         self.assertTrue(self.db_flag(), "tag 也一个都不许动")
 
     def test_current_version_writes(self):
         seen = self.seed("hard", NEW_BODY, flagged=True)
-        written, stale = extract.save_promo(
+        self.assertTrue(extract.save_promo(
             self.conn, PATH, {"level": "none", "reason": "确实判错了"},
-            version_seen=seen)
-        self.assertTrue(written)
-        self.assertTrue(stale, "hard 改判成 none 要让调用方去摘 md 里那行")
+            version_seen=seen))
         self.conn.commit()
         self.assertEqual(self.level(), "none")
         self.assertFalse(self.db_flag())
@@ -222,9 +220,45 @@ class ConditionalWriteTest(_Fixture):
         self.seed("hard", NEW_BODY, flagged=True)
         self.conn.execute("UPDATE documents SET content_hash='换过版了'"
                           " WHERE path=?", (PATH,))
-        written, stale = extract.save_promo(
-            self.conn, PATH, {"level": "none", "reason": "r"})
-        self.assertTrue(written)
+        self.assertTrue(extract.save_promo(
+            self.conn, PATH, {"level": "none", "reason": "r"}))
+        self.conn.commit()
+        self.assertEqual(self.level(), "none")
+
+    def test_a_fallback_none_cannot_overwrite_an_existing_verdict(self):
+        """没拿到结论的「兜底 none」不许盖掉已有判定 —— 包括提取那条路。
+
+        `normalize_promo` 认不出 level 时填一个 none 并标 `fallback`
+        (strict 那道闸只拦得住重判这条路,拦不到全量提取 —— 见
+        `kb.extract_promo.save_promo` 的 fallback 那段)。闸在落库这一层,所以
+        这里直接问落库:库里那份 hard 要原封不动,两处 flag 也不许动。
+        """
+        self.seed("hard", NEW_BODY, flagged=True)
+        self.assertFalse(extract.save_promo(
+            self.conn, PATH, extract.normalize_promo({"reason": "回包缺字段"})))
+        self.conn.commit()
+        self.assertEqual(self.level(), "hard")
+        self.assertEqual(self.reason(), "原判定")
+        self.assertTrue(self.db_flag())
+        self.assertTrue(self.md_flag())
+
+    def test_an_explicit_none_still_overwrites(self):
+        """反过来钉一边:模型**明确**说 none 时照旧覆盖,否则 hard 再也改不回来。"""
+        self.seed("hard", NEW_BODY, flagged=True)
+        self.assertTrue(extract.save_promo(
+            self.conn, PATH,
+            extract.normalize_promo({"level": "none", "reason": "正常资讯"})))
+        self.conn.commit()
+        self.assertEqual(self.level(), "none")
+        self.assertFalse(self.db_flag())
+
+    def test_a_fallback_none_is_fine_on_a_first_judgement(self):
+        """还没判过的那一篇,兜底的 none 照旧落库(软广判定宁可漏、不可错杀)。"""
+        self.seed("", NEW_BODY, flagged=False)
+        self.conn.execute("UPDATE documents SET promo_reason='' WHERE path=?",
+                          (PATH,))
+        self.assertTrue(extract.save_promo(
+            self.conn, PATH, extract.normalize_promo({})))
         self.conn.commit()
         self.assertEqual(self.level(), "none")
 
@@ -262,8 +296,9 @@ class RecheckEndStateTest(_Fixture):
         一起消失,而脚本报「全部成功」,没有任何一处会再提醒。
         """
         self.seed("hard", NEW_BODY, flagged=True)
-        rc = self._recheck(reply="{}")
-        self.assertEqual(rc, 0)
+        # 整组都没拿到判定 → 退出码要能看出来(自动化按 0 判成功,而「一篇都
+        # 没判成」和「判完了」是两件事)
+        self.assertEqual(self._recheck(reply="{}"), 1)
         self.assertIn("判定 0 篇", self.out.getvalue())
         self.assertIn("失败组 1", self.out.getvalue())
         self.assertEqual(self.level(), "hard")
@@ -498,12 +533,12 @@ class AtomicDeliveryTest(_Fixture):
                 挂在 `sync_promo_tag` 上**测不出**这件事 —— 回写那一下在两个
                 版本里都在锁内,索引一律被挡住,注入旧结构照样全绿(实测红 0 条)。
                 """
-                written, stale = real_save(conn, path, promo, **kw)
+                written = real_save(conn, path, promo, **kw)
                 conn.commit()       # 旧结构里落库紧跟着就整组提交了
                 fut["f"] = pool.submit(index_now)
                 # 圈住了的话索引拿不到锁,这里必然等满 —— 那个超时就是互斥本身
                 seen["index_got_in"] = holding.wait(2)
-                return written, stale
+                return written
 
             # **索引线程要全程待在打桩范围里**(见 `_recheck_env` 的 docstring):
             # 它此刻还在等锁,`store.connect` 的替身一旦提前恢复,它醒来后会连到

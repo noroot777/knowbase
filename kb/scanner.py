@@ -72,6 +72,20 @@ def file_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def frontmatter_tags(fm: dict) -> list[str]:
+    """索引会从一份 frontmatter 里读到的 tags 列表。
+
+    抽出来是因为有第二个消费点:回写摘掉 `flag/软广` 之后,要确认「索引下次
+    读到的那一份里它真的不在了」(`kb.extract_promo.promo_tag_in_md`)。那道
+    确认必须和索引用同一份口径 —— 各写一遍的话,摘除那边按自己的理解判「摘
+    干净了」,而索引按另一套读法照旧把它读回 `doc_tags`。
+    """
+    tags = fm.get("tags") or []
+    if not isinstance(tags, list):
+        tags = [str(tags)]
+    return [str(t).strip() for t in tags if str(t).strip()]
+
+
 def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
     try:
         text = md_path.read_text(encoding="utf-8")
@@ -79,10 +93,7 @@ def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
         return None
     fm, body = parse_frontmatter(text)
 
-    tags = fm.get("tags") or []
-    if not isinstance(tags, list):
-        tags = [str(tags)]
-    tags = [str(t).strip() for t in tags if str(t).strip()]
+    tags = frontmatter_tags(fm)
 
     # channel(youtube) 和 account(gzh) 语义相同,归一到 account
     account = str(fm.get("account") or fm.get("channel") or "").strip()

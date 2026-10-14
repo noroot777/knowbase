@@ -302,13 +302,16 @@ class CallSiteTests(unittest.TestCase):
     # 入库走 `parse_pretagged` 解 frontmatter(同步、没有模型往返,三处:索引那
     # 两条入口 + `pretagged_refresh.py`)—— 它们没有"基于哪一份正文"可言。
     # **软广补判不在这张名单上,因为它压根不是 `save_extraction` 的调用方**:
-    # 它照样读 chunks 正文、照样等模型回包那几十秒,所以**落库**那一侧也校验 ——
-    # 判据进 `save_promo` 的 UPDATE 自己的 WHERE(比 `content_hash`,0 行就是
-    # 拒绝),整段由 `extract_promo.commit_promo` 圈进维护锁。**但它的回写那一侧
-    # 不传指纹**(理由见 `extract_promo.sync_promo_tag`):第一道比的是整个
-    # **文件**的 hash,而只改 frontmatter 的流程是常态(翻译回写、tag 回写、wiki
-    # 追加图谱尾区),传下去会把一次正文压根没动的合法改判判成作废、md 里那行
-    # flag 摘不掉。这两件事由 `tests/test_promo_recheck.py` 钉着。
+    # 它照样读 chunks 正文、照样等模型回包那几十秒,所以也校验,**只是判据和这里
+    # 不是同一组**:`commit_promo` 在锁内、落库**之前**问两件事 —— 磁盘正文进索引
+    # 了吗(`disk_body_indexed`,按索引那对函数切一遍再和 chunks 比)、索引里那份
+    # 换版了吗(`_body_moved(file_must_match=False)`);落库那条 UPDATE 自己的
+    # WHERE 再比一次 `content_hash`。**它的回写那一侧不传指纹**(理由见
+    # `extract_promo.sync_promo_tag`):判据已经提到交付区间的入口了,拦下来是
+    # 一个字都没写、两处仍然一致;在回写那一侧再判一次反而会造出不一致 ——
+    # 那时判定已经落库,而第一道比的是整个**文件**的 hash,只改 frontmatter 的
+    # 流程是常态(翻译回写、tag 回写、wiki 追加图谱尾区)。这几件事由
+    # `tests/test_promo_recheck.py` 和 `tests/test_promo_delivery.py` 钉着。
     # 按**文件**比,所以 `kb/cli.py` / `kb/pipeline_stages.py` 两边都在
     # (它们各有一条 LLM 路径和一条条目化路径);「LLM 那三条真的走了协调入口」
     # 由上面那张字面量锚点的表钉住。
@@ -486,7 +489,7 @@ class CommitWindowTests(BodyVersionCase):
         self.index(rel)                            # 索引跟上
         before = self.content_hash(rel)
         with self.kb() as c:
-            changed = extract.writeback_extraction(c, rel, dict(OLD), False,
+            changed = extract.writeback_extraction(c, rel, dict(OLD),
                                                    body_seen=seen)
         self.assertFalse(changed, '按旧正文算出来的 tag 被写进了新全文')
         self.assertEqual([], [t for t in self.md_tags(rel) if 'link-only' in t],
@@ -504,7 +507,7 @@ class CommitWindowTests(BodyVersionCase):
         self.index(rel)
         with self.kb() as c:
             seen = extract.body_fingerprint(store.doc_body(c, rel))
-            changed = extract.writeback_extraction(c, rel, dict(NEW), False,
+            changed = extract.writeback_extraction(c, rel, dict(NEW),
                                                    body_seen=seen)
         self.assertTrue(changed, '正文还是当前那一份,tag 却没写进去')
         self.assertIn('topic/ai-coding', self.md_tags(rel))

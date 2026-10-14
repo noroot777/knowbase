@@ -267,25 +267,34 @@ class GroupingTest(unittest.TestCase):
         import promo_backfill
         self.mod = promo_backfill
 
-    def _c(self, path, title, n):
-        return {"path": path, "title": title, "account": "x", "body": "正" * n}
+    def _c(self, path, title, n, tail=""):
+        return {"path": path, "title": title, "account": "x",
+                "body": "正" * n + tail}
 
-    def test_same_title_same_length_grouped(self):
+    def test_identical_input_grouped(self):
+        # 同账号 + 同标题 + 同一份正文 = 喂进去的 prompt 一个字节不差,
+        # 结论当然共用 —— 这是归组唯一站得住的理由
         groups = self.mod._group([self._c("a.md", "同一篇广告", 1000),
-                                  self._c("b.md", "同一篇广告", 1050)])
+                                  self._c("b.md", "同一篇广告", 1000)])
         self.assertEqual(len(groups), 1)
+
+    def test_same_title_similar_length_different_body_split(self):
+        """同题、长度落在同一个 500 字桶里、正文不同 —— 不许归到一组。
+
+        这是旧键(账号 + 标题 + 长度桶)下真实发生过的误杀:一个号把「每日
+        资讯」当标题反复用,一篇是开源教程、另一篇是代充值广告,广告那篇稍长
+        当了代表,教程跟着被判 hard,连实体带条目一起从检索和图鉴里摘掉,而
+        脚本报的是「软广 ×2」。
+        """
+        groups = self.mod._group([self._c("tut.md", "每日资讯", 910, "教程"),
+                                  self._c("ad.md", "每日资讯", 910, "代充值")])
+        self.assertEqual(len(groups), 2)
 
     def test_same_title_different_length_split(self):
         # 撞名但长度差一截的是两篇不同文章,归错组会张冠李戴
         groups = self.mod._group([self._c("a.md", "招聘", 300),
                                   self._c("b.md", "招聘", 9000)])
         self.assertEqual(len(groups), 2)
-
-    def test_representative_is_longest(self):
-        # 转发版常被砍掉尾部的推广段,而那正是判定依据,所以代表取最长的
-        groups = self.mod._group([self._c("short.md", "稿", 1000),
-                                  self._c("long.md", "稿", 1400)])
-        self.assertEqual(groups[0][0]["path"], "long.md")
 
     def test_different_account_not_grouped(self):
         """搬运号抄走原创号的稿子,标题和长度都一样,结论不许互相广播。
@@ -417,7 +426,8 @@ class BackfillWritebackTest(unittest.TestCase):
         self.conn.execute("INSERT INTO chunks (path, seq, text)"
                           " VALUES ('a.md', 0, ?)", (body,))
         self.conn.commit()
-        return {"path": "a.md", "version": scanner.file_hash(text)}
+        return {"path": "a.md", "version": scanner.file_hash(text),
+                "body": body}
 
     def test_writes_tag_into_frontmatter(self):
         vault = Path(self._tmp.name) / "vault"
@@ -427,8 +437,8 @@ class BackfillWritebackTest(unittest.TestCase):
                       encoding="utf-8")
         cand = self._candidate(vault)
         with mock.patch.object(extract, "VAULT_ROOT", vault):
-            self.assertEqual("", self.mod._deliver(self.conn, cand,
-                                                   {"level": "hard"}))
+            self.assertEqual(("", True), self.mod._deliver(self.conn, cand,
+                                                           {"level": "hard"}))
         self.assertIn(extract.PROMO_TAG, md.read_text(encoding="utf-8"))
         # 回写改了文件,hash 要跟着刷新,否则下次 index 白白重建
         self.assertNotEqual(self.conn.execute(
@@ -445,136 +455,55 @@ class BackfillWritebackTest(unittest.TestCase):
         """
         vault = Path(self._tmp.name) / "empty"
         vault.mkdir(parents=True, exist_ok=True)
-        cand = {"path": "a.md", "version": "old"}
+        cand = {"path": "a.md", "version": "old", "body": "正文"}
         with mock.patch.object(extract, "VAULT_ROOT", vault):
-            why = self.mod._deliver(self.conn, cand, {"level": "hard"})  # 不抛
+            why, _ = self.mod._deliver(self.conn, cand,
+                                       {"level": "hard"})      # 不抛
         self.assertTrue(why, "什么都没写却没说为什么")
         self.assertEqual("", self.conn.execute(
             "SELECT promo_level FROM documents WHERE path='a.md'"
         ).fetchone()["promo_level"])
 
 
+    def _vault_with_md(self) -> Path:
+        vault = Path(self._tmp.name) / "vault"
+        vault.mkdir(parents=True, exist_ok=True)
+        (vault / "a.md").write_text(
+            '---\ntitle: "广告"\ntags:\n  - source/dr-gzh\n---\n正文\n',
+            encoding="utf-8")
+        return vault
+
     def test_a_write_error_on_the_file_does_not_void_the_verdict(self):
         """摘 md 那行失败(文件只读、没有 frontmatter)不该让判定作废。
 
-        判定已经落库了,md 那行只是展示用的标记 —— 所以 `on_error` 吞掉
-        `OSError`、照常算这一篇写进去了。**反过来钉一边在下一条**:别的异常
+        判定已经落库了。但这**也不是一次成功的交付**:两处标记此刻不一致,
+        所以第二位返回 False、库里留下 `promo_tag_pending` 这条待办 ——
+        少了待办,这一篇按 `promo_level <> ''` 掉出所有候选,再没有人回来看它
+        (`sync-tags` 就是那条待办的出口)。**反过来钉一边在下一条**:别的异常
         不许跟着一起吞,那会把「协调区间里出了我们没想到的事」压成一次成功。
         """
-        vault = Path(self._tmp.name) / "vault"
-        vault.mkdir(parents=True, exist_ok=True)
-        md = vault / "a.md"
-        md.write_text('---\ntitle: "广告"\ntags:\n  - source/dr-gzh\n---\n正文\n',
-                      encoding="utf-8")
+        vault = self._vault_with_md()
         cand = self._candidate(vault)
         with mock.patch.object(extract, "VAULT_ROOT", vault), \
              mock.patch.object(extract, "writeback_extraction",
                                side_effect=OSError("只读文件系统")):
-            self.assertEqual("", self.mod._deliver(self.conn, cand,
-                                                   {"level": "hard"}))
-        self.assertEqual("hard", self.conn.execute(
-            "SELECT promo_level FROM documents WHERE path='a.md'"
-        ).fetchone()["promo_level"], "判定该落库的照样要落库")
+            self.assertEqual(("", False), self.mod._deliver(
+                self.conn, cand, {"level": "hard"}))
+        row = self.conn.execute(
+            "SELECT promo_level, promo_tag_pending FROM documents"
+            " WHERE path='a.md'").fetchone()
+        self.assertEqual("hard", row["promo_level"], "判定该落库的照样要落库")
+        self.assertTrue(row["promo_tag_pending"], "没留下可修的待办")
 
     def test_an_unexpected_error_is_not_swallowed(self):
-        """反过来钉一边:不是 `OSError` 的异常必须抛出去,不许压成一次成功。"""
-        vault = Path(self._tmp.name) / "vault"
-        vault.mkdir(parents=True, exist_ok=True)
-        md = vault / "a.md"
-        md.write_text('---\ntitle: "广告"\ntags:\n  - source/dr-gzh\n---\n正文\n',
-                      encoding="utf-8")
+        """反过来钉一边:不是交付失败的那类异常必须抛出去,不许压成一次成功。"""
+        vault = self._vault_with_md()
         cand = self._candidate(vault)
         with mock.patch.object(extract, "VAULT_ROOT", vault), \
              mock.patch.object(extract, "writeback_extraction",
                                side_effect=RuntimeError("没想到的事")):
             with self.assertRaises(RuntimeError):
                 self.mod._deliver(self.conn, cand, {"level": "hard"})
-
-
-class ReclassifyVaultTest(unittest.TestCase):
-    """误判 hard 之后改判,md 里那行 flag 也得摘掉。
-
-    writeback_tags 只会追加。DB 侧改判时 doc_tags 清了,但 frontmatter 还留着
-    那行——这篇文件之后任何一次改动触发 upsert_document,doc_tags 会按
-    frontmatter 重建,误判的标记就又回到库里(第 2 轮审查发现)。
-    """
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.vault = Path(self._tmp.name) / "vault"
-        self.vault.mkdir()
-        self.md = self.vault / "a.md"
-        self.md.write_text(
-            '---\ntitle: "广告"\ntags:\n  - source/dr-gzh\n---\n正文\n',
-            encoding="utf-8")
-        self.conn = store.connect(Path(self._tmp.name) / "kb.db")
-        self.conn.execute(
-            "INSERT INTO documents (path, source, title, content_hash, url)"
-            " VALUES ('a.md','dr-gzh','广告','old','u')")
-        self.conn.commit()
-
-    def tearDown(self):
-        self.conn.close()
-        self._tmp.cleanup()
-
-    def _reindex(self):
-        """模拟下一轮 index:doc_tags 按 md 当前的 frontmatter 重建。"""
-        tags = re.findall(r"^\s*-\s+(\S+)\s*$", self.md.read_text(encoding="utf-8"),
-                          re.M)
-        doc = SimpleNamespace(path="a.md", source="dr-gzh", title="广告",
-                              account="号", published="", url="u",
-                              content_hash="new", tags=tags)
-        store.upsert_document(self.conn, doc, [], "t2")
-        self.conn.commit()
-        return [r["tag"] for r in self.conn.execute(
-            "SELECT tag FROM doc_tags WHERE path='a.md' ORDER BY tag")]
-
-    def _judge(self, level: str):
-        with mock.patch.object(extract, "VAULT_ROOT", self.vault):
-            written, stale = extract.save_promo(self.conn, "a.md",
-                                                {"level": level, "reason": "r"})
-            self.assertTrue(written)
-            extract.sync_promo_tag(self.conn, "a.md", level, stale)
-        self.conn.commit()
-        return stale
-
-    def test_flag_removed_from_markdown_on_reclassify(self):
-        self._judge("hard")
-        self.assertIn(extract.PROMO_TAG, self.md.read_text(encoding="utf-8"))
-
-        self.assertTrue(self._judge("none"))          # 需要摘 md 里那行
-        text = self.md.read_text(encoding="utf-8")
-        self.assertNotIn(extract.PROMO_TAG, text)
-        self.assertIn("source/dr-gzh", text)          # 别的 tag 不能被误删
-        self.assertIn("正文", text)                   # 正文不碰
-
-        self.assertNotIn(extract.PROMO_TAG, self._reindex())   # 重索引不再带回
-
-    def test_reindex_would_resurrect_without_cleanup(self):
-        # 反证:只清 DB、不动 md 时,重索引会把标记带回来
-        self._judge("hard")
-        self.conn.execute("DELETE FROM doc_tags WHERE path='a.md' AND tag=?",
-                          (extract.PROMO_TAG,))
-        self.conn.commit()
-        self.assertIn(extract.PROMO_TAG, self._reindex())
-
-    def test_no_file_touch_when_never_hard(self):
-        # 没判过 hard 的文章不该为了「摘 flag」去读写文件
-        before = self.md.read_text(encoding="utf-8")
-        self.assertFalse(self._judge("soft"))
-        self.assertEqual(self.md.read_text(encoding="utf-8"), before)
-
-    def test_save_extraction_reports_stale_flag(self):
-        self._judge("hard")
-        stale = extract.save_extraction(self.conn, "a.md", {
-            "entities": [], "topics": [], "summary": "改判",
-            "promo": {"level": "none", "reason": "不是广告"}})
-        self.assertTrue(stale)
-
-    def test_remove_tag_is_noop_on_missing_file(self):
-        with mock.patch.object(extract, "VAULT_ROOT", self.vault / "nope"):
-            self.assertFalse(
-                extract.remove_writeback_tag("a.md", extract.PROMO_TAG))
 
 
 class ExtractEntrypointsTest(unittest.TestCase):
@@ -623,10 +552,10 @@ class ExtractEntrypointsTest(unittest.TestCase):
         conn.close()
         return md
 
-    def _run(self, entry: str, llm_level: str):
+    def _run(self, entry: str, llm_level: str, promo: dict | None = None):
         data = {"entities": [{"name": "某产品", "kind": "product"}],
                 "topics": ["ai"], "summary": "s",
-                "promo": {"level": llm_level, "reason": "r"}}
+                "promo": promo or {"level": llm_level, "reason": "r"}}
         fake = lambda *a, **kw: dict(data)          # noqa: E731
         opened = [store.connect(self.db)]
         with mock.patch.object(extract, "VAULT_ROOT", self.vault), \
@@ -671,6 +600,44 @@ class ExtractEntrypointsTest(unittest.TestCase):
                 self.assertIn("source/dr-gzh", text)
                 self.assertIn("正文", text)
 
+    def test_a_fallback_none_does_not_erase_an_existing_hard(self):
+        """回包里缺 promo 字段 —— 已有的 hard 在**每条**提取路上都要留着。
+
+        `judge_promo(require_verdict)` 那道 strict 只管得到重判那条路。全量
+        提取不能开 strict(绝大多数文章是第一次判,一个坏回包不该把
+        entity/topic/summary 整份丢掉),而它同样会覆盖已有判定:正文补抓回来后
+        `fulltext.retire_stale` 只清 `extracted_at`、**明确保留** promo,于是
+        一篇判过 hard 的广告带着结论重新排进提取,一个缺 promo 的回包就把它擦成
+        none —— 广告重新进检索、两处 flag 一起摘掉,而界面显示提取成功、
+        `extracted_at` 非空,这一篇从此掉出所有待办。闸设在落库那一层
+        (`extract_promo.save_promo` 的 fallback 那段),所以这里对每个入口问
+        同一组末态。
+        """
+        for entry in self._entries():
+            with self.subTest(entry=entry):
+                self._fresh()
+                md = self._seed("hard", ["source/dr-gzh", extract.PROMO_TAG])
+                # 兜底那个 none 由真实的 normalize_promo 产出(带 fallback 标记)
+                self.assertEqual(
+                    self._run(entry, "", promo=extract.normalize_promo({})),
+                    "hard", "兜底的 none 把已经判出来的 hard 擦掉了")
+                text = md.read_text(encoding="utf-8")
+                self.assertIn(extract.PROMO_TAG, text, "md 里那行也不许摘")
+                self.assertIn("topic/ai", text, "别的 tag 照旧写进去")
+
+    def test_an_explicit_none_still_reclassifies_on_every_entry(self):
+        """反过来钉一边:模型**明确**说 none 时,每条路都照旧改判 + 摘 flag。
+
+        不然这道闸就成了「hard 再也改不回来」,比原来的问题更糟。
+        """
+        for entry in self._entries():
+            with self.subTest(entry=entry):
+                self._fresh()
+                md = self._seed("hard", ["source/dr-gzh", extract.PROMO_TAG])
+                self.assertEqual(self._run(entry, "none"), "none")
+                self.assertNotIn(extract.PROMO_TAG,
+                                 md.read_text(encoding="utf-8"))
+
     def test_promo_tag_is_not_slugged(self):
         # flag/软广 已是最终形态,跟着 topic/entity 过一遍 _tag_slug 会被改写
         tags = extract.extraction_tags(
@@ -680,12 +647,17 @@ class ExtractEntrypointsTest(unittest.TestCase):
         self.assertEqual(tags[-1], extract.PROMO_TAG)
 
     def test_nothing_to_write_skips_file_io(self):
-        # 没 tag 又没改判时不该去读文件:补判 8000 多篇时这是纯浪费
+        """没 tag、也没有 promo 结论时不该去读文件(pre_tagged 那条路就是这样)。
+
+        **带明确 promo 结论的那条路现在一定会读一次** —— md 那行按库里的判定
+        幂等对齐,代价就是这一次读(理由见 `extract_promo.align_promo_tag`)。
+        所以这条用例的前置是「产物里压根没有 promo 字段」:VAULT_ROOT 指向一个
+        不存在的目录,读文件就会抛,安静返回 False 才说明它压根没读。
+        """
         conn = store.connect(self.db)
         with mock.patch.object(extract, "VAULT_ROOT", self.root / "nope"):
             self.assertFalse(extract.writeback_extraction(
-                conn, "missing.md", {"topics": [], "entities": [],
-                                     "promo": {"level": "none"}}, False))
+                conn, "missing.md", {"topics": [], "entities": []}))
         conn.close()
 
 
