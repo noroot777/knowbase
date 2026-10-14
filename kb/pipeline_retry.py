@@ -25,7 +25,7 @@ from kb.pipeline_state import (
     _now,
     _stage,
     _state,
-    load_last_run,
+    last_result,
     new_run_id,
     retry_notes,
 )
@@ -159,7 +159,7 @@ def _run_refill() -> None:
            failures=fail_items)
 
 
-def retry_failed_plan(nothing_to_crawl: bool = False) -> list[str]:
+def retry_failed_plan(nothing_to_crawl: bool = False, run: dict | None = None) -> list[str]:
     """按上次运行的失败状态编排重试链(面板全局"重试失败项"按钮的后端)。
 
     `nothing_to_crawl`:上一轮失败的那几个目标现在一个都不用重抓了(它们后来都已
@@ -177,7 +177,12 @@ def retry_failed_plan(nothing_to_crawl: bool = False) -> list[str]:
     status=error,或 detail 里写了失败条数。两边不一致的话按钮会亮着但这里
     返回空计划,用户点下去只收到 409。
     """
-    prev = (load_last_run() or {}).get("stages", {})
+    # **`run` 由调用方传进来,不在这里另读一次。** `start_retry_failed` 的范围和
+    # 计划原来各读一次「最近一次」,两次之间别的窗口或调度器恰好跑完一轮的话,计划
+    # 来自新那一轮的失败、而导出范围还是旧那一轮的来源 —— 实测里重试去抓了订阅 A,
+    # 而导致这个计划的失败发生在订阅 B。缺省自己取是给单独问「有没有失败项」的调
+    # 用方用的。
+    prev = ((last_result() if run is None else run).get("stages") or {})
 
     def _detail(name: str) -> str:
         return (prev.get(name) or {}).get("detail") or ""
@@ -306,8 +311,10 @@ def retry_crawl_scopes(prev: dict) -> list[dict]:
 
 def start_retry_failed() -> tuple[bool, str]:
     """一键重试所有失败项。返回 (started, msg);无失败项或已在跑时 False。"""
-    prev = load_last_run() or {}
-    plan = retry_failed_plan()
+    # **整次重试只取一份快照**,下面的计划、范围、导出范围全从它派生(理由在
+    # `retry_failed_plan` 的 `run` 那段)。
+    prev = last_result()
+    plan = retry_failed_plan(run=prev)
     # **先定计划,只有真要重抓才去问各来源的失败名单。** 问名单要读那个来源自己
     # 的订阅库,而这颗按钮的射程远不止抓取:上一轮只有 index 失败、这会儿订阅库
     # 又恰好打不开(锁着、权限、路径没挂上)时,无条件先问一遍等于让一个跟 index
@@ -321,7 +328,7 @@ def start_retry_failed() -> tuple[bool, str]:
     # 一模一样。
     crawl_resolved = "crawl" in plan and not scopes
     if crawl_resolved:
-        plan = retry_failed_plan(nothing_to_crawl=True)
+        plan = retry_failed_plan(nothing_to_crawl=True, run=prev)
     # **导出范围从上一轮的导出范围恢复,不是从它的抓取范围派生。** 两者在重试轮
     # 里本来就不一样(crawl 收窄、export 照旧走全部来源),而落盘只存一份收窄后
     # 的抓取范围的话,第二次重试就从那份收窄范围再派生一次导出范围 —— 第一次
@@ -343,6 +350,17 @@ def start_retry_failed() -> tuple[bool, str]:
     with _lock:
         if _state["running"]:
             return False, "管道已在运行中"
+        # **取快照到现在这段时间里,别的窗口或调度器可能又跑完了一轮。** 那样上面
+        # 派生出来的计划、抓取范围和导出范围全是**上一轮**的,拿它起跑等于按一份跟
+        # 当前失败毫无关系的范围去抓。身份变了一律拒,让用户再点一次(那一下读到的
+        # 就是新快照)。
+        # **两边都得有身份才比,拿不准一律放行**:`finished_at` 空的那一档是重启后
+        # 内存还没跑过任何一轮,快照来自磁盘;`prev` 没有 `run_id` 的那一档是升级前
+        # 落的老记录(那个字段是后来才加的)。这两档都无从比对 —— 拿它们当「身份变了」
+        # 会把一次本来正常的重试静默拒掉,而那正是这颗按钮的老毛病。
+        if (prev.get("run_id") and _state.get("finished_at")
+                and _state.get("run_id") != prev["run_id"]):
+            return False, "这期间又跑完了一轮，请重新点一次「重试失败项」"
         # card 标记这一轮会碰哪些阶段:按 STAGES 生成,STAGES 加新阶段也不会漏 key。
         # refill 不是独立卡片,占用 export 那张展示进度。
         card = {s: s in plan for s in STAGES}

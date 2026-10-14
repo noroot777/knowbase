@@ -174,10 +174,11 @@ class RetryScopeTests(RetryScopeBase):
         self.crawl({'channel': 'rss'}, broken=[self.a])
         self.succeeded_later(self.a)
         # 让 index 也红:这一轮的计划里还有别的阶段,于是真的会起跑。
-        run = pipeline_state.load_last_run() or {}
-        run['stages']['index'] = {'status': 'error', 'detail': '索引没做'}
-        pipeline_state._STATE_FILE.write_text(json.dumps(run, ensure_ascii=False),
-                                              encoding='utf-8')
+        # **摆的是内存那一份**(两边再落盘对齐)—— 重试读的是 `last_result()`,它空闲时
+        # 认内存,磁盘只给重启做恢复(见 `pipeline_state.last_result`)。只改磁盘文件
+        # 的话这一局在摆局那一步就不成立。
+        pipeline_state._state['stages']['index'] = {'status': 'error', 'detail': '索引没做'}
+        pipeline_state._save_last_run()
         with patch.object(pipeline_retry, '_run_crawl') as crawl, \
              patch.object(pipeline_retry, '_run_export'), \
              patch.object(pipeline_retry, '_run_index'), \

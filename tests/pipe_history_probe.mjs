@@ -55,6 +55,11 @@ let failRuns = 0;
 let failPending = 0;
 // 非空 = 后端最近一次留档失败了,`/api/pipeline/runs` 要如实带出来
 let runsError = '';
+// 非 null = 下一次待处理数查询的回包按在这儿等放行。**内容在收到请求那一刻就生成
+// 好**(和 `holdRuns` 一样、和 `holdStatus` 相反)—— 摆的就是「这份回包属于上一轮」:
+// 放行时它带的是请求发出时那一刻的身份和数字。
+let holdPending = null;
+let pendingExtract = 2;
 // 非 null = 下一次状态轮询(`refreshPipe` 那一条)的回包按在这儿等放行。**和
 // `holdRuns` 的生成时机刚好相反:它的回包是放行那一刻才生成的**,于是带的是那一轮
 // 已经结束之后的事实。两个合起来摆的就是生产那个窗口:两个请求一起发出,服务端先
@@ -111,11 +116,17 @@ const server = createServer((req, res) => {
   if (path === "/api/pipeline/status") {
     // 最新那一轮全绿,但还有 2 项待提取 —— 于是「重试失败项」在最新视图下是**可见**的,
     // 翻历史时藏没藏掉才看得出来
-    const extra = req.url.includes("pending=true") ? { pending: { extract: 2 } } : {};
+    const extra = {};
     // 只按住 `refreshPipe` 那一条。待处理数(`pending=true`)和来源连接探测(带 channel)
     // 走的是同一个路径,按住它们会把摆局卡在别处。
-    if (failPending > 0 && req.url.includes("pending=true")) {
-      failPending--; return json({ detail: "pending unavailable" }, 503);
+    if (req.url.includes("pending=true")) {
+      if (failPending > 0) { failPending--; return json({ detail: "pending unavailable" }, 503); }
+      const body = { ...state, last_run: runs[0] || null, pending: { extract: pendingExtract } };
+      if (holdPending) {
+        const gate = holdPending; holdPending = null;
+        return void gate.then(() => json(body));
+      }
+      return json(body);
     }
     const poll = req.url.includes("source=false") && !req.url.includes("pending=true");
     if (holdStatus && poll) {
@@ -528,6 +539,68 @@ check("「重新读取」真会再查一次", await (async () => {
   if (!await clickAt("#pipe-fresh button")) return false;
   return await until(`$('pipe-fresh').hidden`, 8000) && runsCalls > before;
 })(), `runsCalls=${runsCalls}`);
+
+// ── 18. 旧的待处理数回包迟到:不许拿此刻的页面快照给它盖章 ────────────────────
+// 这一局整个是报告那条的形状:全新页面、快照还是 null 时发出 pending 查询(于是回包
+// 带的是**上一轮**的身份和数字),按住它,这期间新一轮跑完把它清成 0,再放行。
+// 原来的判据是「发请求前记下的快照身份为空就放行」+「成功后拿当前快照盖章」——
+// 旧那个 1 被应用上去,还被标成「已追平最新那一轮」:缺口不存在、提示不出现、补读
+// 也不会发生,面板永久写着「还有 1 项内容待提取」,切走再回来才归零。
+runs = [EVENING, MORNING];
+state = { running: false, stop_supported: true, stop_requested: false, ...EVENING };
+pendingExtract = 1;                           // 上一轮留下 1 项待提取
+await evalJs(`window.__beforeReload = 1; true`);
+let releaseStatus3, releasePending;
+holdStatus = new Promise(r => { releaseStatus3 = r; });
+holdPending = new Promise(r => { releasePending = r; });
+await send("Page.navigate", { url: base + "/" });
+await setup("页面整个重建了", until(
+  `typeof window.__beforeReload === 'undefined' && typeof switchTab === 'function'`, 20000));
+await setup("页面加载那次状态查询卡在途中", untilHere(() => holdStatus === null));
+await setup("点开了同步中心", clickAt("#tab-pipe"));
+await setup("待处理数那次查询也卡在途中(带的是上一轮的身份)",
+            untilHere(() => holdPending === null));
+check("这一刻确实还没有快照", await evalJs(`pipeSnapshot === null`),
+      await evalJs(`JSON.stringify({ snap: pipeSnapshot })`));
+
+// 这期间第三轮跑完了,待处理数被清成 0
+runs = [LATER, EVENING, MORNING];
+state = { ...state, ...LATER };
+pendingExtract = 0;
+releaseStatus3();
+await setup("顶上换成了第三轮", until(`pipeRunKey(pipeSnapshot) === 'run-later'`, 8000));
+releasePending();                             // 旧回包这才落地
+
+check("旧那份待处理数不许被应用上去",
+      await until(`pipePending.extract === 0`, 8000),
+      await evalJs(`JSON.stringify({ pending: pipePending, applied: PIPE_FRESH.pending.applied,
+                                     desired: PIPE_FRESH.pending.desired })`));
+check("面板上那行字也跟着归零了",
+      !/待处理 1 项/.test(await evalJs(`$('pipe-issues')?.textContent || ''`)),
+      await evalJs(`($('pipe-issues')?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60)`));
+check("追平之后 applied 是这一轮的身份、不是旧回包那一轮",
+      await evalJs(`PIPE_FRESH.pending.applied === 'run-later'
+                    && PIPE_FRESH.pending.applied === PIPE_FRESH.pending.desired`),
+      await evalJs(`JSON.stringify({ applied: PIPE_FRESH.pending.applied, desired: PIPE_FRESH.pending.desired })`));
+
+// ── 19. 历史清单落后于当前这一轮、而后端没报错:也要算落后 ─────────────────────
+// 这一条钉 history 侧的凭据。上一组钉的是 pending:那边的「对不上就不应用」已经
+// 挡住了旧回包,所以**盖章用什么都一样**(定点注入只换盖章红 0 项,真冗余)。history
+// 不同:它没有「清单身份必须等于快照身份」这道条件(留档失败那一档本来就等不了),
+// 于是盖章是唯一的凭据 —— 拿此刻的页面快照盖的话,一份少了最新那一轮的清单就成了
+// 「已追平」,补读再也不会发生。
+runs = [EVENING, MORNING];                    // 清单落后一轮,而 state 还是第三轮
+runsError = "";
+await evalJs(`loadPipeHistory(); true`);
+await setup("那份落后的清单已经应用上去了",
+            until(`document.querySelectorAll('.pipe-history-row').length === 2`, 8000));
+check("applied 记的是清单那一轮,不是页面快照那一轮",
+      await evalJs(`PIPE_FRESH.history.applied === 'run-evening'`),
+      await evalJs(`JSON.stringify({ applied: PIPE_FRESH.history.applied,
+                                     desired: PIPE_FRESH.history.desired })`));
+check("所以它算落后、补读还会继续",
+      await evalJs(`PIPE_FRESH.history.applied !== PIPE_FRESH.history.desired`),
+      await evalJs(`PIPE_FRESH.history.applied + ' vs ' + PIPE_FRESH.history.desired`));
 
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 

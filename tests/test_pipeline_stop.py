@@ -196,7 +196,7 @@ class PipelineStopTests(TestCase):
             with self.subTest(plan=plan):
                 state._state['running'] = False
                 with patch.object(pipeline_retry, 'retry_failed_plan', return_value=plan), \
-                     patch.object(pipeline_retry, 'load_last_run', return_value={'crawl_filter': {'channel': 'wechat_local'}}), \
+                     patch.object(pipeline_retry, 'last_result', return_value={'crawl_filter': {'channel': 'wechat_local'}}), \
                      patch.object(pipeline_retry.threading, 'Thread'):
                     started, _ = pipeline_retry.start_retry_failed()
                 self.assertTrue(started)

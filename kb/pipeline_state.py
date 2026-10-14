@@ -384,9 +384,31 @@ def persist_error() -> str:
 
 
 def load_last_run() -> dict | None:
-    """上一轮的终态。读不出来一律 `None` —— 口径和历史那份共用 `_load_json`。"""
+    """上一轮的终态,**磁盘那一份**。读不出来一律 `None`(口径和历史共用 `_load_json`)。
+
+    只在**重启之后**该直接用它 —— 活着的进程里请用 `last_result()`,理由在那边。
+    """
     raw = _load_json(_STATE_FILE)
     return raw if isinstance(raw, dict) else None
+
+
+def last_result() -> dict:
+    """「最新那一轮的终态」**只有这一份口径**,展示和重试都从这里取。
+
+    优先内存:`_state` 在 `_end_run()` 收尾后存的就是终态(阶段修正已经做完)。
+    **磁盘那份是给重启做恢复的,它写失败了不该改变活进程里「最新是哪一轮」这个
+    事实** —— 原来展示和重试各自直读磁盘,于是最近状态写失败(权限、满盘)那一轮
+    就静默落后一整轮:实测里新一轮翻译报了 503、内存终态是 error,而面板显示上一轮
+    的「已保存 3 条·同步已完成」、连重试按钮都没有;方向反过来就是显示着上一轮的
+    失败、而「重试失败项」去抓**上一轮那条订阅**。
+    **`running` 时回退磁盘**:那时内存里躺的是正在跑的这一轮(阶段还是 pending),
+    拿它派生重试计划会错 —— 这一档要的恰恰是「上一轮」,而那只有磁盘有。
+    """
+    with _lock:
+        if (not _state["running"] and _state.get("run_id")
+                and _state.get("finished_at")):
+            return deepcopy(_state)
+    return load_last_run() or {}
 
 
 def get_state() -> dict:
@@ -438,12 +460,19 @@ def _end_run() -> None:
         # 坏字节的异常类型补进捕获里,下一种坏法照旧重现。
         global _persist_error
         try:
-            _save_last_run()
-            # 历史在状态文件**之后**写:那一份承重(重试范围从它派生),这一份只给人翻。
-            _save_history()
-            _persist_error = ''
-        except Exception as exc:          # noqa: BLE001 - 理由就在上面那段
-            _persist_error = type(exc).__name__
+            # **两份分别尝试、分别诊断,不许串在一个 try 里。** 串着的话状态文件
+            # 写失败就把本来写得成的历史一起跳过 —— 那一轮在历史里直接不存在,而
+            # 「历史里没有这一轮」和「这一轮还没跑过」在面板上长得一模一样。
+            # 顺序仍是状态在前:那一份承重(重试范围从它派生),这一份只给人翻。
+            errs = []
+            for save in (_save_last_run, _save_history):
+                try:
+                    save()
+                except Exception as exc:  # noqa: BLE001 - 理由就在上面那段
+                    errs.append(type(exc).__name__)
+                    _log(f'结果没能留档（{type(exc).__name__}）：'
+                         f'{save.__name__[6:]} 这一份没写上，同步结论不受影响')
+            _persist_error = ' / '.join(errs)
         finally:
             # 收尾状态按 run id 留一份,再把 running 放下:等这一轮的人晚一步来取
             # 也还拿得到自己那一轮的结果(阶段修正已经在上面做完了,存的就是终态)。

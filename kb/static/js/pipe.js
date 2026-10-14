@@ -71,46 +71,28 @@ async function refreshPipe(withPending = false) {
       // 面板还写着「当前待处理 1 项」，只有手动刷新页面才归零(2026-10-09 审查
       // 实测:状态接口 pending.extract=0 而 UI 显示 1)。后台定时跑的那一轮同理。
       const doneRun = s.running ? '' : (s.run_id || s.finished_at || '');
-      // 这一次只是**建立基线**:`pipeDoneRun` 还是初始的 null,「身份变了没有」无从
-      // 谈起。所以它不算「出现一轮新结果」,但它自己要补一次历史对齐 —— 见下面
-      // 那个 firstRead 分支。
-      const firstRead = pipeDoneRun === null;
-      const newResult = !firstRead && doneRun && doneRun !== pipeDoneRun;
+      // 「最近一次读到的结束身份」。附属结果的刷新判据已经不看它了(见下面
+      // `pipeFreshCheck` 那段),它留给 `queuePipeRefresh` 的节奏和探针当观测点。
       pipeDoneRun = doneRun;
       pipeSnapshot = s; pipeConnected = true; pipeLastRead = Date.now();
       $('pipe-connection').hidden = true;
       renderPipeState(s);
       if (wasRunning && !s.running) {
-        refreshPipePending();
-        loadPipeHistory();
         // 来源连接卡在「我的订阅」的公众号视图上,只有它亮着才值得探一次
         if (!$('subs-wechat').hidden) refreshPipeSource();
         pipeJson('/api/stats').then(stats => {
           $('stats').textContent = `${stats.documents.toLocaleString()} 篇内容已收录`;
         }).catch(() => {});
         toast(pipeRunLabel(pipeResult(s)) + (s.stopped || s.last_run?.stopped ? '已停止' : '已结束'), { key: 'pipeline', type: 'info', detail: '各步骤结果已更新，可查看待处理明细。' });
-      } else if (newResult) {
-        // 没见过 running 的那一轮:只把积压数补上,不弹「已结束」——
-        // 这条路也会在页面打开期间别处跑完一轮时走到，弹窗就成了噪音。
-        // **历史照旧要刷**:那一轮也该在列表里留档,而它恰恰是最容易没人看见的
-        // 那一档(几百毫秒就结束、或者后台定时跑的)。
-        refreshPipePending();
-        loadPipeHistory();
-      } else if (firstRead && doneRun) {
-        // **首次读到的就是「一轮已结束」时,也要和历史对齐一次。** 这一次按定义不是
-        // 新结果(基线就是它),而历史查询是和状态查询**并排起跑**的:刷新页面后立刻
-        // 打开同步中心,恰好有一轮在这两个回包之间结束,历史取到的就是不含它的那一份。
-        // 之后身份不再变,`newResult` 永远为假,列表就**永久**少最新那一轮,得切走再
-        // 回来才补齐(实测:后端 4 轮、页面 3 行,等自动轮询也不补)。
-        //
-        // **两种回包顺序都靠这一道兜住**:状态先到时这一道撞上在途的历史查询、记一笔
-        // 欠账(`loadPipeHistory` 开头那一笔),等旧回包收尾后补发;历史先到时在途已经
-        // 空了,这一道直接发一次新的。所以不能改成「只去掉历史那边的空身份短路」——
-        // 那只治得了状态先到的一半。
-        loadPipeHistory();
       }
-      // 上面那几个分支是**事件**(「又跑完一轮」一轮只说一次);这一道管的是
-      // 「那一次取失败之后谁来接」—— 记下要对齐哪一轮,到点的缺口按退避补一次。
+      // **两个附属结果的刷新只有这一处判据:落后就补。** 原来是三个事件分支各自
+      // 直接调一次(running→idle、没见过 running 的那一轮、首次读到结束状态),
+      // 外加这一道按退避补漏 —— 两套判据在同一个 tick 上重叠,一次读失败会被紧跟
+      // 着的那次成功立刻盖过去,「失败了要说一句」就永远轮不到。收敛成一处之后
+      // 那三档自然都被覆盖:身份一变 applied 就落后,首次 applied 是空的也落后。
+      //
+      // `doneRun` 在跑的时候是空串,那时 applied 也会被清成空 —— 跑完才有得对齐,
+      // 中途不该扫文件(`refreshPipePending` 自己那道 running 守卫是同一个意思)。
       pipeFreshCheck(doneRun, { history: loadPipeHistory, pending: refreshPipePending });
     } catch (e) {
       if (version !== pipeStatusVersion) return;
@@ -171,7 +153,7 @@ async function refreshPipeSource() {
 async function refreshPipePending() {
   if (pipeSnapshot?.running) return;
   // 在途那次查询是上一轮的事实:它的回包会被下面那道身份闸丢掉,而
-  // 「出现了一轮新的已结束运行」一轮只说一次(pipeDoneRun 已经更新成新身份),
+  // 「出现了一轮新的已结束运行」原来一轮只说一次(靠 pipeDoneRun 比身份),
   // 直接 return 就等于把唯一那次机会扔了 —— 后端待处理已经是 0,面板永久停在
   // 「当前待处理 1 项」,再轮询多少次也不消失(2026-10-09 第 2 轮审查实测:
   // 切到检索再切回来引发一次查询、趁它在途点「重试失败项」,放行旧回包之后
@@ -183,17 +165,28 @@ async function refreshPipePending() {
     // 跑起来了就别再扫文件:积压数由这一轮结束时那次刷新给出。欠着的那一笔
     // 留着,下一次进来接着补。
     if (pipeSnapshot?.running) return;
-    const runKey = pipeRunKey(pipeSnapshot);
     pipePendingRequest = pipeJson(channelUrl('/api/pipeline/status?source=false&pending=true'), {}, 60000);
     try {
       const s = await pipePendingRequest;
-      if (!pipeSnapshot?.running && (!runKey || runKey === pipeRunKey(pipeSnapshot))) {
+      // **应用的凭据是这份回包自己的身份**(`s.run_id`),不是此刻的页面快照。原来
+      // 空身份(首次打开、快照还是 null)一律放行、再拿当前快照给它盖章 —— 于是一份
+      // 属于上一轮的待处理数被标成「已追平最新那一轮」:缺口不存在、提示不出现、
+      // 补读也不会发生,面板永久写着「还有 1 项内容待提取」而后端早就是 0(实测:
+      // 旧回包 run_id 末尾 -10、extract=1,后端已经是 -11、extract=0,切走再回来
+      // 才归零)。
+      const got = pipeRunKey(s);
+      if (!s.running && got && got === pipeRunKey(pipeSnapshot)) {
         pipePending = s.pending || {}; pipePendingWanted = false;
-        if (pipeSnapshot) renderPipeState(pipeSnapshot);
-        pipeFreshOk('pending', pipeRunKey(pipeSnapshot));
+        renderPipeState(pipeSnapshot);
+        pipeFreshOk('pending', got);
+      } else if (!pipeSnapshot) {
+        // 还没有快照(首次,状态回包还没到):比不出来就**不应用**,欠账留着 ——
+        // 在这里循环重查没用,快照一直是 null、一直对不上。等状态回包之后
+        // `refreshPipe` 那一道(`pipeFreshCheck`)来接。
+        return;
       }
-      // 回包被丢掉(这期间换了一轮运行)时 wanted 还是 true,循环里按新快照
-      // 再查一次 —— 快照不再变动就收敛,它只随真实运行的起止变化。
+      // 对不上(回包是上一轮的、或者这会儿又跑起来了)时 wanted 还是 true,循环里
+      // 按新快照再查一次 —— 快照不再变动就收敛,它只随真实运行的起止变化。
     } catch (e) {
       // 和历史那条同一个形状:不在这里无限重试,但**缺口要留着**(`pipe_fresh.js`)。
       // 只清欠账、保留旧值的话,后续轮询只知道「这一轮见过了」,面板上那个待处理数

@@ -90,7 +90,12 @@ async function loadPipeHistory() {
       renderPipeHistory();
       if (pipeViewing) renderPipeState(pipeSnapshot || { running: false });
       // **渲染成功了才算追平这一轮**(`pipe_fresh.js` 那套 desired/applied)
-      pipeFreshOk('history', pipeRunKey(pipeSnapshot));
+      // **凭据是这份清单自己能证明的最新那一轮**,不是此刻的页面快照(理由同
+      // `pipe_fresh.js` 抬头那条 ②)。**例外是后端如实报了留档失败**:那一轮根本
+      // 没写进文件,补读多少次也追不平 —— 后端能给的最新就是手上这一份,所以按
+      // desired 盖章,面板另有一句如实说那一轮没留下。
+      pipeFreshOk('history', pipeFreshNote ? pipeFreshDesired('history')
+                                           : (pipeHistory[0]?.run_id || ''));
     } catch (e) {
       // 读不到**不在这里**无限重试(循环开头已经把那一笔欠账清了,这里也不置回去)
       // —— 但缺口要如实留着:交给 `pipe_fresh.js`,由后续状态轮询按退避补读,面板上

@@ -22,7 +22,7 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb import pipeline, pipeline_state as state
+from kb import pipeline, pipeline_retry, pipeline_state as state
 from kb.web import pipeline_api
 from tests.headless import probe_env, requires_headless, run_probe
 
@@ -235,7 +235,8 @@ class PersistFailureTests(HistoryCase):
         self.assertFalse(state.get_state()['running'], '留档炸了,收尾也得完成')
         self.assertTrue(state.run_result('run-x'), '等结果的人还要拿得到终态')
         self.assertTrue(self.start_again(), '下一轮还要起得来')
-        self.assertEqual('MemoryError', state.persist_error(), '是什么坏了要如实记')
+        # 两份分别尝试、分别诊断,所以两个都炸时记的是两条
+        self.assertIn('MemoryError', state.persist_error(), '是什么坏了要如实记')
 
         self.run_round('run-y', 'ok', '已保存 95 条到知识库')
         self.assertEqual('', state.persist_error(), '留档又成功了,诊断要撤')
@@ -276,6 +277,112 @@ class PersistFailureTests(HistoryCase):
         self.assertFalse(state.get_state()['running'], '收尾照旧要完成')
         self.assertEqual([], sorted(p.name for p in self.dir.glob('*.tmp')),
                          '临时文件要收掉')
+
+
+class LatestResultTests(HistoryCase):
+    """「最新那一轮」只有一份口径,展示和重试都从它取。
+
+    磁盘那份是给重启做恢复的 —— **它写失败了不该改变活进程里「最新是哪轮」这个
+    事实**。原来展示和重试各自直读磁盘,于是最近状态写失败那一轮静默落后一整轮。
+    """
+
+    def test_the_latest_result_comes_from_memory_not_the_stale_disk_copy(self):
+        """写失败那一轮,`last_result()` 仍然认内存那一份。
+
+        实测形态:新一轮翻译报 503、内存终态是 error,而面板显示上一轮的「已保存
+        3 条 · 同步已完成」、连重试按钮都没有;方向反过来就是显示着上一轮的失败、
+        而「重试失败项」去抓**上一轮那条订阅**。
+        """
+        self.run_round('run-old', 'ok', '已保存 3 条到知识库')
+        with patch.object(state, '_write_atomic', side_effect=PermissionError('read-only')):
+            self.run_round('run-new', 'error', '3 条翻译失败（服务返回 503），库里仍是原文')
+
+        self.assertEqual('run-old', (state.load_last_run() or {}).get('run_id'),
+                         '这一局的前提:磁盘那份确实落后了')
+        got = state.last_result()
+        self.assertEqual('run-new', got.get('run_id'), '最新那一轮要认内存那一份')
+        self.assertEqual('error', got['stages']['export']['status'], '它那个红要还在')
+        self.assertIn('503', got['stages']['export']['detail'])
+
+    def test_a_running_round_falls_back_to_the_disk_copy(self):
+        """**跑着的时候要回退磁盘。** 那时内存里躺的是正在跑的这一轮(阶段还是
+        pending),拿它派生重试计划会错 —— 这一档要的恰恰是「上一轮」。
+        """
+        self.run_round('run-old', 'error', '3 条翻译失败（服务返回 503）')
+        self.reset('run-now')                      # 又跑起来了
+        got = state.last_result()
+        self.assertEqual('run-old', got.get('run_id'), '跑着的时候要给上一轮')
+        self.assertEqual('error', got['stages']['export']['status'])
+
+    def test_a_failed_state_write_does_not_skip_the_history_write(self):
+        """状态文件写失败,不许把本来写得成的那份历史一起跳过。
+
+        串在一个 try 里的话那一轮在历史里直接不存在,而「历史里没有这一轮」和
+        「这一轮还没跑过」在面板上长得一模一样。
+        """
+        real = state._write_atomic
+
+        def only_state_fails(path, data):
+            if path == state._STATE_FILE:
+                raise PermissionError('read-only')
+            return real(path, data)
+
+        with patch.object(state, '_write_atomic', side_effect=only_state_fails):
+            self.run_round('run-new', 'error', '3 条翻译失败（服务返回 503）')
+
+        self.assertEqual(['run-new'], [r['run_id'] for r in state.load_history()],
+                         '历史那一份照旧要写上')
+        self.assertIn('PermissionError', state.persist_error(), '失败要如实记一笔')
+        self.assertTrue(any('没能留档' in line for line in state.get_state()['log']),
+                        '那一轮自己的日志里也要留一行(重启之后内存那笔诊断就没了)')
+
+    def test_the_retry_derives_everything_from_one_snapshot(self):
+        """范围、计划、导出范围必须从**同一份**快照派生。判据是**读了几次**。
+
+        原来各读一次「最近一次」:两次之间别的窗口或调度器恰好跑完一轮的话,计划
+        来自新那一轮的失败、而导出范围还是旧那一轮的来源 —— 实测里重试去抓了
+        订阅 A,而导致这个计划的失败发生在订阅 B。
+        """
+        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）')
+        snap = state.last_result()
+        with patch.object(pipeline_retry, 'last_result', return_value=snap) as reads, \
+             patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, msg = pipeline_retry.start_retry_failed()
+        self.assertTrue(ok, msg)
+        self.assertEqual(1, reads.call_count, f'整次重试只许取一份快照,取了 {reads.call_count} 次')
+        self.assertTrue(thread.called, '这一局的前提:它真走到了起跑那一步')
+
+    def test_a_round_finishing_in_between_blocks_the_retry(self):
+        """取快照到起跑这段时间里又跑完一轮 —— 一律拒,让用户再点一次。
+
+        不拒的话派生出来的计划和范围全是**上一轮**的,拿它起跑等于按一份跟当前
+        失败毫无关系的范围去抓。
+        """
+        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）')
+        stale = state.last_result()
+        self.run_round('run-b', 'ok', '已保存 95 条到知识库')      # 这期间又跑完一轮
+
+        with patch.object(pipeline_retry, 'last_result', return_value=stale), \
+             patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, msg = pipeline_retry.start_retry_failed()
+        self.assertFalse(ok, '身份变了就不许起跑')
+        self.assertIn('又跑完', msg)
+        self.assertFalse(thread.called, '一个线程都不许起')
+
+    def test_a_restart_can_still_retry_from_the_disk_copy(self):
+        """**反过来钉一边**:重启之后内存里没跑过任何一轮,照旧要能重试。
+
+        那一档快照来自磁盘、内存身份是空的,拿「身份有没有变」去拦会把它一起拦掉。
+        """
+        self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）')
+        self.reset()                                # 模拟重启:内存清空、没跑过
+        state._state.update(running=False, run_id='', finished_at='', stages={
+            name: {'status': '', 'detail': ''} for name in state.STAGES})
+
+        with patch.object(pipeline_retry.threading, 'Thread') as thread:
+            ok, msg = pipeline_retry.start_retry_failed()
+        self.assertTrue(ok, f'重启之后还要能重试:{msg}')
+        self.assertTrue(thread.called)
 
 
 class HistoryEndpointTests(HistoryCase):

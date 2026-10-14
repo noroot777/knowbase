@@ -55,7 +55,7 @@ class RefillScriptTests(unittest.TestCase):
         """
         last = {"stages": {"extract": {"status": "ok", "detail": extract_detail},
                            **(stages or {})}}
-        with patch.object(pipeline_retry, "load_last_run", return_value=last), \
+        with patch.object(pipeline_retry, "last_result", return_value=last), \
              patch.object(store, "connect", return_value=_FakeConn()), \
              patch.object(extract, "pending_docs", return_value=[]):
             return pipeline_retry.retry_failed_plan()
@@ -214,7 +214,7 @@ class RefillScriptTests(unittest.TestCase):
         app = FastAPI()
         app.include_router(pipeline_api.router)
         with patch.object(pstate, "_STATE_FILE", Path(self.tmp.name) / "state.json"), \
-             patch.object(pipeline_retry, "load_last_run", return_value=last), \
+             patch.object(pipeline_retry, "last_result", return_value=last), \
              patch.object(pipeline_retry, "_run_index", lambda: ran.append("index")), \
              patch.object(pipeline_retry, "_run_extract", lambda: ran.append("extract")):
             pstate._state["running"] = running

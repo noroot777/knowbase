@@ -74,7 +74,10 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     if source:
         selected = channel or (state.get("crawl_filter") or {}).get("channel")
         state["source"] = pl.source_status(_channel(selected))
-    state["last_run"] = pl.load_last_run()
+    # **`last_result()` 而不是 `load_last_run()`** —— 前端空闲时优先渲染这一份
+    # (`pipeResult`),而磁盘那份在最近状态写失败那一轮会落后整整一轮:面板会显示
+    # 上一轮的结论,而日志写着这一轮的失败。判据放在这里一处,前端照旧。
+    state["last_run"] = pl.last_result() or None
     # 待处理数要扫文件,只有显式要求且空闲时才算
     if pending and not state["running"]:
         state["pending"] = pl.pending_counts(_channel(channel)) if channel else pl.pending_counts()
