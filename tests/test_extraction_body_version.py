@@ -480,19 +480,24 @@ class CallSiteTests(unittest.TestCase):
         永远进不了 chunks(实测最坏的一种:磁盘上换成了新正文、chunks 还是旧的,
         新正文一个字都搜不到,点开文章却是新的,再同步也不恢复)。
         所以这里既钉「只有这几处在调它」,也钉「它压根没有默认值可漏」。
+
+        **「谁有资格登记」那张更大的名单在 `tests/test_doc_rewrite_roster.py`** ——
+        光枚举这个函数的调用点不够:第 5 轮审查抓出来的两条旁路当时**都在**
+        这张名单上、`expect` 也都老实传着,而它们整段在维护锁外,「库里记的还是
+        动手之前那一份」答不了「磁盘上还是我写的那一份」。那两条现在走
+        `kb.doc_rewrite.rewriting()`,所以这里只剩提取回写一条。
         """
         from pathlib import Path
         root = Path(__file__).resolve().parent.parent
         self.assertEqual(
-            {'kb/extract.py', 'kb/extract_writeback.py',
-             'scripts/backfill_youtube_summaries.py',
-             'scripts/wiki/wiki_daily.py'},
+            {'kb/extract.py', 'kb/extract_writeback.py'},
             self.grep('refresh_content_hash(conn'),
             '多了一处刷新索引收据的调用点 —— 它拿出「动手之前」那份 hash 了吗')
         src = (root / 'kb/extract_writeback.py').read_text(encoding='utf-8')
         self.assertIn('def refresh_content_hash(conn, doc_path: str, expect: str)',
                       src, '`expect` 又有默认值了:漏传的那条路会静默无条件刷新')
-        self.assertIn('WHERE path=? AND content_hash=?', src)
+        self.assertIn('WHERE path=? AND content_hash=?',
+                      (root / 'kb/doc_rewrite.py').read_text(encoding='utf-8'))
 
     def test_no_llm_path_calls_the_bare_save(self):
         """裸 `save_extraction` 只剩不读正文的那几条 —— 读正文的一律走协调入口。

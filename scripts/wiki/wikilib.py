@@ -327,16 +327,32 @@ def render_index(u: Universe, vault: Path, recent_days: int = 14) -> str:
 # ── 正文双链化 ──────────────────────────────────────────────────────────────────
 
 def linkify_doc(u: Universe, p: str) -> str | None:
-    """给一篇文章加双链装饰。已处理过(带 GRAPH_MARK)或文件缺失返回 None。
+    """给一篇文章加双链装饰:自己读文件,已处理过或文件缺失返回 None。
+
+    **`wiki_daily.step_linkify` 不走这一条,走 `linkify_text`** —— 它要的是
+    「锁内读到的那一份快照」自己变换出来的新文本。这里自己读一次文件,于是
+    「算新文本读到的那一份」和「外面算 `before` 读到的那一份」可以隔着别人的
+    一次写入,`before` 就指向一份我们压根没变换过的内容(见
+    `kb.doc_rewrite` 模块说明)。留着它给只要「这篇装饰完长什么样」的调用方。
+    """
+    try:
+        text = (VAULT / p).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return linkify_text(u, p, text)
+
+
+def linkify_text(u: Universe, p: str, text: str) -> str | None:
+    """给**这一份**文本加双链装饰。已处理过(带 GRAPH_MARK)返回 None。
 
     正文中每个有页面的实体首次出现 → [[页名|原文写法]];
     文末加 GRAPH_MARK 图谱尾区(实体+主题连边)。
+
+    **改的全是索引看不见的东西**:`scanner.normalize_body` 把双链语法和
+    GRAPH_MARK 尾区都剥掉,所以装饰过的这一篇重新索引一次,chunks 一个字不变。
+    「真的没变」由登记那一步自己证一遍(`kb.doc_rewrite.register_indexed`),
+    不押在这句话上。
     """
-    full = VAULT / p
-    try:
-        text = full.read_text(encoding="utf-8")
-    except OSError:
-        return None
     if GRAPH_MARK in text:
         return None
     m = re.match(r"^---\n.*?\n---\n", text, re.S)

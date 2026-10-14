@@ -74,36 +74,31 @@ def remove_writeback_tag(doc_path: str, tag: str) -> bool:
     return True
 
 
-def refresh_content_hash(conn, doc_path: str, expect: str) -> None:
+def refresh_content_hash(conn, doc_path: str, expect: str) -> str:
     """writeback 改了 frontmatter 后刷新库里的 hash,避免下次 index 无谓重建。
     正文没变(chunker 只看 body),chunks/FTS/向量都无需动。
+    返回空串 = 刷了,非空 = 没刷的原因。
 
-    **只认「库里记的还是我动手之前那一份」,`expect` 是必填的**(判据待在
-    UPDATE 自己的 WHERE 里)。这一句写的是「这个文件已经索引过了」——
-    `content_hash` 就是索引判「要不要重建」的唯一依据。改 frontmatter 之前
-    文件就已经和库里记的不一样(别人刚改完、索引还没跟上)时,无条件刷新等于
-    **替那份改动签了一张已索引的收据**:下一轮 `doc_needs_reindex` 说「未变」,
-    那份改动永远进不了 chunks。实测过最坏的一种:磁盘上换成了新正文、chunks
-    还是旧的,新正文一个字都搜不到,点开文章却是新的,再同步也不恢复
-    (2026-10-14 审查)。0 行不是失败,正是想要的末态 —— 这一篇继续带着
-    「待索引」,下一轮重建一次就对了(误报的代价只是白重建一次,漏报是静默丢
-    数据)。
+    **判据不在这儿,在 `kb.doc_rewrite.register_indexed`** —— 那一份是「登记
+    `content_hash` 即声明已索引」这个不变量的唯一口径(两样证明:库里记的还是我
+    动手之前那一份、磁盘上那组索引输入还是索引里那一组)。这里只多做一件事:
+    把磁盘上**此刻**那一份读出来交给它。
 
-    **没有「不给 expect」这一档。** 原来它有个无条件分支留给两个「自己刚写完
-    这个文件、紧接着刷」的单线程脚本(`scripts/backfill_youtube_summaries.py`、
-    `scripts/wiki/wiki_daily.py`),理由是它们手里没有动手之前那个值 —— 可那个
-    值它们一直有(写之前读的那份原文),而「单线程」只排除了自己,排除不掉
-    另一个进程里正在跑的导出。一个无条件分支就够把上面那个末态造出来,所以
-    这个参数没有默认值:新调用方要么拿得出动手之前那份 hash,要么别刷。
+    **读不出来就什么都不刷。** 回写那条路上这一档的主路径本来就是异常(文件刚被
+    清理删掉),这里只保证万一走到刷新也不会替谁签一张「已索引」的收据。
+
+    **没有「不给 expect」这一档。** 原来它有个无条件分支留给两个「自己刚写完这个
+    文件、紧接着刷」的单线程脚本,理由是它们手里没有动手之前那个值 —— 可那个值它
+    们一直有(写之前读的那份原文),而「单线程」只排除了自己,排除不掉另一个进程
+    里正在跑的导出。那两条旁路现在整段走 `kb.doc_rewrite.rewriting()`,不再自己
+    碰这一句;这个参数也没有默认值:新调用方要么拿得出动手之前那份 hash,要么
+    别刷。
     """
+    from kb.doc_rewrite import register_indexed
     from kb.extract import VAULT_ROOT
-    from kb.scanner import file_hash
 
-    full = VAULT_ROOT / doc_path
     try:
-        text = full.read_text(encoding="utf-8")
-    except OSError:
-        return
-    conn.execute(
-        "UPDATE documents SET content_hash=? WHERE path=? AND content_hash=?",
-        (file_hash(text), doc_path, expect))
+        text = (VAULT_ROOT / doc_path).read_text(encoding="utf-8")
+    except OSError as e:
+        return f"读不出来({e})"
+    return register_indexed(conn, doc_path, text, expect)

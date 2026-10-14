@@ -31,34 +31,55 @@ import wikilib as W  # noqa: E402
 
 
 def step_linkify(u: W.Universe) -> int:
-    from kb import store
-    from kb.extract import refresh_content_hash
-    from kb.scanner import file_hash
+    """逐篇走协调入口双链化:读 → 装饰 → 写回 → 登记已索引,每篇一把维护锁。
 
-    changed = []
-    for p in u.docs:
-        new_text = W.linkify_doc(u, p)
-        if new_text is None:
-            continue
-        full = W.VAULT / p
-        try:
-            before = file_hash(full.read_text(encoding="utf-8"))
-        except OSError:
-            continue
-        full.write_text(new_text, encoding="utf-8")
-        # 带上「动手之前」那份 hash:刷新只认库里记的还是它
-        # (refresh_content_hash 没有无条件分支了)。磁盘已经领先于索引时这一行
-        # 不该写 —— 那等于替别人的改动签一张已索引的收据,它永远进不了 chunks。
-        changed.append((p, before))
-    if changed:
-        conn = store.connect()
-        try:
-            for p, before in changed:
-                refresh_content_hash(conn, p, before)
-            conn.commit()
-        finally:
-            conn.close()
-    return len(changed)
+    **这一步写的是 vault 里的文章文件,所以它必须认那把维护锁**(判据见
+    `docs/decisions/maintenance-lock.md`:按「写不写 vault 里的文章文件 + 写不写
+    kb.db」问)。原来它整段在锁外,而且是**两份快照**:`linkify_doc` 自己读一次
+    算新文本,外面再读一次算 `before` —— 两次读之间别人的一次写入就让 `before`
+    指向一份我们压根没变换过的内容,随后那次刷新把一份**未索引**的新正文认证成
+    「已索引」。末态实测过:磁盘上是新正文、chunks 还是旧的,新正文一个字都搜
+    不到,点开文章却是新的,再同步也不恢复(2026-10-14 审查跨进程复现)。
+
+    粒度是**每篇各取一次**,不是整趟:整趟圈起来等于攥着锁把 vault 里每一篇都
+    读一遍,而管道的同步和索引都在等同一把锁。代价是每篇多一次取放锁,实测
+    9000 次共 311 ms —— 这一趟本来就要把这 9000 篇各读一遍。
+
+    **等不到锁只收住这一步,不许带崩整趟 wiki**:`LockBusy` 的语义是「这一篇一个
+    字节都没动」,而双链化纯机械、下一轮照旧补得回来;后面的 pages / index / 两张
+    图谱压根不碰这把锁,因为 linkify 等不到锁就一张图都不重建是赔本的。所以这里
+    `break` 出去照常往下走 —— 这一步取锁本身是这次新加的,不收住的话等于给整条
+    wiki 阶段新开了一个失败口子。
+    """
+    from kb import store
+    from kb.doc_rewrite import rewriting
+    from kb.maintenance import LockBusy
+
+    changed = stale = 0
+    conn = store.connect()
+    try:
+        for p in u.docs:
+            try:
+                with rewriting(conn, p) as doc:
+                    if doc.text is None:
+                        continue          # 这一篇已经不在了,或者读不出来
+                    new_text = W.linkify_text(u, p, doc.text)
+                    if new_text is None:
+                        continue          # 已经双链化过了
+                    doc.write(new_text)
+            except LockBusy as e:
+                print(f"linkify: 等不到维护锁,这一步到此为止({e})")
+                break
+            if doc.changed:
+                changed += 1
+                stale += 0 if doc.indexed else 1
+    finally:
+        conn.close()
+    if stale:
+        # 登记不上不是失败,正是想要的末态:这几篇继续带着「待索引」,下一轮索引
+        # 重建一次就对了。出声是为了让「磁盘长期领先于索引」看得见。
+        print(f"linkify: {stale} 篇改完没登记已索引(磁盘领先于索引),留待下一轮重建")
+    return changed
 
 
 def step_pages(u: W.Universe) -> tuple[int, int]:

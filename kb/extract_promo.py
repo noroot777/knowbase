@@ -132,7 +132,10 @@ def disk_input_indexed(conn, path: str) -> bool:
     upsert 进库的是同一份口径**),正文按 `normalize_body` → `split_chunks`
     过一遍(**和 `cli.cmd_index` 同一对函数**)再和库里的 chunks 拼回来比。
     三样都对得上 = 现在重新索引一次也不会改动模型看到的任何东西 = 判定针对的
-    那组输入就是磁盘上那组。
+    那组输入就是磁盘上那组。**那三样怎么读、怎么比,口径在
+    `kb.doc_rewrite.index_input_matches`**:登记 `content_hash`(= 声明已索引)
+    之前那道证明用的是同一份,各写一遍的话两处对「索引跟上了没有」的回答会各漂
+    各的,而它们判的后果一头是「固化一个判定」、一头是「认证已索引」,都不可恢复。
 
     **反过来只比正文也不够。** 一次补判的模型请求在途时磁盘上的**标题**被换掉
     (正文一个字没动)是常态 —— 补抓回来的正文和原标题各走各的回写。只比正文
@@ -143,23 +146,14 @@ def disk_input_indexed(conn, path: str) -> bool:
     由 `_still_indexed` 在同一把锁里先问过了,再读不出来就是真的出了事。
     """
     from kb import store
-    from kb.chunker import split_chunks
-    from kb.extract import VAULT_ROOT, input_fingerprint
-    from kb.scanner import (file_hash, frontmatter_input, normalize_body,
-                            parse_frontmatter)
+    from kb.doc_rewrite import index_input_matches
+    from kb.extract import VAULT_ROOT
+    from kb.scanner import file_hash
 
-    full = VAULT_ROOT / path
-    text = full.read_text(encoding="utf-8")
+    text = (VAULT_ROOT / path).read_text(encoding="utf-8")
     if not store.doc_needs_reindex(conn, path, file_hash(text)):
         return True                 # 整个文件都对得上,那三样自然对得上
-    snap = store.doc_input_snapshot(conn, path)
-    if snap is None:
-        return False                # 库里压根没这一行,谈不上"进过索引"
-    fm, md_body = parse_frontmatter(text)
-    title, account = frontmatter_input(fm, full)
-    fresh = "\n".join(c.text for c in split_chunks(normalize_body(md_body)))
-    return (input_fingerprint(title, account, fresh)
-            == input_fingerprint(snap["title"], snap["account"], snap["body"]))
+    return index_input_matches(conn, path, text)
 
 
 def mark_promo_tag_pending(conn, path: str, pending: bool) -> None:
