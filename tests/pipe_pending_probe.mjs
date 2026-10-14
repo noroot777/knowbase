@@ -274,6 +274,45 @@ check("页面已经看到同一秒里的那一轮新结果",
 release2();
 check("同一秒里换了一轮时,旧回包不许被当成当前事实", await pendingIs(0), await pendingText());
 
+// ── 7. 明细截断与落盘降级:这两句话都得在面板上说出来 ────────────────────────
+// 50 条上限是刻意的(状态体不能膨胀),但照数组长度念就把三百条失败写成一个看着
+// 完整的「50 项」,余下那些连"还有"都不知道。落盘失败原来只进运行日志,面板那句
+// 收尾文案仍是一句干净的「已完成」—— 看不出这一轮是降级完成的(重启就退回上一次
+// 写成功的那一份)。
+const summaryText = () => evalJs(
+  `document.querySelector('#pipe-stage-crawl summary')?.textContent || ''`);
+const persistText = () => evalJs(
+  `document.getElementById('pipe-persist-issue')?.textContent || ''`);
+const many = Array.from({ length: 50 }, (_, i) => ({ title: `订阅 ${i}`, reason: "连不上" }));
+state = { ...state, run_id: "run-H", run_kind: "sync", running: false,
+          started_at: "2026-10-09 11:00:00", finished_at: "2026-10-09 11:05:00",
+          persist_issue: "这一轮的结果没能写进磁盘(磁盘满);本进程内照常可查，重启后会退回上一次写成功的那一份",
+          stages: { ...okStages("完成"),
+                    crawl: { status: "error", detail: "失败 312 个",
+                             failures: many, failures_total: 312 } } };
+await evalJs(`refreshPipe(); true`);
+check("截断过的明细念真实总数,还说清只列了前几条",
+      await until(`/明细 · 312 项（仅列前 50 条）/.test(
+        document.querySelector('#pipe-stage-crawl summary')?.textContent || '')`, 4000),
+      await summaryText());
+check("落盘降级在面板上有一句,不是只躺在运行日志里",
+      await until(`/没能写进磁盘/.test(
+        document.getElementById('pipe-persist-issue')?.textContent || '')`, 4000),
+      await persistText());
+// 反过来钉一边:没截断就不许加那句「仅列前 N 条」;写进去了就不许挂着降级提示
+state = { ...state, run_id: "run-I", persist_issue: "",
+          stages: { ...okStages("完成"),
+                    crawl: { status: "error", detail: "失败 2 个",
+                             failures: many.slice(0, 2) } } };
+await evalJs(`refreshPipe(); true`);
+check("没截断时不许加「仅列前 N 条」",
+      await until(`/明细 · 2 项$/.test(
+        document.querySelector('#pipe-stage-crawl summary')?.textContent || '')`, 4000),
+      await summaryText());
+check("写进去了就不挂降级提示",
+      await until(`document.getElementById('pipe-persist-issue').hidden === true`, 4000),
+      await persistText());
+
 check("重试端点一共被打了两次(两个场景各一次)", retryCalls === 2, String(retryCalls));
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 

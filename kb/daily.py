@@ -397,7 +397,10 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
     # (复制、Obsidian、明天再翻),面板上的提示留不住。一份"只用旧素材"的日报
     # 和一份"全都同步到了"的日报长得一模一样,那是在骗人(2026-09-30 审查实测:
     # 三个来源全部连接失败,页面照样只有一句绿色的「日报已生成」)。
-    issues = [f"{i.get('label') or i.get('channel')}：{i.get('detail') or '未同步成功'}"
+    # 措辞一律「项」不「来源」:入库那一段(索引/提取)是全库的一次,不属于任何
+    # 来源 —— 日报是拿走就读的产物,把"磁盘满"写成"某个来源没同步成功"是在文件
+    # 里留一句假话。横幅、列表行、完成提示共用这个口径。
+    issues = [f"{i.get('label') or i.get('channel')}：{i.get('detail') or '未完成'}"
               for i in (sync_issues or [])]
     meta = {
         'type': 'daily-report', 'date': until.date().isoformat(),

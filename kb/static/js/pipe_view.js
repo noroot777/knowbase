@@ -61,7 +61,13 @@ function renderPipeState(s) {
     const details = row.querySelector('details'), failures = st.failures || [];
     details.hidden = !failures.length;
     const waiting = failures.every(f => f.pending);
-    details.querySelector('summary').textContent = `${waiting ? '待处理' : '问题'}明细 · ${failures.length} 项`;
+    // 截断过就把真实总数说出来(后端 `_cap_failures` 留了 failures_total):照数组
+    // 长度念的话,三百条失败会被写成一个看着完整的「50 项」,余下那些连"还有"都
+    // 不知道。
+    const total = st.failures_total || failures.length;
+    details.querySelector('summary').textContent =
+      `${waiting ? '待处理' : '问题'}明细 · ${total} 项`
+      + (total > failures.length ? `（仅列前 ${failures.length} 条）` : '');
     const list = details.querySelector('.pipe-failures');
     const signature = JSON.stringify(failures);
     if (list.dataset.signature !== signature) {
@@ -80,6 +86,16 @@ function renderPipeState(s) {
   else if (failed) title = `${label}结束，${failed} 个步骤需处理`;
   else if (result.finished_at) title = skipped ? `${label}结束，部分步骤已跳过` : planned.length && completed === planned.length ? `${label}已完成` : `${label}结束，本次步骤未全部完成`;
   if ($('pipe-state-title').textContent !== title) $('pipe-state-title').textContent = title;
+  // 这一轮的结论没写进磁盘(满盘、目录没了):本进程内照常可查,重启就退回上一次
+  // 写成功的那一份。后端把它记成 `persist_issue` 一格(见 `_with_persist_issue`)
+  // —— 只写运行日志的话得展开日志才看得到,而这里那句收尾文案仍是一句干净的
+  // 「已完成」,看不出这一轮是降级完成的。
+  const persist = $('pipe-persist-issue');
+  if (persist) {
+    const issue = s.running ? '' : result.persist_issue || '';
+    persist.hidden = !issue;
+    if (persist.textContent !== issue) persist.textContent = issue;
+  }
   const scopes = pipeRunScopes(result), filter = result.crawl_filter || {};
   // 判据在 `pipe_channels.js`:同步中心、公众号页、订阅页共用那一份,别在这儿再判一遍。
   const libraryOnly = pipeLibraryOnly(result);

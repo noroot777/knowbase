@@ -234,7 +234,7 @@ function renderDailyList() {
     data-report="${esc(r.date)}"><b>${esc(r.date)}</b>
     <span>${r.docs} 条素材${r.total > r.docs ? ` / 窗口内 ${r.total}` : ''}${r.late ? ` · 补录 ${r.late}` : ''}</span>
     <small>${esc(Object.entries(r.sources || {}).map(([k, n]) => `${k} ${n}`).join(' · ') || '—')}${
-      r.sync_failed?.length ? ` · ${r.sync_failed.length} 个来源未同步` : ''}</small></button>`).join('')
+      r.sync_failed?.length ? ` · ${r.sync_failed.length} 项未完成` : ''}</small></button>`).join('')
     || '<div class="daily-empty"><h3>还没有日报</h3><p>选好日期，点右上角生成。</p></div>';
 }
 
@@ -457,7 +457,7 @@ function renderDailySyncNote(s) {
   if (!bad.length) return;
   $('daily-sync-note-text').textContent =
     `本轮有 ${bad.length} 项没有完成：`
-    + bad.map(c => `${c.label}（${c.detail || '未同步成功'}）`).join('；')
+    + bad.map(c => `${c.label}（${c.detail || '未完成'}）`).join('；')
     // 只有真出了报才提这一句;停止/失败那两档日报压根没生成。
     + (s?.phase === 'done' ? '。日报用的是已经入库的内容。' : '。');
 }
@@ -507,7 +507,10 @@ async function refreshDailyStatus() {
     else if (s.phase === 'stopped') toast('已停止', { key: 'daily', type: 'info', detail: s.detail || '' });
     // 有来源没同步到就不报成功色:日报是出了,但它不是"同步全部并生成"承诺的
     // 那一份,标成绿勾等于把降级说成完整成功。
-    else if (bad.length) toast(`日报已生成，但 ${bad.length} 个来源未同步成功`,
+    // 「项」不是「来源」:入库那一段(索引/提取)是全库的一次,不属于任何来源 ——
+    // 磁盘满写成「1 个来源未同步成功」是一句假话。正文横幅、日报文件、这句 toast
+    // 共用一个措辞(`kb/daily.py` 的 sync_issues 那一段)。
+    else if (bad.length) toast(`日报已生成，但 ${bad.length} 项未完成`,
       { key: 'daily', type: 'info', detail: s.detail || '' });
     else toast('日报已生成', { key: 'daily', type: 'ok', detail: s.detail || '' });
     if (dailyActive()) {

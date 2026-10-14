@@ -90,18 +90,38 @@ def _now() -> str:
 
 
 def _log(msg: str) -> None:
-    # 带日期:日志保留 80 行且跨天不清,只打时分秒会看不出是哪天跑的
-    _state["log"].append(f"[{datetime.now().strftime('%m-%d %H:%M:%S')}] {msg}")
+    _state["log"].append(_stamp(msg))
     del _state["log"][:-80]
+
+
+def _stamp(msg: str) -> str:
+    # 带日期:日志保留 80 行且跨天不清,只打时分秒会看不出是哪天跑的
+    return f"[{datetime.now().strftime('%m-%d %H:%M:%S')}] {msg}"
+
+
+#: 失败明细带进状态体的条数上限(历史积压场景可能一次几百篇)。
+_FAILURES_KEEP = 50
+
+
+def _cap_failures(entry: dict, failures: list[dict]) -> dict:
+    """把失败明细放进阶段结果,**截断了就把总数一起留下**。
+
+    只截不记的后果:面板照着数组长度写「问题明细 · 50 项」,而真实失败数可能是
+    三百 —— 用户看到的是一个看着完整的清单,余下那些连"还有"都不知道。重试名单
+    另存(`crawl_retry`),不从这个展示用的数组反推,所以截断不影响重试范围。
+    """
+    entry["failures"] = failures[:_FAILURES_KEEP]
+    if len(failures) > _FAILURES_KEEP:
+        entry["failures_total"] = len(failures)
+    return entry
 
 
 def _stage(name: str, status: str, detail: str = "",
            failures: list[dict] | None = None) -> None:
-    """failures: [{"title", "reason"}] 失败明细,面板卡片可展开查看。
-    截断 50 条防状态体膨胀(历史积压场景可能一次几百篇)。"""
+    """failures: [{"title", "reason"}] 失败明细,面板卡片可展开查看。"""
     entry: dict = {"status": status, "detail": detail}
     if failures:
-        entry["failures"] = failures[:50]
+        _cap_failures(entry, failures)
     segments = _segments.get(name)
     if segments:
         # 这一阶段正被多个来源各跑一遍:只更新当前这一段,再把各段合成一条对外的结论
@@ -136,7 +156,12 @@ def _merge_segments(segments: list[dict]) -> dict:
     }
     failures = [item for seg in segments for item in seg.get("failures", [])]
     if failures:
-        entry["failures"] = failures[:50]
+        # 各段自己已经可能截过:总数取"各段记下的总数之和",而不是截完之后的长度
+        _cap_failures(entry, failures)
+        total = sum(seg.get("failures_total") or len(seg.get("failures") or [])
+                    for seg in segments)
+        if total > len(entry["failures"]):
+            entry["failures_total"] = total
     return entry
 
 
@@ -281,15 +306,31 @@ def _write_state(payload: dict) -> None:
     os.replace(tmp, _STATE_FILE)
 
 
+def _with_persist_issue(payload: dict, issue: str) -> dict:
+    """把"这份结果没写进磁盘"记进它自己:一格结构化字段 + 一行日志。
+
+    只写日志的话前端只能让人展开日志去找,面板上那句收尾文案仍是一句干净的
+    「同步完成」—— 看不出这一轮是降级完成的(重启就退回旧那份)。`persist_issue`
+    这一格供面板直接显示(`pipe_view.js`),日志那行留着时序。
+    """
+    payload = {**payload, "persist_issue": issue,
+               "log": [*(payload.get("log") or []), _stamp(issue)][-80:]}
+    _log(issue)
+    return payload
+
+
 def _save_last_run() -> None:
     """持久化最近一次结果,重启 kb-web 后仍能看到。"""
+    payload = run_payload()
     try:
-        _write_state(run_payload())
+        _write_state(payload)
     except OSError as e:
         # 不判这一轮失败,但**也不许一声不吭**:面板上那份结论从这一刻起只活在
-        # 内存里,重启就没了。写进这一轮自己的日志,它跟着结论一起被人看到。
-        _log(f"这一轮的结果没能写进磁盘({e});本进程内照常可查,重启后会丢")
-    _remember_result(run_payload())
+        # 内存里,重启就没了。
+        payload = _with_persist_issue(
+            payload, f"这一轮的结果没能写进磁盘({e});本进程内照常可查,"
+                     "重启后会退回上一次写成功的那一份")
+    _remember_result(payload)
 
 
 # ── 业务批次:一轮日报 = N+1 次管道运行,而「最近一次运行」只有一个位子 ────────
@@ -346,15 +387,39 @@ def _publish_in_batch() -> None:
     if len(_batch_runs) < 2:
         _save_last_run()
         return
+    # **资格冲突和 I/O 故障是两件完全不同的事,分开判。** 混成一种异常的后果是
+    # I/O 那一档被按"别人更新了"处理:退回去写当前子轮那一份局部成功,把整批的
+    # 失败连同重试名单一起抹掉 —— 入库那一轮的 crawl 是「未选择」,前面那条抓取
+    # 失败于是内存里和磁盘上一起没了(第 5 轮实测:一次临时写失败就够)。
     try:
-        _remember_result(_publish_locked(_batch_runs))
+        _publish_right({r.get("run_id") for r in _batch_runs if r.get("run_id")})
     except PublishRefused as e:
-        # 期间有更新的一轮独立运行收尾(用户自己点了同步),这一批没资格替换它。
-        # 退回只写自己那一份:**我们这一轮确实是此刻最新的**,而把前几轮一起合
-        # 进去等于拿一批比那轮手动同步更早的结果去盖掉它。原因留给 `close_batch`
-        # 的调用方如实说出来。
+        # 没资格:期间有更新的一轮独立运行收尾(用户自己点了同步)。退回只写自己
+        # 那一份 —— **我们这一轮确实是此刻最新的**,而把前几轮一起合进去等于拿一批
+        # 比那一轮更早的结果去盖掉它。原因留给 `close_batch` 的调用方说出来。
         _batch_issue = e.reason
         _save_last_run()
+        return
+    merged = _merge_runs(_batch_runs)
+    try:
+        _write_state(merged)
+    except OSError as e:
+        # **不退回去写局部结果。** 盘上那份是这一批上一轮的汇总(同样带着前面
+        # 那些失败),原样留着就是最好的后路;整批那份照旧当权威(见下一句)。
+        _batch_issue = f'这一批的同步结果没能写进磁盘({e})'
+        merged = _with_persist_issue(
+            merged, f'{_batch_issue};本进程内照常可查,'
+                    '重启后会退回上一次写成功的那一份')
+    else:
+        # 发布成功就解除之前那句警告:原因留在运行日志里,但"当前仍未保存"
+        # 这句话不能挂着不放 —— 后来真写进去了,日报却还在说没写进。
+        _batch_issue = ""
+    # **整批那份是权威,与写成不成功无关。** 写成功只回答"重启之后读不读得到",
+    # 答不了"本进程这一批有没有出过那条失败"。
+    _remember_result(merged)
+    _finished[merged["run_id"]] = deepcopy(merged)
+    for old_id in list(_finished)[:-_FINISHED_KEEP]:
+        del _finished[old_id]
 
 
 def load_last_run() -> dict | None:
@@ -453,10 +518,11 @@ def _merge_stage(owned: list[tuple[str, dict]]) -> dict:
     (两个来源各有一个「每日速览」),同名同因就被并掉一条,面板上少一行、
     计数也少一个,看上去就是"只有一个来源出问题"。这里**一条都不并**,原样按
     轮次接起来;真有重复只能是同一轮被记了两遍,那是别处的 bug,并掉等于替它
-    遮住。上限跟 `_stage` 一致(50 条),防状态体膨胀。
+    遮住。上限跟 `_stage` 一致(见 `_cap_failures`:截断了就把总数一起留下)。
     """
     worst = max((stage for _, stage in owned), key=_merge_rank)
-    merged = {k: v for k, v in deepcopy(worst).items() if k not in ("detail", "failures")}
+    merged = {k: v for k, v in deepcopy(worst).items()
+              if k not in ("detail", "failures", "failures_total")}
     details, failures = [], []
     for scope, stage in owned:
         text = (stage.get("detail") or "").strip()
@@ -466,7 +532,11 @@ def _merge_stage(owned: list[tuple[str, dict]]) -> dict:
     if details:
         merged["detail"] = "；".join(details)[:400]
     if failures:
-        merged["failures"] = failures[:50]
+        _cap_failures(merged, failures)
+        total = sum(stage.get("failures_total") or len(stage.get("failures") or [])
+                    for _, stage in owned)
+        if total > len(merged["failures"]):
+            merged["failures_total"] = total
     return merged
 
 
@@ -515,58 +585,63 @@ class PublishRefused(Exception):
         self.reason = reason
 
 
-def _publish_locked(records: list[dict]) -> dict:
-    """把一个业务批次里跑过的几轮管道合并成一份,发布成「最近一次运行」。
+def _publish_right(ours: set[str]) -> None:
+    """这一批有没有资格替换「最近一次运行」。没资格就抛 `PublishRefused`。
 
-    `records` 是各轮的终态快照(`run_payload`),按时间顺序。**唯一的调用方是
-    `_publish_in_batch`**,所以这里不取锁(`_end_run` 那条路已经持着了),也不更新
-    内存里那份权威记录 —— 调用方要先确认写成功了才算记下。
-    **不要再开一个"事后聚合"的公开出口**:那正是这件事原来错的地方 —— 子轮先写
-    一份会删掉前序失败的局部结果,再指望还活着的调用方稍后补回,中间进程一死
-    那几条红就永远不在了。合并要么发生在子轮收尾的同一步里,要么不发生。
-
-    **逐阶段合成不丢东西的一份**(见 `_merge_stage`),而且只在计划过这个阶段的
-    记录之间比。来源范围、失败名单(`crawl_retry`)按来源并起来,这样「重试失败项」
-    拿得到那一轮的目标和原导出范围,不必从当前订阅状态反推。
-
-    合并后的身份**沿用这一批最后那一轮的 run_id**,不另发一个:另发等于把一份
-    早先的批次伪装成"刚刚产生的最新结果",而最新指针是有先后的。
-
-    **发布权**:只有当那份「最近一次运行」仍然是这一批里的某一轮时才替换。期间
-    要是另一轮独立运行已经收尾(用户自己点了同步),它是**比我们新**的结果,替换
-    掉它等于把一次刚失败的手动同步改写成成功、顺带让它的「重试失败项」消失 ——
-    那一档抛 `PublishRefused`,由调用方如实说出来。一把锁只防同时写,答不了
-    "我有没有资格当最新"。
-
-    写不进去(OSError)同样抛:静默返回会让日报带着一份"失败已经没人看得到"的
-    状态照常出报。
+    **只管资格,不合并也不碰磁盘。** 只有当那份「最近一次运行」仍然是这一批里
+    的某一轮时才有资格。期间要是另一轮独立运行已经收尾(用户自己点了同步),
+    它是**比我们新**的结果,替换掉它等于把一次刚失败的手动同步改写成成功、顺带
+    让它的「重试失败项」消失。一把锁只防同时写,答不了"我有没有资格当最新"。
     """
-    ours = {r.get("run_id") for r in records if r.get("run_id")}
     # **判据是内存里那份权威身份,不是磁盘。** 磁盘写会失败而且是吞掉的:
     # 那一轮手动同步明明已经收尾、结论也在内存里,磁盘上却还是我们这一批的
     # 某一轮 —— 照磁盘判,我们就"有资格"把它刚刚的失败改写成成功。
     latest = latest_run_id()
     if latest:
         if latest not in ours:
-            raise PublishRefused(
-                f'期间已经有更新的一轮同步收尾({latest}),这一轮日报的'
-                '同步结果没有写进「最近一次运行」——同步中心显示的是那一轮')
-    else:
-        # 这个进程还没见过任何一轮收尾(刚重启、这一批是从别处恢复的)。
-        # 只能问磁盘,而**读不出来时失败关闭**:一份读不出的状态既可能是
-        # 「没有更新的运行」也可能是「有而且更重要」,拿不准就不许替换。
-        try:
-            current = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            current = {}
-        except (OSError, json.JSONDecodeError) as e:
-            raise PublishRefused(
-                f'读不出当前的「最近一次运行」({e}),不确定期间有没有更新的'
-                '一轮收尾,这一批没有替换它') from e
-        if current.get("run_id") and current["run_id"] not in ours:
-            raise PublishRefused(
-                f'期间已经有更新的一轮同步收尾({current["run_id"]}),这一轮日报的'
-                '同步结果没有写进「最近一次运行」——同步中心显示的是那一轮')
+            raise PublishRefused(_taken_over(latest))
+        return
+    # 这个进程还没见过任何一轮收尾(刚重启、这一批是从别处恢复的)。只能问磁盘,
+    # 而**读不出来时失败关闭**:一份读不出的状态既可能是「没有更新的运行」也可能
+    # 是「有而且更重要」,拿不准就不许替换。
+    try:
+        current = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        current = {}
+    except (OSError, json.JSONDecodeError) as e:
+        raise PublishRefused(
+            f'读不出当前的「最近一次运行」({e}),不确定期间有没有更新的'
+            '一轮收尾,这一批没有替换它') from e
+    if current.get("run_id") and current["run_id"] not in ours:
+        raise PublishRefused(_taken_over(current["run_id"]))
+
+
+def _taken_over(other: str) -> str:
+    """"被更新的一轮接替了"那句话。**只说已经发生的事。**
+
+    原来这句写的是"同步中心显示的是那一轮" —— 而紧接着的退路会把当前子轮写
+    进去,于是同步中心显示的其实是刚结束的这一轮,提示指着另一轮(第 5 轮实测
+    文案不实)。所以只说"没有合并发布",显示的是谁由"最后收尾的那一轮"决定。
+    """
+    return (f'期间已经有更新的一轮同步收尾({other}),这一轮日报的几段同步结果'
+            '没有合并成一份发布;「最近一次运行」显示的是最后收尾的那一轮')
+
+
+def _merge_runs(records: list[dict]) -> dict:
+    """把一个业务批次里跑过的几轮合成**不丢东西**的一份。纯合并:不判资格、不写盘。
+
+    **唯一的调用方是 `_publish_in_batch`**。不要再开一个"事后聚合"的公开出口:
+    那正是这件事原来错的地方 —— 子轮先写一份会删掉前序失败的局部结果,再指望还
+    活着的调用方稍后补回,中间进程一死那几条红就永远不在了。合并要么发生在子轮
+    收尾的同一步里,要么不发生。
+
+    逐阶段合成(见 `_merge_stage`),而且只在计划过这个阶段的记录之间比。来源
+    范围、失败名单(`crawl_retry`)按来源并起来,这样「重试失败项」拿得到那一轮的
+    目标和原导出范围,不必从当前订阅状态反推。
+
+    合并后的身份**沿用这一批最后那一轮的 run_id**,不另发一个:另发等于把一份
+    早先的批次伪装成"刚刚产生的最新结果",而最新指针是有先后的。
+    """
     run_id = records[-1].get("run_id") or new_run_id()
     scopes = [_scope_name(r) for r in records]
     stages: dict[str, dict] = {}
@@ -597,15 +672,4 @@ def _publish_locked(records: list[dict]) -> dict:
         "crawl_retry": {"run": run_id, "channels": notes} if notes else {},
         "log": [line for r in records for line in (r.get("log") or [])][-80:],
     }
-    try:
-        _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _STATE_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=1),
-                               encoding="utf-8")
-    except OSError as e:
-        raise PublishRefused(f'同步结果没写进「最近一次运行」({e})') from e
-    # 这一批的身份就是最后那一轮,所以这里是**把它那份记录补全成整轮的**,
-    # 不是再塞一条新的。
-    _finished[run_id] = deepcopy(merged)
-    for old_id in list(_finished)[:-_FINISHED_KEEP]:
-        del _finished[old_id]
     return merged
