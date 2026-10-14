@@ -10,6 +10,7 @@
 //
 //   HEADLESS_SHELL=<bin> node tests/daily_probe.mjs http://127.0.0.1:8799
 import { launchShell } from "./probe_shell.mjs";
+import { checkScheduleRaces, checkDailyFormSettles } from "./daily_schedule_checks.mjs";
 
 const base = process.argv[2];
 
@@ -600,6 +601,9 @@ await evalJs(`(() => { pipeJson = __realPipeJson; clearTimeout(dailyTimer);
                        dailyTimer = null; return true; })()`);
 check("完成提示把全库那一段算成「项」,不说成「来源」",
       /1 项未完成/.test(doneToast) && !/来源/.test(doneToast), doneToast);
+
+await checkScheduleRaces({ evalJs, waitFor, check });
+await checkDailyFormSettles({ evalJs, waitFor, check });
 
 check("页面没有脚本报错", pageErrors.length === 0, pageErrors.join(" | "));
 

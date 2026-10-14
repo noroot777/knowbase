@@ -8,6 +8,7 @@ import { checkSourceNoticeRecovery } from './subs_notice_recovery_checks.mjs';
 import { checkWechatCollectorNotices, checkWechatTargetSizing } from './subs_wechat_review_checks.mjs';
 import { checkFirstWechatNotice, checkAutomaticSourceNotice, checkManualSourceNotices, checkNoticeGestureSequences } from './subs_notice_hit_checks.mjs';
 import { checkSubscriptionEditorViews } from './subs_editor_view_checks.mjs';
+import { checkScheduleSaveNote, checkScheduleFormSettles } from './subs_schedule_note_checks.mjs';
 
 const base = process.argv[2];
 const profile = mkdtempSync(join(tmpdir(), 'kb-subs-layout-'));
@@ -232,6 +233,8 @@ try {
   await checkWechatTargetSizing({ evaluate, wait, check, viewport, screenshot });
   await checkSubscriptionUsability({ evaluate, wait, check, click, viewport, screenshot, send });
   await checkSubscriptionEditorViews({ evaluate, wait, check, click, screenshot, send });
+  await checkScheduleSaveNote({ evaluate, wait, check, click, screenshot, viewport });
+  await checkScheduleFormSettles({ evaluate, wait, check, click, screenshot, viewport });
   await evaluate(`switchTab('gallery'); true`);
   check('离开订阅页面恢复普通布局', await evaluate(`!document.body.classList.contains('subs-reading') && !document.body.classList.contains('subs-mode')`));
   check('浏览器没有未捕获异常', errors.length === 0, errors.join('\n'));

@@ -9,6 +9,11 @@ let dailyCurrent = '', dailyState = null, dailyTimer = null;
 // 是它撞号时的兜底 —— 多刷一次列表的代价,换"再不会静默停在旧正文上"。
 let dailyDoneRun = null;
 let dailyLoaded = false, dailyDirty = false, dailySaving = false, dailyBusy = false;
+// 这一片**有几趟读取还在路上**。它不是一道闸(面板重开就该再读一次设置,在途的那
+// 趟由共享层的代次去作废 —— 拿它当闸会把重开那次读取整个吞掉,于是被按住的旧回包
+// 落地时写进去的是过时的值,实测把开关退回了未启用):它只回答「自己这趟读完了
+// 没有」,共享层的新事实到了要不要替这张表单收尾,得先知道它还在不在读。
+let dailySchedReads = 0;
 let dailyWindowDirty = false;
 
 function dailyActive() { return activeTab === 'daily'; }
@@ -132,23 +137,80 @@ function dailyScheduleMessage(s) {
   return `已保存：每天 ${s.time} ${s.sync ? '先同步再生成' : '只用已入库的内容生成'}${next}`;
 }
 
-async function loadDailySettings() {
-  if (dailySaving || dailyDirty) return;
-  try {
-    const data = await pipeJson('/api/daily/settings');
-    dailySettings = data.settings; dailyChannels = data.channels;
-    $('daily-on').checked = !!dailySettings.enabled;
-    $('daily-time').value = dailySettings.time;
-    $('daily-sync').checked = !!dailySettings.sync;
-    $('daily-firstdays').value = dailySettings.first_days;
+// **一次读取必须有终态**(同 `pipe_schedule.js` 的 `settleSched`,那边有完整的事故
+// 形态)。这一片底下那句话一开始就是「正在读取定时设置…」、整片字段禁用着,所以
+// 成功、失败、被更晚的读取顶掉,哪条分支走完都得回到这里收尾。终态只有三种:采用
+// 当前已确认的事实、说读不到并把重读放出来、保留用户的草稿。
+//
+// 原来成功和失败两条分支各有一处早退,早退之后这一片就永远停在「正在读取定时
+// 设置…」:字段禁用、没有重读入口,而后端和共享事实都是好的。
+function settleDaily(fact, failure) {
+  if (dailySaving) return;         // 保存那条路自己会收尾
+  if (dailyDirty) {                // 草稿优先:一个字都不许覆盖
+    $('daily-sched-fields').disabled = false; $('daily-sched-save').disabled = false;
+    return;
+  }
+  // 画得出来才算采用:**可选来源目录还没拿到就画不出同步范围**,硬开放字段只会让他
+  // 存出一份空范围(保存那边会当场拒绝)。这一档照"不知道"走,重读能把目录一起补上。
+  if (fact && dailyChannels.length) {
+    dailySettings = fact;
+    $('daily-on').checked = !!fact.enabled;
+    $('daily-time').value = fact.time;
+    $('daily-sync').checked = !!fact.sync;
+    $('daily-firstdays').value = fact.first_days;
     renderDailyChannels();
     dailyLoaded = true;
     $('daily-sched-fields').disabled = false;
-    $('daily-sched-msg').textContent = dailyScheduleMessage(dailySettings);
-  } catch (e) {
-    $('daily-sched-msg').textContent = '读取定时设置失败：' + e.message;
+    $('daily-sched-reload').hidden = true;
+    $('daily-sched-msg').textContent = dailyScheduleMessage(fact);
+    return;
   }
+  // 三句话分得清三件事:**这趟真失败了**、**定时读到了但目录没读到**、**当前不知道**
+  // (更晚那趟失败把事实抹成了未知)。都给重读入口,一句含糊的「失败」救不了用户。
+  $('daily-sched-msg').textContent =
+    failure ? '读取定时设置失败：' + failure
+    : fact ? '同步范围还没读到，点「重新读取」再试一次'
+    : '读不到定时设置';
+  $('daily-sched-reload').hidden = false;
+  // 重读失败时屏幕上那份仍是上一次读到的真实设置,照旧可编辑可保存;
+  // 从没读成功过才留在禁用态 —— 那时根本没有值可编辑。
+  $('daily-sched-fields').disabled = !dailyLoaded;
+  $('daily-sched-save').disabled = !dailyDirty;
 }
+
+async function loadDailySettings() {
+  if (dailySaving || dailyDirty) return;
+  // 占代次要在发请求之前,见 schedules.js 的 schedulesRead(面板重开会再读一次,
+  // 这一趟还没回来时保存了的话,这个回包不许把刚保存的那一份倒退回去)。
+  const accept = schedulesRead('daily');
+  dailySchedReads++;
+  let fact = null, failure = '';
+  try {
+    const data = await pipeJson('/api/daily/settings');
+    // **资格先判,再动任何一格;而且画的是共享层确认的那一份,不是我这趟的回包。**
+    // 照自己的回包画的后果(第 1、2 轮各实测一次):这趟被别处的保存顶掉了,
+    // 开关却被它改回未勾选、提示写成「定时生成未启用」,而同一页读共享事实的
+    // 来源说明还承诺每天同步 —— 同一份配置两处打架。
+    fact = accept({ daily: data.settings }).daily;
+    // 外层那个 channels 是**可选来源目录**(不是设置),共享层不管它,照这趟取。
+    dailyChannels = data.channels;
+  } catch (e) {
+    // 读失败也要过同一道门:**这趟要是已经被顶掉,就不许用它的失败盖掉别处
+    // 刚读到/刚保存的好值**(那会把一句「读取失败」挂在一份正常的配置上)。
+    // 但"别盖掉"不等于"不用收尾" —— 拿回来的那份事实照样要画上去。
+    fact = accept({ daily: null }).daily;
+    if (!fact) failure = e.message;
+  }
+  finally { dailySchedReads--; settleDaily(fact, failure); }
+}
+
+// 这一片也跟着共享事实走:别处(页头那张表单保存、订阅页那次读取)确认的新事实到
+// 了,而这一片自己那趟早就结束了的话,它该跟着完成,而不是停在上一次的样子。只认
+// **非 null**:null 是"当前不知道",而共享层分不出"从没读过"和"读了没读到",拿它
+// 报"读不到"会冤枉一条好定时;自己这趟失败那一档由 settleDaily 自己报。
+watchSchedules(config => {
+  if (config.daily && !dailySchedReads) settleDaily(config.daily, '');
+});
 
 function renderDailyChannels() {
   const picked = new Set(dailySettings.channels);
@@ -181,6 +243,10 @@ async function saveDailySettings() {
     });
     dailyDirty = false;
     $('daily-sched-msg').textContent = dailyScheduleMessage(dailySettings);
+    // **保存成功必须过共享层**:订阅页那句「什么时候自动同步」是这份配置的派生
+    // 展示,不交出去它就一直停在旧说法上(开了说不会自动同步、关了还承诺每天
+    // 同步),刷新才对得上。POST 回的是扁的设置对象,GET 那边才套着一层 settings。
+    schedulesSaved('daily', dailySettings);
   } catch (e) {
     $('daily-sched-msg').textContent = '未保存：' + e.message + '。修改已保留，可重试。';
   } finally {
