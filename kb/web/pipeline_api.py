@@ -85,6 +85,9 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     # 和「已经追平」,两种处理都错过一档(忙着重查 / 永远不补)。
     # 跑着的时候报的是**正在跑这一轮**的版本,附属数据本来就该等它收尾。
     state["result_version"] = pl.result_version(state if state["running"] else (latest or {}))
+    # 非空 = 这个进程启动时只从历史恢复到最新那一轮,它的重试范围没留下。面板据此
+    # 把「重试失败项」按不下去并如实说一句(后端那道闸在 `start_retry_failed`)。
+    state["restore_gap"] = pl.restore_gap()
     # 待处理数要扫文件,只有显式要求且空闲时才算
     if pending and not state["running"]:
         state["pending"] = pl.pending_counts(_channel(channel)) if channel else pl.pending_counts()
@@ -105,8 +108,14 @@ def pipeline_runs():
     # 同步失败(那一轮的结论照旧发布),但也不许静默:只看页面的话,「历史里没有这
     # 一轮」和「这一轮还没跑过」长得一模一样。
     runs = pl.load_history()
-    # **版本和状态端点同一个口径**(`result_version`),前端才比得出「这份清单是不是
-    # 最新那一轮的」。空清单也有值(「从没跑过」),理由在 `result_version` 那边。
+    # **每条记录附一个选择键。** 面板拿它认「点的是哪一行」、再次定位和高亮当前行,
+    # 而 `run_id` 是后来才加的字段:升级前那几条没有它,属性里就是空字符串,点下去
+    # 查找要求 `undefined === ''`,那一行**看得到却打不开**(多条空身份的话还会一律
+    # 选中第一条)。口径同 `result_version`,所以渲染、点击、定位、高亮共用一个键。
+    for run in runs:
+        run["version"] = pl.result_version(run)
+    # **清单的版本和状态端点同一个口径**,前端才比得出「这份清单是不是最新那一轮
+    # 的」。空清单也有值(「从没跑过」),理由在 `result_version` 那边。
     return {"runs": runs, "error": pl.persist_error(),
             "version": pl.result_version(runs[0] if runs else {})}
 

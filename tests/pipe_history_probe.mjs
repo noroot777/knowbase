@@ -144,7 +144,9 @@ const server = createServer((req, res) => {
   if (path === "/api/pipeline/runs") {
     runsCalls++;
     if (failRuns > 0) { failRuns--; return json({ detail: "history unavailable" }, 503); }
-    const body = { runs, error: runsError, version: versionOf(runs?.[0]) };
+    // 每条记录带一个选择键(真后端如此):面板拿它认点的是哪一行
+    const body = { runs: Array.isArray(runs) ? runs.map(r => ({ ...r, version: versionOf(r) })) : runs,
+                   error: runsError, version: versionOf(runs?.[0]) };
     if (holdRuns) { const gate = holdRuns; holdRuns = null; return void gate.then(() => json(body)); }
     return json(body);
   }
@@ -624,6 +626,12 @@ check("没有身份的记录按收尾时间追平,不留一个永久缺口", awa
   `PIPE_FRESH.history.applied === PIPE_FRESH.history.desired
    && PIPE_FRESH.history.applied === ${JSON.stringify(OLD_ROUND.finished_at)}`),
   await evalJs(`PIPE_FRESH.history.applied + ' vs ' + PIPE_FRESH.history.desired`));
+// 选择键也得认得出来:原来渲染和查找都按 `run_id`,这种记录属性里就是空字符串,
+// 点下去要求 `undefined === ''` —— 那一行**看得到却打不开**。
+check("没有身份的那一行点得开", await clickAt(".pipe-history-row")
+      && await until(`pipeViewing !== null`, 4000),
+      await evalJs(`JSON.stringify(pipeViewing && pipeViewing.version)`));
+await evalJs(`exitPipeHistory(); true`);
 
 // ── 21. 一条坏记录只许坏它自己那一行 ────────────────────────────────────────
 // 这些字段全来自落盘文件,形状没有任何保证(`finished_at` 落成数字时 `slice` 当场

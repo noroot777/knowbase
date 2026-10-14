@@ -20,6 +20,7 @@ from kb.collectors import active_collector, retry_narrower
 from kb.pipeline_state import (
     STAGES,
     _end_run,
+    _latest_locked,
     _lock,
     _log,
     _now,
@@ -27,6 +28,7 @@ from kb.pipeline_state import (
     _state,
     last_result,
     new_run_id,
+    restore_gap,
     result_version,
     retry_notes,
 )
@@ -355,13 +357,25 @@ def start_retry_failed() -> tuple[bool, str]:
         # 派生出来的计划、抓取范围和导出范围全是**上一轮**的,拿它起跑等于按一份跟
         # 当前失败毫无关系的范围去抓。身份变了一律拒,让用户再点一次(那一下读到的
         # 就是新快照)。
+        # **恢复得不完整时一律拒绝起跑。** 那一档手上只有历史那份记录,它的阶段、
+        # 日志、抓取范围都齐(所以展示是对的),但**导出范围和失败名单没留下** ——
+        # 拿上面派生出来的那份去抓,导出会把失败的那个来源摘掉:面板报「导出完成·
+        # 已保存 0 条」,而它那几篇文章一个都没落盘,再点重试也不会回来(见
+        # `retry-scope.md`)。**「只能证明有新结果、恢复不了它的范围」要说出来并
+        # 拦住,不许静默退回上一轮的范围。**
+        if restore_gap():
+            return False, ("重启时只从历史记录恢复到最新那一轮，这一轮的重试范围"
+                           "没能留档。跑一次完整同步之后再重试")
         # **核对无条件做**(`result_version` 保证任何快照都有版本:没有 `run_id` 的
         # 旧记录降级到收尾时间,从没跑过就是「none」)。原来是「两边都得有 run_id 才
         # 比、拿不准一律放行」—— 为的是别把重启后那一档和升级前的老记录误拒,可那
         # 两档恰好也是**并发窗口**:实测里拿一份没有身份的旧快照、期间另一轮刚成功
         # 结束,这道核对整条跳过,上一轮失败的那几个订阅又被抓了一遍,而失败其实
         # 发生在另一个来源上。兼容旧记录是降级比对的事,不是放掉不变量的理由。
-        if result_version(prev) != result_version(_state):
+        # **另一边走 `_latest_locked()` 而不是直读 `_state`** —— 跟 `prev` 同一份
+        # 口径(`last_result`)。直读内存的话「恢复还没成功」那一档上两边会岔开:
+        # `prev` 是磁盘上真实那一轮,内存却还是空的,于是每一次重试都被误拒。
+        if result_version(prev) != result_version(_latest_locked()):
             return False, "这期间又跑完了一轮，请重新点一次「重试失败项」"
         # card 标记这一轮会碰哪些阶段:按 STAGES 生成,STAGES 加新阶段也不会漏 key。
         # refill 不是独立卡片,占用 export 那张展示进度。

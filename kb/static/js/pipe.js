@@ -77,6 +77,7 @@ async function refreshPipe(withPending = false) {
       // 「最近一次读到的结束身份」。附属结果的刷新判据已经不看它了(见下面
       // `pipeFreshCheck` 那段),它留给 `queuePipeRefresh` 的节奏和探针当观测点。
       pipeDoneRun = doneRun;
+      pipeRestoreGap = s.restore_gap || '';
       pipeSnapshot = s; pipeConnected = true; pipeLastRead = Date.now();
       $('pipe-connection').hidden = true;
       renderPipeState(s);
@@ -208,15 +209,26 @@ async function refreshPipePending() {
     }
     finally { pipePendingRequest = null; }
   }
+  // **「请求成功了、可取回来的是另一轮的数字」也要回报一次。** 不回报的话这一块
+  // 的预算一次都不扣:每轮状态轮询都再补三次查询,既到不了上限、也到不了「连试两
+  // 次才说」那个提示阈值 —— 面板一个字不说,而后台一直在扫库。历史那边的同类回包
+  // 是扣预算的(`pipeFreshOk` 拿回包自己的版本盖章),这里跟它一个口径。
+  // 上面那几条 `return`(还没有快照、又跑起来了)走不到这里:那两档本来就不该扣。
+  if (pipePendingWanted) {
+    pipePendingWanted = false;
+    pipeFreshMiss('pending', '取到的还是上一轮的结果');
+  }
 }
 function renderPipeButtons() {
   const running = !!pipeSnapshot?.running;
   // Opening a draft is local; only the actual start requires a confirmed connection.
   $('pipe-run').disabled = running || !!pipeAction;
   $('pipe-run').textContent = pipeAction === 'start' ? '正在启动…' : running ? pipeRunLabel(pipeSnapshot) + '进行中' : '新建同步';
-  // 翻历史时按不下去 —— 见 pipe_view.js 里那道 hidden 旁边的理由
+  // 翻历史时按不下去 —— 见 pipe_view.js 里那道 hidden 旁边的理由。恢复不完整时
+  // 同样按不下去(后端那道闸会 409,这里是**先说清楚**,别让人点了才知道)。
   $('pipe-retry').disabled = !pipeConnected || running || !!pipeAction
-    || (typeof pipeViewing !== 'undefined' && !!pipeViewing);
+    || (typeof pipeViewing !== 'undefined' && !!pipeViewing)
+    || (typeof pipeRestoreGap !== 'undefined' && !!pipeRestoreGap);
   $('pipe-retry').textContent = pipeAction === 'retry' ? '正在启动重试…' : '重试失败项';
   $('pipe-stop').hidden = !running || !pipeSnapshot?.stop_supported;
   $('pipe-stop').disabled = !pipeConnected || !!pipeAction || !!pipeSnapshot?.stop_requested;

@@ -37,6 +37,10 @@ let pipeFreshTick = 0;
 // 那两个缺口是**两件不同的事**:缺口是「这一屏取到的是旧的」,这个是「那一轮根本
 // 没留下」—— 后者补读多少次也追不平,所以不能当缺口。
 let pipeFreshNote = '';
+// 非空 = 这个进程启动时只从历史恢复到最新那一轮(状态文件那份写失败了),它的重试
+// 范围没留下。**这不是缺口**(屏幕上这一轮就是最新的那一轮,补读多少次也不会变),
+// 所以它跟那两块分开记、也不参与退避 —— 它要说的是「重试这颗按钮现在不能用」。
+let pipeRestoreGap = '';
 
 function pipeFreshSlot(key) {
   const s = PIPE_FRESH[key];
@@ -106,6 +110,9 @@ function renderPipeFresh() {
     : `${s.label}还是上一轮的，没能对上这一轮`);
   // 后端留档失败单独一句:那一轮的结论是对的,只是没留下记录
   if (pipeFreshNote) lines.push(`上一轮的结果没能留档（${pipeFreshNote}），同步结论不受影响`);
+  // 重试不可用单独一句:屏幕上这一轮的结论是对的,只是它的重试范围没留下
+  if (pipeRestoreGap) lines.push('这一轮的结果是从历史记录恢复的，重试范围没能留档，'
+                                 + '所以「重试失败项」暂时不能用；跑一次完整同步就好了');
   box.hidden = !lines.length;
   if (!lines.length) return;
   const stuck = gaps.some(s => s.tries >= PIPE_FRESH_TRIES);
@@ -117,6 +124,8 @@ function renderPipeFresh() {
 function pipeFreshRetry() {
   for (const key of Object.keys(PIPE_FRESH)) Object.assign(pipeFreshSlot(key), { tries: 0, due: 0, reason: '' });
   pipeFreshNote = '';
+  // **`pipeRestoreGap` 不在这里清**:它不是「这一屏取到的是旧的」,重读多少次也
+  // 还是这样 —— 只有真跑完一轮才补得回来(后端那边 `_end_run` 收尾时清)。
   renderPipeFresh();
   loadPipeHistory();
   refreshPipePending();

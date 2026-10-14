@@ -272,6 +272,24 @@ def _load_json(path: Path):
         return None
 
 
+def _load_json_strict(path: Path):
+    """读一份落盘 JSON。**文件不存在返回 `None`,其余读不出来一律抛。**
+
+    恢复那一步要分得开「这个库从没跑过」和「这一次没读到」—— 两者都当成 `None`
+    的话,一次瞬时读失败(权限、磁盘抖动)会被永久固化成「从没跑过」:内存里那份
+    终态一直是空的,而展示那条路照旧从磁盘读得到真实的那一轮,于是起跑核对拿一个
+    空版本去跟真实那一轮比,**每一次重试都报「这期间又跑完了一轮」,而其实什么都
+    没跑过**(实测:第一次读状态文件注入 `PermissionError`、之后全部正常,页面照旧
+    显示 503 和重试按钮,连点两次都被 409 顶回来)。
+    内容坏了(解码、JSON、嵌套过深)也抛:那一档重读多半还是坏的,但**「拿不准就
+    别固化终态」** —— 代价只是每次多读一次小文件。
+    展示那条路照旧用宽口径的 `_load_json`(读不出来少显示几行、不出声)。
+    """
+    if not path.exists():
+        return None
+    return json.loads(path.read_bytes().decode("utf-8", "replace"))
+
+
 def _dump_bytes(obj) -> bytes:
     """序列化成要落盘的字节。**不可编码的字符就地替换,这一步不许抛。**
 
@@ -371,7 +389,13 @@ def load_history() -> list[dict]:
     文件还没有、读不出来、或者内容不是预期的形状,一律空列表 —— 这一份是只读
     展示,报错不如少显示几行。
     """
-    raw = _load_json(_history_file())
+    return _history_runs(_load_json(_history_file()))
+
+
+def _history_runs(raw) -> list[dict]:
+    """把读出来的那份历史文件解析成记录列表。**解析口径只有一份** —— 恢复那一步
+    也过它,不在那边另写一遍形状检查。
+    """
     runs = raw.get("runs") if isinstance(raw, dict) else None
     if not isinstance(runs, list):
         return []
@@ -392,9 +416,51 @@ def load_last_run() -> dict | None:
     return raw if isinstance(raw, dict) else None
 
 
-# 恢复只做一次。**懒做,不在模块级做** —— `_STATE_FILE` 的位置测试要 patch,
-# 模块 import 那一刻读到的是生产那一份。
-_restored = False
+# 恢复的结果:'' = 还没恢复成功(**也包括这次读不通,下一次还要再试**),
+# 'ok' = 已经恢复完,或者确认这个库从没跑过。**懒做,不在模块级做** ——
+# `_STATE_FILE` 的位置测试要 patch,模块 import 那一刻读到的是生产那一份。
+_restored = ''
+
+# 恢复得不完整时记一笔:历史能证明有更新的一轮,而那一轮的**重试派生范围**
+# (`export_filter` / `crawl_retry`)只存在于那份没写上的状态文件里。空串 = 完整。
+_restore_gap = ''
+
+
+def restore_gap() -> str:
+    """恢复得不完整的话,这里是那一轮的版本;空串 = 完整(或者压根不需要恢复)。
+
+    非空意味着**这个进程手上没有最新那一轮的重试范围** —— 展示是对的(历史那份
+    的阶段、日志、抓取范围都齐),但「重试失败项」不能起跑,理由见
+    `pipeline_retry.start_retry_failed` 里那道闸。
+    """
+    return _restore_gap
+
+
+def _newest_round(runs: list[dict], saved: dict | None) -> tuple[dict | None, str]:
+    """两份落盘里挑出最新那一轮,顺带说明恢复完不完整。
+
+    返回 `(那一轮, 欠账版本)` —— 欠账非空 = 取的是历史那一份,它**没有重试派生
+    字段**(`export_filter` / `crawl_retry`)。
+
+    **不拿收尾时间直接比大小。** 两轮落在同一秒不罕见(几百毫秒就结束的那种:
+    纯图片文章落终态、全是跳过),那时两个时间串相等,「谁更新」就判不出来,于是
+    退回旧那一份 —— 而那正是这道核对要拦的事故。历史是**倒序**的,所以「状态
+    文件那一轮出现在首条后面」就足以证明首条更新;只有状态文件那一轮压根不在
+    历史里(它那一份历史没写上)才退回比时间。
+    """
+    newest = runs[0] if runs else None
+    if not newest:
+        return saved, ''
+    if not isinstance(saved, dict) or not saved.get("finished_at"):
+        return newest, result_version(newest)
+    if result_version(newest) == result_version(saved):
+        return saved, ''                     # 同一轮 —— 用完整那一份
+    want = result_version(saved)
+    if any(result_version(r) == want for r in runs[1:]):
+        return newest, result_version(newest)
+    if str(newest.get("finished_at") or "") > str(saved.get("finished_at") or ""):
+        return newest, result_version(newest)
+    return saved, ''
 
 
 def _restore_once() -> None:
@@ -407,28 +473,51 @@ def _restore_once() -> None:
     都去扫一遍库),而页面上那个数始终是空的;起跑核对那边反过来 —— 空身份对不上
     磁盘上那份快照,就得靠「拿不准一律放行」绕过去,而那正好把并发不变量也一起
     绕过了。
-    恢复进内存之后这三处都不必再各自处理「重启」这一档。
+
+    **两份落盘都要核对,不能只信状态文件。** 那两份是分别写、分别诊断的(见
+    `_end_run`),所以状态文件写失败而历史写成功时,磁盘上最新的那一轮**只在历史
+    里**。只读状态文件的话恢复到的是**上一轮**,而且它会被当成「最新」固化下来:
+    实测里上一轮成功、这一轮翻译 503,重启之后页头写着「同步已完成」、而历史第一
+    条就是那个失败;反过来摆(上一轮失败、这一轮成功)点「重试失败项」,导出阶段
+    实际收到的是**上一轮那个来源**(`accounts=['A']`)。
+    历史那份记录**没有重试派生字段**(有意的,见 `_run_record`),所以取它时记一笔
+    `_restore_gap`,由重试那边据此拒绝起跑 —— **「只能证明有新结果、恢复不了它的
+    范围」要如实说出来并拦住,不许静默退回上一轮的范围**(那一档的后果是导出摘掉
+    失败那个来源、面板报「已保存 0 条」,见 `retry-scope.md`)。
     """
-    global _restored
+    global _restored, _restore_gap
     if _restored:
         return
-    _restored = True
     with _lock:
         # 已经跑过(或正在跑)就不是「刚启动」,磁盘那份不该盖掉内存里的。
         if _state["running"] or _state.get("finished_at"):
+            _restored = 'ok'
             return
-        saved = load_last_run()
-        if not isinstance(saved, dict) or not saved.get("finished_at"):
+        try:
+            saved = _load_json_strict(_STATE_FILE)
+            runs = _history_runs(_load_json_strict(_history_file()))
+        except Exception:  # noqa: BLE001 - 理由在 `_load_json_strict` 的 docstring
+            # **读不通不许固化成「从没跑过」**:下一次读状态时再试一遍。这一档里
+            # 展示和起跑核对都走磁盘(`_latest_locked`),两边同源,不会互相误判。
+            return
+        if not isinstance(saved, dict):
+            saved = None
+        pick, gap = _newest_round(runs, saved)
+        if not isinstance(pick, dict) or not pick.get("finished_at"):
+            _restored = 'ok'                      # 确定没跑过任何一轮
             return
         for key in ("started_at", "finished_at", "run_kind", "planned_stages",
                     "run_id", "log"):
-            if key in saved:
-                _state[key] = deepcopy(saved[key])
-        _state["stopped"] = bool(saved.get("stopped", False))
+            if key in pick:
+                _state[key] = deepcopy(pick[key])
+        _state["stopped"] = bool(pick.get("stopped", False))
         for key in ("stages", "crawl_filter", "export_filter", "crawl_retry"):
-            got = saved.get(key)
-            if isinstance(got, dict):
-                _state[key] = deepcopy(got)
+            got = pick.get(key)
+            # 取历史那份时 `export_filter` / `crawl_retry` 本来就没有:**留空而不是
+            # 沿用上一轮的**,那两个字段错一个就是静默不抓。
+            _state[key] = deepcopy(got) if isinstance(got, dict) else {}
+        _restore_gap = gap
+        _restored = 'ok'
 
 
 def result_version(run: dict | None = None) -> str:
@@ -460,10 +549,21 @@ def last_result() -> dict:
     """
     _restore_once()
     with _lock:
-        # 判据是**收尾时间**,不是身份 —— 恢复进来的旧格式记录没有 `run_id`,
-        # 而它一样是一份已经收尾的终态。
-        if not _state["running"] and _state.get("finished_at"):
-            return deepcopy(_state)
+        return _latest_locked()
+
+
+def _latest_locked() -> dict:
+    """同一件事,**调用方已经持有 `_lock`** 的那个版本。
+
+    抽出来是为了让起跑那道并发核对跟展示**走同一份口径**:核对必须在锁内比,而
+    `last_result()` 自己要拿锁。各写一遍的话两边会在「恢复还没成功」那一档上岔开
+    —— 展示从磁盘读到了真实那一轮,核对却拿空内存去比,于是每一次重试都被拒
+    (实测:连点两次都是 409「这期间又跑完了一轮」,而其实什么都没跑过)。
+    """
+    # 判据是**收尾时间**,不是身份 —— 恢复进来的旧格式记录没有 `run_id`,
+    # 而它一样是一份已经收尾的终态。
+    if not _state["running"] and _state.get("finished_at"):
+        return deepcopy(_state)
     return load_last_run() or {}
 
 
@@ -515,7 +615,10 @@ def _end_run() -> None:
         # 新同步和重试一概被拒,点停止也救不回来(线程早退了);普通同步和失败重试
         # 共用这段收尾,两条入口一起死。**判据只能钉在 `finally` 上** —— 光把某一种
         # 坏字节的异常类型补进捕获里,下一种坏法照旧重现。
-        global _persist_error
+        global _persist_error, _restore_gap
+        # 这一轮是在本进程里跑完的,内存里这份终态带着完整的重试派生字段 ——
+        # 启动时那笔「只恢复到历史那份」的欠账到此为止。
+        _restore_gap = ''
         try:
             # **两份分别尝试、分别诊断,不许串在一个 try 里。** 串着的话状态文件
             # 写失败就把本来写得成的历史一起跳过 —— 那一轮在历史里直接不存在,而

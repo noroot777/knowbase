@@ -213,8 +213,12 @@ class RefillScriptTests(unittest.TestCase):
                            "index": {"status": "error", "detail": "挂了"}}}
         app = FastAPI()
         app.include_router(pipeline_api.router)
+        # **起跑核对的两边都要 patch**:`last_result()` 和锁内那道核对走同一份口径
+        # (`_latest_locked`),只换其中一个的话手工摆的这份快照跟另一边岔开,核对会
+        # 如实报「这期间又跑完了一轮」。这一局测的是坏配置下别的阶段还能不能起。
         with patch.object(pstate, "_STATE_FILE", Path(self.tmp.name) / "state.json"), \
              patch.object(pipeline_retry, "last_result", return_value=last), \
+             patch.object(pipeline_retry, "_latest_locked", return_value=last), \
              patch.object(pipeline_retry, "_run_index", lambda: ran.append("index")), \
              patch.object(pipeline_retry, "_run_extract", lambda: ran.append("extract")):
             # 每次调用是独立的一轮:身份也要一起清掉。留着上一轮的收尾时间的话,

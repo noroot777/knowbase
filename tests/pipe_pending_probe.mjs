@@ -36,6 +36,12 @@ let state = {
   stages: okStages("成功 3,失败 0,跳过 1(正文空,需回填)"), log: ["管道结束"],
 };
 let pendingExtract = 1;
+// 非空 = 这个进程启动时只从历史恢复到最新那一轮,它的重试范围没留下(真后端的
+// `restore_gap`)。面板据此把「重试失败项」按不下去并如实说一句。
+let restoreGap = "";
+// 非空 = 待处理数那个回包的版本固定报这个旧值(摆「请求成功了、取回来的却一直是
+// 另一轮」那一局)。真后端不该这样,但它是这块预算反馈的边界。
+let stalePending = "";
 let pendingCalls = 0, retryCalls = 0, heldCalls = 0;
 // 非 null = 下一次积压查询的回包按在这儿,等放行。回包内容在**收到请求那一刻**
 // 就生成好(和真后端一样),所以放行时它带的是旧那一轮的事实。
@@ -85,7 +91,8 @@ const server = createServer((req, res) => {
     if (req.url.includes("pending=true")) {
       pendingCalls++;
       const body = { ...state, pending: { extract: pendingExtract }, last_run: null,
-                     result_version: versionOf(state) };
+                     result_version: stalePending || versionOf(state),
+                     restore_gap: restoreGap };
       if (holdPending) {
         const gate = holdPending; holdPending = null; heldCalls++;
         return void gate.then(() => json(body));
@@ -94,14 +101,15 @@ const server = createServer((req, res) => {
     }
     const extra = req.url.includes("source=false")
       ? {} : { source: { online: true, label: "测试来源", message: "已连接" } };
-    return json({ ...state, ...extra, last_run: null, result_version: versionOf(state) });
+    return json({ ...state, ...extra, last_run: null, result_version: versionOf(state),
+                  restore_gap: restoreGap });
   }
   // 历史清单。**本探针不验历史渲染**(那是 `pipe_history_probe.mjs` 的事),给一份
   // 自洽的回包只为了让新鲜度那块能追平 —— 不给的话它永远落后,缺口提示条一直顶着,
   // 下面那几项「不存在缺口」就无从断言了。
   if (path === "/api/pipeline/runs") {
-    return json({ runs: state.finished_at ? [state] : [], error: "",
-                  version: versionOf(state) });
+    const rows = state.finished_at ? [{ ...state, version: versionOf(state) }] : [];
+    return json({ runs: rows, error: "", version: versionOf(state) });
   }
   if (path === "/api/pipeline/retry-failed" && req.method === "POST") {
     retryCalls++;
@@ -364,6 +372,45 @@ check("目标一换,补读预算重新给", mech.a);
 check("跑着的时候不读也不扣预算", mech.b);
 check("加载器一次请求都没发时不扣预算", mech.c);
 check("取到旧数据、取不到,各算一次用掉的尝试", mech.d);
+
+// ── 10. 恢复不完整:重试按不下去,而且说清楚为什么 ───────────────────────────
+// 状态文件写失败那一轮,磁盘上最新的终态只在历史里 —— 它没有导出范围和失败名单。
+// 拿上一轮的范围去抓会把失败那个来源摘掉(面板报「已保存 0 条」,而那几篇一个都没
+// 落盘),所以后端那边直接拒绝起跑;这里是**先说清楚**,别让人点了才知道。
+restoreGap = "run-I";
+await evalJs(`refreshPipe(); true`);
+await setup("页面没读到恢复欠账", until(`pipeRestoreGap === 'run-I'`, 6000));
+check("恢复不完整时「重试失败项」按不下去",
+      await evalJs(`document.getElementById('pipe-retry').disabled === true`));
+check("而且如实说明了原因", await evalJs(
+  `!document.getElementById('pipe-fresh').hidden
+   && document.getElementById('pipe-fresh-text').textContent.includes('重试范围没能留档')`),
+  await evalJs(`document.getElementById('pipe-fresh-text').textContent`));
+check("「重新读取」不会把这一句擦掉(它不是读取问题)", await evalJs(
+  `pipeFreshRetry(); pipeRestoreGap === 'run-I'
+   && document.getElementById('pipe-fresh-text').textContent.includes('重试范围没能留档')`));
+restoreGap = "";
+await evalJs(`refreshPipe(); true`);
+check("跑过一轮之后那句话收起来、按钮也回来了", await until(
+  `pipeRestoreGap === '' && document.getElementById('pipe-retry').disabled === false`, 6000),
+  await evalJs(`pipeRestoreGap + '/' + document.getElementById('pipe-retry').disabled`));
+
+// ── 11. 「请求成功了、取回来的是另一轮」也要扣预算 ──────────────────────────
+// 不扣的话这一块的预算一次都不扣:每轮状态轮询都再补三次查询,既到不了上限、也到
+// 不了「连试两次才说」那个提示阈值 —— 面板一个字不说,而后台一直在扫库。历史那边
+// 的同类回包是扣预算的,两个 loader 要一个口径。
+stalePending = "run-stale";
+const staleBefore = pendingCalls;
+await evalJs(`refreshPipePending(); true`);
+const staleSettled = await until(`pipePendingWanted === false`, 8000);
+// 先钉那道循环封口:对不齐时最多再查几次就退出,交给有界补读
+check("对不齐时不会一直在循环里重查", staleSettled && pendingCalls - staleBefore <= 3,
+      `收尾=${staleSettled}，${pendingCalls - staleBefore} 次查询`);
+check("取到的一直是另一轮时,这次尝试要算进预算里", staleSettled && await evalJs(
+  `PIPE_FRESH.pending.tries >= 1 && PIPE_FRESH.pending.reason !== ''`),
+  await evalJs(`PIPE_FRESH.pending.tries + '/' + PIPE_FRESH.pending.reason`));
+stalePending = "";
+await sleep(300);
 
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 
