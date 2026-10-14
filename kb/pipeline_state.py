@@ -9,13 +9,12 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 
-from kb.config import DATA_DIR
+from kb.config import DATA_DIR, write_config_file
 
 _STATE_FILE = DATA_DIR / "pipeline_state.json"
 
@@ -300,10 +299,9 @@ def _write_state(payload: dict) -> None:
     读的那一端只能当"读不出",而旧那份已经被截掉了,两份都没了。先写同目录的
     临时文件再 `os.replace`,中断只会留下一个临时文件,原来那份一字未动。
     """
-    _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _STATE_FILE.with_name(_STATE_FILE.name + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, _STATE_FILE)
+    # 原子替换那几行收在 `kb.config.write_config_file`(配置那几个写口共用它):
+    # 同一件事别在两处各写一遍 —— 那边还负责失败时把临时文件带走。
+    write_config_file(_STATE_FILE, payload)
 
 
 def _with_persist_issue(payload: dict, issue: str) -> dict:
@@ -327,9 +325,10 @@ def _save_last_run() -> None:
     except OSError as e:
         # 不判这一轮失败,但**也不许一声不吭**:面板上那份结论从这一刻起只活在
         # 内存里,重启就没了。
-        payload = _with_persist_issue(
-            payload, f"这一轮的结果没能写进磁盘({e});本进程内照常可查,"
-                     "重启后会退回上一次写成功的那一份")
+        note = (f"这一轮的结果没能写进磁盘({e});本进程内照常可查,"
+                "重启后会退回上一次写成功的那一份")
+        _remember_batch_note(note)
+        payload = _with_persist_issue(payload, note)
     _remember_result(payload)
 
 
@@ -344,7 +343,25 @@ def _save_last_run() -> None:
 # (被下一轮挤出记录)的那一档也照样进账。
 _batch_id = ""              # 开着的批次身份,空串 = 没有批次
 _batch_runs: list[dict] = []        # 这一批里已经收尾的子轮终态,按时间顺序
-_batch_issue = ""           # 这一批没能发布出去的原因(人话),空串 = 一切正常
+_batch_issue = ""           # 这一批**当前**没能发布出去的原因,空串 = 一切正常
+# 这一批自己的事件(落盘失败/恢复),跟子轮的日志分开存。**必须单独留一份**:
+# 下一轮的合并是从子轮账本重新拼日志的,而子轮快照是在落盘之前拍的 —— 只把那行
+# 字追加到当轮合并结果里的话,后面一轮发布成功之后这条历史就没了,而面板上写着
+# "原因留在运行日志里"(第 6 轮实测:最终日志里找不到那次失败)。
+_batch_notes: list[str] = []
+
+
+def _remember_batch_note(note: str) -> None:
+    """把一条保存事件记进**批次账本**(当前有批次才记)。
+
+    **两个写出口都要记,不按"走的是普通保存还是汇总保存"分裂。** 这一批的头一轮
+    走的是 `_save_last_run`:它那行字只进了当轮的 payload,而后面几轮的合并是从
+    子轮账本重新拼日志的(子轮快照在落盘**之前**拍),于是首轮那次保存失败在后
+    一轮写成功之后就没了 —— 第 1 轮实测注入首轮写失败,最终日志里找不到它,而
+    决策文档和回归都写着"原因留在运行日志里"。
+    """
+    if _batch_id and _state.get("batch") == _batch_id:
+        _batch_notes.append(_stamp(note))
 _batch_seq = 0
 
 
@@ -354,10 +371,11 @@ def open_batch() -> str:
     **和 `close_batch()` 成对**,调用方放在 try/finally 里:不关的话下一轮管道
     运行会被算进一个早就结束的批次。
     """
-    global _batch_id, _batch_runs, _batch_issue, _batch_seq
+    global _batch_id, _batch_runs, _batch_issue, _batch_notes, _batch_seq
     with _lock:
         _batch_seq += 1
-        _batch_id, _batch_runs, _batch_issue = f"batch-{_batch_seq}", [], ""
+        _batch_id, _batch_runs = f"batch-{_batch_seq}", []
+        _batch_issue, _batch_notes = "", []
         return _batch_id
 
 
@@ -367,9 +385,10 @@ def close_batch() -> str:
     盘上那份已经在最后一个子轮收尾时写全了,这里不再写 —— 所以**提早返回、
     甚至中途崩掉都不会少东西**。
     """
-    global _batch_id, _batch_runs, _batch_issue
+    global _batch_id, _batch_runs, _batch_issue, _batch_notes
     with _lock:
-        issue, _batch_id, _batch_runs, _batch_issue = _batch_issue, "", [], ""
+        issue, _batch_id, _batch_runs = _batch_issue, "", []
+        _batch_issue, _batch_notes = "", []
         return issue
 
 
@@ -400,16 +419,19 @@ def _publish_in_batch() -> None:
         _batch_issue = e.reason
         _save_last_run()
         return
-    merged = _merge_runs(_batch_runs)
+    from kb.pipeline_merge import _merge_runs      # 延迟:它反过来 import 本模块
+    merged = _merge_runs(_batch_runs, _batch_notes)
     try:
         _write_state(merged)
     except OSError as e:
         # **不退回去写局部结果。** 盘上那份是这一批上一轮的汇总(同样带着前面
         # 那些失败),原样留着就是最好的后路;整批那份照旧当权威(见下一句)。
         _batch_issue = f'这一批的同步结果没能写进磁盘({e})'
-        merged = _with_persist_issue(
-            merged, f'{_batch_issue};本进程内照常可查,'
-                    '重启后会退回上一次写成功的那一份')
+        note = (f'{_batch_issue};本进程内照常可查,'
+                '重启后会退回上一次写成功的那一份')
+        # 记在批次账本上,后面那几轮的合并才带得上它(见 `_remember_batch_note`)。
+        _remember_batch_note(note)
+        merged = _with_persist_issue(merged, note)
     else:
         # 发布成功就解除之前那句警告:原因留在运行日志里,但"当前仍未保存"
         # 这句话不能挂着不放 —— 后来真写进去了,日报却还在说没写进。
@@ -490,92 +512,6 @@ def _end_run() -> None:
         _state["running"] = False
 
 
-# ── 一次业务轮里的几轮管道,合并成一份结果 ──────────────────────────────────────
-# 日报那一轮不是一次管道运行,而是 N+1 次:每个来源各一轮 crawl→export,再一轮
-# 全库的 index→extract。而「最近一次运行」只有一份,**后跑的会把先跑的盖掉** ——
-# 于是 RSS 抓取失败之后,同步中心显示的是最后那一轮入库的「同步已完成」,失败明细
-# 和「重试失败项」一起消失(`retry_failed_plan` 读的也是这一份)。两段式之前就已经
-# 是这样了(只有最后一个来源的结果留得下来),改成两段式之后变成每次必然发生。
-# 所以收尾时把这一批合并成一份发布,让查看和重试面对的是**整个业务轮**。
-
-# 合并时谁盖谁。只在**各自计划里有这个阶段**的记录之间比:没计划过的那一档是
-# `skipped/未选择`,让它参与比较会把另一轮真实的 ok 盖成「跳过」。
-_MERGE_RANK = {"error": 4, "stopped": 3, "skipped": 2, "pending": 1, "running": 1, "ok": 0}
-
-
-def _merge_stage(owned: list[tuple[str, dict]]) -> dict:
-    """同一个阶段在几轮里的结果,合成**不丢东西**的一份。
-
-    `owned` 是 (这一轮的来源名, 那一轮这个阶段的结果),按时间顺序。
-
-    不能只挑最重的那一个对象:RSS 和网页专栏各挂一条订阅时,两轮的 crawl 都是
-    error,挑一个等于把另一个来源的原因和失败名单整个扔掉 —— 面板上「来源:
-    RSS + 网页专栏」却只列得出一条明细。status 仍取最重的那一档。
-
-    **按来源挂名,不按文本去重。** 两个来源各失败一条时两边的 detail 一模一样
-    (都是「失败 1 个」),照文本去重就把两条说成一条,而卡片上写着来源是两个。
-    `failures` 同理,而且更严重:显示用的标题压根不是身份 —— 两条订阅可以同名
-    (两个来源各有一个「每日速览」),同名同因就被并掉一条,面板上少一行、
-    计数也少一个,看上去就是"只有一个来源出问题"。这里**一条都不并**,原样按
-    轮次接起来;真有重复只能是同一轮被记了两遍,那是别处的 bug,并掉等于替它
-    遮住。上限跟 `_stage` 一致(见 `_cap_failures`:截断了就把总数一起留下)。
-    """
-    worst = max((stage for _, stage in owned), key=_merge_rank)
-    merged = {k: v for k, v in deepcopy(worst).items()
-              if k not in ("detail", "failures", "failures_total")}
-    details, failures = [], []
-    for scope, stage in owned:
-        text = (stage.get("detail") or "").strip()
-        if text:
-            details.append(f"{scope}：{text}" if scope else text)
-        failures.extend(deepcopy(item) for item in stage.get("failures") or [])
-    if details:
-        merged["detail"] = "；".join(details)[:400]
-    if failures:
-        _cap_failures(merged, failures)
-        total = sum(stage.get("failures_total") or len(stage.get("failures") or [])
-                    for _, stage in owned)
-        if total > len(merged["failures"]):
-            merged["failures_total"] = total
-    return merged
-
-
-def _merge_rank(stage: dict) -> int:
-    from kb.pipeline_retry import _FAIL_DETAIL_RE
-    # status=ok 但 detail 里写着「失败 3 个」也是失败(判据和面板按钮、
-    # `retry_failed_plan` 共用那一条正则,三处不一致的话按钮会亮着而计划是空的)。
-    if _FAIL_DETAIL_RE.search(stage.get("detail") or ""):
-        return _MERGE_RANK["error"]
-    return _MERGE_RANK.get(stage.get("status") or "", 0)
-
-
-def _scope_name(run: dict) -> str:
-    """这一轮作用在哪几个来源上,写成人话。全库那一轮回空串(它不属于谁)。"""
-    from kb.collectors import channel_labels     # 延迟:它反过来 import 本模块
-    from kb.pipeline_stages import run_scopes
-    labels = channel_labels()
-    return " + ".join(labels.get(s["channel"], s["channel"]) for s in run_scopes(run))
-
-
-def _merge_scopes(records: list[dict], key: str) -> dict:
-    """把几轮的来源范围并起来。同一个来源出现多次时按先到的那份算。"""
-    from kb.pipeline_stages import crawl_channels   # 延迟:它反过来 import 本模块
-    merged: list[dict] = []
-    for run in records:
-        planned = run.get("planned_stages") or []
-        if not ({"crawl", "export"} & set(planned)):
-            continue              # 全库那一轮没有来源范围可言,见 `run_scopes`
-        for scope in crawl_channels(run.get(key) or run.get("crawl_filter")):
-            if scope["channel"] and not any(s["channel"] == scope["channel"] for s in merged):
-                merged.append(scope)
-    if not merged:
-        return {}
-    # 一个来源时写回老样子的 channel + accounts:存量读取方(和 `crawl_channels`
-    # 自己)两种都认,但旧的那种更窄,能被更多消费方直接读。
-    if len(merged) == 1:
-        return {"channel": merged[0]["channel"], "accounts": merged[0]["accounts"]}
-    return {"channel": merged[0]["channel"], "channels": merged}
-
 
 class PublishRefused(Exception):
     """这一批没能发布出去。`reason` 是人话原因,调用方要把它说出来。"""
@@ -588,8 +524,9 @@ class PublishRefused(Exception):
 def _publish_right(ours: set[str]) -> None:
     """这一批有没有资格替换「最近一次运行」。没资格就抛 `PublishRefused`。
 
-    **只管资格,不合并也不碰磁盘。** 只有当那份「最近一次运行」仍然是这一批里
-    的某一轮时才有资格。期间要是另一轮独立运行已经收尾(用户自己点了同步),
+    **只管资格:不合并、不写磁盘;必要时读磁盘判断资格**(手里没有权威身份那
+    一档,见函数末尾)。只有当那份「最近一次运行」仍然是这一批里的某一轮时才
+    有资格。期间要是另一轮独立运行已经收尾(用户自己点了同步),
     它是**比我们新**的结果,替换掉它等于把一次刚失败的手动同步改写成成功、顺带
     让它的「重试失败项」消失。一把锁只防同时写,答不了"我有没有资格当最新"。
     """
@@ -625,51 +562,3 @@ def _taken_over(other: str) -> str:
     """
     return (f'期间已经有更新的一轮同步收尾({other}),这一轮日报的几段同步结果'
             '没有合并成一份发布;「最近一次运行」显示的是最后收尾的那一轮')
-
-
-def _merge_runs(records: list[dict]) -> dict:
-    """把一个业务批次里跑过的几轮合成**不丢东西**的一份。纯合并:不判资格、不写盘。
-
-    **唯一的调用方是 `_publish_in_batch`**。不要再开一个"事后聚合"的公开出口:
-    那正是这件事原来错的地方 —— 子轮先写一份会删掉前序失败的局部结果,再指望还
-    活着的调用方稍后补回,中间进程一死那几条红就永远不在了。合并要么发生在子轮
-    收尾的同一步里,要么不发生。
-
-    逐阶段合成(见 `_merge_stage`),而且只在计划过这个阶段的记录之间比。来源
-    范围、失败名单(`crawl_retry`)按来源并起来,这样「重试失败项」拿得到那一轮的
-    目标和原导出范围,不必从当前订阅状态反推。
-
-    合并后的身份**沿用这一批最后那一轮的 run_id**,不另发一个:另发等于把一份
-    早先的批次伪装成"刚刚产生的最新结果",而最新指针是有先后的。
-    """
-    run_id = records[-1].get("run_id") or new_run_id()
-    scopes = [_scope_name(r) for r in records]
-    stages: dict[str, dict] = {}
-    for name in STAGES:
-        owned = [(scopes[i], r["stages"][name]) for i, r in enumerate(records)
-                 if name in (r.get("planned_stages") or []) and (r.get("stages") or {}).get(name)]
-        stages[name] = (_merge_stage(owned) if owned
-                        else {"status": "skipped", "detail": "未选择"})
-    planned = [s for s in STAGES
-               if any(s in (r.get("planned_stages") or []) for r in records)]
-    notes: dict = {}
-    for run in records:
-        note = run.get("crawl_retry") or {}
-        if note.get("run") == (run.get("run_id") or ""):
-            notes.update(note.get("channels") or {})
-    started = [r.get("started_at") for r in records if r.get("started_at")]
-    finished = [r.get("finished_at") for r in records if r.get("finished_at")]
-    merged = {
-        "started_at": min(started) if started else "",
-        "finished_at": max(finished) if finished else _now(),
-        "stopped": any(r.get("stopped") for r in records),
-        "run_kind": "sync",
-        "planned_stages": planned,
-        "stages": stages,
-        "crawl_filter": _merge_scopes(records, "crawl_filter"),
-        "export_filter": _merge_scopes(records, "export_filter"),
-        "run_id": run_id,
-        "crawl_retry": {"run": run_id, "channels": notes} if notes else {},
-        "log": [line for r in records for line in (r.get("log") or [])][-80:],
-    }
-    return merged

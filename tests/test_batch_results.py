@@ -20,7 +20,7 @@ class DailyBatchResultTests(RoundStore):
     后跑的会把先跑的盖掉 —— 抓取失败的明细、失败名单和「重试失败项」会被最后那
     一轮入库的成功一起抹掉(`retry_failed_plan` 读的就是这一份)。两段式之前只有
     最后一个来源的结果留得下来,改成两段式之后变成**每次必然发生**。所以收尾时把
-    这一批合并成一份(`pipeline_state._merge_runs`),而且**在子轮收尾的同一步里
+    这一批合并成一份(`pipeline_merge._merge_runs`),而且**在子轮收尾的同一步里
     就写进去**(`_publish_in_batch`)。
 
     钉的是后果:库里那份最近运行里还有没有那条红、点重试还排不排得出计划。
@@ -530,6 +530,37 @@ class DailyBatchResultTests(RoundStore):
         self.assertEqual('error', last['stages']['crawl']['status'])
         self.assertEqual(['crawl', 'export', 'index', 'extract'], last['planned_stages'])
         self.assertNotIn('persist_issue', last)
+        # **"当前仍未保存"撤掉,那次失败本身要留着**:子轮快照是落盘之前拍的,
+        # 下一轮合并从账本重新拼日志 —— 只把那行字追加到当轮结果里的话,这条
+        # 历史在后面一轮成功之后就没了(第 6 轮实测找不到),而我们对外说的是
+        # "原因留在运行日志里"。
+        self.assertTrue(any('没能写进磁盘' in line for line in last['log']), last['log'])
+
+    def test_the_first_round_write_failure_also_stays_in_the_final_log(self):
+        """**头一轮**写失败那条,后面写成功之后同样要留着。
+
+        这一批的头一轮走的是普通保存(`_save_last_run`,整批只有它自己时写自己那份
+        就是全的),不是汇总那条路。所以"把保存事件记进批次账本"这件事不能只做在
+        汇总那一侧:第 1 轮实测注入首轮写失败、入库那一轮正常落盘,抓取失败和重试
+        计划都对、当前那句警告也正确撤掉了,但最终日志里找不到首轮那次失败 ——
+        而决策文档和上一条用例都说"原因留在运行日志里"。日志也远没到 80 行上限。
+        """
+        from kb import pipeline
+        batch = ps.open_batch()
+        self.addCleanup(ps.close_batch)
+        with patch.object(ps, '_write_state', Mock(side_effect=OSError('首轮磁盘满'))):
+            finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
+                         results={'crawl': {'status': 'error', 'detail': '失败 1 个'}})
+        finish_round(['index', 'extract'], None, batch, run_id='run-2',
+                     started='2026-10-14 09:20:00')
+        self.assertEqual('', ps.close_batch())
+        self.fresh_process()
+        last = pipeline.load_last_run()
+        # 先把这一批本来的后果钉住:首轮那条抓取失败和重试入口都在
+        self.assertEqual('error', last['stages']['crawl']['status'])
+        self.assertNotIn('persist_issue', last)
+        self.assertTrue(any('首轮磁盘满' in line for line in last['log']), last['log'])
+        self.assertLess(len(last['log']), 80, last['log'])
 
     def test_a_plain_write_failure_is_reported_as_a_persistence_issue(self):
         """不在批次里的那一轮写不进去,也要有结构化的一格给面板用。
