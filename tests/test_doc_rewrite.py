@@ -493,6 +493,7 @@ class MainWritebackTests(Vault):
         self.assertFalse(self.needs_index(rel), "窗口关着,这一次该登记上")
 
 
+
 class BypassBehaviourTests(Vault):
     """两条旁路自己那点事:无人争抢时该做的事照旧做完。"""
 

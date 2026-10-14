@@ -476,7 +476,7 @@ class RefreshHashTest(_Vault):
         (`save_extraction` 把 topic/entity `INSERT OR IGNORE` 进 `doc_tags`,
         随后 `writeback_extraction` 才去改 frontmatter),所以登记那一步看到的
         两边本来就是一致的。只写 md 不落库的那一档是**磁盘领先于索引**,新判据
-        拒绝它是对的 —— 那一档在 `tests/test_doc_rewrite.py` 里单独钉着。
+        拒绝它是对的 —— 那一档在 `tests/test_doc_rewrite_tags.py` 里单独钉着。
         """
         v1 = self.seed("none", OLD_BODY, flagged=False)
         self.conn.execute("INSERT OR IGNORE INTO doc_tags (path, tag)"

@@ -366,8 +366,37 @@ def doc_needs_reindex(conn: sqlite3.Connection, path: str, content_hash: str) ->
     return row is None or row["content_hash"] != content_hash
 
 
+def promo_tag_wanted(level: str, in_file: bool) -> bool:
+    """一次索引重建之后,`flag/软广` 那一行该在不该在 —— 这条规则只有这一份。
+
+    `upsert_document` 先按 frontmatter 重建 `doc_tags`、紧接着
+    `_align_promo_tag` 按落库那份判定纠正它,所以末态是:判定是 hard 就有、
+    是 none/soft 就没有,**还没判过(`''`)就跟着文件** —— 那时 md 那行是提取
+    阶段写进去的唯一记录,索引不去覆盖它。
+
+    抽成纯函数是因为有第二个消费方:登记「这份文件已经索引过了」那道判据要
+    回答「这一份现在重新索引一次,库里会变吗」
+    (`kb.doc_rewrite.index_projection_matches`)。它原来无条件把这一行从两边
+    排除掉,于是**还没判过**的那一篇上,外来编辑增删 md 里那行 flag 判据完全
+    看不见:收据照签,而真实索引这时是跟着文件的 —— 按这个标签筛选从此停在
+    旧结果上,再同步也不恢复(2026-10-14 审查增删两个方向各实测一次)。
+
+    **这里和下面那两句 SQL 是两份实现**(判据必须待在写语句自己的 WHERE 里),
+    所以有一条回归真跑 `upsert_document` 再和这个函数对账,三档判定 × 文件
+    有/无 六个组合全覆盖:哪天一边改了,那条会红。
+    """
+    if level == "hard":
+        return True
+    if level in ("none", "soft"):
+        return False
+    return in_file
+
+
 def _align_promo_tag(conn: sqlite3.Connection, path: str) -> None:
     """重建 doc_tags 时,`flag/软广` 那一行按**库里的判定**定,不按 frontmatter。
+
+    **末态那条规则抽在 `promo_tag_wanted` 里**(登记那道判据也要它),这里是它
+    的 SQL 实现 —— 两边改一边就会在那条对账回归里红。
 
     `upsert_document` 把 doc_tags 整表删掉再按 md 的 tags 重建,而它不碰
     `promo_level` —— 于是 md 里一行过时的 flag 就成了这张表的唯一真相来源:

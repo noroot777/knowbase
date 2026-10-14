@@ -36,19 +36,21 @@
 的 UTF-8 解码失败都会原样抛出去 —— 读失败只捕获 `OSError`。退出时还有一档:
 写回已经抛了、收尾这一步再抛的话,`finally` 里的新异常会盖掉原来那个。
 
-**两道射程交叠,但哪一道都不多余。** 整篇正文被换掉那一档两道都抓得住(② 发现
-磁盘上那组输入变了);**只改 frontmatter 的外来编辑只有 ① 抓得住** —— ② 比的是
-**模型输入那三样**,而索引 upsert 进库的不只那三样:`doc_tags`、`url`、`published`
-都按 frontmatter 重建,别人只加了一行 tag 那种改动,那三样分毫不差、② 完全看不
-出来,认证下去那行 tag 就永远进不了 `doc_tags`,按标签过滤的查询从此照旧捞不到
-它。**反过来越界的变换只有 ② 抓得住**:那次写出来的文件**就是**我写的那一份,
-① 对它是瞎的。
+**①② 对大多数外来编辑互为备份,所以「某一道还在不在」看不出来 —— 想分辨得让
+另一道闭嘴。** 外来进程插在**写回之后**那一瞬:① 当场拦下(磁盘不是我写出去的
+那一份),② 压根轮不到说话;插在**写入函数读文件之前**:那个改动被带进了我们
+自己写出去的全文,① 合法通过,只有 ② 拦得住。回归里两种时点各有一组,不然一道
+坏掉照样全绿(自测踩过两次:注入拿掉其中一道,整组绿着)。
 
-**① 自己也是两件事叠起来的,顺序别倒**:登记用的 hash 取自 `new_text`(本次写出
-去的那一份),**不是**退出时重读磁盘的那一份 —— 原来那条旁路正是重读磁盘来算,
-于是别人换上去的内容被盖了章。核对那一步(`on_disk != new_text`)在这之上再挡
-一层:少了它,登记会把一个**磁盘上从未存在过**的 hash 写进库(我写的那份已经被
-覆盖了),`doc.indexed` 还谎报一句「登记上了」。
+**各自独有的射程**:① 管「外来编辑没动索引投影」(② 对它没意见,可收据不该盖到
+别人那份上);② 管「变换自己写进去的东西还没落库」「越界改了索引看得见的东西」
+(文件就是我写的那一份,① 对它是瞎的)。
+
+**① 自己也是两件事叠起来的,顺序别倒**:登记用的 hash 取自**本次写出去的那一
+份**,不是退出时重读磁盘的那一份 —— 主回写原来正是重读磁盘来算,于是别人换上去
+的内容被盖了章。核对那一步(`on_disk != written`)在这之上再挡一层:少了它,登记
+会把一个**磁盘上从未存在过**的 hash 写进库(我写的那份已经被覆盖了),`indexed`
+还谎报一句「登记上了」。
 
 **整段在维护锁里**(读 → 变换 → 写回 → 登记 → 提交):把正文整篇换掉的那几条路
 (订阅存盘与导出、索引、存量清理)全程持着**同一把**锁,所以它们压根进不来;上面
@@ -70,19 +72,20 @@ from pathlib import Path
 def md_index_input(text: str, md_path: Path) -> str:
     """一份 md 文本在**索引眼里**那组模型输入的指纹(标题 / 账号 / 分块正文)。
 
+    **这是软广补判那一道的判据,不是登记「已索引」那一道。** 它回答的是「磁盘
+    上这一篇喂给模型的那组输入,还是索引里那一组吗」—— 够用来判「能不能固化
+    一个判定」(判定只基于这三样)。
+
     标题和账号按 `scanner.frontmatter_input` 读(**和索引 upsert 进库的是同一份
     口径**),正文按 `normalize_body` → `split_chunks` 过一遍再拼回来(**和
-    `cli.cmd_index` 同一对函数**)。所以「这个指纹没变」= 现在重新索引一次,
-    chunks / FTS / 向量和模型看到的那组输入一个字都不会变。
+    `cli.cmd_index` 同一对函数**)。所以「这个指纹没变」= 模型看到的那组输入一个
+    字都没变。
 
-    **判据是这三样,不是整个文件的 hash。** 后者会把「只改了别的 frontmatter
-    字段」(翻译回写 summary、tag 回写、wiki 追加图谱尾区,都是常态)也算成「跟
-    索引不一致」,于是一次索引输入压根没动的合法改动永远登记不上,下一轮索引白
-    重建一次。
-
-    **反过来:这三样没变不等于「索引什么都不会改」** —— `doc_tags` / `url` /
-    `published` 也按 frontmatter 重建。所以它只是登记那张收据的其中一道证明,
-    另一道(「登记的是本次写出去的那一份」)管的正是这个缺口,见模块说明。
+    **它证明不了「重新索引一次库里不会变」,所以不许拿它签「已索引」的收据。**
+    索引 upsert 进库的还有 `doc_tags` / `url` / `published` / `source` /
+    `chunk.heading`,而这里把正文**拼成一串**比,分块边界不同也会算成相同。
+    那张收据的判据是 `index_projection_matches`(整份索引投影)——审查按字段逐个
+    实测过,只比这三样时五种外来编辑全被盖了章。
     """
     from kb.chunker import split_chunks
     from kb.extract import input_fingerprint
@@ -160,10 +163,21 @@ def index_projection_matches(conn, doc_path: str, text: str) -> str:
     拼接正文还会把**分块边界**不同当成相同(只比 text 的拼接结果),所以这里比
     的是逐块的 (seq, heading, text),不是拼起来的那一串。
 
-    **`flag/软广` 那一行不在判据里。** 它由库里的 `promo_level` 定、不由
-    frontmatter 定:索引重建 `doc_tags` 之后紧跟着 `store._align_promo_tag`
-    按落库那份判定纠正它。所以 md 上那行和库里不一致**不构成**「磁盘领先于
-    索引」—— 把它算进来只会让每一次软广回写都登记不上、下一轮白重建一遍。
+    **标签这一样不是集合全等,分两段判,而且这是本函数最容易判错的地方:**
+
+    - **普通标签只比「文件上有的,库里都有吗」这一个方向。** 反方向(库里有、
+      文件没有)是**合法状态**:`kb extract` 不带 `--writeback` 时提取结果只落
+      `doc_tags`、不回写文件。按全等判它,拒绝登记的代价**不是**「白重建一次」
+      —— `upsert_document` 重建 doc_tags 是 `DELETE` 全部再**只从文件**重建,
+      那些库里专有的提取标签当场永久没了,`extracted_at` 非空也不会重新提取。
+      退让的那一半是「外来编辑**删掉**了 md 上一行标签」:我们照旧登记,库里
+      那行留着(查询多捞到一条),等这一篇正文真的变了再重建纠正 —— 比永久吞掉
+      一批提取标签轻。
+    - **`flag/软广` 那一行按落库那份判定归一化**,规则和索引自己用的是同一份
+      (`store.promo_tag_wanted`):hard 就该有、none/soft 就该没有、**还没判过
+      (`''`)就跟着文件**。原来这里无条件把它从两边排除,于是还没判过的那一篇
+      上,外来编辑增删 md 那行 flag 判据完全看不见 —— 收据照签,而真实索引这时
+      是跟着文件的,按这个标签筛选从此停在旧结果上。
 
     **一个写事务里读完所有表。** 跨三张表没法把判据塞进某一句的 WHERE,所以
     靠 `BEGIN IMMEDIATE`:读和随后那句条件 UPDATE 同属一个事务、同一个快照。
@@ -174,6 +188,7 @@ def index_projection_matches(conn, doc_path: str, text: str) -> str:
     from kb.extract import VAULT_ROOT
     from kb.extract_promo import PROMO_TAG
     from kb.scanner import doc_from_text
+    from kb.store import promo_tag_wanted
 
     row = conn.execute(
         "SELECT source, title, account, published, url FROM documents"
@@ -190,11 +205,24 @@ def index_projection_matches(conn, doc_path: str, text: str) -> str:
         if (row[col] or "") != getattr(doc, col):
             return f"磁盘上的 {col} 和索引里那一个不一样了"
 
-    want = {t for t in doc.tags if t != PROMO_TAG}
-    have = {r["tag"] for r in conn.execute(
-        "SELECT tag FROM doc_tags WHERE path=?", (doc_path,))} - {PROMO_TAG}
-    if want != have:
+    in_file = set(doc.tags)
+    in_db = {r["tag"] for r in conn.execute(
+        "SELECT tag FROM doc_tags WHERE path=?", (doc_path,))}
+    # **普通标签只比一个方向:文件上有的,库里得都有。** 反方向(库里有、文件
+    # 没有)是**合法状态** —— `kb extract` 不带 `--writeback` 是明确支持的操作,
+    # 提取出的 topic/entity 只落 `doc_tags`、压根不回写文件。判成不一致的后果
+    # 不是「白重建一次」:`upsert_document` 重建 doc_tags 是 `DELETE` 全部再
+    # **只从文件**重建,那些库里专有的提取标签当场永久没了,而 `extracted_at`
+    # 非空、这一篇不会被重新提取回来(2026-10-14 审查实测:一次双链化或一次
+    # 软广回写之后,两轮索引下来只剩 `source/*`,按主题和实体过滤全空)。
+    if (in_file - {PROMO_TAG}) - in_db:
         return "磁盘上那组标签还没进 doc_tags"
+    # `flag/软广` 那一行单独判,规则同 `store._align_promo_tag`(抽在
+    # `store.promo_tag_wanted` 里):判过就按判定、还没判过就跟着文件。
+    level = (conn.execute("SELECT promo_level FROM documents WHERE path=?",
+                          (doc_path,)).fetchone()["promo_level"] or "")
+    if promo_tag_wanted(level, PROMO_TAG in in_file) != (PROMO_TAG in in_db):
+        return "磁盘上那行软广标记和索引重建之后该有的对不上"
 
     chunks = [(c.seq, c.heading, c.text) for c in split_chunks(doc.body)]
     indexed = [(r["seq"], r["heading"], r["text"]) for r in conn.execute(
@@ -223,9 +251,13 @@ def register_written(conn, doc_path: str, written: str, expect: str) -> str:
     库里会留一个**磁盘上从未存在过**的 hash,而 `indexed` 还谎报一句登记上了。
 
     **0 行不是失败,正是想要的末态**:这一篇继续带着「待索引」,下一轮重建一次
-    就对了(误报的代价只是白重建一次,漏报是静默丢数据)。**所以这里一律不抛**
-    (SQL 和 UTF-8 解码仍可能抛,见模块说明那条异常契约):调用方照自己的记账把
-    原因打出来即可。
+    就对了。**所以「判据不符」一律走返回值、不抛** —— 调用方照自己的记账把原因
+    打出来即可。**但这不等于这个函数不抛**:读磁盘的 UTF-8 解码失败、那几句
+    SQL 失败都会原样飞出去(读失败只捕获 `OSError`),见模块说明那条异常契约。
+
+    **「误报」在这里不是一律良性的。** 普通标签那一段之所以只比一个方向,正是
+    因为拒绝登记会把这一篇交给下一轮重建,而重建 `doc_tags` 是**破坏性**的
+    (`DELETE` 全部再只从文件重建)——详见 `index_projection_matches`。
     """
     from kb.extract import VAULT_ROOT
     from kb.scanner import file_hash
@@ -297,9 +329,13 @@ class Rewriting:
         self.changed = True
 
     def _settle(self, conn) -> None:
-        """收尾:核对 + 登记 + 在锁里提交。**自己不抛** —— 调用方的异常正在往外飞
-        的时候也会走到这里(理由同 `extract.writeback_extraction` 那个 finally:
-        已经改掉的文件先登记上,漏登记才是坏的那一侧)。
+        """收尾:登记 + 在锁里提交。**判据不符不抛**(走 `reason`)—— 调用方的
+        异常正在往外飞的时候也会走到这里(理由同 `extract.writeback_extraction`
+        那个 finally:已经改掉的文件先登记上,漏登记才是坏的那一侧)。
+
+        **但它确实可能抛**:`register_written` 里读磁盘的解码失败、那几句 SQL、
+        以及这里的 `commit` 都会飞出去。写回已经抛了、这一步再抛的话,`finally`
+        里的新异常会盖掉原来那个 —— 异常契约见模块说明,不在这儿假装不抛。
         """
         if self.new_text is not None:
             # **三样证明全在 `register_written` 里,这里不自己判。** 原来核对

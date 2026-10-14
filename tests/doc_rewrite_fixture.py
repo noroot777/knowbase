@@ -317,3 +317,73 @@ class Vault(unittest.TestCase):
         return self.conn.execute(
             f"SELECT {name} FROM documents WHERE path=?", (rel,)
         ).fetchone()[name] or ""
+
+    # ── 「提取只落库、不回写文件」那个合法状态 ────────────────────────────────
+
+    def extract_without_writeback(self, rel: str, topic: str = "只落库的主题",
+                                  entity: str = "ReviewTool") -> None:
+        """真跑一次 `commit_extraction(writeback=False)` —— `kb extract` 不带
+        `--writeback` 就是这条路(`kb/cli.py` 那个开关),是明确支持的操作。
+
+        末态是**库里有 `topic/*`、`entity/*`,md 文件上没有**,`extracted_at`
+        非空。这是合法状态,不是「磁盘领先于索引」—— 它恰好是反方向。
+        """
+        from kb import extract, store
+        snap = store.doc_input_snapshot(self.conn, rel)
+        # `input_seen` 是**模型输入那一组的指纹**,不是 content_hash
+        # (口径同 `extract._candidates` 给 snap 塞的那个 "seen")
+        seen = extract.input_fingerprint(snap["title"], snap["account"],
+                                         snap["body"])
+        extract.commit_extraction(
+            self.conn, rel,
+            {"summary": "审查复现", "topics": [topic],
+             "entities": [{"name": entity, "kind": "tool"}]},
+            seen, writeback=False)
+        self.conn.commit()
+
+    def promo_level(self, rel: str) -> str:
+        return self.conn.execute(
+            "SELECT promo_level FROM documents WHERE path=?",
+            (rel,)).fetchone()["promo_level"] or ""
+
+    def set_promo_level(self, rel: str, level: str) -> None:
+        self.conn.execute("UPDATE documents SET promo_level=? WHERE path=?",
+                          (level, rel))
+        self.conn.commit()
+
+    def flag_in_db(self, rel: str) -> bool:
+        from kb.extract_promo import PROMO_TAG
+        return PROMO_TAG in self.tags(rel)
+
+    def flag_in_md(self, rel: str) -> bool:
+        from kb.extract_promo import PROMO_TAG
+        return PROMO_TAG in scanner.frontmatter_tags(
+            scanner.parse_frontmatter(self.disk(rel))[0])
+
+    @contextlib.contextmanager
+    def rival_slips_in_before_the_main_writeback_reads(
+            self, rel: str, *, lock: bool, text: str | None = None):
+        """把独立进程安排在「捕获 before」之后、写入函数**读文件之前**。
+
+        和 `rival_slips_in_after_the_main_writeback` 的区别要紧:那个注入点在
+        写回**之后**,所以外来改动不在 `written` 里 —— ①「磁盘上还是本次写出
+        去的那一份」当场就拦住了,② 压根轮不到说话。这个注入点在读之前,
+        `writeback_tags` 读到的就是外来那一份、把那个改动**带进自己写出去的
+        全文**,于是 ① 合法通过,这一档**只有 ② 拦得住**。
+
+        两道判据对大多数外来编辑互为备份,所以要分辨「某一道自己还在不在」,
+        注入时点必须选得让另一道闭嘴 —— 否则一道坏掉也全绿。
+        """
+        from kb import extract_writeback
+        seen = {}
+        real = extract_writeback.writeback_tags
+
+        def rival_then_write(doc_path, new_tags):
+            if doc_path == rel and "child" not in seen:
+                seen["child"] = self.rival(rel, lock=lock, text=text)
+            return real(doc_path, new_tags)
+
+        with mock.patch.object(extract_writeback, "writeback_tags",
+                               rival_then_write), \
+             mock.patch("kb.extract.writeback_tags", rival_then_write):
+            yield seen
