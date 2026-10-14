@@ -12,6 +12,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from kb import pipeline as pl
+from kb.config import ScheduleUnreadable
+from kb.web.common import unreadable_config
 from kb.collectors import (
     CollectorError,
     active_collector,
@@ -51,7 +53,10 @@ class ScheduleRequest(BaseModel):
 
 @router.get("/api/pipeline/schedule")
 def pipeline_schedule():
-    return pl.load_schedule()
+    try:
+        return pl.load_schedule()
+    except ScheduleUnreadable as e:
+        raise unreadable_config(e) from None
 
 
 @router.post("/api/pipeline/schedule")
@@ -60,6 +65,10 @@ def pipeline_schedule_set(body: ScheduleRequest):
     channels = body.channels if body.channels is not None else body.channel
     try:
         return pl.save_schedule(body.enabled, body.time, channels)
+    except ScheduleUnreadable as e:
+        raise unreadable_config(e) from None
+    except OSError as e:
+        raise HTTPException(503, f'没能保存定时设置({e})。原来那份还在。') from None
     except ValueError as e:
         raise HTTPException(400, str(e))
 

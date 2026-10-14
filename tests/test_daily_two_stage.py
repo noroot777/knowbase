@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from kb import daily, daily_run
+from kb import daily_state
 from kb import pipeline_state as ps
 from tests.pipeline_round_fixture import finish_round
 
@@ -33,7 +34,7 @@ class DailyTwoStageSyncTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         labels = {'wechat_local': '公众号', 'social': '大V观点', 'rss': 'RSS'}
-        for p in (patch.object(daily_run, 'STATE_FILE', Path(temp.name) / 'last_run.json'),
+        for p in (patch.object(daily_state, 'STATE_FILE', Path(temp.name) / 'last_run.json'),
                   patch.object(daily_run, 'SETTINGS_FILE', Path(temp.name) / 'daily.json'),
                   patch.object(ps, '_STATE_FILE', Path(temp.name) / 'pipeline.json'),
                   patch.object(daily_run, '_channel_labels', Mock(return_value=labels))):

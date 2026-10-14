@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from kb.source_types import feed_types
@@ -148,3 +151,153 @@ def expand_sources(value) -> list[str] | None:
             out.append(key)
     seen: set[str] = set()
     return [x for x in out if not (x in seen or seen.add(x))] or None
+
+
+# ── 配置文件怎么读:**没有 ≠ 读不出来** ─────────────────────────────────────────
+
+class ScheduleUnreadable(RuntimeError):
+    """盘上那份定时配置读不出来(权限、介质、内容坏了)。**不许当成"没开"。**
+
+    降级成空 dict 之后派生出来的 `enabled=False` 是一句**假的确定话**:API 还会
+    带着 200 回去,界面照它写「未启用」「这一类来源目前不会自动同步」,而盘上那份
+    其实开着 —— 人于是去等一个他以为关掉了、实际上随时会来的同步,反过来也一样。
+    读不出来的正确答案是「不知道」,那一档界面上本来就有(见 `schedules.js`)。
+    """
+
+
+def read_config_file(path, what: str) -> dict:
+    """读一份 JSON 配置并保证上面那条区分。
+
+    - **文件不在** = 还没设置过:返回 `{}`,由调用方补缺省值。这是**确定**的事实。
+    - **空文件**(或只有空白)= `ScheduleUnreadable`。**它跟"文件不在"不是一回事**:
+      一个 0 字节的配置文件只可能是写坏的残骸(就地 `write_text` 先截断再写、中途
+      失败/进程退出),里面原来那份开关、时刻、范围、当天已跑标记全被截掉了 ——
+      按"还没设置过"处理就是拿缺省值冒充用户的设置。第 2 轮实测:给保存进程加
+      `RLIMIT_FSIZE=0`,日报那份从 185 字节变 0 字节,之后的 GET 照旧 200、
+      `enabled=false`、时刻回到缺省。写口那一侧的保证见 `write_config_file`。
+    - 权限/介质错、编码不是 UTF-8、内容不是合法 JSON、顶层不是对象 =
+      `ScheduleUnreadable`。**解码错也要归到这里**:`UnicodeDecodeError` 是
+      `ValueError` 不是 `OSError`,漏掉它就会原样抛到调度线程那层
+      `except Exception: pass`,把另一条健康的定时一起停掉(第 2 轮实测)。
+    """
+    try:
+        text = path.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise ScheduleUnreadable(f'{what}读不出来({e})') from e
+    except ValueError as e:                 # UnicodeDecodeError 走这条
+        raise ScheduleUnreadable(f'{what}不是 UTF-8 文本({e})') from e
+    if not text.strip():
+        raise ScheduleUnreadable(f'{what}是个空文件(多半是上次保存写坏了)')
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ScheduleUnreadable(f'{what}内容坏了({e})') from e
+    if not isinstance(data, dict):
+        raise ScheduleUnreadable(f'{what}的内容不是一个配置对象')
+    return data
+
+
+def derive_config(what: str, build):
+    """把"原样内容 → 带缺省值的设置"这一步的字段错误也归到 `ScheduleUnreadable`。
+
+    `int(d['first_days'])`、时刻字段这类转换遇到乱值会抛 `ValueError`/`TypeError`,
+    那同样是"这份配置读不出来",不是"用户关掉了" —— 而且**不归一的话它会原样抛到
+    调度线程那层 `except Exception: pass`**,把另一条健康的定时一起停掉。
+    """
+    try:
+        return build()
+    except ScheduleUnreadable:
+        raise
+    except (TypeError, ValueError, AttributeError) as e:
+        raise ScheduleUnreadable(f'{what}里有读不懂的字段({e})') from e
+
+
+# 定时配置里那几种字段的口径,**两条定时共用一份**(口径只有一份)。
+# **缺字段 = 用缺省值**(老配置少一格要照旧能用);**有字段但不合格 = 读不懂**,一律
+# 抛 —— 由上面那个 `derive_config` 归一成 `ScheduleUnreadable`(面板 503、这条定时
+# 暂停并留原因,另一条健康的照常)。
+#
+# 为什么不能只靠 JSON 合法:`{"enabled": true, "time": 7}` 放过去的话,GET 回 200、
+# 来源说明写「每天 7」,而调度里是两个字符串比大小,拿它跟数字比当场抛 —— **界面说
+# 着一套、实际跑的是另一套**,比直接报错难查得多。字符串 `"false"` 同理:`bool()`
+# 眼里它是真的,一条关掉的定时会被显示成开着。
+_CLOCK = re.compile(r'([01]\d|2[0-3]):[0-5]\d')
+_DAY = re.compile(r'\d{4}-\d{2}-\d{2}')
+
+
+def config_flag(d: dict, key: str, default: bool = False) -> bool:
+    """开关:只认真正的 true / false。"""
+    v = d.get(key, default)
+    if isinstance(v, bool):
+        return v
+    raise ValueError(f'{key} 要的是 true 或 false,拿到 {v!r}')
+
+
+def config_clock(d: dict, key: str, default: str) -> str:
+    """每天几点:HH:MM。空/缺 = 缺省值。"""
+    v = d.get(key) or default
+    if isinstance(v, str) and _CLOCK.fullmatch(v):
+        return v
+    raise ValueError(f'{key} 要的是 HH:MM 时刻,拿到 {v!r}')
+
+
+def config_day(d: dict, key: str) -> str:
+    """哪一天:YYYY-MM-DD。空 = 没有(还没跑过/没失败过)。"""
+    v = d.get(key) or ''
+    if not v or (isinstance(v, str) and _DAY.fullmatch(v)):
+        return v
+    raise ValueError(f'{key} 要的是 YYYY-MM-DD 日期,拿到 {v!r}')
+
+
+def config_stamp(d: dict, key: str) -> str:
+    """到分的时刻:YYYY-MM-DDTHH:MM。空 = 没安排。
+
+    **要跟 `datetime.now().isoformat(timespec='minutes')` 逐字可比** —— 到期判据就是
+    两个字符串比大小(见 `daily_run.tick`),格式不齐(多了秒、少了 T)比出来的结果
+    是错的,而面板上一切正常。
+    """
+    v = d.get(key) or ''
+    if not v or (isinstance(v, str) and len(v) == 16 and v[10:11] == 'T'
+                 and _DAY.fullmatch(v[:10]) and _CLOCK.fullmatch(v[11:])):
+        return v
+    raise ValueError(f'{key} 要的是 YYYY-MM-DDTHH:MM 时刻,拿到 {v!r}')
+
+
+def write_config_file(path, data: dict) -> None:
+    """原子替换着写一份 JSON 配置。**一次保存失败不许动上一份有效快照。**
+
+    就地 `write_text` 是"先把文件截成 0 字节,再往里写":写到一半失败(配额、
+    满盘、进程被杀)盘上剩的就是半截或者整个空文件,而原来那份**已经没了** ——
+    开关、时刻、同步范围、当天已跑标记一起丢。先写同目录临时文件再 `os.replace`,
+    失败时原来那份一字未动(口径同 `pipeline_state._write_state`)。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + '.tmp')
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding='utf-8')
+        os.replace(tmp, path)
+    except OSError:
+        # 失败就把残骸带走:留着既占地方(满盘那一档正是因为没地方),也让下一个
+        # 看目录的人以为那是份配置。原来那份一字未动,所以直接往上抛。
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+_announced: dict[str, str] = {}
+
+
+def announce_config_issue(what: str, reason: str) -> None:
+    """定时线程读不出配置时留一句话;`reason` 空串 = 又读得出来了。
+
+    **只在状态变化时说**:每 30 秒一跳,每跳都喊会把服务日志刷满;一声不吭则是
+    另一头 —— 调度线程那层 `except Exception: pass` 不留话,「定时从此不再触发」
+    就成了一个没有任何痕迹的静默故障。
+    """
+    if _announced.get(what, '') == reason:
+        return
+    _announced[what] = reason
+    from datetime import datetime
+    print(f'[{datetime.now().strftime("%m-%d %H:%M:%S")}] '
+          + (reason or f'{what}又读得出来了,定时照常'), file=sys.stderr, flush=True)

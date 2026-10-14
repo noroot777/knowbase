@@ -19,7 +19,10 @@ import time
 from copy import deepcopy
 from datetime import datetime, timedelta
 
-from kb.config import DATA_DIR
+from kb.config import (DATA_DIR, ScheduleUnreadable, announce_config_issue,
+                       config_clock, config_day, config_flag, config_stamp,
+                       derive_config, read_config_file, write_config_file)
+from kb.sched_ledger import Ledger
 from kb.collectors import active_collector, known_channels, resolve_channel
 from kb.pipeline_retry import retry_failed_plan, start_retry_failed
 from kb.pipeline_stages import (
@@ -229,20 +232,24 @@ def channel_filter(channels: list[str]) -> dict:
 
 
 def load_schedule() -> dict:
-    try:
-        d = json.loads(_SCHED_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        d = {}
+    """页头那颗「定时同步」的配置。**读不出来就抛,不许降级成"没开"**
+    (同 `daily_run._raw_settings`,口径在 `kb.config.read_config_file`)。"""
+    d = read_config_file(_SCHED_FILE, '页头的定时同步设置')
+    return derive_config('页头的定时同步设置', lambda: _schedule_from(d))
+
+
+def _schedule_from(d: dict) -> dict:
+    """原样内容 → 带缺省值的定时。字段里的乱值由 `derive_config` 归一。"""
     # 读盘这一侧宽容:认不出的名字跳过(通道被删/改过名),绿泡泡那条跟着设置走。
     # 一个坏名字不该让整份定时配置读不出来。
     channels = known_channels([c for c in (d.get("channels") or [d.get("channel")]) if c]) \
         or [active_collector().name]
-    return {"enabled": bool(d.get("enabled")),
-            "time": d.get("time") or "07:30",
+    return {"enabled": config_flag(d, "enabled"),
+            "time": config_clock(d, "time", "07:30"),
             "channel": channels[0],
             "channels": channels,
-            "last_fired": d.get("last_fired") or "",
-            "next_run": d.get("next_run") or ""}
+            "last_fired": config_day(d, "last_fired"),
+            "next_run": config_stamp(d, "next_run")}
 
 
 def save_schedule(enabled: bool, time_str: str,
@@ -266,19 +273,44 @@ def save_schedule(enabled: bool, time_str: str,
         cur.update({"enabled": bool(enabled), "time": time_str,
                     "channel": names[0], "channels": names,
                     "next_run": next_run.isoformat(timespec='minutes') if enabled else ''})
-        _SCHED_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _SCHED_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
-                               encoding="utf-8")
+        # 原子替换:保存失败不许把上一份有效定时截成空文件(见
+        # `kb.config.write_config_file`)。
+        write_config_file(_SCHED_FILE, cur)
         return cur
 
 
+# 页头那条定时今天起过没有,记在**调度账本**里(两条定时共用一份实现,见
+# `kb.sched_ledger`):`_mark_fired` 写不进去(配置一时读不出、满盘)时,只认盘上
+# 那个 last_fired 就会让同一天再跑一整轮全流程(六段里的 extract 是要花模型钱的)。
+# 这条定时**只用 `done` 那一格** —— 它没有补跑,也就没有退避和次数上限。
+# **重启之后账本空了**,那时只能回头问盘上那份:页头这条没有"今天的产物"可查
+# (日报那条有 `_report_done`),所以写失败 + 重启这一档它可能多跑一轮 —— 写失败
+# 那一刻就留一句提示(下面那个 announce),如实记在
+# `docs/decisions/sync-schedule.md` 里。
+_book = Ledger(lambda: _SCHED_FILE)      # 跟着 _SCHED_FILE 走,换库作废
+
+
 def _mark_fired(day: str) -> None:
-    cur = load_schedule()
+    # 先记账本,再写盘:写不进去也不许当成"今天没跑过"(见 `kb.sched_ledger`)
+    _book.book(day).finish(0, True, '')
+    try:
+        cur = load_schedule()
+    except ScheduleUnreadable as e:
+        # 同 `daily_run._write_settings`:读不出来就不写,别拿缺省值盖掉用户那份。
+        announce_config_issue('页头的定时同步设置', f'{e};这一次不改它')
+        return
     cur["last_fired"] = day
     tomorrow = datetime.strptime(day, '%Y-%m-%d') + timedelta(days=1)
     cur['next_run'] = tomorrow.strftime('%Y-%m-%d') + 'T' + cur['time']
-    _SCHED_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
-                           encoding="utf-8")
+    try:
+        write_config_file(_SCHED_FILE, cur)
+    except OSError as e:
+        # **持久化失败不往上抛。** 这一跳该起的已经起了,而"今天起过"这件事上面
+        # 那一行已经记进进程了 —— 抛出去只会让这一跳被算成"出错没起跑",紧接着
+        # 日报那条也来抢同一把管道锁。盘上那份原封不动(原子替换),说一句就够。
+        announce_config_issue('页头的定时同步设置',
+                              f'当天已跑标记没能写进磁盘({e});本进程内不会重复跑,'
+                              '重启后可能再跑一轮')
 
 
 def _scheduler_tick() -> None:
@@ -287,28 +319,65 @@ def _scheduler_tick() -> None:
     # 日报那边就会一直等不到空闲、把通道一个个记成"跳过"。
     if daily_run.is_running():
         return
-    with _schedule_lock:
-        s = load_schedule()
-        now = datetime.now()
-        today = now.strftime("%Y-%m-%d")
-        # Legacy schedules retain restart catch-up; newly saved schedules persist
-        # their next occurrence, including busy deferrals across midnight/restarts.
-        due = (now.isoformat(timespec='minutes') >= s['next_run'] if s.get('next_run')
-               else now.strftime('%H:%M') >= s['time'])
-        if s["enabled"] and due and s["last_fired"] != today:
-            # channels 是新写法;读到的要是旧配置(或还没升级的调用方给的 dict)就退回单个 channel
-            channels = [c for c in (s.get("channels") or [s.get("channel")]) if c]
-            if start_pipeline(None, crawl_filter=channel_filter(channels)):
-                _mark_fired(today)
-                _log(f"定时任务触发全流程同步(每日 {s['time']})")
-                return
-    daily_run.tick()
+    # **每条定时自己的故障只影响自己。** 外面那层 `_scheduler_loop` 只有一个
+    # `except Exception: pass`:异常从这里抛出去的后果是**后面那条健康的定时
+    # 一跳都不跑**,而且一句话都不留 —— 第 2 轮实测把页头那份配置写成非 UTF-8
+    # 字节,`UnicodeDecodeError` 直接穿过去,日报那条(明明开着)从此不再触发。
+    # 「线程没死」不等于「每条任务都还在跑」。
+    if _isolated('页头的定时同步', _fire_head_schedule):
+        return
+    _isolated('日报定时', daily_run.tick)
     # 这里原来还有第三档:每类订阅按自己的间隔自动同步(`kb.feeds.schedule`)。
     # **整条拆掉了** —— 一天一次就够,几份各自到点的定时抢同一把管道锁,先到的
     # 那个会把后到的挤成「跳过」。订阅内容现在跟着日报那一轮进库
     # (`daily_run.tick` 的同步范围),手动同步照旧随时可用。
     # 上面那一档(`load_schedule`,我的订阅页头那颗「定时同步」)**是按要求暂留的**,
     # 不是漏删:删它要等同步中心历史留档那条分支落地。见 `docs/decisions/sync-schedule.md`。
+
+
+def _isolated(what: str, task) -> bool:
+    """跑一条定时任务,**它自己的异常留在它自己这一跳里**,并留下可诊断的原因。
+
+    读不出配置那一族(`ScheduleUnreadable`)在任务里面已经各自处理过(跳过 + 留
+    原因);到这里的是**没预料到的**那些 —— 一律按"这一跳失败"处理,说一句、
+    返回 False(没起跑),让下一条照常轮到自己。
+    """
+    try:
+        return bool(task())
+    except Exception as e:                            # noqa: BLE001 - 见上
+        announce_config_issue(what, f'{what}这一跳出错({type(e).__name__}: {e});'
+                                    '这一跳跳过,别的定时照常')
+        return False
+
+
+def _fire_head_schedule() -> bool:
+    """页头那条定时该不该在这一跳起跑。返回"起了没有"。
+
+    **读不出设置就跳过这一跳并留原因**(同 `daily_run.tick`):按"没开"处理
+    等于把一个故障说成"用户关掉了开关",而调度线程那层 `except Exception: pass`
+    一句话都不留 —— 定时从此不再触发,面板上却一切正常。
+    """
+    with _schedule_lock:
+        try:
+            s = load_schedule()
+        except ScheduleUnreadable as e:
+            announce_config_issue('页头的定时同步设置', f'{e};这一跳跳过,定时暂停')
+            return False
+        announce_config_issue('页头的定时同步设置', '')
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        # Legacy schedules retain restart catch-up; newly saved schedules persist
+        # their next occurrence, including busy deferrals across midnight/restarts.
+        due = (now.isoformat(timespec='minutes') >= s['next_run'] if s.get('next_run')
+               else now.strftime('%H:%M') >= s['time'])
+        if s["enabled"] and due and not _book.book(today).done and today != s["last_fired"]:
+            # channels 是新写法;读到的要是旧配置(或还没升级的调用方给的 dict)就退回单个 channel
+            channels = [c for c in (s.get("channels") or [s.get("channel")]) if c]
+            if start_pipeline(None, crawl_filter=channel_filter(channels)):
+                _mark_fired(today)
+                _log(f"定时任务触发全流程同步(每日 {s['time']})")
+                return True
+    return False
 
 
 def _scheduler_loop() -> None:

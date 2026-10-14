@@ -13,6 +13,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from kb import daily, daily_run
+from kb.config import ScheduleUnreadable
+from kb.web.common import unreadable_config
 
 router = APIRouter(prefix='/api/daily')
 
@@ -39,7 +41,11 @@ def _check_time(value: str | None) -> datetime | None:
 @router.get('/settings')
 def get_settings():
     from kb.collectors import collection_channels
-    return {'settings': daily_run.load_settings(),
+    try:
+        settings = daily_run.load_settings()
+    except ScheduleUnreadable as e:
+        raise unreadable_config(e) from None
+    return {'settings': settings,
             'channels': collection_channels(),
             'default_channels': daily_run.default_channels()}
 
@@ -57,6 +63,14 @@ def set_settings(body: SettingsRequest):
     try:
         return daily_run.save_settings(body.enabled, body.time, body.channels,
                                        body.sync, body.first_days)
+    except ScheduleUnreadable as e:
+        # 保存要先读旧那份来合并(last_fired / next_run)。读不出来时**宁可存不下**
+        # 也不拿缺省值当底写一份出去:那会把"今天已经出过报"这类事实一起抹掉。
+        raise unreadable_config(e) from None
+    except OSError as e:
+        # 写不进去也要如实说(界面照它显示「未保存」并保留草稿)。原来那份还在
+        # (原子替换,见 `kb.config.write_config_file`)。
+        raise HTTPException(503, f'没能保存定时设置({e})。原来那份还在。') from None
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
 
@@ -76,7 +90,13 @@ def window():
     模型钱)。零模型调用,所以放在这条每次打开面板都会调的路上。查不出来时整个
     键给 null,窗口预填照旧 —— 它只是提示。
     """
-    settings = daily_run.load_settings()
+    # 这条只给窗口预填(回溯几天),不报"定时开没开" —— 所以读不出来时退回缺省
+    # 天数照常给出窗口,而不是让面板打不开。那句"开没开"由 /settings 回答。
+    try:
+        first_days = daily_run.load_settings()['first_days']
+    except ScheduleUnreadable:
+        first_days = daily.FIRST_DAYS
+    settings = {'first_days': first_days}
     try:
         info = daily.pending(settings['first_days'])
     except Exception:                               # noqa: BLE001 - 提示失败不该让面板打不开
@@ -103,6 +123,10 @@ def run(body: RunRequest | None = None):
     try:
         started = daily_run.start(_check_time(body.since), _check_time(body.until),
                                   sync=body.sync, channels=body.channels)
+    except ScheduleUnreadable as e:
+        # 手动生成也要读设置拿同步范围。拿缺省范围替它跑等于**悄悄换了同步范围**
+        # (比如用户只留了 RSS,缺省却带上公众号),所以这里也如实报读不出来。
+        raise unreadable_config(e) from None
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
     if not started:

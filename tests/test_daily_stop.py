@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from kb import daily, daily_run
+from kb import daily_state
 from kb.web import daily_api
 
 
@@ -25,7 +26,7 @@ class DailyStopTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.settings = Path(temp.name) / 'daily_report.json'
-        for p in (patch.object(daily_run, 'STATE_FILE', Path(temp.name) / 'last_run.json'),
+        for p in (patch.object(daily_state, 'STATE_FILE', Path(temp.name) / 'last_run.json'),
                   patch.object(daily_run, 'SETTINGS_FILE', self.settings)):
             p.start(); self.addCleanup(p.stop)
         self.before = deepcopy(daily_run._state)
