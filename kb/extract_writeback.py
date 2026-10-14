@@ -84,14 +84,22 @@ def remove_writeback_tag(doc_path: str, tag: str) -> str | None:
     return written
 
 
-def refresh_content_hash(conn, doc_path: str, written: str, expect: str) -> str:
+def refresh_content_hash(conn, doc_path: str, before: str | None,
+                         written: str) -> str:
     """writeback 改了 frontmatter 后刷新库里的 hash,避免下次 index 无谓重建。
     返回空串 = 刷了,非空 = 没刷的原因。
 
     **判据不在这儿,在 `kb.doc_rewrite.register_written`** —— 那一份是「登记
     `content_hash` 即声明已索引」这个不变量的唯一边界(三样证明:磁盘上此刻还是
-    本次写出去的那一份、这一份现在重新索引一次库里不会变、库里记的还是动手之前
-    那个 hash)。这里剩下的只是转发。
+    本次写出去的那一份、这一份现在重新索引一次库里那些从文件来的东西不会变、
+    库里记的还是动手之前那个 hash)。这里剩下的只是转发。
+
+    **`before` 是索引消费的那一份原文,不是它的 hash。** 判据要拿它回答「文件
+    自己那几句话(标签、summary、project/kind)动没动」—— 只有 hash 的话,
+    「库里有、md 上没有」的两种来源分不开:合法的「提取只落库没回写」和外来编辑
+    **刚把那行标签删掉**,末态长得一模一样(审查实测:只比一个方向时,删掉的标签
+    两轮索引之后还在库里,按它筛选照旧命中)。读不出来就交 None,那时登记一律
+    拒绝 —— 第三样证明本来也会 0 行。
 
     **`written` 必须是本次真正写出去的那一份,这里不许自己去读磁盘。** 原来它
     就是「读一次磁盘、把读到的交给登记」,于是那道「登记的是我写出去的那一份」
@@ -101,13 +109,12 @@ def refresh_content_hash(conn, doc_path: str, written: str, expect: str) -> str:
     标题搜不到,再同步也不恢复。签名改成必须交付写出快照之后,这条路压根没有
     「读到的」可以充当「写出的」。
 
-    **没有「不给 expect」这一档。** 原来它有个无条件分支留给两个「自己刚写完这个
-    文件、紧接着刷」的单线程脚本,理由是它们手里没有动手之前那个值 —— 可那个值它
+    **没有「不给 before」这一档。** 原来它有个无条件分支留给两个「自己刚写完这个
+    文件、紧接着刷」的单线程脚本,理由是它们手里没有动手之前那一份 —— 可那一份它
     们一直有(写之前读的那份原文),而「单线程」只排除了自己,排除不掉另一个进程
     里正在跑的导出。那两条旁路现在整段走 `kb.doc_rewrite.rewriting()`,不再自己
-    碰这一句;这个参数也没有默认值:新调用方要么拿得出动手之前那份 hash,要么
-    别刷。
+    碰这一句;这个参数也没有默认值:新调用方要么拿得出动手之前那一份,要么别刷。
     """
     from kb.doc_rewrite import register_written
 
-    return register_written(conn, doc_path, written, expect)
+    return register_written(conn, doc_path, before, written)

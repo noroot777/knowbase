@@ -475,10 +475,12 @@ class CallSiteTests(unittest.TestCase):
     def test_every_hash_refresh_proves_the_version_it_overwrites(self):
         """刷「已索引」那张收据的每一处调用点都得拿出「动手之前」那份 hash。
 
-        判据钉在调用点上:`expect` 一旦有默认值,忘了传的那条路**一条测试都不会
+        判据钉在调用点上:`before` 一旦有默认值,忘了传的那条路**一条测试都不会
         红**,只会在某天把别人那份还没索引的改动认证成「已索引」—— 那份改动从此
         永远进不了 chunks(实测最坏的一种:磁盘上换成了新正文、chunks 还是旧的,
         新正文一个字都搜不到,点开文章却是新的,再同步也不恢复)。
+        **`before` 交的是原文、不是它的 hash**:判据要拿它回答「文件自己那几句话
+        动没动」,hash 答不了(见 `kb.doc_rewrite.index_projection_matches`)。
         所以这里既钉「只有这几处在调它」,也钉「它压根没有默认值可漏」——
         `written` 那个参数同理:**有默认值就等于又给了「事后重读磁盘」一条路**,
         而那一份可能已经是别人的了。
@@ -494,13 +496,13 @@ class CallSiteTests(unittest.TestCase):
         self.assertEqual(
             {'kb/extract.py', 'kb/extract_writeback.py'},
             self.grep('refresh_content_hash(conn'),
-            '多了一处刷新索引收据的调用点 —— 它拿出「动手之前」那份 hash 了吗')
+            '多了一处刷新索引收据的调用点 —— 它拿出「动手之前那一份原文」了吗')
         src = (root / 'kb/extract_writeback.py').read_text(encoding='utf-8')
         self.assertIn(
-            'def refresh_content_hash(conn, doc_path: str, written: str,'
-            ' expect: str)', src,
-            '签名变了:`written`(本次写出去的那一份)或 `expect`(动手之前那份'
-            ' hash)有了默认值,漏传的那条路会静默认证别人的改动')
+            'def refresh_content_hash(conn, doc_path: str,'
+            ' before: str | None,\n                         written: str)', src,
+            '签名变了:`written`(本次写出去的那一份)或 `before`(索引消费的'
+            '那一份原文)有了默认值,漏传的那条路会静默认证别人的改动')
         self.assertNotIn('read_text', src.split(
             'def refresh_content_hash')[1],
             '它又自己去读磁盘了 —— 「刚读到」不能充当「刚写出」')

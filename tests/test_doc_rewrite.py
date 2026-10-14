@@ -421,17 +421,21 @@ class MainWritebackTests(Vault):
         v0 = self.version(rel)
         # 外来那份要带上**这一轮已经落库**的那个 tag,否则不一致的是它、
         # 摆出来的就不是「没动索引投影」那一档了
+        before = self.disk(rel)
+        # 外来那一份改的得是**索引压根不读的**一个 frontmatter 键。原来这里加的是
+        # `summary:`,它现在进投影了(upsert 之后那一步会把它写进
+        # `documents.summary`),② 对它有意见 —— 那就不是这一档要摆的局了。
         foreign = self.md_with(
             "gzh", tags=[f"source/{self.SOURCES['gzh']}", "topic/审查复现"]
         ).replace('account: "审查隔离号"',
-                  'account: "审查隔离号"\nsummary: "别人刚写的一句人工摘要"')
+                  'account: "审查隔离号"\nnote: "别人刚加的一行备注"')
         with self.rival_slips_in_after_the_main_writeback(
                 rel, lock=False, text=foreign) as seen:
             self.assertTrue(self.run_main_writeback(rel))
         self.assertEqual(0, seen["child"].returncode, seen["child"].stderr)
         # 先钉住摆盘:这一档的 ② 确实没有意见
         self.assertEqual("", doc_rewrite.index_projection_matches(
-            self.conn, rel, self.disk(rel)),
+            self.conn, rel, before, self.disk(rel)),
             "摆盘没摆出「外来编辑没动索引投影」那一档")
         self.assertEqual(v0, self.version(rel),
                          "收据盖到了别人那一份上(我写出去的那一份已经没了)")

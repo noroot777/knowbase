@@ -68,6 +68,19 @@ class CallSiteRosterTests(unittest.TestCase):
                 found[py.relative_to(ROOT).as_posix()] = n
         return found
 
+    def kb_defs(self) -> set[str]:
+        """`kb/` 里定义过的函数名 —— 用来把索引那一趟的调用筛成「我们自己的」。
+
+        不这么筛的话,`print` / `commit` / `append` 一类噪声也会进名单,加一句
+        无关的打印就红一次;筛完剩下的才是「这一趟都调了我们哪些东西」。
+        """
+        out: set[str] = set()
+        for py in sorted(ROOT.glob("kb/**/*.py")):
+            for node in ast.walk(self.tree(py)):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    out.add(node.name)
+        return out
+
     def func(self, rel: str, name: str) -> ast.FunctionDef:
         """这份源码里叫 `name` 的那个函数(找不到就红 —— 多半是改名了)。"""
         for node in ast.walk(self.tree(ROOT / rel)):
@@ -165,13 +178,58 @@ class CallSiteRosterTests(unittest.TestCase):
         for table in ("doc_tags", "chunks"):
             self.assertIn(f"INSERT INTO {table} ", head.replace(" OR IGNORE", ""),
                           f"索引不再写 {table} 了?判据跟着改")
+        # upsert 之后那一步(`parse_pretagged` → `save_extraction`)写的那几样
+        ext = (ROOT / "kb/extract.py").read_text(encoding="utf-8")
+        save = ext[ext.index("def save_extraction"):ext.index("def extraction_tags")]
+        for stmt in ("DELETE FROM entities", "INSERT OR IGNORE INTO entities",
+                     "INSERT OR IGNORE INTO doc_tags",
+                     "UPDATE documents SET extracted_at=?, summary=?"):
+            self.assertIn(stmt, save,
+                          f"`save_extraction` 不再写「{stmt}」了?判据跟着改")
         proj = (ROOT / "kb/doc_rewrite.py").read_text(encoding="utf-8")
-        body = proj[proj.index("def index_projection_matches"):
+        body = proj[proj.index("def _extraction_claims"):
                     proj.index("def register_written")]
-        for col in ("source", "title", "account", "published", "url"):
+        for col in ("source", "title", "account", "published", "url",
+                    "summary"):
             self.assertIn(f'"{col}"', body, f"投影判据没比 {col}")
-        for table in ("doc_tags", "chunks"):
+        for table in ("doc_tags", "chunks", "entities"):
             self.assertIn(table, body, f"投影判据没比 {table}")
+
+    def test_the_index_pass_has_no_derived_step_the_projection_does_not_know(self):
+        """**索引不是 upsert 完就完了** —— 那一趟还接着写什么,名单钉在这里。
+
+        三个真实索引入口都在 `upsert_document` 之后接着跑 `parse_pretagged` →
+        `save_extraction`(写 `documents.summary` 和 `entities`),而
+        `content_hash` 跳过的是**整趟**,不只是 upsert 那一句。审查实测过判据漏掉
+        这一层的后果:外来编辑改了 md 里的 summary 或 project/kind,收据照签,
+        连跑两趟 `kb index` 都报「未变 1」,库里和实体枚举一直是旧值,强制重建
+        才纠正得了。
+
+        所以这里按「这一趟都调了我们自己哪些函数」枚举:哪天多一步写库,这条红
+        会来提醒 `index_projection_matches` 跟着知道它 —— 那一句一个字不改的话,
+        症状只有「那一样永远是旧值」。
+        """
+        base = {"connect", "close", "scan_all", "doc_needs_reindex",
+                "split_chunks", "upsert_document",
+                "parse_pretagged", "save_extraction", "embed_pending_chunks"}
+        expected = {
+            # `now` 是 `datetime.now()`,恰好和 kb 里某个同名函数撞上(按名字筛
+            # 的代价),不是索引自己的一步。
+            ("kb/cli.py", "_index_pass"):
+                base | {"remove_missing_documents", "now"},
+            ("kb/pipeline_stages.py", "_index_pass"):
+                base | {"remove_missing_documents", "_now", "_stage"},
+            ("kb/pipeline_stages.py", "_ingest_pass"): base | {"_now"},
+        }
+        kb_defs = self.kb_defs()
+        for (rel, fn), want in expected.items():
+            called = {self._callee(n.func)
+                      for n in ast.walk(self.func(rel, fn))
+                      if isinstance(n, ast.Call)}
+            self.assertEqual(want, called & kb_defs,
+                             f"{rel} 的 {fn}() 这一趟调的东西变了 —— 多出来的"
+                             f"那一步也写库吗?`index_projection_matches` 要"
+                             f"跟着知道它")
 
     def test_every_source_lives_under_the_path_shape_the_fallback_assumes(self):
         """`source_name_of` 按 `source/<name>/...` 推来源名 —— 钉住这个前提。

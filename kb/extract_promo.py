@@ -133,9 +133,15 @@ def disk_input_indexed(conn, path: str) -> bool:
     过一遍(**和 `cli.cmd_index` 同一对函数**)再和库里的 chunks 拼回来比。
     三样都对得上 = 现在重新索引一次也不会改动模型看到的任何东西 = 判定针对的
     那组输入就是磁盘上那组。**那三样怎么读、怎么比,口径在
-    `kb.doc_rewrite.index_input_matches`**:登记 `content_hash`(= 声明已索引)
-    之前那道证明用的是同一份,各写一遍的话两处对「索引跟上了没有」的回答会各漂
-    各的,而它们判的后果一头是「固化一个判定」、一头是「认证已索引」,都不可恢复。
+    `kb.doc_rewrite.index_input_matches`**,这里不自己再拼一遍指纹
+    (`tests/test_doc_rewrite_roster.py` 钉着只有这一个消费方)。
+
+    **登记 `content_hash`(= 声明已索引)那一道不用这份判据,它更严。** 这三样
+    只是索引写进库的一部分:那边还要比 doc_tags、url、published、source、逐块的
+    小节标题,以及 upsert 之后那一步派生的 `documents.summary` 和实体 kind,而且
+    要拿「索引消费的那一份原文」判「文件自己这几句话动没动」
+    (`index_projection_matches`)。两道判的后果一头是「固化一个判定」、一头是
+    「认证已索引」,射程不同,别互相顶替。
 
     **反过来只比正文也不够。** 一次补判的模型请求在途时磁盘上的**标题**被换掉
     (正文一个字没动)是常态 —— 补抓回来的正文和原标题各走各的回写。只比正文

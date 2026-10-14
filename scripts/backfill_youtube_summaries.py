@@ -109,8 +109,9 @@ def main() -> int:
                     continue
                 new_text = add_summary_to_frontmatter(doc.text, summ)
                 if new_text is not None:
-                    # 登记那一步自己会证两样(写回的还在磁盘上、那组索引输入还是
-                    # 索引里那一组),证不出来就保留待索引 —— 不在这儿替它判。
+                    # 登记那一步自己会证三样(写回的还在磁盘上、这一份重新索引
+                    # 一次库里那些从文件来的东西不会变、库里记的还是动手之前那个
+                    # hash),证不出来就保留待索引 —— 不在这儿替它判。
                     doc.write(new_text)
                 # frontmatter 本来就有 summary 时上面返回 None(文件不必动),库里
                 # 那一列照旧要同步 —— 这个脚本就是为了它。和写回去的是同一份快照。

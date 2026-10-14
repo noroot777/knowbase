@@ -19,10 +19,17 @@
    **「刚读到」不能充当「刚写出」**:两处旁路实测过在「写完文件 → 刷 hash」之间
    被另一个进程换掉整篇正文,WHERE 合法命中、登记下去的却是那份未索引新文件的
    hash;主回写那条路更直接 —— 它本来就是事后重读磁盘来当凭据。
-2. **这一份现在重新索引一次,库里不会变**(`index_projection_matches`)——
-   管「变换自己越界改了索引看得见的东西」。比的是 `store.upsert_document` 真正
-   写进库的每一样,**不是**模型输入那三样:后者漏掉 doc_tags / url / published /
-   source / 小节标题(审查按字段逐个实测,五种外来编辑全被盖了章)。
+2. **这一份现在重新索引一次,库里那些从文件来的东西不会变**
+   (`index_projection_matches`)—— 管「变换自己越界改了索引看得见的东西」。比的
+   是**真实索引从这一份文件派生出来的每一样**:`store.upsert_document` 直接写的
+   那些(documents 五列、doc_tags、逐块的 seq/heading/text),**加上 upsert 之后
+   那一步**(`parse_pretagged` → `save_extraction`)写的 `documents.summary` 和
+   `entities` 的 kind。**不是**模型输入那三样:后者漏掉 doc_tags / url /
+   published / source / 小节标题(审查按字段逐个实测,五种外来编辑全被盖了章)。
+   这一道要**索引消费的那一份原文**(`before`)才判得全:库里专有的提取标签和
+   「md 上刚被删掉的那行标签」在末态上长得一模一样,只有拿原文比才分得开,而
+   summary / kind 那两样库里的值可能压根不是从文件来的(模型给的),只能问
+   「文件自己这句话动没动」。
 3. **库里记的还是动手之前那个 hash** —— 条件 UPDATE 自己的 WHERE,不在 Python
    那边先 SELECT 一次。
 
@@ -145,15 +152,77 @@ def source_name_of(doc_path: str, fallback: str) -> str:
     return parts[1] if len(parts) > 2 and parts[0] == "source" else fallback
 
 
-def index_projection_matches(conn, doc_path: str, text: str) -> str:
-    """这份文本**现在**重新索引一次,库里会变吗。空串 = 不会变,非空 = 哪儿会变。
+def _extraction_claims(doc) -> dict | None:
+    """这一份文本对**提取那一步**说的那两句话:summary、主实体的 kind。
 
-    这才是「登记 `content_hash` 即声明已索引」那张收据要的判据:比的是
-    `store.upsert_document` 真正写进库的**每一样** —— `documents` 的
-    source/title/account/published/url、`doc_tags`、以及 chunks 的
-    (seq, heading, text) 序列(`chunks_fts` 的两列都由 title 和 heading+text
-    派生,比了这几样就够)。投影本身用 `scanner.doc_from_text` 算,**和索引
-    走同一个函数**,不自己再读一遍 frontmatter。
+    **索引不是 upsert 完就完了。** 三个真实索引入口(`cli._index_pass`、
+    `pipeline_stages._index_pass`、`pipeline_stages._ingest_pass`)都在
+    `store.upsert_document` 之后接着跑 `parse_pretagged` → `save_extraction`,
+    把 frontmatter 里的 summary 和 project/kind 写进 `documents.summary` 和
+    `entities` —— 这两样同样在 `content_hash` 跳过的射程里,不是展示层
+    (`aggregate` 的实体枚举按 `entities.kind` 筛、把 `documents.summary` 返回
+    给用户)。名单钉在 `tests/test_doc_rewrite_roster.py`:索引那一趟哪天多一步
+    写库,那条红会来提醒这里跟着加。
+
+    返回 None = 这一份压根不会触发那一步(`parse_pretagged` 没有 entity/topic
+    标签就返回 None),于是它对这两样一句话都没说。
+
+    **「没说」和「说了空的」不是一回事,这是本模块最容易判错的地方。** 走
+    `kb extract --writeback` 回写过的普通文章:md 里有 topic/entity 标签、却
+    **没有** `summary:` / `project:` / `kind:` 那几行,而库里的 summary 和实体
+    kind 是模型给的。那种 md 重新索引一次,`parse_pretagged` 会拿 `""` 和
+    `other` 把它们盖掉 —— 所以「库里和这一份重新索引的结果不等」在那一篇上是
+    **常态**,拿它当拒绝理由就等于给主回写判了死刑:拒绝 → 下一轮重建 →
+    模型摘要和 kind 当场没了,而 `extracted_at` 非空、不会重提。判的只能是
+    **文件自己这句话动没动**(`index_projection_matches` 里那两段)。
+    """
+    from kb.extract import parse_pretagged
+    from kb.norm import entity_norm
+
+    pre = parse_pretagged(doc)
+    if pre is None:
+        return None
+    return {
+        "summary": str(pre.get("summary") or ""),
+        # **kind 这一句话只落在「文件自己点名指派过」的那几个实体上。**
+        # `parse_pretagged` 的规则是:project 和 kind 两样都写了、而且某个
+        # `entity/*` 标签归一后正好等于 project,那个实体才拿到这个 kind,
+        # 其余一律 "other"。所以这里只收下非默认的那几个 —— 把默认那一档也算成
+        # 「文件说过的话」会要命:走 `--writeback` 回写的普通文章 md 里压根没有
+        # project/kind,一算就是「文件说这个实体是 other」,而库里是模型给的
+        # kind,于是每次主回写都被拒,一拒就重建、模型那个 kind 当场没了。
+        "kinds": {entity_norm(str(e.get("name") or "").strip()): e["kind"]
+                  for e in pre["entities"]
+                  if str(e.get("name") or "").strip() and e["kind"] != "other"},
+    }
+
+
+def index_projection_matches(conn, doc_path: str, before: str | None,
+                             text: str) -> str:
+    """`text` 现在重新索引一次,库里那些**从文件来的**东西会变吗。空串 = 不会。
+
+    这才是「登记 `content_hash` 即声明已索引」那张收据要的判据。`before` 是
+    **索引消费的那一份原文**(调用方锁内读到的那个快照);它配得上这个名分是因为
+    紧随其后的第三样证明钉着「库里记的 content_hash 还是 `hash(before)`」——
+    所以「`before` 和 `text` 之间文件说的话动过没有」就是「索引知不知道这件事」。
+
+    比的是**真实索引从这一份文件派生出来的每一样**,分两层:
+
+    - `store.upsert_document` 直接写的:`documents` 的
+      source/title/account/published/url、`doc_tags`、chunks 的
+      (seq, heading, text) 序列(`chunks_fts` 两列由 title 和 heading+text 派生,
+      比了这几样就够)。这几样库里的值**就是**上一次索引从文件读出来的,所以
+      直接和磁盘这一份比。
+    - upsert 之后那一步(`parse_pretagged` → `save_extraction`)写的:
+      `documents.summary` 和 `entities` 的 kind。这一层**不能**和磁盘这一份比,
+      理由见 `_extraction_claims` —— 只问「文件自己这句话**动没动**,动了的话
+      库里跟上了吗」。**「库里和文件不等」在这两样上是常态**(模型提取会把自己
+      那句摘要和 kind 写进库,而 md 里可能压根没有这几行、或者仍写着旧的那句),
+      拿它当拒绝理由等于每次回写都触发一次重建,而重建会把模型那两样按文件重新
+      派生一遍盖掉、顺手 `DELETE` 掉库里专有的提取标签。
+
+    投影本身用 `scanner.doc_from_text` 算,**和索引走同一个函数**,不自己再读
+    一遍 frontmatter。
 
     **为什么不能只比模型输入那三样**(标题/账号/拼接正文,`index_input_matches`
     那一份):索引写进库的不只那三样。审查用独立子进程逐个字段实测过,
@@ -163,23 +232,25 @@ def index_projection_matches(conn, doc_path: str, text: str) -> str:
     拼接正文还会把**分块边界**不同当成相同(只比 text 的拼接结果),所以这里比
     的是逐块的 (seq, heading, text),不是拼起来的那一串。
 
-    **标签这一样不是集合全等,分两段判,而且这是本函数最容易判错的地方:**
+    **标签那一样不是集合全等,三段规则,而且这是本函数最容易判错的地方:**
 
-    - **普通标签只比「文件上有的,库里都有吗」这一个方向。** 反方向(库里有、
-      文件没有)是**合法状态**:`kb extract` 不带 `--writeback` 时提取结果只落
-      `doc_tags`、不回写文件。按全等判它,拒绝登记的代价**不是**「白重建一次」
-      —— `upsert_document` 重建 doc_tags 是 `DELETE` 全部再**只从文件**重建,
-      那些库里专有的提取标签当场永久没了,`extracted_at` 非空也不会重新提取。
-      退让的那一半是「外来编辑**删掉**了 md 上一行标签」:我们照旧登记,库里
-      那行留着(查询多捞到一条),等这一篇正文真的变了再重建纠正 —— 比永久吞掉
-      一批提取标签轻。
+    - **文件上有的,库里得都有**(一个方向)。
+    - **文件上刚删掉的,库里得也没了** —— 这一段要 `before` 才判得出来。
+      没有它的话,「库里有、文件没有」有两种来源完全分不开:一种是合法的
+      `kb extract` 不带 `--writeback`(提取结果只落 `doc_tags`、不回写文件),
+      另一种是外来编辑**刚把 md 上那行标签删掉**。审查实测过只比一个方向的后果:
+      删掉的标签收据照签,两轮索引下来库里那行还在,按它筛选照旧命中这一篇,
+      再同步也不恢复。按集合全等判又会把前一种合法状态判成不一致,而拒绝登记的
+      代价**不是**「白重建一次」—— `upsert_document` 重建 doc_tags 是 `DELETE`
+      全部再**只从文件**重建,那些库里专有的提取标签当场永久没了,`extracted_at`
+      非空也不会重新提取。两种来源必须分开判,而 `before` 正好分得开。
     - **`flag/软广` 那一行按落库那份判定归一化**,规则和索引自己用的是同一份
       (`store.promo_tag_wanted`):hard 就该有、none/soft 就该没有、**还没判过
       (`''`)就跟着文件**。原来这里无条件把它从两边排除,于是还没判过的那一篇
       上,外来编辑增删 md 那行 flag 判据完全看不见 —— 收据照签,而真实索引这时
       是跟着文件的,按这个标签筛选从此停在旧结果上。
 
-    **一个写事务里读完所有表。** 跨三张表没法把判据塞进某一句的 WHERE,所以
+    **一个写事务里读完所有表。** 跨四张表没法把判据塞进某一句的 WHERE,所以
     靠 `BEGIN IMMEDIATE`:读和随后那句条件 UPDATE 同属一个事务、同一个快照。
     锁序仍是维护锁 → SQLite 写锁(调用方已经持着维护锁)。
     """
@@ -191,38 +262,70 @@ def index_projection_matches(conn, doc_path: str, text: str) -> str:
     from kb.store import promo_tag_wanted
 
     row = conn.execute(
-        "SELECT source, title, account, published, url FROM documents"
-        " WHERE path=?", (doc_path,)).fetchone()
+        "SELECT source, title, account, published, url, promo_level, summary"
+        " FROM documents WHERE path=?", (doc_path,)).fetchone()
     if row is None:
         return "库里压根没有这一行,谈不上「已索引」"
+    if before is None:
+        # 调用方连动手之前那一份都没读到(`writeback_extraction` 那一档)。
+        # 没有它,下面两段「文件这句话动没动」压根无从判断 —— 第三样证明随后
+        # 也必然 0 行(`hash(before)` 取不出来),两道在这里是一致的。
+        return "拿不出动手之前那一份,证不出索引消费的是哪一份"
 
-    doc = doc_from_text(
-        text, VAULT_ROOT / doc_path,
-        Source(name=source_name_of(doc_path, row["source"] or ""),
-               root=VAULT_ROOT),
-        rel_path=doc_path)
+    src = Source(name=source_name_of(doc_path, row["source"] or ""),
+                 root=VAULT_ROOT)
+    doc = doc_from_text(text, VAULT_ROOT / doc_path, src, rel_path=doc_path)
+    was = doc_from_text(before, VAULT_ROOT / doc_path, src, rel_path=doc_path)
     for col in ("source", "title", "account", "published", "url"):
         if (row[col] or "") != getattr(doc, col):
             return f"磁盘上的 {col} 和索引里那一个不一样了"
 
-    in_file = set(doc.tags)
+    in_file, in_was = set(doc.tags), set(was.tags)
     in_db = {r["tag"] for r in conn.execute(
         "SELECT tag FROM doc_tags WHERE path=?", (doc_path,))}
-    # **普通标签只比一个方向:文件上有的,库里得都有。** 反方向(库里有、文件
-    # 没有)是**合法状态** —— `kb extract` 不带 `--writeback` 是明确支持的操作,
-    # 提取出的 topic/entity 只落 `doc_tags`、压根不回写文件。判成不一致的后果
-    # 不是「白重建一次」:`upsert_document` 重建 doc_tags 是 `DELETE` 全部再
-    # **只从文件**重建,那些库里专有的提取标签当场永久没了,而 `extracted_at`
-    # 非空、这一篇不会被重新提取回来(2026-10-14 审查实测:一次双链化或一次
-    # 软广回写之后,两轮索引下来只剩 `source/*`,按主题和实体过滤全空)。
+    # **普通标签两个方向各问一句,问的都不是「集合等不等」** —— 库里专有的提取
+    # 标签(`kb extract` 不带 `--writeback` 的合法末态)两句都不碰,刚从 md 上
+    # 删掉的那一行两句都躲不过。理由和实测见 docstring。
     if (in_file - {PROMO_TAG}) - in_db:
         return "磁盘上那组标签还没进 doc_tags"
+    if ((in_was - in_file) - {PROMO_TAG}) & in_db:
+        return "磁盘上删掉的那行标签还留在 doc_tags 里"
     # `flag/软广` 那一行单独判,规则同 `store._align_promo_tag`(抽在
     # `store.promo_tag_wanted` 里):判过就按判定、还没判过就跟着文件。
-    level = (conn.execute("SELECT promo_level FROM documents WHERE path=?",
-                          (doc_path,)).fetchone()["promo_level"] or "")
+    level = row["promo_level"] or ""
     if promo_tag_wanted(level, PROMO_TAG in in_file) != (PROMO_TAG in in_db):
         return "磁盘上那行软广标记和索引重建之后该有的对不上"
+
+    # upsert 之后那一步(`parse_pretagged` → `save_extraction`)派生的两样。
+    # **只问「文件自己这句话动没动」**:库里那两样可能是模型给的,拿磁盘这一份
+    # 重新派生一次去比会把主回写全拦掉(详见 `_extraction_claims`)。
+    claims, was_claims = _extraction_claims(doc), _extraction_claims(was) or {}
+    if claims is not None:
+        # **只问「文件这句话动没动」,不问「库里和文件一样吗」。** 后者会把一个
+        # 合法末态判成不一致:模型提取(`kb extract`,带不带 `--writeback` 都是)
+        # 会把自己那句摘要写进 `documents.summary`,而条目化来源的 md 里仍写着
+        # frontmatter 那句 —— 两边不等是常态,拒绝它就等于每次回写都触发重建,
+        # 而重建会按文件把模型那句摘要盖回去、顺手 `DELETE` 掉库里专有的提取标签。
+        # 撤回也算动(原来说了一句、现在不说了),所以比的是两份快照而不是「现在
+        # 说了没有」:只看现在的话,撤回之后新值是空串,一句假的「一致」就把旧
+        # 摘要永久留在库里。
+        if (claims["summary"] != (was_claims.get("summary") or "")
+                and claims["summary"] != (row["summary"] or "")):
+            return "磁盘上那句 summary 还没进 documents.summary"
+        was_kinds = was_claims.get("kinds") or {}
+        for norm in set(claims["kinds"]) | set(was_kinds):
+            if claims["kinds"].get(norm) == was_kinds.get(norm):
+                continue                 # 文件对这个实体的说法没动
+            # 撤回了(文件不再指派它)就按 `parse_pretagged` 的默认档 "other"。
+            kind = claims["kinds"].get(norm, "other")
+            kinds = [r["kind"] for r in conn.execute(
+                "SELECT kind FROM entities WHERE path=? AND norm=?",
+                (doc_path, norm))]
+            if not kinds or any(k != kind for k in kinds):
+                return "磁盘上那句 project/kind 定的实体类型还没进 entities"
+    # `claims is None`(md 上 entity/topic 标签一个都没了)那一档不在这儿判:
+    # 真实索引那时压根不跑 `save_extraction`,库里那两样一个字不会变;而**标签
+    # 被删掉**这件事上面那句已经拒了,下一轮重建照旧会纠正。
 
     chunks = [(c.seq, c.heading, c.text) for c in split_chunks(doc.body)]
     indexed = [(r["seq"], r["heading"], r["text"]) for r in conn.execute(
@@ -233,7 +336,8 @@ def index_projection_matches(conn, doc_path: str, text: str) -> str:
     return ""
 
 
-def register_written(conn, doc_path: str, written: str, expect: str) -> str:
+def register_written(conn, doc_path: str, before: str | None,
+                     written: str) -> str:
     """登记「磁盘上这一份已经索引过了」。空串 = 登记了,非空 = 没登记的原因。
 
     **`written` 必须是调用方本次真正写出去的那一份,不许是事后重读磁盘的那一份**
@@ -242,9 +346,15 @@ def register_written(conn, doc_path: str, written: str, expect: str) -> str:
     盖了章。**所有登记都必经这一个边界**,三样一起证:
 
     ① 磁盘上此刻还是 `written`(退出前再读一次比对);
-    ② `written` 现在重新索引一次库里不会变(`index_projection_matches`);
+    ② `written` 现在重新索引一次库里不会变(`index_projection_matches`,它要
+       `before` —— 索引消费的那一份原文);
     ③ 库里记的还是动手之前那个 hash(条件 UPDATE 自己的 WHERE,不在 Python
        那边先 SELECT 一次)。
+
+    **③ 的 `expect` 不是一个独立参数,就是 `hash(before)`。** 两个值分开传的时候
+    它们可以对不上,而一旦对不上,② 拿着一份**不是索引消费的**原文去判「文件这句
+    话动没动」,判出来的每一个结论都没有依据。现在传的是原文本身,hash 在这里算,
+    「这一对对不上」这种状态压根不存在。
 
     **登记的 hash 取自 `written`,不取磁盘那一份** —— 这一条和 ① 是一对:只有
     ① 没这一条,登记下去的就是别人那份的 hash(原缺陷的形态);只有这一条没 ①,
@@ -274,12 +384,12 @@ def register_written(conn, doc_path: str, written: str, expect: str) -> str:
         # 里时(区间里顺手写过别的列)沿用它那一个:它早就持着写锁,同样是一个
         # 快照,再 BEGIN 会抛「transaction within a transaction」。
         conn.execute("BEGIN IMMEDIATE")
-    reason = index_projection_matches(conn, doc_path, written)
+    reason = index_projection_matches(conn, doc_path, before, written)
     if reason:
         return reason
     cur = conn.execute(
         "UPDATE documents SET content_hash=? WHERE path=? AND content_hash=?",
-        (file_hash(written), doc_path, expect))
+        (file_hash(written), doc_path, file_hash(before)))
     if cur.rowcount != 1:
         return "库里记的已经不是我动手之前那一份 content_hash 了"
     return ""
@@ -293,13 +403,12 @@ class Rewriting:
     末态。
     """
 
-    __slots__ = ("path", "full", "text", "before", "new_text",
+    __slots__ = ("path", "full", "text", "new_text",
                  "changed", "indexed", "reason")
 
     def __init__(self, doc_path: str, full: Path):
         self.path, self.full = doc_path, full
         self.text: str | None = None
-        self.before = ""
         self.new_text: str | None = None
         self.changed = False       # 文件真的被改写了
         self.indexed = False       # content_hash 登记成功(= 这一份已索引)
@@ -342,7 +451,7 @@ class Rewriting:
             # 「磁盘上还是我写的那一份」那一步写在这儿,于是那道证明只在这**一个**
             # 调用者里成立:主回写走的是另一条路(事后重读磁盘),压根没有这一道。
             self.reason = register_written(
-                conn, self.path, self.new_text, self.before)
+                conn, self.path, self.text, self.new_text)
             self.indexed = not self.reason
         # 在锁里提交:攥着 SQLite 写事务走出锁的话,下一个拿到维护锁的清理会卡在
         # 它自己的 DELETE 上(SQLite 的写锁不认这把锁)。调用方在区间里顺手写的
@@ -381,9 +490,10 @@ def rewriting(conn, doc_path: str, on_wait=_default_on_wait):
     **重新创建出来**,下一轮索引合法地把它收回库里,而 feeds 行已经没了,重跑清理
     只会说「无事可做」。不抛异常:文章是用户主动清理掉的,不是一次故障。
 
-    **退出时登记 `content_hash` 要两样证明**(写回的那一份还在磁盘上、它那组索引
-    输入还是索引里那一组),不满足就**保留待索引**而不是认证,`doc.reason` 说一句
-    为什么。理由见模块说明。
+    **退出时登记 `content_hash` 要三样证明**(写回的那一份还在磁盘上、这一份重新
+    索引一次库里那些从文件来的东西不会变、库里记的还是动手之前那个 hash),不满足
+    就**保留待索引**而不是认证,`doc.reason` 说一句为什么。三样都在
+    `register_written` 那一个边界上,理由见模块说明。
 
     **取锁之前先把调用方手里那个写事务落盘**,退出时在锁里提交 —— 锁序是
     维护锁 → SQLite 写锁,反过来会让持锁的清理卡在它自己的 DELETE 上。
@@ -394,7 +504,6 @@ def rewriting(conn, doc_path: str, on_wait=_default_on_wait):
     """
     from kb.extract import VAULT_ROOT, _still_indexed
     from kb.maintenance import maintenance_lock
-    from kb.scanner import file_hash
 
     if conn.in_transaction:
         conn.commit()                 # 锁序:见 docstring,这件事由这里负责
@@ -407,8 +516,6 @@ def rewriting(conn, doc_path: str, on_wait=_default_on_wait):
                 doc.text = doc.full.read_text(encoding="utf-8")
             except OSError as e:
                 doc.reason = f"读不出来({e})"
-            else:
-                doc.before = file_hash(doc.text)
         try:
             yield doc
         finally:

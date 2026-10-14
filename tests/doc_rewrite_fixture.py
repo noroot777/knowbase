@@ -121,6 +121,39 @@ class Vault(unittest.TestCase):
         self.conn.commit()
         return rel
 
+    def seed_with_extraction(self, src: str = "gzh", *,
+                             summary: str = "oldsummary",
+                             project: str = "ReviewTool",
+                             kind: str = "tool") -> str:
+        """摆一篇**连 upsert 之后那一步也真跑过**的已索引文档。
+
+        `seed()` 只走到 `store.upsert_document`,而三个真实索引入口在它之后还接着
+        跑 `parse_pretagged` → `save_extraction`(把 frontmatter 的 summary 和
+        project/kind 写进 `documents.summary` 和 `entities`)。那一层也在
+        `content_hash` 跳过的射程里,所以这里按真路径跑一趟 `kb index` 让它落下来
+        —— 手摆的话判据会在一个生产里不存在的状态上判。
+
+        **摆完就地验一次**:`kind: "tool"` 在库里是 `product`(`kind_norm` 的归一
+        表),摆盘自己写成 `tool` 的话失败发生在前提上,而症状和「判据坏了」长得
+        一模一样(审查自己先踩了这一脚,那份日志作废重跑)。
+        """
+        rel = self.seed(src)
+        name = self.SOURCES[src]
+        text = self.disk(rel).replace(
+            "tags:\n", f'summary: "{summary}"\nproject: "{project}"\n'
+                        f'kind: "{kind}"\ntags:\n').replace(
+            f"  - source/{name}\n",
+            f"  - source/{name}\n  - topic/removed\n  - entity/{project}\n")
+        (self.vault / rel).write_text(text, encoding="utf-8")
+        self.reindex()
+        self.assertFalse(self.needs_index(rel), "摆盘:这一篇该是已索引的")
+        self.assertEqual(summary, self.summary(rel), "摆盘:summary 没落库")
+        from kb.norm import entity_norm, kind_norm
+        self.assertEqual(kind_norm(kind),
+                         self.entity_kind(rel, entity_norm(project)),
+                         "摆盘:实体 kind 没落库(归一值写错了?)")
+        return rel
+
     # ── 读末态 ────────────────────────────────────────────────────────────────
 
     def version(self, rel: str) -> str:
@@ -130,6 +163,22 @@ class Vault(unittest.TestCase):
     def summary(self, rel: str) -> str:
         return self.conn.execute("SELECT summary FROM documents WHERE path=?",
                                  (rel,)).fetchone()["summary"]
+
+    def entities(self, rel: str) -> list[tuple[str, str, str]]:
+        return [(r["entity"], r["kind"], r["norm"]) for r in self.conn.execute(
+            "SELECT entity, kind, norm FROM entities WHERE path=? ORDER BY entity",
+            (rel,))]
+
+    def entity_kind(self, rel: str, norm: str) -> str:
+        """归一键是 `norm` 的那个实体此刻的 kind(没有这一行就是空串)。"""
+        rows = [k for _, k, n in self.entities(rel) if n == norm]
+        return rows[0] if rows else ""
+
+    def hits_tagged(self, token: str, tag: str) -> list[str]:
+        """真走一次按标签过滤的搜索 —— 「库里那行标签还在」的用户侧后果。"""
+        return [h.path for h in search.search(
+            self.conn, token, use_vector=False, top_k=20,
+            filters=search.Filters(tags=[tag]))]
 
     def disk(self, rel: str) -> str:
         return (self.vault / rel).read_text(encoding="utf-8")
@@ -247,23 +296,32 @@ class Vault(unittest.TestCase):
 
     # ── 跑主回写那条路 ────────────────────────────────────────────────────────
 
-    def run_main_writeback(self, rel: str, topic: str = "审查复现") -> bool:
+    def run_main_writeback(self, rel: str, topic: str = "审查复现",
+                           entity: str | None = None) -> bool:
         """真跑 `extract.writeback_extraction`(提取 tag 回写那条主路)。
 
         **tag 先落库再回写**,顺序和真实链路一致(`save_extraction` 把
         topic/entity `INSERT OR IGNORE` 进 `doc_tags`、提交,随后才回写 md)——
         登记那道判据问的是「这一份现在重新索引一次库里会变吗」,所以这一步不做
         的话,合法回写也会被正确地拒绝,而那不是这几条用例要摆的局。
+
+        **`entity` 给了就连 `entity/*` 那行一起回写** —— 生产里 `--writeback`
+        两样都写(`extraction_tags`),而 md 上有没有 `entity/*` 决定重新索引时
+        `parse_pretagged` 会不会给那个实体派一个 kind。只写 topic 的摆盘对
+        「实体 kind 这一段判错了」是瞎的(定点注入实测:把默认那一档也算成
+        「文件说过的话」,整组绿着)。落库那一侧由调用方先摆好(真实链路里是
+        `save_extraction`,夹具里走 `extract_without_writeback`)。
         """
         from kb import extract
         tag = f"topic/{topic}"
         self.conn.execute("INSERT OR IGNORE INTO doc_tags (path, tag)"
                           " VALUES (?, ?)", (rel, tag))
         self.conn.commit()
+        entities = ([{"name": entity, "kind": "tool"}] if entity else [])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             changed = extract.writeback_extraction(
-                self.conn, rel, {"topics": [topic], "entities": []})
+                self.conn, rel, {"topics": [topic], "entities": entities})
         self.said = out.getvalue()
         return changed
 

@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
-"""投影判据里**标签**这一样 —— 它不是集合全等,分两段判。
+"""投影判据里**标签**这一样 —— 它不是集合全等,分三段判。
 
-这一份单列出来是因为两段各有自己的一套前提,和「写出快照 / 分块 / 那几列」
+这一份单列出来是因为三段各有自己的一套前提,和「写出快照 / 分块 / 那几列」
 那几条无关:
 
-- **普通标签只比一个方向**(文件上有的,库里都有吗)。反方向是合法状态:
-  `kb extract` 不带 `--writeback` 时提取结果只落 `doc_tags`、不回写文件。
+- **文件上有的,库里得都有**(一个方向)。反方向不能按全等判:`kb extract`
+  不带 `--writeback` 时提取结果只落 `doc_tags`、不回写文件,那是合法状态。
   按全等判它,拒绝登记会把这一篇交给下一轮重建,而重建 `doc_tags` 是
   `DELETE` 全部再只从文件重建 —— 那批标签当场永久没了。
+- **文件上刚删掉的,库里得也没了**。这一段靠「索引消费的那一份原文」
+  (`before`)才判得出来:末态上「库里有、文件没有」的两种来源长得一模一样,
+  只有拿原文比才分得开上面那个合法状态和「外来编辑刚把那行删了」。
 - **`flag/软广` 那一行按落库那份判定归一化**,规则和索引自己用的是同一份
   (`store.promo_tag_wanted`):还没判过时跟着文件,判过了按判定。
 
@@ -31,7 +34,7 @@ from kb import doc_rewrite, scanner, store   # noqa: E402
 
 import wikilib                               # noqa: E402
 
-from doc_rewrite_fixture import Vault         # noqa: E402
+from doc_rewrite_fixture import OLD_TOKEN, Vault   # noqa: E402
 
 
 class DbOnlyTagTests(Vault):
@@ -118,6 +121,60 @@ class DbOnlyTagTests(Vault):
         self.assertFalse(self.needs_index(rel), "全量回写那条路没登记上")
 
 
+class DeletedFileTagTests(Vault):
+    """md 上**刚被删掉**的那行标签:单向那一段放它过去,所以要第二段来拦。
+
+    两段的分界就是「这个标签原来在不在文件上」,而末态上看不出来 —— 判据必须
+    拿「索引消费的那一份原文」比。审查实测只有单向那一段时的后果:外来编辑删掉
+    md 上一行标签,收据照签,连跑两轮 `kb index` 都报「未变 1」,按那个标签过滤
+    照旧命中这一篇,再同步也不恢复(强制重建才纠正得了)。
+
+    摆盘走 `seed_with_extraction()`:它连 upsert 之后那一步也真跑过,所以这一篇
+    的 `doc_tags` 和 `entities` 都是真实索引写下来的。
+    """
+
+    def test_a_tag_deleted_from_the_file_is_not_certified(self):
+        rel = self.seed_with_extraction()
+        self.assertIn("topic/removed", self.tags(rel), "摆盘:库里该有这行标签")
+        gone = self.disk(rel).replace("  - topic/removed\n", "")
+        # 注入在**写入函数读文件之前**:那个删除被带进我们自己写出去的全文,
+        # 于是第一样证明合法通过,只有投影这一道拦得住(见注入器的 docstring)。
+        with self.rival_slips_in_before_the_main_writeback_reads(
+                rel, lock=False, text=gone) as seen:
+            self.assertTrue(self.run_main_writeback(rel, topic="stable"))
+        self.assertEqual(0, seen["child"].returncode, seen["child"].stderr)
+        self.assertNotIn("topic/removed", self.disk(rel), "注入没落地")
+        self.assertIn("删掉的那行标签", self.said, f"收据签了:{self.said}")
+        self.assertTrue(self.needs_index(rel), "这一篇没留着「待索引」")
+        self.assertEqual([rel], self.hits_tagged(OLD_TOKEN, "topic/removed"),
+                         "摆盘:重建之前按这个标签当然还筛得到")
+        self.reindex()
+        self.assertNotIn("topic/removed", self.tags(rel),
+                         "下一轮重建没把删除收进索引")
+        self.assertEqual([], self.hits_tagged(OLD_TOKEN, "topic/removed"),
+                         "已从文件删掉的标签还筛得出这篇文章")
+
+    def test_an_extraction_that_only_landed_in_the_db_does_not_block_the_receipt(self):
+        """反过来钉一边:同一篇文章上**两种来源同时存在**时照旧签得下来。
+
+        库里专有的那几行(提取没回写)不许被当成「刚删掉的」,而这一篇的 summary
+        已经被模型那次提取盖掉、文件里仍写着旧的那句 —— 两样都不构成拒绝理由:
+        文件自己这几句话一个字都没动。
+        """
+        rel = self.seed_with_extraction()
+        self.extract_without_writeback(rel)
+        self.assertIn("topic/只落库的主题", self.tags(rel), "摆盘:库里那组标签")
+        self.assertEqual("审查复现", self.summary(rel),
+                         "摆盘:模型那次提取该把 summary 盖掉")
+        self.assertTrue(self.run_main_writeback(rel, topic="stable"))
+        self.assertNotIn("没登记已索引", self.said, f"合法回写被拒了:{self.said}")
+        self.assertFalse(self.needs_index(rel), "合法回写没登记上")
+        first, second = self.reindex(), self.reindex()
+        self.assertIn("topic/只落库的主题", self.tags(rel),
+                      f"那批只落库的标签被吞了({first.strip()} / {second.strip()})")
+        self.assertEqual("审查复现", self.summary(rel), "模型那句摘要被盖回去了")
+
+
 class PromoFlagProjectionTests(Vault):
     """`flag/软广` 那一行:投影判据要和真实索引同一份规则。
 
@@ -196,13 +253,15 @@ class PromoFlagProjectionTests(Vault):
                     self.conn.execute("DELETE FROM doc_tags WHERE path=? AND"
                                       " tag=?", (rel, PROMO_TAG))
                 self.conn.commit()
+                # 谁都没改过这个文件,所以「动手之前那一份」就是它自己 ——
+                # 要单独看的是软广那一段规则。
                 self.assertEqual("", doc_rewrite.index_projection_matches(
-                    self.conn, rel, self.disk(rel)),
+                    self.conn, rel, self.disk(rel), self.disk(rel)),
                     "判定明确时,md 上那行 flag 不该构成「磁盘领先于索引」")
 
     def test_the_rule_matches_what_the_indexer_actually_does(self):
         """**两份实现的对账**:真跑 `upsert_document`,末态要和
-        `store.promo_tag_wanted` 说的一样 —— 三档判定 × 文件有/无,六个组合。
+        `store.promo_tag_wanted` 说的一样 —— 四档判定 × 文件有/无,八个组合。
 
         规则有两份实现(纯函数一份、`_align_promo_tag` 的两句 SQL 一份,后者
         必须把判据待在自己的 WHERE 里),所以要有一条回归把它们钉在一起:

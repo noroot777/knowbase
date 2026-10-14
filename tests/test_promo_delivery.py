@@ -436,8 +436,9 @@ class RefreshHashTest(_Vault):
                           " WHERE path=?", (PATH,))
         self.conn.commit()
         written = self.md.read_text(encoding="utf-8")
-        extract.refresh_content_hash(self.conn, PATH, written,
-                                     expect=scanner.file_hash(written))
+        # 没人改过这个文件,所以「动手之前那一份」就是它自己 —— 要拦下来的是
+        # 库里记的那个 hash 已经不是它了(第三样证明)。
+        extract.refresh_content_hash(self.conn, PATH, written, written)
         self.conn.commit()
         self.assertEqual("别人改之前那一版", self.version(),
                          "0 行才是对的末态:这一篇继续带着「待索引」")
@@ -482,10 +483,11 @@ class RefreshHashTest(_Vault):
         self.conn.execute("INSERT OR IGNORE INTO doc_tags (path, tag)"
                           " VALUES (?, 'topic/x')", (PATH,))
         self.conn.commit()
-        written = self.md.read_text(encoding="utf-8").replace(
-            "---\n这是", "  - topic/x\n---\n这是")
+        before = self.md.read_text(encoding="utf-8")
+        self.assertEqual(v1, scanner.file_hash(before), "摆盘:库里记的就是它")
+        written = before.replace("---\n这是", "  - topic/x\n---\n这是")
         self.md.write_text(written, encoding="utf-8")
-        extract.refresh_content_hash(self.conn, PATH, written, expect=v1)
+        extract.refresh_content_hash(self.conn, PATH, before, written)
         self.conn.commit()
         self.assertEqual(scanner.file_hash(written), self.version())
 

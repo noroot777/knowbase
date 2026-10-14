@@ -396,22 +396,23 @@ def writeback_extraction(conn, doc_path: str, data: dict,
         conn.commit()
     from kb.maintenance import maintenance_lock
 
-    from kb.scanner import file_hash
-
     with maintenance_lock():
         if not _still_indexed(conn, doc_path):
             return False
         if input_seen is not None and _input_moved(conn, doc_path, input_seen):
             return False            # 见 docstring:旧 tag 贴到新全文上就摘不掉了
         try:
-            before = file_hash(
-                (VAULT_ROOT / doc_path).read_text(encoding="utf-8"))
+            # **留着原文,不只留它的 hash。** 登记那道边界要拿它回答「文件自己
+            # 那几句话(标签、summary、project/kind)动没动」—— 只有 hash 的话,
+            # 「库里有、md 上没有」的两种来源分不开(合法的「提取只落库没回写」
+            # 和外来编辑刚删掉那行标签),判据只能二选一地放过一种。
+            before: str | None = (VAULT_ROOT / doc_path).read_text(
+                encoding="utf-8")
         except OSError:
-            # 读不出来就给一个不可能匹配的值:库里的 `content_hash` 一律是
-            # `file_hash` 的输出(非空),所以刷新那一句必然 0 行。下面那两步
-            # 本来也会抛、异常才是这一档的主路径 —— 这里只保证万一走到刷新,
-            # 也不会替谁签一张「已索引」的收据。
-            before = ""
+            # 读不出来就交 None:登记那边一律拒绝(第三样证明本来也会 0 行,
+            # `hash(before)` 取不出来)。下面那两步本来也会抛、异常才是这一档的
+            # 主路径 —— 这里只保证万一走到刷新,也不会替谁签一张「已索引」的收据。
+            before = None
         # **记住最后一次真正写出去的那一份整文。** 登记那道边界要它当凭据
         # (`doc_rewrite.register_written` 的第一样证明),事后再读一次磁盘是不
         # 行的:那一份可能已经是别人的了。两步都可能写文件,后写的那一份才是
@@ -436,8 +437,8 @@ def writeback_extraction(conn, doc_path: str, data: dict,
             # `writeback_tags` 可能已经写过文件了,hash 不刷新只会让下一轮索引
             # 白重建一次(良性);反过来漏刷才是坏的。
             if written is not None:
-                reason = refresh_content_hash(conn, doc_path, written,
-                                              expect=before)
+                reason = refresh_content_hash(conn, doc_path, before,
+                                              written)
                 if reason:
                     # **没登记上要出声。** 文件安全地留着「待索引」、下一轮重建
                     # 就补上了(良性),可这一轮的输出里不说一句的话,「磁盘长期
