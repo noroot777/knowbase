@@ -434,9 +434,31 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
     sched_day, retry, publish_issue = _state['sched_day'], False, ''
     try:
         if sync:
+            from kb import pipeline as pl     # 延迟:它反过来 import 本模块
             labels = _channel_labels()
             budget_end = time.monotonic() + SYNC_BUDGET
             rounds: list[dict] = []
+            # **每收一轮就发布一次**,不攒到最后一把发。攒着的话,这一刻盘上那份
+            # 「最近一次运行」是刚收尾的**那一轮自己**(每轮收尾都会覆盖它),
+            # 前几轮的抓取失败和失败名单只活在这个列表里 —— 进程在这中间被杀掉
+            # (重启、停电、OOM),那几条红就永远不在了,而重试按钮读的就是盘上
+            # 那一份。增量发布让盘上那份**始终等于"已经收尾的这几轮合起来"**。
+            # 代价是多写几次状态文件(一轮一次,几 KB)。
+            # 每轮都重试发布,而**同一个原因只说一次**:被拒多半要一直拒到底
+            # (别人已经是最新的那一轮),一轮一条同样的话会把 80 行日志刷满。
+            # 后面某一轮发布成功就回空串 —— 那时盘上那份确实是全的,不该再挂着
+            # 一句旧抱怨(满盘腾出来了就是这个形状)。
+            def publish_so_far(seen: str) -> str:
+                try:
+                    pl.publish_batch(rounds)
+                except pl.PublishRefused as e:
+                    # 发布不成不是日报的失败(素材都在库里,照常出报),但**不许
+                    # 咽下去**:咽下去的后果是同步中心那边看不到这一轮的失败、也
+                    # 点不了重试,而日报这边一句"已生成"看着一切正常。
+                    if e.reason != seen:
+                        _log(f'同步结果未发布:{e.reason}')
+                    return e.reason
+                return ''
             for channel in channels:
                 if _halting():
                     _state['channels'].append(
@@ -449,6 +471,7 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                     _sync_round(FETCH_STAGES, {'channel': channel},
                                 labels.get(channel, channel), budget_end, channel,
                                 rounds=rounds))
+                publish_issue = publish_so_far(publish_issue)
             # 入库那一段:等所有通道都抓完才跑,跑一次 —— 这时待索引的文件和
             # 待提取的队列都最全。**用户按了停止才跳过**:接下来本来就不出报了。
             # 超预算照跑(见 DIGEST_BUDGET),所以这里不能用 `_halting()`。
@@ -461,19 +484,7 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                     DIGEST_STAGES, None, DIGEST_LABEL,
                     max(budget_end, time.monotonic() + DIGEST_BUDGET),
                     halted=lambda: bool(_state['stop_requested']), rounds=rounds))
-            # 这一轮日报是 N+1 次管道运行,而「最近一次运行」只有一份:后跑的会把
-            # 先跑的盖掉,于是抓取失败的明细和「重试失败项」会被最后那一轮入库的
-            # 成功一起抹掉(`retry_failed_plan` 读的也是这一份)。把这一批合并成
-            # 一份发布,让同步中心和重试面对的是**整个业务轮**。
-            from kb import pipeline as pl
-            try:
-                pl.publish_batch(rounds)
-            except pl.PublishRefused as e:
-                # 发布不成不是日报的失败(素材都在库里,照常出报),但**不许咽下去**:
-                # 咽下去的后果是同步中心那边看不到这一轮的失败、也点不了重试,而
-                # 日报这边一句"已生成"看着一切正常。
-                publish_issue = e.reason
-                _log(f'同步结果未发布:{publish_issue}')
+            publish_issue = publish_so_far(publish_issue)
         # 用户按的停止到此为止:接着生成等于把一份"同步到一半"的日报当成功交出去,
         # 还要再花一次模型钱。超预算是另一回事——那本来就是"别再同步了,拿现有的
         # 内容出报",继续生成正是它的目的。

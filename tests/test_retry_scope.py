@@ -29,7 +29,6 @@
 """
 from __future__ import annotations
 
-import json
 import time
 import unittest
 from unittest.mock import patch
@@ -171,13 +170,9 @@ class RetryScopeTests(RetryScopeBase):
         一张写着「本次无需重试」的灰卡片和"这个按钮坏了"长得一模一样 ——
         而上一轮 crawl 明明是红的。
         """
-        self.crawl({'channel': 'rss'}, broken=[self.a])
-        self.succeeded_later(self.a)
         # 让 index 也红:这一轮的计划里还有别的阶段,于是真的会起跑。
-        run = pipeline_state.load_last_run() or {}
-        run['stages']['index'] = {'status': 'error', 'detail': '索引没做'}
-        pipeline_state._STATE_FILE.write_text(json.dumps(run, ensure_ascii=False),
-                                              encoding='utf-8')
+        self.crawl({'channel': 'rss'}, broken=[self.a], also_red=('index',))
+        self.succeeded_later(self.a)
         with patch.object(pipeline_retry, '_run_crawl') as crawl, \
              patch.object(pipeline_retry, '_run_export'), \
              patch.object(pipeline_retry, '_run_index'), \

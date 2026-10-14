@@ -106,8 +106,15 @@ async function loadSourceScheduleNote() {
     ask('/api/daily/settings', d => d.settings),
     ask('/api/pipeline/schedule', d => d),
   ]);
-  // 两个都读不到才算"不知道";读到一个就按已知的那部分说话。
-  sourceSchedules = (daily || pipe) ? { daily, pipe } : null;
+  // **三态,不是两态**:读到 = 知道它开着还是关着,读不到 = **不知道**,
+  // 而不知道不等于"没开"。少读一条就敢说「目前不会自动同步」,而没读到的那条
+  // 可能正开着 —— 页面上方还写着「定时同步 · 每天 07:30」,两句话当场打架
+  // (反过来也一样:日报那条读不到时同样不许替它说"没开")。
+  // 删掉页头那颗定时同步时,记得把下面这条读取一起删掉,否则这行字会永远
+  // 卡在「读不到页头的定时同步」上 —— 接口 404 和断网在这里长得一样
+  // (`pipeJson` 只抛一句话,不带状态码)。
+  sourceSchedules = { daily, pipe, unknown: [...(daily ? [] : ['日报']),
+                                             ...(pipe ? [] : ['页头的定时同步'])] };
   renderSourceScheduleNote();
 }
 // 这一类来源会被哪几条定时带上。返回 [{时刻}],空数组 = 没有一条会带上它。
@@ -128,14 +135,22 @@ function renderSourceScheduleNote() {
   if (!sourceSchedules) { box.textContent = manual; return; }
   const hits = sourceScheduleHits(sourceKind);
   if (hits.length) {
+    // 已知有一条带上它 —— 这句话不受另一条读不到的影响(再多一条定时只会多一个
+    // 同步时刻,不会把这个时刻取消掉)。
     box.textContent = hits.map(h => `每天 ${h.time} 跟着${h.what}那一轮同步`).join('；')
       + `。${manual}`;
     return;
   }
-  // 一条都没带上它。**把原因说出来**,否则用户不知道该去哪儿改。
-  const daily = sourceSchedules.daily;
-  box.textContent = (!daily ? '没有定时会自动同步这一类来源。'
-    : !daily.enabled ? '日报定时未启用，这一类来源目前不会自动同步。'
+  const { daily, unknown } = sourceSchedules;
+  if (unknown.length) {
+    // 已知的那几条都没带上它,可还有读不到的 —— 这时只能说"不知道"。这里不顺带
+    // 念日报那条的原因:那几句话都以「目前不会自动同步」收尾,而此刻正是不确定。
+    box.textContent = `读不到${unknown.join('、')}的设置，没法确定这一类来源会不会`
+      + `自动同步。${manual}`;
+    return;
+  }
+  // 两条都读到了、一条都没带上它。**把原因说出来**,否则用户不知道该去哪儿改。
+  box.textContent = (!daily.enabled ? '日报定时未启用，这一类来源目前不会自动同步。'
     : daily.sync === false ? `日报定时每天 ${daily.time} 生成，但没开「生成前先同步」。`
     : '这一类来源不在日报的同步范围里，目前不会自动同步。') + manual;
 }

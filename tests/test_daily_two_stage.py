@@ -47,7 +47,12 @@ class DailyTwoStageSyncTests(unittest.TestCase):
         from kb.pipeline_state import STAGES
         calls = []
 
+        # 每一轮开跑的那一刻,盘上那份「最近一次运行」长什么样 —— 进程在这里被
+        # 杀掉的话,留下的就是它。`self.on_disk[i]` = 第 i+1 轮起跑时的那一份。
+        self.on_disk = []
+
         def start(wanted, crawl_filter=None):
+            self.on_disk.append(deepcopy(pl.load_last_run()))
             calls.append((list(wanted), deepcopy(crawl_filter)))
             return f'run-{len(calls)}'
 
@@ -109,6 +114,32 @@ class DailyTwoStageSyncTests(unittest.TestCase):
         self.assertEqual([daily_run.DIGEST_LABEL],
                          [i['label'] for i in self.gen.call_args.kwargs['sync_issues']])
         self.assertIn(f'1 项未完成({daily_run.DIGEST_LABEL})', daily_run._state['detail'])
+
+    def test_each_round_is_published_as_it_finishes(self):
+        """**收一轮发一次**,不攒到最后一把发。
+
+        攒着的话,这一刻盘上那份「最近一次运行」是刚收尾的那一轮**自己**(每轮
+        收尾都覆盖它),前几轮的抓取失败和失败名单只活在进程内那个列表里 ——
+        进程在这中间被杀掉(重启、停电、OOM),那几条红就永远不在了,而「重试
+        失败项」读的就是盘上那一份。这里钉的是后果:第 3 轮起跑的那一刻,盘上
+        那份里**已经有**第 1 轮的失败。
+        """
+        from kb import pipeline
+        self.sync_run(rounds={1: {'crawl': {
+            'status': 'error', 'detail': '失败 1 个',
+            'failures': [{'title': '某公众号', 'reason': '连不上'}]}}})
+        third = self.on_disk[2]
+        self.assertIsNotNone(third, '第 3 轮起跑时盘上还什么都没有 —— 攒到最后发的形状')
+        self.assertEqual('error', third['stages']['crawl']['status'])
+        self.assertEqual(['某公众号'], [f['title'] for f in
+                                        third['stages']['crawl']['failures']])
+        # 已经收尾的那两轮都在里面,不是只有最近那一轮
+        self.assertEqual(['wechat_local', 'social'],
+                         [sc['channel'] for sc in pipeline.run_scopes(third)])
+        # 收尾那一下照旧把整批发全(入库那一轮也进去了)
+        last = pipeline.load_last_run()
+        self.assertEqual('error', last['stages']['crawl']['status'])
+        self.assertEqual(['crawl', 'export', 'index', 'extract'], last['planned_stages'])
 
     def test_running_out_of_fetch_budget_still_runs_the_library_stages(self):
         # 超预算的本意是"别再抓了,拿已经抓到的内容出报"。入库那一段要是跟着跳过,
@@ -328,6 +359,105 @@ class DailyBatchResultTests(unittest.TestCase):
         self.assertEqual(('run-manual', 'error'),
                          (last['run_id'], last['stages']['index']['status']))
         self.assertIn('index', pipeline.retry_failed_plan())
+
+    def test_two_same_named_subscriptions_both_keep_their_row(self):
+        """两条订阅同名时,两条失败都要留下。**显示用的标题不是身份。**
+
+        按 (标题, 原因) 去重的后果:两个来源各有一条叫「每日速览」的订阅、都是
+        「连不上」,面板上只剩一行、计数也少一个 —— 看上去就是"只有一个来源出了
+        问题",而另一个来源那条红从此没人知道。同名同因在同一个来源里也会发生
+        (两条都叫「每日速览」),所以这里一条都不并。
+        """
+        from kb import pipeline, pipeline_state as ps
+        def failing(channel, titles):
+            return self.round(['crawl', 'export'],
+                              {'crawl': {'status': 'error', 'detail': '失败 1 个',
+                                         'failures': [{'title': t, 'reason': '连不上'}
+                                                      for t in titles]}},
+                              run_id=f'run-{channel}', crawl_filter={'channel': channel},
+                              export_filter={'channel': channel})
+        ps.publish_batch([failing('rss', ['每日速览', '每日速览']),
+                          failing('web', ['每日速览']),
+                          self.round(['index', 'extract'], {}, run_id='run-z')])
+        crawl = pipeline.load_last_run()['stages']['crawl']
+        self.assertEqual(3, len(crawl['failures']),
+                         f'同名同因被并掉了:{crawl["failures"]}')
+        # detail 同理:两个来源各写一句「失败 1 个」,照文本去重就成了一句,
+        # 而卡片上写着来源是两个。按来源挂名之后两句都在、还看得出谁是谁。
+        self.assertIn('RSS：失败 1 个', crawl['detail'])
+        self.assertIn('失败 1 个；', crawl['detail'])
+        self.assertEqual(2, crawl['detail'].count('失败 1 个'), crawl['detail'])
+
+    def test_a_library_round_adds_no_source_name_to_its_own_detail(self):
+        # 反过来钉一边:全库那一轮不属于任何来源,它那句话前面不许挂来源名
+        # (挂上去的话,`start_pipeline` 盖的那个默认采集器会被念成"公众号:索引
+        # 失败" —— 磁盘满跟公众号没有半点关系)。
+        from kb import pipeline, pipeline_state as ps
+        ps.publish_batch([self.round(['crawl', 'export'], {}, run_id='run-1',
+                                     crawl_filter={'channel': 'rss'}),
+                          self.round(['index', 'extract'],
+                                     {'index': {'status': 'error', 'detail': '磁盘满'}},
+                                     run_id='run-2',
+                                     crawl_filter={'channel': 'wechat_local'})])
+        self.assertEqual('磁盘满', pipeline.load_last_run()['stages']['index']['detail'])
+
+    def test_a_newer_run_blocks_this_batch_even_when_its_own_write_failed(self):
+        """那一轮手动同步**没落盘成功**,照样是最新的一轮。
+
+        落盘会失败(满盘、目录没了),而那一下是**吞掉**的 —— 本来也不该因为写不进
+        状态文件就判这一轮失败。错的是拿磁盘当"有没有更新的一轮"的判据:那一轮
+        明明跑完了、结论还在内存里,磁盘上却还是这一批的某一轮,于是这一批
+        "有资格当最新",把人家刚刚的 index 失败改写成成功、「重试失败项」跟着
+        消失,而日报那边一句「已生成」看着一切正常。
+        """
+        from kb import pipeline, pipeline_state as ps
+        ps._state.update({'run_id': 'run-manual', 'started_at': 'C', 'finished_at': 'D',
+                          'run_kind': 'sync', 'planned_stages': ['index'],
+                          'crawl_filter': {}, 'export_filter': {}, 'crawl_retry': {},
+                          'stopped': False, 'log': []})
+        ps._state['stages'] = {s: {'status': 'skipped', 'detail': '未选择'}
+                               for s in ps.STAGES}
+        ps._state['stages']['index'] = {'status': 'error', 'detail': '索引失败'}
+        with patch.object(Path, 'write_text', Mock(side_effect=OSError('磁盘满'))):
+            ps._save_last_run()
+        self.assertFalse(ps._STATE_FILE.exists(), '这一局的前提:磁盘上压根没有它')
+        with self.assertRaises(ps.PublishRefused) as caught:
+            ps.publish_batch([self.round(['crawl', 'export'], {}, run_id='run-1',
+                                         crawl_filter={'channel': 'rss'}),
+                              self.round(['index', 'extract'], {}, run_id='run-2')])
+        self.assertIn('run-manual', caught.exception.reason)
+        # 面板和重试读的是同一份,而且是那一轮真实的失败
+        last = pipeline.load_last_run()
+        self.assertEqual(('run-manual', 'error'),
+                         (last['run_id'], last['stages']['index']['status']))
+        self.assertIn('index', pipeline.retry_failed_plan())
+        # 写不进去也**不许一声不吭**:这一轮的日志里要说清结论只活在内存里
+        self.assertTrue(any('没能写进磁盘' in line for line in last['log']), last['log'])
+
+    def test_an_unreadable_last_run_is_not_a_green_light(self):
+        """读不出盘上那份 = **不知道**,不是"没有更新的一轮"。
+
+        刚重启的进程手里没有权威身份,只能问磁盘;而一份读不出来的状态既可能是
+        「没有更新的运行」也可能是「有、而且比我们新」。放行就又回到把人家的失败
+        改写成成功那一档,所以**失败关闭**。
+        """
+        from kb import pipeline_state as ps
+        batch = [self.round(['crawl', 'export'],
+                            {'crawl': {'status': 'error', 'detail': '失败 10 个'}},
+                            run_id='run-1', crawl_filter={'channel': 'rss'}),
+                 self.round(['index', 'extract'], {}, run_id='run-2')]
+        broken = '{"run_id": "run-'
+        ps._STATE_FILE.write_text(broken, encoding='utf-8')
+        with self.assertRaises(ps.PublishRefused) as caught:
+            ps.publish_batch(deepcopy(batch))
+        self.assertIn('读不出', caught.exception.reason)
+        self.assertEqual(broken, ps._STATE_FILE.read_text(encoding='utf-8'),
+                         '拒绝发布就不许动它')
+        # 反过来钉一边:**文件压根不存在**是合法的头一轮,照旧发布得出去 ——
+        # 一律失败关闭会让新装的库永远发布不了第一批
+        ps._STATE_FILE.unlink()
+        published = ps.publish_batch(deepcopy(batch))
+        self.assertEqual('error', published['stages']['crawl']['status'])
 
     def test_a_write_failure_is_not_a_silent_success(self):
         # 静默吞掉的后果:同步中心看不到这一轮的失败、也点不了重试,而日报那边

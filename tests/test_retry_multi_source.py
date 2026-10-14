@@ -488,6 +488,8 @@ loadSourceScheduleNote().then(() => console.log(box.textContent));
     DAILY_ON = ("{settings: {enabled: true, sync: true, time: '09:00', channels: ['rss']},"
                 " channels: [{id: 'rss', label: 'RSS'}, {id: 'social', label: '大V观点'}],"
                 " default_channels: ['wechat_local', 'rss']}")
+    # 页头那条:读得到、而且确实关着。**跟"读不到"是两件事**,所以要分开摆。
+    PIPE_OFF = "{enabled: false, time: '07:30', channel: 'rss', channels: ['rss']}"
 
     def test_an_enabled_daily_schedule_is_not_reported_as_off(self):
         self.assertIn('每天 09:00 跟着日报那一轮同步', self.line(daily=self.DAILY_ON))
@@ -513,14 +515,47 @@ loadSourceScheduleNote().then(() => console.log(box.textContent));
                  "没开「生成前先同步」"),
                 ("{settings: {enabled: true, sync: true, time: '09:00', channels: ['social']}}",
                  '不在日报的同步范围里')):
-            got = self.line(daily=daily)
+            # **两条定时都读得到**才轮得到念原因(见下一条用例):少一条就是不确定
+            got = self.line(daily=daily, pipe=self.PIPE_OFF)
             self.assertIn(expect, got)
             self.assertNotIn('每天 09:00 跟着日报', got)
 
-    def test_unknown_stays_unknown_and_manual_is_always_true(self):
-        # 两个接口都读不到时**不猜**:只说已知为真的那一半
-        self.assertEqual('手动同步随时可用。', self.line())
-        for args in ({'daily': self.DAILY_ON}, {}):
+    def test_one_unreadable_schedule_is_not_read_as_off(self):
+        """读不到 ≠ 没开。**少一条就不许断言「不会自动同步」。**
+
+        两态读法(读到一个就按已知的那部分说话)的后果:只中断页头那条的 GET,
+        这行字就说「日报定时未启用,这一类来源目前不会自动同步」,而页头上明明
+        写着「定时同步 · 每天 07:30」—— 用户看到的是两句互相打脸的话,而真相是
+        这一类来源每天 07:30 真的会被同步。反过来(日报那条读不到)同形。
+        """
+        a_off = "{settings: {enabled: false, sync: true, time: '09:00', channels: ['rss']}}"
+        for args, who in ((dict(daily=a_off), '页头的定时同步'),
+                          (dict(pipe=self.PIPE_OFF), '日报')):
+            got = self.line(**args)
+            self.assertIn(f'读不到{who}的设置', got)
+            self.assertIn('没法确定', got)
+            # 不许替没读到的那条下结论(断言用确定句的字样:不确定那句本身就带着
+            # 「会不会自动同步」,拿它当否定词永远红)
+            self.assertNotIn('目前不会自动同步', got)
+            self.assertNotIn('未启用', got)
+        # 两条都读不到时同理,而且两条都点名
+        both = self.line()
+        self.assertIn('读不到日报、页头的定时同步的设置', both)
+        self.assertNotIn('目前不会自动同步', both)
+        # 反过来钉一边:两条都读到了、都没带上它,照旧给出确定的那句话和原因
+        settled = self.line(daily=a_off, pipe=self.PIPE_OFF)
+        self.assertIn('日报定时未启用，这一类来源目前不会自动同步', settled)
+        self.assertNotIn('没法确定', settled)
+
+    def test_a_hit_is_stated_even_when_the_other_schedule_is_unreadable(self):
+        # 已知有一条带上它就够了:另一条读不到只可能再多一个同步时刻,不会把这个
+        # 时刻取消掉。这里退回"不知道"等于把一句真话换成一句含糊话。
+        got = self.line(daily=self.DAILY_ON)
+        self.assertIn('每天 09:00 跟着日报那一轮同步', got)
+        self.assertNotIn('没法确定', got)
+
+    def test_manual_sync_is_always_true(self):
+        for args in ({'daily': self.DAILY_ON}, {'pipe': self.PIPE_OFF}, {}):
             self.assertIn('手动同步随时可用', self.line(**args))
 
 

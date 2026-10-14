@@ -236,17 +236,56 @@ def run_payload() -> dict:
     }
 
 
+# **「最近一次运行」的权威在内存里,磁盘只是重启之后的后路。**
+# 落盘会失败(满盘、权限、目录没了),而那一下**是吞掉的** —— 吞掉本身没错,一轮同步
+# 不该因为写不进状态文件就判失败。错的是拿磁盘当"有没有更新的一轮"的判据:那一轮
+# 明明跑完了、结论还在内存里,磁盘上却还是上一份,于是一批更早的结果被判定"有资格
+# 当最新",把它刚刚的失败改写成成功、「重试失败项」跟着消失。
+# 进程内的每一次收尾都更新这一份,它不会失败,所以它才是判据。
+_last_result: dict | None = None
+# 内存那份是**某一个**状态文件的回写缓存。`_STATE_FILE` 被改指向别处(切数据目录、
+# 测试打桩)时它说的不是同一个库,一律作废,改问新的那份磁盘。
+_last_result_file = None
+
+
+def _remember_result(payload: dict) -> None:
+    """记下「本进程见过的最近一次终态」。落盘成不成功都要记。"""
+    global _last_result, _last_result_file
+    _last_result, _last_result_file = deepcopy(payload), _STATE_FILE
+
+
+def _authoritative() -> dict | None:
+    return _last_result if _last_result_file == _STATE_FILE else None
+
+
+def latest_run_id() -> str:
+    """本进程见过的最近一轮终态的身份。空串 = 这个进程还没见过任何一轮收尾。"""
+    return (_authoritative() or {}).get("run_id") or ""
+
+
 def _save_last_run() -> None:
     """持久化最近一次结果,重启 kb-web 后仍能看到。"""
     try:
         _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         _STATE_FILE.write_text(json.dumps(run_payload(), ensure_ascii=False, indent=1),
                                encoding="utf-8")
-    except OSError:
-        pass
+    except OSError as e:
+        # 不判这一轮失败,但**也不许一声不吭**:面板上那份结论从这一刻起只活在
+        # 内存里,重启就没了。写进这一轮自己的日志,它跟着结论一起被人看到。
+        _log(f"这一轮的结果没能写进磁盘({e});本进程内照常可查,重启后会丢")
+    _remember_result(run_payload())
 
 
 def load_last_run() -> dict | None:
+    """最近一次运行的终态。**内存那份优先** —— 它是权威,磁盘是重启后的后路。
+
+    面板(`/api/pipeline/status` 的 `last_run`)和「重试失败项」
+    (`pipeline_retry.retry_failed_plan`)都走这里,所以两者看到的始终是同一份;
+    分别去读磁盘的话,落盘失败的那一轮会让两边一起退回上一轮的结论。
+    """
+    mine = _authoritative()
+    if mine is not None:
+        return deepcopy(mine)
     try:
         return json.loads(_STATE_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -318,30 +357,35 @@ def _end_run() -> None:
 _MERGE_RANK = {"error": 4, "stopped": 3, "skipped": 2, "pending": 1, "running": 1, "ok": 0}
 
 
-def _merge_stage(entries: list[dict]) -> dict:
+def _merge_stage(owned: list[tuple[str, dict]]) -> dict:
     """同一个阶段在几轮里的结果,合成**不丢东西**的一份。
+
+    `owned` 是 (这一轮的来源名, 那一轮这个阶段的结果),按时间顺序。
 
     不能只挑最重的那一个对象:RSS 和网页专栏各挂一条订阅时,两轮的 crawl 都是
     error,挑一个等于把另一个来源的原因和失败名单整个扔掉 —— 面板上「来源:
-    RSS + 网页专栏」却只列得出一条明细。detail 按分号接起来、`failures` 按
-    (标题, 原因) 去重后合并,status 仍取最重的那一档。
+    RSS + 网页专栏」却只列得出一条明细。status 仍取最重的那一档。
+
+    **按来源挂名,不按文本去重。** 两个来源各失败一条时两边的 detail 一模一样
+    (都是「失败 1 个」),照文本去重就把两条说成一条,而卡片上写着来源是两个。
+    `failures` 同理,而且更严重:显示用的标题压根不是身份 —— 两条订阅可以同名
+    (两个来源各有一个「每日速览」),同名同因就被并掉一条,面板上少一行、
+    计数也少一个,看上去就是"只有一个来源出问题"。这里**一条都不并**,原样按
+    轮次接起来;真有重复只能是同一轮被记了两遍,那是别处的 bug,并掉等于替它
+    遮住。上限跟 `_stage` 一致(50 条),防状态体膨胀。
     """
-    worst = max(entries, key=_merge_rank)
+    worst = max((stage for _, stage in owned), key=_merge_rank)
     merged = {k: v for k, v in deepcopy(worst).items() if k not in ("detail", "failures")}
-    details, failures, seen = [], [], set()
-    for stage in entries:
+    details, failures = [], []
+    for scope, stage in owned:
         text = (stage.get("detail") or "").strip()
-        if text and text not in details:
-            details.append(text)
-        for item in stage.get("failures") or []:
-            key = (item.get("title"), item.get("reason"))
-            if key not in seen:
-                seen.add(key)
-                failures.append(deepcopy(item))
+        if text:
+            details.append(f"{scope}：{text}" if scope else text)
+        failures.extend(deepcopy(item) for item in stage.get("failures") or [])
     if details:
         merged["detail"] = "；".join(details)[:400]
     if failures:
-        merged["failures"] = failures
+        merged["failures"] = failures[:50]
     return merged
 
 
@@ -352,6 +396,14 @@ def _merge_rank(stage: dict) -> int:
     if _FAIL_DETAIL_RE.search(stage.get("detail") or ""):
         return _MERGE_RANK["error"]
     return _MERGE_RANK.get(stage.get("status") or "", 0)
+
+
+def _scope_name(run: dict) -> str:
+    """这一轮作用在哪几个来源上,写成人话。全库那一轮回空串(它不属于谁)。"""
+    from kb.collectors import channel_labels     # 延迟:它反过来 import 本模块
+    from kb.pipeline_stages import run_scopes
+    labels = channel_labels()
+    return " + ".join(labels.get(s["channel"], s["channel"]) for s in run_scopes(run))
 
 
 def _merge_scopes(records: list[dict], key: str) -> dict:
@@ -410,15 +462,36 @@ def publish_batch(records: list[dict]) -> dict | None:
         return None
     with _lock:
         ours = {r.get("run_id") for r in records if r.get("run_id")}
-        current = load_last_run() or {}
-        if current and current.get("run_id") and current["run_id"] not in ours:
-            raise PublishRefused(
-                f'期间已经有更新的一轮同步收尾({current["run_id"]}),这一轮日报的'
-                '同步结果没有写进「最近一次运行」——同步中心显示的是那一轮')
+        # **判据是内存里那份权威身份,不是磁盘。** 磁盘写会失败而且是吞掉的:
+        # 那一轮手动同步明明已经收尾、结论也在内存里,磁盘上却还是我们这一批的
+        # 某一轮 —— 照磁盘判,我们就"有资格"把它刚刚的失败改写成成功。
+        latest = latest_run_id()
+        if latest:
+            if latest not in ours:
+                raise PublishRefused(
+                    f'期间已经有更新的一轮同步收尾({latest}),这一轮日报的'
+                    '同步结果没有写进「最近一次运行」——同步中心显示的是那一轮')
+        else:
+            # 这个进程还没见过任何一轮收尾(刚重启、这一批是从别处恢复的)。
+            # 只能问磁盘,而**读不出来时失败关闭**:一份读不出的状态既可能是
+            # 「没有更新的运行」也可能是「有而且更重要」,拿不准就不许替换。
+            try:
+                current = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                current = {}
+            except (OSError, json.JSONDecodeError) as e:
+                raise PublishRefused(
+                    f'读不出当前的「最近一次运行」({e}),不确定期间有没有更新的'
+                    '一轮收尾,这一批没有替换它') from e
+            if current.get("run_id") and current["run_id"] not in ours:
+                raise PublishRefused(
+                    f'期间已经有更新的一轮同步收尾({current["run_id"]}),这一轮日报的'
+                    '同步结果没有写进「最近一次运行」——同步中心显示的是那一轮')
         run_id = records[-1].get("run_id") or new_run_id()
+        scopes = [_scope_name(r) for r in records]
         stages: dict[str, dict] = {}
         for name in STAGES:
-            owned = [r["stages"][name] for r in records
+            owned = [(scopes[i], r["stages"][name]) for i, r in enumerate(records)
                      if name in (r.get("planned_stages") or []) and (r.get("stages") or {}).get(name)]
             stages[name] = (_merge_stage(owned) if owned
                             else {"status": "skipped", "detail": "未选择"})
@@ -453,6 +526,7 @@ def publish_batch(records: list[dict]) -> dict | None:
         # 这一批的身份就是最后那一轮,所以这里是**把它那份记录补全成整轮的**,
         # 不是再塞一条新的。
         _finished[run_id] = deepcopy(merged)
+        _remember_result(merged)
         for old_id in list(_finished)[:-_FINISHED_KEEP]:
             del _finished[old_id]
         return merged
