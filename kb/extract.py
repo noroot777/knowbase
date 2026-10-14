@@ -635,17 +635,31 @@ def pending_docs(conn, limit: int = 0) -> list:
     return rows[:limit] if limit > 0 else rows
 
 
-def pending_promo_docs(conn, sources: list[str], limit: int = 0) -> list:
+def pending_promo_docs(conn, sources: list[str], limit: int = 0,
+                       accounts: list[str] | None = None,
+                       recheck: bool = False) -> list:
     """已提取过、但还没做软广判定的文档(存量补判用)。
 
     新入库的文章在提取时就顺带判了,这个查询只会捞出「软广判定上线之前」
     提取的那批存量;补完一次就永远是空的。
+
+    `recheck=True` 时连已判过的一起捞 —— 判定口径改了之后要让存量跟上,
+    靠的就是这条路(改口径而不重判,等于新文章一套标准、存量另一套)。
+    它**覆盖**已有的 promo_level,所以默认是关的,而且调用方(补判脚本)还要求
+    必须同时给 `accounts`:无目标的全库重判是 9000 多篇、一次把所有历史结论
+    连人工核对过的那些一起盖掉,不该是一个标志位就能触发的事。
+
+    `accounts` 给了就只看这几个号。空列表当没给(别把它解释成「哪个号都不要」:
+    那会让调用方的一次参数失误静默变成「一篇都不判」,而脚本照旧报成功)。
     """
-    ph = ",".join("?" * len(sources))
-    sql = f"""
-        SELECT path, title, account FROM documents
-        WHERE promo_level = '' AND source IN ({ph})
-        ORDER BY published DESC
-    """
-    rows = conn.execute(sql, list(sources)).fetchall()
+    where = [f"source IN ({','.join('?' * len(sources))})"]
+    args = list(sources)
+    if not recheck:
+        where.append("promo_level = ''")
+    if accounts:
+        where.append(f"account IN ({','.join('?' * len(accounts))})")
+        args += list(accounts)
+    sql = (f"SELECT path, title, account FROM documents"
+           f" WHERE {' AND '.join(where)} ORDER BY published DESC")
+    rows = conn.execute(sql, args).fetchall()
     return rows[:limit] if limit > 0 else rows

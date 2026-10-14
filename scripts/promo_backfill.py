@@ -10,13 +10,19 @@
      (软广信号密集在开头的钩子和结尾的转化引导,中间的实测细节没有增量),
      输出从一整份元数据缩成一个小 JSON。
   2. 同稿去重 —— 库里 8400 篇公众号文里有近 3000 篇是同一份稿子:克隆号互相
-     转发、代充值广告同一个号发了 177 次。按「标题 + 正文长度桶」归组,每组
-     只判一篇,结论广播给同组其余篇,省掉约四分之一的调用。
+     转发、代充值广告同一个号发了 177 次。按「账号 + 标题 + 正文长度桶」归组,
+     每组只判一篇,结论广播给同组其余篇,省掉约四分之一的调用。
+
+判定口径改了之后,存量要跟上也走这里 —— `--recheck` 连已判过的一起重判。
+它覆盖已有判定,所以必须同时用 `--account` 圈定范围(见 `_scope_args`)。
 
 用法:
   uv run python scripts/promo_backfill.py scan            # 规模 + token/费用预估
   uv run python scripts/promo_backfill.py run [--limit N] # 实际补判
   uv run python scripts/promo_backfill.py report          # 判出来的软广清单
+  # 口径改了,重判某个号的存量(先 scan 看规模和花费):
+  uv run python scripts/promo_backfill.py scan --account GitHub猿 --recheck
+  uv run python scripts/promo_backfill.py run  --account GitHub猿 --recheck
 """
 from __future__ import annotations
 
@@ -39,17 +45,41 @@ SOURCES = ["dr-gzh", "gzh"]
 WORKERS = 6          # 与 pipeline_stages.EXTRACT_WORKERS 同口径
 LENGTH_BUCKET = 500  # 正文长度按这个粒度分桶,同标题不同长度的稿子分开判
 
-# 估算用的两个常量,2026-09-16 拿 50 篇真实文章实测校准过:
-# 单次调用输入平均 2696 token,其中喂进去的正文平均 1929 字符 —— 中文正文
-# 基本是 1 字符 1 token,剩下的 ~770 token 是 prompt 模板本身(判定口径那几段)。
+# 估算用的两个常量,拿 50 篇真实文章实测校准过:单次调用输入平均 2696 token,
+# 其中喂进去的正文平均 1929 字符 —— 中文正文基本是 1 字符 1 token,剩下的是
+# prompt 模板本身(判定口径那几段)。模板那部分原先是 ~770 token,判定口径加上
+# 「借壳」那条和它的反向清单之后长了 554 字符,这里跟着抬到 1324。
+# **改 `_PROMO_RULES` 要顺手核一次这个数** —— 它只用于 scan 的费用预估,偏小
+# 不会让任何一次判定出错,但会让人按一个虚低的报价决定要不要跑几千篇。
 CHARS_PER_TOKEN = 1.0
-PROMPT_OVERHEAD = 770
+PROMPT_OVERHEAD = 1324
 OUTPUT_TOKENS = 95   # 实测平均,一个 {"level","reason"} 小 JSON
 
 
-def _candidates(conn, limit: int = 0) -> list[dict]:
+def _scope_args(args) -> tuple[list[str], bool]:
+    """把「判哪些篇」这两个参数解析成 (账号名, 要不要重判),顺带落守卫。
+
+    `--recheck` 覆盖已有判定,无目标地跑一次是 9000 多篇、把所有历史结论
+    (含人工核对过的)一起盖掉,所以要求它必须配 `--account`。守卫搭在参数
+    解析这一层而不是 SQL 里:越早拦住,越不会出现「跑了一半才发现范围错了」。
+
+    两个都按 `getattr` 兜底,**不要求调用方的 args 必须带上这两个属性** ——
+    `cmd_run` 有手工拼 `argparse.Namespace` 的调用方(回写时序那组回归),
+    直接写 `args.recheck` 会把它们打成 AttributeError。解析收在这一处也是
+    为了别在 scan/run 两边各读一次、各漂一次。
+    """
+    accounts = [a.strip() for a in getattr(args, "account", None) or []
+                if a.strip()]
+    recheck = bool(getattr(args, "recheck", False))
+    if recheck and not accounts:
+        raise SystemExit("--recheck 会覆盖已有判定,必须用 --account 指定账号范围")
+    return accounts, recheck
+
+
+def _candidates(conn, limit: int = 0, accounts: list[str] | None = None,
+                recheck: bool = False) -> list[dict]:
     """待补判的文档 + 正文。正文为空的跳过(判不了,也没内容可污染)。"""
-    rows = pending_promo_docs(conn, SOURCES, limit)
+    rows = pending_promo_docs(conn, SOURCES, limit, accounts, recheck)
     out = []
     for r in rows:
         body = store.doc_body(conn, r["path"])
@@ -63,13 +93,21 @@ def _candidates(conn, limit: int = 0) -> list[dict]:
 def _group(cands: list[dict]) -> list[list[dict]]:
     """把同一份稿子的多个副本归成一组,组内只需判一次。
 
-    归组键是「标题 + 正文长度桶」而不是光看标题:同名但长度差一截的多半是
-    两篇不同的文章(「量子位编辑作者招聘」这种通用标题尤其容易撞),归错组
-    会把一篇的结论安到另一篇头上。长度桶把它们分开,代价只是多判几次。
+    归组键是「账号 + 标题 + 正文长度桶」。
+
+    带长度桶是因为同名但长度差一截的多半是两篇不同的文章(「量子位编辑作者
+    招聘」这种通用标题尤其容易撞),归错组会把一篇的结论安到另一篇头上。
+
+    **带账号**防的是另一头:搬运号把原创号的稿子整篇抄走、长度自然落在同一个
+    桶里,于是一个结论广播给两个号。这个库里有 300 组是这样跨号的,最大的两组
+    是「谷歌Gemini 4开跑了」(新智元 1 篇 + 搬运号 53 篇)和「OpenAI大神教你
+    如何榨干Codex」(量子位 1 篇 + 搬运号 57 篇)——判定口径认「借壳」之后,
+    搬运版判 hard,不带账号就会把原创那篇一起广播成 hard,而 hard 是连实体
+    带条目一起从检索和图鉴里摘掉。代价是 7230 组变 7570 组,多 340 次调用。
     """
     buckets: dict[tuple, list[dict]] = {}
     for c in cands:
-        key = (c["title"], len(c["body"]) // LENGTH_BUCKET)
+        key = (c["account"], c["title"], len(c["body"]) // LENGTH_BUCKET)
         buckets.setdefault(key, []).append(c)
     # 组内取最长的一篇当代表:转发版常常被砍掉尾部的推广段,而那正是判定依据
     return [sorted(g, key=lambda c: len(c["body"]), reverse=True)
@@ -96,14 +134,20 @@ def _fmt_cost(est: dict) -> str:
 
 
 def cmd_scan(args) -> int:
+    accounts, recheck = _scope_args(args)
     conn = store.connect()
     try:
-        cands = _candidates(conn)
+        cands = _candidates(conn, 0, accounts, recheck)
     finally:
         conn.close()
     groups = _group(cands)
     est = _estimate(groups)
-    print(f"待补判文档: {est['docs']}(来源 {'/'.join(SOURCES)})")
+    scope = f"来源 {'/'.join(SOURCES)}"
+    if accounts:
+        scope += f",账号 {'/'.join(accounts)}"
+    if recheck:
+        scope += ",含已判过的(会覆盖原判定)"
+    print(f"待补判文档: {est['docs']}({scope})")
     print(f"同稿归组后实际调用: {est['calls']} 次"
           f"(省掉 {est['docs'] - est['calls']} 次重复判定)")
     print(f"预估输入 {est['in_tokens']:,} token,输出 {est['out_tokens']:,} token")
@@ -143,7 +187,8 @@ def _flag_in_vault(conn, path: str, level: str, stale: bool) -> None:
 def cmd_run(args) -> int:
     conn = store.connect()
     try:
-        cands = _candidates(conn, args.limit * 4 if args.limit else 0)
+        cands = _candidates(conn, args.limit * 4 if args.limit else 0,
+                            *_scope_args(args))
         groups = _group(cands)
         if args.limit:
             groups = groups[: args.limit]
@@ -227,10 +272,17 @@ def cmd_report(args) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("scan")
+
+    def _scope(p):
+        p.add_argument("--account", action="append", metavar="名字",
+                       help="只判这个号(可重复给)")
+        p.add_argument("--recheck", action="store_true",
+                       help="连已判过的一起重判(覆盖原判定,必须配 --account)")
+    _scope(sub.add_parser("scan"))
     r = sub.add_parser("run")
     r.add_argument("--limit", type=int, default=0, help="只处理前 N 组(试跑用)")
     r.add_argument("--dry-run", action="store_true", help="只打印规模,不调模型")
+    _scope(r)
     rp = sub.add_parser("report")
     rp.add_argument("--soft", action="store_true", help="连 soft 一档也列出来")
     args = ap.parse_args()

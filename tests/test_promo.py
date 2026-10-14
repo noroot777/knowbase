@@ -13,8 +13,11 @@
    promo 字段,save_extraction 要是跟 summary 一起写,源头判过的结果就没了。
 4. **软广排除不能让每次检索都放大 KNN**。_vec_leg 按「有没有过滤条件」决定
    KNN 候选数,软广子句混进 _filter_sql 会让无过滤的普通查询也跑 4000 的 KNN。
-5. **同稿归组看标题 + 长度**。光看标题会把「量子位编辑作者招聘」这类撞名的
-   不同文章判成同一篇。
+5. **同稿归组看账号 + 标题 + 长度**。光看标题会把「量子位编辑作者招聘」这类
+   撞名的不同文章判成同一篇;不看账号会把搬运号抄走的稿子和原创那篇归成一组,
+   搬运版判 hard 时把原创那篇一起广播掉。
+6. **重判要有目标,而且不许改变默认那条路**。`--recheck` 覆盖已有判定,没有
+   `--account` 就直接拒绝;不给 `--recheck` 时取数范围一个字不变。
 
 跑:  python -m unittest discover -s tests -v
 """
@@ -135,6 +138,66 @@ class PendingTest(_DB):
         self.assertNotIn("c.md", [r["path"] for r in rows])
 
 
+class RecheckScopeTest(_DB):
+    """`--recheck` 的取数范围。判定口径改了之后存量靠它跟上。"""
+
+    def _paths(self, **kw) -> list[str]:
+        return [r["path"] for r in
+                extract.pending_promo_docs(self.conn, ["dr-gzh", "gzh"], **kw)]
+
+    def test_recheck_includes_already_judged(self):
+        extract.save_promo(self.conn, "a.md", {"level": "none", "reason": ""})
+        self.assertEqual(sorted(self._paths(recheck=True)), ["a.md", "b.md"])
+
+    def test_default_still_skips_judged(self):
+        # 反过来钉一边:不给 recheck 时行为一个字都不许变,否则每轮管道的
+        # 存量补判会把全库判定重跑一遍
+        extract.save_promo(self.conn, "a.md", {"level": "hard", "reason": ""})
+        self.assertEqual(self._paths(), ["b.md"])
+
+    def test_accounts_filter(self):
+        self.conn.execute("INSERT INTO documents (path, source, title, account)"
+                          " VALUES ('d.md','dr-gzh','搬运稿','搬运号')")
+        self.assertEqual(self._paths(accounts=["搬运号"]), ["d.md"])
+
+    def test_empty_accounts_means_no_filter(self):
+        # 空列表当「没给」。解释成「哪个号都不要」的话,调用方一次参数失误会
+        # 静默变成「一篇都没判」,而脚本照旧报成功退出
+        self.assertEqual(sorted(self._paths(accounts=[])), ["a.md", "b.md"])
+
+
+class RecheckGuardTest(unittest.TestCase):
+    """`--recheck` 必须带 `--account`:无目标重判会盖掉全库历史结论。"""
+
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        import promo_backfill
+        self.mod = promo_backfill
+
+    def test_recheck_without_account_refuses(self):
+        with self.assertRaises(SystemExit):
+            self.mod._scope_args(SimpleNamespace(account=None, recheck=True))
+
+    def test_recheck_with_account_passes(self):
+        self.assertEqual(
+            self.mod._scope_args(SimpleNamespace(account=["GitHub猿"], recheck=True)),
+            (["GitHub猿"], True))
+
+    def test_plain_run_needs_no_account(self):
+        # 反过来钉一边:不重判时没有 --account 照旧放行,守卫只管重判那条路
+        self.assertEqual(
+            self.mod._scope_args(SimpleNamespace(account=None, recheck=False)),
+            ([], False))
+
+    def test_absent_attributes_do_not_raise(self):
+        """手工拼的 Namespace 不带这两个属性时也得能跑。
+
+        `cmd_run` 有这样的调用方(回写时序那组回归直接拼 Namespace),
+        新参数不该把既有调用方打成 AttributeError。
+        """
+        self.assertEqual(self.mod._scope_args(SimpleNamespace()), ([], False))
+
+
 class SearchFilterTest(unittest.TestCase):
     def test_promo_clause_not_in_filter_sql(self):
         # _vec_leg 拿 _filter_sql 的返回值判断「召回被缩到小子集了没」,
@@ -223,6 +286,18 @@ class GroupingTest(unittest.TestCase):
         groups = self.mod._group([self._c("short.md", "稿", 1000),
                                   self._c("long.md", "稿", 1400)])
         self.assertEqual(groups[0][0]["path"], "long.md")
+
+    def test_different_account_not_grouped(self):
+        """搬运号抄走原创号的稿子,标题和长度都一样,结论不许互相广播。
+
+        后果不对称:搬运版文末挂代充值导流判 hard,广播过去原创那篇就连实体
+        带条目一起从检索和图鉴里消失,而 hard 不是「降权」是「摘掉」。
+        """
+        a = self._c("yuan.md", "谷歌Gemini 4开跑了", 3000)
+        b = dict(self._c("ban.md", "谷歌Gemini 4开跑了", 3000), account="搬运号")
+        groups = self.mod._group([a, b])
+        self.assertEqual(len(groups), 2)
+        self.assertEqual({g[0]["account"] for g in groups}, {"x", "搬运号"})
 
 
 class DerivedEntryTest(unittest.TestCase):

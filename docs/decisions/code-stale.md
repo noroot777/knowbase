@@ -39,6 +39,23 @@
   自己也会安静 —— 留它的理由是构造上的,"服务没跑"该由我们自己回答,不该押在某个
   find 实现对缺失参照物的处理上。
 
+- **同一类事故的另一种形态:从 worktree 跑测试,加载的可能是主检出的代码。** venv 在
+  主检出,里面有**两份** editable `.pth`(旧项目名 `knowbase` 和新的 `knowledge_base`)
+  都指向 `/Users/fjh/code/knowledge-base`,所以解释器一启动,主检出就已经在 `sys.path`
+  里了。worktree 里的那份只靠各个测试文件自己开头那句
+  `sys.path.insert(0, 父目录的父目录)` 顶上去 —— **谁先 import `kb` 就按谁的 path 定
+  版本**,而那取决于模块名的字母序和各文件里 import 的先后。实测:`tests/test_writeback_lock.py`
+  第 26 行 `from kb import cli, …` 排在它第 30 行引 `feed_trim_fixture`(插 path 的那
+  一步)**之前**,所以单独指名跑 `test_writeback_lock test_promo` 时,`kb.extract` 来自
+  **主检出**,新加的关键字参数当场报 `unexpected keyword argument`;而 `discover` 按字
+  母序先 import `test_promo`(它开头就插了 path),同一批测试就全绿。
+  **坏的那一半照旧是静默的**:worktree 里改完、测试全绿,跑的却是主检出那份代码 ——
+  改动一行都没被执行过,而报告上写着「回归通过」。
+  **出路是跑测试时显式带上 `PYTHONPATH=<worktree 根>`**(PYTHONPATH 的条目排在
+  site-packages 之前,`.pth` 再怎么追加也盖不住它),不要依赖字母序。**别去删那两份
+  `.pth` 里的任何一个** —— 两份 dist-info 的 RECORD 记着同一组 `bin/kb`、`bin/kb-web`、
+  `bin/kb-mcp`(见 CLAUDE.md「操作入口」那条「不许改用 `uv sync`」)。
+
 ## 当次事故的处置记录
 
 > 以下来自引入这段约定的那次提交的说明。
