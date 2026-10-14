@@ -304,7 +304,11 @@ const summaryText = () => evalJs(
 const persistText = () => evalJs(
   `document.getElementById('pipe-persist-issue')?.textContent || ''`);
 const many = Array.from({ length: 50 }, (_, i) => ({ title: `订阅 ${i}`, reason: "连不上" }));
-state = { ...state, run_id: "run-H", run_kind: "sync", running: false,
+// 身份另起两个(run-J1 / run-J2),**不许复用这条时序上别处用过的 run id** ——
+// 待处理数那个加载器是按"当前终态的身份"记已经追平过谁的,重名就等于告诉它
+// "这一轮我早追平过了":后面那一档(跑完之后自己追平)于是压根不再去查,面板
+// 永久停在 0 项,而这里这两条检查照旧全绿。
+state = { ...state, run_id: "run-J1", run_kind: "sync", running: false,
           started_at: "2026-10-09 11:00:00", finished_at: "2026-10-09 11:05:00",
           persist_issue: "这一轮的结果没能写进磁盘(磁盘满);本进程内照常可查，重启后会退回上一次写成功的那一份",
           stages: { ...okStages("完成"),
@@ -320,7 +324,7 @@ check("落盘降级在面板上有一句,不是只躺在运行日志里",
         document.getElementById('pipe-persist-issue')?.textContent || '')`, 4000),
       await persistText());
 // 反过来钉一边:没截断就不许加那句「仅列前 N 条」;写进去了就不许挂着降级提示
-state = { ...state, run_id: "run-I", persist_issue: "",
+state = { ...state, run_id: "run-J2", persist_issue: "",
           stages: { ...okStages("完成"),
                     crawl: { status: "error", detail: "失败 2 个",
                              failures: many.slice(0, 2) } } };
