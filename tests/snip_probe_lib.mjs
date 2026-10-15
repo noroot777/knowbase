@@ -234,16 +234,33 @@ true`;
  *  提示。那一页的按钮是个 div、靠行内 `style.display` 藏(app 那边是
  *  `hidden` 属性),提示落在它自己的 `#kbtoast` 里 —— 所以不能复用外壳里那套
  *  `__snipBtnShown`/`__toastText`:它们按 app 的形状读,在这一页会一律为真。*/
-async function docSnip(text) {
+async function docSnip(text, tail = "") {
   await docToastClear();
+  // `tail` 给了就是**跨元素选**:从含 text 的那个文本节点起、到后面含 tail 的那个
+  // 节点止(段落边界那一类分隔落在两个 <p> 之间,一个节点里找不着)。
   const picked = await evalJs(`(() => {
     const host = document.getElementById('content');
     const w = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+    const tail = ${js(tail)};
+    let head = null, at = 0;
     for (let n = w.nextNode(); n; n = w.nextNode()) {
-      const i = n.nodeValue.indexOf(${js(text)});
-      if (i < 0) continue;
+      if (!head) {
+        const i = n.nodeValue.indexOf(${js(text)});
+        if (i < 0) continue;
+        head = n; at = i;
+        if (tail) continue;
+      } else {
+        const j = n.nodeValue.indexOf(tail);
+        if (j < 0) continue;
+        const r2 = document.createRange();
+        r2.setStart(head, at); r2.setEnd(n, j + tail.length);
+        const s2 = getSelection(); s2.removeAllRanges(); s2.addRange(r2);
+        if (n.parentElement) n.parentElement.scrollIntoView({ block: 'center' });
+        document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+        return 'ok';
+      }
       const r = document.createRange();
-      r.setStart(n, i); r.setEnd(n, i + ${js(text)}.length);
+      r.setStart(n, at); r.setEnd(n, at + ${js(text)}.length);
       const s = getSelection(); s.removeAllRanges(); s.addRange(r);
       if (n.parentElement) n.parentElement.scrollIntoView({ block: 'center' });
       document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));

@@ -514,6 +514,7 @@ check("阅读页上两边矛盾时一处也不许高亮",
   (await highlightText()) === "(没有高亮)", await highlightText());
 check("阅读页上两边矛盾时也如实说没找到",
   confDocToast.includes("没找到这段收藏"), confDocToast);
+
 await boot();
 
 // ── 10. 问答:已保存的标记挂在整条消息上,界面文字可不是落了库的正文 ─────────

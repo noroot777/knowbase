@@ -22,15 +22,14 @@
 // 的 `if ready: run_task() else: stop_task()`,换行和缩进再也找不回来(审查实测,
 // 日报正文和独立阅读页都中)。所以 `quote` 原样存,压平只在**读的时候**做
 // (`snipAnchor`、后端 `_anchor`),两边都压一次,结果逐位相同。
+// **「原样」包括元素产生的那几处换行**(`<br>`、段落/列表/表格边界):它们在文本
+// 节点里一个字符都不占,照文本节点串存就是把两行接成一行。
+//
+// 文本那一半(压平、半个字、显示分隔、坐标系、锚点规范化、定位搜索)在
+// `kb/static/js/snip_text.js` —— index.html 里排在本文件之前。本文件只管 UI、
+// 采集入口、来源判定、核验和网络。
 
 const SNIP_MIN = 4;          // 选不到这个字数不弹按钮(误触、双击单词)
-// 前后文锚点各取多少字:**从 30 起,不唯一就加长**。同一段话在一篇里出现两次
-// 时,它两头 30 字也可能一字不差(重复的段落、模板说明、重复的代码块)—— 那时
-// 「整段锚点命中了」证明不了位置,而正文再往外一点就不一样了。长到唯一为止,
-// 回跳才落得回用户选的那一处。三档都不唯一就用最短那档:那是正文自己分不出的
-// 两处,回跳那边会如实说没找到(见 snipSeek),不许静默挑第一处。
-// 阅读页那份内联副本(`kb/web/pages.py` 的 `_DOC_SNIP_JS`)是同一个阶梯。
-const SNIP_CTX_STEPS = [30, 80, 200];
 // 后端 `SnippetRequest` 对这两个快照字段有长度上限,超了整条 POST 被拒成 422 ——
 // 而订阅/图鉴的标题和链接是人家内容自带的,长了不是用户的错。**标题裁尾巴**
 // (它只用来在列表里指代这一条),**链接不裁** —— 半截 URL 点过去是另一个地方,
@@ -38,10 +37,6 @@ const SNIP_CTX_STEPS = [30, 80, 200];
 // 会话号、日期、32 位摘要,够不着上限,裁了反而把回跳的落点裁没了。
 const SNIP_MAX_TITLE = 300;
 const SNIP_MAX_URL = 4096;
-// 定位时一侧的候选数到这个数就不往下数了:判据只问「是不是正好一处」,数到
-// 第二处就已经定论。**数不完的那一侧一律当说不清**(见 snipSeek)—— 截断过的
-// 集合拿去取交集会让交集偏小,而偏小正好是误采信的方向。
-const SNIP_MAX_HITS = 64;
 // 片段来源。和后端 `kb/web/favorites_api.py` 的 `_ORIGINS` 是同一份名单,
 // 加一种来源要两边一起加(后端那边会把不认识的 origin 拒成 400)。
 const SNIP_ORIGINS = ['doc', 'daily', 'chat', 'feed'];
@@ -144,130 +139,32 @@ function showSnipBtn() {
   btn.style.top = (r.top > h + 14 ? r.top - h - 8 : r.bottom + 8) + 'px';
 }
 
-// ── 坐标系 ────────────────────────────────────────────────────────────────────
-// `SNIP_WS` 和 `snipCollapse` 认的是同一个字符类(JS 的 `\s`,含 NBSP),所以
-// 逐字走和整串替换压出来的结果逐位相同 —— 两套规则会让采集和回跳差一两个空格。
-const SNIP_WS = /\s/;
-function snipCollapse(text) {
-  return String(text == null ? '' : text).replace(/\s+/g, ' ');
-}
-
-// ── 不许切开一个字 ────────────────────────────────────────────────────────────
-// JS 的字符串按 UTF-16 存:emoji 一类字占两个单元(代理对),按单元 `slice` 会把
-// 它切成两半。**孤立的那一半不是合法字符** —— Python 的 str 装得下它、UTF-8 编
-// 不出来,于是 sqlite3 在 INSERT 那一句当场抛 UnicodeEncodeError,整条 POST 变成
-// 500(审查实测:正文里一个 emoji 后面隔着 29 个字母,选中再后面那句普通中文,
-// 日报和独立阅读页都收藏失败 —— 而用户选的那几个字里一个 emoji 都没有,是**前后文
-// 窗口**正好切在那个 emoji 中间)。
-//
-// 所以**每一处会进库的截断都得过这一道**:前后文窗口(`snipContext`)、标题上限
-// (`postSnip`、`chat.js` 的提问标题)、阅读页那份内联副本(`kb/web/pages.py` 的
-// `whole`/`contextOf`)。只削掉边上那半个字,正文里合法的字一个不动 —— 替换合法
-// 原文不是修法,那动的是用户收下来的引文。后端还有一道:非法字符串如实拒成 400
-// (`kb/web/favorites_api.py` 的 `_LONE_SURROGATE`),不等到 INSERT 抛 500。
-const SNIP_LOW_HALF = /^[\uDC00-\uDFFF]/;    // 代理对的后一半(它的前一半被切掉了)
-const SNIP_HIGH_HALF = /[\uD800-\uDBFF]$/;   // 代理对的前一半(它的后一半被切掉了)
-
-/** 掐掉两头那半个字(截断只会在边上留下半个)。*/
-function snipWhole(text) {
-  let s = String(text == null ? '' : text);
-  if (SNIP_LOW_HALF.test(s)) s = s.slice(1);
-  if (SNIP_HIGH_HALF.test(s)) s = s.slice(0, -1);
-  return s;
-}
-
-/** 按长度上限截断,**不切开字符**。给要进库的快照字段用。*/
-function snipClip(text, max) {
-  return snipWhole(String(text == null ? '' : text).slice(0, max));
-}
-
-// 容器内所有 text node 串成一条**压平空白**的全文,并记下每个字出自哪个节点的
-// 哪一位:选区偏移、锚点截取、回跳定位共用这一个坐标系。
-//   text  压平之后的全文
-//   map   text[i] 出自 map[i].node 的第 map[i].off 位(一段空白只留第一个字)
-//   nodes 每个 text node 开始时 text 已有多长,给 snipOffsetAt 定位用
-//
-// `skip` 是一条 CSS 选择器:命中它的那些子树**不进这条全文**。界面文字住在正文
-// 容器里是常态(问答气泡下面的模型名和「3 小时前」、引用块那一段「来源 N 篇」),
-// 而**它们不是正文**:相对时间过一会儿就变成「5 小时前」,被采进前后文锚点的
-// 那一条收藏从此对不上;「来源 N 篇」那一块是按 refs 现拼的。**采集和回跳要传
-// 同一个 skip** —— 一头跳过一头不跳,采到的"唯一"在另一头就不唯一了。
-function snipTextIndex(root, skip) {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, skip ? {
-    acceptNode: n => n.parentElement && n.parentElement.closest(skip)
-      ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
-  } : null);
-  const map = [], nodes = [];
-  let text = '', space = false, n;
-  while ((n = walker.nextNode())) {
-    const v = n.nodeValue;
-    nodes.push({ node: n, from: text.length });
-    for (let i = 0; i < v.length; i++) {
-      const ws = SNIP_WS.test(v[i]);
-      if (ws && space) continue;         // 同一段空白里的第二个字:不占位置
-      map.push({ node: n, off: i });
-      text += ws ? ' ' : v[i];
-      space = ws;
-    }
-  }
-  return { map, nodes, text };
-}
-
-// DOM 位置 → 全文偏移:**这个位置之前已经有多少个字**。选区两端用同一个函数,
-// 所以起点落在压掉的那几个空白里时,它和终点算出来的是同一套偏移。
-function snipOffsetAt(idx, node, offset) {
-  const it = idx.nodes.find(x => x.node === node);
-  if (!it) return -1;
-  let i = it.from;
-  while (i < idx.map.length && idx.map[i].node === node && idx.map[i].off < offset) i++;
-  return i;
-}
-
-// 全文偏移 [start, end) → DOM Range。end-1 那个字就是选区最后一个字:压掉的
-// 空白没有自己的位置,而引文两头的空白在 snipSpec 里已经挪走了。
-function snipOffsetRange(idx, start, end) {
-  const first = idx.map[start], last = idx.map[end - 1];
-  if (!first || !last || end <= start) return null;
-  const range = document.createRange();
-  range.setStart(first.node, first.off);
-  range.setEnd(last.node, last.off + 1);
-  return range;
-}
-
-/** [a,b) 这一段的前后文:按 SNIP_CTX_STEPS 一档档加长,取**第一档能让回跳落回
- *  这一处的**;都做不到就回最短那档(回跳那边会如实说没找到)。
+/** 选区 → `{quote, prefix, suffix, locatable}`。
  *
- *  判据直接走 `snipSeek` —— 回跳用的就是它。自己另写一遍"唯一吗"的话,采集这头
- *  算出"唯一",回跳那头按另一套规则(候选集合 + 外侧空白)可能落在别处,而两处的
- *  文字一模一样,谁都看不出来。`exact` = 这条锚点按回跳的口径落回的正是这一处。*/
-function snipContext(text, a, b) {
-  const quote = text.slice(a, b);
-  let first = null;
-  for (const n of SNIP_CTX_STEPS) {
-    // 窗口两头都可能切在一个字中间 —— 削掉那半个(见 snipWhole)。削完仍是
-    // 正文里连着的一段,所以下面那道 `snipSeek` 判据照旧成立。
-    const ctx = { prefix: snipWhole(text.slice(Math.max(0, a - n), a)),
-                  suffix: snipWhole(text.slice(b, b + n)) };
-    const hit = snipSeek(text, { q: quote, p: ctx.prefix, s: ctx.suffix });
-    if (hit && hit[0] === a) return { ...ctx, exact: true };
-    if (!first) first = { ...ctx, exact: false };
-    // 两头都顶到正文尽头了,再加长一个字也不会变
-    if (a - n <= 0 && b + n >= text.length) break;
-  }
-  return first;
-}
-
-// 选区 → {quote, prefix, suffix, locatable}。**quote 是原文**(只去首尾空白),
-// prefix/suffix 是压平过的匹配用上下文;不变量是「压平之后三段连起来仍是正文里
-// 连着的一段」。`locatable` = 这条锚点在它自己这一篇里唯一定位得到吗(收藏那一刻
-// 就知道,用来如实提示)。端点不在 text node 上的少见情况(选到元素边界)退回
-// toString(),锚点留空靠全文搜索 —— 同阅读页。
+ *  **`quote` 是用户在屏幕上选中的那份文字**(只去首尾空白)。**显示文本的权威是
+ *  浏览器自己**(`Selection.toString()`):哪些元素边界算换行、算几个、`<pre>` 里
+ *  的缩进怎么留,那套规则是 CSS 的,自己照标签名重写一遍只会在某一类节点上和它
+ *  差一个字(`<p>A</p>` 和 `<p>B</p>` 之间 HTML 源里那个换行文本节点,渲染里看
+ *  不见、文本节点串里在)。所以这一头**先问浏览器**,再用「压平一遍等于坐标系里
+ *  那一段」确认它说的正是 [a,b) 这一段 —— 对不上(程序派的选区、滚动中选区没了)
+ *  才退回 `snipFragText`(文本节点原文 + 元素边界补换行,可能比浏览器多一个换行,
+ *  但不会丢)。两条路都比 `String(range)` 对:那是 Range 的字符串,`<br>` 和段落
+ *  边界在它里面一个字符都不占,两行当场接成一行。
+ *
+ *  prefix/suffix 是**压平过的**匹配用上下文;不变量是「压平之后三段连起来仍是
+ *  坐标系里连着的一段」,所以坐标系(`snipTextIndex`)和取原文走的是同一份
+ *  `SNIP_BREAKS`。
+ *
+ *  `locatable` = 这条锚点在它自己这一篇里唯一定位得到吗(收藏那一刻就知道,用来
+ *  如实提示)。端点不在 text node 上的少见情况(选到元素边界)锚点留空、靠全文
+ *  搜索。同阅读页那份内联副本。*/
 function snipSpec(zone, range, src) {
   const idx = snipTextIndex((src && src.root) || zone.el, src && src.skip);
   let a = snipOffsetAt(idx, range.startContainer, range.startOffset);
   let b = snipOffsetAt(idx, range.endContainer, range.endOffset);
   if (a < 0 || b < 0 || b <= a) {
-    const bare = { quote: snipWhole(String(range).trim()), prefix: '', suffix: '' };
+    const bare = { quote: snipWhole(snipShown(range).trim()),
+                   prefix: '', suffix: '' };
     return { ...bare, locatable: !!snipSeek(idx.text, snipSpecOf(bare)) };
   }
   // 引文两头的空白挪进前后文。**不能留到后端再 strip** —— 那边剥掉引文的首尾
@@ -279,14 +176,30 @@ function snipSpec(zone, range, src) {
   if (a < b && SNIP_LOW_HALF.test(idx.text[a])) a++;
   if (b > a && SNIP_HIGH_HALF.test(idx.text[b - 1])) b--;
   const ctx = snipContext(idx.text, a, b);
-  // 原文从 DOM 上取回来(而不是拿压平过的那一份):`snipOffsetRange` 给的正是
-  // [a,b) 这一段在 DOM 里的范围,`String(range)` 于是带着真换行和真缩进,而它
-  // 压平一遍就等于 `idx.text.slice(a, b)` —— 匹配和保真同一个来源。
+  // 原文那一头:[a,b) 这一段在 DOM 里的范围(`snipOffsetRange`)→ 屏幕上那份文字
+  // (`snipShown`)。压平一遍就等于 `idx.text.slice(a, b)` —— 匹配和保真同一个来源。
   const dom = snipOffsetRange(idx, a, b);
   return {
-    quote: snipWhole((dom ? String(dom) : idx.text.slice(a, b)).trim()),
+    quote: snipWhole((dom ? snipShown(dom) : idx.text.slice(a, b)).trim()),
     prefix: ctx.prefix, suffix: ctx.suffix, locatable: !!ctx.exact,
   };
+}
+
+/** 一个 Range → **屏幕上那份文字**。
+ *
+ *  先问浏览器:当前选区正好是这一段时(压平一遍逐字相同),`Selection.toString()`
+ *  就是显示文本的权威答案 —— 元素边界算几个换行、`<pre>` 里的缩进怎么留,那是 CSS
+ *  的规则。对不上就退回 `snipFragText`(文本节点原文 + 元素边界补换行)。
+ *
+ *  **退路不是 `String(range)`**:那一份里 `<br>` 和段落边界一个字符都不占。*/
+function snipShown(range) {
+  const frag = snipFragText(range.cloneContents());
+  const sel = getSelection();
+  if (sel && !sel.isCollapsed && sel.rangeCount) {
+    const shown = sel.toString();
+    if (shown && snipCollapse(shown).trim() === snipCollapse(frag).trim()) return shown;
+  }
+  return frag;
 }
 
 async function saveSnip() {
@@ -510,7 +423,10 @@ function snipRenderedText(md) {
   const html = md1 && window.DOMPurify ? DOMPurify.sanitize(md1.parse(src)) : null;
   if (html == null) return snipCollapse(src);
   const doc = new DOMParser().parseFromString(html, 'text/html');
-  return snipCollapse(doc.body.textContent || '');
+  // **`textContent` 不行**:元素产生的那几处换行它一个都不给,而 `quote` 里带着
+  // 它们(见 `snipSpec`)—— 核验于是会把一条好收藏判成"两头文本不一样",当场多说
+  // 一句"点回去可能定位不到"。走同一份 `SNIP_BREAKS`,压平之后两头才对得上。
+  return snipCollapse(snipFragText(doc.body));
 }
 
 /** 这条来源链接超长、于是没送(见 SNIP_MAX_URL)。**判据只有一份**:送不送和
@@ -553,14 +469,23 @@ function snipHostOf(range, selector) {
   return el ? el.closest(selector) : null;
 }
 
-// mouseup 要等浏览器把选区结算完;touchend 同理(手机上长按选词没有 mouseup)
-document.addEventListener('mouseup', e => {
+// 「选完了」这件事三种输入方式各报一次,**一处也不许少**:鼠标是 mouseup、
+// 触摸是 touchend(手机上长按选词没有 mouseup)、键盘和辅助技术是 keyup
+// (Shift+方向键选字,从头到尾不会有 mouseup/touchend —— 少了这一处,只用键盘的
+// 人压根看不到那颗按钮)。都要等浏览器把选区结算完,所以统一延一拍。
+// `selectionchange` 只管**收起**:它在拖选途中一直在响,拿它弹按钮的话按钮会跟着
+// 每个字闪一下。
+const snipSettle = e => {
   if (snipBtn && snipBtn.contains(e.target)) return;
   setTimeout(showSnipBtn, 10);
-});
-document.addEventListener('touchend', e => {
-  if (snipBtn && snipBtn.contains(e.target)) return;
-  setTimeout(showSnipBtn, 10);
+};
+document.addEventListener('mouseup', snipSettle);
+document.addEventListener('touchend', snipSettle);
+document.addEventListener('keyup', e => {
+  // 只认真正会改选区的那几个键 —— 别的键一律不惊动按钮(Escape 另有收起那一道)
+  if (e.key === 'Shift' || e.key.startsWith('Arrow') || e.key === 'Home'
+      || e.key === 'End' || e.key === 'PageUp' || e.key === 'PageDown'
+      || (e.key === 'a' && (e.ctrlKey || e.metaKey))) snipSettle(e);
 });
 document.addEventListener('selectionchange', () => {
   const sel = getSelection();
@@ -578,75 +503,6 @@ addEventListener('keydown', e => { if (e.key === 'Escape') hideSnipBtn(); });
 // 浏览器没有这个 API 时只滚动定位,不高亮(同阅读页的守卫)。
 function clearSnipHighlight() {
   if (window.CSS && CSS.highlights) CSS.highlights.delete('kb-quote');
-}
-
-/** 锚点 {q,p,s} 收成规范形态:空白压平、**外侧**空白去掉、引文两头的空白挪进
- *  前后文(接缝上只留一个)。**读的时候也过这一道** —— 库里还有阅读页早先存下
- *  的、没压过的锚点,而规范形态再压一次不变,所以两种都认。口径同后端 `_anchor`。
- *
- *  只去外侧那一头:**接缝那一头的空白是位置信息**(引文首尾的空白挪过来的,
- *  去掉整段锚点就拼不回原文),而外侧那一头什么也不说明,还最容易在另一种渲染
- *  里差一个 —— 正文末尾那一段,在订阅阅读器的 textContent 里后面跟着一个换行,
- *  渲染成 HTML 之后那儿什么都没有,于是整段锚点差一个空格就对不上(审查复现那
- *  一段正文就卡在这上面)。*/
-function snipAnchor(spec) {
-  let p = snipCollapse(spec && spec.p).replace(/^ +/, '');
-  let q = snipCollapse(spec && spec.q);
-  let sfx = snipCollapse(spec && spec.s).replace(/ +$/, '');
-  if (q.startsWith(' ') && !p.endsWith(' ')) p += ' ';
-  if (q.endsWith(' ') && !sfx.startsWith(' ')) sfx = ' ' + sfx;
-  return { p, q: q.trim(), s: sfx };
-}
-
-/** 在**压平过的**全文里找这条锚点,回 [start, end];位置说不清就回 null。
- *
- *  **按「候选集合」算,不按「档位顺序」挑。** 前文那一边(`p+q`)和后文那一边
- *  (`q+s`)各自给出它认的**全部**位置,两个集合各有两种空法:
- *    - 0 个 = 这一边的证据在这份文本里**用不上**。同一条锚点可能在另一种渲染
- *      里对不上一边:订阅阅读器摊的是 md 原文(`## 标题` 带着井号),`/doc/…`
- *      把它渲染成 `<h2>`(井号没了)—— 前文跨过一个标题就整段失配,而后文那
- *      一边分毫不差。那时只听还说得上话的那一边。
- *    - 多个 = 这一边**自己定不了位**,可它仍然把范围缩到了那几处。
- *  **这两件事不许压成同一个值。** 压成同一个哨兵(原来那个 -1)的话,后一件的
- *  证据就丢了:前文明明说「只可能是第一处或第二处」,后文唯一指向第三处 ——
- *  丢掉前文那个集合之后只剩一个「唯一命中」,于是静默高亮一处前文已经明确排除
- *  掉的地方(审查实测:三处一字不差的重复句,收藏第二处、只改写后文,app 里
- *  高亮落在偏移 1015 而收藏的是 912,独立阅读页 429 而收藏的是 326)。
- *
- *  所以:**两边都还有候选就取交集**(交集正是整段 `p+q+s` 命中的那几处 ——
- *  `p+q` 在 x 处命中且 `q+s` 在 x 处命中,等价于 `p+q+s` 在 x-|p| 处命中,所以
- *  不必再单列「整段」那一档),一边用不上就只听另一边,两边都用不上才退到裸
- *  引文。**最后一律要求只剩一处**:剩两处是正文自己分不出的两处,剩零处是两边
- *  的证据互相矛盾 —— 两种都如实说没找到。锚点还在、位置说不清,比挑一处诚实:
- *  一字不差重复的段落、模板说明、重复的代码块都长这样,静默挑一处换来的是一个
- *  落在错地方的高亮,而两处的文字一模一样,用户从页面上看不出来。
- *  口径同 `kb/web/pages.py` 的 `seek`/`hitsOf`,两头各一份,改一处要改两处。*/
-function snipSeek(text, spec) {
-  const a = snipAnchor(spec);
-  if (!a.q) return null;
-  const byP = a.p ? snipAll(text, a.p + a.q).map(at => at + a.p.length) : [];
-  const byS = a.s ? snipAll(text, a.q + a.s) : [];   // q+s 的起点就是引文的起点
-  const cand = byP.length && byS.length ? byP.filter(at => byS.includes(at))
-    : byP.length ? byP
-      : byS.length ? byS
-        : snipAll(text, a.q);
-  // 数不完的那一边也算说不清(见 SNIP_MAX_HITS):截断过的集合取交集只会偏小
-  const over = xs => xs.length > SNIP_MAX_HITS;
-  if (over(byP) || over(byS) || over(cand)) return null;
-  return cand.length === 1 ? [cand[0], cand[0] + a.q.length] : null;
-}
-
-/** `needle` 在 text 里出现的**全部**起点(升序);空 needle 回空数组。
- *  多于 `SNIP_MAX_HITS` 处时只回前 `SNIP_MAX_HITS + 1` 个 —— 多出来那一个就是
- *  「数不完」的信号(调用方按 `length > SNIP_MAX_HITS` 认)。*/
-function snipAll(text, needle) {
-  const out = [];
-  if (!needle) return out;
-  for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + 1)) {
-    out.push(at);
-    if (out.length > SNIP_MAX_HITS) break;
-  }
-  return out;
 }
 
 /** 在 el 里定位 spec={q,p,s}。找到回 true。
@@ -670,7 +526,3 @@ function locateSnip(el, spec, skip) {
   return true;
 }
 
-/** 收藏条目 → locateSnip 认的 spec。f 是 /api/favorites 给的那一行。*/
-function snipSpecOf(f) {
-  return { q: f.quote || '', p: f.prefix || '', s: f.suffix || '' };
-}

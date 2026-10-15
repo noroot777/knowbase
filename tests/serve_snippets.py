@@ -121,6 +121,14 @@ DISJ_BLOCK = (f'{DISJ_P}{DISJ_Q}{DISJ_S1}\n\n'
 DEAD_Q = '这一处和那一处连两百字开外都分不出来'
 DEAD_FILL = '填' * 205
 DEAD_BLOCK = f'{DEAD_FILL}{DEAD_Q}{DEAD_FILL}{DEAD_Q}{DEAD_FILL}'
+# **阅读页那一侧的显示分隔**:md 里两个段落渲染成两个 `<p>`,屏幕上空着一行,而
+# DOM 文本节点里只有各段自己的文字。`<br>` 那一种在这一页上是**字面文字**(原始
+# HTML 当文字显示,见 `pages.py` 的 `_DOC_LITERAL_JS`),所以这一头用段落边界验 ——
+# 两份实现各有自己的那一格。
+PAGE_PARA_1 = '阅读页这一段到这儿收尾'
+PAGE_PARA_2 = '阅读页下一段打这儿起头'
+PAGE_PARA_SEEN = f'{PAGE_PARA_1}。\n\n{PAGE_PARA_2}'
+
 FEED_ITEM = {
     'url': 'https://example.org/skill-pipeline',
     'title': '一条把书变成技能的流水线',
@@ -129,6 +137,7 @@ FEED_ITEM = {
              f'{SNIP_FEED},剩下的都是工程问题。\n\n'
              f'请执行 {SNIP_MARKED} 并核对结果。\n\n'
              f'{SNIP_FRESH}。\n\n'
+             f'{PAGE_PARA_1}。\n\n{PAGE_PARA_2}。\n\n'
              # 这一对**靠普通段落区分**:两头渲染出来的文字一样,所以验的是
              # 「前后文加长到唯一 + 两份实现都落在第几处」。**只有一边对得上**
              # 那一格由下面那对小标题分隔的管(`MARK_DUP`),两格各管一件事。
@@ -240,6 +249,19 @@ SNIP_CHAT_2 = '第二轮这段回答里另有一句可以收的话'
 # 而用户选的是回答正文里一句普通的话(`chat.js` 的 `chatQuestionOf` + `snipClip`)。
 CHAT_QUESTION_3 = '问' * 59 + '😀 这一问的第六十个字是个 emoji,后面还有几个字'
 SNIP_CHAT_3 = '第三轮这段回答是用来验标题裁口的'
+# **第四轮:屏幕上分了行、DOM 文本节点里却一个分隔字符都没有的那两种。**
+# `<br>` 是一处(markdown 里的硬换行、模型自己写的 HTML 都会出现),段落边界是另
+# 一处。拿文本节点串当原文存的话,这两行当场接成一行 —— 收藏内容本身就丢了,
+# 事后谁也补不回来(审查实测:`Selection.toString()` 是 `第一行\n第二行`,
+# `Range.toString()` 是 `第一行第二行`,落库的是后者)。
+CHAT_QUESTION_4 = '那套方案装完之后第一步该做什么?'
+SNIP_BR_1 = '显示分隔第一行这句要连着下一行一起收'
+SNIP_BR_2 = '显示分隔第二行跟上一行之间只隔一个换行'
+SNIP_PARA_1 = '上一段这句话在屏幕上自成一段'
+SNIP_PARA_2 = '下一段这句跟它之间空着一行'
+# 屏幕上那份文字:`<br>` 一个换行,段落边界两个(同 `Selection.toString()`)
+SNIP_BR_SEEN = f'{SNIP_BR_1}\n{SNIP_BR_2}'
+SNIP_PARA_SEEN = f'{SNIP_PARA_1}。\n\n{SNIP_PARA_2}'
 
 # frontmatter 的键按 scripts/gzh_projects_export.py 来:`project` 缺了
 # `kb/projects.py` 的 `_load_entry` 直接判成"不是条目"、整个图鉴里看不到它。
@@ -538,6 +560,14 @@ def build(vault: Path) -> dict:
             "INSERT INTO messages (conversation_id, role, content, model, created_at)"
             " VALUES (?, 'assistant', ?, 'stub/none', ?)",
             (cid, f'{SNIP_CHAT_3},就这一句。', iso))
+        conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, created_at)"
+            " VALUES (?, 'user', ?, ?)", (cid, CHAT_QUESTION_4, iso))
+        conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, model, created_at)"
+            " VALUES (?, 'assistant', ?, 'stub/none', ?)",
+            (cid, f'{SNIP_BR_1}<br>{SNIP_BR_2}。\n\n'
+                  f'{SNIP_PARA_1}。\n\n{SNIP_PARA_2}。', iso))
         conn.commit()
     finally:
         conn.close()
@@ -558,6 +588,11 @@ def build(vault: Path) -> dict:
             'snipChat': SNIP_CHAT, 'snipDup': SNIP_DUP,
             'snipMarked': SNIP_MARKED, 'snipMarkedPlain': SNIP_MARKED_PLAIN,
             'chatQuestion2': CHAT_QUESTION_2, 'snipChat2': SNIP_CHAT_2,
+            'snipBr1': SNIP_BR_1, 'snipBr2': SNIP_BR_2,
+            'snipBrSeen': SNIP_BR_SEEN, 'snipParaSeen': SNIP_PARA_SEEN,
+            'snipPara1': SNIP_PARA_1, 'snipPara2': SNIP_PARA_2,
+            'pagePara1': PAGE_PARA_1, 'pagePara2': PAGE_PARA_2,
+            'pageParaSeen': PAGE_PARA_SEEN,
             'dupLeadSecond': DUP_LEAD_SECOND, 'snipDailySlow': SNIP_DAILY_SLOW,
             'snipTool': SNIP_TOOL, 'toolNorm': entity_norm(TOOL_NAME),
             'snipCode': SNIP_CODE, 'ambiQuote': AMBI_QUOTE,

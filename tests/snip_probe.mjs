@@ -18,8 +18,8 @@
 //
 //   HEADLESS_SHELL=<bin> node tests/snip_probe.mjs <baseURL> <manifest.json>
 import {
-  base, boot, check, clickJump, evalJs, finish, fx, highlightText, js, send,
-  sleep, snip, snipHighlight, until,
+  base, boot, check, clickJump, evalJs, finish, fx, highlightText, js,
+  openFavList, send, sleep, snip, snipHighlight, until,
 } from "./snip_probe_lib.mjs";
 
 await boot();
@@ -161,6 +161,31 @@ await evalJs(`window.__snipSelect('#source-reader-body', '开头'); true`);
 await sleep(300);
 check("选不满四个字不弹按钮", !(await evalJs(`window.__snipBtnShown()`)));
 
+// 反向的另一头:**用键盘选的那一段照旧要弹按钮**。`__snipSelect` 自己派的是
+// mouseup,那条路验不到键盘;这里只派 keyup(松开 Shift 的样子)。少了这条路,
+// 只用键盘选字的人点不出这个功能,而屏幕上什么异常都没有(审查报告的 N2)。
+const kbPicked = await evalJs(`(() => {
+  const host = document.getElementById('source-reader-body');
+  const w = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+  for (let n = w.nextNode(); n; n = w.nextNode()) {
+    const i = n.nodeValue.indexOf('开头一段交代背景');
+    if (i < 0) continue;
+    const r = document.createRange();
+    r.setStart(n, i); r.setEnd(n, i + '开头一段交代背景'.length);
+    const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift', bubbles: true }));
+    return 'ok';
+  }
+  return 'no-text';
+})()`);
+await sleep(300);
+check("用键盘选的那一段也弹得出按钮(只派 keyup、不派 mouseup)",
+  kbPicked === "ok" && !!(await evalJs(`window.__snipBtnShown()`)), `picked=${kbPicked}`);
+// 选区清掉、按钮收回去:下面两条反向判据都是"不许弹"
+await evalJs(`getSelection().removeAllRanges();
+  document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); true`);
+await sleep(300);
+
 // 反向:页头标题不是注册过的正文容器
 const head = await evalJs(`window.__snipSelect('.source-reader-heading', document.getElementById('source-reader-title').textContent.slice(0, 6))`);
 await sleep(300);
@@ -228,6 +253,58 @@ check("没文档的那两类给的是回跳按钮",
 check("来源角标只标非文章那几类", shape.badges.length === 3
   && ["每日日报", "知识问答", "订阅内容"].every(b => shape.badges.includes(b)),
   JSON.stringify(shape.badges));
+
+// ── 4b. 「回原文」那一步也要认协议 ──
+// `url` 是内容自带的(RSS 的 link),后端只管长度。同一份数据渲染成 `<a>` 时各处
+// 都过 `safeUrl`,只有订阅那条回跳曾经把它直接交给 `window.open`(审查报告的
+// N5)—— `javascript:` 真交出去就是在当前源上跑一段脚本。判据落在**交给
+// window.open 的到底是什么**:把它换成记账的版本,不真导航。
+await evalJs(`window.__opened = [];
+  window.open = (u) => { window.__opened.push(String(u)); return null; }; true`);
+const EVIL_Q = "这条订阅内容的链接是一段脚本不是地址";
+const evilPost = await evalJs(`(async () => {
+  const r = await fetch('/api/favorites', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ quote: ${js(EVIL_Q)}, origin: 'feed', origin_ref: 'rss:1',
+      origin_title: '一条链接写成脚本的订阅内容',
+      origin_url: 'javascript:window.__pwned = 1' }) });
+  return r.status + ' ' + (await r.text()).slice(0, 200);
+})()`);
+// 面板重铺是异步的,而列表里本来就有别的回跳按钮 —— 等**这一条**真出现再点,
+// 不然点在旧 DOM 上,判据会表现成"点不到"
+await openFavList();
+const evilReady = await until(`[...$('fav-list').querySelectorAll('.fav-jump')].some(b => {
+  try { return JSON.parse(decodeURIComponent(b.dataset.jump)).q === ${js(EVIL_Q)}; }
+  catch { return false; } })`, 15000);
+const evilClicked = evilReady && await evalJs(`(() => {
+  for (const b of $('fav-list').querySelectorAll('.fav-jump')) {
+    let j; try { j = JSON.parse(decodeURIComponent(b.dataset.jump)); } catch { continue; }
+    if (j.q === ${js(EVIL_Q)}) { b.click(); return true; }
+  }
+  return false;
+})()`);
+await sleep(400);
+check("收藏面板里能点到那条脚本链接的回跳", evilClicked,
+  `ready=${evilReady} post=${evilPost}`);
+check("javascript: 链接一次也没交给 window.open",
+  (await evalJs(`JSON.stringify(window.__opened)`)) === "[]",
+  await evalJs(`JSON.stringify(window.__opened)`));
+check("认不出协议时走的是「没有站外链接」那条退路,如实说了话",
+  (await evalJs(`window.__toastText()`)).includes("没有站外链接"),
+  await evalJs(`window.__toastText()`));
+// 反过来钉一边:**认得出的链接照旧开出去**(不然"一律不 open"也能过上面那条)
+await openFavList();
+const okClicked = await evalJs(`(() => {
+  for (const b of $('fav-list').querySelectorAll('.fav-jump')) {
+    let j; try { j = JSON.parse(decodeURIComponent(b.dataset.jump)); } catch { continue; }
+    if (j.origin === 'feed' && String(j.url || '').startsWith('http')) { b.click(); return true; }
+  }
+  return false;
+})()`);
+await sleep(400);
+check("https 的那条照旧开去站外原文", okClicked
+  && (await evalJs(`JSON.stringify(window.__opened)`)).includes("https://example.org/"),
+  await evalJs(`JSON.stringify(window.__opened)`));
 
 // ── 5. 回跳:点日报那条 → 回到那一份正文 + 那段话被高亮 ──
 // **点不到就记红、接着往下跑**,不许抛 —— 定点注入一处之后这颗按钮常常压根不

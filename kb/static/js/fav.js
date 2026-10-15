@@ -136,7 +136,13 @@ function jumpFavOrigin(el) {
     // 订阅片段落到这一类,说明屏幕上那份正文在 vault 里没有同一份(外文原文,
     // 或者还没导出)。**站外原文才是那段话的出处**,优先开它;没有链接时退回
     // 它所在的订阅来源,并说清为什么没直接定位 —— 那条内容可能早翻过页了。
-    if (j.url) { window.open(j.url, '_blank', 'noopener'); return; }
+    // **最后这一道导航也过 `safeUrl`。** 这个字段是内容自带的(RSS 的 link),
+    // 后端只管长度;同一份数据渲染成链接时各处都过 `safeUrl`(本文件下面那条
+    // 「原文」、`source_reader.js` 的条目页脚),只有这一句直接把它交给
+    // `window.open` —— 口径两样,那就迟早有一天不一样。认不出协议时退回下面
+    // 「没有链接」那条路:切回它所在的来源,并说清为什么没直接定位。
+    const url = typeof safeUrl === 'function' ? safeUrl(j.url) : j.url;
+    if (j.url && url !== '#') { window.open(url, '_blank', 'noopener'); return; }
     // 来源目录里认得的 id(rss/wechat/social…)`switchTab` 自己会落到订阅面板的
     // 对应视图。**认不得的一律退回 'subs'**:`switchTab` 对不认识的名字是直接
     // return,页面一动不动,而下面那句提示写着"已切到它所在的来源" —— 一句假话。

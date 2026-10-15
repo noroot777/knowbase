@@ -41,6 +41,12 @@ PROBE = Path(__file__).resolve().parent / "snip_probe.mjs"
 # 跑的话那几条数量判据就不是在数它们要数的东西了。两份共用同一个沙箱服务
 # (摆盘贵),共用外壳 `snip_probe_lib.mjs`。
 EDGES = Path(__file__).resolve().parent / "snip_probe_edges.mjs"
+# 第三份只管一件事:**存下来的到底是不是屏幕上那份文字**(`<br>` 和段落边界在
+# DOM 文本节点里一个字符都不占,两行会接成一行),外带「选完了」那三种输入方式。
+# 它和第二份分开是因为那两件事的形态不一样:第二份是"当场成功、后来不作数",
+# 这一份是"当场看着全对、粘出来才发现不是那段话"。**排在第二份之前**:第二份
+# 最后一节会把那个对话真删掉,而这一份要在问答正文上选字。
+SHOWN = Path(__file__).resolve().parent / "snip_probe_shown.mjs"
 # 第三份管**绑得对不对**:位置绑在哪一处(两侧的位置证据只听了一半 → 高亮落在一处
 # 另一侧已经排除掉的地方)、版本绑在哪一版(核对和落库之间正文换了一版 → 收藏固化
 # 在一篇再也找不到那句话的文档上)。**排在最后**:它会真改掉盘上那两篇 md
@@ -79,6 +85,11 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
             raise AssertionError(run.stderr)
         # 探针往 stdout 只写一次(整份 JSON,缩进 1),所以整段解析而不是取末行
         cls.out = json.loads(run.stdout)
+        shown = run_probe([node, str(SHOWN), base, str(manifest)],
+                          timeout=420, env=probe_env())
+        if not shown.stdout.strip():
+            raise AssertionError(shown.stderr)
+        cls.shown = json.loads(shown.stdout)
         # 第二份接着跑(顺序有意义,见上面 EDGES 那段注释)
         edges = run_probe([node, str(EDGES), base, str(manifest)],
                           timeout=420, env=probe_env())
@@ -112,6 +123,19 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
             with self.subTest(check=r["name"]):
                 self.assertTrue(r["ok"], r["detail"])
 
+    def test_the_quote_is_what_was_on_the_screen(self):
+        """库里那条引文,逐字就是屏幕上选中的那份文字。
+
+        和上面两条分开记:这几条红的时候,收藏**当场是成功的**、面板上那条也在、
+        点回去还落得对 —— 不好的是那几个字本身(屏幕上分了两行,库里是接成一行
+        的那一份)。混进别条的话,报告里看不出是"收不下"还是"收下来的不是那段话"。
+        """
+        results = self.shown["results"]
+        self.assertTrue(results, "显示文本探针一条都没跑")
+        for r in results:
+            with self.subTest(check=r["name"]):
+                self.assertTrue(r["ok"], r["detail"])
+
     def test_a_snippet_binds_to_the_right_place_and_version(self):
         """位置绑在哪一处、版本绑在哪一版。
 
@@ -134,6 +158,7 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
         写进去",屏幕上看不出来。
         """
         self.assertEqual([], self.out["pageErrors"])
+        self.assertEqual([], self.shown["pageErrors"])
         self.assertEqual([], self.edges["pageErrors"])
         self.assertEqual([], self.bind["pageErrors"])
 

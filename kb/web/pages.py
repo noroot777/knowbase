@@ -220,20 +220,82 @@ _DOC_SNIP_JS = r"""
     if (HIGH_HALF.test(v)) v = v.slice(0, -1);
     return v;
   }
-  function textIndex() {
-    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
-    const map = [], nodes = []; let text = '', space = false, n;
-    while ((n = walker.nextNode())) {
-      const v = n.nodeValue;
-      nodes.push({ node: n, from: text.length });
-      for (let i = 0; i < v.length; i++) {
-        const ws = WS.test(v[i]);
-        if (ws && space) continue;
-        map.push({ node: n, off: i });
-        text += ws ? ' ' : v[i];
-        space = ws;
+  // **元素边界也是换行。** `<br>`、段落/列表/表格边界在文本节点里一个字符都不占,
+  // 屏幕上却是分行的:照文本节点串存,选中的两行当场接成一行(审查实测)。
+  // 坐标系插一个空格位、取原文插一个换行,**同一份名单**管两处 —— 口径同
+  // snip.js 的 `SNIP_BREAKS`/`snipBreaks`/`snipFragText`,两头各一份,
+  // 改一处要改两处。名单宁可宽:多算一处只是两头都多一个分隔(匹配照旧成立),
+  // 漏一处就是那一行的换行永久丢掉。
+  const BREAKS = new Set([
+    'BR', 'P', 'DIV', 'PRE', 'BLOCKQUOTE', 'HR',
+    'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+    'UL', 'OL', 'LI', 'DL', 'DT', 'DD',
+    'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TD', 'TH', 'CAPTION',
+    'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'ASIDE', 'NAV', 'MAIN',
+    'FIGURE', 'FIGCAPTION', 'DETAILS', 'SUMMARY', 'ADDRESS', 'FIELDSET',
+  ]);
+  function breaks(el) { return !!el && el.nodeType === 1 && BREAKS.has(el.tagName); }
+  // 一棵子树 → 屏幕上那份文字(不压平:真换行真缩进留着,元素边界补换行)
+  function fragText(node) {
+    let out = '';
+    (function walk(parent) {
+      for (const n of parent.childNodes) {
+        if (n.nodeType === 3) { out += n.nodeValue; continue; }
+        if (n.nodeType !== 1) continue;
+        const br = breaks(n);
+        if (br) out += '\n';
+        walk(n);
+        if (br && n.childNodes.length) out += '\n';   // 空元素(<br>)只算一处
       }
+    })(node);
+    return out;
+  }
+  // 一个 Range → 屏幕上那份文字。**先问浏览器**:当前选区正好是这一段时
+  // (压平一遍逐字相同),`Selection.toString()` 就是权威答案 —— 元素边界算几个
+  // 换行、`<pre>` 里的缩进怎么留,那是 CSS 的规则,自己照标签名重算一遍总会在
+  // 某一类节点上差一个字(两个 <p> 之间 HTML 源里那个换行文本节点:渲染里看不见、
+  // 文本节点串里在)。对不上就退回 `fragText`。口径同 snip.js 的 `snipShown`。
+  function shown(range) {
+    const frag = fragText(range.cloneContents());
+    const sel = getSelection();
+    if (sel && !sel.isCollapsed && sel.rangeCount) {
+      const t = sel.toString();
+      if (t && collapse(t).trim() === collapse(frag).trim()) return t;
     }
+    return frag;
+  }
+  function textIndex() {
+    const map = [], nodes = []; let text = '', space = false;
+    // 一处显示分隔占一个空格位;前面已经是空白就只标记,不另占位置(坐标系
+    // 「一段连续空白只占一位」这条不许破,否则 quote 压平之后对不上)
+    const sep = () => {
+      if (!text) return;
+      if (space) { if (map.length) map[map.length - 1].sep = true; return; }
+      map.push({ node: null, off: 0, sep: true });
+      text += ' ';
+      space = true;
+    };
+    (function walk(parent) {
+      for (const n of parent.childNodes) {
+        if (n.nodeType === 1) {
+          const br = breaks(n);
+          if (br) sep();
+          walk(n);
+          if (br) sep();
+          continue;
+        }
+        if (n.nodeType !== 3) continue;
+        const v = n.nodeValue;
+        nodes.push({ node: n, from: text.length });
+        for (let i = 0; i < v.length; i++) {
+          const ws = WS.test(v[i]);
+          if (ws && space) continue;
+          map.push({ node: n, off: i });
+          text += ws ? ' ' : v[i];
+          space = ws;
+        }
+      }
+    })(content);
     return { map, nodes, text };
   }
   // DOM 位置 → 全文偏移:这个位置之前已经有多少个字(选区两端同一个函数)
@@ -245,8 +307,13 @@ _DOC_SNIP_JS = r"""
     return i;
   }
   function offsetRange(idx, start, end) {
-    const first = idx.map[start], last = idx.map[end - 1];
-    if (!first || !last || end <= start) return null;
+    // 两头往里收过分隔位(元素边界插出来的那一格没有自己的 text node)。
+    // 口径同 snip.js 的 `snipOffsetRange`。
+    let a = start, b = end;
+    while (a < b && idx.map[a] && !idx.map[a].node) a++;
+    while (b > a && idx.map[b - 1] && !idx.map[b - 1].node) b--;
+    const first = idx.map[a], last = idx.map[b - 1];
+    if (!first || !last || b <= a) return null;
     const range = document.createRange();
     range.setStart(first.node, first.off);
     range.setEnd(last.node, last.off + 1);
@@ -338,9 +405,19 @@ _DOC_SNIP_JS = r"""
     btn.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.left + r.width / 2 - w / 2)) + 'px';
     btn.style.top = Math.max(8, r.top - 40) + 'px';
   }
-  document.addEventListener('mouseup', e => {
+  // 「选完了」三种输入方式各报一次,一处也不许少:鼠标 mouseup、触摸 touchend
+  // (手机上长按选词没有 mouseup)、键盘/辅助技术 keyup(Shift+方向键选字全程
+  // 没有 mouseup)。口径同 snip.js 的 `snipSettle`,两头各一份。
+  const settle = e => {
     if (e.target === btn) return;
     setTimeout(showBtn, 10);   // 等浏览器结算好选区
+  };
+  document.addEventListener('mouseup', settle);
+  document.addEventListener('touchend', settle);
+  document.addEventListener('keyup', e => {
+    if (e.key === 'Shift' || e.key.startsWith('Arrow') || e.key === 'Home'
+        || e.key === 'End' || e.key === 'PageUp' || e.key === 'PageDown'
+        || (e.key === 'a' && (e.ctrlKey || e.metaKey))) settle(e);
   });
   document.addEventListener('selectionchange', () => {
     const sel = getSelection();
@@ -366,10 +443,10 @@ _DOC_SNIP_JS = r"""
       if (b > a && HIGH_HALF.test(idx.text[b - 1])) b--;
       // **引文按原文存**:压平过的那一份只是匹配表示,存它等于把选中的多行代码
       // 接成一行(换行和缩进就再也找不回来了)。`offsetRange` 给的正是 [a,b)
-      // 在 DOM 里的范围,`String(range)` 带着真换行,压一遍就等于
-      // `idx.text.slice(a, b)` —— 匹配照旧。同 snip.js 的 `snipSpec`。
+      // 在 DOM 里的范围,`shown()` 把它变成屏幕上那份文字 —— 压一遍就等于
+      // `idx.text.slice(a, b)`,匹配照旧。同 snip.js 的 `snipSpec`/`snipShown`。
       const dom = offsetRange(idx, a, b);
-      quote = whole((dom ? String(dom) : idx.text.slice(a, b)).trim());
+      quote = whole((dom ? shown(dom) : idx.text.slice(a, b)).trim());
       const ctx = contextOf(idx.text, a, b);
       prefix = ctx.p;
       suffix = ctx.s;
@@ -406,7 +483,17 @@ _DOC_SNIP_JS = r"""
 
   // ── #kbq= 锚点 → 高亮 + 滚动定位 ──
   let lastEl = null;
+  // **每一次定位请求先把上一次的结果清掉**,早退的那几条分支也算(没有 kbq、
+  // 参数坏了、引文空、找不到、范围建不出来)。同一页上从一条找得到的收藏换到
+  // 一条找不到的,旧那一句照旧亮着、`load` 那一下还会把页面滚回它那儿 ——
+  // 用户看到的是「这条收藏指到那一句」,而那是上一条的位置。口径同 snip.js 的
+  // `locateSnip`(它开头就是 `clearSnipHighlight()`)。
+  function clearQuote() {
+    if (window.CSS && CSS.highlights) CSS.highlights.delete('kb-quote');
+    lastEl = null;
+  }
   function locateQuote() {
+    clearQuote();
     const m = location.hash.match(/kbq=([^&]*)/);
     if (!m) return;
     let spec;
