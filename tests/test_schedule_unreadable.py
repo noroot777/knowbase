@@ -30,6 +30,7 @@ from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
+from kb import config as config_mod
 from kb import daily_run, pipeline
 from kb.config import ScheduleUnreadable
 from kb.server import app
@@ -239,6 +240,119 @@ class SettingsWriteFailureTests(_Base):
             self.assertIn('没能保存', r.json()['detail'])
         self.assertTrue(daily_run.load_settings()['enabled'])
         self.assertEqual('09:00', daily_run.load_settings()['time'])
+
+
+class ConcurrentSaveTests(_Base):
+    """**两个进程同时保存同一份配置时,它们不许写同一个临时文件。**
+
+    原来临时名是写死的 `<name>.tmp`。kb-web 里真会并发:定时线程回写当天那几格、
+    用户在页面上点保存,各走一条路。撞上的两种形态都不是"一方输了"那么轻:一方写
+    到一半被另一方覆盖,`os.replace` 之后盘上那份是两段 JSON 的拼接(读出来直接是
+    `ScheduleUnreadable`,整份配置连同当天已跑标记一起作废);或者一方刚
+    `replace` 走、另一方对着已经不在的路径报 `FileNotFoundError`，而它那次保存的
+    内容谁也没留下。判据落在**临时路径本身每次都不一样**,不在"并发跑一次没撞上"
+    —— 后者是概率,过不了也说明不了什么。
+    """
+
+    def test_each_save_uses_its_own_temporary_file(self):
+        seen = []
+        real = os.replace
+
+        def spy(src, dst):
+            seen.append(str(src))
+            return real(src, dst)
+
+        with patch.object(config_mod.os, 'replace', spy):
+            config_mod.write_config_file(self.path, {'a': 1})
+            config_mod.write_config_file(self.path, {'a': 2})
+        self.assertEqual(2, len(seen))
+        self.assertNotEqual(seen[0], seen[1])
+        for name in seen:
+            self.assertTrue(name.endswith('.tmp'), name)
+            self.assertNotEqual(str(self.path) + '.tmp', name)   # 旧的那个写死名
+        self.assertEqual({'a': 2}, json.loads(self.path.read_text('utf-8')))
+
+    def test_the_file_mode_follows_the_process_umask(self):
+        """**权限要跟着 umask 走,不许写死一个数。**
+
+        这条上一轮钉反了:当时写的是"一律 0644",而那恰恰是回归本身 —— 它在
+        umask=022 的机器上碰巧等于基线,所以绿着。`mkstemp` 固定造 0600,补一句
+        `chmod 0644` 看着像"保持原样",其实**绕过了 umask**:`open()`/`write_text`
+        的 mode 要跟 umask 相与,`chmod` 不受它管。把 umask 设成 077 的人原来写出
+        来的是 0600(只有自己能读),补了那句 chmod 之后变成本机任何账号都能读 ——
+        而这个函数写的是日报设置、定时状态、带 `result`/`log`/`error` 的运行记录和
+        登录态导入账本。所以判据是**两档 umask 下各自算出来的那个值**,一个写死的
+        数字既证不了"没放宽"也证不了"没收紧"。
+        """
+        for mask, want in ((0o077, 0o600), (0o022, 0o644), (0o002, 0o664)):
+            with self.subTest(umask=oct(mask)):
+                before = os.umask(mask)
+                try:
+                    target = self.path.parent / f'm{mask}.json'
+                    config_mod.write_config_file(target, {'a': 1})
+                    self.assertEqual(want, target.stat().st_mode & 0o777)
+                finally:
+                    os.umask(before)       # 同进程跑的别人不该被带走
+
+    def test_a_leftover_temporary_file_is_not_left_behind(self):
+        """失败就把残骸带走 —— 满盘那一档正是因为没地方。"""
+        with patch.object(config_mod.os, 'replace', side_effect=OSError('满了')):
+            with self.assertRaises(OSError):
+                config_mod.write_config_file(self.path, {'a': 1})
+        self.assertEqual([], [q.name for q in self.path.parent.iterdir()
+                              if q.name.endswith('.tmp')])
+
+    def test_a_value_json_cannot_encode_leaves_nothing_behind(self):
+        """**转不动的值在碰磁盘之前就该失败。** `json.dump` 边转边写:遇到 set
+        (`TypeError`)或循环引用(`ValueError`)时文件已经建好、还写进了半截,而那
+        两个都不是 `OSError`,清理那一手接不住 —— 于是临时文件在目录里攒着。
+        基线是先 `json.dumps` 再写,这条把那个顺序钉住。
+        """
+        for bad, exc in (({'s': {1, 2}}, TypeError),):
+            with self.subTest(value=bad):
+                with self.assertRaises(exc):
+                    config_mod.write_config_file(self.path, bad)
+        self.assertEqual([], [q.name for q in self.path.parent.iterdir()
+                              if q.name.endswith('.tmp')])
+        self.assertFalse(self.path.exists())       # 也没造出一份半截配置
+
+    def test_a_name_collision_does_not_delete_the_other_process_file(self):
+        """**撞上的那个临时文件不是我们的,一个字都不许动。**
+
+        `O_EXCL` 失败的含义恰好是「这个名字已经有人在用」。原来建和写在同一个
+        `try` 里,于是这一档会走进清理那一手、**删掉另一个进程正在写的临时文件**:
+        它随后那句 `os.replace` 报 `FileNotFoundError`,一次本来会成功的保存失败,
+        而两边日志都只说「保存失败」。撞名就换个名字重来。
+        """
+        planted = self.path.with_name(f'{self.path.name}.{os.getpid()}.deadbeef.tmp')
+        planted.write_text('别人写到一半的内容', encoding='utf-8')
+        names = iter(['deadbeef' + '0' * 24, 'cafe1234' + '0' * 24])
+
+        class _U:
+            def __init__(self, hexs): self.hex = hexs
+
+        with patch.object(config_mod.uuid, 'uuid4', lambda: _U(next(names))):
+            config_mod.write_config_file(self.path, {'a': 1})
+        self.assertEqual({'a': 1}, json.loads(self.path.read_text('utf-8')))
+        self.assertEqual('别人写到一半的内容', planted.read_text('utf-8'))
+
+    def test_a_name_that_never_comes_free_fails_without_touching_it(self):
+        """**反过来钉一边:换名字不是无限重试。** 目录里躺着个删不掉的同名残骸时,
+        重试要有尽头(否则那次保存永远不返回,定时线程跟着卡住),而且照旧不许动
+        那个文件、不许动上一份有效配置。
+        """
+        self.path.write_text('{"a": 0}', encoding='utf-8')
+        planted = self.path.with_name(f'{self.path.name}.{os.getpid()}.deadbeef.tmp')
+        planted.write_text('不是我的', encoding='utf-8')
+
+        class _U:
+            hex = 'deadbeef' + '0' * 24
+
+        with patch.object(config_mod.uuid, 'uuid4', _U):
+            with self.assertRaises(FileExistsError):
+                config_mod.write_config_file(self.path, {'a': 1})
+        self.assertEqual('不是我的', planted.read_text('utf-8'))
+        self.assertEqual({'a': 0}, json.loads(self.path.read_text('utf-8')))
 
 
 class TaskIsolationTests(_Base):

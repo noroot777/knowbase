@@ -249,7 +249,11 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
     while time.monotonic() < deadline:
         last = json.loads(page.eval(_STATE_JS))
         if last['login']:
-            raise XBrowserError('X 登录态已失效,请在浏览器通道设置里重新登录一次')
+            # **两条自救路都要说。** 这句话出现在每条失败订阅的旁边,而「重新登录」
+            # 只是其中一条:登录态是导进来的那些人要的是再导一次(见
+            # `x_login_import`),把他推去无头壳里登一次正是他想免掉的那一步。
+            raise XBrowserError('X 登录态已失效,请在浏览器通道设置里重新登录,'
+                                '或从日常浏览器再导入一次')
         if last['limited']:
             raise XBrowserError('X 暂时限制了访问频率,请稍后重试或降低同步频率')
         if last['empty']:
@@ -529,6 +533,40 @@ def open_login_window(profile: str, chrome_path: str = '') -> str:
             '(抓取时要独占这个 profile),再回来点一次「检查连接」。')
 
 
+def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
+    """在一个已经导航到 `x.com/home` 的会话上,把落地状态判成一个结论码。
+
+    返回 `(结论码, 最后那份状态)`,码有五个:`ok`(读到推文了)、`login`(掉回
+    登录页)、`limited`(限流)、`not-loaded`(首页压根没加载完)、`no-tweets`
+    (加载完了却一条推文都没有)。
+
+    **只判、不写文案。** 同一个状态在不同入口下该说的下一步完全不同:「检查连接」
+    要指向**这一档自己**的登录办法(独立 profile 点按钮 / 日常浏览器里自己登),
+    而「从日常浏览器导入登录态」那条要说的是「cookie 搬过来了但 X 不认」——
+    指错地方等于让人白跑一趟(`probe` 那条注释里记着这件事)。所以判据收在这一份,
+    文案留给调用方。
+
+    **缺省值在调用时才取,不写成形参默认值。** 写成 `timeout=ACCOUNT_SECONDS` 的话
+    那个数在 `def` 那一刻就绑死了,之后 `patch.object(x_browser,
+    'ACCOUNT_SECONDS', …)` 改到的是另一个名字 —— 口径同 `daily.collect` 那条
+    `limit`/`MAX_ITEMS`。实测代价是回归里那两条走超时的用例各等满 50 秒(整份测试
+    从 2 秒涨到 100 秒),而**真实代价是预算收紧改不动它**:谁把
+    `ACCOUNT_SECONDS` 调小,这一处照旧按老值等。
+    """
+    deadline = time.monotonic() + (timeout or ACCOUNT_SECONDS)
+    last: dict = {}
+    while time.monotonic() < deadline:
+        last = json.loads(page.eval(_STATE_JS))
+        if last['login']:
+            return 'login', last
+        if last['limited']:
+            return 'limited', last
+        if last['articles'] and last['ready'] == 'complete':
+            return 'ok', last
+        time.sleep(_SETTLE_STEP)
+    return ('no-tweets' if last.get('ready') == 'complete' else 'not-loaded'), last
+
+
 def probe(profile: str, chrome_path: str = '', *,
           attach: bool = False) -> tuple[bool, str]:
     """真连一次浏览器,看这份登录态还读不读得到时间线。
@@ -554,23 +592,26 @@ def probe(profile: str, chrome_path: str = '', *,
         with browser_session(profile, chrome_path, attach=attach) as page:
             page.open_page('about:blank')
             page.goto('https://x.com/home')
-            deadline, last = time.monotonic() + ACCOUNT_SECONDS, {}
-            while time.monotonic() < deadline:
-                last = json.loads(page.eval(_STATE_JS))
-                if last['login']:
-                    # 两条路的下一步不一样:独立 profile 要点那颗按钮再登一次,
-                    # 直连那条得在他自己的浏览器里登 —— 我们没有也不该有那个
-                    # 窗口的控制权。指错地方等于让人白跑一趟。
-                    return False, ('这个浏览器里的 X 登录态已失效,'
-                                   '请在它里面打开 x.com 登录一次,再回来检查'
-                                   if attach else
-                                   'X 登录态已失效,点「打开登录窗口」重新登录一次')
-                if last['limited']:
-                    return False, 'X 暂时限制了访问频率,稍后再试'
-                if last['articles'] and last['ready'] == 'complete':
-                    return True, f'登录态有效,首页读到 {last["articles"]} 条推文'
-                time.sleep(_SETTLE_STEP)
-            if last.get('ready') != 'complete':
+            verdict, last = verify_timeline(page)
+            if verdict == 'login':
+                # 两条路的下一步不一样:独立 profile 要点那颗按钮再登一次,
+                # 直连那条得在他自己的浏览器里登 —— 我们没有也不该有那个
+                # 窗口的控制权。指错地方等于让人白跑一趟。
+                #
+                # **独立 profile 这档有两颗按钮,都要说。** 登录态是「从日常浏览器
+                # 导入」来的那些人,点「打开登录窗口」等于被推去做他本来想免掉的
+                # 那次登录 —— 而他要的只是再导一次(cookie 过期是常态,见
+                # `x_login_import` 那条「这件事要能反复做」)。
+                return False, ('这个浏览器里的 X 登录态已失效,'
+                               '请在它里面打开 x.com 登录一次,再回来检查'
+                               if attach else
+                               'X 登录态已失效:点「打开登录窗口」重新登录一次,'
+                               '或者再点一次「从日常浏览器导入登录态」')
+            if verdict == 'limited':
+                return False, 'X 暂时限制了访问频率,稍后再试'
+            if verdict == 'ok':
+                return True, f'登录态有效,首页读到 {last["articles"]} 条推文'
+            if verdict == 'not-loaded':
                 return False, 'X 首页没有加载完 —— 网络不通,或者这台机器访问 X 要走代理'
             return False, 'X 首页打开了,但一条推文都没读到。登录态可能刚刚失效'
     except (XBrowserError, CdpError) as e:

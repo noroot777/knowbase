@@ -13,17 +13,23 @@ Chrome)并列。两条的边界完全不同,所以是一个设置而不是一个
 列标签页、读 cookie、以用户的身份发请求,全都不需要再过任何认证。所以这一档
 不是默认,而且那个开关**只能由用户自己去开**:在浏览器地址栏打开
 `chrome://inspect/#remote-debugging` 勾一次「Allow remote debugging for this
-browser instance」。它只对这个浏览器实例有效(浏览器一关就没了),首次连接时
-浏览器自己还会再弹一次授权。这两道都在用户手里,我们不代劳、也不去用别的
-办法绕开它们(不改用户的启动参数、不写他的 Local State、不去唤起那个页面)。
+browser instance」。**这一勾是持久的**(写在 `Local State` 的
+`devtools.remote_debugging.user-enabled`,跨浏览器重启、跨系统重启都在),而
+**每一条连接**都还会再弹一次「允许」—— 不是只弹首次,而且刻意没有任何办法记住
+它(上游 chrome-devtools-mcp#825 已 closed as not planned)。所以**这条通道结构上
+答不了无人值守**:定时那一轮没人点,90 秒后整批记失败。出路是把登录态搬进独立
+profile(`kb/feeds/x_login_import.py`),别再去找「持久化授权」的办法 —— 实测证据
+在 `docs/decisions/x-channels.md` 首节。这两道都在用户手里,我们不代劳、也不去用
+别的办法绕开它们(不改用户的启动参数、不写他的 Local State、不去唤起那个页面)。
 
-**端口是读出来的,不是我们指定的。** 那个勾选开的是一个**随机**端口,Chrome
-把它写进 user-data-dir 下的 `DevToolsActivePort`:第一行端口,第二行 browser
-那条 WebSocket 的路径。所以发现 = 读这个文件 + TCP 探活;固定去敲 9222 只能
+**端口是读出来的,不是我们指定的。** Chrome 把那个端口写进 user-data-dir 下的
+`DevToolsActivePort`:第一行端口,第二行 browser 那条 WebSocket 的路径(本机实测
+是固定 9222,不是随机的 —— 读端口文件仍然是对的做法,手动指定端口那种模式也靠
+它,但别拿「因为随机」当唯一论证)。所以发现 = 读这个文件 + TCP 探活;固定去敲 9222 只能
 撞上「用户自己带 `--remote-debugging-port` 启动」那一种,那条留作回落。
 
-**探活必须 TCP connect,不能拿 WebSocket 去试。** 首次 WebSocket 连接会让浏览
-器弹一次授权弹窗,而这条判断是来源面板每次刷新都要做的
+**探活必须 TCP connect,不能拿 WebSocket 去试。** 每一条 WebSocket 连接都会让
+浏览器弹一次授权弹窗,而这条判断是来源面板每次刷新都要做的
 (`x_channels.readiness`)—— 拿 WebSocket 去探等于每刷一次面板弹用户一次。
 TCP 握手不触发它。
 
@@ -58,7 +64,9 @@ from kb.feeds.ws_client import WebSocket, WsError
 ENABLE_HINT = ('在浏览器地址栏打开 chrome://inspect/#remote-debugging,勾上 '
                '"Allow remote debugging for this browser instance"'
                '(Edge 是 edge://inspect/#remote-debugging)。'
-               '这个开关只对当前这个浏览器实例有效,浏览器重开要再勾一次。')
+               '这一勾是持久的,重开浏览器不用再勾;但之后每一次连接它都会'
+               '弹一次「允许」,得有人点 —— 要无人值守就改用「从日常浏览器'
+               '导入登录态」。')
 #: 手动 `--remote-debugging-port=N` 启动时的常见端口。只在读不到端口文件时才扫。
 FALLBACK_PORTS = (9222, 9229, 9333)
 #: 直接指定端点的逃生口:`9222` / `127.0.0.1:9222` / `ws://127.0.0.1:9222/devtools/browser/<id>`。
@@ -69,8 +77,8 @@ ENDPOINT_ENV = 'KB_CDP_ENDPOINT'
 ENDPOINT_HINT = (f'{ENDPOINT_ENV} 的写法是 `9222` / `127.0.0.1:9222` / '
                  '`ws://127.0.0.1:9222/devtools/browser/<id>`,端口要在 1-65535。'
                  '清掉它就回到自动发现那条路。')
-#: 首次连接的上限。比 `ws_client.HANDSHAKE_TIMEOUT` 宽得多:浏览器会弹一次授权
-#: 弹窗,而用户要看见它、读一遍、再点「允许」。
+#: 每一条连接的上限(不是只有首次)。比 `ws_client.HANDSHAKE_TIMEOUT` 宽得多:
+#: 浏览器每次都会弹一次授权弹窗,而用户要看见它、读一遍、再点「允许」。
 ATTACH_TIMEOUT = 90.0
 _PROBE_TIMEOUT = 1.0
 
@@ -275,6 +283,10 @@ class Attached(Session):
     """
 
     _BACKGROUND = True
+    #: 这是**用户自己的**浏览器,所以那张标签页还要再隐一档:`hidden` 的页不进
+    #: 标签栏(他看不见、不会去关、也不会以为自己中了什么),而且生命周期跟着这条
+    #: 连接 —— 断开即消失,连「漏关一张空白页」都不会有(见 `Session._HIDDEN`)。
+    _HIDDEN = True
 
     def __init__(self, endpoint: Endpoint | None = None, *,
                  timeout: float = ATTACH_TIMEOUT):
