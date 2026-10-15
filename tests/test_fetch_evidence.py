@@ -37,12 +37,11 @@ import json
 import subprocess
 import sys
 import unittest
-from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
 from kb import fetch_pending, fetch_rounds, pipeline_stages
 from kb import pipeline_state as ps
-from fetch_rounds_fixture import REPO, T, _Pending
+from tests.fetch_rounds_fixture import REPO, T, _Pending
 
 
 # 第 5 轮审查那一例的子进程:**整条起跑—收尾走真的**,而且**不硬退出** —— 要证的
@@ -83,13 +82,28 @@ class Producer:
 real_crawl = pipeline._run_crawl
 
 
+reads = []
+real_read = Path.read_text
+
+
+def unreadable_ledger(self, *a, **kw):
+    if self == fetch_rounds._file():
+        reads.append(1)                  # 瞬时读故障:下面恢复之后同一份文件读得出来
+        raise OSError('账本这一刻读不出来')
+    return real_read(self, *a, **kw)
+
+
 def crawl_after_both_side_files_break(filters):
     # 起跑闸已经过了(开工标记真落了盘),**这之后**账本那把锁和凭证目录一起坏掉
     assert (root / 'pipeline_state_open.json').exists(), '开工标记没落盘,这一例自己坏了'
     lock.unlink()
     lock.mkdir()
     pending.write_text('占住凭证目录的位置')
-    real_crawl(filters)
+    if {read_fault}:
+        with patch.object(Path, 'read_text', unreadable_ledger):
+            real_crawl(filters)
+    else:
+        real_crawl(filters)
 
 
 with patch.object(pipeline, '_run_crawl', crawl_after_both_side_files_break), \\
@@ -110,6 +124,7 @@ pending.unlink()
     'crawl': ps._state['stages']['crawl'],
     'unsaved': list(fetch_rounds._unsaved),
     'fetched': (root / 'fetched.flag').exists(),
+    'read_failures': len(reads),
 }}, ensure_ascii=False), encoding='utf-8')
 '''
 
@@ -298,6 +313,85 @@ class TheGateOnlyTrustsEvidenceBoundToTheDebtTests(_Pending):
             fh.write(deep + '\n')                        # 对称的第二处:账本那一行
         self._unknown_but_still_fetches('run-4', '坏掉的账本行')
 
+    def test_a_ledger_we_cannot_read_right_now_is_not_evidence_either(self):
+        """**「此刻读不出账本」不算那两处证据之一** —— 第 1 轮逻辑审查 F1。
+
+        原来 `_landed` 在账本读不出来时直接放行,理由是「读不出来时读侧只会答不可
+        确认」。那只在账本**永久**坏在盘上时成立:读失败恢复之后,读侧看见的是此前
+        那几个完整子轮、没有任何缺口凭证,于是重新给出一个**确定的偏小值** ——
+        而这一轮已经往 vault 落过文章,重导时它们不是新文件、补不回来。
+
+        **反过来钉一边(同一句里)**:账本坏着、而那笔凭证写上了的那条路径照旧放行。
+        坏掉的展示账本不许把抓取拦住,但它也不能替凭证作证。
+        """
+        day = T('2026-09-29 09:00')
+        self._first_sub_round(day)
+        ledger = self.root / fetch_rounds.FILE_NAME
+        self.break_lock()                                # 登记行追加不上
+        self.block_pending()                             # 凭证也写不下去
+        ledger.chmod(0o000)                              # 而这一刻账本也读不出来
+        self.addCleanup(ledger.chmod, 0o644)
+        self.assertEqual(([], False), fetch_rounds._read())   # 摆盘自检
+        producer = Mock(name='rss')
+        with self.assertRaises(fetch_rounds.NoEvidence):
+            self._crawl('batch-a', 'run-2', producer)
+        self.assertEqual(0, producer.fetch.call_count)
+        # 反向:凭证那条路通了(账本照旧读不出来)—— 这一轮必须放行
+        self.pending().unlink()
+        allowed = self._crawl('batch-a', 'run-3', Mock(name='rss'))
+        self.assertEqual(1, allowed.fetch.call_count)
+        self.assertEqual({'batch-a'}, fetch_pending.mine(self.pending()))
+        # 后果那一头:读失败过去之后,放行那一轮留下的是**下界**,不是确定的偏小值
+        ledger.chmod(0o644)
+        self.fix_lock()
+        self.assertTrue(fetch_rounds.today(day)['partial'])
+
+    def _real_pipeline_child(self, read_fault=False):
+        """起一轮**真的** `start_pipeline`(第二个子轮两条旁路一起坏掉),返回它的末态。
+
+        子进程只把账本那一侧指到临时目录 —— 审查复现脚本也是这么打桩的,两处证据
+        必须在这种打桩下也找得到。摆局(第一个子轮 + vault 里那一篇)在这里一次,
+        两条用例共用:它们注入的东西不同(正常收尾 / 外加一次瞬时读故障),而要钉的
+        后果是同一句「盘上那个数必须对得上 vault 里的文章」。
+        """
+        fetch_rounds.open_round('batch-a', seg='run-1')
+        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_end('batch-a', 'run-1')
+        self.write('source/rss/a.md')
+        self.assertEqual({'added': 1, 'partial': False},
+                         {k: fetch_rounds.today()[k] for k in ('added', 'partial')})
+        script = self.root / 'real_pipeline_child.py'
+        script.write_text(_NORMAL_END_CHILD.format(repo=str(REPO), read_fault=read_fault),
+                          encoding='utf-8')
+        done = subprocess.run([sys.executable, str(script), str(self.root)],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, done.returncode, done.stderr)
+        proof = json.loads((self.root / 'child-proof.json').read_text())
+        self.assertEqual('error', proof['crawl']['status'])
+        self.assertIn('没有往下抓', proof['crawl']['detail'])
+        # 闸落在采集器之前:一次 fetch 都没跑、vault 一篇都没多
+        self.assertFalse(proof['fetched'])
+        self.assertFalse((self.vault / 'source/rss/b.md').exists())
+        return proof
+
+    def test_a_transient_read_failure_cannot_buy_a_real_fetch(self):
+        """**第 1 轮逻辑审查那一例:整条管道走真的,外加一次瞬时账本读故障。**
+
+        两条旁路一起坏着的时候,原来那一版只要**同时**读不出账本就放行 —— 真采集器
+        照旧抓、真导出又落一篇,进程正常退出,而读故障一恢复,全新进程按剩下那几个
+        完整子轮报**确定的偏小值**(审查实测 vault 三篇、盘上写确定的 2 条)。
+
+        所以这一条钉的是**后果**:闸在抓之前拦住,盘上那个数始终对得上 vault 里的
+        文章;「读故障真的注入到了」由子进程回报的次数自证(次数为 0 时这条用例就是
+        在验另一回事)。"""
+        proof = self._real_pipeline_child(read_fault=True)
+        self.assertGreaterEqual(proof['read_failures'], 1)
+        self.assertEqual(['source/rss/a.md'],
+                         sorted(str(q.relative_to(self.vault))
+                                for q in self.vault.rglob('*.md')))
+        self.assertEqual({'added': 1, 'partial': False},
+                         {k: self.restart_today()[k] for k in ('added', 'partial')})
+
     def test_a_normal_end_cannot_erase_the_only_participation_evidence(self):
         """**第 5 轮审查那一例:整条管道走真的,而且不硬退出。**
 
@@ -310,26 +404,11 @@ class TheGateOnlyTrustsEvidenceBoundToTheDebtTests(_Pending):
         那个确定数照旧对得上盘上的文章。断言钉在**另一个进程**读出来的那个数上,
         而且那个子进程只把账本那一侧指到临时目录 —— 两处证据必须在这种打桩下也找
         得到。"""
-        fetch_rounds.open_round('batch-a', seg='run-1')
-        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
-        fetch_rounds.note_end('batch-a', 'run-1')
-        self.write('source/rss/a.md')
-        self.assertEqual({'added': 1, 'partial': False},
-                         {k: fetch_rounds.today()[k] for k in ('added', 'partial')})
-        script = self.root / 'normal_end_child.py'
-        script.write_text(_NORMAL_END_CHILD.format(repo=str(REPO)), encoding='utf-8')
-        done = subprocess.run([sys.executable, str(script), str(self.root)],
-                              capture_output=True, text=True, timeout=60)
-        self.assertEqual(0, done.returncode, done.stderr)
-        proof = json.loads((self.root / 'child-proof.json').read_text())
+        proof = self._real_pipeline_child()
         # 收尾**正常**完成,而它顺手把那笔标记清掉了 —— 这正是它当不了证据的原因
         self.assertEqual('', proof['persist_error'])
         self.assertFalse(proof['marker_after_normal_end'])
-        self.assertEqual('error', proof['crawl']['status'])
-        self.assertIn('没有往下抓', proof['crawl']['detail'])
-        # 闸落在采集器之前:一次 fetch 都没跑、vault 一篇都没多
-        self.assertFalse(proof['fetched'])
-        self.assertFalse((self.vault / 'source/rss/b.md').exists())
+        self.assertEqual(0, proof['read_failures'])      # 这一例不注入读故障
         # 它攥着的就是那一行登记(子轮身份是真 `start_pipeline` 发的,别钉字面量)
         self.assertEqual(1, len(proof['unsaved']))
         self.assertEqual('batch-a', proof['unsaved'][0]['key'])

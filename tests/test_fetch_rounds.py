@@ -41,7 +41,7 @@ from unittest.mock import Mock, patch
 from kb import config, daily, daily_carry, fetch_rounds, llm, llm_stages
 from kb import pipeline_batch, store
 from kb import pipeline_state as ps
-from fetch_rounds_fixture import T, _Base
+from tests.fetch_rounds_fixture import T, _Base
 
 
 class RoundBookTests(_Base):
@@ -337,17 +337,25 @@ class RecoveryIsExactlyOnceTests(unittest.TestCase):
         return {f'source/rss/{n}.md' for n in names}
 
     def test_a_round_recovered_after_a_failed_open_still_records_its_catch(self):
-        """数据目录短暂不可用 → 开轮没写下去 → 恢复后物化交回 2 篇的回执。
+        """数据目录短暂不可用 → 开轮一个字都没写下去 → 恢复之后同一轮交回 2 篇。
 
         实测的旧末态:`{'n': 1, 'added': 0}`,而且是**确定**的 0 —— 开轮行后来
-        补写成功了,清单却已经被丢掉,重读账本也是 0。"""
+        补写成功了,清单却已经被丢掉,重读账本也是 0。
+
+        整个数据目录被占成普通文件时,登记行和那笔凭证**一起**留不下,所以这一轮
+        被闸拦住(那一刀自己的红在 tests/test_fetch_evidence.py)。这一条钉的是它
+        之后的那一段:**攥着的那几行一个都没丢** —— 故障过去、用户再点一次同步,
+        同一轮的回执照旧并进去,而且 `n` 还是 1(两条开轮行折成同一轮,不是第二次
+        抓取)。"""
         import shutil
         shutil.rmtree(self.data)
         self.data.write_text('占住目录位置', encoding='utf-8')     # 目录变成普通文件
-        fetch_rounds.open_round('batch-a', self.day)
+        with self.assertRaises(fetch_rounds.NoEvidence):
+            fetch_rounds.open_round('batch-a', self.day)
         self.assertIsNone(fetch_rounds.today(self.day))            # 此刻只能说不可确认
         self.data.unlink()
         self.data.mkdir()
+        fetch_rounds.open_round('batch-a', self.day)                # 故障过去:这次过闸
         fetch_rounds.note_new('batch-a', self._paths('a', 'b'))
         fetch_rounds.note_end('batch-a')
         self.assertEqual({'n': 1, 'added': 2, 'partial': False, 'at': '09:00'},

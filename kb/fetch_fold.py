@@ -9,6 +9,11 @@
 子轮按集合算,所以同一行追加两遍、同一轮被两条通道各报一次,结论都一样。
 改这里之前先读 `docs/decisions/daily.md`:`got` / `segs` / `ends` 三者的区别各有
 一次实测事故,混起来的后果是面板笃定地报一个少记的数。
+
+**而「第几次抓取」的先后也只由这一层定,`_order` 是唯一出处。** 折出来的轮次按
+`(day, 起跑时刻, key)` 排好序再交出去,所有消费方(`today()` 的「最后一轮」、轮换
+整份重写)拿到的都是这个顺序 —— **物理行序不是业务顺序**:账本是多进程追加的,
+一轮因为短暂写失败晚落盘,它的行就排在后开那一轮的后面(实测形态在 `_order`)。
 """
 from __future__ import annotations
 
@@ -18,6 +23,31 @@ from kb.pipeline_persist import _loads_json
 # 没带子轮身份的结束行(存量账本、没有 run id 的调用)折成这一个身份。它**同时
 # 算「登记过」和「交完了」**,所以老账本的结论一个字都不变。
 _LEGACY_SEG = '-'
+
+
+def _order(one: dict) -> str:
+    """这一轮的**起跑时刻**,用于排序;原始行和折好的轮次都认同一套字段。
+
+    `t` 是 `open_round` 写的微秒级时刻(定宽、零填充,所以按字符串比就是按时间比)。
+    存量账本行只有分钟级的 `at`,补齐成 `:00.000000` —— 同一分钟内它排在带 `t` 的
+    新行前面(那几行是更早版本写的,这个方向也对)。两样都没有的行排最前。
+    """
+    exact = str(one.get('t') or '')
+    if exact:
+        return exact
+    rough = str(one.get('at') or '')
+    return rough + ':00.000000' if rough else ''
+
+
+def _order_key(one: dict) -> tuple[str, str, str]:
+    """排序键:`(day, 起跑时刻, key)`。
+
+    **`day` 在最前**:存量行的 `at` 万一不是完整日期(老版本、手改过),也只会乱在
+    它自己那一天里面,不会跨天错位。**末位拿 `key` 兜平局**,为的是让顺序成为**数据
+    的函数**而不是文件布局的函数:同一微秒开的两轮没有真实先后可恢复,但重放、补写、
+    轮换重写必须给出同一个答案 —— 拿物理位置兜平局就又把它押回行序上了。
+    """
+    return (str(one.get('day') or ''), _order(one), str(one.get('key') or ''))
 
 
 def _fold(lines) -> tuple[list[dict], bool]:
@@ -43,6 +73,10 @@ def _fold(lines) -> tuple[list[dict], bool]:
     `ok=False` 表示有行读不出来(半截行、被改坏、成果对不上轮次)。那时这份账本
     只能说「不可确认」—— 拿认得出来的那部分冒充完整事实,就又回到了把写失败说成
     「今天还没有抓取」。
+
+    **交出去之前按业务起跑顺序排一次**(`_order`):调用方不许再按行序理解先后。
+    同一轮重复开的那几条开轮行里**起跑时刻取最早那一条** —— 读失败之后同一个 key
+    会再写一条开轮行,折叠本来就按先见到的那条算,而「先见到」又是行序。
     """
     rounds: list[dict] = []
     index: dict[str, dict] = {}
@@ -81,9 +115,18 @@ def _fold(lines) -> tuple[list[dict], bool]:
                 got['got'] = True
             continue
         if key in index:
-            continue                    # 同一轮重复开:幂等,不是第二次抓取
+            # 同一轮重复开:幂等,不是第二次抓取。但起跑时刻取**最早**那一条,
+            # 免得「这一轮几点开的」跟着行序变(读失败后同一个 key 会再写一条)。
+            got = index[key]
+            if _order(obj) < _order(got):
+                got['at'] = str(obj.get('at') or '')
+                got['t'] = str(obj.get('t') or '')
+            continue
         got = {'key': key, 'day': str(obj.get('day') or ''),
                'at': str(obj.get('at') or ''),
+               # 微秒级起跑时刻(`fetch_rounds.open_round` 写的),排序用。存量行
+               # 没有这一笔,`_order` 退回分钟级的 `at`。
+               't': str(obj.get('t') or ''),
                # 这次运行会不会物化。读不到(存量账本行)按会物化算 —— 那一侧
                # 的结论是「不可确认」,比笃定地说 0 条安全。
                'ex': bool(obj.get('ex', 1)), 'paths': set(), 'got': False,
@@ -94,4 +137,5 @@ def _fold(lines) -> tuple[list[dict], bool]:
                'segs': set(), 'ends': set(), 'partial': False}
         rounds.append(got)
         index[key] = got
+    rounds.sort(key=_order_key)
     return rounds, ok

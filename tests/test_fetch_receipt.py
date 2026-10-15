@@ -26,7 +26,7 @@ from kb.collectors import wechat_local
 from kb import config, embedder, fetch_rounds, pipeline_segments as segments
 from kb import pipeline_stages, scanner, store
 from kb import pipeline_state as ps
-from fetch_rounds_fixture import T, _Base, _Fake
+from tests.fetch_rounds_fixture import T, _Base, _Fake
 
 
 class ReceiptIsTheOnlyEvidenceTests(_Base):

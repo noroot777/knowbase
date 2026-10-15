@@ -33,7 +33,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from kb import fetch_pending, fetch_rounds
-from fetch_rounds_fixture import REPO, T, _Pending
+from tests.fetch_rounds_fixture import REPO, T, _Pending
 
 # 真实硬退出那一例的子进程。**不能用抛异常代替**:`finally` 还能跑的进程会把攥着
 # 的行补写下去,而这一条要证的正是"补写的机会都没有"那一刀(审查原话:异常可执行
