@@ -81,10 +81,15 @@ function renderDailyGenButton() {
   const exists = dailyReports.some(r => r.date === dailyTargetDate());
   $('daily-gen-label').textContent = exists ? '重新生成日报' : '生成日报';
 
-  // 「再出一份能多带进来多少」。日报是钉在某一天的产物,生成完不会自己跟着新
-  // 内容变 —— 重试失败项、新加一个订阅之后,得有个地方让人看出攒下了东西,再
-  // 决定要不要为这些内容再花一次模型钱。它长在按钮里:回答的是"点这颗会得到
-  // 什么",贴在覆盖区间那行字后面就成了另一个问题的答案。
+  // 「再点一次能**多带进来**多少」。日报是钉在某一天的产物,生成完不会自己跟着
+  // 新内容变 —— 一天内同步第二次之后,得有个地方让人看出这次抓的能不能整合进
+  // 今天这份,再决定要不要为它再花一次模型钱。它长在按钮里:回答的是"点这颗会
+  // 得到什么",贴在覆盖区间那行字后面就成了另一个问题的答案。
+  //
+  // **按钮上只许放 `gain`,不许放 `total`。** 后者是队列总长(一共还积着多少没
+  // 上报过的),而一份日报带得下的条数有上限,两个数能差两个数量级:生产库实测
+  // 队列 1097 条、点下去只多出 11 条,写 1097 就是在许一个兑现不了的承诺。积压
+  // 那一摊挪进 tooltip,它自己是另一个问题。
   //
   // 自定义区间时不报这个数——后端算的是默认区间(接上一份日报)那一段。
   // 后端查不出来(pending 给 null)时整颗藏掉,**不写成「没有新内容」**:
@@ -93,12 +98,14 @@ function renderDailyGenButton() {
   const p = dailyWindowDirty ? null : dailyWindow?.pending;
   chip.hidden = !p;
   if (!p) { $('daily-gen').title = ''; return; }
-  chip.textContent = p.total ? `+${p.total} 条新内容` : '没有新内容';
-  chip.classList.toggle('is-none', !p.total);
-  $('daily-gen').title = p.total
-    ? `有 ${p.total} 条内容还没进过任何一份日报（${p.items} 条在本段窗口内发布、`
-      + `${p.late} 条发布得更早）。再生成一次会把它们带进来。`
-    : '上一份日报之后没有新内容进来，再生成一次得到的基本是同一份。';
+  chip.textContent = p.gain ? `+${p.gain} 条新内容` : '没有新内容';
+  chip.classList.toggle('is-none', !p.gain);
+  const rest = Math.max(0, (p.total || 0) - p.gain);
+  const queued = rest ? `队列里另有 ${rest} 条没进过任何日报，一份带得下的条数有限，`
+    + '会由后面几天的日报陆续带走。' : '';
+  $('daily-gen').title = (p.gain
+    ? `点下去会多带进 ${p.gain} 条今天这份还没有的内容。`
+    : '上一份日报之后没有新内容进来，再生成一次得到的基本是同一份。') + queued;
 }
 
 async function loadDailyWindow() {

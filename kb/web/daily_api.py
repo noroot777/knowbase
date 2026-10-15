@@ -82,13 +82,14 @@ def status():
 
 @router.get('/window')
 def window():
-    """下一份日报默认覆盖的区间 + 现在攒了多少还没上报过的素材。界面拿它预填。
+    """下一份日报默认覆盖的区间 + 再点一次生成能多带进来多少。界面拿它预填。
 
-    `pending` 回答的是"上一份日报之后又进来了什么" —— 日报是一份钉在某一天的
-    产物,生成完不会自己跟着新内容变;重试失败项或新加一个订阅之后,用户得有
-    办法知道"有 N 条还没进过任何一份日报",再决定要不要重新生成(那会再花一次
-    模型钱)。零模型调用,所以放在这条每次打开面板都会调的路上。查不出来时整个
-    键给 null,窗口预填照旧 —— 它只是提示。
+    `pending.gain` 回答的是"点这颗按钮会得到什么" —— 日报是一份钉在某一天的
+    产物,生成完不会自己跟着新内容变;一天内同步第二次之后,用户得有办法知道
+    "这次抓的有 N 条能整合进今天这份",再决定要不要重新生成(那会再花一次模型
+    钱)。`total` 是另一回事(队列里一共还积着多少没上报过的),给 tooltip 用。
+    零模型调用,所以放在这条每次打开面板都会调的路上。查不出来时整个键给 null,
+    窗口预填照旧 —— 它只是提示。
     """
     # 这条只给窗口预填(回溯几天),不报"定时开没开" —— 所以读不出来时退回缺省
     # 天数照常给出窗口,而不是让面板打不开。那句"开没开"由 /settings 回答。
@@ -101,12 +102,14 @@ def window():
         info = daily.pending(settings['first_days'])
     except Exception:                               # noqa: BLE001 - 提示失败不该让面板打不开
         since, until = daily.next_window(settings['first_days'])
-        info = {'since': since, 'until': until, 'items': None, 'late': None}
+        info = {'since': since, 'until': until, 'gain': None,
+                'items': None, 'late': None}
     return {'since': info['since'].isoformat(timespec='minutes'),
             'until': info['until'].isoformat(timespec='minutes'),
             'first_days': settings['first_days'],
-            'pending': (None if info['items'] is None else
-                        {'items': info['items'], 'late': info['late'],
+            'pending': (None if info['gain'] is None else
+                        {'gain': info['gain'],
+                         'items': info['items'], 'late': info['late'],
                          'total': info['items'] + info['late']})}
 
 

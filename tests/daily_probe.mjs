@@ -236,10 +236,22 @@ check("没有新内容时退成灰字、不占品牌色",
 // 状态必然是"没有新内容",所以这一档只能把 pending 摆进去再渲染一次(摆完复原)。
 check("有积压时按钮上报出条数", /^\+7 条新内容$/.test(await evalJs(
   `(() => { const keep = dailyWindow.pending;
-            dailyWindow.pending = { items: 5, late: 2, total: 7 };
+            dailyWindow.pending = { gain: 7, items: 5, late: 2, total: 7 };
             renderDailyGenButton();
             const t = document.getElementById('daily-gen-count').textContent;
             dailyWindow.pending = keep; renderDailyGenButton(); return t; })()`)));
+// **按钮上报的是"点这颗会多带进来多少"(gain),不是队列总长(total)。** 一份日报
+// 带得下的条数有上限,队列可以远超它:生产库实测队列 1097 条而点下去只多出 11
+// 条,把 1097 写在按钮上就是许一个兑现不了的承诺。积压那一摊只许进 tooltip。
+check("队列远大于名额时按钮上不是队列长度", await evalJs(
+  `(() => { const keep = dailyWindow.pending;
+            dailyWindow.pending = { gain: 11, items: 79, late: 1018, total: 1097 };
+            renderDailyGenButton();
+            const t = document.getElementById('daily-gen-count').textContent;
+            const tip = document.getElementById('daily-gen').title;
+            dailyWindow.pending = keep; renderDailyGenButton();
+            return t === '+11 条新内容' && !/1097/.test(t)
+                   && /1086/.test(tip); })()`));
 check("查不出来时整颗藏掉,不谎称没有新内容", await evalJs(
   `(() => { const keep = dailyWindow.pending;
             dailyWindow.pending = null; renderDailyGenButton();
@@ -248,7 +260,8 @@ check("查不出来时整颗藏掉,不谎称没有新内容", await evalJs(
 check("后端把这个计数一起给了出来",
       await evalJs(`(async () => {
         const w = await (await fetch('/api/daily/window')).json();
-        return w.pending && typeof w.pending.total === 'number'; })()`));
+        return w.pending && typeof w.pending.gain === 'number'
+               && typeof w.pending.total === 'number'; })()`));
 // 素材是从**外面**进来的(同步中心跑完一轮、CLI 补抓、定时同步),页面收不到任何
 // 事件。这里绕开界面直接打删除接口(删一份日报会把它带走的条目放回队列),页面
 // 自己不知道发生了什么 —— 空闲那一跳必须把数字问回来。无头浏览器会把后台页面的
