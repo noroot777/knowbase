@@ -61,6 +61,16 @@ def mark(path: Path, run: dict) -> str:
     误报的代价很小而且看得见(这一轮不跑,面板上说清为什么;数据目录写不进去本来就
     是用户该知道的事,何况那一轮的终态也一样写不上);漏报的代价是静默按旧范围重抓
     一轮。顺序只能是这一头。
+
+    **这一笔还同时是「有一轮抓取开过工」的证据**(`kb.fetch_claim` 读它):所以除了
+    那一轮自己的身份,还要写下**这次抓取的业务身份**(`batch`,没有批次的独立运行
+    留空,键按 `pipeline_batch.round_key_of` 还原)和**这一轮到底抓不抓**
+    (`fetches`,判据是 crawl 在不在计划里 —— 在不在计划里就等于当日账本上开不开一
+    轮)。两样都要:当日账本的每一次写都在一把会坏的文件锁后面,而这一笔是**起跑的
+    前提**,它在就说明那一轮真的开过工。只记「标记还在」的话,一次只勾索引的运行就
+    能让面板永久报「不完整」—— 身份必须按抓取/批次口径关联得上(第 4 轮审查明确
+    钉的那一条)。老格式的标记没有这两个字段,读侧按「说不清」处理(见
+    `fetch_claim.claim`),下一次起跑就覆盖掉了。
     """
     try:
         _write_atomic(path, _dump_bytes({
@@ -68,6 +78,8 @@ def mark(path: Path, run: dict) -> str:
             "seq_gen": run.get("seq_gen"),
             "started_at": run.get("started_at", ""),
             "run_kind": run.get("run_kind", ""),
+            "batch": str(run.get("batch") or ""),
+            "fetches": 1 if "crawl" in (run.get("planned_stages") or []) else 0,
         }))
         return ''
     except Exception as exc:  # noqa: BLE001 - 任何落盘坏法都只是「这一笔没留下」

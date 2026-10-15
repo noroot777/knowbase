@@ -21,6 +21,27 @@ from copy import deepcopy
 from pathlib import Path
 
 
+def _loads_json(raw):
+    """解析一段 JSON 文本,**读不出来一律 `None`,而且兜住所有异常**。
+
+    **展示用记录的反序列化只有这一个口径**(落盘那一侧是 `_load_json`,逐行那一侧
+    是 `fetch_fold._fold`,旁挂凭证那一侧是 `fetch_pending._load`)。按异常类型逐处
+    各列一份的后果是实测的:那几处原来写的是 `except (OSError, UnicodeDecodeError,
+    ValueError)`,而**深嵌套 JSON 抛的是 `RecursionError`**(`RuntimeError` 的子类,
+    一个都不在那张单子上)—— 它从读取那一步逃出来,一路冲到**抓取阶段**的
+    `open_round`,于是一份手改坏的计数记录能把整次同步拦在采集器之前,生产者一次
+    `fetch` 都没跑(第 4 轮审查实测两处同形)。**纯展示层不许阻断生产者**,所以这里
+    只有一条:坏记录读不出来就是「说不清」,交给读侧降级,不往调用方抛。
+
+    `except Exception` 而不是 `except BaseException`:`KeyboardInterrupt` /
+    `SystemExit` 不是「这份记录坏了」,吞掉它们等于让 Ctrl-C 失灵。
+    """
+    try:
+        return json.loads(raw)
+    except Exception:  # noqa: BLE001 - 任何解析坏法都只是「这一份读不出来」
+        return None
+
+
 def _load_json(path: Path):
     """读一份落盘 JSON,读不出来一律 `None`。**两份落盘(状态、历史)都过它。**
 
@@ -29,14 +50,16 @@ def _load_json(path: Path):
     `read_text(encoding='utf-8')` 碰上非 UTF-8 字节抛的是 `UnicodeDecodeError`、
     深嵌套 JSON 抛的是 `RecursionError` —— 两个都不属于那两类,从这里逃出去会一路
     冲到 `_end_run()`,把一轮**已经做完**的同步变成「永远进行中」(那一道不变量在
-    `_end_run` 自己那里另外钉着,这里是第一道)。
+    `_end_run` 自己那里另外钉着,这里是第一道)。解析那一半在 `_loads_json`
+    (展示用记录的反序列化共用它,别在调用方那边再按异常类型列一份)。
     **先按字节读、再 `errors='replace'` 解码**,不直接 `read_text`:能读出来的尽量
     读出来,坏字节变成 U+FFFD 而不是整份丢掉(「漏报是静默丢数据」)。
     """
     try:
-        return json.loads(path.read_bytes().decode("utf-8", "replace"))
-    except Exception:
+        raw = path.read_bytes()
+    except Exception:  # noqa: BLE001 - 读不出来和解析不出来是同一档:说不清
         return None
+    return _loads_json(raw.decode("utf-8", "replace"))
 
 
 def _load_json_strict(path: Path):

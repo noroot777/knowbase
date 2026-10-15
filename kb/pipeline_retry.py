@@ -423,7 +423,12 @@ def start_retry_failed() -> tuple[bool, str]:
         # 失证,而失证之后这颗按钮下一次按的就是**上一轮**的范围。
         begun = {"run_id": new_run_id(), "seq_gen": _SEQ_GEN,
                  "started_at": _now(), "run_kind": "retry"}
-        err = mark_open(begun)
+        planned = [s for s in STAGES if card[s]]
+        # 重试轮不属于任何业务批次,所以它的抓取身份就是自己的 run id(`batch` 留空,
+        # 还原按 `pipeline_batch.round_key_of`,和 `round_key()` 同一条)。crawl 在不在
+        # 计划里就是「这一轮抓不抓」:`crawl_resolved` 那一档上面已经把它摘出计划了,
+        # 所以这里不会把一轮不抓的重试说成会抓(理由在 `pipeline_open.mark`)。
+        err = mark_open({**begun, "batch": "", "planned_stages": planned})
         if err:
             return False, err
         _state.update({
@@ -437,7 +442,7 @@ def start_retry_failed() -> tuple[bool, str]:
             # 重试是独立的一轮,不属于任何业务批次(见 `_state` 里那一格的说明)。
             # `run_kind` 不在这里写:它已经在上面那个 `begun` 里(`mark_open` 要它)。
             "batch": "",
-            "planned_stages": [s for s in STAGES if card[s]],
+            "planned_stages": planned,
             "stages": {s: {"status": "pending" if card[s] else "skipped",
                            "detail": detail[s]}
                        for s in STAGES},

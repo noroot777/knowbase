@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-import json
+from kb.pipeline_persist import _loads_json
 
 
 # 没带子轮身份的结束行(存量账本、没有 run id 的调用)折成这一个身份。它**同时
@@ -51,11 +51,11 @@ def _fold(lines) -> tuple[list[dict], bool]:
         raw = raw.strip()
         if not raw:
             continue
-        try:
-            obj = json.loads(raw)
-        except ValueError:
-            ok = False                  # 半截行(写一半断电)或被人改坏
-            continue
+        # 半截行(写一半断电)、被人改坏、根不是带 key 的字典 —— 都是「这一行
+        # 读不出来」。**解析口径不在这里按异常类型列一份**(`_loads_json`):深嵌套
+        # JSON 抛的 `RecursionError` 不在原来那张单子上,它从这里逃出去就把整次
+        # 抓取拦在采集器之前(第 4 轮审查实测,形态在 `_loads_json`)。
+        obj = _loads_json(raw)
         if not isinstance(obj, dict) or not obj.get('key'):
             ok = False
             continue

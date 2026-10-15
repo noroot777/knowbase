@@ -206,7 +206,13 @@ def start_pipeline(stages: list[str] | None = None,
         # 下面那一堆字段挨个撤回去,撤漏一个就是下一轮带着上一轮的范围。
         begun = {"run_id": new_run_id(), "seq_gen": _SEQ_GEN,
                  "started_at": _now(), "run_kind": "sync"}
-        err = mark_open(begun)
+        planned = [s for s in STAGES if s in wanted]
+        # **标记那一笔还要带上这次抓取的业务身份**(`batch`)和「这一轮抓不抓」
+        # (crawl 在不在计划里),它同时是当日账本那边「有一轮抓取开过工」的证据
+        # (口径和事故形态在 `pipeline_open.mark` / `kb.fetch_claim`)。两样
+        # **不并进 `begun`**:那一份会原样铺进 `_state`、跟着两份终态落盘,而终态的
+        # 形状另有自己的判据(`pipeline_persist._state_shape_ok` / `same_round`)。
+        err = mark_open({**begun, "batch": batch, "planned_stages": planned})
         if err:
             return no(err)
         run_id = begun["run_id"]
@@ -224,7 +230,7 @@ def start_pipeline(stages: list[str] | None = None,
             # 这一轮属于哪个业务批次(`run_kind` 不在这里写:它在上面那个 `begun`
             # 里,`mark_open` 要带着它)。
             "batch": batch,
-            "planned_stages": [s for s in STAGES if s in wanted],
+            "planned_stages": planned,
             "stages": {s: {"status": "pending" if s in wanted else "skipped",
                            "detail": ""} for s in STAGES},
         })

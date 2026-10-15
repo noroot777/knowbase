@@ -24,11 +24,9 @@
 所以现在只收回执:采集器说不出来(返回 `None`)就记一笔「这一段不可确认」,
 宁可面板上写「条数读不出来」,也不拿一个看着确定的数糊过去。
 
-**「一次业务抓取」的身份是业务批次,不是管道运行。** 一轮日报 = N+1 次管道运行
-(每个来源各一次),它们共用一个 `pipeline_batch.open_batch()` 发的身份;勾了三个
-来源手动同步也是一次抓取、三次运行。按运行记的话面板上会写成「今天第 7 次抓取」
-而用户只点过两次。没有批次身份的独立运行(单来源同步、重试失败项)各算一次,
-那时它自己的 `run_id` 就是身份。
+**「一次业务抓取」的身份是业务批次,不是管道运行**(一轮日报 = N+1 次运行、一次
+抓取;按运行记的话面板写「今天第 7 次抓取」而用户只点过两次。没有批次的独立运行用
+自己的 `run_id`。两样身份怎么算只有一处:`pipeline_batch.round_key_of`)。
 
 **先有 `open_round` 才认 `note_new`。** 轮次在**抓取阶段**开 —— 只勾了导出/索引的
 那种运行压根没抓过,它落下来的东西(比如上一轮抓回来还没导的)不该凭空变出
@@ -64,12 +62,9 @@
 `os._exit` 落在交回执之前,vault 多了 1 篇而重启后盘上写着确定的 0 条;多来源
 里第一个来源交完回执就让整轮看着完整,第二个还没开口时进程没了。
 
-**而「交完了」是按子轮集合算的,不是哪一个子轮说了算。** 一次业务抓取的物化由
-N 个子轮各跑一段(一轮日报里每个来源一次管道运行,共用一个批次身份),所以
-每个子轮开工时把自己登记进来(`open_round(seg=...)`),`today()` 只在**登记过的
-子轮一个不剩都交了结束行**时才给确定数。少了这一层的后果是实测的:第一个子轮
-正常交完,第二个子轮在另一个进程里写出第二篇之后 `os._exit(23)`,盘上第一个子轮
-的结束行让整轮报成**确定的 1 条**,而 vault 里躺着两篇。
+**而「交完了」是按子轮集合算的,不是哪一个子轮说了算**(每个子轮开工时登记自己,
+`today()` 只在登记过的子轮一个不剩都交了结束行时才给确定数;两条实测的事故形态
+写在 `open_round` 的 `seg` 和 `note_end` 那两段)。
 
 **证据不许因为「这一刻读不出账」就消失。** 回执和「不可确认」标记只要生产者交过,
 就得留在某处:自己开的那一轮照旧追加(`_mark` 认 `_opened`),别人开的那一轮至少
@@ -97,11 +92,21 @@ N 个子轮各跑一段(一轮日报里每个来源一次管道运行,共用一�
 内那把缓冲锁里,这期间另一条线程压进来的回执不许被一句「清空缓冲」带走(实测形态
 在 `_flush`)。锁序只有一个方向:**文件锁 → 缓冲锁**,缓冲锁里只搬缓冲自己的东西。
 
-**现在只剩一档真救不回来**:账本和那笔凭证**一起**写不进去,而进程随后就没了。
-这一档前面另有一道闸 —— 数据目录写不进去时「开工标记」落不下来,那一轮压根不会
-起跑(`kb.pipeline_open.mark`),也就落不出文章来。而这一刀落下去之后账本**不会
-撒谎**:开轮行上记着这次运行会不会物化(`ex`),会物化却没有结束行的轮次一律算
-「不可确认」,而不是算确定的 0 条。
+**而账本和那笔凭证能一起失效,所以「参与过」有三处证据。** 第 4 轮审查实测:旁挂锁
+被占成目录、凭证目录路径被占成普通文件,而数据目录照旧可写 —— 真实 `start_pipeline`
+的开工标记落盘成功、采集器真写出第二篇,随后硬退出,`today()` 仍报**确定的 1 条**。
+旧版文档拿「数据目录写不进去的话开工标记也落不下来、那一轮压根不会起跑」当这一档的
+闸,那条推理不成立:**早先某一个文件写成功,推不出稍后另外两个文件一定可写。** 所以
+第三处证据是那笔开工标记自己(`kb.fetch_claim`)——它**不是尽力而为的旁文件,而是
+起跑的前提**,凡真抓过的运行盘上一定有过它这一笔;判据是**身份按抓取/批次口径对得
+上**,不是「标记还在」(只看在不在的话,一次只勾索引的运行就能让面板永久报「不完整」)。
+
+**三处一处都没留下的时候不许往下抓**(`open_round` 那道闸):继续抓就是产生一批
+**永远不会进账**的文章,重导时它们已经不是新文件。这和「坏记录不许拦生产者」判的是
+两件事:**别人那份记录读不出来**是展示问题(降级成「读不出来」,照旧抓),**自己这
+一笔证据一处都留不下**是记账能力没了(拦住,先修磁盘)。而这一刀落下去之后账本
+**不会撒谎**:开轮行上记着这次运行会不会物化(`ex`),会物化却没有结束行的轮次一律
+算「不可确认」,而不是算确定的 0 条。
 
 面板那一侧怎么显示(几种说法、自定义区间、tooltip 里那句队列积压)写在
 `docs/decisions/daily.md` 的「这个计数长在生成按钮里」那一节。
@@ -117,7 +122,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from kb import fetch_pending
+from kb import fetch_claim, fetch_pending
 from kb.config import DATA_DIR
 from kb.fetch_fold import _LEGACY_SEG, _fold
 from kb.fetch_scope import _scope_prefixes, in_scope      # noqa: F401 - 再导出
@@ -238,7 +243,8 @@ def _locked(exclusive: bool):
     消失,剩下的 JSON 行行合法,`today()` 自称确定、报 0 条,而它写出的
     `source/rss/ack.md` 还在 vault 里。两边的降级路径必须是同一套协议,所以这里
     只留一条口径:**没锁住就不写**。代价是那几行晚一点落盘、这段时间面板说
-    「读不出来」—— 抓取那一侧完全不受影响(`open_round` / `note_*` 都不抛)。
+    「读不出来」—— 抓取那一侧照旧(`note_*` 都不抛;`open_round` 只在**三处证据
+    一处都没留下**时才拦,那不是失锁这一档,见它自己那道闸)。
     """
     fh = None
     try:
@@ -413,6 +419,39 @@ def _rotate(rounds: list[dict], ok: bool, at: datetime, locked: bool) -> None:
         pass
 
 
+# 三处证据一处都没留下时那一句拒绝的**唯一出处**。
+NO_EVIDENCE = (
+    '这一轮抓取的参与记录一处都没能留下（当日账本、独立凭证、开工标记都没有），'
+    '所以没有往下抓：留不下记录的话这一轮新落的文章永远不会进账，面板会笃定地报'
+    '一个少记的数，而重导时它们已经不算新文件、补不回来。先看一眼磁盘空间，以及'
+    '数据目录和里面那个 fetch_rounds.* 的权限')
+
+
+def _landed(key: str, seg: str) -> bool:
+    """这一笔「我参与了这一轮物化」,盘上还留得住吗 —— **追加没成功时才问这一句。**
+
+    判的其实是**读侧会不会笃定地少报**:三处证据任一还在,`today()` 就会把这一轮
+    压到下界或者答「不可确认」,那时继续抓是安全的。
+
+    · **账本读不出来(`ok=False`)一律放行。**「读不出来」不等于「我那一行没落下
+      去」(追加成功而文件整体非 UTF-8 就是这一档),而且那时读侧本来就只会答
+      「不可确认」—— **坏掉的展示账本不许把抓取拦住**,口径同 `_read`、N5 那条。
+    · 账本里已经有这一轮这一个子轮:正路(同一个子轮重复开工时走这条)。
+    · 本进程那几代凭证记着这一轮:「锁坏了、行攥在手里」那一档,**读回来确认**
+      (`fetch_pending.put` 写不上是不出声的,它的返回值证明不了什么)。
+    · 那笔开工标记认这一个子轮:前两处**一起**失效那一档 —— 它不是尽力而为的旁
+      文件,而是起跑的前提(口径和事故形态在 `kb.fetch_claim`)。
+    """
+    rounds, ok = _read()
+    if not ok:
+        return True
+    if any(r['key'] == key and seg in (r['segs'] | r['ends']) for r in rounds):
+        return True
+    if key in fetch_pending.mine(_pending_folder()):
+        return True
+    return fetch_claim.vouches(DATA_DIR, key, seg)
+
+
 def open_round(key: str, now: datetime | None = None,
                materializes: bool = True, seg: str = '') -> None:
     """抓取阶段开始时报到:今天又开了一次抓取(同一个 `key` 重复调是空操作)。
@@ -431,6 +470,14 @@ def open_round(key: str, now: datetime | None = None,
     子轮一个不剩都交完了」。少了这一步,第一个子轮的结束行就冒充了整批交完
     (第 2 轮审查实测:第二个子轮写出文章后 `os._exit(23)`,整轮仍报确定的 1 条)。
     不带 `seg` 的调用退回老口径(整轮按一个子轮算),存量账本行同理。
+
+    **会物化的调用在这里过一道闸:参与证据一处都留不下就抛。** 登记行追加成功就
+    算留下了;没成功时再问账本/凭证/开工标记三处(`_landed`),一处都没有的话这一轮
+    不许往下抓 —— 继续抓就是产生一批永远不会进账的文章(第 4 轮审查实测:两处旁文件
+    一起写不进去,硬退出之后 vault 里两篇、面板确定地报 1 条)。**抛在锁外**:拦的是
+    抓取,不该把那把文件锁多攥一会儿。两种情形不拦:不物化的运行(它一篇都落不进
+    vault,没有会被少记的成果),以及账本整份读不出来(那时读侧只会答「不可确认」,
+    而**坏掉的展示账本不许把抓取拦住**)。
     """
     if not key:
         return
@@ -442,12 +489,15 @@ def open_round(key: str, now: datetime | None = None,
         rounds, ok = _read()
         _push(_opened, key)
         if ok and any(r['key'] == key for r in rounds):
-            _flush(segs, locked)        # 顺手把攥着的那几行再试一次
-            return
-        _rotate(rounds, ok, at, locked)
-        _flush([{'day': _day(at), 'key': key,
-                 'at': at.strftime('%Y-%m-%d %H:%M'),
-                 'ex': 1 if materializes else 0}] + segs, locked)
+            wrote = _flush(segs, locked)    # 顺手把攥着的那几行再试一次
+        else:
+            _rotate(rounds, ok, at, locked)
+            wrote = _flush([{'day': _day(at), 'key': key,
+                             'at': at.strftime('%Y-%m-%d %H:%M'),
+                             'ex': 1 if materializes else 0}] + segs, locked)
+        blocked = bool(segs) and not wrote and not _landed(key, segs[0]['seg'])
+    if blocked:
+        raise RuntimeError(NO_EVIDENCE)
 
 
 def note_new(key: str, paths) -> None:
@@ -590,16 +640,17 @@ def today(now: datetime | None = None) -> dict | None:
     'at': 'HH:MM'}`;`n=0` 是「确定今天还没有抓取过」。**整份读不出来、有行没落
     下去、或者连共享锁都没拿到时返回 `None`(不可确认)**,由 API 原样交给前端。
 
-    `partial=True` 的四种来源:某一段成果采集器说不出来(`note_unknown`)、这一轮
+    `partial=True` 的五种来源:某一段成果采集器说不出来(`note_unknown`)、这一轮
     会物化(`ex`)却没把**登记过的子轮**全交齐(`note_end`,进程在交回执或收尾
     之前就没了)、**别的进程(或者重启前的自己)还扣着这一轮的行没落盘**
-    (`kb.fetch_pending` 那笔凭证),以及存量账本里一个子轮都没登记过的老轮次。
-    那时 `added` 是**下界**,前端据此说「至少 +N 条」而不是「+N 条」。
+    (`kb.fetch_pending` 那笔凭证)、**那笔开工标记指着这一轮的某个子轮,而账本里
+    没有它的登记行**(`kb.fetch_claim` —— 账本和凭证一起写不进去那一档,第 4 轮审查
+    实测),以及存量账本里一个子轮都没登记过的老轮次。那时 `added` 是**下界**,前端
+    据此说「至少 +N 条」而不是「+N 条」。
 
-    **扣着的证据指向一轮账本里压根没有的身份时,整句答「不可确认」。** 那是
-    「登记行一个字都没落下去」那一档:今天确实抓过一次,而盘上最新的轮次是更早
-    那一次 —— 拿它的数当今天的答案,就是把别人的成果说成这一次的(第 3 轮审查
-    那一刀的单轮形态)。
+    **证据指向一轮账本里压根没有的身份时,整句答「不可确认」。** 两条来源同一档
+    (扣着的凭证、开过工的标记):今天确实抓过一次,而盘上最新的轮次是更早那一次
+    —— 拿它的数当今天的答案,就是把别人的成果说成这一次的。
 
     **攥着没落盘的行时顺手重试一次。** 不重试的话,磁盘故障恢复之后面板会一直
     说「读不出来」,要等下一次抓取才补写(第 1 轮审查 N4)。重试走独占锁,别的
@@ -612,20 +663,26 @@ def today(now: datetime | None = None) -> dict | None:
     with _locked(False) as locked:
         rounds, ok = _read()
         held, held_ok = fetch_pending.held(_pending_folder(), _floor(at))
-    if not ok or not held_ok or not locked or _pending():
+        begun, begun_seg, begun_ok = fetch_claim.claim(DATA_DIR)
+    if not ok or not held_ok or not begun_ok or not locked or _pending():
         return None
-    if held - {r['key'] for r in rounds}:
-        return None            # 有一轮的证据被扣着,而账本里连它的开轮行都没有
+    keys = {r['key'] for r in rounds}
+    if held - keys or (begun and begun not in keys):
+        return None            # 有一轮扣着行/开过工,而账本里连它的轮次都没有
     day = _day(at)
     mine = [r for r in rounds if r['day'] == day]
     if not mine:
         return {'n': 0, 'added': 0, 'partial': False, 'at': ''}
     last = mine[-1]
-    # 「交完了」= 登记过的子轮一个不剩都交了结束行,**而且没人扣着它的行**。
-    # 两个集合都空时分两种:开轮就说了不物化(`ex=0`)的那一轮确定是 0 条;
-    # 存量账本那几轮没有子轮行,证明不了完整,只能算不可确认。
+    # 「交完了」= 登记过的子轮一个不剩都交了结束行,**没人扣着它的行,而且那笔开工
+    # 标记指的子轮也登记在册**(它登记不上就是账本和凭证一起失效那一档:盘上那几个
+    # 子轮看着齐了,而开过工的那一个一行都没落下去)。两个集合都空时分两种:开轮就
+    # 说了不物化(`ex=0`)的那一轮确定是 0 条;存量账本那几轮没有子轮行,证明不了
+    # 完整,只能算不可确认。
     done = (last['segs'] == last['ends'] and bool(last['segs'] or not last['ex'])
-            and last['key'] not in held)
+            and last['key'] not in held
+            and (begun != last['key']
+                 or begun_seg in last['segs'] | last['ends']))
     return {'n': len(mine), 'added': len(last['paths']),
             'partial': bool(last['partial'] or not done),
             'at': last['at'][-5:]}
