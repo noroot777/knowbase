@@ -156,11 +156,16 @@ def open_batch() -> str:
 
     **和 `close_batch()` 成对**,调用方放在 try/finally 里:不关的话下一轮管道
     运行会被算进一个早就结束的批次。
+
+    **身份跨进程唯一**(带上 `ps._RUN_EPOCH`,口径同 `new_run_id`):它现在还是
+    当日抓取账本里「一次业务抓取」的键(`kb.fetch_rounds`),而那份账本在盘上跨
+    重启留着 —— 只用进程内自增的话,重启后发出的 `batch-1` 会撞上重启前那一轮,
+    于是今天第二次抓取被并进第一次,面板上永远写着「第 1 次」。
     """
     global _batch_id, _batch_runs, _batch_issue, _batch_notes, _batch_seq
     with ps._lock:
         _batch_seq += 1
-        _batch_id, _batch_runs = f"batch-{_batch_seq}", []
+        _batch_id, _batch_runs = f"batch-{ps._RUN_EPOCH}-{_batch_seq}", []
         _batch_issue, _batch_notes = "", []
         return _batch_id
 

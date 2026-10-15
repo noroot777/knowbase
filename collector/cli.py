@@ -11,6 +11,8 @@
     python -m cli accounts add <名字> [--fakeid X] 加入订阅
     python -m cli accounts remove <名字>
     python -m cli accounts enable|disable <名字>   是否参与采集
+    python -m cli articles drop --id <文章 id> [--account <名字>]
+                                                   这一篇不再采集(拉黑身份)
 
 文章从本机绿泡泡数据库里已同步的推送发现,正文按文章链接抓。不需要登录
 公众平台,也不需要任何代理或逐号凭证。
@@ -27,6 +29,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -80,7 +83,8 @@ def cmd_collect(args) -> int:
             return EXIT_ERROR
     targets = [t.strip() for t in (args.targets or "").split(",") if t.strip()]
 
-    result = collect(emit, targets=targets or None, since=since, until=until)
+    result = collect(emit, targets=targets or None, since=since, until=until,
+                     round_key=args.round or "")
     info(f"采集完成:新增 {result['new_articles']} 篇"
          + (f",{len(result['errors'])} 个号失败" if result["errors"] else ""))
     return EXIT_ERROR if result["errors"] else EXIT_OK
@@ -90,27 +94,222 @@ def cmd_collect(args) -> int:
 
 def cmd_export(args) -> int:
     """导出到 obsidian。转调现成脚本,它自己会打进度。"""
-    argv = [sys.executable, str(ROOT / "scripts" / "export_obsidian.py")]
-    if args.no_images:
-        argv.append("--no-images")
-    proc = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True)
-    # 脚本的输出是人类可读的行,原样转到 stderr;结构化结果自己 emit
-    if proc.stdout:
-        info(proc.stdout.rstrip())
-    if proc.returncode != 0:
-        info(proc.stderr.rstrip()[-500:])
-        emit({"stage": "export", "status": "error",
-              "detail": (proc.stderr or proc.stdout).rstrip()[-300:]})
-        return EXIT_ERROR
-    fails = []
-    for line in proc.stdout.splitlines():
-        if "无正文,跳过" in line:
-            fails.append(line.split("无正文,跳过", 1)[1].strip())
+    with tempfile.TemporaryDirectory(prefix="gzh-export-") as tmp:
+        report = Path(tmp) / "report.json"
+        argv = [sys.executable, str(ROOT / "scripts" / "export_obsidian.py"),
+                "--report", str(report)]
+        if args.no_images:
+            argv.append("--no-images")
+        proc = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True)
+        # 脚本的输出是人类可读的行,原样转到 stderr;结构化结果自己 emit
+        if proc.stdout:
+            info(proc.stdout.rstrip())
+        if proc.returncode != 0:
+            info(proc.stderr.rstrip()[-500:])
+            emit({"stage": "export", "status": "error",
+                  "detail": (proc.stderr or proc.stdout).rstrip()[-300:]})
+            return EXIT_ERROR
+        fails = _no_body_items(report, proc.stdout)
+    items, out, torn = _export_receipt(proc.stdout)
     tail = [l for l in proc.stdout.splitlines() if "完成" in l]
-    emit({"stage": "export", "status": "ok",
-          "detail": tail[-1].replace("[export] ", "") if tail else "完成",
-          "no_body": fails})
+    event = {"stage": "export", "status": "ok",
+             "detail": tail[-1].replace("[export] ", "") if tail else "完成",
+             "no_body": fails, "out": out}
+    # 清单完整才给这个键。缺键就是「说不出来」,上层照旧报「不可确认」
+    # (口径在 kb/collectors/wechat_local.py 的 `_receipt`)。
+    if not torn:
+        event["items"] = items
+    emit(event)
     return EXIT_OK
+
+
+def _item_text(value):
+    """`[item]` 行里一个文本字段:读得懂给它,读不懂给 `None`。
+
+    **读得懂 = 是字符串,或者这个键压根没给**(没给算空串,空串是「说不清」,本来
+    就是合法答案)。**不许 `str()` 一下糊过去**:`str(None)` 是 `'None'`、
+    `str({...})` 是 `"{'a': 1}"`,都是**非空**字符串,当抓取身份交上去会被归进
+    「确定不是这一轮抓的」—— 一个缺口于是伪装成确定答案。
+
+    口径与 `kb/fetch_rounds.py` 的 `text_field` 同一份。两个包、两个进程,导不过
+    来,所以这里抄了一份 —— **改一边记得同步改另一边**。
+    """
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else None
+
+
+def _export_receipt(stdout: str) -> tuple[list[dict], str, bool]:
+    """这一轮真写下去的那几篇,**每一篇带着身份**,外加输出目录和「读全了没有」。
+
+    脚本逐篇打一行 `  [item] {"id": …, "round": …, "name": "<天>/<文件名>"}`,这里
+    连同输出目录一起收上去 —— 知识库拿它当「这次抓取抓了多少」的成果回执,`round`
+    则让它分得开「这一次新抓到的」和「之前抓到、这一次才补导进来的」(口径在
+    `kb/collectors/__init__.py` 的 materialize 契约)。
+
+    身份和给人看的 `[ok]` 分两行打,而不是把 `[ok]` 那行改成机器格式:那一行是人在
+    终端里直接读的。**只认 `[item]` 一份清单**,不额外再收一份路径清单 —— 两份清单
+    迟早漂,而漂的后果是回执里的条数和身份对不上。
+
+    第三个返回值 `torn`:清单里有一行读不懂。**那一行作废整份清单**,不跳过它接着
+    收下一行 —— 跳过之后交上去的是一份少记的清单,而上层会把它当确定值用(「这一
+    次抓了 N 篇」)。少记是静默丢数据,报「不可确认」顶多让人多同步一次。
+    """
+    items, out, torn = [], "", False
+    for line in stdout.splitlines():
+        if line.startswith("  [item] "):
+            try:
+                one = json.loads(line[len("  [item] "):])
+            except ValueError:
+                one = None
+            fields = one if isinstance(one, dict) else {}
+            got = {k: _item_text(fields.get(k)) for k in ("id", "round", "name")}
+            # 答不出文件名的那一行同档:不是字典、名字空着、哪个字段读不懂,
+            # 三种一律整份作废(`_item_text` 说了什么叫读得懂)。
+            if None in got.values() or not got["name"].strip():
+                torn = True
+                continue
+            items.append(got)
+        elif line.startswith("[export] 输出目录: "):
+            out = line[len("[export] 输出目录: "):].strip()
+    return items, out, torn
+
+
+def _no_body_items(report: Path, stdout: str) -> list[dict]:
+    """这一轮因为没正文而没导出的那几篇。每条 `{name, id, account, title, link}`。
+
+    **先读结构化报告,读不出来才退回解析 stdout 那行**「无正文,跳过 账号 · 标题」。
+    退回那一档只有 `name`:标题会重名、`·` 也可能出现在号名或标题里,拿它反查是
+    哪一篇一定出错,所以宁可**不给身份**——上游据此把那一条显示成不可点、不可删,
+    而不是指着另一篇文章让人删。
+    **报告写不出来不许让这几条整个消失**:那样面板上会显示「导出完成」且明细为空,
+    而确实有文章没进知识库(元规则:漏报是静默丢数据)。
+    """
+    try:
+        items = json.loads(report.read_text(encoding="utf-8"))["no_body"]
+    except (OSError, ValueError, KeyError, TypeError):
+        items = None
+    if isinstance(items, list):
+        out = []
+        for one in items:
+            if not isinstance(one, dict):
+                continue
+            account, title = str(one.get("account") or ""), str(one.get("title") or "")
+            out.append({"name": f"{account} · {title}".strip(" ·"),
+                        "id": str(one.get("id") or ""), "account": account,
+                        "title": title, "link": str(one.get("link") or "")})
+        return out
+    return [{"name": line.split("无正文,跳过", 1)[1].strip(),
+             "id": "", "account": "", "title": "", "link": ""}
+            for line in stdout.splitlines() if "无正文,跳过" in line]
+
+
+# ── articles ────────────────────────────────────────────────────────────────────
+
+def cmd_articles(args) -> int:
+    """这一篇不再采集:删掉它,并把它的身份记进黑名单。
+
+    **幂等**:重复点一次、或者它刚好被另一条路径删掉了,都不该报红让人以为没删掉。
+    但**「库里没有这一行」不等于「它已经被永久排除」** —— 见 `_drop_missing`。
+    """
+    from src.db.repository import ArticleRepository
+    from src.utils.article_identity import exclusion_keys, existing_article_id
+
+    if args.action != "drop":
+        return _fail(f"不认识的操作「{args.action}」", args.json)
+    if not args.id:
+        return _fail("需要给文章 id(--id)", args.json)
+    link = getattr(args, "link", "") or ""
+    with ArticleRepository() as repo:
+        row = repo.conn.execute(
+            "SELECT id, account_name, title FROM articles WHERE id=?", (args.id,)
+        ).fetchone()
+        if row is None and link:
+            # **「按这个 ID 查不到」不等于「库里没有这一篇」。** 同一原文换个通道、
+            # 或者换一份采集库之后会以另一个档案 ID 保存(`prepare_article` 沿用旧
+            # ID 就是这么来的)。漏掉这一步就只把请求方给的那组键记进名单、库里那
+            # 一行照旧在,导出下一趟把它写进知识库 —— 第 2 轮审查实测:删除报
+            # `ok=true, excluded=true`,**删除之后才启动**的导出仍写出 1 篇 md。
+            # 找到了就当成常规删除往下走(归属照旧核对),不走 `_drop_missing`。
+            alias = existing_article_id(repo, link)
+            if alias:
+                row = repo.conn.execute(
+                    "SELECT id, account_name, title FROM articles WHERE id=?",
+                    (alias,),
+                ).fetchone()
+        if row is None:
+            return _drop_missing(repo, args.id, link, args.json)
+        # 归属对不上一律拒:调用方拿的是面板上那一条的身份,对不上说明两边
+        # 说的不是同一篇,删下去就是删错文章。
+        if args.account and row["account_name"] != args.account:
+            return _fail(
+                f"这一篇属于「{row['account_name']}」，与给定的"
+                f"「{args.account}」对不上，没有改动", args.json)
+        repo.remove_article(row["id"], row["account_name"])
+        # 请求方给的那组键一并记进名单。`remove_article` 只认它删掉的那个档案 ID
+        # (外加从那一行读出的链接身份),而上面可能删的是**另一个** ID;旧页面手里
+        # 那个 ID、以及按链接算的稳定 ID 不记上,换个通道再发现同一篇时发现侧那一道
+        # 早检查就挡不住。名单里存的键 = `exclusion_keys` 那一组,与写入/发布侧同一份。
+        repo.exclude_identities(*exclusion_keys(args.id, link))
+        repo.commit()
+    detail = f"已移除,以后不再采集:{row['account_name']} · {row['title']}"
+    if args.json:
+        emit({"ok": True, "detail": detail, "removed": True})
+    else:
+        info(detail)
+    return EXIT_OK
+
+
+def _drop_missing(repo, article_id: str, link: str, as_json: bool) -> int:
+    """`articles` 里没有这一行时,那句「以后也不会再采集」怎么兑现。
+
+    走到这里时,调用方已经先按链接身份找过一遍同一原文的**其他档案 ID**
+    (`existing_article_id`)—— 那一步找到了就是常规删除,不会进来。所以这里面对的
+    是「库里真的没有这一篇」。
+
+    **缺行不是排除凭据。** 同步记录和没关掉的旧页面会一直持有这一篇的身份,而采集
+    库完全可能被清理、重建或回退到没有这一行的版本 —— 那时照旧返回成功,主系统会
+    把它从各轮明细里隐藏,而下一轮发现时它照样入库、照样抓正文、照样导出(第 1 轮
+    审查实测:`row_exists_after_drop_and_ingest=true`,`body_fetch_calls=1`)。
+    明细一旦隐藏,用户**再也看不到这一条**,也就不会知道承诺没兑现。
+
+    所以分三档,只有拿得出凭据的两档算成功:
+
+    1. **名单里已经有它**(`exclusion_keys` 里任一个命中)—— 真的已经排除过了,
+       幂等成功。这是「连点两次」「两个标签页各点一次」的正常形态。
+    2. **算得出身份**(调用方给了 `--link`)—— 当场把这组键补写进名单
+       (`exclude_identities`),再报成功。`add_deleted_blacklist` 走不通:它要从
+       `articles` 那一行里读规范链接,而那一行已经没了。
+    3. **两样都没有** —— 拒。只写一个旧档案 ID 挡不住换个通道再发现同一篇
+       (`stable_article_id` 和 `article_identity` 都算不出来),宣称「永久排除」
+       就是报一个没做到的结论。拒掉的代价只是那一条留在明细里(下一轮同步会补上
+       `link`,或者等它再次入库之后再删),比静默失约轻得多。
+    """
+    from src.utils.article_identity import exclusion_keys
+
+    keys = exclusion_keys(article_id, link)
+    if any(repo.is_deleted_blacklist(k) for k in keys):
+        detail = "这一篇已经不在库里了,此前已记为永久不再采集"
+        if as_json:
+            emit({"ok": True, "detail": detail, "removed": False, "excluded": True})
+        else:
+            info(detail)
+        return EXIT_OK
+    # 名单里没有它。能算出链接身份就当场补上——那是跨通道也认的那个键。
+    identity_keys = [k for k in keys if k != article_id]
+    if identity_keys:
+        repo.exclude_identities(*keys)
+        repo.commit()
+        detail = "这一篇已经不在库里了,已记为永久不再采集"
+        if as_json:
+            emit({"ok": True, "detail": detail, "removed": False, "excluded": True})
+        else:
+            info(detail)
+        return EXIT_OK
+    return _fail(
+        "这一篇已经不在采集库里,而且没有原文链接可以算出它的身份,"
+        "没法承诺「以后不再采集」(换个通道发现同一篇时挡不住)。"
+        "下一轮同步会重新带上链接,那时再移除", as_json)
 
 
 # ── accounts ────────────────────────────────────────────────────────────────────
@@ -373,6 +572,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--since", help="起始日期 YYYY-MM-DD(与 --until 同时给)")
     c.add_argument("--until", help="结束日期 YYYY-MM-DD")
     c.add_argument("--targets", help="逗号分隔的公众号名,默认全部订阅号")
+    # 知识库那次业务抓取的身份。新发现的文章各记一笔,导出时原样交回去 ——
+    # 药丸靠它分开「这一次新抓到的」和「之前抓到、这一次才补导进来的」。
+    # 不给就是说不清(手动在终端里跑一次采集),照旧采集,只是那几篇没有身份。
+    c.add_argument("--round", default="", help="知识库业务抓取身份(可空)")
 
     e = sub.add_parser("export", help="把本地库导出成 obsidian md")
     e.add_argument("--no-images", action="store_true", help="不下图,保留远程 URL")
@@ -385,6 +588,14 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--fakeid", default="", help="add 时直接指定,跳过查找")
     a.add_argument("--json", action="store_true", help="输出 JSON 而不是人话")
 
+    r = sub.add_parser("articles", help="维护已采集的文章")
+    r.add_argument("action", choices=["drop"])
+    r.add_argument("--id", default="", help="文章 id")
+    r.add_argument("--account", default="", help="它该属于哪个公众号(对不上就拒)")
+    r.add_argument("--link", default="",
+                   help="它的原文链接。库里已经没有这一行时,永久排除只能靠它算身份")
+    r.add_argument("--json", action="store_true", help="输出 JSON 而不是人话")
+
     return p
 
 
@@ -395,7 +606,7 @@ def main(argv: list[str] | None = None) -> int:
     install()          # 绿泡泡域名绕过系统代理,不装会在有 MITM 代理时静默失败
     handlers = {
         "status": cmd_status, "collect": cmd_collect, "export": cmd_export,
-        "accounts": cmd_accounts,
+        "accounts": cmd_accounts, "articles": cmd_articles,
     }
     try:
         return handlers[args.cmd](args)

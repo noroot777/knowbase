@@ -212,6 +212,10 @@ class CallSiteRosterTests(unittest.TestCase):
         base = {"connect", "close", "scan_all", "doc_needs_reindex",
                 "split_chunks", "upsert_document",
                 "parse_pretagged", "save_extraction", "embed_pending_chunks"}
+        # 当日抓取账本(`kb.fetch_rounds`)**一步都不在这条名单上**:它数的是
+        # 物化那一步往 vault 新落了什么,记在 `_run_export`,索引这边一个字都不写
+        # ——「抓了多少」一度挂在这里(`doc_exists` + `counts_as_new`),而索引看到
+        # 的"头一回进库"混着上一轮抓回来还没索引的、手工导入的和重建索引的。
         expected = {
             # `now` 是 `datetime.now()`,恰好和 kb 里某个同名函数撞上(按名字筛
             # 的代价),不是索引自己的一步。

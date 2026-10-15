@@ -27,6 +27,12 @@ STAMP = '%Y-%m-%d %H:%M:%S'
 # 启用账本那一刻盖的那批章用的 day 值。真实日期一律是 YYYY-MM-DD,所以它不会和
 # 任何一份日报撞上,也不会被 `release()` 误删。
 SEED_DAY = '#seed'
+# 人工从队列里丢弃那一批用的 day 值(「这几个来源的内容一律不要进日报」)。真实
+# 日期一律是 YYYY-MM-DD,所以它同样不会和任何一份日报撞上。
+# **和 `#seed` 的关键区别是它算不回来**:`#seed` 的证据是各份日报自己的素材清单,
+# 盖章算法升版时整张表重算得到的是同一份;这一批是人当场拍的,库里没有任何东西
+# 能把它推导出来 —— 所以 `seed_locked` 重算时必须把它留下(见那里)。
+DROP_DAY = '#drop'
 EPOCH_KEY = 'carry_epoch'
 # 盖章算法的版本。**改了算法必须跟着加一**:账本是懒初始化的,已经盖过章的库
 # 会直接走快路径返回,于是修好的归属只对"从空库开始"的人成立,而最需要修的恰好
@@ -301,7 +307,10 @@ def seed_locked(conn, chain_of, key_of,
         # 版本升级那一次整张表重算。清掉的那些章全都能从日报文件里再读回来
         # (包括启用之后真生成的那几份 —— `mark_carried` 记的就是清单里那批),
         # 读不回来的按不盖章办,方向同上:多报一遍,不写死。
-        conn.execute('DELETE FROM daily_carried')
+        # **`#drop` 那批留下**:它是人工丢弃、不是算出来的归属,重算算不回来
+        # (见 `DROP_DAY`)—— 一起清掉就是把丢弃过的几百条静默倒灌回队列,而
+        # 面板上一切正常。
+        conn.execute('DELETE FROM daily_carried WHERE day<>?', (DROP_DAY,))
         conn.executemany('INSERT OR IGNORE INTO daily_carried(path,day,carried_at)'
                          ' VALUES(?,?,?)', marked)
         conn.executemany('INSERT OR REPLACE INTO daily_state(key,value)'
@@ -372,8 +381,8 @@ def mark_carried(conn, day: str, paths) -> int:
     反过来的话,模型钱花掉、文件没写成,这批素材已经被盖成"报过了" —— 下一份
     日报再也选不到它们,不可恢复。顺序不许反,锁也不能省(见 `commit_lock`)。
     """
-    if day == SEED_DAY:
-        raise ValueError('不能用启用时那批章的 day 值记一份日报')
+    if day in (SEED_DAY, DROP_DAY):
+        raise ValueError('不能用 #seed / #drop 这两个保留值记一份日报')
     rows = [(p, day, datetime.now().strftime(STAMP))
             for p in dict.fromkeys(paths) if p]
     if conn.in_transaction:
@@ -390,10 +399,39 @@ def mark_carried(conn, day: str, paths) -> int:
     return len(rows)
 
 
+def mark_dropped(conn, paths) -> int:
+    """把这些条目从日报队列里永久丢弃(`#drop`),返回实际新增的行数。
+
+    **和 `mark_carried` 的区别是只增不改。** 那边记的是「某一份日报带走了哪些」,
+    重新生成同一天必须整批替换,所以它先 `DELETE WHERE day=?`;这边记的是人工
+    丢弃,分几次丢就该累加 —— 照那边的写法第二批会把第一批静默顶掉,而被顶掉的
+    那些重新回到队列、过几天又出现在日报里,没有任何地方报错。
+
+    返回的是**实际写进去的行数**,不是名单长度:已经盖过 `#drop` 的会被
+    `INSERT OR IGNORE` 挡掉,按元规则「统计按实际写入结果报」。
+    """
+    rows = [(p, DROP_DAY, datetime.now().strftime(STAMP))
+            for p in dict.fromkeys(paths) if p]
+    if not rows:
+        return 0
+    if conn.in_transaction:
+        conn.commit()
+    before = conn.total_changes
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        conn.executemany('INSERT OR IGNORE INTO daily_carried(path,day,carried_at)'
+                         ' VALUES(?,?,?)', rows)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return conn.total_changes - before
+
+
 def release(conn, day: str) -> int:
     """删掉一份日报 ⇒ 它带走的那些条目回到队列,下一份会重新覆盖它们。"""
-    if day == SEED_DAY:
-        raise ValueError('启用时那批章不随日报删除')
+    if day in (SEED_DAY, DROP_DAY):
+        raise ValueError('#seed / #drop 这两批都不随日报删除')
     cur = conn.execute('DELETE FROM daily_carried WHERE day=?', (day,))
     conn.commit()
     return cur.rowcount

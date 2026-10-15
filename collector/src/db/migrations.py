@@ -8,7 +8,7 @@ import re
 
 from src.utils.helpers import time_now
 
-LATEST_SCHEMA_VERSION = 18
+LATEST_SCHEMA_VERSION = 19
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -177,6 +177,15 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (18, time_now()),
+        )
+        conn.commit()
+        current = 18
+
+    if current < 19:
+        _migrate_to_v19(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (19, time_now()),
         )
         conn.commit()
 
@@ -570,6 +579,34 @@ def _migrate_to_v18(conn: sqlite3.Connection) -> None:
           digest_tok,
           body_tok,
           tokenize='unicode61 remove_diacritics 0'
+        )
+        """
+    )
+
+
+def _migrate_to_v19(conn: sqlite3.Connection) -> None:
+    """新增 article_fetch_rounds:「这一篇是知识库哪一次业务抓取头一回发现的」。
+
+    知识库那颗药丸原来只答得出「这次同步之后多了多少篇」,答不出这几篇里哪些是
+    这一次新抓到的、哪些是之前抓到、这一次才补导进来的 —— 后者在「抓取当天正文
+    没抓到、隔两天补上才导出」这条路上天天发生。那件事只有发现它的那一刻知道,
+    事后从时间窗口反猜一定会把别处同期落下的内容也算进来(仓库第 3 轮审查实测)。
+
+    **单开一张表,不给 articles 加列。** 口径同 v17/v18:这个库被主干和 wechat-oa
+    两条分支同时打开,而判据是「另一条分支不重启会不会当场坏」。ADD COLUMN 对在途
+    连接本身是安全的,但那条分支的 `upsert_article_from_blog` 是逐列写死的、还带
+    一长串 `ON CONFLICT DO UPDATE SET`,改 articles 就得把它那一侧全核对一遍;
+    加一张它压根不碰的表,它那边一个字节都不受影响。
+
+    建出来是**空表**:此前已经入库的那些文章没有这一行,于是抓取身份是「说不清」而不是
+    「不是本次」—— 它们入库时压根没有这个概念,硬回填一个值等于凭空造事实。
+    面板上那句分解自己会闭嘴(见 kb/fetch_rounds.py 的 `today`)。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS article_fetch_rounds (
+          article_id  TEXT PRIMARY KEY REFERENCES articles(id) ON DELETE CASCADE,
+          round_key   TEXT NOT NULL
         )
         """
     )

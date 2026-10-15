@@ -104,7 +104,6 @@ const FIXTURES = {
       channels: ["rss"], manager: "feeds", icon: "rss" }] },
   "/api/pipeline/channels": { channels: [{ id: "rss", label: "RSS", hint: "" }],
                               default: "rss", labels: { rss: "RSS" }, aliases: {} },
-  "/api/pipeline/schedule": { enabled: false, time: "07:30", channel: "rss", channels: ["rss"] },
   "/api/daily/window": { since: "", until: "" }, "/api/daily/reports": { reports: [] },
   "/api/daily/status": { running: false, phase: "", channels: [] },
 };

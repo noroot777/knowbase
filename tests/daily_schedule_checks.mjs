@@ -7,12 +7,16 @@
 // **从 tests/daily_probe.mjs 拆出来只因为行数**(那边到了 700 行上限),摆法和
 // 判据原样搬过来。不变量本身在 tests/test_source_schedule_note.py;**那一层钉不住
 // 这三条**(面板"先画完再问资格"/"照自己的回包画"注入进去它一条都不红)。
+//
+// 定时只剩日报这一份了(页头那颗「定时同步」连同接口一起删了),所以共享层这几条
+// 契约**在浏览器里只剩这一处消费者**:订阅那一侧原来那支真鼠标探针跟着那张表单
+// 一起删了,它钉的几条判据搬进了下面 checkDailyFormSettles。
 export async function checkScheduleRaces({ evalJs, waitFor, check }) {
   // ── 保存日报定时之后,别处那句派生说明也要跟着变 ──────────────────────────────
   // 「这一类来源什么时候自动同步」原来自己缓存一份配置,保存只更新自己那一块 ——
   // 于是同一页上两处说法打架,只有整页刷新才对得上。配置收到共享层之后,保存成功
   // 就会通知全部派生展示。**保存之后不再调任何刷新函数**:要验的就是保存自己有没有
-  // 把配置交出去。订阅那一侧的真鼠标版本在 tests/subs_schedule_note_checks.mjs。
+  // 把配置交出去。
   await evalJs(`(() => { sourceKind = 'rss'; return true; })()`);
   await evalJs(`loadSchedules()`);
   check("摆局:来源那句说明先读到了当前(关着的)定时",
@@ -132,11 +136,11 @@ export async function checkScheduleRaces({ evalJs, waitFor, check }) {
   await waitFor(`!dailySaving`);
 }
 
-// 一次读取必须有终态,日报面板这一侧(页头那张表单的对称消费者;真鼠标那一版在
-// tests/subs_schedule_note_checks.mjs,那边能点得到弹窗里的控件)。
-// 两条:**过期的那趟失败也要收尾**、**晚到的共享事实能把干净表单补完**。原来成功和
-// 失败两条分支各有一处早退 —— 早退之后这一片就停在「正在读取定时设置…」:字段禁用、
-// 没有重读入口,而后端和共享事实都是好的。
+// 一次读取必须有终态,日报面板这一侧(定时只剩这一张表单,所以这几条也只剩这一处
+// 钉得住):**过期的那趟失败也要收尾**、**晚到的共享事实能把干净表单补完**、
+// **保存期间整片字段禁着**、**定时读到了而来源目录是空的那一档不许进已加载**。
+// 原来成功和失败两条分支各有一处早退 —— 早退之后这一片就停在「正在读取定时设置…」:
+// 字段禁用、没有重读入口,而后端和共享事实都是好的。
 export async function checkDailyFormSettles({ evalJs, waitFor, check }) {
   const form = () => evalJs(`JSON.stringify({
     msg: $('daily-sched-msg').textContent, fields: $('daily-sched-fields').disabled,
@@ -237,4 +241,58 @@ export async function checkDailyFormSettles({ evalJs, waitFor, check }) {
   check('日报面板:晚到的共享事实把这张干净表单补完(没再碰过它自己的读取)',
         !completed.on && /未启用/.test(completed.msg) && completed.reload
         && !completed.fields, JSON.stringify(completed));
+
+  // ── 定时读到了、可勾选的来源目录是空的 ────────────────────────────────────────
+  // **配置可用 ≠ 这张表单的依赖都可用。** 只看配置就进"已加载"的后果是把人困在
+  // 「一个都选不了、却要你至少选一个」那一步:字段开放、底下写着「已保存:每天
+  // 07:30」,而同步范围一个勾选框都没有,去保存只换来一句「至少勾选一个同步范围」,
+  // 重读还藏着。
+  //
+  // 这一档原来钉在页头那颗「定时同步」上(它连同接口一起删了):那边目录是单独一个
+  // `/api/pipeline/channels`,在网络层拦掉就能复现。日报这一侧目录和设置在**同一个
+  // 回包**里(`{settings, channels, default_channels}`),所以摆法改成让它回一份
+  // **空目录** —— 注册表里一个采集器都没剩时后端就是这么回的。回包之后每一步走的
+  // 都是产品自己的代码。
+  // **真鼠标那一半跟着那张表单一起没了**:这边没有鼠标 helper,"点下去什么也不会
+  // 发生"由「字段留在禁用态」这一条担着,草稿守卫自己那条红由直接调
+  // `markDailyDirty()` 钉住,如实记在这里。
+  await evalJs(`(() => {
+    dailyLoaded = false; dailyChannels = [];
+    // 连同那几个勾选框一起摆回初次加载那一刻(index.html 里 #daily-channels 是空的)
+    // —— 这一页早读过一次,盘上那份的勾选框还挂在 DOM 里。
+    $('daily-channels').innerHTML = '';
+    $('daily-sched-fields').disabled = true;
+    $('daily-sched-reload').hidden = true;
+    $('daily-sched-msg').textContent = '正在读取定时设置…';
+    pipeJson = async (path, ...rest) => {
+      const answer = await __realPipeJson(path, ...rest);
+      return path === '/api/daily/settings' && !rest.length
+        ? { ...answer, channels: [], default_channels: [] } : answer;
+    };
+    return true; })()`);
+  await evalJs(`loadDailySettings()`);
+  await waitFor(`!dailyLoaded && !/正在读取/.test($('daily-sched-msg').textContent)`);
+  const gap = JSON.parse(await form());
+  check('目录空着:不许说「已保存」,也不许进已加载,也画不出一个勾选框',
+        !gap.loaded && !/已保存/.test(gap.msg)
+        && await evalJs(`$('daily-channels').querySelectorAll('input').length === 0`),
+        JSON.stringify(gap));
+  check('目录空着:说清缺的是哪一份,并放出重读入口',
+        /同步范围还没读到/.test(gap.msg) && !gap.reload, JSON.stringify(gap));
+  check('目录空着:字段留在禁用态,保存也按不下去',
+        gap.fields && gap.save, JSON.stringify(gap));
+  await evalJs(`(() => { markDailyDirty(); return true; })()`);
+  const nudged = JSON.parse(await form());
+  check('目录空着:碰一下也形不成草稿(不会被困在草稿守卫后面)',
+        await evalJs(`!dailyDirty`) && nudged.save && nudged.fields,
+        JSON.stringify(nudged));
+  // 恢复路径就在面板上:目录回来之后点「重新读取」(这里调的就是那颗按钮的 onclick)
+  await evalJs(`(() => { pipeJson = __realPipeJson; return true; })()`);
+  await evalJs(`loadDailySettings()`);
+  await waitFor(`dailyLoaded`);
+  const fixed = JSON.parse(await form());
+  check('目录补回来之后这张表单才算已加载,范围也画得出来',
+        fixed.loaded && !fixed.fields && fixed.reload && /未启用/.test(fixed.msg)
+        && await evalJs(`$('daily-channels').querySelectorAll('input').length > 0`),
+        JSON.stringify(fixed));
 }

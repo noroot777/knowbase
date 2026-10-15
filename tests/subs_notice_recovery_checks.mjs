@@ -64,11 +64,13 @@ export async function checkSourceNoticeRecovery({ evaluate, wait, check, click, 
     check('Escape 收起详情并把内部焦点返回入口', await evaluate(`!$('source-notices').open && document.activeElement === $('source-notices').querySelector('summary')`));
     await recover();
     await openNotices();
-    await evaluate(`openSchedModal(); true`);
-    await wait(`overlayTop?.id === 'sched-modal' && !schedLoading`);
+    // 叠一个弹窗在展开的状态详情之上:Escape 该先关最上面那层,不许被详情那套
+    // 迁移逻辑抢走(原来这里借的是页头那颗「定时同步」的弹窗,它已经删了)。
+    await evaluate(`openKeys(); true`);
+    await wait(`overlayTop?.id === 'keys-modal'`);
     await pressEscape();
-    await wait(`$('sched-modal').style.display === 'none'`);
-    check('同步弹窗的 Escape 优先级不被迁移逻辑破坏', await evaluate(`$('source-notices').open`));
+    await wait(`$('keys-modal').style.display === 'none'`);
+    check('叠起来的弹窗 Escape 优先级不被迁移逻辑破坏', await evaluate(`$('source-notices').open`));
     await click('#source-notices > summary');
     await click('#source-reader-expand');
     await failOverview('专注阅读期间的读取失败');

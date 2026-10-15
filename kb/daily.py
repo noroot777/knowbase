@@ -53,6 +53,7 @@ from kb import daily_carry as carry
 from kb import daily_refs
 from kb.config import PRIMARY_SOURCE_NAMES, VAULT_ROOT
 from kb.daily_carry import STAMP, commit_lock, mark_carried, parse_ts, release
+from kb.daily_prompt import PROMPT, late_section
 from kb.daily_carry import UNCARRIED as _UNCARRIED
 # 账本那半拆到 daily_carry 了,这个名字这边自己不用、只为让 `daily.SEED_DAY`
 # 这类既有写法照旧可用。noqa 得待在它自己那一行上:多行 import 的 F401 是按
@@ -71,9 +72,24 @@ from kb.scanner import parse_frontmatter
 from kb.source_types import SOURCE_TYPES
 from kb.store import promo_exclude_sql
 
-# 一份日报最多带多少条素材进 prompt。一天正常十几到几十条;真有几百条时
-# 取最新的那批,并在日报里如实写明"另有 N 条未纳入"。
-MAX_ITEMS = 120
+# 一份日报最多带多少条素材进 prompt。真有几百条时取最新的那批,并在日报里如实
+# 写明"另有 N 条未纳入"。
+#
+# **这个数必须大于「窗口内发布的候选」的实际进水量,否则它自己就是积压的来源。**
+# 120 那一版小于进水量:实测近 7 天窗口内发布 **184 条/天**(10-08~10-14 依次
+# 188/198/152/128/207/215/203),于是每天约 50~64 条被名额挤出去 —— 而它们在下一个
+# 窗口里已经走过自己的发布时间,只能落进补录桶(10-01 以来累计 **656 条**)。补录
+# 那边进水 ≈84 条/天(挤出来的 ~50 + 天生错窗的 ~34)而席位只有 60,**净涨 ~24
+# 条/天**:队列排干之后会自己重新涨起来,和抓取频率无关。260 覆盖掉 215 那个峰值
+# 还有余量,于是"被挤出去"这条进水源整个消失,补录只剩天生错窗的那 ~34 条/天、
+# 低于 60 个席位,积压才真正是单调下降的。
+#
+# 别拿"要点桶没用完的席位借给补录"代替这件事:那治的是另一侧(轻量日的浪费),
+# 治不了重量日**要点桶本身装不下**;而且补录一节的出稿长度是有上限的
+# (`_late_section`),把总量放成无界反而会撑爆出稿。
+#
+# 上界由模型吃得下多少定,不是估的:453 条 / 11.5 万字符的请求实测跑通过。
+MAX_ITEMS = 260
 LATE_ITEMS = 60         # 补录那一段最多带多少条
 # 补录席位里保底留给"发布得最早、下一轮就要被 BACKLOG_DAYS 挡掉"的那几条。
 # 不留的话,只要持续有新内容进来,积压里最老的那些永远排不上队 —— 账本保证了
@@ -95,46 +111,6 @@ _SOURCE_LABEL = {
     'dr-youtube-dig': 'YouTube 视频',
     **{k: v.label for k, v in SOURCE_TYPES.items()},
 }
-
-PROMPT = """你是这个知识库主人的情报助理。下面是 {range_label} 这段时间里**发布**的 {n} 条内容\
-(来自公众号、社交观点、RSS 订阅和视频摘要)。请写一份日报。
-
-输出要求:
-- 全中文,直接输出 markdown 正文,不要代码围栏,不要重复标题行。
-- 每条结论后面用编号标注出处,如 [3][7];编号就是下面列表的序号。
-- 只依据下面给出的材料写,不要编造事实、数字、评价;材料没说的不要推断。
-- 不要逐条复述所有内容,该合并的合并,该舍弃的舍弃。
-
-结构严格如下:
-
-## 今日要点
-
-3~6 条真正值得知道的事。每条一个列表项:**一句话点明事件**,再用一两句说清\
-"是什么、为什么值得注意"。教程、旧闻盘点、招聘、纯营销不算要点。
-
-## 工具与项目
-
-这段时间出现的、可以拿来用的开源项目或产品。每条一行:名字 — 一句话说明它解决什么问题。\
-没有就写"这段时间没有值得单独拿出来的新工具"。
-
-## 观点与讨论
-
-社交观点和评论里值得留意的看法,1~4 条。没有就写一行"没有明显的讨论热点"。
-
-## 一句话速览
-
-其余内容各一行,一行不超过 30 字。最多 12 行,超出的不写。
-{late_section}
-材料:
-{items}
-"""
-
-_LATE_SECTION = """
-## 补录
-
-材料里标了「补录」的,是发布时间更早、这一轮才抓进来的内容。每条一行,\
-写清它是什么、发布于什么时候。上面四节不要提它们。
-"""
 
 
 def report_dir() -> Path:
@@ -328,23 +304,31 @@ def _ensure_ledger(conn, first_days: int = FIRST_DAYS,
 
 def pending(first_days: int = FIRST_DAYS,
             now: datetime | None = None) -> dict:
-    """下一份日报现在攒了多少素材 —— 面板用,零模型调用。
+    """队列里还积着多少没上报过的素材 —— 面板的 tooltip 用,零模型调用。
 
-    判据和真取材共用 `_select`,所以面板上那个数字和真生成时带走的是同一批。
+    **这个数不上按钮。** 按钮上报的是「今天第 N 次抓取抓了多少」,那是抓取自己的
+    事实(`kb.fetch_rounds`),跟取材结果不是一回事。这里答的是另一个问题:一共还
+    积着多少一份日报都没进过的。
+
+    **`day=''` ⇒ 一个章都不排除,而且只读这一次。** `_select` 平时要放过"正在写
+    的那一份自己盖的章"(重新生成时它上一版带走的内容必须重新可选),而这里问的是
+    "进过**任何**一份日报没有"。传当天日期的话今天那份刚带走的内容会被重新数成
+    新素材,面板上永远有一个消不掉的数字。
+    **也不许再补一次「今天那份带走了谁」的查询去扣减** —— 账本是**允许**出现
+    「日报文件写好了、记账没写上」的(那一档故意倒向"多报一遍",见 `daily_carry`),
+    拿它当"今天这份里有什么"的完整事实就会凭空报出新增;何况候选和扣除项来自两
+    个读取时刻,中间别人提交一次,算出来的是两个版本拼起来的数。
     """
     from kb import store
     since, until = next_window(first_days, now)
     conn = store.connect()
     try:
         _ensure_ledger(conn, first_days, until)
-        # `day=''` ⇒ 一个章都不排除。`_select` 平时要放过"正在写的那一份自己盖的
-        # 章"(重新生成时它上一版带走的内容必须重新可选),而这里问的是另一个问题:
-        # "进过**任何**一份日报没有"。传当天日期的话,今天那份刚带走的内容会被
-        # 重新数成"又攒下的新素材",面板上永远有一个消不掉的数字。
         picked, late = _select(conn, since, until, '')
     finally:
         conn.close()
-    return {'since': since, 'until': until, 'items': len(picked), 'late': len(late)}
+    return {'since': since, 'until': until,
+            'items': len(picked), 'late': len(late)}
 
 
 def _material(items: list[dict]) -> str:
@@ -540,7 +524,8 @@ def generate(since: datetime | None = None, until: datetime | None = None,
         progress(f'正在让模型综合 {len(shown)} 条内容')
     body = llm.chat(PROMPT.format(range_label=_label_window(since, until),
                                   n=len(shown), items=_material(shown),
-                                  late_section=_LATE_SECTION if mat.late else ''),
+                                  late_section=(late_section(len(mat.late))
+                                                if mat.late else '')),
                     picked, max_tokens=8192, timeout=600)
     if not body.strip():
         raise RuntimeError('模型返回了空日报,请稍后重试或换一个模型')

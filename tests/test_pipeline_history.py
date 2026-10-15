@@ -27,7 +27,8 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb import pipeline, pipeline_segments, pipeline_state as state
+from kb import (pipeline, pipeline_persist as persist, pipeline_segments,
+                pipeline_state as state)
 from tests.pipeline_case import HistoryCase
 from kb.web import pipeline_api
 from tests.headless import probe_env, requires_headless, run_probe
@@ -137,6 +138,53 @@ class HistoryTests(HistoryCase):
         self.assertEqual(self.dir, state._history_file().parent)
         self.run_round('run-1', 'ok', '已保存 95 条')
         self.assertTrue(state._history_file().exists(), '真写进了被隔离的那个目录')
+        self.assertFalse(list(self.dir.glob('*.tmp')), '临时文件不留下')
+
+    def test_two_writers_on_one_path_never_leave_a_spliced_file(self):
+        """同一个 path 两条线程同时写,**落盘的必须是某一次的完整内容**。
+
+        临时文件名原来按 pid 固定,同一个进程里两条线程(kb-web 是线程池)拿到的
+        是同一个路径:两边各 `open('wb')` 截断再写,落盘的就是两份数据缝在一起的
+        半截 JSON;后 `replace` 的那条还会撞上「临时文件已经被另一条搬走了」。
+        判据落在**文件里是什么**上,不落在「名字里有没有随机串」上。
+
+        窗口靠「分两段写、中间歇一下」摆出来 —— 不这么摆的话两次写之间没有可
+        交错的点,固定名字也照样是绿的(用例不敏感 ≠ 判据冗余)。
+        """
+        import threading
+        import time
+
+        path = self.dir / 'concurrent.json'
+        payloads = [json.dumps({'who': 'a' * 400}).encode(),
+                    json.dumps({'who': 'b' * 900}).encode()]
+
+        def chunked(self_, data):
+            half = len(data) // 2
+            with open(self_, 'wb') as fh:
+                fh.write(data[:half])
+                fh.flush()
+                time.sleep(0.05)
+                fh.write(data[half:])
+            return len(data)
+
+        started, errors = threading.Barrier(2), []
+
+        def write(data):
+            started.wait(5)
+            try:
+                persist._write_atomic(path, data)
+            except Exception as e:                       # noqa: BLE001 - 如实收集
+                errors.append(repr(e))
+
+        with patch.object(Path, 'write_bytes', chunked):
+            threads = [threading.Thread(target=write, args=(d,)) for d in payloads]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+        self.assertEqual([], errors, '两条都不该在 replace 上炸')
+        self.assertIn(path.read_bytes(), payloads,
+                      '落盘的是缝起来的半截内容,不是其中任何一次写的')
         self.assertFalse(list(self.dir.glob('*.tmp')), '临时文件不留下')
 
 

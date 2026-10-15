@@ -11,6 +11,7 @@
 //   HEADLESS_SHELL=<bin> node tests/daily_probe.mjs http://127.0.0.1:8799
 import { launchShell } from "./probe_shell.mjs";
 import { checkScheduleRaces, checkDailyFormSettles } from "./daily_schedule_checks.mjs";
+import { checkFetchCountChip } from "./daily_count_checks.mjs";
 
 const base = process.argv[2];
 
@@ -225,30 +226,7 @@ check("覆盖区间那行字只说区间", !/新内容|未上报|素材/.test(la
 check("按钮按「这一天有没有日报」改名",
       (await evalJs(`document.getElementById('daily-gen-label').textContent`)) === "重新生成日报",
       await evalJs(`document.getElementById('daily-gen').textContent`));
-// 这一份刚生成过,所以此刻该是"没有新内容"而不是一个数字。
-check("刚生成完按钮上写着没有新内容",
-      (await evalJs(`document.getElementById('daily-gen-count').textContent`)) === "没有新内容"
-      && !(await evalJs(`document.getElementById('daily-gen-count').hidden`)),
-      await evalJs(`document.getElementById('daily-gen').textContent`));
-check("没有新内容时退成灰字、不占品牌色",
-      await evalJs(`document.getElementById('daily-gen-count').classList.contains('is-none')`));
-// 有积压时那颗药丸长什么样。摆盘自检:探针跑到这里时今天那一份刚生成完,真实
-// 状态必然是"没有新内容",所以这一档只能把 pending 摆进去再渲染一次(摆完复原)。
-check("有积压时按钮上报出条数", /^\+7 条新内容$/.test(await evalJs(
-  `(() => { const keep = dailyWindow.pending;
-            dailyWindow.pending = { items: 5, late: 2, total: 7 };
-            renderDailyGenButton();
-            const t = document.getElementById('daily-gen-count').textContent;
-            dailyWindow.pending = keep; renderDailyGenButton(); return t; })()`)));
-check("查不出来时整颗藏掉,不谎称没有新内容", await evalJs(
-  `(() => { const keep = dailyWindow.pending;
-            dailyWindow.pending = null; renderDailyGenButton();
-            const hidden = document.getElementById('daily-gen-count').hidden;
-            dailyWindow.pending = keep; renderDailyGenButton(); return hidden; })()`));
-check("后端把这个计数一起给了出来",
-      await evalJs(`(async () => {
-        const w = await (await fetch('/api/daily/window')).json();
-        return w.pending && typeof w.pending.total === 'number'; })()`));
+await checkFetchCountChip({ evalJs, check });
 // 素材是从**外面**进来的(同步中心跑完一轮、CLI 补抓、定时同步),页面收不到任何
 // 事件。这里绕开界面直接打删除接口(删一份日报会把它带走的条目放回队列),页面
 // 自己不知道发生了什么 —— 空闲那一跳必须把数字问回来。无头浏览器会把后台页面的
@@ -278,10 +256,13 @@ check("这一段没有被写成日报",
 check("改过的区间照原样显示",
       /^覆盖 01-01 00:00 → 01-02 00:00$/.test(
         await evalJs(`document.getElementById('daily-window-label').textContent`)));
-// 自定义区间时那个计数不作数(后端算的是默认区间那一段),按钮名字改按目标那天算
-check("自定义区间时不报计数", await evalJs(`(() => {
+// 抓取事实和"这一份覆盖哪一段"无关,所以改了区间它照常显示;跟着藏掉的是
+// tooltip 里那句队列积压(后端算的是默认区间那一段)。
+check("自定义区间不影响抓取事实", await evalJs(`(() => {
   document.getElementById('daily-until').value = '2026-01-02T00:00'; markDailyWindow();
-  return document.getElementById('daily-gen-count').hidden; })()`));
+  const chip = document.getElementById('daily-gen-count');
+  return !chip.hidden && chip.textContent === '今天还没有抓取'
+         && !/队列里有/.test(document.getElementById('daily-gen').title); })()`));
 check("自定义到一个没有日报的日期时按钮叫「生成日报」",
       (await evalJs(`document.getElementById('daily-gen-label').textContent`)) === "生成日报",
       await evalJs(`document.getElementById('daily-gen').textContent`));
@@ -401,13 +382,20 @@ await evalJs(`switchTab('daily')`);
 await waitFor(`document.getElementById('dailypanel').style.display !== 'none'`);
 await evalJs(`resetDailyWindow()`);
 const sinceBefore = await evalJs(`document.getElementById('daily-since').value`);
-const countBefore = await evalJs(`document.getElementById("daily-gen-count").textContent`);
+// 盯的是 tooltip 里那句队列积压 —— 删一份日报会把它带走的条目放回队列,而按钮
+// 上那颗药丸报的是抓取事实,后台删不删日报它都不该动(那正是这一版要钉的)。
+const tipBefore = await evalJs(`document.getElementById('daily-gen').title`);
+const chipBefore = await evalJs(`document.getElementById("daily-gen-count").textContent`);
 const reborn = await evalJs(`(async () => {
   await fetch('/api/daily/reports/${today}', { method: 'DELETE' });
   await refreshDailyStatus();
-  return document.getElementById('daily-gen-count').textContent; })()`);
-check("后台改了素材之前按钮上是零", countBefore === "没有新内容", countBefore);
-check("后台改了素材之后,空闲那一跳把数字问回来", /^\+\d+ 条新内容$/.test(reborn), reborn);
+  return JSON.stringify({ tip: document.getElementById('daily-gen').title,
+    chip: document.getElementById("daily-gen-count").textContent }); })()`);
+const back = JSON.parse(reborn);
+check("后台改之前队列是空的", !/队列里有/.test(tipBefore), tipBefore);
+check("后台改了素材之后,空闲那一跳把队列数问回来", /队列里有 \d+ 条/.test(back.tip), back.tip);
+check("删掉一份日报不会改写「今天抓了几次」", back.chip === chipBefore,
+      `${chipBefore} → ${back.chip}`);
 check("那一跳没有顺手改写两个时刻输入",
       (await evalJs(`document.getElementById('daily-since').value`)) === sinceBefore,
       await evalJs(`document.getElementById('daily-since').value`));

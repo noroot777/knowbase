@@ -18,7 +18,8 @@ def local_status() -> dict:
             "hint": "只采集本机已同步的公众号推送；完整正文仍通过原文链接获取", "targets": targets}
 
 
-def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
+def collect(emit, *, targets=None, since="", until="", reader=None,
+            round_key="") -> dict:
     from src.collect.local_accounts import refresh_display_names
     from src.collect.local_index import ArticleIndex
     from src.db.repository import ArticleRepository
@@ -28,6 +29,7 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
               "missing_accounts": [], "deferred_articles": 0, "unavailable_articles": 0,
               "matched_articles": 0, "download_done": 0, "download_total": 0,
               "download_succeeded": 0, "download_failed": 0, "existing_articles": 0,
+              "excluded_articles": 0,
               "body_failures": [], "unreadable_messages": 0, "unreadable_accounts": [],
               "unattributed_messages": 0, "coverage_unknown_accounts": []}
     reader = reader or LocalReader()
@@ -63,7 +65,7 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
                 repo.commit()
                 articles = index.query(accounts, active, since, until)
                 result["matched_articles"] = len(articles)
-                _download(repo, articles, result, progress)
+                _download(repo, articles, result, progress, round_key)
                 repo.commit()
                 result["done"] = len(accounts)
     except LocalReaderError as exc:
@@ -73,7 +75,7 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
     return result
 
 
-def _download(repo, articles, result, progress):
+def _download(repo, articles, result, progress, round_key=""):
     import api
     from src.utils.article_identity import has_readable_body, prepare_article
     from src.utils import body_retry
@@ -98,11 +100,24 @@ def _download(repo, articles, result, progress):
     for owner, article, is_new in queue:
         current = f"{owner} · {article['title']}"
         progress({"phase": "download", "current": current})
-        succeeded = False
+        succeeded = excluded = False
         try:
             pacer.wait()
-            api._ingest_crawl_article(repo, owner, article)
+            # 「这一篇是知识库哪一次业务抓取发现的」只能由仓储在**首次插入这一篇
+            # 的那个事务里**一起写掉,这里只负责把批次号递下去。队列里既有首次发现
+            # 的、也有前几天抓到、这次只是来补正文的(`has_readable_body` 那道筛放
+            # 进来的就是后者),而补正文不构成新的首次来源 —— 这一层分不出来谁是谁,
+            # 也不该分:仓储那边 `rowcount` 说了算。
+            api._ingest_crawl_article(repo, owner, article, fetch_round=round_key)
             repo.commit()
+            # **按实际写入结果报,不按计划长度报。** 队列是发现阶段排好的,而发现
+            # 到这一刻之间用户完全可能在面板上按下「不再抓取」—— 写入层会拒掉这
+            # 一篇(`repository._excluded_clause`)。那时既不该记成新增(它没进库),
+            # 也不该记成失败、更不该说一句「已安排自动重试」:它不会再被抓了。
+            if not repo.has_article(article["id"]):
+                excluded = True
+                result["excluded_articles"] += 1
+                continue
             result["new_articles"] += int(is_new)
             succeeded = has_readable_body(repo, article["id"])
             if not succeeded:
@@ -115,6 +130,15 @@ def _download(repo, articles, result, progress):
         except Exception as exc:
             result["errors"].append(f"{current}: {exc}")
         finally:
+            # **一篇一个事务单元,出口一定要把它收掉。** 那几句受限写入即使影响 0 行
+            # 也已经开着一个 SQLite 写事务(实测 `rowcount=0` 时 `in_transaction`
+            # 仍为 True、另一个连接当场 `database is locked`),而下一圈开头就是
+            # `pacer.wait()` 的退避和一次网络请求 —— 不收尾就等于攥着整库写锁去等
+            # 网络,用户那一刻按「不再抓取」会被堵到超时(见 `failure-drop.md`)。
+            # 异常路径尤其要走到这里:它压根没有自己的 commit。
+            if repo.conn.in_transaction:
+                repo.conn.rollback()
             result["download_done"] += 1
-            result["download_succeeded" if succeeded else "download_failed"] += 1
+            if not excluded:
+                result["download_succeeded" if succeeded else "download_failed"] += 1
             progress({"phase": "download", "current": current})

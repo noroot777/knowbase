@@ -13,19 +13,64 @@
 采集器要是自带常驻库(先落库再转 md),两步就各司其职。
 
 两个方法都直接调 kb.pipeline_state._stage 汇报进度,与其它阶段一致;
-返回值没有意义,失败通过 _stage(..., "error", ...) 表达而不是抛异常
-——管道要的是"这一阶段红了但后面接着跑",不是整条链断掉。
+失败通过 _stage(..., "error", ...) 表达而不是抛异常——管道要的是"这一阶段红了
+但后面接着跑",不是整条链断掉。
+
+fetch 的返回值没有意义。**materialize 的返回值是这一轮的成果回执**:它这一次
+往 vault 新落了哪几篇,每一篇带着它的身份(见 `Fetched`),交给 kb.fetch_rounds
+记成「今天第 N 次抓取抓了多少」。说不出来就返回 None —— 账本据此报「不可确认」,
+面板上写「条数读不出来」。
+
+回执这件事不许由上层旁观着猜:管道一度在物化前后各取一次全 vault 快照、拿差集
+当成果,而差集分不出"谁写的"——那段时间里别的进程(实时 saver、手工导入、另一个
+采集器)落下的文件会被算进这一轮(第 3 轮审查实测)。采集器自己知道它写了哪几个
+文件,这是别人都拿不到的事实,所以只能由它交出来。宁可返回 None 让面板说
+「读不出来」,也不要一个看着确定、实际上掺了别人成果的数。
+
+**回执里的身份有两个,缺一个就答不全。** 光有「写了哪几个路径」只够回答「这次
+多了多少」;要分得清「这一次新抓到的」和「之前抓到、这一次才补导进来的」,还得
+知道每一篇是**哪一次业务抓取发现**的 —— 而那件事只有采集器自己的持久化记录
+记得住(订阅侧 `feed_items.fetch_round`、公众号侧 `article_fetch_rounds`)。
+路径当不了这个身份:它随标题变,也不区分「头一回落下」和「正文补抓重写一遍」。
+口径与两个数在补导场景下为什么必然不等,见 docs/decisions/daily.md。
 
 新增来源 = 写一个实现 + 在 _REGISTRY 里注册。想让"订阅了哪些号/源"能在
-面板上增删,再实现一份 TargetManager(可选,见下)。
+面板上增删,再实现一份 TargetManager(可选,见下);想让面板上那份失败明细里的
+单条内容能被用户当场排除掉,再实现一份 ItemDropping(可选,见
+docs/decisions/failure-drop.md)。
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 from kb.source_types import feed_types
+
+
+class Fetched(NamedTuple):
+    """回执里的一条成果:谁、哪一次抓到的、这一次落在 vault 哪儿。
+
+    `content_id` 是**稳定内容身份**,写成 `"<采集器>:<它自己的主键>"`
+    (`rss:9f3c…`、`wechat_local:2247…`)。它必须跨轮次、跨改名、跨重导出都
+    不变 —— 账本靠它取并集去重,一条成果被重放、被两条通道各报一次、被 fsync
+    失败后重试追加,折出来的条数都得一样。**路径当不了这个身份**:标题一改
+    文件名就变,同一篇会连着几天被报成"刚抓到"。
+
+    `fetch_id` 是**发现它的那一次业务抓取**(`fetch_rounds.round_key()`)。它等于
+    当前轮次 = 这一次新抓到的;不等且非空 = 之前抓到、这一次才补导进来的;
+    **空串 = 说不清**(存量内容、手工导入链接、采集器还没来得及记)。空串不许
+    当成「不是本次」—— 那是把"不知道"写成了"确定不是",而面板上那句分解会据此
+    说出一个它其实不知道的事实。
+
+    `path` 是这一次写下去的 vault 相对路径,只给账本做**取材范围过滤**用
+    (`fetch_rounds.in_scope`:衍生树、停用的树、skip_dirs 不算)。范围是知识库
+    自己的事,不交给每个采集器各判一遍。
+    """
+
+    content_id: str
+    fetch_id: str
+    path: str
 
 
 @dataclass(frozen=True)
@@ -81,7 +126,9 @@ class SourceCollector(Protocol):
 
     def fetch(self, scope: FetchScope) -> None: ...
 
-    def materialize(self) -> None: ...
+    def materialize(self) -> frozenset[Fetched] | None:
+        """落 md。返回这一轮新写的那几篇(见 `Fetched`),说不出来返回 None。"""
+        ...
 
     def pending(self) -> int | None:
         """还有多少条没落进 vault。算不出返回 None(面板显示空白而非 0)。"""
@@ -184,6 +231,37 @@ class RetryNarrowing(Protocol):
 def retry_narrower(collector: SourceCollector) -> RetryNarrowing | None:
     """这个采集器能不能把重试范围收窄到失败项;不能返回 None。"""
     return collector if isinstance(collector, RetryNarrowing) else None
+
+
+# ── 单条内容的「别再抓了」(可选能力)─────────────────────────────────────────
+
+
+@runtime_checkable
+class ItemDropping(Protocol):
+    """能把**某一条内容**从采集范围里永久去掉的采集器。
+
+    面板上那份失败明细里,有一类条目说的是「这一篇一直缺正文」。它可能真的
+    已经没有内容了(原文被删、只有图片),而管道会按退避时间一轮一轮地重试它 ——
+    用户点开原文核对完,得能当场说一句「这条别再抓了」,否则这几十条会永远挂在
+    那里,把真正要处理的问题挤出视野。
+
+    **语义是「永久不再采集」,不是「这一轮跳过」**:实现必须把这条的身份记成
+    黑名单,再次被发现时照样拦住。做不到的来源别实现这个协议 —— 面板按
+    「有没有这个能力」决定显不显示那颗按钮,假装支持的后果是用户删了一条、
+    下一轮它又回来了。
+
+    **幂等**:同一条删两次要照样返回成功(用户会连点,两个标签页也会各点一次)。
+    失败一律抛 `CollectorError`(同 TargetManager:这是点一下等结果的同步操作)。
+    """
+
+    def drop_item(self, ref: dict) -> str:
+        """`ref` 是失败明细里那条的 `drop` 字段,返回一句成品结果文案。"""
+        ...
+
+
+def item_dropper(collector: SourceCollector) -> ItemDropping | None:
+    """这个采集器能不能把单条内容永久排除;不能返回 None。"""
+    return collector if isinstance(collector, ItemDropping) else None
 
 
 # ── 注册表 ──────────────────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 // 「我的订阅」/「同步中心」拆分后的浏览器回归:各类来源并列的页内切换、公众号与
-// feeds 共用同一套页头、定时同步收进页头弹窗、「最新内容」视图锁在可用视口高度上、
+// feeds 共用同一套页头、**这一页不许再长出定时设置**(定时只剩日报那一份,见
+// `docs/decisions/sync-schedule.md`)、「最新内容」视图锁在可用视口高度上、
 // 老深链(#social 等)落到对应视图、同步中心跑完后把失败步骤统一列进总览问题块
 // (运行中不弹,最后统一处理)。
 //
@@ -71,22 +72,11 @@ check("公众号视图和 feeds 用同一个页头部件", await evalJs(`!!docum
       && !!document.querySelector('#subs-feeds > header.source-heading')`));
 check("公众号的连接说明是一条横幅,不再是独立的连接卡", await evalJs(`!document.querySelector('#subs-wechat .pipe-source')
       && document.getElementById('src-detail').classList.contains('source-banner')`));
-// 定时同步是整页一份的设置:入口收在页头,正文区不再被页尾那张常驻大卡片挤掉一截
-check("定时设置收进页头的弹窗、页内不再常驻", await evalJs(`!document.querySelector('#subspanel .pipe-schedule, #subspanel #sched-fields')
-      && document.getElementById('subs-sched-open')?.getClientRects().length > 0
-      && document.getElementById('sched-modal')?.style.display === 'none'`));
-await until(`schedLoaded && !schedLoading`, 12000);
-check("页头按钮不打开也写着当前定时状态",
-      (await evalJs(`document.getElementById('subs-sched-label')?.textContent || ''`)).includes("未启用"),
-      await evalJs(`document.getElementById('subs-sched-label')?.textContent`));
-// 入口/弹窗缺了要报红,不能让页面异常把整趟探针打断(定点注入时正是这里先炸)
-await evalJs(`try { openSchedModal(); } catch (e) {} true`);
-await until(`document.getElementById('sched-modal')?.style.display === '' && !document.getElementById('sched-fields').disabled`, 12000);
-check("弹窗里就是原来那套整组设置", await evalJs(`document.getElementById('sched-modal')?.style.display === ''
-      && document.querySelectorAll('#sched-modal #sched-channels input').length >= 3
-      && !!document.getElementById('sched-time').value`));
-await evalJs(`try { closeSchedModal(); } catch (e) {} true`);
-check("关掉弹窗不留遮罩", await evalJs(`document.getElementById('sched-modal')?.style.display === 'none'`));
+// 定时同步不在这一页了:原来页尾那张常驻大卡片先收进页头的弹窗,现在整条删了
+// (只剩日报那一份,见 `docs/decisions/sync-schedule.md`)。**这一页不许再长出定时**
+// —— 正文区被页尾那张卡片挤掉一截正是它当初搬走的原因。
+check("这一页没有定时设置", await evalJs(`!document.querySelector('#subspanel .pipe-schedule, #subspanel #sched-fields')
+      && !document.getElementById('subs-sched-open') && !document.getElementById('sched-modal')`));
 const connectionStates = await evalJs(`(async () => {
   const realJson = window.pipeJson, states = [];
   try {
@@ -110,51 +100,6 @@ check("已连接时仍完整保留采集器说明和提示", !connectionStates[1
 check("连接失败保留原因、提示和配置入口", !connectionStates[2].hidden && connectionStates[2].error
       && connectionStates[2].text.includes('采集器连接失败') && connectionStates[2].text.includes('可以重新检查')
       && connectionStates[2].console === '');
-// 慢读取 × 用户编辑:弹窗每打开一次就重读一次,而这时字段已经是启用的 —— 回包不许
-// 把这期间敲进去的值盖掉,更不许让接下来那次保存发出被盖回的那份(2026-10-11 审查
-// 实测:读取中改成 18:10,两秒后变回 16:45,POST 的也是 16:45)。
-await evalJs(`(() => {
-  window.__sched = { posted: null };
-  const realJson = window.pipeJson, realPost = window.pipePost;
-  window.pipeJson = async (path, ...rest) => {
-    if (path !== '/api/pipeline/schedule') return realJson(path, ...rest);
-    await new Promise(r => setTimeout(r, 1200));
-    return { enabled: true, time: '16:45', channels: [], next_run: '' };
-  };
-  window.pipePost = async (path, body, ...rest) => {
-    if (path !== '/api/pipeline/schedule') return realPost(path, body, ...rest);
-    window.__sched.posted = body; return { ...body, next_run: '' };
-  };
-  openSchedModal();
-})(); true`);
-await sleep(250);
-check("读取还没回来时字段是禁用的(改不进去,也就盖不掉)",
-      await evalJs(`document.getElementById('sched-fields').disabled === true`));
-// 真的去点一下「启用定时」,再等那一趟读取跑完(等 schedLoading,不是等 disabled
-// —— 缺陷版里字段从头到尾就没禁用过,等它等于立刻返回,什么都没验到)
-await clickAt("#sched-on");
-await until(`schedLoading === false`, 8000);
-check("回包到了之后字段才放开,显示的是服务端那份",
-      await evalJs(`document.getElementById('sched-fields').disabled === false
-        && document.getElementById('sched-time').value === '16:45'`),
-      await evalJs(`document.getElementById('sched-time').value`));
-// **承重的是这一条**:缺陷版里那一笔敲得进去,于是读完之后屏幕上是服务端那份
-// 16:45、底下却写着「有未保存的修改」、保存键还亮着 —— 点下去存的正是被盖回的
-// 16:45。刚读完的这一份不该是草稿。
-check("刚读完的这一份不是草稿(没有被悄悄吞掉的编辑)",
-      await evalJs(`schedDirty === false && document.getElementById('sched-save').disabled === true`),
-      await evalJs(`JSON.stringify({ dirty: schedDirty, msg: document.getElementById('sched-msg').textContent,
-                                     saveOff: document.getElementById('sched-save').disabled })`));
-// 反过来钉一边:字段放开之后改的那一笔必须活到保存(别为了防覆盖把正常编辑也吃掉)
-await evalJs(`(() => { const t = document.getElementById('sched-time');
-  t.value = '18:10'; t.dispatchEvent(new Event('input'));
-  document.getElementById('sched-on').checked = true; markSchedDirty();
-  document.querySelector('#sched-channels input').checked = true; })(); true`);
-await evalJs(`saveSched()`);
-await until(`window.__sched.posted !== null`, 8000);
-check("放开之后改的时间真的发了出去",
-      (await evalJs(`JSON.stringify(window.__sched.posted)`) || '').includes('"time":"18:10"'),
-      await evalJs(`JSON.stringify(window.__sched.posted)`));
 // 打桩挂在 window 上,重新导航把它连同这一页一起扔掉
 await send("Page.navigate", { url: base + "/" });
 await until(`typeof openSubsPanel === 'function' && typeof subsCatalog !== 'undefined' && subsCatalog.length > 0`, 20000);
@@ -262,7 +207,8 @@ await evalJs(`switchTab('pipe')`);
 await sleep(300);
 check("离开订阅页撤掉视口锁", await evalJs(`!document.body.classList.contains('subs-reading')`));
 check("同步中心没有连接卡和定时设置", await evalJs(`!document.querySelector('#pipepanel .pipe-source')
-      && !document.querySelector('#pipepanel #sched-fields, #pipepanel .sched-modal')`));
+      && !document.querySelector('#pipepanel #sched-fields, #pipepanel .sched-modal')
+      && !document.getElementById('sched-modal')`));
 // 沙箱里有未提取的存量积压:问题块如实显示待提取(和旧版重试按钮同一口径)
 check("空闲时问题块只报真实积压", await evalJs(
   `document.getElementById('pipe-issues').hidden

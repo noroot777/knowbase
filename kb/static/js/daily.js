@@ -69,52 +69,34 @@ function renderDailyWindowLabel() {
   renderDailyGenButton();
 }
 
-function dailyTargetDate() {
-  // 这一次会写到哪一天那份日报上。**只有这一份口径**:按钮叫"生成"还是"重新
-  // 生成"、要不要先弹覆盖确认,问的是同一件事,两处各判一遍必然各漂各的。
-  // 自定义区间落在截止时刻那天,默认区间落在今天(生成时刻)。
-  return dailyWindowDirty && $('daily-until').value
-    ? $('daily-until').value.slice(0, 10)
-    : new Date().toLocaleDateString('sv');
-}
+// 生成按钮的名字和它里面那颗药丸(今天第 N 次抓取、抓了多少)在
+// daily_chip.js —— `dailyTargetDate()` / `renderDailyGenButton()` 也在那边。
 
-function renderDailyGenButton() {
-  // 这颗按钮的名字跟着"那一天有没有日报"走:已经有就是**重新生成**(点下去会
-  // 覆盖它,所以还会弹一次确认),没有就是头一份。写死成"重新生成"的话,第一次
-  // 用的人会以为自己漏掉了一步。
-  const exists = dailyReports.some(r => r.date === dailyTargetDate());
-  $('daily-gen-label').textContent = exists ? '重新生成日报' : '生成日报';
-
-  // 「再出一份能多带进来多少」。日报是钉在某一天的产物,生成完不会自己跟着新
-  // 内容变 —— 重试失败项、新加一个订阅之后,得有个地方让人看出攒下了东西,再
-  // 决定要不要为这些内容再花一次模型钱。它长在按钮里:回答的是"点这颗会得到
-  // 什么",贴在覆盖区间那行字后面就成了另一个问题的答案。
+async function fetchDailyWindow(fillInputs) {
+  // **服务器事实统一从这一个口进来。** 抓取事实、队列积压、默认区间每次都接;
+  // `dailyWindowDirty` 只挡"改写用户填着的那两个时刻",不挡事实本身 —— 绑在
+  // 一起的后果是改过覆盖区间之后,同步完成多久按钮都还写着上一次的次数
+  // (审查实测:API 已返回 n=2,按钮停在「第 1 次抓取 · +3 条」)。
   //
-  // 自定义区间时不报这个数——后端算的是默认区间(接上一份日报)那一段。
-  // 后端查不出来(pending 给 null)时整颗藏掉,**不写成「没有新内容」**:
-  // 那是在把"不知道"说成"没有"。
-  const chip = $('daily-gen-count');
-  const p = dailyWindowDirty ? null : dailyWindow?.pending;
-  chip.hidden = !p;
-  if (!p) { $('daily-gen').title = ''; return; }
-  chip.textContent = p.total ? `+${p.total} 条新内容` : '没有新内容';
-  chip.classList.toggle('is-none', !p.total);
-  $('daily-gen').title = p.total
-    ? `有 ${p.total} 条内容还没进过任何一份日报（${p.items} 条在本段窗口内发布、`
-      + `${p.late} 条发布得更早）。再生成一次会把它们带进来。`
-    : '上一份日报之后没有新内容进来，再生成一次得到的基本是同一份。';
+  // `fillInputs` 另外由调用方给:空闲轮询一律不填,因为默认区间的截止时刻是
+  // "此刻",每跳重填一次会让展开着的「改区间」里的值自己往前跳。
+  let got;
+  try {
+    got = await pipeJson('/api/daily/window');
+  } catch { return false; }
+  dailyWindow = got;
+  if (fillInputs) {
+    $('daily-since').value = got.since;
+    $('daily-until').value = got.until;
+  }
+  return true;
 }
 
 async function loadDailyWindow() {
-  // 改过区间就不覆盖用户填的那两个时刻,但按钮上的名字和计数照样要重算一次
-  // ——「这一天有没有日报」是跟着列表变的,和区间改没改无关。
-  if (dailyWindowDirty) { renderDailyGenButton(); return; }
-  try {
-    dailyWindow = await pipeJson('/api/daily/window');
-  } catch { return; }
-  $('daily-since').value = dailyWindow.since;
-  $('daily-until').value = dailyWindow.until;
-  renderDailyWindowLabel();
+  // 整块重载。改过区间就不覆盖用户填的那两个时刻,但按钮上的名字、抓取事实和
+  // 队列照样要重算 ——「这一天有没有日报」「今天抓了几次」都跟区间改没改无关。
+  if (await fetchDailyWindow(!dailyWindowDirty)) renderDailyWindowLabel();
+  else renderDailyGenButton();
 }
 
 function toggleDailyWindow() {
@@ -141,8 +123,9 @@ function dailyScheduleMessage(s) {
   return `已保存：每天 ${s.time} ${s.sync ? '先同步再生成' : '只用已入库的内容生成'}${next}`;
 }
 
-// **一次读取必须有终态**(同 `pipe_schedule.js` 的 `settleSched`,那边有完整的事故
-// 形态)。这一片底下那句话一开始就是「正在读取定时设置…」、整片字段禁用着,所以
+// **一次读取必须有终态**(事故形态在 `docs/decisions/sync-schedule.md`,那一节原来
+// 写的是两张表单,现在只剩这一张)。这一片底下那句话一开始就是「正在读取定时
+// 设置…」、整片字段禁用着,所以
 // 成功、失败、被更晚的读取顶掉,哪条分支走完都得回到这里收尾。终态只有三种:采用
 // 当前已确认的事实、说读不到并把重读放出来、保留用户的草稿。
 //
@@ -213,8 +196,9 @@ async function loadDailySettings() {
   finally { dailySchedReads--; settleDaily(fact, failure); }
 }
 
-// 这一片也跟着共享事实走:别处(页头那张表单保存、订阅页那次读取)确认的新事实到
-// 了,而这一片自己那趟早就结束了的话,它该跟着完成,而不是停在上一次的样子。只认
+// 这一片也跟着共享事实走:别处(「我的订阅」页那次读取;定时只剩这一张表单了,但
+// 读的地方不止一处)确认的新事实到了,而这一片自己那趟早就结束了的话,它该跟着
+// 完成,而不是停在上一次的样子。只认
 // **非 null**:null 是"当前不知道",而共享层分不出"从没读过"和"读了没读到",拿它
 // 报"读不到"会冤枉一条好定时;自己这趟失败那一档由 settleDaily 自己报。
 watchSchedules(config => {
@@ -250,7 +234,7 @@ async function saveDailySettings() {
     } else $('daily-sched-msg').textContent = '至少勾选一个同步范围';
     return;
   }
-  // **保存期间把整片字段一起禁掉**(同页头那张 `saveSched`)。只禁保存按钮的话:
+  // **保存期间把整片字段一起禁掉。** 只禁保存按钮的话:
   // 这期间改的开关/时刻/范围进不了已经发出去的那个请求,`markDailyDirty` 又因为
   // 正在保存直接返回 —— 保存成功后 dirty 被清掉、按钮继续禁着,那几下修改**既没
   // 保存也存不了**,而面板写着「已保存」。
@@ -642,13 +626,9 @@ async function refreshDailyStatus() {
 }
 
 async function refreshDailyPending() {
-  // 只更新按钮上那个数字,**不碰两个时刻输入框**:默认区间的截止时刻是"此刻",
-  // 每跳重填一次会让展开着的「改区间」里的值自己往前跳。
-  if (dailyWindowDirty || !dailyWindow) return;
-  try {
-    dailyWindow.pending = (await pipeJson('/api/daily/window')).pending;
-  } catch { return; }
-  renderDailyGenButton();
+  // 空闲时每一跳都问一次,**不碰两个时刻输入框**。改过覆盖区间时照样问:抓取
+  // 是从外面(同步中心、CLI、定时)进来的事实,它跟用户在这里填了什么没关系。
+  if (await fetchDailyWindow(false)) renderDailyGenButton();
 }
 
 function queueDailyPoll() {

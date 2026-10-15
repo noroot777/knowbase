@@ -12,7 +12,7 @@ from datetime import date, datetime
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from kb import daily, daily_run
+from kb import daily, daily_run, fetch_rounds
 from kb.config import ScheduleUnreadable
 from kb.web.common import unreadable_config
 
@@ -82,13 +82,28 @@ def status():
 
 @router.get('/window')
 def window():
-    """下一份日报默认覆盖的区间 + 现在攒了多少还没上报过的素材。界面拿它预填。
+    """下一份日报默认覆盖的区间 + 今天第几次抓取抓了多少。界面拿它预填。
 
-    `pending` 回答的是"上一份日报之后又进来了什么" —— 日报是一份钉在某一天的
-    产物,生成完不会自己跟着新内容变;重试失败项或新加一个订阅之后,用户得有
-    办法知道"有 N 条还没进过任何一份日报",再决定要不要重新生成(那会再花一次
-    模型钱)。零模型调用,所以放在这条每次打开面板都会调的路上。查不出来时整个
-    键给 null,窗口预填照旧 —— 它只是提示。
+    `fetch` 是**抓取自己的事实**(`kb.fetch_rounds`):今天第 N 次同步往 vault 新落了
+    多少篇。按钮上报的就是它 —— 一天内同步第二次之后,用户要知道"这次抓了多少"
+    才能决定要不要重新生成那份日报(那会再花一次模型钱)。生成、重新生成、删掉
+    日报都不改变这个数。`pending` 是另一回事(队列里一共还积着多少没进过日报的),
+    给 tooltip 用。两条都零模型调用,所以放在这条每次打开面板都会调的路上。
+
+    **`fetch: null` 是「不可确认」,不是「没抓到」**(`fetch_rounds.today` 读不出
+    账本、或者有行没落下去时就给 null;`{'n': 0}` 才是确定今天还没抓过)。
+    两者混成一句的话,一次写失败之后面板会一直笃定地说「今天还没有抓取」。
+    `fetch.partial` 是第三件事:次数确定、而**这一轮的条数只是下界**(某个来源
+    的成果说不出来)。三种都原样透传,前端各有文案,见 `daily_chip.js` 的
+    `renderDailyGenButton`。
+
+    `fetch.added` 还带着**它由什么构成**:`fresh`(这一次新抓到的)/ `carried`
+    (之前抓到、这一次才补导进来的)/ `unsure`(说不清是哪一次抓到的),三个加
+    起来等于 `added`。`added` 报的是「这次同步之后日报能多拿到多少」,而它和
+    「远端这次新发现多少」在补导场景下必然不等 —— **差额如实拆开交给前端,不从
+    `added` 里减掉**(口径与两个数为什么不等见 `docs/decisions/daily.md`)。
+    这四个数一并原样透传,这里不做任何合并。
+    查不出来时窗口预填照旧 —— 这两条只是提示,不该让面板打不开。
     """
     # 这条只给窗口预填(回溯几天),不报"定时开没开" —— 所以读不出来时退回缺省
     # 天数照常给出窗口,而不是让面板打不开。那句"开没开"由 /settings 回答。
@@ -102,9 +117,14 @@ def window():
     except Exception:                               # noqa: BLE001 - 提示失败不该让面板打不开
         since, until = daily.next_window(settings['first_days'])
         info = {'since': since, 'until': until, 'items': None, 'late': None}
+    try:
+        got = fetch_rounds.today()
+    except Exception:                               # noqa: BLE001 - 同上
+        got = None
     return {'since': info['since'].isoformat(timespec='minutes'),
             'until': info['until'].isoformat(timespec='minutes'),
             'first_days': settings['first_days'],
+            'fetch': got,
             'pending': (None if info['items'] is None else
                         {'items': info['items'], 'late': info['late'],
                          'total': info['items'] + info['late']})}

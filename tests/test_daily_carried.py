@@ -323,8 +323,12 @@ class DailyCarriedTests(_Base):
         self.assertEqual(['线内的'], [i['title'] for i in mat.late])
 
     def test_the_panel_count_and_the_real_pick_are_one_verdict(self):
-        """面板上那个"又攒了多少"必须和真生成时带走的是同一批。两处各判一遍的
-        话必然各漂各的:用户看着"有 7 条新素材"点下去,出来的日报里是另一批。"""
+        """tooltip 里那个"队列里还积着多少"必须和真取材认的是同一批。两处各判
+        一遍的话必然各漂各的:用户看着"还有 7 条没报过",生成时带走的是另一批。
+
+        **这个数不上按钮** —— 按钮报的是"今天第 N 次抓取抓了多少"(抓取自己的
+        事实,钉在 tests/test_fetch_rounds.py)。两件事混成一个的后果写在那一份
+        的模块 docstring 里。"""
         add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
         add_doc(self.conn, 'source/rss/b.md', title='乙文', published='2026-09-20 09:00')
         now = T('2026-09-29 08:00')

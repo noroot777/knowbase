@@ -6,12 +6,29 @@
 
 ## 硬约束(原 CLAUDE.md「collector 采集器」)
 
+- **`materialize()` 要交回这一轮新写了哪几篇(成果回执),而且每一篇**带着身份**;交不出就返回
+  `None`。** 口径和事故形态在 `docs/decisions/daily.md` 的「归属只能由生产者给」和「『这一次抓到的』和
+  『补导进来的』分不开」两节 —— 动导出那条链(导出脚本逐篇打 `  [item] {id, round, name}`、`cmd_export`
+  连同输出目录收成事件、`_receipt` 换算成 vault 相对路径、超时降级那一支返回 `None`)之前先读它们。
+  上层**没有别的办法知道"这些文件是谁写的"**:扫全库拿差集会把同期别的进程落下的文件算进这一轮
+  (实测)。`round` 是**发现这一篇的那一次业务抓取**(`article_fetch_rounds`,migrations v19),空串是
+  「说不清」、不是「不是本次」;**那张表单开一张、不给 `articles` 加列**,理由同 v17/v18(库被
+  `wechat-oa` 分支同时打开)。**它只许在 `upsert_article_from_blog` 里、和首次元数据写进同一个
+  savepoint**(`INSERT OR IGNORE` 的 `rowcount == 1` 就是「首次插入」的确证)。**「两条写在同一个事
+  务里」还不够,得能整篇一起撤回**:来源那一条写失败时,调用方是逐篇接住异常接着往下跑的,收尾那次
+  commit 会把半条记录落了盘 —— 一篇在库、没有来源,下一轮来补正文时它已经不是首次插入,来源
+  **再也补不回来**。所以失败要 `ROLLBACK TO SAVEPOINT` 把这一篇的文章行一起撤掉(只撤这一篇,调用方
+  同一个事务里别的业务写入原样留着),异常原样抛上去;**不许在正文抓完之后补记** ——
+  那样既会把这一次的批次号盖到一篇早就在库里、只是来补正文的文章头上,也会在正文之后崩一次时留下
+  一篇有正文、没来源的文章,而它再也不进采集队列。没有证据的首次来源**保持未知**,谁也不许替它补。
+  **清单里一行读不懂就整份作废**(不给 `items` 这个键),挑着收等于交上去一份少记的清单而上层把它
+  当确定值用。
 - **公众号只有一条通道 `wechat_local`(读本机绿泡泡数据库)。** `wechat_oa` 在另一分支、主干注册表里压
   根没有它,所以「两条通道互斥、选哪条是个设置」那一整套全删了。手动请求、定时配置和失败重试照旧显式
   携带 `channel`,不修改进程全局环境。
 - **退役的通道名要留成别名,不能当「不认识的来源」丢掉**(`_RETIRED_CHANNELS`
   = `{"wechat_oa": "wechat_local"}`,`resolve_channel` / `known_channels` 是唯一口径)—— 存量
-  `schedule.json` / `daily.json` 里写的正是旧名字,丢掉的话**公众号从此不再定时同步、不再进日报,而面
+  `daily.json` 里写的正是旧名字,丢掉的话**公众号从此不再定时同步、不再进日报,而面
   板上完全看不出少了什么**。配套:①退役名也要能翻成人话(`channel_labels()`,API 的 `labels`);②别名
   表要发到浏览器(`/api/pipeline/channels` 的 `aliases`),前端不许写死 `wechat_oa`。
 - **「我的订阅」的公众号视图不信 `kb-sync-channel` 那份全局选择**(`sources.js` 的
@@ -39,6 +56,13 @@
 - **文章身份是 `article_identity` 的 `__biz + mid + idx`,保留已有文章 ID 和归属**(存量是凭证通道采
   的、ID 另一套规则,本地库再发现同一篇时必须认出来、不能新开一行);用户删除时同时记进链接身份黑名单。
   不要把推送接收时间或带跟踪参数的完整 URL 当成唯一键。
+- **「这个身份被永久排除了吗」的判据待在写语句自己的 WHERE 里**
+  (`_repo_exclusion._excluded_clause`,挂在 `upsert_article_from_blog` / `set_body_text` /
+  `set_body_html` / `set_fetch_state`;四者都返回 `bool`,调用方必须跟上 —— 连**附属状态**那一笔也要
+  带,它的外键指向 `articles`,无判据的写入在文章刚被删掉时会抛外键错误)。
+  `prepare_article` 查黑名单那一下**只是早一道,不是互斥** —— 它和真正写入之间隔着抓正文和更新显示
+  名;**最后一道在导出的发布那一步**(`export_obsidian.publish_one`,写事务里复核再写 md)。
+  四处用同一组键(`article_identity.exclusion_keys`),事故形态和回归在 `failure-drop.md`。
 - **本机推送链接须保留正文校验参数 `chksm`,仅剔除跟踪参数。** 发现阶段用分片/表级 `local_id` 游标 ——
   不要用 timeline 的 after-local-id 做增量分页(读取器是在 LIMIT 后过滤 ID),也不能拿发布时间当消息水
   位;**分页/读取失败不推进对应游标**。未选公众号只进本地发现索引,不下载正文、不写共享 articles、不导
@@ -75,8 +99,8 @@
   失败重试照旧显式携带 `channel`,不修改进程全局环境。
 - **退役的通道名要留成别名,不能当「不认识的来源」丢掉**(`_RETIRED_CHANNELS`
   = `{"wechat_oa": "wechat_local"}`,`resolve_channel` / `known_channels` 是唯一口径,
-  `pipeline.load_schedule`、`daily_run.load_settings`/`save_settings`/`start` 都过它)。
-  存量 `schedule.json` / `daily.json` 里写着的正是旧名字,丢掉的话**公众号从此不再
+  `daily_run.load_settings`/`save_settings`/`start` 都过它)。
+  存量 `daily.json` 里写着的正是旧名字,丢掉的话**公众号从此不再
   定时同步、不再进日报,而面板上完全看不出少了什么**。两条配套的:
   ①**退役名也要能翻成人话**(`channel_labels()` 把别名一并给出,API 的 `labels`
   字段,前端 `channelLabel()` 回落查它)——历史运行记录里写着的可能正是它,面板上
@@ -228,7 +252,11 @@
   或隔离坏推送决定是否更新。读取失败按稳定的会话 Msg 表名跨分片追溯 biz，
   必要时仅用同名线索保守阻止对应账号更新时间，不建立文章归属；新分片没有成功
   文章也能关联到旧分片。未知且无关联的失败不冻结其他账号。导出保留
-  `无正文,跳过` 明细协议供 CLI 生成 `no_body`，正文缺失不建议标记绿泡泡删除。
+  `无正文,跳过` 明细协议供 CLI 生成 `no_body`，正文缺失不建议标记绿泡泡删除；那份明细还要带
+  **身份**（`export_obsidian.py --report` 写的结构化 JSON，`cli._no_body_items` 优先读它），面板
+  据此点开原文、按 `cli articles drop` 把这一篇永久排除，见 `failure-drop.md`。
+  那条删除要带 `--link`:库里已经没有那一行时,**缺行不是排除凭据**,只有链接算得出跨通道也认的
+  那个身份。
   `is_wx_deleted` 的历史自动退休记录允许重新入库，用户删除及身份黑名单仍拦截。
 
 - **`collector/data` 和 `collector/.venv` 丢了就跑 `./collector/setup.sh`**。两者都在

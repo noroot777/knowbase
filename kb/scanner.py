@@ -187,15 +187,32 @@ def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
     return doc_from_text(text, md_path, src)
 
 
-def scan_all() -> Iterator[Doc]:
-    """遍历所有来源,产出 Doc。"""
-    for src in SOURCES:
-        if not src.root.is_dir():
+def iter_md(sources: list[Source] | None = None) -> Iterator[tuple[Source, Path]]:
+    """遍历该扫的那些 md 文件,**只给路径,不读正文**。
+
+    「哪些树要扫、树里跳过哪些子目录」只有这一份实现。拆出来是因为"枚举该扫
+    哪些文件"和"把文件读成 Document"是两件事:要枚举的人(本函数)不该为了拿
+    一个路径清单去读上万篇正文。目前只有 `scan_all` 过它。
+    """
+    for src in sources if sources is not None else SOURCES:
+        if not src.enabled or not src.root.is_dir():
             continue
         for md_path in sorted(src.root.rglob("*.md")):
             rel_parts = md_path.relative_to(src.root).parts
             if rel_parts and rel_parts[0] in src.skip_dirs:
                 continue
-            doc = _doc_from_file(md_path, src)
-            if doc is not None:
-                yield doc
+            yield src, md_path
+
+
+def scan_all() -> Iterator[Doc]:
+    """遍历所有来源,产出 Doc。停用的来源(`Source.enabled=False`)整棵跳过。
+
+    **跳过的代价要由 `store.remove_missing_documents` 接住**:这个函数的产出
+    同时是"哪些文件还活着"的唯一依据,不豁免的话停用一棵树等于宣布它底下的
+    文件全没了,库里那一批连 chunk、向量、标签一起被删掉(见 `config.Source`
+    的 `enabled` 那段)。
+    """
+    for src, md_path in iter_md():
+        doc = _doc_from_file(md_path, src)
+        if doc is not None:
+            yield doc

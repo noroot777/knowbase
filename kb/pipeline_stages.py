@@ -126,8 +126,21 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
     {"accounts": [...], "since_date": "YYYY-MM-DD", "until_date": "YYYY-MM-DD"}
     的区间补抓,accounts 为空 = 该来源的全部订阅目标。多来源同时抓时
     accounts 记在各自的 channels 项里(见 crawl_channels)。
+
+    **进来就在当日账本上开一轮**(`fetch_rounds.open_round`):「今天第几次抓取」
+    由抓取自己登记,不由后面哪个阶段的产出反推 —— 一次什么都没抓到的抓取也是
+    一次抓取,而只勾了索引的那种运行不是。
+
+    开轮还要告诉账本**这次运行后面跑不跑物化**:两种运行的账本行长得一样,而
+    一个的 0 条是确定的、另一个是「不可确认」(见 `fetch_rounds.open_round`)。
     """
+    from kb import fetch_rounds
+
     filters = crawl_filter or {}
+    planned = _state.get("planned_stages")
+    fetch_rounds.open_round(
+        fetch_rounds.round_key(),
+        materializes="export" in planned if isinstance(planned, list) else True)
 
     def _fetch(collector, scope: dict) -> None:
         _log(f"采集通道: {_channel_label(collector)}")
@@ -142,8 +155,23 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
 
 
 def _run_export(crawl_filter: dict | str | None = None) -> None:
-    """让采集器把它本地的内容落成 obs md。"""
-    _per_channel("export", crawl_filter, lambda collector, scope: collector.materialize())
+    """让采集器把它本地的内容落成 obs md。
+
+    **这一步的产出就是「这一轮抓取抓到了多少」,而且只认采集器自己交回来的那份
+    清单**(`materialize()` 的返回值,契约在 `kb.collectors`)。拿旁观者的视角
+    冒充生产者的成果错过两版(索引的"头一回进库" / 全 vault 路径差集),实测
+    形态在 `docs/decisions/daily.md`。**每个来源各记一次、记在自己的 `finally`
+    里**:后一个炸了不该抹掉前面那几个真落下来的文章,而炸掉的那个要留一笔
+    「不可确认」—— 它可能已经写了一半。
+    """
+    from kb import fetch_rounds
+
+    key = fetch_rounds.round_key()
+    # 先落一张空回执:成果从「确定的空集」起步,各来源的回执并进来。一个来源都
+    # 没选中时它就是最终结论(确定 0 条,不是不可确认)。
+    fetch_rounds.note_new(key, ())
+    _per_channel("export", crawl_filter,
+                 lambda collector, scope: fetch_rounds.note(key, collector.materialize))
 
 
 class _StopWhileWaiting(Exception):
@@ -231,6 +259,9 @@ def _index_pass() -> None:
                 _stage("index", "running", f"已索引 {new} 篇")
         removed = store.remove_missing_documents(conn, seen)
         conn.commit()
+        # **这里不替抓取记账。**「今天抓了多少」是物化那一步的产出,记在
+        # `_run_export`;索引看到的"头一回进库"混着上一轮抓回来还没索引的、手工
+        # 导入的和重建索引的,而且要等分批提交全过去才知道,中途断电就永久漏记。
 
         def _report(done: int, total: int) -> None:
             _stage("index", "running",
@@ -592,6 +623,8 @@ def _ingest_pass() -> tuple[int, int]:
                 save_extraction(conn, doc.path, pre)
             new += 1
         conn.commit()
+        # 同 `_index_pass`:条目化入库也不替抓取记账(这两棵还都是衍生树,
+        # 日报取材和抓取账本都把它们排除在外)。
         from kb.embedder import embed_pending_chunks
         return new, embed_pending_chunks(conn)
     finally:

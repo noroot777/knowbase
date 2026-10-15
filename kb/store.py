@@ -17,7 +17,7 @@ from pathlib import Path
 import jieba
 import sqlite_vec
 
-from kb.config import DATA_DIR, DB_PATH, EMBEDDING_DIM
+from kb.config import DATA_DIR, DB_PATH, EMBEDDING_DIM, SOURCES
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -105,7 +105,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
 -- (它确实报过),而残留的孤儿行是惰性的。
 CREATE TABLE IF NOT EXISTS daily_carried (
   path       TEXT NOT NULL,
-  day        TEXT NOT NULL,   -- 带走它的那一份日报的日期;'#seed' = 启用账本时一次性盖的章
+  day        TEXT NOT NULL,   -- 带走它的那一份日报的日期;'#seed' = 启用账本时一次性盖的章,
+                             -- '#drop' = 人工从队列里丢弃(见 kb/daily_carry.py 的 DROP_DAY)
   carried_at TEXT NOT NULL,
   PRIMARY KEY (path, day)
 );
@@ -573,9 +574,19 @@ def upsert_document(conn: sqlite3.Connection, doc, chunks, now: str) -> None:
 
 
 def remove_missing_documents(conn: sqlite3.Connection, alive_paths: set[str]) -> int:
-    """删掉 vault 里已不存在的文档(含级联的 chunk/tag/entity 和向量)。"""
-    rows = conn.execute("SELECT path FROM documents").fetchall()
-    dead = [r["path"] for r in rows if r["path"] not in alive_paths]
+    """删掉 vault 里已不存在的文档(含级联的 chunk/tag/entity 和向量)。
+
+    **停用来源(`config.Source.enabled=False`)的文档一律算存活。** 它们的树已经
+    不再被 `scanner.scan_all` 遍历,所以 `alive_paths` 里必然一条都没有 —— 不豁免
+    的话"停止收新内容"会在下一轮索引里顺手把库里那一批连 chunk、向量、标签一起
+    删掉,而面板上只多一个 removed 计数。停用是「不再往里加」,不是「把存量清掉」。
+    判据落在这里而不是三个调用方各写一遍(`pipeline_stages` / `cli` /
+    `scripts/feed_trim_history`):这是唯一的删除口,口径只该有一份。
+    """
+    off = {s.name for s in SOURCES if not s.enabled}
+    rows = conn.execute("SELECT path, source FROM documents").fetchall()
+    dead = [r["path"] for r in rows
+            if r["path"] not in alive_paths and r["source"] not in off]
     for p in dead:
         ids = [r["id"] for r in conn.execute(
             "SELECT id FROM chunks WHERE path=?", (p,)

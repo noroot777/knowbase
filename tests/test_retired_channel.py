@@ -36,7 +36,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb import collectors, daily_run, llm, pipeline  # noqa: E402
+from kb import collectors, daily_run, llm  # noqa: E402
 from kb.source_types import feed_types  # noqa: E402
 from tests.headless import probe_env, requires_headless, run_probe  # noqa: E402
 from kb.web import pipeline_api  # noqa: E402
@@ -120,26 +120,16 @@ class RegistryTests(_Sandbox):
 class ScopeTests(_Sandbox):
     """存量的「抓哪几个来源」配置要跟着别名表走,不能被当成不认识的通道丢掉。"""
 
-    def test_schedule_scope_keeps_wechat_under_its_new_name(self):
-        path = self.dir / "schedule.json"
-        path.write_text(json.dumps({"enabled": True, "time": "07:30",
-                                    "channels": [RETIRED, "rss"]}), encoding="utf-8")
-        with patch.object(pipeline, "_SCHED_FILE", path):
-            loaded = pipeline.load_schedule()
-            self.assertEqual([LIVE, "rss"], loaded["channels"])
-            # 老的读取方只认单个 channel,它得是现在那条而不是盘上那个旧名字
-            self.assertEqual(LIVE, loaded["channel"])
-            # 存进去也一样:旧名字落盘成新的,否则定时那一轮会绕开它去跑一个不存在的通道
-            pipeline.save_schedule(True, "07:30", [RETIRED, "rss"])
-            self.assertEqual([LIVE, "rss"], json.loads(
-                path.read_text(encoding="utf-8"))["channels"])
-
-    def test_schedule_read_survives_a_channel_that_no_longer_exists(self):
-        path = self.dir / "schedule.json"
-        path.write_text(json.dumps({"enabled": True, "time": "07:30",
+    def test_daily_scope_drops_only_the_channel_that_no_longer_exists(self):
+        # 不认识的那条丢掉、**剩下的留着**,不许整份名单回落到默认范围(那会把
+        # 用户只同步 RSS 的设置静默换成全部来源)。一个都没剩才补默认,那一条钉在
+        # tests/test_daily_report.py 的 test_unknown_channels_fall_back_to_defaults。
+        # 原来这条钉的是页头那颗「定时同步」(它连同接口一起删了)。
+        path = self.dir / "daily.json"
+        path.write_text(json.dumps({"enabled": True, "time": "08:00",
                                     "channels": ["没这个通道", "rss"]}), encoding="utf-8")
-        with patch.object(pipeline, "_SCHED_FILE", path):
-            self.assertEqual(["rss"], pipeline.load_schedule()["channels"])
+        with patch.object(daily_run, "SETTINGS_FILE", path):
+            self.assertEqual(["rss"], daily_run.load_settings()["channels"])
 
     def test_daily_scope_keeps_wechat_under_its_new_name(self):
         path = self.dir / "daily.json"

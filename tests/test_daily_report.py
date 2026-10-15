@@ -424,6 +424,18 @@ class DailyScheduleTests(unittest.TestCase):
                                          'channels': ['gone']}))
         self.assertEqual(['wechat_local', 'rss'], daily_run.load_settings()['channels'])
 
+    def test_an_overdue_occurrence_still_runs_once_after_a_restart(self):
+        # 刚起来的进程手里什么都没有(账本跟着配置文件走,换库即作废),到期判据
+        # 只能看盘上那份 —— 过了点才起来的话这一轮照旧要补上,而且**只补一次**。
+        # 原来这条钉在页头那颗「定时同步」上(它连同接口一起删了),同一个不变量在
+        # 日报这一侧照旧成立,所以判据搬到这里。
+        daily_run.save_settings(True, '18:00', ['rss'])
+        self.assertFalse(daily_run.tick())
+        self.clock.now.return_value = datetime(2026, 9, 28, 18, 5)
+        self.assertTrue(daily_run.tick())
+        self.assertFalse(daily_run.tick())       # 补一次就够,别连着起
+        self.start.assert_called_once()
+
     def test_disabled_schedule_never_fires(self):
         daily_run.save_settings(False, '07:30', ['rss'])
         self.clock.now.return_value = datetime(2026, 9, 29, 9, 0)

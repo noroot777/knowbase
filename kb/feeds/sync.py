@@ -428,6 +428,11 @@ def _new_failures(conn, queue: str, cond: str, args: list, extra: list,
 
 def export(kind: str, hold_untranslated: bool = False,
            translated: dict | None = None, fetched: dict | None = None):
+    """把这个来源待导出的条目写成 vault md。
+
+    返回这一轮真写下去的那几篇,每一篇带着身份(`frozenset[kb.collectors.Fetched]`,
+    契约见 `kb.collectors`)。注解不写死那个类型是为了不在模块顶层 import 它。
+    """
     # 整段在维护锁里:导出是「选出待导出的行 → 逐篇写 vault」,存量清理是
     # 「删 feeds.db 行 → 删 vault 文件」。不互斥的话清理删掉行、导出随后按
     # 自己那份快照把文件写回去,而 feed_items 里已经没有这一条——vault 里从此
@@ -547,6 +552,11 @@ def _export(kind: str, hold_untranslated: bool = False,
     args += fetch_args
     with reg.db() as c:
         rows = c.execute(f'SELECT * {base}', args).fetchall()
+    # written:这一轮**新落下**的那几篇,每一篇带着身份(`Fetched`:稳定内容身份
+    # + 发现它的那一次抓取 + 这次写的路径),回执交给上层记进当日抓取账本
+    # (口径见 `kb.collectors` 的 materialize 契约)。判据见下面 `fresh` 那一行。
+    from kb.collectors import Fetched
+    written: set[Fetched] = set()
     errors, done = [], 0
     root = VAULT_ROOT / 'source' / kind
     root.mkdir(parents=True, exist_ok=True)
@@ -594,6 +604,14 @@ def _export(kind: str, hold_untranslated: bool = False,
         # HTML safety belongs to the reader (textContent / DOMPurify).
         text += '# ' + title + '\n' + notice + '\n' + body + '\n'
         temp = None
+        # 「头一回落进 vault」问的是 `feed_items.path`(首次导出成功时写上,之后
+        # 没有任何地方清它),**不是磁盘上此刻有没有这个文件**。导出队列是
+        # `exported_hash<>content_hash`,正文补抓、译文回写都会让老文章重新写一遍
+        # 同一个路径,算进去同一篇会连着好几天被报成"刚抓到"。按文件在不在判还会
+        # 反过来错一次:存量清理删过的那篇再导出时会被当成新抓到的。
+        # `exported_hash` 也当不了这个判据 —— `translate._save` 会故意把它清空,
+        # 好让导出阶段重写那篇 md(见 kb/feeds/translate.py)。
+        fresh = not item['path']
         try:
             with tempfile.NamedTemporaryFile('w', dir=root, suffix='.tmp', encoding='utf-8', delete=False) as f:
                 temp = Path(f.name)
@@ -601,6 +619,9 @@ def _export(kind: str, hold_untranslated: bool = False,
             os.replace(temp, path)
             with reg.db() as c:
                 c.execute('UPDATE feed_items SET exported_hash=content_hash,path=? WHERE key=?', (rel,item['key']))
+            if fresh:
+                written.add(Fetched(f'{kind}:{item["key"]}',
+                                    str(item['fetch_round'] or ''), rel))
             done += 1
         except Exception as e:
             errors.append({'title': item['title'], 'reason': str(e)[:300]})
@@ -672,3 +693,6 @@ def _export(kind: str, hold_untranslated: bool = False,
     # 日志的话用户看到的是一句没有信息的「1 条原文抓取失败」,点进去什么都没有。
     fails += [] if not fetch_bad else (fetched or {}).get('errors') or []
     _stage('export', 'error' if errors or bad or fetch_bad else 'ok', note, failures=fails)
+    # 成果回执。**判红不影响它**:翻译失败、补抓失败说的是「有内容这一轮没能入库」,
+    # 而已经落盘的那几篇是真落盘了,它们正是「这次抓取抓了多少」要数的东西。
+    return frozenset(written)
