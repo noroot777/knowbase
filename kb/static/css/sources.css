@@ -6,15 +6,8 @@
 .subs-switch button:hover { border-color:var(--brand); }
 .subs-switch button.on { background:var(--brand); border-color:var(--brand); color:var(--card); }
 .subs-switch .icon { width:15px; height:15px; }
-/* 定时同步是整页一份的设置(五类来源都归它管),所以挂在页名旁边而不是某个来源
-   的动作区里;当前状态写在按钮上,不点开也看得见。 */
 .subs-page-heading { flex-wrap:wrap; }
 .subs-title { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
-.subs-sched { display:inline-flex; align-items:center; gap:7px; padding:7px 14px; font-size:13px;
-  background:var(--card); color:var(--ink-2); border:1px solid var(--line); border-radius:999px; }
-.subs-sched:hover { border-color:var(--brand); color:var(--ink); }
-.subs-sched.is-on { color:var(--brand-deep); border-color:var(--brand-soft); background:var(--brand-tint); }
-.subs-sched .icon { width:15px; height:15px; }
 /* 公众号视图:订阅管理卡(搜索添加 + 已订阅列表,原来在弹窗里) */
 .subs-manage-card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px 24px; }
 .subs-manage-title { font-size:15px; font-weight:650; margin-bottom:12px; }

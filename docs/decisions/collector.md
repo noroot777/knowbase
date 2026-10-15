@@ -11,7 +11,7 @@
   携带 `channel`,不修改进程全局环境。
 - **退役的通道名要留成别名,不能当「不认识的来源」丢掉**(`_RETIRED_CHANNELS`
   = `{"wechat_oa": "wechat_local"}`,`resolve_channel` / `known_channels` 是唯一口径)—— 存量
-  `schedule.json` / `daily.json` 里写的正是旧名字,丢掉的话**公众号从此不再定时同步、不再进日报,而面
+  `daily.json` 里写的正是旧名字,丢掉的话**公众号从此不再定时同步、不再进日报,而面
   板上完全看不出少了什么**。配套:①退役名也要能翻成人话(`channel_labels()`,API 的 `labels`);②别名
   表要发到浏览器(`/api/pipeline/channels` 的 `aliases`),前端不许写死 `wechat_oa`。
 - **「我的订阅」的公众号视图不信 `kb-sync-channel` 那份全局选择**(`sources.js` 的
@@ -75,8 +75,8 @@
   失败重试照旧显式携带 `channel`,不修改进程全局环境。
 - **退役的通道名要留成别名,不能当「不认识的来源」丢掉**(`_RETIRED_CHANNELS`
   = `{"wechat_oa": "wechat_local"}`,`resolve_channel` / `known_channels` 是唯一口径,
-  `pipeline.load_schedule`、`daily_run.load_settings`/`save_settings`/`start` 都过它)。
-  存量 `schedule.json` / `daily.json` 里写着的正是旧名字,丢掉的话**公众号从此不再
+  `daily_run.load_settings`/`save_settings`/`start` 都过它)。
+  存量 `daily.json` 里写着的正是旧名字,丢掉的话**公众号从此不再
   定时同步、不再进日报,而面板上完全看不出少了什么**。两条配套的:
   ①**退役名也要能翻成人话**(`channel_labels()` 把别名一并给出,API 的 `labels`
   字段,前端 `channelLabel()` 回落查它)——历史运行记录里写着的可能正是它,面板上

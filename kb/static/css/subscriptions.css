@@ -4,7 +4,6 @@ body.subs-mode #wechat-welcome { flex:none; margin:8px 12px; padding:8px 12px; }
 .subs-mode .subs-page-heading { flex:none; align-items:center; gap:8px 16px; margin:0; padding:8px 16px; border-bottom:1px solid var(--line); }
 .subs-mode .subs-title { gap:10px; flex-wrap:nowrap; }
 .subs-mode .subs-title h1 { font-size:16px; white-space:nowrap; }
-.subs-mode .subs-sched { padding:6px 10px; font-size:12px; white-space:nowrap; }
 .subs-mode .subs-switch { gap:6px; min-width:0; max-width:100%; }
 .subs-mode .subs-switch button { padding:6px 12px; font-size:12px; min-height:34px; }
 .subs-mode #subs-error { flex:none; margin:8px 12px; }

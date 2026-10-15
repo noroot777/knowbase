@@ -16,7 +16,7 @@ async page => {
   let sourceCount = 0, pendingCount = 0;
   let holdB = false, releaseB = null, accountFail = false, startFail = false;
   let holdAcct = false; const heldAcct = [], acctCalls = {};
-  let holdStart = false, releaseStart = null, scheduleFail = false;
+  let holdStart = false, releaseStart = null;
   let holdChannels = false, releaseChannels = null, channelFail = false;
   let clockInstalled = false;
   const accounts = {a:['公众号甲','公众号乙','公众号丙 "<测试>'],b:['另一通道甲','另一通道乙']};
@@ -65,7 +65,6 @@ async page => {
       state={...state,running:true,run_kind:'retry',planned_stages:['extract'],finished_at:'',stages:retryStages(['extract'])};
       state.stages.extract={status:'running',detail:'重试提取'};return reply(route,{ok:true,plan:'extract'});
     }
-    if (path === '/api/pipeline/schedule' && request.method()==='POST') return reply(route,scheduleFail?{detail:'测试保存失败'}:request.postDataJSON(),scheduleFail?500:200);
     if (path === '/api/pipeline/channels' && holdChannels) {
       releaseChannels = () => reply(route,{default:'a',channels:[{id:'a',label:'凭证通道'},{id:'b',label:'本机通道'}]});
       return;
@@ -73,7 +72,6 @@ async page => {
     if (path === '/api/pipeline/channels' && channelFail) return reply(route,{detail:'测试通道读取失败'},503);
     const fixtures = {
       '/api/pipeline/channels':{default:'a',channels:[{id:'a',label:'凭证通道'},{id:'b',label:'本机通道'}]},
-      '/api/pipeline/schedule':{enabled:false,time:'07:30',channel:'a'},
       '/api/sources/targets':{manageable:false},
       // 「我的订阅」页的来源切换按这个目录建;公众号视图是来源连接卡现在的家
       '/api/intake/modules':{modules:[{id:'wechat',label:'公众号',description:'测试来源',channels:['a','b'],manager:'wechat',icon:'chat'}]},
@@ -321,21 +319,6 @@ async page => {
     await page.locator('#pipe-retry').click();await page.waitForFunction(()=>!pipeAction && pipeSnapshot.running);
     check('重试有运行反馈且不重复启动',countWrites('/api/pipeline/retry-failed')===1 && await page.locator('#pipe-run').isDisabled());
     finish();await refresh();
-    // 每日定时同步搬进了「我的订阅」页
-    await page.locator('#tab-subs').click();
-    const beforeSchedule=countWrites('/api/pipeline/schedule');
-    await page.locator('#sched-on').check();await page.locator('#sched-time').fill('08:45');
-    await page.locator('#sched-channels').getByRole('checkbox',{name:'本机通道',exact:true}).check();
-    check('修改定时字段不会隐式保存',countWrites('/api/pipeline/schedule')===beforeSchedule && (await page.locator('#sched-msg').textContent()).includes('未保存'));
-    scheduleFail=true;await page.locator('#sched-save').click();await page.waitForFunction(()=>!schedSaving);
-    check('定时保存失败保留编辑并允许重试',(await page.locator('#sched-msg').textContent()).includes('未保存') && await page.locator('#sched-time').inputValue()==='08:45' && !await page.locator('#sched-save').isDisabled());
-    scheduleFail=false;await page.locator('#sched-save').click();await page.waitForFunction(()=>!schedSaving);
-    check('定时整组设置一次保存并带上多个来源',JSON.stringify(writes.filter(w=>w.path==='/api/pipeline/schedule').at(-1).body)===JSON.stringify({enabled:true,time:'08:45',channels:['a','b']}) && await page.locator('#sched-save').isDisabled());
-    await page.locator('#sched-channels').getByRole('checkbox',{name:'凭证通道',exact:true}).uncheck();
-    await page.locator('#sched-channels').getByRole('checkbox',{name:'本机通道',exact:true}).uncheck();
-    await page.locator('#sched-save').click();
-    check('定时不允许一个来源都不选',(await page.locator('#sched-msg').textContent()).includes('至少选择一个') && countWrites('/api/pipeline/schedule')===beforeSchedule+2);
-    await page.locator('#tab-pipe').click();
     await page.setViewportSize({width:375,height:812});
     check('手机同步页面无横向溢出',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
     check('同一同步任务提示不堆叠',await page.locator('[data-toast-key=pipeline]').count()<=1);

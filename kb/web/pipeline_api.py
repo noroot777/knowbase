@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
-"""数据管道 API:状态、手动触发、失败重试、定时同步配置。
+"""数据管道 API:状态、手动触发、失败重试。
 
 真正的阶段实现在 kb.pipeline;这里只是它的 HTTP 外壳。
+
+**定时同步的配置不在这里了**:只剩日报那一条(`/api/daily/settings`)。原来
+页头那颗「定时同步」的 `/api/pipeline/schedule` 连同它的实现一起删了,理由在
+`docs/decisions/sync-schedule.md`。
 """
 
 from __future__ import annotations
@@ -12,8 +16,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from kb import pipeline as pl
-from kb.config import ScheduleUnreadable
-from kb.web.common import unreadable_config
 from kb.collectors import (
     CollectorError,
     active_collector,
@@ -42,35 +44,6 @@ def pipeline_channels():
     """
     return {"channels": collection_channels(), "default": active_collector().name,
             "labels": channel_labels(), "aliases": retired_channels()}
-
-
-class ScheduleRequest(BaseModel):
-    enabled: bool
-    time: str = "07:30"
-    channel: str | None = None
-    channels: list[str] | None = None
-
-
-@router.get("/api/pipeline/schedule")
-def pipeline_schedule():
-    try:
-        return pl.load_schedule()
-    except ScheduleUnreadable as e:
-        raise unreadable_config(e) from None
-
-
-@router.post("/api/pipeline/schedule")
-def pipeline_schedule_set(body: ScheduleRequest):
-    # channels 是新写法(可以定几个来源一起同步),channel 是老的单个写法
-    channels = body.channels if body.channels is not None else body.channel
-    try:
-        return pl.save_schedule(body.enabled, body.time, channels)
-    except ScheduleUnreadable as e:
-        raise unreadable_config(e) from None
-    except OSError as e:
-        raise HTTPException(503, f'没能保存定时设置({e})。原来那份还在。') from None
-    except ValueError as e:
-        raise HTTPException(400, str(e))
 
 
 @router.get("/api/pipeline/status")

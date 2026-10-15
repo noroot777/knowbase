@@ -96,25 +96,24 @@ watchSchedules(() => renderSourceScheduleNote());
 // 共享层是**页内**的:另一份已打开的页面(或另一台机器)在那边保存了,这边收
 // 不到通知,而这一页上别的几句说明都会在自己被打开时重读,只有这一行是停在屏幕
 // 上不动的。所以**回到这一页就重读一次**,别把「我没收到通知」当成「服务器那份
-// 没变」。常规来源轮询不带这一读(两条定时一轮两个请求,15 秒一次不值当)。
+// 没变」。常规来源轮询不带这一读(定时一天也改不了一次,15 秒一问不值当)。
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && sourceActive() && schedules()) loadSchedules();
 });
-// 「这一类来源什么时候会自动同步」。**要问遍所有还在生效的定时**,不是只问日报:
-// 页头那颗「定时同步」(pipeline_schedule)按仓库主人的要求暂留着,它照样会到点跑
-// 全流程。只看日报的话,B 开着而 A 关着时这里会写「目前不会自动同步」,而页面上方
-// 明明写着「定时同步 · 每天 07:30」—— 两句话当场打架。
+// 「这一类来源什么时候会自动同步」。**要问遍所有还在生效的定时**,现在只剩日报
+// 这一条(页头那颗「定时同步」连同它的接口一起删了,见
+// `docs/decisions/sync-schedule.md`)。**再加一条定时就要在这里加一问** —— 漏问的
+// 后果是这里写「目前不会自动同步」而那条定时照样到点跑,两句话当场打架;所以这个
+// 函数照旧返回**一个列表**,不是一个真假。
 //
 // 配置本身由 `schedules.js` 那一层持有(含包形差异、三态和代次),这里只读它。
 // 这一类来源会被哪几条定时带上。返回 [{时刻}],空数组 = 没有一条会带上它。
 function sourceScheduleHits(kind) {
-  const { daily, pipe } = schedules() || {};
+  const { daily } = schedules() || {};
   const hits = [];
   // 日报那一轮:定时开着、勾了「生成前先同步」、而且这一类在它的同步范围里
   if (daily?.enabled && daily.sync !== false && (daily.channels || []).includes(kind))
     hits.push({ time: daily.time, what: '日报' });
-  if (pipe?.enabled && (pipe.channels || [pipe.channel]).includes(kind))
-    hits.push({ time: pipe.time, what: '页头的定时同步' });
   return hits;
 }
 function renderSourceScheduleNote() {
@@ -139,7 +138,7 @@ function renderSourceScheduleNote() {
       + `自动同步。${manual}`;
     return;
   }
-  // 两条都读到了、一条都没带上它。**把原因说出来**,否则用户不知道该去哪儿改。
+  // 每条都读到了、一条都没带上它。**把原因说出来**,否则用户不知道该去哪儿改。
   box.textContent = (!daily.enabled ? '日报定时未启用，这一类来源目前不会自动同步。'
     : daily.sync === false ? `日报定时每天 ${daily.time} 生成，但没开「生成前先同步」。`
     : '这一类来源不在日报的同步范围里，目前不会自动同步。') + manual;

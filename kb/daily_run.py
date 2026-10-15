@@ -196,8 +196,8 @@ def _write_settings(**changes) -> None:
         try:
             write_config_file(SETTINGS_FILE, cur)
         except OSError as e:
-            # 同 `pipeline._mark_fired`:这是定时自己的回写(last_fired /
-            # next_run / 失败计数),抛出去会把这一跳算成"出错",而"今天到此为止"
+            # 这是定时自己的回写(last_fired / next_run / 失败计数),
+            # 抛出去会把这一跳算成"出错",而"今天到此为止"
             # 已经记在进程里了。盘上那份原封不动,说一句就够。
             announce_config_issue('日报定时设置',
                                   f'定时状态没能写进磁盘({e});本进程内照常,'

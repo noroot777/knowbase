@@ -60,7 +60,6 @@ def main():
                 "facets": {"sources": [], "accounts": [], "topics": [], "entities": []},
                 "projects": {"tools": [], "kinds": {}, "total_entries": 0, "topics": []},
                 "favorites": {"doc_paths": [], "favorites": [], "counts": {"inbox": 0}},
-                "pipeline/schedule": {"enabled": False, "time": "07:30"},
                 "conversations": {"conversations": []},
                 "wechat/setup": {"state": "unchecked", "running": False,
                                   "message": "隔离验证环境", "provider_ready": True},

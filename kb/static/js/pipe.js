@@ -65,6 +65,21 @@ async function refreshPipe(withPending = false) {
   pipeStatusAbort = new AbortController();
   const request = (async () => {
     try {
+      // **来源名要靠那份目录,所以它的依赖写在这里。** 面板上「上次来源」「这一轮
+      // 在同步哪几个来源」都过 `channelLabel()`,目录没落地时它只能念回裸 id
+      // (`wechat_local`)。原来这份目录是页头那颗「定时同步」在页面加载时顺带读进
+      // 来的 —— 那颗按钮连同接口一起删了,于是同步中心打开就显示裸 id,直到用户
+      // 点开「新建同步」才补上(实测:退役通道那组探针当场红在「上次来源不是一个
+      // 裸 id」和存量选择没改道上)。目录一个进程只读一次(`loadPipeChannels` 自带
+      // 守卫),所以这里**不是**每轮轮询多一个请求。
+      //
+      // **并排起跑,而且不等它。** `Promise.all` 那一版会把状态压在目录后面:目录
+      // 慢或读不到时(`pipeJson` 默认等 15 秒)这一片什么都不画,而状态正是用来
+      // 发现"后台已经在跑了"的 —— 一份依赖的失败不许把主事实一起拖下去(同
+      // `docs/decisions/sync-schedule.md` 里目录与配置各自说的那条)。目录晚到就
+      // 补画一次,`renderPipeState` 拿的是当时最新那份快照,重画一遍无副作用。
+      loadPipeChannels().then(() => { if (pipeSnapshot) renderPipeState(pipeSnapshot); })
+        .catch(() => {});
       const s = await pipeJson('/api/pipeline/status?source=false', { signal: pipeStatusAbort.signal });
       if (version !== pipeStatusVersion) return;
       const wasRunning = pipeSnapshot?.running;

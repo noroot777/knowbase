@@ -1,24 +1,26 @@
 // 定时配置的共享状态层。**界面上那几句说明只做派生展示,不各自缓存一份。**
 //
-// 原来「这一类来源什么时候会自动同步」在 source_forms.js 里自己缓存一份:页头那颗
-// 「定时同步」保存成功只更新页头按钮,这份缓存既不失效、常规来源轮询也不重读它 ——
-// 于是同一页上,页头写着「定时同步 · 每天 07:30」而右侧说明写着「目前不会自动
-// 同步」;反过来关掉再保存,右侧继续承诺每天同步。留在页面上等它自己刷也不会好,
-// 只有整页刷新才对得上。
+// 原来「这一类来源什么时候会自动同步」在 source_forms.js 里自己缓存一份:另一处
+// 保存成功之后这份缓存既不失效、常规来源轮询也不重读它 —— 于是同一页上两句话各说
+// 一套(一处写「每天 07:30」、另一处写「目前不会自动同步」)。留在页面上等它自己刷
+// 也不会好,只有整页刷新才对得上。
 //
 // 所以口径收在这里:**谁保存成功都把新配置交到这一层**(`schedulesSaved`),这一层
 // 负责通知全部派生展示(`watchSchedules`)。**读取走另一道门**(`schedulesRead`,代次
-// 占在发请求之前):在途的旧回包不许把新配置倒退成旧配置。代次按**每条定时各自**算。
+// 占在发请求之前):在途的旧回包不许把新配置倒退成旧配置。
 //
-// 两条定时的包形不一样,解包也只在这里做一次:`/api/daily/settings` 的 GET 外面套
-// 了一层 `{settings, channels, default_channels}`(外层那个 channels 是可选来源目录,
-// 不是待同步名单),它的 POST 回的却是扁的;`/api/pipeline/schedule` 两头都是扁的。
-// 把外层当设置对象读的话 `enabled` 永远取不到,开着的定时会被一律说成「未启用」。
+// **定时只剩日报这一条了**(页头那颗「定时同步」连同它的接口一起删了,见
+// `docs/decisions/sync-schedule.md`),但这一层**按条记**的形状原样留着:表单一处、
+// 派生展示若干,代次、三态、解包这几件事一条也省不掉;再加一条定时时也不用重接。
+// 包形的差异就在这里解一次:`/api/daily/settings` 的 GET 外面套了一层
+// `{settings, channels, default_channels}`(外层那个 channels 是可选来源目录,不是
+// 待同步名单),它的 POST 回的却是扁的。把外层当设置对象读的话 `enabled` 永远取不
+// 到,开着的定时会被一律说成「未启用」。
 
 // null = 还没读过(别替它报"没开");每条的 null = 这条读不到,也不是"没开"。
 let schedCache = null;
-// 代次按条算:两条各自独立,一条的新读取/保存不许把另一条的在途回包连带作废。
-const schedSeq = { daily: 0, pipe: 0 };
+// 代次按条算:一条的新读取/保存不许把另一条的在途回包连带作废。
+const schedSeq = { daily: 0 };
 const schedWatchers = [];
 
 /** 订阅定时配置的变化。注册时不立即回调 —— 调用方自己先画一次当前值。 */
@@ -30,10 +32,8 @@ function schedules() { return schedCache; }
 function schedulesApply(next) {
   schedCache = {
     daily: next.daily || null,
-    pipe: next.pipe || null,
-    // 读不到 ≠ 没开。只有两条都读到了,派生展示才敢说「不会自动同步」。
-    unknown: [...(next.daily ? [] : ['日报']),
-              ...(next.pipe ? [] : ['页头的定时同步'])],
+    // 读不到 ≠ 没开。每一条都读到了,派生展示才敢说「不会自动同步」。
+    unknown: next.daily ? [] : ['日报'],
   };
   // 一个派生展示抛了不该带走别的(面板上那几句互不相干)。
   for (const fn of schedWatchers) { try { fn(schedCache); } catch (e) { console.error(e); } }
@@ -52,7 +52,7 @@ function schedulesSaved(which, settings) {
 /**
  * **要去读了:先占代次,回包落地时交给 `accept` 结账。**
  *
- * `accept({daily?, pipe?})`(读失败就给 null)做两件事,**而且只做一次**:
+ * `accept({daily?})`(读失败就给 null)做两件事,**而且只做一次**:
  * ① 按代次决定这趟回包要不要写进共享事实 —— 被**更晚的读取**或**期间的保存**
  *    顶掉就不写(保存也推同一个代次;按条算,一条被顶掉不许连带作废另一条);
  * ② 返回**当前已确认的事实**(只含这趟要的那几条),可能是别人刚写进去的那一份。
@@ -94,7 +94,7 @@ function schedulesRead(...keys) {
 }
 
 /**
- * 一张定时表单这一趟读取该落到哪个**终态**。判据收在这里,两张表单共用。
+ * 一张定时表单这一趟读取该落到哪个**终态**。判据收在这里。
  *
  * **配置可用 ≠ 这张表单的依赖都可用。** 它们除了定时本身还要一份「可勾选的来源
  * 目录」,而目录和设置是**两趟请求、各自会失败**。只看配置就进"已加载"的后果(第 4 轮
@@ -117,14 +117,13 @@ function scheduleSettle({ fact, deps = [], saving, dirty }) {
   return gap ? { state: 'unknown', missing: gap.what } : { state: 'ready' };
 }
 
-/** 两条定时各读一次。读不到的那条留 null(= 不知道),不当成"没开"。 */
+/** 每条定时各读一次。读不到的那条留 null(= 不知道),不当成"没开"。 */
 async function loadSchedules() {
-  const accept = schedulesRead('daily', 'pipe');
+  const accept = schedulesRead('daily');
   const ask = async (url, pick) => { try { return pick(await pipeJson(url)); } catch { return null; } };
-  const [daily, pipe] = await Promise.all([
+  const [daily] = await Promise.all([
     ask('/api/daily/settings', d => d.settings),
-    ask('/api/pipeline/schedule', d => d),
   ]);
-  accept({ daily, pipe });
+  accept({ daily });
   return schedCache;
 }
