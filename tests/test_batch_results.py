@@ -2,8 +2,8 @@
 """管道运行结果的发布与保全:一轮日报 N+1 次运行,而「最近一次运行」只有一个位子。
 
 从 `test_daily_two_stage.py` 拆出来 —— 那份加上这一组会超过单文件 700 行上限。
-编排(谁跑几次、红算在谁头上)、范围口径仍在那一份里;摆盘共用
-`tests/pipeline_round_fixture.py`。
+编排(谁跑几次、红算在谁头上)、范围口径仍在那一份里,历史里**一条业务结果占几行、
+谁有资格顶掉谁**在 `test_history_rows.py`;摆盘共用 `tests/pipeline_round_fixture.py`。
 """
 import json
 import unittest
@@ -560,63 +560,6 @@ class DailyBatchResultTests(RoundStore):
         ok, why = pipeline.start_retry_failed()
         self.assertFalse(ok, why)
         self.assertIn('重试范围没能留档', why)
-
-    def test_both_recoverable_copies_carry_the_same_business_result(self):
-        """两份可恢复副本必须是**同一个业务结果**的两个投影。
-
-        状态文件存整批、历史存末个子轮,而两者**共用同一个 run id** —— 于是同一个
-        身份下躺着两种含义的结果:一份抓取 error、一份抓取「未选择」。后果有两层:
-        正常保存时面板说"失败"、点开同身份那条历史却写着"已完成";汇总那次写入
-        失败再重启,恢复按完成序号挑中历史那条,日报里那条 RSS 抓取失败当场变成
-        「同步已完成」、连「重试失败项」都没有(那一档钉在
-        `test_a_transient_write_failure_cannot_demote_the_batch` 的重启那一段)。
-        所以这里钉的是**正常保存**这条路:两份的计划、阶段结论必须一致,而且
-        **一轮日报只占一条历史** —— 整批那一份顶掉这一批前几轮各自留下的那条
-        (顶掉不丢内容:整批是子轮的并集)。
-        """
-        from kb import pipeline
-        batch = pb.open_batch()
-        self.addCleanup(pb.close_batch)
-        finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
-                     results={'crawl': {
-                         'status': 'error', 'detail': '失败 1 个',
-                         'failures': [{'title': '某订阅', 'reason': '连不上'}]}})
-        self.assertEqual(['run-1'], [r['run_id'] for r in pipeline.load_history()])
-        finish_round(['index', 'extract'], None, batch, run_id='run-2',
-                     started='2026-10-14 09:30:00')
-        disk = json.loads(ps._STATE_FILE.read_text(encoding='utf-8'))
-        rows = pipeline.load_history()
-        self.assertEqual(['run-2'], [r['run_id'] for r in rows], '一轮日报占了两条历史')
-        for name, got in (('盘上那份', disk), ('历史那条', rows[0])):
-            with self.subTest(name):
-                self.assertEqual(['crawl', 'export', 'index', 'extract'],
-                                 got['planned_stages'])
-                self.assertEqual('error', got['stages']['crawl']['status'])
-                self.assertEqual(['某订阅'],
-                                 [f['title'] for f in got['stages']['crawl']['failures']])
-
-    def test_a_refused_batch_leaves_the_earlier_rounds_their_own_history_row(self):
-        """反过来钉一边:**没资格发布**那一档写的是子轮自己那份,前几轮那几条不许顶。
-
-        顶掉的前提是"整批那一份已经存进去了、它是子轮的并集"。被更新的一轮接替时
-        盘上和历史里存的都只是当前子轮,这时把前几轮那条删掉就是**真的丢数据** ——
-        那几条是它们唯一的副本。
-        """
-        from kb import pipeline
-        batch = pb.open_batch()
-        self.addCleanup(pb.close_batch)
-        finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
-                     results={'crawl': {'status': 'error', 'detail': '失败 1 个'}})
-        # 期间用户自己点了一轮同步(不带批次身份),它成了最新那一轮
-        finish_round(['index'], None, '', run_id='run-manual',
-                     started='2026-10-14 10:00:00')
-        finish_round(['index', 'extract'], None, batch, run_id='run-2',
-                     started='2026-10-14 10:10:00')
-        self.assertIn('run-manual', pb.close_batch())
-        rows = pipeline.load_history()
-        self.assertEqual(['run-2', 'run-manual', 'run-1'], [r['run_id'] for r in rows])
-        self.assertEqual('error', rows[-1]['stages']['crawl']['status'],
-                         '第一轮那条抓取失败被顶掉了')
 
     def test_a_later_successful_publish_clears_the_warning(self):
         """中间一轮写失败、后面写成功了,就不许还挂着「没写进」。

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """管道结果那几组回归共用的摆盘:摆一轮运行 + **走真的收尾**。
 
-两个文件都要用它(日报两段式编排那一组、结果发布与保全那一组),各写一份的话
-两边的前提会各漂各的。背景见 `tests/test_batch_results.py` 的类注释。
+好几组都要用它(日报两段式编排、结果的发布与保全、历史那几行谁顶谁),各写一份
+的话各组的前提会各漂各的。背景见 `tests/test_batch_results.py` 的类注释。
 """
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ from kb import pipeline_state as ps
 # `setattr` 到**定义它的那个模块**上 —— 落到另一个模块只会在那边挂一个没人读的
 # 同名属性,还原看着做了、其实一格都没还回去。
 _PROCESS_GLOBALS = (
-    (pb, ('_aggregate', '_aggregate_file', '_last_settled', '_last_settled_file')),
+    (pb, ('_aggregate', '_aggregate_file', '_covered',
+          '_last_settled', '_last_settled_file')),
     (ps, ('_persist_error', '_restore_gap', '_restored', '_seq_hwm')),
 )
 
@@ -105,6 +106,7 @@ class RoundStore(unittest.TestCase):
         `pipeline_state._latest_locked` / `_restore_once`)。
         """
         for mod, name, value in ((pb, '_aggregate', None), (pb, '_aggregate_file', None),
+                                 (pb, '_covered', frozenset()),
                                  (pb, '_last_settled', ''), (pb, '_last_settled_file', None),
                                  (ps, '_restored', ''), (ps, '_restore_gap', ''),
                                  (ps, '_persist_error', '')):

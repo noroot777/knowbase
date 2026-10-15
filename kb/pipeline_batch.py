@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from copy import deepcopy
 
 from kb import pipeline_state as ps
@@ -40,27 +41,50 @@ _aggregate: dict | None = None
 # 它是**某一个**状态文件的汇总。`_STATE_FILE` 被改指向别处(切数据目录、测试打桩)
 # 时它说的不是同一个库,一律作废,改认 `_state` / 磁盘那一份。
 _aggregate_file = None
+# 这一份权威**实际合并了哪几轮**。**「权威位上有东西」证明不了「它覆盖了整批」** ——
+# 单轮写失败时躺在这儿的是那一轮自己的快照(见 `_save_own`),它一轮都没合并。谁被它
+# 合并进去了只有发布那一刻知道,所以在那一刻一并记下,不让下游去猜。
+_covered: frozenset[str] = frozenset()
 
 
-def _remember_aggregate(payload: dict | None) -> None:
-    """记下(或清掉)这一批的汇总。**独立的一轮收尾时要清** —— 不清的话它比
-    `_state` 旧却还当着权威,面板和重试会一起退回到那一批的结论。"""
-    global _aggregate, _aggregate_file
+def _remember_aggregate(payload: dict | None, covers: Iterable[str] = ()) -> None:
+    """记下(或清掉)这一批的汇总,连同**它实际合并了哪几轮**(`covers`)。
+
+    **独立的一轮收尾时要清** —— 不清的话它比 `_state` 旧却还当着权威,面板和重试会
+    一起退回到那一批的结论。
+
+    `covers` 缺省是空集,而**空集那一边是安全方向**:历史那边据此顶掉行,少顶一行
+    只是历史里多留一条旧记录,多顶一行是把别人唯一的副本删掉(事故形态写在
+    `pipeline_state._save_history`)。所以新的赋值点忘了传它只会少删,不会丢数据。
+    """
+    global _aggregate, _aggregate_file, _covered
     _aggregate = deepcopy(payload) if payload else None
     _aggregate_file = ps._STATE_FILE
+    _covered = frozenset(covers) if payload else frozenset()
 
 
 def _batch_round_ids() -> set[str]:
-    """这一批里**已经各自落过盘**的那几轮的身份。
+    """这一批里**已经各自落过盘**的那几轮的身份(含正在收尾这一轮)。
 
-    历史那边据此把它们各自留下的那一行顶掉(不变量和事故形态写在
-    `pipeline_state._save_history`):一个业务结果只占一条历史。
+    两处用:判这一批有没有资格发布(`_publish_right`),以及汇总发布出去时交代
+    「这份记录包含了谁」(`_remember_aggregate` 的 `covers`)。**口径只有这一份。**
     """
     return {r.get("run_id") for r in _batch_runs if r.get("run_id")}
 
 
 def _batch_aggregate() -> dict | None:
     return _aggregate if _aggregate_file == ps._STATE_FILE else None
+
+
+def _aggregate_covers() -> frozenset[str]:
+    """内存里那份权威**实际合并了哪几轮**。空集 = 它只代表自己那一轮。
+
+    历史那边据此顶掉那几轮各自留下的行(`pipeline_state._save_history`)。**只有
+    真的合并过的那几轮算**:独立的一轮、以及发布被拒之后写下的那份局部结果都没合并
+    过任何人,拿「权威位非空」当「覆盖了整批」的证明,前几轮那几条历史就被删掉了,
+    而那是它们唯一的副本。`_STATE_FILE` 指向别处时同 `_batch_aggregate`,一律作废。
+    """
+    return _covered if _aggregate_file == ps._STATE_FILE else frozenset()
 
 
 # 本进程**上一轮**收尾的身份。在 `_end_run` 的收尾处记,所以 `_publish_in_batch`
@@ -165,7 +189,9 @@ def _save_own() -> None:
     写失败**原样抛给 `_end_run`**(它分别诊断两份留档、据此决定要不要清开工标记,
     所以这里不许吞)。抛之前把「这一轮没写进磁盘」记进内存那份权威:面板上那句收尾
     文案要看得出这一轮是降级完成的(`persist_issue` 一格,见 `_with_persist_issue`),
-    不然只剩日志里一行字、而标题仍是一句干净的「同步完成」。
+    不然只剩日志里一行字、而标题仍是一句干净的「同步完成」。**记下的是这一轮自己那份
+    快照,它一轮都没合并,所以 `covers` 留空** —— 这一档正是「权威位非空」证明不了
+    「覆盖了整批」的那一档(见 `_aggregate_covers`)。
     **要不要记进批次账本不在这里判**:那是「这一轮属不属于当前这一批」,判据只有
     `_remember_batch_note` 那一份(头一轮要记 —— 后面几轮的合并是从子轮账本重新拼
     日志的,而子轮快照在落盘**之前**拍;批次外那一轮不记 —— 它的落盘事件不该被念
@@ -206,7 +232,7 @@ def _publish_in_batch() -> None:
     # 失败连同重试名单一起抹掉 —— 入库那一轮的 crawl 是「未选择」,前面那条抓取
     # 失败于是内存里和磁盘上一起没了(第 5 轮实测:一次临时写失败就够)。
     try:
-        _publish_right({r.get("run_id") for r in _batch_runs if r.get("run_id")})
+        _publish_right(_batch_round_ids())
     except PublishRefused as e:
         # 没资格:期间有更新的一轮独立运行收尾(用户自己点了同步)。退回只写自己
         # 那一份 —— **我们这一轮确实是此刻最新的**,而把前几轮一起合进去等于拿一批
@@ -225,12 +251,13 @@ def _publish_in_batch() -> None:
                 '重启后会退回上一次写成功的那一份')
         # 记在批次账本上,后面那几轮的合并才带得上它(见 `_remember_batch_note`)。
         _remember_batch_note(note)
-        _remember_aggregate(_with_persist_issue(merged, note))
+        _remember_aggregate(_with_persist_issue(merged, note),
+                            covers=_batch_round_ids())
         raise
     # 发布成功就解除之前那句警告:原因留在运行日志里,但"当前仍未保存"这句话不能
     # 挂着不放 —— 后来真写进去了,日报却还在说没写进。
     _batch_issue = ""
-    _remember_aggregate(merged)
+    _remember_aggregate(merged, covers=_batch_round_ids())
 
 
 class PublishRefused(Exception):

@@ -355,11 +355,9 @@ def _save_history() -> None:
     `docs/decisions/llm-stages.md` 那条)。写失败只是少一条历史记录,不出声 ——
     这一份是只读展示,它写不写得上不该影响这一轮同步的结论。
     """
-    # 两行读的是**同一本账**(都在 `_lock` 里):`_run_record()` 决定"存哪一份",
-    # 这里只要知道"存的是不是汇总"。那个判据只有 `_run_record` 一处。
-    # 延迟 import,同上
-    from kb.pipeline_batch import _batch_aggregate, _batch_round_ids
-    batch = _batch_aggregate()
+    # 延迟 import,同上。读的是**同一本账**(都在 `_lock` 里):`_run_record()` 决定
+    # "存哪一份",`_aggregate_covers()` 回答"这一份实际合并了谁"。
+    from kb.pipeline_batch import _aggregate_covers
     record = _run_record()
     rid = record["run_id"]
     # **空身份一律追加,不去重。** 空串不是身份 —— 拿它当键会把两轮各自跑过的运行
@@ -381,11 +379,15 @@ def _save_history() -> None:
     # `retry_plan=[]`)。正常保存时它也看得见:面板说"失败",点开同一个身份的
     # 那条历史却写着"已完成"。
     # 顶掉**不丢内容**:整批那一份是子轮的并集(阶段按来源合并、日志接起来、失败
-    # 名单并起来,见 `pipeline_merge._merge_runs`)。**只在真的存了汇总时才顶** ——
-    # 没资格发布那一档写的是子轮自己那份,前几轮那几条仍是它们唯一的副本。
+    # 名单并起来,见 `pipeline_merge._merge_runs`)。
+    # **待删的身份只认「这一份记录实际合并了哪几轮」,不许据「内存里有没有权威结果」
+    # 反推** —— 权威位上也可能躺着一轮普通运行自己的快照(落盘失败那一档,见
+    # `pipeline_batch._save_own`),它一轮都没合并,按"有缓存就是整批"去删,期间那几轮
+    # 各自那条唯一的历史就没了(实测形态在 `docs/decisions/pipeline-history.md`)。
+    # 发布被拒那一档同理:写下的是子轮自己那份局部结果。**反过来钉住:真的汇总即使
+    # 状态写失败,存进历史的也还是完整汇总**,不许退回局部结果。
     superseded = {rid} if rid else set()
-    if batch is not None:
-        superseded |= _batch_round_ids()
+    superseded |= _aggregate_covers()
     runs = [r for r in _history_rounds_strict()
             if not (r.get("run_id") and r["run_id"] in superseded)]
     runs.insert(0, record)
@@ -694,4 +696,3 @@ def _end_run() -> None:
             # 所以上面 `pipeline_batch._publish_in_batch` 读到的是我们这一轮**之前**那一轮。
             _remember_settled(run_id)
             _state["running"] = False
-
