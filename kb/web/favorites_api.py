@@ -266,6 +266,12 @@ _FAV_SELECT = (
     # 这儿不许 COALESCE 成 0 或 1:两者分别是「当时不唯一」和「当时唯一」,
     # 都是比「没记下」更强的断言。
     " f.quote_unique, f.origin_msg,"
+    # 采集那一刻核对过的正文版本。**回跳那一头拿它和阅读页此刻的版本号相比**,
+    # 相等才敢只听锚点的一侧、必要时退到裸引文(见 `snip_text.js` 的 `snipSeek`)。
+    # 同样**不许 COALESCE 成空串**:老数据的 NULL 是「没记下」,而空串在那一头
+    # 和「版本号读不出来」撞在一起 —— 两种都该按「证明不了」办,可前者是历史
+    # 遗留、后者是这一刻的故障,混在一起就没法再分。
+    " f.doc_version,"
     " d.source,"
     " COALESCE(NULLIF(d.title, ''), f.origin_title) AS title,"
     " COALESCE(d.account, '') AS account,"
@@ -398,6 +404,7 @@ def api_favorite_snippet(body: SnippetRequest):
     if body.origin not in _ORIGINS:
         raise HTTPException(400, f"origin 只能是 {'/'.join(_ORIGINS)}")
     path = body.path.strip()
+    version = body.doc_version.strip()
     title = body.origin_title.strip()
     if not path:
         if body.origin == "doc":
@@ -406,7 +413,7 @@ def api_favorite_snippet(body: SnippetRequest):
             # 列表、分诊、行动卡都靠它指代这一条。缺了就是一张无字卡片,
             # 而收藏当场是成功的 —— 宁可现在拒掉。
             raise HTTPException(400, "没有对应文档的收藏必须带 origin_title")
-    if path and not body.doc_version.strip():
+    if path and not version:
         raise HTTPException(400, "绑文档的收藏必须带 doc_version(核对过的正文版本)")
     conn = store.connect()
     try:
@@ -417,17 +424,23 @@ def api_favorite_snippet(body: SnippetRequest):
             cur = conn.execute(
                 "INSERT INTO favorites (path, quote, prefix, suffix, note,"
                 " origin, origin_ref, origin_title, origin_url,"
-                " quote_unique, origin_msg, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " quote_unique, origin_msg, doc_version, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (path or None, quote, prefix, suffix, body.note.strip(),
                  body.origin, body.origin_ref.strip(), title,
                  body.origin_url.strip(),
-                 1 if body.quote_unique else 0, msg_id or None, now, now),
+                 1 if body.quote_unique else 0, msg_id or None,
+                 # **核对过的那一版要跟着落库**,不只是在写入这一刻用一次:
+                 # 回跳那一头要靠「库里这一版 == 阅读页此刻这一版」才敢采信
+                 # 锚点的弱档(只听一侧、裸引文)。写进来这一刻它已经被
+                 # `_bind_and_insert` 按盘上那一份核过,所以这个数是事实。
+                 # path 为空时一律 NULL:没有文档可绑,它就没有意义。
+                 (version if path else "") or None, now, now),
             )
             return cur.lastrowid
 
         if path:
-            new_id = _bind_and_insert(conn, path, body.doc_version.strip(), insert)
+            new_id = _bind_and_insert(conn, path, version, insert)
         else:
             new_id = insert()
             conn.commit()

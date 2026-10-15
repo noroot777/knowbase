@@ -19,6 +19,10 @@
 //   8 三档前后文都分不出两处:存得下、点回去只能是一句「没找到」,收藏那一刻
 //     不说清楚的话,用户要到点回去那一刻才发现。
 //
+// 「这段话出自哪一条消息」那一组(可收范围收到落了库的那份正文上、两条一字不差
+// 的回答靠编号分、记着的消息不在了、原对话被删掉)搬到了
+// `tests/snip_probe_chat.mjs` —— 它紧跟在这一份后面跑,顺序照旧。
+//
 // 判据一律落在后果上:**库里存的是什么字**、**高亮落在第几处**(不是"文字对不
 // 对" —— 重复整段那一条,两处的文字都对)、**从库里重新读出来还在不在**。
 //
@@ -26,9 +30,9 @@
 //
 //   HEADLESS_SHELL=<bin> node tests/snip_probe_edges.mjs <baseURL> <manifest.json>
 import {
-  base, boot, check, clickJump, DOC_HELPERS, docSnip, docToast, docToastClear,
-  evalJs, favDocHref, finish, fx, highlightText, js, openFavList, send, sleep,
-  snip, snipHighlight, until,
+  appToastClear, base, boot, check, clickJump, DOC_HELPERS, docSnip, docToast,
+  docToastClear, evalJs, favDocHref, finish, fx, highlightText, js, openFavList,
+  send, sleep, snip, snipHighlight, until,
 } from "./snip_probe_lib.mjs";
 
 const flat = s => String(s).replace(/\s+/g, " ");
@@ -367,6 +371,7 @@ window.__msgMark = (text) => {
     cid: el.getAttribute('data-snip-cid'), mid: el.getAttribute('data-snip-mid') });
 };
 true`);
+await appToastClear();
 await evalJs(`window.__cutDoneOnce()`);
 const ASK_CUT = "这一问的那张收据会在路上丢掉";
 await evalJs(`$('chat-input').value = ${js(ASK_CUT)}; sendChat(); true`);
@@ -374,9 +379,18 @@ const cutEnded = await until(`!document.getElementById('chat-pending')
   && $('chat-msgs').textContent.includes(${js(ASK_CUT)})`, 30000);
 check("那一轮流正常结束了(只是没有 done 帧)", cutEnded,
   await evalJs(`($('chat-msgs').textContent || '').slice(-80)`));
-check("当场如实说了一句「没有收到完成确认」",
-  (await evalJs(`window.__toastText()`)).includes("没有收到完成确认"),
-  await evalJs(`window.__toastText()`));
+// **那一句只许说到「没得到确认」为止。** 后端是 `_save_qa` 之后才发 `done`,所以
+// 那一帧可能丢在存库之前(库里一个字没有)、也可能丢在之后(已经存上了,只是回执
+// 没到)—— 断言「没有落库」是拿一个没证明过的结论告诉用户,而它可能恰好是反的:
+// 历史里明明有这一轮(这一节下面那条反向判据正好证明这件事:重新读一遍,那条气泡
+// 拿到了后端给的身份),而用户按那句话又问了一遍。
+// 判据落在**那句话有没有把结论咬死**上:要有「说不准」,不许有「刷新就没了」。
+// (不能拿「没有落库」四个字当反向针 —— 如实那句里的「有没有落库这儿说不准」
+// 正好包着它,那样钉下去红的是改对了的文案。)
+const cutToast = await evalJs(`window.__toastText()`);
+check("当场如实说了一句「没有收到完成确认」,而且没把它咬死成「刷新就没了」",
+  cutToast.includes("没有收到完成确认") && cutToast.includes("说不准")
+  && !cutToast.includes("刷新就没了"), cutToast);
 const cutMark = JSON.parse(await evalJs(`window.__msgMark(${js(ASK_CUT)})`));
 check("那条提问气泡没有落库身份", cutMark.cid === null && cutMark.mid === null,
   JSON.stringify(cutMark));
@@ -403,6 +417,7 @@ if (!await until(`typeof openToolDrawer === 'function'`, 15000))
   throw new Error("图鉴面板的脚本没加载起来");
 await evalJs(`openToolDrawer(${js(fx.toolNorm)}); true`);
 await until(`$('td-entries').textContent.includes(${js(fx.snipTool)})`, 25000);
+await appToastClear();   // 两份实现各自的那一句要分得开,见顶上 appToastClear
 await evalJs(`window.__cutDoneOnce()`);
 const TOOL_CUT = "这一问在抽屉里问,收据也会丢";
 await evalJs(`$('td-chat-input').value = ${js(TOOL_CUT)}; sendToolChat(); true`);
@@ -410,6 +425,11 @@ const toolCutEnded = await until(`!document.getElementById('td-pending')
   && $('td-chat-msgs').textContent.includes(${js(TOOL_CUT)})`, 30000);
 check("抽屉里那一轮也流完了(同样没有 done 帧)", toolCutEnded,
   await evalJs(`($('td-chat-msgs').textContent || '').slice(-80)`));
+// 文案两份实现各一份(这一头是 `gallery.js` 的 `doSendToolChat`),判据同上
+const toolCutToast = await evalJs(`window.__toastText()`);
+check("抽屉里那一句也只说到「没得到确认」,没咬死成「刷新就没了」",
+  toolCutToast.includes("没有收到完成确认") && toolCutToast.includes("说不准")
+  && !toolCutToast.includes("刷新就没了"), toolCutToast);
 const toolMark = await evalJs(`(() => {
   const el = [...document.querySelectorAll('#td-chat-msgs .msg')]
     .find(m => (m.textContent || '').includes(${js(TOOL_CUT)}));
@@ -601,79 +621,5 @@ check("阅读页上两边矛盾时一处也不许高亮",
   (await highlightText()) === "(没有高亮)", await highlightText());
 check("阅读页上两边矛盾时也如实说没找到",
   confDocToast.includes("没找到这段收藏"), confDocToast);
-
-await boot();
-
-// ── 10. 问答:已保存的标记挂在整条消息上,界面文字可不是落了库的正文 ─────────
-// 同一个 `.msg` 里还住着相对时间、模型名、「存为笔记」那颗按钮,以及按 refs 现拼
-// 的「来源 N 篇 / Obsidian / 原文」那一块 —— 它们不是回答正文(相对时间过一会儿
-// 就变成「3 小时前」,照着它找只会找不到)。可收范围得收到落了库的那一份正文上。
-await evalJs(`switchTab('ask'); openConv(${fx.convId}, true); true`);
-await until(`$('chat-msgs').textContent.includes(${js(fx.snipChat)})
-  && $('chat-msgs').querySelectorAll('.msg-meta').length >= 1`, 30000);
-// 选的是 `.msg-meta` 里的**模型名**那几个字(它旁边就是相对时间)。
-// **不选「存为笔记」那颗按钮上的字**:按钮里的文字浏览器压根选不出来(选区当场
-// 折叠),那个落点分不出"判据拦住了"和"选都没选上" —— 实测定点去掉下面那道
-// 判据,拿按钮当落点红 0 条,拿模型名当落点红 1 条。
-const metaSel = await evalJs(`window.__snipSelect('#chat-msgs', 'stub/none')`);
-await sleep(400);
-check("模型名和相对时间那行不算可收正文", metaSel === "ok"
-  && !(await evalJs(`window.__snipBtnShown()`)), `picked=${metaSel}`);
-const refsSel = await evalJs(`(() => {
-  const d = document.querySelector('#chat-msgs .refs');
-  if (!d) return 'no-refs';
-  d.open = true;
-  return window.__snipSelect('#chat-msgs', ${js(fx.refTitle)});
-})()`);
-await sleep(400);
-check("按 refs 现拼的引用块也不算可收正文", refsSel === "ok"
-  && !(await evalJs(`window.__snipBtnShown()`)), `picked=${refsSel}`);
-// 反过来钉一边:**同一条消息的正文照旧收得下**(不然"一律不收"也能过上面两条)
-const bodySnip = await snip("#chat-msgs", fx.snipChat);
-check("同一条消息的正文照旧收得下", bodySnip.shown, `picked=${bodySnip.picked}`);
-// **那几块界面文字也不许进前后文锚点。** 可收范围(上面两条)和采锚点的范围是两
-// 件事:这一句后面只隔着十个字就是它那条消息的 `.msg-meta`(模型名 + 相对时间 +
-// 「存为笔记」),三十字的后文窗口正好探进去 —— 而**相对时间会自己变**(过一会儿
-// 「3 小时前」就成了「5 小时前」),照着它找的那条收藏从此对不上。
-const chatRows = (await evalJs(`window.__favs()`)).filter(f => f.quote === fx.snipChat);
-check("问答那条收藏的前后文里没有模型名、相对时间和「存为笔记」",
-  chatRows.length >= 1 && chatRows.every(f =>
-    !/存为笔记|stub\/none|分钟前|小时前|来源 \d+ 篇/.test((f.prefix || "") + (f.suffix || ""))),
-  JSON.stringify(chatRows.map(f => ({ p: f.prefix, s: f.suffix }))));
-
-// 收藏列表里那条片段的标题取的是**这一轮的提问**,裁到 60 字 —— 这一问的第 60 个
-// 字是个 emoji,裁口正好落在它中间。切出来的半个字后端存不下,整条 POST 被拒,
-// 而用户选的是回答正文里一句普通的话。
-const chat3 = await snip("#chat-msgs", fx.snipChat3);
-check("提问第六十个字是 emoji 的那一轮也收得下", chat3.shown, `picked=${chat3.picked}`);
-const chat3Fav = (await evalJs(`window.__favs()`)).filter(f => f.quote === fx.snipChat3);
-check("它的标题裁得干净,没把 emoji 切成半个",
-  chat3Fav.length === 1 && !/[\uD800-\uDFFF]/.test(chat3Fav[0].title || ""),
-  JSON.stringify(chat3Fav.map(f => ({ t: (f.title || "").slice(-4) }))));
-
-// ── 原对话已经删掉了:说清楚,不要停在「加载对话…」上 ────────────────────────
-// 这个接口对"会话不在了"回的是 **404 带一份非空 JSON**,所以 `r.json()` 正常解析
-// 得出 `{detail: …}` —— 只判 `!d` 的那一版接着就去 `d.messages.map`,当场
-// TypeError:屏幕永远停在加载态,而这次待定位还挂着(审查实测,报告里的 N1)。
-// **排在最后**:这一节真把那个对话删掉,上面几节都要用它。
-const delStatus = await evalJs(
-  `fetch('/api/conversations/' + ${fx.convId}, { method: 'DELETE' }).then(r => r.status)`);
-check("沙箱真把那个对话删掉了", delStatus === 200 || delStatus === 204, String(delStatus));
-await openFavList();
-const clickedDead = await clickJump("chat", fx.snipChat);
-check("收藏面板里照旧点得到那条问答回跳", clickedDead);
-const goneShown = await until(
-  `activeTab === 'ask' && !$('chat-msgs').textContent.includes('加载对话')`, 15000);
-check("问答面板没有停在「加载对话…」上", goneShown,
-  await evalJs(`activeTab + ' / ' + $('chat-msgs').textContent.slice(0, 40)`));
-check("屏幕上说清了那个对话已经不在了",
-  await evalJs(`$('chat-msgs').textContent.includes('不在了')`),
-  await evalJs(`$('chat-msgs').textContent.slice(0, 60)`));
-const goneToast = await evalJs(`window.__toastText()`);
-check("提示里也说清了,并且说明收藏里那段原文还在",
-  goneToast.includes("删掉") && goneToast.includes("原文还在"), goneToast);
-check("这次待定位被丢掉了(不会挂到下一个对话上)",
-  await evalJs(`chatPendingSnip === null`),
-  await evalJs(`JSON.stringify(chatPendingSnip)`));
 
 finish();

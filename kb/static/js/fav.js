@@ -92,13 +92,20 @@ function favDocA(f, label, cls = '') {
 // 空路径,点下去是 iframe 里一张 404,所以换成回各自面板的按钮。
 function favDocAHtml(f, labelHtml, cls = '') {
   if (!f.path) return favJumpHtml(f, labelHtml, cls);
-  // **`u` 要一起带过去**:阅读页那一头的裸引文退路按它决定能不能采信(采集那一刻
-  // 只有一处 ≠ 现在只剩一处,见 `kb/web/pages.py` 的 `seek`)。老收藏没有这个数
-  // (NULL),那就一个字都不写 —— 那一头把"没有"当"不知道",不给用那一档。
+  // **`u` 和 `v` 都要一起带过去。**
+  // `u` = 采集那一刻这段引文在那一篇里只有一处吗:阅读页的裸引文退路按它决定能
+  // 不能采信(采集那一刻只有一处 ≠ 现在只剩一处,见 `kb/web/pages.py` 的 `seek`)。
+  // `v` = 采集那一刻核对过的正文版本(`favorites.doc_version`):阅读页拿它和
+  // `DOC_VERSION` 相比,**相等才算「要搜的这一篇就是采集时那一篇」**,于是锚点
+  // 一侧失配可以只听另一侧(两头摊的文本本来就不是同一种渲染);不等就说明这一篇
+  // 改过,那时一侧的「唯一命中」证明不了它是原处,如实说位置说不清。
+  // 两个数**都是老收藏可能没有的**(NULL),没有就一个字都不写 —— 那一头把
+  // "没有"当"不知道",弱档一律不给用。
   const hash = f.quote ? '#kbq=' + encodeURIComponent(
     JSON.stringify({ q: f.quote, p: f.prefix || '', s: f.suffix || '',
                      ...(f.quote_unique === 1 || f.quote_unique === 0
-                       ? { u: f.quote_unique } : {}) })) : '';
+                       ? { u: f.quote_unique } : {}),
+                     ...(f.doc_version ? { v: f.doc_version } : {}) })) : '';
   return docAHtml(f, labelHtml, cls, hash);
 }
 
@@ -110,7 +117,15 @@ function favJumpHtml(f, labelHtml, cls = '') {
     q: f.quote || '', p: f.prefix || '', s: f.suffix || '',
     // 同 `favDocAHtml` 的 hash:裸引文那一档要靠它(见 snip_text.js 的 `snipSeek`)
     ...(f.quote_unique === 1 || f.quote_unique === 0 ? { u: f.quote_unique } : {}),
+    // **问答片段出自哪一条消息**(后端核验过的 `favorites.origin_msg`)。回跳要
+    // 落到那一条消息上,不是在整个对话里搜那段引文:同一个问题问两遍得到一模
+    // 一样的回答时,整对话里有两处,于是「位置说不清」、一个高亮也不给,而真正
+    // 要找的那一条明明记着;两条回答只有一半相同时更坏 —— 锚点在另一条上先命中,
+    // 高亮落在别人身上(见 `chat.js` 的 `chatSnipUnit`)。
+    ...(Number(f.origin_msg) > 0 ? { m: Number(f.origin_msg) } : {}),
   }));
+  // `v` 不往这儿带:这颗按钮只给**没有 path** 的收藏用(日报/问答/没导出的订阅
+  // 条目),它们压根不绑文档,没有正文版本可比 —— 绑了文档的走上面那条阅读页。
   const label = SNIP_LABEL[f.origin] || '这段话';
   return `<button class="fav-jump${cls ? ' ' + cls : ''}" data-jump="${payload}"` +
     ` onclick="jumpFavOrigin(this)" title="回到${esc(label)}里这一段">${labelHtml}</button>`;
@@ -128,6 +143,10 @@ function jumpFavOrigin(el) {
   // 连「采集时本来就唯一」的那些收藏也退不了裸引文那一档
   const spec = { q: j.q, p: j.p, s: j.s,
                  ...(j.u === 1 || j.u === 0 ? { u: j.u } : {}) };
+  // **`same` 由各面板自己决定,这儿一个字都不写**(默认 = 证明不了)。日报正文、
+  // 订阅正文这两头:采集和回跳走的是同一个渲染器,一侧对不上就只能是正文自己变过
+  // 了,没有「两种渲染」这个借口 —— 弱档于是一律不采信。问答那一头不一样,见
+  // 下面 chat 分支和 `chat.js` 的 `chatSnipUnit`。
   if (j.origin === 'daily') {
     if (!j.ref) return toast('这条收藏没有记下是哪一天的日报');
     dailyPendingSnip = { ref: j.ref, spec };
@@ -137,7 +156,9 @@ function jumpFavOrigin(el) {
   if (j.origin === 'chat') {
     const cid = Number(j.ref);
     if (!cid) return toast('这条收藏没有记下是哪一个对话');
-    chatPendingSnip = { ref: cid, spec };
+    // `msg` 交给 `openConv`:它负责把落点收到那一条消息上(没有这个数的老收藏
+    // 才在整个对话里搜,而且不采信弱档)
+    chatPendingSnip = { ref: cid, msg: Number(j.m) || 0, spec };
     switchTab('ask');
     openConv(cid, true);
     return;

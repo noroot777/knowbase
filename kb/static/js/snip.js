@@ -183,7 +183,8 @@ function snipSpec(zone, range, src) {
     const uniq = !(src && src.partial)
       && snipAll(idx.text, snipCollapse(bare.quote).trim()).length === 1;
     return { ...bare, unique: uniq,
-             locatable: !!snipSeek(idx.text, { ...snipSpecOf(bare), u: uniq ? 1 : 0 }) };
+             locatable: !!snipSeek(idx.text,
+               { ...snipSpecOf(bare), u: uniq ? 1 : 0, same: true }) };
   }
   // 引文两头的空白挪进前后文。**不能留到后端再 strip** —— 那边剥掉引文的首尾
   // 空白、前后文却照旧,整段锚点就拼不回原文了(定位于是退回只找引文)。
@@ -268,6 +269,22 @@ async function saveSnip() {
   };
   let detail = detailOf(src, (fell ? REASON_NOTE : STAY_NOTE)[reason] || '');
   try {
+    // **绑了文档、却拿不出核对过的那一版正文时,一行都不送。** 后端那道必答校验
+    // 本身是对的,可一条 POST 撞上它,用户看到的是「收藏失败:绑文档的收藏必须带
+    // doc_version(核对过的正文版本)」—— 一句他无法处置的话,而真正的原因
+    // (那一篇这一刻读不出来 / 已经不在索引里了)一个字都没说。所以在这儿拦住,
+    // **并且说出真正的原因**。这是一道**通用的带**:新接上来的入口忘了带版本号
+    // 时,坏的也是这一句话,而不是一个必填字段错误。
+    // **不许反过来把 path 丢掉、偷偷存成一条只有引文的收藏** —— 那是把「能回到
+    // 原文」静默降级,只有用户能做这个决定(口径同后端那段保存契约:它故意不替
+    // 调用方降级)。带 `fallback` 的来源上面那道已经退过了,走不到这儿。
+    const NO_VERSION = {
+      absent: '这一篇已经不在检索索引里了,先没收下来(存下去会是一条点回去找不到原文的收藏)',
+      unreadable: '这一刻读不出盘上那一篇、没法核对,先没收下来 —— 过一会儿再收一次',
+    };
+    if (src.path && !src.doc_version) {
+      throw new Error(NO_VERSION[reason] || '没核出这一篇的正文版本,先没收下来');
+    }
     let r = await postSnip(src, spec);
     // 后端拒绝绑这篇文档的三种理由,这里各退一次 —— 它**故意不替我们降级**:
     // 把一条本该能定位回原文的收藏静默换成只有引文的那一类,是调用方该自己做
@@ -367,7 +384,11 @@ async function snipVerified(src, spec) {
     // 在这儿是允许的**(`u: 1`):核对发生在采集这一刻,盘上那篇正文就是此刻这
     // 一份,「只有一处」就是「只有一处」—— 不存在「原来那处已经被删掉」这件事
     // (那是回跳那一刻才有的问题,见 snip_text.js 的 `snipSeek`)。
-    : (snipSeek(got.text, { ...snipSpecOf(spec), u: 1 }) ? '' : 'mismatch');
+    // `same: true`:这一份正文是此刻从盘上读的,而**它的版本号跟着收藏一起落库**
+    // (`doc_version`)—— 回跳那一刻版本号还相等的话,那一头拿到的也是 `same`,
+    // 两头于是按同一套档位判。少了它,这儿核得过、回跳那头判得更严:库里那条
+    // `locatable` 写着"定得到",点回去却是一句"没找到"。
+    : (snipSeek(got.text, { ...snipSpecOf(spec), u: 1, same: true }) ? '' : 'mismatch');
   if (!reason) {
     // 核过了,顺手把**唯一性和定位**按盘上那一篇重算一遍 —— 上面那两个数是按屏幕
     // 上那个容器算的,而**容器未必是整篇**(列表卡片摊的是正文开头那一截)。切片里
@@ -376,10 +397,23 @@ async function snipVerified(src, spec) {
     const flat = snipCollapse(spec.quote).trim();
     const uniq = snipAll(got.text, flat).length === 1;
     const fix = { unique: uniq,
-                  locatable: !!snipSeek(got.text, { ...snipSpecOf(spec), u: uniq ? 1 : 0 }) };
+                  locatable: !!snipSeek(got.text,
+                    { ...snipSpecOf(spec), u: uniq ? 1 : 0, same: true }) };
     return { src: { ...src, doc_version: got.version }, reason: '', fell: false, fix };
   }
   if (src.fallback) return { src: src.fallback, reason, fell: true };
+  // **核不过、又没有退路可退,而这个来源自己说不出它展示的是哪一版** —— 刚读到的
+  // 那一版就是它唯一能说的版本,记下来。绑了文档却交不出版本号的话后端按 400 拒
+  // (那一道是对的:没有这个数就没有共同事实可绑),于是用户得到一句「绑文档的
+  // 收藏必须带 doc_version」—— 一句他无法处置的话,而这段话本来是存得下的
+  // (搜索卡那一头摊的是命中那一篇的切片,`kb/chunker.py` 把 `*` 剥了却留着
+  // `~~`,于是一句带删除线的话在卡片上和那一页上就是两份文本,核必然不过)。
+  // **反过来,来源自带版本号的一律不许替换**(图鉴条目带的是面板上那一份的版本):
+  // 那个数和盘上此刻**不等**正是「面板旧了」的唯一信号,后端那道 409 全靠它,
+  // 替成新的之后改稿删掉那句话也照存(回归在 `tests/snip_probe_bind.mjs`)。
+  if (!src.doc_version && got && got.version) {
+    return { src: { ...src, doc_version: got.version }, reason, fell: false };
+  }
   return { src, reason, fell: false };
 }
 

@@ -345,6 +345,14 @@ _DOC_SNIP_JS = r"""
   // 326)。两边都有候选就取交集(交集正是整段 p+q+s 命中的那几处),一边用不上
   // 就只听另一边,两边都用不上才退到裸引文;**最后一律要求只剩一处** —— 剩两处
   // 是正文自己分不出的两处,剩零处是两边的证据矛盾,两种都如实说没找到。
+  // **弱档(只听一侧、退到裸引文)还要先证明「这一篇就是采集时那一篇」**
+  // —— `spec.same`,由 `locateQuote` 按 `#kbq=` 里的 `v`(库里的
+  // `favorites.doc_version`)和这一页的 `DOC_VERSION` 比出来。一侧**天生没有**
+  // (引文顶在正文开头/末尾)照旧只听另一侧;一侧**有证据却一处也对不上**时,
+  // 分两种:版本号相等 = 文件没动过,那只能是两种渲染摊出来的文本不一样(弱档
+  // 正是为它存在的);不等或者说不清 = 这一篇改过,那时另一侧的「唯一命中」证明
+  // 不了它就是原处 —— 三处一字不差的重复句,收藏第二处、后来只把它的后文改掉,
+  // 前文那一边仍然唯一地指向前一处,于是静默高亮一处早该排除的地方(审查实测)。
   // **裸引文那一档还要一个条件:采集那一刻这段引文在这一篇里就只有一处**
   // (`spec.u === 1`,库里那一列是 `favorites.quote_unique`)。「现在只剩一处」
   // 证明不了「这一处就是当时那一处」—— 当时有两处的话,原处完全可能正是被改稿
@@ -365,15 +373,21 @@ _DOC_SNIP_JS = r"""
   function seek(text, spec) {
     const a = anchorOf(spec);
     if (!a.q) return null;
-    const byP = a.p ? hitsOf(text, a.p + a.q).map(at => at + a.p.length) : [];
-    const byS = a.s ? hitsOf(text, a.q + a.s) : [];   // q+s 的起点就是引文的起点
-    const bare = Number(spec && spec.u) === 1 ? hitsOf(text, a.q) : [];
-    const cand = byP.length && byS.length ? byP.filter(at => byS.includes(at))
-      : byP.length ? byP
-        : byS.length ? byS
+    const same = !!(spec && spec.same);
+    // 一侧的三种状态**不许压成两种**:null = 这条锚点天生没有这一侧;
+    // [] = 有这一侧、在这份文本里一处也对不上;非空 = 它认的那几处。
+    const byP = a.p ? hitsOf(text, a.p + a.q).map(at => at + a.p.length) : null;
+    const byS = a.s ? hitsOf(text, a.q + a.s) : null;   // q+s 的起点就是引文的起点
+    // 「有证据却一处也对不上」= 这份语料不是采集时那一份,除非证明过(见上)
+    if (((byP && !byP.length) || (byS && !byS.length)) && !same) return null;
+    const hitP = byP || [], hitS = byS || [];
+    const bare = same && Number(spec && spec.u) === 1 ? hitsOf(text, a.q) : [];
+    const cand = hitP.length && hitS.length ? hitP.filter(at => hitS.includes(at))
+      : hitP.length ? hitP
+        : hitS.length ? hitS
           : bare;
     const over = xs => xs.length > MAX_HITS;
-    if (over(byP) || over(byS) || over(cand)) return null;
+    if (over(hitP) || over(hitS) || over(cand)) return null;
     return cand.length === 1 ? [cand[0], cand[0] + a.q.length] : null;
   }
   // 前后文从 30 字起、不唯一就加长,取第一档唯一的。同 snip.js 的
@@ -398,7 +412,11 @@ _DOC_SNIP_JS = r"""
       // 判据走 seek 自己 —— 回跳用的就是它(候选集合 + 外侧空白那一套)。
       // `u` 按**这一刻这一篇里**算:采集和核对都发生在现在,「只有一处」就是
       // 「只有一处」;回跳那一刻才有"原处可能已经不在了"这件事(见 seek)。
-      const hit = seek(text, { q: quote, p: ctx.p, s: ctx.s, u: uniqueIn(text, quote) });
+      // `same: true` 是事实而不是假设:这份 text 正是这一刻这一页的正文,而存下去
+      // 的 `doc_version` 就是它 —— 回跳那一刻版本号还相等的话,那一头判的档位和
+      // 这儿一样。少了它,这儿算出"定得到"、点回去却是一句"没找到"。
+      const hit = seek(text, { q: quote, p: ctx.p, s: ctx.s, same: true,
+                               u: uniqueIn(text, quote) });
       if (hit && hit[0] === a) return { ...ctx, exact: true };
       if (a - n <= 0 && b + n >= text.length) break;
     }
@@ -467,10 +485,13 @@ _DOC_SNIP_JS = r"""
       locatable = !!ctx.exact;
       unique = uniqueIn(idx.text, quote);
     } else {
-      // 选区端点不在 text node 上的少见情况:锚点留空,靠全文搜索
+      // 选区端点不在 text node 上的少见情况:锚点留空,靠全文搜索。
+      // `same: true` 同上面 contextOf:这一刻读的就是这一页的正文,存下去的
+      // `doc_version` 就是它 —— 少了这一个字,这一档(两侧都空)永远算不出
+      // "定得到",屏幕上于是永远多一句"点回去可能分不出是第几处"。
       quote = whole(sel.toString().trim());
       unique = uniqueIn(idx.text, quote);
-      locatable = !!seek(idx.text, { q: quote, p: '', s: '', u: unique });
+      locatable = !!seek(idx.text, { q: quote, p: '', s: '', u: unique, same: true });
     }
     btn.textContent = '…';
     try {
@@ -519,7 +540,11 @@ _DOC_SNIP_JS = r"""
     try { spec = JSON.parse(decodeURIComponent(m[1])); } catch { return; }
     if (!spec || !spec.q) return;
     const idx = textIndex();
-    const hit = seek(idx.text, spec);
+    // **`same` 在这儿定**:`v` 是收藏那一刻核对过的正文版本,`DOC_VERSION` 是这
+    // 一页此刻的。相等 = 这一篇没动过,锚点一侧失配只能是两种渲染的差别,弱档
+    // 可以采信;不等、或者老收藏压根没记下版本 = 证明不了,弱档一律不给用
+    // (口径同 `snip.js` 的 `snipSeek`,两头各一份,改一处要改两处)。
+    const hit = seek(idx.text, { ...spec, same: !!spec.v && spec.v === DOC_VERSION });
     if (!hit) { toast('没找到这段收藏(原文可能已更新)'); return; }
     const range = offsetRange(idx, hit[0], hit[1]);
     if (!range) return;

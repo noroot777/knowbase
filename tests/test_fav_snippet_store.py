@@ -71,6 +71,22 @@ CREATE TABLE favorites (
 CREATE INDEX idx_favorites_path ON favorites(path);
 """
 
+# v4 但**锚点那三列还没加**:今天盘上那一份就是这个形状(`path` 可空、origin 一族
+# 都在)。这三列按「只增不减」走的是 ALTER 那条路,重建分支压根不经过它 —— 不单独
+# 摆一份这样的老库,少 ALTER 一列在回归里一个字都看不出来。
+_V4_NO_ANCHOR_DDL = _V3_DDL.split("CREATE TABLE favorites")[0] + """
+CREATE TABLE favorites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  path TEXT REFERENCES documents(path) ON DELETE CASCADE,
+  quote TEXT NOT NULL DEFAULT '', prefix TEXT NOT NULL DEFAULT '',
+  suffix TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'inbox', action_json TEXT NOT NULL DEFAULT '',
+  origin TEXT NOT NULL DEFAULT 'doc', origin_ref TEXT NOT NULL DEFAULT '',
+  origin_title TEXT NOT NULL DEFAULT '', origin_url TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX idx_favorites_path ON favorites(path);
+"""
+
 # v2:同上但**没有 action_json**。重建时按老表实际有的那几列拼 INSERT,写死一份
 # 列名会让它在 `no such column` 上翻车。
 _V2_DDL = _V3_DDL.replace(" action_json TEXT NOT NULL DEFAULT '',", "")
@@ -147,7 +163,7 @@ class MigrationTests(unittest.TestCase):
 
         索引那一半是**冗余带,单点注入打不红它** —— 索引跟着 `RENAME TO` 挂到临时
         表上、临时表一删就跟着没,而 `connect()` 在迁移之后无条件跑一次
-        `executescript(_FAVORITES_DDL)` 把它补回来(口径写在 `_FAVORITES_INDEX`
+        `executescript(FAVORITES_DDL)` 把它补回来(口径写在 `FAVORITES_INDEX`
         头上)。实测:在重建里加 DROP INDEX / CREATE INDEX,去掉任何一句都红 0 条,
         所以那两句已经删掉了。留这半条断言是为了钉住**后果**:不管迁移怎么改,
         交出去的连接上这条索引必须在。
@@ -161,6 +177,37 @@ class MigrationTests(unittest.TestCase):
         left = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE name LIKE 'favorites_v%'")]
         self.assertEqual([], left, "重建用的临时表留在库里了")
+
+    def test_a_v4_db_without_the_anchor_columns_gets_them_added(self):
+        """锚点那三列是后来加的,老库靠 ALTER 补 —— 补不上整条收藏链路当场断。
+
+        判据落在**连接交出去之后那张表上**:三列都在、老行读出来是 NULL(不是 0
+        也不是空串 —— 那两个分别是「当时不唯一」和「版本号读不出来」,都比「没
+        记下」更强的断言),而且新行真写得进去。少 ALTER 任何一列,后端那条
+        INSERT 当场 `no such column`,收藏按钮从此一按就失败。
+        """
+        _seed_old(self.db, _V4_NO_ANCHOR_DDL)
+        conn = REAL_CONNECT(self.db)
+        self.addCleanup(conn.close)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(favorites)")}
+        self.assertLessEqual({"quote_unique", "origin_msg", "doc_version"}, cols,
+                             "锚点那三列没补上")
+        seven = self.rows(conn)[7]
+        self.assertEqual(
+            (None, None, None),
+            (seven["quote_unique"], seven["origin_msg"], seven["doc_version"]),
+            "老行这三列该读出 NULL")
+        self.assertEqual("文中一句", seven["quote"], "补列把内容弄丢了")
+        conn.execute(
+            "INSERT INTO favorites (path, quote, quote_unique, origin_msg, doc_version,"
+            " created_at, updated_at)"
+            " VALUES (NULL, '补完列之后新收的一段', 1, 0, 'v-新', ?, ?)",
+            ("2026-03-01", "2026-03-01"))
+        self.assertEqual(
+            ("v-新", 1), tuple(conn.execute(
+                "SELECT doc_version, quote_unique FROM favorites"
+                " WHERE quote = '补完列之后新收的一段'").fetchone()),
+            "新行写进去又读不出来")
 
     def test_v2_without_action_json_also_upgrades(self):
         _seed_old(self.db, _V2_DDL)
@@ -444,6 +491,52 @@ class SnippetWriteTests(ApiFixture):
         self.assertEqual(503, unreadable.status_code, unreadable.text)
         self.assertEqual(0, self.conn.execute(
             "SELECT COUNT(*) FROM favorites").fetchone()[0], "拒掉了却还是写了一行")
+
+    def test_the_verified_version_is_kept_not_just_checked(self):
+        """核对过的那一版**随收藏落库、而且取得回来**(不是只在写入那一刻用一次)。
+
+        回跳那一头靠它判「要搜的这一篇是不是采集时那一篇」:相等才敢只听锚点的
+        一侧、必要时退到裸引文(`snip_text.js` 的 `snipSeek`、`pages.py` 的
+        `seek`)。**不落库的后果是静默的**:面板拼 `#kbq=` 时拿不出 `v`,阅读页
+        于是一律按「证明不了」办 —— 改稿之后那一处同句照旧被当成原处高亮不了是
+        好事,可**没改过的那一篇也从此只认两侧都对得上的锚点**,md 和渲染后的
+        文本差一个井号就点不回去了(漏报,而屏幕上只有一句「没找到」)。
+
+        **没绑文档的那一类存 NULL,不是空串** —— 它压根没有文档可绑,而空串在
+        回跳那一头和「版本号读不出来」撞成一件事。
+        """
+        ok = self.snip(path=DOC, quote="这一段绑了那一篇", origin="doc")
+        self.assertEqual(200, ok.status_code, ok.text)
+        row = self.conn.execute(
+            "SELECT doc_version FROM favorites WHERE id=?",
+            (ok.json()["id"],)).fetchone()
+        self.assertEqual(self.version, row["doc_version"])
+        listed = [f for f in self.listed()["favorites"]
+                  if f["quote"] == "这一段绑了那一篇"]
+        self.assertEqual([self.version], [f["doc_version"] for f in listed],
+                         "接口没把它给出去,面板就拼不出 #kbq= 里的 v")
+        free = self.snip(quote="这一段没有文档可绑", origin="daily",
+                         origin_ref="2026-10-15", origin_title="日报")
+        self.assertEqual(200, free.status_code, free.text)
+        self.assertIsNone(self.conn.execute(
+            "SELECT doc_version FROM favorites WHERE id=?",
+            (free.json()["id"],)).fetchone()["doc_version"])
+
+    def test_an_old_row_has_no_version_and_that_is_not_an_empty_string(self):
+        """老数据:这一列是后来补的,它的空值是「没记下」,接口不许抹成空串。
+
+        `COALESCE(…, '')` 一加,老收藏和「这一刻版本号读不出来」就再也分不开了。
+        两种都该按「证明不了」办,但前者是历史遗留、后者是这一刻的故障。
+        """
+        self.conn.execute(
+            "INSERT INTO favorites (path, quote, origin, created_at, updated_at)"
+            " VALUES (?, '老收藏没有版本号', 'doc', '2026-01-01', '2026-01-01')",
+            (DOC,))
+        self.conn.commit()
+        old = [f for f in self.listed()["favorites"]
+               if f["quote"] == "老收藏没有版本号"]
+        self.assertEqual(1, len(old))
+        self.assertIsNone(old[0]["doc_version"])
 
     def test_a_frontmatter_writeback_does_not_invalidate_a_snippet(self):
         """反过来钉一边:**版本号只认正文**,frontmatter 改了不算换版。

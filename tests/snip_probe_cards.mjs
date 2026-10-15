@@ -243,4 +243,103 @@ for (const [name, sel] of [["标题", "h3"], ["那行元信息", ".meta"],
     && !(await evalJs(`window.__snipBtnShown()`)), `picked=${picked}`);
 }
 
+// ── 5. 搜索卡摊的那份文本和阅读页那一份本来就不是同一种 ─────────────────────
+// 检索语料剥掉了 `*`、却留着 `~`(`kb/chunker.py` 的 `strip_markup`),所以带删除线
+// 的那一句**在卡片上带着两道波浪号、在阅读页上没有** —— 跨过波浪号的选区在那一页上
+// 压根不存在,`snipVerified` 必然核不过。而这一类**既不自带版本号、也没有一档不
+// 说谎的退路**(退 `origin=feed` 是假话:这是库里的文章;`origin=doc` 配空 path 后端
+// 按 400 拒)。所以:**照旧绑那一篇**(点回去打开的至少是对的那一篇文章)、把**刚
+// 读到的那一版**记下来、当场说清「点回去可能定位不到这一处」。
+// 原来这一条的后果是:一句「收藏失败:绑文档的收藏必须带 doc_version(核对过的
+// 正文版本)」—— 一个必填字段错误,而用户拿它什么也做不了。
+await evalJs(`switchTab('search'); $('q').value = ${js(fx.toolDelText.slice(0, 6))}; doSearch(); true`);
+const delReady = await until(
+  `[...$('results').querySelectorAll('.hit[data-hit] .snippet')]
+     .some(n => (n.textContent || '').includes(${js(fx.toolDelMd)}))`, 30000);
+check("搜索卡上那一句带着两道波浪号(卡片和那一页摊的不是同一份文本)", delReady,
+  await evalJs(`$('results').textContent.slice(0, 160)`));
+// 从**波浪号之前**开始选:引文里带上 `~~`,于是它在阅读页那一份文本里压根不存在
+const delPick = await evalJs(`(() => {
+  const body = [...document.querySelectorAll('.hit[data-hit] .snippet')]
+    .find(n => (n.textContent || '').includes(${js(fx.toolDelMd)}));
+  if (!body) return JSON.stringify({ err: 'no-card' });
+  const node = [...body.childNodes]
+    .find(n => n.nodeType === 3 && n.nodeValue.includes(${js(fx.toolDelMd)}));
+  if (!node) return JSON.stringify({ err: 'no-text-node' });
+  const at = node.nodeValue.indexOf(${js(fx.toolDelMd)});
+  const r = document.createRange();
+  r.setStart(node, at);
+  r.setEnd(node, at + ${js(fx.toolDelMd)}.length);
+  const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+  body.scrollIntoView({ block: 'center' });
+  document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  return JSON.stringify({ sel: s.toString(),
+    path: body.closest('.hit').querySelector('.favbtn').dataset.path });
+})()`);
+const del = JSON.parse(delPick);
+check("带波浪号那一段选得出来", !del.err && String(del.sel).includes("~~"), delPick);
+const delShown = await until(`window.__snipBtnShown()`, 5000);
+if (delShown) {
+  await evalJs(`document.getElementById('snipbtn').click(); true`);
+  await until(`!window.__snipBtnShown()`, 15000);
+}
+check("它照旧收得下(不是一句必填字段错误)", delShown
+  && !(await evalJs(`window.__toastText()`)).includes("doc_version"),
+  `shown=${delShown} toast=${await evalJs(`window.__toastText()`)}`);
+const delToast = await evalJs(`window.__toastText()`);
+check("并且当场说清了点回去可能定位不到这一处", delToast.includes("定位不到"),
+  delToast);
+const delFav = (await evalJs(`window.__favs()`))
+  .filter(f => flat(f.quote) === flat(del.sel));
+check("库里那条绑的还是命中那一篇,而且记下了刚读到的那一版正文",
+  delFav.length === 1 && delFav[0].origin === "doc"
+  && delFav[0].path === decodeURIComponent(del.path || "")
+  && !!delFav[0].doc_version,
+  JSON.stringify(delFav.map(f => ({ o: f.origin, p: f.path, v: f.doc_version }))));
+
+// ── 6. 那一篇这一刻读不出来:说出真正的原因,别把必填字段错误丢给用户 ───────
+// 上一节是「读到了、可两头的文本不是同一份」。这一节是另一种:**压根读不出来**
+// (路径被换成了同名目录 —— 权限、网盘没挂上同理)。这一类拿不出版本号,而
+// `saveSnip` 有一道通用的带:绑了文档却交不出核对过的版本时**一行都不送**,并且
+// 说出真正的原因。**不许反过来把 path 丢掉偷偷存成一条只有引文的收藏** —— 那是
+// 把「能回到原文」静默降级,只有用户能做这个决定。
+const unreadPath = decodeURIComponent(del.path || "");
+check("沙箱把那一篇变成读不出来的",
+  (await evalJs(`fetch('/__snip__/unreadable?path=' +
+     encodeURIComponent(${js(unreadPath)}), { method: 'POST' }).then(r => r.status)`)) === 200,
+  unreadPath);
+const before = (await evalJs(`window.__favs()`)).length;
+const unreadPick = await evalJs(`(() => {
+  const body = [...document.querySelectorAll('.hit[data-hit] .snippet')]
+    .find(n => (n.textContent || '').includes(${js(fx.toolDelMd)}));
+  if (!body) return 'no-card';
+  const node = [...body.childNodes].find(n => n.nodeType === 3
+    && n.nodeValue.includes(${js(fx.snipTool)}));
+  if (!node) return 'no-text-node';
+  const at = node.nodeValue.indexOf(${js(fx.snipTool)});
+  const r = document.createRange();
+  r.setStart(node, at); r.setEnd(node, at + ${js(fx.snipTool)}.length);
+  const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+  body.scrollIntoView({ block: 'center' });
+  document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  return s.toString();
+})()`);
+const unreadShown = await until(`window.__snipBtnShown()`, 5000);
+if (unreadShown) {
+  await evalJs(`document.getElementById('snipbtn').click(); true`);
+  await until(`!window.__snipBtnShown()`, 15000);
+}
+check("读不出那一篇时按钮照旧浮出来(拦在后面那一步)", unreadShown,
+  `picked=${unreadPick}`);
+const unreadToast = await evalJs(`window.__toastText()`);
+check("说的是「读不出盘上那一篇」,不是一个必填字段错误",
+  unreadToast.includes("读不出") && !unreadToast.includes("doc_version"), unreadToast);
+check("一行都没落库(也没有偷偷存成只有引文的那一类)",
+  (await evalJs(`window.__favs()`)).length === before,
+  JSON.stringify((await evalJs(`window.__favs()`))
+    .filter(f => flat(f.quote) === flat(unreadPick)).map(f => ({ o: f.origin, p: f.path }))));
+check("沙箱把那一篇换回来了",
+  (await evalJs(`fetch('/__snip__/unreadable?path=' +
+     encodeURIComponent(${js(unreadPath)}), { method: 'POST' }).then(r => r.status)`)) === 200);
+
 finish();

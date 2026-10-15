@@ -346,7 +346,8 @@ function snipContext(text, a, b) {
     // 正文里连着的一段,所以下面那道 `snipSeek` 判据照旧成立。
     const ctx = { prefix: snipWhole(text.slice(Math.max(0, a - n), a)),
                   suffix: snipWhole(text.slice(b, b + n)) };
-    const hit = snipSeek(text, { q: quote, p: ctx.prefix, s: ctx.suffix, u });
+    // `same: true` 是事实而不是假设:这份 text 正是这一刻采集的那一份
+    const hit = snipSeek(text, { q: quote, p: ctx.prefix, s: ctx.suffix, u, same: true });
     if (hit && hit[0] === a) return { ...ctx, exact: true };
     if (!first) first = { ...ctx, exact: false };
     // 两头都顶到正文尽头了,再加长一个字也不会变
@@ -396,6 +397,23 @@ function snipAnchor(spec) {
  *  一字不差重复的段落、模板说明、重复的代码块都长这样,静默挑一处换来的是一个
  *  落在错地方的高亮,而两处的文字一模一样,用户从页面上看不出来。
  *
+ *  **弱档(只听一侧、退到裸引文)要先证明「要搜的这份语料就是采集时那一份」**
+ *  —— `spec.same`。两件事在这儿分得清:一侧**天生没有**(引文顶在正文开头或
+ *  末尾,采集那一刻就没取到前文/后文)照旧只听另一侧;一侧**有证据、却在这份
+ *  文本里一处也对不上**,说明这份语料已经不是采集时那一份了,那时另一侧的
+ *  「唯一命中」证明不了它就是原处:三处一字不差的重复句,收藏第二处,后来只把
+ *  第二处的后文改掉 —— 前文那一边仍然唯一地指向……第二处的前一处,于是静默跳到
+ *  一处早该排除的地方(审查用生产函数实测:收藏偏移 912,改稿后回查 1015)。
+ *  所以**除非能证明是同一份语料,一侧失配就如实说位置说不清**。
+ *  能证明的只有这两种,别处一律按"不能"办:
+ *    - **绑了文档的收藏**:库里记着采集那一刻核对过的正文版本
+ *      (`favorites.doc_version`),和阅读页此刻那一篇的版本号相等 = 文件没动过,
+ *      那一侧失配只能是**两种渲染摊出来的文本不一样**(md 原文 `## 标题` vs
+ *      渲染后的 `<h2>`)—— 弱档正是为这件事存在的。
+ *    - **采集和回跳摊的是同一个单元**:问答那一条消息(落库之后不会再改,身份
+ *      就是 `favorites.origin_msg`)。日报正文、订阅正文不在其中 —— 两头是同一
+ *      个渲染器,一侧对不上就只能是正文自己变了。
+ *
  *  **裸引文那一档还要看 `spec.u`:采集那一刻这段引文在那一篇里只有一处吗。**
  *  「现在只剩一处」不等于「这一处就是当时那一处」:收藏那一刻有两处、收的是第
  *  二处,后来第二处被删掉,两侧上下文于是全失配,而第一处还在、按裸引文找正好
@@ -403,21 +421,30 @@ function snipAnchor(spec) {
  *  收藏偏移 153,删掉第二段之后回查到 45)。所以**采集时不唯一(或者老数据没记
  *  下)就不许走这一档**,如实说没找到;采集时本来就唯一的,剩下这一处必是它。
  *  唯一性由采集那头算、随收藏落库(`favorites.quote_unique`),不在回跳这头
- *  现猜 —— 回跳看到的正文已经是改过的那一份了。
+ *  现猜 —— 回跳看到的正文已经是改过的那一份了。**这一档同样要 `same`**:
+ *  「两侧上下文全失配」本身就说明正文变过,那时连"当时唯一"也只在当时成立
+ *  (审查实测:收藏第二处、原处被整段删掉,裸引文正好唯一命中第一处 —— 一段
+ *  用户从没收藏过的文字被当成他收藏的那一段高亮出来)。
  *  口径同 `kb/web/pages.py` 的 `seek`/`hitsOf`,两头各一份,改一处要改两处。*/
 function snipSeek(text, spec) {
   const a = snipAnchor(spec);
   if (!a.q) return null;
-  const byP = a.p ? snipAll(text, a.p + a.q).map(at => at + a.p.length) : [];
-  const byS = a.s ? snipAll(text, a.q + a.s) : [];   // q+s 的起点就是引文的起点
-  const bare = Number(spec && spec.u) === 1 ? snipAll(text, a.q) : [];
-  const cand = byP.length && byS.length ? byP.filter(at => byS.includes(at))
-    : byP.length ? byP
-      : byS.length ? byS
+  const same = !!(spec && spec.same);
+  // 一侧的三种状态**不许压成两种**:`null` = 这条锚点天生没有这一侧;`[]` =
+  // 有这一侧、在这份文本里一处也对不上;非空 = 它认的那几处。
+  const byP = a.p ? snipAll(text, a.p + a.q).map(at => at + a.p.length) : null;
+  const byS = a.s ? snipAll(text, a.q + a.s) : null;   // q+s 的起点就是引文的起点
+  // 「有证据却一处也对不上」= 这份语料不是采集时那一份,除非证明过(见上)
+  if (((byP && !byP.length) || (byS && !byS.length)) && !same) return null;
+  const hitP = byP || [], hitS = byS || [];
+  const bare = same && Number(spec && spec.u) === 1 ? snipAll(text, a.q) : [];
+  const cand = hitP.length && hitS.length ? hitP.filter(at => hitS.includes(at))
+    : hitP.length ? hitP
+      : hitS.length ? hitS
         : bare;
   // 数不完的那一边也算说不清(见 SNIP_MAX_HITS):截断过的集合取交集只会偏小
   const over = xs => xs.length > SNIP_MAX_HITS;
-  if (over(byP) || over(byS) || over(cand)) return null;
+  if (over(hitP) || over(hitS) || over(cand)) return null;
   return cand.length === 1 ? [cand[0], cand[0] + a.q.length] : null;
 }
 

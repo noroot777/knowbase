@@ -41,11 +41,16 @@ PROBE = Path(__file__).resolve().parent / "snip_probe.mjs"
 # 跑的话那几条数量判据就不是在数它们要数的东西了。两份共用同一个沙箱服务
 # (摆盘贵),共用外壳 `snip_probe_lib.mjs`。
 EDGES = Path(__file__).resolve().parent / "snip_probe_edges.mjs"
+# 第二份的后半截:**「这段话出自哪一条消息」**那一组(可收范围收到落了库的正文上、
+# 两条一字不差的回答靠编号分、记着的消息不在了、原对话被删掉)。拆出来是为了 700
+# 行上限,**紧跟在第二份后面跑、顺序一点没动** —— 它最后一节会把那个对话真删掉,
+# 所以仍然排在要在问答正文上选字的那几份之后。
+CHAT = Path(__file__).resolve().parent / "snip_probe_chat.mjs"
 # 第三份只管一件事:**存下来的到底是不是屏幕上那份文字**(`<br>` 和段落边界在
 # DOM 文本节点里一个字符都不占,两行会接成一行),外带「选完了」那三种输入方式。
 # 它和第二份分开是因为那两件事的形态不一样:第二份是"当场成功、后来不作数",
 # 这一份是"当场看着全对、粘出来才发现不是那段话"。**排在第二份之前**:第二份
-# 最后一节会把那个对话真删掉,而这一份要在问答正文上选字。
+# 的后半截(`CHAT`)最后一节会把那个对话真删掉,而这一份要在问答正文上选字。
 SHOWN = Path(__file__).resolve().parent / "snip_probe_shown.mjs"
 # 第三份管**绑得对不对**:位置绑在哪一处(两侧的位置证据只听了一半 → 高亮落在一处
 # 另一侧已经排除掉的地方)、版本绑在哪一版(核对和落库之间正文换了一版 → 收藏固化
@@ -100,6 +105,12 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
         if not edges.stdout.strip():
             raise AssertionError(edges.stderr)
         cls.edges = json.loads(edges.stdout)
+        # 紧跟着跑第二份的后半截(同一个库,顺序照旧)
+        chat = run_probe([node, str(CHAT), base, str(manifest)],
+                         timeout=420, env=probe_env())
+        if not chat.stdout.strip():
+            raise AssertionError(chat.stderr)
+        cls.chat = json.loads(chat.stdout)
         cards = run_probe([node, str(CARDS), base, str(manifest)],
                           timeout=420, env=probe_env())
         if not cards.stdout.strip():
@@ -128,6 +139,19 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
         """
         results = self.edges["results"]
         self.assertTrue(results, "反例探针一条都没跑")
+        for r in results:
+            with self.subTest(check=r["name"]):
+                self.assertTrue(r["ok"], r["detail"])
+
+    def test_a_chat_snippet_says_which_message_it_came_from(self):
+        """问答那一段话出自哪一条消息:采集、回跳、以及那条消息不在了的时候。
+
+        和上面那条分开记:这几条红的时候,收藏**当场是成功的**、库里那条也在 ——
+        不好的是点回去亮在另一条一字不差的回答上(页面上看不出来),或者记着的那
+        条消息不在了却退回整个对话搜,把另一处同句冒认成原处。
+        """
+        results = self.chat["results"]
+        self.assertTrue(results, "问答单元探针一条都没跑")
         for r in results:
             with self.subTest(check=r["name"]):
                 self.assertTrue(r["ok"], r["detail"])
@@ -183,6 +207,7 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
         self.assertEqual([], self.out["pageErrors"])
         self.assertEqual([], self.shown["pageErrors"])
         self.assertEqual([], self.edges["pageErrors"])
+        self.assertEqual([], self.chat["pageErrors"])
         self.assertEqual([], self.cards["pageErrors"])
         self.assertEqual([], self.bind["pageErrors"])
 

@@ -441,13 +441,16 @@ async function doSendToolChat(q) {
     }
     if (errMsg) throw new Error(errMsg);
     const pend = document.getElementById('td-pending');
-    // **正常 EOF 却没有 done 帧 = 这一轮一个字都没进库**(后端是 `_save_qa` 之后
-    // 才发 done):半截答案照旧铺出来,但不给落库身份,所以收不了片段。口径与事故
-    // 形态同问答面板,见 `chat.js` 的 `SNIP_CID`。
+    // **正常 EOF 却没有 done 帧 = 这一轮有没有进库我们不知道**(后端是 `_save_qa`
+    // 之后才发 done,那一帧可能丢在存库之前、也可能丢在之后):半截答案照旧铺出来,
+    // 但不给落库身份,所以收不了片段。**那一句只许说到「没得到确认」为止**,不许
+    // 说成「没有落库」。口径、文案与事故形态同问答面板,见 `chat.js` 的 `SNIP_CID`。
     if (!(Number(doneCid) > 0)) {
       if (pend) pend.outerHTML = renderMsg({ role: 'assistant', content: partial, refs, model });
       toast('这一轮没有收到完成确认', {
-        type: 'info', detail: '屏幕上这段回答没有落库,刷新就没了;重问一次才收得了片段',
+        type: 'info',
+        detail: '它有没有落库这儿说不准 —— 刷新后看问答侧栏里有没有这一轮;'
+          + '屏幕上这一段暂时收不了片段',
       });
       loadConvs();
       return;

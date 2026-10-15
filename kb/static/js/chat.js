@@ -274,7 +274,43 @@ async function openConv(id, force) {
   scrollChat(true);
   // 收藏回跳的落点。排在 scrollChat 之后:那一句把消息区滚到底,
   // 反过来会把刚定位好的位置顶掉。
-  chatPendingSnip = consumeSnipJump(chatPendingSnip, id, $('chat-msgs'), CHAT_SNIP_SKIP);
+  const pend = chatPendingSnip;
+  if (pend && String(pend.ref) === String(id)) {
+    const unit = chatSnipUnit($('chat-msgs'), pend.msg);
+    if (!unit) {
+      // 记着消息 id、可它不在这个对话里了(那一轮被删过、或者这条收藏来自另一个
+      // 对话的同名 ref)。**不许退回整对话搜** —— 那正是「把另一条同句冒认成原处」
+      // 的入口。如实说,并把待定位收掉。
+      chatPendingSnip = null;
+      toast('没找到这段收藏', { type: 'info',
+        detail: '这条收藏出自的那条消息已经不在这个对话里了;收藏里那段原文还在' });
+    } else {
+      chatPendingSnip = consumeSnipJump(
+        { ...pend, spec: { ...pend.spec, same: unit.same } },
+        id, unit.el, CHAT_SNIP_SKIP);
+    }
+  }
+}
+
+/** 问答回跳的落点:**那一条消息**,不是整个对话。回 `{el, same}`;记着消息 id
+ *  可那条消息不在了的话回 `null`(调用方如实说,不许退回整对话搜)。
+ *
+ *  收藏行里记着后端核验过的消息 id(`favorites.origin_msg`)。拿整个消息区当语料
+ *  的话:同一个问题问两遍、回答一模一样时,整对话里有两处,于是按「位置说不清」
+ *  一个高亮也不给 —— 而要找的那一条明明记着(审查复现);两条回答只有一半相同时
+ *  更坏,锚点在另一条上先命中,高亮落在别人身上。
+ *
+ *  `same` = 「要搜的这份语料就是采集时那一份」(见 `snip_text.js` 的 `snipSeek`)。
+ *  **限定到那一条消息之后这句话是真的**:消息落库之后不会再改,它的身份就是那个
+ *  id,而采集那一头的坐标系也正是这一条气泡(`chatSnipSource` 的 `root`)。所以
+ *  弱档(只听一侧、裸引文)在这一头可以采信。老收藏没有 `origin_msg`,只能按整个
+ *  对话搜,那时 `same` 为假 —— 两侧都对不上就如实说位置说不清。*/
+function chatSnipUnit(host, mid) {
+  const want = Number(mid) || 0;
+  if (!want) return { el: host, same: false };
+  const msg = host.querySelector('.msg[' + SNIP_MID + '="' + want + '"]');
+  if (!msg) return null;
+  return { el: msg.querySelector('.bubble') || msg, same: true };
 }
 
 function newChat() {
@@ -477,20 +513,27 @@ async function doSendChat(q, isRetry) {
     inflight = null;
     const pend = $('chat-pending');
     // **「流结束了」不等于「这一轮落库了」。** 后端是收完模型输出 → `_save_qa`
-    // → 才发 `done`(`kb/web/chat_api.py`),所以**正常 EOF 却没有 done 帧**就是
-    // 「答案都在屏幕上、库里一个字没有」:中间那层代理掐断、进程被杀、响应被截
-    // 都长这样,HTTP 状态是 200、delta 帧也完整,只差最后那一帧。
+    // → 才发 `done`(`kb/web/chat_api.py`),所以**正常 EOF 却没有 done 帧**时,
+    // 这一轮有没有进库**我们不知道**:中间那层代理掐断、进程被杀、响应被截都长这
+    // 样,HTTP 状态是 200、delta 帧也完整,只差最后那一帧 —— 而那一帧可能是在
+    // `_save_qa` **之前**没发出来(库里一个字没有),也可能是**之后**(已经存上
+    // 了,只是回执没到)。
     // 这时**半截答案照旧铺出来**(用户看见的东西不该凭空消失),但它拿不到身份,
     // 于是收不了片段(见 `SNIP_CID`);并且**如实说一句**,不然用户只会以为
-    // 「收藏此段坏了」。`chatConvId` 也不能跟着设成 null —— 那会把当前视图的会话
-    // 归属一起抹掉,接着追问就新开了一个对话。
+    // 「收藏此段坏了」。**那一句只许说到「没得到确认」为止** —— 说成「没有落库」
+    // 是拿一个没证明过的结论告诉用户,而它可能恰好是反的:历史里明明有这一轮,
+    // 用户却按这句话又问了一遍(口径同 `snipVerified` 那三种退路各说各话:
+    // 「这一刻读不出来」不许说成「确定不在」)。`chatConvId` 也不能跟着设成
+    // null —— 那会把当前视图的会话归属一起抹掉,接着追问就新开了一个对话。
     if (!(Number(doneCid) > 0)) {
       if (pend) {
         pend.outerHTML = renderMsg({ role: 'assistant', content: answer, refs, model });
         scrollChat();
       }
       toast('这一轮没有收到完成确认', {
-        type: 'info', detail: '屏幕上这段回答没有落库,刷新就没了;重问一次才收得了片段',
+        type: 'info',
+        detail: '它有没有落库这儿说不准 —— 刷新后看侧栏里有没有这一轮;'
+          + '屏幕上这一段暂时收不了片段',
       });
       loadConvs();
       return;
@@ -589,6 +632,11 @@ function chatSnipSource(range) {
   const q = chatQuestionOf(msg).trim();
   return {
     origin: 'chat', origin_ref: String(convId), origin_msg: msgId, skip: CHAT_SNIP_SKIP,
+    // **坐标系收到这一条气泡上**(整个消息区是默认值)。回跳也只在这一条消息里
+    // 找(`chatSnipUnit`)—— 两头摊的是同一个单元,于是采集算出来的「唯一」和
+    // 「定得到」在回跳那一刻仍然成立。摊整个消息区的话,引文顶在气泡开头时它的
+    // 前文来自**上一条消息**,回跳在这一条里一辈子也对不上。
+    root: body,
     // 裁标题不许切开一个字(口径在 snip.js 的 `snipClip`:切出来的半个字
     // 后端存不下,整条 POST 会被拒)
     origin_title: q ? '问答 · ' + snipClip(q, 60) : '知识问答',

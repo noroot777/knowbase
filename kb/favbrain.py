@@ -43,7 +43,7 @@ def _read_body(path: str | None, limit: int) -> str:
     """读文章正文(去 frontmatter),截断到 limit 字。
 
     `path` 可以为空:日报正文、问答回答、还没导出的订阅条目收下来的片段没有
-    vault 文档(见 `kb.store._FAVORITES_TABLE`)。那时行动卡只能围着引文本身
+    vault 文档(见 `kb.store_migrate.FAVORITES_TABLE`)。那时行动卡只能围着引文本身
     做 —— 拿 `VAULT_ROOT / None` 去读是 TypeError,会把整条行动卡打掉。
     """
     if not path:

@@ -276,6 +276,16 @@ TOOL_V_KEPT = '这一句用来验补过一段之后照旧绑得上'
 # 插着四个尖括号字:核对该判"定位不到",落库该照落、但当场说清。
 TOOL_HTML_MD = '图鉴里这句跨过<strong>加粗</strong>那几个字,收藏它要如实说一句'
 TOOL_HTML_SEEN = TOOL_HTML_MD.replace('<strong>', '').replace('</strong>', '')
+# **带删除线的那一句:搜索卡那一头的形状。** 检索语料剥掉了 `*`、却留着 `~`
+# (`kb/chunker.py` 的 `strip_markup`),所以这一句在搜索卡上带着两道波浪号,而
+# 阅读页把它渲染成 `<del>`(波浪号没了)—— 跨过波浪号的选区在那一页上压根不存在,
+# 核对必然不过。而搜索卡这一类**既不自带版本号、也没有一档不说谎的退路**:它只能
+# 记下刚读到的那一版、照旧绑那一篇,并当场说清点回去可能定位不到。
+# **这一句要排在条目正文靠前的位置**:搜索卡只摊 `best_chunk` 的前 160 字
+# (`core.js` 的 `.snippet`),排到后面去的话卡片上压根看不到它,这一节会因为
+# 「一处都没取到」而看着是绿的。
+TOOL_DEL_TEXT = '删除线这一句在搜索卡上带着波浪号'
+TOOL_DEL_MD = f'~~{TOOL_DEL_TEXT}~~'
 # 条目正文的**最后一句**:它后面紧跟着的是抽屉里那三颗链接按钮和小节标题 ——
 # 前后文锚点必须只从正文里采,不许把界面文字当成目标文档的上下文。
 TOOL_TAIL = '交代它和别的工具怎么搭'
@@ -316,6 +326,14 @@ CHAT_QUESTION_5 = '那套方案还有哪两条注意事项?'
 SNIP_CSS_CLASS = 'snip-css-probe'
 SNIP_CSS_1 = 'CSS 把这一句单独摊成了一行'
 SNIP_CSS_2 = '它下面这一句是另一行,标签名上看不出来'
+# **第六、七轮:同一个问题问两遍,两条回答一字不差。** 这个对话里于是有两处
+# 完全一样的文字,**靠文字谁也分不出是哪一条** —— 分得出它们的只有消息编号
+# (`favorites.origin_msg`,后端核验过的那一个)。采集和回跳都该收到那一条消息
+# 上:在整个消息区里搜的话,这两处都对得上 → 按「位置说不清」一个高亮也不给,
+# 而要找的那一条明明记着(审查复现的那一条);更坏的是两条回答只有一半相同时,
+# 锚点在另一条上先命中、高亮落在别人身上。
+CHAT_QUESTION_6 = '同一个问题问两遍,你会给出一字不差的回答吗?'
+SNIP_CHAT_TWICE = '会:这一句在两条回答里一字不差,靠文字分不出是哪一条'
 
 # frontmatter 的键按 scripts/gzh_projects_export.py 来:`project` 缺了
 # `kb/projects.py` 的 `_load_entry` 直接判成"不是条目"、整个图鉴里看不到它。
@@ -338,6 +356,8 @@ tags:
 > 整理自公众号文章 [一篇讲这个工具的文章](https://example.org/tool-post) · 某个公众号 · {day}
 
 {snip},不连任何外部服务。
+
+{vdel}。
 
 {vfresh}。{vstale}。{vagain}。{vkept}。
 
@@ -484,7 +504,7 @@ def build(vault: Path) -> dict:
     tool_path.write_text(_TOOL_MD.format(
         name=TOOL_NAME, snip=SNIP_TOOL, day=day, published=published,
         vfresh=TOOL_V_FRESH, vstale=TOOL_V_STALE, vagain=TOOL_V_AGAIN,
-        vkept=TOOL_V_KEPT, vhtml=TOOL_HTML_MD),
+        vkept=TOOL_V_KEPT, vhtml=TOOL_HTML_MD, vdel=TOOL_DEL_MD),
         encoding='utf-8')
 
     cli._index_pass(Namespace(reembed=False, no_vector=True))
@@ -563,6 +583,17 @@ def build(vault: Path) -> dict:
             " VALUES (?, 'assistant', ?, 'stub/none', ?)",
             (cid, f'<span class="{SNIP_CSS_CLASS}">{SNIP_CSS_1}</span>'
                   f'<span class="{SNIP_CSS_CLASS}">{SNIP_CSS_2}</span>', iso))
+        # 第六、七轮:同一个问题、一字不差的两条回答(见 CHAT_QUESTION_6)。
+        # **排在最后两轮**:前面几节按文字找消息,多两轮一模一样的话会把它们
+        # 认到的那一条换掉 —— 而这两轮的文字和前面任何一轮都不重复。
+        for _ in range(2):
+            conn.execute(
+                "INSERT INTO messages (conversation_id, role, content, created_at)"
+                " VALUES (?, 'user', ?, ?)", (cid, CHAT_QUESTION_6, iso))
+            conn.execute(
+                "INSERT INTO messages (conversation_id, role, content, model,"
+                " created_at) VALUES (?, 'assistant', ?, 'stub/none', ?)",
+                (cid, f'{SNIP_CHAT_TWICE}。', iso))
         conn.commit()
     finally:
         conn.close()
@@ -602,7 +633,11 @@ def build(vault: Path) -> dict:
             'snipChat3': SNIP_CHAT_3, 'snipList': SNIP_LIST,
             'snipListDup': SNIP_LIST_DUP, 'snipListMarked': SNIP_LIST_MARKED,
             'cssClass': SNIP_CSS_CLASS, 'snipCss1': SNIP_CSS_1, 'snipCss2': SNIP_CSS_2,
+            'chatQuestion6': CHAT_QUESTION_6, 'snipChatTwice': SNIP_CHAT_TWICE,
             'onceQ': ONCE_Q, 'onceSolo': ONCE_SOLO,
+            # 两处各自的后文:判「一侧有证据、在这份文本里一处也对不上」那一档用
+            # —— 后文指得出其中一处,前文给一句正文里压根没有的话
+            'onceTail1': ONCE_TAIL_1, 'onceTail2': ONCE_TAIL_2,
             'swapKey': swap['key'], 'swapUrl': FEED_SWAP['url'],
             'snipSwap': SNIP_SWAP, 'snipWide': SNIP_WIDE,
             'confQ': CONF_Q, 'confP': CONF_LEAD_1[:30], 'confS': CONF_TAIL_2[:30],
@@ -615,6 +650,7 @@ def build(vault: Path) -> dict:
             'toolVFresh': TOOL_V_FRESH,
             'toolVStale': TOOL_V_STALE, 'toolVAgain': TOOL_V_AGAIN,
             'toolVKept': TOOL_V_KEPT, 'toolHtmlSeen': TOOL_HTML_SEEN,
+            'toolDelText': TOOL_DEL_TEXT, 'toolDelMd': TOOL_DEL_MD,
             'toolTail': TOOL_TAIL,
             'streamText': STREAM_TEXT, 'streamTail': STREAM_TAIL,
             'toolPath': str(tool_path.relative_to(vault))}

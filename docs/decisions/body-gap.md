@@ -77,14 +77,14 @@
   「失败 1 · 需处理」而「问题明细」里一条都没有,点进去什么也看不到(2026-10-09
   审查实测 `status=error`、「成功 0,失败 1,无正文 1」、`failures=[]`)。
 - **新增那一列在老库上是 ALTER 补的,所以「读列集合」和 ALTER 要在同一把写锁里**
-  (`store._add_columns`:缺列才 `BEGIN IMMEDIATE`,**并在锁里重新读一次**列集合;
-  `_migrate_promo` 一并走它 —— 把不安全的那份留在修好的那份旁边就是个复制陷阱)。
+  (`store_migrate.add_columns`:缺列才 `BEGIN IMMEDIATE`,**并在锁里重新读一次**列集合;
+  `migrate_promo` 一并走它 —— 把不安全的那份留在修好的那份旁边就是个复制陷阱)。
   不持锁的话同时首访同一个老库的连接读到同一份旧列集合,后来者的 ALTER 撞
   `duplicate column name`、那一个请求当场 500;而 `connect()` 是页面 API、提取
   worker、CLI 共用的入口,于是「升级后第一次并发使用」有一批操作直接报错
   (2026-10-09 审查实测 12 个并发连接 11 个失败)。口径同 feeds registry 那次。
   **常态不取锁**:列都在时只花一句 PRAGMA —— 为一件一辈子只发生一次的事去抢写锁,
-  是把升级的代价摊给了每一次连接。(`_migrate_entities` 那条还带数据回填,形状不同,
+  是把升级的代价摊给了每一次连接。(`migrate_entities` 那条还带数据回填,形状不同,
   这一轮没动。)
 - **面板上的「当前待处理 N 项」不能只在 running→idle 那个跳变上刷新**
   (`pipe.js` 另按「出现了一轮新的已结束运行」判:`s.run_id || s.finished_at` 变了

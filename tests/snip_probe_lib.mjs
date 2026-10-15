@@ -401,6 +401,14 @@ export async function boot() {
 
 }
 
+/** 把提示区清空再做下一件事。**`__toastText()` 读的是整个 `#toast-host` 的
+ *  `textContent`** —— 一轮里弹过的每一句都还摊在里面,所以「这一条**没有**说什么」
+ *  那类判据必须先清:不清的话读到的是上一条留下的话,两份实现各自的红也分不开
+ *  (实测:只改问答面板那一句文案,图鉴抽屉那条判据也跟着红)。*/
+export const appToastClear = () => evalJs(
+  `(() => { const h = document.getElementById('toast-host');
+     if (h) h.innerHTML = ''; return true; })()`);
+
 /** 收尾:把结果写到 stdout(整份 JSON 一次写完,调用方整段解析)、关浏览器。 */
 export function finish() {
   writeSync(1, JSON.stringify({ results, pageErrors }, null, 1) + "\n");

@@ -49,6 +49,16 @@ attachSnip($('results'), range => {
   // 搜索结果都是库里的文档,没有 path 的命中不该存在 —— 真碰上就不给收,
   // 而不是存一条没有落点的收藏
   if (!hit || !hit.path) return null;
+  // **卡片上这一截不带版本号,而且它和那一页上的文本本来就不是同一份。** 检索
+  // 语料是入库时切的块(`kb/chunker.py` 为了让检索词对得上把 `*` 剥掉了,却留着
+  // `~~` 之类),卡片又只摊命中的那一截。所以这一类**不自带 `doc_version`**,
+  // 交给 `snipVerified` 现读那一篇:核过了就按盘上那一份重算唯一性和定位、
+  // 带着**读到的那一版**落库;核不过(删除线那类)也带着读到的那一版照旧绑这一
+  // 篇 —— 点回去打开的至少是对的那一篇文章,而收藏那一刻会当场说一句「点回去
+  // 可能定位不到这一处」(见 `snip.js` 的 `snipVerified` / `STAY_NOTE`)。
+  // **不给 `fallback`**:退到 `origin=feed` 是假话(这是库里的文章,不是订阅
+  // 条目),而 `origin=doc` 配空 path 后端按 400 拒 —— 读不出那一篇的那两种
+  // (已经不在索引里 / 这一刻读不出来)由 `saveSnip` 如实拒掉并说明原因。
   return {
     origin: 'doc', path: hit.path, root: host.body, skip: SNIP_CARD_SKIP, partial: true,
     origin_title: hit.title || hit.path, origin_url: hit.url || '',

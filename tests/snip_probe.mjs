@@ -406,12 +406,15 @@ if (docHref) {
   // **跨段落的引文**:订阅阅读器那边两段之间是空行,阅读页这边渲染成两个 <p>
   // (串起来只剩一个换行)—— 不把空白压平的话,这条锚点在这一页永远找不到。
   const across = "剩下的都是工程问题。 请执行 " + fx.snipMarkedPlain + " 并核对结果。";
-  // **手搭的裸锚点要带 `u: 1`**:这一页只在「采集那一刻这段话就只有一处」时才
-  // 采信裸引文那一档(`kb/web/pages.py` 的 `seek`),缺这个数按「说不清」办。
-  // 真实链路上它由 `fav.js` 从 `favorites.quote_unique` 带过来;这一段话在那一篇
-  // 里确实只有一处。反过来那一边(`u: 0` 不许采信)在 snip_probe_bind.mjs 里。
+  // **手搭的裸锚点要带 `u: 1` 和 `v`(这一篇此刻的版本号)**:这一页只在「采集
+  // 那一刻这段话就只有一处」**且「要搜的这一篇就是采集时那一篇」**时才采信裸引文
+  // 那一档(`kb/web/pages.py` 的 `seek`),两个数缺哪个都按「说不清」办。真实链路
+  // 上它们由 `fav.js` 从 `favorites.quote_unique` / `doc_version` 带过来;这一段话
+  // 在那一篇里确实只有一处,而这一页此刻就是收藏时那一版(这一节还没动过盘上那
+  // 篇 md)。反过来那两边(`u: 0` 不许采信、版本不等不许采信)在
+  // snip_probe_bind.mjs 里。
   await evalJs(`location.hash = '#kbq=' + encodeURIComponent(JSON.stringify(
-    { q: ${js(across)}, p: '', s: '', u: 1 })); true`);
+    { q: ${js(across)}, p: '', s: '', u: 1, v: DOC_VERSION })); true`);
   const hiAcross = await snipHighlight(across, 10000);
   check("跨段落的引文在阅读页上也定位得到", hiAcross === across, hiAcross);
   // **这一页的定位也要求每一档唯一**(同 7b,那一条验的是 app 那一侧)。这一篇
