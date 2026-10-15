@@ -23,7 +23,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from kb.collectors import CollectorError, FetchScope, SourceStatus, Target
+from kb.collectors import (CollectorError, Fetched, FetchScope, SourceStatus,
+                           Target)
 from kb.pipeline_state import _log, _stage
 
 # 采集器在本仓库内(<repo>/collector)。刻意用相对于本文件的路径而不是绝对路径:
@@ -81,28 +82,50 @@ def _run_cli(*argv: str, timeout: int) -> subprocess.CompletedProcess:
     )
 
 
-def _receipt(event: dict) -> frozenset[str] | None:
-    """子进程那份「写了哪几篇」换算成 vault 相对路径。换算不了返回 None。
+def _receipt(event: dict) -> frozenset[Fetched] | None:
+    """子进程那份「写了哪几篇」换算成带身份的回执。换算不了返回 None。
 
-    事件里是 `out`(导出根目录的绝对路径)+ `written`(每篇的 `<天>/<文件名>`),
-    两样都由 `collector/cli.py` 的 `cmd_export` 从导出脚本自己打的行里收上来。
+    事件里是 `out`(导出根目录的绝对路径)+ `items`(每篇一条
+    `{"id", "round", "name"}`,name 是 `<天>/<文件名>`),两样都由
+    `collector/cli.py` 的 `cmd_export` 从导出脚本自己打的行里收上来。
+
+    身份两件事各有出处:`id` 是 `articles.id`(稳定内容身份,挂上采集器名字做
+    前缀免得和别的来源撞),`round` 是 `article_fetch_rounds` 里那一行 ——
+    发现这一篇的那一次业务抓取。`round` 空串是「说不清」(这张表建出来之前就在库里的那些文章、手工
+    导入的链接),不许当成「不是本次」。
 
     **`out` 不在 vault 里就返回 None**:那说明采集器被配去写别处(测试夹具、
-    两边 `KB_VAULT_ROOT` 对不上),算出来的相对路径不是知识库里那个身份 ——
-    而账本靠路径去重,记一批不存在的路径会让后面真落下来的同名文章被当成
-    「已经数过」。宁可报「不可确认」。
+    两边 `KB_VAULT_ROOT` 对不上),算出来的相对路径不在知识库的取材范围里 ——
+    而范围过滤正是按它判的,一批对不上的路径会被整批筛掉、报成确定的 0 条。
+    宁可报「不可确认」。
+
+    **没有 `items` 这个键一律 None**,哪怕事件本身是成功的:那说明
+    `KB_COLLECTOR_DIR` 指着一份还不打清单的旧采集器,它写了多少篇我们不知道。
     """
     from kb.config import VAULT_ROOT
 
     out = str(event.get("out") or "")
-    names = event.get("written")
-    if not out or not isinstance(names, list):
+    rows = event.get("items")
+    if not out or not isinstance(rows, list):
         return None
     try:
         prefix = Path(out).resolve().relative_to(Path(VAULT_ROOT).resolve())
     except (OSError, ValueError):
         return None
-    return frozenset(str(prefix / str(n)) for n in names if str(n).strip())
+    got = []
+    for one in rows:
+        if not isinstance(one, dict):
+            return None                 # 清单读不懂:当成说不出来,不挑着收
+        name = str(one.get("name") or "").strip()
+        if not name:
+            continue
+        # 身份退回路径只在「旧采集器打了名字、没打 id」时发生。那时条数照旧
+        # 确定,只有分解说不出来 —— 比整轮报「不可确认」更接近事实。
+        aid = str(one.get("id") or "").strip()
+        rel = str(prefix / name)
+        got.append(Fetched(f"wechat_local:{aid}" if aid else f"path:{rel}",
+                           str(one.get("round") or "").strip(), rel))
+    return frozenset(got)
 
 
 class WeChatLocalCollector:
@@ -165,7 +188,12 @@ class WeChatLocalCollector:
         if problem:
             _stage("crawl", "skipped", f"采集器还没装好,跳过抓取:{problem}")
             return
-        argv = ["collect"]
+        # 把这一次业务抓取的身份带进子进程:它新发现的文章各记一笔,导出时原样
+        # 交回来当回执里的抓取身份。不带的话只能事后按时间窗口反猜归属,而那正是
+        # 「别处同期落下的内容被算进这一轮」的来源(口径见 `kb.fetch_rounds`)。
+        from kb.fetch_rounds import round_key
+
+        argv = ["collect", "--round", round_key()]
         if scope.ranged:
             argv += ["--since", scope.since, "--until", scope.until]
             timeout_min = 120        # 区间补抓页间/号间等待远长于日常增量
@@ -290,7 +318,7 @@ class WeChatLocalCollector:
 
     # ── 落地:采集器本地库 → obs md ───────────────────────────────────────────
 
-    def materialize(self) -> frozenset[str] | None:
+    def materialize(self) -> frozenset[Fetched] | None:
         """落 md,返回这一轮新写的那几篇(见 `kb.collectors` 的契约)。
 
         **只有子进程自己交出清单的那一支给确定值**,其余一律 None(不可确认):

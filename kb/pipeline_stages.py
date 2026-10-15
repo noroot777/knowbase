@@ -119,16 +119,6 @@ def source_pending(channel: str | None = None) -> int | None:
     return active_collector(channel).pending()
 
 
-def _round_key() -> str:
-    """这一刻属于哪一次**业务抓取**(当日抓取账本的键)。
-
-    有批次身份就用它 —— 一轮日报、一次勾了三个来源的同步都是 N 次管道运行、
-    **一次**抓取。没有批次的独立运行(单来源同步、重试失败项)用自己的 run id。
-    两种身份都跨进程唯一,理由分别在 `pipeline_batch.open_batch` 和 `new_run_id`。
-    """
-    return str(_state.get("batch") or _state.get("run_id") or "")
-
-
 def _run_crawl(crawl_filter: dict | None = None) -> None:
     """让采集器把远端内容拉到它本地。
 
@@ -149,7 +139,7 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
     filters = crawl_filter or {}
     planned = _state.get("planned_stages")
     fetch_rounds.open_round(
-        _round_key(),
+        fetch_rounds.round_key(),
         materializes="export" in planned if isinstance(planned, list) else True)
 
     def _fetch(collector, scope: dict) -> None:
@@ -176,7 +166,7 @@ def _run_export(crawl_filter: dict | str | None = None) -> None:
     """
     from kb import fetch_rounds
 
-    key = _round_key()
+    key = fetch_rounds.round_key()
     # 先落一张空回执:成果从「确定的空集」起步,各来源的回执并进来。一个来源都
     # 没选中时它就是最终结论(确定 0 条,不是不可确认)。
     fetch_rounds.note_new(key, ())

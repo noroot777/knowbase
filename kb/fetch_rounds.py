@@ -24,6 +24,25 @@
 所以现在只收回执:采集器说不出来(返回 `None`)就记一笔「这一段不可确认」,
 宁可面板上写「条数读不出来」,也不拿一个看着确定的数糊过去。
 
+**回执里每一条带两个身份,账本按内容身份去重、按抓取身份分档。** 稳定内容身份
+(`rss:<key>`、`wechat_local:<article id>`)由采集器自己的库给,路径当不了它 ——
+标题一改文件名就变,同一篇会连着几天被报成"刚抓到"。抓取身份是**发现**这一条的
+那一次业务抓取,记在采集器自己的持久化记录里(`feed_items.fetch_round`、公众号那
+张 `article_fetch_rounds`),所以「这一次新抓到的」和「之前抓到、这一次才补导进来
+的」分得开,而不是靠时间窗口反猜。
+
+**`added` 报的是「这次同步之后日报能多拿到多少」。** 这是仓库主人定的口径:这个数
+的用处就是决定要不要再花一次模型钱重新生成日报,而补导进来的那几篇确实是日报这
+一刻才拿得到的新素材。另一个口径(「远端这次新发现多少」)在补导场景下必然更小,
+它不是 `added` 要回答的问题 —— 差额如实拆成 `fresh`/`carried`/`unsure` 交给面板,
+不从 `added` 里悄悄减掉,也不反过来拿 `fresh` 冒充总数。
+
+**只勾了导出的那种运行不算一次抓取**(它压根不开轮,`note_new` 找不到轮次就什么
+都不做)。它落下来的那几篇不会因此失踪:每一条都带着**原本那次抓取**的身份,所以
+账目上它们属于真抓到它们的那一轮,而不是属于"没有抓取的这一次"。反过来把它们追记
+回那一轮也不行 —— 一是会改掉用户早就看过的数,二是那一轮多半已经滚出保留窗口,
+追记只会留下一条对不上轮次的孤行,把整份账本拖成「不可确认」。
+
 **「一次业务抓取」的身份是业务批次,不是管道运行。** 一轮日报 = N+1 次管道运行
 (每个来源各一次),它们共用一个 `pipeline_batch.open_batch()` 发的身份;勾了三个
 来源手动同步也是一次抓取、三次运行。按运行记的话面板上会写成「今天第 7 次抓取」
@@ -42,10 +61,11 @@
 
 - 追加而不是整份重写:整份重写一次写坏就把当天已经确认过的轮次全带走,追加
   最坏只留一条半截行,`_fold` 认得出来。
-- 回执行存的是**路径集合**,折叠时取**并集**。`write` 成功而 `fsync` 报错是真会
-  发生的事(那几行其实已经进了文件),重试把同一行再追加一遍 —— 存条数就会
-  翻倍(实测 2 篇报成 4 篇),存路径则并集不变。同一轮被重试、被两条通道各报
-  一次、被同一个进程重放,结论都一样。
+- 回执行存的是**内容身份集合**,折叠时取**并集**。`write` 成功而 `fsync` 报错是真
+  会发生的事(那几行其实已经进了文件),重试把同一行再追加一遍 —— 存条数就会
+  翻倍(实测 2 篇报成 4 篇),存身份则并集不变。同一轮被重试、被两条通道各报
+  一次、被同一个进程重放,结论都一样。**而且必须是内容身份、不能是路径**:
+  改名那一轮里同一篇内容以两个文件名各写一次,按路径取并集会数成两篇。
 - 攥在手里没落下去的那几行不许悄悄丢。超过 `_KEEP_UNSAVED` 时丢掉的不是数据
   而是换成一条「这一轮不可确认」的标记,**投影不完整就不许解除「不可确认」**。
 - 读、追加、轮换全在同一把文件锁里(`_locked`)。不然进程 A 读完旧账、进程 B
@@ -181,12 +201,41 @@ def in_scope(rel: str, prefixes=None) -> bool:
     return False
 
 
+def _pairs(obj: dict) -> list[tuple[str, str]] | None:
+    """一条回执行里的 `(内容身份, 抓取身份)`。读不出来返回 None(= 记不全)。
+
+    认两种形状:`items` 是 `[[内容身份, 抓取身份], …]`,`paths` 是旧形状的
+    `[路径, …]` —— 后者的抓取身份一律空串,因为那时还没记过它。
+    """
+    if 'items' in obj:
+        raw = obj['items']
+        if not isinstance(raw, list):
+            return None
+        out = []
+        for one in raw:
+            if not isinstance(one, (list, tuple)) or not one or not str(one[0]):
+                return None
+            out.append((str(one[0]), str(one[1]) if len(one) > 1 else ''))
+        return out
+    raw = obj.get('paths')
+    if not isinstance(raw, list):
+        return None
+    return [(f'path:{p}', '') for p in (str(x) for x in raw) if p]
+
+
 def _fold(lines) -> tuple[list[dict], bool]:
     """把账本每一行折成「开过哪几轮、各自新落了哪些文章」,外加一句「读全了没有」。
 
-    三种行:开轮(带 `day`/`at`/`ex`)、回执(带 `paths`)、不可确认标记(带
-    `partial`)。**回执取并集**,所以同一行追加两遍、同一轮被两条通道各报一次,
-    折出来的结论都一样(见模块开头那条)。
+    三种行:开轮(带 `day`/`at`/`ex`)、回执(带 `items`)、不可确认标记(带
+    `partial`)。**回执按内容身份取并集**,所以同一行追加两遍、同一轮被两条通道
+    各报一次,折出来的结论都一样(见模块开头那条)。
+
+    一条成果出现两次而只有一次带得出抓取身份时,留**非空**那个:空串是「说不清」,
+    被它顶掉已知的身份等于把知道的事实又丢回去。
+
+    `paths` 是回执的**旧形状**(只有路径、没有身份)。照旧折得出条数,但每一条的
+    抓取身份都是空串 —— 升级那一下盘上正躺着这种行,不认它的话它会被当成一条
+    没有 `day` 的开轮行,凭空多出一次「第 N 次抓取」。
 
     `ok=False` 表示有行读不出来(半截行、被改坏、成果对不上轮次)。那时这份账本
     只能说「不可确认」—— 拿认得出来的那部分冒充完整事实,就又回到了把写失败说成
@@ -208,18 +257,20 @@ def _fold(lines) -> tuple[list[dict], bool]:
             ok = False
             continue
         key = str(obj['key'])
-        if 'paths' in obj or 'partial' in obj:
+        if 'items' in obj or 'paths' in obj or 'partial' in obj:
             got = index.get(key)
             if got is None:
                 ok = False              # 有成果、却找不到它那一轮:记不全
                 continue
             if obj.get('partial'):
                 got['partial'] = True
-            if 'paths' in obj:
-                if not isinstance(obj['paths'], list):
+            if 'items' in obj or 'paths' in obj:
+                pairs = _pairs(obj)
+                if pairs is None:
                     ok = False
                     continue
-                got['paths'].update(str(p) for p in obj['paths'])
+                for cid, fid in pairs:
+                    got['items'][cid] = fid or got['items'].get(cid, '')
                 got['got'] = True
             continue
         if key in index:
@@ -228,7 +279,7 @@ def _fold(lines) -> tuple[list[dict], bool]:
                'at': str(obj.get('at') or ''),
                # 这次运行会不会物化。读不到(存量账本行)按会物化算 —— 那一侧
                # 的结论是「不可确认」,比笃定地说 0 条安全。
-               'ex': bool(obj.get('ex', 1)), 'paths': set(), 'got': False,
+               'ex': bool(obj.get('ex', 1)), 'items': {}, 'got': False,
                'partial': False}
         rounds.append(got)
         index[key] = got
@@ -259,7 +310,7 @@ def _append(objs: list[dict]) -> bool:
     药丸永久写 0 条,补齐文章也不会自己补回来)。
 
     `fsync` 报错不代表前面那次 `write` 没写进去,所以这里返回 False 之后的重试
-    **必须是幂等的** —— 回执行存路径集合、折叠取并集,正是为这一刀准备的。
+    **必须是幂等的** —— 回执行存**内容身份**集合、折叠取并集,正是为这一刀准备的。
     """
     body = ''.join(json.dumps(o, ensure_ascii=False) + '\n' for o in objs)
     try:
@@ -326,7 +377,8 @@ def _rotate(rounds: list[dict], ok: bool, at: datetime) -> None:
         lines.append({'day': r['day'], 'key': r['key'], 'at': r['at'],
                       'ex': 1 if r['ex'] else 0})
         if r['got']:
-            lines.append({'key': r['key'], 'paths': sorted(r['paths'])})
+            lines.append({'key': r['key'],
+                          'items': [[c, f] for c, f in sorted(r['items'].items())]})
         if r['partial']:
             lines.append({'key': r['key'], 'partial': 1})
     try:
@@ -334,6 +386,25 @@ def _rotate(rounds: list[dict], ok: bool, at: datetime) -> None:
             json.dumps(o, ensure_ascii=False) + '\n' for o in lines).encode('utf-8'))
     except OSError:
         pass
+
+
+def round_key() -> str:
+    """此刻属于哪一次**业务抓取** —— 当日账本的键,也是回执里的抓取身份。
+
+    有批次身份就用它:一轮日报、一次勾了三个来源的同步都是 N 次管道运行、
+    **一次**抓取。没有批次的独立运行(单来源同步、重试失败项)用自己的 run id。
+    两种身份都跨进程唯一,理由分别在 `pipeline_batch.open_batch` 和 `new_run_id`。
+
+    **口径只有一份,放在这里。** 读它的不只有管道那两个阶段:采集器往自己的库里
+    记「这一条是哪一次抓到的」时问的是同一个问题(`feed_items.fetch_round`),
+    两处各写一份迟早漂 —— 而漂的后果是药丸把本次新抓到的算成补导的,反过来也会。
+
+    管道没在跑时返回空串(CLI 导出、面板上手点的某个维护动作)。空串是「说不清」,
+    照旧落进回执的 `unsure` 那一档,不冒充任何一次抓取。
+    """
+    from kb.pipeline_state import _state
+
+    return str(_state.get('batch') or _state.get('run_id') or '')
 
 
 def open_round(key: str, now: datetime | None = None,
@@ -362,22 +433,34 @@ def open_round(key: str, now: datetime | None = None,
                  'ex': 1 if materializes else 0}])
 
 
-def note_new(key: str, paths) -> None:
+def note_new(key: str, items) -> None:
     """这一轮抓取往 vault 新落了哪几篇 —— 参数是**生产者交回来的那份清单**。
 
-    **参数是身份(路径集合)而不是一个数**,有两个理由:调用方没法把别的阶段算
-    出来的产出当成抓取成果递进来(前两版正是这么错的,先拿日报取材结果、再拿
-    全库首次索引数冒充它);而且落盘之后折叠取并集,**任何重放都幂等** ——
-    `write` 成功、`fsync` 报错的那一刀之后重试一遍,2 篇还是 2 篇。
+    参数是一串 `kb.collectors.Fetched`(内容身份 + 抓取身份 + 这次写的路径),
+    **不是一个数、也不只是路径**:
 
-    空集合要照样记:它是「这一轮确实一篇都没新落」的那条**确定**的回执。不记
+    - 不收数,调用方就没法把别的阶段算出来的产出当成抓取成果递进来(前两版正是
+      这么错的,先拿日报取材结果、再拿全库首次索引数冒充它)。
+    - 收**内容身份**而不是路径,是因为落盘之后折叠按它取并集,**任何重放都幂等**
+      —— `write` 成功、`fsync` 报错的那一刀之后重试一遍,2 篇还是 2 篇;而路径
+      随标题变,同一篇改过名就会被当成两条。
+    - 收**抓取身份**,药丸背后那句分解才答得出来:这几条里哪些是这一次新抓到的、
+      哪些是之前抓到、这一次才补导进来的(口径见 docs/decisions/daily.md)。
+
+    空清单要照样记:它是「这一轮确实一篇都没新落」的那条**确定**的回执。不记
     的话,它和「物化中途炸了、回执丢了」在账本上长得一样。
 
-    回执里不在取材范围内的路径这里筛掉(`in_scope`)。
+    回执里不在取材范围内的按 `path` 筛掉(`in_scope`)。**范围按路径判、去重按
+    内容身份判**,两件事别混:前者问「这棵树算不算」,后者问「是不是同一篇」。
 
     按 `key` 找轮次、**不按「今天」过滤**:23:59 开的轮次 00:01 才物化完,按今天找
     会找不到它,那一轮永远停在 0 条。读不全时什么都不记(状态本来就是「不可确认」,
     往一份读不懂的账本里追加成果只会多一条对不上轮次的孤行)。
+
+    **清单里有读不懂的行,这一轮就报下界,不许静默少记。** 读不出形状、或者答不
+    出路径(范围按路径判,答不出就判不了)的那几条照旧不计数 —— 但同时记一笔
+    `partial`,面板据此说「至少 +N 条」。只跳过不记标记的后果和挑着收一份少记的
+    清单一样:用户照着一个偏小的、**看着确定**的数决定不重新生成日报。
     """
     if not key:
         return
@@ -389,8 +472,42 @@ def note_new(key: str, paths) -> None:
             _flush([])                  # 没开过这一轮:它不是一次抓取
             return
         scope = _scope_prefixes()
-        keep = sorted({str(p) for p in paths if in_scope(str(p), scope)})
-        _flush([{'key': str(key), 'paths': keep}])
+        keep: dict[str, str] = {}
+        torn = False
+        for one in items:
+            cid, fid, path = _identity(one)
+            if not cid or not path:
+                torn = True             # 读不懂 / 答不出路径:这一轮只是下界
+                continue
+            if not in_scope(path, scope):
+                continue                # 不在取材范围内:这是正常的筛掉,不是缺口
+            keep[cid] = fid or keep.get(cid, '')
+        lines: list[dict] = [{'key': str(key),
+                              'items': [[c, f] for c, f in sorted(keep.items())]}]
+        if torn:
+            lines.append({'key': str(key), 'partial': 1})
+        _flush(lines)
+
+
+def _identity(one) -> tuple[str, str, str]:
+    """一条回执成果的 `(内容身份, 抓取身份, 路径)`。
+
+    只认 `kb.collectors.Fetched` 那个三元形状。**裸路径也照收**(身份退成路径
+    自己、抓取身份说不清):一个还按旧契约返回路径集合的采集器(第三方的、
+    没跟着升的)交上来的清单,拒掉就是把真落进库的那几篇静默少记成确定值,
+    而收下来只损失那句分解 —— 条数照旧确定,`unsure` 那一档如实说「说不清是
+    哪一次抓到的」。
+
+    形状读不出来时返回三个空串,**由调用方记成这一轮的缺口**(`note_new` 的
+    `torn`),不在这里悄悄吞掉。
+    """
+    if isinstance(one, str):
+        return f'path:{one}', '', one
+    try:
+        cid, fid, path = one
+    except (TypeError, ValueError):
+        return '', '', ''
+    return str(cid), str(fid), str(path)
 
 
 def note(key: str, produce) -> None:
@@ -446,9 +563,21 @@ def _is_open(key: str, rounds: list[dict]) -> bool:
 def today(now: datetime | None = None) -> dict | None:
     """今天抓了第几次、最后那一次新落了多少 —— 面板那颗药丸要的就是这个。
 
-    `{'n': 今天第几次, 'added': 那一次新落了多少篇, 'partial': 这个数全不全,
-    'at': 'HH:MM'}`;`n=0` 是「确定今天还没有抓取过」。**整份读不出来、或者有行
-    没落下去时返回 `None`(不可确认)**,由 API 原样交给前端。
+    `{'n': 今天第几次, 'added': 那一次新落了多少篇, 'fresh': 其中这一次新抓到的,
+    'carried': 其中之前抓到、这一次才补导进来的, 'unsure': 其中说不清是哪一次抓到的,
+    'partial': 这个数全不全, 'at': 'HH:MM'}`;`n=0` 是「确定今天还没有抓取过」。
+    **整份读不出来、或者有行没落下去时返回 `None`(不可确认)**,由 API 原样交给
+    前端。
+
+    **`added` 报的是「这次同步之后日报能多拿到多少」,不是「远端这次新发现多少」**
+    —— 仓库主人要的是前者(这个数的用处就是决定要不要再花一次模型钱重新生成
+    日报),而补导进来的那几篇确实是日报这一刻才拿得到的新素材。两个数在补导场景
+    下必然不等,所以把差额如实拆在 `fresh`/`carried`/`unsure` 里,而不是从 `added`
+    里悄悄减掉。口径的来龙去脉在 docs/decisions/daily.md。
+
+    `unsure` 是第三档,不许往 `carried` 里并:抓取身份是空串时我们只知道「没记过」,
+    不知道「不是这一次」(存量内容、手工导入的链接、采集器还没来得及记都长这样)。
+    并进去就是把"不知道"写成了"确定不是"。
 
     `partial=True` 的两种来源:某一段成果采集器说不出来(`note_unknown`),或者
     这一轮会物化却一条回执都没等到(进程在写账本之前就没了)。那时 `added` 是
@@ -461,8 +590,13 @@ def today(now: datetime | None = None) -> dict | None:
     day = _day(_now(now))
     mine = [r for r in rounds if r['day'] == day]
     if not mine:
-        return {'n': 0, 'added': 0, 'partial': False, 'at': ''}
+        return {'n': 0, 'added': 0, 'fresh': 0, 'carried': 0, 'unsure': 0,
+                'partial': False, 'at': ''}
     last = mine[-1]
-    return {'n': len(mine), 'added': len(last['paths']),
+    owners = list(last['items'].values())
+    fresh = sum(1 for f in owners if f == last['key'])
+    unsure = sum(1 for f in owners if not f)
+    return {'n': len(mine), 'added': len(owners), 'fresh': fresh,
+            'carried': len(owners) - fresh - unsure, 'unsure': unsure,
             'partial': bool(last['partial'] or (last['ex'] and not last['got'])),
             'at': last['at'][-5:]}

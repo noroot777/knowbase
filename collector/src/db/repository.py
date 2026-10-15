@@ -486,6 +486,26 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         ).fetchall()
         return [self.row_to_blog_dict(r) for r in rows]
 
+    def note_fetch_round(self, article_id: str, round_key: str) -> None:
+        """记一笔「这一篇是知识库哪一次业务抓取头一回发现的」。
+
+        **INSERT OR IGNORE = 首次发现那一轮说了算。** 同一篇后面会被反复 upsert
+        (补正文、改标题、重新发现),改写这一行就等于把「哪一次抓到的」偷换成
+        「最后一次看见的那一轮」—— 而药丸那句分解正是靠它分开「这一次新抓到的」
+        和「之前抓到、这一次才补导进来的」。
+
+        `round_key` 空串就什么都不记:那是「说不清」(不在管道里跑的 CLI 采集、
+        手工导入链接),留一行空值反而会把"不知道"伪装成一个确定的身份。
+        """
+        aid, key = str(article_id or "").strip(), str(round_key or "").strip()
+        if not aid or not key:
+            return
+        self.conn.execute(
+            "INSERT OR IGNORE INTO article_fetch_rounds (article_id, round_key)"
+            " VALUES (?, ?)",
+            (aid, key),
+        )
+
     def is_deleted_blacklist(self, article_id: str) -> bool:
         row = self.conn.execute(
             "SELECT 1 FROM deleted_articles WHERE article_id=?",

@@ -18,7 +18,8 @@ def local_status() -> dict:
             "hint": "只采集本机已同步的公众号推送；完整正文仍通过原文链接获取", "targets": targets}
 
 
-def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
+def collect(emit, *, targets=None, since="", until="", reader=None,
+            round_key="") -> dict:
     from src.collect.local_accounts import refresh_display_names
     from src.collect.local_index import ArticleIndex
     from src.db.repository import ArticleRepository
@@ -63,7 +64,7 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
                 repo.commit()
                 articles = index.query(accounts, active, since, until)
                 result["matched_articles"] = len(articles)
-                _download(repo, articles, result, progress)
+                _download(repo, articles, result, progress, round_key)
                 repo.commit()
                 result["done"] = len(accounts)
     except LocalReaderError as exc:
@@ -73,7 +74,7 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
     return result
 
 
-def _download(repo, articles, result, progress):
+def _download(repo, articles, result, progress, round_key=""):
     import api
     from src.utils.article_identity import has_readable_body, prepare_article
     from src.utils import body_retry
@@ -102,6 +103,13 @@ def _download(repo, articles, result, progress):
         try:
             pacer.wait()
             api._ingest_crawl_article(repo, owner, article)
+            # 「这一篇是知识库哪一次业务抓取发现的」。**记所有入了库的,不只记
+            # `is_new` 那些**:首次发现时正文可能还没抓到(那一轮导出会跳过它),
+            # 隔两天补上正文才导出 —— 那时它是「补导」,而账目要指回真发现它的
+            # 这一轮。`INSERT OR IGNORE` 保证就是这一轮(见 `note_fetch_round`)。
+            # 和正文写在同一次 commit 里:分开的话中间崩一次就留下一篇有正文、
+            # 没有抓取身份的文章,它从此永远算「说不清」。
+            repo.note_fetch_round(article["id"], round_key)
             repo.commit()
             result["new_articles"] += int(is_new)
             succeeded = has_readable_body(repo, article["id"])

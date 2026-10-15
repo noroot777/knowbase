@@ -80,7 +80,8 @@ def cmd_collect(args) -> int:
             return EXIT_ERROR
     targets = [t.strip() for t in (args.targets or "").split(",") if t.strip()]
 
-    result = collect(emit, targets=targets or None, since=since, until=until)
+    result = collect(emit, targets=targets or None, since=since, until=until,
+                     round_key=args.round or "")
     info(f"采集完成:新增 {result['new_articles']} 篇"
          + (f",{len(result['errors'])} 个号失败" if result["errors"] else ""))
     return EXIT_ERROR if result["errors"] else EXIT_OK
@@ -103,23 +104,46 @@ def cmd_export(args) -> int:
               "detail": (proc.stderr or proc.stdout).rstrip()[-300:]})
         return EXIT_ERROR
     fails = []
-    # 这一轮真写下去的那几篇。脚本逐篇打一行 `  [ok] <天>/<文件名>`,这里把它们
-    # 连同输出目录一起交上去 —— 知识库拿它当「这次抓取抓了多少」的成果回执
+    # 这一轮真写下去的那几篇,**每一篇带着身份**。脚本逐篇打一行
+    # `  [item] {"id": …, "round": …, "name": "<天>/<文件名>"}`,这里连同输出目录
+    # 一起交上去 —— 知识库拿它当「这次抓取抓了多少」的成果回执,`round` 则让它
+    # 分得开「这一次新抓到的」和「之前抓到、这一次才补导进来的」
     # (口径在 kb/collectors/__init__.py 的 materialize 契约)。**只在成功这一支
     # 给**:脚本中途挂掉时它打到哪一行就断在哪里,那份清单是个少记的下界,
     # 交上去会被当成确定值,还不如让上层报「不可确认」。
-    written, out = [], ""
+    #
+    # 身份和给人看的 `[ok]` 分两行打,而不是把 `[ok]` 那行改成机器格式:那一行
+    # 是人在终端里直接读的。**只认 `[item]` 一份清单**,不额外再收一份路径清单
+    # —— 两份清单迟早漂,而漂的后果是回执里的条数和身份对不上。
+    items, out, torn = [], "", False
     for line in proc.stdout.splitlines():
         if "无正文,跳过" in line:
             fails.append(line.split("无正文,跳过", 1)[1].strip())
-        elif line.startswith("  [ok] "):
-            written.append(line[len("  [ok] "):].strip())
+        elif line.startswith("  [item] "):
+            try:
+                one = json.loads(line[len("  [item] "):])
+            except ValueError:
+                one = None
+            # 读不懂的那一行**作废整份清单**,不跳过它接着收下一行:跳过之后
+            # 交上去的是一份少记的清单,而上层会把它当确定值用(「这一次抓了
+            # N 篇」)。少记是静默丢数据,报「不可确认」顶多让人多同步一次。
+            if not isinstance(one, dict) or not str(one.get("name") or ""):
+                torn = True
+                continue
+            items.append({"id": str(one.get("id") or ""),
+                          "round": str(one.get("round") or ""),
+                          "name": str(one["name"])})
         elif line.startswith("[export] 输出目录: "):
             out = line[len("[export] 输出目录: "):].strip()
     tail = [l for l in proc.stdout.splitlines() if "完成" in l]
-    emit({"stage": "export", "status": "ok",
-          "detail": tail[-1].replace("[export] ", "") if tail else "完成",
-          "no_body": fails, "out": out, "written": written})
+    event = {"stage": "export", "status": "ok",
+             "detail": tail[-1].replace("[export] ", "") if tail else "完成",
+             "no_body": fails, "out": out}
+    # 清单完整才给这个键。缺键就是「说不出来」,上层照旧报「不可确认」
+    # (口径在 kb/collectors/wechat_local.py 的 `_receipt`)。
+    if not torn:
+        event["items"] = items
+    emit(event)
     return EXIT_OK
 
 
@@ -383,6 +407,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--since", help="起始日期 YYYY-MM-DD(与 --until 同时给)")
     c.add_argument("--until", help="结束日期 YYYY-MM-DD")
     c.add_argument("--targets", help="逗号分隔的公众号名,默认全部订阅号")
+    # 知识库那次业务抓取的身份。新发现的文章各记一笔,导出时原样交回去 ——
+    # 药丸靠它分开「这一次新抓到的」和「之前抓到、这一次才补导进来的」。
+    # 不给就是说不清(手动在终端里跑一次采集),照旧采集,只是那几篇没有身份。
+    c.add_argument("--round", default="", help="知识库业务抓取身份(可空)")
 
     e = sub.add_parser("export", help="把本地库导出成 obsidian md")
     e.add_argument("--no-images", action="store_true", help="不下图,保留远程 URL")

@@ -128,6 +128,20 @@ CREATE TABLE IF NOT EXISTS local_wechat_articles (
 CREATE INDEX IF NOT EXISTS idx_local_wechat_articles_scope
   ON local_wechat_articles (biz, create_time);
 
+-- 「这一篇是知识库的**哪一次业务抓取**头一回发现的」。知识库那边的药丸靠它
+-- 分开「这一次新抓到的」和「之前抓到、这一次才补导进来的」(口径在仓库
+-- docs/decisions/daily.md)。
+--
+-- 单开一张表而不是给 articles 加一列:这个库被主干和 wechat-oa 两条分支同时
+-- 打开(见 migrations v17/v18),而那条分支的 upsert 是逐列写死的。加一张它
+-- 压根不碰的表,它那边一个字节都不受影响;加一列就得去核对它所有读写。
+-- 「首次发现」靠 INSERT OR IGNORE 落地:同一篇后面被重新 upsert(补正文、改
+-- 标题)都不改写这一行,否则首次发现的事实会被最后一次看见的时刻顶掉。
+CREATE TABLE IF NOT EXISTS article_fetch_rounds (
+  article_id  TEXT PRIMARY KEY REFERENCES articles(id) ON DELETE CASCADE,
+  round_key   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS article_llm_tags (
   article_id  TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
   tag         TEXT NOT NULL,

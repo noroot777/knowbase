@@ -22,6 +22,7 @@ frontmatter 对齐 dr-youtube-dig 的 schema:
 """
 
 import argparse
+import json
 import os
 import sys
 from datetime import datetime
@@ -60,14 +61,20 @@ def collect_existing_urls(roots: list[Path]) -> set[str]:
 
 
 def load_articles(repo: ArticleRepository, account: str | None) -> list[dict]:
+    # fetch_round:知识库哪一次业务抓取头一回发现这一篇(见 migrations v19)。
+    # LEFT JOIN + COALESCE:这张表建出来之前就在库里的文章没有这一行,它们的身份是
+    # 空串「说不清」
+    # —— 不是「不是本次」,所以不能在这里替它们编一个。
     where = "AND a.account_name = ?" if account else ""
     params = (account,) if account else ()
     rows = repo.conn.execute(
         f"""
         SELECT a.id, a.account_name, a.title, a.link, a.create_time,
-               b.body_text, b.body_html
+               b.body_text, b.body_html,
+               COALESCE(r.round_key, '') AS fetch_round
         FROM articles a
         LEFT JOIN article_bodies b ON b.article_id = a.id
+        LEFT JOIN article_fetch_rounds r ON r.article_id = a.id
         WHERE a.is_user_deleted = 0 AND a.is_wx_deleted = 0
           AND a.link != ''
           {where}
@@ -81,7 +88,6 @@ def load_articles(repo: ArticleRepository, account: str | None) -> list[dict]:
 def body_text_to_markdown(body_text: str) -> str:
     """无 HTML 时的降级路径:纯文本段落直接拼 md。"""
     # body_text 可能是 JSON list 序列化(历史格式)或纯字符串
-    import json
     try:
         parsed = json.loads(body_text)
         if isinstance(parsed, list):
@@ -190,7 +196,15 @@ def main() -> int:
             f.write(fm + md_body)
         existing.add(canon)
         exported += 1
-        print(f"  [ok] {day}/{os.path.basename(path)}")
+        name = f"{day}/{os.path.basename(path)}"
+        print(f"  [ok] {name}")
+        # 给机器的那一行:上层(cli.py 的 cmd_export)收它当这一轮的成果回执。
+        # `id` 是稳定内容身份(账本靠它去重,路径随标题变、当不了身份),
+        # `round` 是发现这一篇的那一次抓取。**打在 [ok] 之后**:写文件成功了才算,
+        # 中途挂掉就停在这里,上层据此报「不可确认」而不是一个少记的确定值。
+        print("  [item] " + json.dumps(
+            {"id": row["id"], "round": row["fetch_round"], "name": name},
+            ensure_ascii=False))
 
     print(
         f"[export] 完成: 导出 {exported}, 跳过(已存在) {skipped}, "

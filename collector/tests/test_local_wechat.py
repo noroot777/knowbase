@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import tempfile
 import unittest
 import contextlib
@@ -399,29 +401,25 @@ class LocalCollectionTests(unittest.TestCase):
         self.assertEqual(1, result["unreadable_messages"])
         self.assertEqual(1, result["new_articles"])
 
-    def test_export_hands_up_the_list_of_files_it_wrote(self):
-        """导出脚本逐篇打的那行 `[ok]`,连同输出目录一起收进结构化事件。
+    def _export_event(self, out):
+        """跑一次真导出脚本,再让 `cli.cmd_export` 把它的输出收成结构化事件。
 
-        知识库拿它当「这次抓取抓了多少」的成果回执(口径在
-        kb/collectors/__init__.py 的 materialize 契约)。只留给人看的话上层只能
+        两段都走真的:清单是脚本自己逐篇打出来的,`out` 和每条的 `id`/`round`
+        都由 cli 从那些行里解析。中间任何一段只留给人看的话,知识库那一侧就只能
         回去扫全库猜归属,而差集分不出"谁写的"。
         """
-        import io, json, subprocess, sys, contextlib
-        from pathlib import Path
-        from unittest.mock import patch
+        import sys
         from scripts import export_obsidian
 
-        self.reader.messages.return_value = [push()]
-        self.fill.return_value = (["正文"], "<p>正文</p>", "")
-        self.collect()
-        out = str(Path(self.tmp.name) / "export2")
         with patch.object(sys, "argv",
                           ["export", "--out", out, "--dedup-root", out, "--no-images"]), \
              contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(0, export_obsidian.main())
         raw = output.getvalue()
+        # 一篇都没导的时候也得有这一行:上层靠它把清单里的「天/文件名」还原成
+        # vault 相对路径。
         self.assertIn(f"[export] 输出目录: {out}", raw)
-        self.assertIn("  [ok] ", raw)
+        self.human = raw
 
         import cli
         with patch("cli.subprocess.run", return_value=subprocess.CompletedProcess(
@@ -430,15 +428,111 @@ class LocalCollectionTests(unittest.TestCase):
              contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
         event = json.loads(event_output.getvalue())
+        # 这里就把 `items` 这个键钉住,别留给各条用例去下标 —— 键名漂了的话每条
+        # 用例红成 KeyError(ERROR),而我们要的是一句说得出后果的 FAIL:
+        # 知识库那一侧读不到清单就只能把整轮报成「不可确认」。
+        self.assertIn("items", event,
+                      "事件里没有 items 清单 —— 知识库那侧只能报「不可确认」")
+        return event
+
+    def test_export_hands_up_what_it_wrote_with_each_items_identity(self):
+        """导出脚本逐篇打的那行清单,连同输出目录一起收进结构化事件。
+
+        每条带 `id`(稳定内容身份)和 `round`(发现它的那一次业务抓取)——
+        知识库拿它当成果回执,并据此分开「这一次新抓到的」和「补导之前抓到的」
+        (口径在 kb/collectors/__init__.py 的 materialize 契约)。
+        """
+        from pathlib import Path
+
+        self.reader.messages.return_value = [push()]
+        self.fill.return_value = (["正文"], "<p>正文</p>", "")
+        self.collect(round_key="batch-today")
+        out = str(Path(self.tmp.name) / "export2")
+        event = self._export_event(out)
+        self.assertIn("  [ok] ", self.human)       # 给人看的那一行还在
         # 先判「交上来了没有」再判内容:缺键的话 KeyError 会把红变成 ERROR,
         # 而「清单压根没交」正是这一条要拦的那种改动。
-        self.assertEqual({"out", "written"}, {"out", "written"} & set(event),
+        self.assertEqual({"out", "items"}, {"out", "items"} & set(event),
                          f"事件里没有成果回执:{sorted(event)}")
         self.assertEqual(out, event["out"])
-        self.assertEqual(1, len(event["written"]))
-        self.assertTrue(event["written"][0].endswith(".md"))
+        self.assertEqual(1, len(event["items"]))
+        one = event["items"][0]
+        self.assertTrue(one["name"].endswith(".md"))
         # 回执指的得是真落在盘上的那个文件,不是一句好看的文案
-        self.assertTrue((Path(out) / event["written"][0]).is_file())
+        self.assertTrue((Path(out) / one["name"]).is_file())
+        self.assertTrue(one["id"])                             # 稳定内容身份
+        self.assertEqual("batch-today", one["round"])          # 发现它的那一轮
+
+    def test_the_round_that_found_an_article_is_not_the_round_that_exports_it(self):
+        """**这一条是本任务的要害**:正文当天没抓到、隔一轮补上才导出。
+
+        回执里记的仍是**发现**它的那一轮(`batch-day1`),不是导出它的这一轮 ——
+        否则药丸会把一篇前几天就抓到的文章算成「这一次新抓到的」,而远端那天
+        压根没发新文章。`INSERT OR IGNORE` 保证第二轮不改写它。
+        """
+        from pathlib import Path
+
+        self.reader.messages.return_value = [push()]
+        # 第一轮:发现了它,但正文一个字都没拿到 —— 导出会跳过它(无正文)
+        self.fill.return_value = ([], "", "读取失败")
+        self.collect(round_key="batch-day1")
+        out = str(Path(self.tmp.name) / "export-carried")
+        self.assertEqual([], self._export_event(out)["items"])
+
+        # 第二轮:正文补上了,这一轮才真写进 vault。先清掉上一轮留下的退避状态,
+        # 不然它会被当成「还没到重试时间」整轮跳过。
+        with self.repo.conn:
+            self.repo.conn.execute("DELETE FROM article_fetch_state")
+        self.fill.return_value = (["补上的正文"], "<p>补上的正文</p>", "")
+        self.collect(round_key="batch-day3")
+        items = self._export_event(out)["items"]
+        self.assertEqual(1, len(items))
+        self.assertEqual("batch-day1", items[0]["round"])
+
+    def test_a_collect_without_a_round_leaves_the_identity_blank(self):
+        """在终端里手动跑一次采集(没有业务抓取身份):不许编一个。
+
+        空串是「说不清」,知识库那一侧归到 unsure 那一档;硬写个值等于凭空造
+        「这一篇是哪一次抓到的」这个事实。
+        """
+        from pathlib import Path
+
+        self.reader.messages.return_value = [push()]
+        self.fill.return_value = (["正文"], "<p>正文</p>", "")
+        self.collect()                                  # 不传 round_key
+        out = str(Path(self.tmp.name) / "export-anon")
+        self.assertEqual("", self._export_event(out)["items"][0]["round"])
+
+    def test_a_torn_item_line_voids_the_whole_list(self):
+        """清单里有一行读不懂:**整份作废,不挑着收**。
+
+        挑着收的后果是交上去一份少记的清单,而上层把它当确定值用(「这一次抓了
+        N 篇」)—— 少记是静默丢数据,报「不可确认」顶多让人多同步一次。
+        判据落在后果上:事件里**没有** `items` 这个键,知识库那侧据此报不可确认。
+        """
+        import cli
+
+        raw = ("[export] 输出目录: /tmp/whatever\n"
+               '  [item] {"id": "a1", "round": "batch-x", "name": "2026-10-15/a.md"}\n'
+               "  [item] {\"id\": \"a2\", \"round\"\n"        # 写到一半
+               "[export] 完成: 导出 2, 跳过(已存在) 0, 空正文 0\n")
+        with patch("cli.subprocess.run", return_value=subprocess.CompletedProcess(
+                [], 0, stdout=raw, stderr="")), \
+             contextlib.redirect_stdout(io.StringIO()) as event_output, \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
+        event = json.loads(event_output.getvalue())
+        self.assertNotIn("items", event)
+        # 反过来钉一边:整份清单都读得懂时照旧给键(不是一出错就永久不给了)。
+        good = raw.replace("  [item] {\"id\": \"a2\", \"round\"\n", "")
+        with patch("cli.subprocess.run", return_value=subprocess.CompletedProcess(
+                [], 0, stdout=good, stderr="")), \
+             contextlib.redirect_stdout(io.StringIO()) as event_output, \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
+        self.assertEqual([{"id": "a1", "round": "batch-x",
+                           "name": "2026-10-15/a.md"}],
+                         json.loads(event_output.getvalue())["items"])
 
     def test_export_keeps_old_empty_article_retryable(self):
         from scripts import export_obsidian
