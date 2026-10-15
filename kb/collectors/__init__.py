@@ -17,7 +17,9 @@
 ——管道要的是"这一阶段红了但后面接着跑",不是整条链断掉。
 
 新增来源 = 写一个实现 + 在 _REGISTRY 里注册。想让"订阅了哪些号/源"能在
-面板上增删,再实现一份 TargetManager(可选,见下)。
+面板上增删,再实现一份 TargetManager(可选,见下);想让面板上那份失败明细里的
+单条内容能被用户当场排除掉,再实现一份 ItemDropping(可选,见
+docs/decisions/failure-drop.md)。
 """
 
 from __future__ import annotations
@@ -184,6 +186,37 @@ class RetryNarrowing(Protocol):
 def retry_narrower(collector: SourceCollector) -> RetryNarrowing | None:
     """这个采集器能不能把重试范围收窄到失败项;不能返回 None。"""
     return collector if isinstance(collector, RetryNarrowing) else None
+
+
+# ── 单条内容的「别再抓了」(可选能力)─────────────────────────────────────────
+
+
+@runtime_checkable
+class ItemDropping(Protocol):
+    """能把**某一条内容**从采集范围里永久去掉的采集器。
+
+    面板上那份失败明细里,有一类条目说的是「这一篇一直缺正文」。它可能真的
+    已经没有内容了(原文被删、只有图片),而管道会按退避时间一轮一轮地重试它 ——
+    用户点开原文核对完,得能当场说一句「这条别再抓了」,否则这几十条会永远挂在
+    那里,把真正要处理的问题挤出视野。
+
+    **语义是「永久不再采集」,不是「这一轮跳过」**:实现必须把这条的身份记成
+    黑名单,再次被发现时照样拦住。做不到的来源别实现这个协议 —— 面板按
+    「有没有这个能力」决定显不显示那颗按钮,假装支持的后果是用户删了一条、
+    下一轮它又回来了。
+
+    **幂等**:同一条删两次要照样返回成功(用户会连点,两个标签页也会各点一次)。
+    失败一律抛 `CollectorError`(同 TargetManager:这是点一下等结果的同步操作)。
+    """
+
+    def drop_item(self, ref: dict) -> str:
+        """`ref` 是失败明细里那条的 `drop` 字段,返回一句成品结果文案。"""
+        ...
+
+
+def item_dropper(collector: SourceCollector) -> ItemDropping | None:
+    """这个采集器能不能把单条内容永久排除;不能返回 None。"""
+    return collector if isinstance(collector, ItemDropping) else None
 
 
 # ── 注册表 ──────────────────────────────────────────────────────────────────────

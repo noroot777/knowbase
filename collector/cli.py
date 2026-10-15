@@ -11,6 +11,8 @@
     python -m cli accounts add <名字> [--fakeid X] 加入订阅
     python -m cli accounts remove <名字>
     python -m cli accounts enable|disable <名字>   是否参与采集
+    python -m cli articles drop --id <文章 id> [--account <名字>]
+                                                   这一篇不再采集(拉黑身份)
 
 文章从本机绿泡泡数据库里已同步的推送发现,正文按文章链接抓。不需要登录
 公众平台,也不需要任何代理或逐号凭证。
@@ -27,6 +29,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -90,26 +93,96 @@ def cmd_collect(args) -> int:
 
 def cmd_export(args) -> int:
     """导出到 obsidian。转调现成脚本,它自己会打进度。"""
-    argv = [sys.executable, str(ROOT / "scripts" / "export_obsidian.py")]
-    if args.no_images:
-        argv.append("--no-images")
-    proc = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True)
-    # 脚本的输出是人类可读的行,原样转到 stderr;结构化结果自己 emit
-    if proc.stdout:
-        info(proc.stdout.rstrip())
-    if proc.returncode != 0:
-        info(proc.stderr.rstrip()[-500:])
-        emit({"stage": "export", "status": "error",
-              "detail": (proc.stderr or proc.stdout).rstrip()[-300:]})
-        return EXIT_ERROR
-    fails = []
-    for line in proc.stdout.splitlines():
-        if "无正文,跳过" in line:
-            fails.append(line.split("无正文,跳过", 1)[1].strip())
+    with tempfile.TemporaryDirectory(prefix="gzh-export-") as tmp:
+        report = Path(tmp) / "report.json"
+        argv = [sys.executable, str(ROOT / "scripts" / "export_obsidian.py"),
+                "--report", str(report)]
+        if args.no_images:
+            argv.append("--no-images")
+        proc = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True)
+        # 脚本的输出是人类可读的行,原样转到 stderr;结构化结果自己 emit
+        if proc.stdout:
+            info(proc.stdout.rstrip())
+        if proc.returncode != 0:
+            info(proc.stderr.rstrip()[-500:])
+            emit({"stage": "export", "status": "error",
+                  "detail": (proc.stderr or proc.stdout).rstrip()[-300:]})
+            return EXIT_ERROR
+        fails = _no_body_items(report, proc.stdout)
     tail = [l for l in proc.stdout.splitlines() if "完成" in l]
     emit({"stage": "export", "status": "ok",
           "detail": tail[-1].replace("[export] ", "") if tail else "完成",
           "no_body": fails})
+    return EXIT_OK
+
+
+def _no_body_items(report: Path, stdout: str) -> list[dict]:
+    """这一轮因为没正文而没导出的那几篇。每条 `{name, id, account, title, link}`。
+
+    **先读结构化报告,读不出来才退回解析 stdout 那行**「无正文,跳过 账号 · 标题」。
+    退回那一档只有 `name`:标题会重名、`·` 也可能出现在号名或标题里,拿它反查是
+    哪一篇一定出错,所以宁可**不给身份**——上游据此把那一条显示成不可点、不可删,
+    而不是指着另一篇文章让人删。
+    **报告写不出来不许让这几条整个消失**:那样面板上会显示「导出完成」且明细为空,
+    而确实有文章没进知识库(元规则:漏报是静默丢数据)。
+    """
+    try:
+        items = json.loads(report.read_text(encoding="utf-8"))["no_body"]
+    except (OSError, ValueError, KeyError, TypeError):
+        items = None
+    if isinstance(items, list):
+        out = []
+        for one in items:
+            if not isinstance(one, dict):
+                continue
+            account, title = str(one.get("account") or ""), str(one.get("title") or "")
+            out.append({"name": f"{account} · {title}".strip(" ·"),
+                        "id": str(one.get("id") or ""), "account": account,
+                        "title": title, "link": str(one.get("link") or "")})
+        return out
+    return [{"name": line.split("无正文,跳过", 1)[1].strip(),
+             "id": "", "account": "", "title": "", "link": ""}
+            for line in stdout.splitlines() if "无正文,跳过" in line]
+
+
+# ── articles ────────────────────────────────────────────────────────────────────
+
+def cmd_articles(args) -> int:
+    """这一篇不再采集:删掉它,并把它的身份记进黑名单。
+
+    **幂等**:库里已经没有这一行时照样算成功——重复点一次、或者它刚好被另一条
+    路径删掉了,都不该报红让人以为没删掉。
+    """
+    from src.db.repository import ArticleRepository
+
+    if args.action != "drop":
+        return _fail(f"不认识的操作「{args.action}」", args.json)
+    if not args.id:
+        return _fail("需要给文章 id(--id)", args.json)
+    with ArticleRepository() as repo:
+        row = repo.conn.execute(
+            "SELECT account_name, title FROM articles WHERE id=?", (args.id,)
+        ).fetchone()
+        if row is None:
+            if args.json:
+                emit({"ok": True, "detail": "这一篇已经不在库里了，以后也不会再采集",
+                      "removed": False})
+            else:
+                info("这一篇已经不在库里了")
+            return EXIT_OK
+        # 归属对不上一律拒:调用方拿的是面板上那一条的身份,对不上说明两边
+        # 说的不是同一篇,删下去就是删错文章。
+        if args.account and row["account_name"] != args.account:
+            return _fail(
+                f"这一篇属于「{row['account_name']}」，与给定的"
+                f"「{args.account}」对不上，没有改动", args.json)
+        repo.remove_article(args.id, row["account_name"])
+        repo.commit()
+    detail = f"已移除,以后不再采集:{row['account_name']} · {row['title']}"
+    if args.json:
+        emit({"ok": True, "detail": detail, "removed": True})
+    else:
+        info(detail)
     return EXIT_OK
 
 
@@ -385,6 +458,12 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--fakeid", default="", help="add 时直接指定,跳过查找")
     a.add_argument("--json", action="store_true", help="输出 JSON 而不是人话")
 
+    r = sub.add_parser("articles", help="维护已采集的文章")
+    r.add_argument("action", choices=["drop"])
+    r.add_argument("--id", default="", help="文章 id")
+    r.add_argument("--account", default="", help="它该属于哪个公众号(对不上就拒)")
+    r.add_argument("--json", action="store_true", help="输出 JSON 而不是人话")
+
     return p
 
 
@@ -395,7 +474,7 @@ def main(argv: list[str] | None = None) -> int:
     install()          # 绿泡泡域名绕过系统代理,不装会在有 MITM 代理时静默失败
     handlers = {
         "status": cmd_status, "collect": cmd_collect, "export": cmd_export,
-        "accounts": cmd_accounts,
+        "accounts": cmd_accounts, "articles": cmd_articles,
     }
     try:
         return handlers[args.cmd](args)

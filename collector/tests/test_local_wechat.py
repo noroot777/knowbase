@@ -423,13 +423,103 @@ class LocalCollectionTests(unittest.TestCase):
             self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
         import json
 
-        self.assertEqual(["档案名 · 测试文章"], json.loads(event_output.getvalue())["no_body"])
+        # 这一段 patch 掉了 subprocess,结构化报告压根没写成 —— 走的正是降级路径:
+        # 那一条**仍然列得出来**(漏报是静默丢数据),只是没有身份,面板据此把它
+        # 显示成不可点、不可删。
+        self.assertEqual([{"name": "档案名 · 测试文章", "id": "", "account": "",
+                           "title": "", "link": ""}],
+                         json.loads(event_output.getvalue())["no_body"])
         self.assertEqual(0, self.repo.conn.execute("SELECT is_wx_deleted FROM articles").fetchone()[0])
         self.repo.conn.execute("UPDATE article_fetch_state SET retry_at=0")
         self.repo.commit()
         self.fill.return_value = (["恢复正文"], "<p>恢复正文</p>", "")
         self.assertEqual([], self.collect()["errors"])
         self.assertEqual(1, self.repo.conn.execute("SELECT COUNT(*) FROM article_bodies").fetchone()[0])
+
+    def test_no_body_detail_carries_identity_so_the_panel_can_open_and_drop_it(self):
+        """面板上那条「缺少正文」要点得开、删得掉,靠的是这里的 id 和 link。
+
+        `账号 · 标题` 那个字符串只够给人看:标题会重名、`·` 本身也可能出现在号名
+        或标题里,拿它反查是哪一篇一定出错。所以导出脚本另写一份结构化报告,CLI
+        优先读它。
+        """
+        from scripts import export_obsidian
+        import sys, json
+
+        self.reader.messages.return_value = [push()]
+        self.fill.return_value = ("请求错误", None, "")
+        self.collect()
+        out = str(Path(self.tmp.name) / "export")
+        report = Path(self.tmp.name) / "report.json"
+        with patch.object(sys, "argv", ["export", "--out", out, "--dedup-root", out,
+                                        "--no-images", "--report", str(report)]), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, export_obsidian.main())
+        items = json.loads(report.read_text(encoding="utf-8"))["no_body"]
+        self.assertEqual(1, len(items))
+        stored = self.repo.conn.execute("SELECT id, link FROM articles").fetchone()
+        self.assertEqual(stored["id"], items[0]["id"])
+        self.assertEqual(stored["link"], items[0]["link"])
+        self.assertEqual(("档案名", "测试文章"), (items[0]["account"], items[0]["title"]))
+
+        import cli
+
+        with patch("cli.subprocess.run", side_effect=lambda argv, **kw: self._fake_export(argv)), \
+             contextlib.redirect_stdout(io.StringIO()) as events, \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
+        got = json.loads(events.getvalue())["no_body"][0]
+        self.assertEqual((stored["id"], "档案名 · 测试文章"), (got["id"], got["name"]))
+
+    def _fake_export(self, argv):
+        """替身导出进程:只把 `--report` 那份报告写出来,不真去扫 vault。"""
+        import json
+        import subprocess
+
+        report = Path(argv[argv.index("--report") + 1])
+        row = self.repo.conn.execute("SELECT id, link FROM articles").fetchone()
+        report.write_text(json.dumps({"no_body": [
+            {"id": row["id"], "account": "档案名", "title": "测试文章",
+             "link": row["link"]}]}, ensure_ascii=False), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0,
+                                           stdout="[export] 完成: 导出 0\n", stderr="")
+
+    def test_dropping_one_article_stops_rediscovering_it_and_is_idempotent(self):
+        """「以后不再抓了」= 删掉它 + 把链接身份拉黑,再发现同一篇也不入库。
+
+        **幂等**:库里已经没有这一行时照样算成功 —— 用户会连点,两个标签页也会
+        各点一次,报红会让人以为没删掉。**归属对不上一律拒**:删下去是不可恢复的。
+        """
+        import cli
+        import json
+
+        self.collect()
+        aid = self.repo.conn.execute("SELECT id FROM articles").fetchone()[0]
+        with contextlib.redirect_stdout(io.StringIO()) as out, \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.EXIT_ERROR, cli.main(
+                ["articles", "drop", "--id", aid, "--account", "别的号", "--json"]))
+        self.assertFalse(json.loads(out.getvalue())["ok"])
+        self.assertEqual(1, self.repo.conn.execute(
+            "SELECT COUNT(*) FROM articles").fetchone()[0])
+
+        for _ in range(2):      # 连点两次:第二次库里已经没这一行了,照样成功
+            with contextlib.redirect_stdout(io.StringIO()) as out, \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.EXIT_OK, cli.main(
+                    ["articles", "drop", "--id", aid, "--account", "档案名", "--json"]))
+            self.assertTrue(json.loads(out.getvalue())["ok"])
+        self.assertEqual(0, self.repo.conn.execute(
+            "SELECT COUNT(*) FROM articles").fetchone()[0])
+        self.assertEqual(0, self.repo.conn.execute(
+            "SELECT COUNT(*) FROM article_bodies").fetchone()[0])
+
+        # 反过来钉一边:下一轮同步再发现同一篇,不许又入库一次
+        self.fill.reset_mock()
+        self.assertEqual([], self.collect()["errors"])
+        self.assertEqual(0, self.repo.conn.execute(
+            "SELECT COUNT(*) FROM articles").fetchone()[0])
+        self.fill.assert_not_called()
 
     def test_recovery_only_resets_affected_local_articles_and_creates_backup(self):
         from scripts.recover_local_articles import recover

@@ -228,7 +228,9 @@
   或隔离坏推送决定是否更新。读取失败按稳定的会话 Msg 表名跨分片追溯 biz，
   必要时仅用同名线索保守阻止对应账号更新时间，不建立文章归属；新分片没有成功
   文章也能关联到旧分片。未知且无关联的失败不冻结其他账号。导出保留
-  `无正文,跳过` 明细协议供 CLI 生成 `no_body`，正文缺失不建议标记绿泡泡删除。
+  `无正文,跳过` 明细协议供 CLI 生成 `no_body`，正文缺失不建议标记绿泡泡删除；那份明细还要带
+  **身份**（`export_obsidian.py --report` 写的结构化 JSON，`cli._no_body_items` 优先读它），面板
+  据此点开原文、按 `cli articles drop` 把这一篇永久排除，见 `failure-drop.md`。
   `is_wx_deleted` 的历史自动退休记录允许重新入库，用户删除及身份黑名单仍拦截。
 
 - **`collector/data` 和 `collector/.venv` 丢了就跑 `./collector/setup.sh`**。两者都在

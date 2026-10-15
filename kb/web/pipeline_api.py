@@ -21,6 +21,7 @@ from kb.collectors import (
     active_collector,
     channel_labels,
     collection_channels,
+    item_dropper,
     retired_channels,
 )
 
@@ -73,6 +74,10 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     # 待处理数要扫文件,只有显式要求且空闲时才算
     if pending and not state["running"]:
         state["pending"] = pl.pending_counts(_channel(channel)) if channel else pl.pending_counts()
+    # 用户已经在明细里处理掉的那几条不再送出去(见 `kb.pipeline_failures`)。
+    # **过滤待在出口这一处**:那几份运行记录(内存、整批汇总、两份落盘)一个字节
+    # 都不动,否则「两份落盘是同一个业务结果的两个投影」这条不变量就撕开了。
+    pl.strip_failure_state(state)
     return state
 
 
@@ -114,6 +119,9 @@ def pipeline_runs():
     # 那一轮 —— 两边永远对不上,于是面板一直提示「历史还没追平」、补读一直在跑,点
     # 「重新读取」也不消失。
     first = next((r for r in runs if not r["invalid"]), {})
+    # 口径同状态端点:处理掉的那几条在**任何一轮**里都不再出现 —— 用户要的正是
+    # 「以后别让我再看见它」,而翻历史时那颗移除按钮本来就按不下去(前端那道)。
+    pl.strip_failure_runs(runs)
     return {"runs": runs, "error": pl.persist_error(),
             "version": pl.result_version(first)}
 
@@ -212,6 +220,42 @@ def pipeline_retry_failed():
     if not ok:
         raise HTTPException(409, msg)
     return {"ok": True, "plan": msg}
+
+
+class FailureDropRequest(BaseModel):
+    """面板上那条失败明细的 `drop` 字段,原样回传。"""
+
+    channel: str
+    id: str
+    account: str | None = None
+
+
+@router.post("/api/pipeline/failures/drop")
+def pipeline_drop_failure(body: FailureDropRequest):
+    """明细里这一条内容:以后不再采集它。
+
+    **两步,顺序不许反**:先让采集器真正删掉并拉黑(不可逆的那一步),成了之后才
+    记进「别再显示」的账本。反过来写的话,采集器那一步失败时面板上这条已经消失
+    了 —— 一个还在被反复重试的待处理项就此静默丢掉。
+    """
+    name = _channel(body.channel)
+    dropper = item_dropper(active_collector(name))
+    if dropper is None:
+        raise HTTPException(400, f"{active_collector(name).label}不支持移除单条内容")
+    item_id = (body.id or "").strip()
+    if not item_id:
+        raise HTTPException(400, "这一条没有可用的标识，无法移除")
+    try:
+        detail = dropper.drop_item({"id": item_id, "account": body.account or ""})
+    except CollectorError as e:
+        raise HTTPException(400, str(e)) from None
+    # **账本写不上不许把整件事报成失败。** 不可逆的那一步已经成了,报红会让用户
+    # 以为没删掉而反复重试;如实在文案里说一句,那几条下一轮同步后自然消失。
+    try:
+        pl.drop_failure(name, item_id)
+    except Exception as e:  # noqa: BLE001 - 理由就在上面
+        detail += f"（面板记录没写成：{type(e).__name__}，这一条下次同步后不再出现）"
+    return {"ok": True, "detail": detail}
 
 
 @router.get("/api/pipeline/accounts")

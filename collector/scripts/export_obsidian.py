@@ -22,6 +22,7 @@ frontmatter 对齐 dr-youtube-dig 的 schema:
 """
 
 import argparse
+import json
 import os
 import sys
 from datetime import datetime
@@ -102,6 +103,10 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="最多导出多少篇(0=全部)")
     parser.add_argument("--dry-run", action="store_true", help="只打印计划,不写文件不下图")
     parser.add_argument("--no-images", action="store_true", help="不下载图片(保留远程 URL)")
+    parser.add_argument(
+        "--report", type=Path, default=None,
+        help="把这一轮的结构化结果写成 JSON(给上游程序读,人看的照旧打在 stdout)",
+    )
     args = parser.parse_args()
 
     dedup_roots = args.dedup_root if args.dedup_root else list(DEFAULT_DEDUP_ROOTS)
@@ -118,6 +123,10 @@ def main() -> int:
 
     saved_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     exported = skipped = degraded = pending = 0
+    # 没正文那几篇的**身份**。stdout 那行「无正文,跳过 账号 · 标题」只够给人看:
+    # 标题会重名、`·` 本身也可能出现在号名或标题里,拿它反查是哪一篇一定出错。
+    # 面板要能点开原文核对、能把这一条从采集范围里删掉,靠的就是这里的 id 和 link。
+    no_body: list[dict] = []
 
     for row in articles:
         if args.limit > 0 and exported >= args.limit:
@@ -146,6 +155,8 @@ def main() -> int:
         if not body_html.strip() and not text_md.strip():
             # 发布得早不代表读取已多次失败；留在候选中，由抓取阶段按退避时间补正文。
             pending += 1
+            no_body.append({"id": row["id"], "account": account,
+                            "title": title, "link": row["link"]})
             print(f"  [export] 无正文,跳过 {account} · {title}")
             continue
         if body_html.strip():
@@ -192,6 +203,15 @@ def main() -> int:
         f"[export] 完成: 导出 {exported}, 跳过(已存在) {skipped}, "
         f"降级纯文本 {degraded}, 待补正文 {pending}"
     )
+    # 报告是旁路:写不出来(磁盘满、目录没了)只让上游退回解析 stdout 那几行,
+    # 这一轮导出的结论照旧成立,所以不往上抛。
+    if args.report:
+        try:
+            args.report.write_text(
+                json.dumps({"no_body": no_body}, ensure_ascii=False),
+                encoding="utf-8")
+        except OSError as e:
+            print(f"[export] 结构化报告没写成: {e}")
     return 0
 
 

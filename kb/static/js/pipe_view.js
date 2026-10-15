@@ -54,6 +54,56 @@ function initPipeStageRows() {
       <details hidden><summary></summary><div class="pipe-failures"></div></details></div><span class="pipe-stage-status"></span>
     </div>`).join('');
 }
+/* ── 失败明细的一行(硬约束在 docs/decisions/failure-drop.md 第一节)────────
+   两件事只在**来源给得出身份**时才有:①标题点得开(`url`,去原文核对是不是真的
+   没内容了);②那颗「不再抓取」(`drop`,原样回传给后端,怎么删只有采集器知道)。
+   来源给不出身份时两样都不出现 —— 指着另一篇文章让人删是不可恢复的。        */
+function pipeFailureRow(f, viewing) {
+  const title = esc(f.title || '未命名内容');
+  const head = f.url
+    ? `<a href="${esc(safeUrl(f.url))}" target="_blank" rel="noopener noreferrer">${title}${arrow('ext')}</a>`
+    : title;
+  // **翻历史时这颗按钮一律不出现**,口径同「重试失败项」:「看到的那一轮」和
+  // 「按下去会动的那一轮」必须是同一轮。链接照旧能点 —— 它只是去读原文。
+  const drop = !viewing && f.drop && f.drop.channel && f.drop.id
+    ? `<button class="text-button pipe-failure-drop" data-drop="${esc(JSON.stringify(f.drop))}">不再抓取</button>`
+    : '';
+  return `<p><span class="pipe-failure-head">${head}${drop}</span><span>${esc(f.reason || '')}</span></p>`;
+}
+// 事件委托挂在稳定的容器上:明细那几段 innerHTML 每轮轮询都可能重建,
+// 逐个按钮绑定会在重建的那一下全部丢掉。
+$('pipe-stages').addEventListener('click', e => {
+  const btn = e.target.closest('.pipe-failure-drop');
+  if (btn) dropPipeFailure(btn);
+});
+async function dropPipeFailure(btn) {
+  let ref = null;
+  try { ref = JSON.parse(btn.dataset.drop || ''); } catch {}
+  if (!ref || !ref.channel || !ref.id) return toast('这一条没有可用的标识，无法移除');
+  // 标题要把按钮自己的字摘掉 —— `.textContent` 会把「不再抓取」一起念进来,
+  // 于是确认框里写着「某个号 · 某篇不再抓取。将把它…」。
+  const head = btn.closest('p')?.querySelector('.pipe-failure-head');
+  const name = (head ? [...head.childNodes].filter(n => n !== btn)
+    .map(n => n.textContent).join('') : '').trim() || '这一条';
+  if (!await confirmBox({
+    title: '以后不再抓取这一条？',
+    body: `${name}。将把它从采集范围里永久移除：删除已采集的内容，再次发现同一篇也不再收录。确认原文确实没有正文再操作，此操作不可撤销。`,
+    ok: '不再抓取', danger: true,
+  })) return;
+  btn.disabled = true;
+  try {
+    const r = await pipePost('/api/pipeline/failures/drop', ref);
+    toast('已移除', { type: 'ok', detail: r.detail || '以后不再抓取这一条。' });
+    // 状态和历史清单里都不该再有它。轮询那一份可能正在途中、带的是旧名单,
+    // 所以先把它作废再重读(同「重试失败项」那两颗按钮的收尾)。
+    invalidatePipeStatus();
+    await refreshPipe();
+    if (typeof loadPipeHistory === 'function') loadPipeHistory();
+  } catch (e) {
+    btn.disabled = false;
+    toast('移除未完成', { detail: e.message });
+  }
+}
 function renderPipeState(s) {
   initPipeStageRows();
   // **翻历史时整屏按「那一轮已经结束」渲染。** `running` / `stop_requested` 说的是
@@ -88,10 +138,13 @@ function renderPipeState(s) {
       `${waiting ? '待处理' : '问题'}明细 · ${total} 项`
       + (total > failures.length ? `（仅列前 ${failures.length} 条）` : '');
     const list = details.querySelector('.pipe-failures');
-    const signature = JSON.stringify(failures);
+    // **翻历史也要进签名。** 那颗「不再抓取」按钮在只读那一屏不出现(理由在
+    // `pipeFailureRow`),而两屏的 failures 完全可能逐字相同 —— 只比内容的话,
+    // 从历史切回最新之后按钮一直不长出来。
+    const signature = JSON.stringify([!!viewing, failures]);
     if (list.dataset.signature !== signature) {
       const scroll = list.scrollTop;
-      list.innerHTML = failures.map(f => `<p><b>${esc(f.title || '未命名内容')}</b><span>${esc(f.reason || '')}</span></p>`).join('');
+      list.innerHTML = failures.map(f => pipeFailureRow(f, !!viewing)).join('');
       list.dataset.signature = signature; list.scrollTop = scroll;
     }
   }
