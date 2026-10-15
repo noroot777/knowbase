@@ -157,10 +157,9 @@ def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
 def iter_md(sources: list[Source] | None = None) -> Iterator[tuple[Source, Path]]:
     """遍历该扫的那些 md 文件,**只给路径,不读正文**。
 
-    「哪些树要扫、树里跳过哪些子目录」只有这一份实现:`scan_all` 和
-    `fetch_rounds.vault_snapshot` 都过它。两边各写一遍 rglob 的话,停用一棵树、
-    加一个 skip_dirs 之后迟早对不上 —— 对不上的表现是生成按钮上那颗药丸多报
-    一批压根不会进库的文件。
+    「哪些树要扫、树里跳过哪些子目录」只有这一份实现。拆出来是因为"枚举该扫
+    哪些文件"和"把文件读成 Document"是两件事:要枚举的人(本函数)不该为了拿
+    一个路径清单去读上万篇正文。目前只有 `scan_all` 过它。
     """
     for src in sources if sources is not None else SOURCES:
         if not src.enabled or not src.root.is_dir():

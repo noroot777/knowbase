@@ -108,6 +108,10 @@ def main() -> int:
     if args.out not in dedup_roots:
         dedup_roots.append(args.out)
 
+    # 输出目录要打出来:上层(cli.py 的 cmd_export)靠它把下面那些 [ok] 行里的
+    # 「天/文件名」还原成 vault 相对路径,当成这一轮的成果回执交给知识库记账。
+    # 一篇都没导的时候也得有这一行,所以放在循环之前。
+    print(f"[export] 输出目录: {args.out}")
     print(f"[export] 去重扫描: {', '.join(str(r) for r in dedup_roots)}")
     existing = collect_existing_urls(dedup_roots)
     print(f"[export] 已存在 {len(existing)} 个 URL")

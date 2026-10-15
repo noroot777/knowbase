@@ -103,13 +103,23 @@ def cmd_export(args) -> int:
               "detail": (proc.stderr or proc.stdout).rstrip()[-300:]})
         return EXIT_ERROR
     fails = []
+    # 这一轮真写下去的那几篇。脚本逐篇打一行 `  [ok] <天>/<文件名>`,这里把它们
+    # 连同输出目录一起交上去 —— 知识库拿它当「这次抓取抓了多少」的成果回执
+    # (口径在 kb/collectors/__init__.py 的 materialize 契约)。**只在成功这一支
+    # 给**:脚本中途挂掉时它打到哪一行就断在哪里,那份清单是个少记的下界,
+    # 交上去会被当成确定值,还不如让上层报「不可确认」。
+    written, out = [], ""
     for line in proc.stdout.splitlines():
         if "无正文,跳过" in line:
             fails.append(line.split("无正文,跳过", 1)[1].strip())
+        elif line.startswith("  [ok] "):
+            written.append(line[len("  [ok] "):].strip())
+        elif line.startswith("[export] 输出目录: "):
+            out = line[len("[export] 输出目录: "):].strip()
     tail = [l for l in proc.stdout.splitlines() if "完成" in l]
     emit({"stage": "export", "status": "ok",
           "detail": tail[-1].replace("[export] ", "") if tail else "完成",
-          "no_body": fails})
+          "no_body": fails, "out": out, "written": written})
     return EXIT_OK
 
 

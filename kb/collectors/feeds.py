@@ -55,6 +55,7 @@ class FeedCollector:
         return want
 
     def materialize(self):
+        """落 md,返回这一轮真写下去的那几篇(见 `kb.collectors` 的契约)。"""
         from kb.feeds import fulltext, translate
         from kb.feeds.sync import export
         from kb.pipeline_state import _log, _stage
@@ -139,8 +140,11 @@ class FeedCollector:
             _log(f'export: {note}')
         # 摘要一路交给 export:阶段状态由它最后落,翻译失败只写日志的话这个
         # 阶段会以绿色收尾,而那些文章一篇都没入库(见 `sync.export`)。
-        export(self.name, hold_untranslated=not summary['skipped'], translated=summary,
-               fetched=fetched)
+        # 回执原样交上去:路径是 `sync.export` 自己写文件那一下攒的,这里不再
+        # 数一遍、也不许拿 `done` 之类的计数替它 —— 上层要的是身份,不是数目
+        # (理由在 `kb.fetch_rounds` 开头那条「任何重放都幂等」)。
+        return export(self.name, hold_untranslated=not summary['skipped'],
+                      translated=summary, fetched=fetched)
 
     def pending(self):
         with reg.db() as c:

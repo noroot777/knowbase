@@ -94,18 +94,26 @@ function renderDailyGenButton() {
   // 自定义区间时照样报 —— 抓取事实和区间选哪一段无关(队列那句跟着藏掉,后端
   // 算的是默认区间那一段)。
   //
-  // 三种说法对三种事实,**不许合并**:没问过后端(undefined)整颗藏掉;后端答
-  // 「不可确认」(null:账本读不出来,或者有成果没落下去)说「读不出来」;`n=0`
-  // 才是「今天还没有抓取」。把 null 也说成「还没有抓取」是在把"不知道"说成
+  // 五种说法对五种事实,**不许合并**:没问过后端(undefined)整颗藏掉;后端答
+  // 「不可确认」(null:账本整份读不出来,或者有行没落下去)说「读不出来」;
+  // `n=0` 才是「今天还没有抓取」。把 null 也说成「还没有抓取」是在把"不知道"说成
   // "没有",而一次写失败之后它会一直这么笃定地说下去。
+  //
+  // 剩下两种是**这一轮的条数全不全**(`partial`):勾了三个来源而第三个炸在半路、
+  // 采集器给不出清单时,已知的那几条只是**下界** —— 那就说「至少 +N 条」,一条
+  // 都说不出来时说「条数读不出来」。把下界写成确定值的后果是用户照着一个偏小的
+  // 数决定不重新生成日报,而真落进库的比它多(口径见 `kb/fetch_rounds.py`)。
   const chip = $('daily-gen-count');
   const f = dailyWindow?.fetch;
   chip.hidden = f === undefined;
   if (f === undefined) { $('daily-gen').title = ''; return; }
+  const howMany = f && (f.partial
+    ? (f.added ? `至少 +${f.added} 条` : '条数读不出来')
+    : (f.added ? `+${f.added} 条` : '0 条'));
   chip.textContent = f === null
     ? '抓取次数读不出来'
     : f.n
-      ? `第 ${f.n} 次抓取 · ${f.added ? `+${f.added} 条` : '0 条'}`
+      ? `第 ${f.n} 次抓取 · ${howMany}`
       : '今天还没有抓取';
   chip.classList.toggle('is-none', !f?.added);
   const p = dailyWindowDirty ? null : dailyWindow?.pending;
@@ -117,7 +125,10 @@ function renderDailyGenButton() {
   $('daily-gen').title = (f === null
     ? '当日抓取账本读不出来，这个数暂时不可确认（不是「没抓到」）。'
     : f.n
-      ? `今天第 ${f.n} 次抓取${f.at ? `（${f.at}）` : ''}往库里新加了 ${f.added} 篇。`
+      ? (f.partial
+        ? `今天第 ${f.n} 次抓取${f.at ? `（${f.at}）` : ''}有一段成果没能确认，`
+          + `已知新加了 ${f.added} 篇，实际可能更多。`
+        : `今天第 ${f.n} 次抓取${f.at ? `（${f.at}）` : ''}往库里新加了 ${f.added} 篇。`)
       : '今天还没有同步过，库里的内容和上一次一样。') + queued;
 }
 

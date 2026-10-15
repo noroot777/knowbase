@@ -399,6 +399,47 @@ class LocalCollectionTests(unittest.TestCase):
         self.assertEqual(1, result["unreadable_messages"])
         self.assertEqual(1, result["new_articles"])
 
+    def test_export_hands_up_the_list_of_files_it_wrote(self):
+        """导出脚本逐篇打的那行 `[ok]`,连同输出目录一起收进结构化事件。
+
+        知识库拿它当「这次抓取抓了多少」的成果回执(口径在
+        kb/collectors/__init__.py 的 materialize 契约)。只留给人看的话上层只能
+        回去扫全库猜归属,而差集分不出"谁写的"。
+        """
+        import io, json, subprocess, sys, contextlib
+        from pathlib import Path
+        from unittest.mock import patch
+        from scripts import export_obsidian
+
+        self.reader.messages.return_value = [push()]
+        self.fill.return_value = (["正文"], "<p>正文</p>", "")
+        self.collect()
+        out = str(Path(self.tmp.name) / "export2")
+        with patch.object(sys, "argv",
+                          ["export", "--out", out, "--dedup-root", out, "--no-images"]), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(0, export_obsidian.main())
+        raw = output.getvalue()
+        self.assertIn(f"[export] 输出目录: {out}", raw)
+        self.assertIn("  [ok] ", raw)
+
+        import cli
+        with patch("cli.subprocess.run", return_value=subprocess.CompletedProcess(
+                [], 0, stdout=raw, stderr="")), \
+             contextlib.redirect_stdout(io.StringIO()) as event_output, \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
+        event = json.loads(event_output.getvalue())
+        # 先判「交上来了没有」再判内容:缺键的话 KeyError 会把红变成 ERROR,
+        # 而「清单压根没交」正是这一条要拦的那种改动。
+        self.assertEqual({"out", "written"}, {"out", "written"} & set(event),
+                         f"事件里没有成果回执:{sorted(event)}")
+        self.assertEqual(out, event["out"])
+        self.assertEqual(1, len(event["written"]))
+        self.assertTrue(event["written"][0].endswith(".md"))
+        # 回执指的得是真落在盘上的那个文件,不是一句好看的文案
+        self.assertTrue((Path(out) / event["written"][0]).is_file())
+
     def test_export_keeps_old_empty_article_retryable(self):
         from scripts import export_obsidian
         import sys

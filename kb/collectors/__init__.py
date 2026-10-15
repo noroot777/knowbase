@@ -13,8 +13,19 @@
 采集器要是自带常驻库(先落库再转 md),两步就各司其职。
 
 两个方法都直接调 kb.pipeline_state._stage 汇报进度,与其它阶段一致;
-返回值没有意义,失败通过 _stage(..., "error", ...) 表达而不是抛异常
-——管道要的是"这一阶段红了但后面接着跑",不是整条链断掉。
+失败通过 _stage(..., "error", ...) 表达而不是抛异常——管道要的是"这一阶段红了
+但后面接着跑",不是整条链断掉。
+
+fetch 的返回值没有意义。**materialize 的返回值是这一轮的成果回执**:它这一次
+往 vault 新落了哪几篇(相对 VAULT_ROOT 的路径集合),交给 kb.fetch_rounds 记成
+「今天第 N 次抓取抓了多少」。说不出来就返回 None —— 账本据此报「不可确认」,
+面板上写「条数读不出来」。
+
+回执这件事不许由上层旁观着猜:管道一度在物化前后各取一次全 vault 快照、拿差集
+当成果,而差集分不出"谁写的"——那段时间里别的进程(实时 saver、手工导入、另一个
+采集器)落下的文件会被算进这一轮(第 3 轮审查实测)。采集器自己知道它写了哪几个
+文件,这是别人都拿不到的事实,所以只能由它交出来。宁可返回 None 让面板说
+「读不出来」,也不要一个看着确定、实际上掺了别人成果的数。
 
 新增来源 = 写一个实现 + 在 _REGISTRY 里注册。想让"订阅了哪些号/源"能在
 面板上增删,再实现一份 TargetManager(可选,见下)。
@@ -81,7 +92,9 @@ class SourceCollector(Protocol):
 
     def fetch(self, scope: FetchScope) -> None: ...
 
-    def materialize(self) -> None: ...
+    def materialize(self) -> frozenset[str] | None:
+        """落 md。返回这一轮新写的 md(VAULT_ROOT 相对路径),说不出来返回 None。"""
+        ...
 
     def pending(self) -> int | None:
         """还有多少条没落进 vault。算不出返回 None(面板显示空白而非 0)。"""

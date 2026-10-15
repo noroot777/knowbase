@@ -140,11 +140,17 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
     **进来就在当日账本上开一轮**(`fetch_rounds.open_round`):「今天第几次抓取」
     由抓取自己登记,不由后面哪个阶段的产出反推 —— 一次什么都没抓到的抓取也是
     一次抓取,而只勾了索引的那种运行不是。
+
+    开轮还要告诉账本**这次运行后面跑不跑物化**:两种运行的账本行长得一样,而
+    一个的 0 条是确定的、另一个是「不可确认」(见 `fetch_rounds.open_round`)。
     """
     from kb import fetch_rounds
 
     filters = crawl_filter or {}
-    fetch_rounds.open_round(_round_key())
+    planned = _state.get("planned_stages")
+    fetch_rounds.open_round(
+        _round_key(),
+        materializes="export" in planned if isinstance(planned, list) else True)
 
     def _fetch(collector, scope: dict) -> None:
         _log(f"采集通道: {_channel_label(collector)}")
@@ -161,24 +167,21 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
 def _run_export(crawl_filter: dict | str | None = None) -> None:
     """让采集器把它本地的内容落成 obs md。
 
-    **这一步的产出就是「这一轮抓取抓到了多少」**:物化前后各取一次 vault 快照,
-    差集记进当日抓取账本(`fetch_rounds.note_new`)。记在这里而不是索引那边,
-    是因为账本要的是抓取自己的成果 —— 索引只是消费者,它看到的"库里头一回出现
-    这个路径"既可能是上一轮抓回来还没索引的,也可能是手工导入或重建索引
-    (实测:一次什么都没抓到的同步碰上 3 篇历史未索引的旧文就报成「+3 条」;
-    反过来真抓到 2 篇而这一轮不索引则报 0,之后单独索引也补不回来)。
-
-    记在 `finally` 里:勾了好几个来源时后一个炸了,不该把前面那几个真落下来的
-    文章一起抹掉 —— 它们已经在 vault 里,下一轮索引就会进库。
+    **这一步的产出就是「这一轮抓取抓到了多少」,而且只认采集器自己交回来的那份
+    清单**(`materialize()` 的返回值,契约在 `kb.collectors`)。拿旁观者的视角
+    冒充生产者的成果错过两版(索引的"头一回进库" / 全 vault 路径差集),实测
+    形态在 `docs/decisions/daily.md`。**每个来源各记一次、记在自己的 `finally`
+    里**:后一个炸了不该抹掉前面那几个真落下来的文章,而炸掉的那个要留一笔
+    「不可确认」—— 它可能已经写了一半。
     """
     from kb import fetch_rounds
 
-    before = fetch_rounds.vault_snapshot()
-    try:
-        _per_channel("export", crawl_filter,
-                     lambda collector, scope: collector.materialize())
-    finally:
-        fetch_rounds.note_new(_round_key(), fetch_rounds.vault_snapshot() - before)
+    key = _round_key()
+    # 先落一张空回执:成果从「确定的空集」起步,各来源的回执并进来。一个来源都
+    # 没选中时它就是最终结论(确定 0 条,不是不可确认)。
+    fetch_rounds.note_new(key, ())
+    _per_channel("export", crawl_filter,
+                 lambda collector, scope: fetch_rounds.note(key, collector.materialize))
 
 
 class _StopWhileWaiting(Exception):

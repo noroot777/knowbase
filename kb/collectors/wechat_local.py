@@ -81,6 +81,30 @@ def _run_cli(*argv: str, timeout: int) -> subprocess.CompletedProcess:
     )
 
 
+def _receipt(event: dict) -> frozenset[str] | None:
+    """子进程那份「写了哪几篇」换算成 vault 相对路径。换算不了返回 None。
+
+    事件里是 `out`(导出根目录的绝对路径)+ `written`(每篇的 `<天>/<文件名>`),
+    两样都由 `collector/cli.py` 的 `cmd_export` 从导出脚本自己打的行里收上来。
+
+    **`out` 不在 vault 里就返回 None**:那说明采集器被配去写别处(测试夹具、
+    两边 `KB_VAULT_ROOT` 对不上),算出来的相对路径不是知识库里那个身份 ——
+    而账本靠路径去重,记一批不存在的路径会让后面真落下来的同名文章被当成
+    「已经数过」。宁可报「不可确认」。
+    """
+    from kb.config import VAULT_ROOT
+
+    out = str(event.get("out") or "")
+    names = event.get("written")
+    if not out or not isinstance(names, list):
+        return None
+    try:
+        prefix = Path(out).resolve().relative_to(Path(VAULT_ROOT).resolve())
+    except (OSError, ValueError):
+        return None
+    return frozenset(str(prefix / str(n)) for n in names if str(n).strip())
+
+
 class WeChatLocalCollector:
     """公众号采集器。读本机已同步的推送发现文章,正文按链接公开抓取。"""
 
@@ -266,16 +290,27 @@ class WeChatLocalCollector:
 
     # ── 落地:采集器本地库 → obs md ───────────────────────────────────────────
 
-    def materialize(self) -> None:
+    def materialize(self) -> frozenset[str] | None:
+        """落 md,返回这一轮新写的那几篇(见 `kb.collectors` 的契约)。
+
+        **只有子进程自己交出清单的那一支给确定值**,其余一律 None(不可确认):
+
+        - 采集器没装好 → 一个字节都没写,`frozenset()` 是确定的空集。
+        - 超时后降级 `--no-images` 重跑 → 第一次那趟已经写下去的文章在第二趟里
+          算「已存在」被跳过,清单里没有它们,交上去就是个少记的下界。
+        - 子进程判错、或者清单压根没来(`KB_COLLECTOR_DIR` 指着一份旧采集器)
+          → 写到哪一行断在哪里,同上。
+        """
         problem = _backend_problem()
         if problem:
             _stage("export", "skipped", f"采集器还没装好,跳过导出:{problem}")
-            return
+            return frozenset()
         _stage("export", "running", "导出到 obs")
 
         def _export(extra: list[str], tmo: int):
             return _run_cli("export", *extra, timeout=tmo)
 
+        degraded = False
         try:
             proc = _export([], 30 * 60)
         except subprocess.TimeoutExpired:
@@ -283,14 +318,15 @@ class WeChatLocalCollector:
             # 保证正文仍能导出,不把新文章卡在库外每天复发"导出超时"。
             # export 幂等,重跑只补上次没导完的剩余篇。见 gzh-full-pipeline 记忆。
             _stage("export", "running", "导出超时,降级 --no-images 重跑")
+            degraded = True
             try:
                 proc = _export(["--no-images"], 30 * 60)
             except subprocess.TimeoutExpired:
                 _stage("export", "error", "导出超时(降级 --no-images 仍超时)")
-                return
+                return None
         except OSError as e:
             _stage("export", "error", f"采集器起不来: {e}")
-            return
+            return None
 
         event = {}
         for line in proc.stdout.splitlines():
@@ -301,12 +337,13 @@ class WeChatLocalCollector:
         if proc.returncode != 0:
             _stage("export", "error",
                    event.get("detail") or (proc.stderr or "").strip()[-300:] or "导出失败")
-            return
+            return None
         fails = [{"title": t,
                   "reason": "缺少正文，暂未导出；保留待补，后续同步会按退避时间重试",
                   "pending": True}
                  for t in (event.get("no_body") or [])]
         _stage("export", "ok", event.get("detail") or "完成", failures=fails)
+        return None if degraded else _receipt(event)
 
     # ── 积压 ────────────────────────────────────────────────────────────────
 
