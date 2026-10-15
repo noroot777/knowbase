@@ -19,7 +19,8 @@ from pathlib import Path
 
 from kb.collectors import FetchScope, active_collector
 from kb.config import VIDEOS_ROOT
-from kb.pipeline_state import _log, _now, _stage, _state, stage_segment
+from kb.pipeline_segments import stage_segment
+from kb.pipeline_state import _log, _now, _stage, _state
 
 
 # ── 采集:抓取 + 导出,两阶段都只跟采集器契约打交道 ────────────────────────────

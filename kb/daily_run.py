@@ -372,9 +372,18 @@ def _sync_round(stages: list[str], crawl_filter: dict | None, label: str,
     if not _wait_idle(min(deadline, time.monotonic() + WAIT_BUSY), halted):
         entry.update(status='skipped', detail='同步管道一直被占用,本轮跳过')
         return entry
-    run = pl.start_pipeline(stages, crawl_filter=crawl_filter, batch=batch)
+    # **收下真实原因再报**(口径同 `pipeline_api` / `intake_api` 那三处):没起跑有
+    # 两种,而「被其它任务占用」只覆盖一种 —— 另一种是这一轮的持久化边界落不下来
+    # (数据目录写不进去,见 `pipeline.start_pipeline` 的 `refused`)。日报把它也说成
+    # 占用的后果是**每一段各劝一次「等一下」**:各来源那几轮加入库那一轮都报等待,
+    # 而那一档等不好(得去看磁盘和权限),真实原因只留在管道日志里。
+    why: list[str] = []
+    run = pl.start_pipeline(stages, crawl_filter=crawl_filter, batch=batch,
+                            refused=why)
     if not run:
-        entry.update(status='skipped', detail='同步管道已被其它任务占用,本轮跳过')
+        entry.update(status='skipped',
+                     detail=f'本轮跳过:{why[0]}' if why
+                     else '同步管道已被其它任务占用,本轮跳过')
         return entry
     with _lock:
         _state['pipeline_run'] = run

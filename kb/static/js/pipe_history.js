@@ -30,8 +30,15 @@ function pipeRunWhen(run) {
   return stamp.slice(5, 16) || '时间未知';
 }
 
+// 「这一轮作用在哪」。**判据递的是整份快照、不是裸 filter**(`pipeRunScopes` /
+// `pipeLibraryOnly`,口径在 `pipe_channels.js`,主视图和订阅页走的是同一份)。
+// 递裸 filter 会落进那条留给存量记录的兼容分支 —— 而 `start_pipeline` **一律**往
+// filter 里盖一个默认采集器名,于是日报那个只跑 index/extract 的子轮在列表上被说成
+// 「公众号」,点进去主视图写的却是「全库(不按来源)」:同一轮两种说法。
+// 全库那一档要**自己有话说**,不许回落成「未记录来源」—— 它不是没记,是不按来源。
 function pipeRunWhere(run) {
-  const scopes = pipeRunScopes(run.crawl_filter);
+  if (pipeLibraryOnly(run)) return '全库';
+  const scopes = pipeRunScopes(run);
   return scopes.length ? scopes.map(s => channelLabel(s.channel)).join(' + ') : '未记录来源';
 }
 

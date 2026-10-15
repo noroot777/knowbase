@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from kb import pipeline_batch as pb
+from kb import pipeline_segments as seg
 from kb import pipeline_state as ps
 from tests.pipeline_round_fixture import RoundStore, finish_round
 
@@ -21,7 +23,7 @@ class DailyBatchResultTests(RoundStore):
     一轮入库的成功一起抹掉(`retry_failed_plan` 读的就是这一份)。两段式之前只有
     最后一个来源的结果留得下来,改成两段式之后变成**每次必然发生**。所以收尾时把
     这一批合并成一份(`pipeline_merge._merge_runs`),而且**在子轮收尾的同一步里
-    就写进去**(`_publish_in_batch`)。
+    就写进去**(`pipeline_batch._publish_in_batch`)。
 
     钉的是后果:库里那份最近运行里还有没有那条红、点重试还排不排得出计划。
     """
@@ -73,7 +75,7 @@ class DailyBatchResultTests(RoundStore):
 
         这条原来钉在 `publish_batch` 的「少于两轮回 None」上,那个公开出口已经
         收掉了(留着等于给人留一条"事后再聚合"的路);契约搬到
-        `_publish_in_batch` 的头一轮分支。判据是**合并留下的痕迹**:合过的那份
+        `pipeline_batch._publish_in_batch` 的头一轮分支。判据是**合并留下的痕迹**:合过的那份
         detail 前面会挂来源名(`_scope_name`),没合过的就是阶段自己那句话。
         """
         self.run_batch(self.spec(['crawl'], run_id='run-1',
@@ -148,8 +150,8 @@ class DailyBatchResultTests(RoundStore):
         所以钉的不是"下一轮起跑前看得到",而是**每个子轮收尾之后盘上就是全的**。
         """
         from kb import pipeline
-        batch = ps.open_batch()
-        self.addCleanup(ps.close_batch)
+        batch = pb.open_batch()
+        self.addCleanup(pb.close_batch)
         finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
                      results={'crawl': {
                          'status': 'error', 'detail': '失败 1 个',
@@ -173,7 +175,7 @@ class DailyBatchResultTests(RoundStore):
     def test_start_pipeline_puts_the_batch_id_where_the_ledger_looks(self):
         """`start_pipeline` 要把批次身份**原子地**放进 `_state`。
 
-        账本认的是 `_state['batch']`(见 `_publish_in_batch`),所以这一格丢了的话
+        账本认的是 `_state['batch']`(见 `pipeline_batch._publish_in_batch`),所以这一格丢了的话
         整批退化成"每轮只写自己",而上面那条用例是自己摆盘的、看不见这一段真代码
         (注入「丢掉 batch」时它红 0 条)。放进 `_state` 而不是事后标,是因为一轮
         运行完全可能比调用方的下一句还快。
@@ -197,8 +199,8 @@ class DailyBatchResultTests(RoundStore):
         咽下去的后果:同步中心显示的是那一轮手动同步,而日报那边一句「已生成」
         看着一切正常,没人知道这一轮日报的同步结果压根没进去。
         """
-        batch = ps.open_batch()
-        self.addCleanup(ps.close_batch)
+        batch = pb.open_batch()
+        self.addCleanup(pb.close_batch)
         finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
                      results={'crawl': {'status': 'error', 'detail': '失败 1 个'}})
         # 期间用户自己点了一轮同步,它比我们这一批新
@@ -207,7 +209,7 @@ class DailyBatchResultTests(RoundStore):
                      started='2026-10-14 10:00:00')
         finish_round(['index', 'extract'], None, batch, run_id='run-2',
                      started='2026-10-14 10:10:00')
-        issue = ps.close_batch()
+        issue = pb.close_batch()
         self.assertIn('run-manual', issue)
         # 退回只写自己那一份:**我们这一轮确实是此刻最新的**,但不许把前几轮一起
         # 合进去盖掉人家那一轮
@@ -220,8 +222,8 @@ class DailyBatchResultTests(RoundStore):
         # 反过来钉一边:不带批次身份的那一轮(手动同步、重试)就该只写它自己 ——
         # 合进一个别人的批次等于把早先那几轮的结果说成"刚刚这一轮的成绩"。
         from kb import pipeline
-        batch = ps.open_batch()
-        self.addCleanup(ps.close_batch)
+        batch = pb.open_batch()
+        self.addCleanup(pb.close_batch)
         finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
                      results={'crawl': {'status': 'error', 'detail': '失败 1 个'}})
         finish_round(['index'], None, '', run_id='run-own',
@@ -235,7 +237,7 @@ class DailyBatchResultTests(RoundStore):
         """新一批的头一轮收尾之后,权威位上不许还挂着上一批那份汇总。
 
         整批那份汇总是**进程内的权威**(落盘成不成功都照旧当权威),所以每一次
-        收尾都得重设它 —— 口径收在 `_save_own` 里。漏掉头一轮那一次的后果:新一批
+        收尾都得重设它 —— 口径收在 `pipeline_batch._save_own` 里。漏掉头一轮那一次的后果:新一批
         的抓取段明明跑完了,面板显示的仍是上一批的结论(上一批的阶段、上一批那条
         失败),「重试失败项」也跟着去抓上一批那几个来源 —— 而这两件事都没有任何
         报错,因为磁盘上那一份是对的、只有内存里那份权威是旧的。
@@ -243,16 +245,16 @@ class DailyBatchResultTests(RoundStore):
         `test_a_fetch_failure_survives_the_library_round_that_follows_it` 钉着。
         """
         from kb import pipeline
-        first = ps.open_batch()
+        first = pb.open_batch()
         finish_round(['crawl', 'export'], {'channel': 'rss'}, first, run_id='old-1',
                      results={'crawl': {
                          'status': 'error', 'detail': '失败 1 个',
                          'failures': [{'title': '上一批那条', 'reason': '连不上'}]}})
         finish_round(['index', 'extract'], None, first, run_id='old-2',
                      started='2026-10-14 09:30:00')
-        self.assertEqual('', ps.close_batch())
-        second = ps.open_batch()
-        self.addCleanup(ps.close_batch)
+        self.assertEqual('', pb.close_batch())
+        second = pb.open_batch()
+        self.addCleanup(pb.close_batch)
         finish_round(['crawl', 'export'], {'channel': 'rss'}, second, run_id='new-1',
                      started='2026-10-15 09:00:00')
         last = pipeline.last_result()
@@ -356,8 +358,8 @@ class DailyBatchResultTests(RoundStore):
         many = [{'title': f't{i}', 'reason': '连不上'} for i in range(60)]
         ps._state['stages'] = {st: {'status': 'skipped', 'detail': ''}
                                for st in ps.STAGES}
-        ps.clear_segments()
-        self.addCleanup(ps.clear_segments)
+        seg.clear_segments()
+        self.addCleanup(seg.clear_segments)
         # ① 单阶段自己那一次
         ps._stage('crawl', 'error', '失败 60 个', failures=many)
         entry = ps._state['stages']['crawl']
@@ -366,16 +368,16 @@ class DailyBatchResultTests(RoundStore):
         # ② 多来源分段:两段各 40,合起来 80
         ps._state['stages']['crawl'] = {'status': 'skipped', 'detail': ''}
         for label, part in (('RSS', many[:40]), ('网页专栏', many[20:60])):
-            with ps.stage_segment('crawl', label):
+            with seg.stage_segment('crawl', label):
                 ps._stage('crawl', 'error', '失败 40 个', failures=part)
         entry = ps._state['stages']['crawl']
         self.assertEqual((ps._FAILURES_KEEP, 80),
                          (len(entry['failures']), entry['failures_total']))
         # 反过来钉一边:两段加起来没超上限时不许带这一格
-        ps.clear_segments()
+        seg.clear_segments()
         ps._state['stages']['crawl'] = {'status': 'skipped', 'detail': ''}
         for label in ('RSS', '网页专栏'):
-            with ps.stage_segment('crawl', label):
+            with seg.stage_segment('crawl', label):
                 ps._stage('crawl', 'error', '失败 3 个', failures=many[:3])
         self.assertNotIn('failures_total', ps._state['stages']['crawl'])
 
@@ -389,8 +391,8 @@ class DailyBatchResultTests(RoundStore):
         注入点同上一条,钉在 `Path.write_bytes`(原子替换写的是临时文件)。
         """
         from kb import pipeline
-        batch = ps.open_batch()
-        self.addCleanup(ps.close_batch)
+        batch = pb.open_batch()
+        self.addCleanup(pb.close_batch)
         finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
                      results={'crawl': {
                          'status': 'error', 'detail': '失败 1 个',
@@ -433,8 +435,8 @@ class DailyBatchResultTests(RoundStore):
         "有资格当最新",把前几轮一起合进去盖掉人家刚刚那条 index 失败。
         """
         from kb import pipeline
-        batch = ps.open_batch()
-        self.addCleanup(ps.close_batch)
+        batch = pb.open_batch()
+        self.addCleanup(pb.close_batch)
         finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1')
         # 期间用户自己点了一轮同步,它失败了、而且连状态文件都没写进去
         with patch.object(ps, '_write_state', Mock(side_effect=OSError('磁盘满'))):
@@ -443,7 +445,7 @@ class DailyBatchResultTests(RoundStore):
                          started='2026-10-14 10:00:00')
         finish_round(['index', 'extract'], None, batch, run_id='run-2',
                      started='2026-10-14 10:10:00')
-        issue = ps.close_batch()
+        issue = pb.close_batch()
         self.assertIn('run-manual', issue)
         # 文案只说已经发生的事:**不许承诺"显示的是那一轮"** —— 紧接着的退路会把
         # 当前子轮写进去,于是显示的其实是刚结束的这一轮(第 5 轮实测文案不实)。
@@ -466,16 +468,16 @@ class DailyBatchResultTests(RoundStore):
         这条用例也是把权威清掉来走它 —— 冗余带不删,但要说清它是冗余带。
         """
         from kb import pipeline
-        batch = ps.open_batch()
-        self.addCleanup(ps.close_batch)
+        batch = pb.open_batch()
+        self.addCleanup(pb.close_batch)
         finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
                      results={'crawl': {'status': 'error', 'detail': '失败 10 个'}})
         ps._STATE_FILE.write_text('{"run_id": "run-', encoding='utf-8')
-        with patch.object(ps, '_last_settled', ''), \
-             patch.object(ps, '_last_settled_file', None):
+        with patch.object(pb, '_last_settled', ''), \
+             patch.object(pb, '_last_settled_file', None):
             finish_round(['index', 'extract'], None, batch, run_id='run-2',
                          started='2026-10-14 09:30:00')
-        self.assertIn('读不出', ps.close_batch())
+        self.assertIn('读不出', pb.close_batch())
         # 没资格就不合并:盘上写的是最后收尾的那一轮自己(坏文件本来也读不出来,
         # 留着它才是真的什么都没有)
         self.fresh_process()
@@ -486,16 +488,16 @@ class DailyBatchResultTests(RoundStore):
         # 反过来钉一边:**文件压根不存在**是合法的头一轮,照旧合并发布得出去 ——
         # 一律失败关闭会让新装的库永远发布不了第一批。
         from kb import pipeline
-        batch = ps.open_batch()
-        self.addCleanup(ps.close_batch)
+        batch = pb.open_batch()
+        self.addCleanup(pb.close_batch)
         finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
                      results={'crawl': {'status': 'error', 'detail': '失败 10 个'}})
         ps._STATE_FILE.unlink()
-        with patch.object(ps, '_last_settled', ''), \
-             patch.object(ps, '_last_settled_file', None):
+        with patch.object(pb, '_last_settled', ''), \
+             patch.object(pb, '_last_settled_file', None):
             finish_round(['index', 'extract'], None, batch, run_id='run-2',
                          started='2026-10-14 09:30:00')
-        self.assertEqual('', ps.close_batch())
+        self.assertEqual('', pb.close_batch())
         self.fresh_process()
         last = pipeline.load_last_run()
         self.assertEqual('error', last['stages']['crawl']['status'])
@@ -511,8 +513,8 @@ class DailyBatchResultTests(RoundStore):
         失败" —— 所以整批那份照旧当权威,盘上旧那份原样留着。
         """
         from kb import pipeline
-        batch = ps.open_batch()
-        self.addCleanup(ps.close_batch)
+        batch = pb.open_batch()
+        self.addCleanup(pb.close_batch)
         finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
                      results={'crawl': {
                          'status': 'error', 'detail': '失败 1 个',
@@ -534,23 +536,87 @@ class DailyBatchResultTests(RoundStore):
         # 降级要说出来:一格结构化字段(面板直接显示)+ 一行日志 + 日报的提示
         self.assertIn('没能写进磁盘', last['persist_issue'])
         self.assertTrue(any('没能写进磁盘' in line for line in last['log']), last['log'])
-        self.assertIn('没能写进磁盘', ps.close_batch())
+        self.assertIn('没能写进磁盘', pb.close_batch())
         # 重启之后:盘上那份(这一批上一轮的汇总)原样在,那条失败一个字没丢
         self.fresh_process()
         restarted = pipeline.load_last_run()
         self.assertEqual('error', restarted['stages']['crawl']['status'])
-        # **而重试不许静默拿它的范围去跑。** 这一档正是"状态文件写失败、历史写
-        # 成功":历史里那一轮(run-2)更新,但历史记录没有重试派生字段 —— 恢复只
-        # 证得出"有更新的一轮",证不出它的范围。如实报失证并拦住,不许退回盘上
-        # 那一轮的范围(那样导出会摘掉失败那个来源、面板报「已保存 0 条」,见
-        # `docs/decisions/retry-scope.md`)。失败原因本身没丢:盘上那份和历史里
-        # 那条都还在。
-        # 恢复是懒做的(`_restore_once`),先读一次权威触发它 —— 面板那条路也是
-        # 这个顺序。重启之后屏幕上是历史里更新的那一轮(入库那一轮),而不是盘上
-        # 这份更旧的汇总:**不许把更旧的那一份摆成「最新」**。
-        self.assertEqual('run-2', pipeline.last_result()['run_id'])
+        # **重启之后屏幕上仍然是「这一批」的结论,不是末个子轮那份局部成功。**
+        # 恢复是懒做的(`_restore_once`),先读一次权威触发它 —— 面板那条路也是这个
+        # 顺序。这一档正是"状态文件写失败、历史写成功":恢复挑的是历史那一条,而它
+        # 现在存的就是整批那一份(见 `pipeline_state._save_history`),所以这条 RSS
+        # 抓取失败和失败明细照旧在屏幕上。
+        last = pipeline.last_result()
+        self.assertEqual(('run-2', 'error', ['某订阅']),
+                         (last['run_id'], last['stages']['crawl']['status'],
+                          [f['title'] for f in last['stages']['crawl']['failures']]))
+        self.assertEqual(['crawl', 'export', 'index', 'extract'], last['planned_stages'])
+        # **而重试不许静默拿它的范围去跑。** 历史记录没有重试派生字段(有意的),
+        # 恢复只证得出"有更新的一轮",证不出它的范围 —— 如实报失证并**把按钮拦住**
+        # (判据落在按钮上,不是落在计划长度上:派生得出计划不等于许可起跑)。
+        # 不拦的后果是导出摘掉失败那个来源、面板报「已保存 0 条」,见
+        # `docs/decisions/retry-scope.md`。
         self.assertEqual('scope', pipeline.restore_gap())
-        self.assertEqual([], pipeline.retry_failed_plan())
+        ok, why = pipeline.start_retry_failed()
+        self.assertFalse(ok, why)
+        self.assertIn('重试范围没能留档', why)
+
+    def test_both_recoverable_copies_carry_the_same_business_result(self):
+        """两份可恢复副本必须是**同一个业务结果**的两个投影。
+
+        状态文件存整批、历史存末个子轮,而两者**共用同一个 run id** —— 于是同一个
+        身份下躺着两种含义的结果:一份抓取 error、一份抓取「未选择」。后果有两层:
+        正常保存时面板说"失败"、点开同身份那条历史却写着"已完成";汇总那次写入
+        失败再重启,恢复按完成序号挑中历史那条,日报里那条 RSS 抓取失败当场变成
+        「同步已完成」、连「重试失败项」都没有(那一档钉在
+        `test_a_transient_write_failure_cannot_demote_the_batch` 的重启那一段)。
+        所以这里钉的是**正常保存**这条路:两份的计划、阶段结论必须一致,而且
+        **一轮日报只占一条历史** —— 整批那一份顶掉这一批前几轮各自留下的那条
+        (顶掉不丢内容:整批是子轮的并集)。
+        """
+        from kb import pipeline
+        batch = pb.open_batch()
+        self.addCleanup(pb.close_batch)
+        finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
+                     results={'crawl': {
+                         'status': 'error', 'detail': '失败 1 个',
+                         'failures': [{'title': '某订阅', 'reason': '连不上'}]}})
+        self.assertEqual(['run-1'], [r['run_id'] for r in pipeline.load_history()])
+        finish_round(['index', 'extract'], None, batch, run_id='run-2',
+                     started='2026-10-14 09:30:00')
+        disk = json.loads(ps._STATE_FILE.read_text(encoding='utf-8'))
+        rows = pipeline.load_history()
+        self.assertEqual(['run-2'], [r['run_id'] for r in rows], '一轮日报占了两条历史')
+        for name, got in (('盘上那份', disk), ('历史那条', rows[0])):
+            with self.subTest(name):
+                self.assertEqual(['crawl', 'export', 'index', 'extract'],
+                                 got['planned_stages'])
+                self.assertEqual('error', got['stages']['crawl']['status'])
+                self.assertEqual(['某订阅'],
+                                 [f['title'] for f in got['stages']['crawl']['failures']])
+
+    def test_a_refused_batch_leaves_the_earlier_rounds_their_own_history_row(self):
+        """反过来钉一边:**没资格发布**那一档写的是子轮自己那份,前几轮那几条不许顶。
+
+        顶掉的前提是"整批那一份已经存进去了、它是子轮的并集"。被更新的一轮接替时
+        盘上和历史里存的都只是当前子轮,这时把前几轮那条删掉就是**真的丢数据** ——
+        那几条是它们唯一的副本。
+        """
+        from kb import pipeline
+        batch = pb.open_batch()
+        self.addCleanup(pb.close_batch)
+        finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
+                     results={'crawl': {'status': 'error', 'detail': '失败 1 个'}})
+        # 期间用户自己点了一轮同步(不带批次身份),它成了最新那一轮
+        finish_round(['index'], None, '', run_id='run-manual',
+                     started='2026-10-14 10:00:00')
+        finish_round(['index', 'extract'], None, batch, run_id='run-2',
+                     started='2026-10-14 10:10:00')
+        self.assertIn('run-manual', pb.close_batch())
+        rows = pipeline.load_history()
+        self.assertEqual(['run-2', 'run-manual', 'run-1'], [r['run_id'] for r in rows])
+        self.assertEqual('error', rows[-1]['stages']['crawl']['status'],
+                         '第一轮那条抓取失败被顶掉了')
 
     def test_a_later_successful_publish_clears_the_warning(self):
         """中间一轮写失败、后面写成功了,就不许还挂着「没写进」。
@@ -559,8 +625,8 @@ class DailyBatchResultTests(RoundStore):
         提示里却还带着那句旧抱怨。原因留在运行日志里,"当前仍未保存"这句话不行。
         """
         from kb import pipeline
-        batch = ps.open_batch()
-        self.addCleanup(ps.close_batch)
+        batch = pb.open_batch()
+        self.addCleanup(pb.close_batch)
         finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
                      results={'crawl': {'status': 'error', 'detail': '失败 1 个'}})
         with patch.object(ps, '_write_state', Mock(side_effect=OSError('磁盘满'))):
@@ -568,7 +634,7 @@ class DailyBatchResultTests(RoundStore):
                          started='2026-10-14 09:10:00')
         finish_round(['index', 'extract'], None, batch, run_id='run-3',
                      started='2026-10-14 09:20:00')
-        self.assertEqual('', ps.close_batch())
+        self.assertEqual('', pb.close_batch())
         self.fresh_process()
         last = pipeline.load_last_run()
         self.assertEqual('error', last['stages']['crawl']['status'])
@@ -590,14 +656,14 @@ class DailyBatchResultTests(RoundStore):
         而决策文档和上一条用例都说"原因留在运行日志里"。日志也远没到 80 行上限。
         """
         from kb import pipeline
-        batch = ps.open_batch()
-        self.addCleanup(ps.close_batch)
+        batch = pb.open_batch()
+        self.addCleanup(pb.close_batch)
         with patch.object(ps, '_write_state', Mock(side_effect=OSError('首轮磁盘满'))):
             finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, run_id='run-1',
                          results={'crawl': {'status': 'error', 'detail': '失败 1 个'}})
         finish_round(['index', 'extract'], None, batch, run_id='run-2',
                      started='2026-10-14 09:20:00')
-        self.assertEqual('', ps.close_batch())
+        self.assertEqual('', pb.close_batch())
         self.fresh_process()
         last = pipeline.load_last_run()
         # 先把这一批本来的后果钉住:首轮那条抓取失败和重试入口都在

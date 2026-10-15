@@ -33,7 +33,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-from kb import pipeline_retry, pipeline_state, pipeline_stages
+from kb import pipeline_retry, pipeline_segments, pipeline_stages
+from kb import pipeline_state
 from kb.feeds import registry as reg, sync
 from kb.feeds.fetching import FeedError
 from kb.collectors.feeds import FeedCollector
@@ -195,7 +196,7 @@ class SourceLevelFailureTests(RetryScopeBase):
     这一档和「失败项已经修好」在 `subscriptions` 那边**长得一模一样**(都是一个
     `last_error` 都没有),所以判据不能是订阅行上的状态 —— 分得开它们的是这个来源
     这一轮**有没有留下失败名单**:整批失败时 `collect` 整个抛出去,那时一条订阅都
-    还没被碰到,也就没有名单可言(见 `pipeline_state.note_retry_targets`)。
+    还没被碰到,也就没有名单可言(见 `pipeline_segments.note_retry_targets`)。
     """
 
     def crawl_blowing_up(self, crawl_filter):
@@ -317,7 +318,7 @@ class RetryNoteContractTests(RetryScopeBase):
         """换届就重开一份,不跟上一轮的名单混在一起。"""
         self.crawl({'channel': 'rss'}, broken=[self.a])
         self._begin({'channel': 'rss'})
-        pipeline_state.note_retry_targets('rss', [self.b['id']], reg.now())
+        pipeline_segments.note_retry_targets('rss', [self.b['id']], reg.now())
         note = pipeline_state._state['crawl_retry']
         self.assertEqual(pipeline_state._state['run_id'], note['run'])
         self.assertEqual([str(self.b['id'])], note['channels']['rss']['targets'])

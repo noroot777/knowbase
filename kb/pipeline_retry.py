@@ -276,7 +276,7 @@ def retry_crawl_scopes(prev: dict) -> list[dict]:
     """这一轮重试要抓哪几个来源、各抓哪几个目标([] = 一个都不用抓)。
 
     继承的是上一轮的**来源**(哪几个 channel、上次点名了哪几个目标),范围则按
-    **各来源自己留下的失败名单**逐个收窄(见 `pipeline_state.note_retry_targets`)。
+    **各来源自己留下的失败名单**逐个收窄(见 `pipeline_segments.note_retry_targets`)。
     每项多一个 `retry` 说明这一项是怎么来的:`targets` = 收窄到了失败的那几个,
     `all` = 这个来源没法收窄,按原范围重跑。面板那行「本次范围」照它说话。
 

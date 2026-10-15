@@ -70,6 +70,16 @@
     也没有「重试失败项」。**窗口有多窄都不算修好**:它正是"写了一份会删掉前序
     失败的局部结果,然后指望还活着的调用方稍后修好"。
   - 账本由 `_end_run` 喂,所以日报"没亲眼看到自己那一轮收尾"的那一档也照样进账。
+  - **两份可恢复副本必须是同一个业务结果的两个投影。** 状态文件写整批汇总的那几轮,
+    历史里也必须是整批那一份(`_run_record` 取 `_batch_aggregate()`),而且**整批那条
+    要顶掉这一批前几轮各自留下的行**(`_batch_round_ids`):一个业务结果只占一条历史。
+    汇总继承最后那个子轮的身份(`run_id` / `run_seq` / `seq_gen`),而恢复层按「同一
+    身份的两份记录是同一次事件的不同字段投影」挑轮次(见 `pipeline-history.md`)——
+    两份不同源的话,新进程恢复时会在同一身份下挑中只含 index/extract 成功的那条子轮
+    记录:页头写「同步已完成」、抓取写「本次不执行」,那一批的抓取失败和重试计划一起
+    从主视图消失(只剩一句 `scope`)。正常落盘时它表现成「最新状态是失败、点第一条
+    同身份历史却是成功」。**被拒那一档反过来钉一边**:退回只写自己那一份时,前几轮
+    各自那条历史就该留着。
   - **保存事件(写失败/恢复)也记在同一本账上,不按"走的是普通保存还是汇总保存"
     分裂**(`_remember_batch_note`,两个写出口都调它)。这一批的头一轮走的是
     `_save_last_run`(只有它自己时写自己那份就是全的),它那行字只进了当轮的
@@ -84,12 +94,27 @@
     原因记在批次上由 `close_batch()` 交给日报如实说出来。
   - **批次要关**:正常那一句之外 `finally` 里还有一次,半路抛出来时靠它。
   - **不要再开一个"事后聚合"的公开出口。** 合并的那个函数是 `_merge_runs`
-    (在 `kb/pipeline_merge.py`:从 `pipeline_state` 拆出来**只因为 700 行上限**,
-    那一层没有自己的可变状态,`_publish_in_batch` 在函数里延迟 import 它 ——
-    它要用那边的 `STAGES` / `_cap_failures`,两边直接互相 import 会成环),
-    私有、唯一调用方是 `_publish_in_batch` —— 原来那个公开的 `publish_batch` 已经
+    (在 `kb/pipeline_merge.py`,那一层没有自己的可变状态),
+    私有、唯一调用方是 `pipeline_batch._publish_in_batch` —— 原来那个公开的 `publish_batch` 已经
     收掉了:留着就是给人留一条"子轮先写局部结果、调用方稍后补回"的路,而那正是
     这件事原来错的地方。合并要么发生在子轮收尾的同一步里,要么不发生。
+- **结果存储层分成四个文件,只因为 700 行上限;依赖方向一路单向。**
+  `kb/pipeline_state.py`(一轮运行的状态与收尾)、`kb/pipeline_batch.py`(业务批次的
+  账本与发布)、`kb/pipeline_segments.py`(一个阶段被几个来源各跑一遍时的分段汇报,
+  以及各来源留下的失败名单)、`kb/pipeline_merge.py`(纯合并)。方向是
+  `pipeline_batch` → `pipeline_merge` → `pipeline_state`、`pipeline_segments` →
+  `pipeline_state`;**反过来用的那几处一律在函数里延迟 import**(`_end_run`、
+  `_run_record`、`_save_history`、`_latest_locked`、`_stage`)。
+  - **公开名字从定义它的那个模块取,不在 `pipeline_state` 那边再导出一次** ——
+    再导出就把"模块级互相 import"引回来了,而那种环炸不炸取决于谁先被 import。
+    `kb/pipeline.py` 照旧是门面(`open_batch` / `close_batch` / `PublishRefused` 从
+    它取,`kb/daily_run.py` 一个字没改)。
+  - **拆法不许动临界区**:收尾、批次发布、权威指针更新仍在 `_end_run` 那一把
+    `pipeline_state._lock` 里。为了凑行数把哪一段挪出临界区,等于拿并发不变量换行数
+    合规。
+  - 测试里那几格进程全局**按模块分别还原**(`tests/pipeline_round_fixture.py` 的
+    `_PROCESS_GLOBALS`):`setattr` 落到另一个模块只会在那边挂一个没人读的同名属性,
+    还原看着做了、其实一格都没还回去(`patch.object` 认不认那个属性是现成的守卫)。
 - **落盘一律原子替换,而且两个写出口都走同一个函数**(`_write_state` →
   `pipeline_persist._write_atomic`:同目录临时文件 + rename,替换没成功连临时文件
   一起收掉)。就地改写正式文件写到一半断掉,盘上剩的是半截 JSON —— 读的那端只能
@@ -405,9 +430,15 @@ C 另外还有两处说不通:它**管不到公众号**(`feed_types()` 只收 `m
   **「状态文件写失败、历史写成功」那一档的重启行为按 `pipeline-history.md` 的结论
   钉**:`restore_gap()` 报 `scope`、「重试失败项」拦住,不许静默退回盘上那一轮的
   范围(失败原因本身没丢:盘上那份和历史里那条都在)。
+- `tests/test_pipeline_isolation.py` —— **走真收尾的用例必须把整组落盘出口圈进自己
+  的临时根目录**(口径收在 `pipeline_round_fixture.isolate_pipeline_state`,事故形态
+  在它的 docstring 里)。两条判据:在预置了哨兵历史的临时数据目录里真跑一遍那个用例,
+  外面那几份文件要**逐字节不变**;以及按 AST 扫一遍「调了真收尾的用例有没有自己圈
+  地」。只 mock 当时唯一那个写函数,等于把隔离押在"以后不会再加写出口"上。
 - `tests/test_daily_two_stage.py` —— 两段式编排:抓取按通道、入库一次;全库那一段
   的红不记到通道头上;超预算仍入库;用户停止则跳过;几轮跑在同一个批次里而且走完
-  要关掉。**摆盘打桩只打到 `start_pipeline` 这一层,收尾和落盘都是真的** —— 打掉
+  要关掉;**起跑被拒时念的是真实原因**(数据目录写不进去那一档不许说成「被其它任务
+  占用」,反过来真被占着时也不许说成数据目录的事)。**摆盘打桩只打到 `start_pipeline` 这一层,收尾和落盘都是真的** —— 打掉
   `_end_run` 的话这一轮压根不落盘,"有没有真的合并发布"就没有判据了,而用例照样全绿。
 - `tests/test_source_schedule_note.py` —— 订阅页那行字和它背后的共享层(另含
   `scheduleSettle` 那四个终态:**配置好、依赖缺**也不许算 ready)(从

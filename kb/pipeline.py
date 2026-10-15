@@ -52,13 +52,10 @@ from kb.pipeline_state import (
     _stage,
     _state,
     get_state,
-    close_batch,
     load_history,
     last_result,
     load_last_run,
-    open_batch,
     persist_error,
-    PublishRefused,
     restore_gap,
     row_key,
     same_round,
@@ -70,7 +67,11 @@ from kb.pipeline_state import (
     run_result,
 )
 
-# 对外门面:Web 层只 import 本模块,不直接碰拆出去的三个子模块
+# 批次层:同一个业务轮里的几轮管道合并着发布(`pipeline_batch`,从
+# `pipeline_state` 拆出来只因为行数上限)。`kb.daily_run` 照旧只认本模块这三个名字。
+from kb.pipeline_batch import PublishRefused, close_batch, open_batch
+
+# 对外门面:Web 层只 import 本模块,不直接碰拆出去的几个子模块
 __all__ = [
     "STAGES",
     "channel_filter",
@@ -177,9 +178,9 @@ def start_pipeline(stages: list[str] | None = None,
     crawl_filter 见 _run_crawl:限定来源目标 + 时间段的范围抓取;
     同时抓几个来源时来源列表在 channels 里(见 crawl_channels)。
 
-    `batch` 是 `pipeline_state.open_batch()` 发的身份:带着它的几轮运行算同一个
+    `batch` 是 `pipeline_batch.open_batch()` 发的身份:带着它的几轮运行算同一个
     业务批次,**每一轮收尾都把整批的汇总写进「最近一次运行」**(见
-    `pipeline_state._publish_in_batch`)。这里设进 `_state` 而不是事后再标,是因为
+    `pipeline_batch._publish_in_batch`)。这里设进 `_state` 而不是事后再标,是因为
     一轮运行完全可能比调用方的下一跳还快 —— 事后标就赶不上它的收尾了。
 
     返回 id 而不是 True,是为了让调用方**原子地**拿到"我起的是哪一轮":

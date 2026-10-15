@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from kb import daily, daily_run
 from kb import daily_state
 from kb.web import daily_api
+from tests.pipeline_round_fixture import isolate_pipeline_state
 
 
 class DailyStopTests(unittest.TestCase):
@@ -169,24 +170,23 @@ class DailyStopTests(unittest.TestCase):
     def test_the_pipeline_keeps_each_finished_run_addressable_by_id(self):
         # 上面那两条靠的是管道真留了这份记录:终态在 running 放下之前按 id 存。
         from kb import pipeline_state as ps
-        state, finished = deepcopy(ps._state), dict(ps._finished)
-        try:
-            ps._state.update({'running': True, 'run_id': 'run-42', 'log': [],
-                              'stop_requested': False,
-                              'stages': {s: {'status': 'ok', 'detail': '好了'}
-                                         for s in ps.STAGES}})
-            with patch.object(ps, '_save_last_run', Mock()):
-                ps._end_run()
-            got = ps.run_result('run-42')
-            self.assertEqual('ok', got['stages']['crawl']['status'])
-            self.assertFalse(got['stopped'])
-            self.assertIsNone(ps.run_result('run-41'))     # 没跑过的查不到
-            # 存的是快照,不是同一个对象:之后再起一轮不会把它改掉
-            ps._state['stages']['crawl'] = {'status': 'running', 'detail': '新一轮'}
-            self.assertEqual('ok', ps.run_result('run-42')['stages']['crawl']['status'])
-        finally:
-            ps._state.clear(); ps._state.update(state)
-            ps._finished.clear(); ps._finished.update(finished)
+        # **走真的 `_end_run()` 就得把它那几个落盘出口整组圈进临时目录**,不许只
+        # mock 当时那一个写函数:理由和实测形态在 `isolate_pipeline_state` 里
+        # (这条用例原来只 mock 了 `_save_last_run`,新增的 `_save_history` 于是把
+        # `run-42` 这次从没发生过的同步写进了当前 `KB_DATA_DIR` 的历史)。
+        isolate_pipeline_state(self)
+        ps._state.update({'running': True, 'run_id': 'run-42', 'log': [],
+                          'stop_requested': False,
+                          'stages': {s: {'status': 'ok', 'detail': '好了'}
+                                     for s in ps.STAGES}})
+        ps._end_run()
+        got = ps.run_result('run-42')
+        self.assertEqual('ok', got['stages']['crawl']['status'])
+        self.assertFalse(got['stopped'])
+        self.assertIsNone(ps.run_result('run-41'))     # 没跑过的查不到
+        # 存的是快照,不是同一个对象:之后再起一轮不会把它改掉
+        ps._state['stages']['crawl'] = {'status': 'running', 'detail': '新一轮'}
+        self.assertEqual('ok', ps.run_result('run-42')['stages']['crawl']['status'])
 
     def test_a_failed_channel_reaches_the_report_and_the_finish_notice(self):
         # 通道失败原来只留在 _state['channels'] 里:没人读,也没写进日报,完成

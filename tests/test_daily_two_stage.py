@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 from kb import daily, daily_run
 from kb import daily_state
+from kb import pipeline_batch as pb
 from kb import pipeline_state as ps
 from tests.pipeline_round_fixture import finish_round
 
@@ -47,7 +48,7 @@ class DailyTwoStageSyncTests(unittest.TestCase):
         def restore():
             ps._state.clear(); ps._state.update(keep_state)
             ps._finished.clear(); ps._finished.update(keep_done)
-            ps.close_batch()
+            pb.close_batch()
         self.addCleanup(restore)
 
     def sync_run(self, channels=('wechat_local', 'social', 'rss'), rounds=None, **flags):
@@ -66,7 +67,7 @@ class DailyTwoStageSyncTests(unittest.TestCase):
         # 合并着落盘,靠的就是这一格(见 `pipeline_state._publish_in_batch`)。
         self.batches = []
 
-        def start(wanted, crawl_filter=None, batch=''):
+        def start(wanted, crawl_filter=None, batch='', refused=None):
             self.batches.append(batch)
             calls.append((list(wanted), deepcopy(crawl_filter)))
             run = f'run-{len(calls)}'
@@ -125,22 +126,50 @@ class DailyTwoStageSyncTests(unittest.TestCase):
         传到了每一轮,而且**不许漏关** —— 开着的批次会把下一轮独立运行算进一个
         早就结束的批次。
         """
-        from kb import pipeline_state as ps
+        from kb import pipeline_batch as pb
         self.sync_run()
         self.assertEqual(4, len(self.batches))
         self.assertEqual(1, len(set(self.batches)), self.batches)
         self.assertTrue(self.batches[0], '一轮都没带上批次身份')
-        self.assertEqual('', ps._batch_id, '走完没关批次')
+        self.assertEqual('', pb._batch_id, '走完没关批次')
 
     def test_a_crash_inside_the_sync_block_still_closes_the_batch(self):
         # 半路抛出来时 `close_batch` 那一句走不到,只有 finally 那次关得掉。开着的
         # 批次会把下一轮独立运行算进一个早就结束的批次。
-        from kb import pipeline_state as ps
+        from kb import pipeline_batch as pb
         with patch.object(daily_run, '_sync_round',
                           Mock(side_effect=RuntimeError('摆盘:同步那一步炸了'))):
             self.sync_run()
         self.assertEqual('failed', daily_run._state['phase'])
-        self.assertEqual('', ps._batch_id, '抛出来之后批次还开着')
+        self.assertEqual('', pb._batch_id, '抛出来之后批次还开着')
+
+    def test_a_data_dir_that_cannot_be_written_is_not_called_a_busy_pipeline(self):
+        """起跑被拒时,日报念的是**真实原因**,不是一律「被其它任务占用」。
+
+        没起跑有两种:管道真被占着(等一下就好),或者这一轮的持久化边界落不下来
+        —— 后者**等不好**,得去看磁盘空间和数据目录权限。而日报每一段(各来源那
+        几轮 + 入库那一轮)都会照它各报一次,整屏都在劝用户等,真实原因只留在管道
+        日志里。判据落在成绩单上那句 detail 上,不是「有没有把 refused 传下去」。
+        """
+        daily_run._state.update({**self.before, 'running': True, 'log': []})
+        with patch.dict(ps._state, {'running': False}), \
+             patch.object(ps._open, '_write_atomic',
+                          side_effect=OSError('No space left on device')), \
+             patch.object(daily_run, '_wait_idle', Mock(return_value=True)):
+            entry = daily_run._sync_round(['crawl'], {'channel': 'rss'}, 'RSS', 0)
+        self.assertEqual('skipped', entry['status'])
+        self.assertIn('数据目录写不进去', entry['detail'])
+        self.assertNotIn('被其它任务占用', entry['detail'])
+
+    def test_a_pipeline_that_is_really_busy_still_says_it_is_busy(self):
+        """反过来钉一边:真被别人占着时念的还是「在运行中」,没把两档混成一句。"""
+        daily_run._state.update({**self.before, 'running': True, 'log': []})
+        with patch.dict(ps._state, {'running': True}), \
+             patch.object(daily_run, '_wait_idle', Mock(return_value=True)):
+            entry = daily_run._sync_round(['crawl'], {'channel': 'rss'}, 'RSS', 0)
+        self.assertEqual('skipped', entry['status'])
+        self.assertIn('运行中', entry['detail'])
+        self.assertNotIn('数据目录', entry['detail'])
 
     def test_a_refused_publish_is_said_out_loud(self):
         # 批次没发布出去不是日报的失败(素材都在库里,照常出报),但那句话要跟到
