@@ -23,7 +23,12 @@
   如实在文案里说一句(`（面板记录没写成：…）`),那几条下一轮同步之后自然不再出现。
 - **排除提交之后,后续写入不许把这个身份复活 —— 判据待在写语句自己的 WHERE 里**
   (`repository._excluded_clause`,挂在 `upsert_article_from_blog` / `set_body_text` / `set_body_html`
-  三处;`cursor.rowcount == 0` 就是拒绝信号,三个函数都返回 `bool`,调用方必须跟上)。发现那一道
+  三处;`cursor.rowcount == 0` 就是拒绝信号,三个函数都返回 `bool`,调用方必须跟上)。
+  **`upsert_article_from_blog` 里是两条写语句,两条都要带**:除了那条 upsert,还有一条
+  `INSERT OR IGNORE … SELECT … WHERE <判据>` 专门探「这一篇是不是首次插入」(首次抓取身份靠它,见
+  `daily.md`)。少拼那一处的后果最隐蔽:被排除的身份从那条 `OR IGNORE` 插了进来,而两条语句的
+  `rowcount` 都是 0 —— 跟一次正常拒绝长得一模一样,调用方照旧返回 False、面板照旧显示已移除。
+  往那个函数里再加写语句同理(它们都在 `_write_one_article` 里,那就是判据的覆盖范围)。发现那一道
   (`article_identity.prepare_article`)**只是早一道,不是互斥** —— 它查完黑名单到真正写入之间要抓正文、
   要更新显示名,用户完全可能正好在这中间按下那颗按钮。键取
   `article_identity.exclusion_keys`,**发现侧和写入侧用同一份口径**:各写一遍的话两边只差一个键这件事
