@@ -1,6 +1,6 @@
 """导出回执与**首次来源身份**:这一轮抓到的、之前抓到这次才补导的、说不清的。
 
-和 `test_local_wechat.py`(采集本体)共用 `local_collect_fixture` 那份夹具。单拆出来
+和采集本体、「明细点得开删得掉」那两族共用 `local_collect_case` 那份夹具。单拆出来
 是因为这一组问的全是另一个问题:**一篇文章是哪一次抓到的**,以及那个事实在异常、
 重试、读不懂的清单面前还站不站得住 —— 口径和事故形态在
 `docs/decisions/daily.md` 的「『这一次抓到的』和『补导进来的』分不开」一节。
@@ -19,10 +19,43 @@ from src.db import connection as conn_mod
 from src.crawler.local_wechat import parse_push
 from src.utils.article_identity import stable_article_id
 
-from tests.local_collect_fixture import LocalCollectEnv, push
+from tests.local_collect_case import LocalCollectCase, push
 
 
-class LocalIdentityTests(LocalCollectEnv):
+class LocalIdentityTests(LocalCollectCase):
+    def _export_event(self, out):
+        """跑一次真导出脚本,再让 `cli.cmd_export` 把它的输出收成结构化事件。
+
+        两段都走真的:清单是脚本自己逐篇打出来的,`out` 和每条的 `id`/`round`
+        都由 cli 从那些行里解析。中间任何一段只留给人看的话,知识库那一侧就只能
+        回去扫全库猜归属,而差集分不出"谁写的"。
+        """
+        import sys
+        from scripts import export_obsidian
+
+        with patch.object(sys, "argv",
+                          ["export", "--out", out, "--dedup-root", out, "--no-images"]), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(0, export_obsidian.main())
+        raw = output.getvalue()
+        # 一篇都没导的时候也得有这一行:上层靠它把清单里的「天/文件名」还原成
+        # vault 相对路径。
+        self.assertIn(f"[export] 输出目录: {out}", raw)
+        self.human = raw
+
+        import cli
+        with patch("cli.subprocess.run", return_value=subprocess.CompletedProcess(
+                [], 0, stdout=raw, stderr="")), \
+             contextlib.redirect_stdout(io.StringIO()) as event_output, \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
+        event = json.loads(event_output.getvalue())
+        # 这里就把 `items` 这个键钉住,别留给各条用例去下标 —— 键名漂了的话每条
+        # 用例红成 KeyError(ERROR),而我们要的是一句说得出后果的 FAIL:
+        # 知识库那一侧读不到清单就只能把整轮报成「不可确认」。
+        self.assertIn("items", event,
+                      "事件里没有 items 清单 —— 知识库那侧只能报「不可确认」")
+        return event
     def test_export_hands_up_what_it_wrote_with_each_items_identity(self):
         """导出脚本逐篇打的那行清单,连同输出目录一起收进结构化事件。
 

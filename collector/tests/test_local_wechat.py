@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import subprocess
 import unittest
 import contextlib
 import io
@@ -12,8 +10,10 @@ from unittest.mock import Mock, call, patch
 from src.crawler.local_wechat import LocalReader, LocalReaderError, parse_push, resolve_accounts
 from src.db import connection as conn_mod
 from src.utils.article_identity import article_identity, stable_article_id
+from tests.local_collect_case import LocalCollectCase, push
 
-from tests.local_collect_fixture import LocalCollectEnv, push
+# `push` 在这里 re-export:test_local_index / test_local_coverage 从本模块 import 它。
+__all__ = ["push"]
 
 
 class PushTests(unittest.TestCase):
@@ -205,8 +205,7 @@ class PushTests(unittest.TestCase):
             self.assertEqual(3, sleep.call_count)
 
 
-
-class LocalCollectionTests(LocalCollectEnv):
+class LocalCollectionTests(LocalCollectCase):
     def test_local_collect_twice_is_idempotent_and_does_not_touch_disabled_accounts(self):
         first, second = self.collect(), self.collect()
         self.assertEqual([], first["errors"])
@@ -353,38 +352,6 @@ class LocalCollectionTests(LocalCollectEnv):
         self.assertEqual(1, result["unreadable_messages"])
         self.assertEqual(1, result["new_articles"])
 
-
-    def test_export_keeps_old_empty_article_retryable(self):
-        from scripts import export_obsidian
-        import sys
-
-        self.reader.messages.return_value = [push(published="2020-01-01 12:00")]
-        self.fill.return_value = ("请求错误", None, "")
-        self.collect()
-        out = str(Path(self.tmp.name) / "export")
-        with patch.object(sys, "argv", ["export", "--out", out, "--dedup-root", out, "--no-images"]), \
-             contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(0, export_obsidian.main())
-        self.assertIn("待补正文 1", output.getvalue())
-        self.assertIn("无正文,跳过 档案名 · 测试文章", output.getvalue())
-        self.assertNotIn("失败 0", output.getvalue())
-        import cli
-        import subprocess
-
-        with patch("cli.subprocess.run", return_value=subprocess.CompletedProcess(
-                [], 0, stdout=output.getvalue(), stderr="")), \
-             contextlib.redirect_stdout(io.StringIO()) as event_output, \
-             contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
-        import json
-
-        self.assertEqual(["档案名 · 测试文章"], json.loads(event_output.getvalue())["no_body"])
-        self.assertEqual(0, self.repo.conn.execute("SELECT is_wx_deleted FROM articles").fetchone()[0])
-        self.repo.conn.execute("UPDATE article_fetch_state SET retry_at=0")
-        self.repo.commit()
-        self.fill.return_value = (["恢复正文"], "<p>恢复正文</p>", "")
-        self.assertEqual([], self.collect()["errors"])
-        self.assertEqual(1, self.repo.conn.execute("SELECT COUNT(*) FROM article_bodies").fetchone()[0])
 
     def test_recovery_only_resets_affected_local_articles_and_creates_backup(self):
         from scripts.recover_local_articles import recover

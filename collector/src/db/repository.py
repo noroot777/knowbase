@@ -12,6 +12,7 @@ from typing import Any
 
 from src.db.body_text import normalize_body_text
 from src.db.connection import DATA_DIR, ensure_database_ready, get_connection
+from src.db._repo_exclusion import ExclusionMixin, _excluded_clause
 from src.db._repo_notes import NotesMixin
 from src.db._repo_queries import QueryMixin
 from src.db._repo_reading import ReadingMixin
@@ -58,7 +59,7 @@ class AccountNameTaken(Exception):
         self.name, self.held, self.wanted = name, held, wanted
 
 
-class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
+class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin, ExclusionMixin):
     """文章 / 公众号仓储。
 
     列表搜索、已读收藏、笔记三块按职责拆成了同目录下的 _repo_*.py——这个类
@@ -346,9 +347,16 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         *,
         source: str = "crawl",
         fetch_round: str = "",
-    ) -> None:
-        """入库 / 更新一篇文章。`fetch_round` 只在这一篇**首次**落库时才记。
+    ) -> bool:
+        """入库 / 更新一篇文章。**被永久排除的身份一律写不进来,返回 False。**
 
+        这是「排除优先」那条不变量落地的地方 —— 发现阶段那次黑名单检查只是早一道
+        (见 `article_identity.prepare_article`),它授权不了一次更晚的写入。判据
+        (`_excluded_clause`)取反拼进**每一条**写语句自己的 WHERE,**包括下面探
+        「是不是首次插入」那一条** —— 少拼一处,被排除的身份就从那一条插进来了,而
+        两条语句的 rowcount 都是 0、看着跟一次正常拒绝一模一样。
+
+        `fetch_round` 只在这一篇**首次**落库时才记。
         **「这一篇是知识库哪一次业务抓取头一回发现的」必须和首次元数据一起落、一起撤。**
         药丸那句分解靠它分开「这一次新抓到的」和「之前抓到、这一次才补导进来的」,
         而这件事**只有首次插入这一刻知道答案**:过了这一刻,库里一篇有正文没身份的
@@ -360,10 +368,10 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         - 也不能靠「身份表里没有行」去倒推「所以是这一次新抓的」。存量文章、手工
           导入、冻结分支写进来的那些同样没有行,倒推会把它们全算成刚抓到。
 
-        做法是先拿同一组值试着当新行插一次:`rowcount == 1` 就是「首次插入」的确证
-        (判据待在写语句自己的 WHERE 里,不在 Python 这边先 SELECT 一次问在不在)。
-        首次、且批次号非空,就在同一个隐式事务里把身份行一起写掉 —— 父行刚写进去,
-        立即外键是满足的。
+        做法是先拿同一组值试着当新行插一次:`rowcount == 1` 就是「首次插入**而且
+        没被排除**」的确证(判据待在写语句自己的 WHERE 里,不在 Python 这边先
+        SELECT 一次问在不在)。首次、且批次号非空,就把身份行一起写掉 —— 父行刚
+        写进去,立即外键是满足的。
 
         **拿不到批次号就什么都不记**(不在管道里跑的 CLI 采集、手工导入、冻结分支
         的写入):留一行空值等于把「不知道」伪装成一个确定的身份。没有证据的首次
@@ -371,9 +379,10 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         唯一能吞掉的是外键没开着时删文章留下的孤行,那种情况留着旧那一轮也是实话,
         为它把整轮采集炸掉不值当(外键违反就算带 OR IGNORE 也照旧抛,实测如此)。
 
-        第二条语句照旧无条件跑。首次插入时它必然走 `DO UPDATE`、写的是同一组值,
-        纯无害;而它同时是 `OR IGNORE` 的兜底 —— `OR IGNORE` 会把 CHECK / NOT NULL
-        违反一起吞掉(rowcount 同样是 0),靠它才会照旧抛出来。
+        第二条语句照旧无条件跑,它的 rowcount 才是**拒写**的判据(首次插入那次它
+        必然走 `DO UPDATE`、写的是同一组值,纯无害)。它同时是 `OR IGNORE` 的兜底
+        —— `OR IGNORE` 会把 CHECK / NOT NULL 违反一起吞掉(rowcount 同样是 0),
+        靠它才会照旧抛出来。
 
         **「两条语句在同一个事务里」还不够,得能整篇撤回。** 同一个事务只保证它们
         不会被**别人**的提交劈开;劈开它们的是**自己这一步抛出来的异常** —— 文章
@@ -391,25 +400,33 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
 
         撤回之后下一轮才有机会把这一篇当成真正的首次插入、记下**那一次**的批次,
         这跟「给任何没有来源的文章补当前批次」是两件事:后者会把存量文章说成这次
-        新抓到的(第 1 轮 F1 的那一半)。
+        新抓到的。
 
         自动提交态下进来时,那句 `SAVEPOINT` 自己开了事务,收尾的 `RELEASE` 因此
-        会把它提交掉(实测)。那正是这一刻该有的末态:这一篇整篇写完了。
+        会把它提交掉(实测)。那正是这一刻该有的末态:这一篇整篇写完了 —— **拒写
+        那一次同理**,事务不会被留在开着的状态(`api._ingest_crawl_article` 那句
+        收尾的 commit 因此只是冗余带)。
+
+        两条不变量各自的事故形态、实测证据和回归清单:排除在
+        `docs/decisions/failure-drop.md`,首次抓取身份在 `docs/decisions/daily.md`。
         """
         aid = str(blog.get("id") or "").strip()
         if not aid:
-            return
+            return False
         now = time_now()
         create_time = str(blog.get("create_time") or "")
         cover_url = str(blog.get("cover") or "")
         article_source = "import" if source == "import" else "crawl"
         import_listed = 1 if source == "import" else 0
+        link = str(blog.get("link") or "")
+        excluded, keys = _excluded_clause(aid, link)
+        guard = f"NOT {excluded}"
         values = (
             aid,
             account_name,
             str(blog.get("title") or ""),
             str(blog.get("digest") or ""),
-            str(blog.get("link") or ""),
+            link,
             cover_url,
             create_time,
             _parse_create_time_unix(create_time),
@@ -424,7 +441,8 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         )
         self.conn.execute("SAVEPOINT one_article")
         try:
-            self._write_one_article(aid, values, fetch_round, blog)
+            wrote = self._write_one_article(aid, values, keys, guard,
+                                            fetch_round, blog)
         except BaseException:
             # 这一步没走完 = 这一篇不算写过。只撤这一篇,调用方同一个事务里别的
             # 业务写入原样留着;撤完把异常原样抛上去,不吞。
@@ -432,18 +450,22 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             self.conn.execute("RELEASE SAVEPOINT one_article")
             raise
         self.conn.execute("RELEASE SAVEPOINT one_article")
+        return wrote
 
-    def _write_one_article(self, aid: str, values: tuple,
-                           fetch_round: str, blog: dict[str, Any]) -> None:
+    def _write_one_article(self, aid: str, values: tuple, keys: tuple,
+                           guard: str, fetch_round: str,
+                           blog: dict[str, Any]) -> bool:
         """`upsert_article_from_blog` 的写入正文。**只许它在 savepoint 里调。**
 
         单独拆出来是为了让「哪些写构成这一篇」有个明确的边界:往这里加语句就是
-        往那个原子单元里加,不会有人不小心把一条写加在 savepoint 外面。
+        往那个原子单元里加,不会有人不小心把一条写加在 savepoint 外面。**加的那
+        条语句也得带上 `guard`** —— 排除判据的覆盖范围就是这个函数里的全部写。
         """
+        # 探「是不是首次插入」那一条也带 guard:被排除的身份连这一条都不许插进来。
         first = self.conn.execute(
             f"INSERT OR IGNORE INTO articles ({_ARTICLE_COLUMNS})"
-            f" VALUES ({_ARTICLE_VALUES})",
-            values,
+            f" SELECT {_ARTICLE_VALUES} WHERE {guard}",
+            (*values, *keys),
         ).rowcount == 1
         round_key = str(fetch_round or "").strip()
         if first and round_key:
@@ -452,10 +474,16 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
                 " VALUES (?, ?)",
                 (aid, round_key),
             )
-        self.conn.execute(
+        # `INSERT ... SELECT ... WHERE ... ON CONFLICT` —— SQLite 要求带 upsert 的
+        # SELECT 形式必须有 WHERE(消歧义),这里正好就是那道判据。
+        # DO UPDATE 那半也带一遍:冲突的那一行可能正是被排除的身份(删除把 articles
+        # 行连同正文一起删掉,但身份留在 `deleted_articles` 里),不带的话它会被这次
+        # 采集原地改成一条崭新的正常行。
+        cur = self.conn.execute(
             f"""
             INSERT INTO articles ({_ARTICLE_COLUMNS})
-            VALUES ({_ARTICLE_VALUES})
+            SELECT {_ARTICLE_VALUES}
+            WHERE {guard}
             ON CONFLICT(id) DO UPDATE SET
               account_name=excluded.account_name,
               title=excluded.title,
@@ -474,12 +502,16 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
                 WHEN excluded.import_listed = 1 THEN 1
                 ELSE articles.import_listed
               END
+            WHERE {guard}
             """,
-            values,
+            (*values, *keys, *keys),
         )
+        if not cur.rowcount:
+            return False                    # 这个身份已经被永久排除,一个字节都没写
         tags = blog.get("tags")
         if isinstance(tags, list) and tags:
             self.set_llm_tags(aid, [str(t) for t in tags if str(t).strip()])
+        return True
 
     def set_llm_tags(self, article_id: str, tags: list[str]) -> None:
         self.conn.execute(
@@ -503,19 +535,29 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         if tags:
             self.set_llm_tags(article_id, tags)
 
-    def set_body_text(self, article_id: str, raw: Any) -> None:
+    def set_body_text(self, article_id: str, raw: Any, *, link: str = "") -> bool:
+        """落一篇正文。**被永久排除的身份一律写不进来,返回 False。**
+
+        判据和 `upsert_article_from_blog` 同一份(`_excluded_clause`):正文是抓取
+        链路上**最后**落库的东西,而抓一篇正文要几秒到几十秒 —— 用户完全可能在这
+        中间按下「不再抓取」。只守住元数据那一道的话,正文会以孤儿身份写回来。
+        """
         text = normalize_body_text(raw)
         now = time_now()
-        self.conn.execute(
-            """
+        excluded, keys = _excluded_clause(article_id, link)
+        guard = f"NOT {excluded}"
+        cur = self.conn.execute(
+            f"""
             INSERT INTO article_bodies (article_id, body_text, source_kind, fetched_at, updated_at)
-            VALUES (?, ?, 'crawl', ?, ?)
+            SELECT ?, ?, 'crawl', ?, ? WHERE {guard}
             ON CONFLICT(article_id) DO UPDATE SET
               body_text=excluded.body_text,
               updated_at=excluded.updated_at
+            WHERE {guard}
             """,
-            (article_id, text, now, now),
+            (article_id, text, now, now, *keys, *keys),
         )
+        return bool(cur.rowcount)
 
     def get_body_text(self, article_id: str) -> str | None:
         row = self.conn.execute(
@@ -545,18 +587,23 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         ).fetchone()
         return row is not None
 
-    def set_body_html(self, article_id: str, html: str) -> None:
+    def set_body_html(self, article_id: str, html: str, *, link: str = "") -> bool:
+        """同 `set_body_text`:排除优先,写不进来就返回 False。"""
         now = time_now()
-        self.conn.execute(
-            """
+        excluded, keys = _excluded_clause(article_id, link)
+        guard = f"NOT {excluded}"
+        cur = self.conn.execute(
+            f"""
             INSERT INTO article_bodies (article_id, body_text, body_html, source_kind, fetched_at, updated_at)
-            VALUES (?, '', ?, 'crawl', ?, ?)
+            SELECT ?, '', ?, 'crawl', ?, ? WHERE {guard}
             ON CONFLICT(article_id) DO UPDATE SET
               body_html=excluded.body_html,
               updated_at=excluded.updated_at
+            WHERE {guard}
             """,
-            (article_id, html, now, now),
+            (article_id, html, now, now, *keys, *keys),
         )
+        return bool(cur.rowcount)
 
     def has_body(self, article_id: str) -> bool:
         row = self.conn.execute(
@@ -576,34 +623,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             (account_name,),
         ).fetchall()
         return [self.row_to_blog_dict(r) for r in rows]
-
-    def is_deleted_blacklist(self, article_id: str) -> bool:
-        row = self.conn.execute(
-            "SELECT 1 FROM deleted_articles WHERE article_id=?",
-            (article_id,),
-        ).fetchone()
-        if row:
-            return True
-        row = self.conn.execute(
-            "SELECT is_user_deleted FROM articles WHERE id=?", (article_id,)
-        ).fetchone()
-        return bool(row and row["is_user_deleted"])
-
-    def add_deleted_blacklist(self, article_id: str) -> None:
-        from src.utils.article_identity import remember_deleted_identity
-
-        remember_deleted_identity(self, article_id)
-        self.conn.execute(
-            """
-            INSERT OR IGNORE INTO deleted_articles (article_id, deleted_at)
-            VALUES (?, ?)
-            """,
-            (article_id, time_now()),
-        )
-        self.conn.execute(
-            "UPDATE articles SET is_user_deleted=1, updated_at=? WHERE id=?",
-            (time_now(), article_id),
-        )
 
     def remove_article(self, article_id: str, account: str) -> bool:
         row = self.conn.execute(

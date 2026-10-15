@@ -64,16 +64,33 @@ def main() -> int:
                     print(f"[{i}/{len(todo)}] SKIP({text}) {title_short}")
                     failed += 1
                 elif html:
-                    repo.set_body_html(row["id"], html)
-                    repo.commit()
-                    ok += 1
-                    print(f"[{i}/{len(todo)}] OK {title_short}")
+                    # 带上 link:排除判据在写语句自己的 WHERE 里(见
+                    # `repository.set_body_html`),这一趟跑着的时候用户也可能在
+                    # 面板上按下「不再抓取」。写不进去就如实记成跳过,不算成功。
+                    if not repo.set_body_html(row["id"], html, link=row["link"]):
+                        print(f"[{i}/{len(todo)}] SKIP(已永久排除) {title_short}")
+                        failed += 1
+                    else:
+                        repo.commit()
+                        ok += 1
+                        print(f"[{i}/{len(todo)}] OK {title_short}")
                 else:
                     print(f"[{i}/{len(todo)}] EMPTY-HTML {title_short}")
                     failed += 1
             except Exception as e:
                 print(f"[{i}/{len(todo)}] FAIL {title_short}: {e}")
                 failed += 1
+            finally:
+                # **一篇一个事务单元,下面那两件事之前一定要把它收掉。**
+                # 受限写入即使影响 0 行也已经开着一个 SQLite 写事务(实测
+                # `rowcount=0` 时 `in_transaction` 仍为 True、另一个连接当场
+                # `database is locked`)。拒写和异常两条分支原来都没有收尾点,
+                # 于是接下来那 2–4 秒退避、以及下一篇的网络请求,全程攥着整库写锁
+                # —— 用户在这期间按「不再抓取」会被堵到超时(第 2 轮审查实测:
+                # 第二次删除直接拿到 `database is locked`),连续失败时能一直占到
+                # 脚本退出。成功那一支自己 commit 过,这里就什么都不剩。
+                if repo.conn.in_transaction:
+                    repo.conn.rollback()
             if i < len(todo):
                 time.sleep(random.uniform(2.0, 4.0))
 

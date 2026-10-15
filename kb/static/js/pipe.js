@@ -17,6 +17,13 @@ let pipeSourceVersion = 0, pipePendingRequest = null;
 // 「还欠一次待处理数刷新」。在途的那次查询只能回答它开跑那一刻的事实,
 // 新结果来了得补一次,而「有新结果」这件事一轮只说一次。
 let pipePendingWanted = false;
+// 「在这之前发出去的待处理查询一律作废」。**运行版本管不了这件事**:
+// 删掉明细里一条内容不产生新的一轮,`result_version` 一个字不变 —— 于是在途那次
+// 查询(带的是删除**之前**的数字)照旧对得上版本、照旧被应用,还顺手把欠账清掉,
+// 面板就永久停在删除前那个数(第 1 轮审查实测:实际从 2 行删到 1 行,页面仍写
+// 「当前待处理 2 项」,轮询、切历史再回来都不变,只有整页刷新才归零)。
+// 所以给它另一条身份闸:同一轮之内条目集合也会变。
+let pipePendingEpoch = 0;
 // 「这份回包是哪一轮的」。**版本由服务端算**(`result_version`),前端不再从
 // run_id / 时间戳自己拼 —— 自己拼的那份在两档上没有值:新进程还没跑过任何一轮时
 // 顶层身份是空的,从没跑过的新库里永远是空的。而空串在这里要同时表达「还不知道」
@@ -52,6 +59,10 @@ function invalidatePipeStatus() {
   clearTimeout(pipeTimer); pipeTimer = null;
   pipeStatusVersion++; pipeStatusAbort?.abort(); pipeRequest = null;
 }
+// 条目集合刚刚变过(删掉了一条),在途那次待处理查询的回包不作数。
+// **不清 `pipePendingWanted`**:欠账留着,`refreshPipePending` 的循环会按新 epoch
+// 再查一次 —— 清掉的话这一次刷新机会就没了。
+function invalidatePipePending() { pipePendingEpoch++; }
 function queuePipeRefresh() {
   clearTimeout(pipeTimer);
   // A lightweight status read also discovers new background runs and retries an initial failure.
@@ -190,9 +201,13 @@ async function refreshPipePending() {
     // 跑起来了就别再扫文件:积压数由这一轮结束时那次刷新给出。欠着的那一笔
     // 留着,下一次进来接着补。
     if (pipeSnapshot?.running) return;
+    const epoch = pipePendingEpoch;
     pipePendingRequest = pipeJson(channelUrl('/api/pipeline/status?source=false&pending=true'), {}, 60000);
     try {
       const s = await pipePendingRequest;
+      // 在途期间条目集合变过(删了一条):这份回包说的是删之前,接着查。
+      // 欠账还挂着,所以循环会再发一次。
+      if (epoch !== pipePendingEpoch) continue;
       // **应用的凭据是这份回包自己的身份**(`s.run_id`),不是此刻的页面快照。原来
       // 空身份(首次打开、快照还是 null)一律放行、再拿当前快照给它盖章 —— 于是一份
       // 属于上一轮的待处理数被标成「已追平最新那一轮」:缺口不存在、提示不出现、
