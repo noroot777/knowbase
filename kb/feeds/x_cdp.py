@@ -96,6 +96,11 @@ class Session:
     #: 开页面时要不要 `background: true`。直连用户日常浏览器那条必须要 ——
     #: 不加的话新标签页会抢到前台,把用户正在看的东西顶掉。
     _BACKGROUND = False
+    #: 要不要再加 `hidden: true`。**在用户自己的浏览器里干活的那条要**:隐藏
+    #: 标签页压根不进标签栏(他看不见、不会去关、也不会以为自己中了什么),而且
+    #: 它的生命周期跟着这条连接 —— 断开即消失,连漏关一张空白页这种事都不会有。
+    #: 协议规定它只能和 `background: true` 同时给,所以两个标志是连动的。
+    _HIDDEN = False
 
     def __init__(self) -> None:
         self._seq, self._sid, self._target = 0, '', ''
@@ -158,12 +163,31 @@ class Session:
         params: dict = {'url': url}
         if self._BACKGROUND:
             params['background'] = True
-        self._target = self.call('Target.createTarget', params)['targetId']
+            if self._HIDDEN:
+                params['hidden'] = True
+        self._target = self._create(params)
         self._adopt(self._target)          # 先认下所有权,再做后面的初始化
         self._sid = self.call('Target.attachToTarget',
                               {'targetId': self._target, 'flatten': True})['sessionId']
         self.call('Page.enable', {}, self._sid)
         return self._sid
+
+    def _create(self, params: dict) -> str:
+        """建那张标签页。`hidden` 不被认时退一档,**但只退这一档**。
+
+        `hidden` 是比较新的参数(老 Chrome 会把整条 `Target.createTarget` 判成
+        参数错误)。认不出来的时候退回「后台标签页」是可以的 —— 它仍然不抢
+        前台,只是会在标签栏里多一行。**绝不退到前台**:那是把用户正在看的
+        东西顶掉,比标签栏多一行严重得多,宁可整件事失败。
+        """
+        try:
+            return self.call('Target.createTarget', params)['targetId']
+        except CdpError:
+            if 'hidden' not in params:
+                raise
+            return self.call('Target.createTarget',
+                             {k: v for k, v in params.items()
+                              if k != 'hidden'})['targetId']
 
     def goto(self, url: str) -> dict:
         """导航,并把 `Page.navigate` 的回包**原样交回去**。
@@ -201,6 +225,13 @@ class Chrome(Session):
         self.proc: subprocess.Popen | None = None
         self._buf = b''
         self._r = self._w = -1
+        #: 收尾时那次「好好关一次」成了没有。`None` = 还没收尾。**只是一个
+        #: 事实报告,不是异常**:收尾怎么失败都不许把后面几步跳过(见
+        #: `__exit__`),可调用方有权知道 —— `Browser.close` 存在的理由就是让
+        #: 浏览器把 profile 存盘,被 kill 掉的那一次写进去的东西可能一个都没
+        #: 落盘,而那正是「导入登录态」要对外承诺的那件事
+        #: (`x_login_import.install`)。
+        self.closed_cleanly: bool | None = None
 
     # ── 生命周期 ────────────────────────────────────────────────────────────
 
@@ -283,14 +314,21 @@ class Chrome(Session):
         不关、`proc` 也不复位(见 `__exit__` 那条注释)。
         """
         proc = self.proc
-        if proc is None or proc.poll() is not None:
+        if proc is None:
+            return
+        if proc.poll() is not None:
+            # 它自己先走了。**这不算「好好关了一次」** —— 崩溃或被别人杀掉的
+            # 那一次 profile 里该存的东西可能一个都没存。
+            self.closed_cleanly = False
             return
         try:
             self._send('Browser.close', deadline=time.monotonic() + 5)
             proc.wait(timeout=10)
+            self.closed_cleanly = True
             return
         except (CdpError, EOFError, OSError, subprocess.TimeoutExpired):
             pass
+        self.closed_cleanly = False
         try:
             proc.kill()
             proc.wait(timeout=5)

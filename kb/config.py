@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import uuid
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -310,6 +311,11 @@ def config_names(d: dict, key: str) -> list[str]:
     raise ValueError(f'{key} 要的是一串字符串,拿到 {v!r}')
 
 
+#: 临时名撞上了重试几次。撞名意味着同 pid 同一段随机十六进制同时在用,实际只会
+#: 来自残骸;给几次就够,无限重试会把「目录里有个同名残骸且删不掉」变成死循环。
+_TMP_TRIES = 4
+
+
 def write_config_file(path, data: dict) -> None:
     """原子替换着写一份 JSON 配置。**一次保存失败不许动上一份有效快照。**
 
@@ -318,15 +324,59 @@ def write_config_file(path, data: dict) -> None:
     开关、时刻、同步范围、当天已跑标记一起丢。先写同目录临时文件再 `os.replace`,
     失败时原来那份一字未动(口径同 `pipeline_state._write_state`)。
     """
+    # **先序列化,再碰磁盘。** `json.dump` 边转边写,遇到转不动的值(set、自定义
+    # 对象抛 `TypeError`,循环引用抛 `ValueError`)时文件已经建好、还写进了半截;
+    # 而那两个不是 `OSError`,下面那个 `except` 接不住,于是临时文件留在目录里
+    # 攒着。基线在这一步之前就失败了(它是 `json.dumps` 完再 `write_text`),这个
+    # 顺序把那条性质照原样留着。
+    blob = json.dumps(data, ensure_ascii=False, indent=1)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + '.tmp')
+    # **临时名每次都是新的。** 原来是写死的 `<name>.tmp`:两个进程同时保存同一份
+    # 配置时,它们写的是**同一个**临时文件 —— 一方写到一半被另一方覆盖(落盘的是
+    # 两份 JSON 的拼接),或者一方 `os.replace` 之后另一方对着已经不在的路径报
+    # `FileNotFoundError`。kb-web 里真会并发:定时线程和用户点的保存各走一条路
+    # (口径同 `pipeline_persist._write_state`、`daily.py` 那两处,它们早就是带
+    # pid/随机名的)。
+    #
+    # **自己拼名字 + `O_CREAT|O_EXCL`,不用 `mkstemp`。** 两者都给唯一名,差别在
+    # 权限:`mkstemp` 固定造 0600,补一句 `chmod 0644` 看着像「保持原样」,其实是
+    # **绕过了 umask** —— `open()`/`write_text` 的 mode 要跟 umask 相与,而 `chmod`
+    # 不受它管。把 umask 设成 077 的人原来写出来的是 0600(只有自己能读),补了那句
+    # chmod 之后变成本机任何账号都能读,而这个函数写的是日报设置、定时状态
+    # (`last_fired`/`next_run`)、带 `result`/`log`/`error` 的运行记录和登录态导入
+    # 账本(2026-10-15 审查拿基线函数在同一 umask 下逐项比过:基线 0600、改动后
+    # 0644)。`os.open` 的 mode 走的正是 `open()` 那条规矩,所以这里跟基线一字不差:
+    # 0666 与 umask 相与,**既不收紧也不放宽**。`O_EXCL` 保证不会撞上别人的临时文件。
+    #
+    # **只删自己建出来的那一个。** 建名字这一步单独拿出来,是因为 `O_EXCL` 失败
+    # (`FileExistsError`)的含义恰好是「这个名字**不是**我的」 —— 把建和写放在同
+    # 一个 `try` 里,那一档会走进下面的清理,**删掉另一个进程正在写的临时文件**:
+    # 它随后那句 `os.replace` 报 `FileNotFoundError`,一次本来会成功的保存失败,
+    # 而两边的日志都只说「保存失败」,看不出是谁动了谁。撞名就换个名字重来,别碰
+    # 那个文件。**别的 `OSError`(满盘、没权限、目录没了)照旧往上抛** —— 那一档
+    # 压根没建成文件,没有残骸要收,也没有「原来那份」被动过。
+    for _ in range(_TMP_TRIES):
+        tmp = path.with_name(f'{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp')
+        try:
+            fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise FileExistsError(f'连着 {_TMP_TRIES} 个临时名都被占着:{tmp}')
     try:
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding='utf-8')
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(blob)
         os.replace(tmp, path)
     except OSError:
         # 失败就把残骸带走:留着既占地方(满盘那一档正是因为没地方),也让下一个
-        # 看目录的人以为那是份配置。原来那份一字未动,所以直接往上抛。
-        tmp.unlink(missing_ok=True)
+        # 看目录的人以为那是份配置。原来那份一字未动,所以直接往上抛 ——
+        # **抛原来那个**:清理自己再失败也不许顶掉病因(满盘 vs 没权限,下一步
+        # 完全不一样),而两者都是「这次没保存上」,咽掉不会让人误判成成功。
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
 
