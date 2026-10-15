@@ -24,6 +24,11 @@ from kb.config import DATA_DIR, VAULT_ROOT
 
 _TRIAGE_PATH = DATA_DIR / "fav_triage.json"
 
+# 片段来源的中文名。给人读的只有收藏面板那一处(`kb/static/js/fav.js` 自己有
+# 一份同样的表),这里这一份是喂给模型的 —— 没有文档的收藏拿它当"出处"。
+ORIGIN_LABEL = {"doc": "知识库文章", "daily": "每日日报",
+                "chat": "知识问答", "feed": "订阅内容"}
+
 # 分诊运行状态(进程内;kb-web 常驻,与管道同模式)
 _state_lock = threading.Lock()
 _state = {"running": False, "error": ""}
@@ -34,8 +39,15 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _read_body(path: str, limit: int) -> str:
-    """读文章正文(去 frontmatter),截断到 limit 字。"""
+def _read_body(path: str | None, limit: int) -> str:
+    """读文章正文(去 frontmatter),截断到 limit 字。
+
+    `path` 可以为空:日报正文、问答回答、还没导出的订阅条目收下来的片段没有
+    vault 文档(见 `kb.store._FAVORITES_TABLE`)。那时行动卡只能围着引文本身
+    做 —— 拿 `VAULT_ROOT / None` 去读是 TypeError,会把整条行动卡打掉。
+    """
+    if not path:
+        return ""
     try:
         text = (VAULT_ROOT / path).read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -67,7 +79,7 @@ _ACTION_PROMPT = """你在帮用户整理知识库收藏。用户收藏的语义
 请把这条收藏提炼成一张可直接行动的"行动卡"。
 
 文章标题:{title}
-公众号:{account} · 发布于 {published}
+出处:{account} · {published}
 摘要:{summary}
 {quote_block}正文(截断):
 {body}
@@ -87,9 +99,17 @@ def extract_action(fav_id: int) -> dict | None:
     失败静默返回 None——行动卡是增强,不能生成也不影响收藏本身。"""
     conn = store.connect()
     try:
+        # LEFT JOIN:没有 path 的收藏(日报/问答/未导出的订阅条目)在内连接下
+        # 一行都查不到 —— 行动卡静默不生成,面板上那一条永远只是一段引文。
+        # 元数据回落到收藏那一刻的快照。
         row = conn.execute(
-            "SELECT f.id, f.path, f.quote, f.note, d.title, d.account, d.published, d.summary"
-            " FROM favorites f JOIN documents d ON d.path = f.path WHERE f.id=?",
+            "SELECT f.id, f.path, f.quote, f.note, f.origin, f.created_at,"
+            " COALESCE(NULLIF(d.title, ''), f.origin_title) AS title,"
+            " COALESCE(d.account, '') AS account,"
+            " COALESCE(d.published, '') AS published,"
+            " COALESCE(d.summary, '') AS summary"
+            " FROM favorites f LEFT JOIN documents d ON d.path = f.path"
+            " WHERE f.id=?",
             (fav_id,),
         ).fetchone()
     finally:
@@ -101,8 +121,14 @@ def extract_action(fav_id: int) -> dict | None:
         f"用户只收藏了文中这一段(行动卡应该围绕这段话):\n{row['quote']}\n\n"
         if row["quote"] else ""
     )
+    # 出处那两格在没有文档的来源上是空的(日报正文、问答回答都不是某个公众号
+    # 在某天发的)。留空会在 prompt 里渲染成「出处: · 」,模型只能照着一行标点
+    # 猜;填 origin 的中文名 + 收藏日期,它至少知道这段话是自己库里的产物。
+    account = row["account"] or ORIGIN_LABEL.get(row["origin"], "知识库")
+    published = (row["published"] or "")[:10]
+    published = f"发布于 {published}" if published else f"收藏于 {(row['created_at'] or '')[:10]}"
     prompt = _ACTION_PROMPT.format(
-        title=row["title"], account=row["account"], published=(row["published"] or "")[:10],
+        title=row["title"], account=account, published=published,
         summary=row["summary"], quote_block=quote_block,
         body=_read_body(row["path"], 3000),
     )
@@ -169,10 +195,18 @@ def _fingerprint(rows) -> str:
 def _inbox_rows():
     conn = store.connect()
     try:
+        # LEFT JOIN,理由同 extract_action:内连接会把没有 path 的那批条目从
+        # 分诊里整个漏掉 —— 它们照旧堆在待试清单上,却永远分不到任何一组
+        # (前端兜底把未覆盖的塞进"新收藏,还没分诊",于是分诊跑完它们还在那儿)。
+        # **指纹也是按这批行算的**(`_fingerprint`),漏掉等于收藏新增一条日报
+        # 片段时缓存仍判"新鲜"。
         return conn.execute(
             "SELECT f.id, f.quote, f.note, f.action_json, f.created_at, f.updated_at,"
-            " d.title, d.account, d.published, d.summary"
-            " FROM favorites f JOIN documents d ON d.path = f.path"
+            " COALESCE(NULLIF(d.title, ''), f.origin_title) AS title,"
+            " COALESCE(d.account, '') AS account,"
+            " COALESCE(d.published, '') AS published,"
+            " COALESCE(d.summary, '') AS summary"
+            " FROM favorites f LEFT JOIN documents d ON d.path = f.path"
             " WHERE f.status='inbox' ORDER BY f.id",
         ).fetchall()
     finally:

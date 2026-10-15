@@ -9,6 +9,9 @@ let chatInited = false;
 let inflight = null;
 
 let chatAbort = null;       // 进行中请求的 AbortController;点停止即 abort
+// 从收藏面板点一条问答片段回来时的落点:{ref: 会话 id, spec: 那段话的锚点}。
+// 由 openConv 自己消费(同日报那边的 dailyPendingSnip)。
+let chatPendingSnip = null;
 
 // 生成中的气泡:顶部标模型 + 阶段(agent 研究步骤/生成中),body 承载流式渲染的 markdown。
 // partial 有内容(切回来恢复时)则直接渲染,否则先转圈。
@@ -242,12 +245,36 @@ async function openConv(id, force) {
   chatConvId = id;
   renderConvList();
   $('chat-msgs').innerHTML = '<div class="chat-empty"><span class="spin"></span>加载对话…</div>';
-  const d = await fetch('/api/conversations/' + id).then(r => r.json()).catch(() => null);
+  // **状态码先看,再看有没有 messages。** 这个接口对"会话不在了"回的是 404 带
+  // 一份非空 JSON(`kb/web/chat_api.py`),`r.json()` 于是正常解析出
+  // `{detail: …}` —— 只判 `!d` 的那一版接着就去 `d.messages.map`,当场
+  // TypeError,屏幕永远停在「加载对话…」,而待定位还挂着(审查实测:删掉原对话
+  // 之后点那条问答收藏)。**404 和其它失败分开说**:前者是个结论(那个对话真
+  // 没了,顺手把列表刷新掉),后者只是这一次没读到。
+  const r = await fetch('/api/conversations/' + id).catch(() => null);
+  const d = r && r.ok ? await r.json().catch(() => null) : null;
   if (chatConvId !== id) return;   // 加载期间又切走了,别覆盖别人的视图
-  if (!d) { $('chat-msgs').innerHTML = '<div class="chat-empty">对话加载失败</div>'; return; }
-  $('chat-msgs').innerHTML = d.messages.map(renderMsg).join('');
+  if (!d || !Array.isArray(d.messages)) {
+    const gone = !!r && r.status === 404;
+    $('chat-msgs').innerHTML = '<div class="chat-empty">' +
+      (gone ? '这个对话已经不在了' : '对话加载失败') + '</div>';
+    // 这次回跳没有落点了,**当场丢掉**:留着的话用户下次打开另一个对话时它还
+    // 挂在那儿(`consumeSnipJump` 按 ref 比对,顶多不生效,可"待定位"本身是个
+    // 状态,留着就得有人来收)。收藏那条记录自己还在列表里,引文一个字没丢。
+    if (chatPendingSnip && String(chatPendingSnip.ref) === String(id)) {
+      toast(gone ? '这条收藏出自的那个对话已经删掉了' : '这个对话这一刻读不出来',
+        { type: 'info', detail: '收藏里那段原文还在' });
+      chatPendingSnip = null;
+    }
+    if (gone) { chatConvId = null; loadConvs(); }
+    return;
+  }
+  $('chat-msgs').innerHTML = d.messages.map(m => renderMsg(m, true)).join('');
   appendInflight(id);
   scrollChat(true);
+  // 收藏回跳的落点。排在 scrollChat 之后:那一句把消息区滚到底,
+  // 反过来会把刚定位好的位置顶掉。
+  chatPendingSnip = consumeSnipJump(chatPendingSnip, id, $('chat-msgs'), CHAT_SNIP_SKIP);
 }
 
 function newChat() {
@@ -272,9 +299,37 @@ async function delConv(id) {
   loadConvs();
 }
 
-function renderMsg(m) {
+/** 「这条气泡是库里那条消息」。片段收藏靠它:**会话存在不代表这一轮已经落库**
+ *  —— 生成中、点了停止、出错都没落库(后端只在 NDJSON 收完那一帧之后才
+ *  `_save_qa`,见 `kb/web/chat_api.py`),刷新就什么都没了,而按会话号回跳只会
+ *  打开那个对话、找不到那段话。一处写、一处读:写在 `renderMsg(m, true)` 和
+ *  `chatMarkSaved`,读在 `chatSnipSource`。图鉴抽屉里那个 chatbox 同款。
+ *  事故形态和回归在 docs/decisions/fav-snippets.md。 */
+const SNIP_SAVED = 'data-snip-saved';
+
+/** 消息区里**不是正文**的那几块:采前后文锚点和回跳定位都跳过它们
+ *  (`snipTextIndex` 的 `skip`,采集与回跳必须是同一条选择器)。
+ *  `.msg-meta` 里住着模型名和「3 小时前」——**那个字会自己变**,采进锚点的收藏
+ *  过一会儿就对不上;`.refs` 那一块是按 refs 现拼的「来源 N 篇」;`#chat-pending`
+ *  / `.gen-head` / `.err` / `.chat-empty` 压根没落库(刷新就没了)。
+ *  可收的范围另有一道(`chatSnipSource` 只认 `.bubble` 之内、`.refs` 之外),
+ *  这一条管的是**周边上下文从哪儿采** —— 两道判的不是同一件事。*/
+const CHAT_SNIP_SKIP = '.refs, .msg-meta, .gen-head, #chat-pending, .err, .chat-empty';
+
+/** 一轮落库那一刻,把它的**提问**气泡也标上(回答那条由 renderMsg 带着标记
+ *  重渲染)。提问是和回答同一条 `_save_qa` 写进去的,在那之前它也只是屏幕上
+ *  的一条气泡。 */
+function chatMarkSaved(answerEl) {
+  let el = answerEl;
+  while (el && (el = el.previousElementSibling)) {
+    if (el.classList.contains('user')) { el.setAttribute(SNIP_SAVED, '1'); return; }
+  }
+}
+
+function renderMsg(m, saved) {
+  const mark = saved ? ` ${SNIP_SAVED}="1"` : '';
   if (m.role === 'user') {
-    return `<div class="msg user"><div class="bubble">${esc(m.content)}</div></div>`;
+    return `<div class="msg user"${mark}><div class="bubble">${esc(m.content)}</div></div>`;
   }
   const refMap = {};
   (m.refs || []).forEach(r => { refMap[r.n] = r; });
@@ -291,7 +346,7 @@ function renderMsg(m) {
     ` · <button class="ghost note-btn" style="padding:2px 10px;font-size:12px" ` +
     `data-payload="${encodeURIComponent(JSON.stringify({ content: m.content, refs: m.refs || [] }))}" ` +
     `onclick="saveNote(this)" title="把这条回答回填到 vault 的 wiki/notes/(知识复利)">存为笔记</button></div>` : '';
-  return `<div class="msg assistant"><div class="bubble md">${html}${refsHtml}</div>${meta}</div>`;
+  return `<div class="msg assistant"${mark}><div class="bubble md">${html}${refsHtml}</div>${meta}</div>`;
 }
 
 async function saveNote(btn) {
@@ -395,7 +450,9 @@ async function doSendChat(q, isRetry) {
     const pend = $('chat-pending');
     if (pend) {
       chatConvId = doneCid;
-      pend.outerHTML = renderMsg({ role: 'assistant', content: answer, refs, model });
+      // done 帧到手 = 后端 `_save_qa` 已经把这一轮两条消息写进库了,这才标
+      chatMarkSaved(pend);
+      pend.outerHTML = renderMsg({ role: 'assistant', content: answer, refs, model }, true);
       scrollChat();
     } else if (chatConvId === doneCid) {
       openConv(doneCid, true);           // 竞态兜底:切回加载中 → 强刷拿落库版
@@ -437,3 +494,52 @@ $('chat-convs').addEventListener('keydown', e => {
     e.preventDefault(); e.target.click();
   }
 });
+
+// ── 回答里的「收藏此段」 ──────────────────────────────────────────────────────
+// 回答不是文件,documents 表里没有它 —— 片段按 origin=chat 存,`origin_ref` 是
+// 会话 id,回跳靠 `openConv` 把那段话重新铺到屏幕上(见 kb/static/js/snip.js)。
+//
+// **会话还没落库时不给收**(新对话的第一轮正在生成、或者刚失败):那时
+// `chatConvId` 是 null,存下去就是一条点不回去的收藏。等 done 帧把会话 id 带
+// 回来,同一段话照样收得了。
+
+/** 这条消息所在那一轮的提问 —— 收藏列表里用它指代这一段。口径同 saveNote。
+ *  **选中的就是提问本身时取它自己**:往前找的话会取到上一轮的提问,于是收藏
+ *  列表里那条片段挂在一个跟它无关的问题下面(引文和会话号仍是对的)。*/
+function chatQuestionOf(msg) {
+  let el = msg;
+  if (el && el.classList.contains('user')) return el.querySelector('.bubble')?.textContent || '';
+  while (el && (el = el.previousElementSibling)) {
+    if (el.classList.contains('user')) return el.querySelector('.bubble')?.textContent || '';
+  }
+  return '';
+}
+
+function chatSnipSource(range, convId) {
+  const msg = snipHostOf(range, '.msg');
+  // msg 为空 = 选到的是空态那三颗建议按钮、或者两条气泡之间的空白,没有出处可记
+  if (!msg || convId === null || convId === undefined) return null;
+  // **这一条消息自己得在库里。** 会话号非空只说明"这个对话存在"(追问时它早就
+  // 有了):生成中的气泡、「⏹ 已停止(未保存)」、出错气泡、还没落库的那条提问
+  // 都挂在同一个会话下,收了它们回跳只会打开对话、找不到那段话(刷新连气泡都
+  // 没了)。标记谁来写见 `SNIP_SAVED`。
+  if (!msg.hasAttribute(SNIP_SAVED)) return null;
+  // **标记挂在整条消息上,可不是这条消息里每个字都落了库。** 同一个 `.msg` 里
+  // 还住着相对时间、模型名和「存为笔记」那颗按钮(`renderMsg` 拼的 `.msg-meta`),
+  // 以及按 refs 现拼的那一块「来源 N 篇 / Obsidian / 原文」(`.refs`)—— 它们
+  // 是界面文字,不是落了库的正文:相对时间过一会儿就变成「3 小时前」,照着它
+  // 找只会找不到。所以可收的范围收到**正文那一份**上:气泡之内、引用块之外。
+  const body = msg.querySelector('.bubble');
+  if (!body || !body.contains(range.commonAncestorContainer)) return null;
+  const refs = body.querySelector('.refs');
+  if (refs && range.intersectsNode(refs)) return null;
+  const q = chatQuestionOf(msg).trim();
+  return {
+    origin: 'chat', origin_ref: String(convId), skip: CHAT_SNIP_SKIP,
+    // 裁标题不许切开一个字(口径在 snip.js 的 `snipClip`:切出来的半个字
+    // 后端存不下,整条 POST 会被拒)
+    origin_title: q ? '问答 · ' + snipClip(q, 60) : '知识问答',
+  };
+}
+
+attachSnip($('chat-msgs'), range => chatSnipSource(range, chatConvId));

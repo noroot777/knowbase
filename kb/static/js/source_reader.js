@@ -223,3 +223,56 @@ function backToSourceList() {
   (entry || $('source-list-pane')).focus({ preventScroll: true });
   if (window.matchMedia('(max-width:760px)').matches) document.querySelector('.source-stream').scrollIntoView({ block: 'start' });
 }
+
+// ── 订阅正文的「收藏此段」 ────────────────────────────────────────────────────
+// 这一处有两条路,**按「点回去那一页里有没有这段话」分**:
+//
+// ① 盘上那篇 md 里找得到这段话 → 绑那篇文档(origin=doc),回跳走阅读页的锚点
+//    定位(最可靠的那一种)。
+// ② 原文视图、还没导出、或者盘上那篇跟屏幕上这份对不上 → origin=feed。
+//    **原文在 vault 里压根不存在**(导出写进 md 的是译文),绑文档的话这条收藏
+//    点回去永远是「没找到这段收藏」—— 那是把一句准话换成一句假话。feed 这一类
+//    回跳走站外原文。
+//
+// **走哪条不由客户端手里的字段推断,由存之前那一道核对定**:`docText` 去读
+// `/api/doc` 那一篇(阅读页渲染的就是这个文件),在里面找这条锚点,找不到就落
+// 到②,退的理由如实写进提示。口径在 kb/static/js/snip.js 的 `snipVerified`。
+// **核过了还要把「核的是哪一版」带上**(那道核对把 `doc_version` 挂到来源上,
+// `postSnip` 原样回传):核对和落库是两个请求,中间那一下重译写回、正文补抓照样
+// 会把那一篇换成另一版 —— 后端那时按 409 拒,这一头照旧退到②(见 `RETRY_NOTE`)。
+//
+// 原来这里按 `exported_hash === content_hash` 推断「盘上那篇就是这份正文」,
+// **那个判据立不住**:它是**原文**的哈希(`kb/feeds/sync.py` 导出成功那一句写的
+// 就是 `exported_hash=content_hash`),同一篇原文重译一遍、重导出一遍,它一个
+// 字节都不变 —— 于是「两个哈希相等」和「盘上那篇是哪一份译文」没有关系(审查
+// 实测:保留一页旧阅读器不刷新,后台重译重导出,两个哈希仍相等、旧判据照旧为真,
+// 收藏存成 doc 返回 200,点回去正文是另一份译文、0 个高亮、报「没找到」)。
+// 推断换成核对,顺带把这几条都收进同一道闸:
+//   - `path` 非空只说明上一次导出留下了一篇,不说明它是这份正文(译文写回只清
+//     `exported_hash`、正文补抓只换 `content_hash`,两条都保留 `path`);
+//   - md 落盘了、索引那一步还没跑(`/api/doc` 对它判 404),那几分钟里退②;
+//   - **这边摊的和阅读页摊的不是同一种文本** —— 这个阅读器用 `textContent`
+//     (正文里的 `**`、反引号、`[字](url)` 原样显示),而 `/doc/…` 把同一份 md
+//     按 markdown 渲染,那些标记在那一头消失或变形。核对就按**那一页的渲染口径**
+//     算(`snipRenderedText` 用的是阅读页那条原始 HTML 转字面的规则,不是面板
+//     自己的 `mdHtml`)—— 差这一条就会出现"核过了、点回去 0 个高亮"。
+
+function sourceSnipSource() {
+  const item = sourceReaderItem;
+  if (!item || !sourceItemReadable(item)) return null;
+  const text = sourceText(item);
+  const title = (sourceReaderOriginal ? item.title : text.title) || item.title || '订阅内容';
+  const viaFeed = {
+    origin: 'feed', origin_ref: sourceKind + ':' + item.key,
+    origin_title: title, origin_url: item.url || '',
+  };
+  // 原文视图那一份在 vault 里压根没有对应文件(导出写的是译文),不必去核对
+  if (sourceReaderOriginal || !item.path) return viaFeed;
+  return {
+    origin: 'doc', path: item.path, origin_title: title,
+    origin_url: item.url || '', fallback: viaFeed,
+    docText: () => snipDocText(item.path),
+  };
+}
+
+attachSnip($('source-reader-body'), sourceSnipSource);

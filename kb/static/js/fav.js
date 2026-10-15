@@ -74,7 +74,7 @@ async function saveFavModel() {
 
 function renderFavEmpty() {
   const msg = {
-    inbox: '待试清单是空的,轻松 — 搜索结果点 ☆ 收藏整篇,阅读时选中文字可收藏片段',
+    inbox: '待试清单是空的,轻松 — 搜索结果点 ☆ 收藏整篇;日报、问答、订阅、图鉴和阅读页里选中文字就能收藏片段',
     done: '还没有标过「试过了」的收藏',
     archived: '没有沉底的收藏',
   }[favView];
@@ -86,10 +86,82 @@ function renderFavEmpty() {
 function favDocA(f, label, cls = '') {
   return favDocAHtml(f, esc(label), cls);
 }
+// **按「有没有 path」分流,不按 origin 分。** 有 path 的照旧走阅读页(那套
+// quote+前后文定位在 kb/web/pages.py 里,最可靠);没有 path 的(日报正文、问答
+// 回答、没导出的订阅条目)在 vault 里没有对应文件 —— 照旧拼 `/doc/` 会得到一个
+// 空路径,点下去是 iframe 里一张 404,所以换成回各自面板的按钮。
 function favDocAHtml(f, labelHtml, cls = '') {
+  if (!f.path) return favJumpHtml(f, labelHtml, cls);
   const hash = f.quote ? '#kbq=' + encodeURIComponent(
     JSON.stringify({ q: f.quote, p: f.prefix || '', s: f.suffix || '' })) : '';
   return docAHtml(f, labelHtml, cls, hash);
+}
+
+// 回跳目标整个编进 data 属性,不去全局列表缓存里按 id 捞:这几颗按钮的寿命
+// 比那份缓存长(分诊结果渲染完,下一次 loadFavPanel 之前它一直在屏幕上)。
+function favJumpHtml(f, labelHtml, cls = '') {
+  const payload = encodeURIComponent(JSON.stringify({
+    origin: f.origin || '', ref: f.origin_ref || '', url: f.url || '',
+    q: f.quote || '', p: f.prefix || '', s: f.suffix || '',
+  }));
+  const label = SNIP_LABEL[f.origin] || '这段话';
+  return `<button class="fav-jump${cls ? ' ' + cls : ''}" data-jump="${payload}"` +
+    ` onclick="jumpFavOrigin(this)" title="回到${esc(label)}里这一段">${labelHtml}</button>`;
+}
+
+// 回跳:把目标存成一个"待定位",再切面板 —— 面板自己加载完会消费它。
+// **不在这里 await 面板的加载**:switchTab 会顺手起一轮 loadDailyPanel /
+// initChat,那一轮自己也要决定"打开哪一份",两边各发一次请求就是先发后到的
+// 旧回包盖掉新的(日报面板的 dailyReadSeq 为同一类竞态而存在)。把目标交给它、
+// 由它一处决定,就没有两条路要对齐。
+function jumpFavOrigin(el) {
+  let j;
+  try { j = JSON.parse(decodeURIComponent(el.dataset.jump)); } catch { return; }
+  const spec = { q: j.q, p: j.p, s: j.s };
+  if (j.origin === 'daily') {
+    if (!j.ref) return toast('这条收藏没有记下是哪一天的日报');
+    dailyPendingSnip = { ref: j.ref, spec };
+    switchTab('daily');
+    return;
+  }
+  if (j.origin === 'chat') {
+    const cid = Number(j.ref);
+    if (!cid) return toast('这条收藏没有记下是哪一个对话');
+    chatPendingSnip = { ref: cid, spec };
+    switchTab('ask');
+    openConv(cid, true);
+    return;
+  }
+  if (j.origin === 'feed') {
+    // 订阅片段落到这一类,说明屏幕上那份正文在 vault 里没有同一份(外文原文,
+    // 或者还没导出)。**站外原文才是那段话的出处**,优先开它;没有链接时退回
+    // 它所在的订阅来源,并说清为什么没直接定位 —— 那条内容可能早翻过页了。
+    if (j.url) { window.open(j.url, '_blank', 'noopener'); return; }
+    // 来源目录里认得的 id(rss/wechat/social…)`switchTab` 自己会落到订阅面板的
+    // 对应视图。**认不得的一律退回 'subs'**:`switchTab` 对不认识的名字是直接
+    // return,页面一动不动,而下面那句提示写着"已切到它所在的来源" —— 一句假话。
+    const kind = String(j.ref || '').split(':')[0];
+    const known = typeof subsCatalog !== 'undefined'
+      && subsCatalog.some(m => m.id === kind);
+    switchTab(known ? kind : 'subs');
+    toast('这条订阅内容没有站外链接', { type: 'info',
+      detail: '已切到它所在的来源,可用搜索框找这段话' });
+    return;
+  }
+  toast('这条收藏不知道该回到哪里', { detail: '来源:' + (j.origin || '(空)') });
+}
+
+/** 面板加载完自己调一次:定位成功就清掉待定位,失败如实说。
+ *  `pending.ref` 对不上的不要动 —— 那是另一次回跳的目标。 */
+function consumeSnipJump(pending, ref, el, skip) {
+  if (!pending || String(pending.ref) !== String(ref)) return pending;
+  // `skip` 要和采集那一头传的是同一条(问答那边是 `CHAT_SNIP_SKIP`):一头跳过
+  // 界面文字、一头不跳,采到的"唯一"在这一头就可能不唯一了,见 snipTextIndex。
+  if (!locateSnip(el, pending.spec, skip)) {
+    toast('没找到这段收藏', { type: 'info',
+      detail: '这段正文可能已经变过;收藏里那段原文还在' });
+  }
+  return null;
 }
 
 function favOps(h) {
@@ -104,12 +176,22 @@ function favOps(h) {
 }
 
 // ── 完整列表模式:一篇文章一张卡,整篇是文章行、片段是子行 ──
+// 来源角标:只给**不是知识库文章**的那几类。doc 不标 —— 它占绝大多数,标了
+// 就是每张卡上一枚什么也没区分的徽章(同「图鉴类型色别撞重点色」那条理由)。
+function favOriginBadge(f) {
+  return f.origin && f.origin !== 'doc'
+    ? `<span class="badge fav-origin">${esc(SNIP_LABEL[f.origin] || f.origin)}</span>` : '';
+}
+
 function favGroupCard(g) {
   const h = g.doc;
+  // Obsidian 链接只在有 vault 文档时给:没有 path 时 obsLink 会拼出一个
+  // `&file=` 空着的地址,点下去 Obsidian 打开的是"新建笔记"。
   const meta =
-    `<span class="fav-row-meta">${esc(h.account || '')} · ${(h.published || '').slice(5, 10)}` +
-    ` · 收藏于 ${(g.latest || '').slice(5, 10)}` +
-    ` · <a href="${esc(obsLink(h))}" title="在 Obsidian 中打开">Obsidian</a>` +
+    `<span class="fav-row-meta">${esc(h.account || '')}${h.account ? ' · ' : ''}` +
+    `${(h.published || '').slice(5, 10)}${h.published ? ' · ' : ''}` +
+    `收藏于 ${(g.latest || '').slice(5, 10)}` +
+    (h.path ? ` · <a href="${esc(obsLink(h))}" title="在 Obsidian 中打开">Obsidian</a>` : '') +
     (h.url ? ` · <a href="${esc(safeUrl(h.url))}" target="_blank" rel="noopener">原文${arrow('ext')}</a>` : '') + `</span>`;
   const snipRows = g.snips.map(s => `
       <div class="fav-row fav-snip-row" title="${esc(s.quote.slice(0, 200))}">
@@ -120,7 +202,8 @@ function favGroupCard(g) {
   return `
     <div class="hit fav-group" data-fav-card="1">
       <div class="fav-row">
-        <span class="fav-title">${docA(h, h.title)}</span>
+        <span class="fav-title">${h.path ? docA(h, h.title) : favJumpHtml(h, esc(h.title))}</span>
+        ${favOriginBadge(h)}
         ${meta}
         ${g.whole ? favOps(g.whole) : ''}
       </div>
@@ -129,12 +212,21 @@ function favGroupCard(g) {
     </div>`;
 }
 
+// 一张卡片 = 一处出处。有 path 的按 path 聚,**没有 path 的按 origin+ref 聚** ——
+// 拿空 path 当键的话,日报片段、问答片段、订阅片段会全挤进同一张卡,卡上那个
+// 标题还是其中第一条的(同一天的两条日报摘录归一张卡是对的,一条日报摘录和
+// 一句模型回答归一张卡不是)。
+function favGroupKey(f) {
+  return f.path || (f.origin || '') + '\u0000' + (f.origin_ref || '');
+}
+
 function favListHtml(d) {
-  // 按文章聚合;favorites 已按收藏时间倒序,首次出现定组序
+  // 按出处聚合;favorites 已按收藏时间倒序,首次出现定组序
   const groups = new Map();
   for (const f of d.favorites) {
-    if (!groups.has(f.path)) groups.set(f.path, { doc: f, latest: f.created_at, whole: null, snips: [] });
-    const g = groups.get(f.path);
+    const key = favGroupKey(f);
+    if (!groups.has(key)) groups.set(key, { doc: f, latest: f.created_at, whole: null, snips: [] });
+    const g = groups.get(key);
     f.quote ? g.snips.push(f) : (g.whole = f);
   }
   return [...groups.values()].map(favGroupCard).join('');
@@ -208,7 +300,7 @@ function favColdRow(f, why) {
 function favQuoteRow(f) {
   return `<div class="fav-rowline q" title="${esc((f.quote || '').slice(0, 200))}">
     <span class="t">${favDocA(f, '❝ ' + (f.quote || ''))}</span>
-    <span class="why">${esc((f.title || '').slice(0, 18))} · ${(f.created_at || '').slice(5, 10)}</span>
+    <span class="why">${favOriginBadge(f)}${esc((f.title || '').slice(0, 18))} · ${(f.created_at || '').slice(5, 10)}</span>
     <span class="rops"><button class="ghost" onclick="favDel(${f.id})">删除</button></span></div>`;
 }
 function favFreshRow(f) {

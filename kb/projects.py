@@ -15,7 +15,7 @@ from threading import Lock
 
 from kb.config import VAULT_ROOT
 from kb.norm import entity_norm, kind_norm
-from kb.scanner import parse_frontmatter
+from kb.scanner import body_version, parse_frontmatter, read_md_text
 
 PROJECT_SOURCES = ("dr-gzh-projects", "dr-video-projects")
 
@@ -275,17 +275,23 @@ def get_tool(norm: str) -> dict | None:
         return None
     entries = []
     for e in g["entries"]:
-        body = ""
+        body, version = "", ""
         try:
-            _fm, body = parse_frontmatter(
-                (VAULT_ROOT / e["path"]).read_text(encoding="utf-8"))
+            text = read_md_text(VAULT_ROOT / e["path"])
         except OSError:
-            pass
+            text = None
+        if text is not None:
+            _fm, body = parse_frontmatter(text)
+            # 抽屉里这段正文是哪一版 —— 「收藏此段」回传它,落库前后端比一次
+            # (口径同 `/api/doc` 的 `version`,都走 `scanner.body_version`)。
+            # **按整份 text 算,不按下面去掉首行之后那一份**:后端是对着盘上
+            # 那一整个文件算的,少剥一行都对不上。
+            version = body_version(text)
         # 首行的出处引用(> 整理自… / > 转写自…)详情页自己展示 meta,去掉防重复
         lines = body.lstrip().split("\n")
         if lines and lines[0].startswith("> ") and ("整理自" in lines[0] or "转写自" in lines[0]):
             lines = lines[1:]
-        entries.append({**e, "body": "\n".join(lines).strip()})
+        entries.append({**e, "body": "\n".join(lines).strip(), "version": version})
     return {**g["meta"], "urls": sorted({x["project_url"] for x in g["entries"]
                                          if x["project_url"]}),
             "entries": entries}

@@ -15,6 +15,10 @@ let dailyLoaded = false, dailyDirty = false, dailySaving = false, dailyBusy = fa
 // 没有」,共享层的新事实到了要不要替这张表单收尾,得先知道它还在不在读。
 let dailySchedReads = 0;
 let dailyWindowDirty = false;
+// 从收藏面板点一条日报片段回来时的落点:{ref: 日期, spec: 那段话的锚点}。
+// **由这一片自己消费**(`openDailyReport` 成功之后),不让收藏面板那边也发一次
+// 打开请求 —— 两条路各发一次就是 dailyReadSeq 要挡的那种先发后到。
+let dailyPendingSnip = null;
 
 function dailyActive() { return activeTab === 'daily'; }
 
@@ -302,8 +306,22 @@ async function loadDailyReports(keepSelection = true) {
     ? `最近一份 ${dailyReports[0].date}` : '还没有生成过日报';
   $('daily-list-note').textContent = dailyReports.length ? `共 ${dailyReports.length} 份` : '';
   renderDailyList();
-  const wanted = keepSelection && dailyReports.some(r => r.date === dailyCurrent)
-    ? dailyCurrent : dailyReports[0]?.date;
+  // 收藏回跳指定了哪一天就打开那一天(它只在那一份里才找得到那段话)。
+  // **那一份已经不在了就当场说清楚、并把这次回跳丢掉** —— 退回"打开第一份"的话,
+  // 屏幕上是另一天的日报、没有任何提示,而待定位还挂着:用户以为跳到了,实际
+  // 在读别的东西(审查实测:目标 1999-01-01,最后显示 2026-10-14)。
+  let jump = '';
+  if (dailyPendingSnip) {
+    if (dailyReports.some(r => r.date === dailyPendingSnip.ref)) {
+      jump = dailyPendingSnip.ref;
+    } else {
+      toast('这条收藏出自 ' + dailyPendingSnip.ref + ' 的日报，那一份已经不在了',
+        { type: 'info', detail: '收藏里那段原文还在' });
+      dailyPendingSnip = null;
+    }
+  }
+  const wanted = jump || (keepSelection && dailyReports.some(r => r.date === dailyCurrent)
+    ? dailyCurrent : dailyReports[0]?.date);
   // await:调用方("生成完了,刷新一下")等的是"新那一份已经在屏幕上",不是
   // "列表请求回来了"。不等的话阅读区还挂着上一份的正文和元信息,看起来像是
   // 生成没生效(2026-09-30 复审在全新沙箱上抓到,回归因此假红)。
@@ -332,6 +350,8 @@ function renderDailyList() {
 //   轮询都不会再补刷(审查实测:左边列表写着 5 条,正文只剩 4 条,只有手动再点一次才回来)。
 let dailyReadSeq = 0;
 
+// 正文落地走 `setDailyBody`(kb/static/js/daily_body.js):正文和「这是哪一天的」
+// 一起落,「收藏此段」从那里读出处。
 async function openDailyReport(date) {
   dailyCurrent = date;
   renderDailyList();
@@ -351,16 +371,20 @@ async function openDailyReport(date) {
     // 元信息那一行已经写了。两处都只在面板上剥掉,vault 里的文件一个字不改。
     // 正文里那段「本轮有 N 项没有完成」跟着 md 一起渲染出来(剥掉的只有
     // 标题和覆盖区间这两行重复信息),所以历史日报翻回来也看得见当时的同步缺口。
-    $('daily-reader-body').innerHTML =
-      mdHtml(r.body.replace(/^\s*#\s+[^\n]*\n+(?:>\s*覆盖[^\n]*\n)?/, ''));
-    enhanceDailyBody($('daily-reader-body'));
+    const body = setDailyBody(
+      mdHtml(r.body.replace(/^\s*#\s+[^\n]*\n+(?:>\s*覆盖[^\n]*\n)?/, '')), r.date);
+    enhanceDailyBody(body);
     $('daily-copy').hidden = $('daily-del').hidden = false;
     $('daily-copy').dataset.body = r.body;
+    // 收藏回跳的落点。排在 enhanceDailyBody 之后:那一步会把出处编号换成
+    // 链接元素,换掉的是**元素结构**而不是字符 —— 锚点那套按全文偏移找,
+    // 顺序反了也对得上,但高亮的 Range 会落在已经离开文档的节点上。
+    dailyPendingSnip = consumeSnipJump(dailyPendingSnip, date, body);
   } catch (e) {
     // 失败这一侧走同一道判据:被替代的那次读取报出来的错也是陈旧的,
     // 让它覆盖新正文等于拿一句「读取失败」盖掉一份读到了的日报。
     if (stale()) return;
-    $('daily-reader-body').innerHTML = `<div class="daily-empty" role="alert"><h3>读取失败</h3><p>${esc(e.message)}</p></div>`;
+    setDailyBody(`<div class="daily-empty" role="alert"><h3>读取失败</h3><p>${esc(e.message)}</p></div>`);
   }
 }
 
@@ -459,7 +483,7 @@ async function deleteDailyReport() {
     $('daily-copy').hidden = $('daily-del').hidden = true;
     $('daily-reader-title').textContent = '还没有选中日报';
     $('daily-reader-meta').textContent = '';
-    $('daily-reader-body').innerHTML = '<div class="daily-empty"><h3>已删除</h3><p>可以重新生成这一天的日报。</p></div>';
+    setDailyBody('<div class="daily-empty"><h3>已删除</h3><p>可以重新生成这一天的日报。</p></div>');
     // 删一份日报会把它带走的条目放回队列,所以按钮上那个计数也得重新问一次
     // ——不问的话页面上还写着「没有新内容」,而此刻明明又有了。
     await Promise.all([loadDailyReports(false), loadDailyWindow()]);

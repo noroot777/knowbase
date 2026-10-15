@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from kb.config import VAULT_ROOT, ScheduleUnreadable
+from kb.scanner import read_md_text
 
 _STATIC = Path(__file__).resolve().parent.parent / "static"
 
@@ -21,6 +22,28 @@ VAULT_NAME = VAULT_ROOT.name
 
 def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def read_doc_text(path: str) -> str:
+    """读 vault 里那一篇 md 的文本;读不出来按 HTTP 三分法抛。
+
+    **「不在了」和「读不出来」要分开报。** 索引里有行、文件此刻读不出来(权限、
+    网盘没挂上、IO 错)不等于这一篇不存在 —— 报成 404 会让调用方把一次**暂时的
+    失败**当成一个**已经证明了的结论**:片段收藏那一头据此告诉用户「这篇还没进
+    检索索引」并静默丢掉 path。
+
+    **口径只有这一份**,两个消费方都过它:`/api/doc` 按它报正文版本号,片段落库
+    前按它再算一次(`favorites_api`)。各写一遍的话,一处把"文件不在了"报成 503、
+    另一处报成 404,而前端是按状态码决定退回哪一档、怎么跟用户说的。
+    解码一律 `errors="replace"`,理由见 `scanner.read_md_text`;
+    这一道的事故形态在 `docs/decisions/fav-snippets.md`(硬约束一节)。
+    """
+    try:
+        return read_md_text(VAULT_ROOT / path)
+    except FileNotFoundError:
+        raise HTTPException(404, "文件不在了(可能已移动)")
+    except OSError as e:
+        raise HTTPException(503, f"原文暂时读不出来:{e.strerror or e}")
 
 
 def unreadable_config(e: ScheduleUnreadable) -> HTTPException:

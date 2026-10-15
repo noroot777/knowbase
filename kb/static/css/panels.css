@@ -25,12 +25,12 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .fav-snip-row { border-left: 2px solid var(--line); padding-left: 10px; margin-left: 2px; }
-a.fav-snip-link { flex: 1; min-width: 0; text-decoration: none; overflow: hidden; }
+.fav-snip-link { flex: 1; min-width: 0; text-decoration: none; overflow: hidden; }
 .fav-snip-q {
   display: block; font-size: 13.5px; color: var(--ink-2);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-a.fav-snip-link:hover .fav-snip-q { color: var(--accent); }
+.fav-snip-link:hover .fav-snip-q { color: var(--accent); }
 .fav-note { font-size: 12px; color: var(--brand-deep); padding-left: 12px; margin-bottom: 2px; }
 
 /* 分诊视图:置顶推荐 + 抽屉 + 行动卡 */
@@ -335,3 +335,19 @@ body.chat-mode { padding-bottom: 28px; }
 /* 保存结果就在按钮旁边说,别顶在弹窗最底下让人再找一眼 */
 .keys-footer { display: flex; gap: 8px; align-items: center; margin-top: 16px; }
 .keys-footer #keys-msg { flex: 1; min-width: 0; font-size: 12.5px; }
+
+/* 没有 vault 文档的收藏(日报正文、问答回答、没导出的订阅条目)点回去不是
+   一个地址而是一次面板切换,所以那一下挂在 button 上 —— 但读起来必须和
+   旁边那些文章链接一模一样,否则同一张卡上两种出处长成两个样子。
+   行为在 kb/static/js/fav.js 的 favJumpHtml / jumpFavOrigin。 */
+.fav-jump {
+  background: transparent; border: 0; padding: 0; margin: 0;
+  font: inherit; color: var(--ink); text-align: left; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 100%; min-width: 0;
+}
+.fav-jump:hover { background: transparent; color: var(--accent); }
+.fav-title .fav-jump { font-size: inherit; font-weight: inherit; }
+.fav-rowline .t .fav-jump { color: var(--ink-2); }
+.fav-rowline.q .t .fav-jump:hover { color: var(--accent); }
+.badge.fav-origin { flex-shrink: 0; margin-right: 6px; }
