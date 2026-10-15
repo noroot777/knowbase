@@ -154,6 +154,24 @@ def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
     return doc_from_text(text, md_path, src)
 
 
+def iter_md(sources: list[Source] | None = None) -> Iterator[tuple[Source, Path]]:
+    """遍历该扫的那些 md 文件,**只给路径,不读正文**。
+
+    「哪些树要扫、树里跳过哪些子目录」只有这一份实现:`scan_all` 和
+    `fetch_rounds.vault_snapshot` 都过它。两边各写一遍 rglob 的话,停用一棵树、
+    加一个 skip_dirs 之后迟早对不上 —— 对不上的表现是生成按钮上那颗药丸多报
+    一批压根不会进库的文件。
+    """
+    for src in sources if sources is not None else SOURCES:
+        if not src.enabled or not src.root.is_dir():
+            continue
+        for md_path in sorted(src.root.rglob("*.md")):
+            rel_parts = md_path.relative_to(src.root).parts
+            if rel_parts and rel_parts[0] in src.skip_dirs:
+                continue
+            yield src, md_path
+
+
 def scan_all() -> Iterator[Doc]:
     """遍历所有来源,产出 Doc。停用的来源(`Source.enabled=False`)整棵跳过。
 
@@ -162,13 +180,7 @@ def scan_all() -> Iterator[Doc]:
     文件全没了,库里那一批连 chunk、向量、标签一起被删掉(见 `config.Source`
     的 `enabled` 那段)。
     """
-    for src in SOURCES:
-        if not src.enabled or not src.root.is_dir():
-            continue
-        for md_path in sorted(src.root.rglob("*.md")):
-            rel_parts = md_path.relative_to(src.root).parts
-            if rel_parts and rel_parts[0] in src.skip_dirs:
-                continue
-            doc = _doc_from_file(md_path, src)
-            if doc is not None:
-                yield doc
+    for src, md_path in iter_md():
+        doc = _doc_from_file(md_path, src)
+        if doc is not None:
+            yield doc

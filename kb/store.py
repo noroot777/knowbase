@@ -360,18 +360,6 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
 
 # ── 写入 ──────────────────────────────────────────────────────────────────────
 
-def doc_exists(conn: sqlite3.Connection, path: str) -> bool:
-    """库里已经有这一篇了吗。
-
-    索引阶段用它分出「头一回进库」和「内容变了要重建」—— `doc_needs_reindex`
-    把这两种都答 True(它问的是"要不要重建",正好不该分开),而当日抓取账本要的
-    是真·新增(`kb.fetch_rounds`:老文章重新导出、补全正文、回写译文都会让它
-    要重建一次,算成新内容的话同一篇会被反复报成"刚抓到")。
-    """
-    return conn.execute(
-        "SELECT 1 FROM documents WHERE path=?", (path,)).fetchone() is not None
-
-
 def doc_needs_reindex(conn: sqlite3.Connection, path: str, content_hash: str) -> bool:
     row = conn.execute(
         "SELECT content_hash FROM documents WHERE path=?", (path,)

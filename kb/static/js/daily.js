@@ -92,37 +92,60 @@ function renderDailyGenButton() {
   // 有因为出了一份日报而改变。积压队列是第三个问题,只进 tooltip。
   //
   // 自定义区间时照样报 —— 抓取事实和区间选哪一段无关(队列那句跟着藏掉,后端
-  // 算的是默认区间那一段)。后端查不出来(fetch 给 null)时整颗藏掉,**不写成
-  // 「今天还没有抓取」**:那是在把"不知道"说成"没有"。
+  // 算的是默认区间那一段)。
+  //
+  // 三种说法对三种事实,**不许合并**:没问过后端(undefined)整颗藏掉;后端答
+  // 「不可确认」(null:账本读不出来,或者有成果没落下去)说「读不出来」;`n=0`
+  // 才是「今天还没有抓取」。把 null 也说成「还没有抓取」是在把"不知道"说成
+  // "没有",而一次写失败之后它会一直这么笃定地说下去。
   const chip = $('daily-gen-count');
   const f = dailyWindow?.fetch;
-  chip.hidden = !f;
-  if (!f) { $('daily-gen').title = ''; return; }
-  chip.textContent = f.n
-    ? `第 ${f.n} 次抓取 · ${f.added ? `+${f.added} 条` : '0 条'}`
-    : '今天还没有抓取';
-  chip.classList.toggle('is-none', !f.added);
+  chip.hidden = f === undefined;
+  if (f === undefined) { $('daily-gen').title = ''; return; }
+  chip.textContent = f === null
+    ? '抓取次数读不出来'
+    : f.n
+      ? `第 ${f.n} 次抓取 · ${f.added ? `+${f.added} 条` : '0 条'}`
+      : '今天还没有抓取';
+  chip.classList.toggle('is-none', !f?.added);
   const p = dailyWindowDirty ? null : dailyWindow?.pending;
   // 「后面几天会陆续带走」是句许不出来的承诺:补录每天有名额,而排到超过
   // BACKLOG_DAYS 的会直接退出候选,不是一定进得了日报。
   const queued = p?.total
     ? `队列里有 ${p.total} 条还没进过任何日报，留待后续日报择取（超出回溯范围的不再纳入）。`
     : '';
-  $('daily-gen').title = (f.n
-    ? `今天第 ${f.n} 次抓取${f.at ? `（${f.at}）` : ''}往库里新加了 ${f.added} 篇。`
-    : '今天还没有同步过，库里的内容和上一次一样。') + queued;
+  $('daily-gen').title = (f === null
+    ? '当日抓取账本读不出来，这个数暂时不可确认（不是「没抓到」）。'
+    : f.n
+      ? `今天第 ${f.n} 次抓取${f.at ? `（${f.at}）` : ''}往库里新加了 ${f.added} 篇。`
+      : '今天还没有同步过，库里的内容和上一次一样。') + queued;
+}
+
+async function fetchDailyWindow(fillInputs) {
+  // **服务器事实统一从这一个口进来。** 抓取事实、队列积压、默认区间每次都接;
+  // `dailyWindowDirty` 只挡"改写用户填着的那两个时刻",不挡事实本身 —— 绑在
+  // 一起的后果是改过覆盖区间之后,同步完成多久按钮都还写着上一次的次数
+  // (审查实测:API 已返回 n=2,按钮停在「第 1 次抓取 · +3 条」)。
+  //
+  // `fillInputs` 另外由调用方给:空闲轮询一律不填,因为默认区间的截止时刻是
+  // "此刻",每跳重填一次会让展开着的「改区间」里的值自己往前跳。
+  let got;
+  try {
+    got = await pipeJson('/api/daily/window');
+  } catch { return false; }
+  dailyWindow = got;
+  if (fillInputs) {
+    $('daily-since').value = got.since;
+    $('daily-until').value = got.until;
+  }
+  return true;
 }
 
 async function loadDailyWindow() {
-  // 改过区间就不覆盖用户填的那两个时刻,但按钮上的名字和计数照样要重算一次
-  // ——「这一天有没有日报」是跟着列表变的,和区间改没改无关。
-  if (dailyWindowDirty) { renderDailyGenButton(); return; }
-  try {
-    dailyWindow = await pipeJson('/api/daily/window');
-  } catch { return; }
-  $('daily-since').value = dailyWindow.since;
-  $('daily-until').value = dailyWindow.until;
-  renderDailyWindowLabel();
+  // 整块重载。改过区间就不覆盖用户填的那两个时刻,但按钮上的名字、抓取事实和
+  // 队列照样要重算 ——「这一天有没有日报」「今天抓了几次」都跟区间改没改无关。
+  if (await fetchDailyWindow(!dailyWindowDirty)) renderDailyWindowLabel();
+  else renderDailyGenButton();
 }
 
 function toggleDailyWindow() {
@@ -630,13 +653,9 @@ async function refreshDailyStatus() {
 }
 
 async function refreshDailyPending() {
-  // 只更新按钮上那个数字,**不碰两个时刻输入框**:默认区间的截止时刻是"此刻",
-  // 每跳重填一次会让展开着的「改区间」里的值自己往前跳。
-  if (dailyWindowDirty || !dailyWindow) return;
-  try {
-    dailyWindow.pending = (await pipeJson('/api/daily/window')).pending;
-  } catch { return; }
-  renderDailyGenButton();
+  // 空闲时每一跳都问一次,**不碰两个时刻输入框**。改过覆盖区间时照样问:抓取
+  // 是从外面(同步中心、CLI、定时)进来的事实,它跟用户在这里填了什么没关系。
+  if (await fetchDailyWindow(false)) renderDailyGenButton();
 }
 
 function queueDailyPoll() {

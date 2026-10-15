@@ -159,8 +159,26 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
 
 
 def _run_export(crawl_filter: dict | str | None = None) -> None:
-    """让采集器把它本地的内容落成 obs md。"""
-    _per_channel("export", crawl_filter, lambda collector, scope: collector.materialize())
+    """让采集器把它本地的内容落成 obs md。
+
+    **这一步的产出就是「这一轮抓取抓到了多少」**:物化前后各取一次 vault 快照,
+    差集记进当日抓取账本(`fetch_rounds.note_new`)。记在这里而不是索引那边,
+    是因为账本要的是抓取自己的成果 —— 索引只是消费者,它看到的"库里头一回出现
+    这个路径"既可能是上一轮抓回来还没索引的,也可能是手工导入或重建索引
+    (实测:一次什么都没抓到的同步碰上 3 篇历史未索引的旧文就报成「+3 条」;
+    反过来真抓到 2 篇而这一轮不索引则报 0,之后单独索引也补不回来)。
+
+    记在 `finally` 里:勾了好几个来源时后一个炸了,不该把前面那几个真落下来的
+    文章一起抹掉 —— 它们已经在 vault 里,下一轮索引就会进库。
+    """
+    from kb import fetch_rounds
+
+    before = fetch_rounds.vault_snapshot()
+    try:
+        _per_channel("export", crawl_filter,
+                     lambda collector, scope: collector.materialize())
+    finally:
+        fetch_rounds.note_new(_round_key(), fetch_rounds.vault_snapshot() - before)
 
 
 class _StopWhileWaiting(Exception):
@@ -224,7 +242,7 @@ def _run_index() -> None:
 
 
 def _index_pass() -> None:
-    from kb import fetch_rounds, store
+    from kb import store
     from kb.chunker import split_chunks
     from kb.extract import parse_pretagged, save_extraction
     from kb.scanner import scan_all
@@ -233,15 +251,11 @@ def _index_pass() -> None:
     try:
         now = _now()
         seen: set[str] = set()
-        new = fresh = 0
+        new = 0
         for doc in scan_all():
             seen.add(doc.path)
             if not store.doc_needs_reindex(conn, doc.path, doc.content_hash):
                 continue
-            # 「这一篇是头一回进库」只能在 upsert **之前**问,之后库里一定有它了。
-            if not store.doc_exists(conn, doc.path) \
-                    and fetch_rounds.counts_as_new(doc.source):
-                fresh += 1
             store.upsert_document(conn, doc, split_chunks(doc.body), now)
             pre = parse_pretagged(doc)
             if pre is not None:
@@ -252,11 +266,9 @@ def _index_pass() -> None:
                 _stage("index", "running", f"已索引 {new} 篇")
         removed = store.remove_missing_documents(conn, seen)
         conn.commit()
-        # 这一轮抓取往库里新加了多少篇。**只认真·新增**:`new` 里混着"内容变了要
-        # 重建索引"的老文章(正文补抓、翻译回写、重新导出都会让它变),拿它当
-        # 「抓到了多少新内容」会把同一篇老文章反复报成新的。没抓过的那种运行
-        # (只勾索引)这一步是空操作,见 `fetch_rounds.note_added`。
-        fetch_rounds.note_added(_round_key(), fresh)
+        # **这里不替抓取记账。**「今天抓了多少」是物化那一步的产出,记在
+        # `_run_export`;索引看到的"头一回进库"混着上一轮抓回来还没索引的、手工
+        # 导入的和重建索引的,而且要等分批提交全过去才知道,中途断电就永久漏记。
 
         def _report(done: int, total: int) -> None:
             _stage("index", "running",
@@ -597,7 +609,7 @@ def _ingest_pretagged_sources() -> tuple[int, int]:
 
 
 def _ingest_pass() -> tuple[int, int]:
-    from kb import fetch_rounds, store
+    from kb import store
     from kb.chunker import split_chunks
     from kb.extract import parse_pretagged, save_extraction
     from kb.scanner import scan_all
@@ -606,25 +618,20 @@ def _ingest_pass() -> tuple[int, int]:
     conn = store.connect()
     try:
         now = _now()
-        new = fresh = 0
+        new = 0
         for doc in scan_all():
             if doc.source not in targets:
                 continue
             if not store.doc_needs_reindex(conn, doc.path, doc.content_hash):
                 continue
-            # 今天这两棵都是衍生树,`counts_as_new` 一律答 False,所以这一格现在
-            # 恒为 0。留着是因为「算不算新内容」的口径只有那一份:哪天这里的
-            # targets 换了一棵非衍生的树,漏记是静默少报,而多这三行不花什么。
-            if not store.doc_exists(conn, doc.path) \
-                    and fetch_rounds.counts_as_new(doc.source):
-                fresh += 1
             store.upsert_document(conn, doc, split_chunks(doc.body), now)
             pre = parse_pretagged(doc)
             if pre is not None:
                 save_extraction(conn, doc.path, pre)
             new += 1
         conn.commit()
-        fetch_rounds.note_added(_round_key(), fresh)
+        # 同 `_index_pass`:条目化入库也不替抓取记账(这两棵还都是衍生树,
+        # 日报取材和抓取账本都把它们排除在外)。
         from kb.embedder import embed_pending_chunks
         return new, embed_pending_chunks(conn)
     finally:
