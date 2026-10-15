@@ -7,9 +7,16 @@
 会把后面每一条都拖成「不可确认」,而 `_opened` 留着会让别的用例在读失败时多写出
 一行来。
 
+`_Pending` 在 `_Base` 上再加一层:那把旁挂锁、那几笔独立凭证、那笔开工标记怎么弄坏
+和修好,以及「另一个进程读出来是多少」(`restart_today`)。
+
 消费方:tests/test_fetch_rounds.py(账本本体与恢复协议)、
-tests/test_fetch_receipt.py(成果归属)。
+tests/test_fetch_receipt.py(成果归属)、tests/test_fetch_pending.py(攥着的行与
+那笔凭证)、tests/test_fetch_evidence.py(参与证据的寿命与分代清理)。
 """
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -18,6 +25,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from kb import config, fetch_rounds
+from kb import pipeline_state as ps
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 def T(text):
@@ -84,6 +94,66 @@ class _Base(unittest.TestCase):
 
         with patch.object(Path, 'read_text', maybe_fail):
             yield
+
+
+class _Pending(_Base):
+    """账本那把锁、那几笔凭证、那笔开工标记的小工具。"""
+
+    def lock(self):
+        return self.root / fetch_rounds.LOCK_NAME
+
+    def break_lock(self):
+        """把旁挂锁占成一个目录 —— 取锁从此失败(审查复现用的就是这一手)。"""
+        self.lock().unlink(missing_ok=True)
+        self.lock().mkdir()
+
+    def fix_lock(self):
+        self.lock().rmdir()
+
+    def pending(self):
+        return self.root / fetch_rounds.PENDING_DIR
+
+    def certs(self):
+        folder = self.pending()
+        return sorted(p.name for p in folder.iterdir()) if folder.exists() else []
+
+    def block_pending(self):
+        """把凭证目录的位置占成一个普通文件 —— 那一笔从此写不下去。"""
+        self.pending().write_text('占住凭证目录的位置', encoding='utf-8')
+
+    def marker(self):
+        return self.root / 'pipeline_state_open.json'
+
+    def mark_open(self, run_id):
+        """落一笔**真的**开工标记(走生产那条 `pipeline_open.mark`,不手搓 JSON)。
+
+        位置跟着 `pipeline_state._STATE_FILE` 派生,所以这里把它也指到临时目录 ——
+        两边指到同一个库,才是生产里那个形状。**抓取那一侧不读这一笔**(它的寿命是
+        那一轮运行的,见 `fetch_rounds._landed`),所以这个小工具现在只用来钉
+        「它在不在都不改变结论」。
+        """
+        with patch.object(ps, '_STATE_FILE', self.root / 'pipeline_state.json'):
+            self.assertEqual('', ps.mark_open(
+                {'run_id': run_id, 'seq_gen': 1, 'started_at': '2026-09-29 09:00',
+                 'run_kind': 'sync'}))
+
+    def restart_today(self):
+        """**另一个进程**读出来的那个数(内存里什么都没有,盘上留下什么就是什么)。
+
+        只把账本那一侧指到临时目录 —— 审查复现脚本也是这么打桩的,而参与证据必须
+        在这种打桩下也找得到(两处证据都在账本自己那个数据目录里)。
+        """
+        code = ('import json; from pathlib import Path; from kb import fetch_rounds; '
+                f'fetch_rounds.DATA_DIR = Path({str(self.root)!r}); '
+                'print(json.dumps(fetch_rounds.today()))')
+        done = subprocess.run([sys.executable, '-c', code], capture_output=True,
+                              text=True, check=True, cwd=str(REPO))
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def process_gone(self):
+        """模拟进程没了:内存那三份状态随它消失,盘上留下什么就是什么。"""
+        for name in ('_unsaved', '_opened', '_gaps'):
+            setattr(fetch_rounds, name, [])
 
 
 class _Fake:

@@ -140,6 +140,9 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
     filters = crawl_filter or {}
     planned = _state.get("planned_stages")
     key, seg = round_key()
+    # 闸在这里抛(参与证据一处都记不下,见 `fetch_rounds.open_round`)。**抛要照抛**:
+    # 后面的导出阶段才是真会往 vault 落文章的那一步,吞掉就等于没拦。拦住的原因由
+    # 编排那一层写进阶段卡片(`pipeline._run_pipeline` 的 crawl 分支)。
     fetch_rounds.open_round(
         key, seg=seg,
         materializes="export" in planned if isinstance(planned, list) else True)

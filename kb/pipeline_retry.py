@@ -424,11 +424,9 @@ def start_retry_failed() -> tuple[bool, str]:
         begun = {"run_id": new_run_id(), "seq_gen": _SEQ_GEN,
                  "started_at": _now(), "run_kind": "retry"}
         planned = [s for s in STAGES if card[s]]
-        # 重试轮不属于任何业务批次,所以它的抓取身份就是自己的 run id(`batch` 留空,
-        # 还原按 `pipeline_batch.round_key_of`,和 `round_key()` 同一条)。crawl 在不在
-        # 计划里就是「这一轮抓不抓」:`crawl_resolved` 那一档上面已经把它摘出计划了,
-        # 所以这里不会把一轮不抓的重试说成会抓(理由在 `pipeline_open.mark`)。
-        err = mark_open({**begun, "batch": "", "planned_stages": planned})
+        # **标记那一笔只带这一轮运行自己的身份**(和普通起跑同一处对称:第 4 轮往里
+        # 塞过抓取身份,第 5 轮审查证伪了那条,理由在 `pipeline_open.mark`)。
+        err = mark_open(begun)
         if err:
             return False, err
         _state.update({

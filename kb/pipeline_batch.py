@@ -195,20 +195,11 @@ def round_key() -> tuple[str, str]:
     也交完(事故形态在 `fetch_rounds.note_end`)。**两样身份在同一处算出来**:
     分开两处取的话迟早有一处把"批次有没有开"判反,于是整批的凭证记到某个子轮
     头上,或者反过来每个来源各算一次抓取。
+
+    (第 4 轮一度把这条算法单独抽成 `round_key_of`,供读开工标记的那一侧还原身份;
+    第 5 轮审查证伪了「标记能当参与证据」那条,那个消费方跟着没了,算法折回这一处。)
     """
-    return round_key_of(ps._state.get("batch"), ps._state.get("run_id"))
-
-
-def round_key_of(batch, run_id) -> tuple[str, str]:
-    """两样原始身份 → (这一次业务抓取的键, 它的子轮)。**这条算法只有这一处。**
-
-    `round_key()` 问的是"此刻的内存状态",而**开工标记落盘的时候那份状态还没更新**
-    (两个起跑入口都是先占边界、再认这一轮,理由在 `pipeline_state.mark_open`),
-    所以标记那一侧只能把拿到手的 `batch` / `run_id` 原样递进来。读标记的那一侧
-    (`kb.fetch_claim`)再按同一条算法还原出键 —— 各写一遍的话,一边把没有批次的
-    独立运行算成 `""`、另一边算成它的 run id,两边的身份就永远对不上,而对不上的
-    表现是面板**沉默地**回到那个少记的确定数。
-    """
+    batch, run_id = ps._state.get("batch"), ps._state.get("run_id")
     return (str(batch or run_id or ""), str(run_id or ""))
 
 
