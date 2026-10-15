@@ -83,9 +83,25 @@ N 个子轮各跑一段(一轮日报里每个来源一次管道运行,共用一�
 还会再导一次」,不该让这篇从成果事实里消失 —— 消失之后重导时它已经不是新
 文件(`fresh=False`),这一篇永远补不回账(实测)。
 
-**只有一种情形救不回来**:写失败之后进程就没了 —— 那几行既没落盘也不在内存里。
-但这一刀落下去之后账本**不会撒谎**:开轮行上记着这次运行会不会物化(`ex`),
-会物化却没有结束行的轮次一律算「不可确认」,而不是算确定的 0 条。
+**而「参与过」这件事不许只存在账本里。** 账本的每一次写都要过那把文件锁,锁坏掉时
+那几行攥在内存里 —— 进程一没,盘上就没有任何痕迹说明那个子轮参与过,而它可能已经
+往 vault 落了文章。**「没有留下参与证据」不等于「没有参与」**:第 3 轮审查实测,
+第二个子轮的登记行因为锁暂时不可用没落下去、随后 `os._exit`,盘上第一个子轮的
+开轮行/回执/结束行全部合法,整轮报成**确定的 1 条**,而 vault 里躺着两篇。所以攥住
+行的同时另外留一笔**不走那把锁**的凭证(`kb.fetch_pending`):它只说「这几轮的证据
+在我手里」,`today()` 据此把结论压到下界;凭证指向一轮账本里压根没有的身份时(登记
+行一个字都没落下去),干脆答「不可确认」,而不是沿用更早那一次的确定数。
+
+**缓冲是两条线程共用的,确认只许移除自己真写下去的那几行。** 管道在写账本,而面板
+每 15 秒读一次、`today()` 自己又会替攥着的行补写 —— 追加那一下是 I/O、**不在**进程
+内那把缓冲锁里,这期间另一条线程压进来的回执不许被一句「清空缓冲」带走(实测形态
+在 `_flush`)。锁序只有一个方向:**文件锁 → 缓冲锁**,缓冲锁里只搬缓冲自己的东西。
+
+**现在只剩一档真救不回来**:账本和那笔凭证**一起**写不进去,而进程随后就没了。
+这一档前面另有一道闸 —— 数据目录写不进去时「开工标记」落不下来,那一轮压根不会
+起跑(`kb.pipeline_open.mark`),也就落不出文章来。而这一刀落下去之后账本**不会
+撒谎**:开轮行上记着这次运行会不会物化(`ex`),会物化却没有结束行的轮次一律算
+「不可确认」,而不是算确定的 0 条。
 
 面板那一侧怎么显示(几种说法、自定义区间、tooltip 里那句队列积压)写在
 `docs/decisions/daily.md` 的「这个计数长在生成按钮里」那一节。
@@ -95,17 +111,23 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from kb import fetch_pending
 from kb.config import DATA_DIR
+from kb.fetch_fold import _LEGACY_SEG, _fold
+from kb.fetch_scope import _scope_prefixes, in_scope      # noqa: F401 - 再导出
 from kb.pipeline_persist import _write_atomic
 
 TZ = ZoneInfo('Asia/Shanghai')
 FILE_NAME = 'fetch_rounds.jsonl'
 LOCK_NAME = 'fetch_rounds.lock'
+# 「还欠着行没落盘」那几笔独立凭证放哪(每个进程一份,见 `kb.fetch_pending`)。
+PENDING_DIR = 'fetch_rounds.pending'
 # 账本里留几天。只回答「今天」,但不能只留今天:23:59 开的那一轮 00:01 才物化完,
 # 记它的那一下得找得到它(轮次按**开工那天**归属,不在追加时重新猜今天)。
 _KEEP_DAYS = 2
@@ -114,9 +136,6 @@ _KEEP_DAYS = 2
 _KEEP_UNSAVED = 64
 # `_opened` / `_gaps` 各记得住几轮身份。一天就那么几轮,这个数只是挡无界增长。
 _KEEP_KEYS = 64
-# 没带子轮身份的结束行(存量账本、没有 run id 的调用)折成这一个身份。它**同时
-# 算「登记过」和「交完了」**,所以老账本的结论一个字都不变。
-_LEGACY_SEG = '-'
 
 # 落盘失败、还没写下去的那几行。**不是缓存**:它存在期间 `today()` 一律答
 # 「不可确认」,因为此刻磁盘上那份账本比事实少。
@@ -129,6 +148,16 @@ _opened: list[str] = []
 # 又不是本进程开的)时记一笔,结束行据此带上 `partial` —— 不然读账一恢复,一个
 # 结束行就把未知解除了,报出一个确定却少记的数(见模块开头)。
 _gaps: list[str] = []
+# **上面那三份内存状态的互斥锁。** 管道线程在写账本,而面板每 15 秒从 API 线程
+# 读一次(`today()` 自己也是缓冲的消费者:它会替攥着的行补写一次),所以这三份
+# 是真的被两条线程同时碰的。
+#
+# **锁序只有一个方向:账本那把文件锁 → 这把缓冲锁。** 反过来挂的话,一条线程
+# 攥着缓冲等文件锁、另一条持着文件锁等缓冲,凑出一个死锁。所以这把锁里**只许做
+# 缓冲自己的事**:搬动那几行、以及把「还欠哪几轮」写成一笔凭证(那一笔不碰账本、
+# 不取任何锁,见 `kb.fetch_pending`)—— **追加账本那一下必须在锁外**,它是 I/O,
+# 罩进来就把面板那一跳堵在磁盘故障后面。
+_buffer_lock = threading.RLock()
 
 
 def _push(bag: list[str], key: str) -> None:
@@ -138,10 +167,48 @@ def _push(bag: list[str], key: str) -> None:
     `_gaps` 少一个 = 结束行不带 `partial`,而那时轮次本来就少了行、`_fold` 会
     自己报 `ok=False`。
     """
-    if key in bag:
-        return
-    bag.append(key)
-    del bag[:-_KEEP_KEYS]
+    with _buffer_lock:
+        if key in bag:
+            return
+        bag.append(key)
+        del bag[:-_KEEP_KEYS]
+
+
+def _seen(bag: list[str], key: str) -> bool:
+    """这个身份记在 `bag` 里没有 —— 读也要过缓冲锁(另一条线程正在挤它)。"""
+    with _buffer_lock:
+        return key in bag
+
+
+def _pending() -> bool:
+    """手里还攥着没落盘的行没有。**这一句就是 `today()` 答「不可确认」的判据。**"""
+    with _buffer_lock:
+        return bool(_unsaved)
+
+
+def _pending_folder() -> Path:
+    return DATA_DIR / PENDING_DIR
+
+
+def _floor(at: datetime) -> str:
+    """保留窗口的下沿(这一天之前的轮次清出账本)。**账本和凭证共用这一份口径**:
+    凭证留得比账本久的话,它指的那一轮早被轮换清掉了,`today()` 会从此永久答
+    「读不出来」;反过来凭证先过期,扣着的证据就没人提了。"""
+    return _day(at - timedelta(days=_KEEP_DAYS - 1))
+
+
+def _certify(at: datetime | None = None) -> None:
+    """把「我还欠哪几轮的行」落成一笔独立凭证。**调用方必须已持缓冲锁。**
+
+    凭证的全部作用是:**登记行没落盘、进程又没了**的时候,盘上仍留着「那个子轮
+    参与过」这件事,于是结论压到下界而不是沿用上一个子轮的确定数(第 3 轮审查
+    实测的那一刀,形态在 `kb.fetch_pending` 开头)。手里空了就撤掉它 —— 不撤的
+    后果是面板永久写「至少」,所以这一句和 `_unsaved` 的每一次搬动绑在一起,
+    不单独挑调用点。
+    """
+    keys = [str(o.get('key') or '') for o in _unsaved if o.get('key')]
+    moment = _now(at)
+    fetch_pending.put(_pending_folder(), keys, _day(moment), _floor(moment))
 
 
 def _file() -> Path:
@@ -207,137 +274,6 @@ def _day(at: datetime) -> str:
     return at.date().isoformat()
 
 
-def _scope_prefixes() -> list[tuple[tuple[str, ...], frozenset]] | None:
-    """算「抓到的新内容」的那些树,各自的 vault 相对前缀 + 要跳过的子目录。
-
-    一次算好交给 `in_scope` 复用:一轮回执有上百条路径,每条都把全部来源 resolve
-    一遍是上千次 syscall,而这份清单一轮之内不会变。
-
-    **没读全就交 `None`,不许交一份少了几棵树的清单。** `resolve()` 会因为权限、
-    符号链接层数、目录临时不可用而抛 `OSError` —— 那时「这条路径算不算成果」是
-    **答不出来**,不是「确定不算」。上一版把这两种压成一种(`return []` / 跳过
-    那棵树),于是一次临时故障能把一份真回执筛成空集,再让结束行把这一轮定成
-    确定的 0 条(第 2 轮审查静态项)。`ValueError` 是另一件事:那棵树**确定**
-    不在 vault 底下,跳过它才是对的。
-    """
-    from kb.config import SOURCES, VAULT_ROOT
-
-    try:
-        root = Path(VAULT_ROOT).resolve()
-    except OSError:
-        return None
-    out = []
-    for src in SOURCES:
-        if src.derived or not src.enabled:
-            continue
-        try:
-            out.append((Path(src.root).resolve().relative_to(root).parts,
-                        src.skip_dirs))
-        except OSError:
-            return None                 # 这棵树没读全 → 整份范围都不可信
-        except ValueError:
-            continue                    # 确定不在 vault 底下
-    return out
-
-
-def in_scope(rel: str, prefixes) -> bool:
-    """这个路径**算不算「抓到的新内容」** —— 范围口径只有这一份。
-
-    和日报取材认的那批树一致(`daily._scope`):非衍生、启用中、不在 `skip_dirs`
-    里。回执由采集器交,但"哪些树算"是知识库自己的事,不能交给每个采集器各判
-    一遍 —— 条目化衍生树(`dr-gzh-projects` 等)和原文是同一批内容,日报本来就
-    排除它们,算进来的话一轮条目化就能让药丸写出三位数而日报那边一条新的都没有;
-    停用的树同理不再进库。
-
-    `prefixes` 由调用方先算好(`_scope_prefixes`)。**算不出来时不许拿空范围
-    当答案** —— 那一档归「不可确认」,判据在 `note_new`。
-    """
-    parts = Path(rel).parts
-    for prefix, skip in prefixes:
-        if parts[:len(prefix)] != prefix:
-            continue
-        rest = parts[len(prefix):]
-        return not (rest and rest[0] in skip)
-    return False
-
-
-def _fold(lines) -> tuple[list[dict], bool]:
-    """把账本每一行折成「开过哪几轮、各自新落了哪些文章、走完了没有」,外加一句
-    「读全了没有」。
-
-    五种行:开轮(带 `day`/`at`/`ex`)、回执(带 `paths`)、不可确认标记(带
-    `partial`)、子轮登记(带 `seg`)、子轮交完了(带 `seg`+`end`)。**回执取并集、
-    子轮按集合算**,所以同一行追加两遍、同一轮被两条通道各报一次,折出来的结论都
-    一样(见模块开头那条)——「交完了几次」用计数的话,一次 fsync 重放就能把它
-    推成完整。
-
-    **`got`(收到过回执)和「交完了」是两件事,不许互相顶替。** 上一版只有 `got`:
-    导出阶段进门先落一张空回执,于是「刚开始」在盘上和「全部交完」长得一模一样
-    —— 随后生产者真写出了文章、进程却没了,盘上的结论永久是**确定的 0 条**
-    (第 1 轮审查实测两个分支:预置空回执、以及多来源里第一个交完回执后退出)。
-
-    **而「交完了」是 `segs == ends`,不是「有谁交过」。** 一次业务抓取的物化由 N 个
-    子轮各跑一段,第一个子轮的结束行证明不了后面那几个也交完(第 2 轮审查实测)。
-    结束行**同时**把自己记进 `segs`:只跑导出的那种运行(重试导出阶段)压根没开过
-    轮、不会登记,它交完了也该算完,否则那一轮永远「不可确认」。
-
-    `ok=False` 表示有行读不出来(半截行、被改坏、成果对不上轮次)。那时这份账本
-    只能说「不可确认」—— 拿认得出来的那部分冒充完整事实,就又回到了把写失败说成
-    「今天还没有抓取」。
-    """
-    rounds: list[dict] = []
-    index: dict[str, dict] = {}
-    ok = True
-    for raw in lines:
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            obj = json.loads(raw)
-        except ValueError:
-            ok = False                  # 半截行(写一半断电)或被人改坏
-            continue
-        if not isinstance(obj, dict) or not obj.get('key'):
-            ok = False
-            continue
-        key = str(obj['key'])
-        if {'paths', 'partial', 'end', 'seg'} & obj.keys():
-            got = index.get(key)
-            if got is None:
-                ok = False              # 有成果、却找不到它那一轮:记不全
-                continue
-            if obj.get('partial'):
-                got['partial'] = True
-            if obj.get('end'):
-                seg = str(obj.get('seg') or _LEGACY_SEG)
-                got['segs'].add(seg)    # 见上:交完了的子轮一定算登记过
-                got['ends'].add(seg)
-            elif 'seg' in obj:
-                got['segs'].add(str(obj['seg'] or _LEGACY_SEG))
-            if 'paths' in obj:
-                if not isinstance(obj['paths'], list):
-                    ok = False
-                    continue
-                got['paths'].update(str(p) for p in obj['paths'])
-                got['got'] = True
-            continue
-        if key in index:
-            continue                    # 同一轮重复开:幂等,不是第二次抓取
-        got = {'key': key, 'day': str(obj.get('day') or ''),
-               'at': str(obj.get('at') or ''),
-               # 这次运行会不会物化。读不到(存量账本行)按会物化算 —— 那一侧
-               # 的结论是「不可确认」,比笃定地说 0 条安全。
-               'ex': bool(obj.get('ex', 1)), 'paths': set(), 'got': False,
-               # 参与这一轮物化的子轮,以及其中**明确交完了**的那几个。
-               # 两个集合相等才算这一轮交完(见 `today`);存量账本行里一个
-               # 子轮都没有,那几轮只能说「至少 N 条」—— 新代码确实证明不了
-               # 它们完整,这比继续笃定地报一个数安全。
-               'segs': set(), 'ends': set(), 'partial': False}
-        rounds.append(got)
-        index[key] = got
-    return rounds, ok
-
-
 def _read() -> tuple[list[dict], bool]:
     """读账本。**文件不存在是「确定还没有记录」,读不出来是「不可确认」** ——
     两种都压成空的话,一次权限故障就会让面板笃定地说「今天还没有抓取」。
@@ -390,25 +326,48 @@ def _flush(objs: list[dict], locked: bool) -> bool:
     里,每一轮各留一条 `partial` 标记:数据确实没了,但「这一轮的条数不全」这个
     事实留住了,下一次写成功就会落盘。原来那一版直接 `batch[-64:]` 切掉 ——
     剩下的补写成功后 `today()` 会重新给出一个确定、但已经少记的结论。
+
+    **确认只许移除「我这一批真写下去的那几行」,不许清空整份缓冲。** 追加是 I/O:
+    它在缓冲锁外跑(见 `_buffer_lock`),这段时间另一条线程完全可以往缓冲里压进
+    新的回执 —— 上一版成功之后一句 `_unsaved = []` 把它一起抹掉了。第 3 轮审查
+    实测:面板那一跳(`today()` 替攥着的行补写)正卡在追加里,管道线程这时记下
+    第二篇的回执,追加一回来缓冲就空了,那一篇再也补不回账(重导时它已经不是新
+    文件),而 `today()` 自称确定、报 1 条,vault 里躺着两篇。所以这里**按身份
+    (`id`)剔**:同样的行可能来两条(两条 `partial` 标记长得一模一样),按值剔会
+    多剔一条;按条数剔在两条线程各自确认时会剔到对方新压进来的那几行。
+
+    重复追加不要紧:回执存路径集合、子轮按集合算,折叠本来就幂等(见 `_fold`)。
+    所以两条线程各把同一行写一遍也只是账本长一点,结论不变。
     """
     global _unsaved
-    batch = _unsaved + objs
-    if not batch:
+    with _buffer_lock:
+        held = list(_unsaved)
+        if not held and not objs:
+            return True
+        mine = {id(o) for o in held}
+    if locked and _append(held + objs):     # 追加在锁外:I/O 不许罩进缓冲锁
+        with _buffer_lock:
+            _unsaved = [o for o in _unsaved if id(o) not in mine]
+            _certify()
         return True
-    if locked and _append(batch):
-        _unsaved = []
-        return True
-    # 开轮行一律留住(一天里就那么几条):它一丢,后面那些回执就成了对不上轮次
-    # 的孤行,整份账本当场变成「读不出来」—— 那比「这一轮条数不全」难用得多。
-    opens = [o for o in batch if 'day' in o]
-    rest = [o for o in batch if 'day' not in o]
-    kept = rest[-max(0, _KEEP_UNSAVED - len(opens)):] if len(opens) < _KEEP_UNSAVED else []
-    marks: list[dict] = []
-    for o in rest[:len(rest) - len(kept)]:
-        key = str(o.get('key') or '')
-        if key and key not in {str(m['key']) for m in marks}:
-            marks.append({'key': key, 'partial': 1})
-    _unsaved = opens + marks + kept
+    with _buffer_lock:
+        # 这一批没落下去:重新拿一次当前的缓冲(这期间别的线程可能压进了新行,
+        # 也可能确认掉了几行),把 objs 并进去再按上限收。
+        batch = _unsaved + objs
+        # 开轮行一律留住(一天里就那么几条):它一丢,后面那些回执就成了对不上
+        # 轮次的孤行,整份账本当场变成「读不出来」—— 那比「这一轮条数不全」难用
+        # 得多。
+        opens = [o for o in batch if 'day' in o]
+        rest = [o for o in batch if 'day' not in o]
+        kept = (rest[-max(0, _KEEP_UNSAVED - len(opens)):]
+                if len(opens) < _KEEP_UNSAVED else [])
+        marks: list[dict] = []
+        for o in rest[:len(rest) - len(kept)]:
+            key = str(o.get('key') or '')
+            if key and key not in {str(m['key']) for m in marks}:
+                marks.append({'key': key, 'partial': 1})
+        _unsaved = opens + marks + kept
+        _certify()
     return False
 
 
@@ -428,7 +387,7 @@ def _rotate(rounds: list[dict], ok: bool, at: datetime, locked: bool) -> None:
     """
     if not ok or not locked:
         return
-    floor = _day(at - timedelta(days=_KEEP_DAYS - 1))
+    floor = _floor(at)
     live = [r for r in rounds if r['day'] >= floor]
     if len(live) == len(rounds):
         return
@@ -542,7 +501,7 @@ def _mark(key: str, line: dict) -> None:
             if not _is_open(key, rounds):
                 _flush([], locked)
                 return
-        elif key not in _opened:
+        elif not _seen(_opened, key):
             _push(_gaps, key)
             return
         _flush([dict(line, key=key)], locked)
@@ -605,7 +564,7 @@ def note_end(key: str, seg: str = '') -> None:
     if not key:
         return
     line = {'seg': str(seg) or _LEGACY_SEG, 'end': 1}
-    if str(key) in _gaps:
+    if _seen(_gaps, str(key)):
         line['partial'] = 1
     _mark(key, line)
 
@@ -620,7 +579,8 @@ def _is_open(key: str, rounds: list[dict]) -> bool:
     """
     if any(r['key'] == key for r in rounds):
         return True
-    return any(str(o.get('key') or '') == key and 'day' in o for o in _unsaved)
+    with _buffer_lock:
+        return any(str(o.get('key') or '') == key and 'day' in o for o in _unsaved)
 
 
 def today(now: datetime | None = None) -> dict | None:
@@ -630,31 +590,42 @@ def today(now: datetime | None = None) -> dict | None:
     'at': 'HH:MM'}`;`n=0` 是「确定今天还没有抓取过」。**整份读不出来、有行没落
     下去、或者连共享锁都没拿到时返回 `None`(不可确认)**,由 API 原样交给前端。
 
-    `partial=True` 的三种来源:某一段成果采集器说不出来(`note_unknown`)、这一轮
+    `partial=True` 的四种来源:某一段成果采集器说不出来(`note_unknown`)、这一轮
     会物化(`ex`)却没把**登记过的子轮**全交齐(`note_end`,进程在交回执或收尾
-    之前就没了),以及存量账本里一个子轮都没登记过的老轮次。那时 `added` 是
-    **下界**,前端据此说「至少 +N 条」而不是「+N 条」。
+    之前就没了)、**别的进程(或者重启前的自己)还扣着这一轮的行没落盘**
+    (`kb.fetch_pending` 那笔凭证),以及存量账本里一个子轮都没登记过的老轮次。
+    那时 `added` 是**下界**,前端据此说「至少 +N 条」而不是「+N 条」。
+
+    **扣着的证据指向一轮账本里压根没有的身份时,整句答「不可确认」。** 那是
+    「登记行一个字都没落下去」那一档:今天确实抓过一次,而盘上最新的轮次是更早
+    那一次 —— 拿它的数当今天的答案,就是把别人的成果说成这一次的(第 3 轮审查
+    那一刀的单轮形态)。
 
     **攥着没落盘的行时顺手重试一次。** 不重试的话,磁盘故障恢复之后面板会一直
     说「读不出来」,要等下一次抓取才补写(第 1 轮审查 N4)。重试走独占锁,别的
     读还是只拿共享锁。
     """
-    if _unsaved:
+    at = _now(now)
+    if _pending():
         with _locked(True) as locked:
             _flush([], locked)
     with _locked(False) as locked:
         rounds, ok = _read()
-    if not ok or not locked or _unsaved:
+        held, held_ok = fetch_pending.held(_pending_folder(), _floor(at))
+    if not ok or not held_ok or not locked or _pending():
         return None
-    day = _day(_now(now))
+    if held - {r['key'] for r in rounds}:
+        return None            # 有一轮的证据被扣着,而账本里连它的开轮行都没有
+    day = _day(at)
     mine = [r for r in rounds if r['day'] == day]
     if not mine:
         return {'n': 0, 'added': 0, 'partial': False, 'at': ''}
     last = mine[-1]
-    # 「交完了」= 登记过的子轮一个不剩都交了结束行。两个集合都空时分两种:开轮
-    # 就说了不物化(`ex=0`)的那一轮确定是 0 条;存量账本那几轮没有子轮行,
-    # 证明不了完整,只能算不可确认。
-    done = last['segs'] == last['ends'] and bool(last['segs'] or not last['ex'])
+    # 「交完了」= 登记过的子轮一个不剩都交了结束行,**而且没人扣着它的行**。
+    # 两个集合都空时分两种:开轮就说了不物化(`ex=0`)的那一轮确定是 0 条;
+    # 存量账本那几轮没有子轮行,证明不了完整,只能算不可确认。
+    done = (last['segs'] == last['ends'] and bool(last['segs'] or not last['ex'])
+            and last['key'] not in held)
     return {'n': len(mine), 'added': len(last['paths']),
             'partial': bool(last['partial'] or not done),
             'at': last['at'][-5:]}
