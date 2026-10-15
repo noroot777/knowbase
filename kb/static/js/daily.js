@@ -81,31 +81,36 @@ function renderDailyGenButton() {
   const exists = dailyReports.some(r => r.date === dailyTargetDate());
   $('daily-gen-label').textContent = exists ? '重新生成日报' : '生成日报';
 
-  // 「再点一次能**多带进来**多少」。日报是钉在某一天的产物,生成完不会自己跟着
-  // 新内容变 —— 一天内同步第二次之后,得有个地方让人看出这次抓的能不能整合进
-  // 今天这份,再决定要不要为它再花一次模型钱。它长在按钮里:回答的是"点这颗会
-  // 得到什么",贴在覆盖区间那行字后面就成了另一个问题的答案。
+  // 按钮上那颗药丸报的是**抓取自己的事实**:今天第 N 次抓取往库里新加了多少篇。
+  // 一天内同步第二次之后,得有个地方让人看出这次抓回来多少,再决定要不要为它
+  // 再花一次模型钱。它长在按钮里:贴在覆盖区间那行字后面就成了另一个问题的答案。
   //
-  // **按钮上只许放 `gain`,不许放 `total`。** 后者是队列总长(一共还积着多少没
-  // 上报过的),而一份日报带得下的条数有上限,两个数能差两个数量级:生产库实测
-  // 队列 1097 条、点下去只多出 11 条,写 1097 就是在许一个兑现不了的承诺。积压
-  // 那一摊挪进 tooltip,它自己是另一个问题。
+  // **不许拿取材结果冒充它。** 「这一次生成能选进去几条」受名额和发布时间排序
+  // 左右,和「抓了多少」可以差两个数量级:第二次真抓回来 9 条、名额只剩 3 个就
+  // 写成 3 条;抓回来那条发布得早、抢不到席位就写成「没有新内容」—— 而用户正是
+  // 靠这个数判断要不要重新生成。同理,生成完日报这个数**不该归零**:抓取事实没
+  // 有因为出了一份日报而改变。积压队列是第三个问题,只进 tooltip。
   //
-  // 自定义区间时不报这个数——后端算的是默认区间(接上一份日报)那一段。
-  // 后端查不出来(pending 给 null)时整颗藏掉,**不写成「没有新内容」**:
-  // 那是在把"不知道"说成"没有"。
+  // 自定义区间时照样报 —— 抓取事实和区间选哪一段无关(队列那句跟着藏掉,后端
+  // 算的是默认区间那一段)。后端查不出来(fetch 给 null)时整颗藏掉,**不写成
+  // 「今天还没有抓取」**:那是在把"不知道"说成"没有"。
   const chip = $('daily-gen-count');
+  const f = dailyWindow?.fetch;
+  chip.hidden = !f;
+  if (!f) { $('daily-gen').title = ''; return; }
+  chip.textContent = f.n
+    ? `第 ${f.n} 次抓取 · ${f.added ? `+${f.added} 条` : '0 条'}`
+    : '今天还没有抓取';
+  chip.classList.toggle('is-none', !f.added);
   const p = dailyWindowDirty ? null : dailyWindow?.pending;
-  chip.hidden = !p;
-  if (!p) { $('daily-gen').title = ''; return; }
-  chip.textContent = p.gain ? `+${p.gain} 条新内容` : '没有新内容';
-  chip.classList.toggle('is-none', !p.gain);
-  const rest = Math.max(0, (p.total || 0) - p.gain);
-  const queued = rest ? `队列里另有 ${rest} 条没进过任何日报，一份带得下的条数有限，`
-    + '会由后面几天的日报陆续带走。' : '';
-  $('daily-gen').title = (p.gain
-    ? `点下去会多带进 ${p.gain} 条今天这份还没有的内容。`
-    : '上一份日报之后没有新内容进来，再生成一次得到的基本是同一份。') + queued;
+  // 「后面几天会陆续带走」是句许不出来的承诺:补录每天有名额,而排到超过
+  // BACKLOG_DAYS 的会直接退出候选,不是一定进得了日报。
+  const queued = p?.total
+    ? `队列里有 ${p.total} 条还没进过任何日报，留待后续日报择取（超出回溯范围的不再纳入）。`
+    : '';
+  $('daily-gen').title = (f.n
+    ? `今天第 ${f.n} 次抓取${f.at ? `（${f.at}）` : ''}往库里新加了 ${f.added} 篇。`
+    : '今天还没有同步过，库里的内容和上一次一样。') + queued;
 }
 
 async function loadDailyWindow() {

@@ -119,6 +119,16 @@ def source_pending(channel: str | None = None) -> int | None:
     return active_collector(channel).pending()
 
 
+def _round_key() -> str:
+    """这一刻属于哪一次**业务抓取**(当日抓取账本的键)。
+
+    有批次身份就用它 —— 一轮日报、一次勾了三个来源的同步都是 N 次管道运行、
+    **一次**抓取。没有批次的独立运行(单来源同步、重试失败项)用自己的 run id。
+    两种身份都跨进程唯一,理由分别在 `pipeline_batch.open_batch` 和 `new_run_id`。
+    """
+    return str(_state.get("batch") or _state.get("run_id") or "")
+
+
 def _run_crawl(crawl_filter: dict | None = None) -> None:
     """让采集器把远端内容拉到它本地。
 
@@ -126,8 +136,15 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
     {"accounts": [...], "since_date": "YYYY-MM-DD", "until_date": "YYYY-MM-DD"}
     的区间补抓,accounts 为空 = 该来源的全部订阅目标。多来源同时抓时
     accounts 记在各自的 channels 项里(见 crawl_channels)。
+
+    **进来就在当日账本上开一轮**(`fetch_rounds.open_round`):「今天第几次抓取」
+    由抓取自己登记,不由后面哪个阶段的产出反推 —— 一次什么都没抓到的抓取也是
+    一次抓取,而只勾了索引的那种运行不是。
     """
+    from kb import fetch_rounds
+
     filters = crawl_filter or {}
+    fetch_rounds.open_round(_round_key())
 
     def _fetch(collector, scope: dict) -> None:
         _log(f"采集通道: {_channel_label(collector)}")
@@ -207,7 +224,7 @@ def _run_index() -> None:
 
 
 def _index_pass() -> None:
-    from kb import store
+    from kb import fetch_rounds, store
     from kb.chunker import split_chunks
     from kb.extract import parse_pretagged, save_extraction
     from kb.scanner import scan_all
@@ -216,11 +233,15 @@ def _index_pass() -> None:
     try:
         now = _now()
         seen: set[str] = set()
-        new = 0
+        new = fresh = 0
         for doc in scan_all():
             seen.add(doc.path)
             if not store.doc_needs_reindex(conn, doc.path, doc.content_hash):
                 continue
+            # 「这一篇是头一回进库」只能在 upsert **之前**问,之后库里一定有它了。
+            if not store.doc_exists(conn, doc.path) \
+                    and fetch_rounds.counts_as_new(doc.source):
+                fresh += 1
             store.upsert_document(conn, doc, split_chunks(doc.body), now)
             pre = parse_pretagged(doc)
             if pre is not None:
@@ -231,6 +252,11 @@ def _index_pass() -> None:
                 _stage("index", "running", f"已索引 {new} 篇")
         removed = store.remove_missing_documents(conn, seen)
         conn.commit()
+        # 这一轮抓取往库里新加了多少篇。**只认真·新增**:`new` 里混着"内容变了要
+        # 重建索引"的老文章(正文补抓、翻译回写、重新导出都会让它变),拿它当
+        # 「抓到了多少新内容」会把同一篇老文章反复报成新的。没抓过的那种运行
+        # (只勾索引)这一步是空操作,见 `fetch_rounds.note_added`。
+        fetch_rounds.note_added(_round_key(), fresh)
 
         def _report(done: int, total: int) -> None:
             _stage("index", "running",
@@ -571,7 +597,7 @@ def _ingest_pretagged_sources() -> tuple[int, int]:
 
 
 def _ingest_pass() -> tuple[int, int]:
-    from kb import store
+    from kb import fetch_rounds, store
     from kb.chunker import split_chunks
     from kb.extract import parse_pretagged, save_extraction
     from kb.scanner import scan_all
@@ -580,18 +606,25 @@ def _ingest_pass() -> tuple[int, int]:
     conn = store.connect()
     try:
         now = _now()
-        new = 0
+        new = fresh = 0
         for doc in scan_all():
             if doc.source not in targets:
                 continue
             if not store.doc_needs_reindex(conn, doc.path, doc.content_hash):
                 continue
+            # 今天这两棵都是衍生树,`counts_as_new` 一律答 False,所以这一格现在
+            # 恒为 0。留着是因为「算不算新内容」的口径只有那一份:哪天这里的
+            # targets 换了一棵非衍生的树,漏记是静默少报,而多这三行不花什么。
+            if not store.doc_exists(conn, doc.path) \
+                    and fetch_rounds.counts_as_new(doc.source):
+                fresh += 1
             store.upsert_document(conn, doc, split_chunks(doc.body), now)
             pre = parse_pretagged(doc)
             if pre is not None:
                 save_extraction(conn, doc.path, pre)
             new += 1
         conn.commit()
+        fetch_rounds.note_added(_round_key(), fresh)
         from kb.embedder import embed_pending_chunks
         return new, embed_pending_chunks(conn)
     finally:

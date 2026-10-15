@@ -12,7 +12,7 @@ from datetime import date, datetime
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from kb import daily, daily_run
+from kb import daily, daily_run, fetch_rounds
 from kb.config import ScheduleUnreadable
 from kb.web.common import unreadable_config
 
@@ -82,14 +82,14 @@ def status():
 
 @router.get('/window')
 def window():
-    """下一份日报默认覆盖的区间 + 再点一次生成能多带进来多少。界面拿它预填。
+    """下一份日报默认覆盖的区间 + 今天第几次抓取抓了多少。界面拿它预填。
 
-    `pending.gain` 回答的是"点这颗按钮会得到什么" —— 日报是一份钉在某一天的
-    产物,生成完不会自己跟着新内容变;一天内同步第二次之后,用户得有办法知道
-    "这次抓的有 N 条能整合进今天这份",再决定要不要重新生成(那会再花一次模型
-    钱)。`total` 是另一回事(队列里一共还积着多少没上报过的),给 tooltip 用。
-    零模型调用,所以放在这条每次打开面板都会调的路上。查不出来时整个键给 null,
-    窗口预填照旧 —— 它只是提示。
+    `fetch` 是**抓取自己的事实**(`kb.fetch_rounds`):今天第 N 次同步往库里新加了
+    多少篇。按钮上报的就是它 —— 一天内同步第二次之后,用户要知道"这次抓了多少"
+    才能决定要不要重新生成那份日报(那会再花一次模型钱)。生成、重新生成、删掉
+    日报都不改变这个数。`pending` 是另一回事(队列里一共还积着多少没进过日报的),
+    给 tooltip 用。两条都零模型调用,所以放在这条每次打开面板都会调的路上。
+    查不出来时各自给 null,窗口预填照旧 —— 它们只是提示。
     """
     # 这条只给窗口预填(回溯几天),不报"定时开没开" —— 所以读不出来时退回缺省
     # 天数照常给出窗口,而不是让面板打不开。那句"开没开"由 /settings 回答。
@@ -102,14 +102,17 @@ def window():
         info = daily.pending(settings['first_days'])
     except Exception:                               # noqa: BLE001 - 提示失败不该让面板打不开
         since, until = daily.next_window(settings['first_days'])
-        info = {'since': since, 'until': until, 'gain': None,
-                'items': None, 'late': None}
+        info = {'since': since, 'until': until, 'items': None, 'late': None}
+    try:
+        got = fetch_rounds.today()
+    except Exception:                               # noqa: BLE001 - 同上
+        got = None
     return {'since': info['since'].isoformat(timespec='minutes'),
             'until': info['until'].isoformat(timespec='minutes'),
             'first_days': settings['first_days'],
-            'pending': (None if info['gain'] is None else
-                        {'gain': info['gain'],
-                         'items': info['items'], 'late': info['late'],
+            'fetch': got,
+            'pending': (None if info['items'] is None else
+                        {'items': info['items'], 'late': info['late'],
                          'total': info['items'] + info['late']})}
 
 

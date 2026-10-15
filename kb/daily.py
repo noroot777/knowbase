@@ -328,35 +328,31 @@ def _ensure_ledger(conn, first_days: int = FIRST_DAYS,
 
 def pending(first_days: int = FIRST_DAYS,
             now: datetime | None = None) -> dict:
-    """点一次生成按钮会**多带进来**多少 —— 面板用,零模型调用。
+    """队列里还积着多少没上报过的素材 —— 面板的 tooltip 用,零模型调用。
 
-    `gain` 才是按钮上那个数:按真生成那一天取一次候选、**扣掉名额上限**、再数其中
-    一份日报都没进过的。`items`/`late` 答的是另一个问题 —— 队列里一共还积着多少
-    没上报过的,那个数可以远大于 `gain`(一份最多带 `MAX_ITEMS + LATE_ITEMS` 条),
-    只配 tooltip,**不许上按钮**:否则面板写着「+1097 条新内容」而点下去只多出 11
-    条,它答的是"攒了多少"而用户问的是"点这颗会得到什么"(生产库实测)。
+    **这个数不上按钮。** 按钮上报的是「今天第 N 次抓取抓了多少」,那是抓取自己的
+    事实(`kb.fetch_rounds`),跟取材结果不是一回事。这里答的是另一个问题:一共还
+    积着多少一份日报都没进过的。
 
-    `day` 取真生成那一天,**不是 `''`**:重新生成同一天时它上一版带走的那些必须
-    重新参选(`_UNCARRIED` 的 `c.day<>?`),否则这里算出的席位分配和真生成时的不
-    是同一个。候选里除这一天自己的章之外不可能带别家的章,所以"不在 `mine` 里"
-    就等于"一份日报都没进过" —— 旧口径 `day=''` 数出来的正是这一批。
+    **`day=''` ⇒ 一个章都不排除,而且只读这一次。** `_select` 平时要放过"正在写
+    的那一份自己盖的章"(重新生成时它上一版带走的内容必须重新可选),而这里问的是
+    "进过**任何**一份日报没有"。传当天日期的话今天那份刚带走的内容会被重新数成
+    新素材,面板上永远有一个消不掉的数字。
+    **也不许再补一次「今天那份带走了谁」的查询去扣减** —— 账本是**允许**出现
+    「日报文件写好了、记账没写上」的(那一档故意倒向"多报一遍",见 `daily_carry`),
+    拿它当"今天这份里有什么"的完整事实就会凭空报出新增;何况候选和扣除项来自两
+    个读取时刻,中间别人提交一次,算出来的是两个版本拼起来的数。
     """
     from kb import store
     since, until = next_window(first_days, now)
-    day = until.date().isoformat()
     conn = store.connect()
     try:
         _ensure_ledger(conn, first_days, until)
-        picked, late = _select(conn, since, until, day)
-        mine = {r[0] for r in conn.execute(
-            'SELECT path FROM daily_carried WHERE day=?', (day,))}
+        picked, late = _select(conn, since, until, '')
     finally:
         conn.close()
-    fresh = [row for _, row in picked[:MAX_ITEMS] + late[:LATE_ITEMS]
-             if row['path'] not in mine]
-    return {'since': since, 'until': until, 'gain': len(fresh),
-            'items': sum(1 for _, r in picked if r['path'] not in mine),
-            'late': sum(1 for _, r in late if r['path'] not in mine)}
+    return {'since': since, 'until': until,
+            'items': len(picked), 'late': len(late)}
 
 
 def _material(items: list[dict]) -> str:

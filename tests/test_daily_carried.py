@@ -323,83 +323,23 @@ class DailyCarriedTests(_Base):
         self.assertEqual(['线内的'], [i['title'] for i in mat.late])
 
     def test_the_panel_count_and_the_real_pick_are_one_verdict(self):
-        """面板上那个"点下去会多带多少"必须和真生成时带走的是同一批。两处各判
-        一遍的话必然各漂各的:用户看着"有 7 条新素材"点下去,出来的日报里是另
-        一批。这一条钉的是**装得下**那一侧(队列没超过名额,gain 就等于队列长度)
-        ——超出名额那一侧在下面一条。"""
+        """tooltip 里那个"队列里还积着多少"必须和真取材认的是同一批。两处各判
+        一遍的话必然各漂各的:用户看着"还有 7 条没报过",生成时带走的是另一批。
+
+        **这个数不上按钮** —— 按钮报的是"今天第 N 次抓取抓了多少"(抓取自己的
+        事实,钉在 tests/test_fetch_rounds.py)。两件事混成一个的后果写在那一份
+        的模块 docstring 里。"""
         add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
         add_doc(self.conn, 'source/rss/b.md', title='乙文', published='2026-09-20 09:00')
         now = T('2026-09-29 08:00')
         info = daily.pending(first_days=1, now=now)
         self.assertEqual((1, 1), (info['items'], info['late']))
-        self.assertEqual(2, info['gain'])          # 装得下 ⇒ 两个数字重合
         mat = daily.collect(self.conn, info['since'], info['until'])
         self.assertEqual((1, 1), (mat.total, mat.late_total))
-        # 出过报之后那个数字归零 —— 它答的是"再点一次会多带进来多少"
+        # 出过报之后那个数字归零 —— 它答的是"还没进过任何一份日报的有多少"
         daily.generate(since=info['since'], until=info['until'])
-        after = daily.pending(first_days=1, now=now)
-        self.assertEqual(0, after['gain'])
-        self.assertEqual(0, after['items'] + after['late'])
-
-    def test_the_button_reports_one_click_not_the_queue_length(self):
-        """按钮上那个数答的是"点这颗会得到什么",**不是**"队列里攒了多少"。
-
-        一份日报带得下的条数有上限,队列可以远超它:生产库实测队列 1097 条,而
-        点下去只多出 11 条。把队列长度写在按钮上就是许一个兑现不了的承诺 ——
-        用户看着「+1097 条新内容」点下去,拿回来的是多了 11 条的同一份。
-        队列那个数没有消失(tooltip 还要用),所以两个都断言。
-        """
-        for i in range(9):
-            add_doc(self.conn, f'source/rss/{i}.md', title=f'第{i}条',
-                    published=f'2026-09-28 1{i}:00')
-        with patch.object(daily, 'MAX_ITEMS', 3), patch.object(daily, 'LATE_ITEMS', 0):
-            info = daily.pending(first_days=1, now=T('2026-09-29 08:00'))
-        self.assertEqual(9, info['items'] + info['late'])   # 队列确实有 9 条
-        self.assertEqual(3, info['gain'])                   # 这一次只带得走 3 条
-
-    def test_what_the_previous_version_carried_is_not_counted_as_new(self):
-        """一天内同步第二次:按钮上该只有"这次抓的能整合进来几条"。
-
-        重新生成同一天时,上一版带走的那些会**重新参选**(席位照常分给它们,见
-        `_UNCARRIED` 的 `c.day<>?`)。把它们一起数进去的话按钮上永远有一个消不掉
-        的数字,而那些内容今天这份里本来就有。
-        """
-        for i in range(4):
-            add_doc(self.conn, f'source/rss/old{i}.md', title=f'旧{i}',
-                    published=f'2026-09-28 1{i}:00')
-        now = T('2026-09-29 08:00')
-        info = daily.pending(first_days=1, now=now)
-        self.assertEqual(4, info['gain'])
-        daily.generate(since=info['since'], until=info['until'])
-        add_doc(self.conn, 'source/rss/new.md', title='第二次抓的',
-                published='2026-09-28 20:00')
-        again = daily.pending(first_days=1, now=now)
-        self.assertEqual(1, again['gain'])          # 只有第二次抓回来的那一条
-        self.assertEqual(1, again['items'] + again['late'])
-
-    def test_a_latecomer_that_loses_its_seat_is_not_promised(self):
-        """第二次抓回来的那条**发布得更早**、席位被上一版带走的那些占满时,按钮
-        上必须是 0 —— 因为点下去确实带不进来。
-
-        这一条钉的是 `pending` 为什么传**真生成那一天**而不是 `''`:传 `''` 的话
-        上一版带走的那些压根不进候选,于是席位看起来是空的,面板报"能多带 1 条",
-        点下去却原样一条没多 —— 面板和真取材各漂各的。上面那条用例分不开这两种
-        写法(那里新来的发布得最晚,怎么排都抢得到席位)。
-        """
-        for hour in (14, 15):
-            add_doc(self.conn, f'source/rss/old{hour}.md', title=f'旧{hour}',
-                    published=f'2026-09-28 {hour}:00')
-        now = T('2026-09-29 08:00')
-        with patch.object(daily, 'MAX_ITEMS', 2), patch.object(daily, 'LATE_ITEMS', 0):
-            info = daily.pending(first_days=1, now=now)
-            daily.generate(since=info['since'], until=info['until'])
-            add_doc(self.conn, 'source/rss/new.md', title='第二次抓的',
-                    published='2026-09-28 09:00')
-            again = daily.pending(first_days=1, now=now)
-            mat = daily.collect(self.conn, info['since'], info['until'])
-        self.assertEqual(1, again['items'])         # 队列里确实还有它
-        self.assertEqual(0, again['gain'])          # 但这一次它挤不进来
-        self.assertNotIn('第二次抓的', [i['title'] for i in mat.items])
+        self.assertEqual(0, sum(daily.pending(first_days=1, now=now)[k]
+                                for k in ('items', 'late')))
 
 
 class CarryFailureNoticeTests(_Base):
