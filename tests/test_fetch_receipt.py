@@ -20,8 +20,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from pathlib import Path
+
 from kb.collectors import wechat_local
-from kb import embedder, fetch_rounds, pipeline_segments as segments
+from kb import config, embedder, fetch_rounds, pipeline_segments as segments
 from kb import pipeline_stages, scanner, store
 from kb import pipeline_state as ps
 from fetch_rounds_fixture import T, _Base, _Fake
@@ -124,6 +126,31 @@ class ReceiptIsTheOnlyEvidenceTests(_Base):
         self.assertTrue((self.vault / 'source/rss/a.md').exists())
         self.assertEqual({'n': 1, 'added': 1, 'partial': True}, self._got())
 
+    def test_a_second_sub_round_that_vanished_is_a_lower_bound(self):
+        """**第 2 轮审查实测的那一条**,整条管道走真的:一轮日报里每个来源各跑
+        一次 `FETCH_STAGES`、共用一个业务批次身份,所以这里是**同一个 key 的两个
+        子轮**(各有自己的 `run_id`)。第一个子轮正常收尾,第二个子轮写出第二篇
+        之后进程没了 —— 两篇都在 vault 里,账本只能说「至少 +2 条」。
+
+        旧实现这里报 `{'n':1,'added':2,'partial':False}`:第一个子轮那条结束行
+        冒充了整批交完。注意 `added` 这时**正好**等于真实值,所以只看数字看不出
+        问题 —— 判据必须是"这个数确定不确定",用户照着它决定要不要再花一次模型钱。
+        """
+        self._run(_Fake(self, 'rss', writes=['source/rss/a.md']))
+        self.assertEqual({'n': 1, 'added': 1, 'partial': False}, self._got())
+        real = pipeline_stages._per_channel
+
+        def _die(stage, flt, fn):
+            real(stage, flt, fn)
+            if stage == 'export':
+                raise KeyboardInterrupt('第二个子轮的进程没了')
+
+        ps._state['run_id'] = 'run-probe-2'          # 第二个来源那次运行
+        with patch.object(pipeline_stages, '_per_channel', _die),                 self.assertRaises(KeyboardInterrupt):
+            self._run(_Fake(self, 'rss', writes=['source/rss/b.md']))
+        self.assertTrue((self.vault / 'source/rss/b.md').exists())
+        self.assertEqual({'n': 1, 'added': 2, 'partial': True}, self._got())
+
     def test_two_sources_that_both_report_add_up_exactly(self):
         """反过来钉一边:两个来源都交得出回执时,总数是确定的并集。"""
         self._run(_Fake(self, 'rss', writes=['source/rss/a.md']),
@@ -224,6 +251,39 @@ class ReceiptScopeTests(_Base):
     交给每个采集器各判一遍的话迟早对不上 —— 对不上的表现是药丸报出一批压根
     不会进日报的文件。
     """
+
+    def test_a_scope_that_cannot_be_read_is_not_an_empty_scope(self):
+        """**第 2 轮审查那条静态项**:算范围时 `resolve()` 抛 `OSError`(权限、
+        符号链接层数、目录临时不可用)—— 那是「这条路径算不算成果」**答不出来**,
+        不是「确定不算」。旧口径把两者压成一种(跳过那棵树 / 返回空范围),于是
+        一份真回执被筛成空集,再让结束行把这一轮定成**确定的 0 条**。"""
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-a', day, seg='run-1')
+        real = Path.resolve
+
+        def resolve(path, *a, **kw):
+            if path == self.vault / 'source' / 'rss':
+                raise OSError('这棵树暂时读不到')
+            return real(path, *a, **kw)
+
+        with patch.object(Path, 'resolve', resolve):
+            fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_end('batch-a', 'run-1')
+        self.assertEqual({'n': 1, 'added': 0, 'partial': True, 'at': '09:00'},
+                         fetch_rounds.today(day))
+
+    def test_a_tree_that_is_not_in_the_vault_only_skips_itself(self):
+        """**反过来钉一边**:某棵来源树确定不在 vault 底下(配置指到别处)——
+        那是「确定不算」,跳过它就行。把这一档也归成「不可确认」的话,存量配置里
+        只要有一棵外挂树,每一轮抓取都永久写「条数读不出来」。"""
+        outside = config.Source(name='elsewhere', root=self.root / 'outside')
+        with patch.object(config, 'SOURCES', self._sources() + [outside]):
+            day = T('2026-09-29 09:00')
+            fetch_rounds.open_round('batch-a', day, seg='run-1')
+            fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+            fetch_rounds.note_end('batch-a', 'run-1')
+            self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+                             fetch_rounds.today(day))
 
     def test_only_the_sources_the_report_reads_are_counted(self):
         day = T('2026-09-29 09:00')

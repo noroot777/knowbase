@@ -493,5 +493,160 @@ class FetchFactIsNotReportFactTests(_Base):
                          fetch_rounds.today(day))
 
 
+class EvidenceOutlivesABadReadTests(_Base):
+    """**这一组是第 2 轮审查 F1 的第一条**:账本读不出来那一下,已经交到手里的
+    回执不许就地丢掉。
+
+    实测形态:采集器真写出一篇 md,只在**随后那一次**读账上注入一次 `OSError`,
+    之后读取完全恢复 —— 旧实现在 `_mark` 里直接 return,那篇文章永久不进账,而
+    结束行照样写成功,面板笃定地写「第 2 次抓取 · 0 条」;刷新、重导都纠不回来
+    (重导时它已经不是新文件,`fresh=False`)。
+
+    判据分两档,都落在面板那个数上:**自己开的那一轮**要真把那一行记下来(数
+    对得上);**别人开的那一轮**至少不许在读账恢复之后解除未知(宁可说「至少」)。
+    """
+
+    def test_a_receipt_that_arrived_during_a_read_failure_is_still_counted(self):
+        """这一轮是本进程开的,所以"它存不存在"不必问账本 —— 那一行照旧追加。"""
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-a', day, seg='run-1')
+        with self.ledger_read_fails():
+            fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_end('batch-a', 'run-1')
+        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+                         fetch_rounds.today(day))
+
+    def test_a_line_that_was_lost_keeps_the_round_a_lower_bound(self):
+        """换成**别人**开的那一轮(上一次运行、另一个进程):读账失败时连
+        `_is_open` 都判不了,那一行只能丢 —— 但「这一轮缺了一行」要留住,
+        由结束行带着落盘,**重启之后重读盘上那几行,结论一个字不变**。"""
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-a', day, seg='run-1')
+        fetch_rounds._opened.clear()            # 换一个进程:它没开过这一轮
+        with self.ledger_read_fails():
+            fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_end('batch-a', 'run-1')
+        self.assertEqual({'n': 1, 'added': 0, 'partial': True, 'at': '09:00'},
+                         fetch_rounds.today(day))
+        fetch_rounds._gaps.clear()              # 再换一个进程:只剩盘上那几行
+        self.assertEqual({'n': 1, 'added': 0, 'partial': True, 'at': '09:00'},
+                         fetch_rounds.today(day))
+
+    def test_a_read_failure_does_not_invent_a_round_nobody_opened(self):
+        """**反过来钉一边**:读不出账、这一轮又压根没开过(只勾了索引的那种运行
+        在喊成果)—— 那就什么都不记。往一份读不懂的账本里追加一条对不上轮次的
+        孤行,会让它从此永久「读不出来」。"""
+        day = T('2026-09-29 09:00')
+        with self.ledger_read_fails():
+            fetch_rounds.note_new('ghost', {'source/rss/a.md'})
+        self.assertEqual([], self.lines())
+        self.assertEqual({'n': 0, 'added': 0, 'partial': False, 'at': ''},
+                         fetch_rounds.today(day))
+
+
+class CompletenessIsTheWholeBatchTests(_Base):
+    """**这一组是第 2 轮审查 F1 的第二条**:「交完了」是**参与的子轮全交齐**,
+    不是哪一个子轮说了算。
+
+    一轮日报里每个来源各跑一次导出阶段、共用一个业务批次身份(`daily_run` 那个
+    逐来源循环)。实测形态:第一个子轮正常收尾,第二个子轮在**另一个进程**里写出
+    第二篇之后 `os._exit(23)` —— 盘上第一个子轮的结束行让整轮报成**确定的 1 条**,
+    而 vault 里躺着两篇。上一组(`CompletenessIsAnExplicitEndTests`)只证明了
+    **一次调用**收尾前没有结束行,证明不了**多次调用共用一个 key** 这一档。
+    """
+
+    def test_a_later_sub_round_that_died_turns_the_round_into_a_lower_bound(self):
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-a', day, seg='run-1')
+        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_end('batch-a', 'run-1')
+        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+                         fetch_rounds.today(day))         # 第一个子轮:确定 1 条
+        fetch_rounds.open_round('batch-a', day, seg='run-2')    # 第二个来源开工
+        fetch_rounds.note_new('batch-a', {'source/rss/b.md'})
+        self.assertEqual({'n': 1, 'added': 2, 'partial': True, 'at': '09:00'},
+                         fetch_rounds.today(day))         # 它没交完 → 至少 2 条
+        fetch_rounds.note_end('batch-a', 'run-2')
+        self.assertEqual({'n': 1, 'added': 2, 'partial': False, 'at': '09:00'},
+                         fetch_rounds.today(day))         # **反过来钉一边**:交齐了才确定
+
+    def test_an_export_only_retry_does_not_reopen_the_question(self):
+        """**反过来钉一边**:一轮交齐之后,只勾了导出的那种重试又交了一条结束行
+        —— 它压根没开过轮、没有自己的登记行,结论不许因此退回「至少」。结束行
+        **同时**算"这个子轮登记过",正是为了这一档;少了它,那一轮永久「至少」。"""
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-a', day, seg='run-1')
+        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_end('batch-a', 'run-1')
+        fetch_rounds.note_new('batch-a', ())                # 重试那一轮的空回执
+        fetch_rounds.note_end('batch-a', 'run-7')
+        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+                         fetch_rounds.today(day))
+
+    def test_a_ledger_written_by_the_old_code_keeps_its_verdict(self):
+        """部署那一刻盘上躺着的是**老代码写的账本**:一条子轮行都没有。那几轮的
+        结论一个字都不许变 —— 有结束行的照旧算确定(结束行自己就算一个子轮),
+        没有的算下界(新代码确实证明不了它们完整,这比笃定地报一个数安全)。
+
+        这一条钉的是 `today()` 里 `segs or not ex` 那半句:去掉它,老账本里一轮
+        没交完的抓取会当场变成「确定 N 条」。"""
+        day = T('2026-09-29 09:00')
+        book = self.root / fetch_rounds.FILE_NAME
+        opened = '{"day": "2026-09-29", "key": "old-open", "at": "2026-09-29 09:00", "ex": 1}\n'
+        caught = '{"key": "old-open", "paths": ["source/rss/b.md"]}\n'
+        book.write_text(opened + caught, encoding='utf-8')
+        self.assertEqual({'n': 1, 'added': 1, 'partial': True, 'at': '09:00'},
+                         fetch_rounds.today(day))
+        book.write_text(opened + caught + '{"key": "old-open", "end": 1}\n',
+                        encoding='utf-8')
+        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+                         fetch_rounds.today(day))
+
+    def test_an_unfinished_sub_round_survives_a_rotation(self):
+        """轮换是整份重写,**还没交完的那几个子轮也要抄过去**。漏了它们,一轮
+        不完整的抓取过一次台面下的维护就变成「确定 N 条」—— 那比反过来漏掉结束行
+        更坏:把不知道的说成知道的。顺带钉住轮换确实发生了。"""
+        fetch_rounds.open_round('old', T('2026-09-28 09:00'))
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-a', day, seg='run-1')
+        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_end('batch-a', 'run-1')
+        fetch_rounds.open_round('batch-a', day, seg='run-2')    # 第二个来源开工
+        fetch_rounds.open_round('batch-c', T('2026-09-30 10:00'))   # 触发轮换
+        self.assertNotIn('"old"', (self.root / fetch_rounds.FILE_NAME)
+                         .read_text(encoding='utf-8'))
+        self.assertEqual({'n': 1, 'added': 1, 'partial': True, 'at': '09:00'},
+                         fetch_rounds.today(day))
+
+
+class OneWriteProtocolForEveryWriterTests(_Base):
+    """**这一组是第 2 轮审查 F1 的第三条**:账本的每一次写都在那把文件锁里。
+
+    上一版的降级是「失锁只许追加、不许轮换」—— 它只挡住了"失锁者自己轮换",挡不住
+    反过来那一半:**另一个持锁的进程**按它读到的旧快照整份重写,把失锁者已经追加
+    成功的整轮抹掉(实测:失锁进程把开轮、回执、结束行全部追加成功、`_unsaved`
+    空,随后那一整轮消失,`today()` 自称确定、报 0 条,而它写出的
+    `source/rss/ack.md` 还在 vault 里)。
+
+    所以失锁时一行都不写,攥在手里、展示降级成「读不出来」;抓取那一侧照旧不拦
+    (这一点由 `tests/test_fetch_receipt.py` 的
+    `ABrokenLedgerMustNotBlockTheCaptureTests` 钉住)。
+    """
+
+    def test_an_unlocked_writer_appends_nothing(self):
+        """失锁期间:盘上一行都不多,`today()` 答「读不出来」。**反过来钉一边**:
+        锁一回来,攥着的那几行照旧落盘,数一条不少 —— 这是降级,不是丢数据。"""
+        day = T('2026-09-29 09:00')
+        (self.root / fetch_rounds.LOCK_NAME).mkdir(parents=True)    # 旁挂锁取不到
+        fetch_rounds.open_round('batch-a', day, seg='run-1')
+        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_end('batch-a', 'run-1')
+        self.assertEqual([], self.lines())          # 没有任何没人保护的追加
+        self.assertIsNone(fetch_rounds.today(day))  # 也不许给出确定结论
+        (self.root / fetch_rounds.LOCK_NAME).rmdir()
+        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+                         fetch_rounds.today(day))
+
+
 if __name__ == '__main__':
     unittest.main()

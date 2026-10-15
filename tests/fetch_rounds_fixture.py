@@ -2,14 +2,17 @@
 """抓取账本那两组用例共用的夹具:临时数据目录 + 临时 vault + 一个假采集器。
 
 `_Base` 把 `fetch_rounds.DATA_DIR`、`config.VAULT_ROOT`、`config.SOURCES` 全指到
-临时目录,并且每条用例前后都把模块级的 `fetch_rounds._unsaved` 收干净 —— 不收的话
-一条写失败用例会把后面每一条都拖成「不可确认」。
+临时目录,并且每条用例前后都把模块级的那三份内存状态收干净(`_unsaved` 没落盘的
+行、`_opened` 本进程开过的轮次、`_gaps` 缺过行的轮次)—— 不收的话一条写失败用例
+会把后面每一条都拖成「不可确认」,而 `_opened` 留着会让别的用例在读失败时多写出
+一行来。
 
 消费方:tests/test_fetch_rounds.py(账本本体与恢复协议)、
 tests/test_fetch_receipt.py(成果归属)。
 """
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -27,10 +30,11 @@ class _Base(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.vault = self.root / 'vault'
-        # `_unsaved` 是模块级的:不收干净的话,一条写失败用例会把后面每一条都
+        # 这三份都是模块级的:不收干净的话,一条写失败用例会把后面每一条都
         # 拖成「不可确认」(同 tests/test_*.py 那条共用数据目录的教训)。
-        fetch_rounds._unsaved = []
-        self.addCleanup(setattr, fetch_rounds, '_unsaved', [])
+        for name in ('_unsaved', '_opened', '_gaps'):
+            setattr(fetch_rounds, name, [])
+            self.addCleanup(setattr, fetch_rounds, name, [])
         for p in (patch.object(fetch_rounds, 'DATA_DIR', self.root),
                   patch.object(config, 'VAULT_ROOT', self.vault),
                   patch.object(config, 'SOURCES', self._sources())):
@@ -61,6 +65,25 @@ class _Base(unittest.TestCase):
     def lines(self):
         raw = self.root / fetch_rounds.FILE_NAME
         return raw.read_text(encoding='utf-8').splitlines() if raw.exists() else []
+
+    @contextmanager
+    def ledger_read_fails(self, times=1):
+        """让**账本**的下 `times` 次读取各抛一次 `OSError`,之后完全恢复。
+
+        只打这一个文件:整份 `Path.read_text` 打桩会把配置、vault 正文一起带红,
+        那就不是"短暂的读账故障"这一档了,断言也就不指向账本协议。
+        """
+        left = [times]
+        real = Path.read_text
+
+        def maybe_fail(path, *a, **kw):
+            if path == fetch_rounds._file() and left[0] > 0:
+                left[0] -= 1
+                raise OSError('读账暂时不可用')
+            return real(path, *a, **kw)
+
+        with patch.object(Path, 'read_text', maybe_fail):
+            yield
 
 
 class _Fake:

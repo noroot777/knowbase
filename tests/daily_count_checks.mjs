@@ -180,6 +180,29 @@ export async function checkFetchCountChip({ evalJs, check }) {
   check("等回包期间刚填的覆盖时间,旧回包落地也不许盖掉",
         /"since":"2026-03-04T05:06"/.test(held)
         && /"until":"2026-03-07T08:09"/.test(held), held);
+  // **「两个时刻还没填过」这个职责不许随整趟作废**(第 2 轮审查 N4 实测):刷新
+  // 日报页后,初始化那趟(要填表)被只画按钮的空闲轮询顶掉,于是两个时刻框永久
+  // 空着、区间那行字停在「正在算覆盖区间…」—— 连续多轮轮询都不自愈,要点一次
+  // 「接上一份日报」才回来。职责挂在页面上,由真正落地的那一趟接手。
+  await evalJs(`(() => { window.__hold = null; dailyWindowDirty = false;
+                         dailyWindowFillDue = false;
+                         document.getElementById('daily-since').value = '';
+                         document.getElementById('daily-until').value = '';
+                         document.getElementById('daily-window-label').textContent
+                           = '正在算覆盖区间…';
+                         window.__holdAt = window.__n + 1;
+                         window.__p3 = loadDailyWindow(); return true; })()`);
+  check("初始化那一趟确实停在半路", await evalJs(waitHold));
+  await evalJs(`refreshDailyPending()`);          // 只画按钮的那一趟先落地、顶掉它
+  await evalJs(`(() => { window.__hold(); return true; })()`);
+  await evalJs(settle('__p3'));
+  const filled = await evalJs(chipNow);
+  const label = await evalJs(
+    `document.getElementById('daily-window-label').textContent`);
+  check("初始化被空闲轮询顶掉,填表的职责由落地的那一趟接手",
+        /"since":"2026-09-01T00:00"/.test(filled)
+        && /"until":"2026-09-02T00:00"/.test(filled)
+        && !/正在算/.test(label), filled + " / " + label);
   await evalJs(`(() => { if (window.__pollReal) { refreshDailyStatus = window.__pollReal;
                          delete window.__pollReal; } return true; })()`);
   // 收尾:恢复真回包、清掉草稿,后面几组看到的是真实状态

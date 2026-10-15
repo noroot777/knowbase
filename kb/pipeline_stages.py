@@ -19,6 +19,7 @@ from pathlib import Path
 
 from kb.collectors import FetchScope, active_collector
 from kb.config import VIDEOS_ROOT
+from kb.pipeline_batch import round_key
 from kb.pipeline_segments import stage_segment
 from kb.pipeline_state import _log, _now, _stage, _state
 
@@ -119,16 +120,6 @@ def source_pending(channel: str | None = None) -> int | None:
     return active_collector(channel).pending()
 
 
-def _round_key() -> str:
-    """这一刻属于哪一次**业务抓取**(当日抓取账本的键)。
-
-    有批次身份就用它 —— 一轮日报、一次勾了三个来源的同步都是 N 次管道运行、
-    **一次**抓取。没有批次的独立运行(单来源同步、重试失败项)用自己的 run id。
-    两种身份都跨进程唯一,理由分别在 `pipeline_batch.open_batch` 和 `new_run_id`。
-    """
-    return str(_state.get("batch") or _state.get("run_id") or "")
-
-
 def _run_crawl(crawl_filter: dict | None = None) -> None:
     """让采集器把远端内容拉到它本地。
 
@@ -139,16 +130,18 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
 
     **进来就在当日账本上开一轮**(`fetch_rounds.open_round`):「今天第几次抓取」
     由抓取自己登记,不由后面哪个阶段的产出反推 —— 一次什么都没抓到的抓取也是
-    一次抓取,而只勾了索引的那种运行不是。开轮还要告诉账本**这次运行后面跑不跑
-    物化**:两种运行的账本行长得一样,而一个的 0 条是确定的、另一个是
-    「不可确认」(见 `fetch_rounds.open_round`)。
+    一次抓取,而只勾了索引的那种运行不是。开轮还要交两件事:**这次运行后面跑不跑
+    物化**(两种运行的账本行长得一样,而一个的 0 条是确定的、另一个是
+    「不可确认」),以及**这是整批里的哪个子轮**(`seg`,凭证按子轮集合算,见
+    `pipeline_batch.round_key`)。
     """
     from kb import fetch_rounds
 
     filters = crawl_filter or {}
     planned = _state.get("planned_stages")
+    key, seg = round_key()
     fetch_rounds.open_round(
-        _round_key(),
+        key, seg=seg,
         materializes="export" in planned if isinstance(planned, list) else True)
 
     def _fetch(collector, scope: dict) -> None:
@@ -175,16 +168,17 @@ def _run_export(crawl_filter: dict | str | None = None) -> None:
 
     **「交完了」是循环走完之后单独记的一行**(`note_end`),不是某个来源的回执:
     空回执只是起点,把收到回执当成交完的话,进程在中途没了就留下一个**确定的
-    0 条**(理由和实测形态在 `fetch_rounds.note_end`)。
+    0 条**(理由和实测形态在 `fetch_rounds.note_end`)。那一行**记在自己这个子轮
+    名下** —— 一轮日报里每个来源各跑一次这个阶段,共用一个业务 key。
     """
     from kb import fetch_rounds
 
-    key = _round_key()
+    key, seg = round_key()
     # 先落一张空回执:成果从「确定的空集」起步,各来源的回执并进来。
     fetch_rounds.note_new(key, ())
     _per_channel("export", crawl_filter,
                  lambda collector, scope: fetch_rounds.note(key, collector.materialize))
-    fetch_rounds.note_end(key)
+    fetch_rounds.note_end(key, seg)
 
 
 class _StopWhileWaiting(Exception):
