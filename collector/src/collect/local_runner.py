@@ -124,6 +124,14 @@ def _download(repo, articles, result, progress):
         except Exception as exc:
             result["errors"].append(f"{current}: {exc}")
         finally:
+            # **一篇一个事务单元,出口一定要把它收掉。** 那几句受限写入即使影响 0 行
+            # 也已经开着一个 SQLite 写事务(实测 `rowcount=0` 时 `in_transaction`
+            # 仍为 True、另一个连接当场 `database is locked`),而下一圈开头就是
+            # `pacer.wait()` 的退避和一次网络请求 —— 不收尾就等于攥着整库写锁去等
+            # 网络,用户那一刻按「不再抓取」会被堵到超时(见 `failure-drop.md`)。
+            # 异常路径尤其要走到这里:它压根没有自己的 commit。
+            if repo.conn.in_transaction:
+                repo.conn.rollback()
             result["download_done"] += 1
             if not excluded:
                 result["download_succeeded" if succeeded else "download_failed"] += 1

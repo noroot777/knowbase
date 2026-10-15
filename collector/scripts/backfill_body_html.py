@@ -80,6 +80,17 @@ def main() -> int:
             except Exception as e:
                 print(f"[{i}/{len(todo)}] FAIL {title_short}: {e}")
                 failed += 1
+            finally:
+                # **一篇一个事务单元,下面那两件事之前一定要把它收掉。**
+                # 受限写入即使影响 0 行也已经开着一个 SQLite 写事务(实测
+                # `rowcount=0` 时 `in_transaction` 仍为 True、另一个连接当场
+                # `database is locked`)。拒写和异常两条分支原来都没有收尾点,
+                # 于是接下来那 2–4 秒退避、以及下一篇的网络请求,全程攥着整库写锁
+                # —— 用户在这期间按「不再抓取」会被堵到超时(第 2 轮审查实测:
+                # 第二次删除直接拿到 `database is locked`),连续失败时能一直占到
+                # 脚本退出。成功那一支自己 commit 过,这里就什么都不剩。
+                if repo.conn.in_transaction:
+                    repo.conn.rollback()
             if i < len(todo):
                 time.sleep(random.uniform(2.0, 4.0))
 

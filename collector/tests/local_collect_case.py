@@ -8,6 +8,8 @@ re-export `push`,那两个既有的 import 一个字都不用改。
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import tempfile
 import unittest
 from datetime import datetime
@@ -64,6 +66,29 @@ class LocalCollectCase(unittest.TestCase):
         self.repo.close()
         conn_mod.DEFAULT_DB_PATH, conn_mod.DATA_DIR, conn_mod._db_ready = self.saved
         self.tmp.cleanup()
+
+    def _reset_library(self):
+        """把库清回「刚建好」:四张表都空,下一段摆局不受上一段影响。"""
+        for table in ("article_fetch_state", "article_bodies", "articles",
+                      "deleted_articles"):
+            self.repo.conn.execute(f"DELETE FROM {table}")
+        self.repo.commit()
+
+    def _count(self, table):
+        return self.repo.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+    def _drop_now(self, *extra):
+        """以面板那颗按钮的形态删掉库里**当前**那一篇(真实 CLI,另一个连接)。"""
+        import cli
+        import json as _json
+
+        row = self.repo.conn.execute("SELECT id, link FROM articles").fetchone()
+        with contextlib.redirect_stdout(io.StringIO()) as out, \
+             contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["articles", "drop", "--id", row["id"], "--account",
+                             "档案名", "--link", row["link"], "--json", *extra])
+        self.assertEqual(cli.EXIT_OK, code)
+        self.assertTrue(_json.loads(out.getvalue())["ok"])
 
     def collect(self, **kwargs):
         from src.collect.local_runner import collect

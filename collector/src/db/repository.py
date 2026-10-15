@@ -12,6 +12,7 @@ from typing import Any
 
 from src.db.body_text import normalize_body_text
 from src.db.connection import DATA_DIR, ensure_database_ready, get_connection
+from src.db._repo_exclusion import ExclusionMixin, _excluded_clause
 from src.db._repo_notes import NotesMixin
 from src.db._repo_queries import QueryMixin
 from src.db._repo_reading import ReadingMixin
@@ -30,28 +31,6 @@ def _parse_create_time_unix(create_time: str) -> int | None:
     return None
 
 
-def _excluded_clause(article_id: str, link: str) -> tuple[str, tuple[str, ...]]:
-    """「这个身份被永久排除了吗」的 SQL 判据 + 参数。**写语句自己带着它。**
-
-    判据待在写语句的 WHERE 里,不在 Python 那边先 SELECT 一次 —— 后者在 legacy
-    `isolation_level` 下不开事务、不持锁,查过之后到写入之间用户完全可能按下面板
-    上那颗「不再抓取」,于是一条已经确认移除的文章被重新插回来(连正文一起),而
-    两边都报成功。`cursor.rowcount == 0` 就是拒绝信号。
-
-    键取 `article_identity.exclusion_keys`,和发现那一道查的是同一组(口径一份)。
-    返回的子句是**否定式**:拼进 WHERE 就是"没被排除才写"。
-    """
-    from src.utils.article_identity import exclusion_keys
-
-    keys = exclusion_keys(article_id, link)
-    if not keys:
-        # 一个键都算不出来 = 证明不了这一篇没被排除。拿不准就别写。
-        return "0", ()
-    holes = ",".join("?" * len(keys))
-    return (f"NOT EXISTS (SELECT 1 FROM deleted_articles WHERE article_id IN ({holes}))",
-            keys)
-
-
 class AccountNameTaken(Exception):
     """要订阅的号和一个已有档案同名,而那个档案属于另一个 `__biz`。
 
@@ -66,7 +45,7 @@ class AccountNameTaken(Exception):
         self.name, self.held, self.wanted = name, held, wanted
 
 
-class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
+class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin, ExclusionMixin):
     """文章 / 公众号仓储。
 
     列表搜索、已读收藏、笔记三块按职责拆成了同目录下的 _repo_*.py——这个类
@@ -368,7 +347,8 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         article_source = "import" if source == "import" else "crawl"
         import_listed = 1 if source == "import" else 0
         link = str(blog.get("link") or "")
-        guard, keys = _excluded_clause(aid, link)
+        excluded, keys = _excluded_clause(aid, link)
+        guard = f"NOT {excluded}"
         # `INSERT ... SELECT ... WHERE ... ON CONFLICT` —— SQLite 要求带 upsert 的
         # SELECT 形式必须有 WHERE(消歧义),这里正好就是那道判据。
         # DO UPDATE 那半也带一遍:冲突的那一行可能正是被排除的身份(删除把 articles
@@ -463,7 +443,8 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         """
         text = normalize_body_text(raw)
         now = time_now()
-        guard, keys = _excluded_clause(article_id, link)
+        excluded, keys = _excluded_clause(article_id, link)
+        guard = f"NOT {excluded}"
         cur = self.conn.execute(
             f"""
             INSERT INTO article_bodies (article_id, body_text, source_kind, fetched_at, updated_at)
@@ -505,18 +486,11 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         ).fetchone()
         return row is not None
 
-    def has_article(self, article_id: str) -> bool:
-        """库里还有这一行吗。**只给统计用** —— 判据在写语句自己的 WHERE 里
-        (`_excluded_clause`),这一条回答的是「刚才那次写入到底落没落」。
-        """
-        return self.conn.execute(
-            "SELECT 1 FROM articles WHERE id=? LIMIT 1", (article_id,)
-        ).fetchone() is not None
-
     def set_body_html(self, article_id: str, html: str, *, link: str = "") -> bool:
         """同 `set_body_text`:排除优先,写不进来就返回 False。"""
         now = time_now()
-        guard, keys = _excluded_clause(article_id, link)
+        excluded, keys = _excluded_clause(article_id, link)
+        guard = f"NOT {excluded}"
         cur = self.conn.execute(
             f"""
             INSERT INTO article_bodies (article_id, body_text, body_html, source_kind, fetched_at, updated_at)
@@ -548,48 +522,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             (account_name,),
         ).fetchall()
         return [self.row_to_blog_dict(r) for r in rows]
-
-    def is_deleted_blacklist(self, article_id: str) -> bool:
-        row = self.conn.execute(
-            "SELECT 1 FROM deleted_articles WHERE article_id=?",
-            (article_id,),
-        ).fetchone()
-        if row:
-            return True
-        row = self.conn.execute(
-            "SELECT is_user_deleted FROM articles WHERE id=?", (article_id,)
-        ).fetchone()
-        return bool(row and row["is_user_deleted"])
-
-    def add_deleted_blacklist(self, article_id: str) -> None:
-        from src.utils.article_identity import remember_deleted_identity
-
-        remember_deleted_identity(self, article_id)
-        self.conn.execute(
-            """
-            INSERT OR IGNORE INTO deleted_articles (article_id, deleted_at)
-            VALUES (?, ?)
-            """,
-            (article_id, time_now()),
-        )
-        self.conn.execute(
-            "UPDATE articles SET is_user_deleted=1, updated_at=? WHERE id=?",
-            (time_now(), article_id),
-        )
-
-    def exclude_identities(self, *keys: str) -> None:
-        """把这几个身份记进永久排除名单(幂等)。
-
-        `add_deleted_blacklist` 是它在「articles 还有那一行」时的版本 —— 那一条
-        能从库里读出规范链接自己算身份,这一条只能用调用方给的。行已经不在时
-        (库被重建、回退到旧备份、被别的路径删过)只有这条路还能把承诺兑现。
-        """
-        now = time_now()
-        for key in keys:
-            if key:
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO deleted_articles (article_id, deleted_at) "
-                    "VALUES (?, ?)", (key, now))
 
     def remove_article(self, article_id: str, account: str) -> bool:
         row = self.conn.execute(

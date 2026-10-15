@@ -154,25 +154,44 @@ def cmd_articles(args) -> int:
     但**「库里没有这一行」不等于「它已经被永久排除」** —— 见 `_drop_missing`。
     """
     from src.db.repository import ArticleRepository
+    from src.utils.article_identity import exclusion_keys, existing_article_id
 
     if args.action != "drop":
         return _fail(f"不认识的操作「{args.action}」", args.json)
     if not args.id:
         return _fail("需要给文章 id(--id)", args.json)
+    link = getattr(args, "link", "") or ""
     with ArticleRepository() as repo:
         row = repo.conn.execute(
-            "SELECT account_name, title FROM articles WHERE id=?", (args.id,)
+            "SELECT id, account_name, title FROM articles WHERE id=?", (args.id,)
         ).fetchone()
+        if row is None and link:
+            # **「按这个 ID 查不到」不等于「库里没有这一篇」。** 同一原文换个通道、
+            # 或者换一份采集库之后会以另一个档案 ID 保存(`prepare_article` 沿用旧
+            # ID 就是这么来的)。漏掉这一步就只把请求方给的那组键记进名单、库里那
+            # 一行照旧在,导出下一趟把它写进知识库 —— 第 2 轮审查实测:删除报
+            # `ok=true, excluded=true`,**删除之后才启动**的导出仍写出 1 篇 md。
+            # 找到了就当成常规删除往下走(归属照旧核对),不走 `_drop_missing`。
+            alias = existing_article_id(repo, link)
+            if alias:
+                row = repo.conn.execute(
+                    "SELECT id, account_name, title FROM articles WHERE id=?",
+                    (alias,),
+                ).fetchone()
         if row is None:
-            return _drop_missing(repo, args.id, getattr(args, "link", "") or "",
-                                 args.json)
+            return _drop_missing(repo, args.id, link, args.json)
         # 归属对不上一律拒:调用方拿的是面板上那一条的身份,对不上说明两边
         # 说的不是同一篇,删下去就是删错文章。
         if args.account and row["account_name"] != args.account:
             return _fail(
                 f"这一篇属于「{row['account_name']}」，与给定的"
                 f"「{args.account}」对不上，没有改动", args.json)
-        repo.remove_article(args.id, row["account_name"])
+        repo.remove_article(row["id"], row["account_name"])
+        # 请求方给的那组键一并记进名单。`remove_article` 只认它删掉的那个档案 ID
+        # (外加从那一行读出的链接身份),而上面可能删的是**另一个** ID;旧页面手里
+        # 那个 ID、以及按链接算的稳定 ID 不记上,换个通道再发现同一篇时发现侧那一道
+        # 早检查就挡不住。名单里存的键 = `exclusion_keys` 那一组,与写入/发布侧同一份。
+        repo.exclude_identities(*exclusion_keys(args.id, link))
         repo.commit()
     detail = f"已移除,以后不再采集:{row['account_name']} · {row['title']}"
     if args.json:
@@ -184,6 +203,10 @@ def cmd_articles(args) -> int:
 
 def _drop_missing(repo, article_id: str, link: str, as_json: bool) -> int:
     """`articles` 里没有这一行时,那句「以后也不会再采集」怎么兑现。
+
+    走到这里时,调用方已经先按链接身份找过一遍同一原文的**其他档案 ID**
+    (`existing_article_id`)—— 那一步找到了就是常规删除,不会进来。所以这里面对的
+    是「库里真的没有这一篇」。
 
     **缺行不是排除凭据。** 同步记录和没关掉的旧页面会一直持有这一篇的身份,而采集
     库完全可能被清理、重建或回退到没有这一行的版本 —— 那时照旧返回成功,主系统会

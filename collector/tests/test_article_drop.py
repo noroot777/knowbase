@@ -295,3 +295,217 @@ class ArticleDropTests(LocalCollectCase):
         code, got = drop("--id", aid)
         self.assertEqual(cli.EXIT_OK, code)
         self.assertTrue(got["ok"] and got["excluded"])
+
+    # ── 失败分支与事务边界 ────────────────────────────────────────────────────
+
+    def _write_lock_is_free(self):
+        """此刻另一个连接写得进去吗。
+
+        **判「有没有人攥着写锁」只能用一个没有耐心的连接**:业务连接是 15 秒
+        busy_timeout,拿它来验会把「占着锁」变成「慢了一点」,断言不出任何东西。
+        探针写的是一条删 0 行的 DELETE —— 受限写入即使影响 0 行也要开写事务,
+        所以它探得到锁,又不留下任何痕迹。
+        """
+        import sqlite3
+
+        from src.db import connection as conn_mod
+
+        conn = sqlite3.connect(conn_mod.DEFAULT_DB_PATH, timeout=0)
+        try:
+            conn.execute("PRAGMA busy_timeout=0")
+            conn.execute("DELETE FROM deleted_articles WHERE article_id='写锁探针'")
+            conn.commit()
+            return True
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower():
+                raise
+            return False
+        finally:
+            conn.close()
+
+    def test_a_failed_body_fetch_after_removal_is_excluded_not_a_sync_error(self):
+        """同步期间移除、而这一篇的正文**没抓到**:照样如实记成已排除。
+
+        三条失败路径(请求返回错误字符串、抓到空正文、抓取抛异常)写的都是挂在这篇
+        文章上的退避状态,而那张表的外键指向 `articles`。原来那句无判据的
+        `INSERT OR REPLACE` 在文章刚被删掉时**抛** `FOREIGN KEY constraint failed`,
+        异常一路穿到下载循环的通用失败处理(第 2 轮审查实测:`errors` 里就是这句
+        外键报错、`excluded_articles=0`、`download_failed=1`,CLI 再把 `errors`
+        非空转成失败退出)—— 用户主动的永久移除被报成同步出错。
+
+        既有的那条同类回归只让正文**抓成功**,所以这三条分支一条都没覆盖。
+        """
+        for outcome in (("请求错误", None, ""), ([""], "", ""), "raise"):
+            with self.subTest(outcome=outcome):
+                self._reset_library()
+
+                def fetch(*a, _outcome=outcome, **kw):
+                    self._drop_now()
+                    if _outcome == "raise":
+                        raise RuntimeError("网络断了")
+                    return _outcome
+
+                self.fill.side_effect = fetch
+                got = self.collect()
+                self.assertEqual([], got["errors"],
+                                 "用户主动的永久移除不许记成同步错误")
+                self.assertEqual(1, got["excluded_articles"])
+                self.assertEqual((0, 0), (got["download_failed"],
+                                          got["download_succeeded"]))
+                self.assertEqual([], got["body_failures"],
+                                 "它不会再被抓了,不许说「已安排自动重试」")
+                self.assertEqual(0, self._count("articles"))
+                self.assertEqual(0, self._count("article_fetch_state"),
+                                 "附属状态也挂在这篇文章上,不许留下")
+
+        # 反过来钉一边:没被移除的那一篇,请求失败照旧记退避、照旧算一次下载失败
+        self._reset_library()
+        self.fill.side_effect = None
+        self.fill.return_value = ("请求错误", None, "")
+        got = self.collect()
+        self.assertEqual((1, 0), (got["download_failed"], got["excluded_articles"]))
+        self.assertEqual(1, self._count("article_fetch_state"))
+        self.assertEqual("request_failed", self.repo.conn.execute(
+            "SELECT reason FROM article_fetch_state").fetchone()[0])
+
+    def test_a_refused_write_releases_the_write_lock(self):
+        """**拒写 ≠ 没开事务。** 拒掉的那一笔自己要把写锁放掉。
+
+        `rowcount == 0` 只说明没有改行:受限写入即使影响 0 行,在 legacy
+        `isolation_level` 下也已经开着一个 SQLite 写事务。不收尾的话后面那几秒退避
+        和下一篇的网络请求全程攥着整库写锁,用户这一刻按「不再抓取」会被堵到超时
+        (第 2 轮审查实测:第一篇被拒之后第二次删除当场拿到 `database is locked`,
+        直到整个脚本退出才放开)。
+
+        判据落在**另一个连接此刻写得进去吗**上,不落在「调了 commit/rollback 没有」。
+        这里钉的是两笔写入各自的收尾(主路);下载循环那道兜底的后路另有一条
+        (`test_each_downloaded_article_is_its_own_transaction_unit`),补 HTML 脚本
+        那条路还有一条(`test_the_backfill_script_...`)。
+        """
+        import api
+        from src.utils import body_retry
+
+        self._reset_library()
+        self.collect()
+        row = self.repo.conn.execute("SELECT id, link FROM articles").fetchone()
+        aid, link = row["id"], row["link"]
+        self._drop_now()
+        self.assertTrue(self._write_lock_is_free(), "前提:删除自己收了尾")
+
+        # ① 退避状态:文章已经不在了,写不进去 —— 但事务要收掉
+        probe = type(self.repo)()
+        try:
+            self.assertFalse(body_retry.failed(probe, aid, link))
+            self.assertFalse(probe.conn.in_transaction)
+            self.assertTrue(self._write_lock_is_free(), "拒掉的退避状态攥着写锁")
+
+            # ② 正文那一笔:整条 `_fetch_article_detail_text` 走一遍
+            self.fill.side_effect = None
+            self.fill.return_value = (["正文"], "<p>正文</p>", "")
+            api._fetch_article_detail_text(aid, link, repo=probe)
+            self.assertFalse(probe.conn.in_transaction)
+            self.assertTrue(self._write_lock_is_free(), "拒掉的正文写入攥着写锁")
+        finally:
+            probe.close()
+
+    def test_each_downloaded_article_is_its_own_transaction_unit(self):
+        """下载循环:**一篇一个事务单元**,下一圈的退避和网络请求之前必须收掉。
+
+        这是上面那几笔写入的**后路**。异常路径上它是唯一的收尾点 —— 那条路压根
+        没有自己的 commit。摆局就按这个形态来:正文抓取抛异常,而补记退避状态那一笔
+        **自己也出错**(写锁超时、磁盘满都是这个形态),于是这一篇带着一个开着的写
+        事务走出 try。不收尾的话,接下来 `pacer.wait()` 那几秒反爬退避和下一篇的
+        网络请求全程攥着整库写锁,用户这一刻按「不再抓取」会被堵到超时。
+
+        探针因此放在**下一圈的退避里**,不放在下一篇的抓取里:元数据入库之后那句
+        commit 会把锁放掉,探针放晚了就什么都测不出来(第一版用例正是这样 —— 把
+        收尾整段去掉之后它照样绿,见 `docs/decisions/failure-drop.md` 的反向验证表)。
+
+        **反过来钉一边**:第二篇照旧抓成功 —— 收尾不许把合法写入一起回滚掉。
+        """
+        from src.utils import body_retry
+        from src.utils.request_pacing import RequestPacer
+
+        self._reset_library()
+        self.reader.messages.return_value = [push(mid="101"), push(mid="102")]
+        fetches, rounds, probes = [], [], []
+
+        def fetch(*a, **kw):
+            fetches.append(1)
+            if len(fetches) == 1:
+                raise RuntimeError("网络断了")
+            return (["正文"], "<p>正文</p>", "")
+
+        def failed_then_raise(repo, article_id, link, **kw):
+            """补记退避状态:真写一笔(开写事务),然后在收尾之前出错。"""
+            repo.set_fetch_state(article_id, link_hash="x", failures=1,
+                                 retry_at=0, reason="request_failed", link=link)
+            raise RuntimeError("记退避状态时数据库报错")
+
+        def wait(_self):
+            rounds.append(1)
+            if len(rounds) > 1:
+                probes.append(self._write_lock_is_free())
+
+        self.fill.side_effect = fetch
+        with patch.object(body_retry, "failed", failed_then_raise), \
+             patch.object(RequestPacer, "wait", wait):
+            got = self.collect()
+        self.assertEqual([True], probes,
+                         "上一篇的写事务被攥到了下一圈的退避里")
+        self.assertEqual(["档案名 · 测试文章: 记退避状态时数据库报错"], got["errors"])
+        self.assertEqual(1, got["download_succeeded"], "第二篇照旧抓得成功")
+        self.assertEqual(1, self._count("article_bodies"))
+        self.assertTrue(self._write_lock_is_free(), "一轮跑完也不许留着写锁")
+
+    def test_the_backfill_script_releases_the_write_lock_between_articles(self):
+        """补 HTML 脚本:拒写那一篇也要收尾,否则写锁一直占到脚本退出。
+
+        这条路的形态和下载循环不同 —— 它每篇之间还有 2–4 秒的反爬退避,**成功那一
+        支自己 commit,拒写和异常两支原来一个收尾点都没有**。第 2 轮审查实测:第一
+        篇被拒之后,从另一个连接删第二篇当场拿到 `database is locked`,连续失败时能
+        一直占到整个脚本退出。
+
+        探针放在第二篇的抓取里(上一篇的退避等待已经过去了),判据同样是「另一个
+        连接此刻写得进去吗」。
+        """
+        import sys
+
+        from scripts import backfill_body_html
+
+        self._reset_library()
+        self.reader.messages.return_value = [push(mid="101"), push(mid="102")]
+        self.collect()
+        # 摆局:两篇都只有纯文本、缺 HTML —— 那正是这个脚本的待办集合
+        self.repo.conn.execute("UPDATE article_bodies SET body_html=''")
+        self.repo.commit()
+        self.assertEqual(2, self._count("articles"))
+        seen = []
+
+        def fetch(link, *a, **kw):
+            if not seen:                      # 第一篇:抓 HTML 期间被永久移除
+                seen.append(1)
+                row = self.repo.conn.execute(
+                    "SELECT id FROM articles WHERE link=?", (link,)).fetchone()
+                import cli
+                with contextlib.redirect_stdout(io.StringIO()), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    cli.main(["articles", "drop", "--id", row["id"],
+                              "--account", "档案名", "--link", link, "--json"])
+                return (["正文"], "<p>补上的正文</p>")
+            seen.append(self._write_lock_is_free())
+            return ("请求错误", None)         # 第二篇:失败分支也要收尾
+
+        with patch.object(backfill_body_html, "fetch_article_body", fetch), \
+             patch.object(backfill_body_html.time, "sleep"), \
+             patch.object(sys, "argv", ["backfill"]), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(0, backfill_body_html.main())
+        self.assertEqual([True], seen[1:],
+                         "拒写那一篇把写锁攥到了下一次网络请求里")
+        self.assertIn("SKIP(已永久排除)", out.getvalue())
+        self.assertTrue(self._write_lock_is_free(), "脚本退出前就该放掉")
+        # 反过来钉一边:被移除的那一篇一个字节都没补上,另一篇原样留着待补
+        self.assertEqual(1, self._count("articles"))
+        self.assertEqual([""], [r[0] for r in self.repo.conn.execute(
+            "SELECT body_html FROM article_bodies")])

@@ -63,13 +63,15 @@ def collect_existing_urls(roots: list[Path]) -> set[str]:
 def load_articles(repo: ArticleRepository, account: str | None) -> list[dict]:
     """要导出的文章。
 
-    **永久排除名单那一道是冗余带,不是不变量。** 不变量在写语句自己的 WHERE 里
-    (`repository.upsert_article_from_blog`):排除提交之后,articles 里压根不该再
-    长出这一行。这里再筛一次是为了把「库被别的路径写过、回退到旧备份、或者那次
-    写入发生在本次改动之前」这几种存量情形也挡住 —— 导出是**写进 Vault**,
-    写出去的 md 用户下一次同步也不会自己消失。
-    只能按 `a.id` 匹配:名单里另外那两个键(链接身份、按链接算的稳定 ID)是 Python
-    算出来的,SQL 这边算不出来。
+    **候选筛选不是不变量,发布那一步才是**(`publish_one`)。这里读出来的是快照:
+    一轮导出要下几百张图、写几百个文件,中间用户完全可能在面板上按下「不再抓取」。
+    不变量在 `publish_one` 的写事务里。
+
+    筛选本身按**完整身份**走(`repo.is_excluded` → `exclusion_keys`):SQL 里那句
+    只能比 `a.id`,而名单里另外两个键(链接身份、按链接算的稳定 ID)是 Python 算
+    出来的。只按 ID 筛会漏掉「同一原文以另一个档案 ID 存在库里」这种存量情形
+    (第 2 轮审查实测:删除之后才启动的导出仍写出 1 篇 md)。SQL 那句留着是为了
+    让大头在库里就被滤掉,Python 这一道补齐剩下两个键。
     """
     where = "AND a.account_name = ?" if account else ""
     params = (account,) if account else ()
@@ -87,7 +89,51 @@ def load_articles(repo: ArticleRepository, account: str | None) -> list[dict]:
         """,
         params,
     ).fetchall()
-    return [dict(r) for r in rows]
+    return [dict(r) for r in rows if not repo.is_excluded(r["id"], r["link"])]
+
+
+def publish_one(repo: ArticleRepository, article_id: str, link: str, day_dir: Path,
+                base_name: str, canon: str, content: str) -> tuple[str, str]:
+    """把一篇写进 Vault。返回 `(结果, 路径)`:`("ok", 写出来的 md)`、
+    `("excluded", "")`(已永久移除)、`("skip", "")`(同一篇已经在树里)。
+
+    **这是永久排除的最后一道,也是唯一一道真不变量。** 发布不可撤销:md 写进 Vault
+    之后,用户下一次同步不会让它自己消失,而面板上那颗「不再抓取」承诺的是「以后不
+    再采集」。候选和正文都是几分钟前的快照,所以「此刻还能不能发布」必须和写文件在
+    同一个临界区里问 —— 第 2 轮审查实测:导出读到正文之后、写文件之前完成移除,
+    删除报 `ok=true, removed=true`、库里 `remaining_articles=0`,导出照旧写出 1 篇
+    带正文的 md。只把检查挪到循环末尾是同一类 TOCTOU,不算修。
+
+    串行化靠 SQLite 自己的单写者:`BEGIN IMMEDIATE` 当场拿写锁,而删除那一侧
+    (`remove_article` + `commit`、`exclude_identities` + `commit`)也跑在写事务里。
+    于是两者天然互斥:要么我们先拿到锁、在它之前写完这一个文件;要么它先删完,
+    我们复核当场得到 False。不新开一把文件锁 —— 删除本来就在写事务里,多一个原语
+    就多一处锁序。
+
+    **图片下载刻意留在临界区外**(调用方的第 2 步):攥着整库写锁去等网络,会把面板
+    上那颗按钮堵到超时(见 `docs/decisions/failure-drop.md` 里补 HTML 那一节)。
+    """
+    if repo.conn.in_transaction:
+        repo.conn.commit()
+    repo.conn.execute("BEGIN IMMEDIATE")
+    try:
+        if not repo.publishable(article_id, link):
+            repo.conn.rollback()
+            return "excluded", ""
+        day_dir.mkdir(parents=True, exist_ok=True)
+        path, skip = unique_md_path(str(day_dir), base_name, canon)
+        if skip:
+            repo.conn.rollback()
+            return "skip", ""
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        repo.conn.commit()
+        return "ok", path
+    except BaseException:
+        # 写锁一定要放掉:下一篇开头是图片下载,攥着锁等网络就是 F3 那条占锁路径。
+        if repo.conn.in_transaction:
+            repo.conn.rollback()
+        raise
 
 
 def body_text_to_markdown(body_text: str) -> str:
@@ -128,91 +174,98 @@ def main() -> int:
     existing = collect_existing_urls(dedup_roots)
     print(f"[export] 已存在 {len(existing)} 个 URL")
 
-    with ArticleRepository() as repo:
-        articles = load_articles(repo, args.account)
-    print(f"[export] 库内候选 {len(articles)} 篇")
-
     saved_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    exported = skipped = degraded = pending = 0
+    exported = skipped = degraded = pending = excluded = 0
     # 没正文那几篇的**身份**。stdout 那行「无正文,跳过 账号 · 标题」只够给人看:
     # 标题会重名、`·` 本身也可能出现在号名或标题里,拿它反查是哪一篇一定出错。
     # 面板要能点开原文核对、能把这一条从采集范围里删掉,靠的就是这里的 id 和 link。
     no_body: list[dict] = []
 
-    for row in articles:
-        if args.limit > 0 and exported >= args.limit:
-            break
-        canon = canonicalize_url(row["link"])
-        if canon in existing:
-            skipped += 1
-            continue
+    # **连接要一直开到循环结束。** 发布那一步要在一个写事务里复核「此刻还能不能
+    # 发布」(`publish_one`),连接先关掉就只剩读候选时那一次快照检查 —— 那正是
+    # 第 2 轮审查实测到的漏洞。读候选、下图片这些都不持事务,开着不占锁。
+    with ArticleRepository() as repo:
+        articles = load_articles(repo, args.account)
+        print(f"[export] 库内候选 {len(articles)} 篇")
+        for row in articles:
+            if args.limit > 0 and exported >= args.limit:
+                break
+            canon = canonicalize_url(row["link"])
+            if canon in existing:
+                skipped += 1
+                continue
 
-        title = row["title"] or "untitled"
-        account = row["account_name"]
-        day = (row["create_time"] or "")[:10] or "unknown-date"
-        day_dir = args.out / day
-        base_name = sanitize_filename(f"{account}-{title}")
+            title = row["title"] or "untitled"
+            account = row["account_name"]
+            day = (row["create_time"] or "")[:10] or "unknown-date"
+            day_dir = args.out / day
+            base_name = sanitize_filename(f"{account}-{title}")
 
-        if args.dry_run:
-            print(f"  [plan] {day}/{base_name}.md")
-            exported += 1
-            continue
+            if args.dry_run:
+                print(f"  [plan] {day}/{base_name}.md")
+                exported += 1
+                continue
 
-        # 1. 正文:优先 HTML 转 md,缺 HTML 用纯文本降级
-        body_html = row["body_html"] or ""
-        body_text = row["body_text"] or ""
-        text_md = body_text_to_markdown(body_text) if body_text else ""
-        images: list[str] = []
-        if not body_html.strip() and not text_md.strip():
-            # 发布得早不代表读取已多次失败；留在候选中，由抓取阶段按退避时间补正文。
-            pending += 1
-            no_body.append({"id": row["id"], "account": account,
-                            "title": title, "link": row["link"]})
-            print(f"  [export] 无正文,跳过 {account} · {title}")
-            continue
-        if body_html.strip():
-            try:
-                md_body, images = html_to_markdown(body_html)
-            except Exception as e:
-                print(f"  [export] HTML 解析失败,降级纯文本 {row['id']}: {e}")
+            # 1. 正文:优先 HTML 转 md,缺 HTML 用纯文本降级
+            body_html = row["body_html"] or ""
+            body_text = row["body_text"] or ""
+            text_md = body_text_to_markdown(body_text) if body_text else ""
+            images: list[str] = []
+            if not body_html.strip() and not text_md.strip():
+                # 发布得早不代表读取已多次失败；留在候选中，由抓取阶段按退避时间补正文。
+                pending += 1
+                no_body.append({"id": row["id"], "account": account,
+                                "title": title, "link": row["link"]})
+                print(f"  [export] 无正文,跳过 {account} · {title}")
+                continue
+            if body_html.strip():
+                try:
+                    md_body, images = html_to_markdown(body_html)
+                except Exception as e:
+                    print(f"  [export] HTML 解析失败,降级纯文本 {row['id']}: {e}")
+                    md_body = text_md
+                    degraded += 1
+            else:
                 md_body = text_md
                 degraded += 1
-        else:
-            md_body = text_md
-            degraded += 1
 
-        # 2. 图片:下到当天 assets/,替换为相对路径
-        if images and not args.no_images:
-            mapping = download_images(images, str(day_dir / "assets"))
-            md_body = replace_images_in_markdown(md_body, mapping, "assets")
+            # 2. 图片:下到当天 assets/,替换为相对路径
+            if images and not args.no_images:
+                mapping = download_images(images, str(day_dir / "assets"))
+                md_body = replace_images_in_markdown(md_body, mapping, "assets")
 
-        # 3. frontmatter + 写文件
-        fm = build_frontmatter(
-            scalars=[
-                ("title", title),
-                ("source", "dr-gzh"),
-                ("account", account),
-                ("published", row["create_time"] or ""),
-                ("saved_time", saved_time),
-                ("url", canon),
-            ],
-            tags=["source/dr-gzh", f"account/{account_tag_slug(account)}"],
-        )
+            # 3. frontmatter + 写文件
+            fm = build_frontmatter(
+                scalars=[
+                    ("title", title),
+                    ("source", "dr-gzh"),
+                    ("account", account),
+                    ("published", row["create_time"] or ""),
+                    ("saved_time", saved_time),
+                    ("url", canon),
+                ],
+                tags=["source/dr-gzh", f"account/{account_tag_slug(account)}"],
+            )
 
-        day_dir.mkdir(parents=True, exist_ok=True)
-        path, skip = unique_md_path(str(day_dir), base_name, canon)
-        if skip:
-            skipped += 1
-            continue
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(fm + md_body)
-        existing.add(canon)
-        exported += 1
-        print(f"  [ok] {day}/{os.path.basename(path)}")
+            # 4. 发布:复核 + 写文件在同一个写事务里(`publish_one` 的 docstring)
+            outcome, path = publish_one(repo, row["id"], row["link"], day_dir,
+                                        base_name, canon, fm + md_body)
+            if outcome == "excluded":
+                # 这一篇在本轮导出期间被永久移除了。如实计一笔:它既不是「导出」
+                # 也不是「已存在跳过」,混进后者会让「承诺兑现了没有」看不出来。
+                excluded += 1
+                print(f"  [export] 已永久移除,不发布 {account} · {title}")
+                continue
+            if outcome == "skip":
+                skipped += 1
+                continue
+            existing.add(canon)
+            exported += 1
+            print(f"  [ok] {day}/{os.path.basename(path)}")
 
     print(
         f"[export] 完成: 导出 {exported}, 跳过(已存在) {skipped}, "
-        f"降级纯文本 {degraded}, 待补正文 {pending}"
+        f"降级纯文本 {degraded}, 待补正文 {pending}, 已永久移除 {excluded}"
     )
     # 报告是旁路:写不出来(磁盘满、目录没了)只让上游退回解析 stdout 那几行,
     # 这一轮导出的结论照旧成立,所以不往上抛。
