@@ -401,9 +401,22 @@ def round_key() -> str:
 
     管道没在跑时返回空串(CLI 导出、面板上手点的某个维护动作)。空串是「说不清」,
     照旧落进回执的 `unsure` 那一档,不冒充任何一次抓取。
+
+    **「在跑」要由 `running` 证明,不能只看 `batch`/`run_id` 还在不在。** 那两个
+    字段是收尾时**故意留下**的(晚一步来取结果的人还得按 id 认领自己那一轮,见
+    `pipeline_state._end_run`),所以空闲时它们躺着的是上一轮的身份 —— 管道外直接
+    入库的那一笔会被盖上一个跟它毫无关系的批次号,而 `put_items` 的 `DO NOTHING`
+    和 `article_fetch_rounds` 的 `INSERT OR IGNORE` 都是**首次说了算**:盖错了
+    救不回来,药丸从此把它算成「这一次新抓到的」。拿不准就留「说不清」。
+
+    置位是安全的那一边:`running` 和 `batch` 在同一把锁里一起写下、工作线程才启动
+    (`pipeline.start_pipeline`、`pipeline_retry`),收尾只在 `_end_run` 里放下它,
+    所以它严格包着全部阶段,不会出现「阶段在跑而 running 是 False」。
     """
     from kb.pipeline_state import _state
 
+    if not _state.get('running'):
+        return ''
     return str(_state.get('batch') or _state.get('run_id') or '')
 
 
@@ -507,7 +520,13 @@ def _identity(one) -> tuple[str, str, str]:
         cid, fid, path = one
     except (TypeError, ValueError):
         return '', '', ''
-    return str(cid), str(fid), str(path)
+    # **字段不是字符串就算读不懂,不许 `str()` 一下糊过去。** `str(None)` 是
+    # `'None'`:那是个**非空**的抓取身份,会被当成"确定不是这一轮抓的"归进
+    # `carried`;而 `'None'` 这个路径不在取材范围里,会被范围过滤当成正常筛掉 ——
+    # 一个缺口于是伪装成确定的零条。两样都是把"不知道"写成一个确定答案。
+    if not all(isinstance(x, str) for x in (cid, fid, path)):
+        return '', '', ''
+    return cid, fid, path
 
 
 def note(key: str, produce) -> None:

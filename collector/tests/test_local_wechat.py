@@ -489,6 +489,79 @@ class LocalCollectionTests(unittest.TestCase):
         self.assertEqual(1, len(items))
         self.assertEqual("batch-day1", items[0]["round"])
 
+    def test_filling_in_a_body_does_not_create_a_first_origin(self):
+        """**补正文不构成新的首次来源。** 库里早就有、但没正文的那一篇。
+
+        这一篇可能是存量、手工导入、没带批次号跑的那次采集,也可能是冻结分支
+        写进来的 —— 共同点是**没有谁能证明它是哪一次抓到的**。它没正文,所以
+        照旧会进采集队列;等哪天正文补上了,这一次的批次号不许盖到它头上。
+
+        盖上去的后果不是"数字差一点":远端今天一条新内容都没发,药丸会写
+        「其中 1 篇是这一次新抓到的」。正确答案是 0 篇新抓到、1 篇说不清。
+        """
+        from pathlib import Path
+        from src.utils.article_identity import stable_article_id
+
+        article = parse_push(push())[0]
+        aid = stable_article_id(article["link"])
+        # 先造出「有文章、没正文、没来源」这个状态:不带批次号入一次元数据
+        self.repo.upsert_article_from_blog("档案名", article)
+        self.repo.commit()
+        self.assertEqual(0, self.repo.conn.execute(
+            "SELECT COUNT(*) FROM article_fetch_rounds").fetchone()[0])
+
+        self.fill.return_value = (["隔几天才补上的正文"], "<p>补上的</p>", "")
+        self.collect(round_key="batch-today")
+        self.assertTrue(self.repo.conn.execute(
+            "SELECT 1 FROM article_bodies WHERE article_id=?", (aid,)).fetchone(),
+            "正文该补上才对,这一条测的是补上之后来源有没有被改写")
+        self.assertEqual([], self.repo.conn.execute(
+            "SELECT round_key FROM article_fetch_rounds").fetchall(),
+            "补正文那一轮把自己写成了这一篇的首次来源 —— 远端没发新内容,"
+            "药丸却会说「这一次新抓到的」")
+        # 后果钉到回执上:知识库那侧读到空串才会归到 unsure 那一档
+        out = str(Path(self.tmp.name) / "export-prior")
+        self.assertEqual("", self._export_event(out)["items"][0]["round"])
+
+    def test_a_crash_after_the_body_cannot_leave_an_article_without_its_origin(self):
+        """来源和首次元数据同一个事务:正文之后崩一次也分不开它们。
+
+        原来来源是正文抓完之后补记的。入库单篇要走三段提交(元数据 → 正文 →
+        字数),**正文之后那一段**崩一次(磁盘满、库被锁死)就留下一篇有正文、
+        没来源的文章 —— 而它从此再也不进采集队列(`_download` 的
+        `has_readable_body` 那道筛),来源永久丢掉,这一篇在药丸上永远算「说不清」。
+
+        注入点必须在**正文已经提交之后**:抓正文本身那一步的异常在
+        `_fetch_article_detail_text` 里就被接住了(退避重试),它崩不出这个形态。
+        判据落在后果上:用一条**独立连接**(只看得见已提交的东西)去看,文章在
+        库里就一定带着它的来源;再跑一次采集也确认它不会回到队列里来。
+        """
+        from src.db.repository import ArticleRepository
+
+        self.fill.return_value = (["正文落库了"], "<p>正文落库了</p>", "")
+        with patch.object(ArticleRepository, "set_word_count",
+                          side_effect=OSError("写字数时磁盘满了")):
+            result = self.collect(round_key="batch-crash")
+        self.assertTrue(any("磁盘满" in e for e in result["errors"]),
+                        f"注入点没崩,这一条就什么都没测到:{result['errors']}")
+
+        seen = conn_mod.get_connection(readonly=True)
+        try:
+            rows = seen.execute("SELECT id FROM articles").fetchall()
+            origins = dict(seen.execute(
+                "SELECT article_id, round_key FROM article_fetch_rounds").fetchall())
+            bodies = seen.execute("SELECT COUNT(*) FROM article_bodies").fetchone()[0]
+        finally:
+            seen.close()
+        self.assertEqual(1, len(rows))
+        self.assertEqual(1, bodies, "正文该已经提交 —— 这一条测的是正文之后崩掉")
+        self.assertEqual({rows[0]["id"]: "batch-crash"}, origins,
+                         "文章连正文都提交了、来源却没跟上 —— 它再也不进采集队列,"
+                         "这一篇的来源永久丢了")
+        # 「再也不进队列」不是推测:下一轮它被当成已有的那一篇直接筛掉
+        again = self.collect(round_key="batch-next")
+        self.assertEqual((1, 0), (again["existing_articles"], again["download_total"]))
+
     def test_a_collect_without_a_round_leaves_the_identity_blank(self):
         """在终端里手动跑一次采集(没有业务抓取身份):不许编一个。
 

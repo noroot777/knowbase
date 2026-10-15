@@ -30,6 +30,20 @@ def _parse_create_time_unix(create_time: str) -> int | None:
     return None
 
 
+# ── 文章表的列清单只写一份 ────────────────────────────────────────────────────
+# `upsert_article_from_blog` 要把**同一组值**先试着当新行插一次(拿 rowcount 判
+# 「是不是首次发现」),再按原样 upsert 一次。两条语句的列和占位符必须逐字一致,
+# 抄两份迟早会漂,所以抽出来。`is_user_deleted` 写成字面量 0:它是本地标记,
+# 不跟着采集结果走,所以占位符比列少一个。
+_ARTICLE_COLUMNS = (
+    "id, account_name, title, digest, link, cover_url,"
+    " create_time, create_time_unix, is_wx_deleted, is_user_deleted,"
+    " item_show_type, llm_summary, word_count, ingested_at, updated_at,"
+    " source, import_listed"
+)
+_ARTICLE_VALUES = "?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?"
+
+
 class AccountNameTaken(Exception):
     """要订阅的号和一个已有档案同名,而那个档案属于另一个 `__biz`。
 
@@ -331,7 +345,36 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         blog: dict[str, Any],
         *,
         source: str = "crawl",
+        fetch_round: str = "",
     ) -> None:
+        """入库 / 更新一篇文章。`fetch_round` 只在这一篇**首次**落库时才记。
+
+        **「这一篇是知识库哪一次业务抓取头一回发现的」必须和首次元数据同一个事务。**
+        药丸那句分解靠它分开「这一次新抓到的」和「之前抓到、这一次才补导进来的」,
+        而这件事**只有首次插入这一刻知道答案**:过了这一刻,库里一篇有正文没身份的
+        文章和一篇存量文章长得一模一样,谁也分不出它是刚抓的还是早就在的。所以
+
+        - 不能等正文抓完再补记。那一步要走网络、会失败、会被退避跳过,而正文一旦
+          落库这一篇后面就再也不进采集队列(`_download` 的 `has_readable_body`
+          那道筛),来源从此永久丢掉。
+        - 也不能靠「身份表里没有行」去倒推「所以是这一次新抓的」。存量文章、手工
+          导入、冻结分支写进来的那些同样没有行,倒推会把它们全算成刚抓到。
+
+        做法是先拿同一组值试着当新行插一次:`rowcount == 1` 就是「首次插入」的确证
+        (判据待在写语句自己的 WHERE 里,不在 Python 这边先 SELECT 一次问在不在)。
+        首次、且批次号非空,就在同一个隐式事务里把身份行一起写掉 —— 父行刚写进去,
+        立即外键是满足的。
+
+        **拿不到批次号就什么都不记**(不在管道里跑的 CLI 采集、手工导入、冻结分支
+        的写入):留一行空值等于把「不知道」伪装成一个确定的身份。没有证据的首次
+        来源一律保持未知,后面也不许有谁替它补。身份行用 `INSERT OR IGNORE`:它
+        唯一能吞掉的是外键没开着时删文章留下的孤行,那种情况留着旧那一轮也是实话,
+        为它把整轮采集炸掉不值当(外键违反就算带 OR IGNORE 也照旧抛,实测如此)。
+
+        第二条语句照旧无条件跑。首次插入时它必然走 `DO UPDATE`、写的是同一组值,
+        纯无害;而它同时是 `OR IGNORE` 的兜底 —— `OR IGNORE` 会把 CHECK / NOT NULL
+        违反一起吞掉(rowcount 同样是 0),靠它才会照旧抛出来。
+        """
         aid = str(blog.get("id") or "").strip()
         if not aid:
             return
@@ -340,14 +383,40 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         cover_url = str(blog.get("cover") or "")
         article_source = "import" if source == "import" else "crawl"
         import_listed = 1 if source == "import" else 0
+        values = (
+            aid,
+            account_name,
+            str(blog.get("title") or ""),
+            str(blog.get("digest") or ""),
+            str(blog.get("link") or ""),
+            cover_url,
+            create_time,
+            _parse_create_time_unix(create_time),
+            1 if blog.get("is_deleted") else 0,
+            int(blog.get("item_show_type") or 0),
+            str(blog.get("summary") or "") or None,
+            blog.get("word_count"),
+            now,
+            now,
+            article_source,
+            import_listed,
+        )
+        first = self.conn.execute(
+            f"INSERT OR IGNORE INTO articles ({_ARTICLE_COLUMNS})"
+            f" VALUES ({_ARTICLE_VALUES})",
+            values,
+        ).rowcount == 1
+        round_key = str(fetch_round or "").strip()
+        if first and round_key:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO article_fetch_rounds (article_id, round_key)"
+                " VALUES (?, ?)",
+                (aid, round_key),
+            )
         self.conn.execute(
-            """
-            INSERT INTO articles (
-              id, account_name, title, digest, link, cover_url,
-              create_time, create_time_unix, is_wx_deleted, is_user_deleted,
-              item_show_type, llm_summary, word_count, ingested_at, updated_at,
-              source, import_listed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+            f"""
+            INSERT INTO articles ({_ARTICLE_COLUMNS})
+            VALUES ({_ARTICLE_VALUES})
             ON CONFLICT(id) DO UPDATE SET
               account_name=excluded.account_name,
               title=excluded.title,
@@ -367,24 +436,7 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
                 ELSE articles.import_listed
               END
             """,
-            (
-                aid,
-                account_name,
-                str(blog.get("title") or ""),
-                str(blog.get("digest") or ""),
-                str(blog.get("link") or ""),
-                cover_url,
-                create_time,
-                _parse_create_time_unix(create_time),
-                1 if blog.get("is_deleted") else 0,
-                int(blog.get("item_show_type") or 0),
-                str(blog.get("summary") or "") or None,
-                blog.get("word_count"),
-                now,
-                now,
-                article_source,
-                import_listed,
-            ),
+            values,
         )
         tags = blog.get("tags")
         if isinstance(tags, list) and tags:
@@ -485,26 +537,6 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             (account_name,),
         ).fetchall()
         return [self.row_to_blog_dict(r) for r in rows]
-
-    def note_fetch_round(self, article_id: str, round_key: str) -> None:
-        """记一笔「这一篇是知识库哪一次业务抓取头一回发现的」。
-
-        **INSERT OR IGNORE = 首次发现那一轮说了算。** 同一篇后面会被反复 upsert
-        (补正文、改标题、重新发现),改写这一行就等于把「哪一次抓到的」偷换成
-        「最后一次看见的那一轮」—— 而药丸那句分解正是靠它分开「这一次新抓到的」
-        和「之前抓到、这一次才补导进来的」。
-
-        `round_key` 空串就什么都不记:那是「说不清」(不在管道里跑的 CLI 采集、
-        手工导入链接),留一行空值反而会把"不知道"伪装成一个确定的身份。
-        """
-        aid, key = str(article_id or "").strip(), str(round_key or "").strip()
-        if not aid or not key:
-            return
-        self.conn.execute(
-            "INSERT OR IGNORE INTO article_fetch_rounds (article_id, round_key)"
-            " VALUES (?, ?)",
-            (aid, key),
-        )
 
     def is_deleted_blacklist(self, article_id: str) -> bool:
         row = self.conn.execute(

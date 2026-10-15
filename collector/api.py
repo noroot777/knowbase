@@ -32,8 +32,15 @@ def _word_count_from_body_raw(raw: object, title: str = "") -> int:
     return len(re.sub(r"\s+", "", str(title or "")))
 
 
-def _ingest_crawl_article(repo, account_name: str, article: dict) -> bool:
-    """入库单篇爬取文章：元数据、正文、字数。"""
+def _ingest_crawl_article(repo, account_name: str, article: dict,
+                          *, fetch_round: str = "") -> bool:
+    """入库单篇爬取文章：元数据、正文、字数。
+
+    `fetch_round` 是知识库这一次业务抓取的批次号，只透传给仓储；它只在这一篇
+    **首次**落库时才被记下来，而且跟首次元数据同一个事务（为什么必须如此见
+    `ArticleRepository.upsert_article_from_blog` 的说明）。下面这次 commit
+    **在走网络抓正文之前**——元数据和身份一起落地，正文失败不影响它们。
+    """
     from src.utils.article_identity import prepare_article
 
     prepared = prepare_article(repo, account_name, article)
@@ -42,7 +49,7 @@ def _ingest_crawl_article(repo, account_name: str, article: dict) -> bool:
     account_name, article, _is_new = prepared
 
     article_id = str(article.get("id") or "")
-    repo.upsert_article_from_blog(account_name, article)
+    repo.upsert_article_from_blog(account_name, article, fetch_round=fetch_round)
     repo.commit()
     nickname = _fetch_article_detail_text(
         article_id, str(article.get("link") or ""), repo=repo

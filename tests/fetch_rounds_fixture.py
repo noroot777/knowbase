@@ -6,7 +6,8 @@
 一条写失败用例会把后面每一条都拖成「不可确认」。
 
 消费方:tests/test_fetch_rounds.py(账本本体与恢复协议)、
-tests/test_fetch_receipt.py(成果归属)。
+tests/test_fetch_receipt.py(回执是谁交的)、tests/test_fetch_identity.py(回执里
+那一条属于哪一次抓取)。
 """
 import tempfile
 import unittest

@@ -118,7 +118,11 @@ def _receipt(event: dict) -> frozenset[Fetched] | None:
             return None                 # 清单读不懂:当成说不出来,不挑着收
         name = str(one.get("name") or "").strip()
         if not name:
-            continue
+            # **答不出文件名的那一行也是「读不懂」,不许挑着收。** 挑着收交上去的是
+            # 一份少记的清单,而上层拿它当确定值用(「这一次抓了 N 篇」)—— 少记是
+            # 静默丢数据。`cmd_export` 那一端对空名字本来就是整份作废,两端得一个
+            # 口径,不然中间这一道就成了把缺口洗成确定零条的地方。
+            return None
         # 身份退回路径只在「旧采集器打了名字、没打 id」时发生。那时条数照旧
         # 确定,只有分解说不出来 —— 比整轮报「不可确认」更接近事实。
         aid = str(one.get("id") or "").strip()

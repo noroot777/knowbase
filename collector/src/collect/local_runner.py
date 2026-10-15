@@ -102,14 +102,12 @@ def _download(repo, articles, result, progress, round_key=""):
         succeeded = False
         try:
             pacer.wait()
-            api._ingest_crawl_article(repo, owner, article)
-            # 「这一篇是知识库哪一次业务抓取发现的」。**记所有入了库的,不只记
-            # `is_new` 那些**:首次发现时正文可能还没抓到(那一轮导出会跳过它),
-            # 隔两天补上正文才导出 —— 那时它是「补导」,而账目要指回真发现它的
-            # 这一轮。`INSERT OR IGNORE` 保证就是这一轮(见 `note_fetch_round`)。
-            # 和正文写在同一次 commit 里:分开的话中间崩一次就留下一篇有正文、
-            # 没有抓取身份的文章,它从此永远算「说不清」。
-            repo.note_fetch_round(article["id"], round_key)
+            # 「这一篇是知识库哪一次业务抓取发现的」只能由仓储在**首次插入这一篇
+            # 的那个事务里**一起写掉,这里只负责把批次号递下去。队列里既有首次发现
+            # 的、也有前几天抓到、这次只是来补正文的(`has_readable_body` 那道筛放
+            # 进来的就是后者),而补正文不构成新的首次来源 —— 这一层分不出来谁是谁,
+            # 也不该分:仓储那边 `rowcount` 说了算。
+            api._ingest_crawl_article(repo, owner, article, fetch_round=round_key)
             repo.commit()
             result["new_articles"] += int(is_new)
             succeeded = has_readable_body(repo, article["id"])

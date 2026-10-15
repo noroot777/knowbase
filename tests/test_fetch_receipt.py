@@ -8,16 +8,16 @@
 
 所以现在只认生产者自己交回来的回执(`SourceCollector.materialize()` 的返回值)。
 这一组钉的就是它:回执说了算、回执说不出来就报「不可确认」、回执里不算新内容的
-路径由账本按取材范围筛掉,外加真 `sync.export` 自己那条「新落下」的判据。
+路径由账本按取材范围筛掉,以及成果归属不受下游阶段(索引、条目化)左右。
 
-账本本体(几次、几条、故障时说什么)和它的恢复协议在 tests/test_fetch_rounds.py;
-前端那几种说法在 tests/daily_probe.mjs。
+回执里那一条**属于哪一次业务抓取**(新抓到 / 补导 / 说不清)在
+tests/test_fetch_identity.py;账本本体(几次、几条、故障时说什么)和它的恢复协议
+在 tests/test_fetch_rounds.py;前端那几种说法在 tests/daily_probe.mjs。
 """
 import json
 import sqlite3
 import subprocess
 import unittest
-from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -33,7 +33,10 @@ class ReceiptIsTheOnlyEvidenceTests(_Base):
 
     def setUp(self):
         super().setUp()
-        ps._state.update({'batch': 'batch-probe', 'run_id': 'run-probe',
+        # `running` 要一起装上:**光留着 `batch` 不等于"这一轮在跑"** —— 收尾时
+        # 那两个字段是故意留下的,所以 `round_key()` 认 `running`(见它的说明)。
+        ps._state.update({'running': True,
+                          'batch': 'batch-probe', 'run_id': 'run-probe',
                           'stages': {s: {'status': '', 'detail': ''}
                                      for s in ps.STAGES}, 'log': []})
         self.addCleanup(segments.clear_segments)
@@ -176,96 +179,10 @@ class ReceiptIsTheOnlyEvidenceTests(_Base):
                          fetch_rounds.today(day))
 
 
-class WhichRoundActuallyCaughtItTests(_Base):
-    """**这一组是本任务的要害**:「这一次新抓到的」和「补导之前抓到的」分得开。
-
-    两个数在补导场景下必然不等,而药丸上那个 `added` 报的是前者加后者
-    (「这次同步之后日报能多拿到多少」,仓库主人定的口径)。分解不是装饰:远端
-    今天一条新内容都没发、按钮却写「+3 条」时,用户得能看出那 3 条是前几天抓到、
-    今天正文才补齐的,而不是又值一次模型钱。
-
-    第三档「说不清」单列,不许往补导里并:抓取身份是空串时我们只知道「没记过」,
-    不知道「不是这一次」(存量内容、手工导入的链接都长这样)。
-    """
-
-    def setUp(self):
-        super().setUp()
-        ps._state.update({'batch': 'batch-probe', 'run_id': 'run-probe',
-                          'stages': {s: {'status': '', 'detail': ''}
-                                     for s in ps.STAGES}, 'log': []})
-        self.addCleanup(segments.clear_segments)
-        segments.clear_segments()
-
-    def _run(self, *fakes):
-        by_name = {f.name: f for f in fakes}
-        with patch.object(pipeline_stages, 'crawl_channels',
-                          Mock(return_value=[{'channel': f.name, 'accounts': []}
-                                             for f in fakes])), \
-                patch.object(pipeline_stages, 'active_collector',
-                             Mock(side_effect=lambda ch=None: by_name[ch])):
-            pipeline_stages._run_crawl()
-            pipeline_stages._run_export()
-
-    def _split(self):
-        return {k: fetch_rounds.today()[k]
-                for k in ('added', 'fresh', 'carried', 'unsure')}
-
-    def test_what_this_round_caught_is_told_apart_from_what_it_carried(self):
-        """这一轮写下去 3 篇:1 篇是今天抓到的,2 篇是前几天抓到、今天才补导的。"""
-        self._run(_Fake(self, 'rss', writes=['source/rss/new.md'],
-                        carried=['source/rss/old1.md', 'source/rss/old2.md']))
-        self.assertEqual({'added': 3, 'fresh': 1, 'carried': 2, 'unsure': 0},
-                         self._split())
-
-    def test_a_round_that_only_carried_old_items_caught_nothing_new(self):
-        """远端一条新内容都没发,导出把前几天积压的正文补齐了 —— `added` 照实
-        报 2(日报这一刻确实多拿到 2 条),但新抓到的是 0。"""
-        self._run(_Fake(self, 'rss',
-                        carried=['source/rss/old1.md', 'source/rss/old2.md']))
-        self.assertEqual({'added': 2, 'fresh': 0, 'carried': 2, 'unsure': 0},
-                         self._split())
-
-    def test_items_with_no_recorded_round_are_unsure_not_carried(self):
-        """存量内容交不出抓取身份:归「说不清」,不许算成补导的。"""
-        self._run(_Fake(self, 'rss', writes=['source/rss/new.md'],
-                        nameless=['source/rss/stock.md']))
-        self.assertEqual({'added': 2, 'fresh': 1, 'carried': 0, 'unsure': 1},
-                         self._split())
-
-    def test_the_breakdown_survives_a_replay_of_the_same_receipt(self):
-        """同一份回执记两遍(fsync 失败后重试、两条通道各报一次):分解不翻倍。
-
-        并集按内容身份取,抓取身份跟着那一条走 —— 存成三个计数器的话这里会
-        变成 2/2/0。"""
-        self._run(_Fake(self, 'rss', writes=['source/rss/new.md'],
-                        carried=['source/rss/old.md']))
-        fetch_rounds.note_new('batch-probe', frozenset({
-            Fetched('rss:source/rss/new.md', 'batch-probe', 'source/rss/new.md'),
-            Fetched('rss:source/rss/old.md', 'batch-older', 'source/rss/old.md')}))
-        self.assertEqual({'added': 2, 'fresh': 1, 'carried': 1, 'unsure': 0},
-                         self._split())
-
-    def test_a_known_round_is_not_overwritten_by_a_later_blank_one(self):
-        """同一条内容第二次被报上来时身份是空的:留住已知的那个,别退回「说不清」。
-
-        反过来也要成立 —— 先空后有就补上。否则一次降级上报会把已经知道的事实
-        又丢回去。"""
-        fetch_rounds.open_round('batch-k', T('2026-09-29 09:00'))
-        one = 'source/rss/a.md'
-        fetch_rounds.note_new('batch-k', {Fetched('rss:a', 'batch-older', one)})
-        fetch_rounds.note_new('batch-k', {Fetched('rss:a', '', one)})
-        self.assertEqual(BOOK(1, 1, '09:00', fresh=0, carried=1),
-                         fetch_rounds.today(T('2026-09-29 09:00')))
-        fetch_rounds.note_new('batch-k', {Fetched('rss:b', '', 'source/rss/b.md')})
-        fetch_rounds.note_new('batch-k', {Fetched('rss:b', 'batch-k', 'source/rss/b.md')})
-        self.assertEqual(BOOK(1, 2, '09:00', fresh=1, carried=1),
-                         fetch_rounds.today(T('2026-09-29 09:00')))
-
-
 class WeChatReceiptTests(_Base):
     """公众号那条通道:子进程打出来的清单怎么变成回执,什么时候只能说不出来。
 
-    这是仓库主人的主力来源(库里八千多篇),所以它那一侧必须自己有红 —— 只钉
+    这是仓库主人的主力来源(库里绝大多数文章),所以它那一侧必须自己有红 —— 只钉
     假采集器的话,「超时降级之后清单是个少记的下界」这种只存在于真实现里的
     形态一条都发现不了。
     """
@@ -307,9 +224,9 @@ class WeChatReceiptTests(_Base):
         """抓取当天正文没拿到、隔两天补上才导出 —— 回执里记的仍是**发现**它的
         那一轮,不是导出它的这一轮。
 
-        这是「补导」在公众号那条通道上的真实形态(`article_fetch_rounds` 靠
-        `INSERT OR IGNORE` 把首次发现钉住)。记成这一轮的话药丸会把它算成
-        「这一次新抓到的」,而远端那天压根没发新文章。"""
+        这是「补导」在公众号那条通道上的真实形态:身份只在**文章首次插入那个
+        事务**里写一次(`upsert_article_from_blog`),补正文那一轮压根不碰它。
+        记成这一轮的话药丸会把它算成「这一次新抓到的」,而远端那天压根没发新文章。"""
         out = str(self.vault / 'source' / 'rss')
         got = self._run(self._proc(self._event(
             out, ['2026-10-13/旧文.md'], ids={'2026-10-13/旧文.md': '1001'},
@@ -317,7 +234,7 @@ class WeChatReceiptTests(_Base):
         self.assertEqual('batch-older', next(iter(got)).fetch_id)
 
     def test_a_stock_article_without_a_round_is_unsure_not_someone_elses(self):
-        """存量那八千多篇没有抓取身份:交空串「说不清」,不许编一个。
+        """存量那一大批没有抓取身份:交空串「说不清」,不许编一个。
 
         编成这一轮 = 把补导的算成新抓到的;编成"别的轮次" = 把不知道写成确定
         不是本次。两种都是凭空造事实,所以空串原样交上去,由账本归到 unsure。"""
@@ -325,6 +242,22 @@ class WeChatReceiptTests(_Base):
         got = self._run(self._proc(self._event(
             out, ['2026-01-01/存量.md'], rounds={'2026-01-01/存量.md': ''})))
         self.assertEqual('', next(iter(got)).fetch_id)
+
+    def test_a_row_with_no_file_name_voids_the_whole_list(self):
+        """清单里有一行答不出文件名:**整份不可确认,不挑着收**。
+
+        挑着收交上去的是一份少记的确定清单(「这一次抓了 N 篇」),而少记是静默
+        丢数据:那几篇再也不会被算进任何一轮。报「不可确认」顶多让人多同步一次。
+        `cmd_export` 那一端对空名字本来就是整份作废,两端得同一个口径 —— 不然
+        中间这一道就成了把缺口洗成确定零条的地方。空白字符同样算答不出来。
+        """
+        out = str(self.vault / 'source' / 'rss')
+        for bad in ('', '   ', None):
+            raw = json.loads(self._event(out, ['a.md', 'b.md']))
+            raw['items'][1]['name'] = bad
+            with self.subTest(name=repr(bad)):
+                self.assertIsNone(self._run(self._proc(json.dumps(
+                    raw, ensure_ascii=False))))
 
     def test_an_export_root_outside_the_vault_cannot_be_a_receipt(self):
         """`out` 不在 vault 里:算出来的相对路径不是知识库里那个身份。
@@ -378,7 +311,8 @@ class ABrokenLedgerMustNotBlockTheCaptureTests(_Base):
 
     def setUp(self):
         super().setUp()
-        ps._state.update({'batch': 'b', 'run_id': 'r', 'planned_stages': None,
+        ps._state.update({'running': True,
+                          'batch': 'b', 'run_id': 'r', 'planned_stages': None,
                           'stages': {s: {'status': '', 'detail': ''}
                                      for s in ps.STAGES}, 'log': []})
 
@@ -417,134 +351,6 @@ class ReceiptScopeTests(_Base):
         self.assertEqual(2, fetch_rounds.today(day)['added'])
 
 
-class TheRealExporterReportsOnlyFreshFilesTests(_Base):
-    """回执由**真的** `sync.export` 交:它写了哪几篇、哪几篇算新落下的。
-
-    这一组不装假采集器 —— 「新落下」这个判据长在导出那边(写之前问一句 vault 里
-    有没有这个路径),只钉假采集器的话等于没钉:导出队列是
-    `exported_hash<>content_hash`,正文补抓、译文回写都会让老文章重新写一遍同一个
-    路径,它们不是这一轮抓到的。
-    """
-
-    def setUp(self):
-        super().setUp()
-        from kb import maintenance
-        from kb.feeds import registry as reg
-        from kb.feeds import sync as fsync
-        self.reg, self.fsync = reg, fsync
-        for p in (patch.object(reg, 'DB_PATH', self.root / 'feeds.db'),
-                  patch.object(maintenance, 'DATA_DIR', self.root),
-                  patch.object(fsync, 'VAULT_ROOT', self.vault)):
-            p.start(); self.addCleanup(p.stop)
-        self.source = reg.save_subscription('rss', {'name': 'T',
-                                                    'url': 'https://e.org/f.xml'})
-
-    def _entry(self, n=1):
-        return [{'url': f'https://e.org/a{n}', 'title': f'文章{n}',
-                 'body': '正文正文', 'published': '2026-09-28 09:00'}]
-
-    @contextmanager
-    def _round(self, key):
-        """管道此刻正在跑哪一次业务抓取(`fetch_rounds.round_key()` 读的就是它)。
-
-        只改这两个键、不整份换掉 `_state`:换掉的话 `stages` 一起没了,而
-        `sync.export` 收尾那一下要往里写阶段状态。空串 = 管道没在跑。
-        """
-        before = (ps._state.get('batch'), ps._state.get('run_id'))
-        ps._state['batch'], ps._state['run_id'] = key, ''
-        try:
-            yield
-        finally:
-            ps._state['batch'], ps._state['run_id'] = before
-
-    def test_the_first_export_reports_the_file_it_created(self):
-        self.reg.put_items(self.source, self._entry())
-        got = self.fsync.export('rss')
-        self.assertEqual(1, len(got))
-        one = next(iter(got))
-        self.assertTrue((self.vault / one.path).exists())
-        # 内容身份带来源前缀 + feed_items 的主键(稳定、跨改名不变)
-        self.assertTrue(one.content_id.startswith('rss:'))
-
-    def test_the_export_hands_back_the_round_that_found_the_item(self):
-        """回执里的抓取身份就是 `put_items` 那一刻记下的那一轮。
-
-        这是「本次新抓到」那一档的来源:入库时记,导出时交。按导出时刻反推的话,
-        昨天抓到、今天才补导的那几篇会被算成今天新抓到的。"""
-        with self._round('batch-found-it'):
-            self.reg.put_items(self.source, self._entry())
-        got = self.fsync.export('rss')
-        self.assertEqual('batch-found-it', next(iter(got)).fetch_id)
-
-    def test_an_item_from_an_earlier_round_is_carried_not_freshly_caught(self):
-        """**这一条是本任务的要害**:昨天那一轮抓到的条目,今天这一轮才导出 ——
-        账本该说「这 1 条是补导的」,而不是「今天新抓到 1 条」。
-
-        旧实现压根分不出来:回执里只有路径,两种情形长得一模一样。远端今天一条
-        新内容都没发,按钮却写「+1 条新抓到」,用户照着它再花一次模型钱。"""
-        with self._round('batch-yesterday'):
-            self.reg.put_items(self.source, self._entry())
-        fetch_rounds.open_round('batch-today', T('2026-09-29 09:00'))
-        with self._round('batch-today'):
-            fetch_rounds.note_new('batch-today', self.fsync.export('rss'))
-        self.assertEqual(BOOK(1, 1, '09:00', fresh=0, carried=1),
-                         fetch_rounds.today(T('2026-09-29 09:00')))
-
-    def test_an_item_found_by_this_very_round_is_a_fresh_catch(self):
-        """反过来钉一边:同一轮里抓到又导出的,就是「这一次新抓到的」。"""
-        fetch_rounds.open_round('batch-now', T('2026-09-29 09:00'))
-        with self._round('batch-now'):
-            self.reg.put_items(self.source, self._entry())
-            fetch_rounds.note_new('batch-now', self.fsync.export('rss'))
-        self.assertEqual(BOOK(1, 1, '09:00'),
-                         fetch_rounds.today(T('2026-09-29 09:00')))
-
-    def test_a_stock_item_with_no_round_is_counted_but_not_classified(self):
-        """入库时压根没记过抓取身份(存量条目、在终端里跑的一次采集):条数照旧
-        算进去,那句分解归到「说不清」—— 不许算成补导,也不许算成新抓到。"""
-        with self._round(''):                            # 管道没在跑 = 空串
-            self.reg.put_items(self.source, self._entry())
-        fetch_rounds.open_round('batch-today', T('2026-09-29 09:00'))
-        with self._round('batch-today'):
-            fetch_rounds.note_new('batch-today', self.fsync.export('rss'))
-        self.assertEqual(BOOK(1, 1, '09:00', fresh=0, unsure=1),
-                         fetch_rounds.today(T('2026-09-29 09:00')))
-
-    def test_a_second_export_with_nothing_pending_reports_nothing(self):
-        self.reg.put_items(self.source, self._entry())
-        self.fsync.export('rss')
-        self.assertEqual(frozenset(), self.fsync.export('rss'))
-
-    def test_a_file_deleted_from_the_vault_is_not_a_fresh_catch_on_rewrite(self):
-        """存量清理删掉过那篇 md,之后这一条重新入队导出 —— 它不是新抓到的。
-
-        判据从「磁盘上此刻有没有这个文件」换成「这一条进过 vault 没有」
-        (`feed_items.path`)正是为这一刀:按文件在不在判的话,这里会报「+1 条」,
-        而那是一篇几天前就抓到的老文章。"""
-        self.reg.put_items(self.source, self._entry())
-        first = next(iter(self.fsync.export('rss')))
-        (self.vault / first.path).unlink()
-        with self.reg.db() as c:
-            c.execute("UPDATE feed_items SET content_hash='changed' WHERE kind='rss'")
-        again = self.fsync.export('rss')
-        self.assertEqual(frozenset(), again)
-        self.assertTrue((self.vault / first.path).exists())  # 文件真又写回来了
-
-    def test_rewriting_an_old_article_is_not_a_fresh_catch(self):
-        """正文补抓/译文回写让同一条重新入队:md 确实又写了一遍,但回执是空的。
-
-        算进去的话同一篇会连着好几天被报成"刚抓到",而用户看着那个数决定要不要
-        再花一次模型钱重新生成日报。"""
-        self.reg.put_items(self.source, self._entry())
-        first = self.fsync.export('rss')
-        with self.reg.db() as c:
-            c.execute("UPDATE feed_items SET content_hash='changed' WHERE kind='rss'")
-        again = self.fsync.export('rss')
-        path = self.vault / next(iter(first)).path
-        self.assertEqual(frozenset(), again)
-        self.assertTrue(path.exists())          # 文件真又写了一遍,只是不算新抓到
-
-
 class FetchIsTheExportsOwnResultTests(_Base):
     """问题 2 的另一半:成果归属不受下游阶段(索引、条目化)左右。"""
 
@@ -557,7 +363,10 @@ class FetchIsTheExportsOwnResultTests(_Base):
         for p in (patch.object(store, 'connect', lambda *a, **k: connect(self.db)),
                   patch.object(embedder, 'embed_pending_chunks', Mock(return_value=0))):
             p.start(); self.addCleanup(p.stop)
-        ps._state.update({'batch': 'batch-probe', 'run_id': 'run-probe',
+        # `running` 要一起装上:**光留着 `batch` 不等于"这一轮在跑"** —— 收尾时
+        # 那两个字段是故意留下的,所以 `round_key()` 认 `running`(见它的说明)。
+        ps._state.update({'running': True,
+                          'batch': 'batch-probe', 'run_id': 'run-probe',
                           'stages': {s: {'status': '', 'detail': ''}
                                      for s in ps.STAGES}, 'log': []})
         self.addCleanup(segments.clear_segments)

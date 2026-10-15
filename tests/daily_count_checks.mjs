@@ -11,7 +11,7 @@
 //
 // **从 tests/daily_probe.mjs 拆出来只因为行数**(那边到了 700 行上限),摆法和
 // 判据原样搬过来、共用同一次页面会话。后端那一侧的不变量在
-// tests/test_fetch_rounds.py 与 tests/test_fetch_receipt.py。
+// tests/test_fetch_rounds.py、tests/test_fetch_receipt.py 与 tests/test_fetch_identity.py。
 export async function checkFetchCountChip({ evalJs, check }) {
   // 沙箱从没跑过管道,所以此刻确实"今天还没有抓取" —— 这是一句事实,不是零。
   check("今天没抓过时按钮上这么说",

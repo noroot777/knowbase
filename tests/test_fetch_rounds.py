@@ -24,7 +24,8 @@
 两个方向都钉住:该算一次的算一次(多来源、多阶段共用批次身份),不该算的不算
 (只勾索引/只勾导出的那种运行、衍生树、停用的树、历史旧文件)。
 
-成果**归属**(哪几篇算这一次抓到的、回执由谁交)在 tests/test_fetch_receipt.py;
+成果**归属**(回执由谁交)在 tests/test_fetch_receipt.py,那一条属于哪一次抓取在
+tests/test_fetch_identity.py;
 日报取材口径本身在 tests/test_daily_carried.py 和 tests/test_daily_report.py;
 前端那几种说法在 tests/daily_probe.mjs。
 """
@@ -332,6 +333,30 @@ class RecoveryIsExactlyOnceTests(unittest.TestCase):
         self.assertEqual(1, got['n'])                    # 开轮行没被挤掉
         self.assertLess(got['added'], 70)                # 确实少记了
         self.assertTrue(got['partial'])                  # 但它如实说了自己不全
+
+    def test_a_field_that_is_not_text_is_a_gap_not_a_quiet_skip(self):
+        """三元组里某个字段不是字符串:记成这一轮的缺口,不许 `str()` 一下糊过去。
+
+        `str(None)` 是 `'None'`,而那两个位置上的 `'None'` 各有一种骗法:
+        当抓取身份用时它是个**非空**值,会被归进「之前抓到、这一次才补导的」;
+        当路径用时它不在任何来源树里,会被范围过滤当成**正常筛掉** —— 一个缺口
+        于是伪装成确定的零条。两样都是把「不知道」写成一个确定答案。
+
+        判据落在后果上:那一条不计数,但这一轮如实说自己不全(`partial`)。
+        反过来钉一边在 `test_only_the_sources_the_report_reads_are_counted`:
+        真的不在取材范围内的那几条是正常筛掉,不该把整轮拖成「至少」。
+        """
+        for bad in (Fetched('rss:a', None, 'source/rss/a.md'),
+                    Fetched('rss:a', 'batch-a', None),
+                    Fetched(None, 'batch-a', 'source/rss/a.md')):
+            with self.subTest(bad=bad):
+                fetch_rounds._unsaved = []
+                (self.root / fetch_rounds.FILE_NAME).unlink(missing_ok=True)
+                fetch_rounds.open_round('batch-a', self.day)
+                fetch_rounds.note_new('batch-a', [
+                    Fetched('rss:ok', 'batch-a', 'source/rss/ok.md'), bad])
+                self.assertEqual(BOOK(1, 1, '09:00', partial=True),
+                                 fetch_rounds.today(self.day))
 
     def test_a_slow_rotation_does_not_overwrite_what_another_run_appended(self):
         """轮换是**整份重写**:它和别人的追加不在同一把锁里的话,就会按自己那份
