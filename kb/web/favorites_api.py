@@ -50,11 +50,11 @@ def _stale_cutoff() -> str:
 def api_favorites(status: str = "inbox"):
     """收藏列表(带文档元数据),按收藏时间倒序。
 
-    只返回一个状态的条目,同时附带各状态计数、陈旧数(inbox 超过 STALE_DAYS
+    返回指定状态或 all 全部条目,同时附带各状态计数、陈旧数(inbox 超过 STALE_DAYS
     没动过的)和整篇收藏 path 集合(搜索卡片/reader 的 ★ 状态用,不分状态)。
     """
-    if status not in _FAV_STATUSES:
-        raise HTTPException(400, f"status 只能是 {'/'.join(_FAV_STATUSES)}")
+    if status not in (*_FAV_STATUSES, 'all'):
+        raise HTTPException(400, f"status 只能是 all/{'/'.join(_FAV_STATUSES)}")
     conn = store.connect()
     try:
         rows = conn.execute(
@@ -62,8 +62,9 @@ def api_favorites(status: str = "inbox"):
             " f.action_json, f.created_at, f.updated_at,"
             " d.source, d.title, d.account, d.published, d.url, d.summary"
             " FROM favorites f JOIN documents d ON d.path = f.path"
-            " WHERE f.status = ? ORDER BY f.created_at DESC",
-            (status,),
+            + (" WHERE f.status = ?" if status != 'all' else "")
+            + " ORDER BY f.created_at DESC, f.id DESC",
+            (status,) if status != 'all' else (),
         ).fetchall()
         favorites = []
         for r in rows:
