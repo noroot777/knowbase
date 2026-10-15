@@ -209,6 +209,29 @@ async function openFavList() {
   return until(`$('fav-list').querySelectorAll('.fav-jump').length >= 1`, 15000);
 }
 
+/** 收藏面板里**那一条**收藏的阅读页链接(`fav.js` 现拼的那条带 `#kbq=` 的 href,
+ *  不是探针另拼一份)。回 href,没找到回 `''`。
+ *
+ *  **按 `#kbq=` 里的 `q` 精确比,不许拿整条 href 做 includes。** 锚点里还带着
+ *  prefix/suffix,而相邻两段话互为彼此的前后文 —— 用 includes 的话"前一段"那条
+ *  收藏会先被另一条的前文匹配走,随后那一页高亮的是另一句,红出来的样子是
+ *  「回跳落点不对」,真因在挑链接这一步(实测:订阅列表那一节挑到了下一段那条)。 */
+async function favDocHref(quote, suffix) {
+  return evalJs(`(() => {
+    const want = ${js(quote)}, suf = ${js(suffix === undefined ? null : suffix)};
+    const a = [...document.querySelectorAll('#fav-list a[data-doc]')].find(x => {
+      const h = x.getAttribute('href') || '';
+      const at = h.indexOf('#kbq=');
+      if (at < 0) return false;
+      try {
+        const j = JSON.parse(decodeURIComponent(h.slice(at + 5)));
+        return j.q === want && (suf === null || j.s === suf);
+      } catch { return false; }
+    });
+    return a ? a.getAttribute('href') : '';
+  })()`);
+}
+
 /** 独立阅读页那一头的帮手。**那一页的采集和定位是另一份内联实现**(闭包里,
  *  全局拿不到),所以不能复用 app 那边的 `snipTextIndex` —— 这里只按 Range 量
  *  「高亮之前这段话已经出现过几次」,不碰它的内部函数。 */
@@ -388,4 +411,4 @@ export function finish() {
 
 export { base, fx, send, evalJs, sleep, until, check, results, pageErrors, js,
          clickJump, highlightText, snipHighlight, snip,
-         openFavList, DOC_HELPERS, docSnip, docToastClear, docToast };
+         openFavList, favDocHref, DOC_HELPERS, docSnip, docToastClear, docToast };

@@ -387,8 +387,8 @@ async function doSendToolChat(q) {
   const model = $('ask-model').value;
   const query = toolConvId === null ? `关于工具「${toolMeta.name}」:${q}` : q;
   const box = $('td-chat-msgs');
-  // 提问气泡还没落库(这一轮要等 NDJSON 收完),所以**不标 SNIP_SAVED** ——
-  // 落库那一刻由下面 `chatMarkSaved` 补上。口径同问答面板。
+  // 提问气泡还没落库(这一轮要等 NDJSON 收完),所以**不给落库身份** ——
+  // 收到 done 帧那一刻由下面 `chatMarkSaved` 补上。口径同问答面板(`SNIP_CID`)。
   box.insertAdjacentHTML('beforeend', renderMsg({ role: 'user', content: q }));
   box.insertAdjacentHTML('beforeend',
     `<div class="msg assistant" id="td-pending"><div class="gen-head">模型 · ${esc(model || '默认')}</div>` +
@@ -396,7 +396,8 @@ async function doSendToolChat(q) {
   $('td-scroll').scrollTop = $('td-scroll').scrollHeight;
 
   toolAbort = new AbortController();
-  let partial = '', refs = [], doneCid = null, errMsg = null, lastPaint = 0;
+  let partial = '', refs = [], doneCid = null, doneUid = 0, doneAid = 0,
+    errMsg = null, lastPaint = 0;
   try {
     const r = await fetch('/api/ask/stream', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -432,16 +433,30 @@ async function doSendToolChat(q) {
             if (b) b.innerHTML = mdHtml(partial);
             lastPaint = now;
           }
-        } else if (f.type === 'done') { doneCid = f.conversation_id; if (f.refs) refs = f.refs; }
-        else if (f.type === 'error') errMsg = f.message;
+        } else if (f.type === 'done') {
+          doneCid = f.conversation_id; doneUid = f.user_message_id; doneAid = f.message_id;
+          if (f.refs) refs = f.refs;
+        } else if (f.type === 'error') errMsg = f.message;
       }
     }
     if (errMsg) throw new Error(errMsg);
-    toolConvId = doneCid;
     const pend = document.getElementById('td-pending');
+    // **正常 EOF 却没有 done 帧 = 这一轮一个字都没进库**(后端是 `_save_qa` 之后
+    // 才发 done):半截答案照旧铺出来,但不给落库身份,所以收不了片段。口径与事故
+    // 形态同问答面板,见 `chat.js` 的 `SNIP_CID`。
+    if (!(Number(doneCid) > 0)) {
+      if (pend) pend.outerHTML = renderMsg({ role: 'assistant', content: partial, refs, model });
+      toast('这一轮没有收到完成确认', {
+        type: 'info', detail: '屏幕上这段回答没有落库,刷新就没了;重问一次才收得了片段',
+      });
+      loadConvs();
+      return;
+    }
+    toolConvId = doneCid;
     if (pend) {
-      chatMarkSaved(pend);   // done 帧到手 = 这一轮两条消息已落库
-      pend.outerHTML = renderMsg({ role: 'assistant', content: partial, refs, model }, true);
+      chatMarkSaved(pend, doneCid, doneUid);   // done 帧到手 = 这一轮两条消息已落库
+      pend.outerHTML = renderMsg({ role: 'assistant', content: partial, refs, model },
+        { cid: doneCid, mid: doneAid });
     }
     loadConvs();     // 会话已落库,问答 tab 侧栏同步
   } catch (e) {
@@ -519,4 +534,4 @@ attachSnip($('td-entries'), range => {
 
 // 抽屉里的问答和问答面板是同一条路(会话照样落库,问答 tab 侧栏里看得见),
 // 所以来源也记成 chat、ref 用这边的会话 id。判据与文案共用 `chatSnipSource`。
-attachSnip($('td-chat-msgs'), range => chatSnipSource(range, toolConvId));
+attachSnip($('td-chat-msgs'), range => chatSnipSource(range));

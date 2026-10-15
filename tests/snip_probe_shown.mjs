@@ -90,6 +90,75 @@ const wantAt = await evalJs(
 check("那两行在问答里被高亮出来,落点正是它那一处",
   hiAt >= 0 && hiAt === wantAt, `高亮 ${hiAt} / 期望 ${wantAt}`);
 
+// ── 1b. 屏幕上分了行,而分行是 CSS 说的 ──────────────────────────────────────
+// 上面那两格(`<br>` / 段落边界)在「按标签名」和「按计算样式」两套算法下答案一样,
+// 所以**谁是权威**这件事它们验不到。这一格的两行各装在一个 `<span>` 里:标签名是
+// 行内元素,只有样式说它们各占一行 —— 浏览器照 CSS 算,给的是两行;照标签名那份
+// 名单算,给的是接成一行的那一份。审查实测:按标签名判的那一版把屏幕上的两行存成
+// 了一行,而用户选中的、剪贴板里的都是两行。
+// **样式由探针现注入**(页面上本来没有这条规则):要的就是「产品代码一个字不改、
+// 只有 CSS 变了」这个形状 —— 用户样式、主题、将来某次 CSS 改动都长这样。
+await evalJs(`window.__selectTwoSpans = (cls) => {
+  const els = [...document.querySelectorAll('#chat-msgs .' + cls)];
+  if (els.length < 2) return 'no-spans';
+  const a = els[0].firstChild, b = els[1].firstChild;
+  if (!a || !b) return 'no-text-node';
+  const r = document.createRange();
+  r.setStart(a, 0); r.setEnd(b, b.nodeValue.length);
+  const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+  els[0].scrollIntoView({ block: 'center' });
+  document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  return JSON.stringify({ sel: s.toString(), shown: snipShown(r) });
+};
+window.__cssBlock = (cls) => {
+  const st = document.createElement('style');
+  st.id = 'snip-probe-css';
+  st.textContent = '.' + cls + '{display:block}';
+  document.head.appendChild(st);
+  return true;
+};
+true`);
+await until(`$('chat-msgs').textContent.includes(${js(fx.snipCss1)})`, 20000);
+// 反过来钉一边:**样式说它们是行内时,一个换行都不许多插**(标签名一样、
+// 计算样式不一样,只有这一步能证明口径跟着后者走)
+const inlineTwo = JSON.parse(await evalJs(`window.__selectTwoSpans(${js(fx.cssClass)})`));
+check("两个行内 span 之间不插换行", inlineTwo.sel === fx.snipCss1 + fx.snipCss2
+  && inlineTwo.shown === inlineTwo.sel, JSON.stringify(inlineTwo));
+await evalJs(`window.__cssBlock(${js(fx.cssClass)})`);
+const blockTwo = JSON.parse(await evalJs(`window.__selectTwoSpans(${js(fx.cssClass)})`));
+// 比的是**去掉全部空白之后那几个字一样**:换行那一份压平会得到一个空格,而行内
+// 那一份两句之间压根没有空格 —— 按压平比会在这儿假红
+const bare = t => String(t).replace(/\s+/g, "");
+check("同样两个 span,样式把它们摊成两行之后浏览器给的就是两行",
+  blockTwo.sel.includes("\n") && bare(blockTwo.sel) === bare(inlineTwo.sel),
+  JSON.stringify({ block: blockTwo.sel, inline: inlineTwo.sel }));
+// 退路那一格:不经选区的入口(离线核验)走的是同一套计算样式,两份文字必须一致
+check("那一段:退路给的文字和浏览器给的逐字一致",
+  blockTwo.shown === blockTwo.sel, JSON.stringify(blockTwo));
+// 收下来那条:**逐字等于屏幕上那份**(选区还在,直接点那颗按钮)
+const cssShown = await until(`window.__snipBtnShown()`, 5000);
+if (cssShown) {
+  await evalJs(`document.getElementById('snipbtn').click(); true`);
+  await until(`!window.__snipBtnShown()`, 10000);
+}
+check("CSS 分行那一段也收得下", cssShown);
+const cssRows = (await evalJs(`window.__favs()`))
+  .filter(f => flat(f.quote) === flat(blockTwo.sel));
+check("库里那条 quote 逐字等于屏幕上那两行(分行是 CSS 说的)",
+  cssRows.length === 1 && cssRows[0].quote === blockTwo.sel,
+  JSON.stringify({ got: cssRows.map(f => f.quote), want: blockTwo.sel }));
+// **位置证据也得按同一套规则算。** 引文由浏览器说了算,可前后文和"这一段在这
+// 篇里有几处"是在压平坐标系(`snipTextIndex`)里量的 —— 那一头按标签名判分行的
+// 话,坐标系里这两句之间没有分隔、而引文里有,于是这一段在自己这篇里一处也找
+// 不到:存下来的那条按「说不清是第几处」记,提示里多一句「点回去可能定位不到」。
+// 判据落在后果上:**库里那条声称唯一** + **当场没有那句告警**。
+check("它的位置证据也按同一套规则算(不是一句「点回去可能定位不到」)",
+  cssRows.length === 1 && cssRows[0].quote_unique === 1
+  && !(await evalJs(`window.__toastText()`)).includes("定位不到"),
+  JSON.stringify({ u: cssRows.map(f => f.quote_unique),
+                   toast: await evalJs(`window.__toastText()`) }));
+await evalJs(`document.getElementById('snip-probe-css')?.remove(); true`);
+
 // ── 2. 独立阅读页那一份:它自带一份内联的采集 ────────────────────────────────
 // 上面那一节验的是 app 那份共享实现(`snip_text.js`)。**这一页自带另一份**
 // (`pages.py` 的 `fragText`/`shown`),两份各要有自己的红。`<br>` 那一种在这一页

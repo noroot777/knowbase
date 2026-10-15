@@ -92,8 +92,13 @@ function favDocA(f, label, cls = '') {
 // 空路径,点下去是 iframe 里一张 404,所以换成回各自面板的按钮。
 function favDocAHtml(f, labelHtml, cls = '') {
   if (!f.path) return favJumpHtml(f, labelHtml, cls);
+  // **`u` 要一起带过去**:阅读页那一头的裸引文退路按它决定能不能采信(采集那一刻
+  // 只有一处 ≠ 现在只剩一处,见 `kb/web/pages.py` 的 `seek`)。老收藏没有这个数
+  // (NULL),那就一个字都不写 —— 那一头把"没有"当"不知道",不给用那一档。
   const hash = f.quote ? '#kbq=' + encodeURIComponent(
-    JSON.stringify({ q: f.quote, p: f.prefix || '', s: f.suffix || '' })) : '';
+    JSON.stringify({ q: f.quote, p: f.prefix || '', s: f.suffix || '',
+                     ...(f.quote_unique === 1 || f.quote_unique === 0
+                       ? { u: f.quote_unique } : {}) })) : '';
   return docAHtml(f, labelHtml, cls, hash);
 }
 
@@ -103,6 +108,8 @@ function favJumpHtml(f, labelHtml, cls = '') {
   const payload = encodeURIComponent(JSON.stringify({
     origin: f.origin || '', ref: f.origin_ref || '', url: f.url || '',
     q: f.quote || '', p: f.prefix || '', s: f.suffix || '',
+    // 同 `favDocAHtml` 的 hash:裸引文那一档要靠它(见 snip_text.js 的 `snipSeek`)
+    ...(f.quote_unique === 1 || f.quote_unique === 0 ? { u: f.quote_unique } : {}),
   }));
   const label = SNIP_LABEL[f.origin] || '这段话';
   return `<button class="fav-jump${cls ? ' ' + cls : ''}" data-jump="${payload}"` +
@@ -117,7 +124,10 @@ function favJumpHtml(f, labelHtml, cls = '') {
 function jumpFavOrigin(el) {
   let j;
   try { j = JSON.parse(decodeURIComponent(el.dataset.jump)); } catch { return; }
-  const spec = { q: j.q, p: j.p, s: j.s };
+  // `u` 原样传下去(没有就不传):面板那几头拿它去 `snipSeek`,少这一个字段的话
+  // 连「采集时本来就唯一」的那些收藏也退不了裸引文那一档
+  const spec = { q: j.q, p: j.p, s: j.s,
+                 ...(j.u === 1 || j.u === 0 ? { u: j.u } : {}) };
   if (j.origin === 'daily') {
     if (!j.ref) return toast('这条收藏没有记下是哪一天的日报');
     dailyPendingSnip = { ref: j.ref, spec };

@@ -117,6 +117,29 @@ class ApiFixture(unittest.TestCase):
         self.addCleanup(lock.stop)
         self.client = snip_client(self, self.db)
 
+    def seed_chat(self, title="一轮问答"):
+        """真落一轮问答(`conversations` 一行 + `messages` 两行),回
+        `(会话 id, 提问那条的 id, 回答那条的 id)`。
+
+        问答片段落库要核验「这条消息在不在、属不属于这个对话」
+        (`favorites_api._chat_message_id`)—— 光有会话号不算,那只说明那个对话
+        存在,而一轮问答是答完才整轮写进 `messages` 的。所以这几条用例得有真的
+        消息行,不能只给一个会话号。
+        """
+        now = "2026-10-15 10:00"
+        cid = self.conn.execute(
+            "INSERT INTO conversations (title, created_at, updated_at)"
+            " VALUES (?, ?, ?)", (title, now, now)).lastrowid
+        uid = self.conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, created_at)"
+            " VALUES (?, 'user', '有哪些视频模型', ?)", (cid, now)).lastrowid
+        aid = self.conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, model, created_at)"
+            " VALUES (?, 'assistant', '回答一句在这儿', 'stub/none', ?)",
+            (cid, now)).lastrowid
+        self.conn.commit()
+        return cid, uid, aid
+
     def snip(self, **body):
         """绑文档的那几条**默认带上盘上此刻那一版的版本号**(前端那一头同口径:
         核对读到哪一版就回传哪一版)。要验契约本身的用例自己显式传。"""

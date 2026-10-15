@@ -345,6 +345,12 @@ _DOC_SNIP_JS = r"""
   // 326)。两边都有候选就取交集(交集正是整段 p+q+s 命中的那几处),一边用不上
   // 就只听另一边,两边都用不上才退到裸引文;**最后一律要求只剩一处** —— 剩两处
   // 是正文自己分不出的两处,剩零处是两边的证据矛盾,两种都如实说没找到。
+  // **裸引文那一档还要一个条件:采集那一刻这段引文在这一篇里就只有一处**
+  // (`spec.u === 1`,库里那一列是 `favorites.quote_unique`)。「现在只剩一处」
+  // 证明不了「这一处就是当时那一处」—— 当时有两处的话,原处完全可能正是被改稿
+  // 换掉的那一处,而剩下的这一处是采集时就明确不是的另一处(审查实测:删掉原处
+  // 之后高亮落在第一处)。拿不到那个数(老收藏,`u` 没有)= 不知道,那一档一律
+  // 不给用:漏报顶多是一句如实的「没找到」,误报是静默跳到另一段话。
   // 口径同 snip.js 的 snipSeek/snipAll,两头各一份,改一处要改两处。
   const MAX_HITS = 64;   // 数到这个数就不往下数;数不完的那一边一律当说不清
   function hitsOf(text, needle) {
@@ -361,10 +367,11 @@ _DOC_SNIP_JS = r"""
     if (!a.q) return null;
     const byP = a.p ? hitsOf(text, a.p + a.q).map(at => at + a.p.length) : [];
     const byS = a.s ? hitsOf(text, a.q + a.s) : [];   // q+s 的起点就是引文的起点
+    const bare = Number(spec && spec.u) === 1 ? hitsOf(text, a.q) : [];
     const cand = byP.length && byS.length ? byP.filter(at => byS.includes(at))
       : byP.length ? byP
         : byS.length ? byS
-          : hitsOf(text, a.q);
+          : bare;
     const over = xs => xs.length > MAX_HITS;
     if (over(byP) || over(byS) || over(cand)) return null;
     return cand.length === 1 ? [cand[0], cand[0] + a.q.length] : null;
@@ -375,6 +382,11 @@ _DOC_SNIP_JS = r"""
   // 出来时存照旧存,但得当场说一句"点回去可能定位不到这一处"(app 那一侧同口径,
   // 见 snip.js 的 `locatable`)—— 不说的话,用户要到点回去那一刻才发现。
   const CTX_STEPS = [30, 80, 200];
+  /** 这段引文在这份文本里是不是只有一处(1/0)。采集那一刻存进
+   *  `favorites.quote_unique`,回跳那一刻裸引文那一档按它决定能不能采信。*/
+  function uniqueIn(text, quote) {
+    return hitsOf(text, collapse(quote).trim()).length === 1 ? 1 : 0;
+  }
   function contextOf(text, a, b) {
     const quote = text.slice(a, b);
     let first = null;
@@ -383,8 +395,10 @@ _DOC_SNIP_JS = r"""
       const ctx = { p: whole(text.slice(Math.max(0, a - n), a)),
                     s: whole(text.slice(b, b + n)) };
       if (!first) first = { ...ctx, exact: false };
-      // 判据走 seek 自己 —— 回跳用的就是它(候选集合 + 外侧空白那一套)
-      const hit = seek(text, { q: quote, p: ctx.p, s: ctx.s });
+      // 判据走 seek 自己 —— 回跳用的就是它(候选集合 + 外侧空白那一套)。
+      // `u` 按**这一刻这一篇里**算:采集和核对都发生在现在,「只有一处」就是
+      // 「只有一处」;回跳那一刻才有"原处可能已经不在了"这件事(见 seek)。
+      const hit = seek(text, { q: quote, p: ctx.p, s: ctx.s, u: uniqueIn(text, quote) });
       if (hit && hit[0] === a) return { ...ctx, exact: true };
       if (a - n <= 0 && b + n >= text.length) break;
     }
@@ -432,7 +446,7 @@ _DOC_SNIP_JS = r"""
     const idx = textIndex();
     let a = offsetAt(idx, range.startContainer, range.startOffset);
     let b = offsetAt(idx, range.endContainer, range.endOffset);
-    let quote, prefix = '', suffix = '', locatable = false;
+    let quote, prefix = '', suffix = '', locatable = false, unique = 0;
     if (a >= 0 && b > a) {
       // 引文两头的空白挪进前后文,这样压平之后 prefix+quote+suffix 仍是正文里
       // 连着的一段(后端 `_anchor` 同一条规则)
@@ -451,16 +465,21 @@ _DOC_SNIP_JS = r"""
       prefix = ctx.p;
       suffix = ctx.s;
       locatable = !!ctx.exact;
+      unique = uniqueIn(idx.text, quote);
     } else {
       // 选区端点不在 text node 上的少见情况:锚点留空,靠全文搜索
       quote = whole(sel.toString().trim());
-      locatable = !!seek(idx.text, { q: quote, p: '', s: '' });
+      unique = uniqueIn(idx.text, quote);
+      locatable = !!seek(idx.text, { q: quote, p: '', s: '', u: unique });
     }
     btn.textContent = '…';
     try {
       const r = await fetch('/api/favorites', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: DOC_PATH, quote, prefix, suffix,
+                               // 采集那一刻这段引文在这一篇里是不是只有一处 ——
+                               // 回跳那一刻裸引文那一档按它决定能不能采信(见 seek)
+                               quote_unique: unique,
                                doc_version: DOC_VERSION }),
       });
       // 409 = 这一页上这份正文已经旧了。**这一头没有退路可降级**(页面上压根

@@ -26,10 +26,17 @@ function renderSourceEntry(item) {
   const post = item.content_kind === 'post', key = esc(item.key);
   const author = item.author || '未知作者', status = sourceItemStatus(item);
   const title = text.translating ? '外文内容，正在等翻译' : text.title;
+  // 这一截摊的是**真正的正文**(短观点往往整条都在这儿),所以它能收藏
+  // (`kb/static/js/snip_cards.js`)。那两档等待中的文案不是正文,`sourceItemReadable`
+  // 把它们挡在收藏之外。
+  const pending = text.translating || text.fetching;
   const excerpt = text.translating
     ? '译成中文之后才写进知识库；这一条现在只有原文，点“原文”可以直接看。'
     : text.fetching ? '这个来源只给了一条链接，正在去原文把正文抓回来；抓到之后才翻译、写进知识库。'
-    : text.body.slice(0, 380) + (text.body.length > 380 ? '…' : '');
+    : text.body.slice(0, 380);
+  // **省略号不是原文里的字。** 单独挂一个 span,收藏那头按 `.snip-more` 跳过它 ——
+  // 混在同一个文本节点里的话,选到结尾那一下会把它一起存进引文,点回去定位不到。
+  const more = !pending && text.body.length > 380 ? '<span class="snip-more">…</span>' : '';
   const heading = readable
     ? post ? '' : `<h3><button class="source-entry-title" data-read-item="${key}">${esc(title)}</button></h3>`
     : `<h3 class="source-entry-name">${esc(title)}</h3>`;
@@ -37,7 +44,7 @@ function renderSourceEntry(item) {
     ? `data-source-key="${key}" tabindex="0" aria-label="阅读${esc(post ? author + '的观点' : title)}" aria-current="false"` : ''}>
     <div class="source-entry-meta"><span><b class="source-entry-avatar" aria-hidden="true">${esc(author.slice(0, 1))}</b>${esc(author)}</span><time>${esc(item.published ? sourceTime(item.published) : '发布时间未知')}</time></div>
     ${heading}${!post && text.translated && item.title !== title ? `<p class="source-entry-original">${esc(item.title)}</p>` : ''}
-    <p class="source-excerpt${post && readable ? ' is-post' : ''}">${esc(excerpt)}</p>
+    <p class="source-excerpt${post && readable ? ' is-post' : ''}">${esc(excerpt)}${more}</p>
     <div class="source-entry-footer"><span>${sourceItemKind(item)}${status ? ' · ' + status : ''}</span><div>${readable ? `<button class="text-button" data-read-item="${key}">展开阅读</button>` : ''}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></div></article>`;
 }
 
@@ -257,17 +264,19 @@ function backToSourceList() {
 //     算(`snipRenderedText` 用的是阅读页那条原始 HTML 转字面的规则,不是面板
 //     自己的 `mdHtml`)—— 差这一条就会出现"核过了、点回去 0 个高亮"。
 
-function sourceSnipSource() {
-  const item = sourceReaderItem;
+/** 一条订阅内容 → 它的收藏出处。**阅读器和列表卡片共用这一份** —— 两处摊的是
+ *  同一条内容的同一份正文(列表只摊开头那一截),出处的算法不该各写一遍。
+ *  `original` = 摊的是「原文」视图那一份(译文之前的那一份,vault 里没有对应文件)。*/
+function sourceItemSnipSource(item, { original = false } = {}) {
   if (!item || !sourceItemReadable(item)) return null;
   const text = sourceText(item);
-  const title = (sourceReaderOriginal ? item.title : text.title) || item.title || '订阅内容';
+  const title = (original ? item.title : text.title) || item.title || '订阅内容';
   const viaFeed = {
     origin: 'feed', origin_ref: sourceKind + ':' + item.key,
     origin_title: title, origin_url: item.url || '',
   };
   // 原文视图那一份在 vault 里压根没有对应文件(导出写的是译文),不必去核对
-  if (sourceReaderOriginal || !item.path) return viaFeed;
+  if (original || !item.path) return viaFeed;
   return {
     origin: 'doc', path: item.path, origin_title: title,
     origin_url: item.url || '', fallback: viaFeed,
@@ -275,4 +284,5 @@ function sourceSnipSource() {
   };
 }
 
-attachSnip($('source-reader-body'), sourceSnipSource);
+attachSnip($('source-reader-body'), () =>
+  sourceItemSnipSource(sourceReaderItem, { original: sourceReaderOriginal }));

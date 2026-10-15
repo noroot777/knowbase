@@ -142,6 +142,15 @@ CREATE TABLE IF NOT EXISTS favorites (
   origin_ref  TEXT NOT NULL DEFAULT '',      -- origin 内部的定位键(日报日期 / 会话:消息 id / 条目 key)
   origin_title TEXT NOT NULL DEFAULT '',     -- 收藏那一刻的标题快照,path 为空时列表只靠它
   origin_url  TEXT NOT NULL DEFAULT '',      -- 站外原文地址(可空)
+  -- **采集那一刻这段引文在那一篇里是不是只有一处。** 回跳时两侧上下文都失配、
+  -- 退到「只找引文」那一档时按它决定能不能采信:当时就有两处、收的是第二处,
+  -- 后来第二处被删掉,剩下的第一处按裸引文找正好唯一 —— 采信它等于把另一处同
+  -- 句冒充成原位置。NULL = 老数据没记(按说不清办,不走那一档)。
+  quote_unique INTEGER,
+  -- **问答片段出自哪一条已经落库的消息。** 会话号非空只说明那个对话存在;这一
+  -- 列是后端真正核验过的消息身份(见 favorites_api 的问答归属核验)。0/NULL =
+  -- 不是问答片段,或者老数据。
+  origin_msg  INTEGER,
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL                  -- 状态/备注最后一次变动,陈旧判断基于它
 );
@@ -171,7 +180,7 @@ def tokenize(text: str) -> str:
 # v2/v3 带过来的列。重建时按**老表实际有的**那几列拼 INSERT:v2 没有
 # action_json,写死一份列名会让它在 `no such column` 上翻车。
 _FAV_CARRIED = ("quote", "prefix", "suffix", "note", "status", "action_json",
-                "created_at", "updated_at")
+                "quote_unique", "origin_msg", "created_at", "updated_at")
 
 
 def _carry_sequence(conn: sqlite3.Connection, old: str, new: str) -> None:
@@ -348,6 +357,18 @@ def _migrate_promo(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_fav_anchor(conn: sqlite3.Connection) -> None:
+    """favorites 加「采集时唯一性」和「问答消息身份」两列。幂等。
+
+    老库 favorites 已存在,`CREATE TABLE IF NOT EXISTS` 不补列,只能 ALTER
+    (同 `_migrate_promo`)。两列都可空:**老数据的空值是「没记下」,不是 0** ——
+    `quote_unique` 为空时回跳不走裸引文那一档(判不准一律扣留),`origin_msg`
+    为空时问答归属只核到会话一级。
+    """
+    _add_columns(conn, "favorites",
+                 (("quote_unique", "INTEGER"), ("origin_msg", "INTEGER")))
+
+
 def _migrate_no_body(conn: sqlite3.Connection) -> None:
     """documents 加 no_body_hash 列。幂等(理由同 _migrate_promo:老库只能 ALTER)。
 
@@ -457,6 +478,7 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     _migrate_entities(conn)
     _migrate_promo(conn)
     _migrate_no_body(conn)
+    _migrate_fav_anchor(conn)
     return conn
 
 

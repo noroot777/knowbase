@@ -179,6 +179,14 @@ class SnippetRequest(BaseModel):
     # 重导出 —— 没有这个数,两头就没有共同事实,核对读到的是旧译文、写入时
     # 盘上已是新译文,照旧落成 doc、点回去 0 个高亮(审查实测)。
     doc_version: str = Field(default="", max_length=64)
+    # 采集那一刻这段引文在那一篇里是不是只有一处(1 = 只有一处)。回跳时两侧
+    # 上下文都失配、退到「只找引文」那一档时按它决定能不能采信 —— 当时就有两处
+    # 的话,「现在只剩一处」证明不了这一处就是当时那一处(见 `snip_text.js` 的
+    # `snipSeek`)。**不在服务端重算**:服务端手里没有用户当时看的那一篇正文
+    # (日报、问答回答压根不是文件),而且重算也只能算到「此刻」。
+    quote_unique: int = 0
+    # 问答片段:这段话出自哪一条**已经落库**的消息。见下面那道归属核验。
+    origin_msg: int = 0
 
     @field_validator("*", mode="before")
     @classmethod
@@ -203,6 +211,39 @@ class SnippetRequest(BaseModel):
         return value
 
 
+def _chat_message_id(conn, body: "SnippetRequest") -> int:
+    """问答片段的**归属核验**:这段话出自哪一条消息,那条消息在不在这个会话里。
+
+    **会话号非空只说明那个对话存在。** 追问时它早就有了,而后端只在整条 NDJSON
+    收完、`_save_qa` 提交之后才发 `done` 帧 —— 传输提前结束(代理断了、流被掐
+    在中间)时页面上那条回答一个字都没落库,可它旁边的下一轮正常保存会给出一个
+    真实的会话号。按「当前是哪个对话」记归属的话,那条收藏就指向了一个**从来没
+    有这句话的会话**:当场提示成功,点回去打开的是别的轮次、一句「没找到」
+    (审查实测的失败注入:第一轮只有 200 + delta + EOF、没有 done,第二轮正常落
+    库拿到会话 3,第一轮残留气泡被收成 `origin=chat, origin_ref=3`)。
+
+    所以**身份由后端确认过的消息 id 给**(`done` 帧带回来、或者历史消息自带),
+    这一道再核一次「它确实在那个会话里」。核不过就如实拒掉:那条收藏存下来也只
+    是一条点不回去的死收藏,而用户此刻还看着那段话、重问一次就能收。
+
+    客户端那一头另有一道(`chat.js` 的 `SNIP_CID`:没有 `done` 帧不给身份),
+    **两道都要**:这一道是存储层自己的口径,不押在页面状态上。
+    """
+    mid = int(body.origin_msg or 0)
+    ref = body.origin_ref.strip()
+    if mid <= 0 or not ref.isdigit():
+        raise HTTPException(
+            400, "问答片段要带已落库的消息身份(这一轮可能还没保存,重问一次再收藏)")
+    row = conn.execute(
+        "SELECT 1 FROM messages WHERE id=? AND conversation_id=?",
+        (mid, int(ref)),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            400, "这段回答还没落库(或者不属于这个对话),刷新后重问一次再收藏")
+    return mid
+
+
 class FavoritePatch(BaseModel):
     status: str | None = None
     note: str | None = None
@@ -220,6 +261,11 @@ def _stale_cutoff() -> str:
 _FAV_SELECT = (
     "SELECT f.id, f.path, f.quote, f.prefix, f.suffix, f.note, f.status,"
     " f.action_json, f.origin, f.origin_ref, f.created_at, f.updated_at,"
+    # 回跳那一头要用它决定能不能走裸引文那一档(见 `snip_text.js` 的
+    # `snipSpecOf`/`snipSeek`)。**老数据是 NULL,前端据此按「说不清」办** ——
+    # 这儿不许 COALESCE 成 0 或 1:两者分别是「当时不唯一」和「当时唯一」,
+    # 都是比「没记下」更强的断言。
+    " f.quote_unique, f.origin_msg,"
     " d.source,"
     " COALESCE(NULLIF(d.title, ''), f.origin_title) AS title,"
     " COALESCE(d.account, '') AS account,"
@@ -364,15 +410,19 @@ def api_favorite_snippet(body: SnippetRequest):
         raise HTTPException(400, "绑文档的收藏必须带 doc_version(核对过的正文版本)")
     conn = store.connect()
     try:
+        msg_id = _chat_message_id(conn, body) if body.origin == "chat" else 0
+
         def insert() -> int:
             now = _now()
             cur = conn.execute(
                 "INSERT INTO favorites (path, quote, prefix, suffix, note,"
-                " origin, origin_ref, origin_title, origin_url, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " origin, origin_ref, origin_title, origin_url,"
+                " quote_unique, origin_msg, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (path or None, quote, prefix, suffix, body.note.strip(),
                  body.origin, body.origin_ref.strip(), title,
-                 body.origin_url.strip(), now, now),
+                 body.origin_url.strip(),
+                 1 if body.quote_unique else 0, msg_id or None, now, now),
             )
             return cur.lastrowid
 

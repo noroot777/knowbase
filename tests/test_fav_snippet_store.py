@@ -44,14 +44,13 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb import favbrain, store                                 # noqa: E402
+from kb import favbrain                                        # noqa: E402
 from kb.scanner import body_version, file_hash                 # noqa: E402
-from kb.web import favorites_api                               # noqa: E402
 
 # 摆盘(临时库 + 盘上那一篇 + 只挂收藏路由的 client)搬到了共用模块,
 # 绑文档那一类的临界区用例在 `tests/test_fav_snippet_lock.py` 用同一份。
 from tests.fav_snippet_fixture import (                        # noqa: E402
-    DOC, DOC_MD, GONE, REAL_CONNECT, ApiFixture, seed_vault, snip_client)
+    DOC, GONE, REAL_CONNECT, ApiFixture, seed_vault, snip_client)
 
 
 # v3 的建表语句(path NOT NULL、有 action_json、没有 origin 一族)。手抄一份而
@@ -243,11 +242,12 @@ class SnippetWriteTests(ApiFixture):
     """四类来源都存得下,而该拒的照旧拒。"""
 
     def test_each_origin_lands(self):
+        cid, _uid, aid = self.seed_chat()
         cases = [
             dict(path=DOC, quote="文中一句", prefix="前", suffix="后"),
             dict(quote="日报一句", origin="daily", origin_ref="2026-10-15",
                  origin_title="日报 · 2026-10-15"),
-            dict(quote="回答一句", origin="chat", origin_ref="3",
+            dict(quote="回答一句", origin="chat", origin_ref=str(cid), origin_msg=aid,
                  origin_title="问答 · 有哪些视频模型"),
             dict(quote="订阅一句", origin="feed", origin_ref="rss:abc",
                  origin_title="Some English Post", origin_url="https://e.org/x"),
@@ -279,6 +279,36 @@ class SnippetWriteTests(ApiFixture):
                 self.assertEqual(code, self.snip(**body).status_code)
         self.assertEqual(0, self.conn.execute(
             "SELECT COUNT(*) FROM favorites").fetchone()[0])
+
+    def test_a_chat_snippet_must_name_a_message_that_is_in_the_db(self):
+        """问答片段要带**已经落库的那条消息**的 id,后端自己回库里核一次。
+
+        会话号非空只说明「那个对话存在」—— 追问时它早就有了,而一轮问答是答完
+        才整轮写进 `messages` 的:生成中、点了停止、出错、流断在最后一帧之前,
+        库里都什么都没有。只信客户端那句「我已经保存了」的话,收下来的是一条
+        按会话号点回去**打开的是对的那个对话、那段话却怎么也找不到**的收藏,
+        而当场一切正常。客户端那一头另有一道(`chat.js` 的 `SNIP_CID`:没有
+        `done` 帧不给身份),这一条钉的是服务端这一道 —— 两头各要有自己的红。
+        """
+        cid, _uid, aid = self.seed_chat()
+        other, _ouid, _oaid = self.seed_chat("另一个对话")
+        base = dict(quote="回答一句", origin="chat", origin_title="问答 · 某问")
+        for name, body, code in [
+            ("没带消息身份", dict(base, origin_ref=str(cid)), 400),
+            ("消息 id 不存在", dict(base, origin_ref=str(cid), origin_msg=99999), 400),
+            ("那条消息属于另一个对话",
+             dict(base, origin_ref=str(other), origin_msg=aid), 400),
+            ("会话号不是数字", dict(base, origin_ref="abc", origin_msg=aid), 400),
+        ]:
+            with self.subTest(name):
+                self.assertEqual(code, self.snip(**body).status_code)
+        self.assertEqual(0, self.conn.execute(
+            "SELECT COUNT(*) FROM favorites").fetchone()[0], "拒掉了却还是写了一行")
+        # 反过来钉一边:**对得上的那一条照旧存得下**,而且把身份记进了库
+        self.assertEqual(200, self.snip(
+            **dict(base, origin_ref=str(cid), origin_msg=aid)).status_code)
+        self.assertEqual((str(cid), aid), self.conn.execute(
+            "SELECT origin_ref, origin_msg FROM favorites").fetchone()[:2])
 
     def test_half_a_character_is_refused_not_a_500(self):
         """截断切开的「半个字」**如实拒成 400**,不是一句 500。
@@ -452,10 +482,11 @@ class SnippetListTests(ApiFixture):
     """列出来的和计数牌上那个数必须是一回事。"""
 
     def seed_all(self):
+        cid, _uid, aid = self.seed_chat()
         self.snip(path=DOC, quote="文中一句")
         self.snip(quote="日报一句", origin="daily", origin_ref="2026-10-15",
                   origin_title="日报 · 2026-10-15")
-        self.snip(quote="回答一句", origin="chat", origin_ref="3",
+        self.snip(quote="回答一句", origin="chat", origin_ref=str(cid), origin_msg=aid,
                   origin_title="问答 · 有哪些视频模型")
         self.snip(quote="订阅一句", origin="feed", origin_ref="rss:abc",
                   origin_title="Some English Post", origin_url="https://e.org/x")

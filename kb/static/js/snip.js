@@ -67,6 +67,10 @@ let snipZone = null;
  *    文字**用(问答气泡的模型名/相对时间、引用块)。回跳那一头要传同一个
  *    (`consumeSnipJump` 的第四个参数),见 `snipTextIndex`。
  *
+ *  **容器只是那一篇的一截时要声明 `partial: true`**(列表卡片摊的是正文开头那
+ *  380 字、搜索卡摊的是命中那一段):唯一性于是不按这一截断言 —— 切片里只有一处
+ *  证明不了整篇里只有一处(见 `snipSpec` 的 `unique`)。
+ *
  *  还可以带两样东西,都是给「绑了文档、却不一定定位得回去」那一类用的:
  *  - `fallback`(同结构、不再带 fallback):主选项被后端判成「文档不在索引里」
  *    时改用它。专门给订阅内容 —— md 已经落盘、索引那一步还没跑的那几分钟里,
@@ -152,20 +156,34 @@ function showSnipBtn() {
  *  边界在它里面一个字符都不占,两行当场接成一行。
  *
  *  prefix/suffix 是**压平过的**匹配用上下文;不变量是「压平之后三段连起来仍是
- *  坐标系里连着的一段」,所以坐标系(`snipTextIndex`)和取原文走的是同一份
- *  `SNIP_BREAKS`。
+ *  坐标系里连着的一段」,所以坐标系(`snipTextIndex`)和取原文过的是同一个
+ *  `snipBreaksOf()`。
  *
  *  `locatable` = 这条锚点在它自己这一篇里唯一定位得到吗(收藏那一刻就知道,用来
- *  如实提示)。端点不在 text node 上的少见情况(选到元素边界)锚点留空、靠全文
- *  搜索。同阅读页那份内联副本。*/
+ *  如实提示)。**它还要求屏幕上那份文字压平之后真的等于坐标系里那一段** ——
+ *  坐标系认不出的那种显示分隔(某些 CSS 排版)会让两头差一个空格,那时锚点在这
+ *  套坐标系里定不准。**那一刻放弃定位,不是改引文去迁就坐标系**:引文错了不可
+ *  恢复,定位不到只是一句如实的提示。
+ *
+ *  `unique` = 采集那一刻这段引文在这一篇里只有一处吗。回跳时两侧上下文都失效、
+ *  退到裸引文那一档时按它决定能不能采信(见 `snipSeek`)。**算得出来才敢说** ——
+ *  来源声明了 `partial`(屏幕上这个容器只是那一篇的一截,比如列表卡片摊的正文
+ *  开头)时一律按「不唯一」存:切片里只有一处证明不了整篇里只有一处,照它存下去
+ *  等于给裸引文那一档发一张它不配的通行证,回跳那一刻会命中整篇里的另一处。
+ *  绑了文档的那一类随后会按盘上那一篇重算一遍(见 `snipVerified`),那一份更准。
+ *  端点不在 text node 上的少见情况(选到元素边界)锚点留空、靠全文搜索。
+ *  同阅读页那份内联副本。*/
 function snipSpec(zone, range, src) {
   const idx = snipTextIndex((src && src.root) || zone.el, src && src.skip);
   let a = snipOffsetAt(idx, range.startContainer, range.startOffset);
   let b = snipOffsetAt(idx, range.endContainer, range.endOffset);
   if (a < 0 || b < 0 || b <= a) {
-    const bare = { quote: snipWhole(snipShown(range).trim()),
+    const bare = { quote: snipWhole(snipShown(range, src && src.skip).trim()),
                    prefix: '', suffix: '' };
-    return { ...bare, locatable: !!snipSeek(idx.text, snipSpecOf(bare)) };
+    const uniq = !(src && src.partial)
+      && snipAll(idx.text, snipCollapse(bare.quote).trim()).length === 1;
+    return { ...bare, unique: uniq,
+             locatable: !!snipSeek(idx.text, { ...snipSpecOf(bare), u: uniq ? 1 : 0 }) };
   }
   // 引文两头的空白挪进前后文。**不能留到后端再 strip** —— 那边剥掉引文的首尾
   // 空白、前后文却照旧,整段锚点就拼不回原文了(定位于是退回只找引文)。
@@ -177,29 +195,20 @@ function snipSpec(zone, range, src) {
   if (b > a && SNIP_HIGH_HALF.test(idx.text[b - 1])) b--;
   const ctx = snipContext(idx.text, a, b);
   // 原文那一头:[a,b) 这一段在 DOM 里的范围(`snipOffsetRange`)→ 屏幕上那份文字
-  // (`snipShown`)。压平一遍就等于 `idx.text.slice(a, b)` —— 匹配和保真同一个来源。
+  // (`snipShown`,它先问浏览器)。
   const dom = snipOffsetRange(idx, a, b);
+  const seg = idx.text.slice(a, b);
+  const quote = snipWhole((dom ? snipShown(dom, src && src.skip) : seg).trim());
+  // **坐标系认不认得这一段**:屏幕上那份文字压平一遍,要等于坐标系里 [a,b) 那
+  // 一段。对不上说明这一处的显示分隔坐标系没算出来(CSS 造成的那种),锚点在
+  // 这套坐标系里就定不准 —— 引文照原样存,定位如实放弃。
+  const mapped = snipCollapse(quote).trim() === snipCollapse(seg).trim();
   return {
-    quote: snipWhole((dom ? snipShown(dom) : idx.text.slice(a, b)).trim()),
-    prefix: ctx.prefix, suffix: ctx.suffix, locatable: !!ctx.exact,
+    quote, prefix: ctx.prefix, suffix: ctx.suffix,
+    unique: !(src && src.partial)
+      && snipAll(idx.text, snipCollapse(quote).trim()).length === 1,
+    locatable: mapped && !!ctx.exact,
   };
-}
-
-/** 一个 Range → **屏幕上那份文字**。
- *
- *  先问浏览器:当前选区正好是这一段时(压平一遍逐字相同),`Selection.toString()`
- *  就是显示文本的权威答案 —— 元素边界算几个换行、`<pre>` 里的缩进怎么留,那是 CSS
- *  的规则。对不上就退回 `snipFragText`(文本节点原文 + 元素边界补换行)。
- *
- *  **退路不是 `String(range)`**:那一份里 `<br>` 和段落边界一个字符都不占。*/
-function snipShown(range) {
-  const frag = snipFragText(range.cloneContents());
-  const sel = getSelection();
-  if (sel && !sel.isCollapsed && sel.rangeCount) {
-    const shown = sel.toString();
-    if (shown && snipCollapse(shown).trim() === snipCollapse(frag).trim()) return shown;
-  }
-  return frag;
 }
 
 async function saveSnip() {
@@ -210,15 +219,18 @@ async function saveSnip() {
   // 「这儿压根不能收」的情形,走到这里只剩下竞态,不值得再弹一句提示。
   const src0 = snipSourceOf(zone, range);
   if (!src0) return hideSnipBtn();
-  const spec = snipSpec(zone, range, src0);
+  const spec0 = snipSpec(zone, range, src0);
   // 字数判据落在**压平过的那一份**上:quote 现在是原文,多行选区里的换行和缩进
   // 都算字,按它判的话「只选中四个空格」也能过关。
-  if (snipCollapse(spec.quote).trim().length < SNIP_MIN) return hideSnipBtn();
+  if (snipCollapse(spec0.quote).trim().length < SNIP_MIN) return hideSnipBtn();
   const btn = snipButton();
   btn.innerHTML = '收藏中…';
   btn.disabled = true;
   // 核对要读服务端那一篇(`snipDocText`),所以先把按钮改成"收藏中"再等它
-  const { src, reason, fell } = await snipVerified(src0, spec);
+  const { src, reason, fell, fix } = await snipVerified(src0, spec0);
+  // 核过了的话,唯一性和定位已经按盘上那一篇重算过(`fix`)—— 用那一份,它算的
+  // 语料正是回跳那一头会看到的语料。
+  const spec = { ...spec0, ...(fix || {}) };
   // 「点回去会怎么走」那一句:**凡是让它不按预期走的事,一件都不许瞒** ——
   // 不说的话用户只能到点回去那一刻才发现。攒成一串而不是挑一条:这几件会同时
   // 成立(定不准的锚点在盘上那篇里自然也核不上),挑一条说就把另一条瞒了。
@@ -351,9 +363,22 @@ async function snipVerified(src, spec) {
   try { got = await src.docText(); } catch { got = null; }
   const reason = !got || got.text == null
     ? ((got && got.reason) || 'unreadable')
-    // spec 和收藏行的字段名一样,所以同一个 snipSpecOf 就能转
-    : (snipSeek(got.text, snipSpecOf(spec)) ? '' : 'mismatch');
-  if (!reason) return { src: { ...src, doc_version: got.version }, reason: '', fell: false };
+    // spec 和收藏行的字段名一样,所以同一个 snipSpecOf 就能转。**裸引文那一档
+    // 在这儿是允许的**(`u: 1`):核对发生在采集这一刻,盘上那篇正文就是此刻这
+    // 一份,「只有一处」就是「只有一处」—— 不存在「原来那处已经被删掉」这件事
+    // (那是回跳那一刻才有的问题,见 snip_text.js 的 `snipSeek`)。
+    : (snipSeek(got.text, { ...snipSpecOf(spec), u: 1 }) ? '' : 'mismatch');
+  if (!reason) {
+    // 核过了,顺手把**唯一性和定位**按盘上那一篇重算一遍 —— 上面那两个数是按屏幕
+    // 上那个容器算的,而**容器未必是整篇**(列表卡片摊的是正文开头那一截)。切片里
+    // 「只有一处」不代表整篇里只有一处;定位同理,要按回跳那一头真正的语料算。
+    // 这一份比 `snipSpec` 那一份准,`saveSnip` 用它替掉。
+    const flat = snipCollapse(spec.quote).trim();
+    const uniq = snipAll(got.text, flat).length === 1;
+    const fix = { unique: uniq,
+                  locatable: !!snipSeek(got.text, { ...snipSpecOf(spec), u: uniq ? 1 : 0 }) };
+    return { src: { ...src, doc_version: got.version }, reason: '', fell: false, fix };
+  }
   if (src.fallback) return { src: src.fallback, reason, fell: true };
   return { src, reason, fell: false };
 }
@@ -446,7 +471,15 @@ function postSnip(src, spec) {
       // 文档,这个字段空着。口径在 `kb/web/favorites_api.py` 的保存契约。
       doc_version: src.doc_version || '',
       prefix: spec.prefix, suffix: spec.suffix, note: src.note || '',
+      // **采集那一刻这段引文在那一篇里是不是只有一处。** 回跳那一刻两侧上下文都
+      // 失效时按它决定能不能采信裸引文那一档 —— 当时就有两处的话,「现在只剩一处」
+      // 证明不了这一处就是当时那一处(见 snip_text.js 的 `snipSeek`)。
+      quote_unique: spec.unique ? 1 : 0,
       origin: src.origin, origin_ref: src.origin_ref || '',
+      // **问答那一类:这段话出自哪一条已经落库的消息。** 后端据它核验归属 ——
+      // 会话号非空只说明那个对话存在,不说明这一轮写进去了(见 chat.js 的
+      // `SNIP_CID`、`kb/web/favorites_api.py` 的问答归属核验)。
+      origin_msg: src.origin_msg || 0,
       // 标题裁尾巴也不许切开一个字(见 snipWhole)
       origin_title: snipClip(src.origin_title, SNIP_MAX_TITLE),
       origin_url: snipUrlDropped(src) ? '' : (src.origin_url || ''),
@@ -463,6 +496,16 @@ function refreshFavPanel() {
 
 /** range 落在容器里哪一段上。给 describe 用:一个容器里并排放着多段正文时,
  *  按 selector 往上找那一段的宿主元素。range 的端点可能是文本节点。 */
+/** 这一刻有没有一段**非折叠选区**落在 el 里面。给「拖选不是点击」那类守卫用:
+ *  列表卡片整块可点(点开右侧阅读器),而卡片里现在能选正文收藏 —— 一次拖选松手
+ *  时浏览器照样派一个 click,不挡住的话那次打开会把选区连同浮动按钮一起带走。
+ *  真的单击时 mousedown 已经把选区折叠掉了,所以这道守卫不影响点开。*/
+function snipSelectionIn(el) {
+  const sel = typeof getSelection === 'function' ? getSelection() : null;
+  if (!el || !sel || sel.isCollapsed || !sel.rangeCount) return false;
+  return el.contains(sel.getRangeAt(0).commonAncestorContainer);
+}
+
 function snipHostOf(range, selector) {
   const node = range.commonAncestorContainer;
   const el = node.nodeType === 1 ? node : node.parentElement;
@@ -525,4 +568,3 @@ function locateSnip(el, spec, skip) {
   if (host) host.scrollIntoView({ block: 'center', behavior: 'smooth' });
   return true;
 }
-

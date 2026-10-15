@@ -51,6 +51,10 @@ SHOWN = Path(__file__).resolve().parent / "snip_probe_shown.mjs"
 # 另一侧已经排除掉的地方)、版本绑在哪一版(核对和落库之间正文换了一版 → 收藏固化
 # 在一篇再也找不到那句话的文档上)。**排在最后**:它会真改掉盘上那两篇 md
 # (沙箱独有的 `/__snip__/touch`),前两份有判据按"盘上那篇就是屏幕上这份"摆盘。
+# 第四份管**列表里那几截原文**:订阅列表卡片上那一段正文、搜索卡片上那段命中
+# 片段(都是真原文,不是摘要)。**排在 bind 之前**:bind 会真改掉盘上那两篇 md,
+# 而这一份有判据要在阅读页上验回跳落点。
+CARDS = Path(__file__).resolve().parent / "snip_probe_cards.mjs"
 BIND = Path(__file__).resolve().parent / "snip_probe_bind.mjs"
 
 sys.path.insert(0, str(REPO))
@@ -96,6 +100,11 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
         if not edges.stdout.strip():
             raise AssertionError(edges.stderr)
         cls.edges = json.loads(edges.stdout)
+        cards = run_probe([node, str(CARDS), base, str(manifest)],
+                          timeout=420, env=probe_env())
+        if not cards.stdout.strip():
+            raise AssertionError(cards.stderr)
+        cls.cards = json.loads(cards.stdout)
         bind = run_probe([node, str(BIND), base, str(manifest)],
                          timeout=420, env=probe_env())
         if not bind.stdout.strip():
@@ -136,6 +145,20 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
             with self.subTest(check=r["name"]):
                 self.assertTrue(r["ok"], r["detail"])
 
+    def test_list_level_originals_can_be_taken_too(self):
+        """列表里那几截原文也收得下,而列表上的装饰文字一个都收不下。
+
+        和上面几条分开记:这几条红的时候,四个「完整正文」的容器全是好的 ——
+        不好的是用户在列表里读到一句想收,选中之后什么都不发生(按钮压根不浮出),
+        而右侧同一句话收得下。混进别条的话,报告里看不出是"收不下"还是"这一处
+        压根没接上"。
+        """
+        results = self.cards["results"]
+        self.assertTrue(results, "列表入口探针一条都没跑")
+        for r in results:
+            with self.subTest(check=r["name"]):
+                self.assertTrue(r["ok"], r["detail"])
+
     def test_a_snippet_binds_to_the_right_place_and_version(self):
         """位置绑在哪一处、版本绑在哪一版。
 
@@ -160,6 +183,7 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
         self.assertEqual([], self.out["pageErrors"])
         self.assertEqual([], self.shown["pageErrors"])
         self.assertEqual([], self.edges["pageErrors"])
+        self.assertEqual([], self.cards["pageErrors"])
         self.assertEqual([], self.bind["pageErrors"])
 
 

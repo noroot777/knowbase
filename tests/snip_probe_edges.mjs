@@ -27,8 +27,8 @@
 //   HEADLESS_SHELL=<bin> node tests/snip_probe_edges.mjs <baseURL> <manifest.json>
 import {
   base, boot, check, clickJump, DOC_HELPERS, docSnip, docToast, docToastClear,
-  evalJs, finish, fx, highlightText, js, openFavList, send, sleep, snip,
-  snipHighlight, until,
+  evalJs, favDocHref, finish, fx, highlightText, js, openFavList, send, sleep,
+  snip, snipHighlight, until,
 } from "./snip_probe_lib.mjs";
 
 const flat = s => String(s).replace(/\s+/g, " ");
@@ -218,11 +218,7 @@ check("它绑的是那篇导出稿", docFav.length === 1 && docFav[0].path === f
 await openFavList();
 await until(`$('fav-list').querySelectorAll('a[data-doc]').length >= 1`, 15000);
 // 用的是收藏面板自己拼出来的那条链接(`fav.js` 的 `#kbq=`),不是探针另拼一份
-const docHref = await evalJs(`(() => {
-  const a = [...$('fav-list').querySelectorAll('a[data-doc]')].find(x =>
-    decodeURIComponent(x.getAttribute('href') || '').includes(${js(fx.ambiQuote)}));
-  return a ? a.getAttribute('href') : '';
-})()`);
+const docHref = await favDocHref(fx.ambiQuote);
 check("收藏面板给出了带锚点的阅读页链接", !!docHref, String(docHref));
 if (docHref) {
   await send("Page.navigate", { url: base + docHref });
@@ -264,11 +260,7 @@ check("存之前那道核对认它定位得到,没退回 feed", markFav.length =
   JSON.stringify(markFav.map(f => ({ o: f.origin, p: f.path }))));
 await openFavList();
 await until(`$('fav-list').querySelectorAll('a[data-doc]').length >= 1`, 15000);
-const markHref = await evalJs(`(() => {
-  const a = [...$('fav-list').querySelectorAll('a[data-doc]')].find(x =>
-    decodeURIComponent(x.getAttribute('href') || '').includes(${js(fx.markDup)}));
-  return a ? a.getAttribute('href') : '';
-})()`);
+const markHref = await favDocHref(fx.markDup);
 check("收藏面板给出了它的阅读页链接", !!markHref, String(markHref));
 if (markHref) {
   await send("Page.navigate", { url: base + markHref });
@@ -340,6 +332,101 @@ check("收藏面板里能点到这条新回答的回跳",
   await clickJump("chat", fx.streamTail));
 const hiDone = await snipHighlight(fx.streamTail);
 check("点回去那段话被高亮出来", hiDone === fx.streamTail, hiDone);
+
+// ── 5b. 流正常结束了,可那张收据没来 ─────────────────────────────────────────
+// 上面那几格验的是「这一轮还没结束」。这一格是另一种:**HTTP 200、delta 帧完整、
+// 流正常 EOF,只差最后那一帧 `done`** —— 中间那层代理把整条响应缓冲下来又在末尾
+// 掐断、上游进程被杀、响应被截,都长这样。后端是 `_save_qa` 之后才发 `done`
+// (`kb/web/chat_api.py`),所以**没有 done 就是「客户端手上没有任何落库证据」**。
+// 审查实测:只看「有没有出错」的那一版照旧把这一轮标成已保存,收下来的片段按
+// 会话号回跳 —— 打开的是对的那个对话,那段话却怎么也找不到。
+// 注入落在**传输层**(包一层 fetch,把 done 那一行滤掉),后端照旧真跑真落库 ——
+// 于是「客户端该不该相信自己」这件事才是被验的那一件;反过来钉一边:重新从库里
+// 读出来之后,那条气泡拿到了后端给的身份,照旧收得下。
+await evalJs(`window.__cutDoneOnce = () => {
+  const real = window.fetch;
+  let armed = true;
+  window.__restoreFetch = () => { window.fetch = real; return true; };
+  window.fetch = async (u, o) => {
+    const r = await real(u, o);
+    if (!armed || !String(u).includes('/api/ask/stream')) return r;
+    armed = false;
+    const text = await r.text();
+    const kept = text.split('\\n')
+      .filter(l => l.trim() && !/"type":\\s*"done"/.test(l));
+    return new Response(kept.join('\\n') + '\\n',
+      { status: 200, headers: { 'Content-Type': 'application/x-ndjson' } });
+  };
+  return true;
+};
+window.__msgMark = (text) => {
+  const el = [...document.querySelectorAll('#chat-msgs .msg')]
+    .find(m => (m.textContent || '').includes(text));
+  if (!el) return JSON.stringify({ err: 'no-msg' });
+  return JSON.stringify({ cls: el.className,
+    cid: el.getAttribute('data-snip-cid'), mid: el.getAttribute('data-snip-mid') });
+};
+true`);
+await evalJs(`window.__cutDoneOnce()`);
+const ASK_CUT = "这一问的那张收据会在路上丢掉";
+await evalJs(`$('chat-input').value = ${js(ASK_CUT)}; sendChat(); true`);
+const cutEnded = await until(`!document.getElementById('chat-pending')
+  && $('chat-msgs').textContent.includes(${js(ASK_CUT)})`, 30000);
+check("那一轮流正常结束了(只是没有 done 帧)", cutEnded,
+  await evalJs(`($('chat-msgs').textContent || '').slice(-80)`));
+check("当场如实说了一句「没有收到完成确认」",
+  (await evalJs(`window.__toastText()`)).includes("没有收到完成确认"),
+  await evalJs(`window.__toastText()`));
+const cutMark = JSON.parse(await evalJs(`window.__msgMark(${js(ASK_CUT)})`));
+check("那条提问气泡没有落库身份", cutMark.cid === null && cutMark.mid === null,
+  JSON.stringify(cutMark));
+// 最终后果:**这一轮一个字都收不了**(屏幕上那段答案还在,但它在库里没有落点)
+const cutSel = await evalJs(`window.__snipSelect('#chat-msgs', ${js(ASK_CUT)})`);
+await sleep(400);
+check("没有收据的那一轮不许收藏", cutSel === "ok"
+  && !(await evalJs(`window.__snipBtnShown()`)), `picked=${cutSel}`);
+// 反过来钉一边:**后端其实落库了** —— 把对话重新读一遍,那条气泡就拿到了身份
+// (客户端拒的是"没有收据",不是把这一轮永久封死)
+await evalJs(`window.__restoreFetch()`);
+await evalJs(`openConv(${fx.convId}, true); true`);
+await until(`$('chat-msgs').textContent.includes(${js(ASK_CUT)})`, 25000);
+const cutAgain = JSON.parse(await evalJs(`window.__msgMark(${js(ASK_CUT)})`));
+check("从库里重新读出来之后,那条气泡拿到了后端给的身份",
+  Number(cutAgain.cid) === Number(fx.convId) && Number(cutAgain.mid) > 0,
+  JSON.stringify(cutAgain));
+
+// **图鉴抽屉里那个 chatbox 同款** —— 它走的是同一条 `/api/ask/stream`,却是另一份
+// 收尾代码(`gallery.js` 的 `doSendToolChat`)。两份各要有自己的红:只修主问答的话
+// 这一头照旧把没有收据的那一轮标成已保存。
+await evalJs(`switchTab('gallery'); true`);
+if (!await until(`typeof openToolDrawer === 'function'`, 15000))
+  throw new Error("图鉴面板的脚本没加载起来");
+await evalJs(`openToolDrawer(${js(fx.toolNorm)}); true`);
+await until(`$('td-entries').textContent.includes(${js(fx.snipTool)})`, 25000);
+await evalJs(`window.__cutDoneOnce()`);
+const TOOL_CUT = "这一问在抽屉里问,收据也会丢";
+await evalJs(`$('td-chat-input').value = ${js(TOOL_CUT)}; sendToolChat(); true`);
+const toolCutEnded = await until(`!document.getElementById('td-pending')
+  && $('td-chat-msgs').textContent.includes(${js(TOOL_CUT)})`, 30000);
+check("抽屉里那一轮也流完了(同样没有 done 帧)", toolCutEnded,
+  await evalJs(`($('td-chat-msgs').textContent || '').slice(-80)`));
+const toolMark = await evalJs(`(() => {
+  const el = [...document.querySelectorAll('#td-chat-msgs .msg')]
+    .find(m => (m.textContent || '').includes(${js(TOOL_CUT)}));
+  return el ? JSON.stringify({ cid: el.getAttribute('data-snip-cid') }) : 'no-msg';
+})()`);
+const toolCutSel = await evalJs(`window.__snipSelect('#td-chat-msgs', ${js(TOOL_CUT)})`);
+await sleep(400);
+check("抽屉里没有收据的那一轮也不许收藏",
+  toolCutSel === "ok" && !(await evalJs(`window.__snipBtnShown()`))
+  && !String(toolMark).includes('"cid":"'), `picked=${toolCutSel} mark=${toolMark}`);
+await evalJs(`window.__restoreFetch()`);
+// **抽屉收回去**:它是一张铺满屏幕的遮罩,开着的时候浏览器不让别的面板上留下
+// 选区(实测:同一句话在干净状态下 `Selection.toString()` 是那段话,抽屉开着时
+// 当场折叠成空)。不收的话下面几节在日报正文上一律选不中,而红出来的样子是
+// 「这一段收不下」—— 真因在上一节没收尾。
+await evalJs(`closeToolDrawer(); true`);
+await until(`$('tool-mask').style.display === 'none'`, 5000);
 
 // ── 6. 标题和链接是内容自带的,长度上限两头必须对齐 ─────────────────────────
 // 后端给 `origin_title`/`origin_url` 设了 `max_length`,而这两个值来自订阅条目、

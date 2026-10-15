@@ -27,7 +27,8 @@
 //   HEADLESS_SHELL=<bin> node tests/snip_probe_bind.mjs <baseURL> <manifest.json>
 import {
   base, boot, check, clickJump, DOC_HELPERS, docSnip, docToastClear, evalJs,
-  finish, fx, highlightText, js, openFavList, send, sleep, snip, until,
+  favDocHref, finish, fx, highlightText, js, openFavList, send, sleep, snip,
+  until,
 } from "./snip_probe_lib.mjs";
 
 const docUrl = rel => base + "/doc/" + rel.split("/").map(encodeURIComponent).join("/");
@@ -54,12 +55,34 @@ const favRowOf = q => evalJs(`(async () => {
 
 /** 手搭一条 origin=daily 的收藏(锚点由探针给,不经过采集那一步)。
  *  正文改稿之后锚点就是这个形状,而改稿本身不是这条判据要验的东西。*/
-const putDaily = (q, p, s, title) => evalJs(
+const putDaily = (q, p, s, title, u = 0) => evalJs(
   `fetch('/api/favorites', { method: 'POST',
      headers: { 'Content-Type': 'application/json' },
      body: JSON.stringify({ quote: ${js(q)}, prefix: ${js(p)}, suffix: ${js(s)},
-       origin: 'daily', origin_ref: ${js(fx.dailyDate)},
+       origin: 'daily', origin_ref: ${js(fx.dailyDate)}, quote_unique: ${Number(u)},
        origin_title: ${js(title)} }) }).then(r => r.status)`);
+
+/** 同上,但绑那一篇导出稿(origin=doc + 真 path):面板给这一类拼的是一条带
+ *  `#kbq=` 的阅读页链接,和 daily 那一类的回跳按钮是**两条不同的代码路径**。*/
+const putDoc = (q, p, s, title, u = 0) => evalJs(`(async () => {
+  // 绑文档的收藏必须带盘上此刻那一版(后端 400 挡着),现问一次
+  const d = await fetch('/api/doc?path=' + encodeURIComponent(${js(fx.docPath)}))
+    .then(r => r.json());
+  const r = await fetch('/api/favorites', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ quote: ${js(q)}, prefix: ${js(p)}, suffix: ${js(s)},
+      origin: 'doc', path: ${js(fx.docPath)}, doc_version: String(d.version || ''),
+      quote_unique: ${Number(u)}, origin_title: ${js(title)} }) });
+  return r.status;
+})()`);
+
+/** 库里引文等于 q、来源是 origin 的那一条记下的「采集那会儿有几处」。
+ *  回 `1` / `0` / `null`(没记下)/ `'none'`(没有这条)。*/
+const uniqOf = (q, origin) => evalJs(`(async () => {
+  const d = await fetch('/api/favorites?status=inbox').then(r => r.json());
+  const f = d.favorites.find(x => x.quote === ${js(q)} && x.origin === ${js(origin)});
+  return f ? JSON.stringify(f.quote_unique) : 'none';
+})()`);
 
 /** 库里引文等于 q 的那几条,整成一段 JSON 文本(只留判据要看的那两个字段)。
  *  **自带 fetch,不走外壳装在页面里那套帮手**:独立阅读页是另一个页面上下文,
@@ -107,6 +130,44 @@ for (let i = 0; i < 120 && gotNear !== wantFirst; i++) {
 check("前文有两处候选、后文指着其中一处时照旧落回那一处",
   gotNear === wantFirst && wantFirst >= 0, `高亮偏移 ${gotNear},期望 ${wantFirst}`);
 
+// ── 1b. 裸引文那一档:现在只剩一处,证明不了这一处就是当时那一处 ─────────────
+// 两侧上下文都失配时(改稿、重译、正文补抓都会这样)定位退到最后一档:只按引文
+// 全文搜。**那一档只有在采集那一刻这段话就只有一处时才算得上证据** —— 当时有两处
+// 的话,原处完全可能正是被改掉的那一处,剩下的这一处是采集时就明确不是的另一处
+// (审查实测:收藏第二处、随后删掉第二段,回查命中第一段里的同句)。
+// 判据落在**高亮落在哪儿**,并且**两条只差 `u` 这一个数**:同一篇正文、同一句话、
+// 同样失配的两侧 —— 把别的变量都钉住,剩下的差别只有「采集那会儿有几处」。
+// 后文给的是**正文里压根没有的一句话**,前文留空:这是「两侧都用不上」的确定形状,
+// 不用去改盘上那个文件(改文件那条路另有判据,见第 3 节)。
+const GONE_S1 = "甲:这一句在正文里压根不存在";
+const GONE_S2 = "乙:这一句在正文里也压根不存在";
+await putDaily(fx.onceSolo, "", GONE_S1, "日报 · 采集时唯一", 1);
+await putDaily(fx.onceSolo, "", GONE_S2, "日报 · 采集时有两处", 0);
+await openFavList();
+check("收藏面板里能点到「采集时唯一」那条", await clickJump("daily", fx.onceSolo, GONE_S1));
+const wantSolo = await evalJs(
+  `window.__textOffset('#daily-reader-body', ${js(fx.onceSolo)}, 1)`);
+let gotSolo = -1;
+for (let i = 0; i < 120 && gotSolo !== wantSolo; i++) {
+  gotSolo = await evalJs(`window.__hiOffset('#daily-reader-body')`);
+  if (gotSolo !== wantSolo) await sleep(150);
+}
+check("采集那会儿只有一处的,两侧都失配之后照旧按引文落回那一处",
+  gotSolo === wantSolo && wantSolo >= 0, `高亮偏移 ${gotSolo},期望 ${wantSolo}`);
+await appToastClear();
+await openFavList();
+check("收藏面板里能点到「采集时有两处」那条", await clickJump("daily", fx.onceSolo, GONE_S2));
+const onceToast = await until(`window.__toastText().includes('没找到这段收藏')`, 20000);
+check("采集那会儿有两处的,两侧都失配之后如实说没找到", onceToast,
+  await evalJs(`window.__toastText()`));
+check("并且一处也不许高亮", (await highlightText()) === "(没有高亮)",
+  await highlightText());
+// 采集那一头也要钉住:**这个数是真从正文里数出来的**,不是存了个常量
+const dupTake = await snip("#daily-reader-body", fx.onceQ, 2);
+check("日报里那句重复两次的话收得下", dupTake.shown, `picked=${dupTake.picked}`);
+check("库里那条记的是「采集那会儿不只一处」",
+  (await uniqOf(fx.onceQ, "daily")) === "0", await uniqOf(fx.onceQ, "daily"));
+
 // ── 2. 同一件事,独立阅读页自己判一次 ───────────────────────────────────────
 // `/doc/…` 自带一份内联的定位实现(`kb/web/pages.py` 的 `_DOC_SNIP_JS`,那一页
 // 脱离 kb-web 也要能用)—— **两份实现各要有自己的红**。
@@ -136,6 +197,83 @@ for (let i = 0; i < 120 && docNth !== 1; i++) {
 }
 check("阅读页上交集唯一的那一条照旧落回第一处", docNth === 1,
   `高亮落在第 ${docNth} 处`);
+
+// ── 2b. 裸引文那一档,独立阅读页自己判一次 ───────────────────────────────────
+// 这一页自带一份内联的定位和采集(`kb/web/pages.py` 的 `seek`/`contextOf`,脱离
+// kb-web 也要能用)—— **两份实现各要有自己的红**。同第 1b 节:两条只差 `u` 一个数。
+await evalJs(`CSS.highlights.delete('kb-quote'); location.hash = '#kbq=' +
+  encodeURIComponent(JSON.stringify({ q: ${js(fx.onceSolo)}, p: '',
+    s: ${js(GONE_S1)}, u: 1 })); true`);
+let docSoloHi = "";
+for (let i = 0; i < 120 && docSoloHi !== fx.onceSolo; i++) {
+  docSoloHi = await highlightText();
+  if (docSoloHi !== fx.onceSolo) await sleep(150);
+}
+check("阅读页上采集时唯一的那条,两侧失配之后照旧按引文高亮得出来",
+  docSoloHi === fx.onceSolo, docSoloHi);
+await docToastClear();
+await evalJs(`CSS.highlights.delete('kb-quote'); location.hash = '#kbq=' +
+  encodeURIComponent(JSON.stringify({ q: ${js(fx.onceSolo)}, p: '',
+    s: ${js(GONE_S2)}, u: 0 })); true`);
+const docOnce = await until(
+  `(document.getElementById('kbtoast').textContent || '').includes('没找到这段收藏')`,
+  20000);
+check("阅读页上采集时有两处的那条,两侧失配之后如实说没找到", docOnce,
+  await evalJs(`document.getElementById('kbtoast').textContent`));
+check("阅读页上那一条也一处都不许高亮", (await highlightText()) === "(没有高亮)",
+  await highlightText());
+// 这一页的**采集**也得真数一遍(它和 app 那头各算一次)
+const docDup = await docSnip(fx.onceQ);
+check("阅读页上那句重复两次的话收得下", docDup.shown && docDup.toast.includes("已收藏"),
+  `picked=${docDup.picked} toast=${docDup.toast}`);
+check("阅读页收下的那条记的是「采集那会儿不只一处」",
+  (await uniqOf(fx.onceQ, "doc")) === "0", await uniqOf(fx.onceQ, "doc"));
+const docSolo = await docSnip(fx.onceSolo);
+check("阅读页上那句整篇只有一处的话也收得下",
+  docSolo.shown && docSolo.toast.includes("已收藏"),
+  `picked=${docSolo.picked} toast=${docSolo.toast}`);
+check("阅读页收下的那条记的是「采集那会儿只有一处」",
+  (await uniqOf(fx.onceSolo, "doc")) === "1", await uniqOf(fx.onceSolo, "doc"));
+
+// ── 2c. 那个数还得真走到阅读页去:链接由收藏面板现拼 ─────────────────────────
+// 上面两节把锚点直接写进地址栏,验的是**阅读页收到 `u` 之后怎么判**;可日常那条
+// 路上锚点是**收藏面板拼出来的**(`fav.js` 的 `favDocAHtml`)—— 它少带一个 `u`,
+// 阅读页那一头就只知道"不知道",裸引文那一档一律不采信,于是**采集那会儿确实
+// 只有一处的收藏也点不回去了**(屏幕上是一句「没找到这段收藏」,而库里那条好好
+// 记着 1)。和 daily 那一类的回跳按钮(`favJumpHtml` 的 data-jump)是两条代码
+// 路径,**各要有自己的红**。同第 1b 节:两条只差 `u` 一个数。
+const putSolo = await putDoc(fx.onceSolo, "", GONE_S1, "一篇 · 采集时唯一", 1);
+const putDup = await putDoc(fx.onceSolo, "", GONE_S2, "一篇 · 采集时有两处", 0);
+check("这两条绑文档的收藏手搭进去了",
+  Number(putSolo) === 200 && Number(putDup) === 200,
+  `solo=${putSolo} dup=${putDup}`);
+await boot();
+await openFavList();
+const hrefSolo = await favDocHref(fx.onceSolo, GONE_S1);
+const hrefDup = await favDocHref(fx.onceSolo, GONE_S2);
+check("面板给这两条各拼出了一条阅读页链接", !!hrefSolo && !!hrefDup,
+  `solo=${hrefSolo} dup=${hrefDup}`);
+await send("Page.navigate", { url: base + hrefSolo });
+await until(`!!document.getElementById('content')
+  && document.getElementById('content').textContent.includes(${js(fx.onceSolo)})`, 25000);
+await evalJs(DOC_HELPERS);
+let panelSolo = "";
+for (let i = 0; i < 120 && panelSolo !== fx.onceSolo; i++) {
+  panelSolo = await highlightText();
+  if (panelSolo !== fx.onceSolo) await sleep(150);
+}
+check("点面板上「采集时唯一」那条,阅读页按引文落回那一处", panelSolo === fx.onceSolo,
+  panelSolo);
+await docToastClear();
+await evalJs(`CSS.highlights.delete('kb-quote'); true`);
+await send("Page.navigate", { url: base + hrefDup });
+const panelDup = await until(
+  `(document.getElementById('kbtoast').textContent || '').includes('没找到这段收藏')`,
+  20000);
+check("点面板上「采集时有两处」那条,阅读页如实说没找到", panelDup,
+  await evalJs(`document.getElementById('kbtoast').textContent`));
+check("那一条也一处都不许高亮", (await highlightText()) === "(没有高亮)",
+  await highlightText());
 
 // ── 3. 独立阅读页:页面上这份正文已经旧了,不许把收藏绑上去 ──────────────────
 // 这一页把「我摊的是哪一版正文」烤在 HTML 里(`DOC_VERSION`),所以它天然就是

@@ -38,9 +38,10 @@
 - **探针收尾一律 `writeSync`,不许 `process.exit`** —— node 对管道上的 stdout/stderr 是异步写的,`exit()` 把没刷出去的直接丢掉(越过
   64 KB 管道缓冲时 JSON 断在半个中文字符中间)。**而 `writeSync` 自己要顶住短写和 `EAGAIN`** —— node 把这两个 fd 设成**非阻塞**,缓
   冲满时它不是等而是**抛**,于是单跑这一个文件是绿的、全量跑才崩。短写接着写剩下那段,`EAGAIN` 用 `Atomics.wait` 同步等 2 毫秒再试。
-- **`renderMsg` 的第二个参数 `saved` 是「这条消息已经落库」的标记,不是渲染细节** —— 它写出 `data-snip-saved`,「☆ 收藏此段」靠它判断
-  这块回答有没有落点(一轮问答是答完才整轮写进 `messages` 的,流式途中会话号早就有了)。**往 `renderMsg` / `sendChat` / `done` 帧那几
-  处动手之前先读 `docs/decisions/fav-snippets.md`**;漏掉那个标记的后果是收下来一条点回去永远打不开的片段,而当场一切正常。
+- **`renderMsg` 的第二个参数是「这条消息在库里的身份」`{cid, mid}`,不是渲染细节** —— 它写出 `data-snip-cid` / `data-snip-mid`,
+  「☆ 收藏此段」靠它判断这块回答有没有落点,保存层还要拿它回库里核验归属(一轮问答是答完才整轮写进 `messages` 的,流式途中会话号早
+  就有了,而 `done` 帧是落库之后才发的收据)。**往 `renderMsg` / `sendChat` / `done` 帧那几处动手之前先读
+  `docs/decisions/fav-snippets.md`**;漏掉那份身份的后果是收下来一条点回去永远打不开的片段,而当场一切正常。
 - **探针里等运行状态必须自己驱动 `refreshDailyStatus()`**(无头浏览器把后台页面的定时器节流到分钟级)。同理 `runDaily` 不能直接 await
   (它自己会停在确认框上等点击)。
 

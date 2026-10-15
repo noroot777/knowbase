@@ -43,6 +43,19 @@ ROOT = Path(__file__).resolve().parents[1]
 # 在正文里只出现一次(锚点回跳按 prefix+quote+suffix 找,重复出现就说不清定位
 # 到的是哪一处了)。
 SNIP_FEED = '把书变成可执行技能的那条路子最关键'
+# **订阅列表那张卡片上也摊着这一截正文**(`text.body` 的前 380 字,短观点往往整条
+# 都在里面)—— 那是真原文,不是另生成的摘要,所以它也得能收。这一句专留给列表那条
+# 判据:别的判据各自用别的句子,好让「库里那条是哪一条」说得清。
+SNIP_LIST = '列表卡片上这一截正文也该收得下'
+# 列表那张卡片摊的只是**正文开头那一截**,所以从它身上算不出整篇的事:
+# - 这一句在那 380 字里只有一处、在整篇里有两处 —— **唯一性要按盘上那一篇重算**
+#   (核得过的那一类由 `snipVerified` 重算;照切片存下去就是给裸引文那一档发了一张
+#   它不配的通行证)。
+SNIP_LIST_DUP = '这一句在卡片那一截里只有一处'
+# - 这一句夹着一对星号:卡片按 textContent 原样摊(星号看得见),而阅读页把同一份
+#   md 渲染过(星号没了)—— 核对过不去,该退回 origin=feed。那一类**不绑文档、也就
+#   没有重算的机会**,唯一性只能按切片算 —— 所以一律按「说不清」存(`partial`)。
+SNIP_LIST_MARKED = '列表里这一句夹着 **一对星号** 在中间'
 # 同一篇里另一句:用来反过来钉住「盘上那篇就是这份正文的那一条**照旧**绑文档」。
 # 另取一句而不是复用上面那句,是为了让这条判据单跑也成立(库里不许有两条同引文的)。
 SNIP_FRESH = '最后一段收尾,给出两个可以直接跑的命令'
@@ -129,11 +142,34 @@ PAGE_PARA_1 = '阅读页这一段到这儿收尾'
 PAGE_PARA_2 = '阅读页下一段打这儿起头'
 PAGE_PARA_SEEN = f'{PAGE_PARA_1}。\n\n{PAGE_PARA_2}'
 
+# **采集那一刻这段引文在那一篇里有几处** —— 这个数得在采集那一刻记下来
+# (`favorites.quote_unique`)。回跳那一刻两侧上下文都失配、退到裸引文那一档时按它
+# 决定能不能采信:**「现在只剩一处」证明不了「这一处就是当时那一处」** —— 当时有
+# 两处的话,原处完全可能正是被改稿换掉的那一处,剩下这一处是采集时就明确不是的
+# 另一处(审查实测:原处删掉之后高亮落在第一处)。
+# **反过来钉一边**:采集那一刻整篇只有一处的那一句,同样两侧失配之后裸引文那一档
+# 照旧采信、照旧高亮得出来 —— 那一档不该被整个废掉。
+# 这一组同时摊在日报和订阅那一篇里:共享层和独立阅读页各记一次、各判一次。
+ONCE_Q = '这一句采集那会儿在正文里就有两处'
+ONCE_LEAD_1 = '第一处前面这句话认得出它是第一处:'
+ONCE_LEAD_2 = '第二处前面这句话跟上面那句完全不同:'
+ONCE_TAIL_1 = '第一处后面跟着这一句收尾。'
+ONCE_TAIL_2 = '第二处后面跟着另外一句收尾。'
+ONCE_SOLO = '这一句采集那会儿整篇只有它自己一处'
+ONCE_SOLO_LEAD = '它前面这句话是它的前文:'
+ONCE_SOLO_TAIL = '它后面这句话是它的后文。'
+ONCE_BLOCK = (f'{ONCE_LEAD_1}{ONCE_Q}{ONCE_TAIL_1}\n\n'
+              f'{ONCE_LEAD_2}{ONCE_Q}{ONCE_TAIL_2}\n\n'
+              f'{ONCE_SOLO_LEAD}{ONCE_SOLO}{ONCE_SOLO_TAIL}')
+
 FEED_ITEM = {
     'url': 'https://example.org/skill-pipeline',
     'title': '一条把书变成技能的流水线',
     'author': '某个博客',
     'body': ('开头一段交代背景,先讲为什么要这么做。\n\n'
+             f'{SNIP_LIST},在卡片上就看得见。\n\n'
+             f'{SNIP_LIST_DUP},整篇里另有一处。\n\n'
+             f'{SNIP_LIST_MARKED}。\n\n'
              f'{SNIP_FEED},剩下的都是工程问题。\n\n'
              f'请执行 {SNIP_MARKED} 并核对结果。\n\n'
              f'{SNIP_FRESH}。\n\n'
@@ -156,6 +192,12 @@ FEED_ITEM = {
              f'{SNIP_RACE}。\n\n'
              f'{SNIP_UNREADABLE}。\n\n'
              f'## 怎么都分不出来的两处\n\n{DEAD_BLOCK}\n\n'
+             # 这一组同时摊在日报和这一篇里:**采集那一刻有几处**这件事,共享层和
+             # 独立阅读页各自记一次、各自按它判一次回跳
+             f'## 采集那会儿有几处\n\n{ONCE_BLOCK}\n\n'
+             # `SNIP_LIST_DUP` 的第二处:远在卡片那 380 字之外,所以只有按**整篇**
+             # 算才看得见它
+             f'{SNIP_LIST_DUP},这儿就是那另一处。\n\n'
              f'## 甲一节\n\n铺垫一句话。{MARK_DUP}{MARK_TAIL_A}\n\n'
              f'## 乙一节\n\n铺垫一句话。{MARK_DUP}{MARK_TAIL_B}\n'),
 }
@@ -263,6 +305,18 @@ SNIP_PARA_2 = '下一段这句跟它之间空着一行'
 SNIP_BR_SEEN = f'{SNIP_BR_1}\n{SNIP_BR_2}'
 SNIP_PARA_SEEN = f'{SNIP_PARA_1}。\n\n{SNIP_PARA_2}'
 
+# **第五轮:屏幕上分了行,而分行是 CSS 说的,标签名上看不出来。** 这两句各装在一个
+# `<span>` 里(标签名是行内元素),样式把它们摊成了两行 —— 浏览器照 CSS 算,给的是
+# 两行;照标签名列表那份退路算,给的是接成一行的那一份。谁是权威这件事只有这一格
+# 验得到:`<br>` 和段落那两格在两套算法下答案一样。审查实测:按标签名判的那一版
+# 把两行存成一行,而屏幕上、剪贴板里都是两行。
+# **样式由探针现注入**(页面上本来没有这条规则):要的就是「产品代码一个字不改、
+# 只有 CSS 变了」这个形状 —— 用户样式、主题、将来某次 CSS 改动都是这个形状。
+CHAT_QUESTION_5 = '那套方案还有哪两条注意事项?'
+SNIP_CSS_CLASS = 'snip-css-probe'
+SNIP_CSS_1 = 'CSS 把这一句单独摊成了一行'
+SNIP_CSS_2 = '它下面这一句是另一行,标签名上看不出来'
+
 # frontmatter 的键按 scripts/gzh_projects_export.py 来:`project` 缺了
 # `kb/projects.py` 的 `_load_entry` 直接判成"不是条目"、整个图鉴里看不到它。
 _TOOL_MD = """---
@@ -351,6 +405,10 @@ window_until: {until}
 
 {ambi}
 
+## 采集那会儿有几处
+
+{once}
+
 ## 素材清单
 
 1. [一条把书变成技能的流水线](https://example.org/skill-pipeline) — 某个博客
@@ -380,80 +438,9 @@ def _stub_stream(conn, q, model='', history=None):
     yield {'type': 'delta', 'text': STREAM_TAIL}
 
 
-# ── 沙箱独有的两条路由:把「盘上那一篇换了一版」摆成确定的时序 ───────────────
-# **它们一个响应都不伪造。** `touch` 真往那个文件末尾续一段(正文补抓、译文写回
-# 落盘之后就是这个末态);`swap-after-read` 只是把 touch 的时刻挪到「那一次
-# `/api/doc` 的响应已经生成好、客户端还没发出 POST」之间 —— 核对读到的是**那一刻
-# 盘上真有的**那一份,随后文件真的变了。产品服务里没有这两条路由。
-TOUCH_MARK = '补抓之后这一段才出现在盘上那一篇里'
-_touched = {'n': 0}
-_swap_armed: set[str] = set()
-
-
-def _touch_file(vault: Path, rel: str) -> str:
-    """真改盘上那一篇(末尾续一段),回它改完之后的正文版本号。"""
-    from kb.scanner import body_version, read_md_text
-    full = vault / rel
-    _touched['n'] += 1
-    text = read_md_text(full) + f"\n\n{TOUCH_MARK}(第 {_touched['n']} 次)\n"
-    full.write_text(text, encoding='utf-8')
-    return body_version(text)
-
-
-def install_test_routes(app, vault: Path) -> None:
-    from fastapi import HTTPException, Request
-
-    @app.post('/__snip__/touch')
-    def _touch(path: str):
-        return {'version': _touch_file(vault, path)}
-
-    @app.post('/__snip__/drop')
-    def _drop(path: str, text: str):
-        """把盘上那一篇里的一句话**真删掉**(`touch` 只在末尾续,原句还在)。
-
-        两种改稿的后果不一样,所以要两条路由:续一段之后那段收藏照旧定位得到
-        (该放行),删掉之后它在新那一版里压根不存在(该拒)。回新的正文版本号。
-        """
-        from kb.scanner import body_version, read_md_text
-        full = vault / path
-        body = read_md_text(full)
-        if text not in body:
-            raise HTTPException(404, f'那一篇里没有这句话:{text[:20]}')
-        body = body.replace(text, '这一句已经被改稿换掉了')
-        full.write_text(body, encoding='utf-8')
-        return {'version': body_version(body)}
-
-    @app.post('/__snip__/swap-after-read')
-    def _arm(path: str):
-        _swap_armed.add(path)
-        return {'armed': path}
-
-    @app.post('/__snip__/unreadable')
-    def _unreadable(path: str):
-        """把那个路径**换成一个同名目录**,再调一次换回来(内容一个字节不变)。
-
-        要的是「读到了一个不是 FileNotFound 的 OSError」—— 权限、网盘没挂上、
-        IO 错都是这一类,而目录这一种在任何用户下都稳定可复现(chmod 000 对
-        root 无效)。
-        """
-        full, aside = vault / path, vault / (path + '.aside')
-        if full.is_dir():
-            full.rmdir()
-            aside.rename(full)
-            return {'readable': True}
-        full.rename(aside)
-        full.mkdir()
-        return {'readable': False}
-
-    @app.middleware('http')
-    async def _swap_after_doc_read(request: Request, call_next):
-        resp = await call_next(request)
-        rel = request.query_params.get('path', '')
-        if request.url.path == '/api/doc' and rel in _swap_armed:
-            _swap_armed.discard(rel)
-            # 响应体在路由里就序列化好了,所以客户端拿到的仍是改之前那一份
-            _touch_file(vault, rel)
-        return resp
+# 沙箱独有的那几条路由(`touch` / `drop` / `swap-after-read` / `unreadable`)搬去了
+# `tests/snip_sandbox_routes.py` —— 这一份到了行数上限。它们一个响应都不伪造,
+# 只是把「盘上那一篇真的换了一版」摆成确定的时序,理由写在那一头。
 
 
 def build(vault: Path) -> dict:
@@ -510,7 +497,7 @@ def build(vault: Path) -> dict:
     (daily_dir / f'{day}.md').write_text(_DAILY_MD.format(
         day=day, snip=SNIP_DAILY, dup=SNIP_DUP, slow=SNIP_DAILY_SLOW,
         code=SNIP_CODE, ambi=AMBI_BLOCK, wide=WIDE_BLOCK, conf=CONF_BLOCK,
-        disj=DISJ_BLOCK,
+        disj=DISJ_BLOCK, once=ONCE_BLOCK,
         lead1=DUP_LEAD_FIRST, lead2=DUP_LEAD_SECOND,
         since=(now - timedelta(days=1)).strftime(stamp),
         until=now.strftime(stamp),
@@ -520,7 +507,7 @@ def build(vault: Path) -> dict:
     (daily_dir / f'{old_day}.md').write_text(_DAILY_MD.format(
         day=old_day, snip=SNIP_DAILY_OLD, dup=SNIP_DUP, slow=SNIP_DAILY_SLOW,
         code=SNIP_CODE, ambi=AMBI_BLOCK, wide=WIDE_BLOCK, conf=CONF_BLOCK,
-        disj=DISJ_BLOCK,
+        disj=DISJ_BLOCK, once=ONCE_BLOCK,
         lead1=DUP_LEAD_FIRST, lead2=DUP_LEAD_SECOND,
         since=(now - timedelta(days=2)).strftime(stamp),
         until=(now - timedelta(days=1)).strftime(stamp),
@@ -568,6 +555,14 @@ def build(vault: Path) -> dict:
             " VALUES (?, 'assistant', ?, 'stub/none', ?)",
             (cid, f'{SNIP_BR_1}<br>{SNIP_BR_2}。\n\n'
                   f'{SNIP_PARA_1}。\n\n{SNIP_PARA_2}。', iso))
+        conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, created_at)"
+            " VALUES (?, 'user', ?, ?)", (cid, CHAT_QUESTION_5, iso))
+        conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, model, created_at)"
+            " VALUES (?, 'assistant', ?, 'stub/none', ?)",
+            (cid, f'<span class="{SNIP_CSS_CLASS}">{SNIP_CSS_1}</span>'
+                  f'<span class="{SNIP_CSS_CLASS}">{SNIP_CSS_2}</span>', iso))
         conn.commit()
     finally:
         conn.close()
@@ -604,7 +599,10 @@ def build(vault: Path) -> dict:
             'snipStale': SNIP_STALE, 'hangMark': HANG_MARK,
             'widePrefix': 'x' * 29, 'refTitle': FEED_ITEM['title'],
             'longUrlKey': longurl['key'], 'snipLongUrl': SNIP_LONGURL,
-            'snipChat3': SNIP_CHAT_3,
+            'snipChat3': SNIP_CHAT_3, 'snipList': SNIP_LIST,
+            'snipListDup': SNIP_LIST_DUP, 'snipListMarked': SNIP_LIST_MARKED,
+            'cssClass': SNIP_CSS_CLASS, 'snipCss1': SNIP_CSS_1, 'snipCss2': SNIP_CSS_2,
+            'onceQ': ONCE_Q, 'onceSolo': ONCE_SOLO,
             'swapKey': swap['key'], 'swapUrl': FEED_SWAP['url'],
             'snipSwap': SNIP_SWAP, 'snipWide': SNIP_WIDE,
             'confQ': CONF_Q, 'confP': CONF_LEAD_1[:30], 'confS': CONF_TAIL_2[:30],
@@ -629,6 +627,7 @@ def main() -> None:
     args = parser.parse_args()
     sys.path.insert(0, str(ROOT))
     from tests.fixture_root import fixture_root
+    from tests.snip_sandbox_routes import install_test_routes
     # 临时库优先由父进程拥有:口径和理由都在 tests/fixture_root.py
     with contextlib.ExitStack() as stack:
         temp = fixture_root(stack, 'kb-snip-qa-')

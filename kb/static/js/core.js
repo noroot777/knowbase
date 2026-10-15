@@ -160,6 +160,11 @@ document.addEventListener('click', e => {
 
 let searchAbort = null;
 let searchVersion = 0;
+/** 这一屏搜索结果的原始命中,按卡片上的 `data-hit` 下标取。
+ *  「收藏此段」要用它:卡片里那段 `.snippet` 是**命中那一篇正文的一截真原文**,
+ *  收藏得记下它出自哪一篇(path/标题/链接)。和 DOM 一起整块换,所以下标不会错位
+ *  (注册在 `kb/static/js/snip_cards.js`)。*/
+let searchHits = [];
 const SEARCH_WELCOME = $('results').innerHTML;
 // 条目化衍生条目的标题本身就是「名字:摘要」,照渲染的话同一句话在标题正下方
 // 又出现一遍 —— 一屏三条结果里有三条在复读自己。标题已经包含摘要时就不出这一行。
@@ -209,8 +214,9 @@ async function doSearch() {
     return;
   }
   // 命中里的标题/账号/摘要/片段/实体都是被索引的外部内容,拼进 innerHTML 前一律转义
-  $('results').innerHTML = `<p class="search-count">找到 ${res.hits.length} 条相关内容 · 点击标题阅读全文</p>` + res.hits.map(h => `
-    <div class="hit">
+  searchHits = res.hits;
+  $('results').innerHTML = `<p class="search-count">找到 ${res.hits.length} 条相关内容 · 点击标题阅读全文</p>` + res.hits.map((h, i) => `
+    <div class="hit" data-hit="${i}">
       <h3>${docA(h, h.title)}</h3>
       <div class="meta">
         <span>${esc(h.account || '')}</span><span>${esc((h.published || '').slice(0, 10))}</span>
@@ -223,7 +229,8 @@ async function doSearch() {
               onclick="toggleFav(this)">${favSet.has(h.path) ? '★ 已收藏' : '☆ 收藏'}</button>
       </div>
       ${dupSummary(h) ? '' : `<div class="summary">${esc(h.summary)}</div>`}
-      <div class="snippet">${esc((h.best_chunk || '').slice(0, 160))}…</div>
+      <div class="snippet">${esc((h.best_chunk || '').slice(0, 160))}${
+        (h.best_chunk || '').length > 160 ? '<span class="snip-more">…</span>' : ''}</div>
       ${h.entities.length ? `<div class="ents">${h.entities.map(e =>
         `<button class="ent" data-ent="${esc(e)}">${esc(e)}</button>`).join('')}</div>` : ''}
     </div>`).join('');
