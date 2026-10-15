@@ -139,10 +139,9 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
 
     **进来就在当日账本上开一轮**(`fetch_rounds.open_round`):「今天第几次抓取」
     由抓取自己登记,不由后面哪个阶段的产出反推 —— 一次什么都没抓到的抓取也是
-    一次抓取,而只勾了索引的那种运行不是。
-
-    开轮还要告诉账本**这次运行后面跑不跑物化**:两种运行的账本行长得一样,而
-    一个的 0 条是确定的、另一个是「不可确认」(见 `fetch_rounds.open_round`)。
+    一次抓取,而只勾了索引的那种运行不是。开轮还要告诉账本**这次运行后面跑不跑
+    物化**:两种运行的账本行长得一样,而一个的 0 条是确定的、另一个是
+    「不可确认」(见 `fetch_rounds.open_round`)。
     """
     from kb import fetch_rounds
 
@@ -173,15 +172,19 @@ def _run_export(crawl_filter: dict | str | None = None) -> None:
     形态在 `docs/decisions/daily.md`。**每个来源各记一次、记在自己的 `finally`
     里**:后一个炸了不该抹掉前面那几个真落下来的文章,而炸掉的那个要留一笔
     「不可确认」—— 它可能已经写了一半。
+
+    **「交完了」是循环走完之后单独记的一行**(`note_end`),不是某个来源的回执:
+    空回执只是起点,把收到回执当成交完的话,进程在中途没了就留下一个**确定的
+    0 条**(理由和实测形态在 `fetch_rounds.note_end`)。
     """
     from kb import fetch_rounds
 
     key = _round_key()
-    # 先落一张空回执:成果从「确定的空集」起步,各来源的回执并进来。一个来源都
-    # 没选中时它就是最终结论(确定 0 条,不是不可确认)。
+    # 先落一张空回执:成果从「确定的空集」起步,各来源的回执并进来。
     fetch_rounds.note_new(key, ())
     _per_channel("export", crawl_filter,
                  lambda collector, scope: fetch_rounds.note(key, collector.materialize))
+    fetch_rounds.note_end(key)
 
 
 class _StopWhileWaiting(Exception):

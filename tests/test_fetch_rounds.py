@@ -52,11 +52,13 @@ class RoundBookTests(_Base):
         day = T('2026-09-29 09:00')
         fetch_rounds.open_round('batch-a', day)
         fetch_rounds.note_new('batch-a', {f'source/rss/p{i}.md' for i in range(9)})
+        fetch_rounds.note_end('batch-a')
         self.assertEqual({'n': 1, 'added': 9, 'partial': False, 'at': '09:00'},
                          fetch_rounds.today(day))
         later = T('2026-09-29 15:30')
         fetch_rounds.open_round('batch-b', later)
         fetch_rounds.note_new('batch-b', {'source/rss/q1.md', 'source/rss/q2.md'})
+        fetch_rounds.note_end('batch-b')
         self.assertEqual({'n': 2, 'added': 2, 'partial': False, 'at': '15:30'},
                          fetch_rounds.today(later))
 
@@ -67,6 +69,7 @@ class RoundBookTests(_Base):
         for _ in range(3):
             fetch_rounds.open_round('batch-a', day)
         fetch_rounds.note_new('batch-a', {f'source/rss/{c}.md' for c in 'abcd'})
+        fetch_rounds.note_end('batch-a')
         self.assertEqual({'n': 1, 'added': 4, 'partial': False, 'at': '09:00'},
                          fetch_rounds.today(day))
 
@@ -84,6 +87,7 @@ class RoundBookTests(_Base):
         day = T('2026-09-29 09:00')
         fetch_rounds.open_round('batch-a', day)
         fetch_rounds.note_new('batch-a', ())
+        fetch_rounds.note_end('batch-a')
         self.assertEqual({'n': 1, 'added': 0, 'partial': False, 'at': '09:00'},
                          fetch_rounds.today(day))
 
@@ -119,6 +123,7 @@ class RoundBookTests(_Base):
         归属)。按"现在是今天"去找轮次的话,这一轮永远停在 0 条。"""
         fetch_rounds.open_round('batch-a', T('2026-09-29 23:59'))
         fetch_rounds.note_new('batch-a', {'source/rss/a.md', 'source/rss/b.md', 'source/rss/c.md'})
+        fetch_rounds.note_end('batch-a')
         self.assertEqual({'n': 1, 'added': 3, 'partial': False, 'at': '23:59'},
                          fetch_rounds.today(T('2026-09-29 23:59')))
         # 过了零点:那一轮算在 29 日,30 日这边还没有抓取
@@ -131,6 +136,7 @@ class RoundBookTests(_Base):
         at = datetime(2026, 9, 29, 16, 30, tzinfo=timezone.utc)   # 沪 09-30 00:30
         fetch_rounds.open_round('batch-a', at)
         fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_end('batch-a')
         self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '00:30'},
                          fetch_rounds.today(at))
         self.assertEqual({'n': 0, 'added': 0, 'partial': False, 'at': ''},
@@ -210,9 +216,87 @@ class RoundBookTests(_Base):
         fetch_rounds.open_round('batch-a', day)
         with patch.object(fetch_rounds, '_append', Mock(return_value=False)):
             fetch_rounds.note_new('batch-a', {'source/rss/a.md', 'source/rss/b.md', 'source/rss/c.md'})
+            fetch_rounds.note_end('batch-a')
             self.assertIsNone(fetch_rounds.today(day))         # 不是 0 条
         fetch_rounds.open_round('batch-a', day)                # 磁盘好了
         self.assertEqual({'n': 1, 'added': 3, 'partial': False, 'at': '09:00'},
+                         fetch_rounds.today(day))
+
+
+class CompletenessIsAnExplicitEndTests(_Base):
+    """**这一组是第 1 轮审查 F1 的要害**:盘上那几行可以全部合法、也收到过回执,
+    却仍然不是「这一轮交完了」。
+
+    两种形态都是实测的,而且都落在**确定**那一档上(所以刷新和重试都纠不回来):
+
+    - 导出阶段进门先落一张空回执,于是「刚开始」和「全部交完」在盘上长得一模
+      一样;随后生产者真写出了文章、进程却在交回执前没了(实测 `os._exit(23)`,
+      vault 多了 1 篇,重启读出 `{'n':1,'added':0,'partial':False}`)。
+    - 多来源里第一个来源交完回执就足以让整轮看着完整,第二个还没开口时进程没了,
+      已知的**下界**被当成了总数。
+
+    判据一律落在面板上那个数是「确定 N 条」还是「至少 N 条」,不验标志位。
+    """
+
+    def test_a_receipt_alone_does_not_finish_the_round(self):
+        """开轮 + 导出阶段进门那张空回执 = 「刚开始」,不是「确定 0 条」;
+        **反过来钉一边**:逐来源循环走完之后记上那一行,它才是确定的 0 条。"""
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-a', day)
+        fetch_rounds.note_new('batch-a', ())
+        self.assertEqual({'n': 1, 'added': 0, 'partial': True, 'at': '09:00'},
+                         fetch_rounds.today(day))
+        fetch_rounds.note_end('batch-a')
+        self.assertEqual({'n': 1, 'added': 0, 'partial': False, 'at': '09:00'},
+                         fetch_rounds.today(day))
+
+    def test_a_round_that_died_between_two_sources_reports_a_lower_bound(self):
+        """勾了两个来源,第一个交回 1 篇、第二个还没开口时进程没了 —— 1 是
+        **下界**(面板写「至少 +1 条」),不是确定的总数。"""
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-a', day)
+        fetch_rounds.note_new('batch-a', ())
+        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        self.assertEqual({'n': 1, 'added': 1, 'partial': True, 'at': '09:00'},
+                         fetch_rounds.today(day))
+
+    def test_a_complete_round_stays_complete_across_a_rotation(self):
+        """轮换是整份重写,它得把「交完了」那一位抄过去 —— 漏了它,一轮本来完整
+        的抓取过一次台面下的维护就变成「至少 N 条」,而用户只会看到数字自己变了。
+
+        顺带钉住轮换本身确实发生了(过期那一轮被清出去了)。"""
+        fetch_rounds.open_round('old', T('2026-09-28 09:00'))
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-a', day)
+        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_end('batch-a')
+        fetch_rounds.open_round('batch-c', T('2026-09-30 10:00'))   # 这一下触发轮换
+        self.assertNotIn('"old"', (self.root / fetch_rounds.FILE_NAME)
+                         .read_text(encoding='utf-8'))
+        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+                         fetch_rounds.today(day))
+
+    def test_a_round_that_lost_the_lock_is_not_rotated_away(self):
+        """**第 1 轮审查实测的那一条**:取不到旁挂锁时还继续做覆盖式轮换,会把
+        另一个进程**已经确认过的整轮**抹掉 —— 剩下的 JSON 行行合法,`today()`
+        发现不了,结论从 `added=1` 变成确定的 0 条。
+
+        失锁时:账本一个字都不许被重写,展示降级成「读不出来」;锁一好,先前
+        确认过的那一轮原样还在。"""
+        fetch_rounds.open_round('old', T('2026-09-28 09:00'))
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-a', day)
+        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_end('batch-a')
+        before = (self.root / fetch_rounds.FILE_NAME).read_text(encoding='utf-8')
+        (self.root / fetch_rounds.LOCK_NAME).unlink()
+        (self.root / fetch_rounds.LOCK_NAME).mkdir()        # 旁挂锁取不到了
+        fetch_rounds.open_round('batch-c', T('2026-09-30 10:00'))
+        now = (self.root / fetch_rounds.FILE_NAME).read_text(encoding='utf-8')
+        self.assertTrue(now.startswith(before))             # 没有被整份重写
+        self.assertIsNone(fetch_rounds.today(day))           # 这期间只能说读不出来
+        (self.root / fetch_rounds.LOCK_NAME).rmdir()
+        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
                          fetch_rounds.today(day))
 
 
@@ -265,6 +349,7 @@ class RecoveryIsExactlyOnceTests(unittest.TestCase):
         self.data.unlink()
         self.data.mkdir()
         fetch_rounds.note_new('batch-a', self._paths('a', 'b'))
+        fetch_rounds.note_end('batch-a')
         self.assertEqual({'n': 1, 'added': 2, 'partial': False, 'at': '09:00'},
                          fetch_rounds.today(self.day))
 
@@ -272,30 +357,40 @@ class RecoveryIsExactlyOnceTests(unittest.TestCase):
         """`write` 成功、`fsync` 报错:那一行其实已经在文件里,重试再追加一遍。
 
         实测的旧末态:2 篇报成 `added: 4`。现在回执存路径、折叠取并集,所以同一
-        行出现两次和出现一次是同一个结论。"""
+        行出现两次和出现一次是同一个结论。
+
+        顺带钉住 N4 那一条:故障期间 `today()` 答「不可确认」,**故障一好,下一次
+        读自己就把攥着的行补写下去**(上一版要等下一次抓取才补,面板在这期间
+        一直写「读不出来」)。"""
         fetch_rounds.open_round('batch-a', self.day)
         with patch.object(os, 'fsync', Mock(side_effect=OSError('fsync 失败'))):
             fetch_rounds.note_new('batch-a', self._paths('a', 'b'))
+            fetch_rounds.note_end('batch-a')
+            self.assertIsNone(fetch_rounds.today(self.day))   # 故障还在:不可确认
         book = (self.data / fetch_rounds.FILE_NAME).read_text(encoding='utf-8')
         self.assertIn('source/rss/a.md', book)          # 行其实已经写进去了
-        self.assertIsNone(fetch_rounds.today(self.day))  # 但我们不知道,先说不可确认
-        fetch_rounds.open_round('batch-a', self.day)     # 顺手重试那一行
+        got = fetch_rounds.today(self.day)              # 故障好了:这一下自己补写
         lines = (self.data / fetch_rounds.FILE_NAME).read_text(
             encoding='utf-8').splitlines()
-        self.assertEqual(2, sum(1 for l in lines if 'source/rss/a.md' in l))
-        self.assertEqual({'n': 1, 'added': 2, 'partial': False, 'at': '09:00'},
-                         fetch_rounds.today(self.day))
+        # 同一行确实重复落进了文件(不重复的话这条用例证明不了去重)
+        self.assertGreaterEqual(sum(1 for l in lines if 'source/rss/a.md' in l), 2)
+        self.assertEqual({'n': 1, 'added': 2, 'partial': False, 'at': '09:00'}, got)
 
     def test_rows_that_had_to_be_dropped_keep_the_round_unconfirmed(self):
         """磁盘一直写不进去,攥在手里的行超过上限被挤掉 —— 挤掉的换成「不可确认」。
 
         旧实现直接切掉尾部:剩下的补写成功之后 `today()` 会重新给出一个**确定**、
-        但已经少记的数(这里是 70 篇只剩 63 篇),而面板上一点异样都看不出来。"""
+        但已经少记的数(这里是 70 篇只剩 63 篇),而面板上一点异样都看不出来。
+
+        **这一轮的物化确实交完了**(下面补记了结束行),所以 `partial` 只可能来自
+        挤掉那几行换上的标记 —— 不补这一行的话,「没交完」会把缺口盖住,摘掉标记
+        的注入照样是绿的(第 1 轮审查改完 `end` 之后实测如此)。"""
         fetch_rounds.open_round('batch-a', self.day)
         with patch.object(fetch_rounds, '_append', Mock(return_value=False)):
             for i in range(70):
                 fetch_rounds.note_new('batch-a', self._paths(f'x{i}'))
         fetch_rounds.open_round('batch-a', self.day)     # 磁盘好了,补写
+        fetch_rounds.note_end('batch-a')                 # 逐来源循环确实走完了
         got = fetch_rounds.today(self.day)
         self.assertEqual(1, got['n'])                    # 开轮行没被挤掉
         self.assertLess(got['added'], 70)                # 确实少记了
@@ -365,6 +460,7 @@ class FetchFactIsNotReportFactTests(_Base):
     def _two_fetched(self, day):
         fetch_rounds.open_round('batch-a', day)
         fetch_rounds.note_new('batch-a', {'source/rss/a.md', 'source/rss/b.md'})
+        fetch_rounds.note_end('batch-a')          # 物化这一段明确走完了
         self._doc('source/rss/a.md', '2026-09-28 09:00')
         self._doc('source/rss/b.md', '2026-09-28 10:00')
         return daily.pending(first_days=1, now=day)

@@ -15,6 +15,9 @@ let dailyLoaded = false, dailyDirty = false, dailySaving = false, dailyBusy = fa
 // 没有」,共享层的新事实到了要不要替这张表单收尾,得先知道它还在不在读。
 let dailySchedReads = 0;
 let dailyWindowDirty = false;
+// `/api/daily/window` 的**代次**(同 `schedules.js` 那道门):发请求前占一个号,
+// 回包落地时号被更晚的读取顶掉就整趟作废 —— 不写事实、也不填输入框。
+let dailyWindowSeq = 0;
 
 function dailyActive() { return activeTab === 'daily'; }
 
@@ -139,13 +142,19 @@ async function fetchDailyWindow(fillInputs) {
   // (审查实测:API 已返回 n=2,按钮停在「第 1 次抓取 · +3 条」)。
   //
   // `fillInputs` 另外由调用方给:空闲轮询一律不填,因为默认区间的截止时刻是
-  // "此刻",每跳重填一次会让展开着的「改区间」里的值自己往前跳。
+  // "此刻",每跳重填一次会让展开着的「改区间」里的值自己往前跳。**等回包的那段
+  // 时间里用户可能刚开始填**,所以落地前再认一次 `dailyWindowDirty` —— 按发请求
+  // 时算出来的旧判据覆盖,等于把他刚填的两个时刻吞掉(审查 N2)。
+  const seq = ++dailyWindowSeq;
   let got;
   try {
     got = await pipeJson('/api/daily/window');
   } catch { return false; }
+  // 被更晚的那趟顶掉:整趟作废。照自己这份旧回包画会把「第 2 次抓取」退回
+  // 「第 1 次」,而新事实已经显示出来了(审查 N2)。
+  if (seq !== dailyWindowSeq) return false;
   dailyWindow = got;
-  if (fillInputs) {
+  if (fillInputs && !dailyWindowDirty) {
     $('daily-since').value = got.since;
     $('daily-until').value = got.until;
   }

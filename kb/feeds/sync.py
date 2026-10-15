@@ -549,11 +549,12 @@ def _export(kind: str, hold_untranslated: bool = False,
     with reg.db() as c:
         rows = c.execute(f'SELECT * {base}', args).fetchall()
     # written:这一轮**新落下**的那几篇(VAULT_ROOT 相对路径),回执交给上层记进
-    # 当日抓取账本(口径见 `kb.collectors` 的 materialize 契约)。两道都要卡:
-    # 只有 os.replace 成功、feed_items 也更新过的才算(写一半抛异常的不算);
-    # 而且**只算 vault 里原来没有这个路径的** —— 导出队列是 `exported_hash<>
-    # content_hash`,正文补抓、译文回写都会让老文章重新写一遍同一个路径,那不是
-    # 这一轮抓到的,算进去同一篇会连着好几天被报成"刚抓到"。
+    # 当日抓取账本(口径见 `kb.collectors` 的 materialize 契约)。判据是
+    # 「`os.replace` 成功」这一刻 —— 文件进了 vault 就算,后面那次入库确认失败
+    # 不许把它从事实里抹掉(理由在循环里那条)。而且**只算 vault 里原来没有这个
+    # 路径的** —— 导出队列是 `exported_hash<>content_hash`,正文补抓、译文回写
+    # 都会让老文章重新写一遍同一个路径,那不是这一轮抓到的,算进去同一篇会连着
+    # 好几天被报成"刚抓到"。
     written: set[str] = set()
     errors, done = [], 0
     root = VAULT_ROOT / 'source' / kind
@@ -608,10 +609,16 @@ def _export(kind: str, hold_untranslated: bool = False,
                 temp = Path(f.name)
                 f.write(text)
             os.replace(temp, path)
-            with reg.db() as c:
-                c.execute('UPDATE feed_items SET exported_hash=content_hash,path=? WHERE key=?', (rel,item['key']))
+            # **文件一落进 vault 就进回执,排在入库确认前面。** 这一篇从此是
+            # 既成事实:它会被索引、会进当天日报取材。放在 UPDATE 后面的那一版
+            # 里,`feed_items` 确认失败会让它从成果事实里消失(异常被下面接成
+            # 逐项错误,回执照旧返回一个看着确定的集合),而重导时它已经不是新
+            # 文件(`fresh=False`)—— 这一篇永远补不回账(第 1 轮审查实测:
+            # vault 多了 1 篇,药丸永久写 `added=0, partial=false`)。
             if fresh:
                 written.add(rel)
+            with reg.db() as c:
+                c.execute('UPDATE feed_items SET exported_hash=content_hash,path=? WHERE key=?', (rel,item['key']))
             done += 1
         except Exception as e:
             errors.append({'title': item['title'], 'reason': str(e)[:300]})

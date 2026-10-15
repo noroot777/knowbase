@@ -94,4 +94,3 @@ class _Fake:
         if self.boom:
             raise RuntimeError('某个来源炸了')
         return frozenset(fresh) if self.receipt else None
-

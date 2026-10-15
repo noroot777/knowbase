@@ -98,6 +98,32 @@ class ReceiptIsTheOnlyEvidenceTests(_Base):
                   _Fake(self, 'wechat_local', writes=['source/rss/b.md'], boom=True))
         self.assertEqual({'n': 1, 'added': 1, 'partial': True}, self._got())
 
+    def test_a_run_that_vanished_before_the_stage_finished_is_a_lower_bound(self):
+        """真实 `_run_export` 跑到一半进程没了(这里在逐来源循环之后定点抛
+        `KeyboardInterrupt`,等价于第 1 轮审查用的 `os._exit(23)`):vault 里真多
+        了 1 篇,账本只能说「至少 +1 条」。
+
+        旧实现这里报 `{'n':1,'added':0,'partial':False}` —— 进门那张空回执已经把
+        「不可确认」解除了,所以是个**确定**的 0 条。"""
+        fake = _Fake(self, 'rss', writes=['source/rss/a.md'])
+        real = pipeline_stages._per_channel
+
+        def _die(stage, flt, fn):
+            real(stage, flt, fn)
+            if stage == 'export':
+                raise KeyboardInterrupt('进程没了')
+
+        with patch.object(pipeline_stages, 'crawl_channels',
+                          Mock(return_value=[{'channel': 'rss', 'accounts': []}])), \
+                patch.object(pipeline_stages, 'active_collector',
+                             Mock(return_value=fake)), \
+                patch.object(pipeline_stages, '_per_channel', _die):
+            pipeline_stages._run_crawl()
+            with self.assertRaises(KeyboardInterrupt):
+                pipeline_stages._run_export()
+        self.assertTrue((self.vault / 'source/rss/a.md').exists())
+        self.assertEqual({'n': 1, 'added': 1, 'partial': True}, self._got())
+
     def test_two_sources_that_both_report_add_up_exactly(self):
         """反过来钉一边:两个来源都交得出回执时,总数是确定的并集。"""
         self._run(_Fake(self, 'rss', writes=['source/rss/a.md']),
@@ -263,6 +289,29 @@ class TheRealExporterReportsOnlyFreshFilesTests(_Base):
         path = self.vault / next(iter(first))
         self.assertEqual(frozenset(), again)
         self.assertTrue(path.exists())          # 文件真又写了一遍,只是不算新抓到
+
+    def test_a_file_that_landed_stays_in_the_receipt_when_the_confirm_fails(self):
+        """**第 1 轮审查实测的那一条**:md 已经替换进 vault,随后 `feed_items` 的
+        确认(`exported_hash`)失败 —— 这一篇必须留在回执里。
+
+        旧判据是"两道都要卡"(文件落了 + 入库确认也成了),于是确认那一下的异常被
+        接成逐项错误、回执照旧返回一个看着**确定**的空集;而重导时它已经不是新
+        文件(`fresh=False`),这一篇**永远**补不回账(实测:vault 多了 1 篇,
+        药丸永久写「0 条」且自称确定,刷新和重试都纠不回来)。
+
+        反过来钉一边:它已经记过一次账了,确认恢复之后重导不许再算一次。"""
+        self.reg.put_items(self.source, self._entry())
+        with self.reg.db() as c:
+            c.execute("CREATE TRIGGER no_confirm BEFORE UPDATE OF exported_hash "
+                      "ON feed_items BEGIN SELECT RAISE(ABORT, '确认失败'); END")
+        got = self.fsync.export('rss')
+        self.assertEqual(1, len(got))                          # 回执里有它
+        self.assertTrue((self.vault / next(iter(got))).exists())  # 文件真在 vault 里
+        with self.reg.db() as c:
+            self.assertEqual([''], [r[0] for r in c.execute(
+                "SELECT exported_hash FROM feed_items WHERE kind='rss'")])
+            c.execute('DROP TRIGGER no_confirm')
+        self.assertEqual(frozenset(), self.fsync.export('rss'))
 
 
 class FetchIsTheExportsOwnResultTests(_Base):

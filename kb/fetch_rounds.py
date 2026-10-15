@@ -49,11 +49,26 @@
 - 攥在手里没落下去的那几行不许悄悄丢。超过 `_KEEP_UNSAVED` 时丢掉的不是数据
   而是换成一条「这一轮不可确认」的标记,**投影不完整就不许解除「不可确认」**。
 - 读、追加、轮换全在同一把文件锁里(`_locked`)。不然进程 A 读完旧账、进程 B
-  成功追加、A 再按旧快照轮换,就把 B 已经确认过的行覆盖掉了。
+  成功追加、A 再按旧快照轮换,就把 B 已经确认过的行覆盖掉了。**锁没取到的时候
+  只许追加,不许轮换、也不许给出确定结论** —— 覆盖式轮换拿一份没被保护的旧
+  快照写回去,能把另一个进程已经确认过的整轮抹掉,而剩下的 JSON 行行合法、
+  `today()` 发现不了(实测)。
+
+**「收到过回执」不等于「这一轮交完了」。** 完整性只认那条明确的结束行
+(`note_end`,写在逐来源循环走完之后):导出阶段进门先落一张空回执,所以
+「刚开始」和「全部交完」在盘上长得一模一样;会物化却没等到结束行的轮次一律按
+**下界**报(面板说「至少 +N 条」)。错过的两种形态都是实测的:真实导出里
+`os._exit` 落在交回执之前,vault 多了 1 篇而重启后盘上写着确定的 0 条;多来源
+里第一个来源交完回执就让整轮看着完整,第二个还没开口时进程没了。
+
+**生产者的提交边界在「文件落进 vault」那一刻,不在它后面那次入库确认。**
+`os.replace` 一成功就进回执,随后 `feed_items` 的确认失败只是「这一篇下一轮
+还会再导一次」,不该让这篇从成果事实里消失 —— 消失之后重导时它已经不是新
+文件(`fresh=False`),这一篇永远补不回账(实测)。
 
 **只有一种情形救不回来**:写失败之后进程就没了 —— 那几行既没落盘也不在内存里。
 但这一刀落下去之后账本**不会撒谎**:开轮行上记着这次运行会不会物化(`ex`),
-会物化却一条回执都没有的轮次一律算「不可确认」,而不是算确定的 0 条。
+会物化却没有结束行的轮次一律算「不可确认」,而不是算确定的 0 条。
 
 面板那一侧怎么显示(几种说法、自定义区间、tooltip 里那句队列积压)写在
 `docs/decisions/daily.md` 的「这个计数长在生成按钮里」那一节。
@@ -101,9 +116,17 @@ def _locked(exclusive: bool):
     每 15 秒读一次账本,而维护锁会被一整轮导出持有好几分钟;反过来挂的话,
     面板要么被同步堵死,要么和管道线程凑出一个死锁。
 
-    取不到锁(目录只读、fcntl 不支持)就直接放行:账本是个展示用的东西,
-    为它把抓取拦下来不划算 —— 并发竞争的后果由上面那几条(追加、并集、
-    不可确认)兜着。
+    取不到锁(目录只读、fcntl 不支持、旁挂文件被占成了别的东西)**不拦抓取,
+    但要如实交出「这次没锁住」** —— `yield` 的就是这个布尔值。调用方据此分成
+    两档:
+
+    - **追加照做**:`O_APPEND` 的单次写不会互相截断,并集折叠又让重放幂等,
+      所以失锁时继续记成果是安全的,抓取那一侧完全不受影响。
+    - **覆盖式轮换和「给出确定结论」一律停**:轮换是整份原子替换,拿一份没被
+      保护的旧快照写回去,会把另一个进程**已经确认过的整轮**抹掉,而剩下的
+      JSON 行行合法、`today()` 发现不了(第 1 轮审查实测:失锁后轮换,
+      `acknowledged-writer` 整轮消失,结论从 `added=1` 变成确定的 0)。失锁时
+      读到的也只是「可能不全的投影」,展示要降级成「读不出来」。
     """
     fh = None
     try:
@@ -115,7 +138,7 @@ def _locked(exclusive: bool):
             fh.close()
         fh = None
     try:
-        yield
+        yield fh is not None
     finally:
         if fh is not None:
             try:
@@ -182,11 +205,18 @@ def in_scope(rel: str, prefixes=None) -> bool:
 
 
 def _fold(lines) -> tuple[list[dict], bool]:
-    """把账本每一行折成「开过哪几轮、各自新落了哪些文章」,外加一句「读全了没有」。
+    """把账本每一行折成「开过哪几轮、各自新落了哪些文章、走完了没有」,外加一句
+    「读全了没有」。
 
-    三种行:开轮(带 `day`/`at`/`ex`)、回执(带 `paths`)、不可确认标记(带
-    `partial`)。**回执取并集**,所以同一行追加两遍、同一轮被两条通道各报一次,
-    折出来的结论都一样(见模块开头那条)。
+    四种行:开轮(带 `day`/`at`/`ex`)、回执(带 `paths`)、不可确认标记(带
+    `partial`)、物化走完(带 `end`)。**回执取并集**,所以同一行追加两遍、同一轮
+    被两条通道各报一次,折出来的结论都一样(见模块开头那条)。
+
+    **`got`(收到过回执)和 `end`(明确走完了)是两件事,不许互相顶替。** 上一版
+    只有 `got`:导出阶段进门先落一张空回执,于是「刚开始」在盘上和「全部交完」
+    长得一模一样 —— 随后生产者真写出了文章、进程却没了,盘上的结论永久是
+    **确定的 0 条**(第 1 轮审查实测两个分支:预置空回执、以及多来源里第一个
+    交完回执后退出)。
 
     `ok=False` 表示有行读不出来(半截行、被改坏、成果对不上轮次)。那时这份账本
     只能说「不可确认」—— 拿认得出来的那部分冒充完整事实,就又回到了把写失败说成
@@ -208,13 +238,15 @@ def _fold(lines) -> tuple[list[dict], bool]:
             ok = False
             continue
         key = str(obj['key'])
-        if 'paths' in obj or 'partial' in obj:
+        if 'paths' in obj or 'partial' in obj or 'end' in obj:
             got = index.get(key)
             if got is None:
                 ok = False              # 有成果、却找不到它那一轮:记不全
                 continue
             if obj.get('partial'):
                 got['partial'] = True
+            if obj.get('end'):
+                got['end'] = True
             if 'paths' in obj:
                 if not isinstance(obj['paths'], list):
                     ok = False
@@ -229,7 +261,10 @@ def _fold(lines) -> tuple[list[dict], bool]:
                # 这次运行会不会物化。读不到(存量账本行)按会物化算 —— 那一侧
                # 的结论是「不可确认」,比笃定地说 0 条安全。
                'ex': bool(obj.get('ex', 1)), 'paths': set(), 'got': False,
-               'partial': False}
+               # 物化那一段**明确走完了**没有。存量账本行里没有这一位,折出来
+               # 就是 False:那几轮只能说「至少 N 条」—— 新代码确实证明不了
+               # 它们完整,这比继续笃定地报一个数安全。
+               'end': False, 'partial': False}
         rounds.append(got)
         index[key] = got
     return rounds, ok
@@ -305,17 +340,20 @@ def _flush(objs: list[dict]) -> bool:
     return False
 
 
-def _rotate(rounds: list[dict], ok: bool, at: datetime) -> None:
+def _rotate(rounds: list[dict], ok: bool, at: datetime, locked: bool) -> None:
     """把早于保留窗口的轮次清出账本(整份重写)。
 
     **读不全的时候一个字都不动**:那时我们并不知道文件里还有什么,拿认得出来的
     那部分重写回去,等于把读不出来的那几行悄悄删掉。轮换失败也不出声 ——
     最坏只是文件长一点,结论不受影响。
 
-    调用方必须已经持有独占锁,而且那把锁要罩住它前面那次 `_read`:否则另一个
-    进程在这中间追加的行会被这份旧快照覆盖掉。
+    **没锁住的时候同样一个字都不动。** 调用方必须已经持有独占锁、而且那把锁要
+    罩住它前面那次 `_read`;锁取不到时(旁挂文件被占成目录、目录只读)这一步
+    直接跳过 —— 它是整份原子替换,拿一份没被保护的旧快照写回去会把另一个进程
+    已经确认过的整轮抹掉,而剩下的行行行合法(第 1 轮审查实测)。不轮换的代价
+    只是账本多留几天的行,结论不受影响。
     """
-    if not ok:
+    if not ok or not locked:
         return
     floor = _day(at - timedelta(days=_KEEP_DAYS - 1))
     live = [r for r in rounds if r['day'] >= floor]
@@ -327,6 +365,10 @@ def _rotate(rounds: list[dict], ok: bool, at: datetime) -> None:
                       'ex': 1 if r['ex'] else 0})
         if r['got']:
             lines.append({'key': r['key'], 'paths': sorted(r['paths'])})
+        # 走完的那一位也要抄过去:漏了它,一轮本来完整的抓取过一次轮换就变成
+        # 「至少 N 条」,而轮换是台面下的维护动作,用户只会看到数字自己变了。
+        if r['end']:
+            lines.append({'key': r['key'], 'end': 1})
         if r['partial']:
             lines.append({'key': r['key'], 'partial': 1})
     try:
@@ -351,12 +393,12 @@ def open_round(key: str, now: datetime | None = None,
     if not key:
         return
     at = _now(now)
-    with _locked(True):
+    with _locked(True) as locked:
         rounds, ok = _read()
         if ok and any(r['key'] == str(key) for r in rounds):
             _flush([])                  # 顺手把攥着的那几行再试一次
             return
-        _rotate(rounds, ok, at)
+        _rotate(rounds, ok, at, locked)
         _flush([{'day': _day(at), 'key': str(key),
                  'at': at.strftime('%Y-%m-%d %H:%M'),
                  'ex': 1 if materializes else 0}])
@@ -381,16 +423,29 @@ def note_new(key: str, paths) -> None:
     """
     if not key:
         return
+    scope = _scope_prefixes()
+    keep = sorted({str(p) for p in paths if in_scope(str(p), scope)})
+    _mark(key, {'paths': keep})
+
+
+def _mark(key: str, line: dict) -> None:
+    """往某一轮上追加一行(回执 / 不可确认 / 走完了)。**口径只有这一处。**
+
+    三件事共用的那套判据:按 `key` 找轮次、**不按「今天」过滤**(23:59 开的轮次
+    00:01 才物化完,按今天找会找不到它,那一轮永远停在 0 条);没开过这一轮就
+    什么都不记(它不是一次抓取);读不全时也什么都不记 —— 状态本来就是
+    「不可确认」,往一份读不懂的账本里追加只会多一条对不上轮次的孤行。
+
+    三处各写一遍的话,早晚有一处把 `_is_open` 或者「读不全」那一档漏掉。
+    """
     with _locked(True):
         rounds, ok = _read()
         if not ok:
             return
         if not _is_open(str(key), rounds):
-            _flush([])                  # 没开过这一轮:它不是一次抓取
+            _flush([])
             return
-        scope = _scope_prefixes()
-        keep = sorted({str(p) for p in paths if in_scope(str(p), scope)})
-        _flush([{'key': str(key), 'paths': keep}])
+        _flush([dict(line, key=str(key))])
 
 
 def note(key: str, produce) -> None:
@@ -420,14 +475,27 @@ def note_unknown(key: str) -> None:
     """
     if not key:
         return
-    with _locked(True):
-        rounds, ok = _read()
-        if not ok:
-            return
-        if not _is_open(str(key), rounds):
-            _flush([])
-            return
-        _flush([{'key': str(key), 'partial': 1}])
+    _mark(key, {'partial': 1})
+
+
+def note_end(key: str) -> None:
+    """这一轮的物化**明确走完了** —— 该交回执的生产段一个不剩都结束了。
+
+    **只有这一行能把一轮抓取变成「确定的 N 条」。** 收到过回执不算:导出阶段
+    进门先落一张空回执(「成果从确定的空集起步」),于是「刚开始」和「全部交完」
+    在盘上长得一模一样 —— 随后生产者真写出了文章、进程却在交回执前没了,盘上
+    留下的是一个**确定的 0 条**,重试和刷新都纠不回来(第 1 轮审查实测:真实
+    `_run_export` 里 `os._exit(23)`,vault 多了 1 篇,重启读出来
+    `{'n':1,'added':0,'partial':False}`)。多来源那一侧同形:第一个来源交完回执
+    就足以让整轮看着完整,第二个还没开口时进程没了,已知的下界会被当成总数。
+
+    所以这一行写在**逐来源循环走完之后**(`pipeline_stages._run_export`),不是
+    写在某个来源的回执里。没有它的轮次,`added` 一律当下界看
+    (面板说「至少 +N 条」)。
+    """
+    if not key:
+        return
+    _mark(key, {'end': 1})
 
 
 def _is_open(key: str, rounds: list[dict]) -> bool:
@@ -447,16 +515,24 @@ def today(now: datetime | None = None) -> dict | None:
     """今天抓了第几次、最后那一次新落了多少 —— 面板那颗药丸要的就是这个。
 
     `{'n': 今天第几次, 'added': 那一次新落了多少篇, 'partial': 这个数全不全,
-    'at': 'HH:MM'}`;`n=0` 是「确定今天还没有抓取过」。**整份读不出来、或者有行
-    没落下去时返回 `None`(不可确认)**,由 API 原样交给前端。
+    'at': 'HH:MM'}`;`n=0` 是「确定今天还没有抓取过」。**整份读不出来、有行没落
+    下去、或者连共享锁都没拿到时返回 `None`(不可确认)**,由 API 原样交给前端。
 
-    `partial=True` 的两种来源:某一段成果采集器说不出来(`note_unknown`),或者
-    这一轮会物化却一条回执都没等到(进程在写账本之前就没了)。那时 `added` 是
-    **下界**,前端据此说「至少 +N 条」而不是「+N 条」。
+    `partial=True` 的三种来源:某一段成果采集器说不出来(`note_unknown`)、这一轮
+    会物化(`ex`)却没有那条「走完了」(`note_end`,进程在交回执或收尾之前就没
+    了)、以及存量账本里还没有 `end` 这一位的老轮次。那时 `added` 是**下界**,
+    前端据此说「至少 +N 条」而不是「+N 条」。
+
+    **攥着没落盘的行时顺手重试一次。** 不重试的话,磁盘故障恢复之后面板会一直
+    说「读不出来」,要等下一次抓取才补写(第 1 轮审查 N4)。重试走独占锁,别的
+    读还是只拿共享锁。
     """
-    with _locked(False):
+    if _unsaved:
+        with _locked(True):
+            _flush([])
+    with _locked(False) as locked:
         rounds, ok = _read()
-    if not ok or _unsaved:
+    if not ok or not locked or _unsaved:
         return None
     day = _day(_now(now))
     mine = [r for r in rounds if r['day'] == day]
@@ -464,5 +540,5 @@ def today(now: datetime | None = None) -> dict | None:
         return {'n': 0, 'added': 0, 'partial': False, 'at': ''}
     last = mine[-1]
     return {'n': len(mine), 'added': len(last['paths']),
-            'partial': bool(last['partial'] or (last['ex'] and not last['got'])),
+            'partial': bool(last['partial'] or (last['ex'] and not last['end'])),
             'at': last['at'][-5:]}

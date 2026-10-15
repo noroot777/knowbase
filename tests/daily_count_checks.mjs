@@ -121,6 +121,67 @@ export async function checkFetchCountChip({ evalJs, check }) {
   check("整块重载时也一样:只挡输入框,不挡抓取事实",
         /"chip":"第 3 次抓取 · \+5 条"/.test(dirtyLoad)
         && /"since":"2026-01-02T03:04"/.test(dirtyLoad), dirtyLoad);
+  // **在途的那趟回包不许把已经显示出来的新事实退回旧事实**(审查 N2):空闲轮询
+  // 和整块重载共用同一个读取口,慢的那趟晚到时无条件覆盖,药丸会从「第 2 次」
+  // 退回「第 1 次」。
+  //
+  // 两件事让这一组是**确定的**,不靠网络抖动碰运气:
+  // ① 桩按回包序号攥人 —— 第 1 趟被攥在手里,第 2 趟照常落地,然后手动放行第 1 趟;
+  // ② **先把页面自己的空闲轮询停掉**。它也走同一个读取口,不停的话被攥住的那个
+  //    很可能是轮询发的那一趟,而我们等的 promise 永远不会 resolve(实测:探针
+  //    在这里挂住十几分钟,一行输出都没有)。
+  const gateStub = `(() => {
+    window.__winReal = window.__winReal || pipeJson;
+    window.__n = 0; window.__holdAt = 0; window.__hold = null;
+    pipeJson = async (path, ...rest) => {
+      const r = await window.__winReal(path, ...rest);
+      if (String(path) !== '/api/daily/window') return r;
+      const n = ++window.__n;
+      r.fetch = { n, added: n, at: '09:0' + n };
+      r.since = '2026-09-01T00:00'; r.until = '2026-09-02T00:00';
+      if (n === window.__holdAt) await new Promise(res => { window.__hold = res; });
+      return r;
+    };
+    window.__pollReal = refreshDailyStatus;
+    refreshDailyStatus = async () => {};      // 这一组期间不许有第三趟插进来
+    clearTimeout(dailyTimer);
+    return true; })()`;
+  // 攥住的那一趟最多等 3 秒:桩要是没攥到人,这里要红,不许把探针挂死。
+  const settle = (name) => `(async () => {
+    await Promise.race([window.${name}, new Promise(r => setTimeout(r, 3000))]);
+    return true; })()`;
+  // **等它真的停在半路再往下走**:发请求到"停住"之间隔着一次真实往返,拍一个
+  // 固定时刻去问的话,机器稍慢就什么都没攥到(实测探针在这里当场抛错)。
+  const waitHold = `(async () => {
+    for (let i = 0; i < 60 && !window.__hold; i++) await new Promise(r => setTimeout(r, 50));
+    return !!window.__hold; })()`;
+  await evalJs(gateStub);
+  await evalJs(`(() => { window.__holdAt = window.__n + 1;
+                         window.__p1 = refreshDailyPending(); return true; })()`);
+  check("攥住的那一趟确实停在半路", await evalJs(waitHold));
+  await evalJs(`refreshDailyPending()`);          // 第 2 趟照常落地
+  await evalJs(`(() => { window.__hold(); return true; })()`);   // 放行第 1 趟
+  await evalJs(settle('__p1'));
+  check("在途的旧回包晚到,不许把已经显示的新事实退回去",
+        /^第 2 次抓取 · \+2 条$/.test(JSON.parse(await evalJs(chipNow)).chip),
+        await evalJs(chipNow));
+  // 同一道门的草稿那一侧:**等回包的那段时间里用户刚开始填**,旧回包落地时仍按
+  // 发请求时算出的"可以填"把他填的两个时刻盖掉。判据要在落地前再认一次。
+  await evalJs(`(() => { window.__hold = null; dailyWindowDirty = false;
+                         window.__holdAt = window.__n + 1;
+                         window.__p2 = loadDailyWindow(); return true; })()`);
+  check("草稿那一趟也确实停在半路", await evalJs(waitHold));
+  await evalJs(`(() => { document.getElementById('daily-since').value = '2026-03-04T05:06';
+                         document.getElementById('daily-until').value = '2026-03-07T08:09';
+                         markDailyWindow(); return true; })()`);
+  await evalJs(`(() => { window.__hold(); return true; })()`);
+  await evalJs(settle('__p2'));
+  const held = await evalJs(chipNow);
+  check("等回包期间刚填的覆盖时间,旧回包落地也不许盖掉",
+        /"since":"2026-03-04T05:06"/.test(held)
+        && /"until":"2026-03-07T08:09"/.test(held), held);
+  await evalJs(`(() => { if (window.__pollReal) { refreshDailyStatus = window.__pollReal;
+                         delete window.__pollReal; } return true; })()`);
   // 收尾:恢复真回包、清掉草稿,后面几组看到的是真实状态
   await evalJs(`(() => { if (window.__winReal) { pipeJson = window.__winReal;
                          delete window.__winReal; } return true; })()`);
