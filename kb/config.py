@@ -64,6 +64,14 @@ class Source:
     # 文章级枚举("这段时间有什么文章/信息")未显式指定来源时只看非衍生来源,
     # 避免同一内容以原文+条目两种形态重复出现;实体级枚举不受影响
     derived: bool = False
+    # 还扫不扫这棵树。置 False = **停止收新内容,库里已有的一个都不动** ——
+    # 名字、来源组、别名、`PRIMARY_SOURCE_NAMES` 全部原样保留,所以搜索、问答、
+    # 图鉴照旧查得到存量(按元规则「要停用一列就停止读写它,别 DROP」)。
+    # 两处配合才成立:`scanner.scan_all` 不再遍历它,而
+    # `store.remove_missing_documents` 必须把它的存量豁免掉 —— 不豁免的话
+    # "不再遍历"等于告诉下一轮索引「这些文件都没了」,库里那一批连 chunk、
+    # 向量、标签一起被删,面板上只报一个 removed 计数。
+    enabled: bool = True
 
 
 SOURCES: list[Source] = [
@@ -72,9 +80,16 @@ SOURCES: list[Source] = [
         # claude-dr 生成的 AI 日报(英文博客/X/HN/AI 资讯,每天一篇)。
         # 内容是总结形态,但这些信息在本地只有此形态且与其它来源不重叠,按原始来源对待;
         # deep-dives 是单 URL 深挖(质量参差)、_preview 是 prompt 调试预览稿,都不入库
+        #
+        # **已停用(2026-10-15)**:这个上游项目被 kb 自己的日报取代了,它最近产出的
+        # 一多半是空壳(实测 10-02~10-08 七篇正文都是「今日暂无收录条目」,10-07 那篇
+        # 正文里直接写着「本段 LLM 调用失败」),继续扫只是每天往日报队列里塞一个空壳。
+        # 停的只是"收新的";库里那 108 篇照旧在搜索/图鉴里,显式按来源(`日报`/`dr`)
+        # 也照旧查得到 —— 组名和别名一个都没动。
         name="dr",
         root=VAULT_ROOT / "source" / "dr",
         skip_dirs=frozenset({"deep-dives", "_preview"}),
+        enabled=False,
     ),
     Source(
         name="dr-gzh",

@@ -155,9 +155,15 @@ def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
 
 
 def scan_all() -> Iterator[Doc]:
-    """遍历所有来源,产出 Doc。"""
+    """遍历所有来源,产出 Doc。停用的来源(`Source.enabled=False`)整棵跳过。
+
+    **跳过的代价要由 `store.remove_missing_documents` 接住**:这个函数的产出
+    同时是"哪些文件还活着"的唯一依据,不豁免的话停用一棵树等于宣布它底下的
+    文件全没了,库里那一批连 chunk、向量、标签一起被删掉(见 `config.Source`
+    的 `enabled` 那段)。
+    """
     for src in SOURCES:
-        if not src.root.is_dir():
+        if not src.enabled or not src.root.is_dir():
             continue
         for md_path in sorted(src.root.rglob("*.md")):
             rel_parts = md_path.relative_to(src.root).parts
