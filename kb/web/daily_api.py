@@ -98,7 +98,14 @@ def window():
     日报里每个来源各算一个子轮,见 `fetch_rounds.note_end`),有一行证据在读账
     故障里没留住(见 `fetch_rounds._mark`),或者**别的进程(重启前的自己)还扣着
     这一轮的行没落盘**(`kb.fetch_pending` 那笔凭证)。四种都原样透传,前端各有
-    文案,见 `daily.js` 的 `renderDailyGenButton`。
+    文案,见 `daily_chip.js` 的 `renderDailyGenButton`。
+
+    `fetch.added` 还带着**它由什么构成**:`fresh`(这一次新抓到的)/ `carried`
+    (之前抓到、这一次才补导进来的)/ `unsure`(说不清是哪一次抓到的),三个加
+    起来等于 `added`。`added` 报的是「这次同步之后日报能多拿到多少」,而它和
+    「远端这次新发现多少」在补导场景下必然不等 —— **差额如实拆开交给前端,不从
+    `added` 里减掉**(口径与两个数为什么不等见 `docs/decisions/daily.md`)。
+    这几个数一并原样透传,这里不做任何合并。
     查不出来时窗口预填照旧 —— 这两条只是提示,不该让面板打不开。
     """
     # 这条只给窗口预填(回溯几天),不报"定时开没开" —— 所以读不出来时退回缺省

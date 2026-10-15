@@ -8,10 +8,11 @@
 
 所以现在只认生产者自己交回来的回执(`SourceCollector.materialize()` 的返回值)。
 这一组钉的就是它:回执说了算、回执说不出来就报「不可确认」、回执里不算新内容的
-路径由账本按取材范围筛掉,外加真 `sync.export` 自己那条「新落下」的判据。
+路径由账本按取材范围筛掉,以及成果归属不受下游阶段(索引、条目化)左右。
 
-账本本体(几次、几条、故障时说什么)和它的恢复协议在 tests/test_fetch_rounds.py;
-前端那几种说法在 tests/daily_probe.mjs。
+回执里那一条**属于哪一次业务抓取**(新抓到 / 补导 / 说不清)在
+tests/test_fetch_identity.py;账本本体(几次、几条、故障时说什么)和它的恢复协议
+在 tests/test_fetch_rounds.py;前端那几种说法在 tests/daily_probe.mjs。
 """
 import json
 import sqlite3
@@ -22,11 +23,11 @@ from unittest.mock import Mock, patch
 
 from pathlib import Path
 
-from kb.collectors import wechat_local
+from kb.collectors import Fetched, wechat_local
 from kb import config, embedder, fetch_rounds, pipeline_segments as segments
 from kb import pipeline_stages, scanner, store
 from kb import pipeline_state as ps
-from tests.fetch_rounds_fixture import T, _Base, _Fake
+from tests.fetch_rounds_fixture import BOOK, T, _Base, _Fake
 
 
 class ReceiptIsTheOnlyEvidenceTests(_Base):
@@ -34,7 +35,10 @@ class ReceiptIsTheOnlyEvidenceTests(_Base):
 
     def setUp(self):
         super().setUp()
-        ps._state.update({'batch': 'batch-probe', 'run_id': 'run-probe',
+        # `running` 要一起装上:**光留着 `batch` 不等于"这一轮在跑"** —— 收尾时
+        # 那两个字段是故意留下的,所以 `round_key()` 认 `running`(见它的说明)。
+        ps._state.update({'running': True,
+                          'batch': 'batch-probe', 'run_id': 'run-probe',
                           'stages': {s: {'status': '', 'detail': ''}
                                      for s in ps.STAGES}, 'log': []})
         self.addCleanup(segments.clear_segments)
@@ -157,11 +161,87 @@ class ReceiptIsTheOnlyEvidenceTests(_Base):
                   _Fake(self, 'wechat_local', writes=['source/rss/b.md']))
         self.assertEqual({'n': 1, 'added': 2, 'partial': False}, self._got())
 
+    def test_the_same_content_under_two_names_counts_once(self):
+        """同一条内容在一轮里被报了两次,两次的**文件名不一样**:算 1 条。
+
+        公众号那边的文件名是「号-标题」,标题一改名字就变;一次中途失败后的重跑
+        会把它按新标题再写一遍,于是同一篇出现两个路径。按路径取并集的话这里报
+        2 条 —— 而内容只有一条,它靠 `articles.id` 这个稳定身份认出来。"""
+        fetch_rounds.open_round('batch-dup', T('2026-09-29 09:00'))
+        fetch_rounds.note_new('batch-dup', {
+            Fetched('wechat_local:2247', 'batch-dup', 'source/rss/旧标题.md'),
+            Fetched('wechat_local:2247', 'batch-dup', 'source/rss/新标题.md')})
+        fetch_rounds.note_end('batch-dup')        # 物化这一段明确走完了
+        self.assertEqual(BOOK(1, 1, '09:00'),
+                         fetch_rounds.today(T('2026-09-29 09:00')))
+
+    def test_a_receipt_row_that_cannot_be_read_makes_the_round_a_lower_bound(self):
+        """回执里有一条读不懂:**读得懂的照旧记下,这一轮报下界**。
+
+        静默跳过(旧写法)的后果和「挑着收一份少记的清单」一样:面板给出一个
+        偏小、**看着确定**的数,用户照它决定不重新生成日报,而真落进库的比它多。
+        所以认得出的那一条照旧记,同时落一笔 partial —— 前端据此说「至少 +1 条」。
+        """
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-torn', day)
+        fetch_rounds.note_new('batch-torn', [
+            Fetched('rss:a', 'batch-torn', 'source/rss/a.md'),
+            ('只有两个字段',),                      # 形状读不出来
+        ])
+        # 结束行照旧落下:这一轮的 `partial` 只可能来自那一条读不懂的行
+        fetch_rounds.note_end('batch-torn')
+        self.assertEqual(BOOK(1, 1, '09:00', partial=True),
+                         fetch_rounds.today(day))
+
+    def test_a_row_with_no_path_is_a_gap_not_a_silent_skip(self):
+        """答不出路径的那一条也算缺口:范围按路径判,答不出就判不了。
+
+        不记这一笔的话它和「这一轮确实只有 1 篇」在面板上长得一样。
+        """
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-nopath', day)
+        fetch_rounds.note_new('batch-nopath', [
+            Fetched('rss:a', 'batch-nopath', 'source/rss/a.md'),
+            Fetched('rss:b', 'batch-nopath', ''),
+        ])
+        fetch_rounds.note_end('batch-nopath')     # 同上:缺口是唯一的来源
+        self.assertEqual(BOOK(1, 1, '09:00', partial=True),
+                         fetch_rounds.today(day))
+
+    def test_a_row_outside_the_scope_is_a_normal_skip_not_a_gap(self):
+        """反过来钉一边:**不在取材范围内的那几条是正常筛掉,不是缺口**。
+
+        衍生树、停用的树、`skip_dirs` 天天都会被筛掉几条;把它们也算成缺口的话
+        每一轮都写「至少 +N 条」,那三个字从此再也不代表任何事情。
+        """
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-scope', day)
+        fetch_rounds.note_new('batch-scope', [
+            Fetched('rss:a', 'batch-scope', 'source/rss/a.md'),
+            Fetched('gz:b', 'batch-scope', 'source/dr-gzh-projects/b.md'),
+        ])
+        fetch_rounds.note_end('batch-scope')
+        self.assertEqual(BOOK(1, 1, '09:00'), fetch_rounds.today(day))
+
+    def test_a_collector_still_on_the_old_contract_is_counted_not_refused(self):
+        """还按旧契约交**裸路径集合**的采集器:条数照旧确定,只有分解说不清。
+
+        拒掉它等于把真落进库的那几篇静默少记成一个确定值;收下来只损失那句
+        分解 —— `unsure` 如实说「说不清是哪一次抓到的」,而不是冒充「不是本次」。
+        """
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-legacy', day)
+        fetch_rounds.note_new('batch-legacy',
+                              ['source/rss/a.md', 'source/rss/b.md'])
+        fetch_rounds.note_end('batch-legacy')
+        self.assertEqual(BOOK(1, 2, '09:00', fresh=0, unsure=2),
+                         fetch_rounds.today(day))
+
 
 class WeChatReceiptTests(_Base):
     """公众号那条通道:子进程打出来的清单怎么变成回执,什么时候只能说不出来。
 
-    这是仓库主人的主力来源(库里八千多篇),所以它那一侧必须自己有红 —— 只钉
+    这是仓库主人的主力来源(库里绝大多数文章),所以它那一侧必须自己有红 —— 只钉
     假采集器的话,「超时降级之后清单是个少记的下界」这种只存在于真实现里的
     形态一条都发现不了。
     """
@@ -169,9 +249,13 @@ class WeChatReceiptTests(_Base):
     def _proc(self, stdout, code=0):
         return SimpleNamespace(stdout=stdout, stderr='', returncode=code)
 
-    def _event(self, out, written):
+    def _event(self, out, names, ids=None, rounds=None):
+        """子进程那份结构化事件。`items` 每条是 `{id, round, name}`。"""
+        items = [{'id': (ids or {}).get(n, f'aid-{i}'),
+                  'round': (rounds or {}).get(n, 'batch-probe'), 'name': n}
+                 for i, n in enumerate(names)]
         return json.dumps({'stage': 'export', 'status': 'ok', 'detail': '完成',
-                           'no_body': [], 'out': out, 'written': written},
+                           'no_body': [], 'out': out, 'items': items},
                           ensure_ascii=False)
 
     def _run(self, proc_or_exc, problem=''):
@@ -182,10 +266,74 @@ class WeChatReceiptTests(_Base):
                 patch.object(wechat_local, '_run_cli', run):
             return col.materialize()
 
-    def test_the_subprocess_list_becomes_vault_relative_paths(self):
+    def test_the_subprocess_list_becomes_identified_receipt_rows(self):
+        """清单里那一条换算成 `(内容身份, 抓取身份, vault 相对路径)`。
+
+        三样都要:路径定取材范围,内容身份让重放幂等,抓取身份让药丸分得开
+        「这一次新抓到」和「补导之前抓到」。"""
         out = str(self.vault / 'source' / 'rss')          # 本夹具里的在册来源树
-        got = self._run(self._proc(self._event(out, ['2026-10-15/某号-标题.md'])))
-        self.assertEqual(frozenset({'source/rss/2026-10-15/某号-标题.md'}), got)
+        got = self._run(self._proc(self._event(
+            out, ['2026-10-15/某号-标题.md'], ids={'2026-10-15/某号-标题.md': '2247'},
+            rounds={'2026-10-15/某号-标题.md': 'batch-7'})))
+        self.assertEqual(frozenset({Fetched(
+            'wechat_local:2247', 'batch-7',
+            'source/rss/2026-10-15/某号-标题.md')}), got)
+
+    def test_an_article_found_in_an_earlier_round_keeps_that_round(self):
+        """抓取当天正文没拿到、隔两天补上才导出 —— 回执里记的仍是**发现**它的
+        那一轮,不是导出它的这一轮。
+
+        这是「补导」在公众号那条通道上的真实形态:身份只在**文章首次插入那个
+        事务**里写一次(`upsert_article_from_blog`),补正文那一轮压根不碰它。
+        记成这一轮的话药丸会把它算成「这一次新抓到的」,而远端那天压根没发新文章。"""
+        out = str(self.vault / 'source' / 'rss')
+        got = self._run(self._proc(self._event(
+            out, ['2026-10-13/旧文.md'], ids={'2026-10-13/旧文.md': '1001'},
+            rounds={'2026-10-13/旧文.md': 'batch-older'})))
+        self.assertEqual('batch-older', next(iter(got)).fetch_id)
+
+    def test_a_stock_article_without_a_round_is_unsure_not_someone_elses(self):
+        """存量那一大批没有抓取身份:交空串「说不清」,不许编一个。
+
+        编成这一轮 = 把补导的算成新抓到的;编成"别的轮次" = 把不知道写成确定
+        不是本次。两种都是凭空造事实,所以空串原样交上去,由账本归到 unsure。"""
+        out = str(self.vault / 'source' / 'rss')
+        got = self._run(self._proc(self._event(
+            out, ['2026-01-01/存量.md'], rounds={'2026-01-01/存量.md': ''})))
+        self.assertEqual('', next(iter(got)).fetch_id)
+
+    def test_a_row_with_no_file_name_voids_the_whole_list(self):
+        """清单里有一行答不出文件名:**整份不可确认,不挑着收**。
+
+        挑着收交上去的是一份少记的确定清单(「这一次抓了 N 篇」),而少记是静默
+        丢数据:那几篇再也不会被算进任何一轮。报「不可确认」顶多让人多同步一次。
+        `cmd_export` 那一端对空名字本来就是整份作废,两端得同一个口径 —— 不然
+        中间这一道就成了把缺口洗成确定零条的地方。空白字符同样算答不出来。
+        """
+        out = str(self.vault / 'source' / 'rss')
+        for bad in ('', '   ', None):
+            raw = json.loads(self._event(out, ['a.md', 'b.md']))
+            raw['items'][1]['name'] = bad
+            with self.subTest(name=repr(bad)):
+                self.assertIsNone(self._run(self._proc(json.dumps(
+                    raw, ensure_ascii=False))))
+
+    def test_a_field_that_is_not_text_voids_the_whole_list(self):
+        """清单里某个字段不是字符串:**整份不可确认**,不许 `str()` 成一个身份。
+
+        `str({'not': 'an identity'})` 是 `"{'not': 'an identity'}"` —— 非空,于是
+        那一条被当成「确定不是这一轮抓到的」归进 carried(审查第 2 轮实测到的就是
+        这个数:`carried=1, unsure=0, partial=false`)。把一行坏数据读成确定答案,
+        比报不可确认坏得多。
+        """
+        out = str(self.vault / 'source' / 'rss')
+        for key, bad in (('round', {'not': 'an identity'}), ('round', 7),
+                         ('id', ['a']), ('name', 3)):
+            raw = json.loads(self._event(out, ['a.md', 'b.md']))
+            raw['items'][1][key] = bad
+            with self.subTest(field=key, value=repr(bad)):
+                self.assertIsNone(self._run(self._proc(json.dumps(
+                    raw, ensure_ascii=False))))
 
     def test_an_export_root_outside_the_vault_cannot_be_a_receipt(self):
         """`out` 不在 vault 里:算出来的相对路径不是知识库里那个身份。
@@ -199,6 +347,18 @@ class WeChatReceiptTests(_Base):
         old = json.dumps({'stage': 'export', 'status': 'ok', 'detail': '完成',
                           'no_body': []}, ensure_ascii=False)
         self.assertIsNone(self._run(self._proc(old)))
+
+    def test_a_list_row_that_cannot_be_read_makes_the_whole_round_unknown(self):
+        """清单里混进一条读不懂的:整轮报「不可确认」,**不挑着收那几条认得的**。
+
+        挑着收等于把一个少记的下界当成确定值 —— 读不懂的那几条很可能正是真写
+        下去的文章。"""
+        out = str(self.vault / 'source' / 'rss')
+        raw = json.dumps({'stage': 'export', 'status': 'ok', 'detail': '完成',
+                          'no_body': [], 'out': out,
+                          'items': [{'id': 'a', 'round': 'r', 'name': 'x.md'},
+                                    '这一条不是个对象']}, ensure_ascii=False)
+        self.assertIsNone(self._run(self._proc(raw)))
 
     def test_a_degraded_rerun_after_a_timeout_says_unknown(self):
         """超时后降级 `--no-images` 重跑:第一趟已落盘的文章在第二趟算「已存在」
@@ -227,7 +387,8 @@ class ABrokenLedgerMustNotBlockTheCaptureTests(_Base):
 
     def setUp(self):
         super().setUp()
-        ps._state.update({'batch': 'b', 'run_id': 'r', 'planned_stages': None,
+        ps._state.update({'running': True,
+                          'batch': 'b', 'run_id': 'r', 'planned_stages': None,
                           'stages': {s: {'status': '', 'detail': ''}
                                      for s in ps.STAGES}, 'log': []})
 
@@ -267,9 +428,9 @@ class ReceiptScopeTests(_Base):
             return real(path, *a, **kw)
 
         with patch.object(Path, 'resolve', resolve):
-            fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+            fetch_rounds.note_new('batch-a', self.caught('batch-a', 'source/rss/a.md'))
         fetch_rounds.note_end('batch-a', 'run-1')
-        self.assertEqual({'n': 1, 'added': 0, 'partial': True, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 0, '09:00', True),
                          fetch_rounds.today(day))
 
     def test_a_tree_that_is_not_in_the_vault_only_skips_itself(self):
@@ -280,9 +441,10 @@ class ReceiptScopeTests(_Base):
         with patch.object(config, 'SOURCES', self._sources() + [outside]):
             day = T('2026-09-29 09:00')
             fetch_rounds.open_round('batch-a', day, seg='run-1')
-            fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+            fetch_rounds.note_new('batch-a',
+                                  self.caught('batch-a', 'source/rss/a.md'))
             fetch_rounds.note_end('batch-a', 'run-1')
-            self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+            self.assertEqual(BOOK(1, 1, '09:00'),
                              fetch_rounds.today(day))
 
     def test_only_the_sources_the_report_reads_are_counted(self):
@@ -299,81 +461,6 @@ class ReceiptScopeTests(_Base):
         self.assertEqual(2, fetch_rounds.today(day)['added'])
 
 
-class TheRealExporterReportsOnlyFreshFilesTests(_Base):
-    """回执由**真的** `sync.export` 交:它写了哪几篇、哪几篇算新落下的。
-
-    这一组不装假采集器 —— 「新落下」这个判据长在导出那边(写之前问一句 vault 里
-    有没有这个路径),只钉假采集器的话等于没钉:导出队列是
-    `exported_hash<>content_hash`,正文补抓、译文回写都会让老文章重新写一遍同一个
-    路径,它们不是这一轮抓到的。
-    """
-
-    def setUp(self):
-        super().setUp()
-        from kb import maintenance
-        from kb.feeds import registry as reg
-        from kb.feeds import sync as fsync
-        self.reg, self.fsync = reg, fsync
-        for p in (patch.object(reg, 'DB_PATH', self.root / 'feeds.db'),
-                  patch.object(maintenance, 'DATA_DIR', self.root),
-                  patch.object(fsync, 'VAULT_ROOT', self.vault)):
-            p.start(); self.addCleanup(p.stop)
-        self.source = reg.save_subscription('rss', {'name': 'T',
-                                                    'url': 'https://e.org/f.xml'})
-
-    def _entry(self, n=1):
-        return [{'url': f'https://e.org/a{n}', 'title': f'文章{n}',
-                 'body': '正文正文', 'published': '2026-09-28 09:00'}]
-
-    def test_the_first_export_reports_the_file_it_created(self):
-        self.reg.put_items(self.source, self._entry())
-        got = self.fsync.export('rss')
-        self.assertEqual(1, len(got))
-        self.assertTrue((self.vault / next(iter(got))).exists())
-
-    def test_a_second_export_with_nothing_pending_reports_nothing(self):
-        self.reg.put_items(self.source, self._entry())
-        self.fsync.export('rss')
-        self.assertEqual(frozenset(), self.fsync.export('rss'))
-
-    def test_rewriting_an_old_article_is_not_a_fresh_catch(self):
-        """正文补抓/译文回写让同一条重新入队:md 确实又写了一遍,但回执是空的。
-
-        算进去的话同一篇会连着好几天被报成"刚抓到",而用户看着那个数决定要不要
-        再花一次模型钱重新生成日报。"""
-        self.reg.put_items(self.source, self._entry())
-        first = self.fsync.export('rss')
-        with self.reg.db() as c:
-            c.execute("UPDATE feed_items SET content_hash='changed' WHERE kind='rss'")
-        again = self.fsync.export('rss')
-        path = self.vault / next(iter(first))
-        self.assertEqual(frozenset(), again)
-        self.assertTrue(path.exists())          # 文件真又写了一遍,只是不算新抓到
-
-    def test_a_file_that_landed_stays_in_the_receipt_when_the_confirm_fails(self):
-        """**第 1 轮审查实测的那一条**:md 已经替换进 vault,随后 `feed_items` 的
-        确认(`exported_hash`)失败 —— 这一篇必须留在回执里。
-
-        旧判据是"两道都要卡"(文件落了 + 入库确认也成了),于是确认那一下的异常被
-        接成逐项错误、回执照旧返回一个看着**确定**的空集;而重导时它已经不是新
-        文件(`fresh=False`),这一篇**永远**补不回账(实测:vault 多了 1 篇,
-        药丸永久写「0 条」且自称确定,刷新和重试都纠不回来)。
-
-        反过来钉一边:它已经记过一次账了,确认恢复之后重导不许再算一次。"""
-        self.reg.put_items(self.source, self._entry())
-        with self.reg.db() as c:
-            c.execute("CREATE TRIGGER no_confirm BEFORE UPDATE OF exported_hash "
-                      "ON feed_items BEGIN SELECT RAISE(ABORT, '确认失败'); END")
-        got = self.fsync.export('rss')
-        self.assertEqual(1, len(got))                          # 回执里有它
-        self.assertTrue((self.vault / next(iter(got))).exists())  # 文件真在 vault 里
-        with self.reg.db() as c:
-            self.assertEqual([''], [r[0] for r in c.execute(
-                "SELECT exported_hash FROM feed_items WHERE kind='rss'")])
-            c.execute('DROP TRIGGER no_confirm')
-        self.assertEqual(frozenset(), self.fsync.export('rss'))
-
-
 class FetchIsTheExportsOwnResultTests(_Base):
     """问题 2 的另一半:成果归属不受下游阶段(索引、条目化)左右。"""
 
@@ -386,7 +473,10 @@ class FetchIsTheExportsOwnResultTests(_Base):
         for p in (patch.object(store, 'connect', lambda *a, **k: connect(self.db)),
                   patch.object(embedder, 'embed_pending_chunks', Mock(return_value=0))):
             p.start(); self.addCleanup(p.stop)
-        ps._state.update({'batch': 'batch-probe', 'run_id': 'run-probe',
+        # `running` 要一起装上:**光留着 `batch` 不等于"这一轮在跑"** —— 收尾时
+        # 那两个字段是故意留下的,所以 `round_key()` 认 `running`(见它的说明)。
+        ps._state.update({'running': True,
+                          'batch': 'batch-probe', 'run_id': 'run-probe',
                           'stages': {s: {'status': '', 'detail': ''}
                                      for s in ps.STAGES}, 'log': []})
         self.addCleanup(segments.clear_segments)
@@ -475,7 +565,7 @@ class FetchIsTheExportsOwnResultTests(_Base):
         但今天**没有**抓取过,账本上一轮都不该有。"""
         with self._channels('source/rss/a.md', 'source/rss/b.md'):
             pipeline_stages._run_export()
-        self.assertEqual({'n': 0, 'added': 0, 'partial': False, 'at': ''}, fetch_rounds.today())
+        self.assertEqual(BOOK(0, 0, ''), fetch_rounds.today())
 
     def test_a_source_that_blew_up_mid_way_does_not_claim_a_certain_zero(self):
         """物化写了一篇然后炸了:它交不出回执,所以这一轮是「不可确认」。

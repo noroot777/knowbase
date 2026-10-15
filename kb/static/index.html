@@ -297,7 +297,7 @@
     <aside id="source-settings" class="source-settings" aria-label="此来源的设置" hidden><h2>来源设置</h2>
       <form id="source-settings-form" onsubmit="saveSourceSettings(event)"><fieldset id="source-settings-fields" disabled>
         <div id="source-xchan" class="xchan" hidden>
-          <label for="source-x-channel">X 的取法<select id="source-x-channel" onchange="xChannelPicked()"></select></label>
+          <label for="source-x-channel">X 的取法<select id="source-x-channel" onchange="xChannelChanged()"></select></label>
           <p id="source-x-hint" class="hint"></p>
           <details id="source-bridge-field" hidden><summary>X 订阅桥接设置</summary><p>每行一个可用地址，使用 {handle} 代表账号名。留空时账号处于待配置；也可在单个订阅里填写专用链接。公共桥接可能不可用，连续失败会暂停本轮请求。</p><textarea id="source-bridges" aria-label="X订阅桥接地址" spellcheck="false"></textarea></details>
           <div id="source-x-feedgrab" hidden>
@@ -308,6 +308,9 @@
             <label for="source-x-chrome">Chrome 可执行文件（可留空）<input id="source-x-chrome" spellcheck="false" placeholder="留空时用默认位置的 Google Chrome"></label>
             <p class="hint">在一个独立 profile 里登录一次，之后每天无头复用这份登录态。登录窗口要关掉，抓取时它独占这个 profile。</p>
             <button type="button" class="ghost" id="source-x-login-btn" onclick="openXLoginWindow()">打开登录窗口</button>
+            <p class="hint">也可以不单独登录：从你日常那个浏览器搬一份 X 的登录态过来。它只向那个浏览器要 x.com 的 cookie（在一张隐藏的后台标签页里按地址取，别的站点压根不会交出来），同名的会覆盖这个 profile 里现有的那几条。那个浏览器要先开远程调试开关，导入时它会弹一次授权；cookie 过期后再点一次这颗按钮就行。</p>
+            <button type="button" class="ghost" id="source-x-import-btn" onclick="importXLoginState()">从日常浏览器导入登录态</button>
+            <p id="source-x-import-state" class="hint" role="status"></p>
           </div>
           <p id="source-x-state" class="hint" role="status"></p>
           <p id="source-x-next" class="hint"></p>
@@ -536,6 +539,7 @@
 <!-- daily_refs.js 排在 daily.js 之前:`DAILY_REF_TEXT` 是 const,const 有 TDZ -->
 <script src="/static/js/daily_refs.js"></script>
 <script src="/static/js/daily.js"></script>
+<script src="/static/js/daily_chip.js"></script>
 <script src="/static/js/sources.js"></script>
 <script src="/static/js/source_reader.js"></script>
 <script src="/static/js/source_forms.js"></script>

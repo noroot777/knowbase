@@ -33,7 +33,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from kb import fetch_pending, fetch_rounds
-from tests.fetch_rounds_fixture import REPO, T, _Pending
+from tests.fetch_rounds_fixture import BOOK, REPO, T, _Pending
 
 # 真实硬退出那一例的子进程。**不能用抛异常代替**:`finally` 还能跑的进程会把攥着
 # 的行补写下去,而这一条要证的正是"补写的机会都没有"那一刀(审查原话:异常可执行
@@ -49,7 +49,7 @@ from kb import pipeline_state as ps
 fetch_rounds.DATA_DIR = root
 config.VAULT_ROOT = root / 'vault'
 config.SOURCES = [config.Source(name='rss', root=config.VAULT_ROOT / 'source/rss')]
-ps._state.update({{'batch': 'batch-a', 'run_id': 'run-2',
+ps._state.update({{'running': True, 'batch': 'batch-a', 'run_id': 'run-2',
                    'planned_stages': ['crawl', 'export'], 'stop_requested': False,
                    'log': [], 'stages': {{s: {{'status': '', 'detail': ''}}
                                           for s in ps.STAGES}}}})
@@ -87,9 +87,10 @@ class ParticipationOutlivesTheProcessTests(_Pending):
 
     def _first_sub_round(self, day):
         fetch_rounds.open_round('batch-a', day, seg='run-1')
-        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_new('batch-a',
+                              self.caught('batch-a', 'source/rss/a.md'))
         fetch_rounds.note_end('batch-a', 'run-1')
-        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 1, '09:00'),
                          fetch_rounds.today(day))        # 第一个子轮:确定 1 条
 
     def test_a_sub_round_whose_registration_never_landed_is_not_a_certain_count(self):
@@ -106,9 +107,9 @@ class ParticipationOutlivesTheProcessTests(_Pending):
         self.assertEqual([], [l for l in self.lines() if 'run-2' in l])
         self.process_gone()
         self.fix_lock()
-        self.assertEqual({'n': 1, 'added': 1, 'partial': True, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 1, '09:00', True),
                          fetch_rounds.today(day))
-        self.assertEqual({'n': 1, 'added': 1, 'partial': True, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 1, '09:00', True),
                          fetch_rounds.today(day))        # 重读一次:结论不变
 
     def test_lines_that_landed_before_the_process_died_take_the_doubt_away(self):
@@ -120,11 +121,12 @@ class ParticipationOutlivesTheProcessTests(_Pending):
         self.break_lock()
         fetch_rounds.open_round('batch-a', day, seg='run-2')
         self.fix_lock()
-        fetch_rounds.note_new('batch-a', {'source/rss/b.md'})
+        fetch_rounds.note_new('batch-a',
+                              self.caught('batch-a', 'source/rss/b.md'))
         fetch_rounds.note_end('batch-a', 'run-2')
         self.assertEqual([], self.certs())               # 凭证撤掉了
         self.process_gone()
-        self.assertEqual({'n': 1, 'added': 2, 'partial': False, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 2, '09:00'),
                          fetch_rounds.today(day))
 
     def test_a_round_whose_open_line_was_lost_is_unknown_not_an_older_count(self):
@@ -150,7 +152,7 @@ class ParticipationOutlivesTheProcessTests(_Pending):
         folder.mkdir(parents=True, exist_ok=True)
         (folder / 'dead-proc.json').write_text(
             json.dumps({'day': '2026-09-20', 'keys': ['ghost']}), encoding='utf-8')
-        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 1, '09:00'),
                          fetch_rounds.today(day))
         fetch_rounds.note_new('batch-a', ())             # 下一次写:顺手清场
         self.assertEqual([], self.certs())
@@ -167,7 +169,7 @@ class ParticipationOutlivesTheProcessTests(_Pending):
         (folder / 'broken.json').write_text('{"day": "2026-09', encoding='utf-8')
         self.assertIsNone(fetch_rounds.today(day))
         (folder / 'broken.json').unlink()
-        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 1, '09:00'),
                          fetch_rounds.today(day))        # 反过来:好的凭证不拦
 
     def test_a_hard_exit_in_the_real_stages_still_leaves_the_participation(self):
@@ -177,7 +179,8 @@ class ParticipationOutlivesTheProcessTests(_Pending):
         账本那把锁在它开工时坏着,所以盘上没有它的任何一行 —— 断言就钉在这里:
         `run-2` 在账本里查不到,而面板那个数不许是确定的 1 条。"""
         fetch_rounds.open_round('batch-a', seg='run-1')
-        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_new('batch-a',
+                              self.caught('batch-a', 'source/rss/a.md'))
         fetch_rounds.note_end('batch-a', 'run-1')
         before = fetch_rounds.today()
         self.assertEqual({'added': 1, 'partial': False},
@@ -213,7 +216,8 @@ class ConfirmRemovesOnlyWhatItWroteTests(_Pending):
         day = T('2026-09-29 09:00')
         fetch_rounds.open_round('batch-a', day, seg='run-1')
         self.break_lock()
-        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})   # 第一篇:攥着
+        fetch_rounds.note_new('batch-a',
+                              self.caught('batch-a', 'source/rss/a.md'))   # 第一篇:攥着
         self.fix_lock()
         entered, release = threading.Event(), threading.Event()
         real_append = fetch_rounds._append
@@ -233,7 +237,8 @@ class ConfirmRemovesOnlyWhatItWroteTests(_Pending):
             panel.start()
             self.assertTrue(entered.wait(10))
             self.break_lock()                 # 这会儿锁又坏了
-            fetch_rounds.note_new('batch-a', {'source/rss/b.md'})   # 第二篇:压进缓冲
+            fetch_rounds.note_new('batch-a',
+                              self.caught('batch-a', 'source/rss/b.md'))   # 第二篇:压进缓冲
             release.set()
             panel.join(10)
             self.assertFalse(panel.is_alive())
@@ -241,8 +246,8 @@ class ConfirmRemovesOnlyWhatItWroteTests(_Pending):
         self.assertIsNone(reader[0])          # 失锁期间面板如实说「读不出来」
         fetch_rounds.note_end('batch-a', 'run-1')
         book = '\n'.join(self.lines())
-        self.assertIn('source/rss/b.md', book)        # 那一行真落了盘
-        self.assertEqual({'n': 1, 'added': 2, 'partial': False, 'at': '09:00'},
+        self.assertIn('rss:source/rss/b.md', book)    # 那一行真落了盘
+        self.assertEqual(BOOK(1, 2, '09:00'),
                          fetch_rounds.today(day))
 
     def test_a_flush_that_could_not_write_keeps_owing_every_line(self):
@@ -251,16 +256,18 @@ class ConfirmRemovesOnlyWhatItWroteTests(_Pending):
         day = T('2026-09-29 09:00')
         fetch_rounds.open_round('batch-a', day, seg='run-1')
         with patch.object(fetch_rounds, '_append', Mock(return_value=False)):
-            fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
-            fetch_rounds.note_new('batch-a', {'source/rss/b.md'})
+            fetch_rounds.note_new('batch-a',
+                              self.caught('batch-a', 'source/rss/a.md'))
+            fetch_rounds.note_new('batch-a',
+                              self.caught('batch-a', 'source/rss/b.md'))
             self.assertEqual(2, len([o for o in fetch_rounds._unsaved
-                                     if 'paths' in o]))
+                                     if 'items' in o]))
             # 读回来确认那一笔真落下去了(名字是分代的,别钉具体代号)
             self.assertEqual({'batch-a'}, fetch_pending.mine(self.pending()))
             self.assertEqual(1, len(self.certs()))       # 一代,不是一代一代堆着
             self.assertIsNone(fetch_rounds.today(day))
         fetch_rounds.note_end('batch-a', 'run-1')         # 磁盘好了
-        self.assertEqual({'n': 1, 'added': 2, 'partial': False, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 2, '09:00'),
                          fetch_rounds.today(day))
         self.assertEqual([], self.certs())                # 落了盘就撤掉
 

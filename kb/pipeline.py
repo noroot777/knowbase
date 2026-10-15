@@ -66,10 +66,19 @@ from kb.pipeline_state import (
 # `pipeline_state` 拆出来只因为行数上限)。`kb.daily_run` 照旧只认本模块这三个名字。
 from kb.pipeline_batch import PublishRefused, close_batch, open_batch
 
+# 失败明细里「用户已经处理掉」的那几条(`pipeline_failures`):真正的删除在采集器
+# 那边,这一份只管它从此不再出现在面板上。Web 层照旧只认本模块的名字。
+from kb.pipeline_failures import (
+    remember as drop_failure,
+    strip_runs as strip_failure_runs,
+    strip_state as strip_failure_state,
+)
+
 # 对外门面:Web 层只 import 本模块,不直接碰拆出去的几个子模块
 __all__ = [
     "STAGES",
     "crawl_channels",
+    "drop_failure",
     "get_state",
     "close_batch",
     "load_history",
@@ -93,6 +102,8 @@ __all__ = [
     "start_pipeline",
     "start_retry_failed",
     "start_scheduler",
+    "strip_failure_runs",
+    "strip_failure_state",
 ]
 
 

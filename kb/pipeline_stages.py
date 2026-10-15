@@ -177,7 +177,8 @@ def _run_export(crawl_filter: dict | str | None = None) -> None:
     from kb import fetch_rounds
 
     key, seg = round_key()
-    # 先落一张空回执:成果从「确定的空集」起步,各来源的回执并进来。
+    # 先落一张空回执:成果从「确定的空集」起步,各来源的回执并进来。一个来源都
+    # 没选中时它就是最终结论(确定 0 条,不是不可确认)。
     fetch_rounds.note_new(key, ())
     _per_channel("export", crawl_filter,
                  lambda collector, scope: fetch_rounds.note(key, collector.materialize))

@@ -74,72 +74,8 @@ function renderDailyWindowLabel() {
   renderDailyGenButton();
 }
 
-function dailyTargetDate() {
-  // 这一次会写到哪一天那份日报上。**只有这一份口径**:按钮叫"生成"还是"重新
-  // 生成"、要不要先弹覆盖确认,问的是同一件事,两处各判一遍必然各漂各的。
-  // 自定义区间落在截止时刻那天,默认区间落在今天(生成时刻)。
-  return dailyWindowDirty && $('daily-until').value
-    ? $('daily-until').value.slice(0, 10)
-    : new Date().toLocaleDateString('sv');
-}
-
-function renderDailyGenButton() {
-  // 这颗按钮的名字跟着"那一天有没有日报"走:已经有就是**重新生成**(点下去会
-  // 覆盖它,所以还会弹一次确认),没有就是头一份。写死成"重新生成"的话,第一次
-  // 用的人会以为自己漏掉了一步。
-  const exists = dailyReports.some(r => r.date === dailyTargetDate());
-  $('daily-gen-label').textContent = exists ? '重新生成日报' : '生成日报';
-
-  // 按钮上那颗药丸报的是**抓取自己的事实**:今天第 N 次抓取往库里新加了多少篇。
-  // 一天内同步第二次之后,得有个地方让人看出这次抓回来多少,再决定要不要为它
-  // 再花一次模型钱。它长在按钮里:贴在覆盖区间那行字后面就成了另一个问题的答案。
-  //
-  // **不许拿取材结果冒充它。** 「这一次生成能选进去几条」受名额和发布时间排序
-  // 左右,和「抓了多少」可以差两个数量级:第二次真抓回来 9 条、名额只剩 3 个就
-  // 写成 3 条;抓回来那条发布得早、抢不到席位就写成「没有新内容」—— 而用户正是
-  // 靠这个数判断要不要重新生成。同理,生成完日报这个数**不该归零**:抓取事实没
-  // 有因为出了一份日报而改变。积压队列是第三个问题,只进 tooltip。
-  //
-  // 自定义区间时照样报 —— 抓取事实和区间选哪一段无关(队列那句跟着藏掉,后端
-  // 算的是默认区间那一段)。
-  //
-  // 五种说法对五种事实,**不许合并**:没问过后端(undefined)整颗藏掉;后端答
-  // 「不可确认」(null:账本整份读不出来,或者有行没落下去)说「读不出来」;
-  // `n=0` 才是「今天还没有抓取」。把 null 也说成「还没有抓取」是在把"不知道"说成
-  // "没有",而一次写失败之后它会一直这么笃定地说下去。
-  //
-  // 剩下两种是**这一轮的条数全不全**(`partial`):勾了三个来源而第三个炸在半路、
-  // 采集器给不出清单时,已知的那几条只是**下界** —— 那就说「至少 +N 条」,一条
-  // 都说不出来时说「条数读不出来」。把下界写成确定值的后果是用户照着一个偏小的
-  // 数决定不重新生成日报,而真落进库的比它多(口径见 `kb/fetch_rounds.py`)。
-  const chip = $('daily-gen-count');
-  const f = dailyWindow?.fetch;
-  chip.hidden = f === undefined;
-  if (f === undefined) { $('daily-gen').title = ''; return; }
-  const howMany = f && (f.partial
-    ? (f.added ? `至少 +${f.added} 条` : '条数读不出来')
-    : (f.added ? `+${f.added} 条` : '0 条'));
-  chip.textContent = f === null
-    ? '抓取次数读不出来'
-    : f.n
-      ? `第 ${f.n} 次抓取 · ${howMany}`
-      : '今天还没有抓取';
-  chip.classList.toggle('is-none', !f?.added);
-  const p = dailyWindowDirty ? null : dailyWindow?.pending;
-  // 「后面几天会陆续带走」是句许不出来的承诺:补录每天有名额,而排到超过
-  // BACKLOG_DAYS 的会直接退出候选,不是一定进得了日报。
-  const queued = p?.total
-    ? `队列里有 ${p.total} 条还没进过任何日报，留待后续日报择取（超出回溯范围的不再纳入）。`
-    : '';
-  $('daily-gen').title = (f === null
-    ? '当日抓取账本读不出来，这个数暂时不可确认（不是「没抓到」）。'
-    : f.n
-      ? (f.partial
-        ? `今天第 ${f.n} 次抓取${f.at ? `（${f.at}）` : ''}有一段成果没能确认，`
-          + `已知新加了 ${f.added} 篇，实际可能更多。`
-        : `今天第 ${f.n} 次抓取${f.at ? `（${f.at}）` : ''}往库里新加了 ${f.added} 篇。`)
-      : '今天还没有同步过，库里的内容和上一次一样。') + queued;
-}
+// 生成按钮的名字和它里面那颗药丸(今天第 N 次抓取、抓了多少)在
+// daily_chip.js —— `dailyTargetDate()` / `renderDailyGenButton()` 也在那边。
 
 async function fetchDailyWindow(fillInputs) {
   // **服务器事实统一从这一个口进来。** 抓取事实、队列积压、默认区间每次都接;

@@ -196,9 +196,21 @@ def round_key() -> tuple[str, str]:
     分开两处取的话迟早有一处把"批次有没有开"判反,于是整批的凭证记到某个子轮
     头上,或者反过来每个来源各算一次抓取。
 
+    **「在跑」要由 `running` 证明,不能只看 `batch`/`run_id` 还在不在。** 那两个字段是
+    收尾时**故意留下**的(晚一步来取结果的人还得按 id 认领自己那一轮,见
+    `pipeline_state._end_run`),所以空闲时它们躺着的是上一轮的身份 —— 管道外直接入库
+    的那一笔会被盖上一个跟它毫无关系的批次号,而 `put_items` 的 `DO NOTHING` 和
+    `article_fetch_rounds` 的 `INSERT OR IGNORE` 都是**首次说了算**:盖错了救不回来,
+    药丸从此把它算成「这一次新抓到的」。拿不准就留「说不清」(空串),它落进回执的
+    `unsure` 那一档,不冒充任何一次抓取。置位是安全的那一边:`running` 和 `batch` 在
+    同一把锁里一起写下、工作线程才启动(`pipeline.start_pipeline`、`pipeline_retry`),
+    收尾只在 `_end_run` 里放下它,所以它严格包着全部阶段。
+
     (第 4 轮一度把这条算法单独抽成 `round_key_of`,供读开工标记的那一侧还原身份;
     第 5 轮审查证伪了「标记能当参与证据」那条,那个消费方跟着没了,算法折回这一处。)
     """
+    if not ps._state.get("running"):
+        return ("", "")
     batch, run_id = ps._state.get("batch"), ps._state.get("run_id")
     return (str(batch or run_id or ""), str(run_id or ""))
 

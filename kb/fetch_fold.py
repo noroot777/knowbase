@@ -5,8 +5,9 @@
 输入是账本的行、输出是轮次列表外加一句「读全了没有」。那边剩下的是落盘协议
 (文件锁、缓冲、凭证、轮换)和对外那几个动作;单文件 700 行上限见 CLAUDE.md。
 
-**折叠必须幂等**,这是整份账本敢用「追加 + 重放」的全部前提:回执取路径并集、
-子轮按集合算,所以同一行追加两遍、同一轮被两条通道各报一次,结论都一样。
+**折叠必须幂等**,这是整份账本敢用「追加 + 重放」的全部前提:回执按**内容身份**
+取并集、子轮按集合算,所以同一行追加两遍、同一轮被两条通道各报一次,结论都一样。
+(按路径取并集不行:改名那一轮里同一篇内容以两个文件名各写一次,会数成两篇。)
 改这里之前先读 `docs/decisions/daily.md`:`got` / `segs` / `ends` 三者的区别各有
 一次实测事故,混起来的后果是面板笃定地报一个少记的数。
 
@@ -19,6 +20,7 @@
 """
 from __future__ import annotations
 
+from kb.fetch_identity import _pairs
 from kb.pipeline_persist import _loads_json
 
 
@@ -82,11 +84,15 @@ def _fold(lines) -> tuple[list[dict], bool]:
     """把账本每一行折成「开过哪几轮、各自新落了哪些文章、走完了没有」,外加一句
     「读全了没有」。
 
-    五种行:开轮(带 `day`/`at`/`ex`)、回执(带 `paths`)、不可确认标记(带
-    `partial`)、子轮登记(带 `seg`)、子轮交完了(带 `seg`+`end`)。**回执取并集、
-    子轮按集合算**,所以同一行追加两遍、同一轮被两条通道各报一次,折出来的结论都
-    一样(见模块开头那条)——「交完了几次」用计数的话,一次 fsync 重放就能把它
-    推成完整。
+    五种行:开轮(带 `day`/`at`/`ex`)、回执(带 `items`)、不可确认标记(带
+    `partial`)、子轮登记(带 `seg`)、子轮交完了(带 `seg`+`end`)。**回执按内容
+    身份取并集、子轮按集合算**,所以同一行追加两遍、同一轮被两条通道各报一次,
+    折出来的结论都一样(见模块开头那条)——「交完了几次」用计数的话,一次 fsync
+    重放就能把它推成完整。
+
+    `paths` 是回执的**旧形状**(只有路径、没有身份)。照旧折得出条数,但每一条的
+    抓取身份都是空串 —— 升级那一下盘上正躺着这种行,不认它的话它会被当成一条没有
+    `day` 的开轮行,凭空多出一次「第 N 次抓取」。
 
     **`got`(收到过回执)和「交完了」是两件事,不许互相顶替。** 上一版只有 `got`:
     导出阶段进门先落一张空回执,于是「刚开始」在盘上和「全部交完」长得一模一样
@@ -123,7 +129,7 @@ def _fold(lines) -> tuple[list[dict], bool]:
             ok = False
             continue
         key = str(obj['key'])
-        if {'paths', 'partial', 'end', 'seg'} & obj.keys():
+        if {'items', 'paths', 'partial', 'end', 'seg'} & obj.keys():
             got = index.get(key)
             if got is None:
                 ok = False              # 有成果、却找不到它那一轮:记不全
@@ -136,11 +142,15 @@ def _fold(lines) -> tuple[list[dict], bool]:
                 got['ends'].add(seg)
             elif 'seg' in obj:
                 got['segs'].add(str(obj['seg'] or _LEGACY_SEG))
-            if 'paths' in obj:
-                if not isinstance(obj['paths'], list):
+            if 'items' in obj or 'paths' in obj:
+                pairs = _pairs(obj)
+                if pairs is None:
                     ok = False
                     continue
-                got['paths'].update(str(p) for p in obj['paths'])
+                # 一条成果出现两次而只有一次带得出抓取身份时,留**非空**那个:
+                # 空串是「说不清」,被它顶掉已知的身份等于把知道的事实又丢回去。
+                for cid, fid in pairs:
+                    got['items'][cid] = fid or got['items'].get(cid, '')
                 got['got'] = True
             continue
         if key in index:
@@ -159,7 +169,7 @@ def _fold(lines) -> tuple[list[dict], bool]:
         got = {'key': key, **_start(obj),
                # 这次运行会不会物化。读不到(存量账本行)按会物化算 —— 那一侧
                # 的结论是「不可确认」,比笃定地说 0 条安全。
-               'ex': bool(obj.get('ex', 1)), 'paths': set(), 'got': False,
+               'ex': bool(obj.get('ex', 1)), 'items': {}, 'got': False,
                # 参与这一轮物化的子轮,以及其中**明确交完了**的那几个。
                # 两个集合相等才算这一轮交完(见 `today`);存量账本行里一个
                # 子轮都没有,那几轮只能说「至少 N 条」—— 新代码确实证明不了

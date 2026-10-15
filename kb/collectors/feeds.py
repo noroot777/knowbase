@@ -140,9 +140,10 @@ class FeedCollector:
             _log(f'export: {note}')
         # 摘要一路交给 export:阶段状态由它最后落,翻译失败只写日志的话这个
         # 阶段会以绿色收尾,而那些文章一篇都没入库(见 `sync.export`)。
-        # 回执原样交上去:路径是 `sync.export` 自己写文件那一下攒的,这里不再
-        # 数一遍、也不许拿 `done` 之类的计数替它 —— 上层要的是身份,不是数目
-        # (理由在 `kb.fetch_rounds` 开头那条「任何重放都幂等」)。
+        # 回执原样交上去:那几条身份(内容身份 + 发现它的那一次抓取 + 这次写的
+        # 路径)是 `sync.export` 自己写文件那一下攒的,这里不再数一遍、也不许拿
+        # `done` 之类的计数替它 —— 上层要的是身份,不是数目(理由在
+        # `kb.fetch_rounds` 开头那条「任何重放都幂等」)。
         return export(self.name, hold_untranslated=not summary['skipped'],
                       translated=summary, fetched=fetched)
 

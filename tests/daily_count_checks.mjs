@@ -5,11 +5,13 @@
 // ② 后端答 null(账本读不出来)说「读不出来」,不说「今天还没有抓取」;
 // ③ 后端答 partial(某个来源的成果说不出来)说「至少 +N 条」,不冒充确定值;
 // ④ 抓取事实是从**外面**进来的,页面自己的空闲轮询和整块重载都得接得住,而
-//    用户填过的那两个时刻一个字都不许被覆盖。
+//    用户填过的那两个时刻一个字都不许被覆盖;
+// ⑤ 那个数由什么构成要拆得开:这一次新抓到的 / 之前抓到这一次才补导的 /
+//    说不清的,三档各一句话,而「说不清」不许并进「补导」。
 //
 // **从 tests/daily_probe.mjs 拆出来只因为行数**(那边到了 700 行上限),摆法和
 // 判据原样搬过来、共用同一次页面会话。后端那一侧的不变量在
-// tests/test_fetch_rounds.py 与 tests/test_fetch_receipt.py。
+// tests/test_fetch_rounds.py、tests/test_fetch_receipt.py 与 tests/test_fetch_identity.py。
 export async function checkFetchCountChip({ evalJs, check }) {
   // 沙箱从没跑过管道,所以此刻确实"今天还没有抓取" —— 这是一句事实,不是零。
   check("今天没抓过时按钮上这么说",
@@ -103,6 +105,63 @@ export async function checkFetchCountChip({ evalJs, check }) {
     `(() => { const t = document.getElementById('daily-gen-count').textContent;
               return t === '第 2 次抓取 · +4 条' && !/至少/.test(t); })()`),
         await evalJs(chipNow));
+  // ── 那个数由什么构成 ──────────────────────────────────────────────────────
+  // 药丸报的是「这次同步之后日报能多拿到多少」,而它和「远端这次新发现多少」在
+  // 补导场景下必然不等:正文抓取当天失败、隔两天补上才导出的那几篇是前几天抓到
+  // 的。远端今天一条新内容都没发而按钮写「+3 条」时,用户得能看出这 3 条值不值
+  // 一次模型钱 —— 所以 tooltip 里要把差额拆开说。
+  const tip = `document.getElementById('daily-gen').title`;
+  await evalJs(winStub(
+    `{ n: 1, added: 3, fresh: 0, carried: 3, unsure: 0, at: '09:30' }`));
+  await evalJs(`refreshDailyPending()`);
+  check("全是补导进来的时候,tooltip 说清这 3 篇不是这一次抓到的", await evalJs(
+    `(() => { const t = ${tip};
+              return /新加了 3 篇/.test(t) && /3 篇是之前抓到、这一次才补导进来的/.test(t)
+                     && !/新抓到/.test(t); })()`), await evalJs(tip));
+  // 反过来钉一边:正常情形(全是这一次新抓到的)**不加这句** —— 把同一个数说
+  // 两遍只是噪音。
+  await evalJs(winStub(
+    `{ n: 1, added: 3, fresh: 3, carried: 0, unsure: 0, at: '09:30' }`));
+  await evalJs(`refreshDailyPending()`);
+  check("全是这一次新抓到的时候不多说一句", await evalJs(
+    `(() => { const t = ${tip};
+              return /新加了 3 篇/.test(t) && !/其中/.test(t); })()`), await evalJs(tip));
+  await evalJs(winStub(
+    `{ n: 2, added: 5, fresh: 2, carried: 3, unsure: 0, at: '09:40' }`));
+  await evalJs(`refreshDailyPending()`);
+  check("两档都有时各报各的,加起来就是药丸上那个数", await evalJs(
+    `(() => { const t = ${tip};
+              return /新加了 5 篇/.test(t) && /2 篇是这一次新抓到的/.test(t)
+                     && /3 篇是之前抓到、这一次才补导进来的/.test(t); })()`),
+        await evalJs(tip));
+  // **「说不清」自己一句话,不许并进「补导」**:抓取身份是空串时我们只知道
+  // 「没记过」(存量内容、手工导入的链接),不知道「不是这一次」。
+  await evalJs(winStub(
+    `{ n: 2, added: 4, fresh: 1, carried: 0, unsure: 3, at: '09:50' }`));
+  await evalJs(`refreshDailyPending()`);
+  check("说不清是哪一次抓到的那几篇单独说,不算成补导", await evalJs(
+    `(() => { const t = ${tip};
+              return /3 篇说不清是哪一次抓到的/.test(t)
+                     && !/补导/.test(t); })()`), await evalJs(tip));
+  // 后端答不出这三个字段(`kb/static/` 每次请求从磁盘读、而 server.py 要重启才
+  // 生效,所以「新前端 + 旧后端」天天走到)时整句不说。
+  await evalJs(winStub(`{ n: 2, added: 4, at: '09:55' }`));
+  await evalJs(`refreshDailyPending()`);
+  check("后端答不出分解时整句不说", await evalJs(
+    `(() => { const t = ${tip};
+              return /新加了 4 篇/.test(t) && !/其中/.test(t)
+                     && !/NaN|undefined/.test(t); })()`), await evalJs(tip));
+  // **半份答案更要整句不说。** 上面那一档(三个全缺)被「有没有不是本次抓到的」
+  // 那道闸顺手挡住了,所以它证不了按形状判这件事;真正只有形状那道闸挡得住的是
+  // 这一档 —— 答了 carried 没答 fresh,写出去就是「新加了 4 篇。其中 3 篇是之前
+  // 抓到的」,一个加不起来的分解,而第 4 篇怎么来的页面上一个字都没有。
+  await evalJs(winStub(`{ n: 2, added: 4, carried: 3, at: '09:58' }`));
+  await evalJs(`refreshDailyPending()`);
+  check("只答了一半的分解整句不说,不写出一个加不起来的拆分", await evalJs(
+    `(() => { const t = ${tip};
+              return /新加了 4 篇/.test(t) && !/其中/.test(t)
+                     && !/NaN|undefined/.test(t); })()`), await evalJs(tip));
+
   // 改过覆盖区间:草稿只该挡住"改写用户填的那两个时刻",挡不到抓取事实 ——
   // 抓取是从外面进来的,跟用户在这里填了什么没有关系。
   await evalJs(`(() => { document.getElementById('daily-since').value = '2026-01-02T03:04';

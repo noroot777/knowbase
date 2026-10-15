@@ -23,7 +23,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from kb.collectors import CollectorError, FetchScope, SourceStatus, Target
+from kb.collectors import (CollectorError, Fetched, FetchScope, SourceStatus,
+                           Target)
 from kb.pipeline_state import _log, _stage
 
 # 采集器在本仓库内(<repo>/collector)。刻意用相对于本文件的路径而不是绝对路径:
@@ -81,28 +82,60 @@ def _run_cli(*argv: str, timeout: int) -> subprocess.CompletedProcess:
     )
 
 
-def _receipt(event: dict) -> frozenset[str] | None:
-    """子进程那份「写了哪几篇」换算成 vault 相对路径。换算不了返回 None。
+def _receipt(event: dict) -> frozenset[Fetched] | None:
+    """子进程那份「写了哪几篇」换算成带身份的回执。换算不了返回 None。
 
-    事件里是 `out`(导出根目录的绝对路径)+ `written`(每篇的 `<天>/<文件名>`),
-    两样都由 `collector/cli.py` 的 `cmd_export` 从导出脚本自己打的行里收上来。
+    事件里是 `out`(导出根目录的绝对路径)+ `items`(每篇一条
+    `{"id", "round", "name"}`,name 是 `<天>/<文件名>`),两样都由
+    `collector/cli.py` 的 `cmd_export` 从导出脚本自己打的行里收上来。
+
+    身份两件事各有出处:`id` 是 `articles.id`(稳定内容身份,挂上采集器名字做
+    前缀免得和别的来源撞),`round` 是 `article_fetch_rounds` 里那一行 ——
+    发现这一篇的那一次业务抓取。`round` 空串是「说不清」(这张表建出来之前就在库里的那些文章、手工
+    导入的链接),不许当成「不是本次」。
 
     **`out` 不在 vault 里就返回 None**:那说明采集器被配去写别处(测试夹具、
-    两边 `KB_VAULT_ROOT` 对不上),算出来的相对路径不是知识库里那个身份 ——
-    而账本靠路径去重,记一批不存在的路径会让后面真落下来的同名文章被当成
-    「已经数过」。宁可报「不可确认」。
+    两边 `KB_VAULT_ROOT` 对不上),算出来的相对路径不在知识库的取材范围里 ——
+    而范围过滤正是按它判的,一批对不上的路径会被整批筛掉、报成确定的 0 条。
+    宁可报「不可确认」。
+
+    **没有 `items` 这个键一律 None**,哪怕事件本身是成功的:那说明
+    `KB_COLLECTOR_DIR` 指着一份还不打清单的旧采集器,它写了多少篇我们不知道。
     """
     from kb.config import VAULT_ROOT
+    from kb.fetch_identity import text_field
 
     out = str(event.get("out") or "")
-    names = event.get("written")
-    if not out or not isinstance(names, list):
+    rows = event.get("items")
+    if not out or not isinstance(rows, list):
         return None
     try:
         prefix = Path(out).resolve().relative_to(Path(VAULT_ROOT).resolve())
     except (OSError, ValueError):
         return None
-    return frozenset(str(prefix / str(n)) for n in names if str(n).strip())
+    got = []
+    for one in rows:
+        if not isinstance(one, dict):
+            return None                 # 清单读不懂:当成说不出来,不挑着收
+        name = (text_field(one.get("name")) or "").strip()
+        if not name:
+            # **答不出文件名的那一行也是「读不懂」,不许挑着收。** 挑着收交上去的是
+            # 一份少记的清单,而上层拿它当确定值用(「这一次抓了 N 篇」)—— 少记是
+            # 静默丢数据。`cmd_export` 那一端对空名字本来就是整份作废,两端得一个
+            # 口径,不然中间这一道就成了把缺口洗成确定零条的地方。
+            return None
+        # 身份退回路径只在「旧采集器打了名字、没打 id」时发生。那时条数照旧
+        # 确定,只有分解说不出来 —— 比整轮报「不可确认」更接近事实。
+        # **但「没打」和「打了个读不懂的东西」是两件事**:后者一律整份作废,不许
+        # `str()` 成一个看着确定的身份(口径在 `fetch_identity.text_field`)。
+        aid, round_key = text_field(one.get("id")), text_field(one.get("round"))
+        if aid is None or round_key is None:
+            return None
+        aid, round_key = aid.strip(), round_key.strip()
+        rel = str(prefix / name)
+        got.append(Fetched(f"wechat_local:{aid}" if aid else f"path:{rel}",
+                           round_key, rel))
+    return frozenset(got)
 
 
 class WeChatLocalCollector:
@@ -165,7 +198,12 @@ class WeChatLocalCollector:
         if problem:
             _stage("crawl", "skipped", f"采集器还没装好,跳过抓取:{problem}")
             return
-        argv = ["collect"]
+        # 把这一次业务抓取的身份带进子进程:它新发现的文章各记一笔,导出时原样
+        # 交回来当回执里的抓取身份。不带的话只能事后按时间窗口反猜归属,而那正是
+        # 「别处同期落下的内容被算进这一轮」的来源(口径见 `kb.fetch_rounds`)。
+        from kb.fetch_rounds import round_key
+
+        argv = ["collect", "--round", round_key()]
         if scope.ranged:
             argv += ["--since", scope.since, "--until", scope.until]
             timeout_min = 120        # 区间补抓页间/号间等待远长于日常增量
@@ -279,6 +317,10 @@ class WeChatLocalCollector:
             coverage += f",另有归属待核实的不可读推送 {last['unattributed_messages']} 条（存量）"
         if last.get("unavailable_articles"):
             coverage += f",原文暂不可用 {last['unavailable_articles']} 篇（一周后复查）"
+        # 这一轮跑着的时候用户在面板上按下了「不再抓取」:如实说一句,别让它消失
+        # 在「下载失败」里 —— 它既不是失败,也不会再被重试。
+        if last.get("excluded_articles"):
+            coverage += f",已永久排除 {last['excluded_articles']} 篇（同步期间移除）"
         if code != 0:
             detail = (f"新增 {new} 篇,失败 {len(errors)} 项" if errors
                       else f"采集失败(退出码 {code})")
@@ -290,7 +332,7 @@ class WeChatLocalCollector:
 
     # ── 落地:采集器本地库 → obs md ───────────────────────────────────────────
 
-    def materialize(self) -> frozenset[str] | None:
+    def materialize(self) -> frozenset[Fetched] | None:
         """落 md,返回这一轮新写的那几篇(见 `kb.collectors` 的契约)。
 
         **只有子进程自己交出清单的那一支给确定值**,其余一律 None(不可确认):
@@ -338,12 +380,34 @@ class WeChatLocalCollector:
             _stage("export", "error",
                    event.get("detail") or (proc.stderr or "").strip()[-300:] or "导出失败")
             return None
-        fails = [{"title": t,
-                  "reason": "缺少正文，暂未导出；保留待补，后续同步会按退避时间重试",
-                  "pending": True}
-                 for t in (event.get("no_body") or [])]
+        fails = [self._no_body_failure(one) for one in (event.get("no_body") or [])]
         _stage("export", "ok", event.get("detail") or "完成", failures=fails)
         return None if degraded else _receipt(event)
+
+    def _no_body_failure(self, item) -> dict:
+        """把 CLI 报上来的一条「没正文」转成面板那份失败明细里的一行。
+
+        **三种形态都认**:新版 CLI 给 `{name,id,account,title,link}`;它读不到结构化
+        报告时给的是**带空身份的字典**;更旧的 CLI 给一个 `账号 · 标题` 的裸字符串。
+        后两种没有身份 —— 那就**不带 `url` / `drop`**,面板据此把这一行显示成不可
+        点、不可删,而不是指着另一篇文章让人删。**但那一条仍然要列得出来**:漏报
+        是静默丢数据。
+        """
+        reason = "缺少正文，暂未导出；保留待补，后续同步会按退避时间重试"
+        if not isinstance(item, dict):
+            return {"title": str(item), "reason": reason, "pending": True}
+        title = str(item.get("name") or item.get("title") or "")
+        out: dict = {"title": title, "reason": reason, "pending": True}
+        if link := str(item.get("link") or ""):
+            out["url"] = link
+        if aid := str(item.get("id") or ""):
+            # 面板原样回传这一份:这条到底怎么删只有采集器知道(见 `drop_item`)。
+            # **`link` 一起带上,它不是冗余**:库里已经没有这一行时,档案 ID 算不出
+            # 链接身份,而永久排除要记的正是那个身份(`exclusion_keys`)。
+            out["drop"] = {"channel": self.name, "id": aid,
+                           "account": str(item.get("account") or ""),
+                           "link": link}
+        return out
 
     # ── 积压 ────────────────────────────────────────────────────────────────
 
@@ -414,6 +478,28 @@ class WeChatLocalCollector:
 
     def set_target_enabled(self, name: str, enabled: bool) -> str:
         return self._mutate("enable" if enabled else "disable", name)
+
+    # ── 单条内容的「别再抓了」(kb.collectors.ItemDropping)───────────────────
+
+    def drop_item(self, ref: dict) -> str:
+        """这一篇永久不再采集:删掉它、把它的链接身份记进黑名单。
+
+        **身份只认 `id`,`account` 只用来核对。** CLI 那边拿 id 查出它真正的归属,
+        跟这里给的对不上就整个拒掉 —— 面板上那条明细和库里那一行必须是同一篇,
+        否则删下去的是另一个号的文章,而那是**不可恢复**的(连正文一起删)。
+        **幂等**:库里已经没有这一行时 CLI 照样返回成功 —— 但那条路要先拿出**排除
+        凭据**,拿不出来就拒;`link` 带过去正是为了让它算得出身份(见那边的注释)。
+        """
+        aid = str(ref.get("id") or "").strip()
+        if not aid:
+            raise CollectorError("这一条没有可用的文章标识，无法移除")
+        extra = ["--account", str(ref.get("account") or "")] if ref.get("account") else []
+        if link := str(ref.get("link") or "").strip():
+            extra += ["--link", link]
+        data = self._accounts_raw("articles", "drop", "--id", aid, *extra, timeout=20)
+        # 库里少了一篇,面板下次拿到的积压数要是新的
+        self._cache = None
+        return str(data.get("detail") or "已移除")
 
     # ── 上面几个共用的 CLI 调用 ─────────────────────────────────────────────
 

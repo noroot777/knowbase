@@ -41,7 +41,7 @@ from unittest.mock import Mock, patch
 
 from kb import fetch_pending, fetch_rounds, pipeline_stages
 from kb import pipeline_state as ps
-from tests.fetch_rounds_fixture import REPO, T, _Pending
+from tests.fetch_rounds_fixture import BOOK, REPO, T, _Pending
 
 
 # 第 5 轮审查那一例的子进程:**整条起跑—收尾走真的**,而且**不硬退出** —— 要证的
@@ -134,14 +134,18 @@ class TheGateOnlyTrustsEvidenceBoundToTheDebtTests(_Pending):
 
     def _first_sub_round(self, day):
         fetch_rounds.open_round('batch-a', day, seg='run-1')
-        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_new('batch-a',
+                              self.caught('batch-a', 'source/rss/a.md'))
         fetch_rounds.note_end('batch-a', 'run-1')
-        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 1, '09:00'),
                          fetch_rounds.today(day))        # 第一个子轮:确定 1 条
 
     def _crawl(self, batch, run_id, producer):
         """真走 `pipeline_stages._run_crawl`(含那道闸),返回那个采集器。"""
-        with patch.dict(ps._state, {'batch': batch, 'run_id': run_id,
+        # `running` 要一起装上:`round_key()` 认的是"这一轮在跑",光留着 `batch`
+        # 不算(收尾时那两个字段是故意留下的,见 `pipeline_batch.round_key`)。
+        with patch.dict(ps._state, {'running': True, 'batch': batch,
+                                    'run_id': run_id,
                                     'planned_stages': ['crawl', 'export']}), \
                 patch.object(pipeline_stages, 'crawl_channels',
                              Mock(return_value=[{'channel': 'rss', 'accounts': []}])), \
@@ -174,7 +178,7 @@ class TheGateOnlyTrustsEvidenceBoundToTheDebtTests(_Pending):
         self.process_gone()
         self.pending().unlink()
         self.fix_lock()
-        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 1, '09:00'),
                          fetch_rounds.today(day))        # 那个确定数一个字没变
 
     def test_a_start_marker_does_not_buy_passage_through_the_gate(self):
@@ -235,7 +239,7 @@ class TheGateOnlyTrustsEvidenceBoundToTheDebtTests(_Pending):
         self.process_gone()
         self.pending().unlink()
         self.fix_lock()
-        self.assertEqual({'n': 1, 'added': 1, 'partial': True, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 1, '09:00', True),
                          fetch_rounds.today(day))
 
     def test_a_sub_round_whose_registration_landed_takes_the_doubt_away(self):
@@ -244,10 +248,11 @@ class TheGateOnlyTrustsEvidenceBoundToTheDebtTests(_Pending):
         day = T('2026-09-29 09:00')
         self._first_sub_round(day)
         fetch_rounds.open_round('batch-a', day, seg='run-2')
-        fetch_rounds.note_new('batch-a', {'source/rss/b.md'})
+        fetch_rounds.note_new('batch-a',
+                              self.caught('batch-a', 'source/rss/b.md'))
         fetch_rounds.note_end('batch-a', 'run-2')
         self.process_gone()
-        self.assertEqual({'n': 1, 'added': 2, 'partial': False, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 2, '09:00'),
                          fetch_rounds.today(day))
 
     def test_a_marker_from_a_run_that_has_not_registered_yet_does_not_cloud_it(self):
@@ -261,12 +266,12 @@ class TheGateOnlyTrustsEvidenceBoundToTheDebtTests(_Pending):
         day = T('2026-09-29 09:00')
         self._first_sub_round(day)
         self.mark_open('run-2')
-        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 1, '09:00'),
                          fetch_rounds.today(day))
         self.marker().write_text(                        # 存量/老格式的那一笔同理
             json.dumps({'run_id': 'run-old', 'started_at': '2026-09-29 09:00'}),
             encoding='utf-8')
-        self.assertEqual({'n': 1, 'added': 1, 'partial': False, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 1, '09:00'),
                          fetch_rounds.today(day))
 
     def _unknown_but_still_fetches(self, run_id, why):
@@ -355,7 +360,8 @@ class TheGateOnlyTrustsEvidenceBoundToTheDebtTests(_Pending):
         后果是同一句「盘上那个数必须对得上 vault 里的文章」。
         """
         fetch_rounds.open_round('batch-a', seg='run-1')
-        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_new('batch-a',
+                              self.caught('batch-a', 'source/rss/a.md'))
         fetch_rounds.note_end('batch-a', 'run-1')
         self.write('source/rss/a.md')
         self.assertEqual({'added': 1, 'partial': False},
@@ -437,7 +443,8 @@ class CleanupOnlyRevokesTheGenerationItJudgedTests(_Pending):
 
     def _round(self, day):
         fetch_rounds.open_round('batch-a', day, seg='run-1')
-        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_new('batch-a',
+                              self.caught('batch-a', 'source/rss/a.md'))
         fetch_rounds.note_end('batch-a', 'run-1')
 
     def test_expiry_cannot_delete_a_generation_written_during_it(self):
@@ -480,7 +487,7 @@ class CleanupOnlyRevokesTheGenerationItJudgedTests(_Pending):
         self.assertEqual({'batch-a'}, fetch_pending.mine(folder))  # 当天那笔还在
         self.assertEqual(({'batch-a'}, True), fetch_pending.held(folder, floor))
         self.process_gone()
-        self.assertEqual({'n': 1, 'added': 1, 'partial': True, 'at': '09:00'},
+        self.assertEqual(BOOK(1, 1, '09:00', True),
                          fetch_rounds.today(day))
 
     def test_a_generation_that_could_not_be_written_keeps_the_older_one(self):
@@ -489,12 +496,14 @@ class CleanupOnlyRevokesTheGenerationItJudgedTests(_Pending):
         day = T('2026-09-29 09:00')
         fetch_rounds.open_round('batch-a', day, seg='run-1')
         self.break_lock()
-        fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+        fetch_rounds.note_new('batch-a',
+                              self.caught('batch-a', 'source/rss/a.md'))
         first = self.certs()
         self.assertEqual(1, len(first))
         with patch.object(fetch_pending, '_write_atomic',
                           Mock(side_effect=OSError('写不下去'))):
-            fetch_rounds.note_new('batch-a', {'source/rss/b.md'})
+            fetch_rounds.note_new('batch-a',
+                              self.caught('batch-a', 'source/rss/b.md'))
         self.assertEqual(first, self.certs())            # 旧一代还在
         self.assertEqual({'batch-a'}, fetch_pending.mine(self.pending()))
         self.process_gone()

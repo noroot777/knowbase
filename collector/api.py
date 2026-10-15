@@ -32,8 +32,16 @@ def _word_count_from_body_raw(raw: object, title: str = "") -> int:
     return len(re.sub(r"\s+", "", str(title or "")))
 
 
-def _ingest_crawl_article(repo, account_name: str, article: dict) -> bool:
-    """入库单篇爬取文章：元数据、正文、字数。"""
+def _ingest_crawl_article(repo, account_name: str, article: dict,
+                          *, fetch_round: str = "") -> bool:
+    """入库单篇爬取文章：元数据、正文、字数。
+
+    `fetch_round` 是知识库这一次业务抓取的批次号，只透传给仓储；它只在这一篇
+    **首次**落库时才被记下来，而且跟首次元数据写在同一个 savepoint 里——要么一起
+    落地，要么连文章那行一起撤回（为什么「同一个事务」还不够见
+    `ArticleRepository.upsert_article_from_blog` 的说明）。下面这次 commit
+    **在走网络抓正文之前**——元数据和身份一起落地，正文失败不影响它们。
+    """
     from src.utils.article_identity import prepare_article
 
     prepared = prepare_article(repo, account_name, article)
@@ -42,7 +50,16 @@ def _ingest_crawl_article(repo, account_name: str, article: dict) -> bool:
     account_name, article, _is_new = prepared
 
     article_id = str(article.get("id") or "")
-    repo.upsert_article_from_blog(account_name, article)
+    # 写不进去 = 这个身份在上面那次检查之后被永久排除了(面板上那颗「不再抓取」)。
+    # **到此为止**:不抓正文、不记字数 —— 判据在写语句自己的 WHERE 里,这里只是
+    # 读它的结论(见 `repository.upsert_article_from_blog`)。
+    # **拒写也要 commit**,口径同下面 `_persist` 的早退:那句受限写入即使影响 0 行
+    # 也已经开着一个写事务。这一处眼下还有上游兜着(`local_runner._download` 紧跟
+    # 一句 commit),但收尾该待在开事务的这一层 —— 不然换个调用方就漏。
+    if not repo.upsert_article_from_blog(account_name, article,
+                                         fetch_round=fetch_round):
+        repo.commit()
+        return False
     repo.commit()
     nickname = _fetch_article_detail_text(
         article_id, str(article.get("link") or ""), repo=repo
@@ -88,6 +105,10 @@ def _fetch_article_detail_text(
         if body_retry.deferred(repo, article_id, link):
             return ""
         text, html, nickname = fetch_article_body_full(link)
+        # 下面这三条失败路径写的都是**挂在这篇文章上**的退避状态。它们各自的判据
+        # 都在 `repository.set_fetch_state` 的 WHERE 里:这一篇在抓取期间被永久
+        # 移除了就写 0 行、如实返回 False,不抛外键错误 —— 抛出来会被下载循环当成
+        # 一次同步失败,把用户主动的移除记成红(见 `failure-drop.md`)。
         if isinstance(text, str):
             # 作者删除/平台违规下架/投诉侵权 → 一周复查一次;其余算临时故障退避重试
             body_retry.failed(repo, article_id, link,
@@ -99,16 +120,25 @@ def _fetch_article_detail_text(
             return nickname
 
         def _persist() -> None:
-            repo.set_body_text(article_id, text)
+            # 抓一篇正文要几秒到几十秒,用户完全可能在这中间按下「不再抓取」。
+            # 排除判据在写语句自己的 WHERE 里,这里只读它的结论:一个字节都没写
+            # 就别再往下记重试状态了(那张表也挂在这篇文章上)。
+            # **拒写也要 commit**:那句受限写入即使影响 0 行也已经开着写事务,
+            # 直接 return 会把整库写锁攥到下一篇的网络请求里去。
+            if not repo.set_body_text(article_id, text, link=link):
+                repo.commit()
+                return
             # HTML 一并落库：Markdown 导出和预览都依赖它，抓取时不存后面就得重抓
             if html:
-                repo.set_body_html(article_id, html)
+                repo.set_body_html(article_id, html, link=link)
             body_retry.succeeded(repo, article_id)
             repo.commit()
 
         db_write_with_retry(_persist)
         return nickname
     except Exception as e:
+        # 走到这里说明上面那几处**一处都没来得及记**(网络抛、解析抛)。补一笔,
+        # 判据同上 —— 文章已经被移除时它写 0 行,不会在异常处理里再抛一次。
         body_retry.failed(repo, article_id, link)
         print(f"[detail] 抓取正文失败 {article_id}: {e}")
         return ""

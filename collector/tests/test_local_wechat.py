@@ -1,29 +1,19 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
 import contextlib
 import io
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import Mock, call, patch
-from xml.sax.saxutils import escape
 
 from src.crawler.local_wechat import LocalReader, LocalReaderError, parse_push, resolve_accounts
 from src.db import connection as conn_mod
 from src.utils.article_identity import article_identity, stable_article_id
+from tests.local_collect_case import LocalCollectCase, push
 
-
-def push(biz="biz-a", mid="101", idx="1", published="2026-09-15 18:30", **extra):
-    url = f"https://mp.weixin.qq.com/s?__biz={biz}&mid={mid}&idx={idx}&sn=signature&chksm=checksum&scene=123&xtrack=1"
-    fields = {"title": "测试文章", "url": url, "digest": "摘要", "cover": "",
-              "pub_time": str(int(datetime.strptime(published, "%Y-%m-%d %H:%M").timestamp())),
-              **extra}
-    return {"text": "<msg><appmsg><mmreader><category><item>"
-            + "".join(f"<{k}>{escape(v)}</{k}>" for k, v in fields.items())
-            + "</item></category></mmreader></appmsg></msg>",
-            "create_time": 1}
+# `push` 在这里 re-export:test_local_index / test_local_coverage 从本模块 import 它。
+__all__ = ["push"]
 
 
 class PushTests(unittest.TestCase):
@@ -215,44 +205,7 @@ class PushTests(unittest.TestCase):
             self.assertEqual(3, sleep.call_count)
 
 
-class LocalCollectionTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        root = Path(self.tmp.name)
-        self.saved = (conn_mod.DEFAULT_DB_PATH, conn_mod.DATA_DIR, conn_mod._db_ready)
-        conn_mod.DEFAULT_DB_PATH, conn_mod.DATA_DIR, conn_mod._db_ready = root / "test.db", root, False
-        from src.db.repository import ArticleRepository
-
-        self.repo = ArticleRepository()
-        self.repo.enable_crawl_account("档案名", "biz-a")
-        self.repo.enable_crawl_account("停用号", "biz-off")
-        self.repo.conn.execute("UPDATE accounts SET in_crawl_config=0 WHERE name='停用号'")
-        self.repo.commit()
-        self.reader = LocalReader()
-        self.reader.check = Mock()
-        self.reader.accounts = Mock(return_value=[{"username": "gh_test", "display_name": "档案名"}])
-        self.reader.messages = Mock(return_value=[push()])
-        from tests.local_source_fixture import TimelineFixture
-
-        self.sql_fixture = TimelineFixture(self.reader)
-        self.reader.call = self.sql_fixture.call
-
-        self.fill = patch("src.utils.wechat_body.fetch_article_body_full", return_value=(
-            ["真实正文测试内容"], "<p>真实正文测试内容</p>", "")).start()
-        patch("src.utils.request_pacing.RequestPacer.wait").start()
-
-    def tearDown(self):
-        self.sql_fixture.close()
-        patch.stopall()
-        self.repo.close()
-        conn_mod.DEFAULT_DB_PATH, conn_mod.DATA_DIR, conn_mod._db_ready = self.saved
-        self.tmp.cleanup()
-
-    def collect(self, **kwargs):
-        from src.collect.local_runner import collect
-
-        return collect(lambda event: None, reader=self.reader, **kwargs)
-
+class LocalCollectionTests(LocalCollectCase):
     def test_local_collect_twice_is_idempotent_and_does_not_touch_disabled_accounts(self):
         first, second = self.collect(), self.collect()
         self.assertEqual([], first["errors"])
@@ -399,78 +352,6 @@ class LocalCollectionTests(unittest.TestCase):
         self.assertEqual(1, result["unreadable_messages"])
         self.assertEqual(1, result["new_articles"])
 
-    def test_export_hands_up_the_list_of_files_it_wrote(self):
-        """导出脚本逐篇打的那行 `[ok]`,连同输出目录一起收进结构化事件。
-
-        知识库拿它当「这次抓取抓了多少」的成果回执(口径在
-        kb/collectors/__init__.py 的 materialize 契约)。只留给人看的话上层只能
-        回去扫全库猜归属,而差集分不出"谁写的"。
-        """
-        import io, json, subprocess, sys, contextlib
-        from pathlib import Path
-        from unittest.mock import patch
-        from scripts import export_obsidian
-
-        self.reader.messages.return_value = [push()]
-        self.fill.return_value = (["正文"], "<p>正文</p>", "")
-        self.collect()
-        out = str(Path(self.tmp.name) / "export2")
-        with patch.object(sys, "argv",
-                          ["export", "--out", out, "--dedup-root", out, "--no-images"]), \
-             contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(0, export_obsidian.main())
-        raw = output.getvalue()
-        self.assertIn(f"[export] 输出目录: {out}", raw)
-        self.assertIn("  [ok] ", raw)
-
-        import cli
-        with patch("cli.subprocess.run", return_value=subprocess.CompletedProcess(
-                [], 0, stdout=raw, stderr="")), \
-             contextlib.redirect_stdout(io.StringIO()) as event_output, \
-             contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
-        event = json.loads(event_output.getvalue())
-        # 先判「交上来了没有」再判内容:缺键的话 KeyError 会把红变成 ERROR,
-        # 而「清单压根没交」正是这一条要拦的那种改动。
-        self.assertEqual({"out", "written"}, {"out", "written"} & set(event),
-                         f"事件里没有成果回执:{sorted(event)}")
-        self.assertEqual(out, event["out"])
-        self.assertEqual(1, len(event["written"]))
-        self.assertTrue(event["written"][0].endswith(".md"))
-        # 回执指的得是真落在盘上的那个文件,不是一句好看的文案
-        self.assertTrue((Path(out) / event["written"][0]).is_file())
-
-    def test_export_keeps_old_empty_article_retryable(self):
-        from scripts import export_obsidian
-        import sys
-
-        self.reader.messages.return_value = [push(published="2020-01-01 12:00")]
-        self.fill.return_value = ("请求错误", None, "")
-        self.collect()
-        out = str(Path(self.tmp.name) / "export")
-        with patch.object(sys, "argv", ["export", "--out", out, "--dedup-root", out, "--no-images"]), \
-             contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(0, export_obsidian.main())
-        self.assertIn("待补正文 1", output.getvalue())
-        self.assertIn("无正文,跳过 档案名 · 测试文章", output.getvalue())
-        self.assertNotIn("失败 0", output.getvalue())
-        import cli
-        import subprocess
-
-        with patch("cli.subprocess.run", return_value=subprocess.CompletedProcess(
-                [], 0, stdout=output.getvalue(), stderr="")), \
-             contextlib.redirect_stdout(io.StringIO()) as event_output, \
-             contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
-        import json
-
-        self.assertEqual(["档案名 · 测试文章"], json.loads(event_output.getvalue())["no_body"])
-        self.assertEqual(0, self.repo.conn.execute("SELECT is_wx_deleted FROM articles").fetchone()[0])
-        self.repo.conn.execute("UPDATE article_fetch_state SET retry_at=0")
-        self.repo.commit()
-        self.fill.return_value = (["恢复正文"], "<p>恢复正文</p>", "")
-        self.assertEqual([], self.collect()["errors"])
-        self.assertEqual(1, self.repo.conn.execute("SELECT COUNT(*) FROM article_bodies").fetchone()[0])
 
     def test_recovery_only_resets_affected_local_articles_and_creates_backup(self):
         from scripts.recover_local_articles import recover
@@ -497,6 +378,11 @@ class LocalCollectionTests(unittest.TestCase):
             self.assertEqual(5, saved.execute("SELECT SUM(is_wx_deleted) FROM articles").fetchone()[0])
         self.assertEqual(4, self.repo.conn.execute("SELECT SUM(is_wx_deleted) FROM articles").fetchone()[0])
         self.assertEqual({"candidates": 0, "restored": 0}, recover(db))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
 
 
 if __name__ == "__main__":

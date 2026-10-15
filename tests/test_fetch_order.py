@@ -29,7 +29,7 @@ import unittest
 from unittest.mock import patch
 
 from kb import fetch_rounds
-from tests.fetch_rounds_fixture import REPO, T, _Base
+from tests.fetch_rounds_fixture import BOOK, REPO, T, _Base
 
 
 # 另一个进程:它的缓冲是空的,所以它那一轮**整轮先落盘**(这正是本进程那几行
@@ -46,7 +46,8 @@ config.VAULT_ROOT = root / 'vault'
 config.SOURCES = [config.Source(name='rss', root=config.VAULT_ROOT / 'source/rss')]
 key, at = sys.argv[2], datetime.fromisoformat(sys.argv[3])
 fetch_rounds.open_round(key, at, seg=key + '-run')
-fetch_rounds.note_new(key, {{'source/rss/' + key + '.md'}})
+one = 'source/rss/' + key + '.md'
+fetch_rounds.note_new(key, [('rss:' + one, key, one)])
 fetch_rounds.note_end(key, key + '-run')
 '''
 
@@ -72,8 +73,8 @@ class TheLatestRoundIsTheLatestStartedTests(_Base):
         with patch.object(fetch_rounds, '_append', return_value=False):
             fetch_rounds.open_round('earlier-round', T('2026-09-29 11:00'),
                                     seg='earlier-run')
-            fetch_rounds.note_new('earlier-round',
-                                  {'source/rss/earlier-a.md', 'source/rss/earlier-b.md'})
+            fetch_rounds.note_new('earlier-round', self.caught(
+                'earlier-round', 'source/rss/earlier-a.md', 'source/rss/earlier-b.md'))
             fetch_rounds.note_end('earlier-round', 'earlier-run')
         self._other_process_round('later-round', '2026-09-29 12:00')
         got = fetch_rounds.today(day)                    # 这一下顺手把攥着的行补写
@@ -81,7 +82,7 @@ class TheLatestRoundIsTheLatestStartedTests(_Base):
         body = (self.root / fetch_rounds.FILE_NAME).read_text(encoding='utf-8')
         self.assertLess(body.index('later-round'), body.index('earlier-round'))
         self.assertEqual([], fetch_rounds._unsaved)      # 两轮都在盘上、谁都不欠行
-        self.assertEqual({'n': 2, 'added': 1, 'partial': False, 'at': '12:00'}, got)
+        self.assertEqual(BOOK(2, 1, '12:00'), got)
         # 重放:同一份文件再读一次(新进程、空缓冲)还是同一个答案
         self.assertEqual(got, fetch_rounds.today(day))
 
@@ -111,7 +112,7 @@ class TheLatestRoundIsTheLatestStartedTests(_Base):
         ]
         (self.root / fetch_rounds.FILE_NAME).write_text(''.join(
             json.dumps(o, ensure_ascii=False) + '\n' for o in lines), encoding='utf-8')
-        expected = {'n': 2, 'added': 1, 'partial': False, 'at': '11:00'}
+        expected = BOOK(2, 1, '11:00', fresh=0, unsure=1)
         self.assertEqual(expected, fetch_rounds.today(day))
         # 开一轮新的 → 触发轮换(过期那天被清掉),随后同一句话还要成立
         fetch_rounds.open_round('third', T('2026-09-29 12:00'),
@@ -119,8 +120,7 @@ class TheLatestRoundIsTheLatestStartedTests(_Base):
         body = (self.root / fetch_rounds.FILE_NAME).read_text(encoding='utf-8')
         self.assertNotIn('2026-09-20', body)             # 真轮换过
         self.assertIn('11:00:59.900000', body)           # `t` 抄过去了
-        self.assertEqual({'n': 3, 'added': 0, 'partial': False, 'at': '12:00'},
-                         fetch_rounds.today(day))
+        self.assertEqual(BOOK(3, 0, '12:00'), fetch_rounds.today(day))
         # 把最后那一轮摘掉再读:11:00 那两轮的先后仍然是起跑顺序,不是行序
         kept = [l for l in body.splitlines() if '"third"' not in l]
         (self.root / fetch_rounds.FILE_NAME).write_text('\n'.join(kept) + '\n',
@@ -138,12 +138,11 @@ class TheLatestRoundIsTheLatestStartedTests(_Base):
         day = T('2026-09-29 13:00')
         with patch.object(fetch_rounds, '_append', return_value=False):
             fetch_rounds.open_round('zz-early', T('2026-09-29 11:00:01'), seg='z')
-            fetch_rounds.note_new('zz-early',
-                                  {'source/rss/z1.md', 'source/rss/z2.md'})
+            fetch_rounds.note_new('zz-early', self.caught(
+                'zz-early', 'source/rss/z1.md', 'source/rss/z2.md'))
             fetch_rounds.note_end('zz-early', 'z')
         self._other_process_round('aa-late', '2026-09-29 11:00:59')
-        self.assertEqual({'n': 2, 'added': 1, 'partial': False, 'at': '11:00'},
-                         fetch_rounds.today(day))
+        self.assertEqual(BOOK(2, 1, '11:00'), fetch_rounds.today(day))
 
     def test_rounds_without_the_fine_grained_mark_keep_working(self):
         """**反过来钉一边:存量账本行(没有 `t`)照旧按分钟排,不许一个数都读不出来。**
@@ -168,7 +167,7 @@ class TheLatestRoundIsTheLatestStartedTests(_Base):
         (self.root / fetch_rounds.FILE_NAME).write_text(''.join(
             json.dumps(o, ensure_ascii=False) + '\n' for o in lines), encoding='utf-8')
         # 11:00 那两轮平局 → 按 key:'b-round' > 'a-round',所以末位是 b 那一轮
-        self.assertEqual({'n': 3, 'added': 1, 'partial': False, 'at': '11:00'},
+        self.assertEqual(BOOK(3, 1, '11:00', fresh=0, unsure=1),
                          fetch_rounds.today(day))
 
     def test_a_round_reopened_after_a_read_failure_keeps_its_first_start(self):
@@ -181,7 +180,8 @@ class TheLatestRoundIsTheLatestStartedTests(_Base):
         day = T('2026-09-29 13:00')
         with patch.object(fetch_rounds, '_append', return_value=False):
             fetch_rounds.open_round('batch-a', T('2026-09-29 10:00'), seg='run-1')
-            fetch_rounds.note_new('batch-a', {'source/rss/a.md'})
+            fetch_rounds.note_new('batch-a',
+                                  self.caught('batch-a', 'source/rss/a.md'))
             fetch_rounds.note_end('batch-a', 'run-1')
         # 另一个进程把**同一轮**又开了一次(它读不到那几行,所以照旧写一条开轮行),
         # 于是物理上 12:00 那条在前、10:00 那条是补写进来的
@@ -223,7 +223,8 @@ class TheDayARoundBelongsToTests(_Base):
         """
         with patch.object(fetch_rounds, '_append', return_value=False):
             fetch_rounds.open_round('batch-a', T('2026-09-29 23:59'), seg='early-run')
-            fetch_rounds.note_new('batch-a', {'source/rss/a.md', 'source/rss/b.md'})
+            fetch_rounds.note_new('batch-a', self.caught(
+                'batch-a', 'source/rss/a.md', 'source/rss/b.md'))
             fetch_rounds.note_end('batch-a', 'early-run')
         # 另一个进程为**同一个业务身份**登记第二个子轮,已经过了零点
         self._other_process_round('batch-a', '2026-09-30 00:01')
@@ -233,12 +234,12 @@ class TheDayARoundBelongsToTests(_Base):
         self.assertEqual(2, body.count('"day"'))
         self.assertLess(body.index('00:01'), body.index('23:59'))
         self.assertEqual([], fetch_rounds._unsaved)
-        self.assertEqual({'n': 0, 'added': 0, 'partial': False, 'at': ''}, today)
+        self.assertEqual(BOOK(0, 0, ''), today)
         # 它整轮算在 29 日:3 条都在那一轮名下(两个子轮都交完了,所以不是下界)
-        self.assertEqual({'n': 1, 'added': 3, 'partial': False, 'at': '23:59'},
+        self.assertEqual(BOOK(1, 3, '23:59'),
                          fetch_rounds.today(T('2026-09-29 23:59')))
         # 重放同一份文件(空缓冲)还是同一个答案
-        self.assertEqual({'n': 0, 'added': 0, 'partial': False, 'at': ''},
+        self.assertEqual(BOOK(0, 0, ''),
                          fetch_rounds.today(T('2026-09-30 00:01')))
 
     def test_the_same_events_in_either_layout_answer_the_same(self):
@@ -258,8 +259,8 @@ class TheDayARoundBelongsToTests(_Base):
             {'key': 'batch-a', 'paths': ['source/rss/c.md']},
             {'key': 'batch-a', 'seg': 'later', 'end': 1},
         ]
-        want_today = {'n': 0, 'added': 0, 'partial': False, 'at': ''}
-        want_yesterday = {'n': 1, 'added': 3, 'partial': False, 'at': '23:59'}
+        want_today = BOOK(0, 0, '')
+        want_yesterday = BOOK(1, 3, '23:59', fresh=0, unsure=3)
         for name, lines in (('晚的在前', later + early), ('早的在前', early + later)):
             with self.subTest(name):
                 self._layout(lines)
@@ -282,7 +283,7 @@ class TheDayARoundBelongsToTests(_Base):
             {'key': 'batch-a', 'seg': 'g', 'end': 1},
         ]
         blank = [{'key': 'batch-a', 'ex': 1}]            # 连 day 和 at 都没有
-        want = {'n': 1, 'added': 2, 'partial': False, 'at': '11:00'}
+        want = BOOK(1, 2, '11:00', fresh=0, unsure=2)
         for name, lines in (('空的在后', good + blank), ('空的在前', blank + good)):
             with self.subTest(name):
                 self._layout(lines)
@@ -300,10 +301,10 @@ class TheDayARoundBelongsToTests(_Base):
         for name, lines in (('新的在前', newer + older), ('旧的在前', older + newer)):
             with self.subTest(name):
                 self._layout(lines)
-                self.assertEqual({'n': 0, 'added': 0, 'partial': False, 'at': ''},
+                self.assertEqual(BOOK(0, 0, ''),
                                  fetch_rounds.today(T('2026-09-29 13:00')))
                 # 28 日那边有这一轮:没有子轮行,所以条数只是下界
-                self.assertEqual({'n': 1, 'added': 1, 'partial': True, 'at': ''},
+                self.assertEqual(BOOK(1, 1, '', True, fresh=0, unsure=1),
                                  fetch_rounds.today(T('2026-09-28 13:00')))
 
     def test_a_rotation_writes_the_round_back_onto_its_own_day(self):
@@ -327,7 +328,7 @@ class TheDayARoundBelongsToTests(_Base):
             {'key': 'batch-a', 'seg': 'early', 'end': 1},
         ]
         self._layout(lines)
-        self.assertEqual({'n': 0, 'added': 0, 'partial': False, 'at': ''},
+        self.assertEqual(BOOK(0, 0, ''),
                          fetch_rounds.today(T('2026-09-30 00:01')))
         # 轮换只在写路径上发生:真开一轮新的(不物化,所以它自己是确定的 0 条)
         fetch_rounds.open_round('third', T('2026-09-30 00:02'),
@@ -340,9 +341,9 @@ class TheDayARoundBelongsToTests(_Base):
         self.assertEqual({'day': '2026-09-29', 'at': '2026-09-29 23:59',
                           't': '2026-09-29 23:59:00.000000'},
                          {k: batch[k] for k in ('day', 'at', 't')})
-        self.assertEqual({'n': 1, 'added': 0, 'partial': False, 'at': '00:02'},
+        self.assertEqual(BOOK(1, 0, '00:02'),
                          fetch_rounds.today(T('2026-09-30 00:02')))
-        self.assertEqual({'n': 1, 'added': 3, 'partial': False, 'at': '23:59'},
+        self.assertEqual(BOOK(1, 3, '23:59', fresh=0, unsure=3),
                          fetch_rounds.today(T('2026-09-29 23:59')))
 
 if __name__ == '__main__':

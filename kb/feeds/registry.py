@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS feed_items (
  content_kind TEXT NOT NULL DEFAULT 'feed', fetched_at TEXT NOT NULL,
  content_hash TEXT NOT NULL, exported_hash TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '',
  -- 排在最后,和老库 ALTER 补出来的列序一致(见 _ADDED_COLUMNS)。
- extract_stale INTEGER NOT NULL DEFAULT 0
+ extract_stale INTEGER NOT NULL DEFAULT 0, fetch_round TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS feed_items_recent ON feed_items(kind, published DESC, fetched_at DESC);
 CREATE TABLE IF NOT EXISTS subscription_items (
@@ -118,6 +118,13 @@ _ADDED_COLUMNS = {
         # vault 之后由 `fulltext.retire_stale` 做完清理再放下 —— 所以这一步失败
         # 时标记留在原处,下一轮导出会再来一次。
         ('extract_stale', 'INTEGER NOT NULL DEFAULT 0'),
+        # 「**哪一次业务抓取**头一回发现这一条」(`fetch_rounds.round_key()`)。
+        # 导出那一步把它当成回执里的抓取身份交上去,药丸背后那句分解据此分开
+        # 「这一次新抓到的」和「之前抓到、这一次才补导进来的」。
+        # **老库里的条目补成空串 = 说不清**,不是「不是本次」:它们入库时压根
+        # 没有这个概念,硬塞一个值等于凭空造事实。空串落在 `unsure` 那一档,
+        # 面板上那句分解自己会闭嘴(见 `fetch_rounds.today`)。
+        ('fetch_round', "TEXT NOT NULL DEFAULT ''"),
     ),
 }
 
@@ -550,6 +557,12 @@ def merge_config(source_id: int, patch: dict, conn=None) -> None:
 
 
 def put_items(source: dict, entries: list[dict], conn=None) -> int:
+    # 这一条是哪一次业务抓取发现的。**口径只有一份**(`fetch_rounds.round_key`),
+    # 别在这里另写一遍读 `_state` 的逻辑 —— 两份迟早漂,而漂的后果是药丸把本次
+    # 新抓到的算成补导的。管道没在跑时它是空串 = 说不清,照旧入库。
+    from kb.fetch_rounds import round_key
+
+    round_id = round_key()
     added = 0
     with _writing(conn) as c:
         for e in entries:
@@ -558,12 +571,15 @@ def put_items(source: dict, entries: list[dict], conn=None) -> int:
             exists = c.execute('SELECT key FROM feed_items WHERE key=?', (key,)).fetchone()
             added += int(not exists)
             # First provenance remains stable when an aggregate also contains this URL.
+            # `DO NOTHING` 顺手把 fetch_round 钉成**首次发现**那一轮:聚合源里
+            # 同一个 URL 后面还会再出现,重抓也按 URL 去重,改写它等于把首次发现
+            # 的事实改成最后一次看见的时刻。
             c.execute('''INSERT INTO feed_items
-                (key,kind,url,title,author,published,body,content_kind,fetched_at,content_hash,lang)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO NOTHING''',
+                (key,kind,url,title,author,published,body,content_kind,fetched_at,content_hash,lang,fetch_round)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO NOTHING''',
                 (key,source['kind'],e['url'],e['title'],e.get('author') or source['name'],
                  e.get('published',''),e['body'],e.get('content_kind','feed'),now(),digest,
-                 text_language(e['title'], e['body'])))
+                 text_language(e['title'], e['body']),round_id))
             c.execute('INSERT OR IGNORE INTO subscription_items VALUES(?,?)', (source['id'],key))
     return added
 
