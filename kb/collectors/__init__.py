@@ -167,7 +167,7 @@ def target_manager(collector: SourceCollector | None = None) -> TargetManager | 
 class RetryNarrowing(Protocol):
     """能回答「上一轮失败的那几个目标,现在还要重抓哪些」的采集器。
 
-    名单是采集器自己在失败那一刻留下的(见 `pipeline_state.note_retry_targets`),
+    名单是采集器自己在失败那一刻留下的(见 `pipeline_segments.note_retry_targets`),
     这里只回答"它们现在还要不要抓" —— 中间用户可能改过设置、也可能已经单独同步
     成功了,而这两件事只有采集器分得清。
 

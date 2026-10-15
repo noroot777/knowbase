@@ -26,6 +26,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from kb import daily, daily_carry, daily_run, llm, llm_stages, store
+from kb import daily_state
 
 MODEL = llm.Model('openai', 'test-model')
 
@@ -352,7 +353,7 @@ class CarryFailureNoticeTests(_Base):
         gen = Mock(return_value={'date': '2026-09-29', 'since': '', 'until': '', 'path': '',
                                  'docs': 2, 'total': 2, 'late': 0, 'model': 'm',
                                  'carry_error': 'database is locked'})
-        with patch.object(daily_run, 'STATE_FILE', self.root / 'last_run.json'), \
+        with patch.object(daily_state, 'STATE_FILE', self.root / 'last_run.json'), \
              patch.object(daily, 'generate', gen):
             daily_run._run(None, None, False, [], daily.FIRST_DAYS)
         self.assertEqual('done', daily_run._state['phase'])
@@ -366,7 +367,7 @@ class CarryFailureNoticeTests(_Base):
         daily_run._state.update({**before, 'running': True, 'log': [], 'channels': []})
         gen = Mock(return_value={'date': '2026-09-29', 'since': '', 'until': '', 'path': '',
                                  'docs': 2, 'total': 2, 'late': 0, 'model': 'm', 'carried': 2})
-        with patch.object(daily_run, 'STATE_FILE', self.root / 'last_run.json'), \
+        with patch.object(daily_state, 'STATE_FILE', self.root / 'last_run.json'), \
              patch.object(daily, 'generate', gen):
             daily_run._run(None, None, False, [], daily.FIRST_DAYS)
         self.assertEqual('日报已生成:2 条素材', daily_run._state['detail'])
@@ -388,7 +389,7 @@ class RunIdentityTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.before = deepcopy(daily_run._state)
         self.addCleanup(lambda: daily_run._state.update(self.before))
-        for p in (patch.object(daily_run, 'STATE_FILE', Path(temp.name) / 'last_run.json'),
+        for p in (patch.object(daily_state, 'STATE_FILE', Path(temp.name) / 'last_run.json'),
                   patch.object(daily_run, 'SETTINGS_FILE', Path(temp.name) / 's.json'),
                   patch.object(daily_run.threading, 'Thread', Mock())):
             p.start(); self.addCleanup(p.stop)

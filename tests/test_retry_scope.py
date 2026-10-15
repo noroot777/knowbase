@@ -33,7 +33,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-from kb import pipeline_retry, pipeline_state, pipeline_stages
+from kb import pipeline_retry, pipeline_segments, pipeline_stages
+from kb import pipeline_state
 from kb.feeds import registry as reg, sync
 from kb.feeds.fetching import FeedError
 from kb.collectors.feeds import FeedCollector
@@ -170,14 +171,12 @@ class RetryScopeTests(RetryScopeBase):
         一张写着「本次无需重试」的灰卡片和"这个按钮坏了"长得一模一样 ——
         而上一轮 crawl 明明是红的。
         """
-        self.crawl({'channel': 'rss'}, broken=[self.a])
+        # 让 index 也红:这一轮的计划里还有别的阶段,于是真的会起跑。走产品自己那条路
+        # (`also_red` → `_stage` → `_end_run`),**两头都不手改**:重试读的是空闲时认
+        # 内存的那一份(`pipeline_state.last_result`),只改磁盘文件这一局在摆局那一步
+        # 就不成立;而手改内存又绕开了收尾,摆出来的跟真跑一轮留下的不是同一个东西。
+        self.crawl({'channel': 'rss'}, broken=[self.a], also_red=('index',))
         self.succeeded_later(self.a)
-        # 让 index 也红:这一轮的计划里还有别的阶段,于是真的会起跑。
-        # **摆的是内存那一份**(两边再落盘对齐)—— 重试读的是 `last_result()`,它空闲时
-        # 认内存,磁盘只给重启做恢复(见 `pipeline_state.last_result`)。只改磁盘文件
-        # 的话这一局在摆局那一步就不成立。
-        pipeline_state._state['stages']['index'] = {'status': 'error', 'detail': '索引没做'}
-        pipeline_state._save_last_run()
         with patch.object(pipeline_retry, '_run_crawl') as crawl, \
              patch.object(pipeline_retry, '_run_export'), \
              patch.object(pipeline_retry, '_run_index'), \
@@ -197,7 +196,7 @@ class SourceLevelFailureTests(RetryScopeBase):
     这一档和「失败项已经修好」在 `subscriptions` 那边**长得一模一样**(都是一个
     `last_error` 都没有),所以判据不能是订阅行上的状态 —— 分得开它们的是这个来源
     这一轮**有没有留下失败名单**:整批失败时 `collect` 整个抛出去,那时一条订阅都
-    还没被碰到,也就没有名单可言(见 `pipeline_state.note_retry_targets`)。
+    还没被碰到,也就没有名单可言(见 `pipeline_segments.note_retry_targets`)。
     """
 
     def crawl_blowing_up(self, crawl_filter):
@@ -319,7 +318,7 @@ class RetryNoteContractTests(RetryScopeBase):
         """换届就重开一份,不跟上一轮的名单混在一起。"""
         self.crawl({'channel': 'rss'}, broken=[self.a])
         self._begin({'channel': 'rss'})
-        pipeline_state.note_retry_targets('rss', [self.b['id']], reg.now())
+        pipeline_segments.note_retry_targets('rss', [self.b['id']], reg.now())
         note = pipeline_state._state['crawl_retry']
         self.assertEqual(pipeline_state._state['run_id'], note['run'])
         self.assertEqual([str(self.b['id'])], note['channels']['rss']['targets'])

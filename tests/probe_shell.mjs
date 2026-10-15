@@ -48,6 +48,9 @@
  */
 
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /** chrome 把 DevTools 地址打在 stderr 上,端口是 0 时由内核分配、只能这么读回来。 */
 const PORT_RE = /ws:\/\/127\.0\.0\.1:(\d+)\//;
@@ -165,10 +168,25 @@ export function reapOnExit(proc) {
 /**
  * 起一个无头壳并等到它的 DevTools 端口。
  *
+ * **要独立 profile 的话别自己建目录,把前缀交给这里**(`{ profile: "kb-xxx-" }`)。
+ * 探针自己 `mkdtempSync` + `finally` 里 `rmSync` 的那种写法漏一条路:建目录、起浏览器、
+ * 连 CDP 这几步**在 try 之前**,那一段抛异常(等不到端口、连不上调试口)时 finally
+ * 一行都不跑,目录就留在 /var/folders 下。这里建的目录跟着回收挂在同一个
+ * `process.on('exit')` 上,**正常退出、抛异常、收到信号三条路都删**;顺序也是对的:
+ * 先 SIGKILL 浏览器、再删目录(回收比这一行先注册)。
+ *
+ * **第四条路只有调用方救得了:`run_probe` 的 timeout 发的是 SIGKILL,'exit' 一行都不跑。**
+ * 所以目录建在它给的那个根里(`KB_PROBE_PROFILE_ROOT`),它在自己的 finally 里整根删
+ * (`tests/headless.py`);跟沙箱那份临时库同一条口径(`tests/fixture_root.py`):
+ * **给了根就建在里面,没给(手动跑这个探针)才落到系统临时目录**。下面那个 'exit'
+ * 钩子两种情形都留着:有根时它只是先把自己那一格删掉,根照样由调用方收。
+ *
  * @param {string[]} extraArgs 这个探针自己要的参数(窗口尺寸、色彩配置…)
- * @returns {Promise<{proc: import("node:child_process").ChildProcess, port: number}>}
+ * @param {{timeout?: number, profile?: string}} opts profile = 临时 profile 的目录名前缀
+ * @returns {Promise<{proc: import("node:child_process").ChildProcess, port: number,
+ *                    profile: string|null}>}
  */
-export async function launchShell(extraArgs = [], { timeout = 20000 } = {}) {
+export async function launchShell(extraArgs = [], { timeout = 20000, profile } = {}) {
   const bin = process.env.HEADLESS_SHELL;
   if (!bin) {
     throw new Error("没有 HEADLESS_SHELL —— 这个探针要由 tests/headless.py 的 "
@@ -181,10 +199,21 @@ export async function launchShell(extraArgs = [], { timeout = 20000 } = {}) {
   // 所以定点注入掉它红 0 条 —— 留着的理由是构造上的,见 tests/test_probe_leak.py
   // 里同步那条用例的说明。
   bailIfOrphan();
-  const proc = spawn(bin, [...BASE_ARGS, ...extraArgs, "about:blank"],
-                     { stdio: ["ignore", "pipe", "pipe"] });
+  // profile 目录在 spawn **之前**建(浏览器要用它),但删它的那一下挂在 'exit' 上,
+  // 所以这中间抛什么异常都不会把它留下。
+  // 优先建在调用方拥有的那个根里(超时 SIGKILL 时钩子跑不了,得由它整根删)
+  const root = process.env.KB_PROBE_PROFILE_ROOT || tmpdir();
+  const dir = profile ? mkdtempSync(join(root, profile)) : null;
+  const args = [...BASE_ARGS, ...extraArgs, ...(dir ? [`--user-data-dir=${dir}`] : []),
+                "about:blank"];
+  const proc = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
   // 先挂回收、再去等端口:等端口本身就会超时抛异常,那时它已经起来了。
   reapOnExit(proc);
+  if (dir) {
+    // 注册在回收之后 = 执行在回收之后:先把浏览器 SIGKILL 掉再删它的目录。
+    // `force` 是必须的 —— 被 SIGKILL 的 chrome 可能留下半写的文件和锁。
+    process.on("exit", () => { try { rmSync(dir, { recursive: true, force: true }); } catch {} });
+  }
   let timer;
   let port;
   try {
@@ -214,5 +243,5 @@ export async function launchShell(extraArgs = [], { timeout = 20000 } = {}) {
   proc.unref();
   proc.stderr?.unref();
   proc.stdout?.unref();
-  return { proc, port };
+  return { proc, port, profile: dir };
 }

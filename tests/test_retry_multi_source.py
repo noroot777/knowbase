@@ -373,7 +373,10 @@ class PanelScopeLineTests(unittest.TestCase):
     def scopes(self, filters):
         src = (JS / 'pipe_channels.js').read_text(encoding='utf-8')
         view = (JS / 'pipe_view.js').read_text(encoding='utf-8')
-        func = re.search(r'function pipeRunScopes\(filter\) \{.*?\n\}', src, re.S)
+        # 参数名不写死:它从 `filter` 改成了整份运行结果(`result`),因为「这一轮
+        # 作用在哪些来源上」还要看 planned_stages —— 只跑 index/extract 的那一轮
+        # 不归任何来源。抠的仍是同一个函数。
+        func = re.search(r'function pipeRunScopes\(\w+\) \{.*?\n\}', src, re.S)
         text = re.search(r'  const scopeText = item =>.*?\n  const scope = .*?\n',
                          view, re.S)
         self.assertTrue(func and text, '面板那两行代码的形状变了,这条用例得跟着改')
@@ -392,6 +395,25 @@ console.log(JSON.stringify(out));
         self.assertEqual(0, done.returncode, done.stderr)
         import json
         return json.loads(done.stdout)
+
+    def test_a_library_round_belongs_to_no_source(self):
+        """全库那一轮(只跑 index/extract)不归任何来源。
+
+        `start_pipeline` **一律**会往 `crawl_filter` 里盖一个默认采集器名,照它念
+        的话公众号页会显示「同步中…」、而真正参与这一轮的 RSS 反倒被说成别人的
+        任务。判据在 `pipeRunScopes` 里,同步中心、公众号页、订阅页共用那一份。
+        后端那一份同口径是 `pipeline_stages.run_scopes`。
+        """
+        self.assertEqual([''], self.scopes(
+            """[{planned_stages: ['index', 'extract'],
+                 crawl_filter: {channel: 'wechat_local', accounts: []}}]"""))
+        # 反过来钉一边:抓取轮照旧报它自己的来源
+        self.assertEqual(['全部订阅'], self.scopes(
+            """[{planned_stages: ['crawl', 'export'],
+                 crawl_filter: {channel: 'rss', accounts: []}}]"""))
+        # 存量记录没有 planned_stages,照老样子摊平 —— 一律判成「不按来源」会让
+        # 订阅页对所有旧运行记录都说不出是谁在跑
+        self.assertEqual(['全部订阅'], self.scopes("[{channel: 'rss', accounts: []}]"))
 
     def test_the_line_says_what_each_source_actually_did(self):
         got = self.scopes('''[

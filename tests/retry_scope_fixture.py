@@ -97,21 +97,28 @@ class RetryScopeBase(RoundBase):
 
     # ── 跑一轮采集,返回这一轮哪些订阅真的被抓了 ──────────────────────────
 
-    def crawl(self, crawl_filter, broken=()):
+    def crawl(self, crawl_filter, broken=(), also_red=()):
         """真跑一轮 crawl,`broken` 里那几条订阅让 fetch 抛错。
 
         返回 (被抓到的订阅 id 集合, crawl 阶段的终态)。打桩的只有最外面那次
         网络请求 —— `collect` 的选源、失败名单、退避判定一行都不打桩。
+
+        `also_red`:这一轮的计划里再带上这几个阶段并把它们标红,给"还有别的
+        阶段要重试"那种前提用。走的是产品自己那条路(`_stage` → `_end_run` →
+        落盘),**不是手改状态文件** —— 手改绕开了收尾,摆出来的那份结果跟真跑
+        一轮留下的不是同一个东西。
 
         **收尾那一步(`_end_run`)不能省**:`start_retry_failed` 读的是**落盘的**
         last_run(失败名单也在里面),不是进程内那份状态。少了它,下一步点重试只会
         收到"上次运行没有失败项",这一局的前提压根没建立起来。
         """
         got: set[int] = set()
-        self._begin(crawl_filter)
+        self._begin(crawl_filter, stages=('crawl', *also_red))
         with patch.object(sync, 'fetch_source',
                           side_effect=self._fetcher(got, broken, 'p1')):
             pipeline_stages._run_crawl(crawl_filter)
+        for name in also_red:
+            pipeline_state._stage(name, 'error', '摆盘:这一阶段红了')
         pipeline_state._end_run()
         return got, self.stage()
 

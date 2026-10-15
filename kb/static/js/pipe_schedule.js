@@ -14,6 +14,21 @@ function renderSchedEntry(s) {
   label.textContent = s ? (s.enabled ? `定时同步 · 每天 ${s.time}` : '定时同步 · 未启用') : '定时同步';
   $('subs-sched-open').classList.toggle('is-on', !!s?.enabled);
 }
+// 页头这颗按钮也是**派生展示**,跟着共享事实走(见 `schedules.js`)。原来它只在
+// 弹窗自己读/存的时候刷 —— 别处读到的新配置(来源页那次读取、另一份页面保存后
+// 这边回来重读)改不到它,于是按钮上的时刻和同一页右侧那句说明能长期说两套话。
+// 顺带把**开着的那张干净表单**补完:别处(来源页那次读取、另一份页面保存之后这边
+// 回来重读)确认的新事实到了,而这张表单自己那一趟早就结束了(甚至就是被顶掉的那
+// 一趟)—— 没有草稿、不在读也不在存的话,它就该跟着这份事实收尾,而不是停在上一次
+// 的样子、更不是停在「正在读取」。只认**非 null**:null 是"当前不知道",而共享层
+// 分不出"从没读过"和"读了没读到"(两者都是 null),拿它去报"读不到"会在根本没读过
+// 的时候冤枉一条好定时;本次读取自己失败那一档由 settleSched 自己报。
+watchSchedules(config => {
+  renderSchedEntry(config.pipe);
+  if (!config.pipe || schedLoading) return;              // 自己那趟会收尾
+  if ($('sched-modal').style.display === 'none') return; // 没开着就只刷按钮
+  settleSched(config.pipe, '');   // 依赖齐不齐由 settleSched 那道判据说(目录也算)
+});
 function openSchedModal() {
   $('sched-modal').style.display = '';
   loadSched();
@@ -28,29 +43,79 @@ function renderSchedChannels(selected) {
 function schedChannels() {
   return [...$('sched-channels').querySelectorAll('input:checked')].map(i => i.dataset.schedChannel);
 }
+// **一次读取必须有终态。** 读取一开始禁用整片字段、隐藏重读入口、把那句话换成
+// 「正在读取定时设置…」—— 那是个加载态,所以成功、失败、被更晚的读取顶掉,哪条分支
+// 走完都得回到这里收尾。终态只有三种:**采用当前已确认的事实**、**说读不到并把重读
+// 放出来**、**保留用户的草稿**。
+//
+// 原来成功和失败两条分支各有一处早退(拿到的事实为空、或者这趟的失败被顶掉),早退
+// 之后 finally 只清 `schedLoading`:弹窗就停在「正在读取定时设置…」、整片字段禁用、
+// 连重读按钮都藏着,真鼠标点启用开关毫无反应,**再关一次重开**才恢复(第 3 轮实测)。
+// 共享事实当时是好的 —— 所以"共享事实没有倒退"证明不了"界面已经消费完"。
+function settleSched(fact, failure) {
+  // **就绪判据只有一份**(`schedules.js` 的 `scheduleSettle`):这张表单要的是配置
+  // **和**来源目录,少一份就不许进"已加载"。
+  const { state, missing } = scheduleSettle({
+    fact, saving: schedSaving, dirty: schedDirty,
+    deps: [{ ready: pipeChannels.length, what: '来源目录' }],
+  });
+  if (state === 'saving') return;   // 保存那条路自己会收尾(saveSched 的 finally)
+  if (state === 'draft') {          // 草稿优先:一个字都不许覆盖,但得让他改得动、存得下
+    $('sched-fields').disabled = false; $('sched-save').disabled = false;
+    return;
+  }
+  if (state === 'ready') {
+    $('sched-on').checked = !!fact.enabled; $('sched-time').value = fact.time || '07:30';
+    renderSchedChannels(fact.channels?.length ? fact.channels : [fact.channel || pipeChannel]);
+    schedLoaded = true; $('sched-fields').disabled = false;
+    $('sched-reload').hidden = true;
+    $('sched-msg').textContent = scheduleMessage(fact);
+    return;
+  }
+  // 当前"不知道":这趟自己失败了、更晚那一趟失败把事实抹成了未知,或者定时读到了
+  // 而某份依赖没读到。一律给原因和重读入口,**不许留在加载态**。
+  // **缺依赖那一档先说依赖**:定时本身读到了,差的是目录 —— 说成一句笼统的
+  // 「读取失败」会让人以为定时没了。括号里带上原因,查起来才有线索。
+  $('sched-msg').textContent =
+    missing ? `${missing}还没读到${failure ? `（${failure}）` : ''}，点「重新读取」再试一次`
+    : failure ? '读取失败：' + failure
+    : '读不到定时设置';
+  $('sched-reload').hidden = false;
+  // 重读失败时屏幕上那份仍是上一次读到的真实设置,照旧可编辑可保存;
+  // 从没读成功过才留在禁用态 —— 那时根本没有值可编辑。
+  $('sched-fields').disabled = !schedLoaded;
+  $('sched-save').disabled = !schedDirty;
+}
 async function loadSched() {
   if (schedLoading || schedSaving || schedDirty) return;
-  // 这一趟是不是"从没读成功过"那一次:读失败时要不要把字段留在禁用态只看它。
-  const first = !schedLoaded;
   schedLoading = true; $('sched-reload').hidden = true;
   $('sched-fields').disabled = true;
   $('sched-save').disabled = true;
   $('sched-msg').textContent = '正在读取定时设置…';
+  let fact = null, failure = '';
+  // **目录和配置是两趟请求,各自的失败各自说。** 原来它们同在一个 try 里、共用
+  // 共享层那一次占代次:目录那趟失败时,catch 会拿它的失败去给**配置**结账,把
+  // 一份好的定时事实抹成「不知道」—— 同一页的页头按钮和来源说明跟着一起失忆,
+  // 而根本没读过定时接口(第 4 轮实测:弹窗那次打开把 pipe 事实写成了 null)。
+  // 所以目录单独一趟,它的失败只当"依赖没齐"。
   try {
     await loadPipeChannels();
-    const s = await pipeJson('/api/pipeline/schedule');
-    $('sched-on').checked = !!s.enabled; $('sched-time').value = s.time || '07:30';
-    renderSchedChannels(s.channels?.length ? s.channels : [s.channel || pipeChannel]);
-    schedLoaded = true; $('sched-fields').disabled = false;
-    $('sched-msg').textContent = scheduleMessage(s);
-    renderSchedEntry(s);
+  } catch (e) { failure = e.message; }
+  // 占代次要在**配置那次请求之前**(见 schedules.js 的 schedulesRead):这一趟还没
+  // 回来时设置被保存了,这个回包就该丢掉,不许把刚保存的那一份倒退回去。
+  const accept = schedulesRead('pipe');
+  try {
+    // **资格先判,再动任何一格;画的是共享层确认的那一份,不是我这趟的回包。**
+    // 别处(另一份页面、日报面板那次读取)可能在这中间写进了更新的事实,照自己
+    // 的回包画就会把它退回旧值 —— 而共享事实拒绝退回,同一页两处说法当场打架。
+    fact = accept({ pipe: await pipeJson('/api/pipeline/schedule') }).pipe;
   } catch (e) {
-    $('sched-msg').textContent = '读取失败：' + e.message; $('sched-reload').hidden = false;
-    // 重读失败时屏幕上那份仍是上一次读到的真实设置,照旧可编辑可保存;
-    // 从没读成功过才留在禁用态 —— 那时根本没有值可编辑。
-    $('sched-fields').disabled = first;
+    // 读失败同样过这道门:这趟已经被顶掉就别用它的失败盖掉别处刚拿到的好值 ——
+    // 但"别盖掉"不等于"不用收尾",拿回来的那份事实照样要画上去。
+    fact = accept({ pipe: null }).pipe;
+    if (!fact) failure = failure || e.message;
   }
-  finally { schedLoading = false; }
+  finally { schedLoading = false; settleSched(fact, failure); }
 }
 function markSchedDirty() {
   if (!schedLoaded || schedSaving || schedLoading) return;
@@ -60,14 +125,25 @@ async function saveSched() {
   if (!schedLoaded || schedSaving || !schedDirty) return;
   if (!$('sched-time').reportValidity()) return;
   const channels = schedChannels();
-  if (!channels.length) { $('sched-msg').textContent = '请至少选择一个同步来源'; return; }
+  if (!channels.length) {
+    // **"一个都没勾"和"一个都没有可勾的"是两件事**:后者是来源目录没读到,让他去
+    // 勾一个不存在的勾选框等于把人困在这里(第 4 轮实测),该说的是重读。
+    if (!pipeChannels.length) {
+      $('sched-msg').textContent = '来源目录还没读到，点「重新读取」再试一次';
+      $('sched-reload').hidden = false;
+    } else $('sched-msg').textContent = '请至少选择一个同步来源';
+    return;
+  }
   const body = { enabled: $('sched-on').checked, time: $('sched-time').value, channels };
   schedSaving = true; $('sched-fields').disabled = true; $('sched-save').disabled = true;
   $('sched-save').textContent = '正在保存…'; $('sched-msg').textContent = '';
   try {
     const saved = await pipePost('/api/pipeline/schedule', body); schedDirty = false;
     $('sched-msg').textContent = scheduleMessage(saved);
-    renderSchedEntry(saved);
+    // **保存成功必须过共享层**:只更新页头按钮的那一版里,同一页右侧的来源说明
+    // 会长期说反话(开了说不会自动同步、关了还承诺每天同步),刷新才对得上。
+    // 页头按钮由上面那条订阅跟着画,这里不用再单独刷一次。
+    schedulesSaved('pipe', saved);
   } catch (e) { $('sched-msg').textContent = '未保存：' + e.message + '。修改已保留，可重试。'; }
   finally { schedSaving = false; $('sched-fields').disabled = false; $('sched-save').disabled = !schedDirty; $('sched-save').textContent = '保存设置'; }
 }

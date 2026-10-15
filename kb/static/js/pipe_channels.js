@@ -58,13 +58,46 @@ function channelUrl(path, channel = pipeChannel) {
 }
 function channelLabel(id) { return pipeChannels.find(c => c.id === id)?.label || pipeChannelLabels[id] || id; }
 
-// 一次运行抓了哪几个来源。多来源记在 channels 里，只有一个来源时仍是老样子的
-// channel + accounts —— 存量状态文件和旧的运行记录都还是后者，两种都要认。
-function pipeRunScopes(filter) {
+// 「这一轮实际作用在哪几个来源上」的**唯一口径**。同步中心的来源行、公众号页和
+// 订阅页的「正在同步」判断、以及范围文案全都过它 —— 分别各判一遍的话，同一轮运行
+// 在三个页面上会给出三种说法。
+//
+// **只有 crawl / export 认来源**（`crawl_filter`），index 是全量扫 vault、extract 扫
+// 全库待提取队列，projects / wiki 同理 —— 这些阶段没有「只做这个来源那一份」的概念。
+// 而 `start_pipeline` **一律**会往 filter 里盖一个默认采集器名（实测 `wechat_local`），
+// 所以一轮只跑 index/extract 的运行照着 filter 念，公众号页会显示「同步中…」、而真正
+// 参与这一轮的 RSS 反倒被说成「其他来源正在同步」。判据是这一轮**计划里有没有**
+// crawl / export，不是 filter 里写着谁。
+//
+// 多来源记在 channels 里，只有一个来源时仍是老样子的 channel + accounts —— 存量状态
+// 文件和旧的运行记录都还是后者，两种都要认。
+function pipeRunScopes(result) {
+  // 老调用方可能直接递一份 crawl_filter 进来；没有 planned_stages 的（存量落盘记录、
+  // 裸 filter）按老样子处理，别把它们一律判成「不按来源」。
+  const planned = Array.isArray(result?.planned_stages) ? result.planned_stages : null;
+  if (planned && !planned.includes('crawl') && !planned.includes('export')) return [];
+  const filter = (result && 'crawl_filter' in result ? result.crawl_filter : result) || {};
   // retry:「重试失败项」那一轮这个来源的范围是怎么来的（'targets' 收窄到了失败的
   // 那几个 / 'all' 这个来源收窄不了、跑的是原范围），面板那行「本次范围」要照它说话。
   if (filter?.channels?.length) return filter.channels.map(s => ({ channel: s.channel, accounts: s.accounts || [], retry: s.retry || '' }));
   return filter?.channel ? [{ channel: filter.channel, accounts: filter.accounts || [], retry: filter.retry || '' }] : [];
+}
+// 「这一轮现在在做什么」的一句话。**全库那一档要单独有话说** —— 它不归任何来源,
+// 但那不等于「别人在跑」:照「没有来源范围 = 其他来源正在同步」念,用户在 RSS 页和
+// 公众号页会同时看到「其他来源正在同步」,而那一轮做的正是他自己这些内容的索引与
+// 提取。三个页面共用这一份,别各写各的。
+function pipeRunNote(snapshot, fallback) {
+  const detail = snapshot?.stages?.[snapshot.current_stage]?.detail;
+  if (pipeLibraryOnly(snapshot)) {
+    const planned = (snapshot.planned_stages || []).map(k => STAGE_META[k]?.name).filter(Boolean);
+    return detail || `正在为全部来源${planned.join('、') || '处理入库'}`;
+  }
+  return detail || fallback;
+}
+// 这一轮是不是「不按来源」的全库处理（既没抓取也没导出）。文案要照它说话。
+function pipeLibraryOnly(result) {
+  const planned = Array.isArray(result?.planned_stages) ? result.planned_stages : [];
+  return planned.length > 0 && !planned.includes('crawl') && !planned.includes('export');
 }
 
 function renderPipeChannel() {

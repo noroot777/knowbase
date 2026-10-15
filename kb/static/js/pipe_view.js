@@ -80,7 +80,13 @@ function renderPipeState(s) {
     const details = row.querySelector('details'), failures = st.failures || [];
     details.hidden = !failures.length;
     const waiting = failures.every(f => f.pending);
-    details.querySelector('summary').textContent = `${waiting ? '待处理' : '问题'}明细 · ${failures.length} 项`;
+    // 截断过就把真实总数说出来(后端 `_cap_failures` 留了 failures_total):照数组
+    // 长度念的话,三百条失败会被写成一个看着完整的「50 项」,余下那些连"还有"都
+    // 不知道。
+    const total = st.failures_total || failures.length;
+    details.querySelector('summary').textContent =
+      `${waiting ? '待处理' : '问题'}明细 · ${total} 项`
+      + (total > failures.length ? `（仅列前 ${failures.length} 条）` : '');
     const list = details.querySelector('.pipe-failures');
     const signature = JSON.stringify(failures);
     if (list.dataset.signature !== signature) {
@@ -99,8 +105,22 @@ function renderPipeState(s) {
   else if (failed) title = `${label}结束，${failed} 个步骤需处理`;
   else if (result.finished_at) title = skipped ? `${label}结束，部分步骤已跳过` : planned.length && completed === planned.length ? `${label}已完成` : `${label}结束，本次步骤未全部完成`;
   if ($('pipe-state-title').textContent !== title) $('pipe-state-title').textContent = title;
-  const scopes = pipeRunScopes(result.crawl_filter), filter = result.crawl_filter || {};
-  $('pipe-running-channel').textContent = scopes.length
+  // 这一轮的结论没写进磁盘(满盘、目录没了):本进程内照常可查,重启就退回上一次
+  // 写成功的那一份。后端把它记成 `persist_issue` 一格(见 `_with_persist_issue`)
+  // —— 只写运行日志的话得展开日志才看得到,而这里那句收尾文案仍是一句干净的
+  // 「已完成」,看不出这一轮是降级完成的。
+  const persist = $('pipe-persist-issue');
+  if (persist) {
+    const issue = s.running ? '' : result.persist_issue || '';
+    persist.hidden = !issue;
+    if (persist.textContent !== issue) persist.textContent = issue;
+  }
+  const scopes = pipeRunScopes(result), filter = result.crawl_filter || {};
+  // 判据在 `pipe_channels.js`:同步中心、公众号页、订阅页共用那一份,别在这儿再判一遍。
+  const libraryOnly = pipeLibraryOnly(result);
+  $('pipe-running-channel').textContent = libraryOnly
+    ? `${s.running ? '本次' : '上次'}范围：全库（不按来源）`
+    : scopes.length
     ? `${s.running ? '本次' : '上次'}来源：${scopes.map(scope => channelLabel(scope.channel)).join(' + ')}`
     : '选择来源后开始一次同步';
   const range = filter.since_date ? filter.since_date + ' 至 ' + filter.until_date : '不限时间';
@@ -113,7 +133,14 @@ function renderPipeState(s) {
     ? `仅重试失败的 ${item.accounts.length} 个订阅`
     : item.accounts?.length ? item.accounts.length + ' 个指定订阅' : '全部订阅';
   const scope = scopes.map(item => `${scopes.length > 1 ? channelLabel(item.channel) + ' ' : ''}${scopeText(item)}`).join(' · ');
-  $('pipe-run-scope').textContent = scopes.length
+  // 同上:全库那一轮没有「订阅范围」可言,订阅数和日期窗口对它都不成立。
+  // 步骤名**按这一轮真正计划了什么念**,不许写死「索引与提取」——「不按来源」
+  // 的组合不止它一种(单独重跑一次 wiki、只重建索引都是),写死就会跟实际计划
+  // 对不上,而那一轮本身并没有选错阶段。
+  const libraryWhat = planned.map(k => STAGE_META[k]?.name).filter(Boolean).join(' · ');
+  $('pipe-run-scope').textContent = libraryOnly
+    ? `${libraryWhat}${result.finished_at ? ' · ' + result.finished_at + ' 结束' : ''}`
+    : scopes.length
     ? `${scope} · ${range}${result.finished_at ? ' · ' + result.finished_at + ' 结束' : ''}` : '';
   $('pipe-progress-label').textContent = planned.length ? `${completed} / ${planned.length} 完成` : '—';
   const duration = pipeDuration(result.started_at, s.running ? '' : result.finished_at);

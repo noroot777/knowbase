@@ -19,7 +19,8 @@ from kb.feeds import digest, fulltext, translate, x_channels
 # `sync._within_history` 的指向也照旧成立。
 from kb.feeds.history import _within_history
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
-from kb.pipeline_state import _state, _stage, note_retry_targets
+from kb.pipeline_segments import note_retry_targets
+from kb.pipeline_state import _state, _stage
 from kb.scanner import parse_frontmatter
 
 FETCH_WORKERS = 4

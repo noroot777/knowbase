@@ -1,9 +1,9 @@
 """Disposable full-app fixture for subscription reading membership regressions."""
 
 import argparse
+import contextlib
 import os
 import sys
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -13,7 +13,10 @@ def main():
     parser.add_argument('--port', type=int, default=8899)
     args = parser.parse_args()
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    with tempfile.TemporaryDirectory(prefix='kb-reader-membership-') as temp:
+    from tests.fixture_root import fixture_root
+    # 临时库**优先由父进程拥有**:口径和理由都在 tests/fixture_root.py
+    with contextlib.ExitStack() as stack:
+        temp = fixture_root(stack, 'kb-reader-membership-')
         os.environ['KB_DATA_DIR'] = str(Path(temp) / 'data')
         os.environ['KB_VAULT_ROOT'] = str(Path(temp) / 'vault')
         from kb import pipeline, embedder

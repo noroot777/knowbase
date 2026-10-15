@@ -19,7 +19,8 @@ from pathlib import Path
 
 from kb.collectors import FetchScope, active_collector
 from kb.config import VIDEOS_ROOT
-from kb.pipeline_state import _log, _now, _stage, _state, stage_segment
+from kb.pipeline_segments import stage_segment
+from kb.pipeline_state import _log, _now, _stage, _state
 
 
 # ── 采集:抓取 + 导出,两阶段都只跟采集器契约打交道 ────────────────────────────
@@ -39,6 +40,29 @@ def crawl_channels(crawl_filter: dict | str | None = None) -> list[dict]:
          "accounts": crawl_filter.get("accounts") or []}]
     return [{"channel": s.get("channel") or "",
              "accounts": [n for n in (s.get("accounts") or [])]} for s in scopes]
+
+
+def run_scopes(run: dict | None) -> list[dict]:
+    """这一轮**实际作用在哪几个来源上**。既没抓取也没导出时是 `[]`。
+
+    **只有 crawl / export 认 `crawl_filter`**:`_run_index` 全量扫 vault、
+    `_run_extract` 扫全库待提取队列,`_run_projects` / `_run_wiki` 同理,这几个
+    函数连通道参数都不收。而 `start_pipeline` **一律**会往 filter 里盖一个默认
+    采集器名(实测 `wechat_local`)—— 只跑 index/extract 的那一轮(日报的「入库
+    处理」就是)照着 filter 念,会把公众号判成"正在同步"、把订阅写保护错加在它
+    头上,而真正参与这一轮的来源反倒被说成别人的任务。
+
+    判据是这一轮**计划里有没有** crawl / export,不是 filter 里写着谁。前端那一
+    份同口径在 `kb/static/js/pipe_channels.js` 的 `pipeRunScopes`。
+
+    `planned_stages` 读不到时(存量落盘记录、旧快照)按老样子摊平,不许一律判成
+    「不按来源」—— 那会让写保护对所有存量记录静默失效。
+    """
+    run = run or {}
+    planned = run.get("planned_stages")
+    if isinstance(planned, list) and not ({"crawl", "export"} & set(planned)):
+        return []
+    return crawl_channels(run.get("crawl_filter"))
 
 
 def _channel_label(collector) -> str:

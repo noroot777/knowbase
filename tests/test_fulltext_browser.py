@@ -39,7 +39,7 @@ PROBE = HERE / "fulltext_probe.mjs"
 
 sys.path.insert(0, str(REPO))
 
-from tests.headless import NODE, probe_env, requires_headless, run_probe  # noqa: E402
+from tests.headless import NODE, probe_env, reap, requires_headless, run_probe  # noqa: E402
 
 
 def _free_port() -> int:
@@ -64,6 +64,10 @@ class FullTextPanelTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory(prefix="kb-fulltext-sandbox-")
+        # 建完/起完**立刻**登记(LIFO:先收进程、再删目录)。只写在 tearDownClass 里
+        # 的话,setUpClass 后面那几步(摆盘、起服务、跑探针、解析回包)任意一处抛出来
+        # unittest 都不调它 —— 两个服务连端口、一份沙箱库全留在后台。
+        cls.addClassCleanup(cls.tmp.cleanup)
         base_dir = Path(cls.tmp.name)
         cls.stub_port, cls.web_port = _free_port(), _free_port()
         # 模型指到本地桩:摆盘那一步不连外网、不花钱(这条回归压根不调模型,
@@ -71,12 +75,12 @@ class FullTextPanelTest(unittest.TestCase):
         cls.stub = subprocess.Popen(
             [sys.executable, str(HERE / "llm_stub.py"), "--port", str(cls.stub_port)],
             cwd=str(REPO), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cls.addClassCleanup(reap, cls.stub)
         for script, args in ((HERE / "daily_sandbox.py", [str(base_dir), str(cls.stub_port)]),
                              (HERE / "fulltext_sandbox.py", [str(base_dir)])):
             done = subprocess.run([sys.executable, str(script), *args], cwd=str(REPO),
                                   capture_output=True, text=True, timeout=600)
             if done.returncode:
-                cls.stub.kill()
                 raise AssertionError(f"摆盘失败 {script.name}:{done.stderr[-2000:]}")
             tail = done.stdout.strip().splitlines()[-1] if done.stdout.strip() else ""
         # fulltext_sandbox 最后一行打印 `agg_id=.. plain_id=..`
@@ -86,9 +90,9 @@ class FullTextPanelTest(unittest.TestCase):
         cls.web = subprocess.Popen(
             ["uv", "run", "--offline", "uvicorn", "kb.server:app", "--port", str(cls.web_port)],
             cwd=str(REPO), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cls.addClassCleanup(reap, cls.web)
         url = f"http://127.0.0.1:{cls.web_port}"
         if not _wait(url + "/"):
-            cls.web.kill(); cls.stub.kill()
             raise AssertionError("沙箱 kb-web 没起来")
         run = run_probe(
             [str(NODE), str(PROBE), url, ids["agg_id"], ids["plain_id"]],
@@ -96,19 +100,8 @@ class FullTextPanelTest(unittest.TestCase):
         cls.stderr = run.stderr
         line = run.stdout.strip().splitlines()[-1] if run.stdout.strip() else ""
         if not line:
-            cls.web.kill(); cls.stub.kill()
             raise AssertionError(run.stderr[-4000:])
         cls.results = json.loads(line)
-
-    @classmethod
-    def tearDownClass(cls):
-        for proc in (cls.web, cls.stub):
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:   # pragma: no cover
-                proc.kill()
-        cls.tmp.cleanup()
 
     def test_the_panel_tells_the_fetching_items_apart(self):
         self.assertTrue(self.results, "探针一条都没跑")

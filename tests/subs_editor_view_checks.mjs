@@ -3,7 +3,6 @@ export async function checkSubscriptionEditorViews({ evaluate, wait, check, clic
   const savedViews = await evaluate(`['rss:items', 'rss:manage'].map(key => ({ key, state:sourceViewState.get(key) || null }))`);
   const savedFilter = await evaluate(`sourceFilters.get('rss') || null`);
   const createdIds = [];
-  let savedSettings = null;
   const itemQuery = '知识', managerQuery = 'OpenAI';
   const type = async (id, text) => {
     await click('#' + id);
@@ -15,17 +14,6 @@ export async function checkSubscriptionEditorViews({ evaluate, wait, check, clic
       const button = document.querySelector(${JSON.stringify(selector)}), box = button.getBoundingClientRect();
       return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) === button;
     })()`);
-  };
-  const replaceText = async (id, text) => {
-    const length = await evaluate(`$('${id}').value.length`);
-    await click('#' + id);
-    await send('Input.dispatchKeyEvent', { type:'keyDown', key:'End', code:'End', windowsVirtualKeyCode:35 });
-    await send('Input.dispatchKeyEvent', { type:'keyUp', key:'End', code:'End', windowsVirtualKeyCode:35 });
-    for (let removed = 0; removed < length; removed++) {
-      await send('Input.dispatchKeyEvent', { type:'keyDown', key:'Backspace', code:'Backspace', windowsVirtualKeyCode:8 });
-      await send('Input.dispatchKeyEvent', { type:'keyUp', key:'Backspace', code:'Backspace', windowsVirtualKeyCode:8 });
-    }
-    await send('Input.insertText', { text });
   };
   const holdRefreshes = () => evaluate(`(() => {
     clearTimeout(sourcePoll);
@@ -196,10 +184,13 @@ export async function checkSubscriptionEditorViews({ evaluate, wait, check, clic
     await click('#source-view-manage');
     await clearFilters();
     await wait(`document.querySelectorAll('.source-subscription').length === ${initialCount + 3}`);
-    savedSettings = await evaluate(`({ enabled:sourceData.settings.enabled, interval_minutes:sourceData.settings.interval_minutes })`);
-    const draftInterval = savedSettings.interval_minutes === 45 ? '90' : '45';
-    await replaceText('source-interval', draftInterval);
-    check('编辑前同步间隔确实是未保存的草稿', await evaluate(`$('source-interval').value === ${JSON.stringify(draftInterval)}`));
+    // 这里原来拿「同步间隔」当草稿字段,验「开编辑窗口不会覆盖没保存的设置草稿」。
+    // 那两个控件随「按来源类型自动同步」一起删了(见 `kb.pipeline._scheduler_tick`),
+    // rss 这一类的设置表单现在整张都不显示 —— 没有草稿可覆盖,这几条没有了判据。
+    // 同一条不变量在 social 那一类仍然成立(桥接/Chrome 路径),由 x_channel_probe
+    // 那一组钉。下面保留的是滚动位置那几条,它们跟设置草稿无关。
+    check('没有同步间隔的来源不显示空设置表单',
+      await evaluate(`$('source-settings-form').hidden && !$('source-settings').hidden`));
     await evaluate(`document.querySelector('[data-source-action="edit"][data-source-id="${secondId}"]')
       .closest('.source-subscription').scrollIntoView({ block:'end' }); clearTimeout(sourcePoll); true`);
     await revealEditorButton(`[data-source-action="edit"][data-source-id="${secondId}"]`);
@@ -213,17 +204,11 @@ export async function checkSubscriptionEditorViews({ evaluate, wait, check, clic
     await click('#source-edit-save');
     await wait(`!sourceSaving && $('source-editor').style.display === 'none'
       && sourceData.sources.some(source => source.id === ${secondId} && source.group_name === '滚动编辑回归')`);
-    const afterEdit = await evaluate(`({ scroll:$('source-list-pane').scrollTop, interval:$('source-interval').value })`);
+    const afterEdit = await evaluate(`({ scroll:$('source-list-pane').scrollTop })`);
     check('编辑靠后订阅保存后保持列表滚动位置', Math.abs(afterEdit.scroll - beforeEditScroll) < 1,
       JSON.stringify({ beforeEditScroll, afterEdit }));
     await checkVisibleRow(secondId, '靠后订阅编辑');
-    check('编辑订阅不会覆盖未保存的同步间隔', afterEdit.interval === draftInterval, JSON.stringify(afterEdit));
-    check('编辑订阅没有提前保存设置草稿', await evaluate(`pipeJson('/api/intake/rss').then(data => data.settings.interval_minutes === ${savedSettings.interval_minutes})`));
     await screenshot('editor-edit-preserves-scroll-and-settings');
-    await revealEditorButton('#source-settings-save');
-    await click('#source-settings-save');
-    await wait(`!$('source-settings-save').disabled`);
-    check('编辑后点击保存设置提交的仍是用户草稿', await evaluate(`pipeJson('/api/intake/rss').then(data => data.settings.interval_minutes === ${Number(draftInterval)})`));
 
     await clearFilters();
     await type('source-q', managerQuery);
@@ -277,9 +262,6 @@ export async function checkSubscriptionEditorViews({ evaluate, wait, check, clic
     await wait(`!sourceSaving`);
     await evaluate(`(async () => {
       closeSourceEditor(); clearTimeout(sourceSearchTimer); clearTimeout(sourcePoll);
-      if (${JSON.stringify(savedSettings)}) await pipeJson('/api/intake/rss/settings', {
-        method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(${JSON.stringify(savedSettings)}),
-      });
       for (const id of ${JSON.stringify(createdIds)}) await pipeJson('/api/intake/rss/sources/' + id, { method:'DELETE' });
       if (sourceKind === 'rss') await loadSourceModule(true);
       clearTimeout(sourcePoll);

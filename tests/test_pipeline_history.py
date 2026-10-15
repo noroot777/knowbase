@@ -27,7 +27,7 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb import pipeline, pipeline_state as state
+from kb import pipeline, pipeline_segments, pipeline_state as state
 from tests.pipeline_case import HistoryCase
 from kb.web import pipeline_api
 from tests.headless import probe_env, requires_headless, run_probe
@@ -89,7 +89,7 @@ class HistoryTests(HistoryCase):
         state._state.update(crawl_filter={'channel': 'rss'},
                             export_filter={'channel': 'rss'}, run_kind='retry',
                             planned_stages=['crawl', 'export'])
-        state.note_retry_targets('rss', [7], '2026-10-14T01:00:00Z')
+        pipeline_segments.note_retry_targets('rss', [7], '2026-10-14T01:00:00Z')
         with patch.object(pipeline, '_run_crawl'), patch.object(pipeline, '_run_export'):
             pipeline._run_pipeline(['crawl', 'export'])
         last = state.load_last_run()
@@ -445,7 +445,7 @@ class HistoryEndpointTests(HistoryCase):
         # `{"run": 身份, "channels": {...}}`,按「每个值都得是字典」去验外层会把每一
         # 份真实的重试终态都判成渲染不了。
         state._state['run_id'], state._state['crawl_retry'] = 'run-a', {}
-        state.note_retry_targets('rss', ['sub-1'], '2026-10-14T09:00:00Z')
+        pipeline_segments.note_retry_targets('rss', ['sub-1'], '2026-10-14T09:00:00Z')
         real_notes = deepcopy(state._state['crawl_retry'])
         self.assertEqual('run-a', real_notes.get('run'), '摆局前提:外层带的是身份')
         raw['runs'] = [dict(good, stages=bad_stages),

@@ -158,10 +158,14 @@ feeds 来源的提取悄悄停住,而面板上「当前待处理」是 0、阶�
 
 ## 同步入口跟着改
 
-`intake_api.sync` 和 `feeds/schedule.tick` 原来都写死 `['crawl','export','index']`,
+`intake_api.sync` 和当时的 `feeds/schedule.tick` 原来都写死 `['crawl','export','index']`,
 feeds 来源的提取从来不跑 —— 积压全靠绿泡泡那轮全流程定时同步顺手消化。现在
 **两处都加上 `extract`**:要不要花钱提取由订阅级开关回答了,入口不该再二次把关。
 没开过开关的库跑到这一步是「没有待提取的文档」,一次模型都不调。
+
+(`feeds/schedule` 后来整条拆掉了,见 `sync-schedule.md`;extract 现在由日报那一轮
+的入库段统一跑一次,**这道闸的位置和口径一个字没变** —— 拦住 feeds 那几类的始终是
+订阅级开关,不是"这一轮由哪个入口起的"。)
 
 ## 存量不回滚
 

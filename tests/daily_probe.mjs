@@ -10,6 +10,7 @@
 //
 //   HEADLESS_SHELL=<bin> node tests/daily_probe.mjs http://127.0.0.1:8799
 import { launchShell } from "./probe_shell.mjs";
+import { checkScheduleRaces, checkDailyFormSettles } from "./daily_schedule_checks.mjs";
 
 const base = process.argv[2];
 
@@ -106,7 +107,7 @@ check("状态接口带着各通道的结果",
         `(async () => JSON.stringify(await (await fetch('/api/daily/status')).json()))()`)));
 let gap = await noteOf({ phase: 'done', channels: [failed, okChannel] });
 check("没同步成功的来源写在面板上",
-      !gap.hidden && /没有同步成功/.test(gap.text) && /RSS/.test(gap.text)
+      !gap.hidden && /没有完成/.test(gap.text) && /RSS/.test(gap.text)
         && /无法连接来源/.test(gap.text) && !/公众号/.test(gap.text), JSON.stringify(gap));
 gap = await noteOf({ phase: 'done', channels: [], last_run: { channels: [failed] } });
 check("重启后从上一轮的落盘结果里读回来", !gap.hidden && /RSS/.test(gap.text),
@@ -166,15 +167,15 @@ const prev = JSON.parse(await evalJs(`(async () => {
   return JSON.stringify(rs[0] || {}); })()`));
 check("同步缺口随日报一起存下来", (prev.sync_failed || []).length === 1,
       JSON.stringify(prev.sync_failed));
-check("列表行上标出那一份缺了来源",
-      /1 个来源未同步/.test(await evalJs(`[...document.querySelectorAll('[data-report]')]
+check("列表行上标出那一份有没做完的",
+      /1 项未完成/.test(await evalJs(`[...document.querySelectorAll('[data-report]')]
         .find(b => b.dataset.report === ${JSON.stringify(prev.date)})?.textContent || ''`)),
       prev.date);
 await evalJs(`openDailyReport(${JSON.stringify(prev.date)})`);
 await waitFor(`document.getElementById('daily-reader-title').textContent === '日报 · ${prev.date}'`);
 const prevBody = await evalJs(`document.getElementById('daily-reader-body').innerHTML`);
 check("日报正文写明哪些来源没同步成功",
-      /本轮有 1 个来源没有同步成功/.test(prevBody) && /RSS/.test(prevBody),
+      /本轮有 1 项没有完成/.test(prevBody) && /RSS/.test(prevBody),
       prevBody.slice(0, 160));
 // 加链接之前生成的日报:正文里编号还是纯文本,素材清单的 url 也没套尖括号。
 // 它们是花过模型钱的产物,不该为了加链接重新生成一份(重算窗口还会换掉内容),
@@ -574,6 +575,35 @@ check("认出新一轮成功之后那条失败原因被清掉了",
       await evalJs(`document.getElementById('daily-error-text').textContent`));
 check("清的是整条状态,不是只藏起来", (await evalJs(`dailyErrorKind`)) === "",
       await evalJs(`dailyErrorKind`));
+
+// ── 完成提示里的措辞:入库那一段不是「来源」 ──────────────────────────────────
+// 入库(索引/提取)是全库的一次,`channel` 是空串、只有 label。横幅、日报文件、
+// 列表行都已经写「项」,这句 toast 原来还写着「N 个来源未同步成功」—— 磁盘满跟
+// 任何一个来源都没有关系,那是一句假话。
+// 驱动它要先让页面见到 running=true 再见到已结束(toast 认的是那个跳变),所以
+// 把状态接口按在桩上喂两跳;喂完立刻还回去。
+await evalJs(`(() => {
+  clearTimeout(dailyTimer); dailyTimer = null;
+  document.getElementById('toast-host').innerHTML = '';
+  window.__realPipeJson = pipeJson;
+  window.__fed = [
+    { running: true, phase: 'sync', channels: [] },
+    { running: false, phase: 'done', detail: '日报已生成：2 条素材', channels: [
+        { channel: 'rss', label: 'RSS', status: 'ok', detail: '同步完成' },
+        { channel: '', label: '入库处理（索引与提取）', status: 'error', detail: '磁盘满' }] }];
+  pipeJson = async (path, ...rest) => path === '/api/daily/status' && __fed.length
+    ? __fed.shift() : __realPipeJson(path, ...rest);
+  return true; })()`);
+await evalJs(`refreshDailyStatus()`);
+await evalJs(`refreshDailyStatus()`);
+const doneToast = await evalJs(`document.getElementById('toast-host')?.textContent || ''`);
+await evalJs(`(() => { pipeJson = __realPipeJson; clearTimeout(dailyTimer);
+                       dailyTimer = null; return true; })()`);
+check("完成提示把全库那一段算成「项」,不说成「来源」",
+      /1 项未完成/.test(doneToast) && !/来源/.test(doneToast), doneToast);
+
+await checkScheduleRaces({ evalJs, waitFor, check });
+await checkDailyFormSettles({ evalJs, waitFor, check });
 
 check("页面没有脚本报错", pageErrors.length === 0, pageErrors.join(" | "));
 

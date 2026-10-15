@@ -11,7 +11,8 @@ from unittest.mock import Mock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb import llm, pipeline, pipeline_retry, pipeline_stages, pipeline_state
+from kb import llm, pipeline, pipeline_retry, pipeline_segments, pipeline_stages
+from kb import pipeline_state
 from kb.collectors import FetchScope
 from kb.web import pipeline_api
 
@@ -342,7 +343,7 @@ class ChannelDispatchTests(unittest.TestCase):
         """多来源同抓:一个来源红了不能把另一个来源的结论顶掉。"""
         saved = deepcopy(pipeline_state._state)
         try:
-            pipeline_state.clear_segments()
+            pipeline_segments.clear_segments()
             pipeline_state._state["stages"] = {s: {"status": "", "detail": ""}
                                                for s in pipeline_state.STAGES}
             local, rss = Mock(), Mock()
@@ -362,7 +363,7 @@ class ChannelDispatchTests(unittest.TestCase):
             self.assertEqual("本机库：新增 2 篇；RSS：连接失败", entry["detail"])
             self.assertEqual([{"title": "某源", "reason": "超时"}], entry["failures"])
         finally:
-            pipeline_state.clear_segments()
+            pipeline_segments.clear_segments()
             pipeline_state._state.clear()
             pipeline_state._state.update(saved)
 
@@ -370,7 +371,7 @@ class ChannelDispatchTests(unittest.TestCase):
         """采集器直接抛异常时,勾了的其余来源照样要跑完,面板上也得看见是谁挂的。"""
         saved = deepcopy(pipeline_state._state)
         try:
-            pipeline_state.clear_segments()
+            pipeline_segments.clear_segments()
             pipeline_state._state["stages"] = {s: {"status": "", "detail": ""}
                                                for s in pipeline_state.STAGES}
             broken, rss = Mock(), Mock()
@@ -387,7 +388,7 @@ class ChannelDispatchTests(unittest.TestCase):
             self.assertIn("本机库：RuntimeError: 读取器没装", entry["detail"])
             self.assertIn("RSS：新增 3 篇", entry["detail"])
         finally:
-            pipeline_state.clear_segments()
+            pipeline_segments.clear_segments()
             pipeline_state._state.clear()
             pipeline_state._state.update(saved)
 
@@ -395,7 +396,7 @@ class ChannelDispatchTests(unittest.TestCase):
         """停止是对整次同步说的:点了之后不许再起下一个来源。"""
         saved = deepcopy(pipeline_state._state)
         try:
-            pipeline_state.clear_segments()
+            pipeline_segments.clear_segments()
             pipeline_state._state["stages"] = {s: {"status": "", "detail": ""}
                                                for s in pipeline_state.STAGES}
             pipeline_state._state["stop_requested"] = False
@@ -414,7 +415,7 @@ class ChannelDispatchTests(unittest.TestCase):
             first.fetch.assert_called_once()
             second.fetch.assert_not_called()
         finally:
-            pipeline_state.clear_segments()
+            pipeline_segments.clear_segments()
             pipeline_state._state.clear()
             pipeline_state._state.update(saved)
 

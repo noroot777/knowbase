@@ -1,10 +1,10 @@
 """隔离协议设置浏览器验证;临时配置,无真实凭证、外部网络或调度线程。"""
 
 from argparse import ArgumentParser
+import contextlib
 import os
 from pathlib import Path
 import sys
-import tempfile
 
 
 def main():
@@ -13,7 +13,10 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root))
-    with tempfile.TemporaryDirectory(prefix="kb-openai-qa-") as temporary:
+    from tests.fixture_root import fixture_root
+    # 临时配置**优先由父进程拥有**:口径和理由都在 tests/fixture_root.py
+    with contextlib.ExitStack() as stack:
+        temporary = fixture_root(stack, "kb-openai-qa-")
         os.environ["KB_DATA_DIR"] = str(Path(temporary) / "data")
         os.environ["KB_VAULT_ROOT"] = str(Path(temporary) / "vault")
         for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):

@@ -160,12 +160,18 @@ function renderWechatSubsStatus() {
   if (!section || section.hidden) return;
   const running = !!pipeSnapshot?.running;
   const mine = wechatSubsChannel();
-  const ours = running && !!mine && pipeRunScopes(pipeSnapshot?.crawl_filter).some(s => s.channel === mine);
+  // 整份快照递进去，不是只递 crawl_filter：一轮只跑 index/extract 的运行里，
+  // filter 上那个来源名是 `start_pipeline` 自动盖的，照着念会把公众号说成正在同步。
+  const ours = running && !!mine && pipeRunScopes(pipeSnapshot).some(s => s.channel === mine);
   $('subs-wechat-sync').disabled = subsWechatBusy || running || !!pipeAction;
   $('subs-wechat-sync').textContent = ours ? '同步中…' : '同步全部';
   $('subs-wechat-progress').hidden = !running;
+  // 全库那一轮(索引/提取)不归任何来源,但它做的正是这些内容 —— 不能跟
+  // 「别的来源在抓取」共用一句话。判据和文案都在 pipe_channels.js。
   $('subs-wechat-progress-text').textContent = ours
-    ? (pipeSnapshot.stages?.[pipeSnapshot.current_stage]?.detail || '正在同步公众号')
+    ? pipeRunNote(pipeSnapshot, '正在同步公众号')
+    : pipeLibraryOnly(pipeSnapshot)
+    ? pipeRunNote(pipeSnapshot) + '，新任务会顺延。'
     : '其他来源正在同步，新任务会顺延。';
   updateWechatNotices();
 }
@@ -294,7 +300,7 @@ function sourceRunFinished(reset) {
   if (reset) { sourceSeenRun = id; return false; }
   if (!id || id === sourceSeenRun) return false;
   sourceSeenRun = id;
-  return pipeRunScopes(snap.crawl_filter).some(s => s.channel === sourceKind);
+  return pipeRunScopes(snap).some(s => s.channel === sourceKind);
 }
 
 async function loadSourceModule(reset = false, selectedId = null) {
@@ -354,12 +360,14 @@ function queueSourcePoll() {
 function updateSourceRunStatus() {
   const running = pipeSnapshot?.running;
   // 一次同步可能带上好几个来源，本来源在不在这一批里决定了显示「同步中」还是「顺延」
-  const ours = running && pipeRunScopes(pipeSnapshot?.crawl_filter).some(scope => scope.channel === sourceKind);
+  const ours = running && pipeRunScopes(pipeSnapshot).some(scope => scope.channel === sourceKind);
   $('source-sync').disabled = sourceBusy || !!running || !sourceData?.ready;
   $('source-sync').textContent = ours ? '同步中…' : '同步全部';
   $('source-progress').hidden = !running;
   $('source-progress-text').textContent = ours
-    ? (pipeSnapshot.stages[pipeSnapshot.current_stage]?.detail || '正在同步')
+    ? pipeRunNote(pipeSnapshot, '正在同步')
+    : pipeLibraryOnly(pipeSnapshot)
+    ? pipeRunNote(pipeSnapshot) + '，自动任务会顺延。'
     : '其他来源正在同步，自动任务会顺延。';
   $('source-list').querySelectorAll('[data-source-action]').forEach(b => {
     const source = sourceData?.sources.find(s=>s.id===Number(b.dataset.sourceId));
@@ -485,7 +493,7 @@ function renderSubscription(s) {
     <div class="source-row-meta">${esc(s.group_name || '未分组')} · ${s.item_count} 条 · ${s.last_success ? '最近成功 '+sourceTime(s.last_success) : '尚未成功同步'}${s.fulltext ? ' · 补抓原文正文' : ''}${s.extract ? ' · 提取知识标签' : ''}</div>
     ${s.configuration_error ? `<p class="source-row-meta">${esc(s.configuration_error)}</p>` : ''}
     ${!s.last_error && s.last_note ? `<p class="source-row-meta">${esc(s.last_note)}；下次同步从上次的位置接着读。</p>` : ''}
-    ${s.last_error ? `<details class="source-failure"><summary>查看失败原因与重试时间</summary><p>${esc(s.last_error)}</p><p>自动重试：${sourceTime(s.retry_at*1000)}；也可点击“同步”立即重试。</p></details>` : ''}</div>
+    ${s.last_error ? `<details class="source-failure"><summary>查看失败原因与重试时间</summary><p>${esc(s.last_error)}</p><p>${sourceTime(s.retry_at*1000)} 之后的同步才会再试它；也可点击“同步”立即重试。</p></details>` : ''}</div>
     <div class="source-row-actions"><button class="text-button" data-source-action="edit" data-source-id="${s.id}">编辑</button><button class="text-button" data-source-action="toggle" data-source-id="${s.id}">${s.enabled ? '停用' : '启用'}</button><button class="text-button" data-source-action="sync" data-source-id="${s.id}" ${!s.enabled?'disabled':''}>同步</button><button class="text-button source-delete" data-source-action="delete" data-source-id="${s.id}">删除</button></div></article>`;
 }
 // 外文条目在入库前已经译成中文(kb/feeds/translate.py),面板一律显示译文:

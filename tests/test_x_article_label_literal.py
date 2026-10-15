@@ -463,7 +463,9 @@ class LiteralBracketShapeTests(unittest.TestCase):
 
 
 class ClosedCodeSpanTests(FeedgrabRound):
-    """**两段代码都闭合时,它们之间那个 `[` 是真的显示文字起手 —— 自己那篇长文
+    # 本族几处 docstring 写的都是反斜杠/反引号的转义形态,所以一律 **raw**:
+    # 普通字符串里它们是"非法转义",Python 3.12 起报 SyntaxWarning
+    r"""**两段代码都闭合时,它们之间那个 `[` 是真的显示文字起手 —— 自己那篇长文
     还得补到。**
 
     这一族管第 8 轮那次修法自己写错的那一半(2026-10-10 自由工作流第 9 轮审查)。
@@ -610,7 +612,7 @@ class ClosedCodeSpanShapeTests(unittest.TestCase):
                 self.assertIn(REF, lead_text(body))
 
     def test_a_closing_fence_is_found_literally(self):
-        """**契约①**:闭合串按**字面**找 —— 跨度里的反斜杠是内容,不是转义符。
+        r"""**契约①**:闭合串按**字面**找 —— 跨度里的反斜杠是内容,不是转义符。
 
         第一行逐字取自报告那份误判轨迹:`head` 给出的必须是两段
         (`(0, 7)` 和 `(15, 24)`),而不是一段 `(0, 16)`。后两行是 CommonMark 自己
@@ -626,7 +628,7 @@ class ClosedCodeSpanShapeTests(unittest.TestCase):
         self.assertFalse(_inert('`note\\` [', 8, _code_spans('`note\\` [')))
 
     def test_the_two_escape_rules_stay_on_their_own_side(self):
-        """**契约②**:跨度**外**那个转义分支照旧留着 —— `` \`x` `` 渲染成纯文本
+        r"""**契约②**:跨度**外**那个转义分支照旧留着 —— `` \`x` `` 渲染成纯文本
         (真 `marked` 实测),所以它不构成跨度。
 
         两道判据各管一段范围:一个在自由文本里找**起手**,一个在跨度内容里找

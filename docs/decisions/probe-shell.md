@@ -24,6 +24,41 @@
   程:放行屏障之后**不能立刻**去查「起过浏览器没有」,要先 `_wait_gone(node)`。
 - **信号要单独挂一遍**(node 对没有 handler 的 SIGINT/SIGTERM 直接终止、**不触发 'exit'**)。**杀用 SIGKILL,理由是构造上的,不是
   「SIGTERM 不够」** —— 这是最后一道防线,而 SIGTERM 要对端配合,'exit' 回调只跑得了同步代码、**没法等**。
+- **验证资源的所有权在"起它的那一侧",不在被信号收掉的那一侧**(第 5 轮实测的残留 + 同类的一处推断):
+  - **沙箱服务那份临时库由 `tests.headless.fixture_server` 建和删**(它还顺手挑端口,免得两个测试同跑撞端口)。服务进程是被 SIGTERM
+    收掉的,而 Python 对没有 handler 的 SIGTERM 是直接结束 —— 它那边 `with tempfile.TemporaryDirectory()` 的清理一行都不跑,一份完整
+    的沙箱库留在盘上(定向回归之后残留一个、全量回归两个)。**调用点不要再各自 `Popen` + `terminate`。**
+  - **临时 profile 目录交给 `launchShell(args, {profile: '前缀-'})`** —— 它建、它在同一个 `process.on('exit')` 钩子里删(注册在回收
+    之后 = 先 SIGKILL 浏览器再删目录,`force` 必须给:被 SIGKILL 的 chrome 会留下半写的文件和锁)。探针自己 `mkdtempSync` + `finally`
+    里 `rmSync` 的写法漏一条路:**建目录、起浏览器、连 CDP 都在 try 之前**,那一段抛异常时 finally 一行都不跑。
+  - **而那个钩子挡不住 SIGKILL,所以 profile 的根归调用方**(`run_probe` 用 `KB_PROBE_PROFILE_ROOT` 把一个自己拥有的根传下去,在自己的
+    `finally` 里 `rmtree`;探针那边"给了根就建在里面、没给才落到系统临时目录",跟 `tests/fixture_root.py` 同一条口径)。这一层的 timeout
+    发的正是 SIGKILL —— 第 6 轮审查实测:真跑一次共享 `launchShell` + `run_probe(timeout=6)`,**壳被组杀收掉了、profile 留在盘上**。
+    根**不要用 `TemporaryDirectory`**:它的 GC finalizer 会把这份目录也兜掉,于是"这一层到底有没有收"验不出来(注入去掉收尾那一句
+    **红 0 条**,实测);`mkdtemp` + 自己 `rmtree` 之后两侧各有自己的红。
+  - **类级 fixture 建完就登记 `addClassCleanup`,不许只写 `tearDownClass`** —— `setUpClass` 抛异常之后 unittest **不调**
+    `tearDownClass`(只跑 `doClassCleanups`),而建完资源之后往往还有一长段会抛的活:摆盘、起服务、等端口、跑探针、**解析回包**。
+    第 6 轮按代码指出的那一支是"回包非空但不是合法 JSON":`json.loads` 落在清理域外面,服务和整份临时库都留着。七个类级 fixture
+    (`test_reading_literal`、`test_chat_height`、`test_fulltext_browser`、`test_catgraph_browser`、`test_kb_graph_guard`、
+    `test_x_article_dom`、`test_x_article_fidelity`)一并改过来,收子进程的口径收成 `tests/headless.py` 的 `reap(proc)`。
+  - **子进程那一侧的口径只有一份**:`tests/fixture_root.py` 的 `fixture_root(stack, '前缀-')` —— 有 `KB_FIXTURE_ROOT` 就用父进程那份
+    **而且不许删它**(这边一个 SIGTERM 就没了,删不动也不该删),没给才自己建一个挂在 `stack` 上(手动跑那个脚本时靠 Ctrl-C 的
+    `KeyboardInterrupt` 收尾,`with` 跑得到)。**空白串算"没给"**(`Path('')` 是当前目录)。四个沙箱服务(`serve_sources`、
+    `serve_reading`、`serve_reader_membership`、`serve_openai_protocol`)全部过它;压根不建根的 `serve_workspace` 不在射程内,所以
+    `test_chat_height.py` 直接 `Popen` 它是合法的。
+  - 回归分两份:**行为**在 `tests/test_probe_leak.py`(判据是 pid 还在不在),**结构**在 `tests/test_probe_contract.py`(9 条,都不挂
+    `@requires_headless`)。漏掉的那几条路都在"建目录 → 起进程 → 连上去"这一段,而这一段恰恰在 `try` 之前、正常跑一次都走不到,
+    行为用例全绿也证明不了。
+  - **新增两条结构守卫**(`tests/test_probe_contract.py`,11 条):① `setUpClass` 里建了资源的类必须在里面登记
+    `addClassCleanup`,而且 `tearDownClass` 里不许再出现回收动作(走 AST:`TemporaryDirectory`/`mkdtemp`/`Popen`/`fixture_server`/
+    `ExitStack` 对 `cleanup`/`rmtree`/`terminate`/`kill`/`close`/`__exit__`/`reap`);② profile 那个根的交接两侧认同一个变量名。
+    注入各红 1 条(把 `reading_literal`、`chat_height` 的登记挪回 `tearDownClass`;两侧各改一次变量名)。②的第一版按"文件里出现过
+    这个词"找,**红 0 条** —— 注释和 docstring 里到处都写着它;判据改成落在真正读写它的那一句上(`process.env.<名字>`、
+    `PROFILE_ROOT_ENV = "..."`、`child_env[PROFILE_ROOT_ENV] = profiles`)之后两侧各红 1 条。
+  - **结构守卫的判据是"代码里提到那个服务名",不是"这一行上有 `Popen`"**。按行往后开窗口的第一版**漏得一声不响**:把
+    `SERVER = ... / "serve_reading.py"` 写在 `Popen` 前两行,注入之后 9 条全绿(实测)。现在走 AST:docstring 里本来就会写"数据由
+    `tests/serve_reading.py` 摆出来"(逐行扫会把它当违例,第一版正是这么误报的),注释压根不进 AST,放行的只有
+    `fixture_server(script=...)` 那个实参所在的调用范围。
 - **测「挂住」的用例必须拿一个 ref 的 handle 挂住,`await new Promise(() => {})` 挂不住**(它不是 event loop handle,循环一空 node
   就以 exit 13 正常退出,于是**本该验第二层的用例测的是第一层**)。
 - **`launchShell` 等端口那个 `setTimeout` 非清不可**(它是 ref 的 handle,否则探针跑完 node 也不退出)。**拿到端口后要 `unref()`**
@@ -31,11 +66,12 @@
 - **`run_probe` 要 `start_new_session=True`**(让 node 成为新会话首进程,chrome 自动在同一个组里,`killpg` 一起带走)。收尾在
   `finally` 里**无条件**做一次。
 - **把探针改到共用这个模块之后,必须真跑那几组页面回归 —— `node --check` 只过语法。**
-- **两条契约不挂 `@requires_headless`**(没装无头壳的机器上靠它们守结构):探针不许再自己 `spawn` 浏览器、测试不许再裸
-  `subprocess.run` 跑探针。**`test_probe_leak.py` 自己是后一条唯一的例外,而且必须是**(走 `run_probe` 的话它那道 killpg 会把结论盖
-  掉)。
-- **同形状但没动的是沙箱服务那一半**:几个 `setUpClass` 自己 `Popen` 一个预览服务,而 `run_probe` 本身抛出来那一档没人管(setUpClass
-  抛异常之后 unittest **不调** `tearDownClass`)。要修是起完服务**立刻** `cls.addClassCleanup(...)`。
+- **五条契约不挂 `@requires_headless`**(没装无头壳的机器上靠它们守结构,在 `tests/test_probe_contract.py`):探针不许自己 `spawn`
+  浏览器、不许自己管 profile 目录;测试不许裸 `subprocess.run` 跑探针、不许自己 `Popen` 沙箱服务;沙箱服务不许自己拥有临时根。
+  **`test_probe_leak.py` 自己是"裸跑探针"那条唯一的例外,而且必须是**(走 `run_probe` 的话它那道 killpg 会把结论盖掉)。
+- **`setUpClass` 里起沙箱要把"起完到摆完"整段包进清理**(setUpClass 抛异常之后 unittest **不调** `tearDownClass`):`ExitStack` 存到
+  类上、`fixture_server` 和 `run_probe` 放在同一个 `try` 里,任何一条异常路径上 `stack.close()`。`tests/test_reading_literal.py` 是
+  这个形状。
 - **探针里「等页面就绪」要等那个元素自己,不是等定义它的 JS 全局**(`typeof subsCatalog !== 'undefined'` 回答的根本不是「来源目录取
   回来了吗」)。
 - **「有没有漏」按工作目录归属数,不按进程名**(`lsof -p <pid> -a -d cwd` 落在本 worktree 下且 `ppid=1`)—— 本机常常同时开着好几条
@@ -162,7 +198,7 @@
   有没有装无头壳毫无关系(2026-10-09 第 1 轮审查发现,它拿 HEAD 的旧探针跑了对照组,
   四个全过,确认是本轮引入的)。新增的那几条生命周期回归全绿也发现不了 —— 它们用
   的是自己摆的最小探针,碰不到那 12 个文件。
-- **回归在 `tests/test_probe_leak.py`(14 条),判据一律是「那个 pid 还在不在」「起过
+- **行为回归在 `tests/test_probe_leak.py`(13 条),判据一律是「那个 pid 还在不在」「起过
   浏览器没有」这类后果。** 只验「注册了钩子没有」的话,一个注册完却杀不掉它的实现
   (比如 'exit' 里发 SIGTERM)照样全绿。四条退出路径各一条(抛异常 / `process.exit` /
   正常跑完 / SIGTERM),超时那一档单独一条,**调用方被取消那一档按时机分四条**,外加
@@ -186,11 +222,23 @@
   起了一个浏览器。顺序收成一句:**先 `_wait_gone(node_pid)` 等 node 收场,再问
   `profile.exists()`** —— node 死了就再没有谁会去 spawn,那一刻的答案是终态,不赌
   固定时长。
-  **两条契约不挂 `@requires_headless`** —— 没装无头壳的机器上靠它们守住结构:
-  探针不许再自己 `spawn` 浏览器、测试不许再裸 `subprocess.run` 跑探针。
-  **`test_probe_leak.py` 自己是后一条唯一的例外,而且必须是**:第一层那几条验的正是
-  探针自己退出时收不收得干净,走 `run_probe` 的话它那道 killpg 会把结论盖掉 ——
+  **结构契约搬到 `tests/test_probe_contract.py`(9 条,都不挂 `@requires_headless`)**
+  —— 没装无头壳的机器上靠它们守住结构:探针不许自己 `spawn` 浏览器、不许自己管
+  profile 目录;测试不许裸 `subprocess.run` 跑探针、不许自己 `Popen` 自带沙箱根的服务;
+  沙箱服务不许自己拥有临时根;外加 `fixture_root` 那三条(给了就用且不许删它 / 没给才
+  自己建而且归自己删 / 空白串算没给)。拆出去的直接理由是行数(`test_probe_leak.py`
+  本来 635 行,再加就破 700),顺带把两类判据分开:那边问「pid 还在不在」,这边问
+  「源码里还写不写得出那个形状」。
+  **`test_probe_leak.py` 自己是「裸跑探针」那条唯一的例外,而且必须是**:它那几条验的
+  正是探针自己退出时收不收得干净,走 `run_probe` 的话它那道 killpg 会把结论盖掉 ——
   被测的实现坏掉了也照样全绿。
+  **「提到名字」比「这一行上有 Popen」敏感**:第一版按行往后开 4 行窗口找
+  `Popen`/`subprocess.run`,注入「`SERVER = ... / "serve_reading.py"` 写在 Popen 前两行」
+  **红 0 条**;改成走 AST 收字符串常量(docstring 和注释都摘掉,只放行
+  `fixture_server(script=...)` 那个调用范围)之后,两种形态(常量隔两行、就地写在
+  `Popen` 那一行)各红 1 条。`fixture_root` 那三条的注入:无视 `KB_FIXTURE_ROOT` 红 2 条、
+  把父进程那份根也挂到自己 stack 上(退出时删了别人的目录)红 1 条、不 `strip()` 把空白
+  串当成「给了目录」红 1 条。
   **反向验证定点注入六版,各红 1~4 条**:③那一层整个不装(就是第 1 轮被审的那一版)
   红 1 条 —— 红的正是审查那份证据(调用方的进程组被取消之后,node 和 chrome 都还
   活着、端口还在监听);③那个 interval 不 `unref()` 红 1 条,而且**红的是「正常跑完」
@@ -217,15 +265,25 @@
   **同步那条用例对单层注入都不红**(四版全绿),一样如实记着:①的 'exit' 钩子把这条
   路兜住了(连带 EPIPE 那条自愈路径),它钉的是「同步启动段 + 调用方取消」这个形状
   的末态,不是某一层的独占射程。
-- **同形状但本轮没动的是沙箱服务那一半,记在这儿备查。** `test_chat_height` /
-  `test_reading_literal` / `test_fulltext_browser` 的 `setUpClass` 自己 `Popen` 一个
-  预览服务,每条**显式**的失败路径上都记得 `kill()`,可 `run_probe` 本身抛出来那一档
-  (超时、回包不是 JSON)没人管 —— 而 setUpClass 抛异常之后 unittest **不调**
-  `tearDownClass`,于是那个服务连同它监听的端口留在后台(第 1 轮审查注入
-  `TimeoutExpired` 实测:服务还活着、端口还在监听)。它在 HEAD 里就是这样,本轮只
-  换了探针的调用方式,所以没碰。要修是起完服务**立刻** `cls.addClassCleanup(...)`
-  —— setUpClass 失败时 unittest 会跑 `doClassCleanups()`,这是它和 `tearDownClass`
-  的唯一区别;那时顺手把各失败路径上那几句手写 `kill()` 一并收成这一处。
+- **沙箱服务那一半:临时目录这一档收完了,进程那一档记在这儿备查。**
+  - **目录**(第 5 轮 N2 的射程):四个自带沙箱根的服务全部走 `fixture_root`,根由
+    `fixture_server` 建和删;`test_reading_literal` 改成 `ExitStack` + `fixture_server`
+    (起服务和 `run_probe` 在同一个 `try` 里,任何异常路径上 `stack.close()`);
+    `test_fulltext_browser` 的临时目录本来就在**父进程**手上(`cls.tmp`),方向是对的;
+    `serve_workspace` 压根不建根,所以 `test_chat_height` 直接 `Popen` 它合法。
+    Python 这边还有一处同形状的窗口顺手收了:`test_cdp_attach._live_browser` 的
+    `mkdtemp` + `Popen` 原来都在 `try` 之前,`Popen` 自己抛出来那一下目录就留下了
+    (**按代码推断,没实测到** —— `@_NEEDS_SHELL` 已经保证了那个二进制在)。
+    **这一档没有结构守卫,如实记着**:`setUp` 里 `mkdtemp` + `tearDown`/`addCleanup`
+    删是正确写法,源码结构上跟"建完到进 try 之间还夹着会抛的东西"分不开,机械判据
+    会把十来处正确的一起判红。
+    注入实测:把 `serve_reading` 退回就地 `with tempfile.TemporaryDirectory()`,结构
+    守卫红 1 条,**而且真跑一遍阅读页回归之后盘上留下 `kb-reading-qa-*`、测试照旧报
+    OK** —— 正是报告里那个形状。
+  - **进程那一档(第 6 轮补上)**:`test_chat_height` / `test_fulltext_browser` 的 `setUpClass` 自己 `Popen` 预览服务,原来每条
+    **显式**的失败路径上各写一句 `kill()`,而 `run_probe` 本身抛出来那一档(超时、回包不是 JSON)没人管(第 1 轮注入
+    `TimeoutExpired` 实测:服务还活着、端口还在监听)。现在起完**立刻** `cls.addClassCleanup(reap, proc)`,各失败路径上那几句手写
+    `kill()` 一并收成这一处 —— 一个资源只有一个回收点。
 
 - **探针里「等页面就绪」要等**那个元素自己**,不是等定义它的 JS 全局。**
   `reading_probe.mjs` 原来等的是 `typeof subsCatalog !== 'undefined'` 再去点

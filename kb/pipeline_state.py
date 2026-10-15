@@ -11,7 +11,6 @@ from __future__ import annotations
 import secrets
 import threading
 import time
-from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 
@@ -108,9 +107,13 @@ _state: dict = {
     # 而它那几篇文章一个都没落盘,再点重试也不会回来(2026-10-09 第 2 轮审查实测)。
     "export_filter": {},
     # 「重试失败项」要重试谁:{"run": 这一轮的身份, "channels": {来源: 失败名单}}。
-    # 见 note_retry_targets —— 带着 run id,所以不需要在每条启动路径上各清一次。
+    # 见 `pipeline_segments.note_retry_targets` —— 带着 run id,所以不需要在每条启动路径上各清一次。
     "crawl_retry": {},
     "run_kind": "",
+    # 这一轮属于哪个业务批次(`pipeline_batch.open_batch` 发的身份),空串 = 不属于任何批次。
+    # **每条启动路径都要显式写一遍**:`_state` 是进程内常驻的,不写的话上一轮
+    # 日报的批次身份会漏进下一轮独立运行,于是它被合进一个早就结束的批次。
+    "batch": "",
     "planned_stages": None,
     # 每阶段: {status: pending/running/ok/skipped/error/stopped, detail: str}
     "stages": {s: {"status": "", "detail": ""} for s in STAGES},
@@ -177,117 +180,51 @@ def _now() -> str:
 
 
 def _log(msg: str) -> None:
-    # 带日期:日志保留 80 行且跨天不清,只打时分秒会看不出是哪天跑的
-    _state["log"].append(f"[{datetime.now().strftime('%m-%d %H:%M:%S')}] {msg}")
+    _state["log"].append(_stamp(msg))
     del _state["log"][:-80]
+
+
+def _stamp(msg: str) -> str:
+    # 带日期:日志保留 80 行且跨天不清,只打时分秒会看不出是哪天跑的
+    return f"[{datetime.now().strftime('%m-%d %H:%M:%S')}] {msg}"
+
+
+#: 失败明细带进状态体的条数上限(历史积压场景可能一次几百篇)。
+_FAILURES_KEEP = 50
+
+
+def _cap_failures(entry: dict, failures: list[dict]) -> dict:
+    """把失败明细放进阶段结果,**截断了就把总数一起留下**。
+
+    只截不记的后果:面板照着数组长度写「问题明细 · 50 项」,而真实失败数可能是
+    三百 —— 用户看到的是一个看着完整的清单,余下那些连"还有"都不知道。重试名单
+    另存(`crawl_retry`),不从这个展示用的数组反推,所以截断不影响重试范围。
+    """
+    entry["failures"] = failures[:_FAILURES_KEEP]
+    if len(failures) > _FAILURES_KEEP:
+        entry["failures_total"] = len(failures)
+    return entry
 
 
 def _stage(name: str, status: str, detail: str = "",
            failures: list[dict] | None = None) -> None:
-    """failures: [{"title", "reason"}] 失败明细,面板卡片可展开查看。
-    截断 50 条防状态体膨胀(历史积压场景可能一次几百篇)。"""
+    """failures: [{"title", "reason"}] 失败明细,面板卡片可展开查看。"""
     entry: dict = {"status": status, "detail": detail}
     if failures:
-        entry["failures"] = failures[:50]
-    segments = _segments.get(name)
-    if segments:
-        # 这一阶段正被多个来源各跑一遍:只更新当前这一段,再把各段合成一条对外的结论
-        segments[-1].update(entry)
-        entry = _merge_segments(segments)
-        detail = f"{segments[-1]['label']}：{detail}" if detail else detail
+        _cap_failures(entry, failures)
+    # 分段账本在 `pipeline_segments`(**依赖方向单向:那边 → 这边**,所以反过来
+    # 用它只能在函数里 import;理由写在那个模块的头上)。这一阶段没在分段时
+    # `fold` 返回 None,照原样写 —— 只更新当前那一段、再合成一条对外结论的判据
+    # 全在那边,这里不许再判一次。
+    from kb.pipeline_segments import fold
+    folded = fold(name, entry, detail)
+    if folded:
+        entry, detail = folded
     _state["stages"][name] = entry
     if status == "running":
         _state["current_stage"] = name
     if detail:
         _log(f"{name}: {detail}")
-
-
-# ── 多来源分段汇报 ──────────────────────────────────────────────────────────────
-# 一次同步可以同时抓几个来源,而 crawl / export 两个阶段是每个来源各跑一遍的。
-# 各自直接写 _state["stages"][name] 的话,后一个来源的结论会把前一个整个盖掉——
-# 面板上只剩最后那个来源的成败,前面几个是成功、失败还是跳过都看不见了。
-_segments: dict[str, list[dict]] = {}
-
-# 合并后的状态取"最要紧"的那一档:有一个红就是红,还有没跑完的就是执行中,
-# 剩下全跳过才算跳过。
-_MERGE_ORDER = ("error", "running", "pending", "stopped", "skipped", "ok")
-
-
-def _merge_segments(segments: list[dict]) -> dict:
-    status = next((s for s in _MERGE_ORDER
-                   if any(seg["status"] == s for seg in segments)), "ok")
-    entry: dict = {
-        "status": status,
-        "detail": "；".join(f"{seg['label']}：{seg['detail']}"
-                            for seg in segments if seg.get("detail")),
-    }
-    failures = [item for seg in segments for item in seg.get("failures", [])]
-    if failures:
-        entry["failures"] = failures[:50]
-    return entry
-
-
-@contextmanager
-def stage_segment(name: str, label: str):
-    """把这一段时间里对 name 阶段的汇报记成"label 这个来源的那一段"。"""
-    segments = _segments.setdefault(name, [])
-    segments.append({"label": label, "status": "running", "detail": ""})
-    try:
-        yield
-    finally:
-        current = segments[-1]
-        if current["status"] == "running":
-            # 采集器连一次最终状态都没报(异常穿出去了):不替它编一个成功
-            current.update({"status": "error", "detail": current["detail"] or "没有返回结果"})
-        _state["stages"][name] = _merge_segments(segments)
-
-
-def clear_segments() -> None:
-    _segments.clear()
-
-
-# ── 「重试失败项」要重试谁 ─────────────────────────────────────────────────────
-# 报得出"这一轮哪几个目标失败了"的采集器在这里留一份**稳定身份**的名单(订阅是
-# 它的 id),「重试失败项」据此把下一轮的抓取范围收到失败项上。
-#
-# **名单必须在失败那一刻记下来,不能事后反推。** 事后能查的只有订阅行上的
-# `last_error`,而用户修正地址时 `save_subscription` 的 reset 会把它连同退避一起
-# 清空 —— 那是正当的改址行为、不是"抓成功了"的证据,照它反推就把「已改正、还没
-# 验证过」的那条当成「已经恢复」筛掉:用户修完地址点重试,那个账号一条都不抓,
-# 界面还显示「已跳过」(2026-10-09 第 1 轮审查实测,而那正是这颗按钮的来由)。
-#
-# **而且必须按来源各记一份。** 一轮可以同时抓几个来源,而 `_merge_segments` 把各
-# 段的失败明细扁平合并、项里不带来源归属;拿"合并之后有没有失败项"当一个全局开关
-# 的话,RSS 的一条逐项失败会让**所有**来源都按失败项收窄,而整批失败的那个来源
-# (一条订阅都没碰到、一份名单都没留下)就被收窄成空集 —— 恢复之后点重试,RSS 补抓
-# 了,大V一条也没抓,面板上还不再显示有失败要处理(同轮审查实测)。所以判据是
-# 「**这个来源**留下名单了吗」:没留下 = 整批失败、或者它报不出名单(公众号的失败
-# 是文章级的,`--targets` 是账号级的,压根对不上),一律按原范围重跑。
-#
-# 名单带着这一轮的 run id。下一轮一份名单都没留下时(来源级整轮故障),陈旧名单会
-# 连同这一轮的状态一起落盘,拿它收窄就是按上一轮的失败去抓 —— 带上身份之后这件事
-# 不必在每条启动路径上各清一次,少一处就是少一个会漏的地方。
-
-def note_retry_targets(channel: str, targets, at: str) -> None:
-    """记下「这个来源这一轮有哪几个目标失败了」。
-
-    `targets` 是稳定身份(订阅 id 这类),不是显示名 —— 显示名会被改。
-
-    `at` 是这份名单的时刻,用来回答"这个目标后来有没有成功同步过"。**必填,而且
-    要用采集器自己那套时间格式**(订阅那边是 `reg.now()` 的 UTC ISO,不是这里
-    `_now()` 的本地空格格式):名单只有写它的那个采集器解释得了,而两种格式直接
-    比字符串是错的 —— ISO 的 `T`(0x54)排在空格(0x20)后面,同一天里 ISO 那个
-    **恒大于**空格那个,于是"它后来成功过"这一问会一律答成"是",整份名单当场
-    被摘空。所以这里不给默认值、也不替它回落到 `_now()`:格式由写名单的人负责,
-    少传一个参数会当场报错,而回落只会把"填错了"变成"一个很久以后才表现成『重试
-    什么都不抓』的坏时钟"。空串原样存着 —— 那等于不设时间判定,保守多抓一次。
-    """
-    run = _state.get("run_id") or ""
-    note = _state.get("crawl_retry") or {}
-    if note.get("run") != run:
-        note = {"run": run, "channels": {}}
-        _state["crawl_retry"] = note
-    note["channels"][channel] = {"targets": [str(t) for t in targets], "at": at}
 
 
 def _next_seq() -> int:
@@ -339,36 +276,72 @@ def _saved_round_strict() -> dict | None:
     return raw
 
 
+def run_payload() -> dict:
+    """一轮运行的终态记录。**落盘的那份和按 id 留的那份是同一份**。
+
+    两处曾经各写各的:`_finished` 只留了身份、结束时刻、stopped 和 stages。于是
+    "没亲眼看到自己那一轮收尾、照 id 去取"的调用方(`daily_run._sync_round` 被
+    接替的那条路)拿到的是一份**缺计划、缺来源范围、缺失败名单**的记录 —— 它看着
+    像一份完整结果,合并时却因为没有 `planned_stages` 被整个过滤掉,那一轮真实
+    的抓取失败就此消失。契约只有一份,两边都用它。
+    """
+    return {
+        "started_at": _state["started_at"],
+        "finished_at": _state["finished_at"],
+        "stopped": _state.get("stopped", False),
+        "run_kind": _state.get("run_kind", ""),
+        "planned_stages": _state.get("planned_stages"),
+        "stages": deepcopy(_state["stages"]),
+        "crawl_filter": deepcopy(_state["crawl_filter"]),
+        # 导出范围单独落一份:下一次重试要从**它**恢复,不是从收窄后的抓取范围
+        "export_filter": deepcopy(_state.get("export_filter") or {}),
+        # run_id 跟名单一起落盘:retry_notes 要拿它认"这份名单是不是这一轮的"
+        "run_id": _state.get("run_id", ""),
+        # 完成序号 + 发号世代:恢复时靠它们分出两份落盘各记着哪一轮(见
+        # `pipeline_persist._seq_of`)。**合并出来的那份也要带**,否则整批那一份一
+        # 落盘就是「没有顺序凭据」,重启之后反而被判成比子轮更旧。
+        "run_seq": _state.get("run_seq", 0),
+        "seq_gen": _state.get("seq_gen"),
+        "crawl_retry": deepcopy(_state.get("crawl_retry") or {}),
+        "log": list(_state["log"]),
+    }
+
+
+
+def _write_state(payload: dict) -> None:
+    """把一份结果落到状态文件。**原子替换**,不是就地改写。
+
+    就地 `write_text` 的话,写到一半退出(重启、OOM、断电)留下的是半截 JSON ——
+    读的那一端只能当"读不出",而旧那份已经被截掉了,两份都没了。
+    口径只有一份:普通一轮和批次汇总都过这里(`pipeline_persist._write_atomic`)。
+    """
+    _write_atomic(_STATE_FILE, _dump_bytes(payload))
+
+
+
 def _save_last_run() -> None:
     """持久化最近一次结果,重启 kb-web 后仍能看到。
 
     **异常不在这里吞**:两份落盘都由 `_end_run()` 那段统一收尾兜住,并如实记一笔
     诊断(`persist_error()`)。在这里各吞一次的话,「写没写上」就再也报不出去了。
+
+    写的是 `run_payload()` —— **落盘那份、按 id 留的那份、并进批次汇总的那份是同一个
+    契约**(理由见那个函数)。
     """
-    _write_atomic(_STATE_FILE, _dump_bytes({
-            "started_at": _state["started_at"],
-            "finished_at": _state["finished_at"],
-            "stopped": _state.get("stopped", False),
-            "run_kind": _state.get("run_kind", ""),
-            "planned_stages": _state.get("planned_stages"),
-            "stages": _state["stages"],
-            "crawl_filter": _state["crawl_filter"],
-            # 导出范围单独落一份:下一次重试要从**它**恢复,不是从收窄后的抓取范围
-            "export_filter": _state.get("export_filter") or {},
-            # run_id 跟名单一起落盘:retry_notes 要拿它认"这份名单是不是这一轮的"
-            "run_id": _state.get("run_id", ""),
-            # 完成序号:恢复时靠它分出两份落盘各记着哪一轮
-            "run_seq": _state.get("run_seq", 0),
-            # 发号世代:**凭据自己带出处**,老记录那些号一个都不信(`_seq_of`)
-            "seq_gen": _SEQ_GEN,
-            "crawl_retry": _state.get("crawl_retry") or {},
-            "log": _state["log"],
-        }))
+    _write_state(run_payload())
+
 
 
 def _run_record() -> dict:
-    """这一轮的终态,给人翻的那一份 —— 判据和字段取舍在 `pipeline_persist`。"""
-    return run_record(_state)
+    """要留进历史的那一份终态。**批次里取的是整批那份汇总,不是当前子轮。**
+
+    **两份落盘必须是同一个业务结果的两个投影** —— 这条不变量的事故形态写在
+    `_save_history` 里。字段取舍在 `pipeline_persist.run_record`。
+    """
+    # 延迟 import:批次层在模块级 import 本模块(**方向单向**,理由在
+    # `pipeline_batch` 的模块头),反过来用它只能在函数里取。
+    from kb.pipeline_batch import _batch_aggregate
+    return run_record(_batch_aggregate() or _state)
 
 
 def _save_history() -> None:
@@ -382,6 +355,9 @@ def _save_history() -> None:
     `docs/decisions/llm-stages.md` 那条)。写失败只是少一条历史记录,不出声 ——
     这一份是只读展示,它写不写得上不该影响这一轮同步的结论。
     """
+    # 延迟 import,同上。读的是**同一本账**(都在 `_lock` 里):`_run_record()` 决定
+    # "存哪一份",`_aggregate_covers()` 回答"这一份实际合并了谁"。
+    from kb.pipeline_batch import _aggregate_covers
     record = _run_record()
     rid = record["run_id"]
     # **空身份一律追加,不去重。** 空串不是身份 —— 拿它当键会把两轮各自跑过的运行
@@ -394,7 +370,26 @@ def _save_history() -> None:
     # 历史当场从 3 条变 1 条、面板上一个字不说(两份都写成功了,诊断是空的)。
     # 抛出去反而正好:`_end_run` 那两份是分别尝试、分别诊断的,这一份写不上只是
     # 少一条历史记录,面板会如实说一句,而**原文件一个字节都没动**。
-    runs = [r for r in _history_rounds_strict() if not rid or r.get("run_id") != rid]
+    # **一个业务结果只占一条历史:整批那一份顶掉这一批前几轮各自留下的那条。**
+    # 不顶的后果不是"多几行",而是**两份可恢复副本在同一个 run id 下存着两种含义
+    # 的结果**:状态文件是整批(抓取 error),历史最新那条是末个子轮(抓取「未选择」)
+    # —— 恢复按完成序号挑中历史那条,于是日报里那条 RSS 抓取失败在重启之后变成
+    # 「同步已完成」,连「重试失败项」都没有(实测:只给汇总那一次写入注入
+    # `OSError`,历史照常写成功,新进程起来 `last_run.stages.crawl.status=skipped`、
+    # `retry_plan=[]`)。正常保存时它也看得见:面板说"失败",点开同一个身份的
+    # 那条历史却写着"已完成"。
+    # 顶掉**不丢内容**:整批那一份是子轮的并集(阶段按来源合并、日志接起来、失败
+    # 名单并起来,见 `pipeline_merge._merge_runs`)。
+    # **待删的身份只认「这一份记录实际合并了哪几轮」,不许据「内存里有没有权威结果」
+    # 反推** —— 权威位上也可能躺着一轮普通运行自己的快照(落盘失败那一档,见
+    # `pipeline_batch._save_own`),它一轮都没合并,按"有缓存就是整批"去删,期间那几轮
+    # 各自那条唯一的历史就没了(实测形态在 `docs/decisions/pipeline-history.md`)。
+    # 发布被拒那一档同理:写下的是子轮自己那份局部结果。**反过来钉住:真的汇总即使
+    # 状态写失败,存进历史的也还是完整汇总**,不许退回局部结果。
+    superseded = {rid} if rid else set()
+    superseded |= _aggregate_covers()
+    runs = [r for r in _history_rounds_strict()
+            if not (r.get("run_id") and r["run_id"] in superseded)]
     runs.insert(0, record)
     del runs[_HISTORY_KEEP:]
     _write_atomic(_history_file(), _dump_bytes({"runs": runs}))
@@ -586,7 +581,13 @@ def _latest_locked() -> dict:
     # 判据是**收尾时间**,不是身份 —— 恢复进来的旧格式记录没有 `run_id`,
     # 而它一样是一份已经收尾的终态。
     if not _state["running"] and _state.get("finished_at"):
-        return deepcopy(_state)
+        # 一轮日报的几次管道运行合并出来的那份汇总**不是任何一个 `_state`**,
+        # 而它才是这一刻的最新(`_state` 只剩最后那个子轮:入库那一轮的 crawl 是
+        # 「未选择」,前面几轮的抓取失败和重试名单都不在里面)。独立的一轮收尾时
+        # 它已经被清掉(见 `pipeline_batch._remember_aggregate`),所以这里不会读到更旧的东西。
+        from kb.pipeline_batch import _batch_aggregate    # 延迟 import,同上
+        batch = _batch_aggregate()
+        return deepcopy(batch if batch is not None else _state)
     # 回落到磁盘那份时**要过同一道形状判据**。这一档走的是「恢复还没成功 / 恢复
     # 拒了磁盘那份」,而拒的理由多半正是形状不对(`valid_round`)——
     # `load_last_run()` 是宽口径的「磁盘那份原样」(还有只取失败名单的消费者在用
@@ -621,6 +622,9 @@ def request_stop(run_id: str = "") -> bool:
 
 
 def _end_run() -> None:
+    # 延迟 import,同 `_run_record`:批次层和分段账本都在模块级 import 本模块。
+    from kb.pipeline_batch import _publish_in_batch, _remember_settled
+    from kb.pipeline_segments import clear_segments
     with _lock:
         # 分段是"这一轮某个阶段被几个来源各跑一遍"的临时账本,收尾时一定要清掉:
         # 留着的话下一轮的第一条汇报会被并进上一轮的段里。
@@ -663,7 +667,9 @@ def _end_run() -> None:
             # 「历史里没有这一轮」和「这一轮还没跑过」在面板上长得一模一样。
             # 顺序仍是状态在前:那一份承重(重试范围从它派生),这一份只给人翻。
             errs = []
-            for save in (_save_last_run, _save_history):
+            # 状态那一份改走批次层:普通一轮就是 `_save_last_run`,
+            # 批次的第 2 轮起写的是**整批合并**那一份(见 `pipeline_batch._publish_in_batch`)。
+            for save in (_publish_in_batch, _save_history):
                 try:
                     save()
                 except Exception as exc:  # noqa: BLE001 - 理由就在上面那段
@@ -680,11 +686,13 @@ def _end_run() -> None:
             # 也还拿得到自己那一轮的结果(阶段修正已经在上面做完了,存的就是终态)。
             run_id = _state.get("run_id") or ""
             if run_id:
-                _finished[run_id] = {
-                    "run_id": run_id, "stopped": stopped,
-                    "finished_at": _state["finished_at"],
-                    "stages": deepcopy(_state["stages"]),
-                }
+                # 跟落盘那份同一个契约(见 `run_payload`):少一个字段,照 id 来取的
+                # 调用方就会拿到一份"看着完整、其实合并不进去"的结果 —— 日报那条
+                # "没亲眼看到自己那一轮收尾"的路就是这么把一轮的抓取失败丢掉的。
+                _finished[run_id] = run_payload()
                 for old_id in list(_finished)[:-_FINISHED_KEEP]:
                     del _finished[old_id]
+            # **「上一轮收尾是谁」在这里记**(批次资格判据读的就是它):记在收尾处,
+            # 所以上面 `pipeline_batch._publish_in_batch` 读到的是我们这一轮**之前**那一轮。
+            _remember_settled(run_id)
             _state["running"] = False

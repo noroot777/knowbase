@@ -4,9 +4,9 @@ Run: .venv/bin/python tests/serve_sources.py --port 8879
 The pipeline, export and FTS index are real; remote feed and vector model are fixtures.
 """
 import argparse
+import contextlib
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 
@@ -16,7 +16,10 @@ def main():
     parser.add_argument('--layout-fixture',action='store_true')
     args=parser.parse_args()
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-    with tempfile.TemporaryDirectory(prefix='kb-source-qa-') as temp:
+    from tests.fixture_root import fixture_root
+    # 临时库**优先由父进程拥有**:口径和理由都在 tests/fixture_root.py
+    with contextlib.ExitStack() as stack:
+        temp = fixture_root(stack, 'kb-source-qa-')
         os.environ['KB_DATA_DIR']=str(Path(temp)/'data')
         os.environ['KB_VAULT_ROOT']=str(Path(temp)/'vault')
         from kb import pipeline, embedder

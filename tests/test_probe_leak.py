@@ -25,6 +25,9 @@
 
 判据一律是**后果**:那个 pid 还在不在。只验「注册了钩子没有」的话,一个注册完
 却杀不掉它的实现照样全绿。
+
+同一个所有权问题的另一半是**目录**(浏览器 profile、沙箱那份临时库):那几条靠源码
+结构钉,在 `tests/test_probe_contract.py`。
 """
 
 from __future__ import annotations
@@ -117,6 +120,7 @@ await new Promise(res => {
 
 
 def _write_probe(tmp: Path, name: str, body: str, *, before: str = "",
+                 profile: str = "",
                  args: tuple[str, ...] = ("--window-size=800,600",)) -> Path:
     """写一个用公共模块起浏览器的最小探针,把 chrome 的 pid 打在 stdout 上。
 
@@ -124,16 +128,19 @@ def _write_probe(tmp: Path, name: str, body: str, *, before: str = "",
     `before` 是「起浏览器之前先做点别的」那一段(见 BARRIER);`args` 是交给
     `launchShell` 的参数 —— 用 `--user-data-dir` 可以反过来验「有没有起过浏览器」:
     chrome 一启动就把那个目录建出来,它不存在就是**一个都没起过**。
+    `profile` 是让共享层给一个独立临时 profile(前缀),它的实际路径会一起打出来。
     """
     p = tmp / name
     arglist = ", ".join(f'"{a}"' for a in args)
+    opts = f', {{ profile: "{profile}" }}' if profile else ""
     p.write_text(textwrap.dedent(f'''\
         import {{ writeFileSync, existsSync }} from "node:fs";
         import {{ execSync }} from "node:child_process";
         import {{ launchShell }} from "{HERE / "probe_shell.mjs"}";
     ''') + before + textwrap.dedent(f'''\
-        const {{ proc }} = await launchShell([{arglist}]);
+        const {{ proc, profile }} = await launchShell([{arglist}]{opts});
         process.stdout.write("CHROME_PID=" + proc.pid + "\\n");
+        process.stdout.write("PROFILE=" + profile + "\\n");
         if (process.env.PROBE_PID_FILE) {{
           writeFileSync(process.env.PROBE_PID_FILE,
                         "node=" + process.pid + " chrome=" + proc.pid + "\\n");
@@ -167,6 +174,40 @@ class ProbeShellReapTests(unittest.TestCase):
         self.assertTrue(_wait_gone(pid),
                         f"探针抛异常退出之后 chrome {pid} 还活着(就是那 16 个孤儿的形态)")
 
+    def test_a_temporary_profile_is_removed_on_the_throwing_path_too(self):
+        """**profile 目录跟浏览器同一条口径:谁都不许留在盘上。**
+
+        原来是各探针自己 `mkdtempSync` + `finally` 里 `rmSync`:建目录、起浏览器、
+        连 CDP 这几步**在 try 之前**,那一段抛异常时 finally 一行都不跑,目录就留着
+        (第 5 轮按代码指出;另一处实测的沙箱库残留是同一个所有权问题)。所以改成
+        `launchShell({profile: 前缀})` 自己建、挂在同一个 'exit' 钩子上删。
+
+        判据是后果:**那个目录还在不在**。
+        """
+        import tempfile
+        lines = [
+            'import { launchShell } from "%s";' % (HERE / "probe_shell.mjs"),
+            'const { proc, profile } = await launchShell(["--window-size=800,600"],',
+            '                                           { profile: "kb-leak-probe-" });',
+            'process.stdout.write("CHROME_PID=" + proc.pid + "\\n");',
+            'process.stdout.write("PROFILE=" + profile + "\\n");',
+            'throw new Error("模拟一条检查失败");',
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            probe = Path(td) / "profile.mjs"
+            probe.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            r = subprocess.run([NODE, str(probe)], capture_output=True, text=True,
+                               timeout=90, env=probe_env())
+        found = [l.split("=", 1)[1] for l in r.stdout.splitlines()
+                 if l.startswith("PROFILE=")]
+        self.assertTrue(found, f"探针没报出 profile 路径\nstdout={r.stdout}\nstderr={r.stderr}")
+        self.assertNotIn(found[0], ("", "null"), found)
+        for _ in range(50):          # 钩子是同步的,但进程退出本身要一点时间
+            if not Path(found[0]).exists():
+                break
+            time.sleep(0.1)
+        self.assertFalse(Path(found[0]).exists(),
+                         f"探针抛异常退出之后 profile 目录 {found[0]} 还留着")
     def test_process_exit_takes_the_browser_with_it(self):
         """`process.exit(1)` —— 探针报完失败就是这么收场的。"""
         pid = self._run_and_get_pid("process.exit(1);", "bail.mjs")
@@ -220,6 +261,32 @@ class RunProbeGroupReapTests(unittest.TestCase):
             pid, f"超时之后没收到探针已经打印的输出,排查超时就没线索了\n{out!r}")
         self.assertTrue(_wait_gone(pid),
                         f"run_probe 超时之后 chrome {pid} 还活着 —— 进程组没收干净")
+
+    def test_timeout_also_takes_the_temporary_profile(self):
+        """SIGKILL 杀的是子进程,**删目录是我们自己的事**。
+
+        探针那边只在 node 的 `'exit'` 里删它自己那一格,而这一层的 timeout 发的是
+        SIGKILL —— 钩子一行都不跑。所以 profile 建在 `run_probe` 给的那个根里
+        (`KB_PROBE_PROFILE_ROOT`),它在自己的 `finally` 里整根删掉。第 6 轮审查实测
+        的后果就是这一条:浏览器确实被组杀收掉了,**目录留在盘上**。
+
+        判据是后果 —— 那个目录还在不在、它所在的根还在不在;不看"注册了钩子没有"。
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            probe = _write_probe(Path(td), "stuck_profile.mjs", HANG,
+                                 profile="kb-timeout-profile-")
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                run_probe([NODE, str(probe)], timeout=20, env=probe_env())
+            out = caught.exception.output or ""
+        seen = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+        self.assertIn("PROFILE", seen, f"探针没打出 profile 路径\n{out!r}")
+        profile = Path(seen["PROFILE"])
+        self.assertTrue(profile.name.startswith("kb-timeout-profile-"), profile)
+        self.assertTrue(_wait_gone(int(seen["CHROME_PID"])), "进程组没收干净")
+        self.assertFalse(profile.exists(), f"超时之后 profile {profile} 留在盘上了")
+        self.assertFalse(profile.parent.exists(),
+                         f"那个根 {profile.parent} 也该由 run_probe 收掉")
 
     def test_output_and_returncode_match_subprocess_run(self):
         """形状得和 `subprocess.run` 一样,调用点才能原样读 .returncode/.stdout。"""
@@ -303,7 +370,11 @@ class CallerCancelledReapTests(unittest.TestCase):
                 probe = _write_probe(tmp, "hang.mjs", HANG)
                 pidfile = tmp / "pids.txt"
                 caller = _write_caller(tmp)
-                env = {**probe_env(), "PROBE_PID_FILE": str(pidfile)}
+                # TMPDIR 指到**我们自己这份**临时目录:这个调用方待会要被 SIGKILL,
+                # 它 `run_probe` 建的那个 profile 根于是没人收(它自己的 finally 一行
+                # 都不跑)——所有权只能再往上挪一级,落到这条用例头上。
+                env = {**probe_env(), "PROBE_PID_FILE": str(pidfile),
+                       "TMPDIR": str(tmp)}
                 # 调用方自己也开一个新会话:它的 pgid 于是等于它的 pid,下面那一下
                 # killpg 只打到它,不会波及跑测试的这个进程。
                 with subprocess.Popen(
@@ -359,8 +430,12 @@ class CallerCancelledReapTests(unittest.TestCase):
                                      args=(f"--user-data-dir={profile}",))
                 pidfile, ready, go = tmp / "pids.txt", tmp / "ready.txt", tmp / "go.txt"
                 caller = _write_caller(tmp)
+                # TMPDIR 指到**我们自己这份**临时目录:这个调用方待会要被 SIGKILL,
+                # 它 `run_probe` 建的那个 profile 根于是没人收(它自己的 finally 一行
+                # 都不跑)——所有权只能再往上挪一级,落到这条用例头上。
                 env = {**probe_env(), "PROBE_PID_FILE": str(pidfile),
-                       "PROBE_READY_FILE": str(ready), "PROBE_GO_FILE": str(go)}
+                       "PROBE_READY_FILE": str(ready), "PROBE_GO_FILE": str(go),
+                       "TMPDIR": str(tmp)}
                 with subprocess.Popen(
                         [sys.executable, str(caller), str(probe)],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -413,8 +488,12 @@ class CallerCancelledReapTests(unittest.TestCase):
                                      args=(f"--user-data-dir={profile}",))
                 ready, go = tmp / "ready.txt", tmp / "go.txt"
                 caller = _write_caller(tmp)
+                # TMPDIR 指到**我们自己这份**临时目录:这个调用方待会要被 SIGKILL,
+                # 它 `run_probe` 建的那个 profile 根于是没人收(它自己的 finally 一行
+                # 都不跑)——所有权只能再往上挪一级,落到这条用例头上。
                 env = {**probe_env(), "PROBE_READY_FILE": str(ready),
-                       "PROBE_GO_FILE": str(go)}       # 这个 go 永远不会被写出来
+                       "PROBE_GO_FILE": str(go),      # 这个 go 永远不会被写出来
+                       "TMPDIR": str(tmp)}
                 with subprocess.Popen(
                         [sys.executable, str(caller), str(probe)],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -457,8 +536,12 @@ class CallerCancelledReapTests(unittest.TestCase):
                                      args=(f"--user-data-dir={profile}",))
                 ready, go = tmp / "ready.txt", tmp / "go.txt"
                 caller = _write_caller(tmp)
+                # TMPDIR 指到**我们自己这份**临时目录:这个调用方待会要被 SIGKILL,
+                # 它 `run_probe` 建的那个 profile 根于是没人收(它自己的 finally 一行
+                # 都不跑)——所有权只能再往上挪一级,落到这条用例头上。
                 env = {**probe_env(), "PROBE_READY_FILE": str(ready),
-                       "PROBE_GO_FILE": str(go)}
+                       "PROBE_GO_FILE": str(go),
+                       "TMPDIR": str(tmp)}
                 with subprocess.Popen(
                         [sys.executable, str(caller), str(probe)],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -512,47 +595,6 @@ class CallerCancelledReapTests(unittest.TestCase):
         self.assertNotIn("CHROME_PID=", r.stdout, "launchShell 居然返回了")
         self.assertEqual(143, r.returncode,
                          f"该以 143 收场(被取消的惯例)\nstderr={r.stderr}")
-
-
-
-class ProbeSourceContractTests(unittest.TestCase):
-    """口径只有一份:探针不许再自己 spawn 浏览器,测试不许再裸 subprocess.run 探针。
-
-    这两条不需要浏览器,所以不挂 @requires_headless —— 没装无头壳的机器上它们
-    照样是有效的回归(上面那几条 skip 掉之后,靠它们守住结构)。
-    """
-
-    def test_no_probe_spawns_the_shell_itself(self):
-        offenders = []
-        for f in sorted(HERE.glob("*.mjs")):
-            if f.name == "probe_shell.mjs":
-                continue
-            s = f.read_text(encoding="utf-8")
-            if "HEADLESS_SHELL" in s and "spawn(" in s and "launchShell" not in s:
-                offenders.append(f.name)
-        self.assertEqual([], offenders,
-                         "这些探针又自己 spawn 浏览器了,收尾就不归 probe_shell 管了")
-
-    def test_no_test_runs_a_browser_probe_bare(self):
-        offenders = []
-        for f in sorted(HERE.glob("test_*.py")):
-            # 本文件是唯一的例外,而且必须是:上面第一层那几条验的正是**探针自己**
-            # 退出时收不收得干净,走 run_probe 的话它那道 killpg 会把结论盖掉 ——
-            # 被测的实现坏掉了也照样全绿。
-            if f.name == Path(__file__).name:
-                continue
-            s = f.read_text(encoding="utf-8")
-            if "probe_env()" not in s:
-                continue
-            for i, line in enumerate(s.splitlines(), 1):
-                if "subprocess.run(" in line and "run_probe" not in line:
-                    tail = "\n".join(s.splitlines()[i - 1:i + 3])
-                    if "probe_env()" in tail:
-                        offenders.append(f"{f.name}:{i}")
-        self.assertEqual(
-            [], offenders,
-            "这些地方又裸 subprocess.run 跑探针了 —— 它的 timeout 是 SIGKILL,"
-            "探针起的浏览器会被漏在外面,要走 tests.headless.run_probe")
 
 
 if __name__ == "__main__":

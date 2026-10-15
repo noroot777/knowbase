@@ -54,6 +54,9 @@ class RelatedJumpTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
+        # 建完**立刻**登记:setUpClass 后面还要摆盘、起浏览器,任何一步抛出来
+        # unittest 都**不调** tearDownClass(只跑 doClassCleanups),那份库会留在盘上。
+        cls.addClassCleanup(cls.tmp.cleanup)
         root = Path(cls.tmp.name)
         old_cache = T.CACHE_DIR
         T.CACHE_DIR = root / "data"
@@ -88,10 +91,6 @@ class RelatedJumpTest(unittest.TestCase):
         cls.page = out_dir / B.VIEWS["projects"]["out"]
         cls.probed = cls._probe(["search", "win", "heat", "repo", "none",
                                  "q+win", "q+heat", "q+repo", "enter", "ime"])
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.tmp.cleanup()
 
     @classmethod
     def _probe(cls, filters: list[str]) -> dict:

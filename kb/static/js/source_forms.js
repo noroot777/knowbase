@@ -73,22 +73,84 @@ async function actOnSource(action, id) {
 function fillSourceSettings(s) {
   $('source-settings-error').textContent = '';
   $('source-settings-fields').disabled = false;
-  $('source-auto').checked = s.enabled;
-  $('source-interval').value = s.interval_minutes;
   $('source-bridges').value = (s.bridges || []).join('\n');
+  // 「自动同步 / 同步间隔」两个控件删掉之后(那一档整条拆了,见
+  // `kb.pipeline._scheduler_tick`),这张表单上只剩 X 的取法那一块 —— 别的来源
+  // 打开会看到一个空表单配一颗「保存设置」,点下去提交一个空对象。整张表单
+  // 跟着 X 那一块一起藏掉,面板剩下的说明文字照旧显示。
+  $('source-settings-form').hidden = sourceModules.get(sourceKind)?.adapter !== 'social';
   // 桥接只是三条 X 通道之一,显示哪一块由 x_channel.js 按当前通道决定。
   fillXChannelFields(s);
   loadXChannel(sourceKind);
-  $('source-settings-status').textContent = s.enabled
-    ? `已启用 · 下次计划 ${s.next_run ? sourceTime(s.next_run*1000) : '即将开始'}`
-    : '自动同步未开启。手动同步随时可用。';
+  // 「按来源类型每 N 分钟自动同步」那一档拆掉了(见 kb.pipeline._scheduler_tick),
+  // 这一类来源改成跟着日报那一轮走。**所以这一行必须去问日报到底开没开、这一类
+  // 在不在它的范围里** —— 无条件写「每天同步」在用户关掉日报定时、或者把 RSS 从
+  // 范围里去掉之后就是一句假话,而他会一直等一个不会来的自动同步。
+  renderSourceScheduleNote();
+  // 现读一次:两条定时在别处改过之后,这一行不该还停在上次打开时的说法。
+  loadSchedules();
 }
+// 定时配置一变就重画(谁保存成功都会推一次,见 `schedules.js`)。**这一行自己
+// 不缓存配置**:缓存过的那一版里,页头保存成功只更新页头,这一行长期说反话。
+watchSchedules(() => renderSourceScheduleNote());
+// 共享层是**页内**的:另一份已打开的页面(或另一台机器)在那边保存了,这边收
+// 不到通知,而这一页上别的几句说明都会在自己被打开时重读,只有这一行是停在屏幕
+// 上不动的。所以**回到这一页就重读一次**,别把「我没收到通知」当成「服务器那份
+// 没变」。常规来源轮询不带这一读(两条定时一轮两个请求,15 秒一次不值当)。
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && sourceActive() && schedules()) loadSchedules();
+});
+// 「这一类来源什么时候会自动同步」。**要问遍所有还在生效的定时**,不是只问日报:
+// 页头那颗「定时同步」(pipeline_schedule)按仓库主人的要求暂留着,它照样会到点跑
+// 全流程。只看日报的话,B 开着而 A 关着时这里会写「目前不会自动同步」,而页面上方
+// 明明写着「定时同步 · 每天 07:30」—— 两句话当场打架。
+//
+// 配置本身由 `schedules.js` 那一层持有(含包形差异、三态和代次),这里只读它。
+// 这一类来源会被哪几条定时带上。返回 [{时刻}],空数组 = 没有一条会带上它。
+function sourceScheduleHits(kind) {
+  const { daily, pipe } = schedules() || {};
+  const hits = [];
+  // 日报那一轮:定时开着、勾了「生成前先同步」、而且这一类在它的同步范围里
+  if (daily?.enabled && daily.sync !== false && (daily.channels || []).includes(kind))
+    hits.push({ time: daily.time, what: '日报' });
+  if (pipe?.enabled && (pipe.channels || [pipe.channel]).includes(kind))
+    hits.push({ time: pipe.time, what: '页头的定时同步' });
+  return hits;
+}
+function renderSourceScheduleNote() {
+  const box = $('source-settings-status');
+  if (!box) return;
+  const manual = '手动同步随时可用。';
+  const config = schedules();
+  if (!config) { box.textContent = manual; return; }
+  const hits = sourceScheduleHits(sourceKind);
+  if (hits.length) {
+    // 已知有一条带上它 —— 这句话不受另一条读不到的影响(再多一条定时只会多一个
+    // 同步时刻,不会把这个时刻取消掉)。
+    box.textContent = hits.map(h => `每天 ${h.time} 跟着${h.what}那一轮同步`).join('；')
+      + `。${manual}`;
+    return;
+  }
+  const { daily, unknown } = config;
+  if (unknown.length) {
+    // 已知的那几条都没带上它,可还有读不到的 —— 这时只能说"不知道"。这里不顺带
+    // 念日报那条的原因:那几句话都以「目前不会自动同步」收尾,而此刻正是不确定。
+    box.textContent = `读不到${unknown.join('、')}的设置，没法确定这一类来源会不会`
+      + `自动同步。${manual}`;
+    return;
+  }
+  // 两条都读到了、一条都没带上它。**把原因说出来**,否则用户不知道该去哪儿改。
+  box.textContent = (!daily.enabled ? '日报定时未启用，这一类来源目前不会自动同步。'
+    : daily.sync === false ? `日报定时每天 ${daily.time} 生成，但没开「生成前先同步」。`
+    : '这一类来源不在日报的同步范围里，目前不会自动同步。') + manual;
+}
+
 async function saveSourceSettings(e) {
   e.preventDefault();
   const kind = sourceKind;
   $('source-settings-save').disabled = true;
   $('source-settings-error').textContent = '';
-  const body = { enabled:$('source-auto').checked, interval_minutes:Number($('source-interval').value) };
+  const body = {};
   if (sourceModules.get(kind).adapter === 'social') {
     body.bridges = $('source-bridges').value.split('\n').map(v=>v.trim()).filter(Boolean);
     Object.assign(body, xChannelPayload(kind));

@@ -9,6 +9,11 @@ let dailyCurrent = '', dailyState = null, dailyTimer = null;
 // 是它撞号时的兜底 —— 多刷一次列表的代价,换"再不会静默停在旧正文上"。
 let dailyDoneRun = null;
 let dailyLoaded = false, dailyDirty = false, dailySaving = false, dailyBusy = false;
+// 这一片**有几趟读取还在路上**。它不是一道闸(面板重开就该再读一次设置,在途的那
+// 趟由共享层的代次去作废 —— 拿它当闸会把重开那次读取整个吞掉,于是被按住的旧回包
+// 落地时写进去的是过时的值,实测把开关退回了未启用):它只回答「自己这趟读完了
+// 没有」,共享层的新事实到了要不要替这张表单收尾,得先知道它还在不在读。
+let dailySchedReads = 0;
 let dailyWindowDirty = false;
 
 function dailyActive() { return activeTab === 'daily'; }
@@ -132,23 +137,85 @@ function dailyScheduleMessage(s) {
   return `已保存：每天 ${s.time} ${s.sync ? '先同步再生成' : '只用已入库的内容生成'}${next}`;
 }
 
-async function loadDailySettings() {
-  if (dailySaving || dailyDirty) return;
-  try {
-    const data = await pipeJson('/api/daily/settings');
-    dailySettings = data.settings; dailyChannels = data.channels;
-    $('daily-on').checked = !!dailySettings.enabled;
-    $('daily-time').value = dailySettings.time;
-    $('daily-sync').checked = !!dailySettings.sync;
-    $('daily-firstdays').value = dailySettings.first_days;
+// **一次读取必须有终态**(同 `pipe_schedule.js` 的 `settleSched`,那边有完整的事故
+// 形态)。这一片底下那句话一开始就是「正在读取定时设置…」、整片字段禁用着,所以
+// 成功、失败、被更晚的读取顶掉,哪条分支走完都得回到这里收尾。终态只有三种:采用
+// 当前已确认的事实、说读不到并把重读放出来、保留用户的草稿。
+//
+// 原来成功和失败两条分支各有一处早退,早退之后这一片就永远停在「正在读取定时
+// 设置…」:字段禁用、没有重读入口,而后端和共享事实都是好的。
+function settleDaily(fact, failure) {
+  // **就绪判据只有一份**(`schedules.js` 的 `scheduleSettle`):配置**和**可选来源
+  // 目录都到位才算"已加载" —— 目录没拿到就画不出同步范围,硬开放字段只会让他存出
+  // 一份空范围(保存那边会当场拒绝)。这一档照"不知道"走,重读把目录一起补上。
+  const { state, missing } = scheduleSettle({
+    fact, saving: dailySaving, dirty: dailyDirty,
+    deps: [{ ready: dailyChannels.length, what: '同步范围' }],
+  });
+  if (state === 'saving') return;  // 保存那条路自己会收尾
+  if (state === 'draft') {         // 草稿优先:一个字都不许覆盖
+    $('daily-sched-fields').disabled = false; $('daily-sched-save').disabled = false;
+    return;
+  }
+  if (state === 'ready') {
+    dailySettings = fact;
+    $('daily-on').checked = !!fact.enabled;
+    $('daily-time').value = fact.time;
+    $('daily-sync').checked = !!fact.sync;
+    $('daily-firstdays').value = fact.first_days;
     renderDailyChannels();
     dailyLoaded = true;
     $('daily-sched-fields').disabled = false;
-    $('daily-sched-msg').textContent = dailyScheduleMessage(dailySettings);
-  } catch (e) {
-    $('daily-sched-msg').textContent = '读取定时设置失败：' + e.message;
+    $('daily-sched-reload').hidden = true;
+    $('daily-sched-msg').textContent = dailyScheduleMessage(fact);
+    return;
   }
+  // 三句话分得清三件事:**这趟真失败了**、**定时读到了但依赖没读到**、**当前不知道**
+  // (更晚那趟失败把事实抹成了未知)。都给重读入口,一句含糊的「失败」救不了用户。
+  $('daily-sched-msg').textContent =
+    failure ? '读取定时设置失败：' + failure
+    : missing ? missing + '还没读到，点「重新读取」再试一次'
+    : '读不到定时设置';
+  $('daily-sched-reload').hidden = false;
+  // 重读失败时屏幕上那份仍是上一次读到的真实设置,照旧可编辑可保存;
+  // 从没读成功过才留在禁用态 —— 那时根本没有值可编辑。
+  $('daily-sched-fields').disabled = !dailyLoaded;
+  $('daily-sched-save').disabled = !dailyDirty;
 }
+
+async function loadDailySettings() {
+  if (dailySaving || dailyDirty) return;
+  // 占代次要在发请求之前,见 schedules.js 的 schedulesRead(面板重开会再读一次,
+  // 这一趟还没回来时保存了的话,这个回包不许把刚保存的那一份倒退回去)。
+  const accept = schedulesRead('daily');
+  dailySchedReads++;
+  let fact = null, failure = '';
+  try {
+    const data = await pipeJson('/api/daily/settings');
+    // **资格先判,再动任何一格;而且画的是共享层确认的那一份,不是我这趟的回包。**
+    // 照自己的回包画的后果(第 1、2 轮各实测一次):这趟被别处的保存顶掉了,
+    // 开关却被它改回未勾选、提示写成「定时生成未启用」,而同一页读共享事实的
+    // 来源说明还承诺每天同步 —— 同一份配置两处打架。
+    fact = accept({ daily: data.settings }).daily;
+    // 外层那个 channels 是**可选来源目录**(不是设置),共享层不管它,照这趟取。
+    dailyChannels = data.channels;
+  } catch (e) {
+    // 读失败也要过同一道门:**这趟要是已经被顶掉,就不许用它的失败盖掉别处
+    // 刚读到/刚保存的好值**(那会把一句「读取失败」挂在一份正常的配置上)。
+    // 但"别盖掉"不等于"不用收尾" —— 拿回来的那份事实照样要画上去。
+    fact = accept({ daily: null }).daily;
+    if (!fact) failure = e.message;
+  }
+  finally { dailySchedReads--; settleDaily(fact, failure); }
+}
+
+// 这一片也跟着共享事实走:别处(页头那张表单保存、订阅页那次读取)确认的新事实到
+// 了,而这一片自己那趟早就结束了的话,它该跟着完成,而不是停在上一次的样子。只认
+// **非 null**:null 是"当前不知道",而共享层分不出"从没读过"和"读了没读到",拿它
+// 报"读不到"会冤枉一条好定时;自己这趟失败那一档由 settleDaily 自己报。
+watchSchedules(config => {
+  if (config.daily && !dailySchedReads) settleDaily(config.daily, '');
+});
 
 function renderDailyChannels() {
   const picked = new Set(dailySettings.channels);
@@ -171,8 +238,20 @@ async function saveDailySettings() {
   if (!dailyLoaded || dailySaving || !dailyDirty) return;
   if (!$('daily-time').reportValidity() || !$('daily-firstdays').reportValidity()) return;
   const channels = pickedDailyChannels();
-  if (!channels.length) { $('daily-sched-msg').textContent = '至少勾选一个同步范围'; return; }
-  dailySaving = true; $('daily-sched-save').disabled = true;
+  if (!channels.length) {
+    // 同页头那张:**"一个都没勾"和"一个都没有可勾的"是两件事**,后者该说重读。
+    if (!dailyChannels.length) {
+      $('daily-sched-msg').textContent = '同步范围还没读到，点「重新读取」再试一次';
+      $('daily-sched-reload').hidden = false;
+    } else $('daily-sched-msg').textContent = '至少勾选一个同步范围';
+    return;
+  }
+  // **保存期间把整片字段一起禁掉**(同页头那张 `saveSched`)。只禁保存按钮的话:
+  // 这期间改的开关/时刻/范围进不了已经发出去的那个请求,`markDailyDirty` 又因为
+  // 正在保存直接返回 —— 保存成功后 dirty 被清掉、按钮继续禁着,那几下修改**既没
+  // 保存也存不了**,而面板写着「已保存」。
+  dailySaving = true; $('daily-sched-fields').disabled = true;
+  $('daily-sched-save').disabled = true;
   $('daily-sched-save').textContent = '正在保存…';
   try {
     dailySettings = await pipePost('/api/daily/settings', {
@@ -181,10 +260,15 @@ async function saveDailySettings() {
     });
     dailyDirty = false;
     $('daily-sched-msg').textContent = dailyScheduleMessage(dailySettings);
+    // **保存成功必须过共享层**:订阅页那句「什么时候自动同步」是这份配置的派生
+    // 展示,不交出去它就一直停在旧说法上(开了说不会自动同步、关了还承诺每天
+    // 同步),刷新才对得上。POST 回的是扁的设置对象,GET 那边才套着一层 settings。
+    schedulesSaved('daily', dailySettings);
   } catch (e) {
     $('daily-sched-msg').textContent = '未保存：' + e.message + '。修改已保留，可重试。';
   } finally {
     dailySaving = false; $('daily-sched-save').textContent = '保存设置';
+    $('daily-sched-fields').disabled = false;
     $('daily-sched-save').disabled = !dailyDirty;
   }
 }
@@ -234,7 +318,7 @@ function renderDailyList() {
     data-report="${esc(r.date)}"><b>${esc(r.date)}</b>
     <span>${r.docs} 条素材${r.total > r.docs ? ` / 窗口内 ${r.total}` : ''}${r.late ? ` · 补录 ${r.late}` : ''}</span>
     <small>${esc(Object.entries(r.sources || {}).map(([k, n]) => `${k} ${n}`).join(' · ') || '—')}${
-      r.sync_failed?.length ? ` · ${r.sync_failed.length} 个来源未同步` : ''}</small></button>`).join('')
+      r.sync_failed?.length ? ` · ${r.sync_failed.length} 项未完成` : ''}</small></button>`).join('')
     || '<div class="daily-empty"><h3>还没有日报</h3><p>选好日期，点右上角生成。</p></div>';
 }
 
@@ -265,7 +349,7 @@ async function openDailyReport(date) {
     // `# 日报 · 日期` 是给 Obsidian 看的,面板上标题栏已经写着同一句,渲染出来
     // 就是连着两行一模一样的标题;跟在它后面那句「> 覆盖 … 发布的内容」同理,
     // 元信息那一行已经写了。两处都只在面板上剥掉,vault 里的文件一个字不改。
-    // 正文里那段「本轮有 N 个来源没有同步成功」跟着 md 一起渲染出来(剥掉的只有
+    // 正文里那段「本轮有 N 项没有完成」跟着 md 一起渲染出来(剥掉的只有
     // 标题和覆盖区间这两行重复信息),所以历史日报翻回来也看得见当时的同步缺口。
     $('daily-reader-body').innerHTML =
       mdHtml(r.body.replace(/^\s*#\s+[^\n]*\n+(?:>\s*覆盖[^\n]*\n)?/, ''));
@@ -441,9 +525,11 @@ function renderDailyButtons() {
   $('nav-daily-dot').hidden = !running;
 }
 
-// 同步缺口横幅:哪些来源这一轮没同步成功。toast 会自己消失,而"这份日报只用了
+// 同步缺口横幅:这一轮有哪几项没跑成功。toast 会自己消失,而"这份日报只用了
 // 已入库的素材"是看这份日报时一直要知道的事——一个来源都没同步到的那一轮,页面
 // 原来只有一句绿色的「日报已生成」(2026-09-30 审查实测)。
+// **文案说「项」不说「来源」**:抓取那一段按来源一项,入库那一段(索引与提取)
+// 自己占一项,它不属于任何来源(`daily_run.DIGEST_LABEL`)。
 function dailyChannelResults(s) {
   // 重启 kb-web 之后进程内状态是空的,上一轮的通道结果留在落盘的 last_run 里。
   return (s?.channels?.length ? s.channels : s?.last_run?.channels) || [];
@@ -454,8 +540,8 @@ function renderDailySyncNote(s) {
   $('daily-sync-note').hidden = !bad.length;
   if (!bad.length) return;
   $('daily-sync-note-text').textContent =
-    `本轮有 ${bad.length} 个来源没有同步成功：`
-    + bad.map(c => `${c.label}（${c.detail || '未同步成功'}）`).join('；')
+    `本轮有 ${bad.length} 项没有完成：`
+    + bad.map(c => `${c.label}（${c.detail || '未完成'}）`).join('；')
     // 只有真出了报才提这一句;停止/失败那两档日报压根没生成。
     + (s?.phase === 'done' ? '。日报用的是已经入库的内容。' : '。');
 }
@@ -505,7 +591,10 @@ async function refreshDailyStatus() {
     else if (s.phase === 'stopped') toast('已停止', { key: 'daily', type: 'info', detail: s.detail || '' });
     // 有来源没同步到就不报成功色:日报是出了,但它不是"同步全部并生成"承诺的
     // 那一份,标成绿勾等于把降级说成完整成功。
-    else if (bad.length) toast(`日报已生成，但 ${bad.length} 个来源未同步成功`,
+    // 「项」不是「来源」:入库那一段(索引/提取)是全库的一次,不属于任何来源 ——
+    // 磁盘满写成「1 个来源未同步成功」是一句假话。正文横幅、日报文件、这句 toast
+    // 共用一个措辞(`kb/daily.py` 的 sync_issues 那一段)。
+    else if (bad.length) toast(`日报已生成，但 ${bad.length} 项未完成`,
       { key: 'daily', type: 'info', detail: s.detail || '' });
     else toast('日报已生成', { key: 'daily', type: 'ok', detail: s.detail || '' });
     if (dailyActive()) {

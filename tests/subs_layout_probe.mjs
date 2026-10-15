@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { launchShell } from './probe_shell.mjs';
 import { checkSubscriptionUsability } from './subs_usability_checks.mjs';
@@ -8,13 +7,13 @@ import { checkSourceNoticeRecovery } from './subs_notice_recovery_checks.mjs';
 import { checkWechatCollectorNotices, checkWechatTargetSizing } from './subs_wechat_review_checks.mjs';
 import { checkFirstWechatNotice, checkAutomaticSourceNotice, checkManualSourceNotices, checkNoticeGestureSequences } from './subs_notice_hit_checks.mjs';
 import { checkSubscriptionEditorViews } from './subs_editor_view_checks.mjs';
+import { checkScheduleSaveNote, checkScheduleFormSettles } from './subs_schedule_note_checks.mjs';
 
 const base = process.argv[2];
-const profile = mkdtempSync(join(tmpdir(), 'kb-subs-layout-'));
 const output = 'output/subs-layout';
 mkdirSync(output, { recursive: true });
 const results = [], errors = [];
-const { proc, port } = await launchShell(['--window-size=1440,1000', `--user-data-dir=${profile}`]);
+const { proc, port } = await launchShell(['--window-size=1440,1000'], { profile: 'kb-subs-layout-' });
 const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const socket = new WebSocket(tabs.find(tab => tab.type === 'page').webSocketDebuggerUrl);
 await new Promise(resolve => socket.addEventListener('open', resolve, { once: true }));
@@ -232,6 +231,8 @@ try {
   await checkWechatTargetSizing({ evaluate, wait, check, viewport, screenshot });
   await checkSubscriptionUsability({ evaluate, wait, check, click, viewport, screenshot, send });
   await checkSubscriptionEditorViews({ evaluate, wait, check, click, screenshot, send });
+  await checkScheduleSaveNote({ evaluate, wait, check, click, screenshot, viewport });
+  await checkScheduleFormSettles({ evaluate, wait, check, click, screenshot, viewport });
   await evaluate(`switchTab('gallery'); true`);
   check('离开订阅页面恢复普通布局', await evaluate(`!document.body.classList.contains('subs-reading') && !document.body.classList.contains('subs-mode')`));
   check('浏览器没有未捕获异常', errors.length === 0, errors.join('\n'));
@@ -240,7 +241,6 @@ try {
   proc.ref();
   proc.kill();
   await new Promise(resolve => proc.once('exit', resolve));
-  rmSync(profile, { recursive: true, force: true });
 }
 writeFileSync(`${output}/results.json`, JSON.stringify(results, null, 2));
 process.stdout.write(JSON.stringify(results) + '\n');

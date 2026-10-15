@@ -648,6 +648,34 @@ for (const [gap, says] of [["broken", "最新那一轮的留档损坏"],
 }
 state = { ...state, restore_gap: '' };
 
+// ── 23. 只跑全库那几段的一轮:历史行写「全库」,不许认成某个来源 ──────────────
+// `start_pipeline` **一律**往 `crawl_filter` 里盖一个默认采集器名,所以日报那个只做
+// index/extract 的子轮落盘时带着 `wechat_local`。历史行原来只把裸 filter 递进
+// `pipeRunScopes()`(那条分支是留给存量记录的),于是这一轮在列表上被说成那个来源,
+// 而点开主视图写的是「全库(不按来源)」—— 同一轮两种说法,用户照列表去找「公众号
+// 那次抓了什么」,点进去发现它压根没抓。
+const LIBRARY = {
+  run_id: 'run-library', run_kind: 'sync', stopped: false,
+  started_at: '2026-10-16 03:00:00', finished_at: '2026-10-16 03:06:00',
+  planned_stages: ['index', 'extract'],
+  crawl_filter: { channel: 'wechat_local' },       // 起跑时盖上的默认采集器名
+  stages: { ...EVENING.stages, crawl: { status: 'skipped', detail: '未选择' },
+            export: { status: 'skipped', detail: '未选择' } },
+  log: ['[10-16 03:06:00] 管道结束'],
+};
+runs = [LIBRARY, MORNING];
+state = { running: false, stop_supported: true, stop_requested: false, ...LIBRARY };
+await evalJs(`pipeHistory = []; pipeViewing = null; renderPipeHistory(); true`);
+await evalJs(`refreshPipe(); loadPipeHistory(); true`);
+await setup("列表换成了全库那一轮 + 上午那一轮",
+            until(`document.querySelectorAll('.pipe-history-row').length === 2`, 8000));
+const where = await rows();
+check("全库那一轮的历史行写「全库」", /全库/.test(where[0] || ''), where[0]);
+check("没把它说成某个来源",
+      !/公众号|wechat/.test(where[0] || '') && !/未记录来源/.test(where[0] || ''), where[0]);
+// 反过来钉一边:真按来源跑的那一轮照旧写出它的来源名
+check("按来源那一轮照旧写来源", /订阅源/.test(where[1] || ''), where[1]);
+
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 
 } catch (e) {
