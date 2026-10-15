@@ -8,7 +8,7 @@ function favSourceName(source) {
 
 function renderFavHeader(data) {
   const total = Object.values(data.counts).reduce((sum, count) => sum + count, 0);
-  $('fav-summary').textContent = `${total} 条好东西，等一个派上用场的时刻。`;
+  $('fav-total').textContent = `${total} 条`;
   for (const [status, label] of Object.entries(FAV_STATUSES)) {
     const button = $('fav-t-' + status);
     button.innerHTML = `${label}<span>${status === 'all' ? total : data.counts[status] || 0}</span>`;
@@ -25,6 +25,7 @@ function renderFavHeader(data) {
 
 function renderFavCollection() {
   const items = visibleFavs();
+  pruneFavSelection(items);
   const counts = { all: favItems.length, quick: 0, deep: 0, quote: 0, fresh: 0 };
   favItems.forEach(item => counts[favCategory(item)]++);
   $('fav-filters').innerHTML = Object.entries(FAV_FILTERS).map(([key, [label, glyph]]) =>
@@ -67,14 +68,14 @@ function favCardHtml(item) {
 
 function favEmptyHtml() {
   const filtered = favFilter !== 'all' || $('fav-search').value.trim() || $('fav-source').value;
-  if (filtered) return `<div class="fv-empty">${icon('search')}<h3>还没找到这一条</h3><p>试试更短的关键词，或放宽用途与来源筛选。</p><button class="ghost" onclick="resetFavFilters()">清除筛选</button></div>`;
+  if (filtered) return '<div class="fv-empty"><span>没有符合当前筛选的收藏。</span><button class="text-button" onclick="resetFavFilters()">清除筛选</button></div>';
   const text = {
-    all: ['给下一个好点子，留个位置', '在工具图鉴或搜索结果点「收藏」；阅读时选中文字，还可以只留住那一段。'],
-    inbox: ['暂时没有待探索的收藏', '有新的好奇再收进来，不必为了清单而清单。'],
-    done: ['每一次实践，都值得留在这里', '试过一个工具或读完一篇文章后，点「标为完成」。'],
-    archived: ['这里放下暂时用不到的东西', '暂存不会删除收藏，想探索时随时放回去。'],
+    all: '还没有收藏，可在图鉴或阅读页添加收藏。',
+    inbox: '没有待探索的收藏。',
+    done: '没有已完成的收藏，可在收藏详情中标为完成。',
+    archived: '没有暂存的收藏，暂存的内容可以随时放回待探索。',
   }[favView];
-  return `<div class="fv-empty">${icon('bookmark')}<h3>${text[0]}</h3><p>${text[1]}</p><button class="ghost" onclick="switchTab('gallery')">去工具图鉴逛逛${arrow('right')}</button></div>`;
+  return `<div class="fv-empty"><span>${text}</span><a href="#gallery" onclick="switchTab('gallery');return false">打开工具图鉴${arrow('right')}</a></div>`;
 }
 
 function favDocA(item, label, cls = '', html = false) {
@@ -155,24 +156,25 @@ function favStartHtml() {
 function favTriageHtml() {
   const triage = favTri;
   const inboxIds = new Set(favItems.filter(item => item.status === 'inbox').map(item => item.id));
-  if (!inboxIds.size) return '';
   const duplicates = triage?.fresh ? (triage.data?.dup || [])
     .map(group => ({ ...group, ids: (group.ids || []).filter(id => inboxIds.has(id)) }))
     .filter(group => group.ids.length >= 2) : [];
   const cold = triage?.fresh ? (triage.data?.cold || []).filter(row => inboxIds.has(row.id)) : [];
-  const stale = favItems.filter(item => item.status === 'inbox' && !cold.some(row => row.id === item.id) &&
-    new Date(item.updated_at).getTime() < Date.now() - 60 * 86400000).map(item => item.id);
+  const stale = favItems.filter(item => favStaleDays > 0 && item.status === 'inbox' &&
+    !cold.some(row => row.id === item.id) &&
+    new Date(item.updated_at).getTime() < Date.now() - favStaleDays * 86400000).map(item => item.id);
   const status = triage?.running ? '正在后台整理，你可以继续浏览。'
-    : triage?.error ? triage.error : triage?.data && !triage.fresh ? '收藏有变化，建议可重新生成。'
+    : triage?.error ? triage.error : !inboxIds.size ? '建议针对待探索收藏，可切换到「待探索」查看。'
+    : triage?.data && !triage.fresh ? '收藏有变化，建议可重新生成。'
     : triage?.data ? '整理建议已就绪，不会自动移动收藏。' : '用 AI 找出值得先试的内容和重复收藏。';
   return `<section class="fv-ai"><div class="fv-ai-heading"><h3>${icon('spark')}让 AI 搭把手</h3><button id="fav-triage-btn" class="text-button" onclick="runTriage()"${triage?.running ? ' disabled' : ''}>${triage?.running ? '<span class="spin"></span>整理中' : triage?.data ? '重新整理' : '生成建议'}</button></div><p role="status">${esc(status)}</p>
     ${duplicates.map(group => `<details class="fv-suggestion"><summary>${group.ids.length} 条收藏可能重复${arrow('caretDown')}</summary><p>${esc(group.verdict || '内容方向相近，先对比再决定留哪条。')}</p>${group.ids.map(id => { const row = favItems.find(item => item.id === id); return `<button class="text-button" onclick="openFavDetail(${id})">${esc(row.action?.name || row.title)}${id === group.keep ? ' · 建议保留' : ''}${arrow('right')}</button>`; }).join('')}${group.ids.includes(group.keep) ? `<button class="text-button" data-fav-mutation onclick="archiveFavDuplicates([${group.ids.join(',')}],${group.keep})"${favBusy ? ' disabled' : ''}>保留推荐，其余暂存${arrow('right')}</button>` : ''}</details>`).join('')}
     ${cold.length ? `<details class="fv-suggestion"><summary>${cold.length} 条收藏可以重新考虑${arrow('caretDown')}</summary><p>AI 的取舍建议，仅供参考。</p>${cold.map(suggestion => { const row = favItems.find(item => item.id === suggestion.id); return `<button class="text-button" onclick="openFavDetail(${row.id})">${esc(row.action?.name || row.title)}${arrow('right')}</button><p>${esc(suggestion.why || '可以暂存，等需要的时候再找回来。')}</p>`; }).join('')}</details>` : ''}
-    ${stale.length ? `<details class="fv-suggestion"><summary>${stale.length} 条收藏很久没动过${arrow('caretDown')}</summary><p>超过 60 天未更新。不再需要的话可以暂存，之后随时找回。</p><button class="text-button" data-fav-mutation onclick="archiveFavSuggestions([${stale.join(',')}])"${favBusy ? ' disabled' : ''}>暂存这 ${stale.length} 条${arrow('right')}</button></details>` : ''}</section>`;
+    ${stale.length ? `<details class="fv-suggestion"><summary>${stale.length} 条收藏很久没动过${arrow('caretDown')}</summary><p>超过 ${favStaleDays} 天未更新。不再需要的话可以暂存，之后随时找回。</p><button class="text-button" data-fav-mutation onclick="archiveFavSuggestions([${stale.join(',')}])"${favBusy ? ' disabled' : ''}>暂存这 ${stale.length} 条${arrow('right')}</button></details>` : ''}</section>`;
 }
 
 async function archiveFavSuggestions(ids) {
-  if (!await confirmBox({ title: `暂存这 ${ids.length} 条收藏？`, body: '只整理超过 60 天未更新的待探索收藏，不会删除原文、摘录或笔记。之后可以撤销，或从「暂存」里找回。', ok: '移至暂存' })) return;
+  if (!await confirmBox({ title: `暂存这 ${ids.length} 条收藏？`, body: `只整理超过 ${favStaleDays} 天未更新的待探索收藏，不会删除原文、摘录或笔记。之后可以撤销，或从「暂存」里找回。`, ok: '移至暂存' })) return;
   await favMarkMany(ids, 'archived');
 }
 

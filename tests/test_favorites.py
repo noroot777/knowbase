@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 import shutil
 import subprocess
@@ -48,6 +49,19 @@ class FavoritesApiTests(unittest.TestCase):
         payload = self.api.get('/api/favorites').json()
         self.assertEqual([2, 1], [item['id'] for item in payload['favorites']])
         self.assertEqual({'inbox': 2, 'done': 1, 'archived': 1}, payload['counts'])
+
+    def test_stale_threshold_is_shared_with_the_response_and_count(self):
+        conn = store.connect()
+        for favorite_id, days in ((1, 45), (2, 15), (3, 90)):
+            updated = (datetime.now() - timedelta(days=days)).isoformat(timespec='seconds')
+            conn.execute('UPDATE favorites SET updated_at=? WHERE id=?', (updated, favorite_id))
+        conn.commit()
+        conn.close()
+        for days, count in ((30, 1), (60, 0)):
+            with self.subTest(days=days), mock.patch.object(favorites_api, 'STALE_DAYS', days):
+                result = self.api.get('/api/favorites?status=all').json()
+                self.assertEqual(days, result['stale_days'])
+                self.assertEqual(count, result['stale'])
 
     def test_all_is_a_union_without_losing_snippets(self):
         response = self.api.get('/api/favorites?status=all')

@@ -200,7 +200,7 @@ body.overlay-open { overflow: hidden; }
   .gallery-controls { padding: 14px 14px 0; }
   .gfilters { gap: 8px; }
   .select-field > span, .gallery-search kbd { display: none; }
-  .select-field select { max-width: 98px; padding: 6px; font-size: 11px; }
+  .select-field select { max-width: 98px; padding: 6px 28px 6px 6px; font-size: 11px; }
   .gallery-search { padding: 0 10px; gap: 8px; }
   #g-q { font-size: 14px; }
   .gseg { padding: 12px 0; flex-wrap: nowrap; overflow-x: auto; }

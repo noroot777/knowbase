@@ -1,6 +1,7 @@
 let favSet = new Set();
 let favView = 'all';
 let favItems = [];
+let favStaleDays = null;
 let favTri = null;
 let favFilter = 'all';
 let favLayout = 'grid';
@@ -125,8 +126,12 @@ function visibleFavs() {
 
 function filterFavs(category) {
   if (category && category in FAV_FILTERS) favFilter = category;
-  favSelected.clear();
   renderFavCollection();
+}
+
+function pruneFavSelection(items) {
+  const visibleIds = new Set(items.map(item => item.id));
+  favSelected = new Set([...favSelected].filter(id => visibleIds.has(id)));
 }
 
 function resetFavFilters() {
@@ -180,8 +185,8 @@ async function loadFavPanel() {
     const data = await favJson('/api/favorites?status=' + view);
     if (request !== favRequest) return;
     favItems = data.favorites;
+    favStaleDays = Number.isFinite(data.stale_days) && data.stale_days > 0 ? data.stale_days : null;
     favSet = new Set(data.doc_paths);
-    favSelected = new Set([...favSelected].filter(id => favItems.some(item => item.id === id)));
     if (!favItems.some(item => item.id === favActive)) favActive = null;
     renderFavHeader(data);
     renderFavCollection();

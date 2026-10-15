@@ -13,7 +13,7 @@ const row = (id, extra = {}) => ({ id, path: `article-${id}.md`, title: `收藏 
   account: 'Example', quote: '', note: '', summary: '', status: 'inbox', vault: 'test',
   created_at: `2026-10-${String(id).padStart(2, '0')}T12:00:00`, updated_at: '2026-10-01', ...extra });
 const payload = favorites => ({ favorites, counts: { inbox: favorites.length, done: 0, archived: 0 },
-  doc_paths: favorites.filter(item => !item.quote).map(item => item.path) });
+  stale_days: 60, doc_paths: favorites.filter(item => !item.quote).map(item => item.path) });
 const response = value => ({ ok: true, status: 200, json: async () => value });
 
 function rig() {
@@ -112,14 +112,65 @@ test('sorting is deterministic and does not mutate API order', () => {
   assert.equal(app.run('favItems[0].id'), 1);
 });
 
-test('select all only includes currently visible results and filtering clears selection', () => {
+test('select all only includes visible results and broadening a filter keeps selection', () => {
   const app = rig();
   app.seed([row(1), row(2, { quote: '引用' })]);
   app.run("favFilter = 'quote'; selectVisibleFavs(true)");
   assert.equal(app.run('favSelected.size'), 1);
   assert.equal(app.run('favSelected.has(2)'), true);
   app.run("filterFavs('all')");
+  assert.equal(app.run('favSelected.size'), 1);
+  assert.equal(app.run('favSelected.has(2)'), true);
+});
+
+test('search and source filters only prune selected entries that leave the results', () => {
+  const app = rig();
+  app.seed([row(1, { title: '网页笔记' }), row(2, { title: '网页摘录', source: 'video' }), row(3)]);
+  app.run('selectVisibleFavs(true)');
+  app.element('fav-search').value = '网页';
+  app.run('filterFavs()');
+  assert.equal(app.run('favSelected.size'), 2);
+  assert.equal(app.run('favSelected.has(3)'), false);
+  app.element('fav-source').value = 'rss';
+  app.run('filterFavs()');
+  assert.equal(app.run('favSelected.has(1)'), true);
+  assert.equal(app.run('favSelected.has(2)'), false);
+  app.run('resetFavFilters()');
+  assert.equal(app.run('favSelected.size'), 1);
+});
+
+test('sorting keeps every selected result', () => {
+  const app = rig();
+  app.seed([row(1), row(2)]);
+  app.run('selectVisibleFavs(true)');
+  for (const sort of ['name', 'oldest', 'recent']) {
+    app.element('fav-sort').value = sort;
+    app.run('filterFavs()');
+    assert.equal(app.run('favSelected.size'), 2);
+  }
+});
+
+test('category changes and AI refresh use the same visible-selection invariant', () => {
+  const app = rig();
+  app.seed([row(1, { action: { eta: '5分钟' } }), row(2)]);
+  app.run("selectVisibleFavs(true); filterFavs('quick')");
+  assert.equal(app.run('favSelected.has(1)'), true);
+  assert.equal(app.run('favSelected.has(2)'), false);
+  app.run("filterFavs('fresh'); selectVisibleFavs(true)");
+  app.run('favTri = {fresh: true, data: {quick: [{id: 2}]}}; renderFavCollection()');
   assert.equal(app.run('favSelected.size'), 0);
+});
+
+test('data refresh retains selected visible entries and prunes deleted or filtered entries', async () => {
+  const app = rig();
+  app.seed([row(1, { title: '网页' }), row(2, { title: '网页' }), row(3, { title: '网页' })]);
+  app.element('fav-search').value = '网页';
+  app.run('selectVisibleFavs(true)');
+  app.state.fetch = async url => response(url.includes('/triage') ? { fresh: false }
+    : payload([row(1, { title: '网页' }), row(2, { title: '其他' })]));
+  await app.run('loadFavPanel()');
+  assert.equal(app.run('favSelected.size'), 1);
+  assert.equal(app.run('favSelected.has(1)'), true);
 });
 
 test('empty search has a clear-filters action, not an empty archive message', () => {
@@ -127,7 +178,21 @@ test('empty search has a clear-filters action, not an empty archive message', ()
   app.element('fav-search').value = '不存在';
   assert.match(app.run('favEmptyHtml()'), /清除筛选/);
   app.run('resetFavFilters()');
-  assert.match(app.run('favEmptyHtml()'), /给下一个好点子/);
+  assert.match(app.run('favEmptyHtml()'), /还没有收藏/);
+  assert.equal(/<h3|class="icon"/.test(app.run('favEmptyHtml()')), false);
+});
+
+test('favorites heading shows only its title and factual total', () => {
+  const app = rig();
+  app.run('renderFavHeader({counts: {inbox: 4, done: 2, archived: 1}})');
+  assert.equal(app.element('fav-total').textContent, '7 条');
+  const html = readFileSync(new URL('../index.html', root), 'utf8');
+  assert.doesNotMatch(html, /fv-eyebrow|fav-summary|fv-no-debt/);
+});
+
+test('favorites colors come from shared semantic tokens', () => {
+  const css = readFileSync(new URL('../css/favorites.css', root), 'utf8');
+  assert.doesNotMatch(css, /#[\da-f]{3,8}\b/i);
 });
 
 test('all external text is escaped in cards, notes and commands', () => {
@@ -173,10 +238,48 @@ test('duplicate suggestions discard missing ids and require a valid keep candida
 test('AI reconsideration and age-based suggestions do not repeat the same favorite', () => {
   const app = rig();
   app.seed([row(1, { updated_at: '2020-01-01' })]);
-  app.run("favTri = {fresh:true,data:{cold:[{id:1,why:'方向过时'}]}}");
+  app.run("favStaleDays = 60; favTri = {fresh:true,data:{cold:[{id:1,why:'方向过时'}]}}");
   const html = app.run('favTriageHtml()');
   assert.match(html, /1 条收藏可以重新考虑/);
   assert.equal(html.includes('1 条收藏很久没动过'), false);
+});
+
+test('AI entry stays available in completed, archived and empty views without inbox suggestions', () => {
+  const app = rig();
+  app.run('favTri = {fresh: true, data: {dup: [{ids: [1, 2], keep: 1}], cold: [{id: 1}]}}');
+  for (const status of ['done', 'archived']) {
+    app.seed([row(1, { status, updated_at: '2020-01-01' }), row(2, { status })]);
+    const html = app.run('favTriageHtml()');
+    assert.match(html, /id="fav-triage-btn"/);
+    assert.match(html, /待探索/);
+    assert.doesNotMatch(html, /fv-suggestion/);
+  }
+  app.seed([]);
+  app.run('favTri = {running: true}');
+  assert.match(app.run('favTriageHtml()'), /正在后台整理/);
+  app.run("favTri = {error: '模型不可用'}");
+  assert.match(app.run('favTriageHtml()'), /模型不可用/);
+});
+
+test('age-based suggestion and confirmation use the server threshold instead of sixty days', async () => {
+  const app = rig();
+  app.state.Date = class extends Date { static now() { return Date.parse('2026-10-16T12:00:00Z'); } };
+  const rows = [row(1, { updated_at: '2026-09-01T12:00:00Z' }),
+    row(2, { updated_at: '2026-09-16T12:00:00Z' }), row(3, { updated_at: '2026-10-01T12:00:00Z' }),
+    row(4, { status: 'done', updated_at: '2020-01-01' })];
+  app.state.fetch = async url => response(url.includes('/triage') ? { fresh: false }
+    : { ...payload(rows), stale_days: 30 });
+  await app.run('loadFavPanel()');
+  const html = app.run('favTriageHtml()');
+  assert.match(html, /1 条收藏很久没动过/);
+  assert.match(html, /超过 30 天/);
+  assert.match(html, /archiveFavSuggestions\(\[1\]\)/);
+  let confirmation;
+  app.state.confirmBox = async options => { confirmation = options; return false; };
+  await app.run('archiveFavSuggestions([1])');
+  assert.match(confirmation.body, /超过 30 天/);
+  app.run('favStaleDays = 60');
+  assert.doesNotMatch(app.run('favTriageHtml()'), /很久没动过/);
 });
 
 test('draft survives switching and editing back to saved note clears dirty state', () => {

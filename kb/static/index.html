@@ -138,7 +138,7 @@
 
 <div id="favpanel" style="display:none">
   <header class="fv-heading">
-    <div><div class="fv-eyebrow">留给好奇心的空间</div><h1>我的收藏<span class="fv-title-dot" aria-hidden="true">.</span></h1><p id="fav-summary">好东西，不止于收藏。</p></div>
+    <div class="fv-title"><h1>我的收藏</h1><span id="fav-total">— 条</span></div>
     <div class="fv-heading-actions">
       <button class="ghost" onclick="switchTab('gallery')">发现好东西<i data-arrow="right"></i></button>
       <details class="fv-settings" ontoggle="if(this.open)initFavTools()">
@@ -152,7 +152,6 @@
     <button id="fav-t-inbox" onclick="switchFavView('inbox')" aria-pressed="false">待探索 <span>—</span></button>
     <button id="fav-t-done" onclick="switchFavView('done')" aria-pressed="false">已完成 <span>—</span></button>
     <button id="fav-t-archived" onclick="switchFavView('archived')" aria-pressed="false">暂存 <span>—</span></button>
-    <span class="fv-no-debt">按你的节奏，慢慢探索。</span>
   </nav>
   <div class="fv-workbench">
     <section class="fv-library" aria-label="收藏架">
