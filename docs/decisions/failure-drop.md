@@ -21,8 +21,37 @@
   采集器那一步失败时面板上这条已经消失了 —— 一个还在被反复重试的待处理项就此**静默丢掉**。
 - **账本写不上不许把整件事报成失败。** 不可逆的那一步已经成了,报红会让用户以为没删掉而反复重试。
   如实在文案里说一句(`（面板记录没写成：…）`),那几条下一轮同步之后自然不再出现。
-- **删除要幂等。** 用户会连点,两个标签页也会各点一次,库里已经没有那一行时照样返回成功
-  (`cli.cmd_articles` 的 `row is None` 分支)。
+- **排除提交之后,后续写入不许把这个身份复活 —— 判据待在写语句自己的 WHERE 里**
+  (`repository._excluded_clause`,挂在 `upsert_article_from_blog` / `set_body_text` / `set_body_html`
+  三处;`cursor.rowcount == 0` 就是拒绝信号,三个函数都返回 `bool`,调用方必须跟上)。发现那一道
+  (`article_identity.prepare_article`)**只是早一道,不是互斥** —— 它查完黑名单到真正写入之间要抓正文、
+  要更新显示名,用户完全可能正好在这中间按下那颗按钮。键取
+  `article_identity.exclusion_keys`,**发现侧和写入侧用同一份口径**:各写一遍的话两边只差一个键这件事
+  在任何输出上都看不出来。
+- **删除要幂等,但「库里没有这一行」不是排除凭据**(`cli._drop_missing`,三档)。缺行分三种:①名单里
+  已经有它 → 幂等成功(连点、两个标签页各点一次的正常形态);②名单里没有、但调用方给了 `--link`
+  → 当场把 `exclusion_keys` 整组补写进名单(`repo.exclude_identities`)再报成功 —— `add_deleted_blacklist`
+  走不通,它要从 `articles` 那一行里读规范链接,而那一行已经没了;③两样都没有 → **拒**。只写一个旧档案
+  ID 挡不住换个通道再发现同一篇,宣称「永久排除」就是报一个没做到的结论。
+- **所以 `link` 要一路带到 CLI**(`_no_body_failure` 的 `drop.link` → `FailureDropRequest.link` →
+  `drop_item` 的 `--link`)。**给不出的那两样一个都不许拼成空值**:拿空串去算身份等于给自己留一个
+  「谁都命中」的键(`exclusion_keys` 自己也把空串去掉了)。
+- **一轮同步跑着的时候按下按钮,统计要按实际写入结果报**(`local_runner._download`:写入被拒就记
+  `excluded_articles`、`continue`)。队列是发现阶段排好的,而发现到真正写入之间隔着抓正文(几秒到
+  几十秒)。那一篇被拒之后既不是新增(它没进库)、也不是失败,**更不许落进 `body_failures` 说一句
+  「正文暂未获取,已安排自动重试」** —— 它不会再被抓了。面板上如实写「已永久排除 N 篇(同步期间移除)」。
+- **导出 SQL 再筛一次永久排除名单,那是冗余带不是不变量**(`export_obsidian.load_articles`)。导出是
+  **写进 Vault**,写出去的 md 下一次同步也不会自己消失;挡的是存量情形(库被别的路径写过、回退到旧
+  备份、那次写入发生在这道不变量之前)。只能按 `a.id` 匹配 —— 另外两个键是 Python 算出来的。
+- **账本的「读出来 → 改 → 整份写回」整段要在互斥里**(`pipeline_failures._exclusive`)。两条请求都读到
+  旧列表、各自 append 一条、再整份替换,落盘的就只有后写的那一条,另一条**已经不可逆地删掉了内容却
+  再也不会被隐藏**,而两个响应都是 `ok=true`。`_write_atomic` 只保证单次写入不是半截 JSON,保证不了
+  这个。**一把 flock 就够,不另加线程锁**:flock 认的是 open file description,`_exclusive` 每次自己
+  `open` 一个 fd,所以同进程两条线程(kb-web 是线程池)也互相挡得住 —— 再叠一把 `threading.Lock` 是
+  同一个问题判两遍。锁文件从账本路径派生、**只创建不删除**(同 `kb/maintenance.py`)。
+- **`_write_atomic` 的临时文件名每次都要是新的,不许按 pid 固定**(`pipeline_persist`)。同一个进程里
+  两条线程写同一个 path 时,固定名字那份会被后进来的截断重写:先 `replace` 的搬走的是**半截**内容,
+  后一条的 `replace` 还会撞上「临时文件已经被搬走了」(`FileNotFoundError`)。
 - **归属对不上一律拒**(`cli.cmd_articles`:拿 id 查出真正的 `account_name`,跟调用方给的不一致就整个
   拒掉)。面板上那条明细和库里那一行必须是同一篇 —— 删错的是另一个号的文章,而那是**不可恢复**的
   (连正文一起删)。
@@ -53,6 +82,13 @@
   号名或标题里。身份走 `export_obsidian.py --report` 写的那份结构化 JSON,CLI 优先读它
   (`cli._no_body_items`)。**报告写不出来不许让这几条整个消失**:那样面板上会显示「导出完成」且明细
   为空,而确实有文章没进知识库。
+- **删完要作废「当前待处理数」那一路**(`invalidatePipePending` + `refreshPipe(true)`)。删一条不产生
+  新的一轮,`result_version` 一个字不变 —— 在途那次待处理查询带回来的是删除**之前**的数字,却照旧对
+  得上版本、照旧被应用,还顺手把欠账清掉,于是面板永久停在删前那个数(整页刷新才归零)。所以给它另
+  一条身份闸:**同一轮之内条目集合也会变**。
+- **不可逆操作的等待预算要盖住后端那一串**(POST 45 秒:采集器 CLI 最长 20 秒,它里面那把 SQLite 还
+  配了 15 秒 busy timeout)。**超时/断线一律说「结果未确认」,不许断言「没删掉」** —— 那一步可能已经
+  在后端做完了;说完顺手重读一次状态,真删成了那一条当场就消失。
 - **翻历史时那颗按钮一律不出现**(`pipeFailureRow` 的 `viewing`),口径同「重试失败项」:「看到的那
   一轮」和「按下去会动的那一轮」必须是同一轮。**链接照旧能点** —— 它只是去读原文。
 - **`viewing` 要进明细那段的签名**(`JSON.stringify([!!viewing, failures])`)。两屏的 failures 完全
@@ -84,25 +120,74 @@
 公众号那条链:`drop_item` → `cli articles drop` → `repo.remove_article(id, account)` →
 `add_deleted_blacklist` 把 `article_identity`(`__biz + mid + idx`)记进 `deleted_articles`,再删
 `articles` / `article_bodies` / `article_llm_tags` 三张表里那一行。下一轮发现时
-`article_identity.prepare_article` 的第一件事就是拿 `(id, identity, stable_article_id(link))` 三个键
-去查黑名单,命中就 `return None` —— 既不入库,也不进 `_download` 的正文队列。
+`article_identity.prepare_article` 的第一件事就是拿 `exclusion_keys`(档案 ID、链接身份、按链接算的
+稳定 ID)去查黑名单,命中就 `return None` —— 既不入库,也不进 `_download` 的正文队列。
 
-回归 `collector/tests/test_local_wechat.py::test_dropping_one_article_stops_rediscovering_it_and_is_idempotent`
+回归 `collector/tests/test_article_drop.py::test_dropping_one_article_stops_rediscovering_it_and_is_idempotent`
 钉的就是这一条:删完再 `collect()` 一次,`articles` 仍是 0 行、正文抓取一次都没调。
+
+### 可是那一道只是「早一道」
+
+`prepare_article` 查完黑名单,到真正写入之间隔着抓正文和更新显示名 —— 而 legacy `isolation_level` 下
+那次 SELECT 不开事务、不持锁。用户正好在这中间按下按钮,那一篇照旧 upsert 进去、照旧抓正文、照旧被
+导出写进 Vault,而面板上它已经不再显示:**用户再也看不到这一条**。第 1 轮审查的复现脚本把这个序列
+摆了出来 —— `row_exists_after_drop_and_ingest=true`、`body_fetch_calls=1`、`export_candidates=1`。
+
+所以判据搬进写语句自己的 WHERE 里(`_excluded_clause`),三处写入都带着它、都返回 `bool`:
+
+```sql
+INSERT INTO articles (...) SELECT ?, ?, ...
+ WHERE NOT EXISTS (SELECT 1 FROM deleted_articles WHERE article_id IN (?,?,?))
+ ON CONFLICT(id) DO UPDATE SET ... WHERE <同一个子句>
+```
+
+`ON CONFLICT` 那一半也要带 —— 冲突走的是 UPDATE 分支,只在 INSERT 那边加等于没加。
+`exclusion_keys` 一个键都算不出来时子句退化成 `"0"`:**证明不了这一篇没被排除就别写**。
+
+### 缺行那一档
+
+同步记录和没关掉的旧页面会一直持有这一篇的身份,而采集库完全可能被清理、重建或回退到没有这一行的
+版本。原来那一版照旧返回「以后也不会再采集」,而一个字都没写进名单(实测
+`identity_blacklisted=false`、`id_blacklisted=false`)—— 主系统随即把它从各轮明细里隐藏,下一轮发现
+时它照样入库。**明细一旦隐藏,这一条就再也没有入口了**,比报一次红坏得多。
+
+现在分三档(`cli._drop_missing`):有凭据 → 幂等成功;算得出身份 → 补写进名单再成功;两样都没有 →
+拒。拒掉的代价只是那一条留在明细里(下一轮同步会重新带上 `link`),比静默失约轻得多。
+
+## 已知边界:第 50 条之后的那些删不到
+
+每轮明细在落盘前就被截断到前 50 条(`pipeline_state._cap_failures`),出口 `strip` 只能从这个有限数组
+里剔除 —— **尾部那些压根不在记录里,没有任何后补查询能把它们找回来**。于是一轮有 51 条以上待补文章
+时,逐条删完前 50 条之后整个明细入口会被隐藏(`details.hidden = !failures.length`),即便
+`failures_total` 还大于 0。
+
+**这一轮没改**,理由是:每轮记录本来就有显示上限(那是它存在的理由,不是这次引入的),而再跑一次
+带导出的同步就会把余下那些重新列出来 —— 代价是多跑一轮,不是丢数据。真要改得把「可操作的待处理清单」
+做成一条独立的分页查询(或者在截断时留住足够的身份),那是另一件事;**只把过滤函数挪个位置找不回已经
+丢弃的尾部**。
 
 ## 回归清单
 
-- `tests/test_pipeline_failure_drop.py`(13 条):账本与过滤口径、端点的两步顺序、采集器契约,外加
-  一条真浏览器探针(`@requires_headless`)。
-- `tests/pipe_drop_probe.mjs`(18 项):CDP 直连 chrome-headless-shell,自带 mock 后端。链接的
-  `href`/`target`/箭头 svg、有没有按钮、自绘确认框、取消不发请求、确认后请求体、删完那一条消失、
-  剩下的不受牵连、明细标题的计数、翻历史时按钮消失而链接照旧、整轮零 JS 错误。
-- `collector/tests/test_local_wechat.py`:新增两条(结构化报告带身份、删除的幂等与拉黑),既有的
-  `test_export_keeps_old_empty_article_retryable` 改成钉**降级**那一档。
+- `tests/test_pipeline_failure_drop.py`(18 条):账本与过滤口径、账本的并发与互斥、端点的两步顺序、
+  `link` 一路送到 CLI 的 argv、采集器契约,外加一条真浏览器探针(`@requires_headless`)。
+- `tests/pipe_drop_probe.mjs`(19 项):CDP 直连 chrome-headless-shell,自带 mock 后端。链接的
+  `href`/`target`/箭头 svg、有没有按钮、自绘确认框、取消不发请求、确认后请求体(含 `link`)、删完那
+  一条消失、剩下的不受牵连、明细标题的计数、**待处理数不被在途那份旧回包盖回去**、翻历史时按钮消失
+  而链接照旧、整轮零 JS 错误。mock 的待处理接口**故意答得慢、而且按请求到达那一刻取值**,删除就落在
+  它在途期间 —— 不这么摆的话那条断言压根不敏感。
+- `tests/test_pipeline_history.py`:新增一条钉 `_write_atomic` 的并发(同一个 path 两条线程,落盘必须
+  是某一次的完整内容)。窗口靠「分两段写、中间歇一下」摆出来。
+- `collector/tests/test_article_drop.py`(6 条):结构化报告带身份、删除的幂等与拉黑、**写入层拦得住
+  已经过了检查的那一次写入**(连同导出那道冗余带)、**缺行没凭据一律拒**、**同步期间移除**(在正文
+  抓取那一步里按下按钮,报告里记 `excluded_articles` 而不是 `download_failed`),外加既有的
+  `test_export_keeps_old_empty_article_retryable`(改成钉**降级**那一档)。
+  这一族原来在 `test_local_wechat.py` 里,那个模块到了 700 行上限 —— 夹具抽去了
+  `collector/tests/local_collect_case.py`(连同 `push()`;`test_local_wechat` 仍 re-export 它,
+  `test_local_index` / `test_local_coverage` 的 import 一个字没改)。
 
 ## 反向验证(定点注入,各红几条)
 
-kb 侧 7 次,每次只改一处、跑完就还原:
+kb 侧 14 次,每次只改一处、跑完就还原:
 
 | 注入 | 红 |
 |---|---|
@@ -113,9 +198,17 @@ kb 侧 7 次,每次只改一处、跑完就还原:
 | 没有 id 也拼 `drop` 字段 | 1 |
 | 没有 link 也给 `url` | 1 |
 | 不读结构化报告,一律退回文本解析(collector) | 1 error |
+| `_exclusive()` 退化成空壳(账本不加互斥) | 2 |
+| `_write_atomic` 临时文件名退回按 pid 固定 | 1 |
+| `drop_item` 不拼 `--link` | 1 |
+| `_no_body_failure` 的 `drop` 不带 `link` | 1 |
+| 端点不把 `link` 转给采集器 | 2 |
+| 去掉待处理数那道身份闸(`epoch` 比较) | 1 探针项 |
+| 删完不刷新待处理数(改回 `refreshPipe()`) | 1 探针项 |
 
-collector 侧另有 2 次:归属对不上也照删(1 红)、`remove_article` 只删行不拉黑(2 红 —— 新用例加上
-既有的 `test_deleted_article_does_not_return_through_other_channel`)。
+collector 侧另有 6 次:归属对不上也照删(1 红)、`remove_article` 只删行不拉黑(2 红 —— 新用例加上
+既有的 `test_deleted_article_does_not_return_through_other_channel`)、写入层 guard 永远放行(1 红)、
+导出 SQL 去掉排除名单(1 红)、缺行一律报成功(1 红)、下载循环不认写入拒绝(1 红)。
 
 「没有 id 也拼 `drop`」第一次注入时红 0 条:用例只摆了**裸字符串**那一档,而真实的降级形态是
 **带空身份的字典**。补上那一档之后才红 —— 用例不敏感,不是判据冗余。

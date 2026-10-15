@@ -39,6 +39,10 @@
 - **文章身份是 `article_identity` 的 `__biz + mid + idx`,保留已有文章 ID 和归属**(存量是凭证通道采
   的、ID 另一套规则,本地库再发现同一篇时必须认出来、不能新开一行);用户删除时同时记进链接身份黑名单。
   不要把推送接收时间或带跟踪参数的完整 URL 当成唯一键。
+- **「这个身份被永久排除了吗」的判据待在写语句自己的 WHERE 里**(`repository._excluded_clause`,挂在
+  `upsert_article_from_blog` / `set_body_text` / `set_body_html`;三者都返回 `bool`,调用方必须跟上)。
+  `prepare_article` 查黑名单那一下**只是早一道,不是互斥** —— 它和真正写入之间隔着抓正文和更新显示
+  名。两侧用同一组键(`article_identity.exclusion_keys`),事故形态和回归在 `failure-drop.md`。
 - **本机推送链接须保留正文校验参数 `chksm`,仅剔除跟踪参数。** 发现阶段用分片/表级 `local_id` 游标 ——
   不要用 timeline 的 after-local-id 做增量分页(读取器是在 LIMIT 后过滤 ID),也不能拿发布时间当消息水
   位;**分页/读取失败不推进对应游标**。未选公众号只进本地发现索引,不下载正文、不写共享 articles、不导
@@ -231,6 +235,8 @@
   `无正文,跳过` 明细协议供 CLI 生成 `no_body`，正文缺失不建议标记绿泡泡删除；那份明细还要带
   **身份**（`export_obsidian.py --report` 写的结构化 JSON，`cli._no_body_items` 优先读它），面板
   据此点开原文、按 `cli articles drop` 把这一篇永久排除，见 `failure-drop.md`。
+  那条删除要带 `--link`:库里已经没有那一行时,**缺行不是排除凭据**,只有链接算得出跨通道也认的
+  那个身份。
   `is_wx_deleted` 的历史自动退休记录允许重新入库，用户删除及身份黑名单仍拦截。
 
 - **`collector/data` 和 `collector/.venv` 丢了就跑 `./collector/setup.sh`**。两者都在

@@ -61,6 +61,16 @@ def collect_existing_urls(roots: list[Path]) -> set[str]:
 
 
 def load_articles(repo: ArticleRepository, account: str | None) -> list[dict]:
+    """要导出的文章。
+
+    **永久排除名单那一道是冗余带,不是不变量。** 不变量在写语句自己的 WHERE 里
+    (`repository.upsert_article_from_blog`):排除提交之后,articles 里压根不该再
+    长出这一行。这里再筛一次是为了把「库被别的路径写过、回退到旧备份、或者那次
+    写入发生在本次改动之前」这几种存量情形也挡住 —— 导出是**写进 Vault**,
+    写出去的 md 用户下一次同步也不会自己消失。
+    只能按 `a.id` 匹配:名单里另外那两个键(链接身份、按链接算的稳定 ID)是 Python
+    算出来的,SQL 这边算不出来。
+    """
     where = "AND a.account_name = ?" if account else ""
     params = (account,) if account else ()
     rows = repo.conn.execute(
@@ -71,6 +81,7 @@ def load_articles(repo: ArticleRepository, account: str | None) -> list[dict]:
         LEFT JOIN article_bodies b ON b.article_id = a.id
         WHERE a.is_user_deleted = 0 AND a.is_wx_deleted = 0
           AND a.link != ''
+          AND NOT EXISTS (SELECT 1 FROM deleted_articles d WHERE d.article_id = a.id)
           {where}
         ORDER BY a.create_time
         """,

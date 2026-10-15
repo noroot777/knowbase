@@ -25,11 +25,21 @@
 
 from __future__ import annotations
 
+import fcntl
+import time
+from contextlib import contextmanager
+
 from kb import pipeline_state as ps
 from kb.pipeline_persist import _dump_bytes, _load_json, _write_atomic
 
 #: 账本里最多记多少条。面板显示得到的上限是 20 轮 × 50 条,留一倍余量。
 _KEEP = 2000
+
+#: 等锁的上限(秒)。临界区只是读一个几十 KB 的小文件再写回去,毫秒级;等上几秒
+#: 就说明对面不正常,这时报「账本没写成」比攥着一条 Web 线程不放好 —— 不可逆的
+#: 删除早就成了,端点那边会如实在文案里说一句。
+_WAIT = 5.0
+_POLL = 0.02
 
 
 def _file():
@@ -42,6 +52,52 @@ def _file():
     """
     f = ps._STATE_FILE
     return f.with_name(f"{f.stem}_dropped{f.suffix}")
+
+
+def _lock_file():
+    """账本自己的锁文件。**只创建不删除** —— unlink 会让「A 持锁 → B 删文件 →
+    C 新建再持锁」出现两个持锁者(同 `kb/maintenance.py` 那条)。
+
+    从 `_file()` 派生,所以测试隔离落盘时自动跟着搬走,理由同 `_file()`。
+    """
+    f = _file()
+    return f.with_name(f"{f.stem}.lock")
+
+
+@contextmanager
+def _exclusive():
+    """把「读出来 → 改 → 整份写回」整段圈起来。等不到就抛。
+
+    **粒度是整趟,不是只圈写的那一句。** 丢更新的那一半在「读」:两条请求都读到
+    删除之前的旧列表、各自 append 一条、再整份替换,最后落盘的那份只有它自己追加
+    的那一条,另一条已经不可逆地删掉了内容却**再也不会被隐藏**,而两个响应都是
+    `ok=true`(第 1 轮审查实测:账本里只剩 `wx-second`)。`_write_atomic` 只保证
+    单次写入不是半截 JSON,保证不了这件事。
+
+    **一把 flock 就够,不另加线程锁。** flock 认的是 open file description:
+    `_exclusive` 每次自己 `open` 一个 fd,所以同一个进程里两条线程(kb-web 是线程
+    池,两个标签页各点一次完全正常)也互相挡得住,跟换个进程来是同一条路。
+    再叠一把 `threading.Lock` 等于同一个问题判两遍 —— 口径只有一份。
+    代价是它**不可重入**:谁在持有的时候再调一次 `remember` 会把自己挡到超时。
+    目前只有端点那一个调用方,不存在嵌套。
+    """
+    _file().parent.mkdir(parents=True, exist_ok=True)
+    fh = _lock_file().open("a+")
+    try:
+        deadline = time.monotonic() + _WAIT
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"另一个请求正在写面板记录，等了 {_WAIT:.0f} 秒还没让开"
+                    ) from None
+                time.sleep(_POLL)
+        yield
+    finally:
+        fh.close()                   # 关闭即释放 flock
 
 
 def _key(channel: str, item_id: str) -> str:
@@ -80,15 +136,20 @@ def remember(channel: str, item_id: str) -> None:
     早被历史的保留上限挤出去了。读不出来当空账本 —— 那会让此前记过的几条重新
     显示出来,但不会让这一条记不上(「拿不准就别固化终态」管的是**终态**,这里
     的终态在采集器那边,这份账本只是显示)。
+
+    **整段在 `_exclusive()` 里**:读、合并、写回三步之间不许有别人插进来 ——
+    理由和事故形态写在那个上下文管理器的说明里。
     """
     key = _key(channel, item_id)
-    raw = _load_json(_file())
-    got = raw.get("dropped") if isinstance(raw, dict) else None
-    keys = [k for k in got if isinstance(k, str) and k] if isinstance(got, list) else []
-    keys = [k for k in keys if k != key]
-    keys.append(key)
-    del keys[:-_KEEP]
-    _write_atomic(_file(), _dump_bytes({"dropped": keys}))
+    with _exclusive():
+        raw = _load_json(_file())
+        got = raw.get("dropped") if isinstance(raw, dict) else None
+        keys = ([k for k in got if isinstance(k, str) and k]
+                if isinstance(got, list) else [])
+        keys = [k for k in keys if k != key]
+        keys.append(key)
+        del keys[:-_KEEP]
+        _write_atomic(_file(), _dump_bytes({"dropped": keys}))
 
 
 def strip(run, keys: set[str] | None = None) -> int:

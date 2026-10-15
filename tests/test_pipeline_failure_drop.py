@@ -12,8 +12,12 @@
 摆盘沿用 `tests/pipeline_case.HistoryCase`(账本文件从 `_STATE_FILE` 派生,所以
 那一处 patch 同时隔离了这一份)。
 """
+import fcntl
 import shutil
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -144,6 +148,71 @@ class DropLedgerTests(HistoryCase):
         self.assertEqual({'wechat_local:wx-2', 'wechat_local:wx-3',
                           'wechat_local:wx-4'}, pf.dropped_keys())
 
+    def test_two_concurrent_removals_both_stay_recorded(self):
+        """两条请求同时记账,**两条都要留下来**。
+
+        kb-web 是线程池,两个标签页各点一次完全正常。没有互斥的话两条都读到删除
+        之前的旧列表、各自 append 一条、再整份替换 —— 最后落盘的只有后写的那一
+        条,另一条已经不可逆地删掉了内容,却**再也不会被隐藏**,而两个响应都是
+        `ok=true`(第 1 轮审查实测:账本里只剩 `wx-second`)。
+        `_write_atomic` 只保证单次写入不是半截 JSON,保证不了这件事。
+
+        竞态窗口靠「读完之后歇一下」摆出来:不加锁时两条必定都读到空账本。
+        """
+        real = pf._load_json
+
+        def slow(path):
+            got = real(path)
+            time.sleep(0.05)
+            return got
+
+        done, started = [], threading.Barrier(2)
+
+        def one(item_id):
+            started.wait(5)
+            pf.remember('wechat_local', item_id)
+            done.append(item_id)
+
+        with patch.object(pf, '_load_json', slow):
+            threads = [threading.Thread(target=one, args=(i,))
+                       for i in ('wx-first', 'wx-second')]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+        self.assertEqual({'wx-first', 'wx-second'}, set(done), '两条都该返回成功')
+        self.assertEqual({'wechat_local:wx-first', 'wechat_local:wx-second'},
+                         pf.dropped_keys())
+
+    def test_a_held_lock_makes_the_ledger_write_fail_loudly(self):
+        """锁被别的进程攥着:**抛出来,不许静默跳过**。
+
+        调用方(端点)据此在文案里说一句「面板记录没写成」—— 不可逆的那一步已经
+        成了,报红会让用户以为没删掉。反过来静默返回成功的话,账本里压根没有这
+        一条,而面板显示得像删掉了,下一轮同步它又回来了。
+        flock 认的是 open file description,所以同进程换一个 fd 就挡得住自己 ——
+        这也正是为什么一把 flock 同时管住了线程池里那两条请求,不用再叠一把
+        `threading.Lock`。
+        """
+        other = pf._lock_file().open('a+')
+        self.addCleanup(other.close)
+        fcntl.flock(other.fileno(), fcntl.LOCK_EX)
+        with patch.object(pf, '_WAIT', 0.2), self.assertRaises(TimeoutError):
+            pf.remember('wechat_local', 'wx-1')
+        fcntl.flock(other.fileno(), fcntl.LOCK_UN)
+        self.assertEqual(set(), pf.dropped_keys(), '没写成就是没写成')
+        pf.remember('wechat_local', 'wx-1')
+        self.assertEqual({'wechat_local:wx-1'}, pf.dropped_keys(), '让开之后照旧写得进')
+
+    def test_the_lock_file_travels_with_the_ledger(self):
+        """锁文件从账本那个路径派生 —— 测试隔离落盘时它自动跟着搬走。
+
+        另立一个模块变量的话,每个走到这里的测试都得记着再 patch 一次,而漏掉的
+        那个会去锁**生产**数据目录里的文件,漏没漏在测试输出上一个字都看不见。
+        """
+        self.assertEqual(pf._file().parent, pf._lock_file().parent)
+        self.assertNotEqual(pf._file(), pf._lock_file())
+
 
 class DropEndpointTests(HistoryCase):
     def setUp(self):
@@ -177,7 +246,19 @@ class DropEndpointTests(HistoryCase):
         self.assertEqual({'wechat_local:wx-1'}, pf.dropped_keys())
         self.assertEqual(200, self.drop().status_code, '连点两次照样成功')
         self.assertEqual({'wechat_local:wx-1'}, pf.dropped_keys())
-        self.assertEqual([{'id': 'wx-1', 'account': '某个号'}] * 2, self.fake.calls)
+        self.assertEqual([{'id': 'wx-1', 'account': '某个号', 'link': ''}] * 2,
+                         self.fake.calls)
+
+    def test_the_link_reaches_the_collector(self):
+        """`link` 要原样送到采集器手上。
+
+        库里已经没有那一行时,档案 ID 算不出链接身份,而永久排除要记的正是那个
+        身份 —— 少了这个键,采集器只能拒掉这次移除(见 `cli._drop_missing`)。
+        """
+        link = 'https://mp.weixin.qq.com/s?__biz=b&mid=1&idx=1'
+        self.assertEqual(200, self.drop(link=link).status_code)
+        self.assertEqual([{'id': 'wx-1', 'account': '某个号', 'link': link}],
+                         self.fake.calls)
 
     def test_a_ledger_write_failure_is_not_reported_as_a_failed_removal(self):
         """账本写不上**不许报红**:不可逆的那一步已经成了。
@@ -234,7 +315,9 @@ class CollectorContractTests(HistoryCase):
             'title': '标题', 'link': 'https://mp.weixin.qq.com/s?x=9'})
         self.assertEqual('https://mp.weixin.qq.com/s?x=9', rich['url'])
         self.assertEqual({'channel': 'wechat_local', 'id': 'wx-9',
-                          'account': '某个号'}, rich['drop'])
+                          'account': '某个号',
+                          'link': 'https://mp.weixin.qq.com/s?x=9'}, rich['drop'],
+                         'link 也要带上:缺行时只有它算得出身份')
 
         # 降级那一档给的是**带空身份的字典**(CLI 读不到结构化报告时),更旧的
         # CLI 给的是一个裸字符串 —— 两种都要列得出来、两种都不许长出 url / drop。
@@ -249,6 +332,34 @@ class CollectorContractTests(HistoryCase):
 
         self.assertIsNotNone(item_dropper(collector),
                              '公众号采集器要声明得出这个能力')
+
+    def test_the_cli_call_carries_the_account_and_the_link(self):
+        """`drop_item` 要把 `account` 和 `link` 都交到 CLI 手上。
+
+        `account` 是归属核对(删错的是另一个号的文章,不可恢复);`link` 是库里
+        已经没有那一行时唯一算得出身份的东西 —— 少了它那边只能拒掉这次移除
+        (见 `collector/cli.py` 的 `_drop_missing`)。给不出链接时**不许拼一个空的
+        `--link`**:那等于让下游拿空串去算身份。
+        """
+        from kb.collectors import wechat_local as wl
+
+        seen = []
+
+        def fake(*argv, timeout):
+            seen.append(argv)
+            return SimpleNamespace(returncode=0, stdout='{"ok": true, "detail": "已移除"}',
+                                   stderr='')
+
+        with patch.object(wl, '_backend_problem', return_value=''), \
+             patch.object(wl, '_run_cli', fake):
+            wl.collector.drop_item({'id': 'wx-1', 'account': '某个号',
+                                    'link': 'https://mp.weixin.qq.com/s?x=1'})
+            wl.collector.drop_item({'id': 'wx-2'})
+        self.assertEqual(('articles', 'drop', '--id', 'wx-1', '--account', '某个号',
+                          '--link', 'https://mp.weixin.qq.com/s?x=1', '--json'),
+                         seen[0])
+        self.assertEqual(('articles', 'drop', '--id', 'wx-2', '--json'), seen[1],
+                         '给不出的那两样一个都不许拼成空值')
 
 
 @requires_headless

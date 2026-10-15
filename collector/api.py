@@ -42,7 +42,11 @@ def _ingest_crawl_article(repo, account_name: str, article: dict) -> bool:
     account_name, article, _is_new = prepared
 
     article_id = str(article.get("id") or "")
-    repo.upsert_article_from_blog(account_name, article)
+    # 写不进去 = 这个身份在上面那次检查之后被永久排除了(面板上那颗「不再抓取」)。
+    # **到此为止**:不抓正文、不记字数 —— 判据在写语句自己的 WHERE 里,这里只是
+    # 读它的结论(见 `repository.upsert_article_from_blog`)。
+    if not repo.upsert_article_from_blog(account_name, article):
+        return False
     repo.commit()
     nickname = _fetch_article_detail_text(
         article_id, str(article.get("link") or ""), repo=repo
@@ -99,10 +103,14 @@ def _fetch_article_detail_text(
             return nickname
 
         def _persist() -> None:
-            repo.set_body_text(article_id, text)
+            # 抓一篇正文要几秒到几十秒,用户完全可能在这中间按下「不再抓取」。
+            # 排除判据在写语句自己的 WHERE 里,这里只读它的结论:一个字节都没写
+            # 就别再往下记重试状态了(那张表也挂在这篇文章上)。
+            if not repo.set_body_text(article_id, text, link=link):
+                return
             # HTML 一并落库：Markdown 导出和预览都依赖它，抓取时不存后面就得重抓
             if html:
-                repo.set_body_html(article_id, html)
+                repo.set_body_html(article_id, html, link=link)
             body_retry.succeeded(repo, article_id)
             repo.commit()
 

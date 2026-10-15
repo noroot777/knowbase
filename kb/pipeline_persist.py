@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from copy import deepcopy
 from pathlib import Path
 
@@ -87,11 +88,18 @@ def _write_atomic(path: Path, data: bytes) -> None:
 
     面板那两条读的请求随时在跑,截断重写的窗口里读到的是半截 JSON(同
     `docs/decisions/llm-stages.md` 那条)。而 `replace()` 失败(权限、跨设备)时不清
-    的话,`*.<pid>.tmp` 就留在数据目录里 —— 同一个进程里重名覆盖,每次重启换一个
-    pid 就慢慢堆起来。
+    的话,`*.tmp` 就留在数据目录里慢慢堆起来。
+
+    **临时文件名每次都是新的,不能按 pid 固定。** 同一个进程里两条线程同时写同一
+    个 path 时(kb-web 是线程池,两个 POST 并行完全正常),固定名字的那一份会被后
+    进来的那条截断重写 —— 先 `replace` 的那个搬走的是**半截**内容,而后一条的
+    `finally` 再 `unlink` 掉已经不是自己那份的文件。换成随机名之后两条各写各的,
+    两次 `replace` 谁后到谁赢,落盘的始终是某一次的完整内容。
+    **这只保证单次写入的完整性,不保证并发更新不丢。** 「读出来 → 改 → 整份写
+    回」那种要调用方自己拿互斥(见 `pipeline_failures.remember`)。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         tmp.write_bytes(data)
         tmp.replace(path)

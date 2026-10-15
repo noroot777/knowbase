@@ -255,6 +255,10 @@ class WeChatLocalCollector:
             coverage += f",另有归属待核实的不可读推送 {last['unattributed_messages']} 条（存量）"
         if last.get("unavailable_articles"):
             coverage += f",原文暂不可用 {last['unavailable_articles']} 篇（一周后复查）"
+        # 这一轮跑着的时候用户在面板上按下了「不再抓取」:如实说一句,别让它消失
+        # 在「下载失败」里 —— 它既不是失败,也不会再被重试。
+        if last.get("excluded_articles"):
+            coverage += f",已永久排除 {last['excluded_articles']} 篇（同步期间移除）"
         if code != 0:
             detail = (f"新增 {new} 篇,失败 {len(errors)} 项" if errors
                       else f"采集失败(退出码 {code})")
@@ -308,10 +312,11 @@ class WeChatLocalCollector:
     def _no_body_failure(self, item) -> dict:
         """把 CLI 报上来的一条「没正文」转成面板那份失败明细里的一行。
 
-        **两种形态都认**:新版 CLI 给 `{name,id,account,title,link}`,旧版(以及
-        它那条读不到结构化报告的降级路径)给一个 `账号 · 标题` 的字符串。后者
-        没有身份 —— 那就**不带 `url` / `drop`**,面板据此把这一行显示成不可点、
-        不可删,而不是指着另一篇文章让人删。
+        **三种形态都认**:新版 CLI 给 `{name,id,account,title,link}`;它读不到结构化
+        报告时给的是**带空身份的字典**;更旧的 CLI 给一个 `账号 · 标题` 的裸字符串。
+        后两种没有身份 —— 那就**不带 `url` / `drop`**,面板据此把这一行显示成不可
+        点、不可删,而不是指着另一篇文章让人删。**但那一条仍然要列得出来**:漏报
+        是静默丢数据。
         """
         reason = "缺少正文，暂未导出；保留待补，后续同步会按退避时间重试"
         if not isinstance(item, dict):
@@ -321,9 +326,12 @@ class WeChatLocalCollector:
         if link := str(item.get("link") or ""):
             out["url"] = link
         if aid := str(item.get("id") or ""):
-            # 面板原样回传这一份:这条到底怎么删只有采集器知道(见 `drop_item`)
+            # 面板原样回传这一份:这条到底怎么删只有采集器知道(见 `drop_item`)。
+            # **`link` 一起带上,它不是冗余**:库里已经没有这一行时,档案 ID 算不出
+            # 链接身份,而永久排除要记的正是那个身份(`exclusion_keys`)。
             out["drop"] = {"channel": self.name, "id": aid,
-                           "account": str(item.get("account") or "")}
+                           "account": str(item.get("account") or ""),
+                           "link": link}
         return out
 
     # ── 积压 ────────────────────────────────────────────────────────────────
@@ -404,12 +412,15 @@ class WeChatLocalCollector:
         **身份只认 `id`,`account` 只用来核对。** CLI 那边拿 id 查出它真正的归属,
         跟这里给的对不上就整个拒掉 —— 面板上那条明细和库里那一行必须是同一篇,
         否则删下去的是另一个号的文章,而那是**不可恢复**的(连正文一起删)。
-        **幂等**:库里已经没有这一行时 CLI 照样返回成功,见那边的注释。
+        **幂等**:库里已经没有这一行时 CLI 照样返回成功 —— 但那条路要先拿出**排除
+        凭据**,拿不出来就拒;`link` 带过去正是为了让它算得出身份(见那边的注释)。
         """
         aid = str(ref.get("id") or "").strip()
         if not aid:
             raise CollectorError("这一条没有可用的文章标识，无法移除")
         extra = ["--account", str(ref.get("account") or "")] if ref.get("account") else []
+        if link := str(ref.get("link") or "").strip():
+            extra += ["--link", link]
         data = self._accounts_raw("articles", "drop", "--id", aid, *extra, timeout=20)
         # 库里少了一篇,面板下次拿到的积压数要是新的
         self._cache = None

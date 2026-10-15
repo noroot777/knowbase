@@ -92,16 +92,30 @@ async function dropPipeFailure(btn) {
   })) return;
   btn.disabled = true;
   try {
-    const r = await pipePost('/api/pipeline/failures/drop', ref);
+    // **等待预算要盖住后端那一串**:采集器 CLI 最长等 20 秒,它里面那把 SQLite
+    // 还配了 15 秒 busy timeout。按 `pipePost` 默认的 15 秒算,锁等一下前端就先
+    // 报「没删成」、把按钮放回去,而后端随后删成功了 —— 用户照着提示再点一次,
+    // 看到的是另一套话术,而第一次其实已经生效。
+    const r = await pipePost('/api/pipeline/failures/drop', ref, 45000);
     toast('已移除', { type: 'ok', detail: r.detail || '以后不再抓取这一条。' });
     // 状态和历史清单里都不该再有它。轮询那一份可能正在途中、带的是旧名单,
     // 所以先把它作废再重读(同「重试失败项」那两颗按钮的收尾)。
+    // **待处理数也要作废**:删掉一条不产生新的一轮,靠运行版本比不出变化,
+    // 在途那次查询会把删除前的数字盖回来(见 `invalidatePipePending`)。
     invalidatePipeStatus();
-    await refreshPipe();
+    invalidatePipePending();
+    await refreshPipe(true);
     if (typeof loadPipeHistory === 'function') loadPipeHistory();
   } catch (e) {
+    // **超时/断线不等于「没删掉」。** 不可逆的那一步可能已经在后端做完了,断言
+    // 「未完成」会让用户以为可以当没发生过。如实说一句「结果未确认」,顺手重读
+    // 一次状态 —— 真删成了,那一条当场就从明细里消失,用户不必自己判断。
     btn.disabled = false;
-    toast('移除未完成', { detail: e.message });
+    toast('结果未确认', { detail: e.message + '。这一条可能已经移除，正在重新读取。' });
+    invalidatePipeStatus();
+    invalidatePipePending();
+    refreshPipe(true);
+    if (typeof loadPipeHistory === 'function') loadPipeHistory();
   }
 }
 function renderPipeState(s) {

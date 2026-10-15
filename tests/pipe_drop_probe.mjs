@@ -26,9 +26,11 @@ const LINK = "https://mp.weixin.qq.com/s?__biz=b&mid=1&idx=1";
 // (降级那一档,两样都不该有)。
 const ITEMS = () => [
   { title: "某个号 · 缺正文的一篇", reason: "缺少正文，暂未导出", pending: true,
-    url: LINK, drop: { channel: "wechat_local", id: "wx-1", account: "某个号" } },
+    url: LINK, drop: { channel: "wechat_local", id: "wx-1", account: "某个号",
+                       link: LINK } },
   { title: "另一个号 · 又一篇", reason: "缺少正文，暂未导出", pending: true,
-    url: LINK + "&n=2", drop: { channel: "wechat_local", id: "wx-2", account: "另一个号" } },
+    url: LINK + "&n=2", drop: { channel: "wechat_local", id: "wx-2",
+                                account: "另一个号", link: LINK + "&n=2" } },
   { title: "没有身份的一条", reason: "缺少正文，暂未导出", pending: true },
 ];
 
@@ -47,6 +49,12 @@ let latest = roundOf("run-now", "2026-10-15 09:12:00", ITEMS());
 const PAST = roundOf("run-past", "2026-10-14 09:12:00", ITEMS());
 const drops = [];
 let state = { running: false, stop_supported: true, stop_requested: false, ...latest };
+// 「当前待处理」:删掉一条它就该少一个。**故意答得慢、而且按请求到达那一刻取值**
+// —— 面板的待处理查询是独立的一条请求,删除发生在它在途期间时,它带回来的是删除
+// **之前**的数字。删除不产生新的一轮,运行版本一个字不变,所以那份过期回包照旧
+// 对得上版本。这正是要钉的那一道闸(`invalidatePipePending`)。
+const PENDING_DELAY = 700;
+const pendingNow = () => latest.stages.export.failures.filter(f => f.drop).length;
 
 const server = createServer((req, res) => {
   const path = req.url.split("?")[0];
@@ -56,8 +64,11 @@ const server = createServer((req, res) => {
     res.end(body);
   };
   if (path === "/api/pipeline/status") {
-    return json({ ...state, last_run: latest, result_version: latest.run_id,
-                  restore_gap: "", pending: { extract: 0 } });
+    const body = { ...state, last_run: latest, result_version: latest.run_id,
+                   restore_gap: "" };
+    if (!/[?&]pending=true/.test(req.url)) return json(body);
+    const snapshot = { export: pendingNow(), extract: 0 };
+    return void setTimeout(() => json({ ...body, pending: snapshot }), PENDING_DELAY);
   }
   if (path === "/api/pipeline/runs") {
     const rows = [latest, PAST].map(r => ({ ...r, version: r.run_id, key: r.run_id,
@@ -94,6 +105,8 @@ await new Promise(r => server.listen(0, "127.0.0.1", r));
 const base = `http://127.0.0.1:${server.address().port}`;
 
 const { proc, ws, send, evalJs, until, clickAt, pageErrors } = await attachCdp();
+const pendingText = () => evalJs(
+  `$('pipe-stage-export').querySelector('.pipe-stage-pending').textContent`);
 const rows = () => evalJs(
   `[...document.querySelectorAll('#pipe-stage-export .pipe-failures p')]
      .map(p => ({ text: p.textContent.replace(/\\s+/g, ' ').trim(),
@@ -119,6 +132,9 @@ try {
 await evalJs(`switchTab('pipe'); true`);
 await setup("明细里有三条", until(
   `document.querySelectorAll('#pipe-stage-export .pipe-failures p').length === 3`));
+await setup("待处理数读到了(2 项)", until(
+  `$('pipe-stage-export').querySelector('.pipe-stage-pending').textContent
+     === '当前待处理 2 项'`, 8000));
 await evalJs(`$('pipe-stage-export').querySelector('details').open = true; true`);
 let listed = await rows();
 check("第一条标题是条真链接,指向原文", listed[0].href === LINK, listed[0].href);
@@ -146,13 +162,18 @@ check("取消之后那一条还在",
       (await rows()).length === 3 && (await rows())[0].drop);
 
 // ── 3. 确认之后:请求带着那份 drop,面板上那一条随即消失 ───────────────────────
+// **故意让一次待处理查询在途**:它带回来的是删除之前那个数字,而删除不产生新的
+// 一轮、运行版本一个字不变 —— 没有另一道身份闸的话那份过期回包照旧被应用,面板
+// 永久停在删除前的「当前待处理 2 项」(整页刷新才归零)。
+await evalJs(`refreshPipePending(); true`);
 await setup("再点一次「不再抓取」",
             clickAt("#pipe-stage-export .pipe-failures p:nth-child(1) .pipe-failure-drop"));
 await setup("确认框又出来了", until(`document.querySelectorAll('.confirm-mask').length === 1`));
 await setup("点了确认", clickAt(".confirm-mask [data-act=ok]"));
-check("请求原样带着那条明细给的 drop",
+check("请求原样带着那条明细给的 drop(含 link)",
       drops.length === 1 && drops[0].channel === "wechat_local"
-      && drops[0].id === "wx-1" && drops[0].account === "某个号", JSON.stringify(drops));
+      && drops[0].id === "wx-1" && drops[0].account === "某个号"
+      && drops[0].link === LINK, JSON.stringify(drops));
 check("删完那一条就从面板上消失了", await until(
   `document.querySelectorAll('#pipe-stage-export .pipe-failures p').length === 2`, 8000),
       JSON.stringify(await rows()));
@@ -164,6 +185,11 @@ check("明细标题跟着念剩下几条",
       /2 项/.test(await evalJs(
         `$('pipe-stage-export').querySelector('summary').textContent`)),
       await evalJs(`$('pipe-stage-export').querySelector('summary').textContent`));
+check("待处理数跟着删完的结果走,不是在途那份旧数字",
+      await until(
+        `$('pipe-stage-export').querySelector('.pipe-stage-pending').textContent
+           === '当前待处理 1 项'`, 12000),
+      await pendingText());
 await until(`document.querySelectorAll('.toast').length > 0`, 6000);
 await evalJs(`document.querySelectorAll('.toast').forEach(e => e.remove()); true`);
 

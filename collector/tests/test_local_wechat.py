@@ -1,29 +1,19 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
 import contextlib
 import io
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import Mock, call, patch
-from xml.sax.saxutils import escape
 
 from src.crawler.local_wechat import LocalReader, LocalReaderError, parse_push, resolve_accounts
 from src.db import connection as conn_mod
 from src.utils.article_identity import article_identity, stable_article_id
+from tests.local_collect_case import LocalCollectCase, push
 
-
-def push(biz="biz-a", mid="101", idx="1", published="2026-09-15 18:30", **extra):
-    url = f"https://mp.weixin.qq.com/s?__biz={biz}&mid={mid}&idx={idx}&sn=signature&chksm=checksum&scene=123&xtrack=1"
-    fields = {"title": "测试文章", "url": url, "digest": "摘要", "cover": "",
-              "pub_time": str(int(datetime.strptime(published, "%Y-%m-%d %H:%M").timestamp())),
-              **extra}
-    return {"text": "<msg><appmsg><mmreader><category><item>"
-            + "".join(f"<{k}>{escape(v)}</{k}>" for k, v in fields.items())
-            + "</item></category></mmreader></appmsg></msg>",
-            "create_time": 1}
+# `push` 在这里 re-export:test_local_index / test_local_coverage 从本模块 import 它。
+__all__ = ["push"]
 
 
 class PushTests(unittest.TestCase):
@@ -215,43 +205,7 @@ class PushTests(unittest.TestCase):
             self.assertEqual(3, sleep.call_count)
 
 
-class LocalCollectionTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        root = Path(self.tmp.name)
-        self.saved = (conn_mod.DEFAULT_DB_PATH, conn_mod.DATA_DIR, conn_mod._db_ready)
-        conn_mod.DEFAULT_DB_PATH, conn_mod.DATA_DIR, conn_mod._db_ready = root / "test.db", root, False
-        from src.db.repository import ArticleRepository
-
-        self.repo = ArticleRepository()
-        self.repo.enable_crawl_account("档案名", "biz-a")
-        self.repo.enable_crawl_account("停用号", "biz-off")
-        self.repo.conn.execute("UPDATE accounts SET in_crawl_config=0 WHERE name='停用号'")
-        self.repo.commit()
-        self.reader = LocalReader()
-        self.reader.check = Mock()
-        self.reader.accounts = Mock(return_value=[{"username": "gh_test", "display_name": "档案名"}])
-        self.reader.messages = Mock(return_value=[push()])
-        from tests.local_source_fixture import TimelineFixture
-
-        self.sql_fixture = TimelineFixture(self.reader)
-        self.reader.call = self.sql_fixture.call
-
-        self.fill = patch("src.utils.wechat_body.fetch_article_body_full", return_value=(
-            ["真实正文测试内容"], "<p>真实正文测试内容</p>", "")).start()
-        patch("src.utils.request_pacing.RequestPacer.wait").start()
-
-    def tearDown(self):
-        self.sql_fixture.close()
-        patch.stopall()
-        self.repo.close()
-        conn_mod.DEFAULT_DB_PATH, conn_mod.DATA_DIR, conn_mod._db_ready = self.saved
-        self.tmp.cleanup()
-
-    def collect(self, **kwargs):
-        from src.collect.local_runner import collect
-
-        return collect(lambda event: None, reader=self.reader, **kwargs)
+class LocalCollectionTests(LocalCollectCase):
 
     def test_local_collect_twice_is_idempotent_and_does_not_touch_disabled_accounts(self):
         first, second = self.collect(), self.collect()
@@ -399,127 +353,6 @@ class LocalCollectionTests(unittest.TestCase):
         self.assertEqual(1, result["unreadable_messages"])
         self.assertEqual(1, result["new_articles"])
 
-    def test_export_keeps_old_empty_article_retryable(self):
-        from scripts import export_obsidian
-        import sys
-
-        self.reader.messages.return_value = [push(published="2020-01-01 12:00")]
-        self.fill.return_value = ("请求错误", None, "")
-        self.collect()
-        out = str(Path(self.tmp.name) / "export")
-        with patch.object(sys, "argv", ["export", "--out", out, "--dedup-root", out, "--no-images"]), \
-             contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(0, export_obsidian.main())
-        self.assertIn("待补正文 1", output.getvalue())
-        self.assertIn("无正文,跳过 档案名 · 测试文章", output.getvalue())
-        self.assertNotIn("失败 0", output.getvalue())
-        import cli
-        import subprocess
-
-        with patch("cli.subprocess.run", return_value=subprocess.CompletedProcess(
-                [], 0, stdout=output.getvalue(), stderr="")), \
-             contextlib.redirect_stdout(io.StringIO()) as event_output, \
-             contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
-        import json
-
-        # 这一段 patch 掉了 subprocess,结构化报告压根没写成 —— 走的正是降级路径:
-        # 那一条**仍然列得出来**(漏报是静默丢数据),只是没有身份,面板据此把它
-        # 显示成不可点、不可删。
-        self.assertEqual([{"name": "档案名 · 测试文章", "id": "", "account": "",
-                           "title": "", "link": ""}],
-                         json.loads(event_output.getvalue())["no_body"])
-        self.assertEqual(0, self.repo.conn.execute("SELECT is_wx_deleted FROM articles").fetchone()[0])
-        self.repo.conn.execute("UPDATE article_fetch_state SET retry_at=0")
-        self.repo.commit()
-        self.fill.return_value = (["恢复正文"], "<p>恢复正文</p>", "")
-        self.assertEqual([], self.collect()["errors"])
-        self.assertEqual(1, self.repo.conn.execute("SELECT COUNT(*) FROM article_bodies").fetchone()[0])
-
-    def test_no_body_detail_carries_identity_so_the_panel_can_open_and_drop_it(self):
-        """面板上那条「缺少正文」要点得开、删得掉,靠的是这里的 id 和 link。
-
-        `账号 · 标题` 那个字符串只够给人看:标题会重名、`·` 本身也可能出现在号名
-        或标题里,拿它反查是哪一篇一定出错。所以导出脚本另写一份结构化报告,CLI
-        优先读它。
-        """
-        from scripts import export_obsidian
-        import sys, json
-
-        self.reader.messages.return_value = [push()]
-        self.fill.return_value = ("请求错误", None, "")
-        self.collect()
-        out = str(Path(self.tmp.name) / "export")
-        report = Path(self.tmp.name) / "report.json"
-        with patch.object(sys, "argv", ["export", "--out", out, "--dedup-root", out,
-                                        "--no-images", "--report", str(report)]), \
-             contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(0, export_obsidian.main())
-        items = json.loads(report.read_text(encoding="utf-8"))["no_body"]
-        self.assertEqual(1, len(items))
-        stored = self.repo.conn.execute("SELECT id, link FROM articles").fetchone()
-        self.assertEqual(stored["id"], items[0]["id"])
-        self.assertEqual(stored["link"], items[0]["link"])
-        self.assertEqual(("档案名", "测试文章"), (items[0]["account"], items[0]["title"]))
-
-        import cli
-
-        with patch("cli.subprocess.run", side_effect=lambda argv, **kw: self._fake_export(argv)), \
-             contextlib.redirect_stdout(io.StringIO()) as events, \
-             contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
-        got = json.loads(events.getvalue())["no_body"][0]
-        self.assertEqual((stored["id"], "档案名 · 测试文章"), (got["id"], got["name"]))
-
-    def _fake_export(self, argv):
-        """替身导出进程:只把 `--report` 那份报告写出来,不真去扫 vault。"""
-        import json
-        import subprocess
-
-        report = Path(argv[argv.index("--report") + 1])
-        row = self.repo.conn.execute("SELECT id, link FROM articles").fetchone()
-        report.write_text(json.dumps({"no_body": [
-            {"id": row["id"], "account": "档案名", "title": "测试文章",
-             "link": row["link"]}]}, ensure_ascii=False), encoding="utf-8")
-        return subprocess.CompletedProcess(argv, 0,
-                                           stdout="[export] 完成: 导出 0\n", stderr="")
-
-    def test_dropping_one_article_stops_rediscovering_it_and_is_idempotent(self):
-        """「以后不再抓了」= 删掉它 + 把链接身份拉黑,再发现同一篇也不入库。
-
-        **幂等**:库里已经没有这一行时照样算成功 —— 用户会连点,两个标签页也会
-        各点一次,报红会让人以为没删掉。**归属对不上一律拒**:删下去是不可恢复的。
-        """
-        import cli
-        import json
-
-        self.collect()
-        aid = self.repo.conn.execute("SELECT id FROM articles").fetchone()[0]
-        with contextlib.redirect_stdout(io.StringIO()) as out, \
-             contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.EXIT_ERROR, cli.main(
-                ["articles", "drop", "--id", aid, "--account", "别的号", "--json"]))
-        self.assertFalse(json.loads(out.getvalue())["ok"])
-        self.assertEqual(1, self.repo.conn.execute(
-            "SELECT COUNT(*) FROM articles").fetchone()[0])
-
-        for _ in range(2):      # 连点两次:第二次库里已经没这一行了,照样成功
-            with contextlib.redirect_stdout(io.StringIO()) as out, \
-                 contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(cli.EXIT_OK, cli.main(
-                    ["articles", "drop", "--id", aid, "--account", "档案名", "--json"]))
-            self.assertTrue(json.loads(out.getvalue())["ok"])
-        self.assertEqual(0, self.repo.conn.execute(
-            "SELECT COUNT(*) FROM articles").fetchone()[0])
-        self.assertEqual(0, self.repo.conn.execute(
-            "SELECT COUNT(*) FROM article_bodies").fetchone()[0])
-
-        # 反过来钉一边:下一轮同步再发现同一篇,不许又入库一次
-        self.fill.reset_mock()
-        self.assertEqual([], self.collect()["errors"])
-        self.assertEqual(0, self.repo.conn.execute(
-            "SELECT COUNT(*) FROM articles").fetchone()[0])
-        self.fill.assert_not_called()
 
     def test_recovery_only_resets_affected_local_articles_and_creates_backup(self):
         from scripts.recover_local_articles import recover

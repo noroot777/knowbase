@@ -150,8 +150,8 @@ def _no_body_items(report: Path, stdout: str) -> list[dict]:
 def cmd_articles(args) -> int:
     """这一篇不再采集:删掉它,并把它的身份记进黑名单。
 
-    **幂等**:库里已经没有这一行时照样算成功——重复点一次、或者它刚好被另一条
-    路径删掉了,都不该报红让人以为没删掉。
+    **幂等**:重复点一次、或者它刚好被另一条路径删掉了,都不该报红让人以为没删掉。
+    但**「库里没有这一行」不等于「它已经被永久排除」** —— 见 `_drop_missing`。
     """
     from src.db.repository import ArticleRepository
 
@@ -164,12 +164,8 @@ def cmd_articles(args) -> int:
             "SELECT account_name, title FROM articles WHERE id=?", (args.id,)
         ).fetchone()
         if row is None:
-            if args.json:
-                emit({"ok": True, "detail": "这一篇已经不在库里了，以后也不会再采集",
-                      "removed": False})
-            else:
-                info("这一篇已经不在库里了")
-            return EXIT_OK
+            return _drop_missing(repo, args.id, getattr(args, "link", "") or "",
+                                 args.json)
         # 归属对不上一律拒:调用方拿的是面板上那一条的身份,对不上说明两边
         # 说的不是同一篇,删下去就是删错文章。
         if args.account and row["account_name"] != args.account:
@@ -184,6 +180,54 @@ def cmd_articles(args) -> int:
     else:
         info(detail)
     return EXIT_OK
+
+
+def _drop_missing(repo, article_id: str, link: str, as_json: bool) -> int:
+    """`articles` 里没有这一行时,那句「以后也不会再采集」怎么兑现。
+
+    **缺行不是排除凭据。** 同步记录和没关掉的旧页面会一直持有这一篇的身份,而采集
+    库完全可能被清理、重建或回退到没有这一行的版本 —— 那时照旧返回成功,主系统会
+    把它从各轮明细里隐藏,而下一轮发现时它照样入库、照样抓正文、照样导出(第 1 轮
+    审查实测:`row_exists_after_drop_and_ingest=true`,`body_fetch_calls=1`)。
+    明细一旦隐藏,用户**再也看不到这一条**,也就不会知道承诺没兑现。
+
+    所以分三档,只有拿得出凭据的两档算成功:
+
+    1. **名单里已经有它**(`exclusion_keys` 里任一个命中)—— 真的已经排除过了,
+       幂等成功。这是「连点两次」「两个标签页各点一次」的正常形态。
+    2. **算得出身份**(调用方给了 `--link`)—— 当场把这组键补写进名单
+       (`exclude_identities`),再报成功。`add_deleted_blacklist` 走不通:它要从
+       `articles` 那一行里读规范链接,而那一行已经没了。
+    3. **两样都没有** —— 拒。只写一个旧档案 ID 挡不住换个通道再发现同一篇
+       (`stable_article_id` 和 `article_identity` 都算不出来),宣称「永久排除」
+       就是报一个没做到的结论。拒掉的代价只是那一条留在明细里(下一轮同步会补上
+       `link`,或者等它再次入库之后再删),比静默失约轻得多。
+    """
+    from src.utils.article_identity import exclusion_keys
+
+    keys = exclusion_keys(article_id, link)
+    if any(repo.is_deleted_blacklist(k) for k in keys):
+        detail = "这一篇已经不在库里了,此前已记为永久不再采集"
+        if as_json:
+            emit({"ok": True, "detail": detail, "removed": False, "excluded": True})
+        else:
+            info(detail)
+        return EXIT_OK
+    # 名单里没有它。能算出链接身份就当场补上——那是跨通道也认的那个键。
+    identity_keys = [k for k in keys if k != article_id]
+    if identity_keys:
+        repo.exclude_identities(*keys)
+        repo.commit()
+        detail = "这一篇已经不在库里了,已记为永久不再采集"
+        if as_json:
+            emit({"ok": True, "detail": detail, "removed": False, "excluded": True})
+        else:
+            info(detail)
+        return EXIT_OK
+    return _fail(
+        "这一篇已经不在采集库里,而且没有原文链接可以算出它的身份,"
+        "没法承诺「以后不再采集」(换个通道发现同一篇时挡不住)。"
+        "下一轮同步会重新带上链接,那时再移除", as_json)
 
 
 # ── accounts ────────────────────────────────────────────────────────────────────
@@ -462,6 +506,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("action", choices=["drop"])
     r.add_argument("--id", default="", help="文章 id")
     r.add_argument("--account", default="", help="它该属于哪个公众号(对不上就拒)")
+    r.add_argument("--link", default="",
+                   help="它的原文链接。库里已经没有这一行时,永久排除只能靠它算身份")
     r.add_argument("--json", action="store_true", help="输出 JSON 而不是人话")
 
     return p

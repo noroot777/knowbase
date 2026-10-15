@@ -64,10 +64,16 @@ def main() -> int:
                     print(f"[{i}/{len(todo)}] SKIP({text}) {title_short}")
                     failed += 1
                 elif html:
-                    repo.set_body_html(row["id"], html)
-                    repo.commit()
-                    ok += 1
-                    print(f"[{i}/{len(todo)}] OK {title_short}")
+                    # 带上 link:排除判据在写语句自己的 WHERE 里(见
+                    # `repository.set_body_html`),这一趟跑着的时候用户也可能在
+                    # 面板上按下「不再抓取」。写不进去就如实记成跳过,不算成功。
+                    if not repo.set_body_html(row["id"], html, link=row["link"]):
+                        print(f"[{i}/{len(todo)}] SKIP(已永久排除) {title_short}")
+                        failed += 1
+                    else:
+                        repo.commit()
+                        ok += 1
+                        print(f"[{i}/{len(todo)}] OK {title_short}")
                 else:
                     print(f"[{i}/{len(todo)}] EMPTY-HTML {title_short}")
                     failed += 1

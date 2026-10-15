@@ -228,6 +228,9 @@ class FailureDropRequest(BaseModel):
     channel: str
     id: str
     account: str | None = None
+    #: 原文链接。采集器拿它算链接身份 —— 库里已经没有那一行时,只有这个键
+    #: 挡得住换个通道再次发现同一篇(见 `cli._drop_missing`)。
+    link: str | None = None
 
 
 @router.post("/api/pipeline/failures/drop")
@@ -246,7 +249,8 @@ def pipeline_drop_failure(body: FailureDropRequest):
     if not item_id:
         raise HTTPException(400, "这一条没有可用的标识，无法移除")
     try:
-        detail = dropper.drop_item({"id": item_id, "account": body.account or ""})
+        detail = dropper.drop_item({"id": item_id, "account": body.account or "",
+                                    "link": (body.link or "").strip()})
     except CollectorError as e:
         raise HTTPException(400, str(e)) from None
     # **账本写不上不许把整件事报成失败。** 不可逆的那一步已经成了,报红会让用户

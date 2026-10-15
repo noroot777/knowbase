@@ -28,6 +28,7 @@ def collect(emit, *, targets=None, since="", until="", reader=None) -> dict:
               "missing_accounts": [], "deferred_articles": 0, "unavailable_articles": 0,
               "matched_articles": 0, "download_done": 0, "download_total": 0,
               "download_succeeded": 0, "download_failed": 0, "existing_articles": 0,
+              "excluded_articles": 0,
               "body_failures": [], "unreadable_messages": 0, "unreadable_accounts": [],
               "unattributed_messages": 0, "coverage_unknown_accounts": []}
     reader = reader or LocalReader()
@@ -98,11 +99,19 @@ def _download(repo, articles, result, progress):
     for owner, article, is_new in queue:
         current = f"{owner} · {article['title']}"
         progress({"phase": "download", "current": current})
-        succeeded = False
+        succeeded = excluded = False
         try:
             pacer.wait()
             api._ingest_crawl_article(repo, owner, article)
             repo.commit()
+            # **按实际写入结果报,不按计划长度报。** 队列是发现阶段排好的,而发现
+            # 到这一刻之间用户完全可能在面板上按下「不再抓取」—— 写入层会拒掉这
+            # 一篇(`repository._excluded_clause`)。那时既不该记成新增(它没进库),
+            # 也不该记成失败、更不该说一句「已安排自动重试」:它不会再被抓了。
+            if not repo.has_article(article["id"]):
+                excluded = True
+                result["excluded_articles"] += 1
+                continue
             result["new_articles"] += int(is_new)
             succeeded = has_readable_body(repo, article["id"])
             if not succeeded:
@@ -116,5 +125,6 @@ def _download(repo, articles, result, progress):
             result["errors"].append(f"{current}: {exc}")
         finally:
             result["download_done"] += 1
-            result["download_succeeded" if succeeded else "download_failed"] += 1
+            if not excluded:
+                result["download_succeeded" if succeeded else "download_failed"] += 1
             progress({"phase": "download", "current": current})
