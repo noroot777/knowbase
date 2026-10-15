@@ -1,0 +1,25 @@
+/* 选中即收藏:浮动按钮 + 片段回跳高亮。行为在 kb/static/js/snip.js。
+   阅读页(kb/web/pages.py 的 _DOC_SNIP_JS)是脱离 kb-web 也要能打开的独立产物,
+   自带一份内联副本 —— 改这里的颜色和圆角记得同步那边,不然同一枚按钮在页内
+   阅读器(iframe 里就是那一页)和日报面板上长得不一样。 */
+
+/* z 层级(其余在 base.css 顶部):顶栏 20 < 抽屉 30 < 阅读器 41 < 弹窗 60
+   < 本按钮 70 < 确认框 80 < toast 90。要高过抽屉和阅读器 —— 图鉴条目正文、
+   订阅阅读器都在它们里面;要低过确认框和 toast,那两样是对它的回应。 */
+#snipbtn {
+  position: fixed; z-index: 70;
+  padding: 6px 13px; border: 0; border-radius: 9px;
+  font-family: var(--font-body); font-size: 12.5px; line-height: 1.4;
+  background: var(--ink); color: #fff;
+  cursor: pointer; user-select: none; white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(20, 32, 43, .28);
+}
+#snipbtn:hover { background: var(--brand); }
+#snipbtn:disabled { opacity: .7; cursor: default; }
+
+/* 片段回跳的高亮。CSS Custom Highlight API 不改 DOM,所以日报/问答下一次
+   重渲染不会把标记连正文一起换掉。伪元素里只有少数属性生效,别加边框圆角。 */
+::highlight(kb-quote) {
+  background-color: var(--brand-soft);
+  color: var(--brand-deep);
+}
