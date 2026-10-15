@@ -103,6 +103,7 @@ def _receipt(event: dict) -> frozenset[Fetched] | None:
     `KB_COLLECTOR_DIR` 指着一份还不打清单的旧采集器,它写了多少篇我们不知道。
     """
     from kb.config import VAULT_ROOT
+    from kb.fetch_rounds import text_field
 
     out = str(event.get("out") or "")
     rows = event.get("items")
@@ -116,7 +117,7 @@ def _receipt(event: dict) -> frozenset[Fetched] | None:
     for one in rows:
         if not isinstance(one, dict):
             return None                 # 清单读不懂:当成说不出来,不挑着收
-        name = str(one.get("name") or "").strip()
+        name = (text_field(one.get("name")) or "").strip()
         if not name:
             # **答不出文件名的那一行也是「读不懂」,不许挑着收。** 挑着收交上去的是
             # 一份少记的清单,而上层拿它当确定值用(「这一次抓了 N 篇」)—— 少记是
@@ -125,10 +126,15 @@ def _receipt(event: dict) -> frozenset[Fetched] | None:
             return None
         # 身份退回路径只在「旧采集器打了名字、没打 id」时发生。那时条数照旧
         # 确定,只有分解说不出来 —— 比整轮报「不可确认」更接近事实。
-        aid = str(one.get("id") or "").strip()
+        # **但「没打」和「打了个读不懂的东西」是两件事**:后者一律整份作废,不许
+        # `str()` 成一个看着确定的身份(口径在 `fetch_rounds.text_field`)。
+        aid, round_key = text_field(one.get("id")), text_field(one.get("round"))
+        if aid is None or round_key is None:
+            return None
+        aid, round_key = aid.strip(), round_key.strip()
         rel = str(prefix / name)
         got.append(Fetched(f"wechat_local:{aid}" if aid else f"path:{rel}",
-                           str(one.get("round") or "").strip(), rel))
+                           round_key, rel))
     return frozenset(got)
 
 

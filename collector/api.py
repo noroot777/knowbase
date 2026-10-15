@@ -37,7 +37,8 @@ def _ingest_crawl_article(repo, account_name: str, article: dict,
     """入库单篇爬取文章：元数据、正文、字数。
 
     `fetch_round` 是知识库这一次业务抓取的批次号，只透传给仓储；它只在这一篇
-    **首次**落库时才被记下来，而且跟首次元数据同一个事务（为什么必须如此见
+    **首次**落库时才被记下来，而且跟首次元数据写在同一个 savepoint 里——要么一起
+    落地，要么连文章那行一起撤回（为什么「同一个事务」还不够见
     `ArticleRepository.upsert_article_from_blog` 的说明）。下面这次 commit
     **在走网络抓正文之前**——元数据和身份一起落地，正文失败不影响它们。
     """

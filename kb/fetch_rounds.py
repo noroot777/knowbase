@@ -201,6 +201,33 @@ def in_scope(rel: str, prefixes=None) -> bool:
     return False
 
 
+def text_field(value, *, missing_ok: bool = True) -> str | None:
+    """协议里一个文本字段的**唯一判据**:读得懂给它,读不懂给 `None`。
+
+    读不懂的处理由调用方决定(整份作废 / 记一笔缺口 / 报不可确认),但「什么叫读得
+    懂」只有这一份:**不是字符串就是读不懂,不许 `str()` 一下糊过去。**
+    `str(None)` 是 `'None'`、`str({...})` 是 `"{'a': 1}"` —— 都是**非空**字符串,
+    当抓取身份用时会被归进「确定不是这一轮抓的」(`carried`),当路径用时不在取材
+    范围里、被当成正常筛掉。两样都把一个缺口伪装成确定答案,而那正是整条链上最该
+    拦住的东西。
+
+    `missing_ok`(默认):字段没给(`None`)算空串 —— 空串是「说不清」,本来就是个
+    合法答案(存量内容、手工导入的链接、还没记过的那一轮)。要求字段必须在场时传
+    `False`,那时 `None` 也是读不懂(`Fetched` 三元组就是这一档:它的字段标注是
+    `str`,给个 `None` 是生产者自己的 bug,不是「说不清」)。
+
+    消费方:`_identity`(进程内的三元组)、`_pairs`(盘上那份账本)、
+    `kb.collectors.wechat_local._receipt`(子进程交上来的 JSON)。采集器那侧的
+    `collector/cli.py` 的 `cmd_export` 另有一份同口径的副本 —— 它是独立进程里的
+    另一个包,导不过来,改这里记得同步改它。
+    """
+    if value is None:
+        return '' if missing_ok else None
+    if not isinstance(value, str):
+        return None
+    return value
+
+
 def _pairs(obj: dict) -> list[tuple[str, str]] | None:
     """一条回执行里的 `(内容身份, 抓取身份)`。读不出来返回 None(= 记不全)。
 
@@ -213,14 +240,25 @@ def _pairs(obj: dict) -> list[tuple[str, str]] | None:
             return None
         out = []
         for one in raw:
-            if not isinstance(one, (list, tuple)) or not one or not str(one[0]):
+            if not isinstance(one, (list, tuple)) or not one:
                 return None
-            out.append((str(one[0]), str(one[1]) if len(one) > 1 else ''))
+            cid = text_field(one[0], missing_ok=False)
+            fid = text_field(one[1]) if len(one) > 1 else ''
+            if not cid or fid is None:
+                return None
+            out.append((cid, fid))
         return out
     raw = obj.get('paths')
     if not isinstance(raw, list):
         return None
-    return [(f'path:{p}', '') for p in (str(x) for x in raw) if p]
+    out = []
+    for x in raw:
+        one = text_field(x, missing_ok=False)
+        if one is None:
+            return None     # 盘上这一行被改坏了:整行读不出来,报不可确认
+        if one:
+            out.append((f'path:{one}', ''))
+    return out
 
 
 def _fold(lines) -> tuple[list[dict], bool]:
@@ -520,13 +558,13 @@ def _identity(one) -> tuple[str, str, str]:
         cid, fid, path = one
     except (TypeError, ValueError):
         return '', '', ''
-    # **字段不是字符串就算读不懂,不许 `str()` 一下糊过去。** `str(None)` 是
-    # `'None'`:那是个**非空**的抓取身份,会被当成"确定不是这一轮抓的"归进
-    # `carried`;而 `'None'` 这个路径不在取材范围里,会被范围过滤当成正常筛掉 ——
-    # 一个缺口于是伪装成确定的零条。两样都是把"不知道"写成一个确定答案。
-    if not all(isinstance(x, str) for x in (cid, fid, path)):
+    # 字段不是字符串就算读不懂(为什么不许 `str()` 糊过去见 `text_field`)。
+    # 这里要求字段必须在场:`Fetched` 的三个字段都标注成 `str`,给个 `None` 是
+    # 生产者自己的 bug,不是「说不清」。
+    got = [text_field(x, missing_ok=False) for x in (cid, fid, path)]
+    if any(x is None for x in got):
         return '', '', ''
-    return cid, fid, path
+    return got[0], got[1], got[2]
 
 
 def note(key: str, produce) -> None:

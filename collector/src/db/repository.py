@@ -349,7 +349,7 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
     ) -> None:
         """入库 / 更新一篇文章。`fetch_round` 只在这一篇**首次**落库时才记。
 
-        **「这一篇是知识库哪一次业务抓取头一回发现的」必须和首次元数据同一个事务。**
+        **「这一篇是知识库哪一次业务抓取头一回发现的」必须和首次元数据一起落、一起撤。**
         药丸那句分解靠它分开「这一次新抓到的」和「之前抓到、这一次才补导进来的」,
         而这件事**只有首次插入这一刻知道答案**:过了这一刻,库里一篇有正文没身份的
         文章和一篇存量文章长得一模一样,谁也分不出它是刚抓的还是早就在的。所以
@@ -374,6 +374,27 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
         第二条语句照旧无条件跑。首次插入时它必然走 `DO UPDATE`、写的是同一组值,
         纯无害;而它同时是 `OR IGNORE` 的兜底 —— `OR IGNORE` 会把 CHECK / NOT NULL
         违反一起吞掉(rowcount 同样是 0),靠它才会照旧抛出来。
+
+        **「两条语句在同一个事务里」还不够,得能整篇撤回。** 同一个事务只保证它们
+        不会被**别人**的提交劈开;劈开它们的是**自己这一步抛出来的异常** —— 文章
+        那行已经写进事务,身份那行炸了,调用方(`_download`)逐篇接住异常接着跑下
+        一篇,下一篇成功时的那次 `commit()` 就把这半条一起提交了(用
+        `set_authorizer` 只拒身份表的写就能复现,独立连接看到的末态是
+        `articles=1 / article_fetch_rounds=0`)。而这一篇从此有正文、没来源,重试
+        时 `first` 为假、再也补不上,药丸上永远算「说不清」。
+
+        所以**整篇写入是一个可回滚的单元**:进来先 `SAVEPOINT`,任何一步抛出来就
+        `ROLLBACK TO` 把这一篇撤干净再把异常原样抛上去。用 savepoint 而不是
+        `rollback()`:调用方的事务里可能还躺着别的业务写入(账号最近检查时间、
+        发现记录),整份回滚等于连带撤掉它们。**不按错误类型分支** —— 判据是
+        「这一步没走完」,不是「它报的是哪个错误码」。
+
+        撤回之后下一轮才有机会把这一篇当成真正的首次插入、记下**那一次**的批次,
+        这跟「给任何没有来源的文章补当前批次」是两件事:后者会把存量文章说成这次
+        新抓到的(第 1 轮 F1 的那一半)。
+
+        自动提交态下进来时,那句 `SAVEPOINT` 自己开了事务,收尾的 `RELEASE` 因此
+        会把它提交掉(实测)。那正是这一刻该有的末态:这一篇整篇写完了。
         """
         aid = str(blog.get("id") or "").strip()
         if not aid:
@@ -401,6 +422,24 @@ class ArticleRepository(QueryMixin, ReadingMixin, NotesMixin):
             article_source,
             import_listed,
         )
+        self.conn.execute("SAVEPOINT one_article")
+        try:
+            self._write_one_article(aid, values, fetch_round, blog)
+        except BaseException:
+            # 这一步没走完 = 这一篇不算写过。只撤这一篇,调用方同一个事务里别的
+            # 业务写入原样留着;撤完把异常原样抛上去,不吞。
+            self.conn.execute("ROLLBACK TO SAVEPOINT one_article")
+            self.conn.execute("RELEASE SAVEPOINT one_article")
+            raise
+        self.conn.execute("RELEASE SAVEPOINT one_article")
+
+    def _write_one_article(self, aid: str, values: tuple,
+                           fetch_round: str, blog: dict[str, Any]) -> None:
+        """`upsert_article_from_blog` 的写入正文。**只许它在 savepoint 里调。**
+
+        单独拆出来是为了让「哪些写构成这一篇」有个明确的边界:往这里加语句就是
+        往那个原子单元里加,不会有人不小心把一条写加在 savepoint 外面。
+        """
         first = self.conn.execute(
             f"INSERT OR IGNORE INTO articles ({_ARTICLE_COLUMNS})"
             f" VALUES ({_ARTICLE_VALUES})",

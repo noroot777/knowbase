@@ -115,6 +115,21 @@ def cmd_export(args) -> int:
     # 身份和给人看的 `[ok]` 分两行打,而不是把 `[ok]` 那行改成机器格式:那一行
     # 是人在终端里直接读的。**只认 `[item]` 一份清单**,不额外再收一份路径清单
     # —— 两份清单迟早漂,而漂的后果是回执里的条数和身份对不上。
+    def _text(value):
+        """`[item]` 行里一个文本字段:读得懂给它,读不懂给 `None`。
+
+        **读得懂 = 是字符串,或者这个键压根没给**(没给算空串,空串是「说不清」,
+        本来就是合法答案)。**不许 `str()` 一下糊过去**:`str(None)` 是 `'None'`、
+        `str({...})` 是 `"{'a': 1}"`,都是**非空**字符串,当抓取身份交上去会被归进
+        「确定不是这一轮抓的」—— 一个缺口于是伪装成确定答案。
+
+        口径与 `kb/fetch_rounds.py` 的 `text_field` 同一份。两个包、两个进程,导不
+        过来,所以这里抄了一份 —— **改一边记得同步改另一边**。
+        """
+        if value is None:
+            return ""
+        return value if isinstance(value, str) else None
+
     items, out, torn = [], "", False
     for line in proc.stdout.splitlines():
         if "无正文,跳过" in line:
@@ -127,12 +142,14 @@ def cmd_export(args) -> int:
             # 读不懂的那一行**作废整份清单**,不跳过它接着收下一行:跳过之后
             # 交上去的是一份少记的清单,而上层会把它当确定值用(「这一次抓了
             # N 篇」)。少记是静默丢数据,报「不可确认」顶多让人多同步一次。
-            if not isinstance(one, dict) or not str(one.get("name") or ""):
+            fields = one if isinstance(one, dict) else {}
+            got = {k: _text(fields.get(k)) for k in ("id", "round", "name")}
+            # 答不出文件名的那一行同档:不是字典、名字空着、哪个字段读不懂,
+            # 三种一律整份作废(`_text` 说了什么叫读得懂)。
+            if None in got.values() or not got["name"].strip():
                 torn = True
                 continue
-            items.append({"id": str(one.get("id") or ""),
-                          "round": str(one.get("round") or ""),
-                          "name": str(one["name"])})
+            items.append(got)
         elif line.startswith("[export] 输出目录: "):
             out = line[len("[export] 输出目录: "):].strip()
     tail = [l for l in proc.stdout.splitlines() if "完成" in l]

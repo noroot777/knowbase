@@ -259,6 +259,23 @@ class WeChatReceiptTests(_Base):
                 self.assertIsNone(self._run(self._proc(json.dumps(
                     raw, ensure_ascii=False))))
 
+    def test_a_field_that_is_not_text_voids_the_whole_list(self):
+        """清单里某个字段不是字符串:**整份不可确认**,不许 `str()` 成一个身份。
+
+        `str({'not': 'an identity'})` 是 `"{'not': 'an identity'}"` —— 非空,于是
+        那一条被当成「确定不是这一轮抓到的」归进 carried(审查第 2 轮实测到的就是
+        这个数:`carried=1, unsure=0, partial=false`)。把一行坏数据读成确定答案,
+        比报不可确认坏得多。
+        """
+        out = str(self.vault / 'source' / 'rss')
+        for key, bad in (('round', {'not': 'an identity'}), ('round', 7),
+                         ('id', ['a']), ('name', 3)):
+            raw = json.loads(self._event(out, ['a.md', 'b.md']))
+            raw['items'][1][key] = bad
+            with self.subTest(field=key, value=repr(bad)):
+                self.assertIsNone(self._run(self._proc(json.dumps(
+                    raw, ensure_ascii=False))))
+
     def test_an_export_root_outside_the_vault_cannot_be_a_receipt(self):
         """`out` 不在 vault 里:算出来的相对路径不是知识库里那个身份。
 

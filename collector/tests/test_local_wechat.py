@@ -2,30 +2,18 @@ from __future__ import annotations
 
 import json
 import subprocess
-import tempfile
 import unittest
 import contextlib
 import io
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import Mock, call, patch
-from xml.sax.saxutils import escape
 
 from src.crawler.local_wechat import LocalReader, LocalReaderError, parse_push, resolve_accounts
 from src.db import connection as conn_mod
 from src.utils.article_identity import article_identity, stable_article_id
 
-
-def push(biz="biz-a", mid="101", idx="1", published="2026-09-15 18:30", **extra):
-    url = f"https://mp.weixin.qq.com/s?__biz={biz}&mid={mid}&idx={idx}&sn=signature&chksm=checksum&scene=123&xtrack=1"
-    fields = {"title": "测试文章", "url": url, "digest": "摘要", "cover": "",
-              "pub_time": str(int(datetime.strptime(published, "%Y-%m-%d %H:%M").timestamp())),
-              **extra}
-    return {"text": "<msg><appmsg><mmreader><category><item>"
-            + "".join(f"<{k}>{escape(v)}</{k}>" for k, v in fields.items())
-            + "</item></category></mmreader></appmsg></msg>",
-            "create_time": 1}
+from tests.local_collect_fixture import LocalCollectEnv, push
 
 
 class PushTests(unittest.TestCase):
@@ -217,44 +205,8 @@ class PushTests(unittest.TestCase):
             self.assertEqual(3, sleep.call_count)
 
 
-class LocalCollectionTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        root = Path(self.tmp.name)
-        self.saved = (conn_mod.DEFAULT_DB_PATH, conn_mod.DATA_DIR, conn_mod._db_ready)
-        conn_mod.DEFAULT_DB_PATH, conn_mod.DATA_DIR, conn_mod._db_ready = root / "test.db", root, False
-        from src.db.repository import ArticleRepository
 
-        self.repo = ArticleRepository()
-        self.repo.enable_crawl_account("档案名", "biz-a")
-        self.repo.enable_crawl_account("停用号", "biz-off")
-        self.repo.conn.execute("UPDATE accounts SET in_crawl_config=0 WHERE name='停用号'")
-        self.repo.commit()
-        self.reader = LocalReader()
-        self.reader.check = Mock()
-        self.reader.accounts = Mock(return_value=[{"username": "gh_test", "display_name": "档案名"}])
-        self.reader.messages = Mock(return_value=[push()])
-        from tests.local_source_fixture import TimelineFixture
-
-        self.sql_fixture = TimelineFixture(self.reader)
-        self.reader.call = self.sql_fixture.call
-
-        self.fill = patch("src.utils.wechat_body.fetch_article_body_full", return_value=(
-            ["真实正文测试内容"], "<p>真实正文测试内容</p>", "")).start()
-        patch("src.utils.request_pacing.RequestPacer.wait").start()
-
-    def tearDown(self):
-        self.sql_fixture.close()
-        patch.stopall()
-        self.repo.close()
-        conn_mod.DEFAULT_DB_PATH, conn_mod.DATA_DIR, conn_mod._db_ready = self.saved
-        self.tmp.cleanup()
-
-    def collect(self, **kwargs):
-        from src.collect.local_runner import collect
-
-        return collect(lambda event: None, reader=self.reader, **kwargs)
-
+class LocalCollectionTests(LocalCollectEnv):
     def test_local_collect_twice_is_idempotent_and_does_not_touch_disabled_accounts(self):
         first, second = self.collect(), self.collect()
         self.assertEqual([], first["errors"])
@@ -401,211 +353,6 @@ class LocalCollectionTests(unittest.TestCase):
         self.assertEqual(1, result["unreadable_messages"])
         self.assertEqual(1, result["new_articles"])
 
-    def _export_event(self, out):
-        """跑一次真导出脚本,再让 `cli.cmd_export` 把它的输出收成结构化事件。
-
-        两段都走真的:清单是脚本自己逐篇打出来的,`out` 和每条的 `id`/`round`
-        都由 cli 从那些行里解析。中间任何一段只留给人看的话,知识库那一侧就只能
-        回去扫全库猜归属,而差集分不出"谁写的"。
-        """
-        import sys
-        from scripts import export_obsidian
-
-        with patch.object(sys, "argv",
-                          ["export", "--out", out, "--dedup-root", out, "--no-images"]), \
-             contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(0, export_obsidian.main())
-        raw = output.getvalue()
-        # 一篇都没导的时候也得有这一行:上层靠它把清单里的「天/文件名」还原成
-        # vault 相对路径。
-        self.assertIn(f"[export] 输出目录: {out}", raw)
-        self.human = raw
-
-        import cli
-        with patch("cli.subprocess.run", return_value=subprocess.CompletedProcess(
-                [], 0, stdout=raw, stderr="")), \
-             contextlib.redirect_stdout(io.StringIO()) as event_output, \
-             contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
-        event = json.loads(event_output.getvalue())
-        # 这里就把 `items` 这个键钉住,别留给各条用例去下标 —— 键名漂了的话每条
-        # 用例红成 KeyError(ERROR),而我们要的是一句说得出后果的 FAIL:
-        # 知识库那一侧读不到清单就只能把整轮报成「不可确认」。
-        self.assertIn("items", event,
-                      "事件里没有 items 清单 —— 知识库那侧只能报「不可确认」")
-        return event
-
-    def test_export_hands_up_what_it_wrote_with_each_items_identity(self):
-        """导出脚本逐篇打的那行清单,连同输出目录一起收进结构化事件。
-
-        每条带 `id`(稳定内容身份)和 `round`(发现它的那一次业务抓取)——
-        知识库拿它当成果回执,并据此分开「这一次新抓到的」和「补导之前抓到的」
-        (口径在 kb/collectors/__init__.py 的 materialize 契约)。
-        """
-        from pathlib import Path
-
-        self.reader.messages.return_value = [push()]
-        self.fill.return_value = (["正文"], "<p>正文</p>", "")
-        self.collect(round_key="batch-today")
-        out = str(Path(self.tmp.name) / "export2")
-        event = self._export_event(out)
-        self.assertIn("  [ok] ", self.human)       # 给人看的那一行还在
-        # 先判「交上来了没有」再判内容:缺键的话 KeyError 会把红变成 ERROR,
-        # 而「清单压根没交」正是这一条要拦的那种改动。
-        self.assertEqual({"out", "items"}, {"out", "items"} & set(event),
-                         f"事件里没有成果回执:{sorted(event)}")
-        self.assertEqual(out, event["out"])
-        self.assertEqual(1, len(event["items"]))
-        one = event["items"][0]
-        self.assertTrue(one["name"].endswith(".md"))
-        # 回执指的得是真落在盘上的那个文件,不是一句好看的文案
-        self.assertTrue((Path(out) / one["name"]).is_file())
-        self.assertTrue(one["id"])                             # 稳定内容身份
-        self.assertEqual("batch-today", one["round"])          # 发现它的那一轮
-
-    def test_the_round_that_found_an_article_is_not_the_round_that_exports_it(self):
-        """**这一条是本任务的要害**:正文当天没抓到、隔一轮补上才导出。
-
-        回执里记的仍是**发现**它的那一轮(`batch-day1`),不是导出它的这一轮 ——
-        否则药丸会把一篇前几天就抓到的文章算成「这一次新抓到的」,而远端那天
-        压根没发新文章。`INSERT OR IGNORE` 保证第二轮不改写它。
-        """
-        from pathlib import Path
-
-        self.reader.messages.return_value = [push()]
-        # 第一轮:发现了它,但正文一个字都没拿到 —— 导出会跳过它(无正文)
-        self.fill.return_value = ([], "", "读取失败")
-        self.collect(round_key="batch-day1")
-        out = str(Path(self.tmp.name) / "export-carried")
-        self.assertEqual([], self._export_event(out)["items"])
-
-        # 第二轮:正文补上了,这一轮才真写进 vault。先清掉上一轮留下的退避状态,
-        # 不然它会被当成「还没到重试时间」整轮跳过。
-        with self.repo.conn:
-            self.repo.conn.execute("DELETE FROM article_fetch_state")
-        self.fill.return_value = (["补上的正文"], "<p>补上的正文</p>", "")
-        self.collect(round_key="batch-day3")
-        items = self._export_event(out)["items"]
-        self.assertEqual(1, len(items))
-        self.assertEqual("batch-day1", items[0]["round"])
-
-    def test_filling_in_a_body_does_not_create_a_first_origin(self):
-        """**补正文不构成新的首次来源。** 库里早就有、但没正文的那一篇。
-
-        这一篇可能是存量、手工导入、没带批次号跑的那次采集,也可能是冻结分支
-        写进来的 —— 共同点是**没有谁能证明它是哪一次抓到的**。它没正文,所以
-        照旧会进采集队列;等哪天正文补上了,这一次的批次号不许盖到它头上。
-
-        盖上去的后果不是"数字差一点":远端今天一条新内容都没发,药丸会写
-        「其中 1 篇是这一次新抓到的」。正确答案是 0 篇新抓到、1 篇说不清。
-        """
-        from pathlib import Path
-        from src.utils.article_identity import stable_article_id
-
-        article = parse_push(push())[0]
-        aid = stable_article_id(article["link"])
-        # 先造出「有文章、没正文、没来源」这个状态:不带批次号入一次元数据
-        self.repo.upsert_article_from_blog("档案名", article)
-        self.repo.commit()
-        self.assertEqual(0, self.repo.conn.execute(
-            "SELECT COUNT(*) FROM article_fetch_rounds").fetchone()[0])
-
-        self.fill.return_value = (["隔几天才补上的正文"], "<p>补上的</p>", "")
-        self.collect(round_key="batch-today")
-        self.assertTrue(self.repo.conn.execute(
-            "SELECT 1 FROM article_bodies WHERE article_id=?", (aid,)).fetchone(),
-            "正文该补上才对,这一条测的是补上之后来源有没有被改写")
-        self.assertEqual([], self.repo.conn.execute(
-            "SELECT round_key FROM article_fetch_rounds").fetchall(),
-            "补正文那一轮把自己写成了这一篇的首次来源 —— 远端没发新内容,"
-            "药丸却会说「这一次新抓到的」")
-        # 后果钉到回执上:知识库那侧读到空串才会归到 unsure 那一档
-        out = str(Path(self.tmp.name) / "export-prior")
-        self.assertEqual("", self._export_event(out)["items"][0]["round"])
-
-    def test_a_crash_after_the_body_cannot_leave_an_article_without_its_origin(self):
-        """来源和首次元数据同一个事务:正文之后崩一次也分不开它们。
-
-        原来来源是正文抓完之后补记的。入库单篇要走三段提交(元数据 → 正文 →
-        字数),**正文之后那一段**崩一次(磁盘满、库被锁死)就留下一篇有正文、
-        没来源的文章 —— 而它从此再也不进采集队列(`_download` 的
-        `has_readable_body` 那道筛),来源永久丢掉,这一篇在药丸上永远算「说不清」。
-
-        注入点必须在**正文已经提交之后**:抓正文本身那一步的异常在
-        `_fetch_article_detail_text` 里就被接住了(退避重试),它崩不出这个形态。
-        判据落在后果上:用一条**独立连接**(只看得见已提交的东西)去看,文章在
-        库里就一定带着它的来源;再跑一次采集也确认它不会回到队列里来。
-        """
-        from src.db.repository import ArticleRepository
-
-        self.fill.return_value = (["正文落库了"], "<p>正文落库了</p>", "")
-        with patch.object(ArticleRepository, "set_word_count",
-                          side_effect=OSError("写字数时磁盘满了")):
-            result = self.collect(round_key="batch-crash")
-        self.assertTrue(any("磁盘满" in e for e in result["errors"]),
-                        f"注入点没崩,这一条就什么都没测到:{result['errors']}")
-
-        seen = conn_mod.get_connection(readonly=True)
-        try:
-            rows = seen.execute("SELECT id FROM articles").fetchall()
-            origins = dict(seen.execute(
-                "SELECT article_id, round_key FROM article_fetch_rounds").fetchall())
-            bodies = seen.execute("SELECT COUNT(*) FROM article_bodies").fetchone()[0]
-        finally:
-            seen.close()
-        self.assertEqual(1, len(rows))
-        self.assertEqual(1, bodies, "正文该已经提交 —— 这一条测的是正文之后崩掉")
-        self.assertEqual({rows[0]["id"]: "batch-crash"}, origins,
-                         "文章连正文都提交了、来源却没跟上 —— 它再也不进采集队列,"
-                         "这一篇的来源永久丢了")
-        # 「再也不进队列」不是推测:下一轮它被当成已有的那一篇直接筛掉
-        again = self.collect(round_key="batch-next")
-        self.assertEqual((1, 0), (again["existing_articles"], again["download_total"]))
-
-    def test_a_collect_without_a_round_leaves_the_identity_blank(self):
-        """在终端里手动跑一次采集(没有业务抓取身份):不许编一个。
-
-        空串是「说不清」,知识库那一侧归到 unsure 那一档;硬写个值等于凭空造
-        「这一篇是哪一次抓到的」这个事实。
-        """
-        from pathlib import Path
-
-        self.reader.messages.return_value = [push()]
-        self.fill.return_value = (["正文"], "<p>正文</p>", "")
-        self.collect()                                  # 不传 round_key
-        out = str(Path(self.tmp.name) / "export-anon")
-        self.assertEqual("", self._export_event(out)["items"][0]["round"])
-
-    def test_a_torn_item_line_voids_the_whole_list(self):
-        """清单里有一行读不懂:**整份作废,不挑着收**。
-
-        挑着收的后果是交上去一份少记的清单,而上层把它当确定值用(「这一次抓了
-        N 篇」)—— 少记是静默丢数据,报「不可确认」顶多让人多同步一次。
-        判据落在后果上:事件里**没有** `items` 这个键,知识库那侧据此报不可确认。
-        """
-        import cli
-
-        raw = ("[export] 输出目录: /tmp/whatever\n"
-               '  [item] {"id": "a1", "round": "batch-x", "name": "2026-10-15/a.md"}\n'
-               "  [item] {\"id\": \"a2\", \"round\"\n"        # 写到一半
-               "[export] 完成: 导出 2, 跳过(已存在) 0, 空正文 0\n")
-        with patch("cli.subprocess.run", return_value=subprocess.CompletedProcess(
-                [], 0, stdout=raw, stderr="")), \
-             contextlib.redirect_stdout(io.StringIO()) as event_output, \
-             contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
-        event = json.loads(event_output.getvalue())
-        self.assertNotIn("items", event)
-        # 反过来钉一边:整份清单都读得懂时照旧给键(不是一出错就永久不给了)。
-        good = raw.replace("  [item] {\"id\": \"a2\", \"round\"\n", "")
-        with patch("cli.subprocess.run", return_value=subprocess.CompletedProcess(
-                [], 0, stdout=good, stderr="")), \
-             contextlib.redirect_stdout(io.StringIO()) as event_output, \
-             contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.EXIT_OK, cli.main(["export", "--no-images"]))
-        self.assertEqual([{"id": "a1", "round": "batch-x",
-                           "name": "2026-10-15/a.md"}],
-                         json.loads(event_output.getvalue())["items"])
 
     def test_export_keeps_old_empty_article_retryable(self):
         from scripts import export_obsidian
@@ -664,6 +411,11 @@ class LocalCollectionTests(unittest.TestCase):
             self.assertEqual(5, saved.execute("SELECT SUM(is_wx_deleted) FROM articles").fetchone()[0])
         self.assertEqual(4, self.repo.conn.execute("SELECT SUM(is_wx_deleted) FROM articles").fetchone()[0])
         self.assertEqual({"candidates": 0, "restored": 0}, recover(db))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
 
 
 if __name__ == "__main__":

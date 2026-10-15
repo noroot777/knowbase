@@ -232,6 +232,49 @@ class RoundBookTests(_Base):
         self.assertEqual(BOOK(1, 2, '09:00', fresh=0, unsure=2),
                          fetch_rounds.today(day))
 
+    def _book_line(self, line):
+        day = T('2026-09-29 09:00')
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / fetch_rounds.FILE_NAME).write_text(
+            '{"key": "batch-a", "day": "2026-09-29", "at": "09:00", "ex": 1}\n'
+            + line + '\n', encoding='utf-8')
+        return fetch_rounds.today(day)
+
+    def test_a_persisted_field_of_the_wrong_type_is_unknown_not_an_identity(self):
+        """盘上那份账本里某个字段**给错了类型**:报「不可确认」,不许读成一个身份。
+
+        `str({"not": "an id"})` 是 `"{'not': 'an id'}"` —— **非空**,于是那一条被
+        归进「之前抓到、这一次才补导的」(审查第 2 轮实测到的就是这个);内容身份
+        位置上给错类型则连去重都没法做。一行 `paths` 里的坏值同档:路径没有「说不
+        清」这个合法值,读不出来就筛不了取材范围,而静默筛掉等于少记一条确定值。
+
+        反过来钉一边有两处:形状旧但字段都读得懂的那种行照旧折得出条数
+        (`test_an_old_shape_receipt_line_is_still_a_receipt`),抓取身份位置上的
+        `null` 读成「说不清」而不是整份作废(下一条)。
+        """
+        for bad in ('{"key": "batch-a", "items": [[null, "batch-a"]]}',
+                    '{"key": "batch-a", "items": [[7, "batch-a"]]}',
+                    '{"key": "batch-a", "items": [["rss:test", {"not": "an id"}]]}',
+                    '{"key": "batch-a", "items": [["rss:test", 7]]}',
+                    '{"key": "batch-a", "paths": [null]}',
+                    '{"key": "batch-a", "paths": [{"p": 1}]}'):
+            with self.subTest(line=bad):
+                self.assertIsNone(self._book_line(bad))
+
+    def test_a_missing_identity_on_disk_is_unsure_not_a_void_book(self):
+        """反过来钉一边:**抓取身份那一格没给值** = 「说不清」,不是整份作废。
+
+        空串本来就是这一格的合法答案(存量内容、手工导入的链接、那一轮真没记过),
+        而只有一个元素的旧行读出来也正是空串 —— 把 `null` 判成坏数据会把一天的
+        正确条数整份丢掉,那是用另一种静默丢数据换掉这一种。
+        """
+        self.assertEqual(BOOK(1, 1, '09:00', fresh=0, unsure=1),
+                         self._book_line(
+                             '{"key": "batch-a", "items": [["rss:test", null]]}'))
+        self.assertEqual(BOOK(1, 1, '09:00', fresh=0, unsure=1),
+                         self._book_line(
+                             '{"key": "batch-a", "items": [["rss:test"]]}'))
+
     def test_a_write_failure_says_unknown_and_is_retried_later(self):
         """写失败不许假装成功(旧实现吞掉 `OSError`:文章已入库而按钮永久写
         0 条)。这一刻说「不可确认」,下一次账本操作把漏掉的那几行补上去。"""
