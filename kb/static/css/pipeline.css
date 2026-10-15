@@ -77,24 +77,13 @@
   .pipe-history-result { grid-column: 2; justify-self: start; }
 }
 
-/* 每日定时同步:原来是「我的订阅」页尾一张常驻大卡片,把正文阅读区挤成一条缝,
-   而它一天也调不了一次。现在收进这个弹窗,入口是页头上那颗带状态的按钮。 */
-.sched-modal { width: min(640px, 94vw); max-height: 90dvh; overflow-y: auto; }
-.sched-modal-head { display: flex; gap: 20px; justify-content: space-between; align-items: flex-start; }
-.sched-modal-head h2 { margin-bottom: 6px; }
-.sched-modal-head > button { font-size: 23px; flex-shrink: 0; }
-.sched-modal fieldset { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 18px; }
-.sched-modal label { display: flex; align-items: center; gap: 8px; font-size: 14px; }
-.sched-modal input[type=time] { border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; background: var(--card); font: inherit; color: var(--ink); }
-.sched-modal-footer { display: flex; align-items: center; gap: 12px; margin-top: 18px; font-size: 13px; color: var(--muted); }
-#sched-save { margin-left: auto; }
 .pipe-setup { width: min(620px,94vw); display: flex; flex-direction: column; padding: 0; overflow: hidden; }
 .pipe-setup-heading { display: flex; flex-shrink: 0; gap: 20px; justify-content: space-between; padding: 22px 24px 16px; }
 .pipe-setup-heading h2 { margin-bottom: 6px; }
 .pipe-setup-heading > button { font-size: 23px; flex-shrink: 0; }
 .pipe-setup .pipe-notice { margin: 0 24px 12px; flex-shrink: 0; }
 #pipe-fields { flex: 1; overflow-y: auto; min-height: 0; padding: 0 24px; }
-.pipe-setup fieldset, .sched-modal fieldset { border: 0; margin-inline: 0; min-width: 0; }
+.pipe-setup fieldset { border: 0; margin-inline: 0; min-width: 0; }
 .pipe-setup .row { margin-bottom: 20px; }
 .pipe-setup .hint { font-size: 13px; }
 .pipe-setup label { font-size: 14px; }
@@ -118,7 +107,6 @@
 }
 .pipe-acct-group-head b { font-size: 12.5px; font-weight: 600; }
 .pipe-acct-group-head span { font-size: 12px; color: var(--muted); }
-.sched-modal .pipe-channel-list { flex-basis: 100%; margin: 0; }
 #pipe-range-btn { margin-left: 12px; font-size: 14px; border: 1px solid var(--line); }
 #pipe-range-hint { margin-top: 8px; }
 #pipe-range-pop { margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
@@ -167,6 +155,4 @@
   .pipe-channel-list { gap: 6px; margin: 6px 0; }
   .pipe-channel { padding: 9px 11px; }
   #pipe-acct-list { max-height: 190px; }
-  .sched-modal fieldset { padding: 0; gap: 14px; }
-  .sched-modal-footer { flex-wrap: wrap; }
 }

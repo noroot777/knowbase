@@ -71,7 +71,6 @@ async page => {
       '/api/keys': {keys:{anthropic:{set:false},openai:{set:false}}},
       '/api/mcp/status': {config:'{}',command:'test command',tools:[],cli_available:false},
       '/api/pipeline/channels': {default:'test',channels:[{id:'test',label:'测试来源'}]},
-      '/api/pipeline/schedule': {enabled:false,time:'07:30'},
       '/api/pipeline/status': {running:false,stages:{},source:{online:false},log:[]},
       '/api/conversations': {conversations:[]}, '/api/stages': {stages:[],providers:[]},
     };

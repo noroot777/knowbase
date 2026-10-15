@@ -60,7 +60,6 @@ const FIXTURES = {
                               default: "wechat_local", labels: {}, aliases: {} },
   "/api/pipeline/status": { running: false, stages: {}, log: [], last_run: null,
                             source: { online: true, ready: true } },
-  "/api/pipeline/schedule": { enabled: false, time: "07:30", channel: "social", channels: [] },
   "/api/pipeline/accounts": { accounts: [] },
   "/api/sources/targets": { manageable: false, label: "公众号", targets: [] },
   "/api/wechat/setup": { state: "ready", ready: true, running: false, provider_ready: true,

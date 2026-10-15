@@ -1,10 +1,13 @@
-"""读不出定时配置 ≠ 用户关掉了开关。两条定时**各有一组**。
+"""读不出定时配置 ≠ 用户关掉了开关。
 
-第 1 轮审查把两个配置文件 chmod 000 之后实测:两个端点都回 200,日报
-`settings.enabled=false`、页头 `enabled=false`,把这两份真实回包喂给前端那句
-说明,得到的是「日报定时未启用,这一类来源目前不会自动同步」—— 而恢复权限之后
-两条定时原样开着。根因是两个加载函数都把 `OSError` / `JSONDecodeError` 吃成
-空 dict,再派生出一个**假的确定值**。
+把配置文件 chmod 000 之后实测:端点照旧回 200、`settings.enabled=false`,把这份
+真实回包喂给前端那句说明,得到的是「日报定时未启用,这一类来源目前不会自动同步」
+—— 而恢复权限之后定时原样开着。根因是加载函数把 `OSError` / `JSONDecodeError`
+吃成空 dict,再派生出一个**假的确定值**。
+
+**原来页头那颗「定时同步」也有一组同形的判据**,它连同整条实现一起删了(见
+`docs/decisions/sync-schedule.md`);`unreadable_forms` 那张坏法清单仍是两边共同
+攒出来的,留着别删 —— 再加一条定时时照它过一遍就够。
 
 判据落在后果上:**读不出来时界面拿不到"未启用"这个结论**(API 不是 200)、
 **定时不触发也不改盘上那份**。前端拿到"请求失败"之后怎么说那句不确定的话,由
@@ -191,11 +194,9 @@ class SettingsWriteFailureTests(_Base):
     def setUp(self):
         super().setUp()
         for p in (patch.object(daily_run, 'SETTINGS_FILE', self.path),
-                  patch.object(pipeline, '_SCHED_FILE', self.path),
-                  patch.object(daily_run, '_log'), patch.object(pipeline, '_log')):
+                  patch.object(daily_run, '_log')):
             p.start(); self.addCleanup(p.stop)
         self.catch_announcements(daily_run)
-        self.catch_announcements(pipeline)
 
     def test_a_failed_daily_save_keeps_the_previous_settings(self):
         saved = daily_run.save_settings(True, '09:00', ['rss'], True, 1)
@@ -211,24 +212,12 @@ class SettingsWriteFailureTests(_Base):
         # 临时文件不许留在那儿冒充配置
         self.assertEqual([self.path.name], [p.name for p in self.path.parent.iterdir()])
 
-    def test_a_failed_head_save_keeps_the_previous_schedule(self):
-        saved = pipeline.save_schedule(True, '07:30', ['rss'])
-        before = self.path.read_bytes()
-        with patch('kb.config.os.replace', Mock(side_effect=OSError('配额不够'))):
-            with self.assertRaises(OSError):
-                pipeline.save_schedule(True, '10:00', ['rss'])
-        self.assertEqual(before, self.path.read_bytes())
-        again = pipeline.load_schedule()
-        self.assertTrue(again['enabled'])
-        self.assertEqual(saved['time'], again['time'])
-        self.assertEqual(['rss'], again['channels'])
-
     def test_a_failed_bookkeeping_write_keeps_the_previous_settings(self):
-        """定时自己那两次回写(`_write_settings` / `_mark_fired`)同理 ——
-        它们写的是 last_fired / next_run,截掉的却是整份配置。
+        """定时自己那次回写(`_write_settings`)同理 —— 它写的是 last_fired /
+        next_run,截掉的却是整份配置。
 
-        **这两处写失败不往上抛**(抛出去会把这一跳算成"出错没起跑",紧接着另一条
-        定时来抢同一把管道锁),但要留下原因;判据落在"盘上那份一字未动"。
+        **这一处写失败不往上抛**(抛出去会把这一跳算成"出错没起跑"),但要留下
+        原因;判据落在"盘上那份一字未动"。
         """
         daily_run.save_settings(True, '09:00', ['rss'], True, 1)
         before = self.path.read_bytes()
@@ -237,14 +226,6 @@ class SettingsWriteFailureTests(_Base):
                 daily_run._write_settings(next_run='2026-10-15T08:00')
         self.assertEqual(before, self.path.read_bytes())
         self.assertTrue(daily_run.load_settings()['enabled'])
-        self.assertTrue(any('没能写进磁盘' in line for line in self.said), self.said)
-        self.said.clear()
-        pipeline.save_schedule(True, '07:30', ['rss'])
-        before = self.path.read_bytes()
-        with patch('kb.config.os.replace', Mock(side_effect=OSError('配额不够'))):
-            pipeline._mark_fired('2026-10-15')
-        self.assertEqual(before, self.path.read_bytes())
-        self.assertTrue(pipeline.load_schedule()['enabled'])
         self.assertTrue(any('没能写进磁盘' in line for line in self.said), self.said)
 
     def test_a_failed_user_save_is_reported_as_unsaved(self):
@@ -256,115 +237,44 @@ class SettingsWriteFailureTests(_Base):
                                  json={'enabled': True, 'time': '10:00'})
             self.assertEqual(503, r.status_code, r.text)
             self.assertIn('没能保存', r.json()['detail'])
-            r = self.client.post('/api/pipeline/schedule',
-                                 json={'enabled': True, 'time': '10:00', 'channels': ['rss']})
-            self.assertEqual(503, r.status_code, r.text)
         self.assertTrue(daily_run.load_settings()['enabled'])
         self.assertEqual('09:00', daily_run.load_settings()['time'])
 
 
-class HeadScheduleUnreadableTests(_Base):
-    def setUp(self):
-        super().setUp()
-        for p in (patch.object(pipeline, '_SCHED_FILE', self.path),
-                  patch.object(pipeline, '_log')):
-            p.start(); self.addCleanup(p.stop)
-        self.catch_announcements(pipeline)
-
-    def test_an_unreadable_file_is_not_reported_as_disabled(self):
-        for name, break_it in self.unreadable_forms():
-            with self.subTest(name):
-                break_it()
-                with self.assertRaises(ScheduleUnreadable):
-                    pipeline.load_schedule()
-                r = self.client.get('/api/pipeline/schedule')
-                self.assertEqual(503, r.status_code, r.text)
-                self.assertNotIn('"enabled"', r.text)      # 见日报那组同一处
-                self.assertEqual({'detail'}, set(r.json()))
-                self.assertIn('页头的定时同步设置', r.json()['detail'])
-
-    def test_a_missing_file_is_still_a_clean_disabled(self):
-        r = self.client.get('/api/pipeline/schedule')
-        self.assertEqual(200, r.status_code, r.text)
-        self.assertFalse(r.json()['enabled'])
-        self.assertFalse(self.path.exists())
-
-    def test_an_unreadable_file_stops_the_timer_instead_of_firing(self):
-        self.path.write_text('{"enabled": tru', encoding='utf-8')
-        with patch.object(pipeline, 'start_pipeline', Mock(return_value=True)) as start:
-            self.assertFalse(pipeline._fire_head_schedule())
-            start.assert_not_called()
-            # 整跳也不许因此抛出去:调度线程那层只有一个 `except Exception: pass`,
-            # 抛到那里的后果是**日报那一档跟着被跳过**,而且一句话都不留。
-            with patch.object(daily_run, 'tick', Mock(return_value=False)) as tick, \
-                    patch.object(daily_run, 'is_running', Mock(return_value=False)):
-                pipeline._scheduler_tick()
-                tick.assert_called_once()
-        self.assertTrue(any('页头的定时同步设置:' in line and '定时暂停' in line
-                            for line in self.said), self.said)
-
-    def test_an_unreadable_file_is_never_overwritten(self):
-        broken = '{"enabled": true, "time": "07:30"'
-        self.path.write_text(broken, encoding='utf-8')
-        pipeline._mark_fired('2026-10-14')
-        self.assertEqual(broken, self.path.read_text(encoding='utf-8'))
-
-    def test_saving_refuses_instead_of_resetting_the_file(self):
-        broken = '{"enabled": true, "time": "07:30"'
-        self.path.write_text(broken, encoding='utf-8')
-        r = self.client.post('/api/pipeline/schedule',
-                             json={'enabled': True, 'time': '06:05', 'channels': ['rss']})
-        self.assertEqual(503, r.status_code, r.text)
-        self.assertEqual(broken, self.path.read_text(encoding='utf-8'))
-
-
 class TaskIsolationTests(_Base):
-    """**一条定时的故障只影响它自己。**
+    """**定时任务的故障留在它自己这一跳里,而且要留下原因。**
 
     外面那层 `_scheduler_loop` 只有一个 `except Exception: pass`:异常从
-    `_scheduler_tick` 抛出去的后果是**后面那条健康的定时一跳都不跑**,而且一句话
-    都不留。第 2 轮实测把页头那份配置写成非 UTF-8 字节,`UnicodeDecodeError`
-    (是 `ValueError` 不是 `OSError`)直接穿过去,日报那条明明开着,从此不再触发。
-    判据落在「另一条还跑不跑」和「有没有留下原因」,不是「线程死没死」。
+    `_scheduler_tick` 抛出去就是一句话都不留,而定时从此不再触发、面板上却一切
+    正常(实测形态:把配置写成非 UTF-8 字节,`UnicodeDecodeError` —— 是
+    `ValueError` 不是 `OSError` —— 直接穿过去)。**定时只剩日报这一条了,`_isolated`
+    那层照旧要留着**:判据落在「这一跳抛不抛」「有没有留下原因」,不是「线程死没死」。
     """
 
     def setUp(self):
         super().setUp()
-        for p in (patch.object(pipeline, '_SCHED_FILE', self.path),
-                  patch.object(pipeline, '_log')):
-            p.start(); self.addCleanup(p.stop)
+        p = patch.object(pipeline, '_log')
+        p.start(); self.addCleanup(p.stop)
         self.catch_announcements(pipeline)
 
-    def test_a_broken_head_config_does_not_starve_the_daily_timer(self):
-        for name, write in (('不是 UTF-8', lambda: self.path.write_bytes(b'\xff\xfe{')),
-                            ('内容坏了', lambda: self.path.write_text('{oops')),
-                            ('空文件', lambda: self.path.write_text(''))):
-            with self.subTest(name):
-                self.said.clear()
-                write()
-                with patch.object(daily_run, 'tick', Mock(return_value=False)) as tick, \
-                        patch.object(daily_run, 'is_running', Mock(return_value=False)):
-                    pipeline._scheduler_tick()          # 不许抛
-                    tick.assert_called_once()           # 日报那条照常轮到
-                self.assertTrue(any('页头的定时同步设置' in line for line in self.said),
-                                self.said)
+    def test_an_unexpected_failure_in_the_timer_is_named_and_contained(self):
+        with patch.object(daily_run, 'tick',
+                          Mock(side_effect=RuntimeError('日报那边炸了'))), \
+                patch.object(daily_run, 'is_running', Mock(return_value=False)):
+            pipeline._scheduler_tick()          # 不许抛到调度线程那层去
+        self.assertTrue(any('日报那边炸了' in line for line in self.said), self.said)
 
-    def test_an_unexpected_failure_in_one_task_is_named_and_contained(self):
-        # 读不出配置之外的意外(这里让它直接抛)同样不许带走另一条
-        with patch.object(pipeline, '_fire_head_schedule',
-                          Mock(side_effect=RuntimeError('说不清的毛病'))), \
-                patch.object(daily_run, 'tick', Mock(return_value=False)) as tick, \
+    def test_a_round_still_running_is_not_asked_to_tick_again(self):
+        """反过来钉一边:上一轮还在跑,这一跳不许再把它叫进去 —— 一轮日报要几十
+        分钟,而这个循环 30 秒一跳。`tick` 自己也判,这里是**冗余带**,留着。"""
+        with patch.object(daily_run, 'tick', Mock(return_value=False)) as tick, \
+                patch.object(daily_run, 'is_running', Mock(return_value=True)):
+            pipeline._scheduler_tick()
+            tick.assert_not_called()
+        with patch.object(daily_run, 'tick', Mock(return_value=False)) as tick, \
                 patch.object(daily_run, 'is_running', Mock(return_value=False)):
             pipeline._scheduler_tick()
             tick.assert_called_once()
-        self.assertTrue(any('说不清的毛病' in line for line in self.said), self.said)
-        # 反过来钉一边:日报那条抛了也不许把异常捅到调度线程那层去
-        self.said.clear()
-        with patch.object(pipeline, '_fire_head_schedule', Mock(return_value=False)), \
-                patch.object(daily_run, 'tick', Mock(side_effect=RuntimeError('日报那边炸了'))), \
-                patch.object(daily_run, 'is_running', Mock(return_value=False)):
-            pipeline._scheduler_tick()
-        self.assertTrue(any('日报那边炸了' in line for line in self.said), self.said)
 
 
 if __name__ == '__main__':

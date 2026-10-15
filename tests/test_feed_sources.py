@@ -329,15 +329,15 @@ class FeedTests(unittest.TestCase):
         拆的是**定时**。三样东西一动没动,而且都很容易被这次改动误伤:
         ①手动同步;②**逐条订阅**的启用开关(它跟 kind 级的 `enabled` 同名,
         但从来是两回事);③订阅级的提取开关那道闸。
+
+        页头那颗「定时同步」后来也删了,所以这里不再给它打桩;「起跑没被受理就不
+        记账」那条判据跟着搬去了日报那一侧
+        (`test_schedule_ledger.test_an_unaccepted_start_does_not_spend_the_backoff`)。
         """
         from kb import daily_run
         # ① kind 级设置写成"开着、间隔 15 分钟、早就到点了",调度线程也不该起管道
         reg.save_settings('rss', {'enabled': True, 'interval_minutes': 15, 'next_run': 1})
-        with patch.object(pipeline, 'load_schedule',
-                          return_value={'enabled': False, 'time': '00:00', 'last_fired': '',
-                                        'channel': 'wechat_local', 'channels': ['wechat_local'],
-                                        'next_run': ''}), \
-             patch.object(daily_run, 'tick', return_value=False), \
+        with patch.object(daily_run, 'tick', return_value=False), \
              patch.object(pipeline, 'start_pipeline') as start:
             pipeline._scheduler_tick()
             start.assert_not_called()
@@ -415,21 +415,6 @@ class FeedTests(unittest.TestCase):
         with patch.object(sync,'collect') as collect:
             pipeline_stages._run_crawl({'channel':'rss','force':True,'accounts':['1']})
         self.assertTrue(collect.call_args.args[1].force)
-
-    def test_wechat_daily_schedule_is_not_lost_while_feeds_run(self):
-        saved = {'enabled':True,'time':'00:00','last_fired':'','channel':'wechat_local'}
-        from kb import daily_run
-        with patch.object(pipeline,'load_schedule',return_value=saved), \
-             patch.object(pipeline,'_mark_fired') as mark, \
-             patch.object(pipeline,'start_pipeline',return_value=False) as start, \
-             patch.object(daily_run,'tick') as daily_tick:
-            pipeline._scheduler_tick()
-            mark.assert_not_called()
-            daily_tick.assert_called_once()
-            start.return_value=True
-            pipeline._scheduler_tick()
-            mark.assert_called_once()
-            self.assertEqual('wechat_local',start.call_args.kwargs['crawl_filter']['channel'])
 
     def test_default_social_waits_for_configuration_without_starting_pipeline(self):
         overview = self.client.get('/api/intake/social').json()

@@ -14,18 +14,18 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from kb import daily, daily_run, pipeline
+from kb import daily, daily_run
 from kb.config import ScheduleUnreadable
 
 
 class SameDayRerunTests(unittest.TestCase):
     """**不许用"配置里没写上当天标记"证明"当天还没跑过"。**
 
-    两条定时都是"先起跑、再回写当天标记"。回写那一步失败(配置一时读不出、满盘、
-    进程在写之前被杀)之后,只认盘上那一格的话:等到下一跳,同一天又会自动跑一整
-    轮 —— 日报那一轮要再花一次模型钱,页头那一轮要再跑一遍六段(含 extract)。
-    没有重启、也没有用户点重试。所以进程里另记一格,**而且它只记"今天到此为止",
-    不记"今天起过"**(起过 ≠ 出报:一次模型 502 之后同一天还要补几次)。
+    定时是"先起跑、再回写当天标记"。回写那一步失败(配置一时读不出、满盘、进程在
+    写之前被杀)之后,只认盘上那一格的话:等到下一跳,同一天又会自动跑一整轮 ——
+    那是再花一次模型钱。没有重启、也没有用户点重试。所以进程里另记一格,**而且它
+    只记"今天到此为止",不记"今天起过"**(起过 ≠ 出报:一次模型 502 之后同一天
+    还要补几次)。
     """
 
     def setUp(self):
@@ -33,23 +33,21 @@ class SameDayRerunTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.path = Path(temp.name) / 'cfg.json'
         for p in (patch.object(daily_run, 'SETTINGS_FILE', self.path),
-                  patch.object(pipeline, '_SCHED_FILE', self.path),
-                  patch.object(daily_run, '_log'), patch.object(pipeline, '_log'),
+                  patch.object(daily_run, '_log'),
                   patch('kb.config._announced', {}),
                   patch.object(daily_run, '_report_done', Mock(return_value=False))):
             p.start(); self.addCleanup(p.stop)
         self.said: list[str] = []
-        for module in (daily_run, pipeline):      # 接住"留原因"那句话,顺带别刷屏
-            p = patch.object(module, 'announce_config_issue',
-                             lambda what, reason: self.said.append(f'{what}:{reason}'))
-            p.start(); self.addCleanup(p.stop)
+        # 接住"留原因"那句话,顺带别刷屏
+        p = patch.object(daily_run, 'announce_config_issue',
+                         lambda what, reason: self.said.append(f'{what}:{reason}'))
+        p.start(); self.addCleanup(p.stop)
         self.clock = Mock(wraps=datetime)
         # 保存那一刻要**早于**定时时刻:保存只安排下一次、绝不补跑今天已经过去的
         # 时刻,在 07:30 存一条 07:30 的定时会被排到明天,"到点了"压根不成立。
         self.clock.now.return_value = datetime(2026, 10, 15, 7, 0)
-        for p in (patch.object(daily_run, 'datetime', self.clock),
-                  patch.object(pipeline, 'datetime', self.clock)):
-            p.start(); self.addCleanup(p.stop)
+        p = patch.object(daily_run, 'datetime', self.clock)
+        p.start(); self.addCleanup(p.stop)
 
     def at(self, hour: int, minute: int, day: int = 15) -> None:
         self.clock.now.return_value = datetime(2026, 10, day, hour, minute)
@@ -84,21 +82,6 @@ class SameDayRerunTests(unittest.TestCase):
             self.at(8, 5)
             self.assertTrue(daily_run.tick())
             self.assertEqual(2, start.call_count)
-
-    def test_the_head_round_does_not_run_twice_when_the_mark_is_lost(self):
-        pipeline.save_schedule(True, '07:30', ['rss'])
-        self.at(7, 30)
-        with patch.object(pipeline, 'start_pipeline', Mock(return_value=True)) as start, \
-                patch('kb.config.os.replace', Mock(side_effect=OSError('配额不够'))):
-            self.assertTrue(pipeline._fire_head_schedule())   # 起了,但标记写不进去
-            start.assert_called_once()
-        self.assertEqual('', pipeline.load_schedule()['last_fired'])
-        with patch.object(pipeline, 'start_pipeline', Mock(return_value=True)) as start:
-            self.at(8, 5)
-            self.assertFalse(pipeline._fire_head_schedule())
-            start.assert_not_called()
-            self.at(7, 30, day=16)
-            self.assertTrue(pipeline._fire_head_schedule())   # 第二天照常
 
     def test_todays_report_on_disk_also_counts_as_done(self):
         """重启之后进程里那一格空了,**已经落盘的产物**仍然作数 —— 它比配置里那个

@@ -60,8 +60,6 @@ const FIXTURES = {
   // 范围类接口在服务端就过了 known_channels,交到前端的只会是现役名(定时范围
   // 里那个退役名换成现役名由 tests/test_retired_channel.py 的 ScopeTests 钉住)。
   // 浏览器这一侧真正会碰到退役名的只有两处:localStorage 和历史运行记录。
-  "/api/pipeline/schedule": { enabled: false, time: "07:30",
-                              channel: "wechat_local", channels: ["wechat_local", "rss"] },
   "/api/pipeline/status": { running: false, stages: {}, source: { online: true, ready: true },
                             log: [], last_run: LAST_RUN },
   "/api/pipeline/accounts": { accounts: ["测试公众号甲", "测试公众号乙"] },
@@ -137,8 +135,9 @@ const server = createServer((req, res) => {
     return;
   }
   if (path === "/api/daily/settings") {
+    // 待同步名单故意只给两条(不是目录那三条):见第 4 节那段说明
     const settings = { enabled: false, time: "08:00", sync: true, first_days: 2,
-                       channels: ["wechat_local", "social", "rss"] };
+                       channels: ["wechat_local", "rss"] };
     return json(req.method === "POST" ? settings
       : { settings, channels: CHANNELS.channels,
           default_channels: ["wechat_local", "social", "rss"] });
@@ -208,7 +207,7 @@ const clickAt = async sel => {
   return true;
 };
 const ids = sel => evalJs(`[...document.querySelectorAll('${sel}')].map(e => e.dataset.runChannel
-  || e.dataset.channel || e.dataset.schedChannel || e.value)`);
+  || e.dataset.channel || e.value)`);
 await send("Runtime.enable");
 await send("Page.enable");
 await send("Emulation.setDeviceMetricsOverride",
@@ -262,20 +261,18 @@ check("上次来源不是一个裸 id",
       (await evalJs(`document.getElementById('pipe-running-channel').textContent`)) === "上次来源：公众号",
       await evalJs(`document.getElementById('pipe-running-channel').textContent`));
 
-// ── 4. 定时范围 / 日报范围里的旧名字也只显示现役那条 ──────────────────────────
-// 这两组勾选原来靠 kb:channels-changed 事件在换通道时就地改道,监听器随二选一一起
-// 撤了 —— 所以要确认撤完它们照旧渲染得出来、勾得对。
-await evalJs(`loadSched()`);
-await until(`document.querySelectorAll('#sched-channels input').length === 3`);
-check("定时范围列出现役三条、公众号勾着",
-      (await ids("#sched-channels input")).join() === "wechat_local,social,rss"
-      && (await ids("#sched-channels input:checked")).join() === "wechat_local,rss",
-      (await ids("#sched-channels input:checked")).join());
+// ── 4. 日报那份定时范围里的旧名字也只显示现役那条 ────────────────────────────
+// 这组勾选原来靠 kb:channels-changed 事件在换通道时就地改道,监听器随二选一一起
+// 撤了 —— 所以要确认撤完它照旧渲染得出来、勾得对。原来这一节有两组(页头那颗
+// 「定时同步」也有一份范围勾选),它连同接口一起删了,只剩日报这一份;**「勾得对」
+// 那一半跟着挪到这里**,所以夹具里日报的待同步名单故意只给两条:三条全勾的话,
+// 「列得出」和「勾得对」会退化成同一个判据。
 await evalJs(`switchTab('daily')`);
 await until(`document.querySelectorAll('#daily-channels input').length === 3`);
-check("日报范围也列得出现役三条",
-      (await ids("#daily-channels input")).join() === "wechat_local,social,rss",
-      (await ids("#daily-channels input")).join());
+check("日报范围列出现役三条、公众号勾着",
+      (await ids("#daily-channels input")).join() === "wechat_local,social,rss"
+      && (await ids("#daily-channels input:checked")).join() === "wechat_local,rss",
+      (await ids("#daily-channels input:checked")).join());
 
 // ── 5. 通道二选一那套机制从页面上消失了 ────────────────────────────────────────
 await evalJs(`switchTab('pipe'); closePipeModal(); openWechatSetup()`);

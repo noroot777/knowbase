@@ -86,7 +86,6 @@ const FIXTURES = {
                               default: "rss", labels: { social: "大V观点", rss: "RSS" }, aliases: {} },
   "/api/pipeline/status": { running: false, stages: {}, source: { online: true, ready: true },
                             log: [], last_run: null },
-  "/api/pipeline/schedule": { enabled: false, time: "07:30", channel: "rss", channels: ["rss"] },
   "/api/daily/window": { since: "", until: "" },
   "/api/daily/reports": { reports: [] },
   "/api/daily/status": { running: false, phase: "", channels: [] },

@@ -4,7 +4,6 @@ import json
 import tempfile
 import unittest
 from copy import deepcopy
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -67,25 +66,6 @@ class ChannelAPITests(unittest.TestCase):
             result = self.client.get("/api/pipeline/accounts?channel=wechat_local")
             self.assertEqual(["指定号"], result.json()["accounts"])
             targets.assert_called_once_with("wechat_local")
-
-    def test_schedule_persists_channel_and_preserves_old_clients(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(pipeline, "_SCHED_FILE", Path(tmp) / "schedule.json"):
-            self.assertEqual("wechat_local", pipeline.load_schedule()["channel"])
-            body = {"enabled": True, "time": "08:15", "channel": "wechat_local"}
-            response = self.client.post("/api/pipeline/schedule", json=body)
-            self.assertEqual("wechat_local", response.json()["channel"])
-            self.client.post("/api/pipeline/schedule", json={"enabled": False, "time": "08:20"})
-            self.assertEqual("wechat_local", pipeline.load_schedule()["channel"])
-
-    def test_schedule_keeps_several_sources_and_still_answers_single_channel(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(pipeline, "_SCHED_FILE", Path(tmp) / "schedule.json"):
-            body = {"enabled": True, "time": "08:15", "channels": ["rss", "wechat_local"]}
-            saved = self.client.post("/api/pipeline/schedule", json=body).json()
-            self.assertEqual(["rss", "wechat_local"], saved["channels"])
-            # 老的读取方只认 channel:多来源时它就是第一个,不能是空
-            self.assertEqual("rss", saved["channel"])
-            self.client.post("/api/pipeline/schedule", json={"enabled": False, "time": "08:20"})
-            self.assertEqual(["rss", "wechat_local"], pipeline.load_schedule()["channels"])
 
     def test_several_sources_run_in_one_pass_with_their_own_subscriptions(self):
         body = {"channels": [{"channel": "wechat_local", "accounts": ["甲"]},
@@ -310,25 +290,6 @@ class ChannelDispatchTests(unittest.TestCase):
         self.assertEqual("指定号", argv[argv.index("--targets") + 1])
         self.assertEqual("2026-09-15", argv[argv.index("--until") + 1])
         self.assertEqual(("crawl", "error"), stage.call_args.args[:2])
-
-    def test_scheduler_dispatches_saved_channels(self):
-        for saved, expected in (
-                ({"channel": "wechat_local"}, {"channel": "wechat_local"}),
-                ({"channel": "wechat_local", "channels": ["wechat_local", "rss"]},
-                 {"channel": "wechat_local",
-                  "channels": [{"channel": "wechat_local", "accounts": []},
-                               {"channel": "rss", "accounts": []}]})):
-            schedule = {"enabled": True, "time": "08:15", "last_fired": "", **saved}
-            with self.subTest(saved=saved), \
-                 patch.object(pipeline, "load_schedule", return_value=schedule), \
-                 patch.object(pipeline, "datetime") as clock, \
-                 patch.object(pipeline.time, "sleep", side_effect=[None, KeyboardInterrupt]), \
-                 patch.object(pipeline, "_mark_fired"), \
-                 patch.object(pipeline, "start_pipeline", return_value=True) as start:
-                clock.now.return_value = datetime(2026, 9, 15, 8, 15)
-                with self.assertRaises(KeyboardInterrupt):
-                    pipeline._scheduler_loop()
-                start.assert_called_once_with(None, crawl_filter=expected)
 
     def test_crawl_passes_target_and_dates_to_selected_collector(self):
         collector = Mock()

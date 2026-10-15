@@ -235,8 +235,7 @@
 </div>
 
 <div id="subspanel" style="display:none">
-  <div class="pipe-page-heading subs-page-heading"><div class="subs-title"><h1>我的订阅</h1>
-      <button id="subs-sched-open" class="subs-sched" onclick="openSchedModal()" aria-haspopup="dialog"><i data-icon="clock"></i><span id="subs-sched-label">定时同步</span></button></div>
+  <div class="pipe-page-heading subs-page-heading"><div class="subs-title"><h1>我的订阅</h1></div>
     <div id="subs-switch" class="subs-switch" role="tablist" aria-label="订阅来源"></div>
   </div>
   <div id="subs-error" class="source-banner error" hidden role="alert"><span id="subs-error-text"></span><button class="ghost" onclick="openSubsPanel()">重新读取</button></div>
@@ -316,23 +315,13 @@
         </div>
         <div id="source-settings-error" class="field-err" role="alert"></div><button id="source-settings-save" class="ghost" type="submit">保存设置</button>
       </fieldset></form>
-      <p id="source-settings-status" role="status"></p><div class="source-rule"><p id="source-last-run"></p><p id="source-note"></p><p>每源每次最多读取最近 500 条，后续按原文链接去重。删除订阅保留已收录内容。</p><p>自动同步跟着定时那一轮走：日报的开关、时刻和范围在日报面板里设，页头那颗「定时同步」是另一条，两条都算。这一类来源当前会被哪一条带上，写在上面那一行。要立刻拉一次就点「同步全部」。</p><p>保存后自动建立检索索引；知识提取可在同步中心继续执行。</p></div>
+      <p id="source-settings-status" role="status"></p><div class="source-rule"><p id="source-last-run"></p><p id="source-note"></p><p>每源每次最多读取最近 500 条，后续按原文链接去重。删除订阅保留已收录内容。</p><p>自动同步跟着日报那一轮走：开关、时刻和范围都在日报面板里设。这一类来源当前会不会被带上，写在上面那一行。要立刻拉一次就点「同步全部」。</p><p>保存后自动建立检索索引；知识提取可在同步中心继续执行。</p></div>
     </aside>
   </div>
   </section>
 
 </div>
 </main>
-<div id="sched-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeSchedModal()">
-  <div class="modal sched-modal" role="dialog" aria-modal="true" aria-labelledby="sched-title">
-    <div class="sched-modal-head"><div><h2 id="sched-title">每日定时同步</h2><p class="hint">每天在固定时间把勾选来源的全部订阅同步一遍。修改后保存，下一次定时任务生效。</p></div>
-      <button class="icon-button" onclick="closeSchedModal()" aria-label="关闭定时同步设置">×</button></div>
-    <fieldset id="sched-fields" disabled><label><input type="checkbox" id="sched-on" onchange="markSchedDirty()"> 启用定时</label><label>每天 <input type="time" id="sched-time" value="07:30" required oninput="markSchedDirty()"></label>
-      <div id="sched-channels" class="pipe-channel-list" role="group" aria-label="定时同步的来源"></div>
-    </fieldset>
-    <div class="sched-modal-footer"><span id="sched-msg" role="status">正在读取定时设置…</span><button id="sched-reload" class="ghost" onclick="loadSched()" hidden>重新读取</button><button id="sched-save" onclick="saveSched()" disabled>保存设置</button></div>
-  </div>
-</div>
 
 <div id="source-editor" class="modal-mask" style="display:none" onclick="if(event.target===this)closeSourceEditor()"><div class="modal source-editor">
   <h2 id="source-editor-title">添加订阅</h2><form onsubmit="saveSourceEditor(event)">
@@ -542,7 +531,6 @@
 <script src="/static/js/pipe_history.js"></script>
 <script src="/static/js/pipe_view.js"></script>
 <script src="/static/js/pipe_setup.js"></script>
-<script src="/static/js/pipe_schedule.js"></script>
 <script src="/static/js/targets.js"></script>
 <script src="/static/js/gallery.js"></script>
 <script src="/static/js/daily.js"></script>
@@ -559,7 +547,6 @@ loadFavSet();
 loadModels();
 refreshKeys();
 refreshMcp();
-loadSched();
 loadGallery();
 initWorkspace();
 refreshWechatSetup();
