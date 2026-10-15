@@ -43,6 +43,12 @@ CREATE TABLE IF NOT EXISTS favorites (
   -- 后来第二处被删掉,剩下的第一处按裸引文找正好唯一 —— 采信它等于把另一处同
   -- 句冒充成原位置。NULL = 老数据没记(按说不清办,不走那一档)。
   quote_unique INTEGER,
+  -- **采集那一刻这条锚点定不定得住**(1 = 整段锚点在那一篇里唯一落回用户选的那
+  -- 一处)。回跳那一刻记着 0 的一律不定位:采集那一刻前后各两百字也一字不差的
+  -- 两处,谁也说不出用户选的是第几处;后来原处被整节删掉,剩下的那一处成了整段
+  -- 锚点的唯一命中 —— 采信它就是把一处从没被收藏过的文字高亮出来。
+  -- NULL = 老数据没记(按「不知道」办,原样放行;折成 0 会把存量收藏全废掉)。
+  anchor_exact INTEGER,
   -- **采集那一刻核对过的是哪一版正文**(`scanner.body_version`;落库前后端又按
   -- 盘上此刻那一份核过一次,所以这个数是「写进来那一刻盘上就是这一版」)。
   -- 回跳那一刻拿它和阅读页此刻的版本号相比:**相等 = 这一篇没动过**,于是锚点
@@ -71,7 +77,7 @@ FAVORITES_DDL = FAVORITES_TABLE + FAVORITES_INDEX + ";\n"
 # v2/v3 带过来的列。重建时按**老表实际有的**那几列拼 INSERT:v2 没有
 # action_json,写死一份列名会让它在 `no such column` 上翻车。
 _FAV_CARRIED = ("quote", "prefix", "suffix", "note", "status", "action_json",
-                "quote_unique", "origin_msg", "doc_version",
+                "quote_unique", "anchor_exact", "origin_msg", "doc_version",
                 "created_at", "updated_at")
 
 
@@ -250,17 +256,19 @@ def migrate_promo(conn: sqlite3.Connection) -> None:
 
 
 def migrate_fav_anchor(conn: sqlite3.Connection) -> None:
-    """favorites 加回跳要用的那几列:采集时唯一性、问答消息身份、正文版本。幂等。
+    """favorites 加回跳要用的那几列:采集时唯一性、锚点定不定得住、问答消息身份、
+    正文版本。幂等。
 
     老库 favorites 已存在,`CREATE TABLE IF NOT EXISTS` 不补列,只能 ALTER
-    (同 `migrate_promo`)。三列都可空:**老数据的空值是「没记下」,既不是 0 也
+    (同 `migrate_promo`)。四列都可空:**老数据的空值是「没记下」,既不是 0 也
     不是空串** —— `quote_unique` 为空时回跳不走裸引文那一档(判不准一律扣留),
-    `origin_msg` 为空时问答归属只核到会话一级,`doc_version` 为空时证明不了
-    「要搜的这一篇就是采集时那一篇」,于是弱档一律不采信。
+    `anchor_exact` 为空时不知道当时定不定得住、按原样放行(折成 0 会把存量收藏
+    一次性废掉),`origin_msg` 为空时问答归属只核到会话一级,`doc_version` 为空
+    时证明不了「要搜的这一篇就是采集时那一篇」,于是弱档一律不采信。
     """
     add_columns(conn, "favorites",
-                (("quote_unique", "INTEGER"), ("origin_msg", "INTEGER"),
-                 ("doc_version", "TEXT")))
+                (("quote_unique", "INTEGER"), ("anchor_exact", "INTEGER"),
+                 ("origin_msg", "INTEGER"), ("doc_version", "TEXT")))
 
 
 def migrate_no_body(conn: sqlite3.Connection) -> None:
@@ -271,4 +279,3 @@ def migrate_no_body(conn: sqlite3.Connection) -> None:
     """
     add_columns(conn, "documents",
                 (("no_body_hash", "TEXT NOT NULL DEFAULT ''"),))
-

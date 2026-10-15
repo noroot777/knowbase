@@ -92,19 +92,25 @@ function favDocA(f, label, cls = '') {
 // 空路径,点下去是 iframe 里一张 404,所以换成回各自面板的按钮。
 function favDocAHtml(f, labelHtml, cls = '') {
   if (!f.path) return favJumpHtml(f, labelHtml, cls);
-  // **`u` 和 `v` 都要一起带过去。**
+  // **`u`、`e`、`v` 三个都要一起带过去。**
   // `u` = 采集那一刻这段引文在那一篇里只有一处吗:阅读页的裸引文退路按它决定能
   // 不能采信(采集那一刻只有一处 ≠ 现在只剩一处,见 `kb/web/pages.py` 的 `seek`)。
   // `v` = 采集那一刻核对过的正文版本(`favorites.doc_version`):阅读页拿它和
   // `DOC_VERSION` 相比,**相等才算「要搜的这一篇就是采集时那一篇」**,于是锚点
   // 一侧失配可以只听另一侧(两头摊的文本本来就不是同一种渲染);不等就说明这一篇
   // 改过,那时一侧的「唯一命中」证明不了它是原处,如实说位置说不清。
-  // 两个数**都是老收藏可能没有的**(NULL),没有就一个字都不写 —— 那一头把
-  // "没有"当"不知道",弱档一律不给用。
+  // `e` = 采集那一刻这条锚点定不定得住(`favorites.anchor_exact`):记着 0 的
+  // (采集那一刻就有几处连前后文都一样,或者核对时在那一篇里压根对不上)阅读页
+  // 一律不定位 —— 「现在正好剩一处」只说明别处被删掉了。
+  // 三个数**都是老收藏可能没有的**(NULL),没有就一个字都不写 —— 那一头把
+  // "没有"当"不知道":`u`/`v` 缺了弱档不给用,`e` 缺了按原样放行(拒掉它等于
+  // 把存量收藏一次性废掉,而那些收藏的锚点并没有被证明定不住)。
   const hash = f.quote ? '#kbq=' + encodeURIComponent(
     JSON.stringify({ q: f.quote, p: f.prefix || '', s: f.suffix || '',
                      ...(f.quote_unique === 1 || f.quote_unique === 0
                        ? { u: f.quote_unique } : {}),
+                     ...(f.anchor_exact === 1 || f.anchor_exact === 0
+                       ? { e: f.anchor_exact } : {}),
                      ...(f.doc_version ? { v: f.doc_version } : {}) })) : '';
   return docAHtml(f, labelHtml, cls, hash);
 }
@@ -117,6 +123,10 @@ function favJumpHtml(f, labelHtml, cls = '') {
     q: f.quote || '', p: f.prefix || '', s: f.suffix || '',
     // 同 `favDocAHtml` 的 hash:裸引文那一档要靠它(见 snip_text.js 的 `snipSeek`)
     ...(f.quote_unique === 1 || f.quote_unique === 0 ? { u: f.quote_unique } : {}),
+    // 同上:采集那一刻这条锚点定不定得住(`favorites.anchor_exact`)。**这一个
+    // 和 `v` 不一样,要往这儿带** —— 日报正文、问答回答这几头压根没有文档版本
+    // 可比,而「采集那一刻就定不住」是它们自己也有的事实。
+    ...(f.anchor_exact === 1 || f.anchor_exact === 0 ? { e: f.anchor_exact } : {}),
     // **问答片段出自哪一条消息**(后端核验过的 `favorites.origin_msg`)。回跳要
     // 落到那一条消息上,不是在整个对话里搜那段引文:同一个问题问两遍得到一模
     // 一样的回答时,整对话里有两处,于是「位置说不清」、一个高亮也不给,而真正
@@ -142,7 +152,8 @@ function jumpFavOrigin(el) {
   // `u` 原样传下去(没有就不传):面板那几头拿它去 `snipSeek`,少这一个字段的话
   // 连「采集时本来就唯一」的那些收藏也退不了裸引文那一档
   const spec = { q: j.q, p: j.p, s: j.s,
-                 ...(j.u === 1 || j.u === 0 ? { u: j.u } : {}) };
+                 ...(j.u === 1 || j.u === 0 ? { u: j.u } : {}),
+                 ...(j.e === 1 || j.e === 0 ? { e: j.e } : {}) };
   // **`same` 由各面板自己决定,这儿一个字都不写**(默认 = 证明不了)。日报正文、
   // 订阅正文这两头:采集和回跳走的是同一个渲染器,一侧对不上就只能是正文自己变过
   // 了,没有「两种渲染」这个借口 —— 弱档于是一律不采信。问答那一头不一样,见

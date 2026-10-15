@@ -286,6 +286,10 @@ TOOL_HTML_SEEN = TOOL_HTML_MD.replace('<strong>', '').replace('</strong>', '')
 # 「一处都没取到」而看着是绿的。
 TOOL_DEL_TEXT = '删除线这一句在搜索卡上带着波浪号'
 TOOL_DEL_MD = f'~~{TOOL_DEL_TEXT}~~'
+# **同一句话在条目正文里出现两处**,引子各不相同(采集那头据此分得出是第几处)。
+# 探针把选中那一处连引子一起从盘上删掉(`/__snip__/drop` 认整串),盘上于是只剩
+# 另一处 —— 核对那一步若按裸引文命中它就算"核过了",点回去高亮的是没选过的那一处。
+TOOL_TWIN, TOOL_TWIN_LEAD = '这一句用来验原处删掉之后不许冒认别处那一句', '甲节里先说一遍:'
 # 条目正文的**最后一句**:它后面紧跟着的是抽屉里那三颗链接按钮和小节标题 ——
 # 前后文锚点必须只从正文里采,不许把界面文字当成目标文档的上下文。
 TOOL_TAIL = '交代它和别的工具怎么搭'
@@ -362,6 +366,8 @@ tags:
 {vfresh}。{vstale}。{vagain}。{vkept}。
 
 {vhtml}。
+
+{twinlead}{vtwin}。中间隔着一句话。乙节里又说一遍:{vtwin}。
 
 后面还有一段,交代它和别的工具怎么搭。
 """
@@ -504,7 +510,8 @@ def build(vault: Path) -> dict:
     tool_path.write_text(_TOOL_MD.format(
         name=TOOL_NAME, snip=SNIP_TOOL, day=day, published=published,
         vfresh=TOOL_V_FRESH, vstale=TOOL_V_STALE, vagain=TOOL_V_AGAIN,
-        vkept=TOOL_V_KEPT, vhtml=TOOL_HTML_MD, vdel=TOOL_DEL_MD),
+        vkept=TOOL_V_KEPT, vhtml=TOOL_HTML_MD, vdel=TOOL_DEL_MD,
+        vtwin=TOOL_TWIN, twinlead=TOOL_TWIN_LEAD),
         encoding='utf-8')
 
     cli._index_pass(Namespace(reembed=False, no_vector=True))
@@ -651,6 +658,7 @@ def build(vault: Path) -> dict:
             'toolVStale': TOOL_V_STALE, 'toolVAgain': TOOL_V_AGAIN,
             'toolVKept': TOOL_V_KEPT, 'toolHtmlSeen': TOOL_HTML_SEEN,
             'toolDelText': TOOL_DEL_TEXT, 'toolDelMd': TOOL_DEL_MD,
+            'toolTwin': TOOL_TWIN, 'toolTwinLead': TOOL_TWIN_LEAD,
             'toolTail': TOOL_TAIL,
             'streamText': STREAM_TEXT, 'streamTail': STREAM_TAIL,
             'toolPath': str(tool_path.relative_to(vault))}

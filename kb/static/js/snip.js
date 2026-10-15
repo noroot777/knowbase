@@ -232,6 +232,10 @@ async function saveSnip() {
   // 核过了的话,唯一性和定位已经按盘上那一篇重算过(`fix`)—— 用那一份,它算的
   // 语料正是回跳那一头会看到的语料。
   const spec = { ...spec0, ...(fix || {}) };
+  // **落库那个「定得住吗」按核对的结果算**(`fix.anchored`),没有核对这一步的
+  // 来源(日报、问答、订阅列表卡)按屏幕那一份算 —— 那两头是同一个渲染器,
+  // 屏幕上定得住就是回跳那一头定得住。见 `postSnip` 的 `anchor_exact`。
+  const anchored = fix && 'anchored' in fix ? !!fix.anchored : !!spec.locatable;
   // 「点回去会怎么走」那一句:**凡是让它不按预期走的事,一件都不许瞒** ——
   // 不说的话用户只能到点回去那一刻才发现。攒成一串而不是挑一条:这几件会同时
   // 成立(定不准的锚点在盘上那篇里自然也核不上),挑一条说就把另一条瞒了。
@@ -285,7 +289,7 @@ async function saveSnip() {
     if (src.path && !src.doc_version) {
       throw new Error(NO_VERSION[reason] || '没核出这一篇的正文版本,先没收下来');
     }
-    let r = await postSnip(src, spec);
+    let r = await postSnip(src, spec, anchored);
     // 后端拒绝绑这篇文档的三种理由,这里各退一次 —— 它**故意不替我们降级**:
     // 把一条本该能定位回原文的收藏静默换成只有引文的那一类,是调用方该自己做
     // 的决定。退了就如实说退的是哪一种(文案见上面那三句)。
@@ -300,7 +304,7 @@ async function saveSnip() {
     const RETRY_NOTE = { 404: NOT_INDEXED, 409: STALE, 503: UNREADABLE };
     const retry = src.fallback ? RETRY_NOTE[r.status] : '';
     if (retry) {
-      r = await postSnip(src.fallback, spec);
+      r = await postSnip(src.fallback, spec, anchored);
       detail = detailOf(src.fallback, retry);
     }
     // 没有退路的那几类(图鉴条目正文):409 说明面板上这份正文已经旧了。后端那
@@ -367,6 +371,10 @@ function snipSourceOf(zone, range) {
  *    但 `fell: false` 要让 `saveSnip` 当场说一句「点回去可能定位不到这一处」。
  *    悄悄存成功是这一类里最坏的那一种:库里那条看着好好的,用户要到点回去
  *    那一刻才知道(审查实测:成功提示里一个字都没提)。
+ *  **「屏幕上就有两处」的那一类不许靠裸引文核过**(见下面那个 `u`):那一刻谁也
+ *  说不出用户选的是第几处,而盘上这一篇里只剩一处恰恰说明原处被删掉了 —— 采信它
+ *  就是把另一处同句冒充成原位置。
+ *
  *  **核过了才把新读到的那一版带出去;核不过就原样把面板那一版送上去。** 后端那道
  *  409 于是正好替我们把两件事分开:面板那一版和盘上这一版**不等** = 面板旧了(改稿
  *  很可能正是把那句话换掉的那一下)→ 409 → 一行不落、提示说"刷新再收藏";**相等**
@@ -380,15 +388,27 @@ async function snipVerified(src, spec) {
   try { got = await src.docText(); } catch { got = null; }
   const reason = !got || got.text == null
     ? ((got && got.reason) || 'unreadable')
-    // spec 和收藏行的字段名一样,所以同一个 snipSpecOf 就能转。**裸引文那一档
-    // 在这儿是允许的**(`u: 1`):核对发生在采集这一刻,盘上那篇正文就是此刻这
-    // 一份,「只有一处」就是「只有一处」—— 不存在「原来那处已经被删掉」这件事
-    // (那是回跳那一刻才有的问题,见 snip_text.js 的 `snipSeek`)。
-    // `same: true`:这一份正文是此刻从盘上读的,而**它的版本号跟着收藏一起落库**
-    // (`doc_version`)—— 回跳那一刻版本号还相等的话,那一头拿到的也是 `same`,
-    // 两头于是按同一套档位判。少了它,这儿核得过、回跳那头判得更严:库里那条
-    // `locatable` 写着"定得到",点回去却是一句"没找到"。
-    : (snipSeek(got.text, { ...snipSpecOf(spec), u: 1, same: true }) ? '' : 'mismatch');
+    // spec 和收藏行的字段名一样,所以同一个 snipSpecOf 就能转。
+    // **`u` 按屏幕那一份算(`spec.unique`),不许在这儿写死 1。** 锚点是从屏幕
+    // 那一份上采的,而这里搜的是盘上这一份,**两份不一定是同一份**(面板开着的
+    // 那几分钟里重译写回、正文补抓、条目重导出都会换掉它)。裸引文那一档于是分
+    // 两种:
+    //  - **屏幕上就有两处**(`spec.unique` 为 0):那一刻谁也说不出用户选的是第几
+    //    处,而盘上这一篇里只剩一处恰恰说明原处被删掉了 —— 采信它就是把另一处同句
+    //    冒充成原位置,版本号跟着换成新那一版、落库返回 200,点回去高亮的是用户
+    //    从没选过的那一节(审查实测:旧抽屉上选的是第二节,盘上那一节已被删掉,
+    //    高亮落在第一节)。**一律不采信**,如实判 `mismatch`。
+    //  - **屏幕上只有一处、盘上也只有一处**:这段话在两份语料里都没有第二处可冒
+    //    认,那时两侧上下文同时对不上只能是两头的渲染不一样(前后文里带着
+    //    markdown 标记:订阅阅读器摊的是 md 原文,阅读页把它渲染掉了)—— 弱档
+    //    正是为这件事存在的,照旧采信。
+    // 写死 1 等于把前一种也放过去,而那一种的后果不可恢复(库里那条收藏从此指着
+    // 另一段话)。`partial` 的来源(列表卡、搜索卡只摊那一篇的一截)`spec.unique`
+    // 本来就是 0 —— 切片里只有一处证明不了整篇里只有一处,同口径一律不采信。
+    // `same: true`:一侧对不上在这儿是**预期之中**的(同上,两种渲染),而另一侧
+    // 还唯一地指着一处。
+    : (snipSeek(got.text, { ...snipSpecOf(spec), u: spec.unique ? 1 : 0,
+                            same: true }) ? '' : 'mismatch');
   if (!reason) {
     // 核过了,顺手把**唯一性和定位**按盘上那一篇重算一遍 —— 上面那两个数是按屏幕
     // 上那个容器算的,而**容器未必是整篇**(列表卡片摊的是正文开头那一截)。切片里
@@ -396,11 +416,19 @@ async function snipVerified(src, spec) {
     // 这一份比 `snipSpec` 那一份准,`saveSnip` 用它替掉。
     const flat = snipCollapse(spec.quote).trim();
     const uniq = snipAll(got.text, flat).length === 1;
-    const fix = { unique: uniq,
-                  locatable: !!snipSeek(got.text,
-                    { ...snipSpecOf(spec), u: uniq ? 1 : 0, same: true }) };
+    // `u` 用的是**会落库的那一个**(上面这个 `uniq`),不是核对那一步的 0:这一问
+    // 是「回跳那一刻定得到吗」,那一头拿的就是库里这几个数。
+    const locatable = !!snipSeek(got.text,
+      { ...snipSpecOf(spec), u: uniq ? 1 : 0, same: true });
+    const fix = { unique: uniq, locatable, anchored: locatable };
     return { src: { ...src, doc_version: got.version }, reason: '', fell: false, fix };
   }
+  // **核不过 = 这条锚点在回跳那一头定不住**,这件事要跟着收藏落库
+  // (`anchor_exact`)—— 不落的话库里那条带着屏幕那一份算出来的「定得住」,而
+  // 屏幕上明明刚说过一句「点回去可能定位不到这一处」:同一件事两处口径不一样,
+  // 点回去于是可能落在别处一句同样的文字上。**和 `locatable` 分开两个字段**:
+  // 那一个只管屏幕上那句提示(说的是「这一篇里有几处一模一样的文字」),
+  // 核不过的原因通常不是重复,两句不许混成一句。
   if (src.fallback) return { src: src.fallback, reason, fell: true };
   // **核不过、又没有退路可退,而这个来源自己说不出它展示的是哪一版** —— 刚读到的
   // 那一版就是它唯一能说的版本,记下来。绑了文档却交不出版本号的话后端按 400 拒
@@ -411,10 +439,11 @@ async function snipVerified(src, spec) {
   // **反过来,来源自带版本号的一律不许替换**(图鉴条目带的是面板上那一份的版本):
   // 那个数和盘上此刻**不等**正是「面板旧了」的唯一信号,后端那道 409 全靠它,
   // 替成新的之后改稿删掉那句话也照存(回归在 `tests/snip_probe_bind.mjs`)。
+  const fix = got && got.text != null ? { anchored: false } : null;
   if (!src.doc_version && got && got.version) {
-    return { src: { ...src, doc_version: got.version }, reason, fell: false };
+    return { src: { ...src, doc_version: got.version }, reason, fell: false, fix };
   }
-  return { src, reason, fell: false };
+  return { src, reason, fell: false, fix };
 }
 
 /** 服务端那一篇文档 → `{text, version, reason}`。
@@ -494,7 +523,7 @@ function snipUrlDropped(src) {
   return String(src.origin_url || '').length > SNIP_MAX_URL;
 }
 
-function postSnip(src, spec) {
+function postSnip(src, spec, anchored) {
   return fetch('/api/favorites', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -509,6 +538,11 @@ function postSnip(src, spec) {
       // 失效时按它决定能不能采信裸引文那一档 —— 当时就有两处的话,「现在只剩一处」
       // 证明不了这一处就是当时那一处(见 snip_text.js 的 `snipSeek`)。
       quote_unique: spec.unique ? 1 : 0,
+      // **采集那一刻这条锚点定不定得住。** 定不住的(这一篇里有几处连前后文都
+      // 一样、或者核对读到的那一份里压根对不上)往后哪一档都不给用 —— 回跳那一
+      // 刻的「正好剩一处」只说明别处被删掉了,采信它就是把一处从没被收藏过的
+      // 文字高亮出来(见 snip_text.js 的 `snipSeek`)。
+      anchor_exact: anchored ? 1 : 0,
       origin: src.origin, origin_ref: src.origin_ref || '',
       // **问答那一类:这段话出自哪一条已经落库的消息。** 后端据它核验归属 ——
       // 会话号非空只说明那个对话存在,不说明这一轮写进去了(见 chat.js 的

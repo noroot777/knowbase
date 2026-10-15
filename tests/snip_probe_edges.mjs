@@ -107,13 +107,29 @@ check("那四行代码在日报里被高亮出来", hiCode === flat(fx.snipCode)
 // 而两处的文字一模一样,用户看不出来(审查实测的正是这一处)。
 await evalJs(`switchTab('daily'); true`);
 await until(`$('daily-reader-body').textContent.includes(${js(fx.ambiQuote)})`, 25000);
-const ambi = await snip("#daily-reader-body", fx.ambiQuote, 2);
+/** 选中那一处 → 点收藏 → 确认库里真落了一条;没落就重来(最多三次)。
+ *
+ *  **上一节那次回跳重渲染了同一个容器**:`#snipbtn` 弹出来之后那个 Range 还可能
+ *  在下一帧失效,而产品那头是**有意静静收起按钮**的(见 `snip.js` 的 `saveSnip`
+ *  开头 —— 走到那儿只剩竞态,再弹一句提示反而吵),于是"按钮弹了、一条也没落库"
+ *  在这一处会偶发(实测约每十来轮一次)。**判据没松**:三次都落不下来照旧记红,
+ *  而且详情里带上屏幕上那句提示 —— 一条都没有时那是唯一的线索。*/
+const snipUntilSaved = async nth => {
+  let got = { shown: false, picked: "一次都没选中" }, rows = [];
+  for (let i = 0; i < 3 && rows.length === 0; i++) {
+    got = await snip("#daily-reader-body", fx.ambiQuote, nth);
+    rows = (await evalJs(`window.__favs()`)).filter(f => f.quote === fx.ambiQuote);
+  }
+  return { got, rows };
+};
+const { got: ambi, rows: ambiFav } = await snipUntilSaved(2);
 check("重复整段里的第二处收得下", ambi.shown, `picked=${ambi.picked}`);
-const ambiFav = (await evalJs(`window.__favs()`)).filter(f => f.quote === fx.ambiQuote);
 // 前后文得长过三十字 —— 三十字那一档两处一模一样,分不出来
-check("锚点前后文加长到分得出两处为止", ambiFav.length === 1
-  && ambiFav[0].prefix.length > 30,
-  JSON.stringify(ambiFav.map(f => ({ n: f.prefix.length, p: f.prefix }))));
+const ambiDetail = ambiFav.length
+  ? JSON.stringify(ambiFav.map(f => ({ n: f.prefix.length, p: f.prefix })))
+  : `一条都没有 / 屏幕上那句提示:${await evalJs(`window.__toastText()`)}`;
+check("锚点前后文加长到分得出两处为止",
+  ambiFav.length === 1 && ambiFav[0].prefix.length > 30, ambiDetail);
 await openFavList();
 check("收藏面板里能点到重复整段那条的回跳",
   await clickJump("daily", fx.ambiQuote));
@@ -135,7 +151,7 @@ await evalJs(`(async () => {
 })()`);
 await evalJs(`switchTab('daily'); true`);
 await until(`$('daily-reader-body').textContent.includes(${js(fx.ambiQuote)})`, 25000);
-const ambi1 = await snip("#daily-reader-body", fx.ambiQuote, 1);
+const { got: ambi1 } = await snipUntilSaved(1);
 check("重复整段里的第一处也收得下", ambi1.shown, `picked=${ambi1.picked}`);
 await openFavList();
 check("收藏面板里能点到第一处那条的回跳", await clickJump("daily", fx.ambiQuote));

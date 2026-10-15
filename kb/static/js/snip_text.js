@@ -425,11 +425,37 @@ function snipAnchor(spec) {
  *  「两侧上下文全失配」本身就说明正文变过,那时连"当时唯一"也只在当时成立
  *  (审查实测:收藏第二处、原处被整段删掉,裸引文正好唯一命中第一处 —— 一段
  *  用户从没收藏过的文字被当成他收藏的那一段高亮出来)。
+ *
+ *  **可是「两侧都还在、现在正好一处」同样不足以定身份。** 采集那一刻整段锚点就
+ *  已经分不出两处时(前后各两百字也一字不差 —— 重复的小节、模板说明、重复的代码
+ *  块),那一刻谁也说不出用户选的是第几处;后来原处被整节删掉,剩下的那一处于是
+ *  成了整段锚点的唯一命中 —— 采信它等于把一处从没被收藏过的文字高亮出来,而两处
+ *  的文字一模一样,用户从页面上看不出来(审查用生产函数实测:采集偏移 740,删掉
+ *  第二节之后回查到 244)。所以**「采集那一刻这条锚点定不定得住」也要随收藏落库**
+ *  (`favorites.anchor_exact`,`spec.e`):记着「定不住」的,**哪一档都不给用**
+ *  —— 语料没变过的话它本来就该剩两处候选、照旧说不清,所以这一道在「同一份语料」
+ *  上一分钱不要;真正拦住的正是「原处没了、剩下一处别处」。老收藏没记下这件事
+ *  (NULL)按原样办:拒掉它等于把存量收藏一次性废掉,而新收的一条不落。
+ *
+ *  **唯一的例外是「这份语料整份就是这段引文」**(`whole`):两侧天生都没有的锚点
+ *  (选中整份日报正文、整条气泡)落到裸引文那一档,而这份文本里除了这段引文什么
+ *  都没有 —— 没有第二处可冒认,位置只能是这一处,`same` 和 `u` 都不必再问。
+ *  **这一档不是「放开所有裸引文」**:语料只要比引文多一个字,它就不成立(审查
+ *  实测的那一条:整份日报正文收下来、一个字没改却点不回去 —— 采集那头按「这份
+ *  text 就是此刻这一份」算出"定得到",回跳那头没有任何途径证明同一份语料,于是
+ *  所有完整正文选区一律失效)。日报、问答这类面板两头是同一个渲染器,**语料没变
+ *  过的话两侧本来就对得上、压根走不到裸引文**,所以这一档上「指纹相等」能证明的
+ *  事,「整份就是这段引文」已经证明得更死。
  *  口径同 `kb/web/pages.py` 的 `seek`/`hitsOf`,两头各一份,改一处要改两处。*/
 function snipSeek(text, spec) {
   const a = snipAnchor(spec);
   if (!a.q) return null;
   const same = !!(spec && spec.same);
+  // **「这份语料整份就是这段引文」是自证的同一性**(见上):没有别处可冒认。
+  const whole = !a.p && !a.s && text.trim() === a.q;
+  // **采集那一刻这条锚点就定不住的话,这一刻的「正好一处」不是它定住了,是别处
+  // 被删掉了**(见上)。`e` 是采集那头算出来、跟着收藏落库的那个事实。
+  if (!whole && Number(spec && spec.e) === 0) return null;
   // 一侧的三种状态**不许压成两种**:`null` = 这条锚点天生没有这一侧;`[]` =
   // 有这一侧、在这份文本里一处也对不上;非空 = 它认的那几处。
   const byP = a.p ? snipAll(text, a.p + a.q).map(at => at + a.p.length) : null;
@@ -437,7 +463,8 @@ function snipSeek(text, spec) {
   // 「有证据却一处也对不上」= 这份语料不是采集时那一份,除非证明过(见上)
   if (((byP && !byP.length) || (byS && !byS.length)) && !same) return null;
   const hitP = byP || [], hitS = byS || [];
-  const bare = same && Number(spec && spec.u) === 1 ? snipAll(text, a.q) : [];
+  const bare = whole || (same && Number(spec && spec.u) === 1)
+    ? snipAll(text, a.q) : [];
   const cand = hitP.length && hitS.length ? hitP.filter(at => hitS.includes(at))
     : hitP.length ? hitP
       : hitS.length ? hitS
@@ -461,10 +488,13 @@ function snipAll(text, needle) {
   return out;
 }
 /** 收藏条目 → locateSnip 认的 spec。f 是 /api/favorites 给的那一行。
- *  `u` 是采集那一刻的唯一性(库里的 `quote_unique`;老数据没有这一列 → 留空,
- *  `snipSeek` 按「说不清」处理,不走裸引文那一档)。*/
+ *  `u` 是采集那一刻的唯一性(库里的 `quote_unique`),`e` 是采集那一刻这条锚点
+ *  定不定得住(库里的 `anchor_exact`)。**两个都是「老数据没有这一列」时留空**
+ *  —— 空着不等于 0:`u` 空 = 不走裸引文那一档,`e` 空 = 不知道当时定不定得住,
+ *  按原样放行(见 `snipSeek`);填 0 是比「没记下」更强的断言,不许拿 0 顶替。*/
 function snipSpecOf(f) {
-  const u = f.quote_unique;
+  const u = f.quote_unique, e = f.anchor_exact;
   return { q: f.quote || '', p: f.prefix || '', s: f.suffix || '',
-           ...(u === 1 || u === 0 ? { u } : {}) };
+           ...(u === 1 || u === 0 ? { u } : {}),
+           ...(e === 1 || e === 0 ? { e } : {}) };
 }

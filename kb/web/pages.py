@@ -359,6 +359,14 @@ _DOC_SNIP_JS = r"""
   // 换掉的那一处,而剩下的这一处是采集时就明确不是的另一处(审查实测:删掉原处
   // 之后高亮落在第一处)。拿不到那个数(老收藏,`u` 没有)= 不知道,那一档一律
   // 不给用:漏报顶多是一句如实的「没找到」,误报是静默跳到另一段话。
+  // **「两侧都还在、现在正好一处」同样不足以定身份。** 采集那一刻整段锚点就分不出
+  // 两处(前后各两百字也一字不差)时,那一刻谁也说不出用户选的是第几处;后来原处
+  // 被整节删掉,剩下的那一处成了唯一命中 —— 采信它等于高亮一处从没被收藏过的文字
+  // (审查用生产函数实测:采集偏移 740,删掉第二节之后回查到 244)。所以采集那头
+  // 把「这条锚点定不定得住」也随收藏落库(`favorites.anchor_exact` → `#kbq=` 里的
+  // `e`),记着「定不住」的哪一档都不给用;老收藏没记下(没有 `e`)按原样放行。
+  // **例外是「这一页的正文整份就是这段引文」**:两侧天生都没有、而这份文本里除了
+  // 这段引文什么都没有 —— 没有第二处可冒认,`same` 和 `u` 都不必再问。
   // 口径同 snip.js 的 snipSeek/snipAll,两头各一份,改一处要改两处。
   const MAX_HITS = 64;   // 数到这个数就不往下数;数不完的那一边一律当说不清
   function hitsOf(text, needle) {
@@ -374,6 +382,10 @@ _DOC_SNIP_JS = r"""
     const a = anchorOf(spec);
     if (!a.q) return null;
     const same = !!(spec && spec.same);
+    // 「这份正文整份就是这段引文」= 没有别处可冒认,位置只能是这一处(见上)
+    const whole = !a.p && !a.s && text.trim() === a.q;
+    // 采集那一刻这条锚点就定不住的话,这一刻的「正好一处」是别处被删掉了(见上)
+    if (!whole && Number(spec && spec.e) === 0) return null;
     // 一侧的三种状态**不许压成两种**:null = 这条锚点天生没有这一侧;
     // [] = 有这一侧、在这份文本里一处也对不上;非空 = 它认的那几处。
     const byP = a.p ? hitsOf(text, a.p + a.q).map(at => at + a.p.length) : null;
@@ -381,7 +393,8 @@ _DOC_SNIP_JS = r"""
     // 「有证据却一处也对不上」= 这份语料不是采集时那一份,除非证明过(见上)
     if (((byP && !byP.length) || (byS && !byS.length)) && !same) return null;
     const hitP = byP || [], hitS = byS || [];
-    const bare = same && Number(spec && spec.u) === 1 ? hitsOf(text, a.q) : [];
+    const bare = whole || (same && Number(spec && spec.u) === 1)
+      ? hitsOf(text, a.q) : [];
     const cand = hitP.length && hitS.length ? hitP.filter(at => hitS.includes(at))
       : hitP.length ? hitP
         : hitS.length ? hitS
@@ -501,6 +514,11 @@ _DOC_SNIP_JS = r"""
                                // 采集那一刻这段引文在这一篇里是不是只有一处 ——
                                // 回跳那一刻裸引文那一档按它决定能不能采信(见 seek)
                                quote_unique: unique,
+                               // **采集那一刻这条锚点定不定得住**:定不住的(这一篇
+                               // 里有几处连前后文都一样)往后哪一档都不给用 ——
+                               // 「现在正好剩一处」只说明别处被删掉了(见 seek)。
+                               // 屏幕上那句提示说的是同一件事,两者同一个判据。
+                               anchor_exact: locatable ? 1 : 0,
                                doc_version: DOC_VERSION }),
       });
       // 409 = 这一页上这份正文已经旧了。**这一头没有退路可降级**(页面上压根

@@ -61,6 +61,12 @@ SHOWN = Path(__file__).resolve().parent / "snip_probe_shown.mjs"
 # 而这一份有判据要在阅读页上验回跳落点。
 CARDS = Path(__file__).resolve().parent / "snip_probe_cards.mjs"
 BIND = Path(__file__).resolve().parent / "snip_probe_bind.mjs"
+# 第五份管**原处身份**:这一处是不是他选的那一处(核对那一步按别处一句同句命中就
+# 算过、采集那一刻就定不住的锚点后来成了唯一命中、整份正文选区被这套收紧判死)。
+# **排在最后**:它会真改掉盘上那一篇条目(`/__snip__/drop` 把选中那一处连引子一起
+# 换掉),而前面几份有判据按"抽屉里那一条正文就是盘上那一份"摆盘;它也会现摆日报
+# 正文、删掉几条同引文的收藏(回跳按钮按引文找,留着就分不清点中的是哪一条)。
+IDENT = Path(__file__).resolve().parent / "snip_probe_ident.mjs"
 
 sys.path.insert(0, str(REPO))
 
@@ -121,6 +127,11 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
         if not bind.stdout.strip():
             raise AssertionError(bind.stderr)
         cls.bind = json.loads(bind.stdout)
+        ident = run_probe([node, str(IDENT), base, str(manifest)],
+                          timeout=420, env=probe_env())
+        if not ident.stdout.strip():
+            raise AssertionError(ident.stderr)
+        cls.ident = json.loads(ident.stdout)
 
     def test_snippets_can_be_taken_and_jumped_back_to_everywhere(self):
         results = self.out["results"]
@@ -197,6 +208,20 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
             with self.subTest(check=r["name"]):
                 self.assertTrue(r["ok"], r["detail"])
 
+    def test_a_snippet_points_at_the_place_he_picked(self):
+        """原处身份:高亮的那一处,是不是他当初选的那一处。
+
+        和上面那条分开记:绑定那一条问的是「绑在哪一处哪一版」,这一条问的是
+        **身份凭什么成立** —— 这几条红的时候,收藏当场成功、库里那条也在、版本号
+        看着也对,不好的是那个"对得上"是现搜出来的:原处早被改稿删掉,剩下别处
+        一句一字不差的同句被当成他收藏的那一段高亮出来(页面上看不出来)。
+        """
+        results = self.ident["results"]
+        self.assertTrue(results, "原处身份探针一条都没跑")
+        for r in results:
+            with self.subTest(check=r["name"]):
+                self.assertTrue(r["ok"], r["detail"])
+
     def test_no_page_error_along_the_way(self):
         """页面里抛出来的异常单独报一条。
 
@@ -210,6 +235,7 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
         self.assertEqual([], self.chat["pageErrors"])
         self.assertEqual([], self.cards["pageErrors"])
         self.assertEqual([], self.bind["pageErrors"])
+        self.assertEqual([], self.ident["pageErrors"])
 
 
 if __name__ == "__main__":

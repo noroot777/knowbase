@@ -185,6 +185,14 @@ class SnippetRequest(BaseModel):
     # `snipSeek`)。**不在服务端重算**:服务端手里没有用户当时看的那一篇正文
     # (日报、问答回答压根不是文件),而且重算也只能算到「此刻」。
     quote_unique: int = 0
+    # 采集那一刻**这条锚点定不定得住**(1 = 整段锚点在那一篇里唯一落回用户选的
+    # 那一处)。回跳那一刻记着 0 的一律不定位:那一刻的「正好剩一处」只说明别处
+    # 被删掉了,而采集那一刻谁也说不出用户选的是第几处 —— 采信它就是把一处从没
+    # 被收藏过的文字高亮出来(审查用生产函数实测:采集偏移 740,删掉第二节之后
+    # 回查到 244)。**默认 None = 没记下**,和 0 不是一回事:老数据、以及没带
+    # 这个字段的调用方都是「不知道」,按原样放行;0 是比它更强的断言。
+    # 同 `quote_unique`:**不在服务端重算**(服务端手里没有用户当时看的那一份)。
+    anchor_exact: int | None = None
     # 问答片段:这段话出自哪一条**已经落库**的消息。见下面那道归属核验。
     origin_msg: int = 0
 
@@ -264,8 +272,9 @@ _FAV_SELECT = (
     # 回跳那一头要用它决定能不能走裸引文那一档(见 `snip_text.js` 的
     # `snipSpecOf`/`snipSeek`)。**老数据是 NULL,前端据此按「说不清」办** ——
     # 这儿不许 COALESCE 成 0 或 1:两者分别是「当时不唯一」和「当时唯一」,
-    # 都是比「没记下」更强的断言。
-    " f.quote_unique, f.origin_msg,"
+    # 都是比「没记下」更强的断言。`anchor_exact`(采集那一刻这条锚点定不定得住)
+    # 同理:0 = 当时就定不住、哪一档都不给用,NULL = 老数据没记下、按原样放行。
+    " f.quote_unique, f.anchor_exact, f.origin_msg,"
     # 采集那一刻核对过的正文版本。**回跳那一头拿它和阅读页此刻的版本号相比**,
     # 相等才敢只听锚点的一侧、必要时退到裸引文(见 `snip_text.js` 的 `snipSeek`)。
     # 同样**不许 COALESCE 成空串**:老数据的 NULL 是「没记下」,而空串在那一头
@@ -424,12 +433,19 @@ def api_favorite_snippet(body: SnippetRequest):
             cur = conn.execute(
                 "INSERT INTO favorites (path, quote, prefix, suffix, note,"
                 " origin, origin_ref, origin_title, origin_url,"
-                " quote_unique, origin_msg, doc_version, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " quote_unique, anchor_exact, origin_msg, doc_version,"
+                " created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (path or None, quote, prefix, suffix, body.note.strip(),
                  body.origin, body.origin_ref.strip(), title,
                  body.origin_url.strip(),
-                 1 if body.quote_unique else 0, msg_id or None,
+                 1 if body.quote_unique else 0,
+                 # **没带这个字段就存 NULL,不许折成 0。** 0 的意思是「采集那一刻
+                 # 就定不住」,回跳那一头据它一律不定位;老调用方和老数据是
+                 # 「没记下」,折成 0 等于把它们的收藏一次性废掉。
+                 None if body.anchor_exact is None
+                 else (1 if body.anchor_exact else 0),
+                 msg_id or None,
                  # **核对过的那一版要跟着落库**,不只是在写入这一刻用一次:
                  # 回跳那一头要靠「库里这一版 == 阅读页此刻这一版」才敢采信
                  # 锚点的弱档(只听一侧、裸引文)。写进来这一刻它已经被
