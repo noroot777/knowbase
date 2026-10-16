@@ -114,7 +114,15 @@ def window():
     这几个数一并原样透传,这里不做任何合并。
     查不出来时窗口预填照旧 —— 这两条只是提示,不该让面板打不开。
     **`pending: null`(算不出来)前端照旧显示按钮** —— 那是"不知道",不是"没有
-    新内容",藏掉按钮等于拿一次读取故障把出报这条路堵死。
+    新内容",藏掉按钮等于拿一次读取故障把出报这条路堵死。**`pending.gain: null`
+    是同一回事的更细一档**:两个数算出来了,只有"会不会多带进内容"这一问答不上来
+    (今天那份里有一条账本没记下当时那一版,见 `daily_gain._will_add` 第三档)。
+
+    `day` / `has_report` 是**藏按钮要的另一半**:这一次会写到哪一天、那一天的日报
+    文件**此刻**在不在。只有 `gain == 0` 且 `has_report is true` 才允许把按钮藏掉
+    —— 两件事必须同一趟回包给出来,界面手里那份日报列表缓存答不了"此刻"
+    (空闲轮询只刷新这条,不刷新列表;在 Obsidian 里把今天那份移走之后,缓存会一直
+    说"还在",按钮就一直藏着)。`null` = 不知道,不藏。
     """
     # 这条只给窗口预填(回溯几天),不报"定时开没开" —— 所以读不出来时退回缺省
     # 天数照常给出窗口,而不是让面板打不开。那句"开没开"由 /settings 回答。
@@ -127,8 +135,10 @@ def window():
         info = daily.pending(settings['first_days'])
     except Exception:                               # noqa: BLE001 - 提示失败不该让面板打不开
         since, until = daily.next_window(settings['first_days'])
+        # 算不出来时**连"那一天有没有日报"也一起报不知道**:界面藏按钮要两个
+        # 条件一起成立,这里给 False 等于替它答了一个我们并没有核实的答案。
         info = {'since': since, 'until': until, 'items': None, 'late': None,
-                'gain': None}
+                'gain': None, 'day': None, 'has_report': None}
     try:
         got = fetch_rounds.today()
     except Exception:                               # noqa: BLE001 - 同上
@@ -137,6 +147,7 @@ def window():
             'until': info['until'].isoformat(timespec='minutes'),
             'first_days': settings['first_days'],
             'fetch': got,
+            'day': info['day'], 'has_report': info['has_report'],
             'pending': (None if info['items'] is None else
                         {'items': info['items'], 'late': info['late'],
                          'total': info['items'] + info['late'],

@@ -17,12 +17,44 @@ function dailyTargetDate() {
     : new Date().toLocaleDateString('sv');
 }
 
+function dailyTargetReport() {
+  // 「这一次会写到的那一天,有没有一份日报」—— **只有这一份口径**,三个消费者:
+  // 按钮叫什么名字、点下去要不要先弹覆盖确认(`runDaily`)、以及没有新内容时
+  // 能不能把按钮**藏掉**。三档:
+  //   true  = 核实过:**此刻磁盘上**就有(window 那一趟带回来的 `has_report`,
+  //           和 `gain` 同一次读、同一个回包);
+  //   false = 核实过:没有;
+  //   null  = **没核实过**,只是手里那份列表缓存这么说。
+  //
+  // 为什么要分出 null:列表缓存只在列表重读时才更新,而空闲轮询只刷新 window。
+  // 在 Obsidian 里把今天那份移走(没走界面那条删除)之后,缓存会一直说"还在"、
+  // `gain` 照样是 0,于是"重建今天那一份"的唯一入口被一直藏着,只有整页刷新才
+  // 回来(审查实测)。名字和确认框照缓存说没关系(说错顶多多问一句),
+  // **藏按钮不认猜**。
+  //
+  // **反过来,这份回包里的"没有"一旦过期就不许再用。** 生成、删除、以及最新一趟
+  // 读失败之后它就不是"此刻"了 —— 前两条各自会把列表和这份回包一起重读,第三条由
+  // `fetchDailyWindow` 的 catch 把 `has_report` 一并抹成 null(一句过期的"今天没有
+  // 日报"会让再点一次生成**不弹覆盖确认**,静悄悄盖掉刚出的那一份,审查实测)。
+  // 抹掉之后这件事退回列表那份:它含着今天 ⇒ null(不知道)⇒ 照旧问一声。
+  // 两趟 window 之间的先后由 `dailyWindowSeq` 管,迟到的那趟整趟作废,所以**读成功
+  // 的那一份一定比列表新**(生成/删除都是两样一起重读)。
+  //
+  // 自定义区间要写的是另一天,后端答的不是它 —— 那时整段事实都退回缓存,而
+  // `gain` 本来就不参与(见下),按钮照显示。
+  const day = dailyTargetDate();
+  if (dailyWindow && dailyWindow.day === day
+      && typeof dailyWindow.has_report === 'boolean') return dailyWindow.has_report;
+  return dailyReports.some(r => r.date === day) ? null : false;
+}
+
 function renderDailyGenButton() {
   // 这颗按钮的名字跟着"那一天有没有日报"走:已经有就是**重新生成**(点下去会
   // 覆盖它,所以还会弹一次确认),没有就是头一份。写死成"重新生成"的话,第一次
-  // 用的人会以为自己漏掉了一步。
-  const exists = dailyReports.some(r => r.date === dailyTargetDate());
-  $('daily-gen-label').textContent = exists ? '重新生成日报' : '生成日报';
+  // 用的人会以为自己漏掉了一步。**不知道的时候按"有"说** —— 名字说错只是难看,
+  // 而把"可能会覆盖"说成"头一份"会让人在没有确认框的情况下盖掉一份日报。
+  const exists = dailyTargetReport();
+  $('daily-gen-label').textContent = exists === false ? '生成日报' : '重新生成日报';
 
   // 按钮前面那句话报的是 `gain`:**再生成一次会多带进来几条没进过日报的内容**
   // (后端口径在 `daily.pending`:和真取材共用一个 `_select`,同样先截名额再数)。
@@ -39,11 +71,17 @@ function renderDailyGenButton() {
   //
   // 三档事实三句话:
   // ① 知道且 >0 → 「有 N 条新内容」(品牌深绿),按钮显示;
-  // ② 知道且 =0 → 「没有新内容」(灰),按钮**整颗藏掉**;
-  // ③ **不知道** → 后端答 `pending: null`(算不出来)说「新内容读不出来」、
-  //    还没问过后端或旧后端没给这个字段就整段藏掉 —— 两者都**照常显示按钮**。
-  //    把"不知道"当成"没有"的后果是一次读取故障就把出报这条路堵死,而页面上
-  //    一个字都不说。
+  // ② 知道且 =0 **而且核实过那一天的日报此刻就在** → 「没有新内容」(灰),
+  //    按钮**整颗藏掉**。两个条件缺一不可,而且都得是**核实过**的:账本盖的章和
+  //    vault 里那个文件是两头东西,文件被移走时章还在、`gain` 照样是 0,这时藏掉
+  //    按钮等于把"重建今天那一份"的唯一入口也一起藏了(判据在 `dailyTargetReport`);
+  // ③ **不知道** → 说「新内容读不出来」、**照常显示按钮**。两档都算不知道:
+  //    后端答 `pending: null`(整份算不出来),以及 `pending.gain: null`
+  //    (两个数算出来了,只有"会不会多带进内容"这一问答不上来 —— 今天那份里有
+  //    一条账本没记下当时那一版)。**旧后端压根没给 `gain` 这个字段**时整段不说、
+  //    按钮照显示(按形状判,不猜后端是哪一版;`kb/static/` 免重启而 server.py
+  //    要重启,这一刻天天走到)。把"不知道"当成"没有"的后果是一次读取故障就把
+  //    出报这条路堵死,而页面上一个字都不说。
   //
   // **改过覆盖区间时整段藏掉、按钮照显示**:后端算的是默认区间那一段,拿它去
   // 回答"我填的这一段里有多少新内容"是另一个问题的答案。这也是 `gain=0` 时把
@@ -51,12 +89,13 @@ function renderDailyGenButton() {
   const line = $('daily-new-count');
   const p = dailyWindowDirty ? undefined : dailyWindow?.pending;
   const gain = typeof p?.gain === 'number' ? p.gain : null;
-  const unreadable = !dailyWindowDirty && dailyWindow && dailyWindow.pending === null;
+  const unreadable = !dailyWindowDirty && !!dailyWindow
+    && (dailyWindow.pending === null || (!!p && p.gain === null));
   line.hidden = gain === null && !unreadable;
   line.textContent = unreadable ? '新内容读不出来'
     : gain > 0 ? `有 ${gain} 条新内容` : '没有新内容';
   line.classList.toggle('is-none', !gain);
-  $('daily-gen').hidden = gain === 0;
+  $('daily-gen').hidden = gain === 0 && exists === true;
 
   // tooltip 带着**抓取自己的事实**:今天第 N 次抓取往库里新加了多少篇。一天内
   // 同步第二次之后,得有个地方让人看出这次抓回来多少 —— 它和上面那个数必然不等

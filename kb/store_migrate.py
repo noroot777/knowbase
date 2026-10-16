@@ -271,6 +271,18 @@ def migrate_fav_anchor(conn: sqlite3.Connection) -> None:
                  ("origin_msg", "INTEGER"), ("doc_version", "TEXT")))
 
 
+def migrate_daily_sig(conn: sqlite3.Connection) -> None:
+    """daily_carried 加 material_sig 列。幂等(理由同 migrate_promo:老库只能 ALTER)。
+
+    记的是**当初送进模型的那一份素材的指纹**(`kb.daily_gain.material_sig`)。可空:
+    **老行的空值是「没记下」,不是「和现在一样」** —— 日报面板据它判"再生成一次
+    会不会多出东西",空值那一档**一个字都答不上来,就报「不知道」**(口径只有一份,
+    在 `kb.daily_gain._will_add`:不许拿 `indexed_at` 去推,提取换掉摘要那条路根本
+    不碰它)。
+    """
+    add_columns(conn, "daily_carried", (("material_sig", "TEXT"),))
+
+
 def migrate_no_body(conn: sqlite3.Connection) -> None:
     """documents 加 no_body_hash 列。幂等(理由同 migrate_promo:老库只能 ALTER)。
 

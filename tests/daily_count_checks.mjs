@@ -16,7 +16,7 @@
 // 判据原样搬过来、共用同一次页面会话。后端那一侧的不变量在
 // tests/test_daily_carried.py(`gain` 那四条)、tests/test_fetch_rounds.py、
 // tests/test_fetch_receipt.py 与 tests/test_fetch_identity.py。
-export async function checkNewContentCount({ evalJs, check }) {
+export async function checkNewContentCount({ evalJs, waitFor, check }) {
   const line = `document.getElementById('daily-new-count')`;
   const tip = `document.getElementById('daily-gen').title`;
   // 可见那一句、它藏没藏、按钮藏没藏、tooltip,外加两个时刻输入框 —— 下面每一档
@@ -24,6 +24,7 @@ export async function checkNewContentCount({ evalJs, check }) {
   const now = `(() => JSON.stringify({
     line: ${line}.textContent, lineOff: ${line}.hidden,
     genOff: document.getElementById('daily-gen').hidden,
+    label: document.getElementById('daily-gen-label').textContent,
     tip: ${tip},
     since: document.getElementById('daily-since').value,
     until: document.getElementById('daily-until').value }))()`;
@@ -72,13 +73,172 @@ export async function checkNewContentCount({ evalJs, check }) {
   s = JSON.parse(await evalJs(render(`{ pending: { items: 3, late: 0, total: 3 } }`)));
   check("旧后端没给这个数时整段不说,按钮照显示",
         !s.genOff && s.lineOff, JSON.stringify(s));
+  // **一次读取失败也是「不知道」,而且必须当场改口。** 后端答 `pending: null` 那
+  // 一路覆盖不到 HTTP 错误、断连、解析失败和 `pipeJson` 的超时 —— 留着上一次那个
+  // 0 就是拿一次历史成功当无限期证据:页面继续写「没有新内容」、继续藏着按钮,而
+  // 库里明明又进了新文章(审查实测:只对这一个接口注入网络失败,服务端确有新增,
+  // 面板照旧说 0 并藏着按钮)。五个入口共用一个接收点,所以注在那里、从空闲轮询
+  // 这一个入口驱动。
+  await evalJs(`(() => { window.__winFail = pipeJson;
+    pipeJson = async (path, ...rest) => {
+      if (path === '/api/daily/window') throw new Error('摆局:断连');
+      return window.__winFail(path, ...rest); };
+    return true; })()`);
+  await evalJs(`refreshDailyPending()`);
+  s = await snap();
+  check("空闲那一跳读失败:当场改口说读不出来,按钮跟着回来",
+        !s.genOff && s.line === "新内容读不出来" && !s.lineOff, JSON.stringify(s));
+  await evalJs(`(() => { pipeJson = window.__winFail; delete window.__winFail;
+                         return true; })()`);
+  await evalJs(`loadDailyWindow()`);
+  s = await snap();
+  check("读回来之后那个数自己恢复", s.genOff && s.line === "没有新内容", JSON.stringify(s));
+  // 反过来钉一边:**迟到的失败不许盖掉更晚那趟刚读到的好事实**。摆法是让这一趟
+  // 在失败之前把代次顶掉(等价于"它还在路上时又发了一趟"),它的失败就该整趟作废。
+  await evalJs(`(() => { window.__winFail = pipeJson;
+    pipeJson = async (path, ...rest) => {
+      if (path === '/api/daily/window') { dailyWindowSeq++; throw new Error('摆局:迟到的失败'); }
+      return window.__winFail(path, ...rest); };
+    return true; })()`);
+  await evalJs(`refreshDailyPending()`);
+  s = await snap();
+  check("被顶掉的那一趟失败了,也不许把刚读到的数抹成不知道",
+        s.genOff && s.line === "没有新内容", JSON.stringify(s));
+  await evalJs(`(() => { pipeJson = window.__winFail; delete window.__winFail;
+                         return true; })()`);
+
+  // **「有没有新内容」不许跟着别的请求一起失效。** 这一跳先读运行状态、再读这个
+  // 数,而读状态失败时整轮早退过 —— 于是 `/status` 一直失败时,上一次那个 0 无限
+  // 期有效:页面始终写「没有新内容」、按钮始终不在,而素材是从外面(同步中心、
+  // CLI、定时)进来的,跟读不读得到"这一轮跑到哪了"没有关系(审查实测:只让
+  // `/status` 失败,连驱动两轮,页面一个字都没变)。
+  await evalJs(`(() => { window.__statFail = pipeJson;
+    pipeJson = async (path, ...rest) => {
+      if (String(path) === '/api/daily/status') throw new Error('摆局:状态读不到');
+      const r = await window.__statFail(path, ...rest);
+      if (String(path) === '/api/daily/window')
+        r.pending = { items: 4, late: 0, total: 4, gain: 4 };
+      return r; };
+    return true; })()`);
+  await evalJs(`refreshDailyStatus()`);
+  s = await snap();
+  check("状态读不到的那一跳,新内容这件事照样刷新",
+        !s.genOff && s.line === "有 4 条新内容", JSON.stringify(s));
+  // 反过来钉一边:两个都读不到时**不许编一个数出来**,说读不出来、按钮留着。
+  await evalJs(`(() => { pipeJson = async (path, ...rest) => {
+      if (String(path) === '/api/daily/status'
+          || String(path) === '/api/daily/window') throw new Error('摆局:两头都断');
+      return window.__statFail(path, ...rest); };
+    return true; })()`);
+  await evalJs(`refreshDailyStatus()`);
+  s = await snap();
+  check("两头都读不到时说读不出来,不编一个数",
+        !s.genOff && s.line === "新内容读不出来", JSON.stringify(s));
+  await evalJs(`(() => { pipeJson = window.__statFail; delete window.__statFail;
+                         clearTimeout(dailyTimer); return true; })()`);
+  await evalJs(`loadDailyWindow()`);
+  s = await snap();
+  check("状态那一侧恢复之后,这个数也回到真实值",
+        s.genOff && s.line === "没有新内容", JSON.stringify(s));
+
+  // **账本的章和日报文件是两头东西。** 文件在 Obsidian 里被移走、或者手工删掉
+  // (没走界面那条删除)时,章还盖着、`gain` 照样是 0 —— 这时再把按钮藏掉,等于
+  // 把"重建今天那一份"的唯一入口也一起藏了。
+  //
+  // **这件事只认后端那一趟带回来的 `has_report`**(和 `gain` 同一次读):页面手里
+  // 那份日报列表缓存只在列表重读时更新,而空闲轮询只刷新 window —— 下面第一档
+  // 摆的正是这个形状,**缓存还说"今天那份在"**,照它判的话按钮一直藏着,只有整页
+  // 刷新才回来(审查实测)。
+  s = JSON.parse(await evalJs(render(`{ has_report: false }`)));
+  check("今天那份在外面被移走:列表缓存还说在,也照显示按钮(名字退回「生成日报」)",
+        !s.genOff && s.line === "没有新内容" && s.label === "生成日报", JSON.stringify(s));
+  // 反过来钉一边:**核实过"文件就在"的那一档照旧藏**(缓存空不空都一样)——
+  // 不然"0 条就藏"这件事整个失效,按钮再也藏不掉。
+  await evalJs(`(() => { window.__reports = dailyReports; dailyReports = [];
+                         renderDailyGenButton(); return true; })()`);
+  s = await snap();
+  check("后端核实过那一份就在:列表缓存空着也照旧藏按钮", s.genOff, JSON.stringify(s));
+  // 旧后端不给 `has_report`:列表缓存说"有"只是**猜**,猜不算核实 —— 不许据此
+  // 藏掉按钮(名字照缓存说「重新生成日报」,说错顶多多问一句确认)。
+  await evalJs(`(() => { dailyReports = window.__reports; delete window.__reports;
+                         window.__has = dailyWindow.has_report; delete dailyWindow.has_report;
+                         renderDailyGenButton(); return true; })()`);
+  s = await snap();
+  check("旧后端不给这件事时,列表缓存那一份只是猜,不许据此藏按钮",
+        !s.genOff && s.label === "重新生成日报", JSON.stringify(s));
+  await evalJs(`(() => { dailyWindow.has_report = window.__has; delete window.__has;
+                         renderDailyGenButton(); return true; })()`);
+
+  // **版本答不上来也是「不知道」。** 账本里没记下今天那份带走的是哪一版时(这一列
+  // 是后加的、`seed_locked` 重算出来的那批也没有),后端把整个 `gain` 报成 null ——
+  // 页面要说「读不出来」并把按钮留着,不许当成 0 藏掉(旧判据拿 `indexed_at` 推,
+  // 而真正换掉素材的提取那条路压根不碰它,审查实测 12 组全错)。
+  s = JSON.parse(await evalJs(render(
+    `{ pending: { items: 0, late: 0, total: 0, gain: null } }`)));
+  check("账本没记下带走的是哪一版:说读不出来,按钮留着",
+        !s.genOff && s.line === "新内容读不出来" && !s.lineOff, JSON.stringify(s));
+
+  // **一句过期的"今天还没有日报"不许继续当"可以不问一声就覆盖"的凭据。**
+  // 形状:今天本来没有日报(那一趟读到 `has_report=false`)→ 生成**成功**了(列表
+  // 里已经是新出的那一份)→ 紧接着这个接口开始读失败。页面要是还攥着生成**之前**
+  // 那句"没有",再点生成就**不弹覆盖确认**,静悄悄盖掉刚出的日报(审查实测:两颗
+  // 按钮都发出了 POST /api/daily/run)。**两颗按钮一起验** —— 它们共用
+  // `runDaily(sync)`,只验一颗等于没验那条共用判据。
+  //
+  // POST 先拦下来:真发出去会在沙箱里再生成一次,把后面几组的摆盘冲掉;拦住之后
+  // 「一次都没发」本身也是判据(光看"没见到确认框"证不了它真的发了)。
+  await evalJs(`(() => { window.__runs = []; window.__postReal = pipePost;
+    pipePost = async (path, body) => {
+      if (String(path) === '/api/daily/run') { window.__runs.push(body); throw new Error('摆局:拦下'); }
+      return window.__postReal(path, body); };
+    window.__picked = [...document.getElementById('daily-channels')
+      .querySelectorAll('input')].map(i => i.checked);
+    const one = document.getElementById('daily-channels').querySelector('input');
+    if (one) one.checked = true;              // 同步那颗先过"勾了没有"那道闸
+    dailyWindow.has_report = false;           // 生成之前读到的那一句
+    renderDailyGenButton(); return true; })()`);
+  s = await snap();
+  check("摆局:此刻按的还是生成之前那句「今天还没有日报」",
+        s.label === "生成日报", JSON.stringify(s));
+  await evalJs(`(() => { window.__winFail = pipeJson;
+    pipeJson = async (path, ...rest) => {
+      if (String(path) === '/api/daily/window') throw new Error('摆局:断连');
+      return window.__winFail(path, ...rest); };
+    return true; })()`);
+  await evalJs(`refreshDailyPending()`);
+  s = await snap();
+  check("读失败之后那句过期的「没有」跟着作废(列表里明明已经有今天那一份)",
+        s.label === "重新生成日报"
+        && await evalJs(`dailyReports.some(r => r.date === dailyTargetDate())`),
+        JSON.stringify(s));
+  for (const [id, name] of [['daily-gen', '直接生成'], ['daily-sync-gen', '同步全部并生成']]) {
+    await evalJs(`document.getElementById('${id}').click()`);
+    const asked = await waitFor(`!!document.querySelector('.confirm-mask [data-act=ok]')`, 5000);
+    check(`${name}那颗:照旧先问一声会不会覆盖今天那一份`, asked);
+    if (asked) await evalJs(
+      `document.querySelector('.confirm-mask [data-act=cancel]').click()`);
+  }
+  check("问之前一次都没真发出去",
+        (await evalJs(`JSON.stringify(window.__runs)`)) === "[]",
+        await evalJs(`JSON.stringify(window.__runs)`));
+  await evalJs(`(() => { pipeJson = window.__winFail; pipePost = window.__postReal;
+    delete window.__winFail; delete window.__postReal; delete window.__runs;
+    [...document.getElementById('daily-channels').querySelectorAll('input')]
+      .forEach((i, n) => { i.checked = window.__picked[n]; });
+    delete window.__picked; return true; })()`);
+  await evalJs(`loadDailyWindow()`);
+  s = await snap();
+  check("摆盘收干净:读回来之后又回到「重新生成」那一档",
+        s.genOff && s.line === "没有新内容", JSON.stringify(s));
+
   check("后端把三个数一起给了出来",
         await evalJs(`(async () => {
           const w = await (await fetch('/api/daily/window')).json();
           return w.fetch && typeof w.fetch.n === 'number'
                  && typeof w.fetch.added === 'number'
                  && w.pending && typeof w.pending.total === 'number'
-                 && typeof w.pending.gain === 'number'; })()`));
+                 && typeof w.pending.gain === 'number'
+                 && typeof w.has_report === 'boolean' && typeof w.day === 'string'; })()`));
 
   // ── tooltip 里的抓取事实 ────────────────────────────────────────────────
   // 上面那几档摆的是**页面状态**,它们证明不了"事实能从外面进来"—— 而这正是
