@@ -269,7 +269,7 @@ class WeChatReceiptTests(_Base):
     def test_the_subprocess_list_becomes_identified_receipt_rows(self):
         """清单里那一条换算成 `(内容身份, 抓取身份, vault 相对路径)`。
 
-        三样都要:路径定取材范围,内容身份让重放幂等,抓取身份让药丸分得开
+        三样都要:路径定取材范围,内容身份让重放幂等,抓取身份让 tooltip 分得开
         「这一次新抓到」和「补导之前抓到」。"""
         out = str(self.vault / 'source' / 'rss')          # 本夹具里的在册来源树
         got = self._run(self._proc(self._event(
@@ -285,7 +285,7 @@ class WeChatReceiptTests(_Base):
 
         这是「补导」在公众号那条通道上的真实形态:身份只在**文章首次插入那个
         事务**里写一次(`upsert_article_from_blog`),补正文那一轮压根不碰它。
-        记成这一轮的话药丸会把它算成「这一次新抓到的」,而远端那天压根没发新文章。"""
+        记成这一轮的话 tooltip 会把它算成「这一次新抓到的」,而远端那天压根没发新文章。"""
         out = str(self.vault / 'source' / 'rss')
         got = self._run(self._proc(self._event(
             out, ['2026-10-13/旧文.md'], ids={'2026-10-13/旧文.md': '1001'},
@@ -409,7 +409,7 @@ class ReceiptScopeTests(_Base):
     """回执里不算「抓到的新内容」的那些路径,账本自己筛掉(`in_scope`)。
 
     范围口径和日报取材认的那批树同一份:衍生树、停用的树、`skip_dirs` 都不算。
-    交给每个采集器各判一遍的话迟早对不上 —— 对不上的表现是药丸报出一批压根
+    交给每个采集器各判一遍的话迟早对不上 —— 对不上的表现是 tooltip 报出一批压根
     不会进日报的文件。
     """
 

@@ -142,8 +142,15 @@ def _label_window(since: datetime, until: datetime) -> str:
             else f"{since:%Y-%m-%d %H:%M} 至 {until:%Y-%m-%d %H:%M}")
 
 
+# `mine` = 「这一条是**正在写的那一份**自己上一版带走的」。WHERE 里那道 `UNCARRIED`
+# 已经把别的日报盖过章的排除干净了,所以还查得到章的只可能是今天那一份自己的 ——
+# 于是**同一次读**里就分得开「重新生成会把它重新带走」和「它一份日报都没进过」,
+# `pending` 不必再补一次「今天那份带走了谁」的查询去扣减(两个读取时刻拼出来的数
+# 会在别人中途提交时自相矛盾,口径见 `pending` 的说明)。
 _FIELDS = ('SELECT d.path,d.source,d.title,d.account,d.published,d.url,d.summary,'
-           'd.indexed_at FROM documents d WHERE ')
+           'd.indexed_at,'
+           ' EXISTS(SELECT 1 FROM daily_carried c WHERE c.path=d.path) AS mine'
+           ' FROM documents d WHERE ')
 
 
 def _scope() -> tuple[str, list]:
@@ -158,6 +165,9 @@ def _scope() -> tuple[str, list]:
 
 def _enrich(conn, row, when: datetime | None, late: bool) -> dict:
     doc = dict(row)
+    # `mine` 只给 `pending` 算「再生成一次会多带进来几条」,素材字典的形状不跟着变
+    # (落盘那一侧按字段名逐个取,多一个键没人读,但也没必要让它漂进去)。
+    doc.pop('mine', None)
     doc['when'] = when
     doc['late'] = late
     doc['entities'] = [e[0] for e in conn.execute(
@@ -185,8 +195,12 @@ def _select(conn, since: datetime, until: datetime,
     比大小,见 `parse_ts`。粗筛之后只剩两三天的量,排序开销可以忽略。
 
     两个桶都只看**账本里没有**的条目,所以这个函数同时是 `collect`(真取材)和
-    `pending`(面板上"又攒了多少")的唯一口径 —— 两处各判一遍的话必然各漂各的。
-    返回的补录候选已经排好序:`[:LATE_ITEMS]` 就是该带走的那一批。
+    `pending`(面板上"再出一份能多带进来多少")的唯一口径 —— 两处各判一遍的话
+    必然各漂各的。返回的补录候选已经排好序:`[:LATE_ITEMS]` 就是该带走的那一批。
+
+    行上多带一列 `mine`(见 `_FIELDS`):这一条是不是**正在写的那一份**自己上一版
+    带走的。`collect` 不读它,`pending` 靠它在同一次读里把「重新生成会重新带走」和
+    「它一份日报都没进过」分开。
     """
     where, args = _scope()
     args = [*args, day]
@@ -304,31 +318,58 @@ def _ensure_ledger(conn, first_days: int = FIRST_DAYS,
 
 def pending(first_days: int = FIRST_DAYS,
             now: datetime | None = None) -> dict:
-    """队列里还积着多少没上报过的素材 —— 面板的 tooltip 用,零模型调用。
+    """面板右上角那两个数,零模型调用。
 
-    **这个数不上按钮。** 按钮上报的是「今天第 N 次抓取抓了多少」,那是抓取自己的
-    事实(`kb.fetch_rounds`),跟取材结果不是一回事。这里答的是另一个问题:一共还
-    积着多少一份日报都没进过的。
+    - `items` / `late` / 两者之和:**队列里一共还积着多少一份日报都没进过的**。
+      给 tooltip 用 —— 它答的是"攒了多少",而不是"点下去会得到什么":名额
+      (`MAX_ITEMS` / `LATE_ITEMS`)每一轮只带得走固定条数,生产库实测积压 1097 条
+      而重新生成一次只多出 11 条。把这个数写到按钮边上,用户会照着它花一次模型钱。
+    - `gain`:**再生成一次会多带进来几条**没进过任何日报的内容。这个数才上按钮
+      (`daily_chip.js`),也是"这颗按钮还有没有用"的唯一判据 —— `gain=0` 意味着
+      重新生成会原样挑回今天那一份已经带走的那批,内容一个字都不会多,按钮跟着整颗
+      藏掉。取材口径必须和 `collect` 逐字一致(同一个 `_select`、同样先截
+      `MAX_ITEMS` / `LATE_ITEMS` 再数),两处各判一遍必然各漂各的。
 
-    **`day=''` ⇒ 一个章都不排除,而且只读这一次。** `_select` 平时要放过"正在写
-    的那一份自己盖的章"(重新生成时它上一版带走的内容必须重新可选),而这里问的是
-    "进过**任何**一份日报没有"。传当天日期的话今天那份刚带走的内容会被重新数成
-    新素材,面板上永远有一个消不掉的数字。
-    **也不许再补一次「今天那份带走了谁」的查询去扣减** —— 账本是**允许**出现
-    「日报文件写好了、记账没写上」的(那一档故意倒向"多报一遍",见 `daily_carry`),
-    拿它当"今天这份里有什么"的完整事实就会凭空报出新增;何况候选和扣除项来自两
-    个读取时刻,中间别人提交一次,算出来的是两个版本拼起来的数。
+    **两个数来自同一次读。** `_select` 传的是**今天**(和 `collect` 同一个
+    `day_key`):今天那一份上一版带走的内容必须重新算进候选,否则 `gain` 答的是
+    另一个问题。谁是"今天自己盖的章"由 `mine` 那一列在同一条 SQL 里给出 ——
+    **不许再补一次「今天那份带走了谁」的查询去扣减**:候选和扣除项来自两个读取
+    时刻,中间别人提交一次,算出来的是两个版本拼起来的数。
+
+    **误差方向只许倒向「多报」。** 账本是**允许**出现「日报文件写好了、记账没写
+    上」的(那一档故意倒向多报一遍,见 `daily_carry`),那时今天带走的那几条看着
+    像没进过日报 —— `gain` 跟着偏大,按钮多显示一次(代价:用户白花一次模型钱,
+    看得见)。反过来偏小就是把按钮藏掉、而确实有新内容(静默丢掉一次出报机会),
+    所以盖章一律排在落盘**之后**那条顺序在这里也承重。
     """
     from kb import store
     since, until = next_window(first_days, now)
     conn = store.connect()
     try:
-        _ensure_ledger(conn, first_days, until)
-        picked, late = _select(conn, since, until, '')
+        _ensure_ledger(conn, first_days, until)     # 这一步可能要写,排在读事务外面
+        # 两个桶是**两条 SELECT**,而 legacy `isolation_level` 下 SELECT 自己不开
+        # 事务 —— 中间夹进别人一次 `mark_carried` 提交的话,折出来的是两个版本拼
+        # 起来的数(上一版正是这么报出过一个凭空的新增:实测线程屏障下 `0 → 1 → 0`,
+        # 期间一篇新文章都没加)。WAL 下一次 `BEGIN` 就是一份只读快照,拦不住写者。
+        # 先收干净上一步可能留下的事务(同 `mark_carried` 那道):嵌套 BEGIN 会抛,
+        # 而这条路每 15 秒走一次,抛一次面板上那两个数就整段没了。
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute('BEGIN')
+        try:
+            picked, late = _select(conn, since, until, _day_key(None, until))
+        finally:
+            conn.rollback()                         # 只读,没什么要提交的
     finally:
         conn.close()
+
+    def fresh(rows) -> int:
+        """这一批里没进过任何日报的有几条(`mine` = 今天那份自己上一版带走的)。"""
+        return sum(1 for _, row in rows if not row['mine'])
+
     return {'since': since, 'until': until,
-            'items': len(picked), 'late': len(late)}
+            'items': fresh(picked), 'late': fresh(late),
+            'gain': fresh(picked[:MAX_ITEMS]) + fresh(late[:LATE_ITEMS])}
 
 
 def _material(items: list[dict]) -> str:
