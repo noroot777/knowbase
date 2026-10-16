@@ -186,8 +186,15 @@ def _load_history(conn, cid: int | None) -> list[dict]:
 
 
 def _save_qa(conn, cid: int | None, q: str, answer: str, refs: list, plan: dict,
-             model: str) -> int:
-    """一轮问答落库:新会话则建会话,写 user + assistant 两行并提交。返回会话 id。"""
+             model: str) -> tuple[int, int, int]:
+    """一轮问答落库:新会话则建会话,写 user + assistant 两行并提交。
+
+    回 `(会话 id, 提问那条消息 id, 回答那条消息 id)`。**两个消息 id 是要往
+    `done` 帧里带的**:页面上那两条气泡靠它们证明「我已经在库里了」,片段收藏
+    的归属核验也认它(见 `kb/web/favorites_api.py` 的 `_chat_message_id`)。
+    只回会话 id 的话,客户端只能拿「当前是哪个对话」当归属 —— 而那在流提前
+    结束时会指向一个从来没有这句话的会话。
+    """
     now = _now()
     if cid is None:
         title = q[:30] + ("…" if len(q) > 30 else "")
@@ -197,18 +204,18 @@ def _save_qa(conn, cid: int | None, q: str, answer: str, refs: list, plan: dict,
         ).lastrowid
     else:
         conn.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, cid))
-    conn.execute(
+    uid = conn.execute(
         "INSERT INTO messages (conversation_id, role, content, model, created_at)"
         " VALUES (?, 'user', ?, ?, ?)", (cid, q, model, now),
-    )
-    conn.execute(
+    ).lastrowid
+    aid = conn.execute(
         "INSERT INTO messages (conversation_id, role, content, refs_json,"
         " plan_json, model, created_at) VALUES (?, 'assistant', ?, ?, ?, ?, ?)",
         (cid, answer, json.dumps(refs, ensure_ascii=False),
          json.dumps(plan, ensure_ascii=False), model, _now()),
-    )
+    ).lastrowid
     conn.commit()
-    return cid
+    return cid, uid, aid
 
 
 @router.post("/api/ask")
@@ -230,8 +237,8 @@ def api_ask(body: AskRequest):
         except RuntimeError as e:
             raise HTTPException(502, str(e))
         result["refs"] = askflow_filter_refs(result["answer"], result["refs"])
-        cid = _save_qa(conn, body.conversation_id, q, result["answer"],
-                       result["refs"], result["plan"], model)
+        cid, _uid, _aid = _save_qa(conn, body.conversation_id, q, result["answer"],
+                                   result["refs"], result["plan"], model)
     finally:
         conn.close()
     for r in result["refs"]:
@@ -286,10 +293,16 @@ def api_ask_stream(body: AskRequest):
             # 正常收完 → 只留实际引用的来源 → 落库 + done
             answer = "".join(parts).strip()
             refs = askflow_filter_refs(answer, refs)
-            cid = _save_qa(conn, body.conversation_id, q, answer, refs, plan, model)
+            cid, uid, aid = _save_qa(
+                conn, body.conversation_id, q, answer, refs, plan, model)
             for r in refs:
                 r["vault"] = VAULT_NAME
-            yield frame(type="done", conversation_id=cid, refs=refs)
+            # **`done` 帧是「这一轮已经在库里了」唯一的凭证**,所以把那两条消息
+            # 的 id 一起带回去:页面拿它给气泡打身份,片段收藏把它发回来由
+            # `favorites_api._chat_message_id` 再核一次。正常 EOF 替代不了这一帧
+            # (传输提前结束时也是正常 EOF,而那一轮一个字都没落库)。
+            yield frame(type="done", conversation_id=cid, refs=refs,
+                        user_message_id=uid, message_id=aid)
         finally:
             stream.close()   # 断开时确保关闭底层 LLM 流(真停止);已耗尽则无操作
             conn.close()

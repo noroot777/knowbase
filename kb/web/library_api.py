@@ -10,9 +10,9 @@ from fastapi import APIRouter, HTTPException, Query
 
 from kb import projects as projlib
 from kb import store
-from kb.config import VAULT_ROOT
+from kb.scanner import body_version
 from kb.search import Filters, search
-from kb.web.common import VAULT_NAME
+from kb.web.common import VAULT_NAME, indexed_doc_version, read_doc_text
 
 router = APIRouter()
 
@@ -46,6 +46,13 @@ def api_search(
                 **h.__dict__,
                 "summary": d["summary"] if d else "",
                 "entities": ents,
+                # **这一截命中的正文是按哪一版切的**(卡片上那截原文也能收藏):
+                # 收藏那一头拿它证明「卡片这一份就是盘上这一份」。判据是**建索引
+                # 时那份文件的指纹和此刻盘上这一份逐字节相等** —— `best_chunk` 是
+                # 建索引那一刻切下来的,索引落后时这一截就不是盘上这一份里的字,
+                # 那时如实报空串(「说不出」),口径和事故形态在
+                # `common.indexed_doc_version`。
+                "doc_version": indexed_doc_version(h.path, h.content_hash),
                 "vault": VAULT_NAME,
             })
         return {"hits": out}
@@ -125,7 +132,14 @@ def api_project_detail(norm: str):
 
 @router.get("/api/doc")
 def api_doc(path: str):
-    """读一篇文档全文(md 原文),给前端预览面板。"""
+    """读一篇文档全文(md 原文),给前端预览面板。
+
+    `version` 是**正文**的版本号(`scanner.body_version`):片段收藏拿它回传,
+    落库前后端按盘上此刻那一份再算一次,不等就拒(见 `favorites_api`)。
+
+    「不在了」和「读不出来」分开报(404 / 503),口径在 `common.read_doc_text`
+    —— 片段收藏落库前那一次读走的是同一份。
+    """
     conn = store.connect()
     try:
         row = conn.execute("SELECT * FROM documents WHERE path=?", (path,)).fetchone()
@@ -133,9 +147,6 @@ def api_doc(path: str):
         conn.close()
     if row is None:
         raise HTTPException(404, "文档不在索引里")
-    full = VAULT_ROOT / path
-    try:
-        text = full.read_text(encoding="utf-8")
-    except OSError:
-        raise HTTPException(404, "文件读取失败(可能已移动)")
-    return {"path": path, "title": row["title"], "content": text, "vault": VAULT_NAME}
+    text = read_doc_text(path)
+    return {"path": path, "title": row["title"], "content": text,
+            "version": body_version(text), "vault": VAULT_NAME}

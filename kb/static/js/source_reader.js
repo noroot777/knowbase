@@ -26,10 +26,17 @@ function renderSourceEntry(item) {
   const post = item.content_kind === 'post', key = esc(item.key);
   const author = item.author || '未知作者', status = sourceItemStatus(item);
   const title = text.translating ? '外文内容，正在等翻译' : text.title;
+  // 这一截摊的是**真正的正文**(短观点往往整条都在这儿),所以它能收藏
+  // (`kb/static/js/snip_cards.js`)。那两档等待中的文案不是正文,`sourceItemReadable`
+  // 把它们挡在收藏之外。
+  const pending = text.translating || text.fetching;
   const excerpt = text.translating
     ? '译成中文之后才写进知识库；这一条现在只有原文，点“原文”可以直接看。'
     : text.fetching ? '这个来源只给了一条链接，正在去原文把正文抓回来；抓到之后才翻译、写进知识库。'
-    : text.body.slice(0, 380) + (text.body.length > 380 ? '…' : '');
+    : text.body.slice(0, 380);
+  // **省略号不是原文里的字。** 单独挂一个 span,收藏那头按 `.snip-more` 跳过它 ——
+  // 混在同一个文本节点里的话,选到结尾那一下会把它一起存进引文,点回去定位不到。
+  const more = !pending && text.body.length > 380 ? '<span class="snip-more">…</span>' : '';
   const heading = readable
     ? post ? '' : `<h3><button class="source-entry-title" data-read-item="${key}">${esc(title)}</button></h3>`
     : `<h3 class="source-entry-name">${esc(title)}</h3>`;
@@ -37,7 +44,7 @@ function renderSourceEntry(item) {
     ? `data-source-key="${key}" tabindex="0" aria-label="阅读${esc(post ? author + '的观点' : title)}" aria-current="false"` : ''}>
     <div class="source-entry-meta"><span><b class="source-entry-avatar" aria-hidden="true">${esc(author.slice(0, 1))}</b>${esc(author)}</span><time>${esc(item.published ? sourceTime(item.published) : '发布时间未知')}</time></div>
     ${heading}${!post && text.translated && item.title !== title ? `<p class="source-entry-original">${esc(item.title)}</p>` : ''}
-    <p class="source-excerpt${post && readable ? ' is-post' : ''}">${esc(excerpt)}</p>
+    <p class="source-excerpt${post && readable ? ' is-post' : ''}">${esc(excerpt)}${more}</p>
     <div class="source-entry-footer"><span>${sourceItemKind(item)}${status ? ' · ' + status : ''}</span><div>${readable ? `<button class="text-button" data-read-item="${key}">展开阅读</button>` : ''}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></div></article>`;
 }
 
@@ -223,3 +230,75 @@ function backToSourceList() {
   (entry || $('source-list-pane')).focus({ preventScroll: true });
   if (window.matchMedia('(max-width:760px)').matches) document.querySelector('.source-stream').scrollIntoView({ block: 'start' });
 }
+
+// ── 订阅正文的「收藏此段」 ────────────────────────────────────────────────────
+// 这一处有两条路,**按「点回去那一页里有没有这段话」分**:
+//
+// ① 盘上那篇 md 里找得到这段话 → 绑那篇文档(origin=doc),回跳走阅读页的锚点
+//    定位(最可靠的那一种)。
+// ② 原文视图、还没导出、或者盘上那篇跟屏幕上这份对不上 → origin=feed。
+//    **原文在 vault 里压根不存在**(导出写进 md 的是译文),绑文档的话这条收藏
+//    点回去永远是「没找到这段收藏」—— 那是把一句准话换成一句假话。feed 这一类
+//    回跳走站外原文。
+//
+// **走哪条不由客户端手里的字段推断,由存之前那一道核对定**:`docText` 去读
+// `/api/doc` 那一篇(阅读页渲染的就是这个文件),在里面找这条锚点,找不到就落
+// 到②,退的理由如实写进提示。口径在 kb/static/js/snip.js 的 `snipVerified`。
+// **核过了还要把「核的是哪一版」带上**(那道核对把 `doc_version` 挂到来源上,
+// `postSnip` 原样回传):核对和落库是两个请求,中间那一下重译写回、正文补抓照样
+// 会把那一篇换成另一版 —— 后端那时按 409 拒,这一头照旧退到②(见 `RETRY_NOTE`)。
+//
+// **这一头还要报出「我摊的这一份对应盘上那一版是什么指纹」**(`doc_version`,列表
+// 那一行带来的)。核对那一步拿它和刚读到的那一版比:相等才算「屏幕上这一份就是盘
+// 上这一份」,一侧上下文失配才可以只听另一侧、才可以退到裸引文。**报不出这个数不
+// 等于同一份** —— 原来这一头什么都不报、核对那边按「两头渲染本来就不一样」默认同
+// 份,于是审查实测里盘上那一篇把原处那一段换掉、另一节新写了一句一模一样的,裸引
+// 文那一档正好命中它:收藏成功,点回去高亮的是改稿新写的那一节。
+// **那个数是按这一行内容算的,不是响应时读盘算的**(`/api/intake/{kind}/items` →
+// `kb/feeds/exported.item_body_md` → `scanner.body_version_of`):这一头摊的是 feeds.db
+// 里那一行,读盘算出来的数证明的是「刚读到的文件」—— 盘上先改稿、之后才铺这张列
+// 表的话,这一行旧正文会带着新文件那个数,核对必然相等(审查实测:阅读器那一份
+// 97aaf058、盘上 8b7eb4cb,收藏返回 200 / origin=doc,点回去高亮改稿新写的那一节)。
+// 口径在 `snip.js` 的 `sameCorpus`。
+//
+// 原来这里按 `exported_hash === content_hash` 推断「盘上那篇就是这份正文」,
+// **那个判据立不住**:它是**原文**的哈希(`kb/feeds/sync.py` 导出成功那一句写的
+// 就是 `exported_hash=content_hash`),同一篇原文重译一遍、重导出一遍,它一个
+// 字节都不变 —— 于是「两个哈希相等」和「盘上那篇是哪一份译文」没有关系(审查
+// 实测:保留一页旧阅读器不刷新,后台重译重导出,两个哈希仍相等、旧判据照旧为真,
+// 收藏存成 doc 返回 200,点回去正文是另一份译文、0 个高亮、报「没找到」)。
+// 推断换成核对,顺带把这几条都收进同一道闸:
+//   - `path` 非空只说明上一次导出留下了一篇,不说明它是这份正文(译文写回只清
+//     `exported_hash`、正文补抓只换 `content_hash`,两条都保留 `path`);
+//   - md 落盘了、索引那一步还没跑(`/api/doc` 对它判 404),那几分钟里退②;
+//   - **这边摊的和阅读页摊的不是同一种文本** —— 这个阅读器用 `textContent`
+//     (正文里的 `**`、反引号、`[字](url)` 原样显示),而 `/doc/…` 把同一份 md
+//     按 markdown 渲染,那些标记在那一头消失或变形。核对就按**那一页的渲染口径**
+//     算(`snipRenderedText` 用的是阅读页那条原始 HTML 转字面的规则,不是面板
+//     自己的 `mdHtml`)—— 差这一条就会出现"核过了、点回去 0 个高亮"。
+
+/** 一条订阅内容 → 它的收藏出处。**阅读器和列表卡片共用这一份** —— 两处摊的是
+ *  同一条内容的同一份正文(列表只摊开头那一截),出处的算法不该各写一遍。
+ *  `original` = 摊的是「原文」视图那一份(译文之前的那一份,vault 里没有对应文件)。*/
+function sourceItemSnipSource(item, { original = false } = {}) {
+  if (!item || !sourceItemReadable(item)) return null;
+  const text = sourceText(item);
+  const title = (original ? item.title : text.title) || item.title || '订阅内容';
+  const viaFeed = {
+    origin: 'feed', origin_ref: sourceKind + ':' + item.key,
+    origin_title: title, origin_url: item.url || '',
+  };
+  // 原文视图那一份在 vault 里压根没有对应文件(导出写的是译文),不必去核对
+  if (original || !item.path) return viaFeed;
+  return {
+    origin: 'doc', path: item.path, origin_title: title,
+    // 列表那一行报出来的「盘上那一篇此刻是哪一版」(读不出来时是空串 = 说不出,
+    // 那一头按「证明不了」办,不按「同一份」办)。见上面那段和 `sameCorpus`。
+    doc_version: item.doc_version || '',
+    origin_url: item.url || '', fallback: viaFeed,
+    docText: () => snipDocText(item.path),
+  };
+}
+
+attachSnip($('source-reader-body'), () =>
+  sourceItemSnipSource(sourceReaderItem, { original: sourceReaderOriginal }));

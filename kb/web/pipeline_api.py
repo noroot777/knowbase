@@ -108,11 +108,20 @@ def pipeline_runs():
     #   成一轮正常运行 —— 实测形态是历史首部多了个 `{}`(坏文件、半截写入),面板上
     #   那一行写着「时间未知 · 同步 · 未记录来源 · 已完成」,一轮根本没跑过的
     #   「成功」。
+    # `is_current`:**这一行就是此刻屏幕上那份结果吗 —— 由后端证明,不许前端拿「排第
+    #   一」当证据。** 两份状态来自两条独立的请求、两份独立可失败的落盘,允许不同步:
+    #   留档失败那一轮根本没写进历史文件,于是清单首条是**上午那一轮的红**,而状态端点
+    #   报的是下午那一轮的成功。前端原来按「排第一而且没在跑」把首行当成最新、点它等于
+    #   「回到最新」—— 实测点上午那个红,屏幕换成下午的「同步已完成」,那一轮的失败明细
+    #   再也打不开。判据过 `same_event`(**只认可信身份**,不看内容):证明不了就不标,
+    #   那一行照旧打开它自己那一轮,代价只是「回到最新」要走概况卡上那颗按钮。
+    current = pl.last_result() or {}
     taken: set[str] = set()
     for run in runs:
         run["version"] = pl.result_version(run)
         run["key"] = pl.row_key(run, taken)
         run["invalid"] = not pl.valid_round(run)
+        run["is_current"] = pl.same_event(run, current)
     # **清单的版本和状态端点同一个口径**,前端才比得出「这份清单是不是最新那一轮
     # 的」。空清单也有值(「从没跑过」),理由在 `result_version` 那边。
     # **版本取第一个有效行**:拿无效首行去算的话版本是 `none`,而状态端点报的是真实
@@ -122,8 +131,11 @@ def pipeline_runs():
     # 口径同状态端点:处理掉的那几条在**任何一轮**里都不再出现 —— 用户要的正是
     # 「以后别让我再看见它」,而翻历史时那颗移除按钮本来就按不下去(前端那道)。
     pl.strip_failure_runs(runs)
+    # `keep_days`:**保留口径由后端说**,前端不自己写死一个「3 天」。两处各写一份的
+    # 话,改了这边而面板照旧念旧数字 —— 而那句话正是用户判断「我还查不查得到前天那一
+    # 轮」的唯一依据。
     return {"runs": runs, "error": pl.persist_error(),
-            "version": pl.result_version(first)}
+            "version": pl.result_version(first), "keep_days": pl.history_keep_days()}
 
 
 class ChannelScope(BaseModel):

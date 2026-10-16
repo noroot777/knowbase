@@ -581,7 +581,14 @@ $('source-list').addEventListener('click', e => {
   const read = e.target.closest('[data-read-item]');
   if (read) readSourceItem(read.dataset.readItem);
   const entry = e.target.closest('[data-source-key]');
-  if (entry && !e.target.closest('a,button')) readSourceItem(entry.dataset.sourceKey);
+  // **拖选不是点击。** 卡片整块可点(点开右侧阅读器),而卡片里那一截正文现在能
+  // 选来收藏(`kb/static/js/snip_cards.js`)—— 一次拖选松手时浏览器照样派一个
+  // click:不挡住的话这一下会打开阅读器,窄屏上还会把列表整块藏起来,「☆ 收藏
+  // 此段」那颗按钮当场指着一个看不见的地方。真的单击时 mousedown 已经把选区折叠
+  // 掉了,所以这道守卫不影响点开(判据在 `snip.js` 的 `snipSelectionIn`)。
+  if (entry && !e.target.closest('a,button') && !snipSelectionIn(entry)) {
+    readSourceItem(entry.dataset.sourceKey);
+  }
   const action = e.target.closest('[data-source-action]');
   if (action && !action.disabled) actOnSource(action.dataset.sourceAction, Number(action.dataset.sourceId));
 });

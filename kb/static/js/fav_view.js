@@ -6,6 +6,15 @@ function favSourceName(source) {
     'dr-video-projects': '视频条目', dr: '日报' })[source] || source || '其他来源';
 }
 
+// 「这条出自哪里」。有 account 就是它;日报正文、问答回答、没导出的订阅条目在
+// `documents` 里压根没有一行(`d.source` 是 NULL),所以按它自己那一类说话 ——
+// 不然卡片上写的是「其他来源」。**doc 不单独标**:它占绝大多数,标了就是每张卡上
+// 一句什么也没区分的话(同「图鉴类型色别撞重点色」那条理由)。
+function favWhere(item) {
+  return item.account || (item.origin && item.origin !== 'doc'
+    ? (SNIP_LABEL[item.origin] || item.origin) : '') || favSourceName(item.source);
+}
+
 function renderFavHeader(data) {
   const total = Object.values(data.counts).reduce((sum, count) => sum + count, 0);
   $('fav-total').textContent = `${total} 条`;
@@ -60,9 +69,9 @@ function favCardHtml(item) {
       ${action.name && action.name !== item.title ? `<span class="fv-article-title">${esc(item.title)}</span>` : ''}
     </button>
     ${item.note ? `<button class="fv-card-note" onclick="openFavDetail(${item.id})" aria-label="编辑 ${esc(title)} 的笔记">${icon('paper')}<span>${esc(item.note)}</span></button>` : ''}
-    <div class="fv-card-meta"><span>${esc(item.account || favSourceName(item.source))}</span><time datetime="${esc(item.created_at)}">${favDate(item.created_at).slice(5)}</time></div>
+    <div class="fv-card-meta"><span>${esc(favWhere(item))}</span><time datetime="${esc(item.created_at)}">${favDate(item.created_at).slice(5)}</time></div>
     <div class="fv-card-footer"><span class="fv-card-eta">${item.status !== 'inbox' ? `<span class="fv-state-${item.status}">${item.status === 'done' ? '✓ 已完成' : '已暂存'}</span>` : esc(action.eta || (item.quote ? '随时回看' : '按自己的节奏'))}</span>
-      ${favDocA(item, `打开阅读${arrow('right')}`, 'fv-read-link', true)}</div>
+      ${favDocA(item, `${esc(favOpenLabel(item))}${arrow('right')}`, 'fv-read-link', true)}</div>
   </article>`;
 }
 
@@ -78,11 +87,20 @@ function favEmptyHtml() {
   return `<div class="fv-empty"><span>${text}</span><a href="#gallery" onclick="switchTab('gallery');return false">打开工具图鉴${arrow('right')}</a></div>`;
 }
 
+// 卡片/详情上那颗「打开」。**按有没有 path 分流,不按 origin 分**:有 path 的走
+// 阅读页那条带 `#kbq=` 的链接,没有 path 的(日报正文、问答回答、没导出的订阅条目)
+// 在 vault 里没有对应文件 —— 照旧拼 `/doc/` 得到的是 iframe 里一张 404,所以换成回
+// 各自面板的回跳按钮。两条路都在 `fav.js`(`favDocAHtml` / `favJumpHtml` →
+// `jumpFavOrigin`),**这儿不许再拼一遍锚点**:那一份要把 `u`/`e`/`v`/`m` 一起带过去,
+// 少带一个数,回跳那一头就只知道「说不清」、弱档一律不采信(见
+// `docs/decisions/fav-snippets.md`)。
 function favDocA(item, label, cls = '', html = false) {
-  const hash = item.quote ? '#kbq=' + encodeURIComponent(JSON.stringify({
-    q: item.quote, p: item.prefix || '', s: item.suffix || '',
-  })) : '';
-  return docAHtml(item, html ? label : esc(label), cls, hash);
+  return favDocAHtml(item, html ? label : esc(label), cls);
+}
+
+/** 那颗按钮上的字:有文档的是去读原文,没有的是回到它自己那一处。 */
+function favOpenLabel(item) {
+  return item.path ? '打开阅读' : '回到' + (SNIP_LABEL[item.origin] || '原处');
 }
 
 function openFavDetail(id) {
@@ -123,8 +141,8 @@ function favDetailHtml(item) {
       <h2 class="fv-detail-title" tabindex="-1">${esc(action.name || item.title)}</h2>
       ${description !== item.quote ? `<p class="fv-detail-description">${esc(description)}</p>` : ''}
       ${item.quote ? `<blockquote>${esc(item.quote)}</blockquote>` : ''}
-      <dl class="fv-detail-meta">${action.name && action.name !== item.title ? `<div><dt>原文</dt><dd>${esc(item.title)}</dd></div>` : ''}<div><dt>来源</dt><dd>${esc(item.account || favSourceName(item.source))}</dd></div><div><dt>收藏于</dt><dd>${favDate(item.created_at)}</dd></div><div><dt>状态</dt><dd>${FAV_STATUSES[item.status]}</dd></div>${action.eta ? `<div><dt>预计用时</dt><dd>${esc(action.eta)}</dd></div>` : ''}</dl>
-      <div class="fv-detail-links">${favDocA(item, `打开阅读${arrow('right')}`, 'fv-primary-link', true)}${item.url ? `<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener">原文${arrow('ext')}</a>` : ''}<a href="${esc(obsLink(item))}">Obsidian${arrow('ext')}</a></div>
+      <dl class="fv-detail-meta">${action.name && action.name !== item.title ? `<div><dt>原文</dt><dd>${esc(item.title)}</dd></div>` : ''}<div><dt>来源</dt><dd>${esc(favWhere(item))}</dd></div><div><dt>收藏于</dt><dd>${favDate(item.created_at)}</dd></div><div><dt>状态</dt><dd>${FAV_STATUSES[item.status]}</dd></div>${action.eta ? `<div><dt>预计用时</dt><dd>${esc(action.eta)}</dd></div>` : ''}</dl>
+      <div class="fv-detail-links">${favDocA(item, `${esc(favOpenLabel(item))}${arrow('right')}`, 'fv-primary-link', true)}${item.url ? `<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener">原文${arrow('ext')}</a>` : ''}${item.path ? `<a href="${esc(obsLink(item))}">Obsidian${arrow('ext')}</a>` : ''}</div>
       ${action.cmd ? `<div class="fv-command"><div><span>${icon('code')}上手命令</span><button class="text-button" data-cmd="${esc(action.cmd)}" onclick="copyFavCmd(this)">复制</button></div><code>${esc(action.cmd)}</code><small>来自行动卡，请确认内容后再执行。</small></div>` : ''}
       ${!item.action && item.status === 'inbox' && !item.quote ? `<div class="fv-extract"><p>还没有行动卡？让 AI 提炼用途、上手命令和预计用时。</p><button class="text-button" data-fav-mutation onclick="extractFavAction(${item.id})"${disabled}>${icon('spark')}生成行动卡</button></div>` : ''}
       <section class="fv-note-editor"><div><label for="fav-note">我的随手记</label><span>为什么收藏它？</span></div><textarea id="fav-note" rows="4" placeholder="想到的用法、想解决的问题，或试过后的心得…" oninput="draftFavNote(this.value)">${esc(note || '')}</textarea><div class="fv-note-footer"><span id="fav-note-state" role="status">${favDrafts.has(item.id) ? '有未保存的草稿' : '给未来的自己留个线索'}</span><button class="ghost" data-fav-mutation onclick="saveFavNote(${item.id})"${disabled}>保存笔记</button></div></section>

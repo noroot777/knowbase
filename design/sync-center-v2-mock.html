@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>同步中心 v2 示意稿 — 轮次列 + 流水线</title>
+<style>
+  /* 色板与字体逐值抄自 kb/static/css/base.css 的 :root(示意稿是独立产物、没法
+     import,值必须对得上)。真要落地时这些声明不进产品代码,直接用 var()。 */
+  :root {
+    --paper: #F3F5F4; --paper-2: #ECF0EE; --card: #FFFFFF;
+    --ink: #14202B; --ink-2: #3A4750; --muted: #66727C;
+    --line: #DCE3E0; --line-soft: #E9EDEB;
+    --brand: #17604F; --brand-deep: #0E4A3B; --brand-soft: #DFF0E9; --brand-tint: #F0F7F4;
+    --tag-bg: #EAEEED; --ok: #2E7D57; --danger: #B3402F; --warn: #8A5A22; --warn-soft: #F6EBDC;
+    --font-display: "Songti SC", "STSong", "Source Han Serif SC", serif;
+    --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    --font-body: -apple-system, "PingFang SC", "Noto Sans SC", sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { font: 15px/1.7 var(--font-body); background: var(--paper); color: var(--ink);
+         max-width: 1200px; margin: 0 auto; padding: 20px 24px 60px; }
+  button { font: inherit; cursor: pointer; }
+  .ia { vertical-align: -.1em; }
+
+  /* 示意稿自己的脚手架,不是设计的一部分 */
+  .mock-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    background: var(--warn-soft); border: 1px dashed var(--warn); color: var(--warn);
+    border-radius: 10px; padding: 9px 14px; font-size: 12.5px; margin-bottom: 18px; }
+  .mock-bar b { font-weight: 650; }
+  .mock-bar button { border: 1px solid var(--warn); background: none; color: var(--warn);
+    border-radius: 7px; padding: 4px 11px; font-size: 12px; }
+  .mock-bar button.on { background: var(--warn); color: #fff; }
+  .mock-bar .sp { margin-left: auto; }
+  .todo { outline: 1px dashed #CDB894; outline-offset: 4px; border-radius: 4px; }
+
+  /* ── 页头:一行标题 + 同一行上的事实数字 ─────────────────────────── */
+  .head { display: flex; align-items: baseline; justify-content: space-between;
+          gap: 20px; flex-wrap: wrap; margin-bottom: 16px; }
+  .head h1 { font: 900 26px/1.3 var(--font-display); }
+  .head-facts { display: flex; align-items: baseline; gap: 8px; color: var(--muted); font-size: 13px; }
+  .head-facts b { font: 600 15px var(--font-mono); color: var(--ink-2); }
+  .head-facts i { font-style: normal; color: var(--line); }
+  .head-left { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  .btn-primary { background: var(--brand); color: #fff; border: 1px solid var(--brand);
+    border-radius: 9px; padding: 9px 18px; font-size: 13px; min-height: 38px; }
+  .btn-primary:hover { background: var(--brand-deep); }
+  .btn-ghost { background: var(--card); color: var(--ink-2); border: 1px solid var(--line);
+    border-radius: 9px; padding: 8px 14px; font-size: 13px; }
+  .btn-ghost:hover { border-color: var(--brand); color: var(--brand); }
+  .btn-text { background: none; border: 0; color: var(--brand); font-size: 13px; padding: 0; }
+
+  /* ── 概况卡 ──────────────────────────────────────────────────── */
+  .ov { background: var(--card); border: 1px solid var(--line); border-top: 3px solid var(--brand);
+        border-radius: 12px; padding: 16px 22px 14px; margin-bottom: 14px; }
+  .ov.readonly { border-top-color: var(--muted); background: #FBFCFC; }
+  .ov.has-error { border-top-color: var(--danger); }
+  .ov-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+  .ov-label { font-size: 12px; color: var(--muted); }
+  .ov h2 { font-size: 20px; line-height: 1.4; margin: 5px 0 4px; }
+  .ov-meta { font-size: 13px; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; }
+  .ov-meta i { font-style: normal; color: var(--line); }
+  .ov-meta .mono { font-family: var(--font-mono); color: var(--ink-2); }
+  .ov-count { text-align: right; flex: none; }
+  .ov-count b { display: block; font: 600 22px/1.3 var(--font-mono); }
+  .ov-count span { font-size: 12px; color: var(--muted); }
+  .track { height: 5px; background: var(--tag-bg); border-radius: 5px; overflow: hidden; margin: 16px 0 0; }
+  .track span { display: block; height: 100%; background: var(--brand); transition: width .3s; }
+  .ov.has-error .track span { background: var(--danger); }
+  /* 产出:一轮同步真正的交付物。目前这三个数只存在于各阶段的 detail 文本里 */
+  .yield { display: flex; gap: 26px; flex-wrap: wrap; margin-top: 12px;
+           padding-top: 11px; border-top: 1px solid var(--line-soft); }
+  .yield div b { font: 600 17px var(--font-mono); }
+  .yield div span { display: block; font-size: 12px; color: var(--muted); }
+  /* 失败只在这里报「几个」和给出口,明细一律留在步骤行里 */
+  .ov-alert { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 14px;
+    padding: 11px 14px; border: 1px solid var(--warn); background: var(--warn-soft); border-radius: 9px; font-size: 13px; }
+  /* 作者 display 赢过 UA 的 [hidden]:产品 CSS 里 .pipe-issues[hidden] 那条守的就是这个 */
+  .ov-alert[hidden] { display: none; }
+  .ov-alert b { color: var(--danger); font-weight: 650; }
+  .ov-alert .sp { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+  .ov-foot { display: flex; align-items: center; justify-content: space-between;
+             gap: 14px; margin-top: 11px; font-size: 13px; color: var(--muted); }
+
+  /* ── 工作台:步骤流水线 | 轮次列 ───────────────────────────────── */
+  .bench { display: grid; grid-template-columns: minmax(0,1fr) 320px; gap: 16px; align-items: start; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+          overflow: hidden; min-width: 0; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+               padding: 15px 18px; border-bottom: 1px solid var(--line); }
+  .card-head h2 { font-size: 15px; font-weight: 650; }
+  .card-head > span { font-size: 12px; color: var(--muted); }
+
+  /* 流水线:序号用一条竖线串起来,走到第几步、哪一步红一眼看得出 */
+  .flow { padding: 6px 0; }
+  .step { display: grid; grid-template-columns: 26px minmax(0,1fr) auto; gap: 13px;
+          padding: 11px 18px; position: relative; }
+  .step + .step::before { content: ""; position: absolute; left: 30px; top: -8px; height: 16px;
+          width: 2px; background: var(--line); }
+  .step[data-s=ok] + .step::before, .step[data-s=running] + .step::before { background: var(--brand-soft); }
+  .dot { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%;
+         background: var(--tag-bg); color: var(--muted); font: 11px var(--font-mono); }
+  .step[data-s=ok] .dot { background: var(--brand-soft); color: var(--brand-deep); }
+  .step[data-s=running] .dot { background: var(--brand); color: #fff; }
+  .step[data-s=error] .dot { background: var(--warn-soft); color: var(--danger); }
+  .step[data-s=not_planned] { opacity: .55; }
+  .step h3 { font-size: 14px; font-weight: 650; line-height: 1.6; }
+  .step .desc { font-size: 12px; color: var(--muted); }
+  .step .detail { font-size: 13px; line-height: 1.65; color: var(--ink-2); margin-top: 4px; overflow-wrap: anywhere; }
+  .step .st { font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; padding-top: 3px; }
+  .step[data-s=ok] .st { color: var(--ok); }
+  .step[data-s=running] .st { color: var(--brand); }
+  .step[data-s=error] .st { color: var(--danger); }
+  .step details { margin-top: 7px; font-size: 13px; }
+  .step summary { cursor: pointer; color: var(--brand); }
+  .fails { max-height: 190px; overflow-y: auto; overscroll-behavior: contain; margin-top: 6px; }
+  .fails p { padding: 7px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .fails b { font-weight: 650; }
+  .fails span { display: block; color: var(--muted); font-size: 12.5px; }
+
+  /* 轮次列:一轮一行,点一行整屏按那一轮渲染。它和被它改写的东西并排 */
+  /* 钉住:展开一条问题明细就能把步骤列拉长几百像素,而选择器必须一直在视线里 */
+  .runs-card { position: sticky; top: 14px; }
+  .runs { max-height: min(360px, calc(100vh - 220px)); overflow-y: auto; overscroll-behavior: contain; }
+  .run { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line-soft);
+         background: none; padding: 11px 18px 12px; color: var(--ink); }
+  .run:last-child { border-bottom: 0; }
+  .run:hover { background: var(--paper); }
+  .run.on { background: var(--brand-tint); box-shadow: inset 3px 0 0 var(--brand); }
+  .run-r1 { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .run-when { font: 12px var(--font-mono); color: var(--ink-2); }
+  .run-res { font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+  .run[data-s=error] .run-res { color: var(--danger); }
+  .run[data-s=ok] .run-res { color: var(--ok); }
+  .run[data-s=running] .run-res { color: var(--brand); }
+  .run-r2 { font-size: 12px; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
+  .run-r2 .kind { color: var(--ink-2); }
+  .run.latest .run-when::after { content: "最新"; margin-left: 7px; font-family: var(--font-body);
+    font-size: 10.5px; color: var(--brand-deep); background: var(--brand-soft);
+    border-radius: 4px; padding: 1px 5px; vertical-align: 1px; }
+
+  /* ── 日志:空闲收起,运行中自动展开 ─────────────────────────────── */
+  .logwrap { margin-top: 16px; }
+  .logwrap > summary { list-style: none; cursor: pointer; background: var(--card);
+    border: 1px solid var(--line); border-radius: 12px; padding: 13px 18px;
+    display: flex; align-items: center; gap: 12px; font-size: 14px; }
+  .logwrap[open] > summary { border-radius: 12px 12px 0 0; border-bottom: 0; }
+  .logwrap > summary::-webkit-details-marker { display: none; }
+  .logwrap > summary b { font-weight: 650; font-size: 15px; }
+  .logwrap > summary .n { font: 12px var(--font-mono); color: var(--muted); }
+  .logwrap > summary .sp { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .logbody { background: var(--card); border: 1px solid var(--line); border-top: 0;
+             border-radius: 0 0 12px 12px; overflow: hidden; }
+  .logbox { height: 300px; overflow: auto; padding: 16px; background: var(--ink); color: var(--paper); }
+  .logbox pre { font: 12px/1.9 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .logfoot { padding: 10px 16px; display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); }
+  .logfoot > :last-child { margin-left: auto; }
+
+  @media (max-width: 1000px) {
+    /* 并排不可能了,轮次列排到步骤上面——它是选择器,得在被选内容之前 */
+    .bench { grid-template-columns: minmax(0,1fr); }
+    .bench > .runs-card { order: -1; position: static; }
+    .runs { max-height: 260px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="mock-bar">
+  <b>示意稿</b>
+  <span>真实数据(本机 9 轮留档)、真实色板。演示态:</span>
+  <button id="m-idle" class="on" onclick="setMode('idle')">最新 · 已完成</button>
+  <button id="m-run" onclick="setMode('running')">正在运行</button>
+  <span class="sp">虚线框 = 需要后端补字段才能做</span>
+</div>
+
+<div class="head">
+  <div class="head-left">
+    <h1>同步中心</h1>
+    <div class="head-facts" id="facts"></div>
+  </div>
+  <button class="btn-primary">新建同步</button>
+</div>
+
+<section class="ov" id="ov">
+  <div class="ov-top">
+    <div>
+      <span class="ov-label" id="ov-label">当前状态</span>
+      <h2 id="ov-title">—</h2>
+      <div class="ov-meta" id="ov-meta"></div>
+    </div>
+    <div class="ov-count"><b id="ov-prog">—</b><span id="ov-elapsed"></span></div>
+  </div>
+  <div class="track"><span id="ov-fill" style="width:0"></span></div>
+  <div class="yield todo" id="ov-yield"></div>
+  <div class="ov-alert" id="ov-alert" hidden></div>
+  <div class="ov-foot"><span id="ov-hint"></span><span id="ov-foot-act"></span></div>
+</section>
+
+<div class="bench">
+  <section class="card">
+    <div class="card-head"><h2>同步步骤</h2><span id="flow-note"></span></div>
+    <div class="flow" id="flow"></div>
+  </section>
+  <section class="card runs-card">
+    <div class="card-head"><h2>历史运行</h2><span id="runs-note"></span></div>
+    <div class="runs" id="runs"></div>
+  </section>
+</div>
+
+<details class="logwrap" id="logwrap">
+  <summary><b>运行日志</b><span class="n" id="log-n"></span><span class="sp" id="log-why"></span></summary>
+  <div class="logbody">
+    <div class="logbox"><pre id="log"></pre></div>
+    <div class="logfoot"><label><input type="checkbox" checked> 跟随最新</label><button class="btn-text">下载日志</button></div>
+  </div>
+</details>
+
+<script>
+// 箭头几何逐值抄自 kb/static/js/icons.js 的 ARROW_PATHS —— 页面里不出现 ↗ ↓ → 字符
+const ARROW = { right: 'M2.5 6h7M6.7 3.3 9.4 6 6.7 8.7', down: 'M6 2.6v6.8M3.3 6.7 6 9.4l2.7-2.7' };
+const arrow = n => `<svg class="ia" width="1em" height="1em" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+  stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${ARROW[n] || ARROW.right}"/></svg>`;
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const $ = id => document.getElementById(id);
+
+const STAGES = {
+  crawl: ['抓取内容', '从所选来源收集文章'], export: ['导出文章', '保存到本地知识库'],
+  index: ['建立索引', '让全文与语义检索可用'], extract: ['提取知识', '识别实体、主题与摘要'],
+  projects: ['整理工具', '拆分工具与项目条目'], wiki: ['更新 Wiki', '生成关联页面与知识图谱'],
+};
+const ST = { pending: '等待中', running: '执行中', ok: '已完成', skipped: '已跳过',
+             not_planned: '本次不执行', error: '需处理', stopped: '未执行' };
+const CH = { wechat_local: '公众号', social: '大V观点', rss: 'RSS', digest: '邮件简报', web: '网页专栏' };
+
+const F_SOCIAL = [
+  ['Sam Altman', '连不上Chrome:浏览器没有在预期时间内响应。如果浏览器弹了授权弹窗,点一下「允许」再试'],
+  ['Garry Tan', '连不上Chrome:浏览器没有在预期时间内响应。如果浏览器弹了授权弹窗,点一下「允许」再试'],
+  ['Andrej Karpathy', '连不上Chrome:浏览器没有在预期时间内响应。如果浏览器弹了授权弹窗,点一下「允许」再试'],
+  ['Guillermo Rauch', '连不上Chrome:浏览器没有在预期时间内响应。如果浏览器弹了授权弹窗,点一下「允许」再试'],
+];
+const F_BODY = [
+  ['GitHubStore · 本地优先的医疗AI来了，这个项目让患者数据真正属于自己', '缺少正文，暂未导出；保留待补，后续同步会按退避时间重试'],
+  ['InfoQ · 全网首份指令级拆解：看华为昇腾 950DT 芯片如何撬动 DeepSeek 75%降价与字节锁单', '缺少正文，暂未导出；保留待补，后续同步会按退避时间重试'],
+  ['InfoQ · Terraform MCP Server 发布，助力 AI 助手对接 Terraform 基础设施', '缺少正文，暂未导出；保留待补，后续同步会按退避时间重试'],
+];
+
+// 本机 /api/pipeline/runs 的 9 轮留档(detail 原文,只补了全角标点)
+const RUNS = [
+  { key: 'seq-19', kind: 'sync', start: '2026-10-16 10:59:50', end: '2026-10-16 11:13:54',
+    planned: ['crawl', 'export', 'index', 'extract'], scope: ['social'], yld: [1364, 860, 951],
+    stages: { crawl: { s: 'ok', d: '检查 51/51 个来源，新增 1364 条，9 个没读完（页面不再长出新内容，而且不在时间线底部）' },
+      export: { s: 'ok', d: '已保存 860 条到知识库，504 条待翻译（译完再入库）' },
+      index: { s: 'ok', d: '新增/更新 860，移除 0，新向量 951' },
+      extract: { s: 'ok', d: '没有待提取的文档' },
+      projects: { s: 'skipped', d: '未选择' }, wiki: { s: 'skipped', d: '未选择' } } },
+  { key: 'seq-18', kind: 'sync', start: '2026-10-16 00:00:13', end: '2026-10-16 00:11:04',
+    planned: ['crawl', 'export', 'index', 'extract'], scope: ['wechat_local', 'social', 'rss'], yld: [29, 29, 133],
+    stages: { crawl: { s: 'error', d: '公众号：新增 29 篇，补齐正文 29 篇，本机暂无推送 1 个号（在绿泡泡关注并同步后可采集），等待重试 1 篇，原文暂不可用 21 篇（一周后复查）；大V观点：检查 51/51 个来源，53 个失败', f: F_SOCIAL, ft: 53 },
+      export: { s: 'error', d: '公众号：完成: 导出 29, 跳过(已存在) 9134, 待补正文 22；大V观点：流程中断，未完成；RSS：流程中断，未完成', f: F_BODY, ft: 22 },
+      index: { s: 'ok', d: '新增/更新 29，移除 0，新向量 133' },
+      extract: { s: 'ok', d: '成功 29，失败 0' },
+      projects: { s: 'skipped', d: '未选择' }, wiki: { s: 'skipped', d: '未选择' } } },
+  { key: 'seq-12', kind: 'retry', start: '2026-10-15 10:12:54', end: '2026-10-15 10:15:36',
+    planned: ['crawl', 'export', 'index', 'extract'], scope: ['wechat_local', 'rss'], yld: [3, 13, 33],
+    stages: { crawl: { s: 'error', d: '公众号：新增 3 篇，补齐正文 3 篇，本机暂无推送 1 个号，等待重试 22 篇；RSS：检查 2/2 个来源，新增 0 条，失败 2 个',
+        f: [['Andrej Karpathy', 'karpathy.bearblog.dev: 订阅服务返回 HTTP 403；请检查来源或更换订阅桥接'],
+            ['Hugging Face Blog', 'huggingface.co: 订阅连接超时，请稍后重试或修改链接']] },
+      export: { s: 'error', d: '公众号：完成: 导出 3, 跳过(已存在) 9131, 待补正文 22；RSS：已保存 10 条到知识库', f: F_BODY, ft: 33 },
+      index: { s: 'ok', d: '新增/更新 13，移除 0，新向量 33' },
+      extract: { s: 'ok', d: '成功 3，失败 0' },
+      projects: { s: 'skipped', d: '本次无需重试' }, wiki: { s: 'skipped', d: '本次无需重试' } } },
+  { key: 'seq-11', kind: 'sync', start: '2026-10-15 09:43:09', end: '2026-10-15 09:57:45',
+    planned: ['crawl', 'export', 'index', 'extract'], scope: ['wechat_local', 'social', 'rss'], yld: [8, 41, 68],
+    stages: { crawl: { s: 'error', d: '公众号：新增 1 篇，等待重试 22 篇；大V观点：检查 51/51 个来源，新增 7 条，35 个没读完', f: F_SOCIAL, ft: 35 },
+      export: { s: 'error', d: '公众号：完成: 导出 1, 跳过(已存在) 9130, 待补正文 22；大V观点：已保存 22 条；RSS：已保存 18 条', f: F_BODY, ft: 22 },
+      index: { s: 'ok', d: '新增/更新 41，移除 0，新向量 68' }, extract: { s: 'ok', d: '成功 1，失败 0' },
+      projects: { s: 'skipped', d: '未选择' }, wiki: { s: 'skipped', d: '未选择' } } },
+  { key: 'seq-5', kind: 'sync', start: '2026-10-15 09:19:05', end: '2026-10-15 09:20:24',
+    planned: ['crawl', 'export', 'index', 'extract'], scope: ['web'], yld: [2, 2, 5],
+    stages: { crawl: { s: 'ok', d: '检查 1/1 个来源，新增 2 条' }, export: { s: 'ok', d: '已保存 2 条到知识库' },
+      index: { s: 'ok', d: '新增/更新 2，移除 0，新向量 5' }, extract: { s: 'ok', d: '没有待提取的文档' },
+      projects: { s: 'skipped', d: '未选择' }, wiki: { s: 'skipped', d: '未选择' } } },
+  { key: 'seq-4', kind: 'sync', start: '2026-10-15 09:18:25', end: '2026-10-15 09:19:03',
+    planned: ['crawl', 'export', 'index', 'extract'], scope: ['digest'], yld: [15, 15, 15],
+    stages: { crawl: { s: 'ok', d: '检查 1/1 个来源，新增 15 条' }, export: { s: 'ok', d: '已保存 15 条到知识库' },
+      index: { s: 'ok', d: '新增/更新 15，移除 0，新向量 15' }, extract: { s: 'ok', d: '没有待提取的文档' },
+      projects: { s: 'skipped', d: '未选择' }, wiki: { s: 'skipped', d: '未选择' } } },
+  { key: 'seq-3', kind: 'sync', start: '2026-10-15 09:15:31', end: '2026-10-15 09:18:24',
+    planned: ['crawl', 'export', 'index', 'extract'], scope: ['rss'], yld: [58, 27, 44],
+    stages: { crawl: { s: 'ok', d: '检查 9/9 个来源，新增 58 条' },
+      export: { s: 'error', d: '已保存 27 条到知识库，本轮 3 条原文抓取失败（暂未入库），80 条待补抓原文正文，本轮 3 条翻译失败（暂未入库）', f: F_BODY, ft: 86 },
+      index: { s: 'ok', d: '新增/更新 27，移除 0，新向量 44' }, extract: { s: 'ok', d: '没有待提取的文档' },
+      projects: { s: 'skipped', d: '未选择' }, wiki: { s: 'skipped', d: '未选择' } } },
+  { key: 'seq-2', kind: 'sync', start: '2026-10-15 09:04:18', end: '2026-10-15 09:15:30',
+    planned: ['crawl', 'export', 'index', 'extract'], scope: ['social'], yld: [111, 106, 118],
+    stages: { crawl: { s: 'ok', d: '检查 51/51 个来源，新增 111 条，36 个没读完' },
+      export: { s: 'ok', d: '已保存 106 条到知识库，15 条待翻译（译完再入库）' },
+      index: { s: 'ok', d: '新增/更新 106，移除 0，新向量 118' }, extract: { s: 'ok', d: '没有待提取的文档' },
+      projects: { s: 'skipped', d: '未选择' }, wiki: { s: 'skipped', d: '未选择' } } },
+  { key: 'seq-1', kind: 'sync', start: '2026-10-15 09:00:17', end: '2026-10-15 09:04:16',
+    planned: ['crawl', 'export', 'index', 'extract'], scope: ['wechat_local'], yld: [36, 35, 61],
+    stages: { crawl: { s: 'ok', d: '新增 36 篇，补齐正文 35 篇，本机暂无推送 1 个号，等待重试 21 篇' },
+      export: { s: 'ok', d: '完成: 导出 35, 跳过(已存在) 9095, 待补正文 22' },
+      index: { s: 'ok', d: '新增/更新 35，移除 0，新向量 61' }, extract: { s: 'ok', d: '成功 35，失败 0' },
+      projects: { s: 'skipped', d: '未选择' }, wiki: { s: 'skipped', d: '未选择' } } },
+];
+
+// 「正在运行」那一态:大V观点抓完了、正在导出
+const LIVE = { key: 'live', kind: 'sync', start: '2026-10-16 14:38:02', end: '', running: true,
+  planned: ['crawl', 'export', 'index', 'extract'], scope: ['social', 'rss'], yld: [612, 318, 0],
+  stages: { crawl: { s: 'ok', d: '检查 51/51 个来源，新增 612 条' },
+    export: { s: 'running', d: '已保存 318 条到知识库，212 条待翻译（译完再入库）' },
+    index: { s: 'pending', d: '' }, extract: { s: 'pending', d: '' },
+    projects: { s: 'skipped', d: '未选择' }, wiki: { s: 'skipped', d: '未选择' } } };
+
+const LOG_IDLE = ['11:13:54 [wiki] 未选择，跳过', '11:13:54 [extract] 没有待提取的文档',
+  '11:13:51 [index] 新增/更新 860，移除 0，新向量 951', '11:09:33 [index] 开始扫描 vault',
+  '11:09:30 [export] 已保存 860 条到知识库，504 条待翻译', '10:59:50 [crawl] 大V观点：51 个来源'].join('\n');
+const LOG_LIVE = ['14:41:12 [export] 已保存 318 条到知识库，212 条待翻译',
+  '14:40:58 [export] 翻译 en→zh:38 条在队列', '14:40:02 [export] 开始导出 612 条',
+  '14:39:58 [crawl] 检查 51/51 个来源，新增 612 条', '14:38:02 [crawl] 大V观点 + RSS 开工'].join('\n');
+
+let mode = 'idle', viewing = null;      // viewing = 翻到的那一轮;null = 看最新
+
+const when = r => (r.end || r.start || '').slice(5, 16);   // 没收尾的按开工时刻报
+const kindOf = r => r.kind === 'retry' ? '重试' : '同步';
+const whereOf = r => r.planned.some(k => k === 'crawl' || k === 'export')
+  ? (r.scope.map(c => CH[c] || c).join(' + ') || '未记录来源') : '全库';
+function summary(r) {
+  const failed = r.planned.filter(k => r.stages[k]?.s === 'error').length;
+  if (failed) return { s: 'error', t: `${failed} 个步骤需处理`, failed };
+  if (r.running) return { s: 'running', t: '正在运行', failed: 0 };
+  const sk = r.planned.filter(k => r.stages[k]?.s === 'skipped').length;
+  return sk ? { s: 'skipped', t: `${sk} 个步骤已跳过`, failed: 0 } : { s: 'ok', t: '已完成', failed: 0 };
+}
+function elapsed(r) {
+  const a = new Date(r.start.replace(' ', 'T')), b = r.end ? new Date(r.end.replace(' ', 'T')) : new Date('2026-10-16T14:41:30');
+  const m = Math.floor((b - a) / 60000);
+  return m < 1 ? '不到 1 分钟' : m < 60 ? `${m} 分钟` : `${Math.floor(m / 60)} 小时 ${m % 60} 分钟`;
+}
+
+/** 当前该按哪一轮渲染整屏:翻历史时是那一轮,否则是 live / 最新 */
+const shown = () => viewing || (mode === 'running' ? LIVE : RUNS[0]);
+
+function render() {
+  const r = shown(), sum = summary(r), ro = !!viewing;
+  const done = r.planned.filter(k => r.stages[k]?.s === 'ok').length;
+
+  $('facts').innerHTML = `<b>${RUNS.length}</b> 轮留档 <i>·</i> 最近 <b>${when(RUNS[0])}</b>
+    <i>·</i> ${esc(summary(RUNS[0]).t)}`;
+
+  const ov = $('ov');
+  ov.className = 'ov' + (ro ? ' readonly' : '') + (sum.failed ? ' has-error' : '');
+  $('ov-label').textContent = ro ? `正在查看 ${when(r)} 那一轮 · 记录只读` : '当前状态';
+  $('ov-title').textContent = r.running ? '正在同步' : sum.t;
+  $('ov-meta').innerHTML = [`<span class="mono">${esc(when(r))}</span>`, `<span>${esc(kindOf(r))}</span>`,
+    `<span>${esc(whereOf(r))}</span>`].join('<i>·</i>');
+  $('ov-prog').textContent = `${done} / ${r.planned.length}`;
+  $('ov-elapsed').textContent = (r.running ? '已用 ' : '用时 ') + elapsed(r);
+  $('ov-fill').style.width = (done / r.planned.length * 100).toFixed(0) + '%';
+  $('ov-yield').innerHTML = ['抓到', '入库', '新向量'].map((k, i) =>
+    `<div><b>${r.yld[i] ? r.yld[i].toLocaleString() : '—'}</b><span>${k}</span></div>`).join('');
+
+  const al = $('ov-alert');
+  al.hidden = !sum.failed;
+  if (sum.failed) al.innerHTML = `<b>${sum.failed} 个步骤需处理</b>
+    <span>明细在下面对应的步骤里，这里不再重复一遍。</span>
+    <span class="sp">${ro ? '<span>要处理失败请先回到最新。</span>'
+      : `<button class="btn-ghost">重试失败项</button>`}
+      <button class="btn-text" onclick="jumpFirstError()">看第一个 ${arrow('down')}</button></span>`;
+  $('ov-hint').textContent = ro ? '这一轮的结果按当时的样子保留，不会被后面的运行改写。'
+    : r.running ? '同步在后台执行，切换页面不会中断。'
+    : sum.failed ? '上次的失败不影响新建同步。' : '同步在后台执行，切换页面不会中断。';
+  $('ov-foot-act').innerHTML = ro ? `<button class="btn-text" onclick="exitView()">回到最新</button>`
+    : r.running ? `<button class="btn-ghost">本阶段结束后停止</button>` : '';
+
+  $('flow-note').textContent = r.planned.length < 6
+    ? `本次计划 ${r.planned.length} 步，另 ${6 - r.planned.length} 步不执行` : '每一步都有结果';
+  $('flow').innerHTML = Object.entries(STAGES).map(([k, [name, desc]], i) => {
+    const st = r.stages[k] || { s: '', d: '' };
+    const s = !r.planned.includes(k) && st.s === 'skipped' ? 'not_planned' : st.s;
+    const f = st.f || [], total = st.ft || f.length;
+    return `<div class="step" id="step-${k}" data-s="${esc(s)}">
+      <span class="dot">${i + 1}</span>
+      <div><h3>${name}</h3><p class="desc">${desc}</p>
+        ${st.d ? `<p class="detail">${esc(st.d)}</p>` : ''}
+        ${f.length ? `<details><summary>问题明细 · ${total} 项${total > f.length ? `（仅列前 ${f.length} 条）` : ''}</summary>
+          <div class="fails">${f.map(([t, why]) => `<p><b>${esc(t)}</b><span>${esc(why)}</span></p>`).join('')}</div>
+        </details>` : ''}
+      </div><span class="st">${ST[s] || '未开始'}</span></div>`;
+  }).join('');
+
+  // 列表自己带「最新」那一档 —— 回到最新和挑一轮在同一处,不用去页顶找另一个按钮。
+  // 运行中时最新那一档是**正在跑的这一轮**,它不在留档里,所以单独补一行。
+  $('runs-note').textContent = `保留最近 ${RUNS.length} 轮`;
+  const head = mode === 'running'
+    ? `<button type="button" class="run latest${viewing ? '' : ' on'}" data-s="running"
+        aria-current="${viewing ? 'false' : 'true'}" onclick="exitView()">
+        <span class="run-r1"><span class="run-when">${esc(when(LIVE) || LIVE.start.slice(5, 16))}</span>
+        <span class="run-res">正在运行</span></span>
+        <span class="run-r2"><span class="kind">${esc(kindOf(LIVE))}</span> · ${esc(whereOf(LIVE))}</span></button>`
+    : '';
+  $('runs').innerHTML = head + RUNS.map((x, i) => {
+    const s = summary(x);
+    // 空闲时第一行就是最新那一轮 —— 它和「回到最新」是同一件事,点它一律回到最新。
+    // **产品里不是这么判的**:那边清单和当前状态来自两条独立、各自可失败的请求,
+    // 留档失败那一轮不在清单里,于是首行并不是屏幕上那一轮(第 1 轮审查实点)——
+    // 判据改成后端给的 `is_current`(`same_event` 只认可信身份)+ 前端对一次版本。
+    // 这份示意稿的两行是写死的样例,没有后端也没有「两份状态不同步」这回事,所以
+    // 这里仍按位置写:改了只会多出一个无从触发的分支。见 `design/sync-center-v2.md`
+    // 「差别」第 5 条。
+    const isLatest = i === 0 && mode !== 'running';
+    const on = isLatest ? !viewing : !!(viewing && viewing.key === x.key);
+    return `<button type="button" class="run${on ? ' on' : ''}${isLatest ? ' latest' : ''}"
+      data-s="${s.s}" aria-current="${on ? 'true' : 'false'}"
+      onclick="${isLatest ? 'exitView()' : `pick('${x.key}')`}">
+      <span class="run-r1"><span class="run-when">${esc(when(x))}</span><span class="run-res">${esc(s.t)}</span></span>
+      <span class="run-r2"><span class="kind">${esc(kindOf(x))}</span> · ${esc(whereOf(x))}</span></button>`;
+  }).join('');
+
+  $('log-n').textContent = '保留最近 80 条';
+  $('log').textContent = (mode === 'running' && !viewing) ? LOG_LIVE : LOG_IDLE;
+  $('log-why').textContent = (mode === 'running' && !viewing) ? '运行中自动展开' : '出事才看，默认收起';
+  $('logwrap').open = mode === 'running' && !viewing;
+}
+
+function pick(key) {
+  const r = RUNS.find(x => x.key === key);
+  if (!r) return;
+  viewing = (viewing && viewing.key === key) ? null : r;   // 同一行再点一次 = 回到最新
+  render();
+}
+function exitView() { viewing = null; render(); }
+function setMode(m) {
+  mode = m; viewing = null;
+  $('m-idle').classList.toggle('on', m === 'idle');
+  $('m-run').classList.toggle('on', m === 'running');
+  render();
+}
+function jumpFirstError() {
+  const r = shown(), k = r.planned.find(x => r.stages[x]?.s === 'error');
+  if (!k) return;
+  const el = $('step-' + k);
+  el.querySelector('details')?.setAttribute('open', '');
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+render();
+</script>
+</body>
+</html>

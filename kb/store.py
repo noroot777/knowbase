@@ -18,6 +18,9 @@ import jieba
 import sqlite_vec
 
 from kb.config import DATA_DIR, DB_PATH, EMBEDDING_DIM, SOURCES
+# 老库升级那一块搬去了 kb/store_migrate.py(收藏表 DDL 也在那儿 ——
+# 重建 v4 时要用它,留在这儿两头就得互相 import)
+from kb import store_migrate as mig
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -40,7 +43,7 @@ CREATE TABLE IF NOT EXISTS documents (
   -- 任何方式变了,hash 就对不上,这一篇自动回到提取队列。
   no_body_hash  TEXT NOT NULL DEFAULT ''
 );
--- idx_documents_promo 在 _migrate_promo 里建(老库先补列才能建索引)
+-- idx_documents_promo 在 store_migrate.migrate_promo 里建(老库先补列才能建索引)
 
 CREATE TABLE IF NOT EXISTS doc_tags (
   path  TEXT NOT NULL REFERENCES documents(path) ON DELETE CASCADE,
@@ -58,7 +61,7 @@ CREATE TABLE IF NOT EXISTS entities (
   PRIMARY KEY (path, entity)
 );
 CREATE INDEX IF NOT EXISTS idx_entities_entity ON entities(entity);
--- idx_entities_norm 在 _migrate_entities 里建(老库先补列才能建索引)
+-- idx_entities_norm 在 store_migrate.migrate_entities 里建(老库先补列才能建索引)
 
 CREATE TABLE IF NOT EXISTS chunks (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,6 +111,12 @@ CREATE TABLE IF NOT EXISTS daily_carried (
   day        TEXT NOT NULL,   -- 带走它的那一份日报的日期;'#seed' = 启用账本时一次性盖的章,
                              -- '#drop' = 人工从队列里丢弃(见 kb/daily_carry.py 的 DROP_DAY)
   carried_at TEXT NOT NULL,
+  -- 当初送进模型的那一份素材的指纹(kb.daily_gain.material_sig)。可空:老行的空值
+  -- 是「没记下」,不是「和现在一样」(那一档面板报「不知道」,不报 0)。面板那个
+  -- 「再出一份能多带进来多少」靠它认出"带走过、但带走的是另一个版本"
+  -- (正文后来补全了、摘要刚提取出来)。
+  -- 老库补列在 store_migrate.migrate_daily_sig。
+  material_sig TEXT,
   PRIMARY KEY (path, day)
 );
 
@@ -116,25 +125,6 @@ CREATE TABLE IF NOT EXISTS daily_state (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
-"""
-
-# 收藏(web UI;整篇或片段,语义是"待试备忘"而非典藏,所以带状态流转。
-# 文档从索引移除时级联清掉,重索引 upsert 不影响)。
-# 单独抽出来:favorites v1→v2 迁移时要独立重建这张表。
-_FAVORITES_DDL = """
-CREATE TABLE IF NOT EXISTS favorites (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  path        TEXT NOT NULL REFERENCES documents(path) ON DELETE CASCADE,
-  quote       TEXT NOT NULL DEFAULT '',      -- 片段原文;'' = 整篇收藏
-  prefix      TEXT NOT NULL DEFAULT '',      -- 片段定位锚:前文
-  suffix      TEXT NOT NULL DEFAULT '',      -- 片段定位锚:后文
-  note        TEXT NOT NULL DEFAULT '',      -- 一句话:当时为什么收
-  status      TEXT NOT NULL DEFAULT 'inbox', -- inbox 待试 / done 已处理 / archived 沉底
-  action_json TEXT NOT NULL DEFAULT '',      -- LLM 行动卡 {name,what,cmd,eta,kind},收藏时异步生成
-  created_at  TEXT NOT NULL,
-  updated_at  TEXT NOT NULL                  -- 状态/备注最后一次变动,陈旧判断基于它
-);
-CREATE INDEX IF NOT EXISTS idx_favorites_path ON favorites(path);
 """
 
 _VEC_SCHEMA = f"""
@@ -148,112 +138,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec USING vec0(
 def tokenize(text: str) -> str:
     """jieba 分词,空格连接 —— 入库和查询用同一个函数。"""
     return " ".join(t for t in jieba.cut_for_search(text) if t.strip())
-
-
-def _migrate_favorites(conn: sqlite3.Connection) -> None:
-    """favorites 结构升级,幂等。
-    v1(path 主键、仅整篇星标)→ v2(id 主键 + 片段/状态)→ v3(+action_json)。"""
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(favorites)").fetchall()}
-    if not cols:
-        return
-    if "id" not in cols:  # v1 → 重建
-        conn.execute("ALTER TABLE favorites RENAME TO favorites_v1")
-        conn.executescript(_FAVORITES_DDL)
-        conn.execute(
-            "INSERT INTO favorites (path, created_at, updated_at)"
-            " SELECT path, created_at, created_at FROM favorites_v1"
-        )
-        conn.execute("DROP TABLE favorites_v1")
-        conn.commit()
-    elif "action_json" not in cols:  # v2 → 加列
-        conn.execute("ALTER TABLE favorites ADD COLUMN action_json TEXT NOT NULL DEFAULT ''")
-        conn.commit()
-
-
-def _migrate_entities(conn: sqlite3.Connection) -> None:
-    """entities 加 norm 归一列并回填,顺手把历史野生 kind 归一。幂等。"""
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(entities)").fetchall()}
-    if "norm" not in cols:
-        from kb.norm import entity_norm, kind_norm
-        conn.execute("ALTER TABLE entities ADD COLUMN norm TEXT NOT NULL DEFAULT ''")
-        rows = conn.execute("SELECT path, entity, kind FROM entities").fetchall()
-        for r in rows:
-            conn.execute(
-                "UPDATE entities SET norm=?, kind=? WHERE path=? AND entity=?",
-                (entity_norm(r["entity"]), kind_norm(r["kind"]), r["path"], r["entity"]),
-            )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_norm ON entities(norm)")
-    conn.commit()
-
-
-def _add_columns(conn: sqlite3.Connection, table: str,
-                 cols: tuple[tuple[str, str], ...]) -> None:
-    """给老表补列。幂等。**缺列才取写锁,并在锁里重新读一次列集合。**
-
-    「读列集合」和 ALTER 分在两个语句里、中间不持锁的话,两个连接同时首访同一个
-    老库会读到同一份旧列集合,后一个 ALTER 撞 `duplicate column name` —— 那一个
-    请求当场 500,而 connect() 是页面 API、提取 worker、CLI 共用的入口,于是
-    「升级后第一次并发使用」有一批操作直接报错(2026-10-09 审查实测:12 个并发
-    连接 11 个抛 `duplicate column name`)。WAL 和 SQLite 的写锁不会自动把前面
-    那句 PRAGMA 一起包进事务,所以判据必须和这次 ALTER 待在同一个写事务里 ——
-    口径同 feeds registry 那次「补列和它前面那次列集合读取要在同一把写锁里」。
-
-    常态(列都在)只花一句 PRAGMA、不取锁:connect() 每次都会跑到这里,
-    为一件一辈子只发生一次的事去抢写锁是把升级的代价摊给了每一次连接。
-    """
-    def missing() -> list[tuple[str, str]]:
-        have = {r["name"] for r in conn.execute(
-            f"PRAGMA table_info({table})").fetchall()}
-        return [(n, d) for n, d in cols if n not in have]
-
-    if not missing():
-        return
-    # 这里只会是 connect() 自己前面几步迁移留下的事务(各自都 commit 过);
-    # 显式落一次是因为 BEGIN IMMEDIATE 不能嵌在事务里。
-    if conn.in_transaction:
-        conn.commit()
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        for name, ddl in missing():          # 锁里重新读:别人刚补完就什么都不做
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-
-
-def _migrate_promo(conn: sqlite3.Connection) -> None:
-    """documents 加软广判定三列并建索引。幂等。
-
-    老库 documents 已存在,_SCHEMA 的 CREATE TABLE IF NOT EXISTS 不会补列,
-    只能 ALTER;索引要等列补完才能建,所以不写进 _SCHEMA(同 _migrate_entities)。
-    """
-    _add_columns(conn, "documents",
-                 (("promo_level", "TEXT NOT NULL DEFAULT ''"),
-                  ("promo_reason", "TEXT NOT NULL DEFAULT ''"),
-                  ("promo_at", "TEXT"),
-                  # 「判定落库了,但 md frontmatter 那行 flag 还没对齐」的持久化
-                  # 待办。交付分两步落在两个不同的存储上(kb.db 的事务管不着
-                  # vault 文件),第二步失败必须留下记录 —— 否则下一轮按
-                  # `promo_level` 非空把这一篇滤掉,两处永久不一致。
-                  # 写它的口径只有一份:`kb.extract_promo.mark_promo_tag_pending`。
-                  ("promo_tag_pending", "INTEGER NOT NULL DEFAULT 0")))
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_documents_promo ON documents(promo_level)")
-    # 软广排除要按 url 从条目回溯原文(见 promo_exclude_sql),没索引就是每行一次全表扫
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_documents_url ON documents(url)")
-    conn.commit()
-
-
-def _migrate_no_body(conn: sqlite3.Connection) -> None:
-    """documents 加 no_body_hash 列。幂等(理由同 _migrate_promo:老库只能 ALTER)。
-
-    不建索引:它只在 pending_docs 那一个查询里当过滤条件,而那个查询本来就
-    已经被 extracted_at IS NULL 收窄到几十行。
-    """
-    _add_columns(conn, "documents",
-                 (("no_body_hash", "TEXT NOT NULL DEFAULT ''"),))
 
 
 def promo_exclude_sql(alias: str = "d") -> str:
@@ -348,13 +232,15 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
-    _migrate_favorites(conn)
+    mig.migrate_favorites(conn)
     conn.executescript(_SCHEMA)
-    conn.executescript(_FAVORITES_DDL)
+    conn.executescript(mig.FAVORITES_DDL)
     conn.executescript(_VEC_SCHEMA)
-    _migrate_entities(conn)
-    _migrate_promo(conn)
-    _migrate_no_body(conn)
+    mig.migrate_entities(conn)
+    mig.migrate_promo(conn)
+    mig.migrate_no_body(conn)
+    mig.migrate_fav_anchor(conn)
+    mig.migrate_daily_sig(conn)
     return conn
 
 

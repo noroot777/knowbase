@@ -127,8 +127,11 @@
 .fv-detail-meta dt { color: var(--muted); width: 58px; flex-shrink: 0; }
 .fv-detail-meta dd { margin: 0; color: var(--ink-2); overflow-wrap: anywhere; }
 .fv-detail-links { display: flex; flex-wrap: wrap; align-items: center; gap: 13px; }
-.fv-detail-links > a { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--brand); text-decoration: none; }
-.fv-detail-links > a:hover { text-decoration: underline; }
+/* 这一排里既有 `<a>`(有 vault 文档的那几条)也有 `<button>`(日报正文、问答回答、
+   没导出的订阅条目:点回去是一次面板切换,不是一个地址,见 fav.js 的 favJumpHtml)
+   —— 只写 `> a` 的话那颗按钮拿不到这身排版,挤成一块没有内边距的实色方块。 */
+.fv-detail-links > a, .fv-detail-links > button { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--brand); text-decoration: none; }
+.fv-detail-links > a:hover, .fv-detail-links > button:hover { text-decoration: underline; }
 .fv-detail-links > .fv-primary-link { padding: 8px 12px; background: var(--brand); border-radius: 6px; color: var(--card); font-size: 11px; gap: 15px; }
 .fv-command { background: var(--paper); border: 1px solid var(--line-soft); padding: 11px 12px; border-radius: 7px; margin-top: 22px; }
 .fv-command > div { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: 10px; }

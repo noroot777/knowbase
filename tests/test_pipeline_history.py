@@ -34,6 +34,7 @@ from kb.web import pipeline_api
 from tests.headless import probe_env, requires_headless, run_probe
 
 _PROBE = Path(__file__).resolve().parent / "pipe_history_probe.mjs"
+_LAYOUT_PROBE = Path(__file__).resolve().parent / "pipe_layout_probe.mjs"
 
 class HistoryTests(HistoryCase):
     def test_a_red_round_is_still_there_after_the_next_round_goes_green(self):
@@ -115,13 +116,6 @@ class HistoryTests(HistoryCase):
         runs = state.load_history()
         self.assertEqual(2, len(runs), '两轮都要在')
         self.assertEqual(['ok', 'error'], [r['stages']['export']['status'] for r in runs])
-
-    def test_only_the_most_recent_rounds_are_kept(self):
-        with patch.object(state, '_HISTORY_KEEP', 3):
-            for i in range(5):
-                self.run_round(f'run-{i}', 'ok', f'第 {i} 轮')
-            self.assertEqual(['run-4', 'run-3', 'run-2'],
-                             [r['run_id'] for r in state.load_history()])
 
     def test_a_missing_or_broken_file_is_just_an_empty_list(self):
         """只读展示:读不出来不如少显示几行,不许把一轮同步的收尾带崩。"""
@@ -663,6 +657,15 @@ class BrowserTests(TestCase):
 
     def test_a_past_round_can_be_opened_on_the_real_panel(self):
         r = run_probe([shutil.which("node"), str(_PROBE)],
+                      timeout=300, env=probe_env())
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+
+    def test_the_round_picker_sits_next_to_what_it_rewrites(self):
+        """**版面那一份单独一个探针**:那边验行为(翻到哪一轮、红读不读得到、重试按
+        不按得下去),这边验几何(点一行之后屏幕上看不看得见变化)。分开还因为这一份
+        要换视口、改设备度量,和那份探针的状态机无关。判据在它自己的抬头里。
+        """
+        r = run_probe([shutil.which("node"), str(_LAYOUT_PROBE)],
                       timeout=300, env=probe_env())
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
 

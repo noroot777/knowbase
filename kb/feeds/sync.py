@@ -17,6 +17,7 @@ from kb.feeds import digest, fulltext, translate, x_channels
 # 新订阅的历史下界那道闸在 `history` 里(本文件越过 700 行硬上限时拆出去的)。
 # 这里原地再导出:`_save_result` 调的是本模块这个名字,全仓注释和回归里那些
 # `sync._within_history` 的指向也照旧成立。
+from kb.feeds.exported import item_body_md
 from kb.feeds.history import _within_history
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_segments import note_retry_targets
@@ -575,13 +576,10 @@ def _export(kind: str, hold_untranslated: bool = False,
             else:
                 kept.pop('tags', None)
         meta.update(kept)
-        notice = '\n> 以下为订阅源提供的摘要；完整内容请打开原文。\n' if item['content_kind'] == 'summary' else ''
-        if is_zh:
-            notice += '\n' + translate.NOTE + '\n'
-        text = '---\n' + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + '---\n\n'
+        text = '---\n' + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + '---\n'
         # Keep the parsed text intact for the vault, indexing and extraction.
         # HTML safety belongs to the reader (textContent / DOMPurify).
-        text += '# ' + title + '\n' + notice + '\n' + body + '\n'
+        text += item_body_md(item)
         temp = None
         # 「头一回落进 vault」要**两道一起**:库里那一格还空着(`feed_items.path`,
         # 首次导出成功时写上、之后没人清它),而且这个路径上此刻确实没有文件。

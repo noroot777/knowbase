@@ -201,7 +201,7 @@ def round_key() -> tuple[str, str]:
     `pipeline_state._end_run`),所以空闲时它们躺着的是上一轮的身份 —— 管道外直接入库
     的那一笔会被盖上一个跟它毫无关系的批次号,而 `put_items` 的 `DO NOTHING` 和
     `article_fetch_rounds` 的 `INSERT OR IGNORE` 都是**首次说了算**:盖错了救不回来,
-    药丸从此把它算成「这一次新抓到的」。拿不准就留「说不清」(空串),它落进回执的
+    tooltip 从此把它算成「这一次新抓到的」。拿不准就留「说不清」(空串),它落进回执的
     `unsure` 那一档,不冒充任何一次抓取。置位是安全的那一边:`running` 和 `batch` 在
     同一把锁里一起写下、工作线程才启动(`pipeline.start_pipeline`、`pipeline_retry`),
     收尾只在 `_end_run` 里放下它,所以它严格包着全部阶段。

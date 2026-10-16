@@ -95,6 +95,128 @@ async function saveFavModel() {
   } catch (error) { $('fav-model-state').textContent = '保存失败：' + error.message; }
 }
 
+function favDocAHtml(f, labelHtml, cls = '') {
+  if (!f.path) return favJumpHtml(f, labelHtml, cls);
+  // **`u`、`e`、`v` 三个都要一起带过去。**
+  // `u` = 采集那一刻这段引文在那一篇里只有一处吗:阅读页的裸引文退路按它决定能
+  // 不能采信(采集那一刻只有一处 ≠ 现在只剩一处,见 `kb/web/pages.py` 的 `seek`)。
+  // `v` = 采集那一刻核对过的正文版本(`favorites.doc_version`):阅读页拿它和
+  // `DOC_VERSION` 相比,**相等才算「要搜的这一篇就是采集时那一篇」**,于是锚点
+  // 一侧失配可以只听另一侧(两头摊的文本本来就不是同一种渲染);不等就说明这一篇
+  // 改过,那时一侧的「唯一命中」证明不了它是原处,如实说位置说不清。
+  // `e` = 采集那一刻这条锚点定不定得住(`favorites.anchor_exact`):记着 0 的
+  // (采集那一刻就有几处连前后文都一样,或者核对时在那一篇里压根对不上)阅读页
+  // 一律不定位 —— 「现在正好剩一处」只说明别处被删掉了。
+  // 三个数**都是老收藏可能没有的**(NULL),没有就一个字都不写 —— 那一头把
+  // "没有"当"不知道":`u`/`v` 缺了弱档不给用,`e` 缺了按原样放行(拒掉它等于
+  // 把存量收藏一次性废掉,而那些收藏的锚点并没有被证明定不住)。
+  const hash = f.quote ? '#kbq=' + encodeURIComponent(
+    JSON.stringify({ q: f.quote, p: f.prefix || '', s: f.suffix || '',
+                     ...(f.quote_unique === 1 || f.quote_unique === 0
+                       ? { u: f.quote_unique } : {}),
+                     ...(f.anchor_exact === 1 || f.anchor_exact === 0
+                       ? { e: f.anchor_exact } : {}),
+                     ...(f.doc_version ? { v: f.doc_version } : {}) })) : '';
+  return docAHtml(f, labelHtml, cls, hash);
+}
+
+// 回跳目标整个编进 data 属性,不去全局列表缓存里按 id 捞:这几颗按钮的寿命
+// 比那份缓存长(分诊结果渲染完,下一次 loadFavPanel 之前它一直在屏幕上)。
+function favJumpHtml(f, labelHtml, cls = '') {
+  const payload = encodeURIComponent(JSON.stringify({
+    origin: f.origin || '', ref: f.origin_ref || '', url: f.url || '',
+    q: f.quote || '', p: f.prefix || '', s: f.suffix || '',
+    // 同 `favDocAHtml` 的 hash:裸引文那一档要靠它(见 snip_text.js 的 `snipSeek`)
+    ...(f.quote_unique === 1 || f.quote_unique === 0 ? { u: f.quote_unique } : {}),
+    // 同上:采集那一刻这条锚点定不定得住(`favorites.anchor_exact`)。**这一个
+    // 和 `v` 不一样,要往这儿带** —— 日报正文、问答回答这几头压根没有文档版本
+    // 可比,而「采集那一刻就定不住」是它们自己也有的事实。
+    ...(f.anchor_exact === 1 || f.anchor_exact === 0 ? { e: f.anchor_exact } : {}),
+    // **问答片段出自哪一条消息**(后端核验过的 `favorites.origin_msg`)。回跳要
+    // 落到那一条消息上,不是在整个对话里搜那段引文:同一个问题问两遍得到一模
+    // 一样的回答时,整对话里有两处,于是「位置说不清」、一个高亮也不给,而真正
+    // 要找的那一条明明记着;两条回答只有一半相同时更坏 —— 锚点在另一条上先命中,
+    // 高亮落在别人身上(见 `chat.js` 的 `chatSnipUnit`)。
+    ...(Number(f.origin_msg) > 0 ? { m: Number(f.origin_msg) } : {}),
+  }));
+  // `v` 不往这儿带:这颗按钮只给**没有 path** 的收藏用(日报/问答/没导出的订阅
+  // 条目),它们压根不绑文档,没有正文版本可比 —— 绑了文档的走上面那条阅读页。
+  const label = SNIP_LABEL[f.origin] || '这段话';
+  return `<button class="fav-jump${cls ? ' ' + cls : ''}" data-jump="${payload}"` +
+    ` onclick="jumpFavOrigin(this)" title="回到${esc(label)}里这一段">${labelHtml}</button>`;
+}
+
+// 回跳:把目标存成一个"待定位",再切面板 —— 面板自己加载完会消费它。
+// **不在这里 await 面板的加载**:switchTab 会顺手起一轮 loadDailyPanel /
+// initChat,那一轮自己也要决定"打开哪一份",两边各发一次请求就是先发后到的
+// 旧回包盖掉新的(日报面板的 dailyReadSeq 为同一类竞态而存在)。把目标交给它、
+// 由它一处决定,就没有两条路要对齐。
+function jumpFavOrigin(el) {
+  let j;
+  try { j = JSON.parse(decodeURIComponent(el.dataset.jump)); } catch { return; }
+  // `u` 原样传下去(没有就不传):面板那几头拿它去 `snipSeek`,少这一个字段的话
+  // 连「采集时本来就唯一」的那些收藏也退不了裸引文那一档
+  const spec = { q: j.q, p: j.p, s: j.s,
+                 ...(j.u === 1 || j.u === 0 ? { u: j.u } : {}),
+                 ...(j.e === 1 || j.e === 0 ? { e: j.e } : {}) };
+  // **`same` 由各面板自己决定,这儿一个字都不写**(默认 = 证明不了)。日报正文、
+  // 订阅正文这两头:采集和回跳走的是同一个渲染器,一侧对不上就只能是正文自己变过
+  // 了,没有「两种渲染」这个借口 —— 弱档于是一律不采信。问答那一头不一样,见
+  // 下面 chat 分支和 `chat.js` 的 `chatSnipUnit`。
+  if (j.origin === 'daily') {
+    if (!j.ref) return toast('这条收藏没有记下是哪一天的日报');
+    dailyPendingSnip = { ref: j.ref, spec };
+    switchTab('daily');
+    return;
+  }
+  if (j.origin === 'chat') {
+    const cid = Number(j.ref);
+    if (!cid) return toast('这条收藏没有记下是哪一个对话');
+    // `msg` 交给 `openConv`:它负责把落点收到那一条消息上(没有这个数的老收藏
+    // 才在整个对话里搜,而且不采信弱档)
+    chatPendingSnip = { ref: cid, msg: Number(j.m) || 0, spec };
+    switchTab('ask');
+    openConv(cid, true);
+    return;
+  }
+  if (j.origin === 'feed') {
+    // 订阅片段落到这一类,说明屏幕上那份正文在 vault 里没有同一份(外文原文,
+    // 或者还没导出)。**站外原文才是那段话的出处**,优先开它;没有链接时退回
+    // 它所在的订阅来源,并说清为什么没直接定位 —— 那条内容可能早翻过页了。
+    // **最后这一道导航也过 `safeUrl`。** 这个字段是内容自带的(RSS 的 link),
+    // 后端只管长度;同一份数据渲染成链接时各处都过 `safeUrl`(本文件下面那条
+    // 「原文」、`source_reader.js` 的条目页脚),只有这一句直接把它交给
+    // `window.open` —— 口径两样,那就迟早有一天不一样。认不出协议时退回下面
+    // 「没有链接」那条路:切回它所在的来源,并说清为什么没直接定位。
+    const url = typeof safeUrl === 'function' ? safeUrl(j.url) : j.url;
+    if (j.url && url !== '#') { window.open(url, '_blank', 'noopener'); return; }
+    // 来源目录里认得的 id(rss/wechat/social…)`switchTab` 自己会落到订阅面板的
+    // 对应视图。**认不得的一律退回 'subs'**:`switchTab` 对不认识的名字是直接
+    // return,页面一动不动,而下面那句提示写着"已切到它所在的来源" —— 一句假话。
+    const kind = String(j.ref || '').split(':')[0];
+    const known = typeof subsCatalog !== 'undefined'
+      && subsCatalog.some(m => m.id === kind);
+    switchTab(known ? kind : 'subs');
+    toast('这条订阅内容没有站外链接', { type: 'info',
+      detail: '已切到它所在的来源,可用搜索框找这段话' });
+    return;
+  }
+  toast('这条收藏不知道该回到哪里', { detail: '来源:' + (j.origin || '(空)') });
+}
+
+/** 面板加载完自己调一次:定位成功就清掉待定位,失败如实说。
+ *  `pending.ref` 对不上的不要动 —— 那是另一次回跳的目标。 */
+function consumeSnipJump(pending, ref, el, skip) {
+  if (!pending || String(pending.ref) !== String(ref)) return pending;
+  // `skip` 要和采集那一头传的是同一条(问答那边是 `CHAT_SNIP_SKIP`):一头跳过
+  // 界面文字、一头不跳,采到的"唯一"在这一头就可能不唯一了,见 snipTextIndex。
+  if (!locateSnip(el, pending.spec, skip)) {
+    toast('没找到这段收藏', { type: 'info',
+      detail: '这段正文可能已经变过;收藏里那段原文还在' });
+  }
+  return null;
+}
+
 function favCategory(item) {
   if (item.quote || item.action?.kind === 'reference') return 'quote';
   const action = item.action || {};

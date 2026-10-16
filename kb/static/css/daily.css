@@ -1,22 +1,29 @@
-/* 日报:左边一列日期、右边一份读起来像文章的正文;定时设置压在最下面。 */
+/* 日报:左边一列日期、右边一份读起来像文章的正文;覆盖区间和定时设置各是页头
+   下面的一扇抽屉,由页头上那两颗文字按钮开合。 */
 .daily-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; margin:12px 0 26px; flex-wrap:wrap; }
 .daily-heading h1 { font:700 34px/1.3 var(--font-display); letter-spacing:-1px; }
 .daily-heading-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .daily-heading-actions label { font-size:13px; color:var(--muted); }
-.daily-window-label { font:12px/1.6 var(--font-mono); color:var(--muted); font-variant-numeric:tabular-nums; }
-.daily-window { display:flex; align-items:center; gap:16px; flex-wrap:wrap; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 18px; margin:-12px 0 20px; font-size:13px; }
-.daily-window[hidden] { display:none; }
+/* 页头上那两句事实(覆盖哪一段 / 定时开没开),各自后面跟着开抽屉的那颗按钮。 */
+.daily-head-fact { font:12px/1.6 var(--font-mono); color:var(--muted); font-variant-numeric:tabular-nums; }
+/* 两扇抽屉共用外框;`[hidden]` 这条带属性选择器,压得住下面各自的 display。 */
+.daily-drawer { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 18px; margin:-12px 0 20px; font-size:13px; }
+.daily-drawer[hidden] { display:none; }
+.daily-drawer .hint { color:var(--muted); font-size:12px; }
+/* 收起/取消是退路不是主张:走灰阶,不跟「接上一份日报」「保存设置」抢眼。 */
+.daily-drawer-close { color:var(--muted); }
+.daily-window { display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
 .daily-window label { display:flex; align-items:center; gap:8px; color:var(--muted); }
-.daily-window .hint { color:var(--muted); font-size:12px; }
-/* 「再出一份能多带进来多少」,长在生成按钮里面(不是贴在覆盖区间那行字后面)
-   —— 它回答的是"点这颗按钮会得到什么",所以就该跟着这颗按钮走。
-   区分两种状态**只靠字色**:有积压是品牌深绿,0 条退成灰。不画底色药丸——
-   brand-soft(#DFF0E9)和 ghost 按钮底(#EAEEED)差不到 2%,实测等于没画,
-   留着就是一行看不见的声明。"查不出来"那一档整颗藏掉(既不是有也不是没有)。 */
-.daily-gen-count { margin-left:8px; color:var(--brand-deep);
+.daily-window .daily-drawer-close { margin-left:auto; }
+/* 「再出一份能多带进来多少」,贴在生成按钮前面 —— 它回答的是"点这颗按钮会得到
+   什么",所以就该跟着这颗按钮走(覆盖区间那行字回答的是另一个问题,两件事挨在
+   一起会串台)。区分两种状态**只靠字色**:有新内容是品牌深绿,0 条退成灰。
+   不画底色药丸—— brand-soft(#DFF0E9)和 ghost 按钮底(#EAEEED)差不到 2%,
+   实测等于没画,留着就是一行看不见的声明。 */
+.daily-new-count { color:var(--brand-deep);
   font:11px/1.6 var(--font-mono); font-variant-numeric:tabular-nums; }
-.daily-gen-count[hidden] { display:none; }
-.daily-gen-count.is-none { color:var(--muted); }
+.daily-new-count[hidden] { display:none; }
+.daily-new-count.is-none { color:var(--muted); }
 
 #dailypanel button, #dailypanel input, #dailypanel select { min-height:38px; font-size:13px; }
 #dailypanel .text-button { min-height:0; }
@@ -67,9 +74,7 @@
 .daily-empty h3 { font:600 17px var(--font-display); color:var(--ink); margin-bottom:10px; }
 .daily-empty p { font-size:13px; max-width:340px; margin:auto; line-height:1.9; }
 
-.daily-schedule { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px 24px; margin-top:24px; display:grid; gap:16px; }
-.daily-schedule h2 { font-size:16px; font-weight:650; }
-.daily-schedule p { margin-top:7px; color:var(--muted); font-size:13px; }
+.daily-schedule { display:grid; gap:14px; }
 .daily-schedule fieldset { border:0; padding:0; display:flex; align-items:center; gap:22px; flex-wrap:wrap; font-size:13px; }
 .daily-schedule fieldset label { display:flex; align-items:center; gap:7px; }
 .daily-schedule input[type=number] { width:68px; }
@@ -77,8 +82,11 @@
 .daily-channels-label { font-size:13px; color:var(--muted); }
 #daily-channels { display:flex; gap:18px; flex-wrap:wrap; }
 .daily-channel { display:flex; align-items:center; gap:7px; font-size:13px; }
-.daily-schedule-footer { display:flex; justify-content:space-between; align-items:center; gap:14px; border-top:1px solid var(--line-soft); padding-top:16px; font-size:13px; color:var(--muted); }
-.daily-schedule-footer span { overflow-wrap:anywhere; }
+/* 那句状态占满左边(`margin-right:auto`),按钮靠右排成一排 —— 用
+   `justify-content:space-between` 的话,四件东西会被均匀摊开,「重新读取」
+   飘在中间不知道属于谁。 */
+.daily-schedule-footer { display:flex; align-items:center; gap:14px; border-top:1px solid var(--line-soft); padding-top:14px; font-size:13px; color:var(--muted); }
+.daily-schedule-footer span { margin-right:auto; overflow-wrap:anywhere; }
 
 @media (max-width:900px) {
   .daily-workbench { grid-template-columns:minmax(0,1fr); }

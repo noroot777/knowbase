@@ -165,7 +165,7 @@
 | 新订阅只收几天、存量清理(`kb/feeds/history.py`、`scripts/feed_trim_history.py`) | `history-depth.md` |
 | 「重试失败项」那颗按钮的范围(`kb/pipeline_retry.py`、`pipeline_state.py`) | `retry-scope.md` |
 | 失败明细里那一条怎么点开、怎么「不再抓取」(`kb/pipeline_failures.py`、`collectors.ItemDropping`、`pipe_view.js`) | `failure-drop.md` |
-| 同步的历史运行、一轮的红怎么留档、恢复时挑哪一轮(`kb/pipeline_state.py`、`pipeline_persist.py`、`pipeline_open.py`、`pipe_history.js`) | `pipeline-history.md` |
+| 同步的历史运行、一轮的红怎么留档、留几天、恢复时挑哪一轮(`kb/pipeline_state.py`、`pipeline_persist.py`、`pipeline_retention.py`、`pipeline_open.py`、`pipe_history.js`) | `pipeline-history.md` |
 | **任何写 kb.db 或 vault 文件的入口**(索引、导出、提取回写、条目化、清理脚本) | `maintenance-lock.md` |
 | 没有 feed 的站点、网页专栏解析(`kb/feeds/page_list.py`) | `page-list.md` |
 | 邮件简报 / TLDR(`kb/feeds/digest.py`) | `digest.md` |
@@ -181,6 +181,7 @@
 | 向量子进程与帧协议(`kb/embed_worker.py`、`embed_pool.py`、`embedder.py`) | `embedding.md` |
 | 问答面板布局、聊天区留白、页面探针收尾(`kb/static/js/chat.js`) | `frontend-feedback.md` |
 | 「我的订阅」页布局(`kb/static/js/sources.js`、`targets.js`) | `subs-layout.md` |
+| 「收藏此段」、`favorites` 的可空 path、片段回跳(`kb/static/js/snip.js`、`kb/web/favorites_api.py`、`kb/favbrain.py`、`store.py` 的 favorites 迁移) | `fav-snippets.md` |
 
 ## 往本文件添加内容(硬性)
 

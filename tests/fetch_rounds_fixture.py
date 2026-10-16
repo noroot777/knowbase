@@ -38,7 +38,7 @@ def T(text):
 
 
 def BOOK(n, added, at, partial=False, fresh=None, carried=0, unsure=0):
-    """面板那颗药丸该看到的**整份**事实(`fetch_rounds.today()` 的全部字段)。
+    """面板那段 tooltip 该看到的**整份**事实(`fetch_rounds.today()` 的全部字段)。
 
     整份比,不挑字段:少比一个键的话,「这一轮全不全」或者那句分解悄悄变了都
     发现不了。`fresh` 默认等于 `added` —— 正常情形就是「这一轮交回来的都是这

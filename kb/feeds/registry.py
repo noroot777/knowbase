@@ -119,7 +119,7 @@ _ADDED_COLUMNS = {
         # 时标记留在原处,下一轮导出会再来一次。
         ('extract_stale', 'INTEGER NOT NULL DEFAULT 0'),
         # 「**哪一次业务抓取**头一回发现这一条」(`fetch_rounds.round_key()`)。
-        # 导出那一步把它当成回执里的抓取身份交上去,药丸背后那句分解据此分开
+        # 导出那一步把它当成回执里的抓取身份交上去,tooltip 背后那句分解据此分开
         # 「这一次新抓到的」和「之前抓到、这一次才补导进来的」。
         # **老库里的条目补成空串 = 说不清**,不是「不是本次」:它们入库时压根
         # 没有这个概念,硬塞一个值等于凭空造事实。空串落在 `unsure` 那一档,
@@ -549,7 +549,7 @@ def merge_config(source_id: int, patch: dict, conn=None) -> None:
 
 def put_items(source: dict, entries: list[dict], conn=None) -> int:
     # 这一条是哪一次业务抓取发现的。**口径只有一份**(`fetch_rounds.round_key`),
-    # 别在这里另写一遍读 `_state` 的逻辑 —— 两份迟早漂,而漂的后果是药丸把本次
+    # 别在这里另写一遍读 `_state` 的逻辑 —— 两份迟早漂,而漂的后果是 tooltip 把本次
     # 新抓到的算成补导的。管道没在跑时它是空串 = 说不清,照旧入库。
     from kb.fetch_rounds import round_key
 

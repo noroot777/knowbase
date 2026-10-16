@@ -1,20 +1,20 @@
-// 每日日报:定时设置、立即生成、历史日报的阅读。
+// 每日日报:立即生成、历史日报的阅读、页头那两扇抽屉的开合。
+// 定时设置那一片在 daily_sched.js(拆出去只因为行数)。
 // 生成过程借用同步管道(每个通道跑一趟),细节留在同步中心里看;这里只展示
 // "现在跑到哪个来源了"和结果,同一件事不做两套进度展示。
-let dailySettings = null, dailyChannels = [], dailyReports = [], dailyWindow = null;
+let dailyReports = [], dailyWindow = null;
 let dailyCurrent = '', dailyState = null, dailyTimer = null;
 // 上一次看到的那一轮**已结束**运行的身份(还没查过状态是 null,正在跑是空串)。
 // 身份是 run_id 和完成时刻**两段拼起来的**,哪一段变了都算新一轮:承重的是
 // run_id(`finished_at` 只精确到秒,同一秒里跑完的两轮拿它分不开),而完成时刻
 // 是它撞号时的兜底 —— 多刷一次列表的代价,换"再不会静默停在旧正文上"。
 let dailyDoneRun = null;
-let dailyLoaded = false, dailyDirty = false, dailySaving = false, dailyBusy = false;
-// 这一片**有几趟读取还在路上**。它不是一道闸(面板重开就该再读一次设置,在途的那
-// 趟由共享层的代次去作废 —— 拿它当闸会把重开那次读取整个吞掉,于是被按住的旧回包
-// 落地时写进去的是过时的值,实测把开关退回了未启用):它只回答「自己这趟读完了
-// 没有」,共享层的新事实到了要不要替这张表单收尾,得先知道它还在不在读。
-let dailySchedReads = 0;
+let dailyBusy = false;
 let dailyWindowDirty = false;
+// 从收藏面板点一条日报片段回来时的落点:{ref: 日期, spec: 那段话的锚点}。
+// **由这一片自己消费**(`openDailyReport` 成功之后),不让收藏面板那边也发一次
+// 打开请求 —— 两条路各发一次就是 dailyReadSeq 要挡的那种先发后到。
+let dailyPendingSnip = null;
 // `/api/daily/window` 的**代次**(同 `schedules.js` 那道门):发请求前占一个号,
 // 回包落地时号被更晚的读取顶掉就整趟作废 —— 不写事实、也不填输入框。
 let dailyWindowSeq = 0;
@@ -74,8 +74,9 @@ function renderDailyWindowLabel() {
   renderDailyGenButton();
 }
 
-// 生成按钮的名字和它里面那颗药丸(今天第 N 次抓取、抓了多少)在
-// daily_chip.js —— `dailyTargetDate()` / `renderDailyGenButton()` 也在那边。
+// 生成按钮的名字、它前面那句「有 N 条新内容」(0 条时按钮整颗藏掉)、以及那段
+// 写着抓取事实的 tooltip 都在 daily_chip.js —— `dailyTargetDate()` /
+// `renderDailyGenButton()` 也在那边。
 
 async function fetchDailyWindow(fillInputs) {
   // **服务器事实统一从这一个口进来。** 抓取事实、队列积压、默认区间每次都接;
@@ -95,7 +96,28 @@ async function fetchDailyWindow(fillInputs) {
   let got;
   try {
     got = await pipeJson('/api/daily/window');
-  } catch { return false; }
+  } catch {
+    // **最新这一趟读失败 ⇒ 上一趟那些「会授权某个动作」的结论当场过期。**
+    // 后端算不出来时自己会答 `pending: null`,但那一路覆盖不到 HTTP 错误、断连、
+    // 解析失败和 `pipeJson` 的超时 —— 留着上一次的 0 就是用一次历史成功当无限期
+    // 证据:页面继续写「没有新内容」、继续藏着按钮,而库里明明又进了新文章
+    // (审查实测:只对这一个接口注入网络失败,服务端已有新增,面板照旧说 0)。
+    //
+    // **过期的是两件:`pending`(授权"把按钮藏掉")和 `has_report`(授权"不问一声
+    // 就覆盖")。** 后者漏掉过一次:今天还没有日报时读到 `has_report=false`,随后
+    // 这个接口开始失败、而生成**成功**了 —— 列表里已经是新出的那一份,页面却还攥着
+    // 生成**之前**那句"今天没有日报",于是再点生成**不弹覆盖确认**,静悄悄盖掉刚出
+    // 的日报(审查实测:两颗按钮都发出了 POST /api/daily/run)。一句过期的"没有"
+    // 不能继续当"可以不问"的凭据;丢掉它之后这件事退回列表那份(它正确地含着今天),
+    // 答案变成"不知道",于是照旧弹确认。
+    //
+    // 只用来**显示**的那些(抓取事实、默认区间)留着 —— 它们不授权任何动作,清掉
+    // 只会让面板平白少几句话。读成功的那一趟会把两件一起填回来。
+    // 代次这一道照旧要过:一条迟到的失败不许盖掉更晚那趟刚读到的好事实。
+    if (seq === dailyWindowSeq && dailyWindow)
+      dailyWindow = { ...dailyWindow, pending: null, has_report: null };
+    return false;
+  }
   // 被更晚的那趟顶掉:整趟作废。照自己这份旧回包画会把「第 2 次抓取」退回
   // 「第 1 次」,而新事实已经显示出来了(审查 N2)。
   if (seq !== dailyWindowSeq) return false;
@@ -115,10 +137,52 @@ async function loadDailyWindow() {
   else renderDailyGenButton();
 }
 
+// ── 页头的两扇抽屉 ──────────────────────────────────────────────────────────
+// 「改区间」和「改定时」各开一扇,都是页头底下的整宽横条。**同一时刻只开一扇**:
+// 两扇叠起来小半屏高,下面的日报列表和正文被推出视野,而人只是想改一个时刻。
+// 开合只认 DOM 上的 `hidden`,不另记一份状态 —— 两份状态就有对不上的那一天。
+const DAILY_DRAWERS = { window: 'daily-window', sched: 'daily-sched' };
+
+function dailyDrawerOpen(name) { return !$(DAILY_DRAWERS[name]).hidden; }
+
+function setDailyDrawer(name, open) {
+  for (const [key, box] of Object.entries(DAILY_DRAWERS)) {
+    const on = open && key === name;
+    $(box).hidden = !on;
+    $(box + '-toggle').setAttribute('aria-expanded', String(on));
+  }
+}
+
+// Esc 跟抽屉里那颗「取消」是同一件事(确认框那边也是这个约定)。绑在抽屉元素上
+// 而不是 document:只有焦点在抽屉里才算数,别处按 Esc 不该惊动它。
+function dailyDrawerKey(event, name) {
+  if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
+  event.stopPropagation();
+  if (name === 'window') cancelDailyWindow(); else cancelDailySched();
+}
+
+// 开抽屉时记一份「进来之前是什么样」,给「取消」用。
+let dailyWindowDraft = null;
+
 function toggleDailyWindow() {
-  const box = $('daily-window');
-  box.hidden = !box.hidden;
-  $('daily-window-toggle').setAttribute('aria-expanded', String(!box.hidden));
+  const open = !dailyDrawerOpen('window');
+  if (open) dailyWindowDraft = { dirty: dailyWindowDirty,
+    since: $('daily-since').value, until: $('daily-until').value };
+  setDailyDrawer('window', open);
+}
+
+// 「取消」= 放弃**这次打开之后**改的那几下并收起,不是"清掉自定义区间"。进来时
+// 本来就挂着一段自定义区间的话,取消之后它照旧挂着(人想丢掉它有「接上一份日报」
+// 那颗按钮)。进来时是默认区间就回到默认 —— 走 resetDailyWindow 重算一次,因为
+// 默认区间的截止时刻是"此刻",照进来那一刻的旧值填回去等于把时间钉死了。
+async function cancelDailyWindow() {
+  const was = dailyWindowDraft;
+  setDailyDrawer('window', false);
+  if (!was || !was.dirty) { await resetDailyWindow(); return; }
+  dailyWindowDirty = true;
+  $('daily-since').value = was.since;
+  $('daily-until').value = was.until;
+  renderDailyWindowLabel();
 }
 
 function markDailyWindow() {
@@ -127,154 +191,24 @@ function markDailyWindow() {
 }
 
 async function resetDailyWindow() {
+  // **先用已知的默认区间把三样一次性摆一致:两个时刻、页头那句话、要提交的区间
+  // (`dailyWindowDirty`),再去取新的默认值。** 顺序反过来(先清 dirty、等重读
+  // 回来才还原输入和页头)时,重读一失败屏幕上就留着一段已经被取消掉的自定义
+  // 区间 —— 页头写着「覆盖 01-01 → 01-02」,而此刻点生成走的是默认区间、写的是
+  // 今天那一份(审查实测:真鼠标点完确认框,最终请求里根本没有 since/until)。
+  // 取不回新的默认值不要紧,三样仍然是自洽的"接上一份日报"。
   dailyWindowDirty = false;
+  if (dailyWindow) {
+    $('daily-since').value = dailyWindow.since;
+    $('daily-until').value = dailyWindow.until;
+    renderDailyWindowLabel();
+  } else {
+    // 连默认区间都还没读到过:两个时刻清空、那行字退回"还在算",一样不留下
+    // 任何与提交内容不符的说法(落地的那一趟会把它们填上)。
+    $('daily-since').value = $('daily-until').value = '';
+    $('daily-window-label').textContent = '正在算覆盖区间…';
+  }
   await loadDailyWindow();
-}
-
-// ── 定时设置 ────────────────────────────────────────────────────────────────
-
-function dailyScheduleMessage(s) {
-  if (!s.enabled) return '定时生成未启用';
-  const next = s.next_run ? ` · 下次 ${dailyTime(s.next_run)}` : '';
-  return `已保存：每天 ${s.time} ${s.sync ? '先同步再生成' : '只用已入库的内容生成'}${next}`;
-}
-
-// **一次读取必须有终态**(事故形态在 `docs/decisions/sync-schedule.md`,那一节原来
-// 写的是两张表单,现在只剩这一张)。这一片底下那句话一开始就是「正在读取定时
-// 设置…」、整片字段禁用着,所以
-// 成功、失败、被更晚的读取顶掉,哪条分支走完都得回到这里收尾。终态只有三种:采用
-// 当前已确认的事实、说读不到并把重读放出来、保留用户的草稿。
-//
-// 原来成功和失败两条分支各有一处早退,早退之后这一片就永远停在「正在读取定时
-// 设置…」:字段禁用、没有重读入口,而后端和共享事实都是好的。
-function settleDaily(fact, failure) {
-  // **就绪判据只有一份**(`schedules.js` 的 `scheduleSettle`):配置**和**可选来源
-  // 目录都到位才算"已加载" —— 目录没拿到就画不出同步范围,硬开放字段只会让他存出
-  // 一份空范围(保存那边会当场拒绝)。这一档照"不知道"走,重读把目录一起补上。
-  const { state, missing } = scheduleSettle({
-    fact, saving: dailySaving, dirty: dailyDirty,
-    deps: [{ ready: dailyChannels.length, what: '同步范围' }],
-  });
-  if (state === 'saving') return;  // 保存那条路自己会收尾
-  if (state === 'draft') {         // 草稿优先:一个字都不许覆盖
-    $('daily-sched-fields').disabled = false; $('daily-sched-save').disabled = false;
-    return;
-  }
-  if (state === 'ready') {
-    dailySettings = fact;
-    $('daily-on').checked = !!fact.enabled;
-    $('daily-time').value = fact.time;
-    $('daily-sync').checked = !!fact.sync;
-    $('daily-firstdays').value = fact.first_days;
-    renderDailyChannels();
-    dailyLoaded = true;
-    $('daily-sched-fields').disabled = false;
-    $('daily-sched-reload').hidden = true;
-    $('daily-sched-msg').textContent = dailyScheduleMessage(fact);
-    return;
-  }
-  // 三句话分得清三件事:**这趟真失败了**、**定时读到了但依赖没读到**、**当前不知道**
-  // (更晚那趟失败把事实抹成了未知)。都给重读入口,一句含糊的「失败」救不了用户。
-  $('daily-sched-msg').textContent =
-    failure ? '读取定时设置失败：' + failure
-    : missing ? missing + '还没读到，点「重新读取」再试一次'
-    : '读不到定时设置';
-  $('daily-sched-reload').hidden = false;
-  // 重读失败时屏幕上那份仍是上一次读到的真实设置,照旧可编辑可保存;
-  // 从没读成功过才留在禁用态 —— 那时根本没有值可编辑。
-  $('daily-sched-fields').disabled = !dailyLoaded;
-  $('daily-sched-save').disabled = !dailyDirty;
-}
-
-async function loadDailySettings() {
-  if (dailySaving || dailyDirty) return;
-  // 占代次要在发请求之前,见 schedules.js 的 schedulesRead(面板重开会再读一次,
-  // 这一趟还没回来时保存了的话,这个回包不许把刚保存的那一份倒退回去)。
-  const accept = schedulesRead('daily');
-  dailySchedReads++;
-  let fact = null, failure = '';
-  try {
-    const data = await pipeJson('/api/daily/settings');
-    // **资格先判,再动任何一格;而且画的是共享层确认的那一份,不是我这趟的回包。**
-    // 照自己的回包画的后果(第 1、2 轮各实测一次):这趟被别处的保存顶掉了,
-    // 开关却被它改回未勾选、提示写成「定时生成未启用」,而同一页读共享事实的
-    // 来源说明还承诺每天同步 —— 同一份配置两处打架。
-    fact = accept({ daily: data.settings }).daily;
-    // 外层那个 channels 是**可选来源目录**(不是设置),共享层不管它,照这趟取。
-    dailyChannels = data.channels;
-  } catch (e) {
-    // 读失败也要过同一道门:**这趟要是已经被顶掉,就不许用它的失败盖掉别处
-    // 刚读到/刚保存的好值**(那会把一句「读取失败」挂在一份正常的配置上)。
-    // 但"别盖掉"不等于"不用收尾" —— 拿回来的那份事实照样要画上去。
-    fact = accept({ daily: null }).daily;
-    if (!fact) failure = e.message;
-  }
-  finally { dailySchedReads--; settleDaily(fact, failure); }
-}
-
-// 这一片也跟着共享事实走:别处(「我的订阅」页那次读取;定时只剩这一张表单了,但
-// 读的地方不止一处)确认的新事实到了,而这一片自己那趟早就结束了的话,它该跟着
-// 完成,而不是停在上一次的样子。只认
-// **非 null**:null 是"当前不知道",而共享层分不出"从没读过"和"读了没读到",拿它
-// 报"读不到"会冤枉一条好定时;自己这趟失败那一档由 settleDaily 自己报。
-watchSchedules(config => {
-  if (config.daily && !dailySchedReads) settleDaily(config.daily, '');
-});
-
-function renderDailyChannels() {
-  const picked = new Set(dailySettings.channels);
-  $('daily-channels').innerHTML = dailyChannels.map(c =>
-    `<label class="daily-channel"><input type="checkbox" data-channel="${esc(c.id)}"
-      ${picked.has(c.id) ? 'checked' : ''} onchange="markDailyDirty()"> ${esc(c.label)}</label>`).join('');
-}
-
-function pickedDailyChannels() {
-  return [...$('daily-channels').querySelectorAll('input:checked')].map(i => i.dataset.channel);
-}
-function markDailyDirty() {
-  if (!dailyLoaded || dailySaving) return;
-  dailyDirty = true;
-  $('daily-sched-save').disabled = false;
-  $('daily-sched-msg').textContent = '有未保存的修改';
-}
-
-async function saveDailySettings() {
-  if (!dailyLoaded || dailySaving || !dailyDirty) return;
-  if (!$('daily-time').reportValidity() || !$('daily-firstdays').reportValidity()) return;
-  const channels = pickedDailyChannels();
-  if (!channels.length) {
-    // 同页头那张:**"一个都没勾"和"一个都没有可勾的"是两件事**,后者该说重读。
-    if (!dailyChannels.length) {
-      $('daily-sched-msg').textContent = '同步范围还没读到，点「重新读取」再试一次';
-      $('daily-sched-reload').hidden = false;
-    } else $('daily-sched-msg').textContent = '至少勾选一个同步范围';
-    return;
-  }
-  // **保存期间把整片字段一起禁掉。** 只禁保存按钮的话:
-  // 这期间改的开关/时刻/范围进不了已经发出去的那个请求,`markDailyDirty` 又因为
-  // 正在保存直接返回 —— 保存成功后 dirty 被清掉、按钮继续禁着,那几下修改**既没
-  // 保存也存不了**,而面板写着「已保存」。
-  dailySaving = true; $('daily-sched-fields').disabled = true;
-  $('daily-sched-save').disabled = true;
-  $('daily-sched-save').textContent = '正在保存…';
-  try {
-    dailySettings = await pipePost('/api/daily/settings', {
-      enabled: $('daily-on').checked, time: $('daily-time').value,
-      sync: $('daily-sync').checked, first_days: Number($('daily-firstdays').value) || 1, channels,
-    });
-    dailyDirty = false;
-    $('daily-sched-msg').textContent = dailyScheduleMessage(dailySettings);
-    // **保存成功必须过共享层**:订阅页那句「什么时候自动同步」是这份配置的派生
-    // 展示,不交出去它就一直停在旧说法上(开了说不会自动同步、关了还承诺每天
-    // 同步),刷新才对得上。POST 回的是扁的设置对象,GET 那边才套着一层 settings。
-    schedulesSaved('daily', dailySettings);
-  } catch (e) {
-    $('daily-sched-msg').textContent = '未保存：' + e.message + '。修改已保留，可重试。';
-  } finally {
-    dailySaving = false; $('daily-sched-save').textContent = '保存设置';
-    $('daily-sched-fields').disabled = false;
-    $('daily-sched-save').disabled = !dailyDirty;
-  }
 }
 
 // ── 历史日报 ────────────────────────────────────────────────────────────────
@@ -306,8 +240,22 @@ async function loadDailyReports(keepSelection = true) {
     ? `最近一份 ${dailyReports[0].date}` : '还没有生成过日报';
   $('daily-list-note').textContent = dailyReports.length ? `共 ${dailyReports.length} 份` : '';
   renderDailyList();
-  const wanted = keepSelection && dailyReports.some(r => r.date === dailyCurrent)
-    ? dailyCurrent : dailyReports[0]?.date;
+  // 收藏回跳指定了哪一天就打开那一天(它只在那一份里才找得到那段话)。
+  // **那一份已经不在了就当场说清楚、并把这次回跳丢掉** —— 退回"打开第一份"的话,
+  // 屏幕上是另一天的日报、没有任何提示,而待定位还挂着:用户以为跳到了,实际
+  // 在读别的东西(审查实测:目标 1999-01-01,最后显示 2026-10-14)。
+  let jump = '';
+  if (dailyPendingSnip) {
+    if (dailyReports.some(r => r.date === dailyPendingSnip.ref)) {
+      jump = dailyPendingSnip.ref;
+    } else {
+      toast('这条收藏出自 ' + dailyPendingSnip.ref + ' 的日报，那一份已经不在了',
+        { type: 'info', detail: '收藏里那段原文还在' });
+      dailyPendingSnip = null;
+    }
+  }
+  const wanted = jump || (keepSelection && dailyReports.some(r => r.date === dailyCurrent)
+    ? dailyCurrent : dailyReports[0]?.date);
   // await:调用方("生成完了,刷新一下")等的是"新那一份已经在屏幕上",不是
   // "列表请求回来了"。不等的话阅读区还挂着上一份的正文和元信息,看起来像是
   // 生成没生效(2026-09-30 复审在全新沙箱上抓到,回归因此假红)。
@@ -336,6 +284,8 @@ function renderDailyList() {
 //   轮询都不会再补刷(审查实测:左边列表写着 5 条,正文只剩 4 条,只有手动再点一次才回来)。
 let dailyReadSeq = 0;
 
+// 正文落地走 `setDailyBody`(kb/static/js/daily_body.js):正文和「这是哪一天的」
+// 一起落,「收藏此段」从那里读出处。
 async function openDailyReport(date) {
   dailyCurrent = date;
   renderDailyList();
@@ -355,16 +305,20 @@ async function openDailyReport(date) {
     // 元信息那一行已经写了。两处都只在面板上剥掉,vault 里的文件一个字不改。
     // 正文里那段「本轮有 N 项没有完成」跟着 md 一起渲染出来(剥掉的只有
     // 标题和覆盖区间这两行重复信息),所以历史日报翻回来也看得见当时的同步缺口。
-    $('daily-reader-body').innerHTML =
-      mdHtml(r.body.replace(/^\s*#\s+[^\n]*\n+(?:>\s*覆盖[^\n]*\n)?/, ''));
-    enhanceDailyBody($('daily-reader-body'));
+    const body = setDailyBody(
+      mdHtml(r.body.replace(/^\s*#\s+[^\n]*\n+(?:>\s*覆盖[^\n]*\n)?/, '')), r.date);
+    enhanceDailyBody(body);
     $('daily-copy').hidden = $('daily-del').hidden = false;
     $('daily-copy').dataset.body = r.body;
+    // 收藏回跳的落点。排在 enhanceDailyBody 之后:那一步会把出处编号换成
+    // 链接元素,换掉的是**元素结构**而不是字符 —— 锚点那套按全文偏移找,
+    // 顺序反了也对得上,但高亮的 Range 会落在已经离开文档的节点上。
+    dailyPendingSnip = consumeSnipJump(dailyPendingSnip, date, body);
   } catch (e) {
     // 失败这一侧走同一道判据:被替代的那次读取报出来的错也是陈旧的,
     // 让它覆盖新正文等于拿一句「读取失败」盖掉一份读到了的日报。
     if (stale()) return;
-    $('daily-reader-body').innerHTML = `<div class="daily-empty" role="alert"><h3>读取失败</h3><p>${esc(e.message)}</p></div>`;
+    setDailyBody(`<div class="daily-empty" role="alert"><h3>读取失败</h3><p>${esc(e.message)}</p></div>`);
   }
 }
 
@@ -385,7 +339,7 @@ async function deleteDailyReport() {
     $('daily-copy').hidden = $('daily-del').hidden = true;
     $('daily-reader-title').textContent = '还没有选中日报';
     $('daily-reader-meta').textContent = '';
-    $('daily-reader-body').innerHTML = '<div class="daily-empty"><h3>已删除</h3><p>可以重新生成这一天的日报。</p></div>';
+    setDailyBody('<div class="daily-empty"><h3>已删除</h3><p>可以重新生成这一天的日报。</p></div>');
     // 删一份日报会把它带走的条目放回队列,所以按钮上那个计数也得重新问一次
     // ——不问的话页面上还写着「没有新内容」,而此刻明明又有了。
     await Promise.all([loadDailyReports(false), loadDailyWindow()]);
@@ -410,12 +364,16 @@ async function runDaily(sync) {
   const channels = pickedDailyChannels();
   if (sync && !channels.length) {
     toast('先勾选至少一个同步范围', { key: 'daily',
-      detail: '同步范围在下面的「每天定时生成」里；只想用已入库的内容出报，点左边那颗生成按钮。' });
+      detail: '同步范围在页头「改定时」那一扇里（已经替你打开）；只想用已入库的内容出报，点左边那颗生成按钮（没有新内容时它不显示）。' });
+    // 话说在按钮边上还不够:要改的那几个勾选框此刻收在抽屉里,看不见就等于没说。
+    setDailyDrawer('sched', true);
     return;
   }
-  // 覆盖提示按「这一份会写到哪一天」判,和按钮叫什么名字共用 dailyTargetDate()。
+  // 覆盖提示按「这一份会写到哪一天」判,和按钮叫什么名字共用同一份口径
+  // (`dailyTargetDate` + `dailyTargetReport`)。**不知道的那一档也问** ——
+  // 多问一句的代价是一次点击,不问的代价是静悄悄盖掉一份日报。
   const date = dailyTargetDate();
-  if (dailyReports.some(r => r.date === date) &&
+  if (dailyTargetReport() !== false &&
       !await confirmBox({ title: `重新生成 ${date} 的日报？`,
         body: '这一天已经有一份日报，重新生成会覆盖它。', ok: '重新生成' })) return;
   dailyBusy = true; renderDailyButtons();
@@ -485,7 +443,15 @@ async function refreshDailyStatus() {
   try {
     s = await pipeJson('/api/daily/status');
   } catch {
-    queueDailyPoll(); return;          // 状态读不到不清空面板,下一跳再试
+    // 状态读不到不清空面板,下一跳再试。**但「有没有新内容」是另一条事实,
+    // 不许跟着这一趟一起没了**:它从 /window 来,素材也是从外面(同步中心、
+    // CLI、定时)进来的,跟读不读得到"这一轮跑到哪了"没有关系。早退掉的后果
+    // 是上一次那个 0 无限期有效 —— /status 一直失败时,页面始终写「没有新内容」、
+    // 按钮始终不在,而库里早就进了新文章(审查实测:只让 /status 失败,连驱动
+    // 两轮,页面一个字都没变)。那一趟自己再失败的话,它会把这个数改口成
+    // 「读不出来」(`fetchDailyWindow` 的 catch),仍然不会留下一个假的 0。
+    if (dailyActive()) await refreshDailyPending();
+    queueDailyPoll(); return;
   }
   const finished = dailyState?.running && !s.running;
   // 「有没有出现一轮新的已结束运行」。只认 running→idle 那个跳变是不够的:不同步
@@ -549,7 +515,10 @@ async function refreshDailyPending() {
   //
   // 落地的那一趟把那行区间字一起画上:它可能刚替初始化接手了填表职责(审查
   // N4),而画这行字只**读**输入框、不写它,所以空闲轮询照画不越界。
+  // 失败那一趟把「还有多少新内容」抹成了"不知道",**那也得画上去** —— 不画的话
+  // 屏幕上留着的还是上一次那个 0,按钮还藏着(同 `loadDailyWindow` 的 else)。
   if (await fetchDailyWindow(false)) renderDailyWindowLabel();
+  else renderDailyGenButton();
 }
 
 function queueDailyPoll() {

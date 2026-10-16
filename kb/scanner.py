@@ -72,6 +72,52 @@ def file_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def read_md_text(full: Path) -> str:
+    """读一份 md 的文本。**解码一律 `errors="replace"`。**
+
+    版本号(下面那个 `body_version`)是按读到的文本算的,所以报版本的那几处和
+    落库前再算一次的那一处必须用同一种解码:一处严格、一处 replace 的话,只要
+    文件里有一个坏字节,两头就会算出两个版本,把一条好收藏误拒成"原文已更新"。
+    """
+    return full.read_text(encoding="utf-8", errors="replace")
+
+
+def body_version(text: str) -> str:
+    """一份 md 的**正文**版本号(frontmatter 改了不算数)。
+
+    口径只有这一份:`/api/doc`、图鉴条目详情、独立阅读页都按它告诉前端「你现在
+    看到的是哪一版正文」,片段收藏落库前按**盘上此刻**那一份再算一次,两个数
+    相等才落 `origin=doc`(`kb/web/favorites_api.py` 的 `_doc_version_now`)。
+    少了这个数,核对和写入之间就没有共同事实:核对读到的是旧译文、写入时盘上
+    已是新译文,收藏照旧落成 doc,点回去 0 个高亮(审查实测)。
+
+    **不用 `file_hash`**(那是整份文件、`documents.content_hash` 存的那个):
+    提取回写只动 frontmatter(补 tags、写 extracted_at),正文一个字没变 ——
+    按整份文件算的话,回写那一刻的收藏会被误拒、白退到站外原文。
+
+    和 `kb.extract_version.body_fingerprint` 算的是同一个数却各写一份:那一族
+    判「模型结论针对的输入还是不是当前这份」,这一族判「收藏绑的目标还是不是
+    用户看过的那份」—— 两个判据各自演进,不互为前提。
+
+    事故形态、实测证据和回归在 `docs/decisions/fav-snippets.md`(硬约束一节)。
+    """
+    return body_version_of(parse_frontmatter(text)[1])
+
+
+def body_version_of(body: str) -> str:
+    """同一个数,但输入是**已经拆出来的正文**(frontmatter 之外那一截)。
+
+    给「文件还没写下去、却要说出它的正文版本号」那一头用:订阅条目面板摊的是
+    feeds.db 里那一行的正文,而阅读页回跳读的是导出的那一篇 md —— 两份语料分属
+    两处,想证明「屏幕上这一份就是盘上这一份」只能**按同一行内容算出那一篇 md 的
+    正文版本号**(`kb.feeds.exported.item_body_md` 就是那一截的唯一定义),再跟盘上
+    此刻那一份比。拿「响应这一刻读盘算出来的版本号」冒充是不成立的:那个数证明
+    的是刚读到的文件,不是屏幕上那份语料(审查实测:先改稿、再打开订阅/搜索,
+    旧正文带着新版本号,核对必然相等、弱档重新放行,点回去高亮改稿新写的那一节)。
+    """
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+
+
 def frontmatter_tags(fm: dict) -> list[str]:
     """索引会从一份 frontmatter 里读到的 tags 列表。
 

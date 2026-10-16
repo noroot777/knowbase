@@ -340,7 +340,16 @@ function renderToolEntries(d) {
     // docA/obsLink 需要 {vault,path,title,url}:条目 md 可直接在阅读器里打开
     const h = { vault: d.vault, path: e.path, title: e.article_title || e.name || d.name,
                 url: e.url, account: e.account };
-    return `<details class="td-entry"${i === 0 ? ' open' : ''}>
+    // data-snip-*:这一条记录的出处,给「收藏此段」用(见本文件末尾)。
+    // 一个容器里并排着好几条各有出处的正文,所以出处挂在每一条自己身上。
+    // `data-snip-version` 是**下面这段正文是哪一版**(后端读这个文件时现算的,
+    // `kb/projects.py` 的 `get_tool`):收藏时原样回传,后端落库前按盘上此刻那
+    // 一份再算一次,不等就拒 —— 这个抽屉可以开着好几分钟,正文在这期间被重译
+    // 写回、被补抓换掉都不会通知这一页。
+    return `<details class="td-entry"${i === 0 ? ' open' : ''}
+      data-snip-path="${encodeURIComponent(e.path || '')}"
+      data-snip-version="${esc(e.version || '')}"
+      data-snip-title="${esc(h.title || '')}" data-snip-url="${esc(safeUrl(e.url || ''))}">
       <summary>${srcGlyph(e.source)}<span class="acct">${esc(e.account || '')}</span>
         <span class="date">${esc(String(e.published || '').slice(0, 10))}</span>
         <span class="atitle">${esc(e.article_title || '')}</span>${promoBadge(e)}</summary>
@@ -378,6 +387,8 @@ async function doSendToolChat(q) {
   const model = $('ask-model').value;
   const query = toolConvId === null ? `关于工具「${toolMeta.name}」:${q}` : q;
   const box = $('td-chat-msgs');
+  // 提问气泡还没落库(这一轮要等 NDJSON 收完),所以**不给落库身份** ——
+  // 收到 done 帧那一刻由下面 `chatMarkSaved` 补上。口径同问答面板(`SNIP_CID`)。
   box.insertAdjacentHTML('beforeend', renderMsg({ role: 'user', content: q }));
   box.insertAdjacentHTML('beforeend',
     `<div class="msg assistant" id="td-pending"><div class="gen-head">模型 · ${esc(model || '默认')}</div>` +
@@ -385,7 +396,8 @@ async function doSendToolChat(q) {
   $('td-scroll').scrollTop = $('td-scroll').scrollHeight;
 
   toolAbort = new AbortController();
-  let partial = '', refs = [], doneCid = null, errMsg = null, lastPaint = 0;
+  let partial = '', refs = [], doneCid = null, doneUid = 0, doneAid = 0,
+    errMsg = null, lastPaint = 0;
   try {
     const r = await fetch('/api/ask/stream', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -421,14 +433,34 @@ async function doSendToolChat(q) {
             if (b) b.innerHTML = mdHtml(partial);
             lastPaint = now;
           }
-        } else if (f.type === 'done') { doneCid = f.conversation_id; if (f.refs) refs = f.refs; }
-        else if (f.type === 'error') errMsg = f.message;
+        } else if (f.type === 'done') {
+          doneCid = f.conversation_id; doneUid = f.user_message_id; doneAid = f.message_id;
+          if (f.refs) refs = f.refs;
+        } else if (f.type === 'error') errMsg = f.message;
       }
     }
     if (errMsg) throw new Error(errMsg);
-    toolConvId = doneCid;
     const pend = document.getElementById('td-pending');
-    if (pend) pend.outerHTML = renderMsg({ role: 'assistant', content: partial, refs, model });
+    // **正常 EOF 却没有 done 帧 = 这一轮有没有进库我们不知道**(后端是 `_save_qa`
+    // 之后才发 done,那一帧可能丢在存库之前、也可能丢在之后):半截答案照旧铺出来,
+    // 但不给落库身份,所以收不了片段。**那一句只许说到「没得到确认」为止**,不许
+    // 说成「没有落库」。口径、文案与事故形态同问答面板,见 `chat.js` 的 `SNIP_CID`。
+    if (!(Number(doneCid) > 0)) {
+      if (pend) pend.outerHTML = renderMsg({ role: 'assistant', content: partial, refs, model });
+      toast('这一轮没有收到完成确认', {
+        type: 'info',
+        detail: '它有没有落库这儿说不准 —— 刷新后看问答侧栏里有没有这一轮;'
+          + '屏幕上这一段暂时收不了片段',
+      });
+      loadConvs();
+      return;
+    }
+    toolConvId = doneCid;
+    if (pend) {
+      chatMarkSaved(pend, doneCid, doneUid);   // done 帧到手 = 这一轮两条消息已落库
+      pend.outerHTML = renderMsg({ role: 'assistant', content: partial, refs, model },
+        { cid: doneCid, mid: doneAid });
+    }
     loadConvs();     // 会话已落库,问答 tab 侧栏同步
   } catch (e) {
     if (!current()) return;
@@ -459,3 +491,50 @@ async function doSendToolChat(q) {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendToolChat(); }
   });
 }
+
+// ── 抽屉里两处正文的「收藏此段」 ──────────────────────────────────────────────
+// 条目正文是一篇真文档(`source/dr-gzh-projects/…` 一类条目化产物,索引里有行),
+// 所以按 origin=doc 绑 path,回跳走阅读页的锚点定位。出处挂在每个 `.td-entry`
+// 自己的 data 属性上:一个容器里并排着这个工具的全部记录,各有各的出处。
+attachSnip($('td-entries'), range => {
+  // 选到小节标题(「记录时间线 · N 条」「就这个工具提问」)时找不到宿主,**这一步
+  // 自己判空**:靠后面访问 dataset 抛异常、再被 `snipSourceOf` 的 catch 吞掉,
+  // 行为上也对,可判据就藏进了一个 catch 里 —— 读代码看不出这儿有个判断,
+  // 反向用例也分不出两者(实测:定点去掉下面那句判空,回归红 0 条)。
+  const host = snipHostOf(range, '.td-entry');
+  if (!host) return null;
+  const path = decodeURIComponent(host.dataset.snipPath || '');
+  if (!path) return null;        // 这条记录没有对应文档(正常导出的条目都有)
+  // 版本号缺了 = 后端渲染这一条时那个文件读不出来(`get_tool` 里 body 和
+  // version 同出一次读,读失败的那一条正文也是空的,本来就没什么可选)。
+  // 绑一篇文档却说不出绑的是哪一版的话,后端会按 400 拒 —— 与其让用户点一颗
+  // 注定失败的按钮,不如这一步就不认。
+  const version = host.dataset.snipVersion || '';
+  if (!version) return null;
+  // **可收的范围、采锚点的范围,都收到这一条记录的正文上。** 这个 `<details>`
+  // 里住着的不只正文:摘要行那几样(账号、日期、文章标题)和下面「原文 /
+  // Obsidian / 在阅读器打开」三颗按钮。它们在**目标文档里压根不存在** —— 采进
+  // 后文锚点之后那条收藏带着一段谁也找不到的上下文(审查实测的 suffix 是
+  // `原文 Obsidian 在阅读器打开 就这个工具提问`),选中摘要行还能存下一条
+  // 「某账号 某日期 某标题」冒充正文的收藏。口径同问答那一侧(`chatSnipSource`
+  // 把范围收到 `.bubble` 之内、`.refs` 之外)。
+  const body = host.querySelector('.body');
+  if (!body || !body.contains(range.commonAncestorContainer)) return null;
+  return {
+    origin: 'doc', path, doc_version: version, root: body,
+    origin_title: host.dataset.snipTitle || (toolMeta && toolMeta.name) || '',
+    origin_url: host.dataset.snipUrl || '',
+    // **落库之前按阅读页那一头的文本核一遍。** 「文件版本号一样」只证明盘上那
+    // 一篇没换过,不证明用户选到的这句话在**那一页上**也连着:这儿是
+    // `mdHtml` 渲染的(正文里的 `<strong>` 成了一个粗体元素、标签本身看不见),
+    // 阅读页把原始 HTML 当字面文字显示 —— 跨过这么一段的选区在那一头中间插着
+    // 四个尖括号字,核不过。这一类没有退路可退(原文在 vault 里就是这一篇),
+    // 所以核不过照旧绑它,但会当场说一句「点回去可能定位不到这一处」
+    // (见 snip.js 的 `snipVerified` / `STAY_NOTE`)。
+    docText: () => snipDocText(path),
+  };
+});
+
+// 抽屉里的问答和问答面板是同一条路(会话照样落库,问答 tab 侧栏里看得见),
+// 所以来源也记成 chat、ref 用这边的会话 id。判据与文案共用 `chatSnipSource`。
+attachSnip($('td-chat-msgs'), range => chatSnipSource(range));

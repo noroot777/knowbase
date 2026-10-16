@@ -114,7 +114,7 @@ class ParticipationOutlivesTheProcessTests(_Pending):
 
     def test_lines_that_landed_before_the_process_died_take_the_doubt_away(self):
         """**反过来钉一边**:锁在进程没之前就好了、那几行补写成功 —— 结论要回到
-        确定值。永久写「至少」的凭证等于把这颗药丸作废,而它要回答的是"要不要再
+        确定值。永久写「至少」的凭证等于把这颗 tooltip 作废,而它要回答的是"要不要再
         花一次模型钱"。"""
         day = T('2026-09-29 09:00')
         self._first_sub_round(day)
