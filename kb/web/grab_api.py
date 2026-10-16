@@ -3,8 +3,14 @@
 
 抓取和入库的全部口径在 `kb.feeds.grab`(**硬约束在
 `docs/decisions/link-grab.md` 第一节**),这一层只做三件事:把 `GrabError`
-翻成 400、把「已经收过了」和「刚收下」分开说、以及**尽力**把后半条链
+翻成 400、**按真实进度**回答这条链接走到哪一步了、以及**尽力**把后半条链
 (导出 → 索引 → 提取)跑起来。
+
+**「库里有这一行」和「知识库里搜得到」是两件事。** 重复投递时要分开答:
+走完整条链的那一条就是幂等的一句「已经在知识库里了」;只暂存下来的那一条
+(占不到管道、服务在保存之后重启、导出或索引自己失败)**要把后半条链再跑
+一次**,并且如实说「还没写进知识库」—— 把它说成已完成,用户搜不到,而再投
+一次只会再得到同一句话,后半条链永远没人补。
 
 **占不到管道不是失败。** 内容已经在 feeds.db 里了,写进 vault 这一步由任何
 一轮 `inbox` 的 export 兜住(面板上那颗按钮、下一次收录、定时同步都算),所以
@@ -27,6 +33,42 @@ class GrabRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
 
 
+def _write_through(out: dict, note: str, channel: str = grab.KIND) -> dict:
+    """把后半条链跑起来,并把「写没写进知识库」如实写进这一份回答。
+
+    **这一步只有这一份口径**:新收下的、以及「收过但没走完」的那两档都过它 ——
+    两处各写一遍的话,其中一处迟早会变成「不启动管道、只说一句已完成」。
+
+    **`channel` 要指向真正拥有那一行的来源,不许一律写 `inbox`。** export 阶段
+    是按通道筛的(`pipeline_stages._per_channel`):一条推文已经被「大V观点」收过
+    但还没导出时,起一轮 `inbox` 的 export 一个字都不会动它 —— 而回答里却写着
+    「正在写入知识库」,那就是一句谎报。
+    """
+    why: list[str] = []
+    started = pipeline.start_pipeline(['export', 'index', 'extract'], refused=why,
+                                      crawl_filter={'channel': channel})
+    out['pipeline'] = 'started' if started else 'busy'
+    out['detail'] = (f'{note}，正在写入知识库' if started else
+                     f'{note}；' + (why[0] if why else '其他同步正在运行') +
+                     '，稍后在「手动收录」里点一次「写入知识库」')
+    return out
+
+
+def _duplicate(url: str, seen: dict) -> dict:
+    """这条地址库里已经有了。**按它走到哪一步分开答。**"""
+    label = KINDS.get(seen['kind'], seen['kind'])
+    out = {'ok': True, 'added': 0, 'duplicate': True, 'url': url,
+           'title': seen['title'], 'kind': seen['kind'], 'done': bool(seen['done'])}
+    if seen['done']:
+        # 走完整条链了:幂等的一句话,不占管道(这是绝大多数重复投递的末态)。
+        out['detail'] = f'这条已经在知识库里了（{label}）'
+        return out
+    # 暂存下来了、但还搜不到。**不覆盖库里那一份正文**(`DO NOTHING` 的语义),
+    # 要补的只是后半条链 —— 而且要在**拥有这一行的那个来源**名下跑。
+    return _write_through(out, f'这条之前被「{label}」收过了，还没写进知识库',
+                          seen['kind'])
+
+
 @router.post('')
 def grab_link(body: GrabRequest):
     try:
@@ -34,32 +76,25 @@ def grab_link(body: GrabRequest):
         # **查重排在抓取前面**:已经收过的那一条连 HTTP 都不必发。它只是一句
         # 提示 —— 真正防重复的是 `put_items` 的 `DO NOTHING`(见 `grab.known`)。
         if seen := grab.known(url):
-            return {'ok': True, 'added': 0, 'duplicate': True, 'url': url,
-                    'title': seen['title'], 'kind': seen['kind'],
-                    'detail': f"这条已经在知识库里了（{KINDS.get(seen['kind'], seen['kind'])}）"}
+            return _duplicate(url, seen)
         entry = grab.grab(url)
         saved = grab.save(entry)
     except grab.GrabError as e:
         raise HTTPException(400, str(e)) from None
+    if not saved['added']:
+        # 同一条链接在**这一类**里撞上了(两条投递同时落地):`DO NOTHING` 挡住
+        # 了后一个,库里那一份一个字节都没动。这正是想要的末态,不是故障(元规则
+        # 「0 行不是失败」)—— 但「它写进知识库没有」仍然要现查一次再答。
+        return _duplicate(url, grab.known(url) or
+                          {'title': entry['title'], 'kind': grab.KIND,
+                           'path': '', 'done': False})
     # 已经入库的事实先定下来,再谈写不写得进知识库这一轮。
-    out = {'ok': True, 'added': saved['added'], 'duplicate': not saved['added'],
+    out = {'ok': True, 'added': saved['added'], 'duplicate': False, 'done': False,
            'url': url, 'title': entry['title'], 'kind': grab.KIND,
            'source_id': saved['source']['id'], 'source_name': saved['source']['name'],
            'published': entry['published'], 'chars': len(entry['body'])}
-    if not saved['added']:
-        # 同一条链接在**这一类**里再投一次:`DO NOTHING` 挡住了,库里那一份一个
-        # 字节都没动。这正是想要的末态,不是故障(元规则「0 行不是失败」)。
-        out['detail'] = '这条之前就收过了，库里那一份没有改动'
-        return out
-    why: list[str] = []
     # **这一轮没有 crawl**:手动收录没有可轮询的源,内容刚才已经抓好入库了
     # (`inbox` 的 `pollable=False`,见 `sync.collect` 开头那一道)。要跑的是
     # 后半条链:export 把它写成 vault 里那一篇、index 让检索找得到、extract
     # 买一次打标(收件桶默认开着提取,见 `grab.bucket`)。
-    started = pipeline.start_pipeline(['export', 'index', 'extract'], refused=why,
-                                      crawl_filter={'channel': grab.KIND})
-    out['pipeline'] = 'started' if started else 'busy'
-    out['detail'] = ('已收下，正在写入知识库' if started else
-                     (why[0] if why else '其他同步正在运行') +
-                     '；内容已经存下来了，稍后在「手动收录」里点一次「写入知识库」')
-    return out
+    return _write_through(out, '已收下')

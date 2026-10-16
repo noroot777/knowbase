@@ -28,7 +28,9 @@ try {
   // 面板是**异步**装的:openSourceModule 先摆壳(投递栏、焦点),loadSourceModule
   // 回来之后才刷按钮和列表。所以先等它装完,再断言那几件事 —— 不等的话这几条
   // 断的是摆壳那一刻的页面,机器忙一点就红一片(连跑三轮实测过)。
-  if (!await until(`$('source-sync').textContent === '写入知识库'`, 30000))
+  // 等满 60 秒:冷启动那一次(建库、补种默认订阅)实测把 30 秒用光过,而那是
+  // 环境慢不是产品坏 —— 这一条等的是「面板装完了」,放宽不弱化任何断言。
+  if (!await until(`$('source-sync').textContent === '写入知识库'`, 60000))
     throw new Error("面板没装完:「同步全部」还没换成「写入知识库」");
   check("「同步全部」在这一类里叫「写入知识库」", true);
   check("侧栏入口直达手动收录并聚焦输入框",
@@ -86,6 +88,32 @@ try {
         await evalJs(`[...document.querySelectorAll('#toast-host .toast.err')].map(t=>t.textContent).join(' | ')`));
   check("失败不清输入框（不用重新粘一次）",
         await evalJs(`$('grab-url').value === 'https://blocked.example.net/a'`));
+  check("失败也落在提示上（不是停在「正在抓正文」）",
+        /没收下/.test(await evalJs(`$('grab-hint').textContent`)),
+        await evalJs(`$('grab-hint').textContent`));
+
+  // 6. 慢回包跨过一次列表刷新:**正常成功不许被当成过期丢掉**。
+  //    `loadSourceModule` 就是那条自动刷新走的路(闲时 15 秒、管道跑时 4 秒各一
+  //    次),这里手动触发一次 = 把那个交错钉成确定的。借列表代次做归属的写法
+  //    在这一条上红:输入框不清、提示停在「正在抓这一篇的正文…」。
+  await evalJs(`$('grab-url').value = 'https://example.org/posts/slow-one'; true`);
+  await clickAt("#grab-go");
+  if (!await until(`$('grab-go').disabled`, 8000)) throw new Error("慢请求没起来");
+  await evalJs(`loadSourceModule(false); true`);        // 列表刷一次(代次 ++)
+  await sleep(300);
+  await evalJs(`loadSourceModule(false); true`);
+  if (!await until(`!$('grab-go').disabled`, 60000)) throw new Error("慢请求没回来");
+  check("慢回包跨过列表刷新仍算自己的：输入框清空",
+        await evalJs(`$('grab-url').value === ''`),
+        await evalJs(`$('grab-url').value`));
+  check("慢回包跨过列表刷新仍算自己的：提示收敛到写入知识库",
+        /写入知识库/.test(await evalJs(`$('grab-hint').textContent`)),
+        await evalJs(`$('grab-hint').textContent`));
+  // 7. 那一轮跑完了,提示要**自己收敛** —— 不能永远停在「正在写入知识库」。
+  //    (管道占不到时的末态是「稍后点一次」,同样是一句终态,所以两样都算。)
+  check("写入那一轮结束后提示不再停在进行中",
+        await until(`/已写入知识库|稍后/.test($('grab-hint').textContent)`, 90000),
+        await evalJs(`$('grab-hint').textContent`));
 } catch (err) {
   check("探针跑完", false, err.message);
 } finally {

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 from datetime import datetime
 from urllib.parse import urlsplit
@@ -74,7 +75,20 @@ def normalize(raw: str) -> str:
     **规范化只有 `canonical_url` 这一份口径**(它顺手去掉 utm_*/fbclid/gclid、
     把推文地址收成 `x.com/<handle>/status/<id>`):`put_items` 的键是
     `sha256(kind + ':' + url)`,两处规范化不一致时同一篇内容从两条路进来会变成
-    两条记录、两篇 md、检索里两份结果。`social=True` 对非推文地址是空转。
+    两条记录、两篇 md、检索里两份结果。
+
+    **`social=True` 只给 X 自己的域,这一句是承重的。** 那一档的判据只有路径
+    (`/某人/status/数字`),域名一概不看 —— 它本来服务的是「这条 feed 是 X 的
+    镜像桥接」那个上下文(`SocialAdapter`,nitter / xcancel 给出的链接正是要被
+    改写成 x.com,`tests/test_feed_sources.py` 钉着)。手动收录拿到的是用户随手
+    粘的任意一条地址,**没有这个上下文**:无条件开着它,
+    `https://notx.com/alice/status/12345` 会在分流之前就被改写成
+    `https://x.com/alice/status/12345`,然后拿一个陌生站点的地址去问 FxTwitter、
+    把另一条推文的内容收成「用户要的那一篇」(2026-10-16 审查实测)。
+    `classify` 的域白名单挡不住这一档 —— 原域名那时已经没了。
+
+    **所以这道约束待在调用方,不在 `canonical_url` 里**:共享层那一档对它唯一
+    的老消费方是真话,改成「只认 X 域名」会把桥接镜像的规范化一起停掉。
     """
     value = (raw or '').strip()
     if not value:
@@ -84,7 +98,7 @@ def normalize(raw: str) -> str:
         # 补不出合法地址的照旧由 `canonical_url` 拒掉。
         value = 'https://' + value.lstrip('/')
     try:
-        return canonical_url(value, social=True)
+        return canonical_url(value, social=(urlsplit(value).hostname or '').lower() in _X_HOSTS)
     except ValueError as e:
         raise GrabError(f'{e}') from None
 
@@ -110,11 +124,17 @@ def classify(url: str) -> str:
 
 
 def bucket_label(host: str) -> str:
-    """站点 → 收件桶的名字。认识的给人话名,其余就用它的域名。"""
+    """站点 → 收件桶的名字。认识的给人话名,其余就用它的域名。
+
+    **截到 120 字**:`save_subscription` 的名字上限正是 120,超了它抛 `ValueError`
+    —— 而那一步发生在正文已经抓好之后,整条收录会以一个 500 收场(合法域名最长
+    253 字节,不是构造不出来的输入)。名字只是面板上那行字,`UNIQUE(kind,url)`
+    认的是地址,截短不会把两个站点合成一个桶。
+    """
     host = (host or '').lower().removeprefix('www.')
     if host in _X_HOSTS or host in _BUCKET_LABELS:
         return _BUCKET_LABELS.get('x.com' if host in _X_HOSTS else host, host)
-    return host or '手动收录'
+    return (host or '手动收录')[:120]
 
 
 def bucket(url: str) -> dict:
@@ -130,7 +150,10 @@ def bucket(url: str) -> dict:
     补正文」,而正文此刻已经在手里了。
     """
     host = (urlsplit(url).hostname or '').lower().removeprefix('www.')
-    home = f'https://{host}/'
+    # IPv6 的 `hostname` 是**脱了方括号**的(`2001:db8::1`),照原样拼回去得到
+    # 的是一个 `netloc` 带端口的畸形地址,`normalize_url` 当场拒掉 —— 而这一步
+    # 在正文抓好之后,拒掉就是一个 500。
+    home = f'https://[{host}]/' if ':' in host else f'https://{host}/'
     for source in reg.subscriptions(KIND):
         if source['url'] == home:
             return source
@@ -147,10 +170,51 @@ def bucket(url: str) -> dict:
         raise
 
 
-def known(url: str) -> dict | None:
-    """这条地址是不是已经在库里了。返回那一条(`kind`/`title`/`path`)或 None。
+def _indexed(path: str) -> bool:
+    """vault 里那一篇进全文索引了没有 —— 也就是「现在搜得到吗」。
 
-    **这是一句提示,不是一道互斥**:真正防重复的是 `put_items` 的
+    **只读打开 kb.db,一个字节都不写。** `store.connect()` 这一路走不得:它建表、
+    跑迁移,那是写 kb.db 的入口(要先取维护锁,见 `maintenance-lock.md`),而这里
+    只要回答一句话。地址用 `db_uri` + `?mode=ro`(口径同
+    `extract_optin.attached_feeds`:路径里的 `#`/`?` 不会被当成 fragment/query
+    截断、而且物理上建不出任何东西)。`config.DB_PATH` **现读**,不绑死在默认
+    参数上 —— 否则测试指不到临时库(理由同 `fulltext._drop_extraction`)。
+
+    **判不准一律答「没进」**:代价是多跑一轮 export/index(对已经走完的条目两
+    阶段都是空转),而答反了用户就以为搜得到。
+    """
+    if not path:
+        return False
+    from kb import config, store          # 延迟导入:别让 kb/feeds 在导入期拖进 sqlite_vec
+    if not config.DB_PATH.exists():
+        return False
+    try:
+        conn = sqlite3.connect(store.db_uri(config.DB_PATH) + '?mode=ro', uri=True, timeout=10)
+    except sqlite3.Error:
+        return False
+    try:
+        return conn.execute('SELECT 1 FROM documents WHERE path=? LIMIT 1',
+                            (path,)).fetchone() is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
+def known(url: str) -> dict | None:
+    """这条地址是不是已经在库里了。返回那一条或 None。
+
+    返回里带 **`done`:它走完整条链了没有** —— 导出成了 vault 里那一篇
+    (`path` + `exported_hash` 都在),而且索引里找得到(`_indexed`)。
+
+    **「`feed_items` 里有这一行」只说明内容暂存下来了。** 后半条链(导出 →
+    索引 → 提取)跑没跑是另一件事:占不到管道、服务在保存之后重启、导出或索引
+    自己失败,都会留下一条「在库里但搜不到」的记录。把这两件事混成一句「已经在
+    知识库里了」就是谎报 —— 用户搜不到,而再投一次只会再得到同一句话,后半条链
+    永远没人补(2026-10-16 审查)。所以这里把事实原样交出去,由调用方决定说什么、
+    要不要把后半条链跑起来(`kb/web/grab_api.py`)。
+
+    **这不是一道互斥**:真正防重复的是 `put_items` 的
     `ON CONFLICT(key) DO NOTHING`(同一类来源)—— 这里多答一句是为了跨来源的
     那种重复(一条推文已经被「大V观点」收过了),否则用户会得到第二篇一模一样的
     文章躺在另一棵树下。
@@ -159,9 +223,13 @@ def known(url: str) -> dict | None:
     在 kb.db 里,而绿泡泡的地址压根走不到这一步(`classify` 就拒了)。
     """
     with reg.db() as c:
-        row = c.execute('SELECT kind,title,path,url FROM feed_items WHERE url=? LIMIT 1',
-                        (url,)).fetchone()
-    return dict(row) if row else None
+        row = c.execute('SELECT kind,title,path,url,exported_hash FROM feed_items'
+                        ' WHERE url=? LIMIT 1', (url,)).fetchone()
+    if not row:
+        return None
+    seen = dict(row)
+    seen['done'] = bool(seen['path'] and seen['exported_hash']) and _indexed(seen['path'])
+    return seen
 
 
 # ------------------------------------------------------------------ X 的单条推文
@@ -191,10 +259,16 @@ def _media_lines(media) -> str:
     if not isinstance(media, dict):
         return ''
     lines = []
-    for photo in (media.get('photos') or [])[:8]:
+    # **容器自己的形状也要验**:第三方回包里 `photos` 是个 dict 或数字时,
+    # `(… or [])[:8]` 对前者切出一堆键名、对后者直接 TypeError —— 那会把一条
+    # 文字完好的推文带成 500(端点只翻 `GrabError`)。口径同下面那两个
+    # `isinstance`:**形状不对就当它没有媒体**,文字那一半照旧收得下。
+    photos = media.get('photos') if isinstance(media.get('photos'), list) else []
+    videos = media.get('videos') if isinstance(media.get('videos'), list) else []
+    for photo in photos[:8]:
         if isinstance(photo, dict) and isinstance(photo.get('url'), str):
             lines.append(f"![图片]({photo['url']})")
-    for video in (media.get('videos') or [])[:4]:
+    for video in videos[:4]:
         if not isinstance(video, dict):
             continue
         link = video.get('url') if isinstance(video.get('url'), str) else ''
@@ -301,8 +375,26 @@ def _grab_x(url: str, deadline: float) -> dict:
 
 # ---------------------------------------------------------------------- 其他网页
 
+def _gate(reason: str) -> GrabError:
+    """被关卡挡住那一句。**一份措辞,三个判据共用** —— 用户能做的只有这几件事,
+    地址判据和正文判据各写一句的话差别只在标点上。"""
+    return GrabError(f'{reason}，所以正文抓不到。'
+                     '在浏览器里打开它、把正文复制出来，或者换一个可直接'
+                     '访问的地址。')
+
+
 def _grab_web(url: str, deadline: float) -> dict:
-    """一个网页 → 待入库的条目。正文口径只有 `readable` 那一份。"""
+    """一个网页 → 待入库的条目。正文口径只有 `readable` 那一份。
+
+    **「提取成功」证明不了「拿到了那篇文章」。** 所以关卡判据在**成功路径上
+    也生效**:一张 683 字的验证页提取得出一段文字、长度轻松过关,随后被
+    `put_items` 的 `DO NOTHING` 永久钉成这一篇的正文,再投一次同一条链接也换
+    不回真文章(2026-10-16 审查实测,那一例落在 `/challenge` 上、导出和索引
+    全成功)。三道按「可靠程度」排:
+    ①**地址**(`gate_url_reason`):已确认的关卡地址,提取之前就拒,最可靠;
+    ②**正文**(`gate_body_reason`):强措辞 + 整页就这么点字,成功路径上这一道;
+    ③**整份 HTML 的全量词表**(`gate_reason`):最松,只在提取失败之后才问。
+    """
     try:
         resp = request(url, grab_page.HEADERS, deadline=deadline)
     except FeedError as e:
@@ -313,16 +405,18 @@ def _grab_web(url: str, deadline: float) -> dict:
         raise GrabError(f'{problem}')
     html = readable.decode(resp.body, dict(resp.headers))
     final = resp.url or url
+    if reason := grab_page.gate_url_reason(final):
+        raise _gate(reason)              # ① 地址:提取出什么都不算数
     try:
         body = grab_page.page_body(html)
     except PageUnavailable as e:
-        # **关卡只在提取失败之后才问**:一篇正常文章里出现「captcha」这个词
-        # 不该被判成验证页(见 `grab_page.gate_reason`)。
+        # ③ 全量词表只在这一档问:一篇正常文章里出现「captcha」这个词不该被
+        # 判成验证页(见 `grab_page.gate_reason`)。
         if reason := grab_page.gate_reason(final, html):
-            raise GrabError(f'{reason}，所以正文抓不到。'
-                            '在浏览器里打开它、把正文复制出来，或者换一个可直接'
-                            '访问的地址。') from None
+            raise _gate(reason) from None
         raise GrabError(f'{e}') from None
+    if reason := grab_page.gate_body_reason(body):
+        raise _gate(reason)              # ② 提取成功了,但交出来的是那几句提示
     meta = grab_page.page_meta(html, final)
     host = (urlsplit(final).hostname or '').lower().removeprefix('www.')
     return {'url': url, 'title': grab_page.title_fallback(meta['title'], body, host),

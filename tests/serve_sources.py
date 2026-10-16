@@ -7,6 +7,7 @@ import argparse
 import contextlib
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -65,6 +66,11 @@ def main():
             def grab_fixture(url, headers=None, **kwargs):
                 if 'example.org' not in url:
                     raise FeedError('浏览器测试环境仅允许 example.org 验证源，不访问真实地址')
+                # 慢回包那一档:探针要在它在途期间让列表刷一次(自动刷新每 4~15 秒
+                # 一次,而这颗按钮允许抓 40 秒),钉住「正常慢回包不许被当成过期」。
+                # 端点是同步函数,Starlette 把它丢进线程池 —— 这一觉挡不住列表轮询。
+                if '/slow' in url:
+                    time.sleep(3)
                 return Response(200,url,page.encode('utf-8'),
                                 {'Content-Type':'text/html; charset=utf-8'})
             grab.request=grab_fixture

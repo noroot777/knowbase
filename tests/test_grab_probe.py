@@ -33,11 +33,17 @@ class GrabProbeTests(unittest.TestCase):
             # **盘上的后果**:导出阶段真把它写成了 vault 里那一篇。
             root = Path(base.root) / 'vault' / 'source' / 'inbox'
             files = sorted(root.glob('*.md')) if root.exists() else []
-            self.assertEqual(len(files), 1, f'vault 里应当只有那一篇，实际 {files}')
-            text = files[0].read_text()
-            self.assertIn('把链接存进知识库', text)
-            self.assertIn('source: inbox', text)
-            self.assertIn('url: https://example.org/posts/manual-one', text)
+            texts = [f.read_text() for f in files]
+            # **重复投递只许有一篇**(探针第 4 步投了两次同一条链接):数的是
+            # 「带着那条 url 的 md 有几份」,而不是目录里一共几个文件 —— 探针后面
+            # 那条慢回包用的是另一个地址,它落不落盘取决于最后那一轮排没排上。
+            self.assertEqual(
+                sum('url: https://example.org/posts/manual-one' in t for t in texts), 1,
+                f'带着那条地址的 md 应当只有一份，实际 {files}')
+            one = next(t for t in texts if 'url: https://example.org/posts/manual-one' in t)
+            self.assertIn('把链接存进知识库', one)
+            for text in texts:
+                self.assertIn('source: inbox', text)
 
 
 if __name__ == '__main__':

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
@@ -32,15 +33,36 @@ HEADERS = {'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;
 MAX_CHARS = 60000
 
 #: 落到这些地址上 = 对方把内容挡在了一道人工关卡后面。**判据是最终地址**
-#: (`request` 跟完重定向之后那一个),不是正文内容:正文此刻就是那张关卡页,
-#: 提取器只会说「没找到正文」,而真正该说的是「它要你先过一道验证」。
+#: (`request` 跟完重定向之后那一个),和提取器交得出什么无关 —— 这一道
+#: **在成功路径上也生效**(`gate_url_reason`)。
 #: 绿泡泡实测(2026-10-16,`mp.weixin.qq.com/s/<slug>`):302 到
 #: `/mp/wappoc_appmsgcaptcha?poc_token=…&target_url=…`,18 KB 的验证页,
 #: og 元信息和 `#js_content` 全都没有。
-_GATE_PATHS = ('appmsgcaptcha', 'wappoc_', '/checkpoint', '/challenge',
-               '/cdn-cgi/l/chk', '/sorry/index')
+#: 出现在地址里**任意位置**就算:这几串是各家关卡自己的路径,不会撞上正常文章。
+_GATE_MARKS = ('appmsgcaptcha', 'wappoc_', '/cdn-cgi/l/chk', '/sorry/index')
+#: 这几个要**整段相等**,不能当子串用:`challenge` / `checkpoint` 是常见英文词,
+#: 子串匹配会把 `/cloudflare-challenges/`、`/challenge-of-the-week` 一起拒掉。
+#: 这一道现在在**成功路径**上也生效,所以误拒的代价从「多一句话」变成了「这篇
+#: 收不进来」(2026-10-16 实测 developers.cloudflare.com 那篇 1277 字的正经文档
+#: 正是这个形状,差一个连字符而已)。
+_GATE_SEGMENTS = frozenset(('challenge', 'checkpoint'))
+#: 关卡页的措辞。**整份 HTML 里找这几个词只在「提取不出正文」之后才算数**:
+#: 一篇正常文章里出现「captcha」不该被判成关卡。
 _GATE_WORDS = ('环境异常', '完成验证', '请在微信客户端打开', 'enable javascript',
                'verify you are human', 'checking your browser', 'captcha')
+#: 提取**成功**那条路上也要拒的措辞:只认强措辞(`captcha` 这类正常文章里会出现
+#: 的词不在内),而且只看**提取出来的那段正文**。
+#: 事故形态(2026-10-16 审查实测):一张 683 字的验证页提取成功 → 被当成正文
+#: 落库,而 `put_items` 是 `DO NOTHING`,再投一次同一条链接也换不回真文章。
+_GATE_PHRASES = ('环境异常', '完成验证', '请在微信客户端打开', 'enable javascript',
+                 'verify you are human', 'checking your browser',
+                 'just a moment', 'attention required')
+#: 「整页就这么点字」的界(见 `gate_body_reason` 的两个条件)。
+_GATE_BODY_CHARS = 1200
+#: 要命中**几句**不同的措辞。关卡页从来不只说一句 —— 实测那张 683 字的页面同时
+#: 写着「请完成验证」「enable javascript」「verify you are human」;而一篇正经讲
+#: 拦截页的文章通常只引其中一句。
+_GATE_PHRASE_HITS = 2
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 
@@ -55,13 +77,18 @@ _TIME_META = ('meta[property="article:published_time"]', 'meta[property="og:publ
 #: 最后的回落:只有一个「改动时间」时它也比「没有时间」强(列表排序、日报窗口
 #: 都按 published 走),但必须排在**所有**发布时间来源之后。
 _MODIFIED_META = ('meta[property="article:modified_time"]', 'meta[itemprop="dateModified"]')
-#: 作者。站点名排在人名后面:一篇文章的作者比「这是哪个站」更具体。
+#: 作者。**人名在前、站点名在后,而且 JSON-LD 的作者插在两者中间** ——
+#: 一篇文章的作者比「这是哪个站」更具体,而同时给了 `og:site_name` 和
+#: Article JSON-LD 作者的页面很常见:两个名单合成一张表的话,站点名会在
+#: JSON-LD 还没问过的时候就先把位置占掉,已知的真实作者被丢掉。
 _AUTHOR_META = ('meta[name="author"]', 'meta[property="article:author"]',
-                'meta[name="twitter:creator"]', 'meta[property="og:site_name"]',
-                'meta[name="application-name"]')
+                'meta[name="twitter:creator"]')
+#: 兜底:实在找不到人名时,「这是哪个站」比空着强。
+_SITE_META = ('meta[property="og:site_name"]', 'meta[name="application-name"]')
 _TITLE_META = ('meta[property="og:title"]', 'meta[name="twitter:title"]',
                'meta[name="title"]')
-#: ISO 8601 的那一截日期时间。时区由 `_as_published` 的调用方统一补齐。
+#: ISO 8601 的那一截日期时间。**认得出形状之后还要过一道 `_real_clock`** ——
+#: `2026-99-99` 这种它照样匹配。时区的换算在 `as_published` 自己那儿。
 _ISO = re.compile(r'(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?')
 
 
@@ -69,16 +96,49 @@ class PageUnavailable(ValueError):
     """这一页读不出可保存的内容。消息直接面向用户,说清下一步。"""
 
 
-def gate_reason(final_url: str, html: str) -> str:
-    """这一页是不是一道人工关卡。空串 = 不是。
+def gate_url_reason(final_url: str) -> str:
+    """地址判据:已确认的那几道关卡。空串 = 不是。
 
-    两头各看一眼:**地址**认得出已知的那几道关卡(重定向之后才看得见),**正文**
-    认得出没有重定向、就地渲染一句「请完成验证」的那种。两道都只在**提取不出
-    正文**时才问 —— 一篇正常文章里出现「captcha」这个词不该被判成关卡。
+    **这一道和提取结果无关,成功路径上同样要问。** 「提取器交出了一段长文字」
+    证明不了手里这篇是目标文章 —— 关卡页自己也有文字,够长就一路过关,然后被
+    `DO NOTHING` 永久钉成这一篇的正文(审查实测那一例落在 `/challenge` 上,
+    正文 683 字,导出和索引全都成功)。
     """
     low = (final_url or '').lower()
-    if any(p in low for p in _GATE_PATHS):
-        return '对方把这个地址挡在了一道验证页后面'
+    hit = (any(p in low for p in _GATE_MARKS)
+           or any(seg in _GATE_SEGMENTS for seg in urlsplit(low).path.split('/')))
+    return '对方把这个地址挡在了一道验证页后面' if hit else ''
+
+
+def gate_body_reason(body: str) -> str:
+    """正文判据:提取成功了,但交出来的那段文字自己说「先过验证」。空串 = 不是。
+
+    判据是**「这段正文几乎全是关卡提示」**,两条一起:
+    ①整页就这么点字(`_GATE_BODY_CHARS`);
+    ②里面命中了**两句以上**不同的关卡措辞(`_GATE_PHRASE_HITS`)。
+
+    **少一条都不行。** 只看措辞会拒掉一篇正经写「Verify you are human」的文章
+    (那一句在它里面只是被引用的一行);只看长度会拒掉所有短文 —— 而这一档拒掉
+    就是拒掉,用户再点一次也换不回来,代价不是「重抓一次」。
+    """
+    text = (body or '').strip()
+    if not text or len(text) > _GATE_BODY_CHARS:
+        return ''
+    low = text.lower()
+    hits = sum(1 for p in _GATE_PHRASES if p in low)
+    return '这一页要求先完成验证或登录' if hits >= _GATE_PHRASE_HITS else ''
+
+
+def gate_reason(final_url: str, html: str) -> str:
+    """**提取不出正文之后**那一问:是读不到,还是被挡在了关卡后面。空串 = 不是。
+
+    这一档拿整份 HTML 去对全量词表(含 `captcha` 这类松词)—— 走到这里时已经
+    没有正文可言了,宁可多认一道关卡也别把人留在「这一页没找到正文」上。
+    地址那一道由 `gate_url_reason` 答(调用方在提取之前就问过一次,这里重复问
+    是构造上的第二道)。
+    """
+    if reason := gate_url_reason(final_url):
+        return reason
     head = (html or '')[:200000].lower()
     for word in _GATE_WORDS:
         if word in head:
@@ -135,6 +195,16 @@ def _ld_author(node: dict) -> str:
     return oneline(str(author), 'text') if isinstance(author, str) else ''
 
 
+def _real_clock(day: str, clock: str | None) -> bool:
+    """`2026-10-15` / `18:02` 这两截是不是真存在的日期和时刻。"""
+    try:
+        datetime.strptime(f'{day} {clock}' if clock else day,
+                          '%Y-%m-%d %H:%M' if clock else '%Y-%m-%d')
+    except ValueError:
+        return False
+    return True
+
+
 def as_published(value: str) -> str:
     """任意写法的时间串 → `YYYY-MM-DD HH:MM`(**按项目时区**;缺时分只给日期)。
 
@@ -151,7 +221,10 @@ def as_published(value: str) -> str:
     是拿机器时区补,那会让同一个页面在不同机器上入库成不同时刻)。
     """
     m = _ISO.search(value or '')
-    if not m:
+    if not m or not _real_clock(m.group(1), m.group(2)):
+        # **形状对不等于是个日期**:`2026-99-99`、`2026-02-30`、`10:77` 都过得了
+        # 那个正则。放过去的话这个假时刻会一路进列表排序和日报的时间窗口(两处
+        # 都按 `published` 做字符串比较),而「没有发布时间」是一句真话。
         return ''
     if not m.group(2):
         return m.group(1)                # 只有日期:没有时刻可言,也就没有时区问题
@@ -177,7 +250,8 @@ def page_meta(html: str, final_url: str) -> dict:
         title = oneline(tag.get_text(' ', strip=True), 'text')
     if not title and (tag := soup.select_one('h1')):
         title = oneline(tag.get_text(' ', strip=True), 'text')
-    author = _first_meta(soup, _AUTHOR_META) or _ld_author(node)
+    author = (_first_meta(soup, _AUTHOR_META) or _ld_author(node)
+              or _first_meta(soup, _SITE_META))
     when = _first_meta(soup, _TIME_META)
     if not when:
         for key in ('datePublished', 'dateCreated', 'uploadDate'):
