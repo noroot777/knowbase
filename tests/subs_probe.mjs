@@ -1,8 +1,9 @@
 // 「我的订阅」/「同步中心」拆分后的浏览器回归:各类来源并列的页内切换、公众号与
 // feeds 共用同一套页头、**这一页不许再长出定时设置**(定时只剩日报那一份,见
 // `docs/decisions/sync-schedule.md`)、「最新内容」视图锁在可用视口高度上、
-// 老深链(#social 等)落到对应视图、同步中心跑完后把失败步骤统一列进总览问题块
-// (运行中不弹,最后统一处理)。
+// 老深链(#social 等)落到对应视图、同步中心跑完后在总览问题块里**点名**失败的那几步
+// (运行中不弹,最后统一处理;**具体原因在那一步自己那行里,总览不抄第二遍** ——
+// 口径和理由在 `docs/decisions/pipeline-history.md` 的「失败明细只在步骤行里有一份」)。
 //
 // 需要一个跑着沙箱数据的 kb-web(和 tests/daily_probe.mjs 同一套):
 //   python3 tests/llm_stub.py --port 8801 &
@@ -202,7 +203,7 @@ await evalJs(`document.getElementById('subs-switch-wechat').click()`);
 await until(`!document.getElementById('subs-wechat').hidden`);
 check("切回公众号视图撤掉视口锁(它是自然流的长列表)", await evalJs(`!document.body.classList.contains('subs-reading')`));
 
-// 4. 同步中心:跑完失败的那轮在总览里统一列出 + 重试按钮
+// 4. 同步中心:跑完失败的那轮在总览里点名 + 原因在那一步行里 + 重试按钮
 await evalJs(`switchTab('pipe')`);
 await sleep(300);
 check("离开订阅页撤掉视口锁", await evalJs(`!document.body.classList.contains('subs-reading')`));
@@ -221,12 +222,22 @@ await evalJs(`renderPipeState({ running:false, stages:{}, log:[], last_run: {
   stages:{ crawl:{status:'ok',detail:'完成'},
            export:{status:'error',detail:'4 条译文暂缺:模型服务 503'},
            index:{status:'ok',detail:'完成'} }, log:[] } }); true`);
-check("失败步骤统一列在总览问题块里",
+check("总览问题块点名失败的那一步",
       await evalJs(`!document.getElementById('pipe-issues').hidden
         && document.getElementById('pipe-issues-title').textContent === '1 个步骤需处理'
-        && document.getElementById('pipe-issues-list').textContent.includes('导出文章')
-        && document.getElementById('pipe-issues-list').textContent.includes('503')`),
+        && document.getElementById('pipe-issues-list').textContent.includes('导出文章')`),
       await evalJs(`document.getElementById('pipe-issues-title').textContent`));
+// **原因不在总览里抄第二遍,要在那一步自己那行里读得到**(反过来钉一边:总览只点名)
+check("失败原因在那一步自己那行里,总览不重复",
+      await evalJs(`document.querySelector('#pipe-stage-export .pipe-stage-detail')
+          .textContent.includes('503')
+        && !document.getElementById('pipe-issues-list').textContent.includes('503')`),
+      await evalJs(`document.querySelector('#pipe-stage-export .pipe-stage-detail').textContent
+        + ' || ' + document.getElementById('pipe-issues-list').textContent`));
+check("总览给得出「去哪看」", await evalJs(
+  `document.getElementById('pipe-issues-list').textContent.includes('下面那一步')
+   && !document.getElementById('pipe-issues-jump').hidden`),
+  await evalJs(`document.getElementById('pipe-issues-list').textContent`));
 check("问题块里有重试按钮", await evalJs(`!document.getElementById('pipe-retry').hidden`));
 // 运行中不弹问题块(失败不阻止本轮继续,收尾统一说)
 await evalJs(`renderPipeState({ running:true, current_stage:'index', stop_supported:true,

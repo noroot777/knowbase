@@ -224,19 +224,21 @@
 </div>
 
 <div id="pipepanel" style="display:none">
-  <div class="pipe-page-heading"><div><h1>同步中心</h1></div>
+  <div class="pipe-page-heading"><div class="pipe-title-row"><h1>同步中心</h1><span id="pipe-head-facts" class="pipe-head-facts" role="status"></span></div>
     <div class="pipe-actions"><button id="pipe-run" onclick="openPipeModal()" aria-describedby="pipe-state-hint">新建同步</button></div>
   </div>
   <div id="pipe-connection" class="pipe-notice" hidden role="status"><span></span><button class="ghost" onclick="refreshPipe(true)">重新连接</button></div>
-  <div id="pipe-viewing" class="pipe-notice" hidden role="status"><span id="pipe-viewing-text"></span><button class="ghost" onclick="exitPipeHistory()">回到最新</button></div>
   <div id="pipe-fresh" class="pipe-notice" hidden role="status"><span id="pipe-fresh-text"></span><button class="ghost" onclick="pipeFreshRetry()">重新读取</button></div>
-  <section class="pipe-overview" aria-label="同步概况">
-    <div class="pipe-overview-main"><div><span class="pipe-section-label">当前状态</span><h2 id="pipe-state-title" role="status" tabindex="-1">正在读取同步状态</h2><p id="pipe-running-channel"></p><p id="pipe-run-scope"></p><p id="pipe-persist-issue" class="field-err" role="status" hidden></p></div><div class="pipe-run-metrics"><b id="pipe-progress-label">—</b><span id="pipe-elapsed"></span></div></div>
+  <section class="pipe-overview" id="pipe-overview" aria-label="同步概况">
+    <!-- 只读那一行待在卡片**里面**:它说的是「这整张卡现在讲的是哪一轮」,而翻历史是
+         在下面那条轮次列上点出来的 —— 原来它是页顶一条独立黄条,挑和退出隔着整页。 -->
+    <div id="pipe-viewing" class="pipe-viewing" hidden role="status"><span id="pipe-viewing-text"></span><button class="ghost" onclick="exitPipeHistory()">回到最新</button></div>
+    <div class="pipe-overview-main"><div><span class="pipe-section-label" id="pipe-state-label">当前状态</span><h2 id="pipe-state-title" role="status" tabindex="-1">正在读取同步状态</h2><p id="pipe-running-channel"></p><p id="pipe-run-scope"></p><p id="pipe-persist-issue" class="field-err" role="status" hidden></p></div><div class="pipe-run-metrics"><b id="pipe-progress-label">—</b><span id="pipe-elapsed"></span></div></div>
     <div class="pipe-progress-track" aria-hidden="true"><span id="pipe-progress-fill"></span></div>
     <div class="pipe-overview-footer"><span id="pipe-state-hint">同步在后台执行，切换页面不会中断。</span><button class="ghost" id="pipe-stop" onclick="stopPipe()" hidden>本阶段结束后停止</button></div>
     <div id="pipe-issues" class="pipe-issues" hidden role="status">
-      <div class="pipe-issues-head"><b id="pipe-issues-title"></b><button class="ghost" id="pipe-retry" onclick="retryFailed()" aria-describedby="pipe-retry-help" hidden>重试失败项</button></div>
-      <ul id="pipe-issues-list"></ul>
+      <div class="pipe-issues-head"><b id="pipe-issues-title"></b><span class="pipe-issues-act"><button class="ghost" id="pipe-retry" onclick="retryFailed()" aria-describedby="pipe-retry-help" hidden>重试失败项</button><button class="text-button" id="pipe-issues-jump" onclick="jumpToFirstIssue()" hidden>看第一个<i data-arrow="down"></i></button></span></div>
+      <p id="pipe-issues-list" class="pipe-issues-where"></p>
       <details id="pipe-retry-help" class="pipe-retry-help">
         <summary>新建同步和重试失败项有什么区别？</summary>
         <p><strong>新建同步：</strong>按本次通道、订阅和日期抓取。提取失败且仍在待处理列表中的文档，会在下次完整同步再次尝试；其他步骤仍受各自处理范围、去重和重试间隔限制。</p>
@@ -246,16 +248,26 @@
     </div>
   </section>
   <div class="pipe-workbench">
-    <section class="pipe-stage-panel"><div class="pipe-section-heading"><h2>同步步骤</h2><span>每一步都有结果</span></div><div id="pipe-stages" aria-label="同步阶段"></div></section>
-    <section class="pipe-log-panel"><div class="pipe-section-heading"><h2>运行日志</h2><label><input id="pipe-log-follow" type="checkbox" checked onchange="togglePipeLogFollow()"> 跟随最新</label></div>
-      <div id="pipe-log-box" tabindex="0" aria-label="同步运行日志"><pre id="pipe-log">尚无运行记录</pre></div>
-      <div class="pipe-log-footer"><span id="pipe-log-note">保留最近 80 条</span><button id="pipe-log-latest" class="text-button" onclick="followPipeLog()" hidden>查看最新<i data-arrow="down"></i></button><button class="text-button" onclick="downloadPipeLog()">下载日志</button></div>
+    <section class="pipe-stage-panel"><div class="pipe-section-heading"><h2>同步步骤</h2><span id="pipe-stage-note">每一步都有结果</span></div><div id="pipe-stages" aria-label="同步阶段"></div></section>
+    <!-- 轮次列和它改写的东西并排,而且钉住:点一行会按那一轮重渲染上面整张卡和左边
+         整列步骤,原来它在页尾 y≥1047、被改写的那块在 y=84,点下去什么都看不见。
+         `#pipe-history-live` 是**列表外面**的一行(正在跑的那一轮不在留档里),这样
+         `#pipe-history-list` 里仍然只有留档那几行,nth-child 的位置不被挤掉。 -->
+    <section class="pipe-history-panel" aria-label="历史运行">
+      <div class="pipe-section-heading"><h2>历史运行</h2><span id="pipe-history-note"></span></div>
+      <div id="pipe-history-live"></div>
+      <div id="pipe-history-list"><p class="pipe-history-empty">正在读取历史记录…</p></div>
     </section>
   </div>
-  <section class="pipe-history-panel" aria-label="历史运行">
-    <div class="pipe-section-heading"><h2>历史运行</h2><span id="pipe-history-note"></span></div>
-    <div id="pipe-history-list"><p class="pipe-history-empty">正在读取历史记录…</p></div>
-  </section>
+  <!-- 日志默认收起:它是出事才看的东西,常驻一块 440px 深色块会把整页的视觉重心
+       占住。运行起来时自动展开一次,**按轮次身份记**(`pipe_view.js` 的
+       `pipeLogOpenedFor`:记成布尔的话翻一趟历史就会被当成新起了一轮)。 -->
+  <details class="pipe-log-panel" id="pipe-log-panel">
+    <summary class="pipe-log-summary"><h2>运行日志</h2><span id="pipe-log-note">保留最近 80 条</span><span class="pipe-log-hint" id="pipe-log-hint"></span></summary>
+    <div class="pipe-log-head"><label><input id="pipe-log-follow" type="checkbox" checked onchange="togglePipeLogFollow()"> 跟随最新</label></div>
+    <div id="pipe-log-box" tabindex="0" aria-label="同步运行日志"><pre id="pipe-log">尚无运行记录</pre></div>
+    <div class="pipe-log-footer"><button id="pipe-log-latest" class="text-button" onclick="followPipeLog()" hidden>查看最新<i data-arrow="down"></i></button><button class="text-button" onclick="downloadPipeLog()">下载日志</button></div>
+  </details>
 </div>
 
 <div id="subspanel" style="display:none">
