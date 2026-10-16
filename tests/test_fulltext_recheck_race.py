@@ -213,7 +213,7 @@ class RecheckRaceTests(RecheckCase):
         **两种交错各有一个自洽的末态,而且那份正文一条都不丢**:`_save` 先提交则
         复查那一侧的判据看到正文已经换了、跳过,末态就是完整正文;`_downgrade`
         先提交则这次补抓的结果作废(它带的判据说的是**降级前**那一版 —— 见
-        `fulltext._save` 的 `seen`),而那一条回到了补抓队列,下一轮重抓一次照旧
+        `fulltext.work_version`),而那一条回到了补抓队列,下一轮重抓一次照旧
         落得进去。**两种末态都不许出现「壳 + 补抓成功时间」或者「壳 + 译文」那种
         半状态**,口径同 `sync._claim_write` 那条「两种结局的末态都是对的」。
         8 轮各一次。
@@ -228,8 +228,8 @@ class RecheckRaceTests(RecheckCase):
                 gate = threading.Barrier(2)
                 # 取样排在抢锁之前,和真实补抓一样(`fetch_pending` 先 SELECT、
                 # 再发网络请求、最后才写回)。取的是**那一版的身份**,口径同
-                # `fulltext._save` 的 `seen`。
-                seen = self.row(key)['content_hash']
+                # `fulltext.work_version`。
+                seen = fulltext.work_version(self.row(key))
 
                 def downgrade():
                     gate.wait()
@@ -254,7 +254,8 @@ class RecheckRaceTests(RecheckCase):
                     self.assertEqual('', row['fulltext_at'])
                     self.assertEqual('', row['body_zh'])
                     self.assertEqual(1, fulltext.pending('rss'))
-                    self.assertTrue(fulltext._save(key, article, row['content_hash']))
+                    self.assertTrue(fulltext._save(key, article,
+                                                   fulltext.work_version(row)))
                     self.assertIn(ARTICLE_MARK, self.row(key)['body'])
 
 

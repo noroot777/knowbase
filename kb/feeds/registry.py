@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS feed_items (
  content_kind TEXT NOT NULL DEFAULT 'feed', fetched_at TEXT NOT NULL,
  content_hash TEXT NOT NULL, exported_hash TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '',
  -- 排在最后,和老库 ALTER 补出来的列序一致(见 _ADDED_COLUMNS)。
- extract_stale INTEGER NOT NULL DEFAULT 0, fetch_round TEXT NOT NULL DEFAULT ''
+ extract_stale INTEGER NOT NULL DEFAULT 0, fetch_round TEXT NOT NULL DEFAULT '',
+ content_rev INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS feed_items_recent ON feed_items(kind, published DESC, fetched_at DESC);
 CREATE TABLE IF NOT EXISTS subscription_items (
@@ -125,6 +126,12 @@ _ADDED_COLUMNS = {
         # 没有这个概念,硬塞一个值等于凭空造事实。空串落在 `unsure` 那一档,
         # 面板上那句分解自己会闭嘴(见 `fetch_rounds.today`)。
         ('fetch_round', "TEXT NOT NULL DEFAULT ''"),
+        # 「这一行的内容换到第几版了」——**只增、不复用**的代次,换内容的两个写入方
+        # 自己加一(`grab_store.replace`、`fulltext._save`)。它答的是「异步工作还有
+        # 没有交付权」:为什么内容指纹答不了、两道判据各挡什么,见
+        # `fulltext.work_version`。老库补成 0 = 都算第 0 版,行为逐字不变 —— 判据比
+        # 的是**取样那一刻的值**,起点是几无关。
+        ('content_rev', 'INTEGER NOT NULL DEFAULT 0'),
     ),
 }
 

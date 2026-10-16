@@ -141,18 +141,22 @@ class VersionIdentityTests(GrabCase):
         self.assertEqual(version, grab_store.item_version(dict(payload)))
 
 
+def queued_rss(case) -> dict:
+    """一条开了补抓的 RSS 条目(`content_kind='summary'`、`fulltext_at` 空)。"""
+    source = reg.save_subscription('rss', {'name': 'E', 'url': 'https://e.org/',
+                                           'feed_url': 'https://e.org/feed',
+                                           'fulltext': True})
+    reg.put_items(source, [{'url': PAGE, 'title': 'A', 'body': '订阅源给的那段摘要。' * 4,
+                            'published': '', 'content_kind': 'summary'}])
+    case.assertEqual(fulltext.pending('rss'), 1)
+    return grab.known(PAGE)
+
+
 class LateFulltextTests(GrabCase):
     """一轮同步里的正文补抓**迟到**了:它取样的那一版已经被换掉。"""
 
     def _queued(self):
-        """一条开了补抓的 RSS 条目(`content_kind='summary'`、`fulltext_at` 空)。"""
-        source = reg.save_subscription('rss', {'name': 'E', 'url': 'https://e.org/',
-                                               'feed_url': 'https://e.org/feed',
-                                               'fulltext': True})
-        reg.put_items(source, [{'url': PAGE, 'title': 'A', 'body': '订阅源给的那段摘要。' * 4,
-                                'published': '', 'content_kind': 'summary'}])
-        self.assertEqual(fulltext.pending('rss'), 1)
-        return grab.known(PAGE)
+        return queued_rss(self)
 
     def test_a_late_fulltext_save_cannot_overwrite_a_fresh_replace(self):
         """**迟到的补抓不许盖掉刚换好的正文。**
@@ -295,6 +299,101 @@ class LateFulltextTests(GrabCase):
         self.assertIn('OLDFULLTEXT', row['body'])
         # 旧译文译的是那段摘要,正文一换它就作废了(见 `fulltext._save`)。
         self.assertEqual((row['title_zh'], row['body_zh'], row['translated_at']), ('', '', ''))
+
+
+class WorkEpochTests(GrabCase):
+    """内容**改过去又改回来**:指纹回到原值,而这期间两次更新都已经被接受过。
+
+    `content_hash` 在这种交错下答不出「我取样之后这一行接受过更新吗」——
+    指纹不碰撞也会自然重复,所以这不是"再哈希一列"能解决的问题。身份里那个
+    **只增不复用**的代次(`content_rev`)才是挡住它的那一道;两道各挡什么收在
+    `fulltext.work_version`。
+    """
+
+    def _alpha(self) -> dict:
+        """一条待补抓的 RSS 条目,**指纹已经在替换那条路自己的口径上**。
+
+        先走一次真实重抓是必需的:第一次 `replace` 必然换 hash 口径(从
+        `put_items` 的整份 entry 换到 `item_version` 的导出负载,见那两处说明),
+        指纹压根回不到取样那一版 —— 不先做这一步,这一组测不到「改回来」那一档。
+        """
+        seen = queued_rss(self)
+        base = {'url': PAGE, 'title': 'ALPHA', 'body': seen['body'],
+                'author': seen['author'], 'published': seen['published']}
+        self.assertTrue(grab.replace(seen, base))
+        self.assertEqual(fulltext.pending('rss'), 1)       # 替换不消费补抓待办
+        return base
+
+    def _round_trip(self, base: dict):
+        """把标题改成 BETA、再改回 ALPHA —— 两次都是真的重抓、都被接受。"""
+        self.assertTrue(grab.replace(grab.known(PAGE), {**base, 'title': 'BETA'}))
+        self.assertTrue(grab.replace(grab.known(PAGE), base))
+
+    def test_a_late_fulltext_save_cannot_come_back_after_a_round_trip(self):
+        """**指纹回到原值之后,迟到的补抓仍然不许交付。**
+
+        实测形态:同步正在补抓,用户先把标题改成 BETA、又改回 ALPHA;此时
+        `content_hash` 逐字回到补抓取样那一版,于是按内容相等判的那一版补抓又拿回
+        交付权 —— 打开文章看到的是早先那份正文,md 和全文检索跟着落了它,再贴同一
+        链接只说「已经在知识库里了」。
+        """
+        base = self._alpha()
+        sampled = fulltext.work_version(self.items()[0])
+
+        def fetch_one(url):
+            self._round_trip(base)
+            now = self.items()[0]
+            # **先钉住这条用例测的就是那一档**:指纹真的回来了(不然它证明不了代次
+            # 在起作用),而代次已经走过两版。
+            self.assertEqual(fulltext.work_version(now)[0], sampled[0])
+            self.assertGreater(fulltext.work_version(now)[1], sampled[1])
+            return LATE, ''
+
+        with patch.object(fulltext, 'fetch_one', side_effect=fetch_one) as got:
+            summary = fulltext.fetch_pending('rss')
+        self.assertEqual(got.call_count, 1)
+        self.assertEqual((summary['done'], summary['stale']), (0, 1))
+        row = self.items()[0]
+        self.assertNotIn('OLDFULLTEXT', row['body'])
+        self.assertEqual(row['title'], 'ALPHA')
+        self.assertEqual(row['fulltext_at'], '')
+        # **反过来钉一边:这一条没有被钉死。** 下一轮补抓照旧落得进去 —— 拒的是
+        # 「过期的那次工作」,不是这一条本身。
+        self.assertEqual(fulltext.pending('rss'), 1)
+        with patch.object(fulltext, 'fetch_one', return_value=(LATE, '')):
+            again = fulltext.fetch_pending('rss')
+        self.assertEqual((again['done'], again['stale']), (1, 0))
+        self.assertIn('OLDFULLTEXT', self.items()[0]['body'])
+
+    def test_a_late_failure_cannot_come_back_after_a_round_trip(self):
+        """失败那一侧同理:记一笔失败、扣一次额度,说的都是已经不存在的那一版。"""
+        base = self._alpha()
+
+        def fetch_one(url):
+            self._round_trip(base)
+            raise FeedError('502 Bad Gateway')
+
+        with patch.object(fulltext, 'fetch_one', side_effect=fetch_one):
+            summary = fulltext.fetch_pending('rss')
+        self.assertEqual((summary['failed'], summary['stale']), (0, 1))
+        row = self.items()[0]
+        self.assertEqual((row['fulltext_tries'], row['fulltext_error']), (0, ''))
+
+    def test_a_late_empty_result_cannot_come_back_after_a_round_trip(self):
+        """第三个交付点(页面抓到了、认不出正文)走的是同一份 `_fail`,也一样。"""
+        base = self._alpha()
+
+        def fetch_one(url):
+            self._round_trip(base)
+            return '', '页面上那一块判成了样板区'
+
+        with patch.object(fulltext, 'fetch_one', side_effect=fetch_one):
+            summary = fulltext.fetch_pending('rss')
+        self.assertEqual((summary['empty'], summary['stale']), (0, 1))
+        self.assertEqual(summary['failed_keys'], [])
+        row = self.items()[0]
+        self.assertEqual((row['fulltext_tries'], row['fulltext_error']), (0, ''))
+        self.assertEqual(fulltext.pending('rss'), 1)
 
 
 class StaleExtractionTests(GrabCase):

@@ -238,9 +238,12 @@ def replace(seen: dict, entry: dict) -> bool:
         # (`put_items` 哈希整份 entry、`fulltext.body_hash` 只哈希正文、这里是
         # 导出负载),拿它们相等当「没变」会让每次重抓都白推一轮导出和索引。
         return False
+    # **代次跟着加一**(`content_rev`):这一次更新被接受之后,一切更早的异步工作
+    # 就永远不该再有交付权,而 `content_hash` 答不了这一问 —— 它**可以重复**。
+    # 口径和事故形态见 `fulltext.work_version`。
     with reg.db() as c:
         cur = c.execute("""UPDATE feed_items SET title=?,body=?,author=?,published=?,
-            content_hash=?,lang=?,extract_stale=1,
+            content_hash=?,lang=?,extract_stale=1,content_rev=content_rev+1,
             title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
             WHERE key=? AND content_hash=?""",
             (fresh['title'], fresh['body'], fresh['author'], fresh['published'],
