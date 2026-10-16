@@ -386,9 +386,13 @@ def get_settings(kind: str) -> dict:
     settings = {**default, **(json.loads(row['value']) if row else {})}
     if 'x_channel' in settings:
         from kb.feeds import x_channels
-        # 存量里写着的可能是个退役名,现在就翻成现用名:各处读设置的地方
-        # 都从这里拿,翻译留在这一层就只有一份口径(见 `x_channels.resolve`)。
-        settings['x_channel'] = x_channels.resolve(settings['x_channel'])
+        # 归一留在这一层:退役名翻成现用名,两条可执行文件位置去掉首尾空白。
+        # **各处读设置的地方都从这里拿**,所以口径只有一份(`x_channels.config_of`)。
+        # 放在面板那个 HTTP 入口里不够 —— 采集(`sync.collect` → `x_channels.prefetch`)
+        # 读的是同一份设置的**原值**,于是「面板比的、面板跑的」和「同步真正跑的」
+        # 会是两个文件:审查实测,存着末尾带一个空格的那份、面板发来不带空格的,
+        # 面板这边判"对得上"、检查也说就绪,而同步执行的是另一个可执行文件。
+        settings |= x_channels.config_of(settings)
     return _upgrade_settings(kind, settings)
 
 

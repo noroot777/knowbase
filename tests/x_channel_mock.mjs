@@ -24,6 +24,11 @@ const LOGIN_CMD = "FEEDGRAB_DATA_DIR=/tmp/kb/x-feedgrab/sessions feedgrab login 
 // 块,所以命令必须从这里出来)。于是设置面板上它和 `login_command` 撞在一起 ——
 // 下面那一项钉住前端不把同一句话并排写两遍。
 const IMPORTED = "上次从日常浏览器导入：2026-10-15 17:40:00，13 个 cookie（当场验证通过）";
+// 正在搬的那一档留痕(真后端是账本里那条 `writing`,见 `x_login_words`)。
+// **完成和没完成必须能分开说** —— 两边都以"上次从日常浏览器导入"开头,只查这个
+// 前缀的断言在"刷新没补上"时照样通过,而那正是要钉的那件事。
+const IMPORTING = "上次从日常浏览器导入：2026-10-15 17:40:00，这一轮没走完，"
+                  + "profile 里那份登录态状态不确定，再导入一次";
 const NEXT_STEP = { attach: "在浏览器地址栏打开 chrome://inspect/#remote-debugging，勾上那个开关。",
                     feedgrab: LOGIN_CMD };
 let channel = "feedgrab";   // 这一局从"不是默认档"的那一条起步
@@ -114,6 +119,8 @@ let checkHold = 0;
 // 下一条导入 POST 压慢多久(一次性;缺省那 1200ms 照旧)。**用来摆「导入在途时
 // 改了 Chrome 位置并保存」** —— 那一下写的是共享的 profile,换位置并不换它。
 let importHold = 0;
+// 这会儿有没有一次导入正搬到一半:GET 要如实说「这一轮没走完」。
+let importing = false;
 // 每个动作端点**实际按哪一份配置跑的**。页面上看不见后端用了什么,所以记在这儿。
 const used = [];
 // 「这一份设置」的身份,照 `kb/feeds/x_channels.py` 的 `config_of`:取法 + 两条
@@ -187,6 +194,7 @@ const server = createServer(async (req, res) => {
         // 时改了配置」那个形态在 mock 上压根摆不出来 —— 页面会把一条属于旧配置的
         // 结论判成当前这一份的结论,而探针全绿。
         const ran = storedConfig();
+        importing = true;       // 从这一刻起,读到的留痕是「这一轮没走完」
         // 慢一点回:真实那一下要停在授权弹窗上(最长 90 秒),而"按下去之后
         // 立刻预告"正是这段时间里页面上唯一的交代 —— 秒回的 mock 测不到它。
         await new Promise(r => setTimeout(r, importHold || 1200));
@@ -195,7 +203,7 @@ const server = createServer(async (req, res) => {
         // 会把重算过的 `ready/why` 一起回来(口径跟 GET 完全一份)。mock 不跟着
         // 回的话,「页面上那句互相打脸的旧状态」这条探不到 —— 它正是本轮审查的
         // A 项:导入成功后旁边仍挂着「浏览器通道还没有登录过 X」。
-        imported = true;
+        imported = true; importing = false;
         stamps.push("import");
         return json({ ok: true, login_state: IMPORTED, ready: true, why: "",
                       config: ran,
@@ -238,7 +246,8 @@ const server = createServer(async (req, res) => {
                                              : "浏览器通道还没有登录过 X"),
       hint: snap ? "" : (NEXT_STEP[channel] || ""),
       login_command: channel === "feedgrab" ? LOGIN_CMD : "",
-      needs_login_window: channel === "browser", login_state: imported ? IMPORTED : "",
+      needs_login_window: channel === "browser",
+      login_state: importing ? IMPORTING : (imported ? IMPORTED : ""),
     };
     if (getHold) {
       const ms = getHold;
@@ -274,7 +283,7 @@ const server = createServer(async (req, res) => {
   }
   // 把「还没导入过」摆回来(下一条 GET 就说"还没有登录过 X")。
   if (path === "/__probe/forget") {
-    imported = false;
+    imported = false; importing = false;
     return json({ ok: true });
   }
   // 下一条导入 POST 压慢(摆「导入在途时改了配置并保存」)。

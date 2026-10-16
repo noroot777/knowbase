@@ -14,7 +14,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from kb.feeds import registry as reg, x_browser, x_channels, x_login_import
+from kb.feeds import (registry as reg, x_browser, x_channels, x_feedgrab,
+                      x_login_import)
 from tests.test_x_channels import ChannelBase
 
 ACTIONS = ('/api/intake/social/x-channel/login',
@@ -172,6 +173,29 @@ class ConfigIdentityTests(ChannelBase):
         # 原值那一份可执行、于是被原样交出来,再被 `shlex.quote` 整条引起来
         # (`'…/fg-cli ' login`)。判据是「路径后面直接跟着 login」—— 只有 trim 过才成立。
         self.assertIn(plain + ' login', got['login_command'])
+
+    def test_the_collector_runs_the_same_value_the_panel_compared(self):
+        """**归一要落在"各处读设置的那一层",不是面板那个 HTTP 入口。**
+
+        一度只在 `_x_kind` 里归一:面板 GET 和三个动作于是一致了,而采集
+        (`sync.collect` → `x_channels.prefetch`)读的是同一份设置的**原值** ——
+        于是存着末尾带一个空格的路径时,面板比的、面板检查跑的是 trim 过那份,
+        **每天那一轮同步跑的是另一个可执行文件**,而面板上一切正常。
+        判据因此落在**采集真正交给 feedgrab 的那个值**上。
+        """
+        plain = self.twins()
+        self.settings(x_channels.FEEDGRAB, x_feedgrab_bin=plain + ' ')
+        self.sub('Example')
+        seen = {}
+
+        def harvest(jobs, **kw):
+            seen.update(kw)
+            return {h: {'entries': [], 'error': '', 'watermark': w} for h, w in jobs}
+
+        with patch.object(x_feedgrab, 'harvest', harvest):
+            x_channels.prefetch(list(reg.subscriptions('social')),
+                                reg.get_settings('social'))
+        self.assertEqual(plain, seen['binary'])
 
     def test_a_config_that_can_be_saved_can_also_be_acted_on(self):
         """保存那一侧不限长,动作这一侧原来限 1024 —— 于是存得下、却动不了:长路径

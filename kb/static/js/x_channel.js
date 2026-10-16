@@ -141,7 +141,22 @@ function xChanOwnsAct(t, config) {
 // 的旧结论,而用户看不出它是旧的(审查实测:导入在途时改 Chrome 位置并保存,导入
 // 成功的回包因为配置变了被整条丢掉,面板一直说「还没有登录过 X」「这一轮没走完」,
 // 切走再切回来才恢复)。
-function xChanStale() { loadXChannel(sourceKind); }
+// **失效是一份要留着的状态,不是"发过一条 GET"这个动作。** 一条读发出去之后,
+// 后面任何一个动作、一次改选择都能合法把它作废(`xChanOwnsRead`)—— 上一版把
+// 「已经发过了」当成刷新完成,于是那份变化永远补不回来:审查实测,导入完成后
+// 那条补读被扣住,这期间点一次「检查连接」(它只更新 `ready/why`,答不了留痕
+// 那行),补读回来被判过期丢掉,留痕一直停在「这一轮没走完」,切走再切回来才恢复。
+// 口径:**置上这个标记,只有一条真落了地、被这块面板接住的读才清得掉它**;
+// 中途被作废、读失败、被更晚的动作顶掉,都再补一次。
+let xChanDirty = false;
+// 在飞的读有几条。**必须是计数不是布尔**:两条读同时在飞时,先落地那条的收尾会
+// 把布尔清成 false,于是它被判过期之后当场又补一条,而后发那条还没回来 —— 补一条
+// 顶掉一条,一路滚下去。计数则让「还有人在飞」说了算,补读只在真没人时发。
+let xChanReads = 0;
+function xChanStale() { xChanDirty = true; xChanRefresh(); }
+// 欠着一次刷新、而且此刻没人占着,就去补。**没有定时器**:补读自己落地会清掉
+// 标记,被顶掉的那次由顶掉它的那个动作在收尾时再叫一次(两处都在 `finally` 里)。
+function xChanRefresh() { if (xChanDirty && !xChanReads && !xChanBusy) loadXChannel(sourceKind); }
 
 // 后端那道闸拒绝了(409):它核对过,这一次**什么都没跑**。所以不许记成「结果
 // 不知道」—— 那一档是留给"真跑过、只是没拿到答复"的。要做的是重读一次,把现在
@@ -335,6 +350,7 @@ async function loadXChannel(kind) {
   // 服务端摆不出乱序,而这一个摆得出来。见 `docs/decisions/frontend-feedback.md`。
   const tag = xChanRead();
   let data;
+  xChanReads += 1;
   try {
     data = await pipeJson(`/api/intake/${kind}/x-channel`);
   } catch (e) {
@@ -359,11 +375,20 @@ async function loadXChannel(kind) {
     $('source-x-dot').className = 'xchan-dot';
     $('source-x-state').textContent = `读不出可选的取法（${e.message}）。`;
     return;
+  } finally {
+    // **落地之后才算没人占着。** 这里不直接重试:读失败时面板上写着那句原因,
+    // 再自动打一轮只会把它刷掉;欠着的那次由下一个动作或下一次进来补上。
+    xChanReads -= 1;
   }
   // 这期间切走了、又读了一次、改了下拉、或者有个动作已经开跑:别覆盖别人的面板,
-  // 也别拿「那之前」的一份盖掉更新的事实
-  if (want !== sourceKind || !xChanOwnsRead(tag)) return;
+  // 也别拿「那之前」的一份盖掉更新的事实。**但欠着的那次刷新不算还上了** ——
+  // 它一个字都没写进面板,所以当场再补一次(有动作在飞时 `xChanRefresh` 自己
+  // 会让开,由那个动作收尾时叫)。
+  if (want !== sourceKind || !xChanOwnsRead(tag)) { xChanRefresh(); return; }
   xChan = data; xChanKind = kind;
+  // **这一条真落地了,欠的那次刷新还上了。** 判据落在"被接住"这一刻,不是发出去
+  // 那一刻 —— 两者之间隔着一整道归属检查。
+  xChanDirty = false;
   // **清单整份按这条读重画**:它是权威的那一份(更早发出的读在上面那道
   // 归属检查里已经被挡掉了),名字和说明都以它为准。
   xChannelList();
@@ -584,6 +609,15 @@ async function importXLoginState() {
     // **「这条结论归不归眼前这一份」和「后端那边变没变」是两个问题**,
     // 结论没落地就重取一次(两种来法见 `xChanStale`)。
     if (!mine) { xChannelPicked(); xChanStale(); }
+    // **这个动作可能刚刚把一条在途的补读顶掉了**(它一开始就让更早的读作废)——
+    // 那次刷新还欠着,这里补上。结论归了这块面板也一样欠着:一次成功的「检查
+    // 连接」只更新 `ready/why`,答不了留痕那行「上次搬成了没有」。
+    // **导入这一侧单拆掉一条红都没有**(实测 163 项全绿):导入自己的回包带着
+    // 新的 `ready/why/login_state`,所以"它自己是 mine、却还欠着别人的刷新"那
+    // 一种顺序,现有场景里摆不出来。留着是为了两颗按钮同一条规矩 —— 口径同
+    // `xChanActs` 那条:单拆不红不等于冗余,拆掉只是把余量用掉一格。
+    // (检查那一侧反过来是承重的,拆掉 4.6l 当场红。)
+    else xChanRefresh();
   }
 }
 
@@ -624,5 +658,6 @@ async function checkXChannel() {
     // 同一道,理由同导入那条。**但保护不许因此放宽**:这条结论该不该显示仍然
     // 按它跑的那一份配置判(上面那道 `xChanOwnsAct`),这里只是重取一次权威状态。
     if (!mine) { xChannelPicked(); xChanStale(); }
+    else xChanRefresh();     // 顶掉的那次补读还欠着,理由同导入那条
   }
 }

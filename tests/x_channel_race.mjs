@@ -340,13 +340,24 @@ export async function ownershipSections() {
   await until(`xChannelSaved() && xChanDraft().includes('chrome-b')`, 20000);
   check("保存收尾那次读到的仍是导入之前那一刻(摆盘自检)",
         (await state()).includes("还没有登录过"), await state());
+  // 这会儿那行字归在飞的那次导入说(`xChanMine` 问的是"还在说那一档吗",改一下
+  // 可执行文件位置并不让它改说别人)—— 那个授权弹窗正等在另一个窗口里。
+  check("在途那次导入的预告没被这次保存顺手盖掉(摆盘自检)",
+        (await text('#source-x-import-state')).includes("正在从日常浏览器读登录态"),
+        await text('#source-x-import-state'));
   await until(`document.querySelector('#toast-host')?.textContent.includes('搬进独立 profile')`, 20000);
-  // **先断言后果**:用户眼前这一屏不许再说"还没有登录过"。
-  await until(`!document.getElementById('source-x-state')
-                 .textContent.includes('还没有登录过')`, 20000);
-  check("导入完成之后,同一屏上不再写着「还没有登录过 X」", true);
-  check("那行留痕也跟上了权威记录",
-        (await text('#source-x-import-state')).includes("上次从日常浏览器导入"),
+  // **先断言后果,而且判据要拿得住超时**:`until` 超时只返回 false、不抛,
+  // 所以它的返回值必须交给 `check` —— 写成 `check(..., true)` 的话等到超时
+  // 也照样通过,那条断言就永远绿着(审查 N2)。
+  check("导入完成之后,同一屏上不再写着「还没有登录过 X」",
+        await until(`!document.getElementById('source-x-state')
+                        .textContent.includes('还没有登录过')`, 20000),
+        await state());
+  // **留痕要分得出「搬完了」和「搬到一半」** —— 两句话都以"上次从日常浏览器导入"
+  // 开头,只查这个前缀的话,刷新没补上时它照样通过(审查 N2)。
+  check("那行留痕跟上了权威记录,而且是「搬完了」那一份",
+        (await text('#source-x-import-state')).includes("当场验证通过")
+        && !(await text('#source-x-import-state')).includes("没走完"),
         await text('#source-x-import-state'));
   // **机制那一半**:恢复不是靠把那条被丢掉的回包贴上来(它说的是旧那一份配置),
   // 而是收尾时重新问了一次 —— 所以时序上「导入之后还有一条读」。
@@ -358,4 +369,71 @@ export async function ownershipSections() {
   // **反过来钉一边:回执照旧给**(它说的是用户自己刚点的那颗按钮)。
   check("那次导入的回执照旧给了用户",
         (await text('#toast-host')).includes("搬进独立 profile"), await text('#toast-host'));
+
+  // 4.6k **那次补读被后来的动作顶掉了,欠着的刷新不许就此作数。**
+  // 上一版把「已经发过一条 GET」当成刷新完成,而一条读发出去之后,后面任何一个
+  // 动作都能合法把它作废 —— 审查实测:导入完成后那条补读被扣住,这期间点一次
+  // 「检查连接」(它只更新 `ready/why`,答不了留痕那行),补读回来被判过期丢掉,
+  // 留痕于是一直停在「这一轮没走完」,切走再切回来才恢复。
+  await evalJs(`(document.getElementById('toast-host')||{}).innerHTML = ''; true`);
+  await evalJs(`fetch('/__probe/forget').then(() => true)`);
+  await pick('browser');
+  await fill('#source-x-chrome', '/review/chrome-c');
+  await clickAt("#source-settings-save");
+  await until(`xChannelSaved() && xChan.ready === false`, 20000);
+  check("起点:又回到「还没有登录过」(摆盘自检)",
+        (await state()).includes("还没有登录过"), await state());
+  await evalJs(`fetch('/__probe/slow-import?ms=1500').then(() => true)`);
+  check("「导入登录态」点得到(4.6k)", await clickAt("#source-x-import-btn"));
+  await sleep(300);
+  await fill('#source-x-chrome', '/review/chrome-d');     // 在途时又改又存
+  await clickAt("#source-settings-save");
+  await until(`xChannelSaved() && xChanDraft().includes('chrome-d')`, 20000);
+  // 保存那次读已经落地了,现在把**下一条**读按住 —— 那条正是导入收尾要发的补读。
+  await evalJs(`fetch('/__probe/slow-get?ms=2500').then(() => true)`);
+  await until(`document.querySelector('#toast-host')?.textContent.includes('搬进独立 profile')`, 20000);
+  // 补读还按着,所以这会儿页面上写的还是保存那次读到的「这一轮没走完」。
+  check("补读回来之前,页面上写的是「这一轮没走完」(摆盘自检)",
+        await until(`document.getElementById('source-x-import-state')
+                        .textContent.includes('没走完')`, 20000),
+        await text('#source-x-import-state'));
+  // 补读还被按着,这会儿按钮已经恢复 —— 用户点一次「检查连接」,它会把那条补读作废。
+  check("「检查连接」点得到(4.6k)", await clickAt("#source-x-check"));
+  await until(`document.querySelector('#toast-host')?.textContent.includes('登录态有效')`, 20000);
+  // **判据落在用户看得见的那行字上**:那条被顶掉的补读回来之后也只会被丢掉,
+  // 所以留痕能不能变成「搬完了」,全看欠着的那次刷新有没有被补上。
+  check("被顶掉的那次刷新补上了:留痕最终是「搬完了」那一份",
+        await until(`document.getElementById('source-x-import-state')
+                        .textContent.includes('当场验证通过')`, 20000),
+        await text('#source-x-import-state'));
+  check("而且不再写着「这一轮没走完」",
+        !(await text('#source-x-import-state')).includes("没走完"),
+        await text('#source-x-import-state'));
+
+  // 4.6l **同一件事的另一种时序:那条补读在动作还没跑完的时候就回来了。**
+  // 4.6k 里补读是在检查**之后**才落地的,于是"丢弃时再补一次"那道就够了;这一条
+  // 让它在检查**途中**落地 —— 丢弃那一下 `xChanBusy` 还按着,补不出去,只能由那个
+  // 动作收尾时再叫一次。**两道各有自己的时序,少哪一道都有一种顺序补不回来。**
+  await evalJs(`(document.getElementById('toast-host')||{}).innerHTML = ''; true`);
+  await evalJs(`fetch('/__probe/forget').then(() => true)`);
+  await pick('browser');
+  await fill('#source-x-chrome', '/review/chrome-e');
+  await clickAt("#source-settings-save");
+  await until(`xChannelSaved() && xChan.ready === false`, 20000);
+  await evalJs(`fetch('/__probe/slow-import?ms=1500').then(() => true)`);
+  check("「导入登录态」点得到(4.6l)", await clickAt("#source-x-import-btn"));
+  await sleep(300);
+  await fill('#source-x-chrome', '/review/chrome-f');     // 在途时又改又存
+  await clickAt("#source-settings-save");
+  await until(`xChannelSaved() && xChanDraft().includes('chrome-f')`, 20000);
+  // 补读只按 600 毫秒,而接下来那次检查要跑 2.5 秒 —— 补读会在检查**途中**回来。
+  await evalJs(`fetch('/__probe/slow-get?ms=600').then(() => true)`);
+  await until(`document.querySelector('#toast-host')?.textContent.includes('搬进独立 profile')`, 20000);
+  await evalJs(`fetch('/__probe/slow-check?ms=2500').then(() => true)`);
+  check("「检查连接」点得到(4.6l)", await clickAt("#source-x-check"));
+  await until(`document.querySelector('#toast-host')?.textContent.includes('登录态有效')`, 20000);
+  check("这一种顺序也补得回来:留痕最终是「搬完了」那一份",
+        await until(`document.getElementById('source-x-import-state')
+                        .textContent.includes('当场验证通过')`, 20000),
+        await text('#source-x-import-state'));
 }
