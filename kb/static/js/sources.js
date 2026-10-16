@@ -207,6 +207,8 @@ async function openSourceModule(kind) {
   updateSourceReadingView();
   $('source-title').textContent = spec.label;
   $('source-note').textContent = spec.note;
+  // 不可轮询的那一类(手动收录)把「添加订阅」换成投递栏,见 grab.js
+  applyGrabBar(spec);
   $('source-q').value = filter.q;
   $('source-filter').innerHTML = '<option value="">全部订阅</option>';
   $('source-summary').textContent = '正在读取来源…';
@@ -362,7 +364,13 @@ function updateSourceRunStatus() {
   // 一次同步可能带上好几个来源，本来源在不在这一批里决定了显示「同步中」还是「顺延」
   const ours = running && pipeRunScopes(pipeSnapshot).some(scope => scope.channel === sourceKind);
   $('source-sync').disabled = sourceBusy || !!running || !sourceData?.ready;
-  $('source-sync').textContent = ours ? '同步中…' : '同步全部';
+  // 手动收录没有可轮询的源:这颗按钮在那一类里跑的是后半条链(把已经收下、
+  // 还没落 vault 的那几条写进知识库),所以文案跟着换 —— 写「同步全部」会让人
+  // 以为它会去哪儿再抓一遍。
+  const manual = sourceModules.get(sourceKind)?.pollable === false;
+  $('source-sync').textContent = manual
+    ? (ours ? '写入中…' : '写入知识库')
+    : (ours ? '同步中…' : '同步全部');
   $('source-progress').hidden = !running;
   $('source-progress-text').textContent = ours
     ? pipeRunNote(pipeSnapshot, '正在同步')
@@ -375,6 +383,7 @@ function updateSourceRunStatus() {
     b.disabled = sourceBusy || !!running || paused;
   });
   $('source-add').disabled = sourceBusy || !!ours;
+  updateGrabControls();
   updateSourceNotices();
 }
 function rememberSourceView() {

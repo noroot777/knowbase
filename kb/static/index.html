@@ -45,6 +45,7 @@
   <div class="nav-label">信息来源</div>
   <nav class="tabs nav-section" id="source-navigation" aria-label="信息来源">
     <button id="tab-subs" onclick="switchTab('subs')"><i data-icon="rss"></i><span class="nav-text">我的订阅</span></button>
+    <button id="nav-grab" onclick="grabFromNav()" title="给一个链接，内容抓进知识库"><i data-icon="box"></i><span class="nav-text">存链接</span></button>
     <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span class="nav-text">同步中心</span><span id="nav-sync-dot" hidden aria-label="同步进行中"></span></button>
   </nav>
   <div class="nav-label">发现关联</div>
@@ -295,6 +296,13 @@
       <div class="source-view-tabs" role="group" aria-label="订阅工作区"><button id="source-view-items" class="on" aria-pressed="true" onclick="switchSourceView('items')">最新内容</button><button id="source-view-manage" aria-pressed="false" onclick="switchSourceView('manage')">订阅管理 <small id="source-subscriptions-count"></small></button></div>
       <div class="source-heading-actions"><button class="ghost" id="source-add" onclick="openSourceEditor()">添加订阅</button><button id="source-sync" onclick="syncSource()">同步全部</button></div>
     </header>
+    <div id="grab-bar" class="grab-bar" hidden>
+      <input id="grab-url" type="url" inputmode="url" spellcheck="false" autocomplete="off"
+             aria-label="要收录的链接" placeholder="粘贴文章或推文链接，回车存入"
+             aria-describedby="grab-hint" onkeydown="grabKeydown(event)">
+      <button id="grab-go" onclick="submitGrab()">存入知识库</button>
+      <p id="grab-hint" class="hint grab-hint"></p>
+    </div>
   <div id="source-workbench" class="source-workbench">
     <section class="source-stream" aria-label="订阅内容与来源">
       <div class="source-filters"><input id="source-q" type="search" placeholder="搜索已收录的内容…" aria-label="搜索来源内容" oninput="sourceFilterChanged()"><select id="source-filter" aria-label="筛选订阅来源" onchange="sourceFilterChanged()"><option value="">全部订阅</option></select></div>
@@ -569,6 +577,7 @@
 <script src="/static/js/source_reader.js"></script>
 <script src="/static/js/source_forms.js"></script>
 <script src="/static/js/source_translate.js"></script>
+<script src="/static/js/grab.js"></script>
 <script src="/static/js/snip_cards.js"></script>
 <script src="/static/js/x_channel.js"></script>
 <script src="/static/js/wechat_setup.js"></script>

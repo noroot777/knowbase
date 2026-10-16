@@ -1,0 +1,358 @@
+# -*- coding: utf-8 -*-
+"""手动收录:给一条链接,把内容抓回来写进知识库。
+
+**硬约束在 `docs/decisions/link-grab.md` 第一节 —— 改这块之前先读那一份。**
+
+**为什么是一类来源,而不是「往某条订阅里塞一条」**:塞进 `rss` 或 `social` 的话
+那条内容从此混在订阅内容里,检索按来源筛的时候分不出「我自己存的」;而给它
+真·订阅的身份(水位、etag、退避、定时)更糟 —— 一条文章地址不是一个可以轮询的
+源。所以它是第六类来源 `inbox`(`kb.source_types`),`pollable=False`:**crawl
+阶段对它空转**,抓取发生在用户给出链接的那一刻;**后面那半条链一字不改地复用**
+—— 翻译、导出 vault、索引、提取、检索、图鉴、日报全部由 `feed_types()` 自动
+派生出来(见 `kb/config.py`)。
+
+**抓不到正文一律不入库。** `registry.put_items` 是 `ON CONFLICT(key) DO NOTHING`
+—— 一条空正文落了库就**再也改不回来**,而这一步失败的代价只是用户再点一次
+(按 URL 去重,重抓不会产生重复条目)。所以这个模块里所有「拿不准」都抛
+`GrabError`,一个字都不往库里写。口径同 `x_article` 那条「判不准一律抛」。
+
+**两条取法,按地址分流**(`classify`):
+①**X 的单条推文**走 FxTwitter 的公开接口 —— 和 `x_article` 同一个接口、同一个
+  超时、同一份 article 渲染;长文的正文也顺手取回来(复用 `x_article.merge`)。
+  **不需要登录态**,所以手动收录不受「X 取法」那个设置影响:哪条通道都收得了。
+②**其他任何网页**走一次 HTTP + 正文提取(`grab_page`),正文提取器仍然只有
+  `readable` 那一份口径。
+
+**绿泡泡的文章这条路抓不到**,这是实测结论不是猜测(2026-10-16:
+`mp.weixin.qq.com/s/<slug>` 302 到验证页,og 元信息和 `#js_content` 全没有)。
+那不是 bug,是对方的反自动化关卡 —— 我们**不绕**它,如实说清并指向真正管这件事
+的那条通道(读本机绿泡泡数据库,见 `kb/collectors/wechat_local.py`)。
+"""
+from __future__ import annotations
+
+import json
+import re
+import time
+from datetime import datetime
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
+
+from kb.feeds import grab_page, readable, registry as reg, x_article
+from kb.feeds.fetching import FeedError, body_text, canonical_url, oneline, request
+from kb.feeds.grab_page import PageUnavailable
+
+#: 这一类来源的 id。`kb.source_types.SOURCE_TYPES` 里那一条。
+KIND = 'inbox'
+#: 整条收录的墙钟上限。X 那边最多两次接口请求(推文 + 长文),网页那边一次 HTTP;
+#: 用户正盯着这颗按钮等,所以比采集那一侧(`SOURCE_SECONDS`)给得紧一些。
+GRAB_SECONDS = 40
+SHANGHAI = ZoneInfo('Asia/Shanghai')
+
+#: X 的域。**只认这几个**:判据是「等于其中一个」而不是 `endswith` ——
+#: 后者会把 `notx.com`、`fakex.com` 一起圈进来,然后拿一个陌生站点的地址去问
+#: FxTwitter(口径同 `x_login_import` 那条域判断)。
+_X_HOSTS = frozenset(('x.com', 'www.x.com', 'twitter.com', 'www.twitter.com',
+                      'mobile.twitter.com', 'mobile.x.com'))
+#: 推文地址里的 handle 和 id。`x_article._STATUS` 认的是「正文里出现过」,
+#: 这一条认的是「整个路径就是它」—— 手动收录拿到的是用户粘的那一条地址本身。
+_STATUS_PATH = re.compile(r'^/([A-Za-z0-9_]{1,20})/status/(\d+)/?$')
+#: 绿泡泡文章地址(见模块注释:这条路抓不到,要说清去处)。
+_WECHAT_HOSTS = frozenset(('mp.weixin.qq.com', 'weixin.qq.com'))
+
+#: 收件桶的名字。桶 = `inbox` 这一类下的一条订阅,**按站点一个** —— 面板上
+#: 那排卡片于是读得出「这个站存了几篇」,而条目列表能按它筛。
+_BUCKET_LABELS = {'x.com': 'X / Twitter', 'mp.weixin.qq.com': '绿泡泡公众号'}
+
+
+class GrabError(ValueError):
+    """这条链接没收下来。消息面向用户,**而且必须说清下一步**。"""
+
+
+def normalize(raw: str) -> str:
+    """用户粘进来的那一串 → 规范地址。
+
+    **规范化只有 `canonical_url` 这一份口径**(它顺手去掉 utm_*/fbclid/gclid、
+    把推文地址收成 `x.com/<handle>/status/<id>`):`put_items` 的键是
+    `sha256(kind + ':' + url)`,两处规范化不一致时同一篇内容从两条路进来会变成
+    两条记录、两篇 md、检索里两份结果。`social=True` 对非推文地址是空转。
+    """
+    value = (raw or '').strip()
+    if not value:
+        raise GrabError('请先给一条链接')
+    if '://' not in value:
+        # 从别处复制过来的地址常常掉了协议头。补 https 再按同一套规则校验 ——
+        # 补不出合法地址的照旧由 `canonical_url` 拒掉。
+        value = 'https://' + value.lstrip('/')
+    try:
+        return canonical_url(value, social=True)
+    except ValueError as e:
+        raise GrabError(f'{e}') from None
+
+
+def classify(url: str) -> str:
+    """这条地址走哪条取法:`'x'`(单条推文)或 `'web'`(其他网页)。
+
+    **只有「单条推文」算 X 那一档**:账号主页、搜索页、列表页都不是一篇内容 ——
+    它们该去「大V观点」做一条订阅,而不是被收成一篇空文章。
+    """
+    parts = urlsplit(url)
+    host = (parts.hostname or '').lower()
+    if host in _X_HOSTS:
+        if not _STATUS_PATH.match(parts.path or ''):
+            raise GrabError('这是 X 的页面但不是单条推文。想按账号持续收的话，'
+                            '去「大V观点」把它加成一条订阅。')
+        return 'x'
+    if host in _WECHAT_HOSTS:
+        raise GrabError('绿泡泡的文章挡在验证页后面，这条路抓不到。'
+                        '这类内容走「公众号」那一类：在绿泡泡里打开一次，'
+                        '它就进了本机数据库，同步公众号时会收进来。')
+    return 'web'
+
+
+def bucket_label(host: str) -> str:
+    """站点 → 收件桶的名字。认识的给人话名,其余就用它的域名。"""
+    host = (host or '').lower().removeprefix('www.')
+    if host in _X_HOSTS or host in _BUCKET_LABELS:
+        return _BUCKET_LABELS.get('x.com' if host in _X_HOSTS else host, host)
+    return host or '手动收录'
+
+
+def bucket(url: str) -> dict:
+    """这条地址归哪个收件桶(没有就建一个)。
+
+    **桶是启用着的订阅**:面板要显示它、`put_items` 要挂在它身上。它不会被
+    轮询 —— 这一类来源 `pollable=False`,crawl 阶段在 `sync.collect` 开头就
+    空转了(那一道是承重的,见它的注释)。
+
+    `extract=True`:手动收录正是「谁值得买一次提取」这个问题的肯定答案 ——
+    用户亲手挑的内容(口径见 `kb.extract.pending_docs` 和 `extract-optin.md`)。
+    `fulltext=False` 是**必须**的:那个开关会把条目扣在导出闸门外等「去原文
+    补正文」,而正文此刻已经在手里了。
+    """
+    host = (urlsplit(url).hostname or '').lower().removeprefix('www.')
+    home = f'https://{host}/'
+    for source in reg.subscriptions(KIND):
+        if source['url'] == home:
+            return source
+    try:
+        return reg.save_subscription(KIND, {'name': bucket_label(host), 'url': home,
+                                            'enabled': True, 'extract': True,
+                                            'fulltext': False})
+    except ValueError:
+        # 两条投递同时撞上同一个新站点:`UNIQUE(kind,url)` 挡住后一个。判据待在
+        # 写语句自己的约束里(元规则),所以这里只需要重查一次就拿到赢的那一条。
+        for source in reg.subscriptions(KIND):
+            if source['url'] == home:
+                return source
+        raise
+
+
+def known(url: str) -> dict | None:
+    """这条地址是不是已经在库里了。返回那一条(`kind`/`title`/`path`)或 None。
+
+    **这是一句提示,不是一道互斥**:真正防重复的是 `put_items` 的
+    `ON CONFLICT(key) DO NOTHING`(同一类来源)—— 这里多答一句是为了跨来源的
+    那种重复(一条推文已经被「大V观点」收过了),否则用户会得到第二篇一模一样的
+    文章躺在另一棵树下。
+
+    **只问 `feed_items`**:它覆盖全部订阅类来源(含手动收录自己)。公众号那棵树
+    在 kb.db 里,而绿泡泡的地址压根走不到这一步(`classify` 就拒了)。
+    """
+    with reg.db() as c:
+        row = c.execute('SELECT kind,title,path,url FROM feed_items WHERE url=? LIMIT 1',
+                        (url,)).fetchone()
+    return dict(row) if row else None
+
+
+# ------------------------------------------------------------------ X 的单条推文
+
+def _as_published(stamp) -> str:
+    """推文的 epoch 秒 → 项目里 published 的统一写法(Asia/Shanghai,分钟精度)。
+
+    格式必须和 `fetching.parse_feed`、`x_browser._as_published` 逐字一致:日报
+    按 `published` 做字符串比较筛窗口,两处格式不一样的话同一天的内容会被算进
+    不同的窗口。**宿主机时区不参与** —— 口径同元规则那一条。
+    """
+    if not isinstance(stamp, (int, float)) or isinstance(stamp, bool):
+        return ''
+    try:
+        return datetime.fromtimestamp(float(stamp), SHANGHAI).strftime('%Y-%m-%d %H:%M')
+    except (ValueError, OSError, OverflowError):
+        return ''
+
+
+def _media_lines(media) -> str:
+    """纯图 / 纯视频推文的正文:媒体地址各占一行。
+
+    **不是为了好看,是为了这一条不要变成空正文** —— 空正文一旦落库,`DO NOTHING`
+    之下永久补不回来(模块注释那一条)。地址是 X 自己的 CDN,markdown 的图片语法
+    让 vault 里那一篇点开就看得见。
+    """
+    if not isinstance(media, dict):
+        return ''
+    lines = []
+    for photo in (media.get('photos') or [])[:8]:
+        if isinstance(photo, dict) and isinstance(photo.get('url'), str):
+            lines.append(f"![图片]({photo['url']})")
+    for video in (media.get('videos') or [])[:4]:
+        if not isinstance(video, dict):
+            continue
+        link = video.get('url') if isinstance(video.get('url'), str) else ''
+        thumb = video.get('thumbnail_url') if isinstance(video.get('thumbnail_url'), str) else ''
+        if thumb:
+            lines.append(f'![视频封面]({thumb})')
+        if link:
+            lines.append(f'[视频]({link})')
+    return '\n'.join(lines)
+
+
+def _quote_line(quote) -> str:
+    """被引用的那条推文:一行 `> @谁：说了什么`。
+
+    形状同 `x_browser._entry` 给转推上下文留的那一行(`> …`)—— 下游
+    (`x_article.lead_text` / `quote_lines`)按这个前缀分辨「哪一段是作者自己
+    写的字」,换个写法就会把引用当成正文的一部分送去补长文。
+    """
+    if not isinstance(quote, dict):
+        return ''
+    author = quote.get('author') if isinstance(quote.get('author'), dict) else {}
+    who = oneline(str(author.get('screen_name') or author.get('name') or ''), 'text')
+    text = oneline(str(quote.get('text') or ''), 'text')[:280]
+    if not who and not text:
+        return ''
+    return f"> 引用 @{who}：{text}" if who else f'> 引用：{text}'
+
+
+def _tweet_payload(url: str, deadline: float) -> dict:
+    """问一次这条推文。**错误分档,一档一句话。**
+
+    这是 `x_article` 用的同一个接口(同一个 `API` 常量、同一份超时),只是取的是
+    另一半字段:`tweet.text` / `author` / `created_timestamp` / `media` / `quote`。
+    长文那一半照旧交给 `x_article` —— 它那套形状校验和「空正文一律抛」的口径
+    一个字都不该在这儿重写。
+    """
+    if not x_article.API:
+        raise GrabError('X 的公开接口被关掉了（KB_X_ARTICLE_API 是空的），'
+                        '这条推文没法收。')
+    m = _STATUS_PATH.match(urlsplit(url).path or '')
+    if not m:                            # classify 已经挡过一次,这是构造上的第二道
+        raise GrabError('这不是一条推文的地址')
+    endpoint = f'{x_article.API}/{m.group(1)}/status/{m.group(2)}'
+    try:
+        resp = request(endpoint, {'Accept': 'application/json'}, deadline=deadline)
+        payload = json.loads(resp.body.decode('utf-8', 'replace'))
+    except FeedError as e:
+        # 只取分号前那一半:后半截「请检查来源或更换订阅桥接」在这儿是胡话
+        # (口径同 `x_article.fetch`)。
+        raise GrabError(f'X 的公开接口没答复：{re.split(r"[;；]", str(e))[0].strip()}'
+                        '；稍后再试一次') from None
+    except (OSError, ValueError, UnicodeError, RecursionError) as e:
+        # `RecursionError` 不是 `ValueError`(它是 `RuntimeError` 的子类),
+        # 一份嵌几千层的回包让 `json.loads` 抛的正是它(见 `x_article.fetch`)。
+        raise GrabError(f'X 的公开接口回包读不懂：{e}') from None
+    if not isinstance(payload, dict) or not isinstance(payload.get('tweet'), dict):
+        # 删掉的、仅粉丝可见的、以及 handle 打错的都落在这一档。
+        raise GrabError('这条推文读不到：可能已被删除、设为仅关注者可见，'
+                        '或者地址里的用户名不对。')
+    return payload['tweet']
+
+
+def _grab_x(url: str, deadline: float) -> dict:
+    """一条推文 → 待入库的条目。
+
+    条目形状(标题回落成「某某 的动态」、`[:500]`、`content_kind='post'`)逐字
+    照 `x_browser._entry`:同一条推文从采集通道和手动收录两条路进来,库里那行
+    必须长得一样 —— 先到的那一份被 `DO NOTHING` 钉死,后到的覆盖不了它。
+    """
+    tweet = _tweet_payload(url, deadline)
+    author = tweet.get('author') if isinstance(tweet.get('author'), dict) else {}
+    name = oneline(str(author.get('name') or author.get('screen_name') or ''), 'text')
+    # **文字只收字符串**:强转出来的 `"{'text': …}"` 非空,会被当成「这条有正文」
+    # 落库(口径同 `x_article._must_text`)。
+    #
+    # **正文按纯文本处理、换行一个都不许压掉**:推文的分行就是作者的分段,
+    # 而 `oneline`/HTML 解析两样都会把它们抹平(`body_text(…, 'text')` 走的是
+    # `_plain_lines`,不碰 BeautifulSoup)。标题那一头反过来必须是单行。
+    raw = str(tweet.get('text')) if isinstance(tweet.get('text'), str) else ''
+    text = body_text(raw, 'text').strip()
+    pieces = [p for p in (_quote_line(tweet.get('quote')), text,
+                          _media_lines(tweet.get('media'))) if p]
+    entry = {'url': url, 'title': (oneline(text, 'text') or f'{name} 的动态')[:500],
+             'body': '\n\n'.join(pieces), 'author': name,
+             'published': _as_published(tweet.get('created_timestamp')),
+             'content_kind': 'post'}
+    # 长文那一步:`needs_article` 的判据① 正是「正文里明写着一条文章地址」,
+    # 而这个接口对长文推文给的 `text` 就是那条地址。**没有浏览器后路**(手动
+    # 收录不持有 CDP 会话,同 `bridge` 那一档),所以取不到就抛、什么都不写。
+    if x_article.needs_article(entry):
+        try:
+            got = x_article.fetch(url, timeout=max(1.0, deadline - time.monotonic()))
+        except x_article.ArticleUnavailable as e:
+            raise GrabError(f'这条推文是一篇长文，正文这次没取到：{e}；'
+                            '稍后再点一次') from None
+        if got:
+            entry = x_article.merge(entry, got)
+    if not entry['body']:
+        # 走到这儿 = 接口说「它没有长文」而推文自己又一个字一张图都没有。
+        # **不许入库**:那是一条永久空正文(模块注释那一条)。
+        raise GrabError('这条推文没有可保存的文字或图片')
+    return entry
+
+
+# ---------------------------------------------------------------------- 其他网页
+
+def _grab_web(url: str, deadline: float) -> dict:
+    """一个网页 → 待入库的条目。正文口径只有 `readable` 那一份。"""
+    try:
+        resp = request(url, grab_page.HEADERS, deadline=deadline)
+    except FeedError as e:
+        raise GrabError(f'{re.split(r"[;；]", str(e))[0].strip()}') from None
+    if problem := readable.html_problem(resp.body, dict(resp.headers)):
+        # 「这后面压根不是网页」要认出来:一份 PDF 解码出来是一段看着像文字的
+        # 乱码,提取器眼里它就是整篇正文、长度还轻松过关(口径同 `fulltext`)。
+        raise GrabError(f'{problem}')
+    html = readable.decode(resp.body, dict(resp.headers))
+    final = resp.url or url
+    try:
+        body = grab_page.page_body(html)
+    except PageUnavailable as e:
+        # **关卡只在提取失败之后才问**:一篇正常文章里出现「captcha」这个词
+        # 不该被判成验证页(见 `grab_page.gate_reason`)。
+        if reason := grab_page.gate_reason(final, html):
+            raise GrabError(f'{reason}，所以正文抓不到。'
+                            '在浏览器里打开它、把正文复制出来，或者换一个可直接'
+                            '访问的地址。') from None
+        raise GrabError(f'{e}') from None
+    meta = grab_page.page_meta(html, final)
+    host = (urlsplit(final).hostname or '').lower().removeprefix('www.')
+    return {'url': url, 'title': grab_page.title_fallback(meta['title'], body, host),
+            'body': body, 'author': meta['author'] or host,
+            'published': meta['published'], 'content_kind': 'content'}
+
+
+# -------------------------------------------------------------------------- 入口
+
+def grab(url: str, *, deadline: float | None = None) -> dict:
+    """抓一条链接的内容。**只抓,不写库**(写库是 `save`)。
+
+    分两步是刻意的:抓取要发 HTTP、可能慢、可能失败,而写库那一下要么全成要么
+    什么都没动。中间那一刻还能回答「这条已经在库里了」(`known`)。
+    """
+    url = normalize(url)
+    deadline = deadline if deadline is not None else time.monotonic() + GRAB_SECONDS
+    return (_grab_x if classify(url) == 'x' else _grab_web)(url, deadline)
+
+
+def save(entry: dict) -> dict:
+    """把抓好的条目写进 `inbox`。返回 `{'added', 'source', 'item'}`。
+
+    **`added=0` 不是失败,多半正是想要的末态**(元规则):同一条链接再投一次时
+    `put_items` 的 `DO NOTHING` 挡住它,库里那一份一个字节都没动 —— 调用方据此
+    对用户说「这条已经收过了」,而不是报错。
+    """
+    if not (entry.get('url') and entry.get('body')):
+        # 构造上的最后一道:空正文永久改不回来,所以绝不让它走到 INSERT。
+        raise GrabError('没有可保存的正文')
+    source = bucket(entry['url'])
+    added = reg.put_items(source, [entry])
+    return {'added': added, 'source': source, 'item': entry}

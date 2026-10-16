@@ -18,11 +18,15 @@ from kb.feeds import digest, fulltext, translate, x_channels
 # 这里原地再导出:`_save_result` 调的是本模块这个名字,全仓注释和回归里那些
 # `sync._within_history` 的指向也照旧成立。
 from kb.feeds.exported import item_body_md
+# 导出那一步的两个零件(frontmatter 归属、本轮新失败怎么数)在 `export_meta` 里
+# (本文件越过 700 行硬上限时拆出去的,口径没动)。这里原地再导出:本模块调的是
+# 这两个名字,全仓注释和回归里那些 `sync._kept_meta` 的指向也照旧成立。
+from kb.feeds.export_meta import _kept_meta, _new_failures, _OWNED_META  # noqa: F401
 from kb.feeds.history import _within_history
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_segments import note_retry_targets
+from kb.source_types import SOURCE_TYPES
 from kb.pipeline_state import _state, _stage
-from kb.scanner import parse_frontmatter
 
 FETCH_WORKERS = 4
 COLLECT_SECONDS = 90
@@ -248,6 +252,19 @@ def still_failing(kind, note):
 
 def collect(kind, scope):
     started = reg.now()
+    # **不可轮询的来源在这一步空转**(手动收录:内容在用户给出链接的那一刻就抓好
+    # 入库了,见 `kb/feeds/grab.py`)。它照旧参与后面那半条链 —— export 把积压的
+    # 条目写进 vault、index/extract 跟上,所以这一轮不是白跑。
+    #
+    # **必须在这儿拦住,而不是靠"它没有启用的订阅"**:收件桶是启用着的(面板上
+    # 要显示它、`put_items` 要挂在它身上),放过去就会拿桶那个站点首页地址去发
+    # 一次 HTTP —— 而 `ADAPTERS` 里压根没有 `manual` 这个适配器。
+    if not SOURCE_TYPES[kind].pollable:
+        _stage('crawl', 'ok', f'{reg.KINDS[kind]} · 没有要轮询的来源'
+                              f'（内容在收录那一刻已经抓好）')
+        return {'sources': 0, 'checked': 0, 'added': 0, 'deferred': 0,
+                'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [],
+                'partial': [], 'repointed': 0, 'stopped': False, 'failed_ids': []}
     sources = [s for s in reg.subscriptions(kind) if s['enabled'] and
                (not scope.targets or str(s['id']) in scope.targets or s['name'] in scope.targets)]
     summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0,
@@ -370,61 +387,6 @@ def collect(kind, scope):
     return summary
 
 
-# export 自己产出的 frontmatter 字段:每一轮都按 registry 里的当前事实重写。
-# 这张表之外的键都是**别人**写进这篇 md 的(提取回写的 tags 是唯一的现役例子),
-# 重导出时必须原样留下。
-_OWNED_META = ('source', 'title', 'account', 'published', 'url', 'fetched_at',
-               'content_kind', 'lang', 'translated_from', 'original_title')
-
-
-def _kept_meta(path: Path) -> dict:
-    """旧文件里那些不属于 export 的 frontmatter 字段。
-
-    重导出是整份重写这篇 md。原来只写 export 自己那几个键,于是提取阶段回写的
-    `tags`(topic/entity/flag)被一起抹掉 —— 而索引按 frontmatter 重建 doc_tags、
-    `documents.extracted_at` 又还在,提取不会再做一遍:这篇文章从此按话题再也
-    搜不到,以后每次同步都是同一个结果(2026-09-30 审查实测:一篇已提取的英文
-    旧文补译后,按原话题检索当场从 1 条归零)。
-
-    重导出原本少见(只有源内容变了才发生),翻译把它变成了常规路径:没配 key
-    那阵子按英文入库的条目补上 key 之后要重写一遍,老解析器留下的半成品补译
-    标题也要重写一遍。保留而不是重做提取,是因为标签口径没变 —— 内容还是同一
-    篇,只是换了语言,再买一次提取只是重复付钱。
-    """
-    try:
-        meta, _ = parse_frontmatter(path.read_text(encoding='utf-8'))
-    except (OSError, UnicodeDecodeError):
-        return {}                     # 还没导出过(或者读不了),没什么可留的
-    return {k: v for k, v in meta.items() if k not in _OWNED_META}
-
-
-def _new_failures(conn, queue: str, cond: str, args: list, extra: list,
-                  keys: list[str], column: str = 'translate_error') -> tuple[int, int]:
-    """这一轮刚失败、而且**还排在队列里**的那些,按"入没入过库"分两档。
-
-    返回 `(未入库的, 已入库的)`。`keys` 是这一轮真失败的那几个条目;空列表
-    (比如 `export` 被单独调用、这一轮压根没跑那一步)时两档都是 0 —— 没跑就没有
-    "本轮新失败"可言,队列里那些错误全是此前留下的。
-
-    **翻译和正文补抓共用这一份**(`column` 选哪一列的错误,`cond`/`extra` 给各自
-    那个队列判据)。两边要回答的是同一个问题:"这一轮真失败的那几条,现在还被
-    扣在队列里吗" —— 各写一遍的话,一边判红一边不判,而两处的出口规则
-    (试满 MAX_TRIES 就离开队列、不该判红)一模一样。`column` 只在这个模块里被
-    两个字面量调用,没有外部输入拼进 SQL。
-    """
-    if not keys:
-        return 0, 0
-    fresh = shipped = 0
-    ph = ','.join('?' * len(keys))
-    for t in conn.execute(
-            f"SELECT exported_hash='' AS fresh, count(*) AS n {queue} AND ({cond})"
-            f" AND {column}<>'' AND key IN ({ph}) GROUP BY fresh",
-            (*args, *extra, *keys)):
-        if t['fresh']:
-            fresh = t['n']
-        else:
-            shipped = t['n']
-    return fresh, shipped
 
 
 def export(kind: str, hold_untranslated: bool = False,

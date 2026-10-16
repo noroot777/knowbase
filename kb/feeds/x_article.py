@@ -419,6 +419,23 @@ def _one(entry: dict, session, *, deadline: float | None = None,
     return browser_fetch(session, entry['url'], deadline=deadline)
 
 
+def merge(entry: dict, got: dict) -> dict:
+    """把取到的长文并进这一条推文。**口径只有这一份**,两个消费方都过它。
+
+    三段按原顺序:转推上下文(`> …`)→ 推文自己写在推文里的介绍 → 文章正文。
+    上下文那一段**不能漏**,理由见 `quote_lines`;介绍那一段靠 `lead_text` 摘,
+    它顺手去掉那条指向长文的裸链接(那不是作者写的字)。
+
+    消费方:定时采集那条路(`fill`)和手动收录(`kb.feeds.grab`)。各写一份的话
+    同一篇长文从两条路进来会长出两种正文 —— 而先到的那一份被 `put_items` 的
+    `DO NOTHING` 钉死,另一条路再也覆盖不了它。
+    """
+    src = entry.get('body') or ''
+    parts = (quote_lines(src), lead_text(src), got['body'])
+    return {**entry, 'title': (got['title'] or entry.get('title') or '')[:500],
+            'body': '\n\n'.join(p for p in parts if p)}
+
+
 def fill(entries: list[dict], *, session=None, links_only: bool = False,
          deadline: float | None = None, should_stop=None) -> tuple[list[dict], str]:
     """把这一批里的长文正文补上。返回 (留下的条目, 没补全的原因)。
@@ -459,13 +476,7 @@ def fill(entries: list[dict], *, session=None, links_only: bool = False,
             missed += 1
             continue
         if got:
-            src = entry.get('body') or ''
-            # 三段按原顺序:转推上下文(`> …`)→ 推文自己写的介绍 → 文章正文。
-            # 上下文那一段**不能漏**,理由见 `quote_lines`。
-            parts = (quote_lines(src), lead_text(src), got['body'])
-            entry = {**entry,
-                     'title': (got['title'] or entry.get('title') or '')[:500],
-                     'body': '\n\n'.join(p for p in parts if p)}
+            entry = merge(entry, got)
         kept.append(_strip_hint(entry))
     note = ''
     if missed:

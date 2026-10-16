@@ -114,8 +114,12 @@ export async function checkSubscriptionUsability({ evaluate, wait, check, click,
   await viewport(375, 844);
   await evaluate(`$('subs-switch-social').focus(); true`);
   await key('End', 'End', 35);
-  await wait(`sourceKind === 'web' && sourceReaderItem`);
-  check('手机来源切换仅滚动标签栏且选中标签可见', await evaluate(`$('subs-switch').scrollLeft > 0 && $('subs-switch-web').getBoundingClientRect().right <= innerWidth && document.documentElement.scrollWidth <= innerWidth && window.scrollY === 0`));
+  // End 落在**最后一类来源**上,而那是哪一类由 `SOURCE_TYPES` 说了算 ——
+  // 写死 'web' 的那一版在新增一类来源时当场超时(而它要验的「切一次只滚标签栏」
+  // 跟是哪一类毫无关系)。
+  const lastKind = await evaluate(`subsCatalog[subsCatalog.length - 1].id`);
+  await wait(`sourceKind === ${JSON.stringify(lastKind)} && sourceReaderItem`);
+  check('手机来源切换仅滚动标签栏且选中标签可见', await evaluate(`$('subs-switch').scrollLeft > 0 && $('subs-switch-${lastKind}').getBoundingClientRect().right <= innerWidth && document.documentElement.scrollWidth <= innerWidth && window.scrollY === 0`));
   await screenshot('reading-mobile-375');
   await click('#source-view-manage');
   await screenshot('manage-mobile-375');

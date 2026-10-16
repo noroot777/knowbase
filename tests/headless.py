@@ -228,6 +228,21 @@ def _killpg(pgid: int) -> None:
         pass
 
 
+class SandboxBase(str):
+    """沙箱的 base URL,**顺带带着那份临时根的路径**。
+
+    是 `str` 的子类,所以既有调用点照旧把它当 URL 用(拼接、urlopen、传给探针都
+    不用改)。多出来的 `.root` 给要**查盘**的用例:界面上说「已经写进知识库了」
+    而 vault 里什么都没有,是这条链最难看出来的一种谎报 —— 验它只能去看文件
+    (见 `tests/test_grab_probe.py`)。
+    """
+
+    def __new__(cls, base: str, root: str):
+        self = super().__new__(cls, base)
+        self.root = root
+        return self
+
+
 @contextlib.contextmanager
 def fixture_server(*extra_args: str, script: str = "serve_sources.py",
                    ready: str = "/", timeout: float = 30):
@@ -271,7 +286,7 @@ def fixture_server(*extra_args: str, script: str = "serve_sources.py",
                 time.sleep(0.2)
         else:
             raise AssertionError("隔离沙箱服务没有响应")
-        yield base
+        yield SandboxBase(base, root.name)
     finally:
         reap(server)                 # 收子进程的口径只有一份(见 reap)
         root.cleanup()

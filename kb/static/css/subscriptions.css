@@ -77,3 +77,16 @@ body.subs-mode #wechat-welcome { flex:none; margin:8px 12px; padding:8px 12px; }
   .subs-mode .subs-target-toolbar { align-items:stretch; flex-direction:column; gap:8px; }
   .subs-mode .subs-target-search { max-width:none; }
 }
+
+/* ── 手动收录的投递栏 ──────────────────────────────────────────────────────
+   只在 pollable=false 那一类来源上出现(grab.js 的 applyGrabBar)。**刻意只有
+   一行**:这一页不许再长出整页一份的大卡片(来由见 docs/decisions/subs-layout.md),
+   而正文阅读区的高度是锁在可用视口上的 —— 这里每多一行,下面就少一行。 */
+.grab-bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  padding:10px 20px 12px; border-bottom:1px solid var(--line-soft); background:var(--card); }
+.grab-bar input { flex:1 1 320px; min-width:0; padding:8px 11px; border:1px solid var(--line);
+  border-radius:8px; background:var(--bg); color:var(--ink); font:13px var(--font-mono); }
+.grab-bar input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.grab-bar input:disabled { color:var(--muted); }
+.grab-hint { flex:1 1 100%; margin:0; }
+@media (max-width:720px) { .grab-bar { padding:10px 14px 12px; } }

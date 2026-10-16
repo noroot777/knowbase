@@ -19,6 +19,12 @@ class SourceType:
     url_hint: str = '输入 RSS / Atom 订阅地址'
     note: str = '读取订阅中当前提供的内容；不能保证补齐订阅之前的全部历史。'
     adapter: str = 'rss'
+    # 这一类来源**有没有可以轮询的源**。False = 内容由人逐条投进来(手动收录:
+    # 抓取发生在用户给出链接的那一刻,见 `kb/feeds/grab.py`),于是 crawl 阶段
+    # 对它空转(`kb.feeds.sync.collect` 开头那一道)—— 它参与的是后面那半条链:
+    # 导出 → 索引 → 提取。**不是"这一类来源不进管道"**:积压的条目正是靠那
+    # 半条链进知识库的,所以它照旧出现在同步中心的通道里。
+    pollable: bool = True
 
 
 SOURCE_TYPES = {
@@ -52,6 +58,21 @@ SOURCE_TYPES = {
                            '列表，正文建议打开「补抓原文」去文章页取。站点改版时这条'
                            '订阅会报错，而不是静静地变成「今天没有新文章」。',
                       adapter='page'),
+    # 手动收录:看到一篇就存下来。**它没有可轮询的源** —— 内容在用户给出链接的
+    # 那一刻就抓好入库了(`kb/feeds/grab.py`),所以 `pollable=False`、
+    # `adapter='manual'`(**刻意不在 `fetching.ADAPTERS` 里**:哪条路漏了跳过
+    # crawl 这一道,报出来的是一个说得清的 KeyError,而不是拿一个假地址去发 HTTP)。
+    # 除此之外它和别的 feed 类来源逐字一样 —— vault 树、索引扫描、检索的来源
+    # 筛选、提取开关、日报素材范围、同步中心的通道全部由 `feed_types()` 自动
+    # 派生(见 `kb/config.py`、`kb/collectors/__init__.py`)。
+    'inbox': SourceType('inbox', '手动收录', '看到就存：给一个链接，内容抓进知识库。',
+                        ('inbox',), icon='box', interval_minutes=1440,
+                        url_hint='粘贴文章或推文链接，回车存入',
+                        note='这一类不轮询：你给一个链接，正文当场抓好写进知识库。'
+                             'X 的单条推文走公开接口（长文连正文一起取），其他站点'
+                             '按文章正文提取。按站点自动归到一个收件桶里，'
+                             '抓不到正文的不会入库——重试一次的代价只是再抓一遍。',
+                        adapter='manual', pollable=False),
 }
 
 

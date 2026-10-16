@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from kb.feeds import registry as reg
+from kb.source_types import feed_types
 
 THEMES = (
     ('把手机与电脑之间的阅读接起来', '工作流笔记（样例）',
@@ -20,9 +21,17 @@ THEMES = (
 
 def populate():
     published = datetime.now().strftime('%Y-%m-%d %H:%M')
-    for kind in ('social', 'rss', 'digest', 'web'):
+    # **按 `feed_types()` 整批造,不写死一张清单** —— 新增一类来源时这张夹具
+    # 自动把它也撑开,否则胶囊栏上会多出一个空视图,而「切到最后一类」那条用例
+    # 要等的 `sourceReaderItem` 永远不出现(2026-10-16 新增「手动收录」时就是
+    # 这么红的:探针按 End 落在空的那一类上,120 次轮询全部落空)。
+    for kind, spec in feed_types().items():
+        # 不可轮询的那一类(手动收录)的「订阅」是按站点自动建的收件桶,地址就是
+        # 站点首页 —— 夹具照它的真实形态造,不要塞一个 feed 地址进去。
+        url = ('https://example.org/' if not spec.pollable
+               else f'https://example.org/{kind}.xml')
         source = reg.save_subscription(kind, {
-            'name': '长内容布局验证', 'url': f'https://example.org/{kind}.xml'})
+            'name': '长内容布局验证' if spec.pollable else 'example.org', 'url': url})
         items = []
         for index in range(90):
             title, author, body = THEMES[index % len(THEMES)]
