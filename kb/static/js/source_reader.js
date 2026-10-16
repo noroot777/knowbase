@@ -248,6 +248,19 @@ function backToSourceList() {
 // `postSnip` 原样回传):核对和落库是两个请求,中间那一下重译写回、正文补抓照样
 // 会把那一篇换成另一版 —— 后端那时按 409 拒,这一头照旧退到②(见 `RETRY_NOTE`)。
 //
+// **这一头还要报出「我摊的这一份对应盘上那一版是什么指纹」**(`doc_version`,列表
+// 那一行带来的)。核对那一步拿它和刚读到的那一版比:相等才算「屏幕上这一份就是盘
+// 上这一份」,一侧上下文失配才可以只听另一侧、才可以退到裸引文。**报不出这个数不
+// 等于同一份** —— 原来这一头什么都不报、核对那边按「两头渲染本来就不一样」默认同
+// 份,于是审查实测里盘上那一篇把原处那一段换掉、另一节新写了一句一模一样的,裸引
+// 文那一档正好命中它:收藏成功,点回去高亮的是改稿新写的那一节。
+// **那个数是按这一行内容算的,不是响应时读盘算的**(`/api/intake/{kind}/items` →
+// `kb/feeds/exported.item_body_md` → `scanner.body_version_of`):这一头摊的是 feeds.db
+// 里那一行,读盘算出来的数证明的是「刚读到的文件」—— 盘上先改稿、之后才铺这张列
+// 表的话,这一行旧正文会带着新文件那个数,核对必然相等(审查实测:阅读器那一份
+// 97aaf058、盘上 8b7eb4cb,收藏返回 200 / origin=doc,点回去高亮改稿新写的那一节)。
+// 口径在 `snip.js` 的 `sameCorpus`。
+//
 // 原来这里按 `exported_hash === content_hash` 推断「盘上那篇就是这份正文」,
 // **那个判据立不住**:它是**原文**的哈希(`kb/feeds/sync.py` 导出成功那一句写的
 // 就是 `exported_hash=content_hash`),同一篇原文重译一遍、重导出一遍,它一个
@@ -279,6 +292,9 @@ function sourceItemSnipSource(item, { original = false } = {}) {
   if (original || !item.path) return viaFeed;
   return {
     origin: 'doc', path: item.path, origin_title: title,
+    // 列表那一行报出来的「盘上那一篇此刻是哪一版」(读不出来时是空串 = 说不出,
+    // 那一头按「证明不了」办,不按「同一份」办)。见上面那段和 `sameCorpus`。
+    doc_version: item.doc_version || '',
     origin_url: item.url || '', fallback: viaFeed,
     docText: () => snipDocText(item.path),
   };

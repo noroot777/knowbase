@@ -49,6 +49,13 @@ class Hit:
     # 有效软广档位(""/soft;hard 默认已被挡掉)。给前端打标记用,口径见
     # store.promo_level_sql——衍生条目按 url 继承原文的判定。
     promo_level: str = ""
+    # **建索引那一刻这份文件的指纹**(`documents.content_hash`)。`best_chunk` 是
+    # 那一刻切下来的,所以「卡片上这一截是从哪一份正文里来的」只有这个数说得清:
+    # 收藏那一头据它判断盘上此刻那一份还是不是同一份(`kb/web/common.py` 的
+    # `indexed_doc_version`)。少了它,接口只能拿「响应这一刻读盘」的版本号冒充
+    # 展示语料的身份,而那个数对一截旧 chunk 必然"相等"(审查实测:改稿后不重建
+    # 索引再打开搜索,收藏成功、点回去高亮改稿新写的那一节)。
+    content_hash: str = ""
 
 
 @dataclass
@@ -220,5 +227,6 @@ def search(
             heading=(c["heading"] if c else ""),
             matched_by=sorted(chunk_legs.get(cid, set())),
             promo_level=levels.get(path, ""),
+            content_hash=d["content_hash"],
         ))
     return hits

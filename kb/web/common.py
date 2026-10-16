@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from kb.config import VAULT_ROOT, ScheduleUnreadable
-from kb.scanner import read_md_text
+from kb.scanner import body_version, file_hash, read_md_text
 
 _STATIC = Path(__file__).resolve().parent.parent / "static"
 
@@ -44,6 +44,36 @@ def read_doc_text(path: str) -> str:
         raise HTTPException(404, "文件不在了(可能已移动)")
     except OSError as e:
         raise HTTPException(503, f"原文暂时读不出来:{e.strerror or e}")
+
+
+def indexed_doc_version(path: str, indexed_hash: str) -> str:
+    """盘上那一篇此刻的正文版本号 —— **只在它还是建索引时那一份时才报**,否则空串。
+
+    给检索命中用。搜索卡摊的那一截(`best_chunk`)是**建索引那一刻**从这一篇切下来
+    的,存在 `chunks.text` 里;而收藏那一头要拿版本号证明「屏幕上这一份就是盘上
+    这一份」(口径在 `kb/static/js/snip.js` 的 `sameCorpus`)。所以这个数必须和
+    **摊出来那截语料同源**:`documents.content_hash` 记着建索引时这份文件的指纹
+    (`scanner.file_hash`),和此刻盘上这一份逐字节相等,才说明卡片上那一截就是从
+    现在这份正文里切出来的 —— 那时报它的正文版本号才成立。
+
+    **响应这一刻读盘算出来的版本号冒充不了它**(上一版就是这么写的):那个数证明的
+    是「刚读到的文件」,不是「屏幕上那份语料」。审查实测:建完索引之后在盘上把那一节
+    换掉、**不重建索引**,再打开搜索 —— 返回的还是旧 `best_chunk`,却带着新文件的
+    版本号,于是核对那一步两个数必然相等、弱档重新放行,收藏返回 200,点回去高亮的
+    是改稿新写的那一节。
+
+    索引落后时如实回空串(「说不出」),收藏那一头照旧不采信弱档:绑得住那一篇、
+    当场说一句「点回去可能定位不到这一处」。文件读不出来、索引里压根没有这一行
+    (`indexed_hash` 空)同样回空串,一个异常都不抛 —— 一页几十条,其中一篇刚移走
+    是常态,抛出去就是整页列不出来。
+    """
+    if not path or not indexed_hash:
+        return ""
+    try:
+        text = read_md_text(VAULT_ROOT / path)
+    except OSError:
+        return ""
+    return body_version(text) if file_hash(text) == indexed_hash else ""
 
 
 def unreadable_config(e: ScheduleUnreadable) -> HTTPException:

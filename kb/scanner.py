@@ -101,8 +101,21 @@ def body_version(text: str) -> str:
 
     事故形态、实测证据和回归在 `docs/decisions/fav-snippets.md`(硬约束一节)。
     """
-    return hashlib.sha256(
-        parse_frontmatter(text)[1].encode("utf-8")).hexdigest()[:16]
+    return body_version_of(parse_frontmatter(text)[1])
+
+
+def body_version_of(body: str) -> str:
+    """同一个数,但输入是**已经拆出来的正文**(frontmatter 之外那一截)。
+
+    给「文件还没写下去、却要说出它的正文版本号」那一头用:订阅条目面板摊的是
+    feeds.db 里那一行的正文,而阅读页回跳读的是导出的那一篇 md —— 两份语料分属
+    两处,想证明「屏幕上这一份就是盘上这一份」只能**按同一行内容算出那一篇 md 的
+    正文版本号**(`kb.feeds.exported.item_body_md` 就是那一截的唯一定义),再跟盘上
+    此刻那一份比。拿「响应这一刻读盘算出来的版本号」冒充是不成立的:那个数证明
+    的是刚读到的文件,不是屏幕上那份语料(审查实测:先改稿、再打开订阅/搜索,
+    旧正文带着新版本号,核对必然相等、弱档重新放行,点回去高亮改稿新写的那一节)。
+    """
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
 
 def frontmatter_tags(fm: dict) -> list[str]:

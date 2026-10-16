@@ -32,7 +32,7 @@ tags:
 
 {vdel}。
 
-{vfresh}。{vstale}。{vagain}。{vkept}。
+{vfresh}。{vstale}。{vagain}。{vkept}。{keptnext}
 
 {vhtml}。
 
@@ -41,6 +41,10 @@ tags:
 {movelead}{vmove}。
 
 {movespare}
+
+{sidelead}{sideq}{sidetaila}
+
+{sidelead}{sideq}{sidetailb}
 
 后面还有一段,交代它和别的工具怎么搭。
 """

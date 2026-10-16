@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from kb import pipeline
 from kb.feeds import registry as reg
 from kb.feeds import x_channels
+from kb.scanner import body_version_of
 from kb.source_types import catalog
 
 router = APIRouter(prefix='/api/intake')
@@ -65,7 +66,24 @@ def list_items(kind: str, source_id: int | None = None,
                offset: Annotated[int,Query(ge=0)] = 0, limit: Annotated[int,Query(ge=1,le=100)] = 30,
                q: Annotated[str,Query(max_length=200)] = ''):
     kind_checked(kind)
-    return reg.items(kind,source_id,offset,limit,q)
+    out = reg.items(kind,source_id,offset,limit,q)
+    # **每条都带上「我摊的这份正文对应盘上那一版是什么指纹」。** 面板上这几截正文
+    # (阅读器摊整条、列表卡摊开头那 380 字)都能「收藏此段」,而收藏那一头要拿这
+    # 个数证明「屏幕上这一份就是盘上这一份」(`kb/static/js/snip.js` 的
+    # `sameCorpus`),证明不了就不采信弱档。
+    #
+    # **这个数只能按这一行内容自己算,不能去读盘。** 摊出来的正文是 feeds.db 里
+    # 这一行(`body`/`body_zh`),而回跳那一头读的是导出的那一篇 md:两份语料分属
+    # 两处,读盘算出来的版本号证明的是「刚读到的文件」,不是「屏幕上那份语料」。
+    # 审查实测:先在盘上把原处那一段换掉、另一节新写一句同句,**然后才**加载这张
+    # 列表 —— 旧正文带着新文件的版本号,核对必然相等、弱档重新放行,收藏返回 200,
+    # 点回去高亮改稿新写的那一节。按内容算出来的那个数在这种情形下和盘上不等,
+    # 于是如实退回站外原文。`item_body_md` 是「导出写进那一篇的正文」的唯一定义
+    # (`kb/feeds/exported.py`),没导出过的(`path` 空)压根不走绑文档那一档。
+    from kb.feeds.exported import item_body_md
+    for it in out.get('items', []):
+        it['doc_version'] = body_version_of(item_body_md(it)) if it.get('path') else ''
+    return out
 
 
 class Subscription(BaseModel):

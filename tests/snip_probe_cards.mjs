@@ -144,6 +144,17 @@ const hitsReady = await until(
   `$('results').querySelectorAll('.hit[data-hit]').length >= 1`, 30000);
 check("搜索出了结果卡片", hitsReady,
   await evalJs(`$('results').textContent.slice(0, 80)`));
+// **每条命中都要报出「这一截是按哪一版切的」**(`/api/search` 的 `doc_version`)。
+// 卡片这一头和那一页摊的本来就不是同一种文本(索引剥过 `*`、卡片又只摊一截),
+// 所以核对那一步「一侧对不上」是常态 —— 而常态证明不了两份是同一份语料:缺了这个
+// 数,收藏那一头只好一律不采信弱档(这一节下面那条收藏就会退成「定位不到」)。
+// 这一份探针跑在 bind / ident 之前,盘上那几篇还没有被改过,所以**每一条都该报得
+// 出来**;索引落后时它如实报空串那一半在 ident 第 1e 格(口径和事故形态在
+// `kb/web/common.py` 的 `indexed_doc_version`)。
+const hitVers = await evalJs(`JSON.stringify(searchHits.map(h => String(h.doc_version || '')))`);
+check("每条命中都带着它那一截是按哪一版切的",
+  JSON.parse(hitVers).length > 0 && JSON.parse(hitVers).every(v => v.length > 0),
+  hitVers);
 // 选 `.snippet` 里中间那 40 个字(避开两头的空白和省略号),按**屏幕上读到的**那份
 // 文字断言 —— chunk 切在哪儿由索引决定,不该写进判据里
 const picked = await evalJs(`(() => {
@@ -169,11 +180,19 @@ if (hitShown) {
 }
 check("搜索卡片上那段命中原文选中后浮出收藏按钮", hitShown, picked);
 const hitFav = (await evalJs(`window.__favs()`)).filter(f => flat(f.quote) === flat(hit.sel));
-check("搜索卡里收下的那条:origin=doc + 命中那一篇的 path + 屏幕上那份文字",
+// `anchor_exact` 也一起钉住:这个数是**核对之后按盘上那一篇重算**的那一个
+// (`snipVerified` 的 `fix.anchored`),记的是「回跳那一刻定不定得住」。
+// **它对「搜索命中不报 `doc_version`」那一注入不敏感,如实记着**:这一节选的是
+// 一段干净的汉字,卡片和那一页上两侧上下文都对得上 —— 走的是整段锚点那一档,
+// 压根不问 `same`(实测把 `/api/search` 那个字段整个删掉,这一节只红在上面那条
+// 「有没有报出来」上)。真正搭在弱档上的红由 ident 第 1d / 1e 格给(订阅那一头
+// 一侧失配是常态)。钉它是为了把这一条的事实写全:origin / path / 引文 / 定得住。
+check("搜索卡里收下的那条:origin=doc + 命中那一篇的 path + 屏幕上那份文字 + 定得住",
   hitFav.length === 1 && hitFav[0].origin === "doc"
-  && hitFav[0].path === decodeURIComponent(hit.path || "") && hitFav[0].quote === hit.sel,
-  JSON.stringify({ got: hitFav.map(f => ({ o: f.origin, p: f.path, q: f.quote })),
-                   want: hit }));
+  && hitFav[0].path === decodeURIComponent(hit.path || "") && hitFav[0].quote === hit.sel
+  && hitFav[0].anchor_exact === 1,
+  JSON.stringify({ got: hitFav.map(f => ({ o: f.origin, p: f.path, q: f.quote,
+                                           e: f.anchor_exact })), want: hit }));
 
 // ── 3. 那个「…」不是原文里的字 ───────────────────────────────────────────────
 // 正文被截断时两处都补了一个省略号。它在那一篇里压根不存在 —— 跨过它的选区存下来

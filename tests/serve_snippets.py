@@ -245,6 +245,27 @@ FEED_LONGURL = {
     'body': 'The exported body on disk is this English paragraph only.',
 }
 
+# **原处被改稿换到别处的那一条:订阅阅读器那一头的「原处身份」。** 阅读器摊的是
+# 条目正文、盘上那一篇是它导出的那一份,两头的渲染不一样,所以「一侧上下文对不
+# 上」在这儿是常态 —— 可它证明不了「这两份是同一份语料」。审查实测:阅读器那阵子
+# 报不出版本号,盘上那一篇随后把原处那一段换掉、另一节新写了一句一模一样的,裸
+# 引文那一档正好命中它 —— 收藏成功,点回去高亮的是改稿新写的那一节。拦它的是列表
+# 那一行报出来的 `doc_version`(`/api/intake/{kind}/items`)。
+# **单独摆一条条目**:上面那一篇里一长串锚点各按前后各三十字采着,往它正文里插
+# 两段话会把那些窗口一起挪动,一格验不到的红会落在别的格上。
+MOVED_Q = '这一句留给订阅正文里原处被改稿换到别处那一下'
+MOVED_LEAD = '原处这一段先说:'
+MOVED_SPARE = '另一节这一段原本和上面那句话毫不相干,只占着一个位置。'
+MOVED_SPARE_LEAD = '另一节后来也写了一句:'
+FEED_MOVED = {
+    'url': 'https://example.org/moved-elsewhere',
+    'title': '一篇原处被改稿换掉的订阅内容',
+    'author': '第五个博客',
+    'body': (f'开头一段交代背景,先说清这条内容是干什么的。\n\n'
+             f'{MOVED_LEAD}{MOVED_Q}。\n\n{MOVED_SPARE}\n\n'
+             f'末尾还有一段收尾的话,交代接下来该看什么。'),
+}
+
 # 日报正文里探针去选的那一段。日报是模型写的 markdown,所以这里也按那个形状写。
 SNIP_DAILY = '今天最值得动手的是那条本地索引的方案'
 # **带换行和缩进的四行代码**。收藏它得到的必须还是这四行 —— 压平过的那一份是
@@ -274,6 +295,12 @@ TOOL_V_AGAIN = '这一句用来验重新打开之后又收得下'
 # 盘上那一篇**补了一段**(原句还在)之后去收的那一句:面板上这份视图是旧的,可那
 # 段话在新那一版里照旧定位得到 —— 该照存、绑新那一版,不该因为"版本号不等"就拒。
 TOOL_V_KEPT = '这一句用来验补过一段之后照旧绑得上'
+# **上面那一句的后文**:原来它后面紧跟着那句带原始 HTML 的(`TOOL_HTML_MD`),
+# 于是后文那一侧在阅读页上压根对不上 —— 那一格实际验的成了「只听另一侧」,而它
+# 要说的是「版本号不等不等于回看不了」。补一句普通的话把两件事分开:两侧都对得上
+# 的那一档不问同不同份语料、照旧放行(bind 探针第 4c 格);一侧对不上、版本号又
+# 不等的那一种该拒,由 ident 探针第 1c 节专门钉。
+TOOL_KEPT_NEXT = '后面紧跟这一句普通的话,好让上一句的后文在渲染前后两头都对得上。'
 # **条目正文里真带着一段原始 HTML 的那一句。** 图鉴抽屉按 `mdHtml` 渲染(标签成了
 # 元素、本身看不见),而阅读页把原始 HTML 当**字面文字**显示 —— 同一个文件版本,
 # 两头的文本不是同一份。跨过这一段的选区在抽屉里是连着的一句,在阅读页那一头中间
@@ -302,6 +329,17 @@ TOOL_MOVE = '同一句话应当回到我当初选中的那一处'
 TOOL_MOVE_LEAD = '丙节里本来写着:'
 TOOL_MOVE_SPARE = '丁节这一段原本和上面那句话无关。'
 TOOL_MOVE_SPARE_LEAD = '丁节后来也写了这一句:'
+# **两节里各写一遍、前文一字不差,只有后文分得出这是第几处。** 旧抽屉上选中第二
+# 处,盘上那一篇随后把第二处连后文一起换掉 —— 前文那一侧于是**唯一命中第一处**,
+# 后文那一侧一处也对不上。只听还对得上的那一侧就是把第一处冒认成他选的那一处
+# (审查实测:旧页面版本 351ade05、盘上 2c4ef0c0,收藏返回 200,点回去高亮第一
+# 节)。拦它的是「面板那一版和盘上这一版不等」—— 相等时一侧失配照旧只听另一侧
+# (那是两种渲染的常态)。**前文那一段要够三十字**(锚点最短那一档就是 30):短了
+# 窗口会够到更外面那一层,两处于是分得出来,这一格就验不到「只听一侧」了。
+SIDE_Q = '这一句两节里各写一遍,只有后文分得出第几处'
+SIDE_LEAD = '前面这三十来个字在两节里一字不差地写着,所以单凭它说不出第几处:'
+SIDE_TAIL_A = ',甲节后面接着交代本地索引怎么建、建完之后又该怎么查一遍才算完。'
+SIDE_TAIL_B = ',乙节后面接着交代远端部署要留哪几个端口、怎么收口才不漏请求。'
 # 条目正文的**最后一句**:它后面紧跟着的是抽屉里那三颗链接按钮和小节标题 ——
 # 前后文锚点必须只从正文里采,不许把界面文字当成目标文档的上下文。
 TOOL_TAIL = '交代它和别的工具怎么搭'
@@ -392,7 +430,8 @@ def build(vault: Path) -> dict:
     reg.put_items(source, [{**FEED_ITEM, 'published': published},
                            {**FEED_STALE, 'published': published},
                            {**FEED_SWAP, 'published': published},
-                           {**FEED_LONGURL, 'published': published}])
+                           {**FEED_LONGURL, 'published': published},
+                           {**FEED_MOVED, 'published': published}])
     sync.export('rss', hold_untranslated=False)
     # 两条都导出过了,再把第二条**重译一遍而不重导出** —— 照 `translate._save`
     # 的样子写:译文落库、`exported_hash` 清空、`path` 留着。这就是"屏幕上是新
@@ -421,7 +460,10 @@ def build(vault: Path) -> dict:
     tool_path.write_text(_TOOL_MD.format(
         name=TOOL_NAME, snip=SNIP_TOOL, day=day, published=published,
         vfresh=TOOL_V_FRESH, vstale=TOOL_V_STALE, vagain=TOOL_V_AGAIN,
-        vkept=TOOL_V_KEPT, vhtml=TOOL_HTML_MD, vdel=TOOL_DEL_MD,
+        vkept=TOOL_V_KEPT, keptnext=TOOL_KEPT_NEXT,
+        sidelead=SIDE_LEAD, sideq=SIDE_Q,
+        sidetaila=SIDE_TAIL_A, sidetailb=SIDE_TAIL_B,
+        vhtml=TOOL_HTML_MD, vdel=TOOL_DEL_MD,
         vtwin=TOOL_TWIN, twinlead=TOOL_TWIN_LEAD,
         vmove=TOOL_MOVE, movelead=TOOL_MOVE_LEAD, movespare=TOOL_MOVE_SPARE),
         encoding='utf-8')
@@ -526,6 +568,8 @@ def build(vault: Path) -> dict:
                          (FEED_SWAP['url'],)).fetchone()
         longurl = c.execute('SELECT key, path FROM feed_items WHERE url=?',
                             (FEED_LONGURL['url'],)).fetchone()
+        moved = c.execute('SELECT key, path FROM feed_items WHERE url=?',
+                          (FEED_MOVED['url'],)).fetchone()
     from kb.norm import entity_norm
     return {'docPath': row['path'], 'itemKey': row['key'], 'dailyDate': day,
             'dailyDateOld': old_day, 'snipDailyOld': SNIP_DAILY_OLD,
@@ -549,6 +593,9 @@ def build(vault: Path) -> dict:
             'snipStale': SNIP_STALE, 'hangMark': HANG_MARK,
             'widePrefix': 'x' * 29, 'refTitle': FEED_ITEM['title'],
             'longUrlKey': longurl['key'], 'snipLongUrl': SNIP_LONGURL,
+            'movedKey': moved['key'], 'movedPath': moved['path'],
+            'movedQ': MOVED_Q, 'movedLead': MOVED_LEAD,
+            'movedSpare': MOVED_SPARE, 'movedSpareLead': MOVED_SPARE_LEAD,
             'snipChat3': SNIP_CHAT_3, 'snipList': SNIP_LIST,
             'snipListDup': SNIP_LIST_DUP, 'snipListMarked': SNIP_LIST_MARKED,
             'cssClass': SNIP_CSS_CLASS, 'snipCss1': SNIP_CSS_1, 'snipCss2': SNIP_CSS_2,
@@ -569,6 +616,8 @@ def build(vault: Path) -> dict:
             'toolVFresh': TOOL_V_FRESH,
             'toolVStale': TOOL_V_STALE, 'toolVAgain': TOOL_V_AGAIN,
             'toolVKept': TOOL_V_KEPT, 'toolHtmlSeen': TOOL_HTML_SEEN,
+            'sideQ': SIDE_Q, 'sideLead': SIDE_LEAD,
+            'sideTailA': SIDE_TAIL_A, 'sideTailB': SIDE_TAIL_B,
             'toolDelText': TOOL_DEL_TEXT, 'toolDelMd': TOOL_DEL_MD,
             'toolTwin': TOOL_TWIN, 'toolTwinLead': TOOL_TWIN_LEAD,
             'toolMove': TOOL_MOVE, 'toolMoveLead': TOOL_MOVE_LEAD,

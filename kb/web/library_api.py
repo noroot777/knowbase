@@ -12,7 +12,7 @@ from kb import projects as projlib
 from kb import store
 from kb.scanner import body_version
 from kb.search import Filters, search
-from kb.web.common import VAULT_NAME, read_doc_text
+from kb.web.common import VAULT_NAME, indexed_doc_version, read_doc_text
 
 router = APIRouter()
 
@@ -46,6 +46,13 @@ def api_search(
                 **h.__dict__,
                 "summary": d["summary"] if d else "",
                 "entities": ents,
+                # **这一截命中的正文是按哪一版切的**(卡片上那截原文也能收藏):
+                # 收藏那一头拿它证明「卡片这一份就是盘上这一份」。判据是**建索引
+                # 时那份文件的指纹和此刻盘上这一份逐字节相等** —— `best_chunk` 是
+                # 建索引那一刻切下来的,索引落后时这一截就不是盘上这一份里的字,
+                # 那时如实报空串(「说不出」),口径和事故形态在
+                # `common.indexed_doc_version`。
+                "doc_version": indexed_doc_version(h.path, h.content_hash),
                 "vault": VAULT_NAME,
             })
         return {"hits": out}

@@ -4,7 +4,7 @@
 // (`snip_probe_shown.mjs`)、收下来之后还作不作数(`snip_probe_edges.mjs`、
 // `snip_probe_chat.mjs`)、列表里那几截原文(`snip_probe_cards.mjs`)、绑在哪一处
 // 哪一版(`snip_probe_bind.mjs`)。这一份管的是**位置身份不许由"现在正好对得上"
-// 推出来**,四格 + 独立阅读页那一份实现自己再判一次:
+// 推出来** —— 一档一格,外加独立阅读页那一份实现自己再判一次:
 //
 //   1 **核对那一步不许凭裸引文命中就算过。** 图鉴抽屉开着的那几分钟里,盘上那一篇
 //     把选中那一处连它的引子一起换掉、另一处一字不差的同句还在 —— 按裸引文命中
@@ -15,6 +15,27 @@
 //     来,拦它的是「面板那一版和盘上这一版不等」这个正面证据 —— 否则版本号被偷换
 //     成新那一版、落库返回 200,点回去高亮在他从没选过的那一节(审查实测:旧页面
 //     版本 eadb7fb8、核对读到 15f02774,保存行的 doc_version 被换成后者)。
+//  1c **「只听另一侧」那一档同样不许靠它定身份。** 两节里各写一遍、前文一字不差,
+//     旧抽屉上选的是乙节;盘上把乙节连后文一起换掉 —— 前文那一侧于是唯一命中甲
+//     节,后文那一侧一处也对不上。核对那一步要是照旧只听另一侧,库里那条就指着他
+//     从没选过的甲节(审查实测:旧页面 351ade05、盘上 2c4ef0c0,返回 200 / id=1)。
+//  1d **订阅阅读器那一头:原来它压根报不出「我摊的是哪一版」。** 于是「两侧全失配」
+//     被按「两种渲染不一样」默认成同一份语料,裸引文那一档照旧放行 —— 盘上把原处
+//     那一段换掉、另一节新写一句同句,收藏返回 200 / origin=doc,点回去高亮的是
+//     改稿新写的那一节(审查实测:阅读器那一份 7f1aca69、盘上 8dc78146)。这一格
+//     **先钉住列表那一行真报出了版本号、而且和 `/api/doc` 是同一个数** —— 不然
+//     那条拒绝只是「压根说不出版本」,把这个字段整个删掉也照旧全绿;改稿之前那一句
+//     绑的就是那一篇,这条反向判据排在改稿**之前**(之后再也回不去了)。
+// 1d-bis **改稿发生在列表铺出来之前。** 这一头摊的是 feeds.db 里那一行,所以那个数
+//     只能按**这一行内容**算(`exported.item_body_md`)。响应时读盘算的话,这一行旧正文
+//     会带上**新文件**的版本号,核对必然相等、弱档重新放行,点回去高亮改稿新写的
+//     那一节(审查实测:阅读器那一份 97aaf058、盘上 8b7eb4cb,返回 200 / id=2)。
+//  1e **搜索卡那一头:索引比盘上旧的时候如实说不出版本号。** `best_chunk` 是建索引
+//     那一刻切下来的,改稿之后没重建索引,卡片上躺的就是一截旧正文 —— 响应时读盘
+//     算的那个数于是必然"相等",弱档重新放行(审查实测:建索引时 9b885a9a、盘上
+//     8ae932ab,返回 200 / id=1,回看高亮改稿新写的那一节)。判据是**建索引时那份
+//     文件的指纹和此刻盘上这一份逐字节相等**才报,否则空串;而「说不出」一律按
+//     「证明不了」办,收藏照旧绑那一篇文章、但如实记 `anchor_exact=0`。
 //   2 **采集那一刻就定不住的锚点,往后哪一档都不许定位。** 前后各两百字也一字不差
 //     的两处,采集那一刻谁也说不出用户选的是第几处(屏幕上当场说了一句"可能定位
 //     不到");后来原处被整节删掉,剩下的那一处成了整段锚点的唯一命中 —— 采信它
@@ -51,6 +72,16 @@ const rowsOf = q => evalJs(`(async () => {
   return JSON.stringify(d.favorites.filter(f => f.quote === ${js(q)}).map(f => ({
     o: f.origin, p: f.path || null, u: f.quote_unique, e: f.anchor_exact,
     pre: f.prefix, suf: f.suffix })));
+})()`);
+
+/** 把库里引文等于 q 的收藏全删掉。两处要它:**回跳**那几格按「引文 + 后文」找
+ *  按钮,前面几份探针留下的同引文收藏不清掉就分不清点中的是哪一条;**反过来钉
+ *  一边**的那几格要让「库里这一条是什么」只剩一个答案。*/
+const dropFavs = q => evalJs(`(async () => {
+  const d = await fetch('/api/favorites?status=inbox').then(r => r.json());
+  for (const f of d.favorites.filter(x => x.quote === ${js(q)}))
+    await fetch('/api/favorites/' + f.id, { method: 'DELETE' });
+  return true;
 })()`);
 
 /** 现摆一份日报正文(产品代码里那个唯一写入口),出处记成夹具那一天。*/
@@ -182,6 +213,226 @@ check("一行都没落库(没有一条指着他从没选过的那一节)",
   (await rowsOf(fx.toolMove)) === "[]", await rowsOf(fx.toolMove));
 await evalJs(`closeToolDrawer(); true`);
 
+// ── 1c. 两节里各写一遍、前文一字不差:只听还对得上的那一侧就冒认了第一处 ─────
+// 上面两格拦的是**裸引文**那一档(两侧全失配),这一格拦的是**只听另一侧**那一档
+// —— 审查实测的另一条形状。旧抽屉上选的是乙节那一处,盘上那一篇随后把乙节连后文
+// 一起换掉:前文那一侧(两节一字不差)于是**唯一命中甲节**,后文那一侧一处也对不
+// 上。「一侧对不上」在核对这一步本来是常态(两头的渲染不一样),可常态证明不了
+// 「这两份是同一份语料」—— 版本号不等时照旧只听另一侧,换来的就是一条指着甲节的
+// 收藏(审查实测:旧页面 351ade05、盘上 2c4ef0c0,返回 200 / id=1,回看高亮第一节)。
+// **反面那一边在 bind 第 4c 格**:同样是版本号不等,可盘上只是末尾补了一段、两侧
+// 上下文都还对得上 —— 那一条照旧收得下、绑新那一版,提示里不许出现「刷新」。
+await boot();
+await evalJs(`switchTab('gallery'); true`);
+await until(`typeof openToolDrawer === 'function'`, 15000);
+await evalJs(`openToolDrawer(${js(fx.toolNorm)}); true`);
+if (!await until(`$('td-entries').textContent.split(${js(fx.sideQ)}).length - 1 === 2`,
+  25000)) throw new Error("图鉴抽屉没铺出两节各一处那一句");
+const sideSeen = () => times(`$('td-entries').textContent`, fx.sideQ);
+const sideLeadSeen = () => times(`$('td-entries').textContent`, fx.sideLead + fx.sideQ);
+check("抽屉上这句话摆着两处、连前文也一字不差(版本号就是这一刻这一份)",
+  (await sideSeen()) === 2 && (await sideLeadSeen()) === 2,
+  `屏幕上 ${await sideSeen()} 处 / 带同一段前文的 ${await sideLeadSeen()} 处`);
+check("沙箱把乙节那一处连后文一起换掉了",
+  (await sandbox("drop", fx.toolPath, fx.sideQ + fx.sideTailB)) === 200);
+const sideDisk = await diskText();
+check("盘上还剩甲节那一处(所以下面那条拒绝不是因为这段话不在了)",
+  sideDisk.split(fx.sideQ).length - 1 === 1 && sideDisk.includes(fx.sideQ + fx.sideTailA),
+  `盘上 ${sideDisk.split(fx.sideQ).length - 1} 处`);
+check("屏幕上那两处没跟着变(抽屉就是那一刻读到的那一份)", (await sideSeen()) === 2,
+  `屏幕上 ${await sideSeen()} 处`);
+await appToastClear();
+const sideTake = await snip("#td-entries", fx.sideQ, 2);
+check("旧抽屉上乙节那一处照旧选得中、按钮照旧点得下", sideTake.shown,
+  `picked=${sideTake.picked}`);
+const sideToast = await toast();
+check("如实说面板上这份正文旧了、让刷新再收藏(没拿前文那一侧的唯一命中当原处)",
+  sideToast.includes("刷新"), sideToast);
+check("一行都没落库(没有一条指着甲节那一处)", (await rowsOf(fx.sideQ)) === "[]",
+  await rowsOf(fx.sideQ));
+// 反过来钉一边:**刷新之后(版本号跟上了)剩下那一处照旧收得下** —— 拦住的是
+// 「旧页面 + 他选的那一处没了」,不是「一侧对不上就一律收不下」
+await boot();
+await evalJs(`switchTab('gallery'); true`);
+await until(`typeof openToolDrawer === 'function'`, 15000);
+await evalJs(`openToolDrawer(${js(fx.toolNorm)}); true`);
+await until(`$('td-entries').textContent.includes(${js(fx.sideQ)})`, 25000);
+check("刷新之后屏幕上跟盘上一样只剩甲节那一处", (await sideSeen()) === 1,
+  `屏幕上 ${await sideSeen()} 处`);
+await appToastClear();
+const sideAgain = await snip("#td-entries", fx.sideQ, 1);
+check("剩下那一处照旧收得下", sideAgain.shown, `picked=${sideAgain.picked}`);
+const sideRow = JSON.parse(await rowsOf(fx.sideQ));
+check("而且绑的是那一篇、按新那一份算出了定得住、后文记的是甲节那一段",
+  sideRow.length === 1 && sideRow[0].o === "doc" && sideRow[0].p === fx.toolPath
+  && sideRow[0].u === 1 && sideRow[0].e === 1
+  && sideRow[0].suf.startsWith(fx.sideTailA.slice(0, 8)), JSON.stringify(sideRow));
+await evalJs(`closeToolDrawer(); true`);
+
+// ── 1d. 订阅阅读器:同一件事,而这一头原来压根报不出「我摊的是哪一版」 ─────────
+// 审查实测的第三条形状。阅读器摊的是条目正文、盘上那一篇是它导出的那一份,两头的
+// 渲染不一样,所以「两侧上下文都对不上」在这儿是常态 —— 原来核对那一步据此默认
+// 「这两份是同一份」,裸引文那一档于是照旧放行:盘上那一篇把原处那一段换掉、另一
+// 节新写了一句一模一样的,收藏返回 200 / origin=doc,点回去高亮的是改稿新写的那
+// 一节(审查实测:阅读器那一份 7f1aca69、盘上 8dc78146)。
+// 拦它的是**列表那一行报出来的 `doc_version`**(`/api/intake/{kind}/items`)——
+// 所以**先钉住它真有这个数、而且和 `/api/doc` 报的是同一个**:缺了这两条,下面
+// 那条拒绝就只是「压根说不出版本」,把这个字段整个删掉也照旧全绿。
+// **那个数只能按这一行内容自己算**(`exported.item_body_md` → `body_version_of`),
+// 不许响应时去读盘:读盘算出来的是「刚读到的文件」,而这一头摊的是 feeds.db 里
+// 那一行 —— 第 1d-bis 格钉的就是这一条(改稿发生在列表铺出来**之前**)。
+await boot();
+await evalJs(`switchTab('subs'); true`);
+if (!await until(`!!document.getElementById('subs-switch-rss')`, 25000))
+  throw new Error("订阅面板没列出 rss 那一档");
+await evalJs(`document.getElementById('subs-switch-rss').click(); true`);
+if (!await until(`typeof sourceRows !== 'undefined'
+  && sourceRows.some(r => r.key === ${js(fx.movedKey)})`, 30000))
+  throw new Error("订阅列表没列出改稿那一条");
+const rowVer = await evalJs(`String((sourceRows.find(
+  r => r.key === ${js(fx.movedKey)}) || {}).doc_version || '')`);
+const docVer = () => evalJs(`fetch('/api/doc?path='
+  + encodeURIComponent(${js(fx.movedPath)})).then(r => r.json())
+  .then(d => String(d.version || ''))`);
+check("订阅列表那一行报出了「我摊的这一截对应盘上那一版」",
+  rowVer.length > 0 && rowVer === await docVer(),
+  `列表 ${rowVer} / 接口 ${await docVer()}`);
+await evalJs(`readSourceItem(${js(fx.movedKey)}); true`);
+if (!await until(`$('source-reader-body').textContent.includes(${js(fx.movedQ)})`, 20000))
+  throw new Error("订阅阅读器没摊开改稿那一条");
+// **反过来钉一边,而且要排在改稿之前**:没改稿的时候这一句绑的就是那一篇导出稿。
+// 放到后面做不到 —— 文件一旦被改,这一行内容和盘上那一份就真的不是一回事了,
+// 刷新也回不去(那正是下面 1d-bis 的结论)。
+await appToastClear();
+const movedOk = await snip("#source-reader-body", fx.movedQ);
+check("改稿之前那一句收得下", movedOk.shown, `picked=${movedOk.picked}`);
+const movedOkRow = JSON.parse(await rowsOf(fx.movedQ));
+check("而且绑的就是那一篇导出稿(拦住的是改稿,不是「订阅正文从此绑不了文档」)",
+  movedOkRow.length === 1 && movedOkRow[0].o === "doc"
+  && movedOkRow[0].p === fx.movedPath, JSON.stringify(movedOkRow));
+await dropFavs(fx.movedQ);
+// 两次改稿:原处那一段换掉,另一节换成「也写了这一句」
+check("沙箱把原处那一段换掉了",
+  (await sandbox("drop", fx.movedPath, fx.movedLead + fx.movedQ)) === 200);
+check("沙箱在另一节新写了一句一模一样的",
+  (await sandbox("drop", fx.movedPath, fx.movedSpare,
+     fx.movedSpareLead + fx.movedQ + "。")) === 200);
+const movedDisk = await evalJs(`fetch('/api/doc?path='
+  + encodeURIComponent(${js(fx.movedPath)})).then(r => r.json())
+  .then(d => String(d.content || ''))`);
+check("盘上这句话也只有一处 —— 可那一处是新写在另一节的(原处的引子没了)",
+  movedDisk.split(fx.movedQ).length - 1 === 1
+  && movedDisk.includes(fx.movedSpareLead + fx.movedQ)
+  && !movedDisk.includes(fx.movedLead + fx.movedQ),
+  `盘上 ${movedDisk.split(fx.movedQ).length - 1} 处 / 新引子在=${
+    movedDisk.includes(fx.movedSpareLead + fx.movedQ)}`);
+check("屏幕上那一份没跟着变(阅读器就是那一刻读到的那一份)",
+  await evalJs(`$('source-reader-body').textContent.includes(
+    ${js(fx.movedLead + fx.movedQ)})`) === true, "屏幕上仍是原处那一段");
+await appToastClear();
+const movedTake = await snip("#source-reader-body", fx.movedQ);
+check("旧阅读器上那一句照旧选得中、按钮照旧点得下", movedTake.shown,
+  `picked=${movedTake.picked}`);
+const movedRow = JSON.parse(await rowsOf(fx.movedQ));
+check("它退回了站外原文那一档,一条都没指着改稿新写的那一节",
+  movedRow.length === 1 && movedRow[0].o === "feed" && movedRow[0].p === null,
+  JSON.stringify(movedRow));
+const movedToast = await toast();
+check("而且如实说了退的是哪一种(核对不上,不是一句光秃秃的成功)",
+  movedToast.includes("核对不上") && movedToast.includes("站外原文"), movedToast);
+// ── 1d-bis. 改稿发生在列表铺出来**之前**:报出来的那个数不许跟着盘上走 ────────
+// 上面那一格里改稿发生在加载之后,所以「列表那一行报的数」和「盘上此刻那一版」
+// 本来就不等。**真正的坑是倒过来的那个时序**:盘上那一篇先改,之后才打开订阅、
+// 铺列表、摊正文 —— 响应那一刻去读盘的话,这一行旧正文会带上**新文件**的版本号,
+// 核对那一步两个数必然相等,弱档重新放行,收藏返回 200 / origin=doc,点回去高亮
+// 的是改稿新写的那一节(审查实测:阅读器那一份 97aaf058、盘上 8b7eb4cb)。
+// 这一头摊的是 feeds.db 里那一行,所以那个数只能按**这一行内容**算
+// (`exported.item_body_md`):盘上那一篇已经被改过,两个数于是不等。
+await dropFavs(fx.movedQ);
+await boot();
+await evalJs(`switchTab('subs'); true`);
+await until(`!!document.getElementById('subs-switch-rss')`, 25000);
+await evalJs(`document.getElementById('subs-switch-rss').click(); true`);
+await until(`typeof sourceRows !== 'undefined'
+  && sourceRows.some(r => r.key === ${js(fx.movedKey)})`, 30000);
+const staleVer = await evalJs(`String((sourceRows.find(
+  r => r.key === ${js(fx.movedKey)}) || {}).doc_version || '')`);
+const diskVer = await docVer();
+check("列表那一行报的还是「我摊的这份正文」那个数 —— 和盘上此刻那一份不等",
+  staleVer.length > 0 && diskVer.length > 0 && staleVer !== diskVer,
+  `列表 ${staleVer} / 盘上 ${diskVer}`);
+await evalJs(`readSourceItem(${js(fx.movedKey)}); true`);
+await until(`$('source-reader-body').textContent.includes(${js(fx.movedQ)})`, 20000);
+check("摊出来的还是原处那一段(改稿之后才加载,数据库里那一行没跟着变)",
+  await evalJs(`$('source-reader-body').textContent.includes(
+    ${js(fx.movedLead + fx.movedQ)})`) === true, "屏幕上仍是原处那一段");
+await appToastClear();
+const staleTake = await snip("#source-reader-body", fx.movedQ);
+check("改稿之后才加载的那一页上,那一句照旧选得中、按钮照旧点得下", staleTake.shown,
+  `picked=${staleTake.picked}`);
+const staleRow = JSON.parse(await rowsOf(fx.movedQ));
+check("它照旧退回站外原文 —— 旧正文没有被标成新那一版、也没指着改稿新写的那一节",
+  staleRow.length === 1 && staleRow[0].o === "feed" && staleRow[0].p === null,
+  JSON.stringify(staleRow));
+await dropFavs(fx.movedQ);
+
+// ── 1e. 搜索卡:索引比盘上旧时,如实说不出版本号(「说不出」不等于「同一份」)──
+// 搜索卡摊的那一截(`best_chunk`)是**建索引那一刻**从那一篇切下来的,存在
+// `chunks.text` 里。盘上那一篇后来被改稿、还没重建索引的那几分钟(或者几天),
+// 卡片上躺的就是一截**旧正文** —— 而响应那一刻去读盘算版本号的话,这一截旧文字
+// 会带上新文件的那个数:核对必然相等、弱档重新放行,收藏返回 200,点回去高亮的是
+// 改稿新写的那一节(审查实测:建索引时 9b885a9a、盘上 8ae932ab)。
+// 口径在 `kb/web/common.py` 的 `indexed_doc_version`:**只有建索引时那份文件的
+// 指纹和此刻盘上这一份逐字节相等才报**,否则空串 =「说不出」。而「说不出」一律
+// 按「证明不了」办(`snip.js` 的 `sameCorpus`),不按「同一份」办。
+// 语料借上面那一篇改稿过的订阅条目:1d 已经把它在盘上改掉了、索引没重建,
+// 正好就是这个时序。
+const hitsOfPath = (q, path) => evalJs(`(async () => {
+  const d = await fetch('/api/search?q=' + encodeURIComponent(${js(q)})
+    + '&top_k=20').then(r => r.json());
+  const h = (d.hits || []).find(x => x.path === ${js(path)});
+  return JSON.stringify({ n: (d.hits || []).length, got: !!h,
+    v: h ? String(h.doc_version || '') : null });
+})()`);
+const movedHit = JSON.parse(await hitsOfPath("改稿换到别处", fx.movedPath));
+if (!movedHit.got)
+  throw new Error("搜索没命中那一篇改稿过的订阅稿:" + JSON.stringify(movedHit));
+check("索引比盘上旧的那一条,如实报不出版本号(不拿「刚读到的文件」冒充)",
+  movedHit.v === "", JSON.stringify(movedHit));
+// 反过来钉一边:**没动过的那一篇照旧报得出,而且就是 `/api/doc` 报的那个数** ——
+// 不然「一律回空串」也能让上面那条绿。挑的是**没有任何探针改过的**那一篇
+// (`stalePath`:那一条的译文换过、可盘上那份导出稿一个字没动);`docPath` 不行,
+// bind 那一份已经在它身上验过「读取与提交之间换版」,此刻它的索引本来就旧了。
+const freshHit = JSON.parse(await hitsOfPath("English", fx.stalePath));
+if (!freshHit.got)
+  throw new Error("搜索没命中那一篇没动过的导出稿:" + JSON.stringify(freshHit));
+const freshDisk = await evalJs(`fetch('/api/doc?path='
+  + encodeURIComponent(${js(fx.stalePath)})).then(r => r.json())
+  .then(d => String(d.version || '')).catch(() => '')`);
+check("没动过的那一条照旧报得出,而且和 `/api/doc` 是同一个数",
+  freshHit.v && freshHit.v === freshDisk, `${freshHit.v} / ${freshDisk}`);
+// 后果落在收藏上:卡片上那一截旧正文照旧收得下(它绑得住那一篇文章),可**不许
+// 声称定得住** —— 盘上那一句此刻只剩改稿新写在另一节的那一处,前文那一侧一处也
+// 对不上,于是如实记 `anchor_exact=0`,屏幕上当场说一句「点回去可能定位不到」。
+await dropFavs(fx.movedQ);
+await boot();
+await evalJs(`switchTab('search'); $('q').value = '改稿换到别处'; doSearch(); true`);
+if (!await until(`[...document.querySelectorAll('.hit[data-hit] .snippet')]
+  .some(n => (n.textContent || '').includes(${js(fx.movedQ)}))`, 30000))
+  throw new Error("搜索卡上没摊出那一截旧正文");
+await appToastClear();
+const cardTake = await snip("#results", fx.movedQ);
+check("搜索卡上那一截旧正文照旧选得中、按钮照旧点得下", cardTake.shown,
+  `picked=${cardTake.picked}`);
+const cardRow = JSON.parse(await rowsOf(fx.movedQ));
+check("它绑那一篇文章、但如实记下「当时定不住」(e=0),没拿另一节那一处当原处",
+  cardRow.length === 1 && cardRow[0].o === "doc" && cardRow[0].p === fx.movedPath
+  && cardRow[0].e === 0, JSON.stringify(cardRow));
+const cardToast = await toast();
+check("而且当场说了一句「点回去可能定位不到这一处」",
+  cardToast.includes("定位不到"), cardToast);
+await dropFavs(fx.movedQ);
+
 // ── 2. 采集那一刻整段锚点就定不住:这件事要跟着收藏落库 ──────────────────────
 // 两节一字不差、连前后各两百多字也一字不差(锚点三档 30/80/200 都分不出两处)。
 // 采集那一刻屏幕上就说了一句「可能定位不到这一处」—— 那句话要跟着落库,不然
@@ -271,14 +522,6 @@ check("这一下一处也不许高亮", (await hi()) === -1, String(await hi()))
 // 锚点借 bind 第 1 节那一组(两侧都还在、交集唯一,它那一头钉着落回第一处),
 // **两条只差 `e` 这一个数**:0 → 一个字都不许高亮;1 → 照旧落回那一处。
 await boot();                   // 上一格现摆过日报正文,这一格要的是盘上那一份
-/** 把库里引文等于 q 的收藏全删掉。回跳按钮按「引文 + 后文」找,前面几份探针留下
- *  的同引文收藏不清掉就分不清点中的是哪一条。*/
-const dropFavs = q => evalJs(`(async () => {
-  const d = await fetch('/api/favorites?status=inbox').then(r => r.json());
-  for (const f of d.favorites.filter(x => x.quote === ${js(q)}))
-    await fetch('/api/favorites/' + f.id, { method: 'DELETE' });
-  return true;
-})()`);
 /** 手搭一条 origin=daily 的收藏:锚点由探针给,`e` 是这一格唯一的变量。*/
 const putDaily = e => evalJs(
   `fetch('/api/favorites', { method: 'POST',
