@@ -197,9 +197,9 @@ try {
         done: true, content_ok: false, owing: '收下的那一份看不出是正文' }),
         { status: 200, headers: { 'Content-Type': 'application/json' } }));
     };`);
-  check("收下的内容看不出是正文:不说已写入,并给出重投这条出路",
+  check("收下的内容看不出是正文:不说已写入,并指向重抓这条出路",
         !/已写入知识库/.test(bad.hint) && /看不出是正文/.test(bad.hint)
-          && /再投一次/.test(bad.hint) && bad.stage === 'pending', JSON.stringify(bad));
+          && /重新抓一次/.test(bad.hint) && bad.stage === 'pending', JSON.stringify(bad));
 
   // 9b. **反过来钉一边**:快照还停在起跑之前那一轮时只是轮询还没回来,不许提前
   //     收尾 —— 提交之后面板立刻刷一次,那一刻看到的正是这张旧快照。
@@ -248,6 +248,47 @@ try {
   check("提交断在半路、库里也确实没有:如实说没存下来并留着那条链接",
         /没存下来/.test(lostIt.hint) && lostIt.stage === 'failed'
           && lostIt.left === 'https://example.org/posts/cut-wire', JSON.stringify(lostIt));
+
+  // 12. **错存的唯一出路是那颗「重新抓一次」。** 质量那一道只认得出我们认得出的
+  //     坏内容(通篇复读那一类),「五段各不相同的会员说明」过得了关、从此
+  //     `content_ok` 恒真 —— 恢复出口要是也架在它上面,这种错存一辈子换不回来。
+  //     所以只要库里有这一行,按钮就得在;换不换得成由后端的六道准入和 CAS 决定。
+  await evalJs(`$('grab-url').value = 'https://example.org/posts/manual-one'; true`);
+  if (!await until(`!$('grab-go').disabled`, 10000) || !await clickAt("#grab-go"))
+    throw new Error("点不到「存入知识库」");
+  if (!await until(`!grabBusy && grabKnown === true`, 60000))
+    throw new Error("重复投递没落地");
+  check("库里有这一行时「重新抓一次」才露面",
+        await evalJs(`$('grab-refetch').hidden === false`),
+        await evalJs(`$('grab-hint').textContent`));
+  // 真点它:沙箱那一页内容没变,后端如实说「和它一样」而**不谎报完成** ——
+  // 这句话本身证明 refetch 传到了后端(不带它的重复投递回的是「已经在知识库里了」)。
+  if (!await clickAt("#grab-refetch")) throw new Error("点不到「重新抓一次」");
+  if (!await until(`!grabBusy && grabStage !== ''`, 60000)) throw new Error("重抓没回来");
+  const again = JSON.parse(await evalJs(
+    `JSON.stringify({ hint: $('grab-hint').textContent, stage: grabStage })`));
+  check("重抓到的和库里那一份一样:如实说没换成,不说已完成",
+        again.stage === 'pending' && /一样|已经有人换过/.test(again.hint)
+          && !/已写入知识库/.test(again.hint), JSON.stringify(again));
+  check("没换成之后那颗按钮还在(这不是终态)",
+        await evalJs(`$('grab-refetch').hidden === false`));
+  // 12b. 换成了的那一档:面板要说清库里那一份被换掉了,并接着等写入知识库。
+  const swapped = JSON.parse(await evalJs(`(async () => {
+    const real = window.fetch;
+    window.fetch = (u, o) => (String(u).includes('/api/grab') && o && o.method === 'POST')
+      ? (window.fetch = real, Promise.resolve(new Response(JSON.stringify({ ok: true,
+          duplicate: true, replaced: true, done: false, content_ok: true,
+          pipeline: 'started', run: 'r-swap', url: 'https://example.org/posts/manual-one',
+          title: '真正的文章', detail: '你要求重新抓一次，已经按这次重抓到的内容换掉，正在写入知识库' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } })))
+      : real(u, o);
+    await refetchGrab();
+    window.fetch = real;
+    return JSON.stringify({ hint: $('grab-hint').textContent, stage: grabStage, run: grabRun });
+  })()`));
+  check("换成了:说清那一份被换掉,并继续等写进知识库",
+        swapped.stage === 'writing' && /换掉/.test(swapped.hint)
+          && swapped.run === 'r-swap', JSON.stringify(swapped));
 
 } catch (err) {
   check("探针跑完", false, err.message);

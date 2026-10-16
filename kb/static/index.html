@@ -301,6 +301,7 @@
              aria-label="要收录的链接" placeholder="粘贴文章或推文链接，回车存入"
              aria-describedby="grab-hint" onkeydown="grabKeydown(event)">
       <button id="grab-go" onclick="submitGrab()">存入知识库</button>
+      <button id="grab-refetch" class="ghost" hidden onclick="refetchGrab()">重新抓一次</button>
       <p id="grab-hint" class="hint grab-hint"></p>
     </div>
   <div id="source-workbench" class="source-workbench">

@@ -16,7 +16,8 @@ from kb import config, pipeline
 from kb.collectors import FetchScope
 from kb.feeds import grab, registry as reg, sync
 from kb.source_types import feed_types
-from tests.grab_fixtures import BODY, GrabCase, PAGE, TWEET, html_resp, page_html
+from tests.grab_fixtures import (BODY, SOFT_WALL, SOFT_WALL_PARAS, GrabCase, PAGE,
+                                 TWEET, html_resp, page_html)
 
 
 class SaveTests(GrabCase):
@@ -319,6 +320,49 @@ class PipelineTests(GrabCase):
         self.assertNotIn('Sign in to continue reading', text)
 
 
+    def test_a_replace_during_export_cannot_be_confirmed_by_the_old_file(self):
+        """**导出确认的是刚落盘的那一份,不是 UPDATE 跑到时库里那一份。**
+
+        交错是定点注入的(不靠 sleep 撞概率):导出把旧那一份渲染好、`os.replace`
+        刚落盘的那一刻,另一边(HTTP 请求里的 `_recover` → `grab.replace`,它**不
+        持导出这把维护锁**)把正文换成了新的。原先那句 `SET
+        exported_hash=content_hash` 取的是 SQL 跑到时行上的值,于是把**新正文**的
+        hash 盖成了旧文件的完成回执:导出欠账(`exported_hash<>content_hash`)当场
+        消掉,`known` 从此报 done、重复投递按成品返回、补导一轮也选不中它 ——
+        vault 和全文检索里**永远**是旧那一份(第 3 轮审查用 Event 卡在同一处
+        确定性复现)。
+
+        正向一并钉住:没人插手时这一笔照旧确认得上(末尾那次导出清掉欠账)。
+        """
+        grab.save({'url': PAGE, 'title': 'Membership required', 'body': SOFT_WALL,
+                   'author': 'Example', 'published': '', 'content_kind': 'content'})
+        fresh = {'url': PAGE, 'title': '真正的文章', 'body': BODY,
+                 'author': 'Example', 'published': ''}
+        real, hits = sync.os.replace, []
+
+        def swap(src, dst):
+            real(src, dst)
+            if not hits:                      # 只插一次:第二轮导出要照常确认
+                hits.append(dst)
+                self.assertTrue(grab.replace(grab.known(PAGE), fresh))
+
+        with patch.object(sync.os, 'replace', side_effect=swap):
+            sync.export(grab.KIND)
+        one = next((self.root / 'vault' / 'source' / grab.KIND).glob('*.md'))
+        # 盘上那一篇还是旧的 —— 这是事实,不是缺陷;缺陷是**把它确认成新正文**。
+        self.assertIn('Sign in to continue', one.read_text())
+        self.assertEqual(self.pending_export(), 1)        # 欠账必须还在
+        seen = grab.known(PAGE)
+        self.assertFalse(seen['exported'])
+        self.assertEqual(grab.owing(seen), '还没写成 vault 里那一篇')
+        self.assertFalse(seen['done'])
+        # 下一轮导出(谁也不插手)把新正文落盘,欠账这才清掉。
+        sync.export(grab.KIND)
+        self.assertIn('这是一段确认得了的正文', one.read_text())
+        self.assertEqual(self.pending_export(), 0)
+        self.assertTrue(grab.known(PAGE)['exported'])
+
+
 class EndpointTests(GrabCase):
     """收录端点:**重复投递时按真实进度回答**,别把暂存说成已完成。"""
 
@@ -341,8 +385,8 @@ class EndpointTests(GrabCase):
             return 'run-7' if started else ''
         return patch.object(pipeline, 'start_pipeline', fake)
 
-    def post(self, url=PAGE):
-        return self.client.post('/api/grab', json={'url': url})
+    def post(self, url=PAGE, **body):
+        return self.client.post('/api/grab', json={'url': url, **body})
 
     def test_a_staged_duplicate_gets_the_rest_of_the_chain_run_again(self):
         grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',
@@ -540,13 +584,72 @@ class EndpointTests(GrabCase):
         with patch.object(grab, 'request', return_value=html_resp(wall_page)), \
              self.pipeline_patch():
             data = self.post().json()
-        self.assertEqual((data['duplicate'], data.get('replaced')), (True, None))
+        # **「没换成」要如实交出来**(`replaced=False`):界面据它落可恢复的那一档,
+        # 而不是照「没有 pipeline 字段」把这一次当成「早就走完整条链了」。
+        self.assertEqual((data['duplicate'], data['replaced']), (True, False))
         self.assertIn('看不出是正文', data['detail'])
         # **这不是终态**:`content_ok` 为假要一路交到前端(它据此落可恢复的那一档,
         # 而不是照「没有 pipeline 字段」当成「早就走完整条链了」)。
         self.assertFalse(data['content_ok'])
         self.assertEqual(self.items()[0]['body'], SaveTests.WALL)   # 一个字节都没动
         self.assertEqual(self.runs, [])                             # 没什么可写,不占管道
+
+    def test_an_explicit_refetch_recovers_what_the_gate_cannot_see(self):
+        """**恢复出口不许架在那道会误判的质量判据上。**
+
+        这里种进去的是一张**六道全过**的墙(`SOFT_WALL`:五段各不相同的会员说明,
+        一个表单都没有),它从此 `content_ok` 恒真、`done` 也为真 —— 只开给
+        「看不出是正文」那一档的恢复出口认不出它,于是原站后来恢复可读、用户一遍
+        遍重投,得到的始终是同一句「已经在知识库里了」,HTTP 发出 0 次
+        (第 3 轮审查实测)。所以人说「重新抓一次」就重抓,**不先问 content_ok**。
+        """
+        grab.save({'url': PAGE, 'title': 'Membership required', 'body': SOFT_WALL,
+                   'author': 'Example', 'published': '', 'content_kind': 'content'})
+        self.mark_exported(PAGE, 'source/inbox/a.md')
+        self.index_doc('source/inbox/a.md')
+        seen = grab.known(PAGE)
+        # 先钉住前提:这一份在质量那一道眼里**没毛病**,整条链也走完了。
+        self.assertEqual((seen['content_ok'], seen['done']), (True, True))
+        # ① 反过来钉一边:不带 refetch 的重复投递照旧连 HTTP 都不发、照旧幂等。
+        with patch.object(grab, 'request', side_effect=AssertionError('不许发请求')), \
+             self.pipeline_patch():
+            plain = self.post().json()
+        self.assertEqual((plain['duplicate'], plain['done']), (True, True))
+        self.assertIn('已经在知识库里了', plain['detail'])
+        # ② 人明确要求重抓:真去抓一次,确认得了就把库里那一份换掉。
+        with patch.object(grab, 'request',
+                          return_value=html_resp(page_html())) as got, \
+             self.pipeline_patch():
+            data = self.post(refetch=True).json()
+        self.assertEqual(got.call_count, 1)
+        self.assertEqual((data['duplicate'], data['replaced']), (True, True))
+        self.assertEqual(data['done'], False)        # 换完要重新走后半条链
+        self.assertIn('你要求重新抓一次', data['detail'])
+        # **后果断言**:库里那一份真换了,导出欠账跟着回来,后半条链被起了起来。
+        self.assertIn('这是正文第一段', self.items()[0]['body'])
+        self.assertNotIn('Sign in to continue', self.items()[0]['body'])
+        self.assertEqual(self.pending_export(), 1)
+        self.assertEqual(self.runs, [(['export', 'index', 'extract'], 'inbox')])
+
+    def test_an_explicit_refetch_that_hits_a_wall_leaves_the_row_alone(self):
+        """重抓撞上关卡:**库里原样留着,不占管道,也不说「已完成」。**
+
+        (元规则:拿不准别固化终态。`replaced=False` 如实交到前端,它据此落
+        可恢复的那一档 —— 那颗按钮还在,再点一次照旧会重抓。)"""
+        grab.save({'url': PAGE, 'title': 'Membership required', 'body': SOFT_WALL,
+                   'author': 'Example', 'published': '', 'content_kind': 'content'})
+        wall = page_html(title='Just a moment...', body=[
+            'Checking your browser before accessing this site. '
+            'Please enable JavaScript and cookies to continue. ' * 4])
+        with patch.object(grab, 'request', return_value=html_resp(wall)) as got, \
+             self.pipeline_patch():
+            data = self.post(refetch=True).json()
+        self.assertEqual(got.call_count, 1)
+        self.assertEqual((data['duplicate'], data['replaced']), (True, False))
+        self.assertTrue(data['content_ok'])          # 这一份在质量那道眼里没毛病
+        self.assertIn('你要求重新抓一次', data['detail'])
+        self.assertEqual(self.items()[0]['body'], SOFT_WALL)   # 一个字节都没动
+        self.assertEqual(self.runs, [])                        # 没什么可写,不占管道
 
     def test_a_good_duplicate_still_costs_no_request(self):
         """**反过来钉一边:内容没问题的重复投递照旧连 HTTP 都不发。** 受控重抓

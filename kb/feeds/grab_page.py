@@ -188,16 +188,26 @@ _EXEC_TYPES = ('', 'text/javascript', 'application/javascript', 'module',
                'text/ecmascript', 'application/ecmascript', 'text/jscript')
 
 
-def _inert(node) -> bool:
-    """这个节点**还没生效** —— 它待在 `<template>` 里。
+def _live(node) -> bool:
+    """这个节点**此刻真生效**吗 —— 它不在 `<template>` 里,而且(是 `<script>`
+    的话)它那个 `type` 浏览器真会执行。
 
     `<template>` 的内容是给 JS 以后克隆用的样板,浏览器既不渲染也不提交它。
     bs4 把它当普通子树解析,于是 `select('input[type=password]')` 照样命中 ——
     一篇「手把手教你写登录表单」的教程把 demo 放在 `<template>` 里就被判成登录墙
     (2026-10-16 审查实测:650 字正常教程被拒)。**DOM 里有某个片段不等于它在
     阻挡正文**,所以生效性要和位置(`readable.in_furniture`)分开各判一次。
+
+    **两问合一是因为它们是同一个不变量的两端**(元规则「口径只有一份」):
+    `<script src=… type="application/json">` 跟内联的数据块一样不会执行,而原先
+    只有内联那一支核对了 `type`、带 `src` 的那一支漏着 —— 同一道判据分两处写,
+    其中一处迟早漏掉(第 3 轮审查点的正是这处对称缺口)。
     """
-    return node.find_parent('template') is not None
+    if node.find_parent('template') is not None:
+        return False
+    if node.name == 'script':
+        return str(node.get('type') or '').strip().lower() in _EXEC_TYPES
+    return True
 
 
 def body_confirmed(body: str) -> bool:
@@ -230,14 +240,12 @@ def _gate_assets(soup) -> bool:
     for tag, attr in _ASSET_ATTRS:
         for node in soup.find_all(tag):
             value = str(node.get(attr) or '').lower()
-            if value and any(mark in value for mark in _GATE_ASSETS) and not _inert(node):
+            if value and any(mark in value for mark in _GATE_ASSETS) and _live(node):
                 return True
     for node in soup.find_all('script'):
-        if node.get('src') or _inert(node):
-            continue
-        # **只有会被执行的那些才算挂着**(`_EXEC_TYPES`):数据块和模板块里
-        # 出现那几个串是内容,不是身份。
-        if str(node.get('type') or '').strip().lower() not in _EXEC_TYPES:
+        # **只有会被执行的那些才算挂着**(`_live`):数据块和模板块里出现那几个
+        # 串是内容,不是身份 —— 带 `src` 的那一支在上面同一道判据里过过了。
+        if node.get('src') or not _live(node):
             continue
         if any(mark in (node.string or '').lower() for mark in _GATE_ASSETS):
             return True
@@ -248,7 +256,7 @@ def _wall_reason(soup) -> str:
     """正文是不是挡在一道登录/订阅墙后面(判据和代价见 `_WALL_FREE_KEYS` 那一节)。"""
     for node in soup.select('input[type=password]'):
         form = node.find_parent('form')
-        if form is None or _inert(node) or readable.in_furniture(form):
+        if form is None or not _live(node) or readable.in_furniture(form):
             continue                     # 还没生效 / 长在页面家具里:都不是拦在正文上
         return _SAY_WALL
     free = _ld_json(soup)
@@ -287,7 +295,7 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
 
     **生效性和位置要分开各判一次**:`<template>` 里的密码框、
     `type="application/json"` 里的示例参数都**不算**这一页挂着什么
-    (`_inert`);`nav`/页眉页脚侧栏里的登录框不算拦在正文上
+    (`_live`);`nav`/页眉页脚侧栏里的登录框不算拦在正文上
     (`readable.in_furniture`)。DOM 里有某个片段 ≠ 它在阻挡正文。
 
     `body` 空 = 提取器什么都没交出来。那时 ③ 不再要正文佐证,另外还加一道宽词

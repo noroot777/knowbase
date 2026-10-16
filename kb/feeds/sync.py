@@ -583,7 +583,22 @@ def _export(kind: str, hold_untranslated: bool = False,
                 written.add(Fetched(f'{kind}:{item["key"]}',
                                     str(item['fetch_round'] or ''), rel))
             with reg.db() as c:
-                c.execute('UPDATE feed_items SET exported_hash=content_hash,path=? WHERE key=?', (rel,item['key']))
+                # **确认的是「刚落盘的这一份」,不是「UPDATE 跑到时库里那一份」。**
+                # 右侧原先写 `exported_hash=content_hash`:那是 SQL 执行当刻行上的
+                # 值 —— 这中间有人换过正文(`grab.replace` 跑在 HTTP 请求里、不持
+                # 导出这把维护锁),那一笔就把**新正文**的 hash 盖成了旧文件的完成
+                # 回执,新正文的导出欠账(`exported_hash<>content_hash`)当场被消
+                # 掉,**而且没有任何路径回来重试**:`known` 从此报 done、重复投递
+                # 按成品返回、补导选不中它,vault 和全文检索里永远是旧那一份
+                # (第 3 轮审查用 Event 卡在 `os.replace` 前确定性复现)。
+                # 判据跟着待在 WHERE 里(元规则):行还是我们渲染的那一版才确认,
+                # `rowcount == 0` 说明这期间正文被换过 —— 欠账照旧留着,下一轮
+                # 导出自然选中它,**这不是失败**。
+                c.execute('UPDATE feed_items SET exported_hash=?,path=? '
+                          'WHERE key=? AND content_hash=?',
+                          (item['content_hash'], rel, item['key'], item['content_hash']))
+            # 文件确实落了盘,所以这一篇照旧算进这一轮写了几篇(回执排在确认前面
+            # 那条同理);确认没成只是说「它已经不是最新那一版了」。
             done += 1
         except Exception as e:
             errors.append({'title': item['title'], 'reason': str(e)[:300]})

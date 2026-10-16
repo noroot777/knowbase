@@ -418,7 +418,10 @@ class PageTests(GrabCase):
         ①`<template>` 里的登录表单:那是给 JS 以后克隆用的样板,浏览器既不渲染
         也不提交(「手把手教你写登录表单」的教程就这么写);②
         `<script type="application/json">` 里的示例参数:数据块不会被执行,
-        里面出现 `_cf_chl_opt` 只是一段**内容**。
+        里面出现 `_cf_chl_opt` 只是一段**内容**;③**同一道判据的另一端**:带
+        `src` 的脚本也要看那个 `type` —— 不执行的类型哪怕 `src` 指着某家关卡的
+        地址,它一样不是这一页的身份(`_live` 把两端并成一处口径,原先只有内联
+        那一支核对了类型;第 3 轮审查点的正是这处对称缺口)。
         """
         tmpl = page_html(title='模板编程教程').replace(
             '</article>', '<template id="demo"><form action="/login">'
@@ -427,10 +430,20 @@ class PageTests(GrabCase):
         data = page_html(title='参数解析教程',
                          extra='<script type="application/json">{"sample":"_cf_chl_opt"}</script>')
         self.assertIn('这是正文第一段', self.page(html_resp(data))['body'])
-        # 反过来钉一边:真挂在那儿、会被执行的那一段照旧拒掉。
+        src = page_html(title='关卡脚本是怎么装上的', extra=(
+            '<script type="application/json" '
+            'src="https://cdn.example.org/cdn-cgi/challenge-platform/h/b/demo.json">'
+            '</script>'))
+        self.assertIn('这是正文第一段', self.page(html_resp(src))['body'])
+        # 反过来钉一边:真挂在那儿、会被执行的那两种照旧拒掉(内联 + 带 src)。
         live = page_html(extra='<script>var o = {"k":"_cf_chl_opt"};</script>')
         with self.assertRaises(grab.GrabError):
             self.page(html_resp(live))
+        hooked = page_html(extra=(
+            '<script src="https://cdn.example.org/cdn-cgi/challenge-platform/h/b/x.js">'
+            '</script>'))
+        with self.assertRaises(grab.GrabError):
+            self.page(html_resp(hooked))
 
     def test_a_login_box_in_the_page_furniture_is_not_a_wall(self):
         """**反过来钉一边。** 页眉里常驻一个登录框的站点多得是 —— 那不是拦在正文

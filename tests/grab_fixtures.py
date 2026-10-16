@@ -45,6 +45,26 @@ def tweet_payload(**tweet) -> bytes:
 #: 正是「看不出是正文」的那一档 —— 夹具要像真条目(真条目一定过完了那六道)。
 BODY = '这是一段确认得了的正文，它说的东西足够多，不是同一句话在复读。' * 14
 
+#: 一道**我们认不出的**墙:五段各不相同的会员/登录说明,一个 `<form>` 都没有,
+#: 不挂任何关卡组件,也不是通篇复读 —— 准入那六道全过,`body_confirmed` 为真。
+#: 第 3 轮审查用的正是这个形态。它存进库之后 `content_ok` 恒真,于是**只开给
+#: 「看不出是正文」那一档的恢复出口一辈子换不回它**(原站后来恢复可读也一样,
+#: 重投发出的 HTTP 是 0 次)。所以恢复必须另有一个不依赖那道判据的入口:人说
+#: 「重新抓一次」(`GrabRequest.refetch`)就重抓。
+SOFT_WALL_PARAS = [
+    'Sign in to continue reading this story. Members get unlimited access to the '
+    'full archive and the weekly letter.',
+    'Already a subscriber? Request a fresh email sign-in link and we will restore '
+    'your membership on this device.',
+    'Choose a plan to keep reading: monthly billing, yearly billing, or the '
+    'student rate with a valid school address.',
+    'Restore an earlier purchase if you paid through the mobile app and the '
+    'receipt is still on that account.',
+    'Questions about billing, gift memberships or group rates go to our support '
+    'desk and we answer within a day.',
+]
+SOFT_WALL = '\n'.join(SOFT_WALL_PARAS)
+
 
 def page_html(*, title='Hello world', body=None, extra='') -> str:
     # 段落要够长:`readable.MIN_CHARS` 是 400,比它短的一律算「没找到正文」。

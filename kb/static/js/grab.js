@@ -34,6 +34,12 @@ let grabAction = 0, grabNav = 0;
 // 地址和它的归属来源该点哪颗按钮(后端给的 resume)。
 let grabStage = '', grabNote = '', grabRun = '', grabRunAt = '';
 let grabUrl = '', grabResume = '', grabWhy = '';
+// 这条链接库里**已经有一行**了吗 —— 「重新抓一次」只在这时露面。
+// 它不看那一份过不过得了质量那一道:那道判据只认得出我们认得出的坏内容(通篇
+// 复读那一类),而「五段各不相同的会员墙文案」照样过关 —— 恢复出口要是也架在
+// 它上面,这种错存就一辈子换不回来(第 3 轮审查实测)。所以**只要库里有这一行,
+// 人就随时能要求重抓**;换不换得成由后端的六道准入和 CAS 决定(grab_api._recover)。
+let grabKnown = false;
 
 const GRAB_HINT = 'X 的单条推文走公开接口（长文连正文一起取），'
   + '其他站点按文章正文提取；抓不到正文的不会入库。';
@@ -64,7 +70,7 @@ function applyGrabBar(spec) {
     // **输入框里没提交的那一串留着**:切去别的来源看一眼再回来是常见动作,
     // 替用户把草稿清掉等于让他重新粘一次。只有本次收录成功才清它。
     grabNav++;
-    grabStage = ''; grabNote = '';
+    grabStage = ''; grabNote = ''; grabKnown = false;
   }
   updateGrabControls();
   if (manual && grabWantsFocus) { grabWantsFocus = false; focusGrabInput(); }
@@ -123,6 +129,7 @@ async function grabCheckItem(because) {
     if (r.ok) data = await r.json();
   } catch (e) { data = null; }
   if (action !== grabAction || nav !== grabNav) return;
+  if (data) grabKnown = !!data.known;
   const resume = '；' + (grabResume || '稍后在「手动收录」里点一次「写入知识库」')
     .replace(/^，/, '') + '。';
   const lead = because ? because + '：' : '';
@@ -130,11 +137,15 @@ async function grabCheckItem(because) {
     // **「写进去了」不等于「写进去的是一篇文章」。** 这一档照旧是可恢复的:
     // 再投一次会重抓、确认得了就把库里那一份换掉(`grab_api._recover`)。
     grabStage = 'pending';
-    grabNote = lead + '这一篇收下的内容看不出是正文；再投一次这条链接，'
-      + '会重抓并在确认得了时把它换掉。';
+    grabNote = lead + '这一篇收下的内容看不出是正文；点一下「重新抓一次」'
+      + '会重抓，确认得了就把它换掉。';
   } else if (data && data.done) {
     grabStage = 'done';
-    grabNote = lead + '已写入知识库，全文检索里搜得到了。';
+    // **「写进去了」不等于「写进去的是目标文章」。** 质量那一道只认得出我们认得
+    // 出的坏内容,所以这句话后面常备一条出路:读着不对就点那颗按钮重抓(口径见
+    // grab_api._recover 的两个入口)。
+    grabNote = lead + '已写入知识库，全文检索里搜得到了；'
+      + '要是打开发现不是那篇文章，点一下「重新抓一次」。';
   } else if (data && because && !data.known) {
     // 断在半路那一档:库里压根没有这一行 —— 这时才说得出「没存下来」。
     grabStage = 'failed';
@@ -175,6 +186,9 @@ function updateGrabControls() {
   $('grab-go').disabled = grabBusy;
   $('grab-go').textContent = grabBusy ? '正在抓取…' : '存入知识库';
   $('grab-url').disabled = grabBusy;
+  // 库里有这一行时才给「重新抓一次」:它是**错存的唯一出路**(`put_items` 是
+  // DO NOTHING,普通重投一个字节都不会动那一行),而没收过的链接直接存就行。
+  $('grab-refetch').hidden = !grabKnown || grabBusy;
   grabConverge();
   $('grab-hint').textContent = grabHintText();
   // 管道在跑时照旧能存:抓取和入库不碰 kb.db / vault,写进知识库那一步由后端
@@ -191,9 +205,20 @@ function focusGrabInput() {
   if (box && !$('grab-bar').hidden) box.focus({ preventScroll: true });
 }
 
-async function submitGrab() {
+/** 「重新抓一次」:对**库里已经有的那一条**再发一次抓取,确认得了就替换。
+ *
+ *  地址用后端规范化过的 `grabUrl`(库里那一行的身份),不读输入框 —— 成功投递
+ *  之后输入框是空的,而这颗按钮正是那时才露面。 */
+function refetchGrab() {
+  // 把那个 promise 交出去:`submitGrab` 是异步的,点击不需要它,但探针和以后的
+  // 调用方要能 `await` —— 不交出去的话等不到终态,断的是在途那一刻的面板。
+  return grabUrl ? submitGrab({ url: grabUrl, refetch: true }) : Promise.resolve();
+}
+
+async function submitGrab(opts) {
   if (grabBusy) return;
-  const box = $('grab-url'), url = box.value.trim();
+  const ask = opts || {};
+  const box = $('grab-url'), url = (ask.url || box.value).trim();
   if (!url) { toast('先粘一条链接', { type: 'info' }); box.focus(); return; }
   // 归属:发起这一刻的动作号 + 导航号 + 这块面板在说谁。回包落地前逐一对上。
   const action = ++grabAction, nav = grabNav;
@@ -201,7 +226,7 @@ async function submitGrab() {
   const mine = () => action === grabAction && nav === grabNav
     && kind === (typeof sourceKind !== 'undefined' ? sourceKind : '');
   grabBusy = true;
-  grabStage = ''; grabNote = '';
+  grabStage = ''; grabNote = ''; grabKnown = false;
   // 这一轮的身份要等后端发(不自己猜);起跑之前那一轮的 id 先记下来,收敛时用它
   // 分清「还没轮询到」和「核不上」。
   grabRun = '';
@@ -212,7 +237,7 @@ async function submitGrab() {
   try {
     r = await fetch('/api/grab', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, refetch: !!ask.refetch }),
     });
   } catch (e) {
     // **回包没送达 ≠ 后端没存下来。** 保存排在起管道之前,断线可能发生在它之后 ——
@@ -240,12 +265,17 @@ async function submitGrab() {
   let data = {};
   try { data = await r.json(); } catch {}
   const title = (data.title || url).slice(0, 60);
-  if (data.duplicate) {
+  if (data.replaced) {
+    toast('换成这次抓到的了：' + title, { type: 'ok', detail: data.detail || '' });
+  } else if (data.duplicate) {
     toast('已经收过了', { type: 'info', detail: data.detail || title });
   } else {
     toast('已存入：' + title, { type: 'ok', detail: data.detail || '' });
   }
   if (!mine()) { updateGrabControls(); return; }   // 过期的回包:不碰面板
+  // 库里有这一行了 —— 「重新抓一次」从此露面,不管这一份是刚收的还是早就收过的
+  // (刚收的那一份也可能是一道我们没认出的提示页,那正是它的用处)。
+  grabKnown = !!(data.duplicate || data.added);
   if (!data.duplicate) $('grab-url').value = '';
   // 终态按后端给的事实分档:started=那一轮起跑了(等 grabConverge 收尾)、
   // busy=存下了但没占到管道(要用户再点一次)、没有 pipeline 这个字段=它早就
@@ -255,16 +285,17 @@ async function submitGrab() {
   if (data.pipeline === 'started') {
     grabStage = 'writing';
     grabRun = data.run || '';         // 那一轮的身份(没给就直接去问这一篇的事实)
-    grabNote = (data.duplicate ? '这条之前就收过了；' : '已存入；')
+    grabNote = (data.replaced ? '库里那一份已经按这次重抓到的内容换掉了；'
+      : data.duplicate ? '这条之前就收过了；' : '已存入；')
       + '正在写入知识库，完成后全文检索就能搜到。';
   } else if (data.pipeline === 'busy') {
     grabStage = 'pending';
     grabNote = (data.detail || '内容已存下；其他同步正在运行') + '。';
-  } else if (data.content_ok === false) {
-    // 库里那一份看不出是正文,而这次重抓也没换成(撞上关卡 / 还是确认不了 /
-    // 这期间别人已经动过它)。**这不是终态**:再投一次还会重抓。
+  } else if (data.replaced === false || data.content_ok === false) {
+    // 这次重抓没换成(撞上关卡 / 还是确认不了 / 这期间别人已经动过它),或者库里
+    // 那一份看不出是正文。**都不是终态**:那颗按钮还在,再点一次照旧会重抓。
     grabStage = 'pending';
-    grabNote = (data.detail || '库里那一份看不出是正文') + '。';
+    grabNote = (data.detail || '库里那一份没换成') + '。';
   } else {
     grabStage = 'done';
     grabNote = data.detail || '这条已经在知识库里了。';

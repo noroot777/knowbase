@@ -32,6 +32,12 @@ router = APIRouter(prefix='/api/grab')
 
 class GrabRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
+    #: **用户明确要求「重新抓一次」。** 它不看库里那一份过不过得了质量那一道:
+    #: 那道判据只认得出**我们认得出的**坏内容(通篇复读那一类),而「五段各不相同
+    #: 的会员墙文案」照样过关、从此 content_ok 为真 —— 要是恢复出口也架在同一道
+    #: 判据上,这种错存就永远换不回来(第 3 轮审查实测:原站恢复可读之后重投仍回
+    #: 「已经在知识库里了」,HTTP 发出 0 次)。所以人说「再抓一次」就重抓。
+    refetch: bool = False
 
 
 def _resume_hint(channel: str) -> str:
@@ -80,45 +86,57 @@ def _write_through(out: dict, note: str, channel: str = grab.KIND) -> dict:
     return out
 
 
-def _recover(out: dict, url: str, seen: dict, label: str) -> dict:
-    """库里那一份**看不出是正文** → 受控重抓一次,确认得了才替换。
+def _recover(out: dict, url: str, seen: dict, label: str, asked: bool = False) -> dict:
+    """受控重抓一次,确认得了才替换库里那一份。
+
+    **两个入口,判据各自独立**:① 库里那一份看不出是正文(`content_ok` 为假);
+    ② **用户明确要求重抓**(`asked`,`GrabRequest.refetch`)。②**不许**以①为前提
+    —— ①那道判据只认得出我们认得出的坏内容,而「结构上和文章不可分的纯文字提示
+    页」过得了关、从此 `content_ok` 为真,恢复出口要是也架在它上面,这种错存就
+    **一辈子换不回来**(第 3 轮审查实测:原站恢复可读之后重投仍回「已经在知识库
+    里了」、HTTP 发出 0 次;历史那些 `content_kind='post'` 的 X 残片同理)。
+    **「已导出、已索引」不是内容质量证明**,所以两个入口都不看 `done`:走完整条
+    链的坏内容更该换。
 
     **这是查重那道早检查里唯一会发 HTTP 的一档**,而且它必须发:`put_items` 是
-    `DO NOTHING`,再投一次同一条链接一个字节都不会动那一行 —— 于是一份错存的
-    内容(以前那一版判据漏放的登录提示页,或者那一次抓到的本来就是一道认不出的
-    墙)永远留在知识库里,而用户每次只得到同一句「已经收过了」。**「已导出、已
-    索引」不是内容质量证明**,所以这一档不看 `done`:走完整条链的坏内容更该换。
+    `DO NOTHING`,再投一次同一条链接一个字节都不会动那一行。
 
-    三种结果各有一句话:重抓撞上关卡/还是确认不了(`grab.grab` 抛)→ 原样留着、
-    不起管道;换成了 → 起后半条链(`content_hash` 变了,导出闸门自然成立);
-    `replace` 回 False → 这期间别人已经动过它,或者重抓到的就是同一份。
+    三种结果各有一句话,而且都如实交出 `replaced`:重抓撞上关卡 / 还是确认不了
+    (`grab.grab` 抛)→ 原样留着、不起管道;换成了 → 起后半条链(`content_hash`
+    变了,导出闸门自然成立);`replace` 回 False → 这期间别人已经动过它,或者重抓
+    到的就是同一份。**失败那两档不是终态**:界面据 `replaced` 为假说「没换成」,
+    而不是说「已完成」—— 再来一次照旧会重抓。
     """
+    why = '你要求重新抓一次' if out.get('content_ok') else '库里那一份看不出是正文'
     try:
         fresh = grab.grab(url)
     except grab.GrabError as e:
-        out['detail'] = (f'这条之前被「{label}」收过了，可库里那一份看不出是正文；'
+        out['replaced'] = False
+        out['detail'] = (f'这条之前被「{label}」收过了，{why}；'
                          f'这次重抓还是不行:{e}')
         return out
     if not grab.replace(seen, fresh):
-        out['detail'] = (f'这条之前被「{label}」收过了，库里那一份看不出是正文；'
+        out['replaced'] = False
+        out['detail'] = (f'这条之前被「{label}」收过了，{why}；'
                          '这次重抓到的内容和它一样，或者这期间已经有人换过了')
         return out
     out.update(replaced=True, done=False, title=fresh['title'])
-    return _write_through(out, f'库里那一份看不出是正文，已经按这次重抓到的内容换掉',
-                          seen['kind'])
+    return _write_through(out, f'{why}，已经按这次重抓到的内容换掉', seen['kind'])
 
 
-def _duplicate(url: str, seen: dict) -> dict:
+def _duplicate(url: str, seen: dict, refetch: bool = False) -> dict:
     """这条地址库里已经有了。**按它走到哪一步分开答。**"""
     label = KINDS.get(seen['kind'], seen['kind'])
     out = {'ok': True, 'added': 0, 'duplicate': True, 'url': url,
            'title': seen['title'], 'kind': seen['kind'], 'done': bool(seen['done']),
            'content_ok': bool(seen.get('content_ok'))}
-    if not out['content_ok']:
+    if refetch or not out['content_ok']:
         # **内容本身不对的那一档排在最前面**:后面几步全做完也只是把一份看不出
         # 是正文的东西写进知识库(`owing` 同一份口径里它也排第一)。
+        # **用户明确要求重抓时同样走这里,不先问 `content_ok`**:那道判据漏放的
+        # 错存正是最需要换掉的那几篇(见 `_recover`)。
         out['owing'] = grab.owing(seen)
-        return _recover(out, url, seen, label)
+        return _recover(out, url, seen, label, asked=refetch)
     if seen['done']:
         # 走完整条链了:幂等的一句话,不占管道(这是绝大多数重复投递的末态)。
         out['detail'] = f'这条已经在知识库里了（{label}）'
@@ -170,7 +188,7 @@ def grab_link(body: GrabRequest):
         # **查重排在抓取前面**:已经收过的那一条连 HTTP 都不必发。它只是一句
         # 提示 —— 真正防重复的是 `put_items` 的 `DO NOTHING`(见 `grab.known`)。
         if seen := grab.known(url):
-            return _duplicate(url, seen)
+            return _duplicate(url, seen, refetch=body.refetch)
         entry = grab.grab(url)
         saved = grab.save(entry)
     except grab.GrabError as e:
