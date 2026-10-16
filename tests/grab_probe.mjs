@@ -220,6 +220,35 @@ try {
       : real(u, o);`);
   check("这一篇的状态问不到:如实说没核到,不猜一个结论",
         /没核到/.test(lost.hint) && lost.stage === 'pending', JSON.stringify(lost));
+  // 11. **回包没送达 ≠ 后端没存下来。** 保存排在起管道之前,断线可能发生在它
+  //     之后 —— 说「这条没存下来」是在断言一件我们不知道的事。定点把 POST 掐断,
+  //     面板该去问一次这一篇的状态,再按事实说话。
+  const cut = async (state) => JSON.parse(await evalJs(`(async () => {
+    $('grab-url').value = 'https://example.org/posts/cut-wire';
+    const real = window.fetch;
+    window.fetch = (u, o) => String(u).includes('/api/grab/state')
+      ? Promise.resolve(new Response(JSON.stringify(${state}),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      : (String(u).includes('/api/grab') ? Promise.reject(new Error('断线')) : real(u, o));
+    await submitGrab();
+    for (let i = 0; i < 200 && grabStage === 'checking'; i++)
+      await new Promise(r => setTimeout(r, 25));
+    window.fetch = real;
+    return JSON.stringify({ hint: $('grab-hint').textContent, stage: grabStage,
+                            left: $('grab-url').value });
+  })()`));
+  const landed = await cut(`{ ok: true, known: true, done: true, content_ok: true, owing: '' }`);
+  check("提交断在半路、而它其实存下了:按事实说,不说没存下来",
+        !/没存下来/.test(landed.hint) && /断在半路/.test(landed.hint)
+          && /已写入知识库/.test(landed.hint) && landed.stage === 'done',
+        JSON.stringify(landed));
+  // 11b. **反过来钉一边**:库里压根没有这一行,这时才说得出「没存下来」。
+  const lostIt = await cut(`{ ok: true, known: false, done: false, content_ok: false,
+                              owing: '这条还没收进来' }`);
+  check("提交断在半路、库里也确实没有:如实说没存下来并留着那条链接",
+        /没存下来/.test(lostIt.hint) && lostIt.stage === 'failed'
+          && lostIt.left === 'https://example.org/posts/cut-wire', JSON.stringify(lostIt));
+
 } catch (err) {
   check("探针跑完", false, err.message);
 } finally {

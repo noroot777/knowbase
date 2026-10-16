@@ -269,7 +269,8 @@ def known(url: str) -> dict | None:
     `classify` 的注释里。
     """
     with reg.db() as c:
-        row = c.execute('SELECT key,kind,title,author,published,path,url,body,content_hash,exported_hash'
+        row = c.execute('SELECT key,kind,title,author,published,path,url,body,content_kind,'
+                        'content_hash,exported_hash'
                         ' FROM feed_items WHERE url=? LIMIT 1', (url,)).fetchone()
     if not row:
         return None
@@ -277,7 +278,16 @@ def known(url: str) -> dict | None:
     # **「写进去了」和「写进去的是一篇文章」是两件事。** 后者由内容自己回答,
     # 随时重算得出(`body_confirmed`),所以不必在表上多存一列标记 —— 老库里
     # 那些以前漏放存下的坏内容也因此一样救得回来(见 `replace`)。
-    seen['content_ok'] = grab_page.body_confirmed(seen['body'])
+    #
+    # **这一问只对「我们按文章正文收下的网页」成立。** 那道判据的门槛借的是正文
+    # 提取器的 `MIN_CHARS`(400),而推文、动态、订阅源给的摘要本来就短 ——
+    # 拿它去判一条三十个字的推文,等于把所有短内容都说成坏内容:重复投递时会
+    # 白跑一次重抓,面板上还写着「收下的那一份看不出是正文」。
+    # 别的来源另有自己的「壳 / 空正文」判据(`body-gap.md`、`fulltext`),这里
+    # 不替它们判;所以这一问限在**手动收录自己**那一类、且 `content_kind` 是
+    # `content`(网页正文)的条目上。
+    seen['content_ok'] = (seen['kind'] != KIND or seen['content_kind'] != 'content'
+                          or grab_page.body_confirmed(seen['body']))
     seen['exported'] = bool(seen['path'] and seen['exported_hash']
                             and seen['exported_hash'] == seen['content_hash'])
     seen['stored'] = _stored(seen['path'])

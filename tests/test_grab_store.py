@@ -176,6 +176,30 @@ class SaveTests(GrabCase):
                    'author': 'x', 'published': '', 'content_kind': 'content'})
         self.assertTrue(grab.known('https://example.org/ok')['content_ok'])
 
+    def test_short_posts_and_other_sources_are_not_called_bad_content(self):
+        """**反过来钉一边:这一问只对「我们按文章正文收下的网页」成立。**
+
+        它的门槛借的是正文提取器那道 `MIN_CHARS`(400),而推文、动态、订阅源
+        给的摘要本来就短 —— 拿它去判一条三十个字的推文,等于把所有短内容都说成
+        坏内容:重复投递会白跑一次重抓(真发 HTTP),面板上还写着「收下的那一份
+        看不出是正文」。别的来源另有自己的「壳 / 空正文」判据,这里不替它们判。
+        """
+        short = '就一句话的推文，三十个字都不到。'
+        # ① 手动收录自己的推文(`content_kind='post'`):短也不算坏内容。
+        grab.save({'url': TWEET, 'title': '某某 的动态', 'body': short, 'author': 'x',
+                   'published': '', 'content_kind': 'post'})
+        self.assertTrue(grab.known(TWEET)['content_ok'])
+        # ② 别人家来源里那一条(订阅源给的摘要,`content_kind` 默认 feed)。
+        social = reg.save_subscription('social', {'name': 'E', 'url': 'https://x.com/example'})
+        other = 'https://example.org/posts/short-one'
+        reg.put_items(social, [{'url': other, 'title': 'A', 'body': short, 'published': ''}])
+        self.assertTrue(grab.known(other)['content_ok'])
+        self.assertEqual(grab.owing(grab.known(other)), '还没写成 vault 里那一篇')
+        # ③ 反过来:手动收录按网页正文收下的那一条,短/复读就是坏内容。
+        grab.save({'url': PAGE, 'title': 'Sign in', 'body': SaveTests.WALL, 'author': 'x',
+                   'published': '', 'content_kind': 'content'})
+        self.assertFalse(grab.known(PAGE)['content_ok'])
+
     def test_a_confirmed_refetch_replaces_the_bad_body_in_place(self):
         """**`DO NOTHING` 之下唯一的出路:条件替换。**
 
@@ -267,6 +291,32 @@ class PipelineTests(GrabCase):
         self.assertEqual(meta['url'], PAGE)
         self.assertEqual(meta['account'], '某记者')
         self.assertIn('正文内容', text)
+
+
+    def test_replacing_a_bad_body_rewrites_the_vault_file(self):
+        """**盘上的后果**:错存的那一篇被换掉之后,vault 里那份 md 真的跟着改。
+
+        这是「不可恢复」那半句话的终点 —— 审查三轮都在这里栽:库里那条坏内容
+        导出过、索引过,而重投只会得到「已经收过了」。替换之后 `content_hash`
+        变了,导出闸门(`exported_hash<>content_hash`)自然成立,下一轮 export
+        把同一个路径重写一遍。
+        """
+        wall = ('Sign in to continue reading. Subscribe to unlock this story. ' * 3 + '\n') * 7
+        grab.save({'url': PAGE, 'title': 'Sign in to read', 'body': wall,
+                   'author': 'Example', 'published': '', 'content_kind': 'content'})
+        sync.export(grab.KIND)
+        one = next((self.root / 'vault' / 'source' / grab.KIND).glob('*.md'))
+        self.assertIn('Sign in to continue reading', one.read_text())
+        self.assertTrue(grab.replace(grab.known(PAGE),
+                                     {'url': PAGE, 'title': '真正的文章', 'body': BODY,
+                                      'author': 'Example', 'published': ''}))
+        sync.export(grab.KIND)
+        # 还是**同一个路径**(键没变),里面换成了新正文。
+        files = list((self.root / 'vault' / 'source' / grab.KIND).glob('*.md'))
+        self.assertEqual([f.name for f in files], [one.name])
+        text = one.read_text()
+        self.assertIn('这是一段确认得了的正文', text)
+        self.assertNotIn('Sign in to continue reading', text)
 
 
 class EndpointTests(GrabCase):
@@ -492,6 +542,9 @@ class EndpointTests(GrabCase):
             data = self.post().json()
         self.assertEqual((data['duplicate'], data.get('replaced')), (True, None))
         self.assertIn('看不出是正文', data['detail'])
+        # **这不是终态**:`content_ok` 为假要一路交到前端(它据此落可恢复的那一档,
+        # 而不是照「没有 pipeline 字段」当成「早就走完整条链了」)。
+        self.assertFalse(data['content_ok'])
         self.assertEqual(self.items()[0]['body'], SaveTests.WALL)   # 一个字节都没动
         self.assertEqual(self.runs, [])                             # 没什么可写,不占管道
 

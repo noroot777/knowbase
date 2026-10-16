@@ -260,6 +260,11 @@ async function submitGrab() {
   } else if (data.pipeline === 'busy') {
     grabStage = 'pending';
     grabNote = (data.detail || '内容已存下；其他同步正在运行') + '。';
+  } else if (data.content_ok === false) {
+    // 库里那一份看不出是正文,而这次重抓也没换成(撞上关卡 / 还是确认不了 /
+    // 这期间别人已经动过它)。**这不是终态**:再投一次还会重抓。
+    grabStage = 'pending';
+    grabNote = (data.detail || '库里那一份看不出是正文') + '。';
   } else {
     grabStage = 'done';
     grabNote = data.detail || '这条已经在知识库里了。';
