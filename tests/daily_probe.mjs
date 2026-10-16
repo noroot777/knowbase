@@ -12,6 +12,7 @@
 import { launchShell } from "./probe_shell.mjs";
 import { checkScheduleRaces, checkDailyFormSettles } from "./daily_schedule_checks.mjs";
 import { checkNewContentCount } from "./daily_count_checks.mjs";
+import { checkDailyDrawers } from "./daily_drawer_checks.mjs";
 
 const base = process.argv[2];
 
@@ -226,7 +227,7 @@ check("覆盖区间那行字只说区间", !/新内容|未上报|素材/.test(la
 check("按钮按「这一天有没有日报」改名",
       (await evalJs(`document.getElementById('daily-gen-label').textContent`)) === "重新生成日报",
       await evalJs(`document.getElementById('daily-gen').textContent`));
-await checkNewContentCount({ evalJs, check });
+await checkNewContentCount({ evalJs, waitFor, check });
 // 素材是从**外面**进来的(同步中心跑完一轮、CLI 补抓、定时同步),页面收不到任何
 // 事件。这里绕开界面直接打删除接口(删一份日报会把它带走的条目放回队列),页面
 // 自己不知道发生了什么 —— 空闲那一跳必须把数字问回来。无头浏览器会把后台页面的
@@ -305,6 +306,12 @@ check("空同步范围没有起跑", !(await evalJs(`!!(dailyState && dailyState
 check("空同步范围就地说清怎么办",
       /先勾选至少一个同步范围/.test(await evalJs(`document.getElementById('toast-host')?.textContent || ''`)),
       await evalJs(`document.getElementById('toast-host')?.textContent || ''`));
+// 同步范围现在收在页头「改定时」那一扇里。只在 toast 里说一句"它在那儿"不够:
+// 要改的那几个勾选框此刻看不见,等于没说 —— 所以顺手把那一扇打开。
+check("空同步范围时顺手把定时那一扇打开",
+      await evalJs(`!document.getElementById('daily-sched').hidden
+        && document.getElementById('daily-sched-toggle').getAttribute('aria-expanded') === 'true'`));
+await evalJs(`setDailyDrawer('sched', false)`);
 check("空同步范围没有顺手重算今天那一份", (await evalJs(stamp)) === stampBefore);
 const rejected = await evalJs(`(async () => (await fetch('/api/daily/run', { method: 'POST',
   headers: { 'Content-Type': 'application/json' },
@@ -606,6 +613,7 @@ check("完成提示把全库那一段算成「项」,不说成「来源」",
 
 await checkScheduleRaces({ evalJs, waitFor, check });
 await checkDailyFormSettles({ evalJs, waitFor, check });
+await checkDailyDrawers({ evalJs, waitFor, check });
 
 check("页面没有脚本报错", pageErrors.length === 0, pageErrors.join(" | "));
 

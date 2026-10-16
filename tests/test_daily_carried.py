@@ -359,6 +359,108 @@ class DailyCarriedTests(_Base):
         again = daily.pending(first_days=1, now=now)
         self.assertEqual((1, 1), (again['gain'], again['items']))
 
+    def test_an_update_to_the_same_article_counts_as_new_content(self):
+        """**只按路径盖章答不了"还有没有新东西"。** 同一篇文章的正文后来补全了、
+        摘要刚提取出来,下一次送进模型的就是另一份内容;按路径判的话它永远算
+        "这篇报过了",按钮整颗藏着,人再没有入口把这些更新报出来(审查实测:前后
+        两次真实 prompt 确实不同,而面板那个数两次都是 0)。
+
+        判据落在后果上:**真取材那一侧拿到的摘要已经换了一份**,同一时刻面板上
+        那个数必须跟着是 1。反过来也钉一边:内容改回去、只有 `indexed_at` 变了的
+        话它得回到 0 —— 指纹掺进跟 prompt 无关的东西,每次重新索引都会报一次假的
+        「有新内容」。另外钉住它**不算进队列积压**:那个数答的是"一份日报都没进
+        过的有多少",这一篇进过。"""
+        add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
+        now = T('2026-09-29 08:00')
+        info = daily.pending(first_days=1, now=now)
+        daily.generate(since=info['since'], until=info['until'])
+        self.assertEqual(0, daily.pending(first_days=1, now=now)['gain'])
+
+        self.conn.execute('UPDATE documents SET summary=? WHERE path=?',
+                          ('结果已经公布,补上了关键结论', 'source/rss/a.md'))
+        self.conn.commit()
+        mat = daily.collect(self.conn, info['since'], info['until'])
+        self.assertEqual(['结果已经公布,补上了关键结论'],
+                         [i['excerpt'] for i in mat.items])
+        after = daily.pending(first_days=1, now=now)
+        self.assertEqual((1, 0), (after['gain'], after['items']))
+
+        self.conn.execute('UPDATE documents SET summary=?, indexed_at=? WHERE path=?',
+                          ('摘要', '2026-10-01 00:00', 'source/rss/a.md'))
+        self.conn.commit()
+        self.assertEqual(0, daily.pending(first_days=1, now=now)['gain'])
+
+    def test_a_stamp_without_a_signature_answers_unknown_not_zero(self):
+        """账本里**没有**指纹的那些行(这一列是后加的;`seed_locked` 整表重算出来
+        的那批也没有)—— 这一问**答不上来,就得说答不上来**(`gain is None`),
+        不许当成 0。
+
+        曾经退一步比「带走之后有没有重新索引过」(`indexed_at > carried_at`),
+        **那是错的**:真正换掉素材的那条路是提取 —— `extract.save_extraction` 写
+        `summary` / 实体 / 主题 / `extracted_at`,**一个字都不碰 `indexed_at`**,
+        而"日报先出、提取随后补上摘要"正是常见顺序。于是"索引时刻没动"被当成
+        "送进模型的还是同一份",按钮跟着藏掉,人再没有入口把这些更新报出来
+        (审查实测 12 组:模型输入全变、`indexed_at` 全没动、`gain` 全是 0)。
+
+        三边都钉:①什么都没改也答「不知道」(0 意味着"确定没有",而我们确定不了);
+        ②**提取改了摘要之后照旧答「不知道」** —— 这一条才是旧判据答错的那一档,
+        它当时会答 0;③重新生成一次(账本把指纹补上)之后回到**确定的 0** ——
+        不然一个"永远答不知道"的实现也能把前两条蒙过去,而那等于按钮再也藏不掉。
+        顺带钉住队列积压不受影响:那个数答的是"一份日报都没进过的有多少"。
+        """
+        add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
+        now = T('2026-09-29 08:00')
+        info = daily.pending(first_days=1, now=now)
+        daily.generate(since=info['since'], until=info['until'])
+        self.conn.execute('UPDATE daily_carried SET material_sig=NULL, carried_at=?',
+                          ('2026-09-29 08:30',))
+        self.conn.commit()
+        blind = daily.pending(first_days=1, now=now)
+        self.assertEqual((None, 0), (blind['gain'], blind['items']))
+
+        # 真实提取那条路:摘要换了一份,`indexed_at` 原样不动。
+        before = self.conn.execute(
+            'SELECT indexed_at FROM documents WHERE path=?',
+            ('source/rss/a.md',)).fetchone()['indexed_at']
+        self.conn.execute(
+            'UPDATE documents SET summary=?, extracted_at=? WHERE path=?',
+            ('结果已经公布,补上了关键结论', '2026-09-29 09:00', 'source/rss/a.md'))
+        self.conn.commit()
+        self.assertEqual(before, self.conn.execute(
+            'SELECT indexed_at FROM documents WHERE path=?',
+            ('source/rss/a.md',)).fetchone()['indexed_at'])
+        self.assertIsNone(daily.pending(first_days=1, now=now)['gain'])
+
+        # 重新生成一次就自愈:这一轮的指纹落进账本,又答得出确定的数了。
+        daily.generate(since=info['since'], until=info['until'])
+        self.assertEqual(0, daily.pending(first_days=1, now=now)['gain'])
+
+    def test_the_report_file_itself_is_reported_with_the_same_read(self):
+        """「那一天的日报此刻在不在」和 `gain` 必须**同一次调用**给出来。
+
+        界面要两个条件一起成立才敢把「重新生成日报」整颗藏掉。账本盖的章和 vault
+        里那个文件是两头东西:在 Obsidian 里把今天那份移走(没走界面那条删除)
+        之后章还在、`gain` 照样是 0 —— 这时要是还说"那一天有日报",唯一能重建它
+        的入口就被藏掉了(审查实测:页面上按钮一直不回来,只有整页刷新才回来)。
+
+        三边都钉:没出过报时 `has_report` 是 False;出过是 True;**文件在外面被
+        移走之后当场变回 False,而 `gain` 仍然是 0**(两件事各答各的,后者本来
+        就不该变)。`day` 报的是这一次会写到哪一天 —— 界面拿它确认"后端答的是不是
+        我要问的那一天"。
+        """
+        add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
+        now = T('2026-09-29 08:00')
+        info = daily.pending(first_days=1, now=now)
+        self.assertEqual(('2026-09-29', False), (info['day'], info['has_report']))
+
+        daily.generate(since=info['since'], until=info['until'])
+        after = daily.pending(first_days=1, now=now)
+        self.assertEqual((0, True), (after['gain'], after['has_report']))
+
+        (daily.report_dir() / '2026-09-29.md').unlink()
+        gone = daily.pending(first_days=1, now=now)
+        self.assertEqual((0, False), (gone['gain'], gone['has_report']))
+
     def test_a_long_queue_with_nothing_new_this_time_reads_as_nothing_new(self):
         """**队列总长不许冒充它。** 名额每轮只带得走固定条数,生产库实测队列
         1097 条而重新生成一次只多出 11 条 —— 把队列写在按钮边上,用户会照着它
