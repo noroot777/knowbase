@@ -144,9 +144,10 @@ function watchNavTips() {
 }
 
 function focusWorkspaceSearch() {
-  if (activeTab !== 'gallery' && activeTab !== 'search') switchTab('search');
+  if (!['gallery', 'search', 'fav'].includes(activeTab)) switchTab('search');
   toggleNavigation(false);
-  const input = $(activeTab === 'gallery' ? 'g-q' : 'q');
+  if (activeTab === 'fav' && favActive && matchMedia('(max-width: 760px)').matches) closeFavDetail();
+  const input = $(({ gallery: 'g-q', search: 'q', fav: 'fav-search' })[activeTab]);
   input.focus(); input.select();
 }
 

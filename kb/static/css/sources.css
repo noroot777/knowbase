@@ -123,9 +123,10 @@
 }
 .source-filters input,.source-filters select,.source-settings input[type=number],
 .source-settings textarea,.source-editor input:not([type=checkbox]) {
-  border:1px solid var(--line); border-radius:9px; background:var(--card); color:var(--ink);
+  border:1px solid var(--line); border-radius:9px; background-color:var(--card); color:var(--ink);
   padding:9px 11px; font-size:13px; line-height:1.5;
 }
+.source-filters select { padding-right:28px; }
 .source-filters input:focus,.source-editor input:focus,.source-settings textarea:focus { border-color:var(--brand); }
 .source-settings textarea { font-family:var(--font-mono); font-size:11px; }
 .source-row-meta { font-size:12px; }
