@@ -146,6 +146,11 @@ web 界面(`uv run kb-web` → http://127.0.0.1:8787)的"管道"tab 一键搞定
 `export` / `index` / `extract` / `graph` / `accounts` / `web start|stop`。
 服务都是后台守护进程(自成会话),起完终端就能关,不占前台。
 
+重启后若订阅、日报等面板一起空白，先强制刷新页面（Mac：`Cmd+Shift+R`；
+Windows/Linux：`Ctrl+Shift+R`），不要清空数据库或重建订阅。旧版本的浏览器缓存可能
+把新首页和旧脚本混在一起，导致页面初始化中断，数据本身仍在。首页现在按文件内容
+给脚本、样式和图标加版本号，并要求浏览器重新验证缓存，避免更新后继续混用旧文件。
+
 等价的 CLI:
 1. `cd collector && ./.venv/bin/python -m cli collect` 抓新文章,再 `... -m cli export` 导出到 obs
 2. `kb index` 增量索引新文档(内容 hash 判断,秒级)
