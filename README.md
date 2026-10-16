@@ -138,8 +138,6 @@ docker compose up -d --build    # http://127.0.0.1:8787
 
 请先在 Mac 绿泡泡里订阅并同步你要采集的号——本机没有推送的号不会出现在采集范围中。
 
-> 另一条采集方式（凭证通道）在 `wechat-oa` 分支上，不做推荐，两条分支并行不合并。
-
 <details>
 <summary><strong>绿泡泡采集做了些什么</strong></summary>
 
