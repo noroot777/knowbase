@@ -336,10 +336,10 @@
           <!-- ③可执行文件路径:绝大多数人一辈子不用填,别占主位。 -->
           <details id="source-x-adv" class="xchan-adv" hidden><summary>可执行文件位置</summary>
             <div id="source-x-browser" hidden>
-              <label for="source-x-chrome">Chrome（可留空）<input id="source-x-chrome" spellcheck="false" placeholder="留空时用默认位置的 Google Chrome"></label>
+              <label for="source-x-chrome">Chrome（可留空）<input id="source-x-chrome" oninput="xChannelPicked()" spellcheck="false" placeholder="留空时用默认位置的 Google Chrome"></label>
             </div>
             <div id="source-x-feedgrab" hidden>
-              <label for="source-x-bin">feedgrab（可留空）<input id="source-x-bin" spellcheck="false" placeholder="留空时从 PATH 里找"></label>
+              <label for="source-x-bin">feedgrab（可留空）<input id="source-x-bin" oninput="xChannelPicked()" spellcheck="false" placeholder="留空时从 PATH 里找"></label>
             </div>
           </details>
         </div>

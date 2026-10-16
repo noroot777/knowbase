@@ -70,7 +70,11 @@ async function actOnSource(action, id) {
   } catch(e) { toast('操作未完成', {detail:e.message}); }
   finally { sourceBusy=false; updateSourceRunStatus(); }
 }
-function fillSourceSettings(s) {
+// `sent` 一路传给 `fillXChannelFields`:它是「这一次保存发出去的那份草稿身份」,
+// 不传 = 权威的整份加载(刚打开面板、换了来源),照后端那一份重填。
+// **返回那条通道重读的 promise**:保存之后紧接着要做动作的那条路要等它落地,
+// 否则动作一开始就把它当成"动作之前那一刻"的读作废了(见 `xChanEnsureSaved`)。
+function fillSourceSettings(s, sent) {
   $('source-settings-error').textContent = '';
   $('source-settings-fields').disabled = false;
   // 「自动同步 / 同步间隔」两个控件删掉之后(那一档整条拆了,见
@@ -79,8 +83,8 @@ function fillSourceSettings(s) {
   // 跟着 X 那一块一起藏掉,面板剩下的说明文字照旧显示。
   $('source-settings-form').hidden = sourceModules.get(sourceKind)?.adapter !== 'social';
   // X 那一块(取法、可执行文件路径、登录/导入/检查)整个归 x_channel.js 管。
-  fillXChannelFields(s);
-  loadXChannel(sourceKind);
+  fillXChannelFields(s, sent);
+  const reread = loadXChannel(sourceKind);
   // 「按来源类型每 N 分钟自动同步」那一档拆掉了(见 kb.pipeline._scheduler_tick),
   // 这一类来源改成跟着日报那一轮走。**所以这一行必须去问日报到底开没开、这一类
   // 在不在它的范围里** —— 无条件写「每天同步」在用户关掉日报定时、或者把 RSS 从
@@ -88,6 +92,7 @@ function fillSourceSettings(s) {
   renderSourceScheduleNote();
   // 现读一次:两条定时在别处改过之后,这一行不该还停在上次打开时的说法。
   loadSchedules();
+  return reread;
 }
 // 定时配置一变就重画(谁保存成功都会推一次,见 `schedules.js`)。**这一行自己
 // 不缓存配置**:缓存过的那一版里,页头保存成功只更新页头,这一行长期说反话。
@@ -157,11 +162,16 @@ async function saveSourceSettingsNow() {
   $('source-settings-save').disabled = true;
   $('source-settings-error').textContent = '';
   const body = {};
-  if (sourceModules.get(kind).adapter === 'social') Object.assign(body, xChannelPayload(kind));
+  const social = sourceModules.get(kind).adapter === 'social';
+  if (social) Object.assign(body, xChannelPayload(kind));
+  // **记下发出去的是哪一份草稿。** 回包落地时拿它和此刻的草稿比一下:不一样就
+  // 说明用户在这段时间里又改了,那份新草稿不许被这条旧回包重写(审查实测:保存
+  // 在途时改回另一档,回包一落地选择就被换回去、动作还接着跑了下去)。
+  const sent = social ? xChanDraft() : undefined;
   try {
     const settings = await pipeJson(`/api/intake/${kind}/settings`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if (kind === sourceKind) {
-      fillSourceSettings(settings);
+      await fillSourceSettings(settings, sent);
       await loadSourceModule(false);
     }
     toast('同步设置已保存', {type:'ok'});

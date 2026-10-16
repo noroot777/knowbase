@@ -27,13 +27,19 @@ const IMPORTED = "上次从日常浏览器导入：2026-10-15 17:40:00，13 个 
 const NEXT_STEP = { attach: "在浏览器地址栏打开 chrome://inspect/#remote-debugging，勾上那个开关。",
                     feedgrab: LOGIN_CMD };
 let channel = "feedgrab";   // 这一局从"不是默认档"的那一条起步
+// 存下来的那两条可执行文件位置。**动作端点要照它们回答** —— 真后端读的就是
+// `reg.get_settings` 里这几个字段(`x_channels.probe` / `x_browser.open_login_window`
+// 都拿 `settings.get('x_chrome_path')`)。mock 这边不跟着回的话,「改了路径没保存
+// 就点按钮,动作用的是旧路径」在页面上压根看不出来。
+let chromePath = "", feedgrabBin = "";
 let unconfigured = false;   // 第 9 节用:让这条订阅变成"待配置"
 const saved = [];      // PUT /settings 真发出去的 body
 const posted = [];     // 通道那两个 POST
 let checkReply = { ready: true, detail: "登录态有效,首页读到 12 条推文" };
 
 const settings = () => ({ enabled: false, interval_minutes: 1440, next_run: 0,
-                          x_channel: channel, x_feedgrab_bin: "", x_chrome_path: "" });
+                          x_channel: channel, x_feedgrab_bin: feedgrabBin,
+                          x_chrome_path: chromePath });
 const SOURCE = { id: 1, kind: "social", name: "Example", url: "https://x.com/example",
                  feed_url: "", group_name: "", enabled: 1, mode: "feed", config: "{}",
                  last_attempt: "", last_success: "", last_error: "", failures: 0,
@@ -96,6 +102,13 @@ let stamps = [];
 // 500 是一个明确答复(「后端说失败了」),掐断才是「这一次结果不知道」,而那正是
 // 页面要留住的那条交代(见 `x_channel.js` 的 `xChanUnsure`)。
 let killImport = false;
+// 下一条 settings PUT 压慢多久(一次性)。**用来摆「保存在途时用户又改了一次」**:
+// 那条旧回包落地时会重填整张表单,把他刚改的那一份静默换掉。
+let putHold = 0;
+// 下一条 `/x-channel` GET 直接回 503(一次性)。摆「读不出可选的取法」那个失败态。
+let failGet = false;
+// 每个动作端点**实际按哪一份配置跑的**。页面上看不见后端用了什么,所以记在这儿。
+const used = [];
 const body = req => new Promise(res => { let raw = ""; req.on("data", c => { raw += c; });
                                          req.on("end", () => res(JSON.parse(raw || "{}"))); });
 const server = createServer(async (req, res) => {
@@ -117,6 +130,8 @@ const server = createServer(async (req, res) => {
     // 而这套探针全绿(2026-10-08 审查实测)。
     if (m[2] === "/login" || m[2] === "/check" || m[2] === "/import-login") {
       posted.push(`${req.method} ${path}`);
+      if (req.method === "POST")
+        used.push({ what: m[2].slice(1), channel, chrome: chromePath, bin: feedgrabBin });
       if (req.method !== "POST") return json({ detail: "Method Not Allowed" }, 405);
       if (m[2] === "/import-login") {
         if (killImport) {
@@ -171,6 +186,7 @@ const server = createServer(async (req, res) => {
     // **回包内容在请求到达这一刻定稿,压慢是之后的事** —— 真后端就是这样(处理
     // 请求时读一次状态)。在 await 之后才去读 `imported` 的话,被按住的那条回包会
     // 携带「按住期间发生的事」,于是「旧读盖掉新事实」这个形态压根摆不出来。
+    if (failGet) { failGet = false; return json({ detail: "测试：取法服务暂时不可用" }, 503); }
     if (getForget) { getForget = false; imported = false; }
     const snap = channel === "browser" && imported;
     const payload = {
@@ -203,6 +219,22 @@ const server = createServer(async (req, res) => {
     killImport = true;
     return json({ ok: true });
   }
+  // 下一条 settings PUT 压慢(摆「保存在途时用户又改了一次」)。
+  if (path === "/__probe/slow-put") {
+    putHold = Number(new URL(req.url, "http://probe").searchParams.get("ms") || 0);
+    return json({ ok: true });
+  }
+  // 下一条取法 GET 回 503(摆读失败)。
+  if (path === "/__probe/fail-get") {
+    failGet = true;
+    return json({ ok: true });
+  }
+  // 各动作端点实际按哪一份配置跑的(`?reset=1` 清一次)。
+  if (path === "/__probe/used") {
+    const was = used.slice();
+    if (new URL(req.url, "http://probe").searchParams.get("reset") === "1") used.length = 0;
+    return json({ used: was });
+  }
   // 回包发出的先后(`?reset=1` 清一次,好让每个场景只看自己那几条)。
   if (path === "/__probe/stamps") {
     const was = stamps;
@@ -212,8 +244,14 @@ const server = createServer(async (req, res) => {
   if (path.match(/^\/api\/intake\/\w+\/settings$/) && req.method === "PUT") {
     const sent = await body(req);
     saved.push(sent);
+    // **收到就落账,压慢是之后的事**(口径同上面那条 GET):真后端是先写库再回包,
+    // 回包在路上的那段时间里库里已经是新值了。
     if (sent.x_channel) channel = sent.x_channel;
-    return json(settings());
+    if ("x_chrome_path" in sent) chromePath = sent.x_chrome_path || "";
+    if ("x_feedgrab_bin" in sent) feedgrabBin = sent.x_feedgrab_bin || "";
+    const reply = settings();
+    if (putHold) { const ms = putHold; putHold = 0; await new Promise(r => setTimeout(r, ms)); }
+    return json(reply);
   }
   if (path.match(/^\/api\/intake\/\w+\/items$/)) return json({ items: [], total: 0 });
   // modules 要排在 overview 那条之前:`/api/intake/<kind>` 的正则同样命中它,
@@ -244,7 +282,7 @@ const base = `http://127.0.0.1:${server.address().port}`;
 
 // 场景脚本要的那几样。**只读的直接导出**(ESM 的导入绑定是活的),
 // **要改的两格走存取器** —— 导入绑定在那一侧是只读的,赋值会当场报错。
-export { CHANNELS, NEXT_STEP, posted, saved, server, base };
+export { CHANNELS, NEXT_STEP, posted, saved, used, server, base };
 export const mock = {
   get checkReply() { return checkReply; },
   set checkReply(v) { checkReply = v; },
