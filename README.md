@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="docs/screenshots/gallery.png" width="720" />
-</p>
+
 
 <h1 align="center">Knowbase</h1>
 
@@ -41,7 +39,7 @@ docker compose up -d --build    # http://127.0.0.1:8787
 
 ## 界面导览
 
-打开 http://127.0.0.1:8787，左侧导航栏从上到下排列着七个面板，底部是设置菜单。
+打开 http://127.0.0.1:8787 ，左侧导航栏从上到下排列着七个面板，底部是设置菜单。
 
 ### 工具图鉴（首页）
 
