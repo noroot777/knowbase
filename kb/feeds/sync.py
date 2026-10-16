@@ -591,6 +591,8 @@ def _export(kind: str, hold_untranslated: bool = False,
                 # 掉,**而且没有任何路径回来重试**:`known` 从此报 done、重复投递
                 # 按成品返回、补导选不中它,vault 和全文检索里永远是旧那一份
                 # (第 3 轮审查用 Event 卡在 `os.replace` 前确定性复现)。
+                # 口径与证据见 docs/decisions/link-grab.md 第一节的同名约束,
+                # fulltext.md 那边有一行互指(改这一句两份都要看)。
                 # 判据跟着待在 WHERE 里(元规则):行还是我们渲染的那一版才确认,
                 # `rowcount == 0` 说明这期间正文被换过 —— 欠账照旧留着,下一轮
                 # 导出自然选中它,**这不是失败**。

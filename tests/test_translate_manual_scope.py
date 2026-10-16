@@ -291,7 +291,7 @@ class ScopeTests(ManualRetryCase):
         crash = {'crawl_filter': {'channel': 'rss',
                                   'translate_retry': {'channel': 'rss',
                                                       'source_id': other['id']}}}
-        def boom(key, body):
+        def boom(key, body, seen):
             raise OSError('simulated disk write failure')
         english = 'Full English body fetched from origin. ' * 20
         with patch.dict(pipeline_state._state, crash, clear=False), \

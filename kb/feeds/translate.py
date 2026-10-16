@@ -222,7 +222,15 @@ def _label_unknown(kind: str) -> None:
         for r in rows:
             lang = reg.text_language(r['title'], r['body'])
             if lang != (r['lang'] or ''):
-                c.execute('UPDATE feed_items SET lang=? WHERE key=?', (lang, r['key']))
+                # **判据带上算它时那一版的内容**(口径同 `_save` 那两句):这一趟的
+                # SELECT 不开事务、不持锁(legacy `isolation_level`),中间那一行可能
+                # 被换掉 —— 手动收录那颗「重新抓一次」跑在 HTTP 请求线程里、不持
+                # 任何同步的维护锁,而且它自己也写 `lang`(`grab.replace`)。无条件
+                # 按 key 写的后果是把**按旧正文算出来的**语种盖到新正文上:一篇
+                # 中文新正文被标成英文、白买一次翻译。`rowcount == 0` 不是失败
+                # (元规则),是「那一版已经不在了」。
+                c.execute('UPDATE feed_items SET lang=? WHERE key=? AND title=? AND body=?',
+                          (lang, r['key'], r['title'], r['body']))
 
 
 # 「半成品」的唯一口径:整条判成外文、原标题不空、正文有译文而标题没有。

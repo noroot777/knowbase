@@ -114,8 +114,35 @@ def body_hash(body: str) -> str:
     return hashlib.sha256(body.encode()).hexdigest()
 
 
-def _save(key: str, body: str) -> None:
-    """正文落库。顺带把这一条**重新排进翻译队列**。
+def _save(key: str, body: str, seen: str) -> bool:
+    """正文落库。顺带把这一条**重新排进翻译队列**。返回「写进去了没有」。
+
+    **判据带上取样时那一版的身份**(`seen` = 那一刻的 `content_hash`,口径同
+    `retire_stale` 和 `sync._export` 的收尾确认):这一步跑在
+    `ThreadPoolExecutor` 里、网络等待期间谁都可能换掉这一行 —— 手动收录那颗
+    「重新抓一次」就跑在 HTTP 请求线程里、**不持这一轮同步的维护锁**
+    (`grab.replace`)。无条件 `WHERE key=?` 的后果实测过:用户刚把一篇登录提示
+    页换成真正文,这一轮迟到的补抓把它又盖回旧内容,导出和索引跟着落盘,最后
+    面板说「这条已经在知识库里了」(审查用 Event 卡在补抓返回处确定性复现)。
+    `rowcount == 0` 不是失败,是「我取样那一版已经不在了,这次结果作废」
+    (元规则:0 行不是失败)。
+
+    **比的是整条内容的版本,不是 `AND body=?`。** 「正文还一样」答不出「这一行
+    还是我取样那一版吗」:替换那条路的版本身份是**整份导出负载**
+    (`grab_store._VERSION_FIELDS` —— 标题、正文、作者、发布时间),于是一次
+    **只改标题**的手动重抓换掉了 `content_hash` 却留着同一份正文,迟到的补抓按
+    正文相等照旧获得覆盖权。后果实测过:用户重抓到的那一版标题还在、正文却变成
+    补抓那一轮抓回来的另一份内容,md 和全文检索跟着落了旧正文,再贴同一链接只
+    说「已经在知识库里了」。**一边按四列认定「这是新的一版」、另一边按单列相等
+    认定「还是旧那一版」就是两套口径**(元规则:口径只有一份)。
+
+    `content_hash` 这一列够格当那份身份:换 body 的写入方一个不少地跟着换它
+    (本函数、`grab_store.replace`、`scripts/feed_fulltext_recheck._downgrade`、
+    `scripts/x_article_backfill` —— 后两个自己的 CAS 判据也是这一列),所以**比
+    它的原值不漏判**;而「只清导出回执」(`reclaim_export`)和
+    「译文写回」(`translate._save`)都不动这一列,**也不会把它们误判成内容变过**
+    (三份口径算的东西不同、不许互相比较,比的是库里那一列的原值 ——
+    见 `grab_store.item_version`)。
 
     旧译文译的是那份壳,正文一换它就作废了 —— 留着的话导出会把"壳的译文"当成
     这篇文章的中文正文写进 vault,而 `translated_at` 非空意味着再不会有人去
@@ -140,18 +167,27 @@ def _save(key: str, body: str) -> None:
     with reg.db() as c:
         row = c.execute('SELECT title FROM feed_items WHERE key=?', (key,)).fetchone()
         if not row:                      # 这期间被存量清理删掉了,没什么可写的
-            return
-        c.execute("""UPDATE feed_items SET body=?,content_kind='content',content_hash=?,lang=?,
+            return False
+        cur = c.execute("""UPDATE feed_items SET body=?,content_kind='content',content_hash=?,lang=?,
             fulltext_at=?,fulltext_error='',extract_stale=1,
             title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
-            WHERE key=?""",
-            (body, digest, reg.text_language(row['title'], body), reg.now(), key))
+            WHERE key=? AND content_hash=?""",
+            (body, digest, reg.text_language(row['title'], body), reg.now(), key, seen))
+        return cur.rowcount > 0
 
 
-def _fail(key: str, error: Exception | str) -> None:
+def _fail(key: str, error: Exception | str, seen: str) -> bool:
+    """这一条补抓失败了。返回「记上了没有」。
+
+    **判据同 `_save`,理由也同**:这次失败说的是**取样那一版**(`seen`)去原文
+    链接没抓到。等待期间那一行被换掉时 —— 哪怕换的只是标题,正文一个字没动 ——
+    把错误记在新那一版头上、还扣掉一次重试额度,是在给一件已经不存在的事记账。
+    """
     with reg.db() as c:
-        c.execute('UPDATE feed_items SET fulltext_error=?,fulltext_tries=fulltext_tries+1'
-                  ' WHERE key=?', (str(error)[:600] or type(error).__name__, key))
+        cur = c.execute('UPDATE feed_items SET fulltext_error=?,fulltext_tries=fulltext_tries+1'
+                        ' WHERE key=? AND content_hash=?',
+                        (str(error)[:600] or type(error).__name__, key, seen))
+        return cur.rowcount > 0
 
 
 def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
@@ -163,12 +199,15 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
     `key` 收尾是为了定序 —— `fetched_at` 只精确到秒,一批抓回来的条目时间戳
     一模一样。
     """
-    summary = {'done': 0, 'failed': 0, 'empty': 0, 'left': 0,
+    summary = {'done': 0, 'failed': 0, 'empty': 0, 'left': 0, 'stale': 0,
                'errors': [], 'failed_keys': [], 'stopped': False}
     cond, cargs = queued_sql()
     with reg.db() as c:
         rows = [dict(r) for r in c.execute(
-            f'SELECT key,url,title FROM feed_items WHERE kind=? AND ({cond})'
+            # `content_hash` 跟着取出来:它是这一次补抓**针对哪一版**的身份,
+            # `_save` / `_fail` 的 WHERE 里比的就是它的原值(见那两处的说明)。
+            # **不取 `body`** —— 「正文还一样」答不出「还是我取样那一版吗」。
+            f'SELECT key,url,title,content_hash FROM feed_items WHERE kind=? AND ({cond})'
             ' ORDER BY fulltext_tries DESC, fetched_at DESC, key LIMIT ?',
             (kind, *cargs, max(1, limit or MAX_ITEMS))).fetchall()]
     summary['left'] = max(0, pending(kind) - len(rows))
@@ -183,21 +222,31 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
             body, why = fetch_one(item['url'])
             return item, body, why, None
         except Exception as e:               # noqa: BLE001 - 逐条隔离,一个坏链接不带掉整轮
-            _fail(item['key'], e)
             return item, None, '', e
 
     with ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix='fulltext') as pool:
         for item, body, why, error in pool.map(one, rows):
             if isinstance(error, Exception):
-                summary['failed'] += 1
-                summary['failed_keys'].append(item['key'])
-                summary['errors'].append({'title': item['title'][:120], 'reason': str(error)[:300]})
+                # **记账排在这里而不是线程里**:要按「记上了没有」统计,而
+                # `_fail` 现在会在那一行已经被换掉时拒绝记(元规则:统计按实际
+                # 写入结果报、跳过的如实列出)。
+                if not _fail(item['key'], error, item['content_hash']):
+                    summary['stale'] += 1
+                else:
+                    summary['failed'] += 1
+                    summary['failed_keys'].append(item['key'])
+                    summary['errors'].append({'title': item['title'][:120],
+                                              'reason': str(error)[:300]})
             elif body is None:               # 停止请求 / 预算用完,留给下一轮
                 summary['left'] += 1
                 summary['stopped'] = True
             elif body:
-                _save(item['key'], body)
-                summary['done'] += 1
+                if _save(item['key'], body, item['content_hash']):
+                    summary['done'] += 1
+                else:
+                    # 等待期间那一行被换过了(手动重抓那颗按钮就跑在另一个线程
+                    # 里)—— 这次抓到的结果作废,**不许盖回去**。
+                    summary['stale'] += 1
             else:
                 # 页面抓到了,但那上面认不出一块像正文的内容(付费墙、纯 JS 渲染、
                 # 一张图,或者赢出来那一块判成了样板区)。按失败计次:重试三轮之后
@@ -205,24 +254,34 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
                 # 重抓同一个读不懂的页面。
                 # `why` 非空就用它:样板区那一档的原因是明确的,面板上要说得出是
                 # 哪一类(口径同 `fetch_one` 对 `html_problem` 那段)。
-                _fail(item['key'], why or '页面上没有识别出正文，可能需要登录或由脚本渲染')
-                summary['empty'] += 1
-                summary['failed_keys'].append(item['key'])
-                summary['errors'].append({'title': item['title'][:120], 'reason': (
-                    why or '页面上没有识别出正文，可能需要登录或由脚本渲染')[:300]})
+                said = why or '页面上没有识别出正文，可能需要登录或由脚本渲染'
+                if not _fail(item['key'], said, item['content_hash']):
+                    summary['stale'] += 1
+                else:
+                    summary['empty'] += 1
+                    summary['failed_keys'].append(item['key'])
+                    summary['errors'].append({'title': item['title'][:120],
+                                              'reason': said[:300]})
             if progress:
-                progress(summary['done'] + summary['failed'] + summary['empty'], len(rows))
+                # 作废那几条也算「处理过了」:不算的话进度条到不了头(面板上那一行
+                # 会永远停在 N-1/N)。
+                progress(summary['done'] + summary['failed'] + summary['empty']
+                         + summary['stale'], len(rows))
     return summary
 
 
 def summarize(summary: dict) -> str:
-    if not any(summary[k] for k in ('done', 'failed', 'empty', 'left')):
+    if not any(summary[k] for k in ('done', 'failed', 'empty', 'left', 'stale')):
         return ''
     text = f"已补抓 {summary['done']} 条原文正文"
     if summary['failed']:
         text += f",{summary['failed']} 条抓取失败"
     if summary['empty']:
         text += f",{summary['empty']} 条没能识别出正文"
+    if summary.get('stale'):
+        # **跳过的如实列出**(元规则):这几条在补抓期间被换成了别的内容,这次
+        # 结果作废 —— 说成「失败」会让人去查对方站点,说成「成功」更糟。
+        text += f"，{summary['stale']} 条在补抓期间已被换新、这次结果作废"
     if summary['left']:
         text += f",{summary['left']} 条留到下一轮"
     return text
@@ -301,14 +360,32 @@ def retire_stale(kind: str) -> int:
 
     不漏:这里**不限于本轮刚落盘的那几篇**,所以上一轮失败留下的待办也一起收。
     常态下那条查询是空集合,一次 kb.db 连接都不开。
+
+    **放下标记时要核对版本**(`AND content_hash=?`,取样那一版)。这两步之间那一
+    行可能被换掉 —— 手动收录那颗「重新抓一次」跑在 HTTP 请求线程里、不持这一轮
+    的维护锁(`grab.replace`),而它每次都会重新置上 `extract_stale=1`。无条件按
+    key 清的后果实测过(第 4 轮审查,Event 卡在 `_drop_extraction` 之前):清掉的
+    是**新版本**的待办,于是下一轮导出不再摘旧的 `topic/`、`entity/`,索引按残留
+    标签走 `parse_pretagged`、`extracted_at` 跟着非空 —— **新正文永远不进重新提取
+    队列,旧主题永久留在那一篇上**,再同步多少轮都不变。`rowcount == 0` 不是失败
+    (元规则),是「那一版已经不在了,它的待办不该由我来放下」。
+
+    **`_drop_extraction` 照旧对整批做**:清掉的是知识库里那份按旧内容算出来的
+    摘要/主题,对已经换了版的那几篇也只是让它们重新提取一次 —— 多花一次提取,
+    而反过来留着是「永久错」。
     """
     with reg.db() as c:
-        rows = c.execute("SELECT key,path FROM feed_items WHERE kind=? AND extract_stale=1"
+        rows = c.execute("SELECT key,path,content_hash FROM feed_items"
+                         " WHERE kind=? AND extract_stale=1"
                          " AND exported_hash=content_hash AND path<>''", (kind,)).fetchall()
     if not rows:
         return 0
     _drop_extraction([r['path'] for r in rows])
+    done = 0
     with reg.db() as c:
-        c.executemany('UPDATE feed_items SET extract_stale=0 WHERE key=?',
-                      [(r['key'],) for r in rows])
-    return len(rows)
+        for r in rows:
+            cur = c.execute('UPDATE feed_items SET extract_stale=0'
+                            ' WHERE key=? AND content_hash=? AND extract_stale=1',
+                            (r['key'], r['content_hash']))
+            done += cur.rowcount
+    return done

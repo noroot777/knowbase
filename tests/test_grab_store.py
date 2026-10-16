@@ -16,8 +16,8 @@ from kb import config, pipeline
 from kb.collectors import FetchScope
 from kb.feeds import grab, registry as reg, sync
 from kb.source_types import feed_types
-from tests.grab_fixtures import (BODY, SOFT_WALL, SOFT_WALL_PARAS, GrabCase, PAGE,
-                                 TWEET, html_resp, page_html)
+from tests.grab_fixtures import (BODY, SOFT_WALL, GrabCase, PAGE, TWEET, html_resp,
+                                 page_html)
 
 
 class SaveTests(GrabCase):

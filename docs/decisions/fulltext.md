@@ -42,10 +42,35 @@
   (`content_kind='summary'`、`content_hash` 重算),**是正确的降级**。壳从备份库恢复(`--backup`,显式给了就只认
   那一个)或按标题链接重建;恢复回来的要**再过一遍判据**。`content_hash` 的口径抽成 `fulltext.body_hash`。**射程
   是「属于开了补抓的订阅」,不是「报过补抓成功」**(`_suspect`;后者漏掉的恰恰是这个脚本自己制造的中间态)。写回
-  按元规则带 `AND body=?`(比旧 body 本身,不比 `content_hash` —— 那一列有两个写入方)。
+  按元规则带 `AND body=?` —— 它问的是**「我判坏的那份正文还在吗」**,不是补抓交付那一条的「这一行还是我取样
+  那一版吗」;两问不同口径,别跟着下面那条一起改成 `content_hash`。
 - **失败过的优先**(`ORDER BY fulltext_tries DESC, fetched_at DESC, key`)。
 - **`_save` 要把旧译文一起清掉**(旧译文译的是那份壳),`translate_tries` 归零。**但不许清 `exported_hash`** —— 导出闸门是
   `exported_hash<>content_hash`,正文一换前者就自然成立;而它同时是「这一篇入没入过库」的事实来源,清掉会让一篇**已经能展开阅读**的旧条目标题连同入口一起消失。
+- **这一轮的结果只许写回它取样的那一版 —— 所有异步交付边界都带判据,而判据是「那一版的身份」,不是「正文还一
+  样」。** 补抓是「先 SELECT、再等网络、最后写回」,而**同一行此刻可能被另一个线程换掉**:手动收录那颗「重新抓
+  一次」跑在 HTTP 请求线程里、**不持这一轮同步的维护锁**(`grab.replace`,见 `link-grab.md`)。所以
+  `fetch_pending` 连 `content_hash` 一起取样(**不取 `body`**),`_save` / `_fail` 和 `retire_stale` 的 WHERE 一律
+  带 `AND content_hash=?`(取样那一版)。**`AND body=?` 不够,它是另一套口径**:替换那条路的版本身份是**整份导出
+  负载**(`grab_store._VERSION_FIELDS` —— 标题、正文、作者、发布时间),于是一次**只改标题**的手动重抓换掉了
+  `content_hash` 却留着同一份正文,按正文相等判的补抓照旧获得覆盖权 —— 实测形态是用户重抓到的那一版标题还在、
+  正文却换成补抓那一轮抓回来的另一份内容,md 和全文检索跟着落了旧正文,再贴同一链接只说「已经在知识库里了」。
+  一边按四列认定「这是新的一版」、另一边按单列相等认定「还是旧那一版」就是两套口径(元规则:口径只有一份)。
+  `content_hash` 够格当那份身份:换 body 的写入方一个不少地跟着换它(`_save`、`grab_store.replace`、
+  `_downgrade`、`scripts/x_article_backfill`,后两个自己的 CAS 判据也是这一列),而 `reclaim_export` 清导出回执、
+  `translate._save` 写译文都不动它 —— **不漏判,也不会把「不是内容的变动」误判成换了版**。三处的 `rowcount == 0` **都不是失败**,是「那一版已经不在了,这次结果作废」(元规则)。无条件
+  按 key 写的后果都实测过(Event / 定点回调各复现一次):①迟到的 `_save` 把用户刚换回的正文又盖成旧内容,导出和索引
+  跟着落盘,面板最后说「这条已经在知识库里了」;②迟到的 `_fail` 把一句「抓取失败」记在新正文头上、还扣掉一次重试
+  额度;③迟到的 `retire_stale` 清掉的是**新版本**那笔待办,于是下一轮导出不再摘旧的 `topic/`、`entity/`,索引按
+  残留标签走 `parse_pretagged`、`extracted_at` 跟着非空 —— **新正文永远不进重新提取队列,旧主题永久留在那一篇
+  上**,再同步多少轮都不变。配套两条:**统计按实际写入结果报、跳过的如实列出**(`summary['stale']`,`summarize`
+  里单独一句「N 条在补抓期间已被换新、这次结果作废」;算进进度回调,不然面板那一行永远停在 N-1/N),以及
+  **`_drop_extraction` 照旧对整批做**(清掉知识库里那份按旧内容算的摘要,对已经换版的那几篇也只是让它们重新提取
+  一次 —— 多花一次,反过来留着是永久错)。回归 `tests/test_item_version_race.py`。
+- **导出确认那一句认的是「刚落盘的那一份」**(`sync._export` 收尾的 `SET exported_hash=?,path=? WHERE key=? AND
+  content_hash=?`)。`_save` 跑在 crawl 阶段、和 export 同一轮里串行,所以撞不上它;但只要有谁能在导出进行中改正文
+  (手动收录那条恢复链就是 —— `grab.replace` 跑在 HTTP 请求里、不持这把维护锁),右侧写成 `exported_hash=content_hash`
+  就会把**新正文**的欠账消在旧文件上,**永久漏导出**。要动那一句先读 `link-grab.md` 第一节里的同名约束。
 - **`subscription_items` 要一条按 `item_key` 的索引**(主键是复合的,按 item_key 查用不上)。
 - **正文从壳换成全文之后,按旧壳算出来的提取结果要作废**(`fulltext.retire_stale`,由 `sync._export` 在导出之后调
   一次)—— 不作废不是「晚一点更新」:`extracted_at` 非空意味着这一篇**永远**不进 `pending_docs`。四件事:①**时点

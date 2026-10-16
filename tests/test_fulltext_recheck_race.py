@@ -210,10 +210,13 @@ class RecheckRaceTests(RecheckCase):
     def test_two_real_threads_end_up_consistent(self):
         """**真的两个执行体**(各一条连接),不人为排序地抢同一条记录。
 
-        两种交错都通向同一个末态 —— 那份完整正文:`_save` 先提交则判据看到
-        正文已经换了、跳过;`_downgrade` 先提交则 `_save` 紧接着把正文写上去。
-        **不许出现「壳 + 补抓成功时间」或者「壳 + 译文」那种半状态**,口径同
-        `sync._claim_write` 那条「两种结局的末态都是对的」。8 轮各一次。
+        **两种交错各有一个自洽的末态,而且那份正文一条都不丢**:`_save` 先提交则
+        复查那一侧的判据看到正文已经换了、跳过,末态就是完整正文;`_downgrade`
+        先提交则这次补抓的结果作废(它带的判据说的是**降级前**那一版 —— 见
+        `fulltext._save` 的 `seen`),而那一条回到了补抓队列,下一轮重抓一次照旧
+        落得进去。**两种末态都不许出现「壳 + 补抓成功时间」或者「壳 + 译文」那种
+        半状态**,口径同 `sync._claim_write` 那条「两种结局的末态都是对的」。
+        8 轮各一次。
         """
         article = ARTICLE_MARK + ' and keeps the transcript for later replay. ' * 20
         for i in range(8):
@@ -223,6 +226,10 @@ class RecheckRaceTests(RecheckCase):
                 mine = [r for r in plan if r['key'] == key]
                 self.assertEqual(1, len(mine))
                 gate = threading.Barrier(2)
+                # 取样排在抢锁之前,和真实补抓一样(`fetch_pending` 先 SELECT、
+                # 再发网络请求、最后才写回)。取的是**那一版的身份**,口径同
+                # `fulltext._save` 的 `seen`。
+                seen = self.row(key)['content_hash']
 
                 def downgrade():
                     gate.wait()
@@ -230,7 +237,7 @@ class RecheckRaceTests(RecheckCase):
 
                 def save():
                     gate.wait()
-                    fulltext._save(key, article)
+                    fulltext._save(key, article, seen)
 
                 threads = [threading.Thread(target=downgrade), threading.Thread(target=save)]
                 for t in threads:
@@ -238,9 +245,17 @@ class RecheckRaceTests(RecheckCase):
                 for t in threads:
                     t.join()
                 row = self.row(key)
-                self.assertIn(ARTICLE_MARK, row['body'])
-                self.assertEqual('content', row['content_kind'])
-                self.assertNotEqual('', row['fulltext_at'])
+                if ARTICLE_MARK in row['body']:
+                    self.assertEqual('content', row['content_kind'])
+                    self.assertNotEqual('', row['fulltext_at'])
+                else:
+                    # 复查先提交:这次补抓的结果作废,**没有半状态** —— 壳不许带着
+                    # 补抓成功时间或译文。那一条回到队列,补一次照旧落得进去。
+                    self.assertEqual('', row['fulltext_at'])
+                    self.assertEqual('', row['body_zh'])
+                    self.assertEqual(1, fulltext.pending('rss'))
+                    self.assertTrue(fulltext._save(key, article, row['content_hash']))
+                    self.assertIn(ARTICLE_MARK, self.row(key)['body'])
 
 
 class StaleTranslationTests(RecheckCase):
