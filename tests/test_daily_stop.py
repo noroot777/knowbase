@@ -222,12 +222,12 @@ class DailyStopTests(unittest.TestCase):
                 time.monotonic() + 600, 'social')
 
     def test_a_skipped_stage_is_not_a_successful_sync(self):
-        # 2026-09-30 实测:51 个大V账号全缺 X 桥接配置,crawl 整个落 skipped
+        # 2026-09-30 实测:51 个大V账号全缺 X 通道配置,crawl 整个落 skipped
         # (「待配置 51 个」)。这里原来只数 error,于是通道报绿色的「同步完成」,
         # 日报里那一行只剩 extract 的结果 —— "一条都没抓到"连同原因一起看不见。
         entry = self.sync_once({
             'crawl': {'status': 'skipped',
-                      'detail': '检查 0/51 个来源，新增 0 条，待配置 51 个（请填写 X 桥接或专用订阅链接）'},
+                      'detail': '检查 0/51 个来源，新增 0 条，待配置 51 个（请先配好 X 的取法或填专用订阅链接）'},
             'export': {'status': 'ok', 'detail': '已保存 0 条到知识库'},
             'index': {'status': 'ok', 'detail': '新增/更新 0'},
             'extract': {'status': 'ok', 'detail': '没有待提取的文档'}})

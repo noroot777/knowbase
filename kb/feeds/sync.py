@@ -33,7 +33,6 @@ DIGEST_SECONDS = 240
 # 90 秒连五个号都跑不完。这条通道按天同步(见 `source_types` 里 social 的
 # interval),所以给得宽;用完的账号记成"留待下次",靠 last_attempt 轮转补齐。
 X_LOCAL_SECONDS = float(os.environ.get('KB_X_LOCAL_SECONDS', '1200'))
-BRIDGE_FAILURE_LIMIT = 3
 BUDGET_MESSAGE = '本轮采集时间预算不足，剩余订阅留待下次同步'
 
 
@@ -43,12 +42,8 @@ def _fetch_with_budget(source, settings, scope, collect_deadline):
     deadline = time.monotonic() + SOURCE_SECONDS
     if deadline > collect_deadline:
         raise CollectionBudgetExceeded
-    # 桥接通道的 X 长文补全挂在这儿(另三条通道在预取里就补过了)。判据和动作
-    # 都在 `x_channels` 那一侧:它是「当前这套设置会怎么跑」的唯一口径,而
-    # `targets()` 回答的正是同一个问题的另一面(哪些订阅**不**走 HTTP)。
-    return x_channels.fill_bridge(source, settings, fetch_source(
-        source, settings, unconditional=scope.ranged,
-        deadline=deadline, collect_deadline=collect_deadline))
+    return fetch_source(source, settings, unconditional=scope.ranged,
+                        deadline=deadline, collect_deadline=collect_deadline)
 
 
 def _repointed(c, source) -> bool:
@@ -167,7 +162,7 @@ def _prefetch_x(kind, sources, settings, scope):
 
     一个账号都抓不到也不抛:每个账号的失败已经落在它自己那一项上,随后
     `fetch_source` 会把它翻成这条订阅的失败 —— 一个改了名的号不该把整轮带掉。
-    通道是 bridge(或这一类来源没有通道概念)时 `targets()` 返回空,直接空转。
+    这一类来源没有通道概念时 `targets()` 返回空,直接空转。
     """
     x_channels.reset()
     if not x_channels.supports_channels(kind):
@@ -259,8 +254,8 @@ def collect(kind, scope):
     for source in sources:
         if problem := reg.configuration_error(source, settings):
             summary['unconfigured'] += 1
-            # 理由按当前通道走(桥接要模板、feedgrab 要登录态、浏览器要登录过),
-            # 所以收尾那行提示也从这里取,不写死"请填写 X 桥接"。
+            # 理由按当前通道走(feedgrab 要登录态、浏览器要登录过、attach 要
+            # 那个调试开关),所以收尾那行提示也从这里取,不写死某一档的前提。
             unconfigured_why = unconfigured_why or problem.removeprefix('待配置：')
         elif source['retry_at'] > time.time() and not scope.force:
             summary['deferred'] += 1
@@ -274,13 +269,6 @@ def collect(kind, scope):
     # **之后**才开始算。算在前面的话,预取一跑完每条订阅都已经超了预算,整轮
     # 一条也取不走、全部记成"留待下次"—— 而东西明明已经抓在手里了。
     deadline = time.monotonic() + COLLECT_SECONDS
-    # 桥接熔断只对桥接通道成立:它防的是"公共实例挂了,别再拿 50 个账号去撞"。
-    # 登录态通道的内容已经在预取里抓完,这里只是逐条取走,断开只会白扔掉已经
-    # 付过代价的结果;而那两条通道真出问题(登录失效)时每个账号拿到的是同一
-    # 句话,熔断省不下任何东西。
-    shared_upstream = (x_channels.supports_channels(kind)
-                       and x_channels.channel_of(settings) == x_channels.BRIDGE)
-    bridge_failures = 0
     # Fetches alone run concurrently; persistence and pipeline state have one writer.
     # Submit only one bounded batch so failures/stop never leave a 51-job backlog.
     with ThreadPoolExecutor(max_workers=FETCH_WORKERS, thread_name_prefix='feed') as pool:
@@ -292,22 +280,15 @@ def collect(kind, scope):
                 summary['skipped'] += len(pending)
                 summary['message'] = BUDGET_MESSAGE
                 break
-            if bridge_failures >= BRIDGE_FAILURE_LIMIT:
-                independent = [s for s in pending if not reg.uses_bridge(s)]
-                summary['skipped'] += len(pending) - len(independent)
-                summary['message'] = 'X 桥接连续失败，已暂停本轮其余桥接请求；请检查桥接设置后重试'
-                pending = independent
             batch, pending = pending[:FETCH_WORKERS], pending[FETCH_WORKERS:]
             if not batch:
                 break
             _stage('crawl', 'running', f"{reg.KINDS[kind]} · 正在读取 {len(batch)} 个来源（已检查 {summary['checked']}/{len(sources)}）")
             futures = {pool.submit(_fetch_with_budget, s, settings, scope, deadline): s for s in batch}
-            shared_ok, shared_errors = False, 0
             for future in as_completed(futures):
                 source = futures[future]
                 try:
                     result = future.result()
-                    shared_ok |= shared_upstream and reg.uses_bridge(source)
                     saved = _save_result(source, result, scope)
                     if saved is None:
                         # 这条订阅在采集期间被改指到别的源(见 `_repointed`):
@@ -330,10 +311,8 @@ def collect(kind, scope):
                     if not _save_failure(source, e, summary):
                         summary['repointed'] += 1
                         continue
-                    shared_errors += int(shared_upstream and reg.uses_bridge(source))
                 summary['checked'] += 1
                 _stage('crawl', 'running', f"{reg.KINDS[kind]} {summary['checked']}/{len(sources)} · {source['name']}")
-            bridge_failures = 0 if shared_ok else bridge_failures + shared_errors
     summary['stopped'] |= bool(_state.get('stop_requested'))
     with reg.db() as c:
         c.execute('INSERT INTO feed_runs(kind,started_at,finished_at,summary) VALUES(?,?,?,?)',

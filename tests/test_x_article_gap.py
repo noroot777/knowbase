@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # 这份 docstring 里写着正则(`\S*`、`\w+`),所以必须是 **raw** 字符串:普通字符串里
 # 这些都是"非法转义",Python 3.12 起报 SyntaxWarning、3.15 要变成错误。
-r"""长文补全的五道缝:哪些形态会让一篇长文**悄悄**落成空正文/缺字的正文。
+r"""长文补全的四道缝:哪些形态会让一篇长文**悄悄**落成空正文/缺字的正文。
 
-五族各管一种,共同的要害是同一个:`put_items` 是 `ON CONFLICT(key) DO NOTHING`
+四族各管一种,共同的要害是同一个:`put_items` 是 `ON CONFLICT(key) DO NOTHING`
 —— 缺正文的条目一旦落库就**再也更新不了**,下一轮重叠重抓也救不回来。所以每一
 条都**先断言后果**(这一篇的正文到底是什么、水位动没动、下一轮还取不取得到),
 不是"有没有调过那个接口"。
@@ -13,43 +13,36 @@ r"""长文补全的五道缝:哪些形态会让一篇长文**悄悄**落成空�
 ②`ArticleCardTests`:推文写了一句介绍 + 一张长文卡片。X 把那条
   `/i/article/<id>` 链接藏起来改渲染成卡片,所以正文**非空**,另两条判据都不
   命中 —— 整篇文章就这么漏掉了,面板上一切正常。
-③`BridgeChannelTests`:桥接通道整个没接补全,长文只存下那条文章链接。
-④`ArticlePathFormTests`:X 的文章地址有两种路径形式,而判据只认 `/i/article/`
+③`ArticlePathFormTests`:X 的文章地址有两种路径形式,而判据只认 `/i/article/`
   那一种。`/<handle>/article/<id>`(X 自己 302 到的规范形式,也正是
-  `article_page()` 生成的那个)在**三条保留通道**上各有一种末态:feedgrab 和
+  `article_page()` 生成的那个)在**三条通道**上各有一种末态:feedgrab 和
   「浏览器通道没读到卡片」是那条链接当正文入库,「浏览器通道读到了卡片」是正文
   补上了、而那条地址留在开头。
-⑤`ProseBoundaryTests`:摘掉那条地址时把**紧挨着它**的标点和文字一起删掉。两条
+④`ProseBoundaryTests`:摘掉那条地址时把**紧挨着它**的标点和文字一起删掉。两条
   正则的尾巴原来都是"吃到下一个空白为止"(`\S*` / Unicode 的 `\w+`),而中文不带
   空格 —— 「<地址>,重点看第三节。」那句说明被整段当成地址删掉,采集照报成功。
 
 和 `test_x_article.py` 按形状分开(那边是渲染、接口两档结局和浏览器后路):
 那个文件已经 661 行,贴着仓库那条 700 行上限。摆盘共用它和 `test_x_channels`。
 
-⑤族管的是地址**右边**那条缝;**左边**那条(起点必须是主机名的起点,别人家的地址
+④族管的是地址**右边**那条缝;**左边**那条(起点必须是主机名的起点,别人家的地址
 不许被当成 X 文章链接剪断)在 `test_x_article_host.py` —— 本文件已经贴着那条
-700 行上限,它借④族这两个 round helper。
+700 行上限,它借③族这两个 round helper。
 
 跑:  python -m unittest tests.test_x_article_gap -v
 """
 import contextlib
-import json
 import sys
 import unittest
-from datetime import datetime, timedelta, timezone
-from email.utils import format_datetime
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb.collectors import FetchScope
-from kb.feeds import registry as reg, sync, x_article, x_browser, x_channels
-from kb.feeds import fetching
-from kb.feeds.fetching import FeedError, Response
+from kb.feeds import x_article, x_browser
+from kb.feeds.fetching import FeedError
 from tests.test_x_article import (BLANK, OLD_WATER, _FakeChrome, answering,
                                   article_payload, entry, harvest_round, snapshot)
-from tests.test_x_channels import ChannelBase
 from tests.test_x_feedgrab_contract import TODAY, FeedgrabRound, tweet
 
 FULL = '整理书签、做学习计划，我以前都是一个人对着 AI 来回问。'
@@ -83,7 +76,7 @@ class TitleOnlyReplyTests(unittest.TestCase):
         self.assertTrue(_FakeChrome.visited, '接口没给正文 → 要走后路')
 
     def test_without_a_fallback_a_title_only_reply_holds_the_round(self):
-        """没有后路(feedgrab/桥接那两条):本轮不入库、水位一步不动。"""
+        """没有后路(feedgrab 那一条):本轮不入库、水位一步不动。"""
         got, _ = harvest_round([article_payload(blocks=[])], fallback=False)
         urls = [e['url'] for e in got['entries']]
         self.assertNotIn('https://x.com/example/status/9', urls)
@@ -164,156 +157,8 @@ class ArticleCardTests(unittest.TestCase):
         self.assertEqual('', got['incomplete'])
         self.assertEqual(1, len(got['entries']))
 
-    def test_the_bridge_shape_ignores_the_hint(self):
-        """桥接那一档只认正文里明写的地址 —— 它手里压根没有 DOM 信号。"""
-        e = {'url': 'https://x.com/example/status/9', 'body': '写了话',
-             x_article.HINT: 'https://x.com/i/article/9'}
-        self.assertTrue(x_article.needs_article(e))
-        self.assertFalse(x_article.needs_article(e, links_only=True))
-        self.assertTrue(x_article.needs_article(
-            {'url': 'u', 'body': '写了话 https://x.com/i/article/9'}, links_only=True))
-        self.assertFalse(x_article.needs_article({'url': 'u', 'body': ''}, links_only=True),
-                         '桥接上的空正文多半是纯图推文,不值一次询问')
 
-
-# --------------------------------------------------------------- ③ 桥接通道
-
-_FRESH = datetime.now(timezone.utc) - timedelta(hours=5)
-
-
-def bridge_rss(body):
-    return ('''<?xml version="1.0"?><rss version="2.0"><channel><title>Example</title>
-<item><guid>s900</guid><title>Example Person</title>
-<link>https://x.com/Example/status/900</link>
-<description>%s</description><pubDate>%s</pubDate></item></channel></rss>'''
-            % (body, format_datetime(_FRESH))).encode()
-
-
-class BridgeChannelTests(ChannelBase):
-    """桥接通道:长文照旧要补,补不到就不入库、而且**不存 etag**。
-
-    不存 validators 是这条路上唯一等价的扣留手段:存了的话下一轮条件请求命中
-    304、整份 feed 一条都不返回,被扣下的那几条再也没有第二次机会。
-    """
-
-    def setUp(self):
-        super().setUp()
-        self.sub('Example')
-        self.settings(x_channels.BRIDGE, bridges=['https://bridge.test/{handle}'])
-
-    def collect(self, *script, rss=None, etag='W/"v1"'):
-        calls = []
-
-        def fake_request(url, headers=None, **kw):
-            calls.append(url)
-            return Response(200, url, rss if rss is not None else bridge_rss(
-                '我写了一篇新文章 https://x.com/i/article/123456789'),
-                {'etag': etag, 'last-modified': 'Thu, 09 Oct 2026 00:00:00 GMT'})
-
-        req, api = answering(*script)
-        with contextlib.ExitStack() as es:
-            es.enter_context(patch.object(fetching, 'request', fake_request))
-            es.enter_context(req)
-            summary = sync.collect('social', FetchScope(force=True))
-        return summary, api
-
-    def stored(self):
-        with reg.db() as c:
-            return c.execute("SELECT title, body FROM feed_items WHERE kind='social'").fetchall()
-
-    def row(self):
-        with reg.db() as c:
-            return c.execute("""SELECT etag, modified, last_note FROM subscriptions
-                WHERE kind='social'""").fetchone()
-
-    def test_the_bridge_fills_the_article_body(self):
-        """**后果先断言**:库里是全文,不是那条链接。"""
-        summary, api = self.collect(article_payload())
-        self.assertEqual([], summary['errors'])
-        rows = self.stored()
-        self.assertEqual(1, len(rows))
-        self.assertIn('整理书签', rows[0]['body'])
-        self.assertTrue(rows[0]['body'].startswith('我写了一篇新文章'), rows[0]['body'][:40])
-        self.assertEqual('X书签保存Skill x Teamily', rows[0]['title'])
-        self.assertEqual(1, len(api.urls), '按文章地址问了一次')
-        self.assertEqual('W/"v1"', self.row()['etag'], '读全了就照常存 etag')
-
-    def test_a_held_article_is_not_stored_and_keeps_no_etag(self):
-        summary, _ = self.collect(x_article.ArticleUnavailable('接口挂了'))
-        self.assertEqual([], self.stored(), '补不到就不入库')
-        self.assertEqual([], summary['errors'], '这不是一次失败')
-        row = self.row()
-        self.assertEqual('', row['etag'], '存了 etag 下一轮 304 就再也补不回来了')
-        self.assertEqual('', row['modified'])
-        self.assertIn('没取到', row['last_note'])
-        self.assertIn('长文正文没取到', json.dumps(summary.get('partial') or [],
-                                                ensure_ascii=False),
-                      '面板上那行「部分同步」读的就是它')
-
-    def test_the_next_round_brings_it_back(self):
-        """扣留之后下一轮真的补回来了,而且提示被清掉。"""
-        self.collect(x_article.ArticleUnavailable('接口挂了'))
-        summary, _ = self.collect(article_payload())
-        rows = self.stored()
-        self.assertEqual(1, len(rows))
-        self.assertIn('整理书签', rows[0]['body'])
-        self.assertEqual('', self.row()['last_note'])
-
-    def test_a_tweet_without_an_article_link_is_not_asked(self):
-        """反过来钉一边:桥接上的普通推文一次询问都不发。"""
-        summary, api = self.collect(
-            article_payload(), rss=bridge_rss('随手一条 https://t.co/abcdef'))
-        self.assertEqual([], api.urls)
-        self.assertEqual(1, len(self.stored()))
-        self.assertEqual('', self.row()['last_note'])
-
-    def test_a_plain_rss_subscription_is_left_alone(self):
-        """非 X 的订阅不走这一步 —— 判据是通道,不是"正文里有没有链接"。"""
-        reg.save_subscription('rss', {'name': 'Blog', 'url': 'https://example.org/feed'})
-        calls = []
-
-        def fake_request(url, headers=None, **kw):
-            calls.append(url)
-            return Response(200, url, bridge_rss('一篇博客'), {})
-
-        req, api = answering(article_payload())
-        with contextlib.ExitStack() as es:
-            es.enter_context(patch.object(fetching, 'request', fake_request))
-            es.enter_context(req)
-            sync.collect('rss', FetchScope(force=True))
-        self.assertEqual([], api.urls, 'rss 订阅不许去问 X 长文接口')
-
-
-    def test_a_non_bridge_channel_is_left_to_the_prefetch(self):
-        """**契约**:这个钩子只管桥接那一档,另三条通道在预取里就补过了。
-
-        今天这是一条**零风险的冗余带**,如实记着:预取那一侧 `x_article.fill`
-        用的是完整判据,而 `lead_text` 把 article 链接从介绍里剔掉了 —— 于是补完
-        的条目在 `links_only` 之下必然不命中 ①,补不到的早被预取摘走,所以去掉
-        这个判据在今天的真实路径上行为等价(定点注入实测 0 红)。留着它的理由是
-        **构造上的**:「哪些订阅走这一步」只该由通道设置回答;而预取那一侧哪天把
-        那条链接留在正文里,它就从冗余带变成真防线,那时没有用例会告诉你它没了。
-        """
-        self.settings(x_channels.FEEDGRAB)
-        with reg.db() as c:
-            source = dict(c.execute(
-                "SELECT * FROM subscriptions WHERE kind='social'").fetchone())
-        kept = [entry(body='我写了一篇新文章 https://x.com/i/article/123456789')]
-        validators = {'etag': 'W/"v1"', 'modified': 'Thu, 09 Oct 2026 00:00:00 GMT'}
-        req, api = answering(article_payload())
-        with req:
-            out = x_channels.fill_bridge(
-                source, reg.get_settings('social'), (kept, validators))
-        self.assertEqual([], api.urls, '非桥接通道不在这儿补 —— 预取已经补过了')
-        self.assertIs(kept, out[0], '原样返回,一个条目都不摘')
-        self.assertEqual(validators, out[1], 'etag 照存,这一轮没有扣留')
-
-
-if __name__ == '__main__':
-    unittest.main()
-
-
-# ------------------------------------------------------- ④ 文章地址的两种形式
+# ------------------------------------------------------- ③ 文章地址的两种形式
 
 class ArticlePathFormTests(FeedgrabRound):
     """**X 的文章地址有两种路径形式,只认一种就会漏掉另一种的全文。**
@@ -490,7 +335,7 @@ class ProseBoundaryTests(FeedgrabRound):
     `added=1`、`errors=[]`、`partial=[]`、水位照常推进,一行提示都没有;而
     `put_items` 是 `DO NOTHING`,**重复同步也补不回来**。
 
-    ④族把识别口径扩到规范形式之后,同一条尾巴在那条新路径上跟着发作;
+    ③族把识别口径扩到规范形式之后,同一条尾巴在那条新路径上跟着发作;
     旧式 `/i/article/` 和 t.co 那条在它之前就坏着。修法是两条正则共用一份
     尾巴口径(`_URL_TAIL`):字符类只收 URL 的 ASCII 合法字符(中文天然落在外面),
     结尾必须落在"不像句读"的那一档(英文的 `. ` `) ` 收尾同理)。
@@ -505,7 +350,7 @@ class ProseBoundaryTests(FeedgrabRound):
     CANON = 'https://x.com/Example/article/10001'
     LEGACY = 'https://x.com/i/article/2108252660529049601'
 
-    # 跟④族逐字相同的两个摆盘,直接借过来而不是复制一份 —— 它们只用到
+    # 跟③族逐字相同的两个摆盘,直接借过来而不是复制一份 —— 它们只用到
     # `FeedgrabRound` 的能力和模块级摆盘。
     feedgrab_round = ArticlePathFormTests.feedgrab_round
     browser_round = ArticlePathFormTests.browser_round
@@ -530,7 +375,7 @@ class ProseBoundaryTests(FeedgrabRound):
         self.assertEqual(1, len(calls.urls))
 
     def test_prose_glued_to_a_legacy_link_survives_feedgrab(self):
-        """旧式形式在④族之前就有这个病,两种形式共用一条尾巴口径。"""
+        """旧式形式在③族之前就有这个病,两种形式共用一条尾巴口径。"""
         body = f'{self.LEAD}{self.LEGACY}，{self.PROSE}'
         summary, row, calls, _ = self.feedgrab_round(body)
         got = row.get('body') or ''
@@ -632,3 +477,7 @@ class ProseBoundaryTests(FeedgrabRound):
             with self.subTest(tail=tail):
                 got = x_article.lead_text(f'A {A}{tail} B')
                 self.assertEqual('A   B', got, '地址连尾巴要整条摘掉')
+
+
+if __name__ == '__main__':
+    unittest.main()

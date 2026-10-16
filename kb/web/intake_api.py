@@ -119,7 +119,6 @@ class Settings(BaseModel):
     # 收不存则是静默丢字段。改成可选是因为新页面不再发(那两个控件没了)。
     enabled: bool | None = None
     interval_minutes: int | None = Field(default=None,ge=15,le=10080)
-    bridges: list[str] | None = None
     x_channel: str | None = None
     x_feedgrab_bin: str | None = None
     x_chrome_path: str | None = None
@@ -177,13 +176,13 @@ def x_channel_login(kind: str):
     """开一个有头窗口让用户登录(只有浏览器通道走这条)。起完就返回。
 
     **拒绝的文案要说清「现在是哪一档」和「下一步怎么办」。** 这条路最常见的来法
-    不是"用户在桥接通道上点了登录",而是**他已经把下拉改成了浏览器登录态、只是
-    还没点「保存设置」** —— 这里读的是**存下来**的那一份(`reg.get_settings`),
-    页面上那个下拉是还没提交的草稿。原来只说"只有「我的浏览器登录态」这条通道
-    需要在这里登录",于是用户对着一个明明选着「我的浏览器登录态」的下拉,收到
-    一句自相矛盾的拒绝,看不出差在哪一步(2026-10-09 实测:`feed_settings` 里
-    压根没有 social 这一行,通道是默认的 bridge)。前端另有一道闸(未保存时这颗
-    按钮是禁用的),这里是它漏掉时的兜底 —— 两道各有射程,别只留一道。
+    不是"用户在一档用不着登录的通道上点了登录",而是**他已经把下拉改成了浏览器
+    登录态、只是那一份还没落库** —— 这里读的是**存下来**的那一份
+    (`reg.get_settings`),页面上那个下拉是还没提交的草稿。原来只说"只有「我的
+    浏览器登录态」这条通道需要在这里登录",于是用户对着一个明明选着「我的浏览器
+    登录态」的下拉,收到一句自相矛盾的拒绝,看不出差在哪一步(实测:`feed_settings`
+    里压根没有 social 这一行,通道落在默认那一档)。前端另有一道闸(点按钮时先把
+    草稿存下来),这里是它漏掉时的兜底 —— 两道各有射程,别只留一道。
     """
     settings = _x_kind(kind)
     current = x_channels.channel_of(settings)

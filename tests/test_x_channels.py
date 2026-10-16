@@ -86,17 +86,32 @@ class ChannelBase(unittest.TestCase):
 
 
 class ChannelChoiceTests(ChannelBase):
-    def test_the_default_is_the_bridge_so_existing_installs_behave_the_same(self):
+    def test_a_fresh_install_defaults_to_the_independent_profile(self):
+        """**默认必须是一条真能无人值守跑的档。** 原来是第三方 RSS 桥接,它删掉
+        之后默认落在独立 profile 上:那一档登录一次(或从日常浏览器导一次)之后
+        每天零弹窗。"""
         s = reg.get_settings('social')
-        self.assertEqual(x_channels.BRIDGE, s['x_channel'])
+        self.assertEqual(x_channels.BROWSER, s['x_channel'])
         self.assertEqual('', s['x_feedgrab_bin'])
         self.assertEqual('', s['x_chrome_path'])
         self.assertNotIn('x_channel', reg.get_settings('rss'))
 
     def test_an_unknown_channel_name_falls_back_to_the_default(self):
-        self.assertEqual(x_channels.BRIDGE, x_channels.resolve('no-such-thing'))
-        self.assertEqual(x_channels.BRIDGE, x_channels.resolve(''))
+        self.assertEqual(x_channels.DEFAULT, x_channels.resolve('no-such-thing'))
+        self.assertEqual(x_channels.DEFAULT, x_channels.resolve(''))
         self.assertEqual(x_channels.BROWSER, x_channels.resolve('browser'))
+
+    def test_the_deleted_bridge_name_resolves_instead_of_being_dropped(self):
+        """**退役名一个都不许删。** 存量 `feed_settings` 里写着 `bridge` 的,
+        认不出来就会当成"没配"——那是在用户没动过任何设置的情况下静默换档,
+        而且连「他原来选的是哪一档」都丢了。口径只有 `resolve()` 一份。
+        """
+        self.assertEqual(x_channels.DEFAULT, x_channels.resolve('bridge'))
+        self.assertIn('bridge', x_channels._RETIRED)
+        self.assertNotIn('bridge', x_channels.CHANNELS)
+        # 翻得出人话名字:历史运行记录里写着的可能正是它。
+        self.assertEqual(x_channels.LABELS[x_channels.DEFAULT],
+                         x_channels.label('bridge'))
 
     def test_a_retired_name_is_translated_rather_than_dropped(self):
         """退役名认不出来 = 在用户没动过设置的情况下静默换掉他选的取法。
@@ -138,13 +153,8 @@ class ChannelChoiceTests(ChannelBase):
 
 
 class TargetTests(ChannelBase):
-    def test_the_bridge_channel_takes_nobody(self):
-        self.sub()
-        self.assertEqual([], x_channels.targets(reg.subscriptions('social'),
-                                                self.settings(x_channels.BRIDGE)))
-
     def test_a_dedicated_feed_url_still_wins_over_any_channel(self):
-        """专用订阅链接是桥接全挂时唯一还能采的那批,通道不许把它接管过去。"""
+        """填了专用订阅链接的订阅照旧走 HTTP,通道不许把它接管过去。"""
         self.sub('Mine', feed_url='https://example.org/mine.xml')
         self.sub('Shared')
         picked = x_channels.targets(reg.subscriptions('social'),
@@ -286,15 +296,6 @@ class DispatchTests(ChannelBase):
                                                self.settings(x_channels.BROWSER))
         self.assertEqual([], entries)
 
-    def test_the_bridge_channel_still_goes_through_http(self):
-        s = self.sub()
-        settings = self.settings(x_channels.BRIDGE,
-                                 bridges=['https://bridge.example/{handle}/rss'])
-        with patch.object(fetching, 'request', side_effect=RuntimeError('到 HTTP 了')):
-            with self.assertRaises(Exception) as caught:
-                fetching.fetch_source(reg.subscription('social', s['id']), settings)
-        self.assertIn('到 HTTP', str(caught.exception))
-
     def test_a_subscription_with_its_own_feed_url_is_never_short_circuited(self):
         s = self.sub('Mine', feed_url='https://example.org/mine.xml')
         self.harvested(mine={'entries': [], 'error': '', 'watermark': ''})
@@ -339,13 +340,6 @@ class PrefetchTests(ChannelBase):
         self.assertEqual({'alpha', 'beta'}, set(got))
         self.assertTrue(all(g['skipped'] for g in got.values()))
 
-    def test_the_bridge_channel_never_starts_a_browser(self):
-        self.sub('Alpha')
-        with patch.object(x_browser, 'harvest', side_effect=AssertionError('不该预取')), \
-                patch.object(x_feedgrab, 'harvest', side_effect=AssertionError('不该预取')):
-            sync._prefetch_x('social', reg.subscriptions('social'),
-                             self.settings(x_channels.BRIDGE), FetchScope())
-
     def test_a_ranged_round_hands_over_the_converted_floor_not_the_raw_date(self):
         """裸日期交下去的含义由**宿主时区**决定(采集器那头 `fromisoformat` 拿到
         的是不带时区的时间),而零点整那条还会被严格大于的规则丢掉。换算的那一
@@ -370,26 +364,15 @@ class PrefetchTests(ChannelBase):
 
 
 class ConfigurationErrorTests(ChannelBase):
-    """「这条订阅能不能开工」要问**当前**通道,不是永远问桥接。"""
+    """「这条订阅能不能开工」要问**当前**通道。"""
 
-    def test_the_bridge_channel_still_asks_for_a_template(self):
-        s = self.sub()
-        settings = self.settings(x_channels.BRIDGE)
-        self.assertIn('桥接', reg.configuration_error(reg.subscription('social', s['id']),
-                                                    settings))
-        settings = self.settings(x_channels.BRIDGE,
-                                 bridges=['https://bridge.example/{handle}/rss'])
-        self.assertEqual('', reg.configuration_error(reg.subscription('social', s['id']),
-                                                     settings))
-
-    def test_the_browser_channel_asks_for_a_login_not_for_a_bridge(self):
-        """选了浏览器通道的人看到一片"请填写 X 订阅桥接",说的是跟他这一轮采集
-        毫无关系的一个设置。"""
+    def test_the_browser_channel_asks_for_a_login(self):
+        """问的必须是当前通道:说的要是另一档的前提,那是一个跟他这一轮采集
+        毫无关系的设置。"""
         s = self.sub()
         settings = self.settings(x_channels.BROWSER)
         why = reg.configuration_error(reg.subscription('social', s['id']), settings)
         self.assertIn('登录', why)
-        self.assertNotIn('桥接', why)
         cookies = x_channels.BROWSER_PROFILE / 'Default' / 'Cookies'
         cookies.parent.mkdir(parents=True); cookies.write_bytes(b'x')
         self.assertEqual('', reg.configuration_error(reg.subscription('social', s['id']),
@@ -445,8 +428,8 @@ class ChannelApiTests(ChannelBase):
         端点读的是存下来的那一份,页面上那个是草稿。原来只说"只有「我的浏览器
         登录态」这条通道需要在这里登录",于是用户对着一个明明选着它的下拉收到
         一句自相矛盾的拒绝(2026-10-09 实测:`feed_settings` 里压根没有 social
-        这一行,通道是默认的 bridge)。判据是**说清哪一档 + 下一步怎么办**。"""
-        for channel in (x_channels.BRIDGE, x_channels.FEEDGRAB):
+        这一行,落在默认那一档)。判据是**说清哪一档 + 下一步怎么办**。"""
+        for channel in (x_channels.FEEDGRAB,):
             with self.subTest(channel=channel):
                 self.settings(channel)
                 with patch.object(x_browser, 'open_login_window',
@@ -511,14 +494,6 @@ class ChannelApiTests(ChannelBase):
         self.assertFalse(r.json()['ready'])
         self.assertIn('登录态', r.json()['detail'])
 
-    def test_checking_the_bridge_channel_says_what_it_cannot_know(self):
-        """桥接没有"连一次"可言。谎称已就绪会让人以为公共实例是好的。"""
-        self.settings(x_channels.BRIDGE)
-        self.assertEqual(400, self.client.post('/api/intake/social/x-channel/check').status_code)
-        self.settings(x_channels.BRIDGE, bridges=['https://bridge.example/{handle}/rss'])
-        detail = self.client.post('/api/intake/social/x-channel/check').json()['detail']
-        self.assertIn('真抓一次', detail)
-
     def test_saving_a_channel_through_the_settings_endpoint(self):
         r = self.client.put('/api/intake/social/settings', json={
             'enabled': False, 'interval_minutes': 1440, 'x_channel': 'browser',
@@ -577,9 +552,10 @@ class CollectIntegrationTests(ChannelBase):
         self.assertEqual(0, summary['skipped'])
         self.assertEqual(1, summary['added'])
 
-    def test_a_login_channel_failure_never_trips_the_bridge_breaker(self):
-        """熔断防的是"公共实例挂了,别再拿 50 个账号去撞"。登录态通道的内容已经
-        在预取里抓完,断开只会白扔掉已经付过代价的结果。"""
+    def test_a_login_channel_failure_never_skips_the_rest_of_the_round(self):
+        """**一批账号登录态失效,不许把这一轮剩下的跳过。** 内容已经在预取里
+        抓完,这里只是逐条取走:跳过只会白扔掉已经付过代价的结果,而每个账号
+        拿到的又是同一句话,省不下任何东西。"""
         for i in range(8):
             self.sub(f'Acct{i}')
         self.settings(x_channels.BROWSER)

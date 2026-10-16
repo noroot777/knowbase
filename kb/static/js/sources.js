@@ -324,8 +324,9 @@ async function loadSourceModule(reset = false, selectedId = null) {
     $('source-issues').hidden = !data.errors;
     $('source-issues').innerHTML = `${esc(String(data.errors))} 个来源上次连接失败，已安排退避重试。查看订阅管理${arrow('right')}`;
     $('source-configuration').hidden = !data.unconfigured;
-    // 理由由后端按**当前通道**算好(桥接要模板、feedgrab 要登录态、浏览器要在那个
-    // 独立 profile 里登录过),这里不自己拼一句"请填写 X 桥接" —— 选了别的通道的人
+    // 理由由后端按**当前通道**算好(feedgrab 要登录态、浏览器要在那个独立
+    // profile 里登录过、attach 要那个调试开关),这里不自己拼某一档的前提 ——
+    // 选了别的通道的人
     // 看到的会是一个跟他这一轮采集毫无关系的设置。
     const why = (data.sources.find(s => s.configuration_error)?.configuration_error || '')
       .replace(/^待配置[：:]\s*/, '');
@@ -472,8 +473,8 @@ function currentSourceItems(kind, version, q, id) {
   return kind === sourceKind && version === sourceItemsVersion && sourceActive() && sourceView === 'items'
     && q === $('source-q').value.trim() && id === $('source-filter').value;
 }
-// 空态那句「要先配置什么」按后端给的理由写,不写死桥接那一档:选了浏览器
-// 登录态通道的人看到「先填写 X 订阅桥接」,说的是跟他这一轮采集毫无关系的一个
+// 空态那句「要先配置什么」按后端给的理由写,不写死某一档:选了浏览器
+// 登录态通道的人看到另一档的前提,说的是跟他这一轮采集毫无关系的一个
 // 设置(口径同 `registry.configuration_error`,它已经按当前通道分支了)。
 function sourceConfigHint() {
   const why = (sourceData?.sources || []).map(s => s.configuration_error).find(Boolean) || '';

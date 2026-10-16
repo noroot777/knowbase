@@ -187,7 +187,7 @@ export async function checkSubscriptionEditorViews({ evaluate, wait, check, clic
     // 这里原来拿「同步间隔」当草稿字段,验「开编辑窗口不会覆盖没保存的设置草稿」。
     // 那两个控件随「按来源类型自动同步」一起删了(见 `kb.pipeline._scheduler_tick`),
     // rss 这一类的设置表单现在整张都不显示 —— 没有草稿可覆盖,这几条没有了判据。
-    // 同一条不变量在 social 那一类仍然成立(桥接/Chrome 路径),由 x_channel_probe
+    // 同一条不变量在 social 那一类仍然成立(取法/Chrome 路径),由 x_channel_probe
     // 那一组钉。下面保留的是滚动位置那几条,它们跟设置草稿无关。
     check('没有同步间隔的来源不显示空设置表单',
       await evaluate(`$('source-settings-form').hidden && !$('source-settings').hidden`));

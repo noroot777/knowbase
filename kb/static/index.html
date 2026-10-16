@@ -316,24 +316,32 @@
     <aside id="source-settings" class="source-settings" aria-label="此来源的设置" hidden><h2>来源设置</h2>
       <form id="source-settings-form" onsubmit="saveSourceSettings(event)"><fieldset id="source-settings-fields" disabled>
         <div id="source-xchan" class="xchan" hidden>
-          <label for="source-x-channel">X 的取法<select id="source-x-channel" onchange="xChannelChanged()"></select></label>
-          <p id="source-x-hint" class="hint"></p>
-          <details id="source-bridge-field" hidden><summary>X 订阅桥接设置</summary><p>每行一个可用地址，使用 {handle} 代表账号名。留空时账号处于待配置；也可在单个订阅里填写专用链接。公共桥接可能不可用，连续失败会暂停本轮请求。</p><textarea id="source-bridges" aria-label="X订阅桥接地址" spellcheck="false"></textarea></details>
-          <div id="source-x-feedgrab" hidden>
-            <label for="source-x-bin">feedgrab 可执行文件（可留空）<input id="source-x-bin" spellcheck="false" placeholder="留空时从 PATH 里找"></label>
-            <p class="hint">登录要在终端里跑一次（它会要你扫码或贴 Cookie）：<br><code id="source-x-login"></code></p>
-          </div>
-          <div id="source-x-browser" hidden>
-            <label for="source-x-chrome">Chrome 可执行文件（可留空）<input id="source-x-chrome" spellcheck="false" placeholder="留空时用默认位置的 Google Chrome"></label>
-            <p class="hint">在一个独立 profile 里登录一次，之后每天无头复用这份登录态。登录窗口要关掉，抓取时它独占这个 profile。</p>
-            <button type="button" class="ghost" id="source-x-login-btn" onclick="openXLoginWindow()">打开登录窗口</button>
-            <p class="hint">也可以不单独登录：从你日常那个浏览器搬一份 X 的登录态过来。它只向那个浏览器要 x.com 的 cookie（在一张隐藏的后台标签页里按地址取，别的站点压根不会交出来），同名的会覆盖这个 profile 里现有的那几条。那个浏览器要先开远程调试开关，导入时它会弹一次授权；cookie 过期后再点一次这颗按钮就行。</p>
-            <button type="button" class="ghost" id="source-x-import-btn" onclick="importXLoginState()">从日常浏览器导入登录态</button>
+          <!-- ①现在是哪一档、能不能开工、下一步怎么办。**状态在最上面** ——
+               打开这块面板的人九成是来确认"它还在正常取吗",不是来换档的。 -->
+          <div class="xchan-now">
+            <p class="xchan-head"><span id="source-x-dot" class="xchan-dot" aria-hidden="true"></span><strong id="source-x-name"></strong><button type="button" id="source-x-switch" class="text-button" onclick="toggleXChannelPicker()" aria-expanded="false" aria-controls="source-x-picker">换一种<i data-arrow="caretDown"></i></button></p>
+            <p id="source-x-state" class="hint" role="status"></p>
+            <div class="xchan-acts">
+              <button type="button" class="ghost" id="source-x-login-btn" onclick="openXLoginWindow()" hidden>打开登录窗口</button>
+              <button type="button" class="ghost" id="source-x-import-btn" onclick="importXLoginState()" hidden>从日常浏览器导入</button>
+              <button type="button" class="ghost" id="source-x-check" onclick="checkXChannel()">检查连接</button>
+            </div>
+            <p id="source-x-import-hint" class="hint" hidden>导入只向日常浏览器要 x.com 的 cookie（在一张后台标签页里按地址取，别的站点不会交出来），同名的覆盖这个 profile 里现有的那几条。那个浏览器要先开远程调试开关，导入时它会弹一次授权；cookie 过期后再点一次就行。</p>
             <p id="source-x-import-state" class="hint" role="status"></p>
+            <p id="source-x-cmd" class="hint" hidden>登录要在终端里跑一次（它会要你扫码或贴 Cookie）：<br><code id="source-x-login"></code></p>
           </div>
-          <p id="source-x-state" class="hint" role="status"></p>
-          <p id="source-x-next" class="hint"></p>
-          <button type="button" class="ghost" id="source-x-check" onclick="checkXChannel()">检查连接</button>
+          <!-- ②换一种:**每一档跟着它要准备什么**。原来是个光秃秃的下拉,四个
+               名字摆在一起看不出差别,而它们要准备的东西完全不同。 -->
+          <div id="source-x-picker" class="xchan-picker" role="radiogroup" aria-label="X 的取法" hidden></div>
+          <!-- ③可执行文件路径:绝大多数人一辈子不用填,别占主位。 -->
+          <details id="source-x-adv" class="xchan-adv" hidden><summary>可执行文件位置</summary>
+            <div id="source-x-browser" hidden>
+              <label for="source-x-chrome">Chrome（可留空）<input id="source-x-chrome" spellcheck="false" placeholder="留空时用默认位置的 Google Chrome"></label>
+            </div>
+            <div id="source-x-feedgrab" hidden>
+              <label for="source-x-bin">feedgrab（可留空）<input id="source-x-bin" spellcheck="false" placeholder="留空时从 PATH 里找"></label>
+            </div>
+          </details>
         </div>
         <div id="source-settings-error" class="field-err" role="alert"></div><button id="source-settings-save" class="ghost" type="submit">保存设置</button>
       </fieldset></form>

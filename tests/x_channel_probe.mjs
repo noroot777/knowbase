@@ -53,6 +53,13 @@ const fails = [], oks = [];
 const check = (name, cond, extra = "") => (cond ? oks : fails).push(name + (extra ? ` — ${extra}` : ""));
 const shown = sel => evalJs(`(() => { const e = document.querySelector('${sel}');
   return !!e && e.getClientRects().length > 0; })()`);
+// 在「换一种」那张清单上选一档(和用户点那一行一样走 change)。
+const pick = id => evalJs(`(() => {
+  const r = document.querySelector('#source-x-picker input[value="${id}"]');
+  if (!r) return false; r.checked = true; r.dispatchEvent(new Event('change')); return true; })()`);
+const picked = () => evalJs(`xChannelValue()`);
+const text = sel => evalJs(`document.querySelector('${sel}')?.textContent || ''`);
+const state = () => text('#source-x-state');
 
 // 每个新文档一开张就把三个原生弹窗换成记录器。用 addScriptToEvaluateOnNewDocument
 // 是因为它跑在页面脚本之前 —— 导航之后再替换,中间那段时间的调用就漏掉了。
@@ -91,101 +98,94 @@ if (!await until(`sourceView === 'manage'
     `JSON.stringify({view: typeof sourceView !== 'undefined' ? sourceView : null,
                      hidden: document.getElementById('source-settings').hidden})`));
 
-// 1. 通道选择在大V观点的设置里,选项和当前值都来自后端
-check("通道下拉出现在大V观点的设置里", await shown("#source-x-channel"));
-check("四条通道都列出来,文案是后端给的",
-      await evalJs(`[...document.querySelectorAll('#source-x-channel option')]
-                      .map(o => o.value + ':' + o.textContent).join('|')`)
-      === "bridge:RSS 桥接|feedgrab:feedgrab(cookie)|browser:独立 profile 的登录态"
-          + "|attach:我日常用的浏览器",
-      await evalJs(`[...document.querySelectorAll('#source-x-channel option')].map(o=>o.value).join()`));
-check("当前选中的是后端说的那一条", await evalJs(`document.getElementById('source-x-channel').value`) === "bridge");
-check("桥接那块可见、别的块都不可见",
-      await shown("#source-bridge-field") && !await shown("#source-x-feedgrab")
-      && !await shown("#source-x-browser"));
-check("桥接地址照旧填进去",
-      (await evalJs(`document.getElementById('source-bridges').value`)).includes("{handle}"));
-
-// 2. 换成 feedgrab:要填的东西跟着换,登录命令照抄得出来
-await evalJs(`document.getElementById('source-x-channel').value='feedgrab';
-              document.getElementById('source-x-channel').dispatchEvent(new Event('change')); true`);
-check("选 feedgrab 后只显示它那一块",
-      await shown("#source-x-feedgrab") && !await shown("#source-bridge-field")
-      && !await shown("#source-x-browser"));
-check("改了选择不冒充当前事实、并写明要保存",
-      (await evalJs(`document.getElementById('source-x-state').textContent`)).includes("保存"),
-      await evalJs(`document.getElementById('source-x-state').textContent`));
-check("改了还没保存时不给「检查连接」(否则检查的是旧通道)",
-      !await shown("#source-x-check"));
-// 保存成 feedgrab,看「下一步」那行:它的第三项就是上面那条可复制的命令
-// (后端必须给 —— 待配置横幅那边没有可复制块),并排再写一遍只是噪音。
-// **去重按内容判**,所以这一项不是"feedgrab 就不显示",而是"和上面那条一样就不显示"。
-await clickAt("#source-settings-save");
-await until(`xChan && xChan.current === 'feedgrab'`, 20000);
+// 1. 通道清单在大V观点的设置里,名字、说明、当前值都来自后端
+check("当前这一档的名字写在卡片上", (await text('#source-x-name')) === "feedgrab(cookie)",
+      await text('#source-x-name'));
+check("「换一种」那张清单默认收着(来看状态的人占九成)", !await shown("#source-x-picker"));
+check("点「换一种」把清单打开", await clickAt("#source-x-switch") && await shown("#source-x-picker"));
+check("三条通道都列出来,名字和说明逐字来自后端",
+      await evalJs(`[...document.querySelectorAll('#source-x-picker .xchan-opt')]
+                      .map(o => o.querySelector('input').value + ':'
+                                + o.querySelector('b').textContent + ':'
+                                + o.querySelector('span').textContent).join('|')`)
+      === CHANNELS.map(c => `${c.id}:${c.label}:${c.hint}`).join("|"),
+      await evalJs(`[...document.querySelectorAll('#source-x-picker .xchan-opt')]
+                      .map(o => o.querySelector('input').value).join()`));
+check("选中的是后端说的那一条", (await picked()) === "feedgrab");
+check("feedgrab 那块可见、浏览器那块不可见",
+      await shown("#source-x-feedgrab") && !await shown("#source-x-browser"));
 check("登录命令照抄得出来",
-      (await evalJs(`document.getElementById('source-x-login').textContent`)).includes("feedgrab login"),
-      await evalJs(`document.getElementById('source-x-login').textContent`));
-check("同一条命令不在「下一步」那行再写一遍",
-      (await evalJs(`document.getElementById('source-x-next').textContent`)) === "",
-      await evalJs(`document.getElementById('source-x-next').textContent`));
+      (await text('#source-x-login')).includes("feedgrab login"), await text('#source-x-login'));
+// 那条命令就是这一档的「下一步」(后端 readiness 的第三项必须带着它 —— 待配置
+// 横幅那边没有可复制块),状态行里并排再写一遍只是噪音。**去重按内容判**。
+check("同一条命令在整块面板上只出现一次",
+      Number(await evalJs(`(() => { const t = document.getElementById('source-xchan').textContent;
+        const n = ${JSON.stringify("feedgrab login twitter")};
+        let i = 0, at = 0; while ((at = t.indexOf(n, at)) >= 0) { i++; at += n.length; }
+        return i; })()`)) === 1,
+      await state());
 
-// 3. 换成浏览器:那一块显示出来,但**没保存之前登录窗口打不开**
-await evalJs(`document.getElementById('source-x-channel').value='browser';
-              document.getElementById('source-x-channel').dispatchEvent(new Event('change')); true`);
+// 2. 换成浏览器那一档:要填的东西跟着换,**但还没存下来**
+await pick("browser");
 check("选浏览器后只显示它那一块",
-      await shown("#source-x-browser") && !await shown("#source-bridge-field")
-      && !await shown("#source-x-feedgrab"));
-// 后端那条路由读的是**存下来**的通道(`reg.get_settings`),改了下拉还没保存时
-// 它只会回一句"当前保存的取法是「RSS 桥接」" —— 用户对着一个明明选着「我的浏览器
-// 登录态」的下拉收到这句拒绝,看不出差在哪一步(2026-10-09 实测)。
-check("改了还没保存时「打开登录窗口」是禁用的",
-      await evalJs(`document.getElementById('source-x-login-btn').disabled`) === true);
-check("禁用了也仍然看得见(那段说明指的就是它,藏掉说明就悬空了)",
-      await shown("#source-x-login-btn"));
-// 「从日常浏览器导入登录态」写的也是**存下来**那一档的登录态,所以同一道闸、
-// 同一个理由。两颗按钮各钉一次 —— 共用一段 JS 不等于共用一次验证。
-check("改了还没保存时「导入登录态」也是禁用的",
-      await evalJs(`document.getElementById('source-x-import-btn').disabled`) === true);
-check("禁用了也仍然看得见", await shown("#source-x-import-btn"));
-const beforeBlocked = posted.length;
-// **真鼠标点**:disabled 上直接调 `.click()` 本来就不触发,证明不了页面上点下去会怎样。
-await clickAt("#source-x-login-btn");
-await sleep(500);
-check("点下去一个请求都没发出去", posted.length === beforeBlocked,
-      posted.slice(beforeBlocked).join());
-check("页面上不出现那句自相矛盾的拒绝",
-      !(await evalJs(`document.querySelector('#toast-host')?.textContent || ''`)).includes("打不开登录窗口"),
-      await evalJs(`document.querySelector('#toast-host')?.textContent || ''`));
+      await shown("#source-x-browser") && !await shown("#source-x-feedgrab"));
+check("改了选择不冒充当前事实、并写明还没存下来",
+      (await state()).includes("还没存下来"), await state());
+check("那条终端命令跟着收走了(它是另一档的事)", !await shown("#source-x-cmd"));
+check("色点在草稿上是中性的(没有结论可给)",
+      (await evalJs(`document.getElementById('source-x-dot').className`)) === "xchan-dot",
+      await evalJs(`document.getElementById('source-x-dot').className`));
 
-// 4. 保存设置:三个字段真的发出去了
+// 3. **先保存再执行**:草稿没存下来时按钮照旧可点,点下去先替用户存一次。
+// 原来是把按钮灰掉、把「先点保存设置」藏进 hover 才出得来的 title 里 —— 用户
+// 看到的是一颗按不动的按钮(他原话:「那肯定不合常理」)。
+check("「打开登录窗口」看得见、而且不是禁用的",
+      await shown("#source-x-login-btn")
+      && (await evalJs(`document.getElementById('source-x-login-btn').disabled`)) === false);
+check("「导入登录态」看得见、而且不是禁用的",
+      await shown("#source-x-import-btn")
+      && (await evalJs(`document.getElementById('source-x-import-btn').disabled`)) === false);
+check("「检查连接」任何时候都在(不再按保存与否藏起来)", await shown("#source-x-check"));
+const beforeSave = saved.length, beforePost = posted.length;
+check("「打开登录窗口」真点得到", await clickAt("#source-x-login-btn"));
+await until(`document.querySelector('#toast-host')?.textContent.includes('已打开')`, 15000);
+check("点下去先把草稿存了(而不是白跑一趟换回一句拒绝)",
+      saved.length === beforeSave + 1 && saved[saved.length - 1].x_channel === "browser",
+      JSON.stringify(saved.slice(beforeSave)));
+check("保存这件事说出来了,不是闷头替他改设置",
+      (await text('#toast-host')).includes("已先保存"), await text('#toast-host'));
+check("登录请求打的是 login 端点,而且是 POST",
+      posted.includes("POST /api/intake/social/x-channel/login"), posted.slice(beforePost).join());
+check("登录结果如实显示在提示里", (await text('#toast-host')).includes("关掉它"),
+      await text('#toast-host'));
+check("页面上不出现那句自相矛盾的拒绝",
+      !(await text('#toast-host')).includes("打不开登录窗口"), await text('#toast-host'));
+check("保存之后这条就是当前通道", await evalJs(`xChan && xChan.current === 'browser'`));
+// **反过来钉一边:已经存下来的那一档不许再多存一次** —— 否则这颗按钮每点一下
+// 都往数据库写一遍,而用户什么都没改。
+const settled = saved.length;
+await evalJs(`(document.getElementById('toast-host')||{}).innerHTML = ''; true`);
+check("再点一次「打开登录窗口」", await clickAt("#source-x-login-btn"));
+await until(`document.querySelector('#toast-host')?.textContent.includes('已打开')`, 15000);
+check("已经存下来时不再多发一次保存", saved.length === settled,
+      JSON.stringify(saved.slice(settled)));
+check("也不再说一遍「已先保存」", !(await text('#toast-host')).includes("已先保存"),
+      await text('#toast-host'));
+
+// 4. 「保存设置」自己那条路:字段真的发出去了
 await evalJs(`document.getElementById('source-x-chrome').value =
                 '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'; true`);
+const beforeForm = saved.length;
 await evalJs(`document.getElementById('source-settings-form')
                 .dispatchEvent(new Event('submit', {cancelable:true})); true`);
-await until(`xChan && xChan.current === 'browser'`, 15000);
+// `saved` 在 node 这一侧,页面里的 `until` 看不见它 —— 这一等要在这边轮询。
+for (let i = 0; i < 100 && saved.length === beforeForm; i++) await sleep(100);
 const sent = saved[saved.length - 1] || {};
 check("保存时带上了通道选择", sent.x_channel === "browser", JSON.stringify(sent));
 check("保存时带上了 Chrome 路径",
       (sent.x_chrome_path || "").endsWith("Google Chrome"), JSON.stringify(sent.x_chrome_path));
-check("桥接地址仍然一起保存(换通道不该把它丢了)",
-      Array.isArray(sent.bridges) && sent.bridges.length === 1, JSON.stringify(sent.bridges));
-check("保存之后这条就是当前通道、「检查连接」回来了",
-      await evalJs(`xChan && xChan.current === 'browser'`) && await shown("#source-x-check"));
 
-// 4.5 保存之后登录窗口才打得开 —— 反过来钉一边:上面那道闸不是"永远点不了"
-check("保存之后「打开登录窗口」不再是禁用的",
-      await evalJs(`document.getElementById('source-x-login-btn').disabled`) === false);
-check("「打开登录窗口」真点得到", await clickAt("#source-x-login-btn"));
-await until(`document.querySelector('#toast-host')?.textContent.includes('已打开')`, 8000);
-check("登录请求打的是 login 端点,而且是 POST",
-      posted.includes("POST /api/intake/social/x-channel/login"), posted.join());
-check("登录结果如实显示在提示里",
-      (await evalJs(`document.querySelector('#toast-host')?.textContent || ''`)).includes("关掉它"),
-      await evalJs(`document.querySelector('#toast-host')?.textContent || ''`));
-
-// 4.6 「从日常浏览器导入登录态」—— 反过来钉一边:上面那道闸不是"永远点不了"
-check("保存之后「导入登录态」不再是禁用的",
-      await evalJs(`document.getElementById('source-x-import-btn').disabled`) === false);
+// 4.6 「从日常浏览器导入登录态」
 check("「导入登录态」真点得到", await clickAt("#source-x-import-btn"));
 // 趁 mock 还没回,先把那句预告读下来(见 mock 里那段 1.2 秒的理由)。
 const importPreface =
@@ -225,21 +225,18 @@ check("导入没有顺手再发一次 GET 去问就绪(后端已经带回来了)
 // 那时状态行上挂的是「改完记得点保存设置」,而迟到的成功文案一盖,页面看着像
 // 已经生效,实际存下来的还是旧档(第 2 轮审查在真页面上实测,`import-race.png`)。
 check("「导入登录态」再点一次", await clickAt("#source-x-import-btn"));
-// 趁那 1.2 秒还没回,把取法改走(和用户手点一样走 onchange)。
-await evalJs(`(() => { const s = document.getElementById('source-x-channel');
-                       s.value = 'feedgrab'; s.dispatchEvent(new Event('change')); })()`);
-const racedSay = await evalJs(`document.getElementById('source-x-state').textContent`);
-check("改完之后状态行先说的是「还没保存」", racedSay.includes("保存"), racedSay);
+// 趁那 1.2 秒还没回,把取法改走(和用户点那一行一样走 change)。
+await pick('feedgrab');
+const racedSay = await state();
+check("改完之后状态行先说的是「还没存下来」", racedSay.includes("还没存下来"), racedSay);
 await sleep(2200);                       // 等那个回包确实回来过
-check("迟到的导入回包没有盖掉「还没保存」那句提醒",
-      (await evalJs(`document.getElementById('source-x-state').textContent`)).includes("保存"),
-      await evalJs(`document.getElementById('source-x-state').textContent`));
+check("迟到的导入回包没有盖掉「还没存下来」那句提醒",
+      (await state()).includes("还没存下来"), await state());
 check("也没把成功文案写到留痕那行上",
       (await evalJs(`document.getElementById('source-x-import-state').textContent`)) === "",
       await evalJs(`document.getElementById('source-x-import-state').textContent`));
 // 收尾:把取法改回去,后面几步仍按 browser 这一档继续。
-await evalJs(`(() => { const s = document.getElementById('source-x-channel');
-                       s.value = 'browser'; s.dispatchEvent(new Event('change')); })()`);
+await pick('browser');
 
 // 4.6c 同一道闸的另一半:**迟到的那条读也不许盖**
 // 上面两条钉的是两颗按钮的回包;读那一条原来只判「来源类型变没变」,而类型在
@@ -250,19 +247,14 @@ await evalJs(`(() => { const s = document.getElementById('source-x-channel');
 await evalJs(`fetch('/__probe/slow-get?ms=900').then(() => true)`);
 await evalJs(`loadXChannel('social'); true`);     // 这一条要在路上待 900 毫秒
 await sleep(120);
-// 趁它还没回,用户改了取法(和手点一样走 onchange)。
-await evalJs(`(() => { const s = document.getElementById('source-x-channel');
-                       s.value = 'feedgrab'; s.dispatchEvent(new Event('change')); })()`);
+// 趁它还没回,用户改了取法(和手点一样走 change)。
+await pick('feedgrab');
 await sleep(1400);                                // 等那条读确实回来过
-check("迟到的那条读没把用户刚选的那一档换回去",
-      (await evalJs(`document.getElementById('source-x-channel').value`)) === "feedgrab",
-      await evalJs(`document.getElementById('source-x-channel').value`));
-check("也没把「还没保存」那句提醒盖成「已就绪」",
-      (await evalJs(`document.getElementById('source-x-state').textContent`)).includes("保存"),
-      await evalJs(`document.getElementById('source-x-state').textContent`));
+check("迟到的那条读没把用户刚选的那一档换回去", (await picked()) === "feedgrab", await picked());
+check("也没把「还没存下来」那句提醒盖成「已就绪」",
+      (await state()).includes("还没存下来"), await state());
 // 收尾:改回 browser,后面几步仍按这一档继续。
-await evalJs(`(() => { const s = document.getElementById('source-x-channel');
-                       s.value = 'browser'; s.dispatchEvent(new Event('change')); })()`);
+await pick('browser');
 
 // 4.6d 同一道闸的最后一半:**后来的事实要让此前发出的读作废**
 // 上面那条钉的是「读在途、用户改了下拉」。这一条换成「读在途、**导入成功了**」:
@@ -317,13 +309,9 @@ await evalJs(`loadXChannel('social'); true`);     // 先发(600 毫秒后回)
 await sleep(80);
 await evalJs(`loadXChannel('social'); true`);     // 后发(1300 毫秒后回),它才是最新的意图
 // **摆盘自检**:发第二条时第一条确实还在路上 —— 不然这条用例测的是另一件事。
-check("两条读确实重叠在途(摆盘自检)",
-      (await evalJs(`document.getElementById('source-x-channel').value`)) === "browser",
-      await evalJs(`document.getElementById('source-x-channel').value`));
+check("两条读确实重叠在途(摆盘自检)", (await picked()) === "browser", await picked());
 await sleep(2000);
-check("先回来的那条旧读没赢",
-      (await evalJs(`document.getElementById('source-x-channel').value`)) === "browser",
-      await evalJs(`document.getElementById('source-x-channel').value`));
+check("先回来的那条旧读没赢", (await picked()) === "browser", await picked());
 check("后发那条读的事实落地了",
       (await evalJs(`xChan && xChan.current`)) === "browser",
       await evalJs(`xChan && xChan.current`));
@@ -342,7 +330,7 @@ await evalJs(`window.pipeJson = window.__realPipeJson; true`);   // 收尾:还�
 // 出路:**面板归属和「谁说的更新」分开记** —— 动作一开始就让在途的读作废
 // (`xChanAct`),而读落地不再碰面板归属,所以它废不掉动作。
 await evalJs(`fetch('/__probe/stamps?reset=1').then(() => true)`);
-await evalJs(`document.getElementById('toast-host').innerHTML = ''; true`);  // 只看这一轮的
+await evalJs(`(document.getElementById('toast-host')||{}).innerHTML = ''; true`);  // 只看这一轮的
 await evalJs(`fetch('/__probe/slow-get?ms=600&forget=1').then(() => true)`);
 await evalJs(`loadXChannel('social'); true`);     // 这条读说的是导入之前那一刻
 await sleep(150);
@@ -379,7 +367,7 @@ check("这一轮的抵达顺序确实是「读、再动作」", order === "get,i
 // 出路:**动作的归属按「它说的是哪一档」判,不按代次判**(来源 + 下拉选的那一档 +
 // 存下来的那一档都没变就还是它的),同时记一个「已完成版本」让更早发出的读不许回头盖。
 await evalJs(`fetch('/__probe/stamps?reset=1').then(() => true)`);
-await evalJs(`document.getElementById('toast-host').innerHTML = ''; true`);
+await evalJs(`(document.getElementById('toast-host')||{}).innerHTML = ''; true`);
 check("「导入登录态」在这一档上点得到(4.6g)", await clickAt("#source-x-import-btn"));
 await sleep(60);
 // `forget=1`:让保存触发的那条读说「导入之前那一刻」—— 真后端就是这样,那一刻
@@ -462,15 +450,13 @@ const unsureLine = await evalJs(`document.getElementById('source-x-import-state'
 check("断掉的那一次说的是「不知道」,不是一句空白",
       unsureLine.includes("没跑完") && unsureLine.includes("不知道"), unsureLine);
 // **切走再切回来** —— 审查复现的就是这两下。
-await evalJs(`(() => { const s = document.getElementById('source-x-channel');
-                 s.value = 'feedgrab'; s.dispatchEvent(new Event('change')); })(); true`);
+await pick('feedgrab');
 await sleep(120);
 check("切到别档时那条交代不跟着跑(反过来钉一边)",
       !(await evalJs(`document.getElementById('source-x-import-state').textContent`))
         .includes("没跑完"),
       await evalJs(`document.getElementById('source-x-import-state').textContent`));
-await evalJs(`(() => { const s = document.getElementById('source-x-channel');
-                 s.value = 'browser'; s.dispatchEvent(new Event('change')); })(); true`);
+await pick('browser');
 await sleep(120);
 const backLine = await evalJs(`document.getElementById('source-x-import-state').textContent`);
 check("切回来之后这一次没跑完还在,没被旧留痕顶掉", backLine.includes("没跑完"), backLine);
@@ -494,11 +480,7 @@ await until(`document.getElementById('source-x-import-state')
 // **判据要落在重画上,不是落在那一次动作自己写的那行字上** —— 成功那一下是直接
 // 往 DOM 上写的,所以就算那条记录没撤掉这里也看不出来(注入「不撤」实测:一条红
 // 都没有)。切走再切回来走的才是重画那条路,记录没撤的话它当场又冒出来。
-for (const pick of ['feedgrab', 'browser']) {
-  await evalJs(`(() => { const sel = document.getElementById('source-x-channel');
-                  sel.value = '${pick}'; sel.dispatchEvent(new Event('change')); })(); true`);
-  await sleep(120);
-}
+for (const one of ['feedgrab', 'browser']) { await pick(one); await sleep(120); }
 check("拿到确定答复之后那条「不知道」撤掉了,重画也不再冒出来",
       !(await evalJs(`document.getElementById('source-x-import-state').textContent`))
         .includes("没跑完"),
@@ -530,56 +512,56 @@ check("失败的检查如实写出原因",
       (await evalJs(`document.getElementById('source-x-state').textContent`)).includes("已失效"),
       await evalJs(`document.getElementById('source-x-state').textContent`));
 
-// 9. 待配置横幅说的必须是**当前通道**缺什么,不是永远那句"请填写 X 桥接"
+// 9. 待配置横幅说的必须是**当前通道**缺什么,不是写死某一档的前提
 mock.unconfigured = true;
 await evalJs(`loadSourceModule(true)`);
 await until(`!document.getElementById('source-configuration').hidden`, 15000);
 const banner = await evalJs(`document.getElementById('source-configuration').textContent`);
-check("待配置横幅按当前通道说话", banner.includes("登录") && !banner.includes("桥接"), banner);
+check("待配置横幅按当前通道说话", banner.includes("登录"), banner);
 mock.unconfigured = false;
 await evalJs(`loadSourceModule(true)`);
 await until(`document.getElementById('source-configuration').hidden`, 15000);
 
-// 10. 第四条通道「我日常用的浏览器」—— 它一个输入框都不要,所以这一节同时是
+// 10. 「我日常用的浏览器」那一档 —— 它一个输入框都不要,所以这一节同时是
 // 「新增一条通道不用改这个 JS」那条口径的回归:前端只按后端给的 id 决定显示
-// 哪一块,没有自己那一块的通道就一块都不显示,下一步从 `hint` 那行出来。
+// 哪一块,没有自己那一块的通道就一块都不显示,下一步并进状态行那一句。
 // 这里**不要**再点一次来源切换器:上一节结束时就在这个视图里,再点一次会重新
-// 拉一遍通道清单,而 `loadXChannel` 末尾那句 `sel.value = data.current` 会把下面
-// 这次赋值盖回去 —— 下拉看着是 attach 之前那一档,十条断言一起红。
-await evalJs(`document.getElementById('source-x-channel').value='attach';
-              document.getElementById('source-x-channel').dispatchEvent(new Event('change')); true`);
-check("下拉真的切到这一档了(摆盘自检)",
-      await evalJs(`document.getElementById('source-x-channel').value`) === "attach",
-      await evalJs(`document.getElementById('source-x-channel').value`));
+// 拉一遍通道清单,而 `loadXChannel` 收尾那句 `xChanSelect(data.current)` 会把下面
+// 这次选择盖回去 —— 清单上看着是 attach 之前那一档,十条断言一起红。
+await pick('attach');
+check("清单真的切到这一档了(摆盘自检)", (await picked()) === "attach", await picked());
 check("选它之后一个输入块都不显示",
-      !await shown("#source-bridge-field") && !await shown("#source-x-feedgrab")
-      && !await shown("#source-x-browser"));
+      !await shown("#source-x-feedgrab") && !await shown("#source-x-browser")
+      && !await shown("#source-x-cmd"));
+check("「可执行文件位置」那个折叠块也跟着收走(空折叠块比没有更糟)",
+      !await shown("#source-x-adv"));
 // **逐字比后端给的那条**:前端不许自己攒一句说明,这一档的全部文案都来自
 // `/x-channel` 的 `channels[].hint`。
 check("它自己的说明逐字来自后端",
-      await evalJs(`document.getElementById('source-x-hint').textContent`)
+      (await text('#source-x-picker .xchan-opt:nth-child(2) span'))
       === CHANNELS.find(c => c.id === "attach").hint,
-      await evalJs(`document.getElementById('source-x-hint').textContent`));
-check("改了还没保存时「下一步」是空的(那是当前通道的事实)",
-      (await evalJs(`document.getElementById('source-x-next').textContent`)) === "",
-      await evalJs(`document.getElementById('source-x-next').textContent`));
-check("改了还没保存时不给「检查连接」", !await shown("#source-x-check"));
+      await text('#source-x-picker .xchan-opt:nth-child(2) span'));
+check("卡片上的名字跟着换成这一档",
+      (await text('#source-x-name')) === CHANNELS.find(c => c.id === "attach").label,
+      await text('#source-x-name'));
+check("改了还没存下来时「下一步」不混进来(那是当前通道的事实)",
+      !(await state()).includes("chrome://inspect"), await state());
+check("「检查连接」照旧在", await shown("#source-x-check"));
 // 保存:这一档没有要填的东西,保存之后它就是当前通道
 await clickAt("#source-settings-save");
 await until(`xChan && xChan.current === 'attach'`, 20000);
 check("保存真把这一档发出去了",
       saved[saved.length - 1]?.x_channel === "attach",
       JSON.stringify(saved[saved.length - 1] || {}));
-check("保存之后「检查连接」回来了", await shown("#source-x-check"));
-check("「下一步怎么办」真的显示出来了(后端 readiness 的第三项)",
-      (await evalJs(`document.getElementById('source-x-next').textContent`))
-        .includes("chrome://inspect"),
-      await evalJs(`document.getElementById('source-x-next').textContent`));
-check("状态行说的是这一档缺什么,不是桥接",
-      (await evalJs(`document.getElementById('source-x-state').textContent`)).includes("远程调试"),
-      await evalJs(`document.getElementById('source-x-state').textContent`));
+check("「下一步怎么办」并进了状态行(后端 readiness 的第三项)",
+      (await state()).includes("chrome://inspect"), await state());
+check("状态行说的是这一档缺什么", (await state()).includes("远程调试"), await state());
+check("色点在「没配好」时是提醒色,不是绿的",
+      (await evalJs(`document.getElementById('source-x-dot').className`)) === "xchan-dot warn",
+      await evalJs(`document.getElementById('source-x-dot').className`));
 check("「打开登录窗口」在这一档上压根不出现(它属于独立 profile 那一块)",
       !await shown("#source-x-login-btn"));
+check("「从日常浏览器导入」同理不出现", !await shown("#source-x-import-btn"));
 // 「检查连接」返回的 detail 已经把原因和地址写法指引拼在一起了(真后端
 // `x_browser.probe` 就是 `f'{problem}。{ENDPOINT_HINT}'`),而「下一步」那行装的
 // 正是同一条指引 —— 原来检查那一下只改状态行、不碰「下一步」,于是同一句话在同
@@ -595,19 +577,14 @@ mock.checkReply = { ready: false,
                detail: `KB_CDP_ENDPOINT 填的地址认不出来：ws://127.0.0.1:65536。${NEXT_STEP.attach}` };
 await clickAt("#source-x-check");
 await until(`document.getElementById('source-x-state').textContent.includes('认不出来')`, 20000);
-check("检查结论里带着指引时,「下一步」不再并排写第二遍",
-      (await evalJs(`document.getElementById('source-x-next').textContent`)) === "",
-      await evalJs(`document.getElementById('source-x-next').textContent`));
 check("整块面板上那条指引只出现一次", (await hintTimes()) === 1, String(await hintTimes()));
 // 反过来钉一边:结论里没有那条指引时「下一步」照旧要显示 —— 否则一个
 // 「检查完就把下一步清空」的实现也能过,而那是把真有用的那句话丢掉。
 mock.checkReply = { ready: false, detail: "连不上那个浏览器" };
 await clickAt("#source-x-check");
 await until(`document.getElementById('source-x-state').textContent.includes('连不上')`, 20000);
-check("结论里没有指引时,「下一步」照旧显示",
-      (await evalJs(`document.getElementById('source-x-next').textContent`))
-        .includes("chrome://inspect"),
-      await evalJs(`document.getElementById('source-x-next').textContent`));
+check("结论里没有指引时,「下一步」照旧跟在后面",
+      (await state()).includes("chrome://inspect"), await state());
 // 这一档的拒绝文案不许建议他换档 —— 他要的登录态就在自己那个浏览器里。
 // 按钮看不见,所以走 JS 入口兜底那条路(真实来法:键盘/脚本)。
 await evalJs(`openXLoginWindow(); true`);
@@ -621,8 +598,8 @@ mock.unconfigured = true;
 await evalJs(`loadSourceModule(true)`);
 await until(`!document.getElementById('source-configuration').hidden`, 15000);
 const attachBanner = await evalJs(`document.getElementById('source-configuration').textContent`);
-check("待配置横幅按这一档说话,不提桥接也不提登录窗口",
-      attachBanner.includes("远程调试") && !attachBanner.includes("桥接"), attachBanner);
+check("待配置横幅按这一档说话,不提别档的前提",
+      attachBanner.includes("远程调试") && !attachBanner.includes("登录窗口"), attachBanner);
 mock.unconfigured = false;
 await evalJs(`loadSourceModule(true)`);
 await until(`document.getElementById('source-configuration').hidden`, 15000);
@@ -634,7 +611,7 @@ await clickAt("#subs-switch-rss");
 await until(`sourceKind === 'rss' && sourceData && sourceData.settings
              && !('x_channel' in sourceData.settings)`, 20000);
 check("RSS 的设置里没有通道那一块", !await shown("#source-xchan"));
-check("RSS 也没有桥接输入框", !await shown("#source-bridge-field"));
+check("RSS 也没有那张通道清单", !await shown("#source-x-picker"));
 
 // 8. 原生弹窗一个都不许有(项目硬性约定:它们跟这套配色不搭,还阻塞主线程)
 check("整轮没有调过原生 alert/confirm/prompt",

@@ -204,7 +204,7 @@
 - **日期字符串即文件名,`Date.fromisoformat` 就是那道路径校验**(`_path_for`)。
   API 层另有 `_check_day` / `_check_time` 给 400。写盘走 mkstemp + `os.replace`。
 - **阶段落 `skipped`/`stopped` 的通道不算同步成功**(`daily_run._sync_channel`)。
-  2026-09-30 实测:51 个大V账号一个都没配 X 桥接,`feeds.sync.collect` 把它们全
+  2026-09-30 实测:51 个大V账号一个都没配好 X 的取法,`feeds.sync.collect` 把它们全
   记成 unconfigured、crawl 整个阶段落 `skipped`(「待配置 51 个」)——而这里原来
   只数 `error`,于是 social 通道报的是绿色的「同步完成」,日报里那一行只剩 extract
   的结果,"一条都没抓到"连同原因一起看不见。超预算/被停止时管道落 `stopped`,同理。
@@ -2281,7 +2281,7 @@ feeds 那边 `sync._export` 本来就逐篇算出了 `rel`(它只是没交出来
 - 前端两处注入(不把「还没填过」记成页面职责、落地时仍按本趟的 `fillInputs` 判)各红到
   N4 那一条,读数正是报告截图里的末态(两个输入框 `since/until` 都是空串);还原逐字节一致。
 - 全量 `python -m unittest discover -s tests`:**2057 条,1 红 1 跳过**。那条红是
-  `test_x_channels.BrowserTests.test_the_channel_picker_works_on_a_real_page`(X 通道下拉的页面探针),
+  `test_x_channels.BrowserTests.test_the_channel_picker_works_on_a_real_page`(X 取法那一块的页面探针),
   **在 HEAD 基线 worktree 上同样红、同样的 FAIL 清单**,与本轮改动无关(第 1 轮同形)。定向 116 条、
   collector 35 条、日报面板探针 **124 ok / 0 failed** 全绿。
 - 隔离沙箱里按新行形手写账本、用真实 HTTP 读:一个子轮交齐 → `partial:false`;第二个子轮开工后没了

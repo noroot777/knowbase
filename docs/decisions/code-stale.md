@@ -11,7 +11,8 @@
   跑同步时 `kb.feeds.sync` 才被 import、从磁盘读到**新版**并调用
   `x_channels.fill_bridge` —— 而 `x_channels` 早在启动后不久就被
   `registry.get_settings` 拉进 `sys.modules`,是**旧版**。七条 RSS 订阅于是一起报
-  `module 'kb.feeds.x_channels' has no attribute 'fill_bridge'`,各自被
+  `module 'kb.feeds.x_channels' has no attribute 'fill_bridge'`(那个函数后来随
+  桥接那一档一起删了 —— 这里引的是当时报出来的原话),各自被
   `sync._save_failure` 推进最长 24 小时的退避,而面板上显示的是「连接失败」。
   **那句话指不到任何跟订阅、跟网络有关的东西**,人只会去查源站。
   **定位的铁证是 `__pycache__` 的时间戳**:`sync.cpython-311.pyc` 是 10-10 08:03:51

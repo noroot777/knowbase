@@ -74,7 +74,7 @@ const overview = kind => ({
   sources: [{ id: 7, name: "测试订阅", url: "https://example.org/f.xml", group_name: "测试",
               enabled: 1, item_count: 45, last_success: "2026-10-13 10:47", last_error: "",
               last_note: "", configuration_error: "", retry_at: 0, fulltext: 0, extract: 0 }],
-  settings: { enabled: false, interval_minutes: 1440, bridges: [], next_run: 0 },
+  settings: { enabled: false, interval_minutes: 1440, next_run: 0 },
   last_run: null, total: 45, enabled: 1, ready: 1, unconfigured: 0, errors: 0, kind,
 });
 // 管道状态也要能变:⑤ 那组要让页面看到「一轮带着本来源的运行结束了」。

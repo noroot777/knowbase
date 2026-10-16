@@ -12,10 +12,9 @@ import { dirname, join, normalize } from "node:path";
 const STATIC = join(dirname(fileURLToPath(import.meta.url)), "..", "kb", "static");
 // 形状照 kb/web/intake_api.py:通道清单、人话名字、便宜的就绪判断都由后端给。
 const CHANNELS = [
-  { id: "bridge", label: "RSS 桥接", hint: "由第三方桥接服务把 X 转成 RSS。" },
-  { id: "feedgrab", label: "feedgrab(cookie)", hint: "用一份 X cookie 调 X 自己的接口。" },
   { id: "browser", label: "独立 profile 的登录态", hint: "在一个独立浏览器 profile 里登录一次。" },
   { id: "attach", label: "我日常用的浏览器", hint: "直连你正在用的那个 Chrome/Edge。" },
+  { id: "feedgrab", label: "feedgrab(cookie)", hint: "用一份 X cookie 调 X 自己的接口。" },
 ];
 const LOGIN_CMD = "FEEDGRAB_DATA_DIR=/tmp/kb/x-feedgrab/sessions feedgrab login twitter";
 // 「下一步怎么办」由后端给。有的通道要做的事没法塞进输入框(去地址栏勾一次远程
@@ -27,15 +26,14 @@ const LOGIN_CMD = "FEEDGRAB_DATA_DIR=/tmp/kb/x-feedgrab/sessions feedgrab login 
 const IMPORTED = "上次从日常浏览器导入：2026-10-15 17:40:00，13 个 cookie（当场验证通过）";
 const NEXT_STEP = { attach: "在浏览器地址栏打开 chrome://inspect/#remote-debugging，勾上那个开关。",
                     feedgrab: LOGIN_CMD };
-let channel = "bridge";
+let channel = "feedgrab";   // 这一局从"不是默认档"的那一条起步
 let unconfigured = false;   // 第 9 节用:让这条订阅变成"待配置"
 const saved = [];      // PUT /settings 真发出去的 body
 const posted = [];     // 通道那两个 POST
 let checkReply = { ready: true, detail: "登录态有效,首页读到 12 条推文" };
 
 const settings = () => ({ enabled: false, interval_minutes: 1440, next_run: 0,
-                          bridges: ["https://bridge.example/{handle}/rss"], x_channel: channel,
-                          x_feedgrab_bin: "", x_chrome_path: "" });
+                          x_channel: channel, x_feedgrab_bin: "", x_chrome_path: "" });
 const SOURCE = { id: 1, kind: "social", name: "Example", url: "https://x.com/example",
                  feed_url: "", group_name: "", enabled: 1, mode: "feed", config: "{}",
                  last_attempt: "", last_success: "", last_error: "", failures: 0,
@@ -142,6 +140,7 @@ const server = createServer(async (req, res) => {
         if (channel !== "browser")
           return json({ detail: `当前保存的取法是「${CHANNELS.find(c => c.id === channel).label}」，`
                                 + "而这颗按钮写的是「独立 profile 的登录态」那一档的登录态。" }, 400);
+
         // 慢一点回:真实那一下要停在授权弹窗上(最长 90 秒),而"按下去之后
         // 立刻预告"正是这段时间里页面上唯一的交代 —— 秒回的 mock 测不到它。
         await new Promise(r => setTimeout(r, 1200));
@@ -156,9 +155,10 @@ const server = createServer(async (req, res) => {
       }
       if (m[2] === "/login") {
         // **按存下来的那条通道回答,和真后端一样**:这个 mock 原来无条件返回成功,
-        // 于是"改了下拉还没保存就点登录"这条路在页面上看起来永远是对的 —— 而真
-        // 后端读的是 `reg.get_settings`,只会回一句"当前保存的取法是「RSS 桥接」",
-        // 用户对着一个明明选着浏览器登录态的下拉收到这句拒绝(2026-10-09 实测)。
+        // 于是"改了选择还没保存就点登录"这条路在页面上看起来永远是对的 —— 而真
+        // 后端读的是 `reg.get_settings`,只会回一句"当前保存的取法是「……」"。
+        // 前端如今会**先替用户保存再执行**(`xChanEnsureSaved`),这道门槛是它
+        // 漏掉时的兜底 —— 两道各有射程,mock 这边照旧摆着。
         if (channel === "attach")
           return json({ detail: "这一档用的是你日常浏览器里现成的登录态，不在这里登录。" }, 400);
         if (channel !== "browser")
@@ -172,7 +172,7 @@ const server = createServer(async (req, res) => {
     // 请求时读一次状态)。在 await 之后才去读 `imported` 的话,被按住的那条回包会
     // 携带「按住期间发生的事」,于是「旧读盖掉新事实」这个形态压根摆不出来。
     if (getForget) { getForget = false; imported = false; }
-    const snap = channel === "bridge" || (channel === "browser" && imported);
+    const snap = channel === "browser" && imported;
     const payload = {
       current: channel, channels: CHANNELS, ready: snap,
       why: snap ? "" : (channel === "attach" ? "没有发现开着远程调试的浏览器"

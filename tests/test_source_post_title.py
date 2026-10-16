@@ -2,7 +2,7 @@
 """「大V观点的条目不显示标题」的浏览器回归。
 
 X 的采集器把推文正文的前 500 字符原样当成 title(`x_browser._entry` /
-`x_feedgrab._entry`;桥接那条走 `fetching.parse_feed`,源没给标题时回退成正文
+`x_feedgrab._entry`;走 HTTP 的那条(专用订阅链接)走 `fetching.parse_feed`,源没给标题时回退成正文
 首行)—— 推文本来就没有标题这回事。于是来源面板上那行大标题和紧跟着的正文是同一
 句话显示两遍,而标题那个 <button> 继承了 base.css 的 `white-space: nowrap`,长推文
 一行到底、直接撑出卡片右边界。
@@ -10,7 +10,7 @@ X 的采集器把推文正文的前 500 字符原样当成 title(`x_browser._ent
 页面那一侧由 tests/source_post_probe.mjs 真跑一遍(自带 mock 后端,CDP 直连
 chrome-headless-shell,不装 playwright、不连网、始终无头、临时 profile);
 这里另外钉住**采集器那一头的前提** —— 判据 `content_kind === 'post'` 认的是
-"这条内容是一条动态",两条 X 采集器和桥接那条都得给这个值,不然前端那道判断
+"这条内容是一条动态",两条 X 采集器和走 HTTP 的那条都得给这个值,不然前端那道判断
 永远不成立,而页面上看起来只是"标题又回来了"。
 
 跑:  python -m unittest tests.test_source_post_title -v

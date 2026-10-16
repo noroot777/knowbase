@@ -39,15 +39,21 @@ class MultiSourceBase(RoundBase):
         for kind in ('social', 'rss'):
             for s in reg.subscriptions(kind):
                 reg.delete_subscription(kind, s['id'])
-        # 桥接模板不填的话这几条 X 订阅一律被判「待配置」、压根进不了 pending
-        # (见 `registry.configuration_error`),而这一组要验的正是它们抓没抓。
-        reg.save_settings('social', {'bridges': ['https://bridge.example/{handle}']})
         self.rss = [reg.save_subscription(
             'rss', {'name': n.upper(), 'url': f'https://{n}.org/feed'})
             for n in ('a', 'b', 'c')]
         self.x = [reg.save_subscription(
             'social', {'name': '@' + h, 'url': f'https://x.com/{h}'})
             for h in ('x1', 'x2', 'x3')]
+        # 通道没配好的话这几条 X 订阅一律被判「待配置」、压根进不了 pending
+        # (见 `registry.configuration_error`),而这一组要验的正是它们抓没抓。
+        # 预取一并换成空操作:这几局数的是 `fetch_source`/导出那一侧,没人想在
+        # 这里真起一个 Chrome(要数预取名单的那一组自己再换成记录型的)。
+        reg.save_settings('social', {'x_channel': x_channels.BROWSER})
+        for p in (patch.object(x_channels, 'readiness', return_value=(True, '', '')),
+                  patch.object(x_channels, 'prefetch', return_value={})):
+            p.start()
+            self.addCleanup(p.stop)
 
     def both(self):
         return {'channels': [{'channel': 'social', 'accounts': []},

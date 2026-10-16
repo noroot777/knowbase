@@ -1,4 +1,4 @@
-// X 的采集通道:桥接 / feedgrab(cookie) / 我的浏览器登录态。
+// X 的采集通道:独立 profile 的登录态 / 日常浏览器 / feedgrab(cookie)。
 //
 // 通道清单、人话名字、就绪判断全部由后端给(`/api/intake/<kind>/x-channel`)。
 // **前端不许把通道 id 和它们各自要填什么写死成一张表**:这里只按后端给的
@@ -106,11 +106,47 @@ function xChanOwnsAct(t) {
   return true;
 }
 
+// 选中的那一档。**换成一组单选而不是下拉**:四个名字摆在下拉里看不出差别,
+// 而它们要准备的东西完全不同(一个要在终端装东西、一个要去浏览器开调试开关)。
+// 单选的每一行跟着它自己那句话,选之前就看得见代价。
 function xChannelValue() {
-  return $('source-x-channel').value;
+  return $('source-x-picker').querySelector('input:checked')?.value
+         || (xChan && xChan.current) || '';
 }
 
-// 下拉被人改了(`index.html` 的 onchange)。**代次在这儿推进,不在
+// 「换一种」那块展开没有。展开是**用户的动作**,重画不许顺手收起来 ——
+// 他正对着清单读那几句说明时,一条迟到的读回来就把清单收了。
+function toggleXChannelPicker() {
+  const box = $('source-x-picker'), on = box.hidden;
+  box.hidden = !on;
+  const btn = $('source-x-switch');
+  btn.setAttribute('aria-expanded', String(on));
+  // 箭头走 `icons.js` 的那一份几何(项目硬性:页面里不许出现 ▾ ▴ 这些字符)。
+  btn.innerHTML = '换一种' + arrow(on ? 'caretUp' : 'caretDown');
+}
+
+// 把清单画出来。**名字和那句说明都来自后端**(口径同顶上那句"不许把通道
+// 写死成一张表"):新增/退役一条通道只改后端那份注册表。
+function xChannelList() {
+  const box = $('source-x-picker'), now = xChannelValue();
+  box.innerHTML = '';
+  for (const c of (xChan && xChan.channels) || []) {
+    const row = document.createElement('label');
+    row.className = 'xchan-opt';
+    const radio = document.createElement('input');
+    radio.type = 'radio'; radio.name = 'x-channel'; radio.value = c.id;
+    radio.checked = c.id === now;
+    radio.addEventListener('change', xChannelChanged);
+    const name = document.createElement('b');
+    name.textContent = c.label;
+    const why = document.createElement('span');
+    why.textContent = c.hint || '';
+    row.append(radio, name, why);
+    box.appendChild(row);
+  }
+}
+
+// 清单上换了一档(每个单选自己的 change)。**代次在这儿推进,不在
 // `xChannelPicked` 里** —— 后者同时是**渲染**入口(读回来之后、保存之后都要走一趟),
 // 在它里面推进等于「每次重画都算换了面板」,而那正是「读先到就废掉随后回来的动作」
 // 那条的机制。**这一条是冗余带,别删**:注入「把 `xChanAge()` 搬回 `xChannelPicked`」
@@ -122,25 +158,36 @@ function xChannelChanged() {
   xChannelPicked();
 }
 
-// 按当前选择显示该填什么。各通道要的东西不一样,全塞在一起只会让人以为
-// 选了浏览器还得去填桥接地址。**纯渲染,不动代次**(理由见上一条)。
+// 按当前选择重画这一块。**纯渲染,不动代次**(理由见上一条)。
 function xChannelPicked() {
   if (!xChan) return;
   const now = xChannelValue();
   const show = (id, on) => { $(id).hidden = !on; };
-  show('source-bridge-field', now === 'bridge');
   show('source-x-feedgrab', now === 'feedgrab');
   show('source-x-browser', now === 'browser');
+  // 那条要在终端里跑的命令**留在卡片上,不进折叠块** —— 它是 feedgrab 这一档
+  // 唯一的下一步,收进「可执行文件位置」里的话,不展开就一个字都看不见,而
+  // 状态行那边又按去重把它让掉了(见 `xChannelSay`),两处一起沉默。
+  show('source-x-cmd', now === 'feedgrab' && !!xChan.login_command);
+  // 这一档什么都不用填时,「可执行文件位置」整块收起来 —— 空的折叠块比没有更糟。
+  show('source-x-adv', now === 'feedgrab' || now === 'browser');
   const meta = (xChan.channels || []).find(c => c.id === now);
-  $('source-x-hint').textContent = meta?.hint || '';
+  $('source-x-name').textContent = meta?.label || now;
+  $('source-x-login').textContent = xChan.login_command || '';
+  // 「打开登录窗口」「从日常浏览器导入」都只对独立 profile 那一档成立:别的档
+  // 手里的登录态不在我们这个 profile 里,点了也写不到它该在的地方。
+  // **按「选中的那一档」显示,不按「存下来的那一档」** —— 按钮此刻是可点的
+  // (点下去会先把草稿存下来,见 `xChanEnsureSaved`),所以它跟着选择走。
+  show('source-x-login-btn', now === 'browser');
+  show('source-x-import-btn', now === 'browser');
+  show('source-x-import-hint', now === 'browser');
   // 这几行只在"选择没变"时才是当前通道的事实;改了选择就是一句过期的话。
   const same = now === xChan.current;
-  $('source-x-login').textContent = xChan.login_command || '';
   // **有一个属于这块面板的动作正在飞时,那两行结论归它写,重画不许顺手盖掉。**
   // 它们是这个动作此刻唯一的交代(「正在从日常浏览器读登录态…」「正在检查…」)——
   // 实测:导入途中点一次保存,保存收尾那次重读把预告清成了导入之前的旧留痕,而
-  // 那个授权弹窗正等在另一个窗口里。改了下拉/改了存下来那一档就不是它的了
-  // (`xChanMine` 当场为假),于是「改完记得点保存设置」照常显示。
+  // 那个授权弹窗正等在另一个窗口里。改了选择/改了存下来那一档就不是它的了
+  // (`xChanMine` 当场为假),于是「这一档还没存下来」照常显示。
   const busy = xChanMine(xChanPending);
   // **上一次没跑完的那条交代也归这一类**:它说的是「这一档此刻的结果不知道」,
   // 而缓存里那份 `ready/why`/`login_state` 说的是它之前那一刻 —— 让后者盖上来就是
@@ -148,23 +195,7 @@ function xChannelPicked() {
   const unsure = xChanUnsureNow();
   if (!busy) xChannelSay(unsure && unsure.slot === 'state' ? unsure.text : (same
     ? (xChan.ready ? '当前通道已就绪。' : (xChan.why || '当前通道还没有配好。'))
-    : '改完记得点「保存设置」,保存之后才会生效。'));
-  $('source-x-check').hidden = !same;
-  // 「打开登录窗口」同理不能在改了选择还没保存时点:后端读的是**存下来**的那一份
-  // 通道,于是它只会回一句"当前保存的取法不是浏览器登录态" —— 用户对着一个明明
-  // 选着「我的浏览器登录态」的下拉收到这句拒绝,看不出差在哪一步(2026-10-09 实测)。
-  // **这里禁用而不是藏掉**(「检查连接」是藏的):那颗按钮产出的是一个**结论**,
-  // 贴在新选择旁边就是谎话,没有结论可给就不该出现;这颗是一个**动作**,而且上面
-  // 那段说明("在一个独立 profile 里登录一次")指的就是它 —— 藏掉它说明就悬空了,
-  // 灰着反倒说得清"现在点不了"。
-  const loginBtn = $('source-x-login-btn');
-  loginBtn.disabled = !same;
-  loginBtn.title = same ? '' : '先点「保存设置」,保存之后才能在这里登录';
-  // 「从日常浏览器导入登录态」同理:它写的也是**存下来**那一档的登录态,所以
-  // 跟上面那颗同一道闸、同一个理由(禁用而不是藏掉 —— 上面那段说明指的就是它)。
-  const importBtn = $('source-x-import-btn');
-  importBtn.disabled = !same;
-  importBtn.title = same ? '' : '先点「保存设置」,保存之后才能导入';
+    : '这一档还没存下来。点下面任何一颗按钮会先替你存一次，也可以点「保存设置」。'));
   // 「上次什么时候导的」只在选择没变时才是当前通道的事实(口径同状态行)。
   // **文案整句由后端给**(`x_login_import.summary`):结论码是那一块自己的词汇表,
   // 前端照它写一张表就是把同一个判断放到两处。
@@ -175,27 +206,38 @@ function xChannelPicked() {
     unsure && unsure.slot === 'import' ? `${unsure.text}${trace ? ' ' + trace : ''}` : trace;
 }
 
-// 状态行 + 「下一步怎么办」一起写,**去重按内容判**。
+// 状态那一行。**「现在怎么样」和「下一步怎么办」写进同一句**,不再是两行
+// 分不出主次的灰字。
 //
 // 「下一步」由后端给(`readiness` 的第三项),前端只负责显示:有些通道要做的事
 // 塞不进一个输入框(比如去浏览器地址栏开一次远程调试开关),它就从这里出来 ——
 // 这样**新增一条通道不用改这个文件**,口径同顶上那句"不许把通道和它们各自要填
 // 什么写死成一张表"。它和状态行一样,只在选择没变时才是事实。
 //
-// 两个显示位的内容却可能是同一句话,所以同一条去重规则要管两头:
-//  ①feedgrab 那档的「下一步」就是上面那条可复制的命令本身(它的第三项必须带着
-//    它 —— 待配置横幅那边没有可复制块,见 `x_channels.readiness`);
-//  ②「检查连接」返回的 detail 已经把原因和地址写法指引拼在一起了
-//    (`x_browser.probe`),而「下一步」装的正是同一条指引 —— 原来只在
-//    `xChannelPicked` 里对①去过重、检查那一下直接改状态行,于是合法写法和
-//    「清掉它就回到自动发现」连着显示两遍(2026-10-09 第 2 轮审查截图)。
-// 按内容判而不是按通道写死一张表,所以两档共用这一份。
+// **拼之前去一次重**:同一句话在同一屏上连着出现两遍的来法有两种(见下面两条
+// 注释),按内容判而不是按通道写死一张表,所以各档共用这一份。
+// 实测截图在 `docs/decisions/frontend-feedback.md`。
 function xChannelSay(state) {
-  $('source-x-state').textContent = state;
   // 只有选择没变时「下一步」才是事实(口径同状态行)。
   const next = xChannelSaved() ? (xChan.hint || '') : '';
+  // ①feedgrab 那档的「下一步」就是卡片上那条可复制的命令本身(它的第三项必须
+  //   带着它 —— 待配置横幅那边没有可复制块,见 `x_channels.readiness`);
+  // ②「检查连接」返回的 detail 已经把原因和下一步拼在一起了。
   const dup = !next || next === $('source-x-login').textContent || state.includes(next);
-  $('source-x-next').textContent = dup ? '' : next;
+  const say = dup ? state : `${state} ${next}`;
+  $('source-x-state').textContent = say;
+  // 色点是这句话的提前量:**它不单独承载信息**,旁边永远有字。未保存的草稿、
+  // 以及那条「不知道」都算不出就绪与否 —— 那时它是中性的灰。
+  const dot = $('source-x-dot');
+  const known = xChannelSaved() && !xChanUnsureNow();
+  dot.className = 'xchan-dot' + (!known ? '' : xChan.ready ? ' ok' : ' warn');
+}
+
+// 一个动作正在跑:这一刻**没有结论**,所以色点回到中性灰,别让上一次的绿/褐
+// 挂在一句「正在…」旁边。
+function xChannelWorking(text) {
+  $('source-x-state').textContent = text;
+  $('source-x-dot').className = 'xchan-dot';
 }
 
 // 「页面上选的这条通道,后端已经存下来了吗」。禁用登录按钮和恢复它都认这一份。
@@ -222,16 +264,19 @@ async function loadXChannel(kind) {
   try {
     data = await pipeJson(`/api/intake/${kind}/x-channel`);
   } catch (e) {
-    // 读不出来时别把这一块留成空壳:桥接那个输入框还在(它是存量唯一的
-    // 取法),顺手给一条重读入口,而不是让人对着一个没有选项的下拉。
+    // 读不出来时**把这一块收干净**,只留那句原因:留着上一次那份清单和按钮,
+    // 点下去是对着一份读不出来的设置做动作。
     if (want !== sourceKind || !xChanOwnsRead(tag)) return;
     xChan = null;
-    $('source-x-channel').innerHTML = '';
-    $('source-x-hint').textContent = '';
-    $('source-bridge-field').hidden = false;
+    $('source-x-picker').innerHTML = '';
+    $('source-x-picker').hidden = true;
+    $('source-x-switch').setAttribute('aria-expanded', 'false');
+    $('source-x-name').textContent = '读不出来';
+    $('source-x-adv').hidden = true;
     $('source-x-feedgrab').hidden = $('source-x-browser').hidden = true;
-    $('source-x-check').hidden = true;
-    $('source-x-next').textContent = '';
+    $('source-x-login-btn').hidden = $('source-x-import-btn').hidden = true;
+    $('source-x-import-hint').hidden = true;
+    $('source-x-dot').className = 'xchan-dot';
     $('source-x-state').textContent = `读不出可选的取法（${e.message}）。`;
     return;
   }
@@ -239,14 +284,19 @@ async function loadXChannel(kind) {
   // 也别拿「那之前」的一份盖掉更新的事实
   if (want !== sourceKind || !xChanOwnsRead(tag)) return;
   xChan = data; xChanKind = kind;
-  const sel = $('source-x-channel');
-  sel.innerHTML = '';
-  for (const c of data.channels || []) {
-    const o = document.createElement('option');
-    o.value = c.id; o.textContent = c.label; sel.appendChild(o);
-  }
-  sel.value = data.current;
+  // **清单整份按这条读重画**:它是权威的那一份(更早发出的读在上面那道
+  // 归属检查里已经被挡掉了),名字、说明、选中哪一档都以它为准。
+  xChannelList();
+  xChanSelect(data.current);
   xChannelPicked();
+}
+
+// 把选中项挪到某一档。清单还没画出来(或那一档不在清单里)时先画一遍。
+function xChanSelect(id) {
+  const box = $('source-x-picker');
+  let hit = box.querySelector(`input[value="${CSS.escape(id || '')}"]`);
+  if (!hit) { xChannelList(); hit = box.querySelector(`input[value="${CSS.escape(id || '')}"]`); }
+  for (const r of box.querySelectorAll('input')) r.checked = r === hit;
 }
 
 // 保存设置时附带的那几个字段。社交来源之外返回空对象。
@@ -261,38 +311,62 @@ function fillXChannelFields(settings) {
   if (!('x_channel' in (settings || {}))) return;
   $('source-x-bin').value = settings.x_feedgrab_bin || '';
   $('source-x-chrome').value = settings.x_chrome_path || '';
-  if (xChan) { xChan.current = settings.x_channel; $('source-x-channel').value = settings.x_channel; }
+  if (xChan) { xChan.current = settings.x_channel; xChanSelect(settings.x_channel); }
   // 保存之后/换了来源之后,这块面板说的是另一档了 —— 跟改下拉同一道闸。
   xChanAge();
   xChannelPicked();
 }
 
+// **先保存,再执行。** 三颗按钮任何时候都能点:后端读的是**存下来**的那一份,
+// 所以草稿跟它不一样时,替用户先存一次,再做他刚点的那件事。
+//
+// 原来是把按钮灰掉、挂一句 title 说「先点保存设置」。那等于让用户替我们走一趟
+// 本来就该我们走的流程 —— 他看到的是一颗按不动的按钮,而唯一的解释藏在
+// hover 才出得来的 title 里(用户反馈:「那肯定不合常理」)。后端那道拒绝照旧留着
+// (`intake_api.x_channel_login`),两道各有射程:这里管正常路径,那里管这里漏掉时。
+//
+// 返回 false = 没存成或者存完已经不是这一档了,这一次动作不做 ——
+// 原因已经写在表单那行红字上。
+async function xChanEnsureSaved() {
+  if (xChannelSaved()) return true;
+  const want = xChannelValue(), kind = xChanKind;
+  if (!await saveSourceSettingsNow()) return false;
+  // 保存这一步自己会重读、重画(`fillSourceSettings`),所以回来之后要确认
+  // **存下来的真是他刚点的那一档**:这期间切走了来源、或者又改了选择的话,
+  // 接着做下去就是做到另一档头上。
+  if (kind !== xChanKind || !xChan || xChan.current !== want) return false;
+  const name = (xChan.channels || []).find(c => c.id === want)?.label || want;
+  toast(`已先保存「${name}」这一档，再继续。`, { type: 'info' });
+  return true;
+}
+
 async function openXLoginWindow() {
-  // 未保存时这颗按钮本来就是禁用的;这一句是给别的入口(键盘、脚本)兜底 ——
-  // 发上去只会换回一句"当前保存的取法不是……",白跑一趟还留个看不懂的提示。
-  //
   // **这一条刻意不对代次**(同一族里只有它不对):它一个字都不往面板状态上写,
   // 那条 toast 说的是「用户自己刚点的那个动作真的发生了」。守上它的后果是用户顺手
-  // 改了下拉之后这句话消失,而那个登录窗口确实开着 —— 要守的是往面板上写,不是
+  // 改了选择之后这句话消失,而那个登录窗口确实开着 —— 要守的是往面板上写,不是
   // 发过异步请求(口径见 `docs/decisions/frontend-feedback.md`)。
-  if (xChanBusy || !xChannelSaved()) return;
+  if (xChanBusy) return;
   xChanBusy = true; $('source-x-login-btn').disabled = true;
   try {
+    if (!await xChanEnsureSaved()) return;
     const r = await pipePost(`/api/intake/${xChanKind}/x-channel/login`);
     toast(r.detail, { type: 'info', ms: 12000 });
   } catch (e) { toast('打不开登录窗口', { detail: e.message }); }
-  // 恢复成"此刻该不该能点",不是无条件放开:这期间下拉可能已经被改走了。
-  finally { xChanBusy = false; $('source-x-login-btn').disabled = !xChannelSaved(); }
+  finally { xChanBusy = false; $('source-x-login-btn').disabled = false; }
 }
 
 async function importXLoginState() {
-  // 未保存时这颗按钮本来就是禁用的;这一句是给别的入口(键盘、脚本)兜底,
-  // 理由同 `openXLoginWindow` —— 后端读的是存下来的那一档。
-  if (xChanBusy || !xChannelSaved()) return;
+  if (xChanBusy) return;
+  xChanBusy = true; $('source-x-import-btn').disabled = true;
+  // **先保存再导入**(理由见 `xChanEnsureSaved`):后端写的是存下来那一档的
+  // profile。保存失败就不往下做 —— 那时导入会导到另一档头上。
+  if (!await xChanEnsureSaved()) {
+    xChanBusy = false; $('source-x-import-btn').disabled = false; return;
+  }
   // **动作一开始就让在途的那些读作废**(它们说的是导入之前那一刻)。
+  // 取在保存**之后**:保存自己会重读一次,那条读说的是导入之前,不该落地。
   const tag = xChanAct();
   let mine = false;           // 这个结果最后有没有写进这块面板
-  xChanBusy = true; $('source-x-import-btn').disabled = true;
   // **先把「那个浏览器会弹一次授权」说在前面。** 这一步会停在授权弹窗上最长 90 秒
   // (`cdp_attach.ATTACH_TIMEOUT`),而弹窗出现在另一个窗口里 —— 不预告的话用户
   // 看到的是一颗按下去就没反应的按钮,等他发现那个弹窗时这边可能已经超时了。
@@ -340,7 +414,7 @@ async function importXLoginState() {
   // `xChanPending` 一并清掉:没有动作在飞了,重画照常写那两行结论。
   finally {
     xChanBusy = false; xChanPending = null;
-    $('source-x-import-btn').disabled = !xChannelSaved();
+    $('source-x-import-btn').disabled = false;
     // 结果没写进这块面板时才重画:**写进去了就别动它** —— 一次没验成的导入写的是
     // 「这一次为什么没成」,而重画写的是留痕那行「什么时候搬的」,后者答不了前者。
     // 没写进去的那一档必须重画,否则上面按住的「正在…」会永远挂在那儿。
@@ -350,10 +424,15 @@ async function importXLoginState() {
 
 async function checkXChannel() {
   if (xChanBusy) return;
+  xChanBusy = true; $('source-x-check').disabled = true;
+  // 先保存再检查:后端检的是**存下来**的那一档,草稿没存下去的话,检出来的
+  // 结论贴在另一档旁边就是谎话(理由见 `xChanEnsureSaved`)。
+  if (!await xChanEnsureSaved()) {
+    xChanBusy = false; $('source-x-check').disabled = false; return;
+  }
   const tag = xChanAct();     // 同一道,理由见 `xChanGen`(这条也是审查 grep 出来的)
   let mine = false;
-  xChanBusy = true; $('source-x-check').disabled = true;
-  $('source-x-state').textContent = '正在检查…';
+  xChannelWorking('正在检查…');
   try {
     // 这一步会真起一个 Chrome 或真跑一次 feedgrab doctor,比普通请求慢得多。
     const r = await pipePost(`/api/intake/${xChanKind}/x-channel/check`, {}, 120000);

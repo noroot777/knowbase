@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from kb import maintenance, pipeline, pipeline_state
 from kb.collectors import FetchScope, get_collector
-from kb.feeds import registry as reg, fetching, sync
+from kb.feeds import registry as reg, fetching, sync, x_channels
 from kb.source_types import feed_types
 from kb.web import intake_api
 
@@ -137,24 +137,23 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(0,reg.items('rss',s['id'])['total'])
         self.assertEqual(1,reg.items('rss')['total'])
 
-    def test_etag_304_and_bridge_fallback(self):
+    def test_etag_304_is_sent_and_honoured(self):
         s=self.source(); s.update(etag='v1',modified='date',resolved_url=s['url'])
         with patch.object(fetching,'request',return_value=fetching.Response(304,s['url'],b'',{})) as req:
             entries,_=fetching.fetch_source(s,reg.get_settings('rss'))
             self.assertEqual([],entries)
             self.assertEqual('v1',req.call_args.args[1]['If-None-Match'])
-        s=self.source('https://x.com/example',kind='social')
-        with patch.object(fetching,'request',side_effect=[fetching.FeedError('blocked'),fetching.Response(200,'https://xcancel.com/example/rss',ATOM,{})]) as req:
-            entries,_=fetching.fetch_source(s,{'bridges':['https://nitter.net/{handle}/rss','https://xcancel.com/{handle}/rss']})
-            self.assertEqual(2,req.call_count); self.assertEqual(1,len(entries))
-            self.assertEqual(req.call_args_list[0].kwargs['deadline'], req.call_args_list[1].kwargs['deadline'])
 
     def test_homepage_discovers_only_advertised_rss(self):
         s=self.source('https://example.org/')
         html=b'<html><link rel="alternate" type="application/rss+xml" href="/feed.xml"></html>'
-        with patch.object(fetching,'request',side_effect=[fetching.Response(200,s['url'],html,{}),fetching.Response(200,'https://example.org/feed.xml',RSS,{'etag':'v2'})]):
+        with patch.object(fetching,'request',side_effect=[fetching.Response(200,s['url'],html,{}),fetching.Response(200,'https://example.org/feed.xml',RSS,{'etag':'v2'})]) as req:
             entries,cache=fetching.fetch_source(s,reg.get_settings('rss'))
         self.assertEqual(1,len(entries)); self.assertEqual('https://example.org/feed.xml',cache['resolved_url'])
+        # 第二跳不许重新计时:一条订阅两跳也只有一份预算,各自重新计时的话一条源
+        # 最久能占掉两倍 SOURCE_SECONDS,把同一轮后面的源挤掉。
+        self.assertEqual(req.call_args_list[0].kwargs['deadline'],
+                         req.call_args_list[1].kwargs['deadline'])
 
     def test_failure_isolation_backoff_manual_retry_and_disabled(self):
         a=self.source(); b=self.source('https://other.org/feed'); disabled=self.source('https://paused.org/feed')
@@ -419,7 +418,7 @@ class FeedTests(unittest.TestCase):
     def test_default_social_waits_for_configuration_without_starting_pipeline(self):
         overview = self.client.get('/api/intake/social').json()
         self.assertEqual((51, 0), (overview['unconfigured'], overview['ready']))
-        self.assertEqual([], overview['settings']['bridges'])
+        self.assertEqual(x_channels.DEFAULT, overview['settings']['x_channel'])
         self.assertFalse(get_collector('social').status().ready)
         with patch.object(pipeline, 'start_pipeline') as start:
             response = self.client.post('/api/intake/social/sync', json={})
@@ -433,47 +432,47 @@ class FeedTests(unittest.TestCase):
         # 一个都没抓成,但也不许给订阅记上"连接失败"——待配置不是失败
         self.assertFalse(any(s['last_error'] for s in reg.subscriptions('social')))
 
-    def test_dedicated_feed_and_saved_bridges_remain_usable(self):
+    def test_a_dedicated_feed_url_is_ready_on_its_own(self):
+        """**填了专用订阅链接的那条不看通道脸色。** 它走的是普通 HTTP,通道登
+        没登录都跟它无关;反过来,通道就绪也不许把"就绪"算到别人头上之外的事
+        上——两边各自独立。"""
         source = reg.subscriptions('social')[0]
         reg.save_subscription('social', {'feed_url':'https://example.org/account/rss'}, source['id'])
         data = self.client.get('/api/intake/social').json()
         self.assertEqual((50, 1), (data['unconfigured'], data['ready']))
         with patch.object(pipeline, 'start_pipeline', return_value=True):
             self.assertEqual(200, self.client.post('/api/intake/social/sync', json={'source_ids':[source['id']]}).status_code)
-        reg.save_settings('social', {'bridges':['https://custom.org/{handle}/rss']})
-        self.assertEqual(['https://custom.org/{handle}/rss'], reg.get_settings('social')['bridges'])
-        self.assertEqual(51, self.client.get('/api/intake/social').json()['ready'])
-        reg.save_settings('social', {'bridges':[]})
+        # 通道自己就绪之后,剩下 50 条才跟着就绪;那一条照旧就绪。
+        profile = self.root / 'xprof'
+        (profile / 'Default').mkdir(parents=True)
+        (profile / 'Default' / 'Cookies').write_bytes(b'x')
+        with patch.object(x_channels, 'BROWSER_PROFILE', profile):
+            self.assertEqual(51, self.client.get('/api/intake/social').json()['ready'])
         self.assertEqual(1, self.client.get('/api/intake/social').json()['ready'])
 
-    def test_shared_bridge_failure_stops_after_one_concurrent_batch(self):
-        reg.save_settings('social', {'bridges':['https://broken.org/{handle}/rss']})
-        barrier = threading.Barrier(sync.FETCH_WORKERS)
-        def blocked(*args, **kwargs):
-            barrier.wait(timeout=2)  # Fails if fetching becomes serial again.
-            raise fetching.FeedError('HTTP 451')
-        with patch.object(sync, 'fetch_source', side_effect=blocked) as fetch:
-            summary = sync.collect('social', FetchScope(force=True))
-        self.assertEqual(4, fetch.call_count)
-        self.assertEqual((4,47), (summary['checked'],summary['skipped']))
-        self.assertIn('X 桥接连续失败', summary['message'])
-        sources = reg.subscriptions('social')
-        self.assertEqual(4, sum(bool(s['last_error']) for s in sources))
-        self.assertTrue(all(not s['last_attempt'] for s in sources[4:]))
-        self.assertEqual('error', pipeline_state._state['stages']['crawl']['status'])
-
-    def test_bridge_circuit_does_not_skip_dedicated_or_other_social_feeds(self):
-        reg.save_settings('social', {'bridges':['https://broken.org/{handle}/rss']})
+    def test_one_batch_of_failures_never_skips_the_rest_of_the_round(self):
+        """**同一轮里别人失败不许顺手把后面的跳过。** 曾经有一道"连续失败就
+        熔断"的闸,它防的是"公共实例挂了别再拿 50 个账号去撞";桥接删掉之后
+        没有公共实例可撞了,留着只会让一批超时把同一轮里好好的源一起扔掉。
+        顺带钉住并发:`barrier` 等不到人就是又退回串行了。"""
         direct = self.source('https://example.org/social-feed', kind='social')
         dedicated = self.source('https://x.com/dedicated', kind='social')
         reg.save_subscription('social', {'feed_url':'https://example.org/dedicated'}, dedicated['id'])
+        profile = self.root / 'xprof'
+        (profile / 'Default').mkdir(parents=True)
+        (profile / 'Default' / 'Cookies').write_bytes(b'x')
+        barrier = threading.Barrier(sync.FETCH_WORKERS)
         def response(source, *args, **kwargs):
-            if reg.uses_bridge(source):
+            if reg.uses_channel(source):
+                barrier.wait(timeout=5)
                 raise fetching.FeedError('HTTP 451')
             return self.entries(), {'etag':'', 'modified':'', 'resolved_url':source['url']}
-        with patch.object(sync, 'fetch_source', side_effect=response):
+        with patch.object(sync, 'fetch_source', side_effect=response), \
+             patch.object(x_channels, 'BROWSER_PROFILE', profile), \
+             patch.object(x_channels, 'prefetch'):
             summary = sync.collect('social', FetchScope(force=True))
-        self.assertEqual((6,47,1), (summary['checked'],summary['skipped'],summary['added']))
+        self.assertEqual((53, 0, 1), (summary['checked'], summary['skipped'], summary['added']))
+        self.assertEqual(51, sum(bool(s['last_error']) for s in reg.subscriptions('social')))
         self.assertTrue(reg.subscription('social', direct['id'])['last_success'])
         self.assertTrue(reg.subscription('social', dedicated['id'])['last_success'])
 

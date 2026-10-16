@@ -267,9 +267,14 @@ class FeedBudgetTests(unittest.TestCase):
         self.assertEqual('HTTP 503', reg.subscription('rss', bad['id'])['last_error'])
         self.assertTrue(reg.subscription('rss', good['id'])['last_success'])
 
-    def test_collection_cutoff_does_not_retry_bridges_or_trip_circuit(self):
-        reg.save_settings('social', {'bridges': ['https://first.org/{handle}/rss',
-                                               'https://second.org/{handle}/rss']})
+    def test_collection_cutoff_skips_the_rest_without_blaming_them(self):
+        """**预算用完是本轮的事,不是哪条订阅的错。** 没轮到的那些既不许记
+        `last_error`、也不许动 `last_attempt`(否则下一轮的退避会把它们再推后
+        一次),整轮状态照旧是 ok —— 它确实按预算正常收工了。"""
+        # 专用订阅链接那条路才走 HTTP(X 的三条通道都在预取里整批抓完,这里
+        # 要验的是逐条取的那一段),所以每条都填上。
+        for s in reg.subscriptions('social'):
+            reg.save_subscription('social', {'feed_url': f"https://feed.test/{s['id']}"}, s['id'])
         sources = reg.subscriptions('social')
         barrier = threading.Barrier(sync.FETCH_WORKERS)
 

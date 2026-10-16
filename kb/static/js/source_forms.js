@@ -73,13 +73,12 @@ async function actOnSource(action, id) {
 function fillSourceSettings(s) {
   $('source-settings-error').textContent = '';
   $('source-settings-fields').disabled = false;
-  $('source-bridges').value = (s.bridges || []).join('\n');
   // 「自动同步 / 同步间隔」两个控件删掉之后(那一档整条拆了,见
   // `kb.pipeline._scheduler_tick`),这张表单上只剩 X 的取法那一块 —— 别的来源
   // 打开会看到一个空表单配一颗「保存设置」,点下去提交一个空对象。整张表单
   // 跟着 X 那一块一起藏掉,面板剩下的说明文字照旧显示。
   $('source-settings-form').hidden = sourceModules.get(sourceKind)?.adapter !== 'social';
-  // 桥接只是三条 X 通道之一,显示哪一块由 x_channel.js 按当前通道决定。
+  // X 那一块(取法、可执行文件路径、登录/导入/检查)整个归 x_channel.js 管。
   fillXChannelFields(s);
   loadXChannel(sourceKind);
   // 「按来源类型每 N 分钟自动同步」那一档拆掉了(见 kb.pipeline._scheduler_tick),
@@ -144,16 +143,21 @@ function renderSourceScheduleNote() {
     : '这一类来源不在日报的同步范围里，目前不会自动同步。') + manual;
 }
 
-async function saveSourceSettings(e) {
+function saveSourceSettings(e) {
   e.preventDefault();
+  return saveSourceSettingsNow();
+}
+// 把这张表单存下去。**返回「存成了没有」**:X 那三颗按钮点下去会先借这一步把
+// 草稿存掉(见 `x_channel.js` 的 `xChanEnsureSaved`),存不成就不该接着做 ——
+// 后端读的是存下来的那一份,没存成就是做到另一档头上。
+// 失败的原因照旧落在表单那行红字上(`#source-settings-error`),不额外弹 toast:
+// 那是字段级的错,就地红字是这个项目的口径(见 CLAUDE.md「前端反馈」)。
+async function saveSourceSettingsNow() {
   const kind = sourceKind;
   $('source-settings-save').disabled = true;
   $('source-settings-error').textContent = '';
   const body = {};
-  if (sourceModules.get(kind).adapter === 'social') {
-    body.bridges = $('source-bridges').value.split('\n').map(v=>v.trim()).filter(Boolean);
-    Object.assign(body, xChannelPayload(kind));
-  }
+  if (sourceModules.get(kind).adapter === 'social') Object.assign(body, xChannelPayload(kind));
   try {
     const settings = await pipeJson(`/api/intake/${kind}/settings`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if (kind === sourceKind) {
@@ -161,6 +165,7 @@ async function saveSourceSettings(e) {
       await loadSourceModule(false);
     }
     toast('同步设置已保存', {type:'ok'});
-  } catch(e) { $('source-settings-error').textContent = e.message; }
+    return true;
+  } catch(e) { $('source-settings-error').textContent = e.message; return false; }
   finally { $('source-settings-save').disabled = false; }
 }

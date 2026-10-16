@@ -189,7 +189,7 @@ class StaticNoteTests(unittest.TestCase):
         for count in ('一种', '两种', '三种', '四种', '五种', '两条', '三条', '四条'):
             with self.subTest(count=count):
                 self.assertNotIn(count, note)
-        self.assertIn('取法', note)                 # 指到那个下拉
+        self.assertIn('取法', note)                 # 指到面板上那一块
 
 
 class BadEndpointTests(ChannelBase):

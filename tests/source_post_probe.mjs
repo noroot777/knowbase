@@ -1,7 +1,7 @@
 // 「大V观点的条目不显示标题」在**真页面**上的回归。
 //
 // 采集器把推文正文的前 500 字符原样当成 title(`x_browser._entry` /
-// `x_feedgrab._entry`;桥接那条走 `fetching.parse_feed`,源没给标题时回退成正文
+// `x_feedgrab._entry`;走 HTTP 的那条(专用订阅链接)走 `fetching.parse_feed`,源没给标题时回退成正文
 // 首行),所以来源面板上那行大标题和紧跟着的正文是同一句话显示两遍 —— 而标题那个
 // <button> 继承了 base.css 的 `white-space: nowrap`,长推文一行到底、直接撑出卡片
 // 右边界(用户截图里红框圈的就是这一段)。
@@ -61,7 +61,7 @@ const overview = kind => ({
               url: "https://example.org/" + kind, group_name: "测试", enabled: 1,
               item_count: ITEMS[kind].total, last_success: "2026-10-09 14:00",
               last_error: "", last_note: "", configuration_error: "", retry_at: 0 }],
-  settings: { enabled: false, interval_minutes: 1440, bridges: [], next_run: 0 },
+  settings: { enabled: false, interval_minutes: 1440, next_run: 0 },
   last_run: null, total: ITEMS[kind].total, enabled: 1, ready: 1, unconfigured: 0, errors: 0,
 });
 
