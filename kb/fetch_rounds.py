@@ -84,8 +84,9 @@ from zoneinfo import ZoneInfo
 
 from kb import fetch_pending, fetch_rotate
 from kb.config import DATA_DIR
-from kb.fetch_fold import _LEGACY_SEG, _fold
-from kb.fetch_gate import NO_EVIDENCE, NoEvidence, landed   # noqa: F401 - 再导出
+from kb.fetch_fold import _LEGACY_SEG, _fold, answer
+from kb.fetch_gate import (NO_EVIDENCE, NoEvidence,  # noqa: F401 - 再导出
+                           landed, rollback)
 from kb.fetch_identity import _identity
 from kb.fetch_scope import _scope_prefixes, in_scope      # noqa: F401 - 再导出
 
@@ -248,13 +249,24 @@ def _read() -> tuple[list[dict], bool]:
     的 `open_round`,于是一份坏掉的展示用账本能把整次抓取拦在采集器之前
     (第 3 轮审查实测)。
     """
+    raw = _raw()
+    return _fold(raw)[:2] if raw is not None else ([], False)
+
+
+def _raw() -> list[str] | None:
+    """账本那几行的原文。**`None` = 这份文件读不出来**(权限、被写成二进制垃圾),
+    空列表 = 确定还没有记录(文件不存在)。
+
+    两者差在**许不许整份重写**:读不出来时文件里还有什么我们不知道,拿一份空快照
+    写回去就是把别人的整轮抹掉;文件不存在时那份空快照是确定的。`_read()` 把两者
+    压成同一个「不可确认」,所以轮换那一步要自己问这一句(`open_round`)。
+    """
     try:
-        text = _file().read_text(encoding='utf-8')
+        return _file().read_text(encoding='utf-8').splitlines()
     except FileNotFoundError:
-        return [], True
+        return []
     except (OSError, UnicodeDecodeError):
-        return [], False
-    return _fold(text.splitlines())
+        return None
 
 
 def _append(objs: list[dict]) -> bool:
@@ -300,6 +312,11 @@ def _flush(objs: list[dict], locked: bool) -> bool:
     条数剔在两条线程各自确认时会剔到对方新压进来的那几行。
 
     重复追加不要紧:回执按内容身份取并集、子轮按集合算,折叠本来就幂等(`_fold`)。
+
+    **而攥着的行里,父轮已经退役的那几个一起退役**(`fetch_rotate.disown`):过了保留
+    窗口的那一轮被别的进程清走之后,把回执补进去就是一条谁也认不了的孤行,整份账本
+    从此「读不出来」且清不掉(审查实测的 F1)。只在**持锁、而且账本读全了**时才问这
+    一句 —— 答不出来时宁可攥着。
     """
     global _unsaved
     with _buffer_lock:
@@ -307,6 +324,14 @@ def _flush(objs: list[dict], locked: bool) -> bool:
         if not held and not objs:
             return True
         mine = {id(o) for o in held}
+    gone: list[dict] = []
+    if locked and held:
+        rounds, ok = _read()
+        # **账本一轮都没有时一行都不退役**:那不像「别人把过期那轮清走了」(清完总还
+        # 剩今天那几轮),更像账本文件被删掉或者头一次运行 —— 那时连今天的欠账都会被
+        # 当成孤儿丢掉。这一档宁可写成孤行:下一次开轮的孤行清理会把它收走(`_rotate`)。
+        if ok and rounds:
+            held, gone = fetch_rotate.disown(held, objs, rounds)
     if locked and _append(held + objs):     # 追加在锁外:I/O 不许罩进缓冲锁
         with _buffer_lock:
             _unsaved = [o for o in _unsaved if id(o) not in mine]
@@ -314,8 +339,9 @@ def _flush(objs: list[dict], locked: bool) -> bool:
         return True
     with _buffer_lock:
         # 这一批没落下去:重新拿一次当前的缓冲(这期间别的线程可能压进了新行,
-        # 也可能确认掉了几行),把 objs 并进去再按上限收。
-        batch = _unsaved + objs
+        # 也可能确认掉了几行),把 objs 并进去再按上限收。退役掉的那几行不再回来。
+        retired = {id(o) for o in gone}
+        batch = [o for o in _unsaved if id(o) not in retired] + objs
         # 开轮行一律留住(一天里就那么几条):它一丢,后面那些回执就成了对不上
         # 轮次的孤行,整份账本当场变成「读不出来」—— 那比「这一轮条数不全」难用
         # 得多。
@@ -356,48 +382,36 @@ def _owed() -> tuple[set[str], bool]:
     return keys | held, ok
 
 
-def _rotate(rounds: list[dict], ok: bool, at: datetime, locked: bool) -> None:
+def _rotate(rounds: list[dict], stray: set[str] | None, at: datetime,
+            locked: bool) -> None:
     """把过了保留窗口、而且没人再欠它证据的轮次清出账本(整份重写,见
     `kb.fetch_rotate`:那边是「该重写成什么」,这里是「现在许不许重写」)。
 
-    **读不全、没锁住、欠账说不清,三种都一个字不动**(各自的理由和实测形态跟着
-    `fetch_rotate.rotate` 那三个前提)。轮换失败也不出声 —— 最坏只是文件长一点。
+    **有行读不出来(`stray is None`,连文件读不出来也归这里)、没锁住、欠账说不清,
+    三种都一个字不动**(各自的理由和实测形态跟着 `fetch_rotate.rotate` 那三个前提)。
+    **孤行不算「读不出来」**:它认得出来是谁的、而它那一轮已经没了,留着才是永久的
+    「读不出来」,所以带着它一起交给重写(口径在 `kb.fetch_fold`)。轮换失败也不出声
+    —— 最坏只是文件长一点。
     """
-    if not ok or not locked:
+    if stray is None or not locked:
         return
     floor = _floor(at)
     owed, seen = _owed()
     if seen:
-        fetch_rotate.rotate(_file(), rounds, floor, owed)
+        fetch_rotate.rotate(_file(), rounds, floor, owed, stray)
 
 
 def _drop(key: str, objs: list[dict]) -> None:
     """把一次**被拒绝**的准入尝试压进缓冲的那几行成组撤掉(连那笔凭证一起更新)。
 
     拒绝意味着两处证据一处都没留下,所以这次尝试盘上没有任何痕迹 —— 内存里也不许
-    留:留着的话常驻服务下一跳读页面就把它补写成当天的一次抓取(开轮行),或者补写
-    成一个永远不交结束行的子轮(把完整性永久压到下界),而采集器一次都没跑
-    (审查实测的 F3;「什么算拒绝」在 `kb.fetch_gate`)。
-
-    **只撤这一次自己压进去的那几个对象**(按 `id` 认,同 `_flush`):同一个业务身份
-    底下别的子轮可能正欠着行,它们的证据一个字都不许动。
-
-    挤出去换成的那条 `partial` 标记要跟着撤,但**两个前提都得成立**:这次尝试自己带着
-    开轮行(= 盘上还没有这一轮),而且这个 key 在缓冲里再没有别的行。那时它是一条找不到
-    轮次的孤行(同 `kb.fetch_rotate` 那一类),留着会把整份账本判成「读不出来」。**反过来
-    一边更要紧:条件不成立时一个标记都不许摘。** 盘上已经有这一轮、或者这个 key 还攥着
-    别的行(开轮行一律留在缓冲里,所以「还有别的行」就说明它有主),那条标记记的是别人
-    真丢过行 —— 摘掉它就是把一个真缺口说成确定值,而那是静默少记。
+    留:留着的话故障一修好,光读一次页面(`today()` 就是缓冲的消费者)就把它补写成了
+    当天第一轮抓取,而采集器一个请求都没发(审查实测的 F3)。**撤哪几行的判据在
+    `kb.fetch_gate.rollback`** —— 它和「什么算参与证据」是同一条准入协议的两半。
     """
     global _unsaved
-    mine = {id(o) for o in objs}
     with _buffer_lock:
-        kept = [o for o in _unsaved if id(o) not in mine]
-        rest = [o for o in kept if str(o.get('key') or '') == key]
-        if (any('day' in o for o in objs) and rest
-                and all(set(o) == {'key', 'partial'} for o in rest)):
-            kept = [o for o in kept if o not in rest]
-        _unsaved = kept
+        _unsaved = rollback(_unsaved, objs, key)
         _certify()
 
 
@@ -457,22 +471,30 @@ def open_round(key: str, now: datetime | None = None,
     at = _now(now)
     key = str(key)
     # 不物化的运行不登记子轮:它没有要交的东西,登记了反而永远等不到结束行。
-    segs = [{'key': key, 'seg': str(seg) or _LEGACY_SEG}] if materializes else []
+    mark = str(seg) or _LEGACY_SEG
+    segs = [{'key': key, 'seg': mark}] if materializes else []
     blocked = False
     with _locked(True) as locked:
-        rounds, ok = _read()
+        raw = _raw()
+        rounds, ok, stray = _fold(raw) if raw is not None else ([], False, None)
         if ok and any(r['key'] == key for r in rounds):
             lines = segs                    # 顺手把攥着的那几行再试一次
         else:
-            _rotate(rounds, ok, at, locked)
+            _rotate(rounds, stray, at, locked)
+            # 子轮登记跟开轮行**同一行**:分成两行追加时「只落了开轮行」是一个真实
+            # 的写入前缀(磁盘满、配额用尽),而那一行既够读侧算一次抓取、又不够准入
+            # 认作证据 —— 于是没起跑的那次尝试占了今天第一次,当天真正第一次同步完成
+            # 后药丸又写成「第 2 次」(审查实测的 F2)。合成一行之后前缀只有两种:整行
+            # 在(证据在盘上,该准入也该计次)、整行不在(盘上没有痕迹,两边都不算)。
             lines = [{'day': _day(at), 'key': key,
                       'at': at.strftime('%Y-%m-%d %H:%M'),
                       't': at.strftime('%Y-%m-%d %H:%M:%S.%f'),
-                      'ex': 1 if materializes else 0}] + segs
+                      'ex': 1 if materializes else 0,
+                      **({'seg': mark} if materializes else {})}]
         if not _flush(lines, locked) and segs:
             # 追加没成功:**重读一次账本**再问那两处证据(`write` 成了而 `fsync`
             # 报错时那几行其实已经进了文件),一处都没留下才算拒绝。
-            blocked = not landed(*_read(), _pending_folder(), key, segs[0]['seg'])
+            blocked = not landed(*_read(), _pending_folder(), key, mark)
         if blocked:
             _drop(key, lines)
         else:
@@ -654,10 +676,10 @@ def today(now: datetime | None = None) -> dict | None:
     (`kb.fetch_pending` 那笔凭证),以及存量账本里一个子轮都没登记过的老轮次。
     那时 `added` 是**下界**,前端据此说「至少 +N 条」而不是「+N 条」。
 
-    **扣着的凭证指向一轮账本里压根没有的身份时,整句答「不可确认」** —— 今天确实抓过
-    一次而盘上最新的轮次是更早那一次,拿它的数当答案就是把别人的成果说成这一次的。
-    (「那笔开工标记」不在这张单子里,也不该回来:少报那一档由 `open_round` 那道闸在
-    **抓之前**挡掉,形态见模块开头。)
+    **这七个字段怎么从那几轮算出来,整份在 `kb.fetch_fold.answer`**(扣着的凭证指向
+    账本里压根没有的轮次、「最后一轮」取谁、「交完了」的判据各有一次实测)。这边只管
+    读:锁、凭证、攥着的行。(「那笔开工标记」不在这张单子里,也不该回来:少报那一档
+    由 `open_round` 那道闸在**抓之前**挡掉,形态见模块开头。)
 
     **攥着没落盘的行时顺手重试一次**(走独占锁,别的读还是只拿共享锁):不重试的话
     磁盘故障恢复之后面板会一直说「读不出来」,要等下一次抓取才补写。
@@ -671,28 +693,4 @@ def today(now: datetime | None = None) -> dict | None:
         held, held_ok = fetch_pending.held(_pending_folder(), _floor(at))
     if not ok or not held_ok or not locked or _pending():
         return None
-    keys = {r['key'] for r in rounds}
-    if held - keys:
-        return None            # 有一轮扣着行,而账本里连它的轮次都没有
-    day = _day(at)
-    mine = [r for r in rounds if r['day'] == day]
-    if not mine:
-        return {'n': 0, 'added': 0, 'fresh': 0, 'carried': 0, 'unsure': 0,
-                'partial': False, 'at': ''}
-    # 投影已按业务起跑顺序排过(`fetch_fold._order_key`),末位就是「最后一轮」——
-    # 顺序只有一处口径:这里不许按行序理解,也不许就地再排一次。
-    last = mine[-1]
-    # 「交完了」= 登记过的子轮一个不剩都交了结束行,而且没人扣着它的行。两个集合都
-    # 空时分两种:开轮就说了不物化(`ex=0`)的那一轮确定是 0 条;存量账本那几轮没有
-    # 子轮行,证明不了完整,只能算不可确认。
-    done = (last['segs'] == last['ends'] and bool(last['segs'] or not last['ex'])
-            and last['key'] not in held)
-    # 这一轮每条成果各是**哪一次**抓到的:等于本轮 = 这次新抓到,非空而不等 =
-    # 之前抓到、这次才补导进来,空串 = 说不清(不许并进 carried,见上)。
-    owners = list(last['items'].values())
-    fresh = sum(1 for f in owners if f == last['key'])
-    unsure = sum(1 for f in owners if not f)
-    return {'n': len(mine), 'added': len(owners), 'fresh': fresh,
-            'carried': len(owners) - fresh - unsure, 'unsure': unsure,
-            'partial': bool(last['partial'] or not done),
-            'at': last['at'][-5:]}
+    return answer(rounds, held, _day(at))

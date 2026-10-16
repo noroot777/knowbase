@@ -33,10 +33,14 @@ tests/test_fetch_pending.py)。第 4 轮审查接着钉了两刀:
 
 硬约束、事故形态与反向验证红数在 docs/decisions/daily.md。
 """
+import builtins
+import errno
 import json
+import os
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from kb import fetch_pending, fetch_rounds, pipeline_stages
@@ -210,6 +214,97 @@ class TheGateOnlyTrustsEvidenceBoundToTheDebtTests(_Pending):
         self.assertEqual(1, producer.fetch.call_count)
         self.assertEqual({'n': 1, 'partial': False},
                          {k: fetch_rounds.today()[k] for k in ('n', 'partial')})
+
+    def _cut_after_first_row(self):
+        """账本那次追加:**第一行完整落盘(还 fsync 成功)之后**才报磁盘满。
+
+        这是真实的写入前缀,不是臆造的:`write` 一次交多行时,配额/空间用尽可以让
+        前面几行已经进了文件。顺带把凭证那一笔也堵掉 —— 不堵的话准入会从凭证那边
+        拿到证据,这一条就问不到「账本那一行算不算证据」了。
+        """
+        real_open = builtins.open
+        landed = []
+
+        class Cut:
+            def __init__(self, fh):
+                self.fh = fh
+
+            def __enter__(self):
+                self.fh.__enter__()
+                return self
+
+            def __exit__(self, *a):
+                return self.fh.__exit__(*a)
+
+            def write(self, body):
+                head = body.splitlines(keepends=True)[0]
+                self.fh.write(head)
+                self.fh.flush()
+                os.fsync(self.fh.fileno())
+                landed.append(head)
+                raise OSError(errno.ENOSPC, '审查注入:第一行落盘之后磁盘满')
+
+            def __getattr__(self, name):
+                return getattr(self.fh, name)
+
+        def cut_open(path, mode='r', *a, **kw):
+            fh = real_open(path, mode, *a, **kw)
+            at_book = Path(path) == fetch_rounds._file() and mode == 'a'
+            return Cut(fh) if at_book else fh
+
+        return patch.object(builtins, 'open', cut_open), landed
+
+    def test_a_registration_that_landed_on_disk_both_counts_and_fetches(self):
+        """**审查实测的那一条(F2)**:盘上只落了第一行那个写入前缀,准入和计次必须
+        给同一个答案。
+
+        实测的旧末态:那一行原来只是开轮行 —— 够读侧算一次抓取、不够准入认作证据,
+        于是面板写「第 1 次抓取 · 条数读不出来」而采集器一个请求都没发,当天真正第
+        一次同步完成后它又变成「第 2 次」。子轮登记并进开轮行之后前缀只有两种,这一
+        条钉**整行在**那一种:证据确实留在盘上了,就该准入、也该计次(回执没落下去,
+        所以条数是下界)。另一种(整行都没落)由
+        `test_a_refused_attempt_does_not_become_a_round_when_the_page_is_read` 钉。"""
+        producer = Mock(name='rss')
+        cut, landed = self._cut_after_first_row()
+        with cut, patch.object(fetch_pending, '_write_atomic',
+                               Mock(side_effect=OSError(errno.ENOSPC, '满'))):
+            self._crawl('batch-cut', 'run-1', producer)   # 不许拦:证据在盘上
+        self.assertEqual(1, len(landed))                  # 摆盘自检:只落了一行
+        self.assertEqual(1, producer.fetch.call_count)
+        # 这一组走真实管道,起跑时刻是真实时钟(`_run_crawl` 不接受时间),所以这里
+        # 比的是「第几次 / 几条 / 全不全」外加「有起跑时刻」,不是整份。
+        for got in (fetch_rounds.today(), self.restart_today()):
+            self.assertEqual({'n': 1, 'added': 0, 'partial': True},
+                             {k: got[k] for k in ('n', 'added', 'partial')})
+            self.assertTrue(got['at'])
+
+    def test_a_refusal_after_half_a_row_is_still_not_a_round(self):
+        """反过来钉一边:落到盘上的是**半截行**时,拒绝照旧不许占一次。
+
+        半截行的内容谁也不知道,所以账本整份只能答「不可确认」(面板写「抓取次数读
+        不出来」)—— 但那跟「今天第 1 次抓取」是两句完全不同的话,后者会让用户以为
+        已经抓过一轮。采集器同样一个请求都不许发。"""
+        producer = Mock(name='rss')
+        real_open = builtins.open
+
+        def half_open(path, mode='r', *a, **kw):
+            fh = real_open(path, mode, *a, **kw)
+            if Path(path) == fetch_rounds._file() and mode == 'a':
+                fh.write('{"day": "2026-09-29", "key": "batch-h')
+                fh.flush()
+                os.fsync(fh.fileno())
+                fh.close()
+                raise OSError(errno.ENOSPC, '审查注入:半截行之后磁盘满')
+            return fh
+
+        with patch.object(builtins, 'open', half_open), \
+                patch.object(fetch_pending, '_write_atomic',
+                             Mock(side_effect=OSError(errno.ENOSPC, '满'))), \
+                self.assertRaises(fetch_rounds.NoEvidence):
+            self._crawl('batch-half', 'run-1', producer)
+        self.assertEqual(0, producer.fetch.call_count)
+        self.assertIsNone(fetch_rounds.today())           # 不可确认,不是「第 1 次」
+        self.assertIsNone(self.restart_today())
 
     def test_a_refused_sub_round_does_not_lower_the_round_it_belongs_to(self):
         """同一个业务身份底下第二个子轮被拒绝:它不许留下一个**永远不交结束行**的

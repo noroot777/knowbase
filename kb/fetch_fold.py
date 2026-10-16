@@ -11,6 +11,12 @@
 改这里之前先读 `docs/decisions/daily.md`:`got` / `segs` / `ends` 三者的区别各有
 一次实测事故,混起来的后果是面板笃定地报一个少记的数。
 
+**「读不出来的行」和「找不到父轮的行」不是一件事**,所以 `_fold` 把后者单独交出来
+(`stray`):前者的内容我们压根不知道,盘上那几行只能原样留着;后者认得出来是谁的 ——
+它那一轮的开轮行已经不在了(过了保留窗口被轮换清掉),而没有开轮行的轮次本来就不
+显示,所以持锁重写时可以把它清掉,账本据此从「永久读不出来」里回来。两种混成一个
+布尔的后果:孤行一出现就禁掉轮换,那条孤行从此清不掉(审查实测的 F1)。
+
 **而「这一轮算哪天的第几次」也只由这一层定。** 一个业务身份的几条开轮行先归成
 **一份**起跑事实(`_start` / `_start_key`:`day`/`at`/`t` 整份取最早那一条),再按
 `(day, 起跑时刻, key)` 排好序交出去;所有消费方(`today()` 的当天筛选和「最后一
@@ -80,7 +86,18 @@ def _order_key(one: dict) -> tuple[str, str, str]:
     return (str(one.get('day') or ''), _order(one), str(one.get('key') or ''))
 
 
-def _fold(lines) -> tuple[list[dict], bool]:
+def _enlist(got: dict, obj: dict) -> None:
+    """开轮行自带的那个子轮登记(`day` 和 `seg` 同一行时)也要记进 `segs`。
+
+    不记的后果:准入看得见这一行的 `seg`、而「这一轮交完了没有」看不见它,于是
+    每一轮都少一个登记过的子轮 —— `segs == ends` 反而提前成立,一轮还没交完的
+    抓取被说成确定的 N 条。
+    """
+    if 'seg' in obj:
+        got['segs'].add(str(obj['seg'] or _LEGACY_SEG))
+
+
+def _fold(lines) -> tuple[list[dict], bool, set[str] | None]:
     """把账本每一行折成「开过哪几轮、各自新落了哪些文章、走完了没有」,外加一句
     「读全了没有」。
 
@@ -89,6 +106,10 @@ def _fold(lines) -> tuple[list[dict], bool]:
     身份取并集、子轮按集合算**,所以同一行追加两遍、同一轮被两条通道各报一次,
     折出来的结论都一样(见模块开头那条)——「交完了几次」用计数的话,一次 fsync
     重放就能把它推成完整。
+
+    **开轮行可以自带这一轮的第一个子轮登记**(`day` 和 `seg` 在同一行):那是写侧
+    为了让「准入资格」不被写入前缀劈开才合的一行(理由在 `fetch_rounds.open_round`),
+    这一层只管认 —— 判据因此是「带 `day` 就是开轮行」,不是「不带那五个键」。
 
     `paths` 是回执的**旧形状**(只有路径、没有身份)。照旧折得出条数,但每一条的
     抓取身份都是空串 —— 升级那一下盘上正躺着这种行,不认它的话它会被当成一条没有
@@ -104,9 +125,13 @@ def _fold(lines) -> tuple[list[dict], bool]:
     结束行**同时**把自己记进 `segs`:只跑导出的那种运行(重试导出阶段)压根没开过
     轮、不会登记,它交完了也该算完,否则那一轮永远「不可确认」。
 
-    `ok=False` 表示有行读不出来(半截行、被改坏、成果对不上轮次)。那时这份账本
+    `ok=False` 表示有行没折进来(半截行、被改坏、成果对不上轮次)。那时这份账本
     只能说「不可确认」—— 拿认得出来的那部分冒充完整事实,就又回到了把写失败说成
     「今天还没有抓取」。
+
+    第三样 `stray` 分开说「**哪几个 key 的行找不到父轮**」:`None` = 有行压根读不
+    出来(那时文件里还有什么我们不知道,谁都不许整份重写)、空集 = 每一行都归了位、
+    非空 = 只有孤行这一种不完整,持锁者可以把它们清掉(见模块开头)。
 
     **交出去之前按业务起跑顺序排一次**(`_order_key`):调用方不许再按行序理解先后,
     也不许按行序理解日归属。同一轮重复开的那几条开轮行,**起跑事实整份取最早那一条**
@@ -116,6 +141,7 @@ def _fold(lines) -> tuple[list[dict], bool]:
     rounds: list[dict] = []
     index: dict[str, dict] = {}
     ok = True
+    stray: set[str] | None = set()
     for raw in lines:
         raw = raw.strip()
         if not raw:
@@ -126,13 +152,17 @@ def _fold(lines) -> tuple[list[dict], bool]:
         # 抓取拦在采集器之前(第 4 轮审查实测,形态在 `_loads_json`)。
         obj = _loads_json(raw)
         if not isinstance(obj, dict) or not obj.get('key'):
-            ok = False
+            ok, stray = False, None     # 这一行的内容我们不知道:什么都别动
             continue
         key = str(obj['key'])
-        if {'items', 'paths', 'partial', 'end', 'seg'} & obj.keys():
+        if 'day' not in obj and {'items', 'paths', 'partial', 'end', 'seg'} & obj.keys():
             got = index.get(key)
             if got is None:
-                ok = False              # 有成果、却找不到它那一轮:记不全
+                # 有成果、却找不到它那一轮:记不全,而且这几行是**可以清掉**的
+                # (它那一轮的开轮行已经不在,没有开轮行的轮次本来就不显示)。
+                ok = False
+                if stray is not None:
+                    stray.add(key)
                 continue
             if obj.get('partial'):
                 got['partial'] = True
@@ -145,7 +175,7 @@ def _fold(lines) -> tuple[list[dict], bool]:
             if 'items' in obj or 'paths' in obj:
                 pairs = _pairs(obj)
                 if pairs is None:
-                    ok = False
+                    ok, stray = False, None     # 这一行的形状不认:同上
                     continue
                 # 一条成果出现两次而只有一次带得出抓取身份时,留**非空**那个:
                 # 空串是「说不清」,被它顶掉已知的身份等于把知道的事实又丢回去。
@@ -160,6 +190,7 @@ def _fold(lines) -> tuple[list[dict], bool]:
             got = index[key]
             if _start_key(obj) < _start_key(got):
                 got.update(_start(obj))
+            _enlist(got, obj)
             continue
         #     `day`:这一轮算哪一天的(按**开工那天**归属,`today()` 按它筛)。
         #     `at`:分钟级起跑时刻,给人看的。
@@ -175,7 +206,46 @@ def _fold(lines) -> tuple[list[dict], bool]:
                # 子轮都没有,那几轮只能说「至少 N 条」—— 新代码确实证明不了
                # 它们完整,这比继续笃定地报一个数安全。
                'segs': set(), 'ends': set(), 'partial': False}
+        _enlist(got, obj)
         rounds.append(got)
         index[key] = got
     rounds.sort(key=_order_key)
-    return rounds, ok
+    return rounds, ok, stray
+
+
+def answer(rounds: list[dict], held: set[str], day: str) -> dict | None:
+    """这一天的事实该怎么答 —— `fetch_rounds.today()` 那颗药丸的全部算术。
+
+    输入是折好的轮次、**此刻还有谁扣着行没落盘**(`held`,业务身份)和今天是哪一天;
+    输出是那七个字段,或者 `None` = 不可确认。I/O、锁、凭证怎么读都在那一边,这里
+    一行都不碰 —— 所以同一份快照问两遍必然同一个答案。
+
+    **扣着的凭证指向一轮账本里压根没有的身份时,整句答「不可确认」**:今天确实抓过
+    一次而盘上最新的轮次是更早那一次,拿它的数当答案就是把别人的成果说成这一次的。
+
+    **「最后一轮」取末位,不许就地再排一次**:投影已经按业务起跑顺序排过
+    (`_order_key`)—— 物理行序不是业务顺序,晚落盘的那一轮会冒充最后一轮。
+
+    **「交完了」= 登记过的子轮一个不剩都交了结束行,而且没人扣着它的行。** 两个集合
+    都空时分两种:开轮就说了不物化(`ex=0`)的那一轮确定是 0 条;存量账本那几轮压根
+    没有子轮行,证明不了完整,只能算不可确认 —— 反过来把它说成确定的 0 条,就是把
+    「还没交完」写成了「确定没抓到」。
+    """
+    if held - {r['key'] for r in rounds}:
+        return None
+    mine = [r for r in rounds if r['day'] == day]
+    if not mine:
+        return {'n': 0, 'added': 0, 'fresh': 0, 'carried': 0, 'unsure': 0,
+                'partial': False, 'at': ''}
+    last = mine[-1]
+    done = (last['segs'] == last['ends'] and bool(last['segs'] or not last['ex'])
+            and last['key'] not in held)
+    # 这一轮每条成果各是**哪一次**抓到的:等于本轮 = 这次新抓到,非空而不等 =
+    # 之前抓到、这次才补导进来,空串 = 说不清(不许并进 carried,口径在 `today`)。
+    owners = list(last['items'].values())
+    fresh = sum(1 for f in owners if f == last['key'])
+    unsure = sum(1 for f in owners if not f)
+    return {'n': len(mine), 'added': len(owners), 'fresh': fresh,
+            'carried': len(owners) - fresh - unsure, 'unsure': unsure,
+            'partial': bool(last['partial'] or not done),
+            'at': last['at'][-5:]}

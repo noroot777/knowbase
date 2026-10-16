@@ -51,6 +51,26 @@ NO_EVIDENCE = (
     '数据目录和里面那个 fetch_rounds.* 的权限')
 
 
+def rollback(unsaved: list[dict], objs: list[dict], key: str) -> list[dict]:
+    """一次**被拒绝**的准入尝试撤掉之后,缓冲该剩下哪几行。
+
+    **按对象身份(`id`)剔,不按值剔**:同批次别的子轮可能正欠着长得一模一样的行
+    (两条 `partial` 标记就完全相同),按值剔会把别人的那一条也带走 —— 而那几行
+    是别人的参与证据,这次拒绝一个字都不许动它们。
+
+    挤出去换成的那条 `partial` 标记跟着撤,**但只在这个 key 再没有别的行时**:
+    留着它就是另一条孤行(它那一轮的开轮行刚被我们撤掉),而同批次还有别的子轮
+    欠着行时,那条标记记的是**它们**的不完整,不是这次尝试的。
+    """
+    mine = {id(o) for o in objs}
+    kept = [o for o in unsaved if id(o) not in mine]
+    rest = [o for o in kept if str(o.get('key') or '') == key]
+    if (any('day' in o for o in objs) and rest
+            and all(set(o) == {'key', 'partial'} for o in rest)):
+        kept = [o for o in kept if o not in rest]
+    return kept
+
+
 def landed(rounds: list[dict], ok: bool, folder: Path,
            key: str, seg: str) -> bool:
     """这一笔欠账盘上还留得住吗 —— **追加没成功时才问这一句。**
