@@ -21,17 +21,20 @@ def _scope_prefixes() -> list[tuple[tuple[str, ...], frozenset]] | None:
     一遍是上千次 syscall,而这份清单一轮之内不会变。
 
     **没读全就交 `None`,不许交一份少了几棵树的清单。** `resolve()` 会因为权限、
-    符号链接层数、目录临时不可用而抛 `OSError` —— 那时「这条路径算不算成果」是
-    **答不出来**,不是「确定不算」。上一版把这两种压成一种(`return []` / 跳过
-    那棵树),于是一次临时故障能把一份真回执筛成空集,再让结束行把这一轮定成
-    确定的 0 条(第 2 轮审查静态项)。`ValueError` 是另一件事:那棵树**确定**
-    不在 vault 底下,跳过它才是对的。
+    目录临时不可用而抛 `OSError`,**循环符号链接那一档抛的是 `RuntimeError`**
+    (审查实测的 N5:只接 `OSError` 的话,任意一棵启用来源的根目录出现循环链接,
+    异常就会从 `note_new` 一路冒到导出阶段进门那张空回执登记上,把整次导出 ——
+    连同其他正常来源 —— 整个带崩)。两种都是「这条路径算不算成果」**答不出来**,
+    不是「确定不算」:上一版把它压成空范围(`return []` / 跳过那棵树),于是一次
+    临时故障能把一份真回执筛成空集,再让结束行把这一轮定成确定的 0 条(第 2 轮
+    审查静态项)。`ValueError` 是另一件事:那棵树**确定**不在 vault 底下,跳过它
+    才是对的。
     """
     from kb.config import SOURCES, VAULT_ROOT
 
     try:
         root = Path(VAULT_ROOT).resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return None
     out = []
     for src in SOURCES:
@@ -40,7 +43,7 @@ def _scope_prefixes() -> list[tuple[tuple[str, ...], frozenset]] | None:
         try:
             out.append((Path(src.root).resolve().relative_to(root).parts,
                         src.skip_dirs))
-        except OSError:
+        except (OSError, RuntimeError):
             return None                 # 这棵树没读全 → 整份范围都不可信
         except ValueError:
             continue                    # 确定不在 vault 底下

@@ -433,6 +433,31 @@ class ReceiptScopeTests(_Base):
         self.assertEqual(BOOK(1, 0, '09:00', True),
                          fetch_rounds.today(day))
 
+    def test_a_symlink_loop_in_any_source_is_only_an_unreadable_scope(self):
+        """**审查实测的 N5**:循环符号链接让 `resolve()` 抛的是 `RuntimeError`,
+        不是 `OSError`。只接后者的话,这个异常会从 `note_new` 一路冒到导出阶段进门
+        那张空回执登记上(`pipeline_stages._run_export` 的第一句),把整次导出连同
+        其他正常来源一起带崩 —— 而出事的那棵树压根不是这一轮要导的那一个。
+
+        用真的循环链接(指向自己),不打桩:这一条钉的就是「这一档到底抛什么」。
+        后果和上一条同一句:**答不出来**归「不可确认」,不许筛成确定的 0 条。"""
+        loop = self.vault / 'source' / 'dr-youtube-dig'
+        loop.parent.mkdir(parents=True, exist_ok=True)
+        loop.symlink_to(loop)
+        with self.assertRaises(RuntimeError):            # 前提:这一档真抛它
+            loop.resolve()
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-a', day, seg='run-1')
+        fetch_rounds.note_new('batch-a', ())             # 导出进门那张空回执
+        fetch_rounds.note_new('batch-a', self.caught('batch-a', 'source/rss/a.md'))
+        fetch_rounds.note_end('batch-a', 'run-1')
+        self.assertEqual(BOOK(1, 0, '09:00', True),
+                         fetch_rounds.today(day))
+        # **两处一起收口**,不是按某一个异常实例修一个调用点:vault 根自己是那个
+        # 循环时(整棵 vault 挂在一条坏链接上)判据也只有「范围说不清」。
+        with patch.object(config, 'VAULT_ROOT', loop):
+            self.assertIsNone(fetch_rounds._scope_prefixes())
+
     def test_a_tree_that_is_not_in_the_vault_only_skips_itself(self):
         """**反过来钉一边**:某棵来源树确定不在 vault 底下(配置指到别处)——
         那是「确定不算」,跳过它就行。把这一档也归成「不可确认」的话,存量配置里

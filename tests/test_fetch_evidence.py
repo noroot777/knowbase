@@ -181,6 +181,84 @@ class TheGateOnlyTrustsEvidenceBoundToTheDebtTests(_Pending):
         self.assertEqual(BOOK(1, 1, '09:00'),
                          fetch_rounds.today(day))        # 那个确定数一个字没变
 
+    def test_a_refused_attempt_does_not_become_a_round_when_the_page_is_read(self):
+        """**审查实测的那一条(F3)**:拒绝之后**服务照旧活着** —— 修好故障、
+        还没重新同步,光读一次页面,那次压根没起跑的尝试不许变成当天的一次抓取。
+
+        实测的旧末态:`today()` 自己替攥着的行补写一次(它本来就是缓冲的消费者),
+        于是面板写「第 1 次抓取 · 0 条」还自称「至少」;随后真正第一次同步完成,
+        它又变成「第 2 次」—— 而被拒绝那一次采集器一个请求都没发。
+
+        和 `test_a_sub_round_that_cannot_record_itself_anywhere_does_not_fetch` 的
+        差别只在这里:那一条在恢复之前先 `process_gone()` 把整份缓冲丢掉,**只证明了
+        「进程消失后不多记」**,而常驻的 kb-web 不会消失。"""
+        producer = Mock(name='rss')
+        self.break_lock()
+        self.block_pending()
+        with self.assertRaises(fetch_rounds.NoEvidence):
+            self._crawl('batch-refused', 'run-1', producer)
+        self.assertEqual(0, producer.fetch.call_count)
+        self.pending().unlink()                          # 故障修好了
+        self.fix_lock()
+        self.assertEqual(BOOK(0, 0, ''), fetch_rounds.today())
+        self.assertEqual([], self.lines())               # 盘上一行都没留下
+        self.assertEqual(BOOK(0, 0, ''), self.restart_today())   # 全新进程也一样
+        # 真正的第一次抓取才是「第 1 次」(它的回执照旧是确定的 0 条)
+        self._crawl('batch-real', 'run-2', producer)
+        fetch_rounds.note_new('batch-real', ())
+        fetch_rounds.note_end('batch-real', 'run-2')
+        self.assertEqual(1, producer.fetch.call_count)
+        self.assertEqual({'n': 1, 'partial': False},
+                         {k: fetch_rounds.today()[k] for k in ('n', 'partial')})
+
+    def test_a_refused_sub_round_does_not_lower_the_round_it_belongs_to(self):
+        """同一个业务身份底下第二个子轮被拒绝:它不许留下一个**永远不交结束行**的
+        子轮,把这一轮的完整性永久压到下界 —— 第一个子轮交完的那个确定数一个字不变。
+
+        报告里这一半是按同一条代码路径推断的(两种起跑共用 `_run_crawl`),这里把它
+        钉成红:旧实现攥着的那行子轮登记会在故障修好后被补写进账本,`segs` 从此比
+        `ends` 多一个,面板永久写「至少 +1 条」,而那个子轮压根没抓。
+
+        **反过来钉一边**(别把同批次已准入的子轮一起撤掉)在
+        `test_a_sub_round_whose_registration_landed_takes_the_doubt_away`:那一轮的
+        证据照旧在,结论照旧回到确定值。"""
+        day = T('2026-09-29 09:00')
+        self._first_sub_round(day)                       # 第一个子轮:确定 1 条
+        self.break_lock()
+        self.block_pending()
+        producer = Mock(name='rss')
+        with self.assertRaises(fetch_rounds.NoEvidence):
+            self._crawl('batch-a', 'run-2', producer)
+        self.assertEqual(0, producer.fetch.call_count)
+        self.pending().unlink()
+        self.fix_lock()
+        # 服务没重启:面板这一跳会替攥着的行补写一次,被拒绝的那个子轮不许混进去
+        self.assertEqual(BOOK(1, 1, '09:00'), fetch_rounds.today(day))
+        rounds, ok = fetch_rounds._read()
+        self.assertTrue(ok)                              # 没留下孤行
+        self.assertEqual([({'run-1'}, {'run-1'})],       # 也没留下没交完的子轮
+                         [(r['segs'], r['ends']) for r in rounds])
+
+    def test_a_refusal_does_not_take_away_a_gap_mark_that_has_an_owner(self):
+        """**反过来钉一边(撤销那一侧)**:缓冲里那条「这一轮丢过行」的标记,拒绝时
+        一个都不许摘 —— 它记的是别人真丢过行,摘掉就是把一个真缺口说成确定值,而那
+        是静默少记。
+
+        摆法:盘上这一轮完整(确定 1 条),缓冲里再摆一条这一轮的缺口标记(挤出去的
+        那几行就长这样),然后让同一个业务身份的下一个子轮被拒绝。末态要求面板说
+        **「至少 1 条」**而不是确定的 1 条。撤销那一刀的正面(拒绝自己带来的开轮行和
+        子轮行要撤干净)在上面两条。"""
+        day = T('2026-09-29 09:00')
+        self._first_sub_round(day)
+        fetch_rounds._unsaved.append({'key': 'batch-a', 'partial': 1})
+        self.break_lock()
+        self.block_pending()
+        with self.assertRaises(fetch_rounds.NoEvidence):
+            self._crawl('batch-a', 'run-2', Mock(name='rss'))
+        self.pending().unlink()
+        self.fix_lock()
+        self.assertEqual(BOOK(1, 1, '09:00', True), fetch_rounds.today(day))
+
     def test_a_start_marker_does_not_buy_passage_through_the_gate(self):
         """**盘上那笔开工标记正指着这个子轮,闸照样不许它往下抓。**
 
@@ -321,7 +399,7 @@ class TheGateOnlyTrustsEvidenceBoundToTheDebtTests(_Pending):
     def test_a_ledger_we_cannot_read_right_now_is_not_evidence_either(self):
         """**「此刻读不出账本」不算那两处证据之一** —— 第 1 轮逻辑审查 F1。
 
-        原来 `_landed` 在账本读不出来时直接放行,理由是「读不出来时读侧只会答不可
+        原来那道闸在账本读不出来时直接放行,理由是「读不出来时读侧只会答不可
         确认」。那只在账本**永久**坏在盘上时成立:读失败恢复之后,读侧看见的是此前
         那几个完整子轮、没有任何缺口凭证,于是重新给出一个**确定的偏小值** ——
         而这一轮已经往 vault 落过文章,重导时它们不是新文件、补不回来。
@@ -415,10 +493,10 @@ class TheGateOnlyTrustsEvidenceBoundToTheDebtTests(_Pending):
         self.assertEqual('', proof['persist_error'])
         self.assertFalse(proof['marker_after_normal_end'])
         self.assertEqual(0, proof['read_failures'])      # 这一例不注入读故障
-        # 它攥着的就是那一行登记(子轮身份是真 `start_pipeline` 发的,别钉字面量)
-        self.assertEqual(1, len(proof['unsaved']))
-        self.assertEqual('batch-a', proof['unsaved'][0]['key'])
-        self.assertNotIn(proof['unsaved'][0]['seg'], ('', 'run-1'))
+        # **被拒绝的那次尝试一行都没留下**:缓冲里空的、凭证一笔都没有(F3)——
+        # 留着的话这个进程下一跳读页面就把它补写成当天的一次抓取,而采集器压根
+        # 没跑。它一行都不许留下这件事,由 `fetch_rounds._drop` 保证。
+        self.assertEqual([], proof['unsaved'])
         self.assertEqual([], self.certs())               # 凭证一笔都没落下去
         rounds, ok = fetch_rounds._read()
         self.assertTrue(ok)                              # 账本行行合法 ——

@@ -10,6 +10,7 @@
 丢、重放会不会翻倍,只有那个数答得出来。闸本身(两处证据都留不下就不许往下抓)
 在 tests/test_fetch_evidence.py;账本本体与完整性在 tests/test_fetch_rounds.py。
 """
+import json
 import os
 import tempfile
 import threading
@@ -153,6 +154,80 @@ class RecoveryIsExactlyOnceTests(unittest.TestCase):
                 self.assertEqual(BOOK(1, 1, '09:00', partial=True),
                                  fetch_rounds.today(self.day))
 
+    def test_a_round_that_still_owes_lines_is_not_rotated_away(self):
+        """**审查实测的那一条(F2)**:旧开轮已经落盘、它的回执还攥在手里,
+        下一次开轮先走轮换 —— 清掉那一轮的话,随后补写的回执就成了**找不到轮次的
+        孤行**,折叠据此报「读不出来」,而「读不出来」又禁止下一次轮换,那条孤行
+        从此清不掉。
+
+        实测的旧末态:当天那一轮正常落盘、文章也正常保存,`today()` 却是 `None`;
+        全新进程读同一份账本也是 `None`;第二天再正常开一轮、收一轮,仍是 `None`
+        —— 面板从此一直写「抓取次数读不出来」,刷新、重启、再同步都不恢复。
+
+        **反过来钉一边**:欠账补写完之后那一轮该退役就退役(连成果带结束行),
+        不是靠把保留窗口拉长糊过去。"""
+        old = T('2026-10-13 09:00')
+        fetch_rounds.open_round('old-round', old, seg='old-child')
+        with patch.object(fetch_rounds, '_append', Mock(return_value=False)):
+            fetch_rounds.note_new('old-round', self._paths('old', of='old-round'))
+            fetch_rounds.note_end('old-round', 'old-child')
+        self.assertTrue(fetch_rounds._unsaved)           # 前提:行真攥在手里
+        day = T('2026-10-16 09:00')
+        fetch_rounds.open_round('today-round', day, seg='today-child')  # 触发轮换
+        fetch_rounds.note_new('today-round', self._paths('new', of='today-round'))
+        fetch_rounds.note_end('today-round', 'today-child')
+        rounds, ok = fetch_rounds._read()
+        self.assertTrue(ok)                              # 一条孤行都没留下
+        self.assertEqual({'old-round', 'today-round'}, {r['key'] for r in rounds})
+        self.assertEqual(BOOK(1, 1, '09:00'), fetch_rounds.today(day))
+        for name in ('_unsaved', '_opened', '_gaps'):    # 进程没了,盘上这份照样对
+            setattr(fetch_rounds, name, [])
+        self.assertEqual(BOOK(1, 1, '09:00'), fetch_rounds.today(day))
+        # 欠账清完了:再开一轮时那一轮才真的成组退役
+        nxt = T('2026-10-17 09:00')
+        fetch_rounds.open_round('next-round', nxt, seg='next-child')
+        fetch_rounds.note_new('next-round', ())
+        fetch_rounds.note_end('next-round', 'next-child')
+        self.assertNotIn('old-round', (self.data / fetch_rounds.FILE_NAME)
+                         .read_text(encoding='utf-8'))
+        self.assertEqual(BOOK(1, 0, '09:00'), fetch_rounds.today(nxt))
+
+    def test_a_round_another_process_still_owes_is_not_rotated_away(self):
+        """同一类的另一半:欠着行的是**另一个进程**,而它那笔凭证的日子停在三天前
+        (凭证只在搬动缓冲时才重写,那个进程这期间没动过)。按保留窗口筛凭证的话,
+        这一轮照旧被清走,它随后补写的回执就是那条孤行。
+
+        所以轮换这一侧认**盘上还在的每一笔凭证**,不按天筛;凭证自己的过期清理归
+        `fetch_pending._prune`(和账本同一个 `_floor`),所以放宽这一刀不会让孤儿
+        凭证永久扣着一轮 —— 这里顺带钉住那一头:那笔过期凭证在这一轮里就被收掉了,
+        于是下一次轮换那一轮正常退役。"""
+        old = T('2026-10-13 09:00')
+        fetch_rounds.open_round('old-round', old, seg='old-child')
+        folder = self.data / fetch_rounds.PENDING_DIR
+        folder.mkdir(parents=True, exist_ok=True)
+        # 另一个进程那笔凭证(TAG 不是本进程的,日子停在开轮那天)
+        (folder / 'other-7-deadbeef-1.json').write_text(
+            json.dumps({'day': '2026-10-13', 'keys': ['old-round']}),
+            encoding='utf-8')
+        day = T('2026-10-16 09:00')
+        fetch_rounds.open_round('today-round', day, seg='today-child')  # 触发轮换
+        fetch_rounds.note_new('today-round', self._paths('new', of='today-round'))
+        fetch_rounds.note_end('today-round', 'today-child')
+        # 那个进程这时候才把它攥着的那几行补写下去(交错是摆出来的,不靠撞运气)
+        self.assertTrue(fetch_rounds._append([
+            {'key': 'old-round', 'items': [['rss:old', 'old-round']]},
+            {'key': 'old-round', 'seg': 'old-child', 'end': 1}]))
+        rounds, ok = fetch_rounds._read()
+        self.assertTrue(ok)                              # 不是孤行:它那一轮还在
+        self.assertEqual(BOOK(1, 1, '09:00'), fetch_rounds.today(day))
+        nxt = T('2026-10-17 09:00')
+        fetch_rounds.open_round('next-round', nxt, seg='next-child')
+        fetch_rounds.note_new('next-round', ())
+        fetch_rounds.note_end('next-round', 'next-child')
+        self.assertNotIn('old-round', (self.data / fetch_rounds.FILE_NAME)
+                         .read_text(encoding='utf-8'))   # 凭证收掉了,这才退役
+        self.assertEqual(BOOK(1, 0, '09:00'), fetch_rounds.today(nxt))
+
     def test_a_slow_rotation_does_not_overwrite_what_another_run_appended(self):
         """轮换是**整份重写**:它和别人的追加不在同一把锁里的话,就会按自己那份
         旧快照把人家已经确认的行覆盖掉。
@@ -165,15 +240,17 @@ class RecoveryIsExactlyOnceTests(unittest.TestCase):
         **不要改回"几条线程各跑几轮"的写法** —— 那种写法注入(把 flock 摘掉)
         之后全绿:轮换只在有过期轮次时触发,第一次重写之后就没有了,后面几十次
         开轮压根不走那条路。"""
-        import kb.pipeline_persist as pp
+        from kb import fetch_rotate
         fetch_rounds.open_round('old', T('2026-09-20 09:00'))
-        slow = pp._write_atomic
+        slow = fetch_rotate._write_atomic
 
         def lag(*a, **k):
             time.sleep(0.4)             # 把整份重写那一下拖长
             return slow(*a, **k)
 
-        with patch.object(fetch_rounds, '_write_atomic', Mock(side_effect=lag)):
+        # 整份重写本体在 `kb.fetch_rotate`(`fetch_rounds._rotate` 只管「现在许不许
+        # 重写」),所以要拖慢的是那一边那个符号。
+        with patch.object(fetch_rotate, '_write_atomic', Mock(side_effect=lag)):
             rot = threading.Thread(target=fetch_rounds.open_round,
                                    args=('batch-rot', self.day))
             rot.start()

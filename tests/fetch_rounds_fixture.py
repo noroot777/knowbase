@@ -156,7 +156,7 @@ class _Pending(_Base):
 
         位置跟着 `pipeline_state._STATE_FILE` 派生,所以这里把它也指到临时目录 ——
         两边指到同一个库,才是生产里那个形状。**抓取那一侧不读这一笔**(它的寿命是
-        那一轮运行的,见 `fetch_rounds._landed`),所以这个小工具现在只用来钉
+        那一轮运行的,见 `kb.fetch_gate`),所以这个小工具现在只用来钉
         「它在不在都不改变结论」。
         """
         with patch.object(ps, '_STATE_FILE', self.root / 'pipeline_state.json'):

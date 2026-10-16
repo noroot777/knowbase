@@ -253,9 +253,10 @@ class TheRealExporterReportsOnlyFreshFilesTests(_Base):
     def test_a_file_deleted_from_the_vault_is_not_a_fresh_catch_on_rewrite(self):
         """存量清理删掉过那篇 md,之后这一条重新入队导出 —— 它不是新抓到的。
 
-        判据从「磁盘上此刻有没有这个文件」换成「这一条进过 vault 没有」
-        (`feed_items.path`)正是为这一刀:按文件在不在判的话,这里会报「+1 条」,
-        而那是一篇几天前就抓到的老文章。"""
+        判据是**两道一起**(库里那一格 + 这个路径上此刻有没有文件),这一条钉的是
+        库里那一格那一半:只按文件在不在判的话,这里会报「+1 条」,而那是一篇几天
+        前就抓到的老文章。另一半由
+        `test_a_landed_file_is_not_a_fresh_catch_again_in_the_next_round` 钉。"""
         self.reg.put_items(self.source, self._entry())
         first = next(iter(self.fsync.export('rss')))
         (self.vault / first.path).unlink()
@@ -288,8 +289,9 @@ class TheRealExporterReportsOnlyFreshFilesTests(_Base):
         不算新文件,这一篇**永远**补不回账(实测:vault 多了 1 篇,药丸永久写
         「0 条」且自称确定,刷新和重试都纠不回来)。
 
-        反过来钉一边:确认没写上 `path`,所以恢复之后重导会**再报一次**它 ——
-        账本按内容身份取并集,那个数不许因此翻倍。
+        反过来钉一边:确认没写上 `path`,可那篇 md 已经在 vault 里了 —— 恢复之后
+        重导**不许再报一次**它(判据的另一半,F1),而第一份回执里的那一条照旧留在
+        账本里。
         """
         fetch_rounds.open_round('batch-confirm', T('2026-09-29 09:00'))
         with self._round('batch-confirm'):
@@ -305,7 +307,45 @@ class TheRealExporterReportsOnlyFreshFilesTests(_Base):
                 self.assertEqual([''], [r[0] for r in c.execute(
                     "SELECT exported_hash FROM feed_items WHERE kind='rss'")])
                 c.execute('DROP TRIGGER no_confirm')
-            fetch_rounds.note_new('batch-confirm', self.fsync.export('rss'))
+            again = self.fsync.export('rss')
+            self.assertEqual(frozenset(), again)         # 已经物化过了,不是新落的
+            fetch_rounds.note_new('batch-confirm', again)
             fetch_rounds.note_end('batch-confirm')
         self.assertEqual(BOOK(1, 1, '09:00'),
                          fetch_rounds.today(T('2026-09-29 09:00')))
+
+    def test_a_landed_file_is_not_a_fresh_catch_again_in_the_next_round(self):
+        """**审查实测的那一条(F1)**:第一次同步落了文件、随后那次入库确认
+        失败;第二次同步远端一篇新的都没有 —— 它不许再被算成这一次的新增。
+
+        实测的旧末态:判据只看 `feed_items.path`,而确认失败时那一格还空着,于是
+        **换一个业务身份**重导同一篇又满足「头一回落进 vault」,账本的轮内并集管不到
+        另一轮 —— 药丸写「第 2 次抓取 · +1 条」,提示语还说这 1 篇是这一次才补导
+        进来的,而 vault 里的文件集合和字节一个都没变。用户照着那个数再花一次模型钱。
+
+        两头都钉:第一轮照旧报它(确认失败不许把已落地的成果从成果里抹掉),第二轮
+        报 0 条**而且是确定的 0**(不是「不可确认」—— 那同样会让人去点一次重新生成)。
+        """
+        fetch_rounds.open_round('batch-first', T('2026-09-29 09:00'))
+        with self._round('batch-first'):
+            self.reg.put_items(self.source, self._entry())
+            with self.reg.db() as c:
+                c.execute("CREATE TRIGGER no_confirm BEFORE UPDATE OF exported_hash "
+                          "ON feed_items BEGIN SELECT RAISE(ABORT, '确认失败'); END")
+            fetch_rounds.note_new('batch-first', self.fsync.export('rss'))
+            fetch_rounds.note_end('batch-first')
+        self.assertEqual(BOOK(1, 1, '09:00'),
+                         fetch_rounds.today(T('2026-09-29 09:00')))
+        was = {q: q.read_bytes() for q in self.vault.rglob('*.md')}
+        with self.reg.db() as c:
+            c.execute('DROP TRIGGER no_confirm')         # 确认那一下好了
+        fetch_rounds.open_round('batch-second', T('2026-09-29 10:00'))
+        with self._round('batch-second'):
+            self.reg.put_items(self.source, self._entry())   # 远端还是那一篇
+            got = self.fsync.export('rss')
+            fetch_rounds.note_new('batch-second', got)
+            fetch_rounds.note_end('batch-second')
+        self.assertEqual(frozenset(), got)               # 这一次一篇新的都没有
+        self.assertEqual(was, {q: q.read_bytes() for q in self.vault.rglob('*.md')})
+        self.assertEqual(BOOK(2, 0, '10:00'),
+                         fetch_rounds.today(T('2026-09-29 10:00')))
