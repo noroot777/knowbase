@@ -25,12 +25,26 @@ from pydantic import BaseModel, Field
 from kb import pipeline
 from kb.feeds import grab
 from kb.feeds.registry import KINDS
+from kb.source_types import SOURCE_TYPES
 
 router = APIRouter(prefix='/api/grab')
 
 
 class GrabRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
+
+
+def _resume_hint(channel: str) -> str:
+    """「稍后点一次」那半句话里的**按钮名,按归属来源给对的那一颗**。
+
+    来源页工具栏那颗按钮在可轮询的来源里写「同步全部」,只有手动收录写「写入
+    知识库」(判据就是 `pollable`,和 `sources.js` 的 `manual` 分支同一个)。
+    一条推文被「大V观点」收过、这一轮又没占到管道时,照手动收录那套说就是指着
+    一颗那一页上不存在的按钮。
+    """
+    spec = SOURCE_TYPES.get(channel)
+    button = '写入知识库' if spec and not spec.pollable else '同步全部'
+    return f'，稍后在「{KINDS.get(channel, channel)}」里点一次「{button}」'
 
 
 def _write_through(out: dict, note: str, channel: str = grab.KIND) -> dict:
@@ -43,14 +57,21 @@ def _write_through(out: dict, note: str, channel: str = grab.KIND) -> dict:
     是按通道筛的(`pipeline_stages._per_channel`):一条推文已经被「大V观点」收过
     但还没导出时,起一轮 `inbox` 的 export 一个字都不会动它 —— 而回答里却写着
     「正在写入知识库」,那就是一句谎报。
+
+    **起跑成功要把那一轮的身份原样交给前端**(`run`)。`start_pipeline` 返回 id
+    而不是 True 正是为了让调用方**原子地**拿到「我起的是哪一轮」;前端拿它核对
+    那一轮 export/index 的实际结果。没有它,面板只能按「run_id 变了」猜 ——
+    别人的一轮同步插在中间、或者我们那一轮红了,都会被写成「已写入知识库」
+    (2026-10-16 第二轮审查)。
     """
     why: list[str] = []
     started = pipeline.start_pipeline(['export', 'index', 'extract'], refused=why,
                                       crawl_filter={'channel': channel})
     out['pipeline'] = 'started' if started else 'busy'
+    out['run'] = started
     out['detail'] = (f'{note}，正在写入知识库' if started else
                      f'{note}；' + (why[0] if why else '其他同步正在运行') +
-                     '，稍后在「手动收录」里点一次「写入知识库」')
+                     _resume_hint(channel))
     return out
 
 

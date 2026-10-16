@@ -108,6 +108,13 @@ def classify(url: str) -> str:
 
     **只有「单条推文」算 X 那一档**:账号主页、搜索页、列表页都不是一篇内容 ——
     它们该去「大V观点」做一条订阅,而不是被收成一篇空文章。
+
+    **绿泡泡的文章不在这里特判,和别的站点走同一条路**:发一次请求,读到正文就
+    收下,**实际撞上验证页**才拒(那一句指向「公众号」那一类,见 `_gate`)。
+    按域名先拒等于替对方的服务器回答 —— 转载页、镜像、以及对方哪天放开,都会被
+    一句「这条路抓不到」挡在外面。代价如实写在 `link-grab.md`:真能直接读到的
+    那一篇会在收件桶和公众号树下各留一份(kb.db 的 `documents.url` 没有唯一约束,
+    跨树重复本来就有)—— 两处都搜得到,不是丢数据。
     """
     parts = urlsplit(url)
     host = (parts.hostname or '').lower()
@@ -116,10 +123,6 @@ def classify(url: str) -> str:
             raise GrabError('这是 X 的页面但不是单条推文。想按账号持续收的话，'
                             '去「大V观点」把它加成一条订阅。')
         return 'x'
-    if host in _WECHAT_HOSTS:
-        raise GrabError('绿泡泡的文章挡在验证页后面，这条路抓不到。'
-                        '这类内容走「公众号」那一类：在绿泡泡里打开一次，'
-                        '它就进了本机数据库，同步公众号时会收进来。')
     return 'web'
 
 
@@ -171,30 +174,44 @@ def bucket(url: str) -> dict:
 
 
 def _indexed(path: str) -> bool:
-    """vault 里那一篇进全文索引了没有 —— 也就是「现在搜得到吗」。
+    """vault 里那一篇**当前这一版**进全文索引了没有 —— 也就是「现在搜得到它吗」。
+
+    **判据是版本,不是「`documents` 里有这条路径」。** 后一问只答得出「以前索引
+    过某一版」:导出把新正文写进同一个路径之后那一行照旧在,于是「库里还是上一
+    版」被当成走完了,后半条链再也没人补,而面板上写着「已经在知识库里了」
+    (2026-10-16 第二轮审查)。
+
+    口径借现成那一份,这里一个字都不自己拼(元规则「口径只有一份」):
+    `scanner.file_hash` 算的就是 `documents.content_hash`,
+    `store.doc_needs_reindex` 就是索引自己判「这一篇要不要重建」那一问。
 
     **只读打开 kb.db,一个字节都不写。** `store.connect()` 这一路走不得:它建表、
     跑迁移,那是写 kb.db 的入口(要先取维护锁,见 `maintenance-lock.md`),而这里
     只要回答一句话。地址用 `db_uri` + `?mode=ro`(口径同
     `extract_optin.attached_feeds`:路径里的 `#`/`?` 不会被当成 fragment/query
-    截断、而且物理上建不出任何东西)。`config.DB_PATH` **现读**,不绑死在默认
+    截断、而且物理上建不出任何东西)。`config` 那两个路径**现读**,不绑死在默认
     参数上 —— 否则测试指不到临时库(理由同 `fulltext._drop_extraction`)。
 
-    **判不准一律答「没进」**:代价是多跑一轮 export/index(对已经走完的条目两
-    阶段都是空转),而答反了用户就以为搜得到。
+    **判不准一律答「没进」**:代价是多跑一轮 export/index(两个阶段对已经走完的
+    条目都是空转),而答反了用户就以为搜得到。
     """
     if not path:
         return False
     from kb import config, store          # 延迟导入:别让 kb/feeds 在导入期拖进 sqlite_vec
+    from kb.scanner import file_hash, read_md_text
     if not config.DB_PATH.exists():
         return False
+    try:
+        text = read_md_text(config.VAULT_ROOT / path)
+    except OSError:
+        return False                       # vault 里还没有这一篇(导出没跑/文件没了)
     try:
         conn = sqlite3.connect(store.db_uri(config.DB_PATH) + '?mode=ro', uri=True, timeout=10)
     except sqlite3.Error:
         return False
     try:
-        return conn.execute('SELECT 1 FROM documents WHERE path=? LIMIT 1',
-                            (path,)).fetchone() is not None
+        conn.row_factory = sqlite3.Row     # `doc_needs_reindex` 按列名读
+        return not store.doc_needs_reindex(conn, path, file_hash(text))
     except sqlite3.Error:
         return False
     finally:
@@ -204,31 +221,39 @@ def _indexed(path: str) -> bool:
 def known(url: str) -> dict | None:
     """这条地址是不是已经在库里了。返回那一条或 None。
 
-    返回里带 **`done`:它走完整条链了没有** —— 导出成了 vault 里那一篇
-    (`path` + `exported_hash` 都在),而且索引里找得到(`_indexed`)。
+    返回里带 **`done`:它走完整条链了没有**,三件事一起才算 ——
+    ①导出成了 vault 里那一篇(`path` 在);②**导出的是现在库里这一版**
+    (`exported_hash == content_hash`:一次正文补抓、一轮翻译回写都会把
+    `content_hash` 推新,那时 vault 里还是旧的);③**vault 里当前那一份进了索引**
+    (`_indexed`)。
 
     **「`feed_items` 里有这一行」只说明内容暂存下来了。** 后半条链(导出 →
     索引 → 提取)跑没跑是另一件事:占不到管道、服务在保存之后重启、导出或索引
     自己失败,都会留下一条「在库里但搜不到」的记录。把这两件事混成一句「已经在
     知识库里了」就是谎报 —— 用户搜不到,而再投一次只会再得到同一句话,后半条链
-    永远没人补(2026-10-16 审查)。所以这里把事实原样交出去,由调用方决定说什么、
-    要不要把后半条链跑起来(`kb/web/grab_api.py`)。
+    永远没人补(2026-10-16 审查)。**「以前走完过」也不算**:版本推新之后那一篇
+    仍然欠一轮导出和索引(第二轮审查)。所以这里把事实原样交出去,由调用方决定
+    说什么、要不要把后半条链跑起来(`kb/web/grab_api.py`)。
 
     **这不是一道互斥**:真正防重复的是 `put_items` 的
     `ON CONFLICT(key) DO NOTHING`(同一类来源)—— 这里多答一句是为了跨来源的
     那种重复(一条推文已经被「大V观点」收过了),否则用户会得到第二篇一模一样的
     文章躺在另一棵树下。
 
-    **只问 `feed_items`**:它覆盖全部订阅类来源(含手动收录自己)。公众号那棵树
-    在 kb.db 里,而绿泡泡的地址压根走不到这一步(`classify` 就拒了)。
+    **只问 `feed_items`**:它覆盖全部订阅类来源(含手动收录自己)。公众号那棵树在
+    kb.db 里、不在这张表上,所以一篇真能直接读到正文的绿泡泡文章(`classify` 不
+    再按域名拒它)这里答不出「收过了」,它会在收件桶里再落一份 —— 代价和取舍写在
+    `classify` 的注释里。
     """
     with reg.db() as c:
-        row = c.execute('SELECT kind,title,path,url,exported_hash FROM feed_items'
-                        ' WHERE url=? LIMIT 1', (url,)).fetchone()
+        row = c.execute('SELECT kind,title,path,url,content_hash,exported_hash'
+                        ' FROM feed_items WHERE url=? LIMIT 1', (url,)).fetchone()
     if not row:
         return None
     seen = dict(row)
-    seen['done'] = bool(seen['path'] and seen['exported_hash']) and _indexed(seen['path'])
+    seen['done'] = bool(seen['path'] and seen['exported_hash']
+                        and seen['exported_hash'] == seen['content_hash']) \
+        and _indexed(seen['path'])
     return seen
 
 
@@ -375,25 +400,38 @@ def _grab_x(url: str, deadline: float) -> dict:
 
 # ---------------------------------------------------------------------- 其他网页
 
-def _gate(reason: str) -> GrabError:
-    """被关卡挡住那一句。**一份措辞,三个判据共用** —— 用户能做的只有这几件事,
-    地址判据和正文判据各写一句的话差别只在标点上。"""
-    return GrabError(f'{reason}，所以正文抓不到。'
-                     '在浏览器里打开它、把正文复制出来，或者换一个可直接'
-                     '访问的地址。')
+def _next_step(final_url: str) -> str:
+    """没收下之后那半句「下一步」。**按站点分,而且只有这一份口径。**
+
+    绿泡泡的文章这条路确实走不通(实测 302 到 `/mp/wappoc_appmsgcaptcha`,og 和
+    `#js_content` 全无),而它有一条自己的通道:把人指过去。照通用那句说「在浏览
+    器里打开、把正文复制出来」等于让他对着一道过不去的验证页发呆。
+
+    **判据是实际响应,域名只决定这半句话怎么说** —— 按域名先拒掉那一版的代价写在
+    `classify` 的注释里。
+    """
+    host = (urlsplit(final_url).hostname or '').lower()
+    if host in _WECHAT_HOSTS:
+        return ('绿泡泡的文章走「公众号」那一类：在绿泡泡里打开一次，'
+                '它就进了本机数据库，同步公众号时会收进来。')
+    return '在浏览器里打开它、把正文复制出来，或者换一个可直接访问的地址。'
+
+
+def _gate(reason: str, final_url: str = '') -> GrabError:
+    """被关卡挡住那一句:**为什么没收下**(判据给的那半句)**+ 下一步**。"""
+    return GrabError(f'{reason}，所以正文抓不到。{_next_step(final_url)}')
 
 
 def _grab_web(url: str, deadline: float) -> dict:
     """一个网页 → 待入库的条目。正文口径只有 `readable` 那一份。
 
-    **「提取成功」证明不了「拿到了那篇文章」。** 所以关卡判据在**成功路径上
-    也生效**:一张 683 字的验证页提取得出一段文字、长度轻松过关,随后被
-    `put_items` 的 `DO NOTHING` 永久钉成这一篇的正文,再投一次同一条链接也换
-    不回真文章(2026-10-16 审查实测,那一例落在 `/challenge` 上、导出和索引
-    全成功)。三道按「可靠程度」排:
-    ①**地址**(`gate_url_reason`):已确认的关卡地址,提取之前就拒,最可靠;
-    ②**正文**(`gate_body_reason`):强措辞 + 整页就这么点字,成功路径上这一道;
-    ③**整份 HTML 的全量词表**(`gate_reason`):最松,只在提取失败之后才问。
+    **「提取成功」证明不了「拿到了那篇文章」。** 所以关卡判据排在**所有出路的
+    前面,成功和失败共用一道**(`grab_page.gate_reason`,判据和那条不变量都在它
+    自己头上):一张验证页提取得出一段文字、长度轻松过关,随后被 `put_items` 的
+    `DO NOTHING` 永久钉成这一篇的正文,再投一次同一条链接也换不回真文章(两轮
+    审查各实测到一例:683 字那张落在 `/challenge` 上,1782 字那张谁都没拦住)。
+    **这里只有一个调用点** —— 成功路和失败路各问一次的话,同一张验证页会得到
+    两句不同的话,而其中一条迟早漏掉一个判据。
     """
     try:
         resp = request(url, grab_page.HEADERS, deadline=deadline)
@@ -405,18 +443,21 @@ def _grab_web(url: str, deadline: float) -> dict:
         raise GrabError(f'{problem}')
     html = readable.decode(resp.body, dict(resp.headers))
     final = resp.url or url
-    if reason := grab_page.gate_url_reason(final):
-        raise _gate(reason)              # ① 地址:提取出什么都不算数
+    # **先把提取的结果收在手里,别急着用它答任何话。** 关卡那一问要先过:
+    # 「提取失败」也不许抢在它前面答 —— 「这一页没找到正文」指不出下一步,而这
+    # 一页明摆着是一道验证页。
+    body, unavailable = '', ''
     try:
         body = grab_page.page_body(html)
     except PageUnavailable as e:
-        # ③ 全量词表只在这一档问:一篇正常文章里出现「captcha」这个词不该被
-        # 判成验证页(见 `grab_page.gate_reason`)。
-        if reason := grab_page.gate_reason(final, html):
-            raise _gate(reason) from None
-        raise GrabError(f'{e}') from None
-    if reason := grab_page.gate_body_reason(body):
-        raise _gate(reason)              # ② 提取成功了,但交出来的是那几句提示
+        unavailable = f'{e}'
+    if reason := grab_page.gate_reason(final, html, body):
+        raise _gate(reason, final)
+    if unavailable:
+        # 读不到正文这一档也要带上下一步(口径同 `_gate`:同一个 `_next_step`)。
+        # 「这一页没找到正文」自己指不出任何事 —— 折叠成一句抓取失败就是把人留在
+        # 原地(模块注释那一条)。
+        raise GrabError(f'{unavailable}。{_next_step(final)}')
     meta = grab_page.page_meta(html, final)
     host = (urlsplit(final).hostname or '').lower().removeprefix('www.')
     return {'url': url, 'title': grab_page.title_fallback(meta['title'], body, host),

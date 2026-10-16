@@ -64,6 +64,9 @@ class GrabCase(unittest.TestCase):
         for p in (patch.object(reg, 'DB_PATH', self.root / 'feeds.db'),
                   patch.object(maintenance, 'DATA_DIR', self.root),
                   patch.object(config, 'DB_PATH', self.root / 'kb.db'),
+                  # `_indexed` 要读 vault 里那一篇算 hash:`config.VAULT_ROOT` 和
+                  # 导出用的 `sync.VAULT_ROOT` 各打一次(生产里是同一个值)。
+                  patch.object(config, 'VAULT_ROOT', self.root / 'vault'),
                   patch.object(sync, 'VAULT_ROOT', self.root / 'vault')):
             p.start()
             self.addCleanup(p.stop)
@@ -75,16 +78,31 @@ class GrabCase(unittest.TestCase):
         with reg.db() as c:
             return [dict(r) for r in c.execute('SELECT * FROM feed_items ORDER BY key')]
 
-    def index_doc(self, path: str) -> None:
-        """假装索引阶段把 vault 里那一篇登记进了 kb.db。
+    def export_vault(self, path: str, text: str = '# A\n\n正文') -> None:
+        """假装导出阶段把 vault 里那一篇写了出来(只写文件,不碰索引)。"""
+        full = config.VAULT_ROOT / path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(text, encoding='utf-8')
 
-        只建 `documents` 那一列:`grab._indexed` 问的就是这一句,而
-        `store.connect()` 这条路要加载 sqlite_vec、跑一串迁移(还要维护锁)——
-        为了回答「搜得到吗」不该付这笔钱。
+    def index_doc(self, path: str, text: str = '# A\n\n正文') -> None:
+        """假装导出 + 索引都走完了:vault 里有这一篇,`documents` 记着**它当前
+        这一版**的 `content_hash`。
+
+        **两边一起摆才试得出东西。** `grab._indexed` 问的是版本(口径借
+        `scanner.file_hash` + `store.doc_needs_reindex`),只往 `documents` 插一行
+        路径的话,「库里还是上一版」那档漏报在用例里压根显不出来 —— 第二轮审查
+        逮到的正是这个形态。`store.connect()` 这条路要加载 sqlite_vec、跑一串
+        迁移(还要维护锁),为了回答「搜得到吗」不该付这笔钱。
         """
+        from kb.scanner import file_hash
+
+        self.export_vault(path, text)
         conn = sqlite3.connect(self.root / 'kb.db')
-        conn.execute('CREATE TABLE IF NOT EXISTS documents (path TEXT PRIMARY KEY)')
-        conn.execute('INSERT OR IGNORE INTO documents (path) VALUES (?)', (path,))
+        conn.execute('CREATE TABLE IF NOT EXISTS documents'
+                     ' (path TEXT PRIMARY KEY, content_hash TEXT)')
+        conn.execute('INSERT INTO documents (path,content_hash) VALUES (?,?)'
+                     ' ON CONFLICT(path) DO UPDATE SET content_hash=excluded.content_hash',
+                     (path, file_hash(text)))
         conn.commit()
         conn.close()
 
@@ -144,11 +162,19 @@ class AddressTests(GrabCase):
 
     def test_refusals_say_what_to_do_next(self):
         for url, word in [('https://x.com/example', '大V观点'),
-                          ('https://mp.weixin.qq.com/s/abc123', '公众号'),
                           ('https://x.com/example/status/12345/photo/1', '单条推文')]:
             with self.assertRaises(grab.GrabError) as caught:
                 grab.classify(grab.normalize(url))
             self.assertIn(word, str(caught.exception))
+
+    def test_a_wechat_link_is_not_refused_by_its_domain(self):
+        """**反过来钉一边(R2-F3)。** 绿泡泡的文章和别的站点走同一条路:分流这一步
+        不许按域名先拒 —— 那等于替对方的服务器回答,转载页、镜像、以及对方哪天
+        放开都会被一句「这条路抓不到」挡在外面。真拒它的是**实际响应**
+        (`PageTests` 里那两条)。"""
+        for url in ('https://mp.weixin.qq.com/s/abc123', 'https://weixin.qq.com/s/abc'):
+            with self.subTest(url=url):
+                self.assertEqual(grab.classify(grab.normalize(url)), 'web')
 
     def test_private_addresses_never_leave_the_machine(self):
         for bad in ('http://127.0.0.1/a', 'http://192.168.1.9/x', 'http://box.local/a'):
@@ -228,9 +254,15 @@ class TweetTests(GrabCase):
 
 
 class PageTests(GrabCase):
-    def page(self, resp: Response):
+    def page(self, resp: Response, url: str = PAGE):
         with patch.object(grab, 'request', return_value=resp):
-            return grab.grab(PAGE)
+            return grab.grab(url)
+
+    def save_page(self, resp: Response, url: str = PAGE):
+        """走**真入口**:抓完就存。关卡那几档要钉的是「库里确实没有这一条」——
+        只验它抛了异常的话,`DO NOTHING` 之下那条空壳正文永久改不回来。"""
+        with patch.object(grab, 'request', return_value=resp):
+            return grab.save(grab.grab(url))
 
     def test_a_normal_page_brings_body_title_author_and_a_shanghai_clock(self):
         extra = ('<meta name="author" content="某记者">'
@@ -261,44 +293,126 @@ class PageTests(GrabCase):
         entry = self.page(html_resp(page_html(title='List&lt;T&gt; 的用法')))
         self.assertEqual(entry['title'], 'List<T> 的用法')
 
-    def test_a_verification_gate_is_named_as_one(self):
+    def test_a_wechat_gate_is_refused_and_points_at_its_own_channel(self):
+        """①路由那一道,外加 R2-F3 的下一步。
+
+        实测形态(2026-10-16):`mp.weixin.qq.com/s/<slug>` 302 到
+        `/mp/wappoc_appmsgcaptcha`,18 KB 的验证页、og 和 `#js_content` 全无、
+        提取 0 字。这一档要拒,而且下一步要指向「公众号」那一类 —— 照通用那句
+        「在浏览器里打开、把正文复制出来」说,等于让人对着一道过不去的验证页发呆。
+        """
         gate = ('https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha?poc_token=x'
                 '&target_url=https%3A%2F%2Fmp.weixin.qq.com%2Fs%2Fabc')
         with self.assertRaises(grab.GrabError) as caught:
-            self.page(html_resp('<html><body><p>环境异常</p></body></html>', url=gate))
+            self.save_page(html_resp('<html><body><p>环境异常</p></body></html>', url=gate),
+                           url='https://mp.weixin.qq.com/s/abc')
         self.assertIn('验证页', str(caught.exception))
+        self.assertIn('公众号', str(caught.exception))
         self.assertEqual(self.items(), [])
+        # 反过来钉一边:别人家的页面给的是浏览器那条路,不是公众号那一类。
+        with self.assertRaises(grab.GrabError) as other:
+            self.save_page(html_resp('<html><body><p>环境异常</p></body></html>',
+                                     url='https://example.org/cdn-cgi/l/chk_jschl?x=1'))
+        self.assertNotIn('公众号', str(other.exception))
+        self.assertIn('浏览器', str(other.exception))
 
-    def test_a_long_verification_page_is_refused_even_though_it_extracts(self):
-        """**「提取成功」证明不了「拿到了那篇文章」。**
+    def test_a_wechat_article_that_reads_is_stored_like_any_other_page(self):
+        """**反过来钉一边(R2-F3)。** 真能读到正文的那一篇照旧收下,桶名是它自己
+        那个 —— 按域名先拒的那一版里,这一条连 HTTP 都发不出去。"""
+        wx = 'https://mp.weixin.qq.com/s/abc123'
+        saved = self.save_page(html_resp(page_html(title='一篇公众号文章'), url=wx), url=wx)
+        self.assertEqual(saved['added'], 1)
+        self.assertEqual(saved['source']['name'], '绿泡泡公众号')
+        self.assertIn('这是正文第一段', self.items()[0]['body'])
 
-        实测那一例:最终地址落在 `/challenge` 上,页面正文 683 字 —— 提取器轻松
-        过关,于是那几句验证提示被当成正文落库;而 `put_items` 是 `DO NOTHING`,
-        再投一次同一条链接也换不回真文章。所以地址判据在**成功路径**上也要生效。
+    def test_a_long_gate_page_on_an_ordinary_address_is_refused(self):
+        """**上一轮漏掉的那一张**(第二轮审查实测 `SAVED added=1`)。
+
+        1782 字、地址干净(`/article`)、提取器轻松交出一段"正文" —— 按「超过
+        1200 字就放行」那一版它被当成正文落了库,而 `put_items` 是 `DO NOTHING`:
+        再投一次同一条链接也换不回真文章。判据因此改成**页面身份**:标题自己就是
+        一句祈使的关卡提示,而正文通篇就是那几句话。
         """
-        long_gate = page_html(title='Verify you are human', body=[
-            '请完成验证以继续访问。Please enable JavaScript and cookies to continue. ' * 20])
+        gate = page_html(title='请完成验证后继续', body=[
+            '请完成验证。Checking your browser before accessing the site. '
+            '您需要启用 JavaScript 和 Cookie 后重试。在通过验证前文章内容不可见。' * 18])
+        # 先钉住它确实落在旧判据的放行区里(否则这条用例测不到那个洞)
+        self.assertGreater(len(grab_page.page_body(gate)), 1200)
         with self.assertRaises(grab.GrabError) as caught:
-            self.page(html_resp(long_gate, url='https://example.org/challenge?id=7'))
-        self.assertIn('验证页', str(caught.exception))
+            self.save_page(html_resp(gate, url='https://example.org/article'))
+        self.assertIn('验证', str(caught.exception))
         self.assertEqual(self.items(), [])
 
-    def test_a_page_that_merely_has_challenge_in_its_path_is_still_stored(self):
-        """**反过来钉一边。** 地址判据现在在成功路径上也生效,所以误拒的代价从
-        「多一句话」变成了「这篇收不进来」—— `challenge` / `checkpoint` 这种常见
-        英文词必须整段相等才算(实测 developers.cloudflare.com 那篇 1277 字的正经
-        文档就差一个连字符)。"""
-        for url in ('https://example.org/waf/cloudflare-challenges/',
-                    'https://example.org/posts/challenge-of-the-week'):
+    def test_ordinary_addresses_that_sound_like_gates_are_still_stored(self):
+        """**反过来钉一边(R2-F1 的另一头)。** 关卡路由只收各家关卡自己的那几条
+        串,`challenge` / `checkpoint` / `verify` 这类通用英文词一个都不许进去 ——
+        它们正是正常文章路径里的词。第二轮审查实测:一篇 650 字的正经文章(标题
+        「挑战：一次研究记录」、地址 `/blog/challenge/`)被「整段相等」那一版拒掉,
+        而这一道在成功路径上也生效:拒掉就是拒掉,再点一次也换不回来。
+        """
+        for url in ('https://example.org/blog/challenge/',
+                    'https://example.org/checkpoint',
+                    'https://example.org/waf/reference/cloudflare-challenges/',
+                    'https://example.org/posts/verify-your-email'):
             with self.subTest(url=url):
-                entry = self.page(html_resp(page_html(), url=url))
+                entry = self.page(html_resp(page_html(title='挑战：一次研究记录'), url=url))
                 self.assertIn('这是正文第一段', entry['body'])
-        # 而整段就是它的那一个照旧拒掉
+        # 反过来:各家关卡自己的路由照旧拒掉(①,path 和 query 都算)。
+        for gate in ('https://example.org/cdn-cgi/l/chk_jschl?x=1',
+                     'https://example.org/sorry/index?continue=x',
+                     'https://example.org/a?__cf_chl_tk=abc'):
+            with self.subTest(gate=gate):
+                with self.assertRaises(grab.GrabError):
+                    self.page(html_resp(page_html(), url=gate))
+
+    def test_the_gate_component_counts_but_a_comment_captcha_does_not(self):
+        """②页面挂着的那套关卡组件 —— 一篇讲 Cloudflare 的文章不会把关卡编排
+        脚本挂在自己页上,所以它是页面身份。
+
+        **反过来钉一边(两条)**:通用验证码小组件(正常文章页的评论框就挂着
+        它们)和 Cloudflare 在普通页面上也会注入的那个检测脚本都不算 —— 进表
+        等于按「这站评论要过验证码」拒稿。
+        """
+        chl = '<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script>'
         with self.assertRaises(grab.GrabError):
-            self.page(html_resp(page_html(), url='https://example.org/challenge/'))
+            self.page(html_resp(page_html(extra=chl)))
+        for innocent in ('<script src="https://www.google.com/recaptcha/api.js"></script>',
+                         '<script src="https://hcaptcha.com/1/api.js"></script>',
+                         '<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>'):
+            with self.subTest(innocent=innocent[:48]):
+                entry = self.page(html_resp(page_html(extra=innocent)))
+                self.assertIn('这是正文第一段', entry['body'])
+
+    def test_a_gate_title_needs_the_body_to_agree(self):
+        """③标题是一句关卡提示 —— 单独不算数,要配上正文里也在说同一件事。
+
+        **反过来钉一边**:同一份正文,标题换成一个**话题词**式的标题就该收下。
+        不然这一道就从「拦住关卡」变成「拦住一类话题」。
+        """
+        body = ['请完成验证后才能看到这篇文章。',
+                '这里是一段足够长的正文，讲的是别的事情，长度要过得了提取器那道门槛。' * 14]
+        self.assertLess(grab_page._gate_share(grab_page.page_body(
+            page_html(title='x', body=body))), grab_page._GATE_SHARE)   # ④ 这一道不成立
+        with self.assertRaises(grab.GrabError) as caught:
+            self.page(html_resp(page_html(title='Just a moment…', body=body)))
+        self.assertIn('验证', str(caught.exception))
+        entry = self.page(html_resp(page_html(title='人机验证是怎么坏掉的', body=body)))
+        self.assertIn('这里是一段足够长的正文', entry['body'])
+
+    def test_a_page_that_is_all_gate_lines_is_refused_whatever_its_title(self):
+        """④通篇就是那几句提示:**按份额算、不设字数上限** —— 上限就是上一轮
+        那个洞(页面长一点就一路放行)。标题人畜无害时这一道单独成立。"""
+        say = '请完成验证之后才能继续访问这篇文章的正文内容，这是站点的防护要求。'
+        html = page_html(title='站点公告', body=[say * 16 + '本页由系统生成。' * 4])
+        self.assertGreaterEqual(grab_page._gate_share(grab_page.page_body(html)),
+                                grab_page._GATE_SHARE)
+        with self.assertRaises(grab.GrabError) as caught:
+            self.save_page(html_resp(html))
+        self.assertIn('验证', str(caught.exception))
+        self.assertEqual(self.items(), [])
 
     def test_an_inline_gate_that_extracts_a_few_lines_is_refused(self):
-        """没有重定向、就地渲染几句「请完成验证」的那种:地址判据看不见它,
+        """没有重定向、就地渲染几句「请完成验证」的那种:路由那一道看不见它,
         而提取器可能刚好交得出一段 400 字出头的文字。"""
         gate = page_html(title='Just a moment…', body=[
             '请完成验证后继续。Checking your browser before accessing the site. ' * 9])
@@ -308,9 +422,12 @@ class PageTests(GrabCase):
         self.assertEqual(self.items(), [])
 
     def test_an_article_that_merely_talks_about_captchas_is_still_stored(self):
-        """**反过来钉一边。** 正文判据只认强措辞 + 「整页就这么点字」两个条件
-        一起 —— 一篇正经讲验证码的长文章照旧收得下,不然这一道就从「拦住关卡」
-        变成「拦住一类话题」。"""
+        """**反过来钉一边。** 一篇正经讲验证码的长文章照旧收得下。
+
+        它的命中句占比是 **50%**(实测),刻意贴在 `_GATE_SHARE` 下方一侧:有人
+        把那条线调到 0.5 这一条就红。真实样本离线更远 —— developers.cloudflare.com
+        那篇 1277 字的文档是 0%。
+        """
         entry = self.page(html_resp(page_html(title='聊聊 captcha 的历史', body=[
             '这一段在正经讨论 captcha 与 verify you are human 这类拦截页的来历。' * 14,
             '第二段继续讲它们对可访问性的影响，篇幅要够长。' * 14])))
@@ -340,6 +457,15 @@ class PageTests(GrabCase):
             with self.subTest(bad=bad):
                 extra = f'<meta property="article:published_time" content="{bad}">'
                 self.assertEqual(self.page(html_resp(page_html(extra=extra)))['published'], '')
+
+    def test_a_date_at_the_edge_of_time_does_not_take_the_grab_down(self):
+        """`9999-12-31T23:30:00Z` 本身是个合法日期,换算到上海(+8)就出了
+        `datetime` 的头 —— 一个**补充字段**不许把整条收录带掉(承重的是正文,
+        而「没有发布时间」是一句真话)。"""
+        extra = '<meta property="article:published_time" content="9999-12-31T23:30:00Z">'
+        entry = self.page(html_resp(page_html(extra=extra)))
+        self.assertEqual(entry['published'], '')
+        self.assertIn('这是正文第一段', entry['body'])
 
     def test_an_ipv6_site_and_a_very_long_host_still_get_a_bucket(self):
         """抓完了才发现存不下去 = 一个没有原因的 500(端点只翻 `GrabError`)。"""
@@ -418,6 +544,36 @@ class SaveTests(GrabCase):
         self.mark_exported(PAGE, 'source/inbox/other.md')
         self.assertFalse(grab.known(PAGE)['done'])
 
+    def test_done_follows_the_current_version_not_a_past_one(self):
+        """**「以前走完过」不算完成事实。**
+
+        正文补抓回来、一轮翻译回写,都会把 `feed_items.content_hash` 推新 ——
+        那时 vault 里还是上一版、索引里也是上一版。按「`documents` 里有这条路径」
+        答的话这一条被当成走完了:面板说「已经在知识库里了」,而用户搜到的是旧
+        内容,后半条链再也没人补(2026-10-16 第二轮审查)。判据因此是**版本**:
+        导出的是现在这一版,而且 vault 里当前那一份进了索引。
+        """
+        path = 'source/inbox/abc.md'
+        grab.save({'url': PAGE, 'title': 'A', 'body': '正文', 'author': 'x',
+                   'published': '', 'content_kind': 'content'})
+        self.mark_exported(PAGE, path)
+        self.index_doc(path)
+        self.assertTrue(grab.known(PAGE)['done'])
+        # ① 库里那一行换了版(补抓回来的新正文),vault 和索引都还是上一版
+        with reg.db() as c:
+            c.execute("UPDATE feed_items SET content_hash='v2' WHERE url=?", (PAGE,))
+        self.assertFalse(grab.known(PAGE)['done'])
+        # ② 导出跟上了:vault 里已是新正文,而索引里记着的还是上一版的 hash
+        self.export_vault(path, '# A\n\n新正文')
+        self.mark_exported(PAGE, path)
+        self.assertFalse(grab.known(PAGE)['done'])
+        # ③ 索引也跟上了,这才算走完
+        self.index_doc(path, '# A\n\n新正文')
+        self.assertTrue(grab.known(PAGE)['done'])
+        # ④ vault 里那一篇没了(清理脚本删过/导出其实没落):照旧不算走完
+        (config.VAULT_ROOT / path).unlink()
+        self.assertFalse(grab.known(PAGE)['done'])
+
     def test_known_answers_across_sources(self):
         # 一条推文已经被「大V观点」收过了:再收一遍只会在另一棵树下多一篇一样的。
         social = reg.save_subscription('social', {'name': 'E', 'url': 'https://x.com/example'})
@@ -475,11 +631,14 @@ class EndpointTests(GrabCase):
         self.runs: list[list[str]] = []
 
     def pipeline_patch(self, started=True, reason='其他同步正在运行'):
+        """**打桩也要还原那条契约**:`start_pipeline` 返回的是**这一轮的 id**,
+        不是 True —— 前端要拿它核对那一轮 export/index 的结果。回 True 的打桩会
+        让「端点把 run 原样交出去」这件事测不出来。"""
         def fake(stages, refused=None, crawl_filter=None, **kwargs):
             self.runs.append((list(stages), (crawl_filter or {}).get('channel')))
             if not started and refused is not None:
                 refused.append(reason)
-            return started
+            return 'run-7' if started else ''
         return patch.object(pipeline, 'start_pipeline', fake)
 
     def post(self, url=PAGE):
@@ -494,6 +653,9 @@ class EndpointTests(GrabCase):
         data = r.json()
         self.assertEqual((data['duplicate'], data['done']), (True, False))
         self.assertEqual(data['pipeline'], 'started')
+        # **那一轮的身份要原样交给前端**:没有它,面板只能按「run_id 变了」猜 ——
+        # 别人插在中间的一轮、以及我们这一轮红了,都会被写成「已写入知识库」。
+        self.assertEqual(data['run'], 'run-7')
         self.assertIn('还没写进知识库', data['detail'])
         # **后果断言**:后半条链真被跑起来了 —— 只改一句文案的话这里红。
         self.assertEqual(self.runs, [(['export', 'index', 'extract'], 'inbox')])
@@ -524,18 +686,45 @@ class EndpointTests(GrabCase):
         self.assertEqual(self.runs, [(['export', 'index', 'extract'], 'social')])
         self.assertIn('大V观点', data['detail'])
 
+    def test_a_busy_pipeline_names_the_button_of_the_owning_source(self):
+        """顺延那一句里的**按钮名按归属来源给**:来源页工具栏那颗按钮在可轮询的
+        来源里写「同步全部」,只有手动收录写「写入知识库」(判据就是 `pollable`,
+        和 `sources.js` 的 `manual` 分支同一个)。一条推文被「大V观点」收过、这一轮
+        又没占到管道时,照手动收录那套说就是指着一颗那一页上不存在的按钮。"""
+        social = reg.save_subscription('social', {'name': 'E', 'url': 'https://x.com/example'})
+        reg.put_items(social, [{'url': grab.normalize(TWEET), 'title': '旧标题',
+                                'body': '正文', 'published': ''}])
+        with self.pipeline_patch(started=False):
+            data = self.post(TWEET).json()
+        self.assertEqual(data['pipeline'], 'busy')
+        self.assertIn('在「大V观点」里点一次「同步全部」', data['detail'])
+        self.assertNotIn('写入知识库', data['detail'])
+
     def test_a_fresh_link_that_cannot_get_the_pipeline_says_what_to_do(self):
         with patch.object(grab, 'request', return_value=html_resp(page_html())), \
              self.pipeline_patch(started=False):
             data = self.post().json()
         self.assertEqual((data['added'], data['pipeline']), (1, 'busy'))
+        self.assertEqual(data['run'], '')          # 没起跑就没有可核对的那一轮
         self.assertIn('其他同步正在运行', data['detail'])
         self.assertIn('写入知识库', data['detail'])
         # 占不到管道不是失败:内容已经在库里了,下一轮 export 会兜住它。
         self.assertEqual(len(self.items()), 1)
 
     def test_a_refusal_comes_back_as_a_readable_400(self):
-        r = self.client.post('/api/grab', json={'url': 'https://mp.weixin.qq.com/s/abc'})
+        """**一个真实请求都不许发。** 这一条原先拿一条公众号地址当素材,而
+        `classify` 不再按域名拒它了(R2-F3)—— 于是用例会**真的去连
+        mp.weixin.qq.com**:结论跟着本机网络走,不可重放。地址那一档照旧不发
+        HTTP(X 的账号页),响应那一档把 `request` 打桩成那张验证页。
+        """
+        r = self.client.post('/api/grab', json={'url': 'https://x.com/example'})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('大V观点', r.json()['detail'])
+        gate = ('https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha?poc_token=x'
+                '&target_url=https%3A%2F%2Fmp.weixin.qq.com%2Fs%2Fabc')
+        with patch.object(grab, 'request', return_value=html_resp(
+                '<html><body><p>环境异常</p></body></html>', url=gate)):
+            r = self.client.post('/api/grab', json={'url': 'https://mp.weixin.qq.com/s/abc'})
         self.assertEqual(r.status_code, 400)
         self.assertIn('公众号', r.json()['detail'])
         self.assertEqual(self.items(), [])

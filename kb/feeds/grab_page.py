@@ -32,37 +32,64 @@ HEADERS = {'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;
 # 正文最多留多长。口径同 `x_article.MAX_CHARS`。
 MAX_CHARS = 60000
 
-#: 落到这些地址上 = 对方把内容挡在了一道人工关卡后面。**判据是最终地址**
-#: (`request` 跟完重定向之后那一个),和提取器交得出什么无关 —— 这一道
-#: **在成功路径上也生效**(`gate_url_reason`)。
+# ── 访问关卡 ───────────────────────────────────────────────────────────────────
+# **判据一律是「这一次响应/这一页自己的身份」,不是「它有多长、命中了几个词」。**
+# 上一轮两头都踩了(2026-10-16 第二轮审查两例俱在):按「超过 1200 字就放行」漏掉
+# 一张 1782 字的验证页 —— 它被 `put_items` 的 `DO NOTHING` 永久钉成了那一篇的
+# 正文;按「路径里有 `challenge` 这一段」拒掉一篇正经文章 —— 这一道在成功路径上
+# 也生效,误拒就是这一篇再也收不进来。**所以别再靠调字数、堆关键词来修**:要加的
+# 是身份证据。身份证据四样,一条成立就算关卡,`gate_reason` 挨个问。
+
+#: ①**路由**:各家关卡自己的那几条路径/参数,按**最终地址**(`request` 跟完
+#: 重定向之后那一个)的 path + query 比,和提取器交得出什么无关。
 #: 绿泡泡实测(2026-10-16,`mp.weixin.qq.com/s/<slug>`):302 到
 #: `/mp/wappoc_appmsgcaptcha?poc_token=…&target_url=…`,18 KB 的验证页,
 #: og 元信息和 `#js_content` 全都没有。
-#: 出现在地址里**任意位置**就算:这几串是各家关卡自己的路径,不会撞上正常文章。
-_GATE_MARKS = ('appmsgcaptcha', 'wappoc_', '/cdn-cgi/l/chk', '/sorry/index')
-#: 这几个要**整段相等**,不能当子串用:`challenge` / `checkpoint` 是常见英文词,
-#: 子串匹配会把 `/cloudflare-challenges/`、`/challenge-of-the-week` 一起拒掉。
-#: 这一道现在在**成功路径**上也生效,所以误拒的代价从「多一句话」变成了「这篇
-#: 收不进来」(2026-10-16 实测 developers.cloudflare.com 那篇 1277 字的正经文档
-#: 正是这个形状,差一个连字符而已)。
-_GATE_SEGMENTS = frozenset(('challenge', 'checkpoint'))
-#: 关卡页的措辞。**整份 HTML 里找这几个词只在「提取不出正文」之后才算数**:
-#: 一篇正常文章里出现「captcha」不该被判成关卡。
-_GATE_WORDS = ('环境异常', '完成验证', '请在微信客户端打开', 'enable javascript',
-               'verify you are human', 'checking your browser', 'captcha')
-#: 提取**成功**那条路上也要拒的措辞:只认强措辞(`captcha` 这类正常文章里会出现
-#: 的词不在内),而且只看**提取出来的那段正文**。
-#: 事故形态(2026-10-16 审查实测):一张 683 字的验证页提取成功 → 被当成正文
-#: 落库,而 `put_items` 是 `DO NOTHING`,再投一次同一条链接也换不回真文章。
+#: **一个通用英文词都不许进这张表**(`challenge`、`checkpoint`、`verify` 这些):
+#: 正常文章的路径里就带着它们 —— 实测 developers.cloudflare.com 那篇 1277 字的
+#: 正经文档落在 `/waf/reference/cloudflare-challenges/`、审查那篇落在
+#: `/blog/challenge/`,两篇都该收进来。
+_GATE_ROUTES = ('appmsgcaptcha', 'wappoc_', '/cdn-cgi/l/chk', '/sorry/index',
+                '__cf_chl_tk')
+#: ②**页面上挂着的那套关卡组件**。这是页面身份:一篇讲 Cloudflare 的文章不会把
+#: 关卡编排脚本挂在自己页上。
+#: **通用的验证码小组件不许进这张表**(reCAPTCHA / hCaptcha / Turnstile 那几个
+#: `api.js`):正常文章页的评论框就挂着它们,进表等于按「这站评论要过验证码」拒稿。
+#: Cloudflare 那一条也只收**编排**路径(`challenge-platform/h/`)而不是整个
+#: `challenge-platform/` —— 后者的 `jsd/main.js` 在普通页面上也会被注入。
+_GATE_ASSETS = ('/cdn-cgi/challenge-platform/h/', '_cf_chl_opt',
+                'captcha-delivery.com/captcha')
+#: ③**标题自己就是一句关卡提示**。全是**祈使句或状态播报** —— 正经文章的标题不
+#: 这么写,所以「人机验证是怎么坏掉的」这种不在射程内。反过来说:`验证码`、
+#: `captcha`、`challenge` 这类**话题词**一个都不许进这张表。
+#: 标题单独不算数,要配上正文里也在说同一件事(见 `gate_reason` 的 ③)。
+_GATE_TITLES = ('just a moment', 'attention required', 'access denied',
+                'checking your browser', 'verify you are human',
+                'are you a robot', 'security check', 'one more step',
+                '环境异常', '请完成验证', '完成验证后', '安全验证', '请稍候',
+                '请在微信客户端打开')
+#: 关卡措辞:**只收强措辞**(`captcha` 这类正常文章里会出现的词不在内)。
+#: ③ 用它确认「正文里也在说这件事」,④ 用它算份额。
 _GATE_PHRASES = ('环境异常', '完成验证', '请在微信客户端打开', 'enable javascript',
                  'verify you are human', 'checking your browser',
                  'just a moment', 'attention required')
-#: 「整页就这么点字」的界(见 `gate_body_reason` 的两个条件)。
-_GATE_BODY_CHARS = 1200
-#: 要命中**几句**不同的措辞。关卡页从来不只说一句 —— 实测那张 683 字的页面同时
-#: 写着「请完成验证」「enable javascript」「verify you are human」;而一篇正经讲
-#: 拦截页的文章通常只引其中一句。
-_GATE_PHRASE_HITS = 2
+#: ④**通篇就是那几句提示**:命中的句子占了正文三分之二以上。
+#: **按份额算、不设字数上限** —— 上限就是上一轮那个洞:页面长一点就一路放行。
+#: 实测两侧(2026-10-16):审查那张 1782 字的验证页 67%;而一篇正经讲拦截页的
+#: 文章反复引那几句也只到 50%(`tests/test_grab.py` 拿它钉着这条线的另一侧),
+#: 真实的 Cloudflare 文档是 0%。
+_GATE_SHARE = 0.66
+#: 句界只按 CJK 标点和换行切。**`. ` 不算**:域名、缩写、小数点会把一句话切成好
+#: 几截,份额跟着抖。
+_SENTENCE = re.compile(r'[^\n。！？!?；;]+')
+#: 提取不出正文时才用的宽词表:那时已经没有正文可言,宁可多认一道关卡 ——
+#: 这一档多拒的代价是一句话,而错存的代价不可恢复。
+_GATE_WORDS = _GATE_PHRASES + ('captcha', '滑块验证', 'cf-browser-verification')
+#: 两句话,四个判据共用。地址/组件那一档和正文那一档对用户的意思不同(前者连页面
+#: 都不是我们要的,后者是这一页自己说要先过验证),所以分开写;**再往下分没有意义**
+#: —— 用户能做的事一模一样。
+_SAY_ROUTE = '对方把这个地址挡在了一道验证页后面'
+_SAY_PAGE = '这一页要求先完成验证或登录'
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 
@@ -96,53 +123,65 @@ class PageUnavailable(ValueError):
     """这一页读不出可保存的内容。消息直接面向用户,说清下一步。"""
 
 
-def gate_url_reason(final_url: str) -> str:
-    """地址判据:已确认的那几道关卡。空串 = 不是。
+def _page_title(html: str) -> str:
+    """这一页**自称**的标题:`<title>` 和 og/twitter 那几个一起算。
 
-    **这一道和提取结果无关,成功路径上同样要问。** 「提取器交出了一段长文字」
-    证明不了手里这篇是目标文章 —— 关卡页自己也有文字,够长就一路过关,然后被
-    `DO NOTHING` 永久钉成这一篇的正文(审查实测那一例落在 `/challenge` 上,
-    正文 683 字,导出和索引全都成功)。
+    **两处都要看,而且不回落到正文。** 关卡页一定有 `<title>`(浏览器标签上那行
+    字),但有些站点的关卡壳子只给 og —— 判据宁可宽:这一道多认一次的代价是一
+    句话,而错存不可恢复。反过来,`page_meta` 的回落链(正文第一行 → 站点名)在
+    这里**不能用**:那等于拿正文冒充标题,③ 就退化成"正文里有这句话"。
+    候选拼成一串交出去:判据是子串命中,拼起来不影响结论。
     """
-    low = (final_url or '').lower()
-    hit = (any(p in low for p in _GATE_MARKS)
-           or any(seg in _GATE_SEGMENTS for seg in urlsplit(low).path.split('/')))
-    return '对方把这个地址挡在了一道验证页后面' if hit else ''
+    soup = BeautifulSoup(html or '', 'html.parser')
+    parts = [_first_meta(soup, _TITLE_META)]
+    if tag := soup.select_one('title'):
+        parts.append(oneline(tag.get_text(' ', strip=True), 'text'))
+    return ' | '.join(part for part in parts if part)
 
 
-def gate_body_reason(body: str) -> str:
-    """正文判据:提取成功了,但交出来的那段文字自己说「先过验证」。空串 = 不是。
+def _gate_share(body: str) -> float:
+    """正文里「这一句就是关卡提示」的句子占多少。没正文算 0。"""
+    sentences = [s.strip() for s in _SENTENCE.findall(body or '') if s.strip()]
+    if not sentences:
+        return 0.0
+    hits = sum(1 for s in sentences if any(p in s.lower() for p in _GATE_PHRASES))
+    return hits / len(sentences)
 
-    判据是**「这段正文几乎全是关卡提示」**,两条一起:
-    ①整页就这么点字(`_GATE_BODY_CHARS`);
-    ②里面命中了**两句以上**不同的关卡措辞(`_GATE_PHRASE_HITS`)。
 
-    **少一条都不行。** 只看措辞会拒掉一篇正经写「Verify you are human」的文章
-    (那一句在它里面只是被引用的一行);只看长度会拒掉所有短文 —— 而这一档拒掉
-    就是拒掉,用户再点一次也换不回来,代价不是「重抓一次」。
+def gate_reason(final_url: str, html: str, body: str = '') -> str:
+    """这一次响应是不是一道访问关卡。空串 = 不是,其余是给用户的那半句话。
+
+    **不变量:已经认出是关卡的响应,既不许落库、也不许被说成「这一页没找到
+    正文」。** 所以成功和失败两条路共用这一道 —— 调用方只有一个调用点,而且排
+    在「拿 `body` 做任何事」之前(`grab._grab_web`)。「提取器交出了一段长文字」
+    证明不了手里这篇是目标文章:关卡页自己也有文字,够长就一路过关,然后被
+    `put_items` 的 `DO NOTHING` 永久钉成这一篇的正文(两轮审查各实测到一例)。
+
+    判据全是**身份**,一条成立就算(四张表各自的理由写在它们自己头上):
+    ①路由 `_GATE_ROUTES`;②页面挂着的关卡组件 `_GATE_ASSETS`;
+    ③标题是一句关卡提示 `_GATE_TITLES` **且**正文里也有关卡措辞;
+    ④正文通篇就是那几句提示(`_GATE_SHARE`,**按份额、不按字数**)。
+
+    `body` 空 = 提取器什么都没交出来。那时 ③ 不再要正文佐证,另外还加一道宽词
+    表(`_GATE_WORDS`):已经没有正文可言了,宁可多认一道关卡也别把人留在
+    「这一页没找到正文」上 —— 那句话指不出下一步。
     """
-    text = (body or '').strip()
-    if not text or len(text) > _GATE_BODY_CHARS:
-        return ''
-    low = text.lower()
-    hits = sum(1 for p in _GATE_PHRASES if p in low)
-    return '这一页要求先完成验证或登录' if hits >= _GATE_PHRASE_HITS else ''
-
-
-def gate_reason(final_url: str, html: str) -> str:
-    """**提取不出正文之后**那一问:是读不到,还是被挡在了关卡后面。空串 = 不是。
-
-    这一档拿整份 HTML 去对全量词表(含 `captcha` 这类松词)—— 走到这里时已经
-    没有正文可言了,宁可多认一道关卡也别把人留在「这一页没找到正文」上。
-    地址那一道由 `gate_url_reason` 答(调用方在提取之前就问过一次,这里重复问
-    是构造上的第二道)。
-    """
-    if reason := gate_url_reason(final_url):
-        return reason
-    head = (html or '')[:200000].lower()
-    for word in _GATE_WORDS:
-        if word in head:
-            return '这一页要求先完成验证或登录'
+    parts = urlsplit((final_url or '').lower())
+    route = parts.path + (f'?{parts.query}' if parts.query else '')
+    page = (html or '')[:200000].lower()
+    if any(mark in route for mark in _GATE_ROUTES):
+        return _SAY_ROUTE
+    if any(mark in page for mark in _GATE_ASSETS):
+        return _SAY_ROUTE
+    title = _page_title(html).lower()
+    titled = any(word in title for word in _GATE_TITLES)
+    share = _gate_share(body)
+    if share >= _GATE_SHARE:
+        return _SAY_PAGE
+    if titled and (share > 0 or not body):
+        return _SAY_PAGE
+    if not body and any(word in page for word in _GATE_WORDS):
+        return _SAY_PAGE
     return ''
 
 
@@ -236,7 +275,13 @@ def as_published(value: str) -> str:
         return f'{m.group(1)} {m.group(2)}'
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=SHANGHAI)
-    return dt.astimezone(SHANGHAI).strftime('%Y-%m-%d %H:%M')
+    try:
+        return dt.astimezone(SHANGHAI).strftime('%Y-%m-%d %H:%M')
+    except (OverflowError, OSError, ValueError):
+        # 日期本身合法、换算时却溢出(`9999-12-31T23:30:00Z` 加 8 小时就出了
+        # `datetime` 的头):**别让一个补充字段带掉整条收录** —— 承重的是正文,
+        # 而「没有发布时间」是一句真话(口径同上面认不出就留空那一档)。
+        return ''
 
 
 def page_meta(html: str, final_url: str) -> dict:
