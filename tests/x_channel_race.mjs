@@ -316,4 +316,46 @@ export async function ownershipSections() {
           .includes("没跑完"),
         await evalJs(`document.getElementById('source-x-import-state').textContent`));
 
+  // 4.6j **结论归不归眼前这一份,跟后端那边变没变,是两个问题。**
+  // 这一下写的是那个**共享的** profile —— 换 Chrome 可执行文件位置并不换它。于是
+  // 「导入在途时改一下位置并保存」会同时成立两件事:①那条回包说的是旧那一份配置,
+  // 不该被当成这一份的结论;②cookie 确确实实已经搬进去了,面板缓存里那句「还没有
+  // 登录过 X」已经不成立。上一轮把两件事绑在同一个 `return` 上,于是导入成功的回执
+  // 刚弹出来,同屏还写着「还没有登录过 X」「这一轮没走完」,切走再切回来才恢复
+  // (审查实测 `import-after-save.jpg`)。
+  await evalJs(`(document.getElementById('toast-host')||{}).innerHTML = ''; true`);
+  await evalJs(`fetch('/__probe/forget').then(() => true)`);
+  await pick('browser');
+  await fill('#source-x-chrome', '/review/chrome-a');
+  await clickAt("#source-settings-save");
+  await until(`xChannelSaved() && xChan.current === 'browser' && xChan.ready === false`, 20000);
+  check("起点:面板说这一档还没有登录过(摆盘自检)",
+        (await state()).includes("还没有登录过"), await state());
+  await evalJs(`fetch('/__probe/stamps?reset=1').then(() => true)`);
+  await evalJs(`fetch('/__probe/slow-import?ms=2500').then(() => true)`);
+  check("「导入登录态」点得到(4.6j)", await clickAt("#source-x-import-btn"));
+  await sleep(400);                                   // 导入在路上(按旧位置)
+  await fill('#source-x-chrome', '/review/chrome-b');    // 他改了 Chrome 位置
+  await clickAt("#source-settings-save");                // 并且真存下去了
+  await until(`xChannelSaved() && xChanDraft().includes('chrome-b')`, 20000);
+  check("保存收尾那次读到的仍是导入之前那一刻(摆盘自检)",
+        (await state()).includes("还没有登录过"), await state());
+  await until(`document.querySelector('#toast-host')?.textContent.includes('搬进独立 profile')`, 20000);
+  // **先断言后果**:用户眼前这一屏不许再说"还没有登录过"。
+  await until(`!document.getElementById('source-x-state')
+                 .textContent.includes('还没有登录过')`, 20000);
+  check("导入完成之后,同一屏上不再写着「还没有登录过 X」", true);
+  check("那行留痕也跟上了权威记录",
+        (await text('#source-x-import-state')).includes("上次从日常浏览器导入"),
+        await text('#source-x-import-state'));
+  // **机制那一半**:恢复不是靠把那条被丢掉的回包贴上来(它说的是旧那一份配置),
+  // 而是收尾时重新问了一次 —— 所以时序上「导入之后还有一条读」。
+  const after = await evalJs(`fetch('/__probe/stamps').then(r => r.json())
+                                .then(j => JSON.stringify(j.stamps))`);
+  const marks = JSON.parse(after);
+  check("恢复走的是重新读一次,不是把那条旧回包贴上来",
+        marks.lastIndexOf('get') > marks.lastIndexOf('import'), after);
+  // **反过来钉一边:回执照旧给**(它说的是用户自己刚点的那颗按钮)。
+  check("那次导入的回执照旧给了用户",
+        (await text('#toast-host')).includes("搬进独立 profile"), await text('#toast-host'));
 }

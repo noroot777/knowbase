@@ -127,6 +127,65 @@ class ConfigIdentityTests(ChannelBase):
         self.assertEqual(400, r.status_code)
         self.assertIn('保存设置', r.json()['detail'])
 
+    def test_what_gets_compared_is_also_what_gets_run(self):
+        """**「拿来比的」和「拿来跑的」必须是同一份值。**
+
+        身份把路径 trim 了,执行那一侧原来读原值:存着末尾带一个空格的那份、面板
+        发来不带空格的,这道闸判"对得上"并放行,真跑起来的却是**另一个文件**
+        (审查实测:两份同名、只差末尾空格的可执行文件,回包里是另一份的输出)。
+        判据因此落在**执行时拿到的那个值**上,不是"放没放行"。
+        """
+        self.settings(x_channels.FEEDGRAB, x_feedgrab_bin='/opt/real/feedgrab ')
+        seen = {}
+
+        def check(settings):
+            seen.update(settings)
+            return True, 'ok'
+
+        with patch.object(x_channels, 'check', check):
+            r = self.post('/api/intake/social/x-channel/check',
+                          x_channel='feedgrab', x_feedgrab_bin='/opt/real/feedgrab')
+        self.assertEqual(200, r.status_code)
+        self.assertEqual('/opt/real/feedgrab', seen['x_feedgrab_bin'])
+
+    def twins(self) -> str:
+        """造一对只差末尾一个空格的可执行文件,返回不带空格那个的路径。
+
+        **两个都得真的存在、真的可执行**:只有这样 `x_feedgrab.find_binary` 才会
+        把原值原样交出去 —— 带空格那份不存在时它抛异常、回落分支自己 `strip()` 了,
+        于是「规范化到底在哪一层」这件事在用例里压根看不出来(第一版就是这么写的,
+        注入旧代码一条红都没有)。**一个字节都不执行它们。**
+        """
+        plain = self.root / 'fg-cli'
+        for path in (plain, self.root / 'fg-cli '):
+            path.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+            path.chmod(0o755)
+        return str(plain)
+
+    def test_the_cheap_verdict_reads_the_same_value_too(self):
+        """同一份规范化也要管到 GET 那一侧 —— 否则面板按原值算就绪、照着它抄的那条
+        登录命令指的是另一个文件,而执行走的又是第三种值。"""
+        plain = self.twins()
+        self.settings(x_channels.FEEDGRAB, x_feedgrab_bin=plain + ' ')
+        got = self.client.get('/api/intake/social/x-channel').json()
+        self.assertEqual(plain, got['config']['x_feedgrab_bin'])
+        # 原值那一份可执行、于是被原样交出来,再被 `shlex.quote` 整条引起来
+        # (`'…/fg-cli ' login`)。判据是「路径后面直接跟着 login」—— 只有 trim 过才成立。
+        self.assertIn(plain + ' login', got['login_command'])
+
+    def test_a_config_that_can_be_saved_can_also_be_acted_on(self):
+        """保存那一侧不限长,动作这一侧原来限 1024 —— 于是存得下、却动不了:长路径
+        PUT 回 200,同一份配置的动作回 422,而设置页面一切正常。上限要设就两边一起
+        设、在同一个入口拒绝。"""
+        long_path = '/opt/' + 'x' * 1200 + '/feedgrab'
+        saved = self.client.put('/api/intake/social/settings', json={
+            'x_channel': 'feedgrab', 'x_feedgrab_bin': long_path})
+        self.assertEqual(200, saved.status_code)
+        with patch.object(x_channels, 'check', return_value=(True, 'ok')):
+            r = self.post('/api/intake/social/x-channel/check',
+                          x_channel='feedgrab', x_feedgrab_bin=long_path)
+        self.assertEqual(200, r.status_code)
+
     def test_the_panel_read_hands_back_the_whole_config(self):
         """GET 要给**完整那一份**。少了它前端只能拿上一次权威加载落下的路径去拼
         一份出来 —— 同一档取法在另一个标签页里换了路径时,拼出来的身份就是错的。

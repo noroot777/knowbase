@@ -140,18 +140,38 @@ def set_settings(kind: str,body: Settings):
 
 
 def _x_kind(kind: str) -> dict:
-    """确认这一类来源有通道可选,并把当前设置取出来。"""
+    """确认这一类来源有通道可选,并把当前设置取出来 —— **规范化之后那一份**。
+
+    **「拿来比的」和「拿来跑的」必须是同一份值。** 身份(`config_of`)把两条路径
+    的首尾空白去掉,而执行那一侧原来读的是**原值**:于是存着 `'…/fg-cli '`(末
+    尾一个空格)、面板发来 `'…/fg-cli'` 时,这道闸判"对得上"并放行,真正跑起来的
+    却是另一个文件(审查实测:两份同名、只差末尾空格的可执行文件,回包里是另一
+    份的输出)。这里一次性规范化之后,`readiness`、`login_command`、三个动作的执
+    行全都读同一份值,口径只有 `config_of` 那一处。
+
+    **选 trim 而不是逐字比**:路径末尾的空白几乎一定是手滑,而面板本来就在发出
+    去之前 trim 过 —— 不规范化的话那种存量设置会**永远**被这道闸拒绝(用户对着
+    一份看起来一模一样的设置被拒,看不出差在哪一步)。代价是真叫 `'fg-cli '` 的
+    文件填不进来,那是个可以接受得多的取舍。
+    """
     kind_checked(kind)
     if not x_channels.supports_channels(kind):
         raise HTTPException(404, '该来源没有可选的采集通道')
-    return reg.get_settings(kind)
+    settings = reg.get_settings(kind)
+    return settings | x_channels.config_of(settings)
 
 
 class XChannelAction(BaseModel):
-    """动作请求里带着的「我眼前那一份设置」。字段跟 `x_channels.config_of` 一一对应。"""
+    """动作请求里带着的「我眼前那一份设置」。字段跟 `x_channels.config_of` 一一对应。
+
+    **两条路径不设长度上限,跟保存那一侧(`Settings`)一致。** 两边不一致的后果是
+    一份**存得下、却动不了**的配置:1144 字的路径 PUT 回 200,随后同一份配置的动
+    作回 422,而用户看到的是一颗按下去就报错的按钮、设置页面却一切正常(审查实
+    测)。上限要设就两边一起设、在同一个入口拒绝。
+    """
     x_channel: str = Field(default='', max_length=40)
-    x_feedgrab_bin: str = Field(default='', max_length=1024)
-    x_chrome_path: str = Field(default='', max_length=1024)
+    x_feedgrab_bin: str = ''
+    x_chrome_path: str = ''
 
 
 def _x_act(kind: str, expect: XChannelAction | None) -> tuple[dict, dict]:

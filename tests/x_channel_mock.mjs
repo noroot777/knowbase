@@ -111,6 +111,9 @@ let failGet = false;
 // 一条路径并保存」** —— 真实那一下要起浏览器或跑一次 feedgrab doctor,几十秒里
 // 换个路径再保存是真会发生的事,而旧那次检查的结论说的已经是另一份配置了。
 let checkHold = 0;
+// 下一条导入 POST 压慢多久(一次性;缺省那 1200ms 照旧)。**用来摆「导入在途时
+// 改了 Chrome 位置并保存」** —— 那一下写的是共享的 profile,换位置并不换它。
+let importHold = 0;
 // 每个动作端点**实际按哪一份配置跑的**。页面上看不见后端用了什么,所以记在这儿。
 const used = [];
 // 「这一份设置」的身份,照 `kb/feeds/x_channels.py` 的 `config_of`:取法 + 两条
@@ -178,9 +181,16 @@ const server = createServer(async (req, res) => {
           return json({ detail: `当前保存的取法是「${CHANNELS.find(c => c.id === channel).label}」，`
                                 + "而这颗按钮写的是「独立 profile 的登录态」那一档的登录态。" }, 400);
 
+        // **跑的是哪一份,在请求到达这一刻定稿**(口径同下面的检查和 GET;真后端
+        // 就是这样:`_x_act` 取一次快照,收尾原样回传)。在 await 之后才去读的话,
+        // 被按住的这段时间里别人保存的那一份会被当成"这一次跑的",于是「导入在途
+        // 时改了配置」那个形态在 mock 上压根摆不出来 —— 页面会把一条属于旧配置的
+        // 结论判成当前这一份的结论,而探针全绿。
+        const ran = storedConfig();
         // 慢一点回:真实那一下要停在授权弹窗上(最长 90 秒),而"按下去之后
         // 立刻预告"正是这段时间里页面上唯一的交代 —— 秒回的 mock 测不到它。
-        await new Promise(r => setTimeout(r, 1200));
+        await new Promise(r => setTimeout(r, importHold || 1200));
+        importHold = 0;
         // **导入这一下正是把「还没登录过」变成「登录过」的那件事**,所以真后端
         // 会把重算过的 `ready/why` 一起回来(口径跟 GET 完全一份)。mock 不跟着
         // 回的话,「页面上那句互相打脸的旧状态」这条探不到 —— 它正是本轮审查的
@@ -188,7 +198,7 @@ const server = createServer(async (req, res) => {
         imported = true;
         stamps.push("import");
         return json({ ok: true, login_state: IMPORTED, ready: true, why: "",
-                      config: storedConfig(),
+                      config: ran,
                       detail: "已把 13 个 x.com cookie 搬进独立 profile，并在里面读到 9 条推文。" });
       }
       if (m[2] === "/login") {
@@ -260,6 +270,16 @@ const server = createServer(async (req, res) => {
   // 下一条「检查连接」压慢(摆「检查在途时换了路径并保存」)。
   if (path === "/__probe/slow-check") {
     checkHold = Number(new URL(req.url, "http://probe").searchParams.get("ms") || 0);
+    return json({ ok: true });
+  }
+  // 把「还没导入过」摆回来(下一条 GET 就说"还没有登录过 X")。
+  if (path === "/__probe/forget") {
+    imported = false;
+    return json({ ok: true });
+  }
+  // 下一条导入 POST 压慢(摆「导入在途时改了配置并保存」)。
+  if (path === "/__probe/slow-import") {
+    importHold = Number(new URL(req.url, "http://probe").searchParams.get("ms") || 0);
     return json({ ok: true });
   }
   // 下一条取法 GET 回 503(摆读失败)。

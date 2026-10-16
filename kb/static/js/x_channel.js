@@ -128,6 +128,21 @@ function xChanOwnsAct(t, config) {
   xChanLands += 1;              // 从此刻起,更早发出的读说的都是旧事实
   return true;
 }
+// **结论没能落在这块面板上时,一律重取一次权威状态。** 跟「这条结论能不能贴到
+// 面板上」是两个问题:后者看配置身份(`xChanOwnsAct`),这一个只问"后端那边有没有
+// 可能已经不是面板上说的样子了" —— 两种来法都算:
+//  ①**这个动作可能已经写过东西**。导入写的是那个**共享的** profile
+//    (`x_channels.BROWSER_PROFILE` 只有一个,换 Chrome 可执行文件位置并不换它),
+//    检查会真起一个 Chrome 打开它;**失败和断连同样算** —— 没拿到回包证不了后端
+//    没写(超时不等于没发生)。
+//  ②**被那道闸拒绝**:它什么都没写,但这件事本身说明我们手里那份「后端存着什么」
+//    是错的(多半是另一个标签页改过),同样得重新问一次。
+// 判据宁可宽:多读一次的代价只是一条 GET,漏掉的代价是面板上挂着一条已经不成立
+// 的旧结论,而用户看不出它是旧的(审查实测:导入在途时改 Chrome 位置并保存,导入
+// 成功的回包因为配置变了被整条丢掉,面板一直说「还没有登录过 X」「这一轮没走完」,
+// 切走再切回来才恢复)。
+function xChanStale() { loadXChannel(sourceKind); }
+
 // 后端那道闸拒绝了(409):它核对过,这一次**什么都没跑**。所以不许记成「结果
 // 不知道」—— 那一档是留给"真跑过、只是没拿到答复"的。要做的是重读一次,把现在
 // 真正存着的那一份摆出来。
@@ -371,11 +386,11 @@ function xChanSelect(id) {
 }
 
 // 后端那一份的身份。两种形状各有自己的取法,但都归到 `xChanKey` 那一个口径上:
-//  - `/api/intake/<kind>` 的 settings:三个字段都在;
-//  - `/api/intake/<kind>/x-channel` 的回包:**只有 `current`**,两条路径不在里面 ——
-//    所以拿它更新身份时沿用页面上已经存着的那两个值(它们是上一次权威加载落下的,
-//    这条读压根不声称它们变了)。不这么做的话每条 GET 都会把身份判成"路径空着",
-//    于是「改了路径还没保存」在一次刷新之后就看不出来了。
+//  - `/x-channel` 的回包:`config` 里就是完整那一份(后端照它核对动作请求);
+//  - settings 的形状(保存那条路的回包):三个字段在顶层。
+// **两条都不许靠"沿用页面上现有的那两个值"去拼。** 那是 GET 还只给 `current` 时
+// 的老办法,而它是猜 —— 同一档取法在另一个标签页里换了路径时,拼出来的身份就是
+// 错的,于是这一页会一直以为自己那一份还存着(审查实测过那条路径)。
 function xChanSavedKey(data) {
   if (data && data.config) return xChanKey(data.config);           // `/x-channel` 的回包
   if (data && 'x_channel' in data) return xChanKey(data);          // settings 的形状
@@ -543,7 +558,7 @@ async function importXLoginState() {
   } catch (e) {
     // 拒绝那一档**什么都没跑**,所以不记「搬没搬成不知道」—— 记了就是把一次
     // 明确的拒绝说成一次悬着的导入(理由见 `xChanRefused`)。
-    if (xChanRefused(e)) { toast(e.message, { type: 'info', ms: 12000 }); loadXChannel(sourceKind); return; }
+    if (xChanRefused(e)) { toast(e.message, { type: 'info', ms: 12000 }); return; }
     toast('导入没跑完', { detail: e.message });   // 回执同样先给
     // 失败那条路同一道闸:**超时不等于没发生** —— 后端可能已经把 cookie 搬完了,
     // 这时候放一条「导入之前」的读进来,页面会说回「还没有登录过 X」(那一道同样
@@ -566,7 +581,9 @@ async function importXLoginState() {
     // 结果没写进这块面板时才重画:**写进去了就别动它** —— 一次没验成的导入写的是
     // 「这一次为什么没成」,而重画写的是留痕那行「什么时候搬的」,后者答不了前者。
     // 没写进去的那一档必须重画,否则上面按住的「正在…」会永远挂在那儿。
-    if (!mine) xChannelPicked();
+    // **「这条结论归不归眼前这一份」和「后端那边变没变」是两个问题**,
+    // 结论没落地就重取一次(两种来法见 `xChanStale`)。
+    if (!mine) { xChannelPicked(); xChanStale(); }
   }
 }
 
@@ -592,7 +609,7 @@ async function checkXChannel() {
     if (xChan) { xChan.ready = r.ready; xChan.why = r.detail; }
     xChannelSay(r.detail);
   } catch (e) {
-    if (xChanRefused(e)) { toast(e.message, { type: 'info', ms: 12000 }); loadXChannel(sourceKind); return; }
+    if (xChanRefused(e)) { toast(e.message, { type: 'info', ms: 12000 }); return; }
     toast('检查没跑完', { detail: e.message });
     if (!(mine = xChanOwnsAct(tag))) return;
     // 同一道闸、同一个理由(见 `xChanUnsure`):这一下断在传输层,后端那次检查
@@ -604,6 +621,8 @@ async function checkXChannel() {
   } finally {
     xChanBusy = false; xChanPending = null;
     $('source-x-check').disabled = false;
-    if (!mine) xChannelPicked();    // 理由同导入那条
+    // 同一道,理由同导入那条。**但保护不许因此放宽**:这条结论该不该显示仍然
+    // 按它跑的那一份配置判(上面那道 `xChanOwnsAct`),这里只是重取一次权威状态。
+    if (!mine) { xChannelPicked(); xChanStale(); }
   }
 }
