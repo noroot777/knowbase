@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from kb import pipeline
 from kb.feeds import (fulltext, grab, grab_store, registry as reg, sync,
                       translate)
 from kb.feeds.fetching import FeedError
@@ -301,6 +302,15 @@ class LateFulltextTests(GrabCase):
         self.assertEqual((row['title_zh'], row['body_zh'], row['translated_at']), ('', '', ''))
 
 
+def round_trip(case, base: dict) -> None:
+    """把标题改成 BETA、再改回 ALPHA —— 两次都是真的重抓、两次都被接受。
+
+    末态:四列逐字回到 `base`(所以 `content_hash` 也回到原值),而代次走过两版。
+    """
+    case.assertTrue(grab.replace(grab.known(PAGE), {**base, 'title': 'BETA'}))
+    case.assertTrue(grab.replace(grab.known(PAGE), base))
+
+
 class WorkEpochTests(GrabCase):
     """内容**改过去又改回来**:指纹回到原值,而这期间两次更新都已经被接受过。
 
@@ -325,9 +335,7 @@ class WorkEpochTests(GrabCase):
         return base
 
     def _round_trip(self, base: dict):
-        """把标题改成 BETA、再改回 ALPHA —— 两次都是真的重抓、都被接受。"""
-        self.assertTrue(grab.replace(grab.known(PAGE), {**base, 'title': 'BETA'}))
-        self.assertTrue(grab.replace(grab.known(PAGE), base))
+        round_trip(self, base)
 
     def test_a_late_fulltext_save_cannot_come_back_after_a_round_trip(self):
         """**指纹回到原值之后,迟到的补抓仍然不许交付。**
@@ -394,6 +402,110 @@ class WorkEpochTests(GrabCase):
         row = self.items()[0]
         self.assertEqual((row['fulltext_tries'], row['fulltext_error']), (0, ''))
         self.assertEqual(fulltext.pending('rss'), 1)
+
+
+class ManualHandoffTests(GrabCase):
+    """手动重抓**也是**「先取样 → 等网络 → 再提交」那个模式。
+
+    `/api/grab` 的 `refetch` 先拿一份 `known()` 快照,再去原文链接抓几十秒,最后把
+    结果交给 `replace`。两个页面同时在重抓同一条链接时,等着的那一个回来时库里可能
+    已经换过好几版 —— 判据只认指纹的话,指纹一复原它就又拿回了交付权。
+    """
+
+    def setUp(self):
+        super().setUp()
+        from fastapi.testclient import TestClient
+
+        from kb.server import app
+        self.client = self.enterContext(TestClient(app))
+        self.runs: list = []
+
+    def _pipeline(self):
+        """打桩那一轮管道(交出 run id,口径同 `EndpointTests.pipeline_patch`)。"""
+        def fake(stages, refused=None, crawl_filter=None, **kwargs):
+            self.runs.append(list(stages))
+            return 'run-7'
+        return patch.object(pipeline, 'start_pipeline', fake)
+
+    def _alpha(self) -> dict:
+        """一条已经收好、已导出的条目,**指纹已经在替换那条路自己的口径上**。
+
+        先走一次真实替换是必需的:第一次 `replace` 必然换 hash 口径(见
+        `item_version`),不先做这一步,指纹压根回不到取样那一版。
+        """
+        grab.save({'url': PAGE, 'title': 'BASE', 'body': BODY, 'author': '某记者',
+                   'published': '2026-10-15 10:00', 'content_kind': 'content'})
+        sync.export(grab.KIND)
+        base = {'url': PAGE, 'title': 'ALPHA', 'body': BODY, 'author': '某记者',
+                'published': '2026-10-15 10:00'}
+        self.assertTrue(grab.replace(grab.known(PAGE), base))
+        sync.export(grab.KIND)
+        return base
+
+    def test_an_earlier_refetch_cannot_land_after_a_round_trip(self):
+        """**等着的那个请求回来时指纹已经复原 —— 它那份更早的抓取不许被接受。**
+
+        实测形态:一个页面在等,另一个把标题改成 BETA 又改回 ALPHA(两次都换成
+        了);等第一个回来,文章变成它抓到的那份旧内容、`done` 照旧报真,再贴同一
+        链接只说「已经在知识库里了」,md 和全文检索跟着落了它。
+        """
+        base = self._alpha()
+        sampled = grab_store.work_version(self.items()[0])
+        earlier = {'url': PAGE, 'title': 'EARLIER', 'body': 'OLDMANUALWORK ' + BODY,
+                   'author': '某记者', 'published': '2026-10-15 10:00',
+                   'content_kind': 'content'}
+
+        def grabbing(url):
+            # 这就是「这一个还在等」那段时间:另一个页面来回换了两次。
+            round_trip(self, base)
+            now = self.items()[0]
+            # **先钉住这条用例测的就是那一档**:指纹真的复原了,代次已经走过两版。
+            self.assertEqual(grab_store.work_version(now)[0], sampled[0])
+            self.assertGreater(grab_store.work_version(now)[1], sampled[1])
+            return earlier
+
+        with self._pipeline(), patch.object(grab, 'grab', side_effect=grabbing) as got:
+            data = self.client.post('/api/grab', json={'url': PAGE, 'refetch': True}).json()
+        self.assertEqual(got.call_count, 1)
+        # **如实交出去**:没换成就不许说已完成(前端据 `replaced` 落 pending)。
+        self.assertIs(data['replaced'], False)
+        self.assertIn('已经有人换过了', data['detail'])
+        self.assertNotIn('pipeline', data)
+        self.assertEqual(self.runs, [])
+        # **后果断言**:库里还是后来那一版,一个字节都没被换回去。
+        row = self.items()[0]
+        self.assertEqual(row['title'], 'ALPHA')
+        self.assertNotIn('OLDMANUALWORK', row['body'])
+
+    def test_a_refetch_that_nobody_raced_still_lands(self):
+        """**反过来钉一边**:没人插手时这条链照旧换得成、照旧起后半条链。"""
+        self._alpha()
+        fresh = {'url': PAGE, 'title': 'FRESH', 'body': 'NEWBODY ' + BODY,
+                 'author': '某记者', 'published': '2026-10-15 10:00',
+                 'content_kind': 'content'}
+        with self._pipeline(), patch.object(grab, 'grab', return_value=fresh):
+            data = self.client.post('/api/grab', json={'url': PAGE, 'refetch': True}).json()
+        self.assertIs(data['replaced'], True)
+        self.assertEqual(self.runs, [['export', 'index', 'extract']])
+        row = self.items()[0]
+        self.assertEqual(row['title'], 'FRESH')
+        self.assertIn('NEWBODY', row['body'])
+
+    def test_a_stale_snapshot_cannot_replace_after_a_round_trip(self):
+        """同一条的单元级形态:拿着复原前那份快照提交,`replace` 必须拒。
+
+        端点那条走的是同一个函数,这一条钉的是**判据本身** —— 快照里的代次落后,
+        哪怕四列和指纹都逐字相同也不许提交。
+        """
+        base = self._alpha()
+        stale = grab.known(PAGE)
+        round_trip(self, base)
+        self.assertEqual(grab.known(PAGE)['content_hash'], stale['content_hash'])
+        self.assertFalse(grab.replace(stale, {**base, 'title': 'EARLIER'}))
+        self.assertEqual(self.items()[0]['title'], 'ALPHA')
+        # 快照重新读一次就照旧换得成 —— 拒的是过期的那份工作,不是这一条。
+        self.assertTrue(grab.replace(grab.known(PAGE), {**base, 'title': 'EARLIER'}))
+        self.assertEqual(self.items()[0]['title'], 'EARLIER')
 
 
 class StaleExtractionTests(GrabCase):

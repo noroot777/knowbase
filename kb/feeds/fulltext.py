@@ -38,6 +38,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 from kb.feeds import readable, registry as reg
 from kb.feeds.fetching import FeedError, request
+# 「这一行此刻是哪一版」那份口径摆在 `grab_store` 里(两个版本身份 ——
+# 内容身份 `item_version` 和工作身份 `work_version` —— 要摆在一起对照着读),
+# 本模块和手动重抓那条链共用它。再导出一次,让 `fulltext.work_version` 照旧能用。
+from kb.feeds.grab_store import work_version  # noqa: F401
 from kb.pipeline_state import _state
 
 # 一轮补抓多少条。存量几百条壳的话一次全抓会把一次同步拖很久,而且每抓一条就
@@ -112,38 +116,6 @@ def body_hash(body: str) -> str:
     之后的对不上,一条内容会被白白多导出一轮。
     """
     return hashlib.sha256(body.encode()).hexdigest()
-
-
-def work_version(row) -> tuple[str, int]:
-    """这一次异步工作**针对的是哪一版** —— 取样和写回都过这一个口径。
-
-    **`content_rev` 是充分那一道** —— 一个**只增、不复用**的代次,换内容的两个写入
-    方自己加一(`grab_store.replace`、`_save`)。它挡的是**内容指纹回到原值**那一
-    类:手动重抓把标题改成 BETA、再改回 ALPHA 之后,`content_hash` 逐字回到取样那
-    一版 —— 可这期间**两次更新都已经被接受过**,而按 hash 相等判的那一版补抓又拿
-    回了交付权,把用户刚抓到的那一版换成它那份旧内容(审查用 Event 卡在补抓返回处
-    确定性复现:面板最后说「这条已经在知识库里了」,而 md 和全文检索里都是旧正
-    文)。**指纹不碰撞也会自然重复,所以这不是"再哈希一列、换个更长的摘要"能解决
-    的问题** —— 要的是一个不可复用的身份。
-
-    **`content_hash` 那一道是冗余带,别删。** 它多挡的是「不碰代次的写入方换掉了
-    内容」那一类:存量复查的 `scripts/feed_fulltext_recheck._downgrade`(它自己的
-    CAS 是 `AND body=?`)和 `scripts/x_article_backfill`(它自己的 CAS 是
-    `content_hash`)都换内容、都不动 `content_rev`。**如实记一笔:去掉它一条用例
-    都不红** —— 那两个写入方必然换这一列,而它们之后那几种末态都还能自己收回来
-    (降级过的条目下一次 scan 照旧选得中,回填过的条目正文非空、不再进那个脚本的
-    射程),代价只是多抓一轮。留着的理由是**判据宁可多拒**(元规则:漏报是静默丢
-    数据,误报顶多重抓一次),以及哪天出现一个只换内容、不碰代次的新写入方时,这
-    一道还兜着。`_save` 自己也加一是**同一条口径的一致写法**(换内容就加一),不
-    是因为它那一侧另有可达的交错。
-
-    不比的那几列按它们各自的问题留在原处(元规则:口径只有一份,但两个不同的问
-    题不许合成一份):`translate._save` 比的是**它这趟翻译的输入**(标题+正文),
-    `sync._export` 的收尾确认比的是**导出负载**(文件内容只由那四列决定,所以
-    内容回到原值时确认旧文件是对的),`retire_stale` 比的是**那笔待办属于哪一版
-    内容**(它做的事按 path 清,与代次无关)。
-    """
-    return (row['content_hash'], row['content_rev'])
 
 
 def _save(key: str, body: str, seen: tuple[str, int]) -> bool:

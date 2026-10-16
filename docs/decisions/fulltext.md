@@ -50,7 +50,8 @@
 - **这一轮的结果只许写回它取样的那一版 —— 所有异步交付边界都带判据,而判据是「那一版的身份」,不是「正文还一
   样」。** 补抓是「先 SELECT、再等网络、最后写回」,而**同一行此刻可能被另一个线程换掉**:手动收录那颗「重新抓
   一次」跑在 HTTP 请求线程里、**不持这一轮同步的维护锁**(`grab.replace`,见 `link-grab.md`)。所以
-  `fetch_pending` 按 `fulltext.work_version` 取样(**不取 `body`**),`_save` / `_fail` 的 WHERE 带那一版的
+  `fetch_pending` 按 `grab_store.work_version` 取样(**不取 `body`**;那份口径摆在「库里那一条」
+  那个模块里,因为**手动重抓那条链用的是同一份** —— 见 `link-grab.md` 第一节),`_save` / `_fail` 的 WHERE 带那一版的
   **代次 + 指纹**(`AND content_hash=? AND content_rev=?`),`retire_stale` 带 `AND content_hash=?`。三道判据各答
   一个问题,别互相代入:
   - **`AND body=?` 不够,它是另一套口径**:替换那条路的版本身份是**整份导出负载**

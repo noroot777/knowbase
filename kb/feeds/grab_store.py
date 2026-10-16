@@ -51,6 +51,47 @@ def item_version(fields: dict) -> str:
                                      sort_keys=True).encode()).hexdigest()
 
 
+def work_version(row) -> tuple[str, int]:
+    """这一行**此刻是哪一版** —— 凡是「先读一眼 → 等网络/等模型 → 再写回」的工作,
+    取样和提交都过这一个口径。
+
+    **两个入口共用它,只给一个带判据就是只修了一半:** 后台那一轮正文补抓
+    (`fulltext.fetch_pending` → `_save`/`_fail`)和手动收录那颗「重新抓一次」
+    (`grab_api._recover` → `replace`)是同一个模式 —— 都先拿一份快照,再去原文链接
+    等几十秒,最后把结果写回来。只补抓那头带判据的后果实测过:两个页面先后重抓同一
+    条链接,一个还在等,另一个把标题改成 BETA 又改回 ALPHA(两次都换成了)—— 等第一
+    个回来时 `content_hash` 已经复原,它那份**更早**的抓取又被接受,文章换成旧内容、
+    面板照旧报「已经在知识库里了」,md 和全文检索跟着落了它。
+
+    **`content_rev` 是充分那一道** —— 一个**只增、不复用**的代次,换内容的两个写入
+    方自己加一(`grab_store.replace`、`_save`)。它挡的是**内容指纹回到原值**那一
+    类:手动重抓把标题改成 BETA、再改回 ALPHA 之后,`content_hash` 逐字回到取样那
+    一版 —— 可这期间**两次更新都已经被接受过**,而按 hash 相等判的那一版补抓又拿
+    回了交付权,把用户刚抓到的那一版换成它那份旧内容(审查用 Event 卡在补抓返回处
+    确定性复现:面板最后说「这条已经在知识库里了」,而 md 和全文检索里都是旧正
+    文)。**指纹不碰撞也会自然重复,所以这不是"再哈希一列、换个更长的摘要"能解决
+    的问题** —— 要的是一个不可复用的身份。
+
+    **`content_hash` 那一道是冗余带,别删。** 它多挡的是「不碰代次的写入方换掉了
+    内容」那一类:存量复查的 `scripts/feed_fulltext_recheck._downgrade`(它自己的
+    CAS 是 `AND body=?`)和 `scripts/x_article_backfill`(它自己的 CAS 是
+    `content_hash`)都换内容、都不动 `content_rev`。**如实记一笔:去掉它一条用例
+    都不红** —— 那两个写入方必然换这一列,而它们之后那几种末态都还能自己收回来
+    (降级过的条目下一次 scan 照旧选得中,回填过的条目正文非空、不再进那个脚本的
+    射程),代价只是多抓一轮。留着的理由是**判据宁可多拒**(元规则:漏报是静默丢
+    数据,误报顶多重抓一次),以及哪天出现一个只换内容、不碰代次的新写入方时,这
+    一道还兜着。`_save` 自己也加一是**同一条口径的一致写法**(换内容就加一),不
+    是因为它那一侧另有可达的交错。
+
+    不比的那几列按它们各自的问题留在原处(元规则:口径只有一份,但两个不同的问
+    题不许合成一份):`translate._save` 比的是**它这趟翻译的输入**(标题+正文),
+    `sync._export` 的收尾确认比的是**导出负载**(文件内容只由那四列决定,所以
+    内容回到原值时确认旧文件是对的),`retire_stale` 比的是**那笔待办属于哪一版
+    内容**(它做的事按 path 清,与代次无关)。
+    """
+    return (row['content_hash'], row['content_rev'])
+
+
 def _indexed(path: str) -> bool:
     """vault 里那一篇**当前这一版**进全文索引了没有 —— 也就是「现在搜得到它吗」。
 
@@ -146,7 +187,9 @@ def known(url: str) -> dict | None:
     """
     with reg.db() as c:
         row = c.execute('SELECT key,kind,title,author,published,path,url,body,content_kind,'
-                        'content_hash,exported_hash'
+                        # `content_rev` 跟着交出去:快照要能回答「我读到的是哪一版」,
+                        # 不然显式重抓那条链提交时只比得了指纹(见 `work_version`)。
+                        'content_hash,exported_hash,content_rev'
                         ' FROM feed_items WHERE url=? LIMIT 1', (url,)).fetchone()
     if not row:
         return None
@@ -238,17 +281,19 @@ def replace(seen: dict, entry: dict) -> bool:
         # (`put_items` 哈希整份 entry、`fulltext.body_hash` 只哈希正文、这里是
         # 导出负载),拿它们相等当「没变」会让每次重抓都白推一轮导出和索引。
         return False
-    # **代次跟着加一**(`content_rev`):这一次更新被接受之后,一切更早的异步工作
-    # 就永远不该再有交付权,而 `content_hash` 答不了这一问 —— 它**可以重复**。
-    # 口径和事故形态见 `fulltext.work_version`。
+    # **判据是取样那一刻的工作身份**(`work_version(seen)`),**代次跟着加一**:
+    # 这一次更新被接受之后,一切更早的工作就永远不该再有交付权。只加一、不核对的
+    # 后果实测过 —— 两个页面先后重抓同一条链接,等着的那一个回来时指纹已经复原,
+    # 它那份更早的抓取照旧被接受(见 `work_version`)。`seen` 一律是 `known()` 交出
+    # 来的那份快照,缺了代次就该当场抛,不许退回「只比指纹」。
     with reg.db() as c:
         cur = c.execute("""UPDATE feed_items SET title=?,body=?,author=?,published=?,
             content_hash=?,lang=?,extract_stale=1,content_rev=content_rev+1,
             title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
-            WHERE key=? AND content_hash=?""",
+            WHERE key=? AND content_hash=? AND content_rev=?""",
             (fresh['title'], fresh['body'], fresh['author'], fresh['published'],
              item_version(fresh), reg.text_language(fresh['title'], fresh['body']),
-             seen['key'], seen['content_hash']))
+             seen['key'], *work_version(seen)))
         return cur.rowcount > 0
 
 
