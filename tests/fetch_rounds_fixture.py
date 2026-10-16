@@ -2,21 +2,35 @@
 """抓取账本那两组用例共用的夹具:临时数据目录 + 临时 vault + 一个假采集器。
 
 `_Base` 把 `fetch_rounds.DATA_DIR`、`config.VAULT_ROOT`、`config.SOURCES` 全指到
-临时目录,并且每条用例前后都把模块级的 `fetch_rounds._unsaved` 收干净 —— 不收的话
-一条写失败用例会把后面每一条都拖成「不可确认」。
+临时目录,并且每条用例前后都把模块级的那三份内存状态收干净(`_unsaved` 没落盘的
+行、`_opened` 本进程开过的轮次、`_gaps` 缺过行的轮次)—— 不收的话一条写失败用例
+会把后面每一条都拖成「不可确认」,而 `_opened` 留着会让别的用例在读失败时多写出
+一行来。
 
-消费方:tests/test_fetch_rounds.py(账本本体与恢复协议)、
+`_Pending` 在 `_Base` 上再加一层:那把旁挂锁、那几笔独立凭证、那笔开工标记怎么弄坏
+和修好,以及「另一个进程读出来是多少」(`restart_today`)。
+
+消费方:tests/test_fetch_rounds.py(账本本体与完整性)、
+tests/test_fetch_recovery.py(写故障之后的重放协议)、
 tests/test_fetch_receipt.py(回执是谁交的)、tests/test_fetch_identity.py(回执里
-那一条属于哪一次抓取)。
+那一条属于哪一次抓取)、tests/test_fetch_pending.py(攥着的行与那笔凭证)、
+tests/test_fetch_evidence.py(参与证据的寿命与分代清理)。
 """
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 from kb import config, fetch_rounds
+from kb import pipeline_state as ps
 from kb.collectors import Fetched
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 def T(text):
@@ -40,10 +54,11 @@ class _Base(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.vault = self.root / 'vault'
-        # `_unsaved` 是模块级的:不收干净的话,一条写失败用例会把后面每一条都
+        # 这三份都是模块级的:不收干净的话,一条写失败用例会把后面每一条都
         # 拖成「不可确认」(同 tests/test_*.py 那条共用数据目录的教训)。
-        fetch_rounds._unsaved = []
-        self.addCleanup(setattr, fetch_rounds, '_unsaved', [])
+        for name in ('_unsaved', '_opened', '_gaps'):
+            setattr(fetch_rounds, name, [])
+            self.addCleanup(setattr, fetch_rounds, name, [])
         for p in (patch.object(fetch_rounds, 'DATA_DIR', self.root),
                   patch.object(config, 'VAULT_ROOT', self.vault),
                   patch.object(config, 'SOURCES', self._sources())):
@@ -87,6 +102,85 @@ class _Base(unittest.TestCase):
     def lines(self):
         raw = self.root / fetch_rounds.FILE_NAME
         return raw.read_text(encoding='utf-8').splitlines() if raw.exists() else []
+
+    @contextmanager
+    def ledger_read_fails(self, times=1):
+        """让**账本**的下 `times` 次读取各抛一次 `OSError`,之后完全恢复。
+
+        只打这一个文件:整份 `Path.read_text` 打桩会把配置、vault 正文一起带红,
+        那就不是"短暂的读账故障"这一档了,断言也就不指向账本协议。
+        """
+        left = [times]
+        real = Path.read_text
+
+        def maybe_fail(path, *a, **kw):
+            if path == fetch_rounds._file() and left[0] > 0:
+                left[0] -= 1
+                raise OSError('读账暂时不可用')
+            return real(path, *a, **kw)
+
+        with patch.object(Path, 'read_text', maybe_fail):
+            yield
+
+
+class _Pending(_Base):
+    """账本那把锁、那几笔凭证、那笔开工标记的小工具。"""
+
+    def lock(self):
+        return self.root / fetch_rounds.LOCK_NAME
+
+    def break_lock(self):
+        """把旁挂锁占成一个目录 —— 取锁从此失败(审查复现用的就是这一手)。"""
+        self.lock().unlink(missing_ok=True)
+        self.lock().mkdir()
+
+    def fix_lock(self):
+        self.lock().rmdir()
+
+    def pending(self):
+        return self.root / fetch_rounds.PENDING_DIR
+
+    def certs(self):
+        folder = self.pending()
+        return sorted(p.name for p in folder.iterdir()) if folder.exists() else []
+
+    def block_pending(self):
+        """把凭证目录的位置占成一个普通文件 —— 那一笔从此写不下去。"""
+        self.pending().write_text('占住凭证目录的位置', encoding='utf-8')
+
+    def marker(self):
+        return self.root / 'pipeline_state_open.json'
+
+    def mark_open(self, run_id):
+        """落一笔**真的**开工标记(走生产那条 `pipeline_open.mark`,不手搓 JSON)。
+
+        位置跟着 `pipeline_state._STATE_FILE` 派生,所以这里把它也指到临时目录 ——
+        两边指到同一个库,才是生产里那个形状。**抓取那一侧不读这一笔**(它的寿命是
+        那一轮运行的,见 `kb.fetch_gate`),所以这个小工具现在只用来钉
+        「它在不在都不改变结论」。
+        """
+        with patch.object(ps, '_STATE_FILE', self.root / 'pipeline_state.json'):
+            self.assertEqual('', ps.mark_open(
+                {'run_id': run_id, 'seq_gen': 1, 'started_at': '2026-09-29 09:00',
+                 'run_kind': 'sync'}))
+
+    def restart_today(self):
+        """**另一个进程**读出来的那个数(内存里什么都没有,盘上留下什么就是什么)。
+
+        只把账本那一侧指到临时目录 —— 审查复现脚本也是这么打桩的,而参与证据必须
+        在这种打桩下也找得到(两处证据都在账本自己那个数据目录里)。
+        """
+        code = ('import json; from pathlib import Path; from kb import fetch_rounds; '
+                f'fetch_rounds.DATA_DIR = Path({str(self.root)!r}); '
+                'print(json.dumps(fetch_rounds.today()))')
+        done = subprocess.run([sys.executable, '-c', code], capture_output=True,
+                              text=True, check=True, cwd=str(REPO))
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def process_gone(self):
+        """模拟进程没了:内存那三份状态随它消失,盘上留下什么就是什么。"""
+        for name in ('_unsaved', '_opened', '_gaps'):
+            setattr(fetch_rounds, name, [])
 
 
 class _Fake:
@@ -136,4 +230,3 @@ class _Fake:
                  **{r: self.carried_by for r in self.carried},
                  **{r: '' for r in self.nameless}}
         return frozenset(Fetched(f'{self.name}:{r}', owner[r], r) for r in fresh)
-

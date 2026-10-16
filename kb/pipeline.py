@@ -18,6 +18,7 @@ import time
 from copy import deepcopy
 
 from kb.config import DATA_DIR, announce_config_issue
+from kb.fetch_rounds import NoEvidence
 from kb.collectors import active_collector
 from kb.pipeline_retry import retry_failed_plan, start_retry_failed
 from kb.pipeline_stages import (
@@ -143,7 +144,18 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
             if s not in stages:
                 _state["stages"][s] = {"status": "skipped", "detail": "未选择"}
             elif s == "crawl":
-                _run_crawl(crawl_filter)
+                try:
+                    _run_crawl(crawl_filter)
+                except NoEvidence as exc:
+                    # 抓取那道闸拦住了(两处参与证据都记不下,见
+                    # `fetch_rounds.open_round`)。**抛要照抛** —— 后面的导出阶段才是
+                    # 真会往 vault 落文章的那一步;但原因要先写进阶段卡片,不然用户
+                    # 只看到收尾补的那句「流程中断,未完成」(`_end_run` 只改
+                    # pending/running 的卡片,所以这张 error 不会被它盖掉),而这道
+                    # 闸的全部代价都押在「误报看得见」上。
+                    _stage("crawl", "error", str(exc))
+                    _log(f"抓取没有起跑:{exc}")
+                    raise
             elif s == "export":
                 _run_export(crawl_filter)
             elif s == "index":
@@ -217,6 +229,11 @@ def start_pipeline(stages: list[str] | None = None,
         # 下面那一堆字段挨个撤回去,撤漏一个就是下一轮带着上一轮的范围。
         begun = {"run_id": new_run_id(), "seq_gen": _SEQ_GEN,
                  "started_at": _now(), "run_kind": "sync"}
+        planned = [s for s in STAGES if s in wanted]
+        # **标记那一笔只带这一轮运行自己的身份。** 第 4 轮一度还往里塞这次抓取的
+        # 业务身份(`batch`)和「这一轮抓不抓」,让当日账本把它当第三处参与证据 ——
+        # 第 5 轮审查证伪了那条(它正常收尾就被清掉、下一次起跑又被这里覆盖,
+        # 理由在 `pipeline_open.mark`),所以那两样不再传。
         err = mark_open(begun)
         if err:
             return no(err)
@@ -235,7 +252,7 @@ def start_pipeline(stages: list[str] | None = None,
             # 这一轮属于哪个业务批次(`run_kind` 不在这里写:它在上面那个 `begun`
             # 里,`mark_open` 要带着它)。
             "batch": batch,
-            "planned_stages": [s for s in STAGES if s in wanted],
+            "planned_stages": planned,
             "stages": {s: {"status": "pending" if s in wanted else "skipped",
                            "detail": ""} for s in STAGES},
         })

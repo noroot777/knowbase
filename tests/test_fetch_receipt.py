@@ -21,11 +21,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from pathlib import Path
+
 from kb.collectors import Fetched, wechat_local
-from kb import embedder, fetch_rounds, pipeline_segments as segments
+from kb import config, embedder, fetch_rounds, pipeline_segments as segments
 from kb import pipeline_stages, scanner, store
 from kb import pipeline_state as ps
-from fetch_rounds_fixture import BOOK, T, _Base, _Fake
+from tests.fetch_rounds_fixture import BOOK, T, _Base, _Fake
 
 
 class ReceiptIsTheOnlyEvidenceTests(_Base):
@@ -102,6 +104,57 @@ class ReceiptIsTheOnlyEvidenceTests(_Base):
                   _Fake(self, 'wechat_local', writes=['source/rss/b.md'], boom=True))
         self.assertEqual({'n': 1, 'added': 1, 'partial': True}, self._got())
 
+    def test_a_run_that_vanished_before_the_stage_finished_is_a_lower_bound(self):
+        """真实 `_run_export` 跑到一半进程没了(这里在逐来源循环之后定点抛
+        `KeyboardInterrupt`,等价于第 1 轮审查用的 `os._exit(23)`):vault 里真多
+        了 1 篇,账本只能说「至少 +1 条」。
+
+        旧实现这里报 `{'n':1,'added':0,'partial':False}` —— 进门那张空回执已经把
+        「不可确认」解除了,所以是个**确定**的 0 条。"""
+        fake = _Fake(self, 'rss', writes=['source/rss/a.md'])
+        real = pipeline_stages._per_channel
+
+        def _die(stage, flt, fn):
+            real(stage, flt, fn)
+            if stage == 'export':
+                raise KeyboardInterrupt('进程没了')
+
+        with patch.object(pipeline_stages, 'crawl_channels',
+                          Mock(return_value=[{'channel': 'rss', 'accounts': []}])), \
+                patch.object(pipeline_stages, 'active_collector',
+                             Mock(return_value=fake)), \
+                patch.object(pipeline_stages, '_per_channel', _die):
+            pipeline_stages._run_crawl()
+            with self.assertRaises(KeyboardInterrupt):
+                pipeline_stages._run_export()
+        self.assertTrue((self.vault / 'source/rss/a.md').exists())
+        self.assertEqual({'n': 1, 'added': 1, 'partial': True}, self._got())
+
+    def test_a_second_sub_round_that_vanished_is_a_lower_bound(self):
+        """**第 2 轮审查实测的那一条**,整条管道走真的:一轮日报里每个来源各跑
+        一次 `FETCH_STAGES`、共用一个业务批次身份,所以这里是**同一个 key 的两个
+        子轮**(各有自己的 `run_id`)。第一个子轮正常收尾,第二个子轮写出第二篇
+        之后进程没了 —— 两篇都在 vault 里,账本只能说「至少 +2 条」。
+
+        旧实现这里报 `{'n':1,'added':2,'partial':False}`:第一个子轮那条结束行
+        冒充了整批交完。注意 `added` 这时**正好**等于真实值,所以只看数字看不出
+        问题 —— 判据必须是"这个数确定不确定",用户照着它决定要不要再花一次模型钱。
+        """
+        self._run(_Fake(self, 'rss', writes=['source/rss/a.md']))
+        self.assertEqual({'n': 1, 'added': 1, 'partial': False}, self._got())
+        real = pipeline_stages._per_channel
+
+        def _die(stage, flt, fn):
+            real(stage, flt, fn)
+            if stage == 'export':
+                raise KeyboardInterrupt('第二个子轮的进程没了')
+
+        ps._state['run_id'] = 'run-probe-2'          # 第二个来源那次运行
+        with patch.object(pipeline_stages, '_per_channel', _die),                 self.assertRaises(KeyboardInterrupt):
+            self._run(_Fake(self, 'rss', writes=['source/rss/b.md']))
+        self.assertTrue((self.vault / 'source/rss/b.md').exists())
+        self.assertEqual({'n': 1, 'added': 2, 'partial': True}, self._got())
+
     def test_two_sources_that_both_report_add_up_exactly(self):
         """反过来钉一边:两个来源都交得出回执时,总数是确定的并集。"""
         self._run(_Fake(self, 'rss', writes=['source/rss/a.md']),
@@ -118,6 +171,7 @@ class ReceiptIsTheOnlyEvidenceTests(_Base):
         fetch_rounds.note_new('batch-dup', {
             Fetched('wechat_local:2247', 'batch-dup', 'source/rss/旧标题.md'),
             Fetched('wechat_local:2247', 'batch-dup', 'source/rss/新标题.md')})
+        fetch_rounds.note_end('batch-dup')        # 物化这一段明确走完了
         self.assertEqual(BOOK(1, 1, '09:00'),
                          fetch_rounds.today(T('2026-09-29 09:00')))
 
@@ -134,6 +188,8 @@ class ReceiptIsTheOnlyEvidenceTests(_Base):
             Fetched('rss:a', 'batch-torn', 'source/rss/a.md'),
             ('只有两个字段',),                      # 形状读不出来
         ])
+        # 结束行照旧落下:这一轮的 `partial` 只可能来自那一条读不懂的行
+        fetch_rounds.note_end('batch-torn')
         self.assertEqual(BOOK(1, 1, '09:00', partial=True),
                          fetch_rounds.today(day))
 
@@ -148,6 +204,7 @@ class ReceiptIsTheOnlyEvidenceTests(_Base):
             Fetched('rss:a', 'batch-nopath', 'source/rss/a.md'),
             Fetched('rss:b', 'batch-nopath', ''),
         ])
+        fetch_rounds.note_end('batch-nopath')     # 同上:缺口是唯一的来源
         self.assertEqual(BOOK(1, 1, '09:00', partial=True),
                          fetch_rounds.today(day))
 
@@ -163,6 +220,7 @@ class ReceiptIsTheOnlyEvidenceTests(_Base):
             Fetched('rss:a', 'batch-scope', 'source/rss/a.md'),
             Fetched('gz:b', 'batch-scope', 'source/dr-gzh-projects/b.md'),
         ])
+        fetch_rounds.note_end('batch-scope')
         self.assertEqual(BOOK(1, 1, '09:00'), fetch_rounds.today(day))
 
     def test_a_collector_still_on_the_old_contract_is_counted_not_refused(self):
@@ -175,6 +233,7 @@ class ReceiptIsTheOnlyEvidenceTests(_Base):
         fetch_rounds.open_round('batch-legacy', day)
         fetch_rounds.note_new('batch-legacy',
                               ['source/rss/a.md', 'source/rss/b.md'])
+        fetch_rounds.note_end('batch-legacy')
         self.assertEqual(BOOK(1, 2, '09:00', fresh=0, unsure=2),
                          fetch_rounds.today(day))
 
@@ -353,6 +412,65 @@ class ReceiptScopeTests(_Base):
     交给每个采集器各判一遍的话迟早对不上 —— 对不上的表现是药丸报出一批压根
     不会进日报的文件。
     """
+
+    def test_a_scope_that_cannot_be_read_is_not_an_empty_scope(self):
+        """**第 2 轮审查那条静态项**:算范围时 `resolve()` 抛 `OSError`(权限、
+        符号链接层数、目录临时不可用)—— 那是「这条路径算不算成果」**答不出来**,
+        不是「确定不算」。旧口径把两者压成一种(跳过那棵树 / 返回空范围),于是
+        一份真回执被筛成空集,再让结束行把这一轮定成**确定的 0 条**。"""
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-a', day, seg='run-1')
+        real = Path.resolve
+
+        def resolve(path, *a, **kw):
+            if path == self.vault / 'source' / 'rss':
+                raise OSError('这棵树暂时读不到')
+            return real(path, *a, **kw)
+
+        with patch.object(Path, 'resolve', resolve):
+            fetch_rounds.note_new('batch-a', self.caught('batch-a', 'source/rss/a.md'))
+        fetch_rounds.note_end('batch-a', 'run-1')
+        self.assertEqual(BOOK(1, 0, '09:00', True),
+                         fetch_rounds.today(day))
+
+    def test_a_symlink_loop_in_any_source_is_only_an_unreadable_scope(self):
+        """**审查实测的 N5**:循环符号链接让 `resolve()` 抛的是 `RuntimeError`,
+        不是 `OSError`。只接后者的话,这个异常会从 `note_new` 一路冒到导出阶段进门
+        那张空回执登记上(`pipeline_stages._run_export` 的第一句),把整次导出连同
+        其他正常来源一起带崩 —— 而出事的那棵树压根不是这一轮要导的那一个。
+
+        用真的循环链接(指向自己),不打桩:这一条钉的就是「这一档到底抛什么」。
+        后果和上一条同一句:**答不出来**归「不可确认」,不许筛成确定的 0 条。"""
+        loop = self.vault / 'source' / 'dr-youtube-dig'
+        loop.parent.mkdir(parents=True, exist_ok=True)
+        loop.symlink_to(loop)
+        with self.assertRaises(RuntimeError):            # 前提:这一档真抛它
+            loop.resolve()
+        day = T('2026-09-29 09:00')
+        fetch_rounds.open_round('batch-a', day, seg='run-1')
+        fetch_rounds.note_new('batch-a', ())             # 导出进门那张空回执
+        fetch_rounds.note_new('batch-a', self.caught('batch-a', 'source/rss/a.md'))
+        fetch_rounds.note_end('batch-a', 'run-1')
+        self.assertEqual(BOOK(1, 0, '09:00', True),
+                         fetch_rounds.today(day))
+        # **两处一起收口**,不是按某一个异常实例修一个调用点:vault 根自己是那个
+        # 循环时(整棵 vault 挂在一条坏链接上)判据也只有「范围说不清」。
+        with patch.object(config, 'VAULT_ROOT', loop):
+            self.assertIsNone(fetch_rounds._scope_prefixes())
+
+    def test_a_tree_that_is_not_in_the_vault_only_skips_itself(self):
+        """**反过来钉一边**:某棵来源树确定不在 vault 底下(配置指到别处)——
+        那是「确定不算」,跳过它就行。把这一档也归成「不可确认」的话,存量配置里
+        只要有一棵外挂树,每一轮抓取都永久写「条数读不出来」。"""
+        outside = config.Source(name='elsewhere', root=self.root / 'outside')
+        with patch.object(config, 'SOURCES', self._sources() + [outside]):
+            day = T('2026-09-29 09:00')
+            fetch_rounds.open_round('batch-a', day, seg='run-1')
+            fetch_rounds.note_new('batch-a',
+                                  self.caught('batch-a', 'source/rss/a.md'))
+            fetch_rounds.note_end('batch-a', 'run-1')
+            self.assertEqual(BOOK(1, 1, '09:00'),
+                             fetch_rounds.today(day))
 
     def test_only_the_sources_the_report_reads_are_counted(self):
         day = T('2026-09-29 09:00')

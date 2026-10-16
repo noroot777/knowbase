@@ -423,6 +423,9 @@ def start_retry_failed() -> tuple[bool, str]:
         # 失证,而失证之后这颗按钮下一次按的就是**上一轮**的范围。
         begun = {"run_id": new_run_id(), "seq_gen": _SEQ_GEN,
                  "started_at": _now(), "run_kind": "retry"}
+        planned = [s for s in STAGES if card[s]]
+        # **标记那一笔只带这一轮运行自己的身份**(和普通起跑同一处对称:第 4 轮往里
+        # 塞过抓取身份,第 5 轮审查证伪了那条,理由在 `pipeline_open.mark`)。
         err = mark_open(begun)
         if err:
             return False, err
@@ -437,7 +440,7 @@ def start_retry_failed() -> tuple[bool, str]:
             # 重试是独立的一轮,不属于任何业务批次(见 `_state` 里那一格的说明)。
             # `run_kind` 不在这里写:它已经在上面那个 `begun` 里(`mark_open` 要它)。
             "batch": "",
-            "planned_stages": [s for s in STAGES if card[s]],
+            "planned_stages": planned,
             "stages": {s: {"status": "pending" if card[s] else "skipped",
                            "detail": detail[s]}
                        for s in STAGES},

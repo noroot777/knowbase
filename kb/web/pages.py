@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import html as html_mod
+import hashlib
 import json
 import re
 from urllib.parse import quote
@@ -21,11 +22,25 @@ from kb.scanner import body_version, read_md_text
 from kb.web.common import VAULT_NAME, _STATIC
 
 router = APIRouter()
+_STATIC_REF = re.compile(
+    r'''(?P<prefix>\b(?:src|href)\s*=\s*(?P<quote>["']))'''
+    r'''(?P<url>/static/(?P<path>[^"'?#]+))(?P=quote)'''
+)
+
+
+def _version_static_ref(match: re.Match) -> str:
+    asset = (_STATIC / match['path']).resolve()
+    if not asset.is_relative_to(_STATIC) or not asset.is_file():
+        return match.group(0)
+    version = hashlib.sha256(asset.read_bytes()).hexdigest()[:16]
+    return f"{match['prefix']}{match['url']}?v={version}{match['quote']}"
 
 
 @router.get("/")
 def index_page():
-    return FileResponse(_STATIC / "index.html")
+    content = (_STATIC / "index.html").read_text(encoding="utf-8")
+    return HTMLResponse(_STATIC_REF.sub(_version_static_ref, content),
+                        headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/static/{fpath:path}")
@@ -34,7 +49,7 @@ def static_asset(fpath: str):
     f = (_STATIC / fpath).resolve()
     if not f.is_relative_to(_STATIC) or not f.is_file():
         raise HTTPException(404, "static file not found")
-    return FileResponse(f)
+    return FileResponse(f, headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/graph")

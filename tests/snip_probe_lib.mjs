@@ -200,12 +200,23 @@ window.__favs = async (status) => {
 window.__favBy = async (origin) => (await window.__favs()).filter(f => f.origin === origin);
 true`;
 
-/** 收藏面板切到完整列表(**幂等** —— `toggleFavMode` 是翻转,调两次就翻回去了),
- *  等到回跳按钮真的出现。默认那一档是智能分诊,它不列回跳按钮。 */
+/** 收藏面板:切过去、把筛选收回默认,等它把这些收藏画成卡片(**幂等**,可以反复
+ *  调)。筛选要自己收干净 —— 搜索框、来源下拉和类型筛选都是页面上的持久状态,
+ *  上一格留下的一个词会把这一格要点的那张卡过滤掉,红出来的样子是「面板里没有
+ *  这条收藏」。
+ *
+ *  **等的是这一轮加载自己 resolve,不是屏幕上出现了一颗回跳按钮。** 列表非空时
+ *  那一轮不清屏(见 `fav.js` 的 `loadFavPanel`:只有 `favItems` 空才铺占位),
+ *  所以「按钮 ≥ 1」在旧卡片上立刻就成立 —— 刚收下来那条还没进 DOM,随后那次
+ *  `clickJump` 只会红在「点不到」,真因是这一步压根没等。 */
 async function openFavList() {
-  await evalJs(`switchTab('fav');
-    if (!favListMode) toggleFavMode(); else loadFavPanel();
-    true`);
+  await evalJs(`(async () => {
+    switchTab('fav');
+    favView = 'all'; favFilter = 'all';
+    $('fav-search').value = ''; $('fav-source').value = '';
+    await loadFavPanel();
+    return true;
+  })()`);
   return until(`$('fav-list').querySelectorAll('.fav-jump').length >= 1`, 15000);
 }
 

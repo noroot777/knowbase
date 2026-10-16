@@ -22,6 +22,7 @@
 <link rel="stylesheet" href="/static/css/subscriptions.css">
 <link rel="stylesheet" href="/static/css/daily.css">
 <link rel="stylesheet" href="/static/css/wechat_setup.css">
+<link rel="stylesheet" href="/static/css/favorites.css">
 <link rel="stylesheet" href="/static/css/snip.css">
 </head>
 <body>
@@ -137,19 +138,37 @@
 </div>
 
 <div id="favpanel" style="display:none">
-  <div class="page-heading"><h1>我的收藏</h1></div>
-  <div class="fav-sub">
-    <button id="fav-t-inbox" class="on" onclick="switchFavView('inbox')">待试</button>
-    <button id="fav-t-done" onclick="switchFavView('done')">已处理</button>
-    <button id="fav-t-archived" onclick="switchFavView('archived')">沉底</button>
-    <span class="fav-tools" id="fav-tools">
-      <select id="fav-model" onchange="saveFavModel()" title="分诊与行动卡用的模型"></select>
-      <button class="ghost" id="fav-triage-btn" onclick="runTriage()">✨ 重新分诊</button>
-      <button class="fav-mode-toggle" id="fav-mode-toggle" onclick="toggleFavMode()">以列表查看<i data-arrow="caretDown"></i></button>
-    </span>
+  <header class="fv-heading">
+    <div class="fv-title"><h1>我的收藏</h1><span id="fav-total">— 条</span></div>
+    <div class="fv-heading-actions">
+      <button class="ghost" onclick="switchTab('gallery')">发现好东西<i data-arrow="right"></i></button>
+      <details class="fv-settings" ontoggle="if(this.open)initFavTools()">
+        <summary aria-label="整理设置"><i data-icon="settings"></i><span>整理设置</span></summary>
+        <div class="fv-settings-popover"><label for="fav-model">AI 整理模型</label><select id="fav-model" onchange="saveFavModel()"><option value="">读取模型中…</option></select><p>仅用于生成行动卡和整理建议。浏览收藏不需要 AI。</p><button class="text-button" onclick="initFavTools(true)">重新读取模型</button><span id="fav-model-state" role="status"></span></div>
+      </details>
+    </div>
+  </header>
+  <nav class="fv-statuses" aria-label="收藏状态">
+    <button id="fav-t-all" class="on" onclick="switchFavView('all')" aria-pressed="true">全部收藏 <span>—</span></button>
+    <button id="fav-t-inbox" onclick="switchFavView('inbox')" aria-pressed="false">待探索 <span>—</span></button>
+    <button id="fav-t-done" onclick="switchFavView('done')" aria-pressed="false">已完成 <span>—</span></button>
+    <button id="fav-t-archived" onclick="switchFavView('archived')" aria-pressed="false">暂存 <span>—</span></button>
+  </nav>
+  <div class="fv-workbench">
+    <section class="fv-library" aria-label="收藏架">
+      <div class="fv-searchbar"><label class="fv-search"><i data-icon="search"></i><input id="fav-search" type="search" aria-label="搜索收藏" placeholder="找标题、摘录、笔记，或一个工具…" oninput="filterFavs()"><kbd aria-hidden="true">/</kbd></label></div>
+      <div id="fav-filters" class="fv-filters" role="group" aria-label="按用途筛选"></div>
+      <div class="fv-toolbar">
+        <div class="fv-list-caption"><h2 id="fav-list-title">收藏架</h2><span id="fav-result-count" aria-live="polite"></span></div>
+        <div class="fv-list-controls"><select id="fav-source" aria-label="按来源筛选" onchange="filterFavs()"><option value="">全部来源</option></select><select id="fav-sort" aria-label="收藏排序" onchange="filterFavs()"><option value="recent">最近收藏</option><option value="oldest">最早收藏</option><option value="name">名称 A–Z</option></select><div class="fv-view-switch" role="group" aria-label="显示方式"><button id="fav-view-grid" class="on" aria-label="卡片视图" aria-pressed="true" onclick="setFavLayout('grid')"><i data-icon="grid"></i></button><button id="fav-view-list" aria-label="紧凑视图" aria-pressed="false" onclick="setFavLayout('list')"><i data-icon="list"></i></button></div><button id="fav-select-toggle" class="text-button" onclick="toggleFavSelection()" aria-pressed="false">批量整理</button></div>
+      </div>
+      <div id="fav-error" class="fv-error" role="alert" hidden></div>
+      <div id="fav-batch" class="fv-batch" hidden><label><input id="fav-select-all" type="checkbox" onchange="selectVisibleFavs(this.checked)">全选当前结果</label><span id="fav-selected-count">已选 0 条</span><button data-fav-mutation onclick="favMarkMany([...favSelected],'done')">标为完成</button><button class="ghost" data-fav-mutation onclick="favMarkMany([...favSelected],'archived')">暂存</button><button class="text-button" onclick="toggleFavSelection(false)">取消</button></div>
+      <div id="fav-feedback" class="fv-feedback" role="status" hidden><span id="fav-feedback-text"></span><button class="text-button" id="fav-undo" onclick="undoFavChange()">撤销</button><button class="fv-icon-button" onclick="this.parentElement.hidden=true" aria-label="关闭操作提示"><i data-icon="close"></i></button></div>
+      <div id="fav-list" class="fv-grid" aria-busy="true"><div class="fv-empty"><span class="spin"></span>正在打开收藏架…</div></div>
+    </section>
+    <aside id="fav-inspector" class="fv-inspector" aria-label="收藏详情与灵感起步"></aside>
   </div>
-  <div id="fav-stale" class="fav-stale" style="display:none"></div>
-  <div id="fav-list"><div class="empty">加载中…</div></div>
 </div>
 
 <div id="dailypanel" style="display:none">
@@ -298,7 +317,7 @@
     <aside id="source-settings" class="source-settings" aria-label="此来源的设置" hidden><h2>来源设置</h2>
       <form id="source-settings-form" onsubmit="saveSourceSettings(event)"><fieldset id="source-settings-fields" disabled>
         <div id="source-xchan" class="xchan" hidden>
-          <label for="source-x-channel">X 的取法<select id="source-x-channel" onchange="xChannelPicked()"></select></label>
+          <label for="source-x-channel">X 的取法<select id="source-x-channel" onchange="xChannelChanged()"></select></label>
           <p id="source-x-hint" class="hint"></p>
           <details id="source-bridge-field" hidden><summary>X 订阅桥接设置</summary><p>每行一个可用地址，使用 {handle} 代表账号名。留空时账号处于待配置；也可在单个订阅里填写专用链接。公共桥接可能不可用，连续失败会暂停本轮请求。</p><textarea id="source-bridges" aria-label="X订阅桥接地址" spellcheck="false"></textarea></details>
           <div id="source-x-feedgrab" hidden>
@@ -309,6 +328,9 @@
             <label for="source-x-chrome">Chrome 可执行文件（可留空）<input id="source-x-chrome" spellcheck="false" placeholder="留空时用默认位置的 Google Chrome"></label>
             <p class="hint">在一个独立 profile 里登录一次，之后每天无头复用这份登录态。登录窗口要关掉，抓取时它独占这个 profile。</p>
             <button type="button" class="ghost" id="source-x-login-btn" onclick="openXLoginWindow()">打开登录窗口</button>
+            <p class="hint">也可以不单独登录：从你日常那个浏览器搬一份 X 的登录态过来。它只向那个浏览器要 x.com 的 cookie（在一张隐藏的后台标签页里按地址取，别的站点压根不会交出来），同名的会覆盖这个 profile 里现有的那几条。那个浏览器要先开远程调试开关，导入时它会弹一次授权；cookie 过期后再点一次这颗按钮就行。</p>
+            <button type="button" class="ghost" id="source-x-import-btn" onclick="importXLoginState()">从日常浏览器导入登录态</button>
+            <p id="source-x-import-state" class="hint" role="status"></p>
           </div>
           <p id="source-x-state" class="hint" role="status"></p>
           <p id="source-x-next" class="hint"></p>
@@ -494,7 +516,7 @@
   <iframe id="reader-frame" title="文章内容"></iframe>
 </div>
 
-<div id="shortcuts-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeShortcuts()"><div class="modal shortcuts-dialog"><h2>键盘快捷键</h2><dl><div><dt>快速搜索</dt><dd><kbd>⌘ / Ctrl</kbd> <kbd>K</kbd></dd></div><div><dt>搜索当前图鉴</dt><dd><kbd>/</kbd></dd></div><div><dt>关闭当前弹窗</dt><dd><kbd>Esc</kbd></dd></div><div><dt>发送问题 / 换行</dt><dd><kbd>Enter</kbd> / <kbd>Shift Enter</kbd></dd></div></dl><button onclick="closeShortcuts()">知道了</button></div></div>
+<div id="shortcuts-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeShortcuts()"><div class="modal shortcuts-dialog"><h2>键盘快捷键</h2><dl><div><dt>快速搜索</dt><dd><kbd>⌘ / Ctrl</kbd> <kbd>K</kbd></dd></div><div><dt>搜索当前图鉴或收藏</dt><dd><kbd>/</kbd></dd></div><div><dt>关闭当前弹窗</dt><dd><kbd>Esc</kbd></dd></div><div><dt>发送问题 / 换行</dt><dd><kbd>Enter</kbd> / <kbd>Shift Enter</kbd></dd></div></dl><button onclick="closeShortcuts()">知道了</button></div></div>
 <div id="wechat-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeWechatSetup()">
   <div class="modal wechat-dialog">
     <div class="wechat-heading"><div><h2 id="wechat-title">接入你的绿泡泡</h2><p class="hint" id="wechat-intro">从本机已同步的公众号推送中发现文章，收进知识库。</p></div><button class="icon-button" onclick="closeWechatSetup()" aria-label="关闭绿泡泡接入">×</button></div>
@@ -524,6 +546,7 @@
 <script src="/static/js/snip_text.js"></script>
 <script src="/static/js/snip.js"></script>
 <script src="/static/js/fav.js"></script>
+<script src="/static/js/fav_view.js"></script>
 <script src="/static/js/chat.js"></script>
 <script src="/static/js/settings.js"></script>
 <script src="/static/js/schedules.js"></script>
@@ -537,6 +560,8 @@
 <script src="/static/js/pipe_setup.js"></script>
 <script src="/static/js/targets.js"></script>
 <script src="/static/js/gallery.js"></script>
+<!-- daily_refs.js 排在 daily.js 之前:`DAILY_REF_TEXT` 是 const,const 有 TDZ -->
+<script src="/static/js/daily_refs.js"></script>
 <script src="/static/js/daily.js"></script>
 <script src="/static/js/daily_body.js"></script>
 <script src="/static/js/daily_chip.js"></script>

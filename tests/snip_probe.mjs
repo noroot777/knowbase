@@ -18,7 +18,7 @@
 //
 //   HEADLESS_SHELL=<bin> node tests/snip_probe.mjs <baseURL> <manifest.json>
 import {
-  base, boot, check, clickJump, evalJs, finish, fx, highlightText, js,
+  base, boot, check, clickJump, evalJs, favDocHref, finish, fx, highlightText, js,
   openFavList, send, sleep, snip, snipHighlight, until,
 } from "./snip_probe_lib.mjs";
 
@@ -218,41 +218,49 @@ check("图鉴小节标题不算正文", sec === "ok" && !(await evalJs(`window._
 await evalJs(`closeToolDrawer(); true`);
 
 // ── 4. 收藏面板:四处来源都列得出,各走各的那条回跳 ──
-await evalJs(`switchTab('fav'); toggleFavMode(); true`);   // 切到完整列表
-await until(`$('fav-list').querySelectorAll('.fav-group').length >= 4`, 15000);
+// **一条收藏一张卡**(收藏架那次改版之后不再按出处聚合),所以判据落在「四类
+// 来源各有卡、各走对的那条路」,不落在卡片张数上 —— 同一处出处收了几句话就有
+// 几张卡,数字跟着上面那几格存了多少条走,钉死它只会在加一格用例时红。
+await openFavList();
+await until(`$('fav-list').querySelectorAll('[data-fav-card]').length >= 4`, 15000);
 // **阅读页链接连着它的 path 一起看。** 只问"有没有一条带 #kbq= 的 /doc 链接"
 // 是过不了反向的:分流那一步去掉之后,日报和问答那两条片段也会拼出
 // `/doc/#kbq=…` —— 判据照旧为真,而那串地址指向的是 iframe 里一张 404。
-const shape = await evalJs(`(() => {
-  const jumpOrigins = [...$('fav-list').querySelectorAll('.fav-jump')].map(b => {
-    try { return JSON.parse(decodeURIComponent(b.dataset.jump)).origin; } catch { return '?'; }
-  });
-  const docLinks = [...$('fav-list').querySelectorAll('a[data-doc]')].map(a => ({
-    href: a.getAttribute('href'), path: decodeURIComponent(a.dataset.path || ''),
-  }));
-  const badges = [...$('fav-list').querySelectorAll('.fav-origin')].map(b => b.textContent);
-  return { jumpOrigins, docLinks, badges,
-           cards: $('fav-list').querySelectorAll('.fav-group').length };
-})()`);
-// 五张卡:两篇文档各一张(图鉴那条记录、订阅那篇导出稿)、日报、问答,外加
-// **退回 feed 那一条**(带 markdown 标记那段,它和同一篇的 doc 片段不同组:
-// 分组按 `path || origin+ref`)。四类来源一个不少 —— 这才是这条的判据。
-check("四处来源都列得出,各走各的那条回跳", shape.cards === 5
-  && ["daily", "chat", "feed"].every(o => shape.jumpOrigins.includes(o))
-  && shape.docLinks.length > 0, JSON.stringify(shape));
-check("有文档的那一类照旧走阅读页链接", shape.docLinks.some(
-  l => l.path === fx.docPath && l.href.includes("#kbq=")), JSON.stringify(shape.docLinks));
+const cards = await evalJs(`[...$('fav-list').querySelectorAll('[data-fav-card]')].map(c => {
+  const jump = c.querySelector('.fav-jump');
+  const link = c.querySelector('a[data-doc]');
+  let origin = '';
+  if (jump) { try { origin = JSON.parse(decodeURIComponent(jump.dataset.jump)).origin || '?'; }
+              catch { origin = '?'; } }
+  return { origin: origin || (link ? 'doc' : ''),
+           where: (c.querySelector('.fv-card-meta span') || {}).textContent || '',
+           href: link ? link.getAttribute('href') : '',
+           path: link ? decodeURIComponent(link.dataset.path || '') : '' };
+})`);
+const originsSeen = [...new Set(cards.map(c => c.origin))];
+check("四处来源都列得出,各走各的那条回跳",
+  ["daily", "chat", "feed", "doc"].every(o => originsSeen.includes(o)),
+  JSON.stringify(originsSeen));
+check("有文档的那一类照旧走阅读页链接", cards.some(
+  c => c.path === fx.docPath && c.href.includes("#kbq=")),
+  JSON.stringify(cards.filter(c => c.origin === "doc")));
 // 反向:**一条指向空路径的阅读页链接都不许有**。那是分流漏掉的样子 ——
 // 点下去 iframe 里是 `/doc/` 的 404,而卡片看起来和能读的那条一模一样。
-check("没有指向空路径的阅读页链接", shape.docLinks.every(l => !!l.path),
-  JSON.stringify(shape.docLinks));
-check("没文档的那两类给的是回跳按钮",
-  shape.jumpOrigins.includes("daily") && shape.jumpOrigins.includes("chat"),
-  JSON.stringify(shape.jumpOrigins));
-// 角标是每组一个,**只给非文章那几类**:五组里有两组是文档,它们不带角标。
-check("来源角标只标非文章那几类", shape.badges.length === 3
-  && ["每日日报", "知识问答", "订阅内容"].every(b => shape.badges.includes(b)),
-  JSON.stringify(shape.badges));
+check("没有指向空路径的阅读页链接", cards.every(c => !c.href || !!c.path),
+  JSON.stringify(cards.map(c => ({ o: c.origin, p: c.path }))));
+check("没文档的那几类给的是回跳按钮,一条阅读页链接都没有",
+  cards.filter(c => c.origin !== "doc").every(c => !c.href),
+  JSON.stringify(cards.filter(c => c.origin !== "doc").map(c => ({ o: c.origin, h: c.href }))));
+// 出处那一行**只替不是知识库文章的那几类说话**:它们在 documents 里压根没有一行
+// (`d.source` 是 NULL),不替它们说就是满卡的「其他来源」。反过来钉一边:文档
+// 那一类照旧按它自己的 account/来源说话,不许挂上这三个标签里的任何一个。
+const SNIP_WHERE = ["每日日报", "知识问答", "订阅内容"];
+check("没文档的那几类照自己那一类说出处",
+  cards.filter(c => c.origin !== "doc").every(c => SNIP_WHERE.includes(c.where)),
+  JSON.stringify(cards.filter(c => c.origin !== "doc").map(c => ({ o: c.origin, w: c.where }))));
+check("知识库文章那一类不挂这三个标签",
+  cards.filter(c => c.origin === "doc").every(c => !SNIP_WHERE.includes(c.where)),
+  JSON.stringify(cards.filter(c => c.origin === "doc").map(c => c.where)));
 
 // ── 4b. 「回原文」那一步也要认协议 ──
 // `url` 是内容自带的(RSS 的 link),后端只管长度。同一份数据渲染成 `<a>` 时各处
@@ -376,15 +384,24 @@ check("这次回跳被丢掉,不留在那儿等着",
 // `indexOf(quote)` 落在第一处:用户看到一个高亮,而它在另一段上下文里 ——
 // 一句"没找到"比一个落错地方的高亮诚实。
 const AMBI = fx.snipDup.slice(-7);
-await evalJs(`fetch('/api/favorites', { method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ quote: ${js(AMBI)}, origin: 'daily',
-    origin_ref: ${js(fx.dailyDate)}, origin_title: '日报 · 歧义' }) }).then(r => r.ok)`);
+// **这一条摆盘要自己记一条判据。** 它的引文是上面那条重复句的后半截,所以"面板里
+// 出现了一颗 data-jump 里带着这串字的按钮"连那条旧收藏都算 —— 等它等不出新东西,
+// 随后那次点击只会红在"点不到",真因(这条压根没落库)被盖掉。
+const ambiPost = await evalJs(`(async () => { const r = await fetch('/api/favorites',
+  { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ quote: ${js(AMBI)}, origin: 'daily',
+      origin_ref: ${js(fx.dailyDate)}, origin_title: '日报 · 歧义' }) });
+  return r.status + ' ' + (await r.text()).slice(0, 200); })()`);
+check("歧义那条摆盘真落库了", String(ambiPost).startsWith("200"), String(ambiPost));
 await evalJs(`switchTab('fav'); loadFavPanel(); true`);
-await until(`[...$('fav-list').querySelectorAll('.fav-jump')].some(b =>
-  (b.dataset.jump || '').includes(encodeURIComponent(${js(AMBI)})))`, 15000);
+// 等的是**这一条**:按 `q` 逐字比,不拿整条 payload 做 includes(同 `favDocHref`)
+await until(`[...$('fav-list').querySelectorAll('.fav-jump')].some(b => {
+  try { return JSON.parse(decodeURIComponent(b.dataset.jump)).q === ${js(AMBI)}; }
+  catch { return false; } })`, 15000);
 const clickedAmbi = await clickJump("daily", AMBI);
-check("收藏面板里能点到歧义那条的回跳", clickedAmbi);
+check("收藏面板里能点到歧义那条的回跳", clickedAmbi, await evalJs(`JSON.stringify({
+  err: $('fav-error').textContent, items: favItems.length,
+  qs: favItems.map(f => (f.quote || '').slice(0, 10)) })`));
 const ambiToast = await until(`window.__toastText().includes('没找到这段收藏')`, 20000);
 check("歧义锚点如实说没找到", ambiToast, await evalJs(`window.__toastText()`));
 check("歧义锚点不许高亮到第一处", (await highlightText()) === "(没有高亮)",
@@ -394,11 +411,12 @@ check("歧义锚点不许高亮到第一处", (await highlightText()) === "(没�
 // `/doc/…` 是脱离 kb-web 也能直接打开的独立产物,自带一份内联的采集+定位
 // (`kb/web/pages.py` 的 `_DOC_SNIP_JS`)。**两份实现共用同一套锚点坐标系**,
 // 差一个空格就对不上 —— 所以这一节真跳过去看高亮,而不是只看链接长什么样。
-const docHref = shape.docLinks.find(
-  l => l.path === fx.docPath && l.href.includes("#kbq="));
-check("订阅那条片段给出了带锚点的阅读页链接", !!docHref, JSON.stringify(shape.docLinks));
+// **现挑一次,不吃第 4 格那张快照**:中间那几格又存了几条收藏,面板早重画过了。
+await openFavList();
+const docHref = await favDocHref(fx.snipFeed);
+check("订阅那条片段给出了带锚点的阅读页链接", !!docHref, String(docHref));
 if (docHref) {
-  await send("Page.navigate", { url: base + docHref.href });
+  await send("Page.navigate", { url: base + docHref });
   await until(`!!document.getElementById('content')
     && document.getElementById('content').textContent.includes(${js(fx.snipFeed)})`, 25000);
   const hiDoc = await snipHighlight(fx.snipFeed, 10000);

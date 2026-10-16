@@ -299,11 +299,11 @@ _FAV_NO_TITLE = "(原文已不在索引里)"
 def api_favorites(status: str = "inbox"):
     """收藏列表(带文档元数据),按收藏时间倒序。
 
-    只返回一个状态的条目,同时附带各状态计数、陈旧数(inbox 超过 STALE_DAYS
+    返回指定状态或 all 全部条目,同时附带各状态计数、陈旧数(inbox 超过 STALE_DAYS
     没动过的)和整篇收藏 path 集合(搜索卡片/reader 的 ★ 状态用,不分状态)。
     """
-    if status not in _FAV_STATUSES:
-        raise HTTPException(400, f"status 只能是 {'/'.join(_FAV_STATUSES)}")
+    if status not in (*_FAV_STATUSES, 'all'):
+        raise HTTPException(400, f"status 只能是 all/{'/'.join(_FAV_STATUSES)}")
     conn = store.connect()
     try:
         # **`id` 是必须的那一半**:`created_at` 只到秒(`kb/web/common.py` 的
@@ -311,8 +311,10 @@ def api_favorites(status: str = "inbox"):
         # 那几条排序就成了未定义,列表每次刷新顺序都可能不一样(实测:同一份日报
         # 里两句话同秒收藏,回跳按钮的先后在两次加载之间换过位置)。
         rows = conn.execute(
-            _FAV_SELECT + " WHERE f.status = ? ORDER BY f.created_at DESC, f.id DESC",
-            (status,),
+            _FAV_SELECT
+            + (" WHERE f.status = ?" if status != 'all' else "")
+            + " ORDER BY f.created_at DESC, f.id DESC",
+            (status,) if status != 'all' else (),
         ).fetchall()
         favorites = []
         for r in rows:

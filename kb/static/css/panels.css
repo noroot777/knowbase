@@ -338,8 +338,11 @@ body.chat-mode { padding-bottom: 28px; }
 
 /* 没有 vault 文档的收藏(日报正文、问答回答、没导出的订阅条目)点回去不是
    一个地址而是一次面板切换,所以那一下挂在 button 上 —— 但读起来必须和
-   旁边那些文章链接一模一样,否则同一张卡上两种出处长成两个样子。
-   行为在 kb/static/js/fav.js 的 favJumpHtml / jumpFavOrigin。 */
+   旁边那些文章链接一模一样,否则同一张卡上两种出处长成两个样子。这里只做
+   「把按钮的那层外壳摘掉」,长什么样由它所在那一处的类决定(收藏架卡片是
+   `.fv-read-link`、详情是 `.fv-primary-link`,都在 favorites.css,**排在本文件
+   之后**所以颜色字号由它们说了算)。行为在 kb/static/js/fav.js 的
+   favJumpHtml / jumpFavOrigin。 */
 .fav-jump {
   background: transparent; border: 0; padding: 0; margin: 0;
   font: inherit; color: var(--ink); text-align: left; cursor: pointer;
@@ -347,7 +350,3 @@ body.chat-mode { padding-bottom: 28px; }
   max-width: 100%; min-width: 0;
 }
 .fav-jump:hover { background: transparent; color: var(--accent); }
-.fav-title .fav-jump { font-size: inherit; font-weight: inherit; }
-.fav-rowline .t .fav-jump { color: var(--ink-2); }
-.fav-rowline.q .t .fav-jump:hover { color: var(--accent); }
-.badge.fav-origin { flex-shrink: 0; margin-right: 6px; }

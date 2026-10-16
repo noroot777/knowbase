@@ -169,6 +169,7 @@ def _x_kind(kind: str) -> dict:
 @router.get('/{kind}/x-channel')
 def x_channel(kind: str):
     """通道清单 + 当前选择 + 便宜的就绪判断。面板每次打开都调它,所以不连网。"""
+    from kb.feeds import x_login_import
     settings = _x_kind(kind)
     ready, why, hint = x_channels.readiness(settings)
     current = x_channels.channel_of(settings)
@@ -182,6 +183,10 @@ def x_channel(kind: str):
         'ready': ready, 'why': why, 'hint': hint,
         'login_command': x_channels.login_command(settings),
         'needs_login_window': current == x_channels.BROWSER,
+        # 独立 profile 那份登录态是什么时候搬进去的。**跟 `ready` 是两件事**:
+        # 这一行只说「什么时候」,cookie 过期在文件上看不出来(见
+        # `x_login_import.summary`)。文案在服务端拼,前端只负责显示。
+        'login_state': x_login_import.summary(),
     }
 
 
@@ -219,6 +224,43 @@ def x_channel_login(kind: str):
     except Exception as e:                                # noqa: BLE001 - 成品文案
         raise HTTPException(400, str(e)) from None
     return {'ok': True, 'detail': detail}
+
+
+@router.post('/{kind}/x-channel/import-login')
+def x_channel_import_login(kind: str):
+    """从日常浏览器把 X 登录态搬进独立 profile。用户点按钮才走,所以允许慢。
+
+    **门槛和「打开登录窗口」同一道,理由逐字相同**(见 `x_channel_login`):它写的
+    是独立 profile 那一档的登录态,而这里读的是**存下来**的那份通道 —— 页面上那个
+    下拉是还没提交的草稿。前端另有一道闸(未保存时按钮是禁用的),这里是走键盘或
+    脚本那条路时的兜底。
+
+    **不挂 `guard`。** 它拦的是「这一类来源正在同步时别改订阅」,而这件事真正的
+    互斥在那个 profile 目录上(同一个 profile 同时只能被一个实例打开)——
+    判据因此是 `profile_busy`,它答的是「现在写不写得进去」,而且在跑的那一轮用的
+    不是这条通道时不该拦(口径同元规则「判据待在写语句自己那一侧」)。
+    """
+    from kb.feeds import x_login_import
+    settings = _x_kind(kind)
+    current = x_channels.channel_of(settings)
+    if current != x_channels.BROWSER:
+        raise HTTPException(400, f'当前保存的取法是「{x_channels.label(current)}」，'
+                                 f'而这颗按钮写的是'
+                                 f'「{x_channels.LABELS[x_channels.BROWSER]}」'
+                                 f'那一档的登录态。先把取法改成它并点「保存设置」，'
+                                 f'再回来导入。')
+    ok, detail = x_login_import.import_login_state(
+        str(x_channels.BROWSER_PROFILE), settings.get('x_chrome_path', ''))
+    # `login_state` 一起回去:面板上那行「上次什么时候导的」要跟着这一次更新,
+    # 否则用户得把整页重新打开一次才看得见自己刚做的事。
+    # **就绪判断也一起重算。** 导入之前那一档多半是「还没登录过 X」,而这一下正是
+    # 把它变成「登录过」的那件事 —— 不回新的 `ready/why`,页面上就会同时挂着
+    # 「当场验证通过」和「还没有登录过 X」两句互相打脸的话,而用户得自己再点一次
+    # 「检查连接」才看得到真相。口径跟 GET 完全一份(`x_channels.readiness`),
+    # 不在这儿另写一套判断。
+    ready, why, _hint = x_channels.readiness(settings)
+    return {'ok': ok, 'detail': detail, 'login_state': x_login_import.summary(),
+            'ready': ready, 'why': why}
 
 
 @router.post('/{kind}/x-channel/check')

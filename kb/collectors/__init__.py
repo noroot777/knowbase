@@ -34,6 +34,13 @@ fetch 的返回值没有意义。**materialize 的返回值是这一轮的成果
 路径当不了这个身份:它随标题变,也不区分「头一回落下」和「正文补抓重写一遍」。
 口径与两个数在补导场景下为什么必然不等,见 docs/decisions/daily.md。
 
+**交回执的那一刻是「文件已经落进 vault」,不是「这一篇的后续记账也成了」。**
+一篇 md 替换成功之后,它就会被索引、会进当天日报取材;采集器自己那边随后的
+确认(feeds.db 的 exported_hash、本地库的已导标记)失败只意味着"下一轮还会再
+导一次",不许让这一篇从回执里消失——消失之后重导时它已经不是新文件,这一篇
+永远补不回账(第 1 轮审查实测:vault 多了 1 篇,药丸永久写 0 条且自称确定)。
+整段物化半途炸掉、清单只剩一半时返回 None,不要返回那半份冒充完整。
+
 新增来源 = 写一个实现 + 在 _REGISTRY 里注册。想让"订阅了哪些号/源"能在
 面板上增删,再实现一份 TargetManager(可选,见下);想让面板上那份失败明细里的
 单条内容能被用户当场排除掉,再实现一份 ItemDropping(可选,见
@@ -127,7 +134,10 @@ class SourceCollector(Protocol):
     def fetch(self, scope: FetchScope) -> None: ...
 
     def materialize(self) -> frozenset[Fetched] | None:
-        """落 md。返回这一轮新写的那几篇(见 `Fetched`),说不出来返回 None。"""
+        """落 md。返回这一轮新写的那几篇(见 `Fetched`),说不出来返回 None。
+
+        判据是"文件已经进了 vault",不是"后续记账也成了"(见模块开头)。
+        """
         ...
 
     def pending(self) -> int | None:

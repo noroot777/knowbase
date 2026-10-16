@@ -131,7 +131,7 @@ def _item_text(value):
     `str({...})` 是 `"{'a': 1}"`,都是**非空**字符串,当抓取身份交上去会被归进
     「确定不是这一轮抓的」—— 一个缺口于是伪装成确定答案。
 
-    口径与 `kb/fetch_rounds.py` 的 `text_field` 同一份。两个包、两个进程,导不过
+    口径与 `kb/fetch_identity.py` 的 `text_field` 同一份。两个包、两个进程,导不过
     来,所以这里抄了一份 —— **改一边记得同步改另一边**。
     """
     if value is None:

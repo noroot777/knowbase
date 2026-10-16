@@ -301,7 +301,7 @@ class LocalIdentityTests(LocalCollectCase):
     def test_an_item_field_that_is_not_text_voids_the_whole_list(self):
         """`[item]` 行里某个字段不是字符串:整份作废,和写到一半那种同档。
 
-        这一端和知识库那一端(`_receipt` / `fetch_rounds.text_field`)必须同口径 ——
+        这一端和知识库那一端(`_receipt` / `fetch_identity.text_field`)必须同口径 ——
         只在一端拦的话,另一端就成了把缺口洗成确定答案的那个地方。不许 `str()` 一下
         糊过去:`str(None)` / `str({...})` 都是**非空**字符串,当抓取身份交上去会被
         归进「确定不是这一轮抓的」。

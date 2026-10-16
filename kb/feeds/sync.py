@@ -602,24 +602,26 @@ def _export(kind: str, hold_untranslated: bool = False,
         # HTML safety belongs to the reader (textContent / DOMPurify).
         text += item_body_md(item)
         temp = None
-        # 「头一回落进 vault」问的是 `feed_items.path`(首次导出成功时写上,之后
-        # 没有任何地方清它),**不是磁盘上此刻有没有这个文件**。导出队列是
-        # `exported_hash<>content_hash`,正文补抓、译文回写都会让老文章重新写一遍
-        # 同一个路径,算进去同一篇会连着好几天被报成"刚抓到"。按文件在不在判还会
-        # 反过来错一次:存量清理删过的那篇再导出时会被当成新抓到的。
-        # `exported_hash` 也当不了这个判据 —— `translate._save` 会故意把它清空,
-        # 好让导出阶段重写那篇 md(见 kb/feeds/translate.py)。
-        fresh = not item['path']
+        # 「头一回落进 vault」要**两道一起**:库里那一格还空着(`feed_items.path`,
+        # 首次导出成功时写上、之后没人清它),而且这个路径上此刻确实没有文件。
+        # 只看那一格的后果:确认失败时它还空着,下一次业务抓取重导同一篇又算「头
+        # 一回」,一篇新文章都没有的那次同步照旧报「+1 条」—— **落地之后的确认成
+        # 不成,推不出此前有没有落地**。只看文件在不在的后果:正文补抓、译文回写
+        # 会让老文章重写同一个路径(同一篇连着好几天被报成"刚抓到"),存量清理删
+        # 过的那篇反过来被当成新抓到的。`exported_hash` 两样都当不了(译文回写清它)。
+        fresh = not item['path'] and not path.exists()
         try:
             with tempfile.NamedTemporaryFile('w', dir=root, suffix='.tmp', encoding='utf-8', delete=False) as f:
                 temp = Path(f.name)
                 f.write(text)
             os.replace(temp, path)
-            with reg.db() as c:
-                c.execute('UPDATE feed_items SET exported_hash=content_hash,path=? WHERE key=?', (rel,item['key']))
+            # **回执排在入库确认前面**:文件进了 vault 就是既成事实,后面那次
+            # 确认失败不许把它从成果里抹掉(实测形态见 docs/decisions/daily.md)。
             if fresh:
                 written.add(Fetched(f'{kind}:{item["key"]}',
                                     str(item['fetch_round'] or ''), rel))
+            with reg.db() as c:
+                c.execute('UPDATE feed_items SET exported_hash=content_hash,path=? WHERE key=?', (rel,item['key']))
             done += 1
         except Exception as e:
             errors.append({'title': item['title'], 'reason': str(e)[:300]})

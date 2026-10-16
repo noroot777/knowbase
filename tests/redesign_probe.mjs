@@ -42,6 +42,18 @@ await send("Page.enable");
 
 const fails = [], oks = [];
 const check = (name, cond, extra = "") => (cond ? oks : fails).push(name + (extra ? ` — ${extra}` : ""));
+const selectControlsProbe = `(() => [...document.querySelectorAll('select')].map(select => {
+  const style = getComputedStyle(select);
+  return {id: select.id || select.name || select.className || '(unnamed)',
+    image: style.backgroundImage, paddingRight: style.paddingRight, disabled: select.disabled};
+}))()`;
+
+async function checkSelectControls(view) {
+  const controls = await evalJs(selectControlsProbe);
+  const broken = controls.filter(control => control.image === 'none' || Number.parseFloat(control.paddingRight) < 28);
+  check(`${view} 全站下拉保留箭头与右侧空间（含禁用控件）`, controls.length > 0 && !broken.length,
+        JSON.stringify(broken));
+}
 
 async function goHome(w = 1440, h = 1000) {
   await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: w < 800 });
@@ -221,6 +233,7 @@ for (const tab of ["gallery", "search", "ask", "fav", "subs", "pipe"]) {
   await sleep(700);
   const over = await evalJs(`document.documentElement.scrollWidth - document.documentElement.clientWidth`);
   check(`${tab} 面板无横向溢出`, over <= 0, `溢出 ${over}px`);
+  await checkSelectControls(tab);
 }
 
 // ── 6. 窄屏 375 / 390:图鉴与导航都不许横向溢出 ──
@@ -228,6 +241,7 @@ for (const w of [375, 390]) {
   await goHome(w, 780);
   const over = await evalJs(`document.documentElement.scrollWidth - document.documentElement.clientWidth`);
   check(`${w}px 图鉴无横向溢出`, over <= 0, `溢出 ${over}px`);
+  await checkSelectControls(`${w}px`);
 }
 
 // ── 7. 详情抽屉能打开,标题用上展示体 ──
