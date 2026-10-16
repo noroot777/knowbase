@@ -10,7 +10,7 @@
 import { evalJs, send, sleep, until, clickAt, check, shown, pick, picked, text, fill,
          state, finish } from "./x_channel_kit.mjs";
 import { ownershipSections } from "./x_channel_race.mjs";
-import { CHANNELS, NEXT_STEP, posted, saved, used, mock } from "./x_channel_mock.mjs";
+import { CHANNELS, NEXT_STEP, posted, saved, used, mock, base } from "./x_channel_mock.mjs";
 
 // 1. 通道清单在大V观点的设置里,名字、说明、当前值都来自后端
 check("当前这一档的名字写在卡片上", (await text('#source-x-name')) === "feedgrab(cookie)",
@@ -198,6 +198,77 @@ check("收尾:又回到独立 profile 这一档(摆盘自检)",
       await evalJs(`xChannelSaved() && xChan.current === 'browser'`),
       await evalJs(`JSON.stringify([xChannelValue(), xChan && xChan.current])`));
 
+// 4.5 **慢检查在途时,同一档取法下换了一条路径并保存:旧结论不许贴到新那一份旁边。**
+// 审查实测(`check-race-after.jpg`):检查按旧路径跑着,这期间把位置改成一个不存在
+// 的文件并保存,页面已经读到「路径不可执行」;随后旧检查成功回来,状态行被写成
+// 「feedgrab 已就绪」+ 绿点,而输入框和那条可复制命令里都是那条不存在的路径。
+// 根子是归属只比「还是同一档取法吗」—— 同一档里换路径,它当场为真。
+await evalJs(`(document.getElementById('toast-host')||{}).innerHTML = ''; true`);
+await evalJs(`fetch('/__probe/used?reset=1').then(() => true)`);
+await pick('feedgrab');
+await fill('#source-x-bin', '/review/first-bin');
+await clickAt("#source-settings-save");
+await until(`xChannelSaved() && xChan.current === 'feedgrab'`, 20000);
+await evalJs(`fetch('/__probe/slow-check?ms=2500').then(() => true)`);
+check("「检查连接」点得到(4.5)", await clickAt("#source-x-check"));
+await sleep(400);                                  // 检查在路上(按旧路径跑着)
+await fill('#source-x-bin', '/review/missing-bin');   // 他改了位置
+await clickAt("#source-settings-save");               // 并且真存下去了
+await until(`xChannelSaved() && xChanDraft().includes('missing-bin')`, 20000);
+check("那一次检查确实是按旧路径跑的(摆盘自检)",
+      (await evalJs(`fetch('/__probe/used').then(r => r.json())
+                     .then(j => j.used.some(u => u.what === 'check' && u.bin === '/review/first-bin'))`)) === true,
+      await evalJs(`fetch('/__probe/used').then(r => r.json()).then(j => JSON.stringify(j.used))`));
+await sleep(3000);                                 // 等旧检查的回包确实落地过一次
+check("旧检查的结论没有贴到新那一份旁边",
+      !(await state()).includes("登录态有效"), await state());
+check("色点也没有被写成绿的", !(await evalJs(
+      `document.getElementById('source-x-dot').className`)).includes("ok"),
+      await evalJs(`document.getElementById('source-x-dot').className`));
+// **反过来钉一边:回执照旧给。** 它说的是「用户自己刚点的那颗按钮有结果了」,
+// 守上它的后果是用户在这期间顺手保存一次,就再也不知道那次检查到底回了什么。
+check("那次检查的回执照旧给了用户", (await text('#toast-host')).includes("登录态有效"),
+      await text('#toast-host'));
+
+// 4.5b **另一个标签页改过设置:这一页按下去的动作不许拿别人那一份跑。**
+// 审查实测(`multi-page-after.txt`):第二页把位置改成 `/review/second-page-missing`
+// 并保存,第一页不刷新直接点「检查连接」—— 这一页的「已经保存了」只是**它自己的
+// 缓存**,证不了库里存着的还是它,于是检的是第二页那条路径,结论却贴在第一页那条
+// 可用的路径旁边。判据因此下沉到服务端(`intake_api._x_act`):请求带上「我眼前
+// 这一份」,对不上就一个字都不跑。
+// 这里**从 node 这一侧直接 PUT**,页面无从知道 —— 那正是"另一个客户端"的形态。
+await evalJs(`(document.getElementById('toast-host')||{}).innerHTML = ''; true`);
+await evalJs(`fetch('/__probe/used?reset=1').then(() => true)`);
+await fetch(`${base}/api/intake/social/settings`, {
+  method: "PUT", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ enabled: false, interval_minutes: 1440, x_channel: "feedgrab",
+                         x_feedgrab_bin: "/review/second-page-bin", x_chrome_path: "" }) });
+check("这一页还以为自己那一份存着(摆盘自检)", await evalJs(`xChannelSaved()`));
+check("「检查连接」点得到(4.5b)", await clickAt("#source-x-check"));
+await until(`document.querySelector('#toast-host')?.textContent.includes('不是你眼前这一份')`, 20000);
+check("后端拒绝了,这一次一个动作都没跑",
+      (await evalJs(`fetch('/__probe/used').then(r => r.json()).then(j => j.used.length)`)) === 0,
+      await evalJs(`fetch('/__probe/used').then(r => r.json()).then(j => JSON.stringify(j.used))`));
+check("说清了是存着的那一份变了,不是一句看不懂的失败",
+      (await text('#toast-host')).includes("另一个标签页"), await text('#toast-host'));
+// **不许记成「这一次检查没跑完,当前状态不知道」** —— 那一档是留给"真跑过、只是
+// 没拿到答复"的;这一次后端明确说了它什么都没做。
+check("没有把一次明确的拒绝说成一次悬着的检查",
+      !(await state()).includes("不知道"), await state());
+await until(`!xChannelSaved()`, 20000);
+check("重读之后如实说:眼前这一份还没存下来(下一步是再点一次)",
+      (await state()).includes("还没存下来"), await state());
+
+// 收尾:把面板摆回「独立 profile、两条路径都空」,后面几节按它继续。
+await fill('#source-x-bin', '');
+await pick('browser');
+await clickAt("#source-settings-save");
+await until(`xChannelSaved() && xChan.current === 'browser'`, 20000);
+// (Chrome 那条路径是 4.2 留下的,后面几节按它继续,这里只把本节加的那条清掉。)
+check("收尾:回到独立 profile、feedgrab 那条路径已清掉(摆盘自检)",
+      (await evalJs(`JSON.parse(xChanDraft()).slice(0, 2).join('|')`)) === 'browser|',
+      await evalJs(`xChanDraft()`));
+
 await ownershipSections();
 
 // 5. 「检查连接」真连一次,结论写回状态行
@@ -337,6 +408,32 @@ check("读失败之后那条可照抄的命令收走了",
 check("留痕那一行也清掉了(连「现在是哪一档」都答不上来)",
       (await text('#source-x-import-state')) === "", await text('#source-x-import-state'));
 check("清单也收干净了,不留一份读不出来的旧选项", !await shown("#source-x-picker"));
+
+// 11b **读失败之后第一次点按钮:先把那次读补上,别拿一份空草稿去"保存"。**
+// 审查 N1 实测:读失败那一档 `xChan` 是 null,`xChannelPayload` 于是交出一份空草稿,
+// 于是「先保存再执行」发出一条 **`PUT {}`**、再被恢复出来的真实设置判成「保存完成时
+// 这份设置已经又改过了」—— 而用户一个字都没改,检查也压根没发出去。
+await evalJs(`(document.getElementById('toast-host')||{}).innerHTML = ''; true`);
+await evalJs(`fetch('/__probe/used?reset=1').then(() => true)`);
+const beforeRecover = saved.length;
+check("「检查连接」点得到(11b)", await clickAt("#source-x-check"));
+await until(`xChan && xChan.current === 'feedgrab'`, 20000);
+check("那次读被补上了,面板回到了真实的那一档",
+      (await text('#source-x-name')).includes("feedgrab"), await text('#source-x-name'));
+check("没有拿一份空草稿去保存(一条 PUT 都不该有)", saved.length === beforeRecover,
+      JSON.stringify(saved.slice(beforeRecover)));
+check("更没有把这件事说成「用户又改过设置」",
+      !(await text('#toast-host')).includes("又改过"), await text('#toast-host'));
+// **反过来钉一边:这一次要真的接着做下去** —— 读补上之后草稿本来就等于存着的
+// 那一份,把它堵在这儿等于让用户再点一次,而他压根不知道刚才那下为什么没反应。
+for (let i = 0; i < 100; i++) {
+  if ((await evalJs(`fetch('/__probe/used').then(r => r.json()).then(j => j.used.length)`)) > 0) break;
+  await sleep(100);
+}
+check("这一次检查照常跑了,而且跑的是恢复出来的那一份",
+      (await evalJs(`fetch('/__probe/used').then(r => r.json())
+                     .then(j => j.used.some(u => u.what === 'check' && u.channel === 'feedgrab'))`)) === true,
+      await evalJs(`fetch('/__probe/used').then(r => r.json()).then(j => JSON.stringify(j.used))`));
 
 // 7. RSS 视图上整块不出现 —— 通道是 X 的事
 await clickAt("#subs-switch-rss");

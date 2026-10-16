@@ -100,6 +100,26 @@ def channel_of(settings: dict) -> str:
     return resolve(settings.get('x_channel', DEFAULT))
 
 
+def config_of(settings: dict) -> dict:
+    """这一份设置里**动作真正会用到**的那几项,也就是它的身份。
+
+    面板把它眼前那一份一起发在动作请求里,三个动作端点各自核对一次
+    (`intake_api._x_act`)——「我按的这颗按钮,跑的是不是我正看着的这一份」只能
+    在**服务端**回答:浏览器那边的「已保存」是本页自己的缓存,证不了此刻库里
+    存着的还是它(另一个标签页、另一个客户端改一下就不是了;审查实测:第二页把
+    路径改成一个不存在的文件并保存,第一页不刷新直接点「检查连接」,检的是第二
+    页那条路径,而第一页输入框里仍是原来那条)。
+
+    **口径只有这一处**:通道名过 `resolve`(存量退役名和面板上的现用名要能对上),
+    两条路径去掉首尾空白(面板发出去之前也 trim 过)。**判的是「动作会用到的那
+    几项」,不是整份设置** —— `enabled`、同步间隔这些改了不影响这一次动作跑成
+    什么样,把它们算进身份只会让用户在另一处改个无关开关就被这边拒绝。
+    """
+    return {'x_channel': channel_of(settings),
+            'x_feedgrab_bin': (settings.get('x_feedgrab_bin') or '').strip(),
+            'x_chrome_path': (settings.get('x_chrome_path') or '').strip()}
+
+
 def supports_channels(kind: str) -> bool:
     """只有 social(X)这一类有通道可选。"""
     return feed_types()[kind].adapter == 'social'

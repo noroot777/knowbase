@@ -365,7 +365,7 @@ class EndpointTests(ImportBase):
         拒绝文案要说清**现在是哪一档**和**下一步**。
         """
         self.settings(ATTACH)
-        r = self.client.post('/api/intake/social/x-channel/import-login')
+        r = self.x_act('/api/intake/social/x-channel/import-login')
         self.assertEqual(400, r.status_code)
         detail = r.json()['detail']
         self.assertIn(x_channels.LABELS[ATTACH], detail)
@@ -375,7 +375,7 @@ class EndpointTests(ImportBase):
         """面板上那行字要跟着这一次更新,否则用户得重开整页才看得见自己刚做的事。"""
         self.wire()
         self.settings(BROWSER)
-        got = self.client.post('/api/intake/social/x-channel/import-login').json()
+        got = self.x_act('/api/intake/social/x-channel/import-login').json()
         self.assertTrue(got['ok'])
         self.assertIn('上次从日常浏览器导入', got['login_state'])
 

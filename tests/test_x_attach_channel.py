@@ -258,7 +258,7 @@ class LoginEndpointTests(ChannelBase):
         self.settings(ATTACH)
         with patch.object(x_browser, 'open_login_window',
                           side_effect=AssertionError('不该开窗口')):
-            r = self.client.post('/api/intake/social/x-channel/login')
+            r = self.x_act('/api/intake/social/x-channel/login')
         self.assertEqual(400, r.status_code)
         detail = r.json()['detail']
         self.assertIn('x.com', detail)                       # 下一步:在那儿登录

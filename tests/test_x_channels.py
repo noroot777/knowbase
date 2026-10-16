@@ -78,6 +78,16 @@ class ChannelBase(unittest.TestCase):
         return reg.save_settings('social', {'enabled': False, 'interval_minutes': 1440,
                                             'x_channel': channel} | extra)
 
+    def x_act(self, path, **over):
+        """像面板那样打一次动作请求:**带上现在存着的那一份当身份**。
+
+        三个动作端点都有一道闸(`intake_api._x_act`):请求里要说清"我眼前是哪一
+        份",对不上就什么都不跑 —— 不然另一个标签页改过设置之后,这一页按下去的
+        动作跑的是别人那一份。`over` 用来故意带一份对不上的,那正是这道闸要拦的。
+        """
+        body = x_channels.config_of(reg.get_settings('social')) | over
+        return self.client.post(path, json=body)
+
     def harvested(self, **by_handle):
         """直接摆一份预取结果,相当于"这一轮已经抓完了"。"""
         with x_channels._lock:
@@ -420,7 +430,7 @@ class ChannelApiTests(ChannelBase):
         self.settings(x_channels.FEEDGRAB)
         with patch.object(x_browser, 'open_login_window',
                           side_effect=AssertionError('不该开窗口')):
-            r = self.client.post('/api/intake/social/x-channel/login')
+            r = self.x_act('/api/intake/social/x-channel/login')
         self.assertEqual(400, r.status_code)
 
     def test_the_refusal_names_the_saved_channel_and_the_next_step(self):
@@ -434,7 +444,7 @@ class ChannelApiTests(ChannelBase):
                 self.settings(channel)
                 with patch.object(x_browser, 'open_login_window',
                                   side_effect=AssertionError('不该开窗口')):
-                    detail = self.client.post(
+                    detail = self.x_act(
                         '/api/intake/social/x-channel/login').json()['detail']
                 self.assertIn(x_channels.LABELS[channel], detail)       # 哪一档
                 self.assertIn('保存设置', detail)                        # 下一步
@@ -443,7 +453,7 @@ class ChannelApiTests(ChannelBase):
     def test_opening_a_login_window_reports_what_to_do_next(self):
         self.settings(x_channels.BROWSER)
         with patch.object(x_browser, 'open_login_window', return_value='已打开登录窗口。'):
-            r = self.client.post('/api/intake/social/x-channel/login')
+            r = self.x_act('/api/intake/social/x-channel/login')
         self.assertEqual(200, r.status_code)
         self.assertIn('已打开', r.json()['detail'])
 
@@ -451,7 +461,7 @@ class ChannelApiTests(ChannelBase):
         self.settings(x_channels.BROWSER)
         with patch.object(x_browser, 'open_login_window',
                           side_effect=x_browser.XBrowserError('登录窗口已经开着了')):
-            r = self.client.post('/api/intake/social/x-channel/login')
+            r = self.x_act('/api/intake/social/x-channel/login')
         self.assertEqual(400, r.status_code)
         self.assertIn('已经开着', r.json()['detail'])
 
@@ -483,14 +493,14 @@ class ChannelApiTests(ChannelBase):
     def test_checking_the_browser_channel_really_opens_one(self):
         self.settings(x_channels.BROWSER)
         with patch.object(x_browser, 'probe', return_value=(True, '登录态有效')) as probe:
-            r = self.client.post('/api/intake/social/x-channel/check')
+            r = self.x_act('/api/intake/social/x-channel/check')
         self.assertEqual((True, '登录态有效'), (r.json()['ready'], r.json()['detail']))
         self.assertEqual(str(x_channels.BROWSER_PROFILE), probe.call_args[0][0])
 
     def test_checking_the_feedgrab_channel_runs_its_doctor(self):
         self.settings(x_channels.FEEDGRAB)
         with patch.object(x_feedgrab, 'doctor', return_value=(False, '还没有 X 登录态')):
-            r = self.client.post('/api/intake/social/x-channel/check')
+            r = self.x_act('/api/intake/social/x-channel/check')
         self.assertFalse(r.json()['ready'])
         self.assertIn('登录态', r.json()['detail'])
 

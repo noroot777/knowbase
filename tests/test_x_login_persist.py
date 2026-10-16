@@ -682,7 +682,7 @@ class ImportRefreshesReadinessTests(ImportBase):
         self.settings(x_channels.BROWSER)
         before = self.client.get('/api/intake/social/x-channel').json()
         self.assertFalse(before['ready'])
-        got = self.client.post('/api/intake/social/x-channel/import-login').json()
+        got = self.x_act('/api/intake/social/x-channel/import-login').json()
         self.assertTrue(got['ok'])
         self.assertIn('ready', got)
         self.assertIn('why', got)

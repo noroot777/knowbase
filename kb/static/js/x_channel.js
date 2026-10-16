@@ -71,8 +71,11 @@ function xChanRead() {
 // 实测见 `docs/decisions/frontend-feedback.md`。
 function xChanAct() {
   xChanActs += 1;
+  // `key` = 这一次动作会跑的那**一整份**配置(此刻后端存着的那份;发起之前
+  // `xChanEnsureSaved` 已经确认它就是页面上这一份)。异常那条路上没有回包可问,
+  // 靠它回答「这个结果说的是哪一份」。
   return (xChanPending = { kind: xChanKind, channel: xChannelValue(),
-                           saved: xChan && xChan.current });
+                           saved: xChan && xChan.current, key: xChanSaved });
 }
 // 这个动作说的还是此刻这块面板吗:来源、下拉上选的那一档、**存下来**的那一档
 // 三样都没变才算。少了最后一样,「改成别档→保存→再改回来」会让一条旧结论盖掉
@@ -91,6 +94,10 @@ function xChanSettled(t, slot) {
       && xChanUnsure.channel === t.channel && xChanUnsure.slot === slot)
     xChanUnsure = null;
 }
+// **这一族有两个问题,别合成一个判据。** 这一个问的是「那两行『正在…』还归这个
+// 动作说吗」:来源、下拉上选的那一档、存下来的那一档三样没变就还是它 —— 用户在
+// 导入途中顺手改一下 Chrome 可执行文件位置,那个授权弹窗照样等在另一个窗口里,
+// 预告不该因此消失。**结论**能不能落地是另一个问题,判据严得多,见 `xChanOwnsAct`。
 function xChanMine(t) {
   return !!t && t.kind === xChanKind && t.channel === xChannelValue()
          && t.saved === (xChan && xChan.current);
@@ -100,11 +107,31 @@ function xChanMine(t) {
 function xChanOwnsRead(t) {
   return t.gen === xChanGen && t.acts === xChanActs && t.lands === xChanLands;
 }
-function xChanOwnsAct(t) {
-  if (!xChanMine(t)) return false;
+// 这个结果能不能更新面板上的当前状态。**判据是「它跑的是哪一份配置」,不是
+// 「还是同一档取法」。** 同一档里换一条可执行文件位置并保存,旧那次检查的结论就
+// 不再是这一份的结论了 —— 审查实测:检查在途时把位置改成一个不存在的文件并保存,
+// 页面已经读到「路径不可执行」,随后旧检查成功回来,状态行被写成「feedgrab 已就
+// 绪」+ 绿点,而输入框里和那条可复制命令里都是那条不存在的路径。
+// `config` 是**后端回来的那一份**(它执行时核对过,见 `intake_api._x_act`),它才是
+// 「这次跑的是什么」的权威答复;拿不到时(异常那条路上没有回包)退回发起那一刻
+// 记下的 `t.key`。
+// **`config` 这一道单独拆掉一条红都没有**(实测:改成只认 `t.key`,146 项全绿)——
+// 因为后端那道闸已经保证了"跑的就是我们发出去那一份"。留着它是因为它**不依赖
+// 我们自己这边的记账对不对**:`t.key` 是前端相信的东西,`config` 是服务端说的。
+// 口径同 `xChanActs` 那条:别因为单拆不红就当它冗余,拆掉只是把余量用掉一格。
+// 两头都要:**后端存着的还是它**(`=== xChanSaved`)、
+// **页面上此刻显示的也还是它**(`xChannelSaved()`)—— 只认前一半的话,草稿已经改
+// 成别的东西了,一条结论照样会贴在它旁边。
+function xChanOwnsAct(t, config) {
+  const ran = config ? xChanKey(config) : t.key;
+  if (t.kind !== xChanKind || ran !== xChanSaved || !xChannelSaved()) return false;
   xChanLands += 1;              // 从此刻起,更早发出的读说的都是旧事实
   return true;
 }
+// 后端那道闸拒绝了(409):它核对过,这一次**什么都没跑**。所以不许记成「结果
+// 不知道」—— 那一档是留给"真跑过、只是没拿到答复"的。要做的是重读一次,把现在
+// 真正存着的那一份摆出来。
+function xChanRefused(e) { return !!e && e.status === 409; }
 
 // 选中的那一档。**换成一组单选而不是下拉**:四个名字摆在下拉里看不出差别,
 // 而它们要准备的东西完全不同(一个要在终端装东西、一个要去浏览器开调试开关)。
@@ -350,13 +377,20 @@ function xChanSelect(id) {
 //    这条读压根不声称它们变了)。不这么做的话每条 GET 都会把身份判成"路径空着",
 //    于是「改了路径还没保存」在一次刷新之后就看不出来了。
 function xChanSavedKey(data) {
-  if ('x_feedgrab_bin' in (data || {}) || 'x_chrome_path' in (data || {}))
-    return xChanKey({ x_channel: data.x_channel ?? data.current,
-                      x_feedgrab_bin: data.x_feedgrab_bin,
-                      x_chrome_path: data.x_chrome_path });
-  const was = JSON.parse(xChanSaved || '["","",""]');
-  return xChanKey({ x_channel: (data || {}).current, x_feedgrab_bin: was[1], x_chrome_path: was[2] });
+  if (data && data.config) return xChanKey(data.config);           // `/x-channel` 的回包
+  if (data && 'x_channel' in data) return xChanKey(data);          // settings 的形状
+  // 两种都不是:**这一份是什么我们不知道**,那就别假装知道。返回一个对不上的
+  // 身份,面板于是说「还没存下来」、动作会先存一次 —— 代价是多发一次 PUT,
+  // 而反过来猜错的代价是拿一份不知道是什么的配置去跑(元规则:误报顶多重来
+  // 一次,漏报是静默用错东西)。
+  return '?';
 }
+
+// 动作请求里带着的「我眼前那一份」。**后端照它核对**(`intake_api._x_act`):
+// 对不上就一个字都不跑,因为那说明这一页手里的「已经保存了」已经过期 ——
+// 另一个标签页改过设置时,这一页既不知道、也不会重新 PUT(审查实测:第二页把
+// 路径改成一个不存在的文件并保存,第一页直接点「检查连接」,检的是第二页那条)。
+function xChanExpect() { return xChannelPayload(xChanKind); }
 
 // 保存设置时附带的那几个字段。社交来源之外返回空对象。
 function xChannelPayload(kind) {
@@ -403,6 +437,21 @@ function fillXChannelFields(settings, sent) {
 // 返回 false = 没存成或者存完已经不是这一档了,这一次动作不做 ——
 // 原因已经写在表单那行红字上。
 async function xChanEnsureSaved() {
+  // **「还没读到可操作的配置」跟「用户改过草稿」是两件事,不许混成一件。**
+  // 读失败那一档 `xChan` 是 null,`xChannelPayload` 于是交出一份空草稿 —— 原来
+  // 直接往下走:先发一次**空的 PUT**,再被保存收尾那次重读恢复出来的真实设置判成
+  // 「保存完成时这份设置已经又改过了」,而用户一个字都没改(审查 N1 实测:GET 503
+  // 之后第一次点「检查连接」,只收到一条 `PUT {}`,检查压根没发出去)。
+  // 出路是**先把那次读补上**:读回来了这一份本来就等于存着的那一份,
+  // 下面那个 `xChannelSaved()` 当场为真,这一次动作照常接着做。
+  if (!xChan) {
+    await loadXChannel(sourceKind);
+    if (!xChan) {
+      toast('还没读到现在用的是哪一档，这一次没有执行。等这一行恢复了再点一次。',
+            { type: 'info' });
+      return false;
+    }
+  }
   if (xChannelSaved()) return true;
   const want = xChanDraft(), kind = xChanKind;
   // 保存这一步自己会重读一次通道(`fillSourceSettings` 收尾那条
@@ -439,9 +488,13 @@ async function openXLoginWindow() {
   xChanBusy = true; $('source-x-login-btn').disabled = true;
   try {
     if (!await xChanEnsureSaved()) return;
-    const r = await pipePost(`/api/intake/${xChanKind}/x-channel/login`);
+    const r = await pipePost(`/api/intake/${xChanKind}/x-channel/login`, xChanExpect());
     toast(r.detail, { type: 'info', ms: 12000 });
-  } catch (e) { toast('打不开登录窗口', { detail: e.message }); }
+  } catch (e) {
+    // 被那道闸拒绝了:说清为什么,再把真相读回来(理由见 `xChanRefused`)。
+    if (xChanRefused(e)) { toast(e.message, { type: 'info', ms: 12000 }); loadXChannel(sourceKind); }
+    else toast('打不开登录窗口', { detail: e.message });
+  }
   finally { xChanBusy = false; $('source-x-login-btn').disabled = false; }
 }
 
@@ -466,7 +519,8 @@ async function importXLoginState() {
     // 它要连一次日常浏览器(等用户点授权,最长 90 秒),再起一个无头 Chrome 把
     // cookie 写进去、当场打开 x.com 验一次 —— 比「检查连接」还慢一截,所以超时
     // 给得比它宽。
-    const r = await pipePost(`/api/intake/${xChanKind}/x-channel/import-login`, {}, 240000);
+    const r = await pipePost(`/api/intake/${xChanKind}/x-channel/import-login`,
+                             xChanExpect(), 240000);
     // **回执先给,不进这块面板的归属判断**(口径同 `openXLoginWindow` 那条 toast):
     // 它说的是「用户自己刚点的那颗按钮有结果了」,面板此刻在说谁都不改变这件事 ——
     // 而把它也守上的后果是用户顺手保存一次就再也不知道那次导入成没成。
@@ -475,7 +529,8 @@ async function importXLoginState() {
     // 上挂着的是「改完记得点保存设置」—— 用成功文案把它盖掉就是报喜不报忧。
     // 比它更早发出的那些读说的都是导入之前那一刻 —— 那一道在**点下去的那一刻**
     // 就落了(`xChanAct`),不靠这一句,所以这里只问「还是这块面板吗」。
-    if (!(mine = xChanOwnsAct(tag))) return;
+    // **按后端回来的那一份判**:它说清了这一次跑的是哪一份配置。
+    if (!(mine = xChanOwnsAct(tag, r.config))) return;
     xChanSettled(tag, 'import');   // 这一处有了确定的答复
     if (xChan) xChan.login_state = r.login_state || '';
     // **就绪那一行也跟着这一次更新。** 后端把重算过的 `ready/why` 一起回来了
@@ -486,6 +541,9 @@ async function importXLoginState() {
     // 留痕那行说的是「什么时候搬的」,答不了「这一次为什么没验成」。
     $('source-x-import-state').textContent = r.ok ? (r.login_state || r.detail) : r.detail;
   } catch (e) {
+    // 拒绝那一档**什么都没跑**,所以不记「搬没搬成不知道」—— 记了就是把一次
+    // 明确的拒绝说成一次悬着的导入(理由见 `xChanRefused`)。
+    if (xChanRefused(e)) { toast(e.message, { type: 'info', ms: 12000 }); loadXChannel(sourceKind); return; }
     toast('导入没跑完', { detail: e.message });   // 回执同样先给
     // 失败那条路同一道闸:**超时不等于没发生** —— 后端可能已经把 cookie 搬完了,
     // 这时候放一条「导入之前」的读进来,页面会说回「还没有登录过 X」(那一道同样
@@ -525,13 +583,16 @@ async function checkXChannel() {
   xChannelWorking('正在检查…');
   try {
     // 这一步会真起一个 Chrome 或真跑一次 feedgrab doctor,比普通请求慢得多。
-    const r = await pipePost(`/api/intake/${xChanKind}/x-channel/check`, {}, 120000);
+    const r = await pipePost(`/api/intake/${xChanKind}/x-channel/check`,
+                             xChanExpect(), 120000);
     toast(r.detail, { type: r.ready ? 'ok' : 'err' });   // 回执先给,理由同导入那条
-    if (!(mine = xChanOwnsAct(tag))) return;   // 刚验出来的结论比在途的那些读新
+    // 刚验出来的结论比在途的那些读新;但它只说得了**它跑的那一份**(`r.config`)。
+    if (!(mine = xChanOwnsAct(tag, r.config))) return;
     xChanSettled(tag, 'state');                // 理由同导入那条
     if (xChan) { xChan.ready = r.ready; xChan.why = r.detail; }
     xChannelSay(r.detail);
   } catch (e) {
+    if (xChanRefused(e)) { toast(e.message, { type: 'info', ms: 12000 }); loadXChannel(sourceKind); return; }
     toast('检查没跑完', { detail: e.message });
     if (!(mine = xChanOwnsAct(tag))) return;
     // 同一道闸、同一个理由(见 `xChanUnsure`):这一下断在传输层,后端那次检查
