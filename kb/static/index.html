@@ -179,7 +179,8 @@
     <div class="daily-heading-actions">
       <span id="daily-window-label" class="daily-window-label">正在算覆盖区间…</span>
       <button class="text-button" id="daily-window-toggle" onclick="toggleDailyWindow()" aria-expanded="false" aria-controls="daily-window">改区间</button>
-      <button class="ghost" id="daily-gen" onclick="runDaily(false)"><span id="daily-gen-label">生成日报</span><span id="daily-gen-count" class="daily-gen-count" hidden></span></button>
+      <span id="daily-new-count" class="daily-new-count" hidden></span>
+      <button class="ghost" id="daily-gen" onclick="runDaily(false)"><span id="daily-gen-label">生成日报</span></button>
       <button id="daily-sync-gen" onclick="runDaily(true)">同步全部并生成</button>
     </div>
   </header>

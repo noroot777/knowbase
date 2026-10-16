@@ -78,8 +78,9 @@ function renderDailyWindowLabel() {
   renderDailyGenButton();
 }
 
-// 生成按钮的名字和它里面那颗药丸(今天第 N 次抓取、抓了多少)在
-// daily_chip.js —— `dailyTargetDate()` / `renderDailyGenButton()` 也在那边。
+// 生成按钮的名字、它前面那句「有 N 条新内容」(0 条时按钮整颗藏掉)、以及那段
+// 写着抓取事实的 tooltip 都在 daily_chip.js —— `dailyTargetDate()` /
+// `renderDailyGenButton()` 也在那边。
 
 async function fetchDailyWindow(fillInputs) {
   // **服务器事实统一从这一个口进来。** 抓取事实、队列积压、默认区间每次都接;
@@ -434,7 +435,7 @@ async function runDaily(sync) {
   const channels = pickedDailyChannels();
   if (sync && !channels.length) {
     toast('先勾选至少一个同步范围', { key: 'daily',
-      detail: '同步范围在下面的「每天定时生成」里；只想用已入库的内容出报，点左边那颗生成按钮。' });
+      detail: '同步范围在下面的「每天定时生成」里；只想用已入库的内容出报，点左边那颗生成按钮（没有新内容时它不显示）。' });
     return;
   }
   // 覆盖提示按「这一份会写到哪一天」判,和按钮叫什么名字共用 dailyTargetDate()。
