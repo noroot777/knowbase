@@ -47,6 +47,7 @@ from kb.pipeline_state import (
     _stage,
     _state,
     get_state,
+    history_keep_days,
     load_history,
     last_result,
     load_last_run,
@@ -65,6 +66,10 @@ from kb.pipeline_state import (
 # 批次层:同一个业务轮里的几轮管道合并着发布(`pipeline_batch`,从
 # `pipeline_state` 拆出来只因为行数上限)。`kb.daily_run` 照旧只认本模块这三个名字。
 from kb.pipeline_batch import PublishRefused, close_batch, open_batch
+# 历史清单标「这一行就是此刻屏幕上那份结果」过的是它(只认可信身份、一个字的内容都
+# 不比)。**没绕 `pipeline_state` 再导出一次** —— 那份文件正贴着 700 行上限,而门面
+# 本来就是对外那一层。
+from kb.pipeline_persist import same_event
 
 # 失败明细里「用户已经处理掉」的那几条(`pipeline_failures`):真正的删除在采集器
 # 那边,这一份只管它从此不再出现在面板上。Web 层照旧只认本模块的名字。
@@ -81,6 +86,7 @@ __all__ = [
     "drop_failure",
     "get_state",
     "close_batch",
+    "history_keep_days",
     "load_history",
     "last_result",
     "load_last_run",
@@ -89,6 +95,7 @@ __all__ = [
     "restore_gap",
     "row_key",
     "same_round",
+    "same_event",
     "valid_round",
     "result_version",
     "PublishRefused",

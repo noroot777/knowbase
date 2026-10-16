@@ -1,13 +1,34 @@
 /* Sync is a readable sequence with stable detail rows and an independent log. */
 .pipe-page-heading { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 20px; }
 .pipe-page-heading p { margin-top: 7px; color: var(--muted); font-size: 14px; }
+/* 页头就一行:标题 + 同一行上的事实数字(CLAUDE.md「视觉语言」那条) */
+.pipe-title-row { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; min-width: 0; }
+.pipe-head-facts { display: flex; align-items: baseline; gap: 7px; font-size: 13px; color: var(--muted); }
+.pipe-head-facts b { font: 600 15px var(--font-mono); color: var(--ink-2); }
+.pipe-head-facts i { font-style: normal; color: var(--line); }
 .pipe-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 #pipepanel button, #pipepanel select { min-height: 38px; font-size: 13px; }
 .pipe-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border: 1px solid var(--warn); background: var(--warn-soft); color: var(--warn); border-radius: 9px; margin-bottom: 16px; font-size: 14px; overflow-wrap: anywhere; }
-.pipe-overview { background: #fff; border: 1px solid var(--line); border-top: 3px solid var(--brand); border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; }
+.pipe-overview { background: #fff; border: 1px solid var(--line); border-top: 3px solid var(--brand); border-radius: 12px; padding: 20px 24px; margin-bottom: 16px; }
+/* 翻历史时整张卡转只读:顶边转灰、底色退一档。**比页顶一条黄条强** —— 它要回答的是
+   「这张卡现在讲的是哪一轮」,那句话就该长在卡上。 */
+.pipe-overview.viewing { border-top-color: var(--muted); background: #FBFCFC; }
+.pipe-overview.has-error { border-top-color: var(--danger); }
+.pipe-overview.has-error #pipe-progress-fill { background: var(--danger); }
+.pipe-viewing { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin: -6px 0 12px; padding-bottom: 11px; border-bottom: 1px solid var(--line-soft);
+  font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.pipe-viewing[hidden] { display: none; }   /* 作者 display 赢过 UA 的 [hidden] */
+.pipe-viewing .ghost { flex: none; }
 .pipe-overview-main { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .pipe-section-label { font-size: 12px; color: var(--muted); }
 .pipe-overview h2 { font-size: 20px; line-height: 1.4; margin: 6px 0; }
+/* `#pipe-state-title` 是 `tabindex="-1"` 的**程序化**焦点目标(翻历史时 `viewPipeRun`
+   把焦点挪过来,好让读屏和键盘用户跟上这一屏换了哪一轮),Tab 键到不了它。它原来在
+   屏幕外所以那圈框没人看见;搬进视口之后每点一行都画一个方框。
+   **只摘掉非键盘那一档**(`:not(:focus-visible)`)—— 真有人用键盘落到它上面时那圈框
+   还得在,否则就是把焦点指示删了。 */
+#pipe-state-title:focus:not(:focus-visible) { outline: none; }
 .pipe-overview p { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .pipe-run-metrics { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex-shrink: 0; }
 .pipe-run-metrics b { font: 600 20px/1.4 var(--font-display); }
@@ -18,18 +39,19 @@
 /* 整轮跑完后需处理的问题统一收在这块:失败步骤清单 + 重试按钮,一处看全 */
 .pipe-issues { margin-top: 16px; padding: 14px 16px; border: 1px solid var(--warn); background: var(--warn-soft); border-radius: 10px; }
 .pipe-issues[hidden] { display: none; }
-.pipe-issues-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pipe-issues-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .pipe-issues-head b { font-size: 14px; color: var(--danger); }
-.pipe-issues ul { list-style: none; margin: 10px 0 0; padding: 0; }
-.pipe-issues li { display: flex; gap: 10px; align-items: baseline; padding: 7px 0; border-top: 1px solid var(--line-soft); font-size: 13px; }
-.pipe-issues li b { flex: none; font-weight: 600; }
-.pipe-issues li span { color: var(--ink-2); overflow-wrap: anywhere; white-space: pre-wrap; }
+.pipe-issues-act { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+/* 只写**哪几步**红了,不抄它们的 detail —— 同一个字符串在下面的步骤行里已经有一份,
+   一屏上出现两遍(同元规则「口径只有一份」)。 */
+.pipe-issues-where { margin-top: 8px; font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
+.pipe-issues-where b { font-weight: 650; }
 .pipe-retry-help { margin-top: 12px; font-size: 13px; }
 .pipe-retry-help summary { cursor: pointer; color: var(--brand); }
 .pipe-retry-help p { margin-top: 8px; line-height: 1.7; }
 .pipe-retry-help strong { color: var(--ink); }
-.pipe-workbench { display: grid; grid-template-columns: minmax(0,1fr) minmax(280px,.65fr); gap: 20px; align-items: start; }
-.pipe-stage-panel, .pipe-log-panel { background: white; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; min-width: 0; }
+.pipe-workbench { display: grid; grid-template-columns: minmax(0,1fr) 320px; gap: 16px; align-items: start; }
+.pipe-stage-panel, .pipe-log-panel, .pipe-history-panel { background: white; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; min-width: 0; }
 .pipe-section-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 18px 20px; border-bottom: 1px solid var(--line); }
 .pipe-section-heading h2 { font-size: 16px; font-weight: 650; }
 .pipe-section-heading > span, .pipe-section-heading label { font-size: 12px; color: var(--muted); }
@@ -63,30 +85,46 @@
 .pipe-failure-drop { flex: none; font-weight: 400; color: var(--muted); }
 .pipe-failure-drop:hover, .pipe-failure-drop:focus-visible { color: var(--danger); }
 .pipe-failure-drop:disabled { color: var(--line); }
-#pipe-log-box { height: 440px; overflow: auto; padding: 18px; background: var(--ink); color: var(--paper); overscroll-behavior: contain; scroll-behavior: auto; }
+.pipe-log-panel { margin-top: 16px; }
+.pipe-log-summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 12px; padding: 15px 20px; }
+.pipe-log-summary::-webkit-details-marker { display: none; }
+.pipe-log-panel[open] .pipe-log-summary { border-bottom: 1px solid var(--line); }
+.pipe-log-summary h2 { font-size: 16px; font-weight: 650; }
+.pipe-log-summary > span { font-size: 12px; color: var(--muted); }
+.pipe-log-hint { margin-left: auto; }
+.pipe-log-head { padding: 11px 20px 0; font-size: 12px; color: var(--muted); }
+#pipe-log-box { height: 360px; overflow: auto; margin: 11px 0 0; padding: 18px; background: var(--ink); color: var(--paper); overscroll-behavior: contain; scroll-behavior: auto; }
 #pipe-log { font: 12px/1.9 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pipe-log-footer { padding: 11px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
 .pipe-log-footer > :last-child { margin-left: auto; }
 /* 历史运行:一行一轮,点进去整屏按那一轮渲染。一轮的红很容易在被人看见之前就被
-   下一轮覆盖掉,这是唯一查得到它的地方。 */
-.pipe-history-panel { background: white; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-top: 20px; }
+   下一轮覆盖掉,这是唯一查得到它的地方 —— 所以它**和被它改写的东西并排**,而不是
+   待在页尾(原来点一行改的是上面一千像素外的内容,屏幕上什么都看不见)。
+   **钉住**:展开一条问题明细就能把左边那列步骤拉长几百像素,选择器不能跟着滚出去。 */
+.pipe-history-panel { position: sticky; top: 14px; }
+#pipe-history-list { max-height: min(360px, calc(100vh - 230px)); overflow-y: auto; overscroll-behavior: contain; }
 .pipe-history-empty { padding: 18px 20px; font-size: 13px; color: var(--muted); }
-.pipe-history-row { display: grid; grid-template-columns: 5.5em 3em minmax(0,1fr) auto; align-items: center; gap: 14px;
-  width: 100%; padding: 13px 20px; border: none; border-bottom: 1px solid var(--line); border-radius: 0;
+.pipe-history-row { display: block; width: 100%; padding: 11px 18px 12px;
+  border: none; border-bottom: 1px solid var(--line-soft); border-radius: 0;
   background: none; text-align: left; font-size: 13px; color: var(--ink); cursor: pointer; white-space: normal; }
 .pipe-history-row:last-child { border-bottom: none; }
 .pipe-history-row:hover { background: var(--paper); }
-.pipe-history-row.on { background: var(--brand-tint); }
+.pipe-history-row.on { background: var(--brand-tint); box-shadow: inset 3px 0 0 var(--brand); }
+.pipe-history-r1 { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.pipe-history-r2 { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .pipe-history-when { font: 12px var(--font-mono); color: var(--ink-2); }
-.pipe-history-kind { color: var(--muted); font-size: 12px; }
-.pipe-history-where { color: var(--ink-2); overflow-wrap: anywhere; }
+.pipe-history-kind { color: var(--ink-2); }
+.pipe-history-where { color: var(--muted); overflow-wrap: anywhere; }
 .pipe-history-result { font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; }
 .pipe-history-row[data-status=error] .pipe-history-result { color: var(--danger); }
 .pipe-history-row[data-status=ok] .pipe-history-result { color: var(--ok); }
-@media (max-width: 720px) {
-  .pipe-history-row { grid-template-columns: 5.5em minmax(0,1fr); row-gap: 4px; }
-  .pipe-history-result { grid-column: 2; justify-self: start; }
-}
+.pipe-history-row[data-status=running] .pipe-history-result { color: var(--brand); }
+/* 「最新」那一枚:挑一轮和回到最新在同一处,不用去别处找另一个按钮 */
+.pipe-history-row.latest .pipe-history-when::after { content: "最新"; margin-left: 7px;
+  font: 10.5px var(--font-body); color: var(--brand-deep); background: var(--brand-soft);
+  border-radius: 4px; padding: 1px 5px; vertical-align: 1px; }
+#pipe-history-live .pipe-history-row { border-bottom: 1px solid var(--line); }
+
 
 .pipe-setup { width: min(620px,94vw); display: flex; flex-direction: column; padding: 0; overflow: hidden; }
 .pipe-setup-heading { display: flex; flex-shrink: 0; gap: 20px; justify-content: space-between; padding: 22px 24px 16px; }
@@ -142,7 +180,17 @@
    sticky 的分区头(实测手机上第二个分区头正好压在「暂不执行」上),所以这里提一层。 */
 .pipe-setup-footer { position: relative; z-index: 1; padding: 16px 24px 20px; border-top: 1px solid var(--line); background: var(--card); flex-shrink: 0; }
 .pipe-setup-footer > div:last-child { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
-@media (max-width: 1180px) { .pipe-workbench { grid-template-columns: 1fr; } #pipe-log-box { height: 280px; } }
+/* **窄屏那一档只有这一个断点。** 原来这里只塌列,而「轮次列排到步骤上面、钉住关掉」
+   写在另一个更窄的断点里 —— 两条都命中时后者赢,于是 1000~1180 这一段列塌成了单列、
+   而选择器还钉着、还排在它改写的内容后面,正是「单列下它反过来挡住内容」那一档。
+   塌列和那两件事是同一个决定,所以待在同一个 `@media` 里。 */
+@media (max-width: 1180px) {
+  .pipe-workbench { grid-template-columns: 1fr; }
+  /* 选择器要排在被它改写的内容**之前**;钉住关掉(单列下它会挡住内容) */
+  .pipe-workbench > .pipe-history-panel { order: -1; position: static; }
+  #pipe-history-list { max-height: 260px; }
+  #pipe-log-box { height: 280px; }
+}
 @media (max-width: 600px) {
   .pipe-page-heading { align-items: flex-start; flex-direction: column; gap: 16px; }
   .pipe-page-heading p { font-size: 13px; }

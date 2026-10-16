@@ -124,8 +124,13 @@ const server = createServer((req, res) => {
     // `rowsValid` 不为 null 时**强制**每行的 invalid 取它 —— 摆「后端漏标了」那一局,
     // 用来钉前端自己那道 try/catch(冗余带:上游漏标时它得接住)
     const invalidOf = r => (rowsValid === null ? !validOf(r) : !rowsValid);
+    // 「这一行是不是此刻那份结果」:真后端过 `same_event(行, last_result())`(只认可信
+    // 身份),而这边状态回包的 `last_run` 就是 `runs[0]` —— 所以按**身份**算,**不按
+    // 下标**:按位置给的话「留档失败那一轮不在清单里」这一局就永远摆不出来。
+    const isCurrentOf = r => !!(r?.run_id && r.run_id === (runs?.[0]?.run_id || ""));
     const rows = Array.isArray(runs)
-      ? runs.map(r => ({ ...r, version: versionOf(r), key: keyOf(r), invalid: invalidOf(r) }))
+      ? runs.map(r => ({ ...r, version: versionOf(r), key: keyOf(r), invalid: invalidOf(r),
+                         is_current: isCurrentOf(r) }))
       : runs;
     // **清单版本取第一个有效行**(真后端如此):拿无效首行算出来是 "none",和状态
     // 端点永远对不上,面板就一直提示「历史还没追平」
@@ -250,7 +255,7 @@ check("同一行再点一次就回到最新", await until(`$('pipe-stage-export'
 // ── 8. 正在看的那一轮被挤出记录:退回最新,不留一个指向空处的提示条 ───────────
 await setup("再翻到上午那一轮", clickAt(".pipe-history-row:nth-child(2)"));
 await setup("确实翻过去了", until(`$('pipe-stage-export').dataset.status === 'error'`));
-runs = [EVENING];                       // 它被 _HISTORY_KEEP 挤掉了
+runs = [EVENING];                       // 它出了保留窗口(`_HISTORY_DAYS`)
 await evalJs(`loadPipeHistory(); true`);
 check("被挤出记录之后退回最新", await until(`$('pipe-stage-export').dataset.status === 'ok'`),
       await exportStatus());

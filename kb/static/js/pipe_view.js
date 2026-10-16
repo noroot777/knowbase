@@ -129,6 +129,9 @@ function renderPipeState(s) {
   $('pipe-viewing').hidden = !viewing;
   if (viewing) $('pipe-viewing-text').textContent =
     `正在查看 ${pipeRunWhen(viewing)} 那一轮的结果，不是最新状态。`;
+  // 这张卡现在讲的是哪一轮、那一轮红没红 —— 顶边和底色跟着换。只读那一档**转灰不转
+  // 黄**:它不是一条警告,是「这不是此刻」。
+  $('pipe-state-label').textContent = viewing ? '这一轮的结果' : '当前状态';
   const result = pipeResult(s), stages = result.stages || {};
   const planned = pipePlannedStages(result), label = pipeRunLabel(result);
   for (const key of Object.keys(STAGE_META)) {
@@ -163,6 +166,12 @@ function renderPipeState(s) {
     }
   }
   const values = planned.map(k => stages[k] || {}), failed = values.filter(pipeHasFailure).length;
+  const card = $('pipe-overview');
+  if (card) {
+    card.classList.toggle('viewing', !!viewing);
+    // 运行中不转红:失败项不阻止本轮继续,整张卡这时讲的是「还在跑」
+    card.classList.toggle('has-error', !s.running && failed > 0);
+  }
   const completed = values.filter(st => st.status === 'ok' && !pipeHasFailure(st)).length;
   const active = Object.keys(STAGE_META).filter(k => stages[k]?.status === 'running').map(k => STAGE_META[k].name);
   const skipped = values.filter(st => st.status === 'skipped').length;
@@ -225,10 +234,19 @@ function renderPipeState(s) {
     $('pipe-issues-title').textContent = failedStages.length
       ? `${failedStages.length} 个步骤需处理`
       : `还有 ${pipePending.extract} 项内容待提取`;
-    $('pipe-issues-list').innerHTML = failedStages.map(k =>
-      `<li><b>${STAGE_META[k].name}</b><span>${esc(stages[k]?.detail || '执行失败')}</span></li>`).join('')
-      + (failedStages.length && backlog ? `<li><b>提取知识</b><span>另有 ${pipePending.extract} 项待提取</span></li>` : '');
+    // **只写哪几步,不抄它们的 detail。** 同一个字符串在下面那几行步骤的
+    // `.pipe-stage-detail` 里已经有一份(存量实测有 200 字的),一屏上出现两遍 ——
+    // 同元规则「口径只有一份」。这里的职责收敛成「哪几步 + 去哪看」。
+    const where = failedStages.map(k => `<b>${esc(STAGE_META[k].name)}</b>`).join('、');
+    $('pipe-issues-list').innerHTML = failedStages.length
+      ? `${where} · 各自的明细在下面那一步里`
+        + (backlog ? `；另有 ${pipePending.extract} 项内容待提取` : '')
+      : '在下面的「提取知识」里重试，或新建一次同步。';
   }
+  // 「看第一个」:把屏幕带到第一个红的那一步并展开它的明细。**翻历史时照旧给** ——
+  // 它只是滚动和展开,不动任何东西(那颗重试按钮才是「会动」的,它另有两道守卫)。
+  $('pipe-issues-jump').hidden = issues.hidden || !failedStages.length;
+  pipeFirstIssue = failedStages[0] || '';
   // **翻历史时这颗按钮一律藏掉。** 它重试的永远是**最后一轮**的范围
   // (`pipeline_retry.retry_crawl_scopes` 读的是 `load_last_run()`),而屏幕上显示
   // 的是上午那一轮 —— 「看到的那一轮」和「按下去会动的那一轮」必须是同一轮。
@@ -236,7 +254,59 @@ function renderPipeState(s) {
   // finally 会单独调它,两道射程不同。
   $('pipe-retry').hidden = s.running || !!viewing || !(failed || pipePending.extract > 0);
   renderPipeLog((s.log?.length ? s.log : result.log) || [], result.finished_at);
+  syncPipeLogPanel(s.running && !viewing, pipeVersion(s));
+  // 轮次列那一行「正在运行」跟着此刻的快照走(口径在 `pipe_history.js`)
+  if (typeof syncPipeHistoryLive === 'function') syncPipeHistoryLive();
+  renderPipeHeadFacts();
   renderPipeButtons();
+}
+
+// 第一个需处理的步骤,「看第一个」按它跳。空串 = 这一屏没有红。
+let pipeFirstIssue = '';
+
+function jumpToFirstIssue() {
+  const row = pipeFirstIssue && $('pipe-stage-' + pipeFirstIssue);
+  if (!row) return;
+  // 明细本来就是折叠的,跳过去还要再点一下才看得见原因 —— 那正是来这一趟要看的东西
+  const details = row.querySelector('details');
+  if (details && !details.hidden) details.open = true;
+  row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+// 「这一轮跑起来了」才自动展开日志,**只在翻上来那一下展开,之后不再管**:每次轮询都
+// 强制展开的话,用户跑着的时候自己收起来会被下一跳顶开,那比不展开更烦。收是人的事,
+// 我们不自动收 —— 收在他正读着最后几行的时候同样是抢。
+//
+// **记的是「哪一轮已经自动展开过」,不是一个布尔。** 布尔那一版的重置条件是「此刻这一屏
+// 不在跑」,而**翻历史也满足它**:跑着的时候手动收起、去翻一轮、再回到最新,日志又被顶
+// 开了(第 1 轮审查实测 `open` 从 null 变回 "")。翻历史不是新起了一轮。
+let pipeLogOpenedFor = '';
+function syncPipeLogPanel(running, version) {
+  const panel = $('pipe-log-panel');
+  if (!panel) return;
+  if (running && pipeLogOpenedFor !== version) { panel.open = true; pipeLogOpenedFor = version; }
+  $('pipe-log-hint').textContent = running ? '运行中' : '';
+}
+
+// 页头那一行事实数字(CLAUDE.md「页头就一行:标题 + 同一行上的事实数字」)。
+//
+// **不收参数,自己从全局那两份读** —— 这一行的两半来自两条不同的请求(轮数来自
+// `/api/pipeline/runs`,最近那一轮来自状态端点),而它们**各自什么时候回来是不定的**。
+// 收参数的话就只有状态那一侧调得动它:实测首屏是「最近 10-16 11:13」、那个「9 轮留档」
+// 一直不出现,因为历史回包到的时候没人再写一次这一行。两个写入方共用一个元素、各写半句
+// 更糟(后写的那次把另一半抹掉),所以口径是**一个函数读两份状态,两边都能调**。
+function renderPipeHeadFacts() {
+  const host = $('pipe-head-facts');
+  if (!host) return;
+  const snap = typeof pipeSnapshot === 'undefined' ? null : pipeSnapshot;
+  const rounds = typeof pipeHistory === 'undefined' ? [] : pipeHistory;
+  const result = snap ? pipeResult(snap) : {};
+  const parts = [];
+  if (rounds.length) parts.push(`<b>${rounds.length}</b> 轮留档`);
+  if (snap?.running) parts.push('正在同步');
+  else if (result.finished_at) parts.push(`最近 <b>${esc(pipeRunWhen(result))}</b>`);
+  const html = parts.join('<i>·</i>');
+  if (host.innerHTML !== html) host.innerHTML = html;
 }
 function renderPipeLog(lines, finishedAt) {
   const log = $('pipe-log'), box = $('pipe-log-box');
