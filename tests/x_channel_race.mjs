@@ -436,4 +436,96 @@ export async function ownershipSections() {
         await until(`document.getElementById('source-x-import-state')
                         .textContent.includes('当场验证通过')`, 20000),
         await text('#source-x-import-state'));
+
+  // 4.6m **那条读是在动作完成之前发出去的,它手里是变完之前的快照。**
+  // 上一版把「欠着的那次刷新」记成一个布尔,而这条读照旧通得过三道归属检查
+  // (结论没落地时 `xChanLands` 压根不推进),于是它把布尔清成「不欠了」——
+  // 审查实测:导入在途时改位置并保存,保存收尾那条读在导入提交前取到「没走完」、
+  // 被按住一秒后才落地,面板从此一直写着「还没有登录过 X」「这一轮没走完」,
+  // 而权威接口早就是完成记录,干等也不会变。
+  await evalJs(`(document.getElementById('toast-host')||{}).innerHTML = ''; true`);
+  await evalJs(`fetch('/__probe/forget').then(() => true)`);
+  await pick('browser');
+  await fill('#source-x-chrome', '/review/chrome-g');
+  await clickAt("#source-settings-save");
+  await until(`xChannelSaved() && xChan.ready === false`, 20000);
+  check("起点:又回到「还没有登录过」(摆盘自检)",
+        (await state()).includes("还没有登录过"), await state());
+  await evalJs(`fetch('/__probe/slow-import?ms=1500').then(() => true)`);
+  check("「导入登录态」点得到(4.6m)", await clickAt("#source-x-import-btn"));
+  await sleep(300);
+  // **先把下一条读按住,再去保存** —— 被按住的那条正是保存自己收尾那次重读:
+  // 它在导入提交**之前**就取到了「没走完」,2.2 秒后才落地(导入 1.5 秒就完了)。
+  await evalJs(`fetch('/__probe/slow-get?ms=2200').then(() => true)`);
+  await fill('#source-x-chrome', '/review/chrome-h');     // 在途时又改又存
+  await clickAt("#source-settings-save");
+  await until(`xChanDraft().includes('chrome-h')`, 20000);
+  await until(`document.querySelector('#toast-host')?.textContent.includes('搬进独立 profile')`, 20000);
+  // **判据落在用户看得见的那两行字上**:那条旧快照落地之后,面板不许停在它上面。
+  check("动作完成前发出的那条读,不算把欠着的刷新还上了:留痕最终是「搬完了」",
+        await until(`document.getElementById('source-x-import-state')
+                        .textContent.includes('当场验证通过')`, 20000),
+        await text('#source-x-import-state'));
+  check("而且那句「还没有登录过 X」也不再挂着",
+        await until(`!document.getElementById('source-x-state')
+                        .textContent.includes('还没有登录过')`, 20000),
+        await state());
+
+  // 4.6n **被作废的那条读失败了 —— 欠着的刷新不许就此没人管。**
+  // 它回来时早已不归这块面板(用户点过检查),那个 503 一个字都不会写上去,所以
+  // 用户既看不到失败原因、也等不到自动恢复:审查实测,留痕一直停在「这一轮没走完」,
+  // 显式再点一次检查才补回来。口径:**计数在落地那一刻就还掉,每条出口都推一次**
+  // —— 写在 `finally` 里的话那一格还按着,`xChanRefresh()` 一律让开。
+  await evalJs(`(document.getElementById('toast-host')||{}).innerHTML = ''; true`);
+  await evalJs(`fetch('/__probe/forget').then(() => true)`);
+  await pick('browser');
+  await fill('#source-x-chrome', '/review/chrome-i');
+  await clickAt("#source-settings-save");
+  await until(`xChannelSaved() && xChan.ready === false`, 20000);
+  await evalJs(`fetch('/__probe/slow-import?ms=1200').then(() => true)`);
+  check("「导入登录态」点得到(4.6n)", await clickAt("#source-x-import-btn"));
+  await sleep(300);
+  await fill('#source-x-chrome', '/review/chrome-j');     // 在途时又改又存
+  await clickAt("#source-settings-save");
+  await until(`xChannelSaved() && xChanDraft().includes('chrome-j')`, 20000);
+  // 导入收尾那条补读:按住 2.5 秒,到点回 503。
+  await evalJs(`fetch('/__probe/slow-get?ms=2500&fail=1').then(() => true)`);
+  await until(`document.querySelector('#toast-host')?.textContent.includes('搬进独立 profile')`, 20000);
+  // 补读还按着,用户点一次「检查连接」—— 它一开跑就把那条补读作废了。
+  await evalJs(`fetch('/__probe/slow-check?ms=600').then(() => true)`);
+  check("「检查连接」点得到(4.6n)", await clickAt("#source-x-check"));
+  await until(`document.querySelector('#toast-host')?.textContent.includes('登录态有效')`, 20000);
+  check("那条被作废的读失败了也要接着补:留痕最终是「搬完了」",
+        await until(`document.getElementById('source-x-import-state')
+                        .textContent.includes('当场验证通过')`, 20000),
+        await text('#source-x-import-state'));
+  // **反过来钉一边:那次失败不许写到面板上。** 它不归这块面板(用户的检查已经
+  // 顶掉它了),把「读不出来」贴上去就是拿一条过期的失败冒充当前状态。
+  check("而且这块面板没退化成「读不出来」",
+        !(await text('#source-x-name')).includes("读不出来")
+        && !(await state()).includes("读不出可选的取法"),
+        await text('#source-x-name') + ' / ' + await state());
+
+  // 4.6o **「打开登录窗口」也动了那份共享资料。** 它一个字都不往面板上写(那条
+  // toast 说的是"按钮有结果了"),所以三颗按钮里只有它从来不走归属那一套 —— 但窗口
+  // 一开,Chrome 就把 profile 建出来了,后端那道便宜判断(`x_channels.readiness`
+  // 只看 `Default/Cookies` 在不在)当场就换了答复,而页面上还是开之前那一份。
+  // 判据:**用户什么都不再做**,就绪那一行自己跟上。
+  await evalJs(`(document.getElementById('toast-host')||{}).innerHTML = ''; true`);
+  await evalJs(`fetch('/__probe/forget').then(() => true)`);
+  await pick('browser');
+  await fill('#source-x-chrome', '/review/chrome-k');
+  await clickAt("#source-settings-save");
+  await until(`xChannelSaved() && xChan.ready === false`, 20000);
+  check("起点:又回到「还没有登录过」(摆盘自检)",
+        (await state()).includes("还没有登录过"), await state());
+  check("「打开登录窗口」点得到(4.6o)", await clickAt("#source-x-login-btn"));
+  await until(`document.querySelector('#toast-host')?.textContent.includes('已打开')`, 20000);
+  check("窗口一开,就绪那一行自己跟上(用户没有再点任何东西)",
+        await until(`!document.getElementById('source-x-state')
+                        .textContent.includes('还没有登录过')`, 20000),
+        await state());
+  // **反过来钉一边:那条回执照旧给。** 它说的是用户刚点的那颗按钮,补读不许把它吃掉。
+  check("那次「打开登录窗口」的回执照旧给了用户",
+        (await text('#toast-host')).includes("已打开登录窗口"), await text('#toast-host'));
 }

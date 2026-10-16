@@ -100,6 +100,11 @@ let imported = false;
 // t=4549 进来、压 900ms,第二条 t=5452 才到),于是回包顺序不会倒。换成这一个 ——
 // 摆得出来,而且要的恰好是「发起时取代次」那同一道闸。
 let getHold = 0, getForget = false;
+// 按住之后再回 503(一次性,配合 `getHold`)。**摆「被作废的那条读失败了」**:它回来
+// 时早已不归这块面板,那个 503 一个字都不会写上去 —— 用户看不见原因,欠着的那次刷新
+// 于是也没有别的事件再推它(审查 R1 第二处的形态)。`fail-get` 那个开关摆不出来:
+// 它立刻就回 503,来不及被更晚的动作顶掉。
+let getHoldFail = false;
 // **谁的回包先发出去。** 4.6f 要的那个形态(旧读先抵达、动作随后才到)靠时序摆
 // 出来,所以得有个地方证明这一轮真摆成了 —— 不然用例测的是另一件事。
 let stamps = [];
@@ -121,6 +126,12 @@ let checkHold = 0;
 let importHold = 0;
 // 这会儿有没有一次导入正搬到一半:GET 要如实说「这一轮没走完」。
 let importing = false;
+// 「打开登录窗口」一起手,Chrome 就把那个 profile 建出来了,`Default/Cookies` 当场
+// 就在 —— 而真后端那道便宜判断(`x_channels.readiness`)只看这个文件在不在。所以
+// **窗口一开,后端那边的就绪答复立刻就不一样了**,而页面上还是开之前那一份:它正是
+// 「动作发出去过就算可能动过那份共享资料」要管的事。mock 不照着摆的话,那一道在探针
+// 上没有任何射程(口径同上面那条「按方法回答」)。
+let loginOpened = false;
 // 每个动作端点**实际按哪一份配置跑的**。页面上看不见后端用了什么,所以记在这儿。
 const used = [];
 // 「这一份设置」的身份,照 `kb/feeds/x_channels.py` 的 `config_of`:取法 + 两条
@@ -220,6 +231,7 @@ const server = createServer(async (req, res) => {
         if (channel !== "browser")
           return json({ detail: `当前保存的取法是「${CHANNELS.find(c => c.id === channel).label}」，`
                                 + "不在这里登录。" }, 400);
+        loginOpened = true;         // profile 建出来了,理由见 `loginOpened`
         return json({ ok: true, config: storedConfig(),
                       detail: "已打开登录窗口。登录成功后关掉它。" });
       }
@@ -237,7 +249,7 @@ const server = createServer(async (req, res) => {
     // 携带「按住期间发生的事」,于是「旧读盖掉新事实」这个形态压根摆不出来。
     if (failGet) { failGet = false; return json({ detail: "测试：取法服务暂时不可用" }, 503); }
     if (getForget) { getForget = false; imported = false; }
-    const snap = channel === "browser" && imported;
+    const snap = channel === "browser" && (imported || loginOpened);
     const payload = {
       current: channel, channels: CHANNELS, ready: snap,
       // 完整那一份:前端拿它当「后端此刻存着什么」的身份,不必再去猜路径。
@@ -250,9 +262,10 @@ const server = createServer(async (req, res) => {
       login_state: importing ? IMPORTING : (imported ? IMPORTED : ""),
     };
     if (getHold) {
-      const ms = getHold;
-      getHold = 0;
+      const ms = getHold, bad = getHoldFail;
+      getHold = 0; getHoldFail = false;
       await new Promise(r => setTimeout(r, ms));
+      if (bad) { stamps.push("get-failed"); return json({ detail: "测试：取法服务暂时不可用" }, 503); }
     }
     stamps.push("get");
     return json(payload);
@@ -264,6 +277,8 @@ const server = createServer(async (req, res) => {
     // `forget=1`:把「还没导入过」这个状态摆回来,好让被按住的那条读说的是
     // **导入之前**那一刻(上面 4.6 已经导入成功过了)。
     getForget = q.get("forget") === "1";
+    // `fail=1`:按住到点之后不给回包,回 503(理由见 `getHoldFail`)。
+    getHoldFail = q.get("fail") === "1";
     return json({ ok: true });
   }
   // 下一条导入 POST 掐断连接(摆「这一次结果不知道」那个形态)。
@@ -283,7 +298,7 @@ const server = createServer(async (req, res) => {
   }
   // 把「还没导入过」摆回来(下一条 GET 就说"还没有登录过 X")。
   if (path === "/__probe/forget") {
-    imported = false; importing = false;
+    imported = false; importing = false; loginOpened = false;
     return json({ ok: true });
   }
   // 下一条导入 POST 压慢(摆「导入在途时改了配置并保存」)。
