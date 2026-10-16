@@ -68,6 +68,10 @@ BIND = Path(__file__).resolve().parent / "snip_probe_bind.mjs"
 # 里那一条正文就是盘上那一份"摆盘;它也会现摆日报正文、删掉几条同引文的收藏(回跳
 # 按钮按引文找,留着就分不清点中的是哪一条)。
 IDENT = Path(__file__).resolve().parent / "snip_probe_ident.mjs"
+# 第五份的后半截:**独立阅读页那一份实现自己再判一次**(`/doc/…` 内联的采集和定位
+# 脱离 kb-web 也要能用,共享层全绿证明不了它)。拆出来是为了 700 行上限,**紧跟在
+# 第五份后面跑、顺序一点没动**:它要用同一个库里那条收藏和同一篇导出稿。
+IDENT_DOC = Path(__file__).resolve().parent / "snip_probe_ident_doc.mjs"
 
 sys.path.insert(0, str(REPO))
 
@@ -133,6 +137,11 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
         if not ident.stdout.strip():
             raise AssertionError(ident.stderr)
         cls.ident = json.loads(ident.stdout)
+        ident_doc = run_probe([node, str(IDENT_DOC), base, str(manifest)],
+                              timeout=420, env=probe_env())
+        if not ident_doc.stdout.strip():
+            raise AssertionError(ident_doc.stderr)
+        cls.ident_doc = json.loads(ident_doc.stdout)
 
     def test_snippets_can_be_taken_and_jumped_back_to_everywhere(self):
         results = self.out["results"]
@@ -223,6 +232,20 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
             with self.subTest(check=r["name"]):
                 self.assertTrue(r["ok"], r["detail"])
 
+    def test_the_reading_page_judges_the_same_thing_itself(self):
+        """独立阅读页那一份实现自己再判一次(两份实现各要有自己的红)。
+
+        和上面那条分开记:`/doc/…` 要能脱离 kb-web 直接打开,所以它自带一份内联的
+        采集和定位 —— 这几条红的时候,共享层那几格全是绿的,不好的是用户点一条收藏
+        去读原文那一下:老收藏照旧落回去、「当时就定不住」那条却高亮在别处,或者这
+        一页自己收下来的收藏压根没把那件事记进库里(从此不受那条约束管)。
+        """
+        results = self.ident_doc["results"]
+        self.assertTrue(results, "阅读页那一份探针一条都没跑")
+        for r in results:
+            with self.subTest(check=r["name"]):
+                self.assertTrue(r["ok"], r["detail"])
+
     def test_no_page_error_along_the_way(self):
         """页面里抛出来的异常单独报一条。
 
@@ -237,6 +260,7 @@ class SnippetFavoriteEverywhereTest(unittest.TestCase):
         self.assertEqual([], self.cards["pageErrors"])
         self.assertEqual([], self.bind["pageErrors"])
         self.assertEqual([], self.ident["pageErrors"])
+        self.assertEqual([], self.ident_doc["pageErrors"])
 
 
 if __name__ == "__main__":

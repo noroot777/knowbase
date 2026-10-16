@@ -340,6 +340,15 @@ SIDE_Q = '这一句两节里各写一遍,只有后文分得出第几处'
 SIDE_LEAD = '前面这三十来个字在两节里一字不差地写着,所以单凭它说不出第几处:'
 SIDE_TAIL_A = ',甲节后面接着交代本地索引怎么建、建完之后又该怎么查一遍才算完。'
 SIDE_TAIL_B = ',乙节后面接着交代远端部署要留哪几个端口、怎么收口才不漏请求。'
+# **两处的前后各两百二十字一字不差**:采集那一刻连最长那一档窗口(200)也分不出
+# 用户选的是第几处,`snipSpec` 于是如实给出 `locatable=false`。和上面 `AMBI_*` 那
+# 一对的区别:那一对加长到 80 字就分得出来(采集那一刻**定得住**),这一对怎么加都
+# 分不出 —— 验的是「采集就定不住」这件事能不能活着走到核对和落库那一步。
+# `DUP_TAIL` 只给改稿用:两处的邻域一字不差,要在盘上**只**换掉第二处,就得拿一段
+# 跨过它右边那两百多字、含着这句收尾的文本去换(`/__snip__/drop` 认整串、每一处都换)。
+DUP_Q = '这一处和那一处连前后两百字都分不出先后'
+DUP_PAD = '甲乙丙丁戊己庚辛壬癸' * 22
+DUP_TAIL = '只有第二处后面多出这一句收尾。'
 # 条目正文的**最后一句**:它后面紧跟着的是抽屉里那三颗链接按钮和小节标题 ——
 # 前后文锚点必须只从正文里采,不许把界面文字当成目标文档的上下文。
 TOOL_TAIL = '交代它和别的工具怎么搭'
@@ -465,7 +474,8 @@ def build(vault: Path) -> dict:
         sidetaila=SIDE_TAIL_A, sidetailb=SIDE_TAIL_B,
         vhtml=TOOL_HTML_MD, vdel=TOOL_DEL_MD,
         vtwin=TOOL_TWIN, twinlead=TOOL_TWIN_LEAD,
-        vmove=TOOL_MOVE, movelead=TOOL_MOVE_LEAD, movespare=TOOL_MOVE_SPARE),
+        vmove=TOOL_MOVE, movelead=TOOL_MOVE_LEAD, movespare=TOOL_MOVE_SPARE,
+        dupq=DUP_Q, duppad=DUP_PAD, duptail=DUP_TAIL),
         encoding='utf-8')
 
     cli._index_pass(Namespace(reembed=False, no_vector=True))
@@ -624,6 +634,7 @@ def build(vault: Path) -> dict:
             'toolMoveSpare': TOOL_MOVE_SPARE,
             'toolMoveSpareLead': TOOL_MOVE_SPARE_LEAD,
             'toolTail': TOOL_TAIL,
+            'dupQ': DUP_Q, 'dupPad': DUP_PAD, 'dupTail': DUP_TAIL,
             'streamText': STREAM_TEXT, 'streamTail': STREAM_TAIL,
             'toolPath': str(tool_path.relative_to(vault))}
 

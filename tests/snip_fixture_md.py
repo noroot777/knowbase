@@ -46,6 +46,12 @@ tags:
 
 {sidelead}{sideq}{sidetailb}
 
+## 前后两百字也分不出先后的两处
+
+{duppad}{dupq}{duppad}
+
+{duppad}{dupq}{duppad}{duptail}
+
 后面还有一段,交代它和别的工具怎么搭。
 """
 

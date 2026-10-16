@@ -420,6 +420,26 @@ export const appToastClear = () => evalJs(
   `(() => { const h = document.getElementById('toast-host');
      if (h) h.innerHTML = ''; return true; })()`);
 
+/** 库里引文等于 q 的那几条(只留判据要看的几个字段),整成一段 JSON 文本。
+ *  **原处身份那两份探针共用**(共享层那一份、独立阅读页那一份),所以放在外壳里:
+ *  各自抄一份的话,"库里那条是什么"就有了两套口径。*/
+const rowsOf = q => evalJs(`(async () => {
+  const d = await fetch('/api/favorites?status=inbox').then(r => r.json());
+  return JSON.stringify(d.favorites.filter(f => f.quote === ${js(q)}).map(f => ({
+    o: f.origin, p: f.path || null, u: f.quote_unique, e: f.anchor_exact,
+    pre: f.prefix, suf: f.suffix })));
+})()`);
+
+/** 把库里引文等于 q 的收藏全删掉。两处要它:**回跳**那几格按「引文 + 后文」找
+ *  按钮,前面几份探针留下的同引文收藏不清掉就分不清点中的是哪一条;**反过来钉
+ *  一边**的那几格要让「库里这一条是什么」只剩一个答案。*/
+const dropFavs = q => evalJs(`(async () => {
+  const d = await fetch('/api/favorites?status=inbox').then(r => r.json());
+  for (const f of d.favorites.filter(x => x.quote === ${js(q)}))
+    await fetch('/api/favorites/' + f.id, { method: 'DELETE' });
+  return true;
+})()`);
+
 /** 收尾:把结果写到 stdout(整份 JSON 一次写完,调用方整段解析)、关浏览器。 */
 export function finish() {
   writeSync(1, JSON.stringify({ results, pageErrors }, null, 1) + "\n");
@@ -429,5 +449,5 @@ export function finish() {
 }
 
 export { base, fx, send, evalJs, sleep, until, check, results, pageErrors, js,
-         clickJump, highlightText, snipHighlight, snip,
+         clickJump, highlightText, snipHighlight, snip, rowsOf, dropFavs,
          openFavList, favDocHref, DOC_HELPERS, docSnip, docToastClear, docToast };
