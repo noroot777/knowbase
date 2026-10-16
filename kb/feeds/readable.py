@@ -232,6 +232,26 @@ def _noisy(tag) -> bool:
     return bool(_NOISE.search(_CAMEL.sub(' ', marks)))
 
 
+def in_furniture(node) -> bool:
+    """这个节点待在**页面外围部件**里吗 —— 页眉、页脚、侧栏、导航那一类。
+
+    判据和正文提取剔噪那一套**同一份**(`_noisy` + `_DROP_OUTSIDE` 的位置规则):
+    手动收录那边要分清「这道登录墙拦在正文上」还是「页眉里常驻的一个登录框」
+    (`kb.feeds.grab_page`),问的正是同一个问题。两处各写一份名单的话,一处认得出
+    `siteFooter`、另一处认不出,而那种差别只在某些页面上看得见。
+
+    **按节点自己声明的身份判,不看内容**(同 `_noisy`)。
+    """
+    for parent in node.parents:
+        if getattr(parent, 'name', None) is None:
+            continue
+        if parent.name in _DROP_OUTSIDE and not parent.find_parent(['article', 'main']):
+            return True
+        if parent.name in ('div', 'section', 'ul', 'ol', 'figure', 'table') and _noisy(parent):
+            return True
+    return False
+
+
 def _gone(node) -> bool:
     """这个节点已经被别人连根拔掉了吗。
 

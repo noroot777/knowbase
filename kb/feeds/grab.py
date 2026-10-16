@@ -23,10 +23,12 @@
 ②**其他任何网页**走一次 HTTP + 正文提取(`grab_page`),正文提取器仍然只有
   `readable` 那一份口径。
 
-**绿泡泡的文章这条路抓不到**,这是实测结论不是猜测(2026-10-16:
-`mp.weixin.qq.com/s/<slug>` 302 到验证页,og 元信息和 `#js_content` 全没有)。
-那不是 bug,是对方的反自动化关卡 —— 我们**不绕**它,如实说清并指向真正管这件事
-的那条通道(读本机绿泡泡数据库,见 `kb/collectors/wechat_local.py`)。
+**绿泡泡的文章和别的站点走同一条路**(②):发一次请求,读到正文就收下,**实际
+撞上验证页才拒**,那一句指向真正管这件事的那条通道(读本机绿泡泡数据库,见
+`kb/collectors/wechat_local.py`)。实测多数 `mp.weixin.qq.com/s/<slug>` 确实会
+302 到 `/mp/wappoc_appmsgcaptcha`(og 元信息和 `#js_content` 全没有)—— 那不是
+bug,是对方的反自动化关卡,我们**不绕**它;但那是**那个响应**的结论,不是这个
+域名的结论(按域名先拒的代价见 `classify`)。
 """
 from __future__ import annotations
 
@@ -218,22 +220,43 @@ def _indexed(path: str) -> bool:
         conn.close()
 
 
+def _stored(path: str) -> bool:
+    """vault 里那一篇**还在吗**。
+
+    单独一问,因为它和「导出过没有」是两件事:清理脚本、同步盘、手动删都会把
+    文件拿走,而库里那两个 hash 仍然相等 —— 那时 `sync._export` 的待办判据
+    (`exported_hash<>content_hash`)选不中它,补跑一轮什么都不会写(见
+    `reclaim_export`)。
+    """
+    from kb import config
+
+    try:
+        return bool(path) and (config.VAULT_ROOT / path).is_file()
+    except OSError:
+        return False
+
+
 def known(url: str) -> dict | None:
     """这条地址是不是已经在库里了。返回那一条或 None。
 
-    返回里带 **`done`:它走完整条链了没有**,三件事一起才算 ——
-    ①导出成了 vault 里那一篇(`path` 在);②**导出的是现在库里这一版**
-    (`exported_hash == content_hash`:一次正文补抓、一轮翻译回写都会把
-    `content_hash` 推新,那时 vault 里还是旧的);③**vault 里当前那一份进了索引**
-    (`_indexed`)。
+    返回里把**三件事各自的事实**都交出去,`done` 是它们的合:
+    - `exported`:导出过,而且导出的是库里现在这一版(`exported_hash == content_hash`
+      —— 一次正文补抓、一轮翻译回写都会把 `content_hash` 推新);
+    - `stored`:vault 里那一篇**还在**(`_stored`);
+    - `indexed`:vault 里当前那一份进了全文索引(`_indexed`)。
+
+    **分开交而不是只回一个布尔**:调用方要据此决定「这一条还欠哪一步、那一步
+    能不能靠补跑一轮补上」(`reclaim_export`、`owing`、`/api/grab/state`)。
+    只回一个 `done=False` 的那一版,所有欠账都只能用同一个动作去撞 —— 实测
+    形态:文件被删而 hash 仍相等,补跑的 export 一个字不写、index 正确地把旧
+    索引收掉,两个阶段双 ok,而界面照着阶段结果宣布「已写入知识库」
+    (2026-10-16 第 3 轮审查)。
 
     **「`feed_items` 里有这一行」只说明内容暂存下来了。** 后半条链(导出 →
     索引 → 提取)跑没跑是另一件事:占不到管道、服务在保存之后重启、导出或索引
     自己失败,都会留下一条「在库里但搜不到」的记录。把这两件事混成一句「已经在
     知识库里了」就是谎报 —— 用户搜不到,而再投一次只会再得到同一句话,后半条链
-    永远没人补(2026-10-16 审查)。**「以前走完过」也不算**:版本推新之后那一篇
-    仍然欠一轮导出和索引(第二轮审查)。所以这里把事实原样交出去,由调用方决定
-    说什么、要不要把后半条链跑起来(`kb/web/grab_api.py`)。
+    永远没人补。**「以前走完过」也不算**:版本推新之后那一篇仍然欠一轮导出和索引。
 
     **这不是一道互斥**:真正防重复的是 `put_items` 的
     `ON CONFLICT(key) DO NOTHING`(同一类来源)—— 这里多答一句是为了跨来源的
@@ -251,10 +274,58 @@ def known(url: str) -> dict | None:
     if not row:
         return None
     seen = dict(row)
-    seen['done'] = bool(seen['path'] and seen['exported_hash']
-                        and seen['exported_hash'] == seen['content_hash']) \
-        and _indexed(seen['path'])
+    seen['exported'] = bool(seen['path'] and seen['exported_hash']
+                            and seen['exported_hash'] == seen['content_hash'])
+    seen['stored'] = _stored(seen['path'])
+    seen['indexed'] = seen['stored'] and _indexed(seen['path'])
+    seen['done'] = seen['exported'] and seen['stored'] and seen['indexed']
     return seen
+
+
+def owing(seen: dict) -> str:
+    """这一条还欠哪一步 —— 一句人话。走完了返回空串。
+
+    **只有这一份口径**:重复投递那句提示、`/api/grab/state` 的回答、界面收尾那
+    句话都用它。各写一遍的话,其中一处迟早把「文件不见了」说成「还在排队」。
+    """
+    if not seen:
+        return '这条还没收进来'
+    if not seen.get('exported'):
+        return '还没写成 vault 里那一篇'
+    if not seen.get('stored'):
+        return 'vault 里那一篇不见了'
+    if not seen.get('indexed'):
+        return '还没进全文索引'
+    return ''
+
+
+def reclaim_export(seen: dict) -> bool:
+    """vault 里那一篇不见了 → **把这笔导出欠账落实下来**,让下一轮 export 真的会
+    选中它。返回「这一笔落下了没有」。
+
+    `sync._export` 的待办判据是 `exported_hash<>content_hash`。文件被删掉(清理
+    脚本、同步盘、手动删)而两个 hash 还相等时:补跑那一轮 export 一个字都不会
+    写、index 反而正确地把它那行旧索引收掉 —— 两个阶段都 ok,而那一篇从此搜不
+    到,再投一次又得到同一句话,**反复补跑永远撞不到它**(2026-10-16 第 3 轮审查
+    实测)。所以这一步不是「再起一轮」,是先把欠账写成 export 认得的形状。
+
+    **判据待在写语句自己的 WHERE 里**(元规则:别在 Python 那边先 SELECT 一次):
+    `rowcount == 0` 说明别人已经动过它、或者两个 hash 本来就不相等(那时 export
+    自己就会选中它),都不是失败。
+
+    **清水位不是固化终态,所以这一笔可以放心写**:最坏的后果是把一篇其实还在的
+    md 重写一遍 —— 内容由库里那一行算出来、逐字节相同,`content_hash` 没变,索引
+    也不会重做。反过来「不清」的代价是那一篇永久搜不到。
+    """
+    if not seen or not seen.get('path') or not seen.get('exported'):
+        return False                       # 没导出过的那一档 export 本来就会选中
+    if seen.get('stored'):
+        return False                       # 文件还在:欠的不是导出
+    with reg.db() as c:
+        cur = c.execute("UPDATE feed_items SET exported_hash=''"
+                        ' WHERE url=? AND path=? AND exported_hash=content_hash',
+                        (seen['url'], seen['path']))
+        return cur.rowcount > 0
 
 
 # ------------------------------------------------------------------ X 的单条推文
@@ -380,17 +451,55 @@ def _grab_x(url: str, deadline: float) -> dict:
              'body': '\n\n'.join(pieces), 'author': name,
              'published': _as_published(tweet.get('created_timestamp')),
              'content_kind': 'post'}
-    # 长文那一步:`needs_article` 的判据① 正是「正文里明写着一条文章地址」,
-    # 而这个接口对长文推文给的 `text` 就是那条地址。**没有浏览器后路**(手动
-    # 收录不持有 CDP 会话,同 `bridge` 那一档),所以取不到就抛、什么都不写。
+    # **回包里那个结构化的长文信号先收下,不许先丢掉、再凭展示文本去推断。**
+    # `tweet.article` 是生产者自己的签名「这条推文是一篇长文」,而
+    # `needs_article` 的三条判据全是**间接**信号(正文里写着文章地址 / 时间线上
+    # 那张卡片 / 正文是空的)。长文推文的 `text` 完全可能是文章标题或一句介绍
+    # (上游 FxEmbed 自己的渲染器就按 `text === article.title` 处理),再配一张图
+    # 连「空正文」那条也被挡住 —— 于是我们连问一次都不会问,随后 `DO NOTHING` 把
+    # 这份只有标题/只有图的正文**永久**钉成那一篇(2026-10-16 第 3 轮审查实测三种
+    # 形态各一例,`followup_calls: 0`)。
+    #
+    # 信号挂成已有的那个键(`x_article.HINT`,口径同浏览器通道
+    # `x_browser._entry` 读那张卡片),于是「要不要去取长文」仍然只有
+    # `needs_article` 这一份判据 —— 这里不新增第二个问法。
+    raw = tweet.get('article')
+    article = raw if isinstance(raw, dict) and raw else None
+    # **形状认不出来也算信号**(非空的非 dict):那是回包在说「有长文」而我们读不懂
+    # 它,按「没有长文」放过去就是放行一条残缺正文(口径同 `x_article.fetch` 对
+    # `article` 的分档)。去问一次接口,问不到就拒。
+    if raw:
+        entry[x_article.HINT] = url
+    # **没有浏览器后路**(手动收录不持有 CDP 会话,同 `bridge` 那一档),所以取不
+    # 到就抛、什么都不写。
     if x_article.needs_article(entry):
+        got, problem = None, ''
         try:
             got = x_article.fetch(url, timeout=max(1.0, deadline - time.monotonic()))
         except x_article.ArticleUnavailable as e:
-            raise GrabError(f'这条推文是一篇长文，正文这次没取到：{e}；'
-                            '稍后再点一次') from None
+            problem = f'{e}'
+        if got is None and article:
+            # 接口那一跳没成(超时、回包坏、或者它说「没有长文」),而**手里这份
+            # 回包自己就带着文章内容** —— 用它,别丢掉。判据、渲染、拼接照旧是
+            # `x_article` 那一份(`from_payload` 就是 `fetch` 的尾段)。
+            try:
+                got = x_article.from_payload(article)
+            except x_article.ArticleUnavailable as e:
+                problem = problem or f'{e}'
         if got:
             entry = x_article.merge(entry, got)
+        elif raw:
+            # **确认是长文、正文又没拿到:一个字都不许写。** 这一条落库之后
+            # `DO NOTHING` 之下再投一次同一条链接也换不回真正文。
+            raise GrabError('这条推文是一篇长文，正文这次没取到：'
+                            f'{problem or "接口没给出正文"}；稍后再点一次')
+        elif problem:
+            raise GrabError(f'这条推文是一篇长文，正文这次没取到：{problem}；'
+                            '稍后再点一次')
+    # 那个信号键**不进 `feed_items`**:`put_items` 把整份条目哈希成
+    # `content_hash`,多一个只在抓取期间有意义的键会让同一条推文从采集通道和手动
+    # 收录两条路进来算出两个哈希(剥离口径同 `fill`,共用 `x_article._strip_hint`)。
+    entry = x_article._strip_hint(entry)
     if not entry['body']:
         # 走到这儿 = 接口说「它没有长文」而推文自己又一个字一张图都没有。
         # **不许入库**:那是一条永久空正文(模块注释那一条)。

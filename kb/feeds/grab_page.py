@@ -51,14 +51,23 @@ MAX_CHARS = 60000
 #: `/blog/challenge/`,两篇都该收进来。
 _GATE_ROUTES = ('appmsgcaptcha', 'wappoc_', '/cdn-cgi/l/chk', '/sorry/index',
                 '__cf_chl_tk')
-#: ②**页面上挂着的那套关卡组件**。这是页面身份:一篇讲 Cloudflare 的文章不会把
-#: 关卡编排脚本挂在自己页上。
+#: ②**页面上真挂着的那套关卡组件**。这是页面身份:一篇讲 Cloudflare 的文章不会
+#: 把关卡编排脚本挂在自己页上。
+#: **判据是 DOM 里真实的那几个属性**(`script[src]`、`iframe[src]`、`link[href]`、
+#: `form[action]`,外加 `<script>` 自己的内联代码),**不是在整份 HTML 上找子串** ——
+#: 后者会把一篇**讲**关卡的教程里那段转义的示例代码当成页面身份:实测一篇 731 字
+#: 的正经教程,`<pre>` 里只有一行 `&lt;script src="/cdn-cgi/challenge-platform/h/…"&gt;`,
+#: 既没有生效脚本也没有验证动作,却被拒了(2026-10-16 第 3 轮审查)。而这一道在
+#: 成功路径上也生效,误拒就是这一篇再也收不进来。
 #: **通用的验证码小组件不许进这张表**(reCAPTCHA / hCaptcha / Turnstile 那几个
 #: `api.js`):正常文章页的评论框就挂着它们,进表等于按「这站评论要过验证码」拒稿。
 #: Cloudflare 那一条也只收**编排**路径(`challenge-platform/h/`)而不是整个
 #: `challenge-platform/` —— 后者的 `jsd/main.js` 在普通页面上也会被注入。
 _GATE_ASSETS = ('/cdn-cgi/challenge-platform/h/', '_cf_chl_opt',
                 'captcha-delivery.com/captcha')
+#: 去哪几个属性里找它们。**只收会让浏览器真去加载/提交的那些**。
+_ASSET_ATTRS = (('script', 'src'), ('iframe', 'src'), ('link', 'href'),
+                ('form', 'action'), ('img', 'src'))
 #: ③**标题自己就是一句关卡提示**。全是**祈使句或状态播报** —— 正经文章的标题不
 #: 这么写,所以「人机验证是怎么坏掉的」这种不在射程内。反过来说:`验证码`、
 #: `captcha`、`challenge` 这类**话题词**一个都不许进这张表。
@@ -85,11 +94,27 @@ _SENTENCE = re.compile(r'[^\n。！？!?；;]+')
 #: 提取不出正文时才用的宽词表:那时已经没有正文可言,宁可多认一道关卡 ——
 #: 这一档多拒的代价是一句话,而错存的代价不可恢复。
 _GATE_WORDS = _GATE_PHRASES + ('captcha', '滑块验证', 'cf-browser-verification')
+#: ⑤**正文挡在一道登录/订阅墙后面**。判据也是身份,两样:
+#: ①DOM 里有一道**拦在正文上**的登录表单(`form` 里有 `input[type=password]`,
+#:   而且它不待在页眉页脚侧栏那类外围部件里 —— 位置判据借正文提取自己那一份
+#:   `readable.in_furniture`,不另写一张噪声名单);
+#: ②页面自己用 schema.org 声明了内容不免费(`isAccessibleForFree: false`,
+#:   那是付费墙的标准产者签名,Google 的付费墙规范要求的就是它)。
+#: **不靠措辞。** 事故形态(2026-10-16 第 3 轮审查实测):一张普通的
+#: 「Sign in to continue reading / subscribe to unlock this story」登录页,提取器
+#: 交出 1832 字 —— 份额判据(④)对它压根不成立(那一页话很多),措辞也不在
+#: `_GATE_PHRASES` 里,于是它被当成正文落库,`DO NOTHING` 之下永久改不回来。
+#: 扩词表治不了这一类:墙前面那段话每家写法都不同,而**墙本身是结构**。
+#: 代价如实记着:一篇**渲染了真实密码框**的文章(比如手把手教你写登录表单、且
+#: 把 demo 放在正文区里)会被误拒。两个方向差着一个量级 —— 误拒是这一篇得自己
+#: 复制正文,错存是永久钉死一段不是正文的文字。
+_WALL_FREE_KEYS = ('isAccessibleForFree', 'isaccessibleforfree')
 #: 两句话,四个判据共用。地址/组件那一档和正文那一档对用户的意思不同(前者连页面
 #: 都不是我们要的,后者是这一页自己说要先过验证),所以分开写;**再往下分没有意义**
 #: —— 用户能做的事一模一样。
 _SAY_ROUTE = '对方把这个地址挡在了一道验证页后面'
 _SAY_PAGE = '这一页要求先完成验证或登录'
+_SAY_WALL = '这一页的正文挡在登录或订阅后面'
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 
@@ -123,7 +148,7 @@ class PageUnavailable(ValueError):
     """这一页读不出可保存的内容。消息直接面向用户,说清下一步。"""
 
 
-def _page_title(html: str) -> str:
+def _page_title(soup) -> str:
     """这一页**自称**的标题:`<title>` 和 og/twitter 那几个一起算。
 
     **两处都要看,而且不回落到正文。** 关卡页一定有 `<title>`(浏览器标签上那行
@@ -132,7 +157,6 @@ def _page_title(html: str) -> str:
     这里**不能用**:那等于拿正文冒充标题,③ 就退化成"正文里有这句话"。
     候选拼成一串交出去:判据是子串命中,拼起来不影响结论。
     """
-    soup = BeautifulSoup(html or '', 'html.parser')
     parts = [_first_meta(soup, _TITLE_META)]
     if tag := soup.select_one('title'):
         parts.append(oneline(tag.get_text(' ', strip=True), 'text'))
@@ -148,19 +172,58 @@ def _gate_share(body: str) -> float:
     return hits / len(sentences)
 
 
+def _gate_assets(soup) -> bool:
+    """这一页**真挂着**某家关卡自己的组件吗(见 `_GATE_ASSETS`)。
+
+    只看会让浏览器真去加载或提交的那几个属性,外加 `<script>` 自己的内联代码 ——
+    **页面上的文字一个字都不算**:一篇讲关卡的教程会把那段 `<script src=…>` 原样
+    转义印在 `<pre>` 里,而那是内容,不是身份(第 3 轮审查实测的误拒正是它)。
+    """
+    for tag, attr in _ASSET_ATTRS:
+        for node in soup.find_all(tag):
+            value = str(node.get(attr) or '').lower()
+            if value and any(mark in value for mark in _GATE_ASSETS):
+                return True
+    for node in soup.find_all('script'):
+        if not node.get('src') and any(
+                mark in (node.string or '').lower() for mark in _GATE_ASSETS):
+            return True
+    return False
+
+
+def _wall_reason(soup) -> str:
+    """正文是不是挡在一道登录/订阅墙后面(判据和代价见 `_WALL_FREE_KEYS` 那一节)。"""
+    for node in soup.select('input[type=password]'):
+        form = node.find_parent('form')
+        if form is not None and not readable.in_furniture(form):
+            return _SAY_WALL
+    free = _ld_json(soup)
+    for key in _WALL_FREE_KEYS:
+        if key in free:
+            value = free[key]
+            if value is False or (isinstance(value, str)
+                                  and value.strip().lower() in ('false', 'no')):
+                return _SAY_WALL
+    return ''
+
+
 def gate_reason(final_url: str, html: str, body: str = '') -> str:
-    """这一次响应是不是一道访问关卡。空串 = 不是,其余是给用户的那半句话。
+    """这一次响应是不是一道关卡 —— 验证页、登录墙、付费墙。空串 = 不是,其余是
+    给用户的那半句话。
 
     **不变量:已经认出是关卡的响应,既不许落库、也不许被说成「这一页没找到
     正文」。** 所以成功和失败两条路共用这一道 —— 调用方只有一个调用点,而且排
     在「拿 `body` 做任何事」之前(`grab._grab_web`)。「提取器交出了一段长文字」
-    证明不了手里这篇是目标文章:关卡页自己也有文字,够长就一路过关,然后被
-    `put_items` 的 `DO NOTHING` 永久钉成这一篇的正文(两轮审查各实测到一例)。
+    证明不了手里这篇是目标文章:关卡页和登录墙自己也有文字,够长就一路过关,
+    然后被 `put_items` 的 `DO NOTHING` 永久钉成这一篇的正文(三轮审查各实测到
+    至少一例)。
 
-    判据全是**身份**,一条成立就算(四张表各自的理由写在它们自己头上):
-    ①路由 `_GATE_ROUTES`;②页面挂着的关卡组件 `_GATE_ASSETS`;
-    ③标题是一句关卡提示 `_GATE_TITLES` **且**正文里也有关卡措辞;
-    ④正文通篇就是那几句提示(`_GATE_SHARE`,**按份额、不按字数**)。
+    判据全是**这一次响应/这一页自己的身份**,一条成立就算(每张表各自的理由和
+    误拒代价写在它们自己头上):
+    ①路由 `_GATE_ROUTES`;②DOM 里真挂着的关卡组件 `_gate_assets`;
+    ③标题是一句关卡提示 `_GATE_TITLES` **且**正文里也在说同一件事;
+    ④正文通篇就是那几句提示(`_GATE_SHARE`,**按份额、不按字数**);
+    ⑤一道拦在正文上的登录/订阅墙 `_wall_reason`(**结构,不是措辞**)。
 
     `body` 空 = 提取器什么都没交出来。那时 ③ 不再要正文佐证,另外还加一道宽词
     表(`_GATE_WORDS`):已经没有正文可言了,宁可多认一道关卡也别把人留在
@@ -168,19 +231,22 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
     """
     parts = urlsplit((final_url or '').lower())
     route = parts.path + (f'?{parts.query}' if parts.query else '')
-    page = (html or '')[:200000].lower()
     if any(mark in route for mark in _GATE_ROUTES):
         return _SAY_ROUTE
-    if any(mark in page for mark in _GATE_ASSETS):
+    # **一份 soup 走完所有 DOM 判据**:这一页最多解析一次(标题、组件、登录墙
+    # 问的是同一棵树),别为每个判据各解析一遍。
+    soup = BeautifulSoup((html or '')[:readable.MAX_HTML], 'html.parser')
+    if _gate_assets(soup):
         return _SAY_ROUTE
-    title = _page_title(html).lower()
-    titled = any(word in title for word in _GATE_TITLES)
+    if reason := _wall_reason(soup):
+        return reason
+    titled = any(word in _page_title(soup).lower() for word in _GATE_TITLES)
     share = _gate_share(body)
     if share >= _GATE_SHARE:
         return _SAY_PAGE
     if titled and (share > 0 or not body):
         return _SAY_PAGE
-    if not body and any(word in page for word in _GATE_WORDS):
+    if not body and any(word in (html or '')[:200000].lower() for word in _GATE_WORDS):
         return _SAY_PAGE
     return ''
 

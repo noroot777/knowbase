@@ -19,7 +19,7 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from kb import pipeline
@@ -69,9 +69,14 @@ def _write_through(out: dict, note: str, channel: str = grab.KIND) -> dict:
                                       crawl_filter={'channel': channel})
     out['pipeline'] = 'started' if started else 'busy'
     out['run'] = started
+    # **恢复动作的身份要一路带到前端**,不只用在「占不到管道」那一句上:那一轮
+    # 起跑之后 export/index 失败、或者这一篇最后仍没进知识库时,界面同样得说清
+    # 「去哪一页点哪颗按钮」—— 写死成手动收录那一套,就是指着一颗那一页上不存在
+    # 的按钮(一条推文的归属是「大V观点」)。
+    out['resume'] = _resume_hint(channel)
     out['detail'] = (f'{note}，正在写入知识库' if started else
                      f'{note}；' + (why[0] if why else '其他同步正在运行') +
-                     _resume_hint(channel))
+                     out['resume'])
     return out
 
 
@@ -86,8 +91,41 @@ def _duplicate(url: str, seen: dict) -> dict:
         return out
     # 暂存下来了、但还搜不到。**不覆盖库里那一份正文**(`DO NOTHING` 的语义),
     # 要补的只是后半条链 —— 而且要在**拥有这一行的那个来源**名下跑。
-    return _write_through(out, f'这条之前被「{label}」收过了，还没写进知识库',
-                          seen['kind'])
+    #
+    # **先把这一条欠的那一步落实成 export 认得的形状,再起那一轮。** 「补跑」不等
+    # 于「它会被选中」:vault 里那一篇被删掉而两个 hash 还相等时,export 的待办
+    # 判据(`exported_hash<>content_hash`)压根选不中它,两个阶段跑完都 ok,而那
+    # 一篇仍然搜不到(2026-10-16 第 3 轮审查实测)。
+    out['owing'] = grab.owing(seen)
+    out['reclaimed'] = grab.reclaim_export(seen)
+    return _write_through(
+        out, f'这条之前被「{label}」收过了，{out["owing"] or "还没写进知识库"}',
+        seen['kind'])
+
+
+@router.get('/state')
+def grab_state(url: str = Query(..., min_length=1, max_length=2048)):
+    """这一条**此刻**在知识库里是什么状态。**只读**:不发 HTTP、不起管道、不写
+    一个字节。
+
+    界面那句「已写入知识库」只许由这一句话落地。**整轮 export/index 都 ok 只
+    证明那一轮的阶段跑完了,证明不了这一篇的目标版本已经可检索** —— 实测形态:
+    vault 里那一篇被删掉而两个 hash 还相等,export 一个字没写、index 正确地把
+    旧索引收掉,双 ok,而那一篇搜不到(2026-10-16 第 3 轮审查)。所以收尾要按
+    **条目身份**核对,拿阶段结果当旁证。
+    """
+    try:
+        norm = grab.normalize(url)
+    except grab.GrabError as e:
+        raise HTTPException(400, str(e)) from None
+    seen = grab.known(norm)
+    out = {'ok': True, 'url': norm, 'known': bool(seen),
+           'done': bool(seen and seen['done']), 'owing': grab.owing(seen or {})}
+    if seen:
+        out.update(kind=seen['kind'], title=seen['title'],
+                   exported=seen['exported'], stored=seen['stored'],
+                   indexed=seen['indexed'], resume=_resume_hint(seen['kind']))
+    return out
 
 
 @router.post('')

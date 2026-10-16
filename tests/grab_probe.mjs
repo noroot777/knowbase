@@ -110,60 +110,97 @@ try {
         /写入知识库/.test(await evalJs(`$('grab-hint').textContent`)),
         await evalJs(`$('grab-hint').textContent`));
   // 7. 那一轮跑完了,提示要**自己收敛** —— 不能永远停在「正在写入知识库」。
-  //    (管道占不到时的末态是「稍后点一次」,同样是一句终态,所以两样都算。)
+  //    末态四句:已写入 / 这一篇还没进知识库 / 没核到 / 稍后点一次。
   check("写入那一轮结束后提示不再停在进行中",
-        await until(`/已写入知识库|稍后|没写进知识库|没核到/.test($('grab-hint').textContent)`, 90000),
+        await until(`/已写入知识库|稍后|还没进知识库|没核到/.test($('grab-hint').textContent)`, 90000),
         await evalJs(`$('grab-hint').textContent`));
-  // 7b. **「已写入」这句话要和那一轮的真实结果对得上。** 只验「出现了成功字样」
-  //     的话,把提示写死成那句话也是绿的(第二轮审查指出的正是这一点)。所以
-  //     这里拿**同一轮**的 run_id 去问后端:两个阶段真是 ok,这句话才算成立。
+  // 7b. **「已写入」这句话要由这一篇自己的事实支撑。** 只验「出现了成功字样」的
+  //     话,把提示写死成那句也是绿的;而按那一轮 export/index 双 ok 收尾同样会
+  //     谎报 —— 阶段全绿而这一篇不在库里是实测形态(下面第 8 条就是它)。所以
+  //     这里去问**条目事实**(`/api/grab/state`),两个方向各钉一边。
   const agree = JSON.parse(await evalJs(`(async () => {
-    const s = await (await fetch('/api/pipeline/status?source=false')).json();
-    const st = s.stages || {};
-    return JSON.stringify({ said: $('grab-hint').textContent,
-      sameRun: (s.run_id || '') === grabRun,
-      ok: ['export', 'index'].every(k => (st[k] || {}).status === 'ok'),
-      got: ['export', 'index'].map(k => k + '=' + ((st[k] || {}).status || '-')).join(' ') });
+    const r = await fetch('/api/grab/state?url=' + encodeURIComponent(grabUrl));
+    const s = r.ok ? await r.json() : {};
+    return JSON.stringify({ said: $('grab-hint').textContent, done: !!s.done,
+                            owing: s.owing || '', url: grabUrl });
   })()`));
-  check("说「已写入」时那一轮的 export/index 真是 ok",
-        !/已写入知识库/.test(agree.said) || (agree.sameRun && agree.ok),
+  check("说「已写入」时这一篇真查得到", !/已写入知识库/.test(agree.said) || agree.done,
         JSON.stringify(agree));
-  // 8. **那一轮红了**:面板不许写「已写入知识库」,要落可恢复的那一档并说出原因。
-  //    定点注入:沙箱里的管道是真的、不会按需失败,所以这里直接把快照摆成
-  //    「同一轮、export 红」再走一次收敛那条路(注入和断言在**同一次** eval 里,
-  //    免得轮询在中间把快照换掉)。
-  const red = JSON.parse(await evalJs(`(() => {
-    grabStage = 'writing'; grabNote = ''; grabRun = 'r-red'; grabRunAt = 'r-before';
+  check("这一篇真进了知识库时就说已写入", !agree.done || /已写入知识库/.test(agree.said),
+        JSON.stringify(agree));
+
+  /** 注入一张快照 + 一条地址,走一次收尾,等它落定。
+   *  沙箱里的管道是真的、不会按需失败,所以这几条用定点注入。收尾是**异步**的
+   *  (要问一次条目状态),等待和注入必须在**同一次** eval 里 —— 分两次的话中间
+   *  那次轮询会把快照换掉,断言就落在另一张快照上了。 */
+  const converge = async (js) => JSON.parse(await evalJs(`(async () => {
+    grabBusy = false; grabStage = 'writing'; grabNote = ''; grabWhy = '';
+    grabRun = ''; grabRunAt = 'r-before';
+    grabResume = '，稍后在「手动收录」里点一次「写入知识库」';
+    ${js}
+    updateGrabControls();
+    const mid = $('grab-hint').textContent;
+    for (let i = 0; i < 200 && grabStage === 'checking'; i++)
+      await new Promise(r => setTimeout(r, 25));
+    return JSON.stringify({ mid, hint: $('grab-hint').textContent,
+                            stage: grabStage, note: grabNote });
+  })()`));
+  // 用一条**没收录过**的地址当素材:它在库里的事实是确定的(不在),于是「阶段
+  // 结果」和「条目事实」在这几条上永远对不上 —— 正是要分清的那个岔口。
+  const ghostUrl = `grabUrl = 'https://example.org/posts/never-grabbed';`;
+
+  // 8. **整轮 export/index 双 ok 不等于这一篇进了知识库。** 实测形态:vault 里那
+  //    一篇被删掉而两个 hash 还相等时,export 一个字没写、index 正确地把它那行
+  //    旧索引收掉,阶段全绿而它搜不到。按阶段结果收尾的写法在这一条上说「已写入
+  //    知识库」,而用户搜不到、再投一次只会得到「已经收过了」。
+  const ghost = await converge(`${ghostUrl}
+    grabRun = 'r-ok';
+    pipeSnapshot = { run_id: 'r-ok', running: false,
+      stages: { export: { status: 'ok' }, index: { status: 'ok' } } };`);
+  check("整轮双 ok 而这一篇不在库里:不说已写入,并说出欠哪一步",
+        !/已写入知识库/.test(ghost.hint) && ghost.stage === 'pending'
+          && /还没收进来/.test(ghost.hint) && /点一次「写入知识库」/.test(ghost.hint),
+        JSON.stringify(ghost));
+  check("核对期间说的是正在核对,不是停在正在写入",
+        /正在核对/.test(ghost.mid), JSON.stringify(ghost));
+  // 8b. **那一轮红了**:阶段的红不当结论用,但要用来给失败那句话补上原因 ——
+  //     只说「还没进知识库」而不说为什么,用户只能反复点那颗按钮。
+  const red = await converge(`${ghostUrl}
+    grabRun = 'r-red';
     pipeSnapshot = { run_id: 'r-red', running: false, stages: {
-      export: { status: 'error', detail: '导出失败：盘满了' }, index: { status: 'ok' } } };
-    updateGrabControls();
-    return JSON.stringify({ hint: $('grab-hint').textContent, stage: grabStage });
-  })()`));
+      export: { status: 'error', detail: '导出失败：盘满了' }, index: { status: 'ok' } } };`);
   check("那一轮红了:不说已写入,落可恢复的终态并带上原因",
-        !/已写入知识库/.test(red.hint) && /没写进知识库/.test(red.hint)
-          && /盘满了/.test(red.hint) && red.stage === 'pending',
-        JSON.stringify(red));
-  // 9. 快照已经是**别的一轮**:那一轮的结果再也问不到了 —— 如实说没核到,
-  //    而不是按「换了一轮就算跑完」谎报已完成。
-  const other = JSON.parse(await evalJs(`(() => {
-    grabStage = 'writing'; grabNote = ''; grabRun = 'r-mine'; grabRunAt = 'r-before';
-    pipeSnapshot = { run_id: 'r-other', running: false,
-                     stages: { export: { status: 'ok' }, index: { status: 'ok' } } };
-    updateGrabControls();
-    return JSON.stringify({ hint: $('grab-hint').textContent, stage: grabStage });
-  })()`));
-  check("核不到那一轮的结果:如实说没核到(别人的一轮不算自己的)",
-        /没核到/.test(other.hint) && other.stage === 'pending', JSON.stringify(other));
+        !/已写入知识库/.test(red.hint) && /还没进知识库/.test(red.hint)
+          && /盘满了/.test(red.hint) && red.stage === 'pending', JSON.stringify(red));
+  // 9. 快照已经是**别的一轮**:它的绿和红都不算自己的 —— 不许借它的绿说已写入,
+  //    也不许把它的红当成这一篇的原因(那会指着一个毫不相干的毛病让用户去修)。
+  const other = await converge(`${ghostUrl}
+    grabRun = 'r-mine';
+    pipeSnapshot = { run_id: 'r-other', running: false, stages: {
+      export: { status: 'error', detail: '别人那一轮的毛病' }, index: { status: 'ok' } } };`);
+  check("别人的一轮:绿不借、红也不借",
+        !/已写入知识库/.test(other.hint) && !/别人那一轮的毛病/.test(other.hint)
+          && /还没收进来/.test(other.hint) && other.stage === 'pending',
+        JSON.stringify(other));
   // 9b. **反过来钉一边**:快照还停在起跑之前那一轮时只是轮询还没回来,不许提前
-  //     说「核不上」—— 提交之后面板立刻刷一次,那一刻看到的正是这张旧快照。
-  const early = JSON.parse(await evalJs(`(() => {
-    grabStage = 'writing'; grabNote = ''; grabRun = 'r-mine'; grabRunAt = 'r-before';
-    pipeSnapshot = { run_id: 'r-before', running: false, stages: {} };
-    updateGrabControls();
-    return JSON.stringify({ hint: $('grab-hint').textContent, stage: grabStage, note: grabNote });
-  })()`));
-  check("快照还没轮询到那一轮时继续等,不提前说核不上",
+  //     收尾 —— 提交之后面板立刻刷一次,那一刻看到的正是这张旧快照。
+  const early = await converge(`${ghostUrl}
+    grabRun = 'r-mine';
+    pipeSnapshot = { run_id: 'r-before', running: false, stages: {} };`);
+  check("快照还没轮询到那一轮时继续等,不提前收尾",
         early.stage === 'writing' && early.note === '', JSON.stringify(early));
+  // 10. **问不到就说问不到**(元规则:判不准不许返回「确定没有」的结论)。只拦
+  //     那一问、拦一次,其余请求照走 —— 整个 fetch 拦掉会把列表轮询也打断。
+  const lost = await converge(`${ghostUrl}
+    grabRun = 'r-ok';
+    pipeSnapshot = { run_id: 'r-ok', running: false,
+      stages: { export: { status: 'ok' }, index: { status: 'ok' } } };
+    const real = window.fetch;
+    window.fetch = (u, o) => String(u).includes('/api/grab/state')
+      ? (window.fetch = real, Promise.reject(new Error('断网')))
+      : real(u, o);`);
+  check("这一篇的状态问不到:如实说没核到,不猜一个结论",
+        /没核到/.test(lost.hint) && lost.stage === 'pending', JSON.stringify(lost));
 } catch (err) {
   check("探针跑完", false, err.message);
 } finally {

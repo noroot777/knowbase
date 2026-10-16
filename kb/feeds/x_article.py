@@ -150,6 +150,55 @@ def render(article: dict) -> str:
     return '\n\n'.join(out)[:MAX_CHARS].strip()
 
 
+def from_payload(article: dict) -> dict:
+    """回包里**自带**的那一篇长文 → `{'title','body'}`。取不到正文一律抛。
+
+    **两个消费方共用这一份判据**:`fetch`(专门去问一次长文接口)和手动收录
+    (`kb.feeds.grab._grab_x` —— 推文回包里本来就带着 `tweet.article`,接口那一跳
+    没成时用手里这一份,不是把它丢掉)。各写一份的话「只给了标题算不算补到了」
+    这种判断会在两条路上各漂一次,而漂错的那一边会放行一条空正文落库。
+    """
+    try:
+        body = render(article)
+    except (AttributeError, TypeError, KeyError, IndexError, ValueError) as e:
+        # **兜底,不是承重的那一道。** 承重的是两半:①`_rows` 和每一层的
+        # `isinstance`(见 `_media_urls`)—— **可选**数据认不出来就地降级,那张
+        # 图跳过、那一块跳过,**整篇正文照旧补得到**;②`_must_text` —— **必需**
+        # 的块结构(文字、类型)只收字符串,认不出来一律抛,因为强转出来的
+        # `"{'text': …}"` 非空、会被当成"正文补到了"落库,**兜底压根没有机会
+        # 介入**(强转不抛异常)。这一道管没想到的形状:`render` 解析的
+        # 全部输入都来自第三方回包,而「上游还能给出什么形状」是一张**不会收敛**
+        # 的名单,少想一种就是本轮那场事故(异常漏出 `fill`、漏出 `harvest` 的
+        # 账号隔离,**后面的账号一个都不同步**)。归到这儿之后那一条只是扣留:
+        # 手里有浏览器就走后路,没有就本轮不入库、水位留在原处、下一轮重试。
+        #
+        # **只圈这几类数据形状异常,不写 `except Exception`**,更不在采集外层
+        # 笼统吞 —— 后者会把浏览器会话中断那类真该往上报的故障一起吃掉。
+        #
+        # **如实记一笔:今天这一道是冗余带。** `json.loads` 产得出的类型只有
+        # dict/list/str/数字/bool/None 这几种,逐处类型检查补全之后构造不出能
+        # 走到这里的输入(定点注入实测 0 红,补一条**契约**用例才红)。留着它
+        # 的理由是构造上的:`render` 的形状约束不该取决于一张逐处枚举的名单,
+        # 而代价只有「这一条扣留 + 下一轮重试」—— 和整批中断差着一个量级。
+        raise ArticleUnavailable(
+            f'长文接口的回包解析不了:{type(e).__name__}: {e}') from None
+    raw_title = article.get('title')
+    title = raw_title.strip() if isinstance(raw_title, str) else ''
+    # **只有标题不算补到了。** 要补的是正文,而空正文一旦落库就**再也改不回来**
+    # (`put_items` 是 `ON CONFLICT DO NOTHING`),下一轮重叠重抓也救不回来 ——
+    # 口径同 `browser_fetch` 那条「判不准一律抛」。三种形态都归这儿:回包被截断、
+    # `content.blocks` 缩成空、或者真是一篇空文章。抛出去之后手里有浏览器的
+    # 两条通道会接着走后路,两条都不行时这一条本轮不入库、水位留在原处。
+    #
+    # **不许退回「标题正文同时为空才算」**:那一版在"有标题、没正文"这个形状上
+    # 返回成功,于是 `fill` 留下一条空正文、水位照常推进,而那一篇永久空着。
+    if not body:
+        raise ArticleUnavailable(
+            f'长文接口只给了标题「{title[:40]}」、没有正文' if title
+            else '长文接口给了一篇空文章')
+    return {'title': title, 'body': body}
+
+
 def fetch(url: str, *, timeout: float = 0.0) -> dict | None:
     """问一次这条推文的长文。返回 {'title','body'};**它没有长文时返回 None**。
 
@@ -195,45 +244,7 @@ def fetch(url: str, *, timeout: float = 0.0) -> dict | None:
             raise ArticleUnavailable(
                 f'长文接口给的 article 不是对象:{type(article).__name__}')
         return None                       # 确定的结论:这条推文没有长文
-    try:
-        body = render(article)
-    except (AttributeError, TypeError, KeyError, IndexError, ValueError) as e:
-        # **兜底,不是承重的那一道。** 承重的是两半:①`_rows` 和每一层的
-        # `isinstance`(见 `_media_urls`)—— **可选**数据认不出来就地降级,那张
-        # 图跳过、那一块跳过,**整篇正文照旧补得到**;②`_must_text` —— **必需**
-        # 的块结构(文字、类型)只收字符串,认不出来一律抛,因为强转出来的
-        # `"{'text': …}"` 非空、会被当成"正文补到了"落库,**兜底压根没有机会
-        # 介入**(强转不抛异常)。这一道管没想到的形状:`render` 解析的
-        # 全部输入都来自第三方回包,而「上游还能给出什么形状」是一张**不会收敛**
-        # 的名单,少想一种就是本轮那场事故(异常漏出 `fill`、漏出 `harvest` 的
-        # 账号隔离,**后面的账号一个都不同步**)。归到这儿之后那一条只是扣留:
-        # 手里有浏览器就走后路,没有就本轮不入库、水位留在原处、下一轮重试。
-        #
-        # **只圈这几类数据形状异常,不写 `except Exception`**,更不在采集外层
-        # 笼统吞 —— 后者会把浏览器会话中断那类真该往上报的故障一起吃掉。
-        #
-        # **如实记一笔:今天这一道是冗余带。** `json.loads` 产得出的类型只有
-        # dict/list/str/数字/bool/None 这几种,逐处类型检查补全之后构造不出能
-        # 走到这里的输入(定点注入实测 0 红,补一条**契约**用例才红)。留着它
-        # 的理由是构造上的:`render` 的形状约束不该取决于一张逐处枚举的名单,
-        # 而代价只有「这一条扣留 + 下一轮重试」—— 和整批中断差着一个量级。
-        raise ArticleUnavailable(
-            f'长文接口的回包解析不了:{type(e).__name__}: {e}') from None
-    raw_title = article.get('title')
-    title = raw_title.strip() if isinstance(raw_title, str) else ''
-    # **只有标题不算补到了。** 要补的是正文,而空正文一旦落库就**再也改不回来**
-    # (`put_items` 是 `ON CONFLICT DO NOTHING`),下一轮重叠重抓也救不回来 ——
-    # 口径同 `browser_fetch` 那条「判不准一律抛」。三种形态都归这儿:回包被截断、
-    # `content.blocks` 缩成空、或者真是一篇空文章。抛出去之后手里有浏览器的
-    # 两条通道会接着走后路,两条都不行时这一条本轮不入库、水位留在原处。
-    #
-    # **不许退回「标题正文同时为空才算」**:那一版在"有标题、没正文"这个形状上
-    # 返回成功,于是 `fill` 留下一条空正文、水位照常推进,而那一篇永久空着。
-    if not body:
-        raise ArticleUnavailable(
-            f'长文接口只给了标题「{title[:40]}」、没有正文' if title
-            else '长文接口给了一篇空文章')
-    return {'title': title, 'body': body}
+    return from_payload(article)
 
 
 # ----------------------------------------------------------------- 后路:登录态浏览器

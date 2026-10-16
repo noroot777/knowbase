@@ -12,11 +12,13 @@
 //      (2026-10-16 审查实测)。只有**换了来源模块**和**又发起一次**能让旧动作
 //      过期;轮询不能。过期之后 toast 照发(那是用户自己的动作,他该知道结果),
 //      但一个字都不往面板上写(口径同 frontend-feedback.md 的代次那条)。
-//   ③ **每个终态都要落在提示上**:成功、重复、失败、占不到管道、以及「写入
-//      那一轮的结果」。提示只写进行中、不收敛的话,面板会一直停在「正在写入
-//      知识库」——而那时它早跑完了。收敛**认后端发的那一轮身份、读那一轮
-//      export/index 的实际结果**(grabConverge),核不上就落可恢复的那一档:
-//      谎报已完成的话用户搜不到,再投一次只会得到「已经收过了」。
+//   ③ **每个终态都要落在提示上**:成功、重复、失败、占不到管道、以及「这一篇
+//      到底写进去了没有」。提示只写进行中、不收敛的话,面板会一直停在「正在
+//      写入知识库」——而那时它早跑完了。收敛分两步:**身份认后端发的那一轮
+//      id**(grabConverge),**结论问这一篇自己**(grabCheckItem 去问
+//      `/api/grab/state`)。那一轮 export/index 双 ok 只是旁证 —— 阶段全绿而
+//      这一篇不在库里是实测形态;谎报已完成的话用户搜不到,再投一次只会得到
+//      「已经收过了」。
 
 let grabBusy = false;
 // 从侧栏那个「存链接」入口进来时才抢焦点:单纯切到「我的订阅」不该把光标
@@ -26,10 +28,12 @@ let grabWantsFocus = false;
 let grabAction = 0, grabNav = 0;
 // 这次收录走到哪一步、面板上该写哪句话。stage: '' 空闲 / writing 正在写入 /
 // done 写完了 / pending 要用户再点一次(没占到管道、那一轮红了、或者结果核不上)
-// / failed 没收下。grabRun 是后端告诉我们「我给你起的是哪一轮」(/api/grab 的
-// run),grabRunAt 是**起跑之前**面板上那一轮 —— 快照还停在它上面时只是没轮询到
-// 新的,不是核不上。
+// / checking 正在核对这一篇 / failed 没收下。grabRun 是后端告诉我们「我给你起的
+// 是哪一轮」(/api/grab 的 run),grabRunAt 是**起跑之前**面板上那一轮 —— 快照还
+// 停在它上面时只是没轮询到新的,不是核不上。grabUrl / grabResume 是这次投的那条
+// 地址和它的归属来源该点哪颗按钮(后端给的 resume)。
 let grabStage = '', grabNote = '', grabRun = '', grabRunAt = '';
+let grabUrl = '', grabResume = '', grabWhy = '';
 
 const GRAB_HINT = 'X 的单条推文走公开接口（长文连正文一起取），'
   + '其他站点按文章正文提取；抓不到正文的不会入库。';
@@ -74,47 +78,71 @@ function grabRunIsOurs(snap) {
 
 /** 「正在写入知识库」要自己收敛 —— 那一轮跑完了,提示不能还停在进行中。
  *
- *  **身份认后端发的那个 run id,结论读那一轮自己的阶段结果。**
+ *  **身份认后端发的那个 run id,结论问这一篇自己。**
  *  ① 身份:`/api/grab` 回的 `run` 就是 `start_pipeline` 发的 id(生产者分配、
- *     原子),快照里的 `run_id` 跟它相等才说明看到的是同一轮。按「run_id 变了
- *     就算我们那一轮跑完了」猜的话,别人插在中间的一轮同步也会被认成自己的。
- *  ② 结论:export 把条目写成 vault 里那一篇、index 让它搜得到 —— 这两个阶段
- *     任意一个不是 ok(error / stopped / 没跑),就不许写「已写入知识库」:那一
- *     轮确实跑完了,而 vault 或索引里没有这一篇(extract 是打标那一步,红了
- *     照样搜得到,所以不在这两个里面)。这条路一次模型都不调,整轮可能几百
- *     毫秒、面板一次都没见过 `running=true`,所以不盯 running 的跳变(口径同
- *     sources.js 的 `sourceRunFinished`)。
- *  ③ 核不上(快照已经是别的一轮、后端没给 run)一律落**可恢复**的那一档:
- *     如实说没核到,并指回那颗按钮。 */
+ *     原子),快照里的 `run_id` 跟它相等才说明看到的是同一轮。不认 `running`
+ *     的跳变(这条路一次模型都不调,整轮可能几百毫秒,面板一次都没见过
+ *     `running=true`;口径同 sources.js 的 `sourceRunFinished`),也不许按
+ *     「run_id 变了就算跑完」猜 —— 别人插在中间的一轮会被认成自己的。
+ *  ② 结论:**那一轮的阶段结果只是旁证,不是结论。** 整轮 export/index 双 ok
+ *     只证明那一轮跑完了,证明不了**这一篇**进了知识库:实测 vault 里那一篇被
+ *     删掉而两个 hash 还相等时,export 一个字没写、index 正确地把旧索引收掉,
+ *     双 ok 而那一篇搜不到。所以收尾去问一次 `/api/grab/state`(只读),按**这
+ *     一篇**的事实落终态;阶段的红只用来给失败那句话补上原因。
+ *  ③ 核不上(快照已经是别的一轮、后端没给 run)也走同一问:这一篇到底在不在
+ *     知识库里是一个随时问得出的事实,比追一轮已经过去的运行可靠。 */
 function grabConverge() {
   if (grabStage !== 'writing') return;
   const snap = pipeSnapshot;
   if (!snap) return;
-  const resume = '；在上面点一次「写入知识库」再确认一遍。';
   const id = snap.run_id || '';
-  if (id !== grabRun) {
-    // 快照还是起跑之前那一张(轮询还没回来):等着,别把"还没看到"说成"核不上"。
-    if (id === grabRunAt) return;
-    grabStage = 'pending';                 // 第三个 id:那一轮的结果再也问不到了
-    grabNote = '没核到那一轮写入的结果' + resume;
-    return;
+  if (id === grabRun) {
+    if (snap.running) return;
+    const stages = snap.stages || {};
+    grabWhy = ['export', 'index'].map(s => stages[s] || {})
+      .filter(x => x.status !== 'ok').map(x => x.detail).filter(Boolean)[0] || '';
+  } else if (id === grabRunAt) {
+    return;                       // 快照还是起跑之前那一张:等下一次轮询
+  } else {
+    grabWhy = '';                 // 已经是别的一轮:它的阶段结果不是我们那一轮的
   }
-  if (snap.running) return;
-  const stages = snap.stages || {};
-  const bad = ['export', 'index'].filter(s => (stages[s] || {}).status !== 'ok');
-  if (!bad.length) {
+  grabStage = 'checking';
+  grabNote = '';
+  grabCheckItem();
+}
+
+/** 问一次「这一篇此刻在知识库里吗」,按答复落终态。
+ *
+ *  过期判据和投递那一次同一套(动作号 + 导航号):核对期间用户又投了一条、或者
+ *  切去了别的来源,这次答复就不往面板上写(口径同 `submitGrab`)。 */
+async function grabCheckItem() {
+  const action = grabAction, nav = grabNav, url = grabUrl;
+  let data = null;
+  try {
+    const r = await fetch('/api/grab/state?url=' + encodeURIComponent(url));
+    if (r.ok) data = await r.json();
+  } catch (e) { data = null; }
+  if (action !== grabAction || nav !== grabNav) return;
+  const resume = '；' + (grabResume || '稍后在「手动收录」里点一次「写入知识库」')
+    .replace(/^，/, '') + '。';
+  if (data && data.done) {
     grabStage = 'done';
     grabNote = '已写入知识库，全文检索里搜得到了。';
-    return;
+  } else if (data) {
+    grabStage = 'pending';
+    grabNote = '那一轮跑完了，这一篇还没进知识库（'
+      + (grabWhy || data.owing || '原因未知') + '）' + resume;
+  } else {
+    grabStage = 'pending';
+    grabNote = '没核到这一篇的结果' + resume;
   }
-  const why = bad.map(s => (stages[s] || {}).detail).filter(Boolean)[0] || '';
-  grabStage = 'pending';
-  grabNote = '那一轮没写进知识库' + (why ? '：' + why : '') + resume;
+  updateGrabControls();
 }
 
 /** 提示栏此刻该写哪句话。**所有写 `#grab-hint` 的路都过这里**,不另写一份。 */
 function grabHintText() {
   if (grabBusy) return '正在抓这一篇的正文，长文会多等一会儿…';
+  if (grabStage === 'checking') return '正在核对这一篇写进知识库了没有…';
   if (grabNote) return grabNote;         // 本次动作的终态(成功/重复/失败/顺延)
   const snap = pipeSnapshot;
   if (snap && snap.running) {
@@ -167,6 +195,7 @@ async function submitGrab() {
   // 分清「还没轮询到」和「核不上」。
   grabRun = '';
   grabRunAt = (pipeSnapshot && pipeSnapshot.run_id) || '';
+  grabUrl = url; grabResume = ''; grabWhy = '';
   updateGrabControls();
   let r;
   try {
@@ -204,9 +233,11 @@ async function submitGrab() {
   // 终态按后端给的事实分档:started=那一轮起跑了(等 grabConverge 收尾)、
   // busy=存下了但没占到管道(要用户再点一次)、没有 pipeline 这个字段=它早就
   // 走完整条链了(grab_api 的幂等那一档)。
+  grabUrl = data.url || url;          // 后端规范化之后那一条才是库里的身份
+  grabResume = data.resume || '';     // 归属来源该点哪颗按钮(后端算,前端不另写一份)
   if (data.pipeline === 'started') {
     grabStage = 'writing';
-    grabRun = data.run || '';         // 核对那一轮结果的唯一依据(没给就收敛成"没核到")
+    grabRun = data.run || '';         // 那一轮的身份(没给就直接去问这一篇的事实)
     grabNote = (data.duplicate ? '这条之前就收过了；' : '已存入；')
       + '正在写入知识库，完成后全文检索就能搜到。';
   } else if (data.pipeline === 'busy') {
