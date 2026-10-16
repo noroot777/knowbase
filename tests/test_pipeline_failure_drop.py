@@ -13,9 +13,11 @@
 那一处 patch 同时隔离了这一份)。
 """
 import fcntl
+import json
 import shutil
 import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -140,13 +142,137 @@ class DropLedgerTests(HistoryCase):
         self.assertEqual(0, pf.strip(run))
         self.assertEqual(1, len(run['stages']['export']['failures']))
 
-    def test_the_ledger_is_capped_by_insertion_order(self):
-        """封顶掉的是**最老的**那几条 —— 它们对应的轮次早被历史的上限挤出去了。"""
+    def _ledger(self, dropped, at=None):
+        """手写一本账:`dropped` 按插入顺序(最老在前),`at` 是那张时刻表。"""
+        pf._file().parent.mkdir(parents=True, exist_ok=True)
+        pf._file().write_text(json.dumps({'dropped': dropped, 'at': at or {}},
+                                         ensure_ascii=False), encoding='utf-8')
+
+    @staticmethod
+    def _ago(days):
+        return (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+
+    def test_a_processed_item_stays_hidden_while_its_rounds_are_still_in_the_history(self):
+        """**账本不许先于历史淘汰身份。**(第 1 轮审查判红的那一条。)
+
+        原来按条数封顶(2000),靠「历史最多 20 轮 × 每轮最多 50 条」留余量。历史改成
+        按天留之后那个乘法不成立了:三天里可以有几百轮,账本却先把最老那几条忘掉 ——
+        用户点过「不再抓取」的那几篇**又出现在还翻得到的那几轮里**。
+        所以封顶不许动「还翻得到的那几轮里可能出现它」的那些身份。
+        """
+        self.run_round('run-1', 'ok', '完成', failures=[_gone('https://x/0', aid='wx-0')])
         with patch.object(pf, '_KEEP', 3):
             for n in range(5):
                 pf.remember('wechat_local', f'wx-{n}')
-        self.assertEqual({'wechat_local:wx-2', 'wechat_local:wx-3',
-                          'wechat_local:wx-4'}, pf.dropped_keys())
+        self.assertEqual({f'wechat_local:wx-{n}' for n in range(5)}, pf.dropped_keys(),
+                         '五条都还记着 —— 它们对应的那一轮就在历史里')
+        runs = state.load_history()
+        pf.strip_runs(runs)
+        self.assertEqual([], runs[0]['stages']['export']['failures'],
+                         '那一篇在历史里照旧不显示')
+        # 第二档:**时刻比下限还老**的那一条,只要还显示得到就一样不许忘 —— 判据是
+        # 引用,不是时刻。这种形状来自时刻读不出来的那些留档轮次(窗口一律留着它们、
+        # 而它们不参与取下限)和墙上时钟往前跳那一刻。
+        self._ledger(['wechat_local:wx-0'], {'wechat_local:wx-0': self._ago(30)})
+        pf.remember('wechat_local', 'newest')
+        self.assertIn('wechat_local:wx-0', pf.dropped_keys(),
+                      '一个月前记的,但那一轮还翻得到它 —— 留着')
+
+    def test_an_identity_is_recycled_once_every_round_that_could_show_it_is_gone(self):
+        """**反过来钉一边:回收还得真发生**,否则这本账只长不消。
+
+        判据是历史文件自己说的「最老那一轮在什么时候」——账本里时刻早于它的那几条,
+        当时翻得到它们的轮次现在一轮都不在了。
+        """
+        self.run_round('run-1', 'ok', '完成')
+        self._ledger(['wechat_local:ancient', 'wechat_local:fresh'],
+                     {'wechat_local:ancient': self._ago(30),
+                      'wechat_local:fresh': self._ago(0)})
+        pf.remember('wechat_local', 'newest')
+        self.assertEqual({'wechat_local:fresh', 'wechat_local:newest'}, pf.dropped_keys(),
+                         '一个月前那条回收掉,近的两条留着')
+
+    def test_nothing_is_recycled_when_the_history_cannot_be_read(self):
+        """**读不出历史就一条都不回收**(「拿不准就别固化终态」)。
+
+        `load_history()` 把「读不出来」和「还没有记录」返回成同一个空列表,据它回收
+        等于把一次瞬时读失败变成永久遗忘,所以这里走严格版(读不出来就抛)。
+
+        **判据落在引用那一半上**:下限那一半读失败时本来就是「下限未知」(下一条),
+        两种读法在那一半上长得一样;而引用集被读空之后,那些**还显示得到、却判不出
+        时刻**的身份就成了上限眼里的削减对象 —— 这一条钉的是它。
+        所以摆两轮:第二轮没有明细,于是那一篇只被**历史里**第一轮引用着。
+        """
+        self.run_round('run-1', 'ok', '完成',
+                       failures=[_gone('https://x/legacy', aid='wx-legacy')])
+        self.run_round('run-2', 'ok', '完成')
+        self._ledger(['wechat_local:wx-legacy', 'wechat_local:ancient'],
+                     {'wechat_local:ancient': self._ago(30)})
+        with self.read_fails_on(lambda path: path == state._history_file()), \
+             patch.object(pf, '_KEEP', 1):
+            pf.remember('wechat_local', 'newest')
+        got = pf.dropped_keys()
+        self.assertIn('wechat_local:wx-legacy', got,
+                      '读不出历史 = 不知道谁还显示得到,上限不许据此削人')
+        self.assertIn('wechat_local:ancient', got, '同一趟里按时间那一道也不许动手')
+
+    def test_time_based_recycling_waits_until_a_round_has_been_archived(self):
+        """**留档里一轮都没有 = 下限未知 = 这一趟不按时间回收。**
+
+        下限只从留档那几轮取。活着那两份(当前状态 / 上一轮结果)只进引用集 ——
+        它们说的是**此刻这一轮**,留档里一轮都没有时拿它当「最老还显示得到的时刻」,
+        等于把所有更早的身份一次判死,而这本账里的时刻**正是在更早那些轮次里记下
+        的**:实测历史文件还不存在、状态里只有这一轮的开工时刻,一个月前记下的那条
+        当场被回收。
+        反过来那一半(留档里有一轮、时刻早于它的回收掉)在
+        `test_an_identity_is_recycled_once_every_round_that_could_show_it_is_gone`。
+        """
+        self._ledger(['wechat_local:ancient'], {'wechat_local:ancient': self._ago(30)})
+        pf.remember('wechat_local', 'newest')
+        self.assertIn('wechat_local:ancient', pf.dropped_keys(),
+                      '留档里一轮都没有,不按时间回收')
+
+    def test_the_ceiling_only_trims_entries_that_are_undated_and_unreferenced(self):
+        """条数上限**只削得掉判不出时刻、而且当下没人引用的那些**,最老的先走。
+
+        带时刻的归回收判据管:那是这本账的本职。两类混在一条用例里验的话,上限写错了
+        会被回收那一道兜绿。这一条摆的是「五条升级前记下的、哪一轮都不显示它们」。
+        **引用那一半在下一条**(上限让位给引用)。
+        """
+        self.run_round('run-1', 'ok', '完成')
+        self._ledger([f'wechat_local:legacy-{n}' for n in range(5)])
+        with patch.object(pf, '_KEEP', 3):
+            pf.remember('wechat_local', 'newest')
+        got = pf.dropped_keys()
+        self.assertIn('wechat_local:newest', got, '刚记的这条不许被挤掉')
+        self.assertEqual({'wechat_local:legacy-3', 'wechat_local:legacy-4'},
+                         got - {'wechat_local:newest'}, '削掉的是最老那几条无时刻记录')
+
+    def test_an_undated_identity_that_is_still_shown_outranks_the_ceiling(self):
+        """**上限让位给引用:还显示得到的那条,判不出时刻也不许忘。**(第 2 轮审查那条。)
+
+        升级前记下的那些条目没有时刻,而「判不出时刻」只说明**这本账**不知道它多老,
+        不说明哪一轮都不显示它了 —— 用户点过「不再抓取」的那一篇,此刻还在历史里某
+        一轮的明细中。按「无时刻的最老先削」把它忘掉,下次翻那一轮它就又出现了,而
+        那一步(采集侧真删了)是不可逆的,面板上也没有第二颗按钮能再点一次。
+
+        判据落在**面板上那一行**,不只落在账本里那个键:忘掉之后 `strip_runs` 就不
+        再滤掉它。超了上限还得留 = 这本账这一刻就是比上限长,那是明说过的取舍。
+        """
+        self.run_round('run-1', 'ok', '完成',
+                       failures=[_gone('https://x/legacy', aid='wx-legacy')])
+        # 被引用那条摆在**最老**那一头:按「最老先削」的旧口径它第一个被忘掉
+        self._ledger(['wechat_local:wx-legacy']
+                     + [f'wechat_local:legacy-{n}' for n in range(4)])
+        with patch.object(pf, '_KEEP', 3):
+            pf.remember('wechat_local', 'newest')
+        got = pf.dropped_keys()
+        self.assertIn('wechat_local:wx-legacy', got, '还显示得到的那条,一条都不许忘')
+        self.assertIn('wechat_local:newest', got, '刚记的这条照旧留着')
+        runs = state.load_history()
+        pf.strip_runs(runs)
+        self.assertEqual([], runs[0]['stages']['export']['failures'],
+                         '那一篇在历史里照旧不显示')
 
     def test_two_concurrent_removals_both_stay_recorded(self):
         """两条请求同时记账,**两条都要留下来**。

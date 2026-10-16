@@ -4,7 +4,7 @@
 > 动这块代码之前先读它。CLAUDE.md 只留跨块的元规则和一张索引。
 
 - **大V观点那一档不显示标题,别再加回来。** 推文没有「标题」这回事:采集器把正文的
-  前 500 字符原样当成 title(`x_browser._entry` / `x_feedgrab._entry`;桥接那条走
+  前 500 字符原样当成 title(`x_browser._entry` / `x_feedgrab._entry`;走 HTTP 的那条(专用订阅链接)走
   `fetching.parse_feed`,源没给标题时回退成正文首行)—— 于是卡片上那行大标题和紧跟
   着的正文是**同一句话连着显示两遍**,而标题那个 `<button>` 继承了 base.css 的
   `white-space: nowrap`,一条长推文一行到底、**直接撑出卡片右边界 971px**(2026-10-09
@@ -29,7 +29,7 @@
   标题 —— 旁边那句 `overflow-wrap:anywhere` 在 nowrap 之下压根不起作用,中文标题又
   一个空格都没有,于是长标题照样撑出卡片(RSS 那一侧实测 227px)。大V观点这一档已经
   没有标题了,这条是给另外两类兜底的。
-- 回归在 `tests/test_source_post_title.py`(4 条:两条 X 采集器和桥接给的
+- 回归在 `tests/test_source_post_title.py`(4 条:两条 X 采集器和走 HTTP 的那条给的
   `content_kind` —— 前端那道判断的前提在采集器那头,它变了页面上看起来只是"标题又
   回来了")+ `tests/source_post_probe.mjs`(真页面 + 无头 Chrome,自带 mock 后端,
   18 项)。探针的断言**先验后果**:「有没有东西画到卡片外面」「正文一个字没少」

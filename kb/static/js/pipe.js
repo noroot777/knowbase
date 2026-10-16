@@ -40,7 +40,10 @@ async function pipeJson(path, options = {}, timeout = 15000) {
   const timer = setTimeout(abort, timeout);
   try {
     const r = await fetch(path, { ...options, signal: controller.signal });
-    if (!r.ok) throw new Error(await apiFail(r, '请求未完成'));
+    // 状态码跟着错误走:调用方要能分出「服务端核对之后明确拒绝了(什么都没跑)」
+    // 和「跑了但没答复」—— 后者才该记成"结果不知道"。只多挂一个属性,原来按
+    // `e.message` 取文案的那些调用方一个字都不用改。
+    if (!r.ok) { const err = new Error(await apiFail(r, '请求未完成')); err.status = r.status; throw err; }
     return await r.json();
   } catch (e) {
     if (e.name === 'AbortError') throw new Error('连接超时，请检查服务后重试');

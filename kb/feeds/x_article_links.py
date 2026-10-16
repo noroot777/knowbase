@@ -253,7 +253,7 @@ def _strip_hint(entry: dict) -> dict:
     return {k: v for k, v in entry.items() if k != HINT} if HINT in entry else entry
 
 
-def needs_article(entry: dict, *, links_only: bool = False) -> bool:
+def needs_article(entry: dict) -> bool:
     """这一条要不要去问一次长文。三条,各管一种形态:
 
     ①**正文里明写着一条文章地址** —— 这是确定的信号,feedgrab 的产物正文就是它
@@ -274,16 +274,10 @@ def needs_article(entry: dict, *, links_only: bool = False) -> bool:
 
     **不拿「正文里有 t.co 短链」当信号**:那可能是图片、引用推、任意外链,按它
     发请求等于给一大半推文各买一次调用,而换回来的多半是"它没有长文"。
-
-    `links_only` 是桥接通道那一档:它拿到的是桥接实例给的推文文本,长文在那儿
-    的形态**只有** ① 一种(正文就是展开后的文章地址),而 ③ 在那条路上多半是纯
-    图推文 —— 一轮几十条各买一次询问换不回东西,所以只认 ①。
     """
     if not entry.get('url'):
         return False
     body = entry.get('body') or ''
     if _first(_ARTICLE_LINK, body):
         return True
-    if links_only:
-        return False
     return bool(entry.get(HINT)) or not lead_text(body)

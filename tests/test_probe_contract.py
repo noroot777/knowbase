@@ -46,6 +46,27 @@ def _calls(node: ast.AST) -> list[str]:
     return out
 
 
+def _bare_calls(node: ast.AST) -> set[str]:
+    """`node` 子树里**以裸名字**调用的那些函数(`run_probe()` 算,`self.run_probe()` 不算)。
+
+    和 `_headless_names` 一起回答「这一句调的到底是不是 `tests.headless` 那个」,各挡一
+    种同名形态:这一道挡**方法桩**(`tests/test_x_login_import.py` 里真有一个
+    `self.run_probe`,那一组自己的桩,压根不起浏览器),那一道挡**模块级同名函数**。
+    **如实记着:今天哪一道单独去掉都不红** —— 树里只有前一种形态,而它被两道同时挡着
+    (那份文件压根不导入 `headless`)。留着是因为两种形态都会把判据搞反:误报会逼着
+    下一个人去给一个不起浏览器的类挂能力门。
+    """
+    return {sub.func.id for sub in ast.walk(node)
+            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)}
+
+
+def _headless_names(tree: ast.AST) -> set[str]:
+    """这份文件从 `tests.headless` 里导进来的名字(判据的另一半,见 `_bare_calls`)。"""
+    return {a.asname or a.name for n in ast.walk(tree)
+            if isinstance(n, ast.ImportFrom) and (n.module or '').endswith('headless')
+            for a in n.names}
+
+
 def _class_fixture_offenders(path: Path) -> list[str]:
     """`setUpClass` 建了资源、却把回收押在 `tearDownClass` 上的那些类。"""
     bad = []
@@ -139,6 +160,35 @@ class ProbeSourceContractTests(unittest.TestCase):
         self.assertEqual([], offenders,
                          "这些探针又自己管 profile 目录了,抛异常那条路上会留下它:"
                          "改成 launchShell(args, {profile: '前缀-'})")
+
+    def test_every_test_class_that_runs_a_probe_carries_the_capability_gate(self):
+        """起探针的测试类必须挂 `@requires_headless`,**一个都不许漏**。
+
+        CI 刻意不装无头壳,而 `probe_env()` 一进去就断言失败 —— 同一份 discovery 里
+        别的浏览器类都如实 skip 并说清怎么补,漏掉那一个报的是红,而红的原因和被测
+        的那件事毫无关系(实测形态:新加一个浏览器类忘了挂,在没有无头壳的机器上
+        `FAILED (failures=1, skipped=1)`)。**这是结构守卫,行为用例证明不了它** ——
+        有壳的机器上漏没漏一个字都看不出来。
+
+        判据落在**导入**和**裸名字调用**上:`self.run_probe()` 那种同名桩不算
+        (理由在 `_bare_calls`)。
+        """
+        offenders = []
+        for f in sorted(HERE.glob("test_*.py")):
+            tree = ast.parse(f.read_text(encoding="utf-8"), str(f))
+            gated = {"run_probe", "probe_env"} & _headless_names(tree)
+            if not gated:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef) or not (_bare_calls(node) & gated):
+                    continue
+                decos = {getattr(d, "id", None) or getattr(d, "attr", "")
+                         for d in node.decorator_list}
+                if "requires_headless" not in decos:
+                    offenders.append(f"{f.name}:{node.name}")
+        self.assertEqual([], offenders,
+                         "这些测试类起探针却没挂 @requires_headless —— 没装无头壳的"
+                         "机器上它们会报红而不是 skip,给它们加上那个装饰器")
 
     def test_no_test_runs_a_browser_probe_bare(self):
         offenders = []

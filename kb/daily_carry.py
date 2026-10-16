@@ -374,24 +374,31 @@ def _on_a_list(url, title, listed: tuple, once: set) -> bool:
         any(row.startswith('[' + t) for row in buckets.get('[', ()))
 
 
-def mark_carried(conn, day: str, paths) -> int:
+def mark_carried(conn, day: str, paths, sigs=None) -> int:
     """记下这一份日报带走了哪些条目;重新生成同一天时整批替换。返回条数。
 
     **只能在日报文件真的落盘之后调,而且两步要一起待在 `commit_lock()` 里。**
     反过来的话,模型钱花掉、文件没写成,这批素材已经被盖成"报过了" —— 下一份
     日报再也选不到它们,不可恢复。顺序不许反,锁也不能省(见 `commit_lock`)。
+
+    `sigs` 是 {路径: 这一条**送进模型的那一份**的指纹}(`kb.daily_gain.material_sig`)。
+    缺一条就记空 —— 空的含义是「没记下」,不是「和现在一样」,读它那一侧
+    (`kb.daily_gain._will_add`)据此报「不知道」。**它记的是取材那一刻的版本**,所以必须
+    由落盘那一侧把当时真送进去的素材交过来,不能在这里现查一遍库:那是另一个时刻。
     """
     if day in (SEED_DAY, DROP_DAY):
         raise ValueError('不能用 #seed / #drop 这两个保留值记一份日报')
-    rows = [(p, day, datetime.now().strftime(STAMP))
+    sigs = sigs or {}
+    rows = [(p, day, datetime.now().strftime(STAMP), sigs.get(p) or None)
             for p in dict.fromkeys(paths) if p]
     if conn.in_transaction:
         conn.commit()
     conn.execute('BEGIN IMMEDIATE')
     try:
         conn.execute('DELETE FROM daily_carried WHERE day=?', (day,))
-        conn.executemany('INSERT OR IGNORE INTO daily_carried(path,day,carried_at)'
-                         ' VALUES(?,?,?)', rows)
+        conn.executemany('INSERT OR IGNORE INTO'
+                         ' daily_carried(path,day,carried_at,material_sig)'
+                         ' VALUES(?,?,?,?)', rows)
         conn.commit()
     except BaseException:
         conn.rollback()

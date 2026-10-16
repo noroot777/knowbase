@@ -137,7 +137,6 @@ class Settings(BaseModel):
     # 收不存则是静默丢字段。改成可选是因为新页面不再发(那两个控件没了)。
     enabled: bool | None = None
     interval_minutes: int | None = Field(default=None,ge=15,le=10080)
-    bridges: list[str] | None = None
     x_channel: str | None = None
     x_feedgrab_bin: str | None = None
     x_chrome_path: str | None = None
@@ -159,11 +158,65 @@ def set_settings(kind: str,body: Settings):
 
 
 def _x_kind(kind: str) -> dict:
-    """确认这一类来源有通道可选,并把当前设置取出来。"""
+    """确认这一类来源有通道可选,并把当前设置取出来。
+
+    **「拿来比的」「拿来跑的」和「同步真正跑的」必须是同一份值**,而归一只做一次,
+    在 `reg.get_settings` 那一层(它本来就在那儿把退役名翻成现用名)。一度放在这个
+    函数里 —— 面板 GET 和三个动作于是一致了,采集那条路却还读原值:存着末尾带一个
+    空格的路径时,面板比的、面板跑的是 trim 过那份,同步跑的是另一个文件(审查实测
+    的正是这个形态)。**这一层不许再归一一次**:多一处就是多一份会各自漂移的口径。
+    """
     kind_checked(kind)
     if not x_channels.supports_channels(kind):
         raise HTTPException(404, '该来源没有可选的采集通道')
     return reg.get_settings(kind)
+
+
+class XChannelAction(BaseModel):
+    """动作请求里带着的「我眼前那一份设置」。字段跟 `x_channels.config_of` 一一对应。
+
+    **两条路径不设长度上限,跟保存那一侧(`Settings`)一致。** 两边不一致的后果是
+    一份**存得下、却动不了**的配置:1144 字的路径 PUT 回 200,随后同一份配置的动
+    作回 422,而用户看到的是一颗按下去就报错的按钮、设置页面却一切正常(审查实
+    测)。上限要设就两边一起设、在同一个入口拒绝。
+    """
+    x_channel: str = Field(default='', max_length=40)
+    x_feedgrab_bin: str = ''
+    x_chrome_path: str = ''
+
+
+def _x_act(kind: str, expect: XChannelAction | None) -> tuple[dict, dict]:
+    """三个动作共用的入口:取一份快照,**确认它就是调用方眼前那一份**,再交出去。
+
+    为什么这道闸非在服务端不可:浏览器那边的「已经保存了」是**本页自己的缓存**,
+    它证不了此刻库里存着的还是那一份。另一个标签页(或任何别的客户端)改一下设置
+    并保存,这一页既不知道、也不会重新 PUT,于是按钮打出去的动作跑的是**别人那
+    一份**,结论却贴在这一页的输入框旁边 —— 审查实测:第二页把路径改成
+    `/review/second-page-missing` 并保存,第一页不刷新直接点「检查连接」,检的正是
+    第二页那条路径,而第一页显示的仍是原来那条可用的。判据因此跟着**要执行的那
+    次读**待在一起(口径同元规则「判据待在写语句自己的 WHERE 里」)。
+
+    **没带身份就不跑。** 它和「带了但对不上」是同一件事的两种形态:两种都证不了
+    「这次动作说的是现在存着的这一份」,而动作会真起浏览器、真写那个 profile ——
+    拿不准就别做(元规则「判不准一律抛或扣留」)。这三个端点的调用方只有这块面板,
+    它一定带着;脚本直接打过来时这条 409 会把要带什么说清楚。
+
+    **反过来钉一边:对得上就照常放行。** 存量里写着退役名(`bridge`)的和面板上
+    的 `browser` 是同一份(两边都过 `resolve`);路径两边都 trim;`enabled`、同步
+    间隔这些不在身份里,在别处改了不影响这一次动作。
+    """
+    settings = _x_kind(kind)
+    now = x_channels.config_of(settings)
+    if expect is None or not (expect.x_channel or '').strip():
+        raise HTTPException(409, '这个动作要带上你眼前那份设置（取法和两条可执行'
+                                 '文件位置），好让这边确认不是拿另一份在跑。')
+    want = x_channels.config_of(expect.model_dump())
+    if want != now:
+        label = x_channels.label(now['x_channel'])
+        raise HTTPException(409, f'现在存着的设置已经不是你眼前这一份了（存着的是'
+                                 f'「{label}」那一档）。多半是另一个标签页改过并'
+                                 f'保存了——页面这就重读一次，看清之后再点一次。')
+    return settings, now
 
 
 @router.get('/{kind}/x-channel')
@@ -178,6 +231,10 @@ def x_channel(kind: str):
     # 公众号那边要发别名是因为那份选择存在 localStorage —— 在后端的射程之外。
     return {
         'current': current,
+        # **完整的那一份一起给**:面板拿它当「后端此刻存着什么」的身份。少了它
+        # 前端只能拿上一次权威加载落下的路径去拼一份出来,而那是猜 —— 同一档
+        # 取法在另一个标签页里换了路径时,这边拼出来的身份就是错的。
+        'config': x_channels.config_of(settings),
         'channels': [{'id': c, 'label': x_channels.LABELS[c],
                       'hint': x_channels.HINTS[c]} for c in x_channels.CHANNELS],
         'ready': ready, 'why': why, 'hint': hint,
@@ -191,20 +248,20 @@ def x_channel(kind: str):
 
 
 @router.post('/{kind}/x-channel/login')
-def x_channel_login(kind: str):
+def x_channel_login(kind: str, body: XChannelAction | None = None):
     """开一个有头窗口让用户登录(只有浏览器通道走这条)。起完就返回。
 
     **拒绝的文案要说清「现在是哪一档」和「下一步怎么办」。** 这条路最常见的来法
-    不是"用户在桥接通道上点了登录",而是**他已经把下拉改成了浏览器登录态、只是
-    还没点「保存设置」** —— 这里读的是**存下来**的那一份(`reg.get_settings`),
-    页面上那个下拉是还没提交的草稿。原来只说"只有「我的浏览器登录态」这条通道
-    需要在这里登录",于是用户对着一个明明选着「我的浏览器登录态」的下拉,收到
-    一句自相矛盾的拒绝,看不出差在哪一步(2026-10-09 实测:`feed_settings` 里
-    压根没有 social 这一行,通道是默认的 bridge)。前端另有一道闸(未保存时这颗
-    按钮是禁用的),这里是它漏掉时的兜底 —— 两道各有射程,别只留一道。
+    不是"用户在一档用不着登录的通道上点了登录",而是**他已经把下拉改成了浏览器
+    登录态、只是那一份还没落库** —— 这里读的是**存下来**的那一份
+    (`reg.get_settings`),页面上那个下拉是还没提交的草稿。原来只说"只有「我的
+    浏览器登录态」这条通道需要在这里登录",于是用户对着一个明明选着「我的浏览器
+    登录态」的下拉,收到一句自相矛盾的拒绝,看不出差在哪一步(实测:`feed_settings`
+    里压根没有 social 这一行,通道落在默认那一档)。前端另有一道闸(点按钮时先把
+    草稿存下来),这里是它漏掉时的兜底 —— 两道各有射程,别只留一道。
     """
-    settings = _x_kind(kind)
-    current = x_channels.channel_of(settings)
+    settings, config = _x_act(kind, body)
+    current = config['x_channel']
     if current == x_channels.ATTACH:
         # 这一档不该建议他换档:他要的登录态就在自己那个浏览器里,我们开一个
         # 独立 profile 的窗口对他毫无用处。说清「在哪儿登录」就够了。
@@ -223,11 +280,11 @@ def x_channel_login(kind: str):
                                              settings.get('x_chrome_path', ''))
     except Exception as e:                                # noqa: BLE001 - 成品文案
         raise HTTPException(400, str(e)) from None
-    return {'ok': True, 'detail': detail}
+    return {'ok': True, 'detail': detail, 'config': config}
 
 
 @router.post('/{kind}/x-channel/import-login')
-def x_channel_import_login(kind: str):
+def x_channel_import_login(kind: str, body: XChannelAction | None = None):
     """从日常浏览器把 X 登录态搬进独立 profile。用户点按钮才走,所以允许慢。
 
     **门槛和「打开登录窗口」同一道,理由逐字相同**(见 `x_channel_login`):它写的
@@ -241,8 +298,8 @@ def x_channel_import_login(kind: str):
     不是这条通道时不该拦(口径同元规则「判据待在写语句自己那一侧」)。
     """
     from kb.feeds import x_login_import
-    settings = _x_kind(kind)
-    current = x_channels.channel_of(settings)
+    settings, config = _x_act(kind, body)
+    current = config['x_channel']
     if current != x_channels.BROWSER:
         raise HTTPException(400, f'当前保存的取法是「{x_channels.label(current)}」，'
                                  f'而这颗按钮写的是'
@@ -260,15 +317,21 @@ def x_channel_import_login(kind: str):
     # 不在这儿另写一套判断。
     ready, why, _hint = x_channels.readiness(settings)
     return {'ok': ok, 'detail': detail, 'login_state': x_login_import.summary(),
-            'ready': ready, 'why': why}
+            'ready': ready, 'why': why, 'config': config}
 
 
 @router.post('/{kind}/x-channel/check')
-def x_channel_check(kind: str):
-    """真连一次。这是用户点「检查连接」才做的事,所以允许慢。"""
-    settings = _x_kind(kind)
+def x_channel_check(kind: str, body: XChannelAction | None = None):
+    """真连一次。这是用户点「检查连接」才做的事,所以允许慢。
+
+    **这一次检的是哪一份,要跟着结论回去**(`config`):它慢到几十秒,这期间同一
+    档取法下换一条路径并保存是真会发生的事,而回包落地时面板上那一份已经不是它
+    了 —— 不带着身份回去,前端只能按「还是同一档取法吗」判,于是一条按旧路径跑出
+    来的「已就绪」会贴在一条不可执行的新路径旁边(审查实测)。
+    """
+    settings, config = _x_act(kind, body)
     ready, detail = call(x_channels.check, settings)
-    return {'ready': ready, 'detail': detail}
+    return {'ready': ready, 'detail': detail, 'config': config}
 
 
 class TranslateRetryRequest(BaseModel):

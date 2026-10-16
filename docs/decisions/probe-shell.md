@@ -66,6 +66,12 @@
 - **`run_probe` 要 `start_new_session=True`**(让 node 成为新会话首进程,chrome 自动在同一个组里,`killpg` 一起带走)。收尾在
   `finally` 里**无条件**做一次。
 - **把探针改到共用这个模块之后,必须真跑那几组页面回归 —— `node --check` 只过语法。**
+- **起探针的测试类必须挂 `@requires_headless`,一个都不许漏。** CI 刻意不装无头壳,而 `probe_env()` 一进去就断言失败 —— 同一份
+  discovery 里别的浏览器类都如实 skip 并说清怎么补,漏掉那一个报的是**红**,而红的原因和被测的那件事毫无关系(实测:新加一个浏览器
+  类忘了挂,没有无头壳的机器上 `FAILED (failures=1, skipped=1)`)。**这一条只能靠结构守卫**:有壳的机器上漏没漏一个字都看不出来,所以
+  它和下面那几条一样待在 `tests/test_probe_contract.py` 里(走 AST,判据是「这份文件从 `tests.headless` 导进来的名字 + 以裸名字调用」,
+  两者各挡一种同名形态,射程如实记在那两个辅助函数的 docstring 里)。**不许用「给 CI 装个浏览器」或者「把 `probe_env()` 的断言改成静默
+  放行」代替** —— 前者是把能力门换成成本,后者会让没壳的机器悄悄跑出一堆假绿。
 - **五条契约不挂 `@requires_headless`**(没装无头壳的机器上靠它们守结构,在 `tests/test_probe_contract.py`):探针不许自己 `spawn`
   浏览器、不许自己管 profile 目录;测试不许裸 `subprocess.run` 跑探针、不许自己 `Popen` 沙箱服务;沙箱服务不许自己拥有临时根。
   **`test_probe_leak.py` 自己是"裸跑探针"那条唯一的例外,而且必须是**(走 `run_probe` 的话它那道 killpg 会把结论盖掉)。
@@ -115,7 +121,8 @@
   收掉」的上界。
 - **「原调用方是谁」只能由调用方自己说(`KB_PROBE_PARENT`),不能让探针现读
   `process.ppid`。** 探针在起浏览器**之前**本来就有一段异步 —— 等沙箱后端监听、摆局、
-  读 fixture(`x_channel_probe.mjs` 先等本地后端、十行之后才 `launchShell`)。调用方
+  读 fixture(X 通道那一组先等本地后端、十行之后才 `launchShell`,如今在
+  `x_channel_kit.mjs` 里)。调用方
   死在那一段里时,探针读到的 ppid 已经是 1,而「1」和「我本来就是从终端直接起的、
   没有调用方要盯」长得**一模一样** —— 于是判成后者、检查**永久不装**,随后照旧起一个
   浏览器留在后台。实测(第 2 轮审查独立复现 + 我自己复现各一次):取消之后 node 以

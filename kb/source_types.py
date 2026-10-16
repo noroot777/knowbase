@@ -33,8 +33,8 @@ SOURCE_TYPES = {
     'social': SourceType('social', '大V观点', '关注的人，此刻的想法。', ('social',),
                          icon='chat', interval_minutes=1440,
                          url_hint='输入 X / Twitter 账号主页，或其他社交媒体的 RSS 地址',
-                         note='X 的取法在下面的「取法」里选：桥接、cookie、浏览器登录态几条路，'
-                              '各自要准备的东西不同。也可以为单个账号填写专用订阅链接，它优先于任何通道。',
+                         note='X 的取法在下面的「取法」那一块里选，每一档要准备的东西不同。'
+                              '也可以为单个账号填写专用订阅链接，它优先于任何通道。',
                          adapter='social'),
     'rss': SourceType('rss', 'RSS', '让值得读的文章，自己来到这里。', ('rss',)),
     # 没有 feed 的站点走这条路:解析列表页。独立成一类而不是塞进 rss,是因为

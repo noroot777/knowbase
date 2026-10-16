@@ -326,9 +326,9 @@ class DailyCarriedTests(_Base):
         """tooltip 里那个"队列里还积着多少"必须和真取材认的是同一批。两处各判
         一遍的话必然各漂各的:用户看着"还有 7 条没报过",生成时带走的是另一批。
 
-        **这个数不上按钮** —— 按钮报的是"今天第 N 次抓取抓了多少"(抓取自己的
-        事实,钉在 tests/test_fetch_rounds.py)。两件事混成一个的后果写在那一份
-        的模块 docstring 里。"""
+        **这个数不上按钮** —— 按钮边上写的是「这一次会多带进来几条」(`gain`,
+        下面几条);抓取自己的事实(今天第 N 次抓了多少)钉在
+        tests/test_fetch_rounds.py。三个数混成一个的后果各写在那几份的 docstring 里。"""
         add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
         add_doc(self.conn, 'source/rss/b.md', title='乙文', published='2026-09-20 09:00')
         now = T('2026-09-29 08:00')
@@ -340,6 +340,202 @@ class DailyCarriedTests(_Base):
         daily.generate(since=info['since'], until=info['until'])
         self.assertEqual(0, sum(daily.pending(first_days=1, now=now)[k]
                                 for k in ('items', 'late')))
+
+    def test_this_time_counts_only_what_the_next_report_would_really_add(self):
+        """按钮边上那个数(`gain`)答的是"**再生成一次**会多带进来几条"。
+
+        判据落在后果上:出过报之后它归零(面板据此把「重新生成日报」整颗藏掉 ——
+        点下去只会原样挑回同一批,花一次模型钱拿回同一份日报);随后真进来一条
+        新的,它只算那一条 **1**。算成 2 的实现是把今天那一份自己带走的也数了
+        进去("是不是今天自己盖的章"那一列没过滤);出过报还不归零的,面板上
+        就永远有一颗消不掉的按钮。名额那一侧的射程在下面那条。"""
+        add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
+        now = T('2026-09-29 08:00')
+        info = daily.pending(first_days=1, now=now)
+        self.assertEqual(1, info['gain'])
+        daily.generate(since=info['since'], until=info['until'])
+        self.assertEqual(0, daily.pending(first_days=1, now=now)['gain'])
+        add_doc(self.conn, 'source/rss/b.md', title='乙文', published='2026-09-29 07:00')
+        again = daily.pending(first_days=1, now=now)
+        self.assertEqual((1, 1), (again['gain'], again['items']))
+
+    def test_an_update_to_the_same_article_counts_as_new_content(self):
+        """**只按路径盖章答不了"还有没有新东西"。** 同一篇文章的正文后来补全了、
+        摘要刚提取出来,下一次送进模型的就是另一份内容;按路径判的话它永远算
+        "这篇报过了",按钮整颗藏着,人再没有入口把这些更新报出来(审查实测:前后
+        两次真实 prompt 确实不同,而面板那个数两次都是 0)。
+
+        判据落在后果上:**真取材那一侧拿到的摘要已经换了一份**,同一时刻面板上
+        那个数必须跟着是 1。反过来也钉一边:内容改回去、只有 `indexed_at` 变了的
+        话它得回到 0 —— 指纹掺进跟 prompt 无关的东西,每次重新索引都会报一次假的
+        「有新内容」。另外钉住它**不算进队列积压**:那个数答的是"一份日报都没进
+        过的有多少",这一篇进过。"""
+        add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
+        now = T('2026-09-29 08:00')
+        info = daily.pending(first_days=1, now=now)
+        daily.generate(since=info['since'], until=info['until'])
+        self.assertEqual(0, daily.pending(first_days=1, now=now)['gain'])
+
+        self.conn.execute('UPDATE documents SET summary=? WHERE path=?',
+                          ('结果已经公布,补上了关键结论', 'source/rss/a.md'))
+        self.conn.commit()
+        mat = daily.collect(self.conn, info['since'], info['until'])
+        self.assertEqual(['结果已经公布,补上了关键结论'],
+                         [i['excerpt'] for i in mat.items])
+        after = daily.pending(first_days=1, now=now)
+        self.assertEqual((1, 0), (after['gain'], after['items']))
+
+        self.conn.execute('UPDATE documents SET summary=?, indexed_at=? WHERE path=?',
+                          ('摘要', '2026-10-01 00:00', 'source/rss/a.md'))
+        self.conn.commit()
+        self.assertEqual(0, daily.pending(first_days=1, now=now)['gain'])
+
+    def test_a_stamp_without_a_signature_answers_unknown_not_zero(self):
+        """账本里**没有**指纹的那些行(这一列是后加的;`seed_locked` 整表重算出来
+        的那批也没有)—— 这一问**答不上来,就得说答不上来**(`gain is None`),
+        不许当成 0。
+
+        曾经退一步比「带走之后有没有重新索引过」(`indexed_at > carried_at`),
+        **那是错的**:真正换掉素材的那条路是提取 —— `extract.save_extraction` 写
+        `summary` / 实体 / 主题 / `extracted_at`,**一个字都不碰 `indexed_at`**,
+        而"日报先出、提取随后补上摘要"正是常见顺序。于是"索引时刻没动"被当成
+        "送进模型的还是同一份",按钮跟着藏掉,人再没有入口把这些更新报出来
+        (审查实测 12 组:模型输入全变、`indexed_at` 全没动、`gain` 全是 0)。
+
+        三边都钉:①什么都没改也答「不知道」(0 意味着"确定没有",而我们确定不了);
+        ②**提取改了摘要之后照旧答「不知道」** —— 这一条才是旧判据答错的那一档,
+        它当时会答 0;③重新生成一次(账本把指纹补上)之后回到**确定的 0** ——
+        不然一个"永远答不知道"的实现也能把前两条蒙过去,而那等于按钮再也藏不掉。
+        顺带钉住队列积压不受影响:那个数答的是"一份日报都没进过的有多少"。
+        """
+        add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
+        now = T('2026-09-29 08:00')
+        info = daily.pending(first_days=1, now=now)
+        daily.generate(since=info['since'], until=info['until'])
+        self.conn.execute('UPDATE daily_carried SET material_sig=NULL, carried_at=?',
+                          ('2026-09-29 08:30',))
+        self.conn.commit()
+        blind = daily.pending(first_days=1, now=now)
+        self.assertEqual((None, 0), (blind['gain'], blind['items']))
+
+        # 真实提取那条路:摘要换了一份,`indexed_at` 原样不动。
+        before = self.conn.execute(
+            'SELECT indexed_at FROM documents WHERE path=?',
+            ('source/rss/a.md',)).fetchone()['indexed_at']
+        self.conn.execute(
+            'UPDATE documents SET summary=?, extracted_at=? WHERE path=?',
+            ('结果已经公布,补上了关键结论', '2026-09-29 09:00', 'source/rss/a.md'))
+        self.conn.commit()
+        self.assertEqual(before, self.conn.execute(
+            'SELECT indexed_at FROM documents WHERE path=?',
+            ('source/rss/a.md',)).fetchone()['indexed_at'])
+        self.assertIsNone(daily.pending(first_days=1, now=now)['gain'])
+
+        # 重新生成一次就自愈:这一轮的指纹落进账本,又答得出确定的数了。
+        daily.generate(since=info['since'], until=info['until'])
+        self.assertEqual(0, daily.pending(first_days=1, now=now)['gain'])
+
+    def test_the_report_file_itself_is_reported_with_the_same_read(self):
+        """「那一天的日报此刻在不在」和 `gain` 必须**同一次调用**给出来。
+
+        界面要两个条件一起成立才敢把「重新生成日报」整颗藏掉。账本盖的章和 vault
+        里那个文件是两头东西:在 Obsidian 里把今天那份移走(没走界面那条删除)
+        之后章还在、`gain` 照样是 0 —— 这时要是还说"那一天有日报",唯一能重建它
+        的入口就被藏掉了(审查实测:页面上按钮一直不回来,只有整页刷新才回来)。
+
+        三边都钉:没出过报时 `has_report` 是 False;出过是 True;**文件在外面被
+        移走之后当场变回 False,而 `gain` 仍然是 0**(两件事各答各的,后者本来
+        就不该变)。`day` 报的是这一次会写到哪一天 —— 界面拿它确认"后端答的是不是
+        我要问的那一天"。
+        """
+        add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
+        now = T('2026-09-29 08:00')
+        info = daily.pending(first_days=1, now=now)
+        self.assertEqual(('2026-09-29', False), (info['day'], info['has_report']))
+
+        daily.generate(since=info['since'], until=info['until'])
+        after = daily.pending(first_days=1, now=now)
+        self.assertEqual((0, True), (after['gain'], after['has_report']))
+
+        (daily.report_dir() / '2026-09-29.md').unlink()
+        gone = daily.pending(first_days=1, now=now)
+        self.assertEqual((0, False), (gone['gain'], gone['has_report']))
+
+    def test_a_long_queue_with_nothing_new_this_time_reads_as_nothing_new(self):
+        """**队列总长不许冒充它。** 名额每轮只带得走固定条数,生产库实测队列
+        1097 条而重新生成一次只多出 11 条 —— 把队列写在按钮边上,用户会照着它
+        花一次模型钱,拿回一份几乎没变的日报。
+
+        这里把名额缩到 1:三条全在窗口里,今天那一份带走了最新的那条;剩下两条
+        发布得更早,**下一次生成照样轮不到它们**(名额里挑的还是同一条)。所以
+        "队列里还积着 2 条"和"这一次一条都多带不进来"同时成立,两个数各报各的。
+
+        **这一条还是「取材口径必须和 `collect` 逐字一致」的独占射程**:不截名额
+        (或者拿 `day=''` 去问 —— 今天那一份带走的不在候选里,名额就空出来给了
+        根本抢不到席位的旧条目)都会在这里答出一个大于 0 的数,而真生成一次它们
+        一条都进不去。"""
+        for i, hhmm in enumerate(('09:00', '10:00', '11:00')):
+            add_doc(self.conn, f'source/rss/{i}.md', title=f'第{i}条',
+                    published=f'2026-09-28 {hhmm}')
+        now = T('2026-09-29 08:00')
+        with patch.object(daily, 'MAX_ITEMS', 1):
+            info = daily.pending(first_days=1, now=now)
+            self.assertEqual((3, 1), (info['items'], info['gain']))
+            daily.generate(since=info['since'], until=info['until'])
+            after = daily.pending(first_days=1, now=now)
+        self.assertEqual((2, 0), (after['items'], after['gain']))
+
+    def test_the_two_buckets_are_read_from_one_snapshot(self):
+        """两个桶是两条 SELECT,而 legacy `isolation_level` 下 SELECT 自己不开
+        事务 —— 中间夹进别人一次记账提交的话,折出来的是**两个版本拼起来的数**
+        (上一版就这么报出过一个凭空的新增)。
+
+        摆法:在要点桶那条查询的行循环里放一个真线程,让它用自己的连接把两篇
+        都盖上章,等它提交完再让补录桶那条查询跑。判据落在**自洽**上:两篇要么
+        都算没报过(读事务开在前,拿的是同一份快照),要么都算报过;一个 1 一个
+        0 就是把半份新事实拼进了旧事实里。"""
+        add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
+        add_doc(self.conn, 'source/rss/b.md', title='乙文', published='2026-09-20 09:00')
+        started = threading.Event()
+
+        def stamp_elsewhere():
+            other = store.connect()
+            try:
+                daily_carry.mark_carried(other, '2026-09-29',
+                                         ['source/rss/a.md', 'source/rss/b.md'])
+            finally:
+                other.close()
+
+        real_parse = daily.parse_ts
+
+        def once(value):
+            # 第一条查询正在逐行解析 ⇒ 快照(如果有的话)已经定下来了
+            if not started.is_set():
+                started.set()
+                t = threading.Thread(target=stamp_elsewhere)
+                t.start(); t.join(10)
+            return real_parse(value)
+
+        with patch.object(daily, 'parse_ts', once):
+            info = daily.pending(first_days=1, now=T('2026-09-29 08:00'))
+        self.assertIn((info['items'], info['late']), ((1, 1), (0, 0)),
+                      '两个桶读到了两个版本')
+
+    def test_a_report_whose_accounting_failed_keeps_offering_the_button(self):
+        """**这个数的误差方向只许倒向「多报」。**
+
+        账本是允许出现「日报文件写好了、记账没写上」的(那一档故意倒向多报一遍)。
+        那时今天带走的那几条看着像没进过日报,`gain` 跟着偏大 —— 面板多显示一次
+        那颗按钮,代价是用户可能白花一次模型钱,**看得见**。反过来偏小就是把按钮
+        藏掉而确实有新内容:一次出报机会被静默吃掉,面板上一个字都不说。"""
+        add_doc(self.conn, 'source/rss/a.md', title='甲文', published='2026-09-28 09:00')
+        now = T('2026-09-29 08:00')
+        info = daily.pending(first_days=1, now=now)
+        with patch.object(daily, 'mark_carried',
+                          Mock(side_effect=sqlite3.OperationalError('disk I/O error'))):
+            daily.generate(since=info['since'], until=info['until'])
+        self.assertEqual({}, self.carried())            # 账本确实空着
+        self.assertEqual(1, daily.pending(first_days=1, now=now)['gain'])
 
 
 class CarryFailureNoticeTests(_Base):

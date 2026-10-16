@@ -189,7 +189,7 @@ class StaticNoteTests(unittest.TestCase):
         for count in ('一种', '两种', '三种', '四种', '五种', '两条', '三条', '四条'):
             with self.subTest(count=count):
                 self.assertNotIn(count, note)
-        self.assertIn('取法', note)                 # 指到那个下拉
+        self.assertIn('取法', note)                 # 指到面板上那一块
 
 
 class BadEndpointTests(ChannelBase):
@@ -258,7 +258,7 @@ class LoginEndpointTests(ChannelBase):
         self.settings(ATTACH)
         with patch.object(x_browser, 'open_login_window',
                           side_effect=AssertionError('不该开窗口')):
-            r = self.client.post('/api/intake/social/x-channel/login')
+            r = self.x_act('/api/intake/social/x-channel/login')
         self.assertEqual(400, r.status_code)
         detail = r.json()['detail']
         self.assertIn('x.com', detail)                       # 下一步:在那儿登录

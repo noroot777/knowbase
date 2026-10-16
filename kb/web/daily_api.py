@@ -82,13 +82,19 @@ def status():
 
 @router.get('/window')
 def window():
-    """下一份日报默认覆盖的区间 + 今天第几次抓取抓了多少。界面拿它预填。
+    """下一份日报默认覆盖的区间 + 再生成一次能多带进来多少 + 今天抓了几次。界面拿它预填。
+
+    `pending` 答的是**取材**那一侧的两个问题,别混:`gain` 是「再生成一次会多带进来
+    几条没进过日报的内容」—— 按钮上那句「有 N 条新内容」和「这颗按钮还要不要显示」
+    都只认它;`items`/`late`/`total` 是「队列里一共还积着多少没进过日报的」,只进
+    tooltip(名额每轮只带得走固定条数,生产库实测积压 1097 条而重新生成一次只多出
+    11 条,写到按钮边上会让人照着它花一次模型钱)。口径在 `daily.pending`。
 
     `fetch` 是**抓取自己的事实**(`kb.fetch_rounds`):今天第 N 次同步往 vault 新落了
-    多少篇。按钮上报的就是它 —— 一天内同步第二次之后,用户要知道"这次抓了多少"
-    才能决定要不要重新生成那份日报(那会再花一次模型钱)。生成、重新生成、删掉
-    日报都不改变这个数。`pending` 是另一回事(队列里一共还积着多少没进过日报的),
-    给 tooltip 用。两条都零模型调用,所以放在这条每次打开面板都会调的路上。
+    多少篇。它和 `gain` 回答的不是一个问题(抓回来 860 篇、而其中会进下一份日报的
+    只有一部分:名额、补录回溯范围、软广与衍生树都在中间),所以**不许互相冒充** ——
+    抓取事实整条进 tooltip。生成、重新生成、删掉日报都不改变这个数。三条都零模型
+    调用,所以放在这条每次打开面板都会调的路上。
 
     **`fetch: null` 是「不可确认」,不是「没抓到」**(`fetch_rounds.today` 读不出
     账本、或者有行没落下去时就给 null;`{'n': 0}` 才是确定今天还没抓过)。
@@ -107,6 +113,16 @@ def window():
     `added` 里减掉**(口径与两个数为什么不等见 `docs/decisions/daily.md`)。
     这几个数一并原样透传,这里不做任何合并。
     查不出来时窗口预填照旧 —— 这两条只是提示,不该让面板打不开。
+    **`pending: null`(算不出来)前端照旧显示按钮** —— 那是"不知道",不是"没有
+    新内容",藏掉按钮等于拿一次读取故障把出报这条路堵死。**`pending.gain: null`
+    是同一回事的更细一档**:两个数算出来了,只有"会不会多带进内容"这一问答不上来
+    (今天那份里有一条账本没记下当时那一版,见 `daily_gain._will_add` 第三档)。
+
+    `day` / `has_report` 是**藏按钮要的另一半**:这一次会写到哪一天、那一天的日报
+    文件**此刻**在不在。只有 `gain == 0` 且 `has_report is true` 才允许把按钮藏掉
+    —— 两件事必须同一趟回包给出来,界面手里那份日报列表缓存答不了"此刻"
+    (空闲轮询只刷新这条,不刷新列表;在 Obsidian 里把今天那份移走之后,缓存会一直
+    说"还在",按钮就一直藏着)。`null` = 不知道,不藏。
     """
     # 这条只给窗口预填(回溯几天),不报"定时开没开" —— 所以读不出来时退回缺省
     # 天数照常给出窗口,而不是让面板打不开。那句"开没开"由 /settings 回答。
@@ -119,7 +135,10 @@ def window():
         info = daily.pending(settings['first_days'])
     except Exception:                               # noqa: BLE001 - 提示失败不该让面板打不开
         since, until = daily.next_window(settings['first_days'])
-        info = {'since': since, 'until': until, 'items': None, 'late': None}
+        # 算不出来时**连"那一天有没有日报"也一起报不知道**:界面藏按钮要两个
+        # 条件一起成立,这里给 False 等于替它答了一个我们并没有核实的答案。
+        info = {'since': since, 'until': until, 'items': None, 'late': None,
+                'gain': None, 'day': None, 'has_report': None}
     try:
         got = fetch_rounds.today()
     except Exception:                               # noqa: BLE001 - 同上
@@ -128,9 +147,11 @@ def window():
             'until': info['until'].isoformat(timespec='minutes'),
             'first_days': settings['first_days'],
             'fetch': got,
+            'day': info['day'], 'has_report': info['has_report'],
             'pending': (None if info['items'] is None else
                         {'items': info['items'], 'late': info['late'],
-                         'total': info['items'] + info['late']})}
+                         'total': info['items'] + info['late'],
+                         'gain': info['gain']})}
 
 
 class RunRequest(BaseModel):

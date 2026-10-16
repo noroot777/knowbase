@@ -23,7 +23,7 @@ import httpx
 from bs4 import BeautifulSoup, NavigableString
 
 from kb.feeds import x_channels
-from kb.feeds.registry import normalize_url, uses_bridge, x_handle
+from kb.feeds.registry import normalize_url, uses_channel, x_handle
 from kb.source_types import feed_types
 
 MAX_BYTES = 8 * 1024 * 1024
@@ -143,7 +143,7 @@ def request(url: str, headers: dict | None = None, *, deadline: float | None = N
                             if r.status_code == 304:
                                 return Response(304, url, b'', dict(r.headers))
                             if r.status_code >= 400:
-                                hint = '；服务限流，请稍后重试' if r.status_code == 429 else '；请检查来源或更换订阅桥接'
+                                hint = '；服务限流，请稍后重试' if r.status_code == 429 else '；请检查来源或填写专用订阅链接'
                                 raise FeedError(f'订阅服务返回 HTTP {r.status_code}{hint}')
                             content = bytearray()
                             for block in r.iter_bytes():
@@ -339,11 +339,10 @@ class RSSAdapter:
 
 class SocialAdapter(RSSAdapter):
     def endpoints(self, source: dict, settings: dict) -> list[str]:
-        if source['feed_url']:
-            return [source['feed_url']]
-        handle = x_handle(source['url'])
-        return ([s.replace('{handle}', handle) for s in settings['bridges']]
-                if handle else [source['url']])
+        # X 账号没有 HTTP 端点可言:填了专用订阅链接就用它,没填的那些由通道
+        # 接管(`fetch_source` 开头那一道),压根走不到这里。剩下的是非 X 的
+        # social 订阅(Bluesky 的 RSS 之类),它们的地址就是自己那条。
+        return [source['feed_url'] or source['url']]
 
     def parse(self, body: bytes, url: str) -> list[dict]:
         return parse_feed(body, url, social=True)
@@ -371,10 +370,9 @@ def fetch_source(source: dict, settings: dict, *, unconditional: bool = False,
     # `SocialAdapter.endpoints()` 会把账号主页本身当地址返回,那是一个 HTML 页,
     # 解析必然失败,报出来的还是一句跟真实原因无关的"没有返回 RSS / Atom"。
     #
-    # 只接管「走桥接的那些 X 账号」:填了专用订阅链接的订阅照旧走 HTTP,那是
-    # 桥接全挂时唯一还能采的那批(见 `registry.uses_bridge`)。
-    if x_channels.supports_channels(source['kind']) and uses_bridge(source) \
-            and x_channels.channel_of(settings) != x_channels.BRIDGE:
+    # 只接管「没填专用订阅链接的那些 X 账号」:填了的照旧走 HTTP
+    # (见 `registry.uses_channel`)。
+    if x_channels.supports_channels(source['kind']) and uses_channel(source):
         return x_channels.take(source, settings)
     # 简报同理不走 endpoint + etag:它要两跳(RSS 给期号 → 每期落地页给正文),
     # 而这里只发一次 HTTP。整批在采集开头抓完,这里只取自己那一份(见

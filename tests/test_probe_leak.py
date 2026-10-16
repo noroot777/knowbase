@@ -97,7 +97,8 @@ HANG = "await new Promise(r => setTimeout(r, 600000));"
 
 
 # 起浏览器**之前**那一段异步:真探针在这儿等沙箱后端监听、摆局、读 fixture
-# (`x_channel_probe.mjs` 就是先等本地后端、再 launchShell)。这个 interval 是
+# (X 通道那一组就是先等本地后端、再 launchShell,那段外壳在 `x_channel_kit.mjs`)。
+# 这个 interval 是
 # **ref 的**,所以 node 会真的在这儿等着 —— 调用方死在这一段里正是那个启动窗口。
 # 同一个屏障,但等的方式是**同步**的:node 是单线程的,这期间那个 400ms 的轮询一次
 # 都跑不起来 —— 起浏览器之前那段工作只要是同步的(`execSync` 起个辅助进程、读一份大

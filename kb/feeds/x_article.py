@@ -21,8 +21,8 @@ feedgrab 那边的正文就是那条光秃秃的链接,两条路入库的都是�
   (2026-10-09 用临时 profile 的无头 Chrome 实测)。要正文就只有「登录态 + X 内部
   GraphQL + `x-client-transaction-id` 签名」这一条路 —— 那正是 `x_feedgrab` 的模块
   注释里写明不抄进来的那份维护量。FxTwitter(开源的 FixTweet)替我们背着它。
-②**四条通道通用**。它只认推文 URL,不认我们这一轮用的是浏览器、cookie 还是桥接,
-  所以 `bridge` 那条没有登录态的路也补得上。
+②**三条通道通用**。它只认推文 URL,不认我们这一轮用的是哪一条通道取回来的,
+  所以 feedgrab 那条没有浏览器的路也补得上。
 ③**不开浏览器**。走登录态浏览器读文章页当然也行,但那要在用户自己的浏览器里多开
   一张标签页、等它渲染两三秒,还要押一个 X 改版就会坏的 DOM 选择器;这边是一次
   HTTP、一份结构化 JSON。所以浏览器那条做成**后路**,不做主路。
@@ -30,7 +30,7 @@ feedgrab 那边的正文就是那条光秃秃的链接,两条路入库的都是�
 **它是一个第三方服务,所以有后路**(开源的 FixTweet 跑的公共实例;推文 URL 会发
 给它,内容本来就是公开的)。它关停、限流、改接口的那一天,`browser` / `attach`
 两条通道手里**正好有一个已经登录的浏览器** —— 直接把文章页读出来即可,见下面
-`browser_fetch`。`bridge` / `feedgrab` 没有浏览器,那两条照旧按「补不到就不入库、
+`browser_fetch`。`feedgrab` 没有浏览器,那一条照旧按「补不到就不入库、
 不推进水位」办,下一轮重试。
 
 两个开关各管一条路:`KB_X_ARTICLE_API` 设成空串关掉接口(**手里有浏览器就只走
@@ -218,7 +218,7 @@ def fetch(url: str, *, timeout: float = 0.0) -> dict | None:
         payload = json.loads(resp.body.decode('utf-8', 'replace'))
     except FeedError as e:
         # **只取分号前那一半**:`fetching` 给的是订阅采集的成品文案,后半截
-        # 「请检查来源或更换订阅桥接」在长文语境里是胡话 —— 这一步跟订阅桥接
+        # 「请检查来源或填专用订阅链接」在长文语境里是胡话 —— 这一步跟订阅地址
         # 毫无关系,照原样带出去只会把人指到一个改不出结果的设置上。
         raise ArticleUnavailable(
             f'长文接口没答复:{re.split(r"[;；]", str(e))[0].strip()}') from None
@@ -251,7 +251,7 @@ def fetch(url: str, *, timeout: float = 0.0) -> dict | None:
 
 # **后路**:接口不可用时,在一个已经登录的浏览器里直接把文章页读出来。只有
 # `browser` / `attach` 两条通道手里有浏览器(前者是我们自己起的独立 profile、
-# 后者是用户日常那个),`bridge` / `feedgrab` 走不到这里 —— 它们照旧按
+# 后者是用户日常那个),`feedgrab` 走不到这里 —— 它照旧按
 # 「补不到就不入库、不推进水位」办。设成 '0' 关掉这条后路。
 BROWSER_FALLBACK = os.environ.get('KB_X_ARTICLE_BROWSER', '1') != '0'
 # 文章页等多久。X 的长文是异步渲染的,实测首屏 2~5 秒。
@@ -447,7 +447,7 @@ def merge(entry: dict, got: dict) -> dict:
             'body': '\n\n'.join(p for p in parts if p)}
 
 
-def fill(entries: list[dict], *, session=None, links_only: bool = False,
+def fill(entries: list[dict], *, session=None,
          deadline: float | None = None, should_stop=None) -> tuple[list[dict], str]:
     """把这一批里的长文正文补上。返回 (留下的条目, 没补全的原因)。
 
@@ -456,8 +456,7 @@ def fill(entries: list[dict], *, session=None, links_only: bool = False,
     那几条**本轮不入库** —— 入库了下一轮的重试也更新不了它们,留着等于白等。
 
     `session` 是一个还活着的 CDP 会话(`browser` / `attach` 两条通道手里有),
-    接口不可用时拿它走后路。给 None 就只有接口这一条路(桥接、feedgrab)。
-    `links_only` 见 `needs_article`:桥接那一档只认正文里明写的文章地址。
+    接口不可用时拿它走后路。给 None 就只有接口这一条路(feedgrab)。
 
     `deadline`(整轮预取的绝对截止时刻)和 `should_stop` 由两条预取通道按它们
     自己那份预算传进来,**在每一条新请求之前各问一次**(见 `_over`):超限或
@@ -468,7 +467,7 @@ def fill(entries: list[dict], *, session=None, links_only: bool = False,
         return [_strip_hint(e) for e in entries], ''
     kept, missed, fails, halt = [], 0, 0, ''
     for entry in entries:
-        want = needs_article(entry, links_only=links_only)
+        want = needs_article(entry)
         # **每一条之前都重新问一次**,不是进这个函数时问一回:停止请求和预算
         # 都可能在这一批跑到一半时才成立,而这一批正是几十次串行请求。
         if want and not halt:

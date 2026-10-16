@@ -16,6 +16,9 @@ from datetime import datetime
 
 from kb import pipeline_open as _open
 from kb.config import DATA_DIR
+# 留档口径(留几天、超了削什么)在它自己那个模块里;`history_keep_days` 是面板那句
+# 「保留最近 N 天」的公开入口,这里只是过一道(端点走 `kb.pipeline`)。
+from kb.pipeline_retention import prune_history, shed_bulk, history_keep_days as history_keep_days
 from kb.pipeline_persist import (
     _SEQ_GEN,
     _dump_bytes,
@@ -43,9 +46,6 @@ _STATE_FILE = DATA_DIR / "pipeline_state.json"
 # 「已跳过」,该补的那几条一个都没抓(见 docs/decisions/retry-scope.md)。拿一条
 # 不可恢复的路径去换一个只读展示不值,所以那份文件的形状一个字节都没动,代价是
 # 最新那一轮在两处各存一份(约 6 KB),有意的冗余。
-_HISTORY_KEEP = 20
-
-
 def _history_file():
     """历史文件就在 `_STATE_FILE` 旁边。
 
@@ -147,8 +147,8 @@ _persist_error = ''
 # (2026-09-30 第 3 轮审查实测)。只留最近几轮:够覆盖"等的那一轮刚被接替"这个
 # 窄窗口,又不让状态无限长。
 _finished: dict[str, dict] = {}
-# 跟落盘那份历史的 `_HISTORY_KEEP` **不是一个数,也不该统一**:这一份只为"等的那
-# 一轮刚被接替"这个窄窗口,几轮就够;那一份是给人翻的,留得住两三周才有用。
+# 跟落盘那份历史的 `_HISTORY_DAYS` **不是一回事,也不该统一**:这一份只为"等的那
+# 一轮刚被接替"这个窄窗口,几轮就够;那一份是给人翻的,按天留。
 _FINISHED_KEEP = 8
 
 
@@ -391,7 +391,9 @@ def _save_history() -> None:
     runs = [r for r in _history_rounds_strict()
             if not (r.get("run_id") and r["run_id"] in superseded)]
     runs.insert(0, record)
-    del runs[_HISTORY_KEEP:]
+    # **窗口决定留哪几轮,体量只削重物、不删记录**(`shed_bulk`)—— 三天之内的每一轮
+    # 都还查得到它的结果和它的红,代价是病态那一档里老轮次的日志正文和明细长清单。
+    runs = shed_bulk(prune_history(runs))
     _write_atomic(_history_file(), _dump_bytes({"runs": runs}))
 
 

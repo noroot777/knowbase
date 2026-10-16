@@ -111,6 +111,12 @@ CREATE TABLE IF NOT EXISTS daily_carried (
   day        TEXT NOT NULL,   -- 带走它的那一份日报的日期;'#seed' = 启用账本时一次性盖的章,
                              -- '#drop' = 人工从队列里丢弃(见 kb/daily_carry.py 的 DROP_DAY)
   carried_at TEXT NOT NULL,
+  -- 当初送进模型的那一份素材的指纹(kb.daily_gain.material_sig)。可空:老行的空值
+  -- 是「没记下」,不是「和现在一样」(那一档面板报「不知道」,不报 0)。面板那个
+  -- 「再出一份能多带进来多少」靠它认出"带走过、但带走的是另一个版本"
+  -- (正文后来补全了、摘要刚提取出来)。
+  -- 老库补列在 store_migrate.migrate_daily_sig。
+  material_sig TEXT,
   PRIMARY KEY (path, day)
 );
 
@@ -234,6 +240,7 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     mig.migrate_promo(conn)
     mig.migrate_no_body(conn)
     mig.migrate_fav_anchor(conn)
+    mig.migrate_daily_sig(conn)
     return conn
 
 

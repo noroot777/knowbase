@@ -53,6 +53,8 @@ from kb import daily_carry as carry
 from kb import daily_refs
 from kb.config import PRIMARY_SOURCE_NAMES, VAULT_ROOT
 from kb.daily_carry import STAMP, commit_lock, mark_carried, parse_ts, release
+from kb.daily_gain import material_sig, pending  # noqa: F401  (搬出去的两个口径,
+# `daily.pending` / `daily.material_sig` 这类既有写法照旧可用;见 daily_gain 的说明)
 from kb.daily_prompt import PROMPT, late_section
 from kb.daily_carry import UNCARRIED as _UNCARRIED
 # 账本那半拆到 daily_carry 了,这个名字这边自己不用、只为让 `daily.SEED_DAY`
@@ -142,8 +144,17 @@ def _label_window(since: datetime, until: datetime) -> str:
             else f"{since:%Y-%m-%d %H:%M} 至 {until:%Y-%m-%d %H:%M}")
 
 
+# `mine_at` / `mine_sig` = 「**正在写的那一份**自己上一版带走它的时刻,和当时送进
+# 模型的那一版的指纹」。WHERE 里那道 `UNCARRIED` 已经把别的日报盖过章的排除干净了,
+# 所以还查得到章的只可能是今天那一份自己的 —— 于是**同一次读**里就分得开三件事:
+# 「它一份日报都没进过」(`mine_at` 空)、「今天带走过、而且带走的就是现在这一版」、
+# 「今天带走过,但那是另一个版本」。`pending` 不必再补一次查询去扣减或比对(两个
+# 读取时刻拼出来的数会在别人中途提交时自相矛盾,口径见 `pending` 的说明)。
 _FIELDS = ('SELECT d.path,d.source,d.title,d.account,d.published,d.url,d.summary,'
-           'd.indexed_at FROM documents d WHERE ')
+           'd.indexed_at,'
+           ' (SELECT c.carried_at FROM daily_carried c WHERE c.path=d.path) AS mine_at,'
+           ' (SELECT c.material_sig FROM daily_carried c WHERE c.path=d.path) AS mine_sig'
+           ' FROM documents d WHERE ')
 
 
 def _scope() -> tuple[str, list]:
@@ -158,6 +169,11 @@ def _scope() -> tuple[str, list]:
 
 def _enrich(conn, row, when: datetime | None, late: bool) -> dict:
     doc = dict(row)
+    # `mine_at` / `mine_sig` 只给 `pending` 算「再生成一次会多带进来几条」,素材
+    # 字典的形状不跟着变 —— 它还得喂给 `material_sig`,**多一个键就多一份指纹**,
+    # 那样取材那一刻算出来的和事后比对时算出来的永远对不上。
+    doc.pop('mine_at', None)
+    doc.pop('mine_sig', None)
     doc['when'] = when
     doc['late'] = late
     doc['entities'] = [e[0] for e in conn.execute(
@@ -185,8 +201,12 @@ def _select(conn, since: datetime, until: datetime,
     比大小,见 `parse_ts`。粗筛之后只剩两三天的量,排序开销可以忽略。
 
     两个桶都只看**账本里没有**的条目,所以这个函数同时是 `collect`(真取材)和
-    `pending`(面板上"又攒了多少")的唯一口径 —— 两处各判一遍的话必然各漂各的。
-    返回的补录候选已经排好序:`[:LATE_ITEMS]` 就是该带走的那一批。
+    `pending`(面板上"再出一份能多带进来多少")的唯一口径 —— 两处各判一遍的话
+    必然各漂各的。返回的补录候选已经排好序:`[:LATE_ITEMS]` 就是该带走的那一批。
+
+    行上多带两列 `mine_at` / `mine_sig`(见 `_FIELDS`):**正在写的那一份**自己上一版
+    什么时候带走的它、带走的是哪一版。`collect` 不读它们,`pending` 靠它们在同一次
+    读里把「一份日报都没进过」「带走过、还是同一版」「带走过、但版本变了」分开。
     """
     where, args = _scope()
     args = [*args, day]
@@ -300,35 +320,6 @@ def _ensure_ledger(conn, first_days: int = FIRST_DAYS,
                    now: datetime | None = None) -> str:
     """启用账本那一次的一次性盖章(判据和理由都在 `daily_carry.seed_locked`)。"""
     return carry.ensure_ledger(conn, *_seed_args(first_days, now))
-
-
-def pending(first_days: int = FIRST_DAYS,
-            now: datetime | None = None) -> dict:
-    """队列里还积着多少没上报过的素材 —— 面板的 tooltip 用,零模型调用。
-
-    **这个数不上按钮。** 按钮上报的是「今天第 N 次抓取抓了多少」,那是抓取自己的
-    事实(`kb.fetch_rounds`),跟取材结果不是一回事。这里答的是另一个问题:一共还
-    积着多少一份日报都没进过的。
-
-    **`day=''` ⇒ 一个章都不排除,而且只读这一次。** `_select` 平时要放过"正在写
-    的那一份自己盖的章"(重新生成时它上一版带走的内容必须重新可选),而这里问的是
-    "进过**任何**一份日报没有"。传当天日期的话今天那份刚带走的内容会被重新数成
-    新素材,面板上永远有一个消不掉的数字。
-    **也不许再补一次「今天那份带走了谁」的查询去扣减** —— 账本是**允许**出现
-    「日报文件写好了、记账没写上」的(那一档故意倒向"多报一遍",见 `daily_carry`),
-    拿它当"今天这份里有什么"的完整事实就会凭空报出新增;何况候选和扣除项来自两
-    个读取时刻,中间别人提交一次,算出来的是两个版本拼起来的数。
-    """
-    from kb import store
-    since, until = next_window(first_days, now)
-    conn = store.connect()
-    try:
-        _ensure_ledger(conn, first_days, until)
-        picked, late = _select(conn, since, until, '')
-    finally:
-        conn.close()
-    return {'since': since, 'until': until,
-            'items': len(picked), 'late': len(late)}
 
 
 def _material(items: list[dict]) -> str:
@@ -550,7 +541,11 @@ def generate(since: datetime | None = None, until: datetime | None = None,
             _write(path, _page(since, until, mat, body, str(picked),
                                sync_issues, taken))
             try:
-                out['carried'] = mark_carried(conn, day, [d['path'] for d in shown])
+                # 指纹按**真送进模型的那一份**算(`shown` 就是上面拼 prompt 用的
+                # 那批),下一次面板问"再生成会不会多出东西"时和现在这一版比。
+                out['carried'] = mark_carried(
+                    conn, day, [d['path'] for d in shown],
+                    {d['path']: material_sig(d) for d in shown})
             except (sqlite3.Error, OSError) as e:  # 日报已经在盘上了,别带崩这一轮
                 out['carry_error'] = str(e)
                 if progress:

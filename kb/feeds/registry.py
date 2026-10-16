@@ -2,7 +2,7 @@
 
 这个模块被好几块的硬约束管着,改之前先读对应那一份 `docs/decisions/`:默认订阅补种
 (`defaults-backfill.md`)、新订阅的历史下界(`history-depth.md`)、语言判定与翻译队列
-(`translate.md`)、`uses_bridge` 与通道就绪(`x-channels.md`)。
+(`translate.md`)、`uses_channel` 与通道就绪(`x-channels.md`)。
 """
 from __future__ import annotations
 
@@ -120,7 +120,7 @@ _ADDED_COLUMNS = {
         # 时标记留在原处,下一轮导出会再来一次。
         ('extract_stale', 'INTEGER NOT NULL DEFAULT 0'),
         # 「**哪一次业务抓取**头一回发现这一条」(`fetch_rounds.round_key()`)。
-        # 导出那一步把它当成回执里的抓取身份交上去,药丸背后那句分解据此分开
+        # 导出那一步把它当成回执里的抓取身份交上去,tooltip 背后那句分解据此分开
         # 「这一次新抓到的」和「之前抓到、这一次才补导进来的」。
         # **老库里的条目补成空串 = 说不清**,不是「不是本次」:它们入库时压根
         # 没有这个概念,硬塞一个值等于凭空造事实。空串落在 `unsure` 那一档,
@@ -383,9 +383,9 @@ def get_settings(kind: str) -> dict:
     # 地方读它们。**键一个都不删**(元规则「只增不减」):盘上存量里就有,摘掉
     # 之后另一条分支或者还没重启的进程读到的就是一份缺字段的设置。
     default = {'enabled': False, 'interval_minutes': feed_types()[kind].interval_minutes,
-               'next_run': 0, 'bridges': []}
+               'next_run': 0}
     if feed_types()[kind].adapter == 'social':
-        # X 的取法是个设置,默认仍是桥接 —— 存量库里这一段压根没有这个键,
+        # X 的取法是个设置 —— 存量库里这一段压根没有这个键,
         # 读出来必须和升级前逐字同义。
         from kb.feeds import x_channels
         default |= {'x_channel': x_channels.DEFAULT, 'x_feedgrab_bin': '',
@@ -393,9 +393,13 @@ def get_settings(kind: str) -> dict:
     settings = {**default, **(json.loads(row['value']) if row else {})}
     if 'x_channel' in settings:
         from kb.feeds import x_channels
-        # 存量里写着的可能是个退役名,现在就翻成现用名:各处读设置的地方
-        # 都从这里拿,翻译留在这一层就只有一份口径(见 `x_channels.resolve`)。
-        settings['x_channel'] = x_channels.resolve(settings['x_channel'])
+        # 归一留在这一层:退役名翻成现用名,两条可执行文件位置去掉首尾空白。
+        # **各处读设置的地方都从这里拿**,所以口径只有一份(`x_channels.config_of`)。
+        # 放在面板那个 HTTP 入口里不够 —— 采集(`sync.collect` → `x_channels.prefetch`)
+        # 读的是同一份设置的**原值**,于是「面板比的、面板跑的」和「同步真正跑的」
+        # 会是两个文件:审查实测,存着末尾带一个空格的那份、面板发来不带空格的,
+        # 面板这边判"对得上"、检查也说就绪,而同步执行的是另一个可执行文件。
+        settings |= x_channels.config_of(settings)
     return _upgrade_settings(kind, settings)
 
 
@@ -404,13 +408,6 @@ def save_settings(kind: str, values: dict) -> dict:
     cur.update(values)
     if not isinstance(cur['interval_minutes'], int) or not 15 <= cur['interval_minutes'] <= 10080:
         raise ValueError('同步间隔须在 15 分钟至 7 天之间')
-    bridges = cur.get('bridges', [])
-    if not isinstance(bridges, list) or len(bridges) > 5:
-        raise ValueError('最多设置 5 个 X 订阅桥接地址；留空时账号等待配置专用链接')
-    for value in bridges:
-        if value.count('{handle}') != 1:
-            raise ValueError('桥接地址须包含一个 {handle}，用于替换账号名')
-        normalize_url(value.replace('{handle}', 'example'))
     if feed_types()[kind].adapter == 'social':
         from kb.feeds import x_channels
         x_channels.validate(cur)
@@ -419,12 +416,11 @@ def save_settings(kind: str, values: dict) -> dict:
     return cur
 
 
-def uses_bridge(source: dict) -> bool:
+def uses_channel(source: dict) -> bool:
     """这条订阅的内容是不是要走「X 通道」拿(而不是它自己那条 feed 地址)。
 
-    名字沿用桥接那一版:判据没变 —— social 来源 + 没填专用订阅链接 + 是个 X
-    账号。通道化之后它回答的是"这条订阅受 X 通道设置管吗",桥接只是其中一条
-    通道(见 `kb.feeds.x_channels`)。
+    判据:social 来源 + 没填专用订阅链接 + 是个 X 账号。
+    (原名 `uses_bridge` —— 桥接那一档删掉之后名字就只剩误导了。)
     """
     return (feed_types()[source['kind']].adapter == 'social' and not source['feed_url']
             and bool(x_handle(source['url'])))
@@ -433,20 +429,15 @@ def uses_bridge(source: dict) -> bool:
 def configuration_error(source: dict, settings: dict) -> str:
     """这条订阅现在能不能开工。空串 = 能。
 
-    判据按当前通道走:桥接要有模板,feedgrab 要有可执行文件和登录态,独立
-    profile 要在那里登录过,直连那档要有一个开着调试开关的浏览器。判断本身
-    一律交给 `x_channels.readiness`,这里不自己再写一份 —— 新增一条通道时
-    这个函数一个字都不用改。**问的必须是当前通道**——按桥接判的话,
-    选了浏览器通道的用户会看到一片"请填写 X 订阅桥接",而那个设置跟他这一轮
-    采集毫无关系。
+    判据按当前通道走:feedgrab 要有可执行文件和登录态,独立 profile 要在那里
+    登录过,直连那档要有一个开着调试开关的浏览器。判断本身一律交给
+    `x_channels.readiness`,这里不自己再写一份 —— 新增一条通道时这个函数一个
+    字都不用改。**问的必须是当前通道**:按别的档判的话,用户会看到一条跟他这
+    一轮采集毫无关系的「待配置」。
     """
-    if not uses_bridge(source):
+    if not uses_channel(source):
         return ''
     from kb.feeds import x_channels
-    if x_channels.channel_of(settings) == x_channels.BRIDGE:
-        if not settings['bridges']:
-            return '待配置：请在 X 订阅桥接设置中填写可用模板，或编辑账号的专用订阅链接'
-        return ''
     ready, why, _hint = x_channels.readiness(settings)
     return '' if ready else f'待配置：{why}'
 
@@ -565,7 +556,7 @@ def merge_config(source_id: int, patch: dict, conn=None) -> None:
 
 def put_items(source: dict, entries: list[dict], conn=None) -> int:
     # 这一条是哪一次业务抓取发现的。**口径只有一份**(`fetch_rounds.round_key`),
-    # 别在这里另写一遍读 `_state` 的逻辑 —— 两份迟早漂,而漂的后果是药丸把本次
+    # 别在这里另写一遍读 `_state` 的逻辑 —— 两份迟早漂,而漂的后果是 tooltip 把本次
     # 新抓到的算成补导的。管道没在跑时它是空串 = 说不清,照旧入库。
     from kb.fetch_rounds import round_key
 

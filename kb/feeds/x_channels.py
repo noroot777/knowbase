@@ -1,23 +1,26 @@
 # -*- coding: utf-8 -*-
-"""X 采集通道:同一批账号,四条互斥的取法。选哪条是一个设置。
+"""X 采集通道:同一批账号,三条互斥的取法。选哪条是一个设置。
 
 **硬约束在 `docs/decisions/x-channels.md` 第一节 —— 改这块之前先读那一份。**
 
 | 通道 | 用谁的身份读 X | 要准备什么 | 边界精度 |
 |---|---|---|---|
-| `bridge`  | 桥接实例维护者的 | 一个返回 RSS 的 URL 模板 | 由 feed 自己给 |
 | `feedgrab`| 一份 X cookie    | 装 feedgrab + 跑一次 login | 天 |
 | `browser` | 你自己的登录态   | 在独立 profile 里登录一次 | 分钟 |
 | `attach`  | 你自己的登录态   | 在日常浏览器里开一次调试开关 | 分钟 |
+
+**`bridge`(第三方 RSS 桥接)这一档已经删掉**:公共实例常年不稳,而三条登录态
+通道都已经能无人值守跑。它只以**退役别名**的形式活着(见下面 `_RETIRED`)——
+存量设置里写着 `bridge` 的,解析成现在的默认档。
 
 **后两条的差别是「谁的浏览器」**:`browser` 我们自己起一个独立 profile 的无头
 Chrome(所以要在那里面单独登录一次,但不依赖用户在不在);`attach` 直连用户
 日常那个浏览器(登录态现成,但只在它开着、而且开了远程调试时能用)。对照表和
 那条开关的代价写在 `kb/feeds/cdp_attach.py` 的模块注释里。
 
-**通道只管「走桥接的那些 X 账号」**。填了专用订阅链接(`feed_url`)的订阅照旧走
-HTTP、不受这里影响 —— 这条语义是现成的,而且是桥接全挂时唯一还能采的那批
-(见 `registry.uses_bridge`);非 X 的 social 订阅(Bluesky 的 RSS 之类)同理。
+**通道只管「没填专用订阅链接的那些 X 账号」**。填了 `feed_url` 的订阅照旧走
+HTTP、不受这里影响(见 `registry.uses_channel`);非 X 的 social 订阅
+(Bluesky 的 RSS 之类)同理。
 
 **后两条通道不是 HTTP feed**,所以它们不走 `fetch_source` 里那套 endpoint /
 etag / 公网校验,而是在采集阶段开始时**整批预取**一次、再按订阅各取自己那份:
@@ -40,30 +43,35 @@ from zoneinfo import ZoneInfo
 from kb.config import DATA_DIR
 from kb.source_types import feed_types
 
-BRIDGE, FEEDGRAB, BROWSER, ATTACH = 'bridge', 'feedgrab', 'browser', 'attach'
-DEFAULT = BRIDGE
-CHANNELS = (BRIDGE, FEEDGRAB, BROWSER, ATTACH)
+FEEDGRAB, BROWSER, ATTACH = 'feedgrab', 'browser', 'attach'
+DEFAULT = BROWSER
+CHANNELS = (BROWSER, ATTACH, FEEDGRAB)
 LABELS = {
-    BRIDGE: 'RSS 桥接',
     FEEDGRAB: 'feedgrab(cookie)',
     BROWSER: '独立 profile 的登录态',
     ATTACH: '我日常用的浏览器',
 }
 HINTS = {
-    BRIDGE: '由第三方桥接服务把 X 转成 RSS。不占用你的账号,但公共实例常年不稳。',
     FEEDGRAB: '用一份 X cookie 调 X 自己的接口。建议用小号:拿 cookie 抓取违反 X 服务条款,'
               '账号有被限制的可能。',
+    # **每一档的说明都要能单独读懂,不许写「风险同上」。** 面板上这三行是一张
+    # 清单,顺序由 `CHANNELS` 定,「上」指谁跟着顺序变 —— 把 browser 挪到首项那
+    # 一次,它那句「风险同上」当场指向了空气(审查发现)。
     BROWSER: '在一个独立浏览器 profile 里登录一次,之后无头复用这份登录态。'
-             '用的是你登录的那个账号,风险同上,而且封的是这个号。',
+             '用的是你自己那个账号:拿登录态抓取违反 X 服务条款,'
+             '这个号有被限制的可能。',
     ATTACH: '直连你正在用的那个 Chrome/Edge,用它里面现成的登录态,不必再登录一次。'
             '要先在那个浏览器里开一次远程调试开关 —— 开着的时候本机任何程序都能'
             '连上它(连同里面所有站点的登录态)。那一勾是持久的,关掉浏览器只是'
             '停掉这一次监听、不等于撤销:不想留着就回 '
             'chrome://inspect/#remote-debugging 把它取消掉。'
-            '只在它开着时能抓,而且每次连接都要你点一下「允许」;账号风险同上。',
+            '只在它开着时能抓,而且每次连接都要你点一下「允许」。'
+            '用的也是你自己那个账号:拿登录态抓取违反 X 服务条款,'
+            '这个号有被限制的可能。',
 }
 # 退役名 → 现用名。一个都不许删(见模块注释)。
-_RETIRED: dict[str, str] = {}
+# `bridge` = 删掉的那条第三方 RSS 桥接:存量设置里写着它的,落到现在的默认档。
+_RETIRED: dict[str, str] = {'bridge': BROWSER}
 
 # 浏览器 profile 和 feedgrab 的工作目录都放在 data/ 下:它们装着登录态,
 # 跟着数据目录走(KB_DATA_DIR 指到别处时一起搬),不进版本库。
@@ -90,6 +98,26 @@ def label(name: str) -> str:
 
 def channel_of(settings: dict) -> str:
     return resolve(settings.get('x_channel', DEFAULT))
+
+
+def config_of(settings: dict) -> dict:
+    """这一份设置里**动作真正会用到**的那几项,也就是它的身份。
+
+    面板把它眼前那一份一起发在动作请求里,三个动作端点各自核对一次
+    (`intake_api._x_act`)——「我按的这颗按钮,跑的是不是我正看着的这一份」只能
+    在**服务端**回答:浏览器那边的「已保存」是本页自己的缓存,证不了此刻库里
+    存着的还是它(另一个标签页、另一个客户端改一下就不是了;审查实测:第二页把
+    路径改成一个不存在的文件并保存,第一页不刷新直接点「检查连接」,检的是第二
+    页那条路径,而第一页输入框里仍是原来那条)。
+
+    **口径只有这一处**:通道名过 `resolve`(存量退役名和面板上的现用名要能对上),
+    两条路径去掉首尾空白(面板发出去之前也 trim 过)。**判的是「动作会用到的那
+    几项」,不是整份设置** —— `enabled`、同步间隔这些改了不影响这一次动作跑成
+    什么样,把它们算进身份只会让用户在另一处改个无关开关就被这边拒绝。
+    """
+    return {'x_channel': channel_of(settings),
+            'x_feedgrab_bin': (settings.get('x_feedgrab_bin') or '').strip(),
+            'x_chrome_path': (settings.get('x_chrome_path') or '').strip()}
 
 
 def supports_channels(kind: str) -> bool:
@@ -220,45 +248,7 @@ def since_floor(day: str) -> str:
 def targets(sources: list[dict], settings: dict) -> list[dict]:
     """这一轮里该由非 HTTP 通道接管的订阅。"""
     from kb.feeds import registry as reg
-    if channel_of(settings) == BRIDGE:
-        return []
-    return [s for s in sources if reg.uses_bridge(s) and _handle(s)]
-
-
-def fill_bridge(source, settings, result):
-    """桥接通道的 X 长文补全(由 `sync._fetch_with_budget` 在取完内容之后调一次)。
-
-    另三条通道在**预取**里就补过了(`x_channels.prefetch` → `harvest` →
-    `x_article.fill`,那边手里还有一个浏览器会话可以当后路);桥接这条走的是
-    HTTP + etag 那一套、压根不经过预取,所以要在这儿单独接一次 —— 不接的话它
-    的长文只存下那条文章链接当正文,而 `put_items` 是 `ON CONFLICT DO NOTHING`,
-    下一轮重抓也更新不了它,那一篇永久只有一个链接。
-
-    **补不到的那几条本轮不入库,而且这一轮的 etag / modified 一个都不存**:
-    存了的话下一轮的条件请求命中 304、整份 feed 一条都不返回,被扣下的那几条
-    再也没有第二次机会 —— 桥接没有水位可以留在原处,不存 validators 是它这条
-    路上唯一等价的扣留手段。`resolved_url` 照旧存着:它不参与条件请求的判定
-    (那一步要的是 etag/modified),清掉只会让下一轮多付一次重定向。
-
-    只认 `links_only`(见 `x_article.needs_article`):桥接给的是推文文本,长文
-    在那儿的形态只有"正文就是展开后的文章地址"一种。按空正文也问一遍的话,一轮
-    几十条纯图推文各买一次询问,换回来的都是"它没有长文"。
-    """
-    # 延迟 import,方向和 registry 那一侧对称:`registry.get_settings` 也是在
-    # 函数里 import 本模块,顶层互相 import 会成环。
-    from kb.feeds import registry as reg
-    from kb.feeds import x_article
-    entries, validators = result
-    if not entries or not supports_channels(source['kind']) \
-            or not reg.uses_bridge(source) \
-            or channel_of(settings) != BRIDGE:
-        return result
-    kept, note = x_article.fill(entries, links_only=True)
-    if not note:
-        return kept, validators
-    held = dict(validators)
-    held.update({'etag': '', 'modified': '', 'note': note})
-    return kept, held
+    return [s for s in sources if reg.uses_channel(s) and _handle(s)]
 
 
 def prefetch(sources: list[dict], settings: dict, *, since: str = '',
@@ -332,8 +322,8 @@ def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
         from kb.feeds.fetching import CollectionBudgetExceeded
         raise CollectionBudgetExceeded(note)
     # 这条路没有 etag / last-modified 可言,把三个校验字段原样留着:
-    # 写回空串会把这条订阅之前走 HTTP 时攒下的缓存信息抹掉,切回 bridge
-    # 通道时就要白拉一次全量。
+    # 写回空串会把这条订阅之前走 HTTP 时攒下的缓存信息抹掉,等它哪天又填了
+    # 专用订阅链接、走回 HTTP 时就要白拉一次全量。
     meta = {k: source.get(k, '') for k in ('etag', 'modified', 'resolved_url')}
     # 水位作为"要并进 config 的补丁"交回去,由存盘那一步和条目同一个事务提交
     # (见 `watermark_patch`)。这里是工作线程,当场写盘就和条目脱钩了。
@@ -368,8 +358,6 @@ def readiness(settings: dict) -> tuple[bool, str, str]:
     它自己那颗按钮,没有文字可给。
     """
     channel = channel_of(settings)
-    if channel == BRIDGE:
-        return bool(settings.get('bridges')), '', ''
     if channel == FEEDGRAB:
         from kb.feeds import x_feedgrab
         try:
@@ -436,15 +424,8 @@ def check(settings: dict) -> tuple[bool, str]:
     和 `readiness` 分成两个函数是因为代价差着三个数量级:那个每次刷新面板都
     调,这个是用户点「检查连接」才走的 —— 会真起一个 Chrome、真连一次用户那个
     浏览器(那时他可能还要点一下授权弹窗),或者真跑一次 `feedgrab doctor`。
-    桥接通道没有"连一次"可言 —— 它的健康状况只有在真抓的时候才知道(桥接实例
-    挂没挂、限流没限流),所以这里直接说清楚。
     """
     channel = channel_of(settings)
-    if channel == BRIDGE:
-        if not settings.get('bridges'):
-            raise ValueError('桥接通道还没有填任何桥接地址')
-        return True, f'已配置 {len(settings["bridges"])} 个桥接地址。'\
-                     '桥接实例是否可用要等真抓一次才知道'
     if channel == FEEDGRAB:
         from kb.feeds import x_feedgrab
         return x_feedgrab.doctor(settings.get('x_feedgrab_bin', ''),

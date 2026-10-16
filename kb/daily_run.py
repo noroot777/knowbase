@@ -446,7 +446,7 @@ def _sync_round(stages: list[str], crawl_filter: dict | None, label: str,
     bad = [f'{name} {s.get("detail") or "失败"}'
            for name, s in graded if s.get('status') == 'error']
     # skipped / stopped = 这个阶段该做的事一件没做,**不能跟着算成功**。
-    # 2026-09-30 实测:51 个大V账号全都缺 X 桥接配置,crawl 因此整个落 skipped
+    # 2026-09-30 实测:51 个大V账号全都缺 X 通道配置,crawl 因此整个落 skipped
     # (「待配置 51 个」),而这里只数 error —— 那一轮 social 通道报的是绿色的
     # 「同步完成」,日报里那行只剩下 extract 的结果,"一条都没抓到"这件事连同
     # 原因一起看不见。超预算/被停止时管道落 stopped,同理。

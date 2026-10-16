@@ -55,7 +55,7 @@ def _start(one: dict) -> dict:
     一样取最早、另一样留着物理首行的,折出来就是一份自相矛盾的事实(日期是后开
     那一条的、时刻是先开那一条的),而「今天第几次」正是按 `day` 筛的 —— 第 2 轮
     审查实测:23:59 开的那一轮跨过零点,`day` 落在 16 日而 `at` 写着 15 日 23:59,
-    于是今天还没同步过、药丸却说「第 1 次抓取 · +3 条」,今天真的第一次同步之后
+    于是今天还没同步过、 tooltip 却说「第 1 次抓取 · +3 条」,今天真的第一次同步之后
     它又变成「第 2 次」。
     """
     return {'day': str(one.get('day') or ''), 'at': str(one.get('at') or ''),
@@ -214,7 +214,7 @@ def _fold(lines) -> tuple[list[dict], bool, set[str] | None]:
 
 
 def answer(rounds: list[dict], held: set[str], day: str) -> dict | None:
-    """这一天的事实该怎么答 —— `fetch_rounds.today()` 那颗药丸的全部算术。
+    """这一天的事实该怎么答 —— `fetch_rounds.today()` 那段 tooltip 的全部算术。
 
     输入是折好的轮次、**此刻还有谁扣着行没落盘**(`held`,业务身份)和今天是哪一天;
     输出是那七个字段,或者 `None` = 不可确认。I/O、锁、凭证怎么读都在那一边,这里
