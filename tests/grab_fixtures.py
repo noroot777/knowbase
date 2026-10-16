@@ -40,6 +40,12 @@ def tweet_payload(**tweet) -> bytes:
     return json.dumps({'code': 200, 'tweet': {**base, **tweet}}).encode()
 
 
+#: 一段**确认得了**的正文:`grab_page.body_confirmed` 要求「不重复的字数」过得了
+#: 提取器那道 400 的门槛。保存类用例原先用两个字的 `'正文'`,而那一份在新判据下
+#: 正是「看不出是正文」的那一档 —— 夹具要像真条目(真条目一定过完了那六道)。
+BODY = '这是一段确认得了的正文，它说的东西足够多，不是同一句话在复读。' * 14
+
+
 def page_html(*, title='Hello world', body=None, extra='') -> str:
     # 段落要够长:`readable.MIN_CHARS` 是 400,比它短的一律算「没找到正文」。
     paras = body or ['这是正文第一段，长度要过得了提取器那道门槛。' * 12,

@@ -269,11 +269,15 @@ def known(url: str) -> dict | None:
     `classify` 的注释里。
     """
     with reg.db() as c:
-        row = c.execute('SELECT kind,title,path,url,content_hash,exported_hash'
+        row = c.execute('SELECT key,kind,title,author,published,path,url,body,content_hash,exported_hash'
                         ' FROM feed_items WHERE url=? LIMIT 1', (url,)).fetchone()
     if not row:
         return None
     seen = dict(row)
+    # **「写进去了」和「写进去的是一篇文章」是两件事。** 后者由内容自己回答,
+    # 随时重算得出(`body_confirmed`),所以不必在表上多存一列标记 —— 老库里
+    # 那些以前漏放存下的坏内容也因此一样救得回来(见 `replace`)。
+    seen['content_ok'] = grab_page.body_confirmed(seen['body'])
     seen['exported'] = bool(seen['path'] and seen['exported_hash']
                             and seen['exported_hash'] == seen['content_hash'])
     seen['stored'] = _stored(seen['path'])
@@ -290,6 +294,11 @@ def owing(seen: dict) -> str:
     """
     if not seen:
         return '这条还没收进来'
+    if not seen.get('content_ok'):
+        # **排在最前面:这一条欠的不是哪一步,是内容本身。** 后面几步全做完也
+        # 只是把一份看不出是正文的东西写进了知识库(报告原话:已导出、已索引
+        # 不是内容质量证明)。出路是重抓 + 条件替换,不是再跑一轮导出。
+        return '收下的那一份看不出是正文'
     if not seen.get('exported'):
         return '还没写成 vault 里那一篇'
     if not seen.get('stored'):
@@ -297,6 +306,52 @@ def owing(seen: dict) -> str:
     if not seen.get('indexed'):
         return '还没进全文索引'
     return ''
+
+
+def replace(seen: dict, entry: dict) -> bool:
+    """库里那一份看不出是正文 → **用这次重抓到的内容把它换掉**。返回换没换成。
+
+    这是 `DO NOTHING` 之下唯一的出路。手动收录这条路上「错存」有两种来路:以前
+    那一版判据漏放的(1832 字的登录提示页实测过)、以及那一次抓到的本来就是一道
+    我们认不出的墙。两种都不可能靠「再投一次」自愈 —— 查重会先命中,
+    `put_items` 一个字节都不会动,于是用户永远拿到同一句「已经收过了」。
+
+    **只在确认得了的内容上替换**(调用方保证:能走到这里的 `entry` 刚过完
+    `gate_reason` 那六道),而且**判据待在 UPDATE 自己的 WHERE 里** ——
+    `content_hash` 要还是我们读到的那一版;`rowcount == 0` 说明这期间别人已经
+    动过它(一轮正文补抓、一次存量复查、另一条并发投递),那时不覆盖是对的,
+    不是失败(元规则「0 行不是失败」)。
+
+    **写哪几列照 `fulltext._save` 那一份口径**(元规则「口径只有一份」),它把
+    换正文该连带的事都想过了:`content_hash` 跟着正文变(导出闸门是
+    `exported_hash<>content_hash`,所以**不许清 `exported_hash`** —— 那是「这一篇
+    入没入过库」的事实来源,清掉会让面板上一篇正读得好好的内容连标题一起消失);
+    `extract_stale=1` 留一个待办(知识库里那份摘要、主题、实体是按旧内容算的);
+    译文整组作废重排(旧译文译的是那张墙)。`content_kind` 不动 —— 一条推文换了
+    正文还是推文。
+    """
+    if not seen or not seen.get('key') or not entry.get('body'):
+        return False
+    from kb.feeds import fulltext
+
+    title = entry.get('title') or seen['title']
+    body = entry['body']
+    if body == seen.get('body') and title == seen.get('title'):
+        # **「一样」按内容比,不按 hash 比。** 两处的 hash 口径本来就不同
+        # (`put_items` 哈希的是整份条目的 json,`fulltext.body_hash` 哈希的是
+        # 正文),拿它们相等当「没变」会让每次重抓都白推一轮导出和索引。
+        return False
+    digest = fulltext.body_hash(body)
+    with reg.db() as c:
+        cur = c.execute("""UPDATE feed_items SET title=?,body=?,author=?,published=?,
+            content_hash=?,lang=?,extract_stale=1,
+            title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
+            WHERE key=? AND content_hash=?""",
+            (title, body, entry.get('author') or seen.get('author') or '',
+             entry.get('published') or seen.get('published', ''),
+             digest, reg.text_language(title, body),
+             seen['key'], seen['content_hash']))
+        return cur.rowcount > 0
 
 
 def reclaim_export(seen: dict) -> bool:

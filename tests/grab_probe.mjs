@@ -182,6 +182,25 @@ try {
         !/已写入知识库/.test(other.hint) && !/别人那一轮的毛病/.test(other.hint)
           && /还没收进来/.test(other.hint) && other.stage === 'pending',
         JSON.stringify(other));
+  // 10b. **「写进去了」不等于「写进去的是一篇文章」。** 库里那一份看不出是正文时,
+  //      不许说「已写入知识库,搜得到了」—— 那句话会让用户以为检索里有一篇文章,
+  //      而他搜到的是一页登录提示。出路要一起说出来(再投一次会重抓替换)。
+  const bad = await converge(`${ghostUrl}
+    grabRun = 'r-ok';
+    pipeSnapshot = { run_id: 'r-ok', running: false,
+      stages: { export: { status: 'ok' }, index: { status: 'ok' } } };
+    const real = window.fetch;
+    window.fetch = (u, o) => {
+      if (!String(u).includes('/api/grab/state')) return real(u, o);
+      window.fetch = real;
+      return Promise.resolve(new Response(JSON.stringify({ ok: true, known: true,
+        done: true, content_ok: false, owing: '收下的那一份看不出是正文' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    };`);
+  check("收下的内容看不出是正文:不说已写入,并给出重投这条出路",
+        !/已写入知识库/.test(bad.hint) && /看不出是正文/.test(bad.hint)
+          && /再投一次/.test(bad.hint) && bad.stage === 'pending', JSON.stringify(bad));
+
   // 9b. **反过来钉一边**:快照还停在起跑之前那一轮时只是轮询还没回来,不许提前
   //     收尾 —— 提交之后面板立刻刷一次,那一刻看到的正是这张旧快照。
   const early = await converge(`${ghostUrl}

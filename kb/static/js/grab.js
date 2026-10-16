@@ -115,7 +115,7 @@ function grabConverge() {
  *
  *  过期判据和投递那一次同一套(动作号 + 导航号):核对期间用户又投了一条、或者
  *  切去了别的来源,这次答复就不往面板上写(口径同 `submitGrab`)。 */
-async function grabCheckItem() {
+async function grabCheckItem(because) {
   const action = grabAction, nav = grabNav, url = grabUrl;
   let data = null;
   try {
@@ -125,16 +125,27 @@ async function grabCheckItem() {
   if (action !== grabAction || nav !== grabNav) return;
   const resume = '；' + (grabResume || '稍后在「手动收录」里点一次「写入知识库」')
     .replace(/^，/, '') + '。';
-  if (data && data.done) {
+  const lead = because ? because + '：' : '';
+  if (data && data.known && !data.content_ok) {
+    // **「写进去了」不等于「写进去的是一篇文章」。** 这一档照旧是可恢复的:
+    // 再投一次会重抓、确认得了就把库里那一份换掉(`grab_api._recover`)。
+    grabStage = 'pending';
+    grabNote = lead + '这一篇收下的内容看不出是正文；再投一次这条链接，'
+      + '会重抓并在确认得了时把它换掉。';
+  } else if (data && data.done) {
     grabStage = 'done';
-    grabNote = '已写入知识库，全文检索里搜得到了。';
+    grabNote = lead + '已写入知识库，全文检索里搜得到了。';
+  } else if (data && because && !data.known) {
+    // 断在半路那一档:库里压根没有这一行 —— 这时才说得出「没存下来」。
+    grabStage = 'failed';
+    grabNote = because + '，这条没存下来；再投一次。';
   } else if (data) {
     grabStage = 'pending';
-    grabNote = '那一轮跑完了，这一篇还没进知识库（'
+    grabNote = lead + (because ? '这一篇还没进知识库（' : '那一轮跑完了，这一篇还没进知识库（')
       + (grabWhy || data.owing || '原因未知') + '）' + resume;
   } else {
     grabStage = 'pending';
-    grabNote = '没核到这一篇的结果' + resume;
+    grabNote = lead + '没核到这一篇的结果' + resume;
   }
   updateGrabControls();
 }
@@ -204,10 +215,16 @@ async function submitGrab() {
       body: JSON.stringify({ url }),
     });
   } catch (e) {
+    // **回包没送达 ≠ 后端没存下来。** 保存排在起管道之前,断线可能发生在它之后 ——
+    // 说「这条没存下来」是在断言一件我们不知道的事,而用户据此会去别处找原因。
+    // 出路是现成的:去问一次这一篇自己的状态(`/api/grab/state`,只读),问得到
+    // 就照事实说,问不到就如实说「结果未知,可以再投一次」(重投是安全的:
+    // `DO NOTHING` 挡着,内容不会变成两份)。
     grabBusy = false;
-    if (mine()) { grabStage = 'failed'; grabNote = '没连上服务，这条没存下来。'; }
+    if (mine()) { grabStage = 'checking'; grabNote = ''; }
     updateGrabControls();              // 过期也要恢复控件:不然按钮一直是禁用的
     toast('没连上服务', { detail: String(e && e.message || e) });
+    if (mine()) grabCheckItem('连接断在半路，结果不确定');
     return;
   }
   grabBusy = false;

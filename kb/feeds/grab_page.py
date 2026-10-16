@@ -115,6 +115,10 @@ _WALL_FREE_KEYS = ('isAccessibleForFree', 'isaccessibleforfree')
 _SAY_ROUTE = '对方把这个地址挡在了一道验证页后面'
 _SAY_PAGE = '这一页要求先完成验证或登录'
 _SAY_WALL = '这一页的正文挡在登录或订阅后面'
+#: ⑥**内容本身确认不了**:交出来的文字通篇是同一段在复读。这一句和上面三句不同
+#: ——它不说「对方拦着」,只说「我没能确认哪一段是这一篇的正文」,因为确实可能是
+#: 对方的模板怪、也可能是一道我们认不出的墙。**判不准一律扣留**(元规则)。
+_SAY_THIN = '这一页交出来的文字通篇在复读同一段，看不出哪一段是正文'
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 
@@ -172,6 +176,47 @@ def _gate_share(body: str) -> float:
     return hits / len(sentences)
 
 
+#: 只有这几种 `type` 的 `<script>` 才会被浏览器**执行**(缺省也算)。
+#: `application/json`、`application/ld+json`、`text/template`、`text/x-tmpl` 那些是
+#: **数据和模板**:里面出现 `_cf_chl_opt` 只是一个示例参数,不是这一页挂着关卡。
+#: 事故形态(2026-10-16 审查实测):一篇讲参数解析的 650 字教程,正文里带一段
+#: `<script type="application/json">{"sample":"_cf_chl_opt"}</script>` —— 整篇被拒。
+_EXEC_TYPES = ('', 'text/javascript', 'application/javascript', 'module',
+               'text/ecmascript', 'application/ecmascript', 'text/jscript')
+
+
+def _inert(node) -> bool:
+    """这个节点**还没生效** —— 它待在 `<template>` 里。
+
+    `<template>` 的内容是给 JS 以后克隆用的样板,浏览器既不渲染也不提交它。
+    bs4 把它当普通子树解析,于是 `select('input[type=password]')` 照样命中 ——
+    一篇「手把手教你写登录表单」的教程把 demo 放在 `<template>` 里就被判成登录墙
+    (2026-10-16 审查实测:650 字正常教程被拒)。**DOM 里有某个片段不等于它在
+    阻挡正文**,所以生效性要和位置(`readable.in_furniture`)分开各判一次。
+    """
+    return node.find_parent('template') is not None
+
+
+def body_confirmed(body: str) -> bool:
+    """这段正文**确认得了**吗 —— 「它说了足够多不重复的东西」。
+
+    **口径只有一份**,两处消费:抓到一份新正文时(`gate_reason` 的第六道)、
+    以及重复投递时拿**库里那一份**重算一次(`grab.content_owing` →
+    受控重抓与条件替换)。各写一遍的话,入库那一侧挡住了的形状在恢复那一侧
+    认不出来,错存的内容就永远没人去换。
+
+    判据是 `readable.substance(body) >= readable.MIN_CHARS`:**不重复的**字数要
+    过得了提取器那道门槛。为什么是这一道而不是又一张措辞表 —— 见
+    `readable.substance` 和 `_SAY_THIN`:登录提示页每家的说法都不同,扩词表是
+    逐个堵组合;而「通篇复读同一段」是**内容自己的**事实。
+
+    **它不保证这一篇就是目标文章**(结构上和文章不可分的纯文字提示页仍可能
+    过关),所以它不是「确认完成」,只是「这一次别固化终态」那一道的判据;
+    剩下的那一半由重复投递时的重抓与条件替换兜(`grab.replace`)。
+    """
+    return readable.substance(body or '') >= readable.MIN_CHARS
+
+
 def _gate_assets(soup) -> bool:
     """这一页**真挂着**某家关卡自己的组件吗(见 `_GATE_ASSETS`)。
 
@@ -182,11 +227,16 @@ def _gate_assets(soup) -> bool:
     for tag, attr in _ASSET_ATTRS:
         for node in soup.find_all(tag):
             value = str(node.get(attr) or '').lower()
-            if value and any(mark in value for mark in _GATE_ASSETS):
+            if value and any(mark in value for mark in _GATE_ASSETS) and not _inert(node):
                 return True
     for node in soup.find_all('script'):
-        if not node.get('src') and any(
-                mark in (node.string or '').lower() for mark in _GATE_ASSETS):
+        if node.get('src') or _inert(node):
+            continue
+        # **只有会被执行的那些才算挂着**(`_EXEC_TYPES`):数据块和模板块里
+        # 出现那几个串是内容,不是身份。
+        if str(node.get('type') or '').strip().lower() not in _EXEC_TYPES:
+            continue
+        if any(mark in (node.string or '').lower() for mark in _GATE_ASSETS):
             return True
     return False
 
@@ -195,8 +245,9 @@ def _wall_reason(soup) -> str:
     """正文是不是挡在一道登录/订阅墙后面(判据和代价见 `_WALL_FREE_KEYS` 那一节)。"""
     for node in soup.select('input[type=password]'):
         form = node.find_parent('form')
-        if form is not None and not readable.in_furniture(form):
-            return _SAY_WALL
+        if form is None or _inert(node) or readable.in_furniture(form):
+            continue                     # 还没生效 / 长在页面家具里:都不是拦在正文上
+        return _SAY_WALL
     free = _ld_json(soup)
     for key in _WALL_FREE_KEYS:
         if key in free:
@@ -218,12 +269,23 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
     然后被 `put_items` 的 `DO NOTHING` 永久钉成这一篇的正文(三轮审查各实测到
     至少一例)。
 
-    判据全是**这一次响应/这一页自己的身份**,一条成立就算(每张表各自的理由和
-    误拒代价写在它们自己头上):
-    ①路由 `_GATE_ROUTES`;②DOM 里真挂着的关卡组件 `_gate_assets`;
-    ③标题是一句关卡提示 `_GATE_TITLES` **且**正文里也在说同一件事;
-    ④正文通篇就是那几句提示(`_GATE_SHARE`,**按份额、不按字数**);
-    ⑤一道拦在正文上的登录/订阅墙 `_wall_reason`(**结构,不是措辞**)。
+    判据分两类,一条成立就算(每张表各自的理由和误拒代价写在它们自己头上):
+
+    **A. 对方拦着你**(说得出下一步):①路由 `_GATE_ROUTES`;②DOM 里**真挂着且
+    已生效**的关卡组件 `_gate_assets`;③标题是一句关卡提示 `_GATE_TITLES`
+    **且**正文里也在说同一件事;④正文通篇就是那几句提示(`_GATE_SHARE`,
+    **按份额、不按字数**);⑤一道**生效且拦在正文上**的登录/订阅墙
+    `_wall_reason`(**结构,不是措辞**)。
+
+    **B. 我确认不了**:⑥内容本身过不了质量那一道(`body_confirmed`)。
+    **这一类是本道判据的底**:前五道是「认出了对方的拦截」,而「没认出拦截」
+    证明不了「拿到了正文」—— 三轮审查各实测到至少一例漏放,最后那一例
+    (1832 字、一个表单都没有的登录提示页)把前五道全绕过去了。
+
+    **生效性和位置要分开各判一次**:`<template>` 里的密码框、
+    `type="application/json"` 里的示例参数都**不算**这一页挂着什么
+    (`_inert`);`nav`/页眉页脚侧栏里的登录框不算拦在正文上
+    (`readable.in_furniture`)。DOM 里有某个片段 ≠ 它在阻挡正文。
 
     `body` 空 = 提取器什么都没交出来。那时 ③ 不再要正文佐证,另外还加一道宽词
     表(`_GATE_WORDS`):已经没有正文可言了,宁可多认一道关卡也别把人留在
@@ -248,6 +310,11 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
         return _SAY_PAGE
     if not body and any(word in (html or '')[:200000].lower() for word in _GATE_WORDS):
         return _SAY_PAGE
+    # ⑥**最后一道:没命中前面那五道,不等于手里这篇就是目标正文。** 放在最后是
+    # 因为前五道说得出「对方拦着你」,这一道只说得出「我确认不了」—— 能说清的
+    # 那句话优先。
+    if body and not body_confirmed(body):
+        return _SAY_THIN
     return ''
 
 

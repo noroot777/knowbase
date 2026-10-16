@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from kb.feeds import grab, grab_page, x_article
+from kb.feeds import grab, grab_page, readable, x_article
 from kb.feeds.fetching import Response
 from tests.grab_fixtures import (GrabCase, PAGE, TWEET, html_resp, page_html,
                                  tweet_payload)
@@ -357,31 +357,80 @@ class PageTests(GrabCase):
             self.page(html_resp(real))
 
     def test_a_login_wall_is_refused_even_though_it_extracts_a_lot(self):
-        """**登录墙不许被当成文章落库,判据是结构不是措辞。**
+        """**登录提示页不许被当成文章落库 —— 哪怕它一个表单都没有。**
 
-        实测形态(2026-10-16 第 3 轮审查):一张普通的「Sign in to continue
-        reading / subscribe to unlock this story」登录页提取出 1832 字 —— 份额判据
-        对它压根不成立(那一页话很多),措辞也不在强措辞表里,于是它被当成正文
-        落库,`DO NOTHING` 之下永久改不回来。扩词表治不了这一类:墙前面那段话
-        每家写法都不同,而**墙本身是结构**(一道拦在正文上的密码表单)。
+        这是三轮都栽在同一处的那个形状(2026-10-16 审查实测):一张
+        「Sign in to continue reading / subscribe to unlock this story」的提示页,
+        提取器交出 **1832 字** —— 份额判据对它不成立(那一页话很多)、措辞不在
+        关卡表里。**原始证据里它连 `<form>` 都没有**,所以「密码框」这类结构判据
+        也抓不住它;上一版拿「补一个密码表单」的变形当用例,守住的是那个变形,
+        不是这份证据。
+
+        分得开它的是**内容自己**:整页就是同一段铺了 7 遍,按行去重只剩 260 字 ——
+        连提取器那道 400 的门槛都过不了(`readable.substance`)。这一道不认措辞,
+        所以墙前面那段话每家怎么写都不影响结论。
         """
-        wall = page_html(title='Sign in to read Example Journal', body=[
-            'Sign in to continue reading. Enter the email address associated with your '
-            'subscription. Members have access to the full archive and may manage their '
-            'account and password. New readers can subscribe to unlock this story. '] * 7)
-        wall = wall.replace('</article>', '<form action="/login"><input type="email">'
-                                          '<input type="password"><button>Sign in</button>'
-                                          '</form></article>')
-        self.assertGreater(len(grab_page.page_body(wall)), 1200)   # 提取器交得出一大段
-        with self.assertRaises(grab.GrabError) as caught:
-            self.save_page(html_resp(wall))
-        self.assertIn('登录', str(caught.exception))
-        self.assertEqual(self.items(), [])
+        said = ('Sign in to continue reading. Enter the email address associated with your '
+                'subscription. Members have access to the full archive and may manage their '
+                'account and password. New readers can subscribe to unlock this story. ')
+        bare = page_html(title='Sign in to read Example Journal', body=[said] * 7)
+        self.assertGreater(len(grab_page.page_body(bare)), 1500)   # 提取器交得出一大段
+        self.assertLess(readable.substance(grab_page.page_body(bare)), readable.MIN_CHARS)
+        # 三种形态同一句话:原始那张(一个表单都没有)、补一个邮箱表单的、补一个
+        # 密码表单的。前两档靠内容质量那一道,第三档靠结构那一道 —— 两道都要在。
+        for form in ('',
+                     '<form action="/login"><input type="email"><button>Continue</button></form>',
+                     '<form action="/login"><input type="password"></form>'):
+            with self.subTest(form=form[:34] or '(一个表单都没有)'):
+                html = bare.replace('</article>', form + '</article>')
+                with self.assertRaises(grab.GrabError) as caught:
+                    self.save_page(html_resp(html))
+                self.assertRegex(str(caught.exception), '登录|正文')
+                self.assertEqual(self.items(), [])
         # 付费墙自己的那张标准声明(schema.org)同样算一道墙。
         paid = page_html(extra='<script type="application/ld+json">'
                                '{"@type":"Article","isAccessibleForFree":false}</script>')
         with self.assertRaises(grab.GrabError):
             self.page(html_resp(paid))
+
+    def test_a_page_that_only_repeats_one_paragraph_is_never_stored(self):
+        """**反过来钉一边:说了足够多不重复的东西才算确认得了。**
+
+        第六道判据自己的两侧 —— 同一段复读的拒掉、两段不同的照旧收下。
+        **这一道不许回到原始长度**:复读那张比正常文章长得多。
+        """
+        said = ('这一段会被整页复读，它自己的长度足够让整页过得了提取器那道门槛，'
+                '可整页加起来也只说了这一件事。')
+        once = page_html(title='复读页', body=[said] * 15)
+        with self.assertRaises(grab.GrabError) as caught:
+            self.save_page(html_resp(once))
+        self.assertIn('复读', str(caught.exception))
+        self.assertEqual(self.items(), [])
+        self.assertGreater(len(grab_page.page_body(once)),
+                           len(grab_page.page_body(page_html())))   # 它更长,却该被拒
+        entry = self.page(html_resp(page_html()))                   # 两段不同的照旧收下
+        self.assertIn('这是正文第一段', entry['body'])
+
+    def test_an_inert_fragment_is_not_this_page_identity(self):
+        """**DOM 里有某个片段 ≠ 它在阻挡正文。** 两种「还没生效」的形状各一例
+        (2026-10-16 审查实测:两篇 650 字的正经教程都被拒了)。
+
+        ①`<template>` 里的登录表单:那是给 JS 以后克隆用的样板,浏览器既不渲染
+        也不提交(「手把手教你写登录表单」的教程就这么写);②
+        `<script type="application/json">` 里的示例参数:数据块不会被执行,
+        里面出现 `_cf_chl_opt` 只是一段**内容**。
+        """
+        tmpl = page_html(title='模板编程教程').replace(
+            '</article>', '<template id="demo"><form action="/login">'
+                          '<input type="password"></form></template></article>')
+        self.assertIn('这是正文第一段', self.page(html_resp(tmpl))['body'])
+        data = page_html(title='参数解析教程',
+                         extra='<script type="application/json">{"sample":"_cf_chl_opt"}</script>')
+        self.assertIn('这是正文第一段', self.page(html_resp(data))['body'])
+        # 反过来钉一边:真挂在那儿、会被执行的那一段照旧拒掉。
+        live = page_html(extra='<script>var o = {"k":"_cf_chl_opt"};</script>')
+        with self.assertRaises(grab.GrabError):
+            self.page(html_resp(live))
 
     def test_a_login_box_in_the_page_furniture_is_not_a_wall(self):
         """**反过来钉一边。** 页眉里常驻一个登录框的站点多得是 —— 那不是拦在正文
@@ -391,6 +440,7 @@ class PageTests(GrabCase):
         form = ('<form action="/login"><input type="email">'
                 '<input type="password"></form>')
         for furniture in (f'<header>{form}</header>',
+                          f'<nav>{form}</nav>',
                           f'<div class="site-footer">{form}</div>',
                           f'<div class="sidebar">{form}</div>'):
             with self.subTest(furniture=furniture[:28]):

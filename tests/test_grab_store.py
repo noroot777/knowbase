@@ -16,12 +16,12 @@ from kb import config, pipeline
 from kb.collectors import FetchScope
 from kb.feeds import grab, registry as reg, sync
 from kb.source_types import feed_types
-from tests.grab_fixtures import GrabCase, PAGE, TWEET, html_resp, page_html
+from tests.grab_fixtures import BODY, GrabCase, PAGE, TWEET, html_resp, page_html
 
 
 class SaveTests(GrabCase):
     def test_one_bucket_per_site_with_extraction_on_and_refetch_off(self):
-        grab.save({'url': PAGE, 'title': 'A', 'body': '正文', 'author': 'x',
+        grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',
                    'published': '', 'content_kind': 'content'})
         buckets = reg.subscriptions(grab.KIND)
         self.assertEqual([b['name'] for b in buckets], ['example.org'])
@@ -34,7 +34,7 @@ class SaveTests(GrabCase):
 
     def test_the_same_site_reuses_its_bucket_and_x_gets_a_readable_name(self):
         for url in ('https://example.org/a', 'https://www.example.org/b'):
-            grab.save({'url': url, 'title': 'A', 'body': '正文', 'author': 'x',
+            grab.save({'url': url, 'title': 'A', 'body': BODY, 'author': 'x',
                        'published': '', 'content_kind': 'content'})
         grab.save({'url': TWEET, 'title': 'T', 'body': '推文', 'author': 'x',
                    'published': '', 'content_kind': 'post'})
@@ -65,7 +65,7 @@ class SaveTests(GrabCase):
         搜不到。两件事混成一句「已经在知识库里了」就是谎报:用户搜不到,而再投
         一次只会再得到同一句话,后半条链永远没人补。
         """
-        grab.save({'url': PAGE, 'title': 'A', 'body': '正文', 'author': 'x',
+        grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',
                    'published': '', 'content_kind': 'content'})
         self.assertFalse(grab.known(PAGE)['done'])          # 刚入库:还没导出
         self.mark_exported(PAGE, 'source/inbox/abc.md')
@@ -86,7 +86,7 @@ class SaveTests(GrabCase):
         导出的是现在这一版,而且 vault 里当前那一份进了索引。
         """
         path = 'source/inbox/abc.md'
-        grab.save({'url': PAGE, 'title': 'A', 'body': '正文', 'author': 'x',
+        grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',
                    'published': '', 'content_kind': 'content'})
         self.mark_exported(PAGE, path)
         self.index_doc(path)
@@ -116,7 +116,7 @@ class SaveTests(GrabCase):
         这笔欠账写成 export 认得的形状。
         """
         path = 'source/inbox/abc.md'
-        grab.save({'url': PAGE, 'title': 'A', 'body': '正文', 'author': 'x',
+        grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',
                    'published': '', 'content_kind': 'content'})
         self.mark_exported(PAGE, path)
         self.index_doc(path)
@@ -139,7 +139,7 @@ class SaveTests(GrabCase):
         自己的 WHERE 里(元规则),所以这里连带钉住「0 行不是失败」。
         """
         path = 'source/inbox/abc.md'
-        grab.save({'url': PAGE, 'title': 'A', 'body': '正文', 'author': 'x',
+        grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',
                    'published': '', 'content_kind': 'content'})
         self.mark_exported(PAGE, path)
         self.export_vault(path)                          # 文件在,只是没索引
@@ -149,11 +149,86 @@ class SaveTests(GrabCase):
         self.assertFalse(self.pending_export())          # 水位一个字节都没动
         self.assertEqual(grab.owing(seen), '还没进全文索引')
 
+    #: 一份**看不出是正文**的内容:同一段铺满整页(以前那一版判据漏放存下的形状)。
+    WALL = ('Sign in to continue reading. Subscribe to unlock this story. ' * 3 + '\n') * 7
+
+    def test_bad_content_is_a_fact_of_its_own_not_a_missing_step(self):
+        """**「写进去了」和「写进去的是一篇文章」是两件事。**
+
+        库里那一份看不出是正文时,`owing` 要先说这件事 —— 它欠的不是哪一步:
+        导出、文件、索引全齐也只是把一段不是正文的文字写进了知识库(审查原话:
+        已导出、已索引不是内容质量证明)。判据随时重算得出(`body_confirmed`),
+        所以老库里那些错存的条目一样认得出来,不必在表上多存一列。
+        """
+        path = 'source/inbox/abc.md'
+        grab.save({'url': PAGE, 'title': 'Sign in to read', 'body': self.WALL,
+                   'author': 'x', 'published': '', 'content_kind': 'content'})
+        self.mark_exported(PAGE, path)
+        self.index_doc(path)
+        seen = grab.known(PAGE)
+        # 后半条链确实都走完了,而内容这一件事实单独为假。
+        self.assertEqual((seen['exported'], seen['stored'], seen['indexed'], seen['done']),
+                         (True, True, True, True))
+        self.assertFalse(seen['content_ok'])
+        self.assertEqual(grab.owing(seen), '收下的那一份看不出是正文')
+        # 反过来钉一边:正常内容不许被说成看不出是正文。
+        grab.save({'url': 'https://example.org/ok', 'title': 'B', 'body': BODY,
+                   'author': 'x', 'published': '', 'content_kind': 'content'})
+        self.assertTrue(grab.known('https://example.org/ok')['content_ok'])
+
+    def test_a_confirmed_refetch_replaces_the_bad_body_in_place(self):
+        """**`DO NOTHING` 之下唯一的出路:条件替换。**
+
+        换的时候要连带的事照 `fulltext._save` 那一份口径:`content_hash` 跟着
+        正文变(导出闸门因此自然成立)、`exported_hash` **不许清**、
+        `extract_stale` 置 1(知识库里那份摘要是按旧内容算的)、译文整组作废。
+        """
+        path = 'source/inbox/abc.md'
+        grab.save({'url': PAGE, 'title': 'Sign in to read', 'body': self.WALL,
+                   'author': 'x', 'published': '', 'content_kind': 'content'})
+        self.mark_exported(PAGE, path)
+        before = self.items()[0]
+        with reg.db() as c:          # 先摆一份旧译文:它译的是那张墙
+            c.execute("UPDATE feed_items SET title_zh='墙的译文',body_zh='墙的译文',"
+                      "translated_at='2026-10-01' WHERE key=?", (before['key'],))
+        fresh = {'url': PAGE, 'title': '真正的文章', 'body': BODY, 'author': '作者',
+                 'published': '2026-10-15 10:00', 'content_kind': 'content'}
+        self.assertTrue(grab.replace(grab.known(PAGE), fresh))
+        row = self.items()[0]
+        self.assertEqual((row['title'], row['body']), ('真正的文章', BODY))
+        self.assertNotEqual(row['content_hash'], before['content_hash'])
+        self.assertEqual(row['exported_hash'], before['exported_hash'])   # 没清
+        self.assertEqual(row['extract_stale'], 1)
+        self.assertEqual((row['title_zh'], row['body_zh'], row['translated_at']),
+                         ('', '', ''))
+        self.assertTrue(self.pending_export())       # 下一轮导出会选中它
+        self.assertTrue(grab.known(PAGE)['content_ok'])
+
+    def test_replace_keeps_its_hands_off_a_row_that_moved(self):
+        """**判据待在 UPDATE 自己的 WHERE 里**(元规则):库里那一版还得是我们
+        读到的那一版。这期间别人换过它(一轮正文补抓、一次存量复查、另一条并发
+        投递)就不覆盖 —— `rowcount == 0` 不是失败。
+        """
+        grab.save({'url': PAGE, 'title': 'Sign in to read', 'body': self.WALL,
+                   'author': 'x', 'published': '', 'content_kind': 'content'})
+        seen = grab.known(PAGE)
+        with reg.db() as c:                      # 别人先换了
+            c.execute("UPDATE feed_items SET body=?,content_hash='别人那一版'"
+                      ' WHERE key=?', (BODY, seen['key']))
+        fresh = {'url': PAGE, 'title': '我这一版', 'body': BODY + '尾巴',
+                 'author': '', 'published': '', 'content_kind': 'content'}
+        self.assertFalse(grab.replace(seen, fresh))
+        self.assertEqual(self.items()[0]['body'], BODY)       # 一个字节都没动
+        # 一模一样的内容也不必换(那一笔只会白白推一次导出和索引)。
+        same = grab.known(PAGE)
+        self.assertFalse(grab.replace(same, {'url': PAGE, 'title': same['title'],
+                                             'body': same['body']}))
+
     def test_known_answers_across_sources(self):
         # 一条推文已经被「大V观点」收过了:再收一遍只会在另一棵树下多一篇一样的。
         social = reg.save_subscription('social', {'name': 'E', 'url': 'https://x.com/example'})
         reg.put_items(social, [{'url': grab.normalize(TWEET), 'title': '旧标题',
-                                'body': '正文', 'published': ''}])
+                                'body': BODY, 'published': ''}])
         seen = grab.known(grab.normalize(TWEET))
         self.assertEqual((seen['kind'], seen['title']), ('social', '旧标题'))
         self.assertIsNone(grab.known('https://example.org/never-seen'))
@@ -170,7 +245,7 @@ class PipelineTests(GrabCase):
         self.assertIn(grab.KIND, [c['id'] for c in collection_channels()])
 
     def test_the_crawl_stage_spins_idle_instead_of_fetching_a_bucket(self):
-        grab.save({'url': PAGE, 'title': 'A', 'body': '正文', 'author': 'x',
+        grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',
                    'published': '', 'content_kind': 'content'})
         # 收件桶是启用着的订阅。放过去就会拿站点首页去发一次 HTTP,而
         # `ADAPTERS` 里压根没有 `manual` 这个适配器。
@@ -220,7 +295,7 @@ class EndpointTests(GrabCase):
         return self.client.post('/api/grab', json={'url': url})
 
     def test_a_staged_duplicate_gets_the_rest_of_the_chain_run_again(self):
-        grab.save({'url': PAGE, 'title': 'A', 'body': '正文', 'author': 'x',
+        grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',
                    'published': '', 'content_kind': 'content'})
         with self.pipeline_patch():
             r = self.post()
@@ -239,7 +314,7 @@ class EndpointTests(GrabCase):
         self.assertEqual(self.runs, [(['export', 'index', 'extract'], 'inbox')])
 
     def test_a_finished_duplicate_is_idempotent_and_costs_no_run(self):
-        grab.save({'url': PAGE, 'title': 'A', 'body': '正文', 'author': 'x',
+        grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',
                    'published': '', 'content_kind': 'content'})
         self.mark_exported(PAGE, 'source/inbox/abc.md')
         self.index_doc('source/inbox/abc.md')
@@ -256,7 +331,7 @@ class EndpointTests(GrabCase):
         一个字都不会动它(export 按通道筛),而回答里却写着「正在写入知识库」。"""
         social = reg.save_subscription('social', {'name': 'E', 'url': 'https://x.com/example'})
         reg.put_items(social, [{'url': grab.normalize(TWEET), 'title': '旧标题',
-                                'body': '正文', 'published': ''}])
+                                'body': BODY, 'published': ''}])
         with self.pipeline_patch():
             data = self.post(TWEET).json()
         self.assertEqual((data['duplicate'], data['done'], data['kind']),
@@ -271,7 +346,7 @@ class EndpointTests(GrabCase):
         又没占到管道时,照手动收录那套说就是指着一颗那一页上不存在的按钮。"""
         social = reg.save_subscription('social', {'name': 'E', 'url': 'https://x.com/example'})
         reg.put_items(social, [{'url': grab.normalize(TWEET), 'title': '旧标题',
-                                'body': '正文', 'published': ''}])
+                                'body': BODY, 'published': ''}])
         with self.pipeline_patch(started=False):
             data = self.post(TWEET).json()
         self.assertEqual(data['pipeline'], 'busy')
@@ -312,7 +387,7 @@ class EndpointTests(GrabCase):
         再起这一轮,否则这颗按钮永远只是空转。
         """
         path = 'source/inbox/abc.md'
-        grab.save({'url': PAGE, 'title': 'A', 'body': '正文', 'author': 'x',
+        grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',
                    'published': '', 'content_kind': 'content'})
         self.mark_exported(PAGE, path)
         self.index_doc(path)
@@ -335,7 +410,7 @@ class EndpointTests(GrabCase):
             self.assertIn('写入知识库', self.post().json()['resume'])
         social = reg.save_subscription('social', {'name': 'E', 'url': 'https://x.com/example'})
         reg.put_items(social, [{'url': grab.normalize(TWEET), 'title': '旧标题',
-                                'body': '正文', 'published': ''}])
+                                'body': BODY, 'published': ''}])
         with self.pipeline_patch():
             resume = self.post(TWEET).json()['resume']
         self.assertIn('大V观点', resume)
@@ -353,7 +428,7 @@ class EndpointTests(GrabCase):
             got = self.client.get('/api/grab/state', params={'url': PAGE}).json()
         self.assertEqual((got['known'], got['done'], got['owing']),
                          (False, False, '这条还没收进来'))
-        grab.save({'url': PAGE, 'title': 'A', 'body': '正文', 'author': 'x',
+        grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',
                    'published': '', 'content_kind': 'content'})
         with self.pipeline_patch():
             got = self.client.get('/api/grab/state', params={'url': PAGE}).json()
@@ -377,6 +452,71 @@ class EndpointTests(GrabCase):
         # **只读**:这一问不许顺手把水位清掉(那是投递那颗按钮的事)。
         self.assertEqual(self.pending_export(), 0)
         self.assertEqual(self.runs, [])       # 四次轮询都没占管道
+
+    def test_a_bad_duplicate_is_refetched_and_replaced(self):
+        """**查重命中坏内容时要受控重抓一次 —— 这是它唯一的出路。**
+
+        `put_items` 是 `DO NOTHING`:再投一次同一条链接一个字节都不会动那一行,
+        于是一份错存的内容(以前那一版判据漏放的登录提示页)永远留在知识库里,
+        而用户每次只得到同一句「已经收过了」。**这一档不看 `done`** —— 走完整条
+        链的坏内容更该换。
+        """
+        path = 'source/inbox/abc.md'
+        grab.save({'url': PAGE, 'title': 'Sign in to read', 'body': SaveTests.WALL,
+                   'author': 'x', 'published': '', 'content_kind': 'content'})
+        self.mark_exported(PAGE, path)
+        self.index_doc(path)
+        self.assertTrue(grab.known(PAGE)['done'])        # 后半条链全齐
+        with patch.object(grab, 'request', return_value=html_resp(page_html())) as got, \
+             self.pipeline_patch():
+            data = self.post().json()
+        self.assertEqual(got.call_count, 1)              # 真去重抓了一次
+        self.assertEqual((data['duplicate'], data['content_ok'], data['replaced']),
+                         (True, False, True))
+        self.assertEqual(data['done'], False)            # 换完要重新走后半条链
+        self.assertEqual(data['owing'], '收下的那一份看不出是正文')
+        # **后果断言**:库里那一份真换了,而且后半条链被起了起来。
+        self.assertIn('这是正文第一段', self.items()[0]['body'])
+        self.assertTrue(self.pending_export())
+        self.assertEqual(self.runs, [(['export', 'index', 'extract'], 'inbox')])
+
+    def test_a_refetch_that_still_cannot_be_confirmed_changes_nothing(self):
+        """重抓到的还是那张墙:**库里原样留着,不占管道,也不谎报换好了**。
+        (元规则:0 行不是失败;拿不准别固化终态。)"""
+        grab.save({'url': PAGE, 'title': 'Sign in to read', 'body': SaveTests.WALL,
+                   'author': 'x', 'published': '', 'content_kind': 'content'})
+        wall_page = page_html(title='Sign in', body=[
+            'Sign in to continue reading. Subscribe to unlock this story. ' * 3] * 7)
+        with patch.object(grab, 'request', return_value=html_resp(wall_page)), \
+             self.pipeline_patch():
+            data = self.post().json()
+        self.assertEqual((data['duplicate'], data.get('replaced')), (True, None))
+        self.assertIn('看不出是正文', data['detail'])
+        self.assertEqual(self.items()[0]['body'], SaveTests.WALL)   # 一个字节都没动
+        self.assertEqual(self.runs, [])                             # 没什么可写,不占管道
+
+    def test_a_good_duplicate_still_costs_no_request(self):
+        """**反过来钉一边:内容没问题的重复投递照旧连 HTTP 都不发。** 受控重抓
+        只开给「看不出是正文」那一档 —— 不然每次重复投递都要去对方站点跑一趟。"""
+        grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',
+                   'published': '', 'content_kind': 'content'})
+        with patch.object(grab, 'request', side_effect=AssertionError('不许发请求')), \
+             self.pipeline_patch():
+            data = self.post().json()
+        self.assertEqual((data['duplicate'], data['content_ok']), (True, True))
+        self.assertEqual(self.runs, [(['export', 'index', 'extract'], 'inbox')])
+
+    def test_the_state_endpoint_tells_bad_content_from_a_missing_step(self):
+        """`/api/grab/state` 也要把这件事实交出去:界面据此说「收下的内容看不出
+        是正文,再投一次会重抓替换」,而不是「已写入知识库,搜得到了」。"""
+        path = 'source/inbox/abc.md'
+        grab.save({'url': PAGE, 'title': 'Sign in to read', 'body': SaveTests.WALL,
+                   'author': 'x', 'published': '', 'content_kind': 'content'})
+        self.mark_exported(PAGE, path)
+        self.index_doc(path)
+        got = self.client.get('/api/grab/state', params={'url': PAGE}).json()
+        self.assertEqual((got['done'], got['content_ok']), (True, False))
+        self.assertEqual(got['owing'], '收下的那一份看不出是正文')
 
 
 if __name__ == '__main__':

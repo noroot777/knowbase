@@ -80,11 +80,45 @@ def _write_through(out: dict, note: str, channel: str = grab.KIND) -> dict:
     return out
 
 
+def _recover(out: dict, url: str, seen: dict, label: str) -> dict:
+    """库里那一份**看不出是正文** → 受控重抓一次,确认得了才替换。
+
+    **这是查重那道早检查里唯一会发 HTTP 的一档**,而且它必须发:`put_items` 是
+    `DO NOTHING`,再投一次同一条链接一个字节都不会动那一行 —— 于是一份错存的
+    内容(以前那一版判据漏放的登录提示页,或者那一次抓到的本来就是一道认不出的
+    墙)永远留在知识库里,而用户每次只得到同一句「已经收过了」。**「已导出、已
+    索引」不是内容质量证明**,所以这一档不看 `done`:走完整条链的坏内容更该换。
+
+    三种结果各有一句话:重抓撞上关卡/还是确认不了(`grab.grab` 抛)→ 原样留着、
+    不起管道;换成了 → 起后半条链(`content_hash` 变了,导出闸门自然成立);
+    `replace` 回 False → 这期间别人已经动过它,或者重抓到的就是同一份。
+    """
+    try:
+        fresh = grab.grab(url)
+    except grab.GrabError as e:
+        out['detail'] = (f'这条之前被「{label}」收过了，可库里那一份看不出是正文；'
+                         f'这次重抓还是不行:{e}')
+        return out
+    if not grab.replace(seen, fresh):
+        out['detail'] = (f'这条之前被「{label}」收过了，库里那一份看不出是正文；'
+                         '这次重抓到的内容和它一样，或者这期间已经有人换过了')
+        return out
+    out.update(replaced=True, done=False, title=fresh['title'])
+    return _write_through(out, f'库里那一份看不出是正文，已经按这次重抓到的内容换掉',
+                          seen['kind'])
+
+
 def _duplicate(url: str, seen: dict) -> dict:
     """这条地址库里已经有了。**按它走到哪一步分开答。**"""
     label = KINDS.get(seen['kind'], seen['kind'])
     out = {'ok': True, 'added': 0, 'duplicate': True, 'url': url,
-           'title': seen['title'], 'kind': seen['kind'], 'done': bool(seen['done'])}
+           'title': seen['title'], 'kind': seen['kind'], 'done': bool(seen['done']),
+           'content_ok': bool(seen.get('content_ok'))}
+    if not out['content_ok']:
+        # **内容本身不对的那一档排在最前面**:后面几步全做完也只是把一份看不出
+        # 是正文的东西写进知识库(`owing` 同一份口径里它也排第一)。
+        out['owing'] = grab.owing(seen)
+        return _recover(out, url, seen, label)
     if seen['done']:
         # 走完整条链了:幂等的一句话,不占管道(这是绝大多数重复投递的末态)。
         out['detail'] = f'这条已经在知识库里了（{label}）'
@@ -120,7 +154,8 @@ def grab_state(url: str = Query(..., min_length=1, max_length=2048)):
         raise HTTPException(400, str(e)) from None
     seen = grab.known(norm)
     out = {'ok': True, 'url': norm, 'known': bool(seen),
-           'done': bool(seen and seen['done']), 'owing': grab.owing(seen or {})}
+           'done': bool(seen and seen['done']), 'owing': grab.owing(seen or {}),
+           'content_ok': bool(seen and seen['content_ok'])}
     if seen:
         out.update(kind=seen['kind'], title=seen['title'],
                    exported=seen['exported'], stored=seen['stored'],

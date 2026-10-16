@@ -241,15 +241,51 @@ def in_furniture(node) -> bool:
     `siteFooter`、另一处认不出,而那种差别只在某些页面上看得见。
 
     **按节点自己声明的身份判,不看内容**(同 `_noisy`)。
+
+    **三类都要覆盖,少一类就和提取器的结论不一致**:`nav` 在 `_DROP_TAGS` 里被
+    **无条件**丢掉(它从来不是正文,不看位置),`_DROP_OUTSIDE` 那三个看位置,
+    其余按 `_noisy` 的 class/id/role。漏掉 `nav` 的后果实测过:一篇正常技术文章
+    的导航条里常驻一个登录框,手动收录那边照「有一道登录表单」把整篇拒了
+    (2026-10-16 审查实测),而提取器自己压根不把那段当正文。
     """
     for parent in node.parents:
         if getattr(parent, 'name', None) is None:
             continue
+        if parent.name == 'nav':
+            return True
         if parent.name in _DROP_OUTSIDE and not parent.find_parent(['article', 'main']):
             return True
         if parent.name in ('div', 'section', 'ul', 'ol', 'figure', 'table') and _noisy(parent):
             return True
     return False
+
+
+def substance(text: str) -> int:
+    """这段正文里**不重复**的字数 —— 「它到底说了多少东西」。
+
+    按**行**(提取器输出的段)去重再数:同一段铺满整页的模板文字在这里当一段算。
+    行内的重复不算(真实文章的段落不会复读,夹具里那种 `'…' * 12` 只是省事写法)。
+
+    **这不是提取器自己的门槛**(`MIN_CHARS` 那一道照旧按原始长度算,
+    `extract_or_reason` 的两档一个字都没改):它给的是手动收录那边
+    「这一次响应能不能当成这一篇的正文落库」那一问的内容质量判据
+    (`grab_page.gate_reason` 的第六道)。放在这里是因为它和 `plain` 的输出格式
+    绑在一起 —— 换了分段方式这一问就得跟着改,两处各写一份迟早漂。
+
+    事故形态(2026-10-16 审查实测):一张「Sign in to continue reading /
+    subscribe to unlock this story」的登录提示页,同一段铺了 7 遍 —— 提取器
+    交出 1832 字,份额判据对它不成立(那一页话很多)、措辞不在关卡表里、DOM 里
+    **一个表单都没有**,于是被当成正文落库,`DO NOTHING` 之下永久改不回来。
+    按行去重之后它只剩 260 字,连提取器那道 400 的门槛都过不了。
+    """
+    seen: set[str] = set()
+    total = 0
+    for line in (text or '').splitlines():
+        line = line.strip()
+        if line and line not in seen:
+            seen.add(line)
+            total += len(line)
+    return total
 
 
 def _gone(node) -> bool:
