@@ -38,6 +38,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+# 两份 md 正文模板(图鉴条目、日报)搬去了 `tests/snip_fixture_md.py`(行数上限)
+from tests.snip_fixture_md import _DAILY_MD, _TOOL_MD  # noqa: E402
 
 # 订阅条目。正文里那句 SNIP_FEED 是探针去选的那一段 —— 要够长(过 SNIP_MIN)、
 # 在正文里只出现一次(锚点回跳按 prefix+quote+suffix 找,重复出现就说不清定位
@@ -290,6 +294,14 @@ TOOL_DEL_MD = f'~~{TOOL_DEL_TEXT}~~'
 # 探针把选中那一处连引子一起从盘上删掉(`/__snip__/drop` 认整串),盘上于是只剩
 # 另一处 —— 核对那一步若按裸引文命中它就算"核过了",点回去高亮的是没选过的那一处。
 TOOL_TWIN, TOOL_TWIN_LEAD = '这一句用来验原处删掉之后不许冒认别处那一句', '甲节里先说一遍:'
+# **屏幕上只有一处、盘上也只有一处,而盘上那一处是改稿新写在别处的。** 探针先把
+# 这一句连它的引子从原处换掉,再把下面那段无关的话换成「另一节也写了这一句」
+# (`/__snip__/drop` 的 `into`)—— 于是两份语料里这句话都只有一处,按文字匹配核对
+# 会把别处那一处当成原处。**两段引子必须各不相同**,不然锚点自己就把两处对上了。
+TOOL_MOVE = '同一句话应当回到我当初选中的那一处'
+TOOL_MOVE_LEAD = '丙节里本来写着:'
+TOOL_MOVE_SPARE = '丁节这一段原本和上面那句话无关。'
+TOOL_MOVE_SPARE_LEAD = '丁节后来也写了这一句:'
 # 条目正文的**最后一句**:它后面紧跟着的是抽屉里那三颗链接按钮和小节标题 ——
 # 前后文锚点必须只从正文里采,不许把界面文字当成目标文档的上下文。
 TOOL_TAIL = '交代它和别的工具怎么搭'
@@ -338,107 +350,6 @@ SNIP_CSS_2 = '它下面这一句是另一行,标签名上看不出来'
 # 锚点在另一条上先命中、高亮落在别人身上。
 CHAT_QUESTION_6 = '同一个问题问两遍,你会给出一字不差的回答吗?'
 SNIP_CHAT_TWICE = '会:这一句在两条回答里一字不差,靠文字分不出是哪一条'
-
-# frontmatter 的键按 scripts/gzh_projects_export.py 来:`project` 缺了
-# `kb/projects.py` 的 `_load_entry` 直接判成"不是条目"、整个图鉴里看不到它。
-_TOOL_MD = """---
-title: {name}
-source: dr-gzh-projects
-account: 某个公众号
-published: {published}
-url: https://example.org/tool-post
-article_title: 一篇讲这个工具的文章
-project: {name}
-project_url: https://github.com/example/snipkit
-kind: project
-summary: 本地把文章拆成条目的小工具
-tags:
-  - entity/snipkit
-  - topic/skill工具
----
-
-> 整理自公众号文章 [一篇讲这个工具的文章](https://example.org/tool-post) · 某个公众号 · {day}
-
-{snip},不连任何外部服务。
-
-{vdel}。
-
-{vfresh}。{vstale}。{vagain}。{vkept}。
-
-{vhtml}。
-
-{twinlead}{vtwin}。中间隔着一句话。乙节里又说一遍:{vtwin}。
-
-后面还有一段,交代它和别的工具怎么搭。
-"""
-
-_DAILY_MD = """---
-date: {day}
-docs: 1
-total: 1
-late: 0
-model: stub/none
-generated: {generated}
-sources:
-  rss: 1
-window_since: {since}
-window_until: {until}
----
-
-# 日报 · {day}
-
-> 覆盖 {since} → {until} 发布的内容
-
-## 今天的重点
-
-{snip},它不依赖任何外部服务。
-
-## 两处一样的话
-
-{lead1}{dup}。
-
-{lead2}
-
-{dup}
-
-## 换日那一刻
-
-{slow}。
-
-## 一段可以直接跑的代码
-
-```python
-{code}
-```
-
-## 一字不差的两段
-
-{ambi}
-
-## 一个 emoji 隔着三十个字母
-
-{wide}
-
-## 两边证据矛盾的两处
-
-{conf}
-
-## 两侧候选不相交的三处
-
-{disj}
-
-## 又说了一遍
-
-{ambi}
-
-## 采集那会儿有几处
-
-{once}
-
-## 素材清单
-
-1. [一条把书变成技能的流水线](https://example.org/skill-pipeline) — 某个博客
-"""
 
 
 # ── 假的问答流:一个模型调用都不花,也不连网 ──────────────────────────────────
@@ -511,7 +422,8 @@ def build(vault: Path) -> dict:
         name=TOOL_NAME, snip=SNIP_TOOL, day=day, published=published,
         vfresh=TOOL_V_FRESH, vstale=TOOL_V_STALE, vagain=TOOL_V_AGAIN,
         vkept=TOOL_V_KEPT, vhtml=TOOL_HTML_MD, vdel=TOOL_DEL_MD,
-        vtwin=TOOL_TWIN, twinlead=TOOL_TWIN_LEAD),
+        vtwin=TOOL_TWIN, twinlead=TOOL_TWIN_LEAD,
+        vmove=TOOL_MOVE, movelead=TOOL_MOVE_LEAD, movespare=TOOL_MOVE_SPARE),
         encoding='utf-8')
 
     cli._index_pass(Namespace(reembed=False, no_vector=True))
@@ -659,6 +571,9 @@ def build(vault: Path) -> dict:
             'toolVKept': TOOL_V_KEPT, 'toolHtmlSeen': TOOL_HTML_SEEN,
             'toolDelText': TOOL_DEL_TEXT, 'toolDelMd': TOOL_DEL_MD,
             'toolTwin': TOOL_TWIN, 'toolTwinLead': TOOL_TWIN_LEAD,
+            'toolMove': TOOL_MOVE, 'toolMoveLead': TOOL_MOVE_LEAD,
+            'toolMoveSpare': TOOL_MOVE_SPARE,
+            'toolMoveSpareLead': TOOL_MOVE_SPARE_LEAD,
             'toolTail': TOOL_TAIL,
             'streamText': STREAM_TEXT, 'streamTail': STREAM_TAIL,
             'toolPath': str(tool_path.relative_to(vault))}

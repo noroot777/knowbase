@@ -4,13 +4,17 @@
 // (`snip_probe_shown.mjs`)、收下来之后还作不作数(`snip_probe_edges.mjs`、
 // `snip_probe_chat.mjs`)、列表里那几截原文(`snip_probe_cards.mjs`)、绑在哪一处
 // 哪一版(`snip_probe_bind.mjs`)。这一份管的是**位置身份不许由"现在正好对得上"
-// 推出来**,三格 + 独立阅读页那一份实现自己再判一次:
+// 推出来**,四格 + 独立阅读页那一份实现自己再判一次:
 //
 //   1 **核对那一步不许凭裸引文命中就算过。** 图鉴抽屉开着的那几分钟里,盘上那一篇
 //     把选中那一处连它的引子一起换掉、另一处一字不差的同句还在 —— 按裸引文命中
 //     它就等于"核过了":版本号跟着换成新那一版、落库返回 200,点回去高亮的是用户
 //     从没选过的那一处(审查实测:旧页面版本 ff4fb2dd、核对版本 c54d6364,保存行
 //     的 doc_version 被换成后者,回看落在第一节)。
+//  1b **屏幕上一处、盘上也一处,而盘上那一处是改稿新写在别处的。** 靠数量分不出
+//     来,拦它的是「面板那一版和盘上这一版不等」这个正面证据 —— 否则版本号被偷换
+//     成新那一版、落库返回 200,点回去高亮在他从没选过的那一节(审查实测:旧页面
+//     版本 eadb7fb8、核对读到 15f02774,保存行的 doc_version 被换成后者)。
 //   2 **采集那一刻就定不住的锚点,往后哪一档都不许定位。** 前后各两百字也一字不差
 //     的两处,采集那一刻谁也说不出用户选的是第几处(屏幕上当场说了一句"可能定位
 //     不到");后来原处被整节删掉,剩下的那一处成了整段锚点的唯一命中 —— 采信它
@@ -33,10 +37,12 @@ import {
   snipHighlight, until,
 } from "./snip_probe_lib.mjs";
 
-/** 沙箱那几条路由(真改盘上那一篇)。回 HTTP 状态。*/
-const sandbox = (route, path, text = "") => evalJs(
+/** 沙箱那几条路由(真改盘上那一篇)。回 HTTP 状态。`into` 只有 `drop` 要:给了
+ *  就把那句话换成它(而不是换成那句缺省的「已经被改稿换掉了」)。*/
+const sandbox = (route, path, text = "", into = "") => evalJs(
   `fetch('/__snip__/' + ${js(route)} + '?path=' + encodeURIComponent(${js(path)})
-     + (${js(text)} ? '&text=' + encodeURIComponent(${js(text)}) : ''),
+     + (${js(text)} ? '&text=' + encodeURIComponent(${js(text)}) : '')
+     + (${js(into)} ? '&into=' + encodeURIComponent(${js(into)}) : ''),
      { method: 'POST' }).then(r => r.status)`);
 
 /** 库里引文等于 q 的那几条(只留判据要看的几个字段),整成一段 JSON 文本。*/
@@ -124,6 +130,56 @@ check("而且绑的是那一篇、按新那一份算出了定得住",
   againRow.length === 1 && againRow[0].o === "doc" && againRow[0].p === fx.toolPath
   && againRow[0].u === 1 && againRow[0].e === 1
   && againRow[0].pre.endsWith("又说一遍:"), JSON.stringify(againRow));
+await evalJs(`closeToolDrawer(); true`);
+
+// ── 1b. 屏幕上一处、盘上也一处 —— 而盘上那一处是改稿新写在别处的 ──────────────
+// 这是审查实测的那条形状(两份语料各只有一处,靠数量分不出来):抽屉还开着(版本
+// 号是旧的),盘上那一篇把这句话所在那一节换掉、另一节新写了一句一模一样的,前后文
+// 都不一样。**裸引文那一档在这儿正好命中它** —— 采信就是把一处用户从没选过的文字
+// 当成他选的那一处:版本号跟着换成新那一版(后端那道 409 于是永远判不出"面板旧
+// 了")、落库返回 200、点回去高亮在别处。拦它的是「面板那一版和盘上这一版不等」
+// 这个**正面证据**,不是数量。
+// **反面那一边在 bind 第 4c 格**:同样是版本不等,可盘上只是末尾补了一段、原句连
+// 前后文都还在 —— 那一条照旧存得下、绑新那一版、提示里不许出现「刷新」。
+await boot();
+await evalJs(`switchTab('gallery'); true`);
+await until(`typeof openToolDrawer === 'function'`, 15000);
+await evalJs(`openToolDrawer(${js(fx.toolNorm)}); true`);
+if (!await until(`$('td-entries').textContent.includes(${js(fx.toolMove)})`, 25000))
+  throw new Error("图鉴抽屉没铺出「原处」那一句");
+const moveSeen = () => times(`$('td-entries').textContent`, fx.toolMove);
+check("抽屉上这句话只有一处(版本号就是这一刻这一份)", (await moveSeen()) === 1,
+  `屏幕上 ${await moveSeen()} 处`);
+// 两次改稿:先把原处那一句连引子换掉,再把另一节那段无关的话换成"也写了这一句"
+check("沙箱把原处那一句换掉了",
+  (await sandbox("drop", fx.toolPath, fx.toolMoveLead + fx.toolMove)) === 200);
+check("沙箱在另一节新写了一句一模一样的",
+  (await sandbox("drop", fx.toolPath, fx.toolMoveSpare,
+     fx.toolMoveSpareLead + fx.toolMove + "。")) === 200);
+const diskText = () => evalJs(`fetch('/api/doc?path='
+  + encodeURIComponent(${js(fx.toolPath)})).then(r => r.json())
+  .then(d => String(d.content || ''))`);
+const disk = await diskText();
+check("盘上这句话也只有一处 —— 可那一处是新写的那一节(原处的引子没了)",
+  disk.split(fx.toolMove).length - 1 === 1
+  && disk.includes(fx.toolMoveSpareLead + fx.toolMove)
+  && !disk.includes(fx.toolMoveLead + fx.toolMove),
+  `盘上 ${disk.split(fx.toolMove).length - 1} 处 / 新引子在=${
+    disk.includes(fx.toolMoveSpareLead + fx.toolMove)} / 旧引子在=${
+    disk.includes(fx.toolMoveLead + fx.toolMove)}`);
+check("屏幕上那一处没跟着变(抽屉就是那一刻读到的那一份)",
+  (await moveSeen()) === 1
+  && await evalJs(`$('td-entries').textContent.includes(
+       ${js(fx.toolMoveLead + fx.toolMove)})`) === true, "屏幕上仍是原处那一段");
+await appToastClear();
+const moveTake = await snip("#td-entries", fx.toolMove, 1);
+check("旧抽屉上那一句照旧选得中、按钮照旧点得下", moveTake.shown,
+  `picked=${moveTake.picked}`);
+const moveToast = await toast();
+check("如实说面板上这份正文旧了、让刷新再收藏(没把版本号偷换成新那一版)",
+  moveToast.includes("刷新"), moveToast);
+check("一行都没落库(没有一条指着他从没选过的那一节)",
+  (await rowsOf(fx.toolMove)) === "[]", await rowsOf(fx.toolMove));
 await evalJs(`closeToolDrawer(); true`);
 
 // ── 2. 采集那一刻整段锚点就定不住:这件事要跟着收藏落库 ──────────────────────

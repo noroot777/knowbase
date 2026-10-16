@@ -38,18 +38,23 @@ def install_test_routes(app, vault: Path) -> None:
         return {'version': _touch_file(vault, path)}
 
     @app.post('/__snip__/drop')
-    def _drop(path: str, text: str):
-        """把盘上那一篇里的一句话**真删掉**(`touch` 只在末尾续,原句还在)。
+    def _drop(path: str, text: str, into: str = ''):
+        """把盘上那一篇里的一句话**真换掉**(`touch` 只在末尾续,原句还在)。
 
         两种改稿的后果不一样,所以要两条路由:续一段之后那段收藏照旧定位得到
         (该放行),删掉之后它在新那一版里压根不存在(该拒)。回新的正文版本号。
+
+        `into` 给了就换成它,**于是同一条路由也摆得出「原处没了、别处新写了一句
+        一模一样的」**(两次调用:先把原处换成别的话,再把另一节换成带这句话的
+        一段)—— 那一种的后果最坏:两份语料里这句话都只有一处,按文字匹配核对
+        会把别处那一处当成原处。缺省那句话一个字没动,老调用方照旧。
         """
         from kb.scanner import body_version, read_md_text
         full = vault / path
         body = read_md_text(full)
         if text not in body:
             raise HTTPException(404, f'那一篇里没有这句话:{text[:20]}')
-        body = body.replace(text, '这一句已经被改稿换掉了')
+        body = body.replace(text, into or '这一句已经被改稿换掉了')
         full.write_text(body, encoding='utf-8')
         return {'version': body_version(body)}
 
