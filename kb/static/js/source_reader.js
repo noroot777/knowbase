@@ -302,3 +302,9 @@ function sourceItemSnipSource(item, { original = false } = {}) {
 
 attachSnip($('source-reader-body'), () =>
   sourceItemSnipSource(sourceReaderItem, { original: sourceReaderOriginal }));
+
+// 读正文时让出位置:往下滚就把来源工具栏和手动收录的投递栏收起来,滚回顶上再
+// 放出来。这一页的阅读区高度锁在可用视口上(`body.subs-reading`),上面那两块
+// 一共顶着 155px —— 收不收起来,正文就差那么多行。机制和它吃过的亏在
+// `kb/static/js/scrollaway.js`;复位挂在 `applySubsReadingLayout()` 上。
+bindScrollAway('source-reader-scroll', ['source-head', 'grab-bar']);

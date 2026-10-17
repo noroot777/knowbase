@@ -301,7 +301,7 @@
   </section>
 
   <section id="subs-feeds" hidden aria-label="订阅阅读与管理">
-    <header class="source-heading source-toolbar"><div class="source-ident"><div class="source-title-row"><h2 id="source-title"></h2>
+    <header id="source-head" class="source-heading source-toolbar scroll-away"><div class="source-ident"><div class="source-title-row"><h2 id="source-title"></h2>
       <details id="source-notices" class="source-notices" hidden><summary><span id="source-notices-summary" role="status">来源状态</span></summary><div class="source-notices-body">
         <div id="source-error" class="source-banner error" hidden role="alert"><span id="source-error-text"></span><button class="ghost" onclick="loadSourceModule(true)">重新读取</button></div>
         <div id="source-configuration" class="source-banner" hidden role="status"></div>
@@ -312,7 +312,7 @@
       <div class="source-view-tabs" role="group" aria-label="订阅工作区"><button id="source-view-items" class="on" aria-pressed="true" onclick="switchSourceView('items')">最新内容</button><button id="source-view-manage" aria-pressed="false" onclick="switchSourceView('manage')">订阅管理 <small id="source-subscriptions-count"></small></button></div>
       <div class="source-heading-actions"><button class="ghost" id="source-add" onclick="openSourceEditor()">添加订阅</button><button id="source-sync" onclick="syncSource()">同步全部</button></div>
     </header>
-    <div id="grab-bar" class="grab-bar" hidden>
+    <div id="grab-bar" class="grab-bar scroll-away" hidden>
       <input id="grab-url" type="url" inputmode="url" spellcheck="false" autocomplete="off"
              aria-label="要收录的链接" placeholder="粘贴文章或推文链接，回车存入"
              aria-describedby="grab-hint" onkeydown="grabKeydown(event)">
@@ -600,6 +600,7 @@
 <script src="/static/js/daily_body.js"></script>
 <script src="/static/js/daily_chip.js"></script>
 <script src="/static/js/sources.js"></script>
+<script src="/static/js/scrollaway.js"></script>
 <script src="/static/js/source_reader.js"></script>
 <script src="/static/js/source_forms.js"></script>
 <script src="/static/js/source_translate.js"></script>

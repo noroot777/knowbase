@@ -72,6 +72,9 @@ function applySubsReadingLayout() {
     && sourceModules.has(subsKind) && !$('subs-feeds').hidden && sourceView === 'items';
   document.body.classList.toggle('subs-mode', active);
   document.body.classList.toggle('subs-reading', on);
+  // 阅读区收起的那条工具栏要跟着复位:换来源、切「订阅管理」、切走这个 tab 都
+  // 经过这里,而那几下之后阅读区可能根本不在页面上(见 scrollaway.js 的 reset)。
+  if (typeof resetScrollAway === 'function') resetScrollAway();
 }
 
 function renderSubsSwitch() {
