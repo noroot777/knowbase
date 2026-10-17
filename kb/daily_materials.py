@@ -13,6 +13,10 @@ _SOURCE_TAIL = re.compile(rf'{re.escape(REF_SEP)}(?:(?!{re.escape(REF_SEP)})[^\n
 _LINK = re.compile(r'\[((?:\\[\\\[\]]|[^\[\]\\])*)\]\(<([^<>\n]+)>\)', re.S)
 
 
+def _number_matches(raw: str, expected: int) -> bool:
+    return raw == str(expected)
+
+
 def _entry(title: str, source: str, number: int) -> dict | None:
     link = _LINK.fullmatch(title)
     if link:
@@ -35,21 +39,21 @@ def _entry(title: str, source: str, number: int) -> dict | None:
 
 
 def _section(body: str, head: re.Match) -> dict | None:
-    count = int(head.group(1))
     tails = list(_SOURCE_TAIL.finditer(body, head.end()))
-    if len(tails) != count:
+    count = len(tails)
+    if not _number_matches(head.group(1), count):
         return None
     items = []
     cursor = head.end()
     for number, tail in enumerate(tails, 1):
         row = _ROW_START.match(body, cursor, tail.start())
-        if row is None or int(row.group(1)) != number:
+        if row is None or not _number_matches(row.group(1), number):
             return None
         end = body.find('\n', tail.end())
         end = len(body) if end < 0 else end
         source = body[tail.start() + len(REF_SEP):end]
         if number > 1 and any(
-            int(alternative.group(1)) == number
+            _number_matches(alternative.group(1), number)
             and _entry(body[alternative.end():tail.start()], source, number) is not None
             for alternative in _ROW_LINE.finditer(body, row.end(), tail.start())
         ):

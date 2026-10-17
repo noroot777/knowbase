@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tests.fixture_root import fixture_root
 
 
-def build(vault):
+def build(vault, base='http://127.0.0.1'):
     from kb import daily, store
 
     store.connect().close()
@@ -72,6 +72,11 @@ def build(vault):
                            daily.Material(items=[entry], total=total),
                            '## 今日要点\n\n正常说明。', 'stub/none')
         (root / f'2026-10-{day:02d}.md').write_text(text, encoding='utf-8')
+    from tests.daily_material_edge_fixtures import link_document, numeric_documents
+
+    for date, text in numeric_documents().items():
+        (root / f'{date}.md').write_text(text, encoding='utf-8')
+    (root / '2026-10-05.md').write_text(link_document(base), encoding='utf-8')
 
 
 def main():
@@ -85,7 +90,7 @@ def main():
         os.environ['KB_VAULT_ROOT'] = str(vault)
         from kb import pipeline
         pipeline.start_scheduler = lambda: None
-        build(vault)
+        build(vault, f'http://127.0.0.1:{args.port}')
         import uvicorn
         from kb.server import app
         uvicorn.run(app, host='127.0.0.1', port=args.port, log_level='warning')
