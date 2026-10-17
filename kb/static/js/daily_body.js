@@ -50,7 +50,7 @@ function renderDailyReportBody(report) {
     const row = document.createElement('li');
     const entry = document.createElement('div');
     entry.className = 'daily-material-entry';
-    const title = dailySafeLink(item.url) || document.createElement('span');
+    const title = dailyMarkdownLink(item.url) || document.createElement('span');
     title.className = 'daily-material-title';
     title.textContent = item.title;
     title.title = item.full_title;

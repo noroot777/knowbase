@@ -312,6 +312,17 @@ async function openDailyReport(date) {
     // 链接元素,换掉的是**元素结构**而不是字符 —— 锚点那套按全文偏移找,
     // 顺序反了也对得上,但高亮的 Range 会落在已经离开文档的节点上。
     dailyPendingSnip = consumeDailySnipJump(dailyPendingSnip, date, body);
+    // 出处本地有中文译文的那几处,在编号后面补一个入口(要问一次后端,所以是
+    // 异步的,不等它)。**排在最后**:它只往正文里添元素、不动已有节点和字符,
+    // 上面那两步都已经做完了 —— 反过来把一次网络往返挡在正文和回跳前面,屏幕
+    // 上就会空着等。口径在 daily_zh.js。
+    // **这道 try 只防一种事:那个函数压根不在**(脚本没加载、加载顺序错)——
+    // 那是一个同步的 ReferenceError,会被下面的 catch 接住,把一份**已经读到了**
+    // 的日报换成「读取失败」四个字,而那块提示连「收藏此段」都收不了
+    // (见 daily_body.js);代价完全不对等。**函数里面出的错到不了这儿**:它是
+    // async 的,内部抛出来是一个 rejected promise(不 await 就落到 unhandled
+    // rejection 那条路上,日报正文一个字不动)—— 如实记着,别以为这道管着它。
+    try { markDailyTranslations(body, date); } catch (err) { console.warn(err); }
   } catch (e) {
     // 失败这一侧走同一道判据:被替代的那次读取报出来的错也是陈旧的,
     // 让它覆盖新正文等于拿一句「读取失败」盖掉一份读到了的日报。

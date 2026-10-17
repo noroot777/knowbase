@@ -17,6 +17,13 @@ function dailySafeLink(url) {
   return link.hasAttribute('href') ? link : null;
 }
 
+function dailyMarkdownLink(url) {
+  if (!url || /[<>\r\n]/.test(url)) return null;
+  const host = document.createElement('div');
+  host.innerHTML = mdHtml(`[原文](<${url}>)`);
+  return host.querySelector('a[href]');
+}
+
 function dailyRefMap(el, materialList = null) {
   const out = new Map();
   const head = !materialList && [...el.querySelectorAll('h2')].find(h => /^素材清单/.test(h.textContent.trim()));

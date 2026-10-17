@@ -646,8 +646,15 @@ def doc_page(doc_path: str):
         if row["url"]:
             # url 来自被索引的外部内容,只放行 http(s):javascript: 之类点一下就执行
             safe = row["url"] if re.match(r"^https?://", row["url"], re.I) else "#"
+            # **这一行不许写来源的名字。** 这页最早只有公众号文章,文案就写死成了
+            # 「绿泡泡原文」—— 而 vault 里现在有九个原始来源,于是一条 GitHub
+            # Trending 的 RSS 条目在阅读页上也写着「绿泡泡原文」,点过去是 github.com
+            # (2026-10-17 实测,用户在日报的译文抽屉里撞见)。按来源分支写几套文案
+            # 是在这儿**再立一份来源名口径**(人话标签那份在 `kb.daily._SOURCE_LABEL`),
+            # 下一个新来源照样会漏。站内另外两个入口本来就只写「原文」
+            # (`index.html` 的 `reader-src`、订阅阅读器的「打开原文」),这里跟上。
             meta_parts.append(
-                f'<a href="{html_mod.escape(safe)}" target="_blank" rel="noopener">绿泡泡原文{_EXT_ARROW}</a>'
+                f'<a href="{html_mod.escape(safe)}" target="_blank" rel="noopener">原文{_EXT_ARROW}</a>'
             )
     obs = (f"obsidian://open?vault={quote(VAULT_NAME)}"
            f"&file={quote(doc_path.removesuffix('.md'))}")

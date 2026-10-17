@@ -53,10 +53,10 @@ try {
   await viewport(390);
   await send('Page.navigate', { url: `${base}/#daily` });
   assert.ok(await until(`document.querySelectorAll('.daily-materials > li').length === 12`));
-  for (const day of [14, 13]) {
+  for (const day of [4, 3]) {
     for (const edge of ['开头', '结尾']) {
       const quote = edge + '要找回的独特内容' + (edge === '开头' ? '正文说明。'.repeat(14) : '');
-      const date = `2026-10-${day}`;
+      const date = `2026-10-${String(day).padStart(2, '0')}`;
       await evalJs(`(async () => {
         await openDailyReport(${JSON.stringify(date)});
         const report = await (await fetch('/api/daily/reports/${date}')).json();
@@ -74,14 +74,14 @@ try {
         showSnipBtn();
       })()`);
       assert.ok(await until(`$('snipbtn') && !$('snipbtn').hidden`));
-      if (day === 14 && edge === '结尾') await screenshot('mobile-original');
+      if (day === 4 && edge === '结尾') await screenshot('mobile-original');
       assert.ok(await clickAt('#snipbtn'), '真实保存长素材旧收藏');
       const expression = `(async () => (await (await fetch('/api/favorites')).json()).favorites
         .find(item => item.quote === ${JSON.stringify(quote)} && item.origin_ref === '${date}'))()`;
       assert.ok(await until(expression), '收藏已经落库');
       const favorite = await evalJs(expression);
       assert.equal(favorite.anchor_exact, 1);
-      cases.push({ id: favorite.id, quote, date, linked: day === 14, edge });
+      cases.push({ id: favorite.id, quote, date, linked: day === 4, edge });
     }
   }
   assert.ok(await until(`!document.querySelector('#toast-host .toast')`), '保存提示已自然消失');

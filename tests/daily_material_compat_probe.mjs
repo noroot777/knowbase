@@ -164,7 +164,7 @@ try {
     const image = text => [...host.querySelectorAll('img')].find(image => image.alt === text)?.getAttribute('src');
     return target('原文') === '/doc/article' && target('上文定义') === '/doc/inside'
       && image('前图') === '/static/favicon.svg' && image('后图') === '/static/favicon.svg'
-      && host.querySelectorAll('.daily-materials > li').length === 1;
+      && !host.querySelector('.daily-materials');
   })()`);
   assert.ok(await until(`(() => {
     const images = [...$('daily-reader-body').querySelectorAll('img')];

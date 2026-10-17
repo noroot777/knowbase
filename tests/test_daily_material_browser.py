@@ -36,6 +36,15 @@ class MaterialBrowserTests(unittest.TestCase):
         self.assertGreaterEqual(len(evidence['passed']), 14)
         self.assertEqual([], evidence['errors'])
 
+    def test_ambiguous_materials_use_the_original_reader(self):
+        with fixture_server(script='serve_daily_materials.py') as base:
+            result = run_probe([NODE, 'tests/daily_material_ambiguity_probe.mjs', base],
+                               timeout=90, env=probe_env())
+        self.assertEqual(0, result.returncode, result.stderr[-4000:] + result.stdout[-4000:])
+        evidence = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(12, len(evidence['passed']))
+        self.assertEqual([], evidence['errors'])
+
 
 if __name__ == '__main__':
     unittest.main()

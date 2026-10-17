@@ -1773,3 +1773,8 @@ JS 语法、Python 编译、ruff 与 `git diff --check` 通过。额外在同一
 `chrome-headless-shell` 临时 profile，只访问本地隔离资料库；未连接用户 Chrome、未启动有头
 浏览器。截图和逐次几何数据位于 `output/playwright/snip-scroll/`，已人工核对手机段尾及嵌套
 段首代表截图；服务、浏览器和临时资料库均由现有 `fixture_server/run_probe/launchShell` 回收。
+
+合入主干时保留其全部歧义、数字、链接及中文译文夹具，将长收藏夹具从冲突的 10 月 13/14 日
+迁到空闲的 10 月 3/4 日，并同步探针的两位日期格式。合并后 208 项相关回归与 6 项真实浏览器
+测试全部通过，无跳过；16 次收藏回跳、5 组几何检查和主干译文入口均通过。扩展工具仍不可用，
+继续使用独立无头临时 profile；代表截图与几何数据在 `output/playwright/snip-scroll-merge-main/`。

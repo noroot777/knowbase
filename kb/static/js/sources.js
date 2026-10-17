@@ -72,6 +72,10 @@ function applySubsReadingLayout() {
     && sourceModules.has(subsKind) && !$('subs-feeds').hidden && sourceView === 'items';
   document.body.classList.toggle('subs-mode', active);
   document.body.classList.toggle('subs-reading', on);
+  // 阅读区收起的那条工具栏跟着对一遍账。**是对账不是复位**:这个函数后台同步完
+  // 一轮也会走到,一刀切复位就成了「读着读着工具栏自己弹回来」(实测收起约 4.6s
+  // 后恢复,正文从 886 缩回 826)。判据在 scrollaway.js 的 syncScrollAway()。
+  if (typeof syncScrollAway === 'function') syncScrollAway();
 }
 
 function renderSubsSwitch() {
@@ -277,6 +281,10 @@ function updateSourceNotices() {
   $('source-notices').classList.toggle('has-error', error || issues);
   $('source-notices-summary').textContent = error ? '读取失败，点击查看原因'
     : running ? $('source-progress-text').textContent : issues ? '来源连接需处理' : '部分订阅待配置';
+  // 这块浮层挂在会收起的那条工具栏里。**报错出现时得先把工具栏放出来** ——
+  // 收起态是 height:0 + inert,「读取失败」和它那颗「重新读取」就都走不到人跟前
+  // 了。所有改提示状态的路都汇到这个函数,所以闸只在这里拨一次(口径只有一份)。
+  if (typeof syncScrollAway === 'function') syncScrollAway();
 }
 function sourceTime(value) {
   if (!value) return '尚未同步';

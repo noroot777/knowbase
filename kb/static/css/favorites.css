@@ -114,6 +114,13 @@
 .fv-aside-tip { font-size: 12px; color: var(--muted); padding: 0 22px 24px; line-height: 1.9; }
 .fv-detail { max-height: calc(100vh - 48px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .fv-detail > .fv-aside-heading { padding-top: 10px; padding-bottom: 10px; background: var(--card); position: sticky; top: 0; z-index: 1; border-bottom-color: var(--line-soft); }
+/* 常驻返回按钮的外观自己写一份:`#favpanel .fv-icon-button` 那条特异性 (1,1,0)
+   压得过 base.css 的 `.away-exit`,带上它 display 就永远是 inline-grid,
+   收起之前那颗按钮也摆在那儿。 */
+.fv-detail-exit { top: 7px; right: 10px; align-items: center; justify-content: center; width: 28px; height: 28px;
+  padding: 5px; border: 0; border-radius: 5px; background: var(--card); color: var(--muted); }
+.fv-detail-exit:hover { background: var(--paper-2); color: var(--ink); }
+.fv-detail-exit .icon { width: 14px; height: 14px; }
 #favpanel .fv-icon-button { display: inline-grid; place-items: center; width: 28px; height: 28px; background: transparent; color: var(--muted); border: 0; padding: 5px; border-radius: 5px; }
 #favpanel .fv-icon-button:hover { background: var(--paper-2); color: var(--ink); }
 .fv-detail-back > span { display: none; }
@@ -210,9 +217,12 @@
   .fv-workbench { display: flex; flex-direction: column; gap: 22px; }
   .fv-library, .fv-inspector { width: 100%; }
   .fv-workbench.has-detail .fv-library { display: none; }
-  .fv-inspector { position: static; scroll-margin-top: calc(var(--topbar-h) + 14px); }
+  /* 收起时那颗常驻返回按钮(.away-exit)要相对这一层定位,所以不能退回 static */
+  .fv-inspector { position: relative; top: auto; scroll-margin-top: calc(var(--topbar-h) + 14px); }
   .fv-detail { max-height: none; overflow: visible; }
   .fv-detail > .fv-aside-heading { position: sticky; top: var(--topbar-h); }
+  /* 窄屏滚的是整页,absolute 的常驻返回按钮会跟着内容滚出视口 —— 钉在视口上 */
+  .fv-detail-exit { position: fixed; top: calc(var(--topbar-h) + 8px); right: 12px; z-index: 9; }
   .fv-start-intro { display: none; }
   .fv-recommendation { margin-top: 16px; }
   #favpanel .fv-detail-back { display: inline-flex; align-items: center; gap: 5px; width: auto; font-size: 11px; }
