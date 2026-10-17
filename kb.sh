@@ -367,9 +367,17 @@ print(json.dumps(b))' "$stages" "$since" "$until" "$targets" "$channel")"
 # 覆盖好页面,这边是用户以为存下了)。出路给两条,都不代劳。
 cmd_grab() {
   [ $# -gt 0 ] || die "给一条链接:./kb.sh grab <链接>(多条用空格隔开;- 表示从标准输入读)"
-  # **帮助和参数校验排在任何副作用之前。** 不然 `./kb.sh grab --help` 会先起一个
-  # 守护进程,而 worktree 里下面那道闸门还抢在它前面 —— 连帮助都拿不到。
-  # `--parse-only` 只解析参数就退出:不读标准输入、不发一个请求。
+  # **帮助自己就是终点,打完直接走。** argparse 的 `--help` 让子进程以 0 退出,和
+  # 「参数校验通过」一模一样 —— 光靠下面那句 `|| return` 分不开它们,于是帮助打完
+  # 之后 shell 照旧往下走:起服务(worktree 里更糟,先撞上那道闸门、连帮助都拿不到,
+  # 还以 1 退出)。两种拼写都认,位置不限;skill 那个 wrapper 是 `exec kb.sh grab`,
+  # 所以这一处管得住它。
+  local a
+  for a in "$@"; do
+    case "$a" in -h|--help) exec "$BOOT_PY" "$ROOT/scripts/grab_cli.py" --help ;; esac
+  done
+  # **余下的参数校验也排在任何副作用之前。** `--parse-only` 只解析就退出:不读
+  # 标准输入、不发一个请求、不起服务。
   "$BOOT_PY" "$ROOT/scripts/grab_cli.py" --parse-only "$@" || return
   if ! port_busy "$WEB_PORT"; then
     local common; common="$(git -C "$ROOT" rev-parse --path-format=absolute \

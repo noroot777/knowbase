@@ -236,6 +236,7 @@ uv run kb stats
 ./kb.sh grab --state https://example.com/p   # 只查这一条此刻的状态（只读）
 ./kb.sh grab --refetch https://example.com/p # 库里那一份不对时重抓、确认得了就换掉
 pbpaste | ./kb.sh grab -                     # 从剪贴板那段文字里挑出链接收录
+./kb.sh grab - < links.txt                   # 一行一条的清单：整行原样收，不做抽取
 
 # 订阅管理
 ./kb.sh accounts list | discover | add | remove | enable | disable [名字]

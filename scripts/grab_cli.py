@@ -62,20 +62,31 @@ POLL_SECONDS = 1.0
 #: 到底发生没有是不可靠的 —— 请求已经生效而回包丢了的那次照样起了一轮同步。
 MAX_RENEWS = 2
 
-#: 从**一段文字**里认链接。**半角右括号不排除** —— 维基那一类地址自己就带着一对
-#: (`/wiki/Function_(mathematics)`),把 `)` 写进排除集等于在第一个 `)` 处截断,
-#: 而截断后的那个地址**可能照样存在**:收进来的于是是另一篇文章,比抓不到更坏。
-#: **全角那些照旧排除**(`（）「」『』【】`):它们不是 URL 里的合法字符,出现就只能
-#: 是行文 —— 不排除的话「（地址）以及后面的话」会被整句吃进来。
-_URL_RE = re.compile(r'https?://[^\s<>"\'（）「」『』【】]+')
-#: 外围叙述标点。**全角一律剥**(它们不是 URL 里的合法字符,出现就只能是行文);
-#: ASCII 只剥 `. , ; :` 和末尾的 `?`(写在地址末尾没有意义,而英文句读极常见)。
+#: **整行就是一条地址** —— 这一档和显式参数走同一道:一个字符都不动。判据只看
+#: 「这一行(去掉两头空白之后)整个就是一条 http(s) 地址、中间没有空白」,不看它
+#: 里面有哪些字符 —— 括号、分号、全角都不作数。`pbpaste | kb.sh grab -` 和
+#: `kb.sh grab - < links.txt` 喂进来的多半正是这种一行一条。
+_WHOLE_LINE = re.compile(r'^https?://\S+$')
+#: 从**夹着叙述文字的那一行**里认链接。吃到空白/尖括号/引号/**全角句读**为止。
+#: 这两类全角字符要分开看,而且依据不同:
+#: - **句读**(`、，。；：！？`)在裸地址里出现**没有来源** —— 路径里要用它必须先
+#:   percent-encode,所以裸写只能是行文。排除它才接得住「见 <地址>。后面还有话」
+#:   这种紧贴中文、中间没有空白的常见写法。
+#: - **括号**(`（）`)**有真实来源**:中文维基的条目名自己就带着一对
+#:   (`…/wiki/函数（数学）`)。所以不排除,改按配对算(见 `_unwrap`)—— 排除它等于
+#:   在第一个括号处截断,而截断后的 `…/wiki/函数` **也真的存在**:那是收错文章。
+_URL_RE = re.compile(r'https?://[^\s<>"\'、，。；：！？]+')
+#: 行内抽取时要剥的外围标点,**只剩 ASCII**(全角句读进不了 `_URL_RE`,括号按配对
+#: 算)。剥的是「写在地址末尾没有意义、而行文里极常见」的那几个。
 #: **ASCII 的 `!` 不剥** —— 它是 URL 合法的子分隔符(`/post!` 真的存在),而
 #: 「末尾是叹号就一定是句末」正是那种不能做的推断。
-_TRAIL_PUNCT = '.,;:?、，。；：！？'
-#: 括号按**对**算:多余的那个属于行文,配得上对的属于地址。只有半角这一对需要
-#: 配平 —— 全角的压根进不了 `_URL_RE`。
-_BRACKETS = (('(', ')'),)
+#: **这一层是启发式,只对「行内夹着叙述」那一种生效**:整行一条地址的那一档压根
+#: 不进这里,所以可靠的喂法是一行一条。
+_TRAIL_PUNCT = '.,;:?'
+#: 括号按**对**算,半角全角各一对。判据是**不配对的右括号标志行文从那里开始** ——
+#: 配得上对的属于地址(`…/a(b)`、`…/函数（数学）`),而落单的那个只可能是外围写法
+#: (`（见 <地址>）以及别的`)。`（` 不在 `_URL_RE` 的排除集里,所以配对判得出来。
+_BRACKETS = (('(', ')'), ('（', '）'))
 #: 终态词 → 终端上那个前缀。**每一档都有自己的话**,不许几档共用一句
 #: (「已存下」和「已写入知识库」混成一句就是谎报,用户搜不到)。
 _LABELS = {
@@ -155,7 +166,7 @@ def _request(api: str, path: str, *, payload: dict | None = None,
             data=json.dumps(payload).encode(),
             headers={'Content-Type': 'application/json'})
     try:
-        with _OPENER.open(req, timeout=max(1.0, timeout)) as resp:
+        with _OPENER.open(req, timeout=timeout) as resp:
             body = resp.read()
     except urllib.error.HTTPError as e:
         # **错误回包的正文同样会断在半路**,所以 `e.read()` 也在保护里 ——
@@ -182,9 +193,11 @@ def _request(api: str, path: str, *, payload: dict | None = None,
         raise ApiDown('回的不是 JSON:' + body[:200].decode('utf-8', 'replace')) from None
 
 
-def post_grab(api: str, url: str, refetch: bool, *, timeout: float = GRAB_HTTP_SECONDS) -> dict:
-    return _request(api, '/api/grab', payload={'url': url, 'refetch': bool(refetch)},
-                    timeout=timeout)
+def post_grab(api: str, url: str, refetch: bool, *, restore_only: bool = False,
+              timeout: float = GRAB_HTTP_SECONDS) -> dict:
+    return _request(api, '/api/grab', timeout=timeout,
+                    payload={'url': url, 'refetch': bool(refetch),
+                             'restore_only': bool(restore_only)})
 
 
 def get_state(api: str, url: str, *, timeout: float = READ_HTTP_SECONDS) -> dict:
@@ -192,14 +205,16 @@ def get_state(api: str, url: str, *, timeout: float = READ_HTTP_SECONDS) -> dict
                     timeout=timeout)
 
 
-def pipeline_idle(api: str) -> bool | None:
+def pipeline_idle(api: str, *, timeout: float = READ_HTTP_SECONDS) -> bool | None:
     """管道此刻空着吗。`None` = 问不出来(那时**不许**当成空着去起一轮)。
 
     `source=false` 的理由同 `kb.sh` 的停机保护:来源探测冷缓存时几十秒,而
-    「在不在跑」本来一读内存就有。
+    「在不在跑」本来一读内存就有。**它也吃等待预算** —— 轮询阶段的每一次请求都算
+    在那个秒数里,漏掉一个就等于上限不成立。
     """
     try:
-        return not _request(api, '/api/pipeline/status?source=false').get('running')
+        return not _request(api, '/api/pipeline/status?source=false',
+                            timeout=timeout).get('running')
     except RuntimeError:
         return None
 
@@ -217,43 +232,61 @@ def renew(api: str, it: dict, *, timeout: float) -> None:
     被移走而两个 hash 还相等时,补跑的 export 压根选不中它),再按 `seen['kind']`
     起那一轮。所以恢复的不变量留在服务端一处,这边不另写一份带固定来源的协议。
 
-    **这一次重投不发任何对外 HTTP**:查重排在抓取前面(`grab.known` 命中就返回),
-    对已经 `pending` 的条目是纯粹的恢复动作。**也不带 `refetch`** —— 恢复要补的
-    是后半条链,不是把内容换掉。
+    **带 `restore_only`,这是构造上的那道约束。** `/api/grab` 的公开契约是「在就
+    恢复、不在就抓一篇新的」,而「我刚才查到它还在」不是写入那一刻它还在的保证 ——
+    不带这道约束的后果实测过:等待期间历史清理把那一行删掉之后,这一次重投原地
+    **重新抓了一遍**、把一条清理掉的 `rss` 文章重建成 `inbox`、正文换成这次抓到
+    的,而命令行照旧退出 0。带上它之后那条路径**压根不存在**(服务端 `known` 为空
+    就直接 409),不是靠「再查一次 state」去赌那个窗口。
+    **也不带 `refetch`** —— 恢复要补的是后半条链,不是把内容换掉。
 
     回包只用来看「起跑了没有」,**不覆盖 `it['res']`**:那里面存着本次动作的证据
     (比如一次成功替换的 `replaced`),覆盖掉就等于把它忘了。
     """
     it['renews'] += 1          # **预算在发请求之前扣**(见 MAX_RENEWS)
-    it['renewed'] = post_grab(api, it['url'], False, timeout=timeout)
+    it['renewed'] = post_grab(api, it['url'], False, restore_only=True, timeout=timeout)
 
 
 # ------------------------------------------------------------------ 这一条怎么说
 
-def _unwrap(hit: str) -> str:
-    """剥掉地址右边那些属于**行文**的字符,保留属于**地址**的。
+def _cut_at_unpaired(hit: str) -> str:
+    """**不配对的右括号标志行文从那里开始** —— 在它那里切断。
 
-    两件事交替做到不动为止(`…/a(b).` 要先剥句号、再看括号配不配得上对):
-    外围标点按 `_TRAIL_PUNCT`,右括号按配平 —— **右括号只在多于左括号时才剥**。
+    从左往右数深度,第一个让深度变负的右括号就是落单的那个:它前面是地址,它和它
+    后面的都是外围写法(`（见 <地址>）以及别的` 的 `）以及别的`)。配得上对的一个
+    都不动,所以 `…/a(b)` 和 `…/wiki/函数（数学）` 原样留着。
+    """
+    depth = dict.fromkeys((pair[0] for pair in _BRACKETS), 0)
+    for i, ch in enumerate(hit):
+        for open_, close in _BRACKETS:
+            if ch == open_:
+                depth[open_] += 1
+            elif ch == close:
+                if not depth[open_]:
+                    return hit[:i]
+                depth[open_] -= 1
+    return hit
+
+
+def _unwrap(hit: str) -> str:
+    """剥掉地址右边那些属于**行文**的字符,保留属于**地址**的。(只在行内抽取时用)
+
+    两件事交替做到不动为止(`…(见 <地址>).` 要先剥句号、再看括号配不配得上对):
+    落单的右括号按 `_cut_at_unpaired` 切,外围标点按 `_TRAIL_PUNCT` 剥。
     """
     while True:
         before = hit
-        hit = hit.rstrip(_TRAIL_PUNCT)
-        while hit:
-            pair = next((p for p in _BRACKETS if p[1] == hit[-1]), None)
-            if pair is None or hit.count(pair[1]) <= hit.count(pair[0]):
-                break
-            hit = hit[:-1]
+        hit = _cut_at_unpaired(hit).rstrip(_TRAIL_PUNCT)
         if hit == before:
             return hit
 
 
 def links_in(text: str) -> list[str]:
-    """**一段文字**里的链接,按出现顺序去重。
+    """**夹着叙述文字的那一行**里的链接,按出现顺序去重。
 
-    只给 `-`(标准输入)那条路用 —— 剪贴板里常常是「看这篇 https://… 挺好」。
-    命令行上**显式给出的那一条不走这里**(见 `_targets`):对一个本来就完整的
-    地址做有损抽取,换来的是把它改坏。
+    只有 `_targets` 判出「这一行不是一条干净地址」时才走这里。**它是启发式** ——
+    行内的边界本来就不确定,所以这一层宁可留下一个抓不到的坏地址,也不把地址截短
+    成另一个**可能存在**的目标。
     """
     out: list[str] = []
     for hit in _URL_RE.findall(text or ''):
@@ -322,10 +355,14 @@ def _settled(status: str) -> bool:
 def _left(deadline: float, cap: float) -> float:
     """这一次请求最多还能等多久 —— **剩余预算和单次上限取小的那个**。
 
-    不传预算的话 `--timeout 1` 会在一条慢 state 上等满 15 秒,一批很多条还会累加:
-    说出去的那个秒数就不是上限了(只有这一层能把它变成上限,因为超时是逐请求的)。
+    不传预算的话 `--timeout 1` 会在一条慢 state 上等满单次上限(15 秒),一批很多条
+    还会累加:说出去的那个秒数就不是上限了(只有这一层能把它变成上限,因为超时是
+    逐请求的)。
+
+    **不抬底。** 抬到「至少 1 秒」等于预算耗尽之后每条还能再发一个一秒的请求,
+    N 条就是 N 秒 —— 返回 0 或负数,调用方据此**不发**这一次请求。
     """
-    return min(cap, max(1.0, deadline - time.monotonic()))
+    return min(cap, deadline - time.monotonic())
 
 
 def settle(api: str, items: list[dict], *, deadline: float) -> None:
@@ -348,26 +385,38 @@ def settle(api: str, items: list[dict], *, deadline: float) -> None:
         if not waiting:
             return
         for it in waiting:
+            # **每一次请求之前都看一眼预算**,不是整批查完才看:一批 N 条慢查询
+            # 否则会各自等满自己那一份,说出去的秒数就不是上限了。
+            budget = _left(deadline, READ_HTTP_SECONDS)
+            if budget <= 0:
+                return
             try:
-                fresh = get_state(api, it['url'],
-                                  timeout=_left(deadline, READ_HTTP_SECONDS))
+                fresh = get_state(api, it['url'], timeout=budget)
             except RuntimeError:
                 continue              # 这一轮问不出来:保持原档,别拿 None 重算
             it['state'] = fresh
             it['status'], it['detail'] = verdict(it['res'], fresh,
                                                  refetch=it['refetch'])
         waiting = [it for it in items if not _settled(it['status'])]
-        if not waiting or time.monotonic() >= deadline:
+        if not waiting:
             return
-        if pipeline_idle(api) is True:
+        budget = _left(deadline, READ_HTTP_SECONDS)
+        if budget <= 0:
+            return
+        if pipeline_idle(api, timeout=budget) is True:
             for it in waiting:
                 if it['renews'] >= MAX_RENEWS:
                     continue
+                budget = _left(deadline, GRAB_HTTP_SECONDS)
+                if budget <= 0:
+                    return
                 try:
-                    renew(api, it, timeout=_left(deadline, GRAB_HTTP_SECONDS))
+                    renew(api, it, timeout=budget)
                 except RuntimeError:
                     pass    # 预算已经扣了(那次请求可能已经生效),下一轮按事实再看
                 break
+        if time.monotonic() >= deadline:
+            return
         time.sleep(min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
 
 
@@ -439,6 +488,13 @@ def recheck(api: str, it: dict) -> None:
         # 而不是抛一个 traceback 给人看 —— 一批地址里混进一行脏数据是常事。
         it['status'], it['detail'] = 'failed', str(e)
         return
+    except ApiDown as down:
+        # **「现在查不到」不是「还没投」。** 只读这一问压根没有投递这个动作 ——
+        # 留着 `not_tried` 那句默认文案(「前面那一条就打不通服务了」)时,第一条
+        # 查询失败会被说成一件不存在的事,而用户问的是「这篇我存过吗」。
+        it['status'] = 'unknown'
+        it['detail'] = f'现在查不到，不能确定这篇存过没有:{down}'
+        raise
     it['url'] = state.get('url') or it['url']
     it['title'] = state.get('title') or ''
     if not state.get('known'):
@@ -492,23 +548,36 @@ def record_of(it: dict) -> dict:
 def _targets(args: argparse.Namespace) -> list[str]:
     """命令行上/标准输入里要收的那几条。`-` = 从标准输入读。
 
-    **显式给出的那一条原样交给后端,一个字符都不动**(只去掉两头空白)。地址合不
-    合法只有 `grab.normalize` 那一份口径说得准,而在这儿做有损的文本抽取,代价是
-    把一个**合法**地址改坏:`…/wiki/Function_(mathematics)` 会在第一个 `)` 处被
-    截掉,而截断后的地址**可能照样存在** —— 收进来的于是是另一篇文章。
-    `--refetch` 和 `--state` 走的是同一条解析,所以那还会连带认错「要替换哪一篇」
-    和「要查哪一篇」。把一句话当参数给进来的人,会拿到后端那句明确的「这不是一条
-    链接」,改一下再来即可 —— 比静默换一篇文章好。
-
-    `-` 那条**本来就是一段文字**,所以才抽取(`links_in`,保留 URL 里的合法字符和
-    配对括号)。
+    **两种模式,判据是「这一行是不是整个就是一条地址」:**
+    ①**显式参数、以及标准输入里整行就是一条地址的那些 → 原样交给后端,一个字符
+      都不动。** 地址合不合法只有 `grab.normalize` 那一份口径说得准,而在这儿做
+      有损的抽取,代价是把一个**合法**地址改坏:`…/wiki/函数（数学）`(中文维基的
+      条目名真的带着一对全角括号)会被截成 `…/wiki/函数`,而**那一页也真的存在**
+      —— 收进来的于是是另一篇文章;末尾带 `;` `,` `:` 的地址同理。`--refetch` 和
+      `--state` 走同一条解析,所以那还会连带认错「要替换哪一篇」「要查哪一篇」。
+      把一句话当参数给进来的人,会拿到后端那句明确的「这不是一条链接」,改一下再来
+      即可 —— 比静默换一篇文章好。
+    ②**只有「这一行夹着叙述文字」才抽取**(`links_in`):剪贴板里常常是「看这篇
+      https://… 挺好」。那一层是启发式,宁可留下一个抓不到的坏地址,也不截短成另一个
+      可能存在的目标。
     """
     out: list[str] = []
     for raw in args.url:
-        found = links_in(sys.stdin.read()) if raw == '-' else [raw.strip()]
+        found = _from_stdin() if raw == '-' else [raw.strip()]
         for one in found:
             if one and one not in out:
                 out.append(one)
+    return out
+
+
+def _from_stdin() -> list[str]:
+    """标准输入:**逐行**判模式 —— 整行一条地址的保真,夹着叙述的才抽取。"""
+    out: list[str] = []
+    for line in sys.stdin.read().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        out.extend([line] if _WHOLE_LINE.match(line) else links_in(line))
     return out
 
 

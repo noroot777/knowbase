@@ -38,6 +38,18 @@ class GrabRequest(BaseModel):
     #: 判据上,这种错存就永远换不回来(第 3 轮审查实测:原站恢复可读之后重投仍回
     #: 「已经在知识库里了」,HTTP 发出 0 次)。所以人说「再抓一次」就重抓。
     refetch: bool = False
+    #: **只恢复库里已经有的那一行:不抓网页、不新建条目、不替换正文。**
+    #: 命令行那条入口的自动恢复用它(`scripts/grab_cli.py` 的 `renew`)——
+    #: 批量投递时后面几条撞上前一条起的那一轮,它们的内容在库里却没人替它们跑
+    #: export,所以要再求一次「把欠的那一步补上」。
+    #:
+    #: **「我刚才查到它还在」不是写入那一刻它还在的保证。** 不带这道约束的话,
+    #: 那一次重投走的是**可创建**的那条路:等待期间历史清理
+    #: (`scripts/feed_trim_history`)把那一行删掉之后,它会原地**重新抓一遍**、
+    #: 建成一条新条目 —— 实测形态:一条 `rss` 历史条目被清理掉,随后那次自动恢复
+    #: 发出 1 次对外取页、把它重建成 `inbox`,正文换成这次抓到的,而命令行照旧
+    #: 退出 0。所以这一档在**构造上**没有那条路径:`known` 为空就直接拒,不往下走。
+    restore_only: bool = False
 
 
 def _resume_hint(channel: str) -> str:
@@ -124,13 +136,24 @@ def _recover(out: dict, url: str, seen: dict, label: str, asked: bool = False) -
     return _write_through(out, f'{why}，已经按这次重抓到的内容换掉', seen['kind'])
 
 
-def _duplicate(url: str, seen: dict, refetch: bool = False) -> dict:
-    """这条地址库里已经有了。**按它走到哪一步分开答。**"""
+def _duplicate(url: str, seen: dict, refetch: bool = False,
+               restore_only: bool = False) -> dict:
+    """这条地址库里已经有了。**按它走到哪一步分开答。**
+
+    `restore_only` 把这一档收窄成**纯恢复**:只把欠的那一步补上,**不走重抓**
+    (那要发 HTTP、要替换正文,是人明确要求时才做的事),内容本身不对时也**不补**
+    —— 后面几步全做完只是把一份看不出是正文的东西写进知识库。
+    """
     label = KINDS.get(seen['kind'], seen['kind'])
     out = {'ok': True, 'added': 0, 'duplicate': True, 'url': url,
            'title': seen['title'], 'kind': seen['kind'], 'done': bool(seen['done']),
            'content_ok': bool(seen.get('content_ok'))}
-    if refetch or not out['content_ok']:
+    if restore_only and not out['content_ok']:
+        # 恢复不替任何人做「换掉它」这个决定(出路是 `refetch`,见 `_recover`)。
+        out['owing'] = grab.owing(seen)
+        out['detail'] = f'这条之前被「{label}」收过了，{out["owing"]}'
+        return out
+    if (refetch or not out['content_ok']) and not restore_only:
         # **内容本身不对的那一档排在最前面**:后面几步全做完也只是把一份看不出
         # 是正文的东西写进知识库(`owing` 同一份口径里它也排第一)。
         # **用户明确要求重抓时同样走这里,不先问 `content_ok`**:那道判据漏放的
@@ -188,7 +211,15 @@ def grab_link(body: GrabRequest):
         # **查重排在抓取前面**:已经收过的那一条连 HTTP 都不必发。它只是一句
         # 提示 —— 真正防重复的是 `put_items` 的 `DO NOTHING`(见 `grab.known`)。
         if seen := grab.known(url):
-            return _duplicate(url, seen, refetch=body.refetch)
+            return _duplicate(url, seen, refetch=body.refetch,
+                              restore_only=body.restore_only)
+        if body.restore_only:
+            # **这一档到此为止,再往下就是抓取 + 新建。** 「恢复」说的是把库里那一行
+            # 欠的后半条链补上;那一行已经不在了(历史清理删掉的、或者从来没有过),
+            # 就没有可恢复的东西 —— 照常往下走的后果实测过(见 `restore_only`)。
+            # 409 而不是 400:这不是「这条地址不对」,是「这一刻没有可恢复的条目」,
+            # 调用方据此去问一次事实(只读那一问会答 `known=false`)。
+            raise HTTPException(409, '这一条已经不在库里了，没有可恢复的条目')
         entry = grab.grab(url)
         saved = grab.save(entry)
     except grab.GrabError as e:

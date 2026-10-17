@@ -44,11 +44,15 @@ OTHER = 'https://example.org/posts/second'
 #: 于是收进来的是另一篇文章,比抓不到更坏。
 PAREN = 'https://en.wikipedia.org/wiki/Function_(mathematics)'
 #: 中文维基的条目名用的是**全角**括号,浏览器地址栏里就是裸的这一串(复制出来也是)。
-#: 全角括号不是 URL 里的合法字符,所以文本抽取那一侧必须把它当行文 —— 于是这一条
-#: 一旦走了抽取就被截成 `…/wiki/函数`,**而那一页真的存在**:收进来的是另一篇文章。
-#: 它和 `PAREN` 分别钉着两件事:这一条钉「显式参数原样交出去」,`PAREN` 钉「抽取时
-#: 配对括号要保留」。
+#: **「全角括号只能是行文」是个错的假设**(第 2 轮审查):按它办,这一条就被截成
+#: `…/wiki/函数` —— **而那一页真的存在**,收进来的是另一篇文章。所以括号(半角全角
+#: 都算)按**配对**算:配得上对的属于地址,落单的那个才标志行文从那里开始。
+#: 它和 `PAREN` 钉的是同一件事的两半:半角那一对、全角那一对都不许被剥光。
 FULLWIDTH = 'https://zh.wikipedia.org/wiki/函数（数学）'
+#: 行内抽取要用到的几条真实形态。末尾那几个 ASCII 标点**在地址里合法**
+#: (`grab.normalize` 收下并保留),所以只在「这一行夹着叙述」时才当外围标点剥。
+STDIN_WHOLE_LINES = [FULLWIDTH, 'https://example.org/post;',
+                     'https://example.org/post,', 'https://example.org/post:']
 
 
 def _state(**over) -> dict:
@@ -114,6 +118,9 @@ class _Handler(BaseHTTPRequestHandler):
             queue = plan['states'].get(asked) or plan['states']['*']
             return self._reply(*self._next(queue))
         if self.path.startswith('/api/pipeline/status'):
+            if plan['status_delay']:
+                import time as _t
+                _t.sleep(plan['status_delay'])
             return self._reply(200, {'running': plan['running']})
         self._reply(404, {'detail': '没有这条路径'})
 
@@ -140,7 +147,8 @@ class GrabCliTests(unittest.TestCase):
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), _Handler)
         self.server.plan = {'grabs': [(200, _grabbed())], 'states': {'*': [(200, _state())]},
                             'running': False, 'runs': 0, 'calls': [], 'posted': [],
-                            'asked': [], 'cut_body': False, 'state_delay': 0}
+                            'asked': [], 'cut_body': False, 'state_delay': 0,
+                            'status_delay': 0}
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
@@ -331,6 +339,22 @@ class GrabCliTests(unittest.TestCase):
         self.assertEqual(code, 0, out)        # 「没收过」是一个正常答案,不是故障
         self.assertEqual(self.records(out)[0]['status'], 'absent')
 
+    def test_state_only_cannot_say_a_read_was_never_tried(self):
+        """**「现在查不到」不是「还没投」。** `--state` 只读地问一句「这篇我存过
+        吗」,压根没有投递这个动作 —— 第一条就打不通时把它写成「前面那一条就打不通
+        服务了」,是在说一件不存在的事(而且它那句默认文案指的是**别人**)。
+
+        反过来钉一边:**后面那几条确实没试过**,那一档照旧说得出口 —— 两者的区别
+        正是调用方要的(哪条已经问过、哪些压根没问)。
+        """
+        self.plan['states'] = {'*': [(500, 'boom')]}
+        code, out, err = self.run_cli('--state', '--json', URL, OTHER)
+        self.assertEqual(code, 1, out + err)
+        recs = self.records(out)
+        self.assertEqual([r['status'] for r in recs], ['unknown', 'not_tried'])
+        self.assertIn('不能确定这篇存过没有', recs[0]['detail'])
+        self.assertNotIn('还没投', recs[0]['detail'])
+
     def test_state_only_turns_a_rejected_address_into_a_sentence(self):
         """一批地址里混进一行脏数据是常事:4xx 要变成一句话,不是 traceback。"""
         self.plan['states'] = {'*': [(400, {'detail': '这不是一条链接'})]}
@@ -369,12 +393,29 @@ class GrabCliTests(unittest.TestCase):
                          [FULLWIDTH, FULLWIDTH, 'https://example.org/post!'])
         self.assertEqual(self.plan['asked'], [FULLWIDTH])
 
-    def test_pasted_text_keeps_balanced_brackets_and_drops_prose_marks(self):
-        """`-` 那条**本来就是一段文字**,所以才抽取:括号按配平算(多余的才是行文),
-        外围标点只剥那些写在地址末尾没有意义的。
+    def test_whole_lines_on_stdin_are_handed_over_untouched(self):
+        """**标准输入里整行就是一条地址的那些,和显式参数一样保真。**
+
+        `-` 既用来粘一段话、也用来喂「一行一条」的清单,而第 2 轮审查实测的四组
+        恰恰都是后者:全角括号那一条被截成 `…/wiki/函数`(那一页真的存在),末尾带
+        `;` `,` `:` 的三条被剥掉最后一个字符 —— 后端 `normalize` 本来原样收下它们。
+        判据落在**真发出去的那几个请求**上,不是 `links_in` 的返回值。
         """
-        self.run_cli('--no-wait', '-', stdin=f'看这篇 {PAREN} 挺好，还有（{OTHER}）。')
-        self.assertEqual(self.plan['posted'], [PAREN, OTHER])
+        self.run_cli('--no-wait', '-', stdin='\n'.join(STDIN_WHOLE_LINES))
+        self.assertEqual(self.plan['posted'], STDIN_WHOLE_LINES)
+
+    def test_pasted_prose_keeps_paired_brackets_and_cuts_at_the_lone_one(self):
+        """`-` 那一行**夹着叙述文字**时才抽取,判据有两条:
+
+        **括号按配对算** —— 配得上对的属于地址(`…/wiki/函数（数学）` 那一对),
+        **落单的右括号**标志行文从那里开始(`（见 <地址>）以及别的`)。
+        **全角句读直接切断** —— 它在裸地址里没有来源(要用必须先编码),所以
+        「<地址>。后面还有话」这种中间没有空白的常见写法接得住。
+        """
+        self.run_cli('--no-wait', '-',
+                     stdin=f'看这篇 {PAREN} 挺好，还有（{OTHER}）。\n'
+                           f'另外 {FULLWIDTH} 也值得读。')
+        self.assertEqual(self.plan['posted'], [PAREN, OTHER, FULLWIDTH])
 
     # ---------------------------------------------------------------- 恢复
 
@@ -404,6 +445,50 @@ class GrabCliTests(unittest.TestCase):
         self.assertEqual([r['status'] for r in self.records(out)], ['saved', 'saved'])
         self.assertEqual(self.plan['runs'], 0, '恢复不该由命令行自己起一轮同步')
         self.assertEqual(self.plan['posted'].count(OTHER), 2, '那一条该被重投一次恢复')
+
+    def test_the_automatic_renew_asks_only_to_restore(self):
+        """**自动恢复那一次重投必须带上 `restore_only`。**
+
+        `/api/grab` 的公开契约是「在就恢复、不在就抓一篇新的」,而「刚才那次 state
+        查到它还在」不是写入那一刻它还在的保证。第 2 轮审查实测:等待期间历史清理
+        把那一行删掉之后,这一次重投原地**重新抓了一遍** —— 一条清理掉的 `rss`
+        文章被重建成 `inbox`、正文换成这次抓到的,而命令行照旧退出 0。
+
+        带上它之后那条路径**在服务端压根不存在**(`known` 为空就 409,
+        `tests/test_grab_store.py` 钉着那一半),不是靠「再查一次 state」赌窗口。
+        **也不许带 `refetch`**:恢复补的是后半条链,不是把内容换掉。
+        """
+        self.plan['grabs'] = [(200, _grabbed(pipeline='busy', run='')),
+                              (200, _grabbed(added=0, duplicate=True))]
+        self.plan['states'] = {'*': [(200, _state()), (200, _done())]}
+        code, out, _ = self.run_cli(URL, timeout='3')
+        self.assertEqual(code, 0, out)
+        posts = [body for m, path, body in self.plan['calls']
+                 if m == 'POST' and path == '/api/grab']
+        self.assertEqual(len(posts), 2, '那一条该被重投一次恢复')
+        self.assertEqual((posts[0]['restore_only'], posts[0]['refetch']), (False, False),
+                         '第一次投递是正常收录,不该自我收窄成「只恢复」')
+        self.assertEqual((posts[1]['restore_only'], posts[1]['refetch']), (True, False),
+                         '恢复那一次必须声明「只恢复、不许创建」,而且不替人重抓')
+
+    def test_an_item_cleaned_up_while_waiting_is_never_called_written(self):
+        """恢复撞上 409(那一行已经不在库里了)之后,**不许说成已写入知识库**。
+
+        后果判据:那一条的终态是「库里没有这一行」,退出码非 0 —— 用户据此知道这
+        一篇要重投,而不是去检索里找一篇不存在的文章。
+        """
+        self.plan['grabs'] = [(200, _grabbed(pipeline='busy', run='')),
+                              (409, {'detail': '这一条已经不在库里了，没有可恢复的条目'})]
+        self.plan['states'] = {'*': [(200, _state()),
+                                     (200, {'ok': True, 'url': URL, 'known': False,
+                                            'done': False, 'content_ok': False,
+                                            'owing': ''})]}
+        code, out, _ = self.run_cli('--json', URL, timeout='3')
+        self.assertEqual(code, 1, out)
+        [rec] = self.records(out)
+        self.assertEqual(rec['status'], 'failed', rec)
+        self.assertIn('库里没有这一行', rec['detail'])
+        self.assertNotIn('已写入知识库', out)
 
     def test_recovery_has_a_ceiling_even_when_answers_are_lost(self):
         """永远导不出去的那一条**不许变成一个不停起管道的循环**(那一轮带 extract、
@@ -489,9 +574,54 @@ class GrabCliTests(unittest.TestCase):
         self.assertIn('正在写入知识库', out)
         self.assertNotIn('还没写成 vault 里那一篇', out, '那一次查询本该超时')
 
+    def test_a_batch_of_slow_queries_does_not_each_get_its_own_wait(self):
+        """预算是**整个等待阶段**的,不是每条各一份:一批 N 条慢查询不许继续执行
+        N 次 —— 那样说出去的秒数会被乘以条数。所以每一次请求**之前**都要看预算,
+        耗尽立即结束,而不是整批查完才看。
+        """
+        import time
+        self.plan['state_delay'] = 3
+        started = time.monotonic()
+        code, out, _ = self.run_cli('--json', URL, OTHER, 'https://example.org/c',
+                                    timeout='1')
+        self.assertEqual(len(self.records(out)), 3, '三条输入要各有自己的一行')
+        self.assertLess(time.monotonic() - started, 2.5, '后面几条又各等了一份预算')
+        self.assertEqual(len(self.plan['asked']), 1,
+                         '预算耗尽之后还在发查询:' + repr(self.plan['asked']))
+
+    def test_the_pipeline_probe_is_inside_the_same_budget(self):
+        """「管道在不在跑」那一问**也吃等待预算**。它不在预算里的话,`--timeout 1`
+        之后还能再等满它自己那一份上限(15 秒);返回之后不再确认预算,还能接着发出
+        一次恢复写请求 —— 那是**写**,而且带 extract 的那一轮要调模型。
+        """
+        import time
+        self.plan['status_delay'] = 3
+        started = time.monotonic()
+        code, out, _ = self.run_cli(URL, timeout='1')
+        self.assertEqual(code, 0, out)
+        self.assertLess(time.monotonic() - started, 2.5, '那一问没被剩余预算压短')
+        self.assertEqual(self.plan['posted'], [URL], '预算耗尽之后还发了一次恢复写')
+
     def test_links_are_picked_out_of_pasted_text_and_deduped(self):
         found = cli.links_in('看这篇 %s 挺好，还有（%s）以及 %s。' % (URL, OTHER, URL))
         self.assertEqual(found, [URL, OTHER])
+
+    def test_prose_marks_never_turn_one_address_into_another(self):
+        """抽取这一层是启发式,所以它的不变量是**宁可留下一个抓不到的坏地址,也不
+        截短成另一个可能存在的目标**。左边那一列都是真实写法。
+        """
+        for text, want in (
+                # 配对的括号属于地址:剥掉就换了一篇文章(两种括号各一条)
+                (f'见 {PAREN} 这篇', [PAREN]),
+                (f'见 {FULLWIDTH} 这篇', [FULLWIDTH]),
+                # 落单的右括号 / 全角句读:行文从那里开始
+                (f'（见 {URL}）以及别的', [URL]),
+                (f'见 {URL}。后面还有话', [URL]),
+                (f'见 {URL}，还有 {OTHER}。', [URL, OTHER]),
+                # ASCII 的 `!` 是 URL 合法的子分隔符,不许当句末剥掉
+                ('看 https://example.org/post! 这条', ['https://example.org/post!'])):
+            with self.subTest(text=text):
+                self.assertEqual(cli.links_in(text), want)
 
 
 @requires_headless
