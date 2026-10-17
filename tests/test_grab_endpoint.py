@@ -41,6 +41,16 @@ class EndpointTests(GrabCase):
     def post(self, url=PAGE, **body):
         return self.client.post('/api/grab', json={'url': url, **body})
 
+    def restore(self, url=PAGE):
+        """「只把欠的那一步补上」那条**独立路径**。
+
+        它不是 `/api/grab` 上的一个字段:字段会被**更新了文件却没重启**的那个
+        kb-web 静默忽略(Pydantic 默认丢掉不认识的键),于是降级成「不在就抓一篇
+        新的」。独立路径在那种服务上回 404,客户端据此失败关闭 —— 口径见
+        `kb.web.grab_api.RestoreRequest`。
+        """
+        return self.client.post('/api/grab/restore', json={'url': url})
+
     def test_a_staged_duplicate_gets_the_rest_of_the_chain_run_again(self):
         grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',
                    'published': '', 'content_kind': 'content'})
@@ -60,8 +70,8 @@ class EndpointTests(GrabCase):
         # **后果断言**:后半条链真被跑起来了 —— 只改一句文案的话这里红。
         self.assertEqual(self.runs, [(['export', 'index', 'extract'], 'inbox')])
 
-    def test_restore_only_can_never_create_anything(self):
-        """**`restore_only` 是构造上的那道约束,不是一次时序赌博。**
+    def test_restore_can_never_create_anything(self):
+        """**恢复那条路在构造上就没有「抓一篇新的」这个动作,不是一次时序赌博。**
 
         `/api/grab` 的公开契约是「在就恢复、不在就抓一篇新的」。命令行自动补后半条
         链时手里只有一张旧快照(「刚才查到它还在」),而第 2 轮审查实测:等待期间
@@ -71,26 +81,26 @@ class EndpointTests(GrabCase):
 
         所以约束放在**写入端**:那一行不在了就 409 到此为止,抓取 + 新建那条路径
         压根走不到 —— 不靠「再查一次 state」去堵检查和写入之间的窗口。
-        反过来钉一边:**不带它的初次收录照旧抓取并创建**(不然把这个接口整个关掉
-        也能全绿)。
+        反过来钉一边:**`/api/grab` 的初次收录照旧抓取并创建**(不然把这个接口整个
+        关掉也能全绿)。
         """
         with patch.object(grab, 'request', return_value=html_resp(page_html())) as got, \
              self.pipeline_patch():
-            r = self.post(restore_only=True)
+            r = self.restore()
         self.assertEqual(r.status_code, 409, r.text)
         self.assertIn('没有可恢复的条目', r.json()['detail'])
         # **后果断言**:一次外部取页面都没发,库里一行没多,管道也没被占。
         self.assertEqual(got.call_count, 0)
         self.assertEqual(self.items(), [])
         self.assertEqual(self.runs, [])
-        # 反过来钉一边:同一条地址,不声明「只恢复」就是正常收录。
+        # 反过来钉一边:同一条地址走 `/api/grab` 就是正常收录。
         with patch.object(grab, 'request', return_value=html_resp(page_html())) as got, \
              self.pipeline_patch():
             data = self.post().json()
         self.assertEqual((got.call_count, data['added']), (1, 1))
         self.assertEqual(len(self.items()), 1)
 
-    def test_restore_only_still_finishes_the_chain_for_an_item_that_is_there(self):
+    def test_restore_still_finishes_the_chain_for_an_item_that_is_there(self):
         """**反过来钉一边:那一行还在、内容也没问题时,「只恢复」照旧把后半条链
         补起来。** 少了它,把这道约束写成「一律 409」也全绿,而自动恢复就再也补不了
         任何一条 —— 批量投递时第二条起全都停在「还没写进知识库」。
@@ -99,21 +109,25 @@ class EndpointTests(GrabCase):
                    'published': '', 'content_kind': 'content'})
         with patch.object(grab, 'request',
                           return_value=html_resp(page_html())) as got, self.pipeline_patch():
-            data = self.post(restore_only=True).json()
+            data = self.restore().json()
         self.assertEqual(got.call_count, 0, '恢复不许发任何对外抓取')
         self.assertEqual((data['duplicate'], data['done']), (True, False))
         self.assertEqual(data['pipeline'], 'started')
         self.assertEqual(self.runs, [(['export', 'index', 'extract'], 'inbox')])
-        # 这一份内容没问题,所以两个字段都带时走的仍是恢复那一档 ——
-        # **「只恢复」压过「重新抓一次」**,而不是反过来被它撬开。
+        # **多余的键当场 400,不许被忽略。** 「静默丢掉不认识的键」正是跨版本那个
+        # 故障的机制:哪天又有人想拿一个字段表达「只恢复」/「顺便重抓」,他要立刻
+        # 拿到拒绝,而不是一个会动内容的 200。
         with patch.object(grab, 'request',
                           return_value=html_resp(page_html())) as got, self.pipeline_patch():
-            data = self.post(restore_only=True, refetch=True).json()
-        self.assertEqual(got.call_count, 0, '「只恢复」要压过「重新抓一次」')
+            r = self.client.post('/api/grab/restore', json={'url': PAGE, 'refetch': True})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertEqual(got.call_count, 0, '恢复那条路不许被另一个字段撬开')
         self.assertEqual(self.items()[0]['body'], BODY, '一个字节都不许动')
-        self.assertNotIn('replaced', data)
+        # 同一道边界也挡住「拿字段表达只恢复」那种写法(它曾经被旧服务静默忽略)。
+        r = self.client.post('/api/grab', json={'url': PAGE, 'restore_only': True})
+        self.assertEqual(r.status_code, 422, r.text)
 
-    def test_restore_only_never_replaces_the_body(self):
+    def test_restore_never_replaces_the_body(self):
         """**「只恢复」不替任何人做「换掉它」这个决定。**
 
         库里那一份看不出是正文时,不带约束的那条路会自动走进 `_recover`:真发
@@ -124,21 +138,14 @@ class EndpointTests(GrabCase):
                    'author': 'x', 'published': '', 'content_kind': 'content'})
         with patch.object(grab, 'request', return_value=html_resp(page_html())) as got, \
              self.pipeline_patch():
-            data = self.post(restore_only=True).json()
+            data = self.restore().json()
         self.assertEqual(got.call_count, 0, '恢复不许替人重抓')
         self.assertEqual(self.items()[0]['body'], WALL, '一个字节都不许动')
         self.assertEqual((data['duplicate'], data['content_ok']), (True, False))
         self.assertNotIn('replaced', data)
         self.assertEqual(data['owing'], '收下的那一份看不出是正文')
         self.assertEqual(self.runs, [], '后面几步全做完也只是把一份坏内容写进知识库')
-        # 两个都带时**「只恢复」说话**:自动恢复那条路不许被另一个字段撬开。
-        with patch.object(grab, 'request', return_value=html_resp(page_html())) as got, \
-             self.pipeline_patch():
-            data = self.post(refetch=True, restore_only=True).json()
-        self.assertEqual(got.call_count, 0, '「只恢复」要压过「重新抓一次」')
-        self.assertEqual(self.items()[0]['body'], WALL)
-        self.assertNotIn('replaced', data)
-        # 反过来钉一边:只说重抓、不说只恢复时照旧换得成。
+        # 反过来钉一边:`/api/grab` 上明确要求重抓时照旧换得成。
         with patch.object(grab, 'request', return_value=html_resp(page_html())) as got, \
              self.pipeline_patch():
             data = self.post(refetch=True).json()

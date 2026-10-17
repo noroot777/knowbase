@@ -18,163 +18,18 @@
 """
 from __future__ import annotations
 
-import contextlib
-import importlib.util
-import io
 import json
-import os
 import subprocess
 import sys
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 
+from tests.grab_cli_fixture import (OTHER, ROOT, URL, GrabCliCase, _absent, _done,
+                                    _grabbed, _state, cli)
 from tests.headless import fixture_server, requires_headless
 
-ROOT = Path(__file__).resolve().parent.parent
-_spec = importlib.util.spec_from_file_location('grab_cli', ROOT / 'scripts' / 'grab_cli.py')
-cli = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cli)
 
-URL = 'https://example.org/posts/hello'
-OTHER = 'https://example.org/posts/second'
-#: 自带一对括号的真实形态(维基那一类)。截断之后那个地址**可能照样存在** ——
-#: 于是收进来的是另一篇文章,比抓不到更坏。
-PAREN = 'https://en.wikipedia.org/wiki/Function_(mathematics)'
-#: 中文维基的条目名用的是**全角**括号,浏览器地址栏里就是裸的这一串(复制出来也是)。
-#: **「全角括号只能是行文」是个错的假设**(第 2 轮审查):按它办,这一条就被截成
-#: `…/wiki/函数` —— **而那一页真的存在**,收进来的是另一篇文章。所以括号(半角全角
-#: 都算)按**配对**算:配得上对的属于地址,落单的那个才标志行文从那里开始。
-#: 它和 `PAREN` 钉的是同一件事的两半:半角那一对、全角那一对都不许被剥光。
-FULLWIDTH = 'https://zh.wikipedia.org/wiki/函数（数学）'
-#: 行内抽取要用到的几条真实形态。末尾那几个 ASCII 标点**在地址里合法**
-#: (`grab.normalize` 收下并保留),所以只在「这一行夹着叙述」时才当外围标点剥。
-STDIN_WHOLE_LINES = [FULLWIDTH, 'https://example.org/post;',
-                     'https://example.org/post,', 'https://example.org/post:']
-
-
-def _state(**over) -> dict:
-    """`/api/grab/state` 的一份回包。默认:收下了、内容是正文、还没走完后半条链。"""
-    base = {'ok': True, 'url': URL, 'known': True, 'done': False, 'content_ok': True,
-            'kind': 'inbox', 'title': '把链接存进知识库', 'exported': False,
-            'stored': False, 'indexed': False, 'owing': '还没写成 vault 里那一篇',
-            'resume': '，稍后在「手动收录」里点一次「写入知识库」'}
-    return {**base, **over}
-
-
-def _done(**over) -> dict:
-    return _state(done=True, exported=True, stored=True, indexed=True, owing='', **over)
-
-
-def _grabbed(**over) -> dict:
-    """`/api/grab` 成功收下并起了一轮的回包。"""
-    base = {'ok': True, 'added': 1, 'duplicate': False, 'done': False,
-            'content_ok': True, 'url': URL, 'title': '把链接存进知识库',
-            'kind': 'inbox', 'pipeline': 'started', 'run': 'run-1',
-            'detail': '已收下，正在写入知识库'}
-    return {**base, **over}
-
-
-class _Handler(BaseHTTPRequestHandler):
-    """假 kb-web。**只认我们真的该打的那几条路径**;`/api/pipeline/run` 故意回
-    404 并记账(见模块说明),别的一律 404 —— 多打一条路径的改动要当场红。"""
-
-    def log_message(self, *a):          # 不要往测试输出里刷访问日志
-        pass
-
-    def _reply(self, code: int, payload):
-        body = (json.dumps(payload) if not isinstance(payload, str) else payload).encode()
-        if self.server.plan['cut_body']:
-            # **正文读到一半对方关连接**:声明一个更长的 Content-Length,只写几个
-            # 字节就把连接撕掉 —— `http.client.IncompleteRead`,**不是** OSError。
-            self.send_response(code)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', str(len(body) + 200))
-            self.end_headers()
-            self.wfile.write(body[:12])
-            self.wfile.flush()
-            self.close_connection = True
-            return
-        self.send_response(code)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _next(self, queue: list):
-        return queue.pop(0) if len(queue) > 1 else queue[0]
-
-    def do_GET(self):
-        plan = self.server.plan
-        plan['calls'].append(('GET', self.path, None))
-        if self.path.startswith('/api/grab/state'):
-            asked = (parse_qs(urlsplit(self.path).query).get('url') or [''])[0]
-            plan['asked'].append(asked)
-            if plan['state_delay']:
-                import time as _t
-                _t.sleep(plan['state_delay'])
-            queue = plan['states'].get(asked) or plan['states']['*']
-            return self._reply(*self._next(queue))
-        if self.path.startswith('/api/pipeline/status'):
-            if plan['status_delay']:
-                import time as _t
-                _t.sleep(plan['status_delay'])
-            return self._reply(200, {'running': plan['running']})
-        self._reply(404, {'detail': '没有这条路径'})
-
-    def do_POST(self):
-        plan = self.server.plan
-        raw = self.rfile.read(int(self.headers.get('Content-Length') or 0))
-        body = json.loads(raw or b'{}')
-        plan['calls'].append(('POST', self.path, body))
-        if self.path == '/api/grab':
-            plan['posted'].append(body.get('url'))
-            return self._reply(*self._next(plan['grabs']))
-        if self.path == '/api/pipeline/run':
-            plan['runs'] += 1
-            return self._reply(404, {'detail': '恢复不该由命令行自己起一轮'})
-        self._reply(404, {'detail': '没有这条路径'})
-
-
-class GrabCliTests(unittest.TestCase):
-    def setUp(self):
-        # 轮询间隔压到几乎为零:用例要验的是「收敛到哪一档」,不是真等那几秒。
-        for name, value in (('POLL_SECONDS', 0.01), ('MAX_RENEWS', 2)):
-            self.addCleanup(setattr, cli, name, getattr(cli, name))
-            setattr(cli, name, value)
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), _Handler)
-        self.server.plan = {'grabs': [(200, _grabbed())], 'states': {'*': [(200, _state())]},
-                            'running': False, 'runs': 0, 'calls': [], 'posted': [],
-                            'asked': [], 'cut_body': False, 'state_delay': 0,
-                            'status_delay': 0}
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
-        self.api = 'http://127.0.0.1:%d' % self.server.server_address[1]
-
-    # ---------------------------------------------------------------- 工具
-
-    @property
-    def plan(self):
-        return self.server.plan
-
-    def run_cli(self, *argv, timeout='0.3', stdin=None) -> tuple[int, str, str]:
-        out, err = io.StringIO(), io.StringIO()
-        if stdin is not None:
-            self.addCleanup(setattr, sys, 'stdin', sys.stdin)
-            sys.stdin = io.StringIO(stdin)
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(['--api', self.api, '--timeout', timeout, *argv])
-        return code, out.getvalue(), err.getvalue()
-
-    def records(self, text: str) -> list[dict]:
-        return [json.loads(line) for line in text.strip().splitlines() if line.strip()]
-
-    def paths(self, method: str) -> list[str]:
-        return [p for m, p, _ in self.plan['calls'] if m == method]
-
+class GrabCliTests(GrabCliCase):
     # ---------------------------------------------------------------- 各档
 
     def test_a_finished_link_is_reported_as_in_the_knowledge_base(self):
@@ -248,6 +103,104 @@ class GrabCliTests(unittest.TestCase):
         self.assertEqual(rec['url'], URL)
         self.assertIn('打不通 kb-web', err)
 
+    def test_an_empty_snapshot_after_a_lost_answer_is_not_a_dropped_link(self):
+        """**「这一刻库里没有」证明不了「那次投递不会写入」。**
+
+        第 3 轮审查实测的时序:后端已经进入取页,投递那条连接断掉(动作还在跑),
+        此刻只读那一问答 `known=false` —— 原先据此输出 `failed`「没收下，再投一次」
+        并退出 1,而那次动作随后**真的保存成功**、真实导出在 vault 里生成了 1 篇。
+        skill 对 `failed` 的承诺是「一个字节都没写」,所以那是谎报;照它重投还会
+        多抓一次(重抓那一档更会动库里那一份)。
+
+        所以这一档**不是终态**:在预算内接着核实,事实出来了就按事实说。
+        """
+        self.plan['grabs'] = [(500, 'boom')]            # 没拿到明确回答
+        self.plan['states'] = {'*': [(200, _absent()), (200, _done())]}
+        code, out, _ = self.run_cli('--json', URL, timeout='3')
+        self.assertEqual(code, 0, out)
+        [rec] = self.records(out)
+        self.assertEqual(rec['status'], 'saved', rec)
+        self.assertNotIn('没收下', out)
+        self.assertNotIn('这条没存下来', out)
+        # **后面那几轮查到的标题也要补上**(N2):回包丢了的那一条,标题只有只读
+        # 这一问答得出来 —— 第一轮答的是「库里还没有」,所以这一条钉的是等待循环
+        # 里那一处,不是初次核实那一处。
+        self.assertEqual(rec['title'], '把链接存进知识库')
+
+    def test_an_unconfirmed_write_does_not_trust_the_old_bad_snapshot(self):
+        """**没拿到回包的那一次,库里那一份旧坏内容不许终结它。**
+
+        第 4 轮审查实测的时序:后端已经进入取页,投递那条连接断掉(动作还在跑),
+        此刻只读那一问答的是**动作之前**那一版(`content_ok=false`)—— 原先据此
+        当场落 `bad_content`「收下的那一份看不出是正文」、劝一句「加 --refetch 会
+        重抓一次」并以 0 退出(实测 0.047 秒,而预算给的是 2 秒);CLI 返回之后原
+        动作才走完,真后端 `replaced=true`、新正文 `content_ok` 为真、真实导出
+        生成了 1 篇。
+
+        **这一档于是不是终态**:预算内接着核实,换好了就按换好了说。它跟
+        `--refetch` 无关 —— 普通重复提交撞上坏内容时后端也会进受控重抓。
+        """
+        self.plan['grabs'] = [(500, 'boom')]            # 没拿到明确回答
+        self.plan['states'] = {'*': [(200, _state(content_ok=False)),
+                                     (200, _done(content_ok=True))]}
+        code, out, _ = self.run_cli('--json', URL, timeout='3')
+        self.assertEqual(code, 0, out)
+        [rec] = self.records(out)
+        self.assertEqual(rec['status'], 'saved', rec)
+        self.assertNotIn('看不出是正文', out)
+        self.assertNotIn('--refetch', out, '不许劝人去重抓一份正在被换掉的内容')
+
+    def test_an_unconfirmed_refetch_that_stays_bad_ends_uncertain_not_bad(self):
+        """**反过来钉一边:预算内一直没变好,也只能停在「不确定」。**
+
+        等不到不许改口说「确定是坏内容」—— 那句话的下一步是再重抓一次,而原动作
+        可能正在换。少了它,把这一档直接按旧快照落 `bad_content` 照旧绿。
+        """
+        self.plan['grabs'] = [(500, 'boom')]
+        self.plan['states'] = {'*': [(200, _state(content_ok=False))]}
+        code, out, _ = self.run_cli('--json', '--refetch', URL, timeout='1')
+        self.assertEqual(code, 1, out)
+        [rec] = self.records(out)
+        self.assertEqual(rec['status'], 'unknown', rec)
+        self.assertEqual(rec['label'], '结果不确定')
+        self.assertIn('别急着重投', rec['detail'])
+        # 那句话**可以**如实说「库里那一份看着还不是正文」(它就是现状),但不许把
+        # 结论下成「这条是坏内容、加 --refetch 再来一次」—— 后者是 `bad_content`
+        # 那一档的话,而这一刻原动作可能正在把它换掉。
+        self.assertNotIn('加 --refetch', rec['detail'])
+
+    def test_an_unconfirmed_write_that_never_shows_up_stays_uncertain(self):
+        """**预算到期也不许改口说「确定没存下」。**
+
+        等满之后库里还是没有这一行:那依然只说明我们没看见它 —— 停在「不确定」、
+        退出码非 0,那句话里要说清「可能还在抓,别急着重投」。
+        """
+        self.plan['grabs'] = [(500, 'boom')]
+        self.plan['states'] = {'*': [(200, _absent())]}
+        code, out, _ = self.run_cli('--json', URL, timeout='0.6')
+        self.assertEqual(code, 1, out)
+        [rec] = self.records(out)
+        self.assertEqual(rec['status'], 'unknown', rec)
+        self.assertIn('可能还在抓', rec['detail'])
+        self.assertNotIn('没存下来', rec['detail'])
+        # 没拿到回答的那一次**不许借恢复那条路去补**:那条路要的是「库里有这一行」。
+        self.assertEqual(self.plan['restored'], [])
+
+    def test_a_confirmed_write_keeps_its_facts_even_if_the_answer_was_lost(self):
+        """回包丢了而事实查得到时,**附带的那几个字段也要如实**(N2):
+
+        标题只有只读那一问答得出来(别让一条确认存下的结果带着空标题交给调用方);
+        而「这次新建了几条」**没有证据**,那时给 `null` —— 编码成 `0` 是在断言一件
+        我们不知道的事(那次投递可能真的新建了一条)。
+        """
+        self.plan['grabs'] = [(500, 'boom')]
+        self.plan['states'] = {'*': [(200, _done())]}
+        code, out, _ = self.run_cli('--json', URL)
+        self.assertEqual(code, 0, out)
+        [rec] = self.records(out)
+        self.assertEqual((rec['status'], rec['title']), ('saved', '把链接存进知识库'))
+        self.assertIsNone(rec['added'], '缺证据不是 0')
+
     def test_a_link_that_already_finished_costs_no_extra_poll(self):
         """幂等那一档(后端没起管道,因为它早走完了):一次状态都不必问。
 
@@ -310,18 +263,186 @@ class GrabCliTests(unittest.TestCase):
         self.assertIn('换没换成', rec['detail'])
 
     def test_a_refetch_that_did_not_land_is_not_called_written(self):
+        """没换成那一档**按库里那一份自己的质量分两种说法**。
+
+        这一条库里那一份是正文(`content_ok=true`),只是这次重抓撞上了关卡 ——
+        说成「收下的那一份看不出是正文」是把一次无害的空转报成质量问题(第 3 轮
+        审查 N1);库里那一份一个字节没坏,所以也不是失败。
+
+        **这一档还要库里那一篇已经走完整条链**(`_done()`):`unchanged` 说的是
+        「内容没动、而且那一篇搜得到」—— 还欠导出/索引的那一种是下一条用例。
+        """
         self.plan['grabs'] = [(200, _grabbed(
             added=0, duplicate=True, replaced=False, pipeline=None,
             detail='这次重抓还是不行:这一页挂着验证'))]
+        self.plan['states'] = {'*': [(200, _done())]}
         code, out, _ = self.run_cli('--json', '--refetch', URL)
         self.assertEqual(code, 0, out)
-        # **断在档位上,不是断在那句话上**:只验「出现了这次重抓那句原话」时,
+        # **断在档位上,不是断在那句话上**:只验「那句话里出现了某几个字」时,
         # 把这一档说成「早就在知识库里了」照旧绿 —— 而那正是谎报的形状。
         [rec] = self.records(out)
+        self.assertEqual(rec['status'], 'unchanged', rec)
+        self.assertEqual(rec['label'], '库里那一份没动')
+        self.assertIn('没换成', rec['detail'])
+        # **后端那句 detail 不转述**:它是按**请求开始那一刻**的质量写的
+        # (「这一页挂着验证」),而这一档的结论要按只读那一问核到的当前事实说。
+        self.assertNotIn('已写入知识库', out)
+        self.assertTrue(rec['content_ok'], rec)
+
+    def test_a_refetch_that_did_not_land_still_owes_the_second_half(self):
+        """**「这次有没有换正文」和「这一篇搜不搜得到」是两个维度。**
+
+        库里那一份是好正文、但还没写成 vault 里那一篇,这时要求重抓而原文没变:
+        后端如实回 `replaced=false`(那是**动作**那一问的回答),而那一篇照旧搜
+        不到。把它当成交付终态的后果实测过(第 6 轮审查,真端点 + 临时库:终端说
+        一句「库里那一份没动」就收口,盘上一个 Markdown 文件都没有、恢复请求 0 次
+        —— 不是「等完还没索引」,是压根没人去起那一步)。所以这一条要**继续报欠
+        账**,并且走只恢复、不创建那条路把后半条链补上。
+        """
+        self.plan['grabs'] = [(200, _grabbed(
+            added=0, duplicate=True, replaced=False, pipeline=None,
+            detail='这次重抓到的内容和它一样'))]
+        code, out, _ = self.run_cli('--json', '--refetch', URL, timeout='3')
+        self.assertEqual(code, 0, out)
+        [rec] = self.records(out)
+        # **断在档位和那条补写请求上**:只验那句话的话,把这一档说成「库里那一份
+        # 没动」照旧绿 —— 而那正是「动作回答冒充交付结果」的形状。
+        self.assertEqual(rec['status'], 'pending', rec)
+        self.assertIn('还没写成 vault 里那一篇', rec['detail'])
+        self.assertIn('没换成', rec['detail'])   # 动作那个事实一样要留着
+        # 打的是 `/api/grab/restore` 这条**不创建内容**的独立路径,不是再投一次。
+        # 恰好两次 = `MAX_RENEWS`:这一条在夹具里永远补不上(state 恒为欠账),
+        # 所以这里顺带钉住「不许一直补下去」那道上限。
+        self.assertEqual(self.plan['restored'], [URL, URL], self.plan)
+        self.assertEqual(self.plan['posted'], [URL], self.plan)
+
+    def test_a_refetch_that_found_bad_content_still_says_so(self):
+        """**反过来钉一边:库里那一份真的不是正文时,那一档照旧说得出口。**
+
+        少了它,把「没换成」一律说成「库里那一份没动」也全绿 —— 而那会把一篇
+        错存的坏内容说得像没事,用户不会再 `--refetch` 一次。
+        """
+        self.plan['grabs'] = [(200, _grabbed(
+            added=0, duplicate=True, replaced=False, content_ok=False, pipeline=None,
+            detail='库里那一份看不出是正文；这次重抓到的还是那张墙'))]
+        # **库里那一份此刻确实不是正文** —— 这一档现在要 `state` 作证(回包里的
+        # `content_ok` 说的是请求开始那一刻),所以只读那一问也得这么说。
+        self.plan['states'] = {'*': [(200, _state(content_ok=False))]}
+        code, out, _ = self.run_cli('--json', '--refetch', URL)
+        self.assertEqual(code, 0, out)
+        [rec] = self.records(out)
         self.assertEqual(rec['status'], 'bad_content', rec)
-        self.assertIn('这次重抓还是不行', rec['detail'])
+        self.assertIn('看不出是正文', rec['detail'])
+
+    def test_a_failed_swap_is_not_bad_content_when_the_file_is_already_good(self):
+        """**CAS 没换成的典型成因是别人在这中间刚换好** —— 那时回包里的
+        `content_ok` 带的是人家换**之前**的旧判断。
+
+        后果判据:库里那一份已经是正文了,这一档不许报 `bad_content`、不许再劝一次
+        `--refetch`(那会让人去重抓一份已经好了的正文,而重抓要动库里那一份)。
+        少了它,拿回包那个旧字段先判也全绿。
+        """
+        self.plan['grabs'] = [(200, _grabbed(
+            added=0, duplicate=True, replaced=False, content_ok=False, pipeline=None,
+            detail='库里那一份看不出是正文；这次重抓到的还是那张墙'))]
+        # 只读那一问是**动作之后**发的:它看到的是别人换好之后的样子。
+        self.plan['states'] = {'*': [(200, _done(content_ok=True))]}
+        code, out, _ = self.run_cli('--json', '--refetch', URL)
+        self.assertEqual(code, 0, out)
+        [rec] = self.records(out)
+        self.assertEqual(rec['status'], 'unchanged', rec)
+        self.assertNotIn('看不出是正文', rec['detail'])
+        self.assertNotIn('--refetch', rec['detail'])
+        self.assertTrue(rec['content_ok'], rec)
+
+    def test_a_file_cleaned_up_mid_refetch_is_not_called_unchanged(self):
+        """**「这一行还在不在」要排在所有质量/替换的结论之前。**
+
+        第 5 轮审查点名的形态:重抓等待期间同一篇被清理掉,终端照旧说「库里那一份
+        没动」—— 那是在描述一篇**已经不存在**的文章。没换成是真的,但库里那一份
+        此刻压根不在了,这两句话里只有后一句是用户要知道的。
+        """
+        self.plan['grabs'] = [(200, _grabbed(
+            added=0, duplicate=True, replaced=False, content_ok=False, pipeline=None,
+            detail='这次重抓还是不行:这一页挂着验证'))]
+        self.plan['states'] = {'*': [(200, _absent())]}
+        code, out, _ = self.run_cli('--json', '--refetch', URL, timeout='3')
+        self.assertEqual(code, 1, out)
+        [rec] = self.records(out)
+        self.assertEqual(rec['status'], 'gone', rec)
+        self.assertNotIn('没动', rec['detail'])
+        self.assertNotIn('看不出是正文', rec['detail'])
+        # 后端确认过它当时在库里(`replaced` 这个键在),所以不是「一个字节都没写」。
+        self.assertNotIn('没存下来', rec['detail'])
+
+    def test_an_early_return_publishes_no_stale_quality_verdict(self):
+        """**提前收口的那条路也不许发布旧的质量结论。**
+
+        `--no-wait` 不等、也就没核过库里此刻的样子,而回包里那个 `content_ok` 是
+        **请求开始那一刻**的 —— CAS 没换成的典型成因正是别人刚换好。这一档于是
+        停在「还没核到」,而不是说「看不出是正文、加 --refetch 再来一次」。
+
+        等待那条路上的同一判据在 `test_a_failed_swap_is_not_bad_content_when_the_file_is_already_good`
+        —— 两条路各有自己的红(元规则「两份实现各有自己的回归」)。
+        """
+        self.plan['grabs'] = [(200, _grabbed(
+            added=0, duplicate=True, replaced=False, content_ok=False, pipeline=None,
+            detail='库里那一份看不出是正文；这次重抓到的还是那张墙'))]
+        code, out, _ = self.run_cli('--json', '--no-wait', '--refetch', URL)
+        self.assertEqual(code, 1, out)
+        [rec] = self.records(out)
+        self.assertEqual(rec['status'], 'unknown', rec)
+        self.assertNotIn('看不出是正文', rec['detail'])
+        self.assertNotIn('加 --refetch', rec['detail'])
+        self.assertEqual(self.plan['asked'], [], '--no-wait 不许去查状态')
+
+    def test_a_budget_that_runs_out_without_evidence_stays_uncertain(self):
+        """**预算耗尽、一次状态都没查成,也不许回头用回包里那个旧结论收口。**
+
+        第 5 轮审查实测的第四组:另一个写入者已经把正文换好了,而这一次 CAS 没换成;
+        状态查询一路 500、0.2 秒预算耗尽 —— 当时仍输出 `bad_content` 并退出 0,
+        等于把一份**已经好了**的正文说成坏的,还劝人再抓一次。
+
+        等不到就留在不确定,这是这一类的最后一个出口(别的三个是提前收口、无需
+        等待、查询失败)。
+        """
+        self.plan['grabs'] = [(200, _grabbed(
+            added=0, duplicate=True, replaced=False, content_ok=False, pipeline=None,
+            detail='库里那一份看不出是正文；这次重抓到的还是那张墙'))]
+        self.plan['states'] = {'*': [(500, 'boom')]}
+        code, out, _ = self.run_cli('--json', '--refetch', URL, timeout='0.2')
+        self.assertEqual(code, 1, out)
+        [rec] = self.records(out)
+        self.assertEqual(rec['status'], 'unknown', rec)
+        self.assertNotIn('看不出是正文', rec['detail'])
+        self.assertNotIn('加 --refetch', rec['detail'])
+        # **「这次没换成」这个动作事实可以留着**(它由回包确认过),不许留的是
+        # 「当前正文仍坏」那半句 —— 后者没有任何当前证据。
+        self.assertIn('没换成', rec['detail'])
 
     # ---------------------------------------------------------------- 只读 / 参数
+
+    def test_a_malformed_api_address_is_an_argument_error(self):
+        """**`--api` 给错了是参数错,不是「投出去了而结果未知」。**
+
+        `urllib.request.Request('not-a-url/api/grab')` 抛的 `ValueError` 发生在
+        通道层那套归一化**之前**,会一路穿透到终端:实测 stdout 一个字都没有、
+        stderr 是一段 traceback —— 而「一条输入一行结果」是这条入口的契约。
+
+        后果判据:退出 2(参数错那一档)、stderr 有一句人读得懂的话、**一个请求
+        都没发**。
+        """
+        # `http://[::1` 这种不完整的 IPv6 是 `urlsplit` 自己抛 ValueError 的那一档
+        # (第 5 轮审查实测),和上面几种走同一个出口:一句话,不是 traceback。
+        for bad in ('not-a-url', 'ftp://h/x', '127.0.0.1:8787', 'http://[::1'):
+            with self.subTest(api=bad):
+                code, out, err = self.run_cli('--json', '--api', bad, URL)
+                self.assertEqual(code, 2, (out, err))
+                self.assertEqual(out.strip(), '', out)
+                self.assertIn('--api', err)
+                self.assertNotIn('Traceback', err)
+        self.assertEqual(self.plan['posted'], [], '参数错那一档不许发请求')
+        self.assertEqual(self.plan['asked'], [])
 
     def test_state_only_never_posts_anything(self):
         """`--state` 是只读的:**一个 POST 都不许发**(不抓取、不起管道)。"""
@@ -377,46 +498,6 @@ class GrabCliTests(unittest.TestCase):
         self.assertNotIn('已写入知识库', out)
         self.assertEqual(self.paths('GET'), [], '--no-wait 不该去轮询')
 
-    # ---------------------------------------------------------------- 地址本身
-
-    def test_an_explicit_address_is_handed_over_untouched(self):
-        """**显式给出的那一条一个字符都不许动。** 自带一对括号的地址(维基那一类)
-        在第一个 `)` 处被截断之后,那个地址**可能照样存在** —— 收进来的于是是另一篇
-        文章,比抓不到更坏;`--refetch` / `--state` 走同一条解析,所以还会连带认错
-        「要替换哪一篇」「要查哪一篇」。
-        """
-        self.run_cli('--no-wait', FULLWIDTH)
-        self.run_cli('--no-wait', '--refetch', FULLWIDTH)
-        self.run_cli('--state', FULLWIDTH)
-        self.run_cli('--no-wait', 'https://example.org/post!')
-        self.assertEqual(self.plan['posted'],
-                         [FULLWIDTH, FULLWIDTH, 'https://example.org/post!'])
-        self.assertEqual(self.plan['asked'], [FULLWIDTH])
-
-    def test_whole_lines_on_stdin_are_handed_over_untouched(self):
-        """**标准输入里整行就是一条地址的那些,和显式参数一样保真。**
-
-        `-` 既用来粘一段话、也用来喂「一行一条」的清单,而第 2 轮审查实测的四组
-        恰恰都是后者:全角括号那一条被截成 `…/wiki/函数`(那一页真的存在),末尾带
-        `;` `,` `:` 的三条被剥掉最后一个字符 —— 后端 `normalize` 本来原样收下它们。
-        判据落在**真发出去的那几个请求**上,不是 `links_in` 的返回值。
-        """
-        self.run_cli('--no-wait', '-', stdin='\n'.join(STDIN_WHOLE_LINES))
-        self.assertEqual(self.plan['posted'], STDIN_WHOLE_LINES)
-
-    def test_pasted_prose_keeps_paired_brackets_and_cuts_at_the_lone_one(self):
-        """`-` 那一行**夹着叙述文字**时才抽取,判据有两条:
-
-        **括号按配对算** —— 配得上对的属于地址(`…/wiki/函数（数学）` 那一对),
-        **落单的右括号**标志行文从那里开始(`（见 <地址>）以及别的`)。
-        **全角句读直接切断** —— 它在裸地址里没有来源(要用必须先编码),所以
-        「<地址>。后面还有话」这种中间没有空白的常见写法接得住。
-        """
-        self.run_cli('--no-wait', '-',
-                     stdin=f'看这篇 {PAREN} 挺好，还有（{OTHER}）。\n'
-                           f'另外 {FULLWIDTH} 也值得读。')
-        self.assertEqual(self.plan['posted'], [PAREN, OTHER, FULLWIDTH])
-
     # ---------------------------------------------------------------- 恢复
 
     def test_recovery_goes_through_the_server_not_a_hardcoded_channel(self):
@@ -444,32 +525,57 @@ class GrabCliTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual([r['status'] for r in self.records(out)], ['saved', 'saved'])
         self.assertEqual(self.plan['runs'], 0, '恢复不该由命令行自己起一轮同步')
-        self.assertEqual(self.plan['posted'].count(OTHER), 2, '那一条该被重投一次恢复')
+        self.assertEqual(self.plan['restored'], [OTHER], '那一条该被求一次恢复')
+        self.assertEqual(self.plan['posted'].count(OTHER), 1, '恢复不走可创建那条路')
 
-    def test_the_automatic_renew_asks_only_to_restore(self):
-        """**自动恢复那一次重投必须带上 `restore_only`。**
+    def test_the_automatic_renew_goes_down_a_restore_only_path(self):
+        """**自动恢复走的是 `/api/grab/restore` 这条独立路径,不是 `/api/grab`。**
 
-        `/api/grab` 的公开契约是「在就恢复、不在就抓一篇新的」,而「刚才那次 state
-        查到它还在」不是写入那一刻它还在的保证。第 2 轮审查实测:等待期间历史清理
-        把那一行删掉之后,这一次重投原地**重新抓了一遍** —— 一条清理掉的 `rss`
-        文章被重建成 `inbox`、正文换成这次抓到的,而命令行照旧退出 0。
+        `/api/grab` 的公开契约是「在就恢复、**不在就抓一篇新的**」,而「刚才那次
+        state 查到它还在」不是写入那一刻它还在的保证:等待期间历史清理把那一行删掉
+        之后,那次重投会原地重新抓一遍,把一条清理掉的 `rss` 文章重建成 `inbox`
+        (第 2 轮审查实测)。
 
-        带上它之后那条路径**在服务端压根不存在**(`known` 为空就 409,
-        `tests/test_grab_store.py` 钉着那一半),不是靠「再查一次 state」赌窗口。
-        **也不许带 `refetch`**:恢复补的是后半条链,不是把内容换掉。
+        **收窄这件事必须在协议边界上成立。** 布尔字段那一版只在同版服务上对:
+        `kb.sh grab` 每次跑磁盘上的新 CLI,而撞见已经跑着的服务就直接用它 ——
+        那个没重启的进程用旧 `GrabRequest`,Pydantic **忽略**不认识的键,于是约束
+        静默消失(第 3 轮审查拿 `git show 5b70036:kb/web/grab_api.py` 的真模块实测:
+        实发 1 次取页、把清理掉的条目重建成 `inbox`,而命令行退出 0)。独立路径在那种
+        服务上回 404,这边据此停下来。
+
+        这里断三件事:打的是那条独立路径、**payload 里只有 url**(不带 `refetch`
+        —— 恢复补的是后半条链,不是把内容换掉)、以及可创建那条路没被用来恢复。
         """
-        self.plan['grabs'] = [(200, _grabbed(pipeline='busy', run='')),
-                              (200, _grabbed(added=0, duplicate=True))]
+        self.plan['grabs'] = [(200, _grabbed(pipeline='busy', run=''))]
         self.plan['states'] = {'*': [(200, _state()), (200, _done())]}
         code, out, _ = self.run_cli(URL, timeout='3')
         self.assertEqual(code, 0, out)
-        posts = [body for m, path, body in self.plan['calls']
-                 if m == 'POST' and path == '/api/grab']
-        self.assertEqual(len(posts), 2, '那一条该被重投一次恢复')
-        self.assertEqual((posts[0]['restore_only'], posts[0]['refetch']), (False, False),
-                         '第一次投递是正常收录,不该自我收窄成「只恢复」')
-        self.assertEqual((posts[1]['restore_only'], posts[1]['refetch']), (True, False),
-                         '恢复那一次必须声明「只恢复、不许创建」,而且不替人重抓')
+        posts = [(path, body) for m, path, body in self.plan['calls'] if m == 'POST']
+        self.assertEqual([path for path, _ in posts],
+                         ['/api/grab', '/api/grab/restore'])
+        self.assertEqual(posts[1][1], {'url': URL}, '恢复那一次只许给出地址')
+        self.assertEqual(self.plan['posted'], [URL], '恢复不许走可创建那条路')
+
+    def test_a_server_too_old_to_restore_is_not_downgraded(self):
+        """**跑着的服务没有这条路(404)时到此为止 —— 不换回那条会创建内容的路。**
+
+        这是「更新了文件却没重启」那一刻的形态:库里那一份一个字节没动,所以档位
+        照旧是「已存下、还没写进知识库」、退出码 0;但那句话里要说清下一步是重启,
+        不然这几条只是「还没写进知识库」,看不出原因。**可创建那条路一次都不许再打**
+        (那正是会把清理掉的条目重建出来的动作)。
+        """
+        self.plan['grabs'] = [(200, _grabbed(pipeline='busy', run=''))]
+        self.plan['restores'] = [(404, {'detail': 'Not Found'})]
+        self.plan['states'] = {'*': [(200, _state())]}
+        code, out, _ = self.run_cli('--json', URL, timeout='1.5')
+        self.assertEqual(code, 0, out)
+        [rec] = self.records(out)
+        self.assertEqual(rec['status'], 'pending', rec)
+        self.assertIn('比代码旧', rec['detail'])
+        self.assertIn('restart', rec['detail'])
+        self.assertEqual(self.plan['posted'], [URL], '不许降级去打可创建那条路')
+        # **只试一次**:那条路不存在,再求几次只是白占预算。
+        self.assertEqual(self.plan['restored'], [URL])
 
     def test_an_item_cleaned_up_while_waiting_is_never_called_written(self):
         """恢复撞上 409(那一行已经不在库里了)之后,**不许说成已写入知识库**。
@@ -477,8 +583,9 @@ class GrabCliTests(unittest.TestCase):
         后果判据:那一条的终态是「库里没有这一行」,退出码非 0 —— 用户据此知道这
         一篇要重投,而不是去检索里找一篇不存在的文章。
         """
-        self.plan['grabs'] = [(200, _grabbed(pipeline='busy', run='')),
-                              (409, {'detail': '这一条已经不在库里了，没有可恢复的条目'})]
+        self.plan['grabs'] = [(200, _grabbed(pipeline='busy', run=''))]
+        self.plan['restores'] = [
+            (409, {'detail': '这一条已经不在库里了，没有可恢复的条目'})]
         self.plan['states'] = {'*': [(200, _state()),
                                      (200, {'ok': True, 'url': URL, 'known': False,
                                             'done': False, 'content_ok': False,
@@ -486,9 +593,17 @@ class GrabCliTests(unittest.TestCase):
         code, out, _ = self.run_cli('--json', URL, timeout='3')
         self.assertEqual(code, 1, out)
         [rec] = self.records(out)
-        self.assertEqual(rec['status'], 'failed', rec)
-        self.assertIn('库里没有这一行', rec['detail'])
+        # **这一条后端确认收下了**(`added=1`),之后才被清理掉 —— 所以是「收下了、
+        # 现在不在库里」,不是 `failed` 那句「一个字节都没写、再投一次」。两者的
+        # 下一步不一样:后者会让人原地再抓一篇,而删掉它的可能正是用户自己。
+        self.assertEqual(rec['status'], 'gone', rec)
+        self.assertEqual(rec['label'], '收下了，现在不在库里')
+        self.assertEqual(rec['added'], 1, rec)
+        self.assertNotIn('没存下来', rec['detail'])
         self.assertNotIn('已写入知识库', out)
+        # 409 那一档**不许被当成「那就抓一篇新的」**:可创建那条路只许被用过一次
+        # (最初那次投递)。
+        self.assertEqual(self.plan['posted'], [URL])
 
     def test_recovery_has_a_ceiling_even_when_answers_are_lost(self):
         """永远导不出去的那一条**不许变成一个不停起管道的循环**(那一轮带 extract、
@@ -508,121 +623,6 @@ class GrabCliTests(unittest.TestCase):
         self.run_cli(URL)
         self.assertEqual(self.plan['posted'], [URL])
         self.assertEqual(self.plan['runs'], 0)
-
-    # ---------------------------------------------------------------- 通道
-
-    def test_a_body_cut_midway_is_not_a_traceback(self):
-        """**正文读到一半对方关连接**抛的是 `http.client.IncompleteRead`,不是
-        OSError —— 漏掉它的后果实测过:异常一路穿透,终端上一段 traceback、stdout
-        一个字都没有,**而且一次用于核实的 GET 都没发**,而服务端那会儿可能已经把
-        这一行存下了。
-        """
-        self.plan['cut_body'] = True
-        code, out, err = self.run_cli('--json', URL)
-        self.assertEqual(code, 1, out + err)
-        self.assertNotIn('Traceback', err)
-        self.assertIn('读到一半断了', out, '那句话要人读得懂')
-        [rec] = self.records(out)
-        self.assertEqual((rec['status'], rec['url']), ('unknown', URL), rec)
-        self.assertTrue(self.paths('GET'), '断在半路之后要去核实一次事实')
-
-    def test_a_broken_channel_still_answers_for_every_input(self):
-        """批量途中断线:**每一条输入都要有自己能对上的一行** —— 出问题那一条说
-        「结果不确定」,后面几条说「还没投」。少了它们,批量调用方既不知道哪条已经
-        投出去了、也不知道哪些压根没试过。
-        """
-        self.plan['grabs'] = [(500, 'boom')]
-        self.plan['states'] = {'*': [(500, 'boom')]}
-        code, out, err = self.run_cli('--json', URL, OTHER)
-        self.assertEqual(code, 1, out + err)
-        recs = self.records(out)
-        self.assertEqual([r['url'] for r in recs], [URL, OTHER])
-        self.assertEqual([r['status'] for r in recs], ['unknown', 'not_tried'])
-
-    def test_local_requests_ignore_any_proxy_in_the_environment(self):
-        """这台机器上常设 `*_proxy`,而 urllib 默认会把 `127.0.0.1` 也交给代理 ——
-        拿回一个跟知识库毫无关系的 502,于是被说成「这条没收下」(实测过)。
-        """
-        for var in ('http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY'):
-            # **恢复原值,不是一律删掉**:这台机器上这几个变量本来就设着,而测试
-            # 之间共用一个进程 —— pop 掉之后后面哪个用例要联网(或要按代理解析某个
-            # 地址)就会在**同跑时**红、单跑永远绿,归因能耗掉一整轮。
-            self.addCleanup(os.environ.__setitem__ if var in os.environ
-                            else os.environ.pop, var,
-                            os.environ.get(var, None))
-            os.environ[var] = 'http://127.0.0.1:1'
-        self.plan['states'] = {'*': [(200, _done())]}
-        code, out, err = self.run_cli('--json', URL)
-        self.assertEqual(code, 0, out + err)
-        self.assertEqual(self.records(out)[0]['status'], 'saved')
-
-    def test_the_stated_timeout_bounds_the_whole_wait(self):
-        """说出去的那个秒数要是**上限**。超时是逐请求的,所以剩余预算必须传进每一
-        次 state 查询 —— 不传的话 `--timeout 1` 会在一条慢 state 上等满单次上限
-        (15 秒),一批很多条还会累加。
-
-        **判据有两条,一条看表一条不看表**:总耗时要短于那条慢 state(不然「压短」
-        只是说法);而压短之后那一次查询**必然超时**,于是档位停在投递回包那句话上,
-        不是 state 的 `owing` —— 后者不依赖机器快慢。
-        """
-        import time
-        self.plan['state_delay'] = 3        # 比修好之后的单次预算(约 1 秒)长
-        started = time.monotonic()
-        code, out, _ = self.run_cli(URL, timeout='1')
-        self.assertEqual(code, 0, out)
-        self.assertLess(time.monotonic() - started, 2.5, '单次请求没有被剩余预算压短')
-        self.assertIn('正在写入知识库', out)
-        self.assertNotIn('还没写成 vault 里那一篇', out, '那一次查询本该超时')
-
-    def test_a_batch_of_slow_queries_does_not_each_get_its_own_wait(self):
-        """预算是**整个等待阶段**的,不是每条各一份:一批 N 条慢查询不许继续执行
-        N 次 —— 那样说出去的秒数会被乘以条数。所以每一次请求**之前**都要看预算,
-        耗尽立即结束,而不是整批查完才看。
-        """
-        import time
-        self.plan['state_delay'] = 3
-        started = time.monotonic()
-        code, out, _ = self.run_cli('--json', URL, OTHER, 'https://example.org/c',
-                                    timeout='1')
-        self.assertEqual(len(self.records(out)), 3, '三条输入要各有自己的一行')
-        self.assertLess(time.monotonic() - started, 2.5, '后面几条又各等了一份预算')
-        self.assertEqual(len(self.plan['asked']), 1,
-                         '预算耗尽之后还在发查询:' + repr(self.plan['asked']))
-
-    def test_the_pipeline_probe_is_inside_the_same_budget(self):
-        """「管道在不在跑」那一问**也吃等待预算**。它不在预算里的话,`--timeout 1`
-        之后还能再等满它自己那一份上限(15 秒);返回之后不再确认预算,还能接着发出
-        一次恢复写请求 —— 那是**写**,而且带 extract 的那一轮要调模型。
-        """
-        import time
-        self.plan['status_delay'] = 3
-        started = time.monotonic()
-        code, out, _ = self.run_cli(URL, timeout='1')
-        self.assertEqual(code, 0, out)
-        self.assertLess(time.monotonic() - started, 2.5, '那一问没被剩余预算压短')
-        self.assertEqual(self.plan['posted'], [URL], '预算耗尽之后还发了一次恢复写')
-
-    def test_links_are_picked_out_of_pasted_text_and_deduped(self):
-        found = cli.links_in('看这篇 %s 挺好，还有（%s）以及 %s。' % (URL, OTHER, URL))
-        self.assertEqual(found, [URL, OTHER])
-
-    def test_prose_marks_never_turn_one_address_into_another(self):
-        """抽取这一层是启发式,所以它的不变量是**宁可留下一个抓不到的坏地址,也不
-        截短成另一个可能存在的目标**。左边那一列都是真实写法。
-        """
-        for text, want in (
-                # 配对的括号属于地址:剥掉就换了一篇文章(两种括号各一条)
-                (f'见 {PAREN} 这篇', [PAREN]),
-                (f'见 {FULLWIDTH} 这篇', [FULLWIDTH]),
-                # 落单的右括号 / 全角句读:行文从那里开始
-                (f'（见 {URL}）以及别的', [URL]),
-                (f'见 {URL}。后面还有话', [URL]),
-                (f'见 {URL}，还有 {OTHER}。', [URL, OTHER]),
-                # ASCII 的 `!` 是 URL 合法的子分隔符,不许当句末剥掉
-                ('看 https://example.org/post! 这条', ['https://example.org/post!'])):
-            with self.subTest(text=text):
-                self.assertEqual(cli.links_in(text), want)
-
 
 @requires_headless
 class GrabCliLiveTests(unittest.TestCase):

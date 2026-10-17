@@ -377,19 +377,35 @@ cmd_grab() {
     case "$a" in -h|--help) exec "$BOOT_PY" "$ROOT/scripts/grab_cli.py" --help ;; esac
   done
   # **余下的参数校验也排在任何副作用之前。** `--parse-only` 只解析就退出:不读
-  # 标准输入、不发一个请求、不起服务。
-  "$BOOT_PY" "$ROOT/scripts/grab_cli.py" --parse-only "$@" || return
-  if ! port_busy "$WEB_PORT"; then
-    local common; common="$(git -C "$ROOT" rev-parse --path-format=absolute \
-                              --git-common-dir 2>/dev/null || true)"
-    if [ -n "$common" ] && [ "$common" != "$ROOT/.git" ]; then
-      die "这是 worktree,而 $WEB_PORT 上还没有服务 —— 这儿起的那份会用本检出的 data/,
+  # 标准输入、不发一个请求、不起服务。它顺带把**最终生效的那个 kb-web 地址**打
+  # 回来(默认值就用下面那次调用的同一个 `--api`,所以两次的参数装配是同一份)。
+  local want
+  want="$("$BOOT_PY" "$ROOT/scripts/grab_cli.py" --parse-only --api "$API" "$@")" || return
+  # **只有目标就是本机托管那份服务时,才替它起/拦。** `--api` 指到别处(另一台机器、
+  # 自己另起的一份)时,下面这道闸门和 web_start 管的是**另一个**服务:worktree 里
+  # 会在连上用户给的那个地址之前就 die,主检出则多起一份用户压根不需要的守护进程
+  # (第 6 轮审查 N3)。那种情况下服务的生命周期归他自己,这边只负责把参数交出去。
+  # **明确认出「目标是另一个地址」才跳过。** `$want` 空着、或者将来被改成多打一行,
+  # 一律**照旧按本机走** —— 管道跑在 kb-web 进程内,静默不起服务的代价是内容留在
+  # feeds.db 里、检索不到(那比多起一份服务坏)。
+  local local_api=1
+  case "$want" in
+    "${API%/}") ;;
+    http://*|https://*) local_api= ;;
+  esac
+  if [ -n "$local_api" ]; then
+    if ! port_busy "$WEB_PORT"; then
+      local common; common="$(git -C "$ROOT" rev-parse --path-format=absolute \
+                                --git-common-dir 2>/dev/null || true)"
+      if [ -n "$common" ] && [ "$common" != "$ROOT/.git" ]; then
+        die "这是 worktree,而 $WEB_PORT 上还没有服务 —— 这儿起的那份会用本检出的 data/,
      收进去的文章进的是测试库,而命令行会说「已写入知识库」。
      去主检出跑:cd ${common%/.git} && ./kb.sh grab $*
      确实要在这儿收(数据目录是显式挂的):先 ./kb.sh start,再跑这条。"
+      fi
     fi
+    web_start
   fi
-  web_start
   "$BOOT_PY" "$ROOT/scripts/grab_cli.py" --api "$API" "$@"
 }
 

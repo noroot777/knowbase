@@ -66,7 +66,13 @@ class GrabCommandTest(unittest.TestCase):
             d.mkdir(parents=True)
         shutil.copy2(REPO / "kb.sh", self.root / "kb.sh")
         (self.root / "kb.sh").chmod(0o755)
-        shutil.copy2(REPO / "scripts" / "grab_cli.py", self.root / "scripts")
+        # **两个文件一起拷。** `grab_cli.py` 和同目录的 `grab_http.py` 是一对
+        # (通道层拆出去了);只拷一个的话这一组会红在 ImportError 上,而那跟它要钉的
+        # 「帮助不起服务」毫无关系。
+        # **三个文件一套**(入口 + 通道层 + 输入层):少拷一个,隔离环境里那条
+        # 命令一 import 就炸,而红出来的话指不到「夹具没拷全」这件事。
+        for name in ("grab_cli.py", "grab_http.py", "grab_input.py"):
+            shutil.copy2(REPO / "scripts" / name, self.root / "scripts")
         self.log = base / "uv.log"
         self.port = _free_port()
         stub = self.bin / "uv"
@@ -123,6 +129,28 @@ class GrabCommandTest(unittest.TestCase):
         self._run("--no-wait", "--timeout", "1", "https://example.org/a")
         self.assertTrue(any("kb-web" in c for c in self._uv_calls()),
                         "正常参数被帮助那道短路挡掉了:" + repr(self._uv_calls()))
+
+    def test_api_指到别处时不起本机那一份(self) -> None:
+        """`--api` 指到别处(另一台机器、自己另起的一份)时,这一层的闸门和
+        `web_start` 管的是**另一个**服务:主检出会多起一份用户压根不需要的守护
+        进程,worktree 里更糟 —— 在连上他给的那个地址之前就 die。那种情况下服务的
+        生命周期归他自己。
+        """
+        r = self._run("--api", "http://127.0.0.1:1", "--no-wait",
+                      "https://example.org/a")
+        self.assertEqual([c for c in self._uv_calls() if "kb-web" in c], [],
+                         "指了别处的服务,还起了本机这一份:" + repr(self._uv_calls()))
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_api_指的就是本机那份时照旧起服务(self) -> None:
+        """**反过来钉一边**:判据是「目标是不是本机托管那一份」,不是「有没有给
+        `--api`」。少了它,把那段写成「给了 --api 就一律不起」也全绿,而那会让
+        `--api http://127.0.0.1:$KB_WEB_PORT` 这种写法从此收不进知识库。
+        """
+        self._run("--api", f"http://127.0.0.1:{self.port}", "--no-wait",
+                  "--timeout", "1", "https://example.org/a")
+        self.assertTrue(any("kb-web" in c for c in self._uv_calls()),
+                        "目标就是本机那份,却没起:" + repr(self._uv_calls()))
 
 
 if __name__ == "__main__":

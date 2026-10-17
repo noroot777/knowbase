@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from kb import pipeline
 from kb.feeds import grab
@@ -30,26 +30,45 @@ from kb.source_types import SOURCE_TYPES
 router = APIRouter(prefix='/api/grab')
 
 
-class GrabRequest(BaseModel):
+class RestoreRequest(BaseModel):
+    """「只把欠的那一步补上」——`POST /api/grab/restore` 的请求体。
+
+    **恢复故意是独立端点,不是 `/api/grab` 上的一个布尔字段。** 那种写法在
+    **跨版本**那一刻不成立:Pydantic 默认忽略不认识的键,所以更新了文件而没有重启
+    的那个 kb-web 收到 `restore_only=true` 会**静默当没看见**,继续走它那条
+    「不在就抓一篇新的」—— 实测形态:等待期间历史清理把那一行删掉之后,旧端点实发
+    1 次对外取页,把一条清理掉的 `rss` 文章**重建成 `inbox`**、标题换掉,而命令行
+    照旧退出 0(第 3 轮审查,拿 `git show 5b70036:kb/web/grab_api.py` 的真模块当
+    那个没重启的进程)。
+
+    换成独立路径之后,**旧服务的回答是 404** —— 客户端据此知道「这台服务还不会做
+    这件事」,停下来说一句,而不是被降级成一个会创建内容的动作。这就是「不认识这个
+    操作的服务必须拒绝,不许默默当成别的操作」那条协议边界。
+
+    **多余的键一律拒掉,不许被忽略**(`extra='forbid'`):默认那套「静默丢掉不认识
+    的键」正是上面那个故障的机制 —— 哪天又有人想拿一个字段表达「只恢复」,他会当场
+    被拒,而不是拿到一个会创建内容的 200。两个请求体都这么定(面板只传
+    `url` / `refetch`,`kb/static/js/grab.js` 那一处)。
+
+    **拒的那个码是 422,不是 400**:`extra='forbid'` 走的是 FastAPI 的请求体校验
+    (`RequestValidationError`),和下面那几处手写的 `HTTPException(400, …)` 不是
+    一条路。两边的消费方都按整个 4xx 分支处理(命令行 `ApiRefused`、面板
+    `apiFail`),所以**这里不为了对齐注释去改校验的状态码** —— 那会把项目里
+    「校验错 = 422」这条约定改掉。回归在 `tests/test_grab_endpoint.py`。
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
     url: str = Field(min_length=1, max_length=2048)
+
+
+class GrabRequest(RestoreRequest):
     #: **用户明确要求「重新抓一次」。** 它不看库里那一份过不过得了质量那一道:
     #: 那道判据只认得出**我们认得出的**坏内容(通篇复读那一类),而「五段各不相同
     #: 的会员墙文案」照样过关、从此 content_ok 为真 —— 要是恢复出口也架在同一道
     #: 判据上,这种错存就永远换不回来(第 3 轮审查实测:原站恢复可读之后重投仍回
     #: 「已经在知识库里了」,HTTP 发出 0 次)。所以人说「再抓一次」就重抓。
     refetch: bool = False
-    #: **只恢复库里已经有的那一行:不抓网页、不新建条目、不替换正文。**
-    #: 命令行那条入口的自动恢复用它(`scripts/grab_cli.py` 的 `renew`)——
-    #: 批量投递时后面几条撞上前一条起的那一轮,它们的内容在库里却没人替它们跑
-    #: export,所以要再求一次「把欠的那一步补上」。
-    #:
-    #: **「我刚才查到它还在」不是写入那一刻它还在的保证。** 不带这道约束的话,
-    #: 那一次重投走的是**可创建**的那条路:等待期间历史清理
-    #: (`scripts/feed_trim_history`)把那一行删掉之后,它会原地**重新抓一遍**、
-    #: 建成一条新条目 —— 实测形态:一条 `rss` 历史条目被清理掉,随后那次自动恢复
-    #: 发出 1 次对外取页、把它重建成 `inbox`,正文换成这次抓到的,而命令行照旧
-    #: 退出 0。所以这一档在**构造上**没有那条路径:`known` 为空就直接拒,不往下走。
-    restore_only: bool = False
 
 
 def _resume_hint(channel: str) -> str:
@@ -204,6 +223,27 @@ def grab_state(url: str = Query(..., min_length=1, max_length=2048)):
     return out
 
 
+@router.post('/restore')
+def grab_restore(body: RestoreRequest):
+    """**只恢复**库里已经有的那一行:把欠的后半条链补上。
+
+    不抓网页、不新建条目、不替换正文 —— 判断和 `/api/grab` 的重复那一档共用
+    `_duplicate`(口径只有一份),收窄的部分由 `restore_only` 那个内部参数表达。
+
+    **那一行不在了就 409 到此为止。** 调用方(命令行的自动恢复)手里只有一张旧
+    快照,「刚才查到它还在」不是写入那一刻它还在的保证;历史清理随时会在这两步
+    之间把它删掉。409 而不是 400:这不是「这条地址不对」,是「这一刻没有可恢复的
+    条目」,调用方据此去问一次事实(只读那一问会答 `known=false`)。
+    """
+    try:
+        url = grab.normalize(body.url)
+    except grab.GrabError as e:
+        raise HTTPException(400, str(e)) from None
+    if not (seen := grab.known(url)):
+        raise HTTPException(409, '这一条已经不在库里了，没有可恢复的条目')
+    return _duplicate(url, seen, restore_only=True)
+
+
 @router.post('')
 def grab_link(body: GrabRequest):
     try:
@@ -211,15 +251,7 @@ def grab_link(body: GrabRequest):
         # **查重排在抓取前面**:已经收过的那一条连 HTTP 都不必发。它只是一句
         # 提示 —— 真正防重复的是 `put_items` 的 `DO NOTHING`(见 `grab.known`)。
         if seen := grab.known(url):
-            return _duplicate(url, seen, refetch=body.refetch,
-                              restore_only=body.restore_only)
-        if body.restore_only:
-            # **这一档到此为止,再往下就是抓取 + 新建。** 「恢复」说的是把库里那一行
-            # 欠的后半条链补上;那一行已经不在了(历史清理删掉的、或者从来没有过),
-            # 就没有可恢复的东西 —— 照常往下走的后果实测过(见 `restore_only`)。
-            # 409 而不是 400:这不是「这条地址不对」,是「这一刻没有可恢复的条目」,
-            # 调用方据此去问一次事实(只读那一问会答 `known=false`)。
-            raise HTTPException(409, '这一条已经不在库里了，没有可恢复的条目')
+            return _duplicate(url, seen, refetch=body.refetch)
         entry = grab.grab(url)
         saved = grab.save(entry)
     except grab.GrabError as e:

@@ -237,6 +237,8 @@ uv run kb stats
 ./kb.sh grab --refetch https://example.com/p # 库里那一份不对时重抓、确认得了就换掉
 pbpaste | ./kb.sh grab -                     # 从剪贴板那段文字里挑出链接收录
 ./kb.sh grab - < links.txt                   # 一行一条的清单：整行原样收，不做抽取
+echo '见 <https://example.com/p;> 这篇' | ./kb.sh grab -   # 行文里圈出来的也原样收
+echo '见 [原文](https://example.com/a_(b)) 这篇' | ./kb.sh grab -  # Markdown 按语法取目标
 
 # 订阅管理
 ./kb.sh accounts list | discover | add | remove | enable | disable [名字]
