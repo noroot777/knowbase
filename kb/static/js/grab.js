@@ -191,6 +191,16 @@ function updateGrabControls() {
   $('grab-refetch').hidden = !grabKnown || grabBusy;
   grabConverge();
   $('grab-hint').textContent = grabHintText();
+  // **投递栏会跟着正文一起收起**(`scroll-away`,见 docs/decisions/scroll-away.md),
+  // 而「这一篇没进去、你还得再做点什么」是要交付到人跟前的状态 —— 收起态是
+  // height:0 + inert,那句话就永远走不出去(短暂的 toast 过几秒也没了)。
+  // 给它标上 `role="alert"`,收起那一层的闸就认得出、已经收起的会当场放出来;
+  // 口径只有一份 —— 闸只认这个角色,由状态自己声明要不要人处理。
+  // **进行中和成功态不标**:那几档不该把投递栏永久钉在展开态。
+  const waiting = !grabBusy && (grabStage === 'failed' || grabStage === 'pending');
+  if (waiting) $('grab-hint').setAttribute('role', 'alert');
+  else $('grab-hint').removeAttribute('role');
+  if (typeof syncScrollAway === 'function') syncScrollAway();
   // 管道在跑时照旧能存:抓取和入库不碰 kb.db / vault,写进知识库那一步由后端
   // 按「占不到就如实说」处理(grab_api 里那一段)。所以这里**不拦**。
 }

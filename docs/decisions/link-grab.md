@@ -345,6 +345,13 @@
   选中痕迹,框看着像长了双眼皮(用户截图指出,无头实测复现)。全站别处一个 outline 都没有,
   这里曾是最后一处。回归在 `tests/subs_reader_checks.mjs` 的 `checkGrabInputFocus`
   —— `tests/redesign_probe.mjs` 第 8 节钉的是检索页和图鉴页那几个框,够不着这一个。
+- **落到 `failed` / `pending` 的那句持久提示要自己声明「要人处理」**:
+  `updateGrabControls()`(所有写 `#grab-hint` 的路唯一的汇合点)给它标上
+  `role="alert"` 再对一次账,收起那一层的闸认这个角色、会把投递栏当场放出来。
+  **进行中和成功态不标** —— 那几档不该把投递栏永久钉在展开态。不标的后果:投了
+  一条、接着往下读,慢回包返回 400,短暂 toast 过几秒就没了,而那句「这条没存
+  下来」躺在 `height:0 + inert` 的投递栏里,一个字都到不了人跟前(口径见
+  [`scroll-away.md`](scroll-away.md) 硬约束一节)。
 - **投递栏跟来源工具栏一起参与「读正文时收起」**(`class="scroll-away"`,机制见
   [`scroll-away.md`](scroll-away.md))。它和工具栏加起来 155px,而这一页的正文区高度是锁在
   可用视口上的 —— 不收起来,正文就一直少那么多行。

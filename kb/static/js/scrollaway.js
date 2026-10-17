@@ -36,6 +36,19 @@
 //    前者由 `scrollAwayBlocked()` 挡在收起之前(订阅页那条工具栏里装着「读取
 //    失败 + 重新读取」);后者由调用方传 `host`,收起时它身上会打
 //    `has-scroll-away`,`.away-exit` 那颗常驻按钮靠它显形。
+// ⑧ **自己改的那点高度不算用户在滚。** 收起/展开会改变滚动容器里的内容布局,
+//    浏览器为了让视口里那段文字别乱跑会补偿 `scrollTop`(scroll anchoring),
+//    而补偿方向正好跟收起相反 —— 认了它就是收起→补偿→展开→再补偿的来回震荡
+//    (实测:收藏详情里单次 120px 滚轮之后 1049ms 内方向反转 9 次,那条头在
+//    29.7~57px 之间抖,停手之后一点都没收起来)。所以改完高度要给一小段**平息
+//    期**,期间只跟着记位置、不改判;平息期一完,**把这一段里挪掉的那一截记成
+//    「我们自己造成的」,所有位置判据都要先把它加回去**。只吞事件是不够的:
+//    收起 57px 的头,补偿正好把 `scrollTop` 从 120 压到 63 —— **低于
+//    `AWAY_ENTER`**,于是「回到顶部一律放出来」当场触发,展开又反向补偿回 120,
+//    这是一组双稳态,吞多久都会在平息期结束那一下炸开。
+//    这一档**只有收起目标落在它自己那条轴里面时才出得来**(四处接入里只有收藏
+//    详情是这样,另外三处的目标都在轴外),但判据属于通用层:哪一处接成那样都
+//    不该抖。
 // ⑦ **阅读区不在页面上了就得瞬时复位**,否则那条工具栏停在 `height:0 + inert`
 //    上,切回来谁都点不着它。这条不许押在「某个按钮记得调一下」——
 //    每条轴自己挂一个 `ResizeObserver` 盯着,元素被 `display:none` 时尺寸归零,
@@ -60,7 +73,8 @@ const AWAY_ROOM = 160;
 const AWAY_FLOOR = 24;
 /** 松手之后多久内的滚动还算他自己滚的(口径②,接惯性用;按着的时候不看它)。 */
 const AWAY_GESTURE_MS = 700;
-/** 清理 inline 样式的兜底时限,比 base.css 里那条 .2s 过渡长一截。 */
+/** 清理 inline 样式的兜底时限,也是自己改完高度之后那段平息期(口径⑧)。
+ *  比 base.css 里那条 .2s 过渡长一截 —— 锚定补偿是跟着过渡一帧帧来的。 */
 const AWAY_MS = 280;
 
 /**
@@ -112,6 +126,9 @@ function bindScrollAway(scroller, targets, opts = {}) {
   const axis = scrollAwayAxis(node);
   const state = {
     axis, targets: blocks, last: 0, carry: 0, gestureAt: 0, holding: false, off: [],
+    settleUntil: 0, settleTimer: 0, settleFrom: 0, settleHeight: 0, settleAway: false,
+    /** 自己改高度害浏览器补偿掉的位置,累计值。位置判据一律 `top + shift`(口径⑧)。 */
+    shift: 0,
     visible: opts.visible || (axis.gestures === node ? node : null),
     host: opts.host || null,
   };
@@ -178,9 +195,13 @@ function scrollAwayTick(state) {
   const top = state.axis.top;
   const delta = top - state.last;
   state.last = top;
+  // 口径⑧:平息期里的位置变化多半是浏览器替我们补的,**只记位置、不改判**。
+  // 排在「回到顶部」前面:那一支也会被吞掉,由 `scrollAwaySettled()` 补判。
+  if (state.settleUntil && Date.now() < state.settleUntil) { state.carry = 0; return; }
   // 回到顶部一律放出来 —— 换一篇文章(`readSourceItem` 把 scrollTop 写回 0)
   // 也走这一条,不用在那边另外记着调我们。**这个方向不过手势那道门。**
-  if (top <= AWAY_ENTER) { state.carry = 0; setScrollAway(state, false); return; }
+  // 位置要加回 `shift`:那一截是我们自己收起时害浏览器补掉的,不是用户滚上去的。
+  if (top + state.shift <= AWAY_ENTER) { state.carry = 0; setScrollAway(state, false); return; }
   if (!delta) return;
   if ((delta > 0) !== (state.carry > 0)) state.carry = 0;   // 方向反了,重新攒
   state.carry += delta;
@@ -196,15 +217,43 @@ function scrollAwayTick(state) {
 /** 收起 / 放出这一组。已经在那个状态就什么都不做。 */
 function setScrollAway(state, away) {
   if (state.targets.every(t => t.away === away)) return;
+  const height = scrollAwayHeight(state);     // 这一次涉及多少高度(改之前量)
   if (away) {
     if (scrollAwayBlocked(state)) return;                      // 里面有要人处理的告警
-    const axis = state.axis, height = scrollAwayHeight(state), room = axis.room;
+    const axis = state.axis, room = axis.room;
     if (room - height < AWAY_ROOM) return;                     // 整条轴太短
     if (room - axis.top < height + AWAY_FLOOR) return;         // 已经贴底
   }
   for (const t of state.targets) setScrollAwayTarget(t, away);
   if (state.host) state.host.classList.toggle('has-scroll-away', away);
   state.carry = 0;
+  // 口径⑧:高度正在动,接下来这一小段的位置变化先不当真;量级和起点记下来,
+  // 平息期结束要靠它们算出「这一截是不是我们自己害的」。
+  state.settleFrom = state.axis.top;
+  state.settleAway = away;
+  state.settleUntil = Date.now() + AWAY_MS;
+  clearTimeout(state.settleTimer);
+  state.settleTimer = setTimeout(() => scrollAwaySettled(state, height), AWAY_MS);
+}
+
+/**
+ * 平息期一完:把自己害掉的那一截位移记进 `shift`,再按真实位置补判一次(口径⑧)。
+ *
+ * - **记 `shift`** 是因为位置判据不能用被补偿过的坐标。只认跟这次高度变化**同向、
+ *   且不超过它**的那一截 —— 平息期里用户自己滚的那部分不许算进来(算进去会让
+ *   `shift` 跑飞,之后到了顶上也放不出来)。
+ * - **补判**是因为期间的事件都被吞了:用户要是在这期间滚回了顶上,他已经停在
+ *   那儿,不会再有下一次 scroll 事件来把这条头放出来。
+ */
+function scrollAwaySettled(state, height) {
+  state.settleUntil = 0;
+  const moved = state.settleFrom - state.axis.top;
+  state.shift += state.settleAway
+    ? Math.max(0, Math.min(height, moved))
+    : Math.min(0, Math.max(-height, moved));
+  state.last = state.axis.top;
+  state.carry = 0;
+  if (state.axis.top + state.shift <= AWAY_ENTER) setScrollAway(state, false);
 }
 
 /** 单块的收起/展开动画。收起态留下 inline 的 height/overflow,展开跑完撤干净。 */
@@ -236,6 +285,9 @@ function resetScrollAwayState(state) {
   state.carry = 0;
   state.holding = false;
   state.gestureAt = 0;
+  clearTimeout(state.settleTimer);
+  state.settleUntil = 0;
+  state.shift = 0;
   state.last = state.axis.top;
   if (state.host) state.host.classList.remove('has-scroll-away');
   for (const t of state.targets) {

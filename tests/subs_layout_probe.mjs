@@ -185,7 +185,7 @@ try {
   await checkSubscriptionEditorViews({ evaluate, wait, check, click, screenshot, send });
   await checkReaderScrollAway({ evaluate, wait, check, screenshot, send });
   await checkScrollAwayGuards({ evaluate, wait, check, click, screenshot, send, viewport });
-  await checkDrawerScrollAway({ evaluate, wait, check, screenshot, send });
+  await checkDrawerScrollAway({ evaluate, wait, check, screenshot, send, viewport });
   await checkGrabInputFocus({ evaluate, wait, check, click });
   await evaluate(`switchTab('gallery'); true`);
   check('离开订阅页面恢复普通布局', await evaluate(`!document.body.classList.contains('subs-reading') && !document.body.classList.contains('subs-mode')`));

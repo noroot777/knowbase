@@ -183,7 +183,55 @@ export async function checkScrollAwayGuards({ evaluate, wait, check, click, scre
   const up = await shape();
   check('往回滚不受手势门影响,照样放出来', up.head === open.head && up.top > 64, JSON.stringify({ beforeUp, up }));
 
-  // ── ④ 后台重绘不弹回来 ──────────────────────────────────────────────────
+  // ── ④ 手动收录那条持久提示也要送到人跟前 ──────────────────────────────
+  // 投递栏跟正文一起收起,而「这一篇没进去、你还得再做点什么」是终态提示 ——
+  // 落在 inert 子树里就永远走不出去(短暂的 toast 过几秒也没了)。走真实汇合点
+  // `updateGrabControls()`,不自己改 DOM。
+  await evaluate(`openSubsPanel('inbox'); true`);
+  await wait(`sourceKind === 'inbox' && !$('grab-bar').hidden`);
+  await evaluate(`switchSourceView('items');
+    $('source-workbench').classList.remove('is-list-only', 'is-focused'); true`);
+  await wait(`sourceView === 'items' && sourceRows.length > 0 && sourceReaderItem`);
+  await evaluate(`clearTimeout(sourcePoll); $('source-reader-scroll').scrollTop = 0; true`);
+  await settle();
+  const grabOpen = await evaluate(`Math.round($('grab-bar').getBoundingClientRect().height)`);
+  await collapse('手动收录');
+  const barAway = await evaluate(`Math.round($('grab-bar').getBoundingClientRect().height)`);
+  check('手动收录:前提 —— 投递栏也收起来了', barAway === 0, JSON.stringify({ grabOpen, barAway }));
+  await evaluate(`grabBusy = false; grabStage = 'failed';
+    grabNote = '抓取失败，这条没存下来；再投一次。'; updateGrabControls(); true`);
+  await settle();
+  const grabFailed = await evaluate(`(() => {
+    const bar = $('grab-bar'), hint = $('grab-hint');
+    const box = hint.getBoundingClientRect();
+    const hit = box.width && box.height
+      && document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return JSON.stringify({ bar: Math.round(bar.getBoundingClientRect().height),
+      inert: bar.hasAttribute('inert'), said: hint.textContent,
+      visible: !!hit && hint.contains(hit) });
+  })()`);
+  check('收录失败的持久提示一出现,投递栏自己放出来',
+    JSON.parse(grabFailed).bar >= 60 && !JSON.parse(grabFailed).inert, grabFailed);
+  check('那句失败原因真看得见', JSON.parse(grabFailed).visible
+    && /没存下来/.test(JSON.parse(grabFailed).said), grabFailed);
+  // 反过来钉一边:成功态不该把投递栏永久钉在展开态。
+  await evaluate(`grabStage = 'done'; grabNote = '已写入知识库，全文检索里搜得到了。';
+    updateGrabControls(); true`);
+  await settle();
+  await scrollTo(0);
+  await wheel(120, 6);
+  const grabDone = await evaluate(`Math.round($('grab-bar').getBoundingClientRect().height)`);
+  check('收录成功之后照旧收得起来', grabDone === 0, String(grabDone));
+  await evaluate(`grabStage = ''; grabNote = ''; updateGrabControls(); true`);
+  await evaluate(`openSubsPanel('social'); true`);
+  await wait(`sourceKind === 'social'`);
+  await evaluate(`switchSourceView('items');
+    $('source-workbench').classList.remove('is-list-only', 'is-focused'); true`);
+  await wait(`sourceView === 'items' && sourceRows.length >= 30 && sourceReaderItem`);
+  await evaluate(`clearTimeout(sourcePoll); true`);
+  await scrollTo(0);
+
+  // ── ⑤ 后台重绘不弹回来 ──────────────────────────────────────────────────
   await collapse('后台重绘');
   await evaluate(`applySubsReadingLayout(); true`);
   await settle();

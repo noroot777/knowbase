@@ -221,6 +221,8 @@
   .fv-inspector { position: relative; top: auto; scroll-margin-top: calc(var(--topbar-h) + 14px); }
   .fv-detail { max-height: none; overflow: visible; }
   .fv-detail > .fv-aside-heading { position: sticky; top: var(--topbar-h); }
+  /* 窄屏滚的是整页,absolute 的常驻返回按钮会跟着内容滚出视口 —— 钉在视口上 */
+  .fv-detail-exit { position: fixed; top: calc(var(--topbar-h) + 8px); right: 12px; z-index: 9; }
   .fv-start-intro { display: none; }
   .fv-recommendation { margin-top: 16px; }
   #favpanel .fv-detail-back { display: inline-flex; align-items: center; gap: 5px; width: auto; font-size: 11px; }

@@ -33,7 +33,8 @@ function rig() {
   const state = vm.createContext({ console, $, Date, URLSearchParams, CSS: { escape: value => value },
     document: { querySelector: () => null, querySelectorAll: () => [], addEventListener() {} },
     window: { addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} },
-    matchMedia: () => ({ matches: false }), modelLabel: value => value,
+    // 收藏详情的滚动轴跟着断点换(fav_view 的 FAV_NARROW),所以这份桩要接得住监听
+    matchMedia: () => ({ matches: false, addEventListener() {} }), modelLabel: value => value,
     navigator: { clipboard: { writeText: async () => {} } }, toast() {},
     confirmBox: async () => false, apiFail: async reply => reply.message || '请求失败',
     // 收藏详情那条头参与「读正文时让出位置」(scrollaway.js),那份脚本不在这个

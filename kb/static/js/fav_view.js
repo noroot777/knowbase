@@ -123,21 +123,39 @@ function closeFavDetail() {
   trigger.focus({ preventScroll: !matchMedia('(max-width: 760px)').matches });
 }
 
-// 读正文时让出位置:详情自己占一条轴,头那一条(「收藏详情」+ 返回)是 sticky 的。
-// **这一处每次重绘都是新 DOM**,所以绑定跟着渲染走,渲染前先把上一份解掉。
+// 读正文时让出位置:头那一条(「收藏详情」+ 返回)是 sticky 的,往下读时收起来。
+// **这一处每次重绘都是新 DOM**,所以绑定跟着渲染走,渲染前先把上一份解掉;
 // 收起之后右上角那颗常驻返回按钮顶上。机制见 kb/static/js/scrollaway.js。
 let favAway = null;
+/** 这一处的滚动轴**跟着断点换**,所以 query 存在外面,断点一变就重绑(见下)。 */
+const FAV_NARROW = matchMedia('(max-width: 760px)');
+
+/**
+ * 把收藏详情接上「读正文时让出位置」。
+ *
+ * **窄屏这块不自己滚**(`max-height:none; overflow:visible`,favorites.css),用户
+ * 滚的是整页;还照桌面那条轴绑的话,它的 `scrollTop` 和可滚距离都是 0,一下都收
+ * 不起来 —— 而那条 sticky 的头会一直占着屏幕上方一行。所以**轴要跟着当前布局
+ * 选**,断点变了重绑一次。可见性参照一律是 `.fv-detail` 自己(window 永远「在」)。
+ */
+function bindFavScrollAway() {
+  favAway?.release();
+  favAway = null;
+  const detail = $('fav-inspector').querySelector('.fv-detail');
+  if (!detail) return;
+  favAway = bindScrollAway(FAV_NARROW.matches ? window : detail,
+    [detail.querySelector('.fv-aside-heading')],
+    { visible: detail, host: $('fav-inspector') });
+}
+FAV_NARROW.addEventListener('change', () => { if (favAway) bindFavScrollAway(); });
+
 function renderFavInspector() {
   const item = favItems.find(row => row.id === favActive);
   document.querySelector('.fv-workbench')?.classList.toggle('has-detail', !!item);
   favAway?.release();
   favAway = null;
   $('fav-inspector').innerHTML = item ? favDetailHtml(item) : favStartHtml();
-  if (!item) return;
-  const detail = $('fav-inspector').querySelector('.fv-detail');
-  // 取不到就交给 bindScrollAway 自己收场(它承诺元素不在页面上时返回 null、不抛)。
-  favAway = bindScrollAway(detail, [detail?.querySelector('.fv-aside-heading')],
-    { host: $('fav-inspector') });
+  if (item) bindFavScrollAway();
 }
 
 function favDetailHtml(item) {

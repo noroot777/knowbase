@@ -14,18 +14,30 @@
 const SETTLE = 380;
 const settle = (ms = SETTLE) => new Promise(resolve => setTimeout(resolve, ms));
 
-/** 在某个元素中间滚几下。坐标要现算:这几处的宽度都跟视口绑着。 */
-async function wheelOver(send, evaluate, selector, delta, times) {
-  const at = JSON.parse(await evaluate(`(() => {
-    const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
-    return JSON.stringify({ x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) });
-  })()`));
+/** 在某个点上滚几下。 */
+async function wheelAt(send, at, delta, times) {
   for (let step = 0; step < times; step++) {
     await send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: at.x, y: at.y, deltaX: 0, deltaY: delta });
     await settle(90);
   }
   await settle();
   return at;
+}
+
+/**
+ * 在某个元素跟视口的**交集**中间滚几下。
+ *
+ * 不能直接拿元素自己的中心:窄屏那一支里 `.fv-detail` 比视口高出好几屏,它的
+ * 中心落在视口外,滚轮一下都发不进去(那条检查会变成一条不敏感的绿)。
+ */
+async function wheelOver(send, evaluate, selector, delta, times) {
+  const at = JSON.parse(await evaluate(`(() => {
+    const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+    const top = Math.max(0, box.top), bottom = Math.min(innerHeight, box.bottom);
+    const left = Math.max(0, box.left), right = Math.min(innerWidth, box.right);
+    return JSON.stringify({ x: Math.round((left + right) / 2), y: Math.round((top + bottom) / 2) });
+  })()`));
+  return wheelAt(send, at, delta, times);
 }
 
 /** 点一个元素的中心(这几颗按钮都是动态出现的,给不出稳定的 click 选择器)。 */
@@ -43,7 +55,7 @@ async function clickCenter(send, evaluate, selector) {
   return true;
 }
 
-export async function checkDrawerScrollAway({ evaluate, wait, check, screenshot, send }) {
+export async function checkDrawerScrollAway({ evaluate, wait, check, screenshot, send, viewport }) {
   const shape = (head, scroll, exit) => evaluate(`(() => {
     const h = document.querySelector(${JSON.stringify(head)});
     const s = document.querySelector(${JSON.stringify(scroll)});
@@ -151,7 +163,23 @@ export async function checkDrawerScrollAway({ evaluate, wait, check, screenshot,
   await settle();
   check('阅读器:换过篇之后关闭不出错', await evaluate(`$('reader').style.display === 'none'`), '');
 
-  // ── 收藏详情(每次重绘都是新 DOM,绑定要跟着走) ────────────────────────
+  // ── 收藏详情 ────────────────────────────────────────────────────────────
+  // 这一处跟另外三处不一样:**要收的那条头在它自己那条轴里面**。所以正文必须用
+  // **真实的可锚定文本**撑开 —— 浏览器的滚动锚定只在有文本节点要保位置时才补偿
+  // `scrollTop`,拿一个空白的高盒子占位,那一档就是一条不敏感的绿(上一轮正是
+  // 这么漏掉的:连滚六次最终状态碰巧对了,而单次滚动停手时它一直在抖)。
+  const favFixture = `(() => {
+    const box = document.querySelector('.fv-detail-content');
+    box.innerHTML = Array.from({ length: 60 }, (unused, i) =>
+      '<p style="margin:0 0 16px;line-height:1.9">第 ' + (i + 1) + ' 段：'
+      + '收藏详情的正文得是真文字，浏览器才会在布局变了之后去保住视口里的这一段。'.repeat(3)
+      + '</p>').join('');
+    document.querySelector('.fv-detail').scrollTop = 0;
+    scrollTo(0, 0);
+    return true;
+  })()`;
+  const favShape = () => shape('.fv-detail > .fv-aside-heading', '.fv-detail', '.fv-inspector .away-exit');
+
   await evaluate(`switchTab('fav'); true`);
   await settle();
   await evaluate(`(() => {
@@ -163,19 +191,75 @@ export async function checkDrawerScrollAway({ evaluate, wait, check, screenshot,
     return true;
   })()`);
   await wait(`favActive === 901 && document.querySelector('.fv-detail')`);
-  await evaluate(`document.querySelector('.fv-detail-content').style.height = '2400px';
-    document.querySelector('.fv-detail').scrollTop = 0; true`);
+  await evaluate(favFixture);
   await settle();
-  const favTop = await shape('.fv-detail > .fv-aside-heading', '.fv-detail', '.fv-inspector .away-exit');
+  const favTop = await favShape();
   check('收藏详情:头在上面占着一行', favTop.head >= 30 && !favTop.exit, JSON.stringify(favTop));
-  await wheelOver(send, evaluate, '.fv-detail', 120, 6);
-  const favAwayShape = await shape('.fv-detail > .fv-aside-heading', '.fv-detail', '.fv-inspector .away-exit');
-  check('收藏详情:往下滚,头收起来', favAwayShape.head === 0 && favAwayShape.inert, JSON.stringify(favAwayShape));
-  check('收藏详情:常驻返回按钮顶上来了', favAwayShape.exit, JSON.stringify(favAwayShape));
+
+  // **一次滚轮,然后停手** —— 之后一个输入都不再注入,只等。这一档钉的是
+  // 「收起这件事自己不会把自己撤销」:头的高度变化会让浏览器补偿 `scrollTop`,
+  // 补偿方向正好跟收起相反,认了它就来回震荡(收→补→展→再补),停手两秒之后
+  // 那条头还占着原来的位置。两次采样隔开一秒多,抖的话不可能两次都正好是 0。
+  await wheelOver(send, evaluate, '.fv-detail', 120, 1);
+  await settle(700);
+  const favSettling = await favShape();
+  await settle(1300);
+  const favSettled = await favShape();
+  check('收藏详情:一次滚轮停手之后稳稳收起,不来回抖',
+    favSettling.head === 0 && favSettled.head === 0, JSON.stringify({ favSettling, favSettled }));
+  check('收藏详情:收起之后那条头不许还能用 Tab 走进去', favSettled.inert, JSON.stringify(favSettled));
+  // 收起把位置本身压低了(头在轴里面,浏览器为了保住视口里那段文字补掉了一截):
+  // **「回到顶部」那一支要是不把那一截加回去,轻轻再往下滚一下就会命中它、头当场
+  // 弹回来。** 这里只往下挪到那条线上,方向上才攒 +1、不够触发收起那一支,所以
+  // 这一下只会走位置判据 —— 正好单独钉住它。
+  const favEdge = JSON.parse(await evaluate(`(() => {
+    const box = document.querySelector('.fv-detail');
+    const from = Math.round(box.scrollTop);
+    box.scrollTop = from < 64 ? 64 : from;
+    return JSON.stringify({ from, to: Math.round(box.scrollTop) });
+  })()`));
+  await settle();
+  const favEdged = await favShape();
+  // 前半句同时钉住夹具前提:收起之后位置确实被压到了那条线以下,不然这条不敏感。
+  check('收藏详情:收起之后位置落在「回到顶部」那条线上,头也不许弹回来',
+    favEdge.from < 64 && favEdged.head === 0, JSON.stringify({ favEdge, favEdged }));
+  check('收藏详情:常驻返回按钮顶上来了', favSettled.exit, JSON.stringify(favSettled));
   await screenshot('scroll-away-favorite-collapsed');
   await clickCenter(send, evaluate, '.fv-inspector .away-exit');
   check('收藏详情:收起状态下那颗返回按钮真能退回收藏架',
     await evaluate(`favActive === null`), '');
-  await evaluate(`favItems = []; renderFavCollection(); renderFavInspector(); switchTab('subs'); true`);
+
+  // ── 收藏详情 · 窄屏 ─────────────────────────────────────────────────────
+  // 760px 以下这块**不自己滚**(`max-height:none; overflow:visible`),用户滚的是
+  // 整页。照桌面那条轴绑的话 scrollTop 和可滚距离都是 0,一下都收不起来,而那条
+  // sticky 的头会一直占着屏幕上方一行 —— 轴得跟着断点换。
+  await viewport(390, 844);
+  await settle();
+  await evaluate(`openFavDetail(901); true`);
+  await wait(`favActive === 901 && document.querySelector('.fv-detail')`);
+  await evaluate(favFixture);
+  await settle();
+  const narrowTop = await favShape();
+  const narrowAxis = JSON.parse(await evaluate(`JSON.stringify({
+    inner: Math.round(document.querySelector('.fv-detail').scrollHeight
+      - document.querySelector('.fv-detail').clientHeight),
+    page: Math.round(document.documentElement.scrollHeight - innerHeight) })`));
+  // 夹具自己钉一句:这一档的前提就是「内部不滚、整页滚」,前提不成立下面是假绿。
+  check('收藏详情窄屏:前提 —— 内部不滚、整页才滚',
+    narrowAxis.inner === 0 && narrowAxis.page > 400, JSON.stringify(narrowAxis));
+  check('收藏详情窄屏:头一开始占着一行', narrowTop.head >= 30 && !narrowTop.exit, JSON.stringify(narrowTop));
+  await wheelAt(send, { x: 195, y: 500 }, 120, 10);
+  const narrowAway = await favShape();
+  check('收藏详情窄屏:滚整页也收得起来', narrowAway.head === 0 && narrowAway.inert,
+    JSON.stringify({ narrowAway, scrollY: await evaluate(`Math.round(scrollY)`) }));
+  check('收藏详情窄屏:常驻返回按钮跟着顶上来', narrowAway.exit, JSON.stringify(narrowAway));
+  await screenshot('scroll-away-favorite-narrow');
+  await clickCenter(send, evaluate, '.fv-detail-exit');
+  check('收藏详情窄屏:那颗按钮真能退回收藏架', await evaluate(`favActive === null`), '');
+
+  await viewport(1440, 1000);
+  await settle();
+  await evaluate(`favItems = []; renderFavCollection(); renderFavInspector();
+    scrollTo(0, 0); switchTab('subs'); true`);
   await settle();
 }
