@@ -1,7 +1,9 @@
 // 日报正文里的本地译文入口(kb/static/js/daily_zh.js)在真页面上的回归。
 //
-// 验四件事:
+// 验五件事:
 //   ① 出处是译文的那一条后面多一个入口,**不是译文的那一条一个字都不多**;
+//   ①b 同一篇被重复收录时(url 一份存页面那个编码形式、一份存原样),字面对得上
+//      的那一行没译文**不许**把等价的那一份挡在候选外面;
 //   ② 补上去的字不进正文的文本(`textContent` / 选区都读不到它)—— 日报正文
 //      同时是「收藏此段」的采集面,插一个真字符会让已收下的片段整体错位;
 //   ③ 点开从**左边**滑出阅读器,读的是 vault 里那一篇中文;而别处打开的阅读器
@@ -23,6 +25,7 @@ const REPORT = process.argv[3];     // 摆好那份历史日报的日期
 const ZH_URL = process.argv[4];     // 译文那一篇的原文地址
 const ZH_MARK = process.argv[5];    // 译文正文里的暗号
 const HREFS = JSON.parse(process.argv[6] || "{}");   // 后端算的「库里 url → 页面 href」
+const DUP = JSON.parse(process.argv[7] || "{}");    // 重复收录那一对:{href, zhPath}
 const ZH_PATH = "source/rss/zh-of-en.md";
 const PLAIN_URL = "https://example.org/a";   // 库里有、但不是译文的那一条
 
@@ -95,9 +98,36 @@ check("入口指向 vault 里那一篇", shot.href === "/doc/" + ZH_PATH.split("
       shot.href);
 check("库里有、但不是译文的那一条一个字都没多(反过来钉一边)",
       !shot.oneHasZh && shot.oneHref === PLAIN_URL, JSON.stringify(shot));
-check("整篇只多了这一个入口", shot.total === 1, shot.total);
+// 两条:`[4]` 那一篇,加下面 ①b 那一组的 `[5]`。整篇只有这两处出处是译文。
+check("入口只长在该长的地方", shot.total === 2, shot.total);
 check("提示里带着原文标题", /原文标题：A runtime release, in English/.test(shot.title), shot.title);
 check("读屏软件读得到它是什么", shot.label === "读本地中文译文", shot.label);
+
+// ── 1b. 同一篇被重复收录:字面命中那一行没译文,不许挡住等价的那一份 ─────────
+// 沙箱里摆了两行:url 一份存页面那个编码形式(没译过)、一份存原样中文(译过)。
+// 原来的实现拿「库里有一行 url 跟你逐字相同」当「这个地址的候选收齐了」,于是
+// 中文那一份压根没进候选 —— 面板上这个编号没有「译」,重开日报还是没有
+// (2026-10-17 审查 F2 续)。**这一组是端到端的那一半**:后端判据在
+// tests/test_daily_trans.py,这里钉的是「页面上那个 href 确实是编码形式」加
+// 「照它问回来的是译过的那一篇」。
+const dup = JSON.parse(await evalJs(`(() => {
+  const body = document.getElementById('daily-reader-body');
+  const five = [...body.querySelectorAll('a.daily-ref')].find(a => a.textContent.trim() === '[5]');
+  const n = five && five.nextElementSibling;
+  const z = n && n.classList.contains('daily-zh') ? n : null;
+  return JSON.stringify({
+    refHref: five ? five.getAttribute('href') : '',
+    hasZh: !!z,
+    path: z ? decodeURIComponent(z.dataset.path || '') : '',
+    url: z ? z.dataset.url : '',
+  }); })()`));
+check("页面上那个 href 是编码形式(marked 把中文路径编掉了,和库里没译那一行逐字相同)",
+      dup.refHref === DUP.href, JSON.stringify({ got: dup.refHref, want: DUP.href }));
+check("字面对得上的那一行没译文,渲染等价的那一份照样找得到", dup.hasZh, JSON.stringify(dup));
+check("找到的是译过的那一篇,不是字面命中那一篇", dup.path === DUP.zhPath,
+      JSON.stringify({ got: dup.path, want: DUP.zhPath }));
+check("抽屉顶上那个「原文」还指着你点的那个地址(不许换成库里另一份)",
+      dup.url === DUP.href, dup.url);
 
 // ── 2. 那个字不进正文的文本 ─────────────────────────────────────────────────
 // 日报正文同时是「收藏此段」的采集面:片段的回跳锚点按正文的文字坐标系算
@@ -198,7 +228,7 @@ check("翻到别的日报之后,那次回包不再往屏幕上插入口", movedA
 // 换正文要**同步**换掉(`setDailyBody` 而不是 `openDailyReport`):后者要先等一次
 // 网络往返,回包会赶在正文换掉之前落地,这条用例就变成在验别的事情了。
 await evalJs(`openDailyReport('${REPORT}')`);
-await until(`document.querySelectorAll('#daily-reader-body a.daily-zh').length === 1`);
+await until(`document.querySelectorAll('#daily-reader-body a.daily-zh').length === 2`);
 const rerendered = await hold(`(() => { setDailyBody(
   '<p>同一天、重新渲染过 <a class="daily-ref" href=${JSON.stringify(ZH_URL)}>[4]</a></p>',
   '${REPORT}'); return true; })()`);
@@ -207,14 +237,14 @@ check("同一天重新渲染过,旧回包也不落到新正文上", rerendered =
 // (上面两条的代价只有这么大 —— 否则"保守地不插"就成了"再也看不见")。
 await evalJs(`openDailyReport('${REPORT}')`);
 check("重新打开之后入口照旧补得上",
-      await until(`document.querySelectorAll('#daily-reader-body a.daily-zh').length === 1`));
+      await until(`document.querySelectorAll('#daily-reader-body a.daily-zh').length === 2`));
 
 // 重复调用不该补出第二个。
 await evalJs(`(() => { markDailyTranslations(document.getElementById('daily-reader-body'),
                                              '${REPORT}'); return true; })()`);
 await sleep(600);
-check("同一份正文上再调一次也只有一个入口",
-      (await evalJs(`document.querySelectorAll('#daily-reader-body a.daily-zh').length`)) === 1);
+check("同一份正文上再调一次也不多长一个",
+      (await evalJs(`document.querySelectorAll('#daily-reader-body a.daily-zh').length`)) === 2);
 
 // ── 5. 「库里的 url 渲染到页面上长什么样」两边逐位对齐 ──────────────────────
 // 后端为了把 href 对回库里那一篇,照着 marked 的 `cleanUrl` 又写了一遍

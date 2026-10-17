@@ -38,7 +38,8 @@ PROBE = HERE / "daily_zh_probe.mjs"
 sys.path.insert(0, str(REPO))
 
 from kb.daily_trans import _as_href  # noqa: E402
-from tests.daily_zh_sandbox import ZH_MARK, ZH_URL  # noqa: E402
+from tests.daily_zh_sandbox import (  # noqa: E402
+    DUP_HREF, DUP_ZH_PATH, ZH_MARK, ZH_URL)
 from tests.headless import NODE, probe_env, reap, requires_headless, run_probe  # noqa: E402
 
 #: 「库里的 url → 页面上的 href」这件事,后端照着 marked 的 `cleanUrl` 又写了一遍
@@ -111,7 +112,11 @@ class DailyTranslationEntryTest(unittest.TestCase):
         if not _wait(url + "/"):
             raise AssertionError("沙箱 kb-web 没起来")
         hrefs = json.dumps({u: _as_href(u) for u in HREF_SAMPLES}, ensure_ascii=False)
-        run = run_probe([str(NODE), str(PROBE), url, info["report"], ZH_URL, ZH_MARK, hrefs],
+        # 重复收录那一对(沙箱 ③):`href` 是页面上 marked 会写出来的那个编码形式,
+        # 也正是库里**没译过**那一行的 url 字面;`zhPath` 是译过的那一篇。
+        dup = json.dumps({"href": DUP_HREF, "zhPath": DUP_ZH_PATH}, ensure_ascii=False)
+        run = run_probe([str(NODE), str(PROBE), url, info["report"], ZH_URL, ZH_MARK,
+                         hrefs, dup],
                         timeout=300, env=probe_env(), cwd=str(REPO))
         cls.stderr = run.stderr
         line = run.stdout.strip().splitlines()[-1] if run.stdout.strip() else ""

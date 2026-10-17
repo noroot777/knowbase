@@ -107,6 +107,44 @@ class DailyTranslationLookupTests(unittest.TestCase):
         self.assertEqual('source/rss/cn.md',
                          got['https://e.org/%E4%B8%AD%E6%96%87/path']['path'])
 
+    def test_an_untranslated_exact_row_does_not_hide_the_equivalent_chinese_one(self):
+        """字面对得上的那一行没译文,不等于这个地址没译文。
+
+        同一篇文章被两条订阅各抓一次,url 一份存编码形式一份存原样:编码那一份
+        字面上就等于页面 href、却没译过,原样那一份躺着能读的中文译文。原来的
+        实现拿「有字面命中」当「候选收齐了」,于是中文那一份压根没进候选 ——
+        面板上那个编号没有「译」,重开日报还是没有,而把那条没用的索引删掉译文
+        立刻就出来(2026-10-17 审查用隔离库实测)。
+        """
+        href = 'https://example.org/%E4%B8%AD%E6%96%87'
+        self.doc('source/rss/aaa-english.md', href, title='没译的那一份')
+        self.doc('source/rss/zzz-chinese.md', 'https://example.org/中文',
+                 title='中文那一份', meta='lang: zh\ntranslated_from: en\n')
+        got = daily_trans.translations([href])
+        self.assertEqual('source/rss/zzz-chinese.md', got[href]['path'])
+
+    def test_an_exact_row_whose_file_is_gone_does_not_hide_the_equivalent_one(self):
+        # 同一个判据下的另一种排除结果:字面命中的那一行索引还在、盘上的 md 已经
+        # 不在了。它一样不该把渲染等价的那一份译文挡在候选外面。
+        href = 'https://example.org/%E4%B8%AD%E6%96%87'
+        self.doc('source/rss/aaa-gone.md', href, on_disk=False)
+        self.doc('source/rss/zzz-chinese.md', 'https://example.org/中文',
+                 meta='lang: zh\ntranslated_from: en\n')
+        self.assertEqual('source/rss/zzz-chinese.md',
+                         daily_trans.translations([href])[href]['path'])
+
+    def test_the_exact_row_still_wins_when_it_has_a_translation_of_its_own(self):
+        # 反过来钉一边:两份都有译文时挑字面对得上的那一份(更强的证据,也让
+        # 单篇场景的结果跟以前一模一样)。**path 排序故意不利于它** —— 两批混在
+        # 一起重排一遍的话,这里就会挑错。
+        href = 'https://example.org/%E4%B8%AD%E6%96%87'
+        self.doc('source/rss/zzz-exact.md', href, title='字面那一份',
+                 meta='lang: zh\ntranslated_from: en\n')
+        self.doc('source/rss/aaa-equivalent.md', 'https://example.org/中文',
+                 title='渲染等价那一份', meta='lang: zh\ntranslated_from: en\n')
+        self.assertEqual('source/rss/zzz-exact.md',
+                         daily_trans.translations([href])[href]['path'])
+
     def test_two_urls_that_only_differ_in_escaping_are_not_the_same_article(self):
         """`?q=a%26id%3Db`(一个参数)和 `?q=a&id=b`(两个参数)是两篇不同的文章。
 

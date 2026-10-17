@@ -10,12 +10,16 @@
 第 N 条""条目列表第一行",往里插东西会让别人的探针变红,而红的原因跟它们要验的
 事情毫无关系。这里改的是**这个沙箱自己**那份历史日报的副本。
 
-摆的是一对对照:
+摆的是三档对照:
   ① `zh-of-en.md` —— frontmatter 带 `translated_from: en`,也就是入库前译过的
      那种。它的出处编号后面该多一个「译」。
   ② 已有的 `a.md` —— 中文公众号文章,库里有、但不是译文。它的编号后面
      **一个字都不该多**(反过来钉一边:有入口的那半对了,没入口的那半也得对)。
-两条素材都写成**老写法**(裸 url、正文里编号是纯文本):那是加链接之前那些日报的
+  ③ `aaa-dup-en.md` + `zzz-dup-zh.md` —— **同一篇被重复收录**,url 一份存页面
+     那个编码形式(没译过)、一份存原样中文(译过)。字面对得上的那一行既不保证
+     是译文、也不保证文件还在,**不许拿它当「候选收齐了」** —— 原来的实现在这里
+     把译文整个挡在候选之外(2026-10-17 审查 F2 续)。
+各条素材都写成**老写法**(裸 url、正文里编号是纯文本):那是加链接之前那些日报的
 形态,编号由面板照清单补(`daily_refs.js`),顺带验了"补出来的链接也拿得到入口"。
 """
 import os
@@ -23,6 +27,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -30,6 +35,15 @@ ROOT = Path(__file__).resolve().parent.parent
 ZH_URL = 'https://example.org/zh-of-en'
 # 正文里那句暗号:探针 fetch 一次 /doc/ 页面,确认抽屉里要读的确实是中文那一份。
 ZH_MARK = '这一篇在写进知识库之前就已经译好了'
+
+# ③ 同一篇被重复收录的那一对。路径段是中文,所以 marked 会把它编码掉 ——
+# **页面上那个 href 恰好就是没译过那一行的 url 字面**,而译过的那一行存的是原样。
+_DUP_SEG = '被重复收录的那一篇'
+DUP_URL = f'https://example.org/{_DUP_SEG}'          # 库里原样那一份 + 日报里写的
+DUP_HREF = f'https://example.org/{quote(_DUP_SEG)}'  # marked 渲染出来的 href
+DUP_ZH_PATH = 'source/rss/zzz-dup-zh.md'             # 译过的那一份(ORDER BY path 排后面)
+DUP_EN_PATH = 'source/rss/aaa-dup-en.md'             # 字面对得上、却没译过的那一份
+DUP_MARK = '这一篇被两条订阅各抓了一次'               # 中文那一份的暗号
 
 
 def main():
@@ -58,6 +72,24 @@ def main():
         f'{ZH_MARK},所以 vault 里躺着的正是中文那一份。\n',
         encoding='utf-8')
 
+    # ③ 同一篇被重复收录的那一对:字面对得上的那一行没译文,译过的那一行 url 存
+    #    的是原样中文。**两行都是原始 `rss` 来源**,衍生来源那条口径另有回归。
+    for path, url, zh in ((DUP_EN_PATH, DUP_HREF, False), (DUP_ZH_PATH, DUP_URL, True)):
+        f = vault / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(
+            '---\n'
+            'source: rss\n'
+            f"title: {'重复收录·中文那一份' if zh else '重复收录·没译的那一份'}\n"
+            'account: 某英文站\n'
+            f'published: {published}\n'
+            f'url: {url}\n'
+            + ('lang: zh\ntranslated_from: en\n' if zh else '')
+            + '---\n\n'
+            f"# {'重复收录·中文那一份' if zh else '重复收录·没译的那一份'}\n\n"
+            f"{DUP_MARK if zh else '这一份没译过,它只是字面对得上。'}\n",
+            encoding='utf-8')
+
     # 历史日报里加一条出处指向它。**定点替换,不整份重写**:那一份的别的形态
     # (带圆括号的裸 url、没有 url 的素材、行内代码里的数字方括号)是 daily_probe
     # 在验的东西,照搬一遍就会有两份会各自漂的副本。
@@ -69,11 +101,13 @@ def main():
     pairs = [
         ('- 命令里的 `items[1]` 原样保留。\n',
          '- 命令里的 `items[1]` 原样保留。\n'
-         '- 本地有中文译文的那一条 [4],而 [1] 是库里的中文原文。\n'),
-        ('## 素材清单(3 条)', '## 素材清单(4 条)'),
+         '- 本地有中文译文的那一条 [4],而 [1] 是库里的中文原文。\n'
+         '- 同一篇被重复收录、只有一份译过的那一条 [5]。\n'),
+        ('## 素材清单(3 条)', '## 素材清单(5 条)'),
         ('3. 没有链接的那篇 — 公众号·某公众号\n',
          '3. 没有链接的那篇 — 公众号·某公众号\n'
-         f'4. [一个从英文译过来的运行时发布]({ZH_URL}) — RSS·某英文站\n'),
+         f'4. [一个从英文译过来的运行时发布]({ZH_URL}) — RSS·某英文站\n'
+         f'5. [重复收录·中文那一份]({DUP_URL}) — RSS·某英文站\n'),
     ]
     for old, new in pairs:
         if text.count(old) != 1:
