@@ -9,10 +9,10 @@
 // `https://…/paper-(clean).pdf` 用正则一路吃到第一个 `)` 就断,那一条整行匹配
 // 不上、编号也就补不出链接(2026-09-30 审查实测,生产那份日报里真有这么一条)。
 // marked 本来就按 CommonMark 把它解析对了,照抄解析结果比再写一遍解析器可靠。
-function dailyRefMap(el) {
+function dailyRefMap(el, materialList = null) {
   const out = new Map();
-  const head = [...el.querySelectorAll('h2')].find(h => /^素材清单/.test(h.textContent.trim()));
-  let list = head && head.nextElementSibling;
+  const head = !materialList && [...el.querySelectorAll('h2')].find(h => /^素材清单/.test(h.textContent.trim()));
+  let list = materialList || (head && head.nextElementSibling);
   // 清单为空时别一路找到文末去认别的有序列表 —— 下一个小节标题就是边界。
   while (list && list.tagName !== 'OL' && list.tagName !== 'H2') list = list.nextElementSibling;
   if (!list || list.tagName !== 'OL') return { refs: out, list: null };
@@ -37,8 +37,8 @@ function dailyRefMap(el) {
 // 同一种写法在新旧日报上一个能点一个不能。
 const DAILY_REF_TEXT = /\[(\d{1,3}(?:\s*[,，、]\s*\d{1,3})*)\]/g;
 
-function enhanceDailyBody(el) {
-  const { refs, list } = dailyRefMap(el);
+function enhanceDailyBody(el, materialList = null) {
+  const { refs, list } = dailyRefMap(el, materialList);
   if (refs.size) {
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
       // 已经是链接的编号、代码块里的数字、清单自己那一段都别碰

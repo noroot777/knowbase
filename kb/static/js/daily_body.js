@@ -19,6 +19,42 @@ function setDailyBody(html, ref = '') {
   return el;
 }
 
+function renderDailyReportBody(report) {
+  const stripHeader = text => text.replace(/^\s*#\s+[^\n]*\n+(?:>\s*覆盖[^\n]*\n)?/, '');
+  const view = report.material_view;
+  if (!view) {
+    const el = setDailyBody(mdHtml(stripHeader(report.body)), report.date);
+    enhanceDailyBody(el);
+    return el;
+  }
+  const el = setDailyBody(mdHtml(stripHeader(view.before)), report.date);
+  const heading = document.createElement('h2');
+  heading.textContent = view.heading;
+  const list = document.createElement('ol');
+  list.className = 'daily-materials';
+  for (const item of view.items) {
+    const row = document.createElement('li');
+    const entry = document.createElement('div');
+    entry.className = 'daily-material-entry';
+    const url = /^https?:\/\//i.test(item.url) ? safeUrl(item.url) : '';
+    const title = document.createElement(url ? 'a' : 'span');
+    title.className = 'daily-material-title';
+    title.textContent = item.title;
+    title.title = item.full_title;
+    if (url) title.href = url;
+    const source = document.createElement('span');
+    source.className = 'daily-material-source';
+    source.textContent = item.source;
+    entry.append(title, source);
+    row.append(entry);
+    list.append(row);
+  }
+  el.append(heading, list);
+  el.insertAdjacentHTML('beforeend', mdHtml(view.after));
+  enhanceDailyBody(el, list);
+  return el;
+}
+
 // 日报落在 vault 的 `daily/<日期>.md`,而那个目录**不在任何 `SOURCES.root`
 // 底下**(见 kb/config.py),documents 表里没有它的行 —— 片段只能按 origin=daily
 // 存,回跳靠 `openDailyReport` 回到这同一块正文里。

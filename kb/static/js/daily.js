@@ -305,9 +305,7 @@ async function openDailyReport(date) {
     // 元信息那一行已经写了。两处都只在面板上剥掉,vault 里的文件一个字不改。
     // 正文里那段「本轮有 N 项没有完成」跟着 md 一起渲染出来(剥掉的只有
     // 标题和覆盖区间这两行重复信息),所以历史日报翻回来也看得见当时的同步缺口。
-    const body = setDailyBody(
-      mdHtml(r.body.replace(/^\s*#\s+[^\n]*\n+(?:>\s*覆盖[^\n]*\n)?/, '')), r.date);
-    enhanceDailyBody(body);
+    const body = renderDailyReportBody(r);
     $('daily-copy').hidden = $('daily-del').hidden = false;
     $('daily-copy').dataset.body = r.body;
     // 收藏回跳的落点。排在 enhanceDailyBody 之后:那一步会把出处编号换成

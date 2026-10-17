@@ -1,0 +1,142 @@
+"""用真实日报生成器验证简洁清单，展示不能改变落盘证据。"""
+
+import tempfile
+import unittest
+from datetime import datetime
+from pathlib import Path
+from unittest.mock import patch
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from kb import daily, daily_page
+from kb.daily_materials import material_view
+from kb.scanner import parse_frontmatter
+from kb.web import daily_api
+
+
+def report_text(entries, *, body='## 今日要点\n\n- 观点 [1][2]', total=None):
+    items = [dict(path=f'source/rss/{number}.md', source='rss', account='某号',
+                  late=False, **entry) for number, entry in enumerate(entries)]
+    material = daily.Material(items=items, total=len(items) if total is None else total)
+    return daily._page(datetime(2026, 10, 16, 8), datetime(2026, 10, 17, 8),
+                       material, body, 'stub/none')
+
+
+class MaterialViewTests(unittest.TestCase):
+    def test_multiline_posts_are_individual_items_not_markdown_fragments(self):
+        title = ('Grok Bot 套餐不够用怎么办？\n\n'
+                 '让 Grok Bot 安装 Pi Agent。\n\n1. 第一步\n2. 第二步\n'
+                 '## 素材清单(9 条)\n\n最后一段。')
+        text = report_text([{'title': title, 'url': 'https://x.com/example/status/1'},
+                            {'title': '下一条素材', 'url': 'https://example.org/next'}])
+        view = material_view(text)
+        self.assertIsNotNone(view)
+        self.assertEqual(2, len(view['items']))
+        self.assertEqual([1, 2], [item['number'] for item in view['items']])
+        self.assertEqual('Grok Bot 套餐不够用怎么办？', view['items'][0]['title'])
+        self.assertEqual(' '.join(title.split()), view['items'][0]['full_title'])
+        self.assertEqual('https://x.com/example/status/1', view['items'][0]['url'])
+        self.assertEqual('RSS·某号', view['items'][0]['source'])
+        self.assertIn('- 观点', view['before'])
+
+    def test_blank_first_lines_and_long_titles_are_compact(self):
+        text = report_text([{'title': '\n\n' + '很长的标题' * 40 + '\n正文',
+                             'url': 'https://example.org/long'}])
+        item = material_view(text)['items'][0]
+        self.assertEqual(72, len(item['title']))
+        self.assertTrue(item['title'].endswith('…'))
+        self.assertNotIn('正文', item['title'])
+        self.assertIn('正文', item['full_title'])
+
+    def test_unlinked_titles_keep_literal_brackets_and_backslashes(self):
+        title = '[视频] C:\\models\\\n1. 内部编号\n2. 不是新素材'
+        text = report_text([{'title': title, 'url': ''},
+                            {'title': '紧跟的另一条', 'url': 'https://example.org/next'}])
+        before = daily_page.carried_keys(text)
+        view = material_view(text)
+        self.assertEqual('[视频] C:\\models\\', view['items'][0]['title'])
+        self.assertEqual('', view['items'][0]['url'])
+        self.assertEqual(before, daily_page.carried_keys(text))
+
+    def test_link_label_unescapes_only_the_generator_escapes(self):
+        title = '[视频] [未闭合 C:\\models\\'
+        text = report_text([{'title': title, 'url': 'https://example.org/paper-(clean).pdf'}])
+        item = material_view(text)['items'][0]
+        self.assertEqual(title, item['title'])
+        self.assertEqual('https://example.org/paper-(clean).pdf', item['url'])
+
+    def test_legacy_bare_urls_and_parentheses_in_author_names(self):
+        text = ('## 素材清单(2 条)\n\n'
+                '1. [旧标题\n\n原帖正文](https://example.org/paper-(clean).pdf)'
+                ' — 大V观点·歸藏(guizang.ai)\n'
+                '2. 没有链接 — RSS·某号 · 补录\n\n> 还有待报道的素材。\n')
+        view = material_view(text)
+        self.assertEqual('旧标题', view['items'][0]['title'])
+        self.assertEqual('https://example.org/paper-(clean).pdf', view['items'][0]['url'])
+        self.assertEqual('大V观点·歸藏(guizang.ai)', view['items'][0]['source'])
+        self.assertEqual('RSS·某号 · 补录', view['items'][1]['source'])
+        self.assertIn('> 还有待报道的素材。', view['after'])
+
+    def test_a_separator_inside_an_unlinked_title_does_not_replace_the_source(self):
+        text = report_text([{'title': 'AI — 观察\n正文 — 另一段', 'url': ''}])
+        item = material_view(text)['items'][0]
+        self.assertEqual('AI — 观察', item['title'])
+        self.assertEqual('RSS·某号', item['source'])
+
+    def test_fake_heading_in_the_digest_does_not_take_over_the_real_list(self):
+        text = report_text([{'title': '真实素材', 'url': 'https://example.org/real'}],
+                           body='## 素材清单(9 条)\n\n不是清单\n\n## 今日要点\n\n说明 [1]')
+        view = material_view(text)
+        self.assertIn('## 素材清单(9 条)', view['before'])
+        self.assertEqual('素材清单(1 条)', view['heading'])
+        self.assertEqual('真实素材', view['items'][0]['title'])
+
+    def test_queue_notice_and_following_sections_are_preserved(self):
+        text = report_text([{'title': '素材', 'url': 'https://example.org/one'}], total=9)
+        text += '\n## 额外说明\n\n普通正文。\n'
+        view = material_view(text)
+        self.assertIn('窗口内共 9 条', view['after'])
+        self.assertIn('没列出的留在队列里', view['after'])
+        self.assertIn('## 额外说明\n\n普通正文。', view['after'])
+
+    def test_all_161_items_keep_their_numbers_and_urls(self):
+        text = report_text([{'title': f'第 {number} 条\n\n很长的正文',
+                             'url': f'https://example.org/{number}'} for number in range(161)])
+        view = material_view(text)
+        self.assertEqual(161, len(view['items']))
+        self.assertEqual(161, view['items'][-1]['number'])
+        self.assertEqual('https://example.org/160', view['items'][-1]['url'])
+
+    def test_empty_or_unrecognized_lists_can_fall_back_without_losing_body(self):
+        self.assertIsNone(material_view('## 今日要点\n\n没有素材清单。'))
+        self.assertIsNone(material_view('## 素材清单(2 条)\n\n1. 只有一条 — RSS·某号'))
+        self.assertIsNone(material_view('## 素材清单(1 条)\n\n1. 缺少出处'))
+        view = material_view('## 今日要点\n\n## 素材清单(0 条)\n\n> 说明\n')
+        self.assertEqual([], view['items'])
+        self.assertIn('> 说明', view['after'])
+
+    def test_api_adds_read_only_view_without_changing_raw_body_or_file(self):
+        text = report_text([{'title': '首行\n\n第二段 [标签]', 'url': ''},
+                            {'title': '另一条', 'url': 'https://example.org/next'}])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'daily' / '2026-10-17.md'
+            path.parent.mkdir()
+            path.write_text(text, encoding='utf-8')
+            original = path.read_bytes()
+            app = FastAPI()
+            app.include_router(daily_api.router)
+            with patch.object(daily, 'VAULT_ROOT', root), TestClient(app) as client:
+                response = client.get('/api/daily/reports/2026-10-17')
+            self.assertEqual(200, response.status_code)
+            result = response.json()
+            self.assertEqual(parse_frontmatter(text)[1], result['body'])
+            self.assertEqual('首行', result['material_view']['items'][0]['title'])
+            self.assertEqual(original, path.read_bytes())
+            self.assertEqual(daily_page.carried_keys(text),
+                             daily_page.carried_keys(result['body']))
+
+
+if __name__ == '__main__':
+    unittest.main()
