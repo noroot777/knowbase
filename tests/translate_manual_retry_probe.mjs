@@ -26,7 +26,7 @@
 //
 //   HEADLESS_SHELL=<bin> node tests/translate_manual_retry_probe.mjs
 import { createServer } from "node:http";
-import { readFileSync, writeSync } from "node:fs";
+import { readFileSync, writeFileSync, writeSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, normalize } from "node:path";
 import { launchShell } from "./probe_shell.mjs";
@@ -82,11 +82,11 @@ const PIPE = {
   idle:    { running: false, stages: {}, source: { online: true, ready: true }, log: [], last_run: null },
   running: { running: true, run_id: "run-42", current_stage: "export",
              crawl_filter: { channel: "rss", translate_retry: { channel: "rss", source_id: null } },
-             stages: { export: { status: "running", detail: "正在翻译 40 条" } },
+             stages: { export: { status: "running", detail: "正在翻译 246 条" } },
              source: { online: true, ready: true }, log: [], last_run: null },
   done:    { running: false, run_id: "run-42", current_stage: "extract",
              crawl_filter: { channel: "rss", translate_retry: { channel: "rss", source_id: null } },
-             stages: { export: { status: "ok", detail: "已译 40 条" } },
+             stages: { export: { status: "ok", detail: "已译 246 条" } },
              source: { online: true, ready: true }, log: [], last_run: null },
 };
 let pipeMode = "idle";
@@ -134,7 +134,7 @@ const server = createServer((req, res) => {
       posted.push({ path, body: raw });
       if (retryStatus !== 200) return json({ detail: retryDetail }, retryStatus);
       json({ ok: true, pending: 246,
-             detail: "共 246 条，这一轮先译 40 条，其余留到下一轮，译完会自动写入知识库。" });
+             detail: "这一轮翻译 246 条，译完会自动写入知识库。" });
     });
   }
   if (path === "/api/intake/rss/items") {
@@ -188,6 +188,10 @@ const evalJs = async expression => {
   const r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
   if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.text + " :: " + expression);
   return r.result?.result?.value;
+};
+const screenshot = async path => {
+  const shot = await send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(path, Buffer.from(shot.result.data, "base64"));
 };
 const until = async (expr, ms = 15000) => {
   const dl = Date.now() + ms;
@@ -261,8 +265,11 @@ const ask = await evalJs(`(() => { const m = document.querySelector('.confirm-ma
 // 这颗按钮会真的调模型花钱,而数量可能是上百条:确认框必须把代价说清楚。
 check("确认框说的条数是真会动的那些(246,不是失败的 108)", ask.includes("246 条"), ask);
 check("确认框说清了会调模型(按字数计费)", ask.includes("计费"), ask);
-check("确认框说清了这一轮只译得完一截", ask.includes("一轮译不完"), ask);
+check("确认框说明本轮处理全部条目，不再按条数留到下一轮",
+      ask.includes("本轮会处理上述全部待译内容，不设条数上限") && !ask.includes("下一轮"), ask);
 check("确认框说清了译完会写进知识库", ask.includes("写进知识库"), ask);
+if (process.env.KB_TRANSLATE_PROBE_SCREENSHOT)
+  await screenshot(process.env.KB_TRANSLATE_PROBE_SCREENSHOT.replace(/\.png$/, "-confirm.png"));
 await clickAt('.confirm-mask [data-act="ok"]');
 check("点确认之后真的发了 POST", await (async () => {
   for (let i = 0; i < 40 && !posted.length; i++) await sleep(120);
@@ -273,7 +280,10 @@ check("没筛订阅时请求不带 source_id", posted[0] && !("source_id" in JSO
       posted[0]?.body);
 check("成功之后给的是 ok 的轻提示,文案是后端那句",
       await until(`!!document.querySelector('.toast.ok')`)
-      && (await evalJs(`document.querySelector('.toast.ok')?.textContent || ''`)).includes("这一轮先译 40 条"));
+      && (await evalJs(`document.querySelector('.toast.ok')?.textContent || ''`)).includes("这一轮翻译 246 条"));
+if (process.env.KB_TRANSLATE_PROBE_SCREENSHOT) {
+  await screenshot(process.env.KB_TRANSLATE_PROBE_SCREENSHOT);
+}
 
 // ── 3. 反向钉边一:筛到一条订阅,数字和射程一起收窄 ───────────────────────────
 posted.length = 0;

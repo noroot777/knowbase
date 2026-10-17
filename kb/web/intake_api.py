@@ -426,15 +426,11 @@ def translate_retry(kind: str, body: TranslateRetryRequest):
                                                'scope_sig':body.scope_sig}}):
         raise HTTPException(409, why[0] if why
                             else '其他同步正在运行，请结束后重试；自动同步会顺延')
-    # 一轮上限是 `translate.MAX_ITEMS`,所以队列比它长时要如实说清这一轮只译得完
-    # 一截 —— 不说的话用户点一次、看到数字只掉了 40,会以为按钮漏了东西。
     # `queued` 不含那些已经试满额度、离开队列的,所以总量要把它们加回来 ——
     # 加的是 `exhausted` 而不是 `shipped`:后者只数真的落了盘的那些,而没落盘的
     # 照样会被放回队列,按它算就又变成「说 3 条、动 4 条」(见 `translate.stuck`)。
     total = queued + stuck['exhausted']
-    this_round = min(total, translate.MAX_ITEMS)
-    detail = (f'这一轮翻译 {this_round} 条' if this_round >= total else
-              f'共 {total} 条，这一轮先译 {this_round} 条，其余留到下一轮')
+    detail = f'这一轮翻译 {total} 条'
     return {'ok':True,'pending':total,'detail':detail + '，译完会自动写入知识库。'}
 
 

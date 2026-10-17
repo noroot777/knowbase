@@ -13,7 +13,7 @@
 `patch.object(translate, 'scope_signature')` 对它无效。要造「集合变了」就真的
 去改库(回归里那两条就是这么摆的)。
 
-这里没有 `MAX_ITEMS` / `MAX_BODY` / `_model`:它们被 `patch.object(translate, …)`
+这里没有 `MAX_BODY` / `_model`:它们被 `patch.object(translate, …)`
 打过桩,而用它们的函数留在 `translate.py` —— 搬过来的话打桩只改到一份副本。
 `MAX_TRIES` 跟着 `queued_sql` 走(判据的一部分),它只被读、没被打桩过。
 """
@@ -31,9 +31,9 @@ MAX_TRIES = 3
 def queued_sql() -> tuple[str, list]:
     """"还排在翻译队列里"的判据,只有这一份。
 
-    这些条目**不按英文导出**:一轮只译 MAX_ITEMS 条,一次进来 41 条英文的话
-    第 41 条会先以英文写进 vault,而索引、提取、检索、日报读的全是 vault 里
-    那份英文。等下一轮译完再落盘,晚一轮但是中文的。队列有出口——试满
+    这些条目**不按英文导出**:翻译失败或同步被停止时，尚未译完的内容不能
+    抢先以英文写进 vault，否则索引、提取、检索、日报读的都是那份英文。
+    队列有出口——试满
     MAX_TRIES 次仍然失败的就不在这个集合里了,那时按原文导出,免得一条
     永远译不动的内容永远进不了知识库。
 
@@ -92,8 +92,8 @@ def pending(kind: str, source_id: int | None = None,
 # (2026-10-13 实测 social 2 条);按错误信息筛会把它们永久留在库外,而那正是
 # 这颗按钮唯一要救的东西。
 #
-# **也不含 `translate_tries=0` 的那些** —— 那是正常积压(一轮只译 MAX_ITEMS
-# 条),它们下一轮本来就会被取走,额度一条没动过,放回队列是空操作。
+# **也不含 `translate_tries=0` 的那些** —— 它们会在同步时自动取走，
+# 额度一条没动过，放回队列是空操作。
 RETRY_SQL = "lang='en' AND translated_at='' AND translate_tries>0"
 
 
@@ -258,7 +258,7 @@ def requeue_failed(kind: str, source_id: int | None = None,
     ②**置 `translate_manual`** —— 它同时承担两件事:
       - **排序**:取数是「失败过的优先」(`translate_tries DESC`),而第①步恰好
         把这一批变成「从没试过」、排到队尾。队列里积压超过一轮上限
-        (`MAX_ITEMS`)时,用户点完按钮、等完一整轮同步,库里一个字都不会变:
+        (显式限量调用)时,用户点完按钮、等完一整轮同步,库里一个字都不会变:
         实测点按钮那一刻队列里 246 条,恢复的 108 条排在第 139 位往后,下一轮
         取的 40 条里一条都没有它们。那是「按钮没用」里最难查的一种 —— 它什么
         都不报错。

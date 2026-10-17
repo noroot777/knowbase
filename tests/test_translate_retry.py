@@ -13,6 +13,7 @@
 模型)。import 进来的 `FeedCase` 自己不带 test 方法,被 loader 收走也是空跑。
 """
 import json
+from functools import partial
 import unittest
 from copy import deepcopy
 from unittest.mock import Mock, patch
@@ -64,7 +65,9 @@ class RetryOrderTests(RetryCase):
         self.put('Newer fresh post', 'Body of the one never tried.')
         self.mark_failed('Older failed post')
         chat = Mock(return_value=OK)
-        with patch.object(translate, 'MAX_ITEMS', 1), patch.object(llm, 'chat', chat):
+        with patch.object(translate, 'translate_pending',
+                          partial(translate.translate_pending, limit=1)), \
+                patch.object(llm, 'chat', chat):
             translate.translate_pending('rss')
         # 升序取数时这里取的是"从没试过"的那条(而且它 fetched_at 更新,
         # 永远排在前面)—— 失败的那条要等队列前面全部清空才轮得到。
@@ -90,11 +93,14 @@ class RetryOrderTests(RetryCase):
         self.put('Hopeless post', 'Body that never translates.')
         self.put('Fine post', 'Body that translates fine.')
         self.mark_failed('Hopeless post', tries=translate.MAX_TRIES - 1)
-        with patch.object(translate, 'MAX_ITEMS', 1), \
+        with patch.object(translate, 'translate_pending',
+                          partial(translate.translate_pending, limit=1)), \
                 patch.object(llm, 'chat', Mock(side_effect=RuntimeError('503'))):
             translate.translate_pending('rss')          # 第 MAX_TRIES 次:出队
         chat = Mock(return_value=OK)
-        with patch.object(translate, 'MAX_ITEMS', 1), patch.object(llm, 'chat', chat):
+        with patch.object(translate, 'translate_pending',
+                          partial(translate.translate_pending, limit=1)), \
+                patch.object(llm, 'chat', chat):
             translate.translate_pending('rss')
         self.assertIn('Body that translates fine.', chat.call_args[0][0])
 
@@ -109,7 +115,8 @@ class NewVersusOldFailureTests(RetryCase):
         self.put('Failed B', 'Body B in English.')
         self.mark_failed('Failed A')
         self.mark_failed('Failed B')
-        with patch.object(translate, 'MAX_ITEMS', 1), \
+        with patch.object(translate, 'translate_pending',
+                          partial(translate.translate_pending, limit=1)), \
                 patch.object(llm, 'chat', Mock(return_value=OK)):
             FeedCollector('rss').materialize()
         stage = self.stage()
@@ -132,7 +139,8 @@ class NewVersusOldFailureTests(RetryCase):
         self.mark_failed('Old failure')
         # MAX_ITEMS=1 且失败优先 → 这一轮取的是 Old。让它再失败一次,New 轮不到。
         # 于是 Old 既是"此前失败"又是"本轮失败",口径必须认后者。
-        with patch.object(translate, 'MAX_ITEMS', 1), \
+        with patch.object(translate, 'translate_pending',
+                          partial(translate.translate_pending, limit=1)), \
                 patch.object(llm, 'chat', Mock(side_effect=RuntimeError('HTTP 503'))):
             FeedCollector('rss').materialize()
         stage = self.stage()
@@ -177,7 +185,8 @@ class ShippedBacklogTests(RetryCase):
         self.shipped('Legacy B', 'Legacy body B in English.')
         self.mark_failed('Legacy A')
         self.mark_failed('Legacy B')
-        with patch.object(translate, 'MAX_ITEMS', 1), \
+        with patch.object(translate, 'translate_pending',
+                          partial(translate.translate_pending, limit=1)), \
                 patch.object(llm, 'chat', Mock(return_value=OK)):
             FeedCollector('rss').materialize()
         stage = self.stage()
@@ -197,7 +206,8 @@ class ShippedBacklogTests(RetryCase):
         self.shipped('Shipped old', 'Shipped body in English.')
         self.put('Fresh new', 'Fresh body in English.')
         self.mark_failed('Shipped old')
-        with patch.object(translate, 'MAX_ITEMS', 1), \
+        with patch.object(translate, 'translate_pending',
+                          partial(translate.translate_pending, limit=1)), \
                 patch.object(llm, 'chat', Mock(side_effect=RuntimeError('HTTP 503'))):
             # 失败优先 → 取 Shipped old(已入库那条),它本轮再败一次
             FeedCollector('rss').materialize()

@@ -386,9 +386,9 @@ def export(kind: str, hold_untranslated: bool = False,
 
 def _export(kind: str, hold_untranslated: bool = False,
             translated: dict | None = None, fetched: dict | None = None):
-    # hold_untranslated:还排在翻译队列里的条目这一轮不写 vault。一轮只译
-    # MAX_ITEMS 条,不拦的话第 41 条会先以英文落盘,索引/提取/检索/日报都按
-    # 英文处理过一遍。翻译整个跳过时(没配 key)不能拦,否则这些条目永远进
+    # hold_untranslated:还排在翻译队列里的条目这一轮不写 vault。翻译失败或
+    # 同步被停止时，不拦的话未译完的内容会先以英文落盘，索引等也会按英文
+    # 处理。翻译整个跳过时(没配 key)不能拦,否则这些条目永远进
     # 不了知识库 —— 那时英文总比没有强。
     #
     # translated:这一轮翻译的成品摘要(`translate.translate_pending` 的返回值)。
