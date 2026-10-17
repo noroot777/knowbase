@@ -3,6 +3,15 @@ __pycache__/
 *.egg-info/
 .venv/
 
+# 根目录的数据目录**再单列一条不带斜杠的**:它在不少检出里是指向别处的符号
+# 链接(worktree 里尤其常见 —— 那样才看得到主检出那份库),而上面 `data/` 带
+# 斜杠只匹配真目录、挡不住符号链接。理由同下面 collector 那两行,但这一处是
+# 实际踩过的:一次 `git add -A` 把 `data -> /Users/…/knowledge-base/data` 写进
+# 了提交,别的机器检出之后那是条悬空链接,而 `store.connect()` 第一句就是
+# `DATA_DIR.mkdir(parents=True, exist_ok=True)` —— 当场 FileExistsError,整个
+# 知识库打不开;同一台机器上的另一份检出则会把默认读写落回主检出那份真库。
+/data
+
 # 采集器:数据与虚拟环境不进版本库。
 # 单列一份不带斜杠的规则,因为这两项目前是指向仓库外的符号链接,而上面
 # `data/` `.venv/` 带斜杠只匹配真目录,挡不住符号链接——不写死这几行,

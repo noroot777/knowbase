@@ -34,6 +34,20 @@ def build(vault, base='http://127.0.0.1'):
     items = [dict(path=f'source/{number}.md', title=title, source=source, account=author,
                   url='' if number == 3 else f'https://example.org/material-{number}', late=False)
              for number, (title, source, author) in enumerate(entries)]
+    translated_path = 'source/rss/material-translated.md'
+    translated = vault / translated_path
+    translated.parent.mkdir(parents=True, exist_ok=True)
+    translated.write_text(
+        '---\nsource: rss\ntitle: 本地中文译文\naccount: 英文站\n'
+        'published: 2026-10-16 12:00\nurl: https://example.org/material-1\n'
+        'lang: zh\ntranslated_from: en\n---\n\n清单和本地中文译文同时保留。\n',
+        encoding='utf-8')
+    with contextlib.closing(store.connect()) as conn:
+        conn.execute(
+            'INSERT INTO documents(path,source,title,account,published,url) VALUES(?,?,?,?,?,?)',
+            (translated_path, 'rss', '本地中文译文', '英文站', '2026-10-16 12:00',
+             'https://example.org/material-1'))
+        conn.commit()
     text = daily._page(datetime(2026, 10, 16, 8), datetime(2026, 10, 17, 8),
                        daily.Material(items=items, total=len(items)),
                        '## 今日要点\n\n- **Agent 分工**：调度与执行可以分别承担 [2]。\n'

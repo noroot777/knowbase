@@ -133,10 +133,34 @@ function openReader(a) {
   } else {
     fav.style.display = 'none';
   }
+  // 从哪一边滑出来。默认右边;日报正文里的译文入口要左边 —— 出处编号就在正文
+  // 那一列里,抽屉从同一侧出来,眼睛不用横跨整屏去追它。**要在 display 之前设**:
+  // 滑入动画是跟着 class 走的 CSS 动画,先显示再换 class 的话这一次还是按旧的
+  // 那一边播完。
+  $('reader').classList.toggle('from-left', a.dataset.side === 'left');
   $('reader-mask').style.display = '';
   $('reader').style.display = '';
 }
+
+// 读正文时让出位置:正文在 iframe 里,所以绑的是它那份 window,而「这块还在不在
+// 页面上」得看 iframe 元素自己(跨文档量不着)。头收起之后右上角留一颗常驻的
+// 关闭按钮 —— 原本唯一的出口就在那条头里。机制见 kb/static/js/scrollaway.js。
+let readerAway = null;
+function bindReaderScrollAway() {
+  readerAway?.release();
+  readerAway = null;
+  if ($('reader').style.display === 'none') return;      // about:blank,关掉那一下
+  try {
+    const win = $('reader-frame').contentWindow;
+    if (win?.document) readerAway = bindScrollAway(win, ['reader-head'],
+      { visible: $('reader-frame'), host: $('reader') });
+  } catch { /* An external document cannot be measured from here. */ }
+}
+$('reader-frame').addEventListener('load', bindReaderScrollAway);
+
 function closeReader() {
+  readerAway?.release();
+  readerAway = null;
   $('reader').style.display = 'none';
   $('reader-mask').style.display = 'none';
   $('reader-frame').src = 'about:blank';

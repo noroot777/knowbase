@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { attachCdp } from './pipe_history_cdp.mjs';
 
 const base = process.argv[2];
-const { proc, ws, send, evalJs, until, pageErrors } = await attachCdp();
+const { proc, ws, send, evalJs, until, clickAt, pageErrors } = await attachCdp();
 const passed = [];
 const check = async (name, expression) => {
   assert.ok(await evalJs(expression), name);
@@ -37,6 +37,21 @@ try {
   })()`);
   await check('复制内容仍然保留完整的原始推文', `document.getElementById('daily-copy').dataset.body.includes('1. 负责调度\\n2. 把执行交给其他模型')`);
   await check('正常清单只替换展示，原文复制输入仍含全部出处', `document.getElementById('daily-copy').dataset.body.includes('大V观点·范凯说AI')`);
+  assert.ok(await until(`document.querySelectorAll('#daily-reader-body .daily-zh').length === 1`),
+    '紧凑清单的正文引用仍能从真实接口找到本地译文');
+  await check('紧凑清单和译文入口共存，出处链接与正文文字不变', `(() => {
+    const link = document.querySelector('#daily-reader-body .daily-zh');
+    return document.querySelectorAll('.daily-materials > li').length === 12
+      && link.previousElementSibling.textContent === '[2]'
+      && link.previousElementSibling.href === 'https://example.org/material-1'
+      && link.textContent === '';
+  })()`);
+  assert.ok(await clickAt('#daily-reader-body .daily-zh'), '真实点击本地译文入口');
+  assert.ok(await until(`document.getElementById('reader').classList.contains('from-left')
+    && document.getElementById('reader-frame').contentDocument?.body?.textContent
+      .includes('清单和本地中文译文同时保留。')`), '译文阅读器从左侧打开真实 vault 正文');
+  passed.push('紧凑清单里的译文入口能打开本地中文正文');
+  await evalJs('closeReader()');
   await check('桌面条目逐行排列且不粘连', `(() => {
     const rows = [...document.querySelectorAll('.daily-materials > li')];
     return rows.every((row, index) => row.getBoundingClientRect().height < 65

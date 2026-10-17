@@ -245,10 +245,15 @@ function srcGlyph(source) {
     : '<span class="src-glyph gzh" title="公众号">公</span>';
 }
 
+// 读正文时让出位置:抽屉里的时间线自己占一条轴,头那一条(工具名 + 关闭)固定在
+// 上面。抽屉元素是静态的,绑一次就够;收起之后右上角那颗常驻关闭按钮顶上,
+// 关不掉抽屉的事不会发生。机制见 kb/static/js/scrollaway.js。
+let toolAway = null;
 async function openToolDrawer(norm) {
   const changed = norm !== toolNorm;
   $('tool-mask').style.display = '';
   $('tool-drawer').style.display = '';
+  toolAway ||= bindScrollAway('td-scroll', ['td-head'], { host: $('tool-drawer') });
   if (!changed && toolMeta) return;      // 同一工具重开:直接用现成视图
   toolNorm = norm;
   toolMeta = null;

@@ -182,6 +182,7 @@
 | 向量子进程与帧协议(`kb/embed_worker.py`、`embed_pool.py`、`embedder.py`) | `embedding.md` |
 | 问答面板布局、聊天区留白、页面探针收尾(`kb/static/js/chat.js`) | `frontend-feedback.md` |
 | 「我的订阅」页布局(`kb/static/js/sources.js`、`targets.js`) | `subs-layout.md` |
+| 四处阅读区往下滚时收起上面那条头(`kb/static/js/scrollaway.js`、`.scroll-away` / `.away-exit`,接入在 `source_reader.js`/`core.js`/`gallery.js`/`fav_view.js`) | `scroll-away.md` |
 | 「收藏此段」、`favorites` 的可空 path、片段回跳(`kb/static/js/snip.js`、`kb/web/favorites_api.py`、`kb/favbrain.py`、`store.py` 的 favorites 迁移) | `fav-snippets.md` |
 
 ## 往本文件添加内容(硬性)
