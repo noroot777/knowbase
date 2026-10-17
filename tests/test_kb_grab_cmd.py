@@ -66,12 +66,11 @@ class GrabCommandTest(unittest.TestCase):
             d.mkdir(parents=True)
         shutil.copy2(REPO / "kb.sh", self.root / "kb.sh")
         (self.root / "kb.sh").chmod(0o755)
-        # **两个文件一起拷。** `grab_cli.py` 和同目录的 `grab_http.py` 是一对
-        # (通道层拆出去了);只拷一个的话这一组会红在 ImportError 上,而那跟它要钉的
-        # 「帮助不起服务」毫无关系。
-        # **三个文件一套**(入口 + 通道层 + 输入层):少拷一个,隔离环境里那条
-        # 命令一 import 就炸,而红出来的话指不到「夹具没拷全」这件事。
-        for name in ("grab_cli.py", "grab_http.py", "grab_input.py"):
+        # **五个文件一套**(入口 + 通道层 + 输入层的两趟 + 输出层):单文件
+        # 700 行的上限之下按职责拆的,少拷一个,隔离环境里那条命令一 import 就炸,
+        # 而红出来的话指不到「夹具没拷全」这件事。
+        for name in ("grab_cli.py", "grab_http.py", "grab_input.py",
+                     "grab_md.py", "grab_say.py"):
             shutil.copy2(REPO / "scripts" / name, self.root / "scripts")
         self.log = base / "uv.log"
         self.port = _free_port()
@@ -151,6 +150,26 @@ class GrabCommandTest(unittest.TestCase):
                   "--timeout", "1", "https://example.org/a")
         self.assertTrue(any("kb-web" in c for c in self._uv_calls()),
                         "目标就是本机那份,却没起:" + repr(self._uv_calls()))
+
+    def test_协议名的大小写不改变谁管这份服务(self) -> None:
+        """**同一个地址的两种合法拼写,不许得出两个「要不要管本机服务」的答案。**
+
+        协议名按 RFC 3986 不分大小写,`urlsplit` 认得、urllib 也照打 —— 而外壳
+        那道 `case ... in http://*|https://*` 是**大小写敏感**的。回传原串的那一版
+        下 `HTTP://…` 不命中,于是被当成「目标是本机那份」:主检出多起一份用户
+        压根不需要的守护进程(worktree 里更糟,那道闸门会抢在前面 die)。实测
+        `HTTP://` 和 `HtTp://` 都真的起了一份 kb-web。
+
+        出路是**在参数层规范化一次,打出去的和回传的是同一份**
+        (`grab_http.normalize_api`),不是在外壳里多加几个大小写分支。
+        """
+        for api in ("HTTP://127.0.0.1:1", "HtTp://127.0.0.1:1"):
+            with self.subTest(api=api):
+                r = self._run("--api", api, "--no-wait", "https://example.org/a")
+                self.assertEqual(
+                    [c for c in self._uv_calls() if "kb-web" in c], [],
+                    f"{api} 指的是别处,还起了本机这一份:" + repr(self._uv_calls()))
+                self.assertNotIn("Traceback", r.stderr)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@
 - `ApiDown`(5xx / 连不上 / 读到一半断 / 回的不是 JSON):**写没写进去我们不知道**
   —— 保存排在起管道之前,断线可能发生在它之后。
 
-**归一化只在 `_request` 这一层做。** 五个端点共用它,在某一个调用点补 catch 只能
+**归一化只在 `_request` 这一层做。** 四条路共用它,在某一个调用点补 catch 只能
 修那一处。纯标准库(同 `grab_cli.py`:这条路不该因为 venv 里缺什么而用不了)。
 """
 from __future__ import annotations
@@ -105,10 +105,11 @@ def _request(api: str, path: str, *, payload: dict | None = None,
     照旧该去问一次,不许就此断言「这条没收下」。
     """
     try:
-        req = urllib.request.Request(api.rstrip('/') + path, method='GET')
+        base = normalize_api(api)
+        req = urllib.request.Request(base + path, method='GET')
         if payload is not None:
             req = urllib.request.Request(
-                api.rstrip('/') + path, method='POST',
+                base + path, method='POST',
                 data=json.dumps(payload).encode(),
                 headers={'Content-Type': 'application/json'})
     except (UnicodeError, ValueError, TypeError) as e:
@@ -265,6 +266,24 @@ def bad_api(api: str) -> str:
         return ('--api 要写成 http://主机:端口 这种形式(协议名不能省)，'
                 f'收到 {api!r}')
     return ''
+
+
+def normalize_api(api: str) -> str:
+    """`--api` 收到的那一串 → **真正会被请求的那个地址**。协议名小写、去掉尾斜杠。
+
+    **装配口径只有一份,而且必须是「打出去的那一份」。** `urlsplit` 认得
+    `HTTP://…`(协议名按 RFC 3986 不分大小写,urllib 自己也照打),于是
+    `--parse-only` 回传原串的那一版下,外壳那道 `case ... in http://*|https://*`
+    压根不命中 —— 它于是当成「目标是本机那份服务」,**多起一份用户不需要的守护
+    进程**(worktree 里更糟:那道闸门会抢在前面 die,连用户给的地址都没碰过)。
+    实测 `HTTP://127.0.0.1:1` 和 `HtTp://127.0.0.1:1` 都真的起了一份 kb-web。
+    出路是在这儿规范化一次、`_request` 和 `--parse-only` 都用它,**不是在外壳里
+    多加几个大小写分支**。
+    """
+    parts = urllib.parse.urlsplit(api)
+    return urllib.parse.urlunsplit(
+        (parts.scheme.lower(), parts.netloc, parts.path.rstrip('/'),
+         parts.query, parts.fragment))
 
 
 def post_grab(api: str, url: str, refetch: bool, *,

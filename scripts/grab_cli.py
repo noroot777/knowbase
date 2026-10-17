@@ -5,7 +5,7 @@
 
 **这一层不做任何关于收录的判断。** 抓取、查重、重抓替换、起后半条链那一整套
 口径仍然只有 `kb/web/grab_api.py` 那一份(硬约束在
-`docs/decisions/link-grab.md` 第一节)。这里只做三件事:把参数变成那两个接口的
+`docs/decisions/link-grab.md` 第一节)。这里只做三件事:把参数变成那几条路的
 请求、**按真实事实收敛那句「写进知识库了没有」**、把结果说成终端上的一行话
 (或一行 JSON)。
 
@@ -30,14 +30,15 @@
 去重,`put_items` 的 `DO NOTHING` 挡着,内容不会变成两份)。
 
 纯标准库:这条路不该因为 venv 里缺什么而用不了(`kb.sh` 用 `$BOOT_PY` 跑它)。
-**同目录那两个文件和它是一套**(单文件要过 700 行的上限,按职责拆的):通道层
-`grab_http.py`(打接口、把失败分两档)、输入层 `grab_input.py`(把粘进来的一行
-文字变成几条地址)。要把这条路拷到别处用,三个文件一起拷。
+**同目录那四个文件和它是一套**(单文件 700 行的上限之下按职责拆的):通道层
+`grab_http.py`(打接口、把失败分两档)、输入层 `grab_input.py`(把粘进来的一段
+文字变成几条地址)连同它的第一趟 `grab_md.py`(CommonMark 那一套结构识别)、
+输出层 `grab_say.py`(每一档各说自己那句话)。要把这条路拷到别处用,五个文件
+一起拷(`tests/test_kb_grab_cmd.py` 的隔离夹具钉着这件事)。
 """
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -49,12 +50,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from grab_http import (                                              # noqa: E402
     API_DEFAULT, GRAB_HTTP_SECONDS, READ_HTTP_SECONDS, ApiDown, ApiRefused,
-    bad_api, get_state, pipeline_idle, post_grab, post_restore)
+    bad_api, get_state, normalize_api, pipeline_idle, post_grab, post_restore)
 # **输入层在 `grab_input.py`**:两类边界怎么认、Markdown 怎么按语法取目标,全在
 # 那边(这里只管「拿到地址之后做什么」)。`links_in` 在本模块里**照旧可见** ——
 # 口径只有一份,引用方(含测试)不该因为它搬了家而各自去找新门。
 from grab_input import (                                            # noqa: E402
     TangledInput, dedupe, links_in, whole_line)
+# **输出层在 `grab_say.py`**:每一档各说自己那句话、以及那一行 JSON 里透出哪几个
+# 事实,全在那边。`line_of` / `record_of` 在本模块里**照旧可见** —— 口径只有一份,
+# 引用方(含测试)不该因为它搬了家而各自去找新门。
+from grab_say import _emit, line_of, record_of                       # noqa: E402,F401
 
 #: 等「写进知识库」那一步的默认上限。done 只要 export+index(不等 extract 调
 #: 模型),单条一般几秒。
@@ -70,26 +75,6 @@ MAX_RENEWS = 2
 #: 重启服务会打断正在跑的管道(口径同 `code_stale`:提示而不代劳,也不拦)。
 _STALE_SERVER = ('；补这一步的接口跑着的那个 kb-web 还没有（它比代码旧）——'
                  '`./kb.sh restart` 之后再 `--state` 查一次')
-
-#: 终态词 → 终端上那个前缀。**每一档都有自己的话**,不许几档共用一句
-#: (「已存下」和「已写入知识库」混成一句就是谎报,用户搜不到)。
-_LABELS = {
-    'saved': '已写入知识库',
-    'duplicate': '早就在知识库里了',
-    'pending': '已存下，还没写进知识库',
-    'bad_content': '收下的那一份看不出是正文',
-    # **「没换成」和「内容不合格」是两个事实。** 重抓到的内容和库里那一份一样
-    # (或者这期间已经有人换过)时,库里那一份**本来是正文**、一个字节也没坏 ——
-    # 说成「看不出是正文」是把一次无害的空转报成质量问题。
-    'unchanged': '库里那一份没动',
-    # **「收下了然后没了」和「压根没收下」是两件事。** 前者再投一次是重新抓一篇,
-    # 后者是接着上次没做完的 —— 混成 `failed` 那一句会让人以为一个字节都没写进去。
-    'gone': '收下了，现在不在库里',
-    'failed': '没收下',
-    'unknown': '结果不确定',
-    'absent': '还没收进来',
-    'not_tried': '还没投',
-}
 
 
 def renew(api: str, it: dict, *, timeout: float) -> None:
@@ -492,46 +477,6 @@ def recheck(api: str, it: dict) -> None:
         it['detail'] = (state.get('owing') or '还没写进知识库') + (state.get('resume') or '')
 
 
-# ---------------------------------------------------------------------- 说出来
-
-def line_of(it: dict) -> str:
-    """一条的人读形态:状态词 + 标题,下一行地址,再一行那句话。
-
-    **状态词按 `_LABELS` 逐档取**,不许几档共用一句:「已存下」和「已写入知识
-    库」混成一句话,用户就会去检索里找一篇还没写进去的文章。
-    """
-    label = _LABELS.get(it['status'], it['status'])
-    head = f"{label}  {it.get('title') or ''}".rstrip()
-    rows = [head, f"  {it['url']}"]
-    if it.get('detail'):
-        rows.append(f"  {it['detail']}")
-    return '\n'.join(rows)
-
-
-def record_of(it: dict) -> dict:
-    """一条的机读形态(JSONL 一行)。skill `kb-grab` 读的就是这个。
-
-    **`status` 是收敛之后的终态**,另把后端那几个事实原样透出 —— 调用方要能
-    自己复核,而不是只拿到我们归纳的一个词。
-    """
-    res, state = it.get('res') or {}, it.get('state') or {}
-    return {'url': it['url'], 'status': it['status'], 'title': it.get('title') or '',
-            'detail': it.get('detail') or '', 'label': _LABELS.get(it['status'], it['status']),
-            # **缺证据不是 0。** 回包丢了的那一次可能真的新建了一条,把它编码成
-            # `added: 0` 是在断言一件我们不知道的事(N2):那时给 `null`。
-            'added': res.get('added', 0) if res else None,
-            'duplicate': bool(res.get('duplicate')),
-            'replaced': res.get('replaced'), 'kind': state.get('kind') or res.get('kind') or '',
-            # **没查过不许编码成「确认未完成」。** 幂等那一档不查 state(它早就
-            # 走完了),而后端回包里就有 `done=true` —— 只看 state 会输出
-            # `status=duplicate, done=false` 这种自相矛盾的一行。
-            'done': bool(state.get('done', res.get('done'))),
-            'content_ok': state.get('content_ok', res.get('content_ok')),
-            'owing': state.get('owing', ''), 'exported': state.get('exported'),
-            'stored': state.get('stored'), 'indexed': state.get('indexed'),
-            'refetch': bool(it.get('refetch')), 'renews': it.get('renews', 0)}
-
-
 def _targets(args: argparse.Namespace) -> list[str]:
     """命令行上/标准输入里要收的那几条。`-` = 从标准输入读。
 
@@ -558,13 +503,39 @@ def _targets(args: argparse.Namespace) -> list[str]:
 
 
 def _from_stdin() -> list[str]:
-    """标准输入:**逐行**判模式 —— 整行一条地址的保真,夹着叙述的才抽取。"""
+    """标准输入:**整段一起看**,不是逐行各看一遍。
+
+    **「整行就是一条地址」那一档先按行拿走**(它的意图最明确 —— `pbpaste` 和
+    `links.txt` 喂进来的多半正是一行一条,而且这一档原样交出去);**余下的行连着
+    原来的换行拼成一段**再交给结构扫描。
+
+    **先 `splitlines` 再逐行判的那一版会把一个完整结构切成两截。** Markdown 的
+    链接允许在 `(` 之后换行(`[原文](\n地址)` 是合法写法,CommonMark 的 link
+    destination 前后可以有空白),切开之后第一截是半个结构、第二截里那条裸地址
+    连 Markdown 的收尾 `)` 一起收下 —— 实测:**真库落成带右括号的那个地址、真
+    导出真索引、退出 0、`status=saved`**,而原目标压根不在库里,`DO NOTHING`
+    之下换不回来。
+
+    **空行断段**(CommonMark 的口径:空行终止 paragraph,行内结构不跨段)。
+    """
     out: list[str] = []
+    block: list[str] = []
+
+    def flush() -> None:
+        if block:
+            out.extend(links_in('\n'.join(block)))
+            block.clear()
+
     for line in sys.stdin.read().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        out.extend([line] if whole_line(line) else links_in(line))
+        bare = line.strip()
+        if not bare:
+            flush()                 # 空行:这一段到此为止
+        elif whole_line(bare):
+            flush()                 # 顺序要按原文,所以先把前面那一段交出去
+            out.append(bare)
+        else:
+            block.append(line)
+    flush()
     return out
 
 
@@ -605,8 +576,10 @@ def main(argv: list[str] | None = None) -> int:
         # 服务(实测形态:worktree 里会在连上用户给的地址之前就 die,主检出
         # 则多起一份用户压根不需要的守护进程)。**装配口径只有一份** —— 默认值由
         # `kb.sh` 用 `--api` 传进来,用户自己写的那个照 argparse 的规矩覆盖它,所以
-        # 打出来的就是真正会被请求的地址(`rstrip('/')` 同 `_request`)。
-        print(args.api.rstrip('/'))
+        # 打出来的就是真正会被请求的地址:**和 `_request` 共用同一份规范化**
+        # (`normalize_api` —— 协议名小写那一步少不了,`HTTP://…` 是合法写法而
+        # 外壳那道 case 是大小写敏感的,见那边的说明)。
+        print(normalize_api(args.api))
         return 0
 
     try:
@@ -652,17 +625,6 @@ def main(argv: list[str] | None = None) -> int:
     bad = [it for it in items
            if it['status'] in ('failed', 'unknown', 'not_tried', 'gone')]
     return 1 if bad else 0
-
-
-def _emit(items: list[dict], as_json: bool) -> None:
-    for it in items:
-        print(json.dumps(record_of(it), ensure_ascii=False) if as_json else line_of(it))
-    if not as_json and len(items) > 1:
-        tally: dict[str, int] = {}
-        for it in items:
-            tally[it['status']] = tally.get(it['status'], 0) + 1
-        parts = [f'{n} 条{_LABELS.get(s, s)}' for s, n in tally.items()]
-        print(f"共 {len(items)} 条:" + '、'.join(parts))
 
 
 if __name__ == '__main__':

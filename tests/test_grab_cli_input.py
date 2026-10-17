@@ -237,10 +237,16 @@ class GrabCliInputTests(GrabCliCase):
         **收尾那一侧反过来**:`` `foo\` `` 的收尾就是那个被反斜杠挡着的反引号
         (CommonMark 的「Backslash escapes do not work in code spans」)—— 所以那份
         表**不**跳转义,起点才就地数。让表也跳转义就会把这一条反过来弄错。
+
+        **三段之间空一行**:代码跨度在 CommonMark 下是可以跨行的(同一段里,
+        第一段那个落单的反引号会跟第二段的配成一对、把中间那条地址盖进代码里
+        —— `markdown-it-py` 也是这个结果)。这一条要钉的是「`` \`` `` 不让解析
+        崩掉」,所以让三段各自成段;**空行断段**那件事本身在
+        `test_a_structure_that_spans_lines_is_not_cut_in_half` 里钉。
         """
         self.run_cli('--no-wait', '-',
-                     stdin='见 \\`` 这条 https://example.org/one\n'
-                           '见 \\``a` 和 https://example.org/two\n'
+                     stdin='见 \\`` 这条 https://example.org/one\n\n'
+                           '见 \\``a` 和 https://example.org/two\n\n'
                            # 第三行钉**收尾**那一侧:那段代码跨度的收尾正是被反斜杠
                            # 挡着的反引号,所以它盖掉了里面的 `](y)` —— 成立的是
                            # `…/three` 这一条。表也跳转义的话收尾就找不着了,那个
@@ -332,6 +338,21 @@ class GrabCliInputTests(GrabCliCase):
             ('没收尾的标签是字面文字',
              f'未闭合 <span title="x" 然后 [一篇]({YES})', [YES]),
             ('没收尾的注释同理', f'<!-- 没收尾 [一篇]({YES})', [YES]),
+            # **图片不是链接**:它表达的是「这儿嵌一张图」。外层那条文章链接
+            # 照旧成立 —— 混在一起算的那一版只产出那张图、把文章静默漏掉。
+            ('图片套在链接里,成立的是外层那条文章链接',
+             f'[![封面]({NO}/image.jpg)]({YES})', [YES]),
+            ('单独一张图,一条都不产出', f'![封面]({NO}/image.jpg) 这张', []),
+            # **引用式链接**:我们不解引用定义,但它是一段结构 —— 显示文字和
+            # `][标签]` 残片不许被拼成一个地址。
+            ('引用式链接的显示文字不许被拼成地址',
+             f'见 [{NO}/label][ref] 这篇', []),
+            ('引用定义那一行照旧认得出来', f'[ref]: {YES}', [YES]),
+            # **属性值按 HTML 的规则解码**:`&amp;` 是一个 `&`。
+            ('HTML 属性值里的字符实体要解开',
+             f'见 <a href="{YES}?a=1&amp;b=2">原文</a> 这篇', [f'{YES}?a=1&b=2']),
+            ('属性值不是一条干净地址时一条都不产出',
+             f'<img src="{YES}" srcset="{NO}/2x.jpg 2x">', [YES]),
         )
         for why, line, want in cases:
             with self.subTest(why):
@@ -342,6 +363,38 @@ class GrabCliInputTests(GrabCliCase):
                 self.assertEqual(self.plan['posted'], want)
                 self.run_cli('--state', '-', stdin=line)
                 self.assertEqual(self.plan['asked'], want)
+
+    def test_a_structure_that_spans_lines_is_not_cut_in_half(self):
+        """**粘进来的是一段文字,不是一行一行各看一遍。**
+
+        Markdown 的链接允许在 `(` 之后换行(CommonMark 的 link destination 前后
+        可以有空白)。**先 `splitlines` 再逐行判**的那一版把它切成两截:第一截是
+        半个结构、第二截里那条裸地址连 Markdown 的收尾 `)` 一起收下 —— 实测
+        **真库落成带右括号的那个地址、真导出真索引、退出 0、`status=saved`**,
+        而原目标压根不在库里。
+
+        **「整行就是一条地址」那一档照旧先按行拿走**(它的意图最明确,而且原样
+        交出去),所以一行一条的清单不受影响;**空行断段**(CommonMark 的口径:
+        空行终止 paragraph,行内结构不跨段)。三件事一起钉。
+        """
+        self.run_cli('--no-wait', '-',
+                     stdin='见 [原文](\n'
+                           'https://example.org/multiline) 这篇')
+        self.assertEqual(self.plan['posted'], ['https://example.org/multiline'])
+        # 清单那一档:每行各是一条,顺序照原文。
+        self.plan['posted'].clear()
+        self.run_cli('--no-wait', '-',
+                     stdin='https://example.org/a\nhttps://example.org/b\n'
+                           '看这篇 https://example.org/c 挺好')
+        self.assertEqual(self.plan['posted'],
+                         ['https://example.org/a', 'https://example.org/b',
+                          'https://example.org/c'])
+        # 空行断段:第二段那个 `)` 不属于第一段那个没写完的链接。
+        self.plan['posted'].clear()
+        self.run_cli('--no-wait', '-',
+                     stdin='见 [原文](\n\nhttps://example.org/split) 这篇')
+        self.assertEqual(self.plan['posted'], ['https://example.org/split)'],
+                         '断段之后那一段里的裸地址按空白断、一个标点都不剥')
 
     def test_an_autolink_inside_a_label_does_not_void_the_outer_link(self):
         """**反过来钉一边:`<地址>` 不作废包着它的那条链接。**
