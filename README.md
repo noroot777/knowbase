@@ -14,6 +14,9 @@
 </p>
 
 ---
+<p align="center">
+  <img src="docs/screenshots/outline.png" width="680" />
+</p>
 
 把绿泡泡、X 大V观点、RSS 订阅、网页专栏、邮件简报、YouTube 视频摘要统一索引，支持关键词 + 语义混合检索、意图问答、每日日报、工具图鉴、收藏此段与 AI 分诊。
 
