@@ -36,19 +36,25 @@
 //    前者由 `scrollAwayBlocked()` 挡在收起之前(订阅页那条工具栏里装着「读取
 //    失败 + 重新读取」);后者由调用方传 `host`,收起时它身上会打
 //    `has-scroll-away`,`.away-exit` 那颗常驻按钮靠它显形。
-// ⑧ **自己改的那点高度不算用户在滚。** 收起/展开会改变滚动容器里的内容布局,
-//    浏览器为了让视口里那段文字别乱跑会补偿 `scrollTop`(scroll anchoring),
-//    而补偿方向正好跟收起相反 —— 认了它就是收起→补偿→展开→再补偿的来回震荡
+// ⑧ **判位置要用一把不受自身收起状态影响的尺子。** 收起轴**内**的目标会让轴上
+//    的内容整体上移,浏览器为了让视口里那段文字别乱跑会补偿 `scrollTop`
+//    (scroll anchoring)—— 补偿之后 `scrollTop` 就不再代表「正文读到哪儿了」,
+//    而补偿方向正好跟收起相反,认了它就是收起→补偿→展开→再补偿的来回震荡
 //    (实测:收藏详情里单次 120px 滚轮之后 1049ms 内方向反转 9 次,那条头在
-//    29.7~57px 之间抖,停手之后一点都没收起来)。所以改完高度要给一小段**平息
-//    期**,期间只跟着记位置、不改判;平息期一完,**把这一段里挪掉的那一截记成
-//    「我们自己造成的」,所有位置判据都要先把它加回去**。只吞事件是不够的:
-//    收起 57px 的头,补偿正好把 `scrollTop` 从 120 压到 63 —— **低于
-//    `AWAY_ENTER`**,于是「回到顶部一律放出来」当场触发,展开又反向补偿回 120,
-//    这是一组双稳态,吞多久都会在平息期结束那一下炸开。
-//    这一档**只有收起目标落在它自己那条轴里面时才出得来**(四处接入里只有收藏
-//    详情是这样,另外三处的目标都在轴外),但判据属于通用层:哪一处接成那样都
-//    不该抖。
+//    29.7~57px 之间抖,停手之后一点都没收起来)。
+//    尺子是 `scrollAwayPosition()`:**`scrollTop` 加上此刻被自己收掉的轴内高度**。
+//    这个数在收起前后恒定(120 → 补偿到 63,加回 57 还是 120),方向累计和「回到
+//    顶部」两条判据从此有共同的参照。**目标在轴外时这一项恒为 0**,另外三处的
+//    判据跟原来一字不差。
+//    **别去猜「这一截位移是不是补偿」。** 按方向 + 时间窗 + 幅度上限估一个
+//    「自身补偿量」看着也能把震荡压住,但那几样都证明不了因果:平息期里用户真的
+//    反向滚了、换一篇把 `scrollTop` 写回 0,统统满足同一组条件,于是被当成自身
+//    补偿攒进去 —— 实测快速滚回开头或紧接着点下一篇,整条工具栏就再也回不来了,
+//    而那个估出来的量还会一轮轮累积(收藏往返三次:57 → 104 → 161,可它那条头
+//    一共才 57px)。
+//    动画**跑的过程中**那几帧仍然对不齐(高度是渐变的,而收掉的高度按收起前量到
+//    的整份算),所以还要一小段**平息期**:期间只跟着记位置、不改判,平息期一完
+//    按真实位置补判一次。
 // ⑦ **阅读区不在页面上了就得瞬时复位**,否则那条工具栏停在 `height:0 + inert`
 //    上,切回来谁都点不着它。这条不许押在「某个按钮记得调一下」——
 //    每条轴自己挂一个 `ResizeObserver` 盯着,元素被 `display:none` 时尺寸归零,
@@ -74,7 +80,7 @@ const AWAY_FLOOR = 24;
 /** 松手之后多久内的滚动还算他自己滚的(口径②,接惯性用;按着的时候不看它)。 */
 const AWAY_GESTURE_MS = 700;
 /** 清理 inline 样式的兜底时限,也是自己改完高度之后那段平息期(口径⑧)。
- *  比 base.css 里那条 .2s 过渡长一截 —— 锚定补偿是跟着过渡一帧帧来的。 */
+ *  比 base.css 里那条 .2s 过渡长一截 —— 高度是渐变的,中途那几帧对不齐。 */
 const AWAY_MS = 280;
 
 /**
@@ -104,6 +110,13 @@ function scrollAwayAxis(node) {
           : node.scrollHeight - node.clientHeight;
       } catch { return 0; }
     },
+    /** 这个元素在不在这条轴滚的那堆内容里面(口径⑧的那把尺子按它分档)。 */
+    holds(el) {
+      try {
+        const root = win ? node.document.documentElement : node;
+        return !!root && !!el && root.contains(el);
+      } catch { return false; }
+    },
   };
 }
 
@@ -120,15 +133,15 @@ function scrollAwayAxis(node) {
  */
 function bindScrollAway(scroller, targets, opts = {}) {
   const node = typeof scroller === 'string' ? $(scroller) : scroller;
-  const blocks = (targets || []).map(t => typeof t === 'string' ? $(t) : t)
-    .filter(Boolean).map(el => ({ el, away: false, natural: 0, timer: 0 }));
-  if (!node || !blocks.length) return null;
+  const picked = (targets || []).map(t => typeof t === 'string' ? $(t) : t).filter(Boolean);
+  if (!node || !picked.length) return null;
   const axis = scrollAwayAxis(node);
+  // `inside` 是**收起它会不会挪动轴上内容的坐标**(口径⑧)。这一页的结构在绑定
+  // 期间不变,所以量一次就够;收藏详情每次重绘都重新绑,跟着一起重算。
+  const blocks = picked.map(el => ({ el, inside: axis.holds(el), away: false, natural: 0, timer: 0 }));
   const state = {
     axis, targets: blocks, last: 0, carry: 0, gestureAt: 0, holding: false, off: [],
-    settleUntil: 0, settleTimer: 0, settleFrom: 0, settleHeight: 0, settleAway: false,
-    /** 自己改高度害浏览器补偿掉的位置,累计值。位置判据一律 `top + shift`(口径⑧)。 */
-    shift: 0,
+    settleUntil: 0, settleTimer: 0,
     visible: opts.visible || (axis.gestures === node ? node : null),
     host: opts.host || null,
   };
@@ -174,14 +187,22 @@ function scrollAwayVisible(state) {
 }
 
 /**
- * 这几块里有没有正摆着、要人处理的告警(口径⑥)。
+ * 这几块里有没有**此刻真的摆在页面上、要人处理**的告警(口径⑥)。
  *
  * 判据是 `role="alert"` 而不是「有没有提示」:同一条浮层里还装着进度和待配置
  * (`role="status"`),那两类不该把工具栏钉死在展开态。
+ *
+ * **「在不在页面上」要自己量,不能只问它的 `hidden`。** 手动收录那条投递栏是
+ * 跟着来源整条 `display:none` 的,里面那句上一轮的失败提示自己并没有 hidden、
+ * 角色也还挂着 —— 只看 `hidden` 的话,收录失败过一次之后,大V观点 / RSS /
+ * 邮件简报 / 网页专栏读长文时工具栏全都收不起来(四处实测)。量盒子同时**包含**
+ * 了原来那道 `hidden` 判据(`hidden` 就是 `display:none`),而**被收起的那一块照旧
+ * 量得出盒子**(`height:0 + overflow:hidden` 不改布局盒),所以「收起之后新来的
+ * 告警要放出来」一字没变。
  */
 function scrollAwayBlocked(state) {
   return state.targets.some(t => [...t.el.querySelectorAll('[role="alert"]')]
-    .some(node => !node.hidden && node.textContent.trim()));
+    .some(node => node.getClientRects().length > 0 && node.textContent.trim()));
 }
 
 /** 这几块加起来有多高(收起的按收起前量到的那一份算)。 */
@@ -190,18 +211,33 @@ function scrollAwayHeight(state) {
     (sum, t) => sum + (t.away ? t.natural : t.el.getBoundingClientRect().height), 0);
 }
 
-/** 一次滚动:按口径②③④决定收起还是放出来。 */
+/** 轴上的内容此刻被我们自己收掉了多少(只有轴内的目标算数,口径⑧)。 */
+function scrollAwayCollapsed(state) {
+  return state.targets.reduce((sum, t) => sum + (t.away && t.inside ? t.natural : 0), 0);
+}
+
+/**
+ * 判位置用的坐标(口径⑧):`scrollTop` **加上此刻被自己收掉的轴内高度**。
+ *
+ * 轴内的目标一收,浏览器会补偿 `scrollTop` 保住视口里那段文字;加回这一份,
+ * 这个数在收起前后恒定,方向累计和「回到顶部」才有共同的尺子。目标在轴外时
+ * (四处接入里的另外三处)这一项恒为 0,判据跟原来一字不差。
+ */
+function scrollAwayPosition(state) {
+  return state.axis.top + scrollAwayCollapsed(state);
+}
+
+/** 一次滚动:按口径②③④⑧决定收起还是放出来。 */
 function scrollAwayTick(state) {
-  const top = state.axis.top;
-  const delta = top - state.last;
-  state.last = top;
-  // 口径⑧:平息期里的位置变化多半是浏览器替我们补的,**只记位置、不改判**。
+  const position = scrollAwayPosition(state);
+  const delta = position - state.last;
+  state.last = position;
+  // 口径⑧:动画跑的那几帧对不齐(高度渐变,而收掉的高度按整份算),只记不改判。
   // 排在「回到顶部」前面:那一支也会被吞掉,由 `scrollAwaySettled()` 补判。
   if (state.settleUntil && Date.now() < state.settleUntil) { state.carry = 0; return; }
   // 回到顶部一律放出来 —— 换一篇文章(`readSourceItem` 把 scrollTop 写回 0)
   // 也走这一条,不用在那边另外记着调我们。**这个方向不过手势那道门。**
-  // 位置要加回 `shift`:那一截是我们自己收起时害浏览器补掉的,不是用户滚上去的。
-  if (top + state.shift <= AWAY_ENTER) { state.carry = 0; setScrollAway(state, false); return; }
+  if (position <= AWAY_ENTER) { state.carry = 0; setScrollAway(state, false); return; }
   if (!delta) return;
   if ((delta > 0) !== (state.carry > 0)) state.carry = 0;   // 方向反了,重新攒
   state.carry += delta;
@@ -227,33 +263,24 @@ function setScrollAway(state, away) {
   for (const t of state.targets) setScrollAwayTarget(t, away);
   if (state.host) state.host.classList.toggle('has-scroll-away', away);
   state.carry = 0;
-  // 口径⑧:高度正在动,接下来这一小段的位置变化先不当真;量级和起点记下来,
-  // 平息期结束要靠它们算出「这一截是不是我们自己害的」。
-  state.settleFrom = state.axis.top;
-  state.settleAway = away;
+  // 口径⑧:高度正在渐变,中途那几帧的坐标对不齐,先不改判。
   state.settleUntil = Date.now() + AWAY_MS;
   clearTimeout(state.settleTimer);
-  state.settleTimer = setTimeout(() => scrollAwaySettled(state, height), AWAY_MS);
+  state.settleTimer = setTimeout(() => scrollAwaySettled(state), AWAY_MS);
 }
 
 /**
- * 平息期一完:把自己害掉的那一截位移记进 `shift`,再按真实位置补判一次(口径⑧)。
+ * 平息期一完,按**此刻的真实坐标**补判一次(口径⑧)。
  *
- * - **记 `shift`** 是因为位置判据不能用被补偿过的坐标。只认跟这次高度变化**同向、
- *   且不超过它**的那一截 —— 平息期里用户自己滚的那部分不许算进来(算进去会让
- *   `shift` 跑飞,之后到了顶上也放不出来)。
- * - **补判**是因为期间的事件都被吞了:用户要是在这期间滚回了顶上,他已经停在
- *   那儿,不会再有下一次 scroll 事件来把这条头放出来。
+ * 期间的事件都被吞了,所以这一下必须补:用户要是在这期间滚回了顶上、或者换了
+ * 一篇(`scrollTop` 被写回 0),他已经停在那儿 —— 不会再有下一次 scroll 事件来把
+ * 这条头放出来。
  */
-function scrollAwaySettled(state, height) {
+function scrollAwaySettled(state) {
   state.settleUntil = 0;
-  const moved = state.settleFrom - state.axis.top;
-  state.shift += state.settleAway
-    ? Math.max(0, Math.min(height, moved))
-    : Math.min(0, Math.max(-height, moved));
-  state.last = state.axis.top;
+  state.last = scrollAwayPosition(state);
   state.carry = 0;
-  if (state.axis.top + state.shift <= AWAY_ENTER) setScrollAway(state, false);
+  if (state.last <= AWAY_ENTER) setScrollAway(state, false);
 }
 
 /** 单块的收起/展开动画。收起态留下 inline 的 height/overflow,展开跑完撤干净。 */
@@ -287,8 +314,6 @@ function resetScrollAwayState(state) {
   state.gestureAt = 0;
   clearTimeout(state.settleTimer);
   state.settleUntil = 0;
-  state.shift = 0;
-  state.last = state.axis.top;
   if (state.host) state.host.classList.remove('has-scroll-away');
   for (const t of state.targets) {
     clearTimeout(t.timer);
@@ -298,6 +323,7 @@ function resetScrollAwayState(state) {
     t.el.style.height = '';
     t.el.style.overflow = '';
   }
+  state.last = scrollAwayPosition(state);   // 放在后面:这时 collapsed 才归 0
 }
 
 /**

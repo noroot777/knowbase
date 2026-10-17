@@ -16,6 +16,11 @@
 //    滚」,工具栏再也收不起来。另一边:展开方向任何时候都放行,不受这道门影响。
 // ④ **后台重绘不许把收起态弹回来。** 同步完一轮会重绘这一页,一刀切复位的话
 //    就是「读着读着工具栏自己跳出来」。
+// ⑤ **收起动画还在跑的那几百毫秒里,真实输入和导航不许被当成自身补偿。**
+//    「滚回开头」「换下一篇」都会在那个窗口里把位置带回 0;按方向+时间+幅度去
+//    估补偿量的话它们正好满足全部条件,被攒进去之后到了开头也放不出来。
+// ⑥ **收录失败之后切到别的来源,那条提示不许再拦着别人。** 投递栏是跟着来源整条
+//    隐藏的,里面残留的告警角色不等于当前阅读区有待处理的错误。
 //
 // 判据一律钉在后果上(高度、点不点得中、视图切没切过去),不验类名。
 
@@ -183,7 +188,59 @@ export async function checkScrollAwayGuards({ evaluate, wait, check, click, scre
   const up = await shape();
   check('往回滚不受手势门影响,照样放出来', up.head === open.head && up.top > 64, JSON.stringify({ beforeUp, up }));
 
-  // ── ④ 手动收录那条持久提示也要送到人跟前 ──────────────────────────────
+  // ── ④ 动画还在跑的时候:真实输入和导航都不是自身补偿 ──────────────────
+  // 一次 120px 向下当场收起,**五十毫秒后**(动画还在跑)再做一件事:往回滚、或者
+  // 换下一篇。那一下是真的用户输入 / 真的导航 —— 拿「方向对得上、时间挨得近、
+  // 幅度不超过这条头的高度」去估自身补偿量的话,它们正好三条全中。
+  //
+  // **各做两趟**:估出来的那个量单趟顶多攒下一整条头(57px),还差一点到「回到
+  // 顶部」那条线(64px),攒过线之后才会停在开头也放不出来。两趟之间要先
+  // `resize` 一下 —— 那条路会把这条轴的状态整个复位,不然上一组攒下的东西会让
+  // 后一组从收起态起跑,被遮成一条不敏感的绿。
+  const burst = async (after) => {
+    await scrollTo(0);
+    const spot = await at(evaluate);
+    await send('Input.dispatchMouseEvent', { type: 'mouseWheel', ...spot, deltaX: 0, deltaY: 120 });
+    await settle(50);                      // AWAY_MS 是 280,这时动画还在跑
+    await after(spot);
+    await settle(900);
+  };
+  const freshen = async () => {
+    await evaluate(`window.dispatchEvent(new Event('resize')); true`);
+    await settle();
+    await scrollTo(0);
+    await settle();
+    const ready = await shape();
+    check('前提 —— 这一组从摊开态起跑', ready.head === open.head && !ready.inert, JSON.stringify(ready));
+  };
+
+  await freshen();
+  for (let round = 1; round <= 2; round++) {
+    await burst(async spot => {
+      await send('Input.dispatchMouseEvent', { type: 'mouseWheel', ...spot, deltaX: 0, deltaY: -240 });
+    });
+    const rushed = await shape();
+    check(`动画还在跑时滚回开头(第 ${round} 趟),工具栏照样回来`,
+      rushed.head === open.head && !rushed.inert && rushed.top === 0, JSON.stringify(rushed));
+  }
+
+  // 第二条路:换一篇会把 `scrollTop` 写回 0,那是导航不是补偿。两篇来回换,换回来
+  // 的那篇正文够长,下一趟才滚得动。
+  await freshen();
+  const reading = await evaluate(`JSON.stringify(sourceReaderItem.key)`);
+  for (let round = 1; round <= 2; round++) {
+    await burst(async () => {
+      await evaluate(`readSourceItem(sourceRows[${round}].key); true`);
+    });
+    const navigated = await shape();
+    check(`动画还在跑时换下一篇(第 ${round} 趟),工具栏照样回来`,
+      navigated.head === open.head && !navigated.inert && navigated.top === 0, JSON.stringify(navigated));
+  }
+  await evaluate(`readSourceItem(${reading}); true`);
+  await settle();
+  await freshen();
+
+  // ── ⑤ 手动收录那条持久提示也要送到人跟前 ──────────────────────────────
   // 投递栏跟正文一起收起,而「这一篇没进去、你还得再做点什么」是终态提示 ——
   // 落在 inert 子树里就永远走不出去(短暂的 toast 过几秒也没了)。走真实汇合点
   // `updateGrabControls()`,不自己改 DOM。
@@ -198,6 +255,16 @@ export async function checkScrollAwayGuards({ evaluate, wait, check, click, scre
   await collapse('手动收录');
   const barAway = await evaluate(`Math.round($('grab-bar').getBoundingClientRect().height)`);
   check('手动收录:前提 —— 投递栏也收起来了', barAway === 0, JSON.stringify({ grabOpen, barAway }));
+  // **这一处是两块一起收**(工具栏 57 + 投递栏 60),所以单独钉一句两块都回得来 ——
+  // 收起和放出来是逐块做的,只钉工具栏的话投递栏漏掉也看不见。
+  await scrollTo(0);
+  await settle();
+  const bothBack = JSON.parse(await evaluate(`JSON.stringify({
+    head: Math.round($('source-head').getBoundingClientRect().height),
+    bar: Math.round($('grab-bar').getBoundingClientRect().height) })`));
+  check('手动收录:两块一起收起之后,滚回开头都要回来',
+    bothBack.head >= 30 && bothBack.bar >= 60, JSON.stringify(bothBack));
+  await collapse('手动收录(第二趟)');
   await evaluate(`grabBusy = false; grabStage = 'failed';
     grabNote = '抓取失败，这条没存下来；再投一次。'; updateGrabControls(); true`);
   await settle();
@@ -214,6 +281,10 @@ export async function checkScrollAwayGuards({ evaluate, wait, check, click, scre
     JSON.parse(grabFailed).bar >= 60 && !JSON.parse(grabFailed).inert, grabFailed);
   check('那句失败原因真看得见', JSON.parse(grabFailed).visible
     && /没存下来/.test(JSON.parse(grabFailed).said), grabFailed);
+  // 对称钉一边:**还在这一类里**的时候,那条提示就该一直拦着(跟来源读取失败同口径)。
+  await wheel(120, 6);
+  const grabStill = await evaluate(`Math.round($('grab-bar').getBoundingClientRect().height)`);
+  check('还在手动收录里,失败提示一直拦着不许收', grabStill >= 60, String(grabStill));
   // 反过来钉一边:成功态不该把投递栏永久钉在展开态。
   await evaluate(`grabStage = 'done'; grabNote = '已写入知识库，全文检索里搜得到了。';
     updateGrabControls(); true`);
@@ -222,13 +293,27 @@ export async function checkScrollAwayGuards({ evaluate, wait, check, click, scre
   await wheel(120, 6);
   const grabDone = await evaluate(`Math.round($('grab-bar').getBoundingClientRect().height)`);
   check('收录成功之后照旧收得起来', grabDone === 0, String(grabDone));
-  await evaluate(`grabStage = ''; grabNote = ''; updateGrabControls(); true`);
+
+  // ── ⑥ 切到别的来源,残留的告警不许再拦着别人 ──────────────────────────
+  // 投递栏是跟着来源整条 `display:none` 的,而里面那句提示自己并没有 hidden、
+  // 角色也还挂着 —— 只看 `hidden` 的话,收录失败过一次之后别的来源全都收不起来。
+  await evaluate(`grabStage = 'failed';
+    grabNote = '抓取失败，这条没存下来；再投一次。'; updateGrabControls(); true`);
+  await settle();
   await evaluate(`openSubsPanel('social'); true`);
   await wait(`sourceKind === 'social'`);
   await evaluate(`switchSourceView('items');
     $('source-workbench').classList.remove('is-list-only', 'is-focused'); true`);
   await wait(`sourceView === 'items' && sourceRows.length >= 30 && sourceReaderItem`);
   await evaluate(`clearTimeout(sourcePoll); true`);
+  await settle();
+  const residue = JSON.parse(await evaluate(`JSON.stringify({
+    barHidden: $('grab-bar').hidden, hintHidden: $('grab-hint').hidden,
+    role: $('grab-hint').getAttribute('role') || '' })`));
+  // 前提自己钉一句:残留真的还在,不然下面那条是一条不敏感的绿。
+  check('前提 —— 切走之后那句失败提示还挂在隐藏的投递栏里',
+    residue.barHidden && !residue.hintHidden && residue.role === 'alert', JSON.stringify(residue));
+  await collapse('收录失败之后在别的来源读长文');
   await scrollTo(0);
 
   // ── ⑤ 后台重绘不弹回来 ──────────────────────────────────────────────────

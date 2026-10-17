@@ -223,6 +223,22 @@ export async function checkDrawerScrollAway({ evaluate, wait, check, screenshot,
   // 前半句同时钉住夹具前提:收起之后位置确实被压到了那条线以下,不然这条不敏感。
   check('收藏详情:收起之后位置落在「回到顶部」那条线上,头也不许弹回来',
     favEdge.from < 64 && favEdged.head === 0, JSON.stringify({ favEdge, favEdged }));
+  // **来回三趟。** 判位置那把尺子要是带状态(譬如一边收起一边往里攒一个估出来的
+  // 「补偿量」),每趟都会多攒一截:攒到超过那条线之后,滚回开头也放不出来了。
+  // 每趟都把两头都钉上 —— 只钉「收得起来」的话,放不出来那一半就漏了。
+  for (let round = 1; round <= 3; round++) {
+    await wheelOver(send, evaluate, '.fv-detail', -120, 8);
+    await settle(600);
+    const back = await favShape();
+    check(`收藏详情:第 ${round} 趟滚回开头,那条头原样回来`,
+      back.head >= 30 && !back.inert, JSON.stringify(back));
+    await wheelOver(send, evaluate, '.fv-detail', 120, 1);
+    await settle(600);
+    const again = await favShape();
+    check(`收藏详情:第 ${round} 趟再往下滚,照旧收得起来`,
+      again.head === 0 && again.inert, JSON.stringify(again));
+  }
+
   check('收藏详情:常驻返回按钮顶上来了', favSettled.exit, JSON.stringify(favSettled));
   await screenshot('scroll-away-favorite-collapsed');
   await clickCenter(send, evaluate, '.fv-inspector .away-exit');
