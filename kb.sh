@@ -352,6 +352,35 @@ print(json.dumps(b))' "$stages" "$since" "$until" "$targets" "$channel")"
   esac
 }
 
+# ── 手动收录 ──────────────────────────────────────────────────────────────────
+# 网页端那颗「存入知识库」的命令行版 —— 收录从此不只能在面板上做(skill `kb-grab`
+# 打的也是这一条)。**判断一个都不在这儿**:抓取、查重、重抓替换、起后半条链全在
+# 服务端(`kb/web/grab_api.py`,硬约束 `docs/decisions/link-grab.md` 第一节),这里
+# 只负责「确认服务在」,再把参数原样交给 scripts/grab_cli.py。
+#
+# 先 web_start 的理由同 `./kb.sh sync`:**管道跑在 kb-web 进程内**,服务不在就只能
+# 把内容留在 feeds.db 里、检索不到。
+#
+# **worktree 里只许借用已经跑着的那份服务。** 端口上还没人时 web_start 会起一份
+# 用**这个检出自己** `data/` 的服务 —— 真文章于是收进一个测试库,而终端上写着
+# 「已写入知识库」。那是谎报,代价比 cmd_graph 那道闸门挡的还隐蔽(那边是拿空库
+# 覆盖好页面,这边是用户以为存下了)。出路给两条,都不代劳。
+cmd_grab() {
+  [ $# -gt 0 ] || die "给一条链接:./kb.sh grab <链接>(多条用空格隔开;- 表示从标准输入读)"
+  if ! port_busy "$WEB_PORT"; then
+    local common; common="$(git -C "$ROOT" rev-parse --path-format=absolute \
+                              --git-common-dir 2>/dev/null || true)"
+    if [ -n "$common" ] && [ "$common" != "$ROOT/.git" ]; then
+      die "这是 worktree,而 $WEB_PORT 上还没有服务 —— 这儿起的那份会用本检出的 data/,
+     收进去的文章进的是测试库,而命令行会说「已写入知识库」。
+     去主检出跑:cd ${common%/.git} && ./kb.sh grab $*
+     确实要在这儿收(数据目录是显式挂的):先 ./kb.sh start,再跑这条。"
+    fi
+  fi
+  web_start
+  "$BOOT_PY" "$ROOT/scripts/grab_cli.py" --api "$API" "$@"
+}
+
 # ── 图谱页 ────────────────────────────────────────────────────────────────────
 # 三张图谱是「CSS/JS 内联进单文件 HTML」的产物,住在 Vault 里,kb-web 只是把文件
 # 原样发出去。所以改了 catgraph.css/js 或那几个构建脚本,**重启不会让页面变样**,
@@ -506,6 +535,14 @@ Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
                    图谱是 Vault 里的单文件 HTML,样式改了要重新生成——重启不管用。
                    跑同步时 wiki 阶段本来就会带上,这条是「只想立刻看到新样式」用的。
 
+  手动收录(网页端那颗按钮的命令行版;抓不到正文的一律不入库)
+    ./kb.sh grab <链接> [<链接>...]  抓进来,并等它真写进知识库再返回
+    ./kb.sh grab --state <链接>      只查这一条此刻的状态(只读,不抓不写)
+    ./kb.sh grab --refetch <链接>    库里那一份不对时重抓,确认得了就把它换掉
+                   pbpaste | ./kb.sh grab -   从剪贴板那段文字里挑出链接收录
+                   --json 一行一条 JSON(给程序读)、--no-wait 投完就返回
+                   Claude Code 里说「把这条存进知识库」走 skill kb-grab,同一条路。
+
   订阅(瞬间返回)
     ./kb.sh accounts list|discover|add|remove|enable|disable [名字]
                    discover 从本机绿泡泡的会话列表里找候选:不登录、不走网络。
@@ -552,6 +589,7 @@ case "$ACTION" in
   index)   pipeline_run '["index"]' ;;
   extract) pipeline_run '["extract"]' ;;
   graph)   cmd_graph "$@" ;;
+  grab)    cmd_grab "$@" ;;
 
   accounts) cli accounts "$@" ;;
   setup)   "$COLLECTOR/setup.sh" ;;
