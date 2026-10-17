@@ -521,10 +521,11 @@
 <!-- 工具详情抽屉(z 30/31,低于阅读器) -->
 <div id="tool-mask" style="display:none" onclick="closeToolDrawer()"></div>
 <aside id="tool-drawer" style="display:none" role="dialog" aria-modal="true" aria-label="工具详情">
-  <div class="td-head">
+  <div class="td-head scroll-away" id="td-head">
     <b id="td-name"></b>
     <button class="ghost" onclick="closeToolDrawer()" aria-label="关闭工具详情" style="padding:4px 10px">✕</button>
   </div>
+  <button class="ghost away-exit" id="td-exit" onclick="closeToolDrawer()" aria-label="关闭工具详情">✕</button>
   <div class="td-scroll" id="td-scroll">
     <div id="td-hero" class="td-hero"></div>
     <div id="td-entries"></div>
@@ -538,7 +539,7 @@
 
 <div id="reader-mask" style="display:none" onclick="closeReader()"></div>
 <div id="reader" style="display:none" role="dialog" aria-modal="true" aria-label="文章阅读器">
-  <div class="reader-head">
+  <div class="reader-head scroll-away" id="reader-head">
     <b id="reader-title"></b>
     <button class="favbtn" id="reader-fav" onclick="toggleFav(this)" style="display:none;font-size:12.5px"></button>
     <a id="reader-open" target="_blank" rel="noopener">新标签<i data-arrow="ext"></i></a>
@@ -546,6 +547,7 @@
     <a id="reader-src" target="_blank" rel="noopener" style="display:none">原文<i data-arrow="ext"></i></a>
     <button class="ghost" onclick="closeReader()" aria-label="关闭阅读器" style="padding:4px 10px">✕</button>
   </div>
+  <button class="ghost away-exit" id="reader-exit" onclick="closeReader()" aria-label="关闭阅读器">✕</button>
   <iframe id="reader-frame" title="文章内容"></iframe>
 </div>
 

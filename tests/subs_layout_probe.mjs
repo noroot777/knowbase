@@ -8,6 +8,8 @@ import { checkWechatCollectorNotices, checkWechatTargetSizing } from './subs_wec
 import { checkFirstWechatNotice, checkAutomaticSourceNotice, checkManualSourceNotices, checkNoticeGestureSequences } from './subs_notice_hit_checks.mjs';
 import { checkSubscriptionEditorViews } from './subs_editor_view_checks.mjs';
 import { checkReaderScrollAway, checkGrabInputFocus } from './subs_reader_checks.mjs';
+import { checkScrollAwayGuards } from './subs_reader_guard_checks.mjs';
+import { checkDrawerScrollAway } from './reader_scroll_away_checks.mjs';
 
 const base = process.argv[2];
 const output = 'output/subs-layout';
@@ -182,6 +184,8 @@ try {
   await checkSubscriptionUsability({ evaluate, wait, check, click, viewport, screenshot, send });
   await checkSubscriptionEditorViews({ evaluate, wait, check, click, screenshot, send });
   await checkReaderScrollAway({ evaluate, wait, check, screenshot, send });
+  await checkScrollAwayGuards({ evaluate, wait, check, click, screenshot, send, viewport });
+  await checkDrawerScrollAway({ evaluate, wait, check, screenshot, send });
   await checkGrabInputFocus({ evaluate, wait, check, click });
   await evaluate(`switchTab('gallery'); true`);
   check('离开订阅页面恢复普通布局', await evaluate(`!document.body.classList.contains('subs-reading') && !document.body.classList.contains('subs-mode')`));

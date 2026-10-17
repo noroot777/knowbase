@@ -182,6 +182,11 @@ body .scroll-away.is-away {
   border-top-width: 0; border-bottom-width: 0;
   overflow: hidden; opacity: 0; pointer-events: none;
 }
+/* 退出这一处的入口不许跟着收走:抽屉和阅读器的头里装着唯一那颗关闭按钮,
+   收起之后那块是 height:0 + inert。所以它们各留一颗常驻的,压在正文右上角,
+   只有收起态才现身(class 由 scrollaway.js 打在 opts.host 上)。 */
+.away-exit { position: absolute; top: 9px; right: 14px; z-index: 3; display: none; padding: 4px 10px; }
+.has-scroll-away .away-exit { display: inline-flex; }
 
 .searchbar { display: flex; gap: 8px; margin-bottom: 12px; }
 #q {

@@ -123,10 +123,21 @@ function closeFavDetail() {
   trigger.focus({ preventScroll: !matchMedia('(max-width: 760px)').matches });
 }
 
+// 读正文时让出位置:详情自己占一条轴,头那一条(「收藏详情」+ 返回)是 sticky 的。
+// **这一处每次重绘都是新 DOM**,所以绑定跟着渲染走,渲染前先把上一份解掉。
+// 收起之后右上角那颗常驻返回按钮顶上。机制见 kb/static/js/scrollaway.js。
+let favAway = null;
 function renderFavInspector() {
   const item = favItems.find(row => row.id === favActive);
   document.querySelector('.fv-workbench')?.classList.toggle('has-detail', !!item);
+  favAway?.release();
+  favAway = null;
   $('fav-inspector').innerHTML = item ? favDetailHtml(item) : favStartHtml();
+  if (!item) return;
+  const detail = $('fav-inspector').querySelector('.fv-detail');
+  // 取不到就交给 bindScrollAway 自己收场(它承诺元素不在页面上时返回 null、不抛)。
+  favAway = bindScrollAway(detail, [detail?.querySelector('.fv-aside-heading')],
+    { host: $('fav-inspector') });
 }
 
 function favDetailHtml(item) {
@@ -136,7 +147,8 @@ function favDetailHtml(item) {
   const category = favCategory(item);
   const description = action.what || item.summary || '这条收藏的更多内容，藏在原文里。';
   return `<div class="fv-detail">
-    <div class="fv-aside-heading"><span>收藏详情</span><button class="fv-icon-button fv-detail-back" onclick="closeFavDetail()" aria-label="关闭收藏详情">${icon('close')}<span>返回收藏架</span></button></div>
+    <div class="fv-aside-heading scroll-away"><span>收藏详情</span><button class="fv-icon-button fv-detail-back" onclick="closeFavDetail()" aria-label="关闭收藏详情">${icon('close')}<span>返回收藏架</span></button></div>
+    <button class="away-exit fv-detail-exit" onclick="closeFavDetail()" aria-label="关闭收藏详情">${icon('close')}</button>
     <div class="fv-detail-content"><span class="fv-detail-kind fv-${category}">${icon(FAV_FILTERS[category][1])}${FAV_FILTERS[category][0]}</span>
       <h2 class="fv-detail-title" tabindex="-1">${esc(action.name || item.title)}</h2>
       ${description !== item.quote ? `<p class="fv-detail-description">${esc(description)}</p>` : ''}

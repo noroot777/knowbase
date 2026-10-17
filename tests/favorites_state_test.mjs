@@ -36,6 +36,9 @@ function rig() {
     matchMedia: () => ({ matches: false }), modelLabel: value => value,
     navigator: { clipboard: { writeText: async () => {} } }, toast() {},
     confirmBox: async () => false, apiFail: async reply => reply.message || '请求失败',
+    // 收藏详情那条头参与「读正文时让出位置」(scrollaway.js),那份脚本不在这个
+    // VM 里 —— 这里只要它别炸,收起行为自己有浏览器回归(reader_scroll_away_checks)。
+    bindScrollAway: () => null,
     fetch: async url => response(url.includes('/triage') ? { fresh: false } : payload([])),
     setTimeout: callback => { timers.push(callback); return timers.length; }, clearTimeout() {} });
   function $(id) { return element(id); }
