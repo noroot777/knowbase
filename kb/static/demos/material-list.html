@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>素材清单 · 简洁版</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: #14202b;
+      background: #fff;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-size: 16px; line-height: 1.7; }
+    main { max-width: 1120px; margin: 48px auto; padding: 0 32px; }
+    header { padding-bottom: 18px; border-bottom: 1px solid #dce3e0; }
+    h1 { margin: 0; font-size: 25px; line-height: 1.4; font-weight: 650; }
+    .hint { margin: 9px 0 0; color: #66727c; font-size: 13px; }
+    ol { margin: 15px 0 0; padding-left: 29px; }
+    li { padding: 10px 0 10px 5px; }
+    li::marker { color: #66727c; font-variant-numeric: tabular-nums; }
+    .entry { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+    .title { min-width: 0; overflow-wrap: anywhere; }
+    a.title { color: #17604f; text-decoration-thickness: 1px; text-underline-offset: 4px; }
+    a.title:hover { color: #0e4a3b; }
+    a.title:focus-visible { outline: 2px solid #17604f; outline-offset: 4px; border-radius: 2px; }
+    .source { flex-shrink: 0; color: #66727c; font-size: 13px; }
+    .source::before { content: "— "; }
+    footer { margin-top: 25px; padding-top: 15px; border-top: 1px solid #e9edeb; color: #66727c; font-size: 12px; }
+    @media (max-width: 700px) {
+      main { margin: 28px auto; padding: 0 20px; }
+      h1 { font-size: 23px; }
+      body { font-size: 15px; }
+      ol { padding-left: 25px; }
+      li { padding: 11px 0 11px 3px; }
+      .entry { display: block; }
+      .source { display: block; margin-top: 3px; font-size: 12px; }
+      .source::before { content: ""; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>素材清单（12 条）</h1>
+      <p class="hint">一条素材一个简短标题，后面注明来源和作者，不直接铺开正文。</p>
+    </header>
+    <ol aria-label="素材清单">
+      <li><div class="entry">
+        <span class="title">Frontier Slides：快速完成演示文稿</span>
+        <span class="source">大 V 观点 · Amjad Masad</span>
+      </div></li>
+      <li><div class="entry">
+        <a class="title" href="https://x.com/fankaishuai/status/211125886877190576" target="_blank" rel="noopener noreferrer">Grok Bot + Pi Agent：调度与执行分开</a>
+        <span class="source">大 V 观点 · 范凯说AI</span>
+      </div></li>
+      <li><div class="entry">
+        <span class="title">多个 AI 一起查资料的开源项目</span>
+        <span class="source">公众号 · GitHub科技</span>
+      </div></li>
+      <li><div class="entry">
+        <span class="title">持久记忆：延续跨会话的开发上下文</span>
+        <span class="source">RSS · speckx</span>
+      </div></li>
+      <li><div class="entry">
+        <a class="title" href="https://x.com/swyx/status/2111245359125266915" target="_blank" rel="noopener noreferrer">节目幕后：把零散素材整合成一次讨论</a>
+        <span class="source">大 V 观点 · swyx</span>
+      </div></li>
+      <li><div class="entry">
+        <a class="title" href="https://x.com/bindureddy/status/2111241849507872903" target="_blank" rel="noopener noreferrer">关于 OpenAI 模型定价与使用量的观点</a>
+        <span class="source">大 V 观点 · Bindu Reddy</span>
+      </div></li>
+      <li><div class="entry">
+        <span class="title">远程面试中识别 AI 换脸的一则经验</span>
+        <span class="source">大 V 观点 · 宝玉</span>
+      </div></li>
+      <li><div class="entry">
+        <span class="title">Compute Trading：工程与算力交易</span>
+        <span class="source">大 V 观点 · swyx</span>
+      </div></li>
+      <li><div class="entry">
+        <a class="title" href="https://x.com/dotey/status/2111223306061834684" target="_blank" rel="noopener noreferrer">Anthropic 的 AI 工作方式与公众预期报告</a>
+        <span class="source">大 V 观点 · 宝玉</span>
+      </div></li>
+      <li><div class="entry">
+        <a class="title" href="https://x.com/RookieRicardoR/status/2111218979931128195" target="_blank" rel="noopener noreferrer">Claude Code 提速：更短的首字等待</a>
+        <span class="source">大 V 观点 · 耳朵</span>
+      </div></li>
+      <li><div class="entry">
+        <span class="title">从收集到整理：搭建 AI 协作流程</span>
+        <span class="source">公众号 · 开源观察（样例）</span>
+      </div></li>
+      <li><div class="entry">
+        <span class="title">fx.sh 与持久性：工具中的状态管理</span>
+        <span class="source">RSS · 工程笔记（样例）</span>
+      </div></li>
+    </ol>
+    <footer>仅为排版演示，标题按截图主题精简。带下划线的标题可打开原文，其余未附链接；不改动正式日报。</footer>
+  </main>
+</body>
+</html>
