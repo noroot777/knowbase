@@ -12,9 +12,9 @@ from datetime import date, datetime
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from kb import daily, daily_run, fetch_rounds
+from kb import daily, daily_run, daily_trans, fetch_rounds
 from kb.config import ScheduleUnreadable
-from kb.web.common import unreadable_config
+from kb.web.common import VAULT_NAME, unreadable_config
 
 router = APIRouter(prefix='/api/daily')
 
@@ -205,3 +205,17 @@ def delete_report(day: str):
     if not daily.delete(_check_day(day)):
         raise HTTPException(404, '这一天还没有生成日报')
     return {'ok': True, 'detail': '日报已删除'}
+
+
+class TranslationsRequest(BaseModel):
+    urls: list[str] = Field(default_factory=list)
+
+
+@router.post('/translations')
+def translations(body: TranslationsRequest):
+    """这批出处地址里,哪几条在本地读得到中文译文(判据见 kb.daily_trans)。
+
+    面板按回包在出处编号后面补一个入口,点开从左边滑出阅读器读 vault 里那一篇。
+    **没有的那些一个字都不说** —— 回包里只有找到的,别的照旧只有原文链接。
+    """
+    return {'docs': daily_trans.translations(body.urls), 'vault': VAULT_NAME}

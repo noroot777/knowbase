@@ -253,6 +253,13 @@ input[type=date] {
   display: flex; flex-direction: column; animation: slidein .18s ease;
 }
 @keyframes slidein { from { transform: translateX(40px); opacity: 0; } }
+/* 从左边滑出的那一档(调用方给 `data-side="left"`,见 core.js 的 openReader):
+   日报正文里点「译」读本地译文时用。阴影和滑入方向跟着换边,别的一个字不改。 */
+#reader.from-left {
+  right: auto; left: 0; box-shadow: 12px 0 40px rgba(20, 32, 43, .18);
+  animation: slideinleft .18s ease;
+}
+@keyframes slideinleft { from { transform: translateX(-40px); opacity: 0; } }
 .reader-head {
   display: flex; align-items: center; gap: 14px; padding: 12px 18px;
   border-bottom: 1px solid var(--line); background: var(--card);

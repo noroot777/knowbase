@@ -127,6 +127,11 @@ function openReader(a) {
   } else {
     fav.style.display = 'none';
   }
+  // 从哪一边滑出来。默认右边;日报正文里的译文入口要左边 —— 出处编号就在正文
+  // 那一列里,抽屉从同一侧出来,眼睛不用横跨整屏去追它。**要在 display 之前设**:
+  // 滑入动画是跟着 class 走的 CSS 动画,先显示再换 class 的话这一次还是按旧的
+  // 那一边播完。
+  $('reader').classList.toggle('from-left', a.dataset.side === 'left');
   $('reader-mask').style.display = '';
   $('reader').style.display = '';
 }
