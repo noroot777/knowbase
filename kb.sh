@@ -367,6 +367,10 @@ print(json.dumps(b))' "$stages" "$since" "$until" "$targets" "$channel")"
 # 覆盖好页面,这边是用户以为存下了)。出路给两条,都不代劳。
 cmd_grab() {
   [ $# -gt 0 ] || die "给一条链接:./kb.sh grab <链接>(多条用空格隔开;- 表示从标准输入读)"
+  # **帮助和参数校验排在任何副作用之前。** 不然 `./kb.sh grab --help` 会先起一个
+  # 守护进程,而 worktree 里下面那道闸门还抢在它前面 —— 连帮助都拿不到。
+  # `--parse-only` 只解析参数就退出:不读标准输入、不发一个请求。
+  "$BOOT_PY" "$ROOT/scripts/grab_cli.py" --parse-only "$@" || return
   if ! port_busy "$WEB_PORT"; then
     local common; common="$(git -C "$ROOT" rev-parse --path-format=absolute \
                               --git-common-dir 2>/dev/null || true)"

@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import re
 import sys
@@ -55,11 +56,26 @@ READ_HTTP_SECONDS = 15
 #: 模型),单条一般几秒。
 SETTLE_SECONDS = 120
 POLL_SECONDS = 1.0
-#: 最多替用户起几轮补链。**有上限**:某一条一直导不出去时,无限起管道只会把
-#: 这件事变成一个不停烧钱的循环(那一轮带 extract)。
-MAX_KICKS = 2
+#: 一条最多替它重投几次恢复。**有上限**:某一条一直导不出去时,无限重投只会把
+#: 这件事变成一个不停起管道(那一轮带 extract、要调模型)的循环。
+#: **预算在发请求之前就扣**(见 `settle`):用「收到了 200 没有」判断远端那次写
+#: 到底发生没有是不可靠的 —— 请求已经生效而回包丢了的那次照样起了一轮同步。
+MAX_RENEWS = 2
 
-_URL_RE = re.compile(r'https?://[^\s<>"\'）)】」]+')
+#: 从**一段文字**里认链接。**半角右括号不排除** —— 维基那一类地址自己就带着一对
+#: (`/wiki/Function_(mathematics)`),把 `)` 写进排除集等于在第一个 `)` 处截断,
+#: 而截断后的那个地址**可能照样存在**:收进来的于是是另一篇文章,比抓不到更坏。
+#: **全角那些照旧排除**(`（）「」『』【】`):它们不是 URL 里的合法字符,出现就只能
+#: 是行文 —— 不排除的话「（地址）以及后面的话」会被整句吃进来。
+_URL_RE = re.compile(r'https?://[^\s<>"\'（）「」『』【】]+')
+#: 外围叙述标点。**全角一律剥**(它们不是 URL 里的合法字符,出现就只能是行文);
+#: ASCII 只剥 `. , ; :` 和末尾的 `?`(写在地址末尾没有意义,而英文句读极常见)。
+#: **ASCII 的 `!` 不剥** —— 它是 URL 合法的子分隔符(`/post!` 真的存在),而
+#: 「末尾是叹号就一定是句末」正是那种不能做的推断。
+_TRAIL_PUNCT = '.,;:?、，。；：！？'
+#: 括号按**对**算:多余的那个属于行文,配得上对的属于地址。只有半角这一对需要
+#: 配平 —— 全角的压根进不了 `_URL_RE`。
+_BRACKETS = (('(', ')'),)
 #: 终态词 → 终端上那个前缀。**每一档都有自己的话**,不许几档共用一句
 #: (「已存下」和「已写入知识库」混成一句就是谎报,用户搜不到)。
 _LABELS = {
@@ -70,6 +86,7 @@ _LABELS = {
     'failed': '没收下',
     'unknown': '结果不确定',
     'absent': '还没收进来',
+    'not_tried': '还没投',
 }
 
 
@@ -113,9 +130,24 @@ def _detail_of(raw: bytes) -> str:
     return text[:500]
 
 
+#: **读 HTTP 会在三个层面上断,这一层要把它们归成同一档。** 网络层是
+#: `URLError`/`OSError`/`TimeoutError`,而**正文读到一半对方关连接**抛的是
+#: `http.client.IncompleteRead`(`HTTPException` 的子类,**不是** OSError)——
+#: 漏掉它的后果实测过:200 回包声明 `Content-Length: 247` 只写了 12 字节,
+#: 异常一路穿透 `collect` 和 `main`,终端上是一段 traceback、stdout 一个字没有,
+#: **而且一次用于核实的 GET 都没发** —— 服务端那会儿可能已经把这一行存下了。
+_READ_BROKEN = (urllib.error.URLError, OSError, TimeoutError, http.client.HTTPException)
+
+
 def _request(api: str, path: str, *, payload: dict | None = None,
              timeout: float = READ_HTTP_SECONDS) -> dict:
-    """打一次接口。返回解析好的 JSON;400/409 那类带着服务端那句话抛 RuntimeError。"""
+    """打一次接口。返回解析好的 JSON。
+
+    4xx → `ApiRefused`(服务明确拒了这一条);5xx、连不上、读到一半断、回的不是
+    JSON → `ApiDown`(写没写进去我们不知道)。**归一化只在这一层做**:四个端点
+    (`/api/grab`、`/api/grab/state`、`/api/pipeline/status`、`/api/pipeline/run`)
+    共用它,在某一个调用点补 catch 只能修那一处。
+    """
     req = urllib.request.Request(api.rstrip('/') + path, method='GET')
     if payload is not None:
         req = urllib.request.Request(
@@ -123,15 +155,26 @@ def _request(api: str, path: str, *, payload: dict | None = None,
             data=json.dumps(payload).encode(),
             headers={'Content-Type': 'application/json'})
     try:
-        with _OPENER.open(req, timeout=timeout) as resp:
+        with _OPENER.open(req, timeout=max(1.0, timeout)) as resp:
             body = resp.read()
     except urllib.error.HTTPError as e:
-        why = _detail_of(e.read()) or f'HTTP {e.code}'
+        # **错误回包的正文同样会断在半路**,所以 `e.read()` 也在保护里 ——
+        # 不然 5xx 那一档(本该去核实事实)会变成另一个穿透的异常。
+        try:
+            raw = e.read()
+        except _READ_BROKEN:
+            raw = b''
+        why = _detail_of(raw) or f'HTTP {e.code}'
         # **5xx 不是「这条没收下」**:服务端在保存之后的任何一步抛出,这边看到的
         # 都是 500,而那一行可能已经在库里了。归到通道那一档,由调用方去问事实。
         raise (ApiDown if e.code >= 500 else ApiRefused)(why) from None
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
-        raise ApiDown(str(getattr(e, 'reason', None) or e)) from None
+    except _READ_BROKEN as e:
+        why = str(getattr(e, 'reason', None) or e) or type(e).__name__
+        if isinstance(e, http.client.IncompleteRead):
+            # 这一句要人读得懂:底层那个 `IncompleteRead(12 bytes read, …)` 留在
+            # 括号里给排查用,前面先说清发生了什么。
+            why = f'回包读到一半断了({why})'
+        raise ApiDown(why) from None
     try:
         return json.loads(body.decode('utf-8', 'replace'))
     except ValueError:
@@ -139,13 +182,14 @@ def _request(api: str, path: str, *, payload: dict | None = None,
         raise ApiDown('回的不是 JSON:' + body[:200].decode('utf-8', 'replace')) from None
 
 
-def post_grab(api: str, url: str, refetch: bool) -> dict:
+def post_grab(api: str, url: str, refetch: bool, *, timeout: float = GRAB_HTTP_SECONDS) -> dict:
     return _request(api, '/api/grab', payload={'url': url, 'refetch': bool(refetch)},
-                    timeout=GRAB_HTTP_SECONDS)
+                    timeout=timeout)
 
 
-def get_state(api: str, url: str) -> dict:
-    return _request(api, '/api/grab/state?url=' + urllib.parse.quote(url, safe=''))
+def get_state(api: str, url: str, *, timeout: float = READ_HTTP_SECONDS) -> dict:
+    return _request(api, '/api/grab/state?url=' + urllib.parse.quote(url, safe=''),
+                    timeout=timeout)
 
 
 def pipeline_idle(api: str) -> bool | None:
@@ -160,107 +204,191 @@ def pipeline_idle(api: str) -> bool | None:
         return None
 
 
-def kick_inbox(api: str) -> bool:
-    """替用户起一轮**只补后半条链**的同步(手动收录这一类)。
+def renew(api: str, it: dict, *, timeout: float) -> None:
+    """让**服务端**按这一条自己的归属把后半条链补起来 —— 再 POST 一次 `/api/grab`。
 
-    批量投递时第二条起必然撞上第一条起的那一轮(后端如实回 `busy`),它们的内容
-    已经在 feeds.db 里、却没人替它们跑 export —— 所以收尾时补一轮。
-    **按 channel 筛**:起全量会把别的来源一起抓一遍,那不是用户要的。
+    **不自己打 `/api/pipeline/run`。** 那条路要前端替后端决定「这一条属于哪个
+    来源」,而写死 `inbox` 在跨来源的那一刻就错了:一条推文被「大V观点」收过、
+    这一轮又没占到管道时,起一轮 `inbox` 的 export **一个字都不会动它**
+    (`pipeline_stages._per_channel` 按通道筛;真库 + 真 `sync.export` 实测:
+    `export('inbox')` 之后 `exported=false`,换 `export('social')` 才为 true)。
+    服务端那条路本来就是**按条目**恢复的:`grab_api._duplicate` 现查一次归属、
+    先把欠的那一步落实成 export 认得的形状(`reclaim_export` —— vault 里那一篇
+    被移走而两个 hash 还相等时,补跑的 export 压根选不中它),再按 `seen['kind']`
+    起那一轮。所以恢复的不变量留在服务端一处,这边不另写一份带固定来源的协议。
+
+    **这一次重投不发任何对外 HTTP**:查重排在抓取前面(`grab.known` 命中就返回),
+    对已经 `pending` 的条目是纯粹的恢复动作。**也不带 `refetch`** —— 恢复要补的
+    是后半条链,不是把内容换掉。
+
+    回包只用来看「起跑了没有」,**不覆盖 `it['res']`**:那里面存着本次动作的证据
+    (比如一次成功替换的 `replaced`),覆盖掉就等于把它忘了。
     """
-    try:
-        _request(api, '/api/pipeline/run',
-                 payload={'stages': ['export', 'index', 'extract'], 'channel': 'inbox'})
-        return True
-    except RuntimeError:
-        return False      # 这期间别人占住了管道:不是失败,下一轮轮询再看
+    it['renews'] += 1          # **预算在发请求之前扣**(见 MAX_RENEWS)
+    it['renewed'] = post_grab(api, it['url'], False, timeout=timeout)
 
 
 # ------------------------------------------------------------------ 这一条怎么说
 
-def links_in(text: str) -> list[str]:
-    """一段文字里的链接,按出现顺序去重。
+def _unwrap(hit: str) -> str:
+    """剥掉地址右边那些属于**行文**的字符,保留属于**地址**的。
 
-    为了 `pbpaste | ./kb.sh grab -` 这种用法:剪贴板里常常是「看这篇 https://…
-    挺好」。**提不出来就原样交给服务端** —— 地址合不合法只有
-    `grab.normalize` 那一份口径,在这里再判一遍就是两处各判一遍。
+    两件事交替做到不动为止(`…/a(b).` 要先剥句号、再看括号配不配得上对):
+    外围标点按 `_TRAIL_PUNCT`,右括号按配平 —— **右括号只在多于左括号时才剥**。
+    """
+    while True:
+        before = hit
+        hit = hit.rstrip(_TRAIL_PUNCT)
+        while hit:
+            pair = next((p for p in _BRACKETS if p[1] == hit[-1]), None)
+            if pair is None or hit.count(pair[1]) <= hit.count(pair[0]):
+                break
+            hit = hit[:-1]
+        if hit == before:
+            return hit
+
+
+def links_in(text: str) -> list[str]:
+    """**一段文字**里的链接,按出现顺序去重。
+
+    只给 `-`(标准输入)那条路用 —— 剪贴板里常常是「看这篇 https://… 挺好」。
+    命令行上**显式给出的那一条不走这里**(见 `_targets`):对一个本来就完整的
+    地址做有损抽取,换来的是把它改坏。
     """
     out: list[str] = []
     for hit in _URL_RE.findall(text or ''):
-        hit = hit.rstrip('.,;:!?、，。；：')
-        if hit not in out:
+        hit = _unwrap(hit)
+        if hit and hit not in out:
             out.append(hit)
     return out
 
 
-def verdict(res: dict, state: dict | None) -> tuple[str, str]:
+def verdict(res: dict, state: dict | None, *, refetch: bool = False) -> tuple[str, str]:
     """这一条此刻的终态词 + 那句话。**纯函数**,所有输出都过它。
 
-    四档和界面那一侧(`grab.js` 的 `grabCheckItem`)一一对应:
-    - 内容本身不对(`content_ok` 为假 / 这次重抓没换成)排**最前面** ——
-      后面几步全做完也只是把一份看不出是正文的东西写进知识库(同 `owing`);
+    **两种事实分开,不许互相顶替**:`res` 是**本次动作**的证据(换成了没有),
+    `state` 是**库里那一篇此刻**的样子(在不在、看得出是正文吗、搜得到吗)——
+    「那一篇目前存在且可检索」证明不了「本次替换完成」,旧那一版的质量也否定不了
+    新那一版。档位和界面那一侧(`grab.js` 的 `grabCheckItem`)一一对应:
+    - 内容本身不对排**最前面**:后面几步全做完也只是把一份看不出是正文的东西写
+      进知识库(同 `owing`)。但**这一档只认两种依据** —— 本次明确没换成,或者
+      `state` 说库里当前那一份不是正文;
     - `done` → 真写进去了(按**这一篇自己**的事实,不是按那一轮的阶段结果);
-    - 库里有这一行、但还没走完 → 如实说欠哪一步、下一步点哪儿;
+    - 库里有这一行、还没走完 → 如实说欠哪一步、下一步点哪儿;
     - 库里压根没有这一行 → 这才说得出「没存下来」。
     """
-    known = bool(state.get('known')) if state else None
     if res.get('replaced') is False:
         # 重抓没换成(撞上关卡 / 还是确认不了 / 这期间别人动过它):不是终态,
         # 再来一次照旧会重抓。
         return 'bad_content', res.get('detail') or '这次重抓没换成'
-    if state and known and not state.get('content_ok'):
+    if state and state.get('known') and not state.get('content_ok'):
         return 'bad_content', '加 --refetch 会重抓一次，确认得了就把它换掉'
-    if res.get('content_ok') is False and not state:
+    if res.get('content_ok') is False and not state and not res.get('replaced'):
+        # **换成了的那一档不许走这里。** 后端那一档(`_recover` 的成功分支)只更新
+        # `replaced` / `done` / `title`,回包里的 `content_ok` 仍是**库里旧那一份**
+        # 的判断 —— 拿它下结论就是用旧内容的质量否定新内容。
         return 'bad_content', res.get('detail') or '库里那一份看不出是正文'
     if state and state.get('done'):
+        if refetch and not res:
+            # **「库里那一篇走完整条链了」证明不了这次替换成功。** 显式重抓的回包
+            # 丢了(5xx / 断线),而库里旧那一版本来就 `done` —— 照 `done` 报
+            # 「已写入知识库」就是把一件不知道的事说成已完成,而用户要的是**新**
+            # 那一篇。只读那一问答不出这件事,所以如实停在不确定。
+            return 'unknown', ('库里那一份是走完整条链的，但这次重抓换没换成核不'
+                               '出来；再 --refetch 一次是安全的（换不换得成由后端'
+                               '那六道准入和 CAS 定）')
         label = '已经按这次重抓到的内容换掉了；' if res.get('replaced') else ''
         return 'saved', label + '全文检索里搜得到了'
     if state is None:
-        # 没能问到这一篇的事实(只读接口也不通)。**不许替它下结论**。
+        # 没能问到这一篇的事实。**不许替它下结论**。
         return 'unknown', res.get('detail') or '没核到这一篇的结果'
-    if not known:
+    if not state.get('known'):
         return 'failed', '库里没有这一行，这条没存下来；再投一次'
     owes = state.get('owing') or '还没写进知识库'
     return 'pending', owes + (state.get('resume') or '').replace('，', '；', 1)
 
 
 def _settled(status: str) -> bool:
-    """这一档还用等吗。等的只有「存下了、那一轮还没把它写进去」这一种。"""
-    return status in ('saved', 'duplicate', 'bad_content', 'failed')
+    """这一档还用等吗。
+
+    等的只有两种:那一轮还没把它写进去(`pending`)、以及刚投出去还没核
+    (`writing`)。**`unknown` 是终态** —— 它只由「回包丢了,而只读那一问答出的是
+    库里旧那一版」产生,再等下去问到的还是同一个答案。
+    """
+    return status in ('saved', 'duplicate', 'bad_content', 'failed', 'unknown',
+                      'not_tried')
+
+
+def _left(deadline: float, cap: float) -> float:
+    """这一次请求最多还能等多久 —— **剩余预算和单次上限取小的那个**。
+
+    不传预算的话 `--timeout 1` 会在一条慢 state 上等满 15 秒,一批很多条还会累加:
+    说出去的那个秒数就不是上限了(只有这一层能把它变成上限,因为超时是逐请求的)。
+    """
+    return min(cap, max(1.0, deadline - time.monotonic()))
 
 
 def settle(api: str, items: list[dict], *, deadline: float) -> None:
     """轮询到每条都有终态,或者等满。**原地改 items**。
 
-    **管道空着而还有没写进去的 → 替用户起一轮**(`kick_inbox`):批量投递时第二条
-    起必然撞上第一条那一轮,它们的内容在库里却没人跑 export。起跑有次数上限。
+    **问不出来的那一轮不重算档位。** `get_state` 失败时保持原档继续等 —— 拿
+    `state=None` 去重算,会让「本次已经换成、只是这一次没问到」被旧 `content_ok`
+    判成 `bad_content` 并当场停止等待(新正文明明已经换好了)。
+
+    **管道空着而还有没写进去的 → 让服务端按那一条的归属补一次**(`renew`):批量
+    投递时第二条起必然撞上第一条那一轮,它们的内容在库里却没人替它们跑 export。
+    一轮只补一条:那一轮是该来源的全量待办,同来源的其余几条跟着一起带上;**跨来源
+    的那几条**在后面的轮次里各自补(所以不许把它们合成一次写死来源的补跑)。
 
     超时不谎报:最后一次问到的事实就是那句话(`pending` 自带「欠哪一步 + 去哪儿
     点一次」)。
     """
-    kicks = 0
     while True:
         waiting = [it for it in items if not _settled(it['status'])]
         if not waiting:
             return
         for it in waiting:
             try:
-                it['state'] = get_state(api, it['url'])
+                fresh = get_state(api, it['url'],
+                                  timeout=_left(deadline, READ_HTTP_SECONDS))
             except RuntimeError:
-                it['state'] = it.get('state')     # 留着上一次问到的事实
-            it['status'], it['detail'] = verdict(it['res'], it.get('state'))
+                continue              # 这一轮问不出来:保持原档,别拿 None 重算
+            it['state'] = fresh
+            it['status'], it['detail'] = verdict(it['res'], fresh,
+                                                 refetch=it['refetch'])
         waiting = [it for it in items if not _settled(it['status'])]
         if not waiting or time.monotonic() >= deadline:
             return
-        if kicks < MAX_KICKS and pipeline_idle(api) is True:
-            kicks += 1 if kick_inbox(api) else 0
+        if pipeline_idle(api) is True:
+            for it in waiting:
+                if it['renews'] >= MAX_RENEWS:
+                    continue
+                try:
+                    renew(api, it, timeout=_left(deadline, GRAB_HTTP_SECONDS))
+                except RuntimeError:
+                    pass    # 预算已经扣了(那次请求可能已经生效),下一轮按事实再看
+                break
         time.sleep(min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
 
 
-def collect(api: str, url: str, *, refetch: bool) -> dict:
-    """投一条。回包落地即为这一条的初始档位(还要不要等由 `settle` 决定)。"""
-    it = {'url': url, 'res': {}, 'state': None, 'status': 'failed', 'detail': ''}
+def new_item(url: str, *, refetch: bool = False) -> dict:
+    """一条输入的结果对象。
+
+    **先把它建好、放进列表,再去打接口**:通道断在半路时它已经在列表里了,所以
+    「一条输入对一条结果」这个契约在失败路径上也成立 —— 少了它的后果是 stdout
+    一个字都没有(单条)、或者出问题那一条连同后面几条**一声不响地消失**(批量),
+    而 skill 被告知「只按 status 汇报」时手里压根没有 status。
+    """
+    return {'url': url, 'res': {}, 'state': None, 'status': 'not_tried',
+            'detail': '还没投 —— 前面那一条就打不通服务了', 'title': '',
+            'refetch': bool(refetch), 'renews': 0}
+
+
+def collect(api: str, it: dict) -> None:
+    """投一条,**原地填充** `it`。回包落地即为初始档位(还要不要等由 `settle` 定)。"""
+    url = it['url']
     try:
-        it['res'] = post_grab(api, url, refetch)
+        it['res'] = post_grab(api, url, it['refetch'])
     except ApiDown as down:
         # **回包没送达 ≠ 后端没存下来**(保存排在起管道之前,断线可能发生在它
         # 之后)。去问一次只读那一问;问得到就照事实说,问不到才把通道那句话抛
@@ -268,15 +396,17 @@ def collect(api: str, url: str, *, refetch: bool) -> dict:
         try:
             it['state'] = get_state(api, url)
         except RuntimeError:
+            it['status'] = 'unknown'
+            it['detail'] = f'投出去了，但结果核不到:{down}'
             raise ApiDown(str(down)) from None
-        it['status'], it['detail'] = verdict({}, it['state'])
+        it['status'], it['detail'] = verdict({}, it['state'], refetch=it['refetch'])
         if it['status'] == 'pending':
             it['detail'] = '连接断在半路：' + it['detail']
-        return it
+        return
     except ApiRefused as e:
         # 4xx 那一句就是「为什么没收下 + 下一步」,原样交给用户。
-        it['detail'] = str(e)
-        return it
+        it['status'], it['detail'] = 'failed', str(e)
+        return
     res = it['res']
     it['title'] = res.get('title') or ''
     # **顺序就是判据的优先级,不许按 `content_ok` 先判。** 重抓**换成了**那一档
@@ -286,7 +416,7 @@ def collect(api: str, url: str, *, refetch: bool) -> dict:
     if res.get('replaced') is False:
         it['status'], it['detail'] = verdict(res, None)      # 明确没换成
     elif res.get('pipeline'):
-        # started / busy:两档都要收敛(busy 那一档靠 `settle` 补一轮)。
+        # started / busy:两档都要收敛(busy 那一档靠 `settle` 让服务端补一次)。
         # 重抓换成了的那一档也在这里 —— 它起的是同一条后半链。
         it['status'], it['detail'] = 'writing', res.get('detail') or ''
     elif res.get('content_ok') is False:
@@ -295,23 +425,21 @@ def collect(api: str, url: str, *, refetch: bool) -> dict:
     else:
         # 没有 pipeline 这个字段 = 它早就走完整条链了(grab_api 的幂等那一档)。
         it['status'], it['detail'] = 'duplicate', res.get('detail') or ''
-    return it
 
 
-def recheck(api: str, url: str) -> dict:
-    """`--state`:**只读**问一句这一条此刻在知识库里是什么状态。
+def recheck(api: str, it: dict) -> None:
+    """`--state`:**只读**问一句这一条此刻在知识库里是什么状态,原地填充 `it`。
 
     不发抓取、不起管道、不写一个字节 —— 「这篇我存过吗」是随时问得出的事实。
     """
-    it = {'url': url, 'res': {}, 'state': None, 'status': 'unknown', 'detail': ''}
     try:
-        it['state'] = state = get_state(api, url)
+        it['state'] = state = get_state(api, it['url'])
     except ApiRefused as e:
         # 4xx:多半是「这一串不是一条链接」(`grab.normalize` 那句话)。原样转述,
         # 而不是抛一个 traceback 给人看 —— 一批地址里混进一行脏数据是常事。
         it['status'], it['detail'] = 'failed', str(e)
-        return it
-    it['url'] = state.get('url') or url
+        return
+    it['url'] = state.get('url') or it['url']
     it['title'] = state.get('title') or ''
     if not state.get('known'):
         it['status'], it['detail'] = 'absent', '还没收进来'
@@ -322,7 +450,6 @@ def recheck(api: str, url: str) -> dict:
     else:
         it['status'] = 'pending'
         it['detail'] = (state.get('owing') or '还没写进知识库') + (state.get('resume') or '')
-    return it
 
 
 # ---------------------------------------------------------------------- 说出来
@@ -352,24 +479,36 @@ def record_of(it: dict) -> dict:
             'detail': it.get('detail') or '', 'label': _LABELS.get(it['status'], it['status']),
             'added': res.get('added', 0), 'duplicate': bool(res.get('duplicate')),
             'replaced': res.get('replaced'), 'kind': state.get('kind') or res.get('kind') or '',
-            'done': bool(state.get('done')),
+            # **没查过不许编码成「确认未完成」。** 幂等那一档不查 state(它早就
+            # 走完了),而后端回包里就有 `done=true` —— 只看 state 会输出
+            # `status=duplicate, done=false` 这种自相矛盾的一行。
+            'done': bool(state.get('done', res.get('done'))),
             'content_ok': state.get('content_ok', res.get('content_ok')),
             'owing': state.get('owing', ''), 'exported': state.get('exported'),
-            'stored': state.get('stored'), 'indexed': state.get('indexed')}
+            'stored': state.get('stored'), 'indexed': state.get('indexed'),
+            'refetch': bool(it.get('refetch')), 'renews': it.get('renews', 0)}
 
 
 def _targets(args: argparse.Namespace) -> list[str]:
-    """命令行上/标准输入里要收的那几条。`-` = 从标准输入读(一行一条或一段文字)。"""
+    """命令行上/标准输入里要收的那几条。`-` = 从标准输入读。
+
+    **显式给出的那一条原样交给后端,一个字符都不动**(只去掉两头空白)。地址合不
+    合法只有 `grab.normalize` 那一份口径说得准,而在这儿做有损的文本抽取,代价是
+    把一个**合法**地址改坏:`…/wiki/Function_(mathematics)` 会在第一个 `)` 处被
+    截掉,而截断后的地址**可能照样存在** —— 收进来的于是是另一篇文章。
+    `--refetch` 和 `--state` 走的是同一条解析,所以那还会连带认错「要替换哪一篇」
+    和「要查哪一篇」。把一句话当参数给进来的人,会拿到后端那句明确的「这不是一条
+    链接」,改一下再来即可 —— 比静默换一篇文章好。
+
+    `-` 那条**本来就是一段文字**,所以才抽取(`links_in`,保留 URL 里的合法字符和
+    配对括号)。
+    """
     out: list[str] = []
     for raw in args.url:
-        chunks = [sys.stdin.read()] if raw == '-' else [raw]
-        for chunk in chunks:
-            found = links_in(chunk)
-            # 提不出链接就原样交给服务端:那句「这不是一条链接」只有
-            # `grab.normalize` 说得准(元规则「口径只有一份」)。
-            for one in (found or ([chunk.strip()] if chunk.strip() else [])):
-                if one not in out:
-                    out.append(one)
+        found = links_in(sys.stdin.read()) if raw == '-' else [raw.strip()]
+        for one in found:
+            if one and one not in out:
+                out.append(one)
     return out
 
 
@@ -388,37 +527,41 @@ def main(argv: list[str] | None = None) -> int:
                    help='不等「写进知识库」那一步,投完就返回')
     p.add_argument('--timeout', type=float, default=SETTLE_SECONDS,
                    help=f'等「写进知识库」最多多少秒(默认 {SETTLE_SECONDS:.0f})')
+    # `kb.sh` 在起服务**之前**拿它校验一次参数:`--help`、拼错的选项、少给链接都
+    # 不该先起一个守护进程(worktree 里那道闸门还会抢在前面,连帮助都拿不到)。
+    # 这一档不读标准输入、不发一个请求。
+    p.add_argument('--parse-only', action='store_true', help=argparse.SUPPRESS)
     args = p.parse_args(argv)
+    if args.parse_only:
+        return 0
 
     urls = _targets(args)
     if not urls:
         print('没给出要收录的链接', file=sys.stderr)
         return 2
-    items: list[dict] = []
-    try:
-        for url in urls:
-            items.append(recheck(args.api, url) if args.state
-                         else collect(args.api, url, refetch=args.refetch))
-        if not args.state and not args.no_wait:
-            settle(args.api, items, deadline=time.monotonic() + max(0.0, args.timeout))
-    except ApiDown as e:
-        # **通道不通和「这条没收下」是两件事。** 已经投出去的那几条照旧输出
-        # (它们可能已经存下了),再把这一句说清楚。
-        for it in items:
-            if it['status'] == 'writing':
-                it['status'], it['detail'] = 'unknown', '投出去了，但后来连不上服务'
-        _emit(items, args.json)
-        print(f'打不通 kb-web({args.api}):{e}\n'
-              '服务没起就 ./kb.sh start;起着的话看一眼 ./kb.sh logs',
-              file=sys.stderr)
-        return 1
+    # **一条输入一个结果对象,先全建好。** 下面任何一步断在半路,输出里都还有
+    # 它那一行(`not_tried` / `unknown`),不会静默漏条。
+    items = [new_item(url, refetch=args.refetch) for url in urls]
+    broken = ''
+    for it in items:
+        try:
+            (recheck if args.state else collect)(args.api, it)
+        except ApiDown as e:
+            # 通道都打不通了:后面几条不投(它们留在 `not_tried`,如实说没试过)。
+            broken = str(e)
+            break
+    if not broken and not args.state and not args.no_wait:
+        settle(args.api, items, deadline=time.monotonic() + max(0.0, args.timeout))
     # `--no-wait` 下 `writing` 就是终态:那一轮起跑了,但我们没等它。
     for it in items:
         if it['status'] == 'writing':
             it['status'] = 'pending'
             it['detail'] = it['detail'] or '正在写入知识库，稍后 --state 查一次'
     _emit(items, args.json)
-    bad = [it for it in items if it['status'] in ('failed', 'unknown')]
+    if broken:
+        print(f'打不通 kb-web({args.api}):{broken}\n'
+              '服务没起就 ./kb.sh start;起着的话看一眼 ./kb.sh logs', file=sys.stderr)
+    bad = [it for it in items if it['status'] in ('failed', 'unknown', 'not_tried')]
     return 1 if bad else 0
 
 
