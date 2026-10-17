@@ -66,17 +66,22 @@ class MaterialViewTests(unittest.TestCase):
         self.assertEqual(title, item['title'])
         self.assertEqual('https://example.org/paper-(clean).pdf', item['url'])
 
-    def test_legacy_bare_urls_and_parentheses_in_author_names(self):
+    def test_legacy_bare_urls_preserve_original_instead_of_guessing(self):
         text = ('## 素材清单(2 条)\n\n'
                 '1. [旧标题\n\n原帖正文](https://example.org/paper-(clean).pdf)'
                 ' — 大V观点·歸藏(guizang.ai)\n'
                 '2. 没有链接 — RSS·某号 · 补录\n\n> 还有待报道的素材。\n')
+        self.assertIsNone(material_view(text))
+
+    def test_parentheses_in_authors_and_late_suffix_are_preserved(self):
+        text = ('## 素材清单(2 条)\n\n'
+                '1. [标题](<https://example.org/paper-(clean).pdf>)'
+                ' — 大V观点·歸藏(guizang.ai)\n'
+                '2. 没有链接 — RSS·某号 · 补录\n')
         view = material_view(text)
-        self.assertEqual('旧标题', view['items'][0]['title'])
         self.assertEqual('https://example.org/paper-(clean).pdf', view['items'][0]['url'])
         self.assertEqual('大V观点·歸藏(guizang.ai)', view['items'][0]['source'])
         self.assertEqual('RSS·某号 · 补录', view['items'][1]['source'])
-        self.assertIn('> 还有待报道的素材。', view['after'])
 
     def test_a_separator_inside_an_unlinked_title_does_not_replace_the_source(self):
         text = report_text([{'title': 'AI — 观察\n正文 — 另一段', 'url': ''}])
@@ -92,13 +97,10 @@ class MaterialViewTests(unittest.TestCase):
         self.assertEqual('素材清单(1 条)', view['heading'])
         self.assertEqual('真实素材', view['items'][0]['title'])
 
-    def test_queue_notice_and_following_sections_are_preserved(self):
+    def test_queue_notice_and_following_sections_keep_original(self):
         text = report_text([{'title': '素材', 'url': 'https://example.org/one'}], total=9)
         text += '\n## 额外说明\n\n普通正文。\n'
-        view = material_view(text)
-        self.assertIn('窗口内共 9 条', view['after'])
-        self.assertIn('没列出的留在队列里', view['after'])
-        self.assertIn('## 额外说明\n\n普通正文。', view['after'])
+        self.assertIsNone(material_view(text))
 
     def test_unlinked_postamble_with_a_source_shape_is_not_absorbed(self):
         text = report_text([{'title': '有原文', 'url': 'https://example.org/one'},
@@ -116,20 +118,17 @@ class MaterialViewTests(unittest.TestCase):
     def test_bare_markdown_link_at_start_of_unlinked_title_is_not_an_outer_link(self):
         text = report_text([{'title': '[介绍](https://example.org/info)\n\n详细说明',
                              'url': ''}])
-        item = material_view(text)['items'][0]
-        self.assertEqual('[介绍](https://example.org/info)', item['title'])
-        self.assertEqual('', item['url'])
-        self.assertEqual('RSS·某号', item['source'])
+        self.assertIsNone(material_view(text))
 
-    def test_original_spans_preserve_the_exact_postamble(self):
+    def test_original_spans_preserve_the_exact_trailing_whitespace(self):
         text = report_text([{'title': '相同标题', 'url': ''},
                             {'title': '相同标题', 'url': ''}])
-        text += '\n## 编辑备注\n\n后续说明。\n\n[article]: /doc/example\n'
+        text += '\n \t\n'
         view = material_view(text)
         start, end = view['span']
         self.assertEqual(text[:start], view['before'])
         self.assertEqual(text[end:], view['after'])
-        self.assertTrue(view['after'].endswith('[article]: /doc/example\n'))
+        self.assertEqual('\n\n \t\n', view['after'])
         self.assertEqual(2, len(view['items']))
         for item in view['items']:
             entry_start, entry_end = item['span']

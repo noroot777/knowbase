@@ -35,7 +35,7 @@ def build(vault):
                   url='' if number == 3 else f'https://example.org/material-{number}', late=False)
              for number, (title, source, author) in enumerate(entries)]
     text = daily._page(datetime(2026, 10, 16, 8), datetime(2026, 10, 17, 8),
-                       daily.Material(items=items, total=15),
+                       daily.Material(items=items, total=len(items)),
                        '## 今日要点\n\n- **Agent 分工**：调度与执行可以分别承担 [2]。\n'
                        '- **开发体验**：持久记忆与响应速度值得关注 [4][10]。', 'stub/none')
     root = vault / 'daily'
@@ -56,6 +56,22 @@ def build(vault):
     text += ('\n[article]: /doc/article\n[later-image]: /static/favicon.svg\n\n'
              '## 补充说明\n\n[上文定义][inside]，![后图][earlier-image]。\n')
     (root / '2026-10-15.md').write_text(text, encoding='utf-8')
+    cases = [
+        ('第一行\n\n## 素材清单(1 条)\n\n1. 内部示例', '正常作者',
+         'https://example.org/real', 1),
+        ('[介绍](https://example.org/info) — RSS·示例', '正常作者', '', 1),
+        ('[介绍](https://example.org/info) — 使用说明', '正常作者', '', 1),
+        ('正常标题', '作者第一行\n\n第二行', 'https://example.org/real', 1),
+        ('正常标题', '作者第一行\n\n第二行', '', 1),
+        ('正常标题', '正常作者', 'https://example.org/real', 9),
+    ]
+    for day, (title, account, url, total) in enumerate(cases, 9):
+        entry = dict(path='source/one.md', title=title, source='rss', account=account,
+                     url=url, late=False)
+        text = daily._page(datetime(2026, 10, day - 1, 8), datetime(2026, 10, day, 8),
+                           daily.Material(items=[entry], total=total),
+                           '## 今日要点\n\n正常说明。', 'stub/none')
+        (root / f'2026-10-{day:02d}.md').write_text(text, encoding='utf-8')
 
 
 def main():

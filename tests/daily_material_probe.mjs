@@ -36,7 +36,7 @@ try {
       && links.some(link => link.textContent === '[10]' && link.href === 'https://example.org/material-9');
   })()`);
   await check('复制内容仍然保留完整的原始推文', `document.getElementById('daily-copy').dataset.body.includes('1. 负责调度\\n2. 把执行交给其他模型')`);
-  await check('素材清单后的队列说明仍可见', `document.querySelector('#daily-reader-body').textContent.includes('没列出的留在队列里')`);
+  await check('正常清单只替换展示，原文复制输入仍含全部出处', `document.getElementById('daily-copy').dataset.body.includes('大V观点·范凯说AI')`);
   await check('桌面条目逐行排列且不粘连', `(() => {
     const rows = [...document.querySelectorAll('.daily-materials > li')];
     return rows.every((row, index) => row.getBoundingClientRect().height < 65
