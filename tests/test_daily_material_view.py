@@ -100,6 +100,48 @@ class MaterialViewTests(unittest.TestCase):
         self.assertIn('没列出的留在队列里', view['after'])
         self.assertIn('## 额外说明\n\n普通正文。', view['after'])
 
+    def test_unlinked_postamble_with_a_source_shape_is_not_absorbed(self):
+        text = report_text([{'title': '有原文', 'url': 'https://example.org/one'},
+                            {'title': '没有原文链接的素材', 'url': ''}])
+        text += '\n## 编辑备注\n\n这段补充说明必须显示。\n\n资料整理 — RSS·编辑\n\n后续说明。\n'
+        self.assertIsNone(material_view(text))
+
+    def test_ambiguous_source_shapes_in_titles_and_authors_keep_original(self):
+        cases = ['标题 — RSS·某号 — RSS·编辑',
+                 '标题里的示例 — RSS·示例\n\n真正的标题结尾 — RSS·某号']
+        for raw in cases:
+            with self.subTest(raw=raw):
+                self.assertIsNone(material_view('## 素材清单(1 条)\n\n1. ' + raw))
+
+    def test_bare_markdown_link_at_start_of_unlinked_title_is_not_an_outer_link(self):
+        text = report_text([{'title': '[介绍](https://example.org/info)\n\n详细说明',
+                             'url': ''}])
+        item = material_view(text)['items'][0]
+        self.assertEqual('[介绍](https://example.org/info)', item['title'])
+        self.assertEqual('', item['url'])
+        self.assertEqual('RSS·某号', item['source'])
+
+    def test_original_spans_preserve_the_exact_postamble(self):
+        text = report_text([{'title': '相同标题', 'url': ''},
+                            {'title': '相同标题', 'url': ''}])
+        text += '\n## 编辑备注\n\n后续说明。\n\n[article]: /doc/example\n'
+        view = material_view(text)
+        start, end = view['span']
+        self.assertEqual(text[:start], view['before'])
+        self.assertEqual(text[end:], view['after'])
+        self.assertTrue(view['after'].endswith('[article]: /doc/example\n'))
+        self.assertEqual(2, len(view['items']))
+        for item in view['items']:
+            entry_start, entry_end = item['span']
+            self.assertEqual('相同标题 — RSS·某号', text[entry_start:entry_end])
+        self.assertLess(view['items'][0]['span'][1], view['items'][1]['span'][0])
+
+    def test_multiline_author_boundary_keeps_original_for_linked_and_unlinked_items(self):
+        for title in ['标题', '[标题](<https://example.org/one>)']:
+            with self.subTest(title=title):
+                self.assertIsNone(material_view(
+                    '## 素材清单(1 条)\n\n1. ' + title + ' — RSS·作者第一行\n作者第二行\n'))
+
     def test_all_161_items_keep_their_numbers_and_urls(self):
         text = report_text([{'title': f'第 {number} 条\n\n很长的正文',
                              'url': f'https://example.org/{number}'} for number in range(161)])

@@ -41,6 +41,21 @@ def build(vault):
     root = vault / 'daily'
     root.mkdir(parents=True)
     (root / '2026-10-17.md').write_text(text, encoding='utf-8')
+    simple = [dict(path='source/one.md', title='有原文的正常素材', source='rss',
+                   account='某号', url='https://example.org/one', late=False),
+              dict(path='source/two.md', title='没有原文链接的素材', source='rss',
+                   account='某号', url='', late=False)]
+    text = daily._page(datetime(2026, 10, 15, 8), datetime(2026, 10, 16, 8),
+                       daily.Material(items=simple, total=2), '## 今日要点\n\n正常说明。', 'stub/none')
+    text += '\n## 编辑备注\n\n这段补充说明必须显示。\n\n资料整理 — RSS·编辑\n\n后续说明。\n'
+    (root / '2026-10-16.md').write_text(text, encoding='utf-8')
+    text = daily._page(datetime(2026, 10, 14, 8), datetime(2026, 10, 15, 8),
+                       daily.Material(items=simple[:1], total=1),
+                       '## 今日要点\n\n查看 [原文][article]，![前图][later-image]。\n\n'
+                       '[inside]: /doc/inside\n[earlier-image]: /static/favicon.svg', 'stub/none')
+    text += ('\n[article]: /doc/article\n[later-image]: /static/favicon.svg\n\n'
+             '## 补充说明\n\n[上文定义][inside]，![后图][earlier-image]。\n')
+    (root / '2026-10-15.md').write_text(text, encoding='utf-8')
 
 
 def main():

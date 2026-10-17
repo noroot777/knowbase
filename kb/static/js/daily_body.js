@@ -11,8 +11,12 @@
 // 下来的那条记成了新日期)。
 // 提示形态(读取失败、已删除)一律不带出处:那几个字不是日报正文,一个字都不该
 // 收得下(审查实测:「读取失败」四个字被存成了一条日报片段)。
+const dailyOriginalBodies = new WeakMap();
+const DAILY_LEGACY_SKIP = '.daily-legacy-context';
+
 function setDailyBody(html, ref = '') {
   const el = $('daily-reader-body');
+  dailyOriginalBodies.delete(el);
   el.innerHTML = html;
   if (ref) el.dataset.snipRef = ref;
   else delete el.dataset.snipRef;
@@ -27,7 +31,17 @@ function renderDailyReportBody(report) {
     enhanceDailyBody(el);
     return el;
   }
-  const el = setDailyBody(mdHtml(stripHeader(view.before)), report.date);
+  const original = stripHeader(report.body);
+  const slotId = 'daily-material-' + Date.now().toString(36) + Math.random().toString(36).slice(2);
+  const markdown = stripHeader(view.before) +
+    `\n\n<div data-daily-material-slot="${slotId}"></div>\n\n` + view.after;
+  const el = setDailyBody(mdHtml(markdown, original), report.date);
+  const slot = el.querySelector(`[data-daily-material-slot="${slotId}"]`);
+  if (!slot) {
+    const fallback = setDailyBody(mdHtml(original), report.date);
+    enhanceDailyBody(fallback);
+    return fallback;
+  }
   const heading = document.createElement('h2');
   heading.textContent = view.heading;
   const list = document.createElement('ol');
@@ -36,23 +50,43 @@ function renderDailyReportBody(report) {
     const row = document.createElement('li');
     const entry = document.createElement('div');
     entry.className = 'daily-material-entry';
-    const url = /^https?:\/\//i.test(item.url) ? safeUrl(item.url) : '';
-    const title = document.createElement(url ? 'a' : 'span');
+    const title = dailySafeLink(item.url) || document.createElement('span');
     title.className = 'daily-material-title';
     title.textContent = item.title;
     title.title = item.full_title;
-    if (url) title.href = url;
     const source = document.createElement('span');
     source.className = 'daily-material-source';
-    source.textContent = item.source;
+    source.textContent = ' — ' + item.source;
     entry.append(title, source);
     row.append(entry);
     list.append(row);
   }
-  el.append(heading, list);
-  el.insertAdjacentHTML('beforeend', mdHtml(view.after));
+  slot.replaceWith(heading, list);
   enhanceDailyBody(el, list);
+  dailyOriginalBodies.set(el, original);
   return el;
+}
+
+function consumeDailySnipJump(pending, ref, el) {
+  if (!pending || String(pending.ref) !== String(ref)) return pending;
+  if (locateSnip(el, pending.spec, DAILY_LEGACY_SKIP)) return null;
+  const original = dailyOriginalBodies.get(el);
+  if (original) {
+    const context = document.createElement('details');
+    context.className = 'daily-legacy-context';
+    context.open = true;
+    const summary = document.createElement('summary');
+    summary.textContent = '收藏所在的原版正文';
+    const body = document.createElement('div');
+    body.dataset.snipRef = ref;
+    body.innerHTML = mdHtml(original);
+    enhanceDailyBody(body);
+    context.append(summary, body);
+    el.append(context);
+    if (locateSnip(body, pending.spec)) return null;
+    context.remove();
+  }
+  return consumeSnipJump(pending, ref, el, DAILY_LEGACY_SKIP);
 }
 
 // 日报落在 vault 的 `daily/<日期>.md`,而那个目录**不在任何 `SOURCES.root`
@@ -64,5 +98,8 @@ function renderDailyReportBody(report) {
 attachSnip($('daily-reader-body'), range => {
   const host = snipHostOf(range, '[data-snip-ref]');
   const ref = host && host.dataset.snipRef;
-  return ref ? { origin: 'daily', origin_ref: ref, origin_title: '日报 · ' + ref } : null;
+  if (!ref || [...$('daily-reader-body').querySelectorAll(DAILY_LEGACY_SKIP)]
+    .some(context => !context.contains(host) && range.intersectsNode(context))) return null;
+  return { origin: 'daily', origin_ref: ref, origin_title: '日报 · ' + ref,
+    root: host, skip: DAILY_LEGACY_SKIP };
 });

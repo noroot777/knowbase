@@ -67,8 +67,10 @@
 #daily-reader-body .daily-materials li::marker { color:var(--muted); font-variant-numeric:tabular-nums; }
 .daily-material-entry { display:flex; align-items:baseline; gap:10px; min-width:0; }
 .daily-material-title { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.daily-material-source { flex-shrink:0; color:var(--muted); font-size:12px; }
-.daily-material-source::before { content:'— '; }
+.daily-material-source { min-width:0; max-width:45%; overflow-wrap:anywhere; color:var(--muted); font-size:12px; }
+.daily-legacy-context { margin-top:24px; }
+.daily-legacy-context > summary { cursor:pointer; color:var(--muted); font-size:12px; }
+.daily-legacy-context > div { max-height:40vh; overflow:auto; }
 /* 出处角标。模型常常连着写四五个([18][23][29][38]),按正文字号上色就是一堵
    数字墙,盖过它注解的那句话。缩一档、走等宽体(编号是标识符不是散文)、平时
    只有辅助色,指上去才亮成品牌色。 */
@@ -102,6 +104,5 @@
 @media (max-width:700px) {
   .daily-material-entry { display:block; }
   .daily-material-title { white-space:normal; overflow-wrap:anywhere; }
-  .daily-material-source { display:block; margin-top:2px; font-size:11px; }
-  .daily-material-source::before { content:''; }
+  .daily-material-source { display:block; max-width:none; margin-top:2px; font-size:11px; }
 }

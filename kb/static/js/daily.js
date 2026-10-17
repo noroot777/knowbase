@@ -311,7 +311,7 @@ async function openDailyReport(date) {
     // 收藏回跳的落点。排在 enhanceDailyBody 之后:那一步会把出处编号换成
     // 链接元素,换掉的是**元素结构**而不是字符 —— 锚点那套按全文偏移找,
     // 顺序反了也对得上,但高亮的 Range 会落在已经离开文档的节点上。
-    dailyPendingSnip = consumeSnipJump(dailyPendingSnip, date, body);
+    dailyPendingSnip = consumeDailySnipJump(dailyPendingSnip, date, body);
   } catch (e) {
     // 失败这一侧走同一道判据:被替代的那次读取报出来的错也是陈旧的,
     // 让它覆盖新正文等于拿一句「读取失败」盖掉一份读到了的日报。

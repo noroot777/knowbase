@@ -79,7 +79,7 @@ const safeUrl = u => /^(https?:|obsidian:|\/|#)/i.test(String(u || '')) ? String
 // 两个库都随包在 /static/vendor/,正常不会走到兜底;真走到了在 console 留一句,
 // 否则"回答变纯文本"这种静默降级根本查不出是脚本没加载。
 let _mdWarned = false;
-function mdHtml(src) {
+function mdHtml(src, linkContext = null) {
   const md = String(src || '');
   if (!window.DOMPurify || !window.marked) {
     if (!_mdWarned) {
@@ -88,6 +88,12 @@ function mdHtml(src) {
         typeof window.marked, typeof window.DOMPurify);
     }
     return `<div style="white-space:pre-wrap">${esc(md)}</div>`;
+  }
+  if (linkContext !== null) {
+    const links = marked.lexer(String(linkContext)).links;
+    const lexer = new marked.Lexer();
+    lexer.tokens.links = links;
+    return DOMPurify.sanitize(marked.parser(lexer.lex(md)));
   }
   return DOMPurify.sanitize(marked.parse(md));
 }

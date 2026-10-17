@@ -9,6 +9,14 @@
 // `https://…/paper-(clean).pdf` 用正则一路吃到第一个 `)` 就断,那一条整行匹配
 // 不上、编号也就补不出链接(2026-09-30 审查实测,生产那份日报里真有这么一条)。
 // marked 本来就按 CommonMark 把它解析对了,照抄解析结果比再写一遍解析器可靠。
+function dailySafeLink(url) {
+  if (!url || !window.DOMPurify) return null;
+  const link = document.createElement('a');
+  link.setAttribute('href', url);
+  DOMPurify.sanitize(link, { IN_PLACE: true });
+  return link.hasAttribute('href') ? link : null;
+}
+
 function dailyRefMap(el, materialList = null) {
   const out = new Map();
   const head = !materialList && [...el.querySelectorAll('h2')].find(h => /^素材清单/.test(h.textContent.trim()));
@@ -61,8 +69,9 @@ function enhanceDailyBody(el, materialList = null) {
         for (const n of nums) {
           const hit = refs.get(n);
           if (!hit) { frag.append(`[${n}]`); continue; }
-          const a = document.createElement('a');
-          a.href = safeUrl(hit.url); a.title = hit.title; a.textContent = `[${n}]`;
+          const a = dailySafeLink(hit.url);
+          if (!a) { frag.append(`[${n}]`); continue; }
+          a.title = hit.title; a.textContent = `[${n}]`;
           frag.append(a);
         }
         last = m.index + m[0].length;
