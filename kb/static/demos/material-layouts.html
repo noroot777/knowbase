@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='%2317604f' stroke-width='2' d='M3 4c3-1 6-1 9 1 3-2 6-2 9-1v15c-3-1-6-1-9 1-3-2-6-2-9-1zM12 5v15'/%3E%3C/svg%3E">
+  <title>素材浏览 · 三种展示方案</title>
+  <style>
+    :root {
+      --paper: #f3f5f4; --card: #fff; --ink: #14202b; --muted: #66727c;
+      --line: #dce3e0; --green: #17604f; --soft: #dff0e9; --tint: #f0f7f4;
+      --body: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      --display: "Songti SC", "STSong", "Noto Serif CJK SC", serif;
+      --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--paper); font: 14px/1.65 var(--body); }
+    button, input { font: inherit; }
+    button { cursor: pointer; color: inherit; }
+    button, a, input, summary { -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visible {
+      outline: 3px solid #4e9e89; outline-offset: 3px;
+    }
+    button { border: 0; background: none; }
+    button:disabled { cursor: default; }
+    a { color: var(--green); text-underline-offset: 4px; }
+    svg { width: 20px; height: 20px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.6; }
+    [hidden] { display: none !important; }
+    .topbar { background: var(--card); border-bottom: 1px solid var(--line); }
+    .topbar-inner { max-width: 1304px; margin: auto; padding: 17px 32px; display: flex; align-items: center; gap: 12px; }
+    .brand { display: flex; align-items: center; gap: 9px; font: 700 19px var(--display); letter-spacing: -.4px; }
+    .brand-mark { color: var(--green); display: flex; }
+    .breadcrumb { color: var(--muted); font-size: 12px; border-left: 1px solid var(--line); margin-left: 10px; padding-left: 20px; }
+    .demo-label { margin-left: auto; color: var(--green); font-size: 11px; background: var(--tint); padding: 3px 10px; border-radius: 5px; }
+    main { max-width: 1304px; margin: 0 auto; padding: 35px 32px 30px; }
+    .intro { display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; margin-bottom: 25px; }
+    .eyebrow { color: var(--green); font: 11px var(--mono); letter-spacing: 1.7px; margin: 0 0 9px; }
+    h1 { font: 900 32px/1.3 var(--display); letter-spacing: -.5px; margin: 0 0 9px; }
+    .intro p:last-child { margin: 0; color: var(--muted); font-size: 13px; }
+    .sample-note { white-space: nowrap; font-size: 12px; color: var(--muted); padding-bottom: 3px; }
+    .sample-note span { font-family: var(--mono); color: var(--ink); }
+    .schemes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .scheme { padding: 16px 18px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; display: flex; text-align: left; gap: 13px; align-items: center; position: relative; }
+    .scheme:hover { border-color: #89b5a8; }
+    .scheme[aria-selected="true"] { border-color: var(--green); box-shadow: 0 0 0 1px var(--green); background: var(--tint); }
+    .scheme-icon { width: 38px; height: 38px; background: var(--paper); border-radius: 8px; display: grid; place-items: center; color: var(--muted); }
+    .scheme[aria-selected="true"] .scheme-icon { background: var(--soft); color: var(--green); }
+    .scheme strong { display: block; font-size: 14px; font-weight: 650; }
+    .scheme small { display: block; color: var(--muted); font-size: 11px; margin-top: 3px; }
+    .recommend { margin-left: 7px; font-size: 10px; color: var(--green); background: var(--soft); padding: 2px 5px; border-radius: 3px; font-weight: 500; }
+    .scheme-number { margin-left: auto; color: #87958e; font: 12px var(--mono); }
+    .scheme-explainer { display: flex; gap: 9px; align-items: center; min-height: 53px; color: var(--muted); font-size: 12px; }
+    .scheme-explainer svg { width: 15px; height: 15px; color: var(--green); }
+    .scheme-explainer strong { font-weight: 500; color: var(--green); }
+    .workbench { border: 1px solid var(--line); background: var(--card); border-radius: 12px; overflow: hidden; }
+    .workbench-heading { padding: 19px 22px 13px; display: flex; align-items: center; justify-content: space-between; gap: 15px; }
+    h2 { font-size: 17px; font-weight: 650; margin: 0; }
+    .count { display: inline-grid; place-items: center; min-width: 26px; height: 21px; font: 11px var(--mono); border-radius: 5px; background: var(--paper); color: var(--muted); vertical-align: middle; margin-left: 5px; }
+    .search { display: flex; align-items: center; gap: 8px; background: #f6f8f7; border: 1px solid #e5eae7; padding: 6px 11px; border-radius: 7px; width: 260px; color: var(--muted); }
+    .search svg { width: 16px; height: 16px; }
+    .search input { background: none; border: 0; min-width: 0; width: 100%; color: var(--ink); font-size: 12px; }
+    .search input::placeholder { color: #818c85; }
+    .filters { display: flex; gap: 6px; padding: 0 22px 15px; flex-wrap: wrap; }
+    .filter { border-radius: 5px; padding: 5px 12px; color: var(--muted); font-size: 12px; }
+    .filter span { margin-left: 5px; font: 10px var(--mono); opacity: .75; }
+    .filter:hover { background: var(--paper); }
+    .filter[aria-pressed="true"] { color: var(--green); background: var(--soft); font-weight: 600; }
+    .surface { border-top: 1px solid var(--line); }
+    .list-layout { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr); height: 628px; }
+    .list-layout.detail-closed { grid-template-columns: minmax(0, 1fr); }
+    .list-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    .pane-label { display: flex; justify-content: space-between; padding: 11px 22px; color: var(--muted); font-size: 10px; letter-spacing: .2px; background: #fafcfb; border-bottom: 1px solid #edf0ee; }
+    .rows { overflow-y: auto; flex: 1; min-height: 0; padding: 5px 0; }
+    .material-row { width: 100%; padding: 15px 21px; border-bottom: 1px solid #edf0ee; display: flex; align-items: center; gap: 12px; text-align: left; position: relative; }
+    .material-row:last-child { border-bottom: 0; }
+    .material-row:hover { background: #f7faf8; }
+    .material-row[aria-pressed="true"] { background: var(--tint); }
+    .material-row[aria-pressed="true"]::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px; border-radius: 0 3px 3px 0; background: var(--green); }
+    .avatar { width: 31px; height: 31px; border-radius: 9px; background: #edf0f4; color: #576978; flex-shrink: 0; display: grid; place-items: center; font-size: 11px; font-weight: 600; }
+    .avatar.wechat { color: #496b52; background: #eaf1e9; }
+    .avatar.rss { color: #8e6a44; background: #f5eee4; }
+    .row-copy { flex: 1; min-width: 0; }
+    .row-title { display: block; font-size: 13px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 5px; }
+    .meta { display: flex; gap: 7px; align-items: center; color: var(--muted); font-size: 11px; flex-wrap: wrap; }
+    .meta .dot { color: #bac3bd; }
+    .row-arrow { width: 14px; height: 14px; color: #9caaa2; }
+    .source-badge { padding: 1px 6px; border-radius: 3px; font-size: 10px; background: #edf0f4; color: #526576; white-space: nowrap; }
+    .source-badge.wechat { background: #eaf1e9; color: #496b52; }
+    .source-badge.rss { background: #f5eee4; color: #88643e; }
+    .detail-pane { border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; min-width: 0; background: #fdfefd; }
+    .detail-toolbar { display: flex; align-items: center; justify-content: space-between; min-height: 39px; padding: 7px 21px; border-bottom: 1px solid #edf0ee; color: var(--muted); font-size: 10px; letter-spacing: .2px; }
+    .icon-button { display: inline-grid; place-items: center; width: 27px; height: 27px; border-radius: 5px; color: var(--muted); }
+    .icon-button:hover { background: var(--soft); color: var(--green); }
+    .icon-button svg { width: 16px; height: 16px; }
+    .detail-scroll { padding: 25px 27px; overflow-y: auto; flex: 1; }
+    .detail-title { font: 800 25px/1.45 var(--display); margin: 14px 0 13px; letter-spacing: -.4px; }
+    .detail-tags { margin: 16px 0 22px; display: flex; gap: 7px; flex-wrap: wrap; }
+    .tag { color: #64776d; background: #eff3f0; font-size: 10px; padding: 3px 8px; border-radius: 4px; }
+    .summary-box { border-left: 2px solid #85b5a3; padding: 13px 15px; background: var(--tint); border-radius: 0 6px 6px 0; }
+    .section-label { margin: 0 0 8px; color: var(--green); font-size: 11px; font-weight: 600; }
+    .summary-box p:last-child { margin: 0; color: #35594b; font-size: 13px; line-height: 1.85; }
+    .detail-body { margin-top: 25px; color: #43514a; font-size: 13px; line-height: 1.9; }
+    .detail-body h4 { color: var(--ink); margin: 0 0 11px; font-size: 13px; font-weight: 600; }
+    .detail-body p { margin: 0 0 12px; }
+    .detail-disclaimer { margin-top: 22px; padding-top: 15px; border-top: 1px dashed var(--line); font-size: 10px; color: var(--muted); }
+    .detail-footer { padding: 14px 25px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 10px; color: var(--muted); }
+    .source-link { font-size: 12px; font-weight: 550; text-decoration: none; display: inline-flex; align-items: center; gap: 5px; }
+    .source-link svg { width: 14px; height: 14px; }
+    .scroll-surface { height: 628px; overflow-y: auto; background: #fafcfb; padding: 22px; }
+    .view-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 17px; gap: 12px; }
+    .view-heading p { margin: 0; font-size: 12px; color: var(--muted); }
+    .text-button { color: var(--green); font-size: 12px; padding: 5px 0 5px 10px; }
+    .source-group { margin-bottom: 23px; }
+    .source-group h3 { margin: 0 0 10px; display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; }
+    .source-group h3 small { color: var(--muted); font: 10px var(--mono); }
+    .accordion { border: 1px solid var(--line); background: var(--card); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+    .accordion[open] { border-color: #9dc4b6; }
+    .accordion summary { list-style: none; cursor: pointer; display: flex; gap: 12px; align-items: center; padding: 14px 17px; }
+    .accordion summary::-webkit-details-marker { display: none; }
+    .accordion summary .row-copy { display: flex; justify-content: space-between; align-items: center; gap: 15px; }
+    .accordion .row-title { white-space: normal; margin: 0; }
+    .accordion summary .meta { flex-shrink: 0; }
+    .accordion .chevron { width: 15px; height: 15px; color: #7b8d83; transition: transform .16s; }
+    .accordion[open] .chevron { transform: rotate(90deg); }
+    .accordion-body { border-top: 1px solid #edf0ee; padding: 19px 48px; }
+    .accordion-body p { margin: 0 0 13px; color: #506157; font-size: 13px; max-width: 800px; }
+    .accordion-actions { display: flex; gap: 18px; align-items: center; }
+    .accordion-actions button { font-size: 12px; color: var(--green); padding: 0; }
+    .topic-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; }
+    .topic-card { background: var(--card); border: 1px solid var(--line); border-radius: 9px; overflow: hidden; align-self: start; }
+    .topic-head { padding: 19px 20px 15px; border-bottom: 1px solid #edf0ee; }
+    .topic-kicker { color: var(--green); font-size: 10px; letter-spacing: .8px; display: flex; align-items: center; gap: 7px; }
+    .topic-dot { height: 5px; width: 5px; background: #4b8e76; border-radius: 50%; }
+    .topic-head h3 { font: 800 21px var(--display); margin: 8px 0; }
+    .topic-head p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.8; }
+    .topic-material { display: flex; gap: 10px; text-align: left; width: 100%; padding: 13px 20px; border-bottom: 1px solid #edf0ee; }
+    .topic-material:last-child { border: 0; }
+    .topic-material:hover { background: var(--tint); }
+    .topic-material .avatar { width: 26px; height: 26px; border-radius: 7px; font-size: 9px; margin-top: 2px; }
+    .topic-material .row-title { white-space: normal; font-size: 12px; margin-bottom: 4px; }
+    .topic-material .meta { font-size: 10px; }
+    .topic-foot { padding: 10px 20px; background: #f8faf9; color: var(--muted); font-size: 10px; border-top: 1px solid #edf0ee; }
+    .bench-footer { border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; padding: 11px 22px; color: var(--muted); font-size: 10px; }
+    .status-dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #73a28b; margin-right: 6px; vertical-align: middle; }
+    .empty { text-align: center; padding: 110px 20px; color: var(--muted); }
+    .empty svg { height: 31px; width: 31px; margin-bottom: 5px; color: #9cb4a7; }
+    .empty h3 { font-size: 15px; color: var(--ink); margin: 9px 0; }
+    .empty p { font-size: 12px; }
+    .reset { background: var(--soft); color: var(--green); border-radius: 6px; padding: 7px 16px; font-size: 12px; }
+    .page-foot { margin: 18px 0 0; color: var(--muted); font-size: 11px; display: flex; justify-content: space-between; gap: 12px; }
+    dialog { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(560px, 100%); max-width: 100%; height: 100dvh; max-height: 100dvh; border: 0; padding: 0; background: var(--card); box-shadow: -10px 0 70px #10281b20; }
+    dialog[open] { display: flex; flex-direction: column; }
+    dialog::backdrop { background: #142b2347; }
+    dialog .detail-toolbar { min-height: 57px; }
+    dialog .detail-scroll { padding: 28px; }
+    dialog .detail-title { font-size: 28px; }
+    @media (min-width: 1500px) { main { padding-top: 43px; } }
+    @media (max-width: 900px) {
+      .scheme { padding: 13px; gap: 8px; } .scheme-icon { width: 30px; height: 34px; }
+      .scheme-number { display: none; } .scheme strong { font-size: 12px; }
+      .recommend { font-size: 9px; margin-left: 4px; } .sample-note { display: none; }
+      .detail-scroll { padding: 22px 19px; } .detail-title { font-size: 22px; }
+      .material-row { padding: 14px 16px; gap: 9px; } .row-title { font-size: 12px; }
+      .accordion summary .row-copy { display: block; } .accordion summary .meta { margin-top: 4px; }
+    }
+    @media (max-width: 640px) {
+      .topbar-inner { padding: 15px 17px; } .breadcrumb { display: none; }
+      .demo-label { white-space: nowrap; font-size: 10px; padding: 3px 7px; }
+      main { padding: 26px 14px 22px; } h1 { font-size: 26px; } .intro { margin-bottom: 21px; }
+      .eyebrow { font-size: 10px; } .schemes { gap: 7px; }
+      .scheme { padding: 12px 7px; justify-content: center; } .scheme-icon, .scheme small { display: none; }
+      .scheme strong { font-size: 11px; } .recommend { display: block; width: fit-content; margin: 4px 0 0; }
+      .scheme[aria-selected="true"] { box-shadow: none; } .scheme-explainer { align-items: flex-start; padding: 13px 0; min-height: 67px; }
+      .scheme-explainer svg { margin-top: 3px; } .scheme-explainer span { flex: 1; }
+      .workbench-heading { padding: 17px 14px 13px; flex-wrap: wrap; } .search { width: 100%; order: 2; }
+      .filters { padding: 0 10px 13px; gap: 1px; } .filter { font-size: 11px; padding: 5px 9px; }
+      .list-layout, .list-layout.detail-closed { display: flex; height: 570px; } .list-pane { width: 100%; }
+      .list-layout .detail-pane { display: none; } .pane-label { padding: 10px 16px; }
+      .material-row { padding: 15px 14px; } .row-title { font-size: 13px; }
+      .scroll-surface { padding: 17px 12px; height: 570px; } .topic-grid { grid-template-columns: minmax(0, 1fr); }
+      .accordion summary { padding: 13px 12px; gap: 8px; } .accordion-body { padding: 16px 18px; }
+      .topic-head { padding: 18px; } .topic-head h3 { font-size: 22px; }
+      .bench-footer { padding: 11px 14px; font-size: 9px; } .page-foot { flex-direction: column; gap: 3px; }
+      .view-heading p { font-size: 11px; } .detail-title { font-size: 25px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; } }
+  </style>
+</head>
+<body>
+  <svg aria-hidden="true" style="display:none"><defs>
+    <symbol id="icon-book" viewBox="0 0 24 24"><path d="M3 4.5c3-1 6-1 9 1 3-2 6-2 9-1v15c-3-1-6-1-9 1-3-2-6-2-9-1zM12 5.5v15"/></symbol>
+    <symbol id="icon-list" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M14 4v16M6 8h5M6 12h5M6 16h3"/></symbol>
+    <symbol id="icon-fold" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="5" rx="1"/><rect x="3" y="11" width="18" height="10" rx="1"/><path d="m16 14 2 2-2 2M6 15h6M6 18h4"/></symbol>
+    <symbol id="icon-topic" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="10" rx="1.5"/><rect x="15" y="3" width="6" height="6" rx="1.5"/><rect x="3" y="17" width="8" height="4" rx="1"/><rect x="15" y="13" width="6" height="8" rx="1.5"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></symbol>
+    <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="icon-link" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4 10 14M11 5H5v14h14v-6"/></symbol>
+    <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></symbol>
+  </defs></svg>
+  <header class="topbar"><div class="topbar-inner">
+    <div class="brand"><span class="brand-mark"><svg aria-hidden="true"><use href="#icon-book"/></svg></span>Knowbase</div>
+    <span class="breadcrumb">日报 / 素材浏览</span><span class="demo-label">界面演示 · 不影响正式页面</span>
+  </div></header>
+  <main>
+    <div class="intro"><div>
+      <p class="eyebrow">MATERIAL EXPLORER / DESIGN STUDY</p>
+      <h1>素材清单的三种打开方式</h1>
+      <p>先找到值得读的，再展开内容。切换方案，感受同一批素材的不同浏览方式。</p>
+    </div><div class="sample-note">同一批 <span>12</span> 条样例 · 三种交互</div></div>
+    <nav class="schemes" role="tablist" aria-label="展示方案">
+      <button id="tab-list" class="scheme" type="button" role="tab" aria-selected="true" aria-controls="preview" data-view="list">
+        <span class="scheme-icon"><svg aria-hidden="true"><use href="#icon-list"/></svg></span>
+        <span><strong>列表 + 详情栏<span class="recommend">推荐</span></strong><small>左侧筛选，右侧阅读</small></span><span class="scheme-number">01</span>
+      </button>
+      <button id="tab-accordion" class="scheme" type="button" role="tab" aria-selected="false" aria-controls="preview" tabindex="-1" data-view="accordion">
+        <span class="scheme-icon"><svg aria-hidden="true"><use href="#icon-fold"/></svg></span>
+        <span><strong>来源分组 + 折叠</strong><small>保留清单，按需展开</small></span><span class="scheme-number">02</span>
+      </button>
+      <button id="tab-topics" class="scheme" type="button" role="tab" aria-selected="false" aria-controls="preview" tabindex="-1" data-view="topics">
+        <span class="scheme-icon"><svg aria-hidden="true"><use href="#icon-topic"/></svg></span>
+        <span><strong>按主题聚合</strong><small>围绕选题，串起不同观点</small></span><span class="scheme-number">03</span>
+      </button>
+    </nav>
+    <div class="scheme-explainer"><svg aria-hidden="true"><use href="#icon-info"/></svg><span id="view-explainer"></span></div>
+    <section class="workbench" id="preview" role="tabpanel" aria-labelledby="tab-list" tabindex="0">
+      <div class="workbench-heading"><h2>素材清单 <span id="result-count" class="count">12</span></h2>
+        <label class="search"><svg aria-hidden="true"><use href="#icon-search"/></svg><input id="search" type="search" aria-label="搜索素材" placeholder="搜索标题、作者或关键词" autocomplete="off"></label>
+      </div>
+      <div class="filters" role="group" aria-label="来源筛选"></div>
+      <div class="surface" id="surface"></div>
+      <div class="bench-footer"><span id="result-status" role="status" aria-live="polite"></span><span><i class="status-dot"></i>仅本地演示，不读取真实素材</span></div>
+    </section>
+    <footer class="page-foot"><span id="tradeoff"></span><span>样例依据截图主题整理，摘要与归类均为演示数据。</span></footer>
+  </main>
+  <dialog id="reader" aria-labelledby="reader-title"></dialog>
+  <noscript><p style="padding:24px">请启用 JavaScript 以切换三种方案及体验筛选、展开和详情阅读。</p></noscript>
+  <script>
+    const sources = { social: '大 V 观点', wechat: '公众号', rss: 'RSS' };
+    const materials = [
+      { id: 'claude', title: 'Claude Code 提速：更短的首字等待', author: '耳朵', avatar: '耳', source: 'social', time: '09:42', topic: 'agent', tags: ['Claude Code', '开发体验'],
+        summary: '把一条很长的性能分享收成一句话：本地与云端会话的首字等待时间都在缩短。具体数字留到详情里读，不挤占整个清单。',
+        paragraphs: ['这条样例对应截图中关于 Claude Code 响应速度的分享。列表只保留“发生了什么”，右侧再展示本地与云端会话的对比信息。', '原帖中关于首字延迟、统计区间和测试口径的说明，应保留在详情中。这样既不丢上下文，也不会让一条素材撑满半屏。'], url: 'https://x.com/RookieRicardoR/status/2111218979931128195' },
+      { id: 'grok', title: 'Grok Bot + Pi Agent：把执行交给其他模型', author: '范凯说AI', avatar: '范', source: 'social', time: '09:28', topic: 'agent', tags: ['Grok', 'Agent 协作'],
+        summary: '让 Grok Bot 负责调度，把具体执行交给 Pi Agent 与其他模型。这是一条工作流技巧，而不是需要铺开的长标题。',
+        paragraphs: ['截图中的这条分享讨论一种多 Agent 分工方式：调度与执行由不同工具承担。作者举了 Pi Agent 与 DeepSeek 的组合作为例子。', '完整配置步骤和适用限制可以在详情里补充。清单阶段只需帮助读者判断：我是否正在寻找类似的工作流？'], url: 'https://x.com/fankaishuai/status/211125886877190576' },
+      { id: 'memory', title: '用持久记忆，延续跨会话的开发上下文', author: 'speckx', avatar: 'sp', source: 'rss', time: '09:16', topic: 'agent', tags: ['持久记忆', '上下文'],
+        summary: '会话结束之后，哪些信息应该留下来？这条样例把“记忆”放回开发工具的使用场景里讨论。',
+        paragraphs: ['截图中有一条关于记忆能力的 RSS 素材。这里使用精简后的演示标题，展示技术文章怎样与社交媒体观点出现在同一清单里。', '摘要负责说明价值，详情负责保留展开空间。此处的说明不是原文全文。'], url: null },
+      { id: 'anthropic', title: 'AI 改变工作：把内部使用与公众预期放在一起看', author: '宝玉', avatar: '宝', source: 'social', time: '08:57', topic: 'industry', tags: ['Anthropic', '工作方式'],
+        summary: '围绕 AI 对工作的影响，把组织内的使用情况和公众预期放到同一个主题下，便于后续交叉阅读。',
+        paragraphs: ['截图中的分享提到了 Anthropic 内部工作方式与公众预期相关的报告。这里重点演示长内容如何从清单移到独立的阅读区域。', '涉及比例、统计范围和结论的内容应回到原始来源核对。这份 Demo 不对截图里的数字做事实核验。'], url: 'https://x.com/dotey/status/2111223306061834684' },
+      { id: 'openai', title: '模型定价与使用量：一则关于 OpenAI 的观点', author: 'Bindu Reddy', avatar: 'BR', source: 'social', time: '08:45', topic: 'industry', tags: ['OpenAI', '商业模式'],
+        summary: '把作者对模型能力、价格和使用量的判断单独标为“观点”，避免与已经确认的产品新闻混在一起。',
+        paragraphs: ['这条素材来自截图中关于 OpenAI 与模型定价的观点。演示中保留观点归属，但不把作者的建议写成官方决定。', '主题聚合可以把这类商业判断与组织采用 AI 的其他材料放到一起，帮助形成选题，而不替不同作者制造共识。'], url: 'https://x.com/bindureddy/status/2111241849507872903' },
+      { id: 'compute', title: 'Compute Trading：工程与交易之间的新话题', author: 'swyx', avatar: 'sw', source: 'social', time: '08:31', topic: 'industry', tags: ['算力', '行业观察'],
+        summary: '一条关于算力交易的节目分享。对于选题来说，重要的是找到相关人物、讨论背景以及可继续追踪的线索。',
+        paragraphs: ['截图中 swyx 提到了关于 Compute Trading 的讨论。这条样例用于展示同一主题下不同作者、不同来源的并列关系。', '聚合不是把原文拼成一大段，而是给每份材料保留独立入口和清晰出处。'], url: null },
+      { id: 'slides', title: 'Frontier Slides：快速完成一次演示', author: 'Amjad Masad', avatar: 'AM', source: 'social', time: '08:12', topic: 'creation', tags: ['演示工具', '创作'],
+        summary: '一条很短的工具推荐，也应该与长帖拥有一致的结构：清晰标题、作者、来源，以及按需打开的内容。',
+        paragraphs: ['这条对应截图开头的 Frontier Slides 分享。短内容不必为了凑格式而扩写，详情可以保持简短。', '列表的密度保持一致，内容的长短则留给阅读区域自行适应。'], url: null },
+      { id: 'opensource', title: '多个 AI 一起查资料：协作型开源项目', author: 'GitHub科技', avatar: 'GH', source: 'wechat', time: '07:56', topic: 'creation', tags: ['开源项目', '资料整理'],
+        summary: '把项目介绍从长标题里解放出来，保留工具用途，让读者先判断是否值得深入了解。',
+        paragraphs: ['截图中的公众号文章介绍了一个让多个 AI 一起查资料、讨论信息的开源项目。这里对标题做了展示用精简。', '项目链接、安装方式和功能截图适合放在详情，清单只负责索引。'], url: null },
+      { id: 'collaboration', title: '从收集到整理：搭建一条 AI 协作流程', author: '开源观察（样例）', avatar: '开', source: 'wechat', time: '07:38', topic: 'creation', tags: ['协作流程', '内容整理'],
+        summary: '这是一条补充的演示素材，用来观察同主题下公众号文章与短观点同时出现时的浏览体验。',
+        paragraphs: ['本条是为界面对比补充的虚构样例，不对应截图中的某篇具体文章。', '不同来源不必拥有完全相同的正文长度，但应共享同一套标题、出处和详情入口。'], url: null },
+      { id: 'backstage', title: '节目幕后：把零散素材整合成一次讨论', author: 'swyx', avatar: 'sw', source: 'social', time: '07:21', topic: 'creation', tags: ['内容创作', '幕后'],
+        summary: '幕后花絮可以是一条素材，但不必在清单里完整铺出所有段落和提及的账号。',
+        paragraphs: ['截图中这条分享包含节目幕后花絮，以及对参与者的感谢。换成紧凑清单后，这些内容仍然保留在详情里。', '对作者和被提及人物的关注，可以成为继续检索的线索，而不是让清单失去边界。'], url: 'https://x.com/swyx/status/2111245359125266915' },
+      { id: 'persistence', title: 'fx.sh 与持久性：工具使用中的状态管理', author: '工程笔记（样例）', avatar: 'fx', source: 'rss', time: '07:05', topic: 'agent', tags: ['状态管理', '开发工具'],
+        summary: '将一段技术细节归入“Agent 与开发工具”，让同一问题下的不同材料更容易被发现。',
+        paragraphs: ['截图末尾出现了关于 fx.sh 与持久性的条目。由于截图未显示完整出处，这里使用明确标注的样例作者。', '实际接入时应读取素材已有的元数据，不根据标题猜测真实作者或来源。'], url: null },
+      { id: 'interview', title: '远程面试中的 AI 换脸：一则识别经验', author: '宝玉', avatar: '宝', source: 'social', time: '06:48', topic: 'hiring', tags: ['远程面试', '身份识别'],
+        summary: '把具体经验放在“AI 与招聘”主题下。即使目前只有一条材料，也不必强行与其他主题合并。',
+        paragraphs: ['截图中这条素材讨论了远程面试时对 AI 换脸的怀疑与识别经验。演示只展示内容组织方式，不将个案经验视为通用检测结论。', '可以先打开摘要判断相关性，再回到原文了解具体情境。'], url: null }
+    ];
+    const topics = {
+      agent: { title: 'Agent 与开发工具', subtitle: '从响应速度到持久记忆，关注工具怎样真正进入工作流。', label: '工具与方法' },
+      industry: { title: 'AI 行业与组织', subtitle: '把商业判断、组织使用与行业讨论放在一起交叉阅读。', label: '行业与判断' },
+      creation: { title: '开源与内容创作', subtitle: '从一个工具发现，到资料协作，再到内容成形。', label: '发现与创作' },
+      hiring: { title: 'AI 与招聘', subtitle: 'AI 进入面试之后，新的使用场景与信任问题。', label: '应用与影响' }
+    };
+    const views = {
+      list: { hint: '<strong>适合快速筛选。</strong> 左侧只保留标题和出处，点击后在右侧阅读；手机上改为详情抽屉。', tradeoff: '取舍：浏览效率高，但桌面端需要为详情留出横向空间。' },
+      accordion: { hint: '<strong>适合顺着清单读。</strong> 先按来源分组，感兴趣的条目再原地展开，不让长正文占满页面。', tradeoff: '取舍：结构最接近现有清单，但同时展开多条后仍会拉长。' },
+      topics: { hint: '<strong>适合找选题。</strong> 同一主题的不同作者和来源放在一起，每条材料仍保留独立详情。', tradeoff: '取舍：更容易形成选题，但正式接入需要额外的归类与去重。' }
+    };
+    let activeView = Object.hasOwn(views, location.hash.slice(1)) ? location.hash.slice(1) : 'list';
+    let activeSource = 'all';
+    let selectedId = 'claude';
+    let detailClosed = false;
+    const surface = document.getElementById('surface');
+    const reader = document.getElementById('reader');
+    const search = document.getElementById('search');
+    const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
+    const icon = (name, className = '') => `<svg aria-hidden="true" class="${className}"><use href="#icon-${name}"/></svg>`;
+    const badge = material => `<span class="source-badge ${material.source}">${sources[material.source]}</span>`;
+    const avatar = material => `<span aria-hidden="true" class="avatar ${material.source}">${escapeHtml(material.avatar)}</span>`;
+    const metadata = material => `<span class="meta">${badge(material)}<span>${escapeHtml(material.author)}</span><span class="dot">·</span><span>${material.time}</span></span>`;
+    const sourceLink = material => material.url ? `<a class="source-link" href="${escapeHtml(material.url)}" target="_blank" rel="noopener noreferrer">查看原文 ${icon('link')}</a>` : '<span>演示未附原文链接</span>';
+    const matchingMaterials = () => {
+      const query = search.value.trim().toLocaleLowerCase();
+      return materials.filter(material => (activeSource === 'all' || material.source === activeSource) &&
+        [material.title, material.author, material.summary, ...material.paragraphs, ...material.tags].join(' ').toLocaleLowerCase().includes(query));
+    };
+    function detailMarkup(material, inDialog = false) {
+      return `<div class="detail-toolbar"><span>素材详情 / ${sources[material.source]}</span><button type="button" class="icon-button" data-action="close-detail" aria-label="${inDialog ? '关闭详情' : '收起详情'}">${icon('close')}</button></div>
+        <div class="detail-scroll">${badge(material)}<h3 class="detail-title" ${inDialog ? 'id="reader-title"' : ''}>${escapeHtml(material.title)}</h3>
+        <div class="meta"><span>${escapeHtml(material.author)}</span><span class="dot">·</span><span>演示时间 ${material.time}</span></div>
+        <div class="detail-tags">${material.tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join('')}</div>
+        <div class="summary-box"><p class="section-label">一句话看懂</p><p>${escapeHtml(material.summary)}</p></div>
+        <div class="detail-body"><h4>内容预览</h4>${material.paragraphs.map(paragraph => `<p>${escapeHtml(paragraph)}</p>`).join('')}</div>
+        <p class="detail-disclaimer">展示用整理，非逐字原文。时间、摘要与主题归类仅用于比较界面；事实与完整语境请以原始来源为准。</p></div>
+        <div class="detail-footer">${sourceLink(material)}<span>正文不再挤占素材清单</span></div>`;
+    }
+    function listMarkup(visible) {
+      const selected = visible.find(material => material.id === selectedId) || visible[0];
+      selectedId = selected.id;
+      return `<div class="list-layout ${detailClosed ? 'detail-closed' : ''}"><div class="list-pane"><div class="pane-label"><span>标题 / 出处</span><span>点击阅读详情 →</span></div><div class="rows">${visible.map(material =>
+        `<button type="button" class="material-row" data-material="${material.id}" aria-pressed="${!detailClosed && material.id === selectedId}">${avatar(material)}<span class="row-copy"><span class="row-title">${escapeHtml(material.title)}</span>${metadata(material)}</span>${icon('arrow', 'row-arrow')}</button>`
+      ).join('')}</div></div><aside class="detail-pane" aria-label="素材详情" ${detailClosed ? 'hidden' : ''}>${detailMarkup(selected)}</aside></div>`;
+    }
+    function accordionMarkup(visible) {
+      return `<div class="scroll-surface"><div class="view-heading"><p>按来源归档 · 展开你感兴趣的条目</p><button type="button" class="text-button" data-action="collapse-all">全部收起</button></div>${Object.entries(sources).map(([key, label]) => {
+        const group = visible.filter(material => material.source === key);
+        return group.length ? `<section class="source-group"><h3><span class="source-badge ${key}">${label}</span><small>${group.length} 条</small></h3>${group.map(material =>
+          `<details class="accordion"><summary>${icon('arrow', 'chevron')}<span class="row-copy"><span class="row-title">${escapeHtml(material.title)}</span><span class="meta">${escapeHtml(material.author)}<span class="dot">·</span>${material.time}</span></span></summary><div class="accordion-body"><p>${escapeHtml(material.summary)}</p><div class="accordion-actions"><button type="button" data-material="${material.id}">查看内容预览 →</button>${sourceLink(material)}</div></div></details>`
+        ).join('')}</section>` : '';
+      }).join('')}</div>`;
+    }
+    function topicsMarkup(visible) {
+      const topicCount = new Set(visible.map(material => material.topic)).size;
+      return `<div class="scroll-surface"><div class="view-heading"><p>${visible.length} 条素材，收成 ${topicCount} 个主题 · 点击条目读详情</p><span class="tag">手动归类样例</span></div><div class="topic-grid">${Object.entries(topics).map(([key, topic]) => {
+        const group = visible.filter(material => material.topic === key);
+        return group.length ? `<article class="topic-card"><div class="topic-head"><div class="topic-kicker"><span class="topic-dot"></span>${topic.label}</div><h3>${topic.title}</h3><p>${topic.subtitle}</p></div><div>${group.map(material =>
+          `<button type="button" class="topic-material" data-material="${material.id}">${avatar(material)}<span class="row-copy"><span class="row-title">${escapeHtml(material.title)}</span>${metadata(material)}</span></button>`
+        ).join('')}</div><div class="topic-foot">${group.length} 条素材 · ${new Set(group.map(material => material.author)).size} 位作者 · ${new Set(group.map(material => material.source)).size} 类来源</div></article>` : '';
+      }).join('')}</div></div>`;
+    }
+    function render() {
+      const visible = matchingMaterials();
+      document.querySelectorAll('[data-view]').forEach(button => {
+        const selected = button.dataset.view === activeView;
+        button.setAttribute('aria-selected', String(selected));
+        button.tabIndex = selected ? 0 : -1;
+      });
+      document.getElementById('preview').setAttribute('aria-labelledby', `tab-${activeView}`);
+      document.getElementById('view-explainer').innerHTML = views[activeView].hint;
+      document.getElementById('tradeoff').textContent = views[activeView].tradeoff;
+      document.getElementById('result-count').textContent = visible.length;
+      document.getElementById('result-status').textContent = `显示 ${visible.length} / ${materials.length} 条样例${activeSource === 'all' ? '' : ` · ${sources[activeSource]}`}`;
+      document.querySelector('.filters').innerHTML = [['all', '全部'], ...Object.entries(sources)].map(([key, label]) =>
+        `<button type="button" class="filter" data-source="${key}" aria-pressed="${activeSource === key}">${label}<span>${key === 'all' ? materials.length : materials.filter(material => material.source === key).length}</span></button>`).join('');
+      if (!visible.length) {
+        surface.innerHTML = `<div class="scroll-surface empty">${icon('search')}<h3>没有找到匹配的素材</h3><p>试试其他关键词，或清除来源与搜索条件。</p><button type="button" class="reset" data-action="reset">清除筛选</button></div>`;
+        return;
+      }
+      surface.innerHTML = activeView === 'list' ? listMarkup(visible) : activeView === 'accordion' ? accordionMarkup(visible) : topicsMarkup(visible);
+    }
+    function setView(view, updateHash = true) {
+      activeView = view;
+      if (reader.open) reader.close();
+      if (updateHash) history.replaceState(null, '', `#${view}`);
+      render();
+    }
+    function showMaterial(materialId) {
+      const material = materials.find(candidate => candidate.id === materialId);
+      if (!material) return;
+      selectedId = materialId;
+      if (activeView !== 'list' || matchMedia('(max-width: 640px)').matches) {
+        if (activeView === 'list') surface.querySelectorAll('.material-row').forEach(row => {
+          row.setAttribute('aria-pressed', String(row.dataset.material === materialId));
+        });
+        reader.innerHTML = detailMarkup(material, true);
+        reader.showModal();
+      } else {
+        detailClosed = false;
+        const scrollPosition = surface.querySelector('.rows').scrollTop;
+        render();
+        surface.querySelector('.rows').scrollTop = scrollPosition;
+        surface.querySelector(`[data-material="${materialId}"]`).focus({ preventScroll: true });
+      }
+    }
+    document.addEventListener('click', event => {
+      const viewButton = event.target.closest('[data-view]');
+      if (viewButton) { setView(viewButton.dataset.view); return; }
+      const sourceButton = event.target.closest('[data-source]');
+      if (sourceButton) {
+        activeSource = sourceButton.dataset.source;
+        render();
+        document.querySelector(`[data-source="${activeSource}"]`).focus({ preventScroll: true });
+        return;
+      }
+      const materialButton = event.target.closest('[data-material]');
+      if (materialButton) { showMaterial(materialButton.dataset.material); return; }
+      const action = event.target.closest('[data-action]')?.dataset.action;
+      if (action === 'close-detail') {
+        if (reader.open) reader.close();
+        else {
+          detailClosed = true;
+          render();
+          surface.querySelector(`[data-material="${selectedId}"]`)?.focus({ preventScroll: true });
+        }
+      }
+      if (action === 'collapse-all') surface.querySelectorAll('details[open]').forEach(detail => { detail.open = false; });
+      if (action === 'reset') { activeSource = 'all'; search.value = ''; render(); search.focus(); }
+    });
+    document.querySelector('.schemes').addEventListener('keydown', event => {
+      const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
+      if (!keys.includes(event.key)) return;
+      event.preventDefault();
+      const names = Object.keys(views);
+      const direction = event.key === 'ArrowLeft' ? -1 : 1;
+      const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? names.length - 1 : (names.indexOf(activeView) + direction + names.length) % names.length;
+      setView(names[nextIndex]);
+      document.getElementById(`tab-${activeView}`).focus();
+    });
+    search.addEventListener('input', render);
+    reader.addEventListener('click', event => { if (event.target === reader) reader.close(); });
+    window.addEventListener('hashchange', () => { const view = location.hash.slice(1); if (Object.hasOwn(views, view)) setView(view, false); });
+    render();
+  </script>
+</body>
+</html>
