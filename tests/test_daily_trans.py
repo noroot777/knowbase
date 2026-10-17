@@ -107,6 +107,50 @@ class DailyTranslationLookupTests(unittest.TestCase):
         self.assertEqual('source/rss/cn.md',
                          got['https://e.org/%E4%B8%AD%E6%96%87/path']['path'])
 
+    def test_two_urls_that_only_differ_in_escaping_are_not_the_same_article(self):
+        """`?q=a%26id%3Db`(一个参数)和 `?q=a&id=b`(两个参数)是两篇不同的文章。
+
+        整条 url 解码之后它们是同一个键 —— 那条路会让点「译」打开**另一篇**,而
+        抽屉顶上那个「原文」还指着你点的那一篇(2026-10-17 审查用隔离库 + 真浏览器
+        实测)。**排在前面的故意是错的那一篇**(`ORDER BY path`:`aaa-` 在 `zzz-`
+        之前),挑错了当场看得见。
+        """
+        from kb.daily_trans import _as_href
+        wanted = 'https://example.org/条目?q=a%26id%3Db'
+        other = 'https://example.org/条目?q=a&id=b'
+        self.doc('source/rss/zzz-wanted.md', wanted, title='要的那一篇',
+                 meta='lang: zh\ntranslated_from: en\n')
+        self.doc('source/rss/aaa-other.md', other, title='另一篇',
+                 meta='lang: zh\ntranslated_from: en\n')
+        # 页面上那两个 href(marked 把中文路径编码掉,所以两条都走宽松匹配)。
+        href_w, href_o = _as_href(wanted), _as_href(other)
+        self.assertNotEqual(href_w, href_o)
+        self.assertEqual('source/rss/zzz-wanted.md',
+                         daily_trans.translations([href_w])[href_w]['path'])
+        self.assertEqual('source/rss/aaa-other.md',
+                         daily_trans.translations([href_o])[href_o]['path'])
+
+    def test_both_of_them_survive_one_batch_in_either_order(self):
+        """同一批里问两条,两条都要有结果 —— 哪个顺序都一样。
+
+        「规范化键 → 请求地址」的单值映射会让后写进去的那条把前一条挤掉:同批问
+        两条只回来一条,颠倒顺序消失的换成另一条(同上,审查实测)。
+        """
+        from kb.daily_trans import _as_href
+        wanted = 'https://example.org/条目?q=a%26id%3Db'
+        other = 'https://example.org/条目?q=a&id=b'
+        self.doc('source/rss/zzz-wanted.md', wanted, title='要的那一篇',
+                 meta='lang: zh\ntranslated_from: en\n')
+        self.doc('source/rss/aaa-other.md', other, title='另一篇',
+                 meta='lang: zh\ntranslated_from: en\n')
+        href_w, href_o = _as_href(wanted), _as_href(other)
+        for batch in ([href_w, href_o], [href_o, href_w]):
+            with self.subTest(order=batch[0]):
+                got = daily_trans.translations(batch)
+                self.assertEqual({href_w: 'source/rss/zzz-wanted.md',
+                                  href_o: 'source/rss/aaa-other.md'},
+                                 {u: d['path'] for u, d in got.items()})
+
     def test_the_answer_is_keyed_by_the_url_that_was_asked_about(self):
         # 回包的键必须是调用方传进来的那个字符串:换成库里那一份,上面那条
         # 宽松匹配的结果前端就对不上号(页面上那个 href 才是它手里的键)。

@@ -37,8 +37,25 @@ PROBE = HERE / "daily_zh_probe.mjs"
 
 sys.path.insert(0, str(REPO))
 
+from kb.daily_trans import _as_href  # noqa: E402
 from tests.daily_zh_sandbox import ZH_MARK, ZH_URL  # noqa: E402
 from tests.headless import NODE, probe_env, reap, requires_headless, run_probe  # noqa: E402
+
+#: 「库里的 url → 页面上的 href」这件事,后端照着 marked 的 `cleanUrl` 又写了一遍
+#: (`daily_trans._as_href`)。**两个实现逐位对齐不许按规范推** —— 教训在
+#: `kb/daily_refs.py` 的 TLD 名单那一节(换了预设名也还是窄于 marked)。所以把
+#: 后端算出来的结果带进页面,跟那里真的 `encodeURI` 逐个比。样例覆盖:查询串里
+#: 被编码的保留字符(F2 那个形态)、裸的保留字符、非 ASCII 路径、空格、`%` 本身、
+#: encodeURI 会编码而 Python 默认 safe 里没有的 `[` `]`,以及公众号那种真实地址。
+HREF_SAMPLES = [
+    'https://example.org/条目?q=a%26id%3Db',
+    'https://example.org/条目?q=a&id=b',
+    "https://e.org/a+b,c;d:e@f$g*h'i(j)k!l~m.n-o_p/q?r=s&t=u#v",
+    'https://e.org/path with space/x',
+    'https://e.org/100%25?x=%zz',
+    'https://e.org/list[1]/x',
+    'https://mp.weixin.qq.com/s?__biz=Mzg2ODY3NjgxOA%3D%3D&mid=2247513139&idx=1',
+]
 
 
 def _free_port() -> int:
@@ -93,7 +110,8 @@ class DailyTranslationEntryTest(unittest.TestCase):
         url = f"http://127.0.0.1:{cls.web_port}"
         if not _wait(url + "/"):
             raise AssertionError("沙箱 kb-web 没起来")
-        run = run_probe([str(NODE), str(PROBE), url, info["report"], ZH_URL, ZH_MARK],
+        hrefs = json.dumps({u: _as_href(u) for u in HREF_SAMPLES}, ensure_ascii=False)
+        run = run_probe([str(NODE), str(PROBE), url, info["report"], ZH_URL, ZH_MARK, hrefs],
                         timeout=300, env=probe_env(), cwd=str(REPO))
         cls.stderr = run.stderr
         line = run.stdout.strip().splitlines()[-1] if run.stdout.strip() else ""

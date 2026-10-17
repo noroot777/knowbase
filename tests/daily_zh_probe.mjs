@@ -22,6 +22,7 @@ const base = process.argv[2];
 const REPORT = process.argv[3];     // 摆好那份历史日报的日期
 const ZH_URL = process.argv[4];     // 译文那一篇的原文地址
 const ZH_MARK = process.argv[5];    // 译文正文里的暗号
+const HREFS = JSON.parse(process.argv[6] || "{}");   // 后端算的「库里 url → 页面 href」
 const ZH_PATH = "source/rss/zh-of-en.md";
 const PLAIN_URL = "https://example.org/a";   // 库里有、但不是译文的那一条
 
@@ -214,6 +215,23 @@ await evalJs(`(() => { markDailyTranslations(document.getElementById('daily-read
 await sleep(600);
 check("同一份正文上再调一次也只有一个入口",
       (await evalJs(`document.querySelectorAll('#daily-reader-body a.daily-zh').length`)) === 1);
+
+// ── 5. 「库里的 url 渲染到页面上长什么样」两边逐位对齐 ──────────────────────
+// 后端为了把 href 对回库里那一篇,照着 marked 的 `cleanUrl` 又写了一遍
+// (`daily_trans._as_href`)。**两个实现逐位对齐不许按规范推** —— 窄了就是带
+// 保留字符的出处永远拿不到入口,宽了就是把两篇不同的文章当成同一个地址(F2 那个
+// 形态:点「译」打开另一篇)。所以拿页面上真的 `encodeURI` 跟它逐个比。
+const mismatch = JSON.parse(await evalJs(`(() => {
+  const want = ${JSON.stringify(HREFS)};
+  const bad = {};
+  for (const [url, backend] of Object.entries(want)) {
+    const front = encodeURI(url).replace(/%25/g, '%');   // marked 的 cleanUrl
+    if (front !== backend) bad[url] = { front, backend };
+  }
+  return JSON.stringify(bad); })()`));
+check("后端算的 href 和页面上 marked 那条规则逐位相同",
+      Object.keys(HREFS).length >= 7 && !Object.keys(mismatch).length,
+      JSON.stringify(mismatch));
 
 check("页面没有脚本报错", pageErrors.length === 0, pageErrors.join(" | "));
 
