@@ -60,8 +60,41 @@ _WHOLE_LINE = re.compile(r'^https?://\S+$', re.I)
 #: 逐字符推进在长剪贴板上是白跑,拿它跳过中间那些普通文字。
 #: (`search` 找不到就是这一行再没有链接了。)
 _NEXT = re.compile(r'''[<"']|https?://''', re.I)
-#: 第一趟**只认结构**时值得停下来看的位置:方括号、反引号、反斜杠。
-_STRUCT = re.compile(r'[\\`\[\]]')
+#: 第一趟**只认结构**时值得停下来看的位置:方括号、反引号、反斜杠、尖括号。
+_STRUCT = re.compile(r'[\\`\[\]<]')
+
+#: 行内 HTML 的**开标签/闭标签**,和 autolink 那个 `<地址>`(CommonMark 的
+#: 「Raw HTML」「Autolinks」,口径同 markdown-it 的 `HTML_TAG_RE` / `AUTOLINK_RE`)。
+#: 这几种都是「到第一个 `>` 为止」的**有界**写法,所以一条正则就够、而且是线性的。
+#:
+#: **这几档里的 `[` `]` 一个都不算结构。** 漏掉它的形态实测过:
+#: `见 [看 <span title="]">标签</span>](目标) 这篇` —— 属性值里那个 `]` 弹掉了显示
+#: 文字的开括号,真正的 `]` 来时已经没有配对,于是整条链接退回裸地址,三个动作
+#: (收录、`--state`、`--refetch`)发出去的都是 `目标)`,而那个地址**真的能存进库**。
+#:
+#: **email 那一档故意不写** —— 它的字符集里压根没有方括号,跳过它和不跳过它对
+#: 「链接边界在哪儿」没有任何差别(唯一的作用是让这条正则长一倍)。
+#: **注释、`<?…?>`、`<!…>`、CDATA 也不在这里** —— 那几种是「找收尾串」的写法,
+#: 用正则的 `[\s\S]*?` 写出来在找不到收尾时会一路扫到行尾,一行里塞几百个 `<?`
+#: 就是平方级。它们走 `_CLOSERS` 那张表、用 `str.find` 定位,扫过多少一目了然。
+_TAG = re.compile(r'<(?:[A-Za-z][A-Za-z0-9-]*'
+                  r'''(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*'''
+                  r'''(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*'''
+                  r'\s*/?'
+                  r'|/[A-Za-z][A-Za-z0-9-]*\s*'
+                  r')>')
+#: autolink:`<协议:…>`。**它是一条链接**(所以认出来要产出目标、而且「链接里不许
+#: 再有链接」对它一样管用),不像上面那几个标签只是要跳过去。
+#: 地址**原样交出去**,一个字符都不解码 —— CommonMark 的 autolink 不处理反斜杠
+#: 转义,这一档给的是用户画出来的边界(同模块说明最后一段)。
+_AUTOLINK = re.compile(r'<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*)>')
+#: `<` 起手、要**找一个收尾串**才知道边界的那几种(CommonMark「Raw HTML」的后四种)。
+#: 键是起手串,值是收尾串;`<!` 后面跟字母那一档(declaration)的收尾是单个 `>`。
+#: 找不到收尾时那个 `<` 就是**字面文字**(CommonMark 的口径),按一格往下走 ——
+#: 不许跳到行尾,后面可能还有完整的链接。
+_CLOSERS = (('<!--', '-->'), ('<?', '?>'), ('<![CDATA[', ']]>'))
+#: declaration(`<!DOCTYPE …>`):`<!` + 一个字母起手,`>` 收尾。
+_DECL = re.compile(r'<![A-Za-z]')
 #: `<地址>` —— RFC 3986 附录 C 那个写法。允许 `< 地址 >` 中间带空白。
 #:
 #: **哪几档在承载行为、哪几档是冗余带**(定点注入量过的,别当成都一样):
@@ -99,6 +132,53 @@ _MD_SPACE = ' \t\n'
 #: 转义的那个字符本身收进结果(反斜杠压根不进去),所以后面不需要、也不许再解一遍:
 #: 那会是同一个问题两处各判一遍,而两份字符集迟早对不上。
 _ESCAPABLE = frozenset('!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~')
+
+#: 第一趟**结构探测**的预算(见 `_Budget`):按行长的倍数给,外加一个常数项让短行
+#: 也宽松。两个数都**只为挡住损坏输入**,不是在给正常输入设上限 —— 正常一行里所有
+#: 探测加起来不超过行长。
+_PROBE_FACTOR = 4
+_PROBE_FLOOR = 4096
+
+
+class TangledInput(ValueError):
+    """这一行里认不全的结构残片太多(见 `_Budget`)。
+
+    **按参数错处理**(`grab_cli.main` 那边退出 2、说一句人话),**不许当成「这一行
+    没有链接」** —— 那是「确定没有」这个结论,而我们只知道「没认全」。
+    """
+
+
+class _Budget:
+    """第一趟**结构探测**的累计预算(按字符数)。
+
+    **「这一段是不是链接」答不上来时要扫过多少字符,是输入说了算的** ——
+    `](目标)` 的括号一路不配平、title 没有收尾引号、`<?` 找不到 `?>`,都得扫到
+    行尾才知道。一行里塞上千个这种残片,同一段余文就被反复扫,耗时随行长平方涨
+    (实测 500/1000/2000 个 `[](`:0.019/0.065/0.258 秒;`](a (` 那一档同理)。
+
+    **这道线给得很宽**:正常一行里每段结构只被它自己那一次探测扫过,加起来不超过
+    行长,所以合法输入碰不到;碰到了就是损坏文本。**碰到了要抛** —— 「这一行我
+    认不全」在终端上看得见(退出 2、人读得懂的一句),「把结构残片拼成另一个地址」
+    是静默收错一篇,而 `put_items` 的 `DO NOTHING` 之下换不回来。
+
+    **只有「扫了多远」说得准的那几处才计费**:`_inline_link` 那一族(它返回扫到
+    哪儿)和 `_CLOSERS` 的 `str.find`。`_TAG` / `_AUTOLINK` 不计 —— 那两条正则里
+    没有无界的 lazy 量词、交替分支的首字符互不重叠,一次匹配最多扫到下一个 `<`
+    或行尾,整行加起来是线性的(这正是把注释/`<?…?>`/CDATA 排除出正则、改走
+    `_CLOSERS` 的理由)。
+    """
+
+    __slots__ = ('left',)
+
+    def __init__(self, text: str) -> None:
+        self.left = len(text) * _PROBE_FACTOR + _PROBE_FLOOR
+
+    def spend(self, chars: int) -> None:
+        self.left -= chars
+        if self.left < 0:
+            raise TangledInput(
+                '这一行里认不全的结构残片太多(没有配对的括号、引号或 `?>`?)，'
+                '没法确定哪一段是链接 —— 把要收的地址单独一行贴过来')
 
 
 def _tick_runs(text: str) -> tuple[dict[int, list[int]], dict[int, int]]:
@@ -208,8 +288,13 @@ def _plain_dest(text: str, i: int) -> tuple[str | None, int]:
     return ''.join(out), i
 
 
-def _skip_title(text: str, i: int) -> int | None:
-    """跳过目标后面那个可选的 title(`"…"` / `'…'` / `(…)`)。"""
+def _skip_title(text: str, i: int) -> tuple[bool, int]:
+    """跳过目标后面那个可选的 title(`"…"` / `'…'` / `(…)`)。
+
+    返回 `(认成了吗, 扫到哪儿)`。**第二个数无论成不成都要给** —— 调用方拿它算
+    这次探测花了多少(`_Budget`):没有收尾的 title 要一路扫到行尾才知道,而一行里
+    几百个 `](a (` 会让同一段余文被反复扫(实测形态见 `_Budget`)。
+    """
     closer = ')' if text[i] == '(' else text[i]
     n = len(text)
     i += 1
@@ -218,50 +303,111 @@ def _skip_title(text: str, i: int) -> int | None:
             i += 2
             continue
         if text[i] == closer:
-            return i + 1
+            return True, i + 1
         i += 1
-    return None
+    return False, n
 
 
-def _inline_link(text: str, close: int) -> tuple[str, int] | None:
+def _inline_link(text: str, close: int) -> tuple[str | None, int]:
     """认一个 Markdown 内联链接的 `(目标)` 部分。`close` = 显示文字 `]` 之后那一格。
 
-    返回 `(目标, 整段之后那一格)`;**不是一个内联链接结构**就 `None`。
+    返回 `(目标, 扫到哪儿)`。目标那一位有三态,**三态各是一件不同的事**:
+    - `None` = **这一段不是一个内联链接结构**(没有配对的 `](`、目标括号不配平、
+      title 没收尾)。那时这一段压根不是链接,`[备注] 看 https://…` 里的裸地址
+      还该照常认出来。
+    - `''` = **结构成立,但目标筛不过协议**(`#锚点`、`/相对路径`、`ftp:`)。
+      那一段**照样整段消费** —— 结构认出来了就由它说了算,「解析不了就退回裸地址」
+      会从显示文字里拼出另一个地址来(而那个地址可能真的存在)。
+    - 别的 = 这一段的目标。
 
-    **目标筛不过协议时返回的是空串,而不是 `None`** —— 那一段照样整段消费:
-    结构认出来了就由它说了算,「解析不了就退回裸地址」会从显示文字里拼出另一个
-    地址来(而那个地址可能真的存在)。两件事要分开:**结构不成立**(没有配对的
-    `](`、目标括号不配平)才是 `None`,那时这一段压根不是链接,`[备注] 看 https://…`
-    里的裸地址还该照常认出来。
+    **第二个数无论哪一态都是「扫到哪儿」**,不是「整段之后那一格」:`None` 那一态
+    也要给,调用方拿它算这次探测花了多少(`_Budget`)。成立的那两态下它就是整段
+    之后那一格。
     """
     n = len(text)
     if close >= n or text[close] != '(':
-        return None
+        return None, close
     i = close + 1
     while i < n and text[i] in _MD_SPACE:
         i += 1
     dest, i = (_angle_dest if i < n and text[i] == '<' else _plain_dest)(text, i)
     if dest is None:
-        return None
+        return None, i
     while i < n and text[i] in _MD_SPACE:
         i += 1
     if i < n and text[i] in '"\'(':
-        after = _skip_title(text, i)
-        if after is None:
-            return None
-        i = after
+        ok, i = _skip_title(text, i)
+        if not ok:
+            return None, i
         while i < n and text[i] in _MD_SPACE:
             i += 1
     if i >= n or text[i] != ')':
-        return None
+        return None, i
     # 结构成立。**最后才筛协议** —— 筛不过的交出空串(整段照样消费,见上)。
     return (dest if _SCHEME.match(dest) else ''), i + 1
 
 
-def _links(text: str) -> list[tuple[int, int, str]]:
-    """**第一趟:只认结构** —— 这一行里真正成立的那几段内联链接,
-    `[(起点, 之后那一格, 目标)]`,按位置有序、互不重叠。目标筛不过协议时是空串
-    (那一段**照样整段消费**,理由见 `_inline_link`)。
+def _angled(text: str, i: int, found: list, budget: _Budget) -> int:
+    """`<` 起手那一族(CommonMark「Autolinks」「Raw HTML」):**这一段到哪儿为止**。
+    `text[i] == '<'`。认不出来就是字面的 `<`,返回 `i + 1`。
+
+    **三种各记一种账**(第四位的含义见 `_links`):
+    - **autolink 是一条链接** —— 记它的目标。它**不作废**外层的 `[`:CommonMark 的
+      「Links may not contain other links」管的是内联/引用链接的嵌套,autolink 在
+      bracket matching 里不参与(`[<https://a/auto>](https://b/outer)` 两条都成立,
+      markdown-it 的 commonmark 模式也给两条)。作废掉的那一版**漏掉 outer 那一篇**,
+      而漏是静默的。
+    - **开/闭标签只是跳过去,但属性值里那条地址照旧收**(`framed=True`):用户粘一段
+      HTML 源码进来,`href="https://…"` 就是他要的那一篇(这一档旧版就收,别弄丢)。
+      **裸地址那一档在标签内部不跑** —— `<span title="](https://a/x)">` 那种属性值里
+      混着 Markdown 语法字符,按空白断会把 `)` 一起收进来,那是另一篇。
+    - **注释 / `<?…?>` / CDATA / declaration 整段消费,一个字都不抽**:那几段是
+      不参与渲染的文本,里面的 `[文字](地址)` 残片交给第二趟就会多带一个右括号
+      (实测 `<!-- [注释里的](https://a/no) -->` 发出 `https://a/no)`)。
+
+    里面的 `[` `]` 一个都不算结构 —— 漏掉这件事的形态见 `_TAG`。
+    """
+    if m := _AUTOLINK.match(text, i):
+        dest = m.group(1)
+        # 筛不过协议的(`<ftp://…>`、`<mailto:…>`)交空串:整段照样消费、不产出。
+        found.append((i, m.end(), dest if _SCHEME.match(dest) else '', False))
+        return m.end()
+    if m := _TAG.match(text, i):
+        found.append((i, m.end(), '', True))
+        return m.end()
+    n = len(text)
+    for head, tail in _CLOSERS:
+        if text.startswith(head, i):
+            at = text.find(tail, i + len(head))
+            # **找不到收尾就是字面文字**(CommonMark 的口径):往下走一格,不许跳到
+            # 行尾 —— 后面可能还有完整的链接。两种情况都按真扫过的距离计费。
+            budget.spend((at if at >= 0 else n) - i)
+            if at < 0:
+                return i + 1
+            found.append((i, at + len(tail), '', False))
+            return at + len(tail)
+    if _DECL.match(text, i):
+        at = text.find('>', i + 2)
+        budget.spend((at if at >= 0 else n) - i)
+        if at < 0:
+            return i + 1
+        found.append((i, at + 1, '', False))
+        return at + 1
+    return i + 1
+
+
+def _links(text: str) -> list[tuple[int, int, str, bool]]:
+    """**第一趟:只认结构** —— 这一行里认出来的那几段,按**认成的次序**:
+    `[(起点, 之后那一格, 目标, 这一段里还抽不抽边界给定的那两档)]`。
+
+    目标是空串 = **这一段整段消费、不产出地址**(筛不过协议的目标、HTML 标签、
+    注释那几种、以及认成结构但不该成立为链接的 `](…)` 残片)。第四位只对
+    **HTML 标签**为真:属性值里那条**边界给定**的地址照旧要收,但裸地址那一档不跑
+    (理由见 `_angled`)。
+
+    **一般互不重叠,但 label 里那条 autolink 会被随后认成的外层链接包住**
+    (`[<https://a/auto>](https://b/outer)` 两条都成立)。所以第二趟按**单调水位**
+    拼(`_scan`),不假设区间两两不交。
 
     **这一趟的次序就是优先级,跟 CommonMark 的行内解析同一个口径**:谁的起点先出现
     就先归谁,被整段消费掉的那一段里面再没有别的语法可认。所以
@@ -277,8 +423,9 @@ def _links(text: str) -> list[tuple[int, int, str]]:
     `[outer [inner](A)](B)` 成立的是 inner 那一条,包着它的那几个 `[` 随之作废。不作废
     的话选出来的是 B —— 那是**另一篇文章**,不是「多带了一个字符」那种错。
     """
-    found: list[tuple[int, int, str]] = []
+    found: list[tuple[int, int, str, bool]] = []
     by_width, ends = _tick_runs(text)
+    budget = _Budget(text)
     opens: list[int] = []
     i, n = 0, len(text)
     while i < n:
@@ -305,29 +452,58 @@ def _links(text: str) -> list[tuple[int, int, str]]:
             while i + width < n and text[i + width] == '`':
                 width += 1
             end = _code_span_end(by_width, ends, i, width)
-            # 没闭合的那一串是字面文字:跳过**这一串**接着往下扫(别跳到末尾)。
-            i = end if end is not None else i + width
+            if end is None:
+                # 没闭合的那一串是字面文字:跳过**这一串**接着往下扫(别跳到末尾)。
+                i += width
+            else:
+                # **代码跨度的内容是字面代码,里面的 `[文字](地址)` 不是链接。**
+                # 只跳过、不记一笔的那一版,第二趟会在这一段上抽裸地址 —— 实测
+                # `` `[不是](…/no)` `` 发出的是 `…/no)` 再加一个反引号,那是**另一篇**。
+                # **但反引号也是一道给定的边界**(同 `<…>`、引号那一档):整段就是
+                # 一条地址时照旧收 —— 技术文档和聊天里 `` `https://…` `` 是常见写法,
+                # 漏掉它是静默丢数据,而这一档的边界是用户自己画的,不会把语法
+                # 字符吃进来。判据和「整行就是一条地址」共用一份(`_WHOLE_LINE`)。
+                inner = text[i + width:end - width].strip()
+                found.append((i, end, inner if _WHOLE_LINE.match(inner) else '',
+                              False))
+                i = end
+        elif ch == '<':
+            i = _angled(text, i, found, budget)
         elif ch == '[':
             opens.append(i)
             i += 1
-        elif not opens:
-            i += 1                  # 没有配对的 `[`,这个 `]` 是字面文字
         else:
-            start = opens.pop()
-            if got := _inline_link(text, i + 1):
-                found.append((start, got[1], got[0]))
-                opens.clear()       # 链接里不许再有链接:包着它的那几个一起作废
-                i = got[1]
+            # `]`:把 `](…)` **当一段来认,不管有没有配对的 `[`**。没有配对时它
+            # 在 CommonMark 下是字面文字 —— 但「字面文字」不等于「该从里面抽一条
+            # 裸地址」:那一段的 `)` 是 Markdown 的收尾,不是地址的一部分。交给
+            # 第二趟的后果实测过:`[outer [inner](A)](B)` 里外层被「链接里不许再有
+            # 链接」作废之后,残片 `](B)` 让第二趟发出 `B)` —— 多一个右括号就是
+            # **另一篇文章**,而那个地址真的能存进库。所以认成结构就整段消费、
+            # **一个字都不产出**(`dest` 给空串)。
+            had = bool(opens)
+            start = opens.pop() if had else i
+            dest, end = _inline_link(text, i + 1)
+            budget.spend(end - i)
+            if dest is None:
+                # 结构压根不成立(没有 `](`、括号不配平、title 没收尾)。那一段不是
+                # 链接,`[备注] 看 https://…` 里的裸地址还该照常认出来。
+                i += 1
             else:
-                i += 1              # 不是链接结构:那个 `[` 当文字
+                found.append((start, end, dest if had else '', False))
+                opens.clear()       # 链接里不许再有链接:包着它的那几个一起作废
+                i = end
     return found
 
 
-def _loose(part: str) -> list[str]:
+def _loose(part: str, *, bare: bool = True) -> list[str]:
     """**没被结构盖住**的那段文字里的地址:`<…>`、引号、裸写的这三档。
 
     裸地址那一档按空白断、**一个标点都不剥**(理由见模块说明第②条),所以它会把
     `)` `]` `;` 这些一起收进来 —— 这一档只在结构之外跑,不会因此吞掉一条链接。
+
+    **`bare=False` 给 HTML 标签的内部用**(`_angled`):那里只收**边界给定**的那两档
+    (`href="https://…"` 是用户要的那一篇),裸地址那一档不跑 —— 属性值里混着
+    Markdown 语法字符时(`<span title="](https://a/x)">`)按空白断会把 `)` 一起收进来。
     """
     out: list[str] = []
     i, n = 0, len(part)
@@ -347,7 +523,7 @@ def _loose(part: str) -> list[str]:
                 out.append(m.group('dq') or m.group('sq'))
                 i = m.end()
                 continue
-        elif m := _BARE.match(part, i):
+        elif bare and (m := _BARE.match(part, i)):
             out.append(m.group())
             i = m.end()
             continue
@@ -367,12 +543,35 @@ def _scan(text: str) -> list[str]:
     """
     out: list[str] = []
     at = 0
-    for start, end, dest in _links(text):
-        out.extend(_loose(text[at:start]))
+    for start, end, dest, framed in _links(text):
+        # **水位只许往前**:label 里那条 autolink 会被随后认成的外层链接包住
+        # (见 `_links`),那时 `start` 落在水位之前 —— 照 `at = end` 走会让已经
+        # 走过的那一段再抽一遍。
+        if start > at:
+            out.extend(_loose(text[at:start]))
         if dest:
             out.append(dest)
-        at = end
+        elif framed:
+            out.extend(_loose(text[max(at, start):end], bare=False))
+        at = max(at, end)
     out.extend(_loose(text[at:]))
+    return out
+
+
+def dedupe(items) -> list[str]:
+    """按出现顺序去重,空串丢掉。
+
+    **集合判在不在、列表保顺序。** `not in 列表` 那一版每条都跟前面所有条比一遍
+    —— 一次粘进来上万条互不相同的地址时是平方级的比较。**两个调用点共用这一份**
+    (行内抽取 `links_in`、整批参数 `grab_cli._targets`),所以这个判据只有一处、
+    也只需要一处回归。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for one in items:
+        if one and one not in seen:
+            seen.add(one)
+            out.append(one)
     return out
 
 
@@ -381,11 +580,7 @@ def links_in(text: str) -> list[str]:
 
     只有 `grab_cli._targets` 判出「这一行不是一条干净地址」时才走这里。
     """
-    out: list[str] = []
-    for hit in _scan(text or ''):
-        if hit and hit not in out:
-            out.append(hit)
-    return out
+    return dedupe(_scan(text or ''))
 
 
 def whole_line(line: str) -> bool:

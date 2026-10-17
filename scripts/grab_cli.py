@@ -53,7 +53,8 @@ from grab_http import (                                              # noqa: E40
 # **输入层在 `grab_input.py`**:两类边界怎么认、Markdown 怎么按语法取目标,全在
 # 那边(这里只管「拿到地址之后做什么」)。`links_in` 在本模块里**照旧可见** ——
 # 口径只有一份,引用方(含测试)不该因为它搬了家而各自去找新门。
-from grab_input import links_in, whole_line                          # noqa: E402
+from grab_input import (                                            # noqa: E402
+    TangledInput, dedupe, links_in, whole_line)
 
 #: 等「写进知识库」那一步的默认上限。done 只要 export+index(不等 extract 调
 #: 模型),单条一般几秒。
@@ -92,7 +93,7 @@ _LABELS = {
 
 
 def renew(api: str, it: dict, *, timeout: float) -> None:
-    """让**服务端**按这一条自己的归属把后半条链补起来 —— 再 POST 一次 `/api/grab`。
+    """让**服务端**按这一条自己的归属把后半条链补起来 —— `POST /api/grab/restore`。
 
     **不自己打 `/api/pipeline/run`。** 那条路要前端替后端决定「这一条属于哪个
     来源」,而写死 `inbox` 在跨来源的那一刻就错了:一条推文被「大V观点」收过、
@@ -114,8 +115,7 @@ def renew(api: str, it: dict, *, timeout: float) -> None:
     同版服务上是对的,跨版本就不是:`kb.sh grab` 每次跑的是磁盘上的新 CLI,而
     `web_start` 撞见已经跑着的服务就直接返回(代码比进程新只提示一句 `code_stale`,
     按约定不代劳也不拦)。那个没重启的进程用的是旧 `GrabRequest`,Pydantic 默认
-    **忽略**不认识的键 —— 于是这道约束静默消失,它照旧抓一篇新的建进去(第 3 轮
-    审查拿 `git show 5b70036:kb/web/grab_api.py` 的真模块实测:实发 1 次取页、
+    **忽略**不认识的键 —— 于是这道约束静默消失,它照旧抓一篇新的建进去(实测拿 `git show 5b70036:kb/web/grab_api.py` 的真模块实测:实发 1 次取页、
     把清理掉的 `rss` 条目重建成 `inbox`)。独立路径在那种服务上**回 404**,
     这边据此到此为止(不再试、如实说要重启),而不是被降级成一个会创建内容的动作。
     **一样不带 `refetch`** —— 恢复要补的是后半条链,不是把内容换掉。
@@ -176,7 +176,7 @@ def verdict(res: dict, state: dict | None, *, refetch: bool = False,
     `acked=False` 的意思是「这一次投递没拿到明确回答」(回包丢了 / 5xx / 断线)。
     那时**库里没有这一行只说明这一刻还没有**,不说明那个动作以后不会写入 ——
     实测形态:后端已经进入取页、投递连接断掉,此刻 `known=false`,而那次动作随后
-    真的保存成功并导出了一篇(第 3 轮审查)。所以这一档只能停在「不确定」。
+    真的保存成功并导出了一篇(实测)。所以这一档只能停在「不确定」。
     """
     # —— **先处理「这一行还在不在」**。库里已经没有它了,那么「这次没换成」
     #    「库里那一份是正文」全都是在描述一篇**不存在**的文章(实测形态:重抓等待
@@ -232,7 +232,7 @@ def verdict(res: dict, state: dict | None, *, refetch: bool = False,
         if not acked:
             # **这一份坏内容是动作开始之前的事实。** 没拿到回包的那一次可能正停在
             # 取页中间、随后把它换掉 —— 凭它说「加 --refetch 再来一次」会让人在原
-            # 动作成功之前又投一次(第 4 轮审查实测:真后端随后 `replaced=true`、
+            # 动作成功之前又投一次(实测:真后端随后 `replaced=true`、
             # 新正文 `content_ok` 为真、真导出一篇,而 CLI 已经按旧快照 0 退出了)。
             # 所以停在不确定,由 `_settled` 继续在预算内核实。
             return 'unknown', ('投出去了，回包丢了；库里那一份还是动作之前那一版'
@@ -313,7 +313,7 @@ def _left(deadline: float, cap: float) -> float:
     **它管得到的是「还发不发下一个请求」,管不到「一个已经发出的请求读多久」。**
     传下去的那个数变成 socket 超时,而 socket 超时是**两次收包之间**的空闲上限:
     对方每次都在超时之前喂一点数据的话,那一次 `resp.read()` 可以跨过预算的终点
-    才返回,随后主循环才重新看预算(第 6 轮审查 N4,按代码推断未实测)。所以对外
+    才返回,随后主循环才重新看预算(实测,按代码推断未实测)。所以对外
     那句话只能说「轮询的预算」,不能说成「整段等待的硬上限」——真要硬上限得让读取
     本身也盯同一个绝对终点,那是另一件事(而且读到一半掐掉有自己的代价)。
     """
@@ -550,11 +550,11 @@ def _targets(args: argparse.Namespace) -> list[str]:
     """
     out: list[str] = []
     for raw in args.url:
-        found = _from_stdin() if raw == '-' else [raw.strip()]
-        for one in found:
-            if one and one not in out:
-                out.append(one)
-    return out
+        out.extend(_from_stdin() if raw == '-' else [raw.strip()])
+    # **去重那一份口径在输入层**(`grab_input.dedupe`):按出现顺序、集合判在不在。
+    # 这边再写一遍 `not in out` 就是同一个判据两处各一份,而那种写法在成百上千条
+    # 互不相同的地址上是平方级的比较。
+    return dedupe(out)
 
 
 def _from_stdin() -> list[str]:
@@ -602,14 +602,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.parse_only:
         # **把最终生效的那个地址报回去。** `kb.sh` 据它决定要不要起本机那份服务:
         # `--api` 指到别处时,它那道 worktree 闸门和 `web_start` 管的是**另一个**
-        # 服务(第 6 轮审查 N3:worktree 里会在连上用户给的地址之前就 die,主检出
+        # 服务(实测形态:worktree 里会在连上用户给的地址之前就 die,主检出
         # 则多起一份用户压根不需要的守护进程)。**装配口径只有一份** —— 默认值由
         # `kb.sh` 用 `--api` 传进来,用户自己写的那个照 argparse 的规矩覆盖它,所以
         # 打出来的就是真正会被请求的地址(`rstrip('/')` 同 `_request`)。
         print(args.api.rstrip('/'))
         return 0
 
-    urls = _targets(args)
+    try:
+        urls = _targets(args)
+    except TangledInput as e:
+        # **「这一行我认不全」是参数错,不是「这一行没有链接」。** 后者是「确定
+        # 没有」这个结论,而我们只知道没认全 —— 退出 2、把那一行的开头回显出来,
+        # 用户看得见、改一下再来(见 `grab_input._Budget`)。
+        print(f'{e}', file=sys.stderr)
+        return 2
     if not urls:
         print('没给出要收录的链接', file=sys.stderr)
         return 2

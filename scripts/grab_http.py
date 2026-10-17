@@ -93,16 +93,26 @@ def _request(api: str, path: str, *, payload: dict | None = None,
     """打一次接口。返回解析好的 JSON。
 
     4xx → `ApiRefused`(服务明确拒了这一条);5xx、连不上、读到一半断、回的不是
-    JSON → `ApiDown`(写没写进去我们不知道)。**归一化只在这一层做**:四个端点
-    (`/api/grab`、`/api/grab/state`、`/api/pipeline/status`、`/api/pipeline/run`)
-    共用它,在某一个调用点补 catch 只能修那一处。
+    JSON → `ApiDown`(写没写进去我们不知道)。**归一化只在这一层做**:四条路
+    (`/api/grab`、`/api/grab/restore`、`/api/grab/state`、`/api/pipeline/status`)
+    共用它,在某一个调用点补 catch 只能修那一处。**这条路不打
+    `/api/pipeline/run`** —— 起哪一轮由服务端按条目的归属定(见 `grab_cli.renew`)。
+
+    **请求**构造和发送那一步也在保护里。地址本身的毛病该由 `bad_api` 在参数层
+    拦掉(那才有「退出 2 + 一句人话」这个正确出口),这一道是**兜底** —— 它挡的
+    是那层没想到的组合,挡不住的后果是满屏 traceback、stdout 一个字都没有。
+    归到 `ApiDown` 而不是 `ApiRefused`:请求没发出去,但「库里那一行是什么样」
+    照旧该去问一次,不许就此断言「这条没收下」。
     """
-    req = urllib.request.Request(api.rstrip('/') + path, method='GET')
-    if payload is not None:
-        req = urllib.request.Request(
-            api.rstrip('/') + path, method='POST',
-            data=json.dumps(payload).encode(),
-            headers={'Content-Type': 'application/json'})
+    try:
+        req = urllib.request.Request(api.rstrip('/') + path, method='GET')
+        if payload is not None:
+            req = urllib.request.Request(
+                api.rstrip('/') + path, method='POST',
+                data=json.dumps(payload).encode(),
+                headers={'Content-Type': 'application/json'})
+    except (UnicodeError, ValueError, TypeError) as e:
+        raise ApiDown(f'这个地址组不成一个请求({e})') from None
     try:
         with _OPENER.open(req, timeout=timeout) as resp:
             body = resp.read()
@@ -119,6 +129,9 @@ def _request(api: str, path: str, *, payload: dict | None = None,
         if e.code >= 500:
             raise ApiDown(why) from None
         raise ApiRefused(why, e.code) from None
+    except UnicodeError as e:
+        # **发送那一步也会因为编码炸**(请求行是 ASCII 的)。同上:归通道那一档。
+        raise ApiDown(f'这个地址发不出去({e})') from None
     except _READ_BROKEN as e:
         why = str(getattr(e, 'reason', None) or e) or type(e).__name__
         if isinstance(e, http.client.IncompleteRead):
@@ -140,10 +153,25 @@ _GRAB_NEED = (('url', str), ('added', int), ('duplicate', bool),
               ('done', bool), ('content_ok', bool))
 _STATE_NEED = (('url', str), ('known', bool), ('done', bool), ('content_ok', bool))
 _RUN_NEED = (('running', bool),)
-#: `replaced` 只有重抓那几档才带,所以它**出现时**才校验 —— 而一旦出现就必须是真布尔:
-#: 归并层对它做的是三态判断(`is False` / `is not None`),一个字符串 `"false"` 会被当成
-#: 「做过替换尝试、只是没换成」,那是另一个结论。
-_GRAB_MAYBE = (('replaced', bool),)
+#: **出现时才校验的那几个** —— 它们只在某些分支带,但**一旦带就必须是那个类型**。
+#: 清单按「归并层**实际消费**哪几个键」列,不是只列「下业务结论」的那几个:
+#: - `replaced` 要真布尔 —— 归并层对它做三态判断(`is False` / `is not None`),
+#:   一个字符串 `"false"` 会被当成「做过替换尝试、只是没换成」,那是另一个结论。
+#: - **剩下那几个是拼在人读的那句话里的**,所以同样要校验。漏掉它们的形态实测过:
+#:   承重字段齐全、类型也对,只有 `owing` 是个数字(或 `resume` 是个列表),
+#:   `--state` 就在**第一条**上抛 `TypeError` / `AttributeError`,整批到不了输出 ——
+#:   后面几条连一行结果都没有,而「一条输入一行结果」本来是这条路的承诺。
+#:   **不许只在拼接处补 `str()` 兜底**:那是把「这个回包可信吗」这一问散到每个
+#:   拼接点上各判一遍(元规则「口径只有一份」),而判不准该归 `ApiDown`。
+#:
+#: **`pipeline` / `exported` / `stored` / `indexed` 故意不在这儿。** 前者只被当真值
+#: 读(类型不对也只是多去问一次事实,那一问会给出真结论);后三个原样进 `--json`、
+#: 不参与任何运算,而它们在库里是 0/1,校验成布尔反而会把**正常回包**判成坏的 ——
+#: 误判的代价是整批停在「结果不确定」,比漏校验这三个重得多。
+_TEXT_MAYBE = (('detail', str), ('title', str), ('kind', str), ('owing', str),
+               ('resume', str))
+_GRAB_MAYBE = (('replaced', bool),) + _TEXT_MAYBE
+_STATE_MAYBE = _TEXT_MAYBE
 
 
 def _typed(value, kind) -> bool:
@@ -207,12 +235,26 @@ def bad_api(api: str) -> str:
     那是**参数错**,不是「投出去了而结果未知」,所以调用方按参数错退出(`return 2`),
     一个请求都不发、也不去核实任何事实。
 
-    只看「打得通吗」这三件事:协议是 http(s)、有主机名、端口是数字。**不判它通不通**
-    —— 服务没起是另一回事,那一档归 `ApiDown`(那句话会说去 `./kb.sh start`)。
+    只看「打得通吗」这几件事:**整串能编码成 URI**、协议是 http(s)、有主机名、
+    端口是数字。**不判它通不通** —— 服务没起是另一回事,那一档归 `ApiDown`
+    (那句话会说去 `./kb.sh start`)。
+
+    **「能编码成 URI」这一条和另外三条一样要在这儿拦。** 请求行是 ASCII 的,
+    所以地址里带没编码的非 ASCII 字符(`http://127.0.0.1:8787/知识`、IDN 主机名)
+    会在 urllib 组装请求那一步抛 `UnicodeEncodeError` —— 它和 `ValueError` 一样
+    发生在 `_request` 那套归一化**之前**(实测:退出 1、stdout 一个字没有、stderr
+    是 traceback,本地服务压根没收到请求)。**这里不替用户编码** —— 改写他给的
+    地址等于替他决定打到哪儿去,而 `%E7%9F%A5%E8%AF%86` 和 `知识` 在反代后面
+    可能是两条路由。
     """
     # **`urlsplit` 自己也会抛**:不完整/非法的 IPv6 写法(`http://[::1`)当场
     # `ValueError: Invalid IPv6 URL` —— 所以它和下面取端口那一步一起包起来,
     # 这一层对「打错的地址」只有一个出口:一句话,不是 traceback。
+    try:
+        api.encode('ascii')
+    except UnicodeEncodeError:
+        return ('--api 里有没编码的非 ASCII 字符（请求行只能是 ASCII），'
+                f'先按百分号编码写出来:{api!r}')
     try:
         parts = urllib.parse.urlsplit(api)
         host, scheme = parts.hostname, parts.scheme
@@ -256,7 +298,7 @@ def get_state(api: str, url: str, *, timeout: float = READ_HTTP_SECONDS) -> dict
     """
     return _checked(
         _request(api, '/api/grab/state?url=' + urllib.parse.quote(url, safe=''),
-                 timeout=timeout), '查状态', _STATE_NEED)
+                 timeout=timeout), '查状态', _STATE_NEED, _STATE_MAYBE)
 
 
 def pipeline_idle(api: str, *, timeout: float = READ_HTTP_SECONDS) -> bool | None:

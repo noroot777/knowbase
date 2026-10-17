@@ -2,7 +2,7 @@
 """命令行那条入口的**通道层**:打接口这件事本身出岔子时,那一行结果还对不对。
 
 对应实现 `scripts/grab_http.py`(两类失败怎么分、五个端点怎么打)。从
-`tests/test_grab_cli.py` 拆出来的 —— 那一份加完第 5 轮的用例过了 700 行的上限,
+`tests/test_grab_cli.py` 拆出来的 —— 那一份用例加到一定数量过了 700 行的上限,
 而这一组的判据自成一类:**它验的不是「这一篇是什么状态」,是「连接坏掉的时候
 我们说了什么」**。
 
@@ -19,11 +19,13 @@
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import unittest
 
 from tests.grab_cli_fixture import (OTHER, URL, GrabCliCase, _done, _grabbed,
-                                    _state)
+                                    _state, cli)
 
 
 class GrabCliChannelTests(GrabCliCase):
@@ -119,6 +121,66 @@ class GrabCliChannelTests(GrabCliCase):
                 # **不许落在「还没收进来」或者「看不出是正文」上** —— 那两句都是
                 # 替一个答不出这件事的回包发布结论。
                 self.assertEqual(rec['status'], 'unknown', rec)
+
+    def test_a_text_field_of_the_wrong_type_still_leaves_one_result_per_input(self):
+        """**契约要列「实际消费的字段」,不只是「下业务结论的字段」。**
+
+        `owing` / `resume` / `detail` / `title` / `kind` 不参与任何判断,它们被拼进
+        人读的那句话里。只校验下结论那几个键的那一版下,一份**承重字段齐全、类型
+        也全对**、只有 `owing` 是个数字(或 `resume` 是个列表)的回包,会让 `--state`
+        在**第一条**上抛 `TypeError` / `AttributeError` —— 整批到不了输出,后面几条
+        连一行结果都没有,而「一条输入一行结果」本来是这条路在所有失败路径上的承诺。
+
+        **出路是把它归到 `ApiDown`**(停在「结果不确定」、如实说问不出来),不是在
+        每个拼接点补一个 `str()` 兜底 —— 那是把「这个回包可信吗」这一问散到各处
+        各判一遍,而判不准该停下来。
+
+        **反过来钉一边**:同样的键**缺着**不算坏回包(旧版服务可能压根不带),
+        那时按兜底文案走、照旧给出结论。
+        """
+        for bad in ({'owing': 123}, {'resume': ['不是字符串']}, {'title': 7},
+                    {'kind': {'inbox': True}}):
+            with self.subTest(bad=bad):
+                self.plan['states'] = {'*': [(200, _state(**bad))]}
+                code, out, err = self.run_cli('--json', '--state', URL, OTHER)
+                self.assertEqual(code, 1, out + err)
+                self.assertNotIn('Traceback', err)
+                recs = self.records(out)
+                # **两条输入两行结果** —— 这是这一组的通用判据。
+                self.assertEqual([r['url'] for r in recs], [URL, OTHER], out)
+                self.assertEqual([r['status'] for r in recs],
+                                 ['unknown', 'not_tried'], out)
+        # 反过来:这几个键**缺着**照旧能下结论(别把「没带」也判成坏回包)。
+        thin = {'ok': True, 'url': URL, 'known': True, 'done': True,
+                'content_ok': True}
+        self.plan['states'] = {'*': [(200, thin)]}
+        code, out, err = self.run_cli('--json', '--state', URL)
+        self.assertEqual(code, 0, out + err)
+        [rec] = self.records(out)
+        self.assertEqual(rec['status'], 'saved', rec)
+
+    def test_an_api_that_cannot_be_encoded_is_a_parameter_error(self):
+        """**打不出去的 `--api` 是参数错,不是「投出去了而结果未知」。**
+
+        请求行只能是 ASCII,所以地址里带没编码的非 ASCII 字符(`…:8787/知识`、
+        IDN 主机名)会在 urllib 组装请求那一步抛 `UnicodeEncodeError` —— 它和
+        `ValueError: unknown url type` 一样发生在通道那套归一化**之前**。实测
+        那一版:退出 1、stdout 一个字都没有、stderr 一段 traceback,**本地服务
+        压根没收到请求**。
+
+        判据:退出 2(参数错那个码)、stderr 是一句人话、**一个请求都没发**。
+        这一层**不替用户编码** —— 改写他给的地址等于替他决定打到哪儿去。
+        """
+        for api in (f'{self.api}/知识', 'http://例子.com:8787'):
+            with self.subTest(api=api):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = cli.main(['--api', api, '--json', '--state', URL])
+                self.assertEqual(code, 2, out.getvalue() + err.getvalue())
+                self.assertEqual(out.getvalue(), '')
+                self.assertNotIn('Traceback', err.getvalue())
+                self.assertIn('非 ASCII', err.getvalue())
+                self.assertEqual(self.plan['calls'], [])
 
     def test_a_grab_reply_without_positive_evidence_is_not_called_duplicate(self):
         """**「早就在知识库里了」要正面证据**:`duplicate` 和 `done` 都为真。
