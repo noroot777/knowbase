@@ -91,3 +91,63 @@ class EmbeddedJsonTests(unittest.TestCase):
                 out = _script_json(body)
                 self.assertNotIn('<', out)
                 self.assertEqual(json.loads(out), body)
+
+
+class DocPageOriginLinkTests(unittest.TestCase):
+    """阅读页副标题那个外链**不许写来源的名字**。
+
+    这页最早只有公众号文章,文案就写死成了「绿泡泡原文」;而 vault 里现在有九个
+    原始来源,于是一条 GitHub Trending 的 RSS 条目在阅读页上也写着「绿泡泡原文」,
+    点过去是 github.com(2026-10-17 实测)。**两种来源各一条**:只验 RSS 那一条的话,
+    一个"按来源分支写几套文案"的实现照样全绿 —— 而那正是这里不想要的(来源名的
+    人话口径在 `kb.daily._SOURCE_LABEL`,不该在这一页再立一份)。
+    """
+
+    def setUp(self):
+        from unittest.mock import patch
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from kb import store
+        from kb.web import pages
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        self.vault = root / "vault"
+        db = root / "kb.db"
+        connect = store.connect
+        self.conn = connect(db)
+        self.addCleanup(self.conn.close)
+        for p in (patch.object(store, "connect", lambda *a, **k: connect(db)),
+                  patch.object(pages, "VAULT_ROOT", self.vault)):
+            p.start()
+            self.addCleanup(p.stop)
+        app = FastAPI()
+        app.include_router(pages.router)
+        self.client = TestClient(app)
+
+    def doc(self, path, *, source, account, url):
+        f = self.vault / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(f"---\nsource: {source}\nurl: {url}\n---\n\n正文一句话。\n",
+                     encoding="utf-8")
+        self.conn.execute(
+            "INSERT INTO documents(path,source,title,account,published,url)"
+            " VALUES(?,?,?,?,?,?)", (path, source, "标题", account, "2026-10-17 09:00", url))
+        self.conn.commit()
+        return self.client.get("/doc/" + path).text
+
+    def test_the_origin_link_never_names_one_source(self):
+        pages = {
+            "rss": self.doc("source/rss/gh.md", source="rss", account="GitHub Trending",
+                            url="https://github.com/lightseekorg/tokenspeed"),
+            "gzh": self.doc("source/gzh/a.md", source="gzh", account="某公众号",
+                            url="https://mp.weixin.qq.com/s?__biz=x"),
+        }
+        for kind, html in pages.items():
+            with self.subTest(source=kind):
+                self.assertIn(">原文", html)
+                for word in ("绿泡泡", "微信", "公众号原文", "RSS 原文"):
+                    self.assertNotIn(word, html)

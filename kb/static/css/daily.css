@@ -68,6 +68,17 @@
 #daily-reader-body a.daily-ref { font:500 0.82em/1 var(--font-mono); color:var(--muted);
   text-decoration:none; padding:0 1px; white-space:nowrap; vertical-align:1px; }
 #daily-reader-body a.daily-ref:hover { color:var(--brand); text-decoration:underline; }
+/* 出处本地有中文译文时,紧跟在编号后面的那个「译」。**字是 ::after 画的,正文里
+   没有这个文本节点** —— 日报正文同时是「收藏此段」的采集面,它的锚点按文字坐标
+   系算(snip_text.js),插一个真字符会让已经收下的片段整体错位(口径与实测见
+   kb/static/js/daily_zh.js 的抬头)。同理 display 只许是行内:块级会被
+   `snipBreaksOf` 当成一处显示分隔,坐标系里凭空多一个换行。
+   颜色用品牌绿而不是编号那档灰:它是这一行里多出来的一条路,看得见才有用。 */
+#daily-reader-body a.daily-zh { display:inline; font:500 0.82em/1 var(--font-mono);
+  color:var(--brand); text-decoration:none; padding:0 1px; margin-left:1px;
+  vertical-align:1px; white-space:nowrap; }
+#daily-reader-body a.daily-zh::after { content:'译'; }
+#daily-reader-body a.daily-zh:hover { color:var(--brand-deep); text-decoration:underline; }
 #daily-reader-body hr { border:0; border-top:1px solid var(--line-soft); margin:22px 0; }
 
 .daily-empty { border:1px dashed var(--line); border-radius:14px; text-align:center; padding:56px 28px; color:var(--muted); }
