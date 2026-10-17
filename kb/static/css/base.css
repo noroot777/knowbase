@@ -168,6 +168,26 @@ select:focus-visible, textarea:focus-visible {
 input:disabled, textarea:disabled, select:disabled {
   background-color: var(--paper-2); color: var(--muted); cursor: not-allowed;
 }
+/* ── 读正文时让出位置(JS 在 kb/static/js/scrollaway.js) ──────────────────
+   正文往下滚,它上面那条工具栏收起来。高度由 JS 量了写进 inline(`height:auto`
+   做不了过渡),这里只管过渡曲线和「收起时还要跟着收掉什么」。
+   后面三条一条都不能少:box-sizing 是 border-box,只把 height 压到 0 的话,
+   内边距和那条底边线仍然占着十几二十像素,看着像没收干净;而各面板自己给工具栏
+   定的 min-height(`.subs-mode .source-heading` 是 60px)会直接把 height:0 顶回去。
+   选择器要带上 `body`:那几条面板规则跟 `.scroll-away.is-away` 同特异性、而且排在
+   这个文件后面,不抬一级权重压不住。 */
+.scroll-away { transition: height .2s ease, padding .2s ease, opacity .16s ease; }
+body .scroll-away.is-away {
+  min-height: 0; padding-top: 0; padding-bottom: 0;
+  border-top-width: 0; border-bottom-width: 0;
+  overflow: hidden; opacity: 0; pointer-events: none;
+}
+/* 退出这一处的入口不许跟着收走:抽屉和阅读器的头里装着唯一那颗关闭按钮,
+   收起之后那块是 height:0 + inert。所以它们各留一颗常驻的,压在正文右上角,
+   只有收起态才现身(class 由 scrollaway.js 打在 opts.host 上)。 */
+.away-exit { position: absolute; top: 9px; right: 14px; z-index: 3; display: none; padding: 4px 10px; }
+.has-scroll-away .away-exit { display: inline-flex; }
+
 .searchbar { display: flex; gap: 8px; margin-bottom: 12px; }
 #q {
   flex: 1; padding: 12px 16px; font-size: 15px; border: 1.5px solid var(--line);
