@@ -8,6 +8,16 @@ from tests.headless import NODE, fixture_server, probe_env, requires_headless, r
 
 @requires_headless
 class MaterialBrowserTests(unittest.TestCase):
+    def test_saved_long_quotes_are_visible_through_all_scroll_containers(self):
+        with fixture_server(script='serve_daily_materials.py') as base:
+            result = run_probe([NODE, 'tests/snip_scroll_probe.mjs', base],
+                               timeout=120, env=probe_env())
+        self.assertEqual(0, result.returncode, result.stderr[-4000:] + result.stdout[-4000:])
+        evidence = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(16, len(evidence['jumps']))
+        self.assertEqual(5, len(evidence['geometryChecks']))
+        self.assertEqual([], evidence['errors'])
+
     def test_material_list_in_real_report_reader(self):
         with fixture_server(script='serve_daily_materials.py') as base:
             result = run_probe([NODE, 'tests/daily_material_probe.mjs', base],

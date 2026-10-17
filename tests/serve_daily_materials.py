@@ -56,6 +56,14 @@ def build(vault):
     text += ('\n[article]: /doc/article\n[later-image]: /static/favicon.svg\n\n'
              '## 补充说明\n\n[上文定义][inside]，![后图][earlier-image]。\n')
     (root / '2026-10-15.md').write_text(text, encoding='utf-8')
+    for day, linked in [(14, True), (13, False)]:
+        title = '开头要找回的独特内容' + '正文说明。' * 90 + '结尾要找回的独特内容'
+        item = dict(path='source/long.md', title=title, source='rss', account='长段作者',
+                    url='https://example.org/long' if linked else '', late=False)
+        text = daily._page(datetime(2026, 10, day - 1, 8), datetime(2026, 10, day, 8),
+                           daily.Material(items=[item], total=1),
+                           '## 今日要点\n\n长素材的原文不能被滚动容器裁掉。', 'stub/none')
+        (root / f'2026-10-{day}.md').write_text(text, encoding='utf-8')
 
 
 def main():
