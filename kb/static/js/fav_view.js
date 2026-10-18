@@ -98,8 +98,11 @@ function favDocA(item, label, cls = '', html = false) {
   return favDocAHtml(item, html ? label : esc(label), cls);
 }
 
-/** 那颗按钮上的字:有文档的是去读原文,没有的是回到它自己那一处。 */
+/** 那颗按钮上的字:读本地原文、打开站外快照,或如实提示原文已移除。 */
 function favOpenLabel(item) {
+  if (!item.path && item.origin === 'doc') {
+    return safeUrl(item.url) !== '#' ? '打开站外原文' : '原文已不在索引里';
+  }
   return item.path ? '打开阅读' : '回到' + (SNIP_LABEL[item.origin] || '原处');
 }
 

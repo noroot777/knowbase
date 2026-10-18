@@ -1,4 +1,4 @@
-# 「收藏此段」长在所有能展示原文的地方(kb/static/js/snip.js、favorites 的 v4)
+# 「收藏此段」与独立收藏生命周期(kb/static/js/snip.js、favorites 的 v5)
 
 > **这一份整份都是这一块的记录:硬约束 + 事故形态、实测证据、回归清单和反向验证红数** ——
 > 动这块代码之前先读它。CLAUDE.md 只留跨块的元规则和一张索引。
@@ -16,17 +16,26 @@
   里;问答回答压根不是文件;订阅条目在导出之前只在 feeds.db 里。而 `path` 原来是
   `NOT NULL REFERENCES documents(path)`,外键在 `PRAGMA foreign_keys = ON` 下**对空串照查**
   (只有 NULL 豁免)—— 拿 `''` 占位的写法一条都存不进去,报 `FOREIGN KEY constraint failed`。
-  **`path` 非空时外键和级联语义一个字没变**(只增不减)。
-- **去掉 NOT NULL 只能重建整张表**(SQLite 没有 `ALTER COLUMN`),而重建是这条路上唯一会丢
-  数据的一步。所以 `_rebuild_favorites_v4` 三条都得照办:
+- **收藏独立于来源文档(v5)。** `favorites.path` 的外键为 `ON DELETE SET NULL`。
+  永久排除、手工删除、周期索引移除和历史清理都只能解除文档关联,不得删除收藏编号、
+  引文、前后文、备注、状态、行动卡、来源快照与锚点版本。只有显式删除收藏才删除收藏行。
+  同一路径后来重新入库也不得把旧收藏自动绑定到另一版原文。
+- **删除前补齐缺失的标题和链接。** 共用 DDL 的 `favorites_document_snapshot` 触发器在
+  `DELETE documents` 之前把尚为空的 `origin_title` / `origin_url` 补成文档最后已知的值;
+  已有收藏快照不覆盖,时间戳、备注与锚点不改。老的整篇收藏没有快照,也不能退化为无字卡片。
+  原文仍在索引里时元数据照旧以文档为准;解除关联后用快照兜底,站外链接按 `safeUrl` 校验。
+  没有安全站外链接时显示「原文已不在索引里」,不生成 `/doc/undefined` 或虚假的回跳按钮。
+- **去掉 NOT NULL 或更换外键动作只能重建整张表**(SQLite 没有 `ALTER COLUMN`),重建是这条路上
+  唯一会丢数据的一步。所以 `_rebuild_favorites` 必须满足:
   - **按老表实际有的那几列拼 INSERT**(`_FAV_CARRIED` 过一遍 `PRAGMA table_info`)。v2 没有
     `action_json`,写死一份列名会让它在 `no such column` 上翻车。
   - **孤儿行的 path 落 NULL**(`CASE WHEN EXISTS (SELECT 1 FROM documents …)`)。外键是 ON 的,
     INSERT 回去逐行查 `documents` —— 历史上留下的、文档已经不在索引里的收藏(原来内连接下
     就看不见、却仍占着计数)会让那一句整条失败,于是 **`store.connect()` 本身再也成功不了**:
     页面 API、提取 worker、CLI 全挂,而迁移每次重试都会在同一行上失败。
-  - **整段在一个写事务里,并在锁里重新读一次列集合**(口径同 `store_migrate.add_columns`)。常态(已经
-    是 v4)在函数外那句 `PRAGMA table_info` 就返回了,一次锁都不取。
+  - **整段在一个写事务里,并在锁里重新核对列和外键动作**(口径同 `store_migrate.add_columns`)。
+    结构已是 v5 时只读 PRAGMA,不取写锁。v1-v4 都直接升级,失败时表、行与自增水位一起回滚。
+    删除前快照触发器随重建一起提交,不能先交付解除关联语义、后补元数据保护。
   - **把自增高水位一起搬过去**(`_carry_sequence`,排在 `DROP TABLE` 之前 —— 临时表一删,
     它那行 `sqlite_sequence` 就跟着没了)。`RENAME TO` 会把那一行一起改名,而新表那行是按
     「插进去的最大 id」重新算的:**编号最大的那条已经删掉时,新表的高水位比历史分配过的
@@ -901,6 +910,12 @@
 
 ## 回归清单
 
+- `tests/test_favorite_lifecycle.py`:直接删除、共享删除口和周期索引移除都保留收藏;
+  全字段与原文快照保真、显式删除收藏仍有效、同路径重建不误关联、无关收藏不受影响;
+  v1-v4 升级、并发首次连接、失败回滚、自增高水位和当前结构无写锁快路。
+- `tests/test_favorite_lifecycle_browser.py`:隔离收藏页上保留引文、备注与行动卡,
+  有链接时可打开站外原文、无链接时如实提示,原文移除后仍可编辑和整理收藏。
+
 - `tests/test_fav_snippet_migrate.py`(纯 Python):v3/v2 → v4 的迁移保真(行、内容、
   状态、行动卡、孤儿置空、临时表不残留、幂等、12 路并发首次使用)、**升级后编号不复用**
   (判据落在「旧那一页点删除删掉的是哪一条」:新 id 必须更大、旧 id 得到 404、新收藏还在)、
@@ -911,7 +926,7 @@
 - `tests/test_fav_snippet_store.py`(纯 Python):
   **存进库的锚点三段连起来仍是原文里连着的一段**、**引文按原文逐字存**(四行带缩进的代码
   原样取回,而前后文里一个换行都没有、压平之后三段仍连着)、四类来源都存得下且 NULL 落对、
-  四条拒绝路径、LEFT JOIN 可见性 + 反向(级联只带走有 path 的那些)、计数与列表一致、`doc_paths`
+  四条拒绝路径、LEFT JOIN 可见性 + 删除文档后各来源收藏均保留、计数与列表一致、`doc_paths`
   不含 NULL、没有文档时状态流转/改备注/删除照旧、整篇收藏那条老路没变、行动卡在没有 path
   时也生成且「出处」那一行有字、`_inbox_rows`/`_fingerprint` 看得见非 doc 行、**绑文档的收藏
   必须说清绑的是哪一版正文**(没带 400、带错 409、文件不在了 404、换成目录读不出来 503,四种

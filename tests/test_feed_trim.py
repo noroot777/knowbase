@@ -274,7 +274,7 @@ class TrimTests(TrimFixture, unittest.TestCase):
         self.assertEqual((True, 1, 1), (st['file'], st['documents'], self.favorites()))
         self.assertEqual(1, len(trim._plans(s['id'])))       # 计划还留着,能再续
         self.assertEqual(0, trim.cmd_run(self.args(s, allow_favorites=True)))
-        self.assertEqual((False, 0, 0), (self.state(item)['file'],
+        self.assertEqual((False, 0, 1), (self.state(item)['file'],
                                          self.state(item)['documents'], self.favorites()))
 
     def _star(self, path, note='race-note'):
@@ -314,16 +314,22 @@ class TrimTests(TrimFixture, unittest.TestCase):
                          (st['file'], st['documents'], st['searchable'], self.favorites()))
         self.assertEqual(1, len(trim._plans(s['id'])))   # 计划留着,能续
 
-        # 显式放行时照删,但要毁掉的那几行连备注一起进备份(md 压缩包里没有它们)
+        # 显式放行只清原文,收藏连备注仍保留,同时另外备份。
         self.assertEqual(0, trim.cmd_run(self.args(s, allow_favorites=True)))
         st = self.state(item)
-        self.assertEqual((False, 0, 0, 0),
+        self.assertEqual((False, 0, 0, 1),
                          (st['file'], st['documents'], st['searchable'], self.favorites()))
         saved = [json.loads((d / 'favorites.json').read_text(encoding='utf-8'))
                  for d in (self.root / 'backups').glob('feedtrim-*')
                  if (d / 'favorites.json').exists()]
         self.assertEqual(1, len(saved))
         self.assertEqual(['race-note'], [r['note'] for r in saved[0]])
+        conn = store.connect()
+        try:
+            self.assertEqual((None, 'race-note'), tuple(conn.execute(
+                'SELECT path, note FROM favorites').fetchone()))
+        finally:
+            conn.close()
 
     def test_the_deletion_window_locks_out_favorite_writes(self):
         """删除整段持 kb.db 写锁:这期间的收藏写入只能等/报错,不会"成功了又被删"。

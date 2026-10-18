@@ -57,6 +57,24 @@ test('default is all favorites and layout storage failure is harmless', () => {
   assert.equal(app.run('favLayout'), 'list');
 });
 
+test('detached document favorites use safe external links or an honest missing label', () => {
+  const app = rig();
+  for (const url of ['https://example.org/original', '', 'javascript:alert(1)']) {
+    const item = JSON.stringify(row(1, { path: '', origin: 'doc', url }));
+    const label = app.run(`favOpenLabel(${item})`);
+    const html = app.run(`favDocAHtml(${item}, favOpenLabel(${item}))`);
+    assert.doesNotMatch(html, /\/doc\/|jumpFavOrigin/);
+    if (url.startsWith('https:')) {
+      assert.equal(label, '打开站外原文');
+      assert.match(html, /href="https:\/\/example.org\/original"/);
+      assert.match(html, /target="_blank" rel="noopener"/);
+    } else {
+      assert.equal(label, '原文已不在索引里');
+      assert.doesNotMatch(html, /href=|onclick=/);
+    }
+  }
+});
+
 test('classification uses actual estimated minutes, not a fabricated time', () => {
   const app = rig();
   const cases = [

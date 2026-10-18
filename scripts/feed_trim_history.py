@@ -289,7 +289,7 @@ def _cut_feeds(plan: dict) -> None:
 
 
 def _drop_index(conn, paths: list[str]) -> int:
-    """删 `documents` 行(级联 chunk/tag/entity/收藏与向量)。
+    """删 `documents` 行及 chunk/tag/entity/向量,收藏只解除文档关联。
 
     连接由 `_apply` 给 —— 收藏复查和这一步必须是**同一条**连接上的同一个写
     事务。另开一条连接去删就是跟自己抢写锁,当场自锁。
@@ -307,18 +307,9 @@ def _apply(out: Path, plan: dict, allow_favorites: bool = False) -> None:
     exported_hash 还在」那种既不重建也不存在的半状态。
 
     **删文件和删索引整段跑在 kb.db 的一个 `BEGIN IMMEDIATE` 里,收藏的最终
-    复查也在同一条连接的同一个事务里做。** 收藏护栏原来是「查完就关连接」,
-    从那一刻到真正删除之间有备份打包、进度落盘、逐个 unlink 这么长一段 ——
-    用户在这段时间里收藏一篇还读得到的文章,收藏 API 返回 200、库里真有那
-    一行,随后 `remove_missing_documents` 删掉 `documents` 行、`favorites`
-    的 `ON DELETE CASCADE` 把它连同用户刚写的备注一起带走,命令还以 0 退出
-    (2026-10-01 第 3 轮审查实测,整篇和带备注的片段各复现三次)。索引能从
-    vault 重建,**收藏和备注不能** —— 备份里压根没有它们。
-    `BEGIN IMMEDIATE` 当场拿到 kb.db 的写锁,于是这期间的收藏写入只有两种
-    结局:赶在我们取锁之前提交成功(那它就会被这次复查看见、把这一轮拦下),
-    或者等/报错(`store.connect` 的 `timeout=30`)—— 不会再有「成功了又被
-    静默删掉」这一档。维护锁 `kb.maintenance.maintenance_lock()` 管不了这件事:
-    收藏 API 不认它,只有 kb.db 自己的写锁挡得住。
+    复查也在同一条连接的同一个事务里做。** `--allow-favorites` 只授权清理
+    被收藏的原文,不授权删除收藏:外键将 path 置空,引文、备注、行动卡继续保留。
+    默认仍拦截被收藏的原文,避免用户失去本地阅读入口;显式放行时另外备份收藏。
     """
     if not plan.get('feeds'):
         _cut_feeds(plan)
@@ -336,7 +327,7 @@ def _apply(out: Path, plan: dict, allow_favorites: bool = False) -> None:
             conn.rollback()
             raise FavoritesAppeared(fav)
         if fav:
-            # 显式放行时也把要毁掉的那几行(备注、片段锚、状态、行动卡)存进
+            # 显式放行时也把会解除关联的那几行(备注、片段锚、状态、行动卡)存进
             # 备份 —— 它们不在 vault 里,md 压缩包重建不出来。
             (out / 'favorites.json').write_text(
                 json.dumps(_favorites_rows(conn, dead), ensure_ascii=False, indent=1),
@@ -523,7 +514,7 @@ def _run_locked(args, override: str) -> int:
                 print(f'这份没做完的清理({out})里有 {len(e.paths)} 篇在收藏里:\n  '
                       + '\n  '.join(e.paths[:10])
                       + '\n收藏是用户显式留下的(可能是这次失败之后才加的),'
-                        '确认要删加 --allow-favorites。计划留着,改完参数能接着续。',
+                        '清理原文需加 --allow-favorites，收藏和备注仍保留。计划留着,改完参数能接着续。',
                       file=sys.stderr)
                 return 2
         print('续完了。这一趟只做这一件事 —— 要再清一轮(不管按哪个口径)请重新跑一次。')
@@ -578,7 +569,7 @@ def _run_locked(args, override: str) -> int:
         _c.close()
     if fav and not args.allow_favorites:
         print(f'这批里有 {len(fav)} 篇在收藏里:\n  ' + '\n  '.join(fav[:10])
-              + '\n收藏是用户显式留下的,确认要删加 --allow-favorites。', file=sys.stderr)
+              + '\n清理这些原文需加 --allow-favorites，收藏和备注仍保留。', file=sys.stderr)
         return 2
     scope = ('还排在翻译队列里的 ' + str(len(cut)) + ' 条') if mode \
         else f'下界 {floor},清掉 {len(cut)} 条'
@@ -599,8 +590,8 @@ def _run_locked(args, override: str) -> int:
     except FavoritesAppeared as e:
         print(f'这一趟开跑之后有 {len(e.paths)} 篇被收藏了:\n  '
               + '\n  '.join(e.paths[:10])
-              + '\n收藏连备注一起删掉就找不回来了,所以这一轮不删。'
-                f'计划留在 {out},确认要删加 --allow-favorites 续跑。',
+              + '\n这一轮保留被收藏的原文，收藏和备注不会删除。'
+                f'计划留在 {out},清理原文需加 --allow-favorites 续跑。',
               file=sys.stderr)
         return 2
     return 0
@@ -622,7 +613,7 @@ def main() -> int:
                    help='改为清掉「还排在翻译队列里」的条目(源已停服时用),不动 history_floor')
     r.add_argument('--yes', action='store_true', help='确认执行')
     r.add_argument('--allow-shared', action='store_true', help='条目被别的订阅共享时照样摘归属')
-    r.add_argument('--allow-favorites', action='store_true', help='命中收藏时照删')
+    r.add_argument('--allow-favorites', action='store_true', help='允许清理被收藏的原文，收藏和备注仍保留')
     r.set_defaults(func=cmd_run)
     args = ap.parse_args()
     return args.func(args)

@@ -390,15 +390,17 @@ class SnippetListTests(ApiFixture):
         self.assertEqual("活着的那篇", by["doc"]["title"])
         self.assertEqual("某号", by["doc"]["account"])
 
-    def test_removing_the_document_only_takes_its_own_snippets(self):
-        """反向:外键级联照旧管着有 path 的那些,没有 path 的一条都不许被带走。"""
+    def test_removing_the_document_keeps_all_origins(self):
+        """删除文档只解除关联,四类来源的收藏都保留。"""
         self.seed_all()
         self.conn.execute("DELETE FROM documents WHERE path=?", (DOC,))
         self.conn.commit()
         d = self.listed()
-        self.assertEqual({"daily", "chat", "feed"},
+        self.assertEqual({"doc", "daily", "chat", "feed"},
                          {f["origin"] for f in d["favorites"]})
-        self.assertEqual(3, d["counts"]["inbox"], "计数又和列表分叉了")
+        self.assertEqual(4, d["counts"]["inbox"], "计数又和列表分叉了")
+        detached = next(item for item in d["favorites"] if item["origin"] == "doc")
+        self.assertEqual("", detached["path"])
 
     def test_doc_paths_never_contains_null(self):
         """整篇收藏的 path 集合给前端当 Set 用。迁移置空过的孤儿行也满足
