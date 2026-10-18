@@ -19,6 +19,7 @@
 <link rel="stylesheet" href="/static/css/pipeline.css">
 <link rel="stylesheet" href="/static/css/sources.css">
 <link rel="stylesheet" href="/static/css/source_reader.css">
+<link rel="stylesheet" href="/static/css/article.css">
 <link rel="stylesheet" href="/static/css/subscriptions.css">
 <link rel="stylesheet" href="/static/css/daily.css">
 <link rel="stylesheet" href="/static/css/wechat_setup.css">
@@ -335,7 +336,9 @@
             <div class="source-reader-links"><span id="source-reader-kind"></span><a id="source-reader-link" target="_blank" rel="noopener noreferrer">打开原文<i data-arrow="ext"></i></a></div>
           </header>
           <div id="source-reader-language" class="source-reader-language" role="group" aria-label="阅读语言" hidden><button id="source-reader-translated" class="on" aria-pressed="true" onclick="setSourceOriginal(false)">中文译文</button><button id="source-reader-original" aria-pressed="false" onclick="setSourceOriginal(true)">原文</button></div>
-          <div id="source-reader-note" class="source-reader-note" role="status" hidden></div><div id="source-reader-body"></div><div class="source-reader-end">— 阅读至此 —</div>
+          <div id="source-reader-note" class="source-reader-note" role="status" hidden></div>
+          <details id="source-reader-outline" class="source-reader-outline" hidden><summary>本文目录<span></span></summary><nav aria-label="文章章节"></nav></details>
+          <div id="source-reader-body" class="reader-prose"></div><div class="source-reader-end">— 阅读至此 —</div>
         </div>
       </div>
     </section>
@@ -605,6 +608,7 @@
 <script src="/static/js/daily_chip.js"></script>
 <script src="/static/js/sources.js"></script>
 <script src="/static/js/scrollaway.js"></script>
+<script src="/static/js/source_body.js"></script>
 <script src="/static/js/source_reader.js"></script>
 <script src="/static/js/source_forms.js"></script>
 <script src="/static/js/source_translate.js"></script>
