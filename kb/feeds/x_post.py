@@ -5,6 +5,7 @@ import json
 import re
 import time
 
+from kb.feeds import x_article
 from kb.feeds.x_cdp import CdpError
 
 HINT = '_x_post_prefix'
@@ -55,6 +56,10 @@ class PostUnavailable(RuntimeError):
     pass
 
 
+def expanded(text: str, preview: str) -> bool:
+    return len(text.strip()) > len(preview.strip())
+
+
 def _check(deadline, should_stop):
     if should_stop and should_stop():
         raise PostUnavailable('同步已停止')
@@ -91,6 +96,16 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
         raise PostUnavailable(f'推文详情页读取失败:{exc}') from exc
 
 
+def merge(entry: dict, text: str) -> dict:
+    prefix = entry[HINT]
+    if not expanded(text, entry['body'].removeprefix(prefix)):
+        raise PostUnavailable('详情页正文没有长于时间线预览')
+    complete = dict(entry)
+    complete.pop(HINT)
+    complete.update(title=text.splitlines()[0][:500], body=prefix + text)
+    return complete
+
+
 def fill(entries: list[dict], *, session, deadline=None, should_stop=None):
     kept, missed = [], 0
     for entry in entries:
@@ -99,12 +114,25 @@ def fill(entries: list[dict], *, session, deadline=None, should_stop=None):
             continue
         try:
             text = fetch(entry['url'], session, deadline=deadline, should_stop=should_stop)
+            complete = merge(entry, text)
         except PostUnavailable:
+            if x_article.needs_article(entry):
+                kept.append(entry)
+                continue
             missed += 1
             continue
-        complete = dict(entry)
-        prefix = complete.pop(HINT)
-        complete.update(title=text.splitlines()[0][:500], body=prefix + text)
         kept.append(complete)
     note = f'有 {missed} 条折叠推文的完整正文没取到,留到下次同步再试' if missed else ''
     return kept, note
+
+
+def complete(entries: list[dict], *, session, deadline=None, should_stop=None):
+    entries, post_note = fill(entries, session=session, deadline=deadline, should_stop=should_stop)
+    entries, article_note = x_article.fill(
+        entries, session=session, deadline=deadline, should_stop=should_stop)
+    unresolved = sum(HINT in entry for entry in entries)
+    entries = [entry for entry in entries if HINT not in entry]
+    notes = [post_note, article_note]
+    if unresolved:
+        notes.append(f'有 {unresolved} 条折叠推文没有补到正文,留到下次同步再试')
+    return entries, ';'.join(note for note in notes if note)

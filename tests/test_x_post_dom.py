@@ -112,3 +112,13 @@ class PostDomTests(unittest.TestCase):
         html = article(quoted='<div role="link"><div data-testid="tweetText">quote</div></div>')
         self.load(html.replace('<div data-testid="tweetText">short</div>', ''))
         self.assertEqual('', self.collect()[0]['text'])
+
+    def test_stable_text_before_show_more_appears_is_not_complete(self):
+        self.load(article(text='a preview that stops mid'))
+        first = json.loads(self.page.eval(x_post.READ_JS))
+        second = json.loads(self.page.eval(x_post.READ_JS))
+        self.assertEqual(first['text'], second['text'])
+        self.assertFalse(second['truncated'])
+        entry = dict(x_browser._entry(self.collect()[0]), **{x_post.HINT: ''})
+        with self.assertRaises(x_post.PostUnavailable):
+            x_post.merge(entry, second['text'])

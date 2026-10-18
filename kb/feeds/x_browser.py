@@ -451,10 +451,6 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 started = water or floor.isoformat()
                 try:
                     entries, incomplete = _harvest_one(page, handle, floor)
-                    entries, missing = x_post.fill(
-                        entries, session=page, deadline=deadline, should_stop=should_stop)
-                    if missing:
-                        incomplete = f'{incomplete};{missing}' if incomplete else missing
                     # 长文(Article)推文在时间线上一个字都没有,正文要单独取一次。
                     # 取不到的那几条本轮不入库、并按"没读完"办 —— 空正文一旦落库
                     # 就再也更新不了(`put_items` 是 DO NOTHING),见 `x_article`。
@@ -473,7 +469,7 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # (2026-10-09 第 1 轮审查实测:预算 0.020 秒的一轮,停止在
                     # 第一条之后就置位了,后面照样新发 7 次请求、耗时 0.323 秒,
                     # 8 条全留下、`incomplete` 空、水位照常前进)。
-                    entries, missing = x_article.fill(
+                    entries, missing = x_post.complete(
                         entries, session=page,
                         deadline=deadline, should_stop=should_stop)
                     if missing:
