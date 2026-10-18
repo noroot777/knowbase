@@ -13,6 +13,8 @@ from tests.test_x_post import BODY, Page, snapshot
 
 SHORT = 'Review every app…'
 FULL = SHORT[:-1] + ' and ask before disconnecting anything.\n\nThe full ending.'
+LEGACY = 'Read this:\n@Example\n\nhttps://\nexample.org/long/\npath\n…'
+CLEAN = 'Read this:@Example\n\nhttps://example.org/long/path'
 
 
 class BackfillTests(ChannelBase):
@@ -83,10 +85,101 @@ class BackfillTests(ChannelBase):
         for text in [SHORT, 'shorter']:
             with self.subTest(text=text):
                 stats = backfill.repair([row], Page(snapshot(text)), apply=True)
-                self.assertEqual(1, stats['unchanged'])
+                state = 'identical' if text == SHORT else 'blocked_length'
+                self.assertEqual(1, stats[state])
+                self.assertEqual(state, stats['results'][0]['state'])
                 self.assertEqual(0, stats['updated'])
                 self.assertEqual(0, stats['failed'])
                 self.assertEqual(row, self.row(row['key']))
+
+    def test_shorter_clean_text_repairs_link_artifacts_and_reexports(self):
+        row = self.seed(LEGACY)
+        sync.export('social')
+        with reg.db() as conn:
+            conn.execute("UPDATE feed_items SET body_zh='旧译文',translated_at='old'")
+            row = dict(conn.execute('SELECT * FROM feed_items').fetchone())
+        self.assertLess(len(CLEAN), len(LEGACY))
+        stats = backfill.repair([row], Page(snapshot(CLEAN)), apply=True)
+        updated = self.row(row['key'])
+        self.assertEqual(1, stats['normalized'])
+        self.assertEqual(1, stats['updated'])
+        self.assertEqual('legacy_link_artifacts', stats['results'][0]['reason'])
+        self.assertEqual(CLEAN, updated['body'])
+        self.assertEqual(CLEAN.splitlines()[0], updated['title'])
+        self.assertEqual(row['content_rev'] + 1, updated['content_rev'])
+        self.assertEqual('', updated['body_zh'])
+        self.assertEqual('', updated['translated_at'])
+        self.assertEqual(1, updated['extract_stale'])
+        self.assertEqual(row['exported_hash'], updated['exported_hash'])
+        sync.export('social')
+        text = (sync.VAULT_ROOT / row['path']).read_text()
+        self.assertIn(CLEAN, text)
+        self.assertNotIn('https://\n', text)
+
+    def test_link_cleanup_probe_is_read_only_and_keeps_repost_context(self):
+        row = self.seed(LEGACY, context='Someone reposted')
+        stats = backfill.repair([row], Page(snapshot(CLEAN)))
+        self.assertEqual(1, stats['normalized'])
+        self.assertEqual(0, stats['updated'])
+        self.assertEqual(row, self.row(row['key']))
+        stats = backfill.repair([row], Page(snapshot(CLEAN)), apply=True)
+        self.assertEqual(1, stats['updated'])
+        self.assertEqual('> Someone reposted\n\n' + CLEAN, self.row(row['key'])['body'])
+
+    def test_known_artifacts_do_not_allow_arbitrary_shorter_text(self):
+        row = self.seed(LEGACY)
+        stats = backfill.repair([row], Page(snapshot('Read this: https://example.org')), apply=True)
+        self.assertEqual(1, stats['blocked_artifacts'])
+        self.assertEqual('blocked_artifacts', stats['results'][0]['state'])
+        self.assertEqual(0, stats['updated'])
+        self.assertEqual(row, self.row(row['key']))
+
+    def test_identical_artifacts_are_not_called_repaired_or_complete(self):
+        row = self.seed(LEGACY)
+        stats = backfill.repair([row], Page(snapshot(LEGACY)), apply=True)
+        self.assertEqual(1, stats['identical'])
+        self.assertTrue(stats['results'][0]['artifacts'])
+        self.assertEqual(0, stats['normalized'])
+        self.assertEqual(0, stats['updated'])
+        self.assertEqual(row, self.row(row['key']))
+
+    def test_ascii_tail_and_appended_text_can_be_repaired_without_growth(self):
+        row = self.seed(LEGACY.replace('…', '...'))
+        text = CLEAN + '\nNew'
+        self.assertLess(len(text), len(row['body']))
+        stats = backfill.repair([row], Page(snapshot(text)), apply=True)
+        self.assertEqual(1, stats['normalized'])
+        self.assertEqual(text, self.row(row['key'])['body'])
+
+    def test_legacy_cleanup_does_not_weaken_live_collection(self):
+        row = self.seed(LEGACY)
+        entries, note = x_post.complete([backfill.entry_of(row)], session=Page(snapshot(CLEAN)))
+        self.assertEqual([], entries)
+        self.assertIn('下次同步', note)
+
+    def test_cli_reports_blocked_identical_and_cleanable_artifacts_separately(self):
+        row = self.seed(LEGACY)
+        report = self.root / 'report.json'
+        for text, state, code in [('shorter', 'blocked_artifacts', 1),
+                                  (LEGACY, 'identical', 0), (CLEAN, 'normalized', 0)]:
+            with self.subTest(state=state), contextlib.redirect_stdout(io.StringIO()), \
+                 patch.object(backfill.x_browser, 'browser_session',
+                              return_value=contextlib.nullcontext(Page(snapshot(text)))):
+                self.assertEqual(code, backfill.main(['run', '--report', str(report)]))
+            recorded = json.loads(report.read_text())
+            self.assertEqual(state, recorded['results'][0]['state'])
+            self.assertTrue(recorded['results'][0]['artifacts'])
+            self.assertEqual(0, recorded['updated'])
+            self.assertEqual(row, self.row(row['key']))
+
+    def test_artifact_repair_still_requires_matching_unfolded_detail(self):
+        row = self.seed(LEGACY)
+        for snap in [dict(snapshot(CLEAN), id='999'), dict(snapshot(CLEAN), truncated=True)]:
+            with self.subTest(snap=snap), patch.object(x_post, 'SECONDS', 0.002):
+                stats = backfill.repair([row], Page(snap), apply=True)
+            self.assertEqual(1, stats['failed'])
+            self.assertEqual(0, stats['updated'])
+            self.assertEqual(row, self.row(row['key']))
 
     def test_a_probe_is_read_only_even_when_the_full_body_is_available(self):
         row = self.seed()

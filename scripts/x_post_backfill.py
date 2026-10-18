@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -21,6 +22,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb.feeds import grab_store, registry as reg, x_browser, x_channels, x_post
 from kb.feeds.x_cdp import CdpError
+
+_LEGACY_LINK = re.compile(
+    r'(?P<link>https?://[^\s]*(?:\r?\n[^\s]+)*?)\r?\n(?:…|\.{3})(?=\r?\n|$)')
+
+
+def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
+    """Only bypass raw length when known link artifacts explain the difference."""
+    prefix = entry[x_post.HINT]
+    preview = entry['body'].removeprefix(prefix).strip()
+    canonical = _LEGACY_LINK.sub(
+        lambda match: re.sub(r'\s+', '', match['link']), preview)
+    info = dict(artifacts=canonical != preview, after=len(prefix + text))
+    if text == preview:
+        return 'identical', None, dict(info, reason='detail_matches_stored')
+    if x_post.expanded(text, preview):
+        return 'expanded', x_post.merge(entry, text), dict(info, reason='longer_detail')
+    if info['artifacts'] and re.sub(r'\s+', '', text).startswith(re.sub(r'\s+', '', canonical)):
+        complete = dict(entry)
+        complete.pop(x_post.HINT)
+        complete.update(title=text.splitlines()[0][:500], body=prefix + text)
+        return 'normalized', complete, dict(info, reason='legacy_link_artifacts')
+    state = 'blocked_artifacts' if info['artifacts'] else 'blocked_length'
+    return state, None, dict(info, reason='legacy_link_artifacts_not_reconciled'
+                            if info['artifacts'] else 'detail_not_longer')
 
 
 def candidates(conn, *, urls=(), limit=0, all_posts=False) -> list[dict]:
@@ -56,7 +81,8 @@ def entry_of(row: dict) -> dict:
 
 def repair(rows: list[dict], session, *, apply=False, deadline=None,
            should_stop=None, progress=None) -> dict:
-    stats = dict(candidates=len(rows), expanded=0, updated=0, unchanged=0,
+    stats = dict(candidates=len(rows), expanded=0, normalized=0, updated=0,
+                 identical=0, blocked_length=0, blocked_artifacts=0,
                  failed=0, stale=0, deferred=0, results=[])
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
@@ -70,18 +96,13 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
             stats['failed'] += 1
             result.update(state='failed', error=str(exc))
         else:
-            entry = entry_of(row)
-            if not x_post.expanded(text, row['body'].removeprefix(entry[x_post.HINT])):
-                stats['unchanged'] += 1
-                result['state'] = 'unchanged'
-            else:
-                complete = x_post.merge(entry, text)
-                stats['expanded'] += 1
-                result.update(state='expanded', after=len(complete['body']))
-                if apply:
-                    state = 'updated' if grab_store.replace(row, complete) else 'stale'
-                    stats[state] += 1
-                    result['state'] = state
+            state, complete, info = proposal(entry_of(row), text)
+            stats[state] += 1
+            result.update(state=state, **info)
+            if complete and apply:
+                state = 'updated' if grab_store.replace(row, complete) else 'stale'
+                stats[state] += 1
+                result['state'] = state
         stats['results'].append(result)
         if progress:
             progress(result, stats)
@@ -134,11 +155,16 @@ def main(argv=None) -> int:
         return 1
     if args.report:
         args.report.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
-    print(f'可补全 {stats["expanded"]} 条,实际写入 {stats["updated"]} 条,'
+    print(f'可扩写 {stats["expanded"]} 条,可清理旧链接产物 {stats["normalized"]} 条,'
+          f'实际写入 {stats["updated"]} 条,'
           f'并发换版跳过 {stats["stale"]} 条,失败 {stats["failed"]} 条,'
           f'预算/停止扣留 {stats["deferred"]} 条。')
+    print(f'与详情逐字相同 {stats["identical"]} 条(不等于确认完整),'
+          f'长度拦截 {stats["blocked_length"]} 条,'
+          f'含旧链接产物但未能安全对齐 {stats["blocked_artifacts"]} 条。')
     print('已写入的条目会在正常同步中重新翻译、导出、索引和提取;本脚本不直接改 vault。')
-    return 1 if stats['failed'] or stats['deferred'] else 0
+    return 1 if any(stats[key] for key in
+                    ('failed', 'deferred', 'blocked_length', 'blocked_artifacts')) else 0
 
 
 if __name__ == '__main__':
