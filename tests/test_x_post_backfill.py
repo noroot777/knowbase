@@ -59,8 +59,8 @@ class BackfillTests(ChannelBase):
             'Text…\nhttps://\nexample.org/guide\nThe end.',
             LEGACY.removesuffix('\n…'),
         ])]
-        self.seed('Read this: https://example.org/guide\nThe end.', '140')
-        self.seed('https://example.org/guide\nAnother paragraph', '141')
+        self.seed('Read this: https://example.org/guide. The end.', '140')
+        self.seed('https://example.org/guide Another paragraph', '141')
         with reg.db() as conn:
             self.assertEqual({row['key'] for row in rows},
                              {row['key'] for row in backfill.candidates(conn)})
@@ -216,12 +216,101 @@ class BackfillTests(ChannelBase):
                 self.assertEqual(0, stats['updated'])
                 self.assertEqual(row, self.row(row['key']))
 
-    def test_whitespace_alone_is_not_a_legacy_link_artifact(self):
+    def test_normal_paragraph_breaks_are_not_cleaned_as_link_artifacts(self):
         row = self.seed('Read this: https://example.org/guide\nKeep this ending.')
-        stats = backfill.repair([row], Page(snapshot(row['body'].replace('\n', ''))), apply=True)
-        self.assertEqual(1, stats['blocked_length'])
-        self.assertFalse(stats['results'][0]['artifacts'])
+        stats = backfill.repair([row], Page(snapshot(row['body'].replace('\n', ' '))), apply=True)
+        self.assertEqual(0, stats['normalized'])
+        self.assertEqual(0, stats['updated'])
         self.assertEqual(row, self.row(row['key']))
+
+    def test_any_url_character_can_be_split_without_an_ellipsis(self):
+        url = 'https://example.org/a-long-path?one=two%20three#section'
+        for offset in range(1, len(url)):
+            with self.subTest(offset=offset):
+                identity = str(200 + offset)
+                stored = 'Read ' + url[:offset] + '\n' + url[offset:]
+                row = self.seed(stored, identity)
+                with reg.db() as conn:
+                    self.assertEqual([row], backfill.candidates(conn, urls=[row['url']]))
+                    self.assertIn(row['key'], {item['key'] for item in backfill.candidates(conn)})
+                detail = dict(snapshot('Read ' + url), at=identity, id=identity)
+                stats = backfill.repair([row], Page(detail), apply=True)
+                self.assertEqual(1, stats['normalized'])
+                self.assertEqual(1, stats['updated'])
+                self.assertEqual('Read ' + url, self.row(row['key'])['body'])
+
+    def test_multiple_url_breaks_and_adjacent_ellipsis_forms_are_repaired(self):
+        clean = 'Read https://example.org/a-long-path which matters.'
+        for index, stored in enumerate([
+            'Read https://exam\nple.org/a\n-long-path\n… which matters.',
+            'Read https://exam\nple.org/a\n-long-path… which matters.',
+            'Read https://exam\nple.org/a\n-long-path... which matters.',
+            'Read\n…\nhttps://exam\nple.org/a\n-long-path which matters.',
+            'Read\n...\nhttps://exam\nple.org/a\n-long-path which matters.',
+            'Read htt\r\nps://exam\r\nple.org/a\r\n-long-path\r\n… which matters.',
+        ]):
+            with self.subTest(stored=stored):
+                identity = str(300 + index)
+                row = self.seed(stored, identity, context='Someone reposted')
+                detail = dict(snapshot(clean), at=identity, id=identity)
+                stats = backfill.repair([row], Page(detail), apply=True)
+                self.assertEqual(1, stats['normalized'])
+                self.assertEqual(1, stats['updated'])
+                self.assertEqual('> Someone reposted\n\n' + clean, self.row(row['key'])['body'])
+
+    def test_natural_ellipsis_is_preserved_when_a_broken_url_is_repaired(self):
+        for index, (stored, clean) in enumerate([
+            ('Wait…\nhttps://exam\nple.org/path', 'Wait…\nhttps://example.org/path'),
+            ('Wait\n…\nhttps://exam\nple.org/path', 'Wait\n…\nhttps://example.org/path'),
+            ('Read https://exam\nple.org/path… and wait…',
+             'Read https://example.org/path… and wait…'),
+            ('Read https://exam\nple.org/one...two', 'Read https://example.org/one...two'),
+        ]):
+            with self.subTest(stored=stored):
+                identity = str(320 + index)
+                row = self.seed(stored, identity)
+                stats = backfill.repair([row], Page(dict(snapshot(clean), at=identity, id=identity)),
+                                        apply=True)
+                self.assertEqual(1, stats['normalized'])
+                self.assertEqual(clean, self.row(row['key'])['body'])
+
+    def test_url_cleanup_does_not_discard_narrative_or_edit_the_url(self):
+        for index, (stored, detail) in enumerate([
+            ('Wait…\n\nhttps://exam\nple.org/path', 'Wait\n\nhttps://example.org/path'),
+            ('Wait\n…\n\nhttps://exam\nple.org/path', 'Wait\n\nhttps://example.org/path'),
+            ('Read https://exam\nple.org/one...two', 'Read https://example.org/onetwo'),
+            ('Read https://exam\nple.org/one.../tail and https://example.org/one',
+             'Read https://example.org/one/tail and https://example.org/one'),
+            ('Read https://exam\nple.org/Case\n… ending',
+             'Read https://example.org/case ending'),
+            ('Read https://exam\nple.org/path\n… Important ending',
+             'Read https://example.org/path'),
+        ]):
+            with self.subTest(stored=stored):
+                identity = str(340 + index)
+                row = self.seed(stored, identity)
+                stats = backfill.repair([row], Page(dict(snapshot(detail), at=identity, id=identity)),
+                                        apply=True)
+                self.assertEqual(0, stats['updated'])
+                self.assertEqual(row, self.row(row['key']))
+
+    def test_multiple_urls_are_each_aligned_with_their_own_detail_url(self):
+        stored = 'https://exam\nple.org/one\n…\nhttps://oth\ner.org/two\n… End'
+        clean = 'https://example.org/one\nhttps://other.org/two End'
+        row = self.seed(stored)
+        stats = backfill.repair([row], Page(snapshot(clean)), apply=True)
+        self.assertEqual(1, stats['normalized'])
+        self.assertEqual(clean, self.row(row['key'])['body'])
+
+    def test_word_split_cleanup_preserves_concurrent_replacements(self):
+        row = self.seed('Read https://exam\nple.org/path\n… ending')
+        self.assertTrue(grab_store.replace(row, {'title': 'New title', 'body': BODY}))
+        current = self.row(row['key'])
+        stats = backfill.repair([row], Page(snapshot('Read https://example.org/path ending')),
+                                apply=True)
+        self.assertEqual(1, stats['stale'])
+        self.assertEqual(0, stats['updated'])
+        self.assertEqual(current, self.row(row['key']))
 
     def test_legacy_cleanup_does_not_weaken_live_collection(self):
         for index, stored in enumerate([LEGACY, LEGACY.removesuffix('\n…')]):

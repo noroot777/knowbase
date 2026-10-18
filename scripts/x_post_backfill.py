@@ -6,7 +6,7 @@
     python scripts/x_post_backfill.py run --yes --channel browser --report /tmp/x-post.json
 
 scan is local and read-only. run probes candidates; only --yes writes feeds.db.
-Ellipsis endings and isolated URL protocols are suspects, not proof. --all audits other posts;
+Ellipsis endings and wrapped URLs are suspects, not proof. --all audits other posts;
 --url selects exact stored URLs. Translation, export and indexing use the normal pipeline.
 """
 from __future__ import annotations
@@ -23,14 +23,86 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kb.feeds import grab_store, registry as reg, x_browser, x_channels, x_post
 from kb.feeds.x_cdp import CdpError
 
-_LEGACY_LINK = re.compile(
-    r'(?P<link>https?://[^\s]*(?:\r?\n[^\s]+)*?)\r?\n(?:…|\.{3})(?=\r?\n|$)')
-_SPLIT_PROTOCOL = re.compile(r'(https?://)\r?\n(?=\S)')
+_SCHEME = re.compile('|'.join(
+    r'(?:\r?\n)*'.join(re.escape(char) for char in scheme)
+    for scheme in ('https://', 'http://')))
+_URL_TAIL = re.compile(r'[^\s]*(?:\r?\n[^\s]+)*')
+_DETAIL_URL = re.compile(r'https?://[^\s…]+')
+_BREAK = re.compile(r'\r?\n')
+_ELLIPSIS = re.compile(r'…|\.{3}')
+_BEFORE_URL = re.compile(r'(?:^|\r?\n)(…|\.{3})\r?\n\Z')
+_AFTER_URL = re.compile(r'(?:\r?\n)?(…|\.{3})(?![A-Za-z0-9_])')
+
+
+def _match_url(text: str, start: int, end: int, url: str):
+    cuts = []
+    cursor = start
+    for char in url:
+        while cursor < end and text[cursor] != char:
+            line = _BREAK.match(text, cursor, end)
+            if not line:
+                return None
+            cuts.append(line.span())
+            cursor = line.end()
+        if cursor >= end:
+            return None
+        cursor += 1
+    return cursor, cuts
+
+
+def link_artifacts(text: str, detail: str | None = None) -> list[tuple[int, int]]:
+    """Suspect URL runs broadly; confirm removable ranges against the detail URLs."""
+    ranges = set()
+    urls = [_DETAIL_URL.match(detail, scheme.start()) for scheme in
+            _SCHEME.finditer(detail)] if detail is not None else []
+    for index, scheme in enumerate(_SCHEME.finditer(text)):
+        end = _URL_TAIL.match(text, scheme.end()).end()
+        before = _BEFORE_URL.search(text[:scheme.start()])
+        if detail is None:
+            ranges.update(match.span() for match in _BREAK.finditer(text, scheme.start(), end))
+            ranges.update(match.span() for match in _ELLIPSIS.finditer(text, scheme.start(), end))
+            if before:
+                ranges.add(before.span(1))
+            continue
+        if index >= len(urls) or not urls[index]:
+            continue
+        url = urls[index].group()
+        matched = _match_url(text, scheme.start(), end, url)
+        if not matched:
+            matched = _match_url(text, scheme.start(), end, url.rstrip('.,;:!?)]}'))
+        if not matched:
+            continue
+        cursor, cuts = matched
+        ranges.update(cuts)
+        if before:
+            ranges.add(before.span(1))
+        after = _AFTER_URL.match(text, cursor)
+        if after:
+            ranges.add(after.span(1))
+    return sorted(ranges)
 
 
 def canonical_preview(text: str) -> str:
-    text = _LEGACY_LINK.sub(lambda match: re.sub(r'\s+', '', match['link']), text)
-    return _SPLIT_PROTOCOL.sub(r'\1', text)
+    for start, end in reversed(link_artifacts(text)):
+        text = text[:start] + text[end:]
+    return text
+
+
+def aligned_preview(preview: str, detail: str) -> bool:
+    ranges = link_artifacts(preview, detail)
+    if not ranges:
+        return False
+    pattern, cursor = [], 0
+    for start, end in ranges:
+        if start < cursor:
+            continue
+        pattern.append(re.escape(re.sub(r'\s+', '', preview[cursor:start])))
+        token = re.sub(r'\s+', '', preview[start:end])
+        if token:
+            pattern.append('(?:' + re.escape(token) + ')?')
+        cursor = end
+    pattern.append(re.escape(re.sub(r'\s+', '', preview[cursor:])))
+    return re.match(''.join(pattern), re.sub(r'\s+', '', detail)) is not None
 
 
 def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
@@ -43,7 +115,7 @@ def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
         return 'identical', None, dict(info, reason='detail_matches_stored')
     if x_post.expanded(text, preview):
         return 'expanded', x_post.merge(entry, text), dict(info, reason='longer_detail')
-    if info['artifacts'] and re.sub(r'\s+', '', text).startswith(re.sub(r'\s+', '', canonical)):
+    if info['artifacts'] and aligned_preview(preview, text):
         complete = dict(entry)
         complete.pop(x_post.HINT)
         complete.update(title=text.splitlines()[0][:500], body=prefix + text)
