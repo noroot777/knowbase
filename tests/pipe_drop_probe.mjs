@@ -21,14 +21,15 @@ import { MIME, FIXTURES } from "./pipe_history_fixture.mjs";
 const STATIC = join(dirname(fileURLToPath(import.meta.url)), "..", "kb", "static");
 const KEYS = ["crawl", "export", "index", "extract", "projects", "wiki"];
 const CHANNEL = process.env.PIPE_DROP_CHANNEL || "wechat_local";
-const LINK = CHANNEL === "rss" ? "https://example.org/article?id=1"
+const FEED = CHANNEL !== "wechat_local";
+const LINK = FEED ? "https://example.org/article?id=1"
   : "https://mp.weixin.qq.com/s?__biz=b&mid=1&idx=1";
 const URLS = [LINK, LINK + "&n=2", LINK + "&n=3"];
-const IDS = CHANNEL === "rss"
+const IDS = FEED
   ? URLS.map(url => createHash("sha256").update(`${CHANNEL}:${url}`).digest("hex").slice(0, 32))
   : ["wx-1", "wx-2", "wx-past"];
 const ref = (index, account) => ({ channel: CHANNEL, id: IDS[index], link: URLS[index],
-  ...(CHANNEL === "rss" ? {} : { account }) });
+  ...(FEED ? {} : { account }) });
 
 // 三条明细,刚好是三种形态:带身份的两条(点得开、删得掉)、来源给不出身份的一条
 // (降级那一档,两样都不该有)。
@@ -226,7 +227,7 @@ if (process.env.PIPE_DROP_SCREENSHOT_DIR) {
   await evalJs(`$('pipe-stage-export').scrollIntoView({ block: 'center' }); true`);
   const shot = await send("Page.captureScreenshot", { format: "png" });
   writeFileSync(join(process.env.PIPE_DROP_SCREENSHOT_DIR,
-    CHANNEL === "rss" ? "rss-history-drop.png" : "history-drop.png"),
+    FEED ? `${CHANNEL}-history-drop.png` : "history-drop.png"),
     Buffer.from(shot.result.data, "base64"));
 }
 

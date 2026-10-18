@@ -17,7 +17,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from kb.collectors import FetchScope, active_collector
+from kb.collectors import FetchScope, active_collector, document_failure
 from kb.config import VIDEOS_ROOT
 from kb.pipeline_batch import round_key
 from kb.pipeline_segments import stage_segment
@@ -461,8 +461,7 @@ def _extract_pass(label: str, stats: dict) -> None:
                                  f"{row['title'][:24]}")
                     elif data is None:
                         stats["empty_paths"].add(row["path"])
-                        stats["failures"][row["path"]] = {
-                            "title": row["title"], "reason": "正文为空,需回填"}
+                        stats["failures"][row["path"]] = document_failure(row, "正文为空,需回填")
                         _log(f"extract: SKIP 正文为空 {row['title'][:24]}")
                     else:
                         # 校验 → 落库 → 提交 → tag 回写 frontmatter(决策:自动
@@ -492,8 +491,7 @@ def _extract_pass(label: str, stats: dict) -> None:
                     _log(f"extract: SKIP 正文已更新 {row['title'][:24]}")
                 except Exception as e:
                     stats["failed_paths"].add(row["path"])
-                    stats["failures"][row["path"]] = {
-                        "title": row["title"], "reason": str(e)[:160]}
+                    stats["failures"][row["path"]] = document_failure(row, str(e)[:160])
                     _log(f"extract: FAIL {row['title'][:24]}: {e}")
                 _stage("extract", "running",
                        f"{label}提取 {done}/{len(todo)} — {row['title'][:24]}")

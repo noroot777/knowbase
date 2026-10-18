@@ -274,6 +274,34 @@ def item_dropper(collector: SourceCollector) -> ItemDropping | None:
     return collector if isinstance(collector, ItemDropping) else None
 
 
+@runtime_checkable
+class DocumentFailures(Protocol):
+    """从已入库文档核实失败条目的采集身份；不属于自己的文档返回 None。"""
+
+    def document_failure(self, document: dict, reason: str) -> dict | None:
+        ...
+
+
+def document_failure(document, reason: str) -> dict:
+    """提取阶段保留原文；采集器核实身份后才附上永久排除入口。
+
+    身份查询失败不能盖掉原始故障，也不能据标题或路径猜出可删除的身份。
+    """
+    document = dict(document)
+    result = {"title": document.get("title") or "未命名内容", "reason": reason}
+    if document.get("url"):
+        result["url"] = document["url"]
+    for channel in _REGISTRY:
+        try:
+            collector = get_collector(channel)
+            if isinstance(collector, DocumentFailures):
+                if detail := collector.document_failure(document, reason):
+                    return detail
+        except Exception:
+            continue
+    return result
+
+
 # ── 注册表 ──────────────────────────────────────────────────────────────────────
 # 目前只有一个来源。多来源时这里改成 list,管道对每个采集器跑一遍即可
 # ——fetch/materialize 之后的阶段(索引/提取/条目化)本来就是来源无关的。

@@ -449,4 +449,11 @@ def save(entry: dict) -> dict:
         raise GrabError('没有可保存的正文')
     source = bucket(entry['url'])
     added = reg.put_items(source, [entry])
+    if not added:
+        from kb.feeds.exclusion import item_key
+        with reg.db() as conn:
+            excluded = conn.execute('SELECT 1 FROM feed_item_exclusions WHERE key=?',
+                                    (item_key(KIND, entry['url']),)).fetchone()
+        if excluded:
+            raise GrabError('这一条已设为「不再抓取」，没有重新收录')
     return {'added': added, 'source': source, 'item': entry}

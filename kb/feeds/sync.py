@@ -153,7 +153,7 @@ def _save_failure(source, error, summary) -> bool:
     with reg.db() as c:
         if not _claim_write(c, source):
             return False
-        summary['errors'].append({'title': source['name'], 'reason': reason})
+        summary['errors'].append({'title': source['name'], 'reason': reason, 'url': source['url']})
         # 「重试失败项」靠这份身份收窄下一轮的范围(见 `note_retry_targets`)。
         # 记 id 而不是名字:名字会被改,而改完之后这条订阅还是同一条。
         summary['failed_ids'].append(str(source['id']))
