@@ -14,7 +14,6 @@ from pydantic import BaseModel, Field
 
 from kb import daily, daily_run, daily_trans, fetch_rounds
 from kb.config import ScheduleUnreadable
-from kb.daily_materials import material_view
 from kb.web.common import VAULT_NAME, unreadable_config
 
 router = APIRouter(prefix='/api/daily')
@@ -198,7 +197,7 @@ def read_report(day: str):
     found = daily.report(_check_day(day))
     if not found:
         raise HTTPException(404, '这一天还没有生成日报')
-    return {**found, 'material_view': material_view(found['body'], found)}
+    return found
 
 
 @router.delete('/reports/{day}')

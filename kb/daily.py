@@ -55,6 +55,7 @@ from kb.config import PRIMARY_SOURCE_NAMES, VAULT_ROOT
 from kb.daily_carry import STAMP, commit_lock, mark_carried, parse_ts, release
 from kb.daily_gain import material_sig, pending  # noqa: F401  (搬出去的两个口径,
 # `daily.pending` / `daily.material_sig` 这类既有写法照旧可用;见 daily_gain 的说明)
+from kb.daily_materials import material_view
 from kb.daily_prompt import PROMPT, late_section
 from kb.daily_carry import UNCARRIED as _UNCARRIED
 # 账本那半拆到 daily_carry 了,这个名字这边自己不用、只为让 `daily.SEED_DAY`
@@ -564,6 +565,7 @@ def _entry(path: Path, with_body: bool = False) -> dict:
     if with_body:
         out['body'] = body
         out['late_total'] = meta.get('late_total') if type(meta.get('late_total')) is int else None
+        out['material_view'] = material_view(body, meta)
     return out
 
 

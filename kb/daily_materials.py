@@ -72,14 +72,18 @@ def _section(body: str, head: re.Match) -> dict | None:
     }
 
 
-def _without_queue_tail(body: str, report: dict | None) -> str:
+def _snapshot_counts(report: dict | None) -> dict | None:
     if not isinstance(report, dict):
-        return body
+        return None
     counts = {key: report.get(key) for key in ('docs', 'total', 'late', 'late_total')}
     if any(type(value) is not int or not 0 <= value < 2 ** 63 for value in counts.values()):
-        return body
+        return None
     if counts['total'] < counts['docs'] or counts['late_total'] < counts['late']:
-        return body
+        return None
+    return counts
+
+
+def _without_queue_tail(body: str, counts: dict) -> str:
     tail = queue_tail(**counts)
     content = body.rstrip('\n')
     if not tail or not content.endswith(tail):
@@ -89,13 +93,16 @@ def _without_queue_tail(body: str, report: dict | None) -> str:
 
 def material_view(body: str, report: dict | None = None) -> dict | None:
     """只投影唯一且完整的展示结构；歧义原文不借归属容错解析来猜边界。"""
-    content = _without_queue_tail(body, report)
+    counts = _snapshot_counts(report)
+    if counts is None:
+        return None
+    content = _without_queue_tail(body, counts)
     candidates = [_section(content, head) for head in _HEAD.finditer(content)]
     candidates = [candidate for candidate in candidates if candidate is not None]
     if len(candidates) != 1:
         return None
     view = candidates[0]
-    if len(content) != len(body) and len(view['items']) != report['docs'] + report['late']:
+    if len(view['items']) != counts['docs'] + counts['late']:
         return None
     items = []
     for row in view['items']:
