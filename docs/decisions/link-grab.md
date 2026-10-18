@@ -6,6 +6,9 @@
 
 ## 硬约束
 
+- **Markdown 原文按来源明确分流**(`markdown_source`):GitHub README/Markdown 文件、直接 Markdown 链接和明确返回 Markdown
+  的网页先保留原文,不把代码围栏拍平。取不到时沿用 HTML 提取与关卡判据,不借此绕过验证页。所有 HTTP 请求共用原有公网检查、
+  响应大小限制与本次收录预算;二进制、HTML 文档和空响应不能当 Markdown 入库。
 - **抓不到正文一律不入库,一个字节都不写。** `registry.put_items` 是
   `ON CONFLICT(key) DO NOTHING` —— 空正文一旦落库就**再也改不回来**(重投同一条链接只会被
   `DO NOTHING` 挡住),而这一步失败的代价只是用户再点一次。所以 `grab.py` 里所有「拿不准」

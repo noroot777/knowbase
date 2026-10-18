@@ -392,10 +392,15 @@ def _grab_web(url: str, deadline: float) -> dict:
     **这里只有一个调用点** —— 成功路和失败路各问一次的话,同一张验证页会得到
     两句不同的话,而其中一条迟早漏掉一个判据。
     """
+    from kb.feeds.markdown_source import accept, entry, fetch, from_response
+    if markdown := fetch(url, transport=request, deadline=deadline):
+        return entry(url, markdown)
     try:
-        resp = request(url, grab_page.HEADERS, deadline=deadline)
+        resp = request(url, accept(grab_page.HEADERS), deadline=deadline)
     except FeedError as e:
         raise GrabError(f'{re.split(r"[;；]", str(e))[0].strip()}') from None
+    if markdown := from_response(resp):
+        return entry(url, markdown)
     if problem := readable.html_problem(resp.body, dict(resp.headers)):
         # 「这后面压根不是网页」要认出来:一份 PDF 解码出来是一段看着像文字的
         # 乱码,提取器眼里它就是整篇正文、长度还轻松过关(口径同 `fulltext`)。

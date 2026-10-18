@@ -47,8 +47,10 @@ def _fetch_with_budget(source, settings, scope, collect_deadline):
     deadline = time.monotonic() + SOURCE_SECONDS
     if deadline > collect_deadline:
         raise CollectionBudgetExceeded
-    return fetch_source(source, settings, unconditional=scope.ranged,
-                        deadline=deadline, collect_deadline=collect_deadline)
+    entries, validators = fetch_source(source, settings, unconditional=scope.ranged,
+                                       deadline=deadline, collect_deadline=collect_deadline)
+    from kb.feeds.markdown_source import enrich
+    return enrich(source, entries, deadline=deadline, collect_deadline=collect_deadline), validators
 
 
 def _repointed(c, source) -> bool:
