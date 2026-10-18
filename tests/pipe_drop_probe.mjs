@@ -3,16 +3,15 @@
 // 「缺少正文」的条目会被按退避时间一轮一轮地重试,而其中确实有些原文已经没有内容
 // 了。这份探针钉的是面板上那两件事:①标题是条真链接(去原文核对);②那颗「不再
 // 抓取」按下去真的打到删除端点、而且**先弹自绘确认框**(全站不用原生 confirm)。
-// 外加两道护栏:③来源给不出身份的条目两样都不许长出来;④翻历史时按钮一律不出现
-// (口径同「重试失败项」:看到的那一轮和按下去会动的那一轮必须是同一轮),而链接
-// 照旧能点 —— 它只是读。
+// 外加两道护栏:③来源给不出身份的条目两样都不许长出来;④历史按条目身份移除,
+// 不重试或切换当前正在执行的那一轮。
 //
 // 自带 mock 后端,CDP 直连 playwright 缓存里的 chrome-headless-shell
 // (不装 playwright、不连网、始终无头、临时 profile)。
 //
 //   HEADLESS_SHELL=<bin> node tests/pipe_drop_probe.mjs
 import { createServer } from "node:http";
-import { readFileSync, writeSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, normalize } from "node:path";
 import { attachCdp } from "./pipe_history_cdp.mjs";
@@ -45,8 +44,13 @@ const roundOf = (id, at, failures) => ({
 });
 
 let latest = roundOf("run-now", "2026-10-15 09:12:00", ITEMS());
-// 上一轮:同样有那几条明细,但它是**历史**,翻到它时按钮不许出现
-const PAST = roundOf("run-past", "2026-10-14 09:12:00", ITEMS());
+const HISTORY_ONLY = {
+  title: "历史号 · 仅在上一轮缺正文的一篇", reason: "缺少正文，暂未导出", pending: true,
+  url: LINK + "&n=3", drop: { channel: "wechat_local", id: "wx-past",
+    account: "历史号", link: LINK + "&n=3" },
+};
+let past = roundOf("run-past", "2026-10-14 09:12:00",
+  [...ITEMS().slice(0, 2), HISTORY_ONLY, ITEMS()[2]]);
 const drops = [];
 let state = { running: false, stop_supported: true, stop_requested: false, ...latest };
 // 「当前待处理」:删掉一条它就该少一个。**故意答得慢、而且按请求到达那一刻取值**
@@ -71,7 +75,7 @@ const server = createServer((req, res) => {
     return void setTimeout(() => json({ ...body, pending: snapshot }), PENDING_DELAY);
   }
   if (path === "/api/pipeline/runs") {
-    const rows = [latest, PAST].map(r => ({ ...r, version: r.run_id, key: r.run_id,
+    const rows = [latest, past].map(r => ({ ...r, version: r.run_id, key: r.run_id,
                                             invalid: false }));
     return json({ runs: rows, error: "", version: latest.run_id });
   }
@@ -86,6 +90,7 @@ const server = createServer((req, res) => {
         ...r.stages.export,
         failures: r.stages.export.failures.filter(f => f.drop?.id !== body.id) } } });
       latest = keep(latest);
+      past = keep(past);
       state = { ...state, stages: keep(state).stages };
       json({ ok: true, detail: "已移除,以后不再采集:某个号 · 缺正文的一篇" });
     });
@@ -193,7 +198,9 @@ check("待处理数跟着删完的结果走,不是在途那份旧数字",
 await until(`document.querySelectorAll('.toast').length > 0`, 6000);
 await evalJs(`document.querySelectorAll('.toast').forEach(e => e.remove()); true`);
 
-// ── 4. 翻历史:按钮一律不出现,链接照旧能点 ────────────────────────────────────
+state = { ...state, running: true };
+await evalJs(`refreshPipe(); true`);
+await setup("最新一轮正在运行", until(`pipeSnapshot.running === true`));
 await setup("点中了上一轮那一行", clickAt(".pipe-history-row:nth-child(2)"));
 await setup("整屏换成了上一轮",
             until(`!$('pipe-viewing').hidden`));
@@ -201,9 +208,64 @@ await evalJs(`$('pipe-stage-export').querySelector('details').open = true; true`
 await setup("上一轮那三条明细都在", until(
   `document.querySelectorAll('#pipe-stage-export .pipe-failures p').length === 3`));
 listed = await rows();
-check("翻历史时一颗「不再抓取」都没有", listed.every(r => !r.drop),
+check("翻历史时有身份的条目仍可移除", listed[0].drop && listed[1].drop,
       JSON.stringify(listed.map(r => r.drop)));
-check("链接照旧能点(它只是读)", listed[0].href === LINK, listed[0].href);
+check("历史里已移除的条目不再出现", listed.every(r => !/某个号 · 缺正文/.test(r.text)));
+check("历史里没有身份的条目仍不可操作", !listed[2].drop && !listed[2].href);
+check("链接照旧指向历史条目的原文", listed[0].href === LINK + "&n=2", listed[0].href);
+check("翻历史时仍不能重试整轮", await evalJs(`$('pipe-retry').hidden && $('pipe-retry').disabled`));
+check("历史提示说明仍可永久移除条目", await evalJs(
+  `$('pipe-state-hint').textContent.includes('不再抓取')`));
+if (process.env.PIPE_DROP_SCREENSHOT_DIR) {
+  mkdirSync(process.env.PIPE_DROP_SCREENSHOT_DIR, { recursive: true });
+  await evalJs(`$('pipe-stage-export').scrollIntoView({ block: 'center' }); true`);
+  const shot = await send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(join(process.env.PIPE_DROP_SCREENSHOT_DIR, "history-drop.png"),
+    Buffer.from(shot.result.data, "base64"));
+}
+
+await setup("点中仅在历史里出现的条目", clickAt(
+  "#pipe-stage-export .pipe-failures p:nth-child(2) .pipe-failure-drop"));
+await setup("历史条目也弹出确认框", until(`document.querySelectorAll('.confirm-mask').length === 1`));
+const historyAsked = await evalJs(`document.querySelector('.confirm-body')?.textContent || ''`);
+check("确认框对应历史标题并说明不可撤销", /历史号 · 仅在上一轮缺正文的一篇。/.test(historyAsked)
+  && /不可撤销/.test(historyAsked), historyAsked);
+await setup("取消历史移除", clickAt(".confirm-mask [data-act=cancel]"));
+check("取消历史移除不发请求", drops.length === 1, JSON.stringify(drops));
+await setup("再次点中历史条目", clickAt(
+  "#pipe-stage-export .pipe-failures p:nth-child(2) .pipe-failure-drop"));
+await setup("历史确认框再次出现", until(`document.querySelectorAll('.confirm-mask').length === 1`));
+await setup("确认移除历史条目", clickAt(".confirm-mask [data-act=ok]"));
+check("历史操作原样发送历史条目的身份", drops.length === 2
+  && JSON.stringify(drops[1]) === JSON.stringify(HISTORY_ONLY.drop), JSON.stringify(drops));
+check("历史条目移除后就地消失", await until(
+  `pipeViewing?.key === 'run-past'
+   && document.querySelectorAll('#pipe-stage-export .pipe-failures p').length === 2`, 8000));
+check("不会误删最新一轮的其他条目", latest.stages.export.failures.length === 2
+  && latest.stages.export.failures[0].drop.id === "wx-2");
+
+await evalJs(`document.querySelectorAll('.toast').forEach(e => e.remove()); true`);
+await setup("从历史移除两轮共有的条目", clickAt(
+  "#pipe-stage-export .pipe-failures p:nth-child(1) .pipe-failure-drop"));
+await setup("共有条目弹出确认框", until(`document.querySelectorAll('.confirm-mask').length === 1`));
+await setup("确认移除共有条目", clickAt(".confirm-mask [data-act=ok]"));
+check("共有条目从历史视图消失", await until(
+  `pipeViewing?.key === 'run-past'
+   && document.querySelectorAll('#pipe-stage-export .pipe-failures p').length === 1`, 8000));
+check("历史操作没有停止或替换正在运行的一轮", await evalJs(
+  `pipeSnapshot.running && pipeSnapshot.run_id === 'run-now'`));
+await evalJs(`document.querySelectorAll('.toast').forEach(e => e.remove()); true`);
+await setup("回到最新一轮", clickAt("#pipe-viewing .ghost"));
+check("最新视图也不再出现历史里移除的共有条目", await until(
+  `!pipeViewing && document.querySelectorAll('#pipe-stage-export .pipe-failures p').length === 1`));
+check("最新视图保留无身份条目且无移除入口", (await rows())[0].text.includes("没有身份")
+  && !(await rows())[0].drop);
+state = { ...state, running: false };
+await evalJs(`refreshPipe(); true`);
+await setup("最新一轮已结束", until(`pipeSnapshot.running === false`));
+await evalJs(`refreshPipePending(); true`);
+check("待处理数随历史移除更新", await until(
+  `pipePending.export === 0`, 12000));
 
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 

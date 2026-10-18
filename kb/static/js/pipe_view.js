@@ -23,10 +23,11 @@ function pipeStateHint(s, result, failed, skipped, progress) {
   // 或按上次抓取范围重试失败项」—— 而翻历史时那颗按钮已经藏掉也禁用了(理由在
   // `renderPipeState` 里),提示还指着一个按不到的操作,说的又是**另一轮**的失败。
   if (typeof pipeViewing !== 'undefined' && pipeViewing) {
-    if (failed) return `这一轮有 ${failed} 个步骤失败，记录只读。要处理当前的失败请先回到最新。`;
-    if (result.stopped) return '这一轮被停止了，已完成结果当时已保留。记录只读。';
-    if (skipped) return `这一轮有 ${skipped} 个步骤被跳过，具体原因见下方。记录只读。`;
-    return '这一轮的步骤都已完成。记录只读。';
+    const recordHint = '运行记录只读；带「不再抓取」的条目仍可永久移除。';
+    if (failed) return `这一轮有 ${failed} 个步骤失败。${recordHint}要重试当前失败请先回到最新。`;
+    if (result.stopped) return `这一轮被停止了，已完成结果当时已保留。${recordHint}`;
+    if (skipped) return `这一轮有 ${skipped} 个步骤被跳过，具体原因见下方。${recordHint}`;
+    return `这一轮的步骤都已完成。${recordHint}`;
   }
   if (s.running) {
     if (s.stop_requested) return '正在等待执行中的步骤收尾；全部结束前暂不能新建同步，已完成结果会保留。';
@@ -58,14 +59,12 @@ function initPipeStageRows() {
    两件事只在**来源给得出身份**时才有:①标题点得开(`url`,去原文核对是不是真的
    没内容了);②那颗「不再抓取」(`drop`,原样回传给后端,怎么删只有采集器知道)。
    来源给不出身份时两样都不出现 —— 指着另一篇文章让人删是不可恢复的。        */
-function pipeFailureRow(f, viewing) {
+function pipeFailureRow(f) {
   const title = esc(f.title || '未命名内容');
   const head = f.url
     ? `<a href="${esc(safeUrl(f.url))}" target="_blank" rel="noopener noreferrer">${title}${arrow('ext')}</a>`
     : title;
-  // **翻历史时这颗按钮一律不出现**,口径同「重试失败项」:「看到的那一轮」和
-  // 「按下去会动的那一轮」必须是同一轮。链接照旧能点 —— 它只是去读原文。
-  const drop = !viewing && f.drop && f.drop.channel && f.drop.id
+  const drop = f.drop && f.drop.channel && f.drop.id
     ? `<button class="text-button pipe-failure-drop" data-drop="${esc(JSON.stringify(f.drop))}">不再抓取</button>`
     : '';
   return `<p><span class="pipe-failure-head">${head}${drop}</span><span>${esc(f.reason || '')}</span></p>`;
@@ -155,13 +154,10 @@ function renderPipeState(s) {
       `${waiting ? '待处理' : '问题'}明细 · ${total} 项`
       + (total > failures.length ? `（仅列前 ${failures.length} 条）` : '');
     const list = details.querySelector('.pipe-failures');
-    // **翻历史也要进签名。** 那颗「不再抓取」按钮在只读那一屏不出现(理由在
-    // `pipeFailureRow`),而两屏的 failures 完全可能逐字相同 —— 只比内容的话,
-    // 从历史切回最新之后按钮一直不长出来。
-    const signature = JSON.stringify([!!viewing, failures]);
+    const signature = JSON.stringify(failures);
     if (list.dataset.signature !== signature) {
       const scroll = list.scrollTop;
-      list.innerHTML = failures.map(f => pipeFailureRow(f, !!viewing)).join('');
+      list.innerHTML = failures.map(f => pipeFailureRow(f)).join('');
       list.dataset.signature = signature; list.scrollTop = scroll;
     }
   }
