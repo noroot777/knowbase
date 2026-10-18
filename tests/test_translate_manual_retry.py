@@ -181,12 +181,8 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual([1], started)
         self.assertEqual(18, r.json()['pending'])
 
-    def test_a_queue_longer_than_one_round_says_so(self):
-        """一轮上限是 `translate.MAX_ITEMS`,队列比它长时要如实说清只译得完一截。
-
-        不说的话用户点一次、看到数字只掉了 40,会以为按钮漏了东西 —— 而那正是
-        这颗按钮最常见的使用场景(积压几百条)。
-        """
+    def test_a_large_queue_is_processed_in_one_round(self):
+        """取消条数上限后，重译提示覆盖整个授权范围，不再承诺分轮。"""
         from kb import pipeline
         from kb.feeds import translate
         with patch.object(translate, 'available', lambda: True), \
@@ -203,8 +199,8 @@ class EndpointTests(unittest.TestCase):
         # (见 `translate.stuck`;两个一样的话这条注入红 0 条)。
         self.assertIn('246', detail)
         self.assertNotIn('240', detail)
-        self.assertIn(str(translate.MAX_ITEMS), detail)
-        self.assertIn('下一轮', detail)
+        self.assertIn('这一轮翻译 246 条', detail)
+        self.assertNotIn('下一轮', detail)
 
     def test_a_short_queue_does_not_promise_a_second_round(self):
         """反过来钉一边:一轮译得完的时候不许说「其余留到下一轮」。"""

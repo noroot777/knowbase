@@ -37,7 +37,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from kb.feeds import readable, registry as reg
-from kb.feeds.fetching import FeedError, request
+from kb.feeds.fetching import FeedError, SOURCE_SECONDS, request
 # 「这一行此刻是哪一版」那份口径摆在 `grab_store` 里(两个版本身份 ——
 # 内容身份 `item_version` 和工作身份 `work_version` —— 要摆在一起对照着读),
 # 本模块和手动重抓那条链共用它。再导出一次,让 `fulltext.work_version` 照旧能用。
@@ -101,7 +101,13 @@ def fetch_one(url: str) -> tuple[str, str]:
     空串,是因为空串那条路的提示写的是"可能需要登录或由脚本渲染",而这里的
     原因明确得多 —— 面板上要说得出是哪一类。
     """
-    response = request(url, _HEADERS)
+    from kb.feeds.markdown_source import accept, fetch, from_response, target
+    deadline = time.monotonic() + SOURCE_SECONDS if target(url) else None
+    if markdown := fetch(url, transport=request, deadline=deadline):
+        return markdown, ''
+    response = request(url, accept(_HEADERS), **({'deadline':deadline} if deadline is not None else {}))
+    if markdown := from_response(response):
+        return markdown, ''
     if problem := readable.html_problem(response.body, response.headers):
         raise FeedError(problem)
     return readable.extract_or_reason(readable.decode(response.body, response.headers))
@@ -355,7 +361,7 @@ def retire_stale(kind: str) -> int:
     """把「新正文已经落进 vault、知识库里那份旧提取还没作废」的那几篇收掉。
 
     **时点是「新正文真的落了盘」,不是「网络抓到了正文」。** 补抓成功之后这一条
-    要先排队等翻译(一轮只译 `translate.MAX_ITEMS` 条),那期间 vault 里还是旧
+    要先等翻译成功，翻译失败或同步被停止时 vault 里还是旧
     壳 —— 在补抓那一刻就清掉 `extracted_at` 的话,提取阶段会拿**旧壳**再买一次
     提取、写回一个同样过时的结论,而 `extracted_at` 跟着又非空了:等正文译完
     导出之后,摘要和主题照旧是壳的。所以判据是 `exported_hash=content_hash`

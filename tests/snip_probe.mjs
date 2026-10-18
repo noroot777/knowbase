@@ -144,10 +144,14 @@ check("订阅片段落库:origin=doc + 真 path + 原文", docs.length === 1
   && docs[0].path === fx.docPath && docs[0].quote === fx.snipFeed,
   JSON.stringify(docs.map(f => ({ path: f.path, q: f.quote }))));
 
-// **有文档路径 ≠ 那段话在阅读页那一头找得到。** 这个阅读器按 textContent 原样
-// 摊开正文(星号看得见),而 `/doc/…` 把同一份 md 按 markdown 渲染(星号没了)。
-// 存之前那道核对(`snip.js` 的 `snipVerified`)要把这一段退回 origin=feed ——
-// 回跳打开站外原文,而不是存一条点回去永远「没找到」的收藏。
+const styled = await snip('#source-reader-body', fx.snipMarkedPlain);
+const styledFav = (await evalJs(`window.__favs()`)).filter(f => f.quote === fx.snipMarkedPlain);
+check('排版后的强调文字照旧收藏到文档', styled.shown && styledFav.length === 1
+  && styledFav[0].origin === 'doc' && styledFav[0].path === fx.docPath, JSON.stringify(styledFav));
+
+// **有文档路径 ≠ 那段话在阅读页那一头找得到。** 短观点保留纯文本里的星号,
+// 而 `/doc/…` 渲染 Markdown 后星号消失,核对仍必须退回站外原文。
+await evalJs(`sourceReaderItem = { ...sourceReaderItem, content_kind:'post' }; renderSourceReader(); true`);
 const dmk = await snip("#source-reader-body", fx.snipMarked);
 check("带 markdown 标记的那段也收得下", dmk.shown, `picked=${dmk.picked}`);
 const marked = (await evalJs(`window.__favs()`)).filter(f => f.quote === fx.snipMarked);
@@ -155,6 +159,7 @@ check("它退回 origin=feed、不冒认能定位回文档", marked.length === 1
   && marked[0].origin === "feed" && marked[0].path === ""
   && marked[0].url === "https://example.org/skill-pipeline",
   JSON.stringify(marked.map(f => ({ o: f.origin, p: f.path, u: f.url }))));
+await evalJs(`readSourceItem(${js(fx.itemKey)}); true`);
 
 // 反向:选不满 4 字不许弹(误触、双击一个词)
 await evalJs(`window.__snipSelect('#source-reader-body', '开头'); true`);

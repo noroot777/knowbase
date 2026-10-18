@@ -20,6 +20,8 @@
   数还没入库那一档。**待补抓的条目标题照显示**,换掉的只有正文那一段。
 - **提取器自己写,不装 readability/trafilatura**(我们要的输出是**纯文本**,而块级边界已经由 `fetching.plain` 定
   死;而且 `pyproject.toml` 一动 `uv run` 就要重建 editable 包)。
+- **明确的 Markdown 原文先于网页提取**(`markdown_source`):GitHub README/Markdown 文件、直接 Markdown 链接与明确的
+  Markdown 响应保留源格式。优先请求和 HTML 回退共用单次预算,二进制或 HTML 冒充的 Markdown 不接收;通用 HTML 提取契约不变。
 - **`find_all` 是快照,`decompose()` 之前必须先问「这个节点还在吗」**(`_gone`;bs4 把被销毁节点的 `attrs` 置成
   None)。
 - **`header`/`footer`/`aside` 要看位置,不能无条件删** —— 只有落在 `<article>`/`<main>` **外面**的才是站点部件
@@ -349,7 +351,7 @@
   四件事:
   ①**时点是「新正文真的落了盘」,不是「网络抓到了正文」**(判据
     `extract_stale=1 AND exported_hash=content_hash`)。补抓成功之后这一条要先排队
-    等翻译(一轮只译 `translate.MAX_ITEMS` 条),那期间 vault 里还是旧壳 —— 在补抓
+    等翻译成功，翻译失败或同步被停止时 vault 里还是旧壳 —— 在补抓
     那一刻就清掉 `extracted_at` 的话,提取阶段会拿**旧壳**再买一次提取、写回一个
     同样过时的结论,而 `extracted_at` 跟着又非空了:等正文译完导出之后,摘要和主题
     照旧是壳的。

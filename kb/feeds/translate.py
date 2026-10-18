@@ -31,10 +31,8 @@ from kb.feeds.translate_scope import (            # noqa: F401 - 再导出
     queued_sql, requeue_failed, scope_signature, stuck, _retry_where,
 )
 from kb.pipeline_state import _state
+from kb.feeds import markdown_blocks
 
-# 一轮同步最多译多少条:存量几千条英文的话,一次全译会把一次同步拖成几小时、
-# 还一次性烧掉一大笔钱。分批消化,每轮同步啃一截。
-MAX_ITEMS = int(os.environ.get('KB_TRANSLATE_MAX_ITEMS', '40'))
 # 一条正文最多译多少字:超出部分不译,末尾注明并指向原文。RSS 全文条目偶尔
 # 上万字,整篇译一遍的钱和时间都不划算,而知识库要的是能被检索到的中文正文。
 MAX_BODY = int(os.environ.get('KB_TRANSLATE_MAX_BODY', '12000'))
@@ -47,9 +45,11 @@ NOTE = '> 本文由英文原文自动翻译，专有名词保留原文；如有�
 _RULES = """把下面的内容翻译成简体中文。
 
 要求:
-- 只输出译文本身,不要解释、不要前言、不要代码围栏。
+- 只输出译文本身,不要解释、不要前言、不要额外添加代码围栏。
 - 保持原有的段落与换行结构,不要合并或拆分段落。
 - 产品名、公司名、人名、代码、命令、URL、缩写保留原文,不要音译。
+- 保留 Markdown 标题、列表、表格、链接格式；不要给整篇输出额外套代码围栏。
+- KB_PRESERVE_ 开头的占位标记必须原样保留、单独一行，不要翻译、修改、重复或删除。
 - 不增不减不总结:原文说什么就译什么。"""
 
 _WITH_TITLE = _RULES + """
@@ -146,10 +146,12 @@ def translate_item(item, model) -> tuple[str, str]:
         # 存量半成品(见 `_requeue_partial`):正文已经是中文,只差标题那一行。
         # 整篇重译一遍是把同一份正文再买一次,而它已经在 vault 里了。
         return _title_only(original, model), item['body_zh']
-    body = (item['body'] or '')[:MAX_BODY]
-    truncated = len(item['body'] or '') > MAX_BODY
+    body, protected, cutoff = markdown_blocks.prepare(item['body'] or '', MAX_BODY)
+    truncated = len(item['body'] or '') > cutoff
     parts = _split(body)
     if not parts:                                # 只有标题
+        if truncated:
+            raise RuntimeError('首个代码块超过翻译长度上限，无法保真截断，请查看原文')
         return _title_only(original, model), ''
     title_zh, out = _parse_titled(_call(
         _WITH_TITLE.format(title=original or '(无标题)', body=parts[0]), model))
@@ -159,8 +161,9 @@ def translate_item(item, model) -> tuple[str, str]:
     text = '\n\n'.join(p for p in pieces if p)
     if not text.strip():
         raise RuntimeError('模型返回了空译文')
+    text = markdown_blocks.restore(text, protected)
     if truncated:
-        text += _TRUNCATED.format(n=MAX_BODY)
+        text += _TRUNCATED.format(n=cutoff)
     if original and not title_zh:
         title_zh = _title_only(original, model)
     return title_zh, text
@@ -323,13 +326,16 @@ def translate_pending(kind: str, limit: int | None = None, progress=None,
                       source_id: int | None = None) -> dict:
     """把这个来源里待翻译的条目译成中文。返回一份成品摘要给调用方汇报。
 
+    默认处理当前范围内全部待译条目，不设每轮条数上限。只有显式传入 `limit`
+    的调用才限量；失败条目每轮只尝试一次，不在同一轮里反复重试。
+
     没配 key / 没有可用模型时直接跳过(skipped 带原因),不报错也不重试计数
     ——那是配置问题,不是这些条目有问题,按失败记会把重试次数白白耗光。
 
     **`only_manual` 和 `source_id` 一起才是付费边界,缺一不可。** 面板上那颗
     「重新翻译」按钮的射程跟着当前选中的订阅走,而这两个参数是那个射程唯一跟得到
     取数这一步的东西:收窄只到 `requeue_failed`(它按 `source_id` 点名)的话,
-    这里照旧按整个 kind 取 `MAX_ITEMS` 条,于是用户确认「这条订阅的 1 条」却为
+    这里照旧按整个 kind 取数,于是用户确认「这条订阅的 1 条」却为
     另一条订阅的内容也付了钱(2026-10-13 第 1 轮审查实测)。`crawl_filter`
     到不了这里 —— `crawl_channels` 只留 `channel`/`accounts` 两个键。
 
@@ -366,19 +372,23 @@ def translate_pending(kind: str, limit: int | None = None, progress=None,
         # 这期间每一轮导出都把这 63 条原样报成「补译失败」并判红 —— 一个三周
         # 不变的红点,说的还不是这一轮发生的事(2026-10-08 实测)。
         # 失败优先不会让它们赖着:`translate_tries<MAX_TRIES` 是硬出口,试满
-        # 就按原文导出、离开队列。而 tries=0 的那些只是正常积压,晚一轮无损。
-        rows = [dict(r) for r in c.execute(
+        # 就按原文导出、离开队列。从没试过的条目在同一轮接着处理。
+        sql = (
             f'SELECT * FROM feed_items WHERE kind=? AND ({cond})'
             # **手动重试排在最前面**,压过「失败过的优先」:那颗按钮是用户的
             # 显式指令,而第二段排序恰好把刚放回队列的那批排到队尾(额度清零
-            # = 从没试过)。队列积压超过一轮上限时,点按钮等一轮同步会是库里
-            # 一个字都没变 —— 见 `requeue_failed`。
+            # = 从没试过)。显式限量调用时也要先取点名的条目，不能挤到后面
+            # 导致一条都没译 —— 见 `requeue_failed`。
             # `key` 收尾是为了定序:`fetched_at` 只精确到秒(`registry.now`),
-            # 一批抓回来的几百条时间戳一模一样,前几段排完仍然没有定序 —— 取
-            # 哪 40 条就交给 SQLite 的扫描顺序了,不可复现也没法测。
+            # 一批抓回来的几百条时间戳一模一样,前几段排完仍然没有定序 —— 调用
+            # 顺序就交给 SQLite 的扫描顺序了,不可复现也没法测。
             ' ORDER BY translate_manual DESC, translate_tries DESC,'
-            ' fetched_at DESC, key LIMIT ?',
-            (kind, *cargs, max(1, limit or MAX_ITEMS))).fetchall()]
+            ' fetched_at DESC, key')
+        args = (kind, *cargs)
+        if limit is not None:
+            sql += ' LIMIT ?'
+            args += (max(1, limit),)
+        rows = [dict(r) for r in c.execute(sql, args).fetchall()]
     # 剩几条要按**这一轮的射程**数:只译点名条目时拿整个来源的队列长度去减,
     # 报出来的「留到下一轮」里混着压根不在这一轮射程里的内容。
     summary['left'] = max(0, pending(kind, source_id,

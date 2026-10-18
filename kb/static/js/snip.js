@@ -682,7 +682,6 @@ function locateSnip(el, spec, skip) {
   if (window.Highlight && window.CSS && CSS.highlights) {
     CSS.highlights.set('kb-quote', new Highlight(range));
   }
-  const host = range.startContainer.parentElement;
-  if (host) host.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  scrollSnipRange(range);
   return true;
 }

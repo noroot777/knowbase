@@ -13,6 +13,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -335,7 +336,8 @@ class ExportStageTests(FeedCase):
         # 合成一个数就等于把故障说成积压(或者反过来天天报红)。
         self.put('First English post', 'Body one in English.')
         self.put('Second English post', 'Body two in English.')
-        with patch.object(translate, 'MAX_ITEMS', 1), \
+        with patch.object(translate, 'translate_pending',
+                          partial(translate.translate_pending, limit=1)), \
                 patch.object(llm, 'chat', Mock(return_value='###TITLE###\n中文标题\n'
                                                '###BODY###\n中文正文。')):
             FeedCollector('rss').materialize()
@@ -380,7 +382,8 @@ class ExportStageTests(FeedCase):
         self.put('First legacy post', 'Body one in English.')
         self.put('Second legacy post', 'Body two in English.')
         sync.export('rss')
-        with patch.object(translate, 'MAX_ITEMS', 1), \
+        with patch.object(translate, 'translate_pending',
+                          partial(translate.translate_pending, limit=1)), \
                 patch.object(llm, 'chat', Mock(return_value='###TITLE###\n中文标题\n'
                                                '###BODY###\n中文正文。')):
             FeedCollector('rss').materialize()

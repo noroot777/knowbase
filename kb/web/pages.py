@@ -94,6 +94,7 @@ _DOC_TMPL = """<!DOCTYPE html>
 <title>{title}</title>
 <script src="/static/vendor/marked.min.js"></script>
 <script src="/static/vendor/purify.min.js"></script>
+<link rel="stylesheet" href="/static/css/article.css">
 <style>
   /* 配色与 kb/static/css/base.css 的 :root 逐个对齐 —— 这页是 iframe 里独立
      渲染的产物,拿不到那份 token,只能抄。改那边记得改这里,否则点一条搜索
@@ -105,19 +106,13 @@ _DOC_TMPL = """<!DOCTYPE html>
   .meta {{ color: #66727C; font-size: 13px; margin-bottom: 28px;
            display: flex; gap: 14px; flex-wrap: wrap; }}
   .meta a {{ color: #17604F; text-decoration: none; }}
-  #content img {{ max-width: 100%; border-radius: 8px; }}
-  #content h1, #content h2, #content h3 {{ margin: 22px 0 10px; }}
-  #content p, #content ul, #content ol, #content blockquote {{ margin-bottom: 12px; }}
-  #content pre {{ background: #EAEEED; padding: 14px; border-radius: 9px; overflow-x: auto; }}
-  #content code {{ background: #EAEEED; padding: 1px 5px; border-radius: 4px; font-size: 14px; }}
-  #content blockquote {{ border-left: 3px solid #DCE3E0; padding-left: 14px; color: #3A4750; }}
   /* 行内箭头:与 kb/static/js/icons.js 的 ARROW_PATHS.ext 同一份几何(这页独立
      渲染,拿不到那个模块,只能抄)。别退回字符 ↗ —— 各字体粗细基线都不同。 */
   .ia {{ display: inline-block; vertical-align: -.14em; margin-left: 3px; opacity: .7; }}
 </style></head><body>
 <h1 class="doc-title">{title}</h1>
 <div class="meta">{meta}</div>
-<div id="content"></div>
+<div id="content" class="reader-prose"></div>
 <script>
 const MD = {md_json};
 const DOC_PATH = {path_json};

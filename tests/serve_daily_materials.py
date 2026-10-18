@@ -91,9 +91,14 @@ def build(vault, base='http://127.0.0.1'):
     for date, text in numeric_documents().items():
         (root / f'{date}.md').write_text(text, encoding='utf-8')
     (root / '2026-10-05.md').write_text(link_document(base), encoding='utf-8')
-    from tests.daily_material_queue_fixtures import queue_report
-
-    (root / '2026-10-03.md').write_text(queue_report(), encoding='utf-8')
+    for day, linked in [(4, True), (3, False)]:
+        title = '开头要找回的独特内容' + '正文说明。' * 90 + '结尾要找回的独特内容'
+        item = dict(path='source/long.md', title=title, source='rss', account='长段作者',
+                    url='https://example.org/long' if linked else '', late=False)
+        text = daily._page(datetime(2026, 10, day - 1, 8), datetime(2026, 10, day, 8),
+                           daily.Material(items=[item], total=1),
+                           '## 今日要点\n\n长素材的原文不能被滚动容器裁掉。', 'stub/none')
+        (root / f'2026-10-{day:02d}.md').write_text(text, encoding='utf-8')
 
 
 def main():
@@ -101,6 +106,7 @@ def main():
     parser.add_argument('--port', type=int, default=8876)
     parser.add_argument('--report-fixture', type=Path)
     parser.add_argument('--snapshot-fixtures', action='store_true')
+    parser.add_argument('--queue-fixtures', action='store_true')
     args = parser.parse_args()
     with contextlib.ExitStack() as stack:
         root = Path(fixture_root(stack, 'kb-material-qa-'))
@@ -110,6 +116,10 @@ def main():
         from kb import pipeline
         pipeline.start_scheduler = lambda: None
         build(vault, f'http://127.0.0.1:{args.port}')
+        if args.queue_fixtures:
+            from tests.daily_material_queue_fixtures import queue_report
+
+            (vault / 'daily' / '2026-10-03.md').write_text(queue_report(), encoding='utf-8')
         if args.snapshot_fixtures:
             from tests.daily_material_snapshot_fixtures import snapshot_documents
 
