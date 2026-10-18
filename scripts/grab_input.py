@@ -6,7 +6,7 @@ r"""手动收录那条命令行入口的**输入层**:把人粘进来的一行�
 
 **两类边界,依据完全不同,所以分两段扫:**
 
-①**边界是给定的**:整行就是一条地址(`_WHOLE_LINE`,`grab_cli._from_stdin` 用),
+①**边界是给定的**:整行就是一条地址(`WHOLE_LINE`,`grab_cli._from_stdin` 用),
   以及行内**明确圈出来**的那几种 —— `<地址>`、Markdown `[文字](目标)`、双引号、
   单引号。这几种的分隔符本身一定不属于地址,所以边界不是猜的。
 ②**裸写在行文里的**:边界只认空白。**一个标点都不剥、一个括号都不切** ——
@@ -49,7 +49,8 @@ import re
 # **第一趟(只认结构)在 `grab_md.py`**:CommonMark 的那一套行内解析、按所属语法
 # 解码、以及那份探测预算,全在那边。`TangledInput` 在本模块里**照旧可见** ——
 # 它是这一层对外的失败出口,引用方不该因为它搬了家而各自去找新门。
-from grab_md import WHOLE_LINE, TangledInput, links                 # noqa: F401
+from grab_md import (                                               # noqa: F401
+    WHOLE_LINE, TangledInput, labels_in, links)
 
 #: 扫描时**下一个值得停下来看的位置**。四个结构起点加裸地址的协议名 ——
 #: 逐字符推进在长剪贴板上是白跑,拿它跳过中间那些普通文字。
@@ -108,7 +109,7 @@ def _loose(part: str) -> list[str]:
     return out
 
 
-def _scan(text: str) -> list[str]:
+def _scan(text: str, labels: set[str]) -> list[str]:
     """**第二趟:按位置拼** —— 结构化区域交出它自己的目标,剩下的文字才抽裸地址。
 
     **两趟不能合成一趟。** 正则交替只在**同一个起点**上比较优先级,管不了「后面
@@ -120,7 +121,7 @@ def _scan(text: str) -> list[str]:
     """
     out: list[str] = []
     at = 0
-    for start, end, dest in links(text):
+    for start, end, dest in links(text, labels):
         # **水位只许往前**:label 里那条 autolink 会被随后认成的外层链接包住
         # (见 `_links`),那时 `start` 落在水位之前 —— 照 `at = end` 走会让已经
         # 走过的那一段再抽一遍。
@@ -150,12 +151,15 @@ def dedupe(items) -> list[str]:
     return out
 
 
-def links_in(text: str) -> list[str]:
-    """**夹着叙述文字的那一行**里的链接,按出现顺序去重。
+def links_in(text: str, labels: set[str] | None = None) -> list[str]:
+    """**夹着叙述文字的那一段**里的链接,按出现顺序去重。
 
-    只有 `grab_cli._targets` 判出「这一行不是一条干净地址」时才走这里。
+    `labels` 是**整份输入**里定义过的那几个标签(简写引用 `[标签]` 要靠它判):
+    定义是文档级的、引用可以写在定义之前,所以跨段那一份由调用方收齐传进来
+    (`grab_cli._from_stdin`)。不传就按这一段自己算 —— 单段调用照旧正确。
     """
-    return dedupe(_scan(text or ''))
+    text = text or ''
+    return dedupe(_scan(text, labels if labels is not None else labels_in(text)))
 
 
 def whole_line(line: str) -> bool:

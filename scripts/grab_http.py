@@ -237,8 +237,17 @@ def bad_api(api: str) -> str:
     一个请求都不发、也不去核实任何事实。
 
     只看「打得通吗」这几件事:**整串能编码成 URI**、协议是 http(s)、有主机名、
-    端口是数字。**不判它通不通** —— 服务没起是另一回事,那一档归 `ApiDown`
-    (那句话会说去 `./kb.sh start`)。
+    端口是数字、**没有查询串和锚点**。**不判它通不通** —— 服务没起是另一回事,
+    那一档归 `ApiDown`(那句话会说去 `./kb.sh start`)。
+
+    **查询串和锚点要在这儿明确拒掉,因为再往下这一层拼不出正确的路径。**
+    `_request` 是 `base + path`(四条路共用),所以
+    `--api http://127.0.0.1:8787?token=abc` 实发的是 `POST /?token=abc/api/grab`、
+    带 `#sources` 时实发 `POST /` —— 两种都不是 `/api/grab`,而服务**真的收到了
+    一个请求**,只是打在别的路径上(实测)。那不是「投出去了而结果未知」,是参数
+    一开始就拼不出我们要打的那条路:**按参数错退出 2、一个请求都不发**。
+    (路径前缀照旧支持 —— 反代挂在 `/kb` 下面是正常用法,`normalize_api` 去掉尾
+    斜杠之后 `base + '/api/grab'` 拼出来就是对的。)
 
     **「能编码成 URI」这一条和另外三条一样要在这儿拦。** 请求行是 ASCII 的,
     所以地址里带没编码的非 ASCII 字符(`http://127.0.0.1:8787/知识`、IDN 主机名)
@@ -265,6 +274,9 @@ def bad_api(api: str) -> str:
     if scheme not in ('http', 'https') or not host:
         return ('--api 要写成 http://主机:端口 这种形式(协议名不能省)，'
                 f'收到 {api!r}')
+    if parts.query or parts.fragment:
+        return ('--api 不能带查询串或锚点(接口路径会拼在它后面，拼出来就不是'
+                f'我们要打的那一条了):{api!r}')
     return ''
 
 
@@ -281,9 +293,13 @@ def normalize_api(api: str) -> str:
     多加几个大小写分支**。
     """
     parts = urllib.parse.urlsplit(api)
+    # **查询串和锚点不带进来**:`_request` 是 `base + path`,带着它们拼出来的是
+    # 另一条路径(见 `bad_api` 里那一段)。`bad_api` 已经把这种参数拦在外面,
+    # 这里一并落实 —— **这一份是「真正会被请求的那个地址」,它不该有拼不出
+    # 正确路径的成分**(两处同一个判据,少了这一处的话某个绕过参数校验的调用方
+    # 又会拿到一个拼坏的 base)。
     return urllib.parse.urlunsplit(
-        (parts.scheme.lower(), parts.netloc, parts.path.rstrip('/'),
-         parts.query, parts.fragment))
+        (parts.scheme.lower(), parts.netloc, parts.path.rstrip('/'), '', ''))
 
 
 def post_grab(api: str, url: str, refetch: bool, *,

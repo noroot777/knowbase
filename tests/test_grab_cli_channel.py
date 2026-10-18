@@ -182,6 +182,33 @@ class GrabCliChannelTests(GrabCliCase):
                 self.assertIn('非 ASCII', err.getvalue())
                 self.assertEqual(self.plan['calls'], [])
 
+    def test_an_api_we_cannot_append_a_path_to_is_a_parameter_error(self):
+        """**查询串和锚点要在参数层拦掉:再往下这一层拼不出正确的路径。**
+
+        `_request` 是 `base + path`(四条路共用),所以 `--api http://…:8787?token=abc`
+        实发的是 `POST /?token=abc/api/grab`、带 `#sources` 时实发 `POST /` ——
+        两种都**不是** `/api/grab`,而服务真的收到了一个请求,只是打在别的路径上。
+        那不是「投出去了而结果未知」,是参数一开始就拼不出我们要打的那条路。
+
+        判据同非 ASCII 那一档:退出 2、stderr 一句人话、**一个请求都没发**。
+        **反过来钉一边:路径前缀照旧支持**(反代挂在 `/kb` 下面是正常用法)——
+        不然这道判据一宽就把合法的地址也拦了。
+        """
+        for api in (f'{self.api}?token=abc', f'{self.api}#sources'):
+            with self.subTest(api=api):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = cli.main(['--api', api, '--json', '--state', URL])
+                self.assertEqual(code, 2, out.getvalue() + err.getvalue())
+                self.assertEqual(out.getvalue(), '')
+                self.assertNotIn('Traceback', err.getvalue())
+                self.assertIn('查询串', err.getvalue())
+                self.assertEqual(self.plan['calls'], [])
+        # 反过来:带路径前缀的照旧放行(拼出来就是 `<前缀>/api/grab`)。
+        self.assertEqual(cli.bad_api('http://127.0.0.1:8787/kb/'), '')
+        self.assertEqual(cli.normalize_api('http://127.0.0.1:8787/kb/'),
+                         'http://127.0.0.1:8787/kb')
+
     def test_a_grab_reply_without_positive_evidence_is_not_called_duplicate(self):
         """**「早就在知识库里了」要正面证据**:`duplicate` 和 `done` 都为真。
 

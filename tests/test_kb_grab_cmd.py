@@ -66,11 +66,11 @@ class GrabCommandTest(unittest.TestCase):
             d.mkdir(parents=True)
         shutil.copy2(REPO / "kb.sh", self.root / "kb.sh")
         (self.root / "kb.sh").chmod(0o755)
-        # **五个文件一套**(入口 + 通道层 + 输入层的两趟 + 输出层):单文件
-        # 700 行的上限之下按职责拆的,少拷一个,隔离环境里那条命令一 import 就炸,
-        # 而红出来的话指不到「夹具没拷全」这件事。
-        for name in ("grab_cli.py", "grab_http.py", "grab_input.py",
-                     "grab_md.py", "grab_say.py"):
+        # **六个文件一套**(入口 + 通道层 + 输入层的两趟 + 字符引用 + 输出层):
+        # 单文件 700 行的上限之下按职责拆的,少拷一个,隔离环境里那条命令一 import
+        # 就炸,而红出来的话指不到「夹具没拷全」这件事。
+        for name in ("grab_cli.py", "grab_entity.py", "grab_http.py",
+                     "grab_input.py", "grab_md.py", "grab_say.py"):
             shutil.copy2(REPO / "scripts" / name, self.root / "scripts")
         self.log = base / "uv.log"
         self.port = _free_port()

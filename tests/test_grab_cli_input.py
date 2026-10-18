@@ -9,7 +9,9 @@
 前者在终端上就是一行 `failed`,用户看得见、改写了再来。
 
 夹具(假 kb-web)在 `tests/grab_cli_fixture.py`,收敛那一组在
-`tests/test_grab_cli.py`。
+`tests/test_grab_cli.py`;**判据是时间和预算**的那几条在
+`tests/test_grab_cli_budget.py`(按「拿什么作证」分家:这一份断言发出去的是哪个
+地址,那一份断言认一段损坏或者很长的输入要花多久、从哪个出口走)。
 """
 from __future__ import annotations
 
@@ -274,28 +276,6 @@ class GrabCliInputTests(GrabCliCase):
                            '(https://example.org/outer) 这篇')
         self.assertEqual(self.plan['posted'], ['https://example.org/inner'])
 
-    def test_many_unclosed_backticks_do_not_blow_up_the_parse(self):
-        """**反引号那一串的配对也不许随输入长度平方级变慢。**
-
-        一长串未闭合的反引号,如果每个字符处都重新往后找等长收尾,就会反复扫同一段
-        余文(实测 1000/2000/4000 个:0.011/0.037/0.112 秒,长度翻两倍耗时
-        约十倍)。出路同方括号那一类:**一遍扫出所有串、按宽度分组,配对查表**。
-        """
-        import time
-        # **两种形态各钉一件事**:①一长串未闭合的 —— 它整个是**一个**串,判据是
-        # 「找不到收尾时跳过整串」(旧版在串里每个字符处都重新往后找一遍等长收尾,
-        # 那才是平方级的来源);②很多个短串 —— 这一类串的数量才多,判据是「配对
-        # 查表」(逐个往后找等长的那种写法在这儿是平方级)。少了②,把查表换成逐起点
-        # 重扫也全绿(①只调用一次配对,多慢都看不出来)。
-        for blob in (('`' * 20000) + ' 普通文字 https://example.org/tail',
-                     ('`x' * 20000) + ' 普通文字 https://example.org/tail'):
-            with self.subTest(head=blob[:6]):
-                start = time.monotonic()
-                found = cli.links_in(blob)
-                spent = time.monotonic() - start
-                self.assertEqual(found, ['https://example.org/tail'])
-                self.assertLess(spent, 1.0, f'解析花了 {spent:.2f} 秒')
-
     def test_every_url_we_send_is_what_its_own_structure_says(self):
         """**发出去的每个地址,都得是它那一段结构真正表达的目标。**
 
@@ -365,6 +345,23 @@ class GrabCliInputTests(GrabCliCase):
             ('段里有过正文行之后,`[x]: y` 只是文字',
              f'见下文\n[1]: {YES} "见 {NO}/in-title"',
              [YES, f'{NO}/in-title']),      # 裸地址那一档排除 `"`(URI 里必须编码)
+            # **实体得是真的存在的那几个。** 形状对就解的那一版把
+            # `&notanentity;` 按 `&not` 前缀解成 `¬anentity;`(`html.unescape`
+            # 是「一般文本」那一份),发出去的是另一个地址、真落库;CommonMark 对
+            # 认不出的实体是**原样保留**。
+            ('认不出的命名实体原样保留,不许按前缀解一半',
+             f'见 [原文]({YES}/?q=&notanentity;) 这篇', [f'{YES}/?q=&notanentity;']),
+            ('真的存在的那些照旧解', f'见 [原文]({YES}/?q=&amp;x=1) 这篇',
+             [f'{YES}/?q=&x=1']),
+            # **简写引用**(`[标签]`):有定义它就是一条链接,目标在定义行里。
+            # 不认它的那一版退回裸地址,多发一条 `…/label]` —— 实测它和真目标两条
+            # 都真写入真导出真索引,命令对两条都报 `saved`。
+            ('简写引用 + 定义:只收定义里那个目标',
+             f'[{NO}/label]\n\n[{NO}/label]: {YES}', [YES]),
+            ('引用块里的定义一样算(block quote 的内容照旧是块级序列)',
+             f'> [{NO}/label]: {YES}\n\n看 [{NO}/label] 这篇', [YES]),
+            ('反过来钉一边:标签没有定义时 `[x]` 只是文字,裸地址照旧认',
+             f'[备注] 看 {YES} 这条', [YES]),
             # **属性值按 HTML 自己那一套解码**(不是 Markdown 那一份的宽松版):
             # 数字引用缺分号照样算,命名引用缺分号反而有个历史特例。
             ('HTML 属性值里的字符实体要解开',
@@ -472,57 +469,6 @@ class GrabCliInputTests(GrabCliCase):
                          ['https://example.org/auto', 'https://example.org/outer',
                           'https://example.org/code'])
 
-    def test_input_we_cannot_parse_in_full_is_an_error_not_an_empty_answer(self):
-        """**认不全的那一行要说「我认不全」,不许说「这一行没有链接」。**
-
-        `](目标)` 的括号一路不配平、title 没有收尾引号、`<?` 找不到 `?>` ——
-        这几种都得扫到行尾才知道答不上来,一行里塞上千个,同一段余文就被反复扫
-        (实测 500/1000/2000 个 `[](`:0.019/0.065/0.258 秒,长度翻倍耗时四倍)。
-
-        **出路不是「扫到一半放弃、把剩下的按裸地址拼一条」** —— 那正是保真那一类
-        要堵的事。所以探测有一份预算(`_Budget`),超了抛 `TangledInput`:
-        **退出 2、一句人话**(同打错 `--api` 那一档),一个请求都不发。「没有链接」
-        是「确定没有」这个结论,而我们只知道没认全。
-
-        判据两件:**时间**(四类损坏输入都要在一秒内收口,一类换一个判据)和
-        **出口**(退出 2、stdout 一个字都没有、没发请求)。
-        """
-        import time
-        for pat in ('[](', '[](a (', '<?', '<!--'):
-            with self.subTest(pat):
-                blob = pat * 4000 + ' 看 https://example.org/tail'
-                start = time.monotonic()
-                code, out, err = self.run_cli('--no-wait', '-', stdin=blob)
-                spent = time.monotonic() - start
-                self.assertLess(spent, 1.0, f'解析花了 {spent:.2f} 秒')
-                self.assertEqual(code, 2)
-                self.assertEqual(out, '')
-                self.assertIn('认不全', err)
-                self.assertEqual(self.plan['posted'], [])
-
-    def test_many_distinct_addresses_are_deduped_without_comparing_pairs(self):
-        """**按出现顺序去重,但不许两两比较。**
-
-        `not in 列表` 那一版每条都跟前面所有条比一遍 —— 一次粘进来上万条互不相同
-        的地址时是平方级。出路是**集合判在不在、列表保顺序**,而且这个判据只有
-        一份(`grab_input.dedupe`):行内抽取和整批参数两个调用点共用它,所以这一条
-        用例同时钉住两处。
-
-        **反过来钉一边**:顺序和去重的结果一个都不许变 —— 收录是按这个顺序一条条
-        投出去的,而重复的那几条只该投一次。
-
-        规模要够:两万条时列表那一版 0.62 秒(还在阈值内),四万条 2.62 秒 ——
-        长度翻倍耗时四倍。少给一半,把集合换回列表一条都不红。
-        """
-        import time
-        many = [f'https://example.org/p/{k}' for k in range(40000)]
-        blob = '看这些 ' + ' '.join(many + many[:3]) + ' 都值得读'
-        start = time.monotonic()
-        found = cli.links_in(blob)
-        spent = time.monotonic() - start
-        self.assertLess(spent, 1.0, f'解析花了 {spent:.2f} 秒')
-        self.assertEqual(found, many, '顺序和去重的结果都不许变')
-
     def test_an_unpaired_bracket_elsewhere_does_not_spoil_a_real_link(self):
         """**一个 `[` 配不平,否定不了后面那条配得平的链接。**
 
@@ -537,37 +483,6 @@ class GrabCliInputTests(GrabCliCase):
                            '[A [B] C 见 [原文](https://example.org/second) 末')
         self.assertEqual(self.plan['posted'], ['https://example.org/target',
                                                'https://example.org/second'])
-
-    def test_balanced_brackets_that_are_not_links_stay_linear(self):
-        """**反过来钉一边:方括号全配平、后面却不是链接,耗时一样不许平方涨。**
-
-        `[[[[…文字…]]]]` 里每个 `[` 都配得平,要到 `(` 那一步才失配 —— 下面那条
-        未闭合的用例判不住这一类(未闭合的压根配不出对),而「每个起点各自往后找
-        配对」在这儿会重扫同一段余文(实测 1000/2000/4000 对括号约
-        0.033/0.126/0.508 秒,长度翻倍耗时约四倍)。判据同样落在时间上。
-        """
-        import time
-        blob = ('[' * 20000) + '普通文字' + (']' * 20000) + ' https://example.org/tail'
-        start = time.monotonic()
-        found = cli.links_in(blob)
-        spent = time.monotonic() - start
-        self.assertEqual(found, ['https://example.org/tail'])
-        self.assertLess(spent, 1.0, f'解析花了 {spent:.2f} 秒')
-
-    def test_many_unclosed_brackets_do_not_blow_up_the_parse(self):
-        """**一段带很多未闭合 `[` 的文字,耗时不许随长度平方涨。**
-
-        每个 `[` 都从自己那儿扫到末尾找配对的话,粘一段这样的文字进来就卡住了。
-        判据落在**时间**上:两万个未闭合方括号要在一秒内解析完,而且末尾那条地址
-        照旧认得出来(别为了快把它漏掉)。
-        """
-        import time
-        blob = ('[' * 20000) + ' https://example.org/tail'
-        start = time.monotonic()
-        found = cli.links_in(blob)
-        spent = time.monotonic() - start
-        self.assertEqual(found, ['https://example.org/tail'])
-        self.assertLess(spent, 1.0, f'解析花了 {spent:.2f} 秒')
 
     def test_markdown_around_a_target_is_consumed_whole(self):
         """Markdown 那一段的几种写法:**目标取出来,别的字节一个都不带上。**

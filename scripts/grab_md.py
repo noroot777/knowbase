@@ -9,8 +9,8 @@ r"""手动收录那条输入层的**第一趟:只认结构** —— 按 CommonMa
   先归谁,认成的那一块**整块消费**,里面再没有别的语法可认。
 - **认不出来就失败关闭,不许退回去拼一条。** 第一趟认出来的那一块不交给第二趟去
   抽裸地址 —— 那一块的 `)` `]` 是 Markdown 的收尾,不是地址的一部分。
-- **按所属语法解码**:Markdown 的目标按 Markdown 的规则(反斜杠转义 + 字符实体,
-  同一遍里解),HTML 的属性值按 HTML 的规则(只有字符实体)。
+- **按所属语法解码**(两套规则在 `grab_entity.py`,那一份有张对照表):Markdown 的
+  目标按 CommonMark 解(反斜杠转义 + 字符实体,同一遍里),HTML 的属性值按 HTML5 解。
 
 对外只有 `links_in`/`whole_line` 那一侧用得到的几样:`WHOLE_LINE`(「整个就是一条
 地址」那一份判据,三处共用)、`TangledInput`、`links`。
@@ -18,9 +18,11 @@ r"""手动收录那条输入层的**第一趟:只认结构** —— 按 CommonMa
 from __future__ import annotations
 
 import bisect
-import html
-import html.entities
 import re
+
+# **解码在 `grab_entity.py`**(单文件要过 700 行的上限):Markdown 和 HTML 属性值
+# 是两套规则,那一份模块说明里有张对照表。这一层只管结构在哪儿断。
+from grab_entity import html_value, md_entity
 
 #: **整行就是一条地址** —— 这一档和显式参数走同一道:一个字符都不动。判据只看
 #: 「这一行(去掉两头空白之后)整个就是一条 http(s) 地址、中间没有空白」,不看它
@@ -57,7 +59,7 @@ _TAG = re.compile(r'<(?:[A-Za-z][A-Za-z0-9-]*'
                   r')>')
 #: 标签里**带值的那几个属性**(`href="…"`、`src='…'`、裸值)。用户粘一段 HTML
 #: 源码进来时,`href="https://…"` 就是他要的那一篇,所以这一档要收。
-#: **值要按 HTML 的规则解码**(只有字符实体,没有反斜杠转义),见 `_attrs`。
+#: **值要按 HTML5 的规则解码**(`grab_entity.html_value`),见 `_attrs`。
 _ATTR = re.compile(r'''\s+[A-Za-z_:][A-Za-z0-9_.:-]*\s*=\s*'''
                    r'''(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<uq>[^\s"'=<>`]+))''')
 #: autolink:`<协议:…>`。**它是一条链接**(所以认出来要产出目标、而且「链接里不许
@@ -76,35 +78,23 @@ _DECL = re.compile(r'<![A-Za-z]')
 #: **链接定义行**(CommonMark「Link reference definitions」):`[标签]: 目标 "标题"`。
 #: 这是**块级**结构 —— 只在一段的开头连着出现,段里一旦有过正文行,后面的
 #: `[x]: y` 就只是文字了(markdown-it 的 commonmark 模式同口径)。最多三个前导空格。
-_DEF_OPEN = re.compile(r'[ \t]{0,3}\[')
+#: **引用块里的定义一样算**(`> [标签]: 目标`:block quote 的内容照旧是块级序列),
+#: 所以前缀允许那几个 `>` —— 不认它的那一版把那一行交给第二趟,标签像地址时按
+#: 空白断出一条 `https://a/label]:`(实测真落库)。
+_DEF_OPEN = re.compile(r'(?:[ \t]{0,3}>)*[ \t]{0,3}\[')
+
+#: link label 最多 **999** 个字符(CommonMark「Link label」那一节的硬上界)。
+#: **它同时是一道性能判据**:简写引用那一问要拿 `[` 和 `]` 之间那段文字去比对标签表,
+#: 而那个 `[` 可能在很远的地方 —— `'[' * 20000 + 文字 + ']' * 20000` 下每个 `]` 都切
+#: 一段上万字符出来归一化,又是平方级(实测 1.22 秒,原先 0.3 秒上下)。先比长度
+#: (O(1))、超界的压根不是 label,所以这道界**不是**为了快而牺牲正确性:规范就是这么定的。
+_LABEL_MAX = 999
 
 #: **最后那道筛子**:结构认出来、目标也解码完了,才看它是不是我们收得了的地址。
 #: `[文字](#锚点)` / `[文字](/相对路径)` 筛掉 —— 但那一段**照样整段消费**:链接的
 #: 目标是锚点,显示文字里那条地址是**文字**,把它收进来就是收了另一篇(用户要的是
 #: 锚点那一篇)。「结构不支持就退回裸地址拼一条出来」正是要避免的那件事。
 _SCHEME = re.compile(r'https?://', re.I)
-#: 字符实体(CommonMark「Entity and numeric character references」):`&#40;` 是
-#: 字面的 `(`、`&amp;` 是 `&`。**目标里要按语法解码**,不然 `…/A_&#40;B&#41;`
-#: 原样交出去就是另一个地址。只认**带分号**的严格写法(`html.unescape` 本身宽松到
-#: 连 `&amp` 都解,那会改写用户真的写了 `&amp` 的地址)。
-_ENTITY = re.compile(r'&(?:#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z][a-zA-Z0-9]{1,31});')
-#: **HTML 的字符引用是另一套判据**,不是上面那一份的宽松版(两边各有自己的红)。
-#: 属性值里:**数字引用的分号是可选的**(`&#47B` 表示 `/B`,缺分号在 HTML5 里只是
-#: 个 parse error,照样解码);**命名引用**缺分号时反过来有个历史特例 —— 后面紧跟
-#: `=` 或 ASCII 字母数字就**不解码**(`href="?a&ampb=1"` 里那是字面的 `&ampb`)。
-#: 借 Markdown 那一份(必须带分号)的后果实测:`<a href="https://a/A&#47B">` 三个
-#: 动作都请求 `https://a/A&#47B`,后端的规范化又把 `#` 之后当片段切掉,最终落库的
-#: 是 `https://a/A&` —— **原目标压根不在库里**。
-#: 反过来**不许把 Markdown 也放宽**:CommonMark 的实体必须带分号(spec 的
-#: 「Entity and numeric character references」),放宽了会改写用户真写了 `&amp` 的目标。
-_NUM_REF = re.compile(r'&#(?:[Xx][0-9A-Fa-f]{1,6}|[0-9]{1,7});?')
-_NAMED_REF = re.compile(r'&[A-Za-z][A-Za-z0-9]{1,31};')
-#: HTML5 里**允许缺分号**的那一百来个命名引用(`&amp`、`&lt`、`&not`…),按长度
-#: 降序 —— 缺分号时按**最长匹配**算(`&notit` 的引用是 `&not`)。表取标准库的,
-#: 不自己抄一份。
-_NAMED_BARE = tuple(sorted((k for k in html.entities.html5 if not k.endswith(';')),
-                           key=len, reverse=True))
-
 #: Markdown 语法里的空白(不含别的 Unicode 空白:那些在目标里是字面量)。
 _MD_SPACE = ' \t\n'
 
@@ -164,37 +154,6 @@ class _Budget:
                 '没法确定哪一段是链接 —— 把要收的地址单独一行贴过来')
 
 
-def _html_value(raw: str) -> str:
-    """**HTML 属性值**里的字符引用 → 它表示的字符。判据见 `_NUM_REF` 那几行。
-
-    为什么不直接用 `html.unescape`:它是「一般文本」那一份,对缺分号的命名引用
-    一律解码(`&ampb` → `&b`、`&notit` → `¬it`),而 HTML5 在**属性值**里对这两种
-    恰恰不解码。差别落在地址上就是另一篇文章,所以这一遍自己走:数字引用照解、
-    带分号的命名引用照解、缺分号的命名引用看它后面那一个字符。
-    """
-    out: list[str] = []
-    i, n = 0, len(raw)
-    while i < n:
-        if raw[i] != '&':
-            out.append(raw[i])
-            i += 1
-            continue
-        if m := (_NUM_REF.match(raw, i) or _NAMED_REF.match(raw, i)):
-            # 分号补齐之后交给标准库(数字引用那几条 HTML5 的替换也在它那儿)。
-            out.append(html.unescape(m.group().rstrip(';') + ';'))
-            i = m.end()
-            continue
-        hit = next((k for k in _NAMED_BARE if raw.startswith(k, i + 1)), '')
-        tail = raw[i + 1 + len(hit):i + 2 + len(hit)]
-        if hit and not (tail == '=' or (tail.isascii() and tail.isalnum())):
-            out.append(html.unescape('&' + hit + ';'))
-            i += 1 + len(hit)
-        else:
-            out.append('&')         # 不是引用,或者属性值里那个历史特例
-            i += 1
-    return ''.join(out)
-
-
 def _tick_runs(text: str) -> tuple[dict[int, list[int]], dict[int, int]]:
     r"""一遍扫出整行所有反引号串,**给「收尾在哪儿」那一问当索引**。
     返回 `({宽度: [该宽度那些串的起点(递增)]}, {起点: 之后那一格})`。
@@ -250,9 +209,9 @@ def _angle_dest(text: str, i: int) -> tuple[str | None, int]:
             out.append(text[i + 1])
             i += 2
             continue
-        if ch == '&' and (ent := _ENTITY.match(text, i)):
-            out.append(html.unescape(ent.group()))
-            i = ent.end()
+        if ch == '&' and (ent := md_entity(text, i)):
+            out.append(ent[0])
+            i = ent[1]
             continue
         if ch == '>':
             return ''.join(out), i + 1
@@ -278,14 +237,14 @@ def _plain_dest(text: str, i: int) -> tuple[str | None, int]:
             out.append(text[i + 1])     # 转义掉的括号是字面量,不参与配平
             i += 2
             continue
-        if ch == '&' and (ent := _ENTITY.match(text, i)):
+        if ch == '&' and (ent := md_entity(text, i)):
             # **实体解出来的括号同样不参与配平**(它是字面字符,不是语法)。
             # **两种解码必须在同一遍里做**:`\&#40;` 的那个 `&` 已经被上一档当成
             # 转义吃掉了,剩下的 `#40;` 只是普通文字 —— 换成「整串先解实体、再解
             # 转义」(或者反过来)都会把这五个字符变成一个 `(`,那是另一个地址。
             # 两个分支在这儿谁先谁后倒是无所谓:判据是**当前这个字符**,不冲突。
-            out.append(html.unescape(ent.group()))
-            i = ent.end()
+            out.append(ent[0])
+            i = ent[1]
             continue
         if ch in _MD_SPACE:
             break                       # 目标到此为止,后面可能是 title
@@ -364,14 +323,14 @@ def _inline_link(text: str, close: int) -> tuple[str | None, int]:
 def _attrs(text: str, start: int, end: int, found: list) -> None:
     """一个标签里**属性值写着的那几条地址**,各记一笔。
 
-    **值要按 HTML 自己那一套规则解码**(`_html_value`) —— 属性值里 `&amp;` 是一个
+    **值要按 HTML 自己那一套规则解码**(`grab_entity.html_value`)—— 属性值里 `&amp;` 是一个
     `&`,而数字引用**缺分号照样算**。原样交出去的那一版实测:
     `<a href="https://a/x?p=1&amp;q=2">` 收进库的是 `https://a/x?p=1&amp%3Bq=2`
     (后端的规范化又把那个分号编码了一道),**而原目标压根不在库里**;借 Markdown
     那一份(必须带分号)的那一版同理,`&#47B` 没解开、落库的是 `https://a/A&`。
     属性值里**没有**反斜杠转义,所以这一档只解引用。
 
-    **判据是「解完实体之后整个值就是一条地址」**(`_WHOLE_LINE`,和「整行就是一条
+    **判据是「解完实体之后整个值就是一条地址」**(`WHOLE_LINE`,和「整行就是一条
     地址」、「反引号里整段就是一条地址」共用那一份)。所以 `srcset="…2x.jpg 2x"`
     这种「地址 + 描述符」的值**一条都不产出** —— 值里有空白就说不清哪一段是地址,
     认不出就失败关闭(那张图本来也不是人要收的那一篇,`src` 那条照旧收)。
@@ -381,7 +340,7 @@ def _attrs(text: str, start: int, end: int, found: list) -> None:
     """
     for a in _ATTR.finditer(text, start, end):
         raw = a.group('dq') or a.group('sq') or a.group('uq') or ''
-        val = _html_value(raw.strip())
+        val = html_value(raw.strip())
         if WHOLE_LINE.match(val):
             found.append((a.start(), a.end(), val))
 
@@ -459,8 +418,8 @@ def _ref_label(text: str, i: int) -> int | None:
     return None
 
 
-def _link_def(text: str, i: int, budget: _Budget) -> tuple[str, int] | None:
-    """一段开头那几行里的**链接定义**:`(目标, 之后那一格)`;不是定义就 `None`。
+def _link_def(text: str, i: int, budget: _Budget) -> tuple[str, str, int] | None:
+    """一段开头那几行里的**链接定义**:`(标签, 目标, 之后那一格)`;不是定义就 `None`。
 
     **定义行里那个目标是用户写的真实地址,要收。** 引用式链接自己
     (`[文字][标签]`)说不出要收哪一篇、整段消费,真正的地址正是写在这儿 ——
@@ -479,7 +438,8 @@ def _link_def(text: str, i: int, budget: _Budget) -> tuple[str, int] | None:
     close = _ref_label(text, m.end() - 1)
     if close is None or close >= len(text) or text[close] != ':':
         return None
-    if not text[m.end():close - 1].strip():
+    label = text[m.end():close - 1]
+    if not label.strip():
         return None                     # 空 label:CommonMark 不认
     n = len(text)
     j, lines = close + 1, 0
@@ -504,10 +464,44 @@ def _link_def(text: str, i: int, budget: _Budget) -> tuple[str, int] | None:
             k += 1
     if k < n and text[k] != '\n':
         return None                     # 行尾还有别的东西:这不是一条定义
-    return dest, k
+    return label, dest, k
 
 
-def links(text: str) -> list[tuple[int, int, str]]:
+def _norm_label(raw: str) -> str:
+    """link label 的比较形式(CommonMark:空白折叠 + case fold)。"""
+    return ' '.join(raw.split()).casefold()
+
+
+def leading_defs(text: str, budget: _Budget | None = None,
+                 ) -> list[tuple[int, int, str, str]]:
+    """一段**开头连着**那几条链接定义行:`[(起点, 之后那一格, 标签, 目标)]`。
+
+    **只有这一份**:`links` 拿它记结构和目标,`labels_in` 拿它收标签 —— 同一个
+    「哪儿算定义」的判据不许在两处各写一遍。
+    """
+    budget = budget or _Budget(text)
+    out: list[tuple[int, int, str, str]] = []
+    i, n = 0, len(text)
+    while (one := _link_def(text, i, budget)) is not None:
+        label, dest, end = one
+        out.append((i, end, _norm_label(label), dest))
+        i = end + 1 if end < n and text[end] == '\n' else end
+    return out
+
+
+def labels_in(text: str) -> set[str]:
+    """这一段里定义过的那几个标签(比较形式)。
+
+    **定义是文档级的,引用可以写在定义之前** —— 所以调用方(`grab_cli._from_stdin`)
+    先把**所有段**的标签收齐,再逐段做行内扫描。少了这一步,
+    `[https://a/label]` 在前、定义在后那种合法文档里,前一段那个简写引用认不出来,
+    于是退回裸地址、多发一条 `https://a/label]`(实测真落库真导出真索引)。
+    """
+    return {label for _, _, label, _ in leading_defs(text)}
+
+
+def links(text: str, labels: frozenset[str] | set[str] = frozenset(),
+          ) -> list[tuple[int, int, str]]:
     """**第一趟:只认结构** —— 这一段文字里认出来的那几块,按**认成的次序**:
     `[(起点, 之后那一格, 目标)]`。
 
@@ -539,16 +533,22 @@ def links(text: str) -> list[tuple[int, int, str]]:
     found: list[tuple[int, int, str]] = []
     by_width, ends = _tick_runs(text)
     budget = _Budget(text)
-    #: 栈里每一项是 `(那个 `[` 的位置, 它是图片的开头吗)`。
-    opens: list[tuple[int, bool]] = []
+    #: 栈里每一项是 `(那个 `[` 的位置, 它是图片的开头吗, 入栈时的世代)`。
+    #: **「链接里不许再有链接」靠世代号惰性作废,不许每次成立都过滤一遍整个栈** ——
+    #: 图片的开括号不被作废(它不占那个名额),所以 `'![' * n + '[x](#a)' * n` 这种
+    #: 输入下栈长一直是 n,每条链接过滤一次就是平方级(实测长度翻倍耗时约 3.5 倍,
+    #: 而且这笔工作**不在探测预算里**:它不是「扫了多远」,所以计不进去,只能让它
+    #: 本身是线性的)。世代号那一版:成立一条链接就 `gen += 1`,弹栈时丢掉世代过期
+    #: 的非图片项 —— **每一项最多被丢一次,整趟摊销线性**。
+    opens: list[tuple[int, bool, int]] = []
+    gen = 0
     i, n = 0, len(text)
     # **块级那一档先走:段开头那几条链接定义行**(`[标签]: 目标`)。它是块级结构,
     # 判据是「这一段里它前面只有定义行」—— 所以在行内扫描**之前**、而且只在开头
     # 连着认。认不成就一个字都不消费,余文照旧按行内规则走(见 `_link_def`)。
-    while (one := _link_def(text, i, budget)) is not None:
-        dest, end = one
-        found.append((i, end, dest if _SCHEME.match(dest) else ''))
-        i = end + 1 if end < n and text[end] == '\n' else end
+    for start, end, _label, dest in leading_defs(text, budget):
+        found.append((start, end, dest if _SCHEME.match(dest) else ''))
+        i = end
     while i < n:
         nxt = _STRUCT.search(text, i)
         if not nxt:
@@ -583,7 +583,7 @@ def links(text: str) -> list[tuple[int, int, str]]:
                 # **但反引号也是一道给定的边界**(同 `<…>`、引号那一档):整段就是
                 # 一条地址时照旧收 —— 技术文档和聊天里 `` `https://…` `` 是常见写法,
                 # 漏掉它是静默丢数据,而这一档的边界是用户自己画的,不会把语法
-                # 字符吃进来。判据和「整行就是一条地址」共用一份(`_WHOLE_LINE`)。
+                # 字符吃进来。判据和「整行就是一条地址」共用一份(`WHOLE_LINE`)。
                 inner = text[i + width:end - width].strip()
                 found.append((i, end, inner if WHOLE_LINE.match(inner) else ''))
                 i = end
@@ -597,12 +597,12 @@ def links(text: str) -> list[tuple[int, int, str]]:
             # 走到这一档的 `!` 一定没被转义(转义的那个已经被上面 `\\` 那一档
             # 跳过了),所以这里不必再判一次。
             if i + 1 < n and text[i + 1] == '[':
-                opens.append((i + 1, True))
+                opens.append((i + 1, True, gen))
                 i += 2
             else:
                 i += 1
         elif ch == '[':
-            opens.append((i, False))
+            opens.append((i, False, gen))
             i += 1
         else:
             # `]`:把 `](…)` **当一段来认,不管有没有配对的 `[`**。没有配对时它
@@ -612,8 +612,14 @@ def links(text: str) -> list[tuple[int, int, str]]:
             # 链接」作废之后,残片 `](B)` 让第二趟发出 `B)` —— 多一个右括号就是
             # **另一篇文章**,而那个地址真的能存进库。所以认成结构就整段消费、
             # **一个字都不产出**(`dest` 给空串)。
-            had = bool(opens)
-            start, image = opens.pop() if had else (i, False)
+            had, start, image = False, i, False
+            while opens:
+                pos, img, born = opens.pop()
+                if img or born == gen:
+                    had, start, image = True, pos, img
+                    break
+                # 非图片、而且世代过期:它早被某条成立的链接作废了。丢掉接着往下
+                # 找 —— 每一项最多被丢一次,所以这一圈总共摊销线性。
             dest, end = _inline_link(text, i + 1)
             budget.spend(end - i)
             if dest is not None:
@@ -623,7 +629,7 @@ def links(text: str) -> list[tuple[int, int, str]]:
                 if not image:
                     # 链接里不许再有链接:包着它的那几个一起作废。**图片的开括号
                     # 留着** —— 它不占那个名额(`![a [b](c)](d)` 里 image 照旧成立)。
-                    opens = [o for o in opens if o[1]]
+                    gen += 1
                 i = end
             elif (ref := _ref_label(text, i + 1)) is not None:
                 # **引用式链接**(`[文字][标签]`)。我们不解引用定义 —— 但它**是
@@ -636,10 +642,25 @@ def links(text: str) -> list[tuple[int, int, str]]:
                 budget.spend(ref - i)
                 found.append((start, ref, ''))
                 if not image:
-                    opens = [o for o in opens if o[1]]
+                    gen += 1
                 i = ref
+            elif (had and i - start - 1 <= _LABEL_MAX
+                    and _norm_label(text[start + 1:i]) in labels):
+                # **简写引用**(`[标签]`,CommonMark 的 shortcut reference):后面既没
+                # `(` 也没第二对方括号,但**这个标签有定义** —— 那它是一条链接,
+                # 目标在定义行里(定义行自己那一档已经产出了它)。所以这一段整段
+                # 消费、**一个字都不产出**;交给第二趟的那一版按空白断出一条
+                # `https://a/label]`(实测它和真目标两条都真写入真导出真索引,
+                # 命令对两条都报 `saved`)。
+                # **判据是「这个标签真有定义」,不是「看起来像个标签」** ——
+                # 否则 `[备注] 看 https://…` 那一行会被整段消费掉,而那上面正写着
+                # 用户要收的地址(反过来钉一边的那条用例)。
+                found.append((start, i + 1, ''))
+                if not image:
+                    gen += 1
+                i += 1
             else:
-                # 结构压根不成立(没有 `](`、括号不配平、title 没收尾)。那一段不是
-                # 链接,`[备注] 看 https://…` 里的裸地址还该照常认出来。
+                # 结构压根不成立(没有 `](`、括号不配平、title 没收尾、标签没定义)。
+                # 那一段不是链接,`[备注] 看 https://…` 里的裸地址还该照常认出来。
                 i += 1
     return found

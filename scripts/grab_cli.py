@@ -30,11 +30,12 @@
 去重,`put_items` 的 `DO NOTHING` 挡着,内容不会变成两份)。
 
 纯标准库:这条路不该因为 venv 里缺什么而用不了(`kb.sh` 用 `$BOOT_PY` 跑它)。
-**同目录那四个文件和它是一套**(单文件 700 行的上限之下按职责拆的):通道层
+**同目录那五个文件和它是一套**(单文件 700 行的上限之下按职责拆的):通道层
 `grab_http.py`(打接口、把失败分两档)、输入层 `grab_input.py`(把粘进来的一段
-文字变成几条地址)连同它的第一趟 `grab_md.py`(CommonMark 那一套结构识别)、
-输出层 `grab_say.py`(每一档各说自己那句话)。要把这条路拷到别处用,五个文件
-一起拷(`tests/test_kb_grab_cmd.py` 的隔离夹具钉着这件事)。
+文字变成几条地址)连同它的第一趟 `grab_md.py`(CommonMark 那一套结构识别)和
+`grab_entity.py`(字符引用的两套规则)、输出层 `grab_say.py`(每一档各说自己那
+句话)。要把这条路拷到别处用,六个文件一起拷(`tests/test_kb_grab_cmd.py` 的隔离
+夹具钉着这件事,少拷一份实测红 9 条)。
 """
 from __future__ import annotations
 
@@ -55,7 +56,7 @@ from grab_http import (                                              # noqa: E40
 # 那边(这里只管「拿到地址之后做什么」)。`links_in` 在本模块里**照旧可见** ——
 # 口径只有一份,引用方(含测试)不该因为它搬了家而各自去找新门。
 from grab_input import (                                            # noqa: E402
-    TangledInput, dedupe, links_in, whole_line)
+    TangledInput, dedupe, labels_in, links_in, whole_line)
 # **输出层在 `grab_say.py`**:每一档各说自己那句话、以及那一行 JSON 里透出哪几个
 # 事实,全在那边。`line_of` / `record_of` 在本模块里**照旧可见** —— 口径只有一份,
 # 引用方(含测试)不该因为它搬了家而各自去找新门。
@@ -525,13 +526,20 @@ def _from_stdin() -> list[str]:
     **一行一条的清单照旧逐行原样交**(段始终是空的),空行之后重新开始。
 
     **空行断段**(CommonMark 的口径:空行终止 paragraph,行内结构不跨段)。
+
+    **但链接定义是文档级的,它不受断段管** —— `[标签]` 可以写在 `[标签]: 目标`
+    **之前**(CommonMark 允许),所以这里**走两遍**:先把每一段里定义过的标签收齐,
+    再逐段做行内扫描。少了第一遍,前一段那个简写引用认不出来、退回裸地址,
+    多发一条 `https://a/label]`(实测它和真目标两条都真写入真导出真索引,
+    命令对两条都报 `saved`)。
     """
-    out: list[str] = []
+    #: 按原文顺序排好的输入单元:`('line', 整行就是一条地址)` 或 `('block', 一段)`。
+    items: list[tuple[str, str]] = []
     block: list[str] = []
 
     def flush() -> None:
         if block:
-            out.extend(links_in('\n'.join(block)))
+            items.append(('block', '\n'.join(block)))
             block.clear()
 
     for line in sys.stdin.read().splitlines():
@@ -539,10 +547,17 @@ def _from_stdin() -> list[str]:
         if not bare:
             flush()                 # 空行:这一段到此为止
         elif not block and whole_line(bare):
-            out.append(bare)        # 段还没开始:这一行是一条独立的地址
+            items.append(('line', bare))   # 段还没开始:这一行是一条独立的地址
         else:
             block.append(line)
     flush()
+    labels: set[str] = set()
+    for kind, text in items:
+        if kind == 'block':
+            labels |= labels_in(text)
+    out: list[str] = []
+    for kind, text in items:
+        out.extend([text] if kind == 'line' else links_in(text, labels))
     return out
 
 
