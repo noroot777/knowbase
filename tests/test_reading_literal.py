@@ -69,6 +69,13 @@ class ReadingEntriesAgreeTest(unittest.TestCase):
         if not line:
             raise AssertionError(run.stderr)
         cls.results = json.loads(line)
+        typography = run_probe(
+            [shutil.which("node"), str(PROBE.with_name("reader_typography_probe.mjs")),
+             base, str(manifest)], timeout=300, env=probe_env(), cwd=str(REPO))
+        if typography.returncode:
+            raise AssertionError(typography.stderr)
+        rendered = json.loads(typography.stdout.strip())
+        cls.results.extend(rendered["results"])
 
     def test_both_reading_entries_show_the_same_text(self):
         self.assertTrue(self.results, "探针一条都没跑")
