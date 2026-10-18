@@ -198,7 +198,7 @@ def read_report(day: str):
     found = daily.report(_check_day(day))
     if not found:
         raise HTTPException(404, '这一天还没有生成日报')
-    return {**found, 'material_view': material_view(found['body'])}
+    return {**found, 'material_view': material_view(found['body'], found)}
 
 
 @router.delete('/reports/{day}')
