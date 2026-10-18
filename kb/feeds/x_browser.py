@@ -34,7 +34,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from kb.feeds import x_article
+from kb.feeds import x_article, x_post
 from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
@@ -64,6 +64,7 @@ _BOTTOM_TRIES = 3
 # 按时间排序的话,三条不相邻的旧转推会被拼成一条"连续的老尾巴"。
 _COLLECT_JS = r'''
 (() => {
+''' + x_post.TEXT_JS + r'''
   const S = window.__kbX = window.__kbX || {seen: new Map()};
   const norm = s => (s || '').replace(/ /g, ' ').trim();
   let parsed = 0, articles = 0;
@@ -76,7 +77,8 @@ _COLLECT_JS = r'''
     if (!m) continue;
     parsed++;
     const ctx = norm(art.querySelector('[data-testid="socialContext"]')?.innerText);
-    const text = norm(art.querySelector('[data-testid="tweetText"]')?.innerText);
+    const text = postText(ownNode(art, '[data-testid="tweetText"]'));
+    const truncated = postMore(art);
     // 作者块的第一行是显示名,后面跟着 @handle 和时间,只取第一行。
     const who = norm(art.querySelector('[data-testid="User-Name"]')?.innerText).split('\n')[0];
     // **长文卡片**:X 把推文里那条 `/i/article/<id>` 链接藏起来、改渲染成一张
@@ -99,10 +101,12 @@ _COLLECT_JS = r'''
     if (!prev || (text && text.length > (prev.text || '').length)) {
       S.seen.set(id, {id, author: m[1], name: who, datetime: time.getAttribute('datetime'),
                       text, context: ctx, url: `https://x.com/${m[1]}/status/${id}`,
-                      article: art_url || (prev && prev.article) || ''});
+                      article: art_url || (prev && prev.article) || '',
+                      truncated: truncated || !!prev?.truncated});
     } else if (art_url && prev && !prev.article) {
       prev.article = art_url;
     }
+    if (truncated) S.seen.get(id).truncated = true;
   }
   return JSON.stringify({articles, parsed, items: [...S.seen.values()]});
 })()
@@ -240,6 +244,8 @@ def _entry(item: dict) -> dict | None:
     # 它摘掉(`_strip_hint`),不会进 `feed_items`。
     if item.get('article'):
         out[x_article.HINT] = str(item['article'])
+    if item.get('truncated'):
+        out[x_post.HINT] = body[:-len(text)] if text else body
     return out
 
 
@@ -445,6 +451,10 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 started = water or floor.isoformat()
                 try:
                     entries, incomplete = _harvest_one(page, handle, floor)
+                    entries, missing = x_post.fill(
+                        entries, session=page, deadline=deadline, should_stop=should_stop)
+                    if missing:
+                        incomplete = f'{incomplete};{missing}' if incomplete else missing
                     # 长文(Article)推文在时间线上一个字都没有,正文要单独取一次。
                     # 取不到的那几条本轮不入库、并按"没读完"办 —— 空正文一旦落库
                     # 就再也更新不了(`put_items` 是 DO NOTHING),见 `x_article`。

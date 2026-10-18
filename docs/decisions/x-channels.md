@@ -6,6 +6,14 @@
 
 ## 硬约束(原 CLAUDE.md「X 的采集通道(kb/feeds/x_channels.py + x_browser / x_feedgrab / x_cdp / cdp_attach)」)
 
+- **时间线上的「显示更多」是残文信号,不是完整正文**。`x_post` 为 `browser`/`attach` 收到的这类条目
+  打临时标记,在同一会话打开它自己的详情页补全,再交给 Article 补全和入库。详情页路由和正文所属推文
+  的 status id 必须同时匹配,引用推和回复不能冒充原推;详情仍折叠、登录墙、超时或停止时扣留该条,
+  水位保持原下界以便下轮重试。短推不额外导航;转推上下文保留;补全后的标题只取正文首行,不把后续
+  段落塞进 Markdown 标题再次输出。文本按 DOM 文本节点读,恢复图片表情
+  的 alt 与完整链接,不能把链接中隐藏的协议/路径当成换行。已入库残文不会被 `put_items` 去重更新,
+  修复存量应走 `grab_store.replace` 的版本化替换,同时作废旧译文与提取结果,由正常导出重写正文。
+
 - **同一批大V账号,三条互斥的取法,选哪条是一个设置**(`social` 的 `x_channel`,默认 `browser`):`feedgrab`
   一份 X cookie 调 X 自己的接口(子进程调用用户装好的 CLI)、`browser` 复用**独立 profile** 里的登录态
   (我们起的无头 Chrome,CDP over 管道)、`attach` 直连用户**已经开着**的日常浏览器(CDP over WebSocket)。
