@@ -347,10 +347,32 @@ class GrabCliInputTests(GrabCliCase):
             # `][标签]` 残片不许被拼成一个地址。
             ('引用式链接的显示文字不许被拼成地址',
              f'见 [{NO}/label][ref] 这篇', []),
-            ('引用定义那一行照旧认得出来', f'[ref]: {YES}', [YES]),
-            # **属性值按 HTML 的规则解码**:`&amp;` 是一个 `&`。
+            # **定义行里那个目标是用户写的真实地址**:引用式链接自己说不出要收
+            # 哪一篇,真正的地址正写在这儿,两件事合起来才完整。而它是**块级**
+            # 结构 —— 不认它的那一版把这一行交给第二趟,标签本身像地址时就多发
+            # 一条 `…/label]:`(实测过得了后端规范化、真落库真导出真索引)。
+            ('引用定义那一行给出它的目标', f'[ref]: {YES}', [YES]),
+            ('定义行 + 引用式链接合起来只有真目标那一条',
+             f'看 [原文][1] 这篇\n\n[1]: {YES}', [YES]),
+            ('标签本身像地址时也不许多发一条残片',
+             f'[原文][{NO}/label]\n\n[{NO}/label]: {YES}', [YES]),
+            ('定义行的 title 里那条地址是标题文字,不产出',
+             f'[1]: {YES} "见 {NO}/in-title"', [YES]),
+            # **反过来钉一边:定义是块级的,段里有过正文行之后就不是定义了**
+            # (CommonMark 的口径)。判得太宽会把行文里那一行整段消费掉,而那一行
+            # 上可能正写着用户要收的地址 —— 这里那条 title 里的地址就是判据:
+            # 按定义认它不产出,按文字认(正确)它是行文里的一条裸地址。
+            ('段里有过正文行之后,`[x]: y` 只是文字',
+             f'见下文\n[1]: {YES} "见 {NO}/in-title"',
+             [YES, f'{NO}/in-title']),      # 裸地址那一档排除 `"`(URI 里必须编码)
+            # **属性值按 HTML 自己那一套解码**(不是 Markdown 那一份的宽松版):
+            # 数字引用缺分号照样算,命名引用缺分号反而有个历史特例。
             ('HTML 属性值里的字符实体要解开',
              f'见 <a href="{YES}?a=1&amp;b=2">原文</a> 这篇', [f'{YES}?a=1&b=2']),
+            ('属性值里缺分号的数字引用也要解开',
+             f'见 <a href="{YES}/A&#47B">原文</a> 这篇', [f'{YES}/A/B']),
+            ('缺分号的命名引用后面紧跟字母时不解码(HTML5 的属性值特例)',
+             f'见 <a href="{YES}/?a&ampb=1">原文</a> 这篇', [f'{YES}/?a&ampb=1']),
             ('属性值不是一条干净地址时一条都不产出',
              f'<img src="{YES}" srcset="{NO}/2x.jpg 2x">', [YES]),
         )
@@ -373,14 +395,40 @@ class GrabCliInputTests(GrabCliCase):
         **真库落成带右括号的那个地址、真导出真索引、退出 0、`status=saved`**,
         而原目标压根不在库里。
 
-        **「整行就是一条地址」那一档照旧先按行拿走**(它的意图最明确,而且原样
-        交出去),所以一行一条的清单不受影响;**空行断段**(CommonMark 的口径:
-        空行终止 paragraph,行内结构不跨段)。三件事一起钉。
+        **「整行就是一条地址」那一档只在「它前面没有正在攒的段」时才成立。**
+        判据只看这一行自己的那一版照旧会切断结构 —— 因为 `(` 之后换行的那个目标
+        **本身**往往整个就是一条地址(右括号是 URL 的合法字符),于是又被原样
+        拿走、带着 Markdown 的收尾落进库。所以这里钉**两种**多行链接:行尾还有
+        叙述的、以及行尾什么都没有的。目标独占一行时**解码照旧要走**,
+        多行注释里那一行独立地址**一条都不许产出**(完整结构扫描本来就不产出,
+        那是凭空多一次收录)。
+
+        **反过来钉一边**:一行一条的清单照旧逐行原样交(段始终是空的),
+        **独立地址行里的方括号不许被当成 Markdown 语法**(`…/a[b](c)` 整条原样
+        —— 牺牲这一档的保真去修多行是另一个方向的错),**空行断段**
+        (CommonMark 的口径:空行终止 paragraph,行内结构不跨段)。
         """
         self.run_cli('--no-wait', '-',
                      stdin='见 [原文](\n'
                            'https://example.org/multiline) 这篇')
         self.assertEqual(self.plan['posted'], ['https://example.org/multiline'])
+        # 行尾什么都没有的那一种:第二行整个就是一条地址(`)` 是 URL 合法字符),
+        # 所以「整行」那一档会去抢它 —— 实测带 `)` 的那个地址真落库、真导出真索引。
+        self.plan['posted'].clear()
+        self.run_cli('--no-wait', '-',
+                     stdin='见 [原文](\nhttps://example.org/tail)')
+        self.assertEqual(self.plan['posted'], ['https://example.org/tail'])
+        # 目标独占一行:解码那一步不许被绕过。
+        self.plan['posted'].clear()
+        self.run_cli('--no-wait', '-',
+                     stdin='见 [原文](\nhttps://example.org/A&#40;B&#41;\n) 这篇')
+        self.assertEqual(self.plan['posted'], ['https://example.org/A(B)'])
+        # 多行注释里的独立地址行:整段消费,一条都不产出。
+        self.plan['posted'].clear()
+        self.run_cli('--no-wait', '-',
+                     stdin='见下文 <!-- 注释开始\n'
+                           'https://example.org/in-comment\n--> 完')
+        self.assertEqual(self.plan['posted'], [])
         # 清单那一档:每行各是一条,顺序照原文。
         self.plan['posted'].clear()
         self.run_cli('--no-wait', '-',
@@ -395,6 +443,16 @@ class GrabCliInputTests(GrabCliCase):
                      stdin='见 [原文](\n\nhttps://example.org/split) 这篇')
         self.assertEqual(self.plan['posted'], ['https://example.org/split)'],
                          '断段之后那一段里的裸地址按空白断、一个标点都不剥')
+        # **反过来钉一边**:真正独立的那一行**原样**交出去 —— URL 里的 `[` `]`
+        # 是合法字符,按 Markdown 语法去切会把它截成一个更短的地址,而那个地址
+        # 可能真的存在(收错一篇,`DO NOTHING` 之下换不回来)。
+        self.plan['posted'].clear()
+        self.run_cli('--no-wait', '-',
+                     stdin='https://example.org/wiki/a[b](c)\n'
+                           '\nhttps://example.org/wiki/d[e](f)')
+        self.assertEqual(self.plan['posted'],
+                         ['https://example.org/wiki/a[b](c)',
+                          'https://example.org/wiki/d[e](f)'])
 
     def test_an_autolink_inside_a_label_does_not_void_the_outer_link(self):
         """**反过来钉一边:`<地址>` 不作废包着它的那条链接。**
