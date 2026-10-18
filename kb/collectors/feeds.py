@@ -32,6 +32,10 @@ class FeedCollector:
         from kb.feeds.sync import still_failing
         return still_failing(self.name, note)
 
+    def drop_item(self, ref):
+        from kb.feeds.exclusion import drop_item
+        return drop_item(self.name, ref)
+
     def _manual_retry(self):
         """这一轮是不是用户点的「重新翻译」,以及他点的是哪一条订阅的范围。
 

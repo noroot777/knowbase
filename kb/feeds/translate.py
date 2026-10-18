@@ -31,6 +31,7 @@ from kb.feeds.translate_scope import (            # noqa: F401 - 再导出
     queued_sql, requeue_failed, scope_signature, stuck, _retry_where,
 )
 from kb.pipeline_state import _state
+from kb.feeds.exclusion import failure
 
 # 一条正文最多译多少字:超出部分不译,末尾注明并指向原文。RSS 全文条目偶尔
 # 上万字,整篇译一遍的钱和时间都不划算,而知识库要的是能被检索到的中文正文。
@@ -416,7 +417,7 @@ def translate_pending(kind: str, limit: int | None = None, progress=None,
                 # key 也记下来:导出那头要靠它把"本轮新失败"和"此前失败、还排着
                 # 队"分开报,拿 failed 这个计数是分不出来的(见 `sync._export`)。
                 summary['failed_keys'].append(item['key'])
-                summary['errors'].append({'title': item['title'][:120], 'reason': str(result)[:300]})
+                summary['errors'].append(failure(item, result, kind))
             elif isinstance(result, Exception):      # 原文已经换过,这次失败不算它的
                 summary['stale'] += 1
             elif result is None:                     # 收到停止请求,剩下的留给下一轮

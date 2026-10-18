@@ -18,6 +18,7 @@ from kb.feeds import digest, fulltext, translate, x_channels
 # 这里原地再导出:`_save_result` 调的是本模块这个名字,全仓注释和回归里那些
 # `sync._within_history` 的指向也照旧成立。
 from kb.feeds.exported import item_body_md
+from kb.feeds.exclusion import failure
 # 导出那一步的两个零件(frontmatter 归属、本轮新失败怎么数)在 `export_meta` 里
 # (本文件越过 700 行硬上限时拆出去的,口径没动)。这里原地再导出:本模块调的是
 # 这两个名字,全仓注释和回归里那些 `sync._kept_meta` 的指向也照旧成立。
@@ -582,7 +583,7 @@ def _export(kind: str, hold_untranslated: bool = False,
             # 那条同理);确认没成只是说「它已经不是最新那一版了」。
             done += 1
         except Exception as e:
-            errors.append({'title': item['title'], 'reason': str(e)[:300]})
+            errors.append(failure(item, e, kind))
         finally:
             if temp:
                 temp.unlink(missing_ok=True)

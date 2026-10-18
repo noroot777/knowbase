@@ -371,16 +371,21 @@ def remove_missing_documents(conn: sqlite3.Connection, alive_paths: set[str]) ->
     rows = conn.execute("SELECT path, source FROM documents").fetchall()
     dead = [r["path"] for r in rows
             if r["path"] not in alive_paths and r["source"] not in off]
-    for p in dead:
-        ids = [r["id"] for r in conn.execute(
-            "SELECT id FROM chunks WHERE path=?", (p,)
+    return remove_documents(conn, dead)
+
+
+def remove_documents(conn: sqlite3.Connection, paths) -> int:
+    removed = 0
+    for path in paths:
+        ids = [row["id"] for row in conn.execute(
+            "SELECT id FROM chunks WHERE path=?", (path,)
         ).fetchall()]
         if ids:
             ph = ",".join("?" * len(ids))
             conn.execute(f"DELETE FROM chunk_vec WHERE chunk_id IN ({ph})", ids)
             conn.execute(f"DELETE FROM chunks_fts WHERE chunk_id IN ({ph})", ids)
-        conn.execute("DELETE FROM documents WHERE path=?", (p,))
-    return len(dead)
+        removed += conn.execute("DELETE FROM documents WHERE path=?", (path,)).rowcount
+    return removed
 
 
 def chunks_without_vectors(conn: sqlite3.Connection) -> list[sqlite3.Row]:

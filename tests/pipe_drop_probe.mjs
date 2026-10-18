@@ -11,6 +11,7 @@
 //
 //   HEADLESS_SHELL=<bin> node tests/pipe_drop_probe.mjs
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, normalize } from "node:path";
@@ -19,24 +20,30 @@ import { MIME, FIXTURES } from "./pipe_history_fixture.mjs";
 
 const STATIC = join(dirname(fileURLToPath(import.meta.url)), "..", "kb", "static");
 const KEYS = ["crawl", "export", "index", "extract", "projects", "wiki"];
-const LINK = "https://mp.weixin.qq.com/s?__biz=b&mid=1&idx=1";
+const CHANNEL = process.env.PIPE_DROP_CHANNEL || "wechat_local";
+const LINK = CHANNEL === "rss" ? "https://example.org/article?id=1"
+  : "https://mp.weixin.qq.com/s?__biz=b&mid=1&idx=1";
+const URLS = [LINK, LINK + "&n=2", LINK + "&n=3"];
+const IDS = CHANNEL === "rss"
+  ? URLS.map(url => createHash("sha256").update(`${CHANNEL}:${url}`).digest("hex").slice(0, 32))
+  : ["wx-1", "wx-2", "wx-past"];
+const ref = (index, account) => ({ channel: CHANNEL, id: IDS[index], link: URLS[index],
+  ...(CHANNEL === "rss" ? {} : { account }) });
 
 // 三条明细,刚好是三种形态:带身份的两条(点得开、删得掉)、来源给不出身份的一条
 // (降级那一档,两样都不该有)。
 const ITEMS = () => [
   { title: "某个号 · 缺正文的一篇", reason: "缺少正文，暂未导出", pending: true,
-    url: LINK, drop: { channel: "wechat_local", id: "wx-1", account: "某个号",
-                       link: LINK } },
+    url: LINK, drop: ref(0, "某个号") },
   { title: "另一个号 · 又一篇", reason: "缺少正文，暂未导出", pending: true,
-    url: LINK + "&n=2", drop: { channel: "wechat_local", id: "wx-2",
-                                account: "另一个号", link: LINK + "&n=2" } },
+    url: LINK + "&n=2", drop: ref(1, "另一个号") },
   { title: "没有身份的一条", reason: "缺少正文，暂未导出", pending: true },
 ];
 
 const roundOf = (id, at, failures) => ({
   run_id: id, run_kind: "sync", stopped: false,
   started_at: "2026-10-15 09:00:00", finished_at: at, planned_stages: [...KEYS],
-  crawl_filter: { channel: "wechat_local" },
+  crawl_filter: { channel: CHANNEL },
   stages: Object.fromEntries(KEYS.map(k => [k, k === "export"
     ? { status: "ok", detail: "完成: 导出 3, 待补正文 3", failures }
     : { status: "ok", detail: "完成" }])),
@@ -46,8 +53,7 @@ const roundOf = (id, at, failures) => ({
 let latest = roundOf("run-now", "2026-10-15 09:12:00", ITEMS());
 const HISTORY_ONLY = {
   title: "历史号 · 仅在上一轮缺正文的一篇", reason: "缺少正文，暂未导出", pending: true,
-  url: LINK + "&n=3", drop: { channel: "wechat_local", id: "wx-past",
-    account: "历史号", link: LINK + "&n=3" },
+  url: LINK + "&n=3", drop: ref(2, "历史号"),
 };
 let past = roundOf("run-past", "2026-10-14 09:12:00",
   [...ITEMS().slice(0, 2), HISTORY_ONLY, ITEMS()[2]]);
@@ -176,9 +182,8 @@ await setup("再点一次「不再抓取」",
 await setup("确认框又出来了", until(`document.querySelectorAll('.confirm-mask').length === 1`));
 await setup("点了确认", clickAt(".confirm-mask [data-act=ok]"));
 check("请求原样带着那条明细给的 drop(含 link)",
-      drops.length === 1 && drops[0].channel === "wechat_local"
-      && drops[0].id === "wx-1" && drops[0].account === "某个号"
-      && drops[0].link === LINK, JSON.stringify(drops));
+      drops.length === 1 && JSON.stringify(drops[0]) === JSON.stringify(ITEMS()[0].drop),
+      JSON.stringify(drops));
 check("删完那一条就从面板上消失了", await until(
   `document.querySelectorAll('#pipe-stage-export .pipe-failures p').length === 2`, 8000),
       JSON.stringify(await rows()));
@@ -220,7 +225,8 @@ if (process.env.PIPE_DROP_SCREENSHOT_DIR) {
   mkdirSync(process.env.PIPE_DROP_SCREENSHOT_DIR, { recursive: true });
   await evalJs(`$('pipe-stage-export').scrollIntoView({ block: 'center' }); true`);
   const shot = await send("Page.captureScreenshot", { format: "png" });
-  writeFileSync(join(process.env.PIPE_DROP_SCREENSHOT_DIR, "history-drop.png"),
+  writeFileSync(join(process.env.PIPE_DROP_SCREENSHOT_DIR,
+    CHANNEL === "rss" ? "rss-history-drop.png" : "history-drop.png"),
     Buffer.from(shot.result.data, "base64"));
 }
 
@@ -242,7 +248,7 @@ check("历史条目移除后就地消失", await until(
   `pipeViewing?.key === 'run-past'
    && document.querySelectorAll('#pipe-stage-export .pipe-failures p').length === 2`, 8000));
 check("不会误删最新一轮的其他条目", latest.stages.export.failures.length === 2
-  && latest.stages.export.failures[0].drop.id === "wx-2");
+  && latest.stages.export.failures[0].drop.id === IDS[1]);
 
 await evalJs(`document.querySelectorAll('.toast').forEach(e => e.remove()); true`);
 await setup("从历史移除两轮共有的条目", clickAt(
