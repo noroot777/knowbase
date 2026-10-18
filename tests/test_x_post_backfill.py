@@ -51,6 +51,37 @@ class BackfillTests(ChannelBase):
             self.assertEqual([row], backfill.candidates(conn, urls=[row['url']]))
             self.assertEqual([row], backfill.candidates(conn, all_posts=True))
 
+    def test_default_scan_selects_protocol_splits_without_an_ellipsis(self):
+        rows = [self.seed(text, str(130 + index)) for index, text in enumerate([
+            'https://\nexample.org/guide',
+            'Read this: http://\r\nexample.org/guide\nThe end.',
+            'Text...\nhttps://\nexample.org/guide\nThe end.',
+            'Text…\nhttps://\nexample.org/guide\nThe end.',
+            LEGACY.removesuffix('\n…'),
+        ])]
+        self.seed('Read this: https://example.org/guide\nThe end.', '140')
+        self.seed('https://example.org/guide\nAnother paragraph', '141')
+        with reg.db() as conn:
+            self.assertEqual({row['key'] for row in rows},
+                             {row['key'] for row in backfill.candidates(conn)})
+            self.assertEqual(2, len(backfill.candidates(conn, limit=2)))
+            self.assertEqual([rows[0]], backfill.candidates(conn, urls=[rows[0]['url']]))
+
+    def test_default_cli_repairs_a_protocol_split_without_an_ellipsis(self):
+        row = self.seed('Read this: https://\nexample.org/guide')
+        clean = 'Read this: https://example.org/guide'
+        report = self.root / 'report.json'
+        with contextlib.redirect_stdout(io.StringIO()), \
+             patch.object(backfill.x_browser, 'browser_session',
+                          return_value=contextlib.nullcontext(Page(snapshot(clean)))):
+            self.assertEqual(0, backfill.main(['run', '--yes', '--report', str(report)]))
+        self.assertTrue(report.is_file())
+        stats = json.loads(report.read_text())
+        self.assertEqual(1, stats['candidates'])
+        self.assertEqual(1, stats['normalized'])
+        self.assertEqual(1, stats['updated'])
+        self.assertEqual(clean, self.row(row['key'])['body'])
+
     def test_run_is_a_probe_until_yes_is_given(self):
         row = self.seed()
         report = self.root / 'evidence' / 'repair.json'
@@ -151,11 +182,56 @@ class BackfillTests(ChannelBase):
         self.assertEqual(1, stats['normalized'])
         self.assertEqual(text, self.row(row['key'])['body'])
 
+    def test_protocol_split_normalization_preserves_all_nonwhitespace_text(self):
+        for index, (stored, clean) in enumerate([
+            ('https://\nexample.org/guide', 'https://example.org/guide'),
+            ('http://\r\nexample.org/guide', 'http://example.org/guide'),
+            ('Text...\nhttps://\nexample.org\nEnding.', 'Text...\nhttps://example.org\nEnding.'),
+            ('Text…\nhttps://\nexample.org\nEnding.', 'Text…\nhttps://example.org\nEnding.'),
+            (LEGACY.removesuffix('\n…'), CLEAN),
+            ('https://\nexample.org/one\nNext: http://\nexample.org/two\n…',
+             'https://example.org/one\nNext: http://example.org/two'),
+        ]):
+            with self.subTest(stored=stored):
+                identity = str(150 + index)
+                row = self.seed(stored, identity, context='Someone reposted')
+                detail = dict(snapshot(clean), at=identity, id=identity)
+                self.assertLess(len(clean), len(stored))
+                probe = backfill.repair([row], Page(detail))
+                self.assertEqual(1, probe['normalized'])
+                self.assertEqual(row, self.row(row['key']))
+                stats = backfill.repair([row], Page(detail), apply=True)
+                self.assertEqual(1, stats['updated'])
+                self.assertTrue(stats['results'][0]['artifacts'])
+                self.assertEqual('> Someone reposted\n\n' + clean, self.row(row['key'])['body'])
+                self.assertEqual(row['content_rev'] + 1, self.row(row['key'])['content_rev'])
+
+    def test_protocol_split_does_not_allow_text_loss_or_url_edits(self):
+        row = self.seed('Read this: https://\nexample.org/Case\nKeep this ending.')
+        for clean in ['Read this: https://example.org/Case',
+                      'Read this: https://example.org/case\nKeep this ending.']:
+            with self.subTest(clean=clean):
+                stats = backfill.repair([row], Page(snapshot(clean)), apply=True)
+                self.assertEqual(1, stats['blocked_artifacts'])
+                self.assertEqual(0, stats['updated'])
+                self.assertEqual(row, self.row(row['key']))
+
+    def test_whitespace_alone_is_not_a_legacy_link_artifact(self):
+        row = self.seed('Read this: https://example.org/guide\nKeep this ending.')
+        stats = backfill.repair([row], Page(snapshot(row['body'].replace('\n', ''))), apply=True)
+        self.assertEqual(1, stats['blocked_length'])
+        self.assertFalse(stats['results'][0]['artifacts'])
+        self.assertEqual(row, self.row(row['key']))
+
     def test_legacy_cleanup_does_not_weaken_live_collection(self):
-        row = self.seed(LEGACY)
-        entries, note = x_post.complete([backfill.entry_of(row)], session=Page(snapshot(CLEAN)))
-        self.assertEqual([], entries)
-        self.assertIn('下次同步', note)
+        for index, stored in enumerate([LEGACY, LEGACY.removesuffix('\n…')]):
+            with self.subTest(stored=stored):
+                identity = str(160 + index)
+                row = self.seed(stored, identity)
+                detail = dict(snapshot(CLEAN), at=identity, id=identity)
+                entries, note = x_post.complete([backfill.entry_of(row)], session=Page(detail))
+                self.assertEqual([], entries)
+                self.assertIn('下次同步', note)
 
     def test_cli_reports_blocked_identical_and_cleanable_artifacts_separately(self):
         row = self.seed(LEGACY)

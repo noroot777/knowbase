@@ -6,7 +6,7 @@
     python scripts/x_post_backfill.py run --yes --channel browser --report /tmp/x-post.json
 
 scan is local and read-only. run probes candidates; only --yes writes feeds.db.
-Ellipsis endings are suspects, not proof. --all audits posts without that signal;
+Ellipsis endings and isolated URL protocols are suspects, not proof. --all audits other posts;
 --url selects exact stored URLs. Translation, export and indexing use the normal pipeline.
 """
 from __future__ import annotations
@@ -25,14 +25,19 @@ from kb.feeds.x_cdp import CdpError
 
 _LEGACY_LINK = re.compile(
     r'(?P<link>https?://[^\s]*(?:\r?\n[^\s]+)*?)\r?\n(?:…|\.{3})(?=\r?\n|$)')
+_SPLIT_PROTOCOL = re.compile(r'(https?://)\r?\n(?=\S)')
+
+
+def canonical_preview(text: str) -> str:
+    text = _LEGACY_LINK.sub(lambda match: re.sub(r'\s+', '', match['link']), text)
+    return _SPLIT_PROTOCOL.sub(r'\1', text)
 
 
 def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
     """Only bypass raw length when known link artifacts explain the difference."""
     prefix = entry[x_post.HINT]
     preview = entry['body'].removeprefix(prefix).strip()
-    canonical = _LEGACY_LINK.sub(
-        lambda match: re.sub(r'\s+', '', match['link']), preview)
+    canonical = canonical_preview(preview)
     info = dict(artifacts=canonical != preview, after=len(prefix + text))
     if text == preview:
         return 'identical', None, dict(info, reason='detail_matches_stored')
@@ -59,7 +64,8 @@ def candidates(conn, *, urls=(), limit=0, all_posts=False) -> list[dict]:
         if wanted:
             if row['url'] not in wanted:
                 continue
-        elif not all_posts and not row['body'].rstrip().endswith(('…', '...')):
+        elif not all_posts and not (row['body'].rstrip().endswith(('…', '...')) or
+                                    canonical_preview(row['body']) != row['body']):
             continue
         selected.append(dict(row))
         if limit and len(selected) >= limit:
@@ -114,7 +120,7 @@ def main(argv=None) -> int:
     parser.add_argument('cmd', choices=['scan', 'run'])
     parser.add_argument('--yes', action='store_true', help='确认用版本化替换写回正文')
     parser.add_argument('--url', action='append', default=[], help='只检查指定的存量 URL,可重复')
-    parser.add_argument('--all', action='store_true', help='也检查没有省略号信号的推文')
+    parser.add_argument('--all', action='store_true', help='也检查没有省略号或链接折行信号的推文')
     parser.add_argument('--limit', type=int, default=0)
     parser.add_argument('--budget', type=float, default=600.0, help='整轮浏览器读取秒数')
     parser.add_argument('--channel', choices=['browser', 'attach'], default='browser')
@@ -126,7 +132,7 @@ def main(argv=None) -> int:
         parser.error('--url 只接受 X 推文的完整地址')
     with reg.db() as conn:
         rows = candidates(conn, urls=args.url, limit=args.limit, all_posts=args.all)
-    print(f'找到 {len(rows)} 条候选;省略号不等于正文确实截断,须逐条核对详情页。')
+    print(f'找到 {len(rows)} 条候选;省略号或链接折行不等于正文确实截断,须逐条核对详情页。')
     if args.cmd == 'scan':
         for row in rows:
             print(f'{len(row["body"]):>6} 字符  {row["url"]}')
