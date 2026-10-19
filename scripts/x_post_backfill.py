@@ -92,8 +92,6 @@ def canonical_preview(text: str) -> str:
 
 def aligned_preview(preview: str, detail: str) -> bool:
     ranges = link_artifacts(preview, detail)
-    if not ranges:
-        return False
     pattern, cursor = [], 0
     for start, end in ranges:
         if start < cursor:
@@ -108,7 +106,7 @@ def aligned_preview(preview: str, detail: str) -> bool:
 
 
 def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
-    """Only bypass raw length when known link artifacts explain the difference."""
+    """Allow whitespace-only differences once the detail covers all stored characters."""
     prefix = entry[x_post.HINT]
     preview = entry['body'].removeprefix(prefix).strip()
     canonical = canonical_preview(preview)
@@ -117,11 +115,12 @@ def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
         return 'identical', None, dict(info, reason='detail_matches_stored')
     if x_post.expanded(text, preview):
         return 'expanded', x_post.merge(entry, text), dict(info, reason='longer_detail')
-    if info['artifacts'] and aligned_preview(preview, text):
+    if aligned_preview(preview, text):
         complete = dict(entry)
         complete.pop(x_post.HINT)
         complete.update(title=text.splitlines()[0][:500], body=prefix + text)
-        return 'normalized', complete, dict(info, reason='legacy_link_artifacts')
+        return 'normalized', complete, dict(info, reason='legacy_link_artifacts'
+                                           if info['artifacts'] else 'legacy_whitespace')
     state = 'blocked_artifacts' if info['artifacts'] else 'blocked_length'
     return state, None, dict(info, reason='legacy_link_artifacts_not_reconciled'
                             if info['artifacts'] else 'detail_not_longer')

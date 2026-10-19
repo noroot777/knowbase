@@ -275,12 +275,98 @@ class BackfillTests(ChannelBase):
                 self.assertEqual(0, stats['updated'])
                 self.assertEqual(row, self.row(row['key']))
 
-    def test_normal_paragraph_breaks_are_not_cleaned_as_link_artifacts(self):
+    def test_confirmed_detail_can_reconcile_whitespace_without_url_artifacts(self):
         row = self.seed('Read this: https://example.org/guide\nKeep this ending.')
-        stats = backfill.repair([row], Page(snapshot(row['body'].replace('\n', ' '))), apply=True)
-        self.assertEqual(0, stats['normalized'])
+        clean = row['body'].replace('\n', ' ')
+        stats = backfill.repair([row], Page(snapshot(clean)), apply=True)
+        self.assertEqual(1, stats['normalized'])
+        self.assertEqual(1, stats['updated'])
+        self.assertEqual([], backfill.link_artifacts(row['body'], clean))
+        self.assertEqual(clean, self.row(row['key'])['body'])
+
+    def test_inline_mentions_and_hashtags_are_repaired_without_a_url(self):
+        for index, (stored, clean) in enumerate([
+            ('Prediction: you’re all going to be using \n@AsideAI\n with your agents in a year or so',
+             'Prediction: you’re all going to be using @AsideAI with your agents in a year or so'),
+            ('Read\n@AsideAI\ntoday', 'Read @AsideAI today'),
+            ('Try \n#AI\n and \r\n@AsideAI\r\n today…', 'Try #AI and @AsideAI today…'),
+            ('Read \n@AsideAI\n today', 'Read @AsideAI today!'),
+            ('Read \n@AsideAI\n today\n\nNext paragraph.',
+             'Read @AsideAI today\n\nNext paragraph.'),
+        ]):
+            with self.subTest(stored=stored):
+                identity = str(400 + index)
+                row = self.seed(stored, identity, context='Someone reposted')
+                detail = dict(snapshot(clean), at=identity, id=identity)
+                self.assertLessEqual(len(clean), len(stored))
+                self.assertEqual([], backfill.link_artifacts(stored, clean))
+                probe = backfill.repair([row], Page(detail))
+                self.assertEqual(1, probe['normalized'])
+                self.assertEqual(0, probe['updated'])
+                self.assertEqual(row, self.row(row['key']))
+                stats = backfill.repair([row], Page(detail), apply=True)
+                updated = self.row(row['key'])
+                self.assertEqual(1, stats['updated'])
+                self.assertFalse(stats['results'][0]['artifacts'])
+                self.assertEqual('legacy_whitespace', stats['results'][0]['reason'])
+                self.assertEqual('> Someone reposted\n\n' + clean, updated['body'])
+                self.assertEqual(clean.splitlines()[0], updated['title'])
+                self.assertEqual(row['content_rev'] + 1, updated['content_rev'])
+
+    def test_inline_cleanup_cli_uses_versioned_replacement_and_reexports(self):
+        stored, clean = 'Read \n@AsideAI\n today', 'Read @AsideAI today'
+        row = self.seed(stored, context='Someone reposted')
+        sync.export('social')
+        with reg.db() as conn:
+            conn.execute("UPDATE feed_items SET body_zh='旧译文',translated_at='old'")
+            row = dict(conn.execute('SELECT * FROM feed_items').fetchone())
+        report = self.root / 'report.json'
+        with contextlib.redirect_stdout(io.StringIO()), \
+             patch.object(backfill.x_browser, 'browser_session',
+                          return_value=contextlib.nullcontext(Page(snapshot(clean)))):
+            self.assertEqual(0, backfill.main(['run', '--yes', '--report', str(report)]))
+        self.assertEqual(1, json.loads(report.read_text())['normalized'])
+        updated = self.row(row['key'])
+        self.assertEqual('> Someone reposted\n\n' + clean, updated['body'])
+        self.assertEqual(row['content_rev'] + 1, updated['content_rev'])
+        self.assertEqual('', updated['body_zh'])
+        self.assertEqual('', updated['translated_at'])
+        self.assertEqual(1, updated['extract_stale'])
+        self.assertEqual(row['exported_hash'], updated['exported_hash'])
+        sync.export('social')
+        exported = (sync.VAULT_ROOT / row['path']).read_text()
+        self.assertIn(updated['body'], exported)
+        self.assertNotIn(stored, exported)
+
+    def test_whitespace_alignment_does_not_allow_nonwhitespace_loss_or_edits(self):
+        row = self.seed('Keep \n@AsideAI\n and \n#AI\n today…')
+        for text in ['Keep @AsideAI and #AI', 'Keep @OtherAI and #AI today…',
+                     'Keep @AsideAI and #AI today', 'Keep #AI and @AsideAI today…']:
+            with self.subTest(text=text):
+                stats = backfill.repair([row], Page(snapshot(text)), apply=True)
+                self.assertEqual(1, stats['blocked_length'])
+                self.assertEqual(0, stats['updated'])
+                self.assertEqual(row, self.row(row['key']))
+
+    def test_inline_cleanup_still_requires_the_matching_unfolded_detail(self):
+        stored, clean = 'Read \n@AsideAI\n today', 'Read @AsideAI today'
+        row = self.seed(stored)
+        for detail in [dict(snapshot(clean), at='999'), dict(snapshot(clean), id='999'),
+                       dict(snapshot(clean), truncated=True)]:
+            with self.subTest(detail=detail), patch.object(x_post, 'SECONDS', 0.002):
+                stats = backfill.repair([row], Page(detail), apply=True)
+                self.assertEqual(1, stats['failed'])
+                self.assertEqual(0, stats['updated'])
+                self.assertEqual(row, self.row(row['key']))
+
+    def test_inline_cleanup_preserves_concurrent_replacements(self):
+        row = self.seed('Read \n@AsideAI\n today')
+        self.assertTrue(grab_store.replace(row, {'title': 'New title', 'body': BODY}))
+        current = self.row(row['key'])
+        stats = backfill.repair([row], Page(snapshot('Read @AsideAI today')), apply=True)
+        self.assertEqual(1, stats['stale'])
         self.assertEqual(0, stats['updated'])
-        self.assertEqual(row, self.row(row['key']))
+        self.assertEqual(current, self.row(row['key']))
 
     def test_any_url_character_can_be_split_without_an_ellipsis(self):
         url = 'https://example.org/a-long-path?one=two%20three#section'
@@ -372,11 +458,13 @@ class BackfillTests(ChannelBase):
         self.assertEqual(current, self.row(row['key']))
 
     def test_legacy_cleanup_does_not_weaken_live_collection(self):
-        for index, stored in enumerate([LEGACY, LEGACY.removesuffix('\n…')]):
+        for index, stored in enumerate([LEGACY, LEGACY.removesuffix('\n…'),
+                                        'Read \n@AsideAI\n today']):
             with self.subTest(stored=stored):
                 identity = str(160 + index)
                 row = self.seed(stored, identity)
-                detail = dict(snapshot(CLEAN), at=identity, id=identity)
+                clean = 'Read @AsideAI today' if '@AsideAI' in stored else CLEAN
+                detail = dict(snapshot(clean), at=identity, id=identity)
                 entries, note = x_post.complete([backfill.entry_of(row)], session=Page(detail))
                 self.assertEqual([], entries)
                 self.assertIn('下次同步', note)
