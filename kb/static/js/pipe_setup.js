@@ -35,6 +35,11 @@ async function openPipeModal() {
   pipeSetupError(); $('pipe-acct-search').value = '';
   $('pipe-acct-list').innerHTML = '<p class="pipe-acct-empty">正在读取同步来源与订阅…</p>';
   renderPipeStages(); renderPipeEst();
+  // **每次打开都重读一遍定时事实**:弹窗里「出完报接着整理图鉴和 Wiki」那句话是
+  // 替后端许诺,而那一段跟着定时设置里的勾走(`pipeDailyLibrary`)。同步中心平时
+  // 不读定时(读它的是「我的订阅」和日报页),不读就只能照"读不到"那一档说话 ——
+  // 而这恰恰是最常见的入口。回包落地时 `watchSchedules` 会把这几句就地换掉。
+  loadSchedules();
   if (!pipeConnected) refreshPipe();
   try {
     await loadPipeChannels();

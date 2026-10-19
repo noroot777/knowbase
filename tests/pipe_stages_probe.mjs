@@ -42,6 +42,13 @@ const FIXTURES = {
   // 所以这一格是**可改的**：两个方向各铉一次。
   "/api/daily/reports": { reports: [] },
   "/api/pipeline/runs": { runs: [], error: "", version: "none", keep_days: 3 },
+  // 日报那一轮出完报之后还整不整理图鉴和 Wiki,看这里面的 `library`(GET 外面套了
+  // 一层 `{settings, ...}`,见 `schedules.js`)。**不摆这一格的话读不到**,而
+  // 「读不到」是第三档文案 —— 那一档一绿,"开着"和"关着"两档就都没验过。
+  "/api/daily/settings": { settings: { enabled: true, time: "07:30", sync: true,
+                                       library: true, first_days: 1, channels: [],
+                                       next_run: "" },
+                           channels: [], default_channels: [] },
   "/api/pipeline/status": { running: false, stop_requested: false, stopped: false,
                             stop_supported: true, last_run: null, log: [],
                             result_version: "none" },
@@ -179,16 +186,41 @@ await sleep(100);
 await setStage('wiki', false);               // 先留下一份"用户自己的选择"
 await setDaily(true);
 s = await snap();
-check("勾了出日报:步骤固定成日报那一轮自己那四段,而且改不动",
-      s.stages.join() === 'crawl,export,index,extract' && s.locked, JSON.stringify(s));
+check("勾了出日报:步骤固定成日报那一轮自己那几段,而且改不动",
+      s.stages.join() === 'crawl,export,index,extract,projects,wiki' && s.locked,
+      JSON.stringify(s));
 check("勾了出日报:来源还开着,时间范围和订阅禁掉",
       !s.srcOff && s.scopeOff, JSON.stringify(s));
 check("勾了出日报:说清步骤由它自己排、出完报接着整理,而且不按订阅和日期筛",
       /由它自己排/.test(s.hint) && /出完报接着整理工具和更新 Wiki/.test(s.hint)
       && /不按订阅和日期筛/.test(s.hint), s.hint);
+// 出完报那两段是全库的慢活。**念的顺序不许按步骤表一路念下去** —— 那样会把
+// 「先整理、后出报」念成事实,而真顺序是出报插在中间(`library_tail` 在收尾的
+// finally 里)。
+check("勾了出日报:出报之后那两段也要念出来,顺序是出报在中间",
+      /跑完生成今天的日报，再整理工具 → 更新 Wiki/.test(s.est)
+      && /含 2 段全库的慢活/.test(s.est), s.est);
 check("勾了出日报:汇总念来源,不念订阅数和日期段",
       /跑完生成今天的日报/.test(s.est) && /来源 公众号 · 订阅源/.test(s.est)
       && !/不限时间/.test(s.est) && !/个 ·/.test(s.est), s.est);
+// 反过来钉一边:设置里把那个勾关掉之后,这句话不许再承诺整理 —— 关着的时候
+// `daily_library.library_round` 压根不跑,图鉴和三张图谱就是不更新。走的是共享层
+// 那道门(`schedulesSaved`,别处保存成功就是这么交过来的)。
+await evalJs(`schedulesSaved('daily', { enabled: true, time: '07:30', sync: true,
+  library: false, first_days: 1, channels: [], next_run: '' }); 0`);
+await sleep(60);
+s = await snap();
+check("设置里关掉整理:步骤退回四段,话也跟着改口",
+      s.stages.join() === 'crawl,export,index,extract'
+      && /出完报不整理图鉴和 Wiki/.test(s.hint)
+      && !/慢活/.test(s.est), `${s.hint} // ${s.est}`);
+await evalJs(`schedulesSaved('daily', { enabled: true, time: '07:30', sync: true,
+  library: true, first_days: 1, channels: [], next_run: '' }); 0`);
+await sleep(60);
+s = await snap();
+check("再开回来:六段和那句承诺都回来了",
+      s.stages.join() === 'crawl,export,index,extract,projects,wiki'
+      && /出完报接着整理/.test(s.hint), `${s.hint} // ${s.est}`);
 posted.length = 0;
 await evalJs(`startPipeFromModal()`);
 await sleep(400);

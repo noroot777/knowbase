@@ -275,6 +275,24 @@ await evalJs(`resetDailyWindow()`);
 check("「接上一份日报」能把区间收回默认",
       /起到生成时刻/.test(await evalJs(`document.getElementById('daily-window-label').textContent`)));
 
+// 起跑请求在路上那几百毫秒里,这颗按钮要是按得下去就是两份日报同时在生成。
+// `dailyBusy` 是 daily.js 的顶层 `let` —— **`let` 不挂到 window 上**,读
+// `window.dailyBusy` 永远是 undefined,这一档就整个失效了(挡重复提交的只剩
+// `runDaily` 开头那道词法守卫,而那一道挡不住"按钮看起来还能点")。
+// 两头都钉:**只动 `dailyBusy` 这一个轴**,先勾上「先同步一轮」把「这一次不会多带
+// 内容」那一档(`noGain`)排除掉 —— 不排的话今天已经有日报、`gain=0` 时按钮本来就
+// 是灰的,这一局不管对错都绿。
+check("请求在路上时那颗按钮按不下去", await evalJs(`(() => {
+  const gen = document.getElementById('daily-gen'), ps = document.getElementById('daily-presync');
+  const was = ps.checked, busyWas = dailyBusy;
+  ps.checked = true;
+  dailyBusy = false; renderDailyButtons();
+  const idle = gen.disabled;
+  dailyBusy = true; renderDailyButtons();
+  const busy = gen.disabled;
+  dailyBusy = busyWas; ps.checked = was; renderDailyButtons();
+  return !idle && busy; })()`));
+
 // 重新生成今天这一份:先弹确认框,确认后生成时间会变
 // 比 window_until 而不是 generated:后者只到分钟,同一分钟内重新生成逐字相同。
 const stamp = `(async () => (await (await fetch('/api/daily/reports/${today}')).json()).window_until)()`;

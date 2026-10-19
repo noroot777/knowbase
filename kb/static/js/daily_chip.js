@@ -151,7 +151,13 @@ function renderDailyGenButton() {
   // 这颗按钮点不点得了,只在这一处算 —— `renderDailyButtons` 不再另算一遍,
   // 两处算迟早在某一档上岔开。`dailyBusy` / `dailyState` 是 daily.js 的全局
   // (这个函数本来就在读 `dailyWindow` / `dailyWindowDirty`,同一套)。
-  $('daily-gen').disabled = !!window.dailyBusy || !!dailyState?.running
+  //
+  // **直接读那个名字,不走 `window.`**:`dailyBusy` 是 daily.js 的顶层 `let`,
+  // 而 `let` 只进全局词法环境、**不挂到 window 上** —— `window.dailyBusy` 永远是
+  // undefined,于是起跑请求在路上那几百毫秒里这颗按钮没被禁住(挡住重复提交的只剩
+  // `runDaily` 开头那道词法守卫)。daily.js 排在本文件之前加载,所以这个名字在这儿
+  // 一定已经初始化过了(const/let 有 TDZ,顺序反了会抛)。
+  $('daily-gen').disabled = !!dailyBusy || !!dailyState?.running
                             || (noGain && !presync);
 
   // tooltip 带着**抓取自己的事实**:今天第 N 次抓取往库里新加了多少篇。一天内
