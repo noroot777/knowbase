@@ -118,11 +118,20 @@ def remember_login_window(profile: str, pid: int) -> None:
     记下来的那份在发信号之前要重新核对一次,对不上就一个字都不碰(审查 R7)。
     """
     pid = int(pid)                 # 调用方给的是 `Popen.pid`,先定型再往下用
-    born, exe = _proc_identity(pid)
+    _write_login_note(profile, pid, time.time(), _proc_identity(pid))
+
+
+def _write_login_note(profile: str, pid: int, at: float,
+                      ident: tuple[str, str]) -> None:
+    """落盘那一下只有这一个出口(`remember_login_window` 和重新认人那条路都过它)。
+
+    **`at` 由调用方给**:重新认人时要把原来那个起始时刻原样留住 —— 换成"现在"就是
+    把 TTL 重新计时,那个窗口于是永远到不了点。
+    """
+    born, exe = ident
     try:
         with open(_login_note(profile), 'w', encoding='utf-8') as fh:
-            json.dump({'pid': pid, 'at': time.time(),
-                       'born': born, 'exe': exe}, fh)
+            json.dump({'pid': pid, 'at': at, 'born': born, 'exe': exe}, fh)
     except OSError:
         pass
 
@@ -197,6 +206,38 @@ def login_window_left(profile: str, *, ttl: float = LOGIN_WINDOW_TTL) -> float:
         return 0.0
     at = _read_login_note(profile)[1]
     return max(0.0, at + ttl - time.time())
+
+
+def login_window_stuck(profile: str) -> bool:
+    """**有我们开的窗口、它还占着这个 profile,可是认不出来** —— 到点不会自动关。
+
+    这一档是真会发生的:`_proc_identity` 问 `ps` 要身份,**那一问失败一次就永久
+    失配** —— 记录里存着 `('', '')`,后面 `ps` 和锁都恢复了也没人再去问第二遍
+    (审查 R5)。同判据的另一个实例是启动脚本:它先自己初始化、再 `exec` 真正的
+    Chrome,于是同一个子进程的 `comm` 在我们记下身份**之后**变了。
+
+    两种都让 `login_window_pid` 恒为 0,而守望线程手里有句柄时会去**重新认一次**
+    (`_relearn_identity`)、到点用句柄自己关掉它 —— 所以这一档只在**没有句柄**时
+    留下来:服务重启过,守望线程没了,只剩抓取开工前那一问,而那一问不许凭一份对
+    不上的身份去杀进程。
+
+    **那时面板必须改口。** 认不出 ⇒ `login_window_left` 是 0 ⇒ 面板那段「登录窗口
+    开着,X 分钟后自动关闭」整段不说,于是 readiness 一路走到「Cookies 在,就绪」
+    —— 窗口明明占着浏览器,而面板说一切正常,每一轮同步照旧全红。这正是这块代码
+    要防的那场事故,换了个入口又回来了。
+
+    判据**只认我们自己那份记录指着的那个 pid**:锁指着别人时那是用户自己开的窗口
+    (不归我们管,口径同 `login_window_pid`),不在这一档里。
+    """
+    pid, at, _ = _read_login_note(profile)
+    if not pid or _starting(at) or login_window_pid(profile):
+        return False
+    try:
+        target = os.readlink(os.path.join(profile, 'SingletonLock'))
+    except OSError:
+        return False
+    holder = target.rpartition('-')[2]
+    return holder.isdigit() and int(holder) == pid and _alive(pid)
 
 
 def release_login_window(profile: str, *, ttl: float = LOGIN_WINDOW_TTL) -> str:
@@ -281,6 +322,59 @@ def _close_login_window(pid: int, ident: tuple[str, str]) -> None:
             time.sleep(0.1)
 
 
+def _relearn_identity(profile: str, proc) -> bool:
+    """手里那个句柄还活着时,**重新问一次它的身份并写回记录**。认出来了返回 True。
+
+    `_proc_identity` 问的是 `ps`,而那一问**失败一次就永久失配**:记录里存着
+    `('', '')`,于是 `login_window_pid` 恒为 0 —— 守望、抓取前释放、面板那一行全都
+    认不出这个窗口,而它开着(审查 R5)。启动脚本先初始化再 `exec` 真 Chrome 的那
+    一档同理:身份是在 exec **之前**记下的。
+
+    **重新认人只在手里有活着的句柄时做,这就是它的安全边界**:`proc.poll()` 还是
+    None 意味着这个子进程还没被回收,系统不可能把这个号分给别人 —— 也就是说"这个
+    pid 是我们的"由句柄作证,不是由 `ps` 作证。没有句柄(服务重启过)时一个字都不
+    改:那时唯一能排除 pid 复用的凭据就是记录里那份身份。
+
+    `at` 原样留住(见 `_write_login_note`):重新认人不是重新开始计时。
+    """
+    if proc is None or proc.poll() is not None:
+        return False
+    pid, at, ident = _read_login_note(profile)
+    if pid != proc.pid:
+        return False                     # 记录说的不是手里这一个,不碰
+    fresh = _proc_identity(pid)
+    if fresh == ('', ''):
+        return False                     # 这会儿还是问不出来,下一跳再试
+    if fresh != ident:
+        _write_login_note(profile, pid, at, fresh)
+    return True
+
+
+def _close_by_handle(proc) -> None:
+    """用手里那个 `Popen` 句柄关掉它。**句柄是精确身份,摆不到别的进程上。**
+
+    认不出身份的那一档只剩这一条路:`ps` 坏了、或者启动脚本 exec 换掉了可执行
+    文件,`login_window_pid` 恒为 0,而窗口开着、占着整条采集通道。这里不用 pid
+    发信号 —— `proc.terminate()` 作用在我们自己起的那个子进程上,`poll()` 还是
+    None 就意味着它还没被回收、这个号没被别人拿走,所以**这条路天生没有误杀**
+    (防误杀那道闸一点没松:pid 那条路照旧要身份对得上)。
+
+    两步同 `_close_login_window`:先 SIGTERM 让 Chrome 把 profile 存盘(登录态就
+    在里面),卡住不动才 SIGKILL。一个异常都不往外抛 —— 抛出去就是记录不被清掉。
+    """
+    for stop, grace in ((proc.terminate, 6.0), (proc.kill, 3.0)):
+        if proc.poll() is not None:
+            return
+        try:
+            stop()
+            proc.wait(timeout=grace)     # wait 顺带收尸
+            return
+        except subprocess.TimeoutExpired:
+            continue
+        except OSError:
+            return
+
+
 def watch_login_window(profile: str, *, proc=None,
                        ttl: float = LOGIN_WINDOW_TTL) -> None:
     """起一个守望线程:到点把登录窗口关掉。
@@ -315,12 +409,23 @@ def watch_login_window(profile: str, *, proc=None,
                 forget_login_window(profile)
                 return
             if not login_window_pid(profile):
-                # ② 认不出:启动中,或者记录暂时读不出来。手里的句柄还活着就接着守
-                #    (上限是这个窗口自己的 TTL —— 再久也没有可守的了)。
+                # ② 认不出:启动中、记录暂时读不出来,或者**身份那一问失败过**
+                #    (`ps` 抽了一下、或者启动脚本 exec 换掉了可执行文件)。手里的
+                #    句柄还活着就先**重新认一次人**,再接着守(上限是这个窗口自己的
+                #    TTL —— 再久也没有可守的了)。
                 if proc is not None and time.time() - started < ttl:
+                    _relearn_identity(profile, proc)
                     time.sleep(2.0 if time.time() - started < LOGIN_WINDOW_STARTUP
                                else 15.0)
                     continue
+                # 到点了还是认不出,而句柄说它**还活着**:这就是审查 R5 那一档 ——
+                # 认不出不等于关了,所以用句柄自己关掉它(`_close_by_handle`:精确
+                # 身份,没有误杀的余地),而不是把记录一删了之、留一个开着的窗口
+                # 挡住每一轮同步。
+                if proc is not None and proc.poll() is None:
+                    _close_by_handle(proc)
+                    forget_login_window(profile)
+                    return
                 release_login_window(profile, ttl=ttl)   # 清陈旧记录
                 return
             # ③ 到点了就关(关不关、关谁,全在 `release_login_window` 里判)

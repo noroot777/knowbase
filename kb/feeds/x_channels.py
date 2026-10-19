@@ -399,11 +399,19 @@ def readiness(settings: dict) -> tuple[bool, str, str]:
     # 顺序反了的话,刚点开窗口、还没登录完的人收到的是「还没有登录过 X」——
     # 一句正确但没用的话,而真正该知道的「它正挡着每一轮同步」一个字没说
     # (2026-10-19 那场事故里,面板从头到尾没提过这件事)。
-    from kb.feeds.x_login_window import login_window_left
+    from kb.feeds.x_login_window import login_window_left, login_window_stuck
     if left := login_window_left(str(BROWSER_PROFILE)):
         return (False, 'X 登录窗口开着,它占着抓取要用的浏览器',
                 f'在那个窗口里登录完就关掉它；忘了关也不要紧,'
                 f'{int(left // 60) + 1} 分钟后它会自动关闭')
+    # **认不出那个窗口的时候不许沉默。** 它还占着浏览器,但自动关闭那条路要身份
+    # 对得上才敢走(见 `login_window_stuck`)—— 不说的话这里会一路走到下面
+    # 「Cookies 在 ⇒ 就绪」,而每一轮同步照旧全红、面板上一个字都没有。那就是这块
+    # 代码要防的那场事故换了个入口。承诺也跟着收回:它不会自动关。
+    if login_window_stuck(str(BROWSER_PROFILE)):
+        return (False, 'X 登录窗口还开着,它占着抓取要用的浏览器',
+                '认不出它是不是我们开的那一个（服务重启过，或者系统问不出进程身份），'
+                '所以不会自动关闭 —— 请手动把那个窗口关掉')
     if not (BROWSER_PROFILE / 'Default' / 'Cookies').exists():
         return False, '浏览器通道还没有登录过 X', ''
     return True, '', ''

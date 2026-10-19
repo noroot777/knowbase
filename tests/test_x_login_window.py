@@ -21,6 +21,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from kb.feeds import x_login_window as xlw
 
@@ -318,6 +319,119 @@ class StartupRaceTests(LoginWindowBase):
         self.assertFalse(self._note_exists(), '句柄已经退了,记录还留着')
 
 
+class IdentityGapTests(LoginWindowBase):
+    """**身份那一问失败一次,不许让自动关闭永久失效**(审查 R5 第二轮)。
+
+    `_proc_identity` 问的是 `ps`。那一问失败一次(系统抽一下、容器里没有 ps)记录
+    里就存着 `('', '')`,而原来没有任何地方会再问第二遍 —— `login_window_pid` 从此
+    恒为 0:守望线程守满 TTL、把记录一删了之,**那个窗口开着,占着整条采集通道**,
+    而面板一路走到「Cookies 在 ⇒ 就绪」,一个字都不说。同判据的另一个实例是启动
+    脚本先初始化再 `exec` 真 Chrome(同一个子进程的 `comm` 在我们记下身份之后变了)。
+
+    出路有两条,各有自己的射程,**判据都落在后果上**:
+    · 手里还有句柄时**重新认一次人**并到点用句柄关掉它 —— 句柄是精确身份,
+      防误杀那道闸一点没松(pid 那条路照旧要身份对得上);
+    · 没有句柄时(服务重启过)一个字都不碰,但**面板必须改口**:它不会自动关,
+      请手动关掉。
+    """
+
+    def test_an_identity_probe_that_failed_is_asked_again(self):
+        """起的时候 `ps` 没答上来(记录里是空身份)—— 守望线程要把它补上。
+
+        判据是**后果**:补上之后 `login_window_pid` 重新认得出它,于是到点那一下
+        照原来那条(要身份对得上的)路关掉它。
+        """
+        proc = _sleeper(); self.procs.append(proc)
+        self._hold(proc.pid)
+        self._note(proc.pid, ident=('', ''))        # 那一问当时失败了
+        self.assertEqual(0, xlw.login_window_pid(self.profile),
+                         '这一局的前提:空身份认不出来')
+        self.assertTrue(xlw._relearn_identity(self.profile, proc), '没能重新认出来')
+        self.assertEqual(proc.pid, xlw.login_window_pid(self.profile),
+                         '重新认过之后还是认不出')
+
+    def test_relearning_keeps_the_original_clock(self):
+        """重新认人**不许重新计时** —— 换成"现在"的话那个窗口永远到不了点。"""
+        proc = _sleeper(); self.procs.append(proc)
+        self._hold(proc.pid)
+        self._note(proc.pid, age=9 * 60, ident=('', ''))
+        xlw._relearn_identity(self.profile, proc)
+        left = xlw.login_window_left(self.profile, ttl=10 * 60)
+        self.assertTrue(0 < left <= 65, f'起始时刻被改写了,剩余 {left}')
+
+    def test_the_watcher_puts_the_identity_back_for_everyone_else(self):
+        """守望线程补回来的身份**另外两道也要用得上** —— 这是它和句柄那条路的区别。
+
+        句柄只在守望线程自己手里:它到点能关掉窗口,却帮不了**抓取开工前那一问**和
+        **面板那一行**(那两道只有 profile 里的记录可读)。所以判据落在「别人看得见
+        的那两件事」上:倒计时回来了、面板不再说"认不出、请手动关"。少了重新认人
+        那一步,窗口最后虽然还是被句柄关掉,可这中间每一轮抓取都在红,而面板一直
+        让用户自己去关一个马上会被自动关掉的窗口。
+        """
+        proc = _sleeper(); self.procs.append(proc)
+        self._hold(proc.pid)
+        self._note(proc.pid, age=60, ident=('', ''))     # 那一问当时失败了
+        self.assertTrue(xlw.login_window_stuck(self.profile),
+                        '这一局的前提:现在认不出它')
+        xlw.watch_login_window(self.profile, proc=proc, ttl=10 * 60)
+        for _ in range(60):
+            if xlw.login_window_left(self.profile, ttl=10 * 60):
+                break
+            time.sleep(0.1)
+        self.assertTrue(xlw.login_window_left(self.profile, ttl=10 * 60),
+                        '守望线程没把身份补回来 —— 另外两道一直认不出这个窗口')
+        self.assertFalse(xlw.login_window_stuck(self.profile),
+                         '补回来了,面板却还在说"认不出、请手动关"')
+
+    def test_a_window_we_cannot_identify_is_still_closed_by_its_handle(self):
+        """身份永久对不上(`ps` 坏了 / 启动脚本换了可执行文件):到点照样要关掉它。
+
+        这是这一条的要害:**认不出不等于已经关了**。原来守望线程守满 TTL 之后
+        调 `release_login_window`,而那一下认不出、只把记录删掉就收工 —— 窗口留着
+        挡住每一轮同步,下一次抓取连记录都读不到了。
+        """
+        proc = _sleeper(); self.procs.append(proc)
+        self._hold(proc.pid)
+        self._note(proc.pid, ident=('陈旧的启动时刻', '/不是这个程序'))
+        with patch.object(xlw, '_proc_identity', lambda pid: ('', '')):
+            xlw.watch_login_window(self.profile, proc=proc, ttl=0.5)
+            for _ in range(80):
+                if not _alive(proc.pid):
+                    break
+                time.sleep(0.1)
+        self.assertFalse(_alive(proc.pid),
+                         '认不出身份 ⇒ 守望线程把记录一删了之,窗口留着挡通道')
+        self.assertFalse(self._note_exists(), '关掉之后记录该一起清掉')
+
+    def test_the_handle_route_never_touches_a_window_that_is_not_ours(self):
+        """反过来钉一边:句柄那条路只动**手里那一个**。
+
+        记录指着别人(用户自己开的窗口)时,`_relearn_identity` 一个字都不许改 ——
+        改了就等于把别人的窗口认成我们的,而下一步是 SIGKILL。
+        """
+        mine = _sleeper(); self.procs.append(mine)
+        theirs = _sleeper(); self.procs.append(theirs)
+        self._hold(theirs.pid)
+        self._note(theirs.pid, ident=('', ''))      # 记录说的不是手里这一个
+        self.assertFalse(xlw._relearn_identity(self.profile, mine),
+                         '把别人的窗口重新认成了我们的')
+        self.assertEqual(0, xlw.login_window_pid(self.profile))
+        self.assertTrue(_alive(theirs.pid))
+
+    def test_no_handle_means_no_killing_at_all(self):
+        """反过来钉一边:没有句柄(服务重启过)时认不出就什么都不碰。
+
+        那一档唯一能排除 pid 复用的凭据就是记录里那份身份,而它对不上。这里宁可
+        不关 —— 代价由下面那条面板用例兜着:它会说清"不会自动关,请手动关掉"。
+        """
+        proc = _sleeper(); self.procs.append(proc)
+        self._hold(proc.pid)
+        self._note(proc.pid, age=20 * 60, ident=('对不上的时刻', '/对不上的程序'))
+        self.assertEqual('', xlw.release_login_window(self.profile, ttl=1))
+        self.assertTrue(_alive(proc.pid), '没有句柄、身份又对不上,却还是发了信号')
+        self.assertFalse(xlw._relearn_identity(self.profile, None))
+
+
 class PanelCopyTests(LoginWindowBase):
     """面板那一行:窗口开着时说的是"去关它",不是"还没有登录过 X"。"""
 
@@ -339,6 +453,25 @@ class PanelCopyTests(LoginWindowBase):
         self.assertIn('登录窗口', why)
         self.assertNotIn('还没有登录过', why)
         self.assertIn('自动关闭', nxt)
+
+    def test_a_window_we_cannot_identify_is_not_passed_off_as_ready(self):
+        """认不出那个窗口时**不许沉默**:它还占着浏览器,而面板不能说"就绪"。
+
+        这一档就是 R5 的后半截:身份对不上 ⇒ 倒计时是 0 ⇒ 那段话整段不说 ⇒ 一路
+        走到「Cookies 在就是就绪」。于是每一轮同步全红,而面板上一个字都没有 ——
+        正是这块代码当初要解决的那场事故,换了个入口又回来了。
+        **承诺也要跟着收回**:这一档不会自动关闭,只能手动。
+        """
+        (Path(self.profile) / 'Default').mkdir(parents=True)
+        (Path(self.profile) / 'Default' / 'Cookies').write_text('x', encoding='utf-8')
+        pid = self._hold()
+        self._note(pid, age=60, ident=('对不上的时刻', '/对不上的程序'))
+        ready, why, nxt = self.x_channels.readiness({'x_channel': 'browser'})
+        self.assertFalse(ready, '窗口占着浏览器,面板却说就绪')
+        self.assertIn('登录窗口', why)
+        self.assertIn('手动', nxt, '没说"得自己关"')
+        self.assertIn('不会自动关闭', nxt, '没把那句承诺收回去')
+        self.assertNotIn('分钟后', nxt, '认不出它,却还给了一个自动关闭的倒计时')
 
     def test_a_closed_window_restores_the_normal_verdict(self):
         """反过来钉一边:窗口关掉之后,面板立刻回到原来那套判断。"""
