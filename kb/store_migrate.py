@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS favorites (
   origin_ref  TEXT NOT NULL DEFAULT '',      -- origin 内部的定位键(日报日期 / 会话:消息 id / 条目 key)
   origin_title TEXT NOT NULL DEFAULT '',     -- 收藏那一刻的标题快照,path 为空时列表只靠它
   origin_url  TEXT NOT NULL DEFAULT '',      -- 站外原文地址(可空)
+  origin_source TEXT NOT NULL DEFAULT '',
+  origin_account TEXT NOT NULL DEFAULT '',
+  origin_published TEXT NOT NULL DEFAULT '',
+  origin_summary TEXT NOT NULL DEFAULT '',
   -- **采集那一刻这段引文在那一篇里是不是只有一处。** 回跳时两侧上下文都失配、
   -- 退到「只找引文」那一档时按它决定能不能采信:当时就有两处、收的是第二处,
   -- 后来第二处被删掉,剩下的第一处按裸引文找正好唯一 —— 采信它等于把另一处同
@@ -78,16 +82,22 @@ BEFORE DELETE ON documents
 BEGIN
   UPDATE favorites
   SET origin_title = CASE WHEN origin_title = '' THEN OLD.title ELSE origin_title END,
-      origin_url = CASE WHEN origin_url = '' THEN OLD.url ELSE origin_url END
-  WHERE path = OLD.path AND (origin_title = '' OR origin_url = '');
+      origin_url = CASE WHEN origin_url = '' THEN OLD.url ELSE origin_url END,
+      origin_source = CASE WHEN origin_source = '' THEN OLD.source ELSE origin_source END,
+      origin_account = CASE WHEN origin_account = '' THEN OLD.account ELSE origin_account END,
+      origin_published = CASE WHEN origin_published = '' THEN OLD.published ELSE origin_published END,
+      origin_summary = CASE WHEN origin_summary = '' THEN OLD.summary ELSE origin_summary END
+  WHERE path = OLD.path AND (origin_title = '' OR origin_url = '' OR origin_source = ''
+    OR origin_account = '' OR origin_published = '' OR origin_summary = '');
 END;
 """
 FAVORITES_DDL = FAVORITES_TABLE + FAVORITES_INDEX + ";\n" + FAVORITES_SNAPSHOT
+_FAV_METADATA = ("origin_source", "origin_account", "origin_published", "origin_summary")
 
 # 历史版本带过来的列。重建时按**老表实际有的**那几列拼 INSERT:v2 没有
 # action_json,写死一份列名会让它在 `no such column` 上翻车。
 _FAV_CARRIED = ("id", "quote", "prefix", "suffix", "note", "status", "action_json",
-                "origin", "origin_ref", "origin_title", "origin_url",
+                "origin", "origin_ref", "origin_title", "origin_url", *_FAV_METADATA,
                 "quote_unique", "anchor_exact", "origin_msg", "doc_version",
                 "created_at", "updated_at")
 
@@ -128,6 +138,38 @@ def migrate_favorites(conn: sqlite3.Connection) -> None:
     """
     if _favorites_need_rebuild(conn):
         _rebuild_favorites(conn)
+    _migrate_favorite_metadata(conn)
+
+
+def _migrate_favorite_metadata(conn: sqlite3.Connection) -> None:
+    """原子补齐显示快照列并替换旧触发器,当前结构只读不取写锁。"""
+    def needs_update():
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(favorites)")}
+        if not columns:
+            return False
+        trigger = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger'"
+                               " AND name='favorites_document_snapshot'").fetchone()
+        expected = " ".join(FAVORITES_SNAPSHOT.replace("IF NOT EXISTS ", "").strip().rstrip(";").split())
+        actual = " ".join((trigger["sql"] if trigger else "").strip().rstrip(";").split())
+        return not set(_FAV_METADATA).issubset(columns) or actual != expected
+
+    if not needs_update():
+        return
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if needs_update():
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(favorites)")}
+            for column in _FAV_METADATA:
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE favorites ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            conn.execute("DROP TRIGGER IF EXISTS favorites_document_snapshot")
+            conn.execute(FAVORITES_SNAPSHOT)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _favorites_need_rebuild(conn: sqlite3.Connection) -> bool:

@@ -20,12 +20,18 @@
   永久排除、手工删除、周期索引移除和历史清理都只能解除文档关联,不得删除收藏编号、
   引文、前后文、备注、状态、行动卡、来源快照与锚点版本。只有显式删除收藏才删除收藏行。
   同一路径后来重新入库也不得把旧收藏自动绑定到另一版原文。
-- **删除前补齐缺失的标题和链接。** 共用 DDL 的 `favorites_document_snapshot` 触发器在
-  `DELETE documents` 之前把尚为空的 `origin_title` / `origin_url` 补成文档最后已知的值;
+- **删除前补齐缺失的显示快照。** 共用 DDL 的 `favorites_document_snapshot` 触发器在
+  `DELETE documents` 之前把尚为空的 `origin_title` / `origin_url`、`origin_source` /
+  `origin_account` / `origin_published` / `origin_summary` 补成文档最后已知的值;
   已有收藏快照不覆盖,时间戳、备注与锚点不改。老的整篇收藏没有快照,也不能退化为无字卡片。
   原文仍在索引里时元数据照旧以文档为准;解除关联后用快照兜底,站外链接按 `safeUrl` 校验。
   没有安全站外链接时由 `favDocAHtml` 统一显示「原文已不在索引里」的灰色说明文字,
   不复用调用方的操作样式或箭头,不生成 `/doc/undefined` 或虚假的回跳按钮。
+  列表的 `document_available` 只由后端关联查询的 `d.path IS NOT NULL` 决定,快照不表示
+  原文还在。前端的原文入口和描述兜底共用 `favOriginal` 判据;旧脱钩行缺失的元数据
+  不凭空补造,没有摘要或引文时如实显示保留收藏的说明。删除确认和成功提示只陈述
+  收藏操作本身,不保证列表读取后原文仍在。存量库补列与快照触发器升级在同一事务内,
+  失败一起回滚,重复连接不重建也不取写锁。
 - **去掉 NOT NULL 或更换外键动作只能重建整张表**(SQLite 没有 `ALTER COLUMN`),重建是这条路上
   唯一会丢数据的一步。所以 `_rebuild_favorites` 必须满足:
   - **按老表实际有的那几列拼 INSERT**(`_FAV_CARRIED` 过一遍 `PRAGMA table_info`)。v2 没有

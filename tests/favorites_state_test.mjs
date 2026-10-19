@@ -9,7 +9,9 @@ const linkHelpers = core.slice(core.indexOf('function obsLink'), core.indexOf('/
   + core.match(/function docAHtml[\s\S]*?\n\}/)[0];
 const source = ['icons.js', 'fav.js', 'fav_view.js']
   .map(name => readFileSync(new URL(name, root), 'utf8')).join('\n');
+const snipLabels = readFileSync(new URL('snip.js', root), 'utf8').match(/const SNIP_LABEL =[^;]+;/)[0];
 const row = (id, extra = {}) => ({ id, path: `article-${id}.md`, title: `收藏 ${id}`, source: 'rss',
+  origin: 'doc', document_available: extra.path === undefined || !!extra.path,
   account: 'Example', quote: '', note: '', summary: '', status: 'inbox', vault: 'test',
   created_at: `2026-10-${String(id).padStart(2, '0')}T12:00:00`, updated_at: '2026-10-01', ...extra });
 const payload = favorites => ({ favorites, counts: { inbox: favorites.length, done: 0, archived: 0 },
@@ -43,7 +45,7 @@ function rig() {
     fetch: async url => response(url.includes('/triage') ? { fresh: false } : payload([])),
     setTimeout: callback => { timers.push(callback); return timers.length; }, clearTimeout() {} });
   function $(id) { return element(id); }
-  vm.runInContext(linkHelpers + '\n' + source, state);
+  vm.runInContext(linkHelpers + '\n' + snipLabels + '\n' + source, state);
   element('fav-sort').value = 'recent';
   return { state, element, timers, run: code => vm.runInContext(code, state),
     seed: rows => vm.runInContext(`favItems = ${JSON.stringify(rows)}`, state) };
@@ -61,8 +63,8 @@ test('detached document favorites use safe external links or an honest missing l
   const app = rig();
   for (const url of ['https://example.org/original', '', 'javascript:alert(1)']) {
     const item = JSON.stringify(row(1, { path: '', origin: 'doc', url }));
-    const label = app.run(`favOpenLabel(${item})`);
-    const html = app.run(`favDocAHtml(${item}, favOpenLabel(${item}))`);
+    const label = app.run(`favOriginal(${item}).label`);
+    const html = app.run(`favDocAHtml(${item}, favOriginal(${item}).label)`);
     assert.doesNotMatch(html, /\/doc\/|jumpFavOrigin/);
     if (url.startsWith('https:')) {
       assert.equal(label, '打开站外原文');
@@ -83,6 +85,53 @@ test('detached document favorites use safe external links or an honest missing l
         assert.doesNotMatch(rendered, /href="#"/);
       }
     }
+  }
+});
+
+test('all detached descriptions use the API availability rather than paths or snapshots', () => {
+  const app = rig();
+  for (const url of ['', 'https://example.org/original']) {
+    const item = row(1, { document_available: false, url });
+    const encoded = JSON.stringify(item);
+    for (const render of ['favCardHtml', 'favDetailHtml']) {
+      const html = app.run(`${render}(${encoded})`);
+      assert.match(html, /原文已不在索引里/);
+      assert.doesNotMatch(html, /打开原文，重新发现|更多内容，藏在原文里|\/doc\/|Obsidian/);
+    }
+    app.seed([item]);
+    assert.match(app.run('favStartHtml()'), /原文已不在索引里/);
+    assert.equal(app.run(`favOriginal(${encoded}).indexed`), false);
+  }
+  const quoted = JSON.stringify(row(2, { path: '', quote: '保留下来的引文' }));
+  assert.match(app.run(`favDetailHtml(${quoted})`), /<blockquote>保留下来的引文<\/blockquote>/);
+  assert.doesNotMatch(app.run(`favDetailHtml(${quoted})`), /藏在原文里/);
+  const snapshot = JSON.stringify(row(3, { path: '', account: '来源快照', summary: '保存的摘要' }));
+  assert.match(app.run(`favCardHtml(${snapshot})`), /保存的摘要/);
+  assert.match(app.run(`favDetailHtml(${snapshot})`), /来源快照/);
+});
+
+test('deletion feedback never asserts that an original still exists', async () => {
+  for (const extra of [{}, { path: '' }]) {
+    const app = rig();
+    app.seed([row(1, extra)]);
+    let confirmation;
+    app.state.confirmBox = async options => { confirmation = options; return true; };
+    app.state.fetch = async (_url, options) => options?.method === 'DELETE'
+      ? { ok: true, status: 204 } : response(payload([]));
+    await app.run('favDel(1)');
+    assert.match(confirmation.body, /只删除这条收藏及其笔记/);
+    assert.doesNotMatch(confirmation.body, /原文/);
+    assert.equal(app.element('fav-feedback-text').textContent, '收藏及其笔记已删除。');
+  }
+});
+
+test('non-document origins still jump back to their own panels', () => {
+  const app = rig();
+  for (const origin of ['daily', 'chat', 'feed']) {
+    const item = JSON.stringify(row(1, { path: '', origin }));
+    const html = app.run(`favCardHtml(${item})`);
+    assert.match(html, /jumpFavOrigin/);
+    assert.doesNotMatch(html, /原文已不在索引里|fv-original-missing/);
   }
 });
 

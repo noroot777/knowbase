@@ -281,12 +281,13 @@ _FAV_SELECT = (
     # 和「版本号读不出来」撞在一起 —— 两种都该按「证明不了」办,可前者是历史
     # 遗留、后者是这一刻的故障,混在一起就没法再分。
     " f.doc_version,"
-    " d.source,"
+    " (d.path IS NOT NULL) AS document_available,"
+    " COALESCE(d.source, NULLIF(f.origin_source, '')) AS source,"
     " COALESCE(NULLIF(d.title, ''), f.origin_title) AS title,"
-    " COALESCE(d.account, '') AS account,"
-    " COALESCE(d.published, '') AS published,"
+    " COALESCE(d.account, f.origin_account) AS account,"
+    " COALESCE(d.published, f.origin_published) AS published,"
     " COALESCE(NULLIF(d.url, ''), f.origin_url) AS url,"
-    " COALESCE(d.summary, '') AS summary"
+    " COALESCE(d.summary, f.origin_summary) AS summary"
     " FROM favorites f LEFT JOIN documents d ON d.path = f.path"
 )
 
@@ -322,6 +323,7 @@ def api_favorites(status: str = "inbox"):
             # path 为空时前端那套 docLink/obsLink 会拼出 `/doc/undefined`,
             # 一律给空串,由前端按 origin 走自己那条回跳。
             item["path"] = item["path"] or ""
+            item["document_available"] = bool(item["document_available"])
             item["title"] = item["title"] or _FAV_NO_TITLE
             aj = item.pop("action_json", "")
             if aj:

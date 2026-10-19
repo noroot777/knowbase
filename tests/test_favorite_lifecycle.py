@@ -34,6 +34,8 @@ class FavoriteLifecycleTests(ApiFixture):
                 self.conn.commit()
                 before = dict(self.conn.execute(
                     "SELECT * FROM favorites WHERE id=?", (favorite_id,)).fetchone())
+                metadata = self.conn.execute(
+                    "SELECT source,account,published,summary FROM documents WHERE path=?", (DOC,)).fetchone()
                 if mode == "direct":
                     self.conn.execute("DELETE FROM documents WHERE path=?", (DOC,))
                 elif mode == "explicit":
@@ -43,7 +45,10 @@ class FavoriteLifecycleTests(ApiFixture):
                 self.conn.commit()
                 after = dict(self.conn.execute(
                     "SELECT * FROM favorites WHERE id=?", (favorite_id,)).fetchone())
-                self.assertEqual({**before, "path": None}, after)
+                expected = {**before, "path": None}
+                expected.update({f"origin_{column}": before[f"origin_{column}"] or metadata[column]
+                                 for column in ("source", "account", "published", "summary")})
+                self.assertEqual(expected, after)
                 listed = self.listed("all")
                 item = next(item for item in listed["favorites"] if item["id"] == favorite_id)
                 self.assertEqual(("", "收藏时的标题", "https://e.org/snapshot", "我的备注"),
@@ -123,11 +128,16 @@ class FavoriteLifecycleMigrationTests(unittest.TestCase):
         expected = {**before, 9: {**before[9], "path": None}}
         self.assertEqual(expected, self.rows(conn))
         self.assertEqual([], list(conn.execute("PRAGMA foreign_key_check")))
+        metadata = conn.execute("SELECT source,account,published,summary FROM documents WHERE path=?",
+                                (DOC,)).fetchone()
         conn.execute("DELETE FROM documents WHERE path=?", (DOC,))
         conn.commit()
         rows = self.rows(conn)
         self.assertEqual({7, 8, 9, 10}, set(rows))
-        self.assertEqual({**before[7], "path": None}, rows[7])
+        expected_row = {**before[7], "path": None}
+        expected_row.update({f"origin_{column}": before[7][f"origin_{column}"] or metadata[column]
+                             for column in ("source", "account", "published", "summary")})
+        self.assertEqual(expected_row, rows[7])
         self.assertEqual((None, "活着的那篇", "https://e.org/live"),
                          (rows[8]["path"], rows[8]["origin_title"], rows[8]["origin_url"]))
         self.assertEqual(before[10], rows[10])

@@ -10,7 +10,7 @@ from tests.headless import NODE, fixture_server, probe_env, requires_headless, r
 @requires_headless
 class FavoriteLifecycleBrowserTests(unittest.TestCase):
     def test_detached_favorites_remain_usable(self):
-        with fixture_server('--detached', script='serve_favorites.py') as base:
+        with fixture_server('--detached', '--legacy-detached', script='serve_favorites.py') as base:
             result = run_probe(
                 [NODE, str(Path(__file__).with_name('favorite_lifecycle_probe.mjs')), base],
                 env=probe_env(), timeout=90)
@@ -18,7 +18,7 @@ class FavoriteLifecycleBrowserTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual([], report['errors'])
         self.assertEqual([], [check for check in report['checks'] if not check['ok']], report)
-        self.assertGreaterEqual(len(report['checks']), 12)
+        self.assertGreaterEqual(len(report['checks']), 17)
 
 
 if __name__ == '__main__':

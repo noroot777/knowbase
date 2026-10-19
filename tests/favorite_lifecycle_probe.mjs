@@ -64,6 +64,15 @@ try {
     'favItems.filter(item => !item.path).length === 3'
     + ' && favItems.filter(item => !item.path).every(item => item.title)'
     + ' && favItems.find(item => item.id === 1).url === "https://example.org/1"'));
+  check('API document availability and source snapshots survive deletion', await evaluate(
+    'favItems.find(item => item.id === 1).document_available === false'
+    + ' && favItems.find(item => item.id === 2).document_available === true'
+    + ' && favItems.find(item => item.id === 1).account === "少数派"'
+    + ' && favItems.find(item => item.id === 1).source === "rss"'
+    + ' && favItems.find(item => item.id === 1).published'
+    + ' && favItems.find(item => item.id === 1).summary.includes("去掉导航和广告")'));
+  check('legacy detached recommendation has an honest nonempty fallback', await evaluate(
+    'document.querySelector(".fv-recommendation p").textContent.includes("原文已不在索引里")'));
   await evaluate('document.querySelector(`[data-fav-preview="1"]`).click()');
   await waitFor('document.querySelector("#fav-inspector .fv-detail-title")');
   check('notes and action card remain in the real detail view', await evaluate(
@@ -93,6 +102,10 @@ try {
   check('clicking the card explanation does not open a detail or navigation', await evaluate(
     'favActive === 4 && location.hash === "#fav"'));
   await evaluate('document.querySelector(`[data-fav-preview="6"]`).click()');
+  check('legacy card and detail never promise unavailable original content', await evaluate(
+    'document.querySelector(`[data-fav-card="6"] .fv-card-desc`).textContent.includes("原文已不在索引里")'
+    + ' && document.querySelector("#fav-inspector .fv-detail-description").textContent.includes("原文已不在索引里")'
+    + ' && !document.querySelector("#fav-inspector").textContent.includes("藏在原文里")'));
   check('missing original without URL has an honest non-clickable label', await evaluate(
     'document.querySelector("#fav-inspector .fv-original-missing").textContent === "原文已不在索引里"'
     + ' && !document.querySelector("#fav-inspector .fv-primary-link")'
@@ -132,6 +145,22 @@ try {
     'fetch("/api/favorites?status=all").then(response => response.json())'
     + '.then(data => data.favorites.length === 10'
     + ' && data.favorites.find(item => item.id === 6).status === "done")'));
+  await click('#fav-inspector .fv-delete');
+  await waitFor('document.querySelector(".confirm-body")');
+  check('deletion confirmation describes only the favorite operation', await evaluate(
+    'document.querySelector(".confirm-body").textContent.includes("只删除这条收藏及其笔记")'
+    + ' && !document.querySelector(".confirm-body").textContent.includes("原文")'));
+  if (process.env.KB_LIFECYCLE_SCREENSHOT) {
+    const screenshot = await send('Page.captureScreenshot', { format: 'png' });
+    writeFileSync(process.env.KB_LIFECYCLE_SCREENSHOT.replace(/\.png$/, '-delete.png'),
+      Buffer.from(screenshot.data, 'base64'));
+  }
+  await click('.confirm-acts [data-act="ok"]');
+  await waitFor('favItems.length === 9 && !favItems.some(item => item.id === 6)');
+  check('deletion is persisted without claiming the original remains indexed', await evaluate(
+    'document.querySelector("#fav-feedback-text").textContent === "收藏及其笔记已删除。"'
+    + ' && fetch("/api/favorites?status=all").then(response => response.json())'
+    + '.then(data => data.favorites.length === 9 && !data.favorites.some(item => item.id === 6))'));
   check('no JavaScript exceptions', errors.length === 0);
   console.log(JSON.stringify({ checks, errors }));
 } finally {
