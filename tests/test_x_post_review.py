@@ -35,6 +35,29 @@ class ExpansionTests(unittest.TestCase):
             self.assertEqual(OLD, result['watermark'])
             self.assertTrue(result['incomplete'])
 
+    def test_two_complete_empty_reads_can_still_be_followed_by_the_full_body(self):
+        empty = dict(snapshot(''), ready='complete', articles=1)
+        with patch.object(x_post, 'STEP', 0.0):
+            page = Page(empty, empty, snapshot(BODY), snapshot(BODY))
+            kept, note = x_post.complete([preview()], session=page)
+        self.assertEqual(4, page.reads)
+        self.assertEqual('', note)
+        self.assertEqual(BODY, kept[0]['body'])
+
+    def test_a_stable_preview_on_one_round_can_be_completed_on_the_next(self):
+        for attach in [False, True]:
+            for text, expected in [(PREVIEW, []), (BODY, [BODY])]:
+                page = Page(dict(snapshot(text), ready='complete', articles=1))
+                with self.subTest(attach=attach, text=text), patch.object(x_post, 'STEP', 0.0), \
+                     patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
+                     patch.object(x_browser, '_harvest_one', return_value=([preview()], '')):
+                    result = x_browser.harvest([('Example', OLD)], profile='', attach=attach)['Example']
+                self.assertEqual(expected, [entry['body'] for entry in result['entries']])
+                if expected:
+                    self.assertNotEqual(OLD, result['watermark'])
+                else:
+                    self.assertEqual(OLD, result['watermark'])
+
 
 class ArticleHandoffTests(unittest.TestCase):
     def entry(self):

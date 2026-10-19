@@ -3,7 +3,7 @@ import json
 import time
 import unittest
 from contextlib import nullcontext
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from kb.collectors import FetchScope
 from kb.feeds import grab_store, registry as reg, sync, translate, x_browser, x_channels, x_post
@@ -90,13 +90,14 @@ class PostTests(unittest.TestCase):
                 self.assertEqual([], kept)
                 self.assertIn('1 条折叠推文', note)
 
-    def test_failures_are_local_and_leave_short_posts_untouched(self):
+    def test_session_failures_are_not_hidden_as_retryable_post_counts(self):
         short = x_browser._entry(tweet('124', text='short'))
         for snap in [dict(snapshot(), login=True), CdpError('disconnected')]:
             with self.subTest(snap=snap):
-                kept, note = x_post.fill([preview(), short], session=Page(snap))
-                self.assertEqual([short], kept)
-                self.assertIn('下次同步', note)
+                page = Page(snap)
+                with self.assertRaises(x_post.PostSessionUnavailable):
+                    x_post.fill([preview(), short, preview()], session=page)
+                self.assertEqual([URL], page.urls)
 
     def test_stop_and_budget_do_not_start_any_navigation(self):
         for kwargs in [{'should_stop': lambda: True}, {'deadline': time.monotonic() - 1}]:
@@ -104,19 +105,62 @@ class PostTests(unittest.TestCase):
                 page = Page()
                 kept, note = x_post.fill([preview()], session=page, **kwargs)
                 self.assertEqual([], kept)
-                self.assertTrue(note)
+                self.assertIn('暂缓补全', note)
+                self.assertIn('同步已停止' if 'should_stop' in kwargs else '时间预算用完', note)
+                self.assertNotIn('没取到', note)
                 self.assertEqual([], page.urls)
 
-    def test_a_failed_detail_does_not_advance_browser_or_attach_watermarks(self):
+    def test_an_expired_session_aborts_remaining_accounts_in_both_channels(self):
         for attach in [False, True]:
-            with self.subTest(attach=attach):
-                page = Page(dict(snapshot(), login=True))
-                with patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
-                     patch.object(x_browser, '_harvest_one', return_value=([preview()], '')):
-                    result = x_browser.harvest([('Example', OLD)], profile='', attach=attach)
-                self.assertEqual([], result['Example']['entries'])
-                self.assertEqual(OLD, result['Example']['watermark'])
-                self.assertIn('折叠推文', result['Example']['incomplete'])
+            for snap, reason in [(dict(snapshot(), login=True), '重新登录'),
+                                 (CdpError('disconnected'), '会话中断'),
+                                 (EOFError('closed'), '会话中断')]:
+                with self.subTest(attach=attach, reason=reason):
+                    page = Page(snap)
+                    short = x_browser._entry(tweet('124', text='short'))
+                    with patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
+                         patch.object(x_browser, '_harvest_one', side_effect=[([short], ''),
+                                      ([preview(), preview()], ''), ([preview()], '')]) as collect:
+                        result = x_browser.harvest([('First', OLD), ('Example', OLD), ('Next', OLD)],
+                                                   profile='', attach=attach)
+                    self.assertEqual([short], result['First']['entries'])
+                    self.assertEqual('', result['First']['error'])
+                    self.assertEqual(2, collect.call_count)
+                    self.assertEqual([URL], page.urls)
+                    for handle in ['Example', 'Next']:
+                        self.assertEqual([], result[handle]['entries'])
+                        self.assertIn(reason, result[handle]['error'])
+                        self.assertNotIn('watermark', result[handle])
+
+    def test_halt_is_latched_without_dropping_unrelated_short_posts(self):
+        short = x_browser._entry(tweet('124', text='short'))
+        page = Page()
+        stop = Mock(return_value=True)
+        kept, note = x_post.fill([preview(), short, preview()], session=page,
+                                 should_stop=stop)
+        self.assertEqual([short], kept)
+        self.assertIn('2 条折叠推文暂缓补全', note)
+        self.assertIn('同步已停止', note)
+        self.assertEqual([], page.urls)
+        stop.assert_called_once()
+
+    def test_stopping_after_a_successful_post_keeps_it_and_defers_the_rest(self):
+        page = Page()
+        kept, note = x_post.fill([preview(), preview(), preview()], session=page,
+                                 should_stop=lambda: page.reads >= 2)
+        self.assertEqual([BODY], [entry['body'] for entry in kept])
+        self.assertEqual([URL], page.urls)
+        self.assertIn('2 条折叠推文暂缓补全', note)
+        self.assertIn('同步已停止', note)
+
+    def test_one_post_timeout_does_not_consume_the_shared_batch_budget(self):
+        other = dict(preview(), url='https://x.com/Example/status/124')
+        with patch.object(x_post, 'fetch', side_effect=[x_post.PostUnavailable('单条超时'), BODY]):
+            kept, note = x_post.fill([preview(), other], session=Page(),
+                                     deadline=time.monotonic() + 10)
+        self.assertEqual([x_post.merge(other, BODY)], kept)
+        self.assertIn('1 条折叠推文的完整正文没取到', note)
+        self.assertNotIn('暂缓', note)
 
     def test_success_advances_the_watermark_and_keeps_the_full_post(self):
         with patch.object(x_browser, 'browser_session', return_value=nullcontext(Page())), \
@@ -158,7 +202,8 @@ class PostTests(unittest.TestCase):
     def test_one_deleted_post_does_not_hide_another_posts_retryable_failure(self):
         gone = dict(snapshot(''), id='', ready='complete', empty=True)
         other = dict(preview(), url='https://x.com/Example/status/124')
-        page = Page(gone, gone, CdpError('disconnected'))
+        failed = dict(snapshot(''), at='124', id='', ready='complete', failed=True)
+        page = Page(gone, gone, failed, failed)
         with patch.object(x_post, 'SECONDS', 0.02), \
              patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
              patch.object(x_browser, '_harvest_one', return_value=([preview(), other], '')):
@@ -257,6 +302,51 @@ class PostTests(unittest.TestCase):
 
 
 class StoredPostTests(ChannelBase):
+    def test_session_errors_reach_failure_details_without_advancing_the_stored_watermark(self):
+        source = self.sub()
+        for channel in [x_channels.BROWSER, x_channels.ATTACH]:
+            for snap, reason in [(dict(snapshot(), login=True), '重新登录'),
+                                 (CdpError('disconnected'), '会话中断')]:
+                with self.subTest(channel=channel, reason=reason):
+                    settings = self.settings(channel)
+                    x_channels.save_watermark(source['id'], channel, OLD)
+                    source = reg.subscription('social', source['id'])
+                    with patch.object(x_browser, 'browser_session', return_value=nullcontext(Page(snap))), \
+                         patch.object(x_browser, '_harvest_one', return_value=([preview()], '')):
+                        x_channels.prefetch([source], settings)
+                    summary = {'errors': [], 'failed_ids': []}
+                    try:
+                        x_channels.take(source, settings)
+                    except ValueError as error:
+                        self.assertTrue(sync._save_failure(source, error, summary))
+                    else:
+                        self.fail('session failure was reported as a successful partial result')
+                    saved = reg.subscription('social', source['id'])
+                    self.assertIn(reason, saved['last_error'])
+                    self.assertIn(reason, summary['errors'][0]['reason'])
+                    self.assertEqual(OLD, x_channels.watermark(saved, channel))
+                    with reg.db() as conn:
+                        self.assertEqual(0, conn.execute('SELECT count(*) FROM feed_items').fetchone()[0])
+
+    def test_quote_only_rows_are_not_stored_and_can_be_captured_after_text_loads(self):
+        source = self.sub()
+        for index, channel in enumerate([x_channels.BROWSER, x_channels.ATTACH]):
+            item = dict(tweet(str(550 + index), text=''), quoted=True)
+            settings = self.settings(channel)
+            for text, expected in [('', 0), ('Now the author text is loaded', 1)]:
+                with self.subTest(channel=channel, text=text):
+                    item['text'] = text
+                    entries = x_browser._select([item], None, 'Example')
+                    with patch.object(x_browser, 'browser_session', return_value=nullcontext(Page())), \
+                         patch.object(x_browser, '_harvest_one', return_value=(entries, '')):
+                        x_channels.prefetch([source], settings)
+                        added = sync._save_result(source, x_channels.take(source, settings), FetchScope())
+                    self.assertEqual(expected, added)
+                    with reg.db() as conn:
+                        row = conn.execute('SELECT body FROM feed_items WHERE url=?',
+                                           (item['url'],)).fetchone()
+                    self.assertEqual(text if expected else None, row['body'] if row else None)
+
     def test_only_deleted_posts_commit_the_observed_watermark_without_inserting_a_preview(self):
         source = self.sub()
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:

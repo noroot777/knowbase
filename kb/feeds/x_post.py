@@ -62,15 +62,23 @@ class PostRequestFailed(PostUnavailable):
     """The page offers a retry, without proving absence or an HTTP rate limit."""
 
 
+class PostSessionUnavailable(PostUnavailable):
+    """Authentication or the browser connection failed for the shared session."""
+
+
+class PostHalted(PostUnavailable):
+    """The caller stopped this batch or exhausted its shared time budget."""
+
+
 def expanded(text: str, preview: str) -> bool:
     return len(text.strip()) > len(preview.strip())
 
 
 def _check(deadline, should_stop):
     if should_stop and should_stop():
-        raise PostUnavailable('同步已停止')
+        raise PostHalted('同步已停止')
     if deadline is not None and time.monotonic() >= deadline:
-        raise PostUnavailable('推文正文补全时间用完')
+        raise PostHalted('本轮时间预算用完')
 
 
 def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
@@ -79,7 +87,7 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
         raise PostUnavailable('不是 X 推文地址')
     until = min(time.monotonic() + SECONDS, deadline) if deadline is not None else (
         time.monotonic() + SECONDS)
-    _check(until, should_stop)
+    _check(deadline, should_stop)
     previous = None
     absent = False
     previous_problem = ''
@@ -88,10 +96,12 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
         if isinstance(navigation, dict) and navigation.get('errorText'):
             raise PostUnavailable(f'推文详情页打开失败:{navigation["errorText"]}')
         while True:
-            _check(until, should_stop)
+            _check(deadline, should_stop)
+            if time.monotonic() >= until:
+                raise PostUnavailable('推文正文补全时间用完')
             snap = read(session, READ_JS)
             if snap.get('login'):
-                raise PostUnavailable('推文详情页需要重新登录 X')
+                raise PostSessionUnavailable('推文详情页需要重新登录 X')
             current_problem = problem(snap) if snap.get('at') == match[1] else ''
             if current_problem and current_problem == previous_problem:
                 if current_problem == 'limited':
@@ -111,7 +121,9 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
                 return text
             previous = text
             time.sleep(min(STEP, max(0.0, until - time.monotonic())))
-    except (CdpError, OSError, EOFError, ValueError, TypeError, AttributeError) as exc:
+    except (CdpError, OSError, EOFError) as exc:
+        raise PostSessionUnavailable(f'浏览器会话中断:{exc}') from exc
+    except (ValueError, TypeError, AttributeError) as exc:
         raise PostUnavailable(f'推文详情页读取失败:{exc}') from exc
 
 
@@ -127,14 +139,24 @@ def merge(entry: dict, text: str) -> dict:
 
 def fill(entries: list[dict], *, session, deadline=None, should_stop=None):
     kept, missed, request_failed = [], 0, 0
+    deferred, halt = 0, ''
     for entry in entries:
         if HINT not in entry:
             kept.append(entry)
+            continue
+        if halt:
+            deferred += 1
             continue
         try:
             text = fetch(entry['url'], session, deadline=deadline, should_stop=should_stop)
             complete = merge(entry, text)
         except PostGone:
+            continue
+        except PostSessionUnavailable:
+            raise
+        except PostHalted as exc:
+            deferred += 1
+            halt = str(exc)
             continue
         except PostUnavailable as exc:
             if x_article.needs_article(entry):
@@ -147,6 +169,9 @@ def fill(entries: list[dict], *, session, deadline=None, should_stop=None):
     note = f'有 {missed} 条折叠推文的完整正文没取到,留到下次同步再试' if missed else ''
     if request_failed:
         note += f';其中 {request_failed} 条为 X 页面请求出错,请稍后重试'
+    if deferred:
+        note += (';' if note else '') + (
+            f'有 {deferred} 条折叠推文暂缓补全({halt}),留到下次同步再试')
     return kept, note
 
 

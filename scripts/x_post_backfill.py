@@ -172,7 +172,7 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
         except x_post.PostGone as exc:
             stats['unavailable'] += 1
             result.update(state='unavailable', error=str(exc))
-        except XRateLimited as exc:
+        except (XRateLimited, x_post.PostSessionUnavailable) as exc:
             stats['failed'] += 1
             stats['deferred'] = len(rows) - index - 1
             stats['stop_reason'] = str(exc)

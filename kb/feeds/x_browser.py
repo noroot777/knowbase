@@ -92,6 +92,7 @@ _COLLECT_JS = r'''
     // 文章,按它去补就是把别人的正文记成这条推文的内容。排错了也只是回到漏掉
     // 的现状,而收错了是污染 —— 这个方向上宁可多排。
     const quote = art.querySelector('div[role="link"]');
+    const quoted = !!art.querySelector('[data-testid="quoteTweet"], div[role="link"] [data-testid="tweetText"]');
     const card = [...art.querySelectorAll('a[href*="/article/"]')]
                    .find(a => !(quote && quote.contains(a)));
     const art_url = card ? card.href : '';
@@ -104,11 +105,13 @@ _COLLECT_JS = r'''
       S.seen.set(id, {id, author: m[1], name: who, datetime: time.getAttribute('datetime'),
                       text, context: ctx, url: `https://x.com/${m[1]}/status/${id}`,
                       article: art_url || (prev && prev.article) || '',
+                      quoted: quoted || !!prev?.quoted,
                       truncated: truncated || !!prev?.truncated});
     } else if (art_url && prev && !prev.article) {
       prev.article = art_url;
     }
     if (truncated) S.seen.get(id).truncated = true;
+    if (quoted) S.seen.get(id).quoted = true;
   }
   return JSON.stringify({articles, parsed, items: [...S.seen.values()]});
 })()
@@ -221,6 +224,8 @@ def _entry(item: dict) -> dict | None:
     published = _as_published(item.get('datetime', ''))
     text = (item.get('text') or '').strip()
     if not item.get('url') or not (text or published):
+        return None
+    if item.get('quoted') and not text and not item.get('article'):
         return None
     name = item.get('name') or item.get('author') or ''
     context = (item.get('context') or '').strip()
@@ -478,14 +483,14 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     results[handle] = {
                         'entries': entries, 'error': '', 'incomplete': incomplete,
                         'watermark': started if incomplete else observed_watermark}
-                except XRateLimited:
+                except (XRateLimited, x_post.PostSessionUnavailable):
                     raise
                 except (XBrowserError, CdpError) as e:
                     results[handle] = {'entries': [], 'error': str(e)}
-    except (XRateLimited, CdpError, EOFError, OSError) as e:
+    except (XRateLimited, x_post.PostSessionUnavailable, CdpError, EOFError, OSError) as e:
         # 浏览器整个起不来/中途死了:剩下的账号统一记成同一个原因,
         # 而不是逐个报一条看不出共同根因的错。
-        reason = str(e) if isinstance(e, (XRateLimited, CdpError)) else f'浏览器会话中断:{e}'
+        reason = str(e) if isinstance(e, (XRateLimited, x_post.PostSessionUnavailable, CdpError)) else f'浏览器会话中断:{e}'
         for handle, _ in jobs:
             results.setdefault(handle, {'entries': [], 'error': reason})
     return results

@@ -119,9 +119,33 @@ class PostDomTests(unittest.TestCase):
         self.assertEqual('', snap['text'])
 
     def test_a_quote_without_author_text_is_not_promoted_to_the_post_body(self):
-        html = article(quoted='<div role="link"><div data-testid="tweetText">quote</div></div>')
-        self.load(html.replace('<div data-testid="tweetText">short</div>', ''))
-        self.assertEqual('', self.collect()[0]['text'])
+        for quote in ['<div role="link"><div data-testid="tweetText">quote</div></div>',
+                      '<div data-testid="quoteTweet"><div data-testid="tweetText">quote</div></div>']:
+            with self.subTest(quote=quote):
+                html = article(quoted=quote)
+                self.load(html.replace('<div data-testid="tweetText">short</div>', ''))
+                item = self.collect()[0]
+                self.assertEqual('', item['text'])
+                self.assertTrue(item['quoted'])
+                self.assertIsNone(x_browser._entry(item))
+                self.assertEqual([], x_browser._select([item], None, 'Example'))
+
+    def test_late_quote_detection_does_not_leave_a_storable_empty_post(self):
+        self.load(article(text=''))
+        self.assertFalse(self.collect()[0]['quoted'])
+        quote = '<div role="link"><div data-testid="tweetText">quote</div></div>'
+        self.page.eval('document.querySelector("article").insertAdjacentHTML("beforeend", '
+                       + json.dumps(quote) + '); true')
+        self.assertIsNone(x_browser._entry(self.collect()[0]))
+
+    def test_author_text_and_own_article_survive_while_media_contract_is_unchanged(self):
+        quote = '<div role="link"><div data-testid="tweetText">quote</div></div>'
+        self.load(article(text='Own text', quoted=quote))
+        self.assertEqual('Own text', x_browser._entry(self.collect()[0])['body'])
+        self.load(article(text='', quoted=quote + '<a href="/i/article/999">Article</a>'))
+        self.assertIn(x_browser.x_article.HINT, x_browser._entry(self.collect()[0]))
+        self.load(article(text=''))
+        self.assertIsNotNone(x_browser._entry(self.collect()[0]))
 
     def test_stable_text_before_show_more_appears_is_not_complete(self):
         self.load(article(text='a preview that stops mid'))

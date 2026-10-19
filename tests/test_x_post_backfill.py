@@ -6,6 +6,7 @@ import time
 from unittest.mock import patch
 
 from kb.feeds import grab_store, registry as reg, sync, translate, x_post
+from kb.feeds.x_cdp import CdpError
 from scripts import x_post_backfill as backfill
 from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import tweet
@@ -542,6 +543,20 @@ class BackfillTests(ChannelBase):
         self.assertEqual(1, stats['failed'])
         self.assertEqual(row, self.row(row['key']))
         self.assertIn('登录', stats['results'][0]['error'])
+
+    def test_session_failure_stops_the_audit_without_reopening_later_posts(self):
+        for snap, reason in [(dict(snapshot(), login=True), '重新登录'),
+                             (CdpError('disconnected'), '会话中断')]:
+            with self.subTest(reason=reason):
+                rows = [self.seed(), self.seed(identity='124')]
+                page = Page(snap)
+                stats = backfill.repair(rows, page, apply=True)
+                self.assertEqual([rows[0]['url']], page.urls)
+                self.assertEqual(1, stats['failed'])
+                self.assertEqual(1, stats['deferred'])
+                self.assertEqual('batch', stats['results'][0]['scope'])
+                self.assertIn(reason, stats['stop_reason'])
+                self.assertEqual(rows, [self.row(row['key']) for row in rows])
 
     def test_request_error_is_reported_without_replacing_the_row_or_stopping_other_repairs(self):
         row = self.seed()
