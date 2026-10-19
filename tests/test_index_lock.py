@@ -65,6 +65,17 @@ class IndexLockTests(TrimFixture, unittest.TestCase):
     def stage(self, status):
         return [s for s in self.stages if s[0] == 'index' and s[1] == status]
 
+    def seed(self, source, entry=None):
+        item = super().seed(source, entry)
+        doc = scanner._doc_from_file(self.vault / item['path'], scanner.SOURCES[0])
+        conn = store.connect()
+        try:
+            self.assertTrue(store.observed_document_is_current(conn, doc))
+            conn.commit()
+        finally:
+            conn.close()
+        return item
+
     def hold_the_lock_in_another_process(self):
         child = subprocess.Popen([sys.executable, '-c', HOLDER,
                                   str(self.root / maintenance.LOCK_NAME)],
@@ -118,8 +129,8 @@ class IndexLockTests(TrimFixture, unittest.TestCase):
         real_scan, real_backup = scanner.scan_all, trim._backup
         scanned, release = threading.Event(), threading.Event()
 
-        def paused_scan():
-            docs = list(real_scan())      # 读:这一刻磁盘上的事实
+        def paused_scan(**kwargs):
+            docs = list(real_scan(**kwargs))      # 读:这一刻磁盘上的事实
             scanned.set()
             self.assertTrue(release.wait(10))
             yield from docs               # 写:可能已经是删除之后了

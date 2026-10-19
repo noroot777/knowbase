@@ -185,6 +185,11 @@ class FeedDropTests(FullTextCase):
             conn.execute('INSERT INTO chunks_fts(chunk_id,title_tok,text_tok) VALUES(?,?,?)',
                          (chunk_id, '标题', '正文'))
             store.insert_vectors(conn, [chunk_id], [[0.0] * config.EMBEDDING_DIM])
+            favorite_id = conn.execute(
+                'INSERT INTO favorites(path,quote,note,action_json,origin_url,created_at,updated_at)'
+                ' VALUES(?,?,?,?,?,?,?)',
+                (relative, '用户引文', '用户备注', '{"name":"行动卡"}',
+                 self.ref(key)['link'], 'x', 'x')).lastrowid
             conn.commit()
         finally:
             conn.close()
@@ -194,6 +199,10 @@ class FeedDropTests(FullTextCase):
         try:
             for table in ('documents', 'doc_tags', 'chunks', 'chunks_fts', 'chunk_vec'):
                 self.assertEqual(0, conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0], table)
+            self.assertEqual((None, '用户引文', '用户备注', '{"name":"行动卡"}', '原文'),
+                             tuple(conn.execute(
+                                 'SELECT path,quote,note,action_json,origin_title FROM favorites'
+                                 ' WHERE id=?', (favorite_id,)).fetchone()))
         finally:
             conn.close()
         self.assert_excluded(key)

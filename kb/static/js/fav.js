@@ -96,6 +96,12 @@ async function saveFavModel() {
 }
 
 function favDocAHtml(f, labelHtml, cls = '') {
+  if (!f.path && f.origin === 'doc') {
+    const url = safeUrl(f.url);
+    return url !== '#'
+      ? `<a href="${esc(url)}" target="_blank" rel="noopener" class="${esc(cls)}" title="原文已不在索引里，打开站外原文">${labelHtml}</a>`
+      : `<span class="${esc(cls)}" title="原文已不在索引里，收藏内容仍保留">${labelHtml}</span>`;
+  }
   if (!f.path) return favJumpHtml(f, labelHtml, cls);
   // **`u`、`e`、`v` 三个都要一起带过去。**
   // `u` = 采集那一刻这段引文在那一篇里只有一处吗:阅读页的裸引文退路按它决定能

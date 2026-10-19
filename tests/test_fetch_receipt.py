@@ -517,7 +517,12 @@ class FetchIsTheExportsOwnResultTests(_Base):
             active_collector=Mock(return_value=fake))
 
     def _scan(self, *docs):
-        return patch.object(scanner, 'scan_all', Mock(return_value=list(docs)))
+        def scan(*, report=None):
+            if report is not None:
+                report.start([], self.vault)
+                report.complete = True
+            return iter(docs)
+        return patch.object(scanner, 'scan_all', scan)
 
     def _doc(self, path, source='rss', body='正文', h='h1'):
         return scanner.Doc(path=path, source=source, title=path, account='某号',

@@ -14,6 +14,7 @@ import sys
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=18881)
+    parser.add_argument('--detached', action='store_true')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root))
@@ -72,6 +73,11 @@ def main():
             conn.execute('INSERT INTO favorites(path,quote,note,status,action_json,created_at,updated_at)'
                          ' VALUES(?,?,?,?,?,?,?)',
                          (path, quote, note, status, json.dumps(action) if action else '', created, created))
+        if args.detached:
+            conn.execute("UPDATE documents SET url='' WHERE path='source/rss/favorite-6.md'")
+            store.remove_documents(conn, [
+                'source/rss/favorite-1.md', 'source/dr-gzh/favorite-4.md',
+                'source/rss/favorite-6.md'])
         conn.commit()
         conn.close()
         triage = {'running': False, 'fresh': True, 'error': '', 'model': 'fixture:model',

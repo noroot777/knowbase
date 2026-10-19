@@ -110,12 +110,11 @@ class NoBodyBase:
     def index(self) -> None:
         """真走一遍索引(scan → split_chunks → upsert),content_hash 由它落。"""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        seen = set()
-        for doc in scanner.scan_all():
-            seen.add(doc.path)
+        report = scanner.ScanReport()
+        for doc in scanner.scan_all(report=report):
             if store.doc_needs_reindex(self.conn, doc.path, doc.content_hash):
                 store.upsert_document(self.conn, doc, split_chunks(doc.body), now)
-        store.remove_missing_documents(self.conn, seen)
+        store.remove_missing_documents(self.conn, report)
         self.conn.commit()
 
     def fake_llm(self, title, body, account=""):
