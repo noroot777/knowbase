@@ -206,11 +206,20 @@ claude mcp add kb --scope user -- uv run --directory ~/code/knowbase kb-mcp
 
 注册后可用工具：`kb_search`（混合检索）、`kb_enumerate`（全量枚举，穷举问题用这个）、`kb_read`（读全文）、`kb_entities`（列实体）。
 
-**往知识库里存**走 skill `kb-grab`（`.claude/skills/kb-grab/`）：在 Claude Code 里说
-「把这条存进知识库」、给一批链接、或者问「这篇我存过吗」，它打的就是面板上那颗
-「存入知识库」按钮的同一个接口。装到全局：
-`ln -s ~/code/knowbase/.claude/skills/kb-grab ~/.claude/skills/kb-grab`；
-检出不在常见位置时设 `KB_HOME`。
+### Skill：在对话里收录链接
+
+仓库自带 skill `kb-grab`（`.claude/skills/kb-grab/`），和面板上「存入知识库」按钮走同一个接口。在 Claude Code 里**用自然语言说一句就行**：
+
+```
+这篇存一下 https://example.com/post
+把这几条收进知识库 https://a.com https://b.com
+这篇我存过吗 https://example.com/post
+刚存那篇不对，重新抓一次 https://example.com/post
+```
+
+不需要记命令。Claude 看到你要往知识库存东西，会自动调这个 skill。
+
+**装到全局**（项目外也能用）：`ln -s ~/code/knowbase/.claude/skills/kb-grab ~/.claude/skills/kb-grab`；检出不在常见位置时设 `KB_HOME`。
 
 ## CLI 用法
 
