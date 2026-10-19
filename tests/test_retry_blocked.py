@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import unittest
 from copy import deepcopy
+from dataclasses import replace
 from unittest.mock import patch
 
 from kb import pipeline_retry, pipeline_state
 from kb.collectors import SourceStatus
 from kb.collectors.feeds import FeedCollector
-from kb.feeds import registry as reg, sync
-from tests.retry_scope_fixture import RetryScopeBase
+from kb.feeds import registry as reg, sync, x_channels
+from tests.retry_scope_fixture import RetryScopeBase, RoundBase
 
 _BLOCKED = SourceStatus(online=True, ready=False,
                         message='X 登录窗口开着,它占着抓取要用的浏览器',
@@ -37,7 +38,17 @@ class BlockedGateTests(RetryScopeBase):
     """抓不动的时候拒绝起跑,而且什么都不改。"""
 
     def blocked(self, status=_BLOCKED):
-        return patch.object(FeedCollector, 'status', lambda self: status)
+        """整条来源抓不动,**按它收到的范围如实作答**。
+
+        两处都得像真采集器:①认范围那个参数(`status(targets=...)`)—— 不认的那一下
+        抛 TypeError,而那道闸把问不出来一律当放行,打桩就静默穿不过去了;②把范围内
+        那几条报回 `targets` —— 报空等于说"这一轮一条订阅都没对上",那道闸据此放行
+        (`crawl_blocked` 里那一档),验的就不是"拦路的还拦着"这件事了。
+        """
+        return patch.object(
+            FeedCollector, 'status',
+            lambda self, targets=(): replace(
+                status, targets=targets or ('A', 'B', 'C')))
 
     def test_a_still_blocked_source_refuses_to_start(self):
         """拦路的还拦着 → 拒绝,一个请求都不发(`refuse` 自己钉着这一条)。"""
@@ -85,7 +96,7 @@ class BlockedGateTests(RetryScopeBase):
         """
         self.crawl({'channel': 'rss'}, broken=[self.a])
 
-        def boom(self):
+        def boom(self, targets=()):
             raise RuntimeError('订阅库打不开')
         with patch.object(FeedCollector, 'status', boom):
             got, stage = self.retry()
@@ -122,7 +133,7 @@ class BlockedProbeCostTests(unittest.TestCase):
 
         def collector(channel):
             asked.append(channel)
-            return type('C', (), {'status': lambda _s: (
+            return type('C', (), {'status': lambda _s, targets=(): (
                 _READY if channel == 'rss' else _BLOCKED)})()
         with patch.object(pipeline_retry, 'active_collector', collector):
             got = pipeline_retry.crawl_blocked(
@@ -134,13 +145,114 @@ class BlockedProbeCostTests(unittest.TestCase):
         """全都抓不动时,每一个都要在那句话里出现 —— 只说第一个的话,用户关掉那个
         窗口再点一次,又被第二个拦住,而第二条原因这才第一次露面。"""
         def collector(channel):
-            return type('C', (), {'status': lambda _s: SourceStatus(
+            return type('C', (), {'status': lambda _s, targets=(): SourceStatus(
                 online=True, ready=False, message=f'{channel} 没配好')})()
         with patch.object(pipeline_retry, 'active_collector', collector):
             got = pipeline_retry.crawl_blocked(
                 [{'channel': 'social'}, {'channel': 'gzh'}])
         self.assertIn('social 没配好', got)
         self.assertIn('gzh 没配好', got)
+
+
+class ScopedReadinessTests(RoundBase):
+    """这道闸问的是**这一次要抓的那几个**,不是整条通道。
+
+    形态:同一条来源(大V)下 A 走 X 通道、B 填了专用订阅链接。上一轮只有 A 失败
+    (它要用的浏览器被占着),于是重试范围只有 A。整条通道的就绪是「2 个来源 · 1 个
+    待配置」= 还有抓得动的,这道闸当场放行 —— **用 B 能抓证明了 A 能抓**,而 A 必定
+    再失败一次,那一轮白跑还会把手上那份诊断顶掉(`_BLOCKED_PREFIX` 那段)。
+
+    判据落在**那道闸的答复**上:拦谁、放谁、那句话里有没有下一步。就绪本身走真的
+    `FeedCollector.status` + `reg.configuration_error`(一行不打桩),只有「X 通道现在
+    配好没有」这一问换成定值 —— 不然这一局的红绿取决于这台机器上登录态还在不在。
+    """
+
+    def setUp(self):
+        super().setUp()
+        for s in reg.subscriptions('social'):
+            reg.delete_subscription('social', s['id'])
+        # A 没填专用订阅链接 → 内容要走 X 通道 → 通道没配好它就抓不动。
+        self.a = reg.save_subscription('social', {'name': 'A', 'url': 'https://x.com/a'})
+        # B 填了专用订阅链接 → 它自己那条 feed 就够,跟 X 通道无关,一直抓得动。
+        self.b = reg.save_subscription(
+            'social', {'name': 'B', 'url': 'https://x.com/b',
+                       'feed_url': 'https://b.example.org/feed.xml'})
+        p = patch.object(x_channels, 'readiness',
+                         lambda settings: (False, '浏览器通道还没有登录过 X',
+                                           '去「我的订阅」里登录一次'))
+        p.start(); self.addCleanup(p.stop)
+
+    def gate(self, *names):
+        return pipeline_retry.crawl_blocked(
+            [{'channel': 'social', 'accounts': [str(n['id']) for n in names],
+              'retry': 'targets'}])
+
+    def test_retrying_only_the_blocked_account_is_refused(self):
+        """只重试 A:拦住,并且把原因和下一步说出来。
+
+        放行的代价不是白跑一轮 —— 是那一轮一模一样的失败会成为「最近一次运行」,
+        而下一次重试的计划和范围都从它派生。
+        """
+        self.assertTrue(FeedCollector('social').status().ready,
+                        '这一局的前提:整条通道"就绪"(B 抓得动)')
+        msg = self.gate(self.a)
+        self.assertIn('待配置', msg, f'只重试抓不动的那个却放行了:{msg!r}')
+        self.assertIn('大V', msg, '没说是哪个来源')
+        self.assertIn('配好 X 的取法', msg, '没说下一步')
+
+    def test_retrying_the_healthy_account_still_goes_through(self):
+        """反过来钉一边:只重试 B 照旧放行 —— A 还坏着,但这一轮不抓它。
+
+        收紧的方向错了的话这里会红:拿"通道里还有坏的"扣下一次本来做得成的重试,
+        而那是这道闸最贵的失手(该补的一步也没补)。
+        """
+        self.assertEqual('', self.gate(self.b))
+
+    def test_a_scope_that_matches_nothing_is_let_through(self):
+        """名单里那条订阅已经不在了(删了/停用了):放行,不是拦住。
+
+        它答的是"这一轮没有来源",答不了"这几个抓不动"。按名字匹配也要认得出,
+        所以这一条顺带钉住 `reg.in_scope` 的两种写法 —— 只认 id 的话,面板按名字
+        给的名单会整批对不上,于是整批被当成"范围里没有来源"而放行。
+        """
+        self.assertEqual('', pipeline_retry.crawl_blocked(
+            [{'channel': 'social', 'accounts': ['早就删掉的那条'],
+              'retry': 'targets'}]))
+        self.assertIn('待配置', pipeline_retry.crawl_blocked(
+            [{'channel': 'social', 'accounts': ['A'], 'retry': 'targets'}]),
+            '按名字给的名单没匹配上 —— 整条通道的就绪于是替它放了行')
+
+    def test_a_whole_channel_retry_still_asks_the_whole_channel(self):
+        """`retry: "all"` 那一档照旧问整条通道:那时要抓的确实是它的全部订阅。
+
+        跟着收窄成空集的话,这一档会拿"范围里没有来源"放行掉**所有**整批失败的
+        重试 —— 而整批失败恰恰是最该被这道闸拦住的那一档。
+        """
+        self.assertEqual('', pipeline_retry.crawl_blocked(
+            [{'channel': 'social', 'retry': 'all'}]),
+            '整条通道还有抓得动的,这一档不该拦')
+        with patch.object(reg, 'configuration_error',
+                          lambda s, settings: '待配置：浏览器通道还没有登录过 X'):
+            self.assertIn('待配置', pipeline_retry.crawl_blocked(
+                [{'channel': 'social', 'retry': 'all'}]),
+                '整条通道一个都抓不动,这一档没拦住')
+
+
+class ScopeMatchTests(unittest.TestCase):
+    """范围匹配只有一份口径(`reg.in_scope`),抓谁和问谁必须认同一批订阅。"""
+
+    def test_the_fetch_and_the_readiness_probe_match_the_same_way(self):
+        """`sync.collect` 挑订阅和 `status(targets=...)` 算就绪用的是同一个判据。
+
+        岔开的后果不是少抓一条,是**用一批订阅的就绪替另一批放行**:比如这边只认
+        id、那边连名字一起认,只重试 A 时这道闸会按"范围里没有来源"放行,A 又失败
+        一次。所以这里直接钉死那一份判据本身,两个消费方都从它过。
+        """
+        row = {'id': 7, 'name': 'A'}
+        self.assertTrue(reg.in_scope(row, ()), '空范围 = 全都在')
+        self.assertTrue(reg.in_scope(row, ('7',)), 'id 的字符串没认出来')
+        self.assertTrue(reg.in_scope(row, ('A',)), '名字没认出来')
+        self.assertFalse(reg.in_scope(row, ('9', 'B')))
 
 
 class CarriedWithinTheDayTests(RetryScopeBase):

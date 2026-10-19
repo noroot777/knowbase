@@ -129,7 +129,24 @@ class SourceCollector(Protocol):
     label: str                              # 面板上的人话名字
     range_hint: str                         # 区间补抓的注意事项(留空则面板用通用文案)
 
-    def status(self) -> SourceStatus: ...
+    def status(self, targets: tuple[str, ...] = ()) -> SourceStatus:
+        """现在抓不抓得动。给了 targets 就**只对这几个目标作答**。
+
+        **整条通道有能力,不等于这一次要抓的那几个有能力。** 「重试失败项」只重抓
+        上一轮失败的那几条,而就绪在有些来源那边是逐个订阅的(X 账号各自的取法)
+        —— 拿整条通道的就绪放行一次只抓 A 的重试,等于用 B 能抓证明 A 能抓,而 A
+        必定再失败一次,那一轮白跑还会把手上那份诊断顶掉(见 `pipeline_retry`
+        的 `_BLOCKED_PREFIX`)。
+
+        `targets` 用订阅的 id 或名字,口径同 `FetchScope.targets`(真正去抓的那
+        一批就是按它挑的)。**逐个目标没有就绪这个概念的来源原样忽略它**,照旧答
+        整条通道 —— 那不是糊弄:本机库那条路的前提是"采集器装没装好、那个库读不
+        读得出来",跟抓哪几个号确实无关。
+
+        `targets` 里带着这次范围内**启用着的**那几个,好让调用方分得清"这几个抓
+        不动"和"这几个压根不在订阅里"(后者答不了,照旧放行)。
+        """
+        ...
 
     def fetch(self, scope: FetchScope) -> None: ...
 

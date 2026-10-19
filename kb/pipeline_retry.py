@@ -331,10 +331,20 @@ def crawl_blocked(scopes: list[dict]) -> str:
     另写一份 —— 新增一条通道时这个函数一个字都不用改,口径跟面板上那张来源卡片
     也就不会岔开(同 `registry.configuration_error` 那条)。
 
-    **问不出来一律放行。** `status()` 要起子进程、读订阅库、碰文件系统,它自己炸掉
-    跟「能不能抓」是两件事:拦住整轮会把同一轮里本该重试的 index / extract 一起
-    带走(同 `refill_script` 那条「永不抛」的理由)。漏拦一次的代价只是白抓一轮,
-    错拦一次的代价是该补的一步也没补。
+    **问的是这一次要抓的那几个,不是整条通道。** 范围收窄到几条订阅时就把名单交给
+    `status(targets=...)`(契约在 `kb.collectors.SourceCollector.status`)—— 不交的
+    后果是**用 B 能抓证明 A 能抓**:上一轮只有 A 失败(它要用的浏览器被占着),而
+    同一条来源里 B 填了专用订阅链接、好得很,整条通道于是"就绪",这道闸当场放行,
+    A 又失败一次。那一轮白跑还会把手上那份诊断顶掉(见 `_BLOCKED_PREFIX`)。
+    `retry: "all"` 那一档没有名单(整批失败,或者来源报不出账号级名单),照旧问整条
+    通道 —— 那时要抓的确实是它的全部订阅。
+
+    **问不出来一律放行,范围对不上也一样。** `status()` 要起子进程、读订阅库、碰
+    文件系统,它自己炸掉跟「能不能抓」是两件事;而范围里一条启用着的订阅都没匹配上
+    (名单里那条刚被删掉或停用)时,它答的是"这一轮没有来源",不是"这几个抓不动"。
+    两档都拦住整轮的话,会把同一轮里本该重试的 index / extract 一起带走(同
+    `refill_script` 那条「永不抛」的理由)。**漏拦一次的代价只是白抓一轮,错拦一次
+    的代价是该补的一步也没补。**
 
     **有一个抓得动就不拦,而且当场返回** —— 那一轮有正事可做,拦住它等于拿一个
     来源的故障扣下别人的重试;顺带也省掉剩下那几次探测(公众号那一下要起采集器
@@ -344,9 +354,14 @@ def crawl_blocked(scopes: list[dict]) -> str:
     labels = channel_labels()
     for scope in scopes:
         channel = scope.get('channel') or ''
+        wanted = tuple(scope.get('accounts') or ())
         try:
-            st = active_collector(channel).status()
+            st = active_collector(channel).status(targets=wanted)
             if st.online and st.ready:
+                return ''
+            # 范围给了、却一条启用着的订阅都没对上:它答的是"这一轮没有来源",
+            # 答不了"这几个抓不动"。**这一档放行**(理由同上:错拦更贵)。
+            if wanted and not st.targets:
                 return ''
             why = (st.message or '').strip()
             hint = (st.hint or '').strip()

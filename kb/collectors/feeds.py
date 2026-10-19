@@ -12,14 +12,22 @@ class FeedCollector:
         self.channel_hint = spec.note
         self.range_hint = '按订阅条目的发布时间筛选；来源只提供近期内容，选择历史日期不能补齐未提供的历史。无日期条目仅在不限时间时收录。'
 
-    def status(self):
+    def status(self, targets: tuple[str, ...] = ()):
+        """见 `kb.collectors.SourceCollector.status`。
+
+        **就绪在这条来源上是逐个订阅的**(X 账号各自要么走通道、要么填专用链接),
+        所以给了范围就只按范围内那几条算 —— 整条通道里别人配好了,证明不了这几条
+        配好了。范围匹配走 `reg.in_scope`(唯一一份口径,`sync.collect` 同款)。
+        """
         sources = reg.subscriptions(self.name)
-        active = [s for s in sources if s['enabled']]
+        active = [s for s in sources
+                  if s['enabled'] and reg.in_scope(s, targets)]
         settings = reg.get_settings(self.name)
         unconfigured = sum(bool(reg.configuration_error(s, settings)) for s in active)
         errors = sum(bool(s['last_error']) for s in active)
+        scoped = '这一轮要抓的' if targets else '已启用'
         return SourceStatus(online=True, ready=len(active) > unconfigured,
-                            message=f'已启用 {len(active)} 个来源 · {unconfigured} 个待配置 · {errors} 个来源上次连接失败',
+                            message=f'{scoped} {len(active)} 个来源 · {unconfigured} 个待配置 · {errors} 个来源上次连接失败',
                             hint=('请在来源设置里配好 X 的取法，或给账号填专用订阅链接' if unconfigured else '连接结果以实际同步为准'),
                             targets=tuple(s['name'] for s in active))
 

@@ -150,42 +150,10 @@ def _migrate(conn) -> None:
                 conn.execute(f'ALTER TABLE {table} ADD COLUMN {name} {decl}')
 
 
-# 非中文判定:中日韩字符占比低于这个数就当成"外文,要翻译"。纯英文条目是 0,
-# 正常中文条目远高于它;夹杂大段代码/英文引文的中文条目也在它之上。
-_CJK_SHARE = 0.12
-# 夹着汉字的短文本:占比算不准(一个汉字 + 几个字母就能压到阈值以下),
-# 这种一律不翻,留原样。
-_SHORT_MIXED = 12
-
-
-def text_language(*parts: str) -> str:
-    """'zh' = 不用翻译;'en' = 外文(泛指非中文),要走翻译。
-
-    只看字符构成,不调模型:翻译本身才花钱,判定不能也花钱。标题和正文合起来
-    判一次——短标题单看常常判不准(全是产品名的标题一个汉字都没有)。
-
-    **一个汉字都没有、又有字母,一律判外文,不设长度下限。** 这里原来有过一道
-    "至少 6 个字母"的成本闸门,用意是别花钱去译「Bun 1.3」这种没什么可译的
-    产品名;代价是「Hello」「Great」「Nice」这类 1-5 个字母的纯英文动态被
-    **确定性地**标成中文、永远进不了翻译队列,而 social 那类来源的短动态整段
-    都是这个形态(2026-09-30 复审实测)。产品名该保留原文,靠的是 prompt 里
-    "产品名、公司名、人名、代码、命令、URL、缩写保留原文"那条译文规则——
-    多花几个 token 换"库里不会躺着英文",而不是把英文冒充成中文。
-
-    真正"判不准"的只有"有汉字但太短"那一档(占比一个汉字就能压穿),照旧留
-    原样;一个字母都没有的(纯数字/表情/标点)本来也没有可译的东西。
-    """
-    text = ' '.join(p or '' for p in parts)
-    cjk = sum(1 for ch in text if '一' <= ch <= '鿿')
-    letters = sum(1 for ch in text if ch.isalpha())
-    if not letters:                       # 没字可判(纯数字/表情/标点)
-        return 'zh'
-    if not cjk:                           # 零汉字 + 有字母 = 不可能是中文
-        return 'en'
-    if letters < _SHORT_MIXED:            # 有汉字又太短:判不出来就别翻
-        return 'zh'
-    return 'zh' if cjk / letters >= _CJK_SHARE else 'en'
-
+# 「这段文字要不要翻译」搬去了 `kb/feeds/lang.py`(700 行上限)。**公开名字仍然
+# 从这里取** —— `reg.text_language` 有五个模块在用、两组回归在打桩,而 `put_items`
+# 自己也走这个模块属性,所以这一行既是出口也是打桩点。
+from kb.feeds.lang import text_language  # noqa: E402,F401
 
 
 def now() -> str:
@@ -440,6 +408,21 @@ def configuration_error(source: dict, settings: dict) -> str:
     from kb.feeds import x_channels
     ready, why, _hint = x_channels.readiness(settings)
     return '' if ready else f'待配置：{why}'
+
+
+def in_scope(source: dict, targets) -> bool:
+    """这条订阅在不在这一次的范围里。空范围 = 全都在。
+
+    **这是范围匹配的唯一一份口径**,`sync.collect`(真去抓哪几条)和
+    `FeedCollector.status(targets=...)`(这几条现在抓不抓得动)都过它 —— 两边
+    岔开的后果是**用一批订阅的就绪去替另一批放行**:名字匹配那一半认不出来的话,
+    「重试这一条」会拿整条通道的就绪当答案,而那一条必定再失败一次。
+
+    id 和 name 两种都认:名单由各处自己产出(`still_failing` 给的是 id 的字符串,
+    面板上点的是名字),而"这条订阅"在库里的稳定身份是 id、在档案里是 name。
+    """
+    return (not targets or str(source['id']) in targets
+            or source['name'] in targets)
 
 
 def subscriptions(kind: str) -> list[dict]:

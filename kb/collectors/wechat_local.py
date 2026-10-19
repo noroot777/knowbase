@@ -152,7 +152,13 @@ class WeChatLocalCollector:
 
     # ── 状态 ────────────────────────────────────────────────────────────────
 
-    def status(self) -> SourceStatus:
+    def status(self, targets: tuple[str, ...] = ()) -> SourceStatus:
+        """见 `kb.collectors.SourceCollector.status`。
+
+        **这条来源的就绪跟抓哪几个号无关,所以原样忽略 `targets`**:它问的是
+        "采集器装没装好、本机那个库读不读得出来",整条通道一个答案(凭证那条逐号
+        授权的路在另一条分支上,主干这边没有)。缓存也因此不用按范围分格。
+        """
         now = time.monotonic()
         if self._cache and now - self._cache[0] < _STATUS_TTL:
             return self._cache[1]

@@ -298,8 +298,10 @@ def collect(kind, scope):
         return {'sources': 0, 'checked': 0, 'added': 0, 'deferred': 0,
                 'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [],
                 'partial': [], 'repointed': 0, 'stopped': False, 'failed_ids': []}
-    sources = [s for s in reg.subscriptions(kind) if s['enabled'] and
-               (not scope.targets or str(s['id']) in scope.targets or s['name'] in scope.targets)]
+    # 匹配判据只有一份(`reg.in_scope`):这一轮抓哪几条,和「这几条现在抓不抓
+    # 得动」(`FeedCollector.status(targets=...)`)必须认同一批订阅。
+    sources = [s for s in reg.subscriptions(kind)
+               if s['enabled'] and reg.in_scope(s, scope.targets)]
     summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0,
                'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [],
                'partial': [], 'repointed': 0, 'stopped': False,
