@@ -158,7 +158,7 @@
 | 你要动的东西 | 先读 `docs/decisions/` 下的 |
 |---|---|
 | 公众号采集、订阅名单、本机绿泡泡库(`collector/`、`kb/collectors/wechat_local.py`) | `collector.md` |
-| X 大V的三条通道、水位、CDP(`kb/feeds/x_channels.py`、`x_browser`/`x_feedgrab`/`x_cdp`/`cdp_attach`) | `x-channels.md` |
+| X 大V的三条通道、水位、CDP、登录窗口(`kb/feeds/x_channels.py`、`x_browser`/`x_feedgrab`/`x_cdp`/`cdp_attach`/`x_login_window`) | `x-channels.md` |
 | X 长文正文补全、地址识别那一族正则(`kb/feeds/x_article*.py`) | `x-article.md` |
 | 聚合源正文补抓、正文提取器、提取结果与正文版本绑定(`kb/feeds/fulltext.py`、`readable.py`) | `fulltext.md` |
 | 订阅正文转纯文本、阅读页渲染、来源卡片(`kb/feeds/fetching.py` 的 `plain`、`kb/web/pages.py`) | `feed-plain.md`、`doc-reader.md`、`source-cards.md` |

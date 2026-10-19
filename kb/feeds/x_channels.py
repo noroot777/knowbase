@@ -399,7 +399,7 @@ def readiness(settings: dict) -> tuple[bool, str, str]:
     # 顺序反了的话,刚点开窗口、还没登录完的人收到的是「还没有登录过 X」——
     # 一句正确但没用的话,而真正该知道的「它正挡着每一轮同步」一个字没说
     # (2026-10-19 那场事故里,面板从头到尾没提过这件事)。
-    from kb.feeds.x_cdp import login_window_left
+    from kb.feeds.x_login_window import login_window_left
     if left := login_window_left(str(BROWSER_PROFILE)):
         return (False, 'X 登录窗口开着,它占着抓取要用的浏览器',
                 f'在那个窗口里登录完就关掉它；忘了关也不要紧,'

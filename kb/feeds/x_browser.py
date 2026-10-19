@@ -35,8 +35,9 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from kb.feeds import x_article
-from kb.feeds.x_cdp import (Chrome, CdpError, login_window_left, profile_busy,
-                            release_login_window)
+from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
+# 登录窗口的生死搬去了 `x_login_window`(x_cdp 顶着 700 行上限)
+from kb.feeds.x_login_window import login_window_left, release_login_window
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 # 连续多少条老推文算"翻到底了"。1 不够:转推带的是原推时间,单条老的很常见。
@@ -523,7 +524,7 @@ def open_login_window(profile: str, chrome_path: str = '') -> str:
 
     **「起完就不管了」已经改掉了。** 这个窗口攥着 profile 的 ProcessSingleton 锁,
     忘了关就是这条通道每一轮同步全红(2026-10-19 实测形态写在
-    `x_cdp.remember_login_window` 上面那段)。所以起完要记下它的身份、并起一个
+    `x_login_window` 的模块注释里)。所以起完要记下它的身份、并起一个
     守望线程到点关掉;抓取和「检查连接」开工前还各兜一道。文案照旧请用户自己关
     —— 自己关是最快的那条路,自动关只是**忘了关时的下限**。
 
@@ -532,8 +533,10 @@ def open_login_window(profile: str, chrome_path: str = '') -> str:
     无头跑。想免掉这次登录就换成「我日常用的浏览器」那一档(`x_channels.ATTACH`,
     直连已经登录好的浏览器),它的边界和代价写在 `cdp_attach` 的模块注释里。
     """
-    from kb.feeds.x_cdp import (LOGIN_WINDOW_TTL, find_chrome,
-                                remember_login_window, watch_login_window)
+    from kb.feeds.x_cdp import find_chrome
+    from kb.feeds.x_login_window import (LOGIN_WINDOW_TTL,
+                                         remember_login_window,
+                                         watch_login_window)
     binary = find_chrome(chrome_path)
     os.makedirs(profile, exist_ok=True)
     if profile_busy(profile):
@@ -548,8 +551,11 @@ def open_login_window(profile: str, chrome_path: str = '') -> str:
         raise XBrowserError(f'打不开登录窗口:{e}') from None
     # **先记录、再守望**:守望线程第一跳就要读这份记录。反过来的话它会读到
     # 「没有我们的窗口」当场收工,而窗口已经起来了 —— 那就退回"起完就不管了"。
+    # **句柄要一起交给守望线程**:`Popen` 返回不代表 Chrome 已经建好
+    # ProcessSingleton 锁,那几百毫秒里光看 profile 里那两个文件认不出我们的窗口
+    # (审查 R5,理由全文在 `watch_login_window`)。
     remember_login_window(profile, proc.pid)
-    watch_login_window(profile)
+    watch_login_window(profile, proc=proc)
     return ('已打开登录窗口。在里面登录你要用的 X 账号,登录成功后**关掉这个窗口**'
             f'(抓取时要独占这个 profile);忘了关也不要紧,{int(LOGIN_WINDOW_TTL // 60)} '
             '分钟后它会自动关闭。登录完回来点一次「检查连接」。')
