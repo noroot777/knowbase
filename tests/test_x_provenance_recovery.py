@@ -94,7 +94,7 @@ class LegacyRecoveryTests(ProvenanceBase):
         row = self.seed(legacy=True)
 
         def fetch(*_args, **_kwargs):
-            replacement = x_post_meta.stamp(dict(row, title='New', body='New body'), 'post')
+            replacement = x_post_meta.stamp(dict(row, title='New', body='New body'), 'post', '')
             self.assertTrue(grab_store.replace(row, replacement))
             return 'A short preview and a complete ending'
 
@@ -167,6 +167,29 @@ class LegacyRecoveryTests(ProvenanceBase):
 
 
 class ProductionRefetchProvenanceTests(GrabCase):
+    def test_real_recover_and_backfill_preserve_a_quoted_tweet_context(self):
+        source = reg.save_subscription('social', dict(name='Example', url='https://x.com/example'))
+        reg.put_items(source, [x_browser._entry(tweet('12345', handle='example', text='My opinion…'))])
+        payload = tweet_payload(text='My opinion', quote=dict(text='The original quoted words',
+                                                             author=dict(screen_name='someone')))
+        with patch.object(grab, 'request', return_value=Response(
+                200, TWEET, payload, {'Content-Type': 'application/json'})), \
+                patch.object(grab_api, '_write_through', side_effect=lambda result, *_args: result):
+            result = grab_api._recover(dict(ok=True, content_ok=True), TWEET,
+                                       grab_store.known(TWEET), '大V观点', asked=True)
+        self.assertTrue(result['replaced'])
+        with reg.db() as conn:
+            row = backfill.candidates(conn, urls=[TWEET])[0]
+        prefix = '> 引用 @someone：The original quoted words\n\n'
+        self.assertEqual(('', prefix), x_post_meta.eligibility(row))
+        detail = 'My opinion followed by the full author text' * 3
+        with patch.object(x_post, 'fetch', return_value=detail):
+            self.assertEqual(1, backfill.repair([row], None, apply=True)['updated'])
+        with reg.db() as conn:
+            saved = dict(conn.execute('SELECT * FROM feed_items WHERE key=?', (row['key'],)).fetchone())
+        self.assertEqual(prefix + detail, saved['body'])
+        self.assertEqual(('', prefix), x_post_meta.eligibility(saved))
+
     def test_real_recover_snapshot_and_x_fetch_keep_the_replacement_in_the_audit(self):
         source = reg.save_subscription('social', dict(name='Example', url='https://x.com/example'))
         entry = x_browser._entry(tweet('12345', handle='example', text='An old preview'))

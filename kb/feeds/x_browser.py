@@ -224,7 +224,8 @@ def _entry(item: dict) -> dict | None:
         return None
     name = item.get('name') or item.get('author') or ''
     context = (item.get('context') or '').strip()
-    body = f'> {context}\n\n{text}' if context and not _is_pinned(context) else text
+    context = f'> {context}' if context and not _is_pinned(context) else ''
+    body = f'{context}\n\n{text}' if context else text
     out = {'url': item['url'], 'title': (text or f"{name} 的动态")[:500],
            'body': body, 'author': name, 'published': published,
            'content_kind': 'post'}
@@ -232,10 +233,10 @@ def _entry(item: dict) -> dict | None:
     # 它摘掉(`_strip_hint`),不会进 `feed_items`。
     if item.get('article'):
         out[x_article.HINT] = str(item['article'])
+    prefix = x_post_meta.context_prefix(body, context)
     if item.get('truncated'):
-        out[x_post.HINT] = body[:-len(text)] if text else body
-    prefix = body[:-len(text)] if text else body
-    return x_post_meta.stamp(out, 'post', prefix)
+        out[x_post.HINT] = prefix
+    return x_post_meta.stamp(out, 'post', prefix, author_text=text)
 
 
 def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
@@ -250,6 +251,8 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
             # `x_login_import`),把他推去无头壳里登一次正是他想免掉的那一步。
             raise XBrowserError('X 登录态已失效,请在浏览器通道设置里重新登录,'
                                 '或从日常浏览器再导入一次')
+        if last['articles'] and last['ready'] == 'complete':
+            return last
         current_problem = page_problem(last)
         if current_problem and current_problem == previous_problem:
             if current_problem == 'limited':
@@ -258,8 +261,6 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
         previous_problem = current_problem
         if last['empty']:
             raise XBrowserError(f'@{handle} 这个账号在 X 上打不开(可能已改名、注销或被冻结)')
-        if last['articles'] and last['ready'] == 'complete':
-            return last
         time.sleep(0.3)
     if last.get('ready') != 'complete':
         raise XBrowserError(f'@{handle} 的页面没有加载完')
@@ -562,10 +563,10 @@ def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
         last = read(page, _STATE_JS)
         if last['login']:
             return 'login', last
-        if problem := page_problem(last):
-            return problem, last
         if last['articles'] and last['ready'] == 'complete':
             return 'ok', last
+        if problem := page_problem(last):
+            return problem, last
         time.sleep(_SETTLE_STEP)
     return ('no-tweets' if last.get('ready') == 'complete' else 'not-loaded'), last
 

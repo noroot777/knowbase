@@ -127,7 +127,7 @@ def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
         complete = dict(entry)
         complete.pop(x_post.HINT)
         complete.update(title=text.splitlines()[0][:500], body=prefix + text)
-        return 'normalized', x_post_meta.stamp(complete, 'post', prefix), dict(
+        return 'normalized', x_post_meta.stamp(complete, 'post', prefix, author_text=text), dict(
             info, reason='legacy_link_artifacts')
     state = 'blocked_artifacts' if info['artifacts'] else 'blocked_length'
     return state, None, dict(info, reason='legacy_link_artifacts_not_reconciled'

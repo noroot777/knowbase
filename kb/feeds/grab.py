@@ -295,14 +295,15 @@ def _grab_x(url: str, deadline: float) -> dict:
     # `_plain_lines`,不碰 BeautifulSoup)。标题那一头反过来必须是单行。
     raw = str(tweet.get('text')) if isinstance(tweet.get('text'), str) else ''
     text = body_text(raw, 'text').strip()
-    pieces = [p for p in (_quote_line(tweet.get('quote')), text,
+    context = _quote_line(tweet.get('quote'))
+    pieces = [p for p in (context, text,
                           _media_lines(tweet.get('media'))) if p]
     entry = {'url': url, 'title': (oneline(text, 'text') or f'{name} 的动态')[:500],
              'body': '\n\n'.join(pieces), 'author': name,
              'published': _as_published(tweet.get('created_timestamp')),
              'content_kind': 'post'}
-    from kb.feeds.x_post_meta import stamp
-    entry = stamp(entry, 'post')
+    from kb.feeds.x_post_meta import context_prefix, stamp
+    entry = stamp(entry, 'post', context_prefix(entry['body'], context), author_text=text)
     # **回包里那个结构化的长文信号先收下,不许先丢掉、再凭展示文本去推断。**
     # `tweet.article` 是生产者自己的签名「这条推文是一篇长文」,而
     # `needs_article` 的三条判据全是**间接**信号(正文里写着文章地址 / 时间线上

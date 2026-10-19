@@ -122,7 +122,7 @@ def merge(entry: dict, text: str) -> dict:
     complete = dict(entry)
     complete.pop(HINT)
     complete.update(title=text.splitlines()[0][:500], body=prefix + text)
-    return x_post_meta.stamp(complete, 'post', prefix)
+    return x_post_meta.stamp(complete, 'post', prefix, author_text=text)
 
 
 def fill(entries: list[dict], *, session, deadline=None, should_stop=None):

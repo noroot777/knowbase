@@ -449,7 +449,7 @@ def merge(entry: dict, got: dict) -> dict:
     complete = {**entry, 'title': (got['title'] or entry.get('title') or '')[:500],
                 'body': '\n\n'.join(p for p in parts if p)}
     complete.pop(POST_HINT, None)
-    return stamp(complete, 'article')
+    return stamp(complete, 'article', '')
 
 
 def fill(entries: list[dict], *, session=None,

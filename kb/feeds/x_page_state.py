@@ -51,6 +51,7 @@ class Responses:
         self.statuses.clear()
 
     def receive(self, event: dict) -> None:
+        """A tracked success retires older sibling failures in that navigation only."""
         if event.get('method') != 'Network.responseReceived' or (
                 event.get('sessionId') != self.session_id):
             return
@@ -62,7 +63,10 @@ class Responses:
                 or not parsed.path.startswith('/i/api/graphql/')
                 or operation not in self.operations or params.get('type') not in {'XHR', 'Fetch'}):
             return
-        self.statuses[(params.get('loaderId'), operation)] = response.get('status', 0)
+        loader, status = params.get('loaderId'), response.get('status', 0)
+        if 200 <= status < 300:
+            self.statuses = {key: value for key, value in self.statuses.items() if key[0] != loader}
+        self.statuses[(loader, operation)] = status
 
     def apply(self, snapshot: dict) -> dict:
         statuses = [status for (loader, _operation), status in self.statuses.items()
@@ -105,8 +109,6 @@ def problem(state: dict) -> str:
     http = state.get('http_problem', '')
     if http in ('limited', 'failed'):
         return http
-    if state.get('ready') != 'complete':
-        return ''
     return next((kind for kind in ('limited', 'failed') if state.get(kind)), '')
 
 

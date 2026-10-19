@@ -34,10 +34,10 @@ class HttpEvidenceTests(unittest.TestCase):
                 self.assertEqual(verdict, x_page_state.problem(state))
                 self.assertEqual(verdict, x_page_state.problem(dict(ready='complete', http_problem=verdict)))
 
-    def test_text_only_conclusions_still_wait_for_a_complete_dom(self):
+    def test_explicit_text_conclusions_do_not_wait_for_a_complete_dom(self):
         for kind in ('limited', 'failed'):
             with self.subTest(kind=kind):
-                self.assertEqual('', x_page_state.problem(dict(ready='loading', **{kind: True})))
+                self.assertEqual(kind, x_page_state.problem(dict(ready='loading', **{kind: True})))
                 self.assertEqual(kind, x_page_state.problem(dict(ready='complete', **{kind: True})))
 
     def test_connection_check_does_not_sleep_on_loading_http_failures(self):
