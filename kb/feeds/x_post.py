@@ -30,6 +30,26 @@ TEXT_JS = r'''
     node.closest('article[data-testid="tweet"]') === art &&
     !node.closest('div[role="link"], [data-testid="quoteTweet"]'));
   const postMore = art => !!ownNode(art, '[data-testid="tweet-text-show-more-link"]');
+  const inlineBreaks = node => {
+    if (!node || [...node.querySelectorAll('*')].some(element =>
+      !element.closest('a') && element.tagName !== 'BR' && element.textContent.trim() &&
+      !['inline', 'inline-block', 'contents', 'none'].includes(getComputedStyle(element).display))) {
+      return [];
+    }
+    const offsets = new Set();
+    for (const anchor of node.querySelectorAll('a')) {
+      const before = document.createRange();
+      before.selectNodeContents(node);
+      before.setEndBefore(anchor);
+      const start = [...postText(before.cloneContents()).replace(/\s/g, '')].length;
+      const length = [...postText(anchor).replace(/\s/g, '')].length;
+      if (length) {
+        offsets.add(start);
+        offsets.add(start + length);
+      }
+    }
+    return [...offsets].sort((first, second) => first - second);
+  };
 '''
 
 READ_JS = r'''(() => {
@@ -42,7 +62,10 @@ READ_JS = r'''(() => {
     const identity = href.match(/^\/[^/]+\/status\/(\d+)(?:[/?#]|$)/);
     if (!identity || identity[1] !== result.at) continue;
     result.id = identity[1];
-    result.text = postText(ownNode(art, '[data-testid="tweetText"]'));
+    const body = ownNode(art, '[data-testid="tweetText"]');
+    result.text = postText(body);
+    result.inline_breaks = inlineBreaks(body);
+    result.inline_plain = result.text.replace(/\s/g, '');
     result.truncated = postMore(art);
     break;
   }
@@ -81,7 +104,9 @@ def _check(deadline, should_stop):
         raise PostHalted('本轮时间预算用完')
 
 
-def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
+def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) -> str:
+    if evidence is not None:
+        evidence.clear()
     match = _STATUS.match(url)
     if not match:
         raise PostUnavailable('不是 X 推文地址')
@@ -117,9 +142,12 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
                      and isinstance(snap.get('text'), str) and snap['text'].strip()
                      and snap.get('truncated') is False)
             text = snap['text'].strip() if valid else None
-            if text is not None and text == previous:
+            current = (text, snap.get('inline_breaks', []), snap.get('inline_plain'))
+            if text is not None and current == previous:
+                if evidence is not None:
+                    evidence.update(text=text, inline_breaks=current[1], inline_plain=current[2])
                 return text
-            previous = text
+            previous = current
             time.sleep(min(STEP, max(0.0, until - time.monotonic())))
     except (CdpError, OSError, EOFError) as exc:
         raise PostSessionUnavailable(f'浏览器会话中断:{exc}') from exc

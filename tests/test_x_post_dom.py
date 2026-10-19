@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 
 from kb.feeds import x_browser, x_page_state, x_post
 from kb.feeds.x_cdp import Chrome
+from scripts import x_post_backfill as backfill
 from tests.headless import INSTALL_HINT, SHELL
 
 MORE = '<button data-testid="tweet-text-show-more-link">显示更多</button>'
@@ -96,6 +97,55 @@ class PostDomTests(unittest.TestCase):
         self.assertEqual(EXPECTED, snap['text'])
         self.assertEqual('123', snap['id'])
         self.assertFalse(snap['truncated'])
+
+    def test_blockified_inline_anchors_have_source_evidence_without_losing_paragraphs(self):
+        self.load(article(text='Read <a style="display:block" href="/AsideAI">@AsideAI</a>'
+                          ' today<br><br>Keep this paragraph.'))
+        legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
+        snap = json.loads(self.page.eval(x_post.READ_JS))
+        self.assertIn('\n@AsideAI\n', legacy)
+        self.assertIn('\n\nKeep this paragraph.', snap['text'])
+        entry = dict(body=legacy, **{x_post.HINT: ''})
+        state, complete, _ = backfill.proposal(entry, snap['text'], snap)
+        self.assertEqual('normalized', state)
+        self.assertEqual(snap['text'], complete['body'])
+        self.assertEqual('blocked_whitespace', backfill.proposal(entry, snap['text'])[0])
+
+    def test_block_paragraphs_are_not_mistaken_for_inline_anchor_artifacts(self):
+        for markup in ['<p>First paragraph.</p><p>Second paragraph.</p>',
+                       '<div>First paragraph.</div><a href="/AsideAI">@AsideAI</a> today']:
+            with self.subTest(markup=markup):
+                self.load(article(text=markup))
+                legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
+                snap = json.loads(self.page.eval(x_post.READ_JS))
+                self.assertIn('\n', legacy)
+                self.assertEqual([], snap['inline_breaks'])
+                entry = dict(body=legacy, **{x_post.HINT: ''})
+                self.assertEqual('blocked_whitespace', backfill.proposal(entry, snap['text'], snap)[0])
+
+    def test_real_protocol_split_is_repaired_but_url_following_paragraphs_survive(self):
+        self.load(article(text='Read <a href="https://t.co/example">'
+                          '<span style="display:block">https://</span>'
+                          'example.org/path</a>'
+                          '<br><br>Keep this paragraph.'))
+        legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
+        snap = json.loads(self.page.eval(x_post.READ_JS))
+        self.assertIn('https://\nexample.org/path', legacy)
+        state, complete, _ = backfill.proposal(dict(body=legacy, **{x_post.HINT: ''}),
+                                              snap['text'], snap)
+        self.assertEqual('normalized', state)
+        self.assertEqual('Read https://example.org/path\n\nKeep this paragraph.', complete['body'])
+
+    def test_anchor_offsets_count_unicode_characters_and_do_not_trust_unlinked_mentions(self):
+        self.load(article(text='🙂 Read <a href="/AsideAI">@AsideAI</a> today'))
+        snap = json.loads(self.page.eval(x_post.READ_JS))
+        self.assertEqual([5, 13], snap['inline_breaks'])
+        entry = dict(body='🙂 Read \n@AsideAI\n today', **{x_post.HINT: ''})
+        self.assertEqual('normalized', backfill.proposal(entry, snap['text'], snap)[0])
+        self.load(article(text='🙂 Read @AsideAI today'))
+        snap = json.loads(self.page.eval(x_post.READ_JS))
+        self.assertEqual([], snap['inline_breaks'])
+        self.assertEqual('blocked_whitespace', backfill.proposal(entry, snap['text'], snap)[0])
 
     def test_a_late_show_more_signal_is_not_lost_on_repeated_collection(self):
         self.load(article())

@@ -77,10 +77,10 @@ def link_artifacts(text: str, detail: str | None = None) -> list[tuple[int, int]
         cursor, cuts = matched
         ranges.update(cuts)
         if before:
-            ranges.add(before.span(1))
+            ranges.add((before.start(1), before.end()))
         after = _AFTER_URL.match(text, cursor)
         if after:
-            ranges.add(after.span(1))
+            ranges.add(after.span())
     return sorted(ranges)
 
 
@@ -90,32 +90,82 @@ def canonical_preview(text: str) -> str:
     return text
 
 
-def aligned_preview(preview: str, detail: str) -> bool:
+def _alignment(preview: str, detail: str, evidence=None) -> str:
     ranges = link_artifacts(preview, detail)
-    pattern, cursor = [], 0
-    for start, end in ranges:
+    tail = re.search(r'(?:…|\.{3})\Z', preview)
+    if (tail and tail.end() == len(preview) and x_post.expanded(detail, preview)
+            and not any(start <= tail.start() < end for start, end in ranges)):
+        ranges.append(tail.span())
+        ranges.sort()
+    pattern, pieces, cursor = [], [], 0
+    for index, (start, end) in enumerate(ranges):
         if start < cursor:
             continue
-        pattern.append(re.escape(re.sub(r'\s+', '', preview[cursor:start])))
+        segment = preview[cursor:start]
+        pattern.append(re.escape(re.sub(r'\s+', '', segment)))
+        pieces.append((segment, None))
         token = re.sub(r'\s+', '', preview[start:end])
         if token:
-            pattern.append('(?:' + re.escape(token) + ')?')
+            group = f'artifact_{index}'
+            pattern.append(f'(?P<{group}>' + re.escape(token) + ')?')
+            pieces.append((preview[start:end], group))
         cursor = end
     pattern.append(re.escape(re.sub(r'\s+', '', preview[cursor:])))
-    return re.match(''.join(pattern), re.sub(r'\s+', '', detail)) is not None
+    pieces.append((preview[cursor:], None))
+    match = re.match(''.join(pattern), re.sub(r'\s+', '', detail))
+    if match is None:
+        return 'content'
+    fixed = ''.join(segment for segment, group in pieces if group is None or match[group])
+    positions = set()
+    if (isinstance(evidence, dict) and evidence.get('text') == detail
+            and evidence.get('inline_plain') == re.sub(r'\s+', '', detail)
+            and isinstance(evidence.get('inline_breaks'), list)):
+        positions = {offset for offset in evidence['inline_breaks']
+                     if type(offset) is int and 0 < offset < len(re.sub(r'\s+', '', detail))}
+    gaps = {}
+    offset = 0
+    for token in re.findall(r'\s+|\S', detail):
+        if token.isspace():
+            gaps[offset] = token
+        else:
+            offset += 1
+    offset = 0
+    for token in re.findall(r'\s+|\S', fixed):
+        if not token.isspace():
+            offset += 1
+            continue
+        original = token.replace('\r\n', '\n')
+        replacement = gaps.get(offset, '').replace('\r\n', '\n')
+        remaining = iter(replacement)
+        if all(any(char == candidate for candidate in remaining) for char in original):
+            continue
+        if (offset in positions and '\n' not in replacement and original.count('\n') <= 1
+                and not any(char in original for char in '\r\v\f\x85\u2028\u2029')):
+            continue
+        return 'whitespace'
+    return 'matched'
 
 
-def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
-    """Allow whitespace-only differences once the detail covers all stored characters."""
+def aligned_preview(preview: str, detail: str, evidence=None) -> bool:
+    return _alignment(preview, detail, evidence) == 'matched'
+
+
+def proposal(entry: dict, text: str, evidence=None) -> tuple[str, dict | None, dict]:
+    """Require coverage and paragraph preservation before any stored-body replacement."""
     prefix = entry[x_post.HINT]
     preview = entry['body'].removeprefix(prefix).strip()
     canonical = canonical_preview(preview)
     info = dict(artifacts=canonical != preview, after=len(prefix + text))
     if text == preview:
         return 'identical', None, dict(info, reason='detail_matches_stored')
+    alignment = _alignment(preview, text, evidence)
+    if alignment == 'whitespace':
+        return 'blocked_whitespace', None, dict(info, reason='unproven_whitespace_change')
+    if alignment == 'content' and x_post.expanded(text, preview):
+        return 'blocked_content', None, dict(info, reason='detail_does_not_cover_stored')
     if x_post.expanded(text, preview):
         return 'expanded', x_post.merge(entry, text), dict(info, reason='longer_detail')
-    if aligned_preview(preview, text):
+    if alignment == 'matched':
         complete = dict(entry)
         complete.pop(x_post.HINT)
         complete.update(title=text.splitlines()[0][:500], body=prefix + text)
@@ -160,6 +210,7 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
            should_stop=None, progress=None) -> dict:
     stats = dict(candidates=len(rows), expanded=0, normalized=0, updated=0,
                  identical=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
+                 blocked_whitespace=0, blocked_content=0,
                  failed=0, stale=0, deferred=0, results=[])
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
@@ -167,8 +218,10 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
             stats['deferred'] = len(rows) - index
             break
         result = dict(url=row['url'], before=len(row['body']))
+        evidence = {}
         try:
-            text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
+            text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop,
+                                evidence=evidence)
         except x_post.PostGone as exc:
             stats['unavailable'] += 1
             result.update(state='unavailable', error=str(exc))
@@ -181,7 +234,7 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
             stats['failed'] += 1
             result.update(state='failed', error=str(exc))
         else:
-            state, complete, info = proposal(entry_of(row), text)
+            state, complete, info = proposal(entry_of(row), text, evidence)
             stats[state] += 1
             result.update(state=state, **info)
             if complete and apply:
@@ -251,12 +304,15 @@ def main(argv=None) -> int:
     print(f'与详情逐字相同 {stats["identical"]} 条(不等于确认完整),'
           f'长度拦截 {stats["blocked_length"]} 条,'
           f'含旧链接产物但未能安全对齐 {stats["blocked_artifacts"]} 条,'
+          f'空白改动缺少证据 {stats["blocked_whitespace"]} 条,'
+          f'正文内容无法对齐 {stats["blocked_content"]} 条,'
           f'远端明确不可用 {stats["unavailable"]} 条(保留原存量)。')
     if stats.get('stop_reason'):
         print(f'整轮已停止:{stats["stop_reason"]}')
     print('已写入的条目会在正常同步中重新翻译、导出、索引和提取;本脚本不直接改 vault。')
     return 1 if any(stats[key] for key in
-                    ('failed', 'deferred', 'blocked_length', 'blocked_artifacts')) else 0
+                    ('failed', 'deferred', 'blocked_length', 'blocked_artifacts',
+                     'blocked_whitespace', 'blocked_content')) else 0
 
 
 if __name__ == '__main__':
