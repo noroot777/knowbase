@@ -5,7 +5,8 @@ import unittest
 from contextlib import nullcontext
 from unittest.mock import patch
 
-from kb.feeds import grab_store, registry as reg, sync, translate, x_browser, x_post
+from kb.collectors import FetchScope
+from kb.feeds import grab_store, registry as reg, sync, translate, x_browser, x_channels, x_post
 from kb.feeds.x_cdp import CdpError
 from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import FRESH_ISO, tweet
@@ -126,8 +127,94 @@ class PostTests(unittest.TestCase):
         self.assertEqual(x_browser._utc(x_browser._as_published(FRESH_ISO)),
                          x_browser._utc(result['watermark']))
 
+    def test_explicit_absence_finishes_without_waiting_for_the_timeout(self):
+        page = Page(dict(snapshot(''), id='', ready='complete', empty=True))
+        with patch.object(x_post, 'SECONDS', 0.02):
+            with self.assertRaisesRegex(x_post.PostUnavailable, '不存在'):
+                x_post.fetch(URL, page)
+        self.assertEqual(2, page.reads)
+
+    def test_loading_and_stale_absence_cannot_discard_an_existing_post(self):
+        gone = dict(snapshot(''), id='', ready='complete', empty=True)
+        for first in [dict(gone, at='999'), dict(gone, ready='loading'), gone,
+                      dict(snapshot(), empty=True)]:
+            with self.subTest(first=first):
+                page = Page(first, snapshot(), snapshot())
+                self.assertEqual(BODY, x_post.fetch(URL, page))
+
+    def test_deleted_posts_do_not_get_inserted_or_freeze_either_channel_watermark(self):
+        for attach in [False, True]:
+            page = Page(dict(snapshot(''), id='', ready='complete', empty=True))
+            with self.subTest(attach=attach), patch.object(x_post, 'SECONDS', 0.02), \
+                 patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
+                 patch.object(x_browser, '_harvest_one', return_value=([preview()], '')):
+                result = x_browser.harvest([('Example', OLD)], profile='', attach=attach)['Example']
+            self.assertEqual([], result['entries'])
+            self.assertEqual('', result['incomplete'])
+            self.assertEqual(x_browser._utc(x_browser._as_published(FRESH_ISO)),
+                             x_browser._utc(result['watermark']))
+            self.assertEqual(2, page.reads)
+
+    def test_one_deleted_post_does_not_hide_another_posts_retryable_failure(self):
+        gone = dict(snapshot(''), id='', ready='complete', empty=True)
+        other = dict(preview(), url='https://x.com/Example/status/124')
+        page = Page(gone, gone, CdpError('disconnected'))
+        with patch.object(x_post, 'SECONDS', 0.02), \
+             patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
+             patch.object(x_browser, '_harvest_one', return_value=([preview(), other], '')):
+            result = x_browser.harvest([('Example', OLD)], profile='')['Example']
+        self.assertEqual([], result['entries'])
+        self.assertEqual(OLD, result['watermark'])
+        self.assertTrue(result['incomplete'])
+
+    def test_detail_rate_limit_aborts_remaining_accounts_in_both_channels(self):
+        short = x_browser._entry(tweet('124', text='short'))
+        for attach in [False, True]:
+            page = Page(dict(snapshot(''), id='', ready='complete', limited=True))
+            with self.subTest(attach=attach), patch.object(x_post, 'SECONDS', 0.02), \
+                 patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
+                 patch.object(x_browser, '_harvest_one',
+                              side_effect=[([short], ''), ([preview()], ''), ([preview()], '')]) as collect:
+                result = x_browser.harvest([('First', OLD), ('Example', OLD), ('Next', OLD)],
+                                           profile='', attach=attach)
+            self.assertEqual([short], result['First']['entries'])
+            self.assertEqual(2, collect.call_count)
+            self.assertEqual([URL], page.urls)
+            for handle in ['Example', 'Next']:
+                self.assertIn('频率', result[handle]['error'])
+                self.assertNotIn('watermark', result[handle])
+
+    def test_timeline_rate_limit_uses_the_same_batch_abort(self):
+        page = Page(dict(snapshot(''), articles=0, ready='complete', empty=False, limited=True))
+        with patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
+             patch.object(x_browser, '_harvest_one', side_effect=lambda page, handle, floor:
+                          x_browser._wait_state(page, handle, time.monotonic() + 1)) as collect:
+            result = x_browser.harvest([('Example', OLD), ('Next', OLD)], profile='')
+        self.assertEqual(1, collect.call_count)
+        self.assertIn('频率', result['Next']['error'])
+
 
 class StoredPostTests(ChannelBase):
+    def test_only_deleted_posts_commit_the_observed_watermark_without_inserting_a_preview(self):
+        source = self.sub()
+        for channel in [x_channels.BROWSER, x_channels.ATTACH]:
+            settings = self.settings(channel)
+            x_channels.save_watermark(source['id'], channel, OLD)
+            source = reg.subscription('social', source['id'])
+            page = Page(dict(snapshot(''), id='', ready='complete', empty=True))
+            with self.subTest(channel=channel), patch.object(x_post, 'STEP', 0.0), \
+                 patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
+                 patch.object(x_browser, '_harvest_one', return_value=([preview()], '')):
+                x_channels.prefetch([source], settings)
+                added = sync._save_result(source, x_channels.take(source, settings), FetchScope())
+            self.assertEqual(0, added)
+            saved = reg.subscription('social', source['id'])
+            self.assertEqual(x_browser._utc(x_browser._as_published(FRESH_ISO)),
+                             x_browser._utc(x_channels.watermark(saved, channel)))
+            self.assertEqual('', saved['last_note'])
+            with reg.db() as conn:
+                self.assertEqual(0, conn.execute('SELECT count(*) FROM feed_items').fetchone()[0])
+
     def test_refetch_does_not_fix_existing_rows_but_versioned_replacement_does(self):
         source = self.sub()
         reg.put_items(source, [preview()])

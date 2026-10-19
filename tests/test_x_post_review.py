@@ -40,6 +40,25 @@ class ArticleHandoffTests(unittest.TestCase):
     def entry(self):
         return dict(preview('Someone reposted'), **{x_article.HINT: 'https://x.com/i/article/999'})
 
+    def test_explicitly_deleted_posts_do_not_enter_article_recovery(self):
+        with patch.object(x_post, 'fetch', side_effect=x_post.PostGone('页面不存在')), \
+             patch.object(x_article, 'fetch') as request, \
+             patch.object(x_article, 'browser_fetch') as fallback:
+            kept, note = x_post.complete([self.entry()], session=Page())
+        self.assertEqual([], kept)
+        self.assertEqual('', note)
+        request.assert_not_called()
+        fallback.assert_not_called()
+
+    def test_rate_limits_escape_article_handoff_as_browser_channel_errors(self):
+        with patch.object(x_post, 'fetch', side_effect=x_post.XRateLimited('访问频率受限')), \
+             patch.object(x_article, 'fetch') as request, \
+             patch.object(x_article, 'browser_fetch') as fallback:
+            with self.assertRaisesRegex(x_browser.XBrowserError, '频率'):
+                x_post.complete([self.entry()], session=Page())
+        request.assert_not_called()
+        fallback.assert_not_called()
+
     def test_a_failed_status_read_still_reaches_the_article_api(self):
         entry = self.entry()
         with patch.object(x_post, 'fetch', side_effect=x_post.PostUnavailable('no detail')), \

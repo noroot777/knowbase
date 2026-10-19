@@ -7,6 +7,7 @@ import time
 
 from kb.feeds import x_article
 from kb.feeds.x_cdp import CdpError
+from kb.feeds.x_page_state import STATE_JS, XRateLimited
 
 HINT = '_x_post_prefix'
 SECONDS = 25.0
@@ -33,11 +34,9 @@ TEXT_JS = r'''
 '''
 
 READ_JS = r'''(() => {
-''' + TEXT_JS + r'''
+''' + TEXT_JS + STATE_JS + r'''
   const at = location.pathname.match(/^\/[^/]+\/status\/(\d+)(?:\/|$)/);
-  const result = {at: at ? at[1] : '', id: '', text: '', truncated: true,
-    login: !!document.querySelector('[data-testid="loginButton"], [data-testid="login"]')
-      || /^\/i\/flow\/login/.test(location.pathname)};
+  const result = {...xPageState(), at: at ? at[1] : '', id: '', text: '', truncated: true};
   for (const art of document.querySelectorAll('article[data-testid="tweet"]')) {
     const clock = ownNode(art, 'time[datetime]');
     const href = clock?.closest('a[href*="/status/"]')?.getAttribute('href') || '';
@@ -54,6 +53,10 @@ READ_JS = r'''(() => {
 
 class PostUnavailable(RuntimeError):
     pass
+
+
+class PostGone(PostUnavailable):
+    """The requested, fully loaded page explicitly says the post is unavailable."""
 
 
 def expanded(text: str, preview: str) -> bool:
@@ -75,6 +78,7 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
         time.monotonic() + SECONDS)
     _check(until, should_stop)
     previous = None
+    absent = False
     try:
         navigation = session.goto(url)
         if isinstance(navigation, dict) and navigation.get('errorText'):
@@ -84,6 +88,13 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
             snap = json.loads(session.eval(READ_JS))
             if snap.get('login'):
                 raise PostUnavailable('推文详情页需要重新登录 X')
+            if snap.get('limited'):
+                raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
+            missing = (snap.get('at') == match[1] and not snap.get('id')
+                       and snap.get('ready') == 'complete' and snap.get('empty') is True)
+            if missing and absent:
+                raise PostGone('X 明确答复该推文页面不存在或已不可用')
+            absent = missing
             valid = (snap.get('at') == match[1] == snap.get('id')
                      and isinstance(snap.get('text'), str) and snap['text'].strip()
                      and snap.get('truncated') is False)
@@ -115,6 +126,8 @@ def fill(entries: list[dict], *, session, deadline=None, should_stop=None):
         try:
             text = fetch(entry['url'], session, deadline=deadline, should_stop=should_stop)
             complete = merge(entry, text)
+        except PostGone:
+            continue
         except PostUnavailable:
             if x_article.needs_article(entry):
                 kept.append(entry)

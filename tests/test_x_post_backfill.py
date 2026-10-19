@@ -41,13 +41,13 @@ class BackfillTests(ChannelBase):
         with patch.object(backfill.x_browser, 'browser_session') as browser, \
              contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(0, backfill.main(['scan']))
-        self.assertIn('1 条候选', output.getvalue())
+        self.assertIn('2 条候选', output.getvalue())
         browser.assert_not_called()
 
-    def test_explicit_urls_and_all_can_reach_previews_without_an_ellipsis(self):
+    def test_default_scan_includes_unmarked_previews_and_all_is_a_compatibility_alias(self):
         row = self.seed('stops in the middle')
         with reg.db() as conn:
-            self.assertEqual([], backfill.candidates(conn))
+            self.assertEqual([row], backfill.candidates(conn))
             self.assertEqual([row], backfill.candidates(conn, urls=[row['url']]))
             self.assertEqual([row], backfill.candidates(conn, all_posts=True))
 
@@ -59,13 +59,72 @@ class BackfillTests(ChannelBase):
             'Text…\nhttps://\nexample.org/guide\nThe end.',
             LEGACY.removesuffix('\n…'),
         ])]
-        self.seed('Read this: https://example.org/guide. The end.', '140')
-        self.seed('https://example.org/guide Another paragraph', '141')
+        plain = [self.seed('Read this: https://example.org/guide. The end.', '140'),
+                 self.seed('https://example.org/guide Another paragraph', '141')]
         with reg.db() as conn:
-            self.assertEqual({row['key'] for row in rows},
+            self.assertEqual({row['key'] for row in rows + plain},
                              {row['key'] for row in backfill.candidates(conn)})
-            self.assertEqual(2, len(backfill.candidates(conn, limit=2)))
+            self.assertTrue({row['key'] for row in backfill.candidates(conn, limit=2)}
+                            <= {row['key'] for row in rows})
             self.assertEqual([rows[0]], backfill.candidates(conn, urls=[rows[0]['url']]))
+
+    def test_default_cli_can_repair_a_preview_without_local_truncation_markers(self):
+        row = self.seed('stops in the middle')
+        full = row['body'] + ' of a sentence, followed by its complete ending.'
+        with contextlib.redirect_stdout(io.StringIO()), \
+             patch.object(backfill.x_browser, 'browser_session',
+                          return_value=contextlib.nullcontext(Page(snapshot(full)))):
+            self.assertEqual(0, backfill.main(['run', '--yes']))
+        self.assertEqual(full, self.row(row['key'])['body'])
+
+    def test_default_scan_includes_empty_x_posts_but_not_other_content(self):
+        empty = self.seed('', '124')
+        foreign = self.seed('not an X post', '125')
+        article = self.seed('an article', '126')
+        with reg.db() as conn:
+            conn.execute('UPDATE feed_items SET url=? WHERE key=?',
+                         ('https://example.org/status/125', foreign['key']))
+            conn.execute("UPDATE feed_items SET content_kind='article' WHERE key=?",
+                         (article['key'],))
+            self.assertEqual([empty], backfill.candidates(conn))
+
+    def test_missing_detail_is_terminal_for_the_audit_and_never_replaces_stored_text(self):
+        row = self.seed()
+        gone = dict(snapshot(''), id='', ready='complete', empty=True)
+        with patch.object(x_post, 'SECONDS', 0.02):
+            stats = backfill.repair([row], Page(gone), apply=True)
+        self.assertEqual(1, stats.get('unavailable', 0))
+        self.assertEqual(0, stats['failed'])
+        self.assertEqual(0, stats['updated'])
+        self.assertEqual(row, self.row(row['key']))
+
+    def test_rate_limit_stops_the_whole_audit_without_probing_or_writing_later_rows(self):
+        rows = [self.seed(), self.seed(identity='124')]
+        page = Page(dict(snapshot(''), id='', ready='complete', limited=True))
+        with patch.object(x_post, 'SECONDS', 0.02):
+            stats = backfill.repair(rows, page, apply=True)
+        self.assertEqual([rows[0]['url']], page.urls)
+        self.assertEqual(1, stats['failed'])
+        self.assertEqual(1, stats['deferred'])
+        self.assertIn('频率', stats.get('stop_reason', ''))
+        self.assertEqual(rows, [self.row(row['key']) for row in rows])
+
+    def test_cli_reports_absence_and_batch_rate_limits_without_overwriting_stored_rows(self):
+        row = self.seed()
+        report = self.root / 'terminal-report.json'
+        for flag, state, code in [('empty', 'unavailable', 0), ('limited', 'failed', 1)]:
+            page = Page(dict(snapshot(''), id='', ready='complete', **{flag: True}))
+            with self.subTest(flag=flag), contextlib.redirect_stdout(io.StringIO()) as output, \
+                 patch.object(x_post, 'SECONDS', 0.02), \
+                 patch.object(backfill.x_browser, 'browser_session',
+                              return_value=contextlib.nullcontext(page)):
+                self.assertEqual(code, backfill.main(['run', '--yes', '--report', str(report)]))
+            stats = json.loads(report.read_text())
+            self.assertEqual(state, stats['results'][0]['state'])
+            self.assertEqual(row, self.row(row['key']))
+            self.assertIn('远端明确不可用', output.getvalue())
+            if flag == 'limited':
+                self.assertIn('整轮已停止', output.getvalue())
 
     def test_default_cli_repairs_a_protocol_split_without_an_ellipsis(self):
         row = self.seed('Read this: https://\nexample.org/guide')

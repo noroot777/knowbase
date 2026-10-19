@@ -36,6 +36,7 @@ from zoneinfo import ZoneInfo
 
 from kb.feeds import x_article, x_post
 from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
+from kb.feeds.x_page_state import STATE_JS, XBrowserError, XRateLimited
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 # 连续多少条老推文算"翻到底了"。1 不够:转推带的是原推时间,单条老的很常见。
@@ -126,22 +127,10 @@ _SCROLL_JS = r'''
 # 登录态失效的几种落地页。X 会跳 /i/flow/login,也会在原地渲染登录按钮。
 _STATE_JS = r'''
 (() => {
-  const txt = (document.body?.innerText || '').slice(0, 4000);
-  return JSON.stringify({
-    url: location.href,
-    ready: document.readyState,
-    articles: document.querySelectorAll('article[data-testid="tweet"]').length,
-    login: !!document.querySelector('[data-testid="loginButton"], [data-testid="login"]')
-           || /^\/i\/flow\/login/.test(location.pathname),
-    empty: /Hmm\.\.\.this page doesn|这个页面不存在|Account suspended|账号已被冻结|doesn’t exist|does not exist/i.test(txt),
-    limited: /Rate limit exceeded|Something went wrong\. Try reloading|请稍后再试/i.test(txt),
-  });
+''' + STATE_JS + r'''
+  return JSON.stringify(xPageState());
 })()
 '''
-
-
-class XBrowserError(RuntimeError):
-    """浏览器通道的失败。message 是成品文案。"""
 
 
 def _as_published(iso: str) -> str:
@@ -261,7 +250,7 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
             raise XBrowserError('X 登录态已失效,请在浏览器通道设置里重新登录,'
                                 '或从日常浏览器再导入一次')
         if last['limited']:
-            raise XBrowserError('X 暂时限制了访问频率,请稍后重试或降低同步频率')
+            raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
         if last['empty']:
             raise XBrowserError(f'@{handle} 这个账号在 X 上打不开(可能已改名、注销或被冻结)')
         if last['articles'] and last['ready'] == 'complete':
@@ -410,8 +399,8 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
     jobs:  [(handle, 水位 ISO 或空串)]
     返回:  {handle: {'entries': [...], 'error': '', 'watermark': ISO}}
 
-    整批共用一个浏览器会话;任何一个账号的失败只落在它自己那一项上,不影响其余
-    ——这条通道一轮跑几十个账号,一个改名的号不该把整轮带掉。
+    整批共用一个浏览器会话;普通账号失败只落在它自己那一项上,不影响其余。
+    明确限流则停止余批,保留已完成账号的结果,未完成账号报同一原因且不推进水位。
 
     `attach` 决定浏览器从哪儿来(见 `browser_session`)。整批共用一个会话这件事
     两条路都成立,只是理由不同:独立 profile 那条是因为起一个 Chrome 要两三秒、
@@ -451,6 +440,7 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 started = water or floor.isoformat()
                 try:
                     entries, incomplete = _harvest_one(page, handle, floor)
+                    observed_watermark = _newest(entries, water)
                     # 长文(Article)推文在时间线上一个字都没有,正文要单独取一次。
                     # 取不到的那几条本轮不入库、并按"没读完"办 —— 空正文一旦落库
                     # 就再也更新不了(`put_items` 是 DO NOTHING),见 `x_article`。
@@ -481,13 +471,15 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # `put_items` 按 URL 去重,一条都不会重复入库。
                     results[handle] = {
                         'entries': entries, 'error': '', 'incomplete': incomplete,
-                        'watermark': started if incomplete else _newest(entries, water)}
+                        'watermark': started if incomplete else observed_watermark}
+                except XRateLimited:
+                    raise
                 except (XBrowserError, CdpError) as e:
                     results[handle] = {'entries': [], 'error': str(e)}
-    except (CdpError, EOFError, OSError) as e:
+    except (XRateLimited, CdpError, EOFError, OSError) as e:
         # 浏览器整个起不来/中途死了:剩下的账号统一记成同一个原因,
         # 而不是逐个报一条看不出共同根因的错。
-        reason = str(e) if isinstance(e, CdpError) else f'浏览器会话中断:{e}'
+        reason = str(e) if isinstance(e, (XRateLimited, CdpError)) else f'浏览器会话中断:{e}'
         for handle, _ in jobs:
             results.setdefault(handle, {'entries': [], 'error': reason})
     return results

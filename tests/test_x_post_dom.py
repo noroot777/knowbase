@@ -49,7 +49,7 @@ class PostDomTests(unittest.TestCase):
         cls.thread.start()
         cls.addClassCleanup(cls.thread.join)
         cls.addClassCleanup(cls.server.shutdown)
-        cls.page = Chrome(str(Path(cls.temp.name) / 'profile'), headless=False, chrome_path=SHELL)
+        cls.page = Chrome(str(Path(cls.temp.name) / 'profile'), headless=True, chrome_path=SHELL)
         cls.page.__enter__()
         cls.addClassCleanup(cls.page.__exit__, None, None, None)
         cls.page.open_page('about:blank')
@@ -122,3 +122,27 @@ class PostDomTests(unittest.TestCase):
         entry = dict(x_browser._entry(self.collect()[0]), **{x_post.HINT: ''})
         with self.assertRaises(x_post.PostUnavailable):
             x_post.merge(entry, second['text'])
+
+    def test_status_and_timeline_share_explicit_absence_and_rate_limit_detection(self):
+        for text, empty, limited in [
+            ('唔...该页面不存在。请尝试搜索别的内容。', True, False),
+            ('这个页面不存在', True, False),
+            ('Hmm...this page doesn’t exist.', True, False),
+            ('Rate limit exceeded', False, True),
+            ('请稍后再试', False, True),
+            ('Loading', False, False),
+        ]:
+            with self.subTest(text=text):
+                self.load('<main>' + text + '</main>')
+                for script in [x_post.READ_JS, x_browser._STATE_JS]:
+                    snap = json.loads(self.page.eval(script))
+                    self.assertIs(empty, snap.get('empty'))
+                    self.assertIs(limited, snap.get('limited'))
+
+    def test_error_words_in_a_real_post_cannot_make_it_absent_or_rate_limited(self):
+        text = '有人说「该页面不存在」或「请稍后再试」，但这是一条正常推文。'
+        self.load(article(text=text))
+        for script in [x_post.READ_JS, x_browser._STATE_JS]:
+            snap = json.loads(self.page.eval(script))
+            self.assertIs(False, snap.get('empty'))
+            self.assertIs(False, snap.get('limited'))
