@@ -5,13 +5,15 @@ import json
 import re
 import time
 
-from kb.feeds import x_article
+from kb.feeds import x_article, x_body
 from kb.feeds.x_cdp import CdpError
 from kb.feeds.x_page_state import STATE_JS, XRateLimited
+from kb.feeds.x_post_empty import EMPTY_JS
 
 HINT = '_x_post_prefix'
 SECONDS = 25.0
 STEP = 0.25
+STRUCTURE_SECONDS = 3.0
 _STATUS = re.compile(r'^https://(?:x|twitter)\.com/[^/?#]+/status/(\d+)(?:[/?#]|$)')
 
 TEXT_JS = r'''
@@ -31,74 +33,13 @@ TEXT_JS = r'''
     node.closest('article[data-testid="tweet"]') === art &&
     !node.closest('div[role="link"], [data-testid="quoteTweet"]'));
   const postMore = art => !!ownNode(art, '[data-testid="tweet-text-show-more-link"]');
-  const knownEmptyContent = (art, media) => {
-    const clock = ownNode(art, 'time[datetime]');
-    const permalink = clock?.closest('a[href*="/status/"]');
-    const status = permalink?.getAttribute('href');
-    const analytics = status && [...art.querySelectorAll('a[href]')].find(node =>
-      node.getAttribute('href') === status + '/analytics');
-    let metadata = permalink?.parentElement;
-    while (metadata && metadata !== art && !metadata.contains(analytics)) metadata = metadata.parentElement;
-    if (metadata === art) metadata = null;
-    const card = media.matches('[data-testid="card.wrapper"]') ? media : null;
-    const understood = node => {
-      if (node === media || node === permalink) return true;
-      if (node.nodeType === Node.TEXT_NODE) return !node.textContent.trim();
-      if (node.nodeType !== Node.ELEMENT_NODE) return true;
-      if (node.matches('[data-testid="User-Name"], [data-testid="Tweet-User-Avatar"], ' +
-          '[data-testid="socialContext"], button, [role="button"]')) return true;
-      if (node.matches('a[href]') && status &&
-          ['/analytics', '/quotes'].some(suffix => node.getAttribute('href') === status + suffix)) return true;
-      if (node.matches('a[href]') && card?.parentElement !== art && card?.parentElement.contains(node) &&
-          node.getAttribute('href') === card.querySelector('a[href]')?.getAttribute('href')) return true;
-      if (node.matches('span') && node.textContent.trim() === '·' &&
-          metadata?.contains(node)) return true;
-      if (media.matches('[data-testid="tweetPhoto"]') && node.matches('[data-testid="tweetPhoto"]') &&
-          [...node.querySelectorAll('img[src]')].some(image => image.complete && image.naturalWidth > 0)) return true;
-      if (node.matches('img[alt]') && node.getAttribute('alt').trim()) return false;
-      return [...node.childNodes].every(understood);
-    };
-    return understood(art);
-  };
-  const emptyPostKind = art => {
-    if (document.readyState !== 'complete' || ownNode(art, '[data-testid="tweetText"]') ||
-        postMore(art) || art.querySelector('[role="progressbar"], [aria-busy="true"]') ||
-        !ownNode(art, '[data-testid="reply"]') ||
-        !ownNode(art, '[data-testid="like"], [data-testid="unlike"]') ||
-        ownNode(art, 'a[href*="/article/"]')) return '';
-    const proved = (kind, media) => knownEmptyContent(art, media) ? kind : '';
-    const photo = ownNode(art, '[data-testid="tweetPhoto"] img[src]');
-    if (photo?.complete && photo.naturalWidth > 0) {
-      return proved('photo', photo.closest('[data-testid="tweetPhoto"]'));
-    }
-    const photoNode = ownNode(art, 'a[href*="/photo/"]');
-    const photoLink = photoNode?.getAttribute('href') || '';
-    const photoId = photoLink.match(/^\/[^/]+\/status\/(\d+)\/photo\/\d+(?:[/?#]|$)/)?.[1];
-    if (photoId && photoId === location.pathname.match(/^\/[^/]+\/status\/(\d+)(?:\/|$)/)?.[1]) {
-      return proved('photo', photoNode);
-    }
-    const video = ownNode(art, '[data-testid="videoPlayer"] video');
-    if (video && (video.readyState >= 1 || /^(?:https?:|data:image\/)/.test(video.poster))) {
-      return proved('video', video.closest('[data-testid="videoPlayer"]'));
-    }
-    const quote = [...art.querySelectorAll('[data-testid="quoteTweet"], div[role="link"]')]
-      .find(node => node.closest('article[data-testid="tweet"]') === art &&
-        node.querySelector('a[href*="/status/"]') &&
-        node.querySelector('[data-testid="tweetText"], [data-testid="tweetPhoto"], [data-testid="videoPlayer"]'));
-    if (quote) return proved('quote', quote);
-    const card = ownNode(art, '[data-testid="card.wrapper"]');
-    const link = card?.querySelector('a[href]');
-    if (link && /^https:\/\//.test(link.getAttribute('href')) &&
-        (card.textContent.trim() || link.getAttribute('aria-label')?.trim())) return proved('link', card);
-    return '';
-  };
 '''
 
 READ_JS = r'''(() => {
-''' + TEXT_JS + STATE_JS + r'''
+''' + TEXT_JS + EMPTY_JS + STATE_JS + r'''
   const at = location.pathname.match(/^\/[^/]+\/status\/(\d+)(?:\/|$)/);
   const result = {...xPageState(), at: at ? at[1] : '', id: '', text: '', truncated: true,
-                  empty_kind: ''};
+                  empty_kind: '', unknown_structure: false};
   for (const art of document.querySelectorAll('article[data-testid="tweet"]')) {
     const clock = ownNode(art, 'time[datetime]');
     const href = clock?.closest('a[href*="/status/"]')?.getAttribute('href') || '';
@@ -107,7 +48,8 @@ READ_JS = r'''(() => {
     result.id = identity[1];
     result.text = postText(ownNode(art, '[data-testid="tweetText"]'));
     result.truncated = postMore(art);
-    result.empty_kind = emptyPostKind(art);
+    result.empty_kind = emptyPostKind(art, identity[1]);
+    result.unknown_structure = emptyPostReady(art) && !result.empty_kind;
     break;
   }
   return JSON.stringify(result);
@@ -120,6 +62,10 @@ class PostUnavailable(RuntimeError):
 
 class PostGone(PostUnavailable):
     """The requested, fully loaded page explicitly says the post is unavailable."""
+
+
+class PostStructureUnknown(PostUnavailable):
+    """A loaded matching post has no readable body or positive empty-text proof."""
 
 
 class PostEmpty(PostUnavailable):
@@ -149,11 +95,14 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
     previous = None
     absent = False
     empty = None
+    unknown_since = None
     try:
         navigation = session.goto(url)
         if isinstance(navigation, dict) and navigation.get('errorText'):
             raise PostUnavailable(f'推文详情页打开失败:{navigation["errorText"]}')
         while True:
+            if unknown_since is not None and time.monotonic() >= until:
+                raise PostStructureUnknown('详情页正文结构尚未确认,未把选择器缺失当作无自写文字')
             _check(until, should_stop)
             snap = json.loads(session.eval(READ_JS))
             if snap.get('login'):
@@ -169,7 +118,7 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
             confirmed_empty = (snap.get('at') == match[1] == snap.get('id')
                                and snap.get('ready') == 'complete' and snap.get('text') == ''
                                and snap.get('truncated') is False
-                               and kind in {'photo', 'video', 'quote', 'link'})
+                               and kind in {'photo', 'video', 'quote', 'link', 'unspecified'})
             if confirmed_empty and empty == kind:
                 raise PostEmpty(kind)
             empty = kind if confirmed_empty else None
@@ -180,18 +129,25 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
             if text is not None and text == previous:
                 return text
             previous = text
+            unknown = (snap.get('at') == match[1] == snap.get('id') and
+                       snap.get('ready') == 'complete' and snap.get('text') == '' and
+                       snap.get('truncated') is False and snap.get('unknown_structure') is True)
+            unknown_since = (unknown_since if unknown_since is not None else time.monotonic()
+                             ) if unknown else None
+            if unknown_since is not None and time.monotonic() - unknown_since >= STRUCTURE_SECONDS:
+                raise PostStructureUnknown('详情页正文结构尚未确认,未把选择器缺失当作无自写文字')
             time.sleep(min(STEP, max(0.0, until - time.monotonic())))
     except (CdpError, OSError, EOFError, ValueError, TypeError, AttributeError) as exc:
         raise PostUnavailable(f'推文详情页读取失败:{exc}') from exc
 
 
 def merge(entry: dict, text: str) -> dict:
-    prefix = entry[HINT]
-    if not expanded(text, entry['body'].removeprefix(prefix)):
+    body = x_body.parts(entry, prefix=entry[HINT])
+    if not expanded(text, body.text):
         raise PostUnavailable('详情页正文没有长于时间线预览')
     complete = dict(entry)
     complete.pop(HINT)
-    complete.update(title=text.splitlines()[0][:500], body=prefix + text)
+    complete.update(title=text.splitlines()[0][:500], body=body.render(text))
     return complete
 
 

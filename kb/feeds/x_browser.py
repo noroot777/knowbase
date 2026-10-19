@@ -34,7 +34,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from kb.feeds import x_account, x_article, x_post
+from kb.feeds import x_account, x_article, x_body, x_post
 from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
 from kb.feeds.x_page_state import STATE_JS, XBrowserError, XRateLimited
 
@@ -225,8 +225,8 @@ def _entry(item: dict) -> dict | None:
     context = (item.get('context') or '').strip()
     # 转推/引用的上下文留在正文开头一行:它决定了这条是不是本人的观点,
     # 而 feed_items 里没有地方放这个标记。
-    body = f'> {context}\n\n{text}' if context and not _is_pinned(context) else text
-    out = {'url': item['url'], 'title': (text or f"{name} 的动态")[:500],
+    body = x_body.context_body(context if not _is_pinned(context) else '', text)
+    out = {'url': item['url'], 'title': (text or x_body.placeholder(name))[:500],
            'body': body, 'author': name, 'published': published,
            'content_kind': 'post'}
     # 「这条带着长文卡片」的信号,只在采集期间有意义:`x_article.fill` 用完就把

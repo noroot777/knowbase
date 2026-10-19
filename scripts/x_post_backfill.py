@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb.feeds import grab_store, registry as reg, x_browser, x_channels, x_post
+from kb.feeds import grab_store, registry as reg, x_body, x_browser, x_channels, x_post
 from kb.feeds.x_cdp import CdpError
 from kb.feeds.x_page_state import XRateLimited
 
@@ -109,10 +109,10 @@ def aligned_preview(preview: str, detail: str) -> bool:
 
 def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
     """Only bypass raw length when known link artifacts explain the difference."""
-    prefix = entry[x_post.HINT]
-    preview = entry['body'].removeprefix(prefix).strip()
+    body = x_body.parts(entry, prefix=entry[x_post.HINT])
+    preview = body.text
     canonical = canonical_preview(preview)
-    info = dict(artifacts=canonical != preview, after=len(prefix + text))
+    info = dict(artifacts=canonical != preview, after=len(body.render(text)))
     if text == preview:
         return 'identical', None, dict(info, reason='detail_matches_stored')
     if x_post.expanded(text, preview):
@@ -120,7 +120,7 @@ def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
     if info['artifacts'] and aligned_preview(preview, text):
         complete = dict(entry)
         complete.pop(x_post.HINT)
-        complete.update(title=text.splitlines()[0][:500], body=prefix + text)
+        complete.update(title=text.splitlines()[0][:500], body=body.render(text))
         return 'normalized', complete, dict(info, reason='legacy_link_artifacts')
     state = 'blocked_artifacts' if info['artifacts'] else 'blocked_length'
     return state, None, dict(info, reason='legacy_link_artifacts_not_reconciled'
@@ -145,24 +145,17 @@ def candidates(conn, *, urls=(), limit=0, all_posts=False) -> list[dict]:
     return selected[:limit] if limit else selected
 
 
-def entry_of(row: dict, *, confirmed_empty=False) -> dict:
-    body = row['body']
-    head, separator, tail = body.partition('\n\n')
-    prefix = ''
-    if head and all(line.startswith('> ') for line in head.splitlines()) and (
-            (separator and row['title'] and tail.startswith(row['title'])) or
-            (confirmed_empty and not tail.strip() and row['title'] == f'{row["author"]} 的动态'[:500])):
-        prefix = head + separator
+def entry_of(row: dict) -> dict:
     return {**{key: row[key] for key in
                ('url', 'title', 'body', 'author', 'published', 'content_kind')},
-            x_post.HINT: prefix}
+            x_post.HINT: x_body.parts(row).prefix}
 
 
 def repair(rows: list[dict], session, *, apply=False, deadline=None,
            should_stop=None, progress=None) -> dict:
     stats = dict(candidates=len(rows), expanded=0, normalized=0, updated=0,
                  identical=0, empty=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
-                 failed=0, stale=0, deferred=0, results=[])
+                 failed=0, unknown_structure=0, stale=0, deferred=0, results=[])
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
                 deadline is not None and time.monotonic() >= deadline):
@@ -172,8 +165,8 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
         try:
             text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
         except x_post.PostEmpty as exc:
-            entry = entry_of(row, confirmed_empty=True)
-            preview = entry['body'].removeprefix(entry[x_post.HINT]).strip()
+            entry = entry_of(row)
+            preview = x_body.parts(entry, prefix=entry[x_post.HINT]).text
             state = 'blocked_length' if preview else 'empty'
             stats[state] += 1
             result.update(state=state, after=len(entry[x_post.HINT]), empty_kind=exc.kind,
@@ -190,6 +183,13 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
         except x_post.PostUnavailable as exc:
             stats['failed'] += 1
             result.update(state='failed', error=str(exc))
+            if isinstance(exc, x_post.PostStructureUnknown):
+                stats['unknown_structure'] += 1
+                result['reason'] = 'unknown_structure'
+                if stats['unknown_structure'] >= 3 and stats['unknown_structure'] / (index + 1) >= 0.5:
+                    stats['deferred'] = len(rows) - index - 1
+                    stats['stop_reason'] = '多条已加载详情的正文结构无法识别,疑似 X 结构变化;停止本批并保留原行'
+                    result['scope'] = 'batch'
         else:
             state, complete, info = proposal(entry_of(row), text)
             stats[state] += 1
@@ -256,6 +256,7 @@ def main(argv=None) -> int:
         args.report.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
     print(f'可扩写 {stats["expanded"]} 条,可清理旧链接产物 {stats["normalized"]} 条,'
           f'实际写入 {stats["updated"]} 条,'
+          f'正文结构尚未确认 {stats["unknown_structure"]} 条,'
           f'并发换版跳过 {stats["stale"]} 条,失败 {stats["failed"]} 条,'
           f'预算/停止/限流扣留 {stats["deferred"]} 条。')
     print(f'与详情逐字相同 {stats["identical"]} 条(不等于确认完整),'

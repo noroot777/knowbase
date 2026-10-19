@@ -34,7 +34,7 @@ class EmptyPostTests(ChannelBase):
             return dict(conn.execute('SELECT * FROM feed_items WHERE key=?', (key,)).fetchone())
 
     def test_each_loaded_media_kind_has_a_distinct_terminal_state(self):
-        for kind in ['photo', 'video', 'quote', 'link']:
+        for kind in ['photo', 'video', 'quote', 'link', 'unspecified']:
             page = Page(empty(kind))
             with self.subTest(kind=kind), self.assertRaises(x_post.PostEmpty) as caught:
                 x_post.fetch(URL, page)

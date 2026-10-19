@@ -33,7 +33,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from kb.feeds import x_article
+from kb.feeds import x_article, x_body
 from kb.scanner import parse_frontmatter
 
 # **产物路径不许写死**:feedgrab 的保存位置是「平台目录 + category」拼出来的
@@ -181,11 +181,11 @@ def _entry(meta: dict, body: str, handle: str) -> dict | None:
     author = meta.get('author')
     name = (meta.get('author_name') or
             (author[0] if isinstance(author, list) and author else author) or handle)
-    title = str(meta.get('title') or '').strip() or f'{name} 的动态'
+    title = str(meta.get('title') or '').strip() or x_body.placeholder(str(name))
     text = body.strip()
     if not text and not title:
         return None
-    return {'url': url, 'title': title[:500], 'body': text or title,
+    return {'url': url, 'title': title[:500], 'body': x_body.feed_body(text, title),
             'author': str(name), 'published': _published(meta),
             'content_kind': 'post'}
 
