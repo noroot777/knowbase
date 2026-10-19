@@ -65,6 +65,23 @@ async page => {
     await page.locator('#wechat-check').waitFor({state:'visible'});
     check('首次配置展示供应商和模型状态', await page.locator('#wechat-provider-state').textContent() === '已配置'
       && await page.locator('#wechat-model-state').textContent() === '已就绪');
+    await page.locator('.wechat-agent summary').click();
+    const prompt = await page.locator('#wechat-agent-prompt').inputValue();
+    check('智能体提示词可查看且只读', await page.locator('#wechat-agent-prompt').getAttribute('readonly') !== null
+      && prompt.includes('经我明确确认后') && prompt.includes('live_database_read_ok=true')
+      && prompt.includes('不读取私聊或群聊') && !prompt.includes('微信'));
+    await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', {configurable: true,
+      value: {writeText: async text => { window.wechatCopiedPrompt = text; }}}));
+    await page.locator('#wechat-agent-copy').click();
+    check('复制的是完整提示词且没有启动获取', await page.evaluate(() => window.wechatCopiedPrompt) === prompt
+      && (await page.locator('#wechat-agent-copy-status').textContent()).includes('已复制') && writes.length === 0);
+    await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', {configurable: true,
+      value: {writeText: async () => { throw new Error('Clipboard blocked'); }}}));
+    await page.locator('#wechat-agent-copy').click();
+    check('剪贴板拒绝后选中全文供手动复制', await page.locator('#wechat-agent-prompt').evaluate(field =>
+      field.selectionStart === 0 && field.selectionEnd === field.value.length)
+      && (await page.locator('#wechat-agent-copy-status').textContent()).includes('无法自动复制'));
+    await page.locator('.wechat-agent summary').click();
     await page.locator('#wechat-check').click();
     await page.locator('#wechat-authorization').waitFor({state:'visible'});
     check('未确认影响不能获取', await page.locator('#wechat-acquire').isDisabled());
@@ -105,11 +122,18 @@ async page => {
     check('关掉模型配置后回到向导', await page.locator('#stages-modal').isHidden() && await page.locator('#wechat-modal').isVisible());
     check('叠加类用完就摘掉', await page.evaluate(()=>!document.getElementById('keys-modal').classList.contains('stacked') && !document.getElementById('stages-modal').classList.contains('stacked')));
     await page.setViewportSize({width:390,height:844});
-    await page.locator('#wechat-modal summary').click();
+    await page.locator('.wechat-explanation summary').click();
+    await page.locator('.wechat-agent summary').click();
     check('手机弹窗内容无横向溢出', await page.locator('.wechat-dialog').evaluate(el => el.scrollWidth <= el.clientWidth + 1));
     check('说明明确无需 skill', (await page.locator('.wechat-explanation').textContent()).includes('不需要安装个人情报库 skill'));
     await page.screenshot({path:'output/playwright/wechat-setup-mobile.png',fullPage:true});
+    await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', {configurable: true,
+      value: {writeText: async text => { window.wechatCopiedPrompt = text; }}}));
+    await page.locator('#wechat-agent-copy').click();
+    await page.screenshot({path:'output/playwright/wechat-agent-mobile.png',fullPage:true});
     await page.setViewportSize({width:1280,height:900});
+    await page.locator('#wechat-agent-copy').scrollIntoViewIfNeeded();
+    await page.screenshot({path:'output/playwright/wechat-agent-desktop.png',fullPage:true});
     await page.screenshot({path:'output/playwright/wechat-setup-desktop.png',fullPage:true});
     await page.keyboard.press('Escape');
     check('Esc 可关闭接入弹窗', await page.locator('#wechat-modal').isHidden());
@@ -119,6 +143,8 @@ async page => {
     await page.getByRole('button',{name:'完成首次配置'}).click();
     check('Docker 禁止本机接入按钮', await page.locator('#wechat-check').isDisabled()
       && (await page.locator('#wechat-check').textContent()).includes('Mac 本机'));
+    check('Docker 保留智能体提示词并明确在 Mac 本机执行', await page.locator('#wechat-agent-copy').isEnabled()
+      && (await page.locator('#wechat-agent-prompt').inputValue()).includes('Docker 或远程服务器不能获取'));
     check('Docker 隐藏进程授权', await page.locator('#wechat-authorization').isHidden());
     check('Docker 首次说明提示挂载文章', (await page.locator('#wechat-welcome-status').textContent()).includes('挂载文章目录'));
     check('Docker 配置步骤指向文章挂载', (await page.locator('#wechat-title').textContent()).includes('Docker')
