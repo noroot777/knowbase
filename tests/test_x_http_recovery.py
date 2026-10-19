@@ -36,7 +36,7 @@ class HttpRecoveryTests(unittest.TestCase):
         responses.loader = 'current'
         return responses
 
-    def test_a_later_tracked_sibling_success_retires_prior_failures_in_each_page_family(self):
+    def test_a_later_tracked_sibling_success_cannot_retire_failures_in_any_page_family(self):
         for url, failed, succeeded in [(URL, 'TweetResultByRestId', 'TweetDetail'),
                 ('https://x.com/home', 'HomeTimeline', 'HomeLatestTimeline'),
                 ('https://x.com/Example', 'UserByScreenName', 'UserTweets')]:
@@ -49,7 +49,8 @@ class HttpRecoveryTests(unittest.TestCase):
                         responses.receive(response(code, operation=failed))
                         self.assertTrue(x_page_state.problem(responses.apply(state(ready='loading'))))
                         responses.receive(response(success, operation=succeeded))
-                        self.assertEqual('', x_page_state.problem(responses.apply(state(ready='loading'))))
+                        self.assertEqual('limited' if code == 429 else 'failed',
+                                         x_page_state.problem(responses.apply(state(ready='loading'))))
 
     def test_foreign_old_loader_and_untracked_successes_cannot_retire_current_failure(self):
         for changes in [dict(loaderId='old'), dict(sessionId='other'), dict(type='Image'),
@@ -66,7 +67,7 @@ class HttpRecoveryTests(unittest.TestCase):
         responses.receive(response(200))
         responses.receive(response(429, operation='TweetResultByRestId'))
         self.assertEqual('limited', x_page_state.problem(responses.apply(state())))
-        responses.receive(response(200))
+        responses.receive(response(200, operation='TweetResultByRestId'))
         self.assertEqual('', x_page_state.problem(responses.apply(state())))
         responses.receive(response(503))
         responses.reset(URL)
@@ -78,6 +79,14 @@ class HttpRecoveryTests(unittest.TestCase):
             page = StateSession([response(code, operation='TweetResultByRestId'), response(200)])
             with self.subTest(code=code), patch.object(x_post, 'STEP', 0):
                 self.assertEqual(BODY, x_post.fetch(URL, page))
+            self.assertEqual(2, page.reads)
+
+    def test_unrendered_detail_failure_cannot_be_cancelled_by_a_sibling_success(self):
+        for code, exception in [(429, x_post.XRateLimited), (503, x_post.PostRequestFailed)]:
+            page = StateSession([response(code), response(200, operation='TweetResultByRestId')],
+                                text='', id='', ready='loading')
+            with self.subTest(code=code), patch.object(x_post, 'STEP', 0), self.assertRaises(exception):
+                x_post.fetch(URL, page, deadline=time.monotonic() + 1)
             self.assertEqual(2, page.reads)
 
     def test_rendered_timeline_wins_over_http_failure_after_the_login_check(self):
@@ -99,7 +108,8 @@ class HttpRecoveryTests(unittest.TestCase):
         for signal, detail_error, account_error in [('failed', x_post.PostRequestFailed, x_browser.XBrowserError),
                                                     ('limited', x_post.XRateLimited, x_browser.XRateLimited)]:
             for detail in (False, True):
-                page = StateSession([], ready='loading', articles=0, **{signal: True})
+                page = StateSession([], ready='loading', articles=0, text='', id='',
+                                    dom_problem=signal, **{signal: True})
                 with self.subTest(signal=signal, detail=detail), patch.object(x_post, 'STEP', 0), \
                         patch.object(x_browser.time, 'sleep'), \
                         self.assertRaises(detail_error if detail else account_error):
@@ -117,8 +127,8 @@ class CheckConnectionRecoveryTests(ChannelBase):
                 (dict(articles=18), [response(503, operation='HomeTimeline'),
                                     response(200, operation='HomeLatestTimeline')], True, '登录态有效'),
                 (dict(articles=18), [response(503, operation='HomeTimeline')], True, '登录态有效'),
-                (dict(ready='loading', limited=True), [], False, '限制了访问频率'),
-                (dict(ready='loading', failed=True), [], False, '请求出错')]:
+                (dict(ready='loading', limited=True, dom_problem='limited'), [], False, '限制了访问频率'),
+                (dict(ready='loading', failed=True, dom_problem='failed'), [], False, '请求出错')]:
             page = StateSession(events, **changes)
             with self.subTest(changes=changes, events=events), \
                     patch.object(x_browser, 'profile_busy', return_value=False), \

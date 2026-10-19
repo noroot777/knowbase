@@ -6,7 +6,8 @@ from kb.feeds.x_cdp import Session
 
 STATE_JS = r'''
   const xPageState = () => {
-    const text = (document.body?.innerText || '').slice(0, 4000);
+    const primary = document.querySelector('[data-testid="primaryColumn"]');
+    const text = (primary?.innerText || '').slice(0, 4000);
     const articles = document.querySelectorAll('article[data-testid="tweet"]').length;
     const retryPath = 'M12 4c-4.418 0-8 3.58-8 8s3.582 8 8 8c3.806 0 6.993-2.66 '
       + '7.802-6.22l1.95.44C20.742 18.67 16.76 22 12 22 6.477 22 2 '
@@ -16,6 +17,9 @@ STATE_JS = r'''
       .some(node => node.getAttribute('d') === retryPath);
     const failed = articles === 0 && (retry
       || /Something went wrong\. Try reloading|出错了。请尝试重新加载。|请稍后再试/i.test(text));
+    const limited = articles === 0 && /Rate limit exceeded/i.test(text);
+    const busy = !!primary?.querySelector('[role="progressbar"], [aria-busy="true"]');
+    const explicit = !busy && (retry || primary?.querySelector('[role="alert"]'));
     return {
       url: location.href,
       ready: document.readyState,
@@ -23,8 +27,9 @@ STATE_JS = r'''
       login: !!document.querySelector('[data-testid="loginButton"], [data-testid="login"]')
         || /^\/i\/flow\/login/.test(location.pathname),
       empty: articles === 0 && !failed && /Hmm\.\.\.this page doesn|这个页面不存在|该页面不存在|Account suspended|账号已被冻结|doesn’t exist|does not exist/i.test(text),
-      limited: articles === 0 && /Rate limit exceeded/i.test(text),
+      limited,
       failed,
+      dom_problem: !busy && limited ? 'limited' : explicit && failed ? 'failed' : '',
     };
   };
 '''
@@ -51,7 +56,7 @@ class Responses:
         self.statuses.clear()
 
     def receive(self, event: dict) -> None:
-        """A tracked success retires older sibling failures in that navigation only."""
+        """A retry replaces only that operation's evidence in the same navigation."""
         if event.get('method') != 'Network.responseReceived' or (
                 event.get('sessionId') != self.session_id):
             return
@@ -64,8 +69,6 @@ class Responses:
                 or operation not in self.operations or params.get('type') not in {'XHR', 'Fetch'}):
             return
         loader, status = params.get('loaderId'), response.get('status', 0)
-        if 200 <= status < 300:
-            self.statuses = {key: value for key, value in self.statuses.items() if key[0] != loader}
         self.statuses[(loader, operation)] = status
 
     def apply(self, snapshot: dict) -> dict:
@@ -109,6 +112,11 @@ def problem(state: dict) -> str:
     http = state.get('http_problem', '')
     if http in ('limited', 'failed'):
         return http
+    explicit = state.get('dom_problem', '')
+    if explicit in ('limited', 'failed'):
+        return explicit
+    if state.get('ready') != 'complete':
+        return ''
     return next((kind for kind in ('limited', 'failed') if state.get(kind)), '')
 
 

@@ -3,10 +3,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 
 from kb.feeds.x_article_links import quote_lines
 
 FIELD = 'x_post_meta'
+RECOVERABLE = {'unclassified_legacy', 'invalid_provenance'}
+_AUTHOR_SOURCES = ('tweetText', 'tweet.text', 'detail')
+
+
+@dataclass(frozen=True)
+class AuthorText:
+    text: str
+    source: str
 
 
 def _fingerprint(entry: dict) -> str:
@@ -24,17 +33,21 @@ def context_prefix(body: str, context: str) -> str:
     return prefix
 
 
-def stamp(entry: dict, kind: str, prefix: str, *, author_text: str | None = None) -> dict:
+def stamp(entry: dict, kind: str, prefix: str, *, author_text: AuthorText | None = None) -> dict:
     """Require an explicit boundary; leading authored quotes need source-text evidence."""
     body = entry['body']
-    authored_quote = (not prefix and body.startswith('> ') and isinstance(author_text, str)
-                      and author_text.startswith('> ') and body.startswith(author_text))
+    if author_text is not None and (not isinstance(author_text, AuthorText) or (
+            author_text.source not in _AUTHOR_SOURCES or not isinstance(author_text.text, str))):
+        raise ValueError('X 作者证据必须来自独立的 DOM、推文接口或详情原文字段')
+    authored_quote = (not prefix and body.startswith('> ') and author_text is not None
+                      and author_text.text.startswith(body.partition('\n\n')[0]))
     if kind == 'post' and (not isinstance(prefix, str) or not body.startswith(prefix) or (
             not prefix and body.startswith('> ') and not authored_quote)):
         raise ValueError('X 正文的引用块必须有明确上下文边界或作者原文证据')
     meta = dict(version=1, kind=kind, prefix=prefix, fingerprint=_fingerprint(entry))
     if authored_quote:
         meta['authored_quote'] = True
+        meta['author_source'] = author_text.source
     return {**entry, FIELD: json.dumps(meta, ensure_ascii=False, sort_keys=True)}
 
 
@@ -54,7 +67,8 @@ def eligibility(entry: dict) -> tuple[str, str]:
         prefix = meta.get('prefix')
         if meta.get('kind') != 'post' or not isinstance(prefix, str) or (
                 not entry['body'].startswith(prefix)) or (
-                not prefix and entry['body'].startswith('> ') and meta.get('authored_quote') is not True):
+                not prefix and entry['body'].startswith('> ') and (
+                    meta.get('authored_quote') is not True or meta.get('author_source') not in _AUTHOR_SOURCES)):
             return 'invalid_provenance', ''
         return '', prefix
     return 'unclassified_legacy', ''

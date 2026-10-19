@@ -212,8 +212,9 @@ class PostTests(unittest.TestCase):
                 self.assertEqual(BODY, x_post.fetch(URL, page))
                 self.assertEqual(5, page.reads)
 
-    def test_request_error_cannot_classify_a_previous_detail_page(self):
-        for changes in [dict(at='999', ready='complete'), dict(at='999', ready='loading')]:
+    def test_unscoped_error_cannot_classify_a_previous_or_unsettled_detail_page(self):
+        for changes in [dict(at='999', ready='complete'), dict(at='999', ready='loading'),
+                        dict(ready='loading')]:
             with self.subTest(changes=changes):
                 failed = dict(snapshot(''), id='', ready='complete', failed=True)
                 failed.update(changes)

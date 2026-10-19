@@ -127,7 +127,8 @@ def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
         complete = dict(entry)
         complete.pop(x_post.HINT)
         complete.update(title=text.splitlines()[0][:500], body=prefix + text)
-        return 'normalized', x_post_meta.stamp(complete, 'post', prefix, author_text=text), dict(
+        return 'normalized', x_post_meta.stamp(
+            complete, 'post', prefix, author_text=x_post_meta.AuthorText(text, 'detail')), dict(
             info, reason='legacy_link_artifacts')
     state = 'blocked_artifacts' if info['artifacts'] else 'blocked_length'
     return state, None, dict(info, reason='legacy_link_artifacts_not_reconciled'
@@ -157,7 +158,7 @@ def candidates(conn, *, urls=(), limit=0, all_posts=False, excluded=None,
                 continue
         row = dict(row)
         if skipped := exclusion(row):
-            if not (resolve_legacy and skipped['reason'] == 'unclassified_legacy'):
+            if not (resolve_legacy and skipped['reason'] in x_post_meta.RECOVERABLE):
                 if excluded is not None:
                     excluded.append(skipped)
                 continue
@@ -190,7 +191,7 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
             stats['deferred'] = len(rows) - index
             break
         skipped = exclusion(row)
-        resolving = resolve_legacy and skipped and skipped['reason'] == 'unclassified_legacy'
+        resolving = resolve_legacy and skipped and skipped['reason'] in x_post_meta.RECOVERABLE
         if skipped and not resolving:
             stats[skipped['state']] += 1
             stats['results'].append(skipped)
@@ -251,7 +252,7 @@ def main(argv=None) -> int:
     parser.add_argument('--url', action='append', default=[], help='只检查指定的存量 URL,可重复')
     parser.add_argument('--all', action='store_true', help='兼容旧命令;不绕过长文与来源不明行的排除')
     parser.add_argument('--resolve-legacy', action='store_true',
-                        help='先核实无来源旧行:长文接口及详情须能对齐;--yes 才保存来源')
+                        help='核实缺失或损坏来源:长文接口及详情须能对齐;--yes 才保存来源')
     parser.add_argument('--limit', type=int, default=0)
     parser.add_argument('--budget', type=float, default=600.0, help='整轮浏览器读取秒数')
     parser.add_argument('--channel', choices=['browser', 'attach'], default='browser')

@@ -92,7 +92,11 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
             snap = read(session, READ_JS)
             if snap.get('login'):
                 raise PostUnavailable('推文详情页需要重新登录 X')
-            current_problem = problem(snap) if snap.get('at') == match[1] else ''
+            valid = (snap.get('at') == match[1] == snap.get('id')
+                     and isinstance(snap.get('text'), str) and snap['text'].strip()
+                     and snap.get('truncated') is False)
+            text = snap['text'].strip() if valid else None
+            current_problem = problem(snap) if snap.get('at') == match[1] and text is None else ''
             if current_problem and current_problem == previous_problem:
                 if current_problem == 'limited':
                     raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
@@ -103,10 +107,6 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
             if missing and absent:
                 raise PostGone('X 明确答复该推文页面不存在或已不可用')
             absent = missing
-            valid = (snap.get('at') == match[1] == snap.get('id')
-                     and isinstance(snap.get('text'), str) and snap['text'].strip()
-                     and snap.get('truncated') is False)
-            text = snap['text'].strip() if valid else None
             if text is not None and text == previous:
                 return text
             previous = text
@@ -122,7 +122,7 @@ def merge(entry: dict, text: str) -> dict:
     complete = dict(entry)
     complete.pop(HINT)
     complete.update(title=text.splitlines()[0][:500], body=prefix + text)
-    return x_post_meta.stamp(complete, 'post', prefix, author_text=text)
+    return x_post_meta.stamp(complete, 'post', prefix, author_text=x_post_meta.AuthorText(text, 'detail'))
 
 
 def fill(entries: list[dict], *, session, deadline=None, should_stop=None):

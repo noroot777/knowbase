@@ -302,8 +302,9 @@ def _grab_x(url: str, deadline: float) -> dict:
              'body': '\n\n'.join(pieces), 'author': name,
              'published': _as_published(tweet.get('created_timestamp')),
              'content_kind': 'post'}
-    from kb.feeds.x_post_meta import context_prefix, stamp
-    entry = stamp(entry, 'post', context_prefix(entry['body'], context), author_text=text)
+    from kb.feeds.x_post_meta import AuthorText, context_prefix, stamp
+    entry = stamp(entry, 'post', context_prefix(entry['body'], context),
+                  author_text=AuthorText(text, 'tweet.text'))
     # **回包里那个结构化的长文信号先收下,不许先丢掉、再凭展示文本去推断。**
     # `tweet.article` 是生产者自己的签名「这条推文是一篇长文」,而
     # `needs_article` 的三条判据全是**间接**信号(正文里写着文章地址 / 时间线上

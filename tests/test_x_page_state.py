@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from kb.feeds import x_browser, x_page_state, x_post
 from kb.feeds.x_cdp import Session
-from tests.test_x_post import BODY, URL, snapshot
+from tests.test_x_post import URL, snapshot
 
 
 def response(status=429, operation='TweetDetail', **changes):
@@ -39,7 +39,7 @@ class EventSession(Session):
         if message['method'] == 'Runtime.evaluate':
             self.reads += 1
             result = dict(result=dict(value=json.dumps(dict(
-                snapshot(BODY), ready='complete', limited=False, failed=False, empty=False))))
+                snapshot(''), id='', ready='complete', limited=False, failed=False, empty=False))))
         self.incoming.append(dict(id=message['id'], result=result))
 
     def _take(self, deadline):

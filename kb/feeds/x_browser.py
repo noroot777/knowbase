@@ -236,7 +236,7 @@ def _entry(item: dict) -> dict | None:
     prefix = x_post_meta.context_prefix(body, context)
     if item.get('truncated'):
         out[x_post.HINT] = prefix
-    return x_post_meta.stamp(out, 'post', prefix, author_text=text)
+    return x_post_meta.stamp(out, 'post', prefix, author_text=x_post_meta.AuthorText(text, 'tweetText'))
 
 
 def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:

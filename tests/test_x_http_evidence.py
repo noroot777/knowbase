@@ -6,14 +6,14 @@ from unittest.mock import patch
 
 from kb.feeds import x_browser, x_page_state, x_post
 from tests.test_x_page_state import EventSession, response
-from tests.test_x_post import BODY, URL, snapshot
+from tests.test_x_post import URL, snapshot
 
 
 class LoadingSession(EventSession):
     def _post(self, message, deadline):
         if message['method'] == 'Runtime.evaluate':
             self.reads += 1
-            state = dict(snapshot(BODY), ready='loading', articles=0, limited=False,
+            state = dict(snapshot(''), id='', ready='loading', articles=0, limited=False,
                          failed=False, empty=False)
             self.incoming.append(dict(id=message['id'], result=dict(
                 result=dict(value=json.dumps(state)))))
@@ -34,10 +34,11 @@ class HttpEvidenceTests(unittest.TestCase):
                 self.assertEqual(verdict, x_page_state.problem(state))
                 self.assertEqual(verdict, x_page_state.problem(dict(ready='complete', http_problem=verdict)))
 
-    def test_explicit_text_conclusions_do_not_wait_for_a_complete_dom(self):
+    def test_only_scoped_terminal_dom_evidence_bypasses_loading(self):
         for kind in ('limited', 'failed'):
             with self.subTest(kind=kind):
-                self.assertEqual(kind, x_page_state.problem(dict(ready='loading', **{kind: True})))
+                self.assertEqual('', x_page_state.problem(dict(ready='loading', **{kind: True})))
+                self.assertEqual(kind, x_page_state.problem(dict(ready='loading', dom_problem=kind)))
                 self.assertEqual(kind, x_page_state.problem(dict(ready='complete', **{kind: True})))
 
     def test_connection_check_does_not_sleep_on_loading_http_failures(self):

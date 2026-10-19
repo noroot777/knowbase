@@ -41,12 +41,10 @@ class ContextBoundaryTests(unittest.TestCase):
             with self.subTest(context=context), self.assertRaises(ValueError):
                 x_post_meta.context_prefix('> Real context\n\nText', context)
 
-    def test_browser_and_feedgrab_keep_author_written_quotes_inside_the_post(self):
+    def test_browser_keeps_independently_read_author_quotes_inside_the_post(self):
         text = '> An authored quote\n\nMy own paragraph'
         browser = x_browser._entry(tweet('123', text=text))
-        feedgrab = x_feedgrab._entry(dict(source='https://x.com/Example/status/123',
-                                         title='Frontmatter title'), text, 'Example')
-        for entry in (browser, feedgrab):
+        for entry in (browser,):
             with self.subTest(entry=entry):
                 self.assertEqual(('', ''), x_post_meta.eligibility(entry))
                 self.assertTrue(json.loads(entry[x_post_meta.FIELD])['authored_quote'])
@@ -54,6 +52,29 @@ class ContextBoundaryTests(unittest.TestCase):
                 complete = x_post.merge(dict(entry, **{x_post.HINT: ''}), full)
                 self.assertEqual(full, complete['body'])
                 self.assertEqual(('', ''), x_post_meta.eligibility(complete))
+
+    def test_feedgrab_markdown_quote_is_context_not_self_certified_author_text(self):
+        text = '> A quoted tweet\n\nMy own paragraph'
+        entry = x_feedgrab._entry(dict(source='https://x.com/Example/status/123',
+                                      title='Frontmatter title'), text, 'Example')
+        self.assertEqual(('', '> A quoted tweet\n\n'), x_post_meta.eligibility(entry))
+        self.assertNotIn('authored_quote', json.loads(entry[x_post_meta.FIELD]))
+
+    def test_plain_body_copies_and_untrusted_evidence_sources_cannot_certify_authored_quotes(self):
+        body = '> A quoted tweet\n\nMy own paragraph'
+        for evidence in [body, x_post_meta.AuthorText(body, 'feedgrab'),
+                         x_post_meta.AuthorText(None, 'detail')]:
+            with self.subTest(evidence=evidence), self.assertRaises(ValueError):
+                x_post_meta.stamp(self.entry(body), 'post', '', author_text=evidence)
+
+    def test_an_authored_quote_marker_without_a_trusted_origin_is_not_proof(self):
+        entry = x_browser._entry(tweet('123', text='> My own quote\n\nMy paragraph'))
+        for source in (None, 'feedgrab', {}):
+            meta = json.loads(entry[x_post_meta.FIELD])
+            meta['author_source'] = source
+            changed = dict(entry, **{x_post_meta.FIELD: json.dumps(meta)})
+            with self.subTest(source=source):
+                self.assertEqual(('invalid_provenance', ''), x_post_meta.eligibility(changed))
 
     def test_browser_distinguishes_real_context_from_the_authors_own_quote(self):
         text = '> An authored quote\n\nMy own paragraph'

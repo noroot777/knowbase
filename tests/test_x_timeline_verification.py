@@ -42,11 +42,11 @@ class TimelineVerificationTests(unittest.TestCase):
                 self.assertEqual(1, page.seen)
                 self.assertEqual('complete', last['ready'])
 
-    def test_explicit_loading_error_is_reported_without_waiting_for_completion(self):
+    def test_unsettled_text_flags_do_not_preempt_a_successful_render(self):
         page = FakePage({'ready': 'loading', 'failed': True}, {'articles': 3})
-        with patch.object(x_browser.time, 'sleep', side_effect=AssertionError('waited')):
-            self.assertEqual('failed', x_browser.verify_timeline(page)[0])
-        self.assertEqual(1, page.seen)
+        with patch.object(x_browser.time, 'sleep'):
+            self.assertEqual('ok', x_browser.verify_timeline(page)[0])
+        self.assertEqual(2, page.seen)
 
     def test_probe_uses_home_http_evidence_and_cause_specific_next_steps(self):
         for code, phrase in [(503, '请求出错'), (429, '限制了访问频率')]:

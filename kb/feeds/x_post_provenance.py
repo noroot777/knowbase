@@ -36,7 +36,7 @@ def resolve(row: dict, session, *, deadline=None, should_stop=None,
         raise x_post.PostUnavailable('远端存在长文，但存量正文不能与整篇文章精确对齐；来源仍未核实')
     detail = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
     if _covers(row['body'], detail, aligned_preview):
-        return x_post_meta.stamp(row, 'post', '', author_text=row['body']), detail
+        return x_post_meta.stamp(row, 'post', '', author_text=x_post_meta.AuthorText(detail, 'detail')), detail
     head, separator, tail = row['body'].partition('\n\n')
     if separator and head and all(line.startswith('> ') for line in head.splitlines()) and (
             _covers(tail, detail, aligned_preview)):

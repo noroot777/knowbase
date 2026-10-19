@@ -41,7 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb.feeds import registry as reg, x_article
+from kb.feeds import registry as reg, x_article, x_post_meta
 
 # 三档结论:有长文 / 确定没有长文(纯图、纯视频推文)/ 这一次问不到(推文已删、
 # 接口故障)。只有第一档会写库,后两档如实报出来 —— 第三档下次再跑就是。
@@ -113,13 +113,15 @@ def apply_one(conn, row, title, body):
     不该动。也**不就地重判**:`empty_items` 的判据是"正文是空的",现在它非空,
     下一次 scan 自己就不会再选中它。
     """
+    final_title = title or row['title']
+    annotated = x_post_meta.stamp(dict(title=final_title, body=body), 'article', '')
     cur = conn.execute(
         """UPDATE feed_items
               SET title=?, body=?, content_hash=?, exported_hash='', lang='',
                   title_zh='', body_zh='', translated_at='', translate_error='',
-                  translate_tries=0
+                  translate_tries=0, x_post_meta=?
             WHERE key=? AND content_hash=? AND length(trim(body))=0""",
-        (title or row['title'], body, _hash(row, title or row['title'], body),
+        (final_title, body, _hash(row, final_title, body), annotated[x_post_meta.FIELD],
          row['key'], row['content_hash']))
     return cur.rowcount > 0
 
