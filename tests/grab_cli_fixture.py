@@ -31,17 +31,15 @@ _spec.loader.exec_module(cli)
 
 URL = 'https://example.org/posts/hello'
 OTHER = 'https://example.org/posts/second'
-#: 自带一对括号的真实形态(维基那一类)。截断之后那个地址**可能照样存在** ——
-#: 于是收进来的是另一篇文章,比抓不到更坏。
+#: 自带一对括号的真实形态(维基那一类)。在第一个 `)` 处截断之后,那个地址**可能照样
+#: 存在** —— 于是收进来的是另一篇文章,比抓不到更坏。
 PAREN = 'https://en.wikipedia.org/wiki/Function_(mathematics)'
 #: 中文维基的条目名用的是**全角**括号,浏览器地址栏里就是裸的这一串(复制出来也是)。
-#: **「全角括号只能是行文」是个错的假设**(实测):按它办,这一条就被截成
-#: `…/wiki/函数` —— **而那一页真的存在**,收进来的是另一篇文章。所以括号(半角全角
-#: 都算)按**配对**算:配得上对的属于地址,落单的那个才标志行文从那里开始。
-#: 它和 `PAREN` 钉的是同一件事的两半:半角那一对、全角那一对都不许被剥光。
+#: 它和 `PAREN` 钉的是同一件事的两半:半角那一对、全角那一对都不许被剥光 ——
+#: 剥成 `…/wiki/函数` 之后**那一页真的存在**,收进来的是另一篇文章。
 FULLWIDTH = 'https://zh.wikipedia.org/wiki/函数（数学）'
-#: 行内抽取要用到的几条真实形态。末尾那几个 ASCII 标点**在地址里合法**
-#: (`grab.normalize` 收下并保留),所以只在「这一行夹着叙述」时才当外围标点剥。
+#: 标准输入那一侧的几条真实形态,**每一条整个就是一条地址**。末尾那几个 ASCII 标点
+#: **在地址里合法**(`grab.normalize` 收下并保留),所以一个都不许剥。
 STDIN_WHOLE_LINES = [FULLWIDTH, 'https://example.org/post;',
                      'https://example.org/post,', 'https://example.org/post:']
 

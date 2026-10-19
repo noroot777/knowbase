@@ -366,7 +366,7 @@ print(json.dumps(b))' "$stages" "$since" "$until" "$targets" "$channel")"
 # 「已写入知识库」。那是谎报,代价比 cmd_graph 那道闸门挡的还隐蔽(那边是拿空库
 # 覆盖好页面,这边是用户以为存下了)。出路给两条,都不代劳。
 cmd_grab() {
-  [ $# -gt 0 ] || die "给一条链接:./kb.sh grab <链接>(多条用空格隔开;- 表示从标准输入读)"
+  [ $# -gt 0 ] || die "给一条链接:./kb.sh grab <链接>(多条用空格隔开;- 表示从标准输入读,一行一条)"
   # **帮助自己就是终点,打完直接走。** argparse 的 `--help` 让子进程以 0 退出,和
   # 「参数校验通过」一模一样 —— 光靠下面那句 `|| return` 分不开它们,于是帮助打完
   # 之后 shell 照旧往下走:起服务(worktree 里更糟,先撞上那道闸门、连帮助都拿不到,
@@ -567,7 +567,7 @@ Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
     ./kb.sh grab <链接> [<链接>...]  抓进来,并等它真写进知识库再返回
     ./kb.sh grab --state <链接>      只查这一条此刻的状态(只读,不抓不写)
     ./kb.sh grab --refetch <链接>    库里那一份不对时重抓,确认得了就把它换掉
-                   pbpaste | ./kb.sh grab -   从剪贴板那段文字里挑出链接收录
+                   ./kb.sh grab - < links.txt 从标准输入读,一行一条地址
                    --json 一行一条 JSON(给程序读)、--no-wait 投完就返回
                    Claude Code 里说「把这条存进知识库」走 skill kb-grab,同一条路。
 
