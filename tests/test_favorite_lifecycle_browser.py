@@ -18,7 +18,7 @@ class FavoriteLifecycleBrowserTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual([], report['errors'])
         self.assertEqual([], [check for check in report['checks'] if not check['ok']], report)
-        self.assertGreaterEqual(len(report['checks']), 9)
+        self.assertGreaterEqual(len(report['checks']), 12)
 
 
 if __name__ == '__main__':

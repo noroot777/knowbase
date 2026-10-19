@@ -71,6 +71,29 @@ test('detached document favorites use safe external links or an honest missing l
     } else {
       assert.equal(label, '原文已不在索引里');
       assert.doesNotMatch(html, /href=|onclick=/);
+      for (const className of ['fv-primary-link', 'fv-read-link']) {
+        const unavailable = app.run(`favDocAHtml(${item}, '打开' + arrow('right'), '${className}')`);
+        assert.match(unavailable, /^<span class="fv-original-missing"[^>]*>原文已不在索引里<\/span>$/);
+        assert.doesNotMatch(unavailable, /fv-primary-link|fv-read-link|<svg|href=|onclick=|tabindex=|role=/);
+      }
+      for (const render of ['favCardHtml', 'favDetailHtml']) {
+        const rendered = app.run(`${render}(${item})`);
+        assert.match(rendered, /class="fv-original-missing"/);
+        assert.doesNotMatch(rendered, /fv-primary-link|fv-read-link/);
+        assert.doesNotMatch(rendered, /href="#"/);
+      }
+    }
+  }
+});
+
+test('linked and externally available originals retain their actionable links and arrows', () => {
+  const app = rig();
+  for (const extra of [{}, { path: '', origin: 'doc', url: 'https://example.org/original' }]) {
+    const item = JSON.stringify(row(1, extra));
+    for (const [render, className] of [['favCardHtml', 'fv-read-link'], ['favDetailHtml', 'fv-primary-link']]) {
+      const rendered = app.run(`${render}(${item})`);
+      assert.match(rendered, new RegExp(`<a [^>]*class="${className}"[^>]*>[^<]+<svg`));
+      assert.doesNotMatch(rendered, /fv-original-missing/);
     }
   }
 });

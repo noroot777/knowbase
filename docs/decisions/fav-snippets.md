@@ -24,7 +24,8 @@
   `DELETE documents` 之前把尚为空的 `origin_title` / `origin_url` 补成文档最后已知的值;
   已有收藏快照不覆盖,时间戳、备注与锚点不改。老的整篇收藏没有快照,也不能退化为无字卡片。
   原文仍在索引里时元数据照旧以文档为准;解除关联后用快照兜底,站外链接按 `safeUrl` 校验。
-  没有安全站外链接时显示「原文已不在索引里」,不生成 `/doc/undefined` 或虚假的回跳按钮。
+  没有安全站外链接时由 `favDocAHtml` 统一显示「原文已不在索引里」的灰色说明文字,
+  不复用调用方的操作样式或箭头,不生成 `/doc/undefined` 或虚假的回跳按钮。
 - **去掉 NOT NULL 或更换外键动作只能重建整张表**(SQLite 没有 `ALTER COLUMN`),重建是这条路上
   唯一会丢数据的一步。所以 `_rebuild_favorites` 必须满足:
   - **按老表实际有的那几列拼 INSERT**(`_FAV_CARRIED` 过一遍 `PRAGMA table_info`)。v2 没有

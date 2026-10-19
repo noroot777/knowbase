@@ -41,6 +41,17 @@ const waitFor = async expression => {
   throw new Error(`等待页面超时: ${expression}`);
 };
 const check = (name, condition) => checks.push({ name, ok: !!condition });
+const click = async selector => {
+  const point = await evaluate(`(() => {
+    const element = document.querySelector(${JSON.stringify(selector)});
+    element.scrollIntoView({block: 'center'});
+    const rect = element.getBoundingClientRect();
+    return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2};
+  })()`);
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
+};
 
 try {
   await send('Runtime.enable');
@@ -78,21 +89,49 @@ try {
   check('saved quote remains visible after document removal', await evaluate(
     'document.querySelector("#fav-inspector blockquote").textContent'
     + ' === "先写下你想用它解决的问题，再决定要不要收藏。"'));
+  await click('[data-fav-card="6"] .fv-original-missing');
+  check('clicking the card explanation does not open a detail or navigation', await evaluate(
+    'favActive === 4 && location.hash === "#fav"'));
   await evaluate('document.querySelector(`[data-fav-preview="6"]`).click()');
   check('missing original without URL has an honest non-clickable label', await evaluate(
-    'document.querySelector("#fav-inspector .fv-primary-link").tagName === "SPAN"'
-    + ' && document.querySelector("#fav-inspector .fv-primary-link").textContent.includes("原文已不在索引里")'
+    'document.querySelector("#fav-inspector .fv-original-missing").textContent === "原文已不在索引里"'
+    + ' && !document.querySelector("#fav-inspector .fv-primary-link")'
+    + ' && !document.querySelector(`[data-fav-card="6"] .fv-read-link`)'
     + ' && !document.querySelector(`#fav-inspector a[href*="/doc/"]`)'));
+  check('card and detail explanations look like muted text, not buttons or links', await evaluate(`(() => {
+    const labels = [...document.querySelectorAll(
+      '[data-fav-card="6"] .fv-original-missing, #fav-inspector .fv-original-missing')];
+    const muted = getComputedStyle(document.querySelector('.fv-card-meta')).color;
+    return labels.length === 2 && labels.every(label => {
+      const style = getComputedStyle(label);
+      return label.tagName === 'SPAN' && !label.querySelector('svg')
+        && !label.matches('[href], [onclick], [tabindex], [role]')
+        && style.color === muted && style.backgroundColor === 'rgba(0, 0, 0, 0)'
+        && style.padding === '0px' && style.borderRadius === '0px'
+        && style.cursor === 'default' && style.textDecorationLine === 'none';
+    });
+  })()`));
+  const beforeClick = await evaluate('location.href');
+  const beforeTargets = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json())
+    .map(target => target.id).sort();
+  await click('#fav-inspector .fv-original-missing');
+  await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  const afterTargets = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json())
+    .map(target => target.id).sort();
+  check('clicking the detail explanation neither navigates nor opens a new tab',
+    await evaluate(`location.href === ${JSON.stringify(beforeClick)} && favActive === 6`)
+    && JSON.stringify(beforeTargets) === JSON.stringify(afterTargets));
   if (process.env.KB_LIFECYCLE_SCREENSHOT) {
     const screenshot = await send('Page.captureScreenshot', { format: 'png' });
     writeFileSync(process.env.KB_LIFECYCLE_SCREENSHOT.replace(/\.png$/, '-missing.png'),
       Buffer.from(screenshot.data, 'base64'));
   }
-  await evaluate('favMark(6, "done")');
+  await click('#fav-inspector .fv-detail-actions button');
   await waitFor('favItems.find(item => item.id === 6).status === "done"');
   check('detached favorite remains manageable', await evaluate(
     'fetch("/api/favorites?status=all").then(response => response.json())'
-    + '.then(data => data.favorites.length === 10)'));
+    + '.then(data => data.favorites.length === 10'
+    + ' && data.favorites.find(item => item.id === 6).status === "done")'));
   check('no JavaScript exceptions', errors.length === 0);
   console.log(JSON.stringify({ checks, errors }));
 } finally {

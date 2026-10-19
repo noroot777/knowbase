@@ -100,7 +100,7 @@ function favDocAHtml(f, labelHtml, cls = '') {
     const url = safeUrl(f.url);
     return url !== '#'
       ? `<a href="${esc(url)}" target="_blank" rel="noopener" class="${esc(cls)}" title="原文已不在索引里，打开站外原文">${labelHtml}</a>`
-      : `<span class="${esc(cls)}" title="原文已不在索引里，收藏内容仍保留">${labelHtml}</span>`;
+      : '<span class="fv-original-missing" title="原文已不在索引里,收藏内容仍保留">原文已不在索引里</span>';
   }
   if (!f.path) return favJumpHtml(f, labelHtml, cls);
   // **`u`、`e`、`v` 三个都要一起带过去。**

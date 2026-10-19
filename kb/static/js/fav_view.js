@@ -163,6 +163,7 @@ function renderFavInspector() {
 
 function favDetailHtml(item) {
   const action = item.action || {};
+  const originalUrl = safeUrl(item.url);
   const note = favDrafts.has(item.id) ? favDrafts.get(item.id) : item.note;
   const disabled = favBusy ? ' disabled' : '';
   const category = favCategory(item);
@@ -175,7 +176,7 @@ function favDetailHtml(item) {
       ${description !== item.quote ? `<p class="fv-detail-description">${esc(description)}</p>` : ''}
       ${item.quote ? `<blockquote>${esc(item.quote)}</blockquote>` : ''}
       <dl class="fv-detail-meta">${action.name && action.name !== item.title ? `<div><dt>原文</dt><dd>${esc(item.title)}</dd></div>` : ''}<div><dt>来源</dt><dd>${esc(favWhere(item))}</dd></div><div><dt>收藏于</dt><dd>${favDate(item.created_at)}</dd></div><div><dt>状态</dt><dd>${FAV_STATUSES[item.status]}</dd></div>${action.eta ? `<div><dt>预计用时</dt><dd>${esc(action.eta)}</dd></div>` : ''}</dl>
-      <div class="fv-detail-links">${favDocA(item, `${esc(favOpenLabel(item))}${arrow('right')}`, 'fv-primary-link', true)}${item.url ? `<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener">原文${arrow('ext')}</a>` : ''}${item.path ? `<a href="${esc(obsLink(item))}">Obsidian${arrow('ext')}</a>` : ''}</div>
+      <div class="fv-detail-links">${favDocA(item, `${esc(favOpenLabel(item))}${arrow('right')}`, 'fv-primary-link', true)}${originalUrl !== '#' ? `<a href="${esc(originalUrl)}" target="_blank" rel="noopener">原文${arrow('ext')}</a>` : ''}${item.path ? `<a href="${esc(obsLink(item))}">Obsidian${arrow('ext')}</a>` : ''}</div>
       ${action.cmd ? `<div class="fv-command"><div><span>${icon('code')}上手命令</span><button class="text-button" data-cmd="${esc(action.cmd)}" onclick="copyFavCmd(this)">复制</button></div><code>${esc(action.cmd)}</code><small>来自行动卡，请确认内容后再执行。</small></div>` : ''}
       ${!item.action && item.status === 'inbox' && !item.quote ? `<div class="fv-extract"><p>还没有行动卡？让 AI 提炼用途、上手命令和预计用时。</p><button class="text-button" data-fav-mutation onclick="extractFavAction(${item.id})"${disabled}>${icon('spark')}生成行动卡</button></div>` : ''}
       <section class="fv-note-editor"><div><label for="fav-note">我的随手记</label><span>为什么收藏它？</span></div><textarea id="fav-note" rows="4" placeholder="想到的用法、想解决的问题，或试过后的心得…" oninput="draftFavNote(this.value)">${esc(note || '')}</textarea><div class="fv-note-footer"><span id="fav-note-state" role="status">${favDrafts.has(item.id) ? '有未保存的草稿' : '给未来的自己留个线索'}</span><button class="ghost" data-fav-mutation onclick="saveFavNote(${item.id})"${disabled}>保存笔记</button></div></section>
