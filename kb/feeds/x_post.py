@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import time
 
-from kb.feeds import x_article
+from kb.feeds import x_article, x_post_meta
 from kb.feeds.x_cdp import CdpError
 from kb.feeds.x_page_state import STATE_JS, XRateLimited, navigate, problem, read
 
@@ -122,7 +122,7 @@ def merge(entry: dict, text: str) -> dict:
     complete = dict(entry)
     complete.pop(HINT)
     complete.update(title=text.splitlines()[0][:500], body=prefix + text)
-    return complete
+    return x_post_meta.stamp(complete, 'post', prefix)
 
 
 def fill(entries: list[dict], *, session, deadline=None, should_stop=None):

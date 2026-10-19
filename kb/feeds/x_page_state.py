@@ -41,8 +41,12 @@ class Responses:
     def reset(self, url: str) -> None:
         parsed = urlsplit(url)
         self.origin = (parsed.scheme, parsed.netloc)
-        self.operations = ({'TweetDetail', 'TweetResultByRestId'} if '/status/' in parsed.path
-                           else {'UserTweets', 'UserTweetsAndReplies', 'UserByScreenName'})
+        if '/status/' in parsed.path:
+            self.operations = {'TweetDetail', 'TweetResultByRestId'}
+        elif parsed.path == '/home':
+            self.operations = {'HomeTimeline', 'HomeLatestTimeline'}
+        else:
+            self.operations = {'UserTweets', 'UserTweetsAndReplies', 'UserByScreenName'}
         self.loader = ''
         self.statuses.clear()
 

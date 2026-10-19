@@ -34,7 +34,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from kb.feeds import x_article, x_post
+from kb.feeds import x_article, x_post, x_post_meta
 from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
 from kb.feeds.x_page_state import STATE_JS, XBrowserError, XRateLimited, navigate, read
 from kb.feeds.x_page_state import problem as page_problem
@@ -224,8 +224,6 @@ def _entry(item: dict) -> dict | None:
         return None
     name = item.get('name') or item.get('author') or ''
     context = (item.get('context') or '').strip()
-    # 转推/引用的上下文留在正文开头一行:它决定了这条是不是本人的观点,
-    # 而 feed_items 里没有地方放这个标记。
     body = f'> {context}\n\n{text}' if context and not _is_pinned(context) else text
     out = {'url': item['url'], 'title': (text or f"{name} 的动态")[:500],
            'body': body, 'author': name, 'published': published,
@@ -236,7 +234,8 @@ def _entry(item: dict) -> dict | None:
         out[x_article.HINT] = str(item['article'])
     if item.get('truncated'):
         out[x_post.HINT] = body[:-len(text)] if text else body
-    return out
+    prefix = body[:-len(text)] if text else body
+    return x_post_meta.stamp(out, 'post', prefix)
 
 
 def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
@@ -540,8 +539,8 @@ def open_login_window(profile: str, chrome_path: str = '') -> str:
 def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
     """在一个已经导航到 `x.com/home` 的会话上,把落地状态判成一个结论码。
 
-    返回 `(结论码, 最后那份状态)`,码有五个:`ok`(读到推文了)、`login`(掉回
-    登录页)、`limited`(限流)、`not-loaded`(首页压根没加载完)、`no-tweets`
+    返回 `(结论码, 最后那份状态)`,码有六个:`ok`(读到推文了)、`login`(掉回
+    登录页)、`limited`(限流)、`failed`(请求出错)、`not-loaded`(首页压根没加载完)、`no-tweets`
     (加载完了却一条推文都没有)。
 
     **只判、不写文案。** 同一个状态在不同入口下该说的下一步完全不同:「检查连接」
@@ -560,11 +559,11 @@ def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
     deadline = time.monotonic() + (timeout or ACCOUNT_SECONDS)
     last: dict = {}
     while time.monotonic() < deadline:
-        last = json.loads(page.eval(_STATE_JS))
+        last = read(page, _STATE_JS)
         if last['login']:
             return 'login', last
-        if last['limited']:
-            return 'limited', last
+        if problem := page_problem(last):
+            return problem, last
         if last['articles'] and last['ready'] == 'complete':
             return 'ok', last
         time.sleep(_SETTLE_STEP)
@@ -595,7 +594,7 @@ def probe(profile: str, chrome_path: str = '', *,
     try:
         with browser_session(profile, chrome_path, attach=attach) as page:
             page.open_page('about:blank')
-            page.goto('https://x.com/home')
+            navigate(page, 'https://x.com/home')
             verdict, last = verify_timeline(page)
             if verdict == 'login':
                 # 两条路的下一步不一样:独立 profile 要点那颗按钮再登一次,
@@ -613,6 +612,8 @@ def probe(profile: str, chrome_path: str = '', *,
                                '或者再点一次「从日常浏览器导入登录态」')
             if verdict == 'limited':
                 return False, 'X 暂时限制了访问频率,稍后再试'
+            if verdict == 'failed':
+                return False, 'X 页面请求出错,暂时无法验证登录态;稍后点「检查连接」重试,不必因此重新登录'
             if verdict == 'ok':
                 return True, f'登录态有效,首页读到 {last["articles"]} 条推文'
             if verdict == 'not-loaded':

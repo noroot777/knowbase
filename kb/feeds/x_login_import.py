@@ -284,7 +284,7 @@ def install(cookies: list[dict], profile: str,
 
     返回 (结论码, 最后那份状态)。三个是这一步自己的:`unsaved`(写进去了但下次
     启动时不在)、`relogin`(重开之后 X 又判未登录)、`unconfirmed`(重开那一次没
-    验成,判不准);其余沿用 `verify_timeline` 那五档。**这三个只从 `ok` 来** ——
+    验成,判不准);其余沿用 `verify_timeline` 的结论。**这三个只从 `ok` 来** ——
     验证本来就没过时那才是主结论,保存差异接在后面(理由见下面那段注释)。
 
     **写和当场验在同一个会话里。** 起一个 Chrome 要两三秒,但更要紧的是这两件事
@@ -315,7 +315,7 @@ def install(cookies: list[dict], profile: str,
     `ct0@/home`、`ct0@/i/api` 这类路径受限的条目一样进得来 —— 按 URL 读的那一版
     漏的正是它们,而且是**两侧同时漏**,于是「集合相等」什么都证明不了。
     """
-    from kb.feeds.x_browser import verify_timeline
+    from kb.feeds.x_browser import navigate, verify_timeline
     from kb.feeds.x_cdp import Chrome
     with Chrome(profile, headless=True, chrome_path=chrome_path) as page:
         # 先灌 cookie 再开页面:第一次导航就带着它们,省掉一次「先掉回登录页、
@@ -323,7 +323,7 @@ def install(cookies: list[dict], profile: str,
         page.call('Storage.setCookies',
                   {'cookies': [_param(c) for c in cookies]}, timeout=_WRITE_TIMEOUT)
         page.open_page('about:blank')
-        page.goto(VERIFY_URL)
+        navigate(page, VERIFY_URL)
         verdict, last = verify_timeline(page)
         # **快照:验证通过的到底是哪一份状态。** 读的是浏览器,不是我们的输入 ——
         # 理由(三条,都实测过)写在这个函数的注释里。**整杯读**:路径受限的那一族
@@ -444,14 +444,14 @@ def _reopened(profile: str, chrome_path: str = '') -> dict:
     状态。`clean` 跟着交出来:这一份能不能落盘,取决于这一次关闭成没成。
     这两样由 `install` 收尾那道 `_settled` 比完(理由见那里)。
     """
-    from kb.feeds.x_browser import verify_timeline
+    from kb.feeds.x_browser import navigate, verify_timeline
     from kb.feeds.x_cdp import Chrome
     out: dict = {'disk': [], 'verdict': '', 'live': [], 'clean': False}
     try:
         with Chrome(profile, headless=True, chrome_path=chrome_path) as page:
             page.open_page('about:blank')
             out['disk'] = read_all(page)       # 盘上那一份:还没被这次加载改过
-            page.goto(VERIFY_URL)
+            navigate(page, VERIFY_URL)
             out['verdict'], _last = verify_timeline(page)
             out['live'] = read_all(page)       # 这次加载之后:下一次采集要用的那一份
         out['clean'] = bool(page.closed_cleanly)

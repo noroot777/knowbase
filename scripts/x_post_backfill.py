@@ -6,7 +6,8 @@
     python scripts/x_post_backfill.py run --yes --channel browser --report /tmp/x-post.json
 
 scan is local and read-only. run probes candidates; only --yes writes feeds.db.
-Every stored X post is audited by default; ellipses and wrapped URLs only affect priority.
+Only eligible post bodies are audited; merged Articles and ambiguous legacy rows are skipped.
+Ellipses and wrapped URLs only affect priority within eligible posts.
 --all is a compatibility alias; --url selects exact stored URLs. Translation, export and
 indexing use the normal pipeline.
 """
@@ -21,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb.feeds import grab_store, registry as reg, x_browser, x_channels, x_post
+from kb.feeds import grab_store, registry as reg, x_browser, x_channels, x_post, x_post_meta
 from kb.feeds.x_cdp import CdpError
 from kb.feeds.x_page_state import XRateLimited
 
@@ -109,6 +110,8 @@ def aligned_preview(preview: str, detail: str) -> bool:
 
 def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
     """Only bypass raw length when known link artifacts explain the difference."""
+    if skipped := exclusion(entry):
+        return skipped['state'], None, dict(reason=skipped['reason'])
     prefix = entry[x_post.HINT]
     preview = entry['body'].removeprefix(prefix).strip()
     canonical = canonical_preview(preview)
@@ -121,14 +124,23 @@ def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
         complete = dict(entry)
         complete.pop(x_post.HINT)
         complete.update(title=text.splitlines()[0][:500], body=prefix + text)
-        return 'normalized', complete, dict(info, reason='legacy_link_artifacts')
+        return 'normalized', x_post_meta.stamp(complete, 'post', prefix), dict(
+            info, reason='legacy_link_artifacts')
     state = 'blocked_artifacts' if info['artifacts'] else 'blocked_length'
     return state, None, dict(info, reason='legacy_link_artifacts_not_reconciled'
                             if info['artifacts'] else 'detail_not_longer')
 
 
-def candidates(conn, *, urls=(), limit=0, all_posts=False) -> list[dict]:
-    """Audit all X posts; all_posts remains accepted for existing callers."""
+def exclusion(row: dict) -> dict | None:
+    reason, _prefix = x_post_meta.eligibility(row)
+    if not reason:
+        return None
+    return dict(url=row['url'], before=len(row['body']), reason=reason,
+                state='skipped_article' if reason == 'article_merged' else 'skipped_ambiguous')
+
+
+def candidates(conn, *, urls=(), limit=0, all_posts=False, excluded=None) -> list[dict]:
+    """Apply eligibility before limit; all_posts never bypasses provenance checks."""
     rows = conn.execute("SELECT * FROM feed_items WHERE kind='social' AND content_kind='post'"
                         " ORDER BY published DESC,key").fetchall()
     selected = []
@@ -139,34 +151,45 @@ def candidates(conn, *, urls=(), limit=0, all_posts=False) -> list[dict]:
         if wanted:
             if row['url'] not in wanted:
                 continue
-        selected.append(dict(row))
+        row = dict(row)
+        if skipped := exclusion(row):
+            if excluded is not None:
+                excluded.append(skipped)
+            continue
+        selected.append(row)
     selected.sort(key=lambda row: not (row['body'].rstrip().endswith(('…', '...')) or
                                       canonical_preview(row['body']) != row['body']))
     return selected[:limit] if limit else selected
 
 
 def entry_of(row: dict) -> dict:
-    body = row['body']
-    head, separator, tail = body.partition('\n\n')
-    prefix = ''
-    if separator and all(line.startswith('> ') for line in head.splitlines()) and (
-            row['title'] and tail.startswith(row['title'])):
-        prefix = head + separator
+    reason, prefix = x_post_meta.eligibility(row)
+    if reason:
+        raise ValueError(f'X post is not eligible for detail audit: {reason}')
     return {**{key: row[key] for key in
                ('url', 'title', 'body', 'author', 'published', 'content_kind')},
-            x_post.HINT: prefix}
+            x_post.HINT: prefix, x_post_meta.FIELD: row.get(x_post_meta.FIELD, '')}
 
 
 def repair(rows: list[dict], session, *, apply=False, deadline=None,
-           should_stop=None, progress=None) -> dict:
+           should_stop=None, progress=None, excluded=()) -> dict:
     stats = dict(candidates=len(rows), expanded=0, normalized=0, updated=0,
                  identical=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
-                 failed=0, stale=0, deferred=0, results=[])
+                 failed=0, stale=0, deferred=0, skipped_article=0, skipped_ambiguous=0,
+                 results=list(excluded))
+    for skipped in excluded:
+        stats[skipped['state']] += 1
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
                 deadline is not None and time.monotonic() >= deadline):
             stats['deferred'] = len(rows) - index
             break
+        if skipped := exclusion(row):
+            stats[skipped['state']] += 1
+            stats['results'].append(skipped)
+            if progress:
+                progress(skipped, stats)
+            continue
         result = dict(url=row['url'], before=len(row['body']))
         try:
             text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
@@ -202,7 +225,7 @@ def main(argv=None) -> int:
     parser.add_argument('cmd', choices=['scan', 'run'])
     parser.add_argument('--yes', action='store_true', help='确认用版本化替换写回正文')
     parser.add_argument('--url', action='append', default=[], help='只检查指定的存量 URL,可重复')
-    parser.add_argument('--all', action='store_true', help='兼容旧命令;默认已检查全部存量 X 推文')
+    parser.add_argument('--all', action='store_true', help='兼容旧命令;不绕过长文与来源不明行的排除')
     parser.add_argument('--limit', type=int, default=0)
     parser.add_argument('--budget', type=float, default=600.0, help='整轮浏览器读取秒数')
     parser.add_argument('--channel', choices=['browser', 'attach'], default='browser')
@@ -213,15 +236,16 @@ def main(argv=None) -> int:
     if any(not x_post._STATUS.match(url) for url in args.url):
         parser.error('--url 只接受 X 推文的完整地址')
     with reg.db() as conn:
-        rows = candidates(conn, urls=args.url, limit=args.limit, all_posts=args.all)
-    print(f'找到 {len(rows)} 条候选;默认覆盖全部存量 X 推文,省略号或链接折行只决定优先级。')
+        excluded = []
+        rows = candidates(conn, urls=args.url, limit=args.limit, all_posts=args.all, excluded=excluded)
+    print(f'找到 {len(rows)} 条候选;已排除合并长文及来源不明的旧行,省略号或链接折行只决定优先级。')
+    for skipped in excluded:
+        print(json.dumps(skipped, ensure_ascii=False))
     if args.limit:
         print('已按 limit 限制本批数量,不代表其余存量已核对;截断与否须逐条核对详情页。')
     if args.cmd == 'scan':
         for row in rows:
             print(f'{len(row["body"]):>6} 字符  {row["url"]}')
-        return 0
-    if not rows:
         return 0
     print('模式:真正回填' if args.yes else '模式:只读核对,不写库(加 --yes 才写回)')
     if args.report:
@@ -232,6 +256,11 @@ def main(argv=None) -> int:
         if args.report:
             args.report.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
 
+    if not rows:
+        stats = repair([], None, excluded=excluded)
+        if args.report:
+            args.report.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
+        return 0
     settings = reg.get_settings('social')
     deadline = time.monotonic() + args.budget
     try:
@@ -239,7 +268,8 @@ def main(argv=None) -> int:
                 str(x_channels.BROWSER_PROFILE), settings.get('x_chrome_path', ''),
                 attach=args.channel == 'attach') as page:
             page.open_page('about:blank')
-            stats = repair(rows, page, apply=args.yes, deadline=deadline, progress=report)
+            stats = repair(rows, page, apply=args.yes, deadline=deadline, progress=report,
+                           excluded=excluded)
     except (CdpError, OSError, EOFError) as exc:
         print(f'浏览器不可用,未继续回填:{exc}', file=sys.stderr)
         return 1

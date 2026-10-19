@@ -132,6 +132,7 @@ _ADDED_COLUMNS = {
         # `fulltext.work_version`。老库补成 0 = 都算第 0 版,行为逐字不变 —— 判据比
         # 的是**取样那一刻的值**,起点是几无关。
         ('content_rev', 'INTEGER NOT NULL DEFAULT 0'),
+        ('x_post_meta', "TEXT NOT NULL DEFAULT ''"),
     ),
 }
 
@@ -573,11 +574,11 @@ def put_items(source: dict, entries: list[dict], conn=None) -> int:
             # 同一个 URL 后面还会再出现,重抓也按 URL 去重,改写它等于把首次发现
             # 的事实改成最后一次看见的时刻。
             c.execute('''INSERT INTO feed_items
-                (key,kind,url,title,author,published,body,content_kind,fetched_at,content_hash,lang,fetch_round)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO NOTHING''',
+                (key,kind,url,title,author,published,body,content_kind,fetched_at,content_hash,lang,fetch_round,x_post_meta)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO NOTHING''',
                 (key,source['kind'],e['url'],e['title'],e.get('author') or source['name'],
                  e.get('published',''),e['body'],e.get('content_kind','feed'),now(),digest,
-                 text_language(e['title'], e['body']),round_id))
+                 text_language(e['title'], e['body']),round_id,e.get('x_post_meta', '')))
             c.execute('INSERT OR IGNORE INTO subscription_items VALUES(?,?)', (source['id'],key))
     return added
 
