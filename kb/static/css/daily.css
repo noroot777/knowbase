@@ -6,6 +6,10 @@
 .daily-heading-actions label { font-size:13px; color:var(--muted); }
 /* 页头上那两句事实(覆盖哪一段 / 定时开没开),各自后面跟着开抽屉的那颗按钮。 */
 .daily-head-fact { font:12px/1.6 var(--font-mono); color:var(--muted); font-variant-numeric:tabular-nums; }
+/* 「先同步一轮」那个勾:紧挨着生成按钮,它决定按钮叫什么名字,所以不能被
+   当成页头那几句事实读(那几句是 var(--font-mono) 的灰字)。*/
+.daily-presync { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
+.daily-presync input { margin:0; }
 /* 两扇抽屉共用外框;`[hidden]` 这条带属性选择器,压得住下面各自的 display。 */
 .daily-drawer { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 18px; margin:-12px 0 20px; font-size:13px; }
 .daily-drawer[hidden] { display:none; }

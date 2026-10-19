@@ -19,11 +19,16 @@
 export async function checkNewContentCount({ evalJs, waitFor, check }) {
   const line = `document.getElementById('daily-new-count')`;
   const tip = `document.getElementById('daily-gen').title`;
-  // 可见那一句、它藏没藏、按钮藏没藏、tooltip,外加两个时刻输入框 —— 下面每一档
-  // 都按这一份快照判,免得各写各的 selector。
+  // 可见那一句、它藏没藏、按钮**点不点得了**、tooltip,外加两个时刻输入框 ——
+  // 下面每一档都按这一份快照判,免得各写各的 selector。
+  //
+  // **`genOff` 读的是 `disabled` 而不是 `hidden`。** 页头两颗按钮并成一颗之后,
+  // 「这一次生成一个字都不会多」那一档从「整颗藏掉」改成了「置灰 + 把出路写在
+  // 它上面」—— 藏掉会把旁边「先同步一轮」那条路一起藏了。语义仍是「这颗按钮现在
+  // 用不了」,所以下面每一档的判据原样成立。
   const now = `(() => JSON.stringify({
     line: ${line}.textContent, lineOff: ${line}.hidden,
-    genOff: document.getElementById('daily-gen').hidden,
+    genOff: document.getElementById('daily-gen').disabled,
     label: document.getElementById('daily-gen-label').textContent,
     tip: ${tip},
     since: document.getElementById('daily-since').value,
@@ -32,24 +37,39 @@ export async function checkNewContentCount({ evalJs, waitFor, check }) {
 
   // 真实状态:探针刚生成过今天那一份,沙箱里那三篇素材全被它带走了。
   let s = await snap();
-  check("素材都进了日报时,「重新生成」这颗按钮整个收起来",
+  check("素材都进了日报时,「重新生成」这颗按钮点不动",
         s.genOff && s.line === "没有新内容" && !s.lineOff, JSON.stringify(s));
-  check("按钮不在时留一句灰字交代,不让它毫无交代地消失",
+  check("点不动的时候要说清为什么、以及出路在哪 —— 不说的话它和坏了没区别",
         await evalJs(`${line}.classList.contains('is-none')
           && ${line}.offsetParent !== null
-          && document.getElementById('daily-gen').offsetParent === null`),
+          && document.getElementById('daily-gen').offsetParent !== null
+          && /不会多带进任何内容/.test(document.getElementById('daily-gen').title)
+          && /先同步一轮/.test(document.getElementById('daily-gen').title)`),
         JSON.stringify(s));
+  // **勾上「先同步一轮」按钮就该恢复可点。** 这是「没有新内容」时唯一的出路:
+  // 那个判据(后端按**现有库存**算的 `gain`)对「先去取一遍新的」压根不成立。
+  // 一直置灰等于把这条路堵死,而藏掉连这个勾都成了没有去处的勾。
+  s = JSON.parse(await evalJs(`(() => {
+    const chk = document.getElementById('daily-presync');
+    chk.checked = true; renderDailyGenButton();
+    const got = ${now};
+    chk.checked = false; renderDailyGenButton(); return got; })()`));
+  check("没有新内容时勾上「先同步一轮」,按钮恢复可点、名字也改了",
+        !s.genOff && /^同步后/.test(s.label), JSON.stringify(s));
+  s = await snap();
+  check("取消那个勾又回到点不动(摆盘自检:上面那一下复位了)", s.genOff, JSON.stringify(s));
   // 沙箱从没跑过管道,所以此刻确实"今天还没有同步过" —— 这是一句事实,不是零。
   check("没抓过时 tooltip 这么说", /今天还没有同步过/.test(s.tip), s.tip);
 
   // ── 按钮回不回得来 ──────────────────────────────────────────────────────
   // 有新内容进来时它得自己回来(摆盘自检:上面那一档证明此刻它确实是藏着的)。
+  // (「此刻它确实点不动」由上面那两档证明)
   const render = (patch) => `(() => { const keep = JSON.stringify(dailyWindow);
     Object.assign(dailyWindow, ${patch}); renderDailyGenButton();
     const got = ${now};
     dailyWindow = JSON.parse(keep); renderDailyGenButton(); return got; })()`;
   s = JSON.parse(await evalJs(render(`{ pending: { items: 7, late: 2, total: 9, gain: 9 } }`)));
-  check("有新内容时按钮回来,并在它前面写有几条",
+  check("有新内容时按钮恢复可点,并在它前面写有几条",
         !s.genOff && s.line === "有 9 条新内容" && !s.lineOff, JSON.stringify(s));
   // **按钮边上那个数是「这一次会多带进来几条」,不是队列总长,也不是抓回来多少。**
   // 三个数答的是三个问题:抓回来 860 篇、队列里还积着 1097 条、而这一次生成只多带
@@ -66,12 +86,12 @@ export async function checkNewContentCount({ evalJs, waitFor, check }) {
   // **「不知道」不许当成「没有」。** 后端算不出来(pending: null)时按钮照显示 ——
   // 藏掉等于拿一次读取故障把出报这条路堵死,而页面上一个字都不说。
   s = JSON.parse(await evalJs(render(`{ pending: null }`)));
-  check("算不出来时说「读不出来」,按钮照显示",
+  check("算不出来时说「读不出来」,按钮照旧可点",
         !s.genOff && s.line === "新内容读不出来" && !s.lineOff, JSON.stringify(s));
   // 旧后端没给这个字段(kb/static/ 每次请求从磁盘读、server.py 要重启才生效,
   // 「新前端 + 旧后端」天天走到):整段不说,按钮同样照显示。
   s = JSON.parse(await evalJs(render(`{ pending: { items: 3, late: 0, total: 3 } }`)));
-  check("旧后端没给这个数时整段不说,按钮照显示",
+  check("旧后端没给这个数时整段不说,按钮照旧可点",
         !s.genOff && s.lineOff, JSON.stringify(s));
   // **一次读取失败也是「不知道」,而且必须当场改口。** 后端答 `pending: null` 那
   // 一路覆盖不到 HTTP 错误、断连、解析失败和 `pipeJson` 的超时 —— 留着上一次那个
@@ -86,7 +106,7 @@ export async function checkNewContentCount({ evalJs, waitFor, check }) {
     return true; })()`);
   await evalJs(`refreshDailyPending()`);
   s = await snap();
-  check("空闲那一跳读失败:当场改口说读不出来,按钮跟着回来",
+  check("空闲那一跳读失败:当场改口说读不出来,按钮跟着恢复可点",
         !s.genOff && s.line === "新内容读不出来" && !s.lineOff, JSON.stringify(s));
   await evalJs(`(() => { pipeJson = window.__winFail; delete window.__winFail;
                          return true; })()`);
@@ -211,13 +231,19 @@ export async function checkNewContentCount({ evalJs, waitFor, check }) {
         s.label === "重新生成日报"
         && await evalJs(`dailyReports.some(r => r.date === dailyTargetDate())`),
         JSON.stringify(s));
-  for (const [id, name] of [['daily-gen', '直接生成'], ['daily-sync-gen', '同步全部并生成']]) {
-    await evalJs(`document.getElementById('${id}').click()`);
+  // 并成一颗之后,**两种意图都要照旧先问一声会不会覆盖** —— 勾不勾那个勾只决定
+  // 要不要先同步,不改变「这一天已经有一份日报」这件事。
+  for (const [checked, name] of [['false', '不勾先同步'], ['true', '勾了先同步']]) {
+    await evalJs(`(() => { document.getElementById('daily-presync').checked = ${checked};
+                           renderDailyButtons(); return true; })()`);
+    await evalJs(`document.getElementById('daily-gen').click()`);
     const asked = await waitFor(`!!document.querySelector('.confirm-mask [data-act=ok]')`, 5000);
-    check(`${name}那颗:照旧先问一声会不会覆盖今天那一份`, asked);
+    check(`${name}:照旧先问一声会不会覆盖今天那一份`, asked);
     if (asked) await evalJs(
       `document.querySelector('.confirm-mask [data-act=cancel]').click()`);
   }
+  await evalJs(`(() => { document.getElementById('daily-presync').checked = false;
+                         renderDailyButtons(); return true; })()`);
   check("问之前一次都没真发出去",
         (await evalJs(`JSON.stringify(window.__runs)`)) === "[]",
         await evalJs(`JSON.stringify(window.__runs)`));

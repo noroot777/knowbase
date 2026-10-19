@@ -357,8 +357,10 @@ async function deleteDailyReport() {
 
 // ── 生成 ────────────────────────────────────────────────────────────────────
 
-async function runDaily(sync) {
+async function runDaily() {
   if (dailyBusy || dailyState?.running) return;
+  // 「要不要先同步」从页头那个勾上读,不再由两颗按钮各传一个常量进来。
+  const sync = !!$('daily-presync').checked;
   // 改过区间就按改的来;没改就什么都不传,让后端按上一份日报接着算——区间的
   // 截止时刻必须是**生成那一刻**,同步跑掉的几小时也该算进来,在这里钉死的话
   // 那几小时会掉进两份日报中间的缝里。
@@ -373,7 +375,7 @@ async function runDaily(sync) {
   const channels = pickedDailyChannels();
   if (sync && !channels.length) {
     toast('先勾选至少一个同步范围', { key: 'daily',
-      detail: '同步范围在页头「改定时」那一扇里（已经替你打开）；只想用已入库的内容出报，点左边那颗生成按钮（没有新内容时它不显示）。' });
+      detail: '同步范围在页头「改定时」那一扇里（已经替你打开）；只想用已经入库的内容出报，把「先同步一轮」的勾去掉再点。' });
     // 话说在按钮边上还不够:要改的那几个勾选框此刻收在抽屉里,看不见就等于没说。
     setDailyDrawer('sched', true);
     return;
@@ -407,9 +409,12 @@ async function stopDaily() {
 
 function renderDailyButtons() {
   const running = !!dailyState?.running;
-  $('daily-gen').disabled = $('daily-sync-gen').disabled = dailyBusy || running;
-  $('daily-sync-gen').textContent = running ? '生成中…' : '同步全部并生成';
+  // **这颗按钮点不点得了只在 `renderDailyGenButton` 里算一处**(它还要管「这一次
+  // 不会多带内容」那一档,见 daily_chip.js)。这里再算一遍的话两处迟早岔开 ——
+  // 而且探针里有几档只调 `renderDailyGenButton()` 渲染,算在这边它们就测不到。
+  $('daily-presync').disabled = dailyBusy || running;
   renderDailyGenButton();
+  if (running) $('daily-gen-label').textContent = '生成中…';
   // 进了生成阶段就停不了了:模型已经在出稿,daily.generate() 自己把文件写完
   // 才返回。按钮留着能点、点了又被拒,不如置灰并把原因写在上面。
   const generating = running && dailyState?.phase === 'generate';

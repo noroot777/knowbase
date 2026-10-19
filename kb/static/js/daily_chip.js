@@ -54,7 +54,12 @@ function renderDailyGenButton() {
   // 用的人会以为自己漏掉了一步。**不知道的时候按"有"说** —— 名字说错只是难看,
   // 而把"可能会覆盖"说成"头一份"会让人在没有确认框的情况下盖掉一份日报。
   const exists = dailyTargetReport();
-  $('daily-gen-label').textContent = exists === false ? '生成日报' : '重新生成日报';
+  // 勾了「先同步一轮」就把它写进按钮名字里。**名字必须跟着那个勾走** —— 页头只剩
+  // 一颗按钮,点下去到底会不会先同步,只能从它自己身上看出来(原来那是两颗按钮的
+  // 区别,而那个区别哪儿都没写,正是用户说「乱」的地方)。
+  const presync = !!$('daily-presync')?.checked;
+  const base = exists === false ? '生成日报' : '重新生成日报';
+  $('daily-gen-label').textContent = presync ? '同步后' + base : base;
 
   // 按钮前面那句话报的是 `gain`:**再生成一次会多带进来几条没进过日报的内容**
   // (后端口径在 `daily.pending`:和真取材共用一个 `_select`,同样先截名额再数)。
@@ -95,7 +100,21 @@ function renderDailyGenButton() {
   line.textContent = unreadable ? '新内容读不出来'
     : gain > 0 ? `有 ${gain} 条新内容` : '没有新内容';
   line.classList.toggle('is-none', !gain);
-  $('daily-gen').hidden = gain === 0 && exists === true;
+
+  // **「这一次生成一个字都不会多」时置灰,不是藏掉。** 藏掉是两颗按钮时代的做法
+  // (那时「同步全部并生成」还在,出路没断);页头并成一颗之后,藏掉会把「先同步
+  // 一轮」这条路一起藏了 —— 而没有新内容时,先同步正是该做的那件事。更要紧的是
+  // 藏掉让人**发现不了**那条出路:按钮不在,旁边那个勾就成了一个没有去处的勾。
+  // 置灰 + 把出路写在它上面,既没请人做一件没有后果的事,也没把入口堵死。
+  //
+  // **勾了「先同步」就恢复可点**:同步会带进新内容,「这一次不会多带」那个判据
+  // (后端按**现有库存**算的 `gain`)对它压根不成立。
+  const noGain = gain === 0 && exists === true;
+  // 这颗按钮点不点得了,只在这一处算 —— `renderDailyButtons` 不再另算一遍,
+  // 两处算迟早在某一档上岔开。`dailyBusy` / `dailyState` 是 daily.js 的全局
+  // (这个函数本来就在读 `dailyWindow` / `dailyWindowDirty`,同一套)。
+  $('daily-gen').disabled = !!window.dailyBusy || !!dailyState?.running
+                            || (noGain && !presync);
 
   // tooltip 带着**抓取自己的事实**:今天第 N 次抓取往库里新加了多少篇。一天内
   // 同步第二次之后,得有个地方让人看出这次抓回来多少 —— 它和上面那个数必然不等
@@ -116,7 +135,12 @@ function renderDailyGenButton() {
   // 数决定不重新生成日报,而真落进库的比它多(口径见 `kb/fetch_rounds.py`)。
   //
   // 两处都挂同一段话:`gain=0` 时按钮不在了,这些事实得还有地方能看。
-  $('daily-gen').title = $('daily-new-count').title = dailyCatchTip();
+  // 置灰的原因和出路要写在按钮上 —— 一颗点不动、又不说为什么的按钮,和坏了
+  // 长得一模一样。抓取事实那段照旧两处都挂(口径没动)。
+  $('daily-new-count').title = dailyCatchTip();
+  $('daily-gen').title = (noGain && !presync
+    ? '这一次生成不会多带进任何内容；勾上「先同步一轮」可以先取一遍新内容。\n' : '')
+    + dailyCatchTip();
 }
 
 function dailyCatchTip() {

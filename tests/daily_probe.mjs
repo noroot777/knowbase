@@ -120,7 +120,7 @@ check("全都同步成功时没有这条横幅", gap.hidden, JSON.stringify(gap)
 const hasToday = `(async () => (await (await fetch('/api/daily/reports')).json())
   .reports.some(r => r.date === '${today}'))()`;
 if (!(await evalJs(hasToday))) {
-  await evalJs(`(() => { runDaily(false); })()`);
+  await evalJs(`(() => { runDaily(); })()`);
   await waitStatus(hasToday, 40000);
   await evalJs(`loadDailyPanel()`);
 }
@@ -246,7 +246,7 @@ check("起点预填成上一份日报的截止时刻", since === last, `${since}
 await evalJs(`(() => {
   document.getElementById('daily-since').value = '2026-01-01T00:00';
   document.getElementById('daily-until').value = '2026-01-02T00:00';
-  markDailyWindow(); runDaily(false); })()`);
+  markDailyWindow(); runDaily(); })()`);
 await waitStatus(`!document.getElementById('daily-error').hidden`);
 await evalJs(`loadDailyReports()`);
 const banner = await evalJs(`document.getElementById('daily-error-text').textContent`);
@@ -260,11 +260,11 @@ check("改过的区间照原样显示",
 // 抓取事实和"这一份覆盖哪一段"无关,所以改了区间它照常显示在 tooltip 里;跟着
 // 藏掉的是按钮边上那句「有 N 条新内容」和 tooltip 里那句队列积压(后端算的是
 // 默认区间那一段)。**按钮本身照显示** —— 自定义区间里有没有新内容,后端没算过。
-check("自定义区间不报新内容条数,但按钮和抓取事实都还在", await evalJs(`(() => {
+check("自定义区间不报新内容条数,但按钮可点、抓取事实也在", await evalJs(`(() => {
   document.getElementById('daily-until').value = '2026-01-02T00:00'; markDailyWindow();
   const line = document.getElementById('daily-new-count');
   const gen = document.getElementById('daily-gen');
-  return line.hidden && !gen.hidden
+  return line.hidden && !gen.disabled
          && /今天还没有同步过/.test(gen.title)
          && !/队列里有/.test(gen.title); })()`));
 check("自定义到一个没有日报的日期时按钮叫「生成日报」",
@@ -279,7 +279,7 @@ check("「接上一份日报」能把区间收回默认",
 const stamp = `(async () => (await (await fetch('/api/daily/reports/${today}')).json()).window_until)()`;
 const before = await evalJs(stamp);
 // 不能直接 await runDaily:它自己会停在确认框上等点击,await 等于死锁。
-await evalJs(`(() => { runDaily(false); })()`);
+await evalJs(`(() => { runDaily(); })()`);
 const asked = await waitFor(`!!document.querySelector('.confirm-mask [data-act=ok]')`, 5000);
 check("覆盖已有日报前先确认", asked,
       asked ? "" : await evalJs(`JSON.stringify({dates: dailyReports.map(r => r.date), busy: dailyBusy,
@@ -299,7 +299,10 @@ check("重新生成后不再显示上一次的失败",
 await evalJs(`(() => { document.querySelectorAll('#daily-channels input:checked')
   .forEach(i => { i.checked = false; }); })()`);
 const stampBefore = await evalJs(stamp);
-await evalJs(`(() => { runDaily(true); })()`);
+// 「要不要先同步」现在从页头那个勾上读(两颗按钮并成了一颗),所以这一段要先把
+// 勾打上 —— 不打勾点下去走的是「直接出报」那条路,这道闸门压根不该拦它。
+await evalJs(`(() => { document.getElementById('daily-presync').checked = true;
+  renderDailyButtons(); runDaily(); })()`);
 await sleep(600);
 check("空同步范围没有起跑", !(await evalJs(`!!(dailyState && dailyState.running)`)),
       await evalJs(`JSON.stringify({phase: dailyState && dailyState.phase})`));
@@ -318,7 +321,9 @@ const rejected = await evalJs(`(async () => (await fetch('/api/daily/run', { met
   body: JSON.stringify({ sync: true, channels: [] }) })).status)()`);
 check("后端也拒绝空同步范围", rejected === 400, String(rejected));
 await evalJs(`(() => { document.querySelectorAll('#daily-channels input')
-  .forEach(i => { i.checked = true; }); })()`);
+  .forEach(i => { i.checked = true; });
+  document.getElementById('daily-presync').checked = false;
+  renderDailyButtons(); })()`);
 
 // 来源面板:英文条目显示译文,弹窗能切回原文。老深链 #rss 现在落到
 // 「我的订阅」页的 RSS 视图,地址栏写的是统一的 #subs。
@@ -394,28 +399,31 @@ await evalJs(`resetDailyWindow()`);
 const sinceBefore = await evalJs(`document.getElementById('daily-since').value`);
 // 盯两样:tooltip 里那句队列积压(删一份日报会把它带走的条目放回队列),以及
 // **这颗按钮自己回不回来** —— 删之前今天那份把素材全带走了,`gain=0`,按钮是
-// 藏着的;放回队列之后它得自己回来。而 tooltip 里的抓取事实报的是抓取自己的
+// 置灰的(并成一颗之后不再整颗藏掉,见 daily_count_checks.mjs);放回队列之后
+// 它得自己恢复可点。而 tooltip 里的抓取事实报的是抓取自己的
 // 事实,后台删不删日报它都不该动(那正是这一版要钉的)。
 const tipBefore = await evalJs(`document.getElementById('daily-gen').title`);
-const goneBefore = await evalJs(`document.getElementById('daily-gen').hidden`);
+const goneBefore = await evalJs(`document.getElementById('daily-gen').disabled`);
 const reborn = await evalJs(`(async () => {
   await fetch('/api/daily/reports/${today}', { method: 'DELETE' });
   await refreshDailyStatus();
   return JSON.stringify({ tip: document.getElementById('daily-gen').title,
-    gone: document.getElementById('daily-gen').hidden,
+    gone: document.getElementById('daily-gen').disabled,
     line: document.getElementById('daily-new-count').textContent,
     lineOff: document.getElementById('daily-new-count').hidden }); })()`);
 const back = JSON.parse(reborn);
-check("后台改之前队列是空的、按钮也收着", !/队列里有/.test(tipBefore) && goneBefore,
+check("后台改之前队列是空的、按钮也点不动", !/队列里有/.test(tipBefore) && goneBefore,
       `${tipBefore} / ${goneBefore}`);
 check("后台改了素材之后,空闲那一跳把队列数问回来", /队列里有 \d+ 条/.test(back.tip), back.tip);
-check("放回队列之后那颗按钮自己回来,并写明有几条新内容",
+check("放回队列之后那颗按钮自己恢复可点,并写明有几条新内容",
       !back.gone && !back.lineOff && /^有 \d+ 条新内容$/.test(back.line),
       JSON.stringify(back));
-// 抓取事实那一截逐字不变(队列那句本来就该跟着变,所以按「队列里有」切开再比)
+// 抓取事实那一截逐字不变。要先摘掉两样跟抓取无关、本来就该跟着变的:队列那句
+// (按「队列里有」切开),以及 tooltip 头上那行「这一次为什么点不动」的出路提示
+// —— 删掉日报之后按钮又点得动了,那行自然消失。
+const facts = t => t.split('队列里有')[0].split('\n').pop();
 check("删掉一份日报不会改写「今天抓了几次」",
-      back.tip.split('队列里有')[0] === tipBefore.split('队列里有')[0]
-      && /今天还没有同步过/.test(back.tip),
+      facts(back.tip) === facts(tipBefore) && /今天还没有同步过/.test(back.tip),
       `${tipBefore} → ${back.tip}`);
 check("那一跳没有顺手改写两个时刻输入",
       (await evalJs(`document.getElementById('daily-since').value`)) === sinceBefore,
@@ -539,7 +547,7 @@ await evalJs(`window.__restoreFetch(); delete window.__restoreFetch; true`);
 await evalJs(`(() => {
   document.getElementById('daily-since').value = '2026-01-01T00:00';
   document.getElementById('daily-until').value = '2026-01-02T00:00';
-  markDailyWindow(); runDaily(false); })()`);
+  markDailyWindow(); runDaily(); })()`);
 const failBanner = await waitStatus(`!document.getElementById('daily-error').hidden`);
 check("摆盘:一轮失败之后横幅写着原因", failBanner
       && /没有未上报过的新内容/.test(
@@ -610,6 +618,29 @@ await evalJs(`(() => { pipeJson = __realPipeJson; clearTimeout(dailyTimer);
                        dailyTimer = null; return true; })()`);
 check("完成提示把全库那一段算成「项」,不说成「来源」",
       /1 项未完成/.test(doneToast) && !/来源/.test(doneToast), doneToast);
+
+// 跑着的时候页头上**不许有控件假装点得动**:「先同步一轮」那个勾要跟那颗按钮
+// 一起禁着。它不禁住的话跑着的时候还能改,而改的那一下对正在跑的这一轮一个字
+// 都不起作用(定时表单那一侧同口径,见 checkDailyFormSettles)。反过来钉一边:
+// 这一轮结束之后那个勾自己回来。
+await evalJs(`(() => {
+  clearTimeout(dailyTimer); dailyTimer = null;
+  document.getElementById('toast-host').innerHTML = '';
+  window.__fed = [{ running: true, phase: 'sync', channels: [] },
+                  { running: false, phase: 'done', detail: '日报已生成：2 条素材' }];
+  pipeJson = async (path, ...rest) => path === '/api/daily/status' && __fed.length
+    ? __fed.shift() : __realPipeJson(path, ...rest);
+  return true; })()`);
+const knobs = `JSON.stringify({presync: document.getElementById('daily-presync').disabled,
+  gen: document.getElementById('daily-gen').disabled})`;
+await evalJs(`refreshDailyStatus()`);
+check("跑着的时候那个勾跟按钮一起禁着", (await evalJs(knobs)) === '{"presync":true,"gen":true}',
+      await evalJs(knobs));
+await evalJs(`refreshDailyStatus()`);
+check("这一轮结束之后那个勾自己回来",
+      !(await evalJs(`document.getElementById('daily-presync').disabled`)), await evalJs(knobs));
+await evalJs(`(() => { pipeJson = __realPipeJson; clearTimeout(dailyTimer);
+                       dailyTimer = null; return true; })()`);
 
 await checkScheduleRaces({ evalJs, waitFor, check });
 await checkDailyFormSettles({ evalJs, waitFor, check });

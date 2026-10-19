@@ -184,8 +184,8 @@
       <span id="daily-sched-label" class="daily-head-fact">正在读取定时设置…</span>
       <button class="text-button" id="daily-sched-toggle" onclick="toggleDailySched()" aria-expanded="false" aria-controls="daily-sched">改定时</button>
       <span id="daily-new-count" class="daily-new-count" hidden></span>
-      <button class="ghost" id="daily-gen" onclick="runDaily(false)"><span id="daily-gen-label">生成日报</span></button>
-      <button id="daily-sync-gen" onclick="runDaily(true)">同步全部并生成</button>
+      <label class="daily-presync" title="勾上就先依次同步所选来源，再用新取回来的内容出报"><input type="checkbox" id="daily-presync" onchange="renderDailyButtons()"> 先同步一轮</label>
+      <button id="daily-gen" onclick="runDaily()"><span id="daily-gen-label">生成日报</span></button>
     </div>
   </header>
   <div id="daily-window" class="daily-drawer daily-window" hidden onkeydown="dailyDrawerKey(event, 'window')">
@@ -221,7 +221,7 @@
         <div class="daily-reader-actions"><button class="text-button" id="daily-copy" onclick="copyDailyReport()" hidden>复制全文</button><button class="text-button daily-delete" id="daily-del" onclick="deleteDailyReport()" hidden>删除</button></div>
       </div>
       <p id="daily-reader-meta" class="hint"></p>
-      <div id="daily-reader-body"><div class="daily-empty"><h3>还没有日报</h3><p>点右上角「同步全部并生成」：依次同步所选来源，再把这段时间里发布的内容写成一份日报。</p></div></div>
+      <div id="daily-reader-body"><div class="daily-empty"><h3>还没有日报</h3><p>点右上角「生成日报」：把这段时间里发布的内容写成一份日报。想先取一遍新内容就勾上它旁边的「先同步一轮」。</p></div></div>
     </article>
   </div>
 </div>
