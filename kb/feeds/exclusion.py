@@ -5,7 +5,8 @@ import sqlite3
 from pathlib import Path
 
 from kb import config
-from kb.collectors import CollectorError
+from kb.collectors import CollectorError, DropIncomplete
+from kb.feeds.paths import export_path
 from kb.maintenance import LockBusy, maintenance_lock
 
 SCHEMA = '''
@@ -50,16 +51,14 @@ def _export_path(kind: str, relative: str) -> Path | None:
     return path
 
 
-def _cleanup(kind: str, relative: str) -> None:
-    path = _export_path(kind, relative)
-    if path is None:
-        return
-    path.unlink(missing_ok=True)
+def _cleanup(kind: str, relatives: list[str]) -> None:
+    for relative in relatives:
+        _export_path(kind, relative).unlink(missing_ok=True)
     if config.DB_PATH.is_file():
         from kb import store
         conn = store.connect(config.DB_PATH)
         try:
-            store.remove_documents(conn, [relative])
+            store.remove_documents(conn, relatives)
             conn.commit()
         finally:
             conn.close()
@@ -89,15 +88,17 @@ def _drop(kind: str, ref: dict) -> str:
         except ValueError as error:
             raise CollectorError(str(error)) from None
         relative = known['path'] if known else ''
-        _export_path(kind, relative)
+        relatives = list(dict.fromkeys(filter(None, [str(export_path(kind, key)), relative])))
+        for candidate in relatives:
+            _export_path(kind, candidate)
         conn.execute('INSERT OR IGNORE INTO feed_item_exclusions VALUES(?,?,?,?,?)',
                      (key, kind, link, relative, reg.now()))
         conn.execute('DELETE FROM subscription_items WHERE item_key=?', (key,))
         conn.execute('DELETE FROM feed_items WHERE key=?', (key,))
     try:
-        _cleanup(kind, relative)
+        _cleanup(kind, relatives)
     except (OSError, sqlite3.Error) as error:
-        raise CollectorError(f'已永久排除，但已导出内容清理未完成，请重试：{error}') from None
+        raise DropIncomplete(f'已永久排除，但已导出内容清理未完成，请重试：{error}') from None
     return '已移除这一条内容；以后从此来源的其他订阅再次发现同一篇，也不再收录。'
 
 

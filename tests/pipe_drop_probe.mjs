@@ -59,6 +59,7 @@ const HISTORY_ONLY = {
 let past = roundOf("run-past", "2026-10-14 09:12:00",
   [...ITEMS().slice(0, 2), HISTORY_ONLY, ITEMS()[2]]);
 const drops = [];
+let dropFailure = null;
 let state = { running: false, stop_supported: true, stop_requested: false, ...latest };
 // 「当前待处理」:删掉一条它就该少一个。**故意答得慢、而且按请求到达那一刻取值**
 // —— 面板的待处理查询是独立的一条请求,删除发生在它在途期间时,它带回来的是删除
@@ -91,11 +92,19 @@ const server = createServer((req, res) => {
     req.on("data", c => { raw += c; });
     return void req.on("end", () => {
       const body = JSON.parse(raw || "{}");
+      if (dropFailure) {
+        if (dropFailure.status) json({ detail: dropFailure.detail }, dropFailure.status);
+        else req.socket.destroy();
+        return;
+      }
       drops.push(body);
       // 后端的口径:删成功之后那一条在**任何一轮**里都不再送出来。
-      const keep = r => ({ ...r, stages: { ...r.stages, export: {
-        ...r.stages.export,
-        failures: r.stages.export.failures.filter(f => f.drop?.id !== body.id) } } });
+      const keep = round => ({ ...round, stages: Object.fromEntries(
+        Object.entries(round.stages).map(([key, stage]) => [key, {
+          ...stage, ...(stage.failures ? {
+            failures: stage.failures.filter(failure => failure.drop?.id !== body.id),
+          } : {}),
+        }])) });
       latest = keep(latest);
       past = keep(past);
       state = { ...state, stages: keep(state).stages };
@@ -172,6 +181,35 @@ await setup("点了取消", clickAt(".confirm-mask [data-act=cancel]"));
 check("取消之后一个请求都没发", drops.length === 0, JSON.stringify(drops));
 check("取消之后那一条还在",
       (await rows()).length === 3 && (await rows())[0].drop);
+
+for (const failure of [
+  { status: 400, detail: "正在导出或建立索引，尚未移除；请稍后重试", title: "没有移除" },
+  { status: 409, detail: "已永久排除，但已导出内容清理未完成，请重试", title: "清理未完成" },
+  { status: 504, detail: "采集器无响应(超过 20 秒)", title: "结果未确认" },
+  { status: 0, detail: "这一条可能已经移除", title: "结果未确认" },
+]) {
+  dropFailure = failure;
+  await evalJs(`document.querySelectorAll('.toast').forEach(element => element.remove()); true`);
+  await setup("重试移除", clickAt("#pipe-stage-export .pipe-failure-drop"));
+  await setup("确认框已打开", until(`document.querySelectorAll('.confirm-mask').length === 1`));
+  await setup("确认失败场景", clickAt(".confirm-mask [data-act=ok]"));
+  const expected = JSON.stringify(failure.title);
+  await setup("显示对应结果", until(`document.querySelector('.toast')?.textContent.includes(${expected})`));
+  const message = await evalJs(`document.querySelector('.toast').textContent`);
+  check(`${failure.status}: 保留服务端事实与正确标题`, message.includes(failure.detail), message);
+  check(`${failure.status}: 不把明确拒绝或部分完成说成未知`,
+        failure.status === 0 || failure.status >= 500 || !message.includes("可能已经移除"), message);
+  check(`${failure.status}: 明细和重试按钮仍在`, (await rows()).length === 3
+        && await evalJs(`!document.querySelector('.pipe-failure-drop').disabled`));
+  if (process.env.PIPE_DROP_SCREENSHOT_DIR) {
+    mkdirSync(process.env.PIPE_DROP_SCREENSHOT_DIR, { recursive: true });
+    const shot = await send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(join(process.env.PIPE_DROP_SCREENSHOT_DIR, `${CHANNEL}-drop-${failure.status}.png`),
+                  Buffer.from(shot.result.data, "base64"));
+  }
+}
+dropFailure = null;
+await evalJs(`document.querySelectorAll('.toast').forEach(element => element.remove()); true`);
 
 // ── 3. 确认之后:请求带着那份 drop,面板上那一条随即消失 ───────────────────────
 // **故意让一次待处理查询在途**:它带回来的是删除之前那个数字,而删除不产生新的
@@ -273,6 +311,38 @@ await setup("最新一轮已结束", until(`pipeSnapshot.running === false`));
 await evalJs(`refreshPipePending(); true`);
 check("待处理数随历史移除更新", await until(
   `pipePending.export === 0`, 12000));
+
+const extractLink = FEED ? "https://example.org/extract-only"
+  : "https://mp.weixin.qq.com/s?__biz=b&mid=42&idx=1";
+const extractRef = { channel: CHANNEL,
+  id: FEED ? createHash("sha256").update(`${CHANNEL}:${extractLink}`).digest("hex").slice(0, 32)
+    : "wx-extract", link: extractLink };
+latest.stages.extract = { status: "error", detail: "1 篇提取失败", failures: [{
+  title: "某个号 · 已导出但正文为空的一篇", reason: "正文为空，需回填",
+  url: extractLink, drop: extractRef,
+}] };
+state = { ...state, stages: latest.stages };
+await evalJs(`refreshPipe(); true`);
+await setup("提取失败明细出现", until(
+  `document.querySelectorAll('#pipe-stage-extract .pipe-failures p').length === 1`));
+await evalJs(`$('pipe-stage-extract').querySelector('details').open = true; true`);
+check("提取失败保留原文链接与不再抓取按钮", await evalJs(
+  `document.querySelector('#pipe-stage-extract .pipe-failures a')?.getAttribute('href')
+     === ${JSON.stringify(extractLink)}
+   && !!document.querySelector('#pipe-stage-extract .pipe-failure-drop')`));
+if (process.env.PIPE_DROP_SCREENSHOT_DIR) {
+  await evalJs(`$('pipe-stage-extract').scrollIntoView({ block: 'center' }); true`);
+  const shot = await send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(join(process.env.PIPE_DROP_SCREENSHOT_DIR, `${CHANNEL}-extract-drop.png`),
+                Buffer.from(shot.result.data, "base64"));
+}
+await evalJs(`document.querySelectorAll('.toast').forEach(element => element.remove()); true`);
+await setup("处理正文为空的文章", clickAt("#pipe-stage-extract .pipe-failure-drop"));
+await setup("提取明细弹出确认框", until(`document.querySelectorAll('.confirm-mask').length === 1`));
+await setup("确认移除提取失败的文章", clickAt(".confirm-mask [data-act=ok]"));
+check("提取阶段按同一身份提交删除", JSON.stringify(drops.at(-1)) === JSON.stringify(extractRef));
+check("提取失败条目删除后离开明细", await until(
+  `document.querySelectorAll('#pipe-stage-extract .pipe-failures p').length === 0`));
 
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 

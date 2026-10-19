@@ -213,8 +213,10 @@ def cmd_articles(args) -> int:
     但**「库里没有这一行」不等于「它已经被永久排除」** —— 见 `_drop_missing`。
     """
     from src.db.repository import ArticleRepository
-    from src.utils.article_identity import exclusion_keys, existing_article_id
+    from src.utils.article_identity import article_identity, exclusion_keys, existing_article_id
 
+    if args.action == "resolve":
+        return _resolve_article(args)
     if args.action != "drop":
         return _fail(f"不认识的操作「{args.action}」", args.json)
     if not args.id:
@@ -222,7 +224,7 @@ def cmd_articles(args) -> int:
     link = getattr(args, "link", "") or ""
     with ArticleRepository() as repo:
         row = repo.conn.execute(
-            "SELECT id, account_name, title FROM articles WHERE id=?", (args.id,)
+            "SELECT id, account_name, title, link FROM articles WHERE id=?", (args.id,)
         ).fetchone()
         if row is None and link:
             # **「按这个 ID 查不到」不等于「库里没有这一篇」。** 同一原文换个通道、
@@ -234,7 +236,7 @@ def cmd_articles(args) -> int:
             alias = existing_article_id(repo, link)
             if alias:
                 row = repo.conn.execute(
-                    "SELECT id, account_name, title FROM articles WHERE id=?",
+                    "SELECT id, account_name, title, link FROM articles WHERE id=?",
                     (alias,),
                 ).fetchone()
         if row is None:
@@ -245,6 +247,8 @@ def cmd_articles(args) -> int:
             return _fail(
                 f"这一篇属于「{row['account_name']}」，与给定的"
                 f"「{args.account}」对不上，没有改动", args.json)
+        if link and article_identity(link) != article_identity(row["link"]):
+            return _fail("文章标识与原文链接不符，没有改动", args.json)
         repo.remove_article(row["id"], row["account_name"])
         # 请求方给的那组键一并记进名单。`remove_article` 只认它删掉的那个档案 ID
         # (外加从那一行读出的链接身份),而上面可能删的是**另一个** ID;旧页面手里
@@ -257,6 +261,25 @@ def cmd_articles(args) -> int:
         emit({"ok": True, "detail": detail, "removed": True})
     else:
         info(detail)
+    return EXIT_OK
+
+
+def _resolve_article(args) -> int:
+    from urllib.parse import urlparse
+
+    from src.db.repository import ArticleRepository
+    from src.utils.article_identity import existing_article_id, stable_article_id
+
+    link = args.link or ""
+    stable_id = stable_article_id(link)
+    if urlparse(link).scheme not in ("http", "https") or not stable_id:
+        return _fail("原文链接没有可核实的公众号文章身份", args.json)
+    with ArticleRepository() as repo:
+        article_id = existing_article_id(repo, link) or stable_id
+        row = repo.conn.execute("SELECT account_name FROM articles WHERE id=?",
+                                (article_id,)).fetchone()
+    emit({"ok": True, "id": article_id, "link": link,
+          "account": row["account_name"] if row else ""})
     return EXIT_OK
 
 
@@ -589,7 +612,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--json", action="store_true", help="输出 JSON 而不是人话")
 
     r = sub.add_parser("articles", help="维护已采集的文章")
-    r.add_argument("action", choices=["drop"])
+    r.add_argument("action", choices=["drop", "resolve"])
     r.add_argument("--id", default="", help="文章 id")
     r.add_argument("--account", default="", help="它该属于哪个公众号(对不上就拒)")
     r.add_argument("--link", default="",

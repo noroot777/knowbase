@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
 
-from kb.collectors import (CollectorError, Fetched, FetchScope, SourceStatus,
-                           Target)
+from kb.collectors import (CollectorError, CollectorTimeout, DropIncomplete,
+                           Fetched, FetchScope, SourceStatus, Target)
 from kb.pipeline_state import _log, _stage
 
 # 采集器在本仓库内(<repo>/collector)。刻意用相对于本文件的路径而不是绝对路径:
@@ -481,7 +482,37 @@ class WeChatLocalCollector:
 
     # ── 单条内容的「别再抓了」(kb.collectors.ItemDropping)───────────────────
 
+    def document_failure(self, document, reason: str) -> dict | None:
+        from kb.collectors.wechat_documents import document_failure
+
+        return document_failure(self, VAULT_SOURCES, document, reason)
+
+    def item_aliases(self, ref: dict) -> tuple[str, ...]:
+        from collector.src.utils.article_identity import stable_article_id
+        from kb.collectors.wechat_documents import identity
+
+        link = str(ref.get('link') or '')
+        return (stable_article_id(link),) if identity(link) else ()
+
     def drop_item(self, ref: dict) -> str:
+        from kb.collectors.wechat_documents import cleanup, identity
+        from kb.maintenance import LockBusy, maintenance_lock
+
+        link = str(ref.get('link') or '').strip()
+        if not identity(link):
+            return self._drop_item(ref)
+        try:
+            with maintenance_lock(wait=5):
+                detail = self._drop_item(ref)
+                try:
+                    cleanup(link, VAULT_SOURCES)
+                except (OSError, sqlite3.Error, CollectorError) as error:
+                    raise DropIncomplete(f'已永久排除，但已导出内容清理未完成，请重试：{error}') from None
+                return detail
+        except LockBusy:
+            raise CollectorError('正在导出或建立索引，尚未移除；请稍后重试') from None
+
+    def _drop_item(self, ref: dict) -> str:
         """这一篇永久不再采集:删掉它、把它的链接身份记进黑名单。
 
         **身份只认 `id`,`account` 只用来核对。** CLI 那边拿 id 查出它真正的归属,
@@ -519,7 +550,7 @@ class WeChatLocalCollector:
         try:
             proc = _run_cli(*argv, "--json", timeout=timeout)
         except subprocess.TimeoutExpired:
-            raise CollectorError(f"采集器无响应(超过 {timeout} 秒)") from None
+            raise CollectorTimeout(f"采集器无响应(超过 {timeout} 秒)") from None
         except OSError as e:
             raise CollectorError(f"采集器起不来:{e}") from None
 
