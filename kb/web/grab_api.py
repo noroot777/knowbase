@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from kb import pipeline
 from kb.feeds import grab
@@ -30,8 +30,39 @@ from kb.source_types import SOURCE_TYPES
 router = APIRouter(prefix='/api/grab')
 
 
-class GrabRequest(BaseModel):
+class RestoreRequest(BaseModel):
+    """「只把欠的那一步补上」——`POST /api/grab/restore` 的请求体。
+
+    **恢复故意是独立端点,不是 `/api/grab` 上的一个布尔字段。** 那种写法在
+    **跨版本**那一刻不成立:Pydantic 默认忽略不认识的键,所以更新了文件而没有重启
+    的那个 kb-web 收到 `restore_only=true` 会**静默当没看见**,继续走它那条
+    「不在就抓一篇新的」—— 实测形态:等待期间历史清理把那一行删掉之后,旧端点实发
+    1 次对外取页,把一条清理掉的 `rss` 文章**重建成 `inbox`**、标题换掉,而命令行
+    照旧退出 0(第 3 轮审查,拿 `git show 5b70036:kb/web/grab_api.py` 的真模块当
+    那个没重启的进程)。
+
+    换成独立路径之后,**旧服务的回答是 404** —— 客户端据此知道「这台服务还不会做
+    这件事」,停下来说一句,而不是被降级成一个会创建内容的动作。这就是「不认识这个
+    操作的服务必须拒绝,不许默默当成别的操作」那条协议边界。
+
+    **多余的键一律拒掉,不许被忽略**(`extra='forbid'`):默认那套「静默丢掉不认识
+    的键」正是上面那个故障的机制 —— 哪天又有人想拿一个字段表达「只恢复」,他会当场
+    被拒,而不是拿到一个会创建内容的 200。两个请求体都这么定(面板只传
+    `url` / `refetch`,`kb/static/js/grab.js` 那一处)。
+
+    **拒的那个码是 422,不是 400**:`extra='forbid'` 走的是 FastAPI 的请求体校验
+    (`RequestValidationError`),和下面那几处手写的 `HTTPException(400, …)` 不是
+    一条路。两边的消费方都按整个 4xx 分支处理(命令行 `ApiRefused`、面板
+    `apiFail`),所以**这里不为了对齐注释去改校验的状态码** —— 那会把项目里
+    「校验错 = 422」这条约定改掉。回归在 `tests/test_grab_endpoint.py`。
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
     url: str = Field(min_length=1, max_length=2048)
+
+
+class GrabRequest(RestoreRequest):
     #: **用户明确要求「重新抓一次」。** 它不看库里那一份过不过得了质量那一道:
     #: 那道判据只认得出**我们认得出的**坏内容(通篇复读那一类),而「五段各不相同
     #: 的会员墙文案」照样过关、从此 content_ok 为真 —— 要是恢复出口也架在同一道
@@ -124,13 +155,24 @@ def _recover(out: dict, url: str, seen: dict, label: str, asked: bool = False) -
     return _write_through(out, f'{why}，已经按这次重抓到的内容换掉', seen['kind'])
 
 
-def _duplicate(url: str, seen: dict, refetch: bool = False) -> dict:
-    """这条地址库里已经有了。**按它走到哪一步分开答。**"""
+def _duplicate(url: str, seen: dict, refetch: bool = False,
+               restore_only: bool = False) -> dict:
+    """这条地址库里已经有了。**按它走到哪一步分开答。**
+
+    `restore_only` 把这一档收窄成**纯恢复**:只把欠的那一步补上,**不走重抓**
+    (那要发 HTTP、要替换正文,是人明确要求时才做的事),内容本身不对时也**不补**
+    —— 后面几步全做完只是把一份看不出是正文的东西写进知识库。
+    """
     label = KINDS.get(seen['kind'], seen['kind'])
     out = {'ok': True, 'added': 0, 'duplicate': True, 'url': url,
            'title': seen['title'], 'kind': seen['kind'], 'done': bool(seen['done']),
            'content_ok': bool(seen.get('content_ok'))}
-    if refetch or not out['content_ok']:
+    if restore_only and not out['content_ok']:
+        # 恢复不替任何人做「换掉它」这个决定(出路是 `refetch`,见 `_recover`)。
+        out['owing'] = grab.owing(seen)
+        out['detail'] = f'这条之前被「{label}」收过了，{out["owing"]}'
+        return out
+    if (refetch or not out['content_ok']) and not restore_only:
         # **内容本身不对的那一档排在最前面**:后面几步全做完也只是把一份看不出
         # 是正文的东西写进知识库(`owing` 同一份口径里它也排第一)。
         # **用户明确要求重抓时同样走这里,不先问 `content_ok`**:那道判据漏放的
@@ -179,6 +221,27 @@ def grab_state(url: str = Query(..., min_length=1, max_length=2048)):
                    exported=seen['exported'], stored=seen['stored'],
                    indexed=seen['indexed'], resume=_resume_hint(seen['kind']))
     return out
+
+
+@router.post('/restore')
+def grab_restore(body: RestoreRequest):
+    """**只恢复**库里已经有的那一行:把欠的后半条链补上。
+
+    不抓网页、不新建条目、不替换正文 —— 判断和 `/api/grab` 的重复那一档共用
+    `_duplicate`(口径只有一份),收窄的部分由 `restore_only` 那个内部参数表达。
+
+    **那一行不在了就 409 到此为止。** 调用方(命令行的自动恢复)手里只有一张旧
+    快照,「刚才查到它还在」不是写入那一刻它还在的保证;历史清理随时会在这两步
+    之间把它删掉。409 而不是 400:这不是「这条地址不对」,是「这一刻没有可恢复的
+    条目」,调用方据此去问一次事实(只读那一问会答 `known=false`)。
+    """
+    try:
+        url = grab.normalize(body.url)
+    except grab.GrabError as e:
+        raise HTTPException(400, str(e)) from None
+    if not (seen := grab.known(url)):
+        raise HTTPException(409, '这一条已经不在库里了，没有可恢复的条目')
+    return _duplicate(url, seen, restore_only=True)
 
 
 @router.post('')

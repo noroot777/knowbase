@@ -206,6 +206,12 @@ claude mcp add kb --scope user -- uv run --directory ~/code/knowbase kb-mcp
 
 注册后可用工具：`kb_search`（混合检索）、`kb_enumerate`（全量枚举，穷举问题用这个）、`kb_read`（读全文）、`kb_entities`（列实体）。
 
+**往知识库里存**走 skill `kb-grab`（`.claude/skills/kb-grab/`）：在 Claude Code 里说
+「把这条存进知识库」、给一批链接、或者问「这篇我存过吗」，它打的就是面板上那颗
+「存入知识库」按钮的同一个接口。装到全局：
+`ln -s ~/code/knowbase/.claude/skills/kb-grab ~/.claude/skills/kb-grab`；
+检出不在常见位置时设 `KB_HOME`。
+
 ## CLI 用法
 
 面板能做的事 CLI 也能做：
@@ -230,6 +236,15 @@ uv run kb stats
 ./kb.sh sync --channel rss        # 只跑某一个来源
 ./kb.sh status                    # 一屏看全
 ./kb.sh graph                     # 重建三张图谱
+
+# 手动收录（粘一条链接，内容抓进知识库）
+./kb.sh grab https://example.com/post        # 收下来，并等它真写进知识库
+./kb.sh grab --state https://example.com/p   # 只查这一条此刻的状态（只读）
+./kb.sh grab --refetch https://example.com/p # 库里那一份不对时重抓、确认得了就换掉
+pbpaste | ./kb.sh grab -                     # 从剪贴板那段文字里挑出链接收录
+./kb.sh grab - < links.txt                   # 一行一条的清单：整行原样收，不做抽取
+echo '见 <https://example.com/p;> 这篇' | ./kb.sh grab -   # 行文里圈出来的也原样收
+echo '见 [原文](https://example.com/a_(b)) 这篇' | ./kb.sh grab -  # Markdown 按语法取目标
 
 # 订阅管理
 ./kb.sh accounts list | discover | add | remove | enable | disable [名字]
