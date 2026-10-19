@@ -31,6 +31,7 @@ from kb.config import (DATA_DIR, ScheduleUnreadable, announce_config_issue,
 from kb.daily_state import (STATE_FILE, _halting, _load_last_run, _lock, _log,
                             _save_last_run, _set, _state, _sync_issues,
                             get_state, is_running)
+from kb.daily_library import amend_done, library_round
 from kb.sched_ledger import Ledger
 
 SETTINGS_FILE = DATA_DIR / 'daily_report.json'
@@ -42,8 +43,8 @@ SETTINGS_FILE = DATA_DIR / 'daily_report.json'
 #
 # **合并不会绕开任何一道闸**:哪些内容要买提取由**订阅级**开关回答
 # (`kb.extract.pending_docs` 是唯一口径,feeds 那几类默认不提取),拦它的不是
-# "这一轮由哪个通道起的"。条目化/wiki 两个重活仍旧不跑——日报不读它们的产物,
-# 跑一遍要几十分钟。
+# "这一轮由哪个通道起的"。条目化/wiki 两个重活**不在这两段里**,它们排在日报
+# 出完之后单跑一段(`kb.daily_library`)。
 FETCH_STAGES = ['crawl', 'export']
 DIGEST_STAGES = ['index', 'extract']
 # 入库那一段在成绩单上的身份。它不属于任何一个来源,所以 channel 留空 ——
@@ -117,6 +118,9 @@ def _settings_from(d: dict) -> dict:
     return {'enabled': config_flag(d, 'enabled'),
             'time': config_clock(d, 'time', '08:00'),
             'sync': config_flag(d, 'sync', True),
+            # 出完报之后跑不跑条目化和 wiki。**缺省必须是开**(理由在
+            # `kb.daily_library` 的模块注释里)。
+            'library': config_flag(d, 'library', True),
             # 一份日报都没有、接不上任何截止时刻时回溯几天。老配置里这个键
             # 叫 days/max_days(当时是"覆盖最近几天"和"最长回溯几天"),窗口
             # 改成一律接上一份日报的截止时刻之后,它只剩"第一份回溯几天"。
@@ -142,7 +146,9 @@ def load_settings() -> dict:
 
 
 def save_settings(enabled: bool, time_str: str, channels: list[str] | None = None,
-                  sync: bool = True, first_days: int = daily.FIRST_DAYS) -> dict:
+                  sync: bool = True, first_days: int = daily.FIRST_DAYS,
+                  library: bool = True) -> dict:
+    """`library` 见 `kb.daily_library`:出完报之后跑不跑条目化和 wiki。"""
     if not re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d', time_str or ''):
         raise ValueError(f'时间格式应为 HH:MM,收到 {time_str!r}')
     if not 1 <= int(first_days) <= 7:
@@ -161,6 +167,7 @@ def save_settings(enabled: bool, time_str: str, channels: list[str] | None = Non
         if nxt <= now or cur['last_fired'] == now.strftime('%Y-%m-%d'):
             nxt += timedelta(days=1)
         cur.update({'enabled': bool(enabled), 'time': time_str, 'sync': bool(sync),
+                    'library': bool(library),
                     'first_days': int(first_days), 'channels': picked or cur['channels'],
                     'next_run': nxt.isoformat(timespec='minutes') if enabled else ''})
         # 原子替换:保存失败不许把上一份有效设置截成空文件(见
@@ -460,7 +467,7 @@ def _sync_round(stages: list[str], crawl_filter: dict | None, label: str,
 
 def _run(since: datetime | None, until: datetime | None, sync: bool,
          channels: list[str], first_days: int) -> None:
-    sched_day, retry, publish_issue = _state['sched_day'], False, ''
+    sched_day, retry, batch = _state['sched_day'], False, ''
     try:
         if sync:
             from kb import pipeline as pl     # 延迟:它反过来 import 本模块
@@ -497,12 +504,8 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                     DIGEST_STAGES, None, DIGEST_LABEL,
                     max(budget_end, time.monotonic() + DIGEST_BUDGET),
                     halted=lambda: bool(_state['stop_requested']), batch=batch))
-            # 发布不成不是日报的失败(素材都在库里,照常出报),但**不许咽下去**:
-            # 咽下去的后果是同步中心那边看不到这一轮的失败、也点不了重试,而日报
-            # 这边一句"已生成"看着一切正常。
-            publish_issue = pl.close_batch()
-            if publish_issue:
-                _log(f'同步结果未发布:{publish_issue}')
+            # **批次不在这里关了**:出报之后那一段必须进同一个批次(为什么,见
+            # `kb.daily_library`)。关它的地方挪到了 `finally`。
         # 用户按的停止到此为止:接着生成等于把一份"同步到一半"的日报当成功交出去,
         # 还要再花一次模型钱。超预算是另一回事——那本来就是"别再同步了,拿现有的
         # 内容出报",继续生成正是它的目的。
@@ -534,8 +537,7 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         # 记账没写成不该糊过去:日报是出了,但这一天的素材会在下一份里重复出现
         # 一遍(`daily.generate` 的失败方向,见那一段的注释)。只写进 log 的话
         # 面板上那句收尾文案仍是一句干净的"已生成",用户看不出这一轮是降级完成的。
-        if publish_issue:
-            note += f'；{publish_issue}'
+        # (批次发布不成那一句由 `finally` 里的 `amend_done` 补。)
         if res.get('carry_error'):
             note += f";上报记录没写进库({res['carry_error']}),这一天的素材会在下一份里重复出现"
         _set('done', note)
@@ -548,11 +550,16 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         _state['error'] = str(e)
         _set('failed', f'日报生成失败: {e}')
     finally:
-        # 批次一定要关掉:半路抛出来的时候 `close_batch` 那一句走不到,而开着的
-        # 批次会把下一轮管道运行算进一个早就结束的批次(`_publish_in_batch` 还认
-        # `_state['batch']`,所以漏关不至于出错 —— 但也没有理由把它留着)。
         from kb import pipeline as pl
-        pl.close_batch()
+        # 出报之后那一段(位置的两条理由在 `kb.daily_library` 的模块注释里)。
+        library_round(batch, _sync_round)
+        # 批次一定要关掉:半路抛出来的时候上面那一句走不到,而开着的批次会把下一轮
+        # 管道运行算进一个早就结束的批次。
+        #
+        # 发布不成不是日报的失败,但**不许咽下去**(见 `amend_done`)。
+        if issue := pl.close_batch():
+            _log(f'同步结果未发布:{issue}')
+            amend_done(f'；{issue}')
         _release_round(sched_day, retry)
 
 

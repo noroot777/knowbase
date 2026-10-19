@@ -54,6 +54,10 @@ class SettingsRequest(BaseModel):
     enabled: bool
     time: str = '08:00'
     sync: bool = True
+    #: 出完报之后跑不跑条目化和 wiki(`daily_run.LIBRARY_STAGES`)。**缺省 True**:
+    #: 老客户端不带这个字段时照旧跑 —— 缺省 False 等于一次升级把它静默关掉,
+    #: 而它关着的后果是图鉴和三张图谱从此停更(事故形态在 `sync-schedule.md`)。
+    library: bool = True
     first_days: int = Field(default=daily.FIRST_DAYS, ge=1, le=7)
     channels: list[str] | None = None
 
@@ -62,7 +66,7 @@ class SettingsRequest(BaseModel):
 def set_settings(body: SettingsRequest):
     try:
         return daily_run.save_settings(body.enabled, body.time, body.channels,
-                                       body.sync, body.first_days)
+                                       body.sync, body.first_days, body.library)
     except ScheduleUnreadable as e:
         # 保存要先读旧那份来合并(last_fired / next_run)。读不出来时**宁可存不下**
         # 也不拿缺省值当底写一份出去:那会把"今天已经出过报"这类事实一起抹掉。

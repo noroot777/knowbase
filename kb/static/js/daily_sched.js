@@ -18,7 +18,11 @@ let dailySchedReads = 0;
 function dailyScheduleMessage(s) {
   if (!s.enabled) return '定时生成未启用';
   const next = s.next_run ? ` · 下次 ${dailyTime(s.next_run)}` : '';
-  return `已保存：每天 ${s.time} ${s.sync ? '先同步再生成' : '只用已入库的内容生成'}${next}`;
+  // 「出完报还跑不跑图鉴和 Wiki」只在**关着**的时候说。开着是缺省,每次都念一遍
+  // 只会把真正要紧的那两件事(几点、同不同步)挤淡;关着才是用户自己改过的状态,
+  // 而那个状态的后果是图鉴和三张图谱停更 —— 不说一声就看不出来。
+  const lib = s.library === false ? '，不整理图鉴和 Wiki' : '';
+  return `已保存：每天 ${s.time} ${s.sync ? '先同步再生成' : '只用已入库的内容生成'}${lib}${next}`;
 }
 
 // **一次读取必须有终态**(事故形态在 `docs/decisions/sync-schedule.md`,那一节原来
@@ -122,6 +126,7 @@ function fillDailySched(fact) {
   $('daily-on').checked = !!fact.enabled;
   $('daily-time').value = fact.time;
   $('daily-sync').checked = !!fact.sync;
+  $('daily-library').checked = !!fact.library;
   $('daily-firstdays').value = fact.first_days;
   renderDailyChannels();
 }
@@ -160,7 +165,7 @@ async function saveDailySettings() {
   try {
     dailySettings = await pipePost('/api/daily/settings', {
       enabled: $('daily-on').checked, time: $('daily-time').value,
-      sync: $('daily-sync').checked, first_days: Number($('daily-firstdays').value) || 1, channels,
+      sync: $('daily-sync').checked, library: $('daily-library').checked, first_days: Number($('daily-firstdays').value) || 1, channels,
     });
     dailyDirty = false;
     $('daily-sched-msg').textContent = dailyScheduleMessage(dailySettings);

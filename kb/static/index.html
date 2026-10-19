@@ -200,8 +200,9 @@
       <label><input type="checkbox" id="daily-on" onchange="markDailyDirty()"> 启用定时</label>
       <label>每天 <input type="time" id="daily-time" value="08:00" required oninput="markDailyDirty()"></label>
       <label><input type="checkbox" id="daily-sync" checked onchange="markDailyDirty()"> 生成前先同步</label>
+      <label><input type="checkbox" id="daily-library" checked onchange="markDailyDirty()"> 出完报后整理图鉴与 Wiki</label>
       <label>没有上一份时回溯 <input type="number" id="daily-firstdays" min="1" max="7" value="1" required oninput="markDailyDirty()"> 天</label>
-      <span class="hint">需要知识库服务保持运行；管道被占用时顺延。</span>
+      <span class="hint">需要知识库服务保持运行；管道被占用时顺延。整理图鉴与 Wiki 排在日报出完之后，不拖慢出报；它会调用模型，关掉后图鉴与三张图谱将停止更新。</span>
     </fieldset>
     <div class="daily-channels"><span class="daily-channels-label">同步范围</span><div id="daily-channels" role="group" aria-label="同步范围"></div></div>
     <div class="daily-schedule-footer"><span id="daily-sched-msg" role="status">正在读取定时设置…</span><button id="daily-sched-reload" class="ghost" onclick="loadDailySettings()" hidden>重新读取</button><button class="text-button daily-drawer-close" id="daily-sched-close" onclick="cancelDailySched()">收起</button><button id="daily-sched-save" class="ghost" onclick="saveDailySettings()" disabled>保存设置</button></div>
