@@ -111,6 +111,13 @@ RSS 等订阅类来源也走同一契约：原文补抓、翻译和导出失败�
 - **`no_body` 明细协议有三种形态,全都要认**(`wechat_local._no_body_failure`):新版 CLI 给
   `{name,id,account,title,link}`;CLI 读不到结构化报告时给**带空身份的字典**;更旧的 CLI 给一个
   `账号 · 标题` 的裸字符串。后两种都走「列得出来、不可点、不可删」。
+- **抓取阶段与导出阶段共用文章明细身份，不许一个可处理、另一个丢身份。**
+  `local_runner._download` 在正文待重试与单篇异常两处分发同一份 `{name,id,account,title,link}`
+  工作快照，使用 `prepare_article` 确定的实际档案 ID；`wechat_local._report` 两路都经
+  `_no_body_failure` 转换，保留各自的原因，待重试仍为 `pending=True`、单篇异常仍计失败。
+  `errors` 的字符串列表及 CLI 失败退出契约保持不变，新增的 `article_failures` 只补充结构化身份；
+  面板使用这些结构化条目替代相同错误的重复文字，不按错误文本或同名标题反查文章。
+  同标题、同错误的不同文章必须各保留自己的身份；账号/读取器级故障和旧版无身份条目不能伪造按钮。
 - **`账号 · 标题` 那个字符串只够给人看,不许拿它反查是哪一篇** —— 标题会重名、`·` 本身也可能出现在
   号名或标题里。身份走 `export_obsidian.py --report` 写的那份结构化 JSON,CLI 优先读它
   (`cli._no_body_items`)。**报告写不出来不许让这几条整个消失**:那样面板上会显示「导出完成」且明细

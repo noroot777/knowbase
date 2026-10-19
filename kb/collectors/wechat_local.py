@@ -273,10 +273,16 @@ class WeChatLocalCollector:
         return (f"采集中 {event.get('done', 0)}/{event.get('total', 0)}"
                 f" — {event.get('current', '')}")
 
-    @staticmethod
-    def _report(code: int, last: dict) -> None:
+    @classmethod
+    def _report(cls, code: int, last: dict) -> None:
         errors = last.get("errors") or []
-        failures = [{"title": str(e), "reason": "文章发现或入库失败"} for e in errors]
+        articles = last.get("article_failures") or []
+        described = {item.get("error") for item in articles if isinstance(item, dict)}
+        failures = [{"title": str(error), "reason": "文章发现或入库失败"}
+                    for error in errors if error not in described]
+        failures += [cls._no_body_failure(item, pending=False,
+                                         reason="文章发现或入库失败") for item in articles]
+        error_count = len(failures)
         for item in last.get("unreadable_accounts") or []:
             reason = (f"本机现有 {item['messages']} 条推送无法解析"
                       if item["identity_confirmed"] else
@@ -292,7 +298,8 @@ class WeChatLocalCollector:
                                        "无法确认所属公众号，未计入各号条数"
                                        + hint + "；请检查读取器或推送格式"})
         # 账号级诊断先于正文条目，避免首次大量正文待补挤掉账号提示（面板最多 50 条）。
-        failures += [{**item, "pending": True} for item in (last.get("body_failures") or [])]
+        failures += [cls._no_body_failure(item, reason="正文暂未获取，已安排自动重试")
+                     for item in (last.get("body_failures") or [])]
         new = last.get("new_articles", 0)
         coverage = ""
         if "download_succeeded" in last:
@@ -323,12 +330,12 @@ class WeChatLocalCollector:
         if last.get("excluded_articles"):
             coverage += f",已永久排除 {last['excluded_articles']} 篇（同步期间移除）"
         if code != 0:
-            detail = (f"新增 {new} 篇,失败 {len(errors)} 项" if errors
+            detail = (f"新增 {new} 篇,失败 {error_count} 项" if error_count
                       else f"采集失败(退出码 {code})")
             _stage("crawl", "error", detail + coverage, failures=failures)
         else:
-            _stage("crawl", "error" if errors else "ok",
-                   f"新增 {new} 篇" + (f",失败 {len(errors)} 项" if errors else "") + coverage,
+            _stage("crawl", "error" if error_count else "ok",
+                   f"新增 {new} 篇" + (f",失败 {error_count} 项" if error_count else "") + coverage,
                    failures=failures)
 
     # ── 落地:采集器本地库 → obs md ───────────────────────────────────────────
@@ -385,7 +392,8 @@ class WeChatLocalCollector:
         _stage("export", "ok", event.get("detail") or "完成", failures=fails)
         return None if degraded else _receipt(event)
 
-    def _no_body_failure(self, item) -> dict:
+    @classmethod
+    def _no_body_failure(cls, item, *, reason=None, pending=True) -> dict:
         """把 CLI 报上来的一条「没正文」转成面板那份失败明细里的一行。
 
         **三种形态都认**:新版 CLI 给 `{name,id,account,title,link}`;它读不到结构化
@@ -394,18 +402,19 @@ class WeChatLocalCollector:
         点、不可删,而不是指着另一篇文章让人删。**但那一条仍然要列得出来**:漏报
         是静默丢数据。
         """
-        reason = "缺少正文，暂未导出；保留待补，后续同步会按退避时间重试"
+        reason = reason or "缺少正文，暂未导出；保留待补，后续同步会按退避时间重试"
         if not isinstance(item, dict):
-            return {"title": str(item), "reason": reason, "pending": True}
+            return {"title": str(item), "reason": reason, "pending": pending}
+        reason = str(item.get("reason") or reason)
         title = str(item.get("name") or item.get("title") or "")
-        out: dict = {"title": title, "reason": reason, "pending": True}
+        out: dict = {"title": title, "reason": reason, "pending": pending}
         if link := str(item.get("link") or ""):
             out["url"] = link
         if aid := str(item.get("id") or ""):
             # 面板原样回传这一份:这条到底怎么删只有采集器知道(见 `drop_item`)。
             # **`link` 一起带上,它不是冗余**:库里已经没有这一行时,档案 ID 算不出
             # 链接身份,而永久排除要记的正是那个身份(`exclusion_keys`)。
-            out["drop"] = {"channel": self.name, "id": aid,
+            out["drop"] = {"channel": cls.name, "id": aid,
                            "account": str(item.get("account") or ""),
                            "link": link}
         return out
