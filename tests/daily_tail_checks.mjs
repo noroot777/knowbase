@@ -53,7 +53,8 @@ export async function checkDailyTail({ evalJs, check }) {
     toast: document.getElementById('toast-host').textContent,
     text: document.getElementById('daily-progress-text').textContent,
     shown: !document.getElementById('daily-progress').hidden,
-    label: document.getElementById('daily-gen-label').textContent })`);
+    label: document.getElementById('daily-gen-label').textContent,
+    dot: document.getElementById('nav-daily-dot').getAttribute('aria-label') })`);
   const m = JSON.parse(mid);
   check("报一落地就刷新阅读区,不等后面那段整理", m.loads === 1, mid);
   check("报一落地就弹完成提示", /日报已生成/.test(m.toast), mid);
@@ -61,6 +62,10 @@ export async function checkDailyTail({ evalJs, check }) {
         m.shown && /整理工具与 Wiki/.test(m.text) && !/正在生成/.test(m.text), mid);
   check("整理跑着时按钮写「整理中」,不写「生成中」",
         /整理中/.test(m.label) && !/生成中/.test(m.label), mid);
+  // 侧栏那颗点只有读屏软件念得到,所以它最容易被漏掉 —— 而漏掉的后果是:正文写着
+  // 「上次生成失败」、按钮写着「整理中…」,念出来的却是「日报生成中」(审查 N2)。
+  check("整理跑着时侧栏那颗点念的也是整理,不是「日报生成中」",
+        /整理/.test(m.dot) && !/日报生成中/.test(m.dot), mid);
 
   await evalJs(`refreshDailyStatus()`);
   const end = await evalJs(`JSON.stringify({

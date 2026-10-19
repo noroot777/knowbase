@@ -72,6 +72,12 @@ from kb.daily_page import md_dest as _md_dest
 from kb.daily_page import md_text as _md_text
 from kb.daily_page import md_title as _md_title
 from kb.daily_page import queue_tail as _queue_tail
+from kb.daily_overwrite import (          # 覆盖授权那一套,见那个模块的模块头
+    Approval as Approval,
+    OverwriteRefused as OverwriteRefused,
+    check_overwrite,
+    report_version as report_version,
+)
 from kb.scanner import parse_frontmatter
 from kb.source_types import SOURCE_TYPES
 from kb.store import promo_exclude_sql
@@ -472,7 +478,8 @@ def next_window(first_days: int = FIRST_DAYS,
 
 def generate(since: datetime | None = None, until: datetime | None = None,
              first_days: int = FIRST_DAYS, model=None, progress=None,
-             sync_issues: list[dict] | None = None) -> dict:
+             sync_issues: list[dict] | None = None,
+             approval: Approval | None = None) -> dict:
     """生成一份日报并落盘,返回 {date, since, until, docs, total, late, path, model}。
 
     素材为空时抛 LookupError(那不是失败,是"这段时间没有新内容"),调用方据此
@@ -480,6 +487,9 @@ def generate(since: datetime | None = None, until: datetime | None = None,
 
     `sync_issues` 是这一轮没同步成功的通道(`daily_run` 给的通道结果),原样写进
     日报:允许降级用已有内容出报,但不能让它看起来像是全都同步到了。
+
+    `approval` 是**用户批准覆盖的那一天那一版**,要盖掉一份已经有的日报时核对它
+    (`kb.daily_overwrite`,`None` = 没有人可问那一档)。对不上抛 `OverwriteRefused`。
     """
     from kb import llm, llm_stages, store
 
@@ -489,6 +499,9 @@ def generate(since: datetime | None = None, until: datetime | None = None,
     if since >= until:
         raise ValueError('日报的起始时刻必须早于截止时刻')
     day = until.date().isoformat()
+    # **早一道**:这一天已经有一份、而批准的不是它时,别先去花那次模型钱。真正的
+    # 那一道在落盘那一段里(这两者之间别的进程照样能写一版进来)。
+    check_overwrite(day, approval)
     conn = store.connect()
     try:
         _ensure_ledger(conn, first_days, until)
@@ -528,6 +541,10 @@ def generate(since: datetime | None = None, until: datetime | None = None,
     # ②**盖章排在落盘之后**:章盖不上只是这一天的素材下一份再出现一遍(多报一次,
     #   看得见),反过来落盘失败而章已经盖上,这批素材就再也选不到了。
     with commit_lock():
+        # **真正那一道闸就在这儿**:放回旧章之前(它会改账本)、落盘之前。核对
+        # 完到 `_write` 之间整段都在 `commit_lock` 里,所以这一刻的核对作用在
+        # 真正要被替换掉的那一份上。
+        check_overwrite(day, approval)
         conn = store.connect()
         try:
             release(conn, day)

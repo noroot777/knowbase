@@ -350,7 +350,8 @@ def request_stop() -> tuple[bool, str]:
 
 
 def _run(since: datetime | None, until: datetime | None, sync: bool,
-         channels: list[str], first_days: int) -> None:
+         channels: list[str], first_days: int,
+         approval: daily.Approval | None = None) -> None:
     sched_day, retry, batch = _state['sched_day'], False, ''
     try:
         if sync:
@@ -406,7 +407,7 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         issues = _sync_issues()
         res = daily.generate(since=since, until=until, first_days=first_days,
                              progress=lambda text: _set('generate', text),
-                             sync_issues=issues)
+                             sync_issues=issues, approval=approval)
         _state.update(result=res, date=res['date'], since=res['since'], until=res['until'])
         # 完成这句话要把同步缺口说出来。"日报已生成"配一个绿勾、外加一份看起来
         # 完整的日报,用户没法区分"全都同步到了"和"一个来源都没同步到、直接拿
@@ -426,6 +427,12 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         _set('done', note)
     except LookupError as e:
         # "这段时间没有新内容"不是故障,重试多少次都是同一个结果。
+        _state['error'] = str(e)
+        _set('failed', str(e))
+    except daily.OverwriteRefused as e:
+        # 要盖的那一天不是用户批准的那一天(同步跨了零点、或者期间换了一版)。
+        # **同 LookupError 一档:不置 retry** —— 重试多少次都是同一个结果,得让
+        # 用户按着真正的目标再确认一次。那份日报一个字节都没动。
         _state['error'] = str(e)
         _set('failed', str(e))
     except Exception as e:                       # noqa: BLE001 - 面板要看到原因
@@ -481,7 +488,7 @@ def _release_round(sched_day: str, retry: bool) -> None:
 def start(since: datetime | None = None, until: datetime | None = None,
           sync: bool = True, channels: list[str] | None = None,
           first_days: int | None = None, trigger: str = 'manual',
-          sched_day: str = '') -> bool:
+          sched_day: str = '', approval: daily.Approval | None = None) -> bool:
     """起一轮日报。已经在跑返回 False。
 
     `since`/`until` 都不给时由 `daily.next_window()` 接着上一份日报算,那是
@@ -502,6 +509,12 @@ def start(since: datetime | None = None, until: datetime | None = None,
     if sync and not picked:
         raise ValueError('同步范围里一个可用来源都没有:先勾选至少一个,'
                          '或者把「先同步一轮」的勾去掉(只用已入库的内容出报)')
+    # **覆盖授权早一道**:现在就能看出批准的不是这一天时,别让用户先等几小时同步。
+    # 真正那一道在落盘之前(`daily.generate`)—— 目标日期要等同步跑完才定下来,
+    # 所以这一道只拦「此刻就已经对不上」的那一档,拦不住跨零点那一档。
+    # **排在上面那几道入参检查之后**:两者都能拒,而「同步范围一个都没勾」是用户
+    # 这一刻能直接改的事,先把它说出来更有用(授权那一句要他回去再确认一次)。
+    daily.check_overwrite((until or datetime.now()).date().isoformat(), approval)
     with _lock:
         if _state['running']:
             return False
@@ -523,7 +536,8 @@ def start(since: datetime | None = None, until: datetime | None = None,
         _log(f'开始生成日报({window})'
              + (f',先同步 {len(picked)} 个来源' if sync else ''))
     threading.Thread(target=_run, args=(since, until, bool(sync), picked,
-                                        first_days or settings['first_days']),
+                                        first_days or settings['first_days'],
+                                        approval),
                      daemon=True).start()
     return True
 

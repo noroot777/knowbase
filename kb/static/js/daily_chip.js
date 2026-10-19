@@ -21,30 +21,41 @@ function dailyTargetDate() {
     : dailyToday();
 }
 
-// 这一次会不会盖掉一份已经有的日报 —— 要盖就先问一声。返回「还要不要继续」。
+// 这一次会不会盖掉一份已经有的日报 —— 要盖就先问一声。
+//
+// 返回的是**一份批准**(`{day, version}`,跟着请求发下去由后端在落盘之前核对),
+// 取消时返回 `null`。**不是一个布尔值**:点击那一刻的浏览器日期不是写文件时的
+// 目标身份(勾了「先同步一轮」时目标要等几小时后同步跑完才定下来),所以"问过了"
+// 这件事必须带着它问的是**哪一天哪一版**一起下去(审查 R4)。
 //
 // **手动出报有两个入口,确认只能有这一份**:日报页那颗按钮,和同步中心起跑弹窗
-// 里的「跑完出日报」。后端没有第二道闸(`daily.generate` 最后是 `tmp.replace(path)`),
-// 漏掉确认的那个入口就是静悄悄盖掉一份日报(审查 R4)。
+// 里的「跑完出日报」。
 //
 // `known` 是调用方**已经核实过**的那一档(日报页手里就有:`dailyTargetReport()`
 // 的 true/false/null)。给 null 就在这儿问一次后端 —— 同步中心那条路平时压根没读
 // 过日报清单。**读不出来也问**:多问一句的代价是一次点击,不问的代价是盖掉一份
 // 日报(口径同 `dailyTargetReport` 的 null 那一档)。
+//
+// `version` 三档,**每次都重新读一遍那份清单拿它**:后端对不上会拒(「期间换了
+// 一版」),拿一份缓存里的旧版本重发只会在同一句话上卡住。
+//   '<时刻>' = 核实过就是这一版;'*' = 问过、而且说清了查不到有没有;
+//   ''       = 压根没问过他(界面判定那一天没有日报)。
 async function confirmDailyOverwrite(date, known = null) {
-  let exists = known;
-  if (exists !== true && exists !== false) {
-    try {
-      exists = ((await pipeJson('/api/daily/reports')).reports || [])
-        .some(r => r.date === date);
-    } catch { exists = null; }
-  }
-  if (exists === false) return true;
-  return await confirmBox({
+  const bare = { day: date, version: '' };
+  if (known === false) return bare;        // 核实过:那一天没有,不用问
+  let version = '';
+  try {
+    const row = ((await pipeJson('/api/daily/reports')).reports || [])
+      .find(r => r.date === date);
+    if (!row && known !== true) return bare;
+    version = row ? String(row.generated || '') || '*' : '*';
+  } catch { version = '*'; }               // 读不出来:照旧问,批的是「那一天不管哪一版」
+  const ok = await confirmBox({
     title: `重新生成 ${date} 的日报？`,
-    body: exists === true ? '这一天已经有一份日报，重新生成会覆盖它。'
-      : '查不到这一天有没有日报；要是已经有一份，这一次会覆盖它。',
+    body: version === '*' ? '查不到这一天有没有日报；要是已经有一份，这一次会覆盖它。'
+      : '这一天已经有一份日报，重新生成会覆盖它。',
     ok: '重新生成' });
+  return ok ? { day: date, version } : null;
 }
 
 function dailyTargetReport() {

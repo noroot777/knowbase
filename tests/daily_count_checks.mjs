@@ -242,6 +242,21 @@ export async function checkNewContentCount({ evalJs, waitFor, check }) {
     if (asked) await evalJs(
       `document.querySelector('.confirm-mask [data-act=cancel]').click()`);
   }
+  // **确认之后,批准要跟着请求下去**:点击这一刻的浏览器日期不是写文件时的目标
+  // 身份(勾了先同步的那条路要先跑几小时),所以"问过了"必须带着它问的是哪一天、
+  // 哪一版,由后端在落盘之前核对(审查 R4)。只验"弹了确认框"的实现照样全绿,而
+  // 跨零点那一档照旧盖掉没人问过的那一份。
+  await evalJs(`document.getElementById('daily-gen').click()`);
+  if (await waitFor(`!!document.querySelector('.confirm-mask [data-act=ok]')`, 5000)) {
+    await evalJs(`document.querySelector('.confirm-mask [data-act=ok]').click()`);
+    await waitFor(`(window.__runs || []).length === 1`, 5000);
+  }
+  const sent = JSON.parse(await evalJs(`JSON.stringify(window.__runs[0] || null)`));
+  check("确认之后那份批准跟着请求下去:哪一天 + 哪一版",
+        !!sent && sent.overwrite_day === (await evalJs(`dailyTargetDate()`))
+        && typeof sent.overwrite_version === 'string'
+        && sent.overwrite_version !== '', JSON.stringify(sent));
+  await evalJs(`(() => { window.__runs.length = 0; return true; })()`);
   await evalJs(`(() => { document.getElementById('daily-presync').checked = false;
                          renderDailyButtons(); return true; })()`);
   check("问之前一次都没真发出去",

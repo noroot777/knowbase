@@ -105,7 +105,16 @@ def library_round(batch: str, sync_round) -> None:
     except ScheduleUnreadable as e:
         # 读不出设置**就不跑**:这一段烧额度,而"读不出来"证明不了用户开着它。
         # 反过来(读不出就跑)是拿一份读不懂的配置替用户花钱。
-        _log(f'{LIBRARY_LABEL}:读不出定时设置({e}),这一轮跳过')
+        #
+        # **但这一档要进「N 项未完成」**(`_sync_issues` 读 `channels`):我们本来
+        # 要整理、只是不知道用户开没开,那是一件**没做成**的事。只写一行日志的话
+        # 日报结果照旧是干干净净的 done,图鉴和三张图谱却停更了,而用户只有去翻
+        # 日志才知道(审查 N1)。**上面「用户自己关掉了」那一档不进这份名单** ——
+        # 那不是没做成,是不做。
+        _state['channels'].append(
+            {'channel': '', 'label': LIBRARY_LABEL, 'status': 'skipped',
+             'detail': f'读不出定时设置({e}),这一轮没整理'})
+        library_progress('skipped', f'{LIBRARY_LABEL}:读不出定时设置({e}),这一轮跳过')
         return
     # **进度写自己那一格(`progress=library_progress`),不写日报的 phase/detail。**
     # 写同一格就是把已经确定的 done/failed 改写成「同步中」,而前端只在

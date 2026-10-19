@@ -392,10 +392,12 @@ async function runDaily() {
   // 覆盖确认是**两个出报入口共用的那一份**(`confirmDailyOverwrite`,同步中心
   // 那颗「跑完出日报」走的也是它):按「这一份会写到哪一天」判,和按钮叫什么
   // 名字共用 `dailyTargetDate` + `dailyTargetReport`。
-  if (!await confirmDailyOverwrite(dailyTargetDate(), dailyTargetReport())) return;
+  const approval = await confirmDailyOverwrite(dailyTargetDate(), dailyTargetReport());
+  if (!approval) return;
   dailyBusy = true; renderDailyButtons();
   try {
-    await pipePost('/api/daily/run', { ...custom, sync, channels });
+    await pipePost('/api/daily/run', { ...custom, sync, channels,
+      overwrite_day: approval.day, overwrite_version: approval.version });
     toast(sync ? '已开始同步并生成日报' : '已开始生成日报',
       { key: 'daily', type: 'ok', detail: sync ? '依次同步所选来源后生成，离开页面不影响。' : '直接用已入库的内容生成。' });
   } catch (e) {
@@ -427,7 +429,14 @@ function renderDailyButtons() {
   const generating = running && dailyState?.phase === 'generate';
   $('daily-stop').disabled = generating || !!dailyState?.stop_requested;
   $('daily-stop').title = generating ? '正在出稿，这一阶段不能中途停止' : '';
+  // 侧栏那颗点亮着的时候,读屏软件念的是它的 `aria-label` —— **那句话也得跟着
+  // 生命周期走**:结论已经落下、还在跑 = 跑的是出报之后那段整理,这时念「日报
+  // 生成中」就是一句假话(按钮上写的是「整理中…」,正文写的是「上次生成失败」,
+  // 只有这一处还停在旧说法,审查 N2)。口径同按钮那一处:`dailySettled`。
   $('nav-daily-dot').hidden = !running;
+  $('nav-daily-dot').setAttribute(
+    'aria-label', dailySettled(dailyState) ? '日报跑完了，正在整理图鉴和 Wiki'
+                                          : '日报生成中');
 }
 
 // 同步缺口横幅:这一轮有哪几项没跑成功。toast 会自己消失,而"这份日报只用了

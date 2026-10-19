@@ -163,14 +163,31 @@ class RunRequest(BaseModel):
     until: str | None = None
     sync: bool = True
     channels: list[str] | None = None
+    #: 用户在界面上批准覆盖的是**哪一天那一版**日报(`kb.daily_overwrite`)。
+    #: 浏览器日期不是写文件时的目标身份,所以批准要跟着请求一起下来、在落盘之前
+    #: 核对(审查 R4)。
+    overwrite_day: str | None = None
+    #: 他看到的是哪一版:`'<时刻>'` / `'*'`(明确告知过"查不到有没有") /
+    #: `''`(**压根没问过**)。三档的含义和各自的失败方向见 `kb.daily_overwrite`。
+    overwrite_version: str = ''
 
 
 @router.post('/run')
 def run(body: RunRequest | None = None):
     body = body or RunRequest()
+    # **手动这条路一律带着一份批准**,带不出来就是空的那一份(day 为空、version
+    # 为空)—— 那正好让它在已经有一份日报时拒掉,而不是静悄悄盖过去。定时那条路
+    # 走的是 `daily_run.tick`,它压根不经过这里(没有人可问,见那个模块)。
+    approval = daily.Approval(day=_check_day(body.overwrite_day) or '',
+                              version=body.overwrite_version or '')
     try:
         started = daily_run.start(_check_time(body.since), _check_time(body.until),
-                                  sync=body.sync, channels=body.channels)
+                                  sync=body.sync, channels=body.channels,
+                                  approval=approval)
+    except daily.OverwriteRefused as e:
+        # 不是入参错(格式都对),是**授权对不上目标** —— 让界面原样把这句话说出来,
+        # 用户据此再确认一次。
+        raise HTTPException(409, str(e)) from None
     except ScheduleUnreadable as e:
         # 手动生成也要读设置拿同步范围。拿缺省范围替它跑等于**悄悄换了同步范围**
         # (比如用户只留了 RSS,缺省却带上公众号),所以这里也如实报读不出来。

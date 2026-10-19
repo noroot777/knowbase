@@ -268,11 +268,20 @@ async function startPipeFromModal() {
   const daily = pipeDailyOn();
   const path = daily ? '/api/daily/run' : '/api/pipeline/run';
   const body = daily ? { sync: true, channels: pipeReadyChannels() } : pipeRunBody();
-  // 出报会盖掉当天那份（`daily.generate` 最后是 `tmp.replace(path)`，
-  // 后端没有第二道闸）。**走的是和日报页那颗按钮同一份确认**
-  // （`confirmDailyOverwrite`）；这条路不带区间，所以目标就是今天，而同步
-  // 中心平时没读过日报清单 —— 交给它自己问一次（审查 R4）。
-  if (daily && !await confirmDailyOverwrite(dailyToday())) return;
+  let approval = null;
+  // 出报会盖掉当天那份（`daily.generate` 最后是整份替换文件，不可恢复）。
+  // **走的是和日报页那颗按钮同一份确认**（`confirmDailyOverwrite`）；这条路不带
+  // 区间，所以目标就是今天，而同步中心平时没读过日报清单 —— 交给它自己问一次。
+  // 后端在落盘之前还会按这份批准核对一次（`kb/daily_overwrite.py`）：那一道管的是
+  // 「问的是不是真正要写的那一份」，这一道管的是「问没问过」，两道都要。
+  if (daily) {
+    approval = await confirmDailyOverwrite(dailyToday());
+    if (!approval) return;
+    // 批准跟着请求下去:这条路要先跑几小时同步,目标日期是同步跑完才定下来的,
+    // 浏览器这一刻的日期不是写文件时的目标身份(审查 R4)。
+    Object.assign(body, { overwrite_day: approval.day,
+                          overwrite_version: approval.version });
+  }
   pipeAction = 'start'; pipeSetupError(); invalidatePipeStatus();
   let failure = '';
   $('pipe-fields').disabled = true; renderPipeEst(); renderPipeButtons();

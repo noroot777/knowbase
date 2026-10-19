@@ -133,10 +133,16 @@ const holdList = () => evalJs(HOLD(`String(path) === '/api/daily/reports'`));
 // 后端按**本地**朴素时间解析,而 toISOString() 给的是 UTC —— 差 8 小时,早上还会把
 // until 推到昨天,那就不是「重新生成今天这一份」了。
 const nowLocal = () => new Date().toLocaleString('sv').replace(' ', 'T').slice(0, 16);
+// 摆盘要的就是「重新生成同一天」,所以带一份**明说过的**覆盖批准
+// (overwrite_version: '*',含义见 kb/daily_overwrite.py):界面上那条路由确认
+// 框产生它,绕开界面直打这条 API 的摆盘要自己带 —— 不带的话后端按「压根没问过
+// 他」拒掉(审查 R4),而这几条摆盘只看 status、看不见那个 409。
+// (注意:这段注释在模板字符串里,不许出现反引号。)
 const genRange = (since) => evalJs(`(async () => {
   await fetch('/api/daily/run', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sync: false, since: ${JSON.stringify(since)},
-                           until: ${JSON.stringify(nowLocal())} }) });
+                           until: ${JSON.stringify(nowLocal())},
+                           overwrite_day: '${today}', overwrite_version: '*' }) });
   for (let i = 0; i < 60; i++) {
     const s = await (await fetch('/api/daily/status')).json();
     if (!s.running && s.phase !== 'starting') return s.phase;

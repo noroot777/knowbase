@@ -472,8 +472,15 @@ check("摆盘:阅读区此刻是别的那一份",
       (await evalJs(`document.getElementById('daily-reader-title').textContent`)) !== `日报 · ${today}`,
       await evalJs(`document.getElementById('daily-reader-title').textContent`));
 const quietRun = await evalJs(`(async () => {
+  // 摆盘要的就是「重新生成同一天」,所以带一份**明说过的**覆盖批准
+  // (overwrite_version: '*',含义见 kb/daily_overwrite.py):界面上那条路由确认
+  // 框产生它,绕开界面直打这条 API 的摆盘要自己带 —— 不带的话后端按「压根没问过
+  // 他」拒掉(审查 R4),而这几条摆盘只看 status、看不见那个 409。
+  // (注意:这段注释在模板字符串里,不许出现反引号。)
   await fetch('/api/daily/run', { method: 'POST',
-    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sync: false }) });
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sync: false, overwrite_day: '${today}',
+                           overwrite_version: '*' }) });
   for (let i = 0; i < 60; i++) {
     const s = await (await fetch('/api/daily/status')).json();
     if (!s.running && s.phase !== 'starting') return JSON.stringify({ phase: s.phase, id: s.run_id });
@@ -540,7 +547,9 @@ const stale = await evalJs(`(() => {
 check("摆盘:拿得到页面记着的那一段身份", /^daily-/.test(stale), stale);
 const collided = await evalJs(`(async () => {
   await fetch('/api/daily/run', { method: 'POST',
-    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sync: false }) });
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sync: false, overwrite_day: '${today}',
+                           overwrite_version: '*' }) });
   for (let i = 0; i < 60; i++) {
     const s = await (await fetch('/api/daily/status')).json();
     if (!s.running && s.phase !== 'starting') return JSON.stringify({ phase: s.phase, id: s.run_id });
@@ -592,7 +601,9 @@ check("列表重读成功不会顺手清掉生成失败的原因",
       await evalJs(`dailyErrorKind + ' / ' + document.getElementById('daily-error-text').textContent`));
 const quietOk = await evalJs(`(async () => {
   await fetch('/api/daily/run', { method: 'POST',
-    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sync: false }) });
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sync: false, overwrite_day: '${today}',
+                           overwrite_version: '*' }) });
   for (let i = 0; i < 60; i++) {
     const s = await (await fetch('/api/daily/status')).json();
     if (!s.running && s.phase !== 'starting') return JSON.stringify({ phase: s.phase, id: s.run_id });

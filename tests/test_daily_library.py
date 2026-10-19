@@ -86,12 +86,22 @@ class LibraryRoundTests(unittest.TestCase):
 
     def test_an_unreadable_schedule_does_not_spend_money(self):
         """读不出设置就不跑:这一段烧额度,而"读不出来"证明不了用户开着它。
-        反过来(读不出就跑)是拿一份读不懂的配置替用户花钱。"""
+        反过来(读不出就跑)是拿一份读不懂的配置替用户花钱。
+
+        **而且它要在成绩单上留一项**:我们本来要整理、只是不知道开没开,那是一件
+        没做成的事。只写一行日志的话日报结果照旧是干净的 done、图鉴和三张图谱却
+        停更了,用户只有翻日志才知道。跟上面「用户自己关掉了」那一档的区别就在
+        这儿 —— 那一档不进名单(不是没做成,是不做)。
+        """
         def boom():
             raise daily_run.ScheduleUnreadable('配置读不出来')
         with patch('kb.daily_run.load_settings', boom):
             daily_library.library_round('b', self.sync_round)
         self.assertEqual([], self.rounds)
+        self.assertEqual(1, len(self.channels), '读不出设置那一档没在成绩单上留项')
+        self.assertEqual('skipped', self.channels[0]['status'])
+        self.assertIn('读不出定时设置', self.channels[0]['detail'])
+        self.assertIn('配置读不出来', self.channels[0]['detail'], '没说读不出来的原因')
 
     def test_a_stop_request_skips_it_but_says_so(self):
         """停止是对整轮说的(口径同入库那一段)。**但它要在成绩单上留一项** ——

@@ -11,9 +11,15 @@
   Wiki)。所以勾上它之后:
   - **步骤那一组固定成 `PIPE_DAILY_STAGES` 并禁掉**。留着能改 = 用户取消了「提取要
     点」、后端照旧提取。
-  - **时间范围和订阅那两块禁掉**(`#pipe-scope-fields`)。`daily_api.RunRequest` 只有
-    `since/until/sync/channels`,而 `since/until` 说的是**哪些素材进这份日报**,不是
-    抓哪几天;订阅名单它压根不收。
+  - **时间范围和订阅那两块禁掉**(`#pipe-scope-fields`)。`daily_api.RunRequest` 收的
+    是 `since/until/sync/channels` 加一份覆盖批准,而 `since/until` 说的是**哪些素材
+    进这份日报**,不是抓哪几天;订阅名单它压根不收。
+  - **起跑之前要问一声会不会盖掉当天那份日报,而且要把那份批准跟着请求发下去**
+    (`confirmDailyOverwrite` → `overwrite_day` / `overwrite_version`)。确认框和日报
+    页那颗按钮共用一份;这条路不带区间,目标就是今天。**后端在落盘之前还会按这份
+    批准核对一次**(`kb/daily_overwrite.py`,口径在 `daily.md` 第一节):那一道管
+    「问的是不是真正要写的那一份」(这一轮要先跑几小时同步,跨零点就不是今天了),
+    这一道管「问没问过」—— 漏掉这一道的后果是点一次「跑完出日报」就静悄悄盖掉。
   - **汇总那一句里不许念订阅数和日期段** —— 念了就是一句假话。
   - **出完报那两段也要念出来,而且顺序是「出报插在中间」**(`PIPE_DAILY_TAIL`,
     真顺序在 `daily_run` 收尾那个 finally 里)。少念了,用户就会被一段几十分钟的

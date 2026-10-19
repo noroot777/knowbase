@@ -230,11 +230,17 @@ check("勾了出日报:走的是日报通道,请求体是 sync + 来源",
       && !('stages' in posted[0].body), JSON.stringify(posted[0]));
 check("今天还没有日报:不多问一句覆盖",
       (await evalJs(`document.querySelectorAll('.confirm-mask').length`)) === 0);
+// 没问过他就等于没批准覆盖:请求里那份批准的版本是空的,后端据此在"那一天其实
+// 已经有一份"时拒掉(审查 R4;空版本的含义见 kb/daily_overwrite.py)。
+check("没问过那一档:请求带着今天这一天 + 空版本",
+      posted[0]?.body.overwrite_day === today
+      && posted[0]?.body.overwrite_version === "", JSON.stringify(posted[0]?.body));
 
 // ── 5b. 今天已经有一份日报:起跑前要先问一句覆盖 ──────────────
-// 后端没有第二道闸（`daily.generate` 最后是 `tmp.replace(path)`），而日报页
-// 那颗按钮一直是先问的 —— 漏掉这一道就是静悄悄盖掉一份日报（审查 R4）。
-REPORTS = [{ date: today, docs: 12 }];
+// 日报页那颗按钮一直是先问的，这条路漏掉这一道就是静悄悄盖掉一份日报。后端在落盘
+// 之前还会按这份批准核对一次（`kb/daily_overwrite.py`）：那一道管「问的是不是真正
+// 要写的那一份」，这一道管「问没问过」，两道都要。
+REPORTS = [{ date: today, docs: 12, generated: "2026-10-20 07:31" }];
 await evalJs(`openPipeModal()`);
 await setup("弹窗再开一次", until(`document.querySelectorAll('#pipe-stage-list input').length === 6`, 4000));
 await setDaily(true);
@@ -257,6 +263,12 @@ await setup("确认之后才发出请求", until(`true`, 100).then(() => sleep(5
 check("确认之后走的还是日报通道",
       posted[0]?.path === '/api/daily/run' && posted[0].body.sync === true,
       JSON.stringify(posted[0]));
+// **点击那一刻的浏览器日期不是写文件时的目标身份**(这条路要先跑几小时同步),
+// 所以"问过了"必须带着它问的是哪一天哪一版下去,由后端在落盘之前核对(审查 R4)。
+check("批准跟着请求下去:哪一天 + 哪一版",
+      posted[0]?.body.overwrite_day === today
+      && posted[0]?.body.overwrite_version === "2026-10-20 07:31",
+      JSON.stringify(posted[0]?.body));
 REPORTS = [];
 
 // ── 6. 取消那个勾:还回用户自己那一份,不是重置成全选 ────────────────────────
