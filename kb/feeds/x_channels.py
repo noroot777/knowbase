@@ -393,6 +393,17 @@ def readiness(settings: dict) -> tuple[bool, str, str]:
         return False, '没有发现开着远程调试的浏览器', cdp_attach.ENABLE_HINT
     # browser:profile 里有 Cookies 文件就算登录过。真失效要等抓取时才知道
     # (那时 `x_browser` 会认出登录页并给出重新登录的提示)。
+    #
+    # **「登录窗口还开着」排在「登录过没有」前面。** 它是一个**此刻挡着抓取**的
+    # 事实,而且两档的下一步正好相反:还没登录过要去开那个窗口,窗口开着要去关它。
+    # 顺序反了的话,刚点开窗口、还没登录完的人收到的是「还没有登录过 X」——
+    # 一句正确但没用的话,而真正该知道的「它正挡着每一轮同步」一个字没说
+    # (2026-10-19 那场事故里,面板从头到尾没提过这件事)。
+    from kb.feeds.x_cdp import login_window_left
+    if left := login_window_left(str(BROWSER_PROFILE)):
+        return (False, 'X 登录窗口开着,它占着抓取要用的浏览器',
+                f'在那个窗口里登录完就关掉它；忘了关也不要紧,'
+                f'{int(left // 60) + 1} 分钟后它会自动关闭')
     if not (BROWSER_PROFILE / 'Default' / 'Cookies').exists():
         return False, '浏览器通道还没有登录过 X', ''
     return True, '', ''

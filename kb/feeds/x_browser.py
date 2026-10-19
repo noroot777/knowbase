@@ -35,7 +35,8 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from kb.feeds import x_article
-from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
+from kb.feeds.x_cdp import (Chrome, CdpError, login_window_left, profile_busy,
+                            release_login_window)
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 # 连续多少条老推文算"翻到底了"。1 不够:转推带的是原推时间,单条老的很常见。
@@ -421,6 +422,15 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
         return {h: {'entries': [], 'error': '', 'skipped': '已按停止请求中断'}
                 for h, _ in jobs}
     deadline = time.monotonic() + budget if budget else None
+    if not attach:
+        # **开工前先把到点的登录窗口关掉。** 它攥着 profile 的 ProcessSingleton
+        # 锁,不关的话下面 `browser_session` 起不来,而那个异常会被每个账号各记
+        # 一条失败(实测 51 个号 50 条同一句话),整条通道从此每轮全红。
+        # 没到点的不动 —— 那一档起不来照旧落到各账号的 error 上,文案里有
+        # 「关掉之前打开的登录窗口」这句话。
+        if note := release_login_window(profile):
+            if on_progress:
+                on_progress(note)
     try:
         with browser_session(profile, chrome_path, attach=attach) as page:
             page.open_page('about:blank')
@@ -505,32 +515,44 @@ def _newest(entries: list[dict], fallback: str) -> str:
 
 
 def open_login_window(profile: str, chrome_path: str = '') -> str:
-    """开一个**有头**窗口让用户自己登录 X,起完就不管了。
+    """开一个**有头**窗口让用户自己登录 X,起完**记下它、并安排到点关掉**。
 
     这一步必须有头、也必须是用户点出来的:输密码、过两步验证、认人机校验都
     得他本人做。起完立刻返回 —— 等他登录完是几分钟的事,一个 HTTP 请求不该
     挂在那里。登录态落在 profile 目录里,之后的定时抓取无头复用它。
+
+    **「起完就不管了」已经改掉了。** 这个窗口攥着 profile 的 ProcessSingleton 锁,
+    忘了关就是这条通道每一轮同步全红(2026-10-19 实测形态写在
+    `x_cdp.remember_login_window` 上面那段)。所以起完要记下它的身份、并起一个
+    守望线程到点关掉;抓取和「检查连接」开工前还各兜一道。文案照旧请用户自己关
+    —— 自己关是最快的那条路,自动关只是**忘了关时的下限**。
 
     **这一档用的是一个独立 profile,不是用户日常那个 Chrome** —— 所以要在这里
     单独登录一次。好处是它不依赖用户:日常窗口关了、浏览器重启了,定时抓取照旧
     无头跑。想免掉这次登录就换成「我日常用的浏览器」那一档(`x_channels.ATTACH`,
     直连已经登录好的浏览器),它的边界和代价写在 `cdp_attach` 的模块注释里。
     """
-    from kb.feeds.x_cdp import find_chrome
+    from kb.feeds.x_cdp import (LOGIN_WINDOW_TTL, find_chrome,
+                                remember_login_window, watch_login_window)
     binary = find_chrome(chrome_path)
     os.makedirs(profile, exist_ok=True)
     if profile_busy(profile):
         raise XBrowserError('登录窗口已经开着了,请在那个窗口里完成登录')
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [binary, f'--user-data-dir={profile}', '--no-first-run',
              '--no-default-browser-check', 'https://x.com/login'],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError as e:
         raise XBrowserError(f'打不开登录窗口:{e}') from None
+    # **先记录、再守望**:守望线程第一跳就要读这份记录。反过来的话它会读到
+    # 「没有我们的窗口」当场收工,而窗口已经起来了 —— 那就退回"起完就不管了"。
+    remember_login_window(profile, proc.pid)
+    watch_login_window(profile)
     return ('已打开登录窗口。在里面登录你要用的 X 账号,登录成功后**关掉这个窗口**'
-            '(抓取时要独占这个 profile),再回来点一次「检查连接」。')
+            f'(抓取时要独占这个 profile);忘了关也不要紧,{int(LOGIN_WINDOW_TTL // 60)} '
+            '分钟后它会自动关闭。登录完回来点一次「检查连接」。')
 
 
 def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
@@ -587,7 +609,16 @@ def probe(profile: str, chrome_path: str = '', *,
                 return False, f'{problem}。{cdp_attach.ENDPOINT_HINT}'
             return False, '没有发现开着远程调试的浏览器。' + cdp_attach.ENABLE_HINT
     elif profile_busy(profile):
-        return False, '这个 profile 正被另一个窗口占着(登录窗口还开着?)。关掉它再试'
+        # 到点的先关掉再判:用户点「检查连接」正是想知道"这条通道现在行不行",
+        # 而我们自己起的、早该关的那个窗口不该算成"行不通"。
+        release_login_window(profile)
+        if profile_busy(profile):
+            left = login_window_left(profile)
+            if left:
+                return False, (f'X 登录窗口还开着,它占着这个 profile。'
+                               f'在那个窗口里登录完就关掉它,或者等 {int(left // 60) + 1} '
+                               '分钟它自动关闭')
+            return False, '这个 profile 正被另一个窗口占着(登录窗口还开着?)。关掉它再试'
     try:
         with browser_session(profile, chrome_path, attach=attach) as page:
             page.open_page('about:blank')
