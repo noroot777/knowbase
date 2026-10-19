@@ -28,6 +28,12 @@ class HistoryCase(TestCase):
         self.temp.cleanup()
         state._state.clear()
         state._state.update(self.saved)
+        # **进程内常驻那几格也要还回去**(口径同 `pipeline_round_fixture`
+        # 的 `_PROCESS_GLOBALS`):`reset()` 只在 setUp 里清,留着的话这一族最后
+        # 一条用例的欠账会漏进**别的文件** —— 那边每次重试都被「留档损坏,跑一次
+        # 完整同步」顶回去,而它单跑永远是绿的。
+        state._restored, state._restore_gap, state._seq_hwm = '', '', 0
+        state._persist_error = ''
 
     def reset(self, run_id=''):
         # 「刚启动,还没从磁盘恢复过」。`running=True` 让恢复短路,所以这一句对自己
@@ -53,23 +59,46 @@ class HistoryCase(TestCase):
             export_filter={}, crawl_retry={}, log=[],
             stages={name: {'status': '', 'detail': ''} for name in state.STAGES})
 
+    def persisted_files(self):
+        """一轮的终态会落到哪几份文件上。
+
+        跟 `pipeline_state._SAVE_LABEL` 那几个留档出口一一对应(状态文件、当日账本、
+        历史记录)。开工标记和失败名单各走自己的路,**不在这里** —— 把它们一起打掉
+        会改掉这几局的前提(标记写不上就不是「跑过而没留下终态」了)。
+        """
+        from kb.pipeline_daybook import _book_file
+        return (state._STATE_FILE, state._history_file(), _book_file())
+
     def only_state_write_fails(self):
-        """状态文件写不上、历史写得上 —— 磁盘上最新那一轮**只在历史里**。"""
+        """状态文件写不上、另两份写得上 —— 磁盘上最新那一轮**只在历史里**。"""
         return self._write_fails_on(lambda path: path == state._STATE_FILE)
 
     def only_history_write_fails(self):
         """历史写不上、状态写得上 —— 那一轮**不在历史里**(位置证据就此缺失)。"""
-        return self._write_fails_on(lambda path: path != state._STATE_FILE)
+        return self._write_fails_on(lambda path: path == state._history_file())
 
-    def _write_fails_on(self, hit):
-        real = state._write_atomic
+    def all_writes_fail(self, exc=None):
+        """这一轮的终态**一份都没落下来**(开工标记照旧写得上,它是另一条路)。"""
+        return self._write_fails_on(lambda path: path in self.persisted_files(), exc)
 
-        def pick(path, data):
-            if hit(path):
-                raise PermissionError('read-only')
-            return real(path, data)
+    def _write_fails_on(self, hit, exc=None):
+        """**注入打在真实的那次 IO 上**(`Path.replace`,原子替换的最后一下)。
 
-        return patch.object(state, '_write_atomic', side_effect=pick)
+        打在某个模块的 `_write_atomic` 名字上是不行的:留档的三份各住在自己的模块
+        里、各自 `from ... import _write_atomic`,那个名字**带的是绑定不是引用** ——
+        历史那一份搬进 `kb/pipeline_history.py` 之后,`patch.object(state, ...)`
+        当场拦不住它,而用例全绿(实测:8 条用例的前提一起失效,「那一轮没写进历史」
+        变成了「写进去了」,红的地方却指向恢复逻辑)。
+        """
+        real = Path.replace
+        exc = exc or PermissionError('read-only')
+
+        def pick(tmp, target, *args, **kwargs):
+            if hit(Path(target)):
+                raise exc
+            return real(tmp, target, *args, **kwargs)
+
+        return patch.object(Path, 'replace', pick)
 
     def read_fails_on(self, hit):
         """**注入打在真实的那次 IO 上**(`Path.read_bytes`)。打在

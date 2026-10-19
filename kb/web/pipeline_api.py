@@ -68,6 +68,11 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     # 和「已经追平」,两种处理都错过一档(忙着重查 / 永远不补)。
     # 跑着的时候报的是**正在跑这一轮**的版本,附属数据本来就该等它收尾。
     state["result_version"] = pl.result_version(state if state["running"] else (latest or {}))
+    # **今天还欠着的那几步**(当日账本那一份口径,见 `pipeline_retry.today_failed`)。
+    # 面板那颗「重试失败项」原来只看「最近一轮有没有红」,而今天早些时候那几笔在
+    # 一轮全绿收尾之后就不在最近那一轮里了 —— 按钮藏掉,用户连点的机会都没有。
+    # **跑着的时候不算**:那会儿按钮本来就藏着,而这一问要读一次账本文件。
+    state["today_failed"] = [] if state["running"] else pl.today_failed()
     # 非空 = 这个进程启动时只从历史恢复到最新那一轮,它的重试范围没留下。面板据此
     # 把「重试失败项」按不下去并如实说一句(后端那道闸在 `start_retry_failed`)。
     state["restore_gap"] = pl.restore_gap()

@@ -16,6 +16,7 @@ import threading
 from copy import deepcopy
 from pathlib import Path
 
+from kb import pipeline_daybook as daybook
 from kb.collectors import active_collector, channel_labels, retry_narrower
 from kb.pipeline_state import (
     _SEQ_GEN,
@@ -97,6 +98,22 @@ def refill_script() -> Path | None:
 _FAIL_DETAIL_RE = re.compile(r"失败 [1-9]|\d+ 个账号失败")
 
 
+def stage_failed(stage: dict | None) -> bool:
+    """这一格阶段结果**算不算失败**。
+
+    **「算失败」的判据只有这一份。** 三处消费:重试的计划(`retry_failed_plan`)、
+    几轮合并时谁盖谁(`pipeline_merge._merge_rank`)、当日账本里哪一格还欠着
+    (`pipeline_daybook`)。面板按钮那边的同口径在 `kb/static/js/pipe_view.js` 的
+    `pipeHasFailure`,改这里要跟着改它 —— 两边不一致的话按钮亮着而计划是空的,
+    用户点下去只收到 409。
+
+    `status=ok` 但 detail 里写着「失败 3 个」也算:逐项失败的那一档整个阶段是绿的。
+    """
+    stage = stage or {}
+    return (stage.get("status") == "error"
+            or bool(_FAIL_DETAIL_RE.search(stage.get("detail") or "")))
+
+
 def _run_refill() -> None:
     """子进程跑配置好的回填脚本:找 dr-gzh 树里正文为空的 md,重抓原文回填
     (转载 stub 会走平台列表 API 定位原文短链)。占用 export 卡片展示进度。
@@ -164,8 +181,41 @@ def _run_refill() -> None:
            failures=fail_items)
 
 
+def unfinished_today() -> dict:
+    """今天还欠的那些事,摆成一轮运行的样子。**只在这里取,降级说明丢掉。**
+
+    单独问一句「有没有失败项」的调用方不需要那句降级说明(它没有消息可以带出去);
+    真要起跑的那条路走 `daybook.unfinished` 自己拿,它会把那句话跟着返回。
+    """
+    return daybook.unfinished(last_result())[0]
+
+
+def today_failed() -> list[str]:
+    """**今天**还欠着的那几步(面板拿它决定「重试失败项」露不露脸)。
+
+    **不许只看最近一次运行。** 那颗按钮原来是「最近一轮有没有红」才显示,而这颗
+    按钮要补的是今天还欠的那些:09:12 抓 RSS 失败、10:20 一轮公众号全绿收尾之后,
+    最近那一轮一个红都没有 —— 按钮当场藏掉,于是 09:12 那条**连点的机会都没有**,
+    后端这一侧补得再对也到不了(审查 R1 的同一条路)。
+
+    账本空着时它退回最近一次运行,所以这一份只会**多**显示、不会少显示:多显示的
+    那一档点下去照旧按真实计划跑,少显示那一档是用户再也碰不到的红。
+
+    **合成那一步炸了也只退回存量行为,不许把整条状态接口带下去。** 它只是面板上一
+    颗按钮的显示判据,而 `/api/pipeline/status` 是面板的命脉 —— 连「管道在不在跑」
+    都从它读(`./kb.sh` 杀进程前的那道保护就是),一个只读字段不该让那一问变成 500。
+    """
+    latest = last_result()
+    try:
+        pending, _ = daybook.unfinished(latest)
+    except Exception:                              # noqa: BLE001 - 见 docstring
+        pending = latest
+    stages = pending.get('stages') or {}
+    return [name for name in STAGES if stage_failed(stages.get(name))]
+
+
 def retry_failed_plan(nothing_to_crawl: bool = False, run: dict | None = None) -> list[str]:
-    """按上次运行的失败状态编排重试链(面板全局"重试失败项"按钮的后端)。
+    """按**今天还欠的那些**编排重试链(面板全局"重试失败项"按钮的后端)。
 
     `nothing_to_crawl`:上一轮失败的那几个目标现在一个都不用重抓了(它们后来都已
     成功同步,见 `retry_crawl_scopes`)。这一档不能把 crawl 排进计划 —— 范围是空的,
@@ -187,14 +237,16 @@ def retry_failed_plan(nothing_to_crawl: bool = False, run: dict | None = None) -
     # 来自新那一轮的失败、而导出范围还是旧那一轮的来源 —— 实测里重试去抓了订阅 A,
     # 而导致这个计划的失败发生在订阅 B。缺省自己取是给单独问「有没有失败项」的调
     # 用方用的。
-    prev = ((last_result() if run is None else run).get("stages") or {})
+    # **缺省读的是「今天还欠什么」,不是「最近一次运行」**(`pipeline_daybook`):
+    # 这颗按钮会跑哪几步只许有一个答案 —— 两处各判一次的话,单独问一句的人看到
+    # 「要补 export」,真点下去却按最近那一轮重跑整条链(2026-10-19 10:34 那一次)。
+    prev = ((unfinished_today() if run is None else run).get("stages") or {})
 
     def _detail(name: str) -> str:
         return (prev.get(name) or {}).get("detail") or ""
 
     def _failed(name: str) -> bool:
-        return ((prev.get(name) or {}).get("status") == "error"
-                or bool(_FAIL_DETAIL_RE.search(_detail(name))))
+        return stage_failed(prev.get(name))
 
     # projects 的"入库失败"卡在最后的 chunk 入库/编码那步 —— gate/transcribe 的
     # 大模型调用其实已经成功了。而 index 扫的是整个 vault,dr-*-projects 只是它的
@@ -321,7 +373,11 @@ def retry_crawl_scopes(prev: dict) -> list[dict]:
 # 一样的失败就成了「最近一次运行」,而计划和范围都从最近那一轮派生 —— 等于拿一轮
 # 白跑换掉了手上那份诊断(2026-10-19 那次 10:34 的重试就是这么把 09:12 那轮的结论
 # 顶掉的)。
-_BLOCKED_PREFIX = '现在一个来源都抓不动，先把这件事处理掉再重试：'
+_BLOCKED_PREFIX = '现在一个来源都抓不动，而这一次只有抓取要补，先把这件事处理掉再重试：'
+# 抓不动、但这一轮还有别的正事要做时,抓取那张卡片上写这句话。**不写成失败**
+# (`status` 是 skipped):它这一次压根没跑过,而「失败」会被面板和下一次的计划判据
+# 当成这一轮新产生的红。该补的那几个来源留在当日账本里,下一次重试照旧派生得出来。
+_BLOCKED_SKIPPED = '现在抓不动，这一步留着下次补：'
 
 
 def crawl_blocked(scopes: list[dict]) -> str:
@@ -401,37 +457,58 @@ def start_retry_failed() -> tuple[bool, str]:
     gap = restore_gap()
     if gap:
         return False, _GAP_REFUSED.get(gap, _GAP_REFUSED['order'])
-    plan = retry_failed_plan(run=prev)
+    # **计划和范围从「今天还欠什么」派生,不是从「最近一次运行」。** 一天里会跑好
+    # 几轮,而那一格只有一个位子:09:12 抓 RSS 失败、10:20 一轮公众号成功收尾,后者
+    # 当场把前者顶掉 —— 于是这颗按钮要么说「上次运行没有失败项」,要么按最近那一轮
+    # 的范围从头再跑一遍(2026-10-19 10:34 那一次),而 09:12 该补的那条一直没补上。
+    # 账本按 (来源, 步骤) 记、只认今天,所以「同一天继承之前的状态」和「不跨天」
+    # 是同一份判据的两面(见 `pipeline_daybook`)。
+    # **身份核对照旧认 `prev`**:那一问是「这期间又跑完了一轮吗」,答它的只能是
+    # 真实的那一轮,合成快照没有可信身份。
+    pending, degraded = daybook.unfinished(prev)
+    plan = retry_failed_plan(run=pending)
     # **先定计划,只有真要重抓才去问各来源的失败名单。** 问名单要读那个来源自己
     # 的订阅库,而这颗按钮的射程远不止抓取:上一轮只有 index 失败、这会儿订阅库
     # 又恰好打不开(锁着、权限、路径没挂上)时,无条件先问一遍等于让一个跟 index
     # 毫无关系的故障把整次重试顶成 HTTP 500 —— 索引和后面的提取一步都没起跑
     # (2026-10-09 第 2 轮审查实测)。顺序反过来就没有这条路:crawl 不在计划里
     # 时压根不碰订阅库。
-    scopes = retry_crawl_scopes(prev) if "crawl" in plan else []
+    scopes = retry_crawl_scopes(pending) if "crawl" in plan else []
     # **拦路的东西还拦着就别起跑。** 这道闸要在一切状态改动之前(理由在
     # `_BLOCKED_PREFIX` 那段):拒绝 = 上一轮的结论、失败名单、导出范围一字未动。
     # **它只是早一道,不是互斥**(元规则那条):探测完到真起跑之间那个窗口里拦路
     # 的东西照样能回来,那一档由抓取阶段自己红掉 —— 这道闸换的是「别拿一轮白跑
     # 顶掉手上那份诊断」。
+    #
+    # **一个来源都抓不动,不等于整条计划没有正事可做。** 同一轮里红掉的 index /
+    # extract / Wiki 跟那个浏览器毫无关系,把它们一起扣下来的后果是:用户点一次
+    # 收到一句「先把这件事处理掉」,而本来能补的几步一步都没补(审查 R2)。所以
+    # 这里只摘掉抓取那一段,剩下的照跑 —— 真的只剩抓取可做时才拒绝(那才是白跑)。
+    # **摘掉不等于标成功**:抓取那一步是 skipped、卡片上写着为什么,而该补的那几个
+    # 来源留在当日账本里(这一轮没把它们列进计划,`daybook.fold` 就不碰那几格),
+    # 下一次重试照旧派生得出来 —— 标成功才会把那几条红就此丢掉(审查 R1 那一档)。
+    blocked_note = ''
     if scopes and (blocked := crawl_blocked(scopes)):
-        return False, _BLOCKED_PREFIX + blocked
+        rest = retry_failed_plan(nothing_to_crawl=True, run=pending)
+        if not rest:
+            return False, _BLOCKED_PREFIX + blocked
+        plan, scopes, blocked_note = rest, [], _BLOCKED_SKIPPED + blocked
     # 上一轮 crawl 确实失败过,可那几个目标现在一个都不用重抓了:把 crawl 摘出
     # 计划(范围是空的,真让它跑会按"没指定来源"回落到默认采集器),并在它那张
     # 卡片上说清为什么 —— 一张绿色的「检查 0/0 个来源」和"这个按钮坏了"长得
     # 一模一样。
     crawl_resolved = "crawl" in plan and not scopes
     if crawl_resolved:
-        plan = retry_failed_plan(nothing_to_crawl=True, run=prev)
+        plan = retry_failed_plan(nothing_to_crawl=True, run=pending)
     # **导出范围从上一轮的导出范围恢复,不是从它的抓取范围派生。** 两者在重试轮
     # 里本来就不一样(crawl 收窄、export 照旧走全部来源),而落盘只存一份收窄后
     # 的抓取范围的话,第二次重试就从那份收窄范围再派生一次导出范围 —— 第一次
     # 重试里仍然导出失败的那个来源就此被摘掉,面板报「导出完成·已保存 0 条」,
     # 它那几篇文章一个都没落盘,再点也不回来(2026-10-09 第 2 轮审查实测)。
     # 回落到 `crawl_filter` 是给升级前那些没有这个字段的旧记录用的。
-    export_filter = deepcopy(prev.get("export_filter")
-                             or prev.get("crawl_filter") or {})
-    crawl_filter = deepcopy(prev.get("crawl_filter") or {})
+    export_filter = deepcopy(pending.get("export_filter")
+                             or pending.get("crawl_filter") or {})
+    crawl_filter = deepcopy(pending.get("crawl_filter") or {})
     # 退避是失败自己留下的(最短 1800 秒,见 `sync._save_failure`),手动重试必须
     # 跳过它 —— 不跳的话失败后半小时内点这颗按钮,唯一该抓的那条被记成
     # `deferred` 跳过:该抓的不抓,正好和上面那个"不该抓的全抓"凑成一对。
@@ -481,6 +558,8 @@ def start_retry_failed() -> tuple[bool, str]:
         detail = {s: "" if card[s] else "本次无需重试" for s in STAGES}
         if crawl_resolved:
             detail["crawl"] = RETRY_NOTHING
+        elif blocked_note:
+            detail["crawl"] = blocked_note
         # 这条也是一次"新的运行":发个新身份,别让它继承上一轮的 id
         # (日报只停自己那一轮,靠的就是这个 id 不复用)。
         # **先占住持久化边界,占不住就什么都不改**(口径和理由在
@@ -513,4 +592,7 @@ def start_retry_failed() -> tuple[bool, str]:
     _log("重试失败项: " + " → ".join(plan))
     threading.Thread(target=_run_retry_failed,
                      args=(plan, crawl_filter, export_filter), daemon=True).start()
-    return True, " → ".join(plan)
+    # 账本读不出来、抓取被摘掉这两档**都要跟着起跑消息一起说出去**:一句
+    # 「index → extract」看不出今天还有没补上的东西(见 `daybook.unfinished`)。
+    notes = [n for n in (blocked_note, degraded) if n]
+    return True, " → ".join(plan) + (f"（{'；'.join(notes)}）" if notes else "")

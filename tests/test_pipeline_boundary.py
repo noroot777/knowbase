@@ -149,8 +149,7 @@ class ReadVerdictTests(HistoryCase):
     def _b_round_that_never_landed(self):
         """摆一局:A 正常留档,B 跑完但两份终态都写失败 —— 标记指着 B。"""
         self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）')
-        with patch.object(state, '_write_atomic',
-                          side_effect=OSError('No space left on device')):
+        with self.all_writes_fail(OSError('No space left on device')):
             self.run_round('run-b', 'ok', '已保存 95 条')
         self.assertTrue(state._open_file().exists(), '摆局前提:标记留着')
         self.assertEqual('run-a', (state.load_last_run() or {}).get('run_id'),

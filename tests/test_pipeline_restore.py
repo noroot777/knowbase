@@ -33,7 +33,7 @@ class LatestResultTests(HistoryCase):
         而「重试失败项」去抓**上一轮那条订阅**。
         """
         self.run_round('run-old', 'ok', '已保存 3 条到知识库')
-        with patch.object(state, '_write_atomic', side_effect=PermissionError('read-only')):
+        with self.all_writes_fail():
             self.run_round('run-new', 'error', '3 条翻译失败（服务返回 503），库里仍是原文')
 
         self.assertEqual('run-old', (state.load_last_run() or {}).get('run_id'),
@@ -59,14 +59,7 @@ class LatestResultTests(HistoryCase):
         串在一个 try 里的话那一轮在历史里直接不存在,而「历史里没有这一轮」和
         「这一轮还没跑过」在面板上长得一模一样。
         """
-        real = state._write_atomic
-
-        def only_state_fails(path, data):
-            if path == state._STATE_FILE:
-                raise PermissionError('read-only')
-            return real(path, data)
-
-        with patch.object(state, '_write_atomic', side_effect=only_state_fails):
+        with self.only_state_write_fails():
             self.run_round('run-new', 'error', '3 条翻译失败（服务返回 503）')
 
         self.assertEqual(['run-new'], [r['run_id'] for r in state.load_history()],
@@ -287,16 +280,9 @@ class RestoreTests(HistoryCase):
         那时两个收尾时间串相等,拿时间比大小判不出谁新,而这正是真实形态
         (几百毫秒就结束的那种运行)。恢复要认状态文件那一份,而且它是完整的。
         """
-        real = state._write_atomic
-
-        def only_history_fails(path, data):
-            if path != state._STATE_FILE:
-                raise PermissionError('read-only')
-            return real(path, data)
-
         with patch.object(state, '_now', return_value='2026-10-14 09:00:00'):
             self.run_round('run-a', 'ok', '已保存 3 条到知识库')
-            with patch.object(state, '_write_atomic', side_effect=only_history_fails):
+            with self.only_history_write_fails():
                 self.run_round('run-b', 'error',
                                '3 条翻译失败（服务返回 503），库里仍是原文')
         self.assertEqual(['run-a'], [r['run_id'] for r in state.load_history()],
@@ -402,16 +388,20 @@ class RestoreTests(HistoryCase):
     def test_an_old_record_without_an_id_cannot_skip_the_start_check(self):
         """**旧格式快照不许绕过起跑核对。**
 
-        实测:升级后重启、点一次「重试失败项」,期间另一轮刚成功结束 —— 旧快照没有
-        身份,「两边都有身份才比」那道核对整条跳过,上一轮失败的那几个订阅又被抓了
-        一遍,而失败其实发生在另一个来源上。
+        实测:升级后重启、点一次「重试失败项」,期间另一轮刚结束 —— 旧快照没有身份,
+        「两边都有身份才比」那道核对整条跳过,上一轮失败的那几个订阅又被抓了一遍,
+        而失败其实发生在另一个来源上。
+
+        **期间那一轮也留着红**:计划现在从当日账本派生,期间那轮全绿的话今天压根
+        没有欠账,这颗按钮会早一步回「没有失败项」—— 那也是对的答案,但核对那道闸
+        一个字都没验到。要验它就得让计划非空。
         """
         with patch.object(state, '_now', return_value='2026-10-14 09:05:00'):
             self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503），库里仍是原文')
         stale = state.last_result()
         stale.pop('run_id')                        # 升级前落的那种记录
         with patch.object(state, '_now', return_value='2026-10-14 09:30:00'):
-            self.run_round('run-b', 'ok', '已保存 95 条到知识库')
+            self.run_round('run-b', 'error', '1 条导出失败（磁盘只读）')
 
         with patch.object(pipeline_retry, 'last_result', return_value=stale), \
              patch.object(pipeline_retry.threading, 'Thread') as thread:
@@ -523,7 +513,7 @@ class RestoreTests(HistoryCase):
         """
         self.run_round('run-a', 'error', '3 条翻译失败（服务返回 503）')
         self.assertFalse(state._open_file().exists(), '摆局前提:上一轮正常收尾,标记清掉了')
-        with self._write_fails_on(lambda path: True):
+        with self.all_writes_fail():
             self.run_round('run-b', 'ok', '已保存 95 条')
         self.assertTrue(state._open_file().exists(), 'B 轮两份都没写上 —— 标记留着')
         self.assertEqual('run-a', (state.load_last_run() or {}).get('run_id'),

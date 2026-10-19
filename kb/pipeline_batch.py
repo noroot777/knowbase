@@ -170,11 +170,16 @@ def batch_note(note: str, batch: str) -> bool:
     后果:出报期间用户自己点了一轮同步,`ps._state['batch']` 换成了别人的,于是日报
     「生成失败: Claude 503」那行字被静默丢掉(审查 R6)。
 
-    **记完就发布,不等下一个子轮捎带。** 出报是这一批的**最后一件事**:库整理被关掉、
-    设置读不出、用户按了停止、管道被占住起不来 —— 这几档后面压根没有子轮会收尾,而
-    `close_batch` 紧接着就把 `_batch_notes` 清了,于是内存里那份汇总和磁盘上那份都还是
-    出报**之前**的样子,同步中心看不到这次失败(审查 R6)。发布成没成不改返回值:记上
-    了就是记上了,没发布出去的原因进 `_batch_issue`,由 `close_batch` 的调用方说出来。
+    **记完就发布,不等下一个子轮捎带,而且两份持久化副本一起收。** 出报是这一批的
+    **最后一件事**:库整理被关掉、设置读不出、用户按了停止、管道被占住起不来 ——
+    这几档后面压根没有子轮会收尾,而 `close_batch` 紧接着就把 `_batch_notes` 清了,
+    于是内存里那份汇总和磁盘上那份都还是出报**之前**的样子,同步中心看不到这次失败
+    (审查 R6)。只发布「最近一次运行」那一份也不够:历史副本是另一个子轮在
+    `_end_run` 里顺手写的,**这条路后面没有子轮**,于是翻历史那张清单只看得到
+    「管道结束」,日报到底出没出来一个字不说;下一次普通同步接替「最近一次运行」
+    之后,这条结论就两份副本都没有了(审查 R3)。所以这里传 `archive=True`。
+    发布成没成不改返回值:记上了就是记上了,没发布出去的原因进 `_batch_issue`,
+    由 `close_batch` 的调用方说出来。
 
     返回值说的是「记上了没有」,调用方据此决定要不要另找地方说(日报自己那份
     `daily_last_run.json` 照旧写,这条只是让同步中心也看得见)。**永不抛**:它在
@@ -187,7 +192,7 @@ def batch_note(note: str, batch: str) -> bool:
         # 一轮子轮都还没收尾(全被占住挡掉了)时没有可发布的汇总 —— 合并要的就是
         # 那几轮的终态。这行字留在账本里,真有子轮收尾时跟着一起出去。
         if _batch_runs:
-            _publish_merged()
+            _publish_merged(archive=True)
         return True
 
 
@@ -310,7 +315,9 @@ def _publish_in_batch() -> None:
     # I/O 那一档被按"别人更新了"处理:退回去写当前子轮那一份局部成功,把整批的
     # 失败连同重试名单一起抹掉 —— 入库那一轮的 crawl 是「未选择」,前面那条抓取
     # 失败于是内存里和磁盘上一起没了(第 5 轮实测:一次临时写失败就够)。
-    err = _publish_merged()
+    # `archive=False`:历史那一份紧接着由 `_end_run` 自己那一笔写(它两份分别尝试、
+    # 分别诊断,见那边的注释)。这里再写一次只是多一次全量重写历史文件。
+    err = _publish_merged(archive=False)
     if isinstance(err, PublishRefused):
         # 没资格:期间有更新的一轮独立运行收尾(用户自己点了同步)。退回只写自己
         # 那一份 —— **我们这一轮确实是此刻最新的**,而把前几轮一起合进去等于拿一批
@@ -321,13 +328,17 @@ def _publish_in_batch() -> None:
         raise err                                  # 写盘炸了:原样抛给 `_end_run`
 
 
-def _publish_merged() -> Exception | None:
+def _publish_merged(*, archive: bool) -> Exception | None:
     """把**整批**(已收尾的子轮 + 批次事件)合并着发布一次。已持 `ps._lock`。
 
     返回 None = 发布成功;返回异常 = 这一次没发布出去(`PublishRefused` = 没资格,
     其它 = 写盘炸了)。原因已经记进 `_batch_issue`,**调用方只决定自己那一步还要不要
     做**:子轮收尾要在没资格时退回去写自己那一份、要把写盘异常抛给 `_end_run`;
     `batch_note` 两样都不做(它没有"自己那一轮"可写)。
+
+    `archive` 回答的是「**历史那一份副本谁来写**」,**故意没有缺省值** —— 新的调用方
+    必须自己答一次。子轮收尾传 False(紧接着 `_end_run` 自己那一笔会写);批次事件传
+    True,它后面没有子轮了,不自己补一次就只有「最近一次运行」收到这一版(审查 R3)。
 
     **口径只有这一份**:哪一批有资格发布、合成什么、谁当权威、覆盖了哪几轮。两个
     调用方(子轮收尾、批次事件)在这几件事上分裂一次就等于一边把整批的失败写丢了。
@@ -353,12 +364,41 @@ def _publish_merged() -> Exception | None:
         _batch_notes.append(ps._stamp(note))
         _remember_aggregate(_with_persist_issue(merged, note),
                             covers=_batch_round_ids())
+        # **两份分别尝试、分别诊断**(口径同 `ps._end_run` 的收尾):状态那一份写
+        # 不进去,不代表历史那一份也写不进去,而历史是这条结论唯一的另一处落脚点。
+        if archive:
+            _archive_merged()
         return e
     # 发布成功就解除之前那句警告:原因留在运行日志里,但"当前仍未保存"这句话不能
     # 挂着不放 —— 后来真写进去了,日报却还在说没写进。
     _batch_issue = ""
     _remember_aggregate(merged, covers=_batch_round_ids())
+    if archive:
+        _archive_merged()
     return None
+
+
+def _archive_merged() -> None:
+    """把刚记下的那一版也写进**历史副本**。已持 `ps._lock`。**永不抛。**
+
+    走的是历史那一份唯一的出口 `ps._save_history()` —— 它读的就是内存里刚记下的那份
+    汇总(`_batch_aggregate()`),所以必须排在 `_remember_aggregate` **之后**:排前面
+    存进历史的是上一版,这行字照旧不在。按 run id 幂等,重复写只是替换同一条。
+
+    **没资格发布那一档不走这里。** 那时期间已经有更新的一轮收尾了,而历史那张清单是
+    倒序的 —— 把这一批补写进去就是插到最前面,于是一批更早的运行看着像是最后跑的
+    那一轮。两份副本一起停在上一版、原因进 `_batch_issue`,这才是一致的。
+
+    写不上只少一条历史记录(那份是只读展示),但**要说出来**:原因并进 `_batch_issue`,
+    由 `close_batch` 的调用方报给用户。
+    """
+    global _batch_issue
+    try:
+        ps._save_history()
+    except Exception as e:                         # noqa: BLE001 - 见 docstring
+        why = (f'这一批的同步结果没能写进历史({e}),'
+               '同步中心那张历史清单上这一轮还是上一次写成功的样子')
+        _batch_issue = f'{_batch_issue};{why}' if _batch_issue else why
 
 
 class PublishRefused(Exception):

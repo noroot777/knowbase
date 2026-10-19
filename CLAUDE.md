@@ -163,16 +163,16 @@
 | 聚合源正文补抓、正文提取器、提取结果与正文版本绑定(`kb/feeds/fulltext.py`、`readable.py`) | `fulltext.md` |
 | 订阅正文转纯文本、阅读页渲染、来源卡片(`kb/feeds/fetching.py` 的 `plain`、`kb/web/pages.py`) | `feed-plain.md`、`doc-reader.md`、`source-cards.md` |
 | 新订阅只收几天、存量清理(`kb/feeds/history.py`、`scripts/feed_trim_history.py`) | `history-depth.md` |
-| 「重试失败项」那颗按钮的范围(`kb/pipeline_retry.py`、`pipeline_state.py`) | `retry-scope.md` |
+| 「重试失败项」那颗按钮的范围、当日账本(`kb/pipeline_retry.py`、`pipeline_daybook.py`、`pipeline_state.py`) | `retry-scope.md` |
 | 失败明细里那一条怎么点开、怎么「不再抓取」(`kb/pipeline_failures.py`、`collectors.ItemDropping`、`pipe_view.js`) | `failure-drop.md` |
-| 同步的历史运行、一轮的红怎么留档、留几天、恢复时挑哪一轮(`kb/pipeline_state.py`、`pipeline_persist.py`、`pipeline_retention.py`、`pipeline_open.py`、`pipe_history.js`) | `pipeline-history.md` |
+| 同步的历史运行、一轮的红怎么留档、留几天、恢复时挑哪一轮(`kb/pipeline_state.py`、`pipeline_history.py`、`pipeline_persist.py`、`pipeline_retention.py`、`pipeline_open.py`、`pipe_history.js`) | `pipeline-history.md` |
 | **任何写 kb.db 或 vault 文件的入口**(索引、导出、提取回写、条目化、清理脚本) | `maintenance-lock.md` |
 | 没有 feed 的站点、网页专栏解析(`kb/feeds/page_list.py`) | `page-list.md` |
 | 手动收录(粘一条链接抓进知识库:`kb/feeds/grab.py`、`grab_store.py`、`grab_page.py`、`kb/web/grab_api.py`、`kb/static/js/grab.js`) | `link-grab.md` |
 | 邮件简报 / TLDR(`kb/feeds/digest.py`) | `digest.md` |
 | 往 `defaults.json` 加来源、存量库补种(`kb/feeds/registry.py` 的 `DEFAULTS_REV`) | `defaults-backfill.md` |
 | 英文内容翻译、译文显示口径(`kb/feeds/translate.py`) | `translate.md` |
-| 每日日报、素材账本、出处编号(`kb/daily*.py`、`kb/daily_refs.py`) | `daily.md` |
+| 每日日报、素材账本、出处编号、覆盖确认(`kb/daily*.py`、`kb/daily_refs.py`、`kb/daily_overwrite.py`) | `daily.md` |
 | 同步的定时、日报那一轮的两段式编排(`kb/daily_run.py`、`kb/pipeline._scheduler_tick`) | `sync-schedule.md` |
 | 起跑弹窗里勾哪几段、跑完出不出日报(`kb/static/js/pipe_stages.js`、`pipe_setup.js`) | `sync-entry.md` |
 | 大模型阶段配置、`secrets.json`(`kb/llm_stages.py`、`kb/llm.py`) | `llm-stages.md` |

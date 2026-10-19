@@ -158,6 +158,10 @@ class BatchNotePublishTests(unittest.TestCase):
     关掉、设置读不出、用户按了停止、管道被占住起不来 —— 这几档后面压根没有子轮
     会收尾,而 `close_batch` 紧接着就把账本清了。只验"内存里追加上了"的实现照样
     全绿,而重启之后那行字一个字都不在。
+
+    **而且两份持久化副本都要收这一版**(审查 R3):「最近一次运行」只有一格,下一次
+    普通同步一接替它,这条结论就只剩历史那张清单上还查得到 —— 历史那一份原本是靠
+    另一个子轮在 `_end_run` 里顺手写的,而这条路后面没有子轮。
     """
 
     def setUp(self):
@@ -195,6 +199,52 @@ class BatchNotePublishTests(unittest.TestCase):
             self.assertTrue(pb.batch_note('日报生成失败: Claude 503', batch))
         self.assertTrue(any('Claude 503' in line for line in pb._batch_notes))
         self.assertIn('磁盘满', pb.close_batch())
+
+    def test_the_verdict_is_also_in_the_history_copy(self):
+        """**审查 R3**:翻历史那张清单也要看得到日报的结论。
+
+        不写的话历史里同一个身份那条只有「管道结束」 —— 而「最近一次运行」那一格
+        被下一次普通同步接替之后,这就是唯一还查得到的地方了。
+        """
+        batch = self._two_rounds()
+        pb.batch_note('日报生成失败: Claude 503', batch)
+        rows = [r for r in ps.load_history() if r.get('run_id') == 'run-2']
+        self.assertEqual(1, len(rows), f'历史里这一轮不止一条或压根没有:{rows}')
+        self.assertTrue(any('Claude 503' in line for line in rows[0].get('log') or []),
+                        f'历史副本里没有出报的结论:{rows[0].get("log")}')
+
+    def test_a_successful_verdict_reaches_history_too(self):
+        """反过来钉一边:成了也要进历史 —— 只给失败字符串补写的实现照样漏一半。"""
+        batch = self._two_rounds()
+        pb.batch_note('日报已生成:12 条素材', batch)
+        rows = [r for r in ps.load_history() if r.get('run_id') == 'run-2']
+        self.assertTrue(any('12 条素材' in line for line in rows[0].get('log') or []),
+                        f'历史副本里没有出报成功那句:{rows[0].get("log")}')
+
+    def test_history_write_failure_is_diagnosed_not_swallowed(self):
+        """反过来钉一边:历史那一份写不上**不许抛、也不许不出声**。
+
+        它在 `_run` 的 `finally` 里跑(抛出去就挡住收尾),而默不作声的后果是
+        「翻历史看不到今天的日报」没人解释得了。
+        """
+        batch = self._two_rounds()
+        with patch.object(ps, '_save_history', Mock(side_effect=OSError('历史文件没了'))):
+            self.assertTrue(pb.batch_note('日报生成失败: Claude 503', batch))
+        self.assertIn('历史文件没了', pb.close_batch())
+
+    def test_a_refused_publish_does_not_reshuffle_history(self):
+        """反过来钉一边:**没资格发布**那一档,历史里最新那条仍是更新的那一轮。
+
+        期间用户自己点的那一轮已经收尾、它才是最新。把这一批补写进历史会让它插到
+        清单最前面 —— 那张清单是倒序的,于是一批更早的运行看着像是最后跑的那一轮。
+        两份副本一起停在上一版、原因进 `_batch_issue`,这才是一致的。
+        """
+        batch = self._two_rounds()
+        finish_round(['index'], None, '', None, 'run-别人')   # 用户自己点的那一轮
+        self.assertTrue(pb.batch_note('日报生成失败: Claude 503', batch))
+        self.assertEqual('run-别人', (ps.load_history() or [{}])[0].get('run_id'),
+                         f'历史里最新那条被这一批顶掉了:{[r.get("run_id") for r in ps.load_history()]}')
+        self.assertIn('run-别人', pb.close_batch())
 
     def test_nothing_to_publish_yet_is_not_a_dropped_note(self):
         """反过来钉一边:一轮子轮都还没收尾(全被占住挡掉了)时没有可发布的汇总

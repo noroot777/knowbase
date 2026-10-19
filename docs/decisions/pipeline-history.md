@@ -1,4 +1,4 @@
-# 同步的历史运行(kb/pipeline_state.py + pipe_history.js)
+# 同步的历史运行(kb/pipeline_state.py + pipeline_history.py + pipe_history.js)
 
 ## 硬约束
 
@@ -12,6 +12,13 @@
   读错一个字段的后果是**静默不抓** —— 用户点重试、面板报「已跳过」,该补的那几条一个
   都没抓(见 `retry-scope.md`)。拿一条不可恢复的路径去换一个只读展示不值。代价是最新
   那一轮在两处各存一份(约 6 KB),**有意的冗余**。
+- **历史那几个函数搬去了 `pipeline_history`,但名字要从 `pipeline_state` 原样再导一遍**
+  (`_history_file` / `_save_history` / `load_history` / `_run_record` /
+  `_history_rounds_strict`)。它们原先就住在 `pipeline_state` 里,仓库里一大片测试和调用
+  方按 `pipeline_state.X` 这个名字 patch 或调用 —— 搬完不再导的话,**广域回归可能全绿**
+  (改用新名字的那几处自己是对的),而没跟着改的那几处悄悄打在一个没人读的位置上。
+  **依赖只许一个方向**:`pipeline_history` 在函数体里晚导入 `pipeline_state`(模块级会成
+  环),反过来那一侧是模块顶上的再导出。拆它的理由只是行数上限。
 - **历史文件的位置从 `_STATE_FILE` 派生,不另立一个模块变量**(`_history_file()`)。
   测试隔离落盘状态时 patch 的是 `_STATE_FILE`,另立一个的话每个走到 `_end_run()` 的
   既有测试都得记着再 patch 一次 —— 漏掉的那个会去写**生产**那份历史,而漏没漏在测试

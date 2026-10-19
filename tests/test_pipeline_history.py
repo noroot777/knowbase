@@ -283,7 +283,7 @@ class PersistFailureTests(HistoryCase):
         **反过来钉一边**:下一轮留档成功,那条诊断就撤掉 —— 不然面板会一直挂着
         一句早就不成立的话。
         """
-        with patch.object(state, '_write_atomic', side_effect=MemoryError('boom')):
+        with self.all_writes_fail(MemoryError('boom')):
             self.run_round('run-x', 'error', '3 条翻译失败（服务返回 503），库里仍是原文')
         self.assertFalse(state.get_state()['running'], '留档炸了,收尾也得完成')
         self.assertTrue(state.run_result('run-x'), '等结果的人还要拿得到终态')

@@ -18,7 +18,18 @@ from kb import pipeline_open as _open
 from kb.config import DATA_DIR
 # 留档口径(留几天、超了削什么)在它自己那个模块里;`history_keep_days` 是面板那句
 # 「保留最近 N 天」的公开入口,这里只是过一道(端点走 `kb.pipeline`)。
-from kb.pipeline_retention import prune_history, shed_bulk, history_keep_days as history_keep_days
+from kb.pipeline_retention import history_keep_days as history_keep_days
+# 给人翻的那一份(历史记录的落盘、读取与「谁顶谁」)拆成了自己的模块,**只因为
+# 行数**。这几个名字在本模块里**再导出一次**:几十处调用方和测试打桩点按
+# `pipeline_state.xxx` 认它们,而 `_end_run` 的收尾循环读的也是本模块的全局 ——
+# 打桩 `ps._save_history` 因此照旧拦得住(方向只有一个:本模块 → 那边)。
+from kb.pipeline_history import (
+    _history_file as _history_file,
+    _history_rounds_strict as _history_rounds_strict,
+    _run_record as _run_record,
+    _save_history as _save_history,
+    load_history as load_history,
+)
 from kb.pipeline_persist import (
     _SEQ_GEN,
     _dump_bytes,
@@ -46,18 +57,6 @@ _STATE_FILE = DATA_DIR / "pipeline_state.json"
 # 「已跳过」,该补的那几条一个都没抓(见 docs/decisions/retry-scope.md)。拿一条
 # 不可恢复的路径去换一个只读展示不值,所以那份文件的形状一个字节都没动,代价是
 # 最新那一轮在两处各存一份(约 6 KB),有意的冗余。
-def _history_file():
-    """历史文件就在 `_STATE_FILE` 旁边。
-
-    **从它派生,不另立一个模块变量**:测试隔离落盘状态时 patch 的是 `_STATE_FILE`
-    (`tests/test_pipeline_stop.py` 那一套),另立一个的话每个走到 `_end_run()` 的
-    测试都得记着再 patch 一次 —— 漏掉的那个会去写**生产**那份历史,而漏没漏在
-    测试输出上一个字都看不见(同 `maintenance.DATA_DIR` 那条)。派生之后隔离点
-    只有一个,不可能漏。
-    """
-    return _STATE_FILE.with_name(f"{_STATE_FILE.stem}_runs{_STATE_FILE.suffix}")
-
-
 def _open_file():
     """开工标记也在 `_STATE_FILE` 旁边,**派生,理由同上**。"""
     return _STATE_FILE.with_name(f"{_STATE_FILE.stem}_open{_STATE_FILE.suffix}")
@@ -256,18 +255,6 @@ def _next_seq() -> int:
     return nxt
 
 
-def _history_rounds_strict() -> list[dict]:
-    """历史记录的**严格版**:读不出来、或者形状不对,一律抛。
-
-    「可解析但形状不对」和「读不出来」是同一档 —— 都不能当成「这份副本没有」。
-    展示那条路照旧走 `load_history()`(宽口径,少显示几行、不出声)。
-    """
-    raw = _load_json_strict(_history_file())
-    if not _history_shape_ok(raw):
-        raise ValueError(f'历史文件形状不对：{type(raw).__name__}')
-    return _history_runs(raw)
-
-
 def _saved_round_strict() -> dict | None:
     """状态文件里那一轮的**严格版**,口径同上。发号和恢复共用它。"""
     raw = _load_json_strict(_STATE_FILE)
@@ -332,78 +319,24 @@ def _save_last_run() -> None:
 
 
 
-def _run_record() -> dict:
-    """要留进历史的那一份终态。**批次里取的是整批那份汇总,不是当前子轮。**
+# 三份留档各自的人话名字。**不按函数名切片**:那样切出来的是 `sh_in_batch`
+# 这种东西,而这行字是给用户看的。取的时候带兜底(`.get`):这张表只喂一句日志,
+# 将来多一份留档而忘了在这儿加一行的话,该报的那次失败照旧报出来、只是名字难看
+# —— 让一句日志的 KeyError 从收尾里逃出去才是真麻烦。
+_SAVE_LABEL = {'_publish_in_batch': '同步结果', '_save_daybook': '当日账本',
+               '_save_history': '历史记录'}
 
-    **两份落盘必须是同一个业务结果的两个投影** —— 这条不变量的事故形态写在
-    `_save_history` 里。字段取舍在 `pipeline_persist.run_record`。
+
+def _save_daybook() -> None:
+    """把这一轮折进**今天那份账本**(「重试失败项」的计划和范围从它派生)。
+
+    折的是这一轮**自己**那份终态,不是整批合并出来的那一份 —— 理由在
+    `pipeline_daybook` 的模块头(合并之后的来源清单摊开会把别人那一格也染红)。
+
+    延迟 import,同 `_run_record`:账本层在模块级 import 本模块。
     """
-    # 延迟 import:批次层在模块级 import 本模块(**方向单向**,理由在
-    # `pipeline_batch` 的模块头),反过来用它只能在函数里取。
-    from kb.pipeline_batch import _batch_aggregate
-    return run_record(_batch_aggregate() or _state)
-
-
-def _save_history() -> None:
-    """把这一轮的终态记进历史。
-
-    **按 run id 幂等**(身份非空时):同一轮重复落盘时替换那一条、不追加 —— 否则一次
-    重复调用就在历史里留下两条一模一样的记录,而它们的区别只有写入顺序。
-
-    **原子换文件**:面板那条读历史的请求随时在跑,而这份文件比状态文件大得多
-    (带着每轮 80 行日志),截断重写的窗口里读到的是半截 JSON(同
-    `docs/decisions/llm-stages.md` 那条)。写失败只是少一条历史记录,不出声 ——
-    这一份是只读展示,它写不写得上不该影响这一轮同步的结论。
-    """
-    # 延迟 import,同上。读的是**同一本账**(都在 `_lock` 里):`_run_record()` 决定
-    # "存哪一份",`_aggregate_covers()` 回答"这一份实际合并了谁"。
-    from kb.pipeline_batch import _aggregate_covers
-    record = _run_record()
-    rid = record["run_id"]
-    # **空身份一律追加,不去重。** 空串不是身份 —— 拿它当键会把两轮各自跑过的运行
-    # 合成一条(没经过 `start_pipeline` 的那条路身份就是空的)。历史里少一轮是静默
-    # 丢数据,多留一条只是多一行。
-    # **存量必须是「确实读出来了」或者「文件确实不存在」,别的一律抛。** 这一步之后
-    # 是整份原子替换,拿一个因为读失败而空着的集合去替换,就是把存量**删掉** ——
-    # 原子性只保证新文件完整,不保证旧记录还在。实测形态:库里已经三轮(其中一轮
-    # 带着失败原因和日志),第四轮成功、只在这一次读上注入一个 `PermissionError`,
-    # 历史当场从 3 条变 1 条、面板上一个字不说(两份都写成功了,诊断是空的)。
-    # 抛出去反而正好:`_end_run` 那两份是分别尝试、分别诊断的,这一份写不上只是
-    # 少一条历史记录,面板会如实说一句,而**原文件一个字节都没动**。
-    # **一个业务结果只占一条历史:整批那一份顶掉这一批前几轮各自留下的那条。**
-    # 不顶的后果不是"多几行",而是**两份可恢复副本在同一个 run id 下存着两种含义
-    # 的结果**:状态文件是整批(抓取 error),历史最新那条是末个子轮(抓取「未选择」)
-    # —— 恢复按完成序号挑中历史那条,于是日报里那条 RSS 抓取失败在重启之后变成
-    # 「同步已完成」,连「重试失败项」都没有(实测:只给汇总那一次写入注入
-    # `OSError`,历史照常写成功,新进程起来 `last_run.stages.crawl.status=skipped`、
-    # `retry_plan=[]`)。正常保存时它也看得见:面板说"失败",点开同一个身份的
-    # 那条历史却写着"已完成"。
-    # 顶掉**不丢内容**:整批那一份是子轮的并集(阶段按来源合并、日志接起来、失败
-    # 名单并起来,见 `pipeline_merge._merge_runs`)。
-    # **待删的身份只认「这一份记录实际合并了哪几轮」,不许据「内存里有没有权威结果」
-    # 反推** —— 权威位上也可能躺着一轮普通运行自己的快照(落盘失败那一档,见
-    # `pipeline_batch._save_own`),它一轮都没合并,按"有缓存就是整批"去删,期间那几轮
-    # 各自那条唯一的历史就没了(实测形态在 `docs/decisions/pipeline-history.md`)。
-    # 发布被拒那一档同理:写下的是子轮自己那份局部结果。**反过来钉住:真的汇总即使
-    # 状态写失败,存进历史的也还是完整汇总**,不许退回局部结果。
-    superseded = {rid} if rid else set()
-    superseded |= _aggregate_covers()
-    runs = [r for r in _history_rounds_strict()
-            if not (r.get("run_id") and r["run_id"] in superseded)]
-    runs.insert(0, record)
-    # **窗口决定留哪几轮,体量只削重物、不删记录**(`shed_bulk`)—— 三天之内的每一轮
-    # 都还查得到它的结果和它的红,代价是病态那一档里老轮次的日志正文和明细长清单。
-    runs = shed_bulk(prune_history(runs))
-    _write_atomic(_history_file(), _dump_bytes({"runs": runs}))
-
-
-def load_history() -> list[dict]:
-    """最近几轮的终态,**最新排在最前**。
-
-    文件还没有、读不出来、或者内容不是预期的形状,一律空列表 —— 这一份是只读
-    展示,报错不如少显示几行。
-    """
-    return _history_runs(_load_json(_history_file()))
+    from kb.pipeline_daybook import fold
+    fold(run_payload())
 
 
 def persist_error() -> str:
@@ -651,9 +584,10 @@ def _end_run() -> None:
         _state["seq_gen"] = _SEQ_GEN
         _state["run_seq"] = _next_seq()
         _log("同步已停止，已完成的结果保留" if stopped else "管道结束")
-        # **留档失败不许把一轮已经做完的正文工作变成「永远进行中」。** 这两份落盘
-        # 都是旁路:状态文件喂「重试失败项」的范围派生(重启之后才用得上),历史文件
-        # 只给人翻 —— 而下面 finally 里那两件事是**这一轮能不能收尾**。实测形态:
+        # **留档失败不许把一轮已经做完的正文工作变成「永远进行中」。** 这三份落盘
+        # 都是旁路:状态文件喂「重试失败项」的范围派生(重启之后才用得上),当日账本
+        # 喂同一颗按钮的当日继承,历史文件只给人翻 —— 而下面 finally 里那两件事是
+        # **这一轮能不能收尾**。实测形态:
         # 历史文件里一个非 UTF-8 字节,解码异常就从 `_save_history()` 逃出来,阶段
         # 卡片和日志都已经写着「管道结束」,而标题是「同步正在启动」、按钮禁用,
         # 新同步和重试一概被拒,点停止也救不回来(线程早退了);普通同步和失败重试
@@ -664,20 +598,23 @@ def _end_run() -> None:
         # 启动时那笔「只恢复到历史那份」的欠账到此为止。
         _restore_gap = ''
         try:
-            # **两份分别尝试、分别诊断,不许串在一个 try 里。** 串着的话状态文件
+            # **三份分别尝试、分别诊断,不许串在一个 try 里。** 串着的话状态文件
             # 写失败就把本来写得成的历史一起跳过 —— 那一轮在历史里直接不存在,而
             # 「历史里没有这一轮」和「这一轮还没跑过」在面板上长得一模一样。
-            # 顺序仍是状态在前:那一份承重(重试范围从它派生),这一份只给人翻。
+            # 顺序按承重排:状态那一份和当日账本都喂「重试失败项」的派生,历史
+            # 只给人翻。**当日账本写不上也只是退回存量行为**(那颗按钮按最近一次
+            # 运行来补),所以它跟另两份一样不许挡住收尾。
             errs = []
             # 状态那一份改走批次层:普通一轮就是 `_save_last_run`,
             # 批次的第 2 轮起写的是**整批合并**那一份(见 `pipeline_batch._publish_in_batch`)。
-            for save in (_publish_in_batch, _save_history):
+            for save in (_publish_in_batch, _save_daybook, _save_history):
                 try:
                     save()
                 except Exception as exc:  # noqa: BLE001 - 理由就在上面那段
                     errs.append(type(exc).__name__)
                     _log(f'结果没能留档（{type(exc).__name__}）：'
-                         f'{save.__name__[6:]} 这一份没写上，同步结论不受影响')
+                         f'{_SAVE_LABEL.get(save.__name__, save.__name__)}'
+                         '这一份没写上，同步结论不受影响')
             _persist_error = ' / '.join(errs)
             # **两份都写上了才清开工标记。** 任一份失败就留着 —— 下一次启动据它
             # 报失证(误报顶多多跑一轮完整同步;反过来是漏报,那一轮查不出来)。

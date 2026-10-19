@@ -11,7 +11,11 @@
 ①**拒绝之后那一轮的留档一字未动** —— 这是这道闸唯一的理由,也是它和"让它跑完
   再看"的全部区别;
 ②**拦不住就别拦** —— 有一个来源抓得动、或者压根问不出来时照旧起跑,否则一个来源
-  的故障会把同一轮里本该重试的 index / extract 一起扣下。
+  的故障会把同一轮里本该重试的 index / extract 一起扣下;
+③**抓不动也只摘抓取那一段** —— 同一轮里红掉的 index / extract / Wiki 跟那个浏览器
+  毫无关系。整条计划一起扣下的后果是用户点一次只收到一句「先把这件事处理掉」,而
+  本来能补的几步一步都没补。摘掉**不等于标成功**:该补的那几个来源留在当日账本里
+  (`kb.pipeline_daybook`),下一次重试照旧派生得出来。
 
 跑:  uv run --offline python -m unittest tests.test_retry_blocked -v
 """
@@ -118,6 +122,74 @@ class BlockedGateTests(RetryScopeBase):
         self.assertNotIn('crawl', msg, '这一轮压根不该排抓取')
         self.assertIn('index', msg, '该重试的索引被一个无关的来源故障扣住了')
         self.assertNotEqual('skipped', self.stage('index')['status'])
+
+
+class BlockedButBusyTests(RetryScopeBase):
+    """抓不动,可这一轮还有别的正事要做 —— 只摘掉抓取那一段。"""
+
+    blocked = BlockedGateTests.blocked
+
+    def test_the_independent_stages_still_run(self):
+        """抓取被拦着,同一轮里红掉的 index / Wiki 照旧要补。"""
+        self.crawl({'channel': 'rss'}, broken=[self.a], also_red=('index', 'wiki'))
+        with self.blocked(), \
+             patch.object(pipeline_retry, '_run_index'), \
+             patch.object(pipeline_retry, '_run_extract'), \
+             patch.object(pipeline_retry, '_run_wiki'), \
+             patch.object(sync, 'fetch_source',
+                          side_effect=AssertionError('抓取被拦着,不该发请求')):
+            ok, msg = pipeline_retry.start_retry_failed()
+            self.assertTrue(ok, f'本可恢复的 index / Wiki 被抓取一起扣下了:{msg}')
+            self._wait_idle('重试那一轮没有收尾')
+        self.assertNotIn('crawl', msg, '抓取该被摘掉')
+        self.assertIn('index', msg)
+        self.assertIn('wiki', msg)
+
+    def test_the_skipped_crawl_card_says_why(self):
+        """摘掉的那一步要在卡片上说清为什么,**而且不许记成这一轮新产生的红**。
+
+        一张写着「本次无需重试」的灰卡片和"这个按钮坏了"长得一模一样;反过来记成
+        失败的话,面板和下一次的计划判据都会把它当成这一轮刚失败的东西。
+        """
+        self.crawl({'channel': 'rss'}, broken=[self.a], also_red=('index',))
+        with self.blocked(), \
+             patch.object(pipeline_retry, '_run_index'), \
+             patch.object(pipeline_retry, '_run_extract'):
+            ok, _ = pipeline_retry.start_retry_failed()
+            self.assertTrue(ok)
+            self._wait_idle('重试那一轮没有收尾')
+        card = self.stage('crawl')
+        self.assertEqual('skipped', card['status'], '不许记成失败,也不许记成成功')
+        self.assertIn('现在抓不动', card['detail'])
+        self.assertIn('占着抓取要用的浏览器', card['detail'], '没说原因')
+
+    def test_the_blocked_source_is_still_retryable_afterwards(self):
+        """**这一条才是「不许标成功」的判据**:那一轮跑完之后,被拦住的来源还补得上。
+
+        把 crawl 标成成功(或者让它原地红一遍再当成「最近一次运行」)都会把这条红
+        就此丢掉 —— 拦路的东西撤掉之后点重试,该抓的那一条一个字都不抓。
+        """
+        self.crawl({'channel': 'rss'}, broken=[self.a], also_red=('index',))
+        with self.blocked(), \
+             patch.object(pipeline_retry, '_run_index'), \
+             patch.object(pipeline_retry, '_run_extract'):
+            self.assertTrue(pipeline_retry.start_retry_failed()[0])
+            self._wait_idle('重试那一轮没有收尾')
+        got, _ = self.retry()                       # 窗口关掉了,再点一次
+        self.assertEqual({self.a['id']}, got, '被拦住的那一条就此补不上了')
+
+    def test_only_crawling_left_still_refuses(self):
+        """反过来钉一边:这一次**只有抓取**要补时照旧拒绝起跑。
+
+        那才是白跑 —— 而且一轮一模一样的失败会把手上那份诊断顶掉。
+        """
+        self.crawl({'channel': 'rss'}, broken=[self.a])
+        before = deepcopy(pipeline_state.load_last_run() or {})
+        with self.blocked():
+            msg = self.refuse()
+        self.assertIn('只有抓取要补', msg, '那句话要说清为什么这一次整个拒绝')
+        self.assertEqual(before, pipeline_state.load_last_run() or {},
+                         '拒绝起跑却动了上一轮的留档')
 
 
 class BlockedProbeCostTests(unittest.TestCase):

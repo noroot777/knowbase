@@ -22,6 +22,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from kb import extract, pipeline_retry, store
+from kb.pipeline_daybook import _book_file
 
 
 class _FakeConn:
@@ -225,6 +226,11 @@ class RefillScriptTests(unittest.TestCase):
             # patch 出来的那份快照(没有身份)会被起跑那道并发核对认成「这期间又跑
             # 完了一轮」—— 那道核对是对的,是这里的摆局该干净。
             pstate._state.update(running=running, run_id="", finished_at="")
+            # **当日账本也要清。** 这一局要的前提是「今天只有手里这一份快照」:
+            # 上一个 subTest 真跑过一轮重试,它的 index/extract 会折进账本,而重试
+            # 的计划是从账本派生的(见 `kb.pipeline_daybook`)—— 不清的话第二个
+            # subTest 起,「正文空」那一档已经被上一轮的结论盖掉,refill 不进计划。
+            _book_file().unlink(missing_ok=True)
             client = TestClient(app, raise_server_exceptions=False)
             r = client.post("/api/pipeline/retry-failed")
             if r.status_code == 200:   # 真起了一条线程,等它收尾

@@ -67,10 +67,11 @@ def _merge_stage(owned: list[tuple[str, dict]]) -> dict:
 
 
 def _merge_rank(stage: dict) -> int:
-    from kb.pipeline_retry import _FAIL_DETAIL_RE
-    # status=ok 但 detail 里写着「失败 3 个」也是失败(判据和面板按钮、
-    # `retry_failed_plan` 共用那一条正则,三处不一致的话按钮会亮着而计划是空的)。
-    if _FAIL_DETAIL_RE.search(stage.get("detail") or ""):
+    from kb.pipeline_retry import stage_failed
+    # status=ok 但 detail 里写着「失败 3 个」也是失败。**判据只有那一份**
+    # (`pipeline_retry.stage_failed`,面板按钮那边的同口径在 `pipe_view.js` 的
+    # `pipeHasFailure`):岔开一次就是按钮亮着而计划是空的。
+    if stage_failed(stage):
         return _MERGE_RANK["error"]
     return _MERGE_RANK.get(stage.get("status") or "", 0)
 
@@ -94,13 +95,25 @@ def _merge_scopes(records: list[dict], key: str) -> dict:
         for scope in crawl_channels(run.get(key) or run.get("crawl_filter")):
             if scope["channel"] and not any(s["channel"] == scope["channel"] for s in merged):
                 merged.append(scope)
-    if not merged:
+    return scope_payload(merged)
+
+
+def scope_payload(scopes: list[dict]) -> dict:
+    """几个来源范围写成一份 `crawl_filter`。`{}` = 没有来源范围可言。
+
+    **这一份形状的口径只有这里**:一个来源时写回老样子的 `channel` + `accounts`
+    (存量读取方和 `crawl_channels` 自己两种都认,但旧的那种更窄、能被更多消费方
+    直接读),多个来源才摊成 `channels`。两处各拼一遍的话,某一处少写 `channel`
+    那一格,`crawl_channels` 就回落到「没指定来源」—— 抓的是默认采集器,跟这一轮
+    要补的那几个毫无关系。当日账本那边合成快照也过这里(`pipeline_daybook`)。
+    """
+    scopes = [{'channel': s['channel'], 'accounts': list(s.get('accounts') or [])}
+              for s in scopes if s.get('channel')]
+    if not scopes:
         return {}
-    # 一个来源时写回老样子的 channel + accounts:存量读取方(和 `crawl_channels`
-    # 自己)两种都认,但旧的那种更窄,能被更多消费方直接读。
-    if len(merged) == 1:
-        return {"channel": merged[0]["channel"], "accounts": merged[0]["accounts"]}
-    return {"channel": merged[0]["channel"], "channels": merged}
+    if len(scopes) == 1:
+        return {"channel": scopes[0]["channel"], "accounts": scopes[0]["accounts"]}
+    return {"channel": scopes[0]["channel"], "channels": scopes}
 
 
 def _merge_runs(records: list[dict], events: list[str] | None = None,

@@ -22,7 +22,7 @@ function pipeRunLabel(result) {
   if (result.run_kind === 'daily') return '日报';
   return result.run_kind === 'retry' || legacyRetry ? '重试' : '同步';
 }
-function pipeStateHint(s, result, failed, skipped, progress) {
+function pipeStateHint(s, result, failed, skipped, progress, owed = 0) {
   // **翻历史时这句话要跟着换成只读语义。** 下面那几句写的是「可以重新配置一次同步,
   // 或按上次抓取范围重试失败项」—— 而翻历史时那颗按钮已经藏掉也禁用了(理由在
   // `renderPipeState` 里),提示还指着一个按不到的操作,说的又是**另一轮**的失败。
@@ -39,6 +39,14 @@ function pipeStateHint(s, result, failed, skipped, progress) {
     return `本轮${progress.label}尚未结束，暂不能新建同步。任务在后台执行，切换页面不会中断。`;
   }
   if (failed) return `${result.stopped ? '本轮已停止，结果已保留。' : ''}上次有 ${failed} 个步骤失败，不影响新建同步。可重新配置一次同步，或按上次抓取范围重试失败项。`;
+  // **这一轮全绿不等于今天没欠账。** 一天里会跑好几轮,而上面那句话只念得出最后
+  // 一轮:今天早些时候失败的那几步在一轮全绿收尾之后就不在它里面了,而「重试失败
+  // 项」补的正是它们(后端口径 `pipeline_retry.today_failed`)。不说的话按钮冒出来
+  // 了却没有任何一句话解释它为什么在。
+  // **排在上面那句之后**:这一轮自己报了红时念的是它自己那几步(屏幕上的卡片正指着
+  // 它们),反过来就是把用户的注意力从眼前这一轮引开。于是这句话只在「这一轮一个红
+  // 都没有」时出现 —— 两句话数的是同一批步骤也不会念两遍。
+  if (owed) return `本轮的步骤都完成了，但今天早些时候还有 ${owed} 个步骤没补上，可按它们各自的范围重试失败项。`;
   if (result.stopped) return '已完成结果已保留。可重新配置同步，已有内容会按现有规则去重。';
   if (skipped) return `${skipped} 个步骤被跳过，具体原因见下方。`;
   if (result.finished_at && progress.total && progress.completed === progress.total) return `本次${progress.label}计划的 ${progress.total} 个步骤均已完成。`;
@@ -223,10 +231,11 @@ function renderPipeState(s) {
   $('pipe-elapsed').textContent = duration ? `${s.running ? '已运行' : '耗时'} ${duration}` : '';
   // Use the same successful-step count as the label; unexecuted work never fills the bar.
   $('pipe-progress-fill').style.width = (planned.length ? Math.round(completed / planned.length * 100) : 0) + '%';
-  $('pipe-state-hint').textContent = pipeStateHint(s, result, failed, skipped, { label, completed, total: planned.length });
   // 需处理的问题在整轮结束后统一收进总览卡片:哪几步、各自卡在什么,配一颗重试按钮,
   // 不用去每个步骤卡片里找「需处理」。运行中不出现(失败项不阻止本轮继续)。
   const failedStages = planned.filter(k => pipeHasFailure(stages[k]));
+  const owed = (s.today_failed || []).length;
+  $('pipe-state-hint').textContent = pipeStateHint(s, result, failed, skipped, { label, completed, total: planned.length }, owed);
   const backlog = !s.running && !viewing && pipePending.extract > 0;
   const issues = $('pipe-issues');
   issues.hidden = s.running || !(failedStages.length || backlog);
@@ -252,7 +261,12 @@ function renderPipeState(s) {
   // 的是上午那一轮 —— 「看到的那一轮」和「按下去会动的那一轮」必须是同一轮。
   // `renderPipeButtons` 里另有一道 disabled:那一道跟着连接和在途动作走,轮询的
   // finally 会单独调它,两道射程不同。
-  $('pipe-retry').hidden = s.running || !!viewing || !(failed || pipePending.extract > 0);
+  // **露不露脸按「今天还欠不欠」判,不按「最近一轮红不红」。** 一天里会跑好几轮,
+  // 一轮全绿收尾之后最近那一轮一个红都没有,而今天早些时候那几笔还欠着 —— 按旧判据
+  // 按钮当场藏掉,那几笔连点的机会都没有(后端口径 `pipeline_retry.today_failed`,
+  // 账本空着时它退回最近一次运行,所以只会多显示、不会少显示)。
+  $('pipe-retry').hidden = s.running || !!viewing
+    || !(failed || (s.today_failed || []).length || pipePending.extract > 0);
   renderPipeLog((s.log?.length ? s.log : result.log) || [], result.finished_at);
   syncPipeLogPanel(s.running && !viewing, pipeVersion(s));
   // 轮次列那一行「正在运行」跟着此刻的快照走(口径在 `pipe_history.js`)

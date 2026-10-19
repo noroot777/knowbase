@@ -20,7 +20,7 @@ from copy import deepcopy
 from kb.config import DATA_DIR, announce_config_issue
 from kb.fetch_rounds import NoEvidence
 from kb.collectors import active_collector
-from kb.pipeline_retry import retry_failed_plan, start_retry_failed
+from kb.pipeline_retry import retry_failed_plan, start_retry_failed, today_failed
 from kb.pipeline_stages import (
     _extract_pass,
     _finish_extract_stage,
@@ -103,6 +103,7 @@ __all__ = [
     "pending_counts",
     "request_stop",
     "retry_failed_plan",
+    "today_failed",
     "run_result",
     "run_scopes",
     "source_status",
