@@ -397,20 +397,29 @@
 
 <div id="pipe-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closePipeModal()">
   <div class="modal pipe-setup">
-    <div class="pipe-setup-heading"><div><h2>新建同步</h2><p class="hint">勾选要抓的来源与时间范围，自动完成后续六个步骤。</p></div><button class="icon-button" onclick="closePipeModal()" aria-label="关闭同步配置">×</button></div>
+    <div class="pipe-setup-heading"><div><h2>新建同步</h2><p class="hint">勾要抓的来源和时间范围，再勾这一次跑哪几步。</p></div><button class="icon-button" onclick="closePipeModal()" aria-label="关闭同步配置">×</button></div>
     <div id="pipe-setup-connection" class="pipe-notice" hidden role="status"><span></span><button class="ghost" onclick="refreshPipe()">重新连接</button></div>
     <div id="pipe-setup-error" class="pipe-notice" hidden role="alert"></div>
     <fieldset id="pipe-fields">
+      <fieldset id="pipe-source-fields">
       <div class="row"><div class="pipe-acct-heading"><label id="pipe-channel-label">同步来源 <b id="pipe-channel-count"></b></label></div>
         <div id="pipe-channel-list" class="pipe-channel-list" role="group" aria-labelledby="pipe-channel-label"></div>
         <p id="pipe-channel-hint" class="hint"></p>
       </div>
+      </fieldset>
+      <fieldset id="pipe-scope-fields">
       <div class="row pipe-range-row"><label>时间范围</label><button class="ghost" id="pipe-range-btn" onclick="togglePipeRangePop(event)" aria-expanded="false" aria-controls="pipe-range-pop"><span id="pipe-range-label">不限时间</span><i data-arrow="caretDown"></i></button>
         <div id="pipe-range-pop" style="display:none"><div id="pipe-range-presets"></div><div class="pipe-custom-range"><label>开始日期<input type="date" id="pipe-custom-from"></label><label>结束日期<input type="date" id="pipe-custom-to"></label><button onclick="applyPipeCustomRange()">应用日期</button><div id="pipe-custom-err" class="field-err" role="alert"></div></div></div>
         <p id="pipe-range-hint" class="hint"></p>
       </div>
       <div class="row" id="pipe-acct-block"><div class="pipe-acct-heading"><label for="pipe-acct-search">订阅 <b id="pipe-acct-count"></b></label><span><button class="text-button" id="pipe-select-all" onclick="pipeSelectAll()">全选</button><button class="text-button" id="pipe-select-none" onclick="pipeSelectNone()">清空选择</button></span></div>
         <input id="pipe-acct-search" placeholder="搜索订阅名称…" oninput="renderPipeAcctList()"><div id="pipe-acct-list" aria-busy="false"></div>
+      </div>
+      </fieldset>
+      <div class="row"><div class="pipe-acct-heading"><label id="pipe-stage-label">跑哪些步骤 <b id="pipe-stage-count"></b></label><button class="text-button" id="pipe-stage-all" onclick="pipeStageToggleAll()">清空选择</button></div>
+        <div id="pipe-stage-list" class="pipe-channel-list" role="group" aria-labelledby="pipe-stage-label"></div>
+        <label class="pipe-daily-row"><input type="checkbox" id="pipe-daily" onchange="onPipeDailyToggle()"><span><b>跑完出日报</b><small>用这一轮之后的库存生成今天的日报</small></span></label>
+        <p id="pipe-stage-hint" class="hint"></p>
       </div>
     </fieldset>
     <div class="pipe-setup-footer"><div id="pipe-est" class="hint" role="status"></div><div><button class="ghost" onclick="closePipeModal()">暂不执行</button><button id="pipe-start" onclick="startPipeFromModal()" disabled>开始同步</button></div></div>
@@ -597,6 +606,8 @@
 <!-- pipe_history.js 排在 pipe_view.js 之前:`pipeViewing` 是 let,渲染要读它 -->
 <script src="/static/js/pipe_history.js"></script>
 <script src="/static/js/pipe_view.js"></script>
+<!-- pipe_stages.js 排在 pipe_setup.js 之前:`PIPE_STAGE_DEFS` 是 const,const 有 TDZ -->
+<script src="/static/js/pipe_stages.js"></script>
 <script src="/static/js/pipe_setup.js"></script>
 <script src="/static/js/targets.js"></script>
 <script src="/static/js/gallery.js"></script>

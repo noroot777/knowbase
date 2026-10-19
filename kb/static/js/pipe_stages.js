@@ -1,0 +1,107 @@
+// ── 一次同步跑哪几段,以及跑完要不要出日报 ─────────────────────────────────────
+// 原来两个入口各自固定:「新建同步」跑六段不出日报,「同步全部并生成」跑四段出日
+// 报,名字上一个字都看不出区别;而那两段全库的慢活(整理工具、更新 Wiki)一跑就
+// 是几十分钟,从哪儿进来都没人说一声。所以步骤改成就地勾,慢活自己带标记。
+//
+// **「跑完出日报」不是第七个步骤,它换的是另一条起跑通道**(`/api/daily/run`,见
+// `kb/daily_run.py`):那一轮的步骤由它自己排(每个来源各抓一遍,再统一索引与提
+// 取),出报之后还接着整理图鉴与更新 Wiki(`kb/daily_library.py`)。所以勾上它之
+// 后,步骤这一组**固定成它那一份、并且禁掉** —— 留着能改而后端照自己那一套跑,
+// 等于把勾选静默忽略。同一个道理:日报那条通道**不认订阅名单也不认抓取日期段**
+// (`RunRequest` 只有 since/until/sync/channels,而 since/until 说的是「哪些素材
+// 进这份日报」,不是抓哪几天),所以那两块也一起禁掉,并就地说明为什么。
+//
+// 不勾「抓取内容」时同理:来源、时间范围、订阅这三块全都不参与这一次,所以一起
+// 禁掉 ——「勾了半天一条都不作数」比报错难发现得多。
+const PIPE_STAGE_DEFS = [
+  { k: 'crawl', name: '抓取内容', d: '从所选来源收集文章' },
+  { k: 'export', name: '导出文章', d: '保存到本地知识库' },
+  { k: 'index', name: '建立索引', d: '让新内容能被搜到' },
+  { k: 'extract', name: '提取要点', d: '模型读一遍，写摘要和标签', cost: 1 },
+  { k: 'projects', name: '整理工具', d: '把文章里提到的工具拆成图鉴条目', cost: 1, slow: 1 },
+  { k: 'wiki', name: '更新 Wiki', d: '双链、汇总页、三张关系图谱', cost: 1, slow: 1 },
+];
+// 日报那一轮自己排的步骤(`daily_run.FETCH_STAGES` + `DIGEST_STAGES`)。这里是
+// **照着念给人看**,不是传给后端的参数 —— 真正跑哪几段由 `daily_run` 定。
+const PIPE_DAILY_STAGES = ['crawl', 'export', 'index', 'extract'];
+let pipeStageSel = new Set(PIPE_STAGE_DEFS.map(s => s.k));
+// 勾上「跑完出日报」之前用户自己那一份:取消勾选时原样还回去,不是重置成全选。
+let pipeStageKept = null;
+
+function pipeDailyOn() { return !!$('pipe-daily')?.checked; }
+// 这一次实际会跑哪几段。**顺序按 `PIPE_STAGE_DEFS` 定死**,不按勾选先后 ——
+// 后端 `start_pipeline` 也是按 `STAGES` 过滤的,两边念出来的顺序得是同一个。
+function pipeStageList() {
+  const sel = pipeDailyOn() ? new Set(PIPE_DAILY_STAGES) : pipeStageSel;
+  return PIPE_STAGE_DEFS.filter(s => sel.has(s.k)).map(s => s.k);
+}
+function pipeStageOn(k) { return pipeStageList().includes(k); }
+
+// 「这一次起不起得了跑」。**只判一处**:那颗按钮的 disabled 和脚下那句汇总都读
+// 它,免得一个说得通、另一个按不下去。返回空串 = 可以跑。
+function pipeStartBlocked() {
+  if (!pipeStageList().length) return '一步都没勾';
+  if (!pipeStageOn('crawl')) return '';          // 不抓取:来源和订阅都不参与
+  if (pipeLoadingChannels().length) return '订阅还在读';
+  if (!pipeReadyChannels().length) return '来源读不出来';
+  if (pipeDailyOn()) return '';                  // 日报那条通道只认来源
+  return pipeSelCount() ? '' : '一个订阅都没勾';
+}
+
+function pipeStageSlowCount() {
+  const on = pipeStageList();
+  return PIPE_STAGE_DEFS.filter(s => s.slow && on.includes(s.k)).length;
+}
+// 「这次会跑:A → B → C」。汇总那一句和日报那一轮的说明都用它。
+function pipeStagePlan() {
+  const on = pipeStageList();
+  return '这次会跑：' + PIPE_STAGE_DEFS.filter(s => on.includes(s.k)).map(s => s.name).join(' → ')
+         + (pipeDailyOn() ? '，跑完生成今天的日报' : '');
+}
+function pipeStageTail() {
+  const slow = pipeStageSlowCount();
+  return slow ? ` 含 ${slow} 段全库的慢活，一次要跑几十分钟。` : '';
+}
+
+function renderPipeStages() {
+  const daily = pipeDailyOn();
+  const on = pipeStageList();
+  $('pipe-stage-list').innerHTML = PIPE_STAGE_DEFS.map(s => `<label class="pipe-channel">
+      <input type="checkbox" data-stage="${s.k}"${on.includes(s.k) ? ' checked' : ''}${daily ? ' disabled' : ''}>
+      <span><b>${s.name}${s.cost ? '<i class="pipe-chip">烧额度</i>' : ''}${s.slow ? '<i class="pipe-chip">几十分钟</i>' : ''}</b>
+      <small>${s.d}</small></span></label>`).join('');
+  $('pipe-stage-count').textContent = `已选 ${on.length} / ${PIPE_STAGE_DEFS.length}`;
+  $('pipe-stage-all').textContent = on.length === PIPE_STAGE_DEFS.length ? '清空选择' : '全选';
+  $('pipe-stage-all').disabled = daily;
+  // 两块范围各自为什么被禁,**分开说**:一个是「日报那一轮不认它们」,一个是
+  // 「这次压根不抓」,笼统一句「不可用」两档都对、哪一档都没说明白。
+  const crawl = on.includes('crawl');
+  $('pipe-source-fields').disabled = !crawl;
+  $('pipe-scope-fields').disabled = !crawl || daily;
+  $('pipe-stage-hint').textContent = daily
+    ? '日报那一轮的步骤由它自己排：每个来源各抓一遍，再统一建索引、提取要点；'
+      + '出完报接着整理工具和更新 Wiki。它抓的是各来源的新内容，不按订阅和日期筛。'
+    : !crawl ? '没勾「抓取内容」，上面的来源、时间范围和订阅这次都不作数。' : '';
+}
+
+// 勾一段 / 取消一段
+$('pipe-stage-list').addEventListener('change', e => {
+  const k = e.target.dataset?.stage;
+  if (!k) return;
+  if (e.target.checked) pipeStageSel.add(k); else pipeStageSel.delete(k);
+  renderPipeStages(); renderPipeEst();
+});
+function pipeStageToggleAll() {
+  pipeStageSel = pipeStageSel.size === PIPE_STAGE_DEFS.length
+    ? new Set() : new Set(PIPE_STAGE_DEFS.map(s => s.k));
+  renderPipeStages(); renderPipeEst();
+}
+function onPipeDailyToggle() {
+  if (pipeDailyOn()) {
+    if (!pipeStageKept) pipeStageKept = new Set(pipeStageSel);
+    pipeStageSel = new Set(PIPE_DAILY_STAGES);
+  } else if (pipeStageKept) {
+    pipeStageSel = pipeStageKept; pipeStageKept = null;
+  }
+  renderPipeStages(); renderPipeEst();
+}

@@ -215,3 +215,18 @@
   .pipe-channel { padding: 9px 11px; }
   #pipe-acct-list { max-height: 190px; }
 }
+/* 步骤多选沿用来源那套勾选块(`.pipe-channel`),只多两样:会烧额度 / 要跑几十分钟
+   的标记,以及「跑完出日报」那一行 —— 它不是第七个步骤,所以单独一行、不混进网格 */
+.pipe-chip {
+  margin-left: 6px; padding: 1px 6px; border-radius: 6px; font-style: normal;
+  font-size: 11px; font-weight: 500; color: var(--warn); border: 1px solid var(--warn);
+}
+.pipe-daily-row {
+  display: flex; gap: 10px; align-items: flex-start; margin-top: 10px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--paper); cursor: pointer;
+}
+.pipe-daily-row input { flex-shrink: 0; width: 16px; height: 16px; margin-top: 2px; accent-color: var(--brand); }
+.pipe-daily-row b { display: block; font-size: 13.5px; font-weight: 600; }
+.pipe-daily-row small { display: block; margin-top: 3px; font-size: 12px; color: var(--muted); }
+/* 被禁掉的那一块要一眼看出来(为什么禁写在 #pipe-stage-hint 里) */
+.pipe-setup fieldset:disabled { opacity: .5; }

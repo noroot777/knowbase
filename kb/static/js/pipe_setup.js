@@ -34,7 +34,7 @@ async function openPipeModal() {
   $('pipe-modal').style.display = ''; $('pipe-fields').disabled = false;
   pipeSetupError(); $('pipe-acct-search').value = '';
   $('pipe-acct-list').innerHTML = '<p class="pipe-acct-empty">正在读取同步来源与订阅…</p>';
-  renderPipeEst();
+  renderPipeStages(); renderPipeEst();
   if (!pipeConnected) refreshPipe();
   try {
     await loadPipeChannels();
@@ -201,16 +201,26 @@ function pipeSelectNone() {
   }
   renderPipeAcctList();
 }
+// 汇总那一句。**第一件事是念这次跑哪几段** —— 原来它只说来源和订阅,而步骤
+// 是固定的六段,现在步骤可勾,「这次到底会发生什么」就得从这里读出来。
 function pipeEstText() {
+  if (!pipeStageList().length) return '一步都没勾，这次什么也不会发生。';
+  const plan = pipeStagePlan(), tail = pipeStageTail();
+  if (!pipeStageOn('crawl'))
+    return `${plan}。不抓新内容，上面的来源、时间范围和订阅这次都不作数。` + tail;
   const n = pipeSelCount(), failed = pipeFailedChannels().length;
   if (!pipeRunSel.length) return '请至少选择一个来源。';
   if (pipeLoadingChannels().length) return '订阅读取完成后即可开始。';
   if (!pipeReadyChannels().length) return '所选来源的订阅都没能读出来，请重新读取后再开始。';
+  // 日报那条通道只认来源,所以这一档念的是来源名,不念订阅数和日期段(念了就是
+  // 一句假话 —— 那两样它根本不收)。
+  if (pipeDailyOn())
+    return `${plan}。来源 ${pipeReadyChannels().map(channelLabel).join(' · ')}。` + tail;
   if (!n) return '请至少选择一个订阅。';
   const sources = pipeReadyChannels().filter(id => pipeSelected(id).size)
     .map(id => `${channelLabel(id)} ${pipeSelected(id).size} 个`).join(' · ');
-  return `${sources} · ${pipeRange.label}。执行中可离开本页，稍后回来查看。`
-    + (failed ? `另有 ${failed} 个来源读取失败，本次不会同步它们。` : '');
+  return `${plan}。${sources} · ${pipeRange.label}。执行中可离开本页，稍后回来查看。`
+    + (failed ? `另有 ${failed} 个来源读取失败，本次不会同步它们。` : '') + tail;
 }
 function renderPipeEst() {
   const editingRange = $('pipe-range-pop').style.display !== 'none';
@@ -227,29 +237,40 @@ function renderPipeEst() {
   if (!pipeConnected) $('pipe-est').textContent = '请先恢复状态连接，再开始同步。';
   else if (pipeSnapshot?.running) $('pipe-est').textContent = '等待当前同步结束，配置会保留。';
   if (editingRange) $('pipe-est').textContent = '请先应用日期范围，或收起日期选择以使用当前已选范围。';
-  $('pipe-start').disabled = editingRange || !pipeConnected || !n || !!pipeAction || !!pipeSnapshot?.running
-    || !!pipeLoadingChannels().length;
-  $('pipe-start').textContent = pipeAction === 'start' ? '正在启动…' : n ? `开始同步 · ${n} 个` : '开始同步';
+  // 能不能起跑由 `pipeStartBlocked()` 一处判(不勾抓取时订阅数本来就该不参与)
+  $('pipe-start').disabled = editingRange || !pipeConnected || !!pipeStartBlocked()
+    || !!pipeAction || !!pipeSnapshot?.running;
+  const steps = pipeStageList().length;
+  $('pipe-start').textContent = pipeAction === 'start' ? '正在启动…'
+    : steps ? `开始同步 · ${steps} 步` : '开始同步';
 }
 function pipeRunBody() {
-  const channels = pipeReadyChannels()
+  const body = { stages: pipeStageList() };
+  // **不抓取就一个来源字段都不带**:带上去的话后端照旧按它整理 crawl_filter,而
+  // 这一次压根不跑 crawl —— 留在请求里只会让留档上那一轮看着像是按来源抓过。
+  if (!pipeStageOn('crawl')) return body;
+  body.channels = pipeReadyChannels()
     .filter(id => pipeSelected(id).size)
     .map(id => ({ channel: id, accounts: [...pipeSelected(id)] }));
-  const body = { channels };
   if (pipeRange.from) Object.assign(body, { since_date: pipeRange.from, until_date: pipeRange.to });
   return body;
 }
 async function startPipeFromModal() {
   if ($('pipe-range-pop').style.display !== 'none' || !pipeConnected || pipeAction
-      || !pipeSelCount() || pipeSnapshot?.running) return;
-  const body = pipeRunBody();
+      || pipeStartBlocked() || pipeSnapshot?.running) return;
+  // 勾了「跑完出日报」走的是日报那条通道(它自己排步骤、出完报接着整理图鉴与
+  // Wiki);没勾才是单纯跑这几段管道。两条路的请求体不一样,别拼到一起去。
+  const daily = pipeDailyOn();
+  const path = daily ? '/api/daily/run' : '/api/pipeline/run';
+  const body = daily ? { sync: true, channels: pipeReadyChannels() } : pipeRunBody();
   pipeAction = 'start'; pipeSetupError(); invalidatePipeStatus();
   let failure = '';
   $('pipe-fields').disabled = true; renderPipeEst(); renderPipeButtons();
   try {
-    await pipePost('/api/pipeline/run', body);
+    await pipePost(path, body);
     closePipeModal();
-    toast('同步已启动', { key: 'pipeline', type: 'ok', detail: '任务在后台执行，可随时回来查看进度。' });
+    toast(daily ? '同步已启动，跑完出日报' : '同步已启动',
+          { key: 'pipeline', type: 'ok', detail: '任务在后台执行，可随时回来查看进度。' });
   } catch (e) {
     failure = e.message;
     pipeSetupError('启动未确认：' + e.message + '。正在核对运行状态，请勿重复提交。');
