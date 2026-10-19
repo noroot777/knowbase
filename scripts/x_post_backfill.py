@@ -217,6 +217,14 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
                         result.update(skipped)
             if not result.get('state') and text is None:
                 text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
+            if not result.get('state'):
+                state, complete, info = proposal(entry_of(row), text)
+                stats[state] += 1
+                result.update(state=state, **info)
+                if complete and apply:
+                    state = 'updated' if grab_store.replace(row, complete) else 'stale'
+                    stats[state] += 1
+                    result['state'] = state
         except x_post.PostGone as exc:
             stats['unavailable'] += 1
             result.update(state='unavailable', error=str(exc))
@@ -228,15 +236,6 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
         except x_post.PostUnavailable as exc:
             stats['failed'] += 1
             result.update(state='failed', error=str(exc))
-        else:
-            if not result.get('state'):
-                state, complete, info = proposal(entry_of(row), text)
-                stats[state] += 1
-                result.update(state=state, **info)
-                if complete and apply:
-                    state = 'updated' if grab_store.replace(row, complete) else 'stale'
-                    stats[state] += 1
-                    result['state'] = state
         stats['results'].append(result)
         if progress:
             progress(result, stats)

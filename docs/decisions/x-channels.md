@@ -68,9 +68,13 @@
   保留为上下文;边界不明或仅有上下文时留成来源待核实,不盖 authored_quote。其他通道的作者自写
   引用由独立原文字段证明,仍留在正文。旧的同类不安全来源不再放行,可用显式来源核实恢复。
   x_article_backfill 换写 title/body 时同一 UPDATE 写入最终文章的来源章,不能遗留空正文的旧章。
+  stamp/context_prefix 的证据不足统一抛共享 PostUnavailable,不以未处理的 ValueError 中断批次。
+  存量核实与正文提案都在逐行失败边界内:该行失败、保留原文,继续后续行并写报告;时间线来源
+  无法证明时只让当前账号失败且不推进水位,继续后续账号。省略号词干匹配不替代独立作者证据。
 - **连接检查与登录导入共用请求错误结论**。`verify_timeline` 通过 `x_page_state.read/problem` 判
   `failed` 与 `limited`,不耗满账号预算再误报登录失效;明确登录墙仍优先。HTTP 错误另带
-  http_problem 证据来路,不受 DOM 加载门槛影响。DOM 错误文字只读 primaryColumn,不读侧栏;
+  http_problem 证据来路,不受 DOM 加载门槛影响。DOM 不存在、限流、请求错误文字均只读
+  primaryColumn,不读侧栏;浏览器回归的正向夹具必须提供主列,同时覆盖侧栏与缺主列的阴性形状。
   普通文案须加载完成,主内容无进度指示且明确显示限流,或显示 Retry/错误 alert 时可提前给出
   dom_problem。加载中“暂时还没有推文”本身不是失败证据。
   同一次导航只让同 operation 的后到响应覆盖先前状态;其他页面、loader、操作或会话的成功

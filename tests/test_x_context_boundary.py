@@ -18,7 +18,7 @@ class ContextBoundaryTests(unittest.TestCase):
     def test_unexplained_empty_or_incorrect_boundaries_are_rejected(self):
         entry = self.entry('> Quoted context\n\nAuthor text')
         for prefix, evidence in [('', None), ('', 'Author text'), ('> Different\n\n', None)]:
-            with self.subTest(prefix=prefix, evidence=evidence), self.assertRaises(ValueError):
+            with self.subTest(prefix=prefix, evidence=evidence), self.assertRaises(x_post.PostUnavailable):
                 x_post_meta.stamp(entry, 'post', prefix, author_text=evidence)
 
     def test_existing_unsafe_empty_boundary_is_not_accepted_as_valid_provenance(self):
@@ -38,7 +38,7 @@ class ContextBoundaryTests(unittest.TestCase):
                 self.assertEqual(expected, x_post_meta.context_prefix(body, context))
                 self.assertEqual('', x_post_meta.context_prefix(body, ''))
         for context in ['not a quote', '> Wrong context']:
-            with self.subTest(context=context), self.assertRaises(ValueError):
+            with self.subTest(context=context), self.assertRaises(x_post.PostUnavailable):
                 x_post_meta.context_prefix('> Real context\n\nText', context)
 
     def test_browser_keeps_independently_read_author_quotes_inside_the_post(self):
@@ -64,7 +64,7 @@ class ContextBoundaryTests(unittest.TestCase):
         body = '> A quoted tweet\n\nMy own paragraph'
         for evidence in [body, x_post_meta.AuthorText(body, 'feedgrab'),
                          x_post_meta.AuthorText(None, 'detail')]:
-            with self.subTest(evidence=evidence), self.assertRaises(ValueError):
+            with self.subTest(evidence=evidence), self.assertRaises(x_post.PostUnavailable):
                 x_post_meta.stamp(self.entry(body), 'post', '', author_text=evidence)
 
     def test_an_authored_quote_marker_without_a_trusted_origin_is_not_proof(self):

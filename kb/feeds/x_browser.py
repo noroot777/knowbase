@@ -480,7 +480,7 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                         'watermark': started if incomplete else observed_watermark}
                 except XRateLimited:
                     raise
-                except (XBrowserError, CdpError) as e:
+                except (XBrowserError, CdpError, x_post.PostUnavailable) as e:
                     results[handle] = {'entries': [], 'error': str(e)}
     except (XRateLimited, CdpError, EOFError, OSError) as e:
         # 浏览器整个起不来/中途死了:剩下的账号统一记成同一个原因,

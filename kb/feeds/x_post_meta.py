@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 
 from kb.feeds.x_article_links import quote_lines
+from kb.feeds.x_errors import PostUnavailable
 
 FIELD = 'x_post_meta'
 RECOVERABLE = {'unclassified_legacy', 'invalid_provenance'}
@@ -29,7 +30,7 @@ def context_prefix(body: str, context: str) -> str:
         return ''
     prefix = context if body == context else context + '\n\n'
     if quote_lines(context) != context or not body.startswith(prefix):
-        raise ValueError('X 上下文必须是正文开头的完整引用块')
+        raise PostUnavailable('X 上下文必须是正文开头的完整引用块')
     return prefix
 
 
@@ -38,12 +39,12 @@ def stamp(entry: dict, kind: str, prefix: str, *, author_text: AuthorText | None
     body = entry['body']
     if author_text is not None and (not isinstance(author_text, AuthorText) or (
             author_text.source not in _AUTHOR_SOURCES or not isinstance(author_text.text, str))):
-        raise ValueError('X 作者证据必须来自独立的 DOM、推文接口或详情原文字段')
+        raise PostUnavailable('X 作者证据必须来自独立的 DOM、推文接口或详情原文字段')
     authored_quote = (not prefix and body.startswith('> ') and author_text is not None
                       and author_text.text.startswith(body.partition('\n\n')[0]))
     if kind == 'post' and (not isinstance(prefix, str) or not body.startswith(prefix) or (
             not prefix and body.startswith('> ') and not authored_quote)):
-        raise ValueError('X 正文的引用块必须有明确上下文边界或作者原文证据')
+        raise PostUnavailable('X 正文的引用块必须有明确上下文边界或作者原文证据')
     meta = dict(version=1, kind=kind, prefix=prefix, fingerprint=_fingerprint(entry))
     if authored_quote:
         meta['authored_quote'] = True

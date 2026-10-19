@@ -143,7 +143,7 @@ class PostDomTests(unittest.TestCase):
             ('Loading', False, False),
         ]:
             with self.subTest(text=text):
-                self.load('<main>' + text + '</main>')
+                self.load('<main><div data-testid="primaryColumn">' + text + '</div></main>')
                 for script in [x_post.READ_JS, x_browser._STATE_JS]:
                     snap = json.loads(self.page.eval(script))
                     self.assertIs(empty, snap.get('empty'))
@@ -152,7 +152,7 @@ class PostDomTests(unittest.TestCase):
     def test_real_request_error_copy_is_retryable_not_absent_or_proven_rate_limit(self):
         for text in ['出错了。请尝试重新加载。', 'Something went wrong. Try reloading.', '请稍后再试']:
             with self.subTest(text=text):
-                self.load('<main>' + text + '</main>')
+                self.load('<main><div data-testid="primaryColumn">' + text + '</div></main>')
                 for script in [x_post.READ_JS, x_browser._STATE_JS]:
                     snap = json.loads(self.page.eval(script))
                     self.assertIs(True, snap.get('failed'))
@@ -167,6 +167,18 @@ class PostDomTests(unittest.TestCase):
             self.assertIs(True, snap.get('failed'))
             self.assertIs(False, snap.get('empty'))
             self.assertIs(False, snap.get('limited'))
+
+    def test_sidebar_words_or_missing_primary_cannot_classify_the_main_page(self):
+        for text in ['该页面不存在', 'Hmm...this page doesn’t exist.', 'Rate limit exceeded',
+                     '出错了。请尝试重新加载。', 'Something went wrong. Try reloading.', '请稍后再试']:
+            for main in ['', '<main><div data-testid="primaryColumn">Loading</div></main>']:
+                with self.subTest(text=text, main=main):
+                    self.load(main + '<aside data-testid="sidebarColumn">' + text + '</aside>')
+                    for script in [x_post.READ_JS, x_browser._STATE_JS]:
+                        snap = json.loads(self.page.eval(script))
+                        for flag in ('empty', 'limited', 'failed'):
+                            self.assertIs(False, snap.get(flag))
+                        self.assertEqual('', x_page_state.problem(snap))
 
     def test_retry_icons_in_sidebars_or_tweets_and_regular_buttons_are_not_page_errors(self):
         fixtures = [

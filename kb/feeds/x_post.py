@@ -6,6 +6,7 @@ import time
 
 from kb.feeds import x_article, x_post_meta
 from kb.feeds.x_cdp import CdpError
+from kb.feeds.x_errors import PostUnavailable
 from kb.feeds.x_page_state import STATE_JS, XRateLimited, navigate, problem, read
 
 HINT = '_x_post_prefix'
@@ -48,10 +49,6 @@ READ_JS = r'''(() => {
   }
   return JSON.stringify(result);
 })()'''
-
-
-class PostUnavailable(RuntimeError):
-    pass
 
 
 class PostGone(PostUnavailable):

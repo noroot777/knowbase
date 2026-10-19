@@ -140,7 +140,7 @@ class PostProvenanceTests(ProvenanceBase):
             with self.subTest(raw=raw):
                 self.assertEqual('invalid_provenance', x_post_meta.eligibility(
                     dict(row, **{x_post_meta.FIELD: raw}))[0])
-        with self.assertRaises(ValueError):
+        with self.assertRaises(x_post.PostUnavailable):
             x_post_meta.stamp(row, 'post', '> A different context\n\n')
         replacement = dict(title='New post', body='New post body')
         self.assertTrue(grab_store.replace(row, replacement))
