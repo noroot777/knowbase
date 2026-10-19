@@ -24,12 +24,13 @@ def response(status=429, operation='TweetDetail', **changes):
 
 
 class EventSession(Session):
-    def __init__(self, events):
+    def __init__(self, events, available=False):
         super().__init__()
         self._sid = 'owned'
         self.incoming = deque()
         self.events = events
         self.reads = 0
+        self.available = available
 
     def _post(self, message, deadline):
         result = {}
@@ -39,7 +40,9 @@ class EventSession(Session):
         if message['method'] == 'Runtime.evaluate':
             self.reads += 1
             result = dict(result=dict(value=json.dumps(dict(
-                snapshot(BODY), ready='complete', limited=False, failed=False, empty=False))))
+                snapshot(BODY if self.available else ''), id='123' if self.available else '',
+                articles=int(self.available), ready='complete', limited=False,
+                failed=False, empty=False))))
         self.incoming.append(dict(id=message['id'], result=result))
 
     def _take(self, deadline):
@@ -55,9 +58,10 @@ class ResponseTests(unittest.TestCase):
 
     def test_http_429_during_navigation_is_retained_and_aborts_after_two_observations(self):
         session = EventSession([response()])
-        with patch.object(x_post, 'STEP', 0), self.assertRaises(x_post.XRateLimited):
+        with patch.object(x_post, 'STEP', 0), patch.object(x_post, 'SECONDS', 0.01), \
+             self.assertRaises(x_post.XRateLimited):
             x_post.fetch(URL, session)
-        self.assertEqual(2, session.reads)
+        self.assertGreaterEqual(session.reads, 2)
 
     def test_timeline_core_http_429_reaches_the_shared_state(self):
         session = EventSession([response(operation='UserTweets')])

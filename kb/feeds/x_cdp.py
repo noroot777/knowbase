@@ -69,6 +69,10 @@ class CdpError(RuntimeError):
     """浏览器侧的失败。message 是成品文案,直接给用户看。"""
 
 
+class CdpTransportError(CdpError):
+    """The shared transport cannot safely send or receive another command."""
+
+
 def find_chrome(explicit: str = '') -> str:
     """定位 Chrome 可执行文件。找不到时的文案要能指到下一步。"""
     if explicit:
@@ -368,13 +372,13 @@ class Chrome(Session):
         while view:
             left = limit - time.monotonic()
             if left <= 0 or not select.select([], [self._w], [], left)[1]:
-                raise CdpError('浏览器没有在预期时间内收下命令')
+                raise CdpTransportError('浏览器没有在预期时间内收下命令')
             try:
                 sent = os.write(self._w, view)
             except BlockingIOError:
                 continue                  # select 说可写、内核又改主意了
             except OSError as e:
-                raise CdpError(f'写浏览器连接出错:{e}') from None
+                raise CdpTransportError(f'写浏览器连接出错:{e}') from None
             view = view[sent:]
 
     def _take(self, deadline: float) -> dict:

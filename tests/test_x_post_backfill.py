@@ -7,7 +7,7 @@ import time
 from unittest.mock import patch
 
 from kb.feeds import grab_store, registry as reg, sync, translate, x_post
-from kb.feeds.x_cdp import CdpError
+from kb.feeds.x_cdp import CdpTransportError
 from scripts import x_post_backfill as backfill
 from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import tweet
@@ -25,8 +25,9 @@ def linked_snapshot(text):
     for anchor in re.finditer(r'https?://\S+|[@#]\w+', text):
         offsets.update(len(re.sub(r'\s+', '', text[:position]))
                        for position in anchor.span())
+    legacy = re.sub(r'(https?://\S+|[@#]\w+)', r'\n\1\n', text)
     return dict(snapshot(text), inline_breaks=sorted(offsets),
-                inline_plain=re.sub(r'\s+', '', text))
+                inline_plain=re.sub(r'\s+', '', text), inline_legacy=legacy)
 
 
 class BackfillTests(ChannelBase):
@@ -484,7 +485,7 @@ class BackfillTests(ChannelBase):
     def test_cli_reports_blocked_identical_and_cleanable_artifacts_separately(self):
         row = self.seed(LEGACY)
         report = self.root / 'report.json'
-        for text, state, code in [('shorter', 'blocked_artifacts', 1),
+        for text, state, code in [('shorter', 'blocked_artifacts', 0),
                                   (LEGACY, 'identical', 0), (CLEAN, 'normalized', 0)]:
             with self.subTest(state=state), contextlib.redirect_stdout(io.StringIO()), \
                  patch.object(backfill.x_browser, 'browser_session',
@@ -557,7 +558,7 @@ class BackfillTests(ChannelBase):
 
     def test_session_failure_stops_the_audit_without_reopening_later_posts(self):
         for snap, reason in [(dict(snapshot(), login=True), '重新登录'),
-                             (CdpError('disconnected'), '会话中断')]:
+                             (CdpTransportError('disconnected'), '会话中断')]:
             with self.subTest(reason=reason):
                 rows = [self.seed(), self.seed(identity='124')]
                 page = Page(snap)

@@ -90,7 +90,7 @@ def canonical_preview(text: str) -> str:
     return text
 
 
-def _alignment(preview: str, detail: str, evidence=None) -> str:
+def _covered_preview(preview: str, detail: str) -> str | None:
     ranges = link_artifacts(preview, detail)
     tail = re.search(r'(?:…|\.{3})\Z', preview)
     if (tail and tail.end() == len(preview) and x_post.expanded(detail, preview)
@@ -114,32 +114,43 @@ def _alignment(preview: str, detail: str, evidence=None) -> str:
     pieces.append((preview[cursor:], None))
     match = re.match(''.join(pattern), re.sub(r'\s+', '', detail))
     if match is None:
-        return 'content'
-    fixed = ''.join(segment for segment, group in pieces if group is None or match[group])
-    positions = set()
-    if (isinstance(evidence, dict) and evidence.get('text') == detail
-            and evidence.get('inline_plain') == re.sub(r'\s+', '', detail)
-            and isinstance(evidence.get('inline_breaks'), list)):
-        positions = {offset for offset in evidence['inline_breaks']
-                     if type(offset) is int and 0 < offset < len(re.sub(r'\s+', '', detail))}
-    gaps = {}
-    offset = 0
-    for token in re.findall(r'\s+|\S', detail):
+        return None
+    return ''.join(segment for segment, group in pieces if group is None or match[group])
+
+
+def _gaps(text: str) -> dict[int, str]:
+    gaps, offset = {}, 0
+    for token in re.findall(r'\s+|\S', text):
         if token.isspace():
-            gaps[offset] = token
+            gaps[offset] = token.replace('\r\n', '\n')
         else:
             offset += 1
-    offset = 0
-    for token in re.findall(r'\s+|\S', fixed):
-        if not token.isspace():
-            offset += 1
-            continue
-        original = token.replace('\r\n', '\n')
-        replacement = gaps.get(offset, '').replace('\r\n', '\n')
+    return gaps
+
+
+def _alignment(preview: str, detail: str, evidence=None) -> str:
+    fixed = _covered_preview(preview, detail)
+    if fixed is None:
+        return 'content'
+    positions = set()
+    legacy = None
+    if (isinstance(evidence, dict) and evidence.get('text') == detail
+            and evidence.get('inline_plain') == re.sub(r'\s+', '', detail)
+            and isinstance(evidence.get('inline_breaks'), list)
+            and isinstance(evidence.get('inline_legacy'), str)):
+        positions = {offset for offset in evidence['inline_breaks']
+                     if type(offset) is int and 0 < offset < len(re.sub(r'\s+', '', detail))}
+        legacy = _covered_preview(evidence['inline_legacy'], detail)
+    source_gaps = _gaps(legacy) if legacy is not None else {}
+    gaps = _gaps(detail)
+    for offset, original in _gaps(fixed).items():
+        replacement = gaps.get(offset, '')
         remaining = iter(replacement)
         if all(any(char == candidate for candidate in remaining) for char in original):
             continue
-        if (offset in positions and '\n' not in replacement and original.count('\n') <= 1
+        source = source_gaps.get(offset, '')
+        if (offset in positions and replacement.count('\n') < original.count('\n')
+                <= source.count('\n')
                 and not any(char in original for char in '\r\v\f\x85\u2028\u2029')):
             continue
         return 'whitespace'
@@ -230,6 +241,10 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
             stats['deferred'] = len(rows) - index - 1
             stats['stop_reason'] = str(exc)
             result.update(state='failed', error=str(exc), scope='batch')
+        except x_post.PostHalted as exc:
+            stats['deferred'] = len(rows) - index
+            stats['stop_reason'] = str(exc)
+            result.update(state='deferred', error=str(exc), scope='batch')
         except x_post.PostUnavailable as exc:
             stats['failed'] += 1
             result.update(state='failed', error=str(exc))
@@ -310,9 +325,7 @@ def main(argv=None) -> int:
     if stats.get('stop_reason'):
         print(f'整轮已停止:{stats["stop_reason"]}')
     print('已写入的条目会在正常同步中重新翻译、导出、索引和提取;本脚本不直接改 vault。')
-    return 1 if any(stats[key] for key in
-                    ('failed', 'deferred', 'blocked_length', 'blocked_artifacts',
-                     'blocked_whitespace', 'blocked_content')) else 0
+    return 1 if stats['failed'] or stats['deferred'] else 0
 
 
 if __name__ == '__main__':

@@ -5,7 +5,7 @@ import re
 import time
 
 from kb.feeds import x_article
-from kb.feeds.x_cdp import CdpError
+from kb.feeds.x_cdp import CdpError, CdpTransportError
 from kb.feeds.x_page_state import STATE_JS, XRateLimited, navigate, problem, read
 
 HINT = '_x_post_prefix'
@@ -31,21 +31,36 @@ TEXT_JS = r'''
     !node.closest('div[role="link"], [data-testid="quoteTweet"]'));
   const postMore = art => !!ownNode(art, '[data-testid="tweet-text-show-more-link"]');
   const inlineBreaks = node => {
-    if (!node || [...node.querySelectorAll('*')].some(element =>
-      !element.closest('a') && element.tagName !== 'BR' && element.textContent.trim() &&
-      !['inline', 'inline-block', 'contents', 'none'].includes(getComputedStyle(element).display))) {
-      return [];
+    if (!node) return [];
+    const bounds = element => {
+      const before = document.createRange();
+      before.selectNodeContents(node);
+      before.setEndBefore(element);
+      const start = [...postText(before.cloneContents()).replace(/\s/g, '')].length;
+      return [start, start + [...postText(element).replace(/\s/g, '')].length];
+    };
+    const wrapper = element => {
+      const anchors = [...element.querySelectorAll('a')];
+      if (anchors.length !== 1 || postText(element) !== postText(anchors[0])) return false;
+      if (getComputedStyle(element).display === 'inline-flex') return true;
+      let parent = element.parentElement;
+      while (parent && parent !== node && postText(parent) === postText(anchors[0])) {
+        if (getComputedStyle(parent).display === 'inline-flex') return true;
+        parent = parent.parentElement;
+      }
+      return false;
+    };
+    const protectedOffsets = new Set();
+    for (const element of node.querySelectorAll('*')) {
+      if (element.closest('a') || element.tagName === 'BR' || !postText(element)) continue;
+      if (['inline', 'inline-block', 'contents', 'none'].includes(getComputedStyle(element).display)
+          || wrapper(element)) continue;
+      for (const offset of bounds(element)) protectedOffsets.add(offset);
     }
     const offsets = new Set();
     for (const anchor of node.querySelectorAll('a')) {
-      const before = document.createRange();
-      before.selectNodeContents(node);
-      before.setEndBefore(anchor);
-      const start = [...postText(before.cloneContents()).replace(/\s/g, '')].length;
-      const length = [...postText(anchor).replace(/\s/g, '')].length;
-      if (length) {
-        offsets.add(start);
-        offsets.add(start + length);
+      for (const offset of bounds(anchor)) {
+        if (!protectedOffsets.has(offset)) offsets.add(offset);
       }
     }
     return [...offsets].sort((first, second) => first - second);
@@ -66,6 +81,7 @@ READ_JS = r'''(() => {
     result.text = postText(body);
     result.inline_breaks = inlineBreaks(body);
     result.inline_plain = result.text.replace(/\s/g, '');
+    result.inline_legacy = body?.innerText.replace(/\u00a0/g, ' ').trim() || '';
     result.truncated = postMore(art);
     break;
   }
@@ -104,6 +120,12 @@ def _check(deadline, should_stop):
         raise PostHalted('本轮时间预算用完')
 
 
+def _request_failed(kind):
+    if kind == 'limited':
+        raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
+    raise PostRequestFailed('X 页面请求出错,请稍后重试(不能据此确认限流或推文不存在)')
+
+
 def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) -> str:
     if evidence is not None:
         evidence.clear()
@@ -116,6 +138,7 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
     previous = None
     absent = False
     previous_problem = ''
+    confirmed_problem = ''
     try:
         navigation = navigate(session, url)
         if isinstance(navigation, dict) and navigation.get('errorText'):
@@ -123,34 +146,39 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
         while True:
             _check(deadline, should_stop)
             if time.monotonic() >= until:
+                if confirmed_problem:
+                    _request_failed(confirmed_problem)
                 raise PostUnavailable('推文正文补全时间用完')
             snap = read(session, READ_JS)
             if snap.get('login'):
                 raise PostSessionUnavailable('推文详情页需要重新登录 X')
-            current_problem = problem(snap) if snap.get('at') == match[1] else ''
-            if current_problem and current_problem == previous_problem:
-                if current_problem == 'limited':
-                    raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
-                raise PostRequestFailed('X 页面请求出错,请稍后重试(不能据此确认限流或推文不存在)')
+            valid = (snap.get('at') == match[1] == snap.get('id')
+                     and isinstance(snap.get('text'), str) and snap['text'].strip()
+                     and snap.get('truncated') is False)
+            text = snap['text'].strip() if valid else None
+            current = (text, snap.get('inline_breaks', []), snap.get('inline_plain'),
+                       snap.get('inline_legacy'))
+            if text is not None and current == previous:
+                if evidence is not None:
+                    evidence.update(text=text, inline_breaks=current[1], inline_plain=current[2],
+                                    inline_legacy=current[3])
+                return text
+            previous = current
+            current_problem = problem(snap) if snap.get('at') == match[1] and not valid else ''
+            confirmed_problem = current_problem if current_problem == previous_problem else ''
+            if confirmed_problem and not snap.get('http_only'):
+                _request_failed(confirmed_problem)
             previous_problem = current_problem
             missing = (snap.get('at') == match[1] and not snap.get('id')
                        and snap.get('ready') == 'complete' and snap.get('empty') is True)
             if missing and absent:
                 raise PostGone('X 明确答复该推文页面不存在或已不可用')
             absent = missing
-            valid = (snap.get('at') == match[1] == snap.get('id')
-                     and isinstance(snap.get('text'), str) and snap['text'].strip()
-                     and snap.get('truncated') is False)
-            text = snap['text'].strip() if valid else None
-            current = (text, snap.get('inline_breaks', []), snap.get('inline_plain'))
-            if text is not None and current == previous:
-                if evidence is not None:
-                    evidence.update(text=text, inline_breaks=current[1], inline_plain=current[2])
-                return text
-            previous = current
             time.sleep(min(STEP, max(0.0, until - time.monotonic())))
-    except (CdpError, OSError, EOFError) as exc:
+    except (CdpTransportError, OSError, EOFError) as exc:
         raise PostSessionUnavailable(f'浏览器会话中断:{exc}') from exc
+    except CdpError as exc:
+        raise PostUnavailable(f'推文详情页读取失败:{exc}') from exc
     except (ValueError, TypeError, AttributeError) as exc:
         raise PostUnavailable(f'推文详情页读取失败:{exc}') from exc
 

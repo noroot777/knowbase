@@ -219,13 +219,18 @@ def _own_tweet(item: dict, handle: str) -> bool:
     return (item.get('author') or '').lower() == handle.lower()
 
 
+def _quote_only(item: dict) -> bool:
+    return bool(item.get('quoted') and not (item.get('text') or '').strip()
+                and not item.get('article'))
+
+
 def _entry(item: dict) -> dict | None:
     """一条推文 → feed_items 的条目形状。没正文也没链接的不要。"""
     published = _as_published(item.get('datetime', ''))
     text = (item.get('text') or '').strip()
     if not item.get('url') or not (text or published):
         return None
-    if item.get('quoted') and not text and not item.get('article'):
+    if _quote_only(item):
         return None
     name = item.get('name') or item.get('author') or ''
     context = (item.get('context') or '').strip()
@@ -248,6 +253,7 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
     """等页面落定,顺带认出登录失效/不存在/限流这三种不该当成"没有推文"的情况。"""
     last = {}
     previous_problem = ''
+    confirmed_problem = ''
     while time.monotonic() < deadline:
         last = read(page, _STATE_JS)
         if last['login']:
@@ -256,17 +262,22 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
             # `x_login_import`),把他推去无头壳里登一次正是他想免掉的那一步。
             raise XBrowserError('X 登录态已失效,请在浏览器通道设置里重新登录,'
                                 '或从日常浏览器再导入一次')
+        if last['articles'] and last['ready'] == 'complete':
+            return last
         current_problem = page_problem(last)
-        if current_problem and current_problem == previous_problem:
+        confirmed_problem = current_problem if current_problem == previous_problem else ''
+        if confirmed_problem and not last.get('http_only'):
             if current_problem == 'limited':
                 raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
             raise XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
         previous_problem = current_problem
         if last['empty']:
             raise XBrowserError(f'@{handle} 这个账号在 X 上打不开(可能已改名、注销或被冻结)')
-        if last['articles'] and last['ready'] == 'complete':
-            return last
         time.sleep(0.3)
+    if confirmed_problem == 'limited':
+        raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
+    if confirmed_problem:
+        raise XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
     if last.get('ready') != 'complete':
         raise XBrowserError(f'@{handle} 的页面没有加载完')
     raise XBrowserError(f'@{handle} 的时间线上没有读到推文')
@@ -366,6 +377,14 @@ def _settle(page: Chrome, before: int, deadline: float) -> bool:
     return False
 
 
+class TimelineEntries(list):
+    """Selected entries plus the count of retryable quote-only omissions."""
+
+    def __init__(self):
+        super().__init__()
+        self.skipped_quotes = 0
+
+
 def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list[dict]:
     """落到 feed_items 之前的最后一道:去掉不属于这条时间线的和过老的,转成条目形状。
 
@@ -374,7 +393,7 @@ def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list
     翻到底的证明(`_own_tweet`),但刚发出来就被钉上去的推文在 X 上看得见,不收
     就是永久丢掉一条真内容。
     """
-    out = []
+    out = TimelineEntries()
     for item in sorted(items, key=lambda i: i.get('datetime') or ''):
         if not _in_timeline(item, handle):
             continue
@@ -383,6 +402,8 @@ def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list
             continue
         if entry := _entry(item):
             out.append(entry)
+        elif _quote_only(item) and item.get('url') and when:
+            out.skipped_quotes += 1
     return out
 
 
@@ -451,7 +472,12 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 started = water or floor.isoformat()
                 try:
                     entries, incomplete = _harvest_one(page, handle, floor)
+                    skipped_quotes = getattr(entries, 'skipped_quotes', 0)
                     observed_watermark = _newest(entries, water)
+                    if skipped_quotes:
+                        note = (f'跳过 {skipped_quotes} 条本人无正文的引用推文,'
+                                '未冒充本人观点入库,留到下次同步再试')
+                        incomplete = ';'.join(filter(None, [incomplete, note]))
                     # 长文(Article)推文在时间线上一个字都没有,正文要单独取一次。
                     # 取不到的那几条本轮不入库、并按"没读完"办 —— 空正文一旦落库
                     # 就再也更新不了(`put_items` 是 DO NOTHING),见 `x_article`。
@@ -482,6 +508,7 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # `put_items` 按 URL 去重,一条都不会重复入库。
                     results[handle] = {
                         'entries': entries, 'error': '', 'incomplete': incomplete,
+                        'skipped_quotes': skipped_quotes,
                         'watermark': started if incomplete else observed_watermark}
                 except (XRateLimited, x_post.PostSessionUnavailable):
                     raise

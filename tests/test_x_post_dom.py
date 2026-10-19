@@ -119,9 +119,72 @@ class PostDomTests(unittest.TestCase):
                 legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
                 snap = json.loads(self.page.eval(x_post.READ_JS))
                 self.assertIn('\n', legacy)
-                self.assertEqual([], snap['inline_breaks'])
                 entry = dict(body=legacy, **{x_post.HINT: ''})
                 self.assertEqual('blocked_whitespace', backfill.proposal(entry, snap['text'], snap)[0])
+
+    def test_actual_x_mention_wrappers_repair_legacy_text_and_longer_details(self):
+        text = ('Prediction: you are going to use '
+                '<div style="display:inline-flex"><span style="display:block">'
+                '<a href="/AsideAI">@AsideAI</a></span></div> with agents.'
+                '<br><br>Keep this paragraph.')
+        self.load(article(text=text))
+        legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
+        snap = json.loads(self.page.eval(x_post.READ_JS))
+        self.assertIn('\n@AsideAI\n', legacy)
+        for preview, expected in [(legacy, 'normalized'), (legacy.split(' with agents.')[0], 'expanded')]:
+            with self.subTest(preview=preview):
+                state, complete, _ = backfill.proposal(dict(body=preview, **{x_post.HINT: ''}),
+                                                      snap['text'], snap)
+                self.assertEqual(expected, state)
+                self.assertEqual(snap['text'], complete['body'])
+                self.assertIn('\n\nKeep this paragraph.', complete['body'])
+
+    def test_unrelated_blocks_do_not_invalidate_a_proven_link_elsewhere(self):
+        self.load(article(text='Read <div style="display:inline-flex"><span style="display:block">'
+                          '<a href="/AsideAI">@AsideAI</a></span></div> today<br><br>'
+                          '<span style="display:block">A later paragraph.</span>'))
+        legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
+        snap = json.loads(self.page.eval(x_post.READ_JS))
+        preview = legacy.split(' today')[0]
+        state, complete, _ = backfill.proposal(dict(body=preview, **{x_post.HINT: ''}),
+                                              snap['text'], snap)
+        self.assertEqual('expanded', state)
+        self.assertEqual(snap['text'], complete['body'])
+        self.assertIn('\n\nA later paragraph.', complete['body'])
+
+    def test_proven_multiple_layout_breaks_can_be_removed_without_removing_source_paragraphs(self):
+        anchors = ['<a style="display:block" href="https://example.org">https://example.org</a>',
+                   '<div style="display:inline-flex"><span style="display:block">'
+                   '<a href="https://example.org">https://example.org</a></span></div>']
+        for anchor in anchors:
+            with self.subTest(anchor=anchor):
+                html = article(text='Read\n' + anchor + ' today<br><br>Keep this paragraph.')
+                self.load(html.replace('data-testid="tweetText"',
+                                       'data-testid="tweetText" style="white-space:pre-wrap"'))
+                legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
+                snap = json.loads(self.page.eval(x_post.READ_JS))
+                self.assertIn('\n\nhttps://', legacy)
+                self.assertIn('Read\nhttps://', snap['text'])
+                state, complete, _ = backfill.proposal(dict(body=legacy, **{x_post.HINT: ''}),
+                                                      snap['text'], snap)
+                self.assertEqual('normalized', state)
+                self.assertEqual(snap['text'], complete['body'])
+                self.assertIn('\n\nKeep this paragraph.', complete['body'])
+
+    def test_unproven_extra_paragraph_at_a_real_wrapper_is_still_blocked(self):
+        self.load(article(text='Read <div style="display:inline-flex"><span style="display:block">'
+                          '<a href="/AsideAI">@AsideAI</a></span></div> today'))
+        legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
+        snap = json.loads(self.page.eval(x_post.READ_JS))
+        preview = legacy.replace('\n@AsideAI', '\n\n@AsideAI')
+        self.assertEqual('blocked_whitespace', backfill.proposal(
+            dict(body=preview, **{x_post.HINT: ''}), snap['text'], snap)[0])
+
+    def test_inline_anchor_without_a_layout_break_cannot_authorize_removing_one(self):
+        self.load(article(text='Read <a href="/AsideAI">@AsideAI</a> today'))
+        snap = json.loads(self.page.eval(x_post.READ_JS))
+        self.assertEqual('blocked_whitespace', backfill.proposal(
+            dict(body='Read\n@AsideAI\ntoday', **{x_post.HINT: ''}), snap['text'], snap)[0])
 
     def test_real_protocol_split_is_repaired_but_url_following_paragraphs_survive(self):
         self.load(article(text='Read <a href="https://t.co/example">'
@@ -137,7 +200,7 @@ class PostDomTests(unittest.TestCase):
         self.assertEqual('Read https://example.org/path\n\nKeep this paragraph.', complete['body'])
 
     def test_anchor_offsets_count_unicode_characters_and_do_not_trust_unlinked_mentions(self):
-        self.load(article(text='🙂 Read <a href="/AsideAI">@AsideAI</a> today'))
+        self.load(article(text='🙂 Read <a style="display:block" href="/AsideAI">@AsideAI</a> today'))
         snap = json.loads(self.page.eval(x_post.READ_JS))
         self.assertEqual([5, 13], snap['inline_breaks'])
         entry = dict(body='🙂 Read \n@AsideAI\n today', **{x_post.HINT: ''})

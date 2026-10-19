@@ -118,7 +118,7 @@ class SafeReplacementTests(ChannelBase):
         with contextlib.redirect_stdout(io.StringIO()) as output, \
              patch.object(backfill.x_browser, 'browser_session',
                           return_value=contextlib.nullcontext(Page(snapshot(text)))):
-            self.assertEqual(1, backfill.main(['run', '--yes', '--report', str(report)]))
+            self.assertEqual(0, backfill.main(['run', '--yes', '--report', str(report)]))
         stats = json.loads(report.read_text())
         self.assertEqual(1, stats['blocked_whitespace'])
         self.assertIn('空白改动缺少证据 1 条', output.getvalue())

@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from kb.collectors import FetchScope
 from kb.feeds import grab_store, registry as reg, sync, translate, x_browser, x_channels, x_post
-from kb.feeds.x_cdp import CdpError
+from kb.feeds.x_cdp import CdpTransportError
 from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import FRESH_ISO, tweet
 
@@ -92,7 +92,7 @@ class PostTests(unittest.TestCase):
 
     def test_session_failures_are_not_hidden_as_retryable_post_counts(self):
         short = x_browser._entry(tweet('124', text='short'))
-        for snap in [dict(snapshot(), login=True), CdpError('disconnected')]:
+        for snap in [dict(snapshot(), login=True), CdpTransportError('disconnected')]:
             with self.subTest(snap=snap):
                 page = Page(snap)
                 with self.assertRaises(x_post.PostSessionUnavailable):
@@ -113,7 +113,7 @@ class PostTests(unittest.TestCase):
     def test_an_expired_session_aborts_remaining_accounts_in_both_channels(self):
         for attach in [False, True]:
             for snap, reason in [(dict(snapshot(), login=True), '重新登录'),
-                                 (CdpError('disconnected'), '会话中断'),
+                                 (CdpTransportError('disconnected'), '会话中断'),
                                  (EOFError('closed'), '会话中断')]:
                 with self.subTest(attach=attach, reason=reason):
                     page = Page(snap)
@@ -306,7 +306,7 @@ class StoredPostTests(ChannelBase):
         source = self.sub()
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:
             for snap, reason in [(dict(snapshot(), login=True), '重新登录'),
-                                 (CdpError('disconnected'), '会话中断')]:
+                                 (CdpTransportError('disconnected'), '会话中断')]:
                 with self.subTest(channel=channel, reason=reason):
                     settings = self.settings(channel)
                     x_channels.save_watermark(source['id'], channel, OLD)

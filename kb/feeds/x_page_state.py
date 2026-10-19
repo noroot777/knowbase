@@ -61,8 +61,14 @@ class Responses:
         self.statuses[(params.get('loaderId'), operation)] = response.get('status', 0)
 
     def apply(self, snapshot: dict) -> dict:
+        if snapshot.get('articles'):
+            return snapshot
         statuses = [status for (loader, _operation), status in self.statuses.items()
                     if self.loader and loader == self.loader]
+        http_problem = ('limited' if any(status == 429 for status in statuses) else
+                        'failed' if any(400 <= status < 600 for status in statuses) else '')
+        if http_problem and not problem(snapshot):
+            snapshot['http_only'] = True
         if any(status == 429 for status in statuses):
             snapshot['limited'] = True
         if any(400 <= status < 600 for status in statuses):
