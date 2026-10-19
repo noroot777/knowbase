@@ -30,12 +30,11 @@
 去重,`put_items` 的 `DO NOTHING` 挡着,内容不会变成两份)。
 
 纯标准库:这条路不该因为 venv 里缺什么而用不了(`kb.sh` 用 `$BOOT_PY` 跑它)。
-**同目录那五个文件和它是一套**(单文件 700 行的上限之下按职责拆的):通道层
-`grab_http.py`(打接口、把失败分两档)、输入层 `grab_input.py`(把粘进来的一段
-文字变成几条地址)连同它的第一趟 `grab_md.py`(CommonMark 那一套结构识别)和
-`grab_entity.py`(字符引用的两套规则)、输出层 `grab_say.py`(每一档各说自己那
-句话)。要把这条路拷到别处用,六个文件一起拷(`tests/test_kb_grab_cmd.py` 的隔离
-夹具钉着这件事,少拷一份实测红 9 条)。
+**同目录那三个文件和它是一套**(单文件 700 行的上限之下按职责拆的):通道层
+`grab_http.py`(打接口、把失败分两档)、输入层 `grab_input.py`(一行一条地址,
+掺了叙述文字就报错)、输出层 `grab_say.py`(每一档各说自己那句话)。要把这条路
+拷到别处用,四个文件一起拷(`tests/test_kb_grab_cmd.py` 的隔离夹具钉着这件事,
+少拷一份实测有红)。
 """
 from __future__ import annotations
 
@@ -52,11 +51,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from grab_http import (                                              # noqa: E402
     API_DEFAULT, GRAB_HTTP_SECONDS, READ_HTTP_SECONDS, ApiDown, ApiRefused,
     bad_api, get_state, normalize_api, pipeline_idle, post_grab, post_restore)
-# **输入层在 `grab_input.py`**:两类边界怎么认、Markdown 怎么按语法取目标,全在
-# 那边(这里只管「拿到地址之后做什么」)。`links_in` 在本模块里**照旧可见** ——
-# 口径只有一份,引用方(含测试)不该因为它搬了家而各自去找新门。
+# **输入层在 `grab_input.py`**:「这一行整个是不是一条地址」那一份判据、以及不是
+# 的时候怎么失败关闭,全在那边(这里只管「拿到地址之后做什么」)。
 from grab_input import (                                            # noqa: E402
-    TangledInput, dedupe, labels_in, links_in, whole_line)
+    NotAnAddress, dedupe, whole_line)
 # **输出层在 `grab_say.py`**:每一档各说自己那句话、以及那一行 JSON 里透出哪几个
 # 事实,全在那边。`line_of` / `record_of` 在本模块里**照旧可见** —— 口径只有一份,
 # 引用方(含测试)不该因为它搬了家而各自去找新门。
@@ -481,18 +479,17 @@ def recheck(api: str, it: dict) -> None:
 def _targets(args: argparse.Namespace) -> list[str]:
     """命令行上/标准输入里要收的那几条。`-` = 从标准输入读。
 
-    **两种模式,判据是「这一行是不是整个就是一条地址」:**
-    ①**显式参数、以及标准输入里整行就是一条地址的那些 → 原样交给后端,一个字符
-      都不动。** 地址合不合法只有 `grab.normalize` 那一份口径说得准,而在这儿做
-      有损的抽取,代价是把一个**合法**地址改坏:`…/wiki/函数（数学）`(中文维基的
-      条目名真的带着一对全角括号)会被截成 `…/wiki/函数`,而**那一页也真的存在**
-      —— 收进来的于是是另一篇文章;末尾带 `;` `,` `:` 的地址同理。`--refetch` 和
-      `--state` 走同一条解析,所以那还会连带认错「要替换哪一篇」「要查哪一篇」。
-      把一句话当参数给进来的人,会拿到后端那句明确的「这不是一条链接」,改一下再来
-      即可 —— 比静默换一篇文章好。
-    ②**只有「这一行夹着叙述文字」才抽取**(`grab_input.links_in`):剪贴板里常常是「看这篇
-      https://… 挺好」。那一层是启发式,宁可留下一个抓不到的坏地址,也不截短成另一个
-      可能存在的目标。
+    **两处都是「地址由调用方给定,原样交给后端」,一个字符都不动。** 地址合不合法
+    只有 `grab.normalize` 那一份口径说得准,而在这儿做有损的改写,代价是把一个
+    **合法**地址改坏:`…/wiki/函数（数学）`(中文维基的条目名真的带着一对全角括号)
+    剥掉尾巴就成了 `…/wiki/函数`,而**那一页也真的存在** —— 收进来的于是是另一篇
+    文章;末尾带 `;` `,` `:` 的地址同理。`--refetch` 和 `--state` 走同一条解析,
+    所以那还会连带认错「要替换哪一篇」「要查哪一篇」。
+
+    **参数那一侧不校验形状**:把一句话当参数给进来的人,会拿到后端那句明确的
+    「这不是一条链接」—— 一条输入一条结果,不牵连别人。**标准输入那一侧要校验**
+    (`_from_stdin`):它是一整段文字,不校验就得猜哪几行是地址,而那正是这条入口
+    刻意不做的事(理由见 `grab_input` 的模块说明)。
     """
     out: list[str] = []
     for raw in args.url:
@@ -504,60 +501,24 @@ def _targets(args: argparse.Namespace) -> list[str]:
 
 
 def _from_stdin() -> list[str]:
-    """标准输入:**整段一起看**,不是逐行各看一遍。
+    """标准输入:**一行一条地址**,逐行原样交出去。
 
-    **先 `splitlines` 再逐行判的那一版会把一个完整结构切成两截。** Markdown 的
-    链接允许在 `(` 之后换行(`[原文](\n地址)` 是合法写法,CommonMark 的 link
-    destination 前后可以有空白),切开之后第一截是半个结构、第二截里那条裸地址
-    连 Markdown 的收尾 `)` 一起收下 —— 实测:**真库落成带右括号的那个地址、真
-    导出真索引、退出 0、`status=saved`**,而原目标压根不在库里,`DO NOTHING`
-    之下换不回来。
+    **空行跳过**(文件末尾那个换行、段与段之间的空行都是常态,不是错)。前后空白
+    剥掉 —— 那不是地址的一部分。**余下每一行都得整个就是一条地址**,否则
+    `NotAnAddress`:退出 2、指出是第几行、**一个请求都不发**。
 
-    **「整行就是一条地址」那一档只在「它前面没有正在攒的段」时才成立。**
-    这一档的意思是「用户给的是一条地址,原样交出去」,而**一行文字是不是一条独立
-    的输入,得看它前面有什么** —— 判据只看这一行自己的那一版照旧会切断结构,
-    因为 `(` 之后换行的那个目标**本身**往往整个就是一条地址:
-    `见 [原文](\nhttps://example.org/x)` 的第二行整行都是地址(右括号是 URL 的
-    合法字符),于是又被原样拿走、带着 Markdown 的收尾落进库(实测:退出 0、
-    `status=saved`、库里唯一那一行带着 `)`)。同一道判据还挡住另两种:目标独占
-    一行时不走解码(`…/A&#40;B&#41;` 原样发出去),以及**多行注释里那一行独立
-    地址被收走** —— 完整结构扫描本来正确地一条都不产出,那是凭空多一次收录。
-    所以段一开始攒(前面有过正文行),后面的行一律进段,由结构扫描说了算;
-    **一行一条的清单照旧逐行原样交**(段始终是空的),空行之后重新开始。
-
-    **空行断段**(CommonMark 的口径:空行终止 paragraph,行内结构不跨段)。
-
-    **但链接定义是文档级的,它不受断段管** —— `[标签]` 可以写在 `[标签]: 目标`
-    **之前**(CommonMark 允许),所以这里**走两遍**:先把每一段里定义过的标签收齐,
-    再逐段做行内扫描。少了第一遍,前一段那个简写引用认不出来、退回裸地址,
-    多发一条 `https://a/label]`(实测它和真目标两条都真写入真导出真索引,
-    命令对两条都报 `saved`)。
+    **这里不从一段文字里挑链接** —— 挑地址是调用方(大模型)那一步的活,而「这一段
+    结构真正表达的目标是哪一条」的判据等于 CommonMark 规范。整件事的理由、以及
+    「不合格的那一行为什么是报错而不是跳过或原样发」,都在 `grab_input` 的模块
+    说明里。
     """
-    #: 按原文顺序排好的输入单元:`('line', 整行就是一条地址)` 或 `('block', 一段)`。
-    items: list[tuple[str, str]] = []
-    block: list[str] = []
-
-    def flush() -> None:
-        if block:
-            items.append(('block', '\n'.join(block)))
-            block.clear()
-
-    for line in sys.stdin.read().splitlines():
-        bare = line.strip()
-        if not bare:
-            flush()                 # 空行:这一段到此为止
-        elif not block and whole_line(bare):
-            items.append(('line', bare))   # 段还没开始:这一行是一条独立的地址
-        else:
-            block.append(line)
-    flush()
-    labels: set[str] = set()
-    for kind, text in items:
-        if kind == 'block':
-            labels |= labels_in(text)
     out: list[str] = []
-    for kind, text in items:
-        out.extend([text] if kind == 'line' else links_in(text, labels))
+    for no, line in enumerate(sys.stdin.read().splitlines(), 1):
+        if not (bare := line.strip()):
+            continue
+        if not whole_line(bare):
+            raise NotAnAddress(no, bare)
+        out.append(bare)
     return out
 
 
@@ -565,10 +526,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog='kb.sh grab', description='手动收录:把链接抓进知识库(网页端那颗按钮的命令行版)')
     p.add_argument('url', nargs='+', metavar='链接',
-                   help='要收录的链接,可给多条;`-` = 从标准输入读(整行一条、'
-                        '或者把地址圈进 <…> / "…" / Markdown 的那些 —— 边界给定的'
-                        '原样收,Markdown 按语法取目标;裸写在行文里的按空白断、'
-                        '一个标点都不剥)')
+                   help='要收录的链接,可给多条;`-` = 从标准输入读,一行一条'
+                        '(空行跳过;掺了叙述文字的那一行会报错、一个请求都不发)')
     p.add_argument('--api', default=API_DEFAULT, help=f'kb-web 地址(默认 {API_DEFAULT})')
     p.add_argument('--refetch', action='store_true',
                    help='库里已经有这一条时重抓一次,确认得了就把它换掉')
@@ -606,10 +565,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         urls = _targets(args)
-    except TangledInput as e:
-        # **「这一行我认不全」是参数错,不是「这一行没有链接」。** 后者是「确定
-        # 没有」这个结论,而我们只知道没认全 —— 退出 2、把那一行的开头回显出来,
-        # 用户看得见、改一下再来(见 `grab_input._Budget`)。
+    except NotAnAddress as e:
+        # **「这一行不是一条地址」是参数错,一个请求都不发。** 跳过它等于断言
+        # 「这几行没有地址」,而用户要收的那一条可能正夹在里面 —— 退出 2、指出是
+        # 第几行,用户看得见、改一下再来(见 `grab_input.NotAnAddress`)。
         print(f'{e}', file=sys.stderr)
         return 2
     if not urls:
