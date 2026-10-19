@@ -1,11 +1,13 @@
 """Unavailable-post audit trails survive storage, partial runs and batch aborts."""
 import json
 from contextlib import nullcontext
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg, sync, x_browser, x_channels, x_post
 from tests.test_x_channels import ChannelBase
+from tests.test_x_collectors import FRESH_ISO, tweet
 from tests.test_x_post import OLD, URL, Page, preview
 
 
@@ -52,6 +54,63 @@ class UnavailableNoteTests(ChannelBase):
         self.assertIn('下次同步', saved['last_note'])
         self.assertIn(URL, saved['last_notice'])
         self.assertEqual(summary, run)
+
+    def test_empty_details_are_audited_without_insertion_or_freezing_either_channel(self):
+        for channel in [x_channels.BROWSER, x_channels.ATTACH]:
+            for kind in ['photo', 'video', 'quote', 'link']:
+                with self.subTest(channel=channel, kind=kind):
+                    summary, saved, run, _ = self.collect(channel, [x_post.PostEmpty(kind)])
+                    self.assertEqual([], summary['errors'])
+                    self.assertEqual([], summary['partial'])
+                    self.assertEqual(0, summary['added'])
+                    self.assertEqual(1, summary['notices'][0]['count'])
+                    self.assertEqual([dict(url=URL, reason=f'详情页已确认无自写文字({kind})',
+                                           empty_kind=kind)], summary['notices'][0]['items'])
+                    self.assertEqual('', saved['last_note'])
+                    self.assertIn('已确认无自写文字', saved['last_notice'])
+                    self.assertEqual(x_browser._newest([preview()], OLD),
+                                     x_channels.watermark(saved, channel))
+                    self.assertEqual(summary, run)
+                    with reg.db() as conn:
+                        self.assertEqual(0, conn.execute('SELECT count(*) FROM feed_items').fetchone()[0])
+
+    def test_empty_and_unknown_details_keep_terminal_and_retryable_results_separate(self):
+        entries = [preview(), dict(preview(), url='https://x.com/Example/status/124')]
+        summary, saved, run, _ = self.collect(x_channels.BROWSER,
+            [x_post.PostEmpty('photo'), x_post.PostUnavailable('未加载')], entries)
+        self.assertEqual(1, len(summary['partial']))
+        self.assertEqual(1, summary['notices'][0]['count'])
+        self.assertEqual('photo', summary['notices'][0]['items'][0]['empty_kind'])
+        self.assertEqual(OLD, x_channels.watermark(saved, x_channels.BROWSER))
+        self.assertIn('下次同步', saved['last_note'])
+        self.assertIn(URL, saved['last_notice'])
+        self.assertEqual(summary, run)
+
+    def test_a_clean_next_round_receives_new_posts_after_a_confirmed_empty_skip(self):
+        source = self.sub()
+        self.settings(x_channels.BROWSER)
+        x_channels.save_watermark(source['id'], x_channels.BROWSER, OLD)
+        later = datetime.fromisoformat(FRESH_ISO.replace('Z', '+00:00')) + timedelta(hours=1)
+        next_post = x_browser._entry(tweet('124', text='A new post', when=later.isoformat()))
+        with patch.object(reg, 'configuration_error', return_value=''), \
+             patch.object(x_browser, 'browser_session', return_value=nullcontext(Page())), \
+             patch.object(x_browser, '_harvest_one', side_effect=[([preview()], ''), ([next_post], '')]), \
+             patch.object(x_post, 'fetch', side_effect=x_post.PostEmpty('photo')) as fetch:
+            first = sync.collect('social', FetchScope())
+            second = sync.collect('social', FetchScope())
+        self.assertEqual(1, first['notices'][0]['count'])
+        self.assertEqual([], first['partial'])
+        self.assertEqual(1, second['added'])
+        self.assertEqual([], second['notices'])
+        self.assertEqual([], second['partial'])
+        fetch.assert_called_once()
+        saved = reg.subscription('social', source['id'])
+        self.assertEqual('', saved['last_notice'])
+        self.assertEqual(x_browser._newest([next_post], OLD),
+                         x_channels.watermark(saved, x_channels.BROWSER))
+        with reg.db() as conn:
+            self.assertEqual([(next_post['url'], 'A new post')],
+                             [tuple(row) for row in conn.execute('SELECT url,body FROM feed_items')])
 
     def test_skip_evidence_survives_a_later_batch_rate_limit(self):
         entries = [preview(), dict(preview(), url='https://x.com/Example/status/124')]

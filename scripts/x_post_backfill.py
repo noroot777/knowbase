@@ -145,12 +145,13 @@ def candidates(conn, *, urls=(), limit=0, all_posts=False) -> list[dict]:
     return selected[:limit] if limit else selected
 
 
-def entry_of(row: dict) -> dict:
+def entry_of(row: dict, *, confirmed_empty=False) -> dict:
     body = row['body']
     head, separator, tail = body.partition('\n\n')
     prefix = ''
-    if separator and all(line.startswith('> ') for line in head.splitlines()) and (
-            row['title'] and tail.startswith(row['title'])):
+    if head and all(line.startswith('> ') for line in head.splitlines()) and (
+            (separator and row['title'] and tail.startswith(row['title'])) or
+            (confirmed_empty and not tail.strip() and row['title'] == f'{row["author"]} 的动态'[:500])):
         prefix = head + separator
     return {**{key: row[key] for key in
                ('url', 'title', 'body', 'author', 'published', 'content_kind')},
@@ -171,7 +172,7 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
         try:
             text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
         except x_post.PostEmpty as exc:
-            entry = entry_of(row)
+            entry = entry_of(row, confirmed_empty=True)
             preview = entry['body'].removeprefix(entry[x_post.HINT]).strip()
             state = 'blocked_length' if preview else 'empty'
             stats[state] += 1

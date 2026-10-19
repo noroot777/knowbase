@@ -31,30 +31,65 @@ TEXT_JS = r'''
     node.closest('article[data-testid="tweet"]') === art &&
     !node.closest('div[role="link"], [data-testid="quoteTweet"]'));
   const postMore = art => !!ownNode(art, '[data-testid="tweet-text-show-more-link"]');
+  const knownEmptyContent = (art, media) => {
+    const clock = ownNode(art, 'time[datetime]');
+    const permalink = clock?.closest('a[href*="/status/"]');
+    const status = permalink?.getAttribute('href');
+    const analytics = status && [...art.querySelectorAll('a[href]')].find(node =>
+      node.getAttribute('href') === status + '/analytics');
+    let metadata = permalink?.parentElement;
+    while (metadata && metadata !== art && !metadata.contains(analytics)) metadata = metadata.parentElement;
+    if (metadata === art) metadata = null;
+    const card = media.matches('[data-testid="card.wrapper"]') ? media : null;
+    const understood = node => {
+      if (node === media || node === permalink) return true;
+      if (node.nodeType === Node.TEXT_NODE) return !node.textContent.trim();
+      if (node.nodeType !== Node.ELEMENT_NODE) return true;
+      if (node.matches('[data-testid="User-Name"], [data-testid="Tweet-User-Avatar"], ' +
+          '[data-testid="socialContext"], button, [role="button"]')) return true;
+      if (node.matches('a[href]') && status &&
+          ['/analytics', '/quotes'].some(suffix => node.getAttribute('href') === status + suffix)) return true;
+      if (node.matches('a[href]') && card?.parentElement !== art && card?.parentElement.contains(node) &&
+          node.getAttribute('href') === card.querySelector('a[href]')?.getAttribute('href')) return true;
+      if (node.matches('span') && node.textContent.trim() === '·' &&
+          metadata?.contains(node)) return true;
+      if (media.matches('[data-testid="tweetPhoto"]') && node.matches('[data-testid="tweetPhoto"]') &&
+          [...node.querySelectorAll('img[src]')].some(image => image.complete && image.naturalWidth > 0)) return true;
+      if (node.matches('img[alt]') && node.getAttribute('alt').trim()) return false;
+      return [...node.childNodes].every(understood);
+    };
+    return understood(art);
+  };
   const emptyPostKind = art => {
     if (document.readyState !== 'complete' || ownNode(art, '[data-testid="tweetText"]') ||
         postMore(art) || art.querySelector('[role="progressbar"], [aria-busy="true"]') ||
         !ownNode(art, '[data-testid="reply"]') ||
         !ownNode(art, '[data-testid="like"], [data-testid="unlike"]') ||
         ownNode(art, 'a[href*="/article/"]')) return '';
+    const proved = (kind, media) => knownEmptyContent(art, media) ? kind : '';
     const photo = ownNode(art, '[data-testid="tweetPhoto"] img[src]');
-    if (photo?.complete && photo.naturalWidth > 0) return 'photo';
-    const photoLink = ownNode(art, 'a[href*="/photo/"]')?.getAttribute('href') || '';
+    if (photo?.complete && photo.naturalWidth > 0) {
+      return proved('photo', photo.closest('[data-testid="tweetPhoto"]'));
+    }
+    const photoNode = ownNode(art, 'a[href*="/photo/"]');
+    const photoLink = photoNode?.getAttribute('href') || '';
     const photoId = photoLink.match(/^\/[^/]+\/status\/(\d+)\/photo\/\d+(?:[/?#]|$)/)?.[1];
     if (photoId && photoId === location.pathname.match(/^\/[^/]+\/status\/(\d+)(?:\/|$)/)?.[1]) {
-      return 'photo';
+      return proved('photo', photoNode);
     }
     const video = ownNode(art, '[data-testid="videoPlayer"] video');
-    if (video && (video.readyState >= 1 || /^(?:https?:|data:image\/)/.test(video.poster))) return 'video';
+    if (video && (video.readyState >= 1 || /^(?:https?:|data:image\/)/.test(video.poster))) {
+      return proved('video', video.closest('[data-testid="videoPlayer"]'));
+    }
     const quote = [...art.querySelectorAll('[data-testid="quoteTweet"], div[role="link"]')]
       .find(node => node.closest('article[data-testid="tweet"]') === art &&
         node.querySelector('a[href*="/status/"]') &&
         node.querySelector('[data-testid="tweetText"], [data-testid="tweetPhoto"], [data-testid="videoPlayer"]'));
-    if (quote) return 'quote';
+    if (quote) return proved('quote', quote);
     const card = ownNode(art, '[data-testid="card.wrapper"]');
     const link = card?.querySelector('a[href]');
     if (link && /^https:\/\//.test(link.getAttribute('href')) &&
-        (card.textContent.trim() || link.getAttribute('aria-label')?.trim())) return 'link';
+        (card.textContent.trim() || link.getAttribute('aria-label')?.trim())) return proved('link', card);
     return '';
   };
 '''
@@ -169,9 +204,15 @@ def fill(entries: list[dict], *, session, deadline=None, should_stop=None, unava
         try:
             text = fetch(entry['url'], session, deadline=deadline, should_stop=should_stop)
             complete = merge(entry, text)
-        except PostGone as exc:
+        except (PostGone, PostEmpty) as exc:
+            if isinstance(exc, PostEmpty) and entry.get(x_article.HINT):
+                kept.append(entry)
+                continue
             if unavailable is not None:
-                unavailable.append(dict(url=entry['url'], reason=str(exc)))
+                evidence = dict(url=entry['url'], reason=str(exc))
+                if isinstance(exc, PostEmpty):
+                    evidence['empty_kind'] = exc.kind
+                unavailable.append(evidence)
             continue
         except PostUnavailable:
             if x_article.needs_article(entry):
@@ -188,7 +229,8 @@ def unavailable_note(unavailable: list[dict]) -> str:
     if not unavailable:
         return ''
     details = ';'.join(f'{item["url"]} ({item["reason"]})' for item in unavailable)
-    return f'跳过 {len(unavailable)} 条远端明确不可用推文(跳过本身不冻结水位):{details}'
+    label = '推文' if any(item.get('empty_kind') for item in unavailable) else '远端明确不可用推文'
+    return f'跳过 {len(unavailable)} 条{label}(跳过本身不冻结水位):{details}'
 
 
 def unavailable_report(unavailable: list[dict]) -> dict:

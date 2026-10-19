@@ -34,7 +34,8 @@ ACCOUNT_JS = r'''
     }
     if (!profile) {
       const missing = /此账号不存在|此帳號不存在|This account doesn[’']t exist|This account does not exist/i.test(header.textContent);
-      return {...result, state: missing ? 'missing' : 'unavailable', evidence: 'empty_state_without_profile'};
+      return {...result, state: missing ? 'missing' : 'unknown',
+              evidence: missing ? 'missing_account_header' : 'unrecognized_profile_empty_state'};
     }
     return result;
   };
@@ -48,7 +49,6 @@ class XAccountUnavailable(XBrowserError):
             'missing': '账号不存在(可能已改名或注销,不能据此区分)',
             'suspended': '账号已被冻结',
             'protected': '账号的帖子受保护,当前登录态无权读取',
-            'unavailable': '账号页面明确不可用(可能已改名、注销或被冻结)',
             'login': '登录态已失效,请在浏览器通道设置里重新登录,或从日常浏览器再导入一次',
         }[state]
         super().__init__(f'@{handle} {reason}')
@@ -62,6 +62,6 @@ def terminal(snapshot: dict, handle: str) -> tuple[str, str] | None:
     if state == 'login':
         return state, account.get('evidence', '')
     if (account.get('handle') == handle.lower() and not snapshot.get('articles')
-            and state in {'missing', 'suspended', 'protected', 'unavailable'}):
+            and state in {'missing', 'suspended', 'protected'}):
         return state, account.get('evidence', '')
     return None

@@ -4,7 +4,7 @@ import io
 import time
 from unittest.mock import patch
 
-from kb.feeds import registry as reg, x_post
+from kb.feeds import registry as reg, x_article, x_post
 from scripts import x_post_backfill as backfill
 from tests.test_x_post import BODY, URL, Page, preview, snapshot
 from tests.test_x_channels import ChannelBase
@@ -24,8 +24,8 @@ class EmptyPostTests(ChannelBase):
         self.addCleanup(fast.stop)
         self.source = self.sub()
 
-    def seed(self, text):
-        reg.put_items(self.source, [backfill_entry(tweet('123', text=text))])
+    def seed(self, text, context=''):
+        reg.put_items(self.source, [backfill_entry(tweet('123', text=text, context=context))])
         with reg.db() as conn:
             return dict(conn.execute('SELECT * FROM feed_items').fetchone())
 
@@ -74,8 +74,36 @@ class EmptyPostTests(ChannelBase):
         self.assertEqual('remote_empty_stored_text', stats['results'][0]['reason'])
         self.assertEqual(row, self.row(row['key']))
 
+    def test_repost_attribution_only_is_empty_before_and_after_whitespace_normalization(self):
+        row = self.seed('', context='向阳乔木 转推了')
+        self.assertEqual('Example Person 的动态', row['title'])
+        self.assertEqual('> 向阳乔木 转推了\n\n', row['body'])
+        for body in [row['body'], row['body'].rstrip()]:
+            with self.subTest(body=body):
+                with reg.db() as conn:
+                    conn.execute('UPDATE feed_items SET body=? WHERE key=?', (body, row['key']))
+                stored = self.row(row['key'])
+                stats = backfill.repair([stored], Page(empty()), apply=True)
+                self.assertEqual(1, stats['empty'])
+                self.assertEqual(0, stats['blocked_length'])
+                self.assertEqual(0, stats['updated'])
+                self.assertEqual(stored, self.row(row['key']))
+
+    def test_repost_attribution_does_not_hide_real_authored_blockquotes(self):
+        row = self.seed('> keep my own words', context='向阳乔木 转推了')
+        stats = backfill.repair([row], Page(empty()), apply=True)
+        self.assertEqual(0, stats['empty'])
+        self.assertEqual(1, stats['blocked_length'])
+        self.assertEqual(row, self.row(row['key']))
+
+    def test_authored_blockquote_without_context_is_not_mistaken_for_attribution(self):
+        row = self.seed('> keep my own words')
+        stats = backfill.repair([row], Page(empty()), apply=True)
+        self.assertEqual(1, stats['blocked_length'])
+        self.assertEqual(row, self.row(row['key']))
+
     def test_cli_succeeds_for_proved_empty_but_keeps_unknown_empty_failure(self):
-        self.seed('')
+        row = self.seed('', context='向阳乔木 转推了')
         for snap, code, phrase in [(empty(), 0, '已确认无自写文字 1 条'),
                                    (snapshot(''), 1, '失败 1 条')]:
             with self.subTest(snap=snap), patch.object(x_post, 'SECONDS', 0.05), \
@@ -84,11 +112,34 @@ class EmptyPostTests(ChannelBase):
                  contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(code, backfill.main(['run', '--yes']))
             self.assertIn(phrase, output.getvalue())
+            self.assertEqual(row, self.row(row['key']))
 
-    def test_empty_proof_cannot_be_written_as_a_completed_folded_preview(self):
-        entries, note = x_post.complete([preview()], session=Page(empty()))
+    def test_empty_proof_is_an_audited_terminal_skip_not_a_completed_folded_preview(self):
+        unavailable = []
+        entries, note = x_post.complete([preview()], session=Page(empty()), unavailable=unavailable)
         self.assertEqual([], entries)
-        self.assertIn('下次同步', note)
+        self.assertEqual('', note)
+        self.assertEqual([dict(url=URL, reason='详情页已确认无自写文字(photo)', empty_kind='photo')],
+                         unavailable)
+
+    def test_no_authored_text_does_not_override_positive_article_evidence(self):
+        entry = dict(preview(), **{x_article.HINT: 'https://x.com/i/article/999'})
+        article = dict(title='Full article', body='The entire article, including the ending.')
+        for detail in [article, None]:
+            unavailable = []
+            with self.subTest(detail=detail), patch.object(x_article, 'API', 'https://article.test'), \
+                 patch.object(x_article, 'fetch', return_value=detail):
+                kept, note = x_post.complete([entry], session=Page(empty('link')),
+                                              unavailable=unavailable)
+            self.assertEqual([], unavailable)
+            if detail:
+                self.assertEqual('', note)
+                self.assertEqual(1, len(kept))
+                self.assertIn(article['body'], kept[0]['body'])
+                self.assertNotIn(x_post.HINT, kept[0])
+            else:
+                self.assertEqual([], kept)
+                self.assertIn('下次同步', note)
 
     def test_expired_budget_does_not_approve_empty_without_a_second_read(self):
         page = Page(empty())

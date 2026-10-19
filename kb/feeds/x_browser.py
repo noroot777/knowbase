@@ -261,6 +261,8 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
         time.sleep(0.3)
     if last.get('ready') != 'complete':
         raise XBrowserError(f'@{handle} 的页面没有加载完')
+    if (last.get('account') or {}).get('state') == 'unknown':
+        raise XBrowserError(f'@{handle} 的个人页结构无法识别,尚未确认账号状态,留待下次同步重试')
     raise XBrowserError(f'@{handle} 的时间线上没有读到推文')
 
 

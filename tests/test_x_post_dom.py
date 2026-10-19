@@ -6,6 +6,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from kb.feeds import x_browser, x_post
 from kb.feeds.x_cdp import Chrome
@@ -157,13 +158,14 @@ class PostDomTests(unittest.TestCase):
                 self.assertEqual(sample['state'], snap['account']['state'])
                 self.assertTrue(snap['account']['evidence'])
 
-    def test_unknown_language_and_renamed_handles_still_have_a_structural_terminal(self):
-        self.load('<main><div data-testid=primaryColumn><div data-testid=emptyState>'
-                  '<div data-testid=empty_state_header_text>Unbekannt</div></div></div></main>',
-                  '/old_handle')
-        snap = json.loads(self.page.eval(x_browser._STATE_JS))
-        self.assertEqual('unavailable', snap['account']['state'])
-        self.assertEqual('old_handle', snap['account']['handle'])
+    def test_unknown_profile_structure_is_not_positive_evidence_of_account_absence(self):
+        for profile in ['', '<div data-testid=ProfileHeaderVNext>Healthy account</div>']:
+            self.load('<main><div data-testid=primaryColumn>' + profile + '<div data-testid=emptyState>'
+                      '<div data-testid=empty_state_header_text>Unbekannt</div></div></div></main>',
+                      '/old_handle')
+            snap = json.loads(self.page.eval(x_browser._STATE_JS))
+            self.assertEqual('unknown', snap['account']['state'])
+            self.assertEqual('old_handle', snap['account']['handle'])
 
     def test_protected_profile_uses_its_help_link_not_translated_words(self):
         self.load('<main><div data-testid=primaryColumn><div data-testid=UserName>Example</div>'
@@ -239,3 +241,52 @@ class PostDomTests(unittest.TestCase):
         self.load(self.media('<a href=/Example/status/123/photo/1></a>'
                              '<button data-testid=reply></button><button data-testid=unlike></button>'))
         self.assertEqual('photo', json.loads(self.page.eval(x_post.READ_JS))['empty_kind'])
+
+    def test_unrecognized_authored_content_blocks_every_empty_media_kind(self):
+        controls = '<button data-testid=reply></button><button data-testid=like></button>'
+        samples = [
+            '<a href=/Example/status/123/photo/1></a>',
+            '<div data-testid=videoPlayer><video poster="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></video></div>',
+            '<div data-testid=quoteTweet><a href=/Other/status/456>source</a>'
+            '<div data-testid=tweetText>quoted text</div></div>',
+            '<div data-testid=card.wrapper><a href=https://example.org>linked title</a></div>',
+        ]
+        for media in samples:
+            for authored in ['<div data-testid=postTextVNext>Do not discard my text</div>',
+                             '<img alt="🙂" src="data:,">']:
+                with self.subTest(media=media, authored=authored):
+                    self.load(self.media(authored + media + controls))
+                    snap = json.loads(self.page.eval(x_post.READ_JS))
+                    self.assertEqual('', snap['text'])
+                    self.assertEqual('', snap['empty_kind'])
+                    with patch.object(self.page, 'goto', return_value={}), \
+                         patch.object(x_post, 'SECONDS', 0.03), patch.object(x_post, 'STEP', 0.001):
+                        with self.assertRaises(x_post.PostUnavailable) as caught:
+                            x_post.fetch('https://x.com/Example/status/123', self.page)
+                    self.assertNotIsInstance(caught.exception, x_post.PostEmpty)
+
+    def test_known_detail_metadata_does_not_block_a_proved_empty_photo(self):
+        self.load('<article data-testid=tweet><div data-testid=Tweet-User-Avatar></div>'
+                  '<div data-testid=User-Name>Example @Example</div>'
+                  '<div><div><a href=/Example/status/123><time datetime=2026-10-18>now</time></a></div>'
+                  '<div><span>·</span></div><a href=/Example/status/123/analytics>1,857 查看</a></div>'
+                  '<a href=/Example/status/123/photo/1><div></div></a>'
+                  '<button data-testid=reply>2</button><button data-testid=like>22</button>'
+                  '<button>相关</button><a href=/Example/status/123/quotes>查看引用</a></article>')
+        with patch.object(self.page, 'goto', return_value={}), patch.object(x_post, 'STEP', 0.001):
+            with self.assertRaises(x_post.PostEmpty) as caught:
+                x_post.fetch('https://x.com/Example/status/123', self.page)
+        self.assertEqual('photo', caught.exception.kind)
+
+    def test_external_card_source_footer_and_multiple_photos_are_known_media_content(self):
+        image = ('<div data-testid=tweetPhoto><img alt="图像" src="data:image/gif;base64,'
+                 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></div>')
+        for content, kind in [
+            ('<div><div data-testid=card.wrapper><a href=https://example.org>title</a></div>'
+             '<div><a href=https://example.org>来自 example.org</a></div></div>', 'link'),
+            (image + image, 'photo'),
+        ]:
+            with self.subTest(kind=kind):
+                self.load(self.media(content + '<button data-testid=reply></button>'
+                                    '<button data-testid=like></button>'))
+                self.assertEqual(kind, json.loads(self.page.eval(x_post.READ_JS))['empty_kind'])

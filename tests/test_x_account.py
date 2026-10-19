@@ -18,7 +18,7 @@ def state(name='missing', handle='example', **extra):
 class AccountTests(unittest.TestCase):
     def test_all_explicit_states_finish_after_two_observations_not_the_account_budget(self):
         for name, reason in [('missing', '改名或注销'), ('suspended', '被冻结'),
-                             ('protected', '无权读取'), ('unavailable', '明确不可用'),
+                             ('protected', '无权读取'),
                              ('login', '重新登录')]:
             page = Page(state(name))
             with self.subTest(name=name), patch.object(x_browser.time, 'sleep'):
@@ -76,5 +76,15 @@ class AccountTests(unittest.TestCase):
 
     def test_only_complete_target_profile_snapshots_can_classify_an_account(self):
         for snap in [dict(state(), articles=1), dict(state(), ready='loading'),
-                     state(handle='another')]:
+                     state(handle='another'), state('unknown'), state('unavailable')]:
             self.assertIsNone(x_account.terminal(snap, 'Example'))
+
+    def test_unknown_profile_structure_waits_for_recovery_or_reports_retryable_uncertainty(self):
+        unknown = state('unknown')
+        good = dict(state(''), articles=1)
+        with patch.object(x_browser.time, 'sleep'):
+            self.assertEqual(good, x_browser._wait_state(
+                Page(unknown, good), 'Example', time.monotonic() + 5))
+            with self.assertRaisesRegex(x_browser.XBrowserError, '尚未确认账号状态') as caught:
+                x_browser._wait_state(Page(unknown), 'Example', time.monotonic() + 0.003)
+        self.assertNotIsInstance(caught.exception, x_account.XAccountUnavailable)
