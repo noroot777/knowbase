@@ -25,10 +25,23 @@ STATE_FILE = DATA_DIR / 'daily_last_run.json'
 _lock = threading.RLock()
 
 
+#: 日报这一轮的**结论**:出报要么成了、要么没成、要么被停了。
+#: 这三个 phase 一落下就是**终态**,此后 `_set` 不再改写任何东西(见那边)。
+SETTLED = ('done', 'failed', 'stopped')
+
 _state: dict = {
     'running': False, 'phase': '', 'detail': '', 'date': '',
     'since': '', 'until': '', 'sync': False, 'run_id': '',
     'trigger': '', 'started_at': '', 'finished_at': '', 'error': '',
+    #: 结论落下的时刻。**和 `finished_at` 是两件事**:后者是整轮(含出报之后那段
+    #: 库整理)收尾的时刻,而出报一完成页面就该刷新阅读区 —— 中间那几十分钟里
+    #: `running` 还是 True、`finished_at` 还是空的,前端认的就是这一格。
+    'settled_at': '',
+    #: 出报之后那一段(整理图鉴与 Wiki)自己的进度。**不和日报共用 phase/detail**:
+    #: 它跑在 `finally` 里、复用同一个 `_sync_round`,共用的话会把已经确定的
+    #: done/failed 改写成 sync,而前端只在 phase==='failed' 时留失败横幅 —— 一次
+    #: 没出来的日报于是被报成「日报已生成」(`docs/decisions/sync-schedule.md`)。
+    'library': {'phase': '', 'detail': ''},
     'stop_requested': False, 'over_budget': False, 'sched_day': '',
     # 我们自己起的那一轮管道的 run id(没起就是空串)。日报允许在别人的管道
     # 跑着时排队等,这时候用户按"停止"只该结束我们的等待,不能顺手把别人的
@@ -48,11 +61,58 @@ def _log(msg: str) -> None:
     del _state['log'][:-60]
 
 
-def _set(phase: str, detail: str = '') -> None:
+def _set(phase: str, detail: str = '', *, quiet: bool = False) -> None:
+    """写这一轮的 phase / detail。**结论落下之后这个函数一个字都不再改。**
+
+    守卫放在这里而不是各调用点:出报之后还有一段库整理要跑,它**复用同一个
+    `_sync_round`**,而那个函数一路 `_set('sync', …)`。拦不住的话已经确定的
+    done/failed 被改写成 sync —— 前端只在 `phase === 'failed'` 时留失败横幅,
+    于是一次**根本没出来**的日报被报成「日报已生成」(实测终态
+    `phase='sync', error='Claude 503', result=None`)。把守卫写在调用点就是
+    「下一个复用 `_sync_round` 的人再踩一遍」。
+
+    新的一轮由 `start()` 直接重设 `_state`(不过这个函数),所以不会被冻住。
+    库整理自己的进度进 `_state['library']`,见 `library_progress`。
+
+    `quiet=True` 给**两秒一跳的轮询进度**:只换 detail,不进日志 —— 不然同一句话
+    每两秒刷一行,60 行的日志当场只剩这一个阶段。
+    """
+    if _state['phase'] in SETTLED:
+        return
     _state['phase'] = phase
+    if phase in SETTLED and not _state['settled_at']:
+        _state['settled_at'] = datetime.now().isoformat(timespec='seconds')
     if detail:
         _state['detail'] = detail
+        if not quiet:
+            _log(detail)
+
+
+def library_progress(phase: str, detail: str = '', *, quiet: bool = False) -> None:
+    """出报之后那一段自己的进度。**只写 `_state['library']`,碰不到日报的结论。**
+
+    签名和 `_set` 对齐(`_sync_round` 的 `progress` 认的就是这个形状)。`quiet` 同上。
+    """
+    _state['library'] = {'phase': phase, 'detail': detail}
+    if detail and not quiet:
         _log(detail)
+
+
+def fresh_round() -> dict:
+    """一轮开跑时要归零的那几格。**「新的一轮长什么样」口径只有这一份。**
+
+    新一轮**不走 `_set`**(它认结论冻结,见上),所以归零只能发生在这里;而回归里
+    直接驱动 `_run` 的摆盘也必须过它 —— 不过的话上一条用例留下的那个 `done` 会把
+    这一轮**整轮冻住**(实测:同跑时 7 条红、单跑全绿,正是最难归因的那一档)。
+    各自列一份字段的话,以后新增一格就只有一边记得加。
+
+    `running` / `run_id` / 窗口那几格不在这里:它们是**这一轮自己的身份**,由
+    `start()` 按参数填。
+    """
+    return {'phase': 'starting', 'detail': '', 'error': '', 'log': [],
+            'settled_at': '', 'library': {'phase': '', 'detail': ''},
+            'stop_requested': False, 'over_budget': False,
+            'channels': [], 'result': None, 'finished_at': ''}
 
 
 def is_running() -> bool:
@@ -73,7 +133,8 @@ def _save_last_run() -> None:
     try:
         write_config_file(STATE_FILE, {
             k: _state[k] for k in ('date', 'since', 'until', 'sync', 'trigger', 'started_at',
-                                   'finished_at', 'error', 'channels', 'result', 'log')})
+                                   'finished_at', 'settled_at', 'error', 'channels',
+                                   'result', 'log')})
     except OSError:
         pass
 

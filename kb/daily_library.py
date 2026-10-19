@@ -25,7 +25,7 @@
   和日报的成败毫无关系:它们消费的是**已经入库**的内容,那一步早就成了。
 
 依赖方向:本模块 → `daily_state`;`daily_run` 反过来 import 本模块。跑一轮要用的
-`_sync_round` 由调用方传进来(它属于 `daily_run` 的编排,不该跟着搬)。
+`_sync_round` 由调用方传进来(它属于编排,住在 `kb.daily_sync`)。
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ import os
 import time
 
 from kb.config import ScheduleUnreadable
-from kb.daily_state import _lock, _log, _state
+from kb.daily_state import _lock, _log, _state, library_progress
 
 # 出完报之后那一段:条目化(图鉴条目)和 wiki 层(双链、汇总页、三张图谱)。
 #
@@ -96,6 +96,7 @@ def library_round(batch: str, sync_round) -> None:
         _state['channels'].append(
             {'channel': '', 'label': LIBRARY_LABEL, 'status': 'skipped',
              'detail': '已停止,未整理'})
+        library_progress('skipped', f'{LIBRARY_LABEL}:已停止,未整理')
         return
     try:
         from kb.daily_run import load_settings
@@ -106,7 +107,48 @@ def library_round(batch: str, sync_round) -> None:
         # 反过来(读不出就跑)是拿一份读不懂的配置替用户花钱。
         _log(f'{LIBRARY_LABEL}:读不出定时设置({e}),这一轮跳过')
         return
-    _state['channels'].append(sync_round(
+    # **进度写自己那一格(`progress=library_progress`),不写日报的 phase/detail。**
+    # 写同一格就是把已经确定的 done/failed 改写成「同步中」,而前端只在
+    # `phase === 'failed'` 时留失败横幅 —— 一次根本没出来的日报于是被报成「日报
+    # 已生成」(审查 R1,实测终态 `phase='sync', error='Claude 503', result=None`)。
+    entry = sync_round(
         LIBRARY_STAGES, None, LIBRARY_LABEL,
         time.monotonic() + LIBRARY_BUDGET,
-        halted=lambda: bool(_state['stop_requested']), batch=batch))
+        halted=lambda: bool(_state['stop_requested']), batch=batch,
+        progress=library_progress)
+    _state['channels'].append(entry)
+    # 终态落回自己那一格(`quiet`:`_sync_round` 收尾那句已经进过日志了)。不落的话
+    # 这一格永远停在「同步中」,页面上那段整理跑完了还在转。
+    library_progress('failed' if entry['status'] == 'error' else 'done',
+                     f'{LIBRARY_LABEL}:{entry["detail"]}', quiet=True)
+
+
+def library_tail(batch: str, sync_round, verdict: str) -> None:
+    """出报之后那一段的完整收尾:结论记进同步中心 → 跑整理 → 关批次。
+
+    **这里面每一步炸了都不许挡住后面的步骤**(审查 R3):`library_round` 要去解析
+    采集器配置、起管道、开线程,一步都不是"语言层面不会抛"的操作,而它后面压着
+    `close_batch`(不关的话下一轮管道运行被算进一个早就结束的批次)和调用方的
+    `_release_round`(唯一一处把日报的 `running` 放回 False 的地方)。整理红了就红在
+    它自己那一项上,不牵连任何一个来源 —— 它和入库那一段一样是全库的活。
+
+    `verdict` 是日报这一轮的结论(那句收尾文案)。**它要在同步中心也看得见**
+    (事故形态在 `docs/decisions/sync-schedule.md`):进的是**批次账本**,而且按
+    **我们自己这一批**的身份记、记完立刻发布 —— 理由都在 `pipeline_batch.batch_note`
+    上。记不上就在日报自己的日志里说一句,不许静默丢掉(审查 R6)。
+    """
+    from kb import pipeline as pl
+    try:
+        if not pl.batch_note(verdict, batch) and batch:
+            _log('这一轮的结论没能记进同步中心:这一批已经不在了')
+        library_round(batch, sync_round)
+    except Exception as e:                       # noqa: BLE001 - 理由见 docstring
+        _state['channels'].append(
+            {'channel': '', 'label': LIBRARY_LABEL, 'status': 'error',
+             'detail': f'整理中断:{e}'[:400]})
+        library_progress('failed', f'{LIBRARY_LABEL}:整理中断({e})')
+    finally:
+        # 发布不成不是日报的失败,但**不许咽下去**(见 `amend_done`)。
+        if issue := pl.close_batch():
+            _log(f'同步结果未发布:{issue}')
+            amend_done(f'；{issue}')

@@ -37,6 +37,10 @@ const FIXTURES = {
   "/api/projects": { tools: [], kinds: {}, total_entries: 0 },
   "/api/sources/catalog": { modules: [] },
   "/api/daily/list": { days: [] },
+  // 覆盖确认读的就是它（`confirmDailyOverwrite`）。缺缺的那一档被
+  // catch-all 的 `{}` 答成「没有日报」，那正好把要验的那道闸跳过去，
+  // 所以这一格是**可改的**：两个方向各铉一次。
+  "/api/daily/reports": { reports: [] },
   "/api/pipeline/runs": { runs: [], error: "", version: "none", keep_days: 3 },
   "/api/pipeline/status": { running: false, stop_requested: false, stopped: false,
                             stop_supported: true, last_run: null, log: [],
@@ -44,6 +48,9 @@ const FIXTURES = {
 };
 // 起跑请求原样留下来:判据落在「后端收到的是什么」,不落在页面上的勾选快照
 const posted = [];
+// 「今天已经有一份日报」这个事实，用例中间要换的
+const today = new Date().toLocaleDateString("sv");
+let REPORTS = [];
 
 const server = createServer((req, res) => {
   const path = req.url.split("?")[0];
@@ -65,6 +72,7 @@ const server = createServer((req, res) => {
     const ch = new URLSearchParams(req.url.split("?")[1] || "").get("channel") || "wechat_local";
     return json({ accounts: ACCOUNTS[ch] || [] });
   }
+  if (path === "/api/daily/reports") return json({ reports: REPORTS });
   if (FIXTURES[path]) return json(FIXTURES[path]);
   if (path.startsWith("/api/")) return json({});
   const file = normalize(join(STATIC, path === "/" ? "index.html" : path.replace(/^\/static/, "")));
@@ -188,6 +196,36 @@ check("勾了出日报:走的是日报通道,请求体是 sync + 来源",
       posted[0]?.path === '/api/daily/run' && posted[0].body.sync === true
       && posted[0].body.channels.join() === 'wechat_local,rss'
       && !('stages' in posted[0].body), JSON.stringify(posted[0]));
+check("今天还没有日报:不多问一句覆盖",
+      (await evalJs(`document.querySelectorAll('.confirm-mask').length`)) === 0);
+
+// ── 5b. 今天已经有一份日报:起跑前要先问一句覆盖 ──────────────
+// 后端没有第二道闸（`daily.generate` 最后是 `tmp.replace(path)`），而日报页
+// 那颗按钮一直是先问的 —— 漏掉这一道就是静悄悄盖掉一份日报（审查 R4）。
+REPORTS = [{ date: today, docs: 12 }];
+await evalJs(`openPipeModal()`);
+await setup("弹窗再开一次", until(`document.querySelectorAll('#pipe-stage-list input').length === 6`, 4000));
+await setDaily(true);
+posted.length = 0;
+// `evalJs` 是 awaitPromise:true —— 起跑那一步现在会停在确认框上等人点，
+// 所以这几处**不等它的 Promise**（`void` 丢掉），否则探针自己挂在这里。
+await evalJs(`void startPipeFromModal(); 0`);
+await setup("覆盖确认弹出来了", until(`document.querySelectorAll('.confirm-mask').length === 1`, 3000));
+check("问的是今天那一天,而且说清会覆盖",
+      (await evalJs(`document.querySelector('.confirm-mask h2').textContent`)).includes(today)
+      && /覆盖/.test(await evalJs(`document.querySelector('.confirm-body').textContent`)));
+check("没点确认之前一个请求都没发", posted.length === 0, JSON.stringify(posted));
+await evalJs(`document.querySelector('.confirm-mask [data-act=cancel]').click()`);
+await sleep(300);
+check("取消就真的不起跑", posted.length === 0, JSON.stringify(posted));
+await evalJs(`void startPipeFromModal(); 0`);
+await setup("确认框再弹一次", until(`document.querySelectorAll('.confirm-mask').length === 1`, 3000));
+await evalJs(`document.querySelector('.confirm-mask [data-act=ok]').click()`);
+await setup("确认之后才发出请求", until(`true`, 100).then(() => sleep(500).then(() => posted.length > 0)));
+check("确认之后走的还是日报通道",
+      posted[0]?.path === '/api/daily/run' && posted[0].body.sync === true,
+      JSON.stringify(posted[0]));
+REPORTS = [];
 
 // ── 6. 取消那个勾:还回用户自己那一份,不是重置成全选 ────────────────────────
 await evalJs(`openPipeModal()`);

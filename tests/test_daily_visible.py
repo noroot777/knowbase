@@ -11,7 +11,10 @@
 ②出报的结论进的是**批次账本**而不是某一轮的日志 —— 后面几轮的合并是从子轮账本
   重新拼日志的,只追加到当轮结果里的话,下一轮发布成功之后那行字就没了;
 ③**反过来钉一边**:没有批次时 `batch_note` 什么都不做、也不炸(手点「直接生成」
-  那一档压根没有同步可看)。
+  那一档压根没有同步可看);
+④那行字的身份是**调用方自己手里那个批次**,而且**记完立刻发布** —— 出报是这一批的
+  最后一件事,靠"后面恰好还会跑一轮子轮"把它捎带出去的话,库整理被关掉/设置读不出/
+  用户按了停止那几档根本没有后续子轮,`close_batch` 紧接着就把账本清了(审查 R6)。
 
 跑:  uv run --offline python -m unittest tests.test_daily_visible -v
 """
@@ -19,8 +22,12 @@ from __future__ import annotations
 
 import unittest
 
+from unittest.mock import Mock, patch
+
+from kb.daily_state import fresh_round
 from kb import pipeline_batch as pb, pipeline_state as ps
 from kb.pipeline_merge import _merge_runs
+from tests.pipeline_round_fixture import finish_round, isolate_pipeline_state
 
 
 def _round(run_id: str, detail: str = '完成') -> dict:
@@ -97,7 +104,7 @@ class BatchNoteTests(unittest.TestCase):
         """那行字要出现在**合并结果**的日志里 —— 面板上看的就是这一份。"""
         batch = pb.open_batch('daily')
         ps._state['batch'] = batch
-        self.assertTrue(pb.batch_note('日报生成失败: Claude 503'))
+        self.assertTrue(pb.batch_note('日报生成失败: Claude 503', batch))
         merged = _merge_runs([_round('r1')], pb._batch_notes, pb._batch_kind)
         self.assertTrue(any('Claude 503' in line for line in merged['log']),
                         '出报失败那一行没进那一轮的日志')
@@ -111,7 +118,7 @@ class BatchNoteTests(unittest.TestCase):
         """
         batch = pb.open_batch('daily')
         ps._state['batch'] = batch
-        pb.batch_note('日报生成失败: Claude 503')
+        pb.batch_note('日报生成失败: Claude 503', batch)
         merged = _merge_runs([_round('r1'), _round('r2'), _round('r3')],
                              pb._batch_notes, pb._batch_kind)
         self.assertTrue(any('Claude 503' in line for line in merged['log']))
@@ -123,14 +130,82 @@ class BatchNoteTests(unittest.TestCase):
         一起不跑,而「可以受理下一轮」正是在那里发布的 —— 日报从此再也起不来。
         """
         ps._state['batch'] = ''
-        self.assertFalse(pb.batch_note('日报已生成:12 条素材'))
+        self.assertFalse(pb.batch_note('日报已生成:12 条素材', ''))
 
     def test_a_note_from_another_batch_is_not_recorded(self):
-        """这一轮属于**别的**批次时不记:它的结论不该被念进这一批的日志。"""
+        """事件属于**别的**批次时不记:它不该被念进这一批的日志。"""
         pb.open_batch('daily')
-        ps._state['batch'] = 'batch-999'
-        self.assertFalse(pb.batch_note('不属于这一批'))
+        self.assertFalse(pb.batch_note('不属于这一批', 'batch-999'))
         self.assertEqual([], pb._batch_notes)
+
+    def test_the_global_pipeline_moving_on_does_not_drop_our_note(self):
+        """**身份是调用方手里那个批次,不是全局管道当前那一批。**
+
+        出报期间用户自己点了一轮同步,`ps._state['batch']` 就换成了别人的 —— 照它
+        判的话日报「生成失败: Claude 503」那行字被静默丢掉,同步中心看不到这次失败
+        (审查 R6)。这两样答的是两个不同的问题,见 `batch_note` 的 docstring。
+        """
+        batch = pb.open_batch('daily')
+        ps._state['batch'] = 'batch-999'          # 全局管道已经是别人的了
+        self.assertTrue(pb.batch_note('日报生成失败: Claude 503', batch))
+        self.assertTrue(any('Claude 503' in line for line in pb._batch_notes))
+
+
+class BatchNotePublishTests(unittest.TestCase):
+    """那行字要**立刻落到盘上**,不等下一个子轮捎带(审查 R6)。
+
+    判据落在**磁盘上那份「最近一次运行」**里:出报是这一批的最后一件事,库整理被
+    关掉、设置读不出、用户按了停止、管道被占住起不来 —— 这几档后面压根没有子轮
+    会收尾,而 `close_batch` 紧接着就把账本清了。只验"内存里追加上了"的实现照样
+    全绿,而重启之后那行字一个字都不在。
+    """
+
+    def setUp(self):
+        isolate_pipeline_state(self)
+
+    def _two_rounds(self) -> str:
+        """摆一批里的两轮(抓取 + 入库),都走真的收尾。"""
+        batch = pb.open_batch('daily')
+        finish_round(['crawl', 'export'], {'channel': 'rss'}, batch, None, 'run-1')
+        finish_round(['index', 'extract'], None, batch, None, 'run-2')
+        return batch
+
+    def test_the_verdict_is_on_disk_before_the_batch_closes(self):
+        batch = self._two_rounds()
+        pb.batch_note('日报生成失败: Claude 503', batch)
+        pb.close_batch()
+        saved = ps._saved_round_strict() or {}
+        self.assertTrue(any('Claude 503' in line for line in saved.get('log') or []),
+                        f'盘上那份里没有出报的结论:{saved.get("log")}')
+        self.assertEqual('daily', saved.get('run_kind'))
+
+    def test_it_is_also_the_in_memory_authority(self):
+        """内存那份权威同样要带上它:面板读的是它(磁盘只是重启后的后路)。"""
+        batch = self._two_rounds()
+        pb.batch_note('日报生成失败: Claude 503', batch)
+        from kb import pipeline
+        self.assertTrue(any('Claude 503' in line
+                            for line in pipeline.last_result().get('log') or []))
+
+    def test_a_failed_write_does_not_lose_the_note_or_throw(self):
+        """反过来钉一边:写盘炸了**不许抛**(它在 `_run` 的 `finally` 里跑,抛出去
+        就把收尾挡住了),那行字照旧在账本和内存权威里,原因另有人说。"""
+        batch = self._two_rounds()
+        with patch.object(ps, '_write_state', Mock(side_effect=OSError('磁盘满'))):
+            self.assertTrue(pb.batch_note('日报生成失败: Claude 503', batch))
+        self.assertTrue(any('Claude 503' in line for line in pb._batch_notes))
+        self.assertIn('磁盘满', pb.close_batch())
+
+    def test_nothing_to_publish_yet_is_not_a_dropped_note(self):
+        """反过来钉一边:一轮子轮都还没收尾(全被占住挡掉了)时没有可发布的汇总
+        —— 这不算丢,那行字留在账本里,真有子轮收尾时跟着一起出去。"""
+        batch = pb.open_batch('daily')
+        self.assertTrue(pb.batch_note('日报生成失败: Claude 503', batch))
+        finish_round(['crawl'], {'channel': 'rss'}, batch, None, 'run-1')
+        finish_round(['index'], None, batch, None, 'run-2')
+        saved = ps._saved_round_strict() or {}
+        self.assertTrue(any('Claude 503' in line for line in saved.get('log') or []),
+                        f'留在账本里的那行字没跟着出去:{saved.get("log")}')
 
 
 class OrchestrationTests(unittest.TestCase):
@@ -150,16 +225,15 @@ class OrchestrationTests(unittest.TestCase):
         with patch('kb.pipeline.open_batch',
                    lambda kind='': (seen.update(kind=kind), 'b-1')[1]), \
              patch('kb.pipeline.batch_note',
-                   lambda note: (seen['notes'].append(note), True)[1]), \
+                   lambda note, batch: (seen['notes'].append(note), True)[1]), \
              patch('kb.pipeline.close_batch', lambda: ''), \
              patch('kb.daily.generate', lambda **kw: generate()), \
-             patch('kb.daily_run.library_round', lambda *a: None), \
+             patch('kb.daily_library.library_round', lambda *a: None), \
              patch('kb.daily_run._sync_round', Mock(return_value={
                  'channel': '', 'label': 'x', 'status': 'ok', 'detail': ''})), \
              patch('kb.daily_run._channel_labels', lambda: {'rss': 'RSS'}), \
              patch('kb.daily_run._release_round', lambda *a: None):
-            _state.update(stop_requested=False, over_budget=False, channels=[],
-                          sched_day='', phase='idle', detail='', log=[])
+            _state.update(**fresh_round(), sched_day='')
             daily_run._run(None, None, True, ['rss'], 1)
         return seen
 

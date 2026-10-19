@@ -155,21 +155,40 @@ def _remember_batch_note(note: str) -> None:
 _batch_seq = 0
 
 
-def batch_note(note: str) -> bool:
-    """往**当前这一批**的日志里记一行人话;没有批次时返回 False、什么都不做。
+def batch_note(note: str, batch: str) -> bool:
+    """往**这一批**的日志里记一行人话,**并且立刻发布一次**。
 
     给的是「这一批里发生了、但不属于任何一个阶段」的事:日报没出来、出报用的模型
     挂了、库整理那一段被跳过。**它必须进批次账本而不是某一轮的日志** —— 后面几轮
     的合并是从子轮账本重新拼日志的,只追加到当轮合并结果里的话,下一轮发布成功之后
     这行字就没了(理由和 `_remember_batch_note` 那条一样)。
 
-    **判据只有 `_remember_batch_note` 那一份**:在这里再判一遍「属不属于这一批」,
-    两处迟早在某一档上岔开。返回值说的是「记上了没有」,调用方据此决定要不要另找
-    地方说(日报自己那份 `daily_last_run.json` 照旧写,这条只是让同步中心也看得见)。
+    **身份是调用方自己手里那个 `batch`,不是全局管道当前那一批。** 两者答的是两个
+    不同的问题,所以是两份判据而不是「口径分裂」:`_remember_batch_note` 答「**正在
+    收尾的这一轮**属不属于这一批」(它在 `_end_run` 里跑,问的只能是那一轮),这里
+    答「**这条事件**属不属于这一批」—— 而记事件的人手里就有批次身份。拿前者来判的
+    后果:出报期间用户自己点了一轮同步,`ps._state['batch']` 换成了别人的,于是日报
+    「生成失败: Claude 503」那行字被静默丢掉(审查 R6)。
+
+    **记完就发布,不等下一个子轮捎带。** 出报是这一批的**最后一件事**:库整理被关掉、
+    设置读不出、用户按了停止、管道被占住起不来 —— 这几档后面压根没有子轮会收尾,而
+    `close_batch` 紧接着就把 `_batch_notes` 清了,于是内存里那份汇总和磁盘上那份都还是
+    出报**之前**的样子,同步中心看不到这次失败(审查 R6)。发布成没成不改返回值:记上
+    了就是记上了,没发布出去的原因进 `_batch_issue`,由 `close_batch` 的调用方说出来。
+
+    返回值说的是「记上了没有」,调用方据此决定要不要另找地方说(日报自己那份
+    `daily_last_run.json` 照旧写,这条只是让同步中心也看得见)。**永不抛**:它在
+    `_run` 的 `finally` 里跑,抛出去会挡住收尾(见 `daily_library.library_tail`)。
     """
-    before = len(_batch_notes)
-    _remember_batch_note(note)
-    return len(_batch_notes) > before
+    with ps._lock:
+        if not batch or batch != _batch_id:
+            return False
+        _batch_notes.append(ps._stamp(note))
+        # 一轮子轮都还没收尾(全被占住挡掉了)时没有可发布的汇总 —— 合并要的就是
+        # 那几轮的终态。这行字留在账本里,真有子轮收尾时跟着一起出去。
+        if _batch_runs:
+            _publish_merged()
+        return True
 
 
 def open_batch(kind: str = "") -> str:
@@ -277,11 +296,9 @@ def _publish_in_batch() -> None:
     每一轮都把**整批**合并着写,盘上那份于是始终等于"已经收尾的这几轮合起来"。
 
     **写失败一律抛出去**,由 `_end_run` 那段统一诊断(它分别尝试两份留档、据此决定
-    要不要清开工标记)。抛之前要做两件事:把原因记进批次账本(后面几轮的合并才带得
-    上它),以及**整批那份照旧当权威** —— "写成没写成"答不了"本进程这一批有没有出过
-    那条失败"。**不许退回去写当前子轮那一份局部结果。**
+    要不要清开工标记)。抛之前要做的那两件事在 `_publish_merged` 里(把原因记进批次
+    账本、**整批那份照旧当权威**),**不许退回去写当前子轮那一份局部结果**。
     """
-    global _batch_issue
     if not _batch_id or ps._state.get("batch") != _batch_id:
         _save_own()
         return
@@ -293,33 +310,55 @@ def _publish_in_batch() -> None:
     # I/O 那一档被按"别人更新了"处理:退回去写当前子轮那一份局部成功,把整批的
     # 失败连同重试名单一起抹掉 —— 入库那一轮的 crawl 是「未选择」,前面那条抓取
     # 失败于是内存里和磁盘上一起没了(第 5 轮实测:一次临时写失败就够)。
-    try:
-        _publish_right(_batch_round_ids())
-    except PublishRefused as e:
+    err = _publish_merged()
+    if isinstance(err, PublishRefused):
         # 没资格:期间有更新的一轮独立运行收尾(用户自己点了同步)。退回只写自己
         # 那一份 —— **我们这一轮确实是此刻最新的**,而把前几轮一起合进去等于拿一批
         # 比那一轮更早的结果去盖掉它。原因留给 `close_batch` 的调用方说出来。
-        _batch_issue = e.reason
         _save_own()
         return
+    if err is not None:
+        raise err                                  # 写盘炸了:原样抛给 `_end_run`
+
+
+def _publish_merged() -> Exception | None:
+    """把**整批**(已收尾的子轮 + 批次事件)合并着发布一次。已持 `ps._lock`。
+
+    返回 None = 发布成功;返回异常 = 这一次没发布出去(`PublishRefused` = 没资格,
+    其它 = 写盘炸了)。原因已经记进 `_batch_issue`,**调用方只决定自己那一步还要不要
+    做**:子轮收尾要在没资格时退回去写自己那一份、要把写盘异常抛给 `_end_run`;
+    `batch_note` 两样都不做(它没有"自己那一轮"可写)。
+
+    **口径只有这一份**:哪一批有资格发布、合成什么、谁当权威、覆盖了哪几轮。两个
+    调用方(子轮收尾、批次事件)在这几件事上分裂一次就等于一边把整批的失败写丢了。
+    """
+    global _batch_issue
+    try:
+        _publish_right(_batch_round_ids())
+    except PublishRefused as e:
+        _batch_issue = e.reason
+        return e
     merged = _merge_runs(_batch_runs, _batch_notes, _batch_kind)
     try:
         ps._write_state(merged)
-    except Exception as e:                         # noqa: BLE001 - 原样抛给 _end_run
+    except Exception as e:                         # noqa: BLE001 - 见 docstring
         # **不退回去写局部结果。** 盘上那份是这一批上一轮的汇总(同样带着前面
         # 那些失败),原样留着就是最好的后路。
         _batch_issue = f'这一批的同步结果没能写进磁盘({e})'
         note = (f'{_batch_issue};本进程内照常可查,'
                 '重启后会退回上一次写成功的那一份')
-        # 记在批次账本上,后面那几轮的合并才带得上它(见 `_remember_batch_note`)。
-        _remember_batch_note(note)
+        # **直接追加,不走 `_remember_batch_note`**:这一刻我们正在发布的就是这一批,
+        # 它属于谁没有可判的 —— 走那一份判据的话,全局管道已经被别人接替时这行字
+        # 被静默丢掉(审查 R6 的同一个形状)。
+        _batch_notes.append(ps._stamp(note))
         _remember_aggregate(_with_persist_issue(merged, note),
                             covers=_batch_round_ids())
-        raise
+        return e
     # 发布成功就解除之前那句警告:原因留在运行日志里,但"当前仍未保存"这句话不能
     # 挂着不放 —— 后来真写进去了,日报却还在说没写进。
     _batch_issue = ""
     _remember_aggregate(merged, covers=_batch_round_ids())
+    return None
 
 
 class PublishRefused(Exception):

@@ -20,7 +20,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from kb import daily_library, daily_run
-from kb.daily_state import _state
+from kb.daily_state import _state, fresh_round
 
 
 class LibraryRoundTests(unittest.TestCase):
@@ -34,10 +34,18 @@ class LibraryRoundTests(unittest.TestCase):
         _state['stop_requested'] = False
         self.addCleanup(lambda: _state.update(channels=[], stop_requested=False))
 
+        _state['library'] = {'phase': '', 'detail': ''}
+        self.addCleanup(lambda: _state.update(library={'phase': '', 'detail': ''}))
+
         def sync_round(stages, crawl_filter, label, deadline, channel='',
-                       halted=None, batch=''):
+                       halted=None, batch='', progress=None):
             self.rounds.append({'stages': list(stages), 'label': label,
-                                'channel': channel, 'batch': batch})
+                                'channel': channel, 'batch': batch,
+                                'progress': progress})
+            # 真的 `_sync_round` 一路往 `progress` 写进度,替身也写一次:进度写错
+            # 格子正是 R1 那个事故(写到日报的 phase 上就把结论改写了)。
+            if progress:
+                progress('sync', f'{label}:同步中')
             return {'channel': channel, 'label': label, 'status': 'ok', 'detail': '完成'}
         self.sync_round = sync_round
 
@@ -55,6 +63,10 @@ class LibraryRoundTests(unittest.TestCase):
         self.assertEqual('batch-7', self.rounds[0]['batch'],
                          '没带批次身份:它会把自己写成「最近一次运行」,'
                          '这一批的抓取失败就从主视图消失了')
+        # **进度写自己那一格**:传的就得是 `library_progress`,写日报那一格的话
+        # 已经确定的结论被改写(审查 R1,整条链在 `LibraryTailTests`)。
+        self.assertIn(daily_library.LIBRARY_LABEL, _state['library']['detail'])
+        self.assertEqual('done', _state['library']['phase'], '跑完了还停在「同步中」')
 
     def test_it_is_a_line_of_its_own_on_the_scorecard(self):
         """它是全库的活,不属于任何来源 —— `channel` 留空,只有 label。
@@ -142,7 +154,10 @@ class OrchestrationTests(unittest.TestCase):
 
     def _run_once(self, generate):
         order: list[str] = []
-        with patch('kb.daily_run.library_round',
+        # **桩打在 `daily_library.library_round` 上,不打 `library_tail`**:后者是
+        # `_run` 调的那一层,打掉它就连带把"结论进没进同步中心、批次关没关"一起
+        # 打掉了,而那是 `LibraryTailTests` 要验的东西。
+        with patch('kb.daily_library.library_round',
                    lambda batch, sr: order.append('library')), \
              patch('kb.daily.generate', lambda **kw: (order.append('generate'),
                                                       generate())[1]), \
@@ -151,10 +166,9 @@ class OrchestrationTests(unittest.TestCase):
              patch('kb.daily_run._channel_labels', lambda: {'rss': 'RSS'}), \
              patch('kb.pipeline.open_batch', lambda kind='': 'b-1'), \
              patch('kb.pipeline.close_batch', lambda: ''), \
-             patch('kb.pipeline.batch_note', lambda note: True), \
+             patch('kb.pipeline.batch_note', lambda note, batch: True), \
              patch('kb.daily_run._release_round', lambda *a: None):
-            _state.update(stop_requested=False, over_budget=False, channels=[],
-                          sched_day='', phase='idle', detail='', log=[])
+            _state.update(**fresh_round(), sched_day='')
             daily_run._run(None, None, True, ['rss'], 1)
         return order
 
@@ -172,6 +186,84 @@ class OrchestrationTests(unittest.TestCase):
         order = self._run_once(boom)
         self.assertIn('library', order, '出报失败就不整理图鉴了')
         self.assertEqual(['generate', 'library'], order)
+
+
+class LibraryTailTests(unittest.TestCase):
+    """出报之后那一段的收尾(`library_tail`):结论进同步中心 → 跑整理 → 关批次。
+
+    **这三步里任意一步炸了,后面的步骤照旧要走完**(审查 R3):它后面压着
+    `close_batch`(不关的话下一轮独立运行被算进一个早就结束的批次)和调用方的
+    `_release_round`(唯一一处把日报的 `running` 放回 False 的地方)。判据落在
+    「批次关没关、成绩单上有没有这一项」,不是「有没有 try」。
+    """
+
+    def setUp(self):
+        self.closed: list[int] = []
+        self.notes: list[tuple] = []
+        _state.update(channels=[], stop_requested=False, log=[],
+                      phase='done', detail='日报已生成:12 条素材',
+                      library={'phase': '', 'detail': ''})
+        self.addCleanup(lambda: _state.update(
+            channels=[], log=[], phase='idle', detail='',
+            library={'phase': '', 'detail': ''}))
+
+    def _tail(self, library_round, note_ok=True, batch='b-1'):
+        with patch('kb.daily_library.library_round', library_round), \
+             patch('kb.pipeline.batch_note',
+                   lambda note, batch: (self.notes.append((note, batch)), note_ok)[1]), \
+             patch('kb.pipeline.close_batch',
+                   lambda: (self.closed.append(1), '')[1]):
+            daily_library.library_tail(batch, Mock(), _state['detail'])
+
+    def test_a_crash_in_the_tidy_round_still_closes_the_batch(self):
+        """存量回归实测过的那一档:整理那一轮解析采集器/起管道/开线程都可能抛,
+        而它原来直接从 `finally` 里冒出去 —— `close_batch` 和日报的运行资格一起
+        不执行,面板从此卡在「正在生成」。"""
+        def boom(batch, sr):
+            raise RuntimeError('摆盘:整理那一步炸了')
+        self._tail(boom)
+        self.assertEqual(1, len(self.closed), '整理抛出来之后批次没关')
+
+    def test_the_crash_is_scored_on_its_own_line(self):
+        """红记在它自己那一项上,不牵连任何一个来源 —— 它和入库那一段一样是
+        全库的活。静默吞掉的话面板上这一轮看着一切正常。"""
+        def boom(batch, sr):
+            raise RuntimeError('整理那一步炸了')
+        self._tail(boom)
+        bad = [c for c in _state['channels'] if c['label'] == daily_library.LIBRARY_LABEL]
+        self.assertEqual(1, len(bad))
+        self.assertEqual(('', 'error'), (bad[0]['channel'], bad[0]['status']))
+        self.assertIn('整理那一步炸了', bad[0]['detail'])
+        self.assertEqual('failed', _state['library']['phase'])
+
+    def test_the_crash_does_not_rewrite_the_report_verdict(self):
+        """反过来钉一边:整理炸了**不改**日报的结论 —— 报已经出来了。"""
+        def boom(batch, sr):
+            raise RuntimeError('整理那一步炸了')
+        self._tail(boom)
+        self.assertEqual('done', _state['phase'])
+        self.assertEqual('日报已生成:12 条素材', _state['detail'])
+
+    def test_the_verdict_is_noted_under_our_own_batch(self):
+        """结论要进**我们自己这一批**的账本(身份就是手里那个 batch)。
+
+        拿全局管道当前那一批来判的后果:出报期间用户自己点了一轮同步,这行字
+        被静默丢掉,同步中心看不到这次失败(审查 R6,判据在 `batch_note`)。
+        """
+        self._tail(lambda batch, sr: None)
+        self.assertEqual([('日报已生成:12 条素材', 'b-1')], self.notes)
+
+    def test_a_dropped_note_is_said_out_loud(self):
+        """记不上就在日报自己的日志里说一句。静默丢掉的话两边都显示正常 ——
+        同步中心没有这次失败,日报这边也没有任何痕迹。"""
+        self._tail(lambda batch, sr: None, note_ok=False)
+        self.assertTrue(any('没能记进同步中心' in line for line in _state['log']),
+                        f'丢了却没说:{_state["log"]}')
+
+    def test_a_report_only_run_does_not_complain_about_the_batch(self):
+        """反过来钉一边:手点「直接生成」压根没有批次(`batch=''`),那不是丢。"""
+        self._tail(lambda batch, sr: None, note_ok=False, batch='')
+        self.assertEqual([], [l for l in _state['log'] if '没能记进同步中心' in l])
 
 
 if __name__ == '__main__':

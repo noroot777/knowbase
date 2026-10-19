@@ -8,13 +8,43 @@
 // 读的是 daily.js 的 `dailyWindow` / `dailyReports` / `dailyWindowDirty`
 // (同一个全局作用域,index.html 里按序加载)。
 
+// 默认区间会写到哪一天:生成那一刻所在的那一天。**两个入口共用这一份** ——
+// 同步中心那条路不带区间,所以它要的就是这个(见 `confirmDailyOverwrite`)。
+function dailyToday() { return new Date().toLocaleDateString('sv'); }
+
 function dailyTargetDate() {
   // 这一次会写到哪一天那份日报上。**只有这一份口径**:按钮叫"生成"还是"重新
   // 生成"、要不要先弹覆盖确认,问的是同一件事,两处各判一遍必然各漂各的。
   // 自定义区间落在截止时刻那天,默认区间落在今天(生成时刻)。
   return dailyWindowDirty && $('daily-until').value
     ? $('daily-until').value.slice(0, 10)
-    : new Date().toLocaleDateString('sv');
+    : dailyToday();
+}
+
+// 这一次会不会盖掉一份已经有的日报 —— 要盖就先问一声。返回「还要不要继续」。
+//
+// **手动出报有两个入口,确认只能有这一份**:日报页那颗按钮,和同步中心起跑弹窗
+// 里的「跑完出日报」。后端没有第二道闸(`daily.generate` 最后是 `tmp.replace(path)`),
+// 漏掉确认的那个入口就是静悄悄盖掉一份日报(审查 R4)。
+//
+// `known` 是调用方**已经核实过**的那一档(日报页手里就有:`dailyTargetReport()`
+// 的 true/false/null)。给 null 就在这儿问一次后端 —— 同步中心那条路平时压根没读
+// 过日报清单。**读不出来也问**:多问一句的代价是一次点击,不问的代价是盖掉一份
+// 日报(口径同 `dailyTargetReport` 的 null 那一档)。
+async function confirmDailyOverwrite(date, known = null) {
+  let exists = known;
+  if (exists !== true && exists !== false) {
+    try {
+      exists = ((await pipeJson('/api/daily/reports')).reports || [])
+        .some(r => r.date === date);
+    } catch { exists = null; }
+  }
+  if (exists === false) return true;
+  return await confirmBox({
+    title: `重新生成 ${date} 的日报？`,
+    body: exists === true ? '这一天已经有一份日报，重新生成会覆盖它。'
+      : '查不到这一天有没有日报；要是已经有一份，这一次会覆盖它。',
+    ok: '重新生成' });
 }
 
 function dailyTargetReport() {
@@ -59,7 +89,15 @@ function renderDailyGenButton() {
   // 区别,而那个区别哪儿都没写,正是用户说「乱」的地方)。
   const presync = !!$('daily-presync')?.checked;
   const base = exists === false ? '生成日报' : '重新生成日报';
-  $('daily-gen-label').textContent = presync ? '同步后' + base : base;
+  // 跑着的时候写的是这一轮跑到哪了。**这句话必须和名字在同一处算** ——
+  // 在 `renderDailyButtons` 里再覆盖一次的话,任何单调 `renderDailyGenButton()`
+  // 的地方(空闲轮询那一跳、`refreshDailyPending`)都会把它抹成按钮名
+  // （探针实测：整理跑着的时候按钮写的是「重新生成日报」）。
+  // 结论已经落下、却还在跑 = 跑的是出报之后那段整理（审查 R1）。
+  const running = !!dailyState?.running;
+  $('daily-gen-label').textContent =
+    running ? (dailySettled(dailyState) ? '整理中…' : '生成中…')
+      : presync ? '同步后' + base : base;
 
   // 按钮前面那句话报的是 `gain`:**再生成一次会多带进来几条没进过日报的内容**
   // (后端口径在 `daily.pending`:和真取材共用一个 `_select`,同样先截名额再数)。

@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb import daily, daily_run
+from kb import daily, daily_run, daily_sync
 from kb import daily_state
 from kb.web import daily_api
 from tests.pipeline_round_fixture import isolate_pipeline_state
@@ -34,8 +34,10 @@ class DailyStopTests(unittest.TestCase):
         self.addCleanup(lambda: daily_run._state.update(self.before))
 
     def run_once(self, **flags):
-        daily_run._state.update({**self.before, 'running': True, 'log': [],
-                                 'channels': [], **flags})
+        # **摆盘要过 `fresh_round()`**:上一条用例留下的那个 `done` 会把这一轮
+        # 整轮冻住(结论冻结,见 `daily_state._set`)—— 同跑时红、单跑全绿。
+        daily_run._state.update({**self.before, **daily_state.fresh_round(),
+                                 'running': True, **flags})
         gen = Mock(return_value={'date': '2026-09-29', 'since': '', 'until': '', 'path': '',
                                  'docs': 2, 'total': 2, 'late': 0, 'model': 'm'})
         with patch.object(daily, 'generate', gen):
@@ -76,7 +78,8 @@ class DailyStopTests(unittest.TestCase):
             return {'date': '2026-09-29', 'since': '', 'until': '', 'path': '',
                     'docs': 2, 'total': 2, 'late': 0, 'model': 'm'}
 
-        daily_run._state.update({**self.before, 'running': True, 'log': [], 'channels': []})
+        daily_run._state.update({**self.before, **daily_state.fresh_round(),
+                                 'running': True})
         with patch.object(daily, 'generate', Mock(side_effect=generating)):
             daily_run._run(None, None, False, [], daily.FIRST_DAYS)
         self.assertFalse(seen['stop'][0])
@@ -141,7 +144,7 @@ class DailyStopTests(unittest.TestCase):
              patch.object(pl, 'run_result', Mock(return_value=result)), \
              patch.object(pl, 'request_stop', Mock()) as stop, \
              patch.object(daily_run.time, 'sleep', Mock()), \
-             patch.object(daily_run, '_wait_idle', Mock(return_value=True)):
+             patch.object(daily_sync, '_wait_idle', Mock(return_value=True)):
             entry = daily_run._sync_round(daily_run.FETCH_STAGES,
                 {'channel': 'rss'}, 'RSS', time.monotonic() + 600, 'rss')
         stop.assert_not_called()                      # 别人那一轮不该被我们停
@@ -216,7 +219,7 @@ class DailyStopTests(unittest.TestCase):
                  'running': False, 'run_id': 'run-1', 'current_stage': '', 'stages': full})), \
              patch.object(pl, 'request_stop', Mock()), \
              patch.object(daily_run.time, 'sleep', Mock()), \
-             patch.object(daily_run, '_wait_idle', Mock(return_value=True)):
+             patch.object(daily_sync, '_wait_idle', Mock(return_value=True)):
             return daily_run._sync_round(wanted or daily_run.FETCH_STAGES
                 + daily_run.DIGEST_STAGES, {'channel': 'social'}, '大V观点',
                 time.monotonic() + 600, 'social')

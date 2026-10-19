@@ -13,6 +13,7 @@ import { launchShell } from "./probe_shell.mjs";
 import { checkScheduleRaces, checkDailyFormSettles } from "./daily_schedule_checks.mjs";
 import { checkNewContentCount } from "./daily_count_checks.mjs";
 import { checkDailyDrawers } from "./daily_drawer_checks.mjs";
+import { checkDailyTail } from "./daily_tail_checks.mjs";
 
 const base = process.argv[2];
 
@@ -645,6 +646,7 @@ await evalJs(`(() => { pipeJson = __realPipeJson; clearTimeout(dailyTimer);
 await checkScheduleRaces({ evalJs, waitFor, check });
 await checkDailyFormSettles({ evalJs, waitFor, check });
 await checkDailyDrawers({ evalJs, waitFor, check });
+await checkDailyTail({ evalJs, check });
 
 check("页面没有脚本报错", pageErrors.length === 0, pageErrors.join(" | "));
 

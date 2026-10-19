@@ -549,7 +549,8 @@ class CarryFailureNoticeTests(_Base):
     def test_the_finish_notice_says_the_accounting_did_not_land(self):
         before = deepcopy(daily_run._state)
         self.addCleanup(lambda: daily_run._state.update(before))
-        daily_run._state.update({**before, 'running': True, 'log': [], 'channels': []})
+        daily_run._state.update({**before, **daily_state.fresh_round(),
+                                 'running': True})
         gen = Mock(return_value={'date': '2026-09-29', 'since': '', 'until': '', 'path': '',
                                  'docs': 2, 'total': 2, 'late': 0, 'model': 'm',
                                  'carry_error': 'database is locked'})
@@ -564,7 +565,8 @@ class CarryFailureNoticeTests(_Base):
         """反过来钉一边:正常那一轮不许凭空多出一句"记录没写进库"。"""
         before = deepcopy(daily_run._state)
         self.addCleanup(lambda: daily_run._state.update(before))
-        daily_run._state.update({**before, 'running': True, 'log': [], 'channels': []})
+        daily_run._state.update({**before, **daily_state.fresh_round(),
+                                 'running': True})
         gen = Mock(return_value={'date': '2026-09-29', 'since': '', 'until': '', 'path': '',
                                  'docs': 2, 'total': 2, 'late': 0, 'model': 'm', 'carried': 2})
         with patch.object(daily_state, 'STATE_FILE', self.root / 'last_run.json'), \

@@ -27,6 +27,15 @@ let dailyWindowFillDue = false;
 
 function dailyActive() { return activeTab === 'daily'; }
 
+// 日报这一轮的**结论**:出了、没出、被停了。这三个 phase 一落下就是终态,后端
+// 此后一个字都不再改(`kb/daily_state.py` 的 SETTLED)。
+// **页面上凡是「这一轮有结果了吗」都读它,不读 `running`** —— 出报之后还有一段
+// 整理图鉴与 Wiki 要跑(默认上限 90 分钟),那段时间里 `running` 还是 true:认
+// `running` 的后果是报已经出来了、阅读区却要再等一个钟头才刷新,页面上那行字
+// 一直写着「正在生成」(审查 R1)。
+const DAILY_SETTLED = ['done', 'failed', 'stopped'];
+function dailySettled(s) { return !!s && DAILY_SETTLED.includes(s.phase); }
+
 function dailyTime(value) {
   if (!value) return '';
   const d = new Date(value.replace(' ', 'T'));
@@ -380,13 +389,10 @@ async function runDaily() {
     setDailyDrawer('sched', true);
     return;
   }
-  // 覆盖提示按「这一份会写到哪一天」判,和按钮叫什么名字共用同一份口径
-  // (`dailyTargetDate` + `dailyTargetReport`)。**不知道的那一档也问** ——
-  // 多问一句的代价是一次点击,不问的代价是静悄悄盖掉一份日报。
-  const date = dailyTargetDate();
-  if (dailyTargetReport() !== false &&
-      !await confirmBox({ title: `重新生成 ${date} 的日报？`,
-        body: '这一天已经有一份日报，重新生成会覆盖它。', ok: '重新生成' })) return;
+  // 覆盖确认是**两个出报入口共用的那一份**(`confirmDailyOverwrite`,同步中心
+  // 那颗「跑完出日报」走的也是它):按「这一份会写到哪一天」判,和按钮叫什么
+  // 名字共用 `dailyTargetDate` + `dailyTargetReport`。
+  if (!await confirmDailyOverwrite(dailyTargetDate(), dailyTargetReport())) return;
   dailyBusy = true; renderDailyButtons();
   try {
     await pipePost('/api/daily/run', { ...custom, sync, channels });
@@ -413,8 +419,9 @@ function renderDailyButtons() {
   // 不会多带内容」那一档,见 daily_chip.js)。这里再算一遍的话两处迟早岔开 ——
   // 而且探针里有几档只调 `renderDailyGenButton()` 渲染,算在这边它们就测不到。
   $('daily-presync').disabled = dailyBusy || running;
+  // 按钮上那句话（名字 / 「生成中」/「整理中」）全在 `renderDailyGenButton`
+  // 里算，这儿不再覆盖一次（理由写在那边）。
   renderDailyGenButton();
-  if (running) $('daily-gen-label').textContent = '生成中…';
   // 进了生成阶段就停不了了:模型已经在出稿,daily.generate() 自己把文件写完
   // 才返回。按钮留着能点、点了又被拒,不如置灰并把原因写在上面。
   const generating = running && dailyState?.phase === 'generate';
@@ -445,9 +452,13 @@ function renderDailySyncNote(s) {
 }
 
 function dailyPhaseText(s) {
-  if (s.phase === 'failed') return '上次生成失败：' + (s.error || '未知原因');
-  if (s.phase === 'stopped') return s.detail || '已停止，这一轮没有生成日报';
-  if (s.phase === 'done') return s.detail || '日报已生成';
+  // 结论已经落下、却还在跑 —— 跑的只能是出报之后那段整理,它有自己的进度
+  // (`s.library`)。**接在结论后面,不替换它**:日报成没成是这一轮的结果,整理
+  // 到哪了是另一件事(审查 R1)。
+  const tail = s.running && s.library?.detail ? ' · ' + s.library.detail : '';
+  if (s.phase === 'failed') return '上次生成失败：' + (s.error || '未知原因') + tail;
+  if (s.phase === 'stopped') return (s.detail || '已停止，这一轮没有生成日报') + tail;
+  if (s.phase === 'done') return (s.detail || '日报已生成') + tail;
   return s.detail || '正在准备';
 }
 
@@ -467,15 +478,21 @@ async function refreshDailyStatus() {
     if (dailyActive()) await refreshDailyPending();
     queueDailyPoll(); return;
   }
-  const finished = dailyState?.running && !s.running;
+  // **「这一轮有结果了」要认结论,不认 running**(理由在 `dailySettled`)。要求
+  // 上一跳**还没**落结论:页面刚打开时第一跳看到的是上一轮早就落下的结论,认
+  // 不住这一条就会在打开页面时弹一次「日报已生成」。
+  const finished = dailyState && !dailySettled(dailyState) && dailySettled(s);
   // 「有没有出现一轮新的已结束运行」。只认 running→idle 那个跳变是不够的:不同步
   // 直接生成那条路(桩模型、素材不多时)在两次轮询之间就跑完了,页面一次都没见过
   // running=true —— 于是按钮上那个数字归零了,而列表和阅读区还停在上一版(审查
   // 实测:接口已经是「素材清单(4 条)」,页面仍显示 3 条和旧的生成时刻,只有整页
   // 刷新才看得到新内容)。后台定时那一轮、别的页面点的那一轮同理。
   // 第一跳(dailyDoneRun === null)不算新结果:那时页面刚打开,正文本来就是现读的。
-  const doneRun = s.running ? ''
-    : [s.run_id, s.finished_at].filter(Boolean).join('|');
+  // 同一条口径:结论没落下就没有"已结束的那一轮"。时刻优先取**结论落下的那一刻**
+  // (`settled_at`):`finished_at` 要等尾段整理跑完才写,拿它当身份的话这一轮会在
+  // 一个钟头后再"新"一次,阅读区白刷一遍。
+  const doneRun = dailySettled(s)
+    ? [s.run_id, s.settled_at || s.finished_at].filter(Boolean).join('|') : '';
   const fresh = dailyDoneRun !== null && doneRun && doneRun !== dailyDoneRun;
   dailyDoneRun = doneRun;
   dailyState = s;
@@ -487,7 +504,7 @@ async function refreshDailyStatus() {
   // 次轮询之间(桩模型、素材不多、或者定时/CLI 跑的那一轮),页面一次都没见过
   // running —— 于是正文和按钮都更新成了新的,顶上那条横幅还写着上一次失败的
   // 原因,而面板上再没有任何操作能把它清掉。所以 `fresh` 那一跳也清。
-  if (!s.running && s.phase === 'failed') dailyError(s.error || '日报生成失败', 'run');
+  if (dailySettled(s) && s.phase === 'failed') dailyError(s.error || '日报生成失败', 'run');
   else if (s.running || fresh) clearDailyError('run');
   renderDailyButtons();
   renderDailySyncNote(s);
@@ -519,7 +536,7 @@ async function refreshDailyStatus() {
   // 一个事件都收不到。只在"日报从运行变成完成"那一跳重读的话,按钮上的数字会
   // 一直停在打开页面那一刻(审查实测:后台插进一篇,页面仍写着「没有新内容」,
   // 要点一次「改区间」再「接上一份日报」才更新)。所以空闲时每一跳都问一次。
-  if (!s.running && dailyActive()) await refreshDailyPending();
+  if ((!s.running || dailySettled(s)) && dailyActive()) await refreshDailyPending();
   queueDailyPoll();
 }
 

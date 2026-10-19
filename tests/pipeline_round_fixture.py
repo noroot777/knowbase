@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from kb import pipeline_batch as pb
 from kb import pipeline_state as ps
@@ -25,6 +25,17 @@ _PROCESS_GLOBALS = (
           '_last_settled', '_last_settled_file')),
     (ps, ('_persist_error', '_restore_gap', '_restored', '_seq_hwm')),
 )
+
+
+def no_extract_backlog():
+    """打掉「还有没有待提取的文档」那条兜底(contextmanager)。
+
+    `retry_failed_plan` 在**没有失败项**时会去问真实 kb.db 还有没有积压(那是另一条
+    正当的路:手动往 vault 放过文档也该能重跑提取)。可是「合并有没有凭空造出失败
+    项」这件事跟积压无关 —— 不打掉的话判据变成"开发机上那一刻有几条积压",本机有
+    3 条,于是那几条用例**恒红**,而要验的那件事压根没被验到。
+    """
+    return patch('kb.extract.pending_docs', Mock(return_value=[]))
 
 
 def isolate_pipeline_state(case: unittest.TestCase) -> Path:

@@ -13,7 +13,8 @@ from unittest.mock import Mock, patch
 from kb import pipeline_batch as pb
 from kb import pipeline_segments as seg
 from kb import pipeline_state as ps
-from tests.pipeline_round_fixture import RoundStore, finish_round
+from tests.pipeline_round_fixture import (RoundStore, finish_round,
+                                          no_extract_backlog)
 
 
 class DailyBatchResultTests(RoundStore):
@@ -66,7 +67,10 @@ class DailyBatchResultTests(RoundStore):
                        self.spec(['index', 'extract'], run_id='run-2'))
         last = pipeline.last_result()
         self.assertEqual('ok', last['stages']['crawl']['status'])
-        self.assertEqual([], pipeline.retry_failed_plan())
+        # 提取积压那条兜底要打掉(口径在 `no_extract_backlog`):它和"合并有没有
+        # 凭空造出失败项"无关,不打的话判据变成开发机上那一刻有几条积压。
+        with no_extract_backlog():
+            self.assertEqual([], pipeline.retry_failed_plan())
         # 谁都没计划过的阶段照旧是「未选择」
         self.assertEqual('未选择', last['stages']['wiki']['detail'])
 
@@ -261,7 +265,8 @@ class DailyBatchResultTests(RoundStore):
         self.assertEqual(('new-1', 'ok'),
                          (last['run_id'], last['stages']['crawl']['status']))
         self.assertNotIn('上一批那条', json.dumps(last, ensure_ascii=False))
-        self.assertEqual([], pipeline.retry_failed_plan())
+        with no_extract_backlog():                 # 同上
+            self.assertEqual([], pipeline.retry_failed_plan())
 
     def test_a_half_written_state_file_cannot_eat_the_previous_result(self):
         """落盘写到一半退出,旧那份要一字未动。

@@ -263,6 +263,11 @@ async function startPipeFromModal() {
   const daily = pipeDailyOn();
   const path = daily ? '/api/daily/run' : '/api/pipeline/run';
   const body = daily ? { sync: true, channels: pipeReadyChannels() } : pipeRunBody();
+  // 出报会盖掉当天那份（`daily.generate` 最后是 `tmp.replace(path)`，
+  // 后端没有第二道闸）。**走的是和日报页那颗按钮同一份确认**
+  // （`confirmDailyOverwrite`）；这条路不带区间，所以目标就是今天，而同步
+  // 中心平时没读过日报清单 —— 交给它自己问一次（审查 R4）。
+  if (daily && !await confirmDailyOverwrite(dailyToday())) return;
   pipeAction = 'start'; pipeSetupError(); invalidatePipeStatus();
   let failure = '';
   $('pipe-fields').disabled = true; renderPipeEst(); renderPipeButtons();
