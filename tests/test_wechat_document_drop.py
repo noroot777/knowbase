@@ -5,7 +5,8 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb import config, pipeline_failures, pipeline_stages, pipeline_state
+from kb import config, pipeline_failures, pipeline_stages, pipeline_state, projects, scanner, store
+from kb.chunker import split_chunks
 from kb.collectors import CollectorError, document_failure, item_aliases
 from kb.collectors import wechat_documents, wechat_local
 from kb.web import pipeline_api
@@ -51,6 +52,81 @@ class WeChatDocumentDropTests(NoBodyBase, unittest.TestCase):
         app.include_router(pipeline_api.router)
         return TestClient(app)
 
+    def exported_document(self, source, name, link=LINK, indexed=True):
+        relative = f'source/{source}/2026-10-19/{name}.md'
+        path = self.vault / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = (f'---\nsource: {source}\ntitle: same title\nurl: "{link}"\n'
+                f'article_title: 母文章\nproject: {name}\n---\n\n{REAL}')
+        path.write_text(text, encoding='utf-8')
+        if indexed:
+            document = scanner.doc_from_text(text, path, config.Source(source, path.parent), relative)
+            store.upsert_document(self.conn, document, split_chunks(document.body), '2026-10-19')
+            self.conn.commit()
+        return relative
+
+    def test_drop_removes_same_article_derivatives_but_not_independent_sources(self):
+        relative, document = self.article(body=REAL)
+        derivatives = [self.exported_document('dr-gzh-projects', 'tool-a'),
+                       self.exported_document('dr-gzh-projects', 'tool-b',
+                                              LINK.replace('scene=1', 'scene=99'))]
+        kept = [self.exported_document('dr-gzh-projects', 'other-article',
+                                       'https://mp.weixin.qq.com/s/other'),
+                self.exported_document('rss', 'independent'),
+                self.exported_document('dr-video-projects', 'video')]
+        chunk_ids = [row[0] for item in [relative, *derivatives]
+                     for row in self.conn.execute('SELECT id FROM chunks WHERE path=?', (item,))]
+        self.assertTrue(chunk_ids)
+        store.insert_vectors(self.conn, chunk_ids, [[0.0] * config.EMBEDDING_DIM for item in chunk_ids])
+        self.conn.commit()
+        with self.client() as client, patch.object(projects, 'VAULT_ROOT', self.vault), \
+             patch.dict(projects._cache, {'sig': None, 'entries': None, 'groups': None}, clear=True):
+            self.assertEqual(4, projects.list_tools()['total_entries'])
+            response = client.post('/api/pipeline/failures/drop',
+                                   json=document_failure(document, '失败')['drop'])
+            self.assertEqual(2, projects.list_tools()['total_entries'])
+            remaining = {entry['path'] for group in projects.all_groups() for entry in group['entries']}
+            self.assertEqual({kept[0], kept[2]}, remaining)
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertTrue(self.excluded)
+        for removed in [relative, *derivatives]:
+            self.assertFalse((self.vault / removed).exists())
+        self.assertEqual(set(kept), {row[0] for row in self.conn.execute('SELECT path FROM documents')})
+        for chunk_id in chunk_ids:
+            self.assertIsNone(self.conn.execute('SELECT id FROM chunks WHERE id=?', (chunk_id,)).fetchone())
+            self.assertIsNone(self.conn.execute('SELECT chunk_id FROM chunks_fts WHERE chunk_id=?',
+                                               (chunk_id,)).fetchone())
+            self.assertIsNone(self.conn.execute('SELECT chunk_id FROM chunk_vec WHERE chunk_id=?',
+                                               (chunk_id,)).fetchone())
+
+    def test_unindexed_and_index_only_derivatives_are_cleaned_idempotently(self):
+        relative, document = self.article(body=REAL)
+        unindexed = self.exported_document('dr-gzh-projects', 'unindexed', indexed=False)
+        index_only = self.exported_document('dr-gzh-projects', 'index-only')
+        (self.vault / index_only).unlink()
+        ref = document_failure(document, '失败')['drop']
+        for attempt in range(2):
+            with self.subTest(attempt=attempt):
+                wechat_local.collector.drop_item(ref)
+                for removed in (relative, unindexed, index_only):
+                    self.assertFalse((self.vault / removed).exists())
+                self.assertEqual(0, self.conn.execute('SELECT count(*) FROM documents').fetchone()[0])
+
+    def test_derived_cleanup_rejects_symlinks_outside_the_vault(self):
+        relative, document = self.article(body=REAL)
+        outside = self.root / 'outside'
+        outside.mkdir()
+        external = outside / 'keep.md'
+        external.write_text(f'---\nurl: "{LINK}"\n---\n{REAL}', encoding='utf-8')
+        (self.vault / 'source/dr-gzh-projects').symlink_to(outside, target_is_directory=True)
+        with self.client() as client:
+            response = client.post('/api/pipeline/failures/drop',
+                                   json=document_failure(document, '失败')['drop'])
+        self.assertEqual(409, response.status_code, response.text)
+        self.assertTrue(external.exists())
+        self.assertTrue(self.excluded)
+        self.assertEqual(set(), pipeline_failures.dropped_keys())
+
     def test_empty_body_and_model_failure_have_an_action_and_leave_the_extraction_queue(self):
         for body in (STUB, REAL):
             with self.subTest(body=body):
@@ -91,6 +167,7 @@ class WeChatDocumentDropTests(NoBodyBase, unittest.TestCase):
 
     def test_cleanup_error_keeps_the_action_and_can_be_retried_after_exclusion(self):
         relative, document = self.article(body=REAL)
+        derivative = self.exported_document('dr-gzh-projects', 'retry')
         ref = document_failure(document, 'failed')['drop']
         with self.client() as client:
             with patch.object(wechat_documents.store, 'remove_documents',
@@ -104,6 +181,8 @@ class WeChatDocumentDropTests(NoBodyBase, unittest.TestCase):
             response = client.post('/api/pipeline/failures/drop', json=ref)
         self.assertEqual(200, response.status_code, response.text)
         self.assertEqual([], self.pending())
+        self.assertFalse((self.vault / derivative).exists())
+        self.assertEqual(0, self.conn.execute('SELECT count(*) FROM documents').fetchone()[0])
 
     def test_identity_lookup_failure_preserves_the_original_failure_without_a_button(self):
         relative, document = self.article()

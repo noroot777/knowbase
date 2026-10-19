@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from pathlib import Path
 
 from kb import config
 from kb.collectors import CollectorError, DropIncomplete
-from kb.feeds.paths import export_path
+from kb.feeds.paths import export_path, item_key
 from kb.maintenance import LockBusy, maintenance_lock
 
 SCHEMA = '''
@@ -19,10 +18,6 @@ BEFORE INSERT ON feed_items
 WHEN EXISTS (SELECT 1 FROM feed_item_exclusions WHERE key=NEW.key)
 BEGIN SELECT RAISE(IGNORE); END;
 '''
-
-
-def item_key(kind: str, url: str) -> str:
-    return hashlib.sha256((kind + ':' + url).encode()).hexdigest()[:32]
 
 
 def failure(item, reason, kind: str | None = None) -> dict:

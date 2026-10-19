@@ -48,6 +48,7 @@ def cleanup(link: str, sources: tuple[str, ...]) -> None:
     target = identity(link)
     if not target:
         return
+    sources = tuple(dict.fromkeys((*sources, *config.SOURCE_GROUPS['gzh'])))
     relatives = set()
     for source in sources:
         root = config.VAULT_ROOT / 'source' / source
