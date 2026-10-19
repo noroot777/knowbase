@@ -1,8 +1,10 @@
 """Exercise the timeline and status readers against real DOM in a fresh headless shell."""
 import json
+import re
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -139,6 +141,30 @@ class PostDomTests(unittest.TestCase):
                 self.assertEqual(snap['text'], complete['body'])
                 self.assertIn('\n\nKeep this paragraph.', complete['body'])
 
+    def test_layout_and_canonical_evidence_share_emoji_and_url_text_semantics(self):
+        for emoji in ['<img alt="😂" src="data:,">', '<span><img alt="👩🏽‍💻" src="data:,"></span>']:
+            with self.subTest(emoji=emoji):
+                self.load(article(text='Prediction 🙂 ' + emoji + ' read '
+                                  '<div style="display:inline-flex"><span style="display:block">'
+                                  '<a href="/AsideAI">@AsideAI</a></span></div> with ' + LINK
+                                  + '<br><br>Keep this paragraph.'))
+                snap = json.loads(self.page.eval(x_post.READ_JS))
+                self.assertEqual(re.sub(r'\s+', '', snap['text']),
+                                 re.sub(r'\s+', '', snap['inline_legacy']))
+                self.assertIn('\n@AsideAI\n', snap['inline_legacy'])
+                self.assertIn('https://example.com/connections', snap['inline_legacy'])
+                state, complete, _ = backfill.proposal(
+                    dict(body=snap['inline_legacy'], **{x_post.HINT: ''}), snap['text'], snap)
+                self.assertEqual('normalized', state)
+                self.assertEqual(snap['text'], complete['body'])
+                self.assertIn('\n\nKeep this paragraph.', complete['body'])
+                raw = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
+                state, complete, info = backfill.proposal(
+                    dict(body=raw, **{x_post.HINT: ''}), snap['text'], snap)
+                self.assertEqual('blocked_content', state)
+                self.assertIsNone(complete)
+                self.assertEqual('detail_does_not_cover_stored', info['reason'])
+
     def test_unrelated_blocks_do_not_invalidate_a_proven_link_elsewhere(self):
         self.load(article(text='Read <div style="display:inline-flex"><span style="display:block">'
                           '<a href="/AsideAI">@AsideAI</a></span></div> today<br><br>'
@@ -151,6 +177,24 @@ class PostDomTests(unittest.TestCase):
         self.assertEqual('expanded', state)
         self.assertEqual(snap['text'], complete['body'])
         self.assertIn('\n\nA later paragraph.', complete['body'])
+
+    def test_hidden_block_wrappers_do_not_create_layout_removal_evidence(self):
+        self.load(article(text='Read <div style="display:none"><span style="display:block">'
+                          '<a href="/AsideAI">@AsideAI</a></span></div> today'))
+        snap = json.loads(self.page.eval(x_post.READ_JS))
+        self.assertEqual(snap['text'], snap['inline_legacy'])
+        self.assertEqual('blocked_whitespace', backfill.proposal(
+            dict(body='Read \n@AsideAI\n today', **{x_post.HINT: ''}), snap['text'], snap)[0])
+
+    def test_out_of_flow_wrappers_cannot_authorize_deleting_paragraphs(self):
+        for style in ['position:absolute', 'position:fixed', 'float:left', 'visibility:hidden']:
+            with self.subTest(style=style):
+                self.load(article(text='Read <span style="display:block;' + style
+                                  + '"><a href="/AsideAI">@AsideAI</a></span> today'))
+                snap = json.loads(self.page.eval(x_post.READ_JS))
+                self.assertEqual(snap['text'], snap['inline_legacy'])
+                self.assertEqual('blocked_whitespace', backfill.proposal(
+                    dict(body='Read \n@AsideAI\n today', **{x_post.HINT: ''}), snap['text'], snap)[0])
 
     def test_proven_multiple_layout_breaks_can_be_removed_without_removing_source_paragraphs(self):
         anchors = ['<a style="display:block" href="https://example.org">https://example.org</a>',
@@ -269,6 +313,15 @@ class PostDomTests(unittest.TestCase):
         entry = dict(x_browser._entry(self.collect()[0]), **{x_post.HINT: ''})
         with self.assertRaises(x_post.PostUnavailable):
             x_post.merge(entry, second['text'])
+        full = second['text'] + ', and the rest arrived after the first two reads.'
+        self.page.eval('document.querySelector("[data-testid=tweetText]").textContent = '
+                       + json.dumps(full) + '; true')
+        third = json.loads(self.page.eval(x_post.READ_JS))
+        fourth = json.loads(self.page.eval(x_post.READ_JS))
+        self.assertEqual(first['at'], third['at'])
+        self.assertEqual(first['id'], third['id'])
+        self.assertEqual(third['text'], fourth['text'])
+        self.assertEqual(full, x_post.merge(entry, fourth['text'])['body'])
 
     def test_status_and_timeline_share_explicit_absence_and_rate_limit_detection(self):
         for text, empty, limited in [
@@ -321,25 +374,41 @@ class PostDomTests(unittest.TestCase):
 
     def test_actual_http_status_events_are_seen_in_a_fresh_headless_browser(self):
         for status in [429, 503, 200]:
-            with self.subTest(status=status):
-                self.server.api_status = status
-                self.server.html = ('<script>fetch("/i/api/graphql/hash/TweetDetail")'
-                                    '.finally(() => window.finished = true)</script>')
-                marker = str(time.monotonic_ns())
-                x_page_state.navigate(self.page, f'http://127.0.0.1:{self.server.server_port}'
-                                                '/Example/status/123?fixture=' + marker)
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    if self.page.eval('location.search === ' + json.dumps('?fixture=' + marker)
-                                      + ' && window.finished === true'):
-                        break
-                    time.sleep(0.02)
-                else:
-                    self.fail('the real browser did not complete its fixture request')
-                snap = x_page_state.read(self.page, x_post.READ_JS)
-                self.assertIs(status == 429, snap.get('limited'))
-                self.assertIs(status >= 400, snap.get('failed'))
-                self.assertIs(False, snap.get('empty'))
+            for cards in ['', article(identity='999', text='Someone else replied')]:
+                self.check_http_status(status, cards)
+
+    def check_http_status(self, status, cards):
+        with self.subTest(status=status, cards=bool(cards)):
+            self.server.api_status = status
+            self.server.html = (cards + '<script>fetch("/i/api/graphql/hash/TweetDetail")'
+                                '.finally(() => window.finished = true)</script>')
+            marker = str(time.monotonic_ns())
+            x_page_state.navigate(self.page, f'http://127.0.0.1:{self.server.server_port}'
+                                            '/Example/status/123?fixture=' + marker)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if self.page.eval('location.search === ' + json.dumps('?fixture=' + marker)
+                                  + ' && window.finished === true'):
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail('the real browser did not complete its fixture request')
+            snap = x_page_state.read(self.page, x_post.READ_JS)
+            self.assertIs(status == 429, snap.get('limited'))
+            self.assertIs(status >= 400, snap.get('failed'))
+            self.assertIs(False, snap.get('empty'))
+
+    def test_real_http_limit_with_replies_stops_detail_reads_before_the_local_budget(self):
+        self.server.api_status = 429
+        self.server.html = (article(identity='999')
+                            + '<script>fetch("/i/api/graphql/hash/TweetDetail")</script>')
+        url = f'http://127.0.0.1:{self.server.server_port}/Example/status/123'
+        started = time.monotonic()
+        with (patch.object(x_post, '_STATUS', re.compile(r'^http://[^/]+/[^/]+/status/(\d+)')),
+              patch.object(x_post, 'STEP', 0.01), patch.object(x_post, 'SECONDS', 3)):
+            with self.assertRaises(x_page_state.XRateLimited):
+                x_post.fetch(url, self.page)
+        self.assertLess(time.monotonic() - started, 2.5)
 
     def test_error_words_in_a_real_post_cannot_make_it_absent_or_rate_limited(self):
         text = '有人说「该页面不存在」或「请稍后再试」，但这是一条正常推文。'

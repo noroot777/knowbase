@@ -188,7 +188,7 @@ class BackfillTests(ChannelBase):
         for text in [SHORT, 'shorter']:
             with self.subTest(text=text):
                 stats = backfill.repair([row], Page(snapshot(text)), apply=True)
-                state = 'identical' if text == SHORT else 'blocked_length'
+                state = 'identical' if text == SHORT else 'blocked_content'
                 self.assertEqual(1, stats[state])
                 self.assertEqual(state, stats['results'][0]['state'])
                 self.assertEqual(0, stats['updated'])
@@ -232,8 +232,8 @@ class BackfillTests(ChannelBase):
     def test_known_artifacts_do_not_allow_arbitrary_shorter_text(self):
         row = self.seed(LEGACY)
         stats = backfill.repair([row], Page(snapshot('Read this: https://example.org')), apply=True)
-        self.assertEqual(1, stats['blocked_artifacts'])
-        self.assertEqual('blocked_artifacts', stats['results'][0]['state'])
+        self.assertEqual(1, stats['blocked_content'])
+        self.assertEqual('blocked_content', stats['results'][0]['state'])
         self.assertEqual(0, stats['updated'])
         self.assertEqual(row, self.row(row['key']))
 
@@ -284,7 +284,7 @@ class BackfillTests(ChannelBase):
                       'Read this: https://example.org/case\nKeep this ending.']:
             with self.subTest(clean=clean):
                 stats = backfill.repair([row], Page(snapshot(clean)), apply=True)
-                self.assertEqual(1, stats['blocked_artifacts'])
+                self.assertEqual(1, stats['blocked_content'])
                 self.assertEqual(0, stats['updated'])
                 self.assertEqual(row, self.row(row['key']))
 
@@ -357,7 +357,7 @@ class BackfillTests(ChannelBase):
                      'Keep @AsideAI and #AI today', 'Keep #AI and @AsideAI today…']:
             with self.subTest(text=text):
                 stats = backfill.repair([row], Page(snapshot(text)), apply=True)
-                self.assertEqual(1, stats['blocked_length'])
+                self.assertEqual(1, stats['blocked_content'])
                 self.assertEqual(0, stats['updated'])
                 self.assertEqual(row, self.row(row['key']))
 
@@ -485,7 +485,7 @@ class BackfillTests(ChannelBase):
     def test_cli_reports_blocked_identical_and_cleanable_artifacts_separately(self):
         row = self.seed(LEGACY)
         report = self.root / 'report.json'
-        for text, state, code in [('shorter', 'blocked_artifacts', 0),
+        for text, state, code in [('shorter', 'blocked_content', 0),
                                   (LEGACY, 'identical', 0), (CLEAN, 'normalized', 0)]:
             with self.subTest(state=state), contextlib.redirect_stdout(io.StringIO()), \
                  patch.object(backfill.x_browser, 'browser_session',

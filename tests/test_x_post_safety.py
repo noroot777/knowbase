@@ -92,7 +92,7 @@ class SafeReplacementTests(ChannelBase):
         self.assertEqual(text, complete['body'])
         evidence = linked_snapshot(text)
         evidence['inline_plain'] = 'a differently indexed string'
-        self.assertEqual('blocked_whitespace', backfill.proposal(entry, text, evidence)[0])
+        self.assertEqual('blocked_evidence', backfill.proposal(entry, text, evidence)[0])
 
     def test_layout_evidence_must_stabilize_together_with_the_text(self):
         first = snapshot('Read @AsideAI today')

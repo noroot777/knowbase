@@ -221,7 +221,7 @@ def _own_tweet(item: dict, handle: str) -> bool:
 
 def _quote_only(item: dict) -> bool:
     return bool(item.get('quoted') and not (item.get('text') or '').strip()
-                and not item.get('article'))
+                and not item.get('article') and not item.get('truncated'))
 
 
 def _entry(item: dict) -> dict | None:
@@ -262,11 +262,11 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
             # `x_login_import`),把他推去无头壳里登一次正是他想免掉的那一步。
             raise XBrowserError('X 登录态已失效,请在浏览器通道设置里重新登录,'
                                 '或从日常浏览器再导入一次')
-        if last['articles'] and last['ready'] == 'complete':
-            return last
         current_problem = page_problem(last)
+        if last['articles'] and last['ready'] == 'complete' and not current_problem:
+            return last
         confirmed_problem = current_problem if current_problem == previous_problem else ''
-        if confirmed_problem and not last.get('http_only'):
+        if confirmed_problem and (not last.get('http_only') or last.get('http_content_limited')):
             if current_problem == 'limited':
                 raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
             raise XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
@@ -378,14 +378,15 @@ def _settle(page: Chrome, before: int, deadline: float) -> bool:
 
 
 class TimelineEntries(list):
-    """Selected entries plus the count of retryable quote-only omissions."""
+    """Selected entries plus informational skips and their observed timestamps."""
 
     def __init__(self):
         super().__init__()
         self.skipped_quotes = 0
+        self.skipped_newest = None
 
 
-def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list[dict]:
+def _select(items: list[dict], floor: datetime | None, handle: str = '') -> TimelineEntries:
     """落到 feed_items 之前的最后一道:去掉不属于这条时间线的和过老的,转成条目形状。
 
     哪些不属于见 `_in_timeline`(推广位、推荐位)—— 入库口径只有那一份,两处各判
@@ -404,6 +405,7 @@ def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list
             out.append(entry)
         elif _quote_only(item) and item.get('url') and when:
             out.skipped_quotes += 1
+            out.skipped_newest = max(out.skipped_newest, when) if out.skipped_newest else when
     return out
 
 
@@ -474,10 +476,8 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     entries, incomplete = _harvest_one(page, handle, floor)
                     skipped_quotes = getattr(entries, 'skipped_quotes', 0)
                     observed_watermark = _newest(entries, water)
-                    if skipped_quotes:
-                        note = (f'跳过 {skipped_quotes} 条本人无正文的引用推文,'
-                                '未冒充本人观点入库,留到下次同步再试')
-                        incomplete = ';'.join(filter(None, [incomplete, note]))
+                    note = (f'跳过 {skipped_quotes} 条本人无正文的引用推文,未冒充本人观点入库'
+                            if skipped_quotes else '')
                     # 长文(Article)推文在时间线上一个字都没有,正文要单独取一次。
                     # 取不到的那几条本轮不入库、并按"没读完"办 —— 空正文一旦落库
                     # 就再也更新不了(`put_items` 是 DO NOTHING),见 `x_article`。
@@ -508,7 +508,7 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # `put_items` 按 URL 去重,一条都不会重复入库。
                     results[handle] = {
                         'entries': entries, 'error': '', 'incomplete': incomplete,
-                        'skipped_quotes': skipped_quotes,
+                        'skipped_quotes': skipped_quotes, 'note': note,
                         'watermark': started if incomplete else observed_watermark}
                 except (XRateLimited, x_post.PostSessionUnavailable):
                     raise
@@ -529,15 +529,10 @@ def _newest(entries: list[dict], fallback: str) -> str:
     **一条都没抓到时沿用旧水位**,不要改成"现在":那等于把这段时间宣布为已抓过,
     而这一轮可能只是没滚到(预算用完、X 限流)。水位只前进到确实见过的那条推文。
     """
-    stamps = [e['published'] for e in entries if e.get('published')]
-    if not stamps:
-        return fallback
-    newest = max(stamps)
-    try:
-        local = datetime.strptime(newest, '%Y-%m-%d %H:%M').replace(tzinfo=SHANGHAI)
-    except ValueError:
-        return fallback
-    return local.astimezone(timezone.utc).isoformat()
+    stamps = [_utc(entry['published']) for entry in entries if entry.get('published')]
+    stamps.append(getattr(entries, 'skipped_newest', None))
+    newest = max((stamp for stamp in stamps if stamp is not None), default=None)
+    return newest.isoformat() if newest else fallback
 
 
 def open_login_window(profile: str, chrome_path: str = '') -> str:

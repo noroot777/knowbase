@@ -134,13 +134,17 @@ def _alignment(preview: str, detail: str, evidence=None) -> str:
         return 'content'
     positions = set()
     legacy = None
+    evidence_mismatch = isinstance(evidence, dict) and any(
+        evidence.get(key) is not None for key in ('inline_plain', 'inline_legacy'))
     if (isinstance(evidence, dict) and evidence.get('text') == detail
             and evidence.get('inline_plain') == re.sub(r'\s+', '', detail)
             and isinstance(evidence.get('inline_breaks'), list)
             and isinstance(evidence.get('inline_legacy'), str)):
         positions = {offset for offset in evidence['inline_breaks']
                      if type(offset) is int and 0 < offset < len(re.sub(r'\s+', '', detail))}
-        legacy = _covered_preview(evidence['inline_legacy'], detail)
+        legacy = (evidence['inline_legacy'] if re.sub(r'\s+', '', evidence['inline_legacy'])
+                  == evidence['inline_plain'] else None)
+        evidence_mismatch = legacy is None
     source_gaps = _gaps(legacy) if legacy is not None else {}
     gaps = _gaps(detail)
     for offset, original in _gaps(fixed).items():
@@ -153,7 +157,7 @@ def _alignment(preview: str, detail: str, evidence=None) -> str:
                 <= source.count('\n')
                 and not any(char in original for char in '\r\v\f\x85\u2028\u2029')):
             continue
-        return 'whitespace'
+        return 'evidence' if evidence_mismatch else 'whitespace'
     return 'matched'
 
 
@@ -170,9 +174,11 @@ def proposal(entry: dict, text: str, evidence=None) -> tuple[str, dict | None, d
     if text == preview:
         return 'identical', None, dict(info, reason='detail_matches_stored')
     alignment = _alignment(preview, text, evidence)
+    if alignment == 'evidence':
+        return 'blocked_evidence', None, dict(info, reason='source_evidence_mismatch')
     if alignment == 'whitespace':
         return 'blocked_whitespace', None, dict(info, reason='unproven_whitespace_change')
-    if alignment == 'content' and x_post.expanded(text, preview):
+    if alignment == 'content':
         return 'blocked_content', None, dict(info, reason='detail_does_not_cover_stored')
     if x_post.expanded(text, preview):
         return 'expanded', x_post.merge(entry, text), dict(info, reason='longer_detail')
@@ -221,7 +227,7 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
            should_stop=None, progress=None) -> dict:
     stats = dict(candidates=len(rows), expanded=0, normalized=0, updated=0,
                  identical=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
-                 blocked_whitespace=0, blocked_content=0,
+                 blocked_whitespace=0, blocked_content=0, blocked_evidence=0,
                  failed=0, stale=0, deferred=0, results=[])
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
@@ -320,6 +326,7 @@ def main(argv=None) -> int:
           f'长度拦截 {stats["blocked_length"]} 条,'
           f'含旧链接产物但未能安全对齐 {stats["blocked_artifacts"]} 条,'
           f'空白改动缺少证据 {stats["blocked_whitespace"]} 条,'
+          f'来源读数证据不一致 {stats["blocked_evidence"]} 条,'
           f'正文内容无法对齐 {stats["blocked_content"]} 条,'
           f'远端明确不可用 {stats["unavailable"]} 条(保留原存量)。')
     if stats.get('stop_reason'):

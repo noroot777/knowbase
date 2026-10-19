@@ -14,9 +14,21 @@ STEP = 0.25
 _STATUS = re.compile(r'^https://(?:x|twitter)\.com/[^/?#]+/status/(\d+)(?:[/?#]|$)')
 
 TEXT_JS = r'''
-  const postText = node => {
+  const postText = (node, layout = false) => {
     if (!node) return '';
     const copy = node.cloneNode(true);
+    const blocks = new Set();
+    if (layout) {
+      const originals = [...node.querySelectorAll('*')];
+      [...copy.querySelectorAll('*')].forEach((element, index) => {
+        const style = getComputedStyle(originals[index]);
+        if (originals[index].getClientRects().length && postText(originals[index])
+            && style.visibility === 'visible' && style.float === 'none'
+            && !['absolute', 'fixed'].includes(style.position) && ![
+            'inline', 'inline-block', 'inline-flex', 'inline-grid', 'contents', 'none']
+            .includes(style.display)) blocks.add(element);
+      });
+    }
     for (const tail of copy.querySelectorAll('a [aria-hidden="true"]')) {
       if (tail.textContent === '…') tail.remove();
     }
@@ -24,7 +36,19 @@ TEXT_JS = r'''
       image.replaceWith(document.createTextNode(image.getAttribute('alt')));
     }
     for (const br of copy.querySelectorAll('br')) br.replaceWith('\n');
-    return copy.textContent.replace(/\u00a0/g, ' ').trim();
+    const parts = [];
+    const boundary = () => { if (parts.at(-1) !== null) parts.push(null); };
+    const collect = element => {
+      if (blocks.has(element)) boundary();
+      for (const child of element.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE && child.textContent) parts.push(child.textContent);
+        else if (child.nodeType === Node.ELEMENT_NODE) collect(child);
+      }
+      if (blocks.has(element)) boundary();
+    };
+    collect(copy);
+    return parts.map(part => part === null ? '\n' : part).join('')
+      .replace(/\u00a0/g, ' ').trim();
   };
   const ownNode = (art, selector) => [...art.querySelectorAll(selector)].find(node =>
     node.closest('article[data-testid="tweet"]') === art &&
@@ -81,7 +105,7 @@ READ_JS = r'''(() => {
     result.text = postText(body);
     result.inline_breaks = inlineBreaks(body);
     result.inline_plain = result.text.replace(/\s/g, '');
-    result.inline_legacy = body?.innerText.replace(/\u00a0/g, ' ').trim() || '';
+    result.inline_legacy = postText(body, true);
     result.truncated = postMore(art);
     break;
   }
@@ -166,7 +190,8 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
             previous = current
             current_problem = problem(snap) if snap.get('at') == match[1] and not valid else ''
             confirmed_problem = current_problem if current_problem == previous_problem else ''
-            if confirmed_problem and not snap.get('http_only'):
+            if confirmed_problem and (not snap.get('http_only')
+                                      or snap.get('http_content_limited')):
                 _request_failed(confirmed_problem)
             previous_problem = current_problem
             missing = (snap.get('at') == match[1] and not snap.get('id')

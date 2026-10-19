@@ -79,13 +79,16 @@ class TransportScopeTests(unittest.TestCase):
 
 
 class ResultPrecedenceTests(unittest.TestCase):
-    def test_http_flags_are_not_attached_when_the_page_has_content(self):
+    def test_unrelated_cards_cannot_erase_core_http_failure_evidence(self):
         state = x_page_state.Responses('owned')
         state.reset(URL)
         state.loader = 'current'
         state.receive(response(429))
         snap = dict(articles=1, ready='complete', failed=False, limited=False)
-        self.assertEqual(snap.copy(), state.apply(snap))
+        applied = state.apply(snap)
+        self.assertTrue(applied['limited'])
+        self.assertTrue(applied['http_only'])
+        self.assertTrue(applied['http_content_limited'])
 
     def test_full_stable_text_wins_over_every_http_failure(self):
         for status in [429, 503, 404]:
@@ -119,6 +122,8 @@ class ResultPrecedenceTests(unittest.TestCase):
 
                 def delayed(message, deadline):
                     session.available = session.reads >= 2
+                    if session.available:
+                        session.incoming.append(response(200, operation='UserByScreenName'))
                     original(message, deadline)
 
                 session._post = delayed
@@ -170,7 +175,7 @@ class StoredScopeTests(ChannelBase):
                 self.assertEqual(OLD, x_channels.watermark(first, channel))
                 self.assertNotEqual(OLD, x_channels.watermark(second, channel))
 
-    def test_quote_only_skips_are_reported_without_a_blank_row_or_lost_retry(self):
+    def test_quote_only_skips_are_informational_and_do_not_stall_either_channel(self):
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:
             with self.subTest(channel=channel), Quick():
                 handle = 'Example' + channel
@@ -186,16 +191,21 @@ class StoredScopeTests(ChannelBase):
                 sync._save_result(source, x_channels.take(source, settings), FetchScope())
                 saved = reg.subscription('social', source['id'])
                 self.assertIn('跳过 1 条本人无正文的引用推文', saved['last_note'])
-                self.assertEqual(OLD, x_channels.watermark(saved, channel))
+                observed = x_browser._newest(x_browser._select([item], None, handle), OLD)
+                self.assertEqual(observed, x_channels.watermark(saved, channel))
+                self.assertNotEqual(OLD, observed)
                 with reg.db() as conn:
                     self.assertEqual(0, conn.execute('SELECT count(*) FROM feed_items WHERE url=?',
                                                     (item['url'],)).fetchone()[0])
-                item['text'] = 'Now the author text is available.'
                 page = OpenTimeline([item])
                 with patch.object(x_browser, 'browser_session',
                                   return_value=contextlib.nullcontext(page)):
                     x_channels.prefetch([saved], settings)
-                self.assertEqual(1, sync._save_result(saved, x_channels.take(saved, settings), FetchScope()))
+                self.assertEqual(0, sync._save_result(
+                    saved, x_channels.take(saved, settings), FetchScope()))
+                saved = reg.subscription('social', source['id'])
+                self.assertEqual(observed, x_channels.watermark(saved, channel))
+                self.assertEqual('', saved['last_note'])
 
     def test_halt_inside_fetch_is_deferred_and_stops_further_rows(self):
         row = self.seed()
@@ -210,7 +220,8 @@ class StoredScopeTests(ChannelBase):
 
     def test_all_intentional_withholding_states_exit_successfully_without_writing(self):
         row = self.seed()
-        states = ['blocked_length', 'blocked_artifacts', 'blocked_whitespace', 'blocked_content']
+        states = ['blocked_length', 'blocked_artifacts', 'blocked_whitespace', 'blocked_content',
+                  'blocked_evidence']
         for state in states:
             with self.subTest(state=state), contextlib.redirect_stdout(io.StringIO()) as output, \
                  patch.object(backfill.x_browser, 'browser_session',
