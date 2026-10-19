@@ -8,6 +8,11 @@ from dataclasses import dataclass
 PROVENANCE = 'body_provenance'
 
 
+class SourceUnknown(ValueError):
+    def __init__(self):
+        super().__init__('正文来源待核:缺少或无法验证原有片段来源,保留原行;需可靠重新采集补证后再补全')
+
+
 def placeholder(author: str) -> str:
     return f'{author} 的动态'[:500]
 
@@ -47,6 +52,12 @@ class Body:
     text: str
     media: str = ''
     fallback: str = ''
+    source_known: bool = False
+
+    def require_source(self) -> Body:
+        if not self.source_known:
+            raise SourceUnknown()
+        return self
 
     def render(self, text: str) -> str:
         content = text or self.fallback
@@ -72,7 +83,7 @@ def parts(entry: dict) -> Body:
     unknown = Body('', body)
     try:
         evidence = json.loads(entry.get(PROVENANCE) or '')
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return unknown
     if (not isinstance(evidence, dict) or evidence.get('version') != 1
             or evidence.get('fingerprint') != _fingerprint(body)
@@ -97,12 +108,12 @@ def parts(entry: dict) -> Body:
         if raw != fallback:
             return unknown
         raw = ''
-    fragments = Body(prefix, raw, media, fallback)
+    fragments = Body(prefix, raw, media, fallback, source_known=True)
     return fragments if fragments.render(raw).rstrip() == body.rstrip() else unknown
 
 
 def with_text(entry: dict, text: str) -> dict:
-    fragments = parts(entry)
+    fragments = parts(entry).require_source()
     body = Body(fragments.prefix, text, fragments.media)
     return record({**entry, 'body': body.render(text)}, text,
                   prefix=body.prefix, media=body.media)

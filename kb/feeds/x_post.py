@@ -142,7 +142,10 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
 
 
 def merge(entry: dict, text: str) -> dict:
-    body = x_body.parts(entry)
+    try:
+        body = x_body.parts(entry).require_source()
+    except x_body.SourceUnknown as exc:
+        raise PostUnavailable(str(exc)) from exc
     if not expanded(text, body.text):
         raise PostUnavailable('详情页正文没有长于时间线预览')
     complete = x_body.with_text(entry, text)

@@ -112,9 +112,13 @@ def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
     body = x_body.parts(entry)
     preview = body.text
     canonical = canonical_preview(preview)
-    info = dict(artifacts=canonical != preview, after=len(body.render(text)))
+    info = dict(artifacts=canonical != preview, after=len(entry['body']))
     if text == entry['body'] or text == preview:
         return 'identical', None, dict(info, after=len(entry['body']), reason='detail_matches_stored')
+    if not body.source_known:
+        return 'unknown_provenance', None, dict(info, reason='body_provenance_unknown',
+                                               detail=str(x_body.SourceUnknown()))
+    info['after'] = len(body.render(text))
     if x_post.expanded(text, preview):
         return 'expanded', x_post.merge(entry, text), dict(info, reason='longer_detail')
     if info['artifacts'] and aligned_preview(preview, text):
@@ -156,7 +160,7 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
            should_stop=None, progress=None) -> dict:
     stats = dict(candidates=len(rows), expanded=0, normalized=0, updated=0,
                  identical=0, empty=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
-                 failed=0, unknown_structure=0, stale=0, deferred=0, results=[])
+                 failed=0, unknown_structure=0, unknown_provenance=0, stale=0, deferred=0, results=[])
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
                 deadline is not None and time.monotonic() >= deadline):
@@ -167,12 +171,14 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
             text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
         except x_post.PostEmpty as exc:
             entry = entry_of(row)
-            preview = x_body.parts(entry).text
-            state = 'blocked_length' if preview else 'empty'
+            body = x_body.parts(entry)
+            state = ('unknown_provenance' if not body.source_known
+                     else 'blocked_length' if body.text else 'empty')
             stats[state] += 1
-            result.update(state=state, after=len(entry[x_post.HINT]), empty_kind=exc.kind,
-                          reason='remote_empty_stored_text' if preview else 'confirmed_empty',
-                          detail=str(exc))
+            result.update(state=state, after=len(row['body']), empty_kind=exc.kind,
+                          reason='body_provenance_unknown' if not body.source_known
+                          else 'remote_empty_stored_text' if body.text else 'confirmed_empty',
+                          detail=str(x_body.SourceUnknown()) if not body.source_known else str(exc))
         except x_post.PostGone as exc:
             stats['unavailable'] += 1
             result.update(state='unavailable', error=str(exc))
@@ -258,6 +264,7 @@ def main(argv=None) -> int:
     print(f'可扩写 {stats["expanded"]} 条,可清理旧链接产物 {stats["normalized"]} 条,'
           f'实际写入 {stats["updated"]} 条,'
           f'正文结构尚未确认 {stats["unknown_structure"]} 条,'
+          f'原正文来源待核 {stats["unknown_provenance"]} 条(保留原行,需重新采集补证),'
           f'并发换版跳过 {stats["stale"]} 条,失败 {stats["failed"]} 条,'
           f'预算/停止/限流扣留 {stats["deferred"]} 条。')
     print(f'与详情逐字相同 {stats["identical"]} 条(不等于确认完整),'
@@ -269,7 +276,8 @@ def main(argv=None) -> int:
         print(f'整轮已停止:{stats["stop_reason"]}')
     print('已写入的条目会在正常同步中重新翻译、导出、索引和提取;本脚本不直接改 vault。')
     return 1 if any(stats[key] for key in
-                    ('failed', 'deferred', 'blocked_length', 'blocked_artifacts')) else 0
+                    ('failed', 'deferred', 'blocked_length', 'blocked_artifacts',
+                     'unknown_provenance')) else 0
 
 
 if __name__ == '__main__':

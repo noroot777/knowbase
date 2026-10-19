@@ -1,4 +1,6 @@
 """Producer evidence survives SQLite writes; lookalike authored and legacy text never vanishes."""
+import contextlib
+import io
 import json
 import time
 from unittest.mock import patch
@@ -8,7 +10,7 @@ from scripts import x_post_backfill as backfill
 from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import tweet
 from tests.test_x_empty_post import empty
-from tests.test_x_post import BODY, URL, Page, snapshot
+from tests.test_x_post import BODY, PREVIEW, URL, Page, snapshot
 
 
 class ProvenanceTests(ChannelBase):
@@ -71,7 +73,8 @@ class ProvenanceTests(ChannelBase):
                     self.assertEqual(row['body'], x_body.parts(row).text)
                     for detail in [None, '短']:
                         stats = self.audit(row, detail)
-                        self.assertEqual(1, stats['blocked_length'])
+                        state = 'unknown_provenance' if legacy else 'blocked_length'
+                        self.assertEqual(1, stats[state])
                         self.assertEqual(0, stats['empty'])
                         self.assertEqual(0, stats['updated'])
                         self.assertEqual(row, self.row(row))
@@ -85,8 +88,9 @@ class ProvenanceTests(ChannelBase):
             for legacy in [False, True]:
                 with self.subTest(text=text, legacy=legacy):
                     row = self.seed(entry, legacy=legacy)
-                    self.assertEqual(x_body.Body('', text), x_body.parts(row))
-                    self.assertEqual(1, self.audit(row)['blocked_length'])
+                    self.assertEqual(x_body.Body('', text, source_known=not legacy), x_body.parts(row))
+                    state = 'unknown_provenance' if legacy else 'blocked_length'
+                    self.assertEqual(1, self.audit(row)[state])
                     self.assertEqual(1, self.audit(row, text)['identical'])
                     self.assertEqual(row, self.row(row))
 
@@ -99,10 +103,10 @@ class ProvenanceTests(ChannelBase):
                 row = self.seed(entry, legacy=True)
                 self.assertEqual(row['body'], x_body.parts(row).text)
                 stats = self.audit(row)
-                self.assertEqual(1, stats['blocked_length'])
-                self.assertEqual('remote_empty_stored_text', stats['results'][0]['reason'])
-                self.assertEqual(1, self.audit(row, '短')['blocked_length'])
-                state = 'identical' if row['body'] == row['body'].strip() else 'blocked_length'
+                self.assertEqual(1, stats['unknown_provenance'])
+                self.assertEqual('body_provenance_unknown', stats['results'][0]['reason'])
+                self.assertEqual(1, self.audit(row, '短')['unknown_provenance'])
+                state = 'identical' if row['body'] == row['body'].strip() else 'unknown_provenance'
                 self.assertEqual(1, self.audit(row, row['body'])[state])
                 self.assertEqual('identical', backfill.proposal(backfill.entry_of(row), row['body'])[0])
                 self.assertEqual(row, self.row(row))
@@ -141,7 +145,7 @@ class ProvenanceTests(ChannelBase):
     def test_bad_missing_or_stale_evidence_and_transient_hint_cannot_strip_characters(self):
         entry = x_browser._entry(tweet('123', text='', context='ctx'))
         proof = json.loads(entry[x_body.PROVENANCE])
-        invalid = ['', 'null', '[]', '{', json.dumps({**proof, 'version': 2}),
+        invalid = ['', 'null', '[]', '{', '[' * 2000, json.dumps({**proof, 'version': 2}),
                    json.dumps({**proof, 'fingerprint': 'bad'}),
                    json.dumps({**proof, 'prefix': 42}),
                    json.dumps({**proof, 'prefix': '> other\n\n'}),
@@ -151,11 +155,15 @@ class ProvenanceTests(ChannelBase):
             with self.subTest(evidence=evidence):
                 row = self.seed(dict(entry, body_provenance=evidence))
                 self.assertEqual(x_body.Body('', row['body']), x_body.parts(row))
-                self.assertEqual(1, self.audit(row)['blocked_length'])
+                self.assertEqual(1, self.audit(row)['unknown_provenance'])
+                self.assertEqual(1, self.audit(row, BODY)['unknown_provenance'])
+                with self.assertRaises(x_body.SourceUnknown):
+                    x_body.with_text(row, BODY)
                 self.assertEqual(row, self.row(row))
         stale = self.seed(dict(entry, body='> ctx\n\nreal authored text'))
         self.assertEqual(stale['body'], x_body.parts(stale).text)
-        self.assertEqual(1, self.audit(stale)['blocked_length'])
+        self.assertEqual(1, self.audit(stale)['unknown_provenance'])
+        self.assertEqual(1, self.audit(stale, BODY)['unknown_provenance'])
         plain = dict(entry, body_provenance='', **{x_post.HINT: entry['body']})
         with self.assertRaises(x_post.PostUnavailable):
             x_post.merge(plain, '短')
@@ -169,7 +177,7 @@ class ProvenanceTests(ChannelBase):
         self.assertEqual('', fresh[x_body.PROVENANCE])
         self.assertEqual(grab_store.item_version(replacement), fresh['content_hash'])
         self.assertEqual(row['content_rev'] + 1, fresh['content_rev'])
-        self.assertEqual(1, self.audit(fresh)['blocked_length'])
+        self.assertEqual(1, self.audit(fresh)['unknown_provenance'])
         self.assertFalse(grab_store.replace(fresh, {**replacement, **{
             x_body.PROVENANCE: row[x_body.PROVENANCE]}}))
         self.assertEqual(fresh, self.row(row))
@@ -181,5 +189,94 @@ class ProvenanceTests(ChannelBase):
         migrated = self.row(row)
         self.assertEqual('', migrated[x_body.PROVENANCE])
         self.assertEqual({**row, x_body.PROVENANCE: ''}, migrated)
-        self.assertEqual(1, self.audit(migrated)['blocked_length'])
+        self.assertEqual(1, self.audit(migrated)['unknown_provenance'])
         self.assertEqual(migrated, self.row(row))
+
+    def test_known_no_fragments_and_unknown_source_are_distinct_even_with_identical_text(self):
+        entry = x_browser._entry(tweet('123', text=PREVIEW))
+        known = x_body.parts(entry)
+        unknown = x_body.parts({**entry, x_body.PROVENANCE: ''})
+        self.assertEqual(known.text, unknown.text)
+        self.assertTrue(known.source_known)
+        self.assertFalse(unknown.source_known)
+        self.assertNotEqual(known, unknown)
+        with self.assertRaises(x_body.SourceUnknown):
+            unknown.require_source()
+        complete = x_body.with_text(entry, BODY)
+        self.assertEqual(x_body.Body('', BODY, source_known=True), x_body.parts(complete))
+
+    def test_real_old_schema_migration_blocks_longer_overwrite_of_context_media_and_placeholder(self):
+        media = {'photos': [{'url': 'https://pbs.twimg.com/media/a.jpg'}]}
+        entries = [x_browser._entry(tweet('123', text=PREVIEW, context='向阳乔木 转推了')),
+                   self.manual(PREVIEW, media=media),
+                   x_browser._entry(tweet('123', text='', context='向阳乔木 转推了')),
+                   x_feedgrab._entry(dict(source=URL, author_name='Example Person'), '', 'Example'),
+                   self.manual(media=media)]
+        for entry in entries:
+            with self.subTest(entry=entry):
+                original = self.seed(entry)
+                with reg.db() as conn:
+                    conn.execute('ALTER TABLE feed_items DROP COLUMN body_provenance')
+                row = self.row(original)
+                self.assertEqual('', row[x_body.PROVENANCE])
+                self.assertGreater(len(BODY), len(row['body']))
+                with patch.object(grab_store, 'replace', wraps=grab_store.replace) as replace, \
+                     patch.object(x_body, 'record', wraps=x_body.record) as record:
+                    for detail in [BODY, None, '短']:
+                        stats = self.audit(row, detail)
+                        self.assertEqual(1, stats['unknown_provenance'])
+                        self.assertEqual(0, stats['updated'])
+                        self.assertEqual(0, stats['empty'])
+                        self.assertEqual(0, stats['blocked_length'])
+                        self.assertEqual('body_provenance_unknown', stats['results'][0]['reason'])
+                        self.assertEqual(len(row['body']), stats['results'][0]['after'])
+                        self.assertIn('来源待核', stats['results'][0]['detail'])
+                        self.assertEqual(row, self.row(row))
+                    replace.assert_not_called()
+                    record.assert_not_called()
+                with self.assertRaisesRegex(x_post.PostUnavailable, '来源待核'):
+                    x_post.merge(backfill.entry_of(row), BODY)
+                with self.assertRaises(x_body.SourceUnknown):
+                    x_body.with_text(row, BODY)
+
+    def test_unknown_source_cannot_normalize_links_or_mint_a_proof_but_identical_is_noop(self):
+        broken, clean = 'https://exa\nmple.org/long-path\n…', 'https://example.org/long-path'
+        entry = x_browser._entry(tweet('123', text=broken))
+        for evidence in ['', '{', json.dumps({'version': 99})]:
+            with self.subTest(evidence=evidence):
+                row = self.seed(dict(entry, body_provenance=evidence))
+                self.assertTrue(backfill.aligned_preview(row['body'], clean))
+                stats = self.audit(row, clean)
+                self.assertEqual(1, stats['unknown_provenance'])
+                self.assertEqual(0, stats['normalized'])
+                self.assertEqual(0, stats['updated'])
+                self.assertTrue(stats['results'][0]['artifacts'])
+                self.assertEqual(1, self.audit(row, row['body'])['identical'])
+                self.assertEqual(row, self.row(row))
+
+    def test_unknown_source_cli_is_retryable_in_readonly_and_apply_modes(self):
+        row = self.seed(x_browser._entry(tweet('123', text=PREVIEW, context='ctx')), legacy=True)
+        identity = row['url'].rsplit('/', 1)[1]
+        report = self.root / 'unknown-source-report.json'
+        for flags in [[], ['--yes']]:
+            output = io.StringIO()
+            page = Page(dict(snapshot(BODY), id=identity, at=identity))
+            with self.subTest(flags=flags), contextlib.redirect_stdout(output), \
+                 patch.object(backfill.x_browser, 'browser_session',
+                              return_value=contextlib.nullcontext(page)):
+                self.assertEqual(1, backfill.main(['run', '--report', str(report), *flags]))
+                stats = json.loads(report.read_text())
+                self.assertEqual(1, stats['unknown_provenance'])
+                self.assertEqual(0, stats['expanded'])
+                self.assertEqual(0, stats['failed'])
+                self.assertIn('来源待核', output.getvalue())
+                self.assertEqual(row, self.row(row))
+
+    def test_live_completion_keeps_unknown_source_retryable_without_rebuilding_content(self):
+        row = self.seed(x_browser._entry(tweet('123', text=PREVIEW, context='ctx')), legacy=True)
+        identity = row['url'].rsplit('/', 1)[1]
+        page = Page(dict(snapshot(BODY), id=identity, at=identity))
+        entries, note = x_post.complete([backfill.entry_of(row)], session=page)
+        self.assertEqual([], entries)
+        self.assertIn('下次同步', note)
+        self.assertEqual(row, self.row(row))
