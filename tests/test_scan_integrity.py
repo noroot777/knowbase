@@ -109,6 +109,7 @@ class ScanIntegrityTests(ScanFixture):
         path = self.seed('excluded/a.md')
         before = self.snapshot()
         before.pop('index_scan_roots')
+        before.pop('index_scan_directories')
         moved_root = self.vault / 'renamed-root'
         moved_root.mkdir()
         variants = (
@@ -122,6 +123,7 @@ class ScanIntegrityTests(ScanFixture):
                 report, removed = self.index()
                 after = self.snapshot()
                 after.pop('index_scan_roots')
+                after.pop('index_scan_directories')
                 self.assertEqual(before, after)
                 self.assertEqual(0, removed)
                 self.assertFalse(report.errors)

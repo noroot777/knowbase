@@ -22,13 +22,20 @@ class ScanScope:
     vault: Path
     directories: dict[Path, tuple[int, ...]] = field(default_factory=dict)
     excluded: set[Path] = field(default_factory=set)
-    errors: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+    missing_root: str = ''
+    uninitialized: bool = False
     finished: bool = False
 
     def fail(self, path: Path, error: object) -> None:
         message = f"{path}: {error}"
         if message not in self.errors:
-            self.errors.append(message)
+            self.failures.append(message)
+
+    @property
+    def errors(self) -> list[str]:
+        missing = [self.missing_root] if self.missing_root and not self.uninitialized else []
+        return self.failures + missing
 
     def paths(self) -> Iterator[Path]:
         if not self.source.enabled:
@@ -58,7 +65,11 @@ class ScanScope:
                 elif entry.name.endswith('.md') and entry.is_file(follow_symlinks=False):
                     yield full
         except OSError as error:
-            self.fail(directory, error)
+            if (directory == self.source.root and not self.directories
+                    and isinstance(error, FileNotFoundError)):
+                self.missing_root = f"{directory}: {error}"
+            else:
+                self.fail(directory, error)
 
     def validate(self) -> None:
         for directory, expected in self.directories.items():
@@ -71,12 +82,16 @@ class ScanScope:
     def contains(self, full: Path) -> bool:
         return full.is_relative_to(self.source.root)
 
-    def authorizes(self, full: Path) -> bool:
+    def covers(self, full: Path) -> bool:
+        if not self.contains(full):
+            return False
         relative = full.relative_to(self.source.root)
-        return (self.source.enabled and self.finished and not self.errors
-                and bool(relative.parts)
-                and relative.parts[0] not in self.source.skip_dirs
+        return ((not relative.parts or relative.parts[0] not in self.source.skip_dirs)
                 and not any(full.is_relative_to(path) for path in self.excluded))
+
+    def authorizes(self, full: Path) -> bool:
+        return (self.source.enabled and self.finished and not self.errors
+                and not self.missing_root and full != self.source.root and self.covers(full))
 
 
 @dataclass
@@ -113,47 +128,78 @@ class ScanReport:
         for scope in self.scopes:
             scope.validate()
 
-    def authorize_roots(self, conn: sqlite3.Connection, documents) -> None:
-        """来源目录换了实体时,不能拿新建的空壳宣布旧目录里的文档全没了。"""
+    def check_history(self, conn: sqlite3.Connection, documents) -> None:
+        """已知目录必须连续可核验;从未初始化且无存量的根不算同步失败。"""
+        history = {row['path']: (row['device'], row['inode']) for row in conn.execute(
+            'SELECT root AS path, device, inode FROM index_scan_roots UNION ALL '
+            'SELECT path, device, inode FROM index_scan_directories')}
         for scope in self.scopes:
-            if not scope.source.enabled or not scope.finished or scope.errors:
+            known = {scope.vault / path: identity for path, identity in history.items()
+                     if scope.contains(scope.vault / path)}
+            scope.uninitialized = bool(scope.missing_root and not known and not any(
+                row['source'] == scope.source.name or scope.contains(scope.vault / row['path'])
+                for row in documents))
+            if (not scope.source.enabled or not scope.finished or scope.errors
+                    or scope.missing_root):
                 continue
+            for directory, identity in known.items():
+                if not scope.covers(directory):
+                    continue
+                current = scope.directories.get(directory)
+                if current is not None and current[:2] == identity:
+                    continue
+                if any((scope.vault / row['path']).is_relative_to(directory)
+                       and row['path'] not in self.alive_paths for row in documents):
+                    reason = ('已知目录不可用' if current is None else
+                              '来源根身份变化' if directory == scope.source.root else '目录身份变化')
+                    scope.fail(directory, f'{reason}且仍有未核实存量,不授权清理')
+
+    def remember_directories(self, conn: sqlite3.Connection) -> None:
+        """仅在全部探测与最终复核之后接纳健康范围的目录身份。"""
+        for scope in self.scopes:
+            if (not scope.source.enabled or not scope.finished or scope.errors
+                    or scope.missing_root):
+                continue
+            for directory, signature in scope.directories.items():
+                path = str(directory.relative_to(scope.vault))
+                conn.execute(
+                    'INSERT INTO index_scan_directories(path, device, inode) VALUES(?,?,?) '
+                    'ON CONFLICT(path) DO UPDATE SET device=excluded.device, inode=excluded.inode',
+                    (path, *signature[:2]))
             root = str(scope.source.root.relative_to(scope.vault))
-            device, inode = scope.directories[scope.source.root][:2]
             conn.execute(
-                'INSERT OR IGNORE INTO index_scan_roots(root, device, inode) VALUES(?,?,?)',
-                (root, device, inode))
-            previous = conn.execute(
-                'SELECT device, inode FROM index_scan_roots WHERE root=?', (root,)).fetchone()
-            if (previous['device'], previous['inode']) == (device, inode):
-                continue
-            if any(scope.contains(scope.vault / row['path'])
-                   and row['path'] not in self.alive_paths for row in documents):
-                scope.fail(scope.source.root, '来源根身份变化且仍有未核实存量,不授权清理')
-                continue
-            conn.execute('UPDATE index_scan_roots SET device=?, inode=? WHERE root=?',
-                         (device, inode, root))
+                'INSERT INTO index_scan_roots(root, device, inode) VALUES(?,?,?) '
+                'ON CONFLICT(root) DO UPDATE SET device=excluded.device, inode=excluded.inode',
+                (root, *scope.directories[scope.source.root][:2]))
+
+    def matching_scopes(self, path: str) -> list[ScanScope]:
+        relative = Path(path)
+        if relative.is_absolute() or '..' in relative.parts:
+            return []
+        return [scope for scope in self.scopes if scope.contains(scope.vault / relative)]
 
     def allows_missing(self, path: str, source: str) -> bool:
-        relative = Path(path)
-        if (path in self.alive_paths or relative.is_absolute()
-                or '..' in relative.parts
+        """只读最终范围状态,不做文件探测、不改变任何授权条件。"""
+        if (path in self.alive_paths
                 or any(not scope.source.enabled and scope.source.name == source
                        for scope in self.scopes)):
             return False
-        matching = [scope for scope in self.scopes
-                    if scope.contains(scope.vault / relative)]
-        if not matching or not all(scope.authorizes(scope.vault / relative)
-                                   for scope in matching):
+        matching = self.matching_scopes(path)
+        return bool(matching) and all(scope.authorizes(scope.vault / path) for scope in matching)
+
+    def probe_missing(self, path: str) -> bool:
+        """候选探测可使范围失效,结果必须在所有探测结束后重新授权。"""
+        matching = self.matching_scopes(path)
+        if not matching:
             return False
-        scope = matching[0]
-        full = scope.vault / relative
+        full = matching[0].vault / path
         try:
             full.lstat()
         except FileNotFoundError:
             return True
         except OSError as error:
-            scope.fail(full, error)
+            for scope in matching:
+                scope.fail(full, error)
         return False
 
     @property

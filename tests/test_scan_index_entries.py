@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import io
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from kb import cli, config, pipeline_stages
+from kb import cli, config, pipeline_stages, scanner, store
 from kb.feeds import exclusion
 from tests.feed_trim_fixture import trim
 from tests.scan_fixture import ScanFixture, TEXT
@@ -47,6 +49,96 @@ class ScanIndexEntryTests(ScanFixture):
         self.assertEqual(before, self.snapshot())
         self.assertEqual(('index', 'error'), stages[-1].args[:2])
         self.assertIn('扫描不完整', stages[-1].args[2])
+        self.assertEqual([path], self.listed()['doc_paths'])
+
+    def test_unused_default_sources_do_not_fail_fresh_or_repeated_indexing(self):
+        path = self.write()
+        self.sources[1].root.rmdir()
+        sources = [replace(source, root=self.vault / 'source' / source.name)
+                   for source in config.SOURCES]
+        with mock.patch.object(scanner, 'SOURCES', sources), \
+             mock.patch.object(store, 'SOURCES', sources):
+            for _attempt in range(2):
+                result, output = self.cli_index()
+                self.assertEqual(0, result, output)
+                self.assertNotIn('扫描不完整', output)
+            stages = self.pipeline_index()
+        self.assertEqual(('index', 'ok'), stages[-1].args[:2])
+        self.assertEqual([path], [row['path'] for row in self.rows('documents')])
+        for source in sources:
+            if source.name != 'rss':
+                self.assertFalse(source.root.exists(), source.name)
+
+    def test_both_entries_report_replaced_subtree_and_preserve_its_data(self):
+        path = self.seed('nested/a.md')
+        before = self.snapshot()
+        nested = self.sources[0].root / 'nested'
+        nested.rename(self.root / 'offline')
+        nested.mkdir()
+        result, output = self.cli_index()
+        self.assertEqual(1, result)
+        self.assertIn('目录身份变化', output)
+        stages = self.pipeline_index()
+        self.assertEqual(('index', 'error'), stages[-1].args[:2])
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual([path], self.listed()['doc_paths'])
+
+    def test_both_entries_revoke_candidates_after_the_last_verification_fails(self):
+        self.seed()
+        failed = self.write('b.md')
+        self.index()
+        before = self.snapshot()
+        for row in self.rows('documents'):
+            (self.vault / row['path']).unlink()
+        original_lstat = Path.lstat
+
+        def unavailable(candidate, *args, **kwargs):
+            if candidate == self.vault / failed:
+                raise PermissionError('late verification failure')
+            return original_lstat(candidate, *args, **kwargs)
+
+        with mock.patch.object(Path, 'lstat', unavailable):
+            result, output = self.cli_index()
+            self.assertEqual(1, result)
+            self.assertIn('移除 0', output)
+            stages = self.pipeline_index()
+        self.assertEqual(('index', 'error'), stages[-1].args[:2])
+        self.assertEqual(before, self.snapshot())
+
+    def test_never_indexed_permission_failure_is_not_an_unused_optional_root(self):
+        stat = Path.stat
+
+        def unavailable(candidate, *args, **kwargs):
+            if candidate == self.sources[1].root:
+                raise PermissionError('cannot inspect source')
+            return stat(candidate, *args, **kwargs)
+
+        with mock.patch.object(Path, 'stat', unavailable):
+            result, output = self.cli_index()
+            self.assertEqual(1, result)
+            self.assertIn('cannot inspect source', output)
+            self.assertEqual(('index', 'error'), self.pipeline_index()[-1].args[:2])
+
+    def test_previously_initialized_empty_root_remains_an_error_when_offline(self):
+        self.index()
+        self.sources[1].root.rmdir()
+        for _attempt in range(2):
+            result, output = self.cli_index()
+            self.assertEqual(1, result)
+            self.assertIn(str(self.sources[1].root), output)
+            stages = self.pipeline_index()
+            self.assertEqual(('index', 'error'), stages[-1].args[:2])
+            self.assertFalse(self.sources[1].root.exists())
+
+    def test_legacy_index_without_directory_history_still_protects_an_offline_root(self):
+        path = self.seed()
+        self.conn.execute('DELETE FROM index_scan_roots')
+        self.conn.execute('DELETE FROM index_scan_directories')
+        self.conn.commit()
+        self.sources[0].root.rename(self.root / 'offline')
+        result, output = self.cli_index()
+        self.assertEqual(1, result)
+        self.assertIn('扫描不完整', output)
         self.assertEqual([path], self.listed()['doc_paths'])
 
     def test_cli_and_scheduled_pipeline_both_restore_the_original_favorite_before_recollecting(self):

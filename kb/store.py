@@ -50,6 +50,11 @@ CREATE TABLE IF NOT EXISTS index_scan_roots (
   device INTEGER NOT NULL,
   inode INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS index_scan_directories (
+  path TEXT PRIMARY KEY,
+  device INTEGER NOT NULL,
+  inode INTEGER NOT NULL
+);
 -- idx_documents_promo 在 store_migrate.migrate_promo 里建(老库先补列才能建索引)
 
 CREATE TABLE IF NOT EXISTS doc_tags (
@@ -377,9 +382,14 @@ def remove_missing_documents(conn: sqlite3.Connection, report: ScanReport) -> in
     report.validate()
     off = {s.name for s in SOURCES if not s.enabled}
     rows = conn.execute("SELECT path, source FROM documents").fetchall()
-    report.authorize_roots(conn, rows)
-    dead = [r["path"] for r in rows
-            if r["source"] not in off and report.allows_missing(r["path"], r["source"])]
+    report.check_history(conn, rows)
+    candidates = [row for row in rows if row['source'] not in off
+                  and report.allows_missing(row['path'], row['source'])]
+    missing = [row for row in candidates if report.probe_missing(row['path'])]
+    report.validate()
+    dead = tuple(row['path'] for row in missing
+                 if report.allows_missing(row['path'], row['source']))
+    report.remember_directories(conn)
     return remove_documents(conn, dead, recoverable=True)
 
 

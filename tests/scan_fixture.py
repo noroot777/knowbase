@@ -87,7 +87,8 @@ class ScanFixture(unittest.TestCase):
     def snapshot(self):
         return {table: self.rows(table) for table in (
             'documents', 'chunks', 'chunks_fts', 'chunk_vec', 'doc_tags',
-            'entities', 'favorites', 'favorite_document_recovery', 'index_scan_roots')}
+            'entities', 'favorites', 'favorite_document_recovery', 'index_scan_roots',
+            'index_scan_directories')}
 
     def seed(self, name='a.md', *, snippet=False):
         path = self.write(name)
