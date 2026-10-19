@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>同步入口改版 · demo</title>
+<style>
+/* 色板与字体逐值抄自 kb/static/css/base.css 的 :root —— 这是独立产物，不能 import */
+:root{
+  --paper:#F3F5F4; --paper-2:#ECF0EE; --card:#FFFFFF;
+  --ink:#14202B; --ink-2:#3A4750; --muted:#66727C;
+  --line:#DCE3E0; --line-soft:#E9EDEB;
+  --brand:#17604F; --brand-deep:#0E4A3B; --brand-soft:#DFF0E9; --brand-tint:#F0F7F4;
+  --ok:#2E7D57; --danger:#B3402F; --warn:#8A5A22; --warn-soft:#F6EBDC;
+  --font-display:"Songti SC","STSong","Source Han Serif SC","Noto Serif CJK SC",serif;
+  --font-mono:ui-monospace,"SF Mono","SFMono-Regular",Menlo,Consolas,monospace;
+  --font-body:-apple-system,"PingFang SC","Noto Sans SC",sans-serif;
+}
+*{box-sizing:border-box;margin:0}
+body{font:15px/1.7 var(--font-body);background:var(--paper);color:var(--ink);padding:32px 24px 72px}
+.wrap{max-width:1180px;margin:0 auto}
+h1{font-family:var(--font-display);font-weight:900;font-size:26px;letter-spacing:.5px}
+.head{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:6px}
+.head .fact{font-family:var(--font-mono);font-size:12.5px;color:var(--muted)}
+.lede{color:var(--ink-2);font-size:14px;margin-bottom:28px}
+.ia{display:inline-block;vertical-align:-.1em}
+
+/* 分节 */
+section{margin-bottom:40px}
+.sec-head{display:flex;align-items:baseline;gap:12px;margin-bottom:4px}
+.sec-head h2{font-size:16px;font-weight:600}
+.sec-head .tag{font-family:var(--font-mono);font-size:11.5px;color:var(--brand-deep);
+  background:var(--brand-soft);border-radius:4px;padding:2px 7px}
+.sec-note{color:var(--muted);font-size:13px;margin-bottom:14px}
+
+/* 入口预设切换 */
+.presets{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.preset{font:13px/1 var(--font-body);color:var(--ink-2);background:var(--card);
+  border:1px solid var(--line);border-radius:999px;padding:8px 15px;cursor:pointer}
+.preset:hover{background:var(--brand-tint);border-color:var(--brand-soft)}
+.preset[aria-pressed="true"]{background:var(--brand);border-color:var(--brand);color:#fff}
+
+/* 弹窗舞台 */
+.stage{background:rgba(20,32,43,.08);border:1px solid var(--line);border-radius:18px;
+  padding:30px;display:flex;justify-content:center}
+.modal{background:var(--card);border-radius:16px;width:min(620px,100%);
+  box-shadow:0 20px 60px rgba(20,32,43,.18);overflow:hidden}
+.modal-hd{padding:20px 24px 14px;border-bottom:1px solid var(--line-soft)}
+.modal-hd h3{font-size:17px;font-weight:600}
+.modal-hd p{color:var(--muted);font-size:13px;margin-top:3px}
+.modal-bd{padding:4px 24px 0;max-height:none}
+.modal-ft{padding:16px 24px 20px;border-top:1px solid var(--line-soft);margin-top:18px;
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+
+/* 分组 */
+.grp{padding:18px 0 4px;border-bottom:1px solid var(--line-soft)}
+.grp:last-of-type{border-bottom:0}
+.grp-hd{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.grp-hd h4{font-size:13.5px;font-weight:600;color:var(--ink)}
+.grp-hd .n{font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.grp-hd .all{margin-left:auto;font:12.5px/1 var(--font-body);color:var(--brand-deep);
+  background:none;border:0;cursor:pointer;padding:4px 2px}
+.grp-hd .all:hover{text-decoration:underline}
+
+/* 一行一项 */
+.row{display:flex;align-items:flex-start;gap:11px;padding:7px 0;cursor:pointer}
+.row input{accent-color:var(--brand);width:15px;height:15px;margin-top:3px;flex:none;cursor:pointer}
+.row .body{flex:1;min-width:0}
+.row .t{font-size:14px;line-height:1.5}
+.row .d{font-size:12.5px;color:var(--muted);line-height:1.5}
+.row .meta{font-family:var(--font-mono);font-size:11.5px;color:var(--muted);flex:none;margin-top:3px}
+.row.off .t,.row.off .d{color:var(--muted)}
+.chip{font-family:var(--font-mono);font-size:10.5px;border-radius:4px;padding:1.5px 6px;
+  margin-left:7px;white-space:nowrap;vertical-align:1px}
+.chip.cost{color:var(--warn);background:var(--warn-soft)}
+.chip.slow{color:var(--muted);background:var(--paper-2)}
+.warnline{display:flex;gap:8px;align-items:flex-start;margin:2px 0 6px 26px;
+  font-size:12.5px;color:var(--danger);background:var(--warn-soft);
+  border-radius:7px;padding:7px 10px}
+.warnline b{font-weight:600}
+.warnline .fix{margin-left:auto;flex:none;font:12.5px/1 var(--font-body);color:#fff;
+  background:var(--danger);border:0;border-radius:6px;padding:6px 11px;cursor:pointer}
+.warnline .fix:hover{filter:brightness(.92)}
+.warnline .fix.done{background:var(--ok);cursor:default}
+
+/* 出日报那一条:单独一格,不混在六段里 */
+.daily-row{margin:14px 0 2px;background:var(--brand-tint);border:1px solid var(--brand-soft);
+  border-radius:10px;padding:11px 13px}
+.daily-row .row{padding:0}
+
+/* 底部 */
+.sum{flex:1;min-width:220px;font-size:12.5px;color:var(--ink-2);line-height:1.6}
+.sum .k{font-family:var(--font-mono);color:var(--ink)}
+.sum .none{color:var(--danger)}
+.btn{font:14px/1 var(--font-body);border-radius:9px;padding:11px 20px;cursor:pointer;border:1px solid transparent}
+.btn.go{background:var(--brand);color:#fff}
+.btn.go:hover{background:var(--brand-deep)}
+.btn.go:disabled{background:var(--line);color:var(--muted);cursor:not-allowed}
+.btn.ghost{background:var(--card);border-color:var(--line);color:var(--ink-2)}
+.btn.ghost:hover{background:var(--paper-2)}
+
+/* 日报页头 */
+.panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
+.panel-hd{display:flex;align-items:baseline;gap:12px;margin-bottom:14px}
+.panel-hd h3{font-family:var(--font-display);font-weight:900;font-size:20px}
+.panel-hd .fact{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.panel-hd .right{margin-left:auto;display:flex;gap:9px}
+.pre-sync{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--paper-2)}
+.pre-sync .row{padding:0}
+.scope{margin:10px 0 0 26px;display:none;gap:7px;flex-wrap:wrap}
+.scope.on{display:flex}
+.scope label{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-2);
+  background:var(--card);border:1px solid var(--line);border-radius:999px;padding:5px 11px;cursor:pointer}
+.scope input{accent-color:var(--brand);width:13px;height:13px}
+
+/* 台账 */
+.ledger{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.ledger-hd{display:flex;align-items:baseline;gap:12px;padding:16px 20px;border-bottom:1px solid var(--line-soft)}
+.ledger-hd h3{font-size:15px;font-weight:600}
+.ledger-hd .fact{font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-left:auto}
+.item{display:flex;gap:13px;align-items:flex-start;padding:13px 20px;border-bottom:1px solid var(--line-soft)}
+.item:last-child{border-bottom:0}
+.dot{width:7px;height:7px;border-radius:50%;flex:none;margin-top:8px}
+.dot.bad{background:var(--danger)} .dot.block{background:var(--warn)} .dot.done{background:var(--ok)}
+.item .who{font-size:14px;flex:none;width:168px}
+.item .who .st{font-family:var(--font-mono);font-size:11.5px;color:var(--muted);display:block}
+.item .why{font-size:13px;color:var(--ink-2);flex:1;min-width:0}
+.item .why em{font-style:normal;color:var(--danger)}
+.item.ok .who,.item.ok .why{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line)}
+.ledger-ft{padding:15px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:var(--paper-2)}
+.ledger-ft .msg{flex:1;min-width:240px;font-size:12.5px;color:var(--ink-2)}
+.ledger-ft .msg b{color:var(--danger);font-weight:600}
+
+.note{margin-top:12px;font-size:12.5px;color:var(--muted);line-height:1.75}
+.note code{font-family:var(--font-mono);font-size:11.5px;background:var(--paper-2);padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="head">
+    <h1>同步入口改版</h1>
+    <span class="fact">6 个起跑入口 → 1 个 · 阶段从按钮名字里挖出来</span>
+  </div>
+  <p class="lede">勾来源、勾阶段，底下一行小字说清这次会跑什么。按钮一律叫「开始同步」。</p>
+
+  <!-- ① 起跑弹窗 -->
+  <section>
+    <div class="sec-head"><h2>① 起跑弹窗</h2><span class="tag">改 2</span></div>
+    <p class="sec-note">同一个弹窗，不同入口只是默认勾选不同。点下面的预设看默认值怎么变。</p>
+
+    <div class="presets" id="presets"></div>
+
+    <div class="stage">
+      <div class="modal">
+        <div class="modal-hd">
+          <h3>开始同步</h3>
+          <p id="preset-note">从同步中心进来，默认跑全套。</p>
+        </div>
+        <div class="modal-bd">
+
+          <div class="grp">
+            <div class="grp-hd">
+              <h4>同步哪些来源</h4><span class="n" id="src-n"></span>
+              <button class="all" id="src-all">全选</button>
+            </div>
+            <div id="src-list"></div>
+          </div>
+
+          <div class="grp">
+            <div class="grp-hd">
+              <h4>跑哪些步骤</h4><span class="n" id="stg-n"></span>
+              <button class="all" id="stg-all">全选</button>
+            </div>
+            <div id="stg-list"></div>
+
+            <div class="daily-row">
+              <label class="row">
+                <input type="checkbox" id="daily-chk">
+                <span class="body">
+                  <span class="t">跑完出日报</span>
+                  <span class="d">用这一轮之后的库存生成今天的日报</span>
+                </span>
+              </label>
+            </div>
+          </div>
+
+        </div>
+        <div class="modal-ft">
+          <div class="sum" id="sum"></div>
+          <button class="btn ghost">取消</button>
+          <button class="btn go" id="go">开始同步</button>
+        </div>
+      </div>
+    </div>
+
+    <p class="note">
+      改之前：「新建同步」跑六段不出日报，「同步全部并生成」跑四段出日报，名字上完全看不出区别；
+      「我的订阅」里点公众号那一条的同步，会顺手跑一遍全库条目化和 Wiki（几十分钟），也没人说。
+    </p>
+  </section>
+
+  <!-- ② 日报页头 -->
+  <section>
+    <div class="sec-head"><h2>② 日报页头</h2><span class="tag">改 2</span></div>
+    <p class="sec-note">只留一颗「生成日报」。要不要先同步，变成它上面的一个勾。</p>
+
+    <div class="panel">
+      <div class="panel-hd">
+        <h3>日报</h3>
+        <span class="fact">库里有 224 条新内容 · 上一份 10-18</span>
+        <span class="right">
+          <button class="btn ghost">改区间</button>
+          <button class="btn ghost">改定时</button>
+        </span>
+      </div>
+
+      <div class="pre-sync">
+        <label class="row">
+          <input type="checkbox" id="pre-chk">
+          <span class="body">
+            <span class="t">先同步一遍再生成</span>
+            <span class="d">不勾就直接用已经入库的内容出报，不碰同步管道</span>
+          </span>
+        </label>
+        <div class="scope" id="pre-scope"></div>
+      </div>
+
+      <div class="modal-ft" style="border-top:0;padding:16px 0 0;margin-top:14px">
+        <div class="sum" id="daily-sum"></div>
+        <button class="btn go" id="daily-go">生成日报</button>
+      </div>
+    </div>
+
+    <p class="note">
+      改之前：两颗按钮「生成日报」和「同步全部并生成」，区别写在哪儿都没写；
+      而后者跑的阶段又和同步页的「新建同步」不一样。
+    </p>
+  </section>
+
+  <!-- ③ 当日台账 -->
+  <section>
+    <div class="sec-head"><h2>③ 重试失败项 · 当日台账</h2><span class="tag">改 1 + 改 6</span></div>
+    <p class="sec-note">今天累计还没做成的事。绿的划掉，没碰过的原样留着，跨天清零。</p>
+
+    <div class="ledger">
+      <div class="ledger-hd">
+        <h3>今天还没做成的</h3>
+        <span class="fact">自 09:12 起累计 · 10-20 00:00 清零</span>
+      </div>
+
+      <div class="item">
+        <span class="dot block"></span>
+        <span class="who">大V观点 · 抓取<span class="st">10:24 失败 · 51 个来源</span></span>
+        <span class="why"><em>现在重试也会再失败一次</em> —— X 登录窗口还开着，占住了抓取要用的浏览器。关掉它，这一条就能跑。</span>
+      </div>
+
+      <div class="item">
+        <span class="dot bad"></span>
+        <span class="who">RSS · 导出<span class="st">10:24 失败 · 8 条</span></span>
+        <span class="why">原文抓取失败，暂未入库。可以重试。</span>
+      </div>
+
+      <div class="item">
+        <span class="dot bad"></span>
+        <span class="who">全库 · 提取要点<span class="st">10:24 失败 · 25 条</span></span>
+        <span class="why">模型 503。现在已经恢复，可以重试。</span>
+      </div>
+
+      <div class="item ok">
+        <span class="dot done"></span>
+        <span class="who">公众号 · 抓取<span class="st">10:24 成功 · 新增 2 篇</span></span>
+        <span class="why">今天已经做成，不进这一轮。</span>
+      </div>
+
+      <div class="ledger-ft">
+        <div class="msg"><b>有 1 条现在重试没有意义</b> —— 先关掉 X 登录窗口，或者跳过它只重试另外 2 条。</div>
+        <button class="btn ghost" disabled>重试全部 3 条</button>
+        <button class="btn go">只重试能跑的 2 条</button>
+      </div>
+    </div>
+
+    <p class="note">
+      改之前：10:34 那一次重试把零失败的公众号也拖进去全量重抓了一遍（导出核对了 <code>9250</code> 篇），
+      然后大V那 51 个必然再红一次 —— 因为没人问过"堵着的东西还堵着吗"。
+    </p>
+  </section>
+
+</div>
+
+<script>
+const ARROW = {caretDown:'m2.9 4.7 3.1 3.1 3.1-3.1'};
+const SOURCES = [
+  {k:'wechat_local', name:'公众号',  meta:'9250 篇'},
+  {k:'social',       name:'大V观点', meta:'51 个来源', blocked:'X 登录窗口开着，抓取被挡住。关掉它再勾。'},
+  {k:'rss',          name:'RSS',     meta:'9 个来源'},
+  {k:'digest',       name:'邮件简报', meta:'1 个来源'},
+  {k:'web',          name:'网页专栏', meta:'1 个来源'},
+];
+const STAGES = [
+  {k:'crawl',   name:'抓取内容',  d:'从所选来源收集文章'},
+  {k:'export',  name:'导出文章',  d:'保存到本地知识库'},
+  {k:'index',   name:'建立索引',  d:'让新内容能被搜到'},
+  {k:'extract', name:'提取要点',  d:'模型读一遍，写摘要和标签', cost:1},
+  {k:'projects',name:'整理工具',  d:'把文章里提到的工具拆成图鉴条目', cost:1, slow:1},
+  {k:'wiki',    name:'更新 Wiki', d:'双链、汇总页、三张关系图谱', cost:1, slow:1},
+];
+const PRESETS = {
+  full:  {label:'同步中心 · 新建同步', note:'从同步中心进来，默认跑全套。',
+          src:['wechat_local','rss','digest','web'], stg:STAGES.map(s=>s.k), daily:false},
+  daily: {label:'日报那一轮', note:'日报要的是库存，不需要图鉴和 Wiki —— 但它们改到由日报跑完之后接着跑。',
+          src:['wechat_local','rss','digest','web'], stg:['crawl','export','index','extract'], daily:true},
+  one:   {label:'我的订阅 · 同步一条', note:'只同步你点的那一条，不跑全库那两段慢活。',
+          src:['rss'], stg:['crawl','export','index','extract'], daily:false},
+  grab:  {label:'手动收录一条链接', note:'内容已经拿到了，只要入库那几步。',
+          src:[], stg:['export','index','extract'], daily:false},
+};
+
+let cur = 'full', src = new Set(), stg = new Set(), daily = false;
+
+function el(h){const d=document.createElement('div');d.innerHTML=h.trim();return d.firstElementChild}
+
+function buildPresets(){
+  document.getElementById('presets').innerHTML = Object.entries(PRESETS)
+    .map(([k,p])=>`<button class="preset" data-p="${k}">${p.label}</button>`).join('');
+  document.getElementById('presets').addEventListener('click', e=>{
+    const b = e.target.closest('[data-p]'); if(!b) return;
+    apply(b.dataset.p);
+  });
+}
+
+function apply(key){
+  cur = key; const p = PRESETS[key];
+  src = new Set(p.src); stg = new Set(p.stg); daily = p.daily;
+  document.getElementById('preset-note').textContent = p.note;
+  document.querySelectorAll('[data-p]').forEach(b=>
+    b.setAttribute('aria-pressed', b.dataset.p === key));
+  render();
+}
+
+function render(){
+  document.getElementById('src-list').innerHTML = SOURCES.map(s=>{
+    const on = src.has(s.k);
+    return `<label class="row ${on?'':'off'}" data-src="${s.k}">
+      <input type="checkbox" ${on?'checked':''} ${s.blocked?'disabled':''}>
+      <span class="body"><span class="t">${s.name}</span></span>
+      <span class="meta">${s.meta}</span>
+    </label>` + (s.blocked
+      ? `<div class="warnline"><b>挡住了</b><span>${s.blocked}</span>
+          <button class="fix" data-fix="${s.k}">关掉窗口</button></div>` : '');
+  }).join('');
+
+  document.getElementById('stg-list').innerHTML = STAGES.map(s=>{
+    const on = stg.has(s.k);
+    return `<label class="row ${on?'':'off'}" data-stg="${s.k}">
+      <input type="checkbox" ${on?'checked':''}>
+      <span class="body">
+        <span class="t">${s.name}${s.cost?'<span class="chip cost">烧额度</span>':''}${s.slow?'<span class="chip slow">几十分钟</span>':''}</span>
+        <span class="d">${s.d}</span>
+      </span>
+    </label>`;
+  }).join('');
+  document.getElementById('daily-chk').checked = daily;
+
+  document.getElementById('src-n').textContent = `已选 ${src.size}/${SOURCES.length}`;
+  document.getElementById('stg-n').textContent = `已选 ${stg.size}/${STAGES.length}`;
+
+  const needSrc = stg.has('crawl');
+  const ok = stg.size > 0 && (!needSrc || src.size > 0);
+  document.getElementById('go').disabled = !ok;
+  document.getElementById('go').textContent =
+    stg.size ? `开始同步 · ${stg.size} 步` : '开始同步';
+
+  const names = STAGES.filter(s=>stg.has(s.k)).map(s=>s.name);
+  const heavy = STAGES.filter(s=>stg.has(s.k) && s.slow).length;
+  let line;
+  if(!stg.size) line = '<span class="none">一步都没勾，这次什么也不会发生。</span>';
+  else if(needSrc && !src.size) line = '<span class="none">勾了「抓取内容」，但一个来源都没选。</span>';
+  else {
+    line = `这次会跑：<span class="k">${names.join(' → ')}</span>`;
+    if(needSrc) line += `，来源 <span class="k">${src.size}</span> 个`;
+    if(daily) line += '，跑完生成今天的日报';
+    line += '。';
+    if(heavy) line += ` 含 ${heavy} 段全库的慢活，预计多花几十分钟。`;
+  }
+  document.getElementById('sum').innerHTML = line;
+}
+
+document.getElementById('src-list').addEventListener('click', e=>{
+  const fix = e.target.closest('[data-fix]');
+  if(fix){
+    const s = SOURCES.find(x=>x.k===fix.dataset.fix);
+    fix.textContent = '已关掉'; fix.classList.add('done');
+    setTimeout(()=>{ delete s.blocked; src.add(s.k); render(); }, 600);
+    return;
+  }
+  const row = e.target.closest('[data-src]'); if(!row) return;
+  const k = row.dataset.src;
+  if(SOURCES.find(s=>s.k===k).blocked){ e.preventDefault(); return; }
+  setTimeout(()=>{ src.has(k) ? src.delete(k) : src.add(k); render(); });
+});
+document.getElementById('stg-list').addEventListener('click', e=>{
+  const row = e.target.closest('[data-stg]'); if(!row) return;
+  const k = row.dataset.stg;
+  setTimeout(()=>{ stg.has(k) ? stg.delete(k) : stg.add(k); render(); });
+});
+document.getElementById('daily-chk').addEventListener('change', e=>{ daily = e.target.checked; render(); });
+document.getElementById('src-all').addEventListener('click', ()=>{
+  const free = SOURCES.filter(s=>!s.blocked);
+  src = src.size >= free.length ? new Set() : new Set(free.map(s=>s.k)); render();
+});
+document.getElementById('stg-all').addEventListener('click', ()=>{
+  stg = stg.size === STAGES.length ? new Set() : new Set(STAGES.map(s=>s.k)); render();
+});
+
+// ② 日报页头
+const preScope = document.getElementById('pre-scope');
+preScope.innerHTML = SOURCES.map(s=>
+  `<label><input type="checkbox" ${s.blocked?'':'checked'} ${s.blocked?'disabled':''}>${s.name}</label>`).join('');
+function renderDaily(){
+  const on = document.getElementById('pre-chk').checked;
+  preScope.classList.toggle('on', on);
+  document.getElementById('daily-sum').innerHTML = on
+    ? '先依次同步所选来源，再用同步后的库存出报。<span class="k">大V观点</span>这一条被登录窗口挡着，这次会跳过。'
+    : '直接用已经入库的 <span class="k">224</span> 条内容出报，不碰同步管道。';
+  document.getElementById('daily-go').textContent = on ? '同步后生成日报' : '生成日报';
+}
+document.getElementById('pre-chk').addEventListener('change', renderDaily);
+
+buildPresets(); apply('full'); renderDaily();
+</script>
+</body>
+</html>
