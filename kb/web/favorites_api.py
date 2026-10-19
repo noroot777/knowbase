@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from kb import favbrain, llm, store
+from kb.favorite_metadata import FAVORITE_DOCUMENT_COLUMNS, FAVORITE_DOCUMENT_JOIN
 from kb.maintenance import LockBusy, maintenance_lock
 from kb.scanner import body_version
 from kb.web.common import VAULT_NAME, read_doc_text, now as _now
@@ -281,14 +282,7 @@ _FAV_SELECT = (
     # 和「版本号读不出来」撞在一起 —— 两种都该按「证明不了」办,可前者是历史
     # 遗留、后者是这一刻的故障,混在一起就没法再分。
     " f.doc_version,"
-    " (d.path IS NOT NULL) AS document_available,"
-    " COALESCE(d.source, NULLIF(f.origin_source, '')) AS source,"
-    " COALESCE(NULLIF(d.title, ''), f.origin_title) AS title,"
-    " COALESCE(d.account, f.origin_account) AS account,"
-    " COALESCE(d.published, f.origin_published) AS published,"
-    " COALESCE(NULLIF(d.url, ''), f.origin_url) AS url,"
-    " COALESCE(d.summary, f.origin_summary) AS summary"
-    " FROM favorites f LEFT JOIN documents d ON d.path = f.path"
+    + FAVORITE_DOCUMENT_COLUMNS + FAVORITE_DOCUMENT_JOIN
 )
 
 # path 为空、`origin_title` 也空(只可能来自 v4 迁移时置空的孤儿行)时列表总得
