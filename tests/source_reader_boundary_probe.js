@@ -98,7 +98,8 @@ async page => {
     check('新内容挤出末篇时仍保留当前文章', afterRefresh.key === lastItem.key);
     check('后台更新保留正文滚动位置', afterRefresh.scroll === beforeRefresh.scroll);
     check('后台更新保留原文语言选择和全文', afterRefresh.original
-      && await page.locator('#source-reader-body').textContent() === lastItem.body);
+      && await page.evaluate(expected => snipCollapse(snipFragText(document.getElementById('source-reader-body')))
+        === snipRenderedText(expected), lastItem.body));
     check('列表之外的当前文章不显示虚假的零号位置', afterRefresh.position === '继续阅读');
     check('不能把列表首篇误当成当前文章的下一篇', await page.locator('#source-reader-prev').isDisabled()
       && await page.locator('#source-reader-next').isDisabled());

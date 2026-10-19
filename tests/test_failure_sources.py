@@ -133,6 +133,8 @@ class FailureSourceTests(FullTextCase):
         for kind in feed_types():
             with self.subTest(kind=kind):
                 source, key, entry, document = self.indexed(kind)
+                with reg.db() as conn:
+                    conn.execute('UPDATE feed_items SET path=? WHERE key=?', ('', key))
                 for outcome in (RuntimeError('LLM unavailable'), (None, 'empty', 'version', '')):
                     options = ({'side_effect': outcome} if isinstance(outcome, Exception)
                                else {'return_value': outcome})
@@ -163,8 +165,14 @@ class FailureSourceTests(FullTextCase):
                     report = document_failure(document | replacement, '失败')
                     self.assertNotIn('drop', report)
                     self.assertEqual((document | replacement)['url'], report['url'])
-                with patch.object(reg, 'db', side_effect=sqlite3.OperationalError('busy')):
+                with patch.object(reg, 'db', side_effect=sqlite3.OperationalError('busy')) as database:
                     report = document_failure(document, '原始错误')
+                    database.assert_not_called()
+                self.assertEqual('原始错误', report['reason'])
+                self.assertEqual(entry['url'], report['url'])
+                self.assertEqual(self.report_ref(kind, key, entry), report['drop'])
+                with patch.object(reg, 'db', side_effect=sqlite3.OperationalError('busy')):
+                    report = document_failure(document | {'path': f'source/{kind}/legacy.md'}, '原始错误')
                 self.assertEqual('原始错误', report['reason'])
                 self.assertEqual(entry['url'], report['url'])
                 self.assertNotIn('drop', report)

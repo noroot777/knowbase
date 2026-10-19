@@ -157,6 +157,14 @@ class CollectorError(RuntimeError):
     """
 
 
+class DropIncomplete(CollectorError):
+    """永久排除已提交，但已导出内容还需要重试清理。"""
+
+
+class CollectorTimeout(CollectorError):
+    """采集器调用超时，不能据此断言操作没有生效。"""
+
+
 @dataclass(frozen=True)
 class Target:
     """来源里的一个采集目标:一个公众号、一个 RSS 源、一个频道…"""
@@ -272,6 +280,20 @@ class ItemDropping(Protocol):
 def item_dropper(collector: SourceCollector) -> ItemDropping | None:
     """这个采集器能不能把单条内容永久排除;不能返回 None。"""
     return collector if isinstance(collector, ItemDropping) else None
+
+
+@runtime_checkable
+class ItemAliases(Protocol):
+    """同一篇内容的其他可靠身份；不能依赖仍存在的暂存行。"""
+
+    def item_aliases(self, ref: dict) -> tuple[str, ...]: ...
+
+
+def item_aliases(collector: SourceCollector, ref: dict) -> tuple[str, ...]:
+    identities = [str(ref.get('id') or '')]
+    if isinstance(collector, ItemAliases):
+        identities.extend(collector.item_aliases(ref))
+    return tuple(dict.fromkeys(value for value in identities if value))
 
 
 @runtime_checkable

@@ -70,6 +70,8 @@ function resetSourceReader(message = '') {
   $('source-reader-empty').querySelector('p').textContent = message ? '选择其他内容，或稍后再试。' : '从左侧选择一篇内容，正文会在这里展开。';
   $('source-reader-title').textContent = '';
   $('source-reader-body').textContent = '';
+  $('source-reader-outline').hidden = true;
+  $('source-reader-outline').querySelector('nav').replaceChildren();
   $('source-reader-meta').textContent = '';
   $('source-reader-link').removeAttribute('href');
   $('source-items-count').textContent = '';
@@ -154,7 +156,7 @@ function renderSourceReader() {
   $('source-reader-meta').textContent = `${author} · ${item.published ? sourceTime(item.published) : '发布时间未知'}${text.translated ? (original ? ' · 原文' : ' · 自动翻译') : ''}`;
   $('source-reader-subtitle').hidden = post || original || !text.translated || item.title === text.title;
   $('source-reader-subtitle').textContent = item.title;
-  $('source-reader-body').textContent = original ? item.body : text.body;
+  renderSourceBody(original ? item.body : text.body, { plain:post });
   $('source-reader-kind').textContent = sourceItemKind(item);
   $('source-reader-link').href = safeUrl(item.url);
   $('source-reader-language').hidden = !text.translated;
@@ -271,11 +273,9 @@ function backToSourceList() {
 //   - `path` 非空只说明上一次导出留下了一篇,不说明它是这份正文(译文写回只清
 //     `exported_hash`、正文补抓只换 `content_hash`,两条都保留 `path`);
 //   - md 落盘了、索引那一步还没跑(`/api/doc` 对它判 404),那几分钟里退②;
-//   - **这边摊的和阅读页摊的不是同一种文本** —— 这个阅读器用 `textContent`
-//     (正文里的 `**`、反引号、`[字](url)` 原样显示),而 `/doc/…` 把同一份 md
-//     按 markdown 渲染,那些标记在那一头消失或变形。核对就按**那一页的渲染口径**
-//     算(`snipRenderedText` 用的是阅读页那条原始 HTML 转字面的规则,不是面板
-//     自己的 `mdHtml`)—— 差这一条就会出现"核过了、点回去 0 个高亮"。
+//   - 短观点和列表仍摊纯文本,文章正文则复用阅读页的 Markdown 渲染规则。
+//     核对不能因此省掉:同一段标记在纯文本和阅读页里仍可能长得不一样,
+//     `snipRenderedText` 和 `renderSourceBody` 共用 `snipDocRenderer` 保持一致。
 
 /** 一条订阅内容 → 它的收藏出处。**阅读器和列表卡片共用这一份** —— 两处摊的是
  *  同一条内容的同一份正文(列表只摊开头那一截),出处的算法不该各写一遍。

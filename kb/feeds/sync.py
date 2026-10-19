@@ -24,6 +24,7 @@ from kb.feeds.exclusion import failure
 # 这两个名字,全仓注释和回归里那些 `sync._kept_meta` 的指向也照旧成立。
 from kb.feeds.export_meta import _kept_meta, _new_failures, _OWNED_META  # noqa: F401
 from kb.feeds.history import _within_history
+from kb.feeds.paths import export_path
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_segments import note_retry_targets
 from kb.source_types import SOURCE_TYPES
@@ -48,8 +49,10 @@ def _fetch_with_budget(source, settings, scope, collect_deadline):
     deadline = time.monotonic() + SOURCE_SECONDS
     if deadline > collect_deadline:
         raise CollectionBudgetExceeded
-    return fetch_source(source, settings, unconditional=scope.ranged,
-                        deadline=deadline, collect_deadline=collect_deadline)
+    entries, validators = fetch_source(source, settings, unconditional=scope.ranged,
+                                       deadline=deadline, collect_deadline=collect_deadline)
+    from kb.feeds.markdown_source import enrich
+    return enrich(source, entries, deadline=deadline, collect_deadline=collect_deadline), validators
 
 
 def _repointed(c, source) -> bool:
@@ -506,7 +509,7 @@ def _export(kind: str, hold_untranslated: bool = False,
     for item in rows:
         if _state.get('stop_requested'):
             break
-        path = root / (item['key'] + '.md')
+        path = VAULT_ROOT / export_path(kind, item['key'])
         rel = str(path.relative_to(VAULT_ROOT))
         title, body = translate.display(item)
         # 标题被译了也算"这一篇是译文":只有一行标题的短动态(正文为空)整条

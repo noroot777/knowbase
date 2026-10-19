@@ -323,7 +323,7 @@ class FeedDropTests(FullTextCase):
         with TestClient(app) as client:
             with patch.object(exclusion, '_cleanup', side_effect=PermissionError('locked')):
                 response = client.post('/api/pipeline/failures/drop', json=ref)
-            self.assertEqual(400, response.status_code)
+            self.assertEqual(409, response.status_code)
             self.assertIn('已永久排除', response.json()['detail'])
             self.assertEqual(set(), pipeline_failures.dropped_keys())
             response = client.post('/api/pipeline/failures/drop', json=ref)

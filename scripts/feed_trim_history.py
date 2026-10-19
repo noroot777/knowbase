@@ -295,8 +295,7 @@ def _drop_index(conn, paths: list[str]) -> int:
     事务。另开一条连接去删就是跟自己抢写锁,当场自锁。
     """
     from kb import store
-    alive = {r['path'] for r in conn.execute('SELECT path FROM documents')} - set(paths)
-    return store.remove_missing_documents(conn, alive)
+    return store.remove_documents(conn, paths)
 
 
 def _apply(out: Path, plan: dict, allow_favorites: bool = False) -> None:

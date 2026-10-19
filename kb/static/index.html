@@ -19,6 +19,7 @@
 <link rel="stylesheet" href="/static/css/pipeline.css">
 <link rel="stylesheet" href="/static/css/sources.css">
 <link rel="stylesheet" href="/static/css/source_reader.css">
+<link rel="stylesheet" href="/static/css/article.css">
 <link rel="stylesheet" href="/static/css/subscriptions.css">
 <link rel="stylesheet" href="/static/css/daily.css">
 <link rel="stylesheet" href="/static/css/wechat_setup.css">
@@ -335,7 +336,9 @@
             <div class="source-reader-links"><span id="source-reader-kind"></span><a id="source-reader-link" target="_blank" rel="noopener noreferrer">打开原文<i data-arrow="ext"></i></a></div>
           </header>
           <div id="source-reader-language" class="source-reader-language" role="group" aria-label="阅读语言" hidden><button id="source-reader-translated" class="on" aria-pressed="true" onclick="setSourceOriginal(false)">中文译文</button><button id="source-reader-original" aria-pressed="false" onclick="setSourceOriginal(true)">原文</button></div>
-          <div id="source-reader-note" class="source-reader-note" role="status" hidden></div><div id="source-reader-body"></div><div class="source-reader-end">— 阅读至此 —</div>
+          <div id="source-reader-note" class="source-reader-note" role="status" hidden></div>
+          <details id="source-reader-outline" class="source-reader-outline" hidden><summary>本文目录<span></span></summary><nav aria-label="文章章节"></nav></details>
+          <div id="source-reader-body" class="reader-prose"></div><div class="source-reader-end">— 阅读至此 —</div>
         </div>
       </div>
     </section>
@@ -560,6 +563,7 @@
       <li><span class="wechat-step-number">02</span><div><strong>分配模型与智能体</strong><small id="wechat-model-state">待检查</small></div><button class="ghost" onclick="wechatConfigured(openStages, 'stages-modal')">模型配置</button></li>
       <li><span class="wechat-step-number">03</span><div><strong id="wechat-source-title">接入本机绿泡泡</strong><small id="wechat-source-hint">已有配置直接复用，缺 key 时自动准备获取工具</small></div><span id="wechat-database-state" class="badge">待接入</span></li>
     </ol>
+    <p class="wechat-method-title" id="wechat-method-title">方式一：在此页面接入</p>
     <p id="wechat-status" class="wechat-progress" role="status" aria-live="polite">正在读取绿泡泡接入状态…</p>
     <label id="wechat-account-row" class="wechat-account-row" hidden>选择本人绿泡泡账号<select id="wechat-account" onchange="renderWechatSetup()"><option value="">请选择本人账号</option></select></label>
     <div id="wechat-authorization" class="wechat-authorization" hidden>
@@ -571,6 +575,14 @@
     <p id="wechat-error" role="alert"></p>
     <div class="wechat-actions"><button id="wechat-check" onclick="startWechatSetup()">检查并接入绿泡泡</button><button id="wechat-next" class="ghost" onclick="useLocalWechat()" hidden>去同步公众号</button><button class="ghost" onclick="refreshWechatSetup()">刷新状态</button></div>
     <p class="hint" id="wechat-runtime-hint">可以关闭窗口，任务继续在后台执行。获取和验证不需要大模型 API。</p>
+    <details class="wechat-agent">
+      <summary>方式二：让你的智能体协助接入</summary>
+      <p class="hint">复制提示词，交给在你的 Mac 上、能访问本项目和终端的智能体。这里只复制说明，不会启动智能体或获取 key；系统授权仍由你本人完成。</p>
+      <div class="wechat-actions"><button id="wechat-agent-copy" class="ghost" onclick="copyWechatAgentPrompt()">复制接入提示词</button><span id="wechat-agent-copy-status" class="hint" role="status" aria-live="polite"></span></div>
+      <label for="wechat-agent-prompt">绿泡泡接入提示词</label>
+      <textarea id="wechat-agent-prompt" rows="9" readonly spellcheck="false" aria-describedby="wechat-agent-return"></textarea>
+      <p class="hint" id="wechat-agent-return">智能体处理完成后，回到这里点击「刷新状态」，确认已验证，再去同步公众号。</p>
+    </details>
     <details class="wechat-explanation hint"><summary>文章怎么获取？需要安装 skill 吗？</summary><p>不需要安装个人情报库 skill。项目会准备独立 Reader，读取本机已同步的公众号推送，提取文章链接，再抓取公开正文、归档和索引；智能体用于后续分析。</p><p>仅覆盖本机已同步的推送，不保证订阅前的历史。私聊、群聊不会被作为文章采集。公众号正文图片走网页下载，不要求绿泡泡缓存图片解码 key。</p><p>本机推送是这里唯一的通道，正文按文章链接公开抓取，所以没有任何凭证要维护。另一条“逐号文章凭证”的通道（要 wxdown 抓包、要人去逐个点开文章）在 wechat-oa 分支上，主干不带它。绿泡泡接入目前只支持在本机 Mac 上获取 key；远程服务器读不到你电脑上的绿泡泡。</p></details>
   </div>
 </div>
@@ -605,6 +617,7 @@
 <script src="/static/js/daily_chip.js"></script>
 <script src="/static/js/sources.js"></script>
 <script src="/static/js/scrollaway.js"></script>
+<script src="/static/js/source_body.js"></script>
 <script src="/static/js/source_reader.js"></script>
 <script src="/static/js/source_forms.js"></script>
 <script src="/static/js/source_translate.js"></script>

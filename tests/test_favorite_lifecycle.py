@@ -6,10 +6,12 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from kb import store, store_migrate
+from kb import scanner, store, store_migrate
+from kb.config import Source
 from tests.fav_snippet_fixture import ApiFixture, DOC, REAL_CONNECT
 from tests.test_fav_snippet_migrate import _V2_DDL, _V3_DDL, _seed_old
 
@@ -21,6 +23,11 @@ class FavoriteLifecycleTests(ApiFixture):
                 self.conn.execute(
                     "INSERT OR IGNORE INTO documents(path, source, title, url)"
                     " VALUES (?, 'rss', '删除前的标题', 'https://e.org/deleted')", (DOC,))
+                if mode == 'missing':
+                    with mock.patch.object(scanner, 'VAULT_ROOT', self.vault):
+                        doc = scanner._doc_from_file(
+                            self.vault / DOC, Source('dr-gzh', (self.vault / DOC).parent))
+                    store.upsert_document(self.conn, doc, [], '2026-10-19 12:00:00')
                 self.conn.commit()
                 response = self.snip(path=DOC, quote="文中一句", note="我的备注",
                                      prefix="前文", suffix="后文", quote_unique=1,
@@ -41,7 +48,13 @@ class FavoriteLifecycleTests(ApiFixture):
                 elif mode == "explicit":
                     self.assertEqual(1, store.remove_documents(self.conn, [DOC]))
                 else:
-                    self.assertEqual(1, store.remove_missing_documents(self.conn, set()))
+                    (self.vault / DOC).unlink()
+                    report = scanner.ScanReport()
+                    with mock.patch.object(scanner, 'VAULT_ROOT', self.vault), \
+                         mock.patch.object(scanner, 'SOURCES', [
+                             Source('dr-gzh', (self.vault / DOC).parent)]):
+                        list(scanner.scan_all(report=report))
+                    self.assertEqual(1, store.remove_missing_documents(self.conn, report))
                 self.conn.commit()
                 after = dict(self.conn.execute(
                     "SELECT * FROM favorites WHERE id=?", (favorite_id,)).fetchone())

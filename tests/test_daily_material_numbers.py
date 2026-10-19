@@ -22,8 +22,8 @@ class MaterialNumberTests(unittest.TestCase):
         for digits in ['9' * 5000, '0' * 5000 + '1', '９' * 5000]:
             for date, text in numeric_documents(digits).items():
                 with self.subTest(digits=digits[:8], date=date):
-                    body = parse_frontmatter(text)[1]
-                    view = material_view(body)
+                    meta, body = parse_frontmatter(text)
+                    view = material_view(body, meta)
                     if view is not None:
                         start, end = view['span']
                         self.assertEqual(body[:start], view['before'])
@@ -59,7 +59,8 @@ class MaterialNumberTests(unittest.TestCase):
         for count, number in [('01', '1'), ('1', '01'), ('１', '1'), ('1', '１')]:
             with self.subTest(count=count, number=number):
                 self.assertIsNone(material_view(
-                    f'## 素材清单({count} 条)\n\n{number}. 标题 — RSS·作者\n'))
+                    f'## 素材清单({count} 条)\n\n{number}. 标题 — RSS·作者\n',
+                    dict(docs=1, total=1, late=0, late_total=0)))
 
 
 if __name__ == '__main__':
