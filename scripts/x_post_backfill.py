@@ -160,7 +160,7 @@ def entry_of(row: dict) -> dict:
 def repair(rows: list[dict], session, *, apply=False, deadline=None,
            should_stop=None, progress=None) -> dict:
     stats = dict(candidates=len(rows), expanded=0, normalized=0, updated=0,
-                 identical=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
+                 identical=0, empty=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
                  failed=0, stale=0, deferred=0, results=[])
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
@@ -170,6 +170,14 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
         result = dict(url=row['url'], before=len(row['body']))
         try:
             text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
+        except x_post.PostEmpty as exc:
+            entry = entry_of(row)
+            preview = entry['body'].removeprefix(entry[x_post.HINT]).strip()
+            state = 'blocked_length' if preview else 'empty'
+            stats[state] += 1
+            result.update(state=state, after=len(entry[x_post.HINT]), empty_kind=exc.kind,
+                          reason='remote_empty_stored_text' if preview else 'confirmed_empty',
+                          detail=str(exc))
         except x_post.PostGone as exc:
             stats['unavailable'] += 1
             result.update(state='unavailable', error=str(exc))
@@ -252,7 +260,8 @@ def main(argv=None) -> int:
     print(f'与详情逐字相同 {stats["identical"]} 条(不等于确认完整),'
           f'长度拦截 {stats["blocked_length"]} 条,'
           f'含旧链接产物但未能安全对齐 {stats["blocked_artifacts"]} 条,'
-          f'远端明确不可用 {stats["unavailable"]} 条(保留原存量)。')
+          f'远端明确不可用 {stats["unavailable"]} 条(保留原存量),'
+          f'已确认无自写文字 {stats["empty"]} 条(保留原行,无需回填)。')
     if stats.get('stop_reason'):
         print(f'整轮已停止:{stats["stop_reason"]}')
     print('已写入的条目会在正常同步中重新翻译、导出、索引和提取;本脚本不直接改 vault。')

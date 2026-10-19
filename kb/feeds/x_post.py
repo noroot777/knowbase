@@ -31,12 +31,39 @@ TEXT_JS = r'''
     node.closest('article[data-testid="tweet"]') === art &&
     !node.closest('div[role="link"], [data-testid="quoteTweet"]'));
   const postMore = art => !!ownNode(art, '[data-testid="tweet-text-show-more-link"]');
+  const emptyPostKind = art => {
+    if (document.readyState !== 'complete' || ownNode(art, '[data-testid="tweetText"]') ||
+        postMore(art) || art.querySelector('[role="progressbar"], [aria-busy="true"]') ||
+        !ownNode(art, '[data-testid="reply"]') ||
+        !ownNode(art, '[data-testid="like"], [data-testid="unlike"]') ||
+        ownNode(art, 'a[href*="/article/"]')) return '';
+    const photo = ownNode(art, '[data-testid="tweetPhoto"] img[src]');
+    if (photo?.complete && photo.naturalWidth > 0) return 'photo';
+    const photoLink = ownNode(art, 'a[href*="/photo/"]')?.getAttribute('href') || '';
+    const photoId = photoLink.match(/^\/[^/]+\/status\/(\d+)\/photo\/\d+(?:[/?#]|$)/)?.[1];
+    if (photoId && photoId === location.pathname.match(/^\/[^/]+\/status\/(\d+)(?:\/|$)/)?.[1]) {
+      return 'photo';
+    }
+    const video = ownNode(art, '[data-testid="videoPlayer"] video');
+    if (video && (video.readyState >= 1 || /^(?:https?:|data:image\/)/.test(video.poster))) return 'video';
+    const quote = [...art.querySelectorAll('[data-testid="quoteTweet"], div[role="link"]')]
+      .find(node => node.closest('article[data-testid="tweet"]') === art &&
+        node.querySelector('a[href*="/status/"]') &&
+        node.querySelector('[data-testid="tweetText"], [data-testid="tweetPhoto"], [data-testid="videoPlayer"]'));
+    if (quote) return 'quote';
+    const card = ownNode(art, '[data-testid="card.wrapper"]');
+    const link = card?.querySelector('a[href]');
+    if (link && /^https:\/\//.test(link.getAttribute('href')) &&
+        (card.textContent.trim() || link.getAttribute('aria-label')?.trim())) return 'link';
+    return '';
+  };
 '''
 
 READ_JS = r'''(() => {
 ''' + TEXT_JS + STATE_JS + r'''
   const at = location.pathname.match(/^\/[^/]+\/status\/(\d+)(?:\/|$)/);
-  const result = {...xPageState(), at: at ? at[1] : '', id: '', text: '', truncated: true};
+  const result = {...xPageState(), at: at ? at[1] : '', id: '', text: '', truncated: true,
+                  empty_kind: ''};
   for (const art of document.querySelectorAll('article[data-testid="tweet"]')) {
     const clock = ownNode(art, 'time[datetime]');
     const href = clock?.closest('a[href*="/status/"]')?.getAttribute('href') || '';
@@ -45,6 +72,7 @@ READ_JS = r'''(() => {
     result.id = identity[1];
     result.text = postText(ownNode(art, '[data-testid="tweetText"]'));
     result.truncated = postMore(art);
+    result.empty_kind = emptyPostKind(art);
     break;
   }
   return JSON.stringify(result);
@@ -57,6 +85,12 @@ class PostUnavailable(RuntimeError):
 
 class PostGone(PostUnavailable):
     """The requested, fully loaded page explicitly says the post is unavailable."""
+
+
+class PostEmpty(PostUnavailable):
+    def __init__(self, kind: str):
+        self.kind = kind
+        super().__init__(f'详情页已确认无自写文字({kind})')
 
 
 def expanded(text: str, preview: str) -> bool:
@@ -79,6 +113,7 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
     _check(until, should_stop)
     previous = None
     absent = False
+    empty = None
     try:
         navigation = session.goto(url)
         if isinstance(navigation, dict) and navigation.get('errorText'):
@@ -95,6 +130,14 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
             if missing and absent:
                 raise PostGone('X 明确答复该推文页面不存在或已不可用')
             absent = missing
+            kind = snap.get('empty_kind')
+            confirmed_empty = (snap.get('at') == match[1] == snap.get('id')
+                               and snap.get('ready') == 'complete' and snap.get('text') == ''
+                               and snap.get('truncated') is False
+                               and kind in {'photo', 'video', 'quote', 'link'})
+            if confirmed_empty and empty == kind:
+                raise PostEmpty(kind)
+            empty = kind if confirmed_empty else None
             valid = (snap.get('at') == match[1] == snap.get('id')
                      and isinstance(snap.get('text'), str) and snap['text'].strip()
                      and snap.get('truncated') is False)
@@ -117,7 +160,7 @@ def merge(entry: dict, text: str) -> dict:
     return complete
 
 
-def fill(entries: list[dict], *, session, deadline=None, should_stop=None):
+def fill(entries: list[dict], *, session, deadline=None, should_stop=None, unavailable=None):
     kept, missed = [], 0
     for entry in entries:
         if HINT not in entry:
@@ -126,7 +169,9 @@ def fill(entries: list[dict], *, session, deadline=None, should_stop=None):
         try:
             text = fetch(entry['url'], session, deadline=deadline, should_stop=should_stop)
             complete = merge(entry, text)
-        except PostGone:
+        except PostGone as exc:
+            if unavailable is not None:
+                unavailable.append(dict(url=entry['url'], reason=str(exc)))
             continue
         except PostUnavailable:
             if x_article.needs_article(entry):
@@ -139,8 +184,21 @@ def fill(entries: list[dict], *, session, deadline=None, should_stop=None):
     return kept, note
 
 
-def complete(entries: list[dict], *, session, deadline=None, should_stop=None):
-    entries, post_note = fill(entries, session=session, deadline=deadline, should_stop=should_stop)
+def unavailable_note(unavailable: list[dict]) -> str:
+    if not unavailable:
+        return ''
+    details = ';'.join(f'{item["url"]} ({item["reason"]})' for item in unavailable)
+    return f'跳过 {len(unavailable)} 条远端明确不可用推文(跳过本身不冻结水位):{details}'
+
+
+def unavailable_report(unavailable: list[dict]) -> dict:
+    return dict(unavailable=unavailable, unavailable_count=len(unavailable),
+                note=unavailable_note(unavailable))
+
+
+def complete(entries: list[dict], *, session, deadline=None, should_stop=None, unavailable=None):
+    entries, post_note = fill(entries, session=session, deadline=deadline,
+                              should_stop=should_stop, unavailable=unavailable)
     entries, article_note = x_article.fill(
         entries, session=session, deadline=deadline, should_stop=should_stop)
     unresolved = sum(HINT in entry for entry in entries)

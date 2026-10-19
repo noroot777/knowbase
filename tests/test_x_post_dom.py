@@ -54,10 +54,10 @@ class PostDomTests(unittest.TestCase):
         cls.addClassCleanup(cls.page.__exit__, None, None, None)
         cls.page.open_page('about:blank')
 
-    def load(self, html):
+    def load(self, html, route='/Example/status/123'):
         marker = str(time.monotonic_ns())
         self.server.html = f'<meta name="fixture-version" content="{marker}">' + html
-        self.page.goto(f'http://127.0.0.1:{self.server.server_port}/Example/status/123')
+        self.page.goto(f'http://127.0.0.1:{self.server.server_port}{route}')
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if self.page.eval('document.querySelector("meta[name=fixture-version]")?.content === '
@@ -146,3 +146,96 @@ class PostDomTests(unittest.TestCase):
             snap = json.loads(self.page.eval(script))
             self.assertIs(False, snap.get('empty'))
             self.assertIs(False, snap.get('limited'))
+
+    def test_real_profile_terminal_shapes_are_independent_of_body_wide_regexes(self):
+        fixtures = json.loads((Path(__file__).parent / 'fixtures/x_account_states.json').read_text())
+        for sample in fixtures:
+            with self.subTest(state=sample['state']):
+                route = sample.get('landed', '/' + sample['source'].rsplit('/', 1)[1])
+                self.load(sample['html'], route)
+                snap = json.loads(self.page.eval(x_browser._STATE_JS))
+                self.assertEqual(sample['state'], snap['account']['state'])
+                self.assertTrue(snap['account']['evidence'])
+
+    def test_unknown_language_and_renamed_handles_still_have_a_structural_terminal(self):
+        self.load('<main><div data-testid=primaryColumn><div data-testid=emptyState>'
+                  '<div data-testid=empty_state_header_text>Unbekannt</div></div></div></main>',
+                  '/old_handle')
+        snap = json.loads(self.page.eval(x_browser._STATE_JS))
+        self.assertEqual('unavailable', snap['account']['state'])
+        self.assertEqual('old_handle', snap['account']['handle'])
+
+    def test_protected_profile_uses_its_help_link_not_translated_words(self):
+        self.load('<main><div data-testid=primaryColumn><div data-testid=UserName>Example</div>'
+                  '<div data-testid=emptyState><div data-testid=empty_state_header_text>非英文</div>'
+                  '<a href="https://help.x.com/en/safety-and-security/public-and-protected-posts">'
+                  'Help</a></div></div></main>', '/Example')
+        snap = json.loads(self.page.eval(x_browser._STATE_JS))
+        self.assertEqual('protected', snap['account']['state'])
+
+    def test_sidebar_bio_empty_profile_and_loading_do_not_prove_account_absence(self):
+        missing = ('<div data-testid=emptyState><div data-testid=empty_state_header_text>'
+                   '此账号不存在</div></div>')
+        for html in ['<div data-testid=sidebarColumn>' + missing + '</div>',
+                     '<div data-testid=primaryColumn><div data-testid=UserName>正常账号</div>'
+                     + missing + '</div>',
+                     '<div data-testid=primaryColumn><div role=progressbar></div>' + missing + '</div>',
+                     '<div data-testid=primaryColumn>' + article(text='此账号不存在') + missing + '</div>']:
+            with self.subTest(html=html):
+                self.load('<main>' + html + '</main>', '/Example')
+                self.assertEqual('', json.loads(self.page.eval(x_browser._STATE_JS))['account']['state'])
+
+    def media(self, content):
+        return article(text='').replace('<div data-testid="tweetText"></div>', content)
+
+    def test_real_zero_text_external_card_is_not_a_loading_failure(self):
+        content = ('<div data-testid="card.wrapper"><div data-testid="card.layoutLarge.media">'
+                   '<a href="https://t.co/ldgND9KkGu" aria-label="anthropic.com GLM-5.3 and the spread of advanced cyber capabilities">'
+                   'GLM-5.3 and the spread of advanced cyber capabilities</a></div></div>')
+        self.load(self.media(content).replace('</article>',
+                  '<button data-testid=reply></button><button data-testid=like></button></article>'))
+        self.assertEqual('link', json.loads(self.page.eval(x_post.READ_JS))['empty_kind'])
+
+    def test_loaded_photo_and_quote_are_empty_only_with_their_own_controls(self):
+        image = ('<div data-testid=tweetPhoto><img src="data:image/gif;base64,'
+                 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></div>')
+        quote = ('<div role=link><a href=/Other/status/456><time datetime=2026-10-01>now</time></a>'
+                 '<div data-testid=tweetText>quoted text is not authored text</div></div>')
+        controls = '<button data-testid=reply></button><button data-testid=like></button>'
+        for content, kind in [(image, 'photo'), (quote, 'quote')]:
+            with self.subTest(kind=kind):
+                self.load(self.media(content + controls))
+                self.assertEqual(kind, json.loads(self.page.eval(x_post.READ_JS))['empty_kind'])
+                self.load(self.media(content))
+                self.assertEqual('', json.loads(self.page.eval(x_post.READ_JS))['empty_kind'])
+
+    def test_missing_media_empty_text_nodes_and_article_cards_are_not_legal_empty_posts(self):
+        controls = '<button data-testid=reply></button><button data-testid=like></button>'
+        for content in ['', '<div data-testid=tweetText></div>',
+                        '<div data-testid=tweetPhoto><img src=/missing-image></div>',
+                        '<div data-testid=videoPlayer><video></video></div>',
+                        '<div data-testid=card.wrapper><a href=/i/article/999>Article</a></div>',
+                        '<div data-testid=card.wrapper></div>']:
+            with self.subTest(content=content):
+                self.load(self.media(content + controls))
+                self.assertEqual('', json.loads(self.page.eval(x_post.READ_JS))['empty_kind'])
+
+    def test_real_photo_permalink_is_proof_even_when_media_downloads_are_disabled(self):
+        self.load(self.media('<a href=/Example/status/123/photo/1 role=link><div></div></a>'
+                             '<button data-testid=reply></button><button data-testid=like></button>'))
+        self.assertEqual('photo', json.loads(self.page.eval(x_post.READ_JS))['empty_kind'])
+        self.load(self.media('<a href=/Other/status/456/photo/1 role=link><div></div></a>'
+                             '<button data-testid=reply></button><button data-testid=like></button>'))
+        self.assertEqual('', json.loads(self.page.eval(x_post.READ_JS))['empty_kind'])
+
+    def test_video_poster_is_media_evidence_but_an_uninitialized_player_is_not(self):
+        self.load(self.media('<div data-testid=videoPlayer><video poster="data:image/gif;base64,'
+                             'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">'
+                             '</video></div><button data-testid=reply></button>'
+                             '<button data-testid=like></button>'))
+        self.assertEqual('video', json.loads(self.page.eval(x_post.READ_JS))['empty_kind'])
+
+    def test_a_previously_liked_media_post_is_still_a_legal_empty_post(self):
+        self.load(self.media('<a href=/Example/status/123/photo/1></a>'
+                             '<button data-testid=reply></button><button data-testid=unlike></button>'))
+        self.assertEqual('photo', json.loads(self.page.eval(x_post.READ_JS))['empty_kind'])
