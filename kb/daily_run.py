@@ -619,7 +619,7 @@ def start(since: datetime | None = None, until: datetime | None = None,
     # 素材根本没刷新(2026-09-30 审查实测)。要么给个来源,要么明确走不同步那条。
     if sync and not picked:
         raise ValueError('同步范围里一个可用来源都没有:先勾选至少一个,'
-                         '或者改用不同步那颗生成按钮(只用已入库的内容出报)')
+                         '或者把「先同步一轮」的勾去掉(只用已入库的内容出报)')
     with _lock:
         if _state['running']:
             return False
