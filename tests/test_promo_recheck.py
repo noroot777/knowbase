@@ -474,7 +474,7 @@ class AtomicDeliveryTest(_Fixture):
         self.md.write_text(text.replace('title:', 'wiki_round: 2\ntitle:', 1),
                            encoding="utf-8")
 
-    def _scan_at_index_time(self):
+    def _scan_at_index_time(self, *, report=None):
         """索引那一趟的扫描结果 —— **被迭代时**才读磁盘。
 
         真实 `cli.cmd_index` 是「取锁 → 扫描」,扫描读到的是**拿到锁那一刻**
@@ -482,6 +482,9 @@ class AtomicDeliveryTest(_Fixture):
         一个锁外读盘的时序:那样无论协调区间圈不圈得住,索引都会拿着带旧 flag
         的 frontmatter 去重建 `doc_tags`,红绿都证明不了互斥。
         """
+        if report is not None:
+            report.start([], self.vault)
+            report.complete = True
         text = self.md.read_text(encoding="utf-8")
         fm, body = scanner.parse_frontmatter(text)
         yield scanner.Doc(path=PATH, source="dr-gzh", title="稿子",

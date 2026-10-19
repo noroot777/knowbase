@@ -162,7 +162,7 @@ class TrimTests(TrimFixture, unittest.TestCase):
     def test_a_failed_index_cleanup_is_finished_by_the_next_run(self):
         s = self.sub()
         item = self.seed(s)
-        with patch.object(store, 'remove_missing_documents',
+        with patch.object(store, 'remove_documents',
                           side_effect=sqlite3.OperationalError('database is locked')):
             with self.assertRaises(sqlite3.OperationalError):
                 trim.cmd_run(self.args(s))

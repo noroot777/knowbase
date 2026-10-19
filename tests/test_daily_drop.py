@@ -146,9 +146,10 @@ class DisabledSourceTests(unittest.TestCase):
                 'INSERT INTO documents(path,source,title) VALUES(?,?,?)',
                 (path, src, '标题'))
         self.conn.commit()
-        alive = {d.path for d in scanner.scan_all()}
+        report = scanner.ScanReport()
+        alive = {d.path for d in scanner.scan_all(report=report)}
         self.assertEqual({'source/live/a.md'}, alive)
-        removed = store.remove_missing_documents(self.conn, alive)
+        removed = store.remove_missing_documents(self.conn, report)
         left = {r['path'] for r in self.conn.execute('SELECT path FROM documents')}
         self.assertEqual({'source/frozen/a.md', 'source/live/a.md'}, left)
         self.assertEqual(1, removed, '只该收掉启用来源下那条真没了的')

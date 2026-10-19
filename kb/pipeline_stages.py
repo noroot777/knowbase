@@ -249,15 +249,14 @@ def _index_pass() -> None:
     from kb import store
     from kb.chunker import split_chunks
     from kb.extract import parse_pretagged, save_extraction
-    from kb.scanner import scan_all
+    from kb.scanner import ScanReport, scan_all
 
     conn = store.connect()
     try:
         now = _now()
-        seen: set[str] = set()
+        report = ScanReport()
         new = 0
-        for doc in scan_all():
-            seen.add(doc.path)
+        for doc in scan_all(report=report):
             if not store.doc_needs_reindex(conn, doc.path, doc.content_hash):
                 continue
             store.upsert_document(conn, doc, split_chunks(doc.body), now)
@@ -268,7 +267,7 @@ def _index_pass() -> None:
             if new % 25 == 0:
                 conn.commit()
                 _stage("index", "running", f"已索引 {new} 篇")
-        removed = store.remove_missing_documents(conn, seen)
+        removed = store.remove_missing_documents(conn, report)
         conn.commit()
         # **这里不替抓取记账。**「今天抓了多少」是物化那一步的产出,记在
         # `_run_export`;索引看到的"头一回进库"混着上一轮抓回来还没索引的、手工
@@ -283,7 +282,8 @@ def _index_pass() -> None:
         # 行,谁也不会再来收(见 `kb.maintenance`)。
         from kb.embedder import embed_pending_chunks
         n = embed_pending_chunks(conn, _report)
-        _stage("index", "ok", f"新增/更新 {new},移除 {removed},新向量 {n}")
+        _stage("index", "error" if report.errors else "ok",
+               f"新增/更新 {new},移除 {removed},新向量 {n}{report.warning}")
     finally:
         conn.close()
 

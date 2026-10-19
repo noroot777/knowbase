@@ -6,10 +6,12 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from kb import store, store_migrate
+from kb import scanner, store, store_migrate
+from kb.config import Source
 from tests.fav_snippet_fixture import ApiFixture, DOC, REAL_CONNECT
 from tests.test_fav_snippet_migrate import _V2_DDL, _V3_DDL, _seed_old
 
@@ -39,7 +41,13 @@ class FavoriteLifecycleTests(ApiFixture):
                 elif mode == "explicit":
                     self.assertEqual(1, store.remove_documents(self.conn, [DOC]))
                 else:
-                    self.assertEqual(1, store.remove_missing_documents(self.conn, set()))
+                    (self.vault / DOC).unlink()
+                    report = scanner.ScanReport()
+                    with mock.patch.object(scanner, 'VAULT_ROOT', self.vault), \
+                         mock.patch.object(scanner, 'SOURCES', [
+                             Source('dr-gzh', (self.vault / DOC).parent)]):
+                        list(scanner.scan_all(report=report))
+                    self.assertEqual(1, store.remove_missing_documents(self.conn, report))
                 self.conn.commit()
                 after = dict(self.conn.execute(
                     "SELECT * FROM favorites WHERE id=?", (favorite_id,)).fetchone())

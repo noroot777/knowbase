@@ -247,12 +247,15 @@ class StagedBodyTest(_Vault):
                 self.md.read_text(encoding="utf-8"))),
             "索引认为这一篇「未变」—— 新标题永远进不了库")
 
-    def _scan_the_fixture(self):
+    def _scan_the_fixture(self, *, report=None):
         """索引那一趟的扫描结果 —— 只给夹具这一篇,别的全是真的。
 
         不能让 `scan_all` 去扫真实 vault(它按 `kb.config` 解析来源目录,
         patch `scanner.VAULT_ROOT` 盖不住)。切块、upsert、FTS、提交全是真实的。
         """
+        if report is not None:
+            report.start([], self.vault)
+            report.complete = True
         text = self.md.read_text(encoding="utf-8")
         fm, body = scanner.parse_frontmatter(text)
         yield scanner.Doc(path=PATH, source="dr-gzh", title="稿子",

@@ -118,8 +118,8 @@ class IndexLockTests(TrimFixture, unittest.TestCase):
         real_scan, real_backup = scanner.scan_all, trim._backup
         scanned, release = threading.Event(), threading.Event()
 
-        def paused_scan():
-            docs = list(real_scan())      # 读:这一刻磁盘上的事实
+        def paused_scan(**kwargs):
+            docs = list(real_scan(**kwargs))      # 读:这一刻磁盘上的事实
             scanned.set()
             self.assertTrue(release.wait(10))
             yield from docs               # 写:可能已经是删除之后了

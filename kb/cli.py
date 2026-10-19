@@ -17,7 +17,7 @@ from datetime import datetime
 
 from kb import store
 from kb.chunker import split_chunks
-from kb.scanner import scan_all
+from kb.scanner import ScanReport, scan_all
 from kb.search import Filters, search
 
 
@@ -44,13 +44,12 @@ def cmd_index(args) -> int:
 def _index_pass(args) -> int:
     conn = store.connect()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    seen: set[str] = set()
+    report = ScanReport()
     new = unchanged = 0
 
     from kb.extract import parse_pretagged, save_extraction
 
-    for doc in scan_all():
-        seen.add(doc.path)
+    for doc in scan_all(report=report):
         if not args.reembed and not store.doc_needs_reindex(conn, doc.path, doc.content_hash):
             unchanged += 1
             continue
@@ -64,16 +63,17 @@ def _index_pass(args) -> int:
         if new % 50 == 0:
             conn.commit()
             print(f"[index] {new} 篇...")
-    removed = store.remove_missing_documents(conn, seen)
+    removed = store.remove_missing_documents(conn, report)
     conn.commit()
-    print(f"[index] 完成: 新增/更新 {new}, 未变 {unchanged}, 移除 {removed}")
+    print(f"[index] 完成: 新增/更新 {new}, 未变 {unchanged}, 移除 {removed}{report.warning}")
 
     if not args.no_vector:
         try:
             from kb.embedder import embed_pending_chunks
         except Exception as e:
             print(f"[embed] 跳过: {e}")
-            return 0
+            conn.close()
+            return int(bool(report.errors))
 
         def _report(done: int, total: int) -> None:
             if done == 0:
@@ -85,7 +85,7 @@ def _index_pass(args) -> int:
         if embed_pending_chunks(conn, _report) == 0:
             print("[embed] 向量已是最新")
     conn.close()
-    return 0
+    return int(bool(report.errors))
 
 
 def cmd_extract(args) -> int:
