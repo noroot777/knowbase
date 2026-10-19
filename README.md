@@ -208,7 +208,17 @@ claude mcp add kb --scope user -- uv run --directory ~/code/knowbase kb-mcp
 
 ### Skill：在对话里收录链接
 
-仓库自带 skill `kb-grab`（`.claude/skills/kb-grab/`），和面板上「存入知识库」按钮走同一个接口。在 Claude Code 里**用自然语言说一句就行**：
+仓库自带 skill `kb-grab`（`.claude/skills/kb-grab/`），和面板上「存入知识库」按钮走同一个接口。
+
+**安装**：在仓库目录里的 Claude Code 会话天然可用，不需要装。要在其他项目里也能用，让 Claude 帮你装：
+
+```
+帮我把 ~/code/knowbase/.claude/skills/kb-grab 链接到全局 skill 目录
+```
+
+或者自己来：`ln -s ~/code/knowbase/.claude/skills/kb-grab ~/.claude/skills/kb-grab`。检出不在 `~/code/knowbase` 时设 `KB_HOME` 环境变量指向仓库根目录。
+
+**使用**：用自然语言说一句就行，不需要记命令——
 
 ```
 这篇存一下 https://example.com/post
@@ -217,9 +227,7 @@ claude mcp add kb --scope user -- uv run --directory ~/code/knowbase kb-mcp
 刚存那篇不对，重新抓一次 https://example.com/post
 ```
 
-不需要记命令。Claude 看到你要往知识库存东西，会自动调这个 skill。
-
-**装到全局**（项目外也能用）：`ln -s ~/code/knowbase/.claude/skills/kb-grab ~/.claude/skills/kb-grab`；检出不在常见位置时设 `KB_HOME`。
+Claude 看到你要往知识库存东西，会自动调这个 skill。
 
 ## CLI 用法
 
