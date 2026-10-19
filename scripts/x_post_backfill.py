@@ -8,6 +8,8 @@
 scan is local and read-only. run probes candidates; only --yes writes feeds.db.
 Only eligible post bodies are audited; merged Articles and ambiguous legacy rows are skipped.
 Ellipses and wrapped URLs only affect priority within eligible posts.
+run --resolve-legacy independently verifies missing provenance before admission;
+only --yes persists those version-bound records, without inferring type from titles.
 --all is a compatibility alias; --url selects exact stored URLs. Translation, export and
 indexing use the normal pipeline.
 """
@@ -23,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb.feeds import grab_store, registry as reg, x_browser, x_channels, x_post, x_post_meta
+from kb.feeds import x_post_provenance
 from kb.feeds.x_cdp import CdpError
 from kb.feeds.x_page_state import XRateLimited
 
@@ -139,7 +142,8 @@ def exclusion(row: dict) -> dict | None:
                 state='skipped_article' if reason == 'article_merged' else 'skipped_ambiguous')
 
 
-def candidates(conn, *, urls=(), limit=0, all_posts=False, excluded=None) -> list[dict]:
+def candidates(conn, *, urls=(), limit=0, all_posts=False, excluded=None,
+               resolve_legacy=False) -> list[dict]:
     """Apply eligibility before limit; all_posts never bypasses provenance checks."""
     rows = conn.execute("SELECT * FROM feed_items WHERE kind='social' AND content_kind='post'"
                         " ORDER BY published DESC,key").fetchall()
@@ -153,9 +157,10 @@ def candidates(conn, *, urls=(), limit=0, all_posts=False, excluded=None) -> lis
                 continue
         row = dict(row)
         if skipped := exclusion(row):
-            if excluded is not None:
-                excluded.append(skipped)
-            continue
+            if not (resolve_legacy and skipped['reason'] == 'unclassified_legacy'):
+                if excluded is not None:
+                    excluded.append(skipped)
+                continue
         selected.append(row)
     selected.sort(key=lambda row: not (row['body'].rstrip().endswith(('…', '...')) or
                                       canonical_preview(row['body']) != row['body']))
@@ -172,11 +177,11 @@ def entry_of(row: dict) -> dict:
 
 
 def repair(rows: list[dict], session, *, apply=False, deadline=None,
-           should_stop=None, progress=None, excluded=()) -> dict:
+           should_stop=None, progress=None, excluded=(), resolve_legacy=False) -> dict:
     stats = dict(candidates=len(rows), expanded=0, normalized=0, updated=0,
                  identical=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
                  failed=0, stale=0, deferred=0, skipped_article=0, skipped_ambiguous=0,
-                 results=list(excluded))
+                 provenance_resolved=0, provenance_saved=0, results=list(excluded))
     for skipped in excluded:
         stats[skipped['state']] += 1
     for index, row in enumerate(rows):
@@ -184,7 +189,9 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
                 deadline is not None and time.monotonic() >= deadline):
             stats['deferred'] = len(rows) - index
             break
-        if skipped := exclusion(row):
+        skipped = exclusion(row)
+        resolving = resolve_legacy and skipped and skipped['reason'] == 'unclassified_legacy'
+        if skipped and not resolving:
             stats[skipped['state']] += 1
             stats['results'].append(skipped)
             if progress:
@@ -192,7 +199,23 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
             continue
         result = dict(url=row['url'], before=len(row['body']))
         try:
-            text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
+            text = None
+            if resolving:
+                annotated, text = x_post_provenance.resolve(
+                    row, session, deadline=deadline, should_stop=should_stop,
+                    aligned_preview=aligned_preview)
+                row = x_post_provenance.save(row, annotated) if apply else annotated
+                if row is None:
+                    stats['stale'] += 1
+                    result.update(state='stale', reason='provenance_snapshot_changed')
+                else:
+                    stats['provenance_resolved'] += 1
+                    stats['provenance_saved'] += int(apply)
+                    if skipped := exclusion(row):
+                        stats[skipped['state']] += 1
+                        result.update(skipped)
+            if not result.get('state') and text is None:
+                text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
         except x_post.PostGone as exc:
             stats['unavailable'] += 1
             result.update(state='unavailable', error=str(exc))
@@ -205,13 +228,14 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
             stats['failed'] += 1
             result.update(state='failed', error=str(exc))
         else:
-            state, complete, info = proposal(entry_of(row), text)
-            stats[state] += 1
-            result.update(state=state, **info)
-            if complete and apply:
-                state = 'updated' if grab_store.replace(row, complete) else 'stale'
+            if not result.get('state'):
+                state, complete, info = proposal(entry_of(row), text)
                 stats[state] += 1
-                result['state'] = state
+                result.update(state=state, **info)
+                if complete and apply:
+                    state = 'updated' if grab_store.replace(row, complete) else 'stale'
+                    stats[state] += 1
+                    result['state'] = state
         stats['results'].append(result)
         if progress:
             progress(result, stats)
@@ -226,6 +250,8 @@ def main(argv=None) -> int:
     parser.add_argument('--yes', action='store_true', help='确认用版本化替换写回正文')
     parser.add_argument('--url', action='append', default=[], help='只检查指定的存量 URL,可重复')
     parser.add_argument('--all', action='store_true', help='兼容旧命令;不绕过长文与来源不明行的排除')
+    parser.add_argument('--resolve-legacy', action='store_true',
+                        help='先核实无来源旧行:长文接口及详情须能对齐;--yes 才保存来源')
     parser.add_argument('--limit', type=int, default=0)
     parser.add_argument('--budget', type=float, default=600.0, help='整轮浏览器读取秒数')
     parser.add_argument('--channel', choices=['browser', 'attach'], default='browser')
@@ -237,8 +263,10 @@ def main(argv=None) -> int:
         parser.error('--url 只接受 X 推文的完整地址')
     with reg.db() as conn:
         excluded = []
-        rows = candidates(conn, urls=args.url, limit=args.limit, all_posts=args.all, excluded=excluded)
-    print(f'找到 {len(rows)} 条候选;已排除合并长文及来源不明的旧行,省略号或链接折行只决定优先级。')
+        rows = candidates(conn, urls=args.url, limit=args.limit, all_posts=args.all, excluded=excluded,
+                          resolve_legacy=args.resolve_legacy)
+    print(f'找到 {len(rows)} 条候选;仅核对有来源的短推文,或显式核实无来源旧行。')
+    print('旧行可用 run --resolve-legacy 核实来源;加 --yes 才保存,不是强制绕过保护。')
     for skipped in excluded:
         print(json.dumps(skipped, ensure_ascii=False))
     if args.limit:
@@ -269,7 +297,7 @@ def main(argv=None) -> int:
                 attach=args.channel == 'attach') as page:
             page.open_page('about:blank')
             stats = repair(rows, page, apply=args.yes, deadline=deadline, progress=report,
-                           excluded=excluded)
+                           excluded=excluded, resolve_legacy=args.resolve_legacy)
     except (CdpError, OSError, EOFError) as exc:
         print(f'浏览器不可用,未继续回填:{exc}', file=sys.stderr)
         return 1

@@ -11,7 +11,7 @@ from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import tweet
 
 
-class PostProvenanceTests(ChannelBase):
+class ProvenanceBase(ChannelBase):
     def setUp(self):
         super().setUp()
         self.source = self.sub()
@@ -30,6 +30,8 @@ class PostProvenanceTests(ChannelBase):
         with reg.db() as conn:
             return dict(conn.execute('SELECT * FROM feed_items WHERE key=?', (row['key'],)).fetchone())
 
+
+class PostProvenanceTests(ProvenanceBase):
     def test_new_article_is_excluded_even_when_its_title_matches_the_lead(self):
         row = self.seed(article=dict(title='A short preview', body='Full Article Markdown'))
         self.assertEqual('article_merged', x_post_meta.eligibility(row)[0])
@@ -88,13 +90,18 @@ class PostProvenanceTests(ChannelBase):
                 text = '> The author quotes this\n\nThe author adds this'
                 row = self.seed(text, str(140 + legacy * 2 + bool(context)), context=context,
                                 legacy=legacy)
-                entry = backfill.entry_of(row)
                 prefix = '> Someone reposted\n\n' if context else ''
                 with self.subTest(legacy=legacy, context=context):
-                    self.assertEqual(prefix, entry[x_post.HINT])
+                    if legacy:
+                        with self.assertRaises(ValueError):
+                            backfill.entry_of(row)
+                    else:
+                        self.assertEqual(prefix, backfill.entry_of(row)[x_post.HINT])
                     full = text + '\n\nThe complete ending'
-                    with patch.object(x_post, 'fetch', return_value=full):
-                        stats = backfill.repair([row], None, apply=True)
+                    with patch.object(x_article, 'API', 'https://example.invalid'), \
+                            patch.object(x_article, 'fetch', return_value=None), \
+                            patch.object(x_post, 'fetch', return_value=full):
+                        stats = backfill.repair([row], None, apply=True, resolve_legacy=legacy)
                     self.assertEqual(1, stats['updated'])
                     saved = self.current(row)
                     self.assertEqual(prefix + full, saved['body'])
@@ -105,12 +112,12 @@ class PostProvenanceTests(ChannelBase):
         row['title'] = 'A post title'
         self.assertEqual(('unclassified_legacy', ''), x_post_meta.eligibility(row))
 
-    def test_legacy_expanded_first_line_title_and_empty_body_remain_eligible(self):
+    def test_titles_and_empty_bodies_do_not_prove_legacy_provenance(self):
         row = self.seed('First line\n\nSecond paragraph', legacy=True)
         row['title'] = 'First line'
-        self.assertEqual(('', ''), x_post_meta.eligibility(row))
+        self.assertEqual(('unclassified_legacy', ''), x_post_meta.eligibility(row))
         empty = self.seed('', '125', legacy=True)
-        self.assertEqual(('', ''), x_post_meta.eligibility(empty))
+        self.assertEqual(('unclassified_legacy', ''), x_post_meta.eligibility(empty))
 
     def test_source_metadata_survives_versioned_replacement_and_prevents_article_downgrade(self):
         row = self.seed(context='Someone reposted')
@@ -141,7 +148,9 @@ class PostProvenanceTests(ChannelBase):
 
     def test_metadata_free_author_only_update_does_not_lose_article_provenance(self):
         row = self.seed(article=dict(title='An Article', body='Full Markdown'))
-        self.assertTrue(grab_store.replace(row, dict(title=row['title'], body=row['body'],
+        seen = grab_store.known(row['url'])
+        self.assertEqual(row[x_post_meta.FIELD], seen[x_post_meta.FIELD])
+        self.assertTrue(grab_store.replace(seen, dict(title=row['title'], body=row['body'],
                                                      author='Corrected author')))
         self.assertEqual('article_merged', x_post_meta.eligibility(self.current(row))[0])
 

@@ -13,7 +13,7 @@ from tests.x_login_fixture import FakeChrome, logged_in
 
 def state(**changes):
     return dict(ready='complete', articles=0, login=False, limited=False, failed=False,
-                **changes)
+                empty=False) | changes
 
 
 class HomeSession(EventSession):

@@ -35,17 +35,4 @@ def eligibility(entry: dict) -> tuple[str, str]:
                 not entry['body'].startswith(prefix)):
             return 'invalid_provenance', ''
         return '', prefix
-    body, title = entry['body'], entry['title']
-    if not body:
-        return '', ''
-
-    def matches(text: str) -> bool:
-        return bool(title) and title in (text[:500], text.split('\n', 1)[0][:500])
-
-    if matches(body):
-        return '', ''
-    head, separator, tail = body.partition('\n\n')
-    if separator and head and all(line.startswith('> ') for line in head.splitlines()) and (
-            matches(tail)):
-        return '', head + separator
     return 'unclassified_legacy', ''

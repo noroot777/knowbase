@@ -69,9 +69,11 @@ class Responses:
                     if self.loader and loader == self.loader]
         if any(status == 429 for status in statuses):
             snapshot['limited'] = True
+            snapshot['http_problem'] = 'limited'
         if any(400 <= status < 600 for status in statuses):
             snapshot['failed'] = True
             snapshot['empty'] = False
+            snapshot.setdefault('http_problem', 'failed')
         return snapshot
 
 
@@ -100,6 +102,9 @@ def read(session, script: str) -> dict:
 
 
 def problem(state: dict) -> str:
+    http = state.get('http_problem', '')
+    if http in ('limited', 'failed'):
+        return http
     if state.get('ready') != 'complete':
         return ''
     return next((kind for kind in ('limited', 'failed') if state.get(kind)), '')

@@ -189,7 +189,7 @@ def known(url: str) -> dict | None:
         row = c.execute('SELECT key,kind,title,author,published,path,url,body,content_kind,'
                         # `content_rev` 跟着交出去:快照要能回答「我读到的是哪一版」,
                         # 不然显式重抓那条链提交时只比得了指纹(见 `work_version`)。
-                        'content_hash,exported_hash,content_rev'
+                        'content_hash,exported_hash,content_rev,x_post_meta'
                         ' FROM feed_items WHERE url=? LIMIT 1', (url,)).fetchone()
     if not row:
         return None
@@ -265,6 +265,9 @@ def replace(seen: dict, entry: dict) -> bool:
     `extract_stale=1` 留一个待办(知识库里那份摘要、主题、实体是按旧内容算的);
     译文整组作废重排(旧译文译的是那张墙)。`content_kind` 不动 —— 一条推文换了
     正文还是推文。
+
+    seen 必须携带 x_post_meta,如同 content_hash/content_rev 一样不能以缺省值补造。
+    known 与回填候选交出的生产快照都满足这一约束;缺列的调用方必须修复取样口径。
     """
     if not seen or not seen.get('key') or not entry.get('body'):
         return False
@@ -293,7 +296,7 @@ def replace(seen: dict, entry: dict) -> bool:
             WHERE key=? AND content_hash=? AND content_rev=?""",
             (fresh['title'], fresh['body'], fresh['author'], fresh['published'],
              item_version(fresh), reg.text_language(fresh['title'], fresh['body']),
-             entry.get('x_post_meta', seen.get('x_post_meta', '')),
+             entry.get('x_post_meta', seen['x_post_meta']),
              seen['key'], *work_version(seen)))
         return cur.rowcount > 0
 

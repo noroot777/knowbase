@@ -185,9 +185,10 @@ def _entry(meta: dict, body: str, handle: str) -> dict | None:
     text = body.strip()
     if not text and not title:
         return None
-    return {'url': url, 'title': title[:500], 'body': text or title,
-            'author': str(name), 'published': _published(meta),
-            'content_kind': 'post'}
+    from kb.feeds.x_post_meta import stamp
+    return stamp({'url': url, 'title': title[:500], 'body': text or title,
+                  'author': str(name), 'published': _published(meta),
+                  'content_kind': 'post'}, 'post')
 
 
 def _read_output(folder: Path, handle: str) -> list[dict]:
