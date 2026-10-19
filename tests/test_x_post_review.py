@@ -72,6 +72,16 @@ class ArticleHandoffTests(unittest.TestCase):
         self.assertNotIn(x_article.HINT, kept[0])
         request.assert_called_once()
 
+    def test_request_error_still_allows_article_recovery_without_freezing_a_recovered_post(self):
+        with patch.object(x_post, 'fetch', side_effect=x_post.PostRequestFailed('X 页面请求出错')), \
+             patch.object(x_article, 'API', 'https://article.test'), \
+             patch.object(x_article, 'fetch', return_value=ARTICLE):
+            kept, note = x_post.complete([self.entry()], session=Page())
+        self.assertEqual('', note)
+        self.assertEqual(1, len(kept))
+        self.assertIn(ARTICLE['body'], kept[0]['body'])
+        self.assertNotIn(x_post.HINT, kept[0])
+
     def test_the_article_browser_fallback_is_reachable_too(self):
         with patch.object(x_post, 'fetch', side_effect=x_post.PostUnavailable('no detail')), \
              patch.object(x_article, 'API', 'https://article.test'), \

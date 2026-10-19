@@ -193,6 +193,68 @@ class PostTests(unittest.TestCase):
         self.assertEqual(1, collect.call_count)
         self.assertIn('频率', result['Next']['error'])
 
+    def test_request_error_returns_promptly_without_claiming_absence_or_rate_limiting(self):
+        failed = dict(snapshot(''), id='', ready='complete', failed=True)
+        page = Page(failed)
+        with patch.object(x_post, 'SECONDS', 0.1), \
+             patch.object(x_post.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(x_post.PostUnavailable, 'X.*请求出错') as failure:
+                x_post.fetch(URL, page)
+        self.assertNotIsInstance(failure.exception, x_post.PostGone)
+        self.assertEqual(2, page.reads)
+        self.assertEqual(1, sleep.call_count)
+
+    def test_transient_errors_and_limits_need_consecutive_confirmations(self):
+        for signal in ['failed', 'limited']:
+            with self.subTest(signal=signal):
+                failed = dict(snapshot(''), id='', ready='complete', **{signal: True})
+                page = Page(failed, snapshot(BODY), failed, snapshot(BODY), snapshot(BODY))
+                self.assertEqual(BODY, x_post.fetch(URL, page))
+                self.assertEqual(5, page.reads)
+
+    def test_request_error_cannot_classify_a_previous_or_loading_detail_page(self):
+        for changes in [dict(at='999'), dict(ready='loading')]:
+            with self.subTest(changes=changes):
+                failed = dict(snapshot(''), id='', ready='complete', failed=True)
+                failed.update(changes)
+                page = Page(failed, failed, snapshot(BODY), snapshot(BODY))
+                self.assertEqual(BODY, x_post.fetch(URL, page))
+
+    def test_request_error_keeps_the_account_retryable_and_next_account_can_succeed(self):
+        short = x_browser._entry(tweet('124', text='short'))
+        for attach in [False, True]:
+            page = Page(dict(snapshot(''), id='', ready='complete', failed=True))
+            with self.subTest(attach=attach), \
+                 patch.object(x_post, 'SECONDS', 0.1), \
+                 patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
+                 patch.object(x_browser, '_harvest_one',
+                              side_effect=[([preview()], ''), ([short], '')]) as collect:
+                result = x_browser.harvest([('Example', OLD), ('Next', OLD)],
+                                           profile='', attach=attach)
+            self.assertEqual(2, collect.call_count)
+            self.assertEqual([], result['Example']['entries'])
+            self.assertEqual(OLD, result['Example']['watermark'])
+            self.assertIn('X 页面请求出错', result['Example']['incomplete'])
+            self.assertEqual([short], result['Next']['entries'])
+
+    def test_timeline_request_error_is_account_local_and_confirmed_twice(self):
+        page = Page(dict(snapshot(''), articles=0, ready='complete', empty=False,
+                         limited=False, failed=True))
+        with patch.object(x_browser.time, 'sleep'), \
+             self.assertRaisesRegex(x_browser.XBrowserError, 'X.*请求出错'):
+            x_browser._wait_state(page, 'Example', time.monotonic() + 0.1)
+        self.assertEqual(2, page.reads)
+
+    def test_timeline_transient_request_error_and_limit_can_recover(self):
+        good = dict(snapshot(BODY), articles=1, ready='complete', empty=False, limited=False)
+        for signal in ['failed', 'limited']:
+            with self.subTest(signal=signal), patch.object(x_browser.time, 'sleep'):
+                bad = dict(good, articles=0)
+                bad[signal] = True
+                page = Page(bad, good)
+                self.assertEqual(good, x_browser._wait_state(page, 'Example', time.monotonic() + 0.1))
+                self.assertEqual(2, page.reads)
+
 
 class StoredPostTests(ChannelBase):
     def test_only_deleted_posts_commit_the_observed_watermark_without_inserting_a_preview(self):

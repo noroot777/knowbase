@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from kb.feeds import x_browser, x_post
+from kb.feeds import x_browser, x_page_state, x_post
 from kb.feeds.x_cdp import Chrome
 from tests.headless import INSTALL_HINT, SHELL
 
@@ -17,6 +17,11 @@ LINK = ('<a href="https://t.co/example"><span aria-hidden="true">https://</span>
         '<span aria-hidden="true">…</span></a>')
 TEXT = 'Audit ' + LINK + '<br>Every app<img alt="🙂" src="data:,">\n\n4. Ask first.'
 EXPECTED = 'Audit https://example.com/connections\nEvery app🙂\n\n4. Ask first.'
+RETRY_PATH = ('M12 4c-4.418 0-8 3.58-8 8s3.582 8 8 8c3.806 0 6.993-2.66 '
+              '7.802-6.22l1.95.44C20.742 18.67 16.76 22 12 22 6.477 22 2 '
+              '17.52 2 12S6.477 2 12 2c3.272 0 6.176 1.57 8 4V3.5h2v6h-6v-2'
+              'h2.616C17.175 5.39 14.749 4 12 4z')
+RETRY = f'<button role="button"><div><svg><g><path d="{RETRY_PATH}"></path></g></svg></div></button>'
 
 
 def article(identity='123', text='short', more='', quoted=''):
@@ -28,6 +33,11 @@ def article(identity='123', text='short', more='', quoted=''):
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.startswith('/i/api/graphql/'):
+            self.send_response(self.server.api_status)
+            self.end_headers()
+            self.wfile.write(b'{}')
+            return
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
@@ -129,7 +139,7 @@ class PostDomTests(unittest.TestCase):
             ('这个页面不存在', True, False),
             ('Hmm...this page doesn’t exist.', True, False),
             ('Rate limit exceeded', False, True),
-            ('请稍后再试', False, True),
+            ('请稍后再试', False, False),
             ('Loading', False, False),
         ]:
             with self.subTest(text=text):
@@ -138,6 +148,61 @@ class PostDomTests(unittest.TestCase):
                     snap = json.loads(self.page.eval(script))
                     self.assertIs(empty, snap.get('empty'))
                     self.assertIs(limited, snap.get('limited'))
+
+    def test_real_request_error_copy_is_retryable_not_absent_or_proven_rate_limit(self):
+        for text in ['出错了。请尝试重新加载。', 'Something went wrong. Try reloading.', '请稍后再试']:
+            with self.subTest(text=text):
+                self.load('<main>' + text + '</main>')
+                for script in [x_post.READ_JS, x_browser._STATE_JS]:
+                    snap = json.loads(self.page.eval(script))
+                    self.assertIs(True, snap.get('failed'))
+                    self.assertIs(False, snap.get('empty'))
+                    self.assertIs(False, snap.get('limited'))
+
+    def test_primary_column_retry_icon_detects_errors_without_matching_any_ui_language(self):
+        self.load('<main><div data-testid="primaryColumn"><div><div>別の言語</div>'
+                  + RETRY + '</div></div></main>')
+        for script in [x_post.READ_JS, x_browser._STATE_JS]:
+            snap = json.loads(self.page.eval(script))
+            self.assertIs(True, snap.get('failed'))
+            self.assertIs(False, snap.get('empty'))
+            self.assertIs(False, snap.get('limited'))
+
+    def test_retry_icons_in_sidebars_or_tweets_and_regular_buttons_are_not_page_errors(self):
+        fixtures = [
+            '<div data-testid="sidebarColumn">' + RETRY + '</div>',
+            '<div data-testid="primaryColumn">' + article(text=RETRY) + '</div>',
+            '<div data-testid="primaryColumn"><button><svg><path d="M0 0"/></svg></button></div>',
+            article(text='出错了。请尝试重新加载。'),
+        ]
+        for html in fixtures:
+            with self.subTest(html=html):
+                self.load(html)
+                for script in [x_post.READ_JS, x_browser._STATE_JS]:
+                    snap = json.loads(self.page.eval(script))
+                    self.assertIs(False, snap.get('failed'))
+
+    def test_actual_http_status_events_are_seen_in_a_fresh_headless_browser(self):
+        for status in [429, 503, 200]:
+            with self.subTest(status=status):
+                self.server.api_status = status
+                self.server.html = ('<script>fetch("/i/api/graphql/hash/TweetDetail")'
+                                    '.finally(() => window.finished = true)</script>')
+                marker = str(time.monotonic_ns())
+                x_page_state.navigate(self.page, f'http://127.0.0.1:{self.server.server_port}'
+                                                '/Example/status/123?fixture=' + marker)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if self.page.eval('location.search === ' + json.dumps('?fixture=' + marker)
+                                      + ' && window.finished === true'):
+                        break
+                    time.sleep(0.02)
+                else:
+                    self.fail('the real browser did not complete its fixture request')
+                snap = x_page_state.read(self.page, x_post.READ_JS)
+                self.assertIs(status == 429, snap.get('limited'))
+                self.assertIs(status >= 400, snap.get('failed'))
+                self.assertIs(False, snap.get('empty'))
 
     def test_error_words_in_a_real_post_cannot_make_it_absent_or_rate_limited(self):
         text = '有人说「该页面不存在」或「请稍后再试」，但这是一条正常推文。'

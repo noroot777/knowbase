@@ -455,6 +455,23 @@ class BackfillTests(ChannelBase):
         self.assertEqual(row, self.row(row['key']))
         self.assertIn('登录', stats['results'][0]['error'])
 
+    def test_request_error_is_reported_without_replacing_the_row_or_stopping_other_repairs(self):
+        row = self.seed()
+        other = self.seed(identity='124')
+        failed = dict(snapshot(''), id='', ready='complete', failed=True)
+        complete = dict(snapshot(FULL), at='124', id='124')
+        page = Page(failed, failed, complete, complete)
+        stats = backfill.repair([row, other], page, apply=True)
+        self.assertEqual(1, stats['failed'])
+        self.assertEqual(0, stats['unavailable'])
+        self.assertEqual(1, stats['updated'])
+        self.assertEqual(0, stats['deferred'])
+        self.assertNotIn('stop_reason', stats)
+        self.assertEqual(row, self.row(row['key']))
+        self.assertEqual(FULL, self.row(other['key'])['body'])
+        self.assertIn('X 页面请求出错', stats['results'][0]['error'])
+        self.assertEqual(4, page.reads)
+
     def test_expired_budget_and_stop_do_not_open_a_page_or_touch_data(self):
         row = self.seed()
         for kwargs in [{'deadline': time.monotonic() - 1}, {'should_stop': lambda: True}]:

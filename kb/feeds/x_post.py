@@ -1,13 +1,12 @@
 """Expand timeline previews on the matching status page before storing a post."""
 from __future__ import annotations
 
-import json
 import re
 import time
 
 from kb.feeds import x_article
 from kb.feeds.x_cdp import CdpError
-from kb.feeds.x_page_state import STATE_JS, XRateLimited
+from kb.feeds.x_page_state import STATE_JS, XRateLimited, navigate, problem, read
 
 HINT = '_x_post_prefix'
 SECONDS = 25.0
@@ -59,6 +58,10 @@ class PostGone(PostUnavailable):
     """The requested, fully loaded page explicitly says the post is unavailable."""
 
 
+class PostRequestFailed(PostUnavailable):
+    """The page offers a retry, without proving absence or an HTTP rate limit."""
+
+
 def expanded(text: str, preview: str) -> bool:
     return len(text.strip()) > len(preview.strip())
 
@@ -79,17 +82,22 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
     _check(until, should_stop)
     previous = None
     absent = False
+    previous_problem = ''
     try:
-        navigation = session.goto(url)
+        navigation = navigate(session, url)
         if isinstance(navigation, dict) and navigation.get('errorText'):
             raise PostUnavailable(f'推文详情页打开失败:{navigation["errorText"]}')
         while True:
             _check(until, should_stop)
-            snap = json.loads(session.eval(READ_JS))
+            snap = read(session, READ_JS)
             if snap.get('login'):
                 raise PostUnavailable('推文详情页需要重新登录 X')
-            if snap.get('limited'):
-                raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
+            current_problem = problem(snap) if snap.get('at') == match[1] else ''
+            if current_problem and current_problem == previous_problem:
+                if current_problem == 'limited':
+                    raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
+                raise PostRequestFailed('X 页面请求出错,请稍后重试(不能据此确认限流或推文不存在)')
+            previous_problem = current_problem
             missing = (snap.get('at') == match[1] and not snap.get('id')
                        and snap.get('ready') == 'complete' and snap.get('empty') is True)
             if missing and absent:
@@ -118,7 +126,7 @@ def merge(entry: dict, text: str) -> dict:
 
 
 def fill(entries: list[dict], *, session, deadline=None, should_stop=None):
-    kept, missed = [], 0
+    kept, missed, request_failed = [], 0, 0
     for entry in entries:
         if HINT not in entry:
             kept.append(entry)
@@ -128,14 +136,17 @@ def fill(entries: list[dict], *, session, deadline=None, should_stop=None):
             complete = merge(entry, text)
         except PostGone:
             continue
-        except PostUnavailable:
+        except PostUnavailable as exc:
             if x_article.needs_article(entry):
                 kept.append(entry)
                 continue
             missed += 1
+            request_failed += isinstance(exc, PostRequestFailed)
             continue
         kept.append(complete)
     note = f'有 {missed} 条折叠推文的完整正文没取到,留到下次同步再试' if missed else ''
+    if request_failed:
+        note += f';其中 {request_failed} 条为 X 页面请求出错,请稍后重试'
     return kept, note
 
 

@@ -104,6 +104,10 @@ class Session:
 
     def __init__(self) -> None:
         self._seq, self._sid, self._target = 0, '', ''
+        self._event_observers = []
+
+    def observe_events(self, observer) -> None:
+        self._event_observers.append(observer)
 
     # ── 传输(子类实现)──────────────────────────────────────────────────────
 
@@ -127,7 +131,7 @@ class Session:
 
     def call(self, method: str, params: dict | None = None, sid: str = '',
              timeout: float = CALL_TIMEOUT) -> dict:
-        """发一条命令,等它自己那条回复。期间的事件一律丢掉(我们不订阅事件)。
+        """发一条命令,等它自己那条回复。期间的事件交给已登记的观察者,其余丢掉。
 
         **deadline 要在发出去之前就算出来,而且发送也受它约束。** 原来是先
         `_send` 再算 deadline,于是 `timeout` 只管收、不管发 —— 对端卡住不读
@@ -140,6 +144,9 @@ class Session:
         want = self._send(method, params, sid, deadline)
         while True:
             msg = self._take(deadline)
+            if msg.get('method'):
+                for observer in self._event_observers:
+                    observer(msg)
             if msg.get('id') != want:
                 continue                              # 别人的回复,或是事件
             if 'error' in msg:
