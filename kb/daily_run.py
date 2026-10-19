@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 """日报的编排与定时:到点先把所有来源同步一遍,再生成当天的日报。
 
-同步这一步不自己造轮子,而是**依次**借用已有的管道(`kb.pipeline`),分两段:
-每个来源各跑一趟 抓取→导出,全部抓完再跑一趟全库的 索引→提取(只有前两段认
-来源,后两段没有「只做这个来源那一份」的概念)。依次而不是并发:管道是单例
-(全局一把运行锁,索引/提取都要单写者写 kb.db),两轮同时开等于一个必然被拒。
+同步这一步不自己造轮子,而是**依次**借用已有的管道(`kb.pipeline`),分两段:每个
+来源各跑一趟 抓取→导出,全部抓完再跑一趟全库的 索引→提取(只有前两段认来源)。
+依次而不是并发:管道是单例(一把运行锁,索引/提取都要单写者写 kb.db)。
 
 于是一轮日报是 N+1 次管道运行,而「最近一次运行」只有一个位子 —— 这几轮用
-`pipeline.open_batch()` 归成一个**业务批次**,每一轮收尾都由结果存储层把整批合并着
-落盘,否则抓取失败的明细和「重试失败项」会被最后那一轮入库的成功抹掉。细节仍旧
-点进同步中心看,这里只记每一项的成败。
-硬约束在 `docs/decisions/sync-schedule.md`。
+`pipeline.open_batch('daily')` 归成一个**业务批次**,每一轮收尾都由结果存储层把整批
+合并着落盘,否则抓取失败的明细和「重试失败项」会被最后那一轮入库的成功抹掉。那个
+`'daily'` 是这一批的身份,面板的历史清单据此写「日报」而不是「同步」。细节仍旧点进
+同步中心看,这里只记每一项的成败。硬约束在 `docs/decisions/sync-schedule.md`。
 """
 
 from __future__ import annotations
@@ -473,13 +472,12 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
             from kb import pipeline as pl     # 延迟:它反过来 import 本模块
             labels = _channel_labels()
             budget_end = time.monotonic() + SYNC_BUDGET
-            # 这一轮日报是 N+1 次管道运行,而「最近一次运行」只有一个位子。开一个
-            # **业务批次**,之后每一轮子轮收尾都由结果存储层把整批合并着写进去
-            # (见 `pipeline_state._publish_in_batch`)—— 盘上那份于是始终等于
-            # "已经收尾的这几轮合起来",进程在任何一刻退出都不会把前几轮的抓取
-            # 失败和失败名单弄丢。**这件事不能由这里事后补**:子轮收尾和我们下一
-            # 句之间进程就可能没了。
-            batch = pl.open_batch()
+            # 开一个**业务批次**:之后每一轮子轮收尾都由结果存储层把整批合并着写
+            # 进去(见 `pipeline_state._publish_in_batch`),盘上那份于是始终等于
+            # 「已经收尾的这几轮合起来」,进程在任何一刻退出都不会把前几轮的抓取
+            # 失败和失败名单弄丢。**不能事后补**:子轮收尾和下一句之间进程就可能
+            # 没了。`'daily'` 是这一批的身份(见模块开头)。
+            batch = pl.open_batch('daily')
             for channel in channels:
                 if _halting():
                     _state['channels'].append(
@@ -551,12 +549,14 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         _set('failed', f'日报生成失败: {e}')
     finally:
         from kb import pipeline as pl
+        # **出报成没成要在同步中心也看得见**(事故形态在 `sync-schedule.md`)。进的
+        # 是**批次账本**:后面几轮重拼日志时不会把它挤掉(见 `batch_note`)。
+        pl.batch_note(_state['detail'] or '日报这一轮没有留下结论')
         # 出报之后那一段(位置的两条理由在 `kb.daily_library` 的模块注释里)。
         library_round(batch, _sync_round)
-        # 批次一定要关掉:半路抛出来的时候上面那一句走不到,而开着的批次会把下一轮
-        # 管道运行算进一个早就结束的批次。
-        #
-        # 发布不成不是日报的失败,但**不许咽下去**(见 `amend_done`)。
+        # 批次一定要关掉:半路抛出来时上面那句走不到,而开着的批次会把下一轮管道
+        # 运行算进一个早就结束的批次。发布不成不是日报的失败,但**不许咽下去**
+        # (见 `amend_done`)。
         if issue := pl.close_batch():
             _log(f'同步结果未发布:{issue}')
             amend_done(f'；{issue}')

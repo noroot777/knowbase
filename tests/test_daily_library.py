@@ -149,8 +149,9 @@ class OrchestrationTests(unittest.TestCase):
              patch('kb.daily_run._sync_round', Mock(return_value={
                  'channel': '', 'label': 'x', 'status': 'ok', 'detail': ''})), \
              patch('kb.daily_run._channel_labels', lambda: {'rss': 'RSS'}), \
-             patch('kb.pipeline.open_batch', lambda: 'b-1'), \
+             patch('kb.pipeline.open_batch', lambda kind='': 'b-1'), \
              patch('kb.pipeline.close_batch', lambda: ''), \
+             patch('kb.pipeline.batch_note', lambda note: True), \
              patch('kb.daily_run._release_round', lambda *a: None):
             _state.update(stop_requested=False, over_budget=False, channels=[],
                           sched_day='', phase='idle', detail='', log=[])

@@ -16,6 +16,10 @@ function pipePlannedStages(result) {
 }
 function pipeRunLabel(result) {
   const legacyRetry = !result.run_kind && Object.values(result.stages || {}).some(st => st.status === 'skipped' && st.detail === '本次无需重试');
+  // 「日报」是业务批次自己的身份(`open_batch('daily')` → `_merge_runs` 的 kind)。
+  // 原来整批一律写死成「同步」,于是调度器起的日报轮和一次手点的同步在这张清单里
+  // 长得一模一样 —— 而这张清单是排查「今天到底发生了什么」的唯一入口。
+  if (result.run_kind === 'daily') return '日报';
   return result.run_kind === 'retry' || legacyRetry ? '重试' : '同步';
 }
 function pipeStateHint(s, result, failed, skipped, progress) {

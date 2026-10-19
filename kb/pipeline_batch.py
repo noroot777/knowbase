@@ -133,6 +133,10 @@ _batch_issue = ""           # 这一批**当前**没能发布出去的原因,空
 # 字追加到当轮合并结果里的话,后面一轮发布成功之后这条历史就没了,而面板上写着
 # "原因留在运行日志里"(第 6 轮实测:最终日志里找不到那次失败)。
 _batch_notes: list[str] = []
+# 这一批是谁起的(`open_batch(kind=...)`),合并时写进 `run_kind`。空串 = 一次普通
+# 同步。**只在 `open_batch` 里设,`close_batch` 里清** —— 留着的话下一批会继承上
+# 一批的身份,而那正是「分不出是谁起的」换一个方向犯一遍。
+_batch_kind = ""
 
 
 def _remember_batch_note(note: str) -> None:
@@ -151,8 +155,28 @@ def _remember_batch_note(note: str) -> None:
 _batch_seq = 0
 
 
-def open_batch() -> str:
+def batch_note(note: str) -> bool:
+    """往**当前这一批**的日志里记一行人话;没有批次时返回 False、什么都不做。
+
+    给的是「这一批里发生了、但不属于任何一个阶段」的事:日报没出来、出报用的模型
+    挂了、库整理那一段被跳过。**它必须进批次账本而不是某一轮的日志** —— 后面几轮
+    的合并是从子轮账本重新拼日志的,只追加到当轮合并结果里的话,下一轮发布成功之后
+    这行字就没了(理由和 `_remember_batch_note` 那条一样)。
+
+    **判据只有 `_remember_batch_note` 那一份**:在这里再判一遍「属不属于这一批」,
+    两处迟早在某一档上岔开。返回值说的是「记上了没有」,调用方据此决定要不要另找
+    地方说(日报自己那份 `daily_last_run.json` 照旧写,这条只是让同步中心也看得见)。
+    """
+    before = len(_batch_notes)
+    _remember_batch_note(note)
+    return len(_batch_notes) > before
+
+
+def open_batch(kind: str = "") -> str:
     """开一个业务批次,返回它的身份 —— 交给 `start_pipeline(batch=...)`。
+
+    `kind` 是这一批的身份,原样写进合并结果的 `run_kind`(见 `_merge_runs`):
+    日报那一轮传 `"daily"`,面板的历史清单据此写「日报」而不是「同步」。
 
     **和 `close_batch()` 成对**,调用方放在 try/finally 里:不关的话下一轮管道
     运行会被算进一个早就结束的批次。
@@ -163,10 +187,11 @@ def open_batch() -> str:
     于是今天第二次抓取被并进第一次,面板上永远写着「第 1 次」。
     """
     global _batch_id, _batch_runs, _batch_issue, _batch_notes, _batch_seq
+    global _batch_kind
     with ps._lock:
         _batch_seq += 1
         _batch_id, _batch_runs = f"batch-{ps._RUN_EPOCH}-{_batch_seq}", []
-        _batch_issue, _batch_notes = "", []
+        _batch_issue, _batch_notes, _batch_kind = "", [], kind
         return _batch_id
 
 
@@ -176,10 +201,10 @@ def close_batch() -> str:
     盘上那份已经在最后一个子轮收尾时写全了,这里不再写 —— 所以**提早返回、
     甚至中途崩掉都不会少东西**。
     """
-    global _batch_id, _batch_runs, _batch_issue, _batch_notes
+    global _batch_id, _batch_runs, _batch_issue, _batch_notes, _batch_kind
     with ps._lock:
         issue, _batch_id, _batch_runs = _batch_issue, "", []
-        _batch_issue, _batch_notes = "", []
+        _batch_issue, _batch_notes, _batch_kind = "", [], ""
         return issue
 
 
@@ -277,7 +302,7 @@ def _publish_in_batch() -> None:
         _batch_issue = e.reason
         _save_own()
         return
-    merged = _merge_runs(_batch_runs, _batch_notes)
+    merged = _merge_runs(_batch_runs, _batch_notes, _batch_kind)
     try:
         ps._write_state(merged)
     except Exception as e:                         # noqa: BLE001 - 原样抛给 _end_run

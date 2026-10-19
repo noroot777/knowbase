@@ -65,7 +65,7 @@ from kb.pipeline_state import (
 
 # 批次层:同一个业务轮里的几轮管道合并着发布(`pipeline_batch`,从
 # `pipeline_state` 拆出来只因为行数上限)。`kb.daily_run` 照旧只认本模块这三个名字。
-from kb.pipeline_batch import PublishRefused, close_batch, open_batch
+from kb.pipeline_batch import PublishRefused, batch_note, close_batch, open_batch
 # 历史清单标「这一行就是此刻屏幕上那份结果」过的是它(只认可信身份、一个字的内容都
 # 不比)。**没绕 `pipeline_state` 再导出一次** —— 那份文件正贴着 700 行上限,而门面
 # 本来就是对外那一层。
@@ -90,6 +90,7 @@ __all__ = [
     "load_history",
     "last_result",
     "load_last_run",
+    "batch_note",
     "open_batch",
     "persist_error",
     "restore_gap",

@@ -103,13 +103,20 @@ def _merge_scopes(records: list[dict], key: str) -> dict:
     return {"channel": merged[0]["channel"], "channels": merged}
 
 
-def _merge_runs(records: list[dict], events: list[str] | None = None) -> dict:
+def _merge_runs(records: list[dict], events: list[str] | None = None,
+                kind: str = "") -> dict:
     """把一个业务批次里跑过的几轮合成**不丢东西**的一份。纯合并:不判资格、不写盘。
 
     `events` 是这一批自己的事件(已经带时间戳),接在合并后的日志末尾 —— 子轮快照
     是落盘之前拍的,不走这条路的话保存失败那行字在下一轮成功之后就没了。
     **别叫 notes**:这个函数里已经有一个 `notes`(失败名单),同名会把参数遮住,
     于是日志里接上去的是那份名单的键(实测:那行保存失败照旧找不着)。
+
+    `kind` 是**这一批自己的身份**(`open_batch(kind=...)` 收的那个),缺省回落成
+    `"sync"`。原来这里写死 `"sync"`,于是日报那一轮在历史清单里和一次手点的同步
+    **长得一模一样** —— 2026-10-19 用户看着 10:22/10:24 两行「同步」问「这是我点
+    的吗」,而那两行是调度器的重试轮。那张清单是他排查「今天到底发生了什么」的
+    唯一入口,分不出是谁起的就什么都查不下去。
 
     **唯一的调用方是 `pipeline_batch._publish_in_batch`**。不要再开一个"事后聚合"
     的公开出口:那正是这件事原来错的地方 —— 子轮先写一份会删掉前序失败的局部
@@ -144,7 +151,7 @@ def _merge_runs(records: list[dict], events: list[str] | None = None) -> dict:
         "started_at": min(started) if started else "",
         "finished_at": max(finished) if finished else _now(),
         "stopped": any(r.get("stopped") for r in records),
-        "run_kind": "sync",
+        "run_kind": kind or "sync",
         "planned_stages": planned,
         "stages": stages,
         "crawl_filter": _merge_scopes(records, "crawl_filter"),
