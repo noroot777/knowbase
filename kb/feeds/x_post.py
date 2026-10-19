@@ -142,12 +142,12 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
 
 
 def merge(entry: dict, text: str) -> dict:
-    body = x_body.parts(entry, prefix=entry[HINT])
+    body = x_body.parts(entry)
     if not expanded(text, body.text):
         raise PostUnavailable('详情页正文没有长于时间线预览')
-    complete = dict(entry)
+    complete = x_body.with_text(entry, text)
     complete.pop(HINT)
-    complete.update(title=text.splitlines()[0][:500], body=body.render(text))
+    complete.update(title=text.splitlines()[0][:500])
     return complete
 
 

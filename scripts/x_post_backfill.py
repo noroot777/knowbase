@@ -109,18 +109,18 @@ def aligned_preview(preview: str, detail: str) -> bool:
 
 def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
     """Only bypass raw length when known link artifacts explain the difference."""
-    body = x_body.parts(entry, prefix=entry[x_post.HINT])
+    body = x_body.parts(entry)
     preview = body.text
     canonical = canonical_preview(preview)
     info = dict(artifacts=canonical != preview, after=len(body.render(text)))
-    if text == preview:
-        return 'identical', None, dict(info, reason='detail_matches_stored')
+    if text == entry['body'] or text == preview:
+        return 'identical', None, dict(info, after=len(entry['body']), reason='detail_matches_stored')
     if x_post.expanded(text, preview):
         return 'expanded', x_post.merge(entry, text), dict(info, reason='longer_detail')
     if info['artifacts'] and aligned_preview(preview, text):
-        complete = dict(entry)
+        complete = x_body.with_text(entry, text)
         complete.pop(x_post.HINT)
-        complete.update(title=text.splitlines()[0][:500], body=body.render(text))
+        complete.update(title=text.splitlines()[0][:500])
         return 'normalized', complete, dict(info, reason='legacy_link_artifacts')
     state = 'blocked_artifacts' if info['artifacts'] else 'blocked_length'
     return state, None, dict(info, reason='legacy_link_artifacts_not_reconciled'
@@ -148,6 +148,7 @@ def candidates(conn, *, urls=(), limit=0, all_posts=False) -> list[dict]:
 def entry_of(row: dict) -> dict:
     return {**{key: row[key] for key in
                ('url', 'title', 'body', 'author', 'published', 'content_kind')},
+            x_body.PROVENANCE: row.get(x_body.PROVENANCE, ''),
             x_post.HINT: x_body.parts(row).prefix}
 
 
@@ -166,7 +167,7 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
             text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
         except x_post.PostEmpty as exc:
             entry = entry_of(row)
-            preview = x_body.parts(entry, prefix=entry[x_post.HINT]).text
+            preview = x_body.parts(entry).text
             state = 'blocked_length' if preview else 'empty'
             stats[state] += 1
             result.update(state=state, after=len(entry[x_post.HINT]), empty_kind=exc.kind,

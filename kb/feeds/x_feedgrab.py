@@ -185,9 +185,11 @@ def _entry(meta: dict, body: str, handle: str) -> dict | None:
     text = body.strip()
     if not text and not title:
         return None
-    return {'url': url, 'title': title[:500], 'body': x_body.feed_body(text, title),
-            'author': str(name), 'published': _published(meta),
-            'content_kind': 'post'}
+    entry = {'url': url, 'title': title[:500], 'body': x_body.feed_body(text, title),
+             'author': str(name), 'published': _published(meta), 'content_kind': 'post'}
+    generated = not text and not str(meta.get('title') or '').strip()
+    return x_body.record(entry, '' if generated else text or title,
+                         fallback=title if generated else '')
 
 
 def _read_output(folder: Path, handle: str) -> list[dict]:

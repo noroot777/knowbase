@@ -1,10 +1,11 @@
-"""Shared X ingestion body conventions and conservative legacy provenance recovery."""
+"""Shared X body rendering with producer-recorded, body-bound fragment provenance."""
 from __future__ import annotations
 
-import re
+import hashlib
+import json
 from dataclasses import dataclass
 
-_MEDIA_LINE = re.compile(r'(?:!\[(?:图片|视频封面)\]|\[视频\])\(https?://[^\s)]+\)')
+PROVENANCE = 'body_provenance'
 
 
 def placeholder(author: str) -> str:
@@ -40,43 +41,68 @@ def media_lines(media) -> str:
     return '\n'.join(lines)
 
 
-def _only_media(text: str) -> bool:
-    return bool(text.strip()) and all(_MEDIA_LINE.fullmatch(line) for line in text.strip().splitlines())
-
-
-def _has_title(text: str, title: str) -> bool:
-    return bool(title.strip()) and re.sub(r'\s+', ' ', text).startswith(re.sub(r'\s+', ' ', title))
-
-
 @dataclass(frozen=True)
 class Body:
     prefix: str
     text: str
     media: str = ''
+    fallback: str = ''
 
     def render(self, text: str) -> str:
-        body = self.prefix + text
-        return body + ('\n\n' if text else '') + self.media if self.media else body
+        content = text or self.fallback
+        body = self.prefix + content
+        return body + ('\n\n' if content else '') + self.media if self.media else body
 
 
-def parts(entry: dict, *, prefix: str | None = None) -> Body:
+def _fingerprint(body: str) -> str:
+    return hashlib.sha256(body.rstrip().encode()).hexdigest()
+
+
+def record(entry: dict, text: str, *, prefix='', media='', fallback='') -> dict:
+    fragments = Body(prefix, text, media, fallback)
+    if fragments.render(text).rstrip() != entry['body'].rstrip():
+        raise ValueError('X body does not match its producer-recorded fragments')
+    evidence = dict(version=1, fingerprint=_fingerprint(entry['body']),
+                    prefix=prefix, media=media, fallback=fallback)
+    return {**entry, PROVENANCE: json.dumps(evidence, ensure_ascii=False, sort_keys=True)}
+
+
+def parts(entry: dict) -> Body:
     body = entry['body']
-    title = entry.get('title', '')
-    generated = title == placeholder(entry.get('author', ''))
-    if prefix is None:
-        head, separator, tail = body.partition('\n\n')
-        attribution = head and all(line.startswith('> ') for line in head.splitlines())
-        recognized = (separator and _has_title(tail, title)) or (
-            generated and (not tail.strip() or _only_media(tail)))
-        prefix = head + '\n\n' if attribution and recognized else ''
-    raw = body.removeprefix(prefix).strip()
-    if prefix and body.rstrip() == prefix.rstrip():
+    unknown = Body('', body)
+    try:
+        evidence = json.loads(entry.get(PROVENANCE) or '')
+    except (TypeError, ValueError):
+        return unknown
+    if (not isinstance(evidence, dict) or evidence.get('version') != 1
+            or evidence.get('fingerprint') != _fingerprint(body)
+            or not all(isinstance(evidence.get(key), str) for key in ('prefix', 'media', 'fallback'))):
+        return unknown
+    prefix, media, fallback = (evidence[key] for key in ('prefix', 'media', 'fallback'))
+    raw = body.rstrip()
+    if prefix and raw == prefix.rstrip():
         raw = ''
-    if generated and raw == title:
+    elif raw.startswith(prefix):
+        raw = raw[len(prefix):]
+    else:
+        return unknown
+    if media:
+        if raw == media:
+            raw = ''
+        elif raw.endswith('\n\n' + media):
+            raw = raw[:-len(media) - 2]
+        else:
+            return unknown
+    if fallback:
+        if raw != fallback:
+            return unknown
         raw = ''
-    if generated and _only_media(raw):
-        return Body(prefix, '', raw)
-    text, separator, media = raw.rpartition('\n\n')
-    if separator and _has_title(text, title) and _only_media(media):
-        return Body(prefix, text, media)
-    return Body(prefix, raw)
+    fragments = Body(prefix, raw, media, fallback)
+    return fragments if fragments.render(raw).rstrip() == body.rstrip() else unknown
+
+
+def with_text(entry: dict, text: str) -> dict:
+    fragments = parts(entry)
+    body = Body(fragments.prefix, text, fragments.media)
+    return record({**entry, 'body': body.render(text)}, text,
+                  prefix=body.prefix, media=body.media)

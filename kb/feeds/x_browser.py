@@ -235,7 +235,7 @@ def _entry(item: dict) -> dict | None:
         out[x_article.HINT] = str(item['article'])
     if item.get('truncated'):
         out[x_post.HINT] = body[:-len(text)] if text else body
-    return out
+    return x_body.record(out, text, prefix=body[:-len(text)] if text else body)
 
 
 def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
