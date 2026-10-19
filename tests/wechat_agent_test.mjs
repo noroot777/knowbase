@@ -5,6 +5,7 @@ import vm from 'node:vm';
 
 const source = readFileSync(new URL('../kb/static/js/wechat_setup.js', import.meta.url), 'utf8');
 const markup = readFileSync(new URL('../kb/static/index.html', import.meta.url), 'utf8');
+const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
 
 function fixture(clipboard) {
   const elements = new Map();
@@ -28,6 +29,22 @@ function fixture(clipboard) {
   vm.runInContext(source, context);
   return {context, element, requests};
 }
+
+test('README names the actual buttons for first connection and an existing connection', () => {
+  const {context, element} = fixture(undefined);
+  const onboarding = readme.split('#### 绿泡泡接入（首次）')[1].split('</details>')[0];
+  const instruction = onboarding.match(/^2\..*$/m)?.[0];
+  assert.ok(instruction, 'README must describe the first connection action');
+  for (const scenario of [
+    {state: 'unchecked', ready: false, label: '检查并接入绿泡泡'},
+    {state: 'ready', ready: true, label: '重新检查连接'},
+  ]) {
+    vm.runInContext(`wechatSetup = ${JSON.stringify(scenario)}; renderWechatSetup()`, context);
+    const label = element('wechat-check').textContent;
+    assert.equal(label, scenario.label);
+    assert.ok(instruction.includes(`「${label}」`), `README must name the ${scenario.state} action: ${label}`);
+  }
+});
 
 test('alternate method exposes a labelled, read-only prompt without starting acquisition', async () => {
   const {context, element, requests} = fixture({writeText: async () => {}});

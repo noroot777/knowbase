@@ -65,6 +65,8 @@ async page => {
     await page.locator('#wechat-check').waitFor({state:'visible'});
     check('首次配置展示供应商和模型状态', await page.locator('#wechat-provider-state').textContent() === '已配置'
       && await page.locator('#wechat-model-state').textContent() === '已就绪');
+    check('首次未接入显示检查并接入绿泡泡', await page.locator('#wechat-check').textContent() === '检查并接入绿泡泡');
+    await page.screenshot({path:'output/playwright/wechat-first-connection.png',fullPage:true});
     await page.locator('.wechat-agent summary').click();
     const prompt = await page.locator('#wechat-agent-prompt').inputValue();
     check('智能体提示词可查看且只读', await page.locator('#wechat-agent-prompt').getAttribute('readonly') !== null
@@ -95,6 +97,7 @@ async page => {
     status = { ...status, state:'ready', running:false, ready:true,
       confirmation_token:undefined, message:'绿泡泡数据库已验证可读，可以开始同步。' };
     await page.locator('#wechat-next').waitFor({state:'visible'});
+    check('已接入显示重新检查连接', await page.locator('#wechat-check').textContent() === '重新检查连接');
     check('成功后首次提示收起', await page.locator('#wechat-welcome').isHidden());
     await page.locator('#wechat-next').click();
     await page.waitForFunction(() => pipeChannel === 'wechat_local');
