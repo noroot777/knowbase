@@ -16,7 +16,7 @@ import threading
 from copy import deepcopy
 from pathlib import Path
 
-from kb.collectors import active_collector, retry_narrower
+from kb.collectors import active_collector, channel_labels, retry_narrower
 from kb.pipeline_state import (
     _SEQ_GEN,
     STAGES,
@@ -265,11 +265,13 @@ def _run_retry_failed(plan: list[str], crawl_filter: dict | None = None,
         _end_run()
 
 
-# 上一轮失败的那几条后来都已经不用重抓了。两件事都要说:为什么是空的、以及真想
-# 重抓某一条该走哪个入口 —— 否则用户看到的是一句"上次运行没有失败项",而面板上
-# 明明还显示着上一轮的失败。
-RETRY_NOTHING = ("上一轮失败的那几个来源后来都已成功同步（或已删除、停用），"
-                 "没有要重抓的；要重新抓某一条，请在「我的订阅」里单独同步它")
+# 上一轮失败的那几条后来都已经不用重抓了(后来单独同步过、被删被停,或者**今天
+# 前面某轮已经抓成过** —— 当日继承,见 `sync.still_failing`)。两件事都要说:为什么
+# 是空的、以及真想再抓一次该走哪个入口 —— 否则用户看到的是一句"上次运行没有失败
+# 项",而面板上明明还显示着上一轮的失败。
+RETRY_NOTHING = ("上一轮失败的那几个来源，今天都已经成功抓过了（或者后来单独同步过、"
+                 "已删除、已停用），这颗按钮没有要补的；想再取一次新内容，请在"
+                 "「我的订阅」里单独同步它，或者跑一次完整同步")
 
 
 def retry_crawl_scopes(prev: dict) -> list[dict]:
@@ -314,6 +316,47 @@ def retry_crawl_scopes(prev: dict) -> list[dict]:
     return scopes
 
 
+# 一个来源都抓不动时那句话。**拒绝起跑而不是让它原地红一遍**:拒绝不改任何状态,
+# 上一轮的结论和失败名单一字不动,下一次重试照旧从它派生;真让它跑完,这一份一模
+# 一样的失败就成了「最近一次运行」,而计划和范围都从最近那一轮派生 —— 等于拿一轮
+# 白跑换掉了手上那份诊断(2026-10-19 那次 10:34 的重试就是这么把 09:12 那轮的结论
+# 顶掉的)。
+_BLOCKED_PREFIX = '现在一个来源都抓不动，先把这件事处理掉再重试：'
+
+
+def crawl_blocked(scopes: list[dict]) -> str:
+    """这一轮要重抓的来源**是不是一个都抓不动**;有一个抓得动就返回空串。
+
+    **「抓得动」的判据是采集器自己那份 `status()`**(`online and ready`),这里不
+    另写一份 —— 新增一条通道时这个函数一个字都不用改,口径跟面板上那张来源卡片
+    也就不会岔开(同 `registry.configuration_error` 那条)。
+
+    **问不出来一律放行。** `status()` 要起子进程、读订阅库、碰文件系统,它自己炸掉
+    跟「能不能抓」是两件事:拦住整轮会把同一轮里本该重试的 index / extract 一起
+    带走(同 `refill_script` 那条「永不抛」的理由)。漏拦一次的代价只是白抓一轮,
+    错拦一次的代价是该补的一步也没补。
+
+    **有一个抓得动就不拦,而且当场返回** —— 那一轮有正事可做,拦住它等于拿一个
+    来源的故障扣下别人的重试;顺带也省掉剩下那几次探测(公众号那一下要起采集器
+    CLI,冷缓存时几十秒)。
+    """
+    reasons: list[str] = []
+    labels = channel_labels()
+    for scope in scopes:
+        channel = scope.get('channel') or ''
+        try:
+            st = active_collector(channel).status()
+            if st.online and st.ready:
+                return ''
+            why = (st.message or '').strip()
+            hint = (st.hint or '').strip()
+        except Exception:
+            return ''
+        reasons.append(f"{labels.get(channel) or channel or '来源'}：{why or '现在抓不动'}"
+                       + (f"（{hint}）" if hint else ''))
+    return '；'.join(reasons)
+
+
 # 三档各自说清**为什么这会儿不能重试**,而不是笼统一句「恢复得不完整」——
 # 用户要据此决定下一步(三档都是「跑一次完整同步就好了」,但原因不同)。
 _GAP_REFUSED = {
@@ -351,6 +394,13 @@ def start_retry_failed() -> tuple[bool, str]:
     # (2026-10-09 第 2 轮审查实测)。顺序反过来就没有这条路:crawl 不在计划里
     # 时压根不碰订阅库。
     scopes = retry_crawl_scopes(prev) if "crawl" in plan else []
+    # **拦路的东西还拦着就别起跑。** 这道闸要在一切状态改动之前(理由在
+    # `_BLOCKED_PREFIX` 那段):拒绝 = 上一轮的结论、失败名单、导出范围一字未动。
+    # **它只是早一道,不是互斥**(元规则那条):探测完到真起跑之间那个窗口里拦路
+    # 的东西照样能回来,那一档由抓取阶段自己红掉 —— 这道闸换的是「别拿一轮白跑
+    # 顶掉手上那份诊断」。
+    if scopes and (blocked := crawl_blocked(scopes)):
+        return False, _BLOCKED_PREFIX + blocked
     # 上一轮 crawl 确实失败过,可那几个目标现在一个都不用重抓了:把 crawl 摘出
     # 计划(范围是空的,真让它跑会按"没指定来源"回落到默认采集器),并在它那张
     # 卡片上说清为什么 —— 一张绿色的「检查 0/0 个来源」和"这个按钮坏了"长得

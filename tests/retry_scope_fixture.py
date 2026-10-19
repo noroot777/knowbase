@@ -9,6 +9,7 @@ from __future__ import annotations
 import tempfile
 import time
 import unittest
+from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -152,11 +153,44 @@ class RetryScopeBase(RoundBase):
             self._wait_idle('重试那一轮没有收尾')
         return got, self.stage()
 
-    def refuse(self):
-        """点「重试失败项」而它拒绝起跑:返回那句话,并确认一个请求都没发。"""
+    def no_backlog(self):
+        """「没有提取积压」—— 要验「没有失败项就拒绝起跑」时必须钉住这个前提。
+
+        计划空下来之后 `retry_failed_plan` 会去问一句「vault 里还有没有没提取的
+        文档」,有积压就排一步 extract 照旧起跑(那是正当行为)。而那一问读的是
+        **共用的** `KB_DATA_DIR/kb.db` —— 本仓库任何一次真索引都会往里添文档,
+        于是「拒绝起跑」这一类用例的红绿取决于别人留下的库存:同跑时红、单跑时绿,
+        而红的地方跟改动毫无关系(2026-10-19 实测,一次误跑的真索引让两条存量用例
+        当场变红)。前提自己摆出来,别押在环境上。
+
+        `retry_failed_plan` 是在函数体里 `from kb.extract import pending_docs`
+        的,所以打桩打在**模块属性**上才拦得住(打 `pipeline_retry.pending_docs`
+        那个名字压根不存在)。
+        """
+        from kb import extract
+        return patch.object(extract, 'pending_docs', lambda *a, **k: [])
+
+    def refuse(self, backlog=False):
+        """点「重试失败项」而它拒绝起跑:返回那句话,并确认一个请求都没发。
+
+        `backlog=True` 时不钉积压那个前提 —— 给「拒绝的理由跟积压无关」那几局用
+        (比如拦路的东西还拦着,那一档在问积压之前就拒了)。
+        """
+        # **后面那几个阶段一律打桩掉。** 这一局断言的是「它拒绝了」,所以真跑起来
+        # 本身就是失败 —— 而不打桩的话那一轮会真去索引整个 vault(共用的
+        # `KB_DATA_DIR/kb.db`),反向验证时一条注入就把用例挂住十几分钟,看起来像
+        # 卡死而不是像红。
         with patch.object(sync, 'fetch_source',
-                          side_effect=AssertionError('不该发出任何请求')):
+                          side_effect=AssertionError('不该发出任何请求')), \
+             patch.object(pipeline_retry, '_run_export'), \
+             patch.object(pipeline_retry, '_run_index'), \
+             patch.object(pipeline_retry, '_run_extract'), \
+             patch.object(pipeline_retry, '_run_projects'), \
+             patch.object(pipeline_retry, '_run_wiki'), \
+             (nullcontext() if backlog else self.no_backlog()):
             ok, msg = pipeline_retry.start_retry_failed()
+            if ok:
+                self._wait_idle('那一轮起跑了却没收尾')
         self.assertFalse(ok, f'这一局本该拒绝起跑,实际起跑了:{msg}')
         return msg
 
@@ -174,6 +208,20 @@ class RetryScopeBase(RoundBase):
         with reg.db() as c:
             c.execute('UPDATE subscriptions SET last_success=? WHERE id=?',
                       (later, source['id']))
+
+    def succeeded_on(self, source, days_ago: int):
+        """把这条订阅的「上次成功」挪到 `days_ago` 天前(按项目时区算那一天)。
+
+        「今天成过就不再重抓」那条当日继承(`sync._succeeded_today`)把**哪一天**
+        变成了判据,所以「以前好着、这一轮才坏」这组用例必须说出那个「以前」是哪
+        天 —— 随手用 `reg.now()` 的话它落在今天,验的就成了当日继承那一档,而
+        docstring 上写的还是跨天那一档。
+        """
+        when = (datetime.now(ZoneInfo('Asia/Shanghai'))
+                - timedelta(days=days_ago)).astimezone(timezone.utc)
+        with reg.db() as c:
+            c.execute('UPDATE subscriptions SET last_success=? WHERE id=?',
+                      (when.isoformat(timespec='seconds'), source['id']))
 
     def urls(self, source):
         """这条订阅库里现有的条目 url(用来确认"真的按新地址抓过")。"""

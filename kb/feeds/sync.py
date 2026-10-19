@@ -6,7 +6,9 @@ import os
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -27,6 +29,11 @@ from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_so
 from kb.pipeline_segments import note_retry_targets
 from kb.source_types import SOURCE_TYPES
 from kb.pipeline_state import _state, _stage
+
+#: 「今天」按项目时区算(CLAUDE.md 那条),不按宿主机、更不按 `last_success` 自己
+#: 那个 UTC 日期 —— 两者差 8 小时,截字符串比日期会在每天 08:00 之前判反(见
+#: `_succeeded_today`)。
+TZ = ZoneInfo('Asia/Shanghai')
 
 FETCH_WORKERS = 4
 COLLECT_SECONDS = 90
@@ -218,6 +225,26 @@ def _prefetch_digest(kind, sources, settings, scope):
                     should_stop=lambda: bool(_state.get('stop_requested')))
 
 
+def _succeeded_today(stamp: str, now: datetime | None = None) -> bool:
+    """这条订阅**今天**成功同步过(项目时区)。空串 / 读不懂一律 False。
+
+    **必须换算时区再取日期,不许截 `stamp` 的前 10 个字符**:`last_success` 是
+    `reg.now()` 的 UTC ISO,日界比 Asia/Shanghai 早 8 小时,截字符串会在每天
+    08:00 之前判反 —— 昨天上午成功过的订阅被当成「今天成过」而跳过重抓,**静默
+    丢数据**。**读不懂的时刻算「没成过」,不按项目时区补齐**:补齐猜错是少抓,
+    当成没成过顶多多抓一次。两条的完整形态在 `docs/decisions/retry-scope.md`。
+    """
+    if not stamp:
+        return False
+    try:
+        at = datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return False
+    if at.tzinfo is None:
+        return False
+    return at.astimezone(TZ).date() == (now or datetime.now(TZ)).astimezone(TZ).date()
+
+
 def still_failing(kind, note):
     """上一轮失败的那几条订阅里,现在仍然需要重抓的那些(返回订阅 id)。
 
@@ -225,10 +252,17 @@ def still_failing(kind, note):
     它连同退避一起清空,照它筛就把「已改正、还没验证过」的那条当成「已经恢复」漏掉
     —— 用户修完地址点「重试失败项」,那个账号一条都不抓(见 `note_retry_targets`)。
 
-    判据是**那一轮失败之后有没有成功同步过**:`last_success` 比名单的时刻新,说明它
-    后来已经成功了(比如用户在「我的订阅」里单独同步过一次),不必再抓一遍 —— 而改过
-    链接的那条 `last_success` 被 reset 清成了空串,所以它留在名单里。订阅被删掉、
-    停用、或者名单里那个 id 压根不存在时一并摘掉:没有可抓的东西。
+    摘掉的有两档,都是「再抓一遍也没有新东西」:
+
+    - **那一轮失败之后成功同步过**:`last_success` 比名单的时刻新(比如用户在
+      「我的订阅」里单独同步过一次)。改过链接的那条 `last_success` 被 reset 清成
+      了空串,所以它留在名单里。
+    - **今天已经成功同步过**(`_succeeded_today`),哪怕后来又失败了一次 —— 这一档
+      就是「继承」。**继承只在当日内**,跨天由日期判据自动清零。这颗按钮的射程是
+      「把上一轮没成的补上」,不是「再取一次新内容」;当天想再取新的走「我的订阅」
+      里单独同步、或者一次完整同步。事故形态与边界见 `docs/decisions/retry-scope.md`。
+
+    订阅被删掉、停用、或者名单里那个 id 压根不存在时一并摘掉:没有可抓的东西。
     """
     at = note.get('at') or ''
     ids = {str(t) for t in (note.get('targets') or [])}
@@ -242,6 +276,8 @@ def still_failing(kind, note):
         if str(source['id']) not in ids or not source['enabled']:
             continue
         if at and source['last_success'] and source['last_success'] > at:
+            continue
+        if _succeeded_today(source['last_success']):
             continue
         live.append(str(source['id']))
     return live

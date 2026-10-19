@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import time
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from kb import pipeline_retry, pipeline_segments, pipeline_stages
 from kb import pipeline_state
@@ -81,17 +83,21 @@ class RetryScopeTests(RetryScopeBase):
         self.assertTrue(any('a-fixed.org' in u for u in self.urls(self.a)),
                         '要按**改好之后**那个地址抓,而不是只是"碰过它"')
 
-    def test_a_subscription_that_worked_before_and_broke_now_is_retried(self):
-        """上一轮还好着、这一轮才坏的那条,照样要重抓。
+    def test_a_subscription_that_worked_yesterday_and_broke_now_is_retried(self):
+        """**昨天**还好着、今天这一轮才坏的那条,照样要重抓。
 
         它身上留着一个**旧的** `last_success`,而名单里记的是这一轮的时刻 ——
         两个时间戳必须是同一套格式才比得出先后(`reg.now()` 的 UTC ISO 和
         `pipeline_state._now()` 的本地空格格式混用时,ISO 那个在同一天里恒大于
         空格那个,于是"它后来成功过"一律答成"是",整份名单当场被摘空)。
+
+        **「以前」必须明确是昨天**:当日继承(`sync._succeeded_today`)摘掉的是
+        「今天成过」的那一档,随手用今天的时刻写这一局就验不到跨天这条线了。
         """
         self.crawl({'channel': 'rss'})
         self.assertTrue(reg.subscription('rss', self.a['id'])['last_success'],
                         '这一局的前提:它确实成功过一次')
+        self.succeeded_on(self.a, 1)
         self.crawl({'channel': 'rss', 'force': True}, broken=[self.a])
 
         got, _ = self.retry()
@@ -117,12 +123,31 @@ class RetryScopeTests(RetryScopeBase):
         「重试失败项」重试的是**上一轮**的失败,不是把库里所有失败订阅扫一遍。
         """
         self.crawl({'channel': 'rss'}, broken=[self.c])          # c 留下历史失败
+        # a 在第一轮成功过,把那一次挪到昨天 —— 否则当日继承(`_succeeded_today`)
+        # 会把它也摘掉,这一局就不是在验「c 有没有被拖进来」了。
+        self.succeeded_on(self.a, 1)
         self.crawl({'channel': 'rss', 'accounts': [str(self.a['id'])]},
                    broken=[self.a])
         self.assertTrue(self.last_error(self.c) and self.last_error(self.a))
 
         got, _ = self.retry()
         self.assertEqual({self.a['id']}, got, '范围要和上一轮点名的目标取交集')
+
+    def test_a_single_source_sync_is_not_held_back_by_todays_success(self):
+        """反过来钉一边:**当日继承只管那颗按钮**,单独同步照旧抓。
+
+        「今天成过的不再重抓」把「重试失败项」的射程收窄了,所以必须留一条出路:
+        今天抓成过、晚些时候又坏了的那条订阅,用户在「我的订阅」里点单独同步要
+        真的抓得到它(那条路不走 `still_failing`)。两条都收窄的话,这条订阅当天
+        就彻底没有入口了 —— 那才是静默丢数据。
+        """
+        self.crawl({'channel': 'rss'})
+        row = reg.subscription('rss', self.a['id'])
+        self.assertTrue(sync._succeeded_today(row['last_success']),
+                        '这一局的前提:它今天已经成功抓过一轮')
+        got, _ = self.crawl({'channel': 'rss', 'force': True,
+                             'accounts': [str(self.a['id'])]})
+        self.assertEqual({self.a['id']}, got, '单独同步必须照旧抓到它')
 
     def test_plain_sync_is_never_narrowed_to_failed_sources(self):
         """反过来钉一边:普通同步照旧抓全部,不许按失败名单收窄。
@@ -187,7 +212,12 @@ class RetryScopeTests(RetryScopeBase):
             self.assertTrue(ok)
             self._wait_idle()
         crawl.assert_not_called()
-        self.assertIn('已成功同步', self.stage()['detail'])
+        # 判据是**那张卡片上写着为什么**,不逐字比对文案(那只会把每次改措辞都变成
+        # 一条假红);判文案的那一条在 `start_retry_failed` 的返回值上,比的是
+        # `RETRY_NOTHING` 本身。
+        detail = self.stage()['detail']
+        self.assertEqual(pipeline_retry.RETRY_NOTHING, detail)
+        self.assertIn('我的订阅', detail, '要指到真能再抓一次的那个入口')
 
 
 class SourceLevelFailureTests(RetryScopeBase):
@@ -262,13 +292,66 @@ class StillFailingTests(RetryScopeBase):
         self.succeeded_later(self.a)
         self.assertEqual([], sync.still_failing('rss', note))
 
-    def test_an_older_success_keeps_it_on_the_list(self):
-        """成功是在名单**之前**(以前好着、这一轮才坏)→ 照样要抓。"""
+    def test_yesterdays_success_keeps_it_on_the_list(self):
+        """成功是在**昨天**(那会儿好着、今天这一轮才坏)→ 照样要抓。
+
+        **继承只在当日内** —— 这是跨天那一边的钉子。昨天抓到的东西不解决「今天
+        还一条都没抓到」,摘掉它就是静默少抓一天。
+        """
         self.crawl({'channel': 'rss'})
+        self.succeeded_on(self.a, 1)
         self.crawl({'channel': 'rss', 'force': True}, broken=[self.a])
         note = self.note(self.a)
         self.assertTrue(reg.subscription('rss', self.a['id'])['last_success'])
         self.assertEqual([str(self.a['id'])], sync.still_failing('rss', note))
+
+    def test_a_success_earlier_today_takes_it_off_the_list(self):
+        """**今天前面某轮已经成功抓过**,后来又失败了 → 这一轮不再抓它。
+
+        这是用户点名要的「同一天继承」:2026-10-19 那天 09:12 把 51 个大V全抓成
+        了,10:22 那轮被一个占着浏览器 profile 的登录窗口整批堵死,10:34 点「重试
+        失败项」又把 51 个号抓了一遍。判据落在**名单被摘空**上,不是"调了某个
+        函数"。
+        """
+        self.crawl({'channel': 'rss'})
+        self.crawl({'channel': 'rss', 'force': True}, broken=[self.a])
+        note = self.note(self.a)
+        row = reg.subscription('rss', self.a['id'])
+        self.assertTrue(row['last_error'], '这一局的前提:它这一轮确实失败了')
+        self.assertTrue(sync._succeeded_today(row['last_success']),
+                        '这一局的前提:它今天前面那一轮成功过')
+        self.assertEqual([], sync.still_failing('rss', note))
+
+    def test_the_day_boundary_is_the_projects_timezone_not_utc(self):
+        """**日界按 Asia/Shanghai 算,不按 `last_success` 自己那个 UTC 日期。**
+
+        两者差 8 小时,所以要在那条缝里挑时刻才看得出来 —— 别的用例全在白天跑,
+        两个日期恰好相同,拿 UTC 日期比也一样绿。
+
+        坏的那一档是**静默丢数据**:北京时间还没到 08:00 时,UTC 的「今天」覆盖的
+        是北京**昨天** 08:00 之后那一段,于是昨天上午成功过的订阅被判成「今天成
+        过」而跳过重抓 —— 今天一条都没抓到,面板上却显示没有要补的。
+        """
+        now = datetime(2026, 10, 19, 6, 0, tzinfo=ZoneInfo('Asia/Shanghai'))
+        yesterday_morning = '2026-10-18T02:00:00+00:00'      # = 北京 10-18 10:00
+        self.assertEqual('2026-10-18', yesterday_morning[:10],
+                         '这一局的前提:它的 UTC 日期跟 now 的 UTC 日期一样')
+        self.assertEqual('2026-10-18', now.astimezone(timezone.utc).date().isoformat())
+        self.assertFalse(sync._succeeded_today(yesterday_morning, now),
+                         '昨天上午那次成功被当成了「今天成过」')
+
+        today_just_after_midnight = '2026-10-18T16:30:00+00:00'   # = 北京 10-19 00:30
+        self.assertTrue(sync._succeeded_today(today_just_after_midnight, now),
+                        '北京时间今天凌晨那次成功没被认成今天')
+
+    def test_an_unreadable_success_stamp_keeps_it_on_the_list(self):
+        """反过来钉一边:时刻读不懂时**当成没成过**,宁可多抓一次。
+
+        按项目时区补齐去猜的话,猜错就是静默少抓一次;当成没成过顶多白抓一遍。
+        """
+        self.assertFalse(sync._succeeded_today('2026-10-19'))      # 没有时区
+        self.assertFalse(sync._succeeded_today('前天下午'))         # 压根不是时刻
+        self.assertFalse(sync._succeeded_today(''))
 
     def test_a_gone_or_disabled_subscription_drops_out(self):
         """被删掉、停用的不进范围:没有可抓的东西。"""
