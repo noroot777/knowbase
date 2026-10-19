@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from kb.daily_page import REF_SEP
+from kb.daily_page import REF_SEP, queue_tail
 
 _HEAD = re.compile(r'^## 素材清单[(（](\d+)[ \t]*条[)）][ \t]*$', re.M)
 _ROW_START = re.compile(r'\s*(\d+)\.[ \t]+')
@@ -72,13 +72,38 @@ def _section(body: str, head: re.Match) -> dict | None:
     }
 
 
-def material_view(body: str) -> dict | None:
+def _snapshot_counts(report: dict | None) -> dict | None:
+    if not isinstance(report, dict):
+        return None
+    counts = {key: report.get(key) for key in ('docs', 'total', 'late', 'late_total')}
+    if any(type(value) is not int or not 0 <= value < 2 ** 63 for value in counts.values()):
+        return None
+    if counts['total'] < counts['docs'] or counts['late_total'] < counts['late']:
+        return None
+    return counts
+
+
+def _without_queue_tail(body: str, counts: dict) -> str:
+    tail = queue_tail(**counts)
+    content = body.rstrip('\n')
+    if not tail or not content.endswith(tail):
+        return body
+    return content[:-len(tail)]
+
+
+def material_view(body: str, report: dict | None = None) -> dict | None:
     """只投影唯一且完整的展示结构；歧义原文不借归属容错解析来猜边界。"""
-    candidates = [_section(body, head) for head in _HEAD.finditer(body)]
+    counts = _snapshot_counts(report)
+    if counts is None:
+        return None
+    content = _without_queue_tail(body, counts)
+    candidates = [_section(content, head) for head in _HEAD.finditer(content)]
     candidates = [candidate for candidate in candidates if candidate is not None]
     if len(candidates) != 1:
         return None
     view = candidates[0]
+    if len(view['items']) != counts['docs'] + counts['late']:
+        return None
     items = []
     for row in view['items']:
         item = _entry(row['title'], row['source'], row['number'])
@@ -86,4 +111,5 @@ def material_view(body: str) -> dict | None:
             return None
         items.append({**item, 'span': row['span']})
     view['items'] = items
+    view['after'] = body[view['span'][1]:]
     return view

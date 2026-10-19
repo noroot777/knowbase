@@ -32,6 +32,7 @@ from kb.feeds.translate_scope import (            # noqa: F401 - 再导出
 )
 from kb.pipeline_state import _state
 from kb.feeds.exclusion import failure
+from kb.feeds import markdown_blocks
 
 # 一条正文最多译多少字:超出部分不译,末尾注明并指向原文。RSS 全文条目偶尔
 # 上万字,整篇译一遍的钱和时间都不划算,而知识库要的是能被检索到的中文正文。
@@ -45,9 +46,11 @@ NOTE = '> 本文由英文原文自动翻译，专有名词保留原文；如有�
 _RULES = """把下面的内容翻译成简体中文。
 
 要求:
-- 只输出译文本身,不要解释、不要前言、不要代码围栏。
+- 只输出译文本身,不要解释、不要前言、不要额外添加代码围栏。
 - 保持原有的段落与换行结构,不要合并或拆分段落。
 - 产品名、公司名、人名、代码、命令、URL、缩写保留原文,不要音译。
+- 保留 Markdown 标题、列表、表格、链接格式；不要给整篇输出额外套代码围栏。
+- KB_PRESERVE_ 开头的占位标记必须原样保留、单独一行，不要翻译、修改、重复或删除。
 - 不增不减不总结:原文说什么就译什么。"""
 
 _WITH_TITLE = _RULES + """
@@ -144,10 +147,12 @@ def translate_item(item, model) -> tuple[str, str]:
         # 存量半成品(见 `_requeue_partial`):正文已经是中文,只差标题那一行。
         # 整篇重译一遍是把同一份正文再买一次,而它已经在 vault 里了。
         return _title_only(original, model), item['body_zh']
-    body = (item['body'] or '')[:MAX_BODY]
-    truncated = len(item['body'] or '') > MAX_BODY
+    body, protected, cutoff = markdown_blocks.prepare(item['body'] or '', MAX_BODY)
+    truncated = len(item['body'] or '') > cutoff
     parts = _split(body)
     if not parts:                                # 只有标题
+        if truncated:
+            raise RuntimeError('首个代码块超过翻译长度上限，无法保真截断，请查看原文')
         return _title_only(original, model), ''
     title_zh, out = _parse_titled(_call(
         _WITH_TITLE.format(title=original or '(无标题)', body=parts[0]), model))
@@ -157,8 +162,9 @@ def translate_item(item, model) -> tuple[str, str]:
     text = '\n\n'.join(p for p in pieces if p)
     if not text.strip():
         raise RuntimeError('模型返回了空译文')
+    text = markdown_blocks.restore(text, protected)
     if truncated:
-        text += _TRUNCATED.format(n=MAX_BODY)
+        text += _TRUNCATED.format(n=cutoff)
     if original and not title_zh:
         title_zh = _title_only(original, model)
     return title_zh, text

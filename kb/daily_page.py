@@ -20,6 +20,18 @@ import re
 REF_SEP = ' — '
 
 
+def queue_tail(*, docs: int, total: int, late: int, late_total: int) -> str:
+    """生成器与展示读取共用的限量说明，数量只来自这份日报的取材快照。"""
+    more = []
+    if total > docs:
+        more.append(f'窗口内共 {total} 条,以上列出最新的 {docs} 条。')
+    if late_total > late:
+        more.append(f'补录共 {late_total} 条,以上列出 {late} 条。')
+    if more:
+        more.append('没列出的留在队列里,下一份日报接着带。')
+    return ('\n\n> ' + ' '.join(more)) if more else ''
+
+
 def md_dest(url: str) -> str:
     r"""markdown 链接的目标一律用尖括号包起来。
 
