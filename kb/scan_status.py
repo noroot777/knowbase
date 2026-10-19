@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterator
 
 from kb.config import Source
+from kb.scan_evidence import DocumentEvidence
 
 
 def stat_signature(info: os.stat_result) -> tuple[int, ...]:
@@ -171,6 +172,26 @@ class ScanReport:
                 'INSERT INTO index_scan_roots(root, device, inode) VALUES(?,?,?) '
                 'ON CONFLICT(root) DO UPDATE SET device=excluded.device, inode=excluded.inode',
                 (root, *scope.directories[scope.source.root][:2]))
+
+    def check_document_evidence(self, conn: sqlite3.Connection, documents) -> None:
+        """没有与已提交文档对应的完整目录链,就不能以缺失为由删除。"""
+        receipts = {row['path']: DocumentEvidence.load(row)
+                    for row in conn.execute('SELECT * FROM document_scan_evidence')}
+        observed = {str(directory.relative_to(scope.vault)): signature[:2]
+                    for scope in self.scopes for directory, signature in scope.directories.items()}
+        for row in documents:
+            if not self.allows_missing(row['path'], row['source']):
+                continue
+            evidence = receipts.get(row['path'])
+            if evidence is None or not evidence.matches(row):
+                reason = '缺少与已提交版本对应的入库目录凭据'
+            elif any(observed.get(path) != (device, inode)
+                     for path, device, inode in evidence.directories):
+                reason = '入库目录身份或覆盖无法核实'
+            else:
+                continue
+            for scope in self.matching_scopes(row['path']):
+                scope.fail(scope.vault / row['path'], f'{reason},不授权清理')
 
     def matching_scopes(self, path: str) -> list[ScanScope]:
         relative = Path(path)

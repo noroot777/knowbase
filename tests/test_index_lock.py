@@ -65,6 +65,17 @@ class IndexLockTests(TrimFixture, unittest.TestCase):
     def stage(self, status):
         return [s for s in self.stages if s[0] == 'index' and s[1] == status]
 
+    def seed(self, source, entry=None):
+        item = super().seed(source, entry)
+        doc = scanner._doc_from_file(self.vault / item['path'], scanner.SOURCES[0])
+        conn = store.connect()
+        try:
+            self.assertTrue(store.observed_document_is_current(conn, doc))
+            conn.commit()
+        finally:
+            conn.close()
+        return item
+
     def hold_the_lock_in_another_process(self):
         child = subprocess.Popen([sys.executable, '-c', HOLDER,
                                   str(self.root / maintenance.LOCK_NAME)],

@@ -23,6 +23,11 @@ class FavoriteLifecycleTests(ApiFixture):
                 self.conn.execute(
                     "INSERT OR IGNORE INTO documents(path, source, title, url)"
                     " VALUES (?, 'rss', '删除前的标题', 'https://e.org/deleted')", (DOC,))
+                if mode == 'missing':
+                    with mock.patch.object(scanner, 'VAULT_ROOT', self.vault):
+                        doc = scanner._doc_from_file(
+                            self.vault / DOC, Source('dr-gzh', (self.vault / DOC).parent))
+                    store.upsert_document(self.conn, doc, [], '2026-10-19 12:00:00')
                 self.conn.commit()
                 response = self.snip(path=DOC, quote="文中一句", note="我的备注",
                                      prefix="前文", suffix="后文", quote_unique=1,

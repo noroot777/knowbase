@@ -21,7 +21,7 @@ from kb.config import DATA_DIR, DB_PATH, EMBEDDING_DIM, SOURCES
 # 老库升级那一块搬去了 kb/store_migrate.py(收藏表 DDL 也在那儿 ——
 # 重建 v4 时要用它,留在这儿两头就得互相 import)
 from kb import store_migrate as mig
-from kb import favorite_recovery
+from kb import favorite_recovery, scan_evidence
 from kb.scan_status import ScanReport
 
 _SCHEMA = """
@@ -248,6 +248,7 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.executescript(_SCHEMA)
     conn.executescript(mig.FAVORITES_DDL)
     conn.executescript(favorite_recovery.DDL)
+    conn.executescript(scan_evidence.DDL)
     conn.executescript(_VEC_SCHEMA)
     mig.migrate_entities(conn)
     mig.migrate_promo(conn)
@@ -264,6 +265,14 @@ def doc_needs_reindex(conn: sqlite3.Connection, path: str, content_hash: str) ->
         "SELECT content_hash FROM documents WHERE path=?", (path,)
     ).fetchone()
     return row is None or row["content_hash"] != content_hash
+
+
+def observed_document_is_current(conn: sqlite3.Connection, doc) -> bool:
+    """相同原文无需重建索引;精确匹配已提交版本时可更新目录凭据。"""
+    if doc_needs_reindex(conn, doc.path, doc.content_hash):
+        return False
+    scan_evidence.remember(conn, doc)
+    return True
 
 
 def promo_tag_wanted(level: str, in_file: bool) -> bool:
@@ -326,6 +335,13 @@ def _align_promo_tag(conn: sqlite3.Connection, path: str) -> None:
 
 
 def upsert_document(conn: sqlite3.Connection, doc, chunks, now: str) -> None:
+    """文档、派生索引与该版本的目录凭据同事务交付,任一步失败都撤回本篇。"""
+    with scan_evidence.document_write(conn):
+        _upsert_document(conn, doc, chunks, now)
+        scan_evidence.remember(conn, doc, replace=True)
+
+
+def _upsert_document(conn: sqlite3.Connection, doc, chunks, now: str) -> None:
     """写入/更新一篇文档及其 chunk 与 FTS。旧 chunk(含向量)全部删除重建。"""
     # 老 chunk 的向量一并清掉(chunk_id 会变)
     old_ids = [r["id"] for r in conn.execute(
@@ -381,8 +397,9 @@ def remove_missing_documents(conn: sqlite3.Connection, report: ScanReport) -> in
         raise TypeError("清理缺失文档需要 ScanReport,路径集合不是删除授权")
     report.validate()
     off = {s.name for s in SOURCES if not s.enabled}
-    rows = conn.execute("SELECT path, source FROM documents").fetchall()
+    rows = conn.execute("SELECT path, source, content_hash FROM documents").fetchall()
     report.check_history(conn, rows)
+    report.check_document_evidence(conn, rows)
     candidates = [row for row in rows if row['source'] not in off
                   and report.allows_missing(row['path'], row['source'])]
     missing = [row for row in candidates if report.probe_missing(row['path'])]

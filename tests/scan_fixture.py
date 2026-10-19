@@ -58,7 +58,7 @@ class ScanFixture(unittest.TestCase):
     def index(self):
         report = scanner.ScanReport()
         for doc in scanner.scan_all(report=report):
-            if store.doc_needs_reindex(self.conn, doc.path, doc.content_hash):
+            if not store.observed_document_is_current(self.conn, doc):
                 store.upsert_document(self.conn, doc, split_chunks(doc.body), NOW)
         removed = store.remove_missing_documents(self.conn, report)
         self.conn.commit()
@@ -88,7 +88,7 @@ class ScanFixture(unittest.TestCase):
         return {table: self.rows(table) for table in (
             'documents', 'chunks', 'chunks_fts', 'chunk_vec', 'doc_tags',
             'entities', 'favorites', 'favorite_document_recovery', 'index_scan_roots',
-            'index_scan_directories')}
+            'index_scan_directories', 'document_scan_evidence')}
 
     def seed(self, name='a.md', *, snippet=False):
         path = self.write(name)

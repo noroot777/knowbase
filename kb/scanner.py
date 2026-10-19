@@ -17,6 +17,7 @@ from typing import Iterator
 import yaml
 
 from kb.config import SOURCES, VAULT_ROOT, Source
+from kb.scan_evidence import DocumentEvidence, capture
 from kb.scan_status import ScanReport, stat_signature
 
 
@@ -33,6 +34,7 @@ class Doc:
     content_hash: str = ""
     meta: dict = field(default_factory=dict)  # 完整 frontmatter(project/kind/summary 等)
     body_version: str = ""
+    scan_evidence: DocumentEvidence | None = None
 
 
 _FM_RE = re.compile(r"\A---\n(.*?)\n---\n?", re.S)
@@ -197,6 +199,7 @@ def doc_from_text(text: str, md_path: Path, src: Source,
 
 
 def _doc_from_file(md_path: Path, src: Source) -> Doc:
+    lineage = capture(md_path, src.root, VAULT_ROOT)
     before = stat_signature(md_path.stat())
     text = md_path.read_text(encoding="utf-8")
     if before != stat_signature(md_path.stat()):
@@ -210,7 +213,12 @@ def _doc_from_file(md_path: Path, src: Source) -> Doc:
         metadata = yaml.safe_load(match.group(1))
         if metadata is not None and not isinstance(metadata, dict):
             raise ValueError("frontmatter 不是映射")
-    return doc_from_text(text, md_path, src)
+    if lineage != capture(md_path, src.root, VAULT_ROOT):
+        raise ValueError('读取原文期间目录身份发生变化')
+    doc = doc_from_text(text, md_path, src)
+    doc.scan_evidence = DocumentEvidence(
+        doc.path, doc.source, doc.content_hash, *lineage)
+    return doc
 
 
 def iter_md(sources: list[Source] | None = None, *,

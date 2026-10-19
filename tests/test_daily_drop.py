@@ -145,7 +145,12 @@ class DisabledSourceTests(unittest.TestCase):
             self.conn.execute(
                 'INSERT INTO documents(path,source,title) VALUES(?,?,?)',
                 (path, src, '标题'))
+        gone = self.root / 'source/live/gone.md'
+        gone.write_text('---\ntitle: 将删除\nsource: live\n---\n原文\n')
+        doc = scanner._doc_from_file(gone, self.sources[1])
+        store.upsert_document(self.conn, doc, [], '2026-10-19 12:00:00')
         self.conn.commit()
+        gone.unlink()
         report = scanner.ScanReport()
         alive = {d.path for d in scanner.scan_all(report=report)}
         self.assertEqual({'source/live/a.md'}, alive)

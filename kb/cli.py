@@ -50,7 +50,7 @@ def _index_pass(args) -> int:
     from kb.extract import parse_pretagged, save_extraction
 
     for doc in scan_all(report=report):
-        if not args.reembed and not store.doc_needs_reindex(conn, doc.path, doc.content_hash):
+        if not args.reembed and store.observed_document_is_current(conn, doc):
             unchanged += 1
             continue
         chunks = split_chunks(doc.body)
