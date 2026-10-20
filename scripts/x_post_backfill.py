@@ -6,7 +6,9 @@
     python scripts/x_post_backfill.py run --yes --channel browser --report /tmp/x-post.json
 
 scan is local and read-only. run probes candidates; only --yes writes feeds.db.
-Every stored X post is audited by default; ellipses and wrapped URLs only affect priority.
+Every unaudited or changed X post is selected by default; failures remain retryable.
+Audit receipts are saved beside feeds.db, without changing feed content in probe mode.
+--recheck repeats completed audits; ellipses and wrapped URLs only affect priority.
 --all is a compatibility alias; --url selects exact stored URLs. Translation, export and
 indexing use the normal pipeline.
 """
@@ -23,7 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb.feeds import grab_store, registry as reg, x_browser, x_channels, x_post
 from kb.feeds.x_cdp import CdpError
-from kb.feeds.x_page_state import XRateLimited
+from kb.feeds.x_page_state import XAccessBlocked, XRateLimited
+from scripts import x_post_audit as audit
 
 _SCHEME = re.compile('|'.join(
     r'(?:\r?\n)*'.join(re.escape(char) for char in scheme)
@@ -90,12 +93,14 @@ def canonical_preview(text: str) -> str:
     return text
 
 
-def _covered_preview(preview: str, detail: str) -> str | None:
+def _covered_preview(preview: str, detail: str, *, keep_tail=False) -> str | None:
     ranges = link_artifacts(preview, detail)
+    tail_range = None
     tail = re.search(r'(?:…|\.{3})\Z', preview)
     if (tail and tail.end() == len(preview) and x_post.expanded(detail, preview)
             and not any(start <= tail.start() < end for start, end in ranges)):
-        ranges.append(tail.span())
+        tail_range = tail.span()
+        ranges.append(tail_range)
         ranges.sort()
     pattern, pieces, cursor = [], [], 0
     for index, (start, end) in enumerate(ranges):
@@ -108,7 +113,8 @@ def _covered_preview(preview: str, detail: str) -> str | None:
         if token:
             group = f'artifact_{index}'
             pattern.append(f'(?P<{group}>' + re.escape(token) + ')?')
-            pieces.append((preview[start:end], group))
+            pieces.append((preview[start:end], None if keep_tail and
+                           (start, end) == tail_range else group))
         cursor = end
     pattern.append(re.escape(re.sub(r'\s+', '', preview[cursor:])))
     pieces.append((preview[cursor:], None))
@@ -174,6 +180,19 @@ def proposal(entry: dict, text: str, evidence=None) -> tuple[str, dict | None, d
     if text == preview:
         return 'identical', None, dict(info, reason='detail_matches_stored')
     alignment = _alignment(preview, text, evidence)
+    if alignment in {'whitespace', 'evidence'}:
+        fixed = _covered_preview(preview, text, keep_tail=True)
+        if fixed is not None and fixed != preview:
+            original = entry['body'].removeprefix(prefix)
+            start = len(original) - len(original.lstrip())
+            end = len(original.rstrip())
+            complete = dict(entry)
+            complete.pop(x_post.HINT)
+            complete.update(title=fixed.splitlines()[0][:500],
+                            body=prefix + original[:start] + fixed + original[end:])
+            return 'normalized', complete, dict(
+                info, after=len(complete['body']), reason='confirmed_link_ranges',
+                remaining='blocked_' + alignment)
     if alignment == 'evidence':
         return 'blocked_evidence', None, dict(info, reason='source_evidence_mismatch')
     if alignment == 'whitespace':
@@ -193,7 +212,7 @@ def proposal(entry: dict, text: str, evidence=None) -> tuple[str, dict | None, d
                             if info['artifacts'] else 'detail_not_longer')
 
 
-def candidates(conn, *, urls=(), limit=0, all_posts=False) -> list[dict]:
+def candidates(conn, *, urls=(), limit=0, all_posts=False, apply=False, recheck=False) -> list[dict]:
     """Audit all X posts; all_posts remains accepted for existing callers."""
     rows = conn.execute("SELECT * FROM feed_items WHERE kind='social' AND content_kind='post'"
                         " ORDER BY published DESC,key").fetchall()
@@ -208,6 +227,7 @@ def candidates(conn, *, urls=(), limit=0, all_posts=False) -> list[dict]:
         selected.append(dict(row))
     selected.sort(key=lambda row: not (row['body'].rstrip().endswith(('…', '...')) or
                                       canonical_preview(row['body']) != row['body']))
+    selected = audit.select(selected, apply=apply, recheck=recheck or bool(wanted))
     return selected[:limit] if limit else selected
 
 
@@ -224,11 +244,11 @@ def entry_of(row: dict) -> dict:
 
 
 def repair(rows: list[dict], session, *, apply=False, deadline=None,
-           should_stop=None, progress=None) -> dict:
+           should_stop=None, progress=None, remember=False) -> dict:
     stats = dict(candidates=len(rows), expanded=0, normalized=0, updated=0,
                  identical=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
                  blocked_whitespace=0, blocked_content=0, blocked_evidence=0,
-                 failed=0, stale=0, deferred=0, results=[])
+                 failed=0, stale=0, deferred=0, partial=0, results=[])
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
                 deadline is not None and time.monotonic() >= deadline):
@@ -236,13 +256,14 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
             break
         result = dict(url=row['url'], before=len(row['body']))
         evidence = {}
+        complete = None
         try:
             text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop,
                                 evidence=evidence)
         except x_post.PostGone as exc:
             stats['unavailable'] += 1
             result.update(state='unavailable', error=str(exc))
-        except (XRateLimited, x_post.PostSessionUnavailable) as exc:
+        except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable) as exc:
             stats['failed'] += 1
             stats['deferred'] = len(rows) - index - 1
             stats['stop_reason'] = str(exc)
@@ -257,11 +278,15 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
         else:
             state, complete, info = proposal(entry_of(row), text, evidence)
             stats[state] += 1
+            if info.get('remaining'):
+                stats['partial'] += 1
             result.update(state=state, **info)
             if complete and apply:
                 state = 'updated' if grab_store.replace(row, complete) else 'stale'
                 stats[state] += 1
                 result['state'] = state
+        if remember:
+            audit.record(row, result, complete=complete)
         stats['results'].append(result)
         if progress:
             progress(result, stats)
@@ -276,6 +301,7 @@ def main(argv=None) -> int:
     parser.add_argument('--yes', action='store_true', help='确认用版本化替换写回正文')
     parser.add_argument('--url', action='append', default=[], help='只检查指定的存量 URL,可重复')
     parser.add_argument('--all', action='store_true', help='兼容旧命令;默认已检查全部存量 X 推文')
+    parser.add_argument('--recheck', action='store_true', help='重新核对已记过结论的当前正文版本')
     parser.add_argument('--limit', type=int, default=0)
     parser.add_argument('--budget', type=float, default=600.0, help='整轮浏览器读取秒数')
     parser.add_argument('--channel', choices=['browser', 'attach'], default='browser')
@@ -286,8 +312,10 @@ def main(argv=None) -> int:
     if any(not x_post._STATUS.match(url) for url in args.url):
         parser.error('--url 只接受 X 推文的完整地址')
     with reg.db() as conn:
-        rows = candidates(conn, urls=args.url, limit=args.limit, all_posts=args.all)
-    print(f'找到 {len(rows)} 条候选;默认覆盖全部存量 X 推文,省略号或链接折行只决定优先级。')
+        rows = candidates(conn, urls=args.url, limit=args.limit, all_posts=args.all,
+                          apply=args.yes, recheck=args.recheck)
+    print(f'找到 {len(rows)} 条候选;默认续查未核对或正文已变的存量 X 推文,失败项排在新项之后重试。')
+    print('核对记录:' + str(audit.path()) + ';--recheck 或 --url 可重查已有结论。')
     if args.limit:
         print('已按 limit 限制本批数量,不代表其余存量已核对;截断与否须逐条核对详情页。')
     if args.cmd == 'scan':
@@ -295,8 +323,12 @@ def main(argv=None) -> int:
             print(f'{len(row["body"]):>6} 字符  {row["url"]}')
         return 0
     if not rows:
+        if args.report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(json.dumps(repair([], None), ensure_ascii=False, indent=2),
+                                   encoding='utf-8')
         return 0
-    print('模式:真正回填' if args.yes else '模式:只读核对,不写库(加 --yes 才写回)')
+    print('模式:真正回填' if args.yes else '模式:只读核对,不写正文库,只记核对进度(加 --yes 才写回)')
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
 
@@ -312,7 +344,8 @@ def main(argv=None) -> int:
                 str(x_channels.BROWSER_PROFILE), settings.get('x_chrome_path', ''),
                 attach=args.channel == 'attach') as page:
             page.open_page('about:blank')
-            stats = repair(rows, page, apply=args.yes, deadline=deadline, progress=report)
+            stats = repair(rows, page, apply=args.yes, deadline=deadline, progress=report,
+                           remember=True)
     except (CdpError, OSError, EOFError) as exc:
         print(f'浏览器不可用,未继续回填:{exc}', file=sys.stderr)
         return 1
@@ -322,6 +355,7 @@ def main(argv=None) -> int:
           f'实际写入 {stats["updated"]} 条,'
           f'并发换版跳过 {stats["stale"]} 条,失败 {stats["failed"]} 条,'
           f'预算/停止/限流扣留 {stats["deferred"]} 条。')
+    print(f'其中仅作局部修复 {stats.get("partial", 0)} 条,未确认的空白和截断标记仍保留。')
     print(f'与详情逐字相同 {stats["identical"]} 条(不等于确认完整),'
           f'长度拦截 {stats["blocked_length"]} 条,'
           f'含旧链接产物但未能安全对齐 {stats["blocked_artifacts"]} 条,'

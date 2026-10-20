@@ -36,7 +36,8 @@ from zoneinfo import ZoneInfo
 
 from kb.feeds import x_article, x_post
 from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
-from kb.feeds.x_page_state import STATE_JS, XBrowserError, XRateLimited, navigate, read
+from kb.feeds.x_page_state import (
+    STATE_JS, XAccessBlocked, XBrowserError, XRateLimited, access_blocked, navigate, read)
 from kb.feeds.x_page_state import problem as page_problem
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
@@ -266,7 +267,10 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
         if last['articles'] and last['ready'] == 'complete' and not current_problem:
             return last
         confirmed_problem = current_problem if current_problem == previous_problem else ''
-        if confirmed_problem and (not last.get('http_only') or last.get('http_content_limited')):
+        if confirmed_problem and (current_problem == 'challenge' or not last.get('http_only')
+                                  or last.get('http_content_limited')):
+            if current_problem == 'challenge':
+                raise access_blocked()
             if current_problem == 'limited':
                 raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
             raise XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
@@ -510,14 +514,14 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                         'entries': entries, 'error': '', 'incomplete': incomplete,
                         'skipped_quotes': skipped_quotes, 'note': note,
                         'watermark': started if incomplete else observed_watermark}
-                except (XRateLimited, x_post.PostSessionUnavailable):
+                except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable):
                     raise
                 except (XBrowserError, CdpError) as e:
                     results[handle] = {'entries': [], 'error': str(e)}
-    except (XRateLimited, x_post.PostSessionUnavailable, CdpError, EOFError, OSError) as e:
+    except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable, CdpError, EOFError, OSError) as e:
         # 浏览器整个起不来/中途死了:剩下的账号统一记成同一个原因,
         # 而不是逐个报一条看不出共同根因的错。
-        reason = str(e) if isinstance(e, (XRateLimited, x_post.PostSessionUnavailable, CdpError)) else f'浏览器会话中断:{e}'
+        reason = str(e) if isinstance(e, (XBrowserError, x_post.PostSessionUnavailable, CdpError)) else f'浏览器会话中断:{e}'
         for handle, _ in jobs:
             results.setdefault(handle, {'entries': [], 'error': reason})
     return results

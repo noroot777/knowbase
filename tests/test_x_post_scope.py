@@ -227,7 +227,7 @@ class StoredScopeTests(ChannelBase):
                  patch.object(backfill.x_browser, 'browser_session',
                               return_value=contextlib.nullcontext(Page())), \
                  patch.object(backfill, 'proposal', return_value=(state, None, {})):
-                self.assertEqual(0, backfill.main(['run', '--yes']))
+                self.assertEqual(0, backfill.main(['run', '--yes', '--recheck']))
                 self.assertIn('失败 0 条', output.getvalue())
         with reg.db() as conn:
             self.assertEqual(row, dict(conn.execute('SELECT * FROM feed_items').fetchone()))

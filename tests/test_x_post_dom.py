@@ -36,6 +36,10 @@ def article(identity='123', text='short', more='', quoted=''):
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.startswith('/cdn-cgi/'):
+            self.send_response(200)
+            self.end_headers()
+            return
         if self.path.startswith('/i/api/graphql/'):
             self.send_response(self.server.api_status)
             self.end_headers()

@@ -131,7 +131,7 @@ class BackfillTests(ChannelBase):
                  patch.object(x_post, 'SECONDS', 0.02), \
                  patch.object(backfill.x_browser, 'browser_session',
                               return_value=contextlib.nullcontext(page)):
-                self.assertEqual(code, backfill.main(['run', '--yes', '--report', str(report)]))
+                self.assertEqual(code, backfill.main(['run', '--yes', '--recheck', '--report', str(report)]))
             stats = json.loads(report.read_text())
             self.assertEqual(state, stats['results'][0]['state'])
             self.assertEqual(row, self.row(row['key']))
@@ -490,7 +490,7 @@ class BackfillTests(ChannelBase):
             with self.subTest(state=state), contextlib.redirect_stdout(io.StringIO()), \
                  patch.object(backfill.x_browser, 'browser_session',
                               return_value=contextlib.nullcontext(Page(linked_snapshot(text)))):
-                self.assertEqual(code, backfill.main(['run', '--report', str(report)]))
+                self.assertEqual(code, backfill.main(['run', '--recheck', '--report', str(report)]))
             recorded = json.loads(report.read_text())
             self.assertEqual(state, recorded['results'][0]['state'])
             self.assertTrue(recorded['results'][0]['artifacts'])

@@ -46,8 +46,10 @@ class SafeReplacementTests(ChannelBase):
         row = self.seed('Read https://\nexample.org/a\n\nKeep this paragraph.\n\nAnd this one.')
         detail = row['body'].replace('https://\n', 'https://').replace('\n\n', ' ')
         stats = backfill.repair([row], Page(linked_snapshot(detail)), apply=True)
-        self.assertEqual(1, stats['blocked_whitespace'])
-        self.assertEqual(row, self.saved(row))
+        self.assertEqual(1, stats['normalized'])
+        self.assertEqual(1, stats['updated'])
+        self.assertEqual('blocked_whitespace', stats['results'][0]['remaining'])
+        self.assertEqual(row['body'].replace('https://\n', 'https://'), self.saved(row)['body'])
 
     def test_source_anchors_do_not_authorize_double_break_loss(self):
         row = self.seed('Read\n\n@AsideAI\n\ntoday')

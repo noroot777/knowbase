@@ -2,6 +2,7 @@
 import json
 from urllib.parse import urlsplit
 
+from kb.feeds.grab_page import _ASSET_ATTRS, _GATE_ASSETS
 from kb.feeds.x_cdp import Session
 
 STATE_JS = r'''
@@ -16,10 +17,18 @@ STATE_JS = r'''
       .some(node => node.getAttribute('d') === retryPath);
     const failed = articles === 0 && (retry
       || /Something went wrong\. Try reloading|出错了。请尝试重新加载。|请稍后再试/i.test(text));
+    const assets = __GATE_ASSETS__;
+    const gate = __ASSET_ATTRS__.some(([tag, attr]) =>
+      [...document.querySelectorAll(`${tag}[${attr}]`)].some(node =>
+        assets.some(marker => node.getAttribute(attr).includes(marker))))
+      || [...document.querySelectorAll('script:not([src])')].some(node =>
+        assets.some(marker => node.textContent.includes(marker)));
     return {
       url: location.href,
       ready: document.readyState,
       articles,
+      challenge: /^\/account\/access(?:\/|$)/.test(location.pathname)
+        || (articles === 0 && gate),
       login: !!document.querySelector('[data-testid="loginButton"], [data-testid="login"]')
         || /^\/i\/flow\/login/.test(location.pathname),
       empty: articles === 0 && !failed && /Hmm\.\.\.this page doesn|这个页面不存在|该页面不存在|Account suspended|账号已被冻结|doesn’t exist|does not exist/i.test(text),
@@ -27,7 +36,8 @@ STATE_JS = r'''
       failed,
     };
   };
-'''
+'''.replace('__GATE_ASSETS__', json.dumps(_GATE_ASSETS)).replace(
+    '__ASSET_ATTRS__', json.dumps(_ASSET_ATTRS))
 
 
 class Responses:
@@ -106,7 +116,7 @@ def read(session, script: str) -> dict:
 def problem(state: dict) -> str:
     if state.get('ready') != 'complete':
         return ''
-    return next((kind for kind in ('limited', 'failed') if state.get(kind)), '')
+    return next((kind for kind in ('challenge', 'limited', 'failed') if state.get(kind)), '')
 
 
 class XBrowserError(RuntimeError):
@@ -115,3 +125,11 @@ class XBrowserError(RuntimeError):
 
 class XRateLimited(XBrowserError):
     """An explicit access limit aborts the remaining batch, not just one post."""
+
+
+class XAccessBlocked(XBrowserError):
+    """A verified access gate stops this session without declaring content absent."""
+
+
+def access_blocked():
+    return XAccessBlocked('X 要求安全验证,本轮已停止;请在对应通道的浏览器中完成验证后重试,不要反复同步')

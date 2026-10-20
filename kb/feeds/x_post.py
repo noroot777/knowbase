@@ -6,7 +6,7 @@ import time
 
 from kb.feeds import x_article
 from kb.feeds.x_cdp import CdpError, CdpTransportError
-from kb.feeds.x_page_state import STATE_JS, XRateLimited, navigate, problem, read
+from kb.feeds.x_page_state import STATE_JS, XRateLimited, access_blocked, navigate, problem, read
 
 HINT = '_x_post_prefix'
 SECONDS = 25.0
@@ -145,6 +145,8 @@ def _check(deadline, should_stop):
 
 
 def _request_failed(kind):
+    if kind == 'challenge':
+        raise access_blocked()
     if kind == 'limited':
         raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
     raise PostRequestFailed('X 页面请求出错,请稍后重试(不能据此确认限流或推文不存在)')
@@ -188,9 +190,10 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
                                     inline_legacy=current[3])
                 return text
             previous = current
-            current_problem = problem(snap) if snap.get('at') == match[1] and not valid else ''
+            current_problem = problem(snap) if not valid and (
+                snap.get('challenge') or snap.get('at') == match[1]) else ''
             confirmed_problem = current_problem if current_problem == previous_problem else ''
-            if confirmed_problem and (not snap.get('http_only')
+            if confirmed_problem and (confirmed_problem == 'challenge' or not snap.get('http_only')
                                       or snap.get('http_content_limited')):
                 _request_failed(confirmed_problem)
             previous_problem = current_problem
