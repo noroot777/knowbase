@@ -2,6 +2,7 @@
 import contextlib
 import json
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from kb.feeds import x_browser, x_cdp, x_login_import, x_login_words, x_page_sta
 from tests.test_x_login_import import FakePage
 from tests.test_x_page_state import EventSession, response
 from tests.x_login_fixture import FakeChrome, logged_in
+from tests import test_x_page_dom_evidence as dom_fixture
 
 
 def state(**changes):
@@ -30,6 +32,44 @@ class HomeSession(EventSession):
 
 
 class TimelineVerificationTests(unittest.TestCase):
+    def test_shell_less_gateway_evidence_reaches_checks_and_batch_errors_promptly(self):
+        for text, verdict in [('Rate limit exceeded', 'limited'),
+                              ('Something went wrong. Try reloading', 'failed')]:
+            snap = dom_fixture.DomEvidenceTests().snapshot(missing=True, body=text)
+            with self.subTest(verdict=verdict), patch.object(x_browser.time, 'sleep'):
+                page = FakePage(snap)
+                self.assertEqual(verdict, x_browser.verify_timeline(page, timeout=0.02)[0])
+                self.assertEqual(1, page.seen)
+                page = FakePage(snap)
+                error = x_browser.XRateLimited if verdict == 'limited' else x_browser.XBrowserError
+                with self.assertRaises(error):
+                    x_browser._wait_state(page, 'Example', time.monotonic() + 0.02)
+                self.assertEqual(2, page.seen)
+
+    def test_unknown_timeouts_do_not_diagnose_login_network_or_proxy_failure(self):
+        for ready in ('loading', 'complete'):
+            with self.subTest(ready=ready), patch.object(x_browser, 'ACCOUNT_SECONDS', 0.002), \
+                    patch.object(x_browser.time, 'sleep'), patch.object(
+                    x_browser, 'profile_busy', return_value=False), patch.object(
+                    x_browser, 'browser_session', return_value=contextlib.nullcontext(FakePage(
+                        dict(ready=ready)))):
+                ok, detail = x_browser.probe('/unused')
+                self.assertFalse(ok)
+                self.assertIn('未能判出原因', detail)
+                self.assertIn('检查连接', detail)
+                for guess in ('失效', '网络', '代理'):
+                    self.assertNotIn(guess, detail)
+                with self.assertRaisesRegex(x_browser.XBrowserError, '未能判出原因'):
+                    x_browser._wait_state(FakePage(dict(ready=ready)), 'Example',
+                                          time.monotonic() + 0.002)
+                verdict = 'not-loaded' if ready == 'loading' else 'no-tweets'
+                for result, last in [(verdict, {}), ('unconfirmed', {'again': verdict})]:
+                    detail = x_login_words._detail(result, 2, last, '')
+                    self.assertIn('未能判出原因', detail)
+                    self.assertNotIn('网络', detail)
+                    self.assertNotIn('请求出错', detail)
+                    self.assertNotIn('限流', detail)
+
     def test_error_limit_and_expired_login_return_without_sleep_or_budget_exhaustion(self):
         for flags, expected in [({'failed': True}, 'failed'), ({'limited': True}, 'limited'),
                                 ({'failed': True, 'limited': True}, 'limited'),

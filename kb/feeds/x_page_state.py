@@ -7,7 +7,9 @@ from kb.feeds.x_cdp import Session
 STATE_JS = r'''
   const xPageState = () => {
     const primary = document.querySelector('[data-testid="primaryColumn"]');
-    const text = (primary?.innerText || '').slice(0, 4000);
+    const fallback = !primary && !document.querySelector(
+      '[data-testid="sidebarColumn"], aside, nav, header, footer, article');
+    const text = (primary?.innerText || (fallback ? document.body?.innerText : '') || '').slice(0, 4000);
     const articles = document.querySelectorAll('article[data-testid="tweet"]').length;
     const retryPath = 'M12 4c-4.418 0-8 3.58-8 8s3.582 8 8 8c3.806 0 6.993-2.66 '
       + '7.802-6.22l1.95.44C20.742 18.67 16.76 22 12 22 6.477 22 2 '
@@ -18,8 +20,9 @@ STATE_JS = r'''
     const failed = articles === 0 && (retry
       || /Something went wrong\. Try reloading|出错了。请尝试重新加载。|请稍后再试/i.test(text));
     const limited = articles === 0 && /Rate limit exceeded/i.test(text);
-    const busy = !!primary?.querySelector('[role="progressbar"], [aria-busy="true"]');
-    const explicit = !busy && (retry || primary?.querySelector('[role="alert"]'));
+    const scope = primary || (fallback ? document.body : null);
+    const busy = !!scope?.querySelector('[role="progressbar"], [aria-busy="true"]');
+    const explicit = !busy && (fallback || retry || primary?.querySelector('[role="alert"]'));
     return {
       url: location.href,
       ready: document.readyState,

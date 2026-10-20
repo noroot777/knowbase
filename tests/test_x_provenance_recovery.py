@@ -161,7 +161,7 @@ class LegacyRecoveryTests(ProvenanceBase):
                 patch.object(x_article, 'API', 'https://example.invalid'), \
                 patch.object(x_article, 'fetch', return_value=dict(title='Article', body=row['body'])), \
                 patch.object(x_post, 'fetch') as fetch:
-            self.assertEqual(0, backfill.main(['run', '--resolve-legacy', '--yes', '--report', str(report)]))
+            self.assertEqual(1, backfill.main(['run', '--resolve-legacy', '--yes', '--report', str(report)]))
         fetch.assert_not_called()
         self.assertEqual(1, json.loads(report.read_text())['provenance_saved'])
 

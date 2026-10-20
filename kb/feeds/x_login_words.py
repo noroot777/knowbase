@@ -28,8 +28,8 @@ _VERDICT_TAIL = {
              '「打开登录窗口」',
     'limited': 'X 当时在限流，没验证成；点「检查连接」再确认',
     'failed': 'X 页面请求出错，暂时无法验证登录态；稍后点「检查连接」重试，不必因此重新登录',
-    'not-loaded': 'X 首页当时没加载完（网络或代理），没验证成；点「检查连接」再确认',
-    'no-tweets': '首页当时一条推文都没读到，没验证成；点「检查连接」再确认',
+    'not-loaded': 'X 首页当时没加载完，未能判出原因；点「检查连接」再确认',
+    'no-tweets': '首页当时一条推文都没读到，未能判出原因；点「检查连接」再确认',
 }
 
 
@@ -90,8 +90,9 @@ def _detail(verdict: str, count: int, last: dict, note: str) -> str:
         # 验证没过那几档。**保存差异也要说,但接在后面,不许顶掉已经查明的原因** ——
         # 站点拒绝登录时它多半顺手清掉了凭证,于是盘上确实也对不上(第 4 轮审查
         # 实测:回调明确返回 `login`,产品却报 `unsaved` 并声称「当场也能用」)。
-        reopened_failure = verdict == 'unconfirmed' and last.get('again') == 'failed'
-        reason = 'failed' if reopened_failure else verdict
+        reopened_failure = verdict == 'unconfirmed' and last.get('again') in (
+            'failed', 'not-loaded', 'no-tweets')
+        reason = last['again'] if reopened_failure else verdict
         tail = _VERDICT_TAIL.get(reason, _VERDICT_TAIL.get(verdict, '没验证成'))
         stage = '重新打开之后那一次验证没跑成：' if reopened_failure else ''
         detail = f'cookie 已经搬进独立 profile，但{stage}{tail}'

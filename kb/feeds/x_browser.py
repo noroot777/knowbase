@@ -262,9 +262,8 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
         if last['empty']:
             raise XBrowserError(f'@{handle} 这个账号在 X 上打不开(可能已改名、注销或被冻结)')
         time.sleep(0.3)
-    if last.get('ready') != 'complete':
-        raise XBrowserError(f'@{handle} 的页面没有加载完')
-    raise XBrowserError(f'@{handle} 的时间线上没有读到推文')
+    observed = '页面没有加载完' if last.get('ready') != 'complete' else '时间线上没有读到推文'
+    raise XBrowserError(f'@{handle} 的{observed};未能判出原因,请稍后重试或点「检查连接」')
 
 
 def _harvest_one(page: Chrome, handle: str,
@@ -634,8 +633,8 @@ def probe(profile: str, chrome_path: str = '', *,
             if verdict == 'ok':
                 return True, f'登录态有效,首页读到 {last["articles"]} 条推文'
             if verdict == 'not-loaded':
-                return False, 'X 首页没有加载完 —— 网络不通,或者这台机器访问 X 要走代理'
-            return False, 'X 首页打开了,但一条推文都没读到。登录态可能刚刚失效'
+                return False, 'X 首页没有加载完;未能判出原因,请稍后点「检查连接」重试'
+            return False, 'X 首页一条推文都没读到;未能判出原因,请稍后点「检查连接」重试'
     except (XBrowserError, CdpError) as e:
         return False, str(e)
     except (EOFError, OSError) as e:

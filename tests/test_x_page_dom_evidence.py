@@ -17,9 +17,13 @@ const primary = {
   },
 };
 const document = {
-  body: {innerText: state.sidebar || ''},
+  body: {
+    innerText: state.body || state.sidebar || '',
+    querySelector: selector => selector.includes('progressbar') && state.busy ? {} : null,
+  },
   readyState: state.ready || 'loading',
   querySelector(selector) {
+    if (selector.includes('sidebarColumn') && state.sidebar) return {};
     return selector === '[data-testid="primaryColumn"]' && !state.missing ? primary : null;
   },
   querySelectorAll(selector) {
@@ -69,6 +73,30 @@ class DomEvidenceTests(unittest.TestCase):
         for changes in [dict(busy=True), dict(missing=True)]:
             with self.subTest(changes=changes):
                 snap = self.snapshot(main='Rate limit exceeded', sidebar='Rate limit exceeded', **changes)
+                self.assertEqual('', x_page_state.problem(snap))
+
+    def test_shell_less_error_pages_keep_classification_without_admitting_content(self):
+        for ready in ('loading', 'complete'):
+            for text, verdict in [('Rate limit exceeded', 'limited'),
+                    ('Something went wrong. Try reloading', 'failed'),
+                    ('出错了。请尝试重新加载。', 'failed')]:
+                with self.subTest(ready=ready, text=text):
+                    snap = self.snapshot(missing=True, ready=ready, body=text)
+                    self.assertEqual(verdict, x_page_state.problem(snap))
+                    self.assertEqual(0, snap['articles'])
+                    self.assertFalse(snap['empty'])
+
+    def test_missing_shell_without_causal_text_still_has_no_error_evidence(self):
+        for body in ('', 'Please wait', 'A page we do not recognize'):
+            with self.subTest(body=body):
+                snap = self.snapshot(missing=True, ready='complete', body=body)
+                self.assertEqual('', x_page_state.problem(snap))
+                self.assertFalse(snap['empty'])
+
+    def test_shell_less_copy_with_a_loading_indicator_is_not_terminal_evidence(self):
+        for body in ('Rate limit exceeded', 'Something went wrong. Try reloading'):
+            with self.subTest(body=body):
+                snap = self.snapshot(missing=True, body=body, busy=True)
                 self.assertEqual('', x_page_state.problem(snap))
 
     def test_rendered_posts_prevent_dom_error_text_from_becoming_a_failure(self):

@@ -168,7 +168,7 @@ class PostProvenanceTests(ProvenanceBase):
             report = self.root / 'article-skips.json'
             with self.subTest(args=args), contextlib.redirect_stdout(io.StringIO()), \
                     patch.object(x_browser, 'browser_session') as browser:
-                self.assertEqual(0, backfill.main(['run', '--yes', '--report', str(report), *args]))
+                self.assertEqual(1, backfill.main(['run', '--yes', '--report', str(report), *args]))
             browser.assert_not_called()
             stats = json.loads(report.read_text())
             self.assertEqual(1, stats['skipped_ambiguous'])

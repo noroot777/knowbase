@@ -12,6 +12,8 @@ run --resolve-legacy independently verifies missing provenance before admission;
 only --yes persists those version-bound records, without inferring type from titles.
 --all is a compatibility alias; --url selects exact stored URLs. Translation, export and
 indexing use the normal pipeline.
+Coverage counts completed detail comparisons and confirmed remote absence, not attempts.
+Excluded rows are listed in the summary and make scan/run exit nonzero.
 """
 from __future__ import annotations
 
@@ -177,14 +179,20 @@ def entry_of(row: dict) -> dict:
             x_post.HINT: prefix, x_post_meta.FIELD: row.get(x_post_meta.FIELD, '')}
 
 
-def repair(rows: list[dict], session, *, apply=False, deadline=None,
-           should_stop=None, progress=None, excluded=(), resolve_legacy=False) -> dict:
-    stats = dict(candidates=len(rows), expanded=0, normalized=0, updated=0,
+def _stats(rows, excluded) -> dict:
+    stats = dict(candidates=len(rows), total=len(rows) + len(excluded), checked=0,
+                 expanded=0, normalized=0, updated=0,
                  identical=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
                  failed=0, stale=0, deferred=0, skipped_article=0, skipped_ambiguous=0,
                  provenance_resolved=0, provenance_saved=0, results=list(excluded))
     for skipped in excluded:
         stats[skipped['state']] += 1
+    return stats
+
+
+def repair(rows: list[dict], session, *, apply=False, deadline=None,
+           should_stop=None, progress=None, excluded=(), resolve_legacy=False) -> dict:
+    stats = _stats(rows, excluded)
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
                 deadline is not None and time.monotonic() >= deadline):
@@ -219,6 +227,7 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
                 text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
             if not result.get('state'):
                 state, complete, info = proposal(entry_of(row), text)
+                stats['checked'] += 1
                 stats[state] += 1
                 result.update(state=state, **info)
                 if complete and apply:
@@ -226,6 +235,7 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
                     stats[state] += 1
                     result['state'] = state
         except x_post.PostGone as exc:
+            stats['checked'] += 1
             stats['unavailable'] += 1
             result.update(state='unavailable', error=str(exc))
         except XRateLimited as exc:
@@ -242,6 +252,13 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
         if stats.get('stop_reason'):
             break
     return stats
+
+
+def _coverage(stats):
+    print(f'实际核对 {stats["checked"]} / 本批共 {stats["total"]} 条'
+          '(已取得详情或确认远端不可用,不等于正文完整);'
+          f'长文跳过 {stats["skipped_article"]} 条,来源不明跳过 {stats["skipped_ambiguous"]} 条。')
+    print(f'来源核实 {stats["provenance_resolved"]} 条,来源保存 {stats["provenance_saved"]} 条。')
 
 
 def main(argv=None) -> int:
@@ -274,7 +291,9 @@ def main(argv=None) -> int:
     if args.cmd == 'scan':
         for row in rows:
             print(f'{len(row["body"]):>6} 字符  {row["url"]}')
-        return 0
+        print('scan 仅列候选,未访问详情。')
+        _coverage(_stats(rows, excluded))
+        return int(bool(excluded))
     print('模式:真正回填' if args.yes else '模式:只读核对,不写库(加 --yes 才写回)')
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
@@ -284,25 +303,23 @@ def main(argv=None) -> int:
         if args.report:
             args.report.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
 
-    if not rows:
-        stats = repair([], None, excluded=excluded)
-        if args.report:
-            args.report.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
-        return 0
-    settings = reg.get_settings('social')
-    deadline = time.monotonic() + args.budget
-    try:
-        with x_browser.browser_session(
-                str(x_channels.BROWSER_PROFILE), settings.get('x_chrome_path', ''),
-                attach=args.channel == 'attach') as page:
-            page.open_page('about:blank')
-            stats = repair(rows, page, apply=args.yes, deadline=deadline, progress=report,
-                           excluded=excluded, resolve_legacy=args.resolve_legacy)
-    except (CdpError, OSError, EOFError) as exc:
-        print(f'浏览器不可用,未继续回填:{exc}', file=sys.stderr)
-        return 1
+    stats = _stats(rows, excluded)
+    if rows:
+        settings = reg.get_settings('social')
+        deadline = time.monotonic() + args.budget
+        try:
+            with x_browser.browser_session(
+                    str(x_channels.BROWSER_PROFILE), settings.get('x_chrome_path', ''),
+                    attach=args.channel == 'attach') as page:
+                page.open_page('about:blank')
+                stats = repair(rows, page, apply=args.yes, deadline=deadline, progress=report,
+                               excluded=excluded, resolve_legacy=args.resolve_legacy)
+        except (CdpError, OSError, EOFError) as exc:
+            print(f'浏览器不可用,未继续回填:{exc}', file=sys.stderr)
+            return 1
     if args.report:
         args.report.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
+    _coverage(stats)
     print(f'可扩写 {stats["expanded"]} 条,可清理旧链接产物 {stats["normalized"]} 条,'
           f'实际写入 {stats["updated"]} 条,'
           f'并发换版跳过 {stats["stale"]} 条,失败 {stats["failed"]} 条,'
@@ -315,7 +332,8 @@ def main(argv=None) -> int:
         print(f'整轮已停止:{stats["stop_reason"]}')
     print('已写入的条目会在正常同步中重新翻译、导出、索引和提取;本脚本不直接改 vault。')
     return 1 if any(stats[key] for key in
-                    ('failed', 'deferred', 'blocked_length', 'blocked_artifacts')) else 0
+                    ('failed', 'deferred', 'blocked_length', 'blocked_artifacts', 'stale',
+                     'skipped_article', 'skipped_ambiguous')) else 0
 
 
 if __name__ == '__main__':

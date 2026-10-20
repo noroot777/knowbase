@@ -168,6 +168,18 @@ class PostDomTests(unittest.TestCase):
             self.assertIs(False, snap.get('empty'))
             self.assertIs(False, snap.get('limited'))
 
+    def test_missing_shell_gateway_copy_is_only_error_evidence_for_both_readers(self):
+        for text, verdict in [('Rate limit exceeded', 'limited'),
+                              ('Something went wrong. Try reloading.', 'failed')]:
+            with self.subTest(verdict=verdict):
+                self.load('<main>' + text + '</main>')
+                for script in [x_post.READ_JS, x_browser._STATE_JS]:
+                    snap = json.loads(self.page.eval(script))
+                    self.assertEqual(verdict, x_page_state.problem(snap))
+                    self.assertEqual(0, snap['articles'])
+                    self.assertFalse(snap.get('valid', False))
+                self.assertEqual(verdict, x_browser.verify_timeline(self.page, timeout=0.2)[0])
+
     def test_sidebar_words_or_missing_primary_cannot_classify_the_main_page(self):
         for text in ['该页面不存在', 'Hmm...this page doesn’t exist.', 'Rate limit exceeded',
                      '出错了。请尝试重新加载。', 'Something went wrong. Try reloading.', '请稍后再试']:
