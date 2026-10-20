@@ -280,3 +280,97 @@ class ProvenanceTests(ChannelBase):
         self.assertEqual([], entries)
         self.assertIn('下次同步', note)
         self.assertEqual(row, self.row(row))
+
+    def test_zero_byte_legacy_row_is_successfully_audited_without_provenance_or_writes(self):
+        original = self.seed(x_browser._entry(tweet('123', text='')))
+        with reg.db() as conn:
+            conn.execute('ALTER TABLE feed_items DROP COLUMN body_provenance')
+        row = self.row(original)
+        self.assertEqual({**original, x_body.PROVENANCE: ''}, row)
+        self.assertEqual('', row['body'])
+        identity = row['url'].rsplit('/', 1)[1]
+        with patch.object(grab_store, 'replace', wraps=grab_store.replace) as replace, \
+             patch.object(x_body, 'record', wraps=x_body.record) as record:
+            for kind in ['photo', 'video', 'quote', 'link', 'unspecified']:
+                for apply in [False, True]:
+                    with self.subTest(kind=kind, apply=apply):
+                        page = Page(dict(empty(kind), at=identity, id=identity))
+                        stats = backfill.repair([row], page, apply=apply)
+                        self.assertEqual(1, stats['empty'])
+                        self.assertEqual(0, stats['unknown_provenance'])
+                        self.assertEqual(0, stats['blocked_length'])
+                        self.assertEqual(0, stats['updated'])
+                        self.assertEqual(0, stats['failed'])
+                        self.assertEqual(2, page.reads)
+                        result = stats['results'][0]
+                        self.assertEqual('confirmed_empty', result['reason'])
+                        self.assertEqual(kind, result['empty_kind'])
+                        self.assertEqual(0, result['before'])
+                        self.assertEqual(0, result['after'])
+                        self.assertEqual(row, self.row(row))
+                        self.assertFalse(x_body.parts(self.row(row)).source_known)
+            replace.assert_not_called()
+            record.assert_not_called()
+
+    def test_zero_byte_empty_cli_succeeds_without_repairing_missing_or_invalid_proof(self):
+        entry = x_browser._entry(tweet('123', text=''))
+        stale = x_browser._entry(tweet('123', text=PREVIEW))[x_body.PROVENANCE]
+        evidence_values = ['', '{', json.dumps({'version': 99}), stale, entry[x_body.PROVENANCE]]
+        for evidence in evidence_values:
+            original = self.seed(dict(entry, body_provenance=evidence))
+            if not evidence:
+                with reg.db() as conn:
+                    conn.execute('ALTER TABLE feed_items DROP COLUMN body_provenance')
+            row = self.row(original)
+            identity = row['url'].rsplit('/', 1)[1]
+            report = self.root / 'zero-byte-empty-report.json'
+            for flags in [[], ['--yes']]:
+                with self.subTest(evidence=evidence, flags=flags):
+                    output = io.StringIO()
+                    page = Page(dict(empty(), at=identity, id=identity))
+                    with contextlib.redirect_stdout(output), \
+                         patch.object(backfill.x_browser, 'browser_session',
+                                      return_value=contextlib.nullcontext(page)):
+                        code = backfill.main(['run', '--url', row['url'],
+                                              '--report', str(report), *flags])
+                    self.assertEqual(0, code)
+                    stats = json.loads(report.read_text())
+                    self.assertEqual(1, stats['empty'])
+                    self.assertEqual(0, stats['unknown_provenance'])
+                    self.assertEqual(0, stats['updated'])
+                    self.assertEqual(0, stats['failed'])
+                    self.assertIn('已确认无自写文字 1 条', output.getvalue())
+                    self.assertEqual(row, self.row(row))
+
+    def test_nonempty_unknown_rows_including_whitespace_do_not_use_empty_noop_exception(self):
+        entry = x_browser._entry(tweet('123', text=''))
+        for body in [' ', '\n\t', 'authored', '> ctx\n\n',
+                     '![图片](https://pbs.twimg.com/media/a.jpg)']:
+            row = self.seed(dict(entry, body=body, body_provenance=''))
+            identity = row['url'].rsplit('/', 1)[1]
+            for kind in ['photo', 'video', 'quote', 'link', 'unspecified']:
+                with self.subTest(body=body, kind=kind):
+                    page = Page(dict(empty(kind), at=identity, id=identity))
+                    stats = backfill.repair([row], page, apply=True)
+                    self.assertEqual(0, stats['empty'])
+                    self.assertEqual(1, stats['unknown_provenance'])
+                    self.assertEqual(0, stats['updated'])
+                    self.assertEqual('body_provenance_unknown', stats['results'][0]['reason'])
+                    self.assertEqual(len(body), stats['results'][0]['after'])
+                    self.assertEqual(row, self.row(row))
+
+    def test_zero_byte_unknown_row_still_requires_positive_remote_empty_proof(self):
+        row = self.seed(x_browser._entry(tweet('123', text='')), legacy=True)
+        identity = row['url'].rsplit('/', 1)[1]
+        states = [snapshot(''), empty('unknown'), dict(empty(), ready='loading'),
+                  dict(empty(), at='999'), dict(empty(), id='999'), dict(empty(), truncated=True)]
+        for state in states:
+            snap = dict(state, at=identity if state.get('at') == '123' else state['at'],
+                        id=identity if state.get('id') == '123' else state['id'])
+            with self.subTest(state=state), patch.object(x_post, 'SECONDS', 0.01):
+                stats = backfill.repair([row], Page(snap), apply=True)
+                self.assertEqual(0, stats['empty'])
+                self.assertEqual(0, stats['unknown_provenance'])
+                self.assertEqual(1, stats['failed'])
+                self.assertEqual(0, stats['updated'])
+                self.assertEqual(row, self.row(row))

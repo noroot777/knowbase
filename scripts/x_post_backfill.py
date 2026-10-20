@@ -107,17 +107,25 @@ def aligned_preview(preview: str, detail: str) -> bool:
     return re.match(''.join(pattern), re.sub(r'\s+', '', detail)) is not None
 
 
-def proposal(entry: dict, text: str) -> tuple[str, dict | None, dict]:
-    """Only bypass raw length when known link artifacts explain the difference."""
+def proposal(entry: dict, text: str, *,
+             empty: x_post.PostEmpty | None = None) -> tuple[str, dict | None, dict]:
+    """Classify no-write audit outcomes before checking replacement permissions."""
     body = x_body.parts(entry)
     preview = body.text
-    canonical = canonical_preview(preview)
-    info = dict(artifacts=canonical != preview, after=len(entry['body']))
-    if text == entry['body'] or text == preview:
-        return 'identical', None, dict(info, after=len(entry['body']), reason='detail_matches_stored')
+    info = dict(after=len(entry['body']))
+    if empty is not None:
+        info.update(empty_kind=empty.kind, detail=str(empty))
+        if entry['body'] == '' or (body.source_known and not preview):
+            return 'empty', None, dict(info, reason='confirmed_empty')
+    else:
+        info['artifacts'] = canonical_preview(preview) != preview
+        if text == entry['body'] or text == preview:
+            return 'identical', None, dict(info, reason='detail_matches_stored')
     if not body.source_known:
         return 'unknown_provenance', None, dict(info, reason='body_provenance_unknown',
                                                detail=str(x_body.SourceUnknown()))
+    if empty is not None:
+        return 'blocked_length', None, dict(info, reason='remote_empty_stored_text')
     info['after'] = len(body.render(text))
     if x_post.expanded(text, preview):
         return 'expanded', x_post.merge(entry, text), dict(info, reason='longer_detail')
@@ -170,15 +178,9 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
         try:
             text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
         except x_post.PostEmpty as exc:
-            entry = entry_of(row)
-            body = x_body.parts(entry)
-            state = ('unknown_provenance' if not body.source_known
-                     else 'blocked_length' if body.text else 'empty')
+            state, complete, info = proposal(entry_of(row), '', empty=exc)
             stats[state] += 1
-            result.update(state=state, after=len(row['body']), empty_kind=exc.kind,
-                          reason='body_provenance_unknown' if not body.source_known
-                          else 'remote_empty_stored_text' if body.text else 'confirmed_empty',
-                          detail=str(x_body.SourceUnknown()) if not body.source_known else str(exc))
+            result.update(state=state, **info)
         except x_post.PostGone as exc:
             stats['unavailable'] += 1
             result.update(state='unavailable', error=str(exc))
