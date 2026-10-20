@@ -4,7 +4,7 @@ import io
 from unittest.mock import patch
 
 from kb.collectors import FetchScope
-from kb.feeds import registry as reg, sync, x_body, x_browser, x_channels, x_post
+from kb.feeds import registry as reg, sync, x_body, x_browser, x_channels, x_post, x_post_meta
 from scripts import x_post_audit as audit, x_post_backfill as backfill
 from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import tweet
@@ -26,6 +26,7 @@ class MergeContractTests(ChannelBase):
         prefix = x_body.parts(entry).prefix
         entry = x_body.record(dict(entry, body=prefix + text + ('\n\n' + media if media else '')),
                               text, prefix=prefix, media=media)
+        entry = x_post_meta.stamp(entry, 'post', prefix)
         if not proof:
             entry[x_body.PROVENANCE] = ''
         with reg.db() as conn:
@@ -108,8 +109,10 @@ class MergeContractTests(ChannelBase):
 
     def test_confirmed_zero_byte_legacy_row_is_a_no_write_completed_audit(self):
         self.seed('', proof=False)
+        stamped = x_post_meta.stamp(dict(self.saved(), body=''), 'post', '')
         with reg.db() as conn:
-            conn.execute("UPDATE feed_items SET body='',body_provenance='{'")
+            conn.execute("UPDATE feed_items SET body='',body_provenance='{',x_post_meta=?",
+                         (stamped[x_post_meta.FIELD],))
         row = self.saved()
         for flags in [[], ['--yes', '--recheck']]:
             with self.subTest(flags=flags), contextlib.redirect_stdout(io.StringIO()), \

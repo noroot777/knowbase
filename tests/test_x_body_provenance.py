@@ -5,7 +5,7 @@ import json
 import time
 from unittest.mock import patch
 
-from kb.feeds import grab, grab_store, registry as reg, x_body, x_browser, x_feedgrab, x_post
+from kb.feeds import grab, grab_store, registry as reg, x_body, x_browser, x_feedgrab, x_post, x_post_meta
 from scripts import x_post_backfill as backfill
 from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import tweet
@@ -95,6 +95,22 @@ class ProvenanceTests(ChannelBase):
                     self.assertEqual(1, self.audit(row, text)['identical'])
                     self.assertEqual(row, self.row(row))
 
+    def test_cookie_prefix_does_not_duplicate_author_quotations_when_detail_includes_them(self):
+        text = '> 自写引用\n\n正文'
+        entry = x_feedgrab._entry(dict(source=URL, title='正文'), text, 'Example')
+        row = self.seed(entry)
+        self.assertEqual(('', '> 自写引用\n\n'), x_post_meta.eligibility(row))
+        self.assertEqual('', x_body.parts(row).prefix)
+        self.assertEqual(1, self.audit(row, text)['identical'])
+        self.assertEqual(1, self.audit(row)['blocked_length'])
+        self.assertEqual(row, self.row(row))
+        detail = text + '与完整的结尾'
+        self.assertEqual(1, self.audit(row, detail)['updated'])
+        saved = self.row(row)
+        self.assertEqual(detail, saved['body'])
+        self.assertEqual(('', ''), x_post_meta.eligibility(saved))
+        self.assertEqual('', x_body.parts(saved).prefix)
+
     def test_unmarked_generated_shapes_stay_conservatively_nonempty(self):
         entries = [x_feedgrab._entry(dict(source=URL, author='Example Person'), '', 'Example'),
                    x_browser._entry(tweet('123', text='', context='ctx')),
@@ -162,7 +178,9 @@ class ProvenanceTests(ChannelBase):
                 with self.assertRaises(x_body.SourceUnknown):
                     x_body.with_text(row, BODY)
                 self.assertEqual(row, self.row(row))
-        stale = self.seed(dict(entry, body='> ctx\n\nreal authored text'))
+        typed = x_post_meta.stamp(dict(entry, body='> ctx\n\nreal authored text'),
+                                  'post', '> ctx\n\n')
+        stale = self.seed(typed)
         self.assertEqual(stale['body'], x_body.parts(stale).text)
         self.assertEqual(1, self.audit(stale)['unknown_provenance'])
         self.assertEqual(1, self.audit(stale, BODY)['unknown_provenance'])
@@ -174,6 +192,7 @@ class ProvenanceTests(ChannelBase):
         row = self.seed(x_feedgrab._entry(dict(source=URL), '', 'Example'))
         replacement = {key: row[key] for key in ('title', 'body', 'author', 'published')}
         replacement['body'] = 'Example Person 的动态'
+        replacement = x_post_meta.stamp(replacement, 'post', '')
         self.assertTrue(grab_store.replace(row, replacement))
         fresh = self.row(row)
         self.assertEqual('', fresh[x_body.PROVENANCE])
@@ -348,7 +367,9 @@ class ProvenanceTests(ChannelBase):
         entry = x_browser._entry(tweet('123', text=''))
         for body in [' ', '\n\t', 'authored', '> ctx\n\n',
                      '![图片](https://pbs.twimg.com/media/a.jpg)']:
-            row = self.seed(dict(entry, body=body, body_provenance=''))
+            typed = x_post_meta.stamp(dict(entry, body=body, body_provenance=''), 'post', '',
+                                      author_text=x_post_meta.AuthorText(body, 'tweetText'))
+            row = self.seed(typed)
             identity = row['url'].rsplit('/', 1)[1]
             for kind in ['photo', 'video', 'quote', 'link', 'unspecified']:
                 with self.subTest(body=body, kind=kind):

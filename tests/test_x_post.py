@@ -221,7 +221,7 @@ class PostTests(unittest.TestCase):
     def test_detail_rate_limit_aborts_remaining_accounts_in_both_channels(self):
         short = x_browser._entry(tweet('124', text='short'))
         for attach in [False, True]:
-            page = Page(dict(snapshot(''), id='', ready='complete', limited=True))
+            page = Page(dict(snapshot(''), id='', ready='complete', limited=True, dom_problem='limited'))
             with self.subTest(attach=attach), patch.object(x_post, 'SECONDS', 0.02), \
                  patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
                  patch.object(x_browser, '_harvest_one',
@@ -236,7 +236,7 @@ class PostTests(unittest.TestCase):
                 self.assertNotIn('watermark', result[handle])
 
     def test_timeline_rate_limit_uses_the_same_batch_abort(self):
-        page = Page(dict(snapshot(''), articles=0, ready='complete', empty=False, limited=True))
+        page = Page(dict(snapshot(''), articles=0, ready='complete', empty=False, limited=True, dom_problem='limited'))
         with patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
              patch.object(x_browser, '_harvest_one', side_effect=lambda page, handle, floor:
                           x_browser._wait_state(page, handle, time.monotonic() + 1)) as collect:
@@ -245,7 +245,7 @@ class PostTests(unittest.TestCase):
         self.assertIn('频率', result['Next']['error'])
 
     def test_request_error_returns_promptly_without_claiming_absence_or_rate_limiting(self):
-        failed = dict(snapshot(''), id='', ready='complete', failed=True)
+        failed = dict(snapshot(''), id='', ready='complete', failed=True, dom_problem='failed')
         page = Page(failed)
         with patch.object(x_post, 'SECONDS', 0.1), \
              patch.object(x_post.time, 'sleep') as sleep:
@@ -258,15 +258,17 @@ class PostTests(unittest.TestCase):
     def test_transient_errors_and_limits_need_consecutive_confirmations(self):
         for signal in ['failed', 'limited']:
             with self.subTest(signal=signal):
-                failed = dict(snapshot(''), id='', ready='complete', **{signal: True})
+                failed = dict(snapshot(''), id='', ready='complete', dom_problem=signal, **{signal: True})
                 page = Page(failed, snapshot(BODY), failed, snapshot(BODY), snapshot(BODY))
                 self.assertEqual(BODY, x_post.fetch(URL, page))
                 self.assertEqual(5, page.reads)
 
-    def test_request_error_cannot_classify_a_previous_or_loading_detail_page(self):
-        for changes in [dict(at='999'), dict(ready='loading')]:
+    def test_unscoped_error_cannot_classify_a_previous_or_unsettled_detail_page(self):
+        for changes in [dict(at='999', ready='complete'), dict(at='999', ready='loading'),
+                        dict(ready='loading')]:
             with self.subTest(changes=changes):
-                failed = dict(snapshot(''), id='', ready='complete', failed=True)
+                failed = dict(snapshot(''), id='', ready='complete', failed=True,
+                              dom_problem='failed' if changes['ready'] == 'complete' else '')
                 failed.update(changes)
                 page = Page(failed, failed, snapshot(BODY), snapshot(BODY))
                 self.assertEqual(BODY, x_post.fetch(URL, page))
@@ -274,7 +276,7 @@ class PostTests(unittest.TestCase):
     def test_request_error_keeps_the_account_retryable_and_next_account_can_succeed(self):
         short = x_browser._entry(tweet('124', text='short'))
         for attach in [False, True]:
-            page = Page(dict(snapshot(''), id='', ready='complete', failed=True))
+            page = Page(dict(snapshot(''), id='', ready='complete', failed=True, dom_problem='failed'))
             with self.subTest(attach=attach), \
                  patch.object(x_post, 'SECONDS', 0.1), \
                  patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
@@ -290,7 +292,7 @@ class PostTests(unittest.TestCase):
 
     def test_timeline_request_error_is_account_local_and_confirmed_twice(self):
         page = Page(dict(snapshot(''), articles=0, ready='complete', empty=False,
-                         limited=False, failed=True))
+                         limited=False, failed=True, dom_problem='failed'))
         with patch.object(x_browser.time, 'sleep'), \
              self.assertRaisesRegex(x_browser.XBrowserError, 'X.*请求出错'):
             x_browser._wait_state(page, 'Example', time.monotonic() + 0.1)
@@ -302,6 +304,7 @@ class PostTests(unittest.TestCase):
             with self.subTest(signal=signal), patch.object(x_browser.time, 'sleep'):
                 bad = dict(good, articles=0)
                 bad[signal] = True
+                bad['dom_problem'] = signal
                 page = Page(bad, good)
                 self.assertEqual(good, x_browser._wait_state(page, 'Example', time.monotonic() + 0.1))
                 self.assertEqual(2, page.reads)

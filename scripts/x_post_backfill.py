@@ -5,13 +5,18 @@
     python scripts/x_post_backfill.py run --limit 10
     python scripts/x_post_backfill.py run --yes --channel browser --report /tmp/x-post.json
 
-scan lists all stored X posts and their current audit results, locally and read-only.
-run probes candidates; only --yes writes feeds.db.
-Every unaudited or changed X post is selected by default; failures remain retryable.
+scan is local and read-only. run probes candidates; only --yes writes feeds.db.
+Only eligible post bodies are audited; merged Articles and ambiguous legacy rows are skipped.
+Ellipses and wrapped URLs only affect priority within eligible posts.
+run --resolve-legacy independently verifies missing provenance before admission;
+only --yes persists those version-bound records, without inferring type from titles.
+Every unaudited or changed eligible post is selected by default; failures remain retryable.
 Audit receipts are saved beside feeds.db, without changing feed content in probe mode.
 --recheck repeats completed audits; ellipses and wrapped URLs only affect priority.
 --all is a compatibility alias; --url selects exact stored URLs. Translation, export and
 indexing use the normal pipeline.
+Coverage counts completed detail comparisons and confirmed remote absence, not attempts.
+Excluded rows are listed in the summary and make scan/run exit nonzero.
 """
 from __future__ import annotations
 
@@ -24,7 +29,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb.feeds import grab_store, registry as reg, x_body, x_browser, x_channels, x_post
+from kb.feeds import grab_store, registry as reg, x_body, x_browser, x_channels, x_post, x_post_meta
+from kb.feeds import x_post_provenance
 from kb.feeds.x_cdp import CdpError
 from kb.feeds.x_page_state import XAccessBlocked, XRateLimited
 from scripts import x_post_audit as audit
@@ -175,6 +181,9 @@ def aligned_preview(preview: str, detail: str, evidence=None) -> bool:
 def proposal(entry: dict, text: str, evidence=None, *,
              empty: x_post.PostEmpty | None = None) -> tuple[str, dict | None, dict]:
     """Require known fragments and source alignment before any stored-body replacement."""
+    if skipped := exclusion(entry):
+        return skipped['state'], None, dict(reason=skipped['reason'])
+    entry = x_post.detail_entry(entry, text)
     body = x_body.parts(entry)
     info = dict(after=len(entry['body']), artifacts=canonical_preview(body.text) != body.text)
     if empty is not None:
@@ -203,7 +212,8 @@ def proposal(entry: dict, text: str, evidence=None, *,
             complete['body'] += entry['body'][len(entry['body'].rstrip()):]
             complete.pop(x_post.HINT)
             complete.update(title=fixed.splitlines()[0][:500])
-            return 'normalized', complete, dict(
+            return 'normalized', x_post_meta.stamp(
+                complete, 'post', body.prefix, author_text=x_post_meta.AuthorText(text, 'detail')), dict(
                 info, after=len(complete['body']), reason='confirmed_link_ranges',
                 remaining='blocked_' + alignment)
     if alignment == 'evidence':
@@ -218,19 +228,31 @@ def proposal(entry: dict, text: str, evidence=None, *,
         complete = x_body.with_text(entry, text)
         complete.pop(x_post.HINT)
         complete.update(title=text.splitlines()[0][:500])
-        return 'normalized', complete, dict(info, reason='legacy_link_artifacts'
+        return 'normalized', x_post_meta.stamp(
+                complete, 'post', body.prefix, author_text=x_post_meta.AuthorText(text, 'detail')), dict(info, reason='legacy_link_artifacts'
                                            if info['artifacts'] else 'legacy_whitespace')
     state = 'blocked_artifacts' if info['artifacts'] else 'blocked_length'
     return state, None, dict(info, reason='legacy_link_artifacts_not_reconciled'
                             if info['artifacts'] else 'detail_not_longer')
 
 
+def exclusion(row: dict) -> dict | None:
+    reason, _prefix = x_post_meta.eligibility(row)
+    if not reason:
+        return None
+    return dict(url=row['url'], before=len(row['body']), reason=reason,
+                state='skipped_article' if reason == 'article_merged' else 'skipped_ambiguous')
+
+
 def candidates(conn, *, urls=(), limit=0, all_posts=False, apply=False, recheck=False,
-               scan=False) -> list[dict]:
-    """Audit all X posts; all_posts remains accepted for existing callers."""
+               scan=False, excluded=None, omitted=None, resolve_legacy=False) -> list[dict]:
+    """Apply provenance and audit progress before limit; scan retains completed rows."""
     rows = conn.execute("SELECT * FROM feed_items WHERE kind='social' AND content_kind='post'"
                         " ORDER BY published DESC,key").fetchall()
     selected = []
+    skipped_rows = []
+    skipped_counts = dict(skipped_article=0, skipped_ambiguous=0)
+    pending_provenance = set()
     wanted = set(urls)
     for row in rows:
         if not x_post._STATUS.match(row['url']):
@@ -238,34 +260,78 @@ def candidates(conn, *, urls=(), limit=0, all_posts=False, apply=False, recheck=
         if wanted:
             if row['url'] not in wanted:
                 continue
-        selected.append(dict(row))
+        row = dict(row)
+        if skipped := exclusion(row):
+            if not (resolve_legacy and skipped['reason'] in x_post_meta.RECOVERABLE):
+                skipped_counts[skipped['state']] += 1
+                if not limit or len(skipped_rows) < limit:
+                    skipped_rows.append(skipped)
+                continue
+            if apply:
+                pending_provenance.add(row['key'])
+        selected.append(row)
     selected.sort(key=lambda row: not (row['body'].rstrip().endswith(('…', '...')) or
                                       canonical_preview(row['body']) != row['body']))
     if not scan:
-        selected = audit.select(selected, apply=apply, recheck=recheck or bool(wanted))
-    return selected[:limit] if limit else selected
+        remaining = audit.select(selected, apply=apply, recheck=recheck or bool(wanted))
+        retained = {row['key'] for row in remaining}
+        pending_provenance.difference_update(retained)
+        selected = [row for row in selected if row['key'] in pending_provenance] + remaining
+    selected = selected[:limit] if limit else selected
+    listed = skipped_rows[:max(limit - len(selected), 0)] if limit else skipped_rows
+    if excluded is not None:
+        excluded.extend(listed)
+    for skipped in listed:
+        skipped_counts[skipped['state']] -= 1
+    if omitted is not None:
+        omitted.update({state: count for state, count in skipped_counts.items() if count})
+    return selected
 
 
 def entry_of(row: dict) -> dict:
+    reason, prefix = x_post_meta.eligibility(row)
+    if reason:
+        raise ValueError(f'X post is not eligible for detail audit: {reason}')
     return {**{key: row[key] for key in
                ('url', 'title', 'body', 'author', 'published', 'content_kind')},
-            x_body.PROVENANCE: row.get(x_body.PROVENANCE, ''),
-            x_post.HINT: x_body.parts(row).prefix}
+            x_post.HINT: prefix, x_post_meta.FIELD: row.get(x_post_meta.FIELD, ''),
+            x_body.PROVENANCE: row.get(x_body.PROVENANCE, '')}
+
+
+def _stats(rows, excluded, omitted=None) -> dict:
+    stats = dict(candidates=len(rows), total=len(rows) + len(excluded), checked=0,
+                 omitted=dict(omitted or {}),
+                 expanded=0, normalized=0, updated=0,
+                 identical=0, empty=0, unknown_structure=0, unknown_provenance=0,
+                 blocked_length=0, blocked_artifacts=0, unavailable=0,
+                 failed=0, stale=0, deferred=0, skipped_article=0, skipped_ambiguous=0,
+                 provenance_resolved=0, provenance_saved=0, partial=0,
+                 blocked_whitespace=0, blocked_content=0, blocked_evidence=0, results=list(excluded))
+    for skipped in excluded:
+        stats[skipped['state']] += 1
+    return stats
 
 
 def repair(rows: list[dict], session, *, apply=False, deadline=None,
-           should_stop=None, progress=None, remember=False) -> dict:
-    stats = dict(candidates=len(rows), expanded=0, normalized=0, updated=0,
-                 identical=0, empty=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
-                 blocked_whitespace=0, blocked_content=0, blocked_evidence=0,
-                 failed=0, unknown_structure=0, unknown_provenance=0,
-                 stale=0, deferred=0, partial=0, results=[])
+           should_stop=None, progress=None, excluded=(), omitted=None,
+           resolve_legacy=False, remember=False) -> dict:
+    stats = _stats(rows, excluded, omitted)
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
                 deadline is not None and time.monotonic() >= deadline):
             stats['deferred'] += len(rows) - index
             break
-        generation = audit.begin(row, apply=apply) if remember else None
+        skipped = exclusion(row)
+        resolving = resolve_legacy and skipped and skipped['reason'] in x_post_meta.RECOVERABLE
+        if skipped and not resolving:
+            stats[skipped['state']] += 1
+            stats['results'].append(skipped)
+            if progress:
+                progress(skipped, stats)
+            continue
+        origin = row
+        generation = audit.begin(row, apply=apply,
+                                 provenance_pending=bool(apply and resolving)) if remember else None
         if remember and generation is None:
             stats['deferred'] += 1
             continue
@@ -273,13 +339,46 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
         evidence = {}
         complete = None
         try:
-            text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop,
-                                evidence=evidence)
+            text = None
+            if resolving:
+                annotated, text = x_post_provenance.resolve(
+                    row, session, deadline=deadline, should_stop=should_stop,
+                    aligned_preview=lambda preview, detail: aligned_preview(preview, detail, evidence),
+                    evidence=evidence)
+                resolved = x_post_provenance.save(row, annotated) if apply else annotated
+                if resolved is None:
+                    stats['stale'] += 1
+                    result.update(state='stale', reason='provenance_snapshot_changed')
+                else:
+                    row = resolved
+                    stats['provenance_resolved'] += 1
+                    stats['provenance_saved'] += int(apply)
+                    if skipped := exclusion(row):
+                        stats[skipped['state']] += 1
+                        result.update(skipped)
+            if not result.get('state') and text is None:
+                text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop,
+                                    evidence=evidence)
+            if isinstance(text, x_post.PostEmpty):
+                raise text
+            if not result.get('state'):
+                state, complete, info = proposal(entry_of(row), text, evidence)
+                stats['checked'] += 1
+                stats[state] += 1
+                result.update(state=state, **info)
+                if complete and apply:
+                    state = 'updated' if grab_store.replace(row, complete) else 'stale'
+                    stats[state] += 1
+                    result['state'] = state
+                    if state == 'updated' and info.get('remaining'):
+                        stats['partial'] += 1
         except x_post.PostEmpty as exc:
             state, complete, info = proposal(entry_of(row), '', empty=exc)
+            stats['checked'] += 1
             stats[state] += 1
             result.update(state=state, **info)
         except x_post.PostGone as exc:
+            stats['checked'] += 1
             stats['unavailable'] += 1
             result.update(state='unavailable', error=str(exc))
         except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable) as exc:
@@ -301,18 +400,9 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
                     stats['deferred'] = len(rows) - index - 1
                     stats['stop_reason'] = '多条已加载详情的正文结构无法识别,疑似 X 结构变化;停止本批并保留原行'
                     result['scope'] = 'batch'
-        else:
-            state, complete, info = proposal(entry_of(row), text, evidence)
-            stats[state] += 1
-            result.update(state=state, **info)
-            if complete and apply:
-                state = 'updated' if grab_store.replace(row, complete) else 'stale'
-                stats[state] += 1
-                result['state'] = state
-                if state == 'updated' and info.get('remaining'):
-                    stats['partial'] += 1
         if remember:
-            audit.record(row, result, complete=complete, generation=generation)
+            audit.record(origin, result, complete=complete, generation=generation,
+                         resolved=row if apply and row is not origin else None)
         stats['results'].append(result)
         if progress:
             progress(result, stats)
@@ -321,12 +411,25 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
     return stats
 
 
+def _coverage(stats):
+    print(f'实际核对 {stats["checked"]} / 本批共 {stats["total"]} 条'
+          '(已取得详情或确认远端不可用,不等于正文完整);'
+          f'长文跳过 {stats["skipped_article"]} 条,来源不明跳过 {stats["skipped_ambiguous"]} 条。')
+    print(f'来源核实 {stats["provenance_resolved"]} 条,来源保存 {stats["provenance_saved"]} 条。')
+    if omitted := stats.get('omitted'):
+        print(f'另有 {sum(omitted.values())} 条资格排除未列出,不计入本批'
+              f'(长文 {omitted.get("skipped_article", 0)} 条,'
+              f'来源不明 {omitted.get("skipped_ambiguous", 0)} 条)。')
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('cmd', choices=['scan', 'run'])
     parser.add_argument('--yes', action='store_true', help='确认用版本化替换写回正文')
     parser.add_argument('--url', action='append', default=[], help='只检查指定的存量 URL,可重复')
-    parser.add_argument('--all', action='store_true', help='兼容旧命令;默认已检查全部存量 X 推文')
+    parser.add_argument('--all', action='store_true', help='兼容旧命令;不绕过长文与来源不明行的排除')
+    parser.add_argument('--resolve-legacy', action='store_true',
+                        help='核实缺失或损坏来源:长文接口及详情须能对齐;--yes 才保存来源')
     parser.add_argument('--recheck', action='store_true', help='重新核对已记过结论的当前正文版本')
     parser.add_argument('--limit', type=int, default=0)
     parser.add_argument('--budget', type=float, default=600.0, help='整轮浏览器读取秒数')
@@ -338,8 +441,15 @@ def main(argv=None) -> int:
     if any(not x_post._STATUS.match(url) for url in args.url):
         parser.error('--url 只接受 X 推文的完整地址')
     with reg.db() as conn:
-        rows = candidates(conn, urls=args.url, limit=args.limit, all_posts=args.all,
-                          apply=args.yes, recheck=args.recheck, scan=args.cmd == 'scan')
+        excluded = []
+        omitted = {}
+        rows = candidates(conn, urls=args.url, limit=args.limit, all_posts=args.all, excluded=excluded,
+                          omitted=omitted,
+                          resolve_legacy=args.resolve_legacy, apply=args.yes, recheck=args.recheck,
+                          scan=args.cmd == 'scan')
+    print('旧行可用 run --resolve-legacy 核实来源;加 --yes 才保存,不是强制绕过保护。')
+    for skipped in excluded:
+        print(json.dumps(skipped, ensure_ascii=False))
     scope = ('列出存量 X 推文及当前版本的核对结论,不隐藏已核对项。' if args.cmd == 'scan' else
              '默认续查未核对或正文已变的存量 X 推文,失败与局部修复欠账排在新项之后重试。')
     print(f'找到 {len(rows)} 条候选;' + scope)
@@ -360,13 +470,9 @@ def main(argv=None) -> int:
                      '未核对' if not prior else '已有结论(不保证完整)')
             print(f'{len(row["body"]):>6} 字符  {row["url"]}  [{label}] '
                   + json.dumps(outcome, ensure_ascii=False))
-        return 0
-    if not rows:
-        if args.report:
-            args.report.parent.mkdir(parents=True, exist_ok=True)
-            args.report.write_text(json.dumps(repair([], None), ensure_ascii=False, indent=2),
-                                   encoding='utf-8')
-        return 0
+        print('scan 仅列候选,未访问详情。')
+        _coverage(_stats(rows, excluded, omitted))
+        return int(bool(excluded or omitted))
     print('模式:真正回填' if args.yes else '模式:只读核对,不写正文库,只记核对进度(加 --yes 才写回)')
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
@@ -376,20 +482,24 @@ def main(argv=None) -> int:
         if args.report:
             args.report.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
 
-    settings = reg.get_settings('social')
-    deadline = time.monotonic() + args.budget
-    try:
-        with x_browser.browser_session(
-                str(x_channels.BROWSER_PROFILE), settings.get('x_chrome_path', ''),
-                attach=args.channel == 'attach') as page:
-            page.open_page('about:blank')
-            stats = repair(rows, page, apply=args.yes, deadline=deadline, progress=report,
-                           remember=True)
-    except (CdpError, OSError, EOFError) as exc:
-        print(f'浏览器不可用,未继续回填:{exc}', file=sys.stderr)
-        return 1
+    stats = _stats(rows, excluded, omitted)
+    if rows:
+        settings = reg.get_settings('social')
+        deadline = time.monotonic() + args.budget
+        try:
+            with x_browser.browser_session(
+                    str(x_channels.BROWSER_PROFILE), settings.get('x_chrome_path', ''),
+                    attach=args.channel == 'attach') as page:
+                page.open_page('about:blank')
+                stats = repair(rows, page, apply=args.yes, deadline=deadline, progress=report,
+                               excluded=excluded, omitted=omitted,
+                               resolve_legacy=args.resolve_legacy, remember=True)
+        except (CdpError, OSError, EOFError) as exc:
+            print(f'浏览器不可用,未继续回填:{exc}', file=sys.stderr)
+            return 1
     if args.report:
         args.report.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
+    _coverage(stats)
     print(f'可扩写 {stats["expanded"]} 条,可清理旧链接产物 {stats["normalized"]} 条,'
           f'实际写入 {stats["updated"]} 条,'
           f'正文结构尚未确认 {stats["unknown_structure"]} 条,'
@@ -408,10 +518,11 @@ def main(argv=None) -> int:
     if stats.get('stop_reason'):
         print(f'整轮已停止:{stats["stop_reason"]}')
     print('已写入的条目会在正常同步中重新翻译、导出、索引和提取;本脚本不直接改 vault。')
-    empty_conflict = any(result.get('reason') == 'remote_empty_stored_text'
-                         for result in stats['results'])
-    return int(empty_conflict or any(stats[key] for key in
-                                   ('failed', 'deferred', 'unknown_provenance')))
+    return 1 if stats['omitted'] or any(stats[key] for key in
+                    ('failed', 'deferred', 'stale',
+                     'skipped_article', 'skipped_ambiguous', 'unknown_provenance')) or any(
+                         result.get('reason') == 'remote_empty_stored_text'
+                         for result in stats['results']) else 0
 
 
 if __name__ == '__main__':

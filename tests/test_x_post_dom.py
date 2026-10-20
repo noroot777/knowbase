@@ -4,12 +4,12 @@ import re
 import threading
 import time
 import unittest
-from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from kb.feeds import x_body, x_browser, x_page_state, x_post
+from kb.feeds import x_body, x_browser, x_page_state, x_post, x_post_meta
 from kb.feeds.x_cdp import Chrome
 from scripts import x_post_backfill as backfill
 from tests.headless import INSTALL_HINT, SHELL
@@ -27,6 +27,14 @@ RETRY_PATH = ('M12 4c-4.418 0-8 3.58-8 8s3.582 8 8 8c3.806 0 6.993-2.66 '
 RETRY = f'<button role="button"><div><svg><g><path d="{RETRY_PATH}"></path></g></svg></div></button>'
 
 
+def audit_entry(body):
+    entry = x_post_meta.stamp(dict(url='https://x.com/Example/status/123',
+                                  title=body.splitlines()[0] if body else '', body=body,
+                                  **{x_post.HINT: ''}), 'post', '',
+                              author_text=x_post_meta.AuthorText(body, 'tweetText'))
+    return x_body.record(entry, body)
+
+
 def article(identity='123', text='short', more='', quoted=''):
     return (f'<article data-testid="tweet"><div data-testid="User-Name">Example</div>'
             f'<a href="/Example/status/{identity}">'
@@ -35,7 +43,7 @@ def article(identity='123', text='short', more='', quoted=''):
 
 
 def stored_entry(text):
-    return x_body.record(dict(body=text, **{x_post.HINT: ''}), text)
+    return audit_entry(text)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -115,7 +123,7 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
         snap = json.loads(self.page.eval(x_post.READ_JS))
         self.assertIn('\n@AsideAI\n', legacy)
         self.assertIn('\n\nKeep this paragraph.', snap['text'])
-        entry = stored_entry(legacy)
+        entry = audit_entry(legacy)
         state, complete, _ = backfill.proposal(entry, snap['text'], snap)
         self.assertEqual('normalized', state)
         self.assertEqual(snap['text'], complete['body'])
@@ -129,7 +137,7 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
                 legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
                 snap = json.loads(self.page.eval(x_post.READ_JS))
                 self.assertIn('\n', legacy)
-                entry = stored_entry(legacy)
+                entry = audit_entry(legacy)
                 self.assertEqual('blocked_whitespace', backfill.proposal(entry, snap['text'], snap)[0])
 
     def test_actual_x_mention_wrappers_repair_legacy_text_and_longer_details(self):
@@ -143,7 +151,7 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
         self.assertIn('\n@AsideAI\n', legacy)
         for preview, expected in [(legacy, 'normalized'), (legacy.split(' with agents.')[0], 'expanded')]:
             with self.subTest(preview=preview):
-                state, complete, _ = backfill.proposal(stored_entry(preview),
+                state, complete, _ = backfill.proposal(audit_entry(preview),
                                                       snap['text'], snap)
                 self.assertEqual(expected, state)
                 self.assertEqual(snap['text'], complete['body'])
@@ -162,13 +170,13 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
                 self.assertIn('\n@AsideAI\n', snap['inline_legacy'])
                 self.assertIn('https://example.com/connections', snap['inline_legacy'])
                 state, complete, _ = backfill.proposal(
-                    stored_entry(snap['inline_legacy']), snap['text'], snap)
+                    audit_entry(snap['inline_legacy']), snap['text'], snap)
                 self.assertEqual('normalized', state)
                 self.assertEqual(snap['text'], complete['body'])
                 self.assertIn('\n\nKeep this paragraph.', complete['body'])
                 raw = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
                 state, complete, info = backfill.proposal(
-                    stored_entry(raw), snap['text'], snap)
+                    audit_entry(raw), snap['text'], snap)
                 self.assertEqual('blocked_content', state)
                 self.assertIsNone(complete)
                 self.assertEqual('detail_does_not_cover_stored', info['reason'])
@@ -180,7 +188,7 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
         legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
         snap = json.loads(self.page.eval(x_post.READ_JS))
         preview = legacy.split(' today')[0]
-        state, complete, _ = backfill.proposal(stored_entry(preview),
+        state, complete, _ = backfill.proposal(audit_entry(preview),
                                               snap['text'], snap)
         self.assertEqual('expanded', state)
         self.assertEqual(snap['text'], complete['body'])
@@ -192,7 +200,7 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
         snap = json.loads(self.page.eval(x_post.READ_JS))
         self.assertEqual(snap['text'], snap['inline_legacy'])
         self.assertEqual('blocked_whitespace', backfill.proposal(
-            stored_entry('Read \n@AsideAI\n today'), snap['text'], snap)[0])
+            audit_entry('Read \n@AsideAI\n today'), snap['text'], snap)[0])
 
     def test_out_of_flow_wrappers_cannot_authorize_deleting_paragraphs(self):
         for style in ['position:absolute', 'position:fixed', 'float:left', 'visibility:hidden']:
@@ -202,7 +210,7 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
                 snap = json.loads(self.page.eval(x_post.READ_JS))
                 self.assertEqual(snap['text'], snap['inline_legacy'])
                 self.assertEqual('blocked_whitespace', backfill.proposal(
-                    stored_entry('Read \n@AsideAI\n today'), snap['text'], snap)[0])
+                    audit_entry('Read \n@AsideAI\n today'), snap['text'], snap)[0])
 
     def test_proven_multiple_layout_breaks_can_be_removed_without_removing_source_paragraphs(self):
         anchors = ['<a style="display:block" href="https://example.org">https://example.org</a>',
@@ -217,7 +225,7 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
                 snap = json.loads(self.page.eval(x_post.READ_JS))
                 self.assertIn('\n\nhttps://', legacy)
                 self.assertIn('Read\nhttps://', snap['text'])
-                state, complete, _ = backfill.proposal(stored_entry(legacy),
+                state, complete, _ = backfill.proposal(audit_entry(legacy),
                                                       snap['text'], snap)
                 self.assertEqual('normalized', state)
                 self.assertEqual(snap['text'], complete['body'])
@@ -230,13 +238,13 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
         snap = json.loads(self.page.eval(x_post.READ_JS))
         preview = legacy.replace('\n@AsideAI', '\n\n@AsideAI')
         self.assertEqual('blocked_whitespace', backfill.proposal(
-            stored_entry(preview), snap['text'], snap)[0])
+            audit_entry(preview), snap['text'], snap)[0])
 
     def test_inline_anchor_without_a_layout_break_cannot_authorize_removing_one(self):
         self.load(article(text='Read <a href="/AsideAI">@AsideAI</a> today'))
         snap = json.loads(self.page.eval(x_post.READ_JS))
         self.assertEqual('blocked_whitespace', backfill.proposal(
-            stored_entry('Read\n@AsideAI\ntoday'), snap['text'], snap)[0])
+            audit_entry('Read\n@AsideAI\ntoday'), snap['text'], snap)[0])
 
     def test_real_protocol_split_is_repaired_but_url_following_paragraphs_survive(self):
         self.load(article(text='Read <a href="https://t.co/example">'
@@ -246,7 +254,7 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
         legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
         snap = json.loads(self.page.eval(x_post.READ_JS))
         self.assertIn('https://\nexample.org/path', legacy)
-        state, complete, _ = backfill.proposal(stored_entry(legacy),
+        state, complete, _ = backfill.proposal(audit_entry(legacy),
                                               snap['text'], snap)
         self.assertEqual('normalized', state)
         self.assertEqual('Read https://example.org/path\n\nKeep this paragraph.', complete['body'])
@@ -255,7 +263,7 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
         self.load(article(text='🙂 Read <a style="display:block" href="/AsideAI">@AsideAI</a> today'))
         snap = json.loads(self.page.eval(x_post.READ_JS))
         self.assertEqual([5, 13], snap['inline_breaks'])
-        entry = stored_entry('🙂 Read \n@AsideAI\n today')
+        entry = audit_entry('🙂 Read \n@AsideAI\n today')
         self.assertEqual('normalized', backfill.proposal(entry, snap['text'], snap)[0])
         self.load(article(text='🙂 Read @AsideAI today'))
         snap = json.loads(self.page.eval(x_post.READ_JS))
@@ -341,7 +349,7 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
             ('Loading', False, False),
         ]:
             with self.subTest(text=text):
-                self.load('<main>' + text + '</main>')
+                self.load('<main><div data-testid="primaryColumn">' + text + '</div></main>')
                 for script in [x_post.READ_JS, x_browser._STATE_JS]:
                     snap = json.loads(self.page.eval(script))
                     self.assertIs(empty, snap.get('empty'))
@@ -350,7 +358,7 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
     def test_real_request_error_copy_is_retryable_not_absent_or_proven_rate_limit(self):
         for text in ['出错了。请尝试重新加载。', 'Something went wrong. Try reloading.', '请稍后再试']:
             with self.subTest(text=text):
-                self.load('<main>' + text + '</main>')
+                self.load('<main><div data-testid="primaryColumn">' + text + '</div></main>')
                 for script in [x_post.READ_JS, x_browser._STATE_JS]:
                     snap = json.loads(self.page.eval(script))
                     self.assertIs(True, snap.get('failed'))
@@ -365,6 +373,68 @@ class PostDomTests(EmptyDomCases, unittest.TestCase):
             self.assertIs(True, snap.get('failed'))
             self.assertIs(False, snap.get('empty'))
             self.assertIs(False, snap.get('limited'))
+
+    def test_document_complete_does_not_make_a_busy_main_error_terminal(self):
+        for text in ('Rate limit exceeded', 'Something went wrong. Try reloading'):
+            with self.subTest(text=text):
+                self.load('<main data-testid="primaryColumn"><div role="progressbar"></div>'
+                          '<div role="alert">' + text + '</div></main>')
+                for script in (x_post.READ_JS, x_browser._STATE_JS):
+                    snap = json.loads(self.page.eval(script))
+                    self.assertEqual('complete', snap['ready'])
+                    self.assertEqual('', snap['dom_problem'])
+                    self.assertEqual('', x_page_state.problem(snap))
+
+    def test_connection_check_waits_for_a_second_terminal_frame_in_a_real_page(self):
+        for text, expected in [('Rate limit exceeded', 'limited'),
+                               ('Something went wrong. Try reloading', 'failed')]:
+            with self.subTest(expected=expected):
+                self.load('<main data-testid="primaryColumn"><div role="alert">' + text + '</div></main>')
+                with patch.object(x_browser, 'read', wraps=x_browser.read) as read, \
+                        patch.object(time, 'sleep'):
+                    self.assertEqual(expected, x_browser.verify_timeline(self.page, timeout=1)[0])
+                self.assertEqual(2, read.call_count)
+
+    def test_connection_check_allows_a_transient_error_to_render_tweets(self):
+        self.load('<main data-testid="primaryColumn"><div role="alert">'
+                  'Something went wrong. Try reloading</div></main>')
+        read = x_browser.read
+        reads = []
+
+        def recover(page, script):
+            snap = read(page, script)
+            reads.append(snap)
+            if len(reads) == 1:
+                page.eval('document.querySelector("main").innerHTML = ' + json.dumps(article()) + '; true')
+            return snap
+
+        with patch.object(x_browser, 'read', side_effect=recover), patch.object(time, 'sleep'):
+            self.assertEqual('ok', x_browser.verify_timeline(self.page, timeout=1)[0])
+        self.assertEqual(['failed', ''], [snap['dom_problem'] for snap in reads])
+
+    def test_missing_shell_gateway_copy_is_only_error_evidence_for_both_readers(self):
+        for text, verdict in [('Rate limit exceeded', 'limited'),
+                              ('Something went wrong. Try reloading.', 'failed')]:
+            with self.subTest(verdict=verdict):
+                self.load('<main>' + text + '</main>')
+                for script in [x_post.READ_JS, x_browser._STATE_JS]:
+                    snap = json.loads(self.page.eval(script))
+                    self.assertEqual(verdict, x_page_state.problem(snap))
+                    self.assertEqual(0, snap['articles'])
+                    self.assertFalse(snap.get('valid', False))
+                self.assertEqual(verdict, x_browser.verify_timeline(self.page, timeout=1)[0])
+
+    def test_sidebar_words_or_missing_primary_cannot_classify_the_main_page(self):
+        for text in ['该页面不存在', 'Hmm...this page doesn’t exist.', 'Rate limit exceeded',
+                     '出错了。请尝试重新加载。', 'Something went wrong. Try reloading.', '请稍后再试']:
+            for main in ['', '<main><div data-testid="primaryColumn">Loading</div></main>']:
+                with self.subTest(text=text, main=main):
+                    self.load(main + '<aside data-testid="sidebarColumn">' + text + '</aside>')
+                    for script in [x_post.READ_JS, x_browser._STATE_JS]:
+                        snap = json.loads(self.page.eval(script))
+                        for flag in ('empty', 'limited', 'failed'):
+                            self.assertIs(False, snap.get(flag))
+                        self.assertEqual('', x_page_state.problem(snap))
 
     def test_retry_icons_in_sidebars_or_tweets_and_regular_buttons_are_not_page_errors(self):
         fixtures = [

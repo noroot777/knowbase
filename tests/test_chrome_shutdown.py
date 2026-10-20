@@ -235,7 +235,15 @@ class ProfileBusyTests(unittest.TestCase):
 
     def test_the_connection_check_is_not_blocked_by_a_stale_lock(self):
         """后果一:「检查连接」放行到真去连浏览器那一步(这里用一个哨兵证明它
-        走过了前置检查,不真起浏览器)。"""
+        走过了前置检查,不真起浏览器)。
+
+        **前提里要摆上登录痕迹**:前置检查现在不止一道闸,「这个 profile 从没登录
+        过」那一道在残锁之后(`has_login_footprint`)。不摆的话这一局会停在那一道上,
+        于是"残锁放行了没有"这件事压根没被问到 —— 用例看着红,而它要钉的那条判据
+        连执行路径都没进。
+        """
+        (self.tmp / 'Default').mkdir(parents=True, exist_ok=True)
+        (self.tmp / 'Default' / 'Cookies').write_text('x', 'utf-8')
         self._lock('somehost-999999')
         with patch.object(x_browser, 'browser_session',
                           side_effect=AssertionError('前置检查放行了')):

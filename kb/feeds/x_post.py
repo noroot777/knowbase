@@ -4,9 +4,10 @@ from __future__ import annotations
 import re
 import time
 
-from kb.feeds import x_article, x_body, x_page_state
+from kb.feeds import x_article, x_body, x_page_state, x_post_meta
 from kb.feeds.x_cdp import CdpError, CdpTransportError
-from kb.feeds.x_page_state import STATE_JS, navigate, problem, read
+from kb.feeds.x_errors import PostUnavailable
+from kb.feeds.x_page_state import STATE_JS, ProblemConfirmation, navigate, read
 from kb.feeds.x_page_state import XRateLimited as XRateLimited
 from kb.feeds.x_post_empty import EMPTY_JS
 
@@ -119,10 +120,6 @@ READ_JS = r'''(() => {
 })()'''
 
 
-class PostUnavailable(RuntimeError):
-    pass
-
-
 class PostGone(PostUnavailable):
     """The requested, fully loaded page explicitly says the post is unavailable."""
 
@@ -173,7 +170,7 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
     absent = False
     empty = None
     unknown_since = None
-    previous_problem = ''
+    errors = ProblemConfirmation()
     confirmed_problem = ''
     snap = {}
     failure = PostRequestFailed('X 页面请求出错,请稍后重试(不能据此确认限流或推文不存在)')
@@ -212,12 +209,11 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
             if confirmed_empty and empty == kind:
                 raise PostEmpty(kind)
             empty = kind if confirmed_empty else None
-            current_problem = problem(snap) if not (valid or confirmed_empty) and (
-                snap.get('challenge') or snap.get('at') == match[1]) else ''
-            confirmed_problem = current_problem if current_problem == previous_problem else ''
-            if error := x_page_state.escalate(snap, confirmed_problem, failure):
+            confirmed_problem = errors.check(snap if not (valid or confirmed_empty) and (
+                snap.get('challenge') or snap.get('at') == match[1]) else {})
+            if error := x_page_state.escalate(snap, confirmed_problem, failure,
+                                               content_pending=not snap.get('empty')):
                 raise error
-            previous_problem = current_problem
             missing = (snap.get('at') == match[1] and not snap.get('id')
                        and x_page_state.unavailable(snap))
             if missing and absent:
@@ -239,7 +235,20 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
         raise PostUnavailable(f'推文详情页读取失败:{exc}') from exc
 
 
+def detail_entry(entry: dict, text: str) -> dict:
+    """Reconcile a recorded context boundary only against independently read author text."""
+    fragments = x_body.parts(entry)
+    reason, prefix = x_post_meta.eligibility(entry)
+    if (not reason and prefix and fragments.source_known and not fragments.prefix
+            and not fragments.fallback and fragments.text.startswith(prefix)
+            and not text.startswith(prefix)):
+        return x_body.record(entry, fragments.text[len(prefix):], prefix=prefix,
+                             media=fragments.media)
+    return entry
+
+
 def merge(entry: dict, text: str) -> dict:
+    entry = detail_entry(entry, text)
     try:
         body = x_body.parts(entry).require_source()
     except x_body.SourceUnknown as exc:
@@ -249,7 +258,8 @@ def merge(entry: dict, text: str) -> dict:
     complete = x_body.with_text(entry, text)
     complete.pop(HINT)
     complete.update(title=text.splitlines()[0][:500])
-    return complete
+    return x_post_meta.stamp(complete, 'post', body.prefix,
+                             author_text=x_post_meta.AuthorText(text, 'detail'))
 
 
 def fill(entries: list[dict], *, session, deadline=None, should_stop=None, unavailable=None):

@@ -188,10 +188,8 @@ class AccessGateDomTests(unittest.TestCase):
         evidence = json.loads(self.page.eval(x_post.READ_JS))
         self.assertEqual('Read this:https://example.org/path', evidence['inline_legacy'])
         stored = 'Read this:\nhttps://\nexample.org/path\n…'
-        entry = dict(url='https://x.com/Example/status/123', body=stored,
-                     title='Read this:', **{x_post.HINT: ''})
-        from kb.feeds import x_body
-        state, complete, info = backfill.proposal(x_body.record(entry, stored), evidence['text'], evidence)
+        entry = dom.audit_entry(stored)
+        state, complete, info = backfill.proposal(entry, evidence['text'], evidence)
         self.assertEqual('normalized', state)
         self.assertEqual('Read this:\nhttps://example.org/path', complete['body'])
         self.assertEqual('blocked_whitespace', info['remaining'])

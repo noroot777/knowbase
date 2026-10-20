@@ -23,6 +23,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from kb.feeds import x_browser
 from kb.feeds import x_login_window as xlw
 
 
@@ -612,6 +613,48 @@ class PanelCopyTests(LoginWindowBase):
         (Path(self.profile) / 'Default' / 'Cookies').write_text('x', encoding='utf-8')
         ready, why, _ = self.x_channels.readiness({'x_channel': 'browser'})
         self.assertTrue(ready, f'窗口没开着却判成不就绪:{why}')
+
+
+class ProbeAfterReleaseTests(LoginWindowBase):
+    """「检查连接」把到点的窗口关掉之后,**它后面那几档判据还要照旧过一遍**。
+
+    这一条钉的是一道**合并出来的缝**,不是某一侧写错了:「窗口占着这个 profile」和
+    「这个 profile 从没登录过」原来是同一条 if/elif 链上的兄弟,各自都对;可是前者
+    一旦变成「先关掉它、关掉就接着往下走」,后者就被整条跳过了。而**最容易留下这种
+    窗口的恰恰是从没登录成功过的 profile**(人点开窗口、没登完就走了)——
+    于是最该收到「还没登录过 X,去点那两颗按钮」的那个人,收到的是后面真连一次得出
+    的那句含糊失败。判据落在**那句话上**,不落在"调没调 release"。
+    """
+
+    def test_closing_our_window_does_not_swallow_the_never_logged_in_verdict(self):
+        pid = self._hold()
+        self._note(pid, age=20 * 60)        # 到点了;Cookies 不存在 = 从没登录过
+        with patch.object(x_browser, 'browser_session',
+                          side_effect=AssertionError('还没登录过就不该真去连一次')):
+            ready, detail = x_browser.probe(self.profile)
+        self.assertFalse(_alive(pid), '到点的窗口没被关掉')
+        self.assertFalse(ready)
+        self.assertIn('还没有登录过 X', detail)
+        for nxt in ('打开登录窗口', '从日常浏览器导入登录态'):
+            self.assertIn(nxt, detail, '那两颗按钮没说全')
+
+    def test_a_released_window_with_a_footprint_still_goes_on_to_connect(self):
+        """反过来钉一边:有登录痕迹的,关掉窗口之后照旧真连一次 —— 新加的这一档
+        不许把「窗口到点关掉了,这条通道现在是好的」那条路也拦下来。"""
+        import contextlib
+
+        from tests.test_x_login_import import FakePage
+        (Path(self.profile) / 'Default').mkdir(parents=True)
+        (Path(self.profile) / 'Default' / 'Cookies').write_text('x', encoding='utf-8')
+        pid = self._hold()
+        self._note(pid, age=20 * 60)
+        page = FakePage(dict(articles=3))
+        with patch.object(x_browser, 'browser_session',
+                          return_value=contextlib.nullcontext(page)):
+            ready, detail = x_browser.probe(self.profile)
+        self.assertFalse(_alive(pid), '到点的窗口没被关掉')
+        self.assertTrue(ready, f'窗口已经关掉、痕迹也在,却判成不行:{detail}')
+        self.assertNotIn('还没有登录过', detail)
 
 
 if __name__ == '__main__':

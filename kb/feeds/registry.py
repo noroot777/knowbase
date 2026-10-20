@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS feed_items (
  content_hash TEXT NOT NULL, exported_hash TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '',
  -- 排在最后,和老库 ALTER 补出来的列序一致(见 _ADDED_COLUMNS)。
  extract_stale INTEGER NOT NULL DEFAULT 0, fetch_round TEXT NOT NULL DEFAULT '',
- content_rev INTEGER NOT NULL DEFAULT 0, body_provenance TEXT NOT NULL DEFAULT ''
+ content_rev INTEGER NOT NULL DEFAULT 0, x_post_meta TEXT NOT NULL DEFAULT '',
+ body_provenance TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS feed_items_recent ON feed_items(kind, published DESC, fetched_at DESC);
 CREATE TABLE IF NOT EXISTS subscription_items (
@@ -135,6 +136,7 @@ _ADDED_COLUMNS = {
         # `fulltext.work_version`。老库补成 0 = 都算第 0 版,行为逐字不变 —— 判据比
         # 的是**取样那一刻的值**,起点是几无关。
         ('content_rev', 'INTEGER NOT NULL DEFAULT 0'),
+        ('x_post_meta', "TEXT NOT NULL DEFAULT ''"),
         ('body_provenance', "TEXT NOT NULL DEFAULT ''"),
     ),
 }
@@ -559,11 +561,12 @@ def put_items(source: dict, entries: list[dict], conn=None) -> int:
             # 的事实改成最后一次看见的时刻。
             inserted = c.execute('''INSERT INTO feed_items
                 (key,kind,url,title,author,published,body,content_kind,fetched_at,content_hash,lang,
-                 fetch_round,body_provenance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(key) DO NOTHING''',
+                 fetch_round,x_post_meta,body_provenance)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO NOTHING''',
                 (key,source['kind'],e['url'],e['title'],e.get('author') or source['name'],
                  e.get('published',''),e['body'],e.get('content_kind','feed'),now(),digest,
-                 text_language(e['title'], e['body']),round_id,e.get('body_provenance', '')))
+                 text_language(e['title'], e['body']),round_id,e.get('x_post_meta', ''),
+                 e.get('body_provenance', '')))
             added += inserted.rowcount
             c.execute('INSERT OR IGNORE INTO subscription_items SELECT ?,? '
                       'WHERE EXISTS (SELECT 1 FROM feed_items WHERE key=?)', (source['id'],key,key))

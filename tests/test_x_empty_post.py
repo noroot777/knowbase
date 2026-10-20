@@ -74,7 +74,7 @@ class EmptyPostTests(ChannelBase):
         self.assertEqual('remote_empty_stored_text', stats['results'][0]['reason'])
         self.assertEqual(row, self.row(row['key']))
 
-    def test_repost_attribution_only_is_empty_before_and_after_whitespace_normalization(self):
+    def test_repost_attribution_is_empty_only_while_the_type_record_matches(self):
         row = self.seed('', context='向阳乔木 转推了')
         self.assertEqual('Example Person 的动态', row['title'])
         self.assertEqual('> 向阳乔木 转推了\n\n', row['body'])
@@ -84,7 +84,8 @@ class EmptyPostTests(ChannelBase):
                     conn.execute('UPDATE feed_items SET body=? WHERE key=?', (body, row['key']))
                 stored = self.row(row['key'])
                 stats = backfill.repair([stored], Page(empty()), apply=True)
-                self.assertEqual(1, stats['empty'])
+                self.assertEqual(int(body == row['body']), stats['empty'])
+                self.assertEqual(int(body != row['body']), stats['skipped_ambiguous'])
                 self.assertEqual(0, stats['blocked_length'])
                 self.assertEqual(0, stats['updated'])
                 self.assertEqual(stored, self.row(row['key']))

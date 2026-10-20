@@ -53,11 +53,16 @@ class BodyContractTests(ChannelBase):
                 self.assertEqual(0, stats['updated'])
                 self.assertEqual(stored, self.row())
 
-    def test_both_recovery_and_empty_audit_recognize_raw_and_normalized_attribution(self):
+    def test_recovery_accepts_normalized_attribution_but_withholds_an_invalid_type_fingerprint(self):
         entry = x_browser._entry(tweet('123', text='', context='ctx'))
         for body in [entry['body'], entry['body'].rstrip()]:
             with self.subTest(body=body):
                 stored = self.seed(dict(entry, body=body))
+                if body != entry['body']:
+                    stats = backfill.repair([stored], Page(snapshot(BODY)), apply=True)
+                    self.assertEqual(1, stats['skipped_ambiguous'])
+                    self.assertEqual(stored, self.row())
+                    continue
                 self.assertEqual('> ctx\n\n', backfill.entry_of(stored)[x_post.HINT])
                 stats = backfill.repair([stored], Page(snapshot(BODY)), apply=True)
                 self.assertEqual(1, stats['updated'])

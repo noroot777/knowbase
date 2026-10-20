@@ -12,9 +12,8 @@
 - 把「写进去了」当成「可以用了」,下一个发现真相的时刻是第二天早上那一轮同步;
 - cookie 值落进明文 JSON,等于把这个功能防的事自己做一遍。
 
-`probe` 那一组钉的是另一件事:`verify_timeline` 是从它里面抽出来的,**抽完每一档文案
-一个字都不许变**(元规则「搬代码要逐符号对过原文」)—— 所以那一组驱动的是真的
-`verify_timeline`,不是打桩的。
+`probe` 那一组驱动的是真的 `verify_timeline`,不是打桩的。未读到推文或页面没加载完
+只是观测,不能据此推断登录失效、网络或代理故障。
 """
 
 from __future__ import annotations
@@ -422,6 +421,7 @@ class ProbeWordingTests(unittest.TestCase):
         for p in (patch.object(x_browser, 'browser_session',
                                lambda *_a, **_k: page),
                   patch.object(x_browser, 'profile_busy', lambda *_a: False),
+                  patch.object(x_browser, 'has_login_footprint', return_value=True),
                   patch.object(x_browser, 'ACCOUNT_SECONDS', budget),
                   patch.object(x_browser, '_SETTLE_STEP', 0.01),
                   patch.object(cdp_attach, 'discover',
@@ -452,20 +452,24 @@ class ProbeWordingTests(unittest.TestCase):
                          '请在它里面打开 x.com 登录一次,再回来检查', detail)
 
     def test_rate_limiting_keeps_its_own_sentence(self):
-        ok, detail = self.run_probe({'limited': True})
+        ok, detail = self.run_probe({'limited': True, 'dom_problem': 'limited'})
         self.assertFalse(ok)
         self.assertEqual('X 暂时限制了访问频率,稍后再试', detail)
 
-    def test_a_page_that_never_loads_points_at_the_network(self):
+    def test_a_page_that_never_loads_does_not_guess_the_cause(self):
         ok, detail = self.run_probe({'ready': 'loading'})
         self.assertFalse(ok)
-        self.assertEqual('X 首页没有加载完 —— 网络不通,或者这台机器访问 X 要走代理',
-                         detail)
+        self.assertIn('X 首页没有加载完;未能判出原因', detail)
+        self.assertIn('本地已有登录痕迹,不代表当前登录态有效', detail)
+        self.assertIn('打开登录窗口', detail)
+        self.assertIn('检查连接', detail)
 
     def test_a_loaded_page_with_no_tweets_keeps_the_other_sentence(self):
         ok, detail = self.run_probe({'articles': 0})
         self.assertFalse(ok)
-        self.assertEqual('X 首页打开了,但一条推文都没读到。登录态可能刚刚失效', detail)
+        self.assertIn('X 首页一条推文都没读到;未能判出原因', detail)
+        self.assertIn('本地已有登录痕迹,不代表当前登录态有效', detail)
+        self.assertIn('打开登录窗口', detail)
 
 
 if __name__ == '__main__':

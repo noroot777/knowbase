@@ -4,7 +4,7 @@ import io
 import json
 from unittest.mock import patch
 
-from kb.feeds import grab_store, registry as reg, x_post
+from kb.feeds import grab_store, registry as reg, x_post, x_post_meta
 from scripts import x_post_audit as audit, x_post_backfill as backfill
 from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import tweet
@@ -101,10 +101,29 @@ class AuditProgressTests(ChannelBase):
             with self.subTest(statement=statement):
                 with reg.db() as conn:
                     conn.execute('UPDATE feed_items SET ' + statement)
+                    current = dict(conn.execute('SELECT * FROM feed_items').fetchone())
+                    stamped = x_post_meta.stamp(
+                        current, 'post', '', author_text=x_post_meta.AuthorText(current['body'], 'detail'))
+                    conn.execute('UPDATE feed_items SET x_post_meta=? WHERE key=?',
+                                 (stamped[x_post_meta.FIELD], row['key']))
                 changed = self.pending()
                 self.assertEqual(1, len(changed))
                 audit.record(changed[0], dict(state='identical'))
                 self.assertEqual([], self.pending())
+
+    def test_body_change_without_new_provenance_is_excluded_instead_of_reusing_a_receipt(self):
+        row = self.seed()
+        audit.record(row, dict(state='identical'))
+        with reg.db() as conn:
+            conn.execute("UPDATE feed_items SET body=body||' changed'")
+        excluded = []
+        self.assertEqual([], self.pending(excluded=excluded))
+        self.assertEqual('invalid_provenance', excluded[0]['reason'])
+        self.assertEqual('skipped_ambiguous', excluded[0]['state'])
+        pending = self.pending(resolve_legacy=True)
+        self.assertEqual(1, len(pending))
+        self.assertEqual(row['key'], pending[0]['key'])
+        self.assertNotEqual(row['body'], pending[0]['body'])
 
     def test_failures_wait_behind_new_rows_and_retry_in_oldest_attempt_order(self):
         for identity in range(123, 126):
@@ -147,6 +166,7 @@ class AuditProgressTests(ChannelBase):
         row = self.seed(body='Original')
         replacement = dict(backfill.entry_of(row), body='Newer', title='Newer')
         replacement.pop(x_post.HINT)
+        replacement = x_post_meta.stamp(replacement, 'post', '')
         self.assertTrue(grab_store.replace(row, replacement))
         stats = backfill.repair([row], Page(snapshot('Original with ending')), apply=True, remember=True)
         self.assertEqual(1, stats['stale'])
@@ -172,7 +192,8 @@ class AuditProgressTests(ChannelBase):
             self.assertTrue(accepted)
             with reg.db() as conn:
                 current = dict(conn.execute('SELECT * FROM feed_items').fetchone())
-            self.assertTrue(replace(current, dict(complete, body='Concurrent new content')))
+            replacement = x_post_meta.stamp(dict(complete, body='Concurrent new content'), 'post', '')
+            self.assertTrue(replace(current, replacement))
             return accepted
 
         with patch.object(grab_store, 'replace', side_effect=replace_then_change):

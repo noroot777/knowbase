@@ -144,7 +144,7 @@ class PolicyTests(unittest.TestCase):
 
     def test_auxiliary_429_cannot_turn_a_dom_request_error_into_a_batch_limit(self):
         session = self.timeline([response(operation='UserByScreenName')],
-                                dict(failed=True, articles=0))
+                                dict(failed=True, dom_problem='failed', articles=0))
         with self.assertRaisesRegex(x_browser.XBrowserError, '页面请求出错') as caught:
             x_browser._wait_state(session, 'Example', self.clock.now + 1)
         self.assertNotIsInstance(caught.exception, x_browser.XRateLimited)
@@ -153,7 +153,7 @@ class PolicyTests(unittest.TestCase):
 
     def test_core_429_and_dom_limits_or_gates_still_stop_after_two_observations(self):
         cases = [([response(operation='UserTweets')], {}, x_browser.XRateLimited),
-                 ([], dict(limited=True), x_browser.XRateLimited),
+                 ([], dict(limited=True, dom_problem='limited'), x_browser.XRateLimited),
                  ([response(503, operation='UserByScreenName')],
                   dict(challenge=True), x_browser.XAccessBlocked),
                  ([response(operation='UserTweets')],
@@ -192,7 +192,8 @@ class PolicyTests(unittest.TestCase):
                                 x_post.PostRequestFailed)
             for dom, expected in [(dict(empty=True), expected_failure),
                                   (dict(empty=True, at='999'), x_post.PostUnavailable),
-                                  (dict(empty=True, ready='loading'), x_post.PostUnavailable),
+                                  (dict(empty=True, ready='loading'), x_page_state.XRateLimited
+                                   if status == 429 else x_post.PostUnavailable),
                                   (dict(empty=True, id='123'), expected_failure if status != 200
                                    else x_post.PostUnavailable)]:
                 with self.subTest(status=status, dom=dom):
@@ -221,15 +222,16 @@ class PolicyTests(unittest.TestCase):
                         x_page_state.navigate(session, 'https://x.com/Example')
                         with self.assertRaises(x_browser.XBrowserError):
                             x_browser._wait_state(session, 'Example', self.clock.now + 1)
-                self.assertEqual(detail, any(call.kwargs.get('expired') for call in policy.call_args_list))
+                self.assertTrue(any(call.kwargs.get('expired') for call in policy.call_args_list))
                 self.assertTrue(any(not call.kwargs.get('expired') for call in policy.call_args_list))
 
     def test_shared_policy_keeps_the_same_batch_scope_at_timeout(self):
-        cases = [(dict(limited=True, http_only=True), None, None),
-                 (dict(failed=True, http_only=True), None, None),
+        cases = [(dict(limited=True, http_only=True, http_problem='limited'), None, None),
+                 (dict(failed=True, http_only=True, http_problem='failed'), None, None),
                  (dict(limited=True, http_only=True, http_content_limited=True),
                   x_page_state.XRateLimited, x_page_state.XRateLimited),
-                 (dict(limited=True), x_page_state.XRateLimited, x_page_state.XRateLimited),
+                 (dict(limited=True, dom_problem='limited'),
+                  x_page_state.XRateLimited, x_page_state.XRateLimited),
                  (dict(challenge=True, http_only=True),
                   x_page_state.XAccessBlocked, x_page_state.XAccessBlocked)]
         failure = x_post.PostRequestFailed('单条请求失败')

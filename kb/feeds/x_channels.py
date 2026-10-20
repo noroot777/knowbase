@@ -41,6 +41,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR
+from kb.feeds.x_cdp import has_login_footprint
 from kb.source_types import feed_types
 
 FEEDGRAB, BROWSER, ATTACH = 'feedgrab', 'browser', 'attach'
@@ -424,7 +425,7 @@ def readiness(settings: dict) -> tuple[bool, str, str]:
         return (False, 'X 登录窗口还开着,它占着抓取要用的浏览器',
                 '认不出它是不是我们开的那一个（服务重启过，或者系统问不出进程身份），'
                 '所以不会自动关闭 —— 请手动把那个窗口关掉')
-    if not (BROWSER_PROFILE / 'Default' / 'Cookies').exists():
+    if not has_login_footprint(BROWSER_PROFILE):
         return False, '浏览器通道还没有登录过 X', ''
     return True, '', ''
 

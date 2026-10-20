@@ -185,11 +185,21 @@ def _entry(meta: dict, body: str, handle: str) -> dict | None:
     text = body.strip()
     if not text and not title:
         return None
+    from kb.feeds.x_article_links import quote_lines
+    from kb.feeds.x_post_meta import context_prefix, stamp
     entry = {'url': url, 'title': title[:500], 'body': x_body.feed_body(text, title),
              'author': str(name), 'published': _published(meta), 'content_kind': 'post'}
     generated = not text and not str(meta.get('title') or '').strip()
-    return x_body.record(entry, '' if generated else text or title,
-                         fallback=title if generated else '')
+    entry = x_body.record(entry, '' if generated else text or title,
+                          fallback=title if generated else '')
+    context = ''
+    quotes = quote_lines(entry['body'])
+    if quotes:
+        head, separator, tail = entry['body'].partition('\n\n')
+        if not separator or not tail.strip() or quotes != head:
+            return entry
+        context = head
+    return stamp(entry, 'post', context_prefix(entry['body'], context))
 
 
 def _read_output(folder: Path, handle: str) -> list[dict]:

@@ -22,15 +22,16 @@ _VERDICT_TAIL = {
                '再导入一次，或者改用「打开登录窗口」',
     'relogin': '重新打开这个 profile 之后 X 又把它判成未登录了 —— 当场能用的那一份'
                '没能完整留下，再导入一次，或者改用「打开登录窗口」',
-    'unconfirmed': '重新打开之后那一次验证没跑成（X 限流，或者首页没加载完），'
+    'unconfirmed': '重新打开之后那一次验证没跑成（X 请求出错、限流，或者首页没加载完），'
                    '所以还不能说明早那一轮不用点弹窗 —— 点「检查连接」再确认一次',
     'login': 'X 当场把它判成未登录 —— 这个账号多半换了浏览器实例就不认，建议改用'
              '「打开登录窗口」',
     'challenge': 'X 要求先过一次安全验证（账号访问受限）—— 这一关重新登录也绕不过'
-                 '去，请在日常浏览器里打开 x.com/account/access 把验证做完',
+                 '去，请在对应通道的浏览器里打开 x.com/account/access，完成验证后重试',
     'limited': 'X 当时在限流，没验证成；点「检查连接」再确认',
-    'not-loaded': 'X 首页当时没加载完（网络或代理），没验证成；点「检查连接」再确认',
-    'no-tweets': '首页当时一条推文都没读到，没验证成；点「检查连接」再确认',
+    'failed': 'X 页面请求出错，暂时无法验证登录态；稍后点「检查连接」重试，不必因此重新登录',
+    'not-loaded': 'X 首页当时没加载完，未能判出原因；点「检查连接」再确认',
+    'no-tweets': '首页当时一条推文都没读到，未能判出原因；点「检查连接」再确认',
 }
 
 
@@ -91,7 +92,12 @@ def _detail(verdict: str, count: int, last: dict, note: str) -> str:
         # 验证没过那几档。**保存差异也要说,但接在后面,不许顶掉已经查明的原因** ——
         # 站点拒绝登录时它多半顺手清掉了凭证,于是盘上确实也对不上(第 4 轮审查
         # 实测:回调明确返回 `login`,产品却报 `unsaved` 并声称「当场也能用」)。
-        detail = f'cookie 已经搬进独立 profile，但{_VERDICT_TAIL.get(verdict, "没验证成")}'
+        reopened_failure = verdict == 'unconfirmed' and last.get('again') in (
+            'failed', 'limited', 'challenge', 'not-loaded', 'no-tweets')
+        reason = last['again'] if reopened_failure else verdict
+        tail = _VERDICT_TAIL.get(reason, _VERDICT_TAIL.get(verdict, '没验证成'))
+        stage = '重新打开之后那一次验证没跑成：' if reopened_failure else ''
+        detail = f'cookie 已经搬进独立 profile，但{stage}{tail}'
         if why := _gap_why(last):
             detail += f'。另外重新打开这个 profile 之后 {why}'
     return f'{detail}。{note}' if note else detail

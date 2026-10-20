@@ -52,7 +52,7 @@ class ChallengeVerdictTests(unittest.TestCase):
         page = Page(_CHALLENGE_STATE)
         verdict, _ = x_browser.verify_timeline(page, timeout=30)
         self.assertEqual('challenge', verdict)
-        self.assertEqual(1, page.evals)
+        self.assertEqual(2, page.evals)
 
     def test_a_normal_timeline_is_still_ok(self):
         """反过来钉一边:正常首页照旧 `ok`,没被这一档抢走。"""
@@ -63,6 +63,7 @@ class ChallengeVerdictTests(unittest.TestCase):
         """「检查连接」那句话要指到过验证,不是指到重新登录。"""
         page = Page(_CHALLENGE_STATE)
         with patch.object(x_browser, 'profile_busy', lambda *a, **k: False), \
+                patch.object(x_browser, 'has_login_footprint', return_value=True), \
                 patch.object(x_browser, 'browser_session',
                              lambda *a, **k: _session(page)):
             ok, detail = x_browser.probe('/tmp/unused')

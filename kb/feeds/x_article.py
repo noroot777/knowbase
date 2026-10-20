@@ -73,6 +73,7 @@ from kb.feeds.x_article_shape import (
     ArticleUnavailable, _code_body, _entities, _entity_image, _fence,
     _media_urls, _must_block, _must_text, _rows)
 from kb.feeds.x_cdp import CdpError
+from kb.feeds.x_post_meta import stamp
 
 # 接口地址。设成空串 = 整个关掉这一步(不发请求、不拦任何条目)。
 API = os.environ.get('KB_X_ARTICLE_API', 'https://api.fxtwitter.com').rstrip('/')
@@ -448,7 +449,7 @@ def merge(entry: dict, got: dict) -> dict:
     complete = {**entry, 'title': (got['title'] or entry.get('title') or '')[:500],
                 'body': '\n\n'.join(p for p in parts if p)}
     complete.pop(POST_HINT, None)
-    return complete
+    return stamp(complete, 'article', '')
 
 
 def fill(entries: list[dict], *, session=None,

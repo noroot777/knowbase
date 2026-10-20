@@ -75,7 +75,7 @@ def select(rows: list[dict], *, apply=False, recheck=False) -> list[dict]:
     return [row for _, row in sorted(selected, key=lambda candidate: candidate[0])]
 
 
-def begin(row: dict, *, apply=False) -> int | None:
+def begin(row: dict, *, apply=False, provenance_pending=False) -> int | None:
     filename = path()
     filename.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(filename, timeout=15)) as conn, conn:
@@ -86,7 +86,7 @@ def begin(row: dict, *, apply=False) -> int | None:
                              (row['key'], revision)).fetchone()
         previous = json.loads(prior[0]) if prior else {}
         recheck = getattr(row, 'recheck', False)
-        if prior and not recheck and not pending(previous, apply=apply):
+        if prior and not recheck and not provenance_pending and not pending(previous, apply=apply):
             return None
         generation = previous.get('generation', 0) + int(recheck)
         if recheck or not prior:
@@ -99,16 +99,19 @@ def begin(row: dict, *, apply=False) -> int | None:
         return generation
 
 
-def record(row: dict, result: dict, *, complete=None, generation=None) -> None:
+def record(row: dict, result: dict, *, complete=None, generation=None, resolved=None) -> None:
     if result['state'] == 'deferred':
         return
     if result['state'] == 'unavailable':
         result = dict(result, availability_policy=AVAILABILITY_POLICY)
     receipts = [(row, result)]
+    if resolved is not None:
+        receipts.append((resolved, result))
+    source = resolved if resolved is not None else row
     if result['state'] == 'updated' and complete is not None:
         with reg.db() as conn:
-            current = conn.execute('SELECT * FROM feed_items WHERE key=?', (row['key'],)).fetchone()
-        if (current and current['content_rev'] == row['content_rev'] + 1
+            current = conn.execute('SELECT * FROM feed_items WHERE key=?', (source['key'],)).fetchone()
+        if (current and current['content_rev'] == source['content_rev'] + 1
                 and current['content_hash'] == grab_store.item_version(complete)):
             receipts.append((dict(current), result))
     filename = path()
@@ -116,6 +119,11 @@ def record(row: dict, result: dict, *, complete=None, generation=None) -> None:
     with closing(sqlite3.connect(filename, timeout=15)) as conn, conn:
         conn.execute('BEGIN IMMEDIATE')
         conn.execute(SCHEMA)
+        if generation is not None:
+            origin = conn.execute('SELECT result FROM audits WHERE item_key=? AND version=?',
+                                  (row['key'], version(row))).fetchone()
+            if not origin or json.loads(origin[0]).get('generation', 0) != generation:
+                return
         for seen, outcome in receipts:
             revision = version(seen)
             prior = conn.execute('SELECT result FROM audits WHERE item_key=? AND version=?',

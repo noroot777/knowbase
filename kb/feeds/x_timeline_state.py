@@ -1,5 +1,40 @@
 """Consume timeline errors through collection and any later response from its requests."""
-from kb.feeds import x_page_state
+import time
+
+from kb.feeds import x_account, x_page_state
+
+
+def wait_state(page, handle: str, deadline: float, script: str) -> dict:
+    last, previous = {}, None
+    errors = x_page_state.ProblemConfirmation()
+    confirmed = ''
+    failure = x_page_state.XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
+    while time.monotonic() < deadline:
+        last = x_page_state.read(page, script)
+        if last['login']:
+            raise x_account.XAccountUnavailable(handle, 'login', 'login_control_or_route')
+        current = x_page_state.problem(last)
+        account = x_account.terminal(last, handle) if not current else None
+        if account and account == previous:
+            raise x_account.XAccountUnavailable(handle, *account)
+        previous = account
+        confirmed = errors.check(last)
+        matching = 'account' not in last or last['account'].get('handle') == handle.lower()
+        if matching and not account and x_page_state.terminal(last, confirmed) == 'ok':
+            return last
+        if x_page_state.partial_content(last, confirmed):
+            return dict(last, incomplete=str(failure))
+        pending = not (last.get('empty') or x_account.terminal(last, handle))
+        if error := x_page_state.escalate(last, confirmed, failure, content_pending=pending):
+            raise error
+        time.sleep(0.3)
+    if error := x_page_state.escalate(last, confirmed, failure, expired=True):
+        raise error
+    if (last.get('account') or {}).get('state') == 'unknown':
+        raise x_page_state.XBrowserError(
+            f'@{handle} 的个人页结构无法识别,尚未确认账号状态,留待下次同步重试;未能判出原因')
+    observed = '页面没有加载完' if last.get('ready') != 'complete' else '时间线上没有读到推文'
+    raise x_page_state.XBrowserError(f'@{handle} 的{observed};未能判出原因,请稍后重试或点「检查连接」')
 
 
 class TimelineState:
