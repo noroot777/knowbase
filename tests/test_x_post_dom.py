@@ -501,6 +501,53 @@ class PostDomTests(unittest.TestCase):
                 self.http_page(200, 'TweetDetail', article(text='Recovered complete body'), route)
                 self.assertEqual('Recovered complete body', x_post.fetch(url, self.page))
 
+    def test_real_late_core_responses_are_consumed_during_collection(self):
+        original_eval = self.page.eval
+        original_navigate = x_page_state.navigate
+        url = f'http://127.0.0.1:{self.server.server_port}/Example'
+        for status in [429, 503]:
+            with self.subTest(status=status):
+                self.server.api_status = status
+                marker = str(time.monotonic_ns())
+                self.server.html = (f'<meta name="late-fixture" content="{marker}">'
+                                    + article(text='Complete cached body'))
+                fired = []
+
+                def navigate(page, target):
+                    original_navigate(page, url + '?late=' + marker)
+                    deadline = time.monotonic() + 3
+                    while not original_eval('document.querySelector("meta[name=late-fixture]")?.content === '
+                                            + json.dumps(marker)):
+                        if time.monotonic() > deadline:
+                            self.fail('real timeline fixture did not render')
+                        time.sleep(0.01)
+
+                def evaluate(script):
+                    if script == x_browser._COLLECT_JS and not fired:
+                        fired.append(status)
+                        original_eval('fetch("/i/api/graphql/hash/UserTweets")'
+                                      '.finally(() => window.lateFinished = true)')
+                        deadline = time.monotonic() + 3
+                        while not original_eval('window.lateFinished === true'):
+                            if time.monotonic() > deadline:
+                                self.fail('real late HTTP request did not finish')
+                            time.sleep(0.01)
+                    return original_eval(script)
+
+                try:
+                    with (patch.object(x_browser, 'navigate', side_effect=navigate),
+                          patch.object(self.page, 'eval', side_effect=evaluate)):
+                        if status == 429:
+                            with self.assertRaises(x_page_state.XRateLimited):
+                                x_browser._harvest_one(self.page, 'Example', None)
+                        else:
+                            entries, incomplete = x_browser._harvest_one(self.page, 'Example', None)
+                            self.assertTrue(entries)
+                            self.assertIn('请求出错', incomplete)
+                    self.assertEqual([status], fired)
+                finally:
+                    self.page._x_timeline = None
+
     def test_error_words_in_a_real_post_cannot_make_it_absent_or_rate_limited(self):
         text = '有人说「该页面不存在」或「请稍后再试」，但这是一条正常推文。'
         self.load(article(text=text))

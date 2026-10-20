@@ -24,6 +24,19 @@ SCHEMA = '''CREATE TABLE IF NOT EXISTS audits (
 )'''
 
 
+class Candidate(dict):
+    def __init__(self, row, recheck):
+        super().__init__(row)
+        self.recheck = recheck
+
+
+def pending(result: dict, *, apply=False) -> bool:
+    return bool(result.get('remaining') or result['state'] in RETRY or (
+        result['state'] == 'unavailable'
+        and result.get('availability_policy') != AVAILABILITY_POLICY) or (
+        apply and result['state'] in REPAIRABLE))
+
+
 def path():
     return reg.DB_PATH.with_suffix('.x-post-audit.db')
 
@@ -52,18 +65,40 @@ def select(rows: list[dict], *, apply=False, recheck=False) -> list[dict]:
         prior = receipts.get((row['key'], version(row)))
         if prior and not recheck:
             checked, result = prior
-            if result.get('remaining') or result['state'] in RETRY or (
-                    result['state'] == 'unavailable'
-                    and result.get('availability_policy') != AVAILABILITY_POLICY):
+            if pending(result):
                 selected.append(((1, checked, index), row))
             elif apply and result['state'] in REPAIRABLE:
                 selected.append(((0, 0, index), row))
         else:
-            selected.append(((0, 0, index), row))
+            selected.append(((0, 0, index), Candidate(row, recheck)))
     return [row for _, row in sorted(selected, key=lambda candidate: candidate[0])]
 
 
-def record(row: dict, result: dict, *, complete=None) -> None:
+def begin(row: dict, *, apply=False) -> int | None:
+    filename = path()
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(filename, timeout=15)) as conn, conn:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute(SCHEMA)
+        revision = version(row)
+        prior = conn.execute('SELECT result FROM audits WHERE item_key=? AND version=?',
+                             (row['key'], revision)).fetchone()
+        previous = json.loads(prior[0]) if prior else {}
+        recheck = getattr(row, 'recheck', False)
+        if prior and not recheck and not pending(previous, apply=apply):
+            return None
+        generation = previous.get('generation', 0) + int(recheck)
+        if recheck or not prior:
+            result = dict(state='deferred', generation=generation)
+            if remaining := previous.get('remaining') or previous.get('retained'):
+                result['remaining'] = remaining
+            conn.execute('INSERT INTO audits VALUES (?,?,?,?) ON CONFLICT(item_key,version) '
+                         'DO UPDATE SET checked=excluded.checked,result=excluded.result',
+                         (row['key'], revision, time.time(), json.dumps(result, ensure_ascii=False)))
+        return generation
+
+
+def record(row: dict, result: dict, *, complete=None, generation=None) -> None:
     if result['state'] == 'deferred':
         return
     if result['state'] == 'unavailable':
@@ -84,8 +119,16 @@ def record(row: dict, result: dict, *, complete=None) -> None:
             revision = version(seen)
             prior = conn.execute('SELECT result FROM audits WHERE item_key=? AND version=?',
                                  (seen['key'], revision)).fetchone()
+            previous = json.loads(prior[0]) if prior else {}
+            expected = (generation if revision == version(row) else 0) if generation is not None else (
+                previous.get('generation', 0))
+            if expected != previous.get('generation', 0):
+                continue
+            outcome = dict(outcome, generation=expected)
+            if prior and not pending(previous, apply=True) and outcome['state'] not in {
+                    'updated', 'expanded', 'normalized'}:
+                continue
             if prior and outcome['state'] not in {'updated', 'expanded', 'normalized', 'unavailable'}:
-                previous = json.loads(prior[0])
                 remaining = previous.get('remaining')
                 if remaining:
                     state = outcome['state']

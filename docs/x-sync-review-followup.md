@@ -119,3 +119,60 @@
 本轮没有界面改动，沿用初次实现的界面截图；本轮协议验证不冒充 X 在线实测。
 自建扩展标签已关闭，57659 端口已关闭，隔离数据目录已删除；
 独立无头浏览器及临时 profile 由测试清理，未触碰生产库、vault、cookie 或用户现有标签。
+
+## 第 2 轮审查修复（2026-10-20）
+
+本轮认可并处理两条生命周期问题，不扩展账号分类、登录导入、Article 资格或历史提示迁移。
+
+- 时间线通过 `TimelineState` 统一消费 reset、collect、scroll、settle 和收尾期间的共享错误。
+  普通核心失败保留合格条目、标记未完成并冻结旧水位；核心 429/安全关卡仍停止批次。
+  在正文补全或下一账号导航前再检查，导航协议调用期间暂存旧 loader 的响应，
+  导航返回前消费后再释放，不能由新导航重置抹掉；迟到错误可修正尚未入库的上一账号结果。
+- 审计在远端读取前持久化代次；默认重试共享同版代次，安全进度及终态单调合并。
+  `--recheck`/`--url` 在实际开始时创建新代次并清除旧安全累计，旧代次迟到结果不能覆盖新意图。
+  收口前已选中、收口后才开始的默认工作直接跳过；同代迟到失败/stale 不重新打开终态。
+  新证据允许的正向修复和正文 CAS 仍可成功，正文换版独立从零核对，不永久忽略显式重查失败。
+
+### 本轮浏览器通道
+
+先选择 Chrome 扩展，命名 `🔎 X 第二轮修复验证`，仅新建后台分组标签。
+扩展访问隔离服务 `127.0.0.1:58137/review-dom` 正常，实际 DOM 状态仍为
+`ready=complete, empty=true, articles=0`。本轮重新取得能力清单：浏览器为
+`viewport/management`、标签为 `pageAssets`，仍无可供产品 `Session` 使用的 CDP 传输和
+`Network.responseReceived` 订阅。因此扩展不能完成必须验证的迟到 HTTP 事件集成链，
+不是扩展断连、页面打不开或登录失败。记录此特定能力限制后，仅真实协议回归使用第 2 档独立
+headless shell、全新临时 profile 和 localhost 夹具；不接用户 Chrome 调试端口、不启动有头浏览器。
+本轮无界面改动，不重复操作订阅 UI，也不把内存事件测试冒充 X 线上验证。
+
+### 本轮验证结果
+
+- `HEADLESS_SHELL=/nonexistent uv run --offline python -m unittest
+  tests.test_x_late_timeline tests.test_x_audit_epochs tests.test_x_audit_retention
+  tests.test_x_post_audit tests.test_x_page_policy tests.test_x_review_contracts
+  tests.test_x_page_state tests.test_x_post_repair_contract tests.test_x_collectors
+  tests.test_x_watermark -q` → **141 tests, OK**，4.931 秒。
+- 迟到事件测试覆盖 reset、collect、scroll、settle、finish、finalize、下一导航前和导航协议调用期间；
+  两种通道的核心限流均停止批次，普通失败保留部分条目/旧水位并继续后续账号，辅助错误不扩大作用域。
+  临时 SQLite 中另验证实际入库、`last_note/last_error`、水位和下一轮成功恢复。
+  导航命令已发出后才收到旧 loader 429 的场景，不能撤回已发导航，但不再读取该新账号或继续后续账号，
+  且撤销尚未落库的上一账号成功结果；该时序由受控协议工装验证，不冒充远端时序实测。
+- 审计测试以线程事件控制两个已选中核对的启动/完成顺序，覆盖 dry-run/写回、迟到失败/stale、
+  已选中未开始、显式重查代次隔离、重开终态后的失败重试及迟到正向修复真实 CAS 写回。
+  每次回执读取重新打开 SQLite；没有声称做过多进程压力或进程崩溃实测。
+- `HEADLESS_SHELL=<本机 chrome-headless-shell> uv run --offline python -m unittest
+  tests.test_x_post_dom -v` → **32 tests, OK，无跳过**，3.910 秒。
+  新增在真实 collect 阶段发起 localhost UserTweets 请求，验证实际 429/503 经产品 CDP 事件链消费，
+  不替换 `Responses`、错误判定或采集结果；仅将导航目标映射到隔离页面、控制请求发出时机。
+- `HEADLESS_SHELL=/nonexistent uv run --offline python -m unittest discover -s tests -t . -q`
+  → **2741 tests, OK (skipped=112)**，113.873 秒，退出码 0。
+  该次执行 2629 项；112 个跳过中另行实际执行上述 32 项，仍有 80 项未执行，不计为通过。
+  定向测试是全仓子集，不重复累计。
+- 内存反向验证：禁用时间线持续检查后，限流边界回归失败 14 个子用例；恢复上轮审计 `record` 后，
+  重叠核对回归失败 2 个子用例，均为预期拒绝退化，产品源文件未为此改写。
+- 本轮变更 Python 文件全部通过 `uvx --offline ruff check`；`git diff --check` 通过。
+  变更代码文件最长 667 行，均不超过 700 行。
+
+证据日志、扩展 DOM/能力清单和清理记录在 `/tmp/kb-x-fix-AACErx-round2/`。
+自建扩展标签已关闭，隔离服务已停止、58137 无监听、临时数据目录已删除；
+真实协议测试的独立浏览器、HTTP 线程和临时 profile 已由测试清理。
+没有读写生产库、真实 vault、cookie 或 X 在线页面，也未接管用户标签。

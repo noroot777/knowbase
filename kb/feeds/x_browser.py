@@ -39,6 +39,7 @@ from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
 from kb.feeds.x_page_state import (
     STATE_JS, XAccessBlocked, XBrowserError, XRateLimited, navigate, read)
 from kb.feeds.x_page_state import problem as page_problem
+from kb.feeds.x_timeline_state import TimelineState
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 # 连续多少条老推文算"翻到底了"。1 不够:转推带的是原推时间,单条老的很常见。
@@ -295,6 +296,7 @@ def _harvest_one(page: Chrome, handle: str,
     navigate(page, f'https://x.com/{handle}')
     deadline = time.monotonic() + ACCOUNT_SECONDS
     state = _wait_state(page, handle, deadline)
+    page = TimelineState(page, handle, state, _STATE_JS)
     page.eval(_RESET_JS)
     seen_articles = parsed = 0
     items: list[dict] = []
@@ -303,8 +305,8 @@ def _harvest_one(page: Chrome, handle: str,
     for _ in range(MAX_SCROLLS):
         snap = json.loads(page.eval(_COLLECT_JS))
         seen_articles, parsed, items = snap['articles'], snap['parsed'], snap['items']
-        if state.get('incomplete'):
-            incomplete = state['incomplete']
+        if page.incomplete:
+            incomplete = page.incomplete
             break
         if floor and _old_enough(items, floor, handle):
             incomplete = ''
@@ -315,7 +317,11 @@ def _harvest_one(page: Chrome, handle: str,
             break
         before = len(items)
         bottom = json.loads(page.eval(_SCROLL_JS))['bottom']
-        if _settle(page, before, deadline):
+        grew = False if page.incomplete else _settle(page, before, deadline)
+        if page.incomplete:
+            incomplete = page.incomplete
+            break
+        if grew:
             dry = 0
             continue
         # 滚完没长出新东西。**一次不算**:慢网络下的一次懒加载空窗和"到底了"
@@ -334,7 +340,9 @@ def _harvest_one(page: Chrome, handle: str,
         # 永远返回空,而面板上一切正常。
         raise XBrowserError(f'@{handle} 的页面结构看不懂了(读到 {seen_articles} 条卡片,'
                             '一条都解析不出来),X 可能改版了')
-    return _select(items, floor, handle), incomplete
+    selected = _select(items, floor, handle)
+    page.check()
+    return selected, page.incomplete or incomplete
 
 
 def _old_enough(items: list[dict], floor: datetime, handle: str = '') -> bool:
@@ -375,7 +383,10 @@ def _settle(page: Chrome, before: int, deadline: float) -> bool:
     end = min(time.monotonic() + _SETTLE_SECONDS, deadline)
     while time.monotonic() < end:
         time.sleep(_SETTLE_STEP)
-        if len(json.loads(page.eval(_COLLECT_JS))['items']) > before:
+        count = len(json.loads(page.eval(_COLLECT_JS))['items'])
+        if getattr(page, 'incomplete', ''):
+            return False
+        if count > before:
             return True
     return False
 
@@ -513,6 +524,8 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                         'entries': entries, 'error': '', 'incomplete': incomplete,
                         'skipped_quotes': skipped_quotes, 'note': note,
                         'watermark': started if incomplete else observed_watermark}
+                    if timeline := getattr(page, '_x_timeline', None):
+                        timeline.finalize(results[handle], started)
                 except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable):
                     raise
                 except (XBrowserError, CdpError) as e:

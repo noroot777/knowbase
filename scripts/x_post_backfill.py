@@ -255,8 +255,12 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
                 deadline is not None and time.monotonic() >= deadline):
-            stats['deferred'] = len(rows) - index
+            stats['deferred'] += len(rows) - index
             break
+        generation = audit.begin(row, apply=apply) if remember else None
+        if remember and generation is None:
+            stats['deferred'] += 1
+            continue
         result = dict(url=row['url'], before=len(row['body']))
         evidence = {}
         complete = None
@@ -268,11 +272,11 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
             result.update(state='unavailable', error=str(exc))
         except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable) as exc:
             stats['failed'] += 1
-            stats['deferred'] = len(rows) - index - 1
+            stats['deferred'] += len(rows) - index - 1
             stats['stop_reason'] = str(exc)
             result.update(state='failed', error=str(exc), scope='batch')
         except x_post.PostHalted as exc:
-            stats['deferred'] = len(rows) - index
+            stats['deferred'] += len(rows) - index
             stats['stop_reason'] = str(exc)
             result.update(state='deferred', error=str(exc), scope='batch')
         except x_post.PostUnavailable as exc:
@@ -289,7 +293,7 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
                 if state == 'updated' and info.get('remaining'):
                     stats['partial'] += 1
         if remember:
-            audit.record(row, result, complete=complete)
+            audit.record(row, result, complete=complete, generation=generation)
         stats['results'].append(result)
         if progress:
             progress(result, stats)

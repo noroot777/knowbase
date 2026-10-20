@@ -1,4 +1,5 @@
 """Shared X page states and errors for timeline and post-detail readers."""
+import copy
 import json
 from urllib.parse import urlsplit
 
@@ -46,6 +47,7 @@ class Responses:
         self.content_operations = frozenset()
         self.loader = ''
         self.statuses = {}
+        self.previous = None
 
     def reset(self, url: str) -> None:
         parsed = urlsplit(url)
@@ -54,9 +56,11 @@ class Responses:
         self.content_operations = _CONTENT_REQUESTS[kind]
         self.operations = self.content_operations | _AUXILIARY_REQUESTS[kind]
         self.loader = ''
-        self.statuses.clear()
+        self.statuses = {}
 
     def receive(self, event: dict) -> None:
+        if self.previous is not None:
+            self.previous.receive(event)
         if event.get('method') != 'Network.responseReceived' or (
                 event.get('sessionId') != self.session_id):
             return
@@ -97,6 +101,10 @@ class Responses:
 
 
 def navigate(session, url: str):
+    timeline = getattr(session, '_x_timeline', None)
+    tracking = timeline is not None and timeline.active
+    if tracking:
+        timeline.before_navigation()
     if not isinstance(session, Session):
         return session.goto(url)
     responses = getattr(session, '_x_responses', None)
@@ -108,10 +116,17 @@ def navigate(session, url: str):
     elif responses.session_id != session._sid:
         session.call('Network.enable', {}, session._sid)
         responses.session_id = session._sid
+    previous = copy.copy(responses) if tracking else None
     responses.reset(url)
-    navigation = session.goto(url)
-    responses.loader = navigation.get('loaderId', '')
-    return navigation
+    responses.previous = previous
+    try:
+        navigation = session.goto(url)
+        responses.loader = navigation.get('loaderId', '')
+        if previous is not None:
+            timeline.drain(previous)
+        return navigation
+    finally:
+        responses.previous = None
 
 
 def read(session, script: str) -> dict:

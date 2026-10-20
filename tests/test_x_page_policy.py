@@ -293,7 +293,7 @@ class StoredPolicyTests(ChannelBase):
                         self.assertEqual({'https://x.com/example/status/123',
                                           'https://x.com/other/status/123'}, urls)
                         self.assertEqual(['https://x.com/example', 'https://x.com/other'], session.urls)
-                        self.assertEqual(1, session.state_reads['example'])
+                        self.assertGreater(session.state_reads['example'], 1)
                         self.assertEqual(0, session.elapsed)
 
     def test_global_auxiliary_errors_do_not_exhaust_the_batch_budget(self):
