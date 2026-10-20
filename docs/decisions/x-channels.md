@@ -70,7 +70,9 @@
   x_article_backfill 换写 title/body 时同一 UPDATE 写入最终文章的来源章,不能遗留空正文的旧章。
   stamp/context_prefix 的证据不足统一抛共享 PostUnavailable,不以未处理的 ValueError 中断批次。
   存量核实与正文提案都在逐行失败边界内:该行失败、保留原文,继续后续行并写报告;时间线来源
-  无法证明时只让当前账号失败且不推进水位,继续后续账号。省略号词干匹配不替代独立作者证据。
+  无法证明时只跳过该条,其余推文照常收录,继续后续账号。incomplete 提示账号、跳过数量及示例
+  URL,说明保留原水位并在下次同步重试;首轮也保存实际下界,不因跳过条目而滑动窗口。
+  省略号词干匹配不替代独立作者证据。
 - **连接检查与登录导入共用请求错误结论**。`verify_timeline` 通过 `x_page_state.read/problem` 判
   `failed` 与 `limited`,不耗满账号预算再误报登录失效;明确登录墙仍优先。HTTP 错误另带
   http_problem 证据来路,不受 DOM 加载门槛影响。DOM 不存在、限流、请求错误文字均只读

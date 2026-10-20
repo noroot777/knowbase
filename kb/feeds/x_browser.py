@@ -274,7 +274,8 @@ def _harvest_one(page: Chrome, handle: str,
     **原因非空 = 这一轮没有读到水位的证据**,调用方据此不推进水位(见 `harvest`)。
     三种"没读完":滚动次数用完、这个账号的时间预算用完、页面不再长出新内容而又
     不在底部(懒加载卡住/被限流)。没有下界(floor 为空)时无从谈起"读到水位",
-    那是新订阅的首轮,按读到的为准。
+    那是新订阅的首轮,按读到的为准。逐条来源证据不足也算没读完:保留其余条目,
+    留着原下界重试,不让无法确认的内容拖垮整个账号。
     """
     navigate(page, f'https://x.com/{handle}')
     deadline = time.monotonic() + ACCOUNT_SECONDS
@@ -315,7 +316,14 @@ def _harvest_one(page: Chrome, handle: str,
         # 永远返回空,而面板上一切正常。
         raise XBrowserError(f'@{handle} 的页面结构看不懂了(读到 {seen_articles} 条卡片,'
                             '一条都解析不出来),X 可能改版了')
-    return _select(items, floor, handle), incomplete
+    rejected: list[str] = []
+    entries = _select(items, floor, handle, rejected=rejected)
+    if rejected:
+        note = (f'@{handle} 有 {len(rejected)} 条推文的来源或上下文无法确认,'
+                f'本轮已跳过(如 {rejected[0]});其余推文照常收录,'
+                '同步位置保持不变,下次同步重试')
+        incomplete = f'{incomplete};{note}' if incomplete else note
+    return entries, incomplete
 
 
 def _old_enough(items: list[dict], floor: datetime, handle: str = '') -> bool:
@@ -361,13 +369,15 @@ def _settle(page: Chrome, before: int, deadline: float) -> bool:
     return False
 
 
-def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list[dict]:
+def _select(items: list[dict], floor: datetime | None, handle: str = '', *,
+            rejected: list[str] | None = None) -> list[dict]:
     """落到 feed_items 之前的最后一道:去掉不属于这条时间线的和过老的,转成条目形状。
 
     哪些不属于见 `_in_timeline`(推广位、推荐位)—— 入库口径只有那一份,两处各判
     各的话,被这里丢掉的条目还在"翻到底"那边顶着计数。**置顶照收**:它不参与
     翻到底的证明(`_own_tweet`),但刚发出来就被钉上去的推文在 X 上看得见,不收
-    就是永久丢掉一条真内容。
+    就是永久丢掉一条真内容。来源证据不足只跳过该条,URL 交给 rejected 供调用方
+    提示没读完并保留水位。
     """
     out = []
     for item in sorted(items, key=lambda i: i.get('datetime') or ''):
@@ -376,7 +386,13 @@ def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list
         when = _utc(item.get('datetime', ''))
         if floor and when and when <= floor:
             continue
-        if entry := _entry(item):
+        try:
+            entry = _entry(item)
+        except x_post.PostUnavailable:
+            if rejected is not None:
+                rejected.append(item['url'])
+            continue
+        if entry:
             out.append(entry)
     return out
 

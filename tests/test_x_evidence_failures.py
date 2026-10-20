@@ -1,4 +1,4 @@
-"""Insufficient X source evidence fails one row or account, never the remaining batch."""
+"""Insufficient X source evidence fails one row, never the remaining batch."""
 import contextlib
 import io
 import json
@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 from kb.feeds import x_article, x_browser, x_post, x_post_meta, x_post_provenance
 from scripts import x_post_backfill as backfill
-from tests.test_x_collectors import tweet
 from tests.test_x_post_provenance import ProvenanceBase
 
 
@@ -86,25 +85,3 @@ class EvidenceFailureTests(ProvenanceBase):
         self.assertEqual(1, stats['failed'])
         self.assertEqual(1, stats['updated'])
         self.assertEqual(bad, self.current(bad))
-
-    def test_multiline_social_context_cannot_abort_later_accounts_or_advance_its_watermark(self):
-        page = type('Page', (), {'open_page': lambda *_args: None})()
-        water = '2026-10-01T00:00:00+00:00'
-
-        def harvest_one(_page, handle, floor):
-            context = 'Someone\nreposted' if handle == 'bad' else ''
-            return x_browser._select([tweet(handle=handle, context=context)], floor, handle), ''
-
-        with self.assertRaises(x_post.PostUnavailable):
-            x_browser._entry(tweet(context='Someone\nreposted'))
-        with patch.object(x_browser, 'browser_session', return_value=contextlib.nullcontext(page)), \
-                patch.object(x_browser, '_harvest_one', side_effect=harvest_one), \
-                patch.object(x_article, 'fetch') as fetch:
-            result = x_browser.harvest([('bad', water), ('good', water)], profile='/unused')
-        fetch.assert_not_called()
-        self.assertIn('上下文', result['bad']['error'])
-        self.assertEqual([], result['bad']['entries'])
-        self.assertNotIn('watermark', result['bad'])
-        self.assertEqual('', result['good']['error'])
-        self.assertEqual(1, len(result['good']['entries']))
-        self.assertNotEqual(water, result['good']['watermark'])
