@@ -233,18 +233,78 @@ class BatchNotePublishTests(unittest.TestCase):
         self.assertIn('历史文件没了', pb.close_batch())
 
     def test_a_refused_publish_does_not_reshuffle_history(self):
-        """反过来钉一边:**没资格发布**那一档,历史里最新那条仍是更新的那一轮。
+        """**没资格发布**那一档:历史里最新那条仍是更新的那一轮,**而这一批自己那条
+        要补上这次的结论**。
 
-        期间用户自己点的那一轮已经收尾、它才是最新。把这一批补写进历史会让它插到
-        清单最前面 —— 那张清单是倒序的,于是一批更早的运行看着像是最后跑的那一轮。
-        两份副本一起停在上一版、原因进 `_batch_issue`,这才是一致的。
+        期间用户自己点的那一轮已经收尾、它才是最新 —— 把这一批插到清单最前面就等于
+        让一批更早的运行看着像是最后跑的那一轮(那张清单是倒序的)。可「不许当最新」
+        和「不许补全自己那条」是两种权限:后者一起扣下来的话,翻那一轮的同步历史永远
+        查不到日报成没成、为什么没成(审查 R4)—— 而「最近一次运行」那一格已经被
+        别人接替了,日报自己那份留档下一轮又被下一份日报换掉。
         """
         batch = self._two_rounds()
         finish_round(['index'], None, '', None, 'run-别人')   # 用户自己点的那一轮
         self.assertTrue(pb.batch_note('日报生成失败: Claude 503', batch))
-        self.assertEqual('run-别人', (ps.load_history() or [{}])[0].get('run_id'),
-                         f'历史里最新那条被这一批顶掉了:{[r.get("run_id") for r in ps.load_history()]}')
+        order = [r.get('run_id') for r in ps.load_history()]
+        self.assertEqual('run-别人', order[0],
+                         f'历史里最新那条被这一批顶掉了:{order}')
+        rows = [r for r in ps.load_history() if r.get('run_id') == 'run-2']
+        self.assertEqual(1, len(rows), f'这一批自己那条历史不止一条或压根没有:{order}')
+        self.assertTrue(any('Claude 503' in line for line in rows[0].get('log') or []),
+                        f'这一批自己那条历史里没有出报的结论:{rows[0].get("log")}')
         self.assertIn('run-别人', pb.close_batch())
+
+    def test_a_refused_publish_does_not_invent_a_history_row(self):
+        """反过来钉一边:**这一批在历史里压根没有自己那一条时不许新增一行。**
+
+        新增就是插队(那张清单是倒序的),而且那一行声称的是一批更早的运行刚跑完。
+        这一档要说出来 —— 默不作声的话「翻历史看不到今天的日报」没人解释得了。
+        """
+        batch = self._two_rounds()
+        finish_round(['index'], None, '', None, 'run-别人')
+        with patch.object(ps, 'update_history_round', Mock(return_value=False)):
+            self.assertTrue(pb.batch_note('日报生成失败: Claude 503', batch))
+        self.assertEqual(['run-别人', 'run-2'],
+                         [r.get('run_id') for r in ps.load_history()],
+                         '历史里多出来一行或者少了一行')
+        self.assertIn('没能补进去', pb.close_batch())
+
+    def test_updating_a_round_that_is_not_in_history_writes_nothing(self):
+        """**原位更新那一侧自己的红**:要更新的那条身份不在清单里时,返回 False
+        而且**文件一个字节都没动**。
+
+        上面那条钉的是调用方(把 `update_history_round` 整个打桩成 False,验它会
+        说出来),所以「找不到就不新增」这条判据在函数自己这一侧没有红 —— 真去
+        插一行的实现在那条用例里照样全绿。而插进去的那一行是**倒序清单的第一
+        行**,等于让一批更早的运行看着像是刚跑完的那一轮。
+        """
+        self._two_rounds()
+        before = ps._history_file().read_bytes()
+        self.assertFalse(ps.update_history_round(dict(_round('run-没见过'))))
+        self.assertEqual(before, ps._history_file().read_bytes(),
+                         '没命中也动了历史文件')
+        self.assertEqual(['run-2'], [r.get('run_id') for r in ps.load_history()])
+
+    def test_an_empty_run_id_never_matches_anything(self):
+        """**反过来钉一边**:空身份一律不认 —— 拿空串去匹配会把另一轮没有身份的
+        运行原地改写成我们这一批(口径同 `_save_history`)。"""
+        self._two_rounds()
+        before = ps._history_file().read_bytes()
+        self.assertFalse(ps.update_history_round(dict(_round(''), run_id='')))
+        self.assertEqual(before, ps._history_file().read_bytes(),
+                         '空身份也动了历史文件')
+
+    def test_a_failed_history_update_is_diagnosed_not_swallowed(self):
+        """反过来钉一边:原位更新那一下炸了**不许抛、也不许不出声**。
+
+        它在 `_run` 的 `finally` 里跑(抛出去就挡住收尾)。
+        """
+        batch = self._two_rounds()
+        finish_round(['index'], None, '', None, 'run-别人')
+        with patch.object(ps, 'update_history_round',
+                          Mock(side_effect=OSError('历史文件没了'))):
+            self.assertTrue(pb.batch_note('日报生成失败: Claude 503', batch))
+        self.assertIn('历史文件没了', pb.close_batch())
 
     def test_nothing_to_publish_yet_is_not_a_dropped_note(self):
         """反过来钉一边:一轮子轮都还没收尾(全被占住挡掉了)时没有可发布的汇总

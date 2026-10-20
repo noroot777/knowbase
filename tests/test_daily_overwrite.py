@@ -8,7 +8,8 @@
 
 判据落在**那份日报的字节**上,不是"某个函数被调用了":
 
-①对不上就一个字节都不许动(跨了天、压根没问过、期间换了一版,三档各一条);
+①对不上就一个字节都不许动(跨了天、压根没问过、期间换了内容、核对不了是哪一版,
+  四档各一条);
 ②**反过来钉一边**:对得上照旧覆盖,没有日报可盖时照旧放行,没有人可问的那条路
   (定时轮、命令行)照旧放行 —— 这道闸管的是「问错了天」,不是「该不该出报」;
 ③闸在**落盘那一段之前**:被拒的那一次不许动账本(旧版的章还在原处)。
@@ -43,10 +44,11 @@ class OverwriteApprovalTests(_Base):
         dov.check_overwrite('2026-09-28', None)
 
     def test_the_approved_version_goes_through(self):
-        """反过来钉一边:批的就是这一天这一版 —— 照旧覆盖。"""
+        """反过来钉一边:批的就是这一天这一份 —— 照旧覆盖。"""
         write_report('2026-09-28', generated='2026-09-28 08:30')
         dov.check_overwrite('2026-09-28',
-                            dov.Approval('2026-09-28', '2026-09-28 08:30'))
+                            dov.Approval('2026-09-28',
+                                         dov.report_version('2026-09-28')))
 
     def test_a_blanket_approval_covers_any_version(self):
         """反过来钉一边:界面明确说过「查不到有没有,要是有就会覆盖」那一档。"""
@@ -86,25 +88,98 @@ class OverwriteApprovalTests(_Base):
 
     def test_a_newer_version_is_refused(self):
         """期间换了一版(定时轮插进来写了一份):批准的那一版已经不在盘上了。"""
-        write_report('2026-09-28', generated='2026-09-28 20:00')
+        write_report('2026-09-28', body='用户确认的那一份',
+                     generated='2026-09-28 08:30')
+        approved = dov.Approval('2026-09-28', dov.report_version('2026-09-28'))
+        write_report('2026-09-28', body='期间换成的那一份',
+                     generated='2026-09-28 20:00')
         with self.assertRaises(dov.OverwriteRefused) as caught:
-            dov.check_overwrite('2026-09-28',
-                                dov.Approval('2026-09-28', '2026-09-28 08:30'))
+            dov.check_overwrite('2026-09-28', approved)
         self.assertIn('换了一版', str(caught.exception))
+
+    def test_the_same_minute_with_another_body_is_still_another_version(self):
+        """**第 2 轮审查那一档**:正文换了、而「生成于」那一行一个字没变。
+
+        三种都造出这个形状:同一分钟内再生成一份、在 Obsidian 里改正文、整份换掉
+        而留着原来那行时间。拿 `generated` 当版本的实现这一条必红 —— 而它正是
+        「确认过的那一份被静默盖掉」那条路(版本相等 ⇒ 放行)。
+        """
+        write_report('2026-09-28', body='用户确认的那一份',
+                     generated='2026-09-28 08:30')
+        approved = dov.Approval('2026-09-28', dov.report_version('2026-09-28'))
+        write_report('2026-09-28', body='期间换成的那一份',
+                     generated='2026-09-28 08:30')          # 同一分钟,正文换了
+        with self.assertRaises(dov.OverwriteRefused) as caught:
+            dov.check_overwrite('2026-09-28', approved)
+        self.assertIn('换了一版', str(caught.exception))
+
+    def test_an_untouched_report_is_still_the_same_version(self):
+        """反过来钉一边:一个字节都没动过的那一份照旧认得出来。
+
+        身份算得太紧(比如把当前时刻混进去)的后果是正常出报从此一次都过不去,
+        而面板上只有一句「期间已经换了一版」。
+        """
+        write_report('2026-09-28', generated='2026-09-28 08:30')
+        first = dov.report_version('2026-09-28')
+        self.assertEqual(first, dov.report_version('2026-09-28'))
+        dov.check_overwrite('2026-09-28', dov.Approval('2026-09-28', first))
 
     def test_a_file_whose_version_cannot_be_read_is_not_taken_as_absent(self):
         """版本读不出来 ≠ 那一天没有日报(那正好放行一次覆盖)。
 
-        带着具体版本的批准要拒;明确问过的那一档(`ANY`)照旧放行。
+        带着具体版本的批准要拒 —— 而且**不许拿两个「读不出来」互相核对**:身份
+        算不出来时两边一比恰好相等,那就等于拿一句「读不出来」当成了「就是这一
+        份」。明确问过的那一档(`ANY`)照旧放行,界面下一次也正是落在那一档
+        (清单给不出版本 ⇒ 确认框明说查不到是哪一版)。
         """
-        daily.report_dir().mkdir(parents=True, exist_ok=True)
-        (daily.report_dir() / '2026-09-28.md').write_bytes(
-            b'\xff\xfe not utf-8')
+        # 摆成一个目录:`read_bytes` 抛的不是 `FileNotFoundError`,正是「在、
+        # 但读不出来」那一档(非 utf-8 的字节现在算得出身份 —— 身份读的是字节)。
+        (daily.report_dir() / '2026-09-28.md').mkdir(parents=True, exist_ok=True)
         self.assertEqual(dov.UNKNOWN, dov.report_version('2026-09-28'))
         with self.assertRaises(dov.OverwriteRefused):
             dov.check_overwrite('2026-09-28',
-                                dov.Approval('2026-09-28', '2026-09-28 08:30'))
+                                dov.Approval('2026-09-28', 'deadbeefdeadbeef'))
+        with self.assertRaises(dov.OverwriteRefused) as caught:
+            dov.check_overwrite('2026-09-28', dov.Approval('2026-09-28', dov.UNKNOWN))
+        self.assertIn('读不出', str(caught.exception))
         dov.check_overwrite('2026-09-28', dov.Approval('2026-09-28', dov.ANY))
+
+    def test_a_non_utf8_report_still_has_an_identity(self):
+        """反过来钉一边:身份读的是**字节**,所以解不开码的那一份照样认得出来。
+
+        它和「核对不了」是两件事 —— 混成一件的后果是这种文件每次都被拒,而那一份
+        日报再也没法重新生成。
+        """
+        daily.report_dir().mkdir(parents=True, exist_ok=True)
+        path = daily.report_dir() / '2026-09-28.md'
+        path.write_bytes(b'\xff\xfe not utf-8')
+        version = dov.report_version('2026-09-28')
+        self.assertNotEqual(dov.UNKNOWN, version)
+        dov.check_overwrite('2026-09-28', dov.Approval('2026-09-28', version))
+        path.write_bytes(b'\xff\xfe another one')
+        with self.assertRaises(dov.OverwriteRefused):
+            dov.check_overwrite('2026-09-28', dov.Approval('2026-09-28', version))
+
+
+class VersionReachesTheListTests(_Base):
+    """那一版要从**清单**里出去 —— 界面只能从那儿拿到它。"""
+
+    def test_the_report_list_carries_the_content_identity(self):
+        """清单里那一格就是文件的内容身份,而且**跟着正文变**。
+
+        不带这一格的后果是静默降档:界面读不到版本就落到「那一天不管哪一版都盖」
+        (`'*'`),于是每一次覆盖都不再核对版本 —— 而页面上一切照常。
+        """
+        write_report('2026-09-28', body='第一版', generated='2026-09-28 08:30')
+        row = next(r for r in daily.reports() if r['date'] == '2026-09-28')
+        self.assertEqual(dov.report_version('2026-09-28'), row.get('version'),
+                         '清单里那一格不是文件的内容身份')
+        self.assertEqual('2026-09-28 08:30', row.get('generated'),
+                         '「生成于」那一行照旧给人看')
+        write_report('2026-09-28', body='第二版', generated='2026-09-28 08:30')
+        again = next(r for r in daily.reports() if r['date'] == '2026-09-28')
+        self.assertNotEqual(row['version'], again['version'],
+                            '正文换了,清单里那一版却没变')
 
 
 class OverwriteAtTheWriteBoundaryTests(_Base):
@@ -148,10 +223,34 @@ class OverwriteAtTheWriteBoundaryTests(_Base):
         """反过来钉一边:对得上就照旧覆盖 —— 这道闸不许把正常出报也拦下来。"""
         write_report('2026-09-28', body='原来那一份', generated='2026-09-28 08:30')
         out = daily.generate(since=T('2026-09-28 00:00'), until=T('2026-09-28 23:00'),
-                             approval=dov.Approval('2026-09-28', '2026-09-28 08:30'))
+                             approval=dov.Approval('2026-09-28',
+                                                   dov.report_version('2026-09-28')))
         self.assertEqual('2026-09-28', out['date'])
         self.assertNotIn('原来那一份',
                          (daily.report_dir() / '2026-09-28.md').read_text('utf-8'))
+
+    def test_a_body_swapped_mid_run_under_the_same_minute_is_caught(self):
+        """**第 2 轮审查那一档,落在落盘那一道闸上**:确认过的那一份在模型那几分钟里
+        被换掉了正文,而 frontmatter 里那行「生成于」一个字没变。
+
+        早一道(出报前)这时看到的还是用户确认的那一份,所以这一条只有**锁里那一
+        道**挡得住;而拿 `generated` 当版本的话两道都放行 —— 用户确认的内容被静默
+        盖掉,一句提示都没有。
+        """
+        write_report('2026-09-28', body='用户确认的那一份',
+                     generated='2026-09-28 08:30')
+        approved = dov.Approval('2026-09-28', dov.report_version('2026-09-28'))
+
+        def swap_body(*a, **kw):
+            write_report('2026-09-28', body='期间换成的那一份',
+                         generated='2026-09-28 08:30')      # 同一分钟
+            return '## 今日要点\n\n- **有事发生**:说明 [1]'
+        self.chat.side_effect = swap_body
+        with self.assertRaises(dov.OverwriteRefused):
+            daily.generate(since=T('2026-09-28 00:00'),
+                           until=T('2026-09-28 23:00'), approval=approved)
+        self.assertIn('期间换成的那一份',
+                      (daily.report_dir() / '2026-09-28.md').read_text('utf-8'))
 
     def test_a_report_that_appears_mid_run_is_still_caught(self):
         """**真正那一道闸在落盘之前**:确认之后、落盘之前冒出来一份也要拦住。

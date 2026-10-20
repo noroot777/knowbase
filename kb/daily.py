@@ -76,6 +76,7 @@ from kb.daily_overwrite import (          # 覆盖授权那一套,见那个模�
     Approval as Approval,
     OverwriteRefused as OverwriteRefused,
     check_overwrite,
+    file_version,
     report_version as report_version,
 )
 from kb.scanner import parse_frontmatter
@@ -575,6 +576,11 @@ def _entry(path: Path, with_body: bool = False) -> dict:
            'total': int(meta.get('total') or 0), 'late': int(meta.get('late') or 0),
            'model': str(meta.get('model') or ''),
            'generated': str(meta.get('generated') or ''),
+           # **覆盖确认带下来的那一版认的是这个,不是上面那行「生成于」。** 那行
+           # 字只到分钟、而且不随正文变化(口径和事故形态在 `kb.daily_overwrite`)。
+           # 算不出来时给空串:界面据此落到「查不到是哪一版」那一档,确认框会把这
+           # 件事说出来,而不是拿一个假身份去核对(`daily_chip.js`)。
+           'version': file_version(path),
            'sources': meta.get('sources') if isinstance(meta.get('sources'), dict) else {},
            'window_since': str(meta.get('window_since') or ''),
            'window_until': str(meta.get('window_until') or ''),

@@ -38,23 +38,31 @@ function dailyTargetDate() {
 //
 // `version` 三档,**每次都重新读一遍那份清单拿它**:后端对不上会拒(「期间换了
 // 一版」),拿一份缓存里的旧版本重发只会在同一句话上卡住。
-//   '<时刻>' = 核实过就是这一版;'*' = 问过、而且说清了查不到有没有;
-//   ''       = 压根没问过他(界面判定那一天没有日报)。
+//   '<内容身份>' = 核实过就是这一份;'*' = 问过、而且说清了查不到有没有(或者
+//   查不到是哪一版);''  = 压根没问过他(界面判定那一天没有日报)。
+//
+// **版本认的是清单里那个 `version`(整份文件的内容身份),不是 `generated`。**
+// 那行「生成于」只到分钟、而且不随正文变化,拿它当版本的话同一分钟内换过内容、
+// 或者在 Obsidian 里改过正文的那一份会被静默盖掉(口径和事故形态在
+// `kb/daily_overwrite.py`,第 2 轮审查实测)。
 async function confirmDailyOverwrite(date, known = null) {
   const bare = { day: date, version: '' };
   if (known === false) return bare;        // 核实过:那一天没有,不用问
-  let version = '';
+  let version = '', row = null;
   try {
-    const row = ((await pipeJson('/api/daily/reports')).reports || [])
-      .find(r => r.date === date);
+    row = ((await pipeJson('/api/daily/reports')).reports || [])
+      .find(r => r.date === date) || null;
     if (!row && known !== true) return bare;
-    version = row ? String(row.generated || '') || '*' : '*';
+    version = row ? String(row.version || '') || '*' : '*';
   } catch { version = '*'; }               // 读不出来:照旧问,批的是「那一天不管哪一版」
+  // **三句话对三档事实,不许合并。** 「查不到有没有」和「有、但查不到是哪一版」
+  // 是两件事:后者下面那句话要说出「有」,否则用户会以为自己在生成头一份。
+  // 两档都送 '*' —— 后端那边它们的含义相同(「那一天不管哪一版都盖」)。
+  const body = version !== '*' ? '这一天已经有一份日报，重新生成会覆盖它。'
+    : row ? '这一天已经有一份日报，但查不到它是哪一版；这一次会覆盖它。'
+      : '查不到这一天有没有日报；要是已经有一份，这一次会覆盖它。';
   const ok = await confirmBox({
-    title: `重新生成 ${date} 的日报？`,
-    body: version === '*' ? '查不到这一天有没有日报；要是已经有一份，这一次会覆盖它。'
-      : '这一天已经有一份日报，重新生成会覆盖它。',
-    ok: '重新生成' });
+    title: `重新生成 ${date} 的日报？`, body, ok: '重新生成' });
   return ok ? { day: date, version } : null;
 }
 
