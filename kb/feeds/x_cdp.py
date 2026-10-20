@@ -480,5 +480,3 @@ def _launch_hint(profile: str, err: Exception) -> str:
         return ('浏览器 profile 正被另一个窗口占用。请关掉之前打开的登录窗口再试'
                 f'(目录:{profile})')
     return f'浏览器启动失败:{err}'
-
-

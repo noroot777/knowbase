@@ -21,44 +21,121 @@ from kb.pipeline_state import _log, _now, _stage, _state
 
 # ── 采集:抓取 + 导出,两阶段都只跟采集器契约打交道 ────────────────────────────
 
-def crawl_channels(crawl_filter: dict | str | None = None) -> list[dict]:
-    """把一次同步的来源摊平成 [{"channel", "accounts"}],一个或多个都是这个读法。
+def _scope_entries(crawl_filter: dict | str | None) -> list[dict]:
+    """一份范围里那几段来源,**原样**。两种写法在这里收口,形状的口径只有这一份。
 
     一次同步可以同时抓几个来源(面板上勾几个就是几个),所以范围是
     `channels: [{"channel": ..., "accounts": [...]}]`;只抓一个来源时仍写成
     老样子的 `channel` + `accounts`,存量的状态文件、定时配置和重试记录
     因此一律不用迁移。
+
+    **`crawl_channels` 在它之上只留 `channel` / `accounts` 两个键,那是有意的**
+    —— 那一份是**要递给执行器的真范围**,多一个键就会跟着跑进执行和付费边界
+    (见 `kb/feeds/translate.py` 那段「`crawl_filter` 到不了这里」)。要读某一段上
+    别的字段(`retry`)的,从这里读,别去扩那一份。
     """
     if isinstance(crawl_filter, str) or crawl_filter is None:
         crawl_filter = {"channel": crawl_filter or ""}
-    scopes = crawl_filter.get("channels") or [
-        {"channel": crawl_filter.get("channel") or "",
-         "accounts": crawl_filter.get("accounts") or []}]
+    # 只有一个来源那种写法:**整份就是那一段,原样递出去**(这个函数的名字就是
+    # 「原样」)。多出来的键(`force`、日期窗口)没人读:取用这一份的只认
+    # channel / accounts / retry。
+    #
+    # **「原样」顺带保住了单来源那种写法上的 `retry`,而这一截是冗余带、眼下没有
+    # 自己的红**(定点改回「重挑 channel/accounts 拼个新字典」,整组回归全绿)——
+    # 后端这边拿得到的重试轮范围**一律**是 `channels` 那种写法
+    # (`start_retry_failed` 里 `if scopes:` 无条件写上它),而那个标记的唯一产地
+    # 是 `retry_crawl_scopes`,经 `scope_payload` 的一律被剥成两个键。前端那一份
+    # 同口径的单来源分支**是走得到的**(存量调用方直接递裸 filter 进来,
+    # `tests/test_retry_multi_source.py` 钉着)。别改回去重拼字典:两份实现的形状
+    # 要对齐,而上游哪天让这种写法带上标记时,这里不会静默把它吞掉。
+    return [s for s in (crawl_filter.get("channels") or [crawl_filter])
+            if isinstance(s, dict)]
+
+
+def crawl_channels(crawl_filter: dict | str | None = None) -> list[dict]:
+    """把一次同步的来源摊平成 [{"channel", "accounts"}],一个或多个都是这个读法。
+
+    **这一份是执行范围**:两个键,不多一个(理由在 `_scope_entries`)。
+    """
     return [{"channel": s.get("channel") or "",
-             "accounts": [n for n in (s.get("accounts") or [])]} for s in scopes]
+             "accounts": [n for n in (s.get("accounts") or [])]}
+            for s in _scope_entries(crawl_filter)]
+
+
+#: 按来源跑的那两步,各读**自己那一份**范围(口径同 `pipeline_daybook._owners`)。
+#: 余下那几步(`_run_index` 扫整个 vault、`_run_extract` 扫全库待提取队列、
+#: `_run_projects` / `_run_wiki` 同理)连通道参数都不收,所以它们一格都不加。
+_STAGE_FILTERS = (("crawl", "crawl_filter"), ("export", "export_filter"))
+
+
+def _stage_scopes(run: dict, key: str) -> list[dict]:
+    """这一步作用在哪几个来源上,**带上那一段的 `retry`**(面板那行文案要念它)。
+
+    回落到 `crawl_filter` 是给升级前那些没有导出范围的旧记录用的,口径同
+    `pipeline_retry.start_retry_failed` / `pipeline_daybook._owners`。
+    """
+    raw = run.get(key) or run.get("crawl_filter")
+    marks = {s.get("channel") or "": s.get("retry") or "" for s in _scope_entries(raw)}
+    return [{**scope, "retry": marks.get(scope["channel"], "")}
+            for scope in crawl_channels(raw)]
 
 
 def run_scopes(run: dict | None) -> list[dict]:
     """这一轮**实际作用在哪几个来源上**。既没抓取也没导出时是 `[]`。
 
-    **只有 crawl / export 认 `crawl_filter`**:`_run_index` 全量扫 vault、
-    `_run_extract` 扫全库待提取队列,`_run_projects` / `_run_wiki` 同理,这几个
-    函数连通道参数都不收。而 `start_pipeline` **一律**会往 filter 里盖一个默认
-    采集器名(实测 `wechat_local`)—— 只跑 index/extract 的那一轮(日报的「入库
-    处理」就是)照着 filter 念,会把公众号判成"正在同步"、把订阅写保护错加在它
-    头上,而真正参与这一轮的来源反倒被说成别人的任务。
+    **这是「按来源执行的那几步各自范围的并集」,不是某一步范围的别名。** 抓取和
+    导出各有自己的范围(`crawl_filter` / `export_filter`:抓取收窄到失败的那几条、
+    导出照旧走整条来源),所以拿抓取那一份当整轮事实会**整个漏掉只导出的那一轮**
+    —— 实测「只补导出」那一轮的抓取范围是 `{"force": true}`(一个来源名都没有),
+    于是:开着的订阅页在重试成功之后**一直显示翻译失败**(它靠「这一轮带不带本
+    来源」决定重读条目,而仅翻译/导出不改订阅行也不改收录总数,下一次轮询照旧
+    什么都不重读,只刷新整页才看得到),同步中心写「选择来源后开始一次同步」,
+    历史那行写「未记录来源」,订阅的增/改/删写保护整条失效(第 1 轮自由审查 R1
+    实页实测)。**也不许写成 `crawl_filter || export_filter`**:只导出那一轮
+    `{"force": true}` 已经为真,而抓取 A / 导出 A+B 那一轮又会漏掉 B。
 
-    判据是这一轮**计划里有没有** crawl / export,不是 filter 里写着谁。前端那一
-    份同口径在 `kb/static/js/pipe_channels.js` 的 `pipeRunScopes`。
+    **判据是这一轮计划里有没有那一步**,不是 filter 里写着谁:`start_pipeline`
+    **一律**会往 filter 里盖一个默认采集器名(实测 `wechat_local`)—— 只跑
+    index/extract 的那一轮(日报的「入库处理」就是)照着 filter 念,会把公众号判成
+    「正在同步」、把订阅写保护错加在它头上,而真正参与这一轮的来源反倒被说成别人
+    的任务。**纯全库那几步一个来源都不凭空附加。**
 
-    `planned_stages` 读不到时(存量落盘记录、旧快照)按老样子摊平,不许一律判成
-    「不按来源」—— 那会让写保护对所有存量记录静默失效。
+    同一个来源在两步里都出现时,那一格带的 `accounts` / `retry` 取**抓取**那一份
+    (它是收窄过的那一份,而面板那行「本次范围」念的正是它);导出只补上抓取没碰到
+    的来源。**要问「某一步在这个来源上的范围」的一律自己读那一步的 filter**
+    (`_stage_scopes` / `_owners`),别拿这一份当它用。
+
+    `scopes` 这一格是**落盘记录自己写下的那个答案**(`pipeline_persist.run_record`):
+    给人翻的那份历史记录**故意不存导出范围**(那一份不许喂给重试派生,见
+    `pipeline_state` 的 `scope` 欠账),所以它改为直接存结论。有就念它。
+
+    `planned_stages` 读不到时(存量落盘记录、旧快照)按老样子只摊平抓取范围,
+    不许一律判成「不按来源」—— 那会让写保护对所有存量记录静默失效。前端那一份
+    同口径在 `kb/static/js/pipe_channels.js` 的 `pipeRunScopes`,**两份的输出形状
+    也一样**(channel / accounts / retry);那一份还多认一种「直接递一份裸
+    `crawl_filter` 进来」的老调用方,后端这边从来没有那种调用。
+
+    硬约束在 `docs/decisions/retry-scope.md` 第一节(落盘那一侧在
+    `pipeline-history.md` 第一节)。
     """
     run = run or {}
+    told = run.get("scopes")
+    if isinstance(told, list):
+        return [{"channel": s.get("channel") or "",
+                 "accounts": [n for n in (s.get("accounts") or [])],
+                 "retry": s.get("retry") or ""}
+                for s in told if isinstance(s, dict)]
     planned = run.get("planned_stages")
-    if isinstance(planned, list) and not ({"crawl", "export"} & set(planned)):
-        return []
-    return crawl_channels(run.get("crawl_filter"))
+    if not isinstance(planned, list):
+        return _stage_scopes(run, "crawl_filter")
+    merged: list[dict] = []
+    for stage, key in _STAGE_FILTERS:
+        if stage not in planned:
+            continue
+        for scope in _stage_scopes(run, key):
+            if not any(s["channel"] == scope["channel"] for s in merged):
+                merged.append(scope)
+    return merged
 
 
 def _channel_label(collector) -> str:

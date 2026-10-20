@@ -22,6 +22,22 @@ function pipeRunLabel(result) {
   if (result.run_kind === 'daily') return '日报';
   return result.run_kind === 'retry' || legacyRetry ? '重试' : '同步';
 }
+// 「**本轮自己**是怎么结束的」那一小句。失败那几档在上面各有自己的话,所以这里只剩
+// 停止 / 跳过 / 跑完了 / 还有没跑的四种。
+//
+// **「本轮一个红都没有」不等于「本轮全部执行成功」。** 那句「今天早些时候还有 N 个
+// 步骤没补上」原来排在停止、跳过、「完成数等于总数」几档**之前**就返回,于是:今天
+// 先有一次导出失败、后来只跑了一轮被跳过的导出时,标题和进度正确写着「部分步骤已
+// 跳过」「0 / 1 完成」,同一屏这句话却说「本轮的步骤都完成了」(第 1 轮自由审查 N1
+// 实页实测)。被停止那一档、以及计划里还有步骤没跑完那一档形态一样 —— 所以这两件事
+// 分开组合:**本轮的结论按本轮的状态念,今天的欠账另说一句。**
+function pipeRoundSoFar(result, skipped, progress) {
+  if (result.stopped) return '本轮已停止，已完成结果已保留。';
+  if (skipped) return `本轮有 ${skipped} 个步骤被跳过，具体原因见下方。`;
+  // 这一档的「但」接着下半句念:「本轮的步骤都完成了，但今天早些时候还有 …」
+  if (progress.total && progress.completed === progress.total) return '本轮的步骤都完成了，但';
+  return `本轮${progress.label}没有全部跑完（${progress.completed} / ${progress.total} 完成）。`;
+}
 function pipeStateHint(s, result, failed, skipped, progress, owed = 0) {
   // **翻历史时这句话要跟着换成只读语义。** 下面那几句写的是「可以重新配置一次同步,
   // 或按上次抓取范围重试失败项」—— 而翻历史时那颗按钮已经藏掉也禁用了(理由在
@@ -51,7 +67,7 @@ function pipeStateHint(s, result, failed, skipped, progress, owed = 0) {
   // **排在上面那句之后**:这一轮自己报了红时念的是它自己那几步(屏幕上的卡片正指着
   // 它们),反过来就是把用户的注意力从眼前这一轮引开。于是这句话只在「这一轮一个红
   // 都没有」时出现 —— 两句话数的是同一批步骤也不会念两遍。
-  if (owed) return `本轮的步骤都完成了，但今天早些时候还有 ${owed} 个步骤没补上，可按它们各自的范围重试失败项。`;
+  if (owed) return `${pipeRoundSoFar(result, skipped, progress)}今天早些时候还有 ${owed} 个步骤没补上，可按它们各自的范围重试失败项。`;
   if (result.stopped) return '已完成结果已保留。可重新配置同步，已有内容会按现有规则去重。';
   if (skipped) return `${skipped} 个步骤被跳过，具体原因见下方。`;
   if (result.finished_at && progress.total && progress.completed === progress.total) return `本次${progress.label}计划的 ${progress.total} 个步骤均已完成。`;

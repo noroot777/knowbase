@@ -217,6 +217,45 @@ check("翻历史时收尾那句话不许替今天下结论",
 await evalJs(`exitPipeHistory()`);
 await sleep(250);
 
+// ⑨ 这一轮被跳过、今天另外还欠着一步:**本轮的结论和今天的欠账要各说各的**。
+// 那句「今天早些时候还有 N 个步骤没补上」原来排在停止、跳过、「完成数等于总数」
+// 几档**之前**就返回,于是「本轮一个红都没有」被当成了「本轮全部执行成功」——
+// 标题和进度正确写着「部分步骤已跳过」「0 / 1 完成」,同一屏那句话却说「本轮的步骤
+// 都完成了」(第 1 轮自由审查 N1 实页实测)。被停止那一档形态一样,一并钉住。
+const SKIPPED = {
+  run_id: "run-skipped", run_kind: "sync", stopped: false,
+  started_at: "2026-10-20 10:00:00", finished_at: "2026-10-20 10:00:20",
+  planned_stages: ["export"], crawl_filter: { channel: "rss" },
+  scopes: [{ channel: "rss", accounts: [], retry: "" }],
+  stages: { export: { status: "skipped", detail: "采集器后端不可用，已跳过" },
+            crawl: { status: "skipped", detail: "本次未选择" } },
+  log: ["[10-20 10:00:20] 管道结束"],
+};
+current = SKIPPED;
+owed = ["export"];
+await reload();
+seen = await now();
+check("跳过那一轮不许说「本轮的步骤都完成了」",
+      !/本轮的步骤都完成了/.test(seen.hint), seen.hint);
+check("它要照实说这一轮被跳过了,再说今天还欠着",
+      /跳过/.test(seen.hint) && /今天早些时候还有 1 个步骤/.test(seen.hint), seen.hint);
+check("标题照旧写它被跳过", /部分步骤已跳过/.test(seen.stateTitle), seen.stateTitle);
+check("那颗按钮照旧点得到(今天那一步还补得到)", seen.clickable, JSON.stringify(seen));
+// 停止那一档同一条判据
+current = { ...SKIPPED, run_id: "run-stopped", stopped: true,
+            stages: { export: { status: "stopped", detail: "用户停止" } } };
+await reload();
+seen = await now();
+check("被停止那一轮也不许说「都完成了」",
+      !/都完成了/.test(seen.hint) && /已停止/.test(seen.hint), seen.hint);
+// **反过来钉一边**:真全绿而今天还欠着时,那句话照旧是原来那一句
+current = EVENING;
+owed = ["crawl"];
+await reload();
+seen = await now();
+check("真全绿那一轮照旧说「本轮的步骤都完成了，但…」",
+      /本轮的步骤都完成了，但今天早些时候还有 1 个步骤/.test(seen.hint), seen.hint);
+
 // ⑧ 真点一下:请求发得出去,而后端那句话(含降级说明)要念出来,不许丢
 owed = ["crawl"];
 await reload();

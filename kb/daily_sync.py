@@ -156,4 +156,3 @@ def _sync_round(stages: list[str], crawl_filter: dict | None, label: str,
                  detail='；'.join(bad + idle)[:400] if bad or idle else '同步完成')
     _log(f'{label}:{entry["detail"]}')
     return entry
-

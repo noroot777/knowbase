@@ -207,4 +207,3 @@ class DaybookGapTests(DaybookCase):
         self.assertTrue(ok, f'合成炸了把整次重试带走了:{msg}')
         self._wait_idle()
         self.assertIn('合不成', msg, f'降级原因说成了另一件事:{msg!r}')
-

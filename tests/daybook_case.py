@@ -112,4 +112,3 @@ class DaybookCase(RetryScopeBase):
             except OSError as e:
                 pipeline_state._stage('export', 'error', f'导出失败:{e}')
         pipeline_state._end_run()
-

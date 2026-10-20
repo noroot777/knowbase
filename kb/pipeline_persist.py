@@ -222,7 +222,8 @@ def event_id(run) -> str:
 
 # 同一轮写出来的两份副本,在这些字段上**逐字相同**:它们都从同一份 `_state` 取。
 # 不含身份/序号/世代(旧格式缺这些,而那恰恰是要兼容的那一档),也不含
-# `export_filter` / `crawl_retry`(历史那一份本来就没有)。
+# `export_filter` / `crawl_retry`(历史那一份本来就没有)、不含 `scopes`
+# (反过来:那一格只有历史那一份有,它是补那两份缺掉的输入所能回答的那个问题)。
 _ROUND_FIELDS = ("started_at", "finished_at", "run_kind", "stopped",
                  "planned_stages", "stages", "crawl_filter", "log")
 
@@ -409,6 +410,12 @@ def _valid_round(run) -> bool:
     for key in ("crawl_filter", "export_filter"):
         if not _filter_ok(run.get(key)):
             return False
+    # 来源清单**验到元素**:历史那行和主视图逐条读 `s.channel`,混进一个 `null`
+    # 就在那一下抛(口径同上面 `failures` 那一段)。老记录没有这一格,照旧有效。
+    told = run.get("scopes")
+    if not (told is None or (isinstance(told, list)
+                             and all(isinstance(one, dict) for one in told))):
+        return False
     notes = run.get("crawl_retry")
     if not (notes is None or isinstance(notes, dict)):
         return False
@@ -476,8 +483,10 @@ def run_record(state: dict) -> dict:
 
     字段取「面板渲染一轮运行要哪些」那一套(`pipe_view.js` 的 `renderPipeState`),
     不含 `export_filter` / `crawl_retry` —— 那两个是重试派生用的,只有最新那一轮
-    的才有意义。
+    的才有意义;整轮作用在哪几个来源上改为存**结论**(`scopes`,见下面那段)。
     """
+    # 延迟 import:`pipeline_stages` 经 `pipeline_state` 回指本模块
+    from kb.pipeline_stages import run_scopes as _run_scopes
     return {
         "run_id": state.get("run_id", ""),
         "run_seq": state.get("run_seq", 0),
@@ -490,6 +499,20 @@ def run_record(state: dict) -> dict:
         "planned_stages": state.get("planned_stages"),
         "stages": deepcopy(state["stages"]),
         "crawl_filter": deepcopy(state["crawl_filter"]),
+        # **这一轮作用在哪几个来源上,存的是「答案」而不是「输入」**(`run_scopes`
+        # 那一份口径)。这一份**故意不存 `export_filter`**(见上面那句),可「只补
+        # 导出」那一轮的来源恰恰只写在导出范围里 —— 于是光凭这份记录答不出来,
+        # 历史那行写「未记录来源」、翻开它主视图写「选择来源后开始一次同步」
+        # (第 1 轮自由审查 R1 实页实测)。**不许改为把 `export_filter` 存进来**:
+        # 「这一份没有重试派生字段」正是 `scope` 那档欠账的判据,存进来就等于让
+        # 重试从一份只够展示的记录里派生范围(那条路错一个字就是静默不抓)。
+        # 存结论没有这个风险:重试那条路一个字都不读它。
+        # **空通道那一格不往这儿存**:它的含义是「不挂在任何具名来源上」(整库
+        # 同步),而这一格是给人看的来源清单 —— 存着它,那一行会显示成一个空名字
+        # (口径同 `pipeline_daybook` 的 `_WHOLE`、`pipeline_merge._merge_scopes`)。
+        # **恢复不把它搬进 `_state`**:那边有两份 filter、自己派生得出来,而常驻
+        # 内存里多一格就要在每条起跑路径上各清一次(`batch` 那一格的教训)。
+        "scopes": [s for s in _run_scopes(state) if s["channel"]],
         # **结果账要带上**(`results`):历史是恢复的另一个入口(状态文件写失败那一
         # 档就靠它),而这份账回答的是「这一轮里哪个来源这一步已经成了」。从这里漏
         # 掉的话,从历史恢复回来的那一轮又退回「整步那张合并卡片」,成功的来源跟着
