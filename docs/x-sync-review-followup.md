@@ -12,7 +12,7 @@
 
 1. **审计欠账收口**：局部修复后仍先排队复查，不假称整篇修复成功。
    同版得到与欠账匹配的安全扣留结论后，把 `remaining` 转为 `retained`，默认不再反复开页。
-   同版连续两次相同的安全保留结论（含 `identical`）也收口，避免出现另一种永久欠账。
+   同版累计两次安全保留结论（含 `identical`）也收口，不要求相同或相邻，避免另一种永久欠账。
    失败、暂缓和首次相同读数仍保留重试能力；正文换版、`--recheck`、`--url` 可重新核对并补齐。
    正文比较策略版本不变，证据检查、CAS、译文作废规则均不放宽。
 2. **HTTP 与空态冲突**：共享 `problem` / `unavailable` 判据保留原始 DOM 证据，
@@ -31,7 +31,7 @@
    不再滚动或把整个账号预算耗完；没有卡片则报账号请求失败，后续账号仍能运行。
    完整目标详情仍须身份匹配、未折叠及正文/证据两次稳定；不把时间线缓存卡片等同于完整详情。
 
-## 验证
+## 初次实现验证（5177e72）
 
 - 最终定向测试：`HEADLESS_SHELL=/nonexistent uv run --offline python -m unittest
   tests.test_x_post_audit tests.test_x_page_policy tests.test_x_review_contracts
@@ -46,7 +46,7 @@
 - 所有数据验证均使用临时 SQLite 库和内存 CDP 事件，不读取或写入生产库、真实 vault、cookie 或 X 页面。
 - 所有修改的代码文件均不超过 700 行。
 
-## 浏览器通道与证据
+## 初次实现浏览器通道与证据
 
 使用第 1 档 Chrome 扩展，先命名 `🔎 X 同步四项修复验证`，再创建本任务的后台验证标签。
 没有接管用户现有标签、主动激活窗口或切换验证标签，没有连接用户 Chrome 的调试端口。
@@ -64,3 +64,58 @@
 
 验证标签已关闭，隔离服务已停止；临时库和伪 cookie 随隔离目录清理。
 没有触碰别的任务的工作树、服务或浏览器会话。
+
+## 第 1 轮审查修复（2026-10-20）
+
+本轮只处理审查报告的两条必修及“改链接”测试盲点；历史混存提示的过渡策略不变。
+
+- 审计收据按 `(item_key, version)` 持久化 `safe_rechecks`。安全保留结果累计两次即收口，
+  不要求结果相同或相邻；`failed`、`stale` 不清零，`deferred` 不覆盖原回执。
+  匹配原欠账的安全扣留仍可立即收口，换版从零开始，旧回执的最后一次安全结果计一次。
+  保留失败重试、显式重查和后续补齐机会，不改正文证据门、比较策略版本或 CAS。
+- 真实 DOM 回归区分核心 `UserTweets` 与辅助 `UserByScreenName`：核心 404/503 为失败，
+  429 为限流，不能被空态变成不存在；辅助错误不否决已确认的空态。
+  增加真实 `TweetDetail` HTTP/空态冲突与下一次成功导航恢复检查。
+- 改链接回归使用 `source_id` 更新原订阅，再从原 id 读取并核对链接和两类说明清空。
+
+### 本轮浏览器通道
+
+先使用第 1 档 Chrome 扩展，命名 `🔎 X 审查修复验证` 后新建后台标签。
+在隔离服务 `127.0.0.1:57659/review-dom` 读取实际空态页面及原 `_STATE_JS` 输出，
+确认 `ready=complete, empty=true, challenge=false, articles=0`。
+
+扩展连接和本地页面均正常，但公开 API 仅提供只读 DOM 求值、定位器和页面日志；
+实际能力清单中浏览器只有 `viewport/management`，标签只有 `pageAssets`，
+没有原始 CDP 命令/事件订阅或可供产品 `Session` 接入的协议传输。
+因此它不能执行本轮必须补跑的 `Network.responseReceived` → `Responses` → 详情/时间线消费集成验证；
+仅复用 DOM 加内存事件会重复审查指出的覆盖缺口，不能称为真实 HTTP 浏览器回归。
+在记录这一协议验证能力限制后，相关既有测试改用第 2 档独立 headless shell 和临时 profile，
+只访问进程内 `127.0.0.1` 夹具，不连接用户 Chrome 调试端口或读取 cookie，不启动有头浏览器。
+扩展标签不接管用户已有标签、不主动激活窗口或切换标签；验证结束后关闭自建标签并清理隔离服务。
+
+### 本轮验证结果
+
+- `HEADLESS_SHELL=/nonexistent uv run --offline python -m unittest
+  tests.test_x_audit_retention tests.test_x_post_audit tests.test_x_page_policy
+  tests.test_x_review_contracts tests.test_x_page_state tests.test_x_post_repair_contract -q`
+  → **64 tests, OK**。新回归覆盖默认/写回入口、不同安全结果交错、失败/暂缓/过期不清零、
+  旧回执续接、正文换版重置、默认结束后不再打开浏览器，以及显式重查后真实正文写回和版本递增。
+- `HEADLESS_SHELL=<本机 chrome-headless-shell> uv run --offline python -m unittest
+  tests.test_x_post_dom -v` → **31 tests, OK，无跳过**，4.008 秒。
+  使用实际浏览器发出的本地 HTTP 请求及产品 CDP 事件链，非内存事件替身；
+  核心/辅助接口、404/429/503、详情/时间线和下一次成功导航恢复均通过。
+  其它测试未为此开启独立浏览器，不以协议能力限制绕过可用的扩展界面通道。
+- `HEADLESS_SHELL=/nonexistent uv run --offline python -m unittest discover -s tests -t . -q`
+  → **2728 tests, OK (skipped=111)**，117.095 秒，退出码 0。
+  该次执行 2617 项；111 项跳过中，本轮另行执行上面的 31 项真实 DOM 检查，仍有 80 项未执行，
+  不把跳过项称为通过。最后补强的正文写回/版本递增断言由上述 64 项定向复跑确认。
+- 原审查 `repro_audit.py` 原样运行：仅在内存恢复旧 `record` 时，两种交错模式 12 轮后仍有候选；
+  恢复本轮实现后，`blocked_content/failed` 在第 3 轮、`blocked_content/identical` 在第 2 轮收口。
+  新增测试另断言收口前后正文行完全不变；未用计数替代正文证据或 CAS。
+- 本轮全部变更 Python 文件通过 `uvx --offline ruff check`，`git diff --check` 通过；
+  变更代码文件最长 510 行，均不超过 700 行。
+
+日志及扩展 DOM/能力清单：`/tmp/kb-x-fix-AACErx-round1/`。
+本轮没有界面改动，沿用初次实现的界面截图；本轮协议验证不冒充 X 在线实测。
+自建扩展标签已关闭，57659 端口已关闭，隔离数据目录已删除；
+独立无头浏览器及临时 profile 由测试清理，未触碰生产库、vault、cookie 或用户现有标签。

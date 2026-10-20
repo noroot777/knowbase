@@ -460,18 +460,46 @@ class PostDomTests(unittest.TestCase):
                 self.assertNotIsInstance(caught.exception, x_post.PostRequestFailed)
                 self.assertNotIsInstance(caught.exception, x_post.PostGone)
 
-    def test_real_dom_terminal_evidence_is_not_erased_by_current_http_errors(self):
+    def test_real_dom_empty_evidence_cannot_override_core_http_errors(self):
         for status in [404, 429, 503]:
             for operation in ['UserByScreenName', 'UserTweets']:
                 with self.subTest(status=status, operation=operation):
                     self.http_page(status, operation, '<main>Account suspended</main>')
                     snap = x_page_state.read(self.page, x_browser._STATE_JS)
                     self.assertTrue(snap['empty'])
-                    self.assertEqual('', x_page_state.problem(snap))
+                    problem = ('' if operation == 'UserByScreenName' else
+                               'limited' if status == 429 else 'failed')
+                    self.assertEqual(problem, x_page_state.problem(snap))
+                    self.assertEqual(not problem, x_page_state.unavailable(snap))
                     started = time.monotonic()
-                    with self.assertRaisesRegex(x_browser.XBrowserError, '账号在 X 上打不开'):
+                    reason = ('账号在 X 上打不开' if not problem else
+                              '限制了访问频率' if status == 429 else '页面请求出错')
+                    with self.assertRaisesRegex(x_browser.XBrowserError, reason) as caught:
                         x_browser._wait_state(self.page, 'Example', started + 3)
+                    self.assertEqual(problem == 'limited', isinstance(
+                        caught.exception, x_page_state.XRateLimited))
                     self.assertLess(time.monotonic() - started, 2.5)
+                    self.http_page(200, 'UserTweets', article())
+                    recovered = x_browser._wait_state(self.page, 'Example', time.monotonic() + 3)
+                    self.assertEqual('', x_page_state.problem(recovered))
+                    self.assertFalse(recovered.get('incomplete'))
+
+    def test_real_detail_http_empty_conflicts_stay_retryable_and_recover_next_navigation(self):
+        route = '/Example/status/123'
+        url = f'http://127.0.0.1:{self.server.server_port}' + route
+        for status in [404, 429, 503]:
+            with (
+                self.subTest(status=status),
+                patch.object(x_post, '_STATUS', re.compile(r'^http://[^/]+/[^/]+/status/(\d+)')),
+                patch.object(x_post, 'STEP', 0.01), patch.object(x_post, 'SECONDS', 0.4)
+            ):
+                self.http_page(status, 'TweetDetail', '<main>This page doesn’t exist</main>', route)
+                expected = x_page_state.XRateLimited if status == 429 else x_post.PostRequestFailed
+                with self.assertRaises(expected) as caught:
+                    x_post.fetch(url, self.page)
+                self.assertNotIsInstance(caught.exception, x_post.PostGone)
+                self.http_page(200, 'TweetDetail', article(text='Recovered complete body'), route)
+                self.assertEqual('Recovered complete body', x_post.fetch(url, self.page))
 
     def test_error_words_in_a_real_post_cannot_make_it_absent_or_rate_limited(self):
         text = '有人说「该页面不存在」或「请稍后再试」，但这是一条正常推文。'

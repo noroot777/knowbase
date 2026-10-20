@@ -1,7 +1,7 @@
 """Versioned audit receipts, separate from feeds.db even in read-only probe mode.
 
 Change POLICY when the content-comparison contract changes, not for queue/display fixes.
-Remaining debt retries after failures; a matching safe withholding settles that version.
+Remaining debt retries after failures; matching or accumulated safe reads settle that version.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from kb.feeds import grab_store, registry as reg
 
 POLICY = 'confirmed-ranges-1'
 AVAILABILITY_POLICY = 'content-http-conflict-1'
+SAFE_RECHECKS = 2
 RETRY = {'failed', 'stale', 'deferred'}
 REPAIRABLE = {'expanded', 'normalized'}
 SCHEMA = '''CREATE TABLE IF NOT EXISTS audits (
@@ -88,9 +89,12 @@ def record(row: dict, result: dict, *, complete=None) -> None:
                 remaining = previous.get('remaining')
                 if remaining:
                     state = outcome['state']
-                    settled = ((state.startswith('blocked_') and state == remaining) or
-                               (state == previous['state'] and
-                                (state == 'identical' or state.startswith('blocked_'))))
+                    safe = state == 'identical' or state.startswith('blocked_')
+                    checks = previous.get('safe_rechecks', int(
+                        previous['state'] == 'identical' or previous['state'].startswith('blocked_')))
+                    checks += int(safe)
+                    outcome = dict(outcome, safe_rechecks=checks)
+                    settled = safe and (state == remaining or checks >= SAFE_RECHECKS)
                     if settled:
                         outcome = dict(outcome, retained=remaining)
                         outcome.pop('remaining', None)

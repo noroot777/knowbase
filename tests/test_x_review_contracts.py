@@ -132,7 +132,11 @@ class ReviewContractsTests(ChannelBase):
         cleared = reg.subscription('social', source['id'])
         self.assertEqual(('', ''), (cleared['last_note'], cleared['last_notice']))
         sync._save_result(cleared, result, FetchScope())
-        reset = reg.save_subscription('social', dict(id=source['id'], name='Other', url='https://x.com/Other'))
+        reset = reg.save_subscription('social', dict(name='Other', url='https://x.com/Other'),
+                                      source_id=source['id'])
+        self.assertEqual(source['id'], reset['id'])
+        reset = reg.subscription('social', source['id'])
+        self.assertEqual('https://x.com/other', reset['url'])
         self.assertEqual(('', ''), (reset['last_note'], reset['last_notice']))
 
     def test_existing_subscription_schema_gains_an_empty_notice_without_resetting_progress(self):
