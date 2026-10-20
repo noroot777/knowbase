@@ -396,6 +396,11 @@ class Chrome(Session):
         return json.loads(raw)
 
 
+def has_login_footprint(profile: str) -> bool:
+    """Whether this standalone profile has the local footprint used by readiness."""
+    return os.path.exists(os.path.join(profile, 'Default', 'Cookies'))
+
+
 def profile_busy(profile: str) -> bool:
     """这个 profile 目录此刻是不是**真的**被一个活着的浏览器占着。
 

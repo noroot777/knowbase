@@ -92,7 +92,7 @@ def _detail(verdict: str, count: int, last: dict, note: str) -> str:
         # 站点拒绝登录时它多半顺手清掉了凭证,于是盘上确实也对不上(第 4 轮审查
         # 实测:回调明确返回 `login`,产品却报 `unsaved` 并声称「当场也能用」)。
         reopened_failure = verdict == 'unconfirmed' and last.get('again') in (
-            'failed', 'challenge', 'not-loaded', 'no-tweets')
+            'failed', 'limited', 'challenge', 'not-loaded', 'no-tweets')
         reason = last['again'] if reopened_failure else verdict
         tail = _VERDICT_TAIL.get(reason, _VERDICT_TAIL.get(verdict, '没验证成'))
         stage = '重新打开之后那一次验证没跑成：' if reopened_failure else ''

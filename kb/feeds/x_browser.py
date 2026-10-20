@@ -35,10 +35,9 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from kb.feeds import x_article, x_page_state, x_post, x_post_meta
-from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
+from kb.feeds.x_cdp import Chrome, CdpError, has_login_footprint, profile_busy
 from kb.feeds.x_page_state import (
     STATE_JS, ProblemConfirmation, XAccessBlocked, XBrowserError, XRateLimited, navigate, read)
-from kb.feeds.x_page_state import problem as page_problem
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 # 连续多少条老推文算"翻到底了"。1 不够:转推带的是原推时间,单条老的很常见。
@@ -264,10 +263,9 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
             # `x_login_import`),把他推去无头壳里登一次正是他想免掉的那一步。
             raise XBrowserError('X 登录态已失效,请在浏览器通道设置里重新登录,'
                                 '或从日常浏览器再导入一次')
-        current_problem = page_problem(last)
-        if last['articles'] and last['ready'] == 'complete' and not current_problem:
-            return last
         confirmed_problem = errors.check(last)
+        if x_page_state.terminal(last, confirmed_problem) == 'ok':
+            return last
         if error := x_page_state.escalate(last, confirmed_problem, failure):
             raise error
         if last['empty']:
@@ -600,15 +598,17 @@ def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
     deadline = time.monotonic() + (timeout or ACCOUNT_SECONDS)
     last: dict = {}
     errors = ProblemConfirmation()
+    confirmed = ''
     while time.monotonic() < deadline:
         last = read(page, _STATE_JS)
         if last['login']:
             return 'login', last
-        if last['articles'] and last['ready'] == 'complete':
-            return 'ok', last
-        if problem := errors.check(last):
-            return problem, last
+        confirmed = errors.check(last)
+        if verdict := x_page_state.terminal(last, confirmed):
+            return verdict, last
         time.sleep(_SETTLE_STEP)
+    if verdict := x_page_state.terminal(last, confirmed, expired=True):
+        return verdict, last
     return ('no-tweets' if last.get('ready') == 'complete' else 'not-loaded'), last
 
 
@@ -633,6 +633,9 @@ def probe(profile: str, chrome_path: str = '', *,
             return False, '没有发现开着远程调试的浏览器。' + cdp_attach.ENABLE_HINT
     elif profile_busy(profile):
         return False, '这个 profile 正被另一个窗口占着(登录窗口还开着?)。关掉它再试'
+    elif not has_login_footprint(profile):
+        return False, ('浏览器通道还没有登录过 X:先点「打开登录窗口」登录一次,'
+                       '或者点「从日常浏览器导入登录态」')
     try:
         with browser_session(profile, chrome_path, attach=attach) as page:
             page.open_page('about:blank')
@@ -660,9 +663,10 @@ def probe(profile: str, chrome_path: str = '', *,
                 return False, str(x_page_state.access_blocked())
             if verdict == 'ok':
                 return True, f'登录态有效,首页读到 {last["articles"]} 条推文'
-            if verdict == 'not-loaded':
-                return False, 'X 首页没有加载完;未能判出原因,请稍后点「检查连接」重试'
-            return False, 'X 首页一条推文都没读到;未能判出原因,请稍后点「检查连接」重试'
+            observed = '没有加载完' if verdict == 'not-loaded' else '一条推文都没读到'
+            local = ('请在对应浏览器中确认 X 首页能否打开' if attach else
+                     '本地已有登录痕迹,不代表当前登录态有效;可点「打开登录窗口」查看 X 首页')
+            return False, f'X 首页{observed};未能判出原因。{local},再点「检查连接」重试'
     except (XBrowserError, CdpError) as e:
         return False, str(e)
     except (EOFError, OSError) as e:

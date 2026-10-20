@@ -49,10 +49,16 @@ class PostProvenanceTests(ProvenanceBase):
         post = self.seed('A preview', '124')
         for kwargs in ({'limit': 1}, {'all_posts': True}, {'urls': [article['url'], post['url']]}):
             excluded = []
+            omitted = {}
             with self.subTest(kwargs=kwargs), reg.db() as conn:
-                self.assertEqual([post], backfill.candidates(conn, excluded=excluded, **kwargs))
-            self.assertEqual('skipped_article', excluded[0]['state'])
-            self.assertEqual(article['url'], excluded[0]['url'])
+                self.assertEqual([post], backfill.candidates(conn, excluded=excluded, omitted=omitted, **kwargs))
+            if kwargs.get('limit'):
+                self.assertEqual([], excluded)
+                self.assertEqual(dict(skipped_article=1), omitted)
+            else:
+                self.assertEqual('skipped_article', excluded[0]['state'])
+                self.assertEqual(article['url'], excluded[0]['url'])
+                self.assertEqual({}, omitted)
 
     def test_old_article_shape_is_ambiguous_not_declared_complete_or_overwritten(self):
         row = self.seed('短短的开头', context='转推的原话',

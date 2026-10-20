@@ -163,15 +163,29 @@ class ProblemConfirmation:
         return confirmed
 
 
+def terminal(state: dict, confirmed: str, *, expired=False) -> str:
+    """Share timeline success and authoritative error timing across all consumers."""
+    if state.get('articles') and state.get('ready') == 'complete' and not problem(state):
+        return 'ok'
+    if not confirmed:
+        return ''
+    if confirmed == 'challenge':
+        return 'challenge'
+    if confirmed == 'limited' and (not state.get('http_only') or state.get('http_content_limited')):
+        return 'limited'
+    if expired or not state.get('http_only'):
+        return 'failed'
+    return ''
+
+
 def escalate(state: dict, confirmed: str, failure: Exception, *, expired=False) -> Exception | None:
     """Use one scope policy during polling and timeout; only local failures wait for expiry."""
-    if not confirmed:
-        return None
-    if confirmed == 'challenge':
+    verdict = terminal(state, confirmed, expired=expired)
+    if verdict == 'challenge':
         return access_blocked()
-    if confirmed == 'limited' and (not state.get('http_only') or state.get('http_content_limited')):
+    if verdict == 'limited':
         return XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
-    if expired or not state.get('http_only'):
+    if verdict == 'failed':
         return failure
     return None
 

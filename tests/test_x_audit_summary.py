@@ -76,8 +76,10 @@ class AuditSummaryTests(ProvenanceBase):
         self.seed(identity='126', legacy=True)
         code, output, stats = self.run_cli('--limit', '1')
         self.assertEqual(1, code)
-        self.assertEqual((1, 2), (stats['checked'], stats['total']))
-        self.assertIn('实际核对 1 / 本批共 2 条', output)
+        self.assertEqual((1, 1), (stats['checked'], stats['total']))
+        self.assertIn('实际核对 1 / 本批共 1 条', output)
+        self.assertEqual(dict(skipped_ambiguous=1), stats['omitted'])
+        self.assertIn('另有 1 条资格排除未列出,不计入本批', output)
         self.assertIn('不代表其余存量已核对', output)
 
     def test_source_verification_and_persistence_have_separate_summary_counts(self):

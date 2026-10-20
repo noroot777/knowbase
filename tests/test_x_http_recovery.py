@@ -93,18 +93,20 @@ class HttpRecoveryTests(unittest.TestCase):
             else:
                 self.assertGreaterEqual(page.reads, 2)
 
-    def test_rendered_home_or_auxiliary_timeline_failure_loses_after_the_login_check(self):
+    def test_only_auxiliary_timeline_failures_lose_after_the_login_check(self):
         for home in (False, True):
             page = StateSession([response(503, operation='HomeTimeline' if home else 'UserByScreenName')],
                                 articles=18)
             x_page_state.navigate(page, 'https://x.com/home' if home else 'https://x.com/Example')
-            with self.subTest(home=home), patch.object(x_browser.time, 'sleep',
-                    side_effect=AssertionError('A rendered timeline should not wait')):
+            with self.subTest(home=home), patch.object(x_browser.time, 'sleep'):
                 if home:
-                    self.assertEqual('ok', x_browser.verify_timeline(page)[0])
+                    self.assertEqual('failed', x_browser.verify_timeline(page, timeout=0.01)[0])
                 else:
                     self.assertEqual(18, x_browser._wait_state(page, 'Example', time.monotonic() + 1)['articles'])
-            self.assertEqual(1, page.reads)
+            if home:
+                self.assertGreater(page.reads, 2)
+            else:
+                self.assertEqual(1, page.reads)
         page = StateSession([], articles=18, login=True)
         self.assertEqual('login', x_browser.verify_timeline(page)[0])
 
@@ -125,22 +127,33 @@ class HttpRecoveryTests(unittest.TestCase):
 
 
 class CheckConnectionRecoveryTests(ChannelBase):
-    def test_real_route_reports_healthy_sibling_recovery_and_loading_dom_causes(self):
+    def test_real_route_reports_core_retry_recovery_and_loading_dom_causes(self):
         self.settings(x_channels.BROWSER)
+        cookies = x_channels.BROWSER_PROFILE / 'Default' / 'Cookies'
+        cookies.parent.mkdir(parents=True)
+        cookies.touch()
         for changes, events, ready, phrase in [
                 (dict(articles=18), [response(503, operation='HomeTimeline'),
-                                    response(200, operation='HomeLatestTimeline')], True, '登录态有效'),
-                (dict(articles=18), [response(503, operation='HomeTimeline')], True, '登录态有效'),
+                                    response(200, operation='HomeLatestTimeline')], False, '请求出错'),
+                (dict(articles=18), [response(503, operation='HomeTimeline')], False, '请求出错'),
+                (dict(articles=18), [response(503, operation='HomeTimeline'),
+                                    response(200, operation='HomeTimeline')], True, '登录态有效'),
                 (dict(ready='loading', limited=True, dom_problem='limited'), [], False, '限制了访问频率'),
                 (dict(ready='loading', failed=True, dom_problem='failed'), [], False, '请求出错')]:
             page = StateSession(events, **changes)
             with self.subTest(changes=changes, events=events), \
                     patch.object(x_browser, 'profile_busy', return_value=False), \
                     patch.object(x_browser, 'browser_session', return_value=contextlib.nullcontext(page)), \
+                    patch.object(x_browser, 'ACCOUNT_SECONDS', 0.01), \
                     patch.object(x_browser.time, 'sleep'):
                 result = self.x_act('/api/intake/social/x-channel/check')
             self.assertEqual(200, result.status_code)
             self.assertEqual(ready, result.json()['ready'])
             self.assertIn(phrase, result.json()['detail'])
             self.assertNotIn('网络不通', result.json()['detail'])
-            self.assertEqual(1 if ready else 2, page.reads)
+            if ready:
+                self.assertEqual(1, page.reads)
+            elif events:
+                self.assertGreater(page.reads, 2)
+            else:
+                self.assertEqual(2, page.reads)

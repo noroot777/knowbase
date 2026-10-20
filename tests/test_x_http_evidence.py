@@ -47,9 +47,13 @@ class HttpEvidenceTests(unittest.TestCase):
             page = LoadingSession([response(status, operation='HomeTimeline')])
             x_page_state.navigate(page, 'https://x.com/home')
             with self.subTest(status=status), patch.object(x_browser.time, 'sleep') as sleep:
-                self.assertEqual(verdict, x_browser.verify_timeline(page)[0])
-            self.assertEqual(2, page.reads)
-            sleep.assert_called_once()
+                self.assertEqual(verdict, x_browser.verify_timeline(page, timeout=0.01)[0])
+            if status == 429:
+                self.assertEqual(2, page.reads)
+                sleep.assert_called_once()
+            else:
+                self.assertGreater(page.reads, 2)
+                self.assertEqual(page.reads, sleep.call_count)
 
     def test_timeline_confirms_http_evidence_without_waiting_for_dom_completion(self):
         for status, kind, message in [(429, x_browser.XRateLimited, '访问频率'),

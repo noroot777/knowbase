@@ -422,6 +422,7 @@ class ProbeWordingTests(unittest.TestCase):
         for p in (patch.object(x_browser, 'browser_session',
                                lambda *_a, **_k: page),
                   patch.object(x_browser, 'profile_busy', lambda *_a: False),
+                  patch.object(x_browser, 'has_login_footprint', return_value=True),
                   patch.object(x_browser, 'ACCOUNT_SECONDS', budget),
                   patch.object(x_browser, '_SETTLE_STEP', 0.01),
                   patch.object(cdp_attach, 'discover',
@@ -459,13 +460,17 @@ class ProbeWordingTests(unittest.TestCase):
     def test_a_page_that_never_loads_does_not_guess_the_cause(self):
         ok, detail = self.run_probe({'ready': 'loading'})
         self.assertFalse(ok)
-        self.assertEqual('X 首页没有加载完;未能判出原因,请稍后点「检查连接」重试',
-                         detail)
+        self.assertIn('X 首页没有加载完;未能判出原因', detail)
+        self.assertIn('本地已有登录痕迹,不代表当前登录态有效', detail)
+        self.assertIn('打开登录窗口', detail)
+        self.assertIn('检查连接', detail)
 
     def test_a_loaded_page_with_no_tweets_keeps_the_other_sentence(self):
         ok, detail = self.run_probe({'articles': 0})
         self.assertFalse(ok)
-        self.assertEqual('X 首页一条推文都没读到;未能判出原因,请稍后点「检查连接」重试', detail)
+        self.assertIn('X 首页一条推文都没读到;未能判出原因', detail)
+        self.assertIn('本地已有登录痕迹,不代表当前登录态有效', detail)
+        self.assertIn('打开登录窗口', detail)
 
 
 if __name__ == '__main__':

@@ -232,11 +232,13 @@ def exclusion(row: dict) -> dict | None:
 
 
 def candidates(conn, *, urls=(), limit=0, all_posts=False, apply=False, recheck=False,
-               scan=False, excluded=None, resolve_legacy=False) -> list[dict]:
+               scan=False, excluded=None, omitted=None, resolve_legacy=False) -> list[dict]:
     """Apply provenance and audit progress before limit; scan retains completed rows."""
     rows = conn.execute("SELECT * FROM feed_items WHERE kind='social' AND content_kind='post'"
                         " ORDER BY published DESC,key").fetchall()
     selected = []
+    skipped_rows = []
+    skipped_counts = dict(skipped_article=0, skipped_ambiguous=0)
     pending_provenance = set()
     wanted = set(urls)
     for row in rows:
@@ -248,8 +250,9 @@ def candidates(conn, *, urls=(), limit=0, all_posts=False, apply=False, recheck=
         row = dict(row)
         if skipped := exclusion(row):
             if not (resolve_legacy and skipped['reason'] in x_post_meta.RECOVERABLE):
-                if excluded is not None:
-                    excluded.append(skipped)
+                skipped_counts[skipped['state']] += 1
+                if not limit or len(skipped_rows) < limit:
+                    skipped_rows.append(skipped)
                 continue
             if apply:
                 pending_provenance.add(row['key'])
@@ -261,7 +264,15 @@ def candidates(conn, *, urls=(), limit=0, all_posts=False, apply=False, recheck=
         retained = {row['key'] for row in remaining}
         pending_provenance.difference_update(retained)
         selected = [row for row in selected if row['key'] in pending_provenance] + remaining
-    return selected[:limit] if limit else selected
+    selected = selected[:limit] if limit else selected
+    listed = skipped_rows[:max(limit - len(selected), 0)] if limit else skipped_rows
+    if excluded is not None:
+        excluded.extend(listed)
+    for skipped in listed:
+        skipped_counts[skipped['state']] -= 1
+    if omitted is not None:
+        omitted.update({state: count for state, count in skipped_counts.items() if count})
+    return selected
 
 
 def entry_of(row: dict) -> dict:
@@ -273,8 +284,9 @@ def entry_of(row: dict) -> dict:
             x_post.HINT: prefix, x_post_meta.FIELD: row.get(x_post_meta.FIELD, '')}
 
 
-def _stats(rows, excluded) -> dict:
+def _stats(rows, excluded, omitted=None) -> dict:
     stats = dict(candidates=len(rows), total=len(rows) + len(excluded), checked=0,
+                 omitted=dict(omitted or {}),
                  expanded=0, normalized=0, updated=0,
                  identical=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
                  failed=0, stale=0, deferred=0, skipped_article=0, skipped_ambiguous=0,
@@ -286,8 +298,9 @@ def _stats(rows, excluded) -> dict:
 
 
 def repair(rows: list[dict], session, *, apply=False, deadline=None,
-           should_stop=None, progress=None, excluded=(), resolve_legacy=False, remember=False) -> dict:
-    stats = _stats(rows, excluded)
+           should_stop=None, progress=None, excluded=(), omitted=None,
+           resolve_legacy=False, remember=False) -> dict:
+    stats = _stats(rows, excluded, omitted)
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
                 deadline is not None and time.monotonic() >= deadline):
@@ -367,6 +380,10 @@ def _coverage(stats):
           '(已取得详情或确认远端不可用,不等于正文完整);'
           f'长文跳过 {stats["skipped_article"]} 条,来源不明跳过 {stats["skipped_ambiguous"]} 条。')
     print(f'来源核实 {stats["provenance_resolved"]} 条,来源保存 {stats["provenance_saved"]} 条。')
+    if omitted := stats.get('omitted'):
+        print(f'另有 {sum(omitted.values())} 条资格排除未列出,不计入本批'
+              f'(长文 {omitted.get("skipped_article", 0)} 条,'
+              f'来源不明 {omitted.get("skipped_ambiguous", 0)} 条)。')
 
 
 def main(argv=None) -> int:
@@ -389,7 +406,9 @@ def main(argv=None) -> int:
         parser.error('--url 只接受 X 推文的完整地址')
     with reg.db() as conn:
         excluded = []
+        omitted = {}
         rows = candidates(conn, urls=args.url, limit=args.limit, all_posts=args.all, excluded=excluded,
+                          omitted=omitted,
                           resolve_legacy=args.resolve_legacy, apply=args.yes, recheck=args.recheck,
                           scan=args.cmd == 'scan')
     print('旧行可用 run --resolve-legacy 核实来源;加 --yes 才保存,不是强制绕过保护。')
@@ -414,8 +433,8 @@ def main(argv=None) -> int:
             print(f'{len(row["body"]):>6} 字符  {row["url"]}  [{label}] '
                   + json.dumps(outcome, ensure_ascii=False))
         print('scan 仅列候选,未访问详情。')
-        _coverage(_stats(rows, excluded))
-        return int(bool(excluded))
+        _coverage(_stats(rows, excluded, omitted))
+        return int(bool(excluded or omitted))
     print('模式:真正回填' if args.yes else '模式:只读核对,不写正文库,只记核对进度(加 --yes 才写回)')
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
@@ -425,7 +444,7 @@ def main(argv=None) -> int:
         if args.report:
             args.report.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
 
-    stats = _stats(rows, excluded)
+    stats = _stats(rows, excluded, omitted)
     if rows:
         settings = reg.get_settings('social')
         deadline = time.monotonic() + args.budget
@@ -435,7 +454,8 @@ def main(argv=None) -> int:
                     attach=args.channel == 'attach') as page:
                 page.open_page('about:blank')
                 stats = repair(rows, page, apply=args.yes, deadline=deadline, progress=report,
-                               excluded=excluded, resolve_legacy=args.resolve_legacy, remember=True)
+                               excluded=excluded, omitted=omitted,
+                               resolve_legacy=args.resolve_legacy, remember=True)
         except (CdpError, OSError, EOFError) as exc:
             print(f'浏览器不可用,未继续回填:{exc}', file=sys.stderr)
             return 1
@@ -457,7 +477,7 @@ def main(argv=None) -> int:
     if stats.get('stop_reason'):
         print(f'整轮已停止:{stats["stop_reason"]}')
     print('已写入的条目会在正常同步中重新翻译、导出、索引和提取;本脚本不直接改 vault。')
-    return 1 if any(stats[key] for key in
+    return 1 if stats['omitted'] or any(stats[key] for key in
                     ('failed', 'deferred', 'stale',
                      'skipped_article', 'skipped_ambiguous')) else 0
 

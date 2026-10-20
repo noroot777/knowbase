@@ -32,6 +32,11 @@ class HomeSession(EventSession):
 
 
 class TimelineVerificationTests(unittest.TestCase):
+    def setUp(self):
+        footprint = patch.object(x_browser, 'has_login_footprint', return_value=True)
+        footprint.start()
+        self.addCleanup(footprint.stop)
+
     def test_shell_less_gateway_evidence_reaches_checks_and_batch_errors_promptly(self):
         for text, verdict in [('Rate limit exceeded', 'limited'),
                               ('Something went wrong. Try reloading', 'failed')]:
@@ -95,12 +100,16 @@ class TimelineVerificationTests(unittest.TestCase):
                 page = HomeSession([response(code, operation='HomeTimeline')])
                 with patch.object(x_browser, 'profile_busy', return_value=False), patch.object(
                         x_browser, 'browser_session', return_value=contextlib.nullcontext(page)), \
+                        patch.object(x_browser, 'ACCOUNT_SECONDS', 0.01), \
                         patch.object(x_browser.time, 'sleep'):
                     ok, detail = x_browser.probe('/unused')
                 self.assertFalse(ok)
                 self.assertIn(phrase, detail)
                 self.assertNotIn('登录态已失效', detail)
-                self.assertEqual(2, page.reads)
+                if code == 429:
+                    self.assertEqual(2, page.reads)
+                else:
+                    self.assertGreater(page.reads, 2)
 
     def test_home_observation_ignores_noncore_foreign_and_old_navigation_responses(self):
         events = [response(operation='UserTweets'), response(operation='HomeTimeline', loaderId='old'),
@@ -158,3 +167,9 @@ class TimelineVerificationTests(unittest.TestCase):
                     if flag == 'failed':
                         self.assertIn('不必因此重新登录', detail)
                         self.assertIn('检查连接', detail)
+                    if flag == 'limited':
+                        self.assertNotIn('或者首页没加载完', detail)
+                        self.assertNotIn('请求出错、限流', detail)
+                        self.assertIn('检查连接', detail)
+                        if first_ok:
+                            self.assertIn('重新打开之后那一次验证没跑成：', detail)

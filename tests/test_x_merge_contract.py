@@ -109,6 +109,7 @@ class MergeContractTests(ChannelBase):
     def test_shared_gate_verdict_reaches_connection_and_both_import_messages(self):
         page = Page(gate())
         with patch.object(x_browser, 'profile_busy', return_value=False), \
+                patch.object(x_browser, 'has_login_footprint', return_value=True), \
                 patch.object(x_browser, 'browser_session', return_value=contextlib.nullcontext(page)), \
                 patch.object(x_browser.time, 'sleep'):
             ready, detail = x_browser.probe('unused')

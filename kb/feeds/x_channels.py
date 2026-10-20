@@ -41,6 +41,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR
+from kb.feeds.x_cdp import has_login_footprint
 from kb.source_types import feed_types
 
 FEEDGRAB, BROWSER, ATTACH = 'feedgrab', 'browser', 'attach'
@@ -393,7 +394,7 @@ def readiness(settings: dict) -> tuple[bool, str, str]:
         return False, '没有发现开着远程调试的浏览器', cdp_attach.ENABLE_HINT
     # browser:profile 里有 Cookies 文件就算登录过。真失效要等抓取时才知道
     # (那时 `x_browser` 会认出登录页并给出重新登录的提示)。
-    if not (BROWSER_PROFILE / 'Default' / 'Cookies').exists():
+    if not has_login_footprint(BROWSER_PROFILE):
         return False, '浏览器通道还没有登录过 X', ''
     return True, '', ''
 
