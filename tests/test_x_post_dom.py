@@ -414,6 +414,46 @@ class PostDomTests(unittest.TestCase):
                 x_post.fetch(url, self.page)
         self.assertLess(time.monotonic() - started, 2.5)
 
+    def http_timeline(self, status, operation, content):
+        self.server.api_status = status
+        self.server.html = (content + '<script>fetch("/i/api/graphql/hash/' + operation + '")'
+                            '.finally(() => window.finished = true)</script>')
+        marker = str(time.monotonic_ns())
+        x_page_state.navigate(self.page, f'http://127.0.0.1:{self.server.server_port}'
+                                        '/Example?fixture=' + marker)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if self.page.eval('location.search === ' + json.dumps('?fixture=' + marker)
+                              + ' && window.finished === true'):
+                return
+            time.sleep(0.02)
+        self.fail('the real timeline fixture did not finish its HTTP request')
+
+    def test_real_persistent_auxiliary_errors_never_become_batch_limits_at_timeout(self):
+        sleep = time.sleep
+        for status in [429, 503]:
+            with self.subTest(status=status):
+                self.http_timeline(status, 'UserByScreenName', article())
+                started = time.monotonic()
+                with patch.object(x_browser.time, 'sleep', lambda _seconds: sleep(0.01)):
+                    with self.assertRaisesRegex(x_browser.XBrowserError, '页面请求出错') as caught:
+                        x_browser._wait_state(self.page, 'Example', started + 0.15)
+                self.assertNotIsInstance(caught.exception, x_browser.XRateLimited)
+                self.assertGreaterEqual(time.monotonic() - started, 0.15)
+
+    def test_real_dom_terminal_evidence_is_not_erased_by_current_http_errors(self):
+        for status in [404, 429, 503]:
+            for operation in ['UserByScreenName', 'UserTweets']:
+                with self.subTest(status=status, operation=operation):
+                    self.http_timeline(status, operation, '<main>Account suspended</main>')
+                    snap = x_page_state.read(self.page, x_browser._STATE_JS)
+                    self.assertTrue(snap['empty'])
+                    self.assertEqual('', x_page_state.problem(snap))
+                    started = time.monotonic()
+                    with self.assertRaisesRegex(x_browser.XBrowserError, '账号在 X 上打不开'):
+                        x_browser._wait_state(self.page, 'Example', started + 3)
+                    self.assertLess(time.monotonic() - started, 2.5)
+
     def test_error_words_in_a_real_post_cannot_make_it_absent_or_rate_limited(self):
         text = '有人说「该页面不存在」或「请稍后再试」，但这是一条正常推文。'
         self.load(article(text=text))

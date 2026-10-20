@@ -4,9 +4,10 @@ from __future__ import annotations
 import re
 import time
 
-from kb.feeds import x_article
+from kb.feeds import x_article, x_page_state
 from kb.feeds.x_cdp import CdpError, CdpTransportError
-from kb.feeds.x_page_state import STATE_JS, XRateLimited, access_blocked, navigate, problem, read
+from kb.feeds.x_page_state import STATE_JS, navigate, problem, read
+from kb.feeds.x_page_state import XRateLimited as XRateLimited
 
 HINT = '_x_post_prefix'
 SECONDS = 25.0
@@ -144,14 +145,6 @@ def _check(deadline, should_stop):
         raise PostHalted('本轮时间预算用完')
 
 
-def _request_failed(kind):
-    if kind == 'challenge':
-        raise access_blocked()
-    if kind == 'limited':
-        raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
-    raise PostRequestFailed('X 页面请求出错,请稍后重试(不能据此确认限流或推文不存在)')
-
-
 def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) -> str:
     if evidence is not None:
         evidence.clear()
@@ -165,6 +158,8 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
     absent = False
     previous_problem = ''
     confirmed_problem = ''
+    snap = {}
+    failure = PostRequestFailed('X 页面请求出错,请稍后重试(不能据此确认限流或推文不存在)')
     try:
         navigation = navigate(session, url)
         if isinstance(navigation, dict) and navigation.get('errorText'):
@@ -172,8 +167,8 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
         while True:
             _check(deadline, should_stop)
             if time.monotonic() >= until:
-                if confirmed_problem:
-                    _request_failed(confirmed_problem)
+                if error := x_page_state.escalate(snap, confirmed_problem, failure, expired=True):
+                    raise error
                 raise PostUnavailable('推文正文补全时间用完')
             snap = read(session, READ_JS)
             if snap.get('login'):
@@ -193,9 +188,8 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
             current_problem = problem(snap) if not valid and (
                 snap.get('challenge') or snap.get('at') == match[1]) else ''
             confirmed_problem = current_problem if current_problem == previous_problem else ''
-            if confirmed_problem and (confirmed_problem == 'challenge' or not snap.get('http_only')
-                                      or snap.get('http_content_limited')):
-                _request_failed(confirmed_problem)
+            if error := x_page_state.escalate(snap, confirmed_problem, failure):
+                raise error
             previous_problem = current_problem
             missing = (snap.get('at') == match[1] and not snap.get('id')
                        and snap.get('ready') == 'complete' and snap.get('empty') is True)

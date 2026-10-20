@@ -34,10 +34,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from kb.feeds import x_article, x_post
+from kb.feeds import x_article, x_page_state, x_post
 from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
 from kb.feeds.x_page_state import (
-    STATE_JS, XAccessBlocked, XBrowserError, XRateLimited, access_blocked, navigate, read)
+    STATE_JS, XAccessBlocked, XBrowserError, XRateLimited, navigate, read)
 from kb.feeds.x_page_state import problem as page_problem
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
@@ -255,6 +255,7 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
     last = {}
     previous_problem = ''
     confirmed_problem = ''
+    failure = XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
     while time.monotonic() < deadline:
         last = read(page, _STATE_JS)
         if last['login']:
@@ -267,21 +268,14 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
         if last['articles'] and last['ready'] == 'complete' and not current_problem:
             return last
         confirmed_problem = current_problem if current_problem == previous_problem else ''
-        if confirmed_problem and (current_problem == 'challenge' or not last.get('http_only')
-                                  or last.get('http_content_limited')):
-            if current_problem == 'challenge':
-                raise access_blocked()
-            if current_problem == 'limited':
-                raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
-            raise XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
+        if error := x_page_state.escalate(last, confirmed_problem, failure):
+            raise error
         previous_problem = current_problem
         if last['empty']:
             raise XBrowserError(f'@{handle} 这个账号在 X 上打不开(可能已改名、注销或被冻结)')
         time.sleep(0.3)
-    if confirmed_problem == 'limited':
-        raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
-    if confirmed_problem:
-        raise XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
+    if error := x_page_state.escalate(last, confirmed_problem, failure, expired=True):
+        raise error
     if last.get('ready') != 'complete':
         raise XBrowserError(f'@{handle} 的页面没有加载完')
     raise XBrowserError(f'@{handle} 的时间线上没有读到推文')

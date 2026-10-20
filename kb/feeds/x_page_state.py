@@ -69,8 +69,10 @@ class Responses:
                     if self.loader and loader == self.loader]
         http_problem = ('limited' if any(status == 429 for status in statuses) else
                         'failed' if any(400 <= status < 600 for status in statuses) else '')
-        if http_problem and not problem(snapshot):
-            snapshot['http_only'] = True
+        if http_problem:
+            snapshot['dom_problem'] = problem(snapshot)
+            if not snapshot['dom_problem']:
+                snapshot['http_only'] = True
         if any(status == 429 for status in statuses):
             snapshot['limited'] = True
         if any(status == 429 and operation != 'UserByScreenName'
@@ -79,7 +81,6 @@ class Responses:
             snapshot['http_content_limited'] = True
         if any(400 <= status < 600 for status in statuses):
             snapshot['failed'] = True
-            snapshot['empty'] = False
         return snapshot
 
 
@@ -110,7 +111,29 @@ def read(session, script: str) -> dict:
 def problem(state: dict) -> str:
     if state.get('ready') != 'complete':
         return ''
+    dom_problem = state.get('dom_problem')
+    if state.get('challenge'):
+        return 'challenge'
+    if dom_problem == '' and state.get('empty'):
+        return ''
+    if state.get('http_content_limited'):
+        return 'limited'
+    if dom_problem:
+        return dom_problem
     return next((kind for kind in ('challenge', 'limited', 'failed') if state.get(kind)), '')
+
+
+def escalate(state: dict, confirmed: str, failure: Exception, *, expired=False) -> Exception | None:
+    """Use one scope policy during polling and timeout; only local failures wait for expiry."""
+    if not confirmed:
+        return None
+    if confirmed == 'challenge':
+        return access_blocked()
+    if confirmed == 'limited' and (not state.get('http_only') or state.get('http_content_limited')):
+        return XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
+    if expired or not state.get('http_only'):
+        return failure
+    return None
 
 
 class XBrowserError(RuntimeError):
