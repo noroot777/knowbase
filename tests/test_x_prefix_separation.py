@@ -2,7 +2,7 @@
 import json
 from unittest.mock import patch
 
-from kb.feeds import grab, registry as reg, x_article, x_post, x_post_meta
+from kb.feeds import grab, registry as reg, x_article, x_body, x_post, x_post_meta
 from scripts import x_post_backfill as backfill
 from tests.test_x_post_provenance import ProvenanceBase
 from tests.test_x_post_backfill import CLEAN, LEGACY, linked_snapshot
@@ -41,6 +41,7 @@ class PrefixSeparationTests(ProvenanceBase):
         prefix = self.context + '\n\n'
         entry = x_post_meta.stamp(dict(title='A post', body=self.context, content_kind='post'),
                                   'post', prefix)
+        entry = x_body.record(entry, '', prefix=prefix)
         entry[x_post.HINT] = prefix
         complete = x_post.merge(entry, self.detail)
         self.assertEqual(prefix + self.detail, complete['body'])
@@ -50,6 +51,7 @@ class PrefixSeparationTests(ProvenanceBase):
         self.assertIsNone(normalized)
         source = x_post_meta.stamp(dict(title='A post', body=prefix + LEGACY, content_kind='post'),
                                    'post', prefix)
+        source = x_body.record(source, LEGACY, prefix=prefix)
         evidence = linked_snapshot(CLEAN)
         evidence['text'] = CLEAN
         state, normalized, _info = backfill.proposal(source | {x_post.HINT: prefix}, CLEAN, evidence)

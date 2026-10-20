@@ -19,6 +19,7 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from kb.feeds import x_browser, x_channels, x_feedgrab
+from tests.x_state_fixture import page_state
 
 # 样本时间跟着今天走,理由同 test_x_channels:新订阅只收最近几天,写死一个日期
 # 的话过几天红的是一堆跟通道毫无关系的用例。
@@ -62,9 +63,7 @@ class Timeline:
 
     def eval(self, js):
         if js is x_browser._STATE_JS:
-            return json.dumps({'url': 'https://x.com/Example', 'ready': 'complete',
-                               'articles': self.shown, 'login': False,
-                               'empty': False, 'limited': False})
+            return json.dumps(page_state(articles=self.shown))
         if js is x_browser._COLLECT_JS:
             shown = self.items[:self.shown]
             return json.dumps({'articles': len(shown), 'parsed': len(shown),
@@ -224,9 +223,7 @@ class BrowserBoundaryTests(unittest.TestCase):
 
             def eval(self, js):
                 if js is x_browser._STATE_JS:
-                    return json.dumps({'url': 'https://x.com/Example', 'ready': 'complete',
-                                       'articles': 7, 'login': False, 'empty': False,
-                                       'limited': False})
+                    return json.dumps(page_state(articles=7))
                 if js is x_browser._COLLECT_JS:
                     return json.dumps({'articles': 7, 'parsed': 0, 'items': []})
                 if js is x_browser._SCROLL_JS:
@@ -241,9 +238,8 @@ class BrowserBoundaryTests(unittest.TestCase):
     def test_a_login_page_is_not_mistaken_for_an_empty_timeline(self):
         class Page:
             def eval(self, js):
-                return json.dumps({'url': 'https://x.com/i/flow/login', 'ready': 'complete',
-                                   'articles': 0, 'login': True, 'empty': False,
-                                   'limited': False})
+                return json.dumps(page_state(url='https://x.com/i/flow/login',
+                                             login=True))
 
         with self.assertRaises(x_browser.XBrowserError) as caught:
             x_browser._wait_state(Page(), 'Example', time.monotonic() + 1)

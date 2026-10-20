@@ -211,7 +211,7 @@ class AuditProgressTests(ChannelBase):
         self.assertEqual(0, self.run_cli()[0])
         self.assertEqual([], self.pending())
 
-    def test_partial_write_remains_retryable_across_failures_and_blocked_reruns_until_resolved(self):
+    def test_partial_write_retries_failures_then_settles_matching_withholding_until_rechecked(self):
         row = self.seed(body='Read\n\nhttps://\nexample.org/path')
         with reg.db() as conn:
             conn.execute("UPDATE feed_items SET body_zh='旧译文',translated_at='old',"
@@ -237,18 +237,22 @@ class AuditProgressTests(ChannelBase):
         self.assertEqual([current], self.pending())
         with patch.object(x_post, 'fetch', side_effect=x_post.PostUnavailable('temporary')):
             backfill.repair([current], None, remember=True)
+        self.assertEqual([current], self.pending())
         for _ in range(2):
             self.assertEqual(0, self.run_cli(detail, '--yes')[0])
-            self.assertEqual([current], self.pending())
-            self.assertEqual([current], self.pending(apply=True))
+            self.assertEqual([], self.pending())
+            self.assertEqual([], self.pending(apply=True))
+            self.assertIn(current, self.pending(recheck=True))
             receipt = audit.load()[(row['key'], audit.version(current))][1]
             self.assertEqual('blocked_whitespace', receipt['state'])
-            self.assertEqual('blocked_whitespace', receipt['remaining'])
+            self.assertEqual('blocked_whitespace', receipt['retained'])
+            self.assertNotIn('remaining', receipt)
         with contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(0, backfill.main(['scan', '--url', row['url']]))
-        self.assertIn('仍需补查', output.getvalue())
-        self.assertIn('remaining', output.getvalue())
-        self.assertEqual(0, self.run_cli('Read\n\nhttps://example.org/path with ending', '--yes')[0])
+        self.assertIn('已扣留', output.getvalue())
+        self.assertIn('retained', output.getvalue())
+        self.assertEqual(0, self.run_cli('Read\n\nhttps://example.org/path with ending',
+                                       '--yes', '--url', row['url'])[0])
         self.assertEqual([], self.pending(apply=True))
         with reg.db() as conn:
             saved = dict(conn.execute('SELECT * FROM feed_items WHERE key=?', (row['key'],)).fetchone())

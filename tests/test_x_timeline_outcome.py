@@ -53,7 +53,12 @@ class TimelineOutcomeTests(unittest.TestCase):
                     page = TimelineSession(operation, 500, retry=4, rendered=rendered)
                     verdict, last = self.read_timeline(page, home)
                     self.assertEqual(('ok', 18), (verdict, last['articles']))
-                    self.assertEqual(4, page.reads)
+                    if not home and rendered:
+                        self.assertIn('页面请求出错', last['incomplete'])
+                        self.assertEqual(2, page.reads)
+                    else:
+                        self.assertNotIn('incomplete', last)
+                        self.assertEqual(4, page.reads)
 
     def test_persistent_core_errors_veto_rendered_cards_in_both_timelines(self):
         for home, operation in [(True, 'HomeLatestTimeline'), (False, 'UserTweets')]:
@@ -63,11 +68,14 @@ class TimelineOutcomeTests(unittest.TestCase):
                     started = self.clock.now
                     if home:
                         self.assertEqual('failed', self.read_timeline(page, home)[0])
+                        self.assertGreaterEqual(self.clock.now - started, 1)
+                        self.assertGreater(page.reads, 2)
                     else:
-                        with self.assertRaisesRegex(x_browser.XBrowserError, '页面请求出错'):
-                            self.read_timeline(page, home)
-                    self.assertGreaterEqual(self.clock.now - started, 1)
-                    self.assertGreater(page.reads, 2)
+                        state = self.read_timeline(page, home)[1]
+                        self.assertIn('页面请求出错', state['incomplete'])
+                        self.assertNotEqual('ok', x_page_state.terminal(state, 'failed'))
+                        self.assertLess(self.clock.now - started, 1)
+                        self.assertEqual(2, page.reads)
 
     def test_core_rate_limit_is_prompt_but_auxiliary_errors_never_veto_content(self):
         for home in (False, True):

@@ -1,0 +1,21 @@
+[
+  {
+    "state": "missing",
+    "source": "https://x.com/kb_no_such_user_zz99",
+    "captured": "2026-10-19",
+    "html": "<main><div data-testid=primaryColumn><div data-testid=emptyState><div data-testid=empty_state_header_text><span>此账号不存在</span></div><div data-testid=empty_state_body_text><span>尝试搜索另一个。</span></div></div></div></main>"
+  },
+  {
+    "state": "suspended",
+    "source": "https://x.com/elonjet",
+    "captured": "2026-10-19",
+    "html": "<main><div data-testid=primaryColumn><div data-testid=emptyState><div data-testid=empty_state_header_text><span>账号已被冻结</span></div><div data-testid=empty_state_body_text>X 会冻结违反 <a href=https://support.x.com/articles/18311>X 规则</a>的账号</div></div></div></main>"
+  },
+  {
+    "state": "login",
+    "source": "https://x.com/i/flow/login",
+    "landed": "/i/jf/onboarding/web?mode=login",
+    "captured": "2026-10-19",
+    "html": "<main><div data-testid=primaryColumn><article data-testid=tweet>用户已登录时,登录流程可能仍渲染主页卡片;不能把它当成目标个人页。</article></div></main>"
+  }
+]

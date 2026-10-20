@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import re
 
-from kb.feeds import registry as reg, x_article, x_post, x_post_meta
+from kb.feeds import registry as reg, x_article, x_body, x_post, x_post_meta
+
+
+def _post(row: dict, prefix: str, detail: str) -> dict:
+    annotated = x_post_meta.stamp(row, 'post', prefix,
+                                  author_text=x_post_meta.AuthorText(detail, 'detail'))
+    return x_body.record(annotated, annotated['body'].removeprefix(prefix), prefix=prefix)
 
 
 def _covers(preview: str, detail: str, aligned_preview=None) -> bool:
@@ -17,7 +23,7 @@ def _covers(preview: str, detail: str, aligned_preview=None) -> bool:
 
 
 def resolve(row: dict, session, *, deadline=None, should_stop=None,
-            aligned_preview=None, evidence=None) -> tuple[dict, str | None]:
+            aligned_preview=None, evidence=None) -> tuple[dict, str | x_post.PostEmpty | None]:
     """Prove a stored Article suffix or match stored text against a verified post detail."""
     x_post._check(deadline, should_stop)
     if not x_article.API and (session is None or not x_article.BROWSER_FALLBACK):
@@ -32,22 +38,28 @@ def resolve(row: dict, session, *, deadline=None, should_stop=None,
         if article_body and (row['body'] == article_body or row['body'].endswith('\n\n' + article_body)):
             return x_post_meta.stamp(row, 'article', ''), None
         raise x_post.PostUnavailable('远端存在长文，但存量正文不能与整篇文章精确对齐；来源仍未核实')
-    detail = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop,
-                          evidence=evidence)
+    try:
+        detail = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop,
+                              evidence=evidence)
+    except x_post.PostEmpty as exc:
+        if row['body'] != '':
+            raise x_post.PostUnavailable('详情无自写文字，不能与非空存量对齐；来源仍未核实') from exc
+        return x_post_meta.stamp(row, 'post', ''), exc
     if _covers(row['body'], detail, aligned_preview):
-        return x_post_meta.stamp(row, 'post', '', author_text=x_post_meta.AuthorText(detail, 'detail')), detail
+        return _post(row, '', detail), detail
     head, separator, tail = row['body'].partition('\n\n')
     if separator and head and all(line.startswith('> ') for line in head.splitlines()) and (
             _covers(tail, detail, aligned_preview)):
-        return x_post_meta.stamp(row, 'post', head + separator), detail
+        return _post(row, head + separator, detail), detail
     raise x_post.PostUnavailable('详情不能覆盖存量正文，无法核实旧行来源；不会仅凭标题放行')
 
 
 def save(seen: dict, annotated: dict) -> dict | None:
     """CAS only the proven metadata; a metadata change also retires older snapshots."""
     with reg.db() as conn:
-        changed = conn.execute('UPDATE feed_items SET x_post_meta=?,content_rev=content_rev+1'
+        changed = conn.execute('UPDATE feed_items SET x_post_meta=?,body_provenance=?,content_rev=content_rev+1'
                                ' WHERE key=? AND content_hash=? AND content_rev=? AND x_post_meta=?',
-                               (annotated[x_post_meta.FIELD], seen['key'], seen['content_hash'],
+                               (annotated[x_post_meta.FIELD], annotated.get(x_body.PROVENANCE, ''),
+                                seen['key'], seen['content_hash'],
                                 seen['content_rev'], seen[x_post_meta.FIELD])).rowcount
     return dict(annotated, content_rev=seen['content_rev'] + 1) if changed else None

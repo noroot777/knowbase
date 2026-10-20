@@ -55,6 +55,7 @@ class Responses:
         self.content_operations = frozenset()
         self.loader = ''
         self.statuses = {}
+        self.consumer = None
 
     def reset(self, url: str) -> None:
         parsed = urlsplit(url)
@@ -64,7 +65,7 @@ class Responses:
         self.content_operations = _CONTENT_REQUESTS[kind]
         self.operations = self.content_operations | _AUXILIARY_REQUESTS[kind]
         self.loader = ''
-        self.statuses.clear()
+        self.statuses = {}
 
     def receive(self, event: dict) -> None:
         """A retry replaces only that operation's evidence in the same navigation."""
@@ -111,20 +112,26 @@ class Responses:
 
 
 def navigate(session, url: str):
+    timeline = getattr(session, '_x_timeline', None)
+    tracking = timeline is not None and timeline.active
+    if tracking:
+        timeline.before_navigation()
     if not isinstance(session, Session):
         return session.goto(url)
+    from kb.feeds.x_response_scope import ResponseScopes
+
+    scopes = getattr(session, '_x_response_scopes', None)
     responses = getattr(session, '_x_responses', None)
-    if responses is None:
+    if scopes is None:
         session.call('Network.enable', {}, session._sid)
-        responses = Responses(session._sid)
-        session.observe_events(responses.receive)
-        session._x_responses = responses
+        scopes = ResponseScopes(session)
+        session.observe_events(scopes.receive, after_call=scopes.check)
+        session._x_response_scopes = scopes
     elif responses.session_id != session._sid:
         session.call('Network.enable', {}, session._sid)
-        responses.session_id = session._sid
-    responses.reset(url)
+    scopes.start(url)
     navigation = session.goto(url)
-    responses.loader = navigation.get('loaderId', '')
+    scopes.navigated(navigation)
     return navigation
 
 
@@ -137,8 +144,6 @@ def read(session, script: str) -> dict:
 def problem(state: dict) -> str:
     if state.get('challenge') and state.get('ready') == 'complete':
         return 'challenge'
-    if state.get('dom_problem') == '' and state.get('empty'):
-        return ''
     if state.get('http_content_limited'):
         return 'limited'
     http = state.get('http_problem', '')
@@ -163,7 +168,15 @@ class ProblemConfirmation:
         return confirmed
 
 
-def terminal(state: dict, confirmed: str, *, expired=False) -> str:
+def unavailable(state: dict) -> bool:
+    return bool(state.get('ready') == 'complete' and state.get('empty') and not problem(state))
+
+
+def partial_content(state: dict, confirmed: str) -> bool:
+    return bool(confirmed == 'failed' and state.get('ready') == 'complete' and state.get('articles'))
+
+
+def terminal(state: dict, confirmed: str, *, expired=False, content_pending=True) -> str:
     """Share timeline success and authoritative error timing across all consumers."""
     if state.get('articles') and state.get('ready') == 'complete' and not problem(state):
         return 'ok'
@@ -173,14 +186,15 @@ def terminal(state: dict, confirmed: str, *, expired=False) -> str:
         return 'challenge'
     if confirmed == 'limited' and (not state.get('http_only') or state.get('http_content_limited')):
         return 'limited'
-    if expired or not state.get('http_only'):
+    if expired or not content_pending or not state.get('http_only'):
         return 'failed'
     return ''
 
 
-def escalate(state: dict, confirmed: str, failure: Exception, *, expired=False) -> Exception | None:
+def escalate(state: dict, confirmed: str, failure: Exception, *, expired=False,
+             content_pending=True) -> Exception | None:
     """Use one scope policy during polling and timeout; only local failures wait for expiry."""
-    verdict = terminal(state, confirmed, expired=expired)
+    verdict = terminal(state, confirmed, expired=expired, content_pending=content_pending)
     if verdict == 'challenge':
         return access_blocked()
     if verdict == 'limited':

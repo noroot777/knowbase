@@ -291,12 +291,13 @@ def replace(seen: dict, entry: dict) -> bool:
     # 来的那份快照,缺了代次就该当场抛,不许退回「只比指纹」。
     with reg.db() as c:
         cur = c.execute("""UPDATE feed_items SET title=?,body=?,author=?,published=?,
-            content_hash=?,lang=?,x_post_meta=?,extract_stale=1,content_rev=content_rev+1,
+            content_hash=?,lang=?,x_post_meta=?,body_provenance=?,extract_stale=1,content_rev=content_rev+1,
             title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
             WHERE key=? AND content_hash=? AND content_rev=?""",
             (fresh['title'], fresh['body'], fresh['author'], fresh['published'],
              item_version(fresh), reg.text_language(fresh['title'], fresh['body']),
              entry.get('x_post_meta', seen['x_post_meta']),
+             entry.get('body_provenance', ''),
              seen['key'], *work_version(seen)))
         return cur.rowcount > 0
 

@@ -9,12 +9,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from kb.feeds import x_browser, x_page_state, x_post, x_post_meta
+from kb.feeds import x_body, x_browser, x_page_state, x_post, x_post_meta
 from kb.feeds.x_cdp import Chrome
 from scripts import x_post_backfill as backfill
 from tests.headless import INSTALL_HINT, SHELL
+from tests.x_empty_dom import MORE, EmptyDomCases
 
-MORE = '<button data-testid="tweet-text-show-more-link">显示更多</button>'
 LINK = ('<a href="https://t.co/example"><span aria-hidden="true">https://</span>'
         'example.com/<span aria-hidden="true">connections</span>'
         '<span aria-hidden="true">…</span></a>')
@@ -28,9 +28,11 @@ RETRY = f'<button role="button"><div><svg><g><path d="{RETRY_PATH}"></path></g><
 
 
 def audit_entry(body):
-    return x_post_meta.stamp(dict(url='https://x.com/Example/status/123',
-                                 title=body.splitlines()[0], body=body, **{x_post.HINT: ''}),
-                             'post', '', author_text=x_post_meta.AuthorText(body, 'tweetText'))
+    entry = x_post_meta.stamp(dict(url='https://x.com/Example/status/123',
+                                  title=body.splitlines()[0] if body else '', body=body,
+                                  **{x_post.HINT: ''}), 'post', '',
+                              author_text=x_post_meta.AuthorText(body, 'tweetText'))
+    return x_body.record(entry, body)
 
 
 def article(identity='123', text='short', more='', quoted=''):
@@ -38,6 +40,10 @@ def article(identity='123', text='short', more='', quoted=''):
             f'<a href="/Example/status/{identity}">'
             '<time datetime="2026-10-18T00:00:00Z">now</time></a>'
             f'<div data-testid="tweetText">{text}</div>{more}{quoted}</article>')
+
+
+def stored_entry(text):
+    return audit_entry(text)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -61,7 +67,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 @unittest.skipUnless(SHELL is not None, '缺 chrome-headless-shell —— ' + INSTALL_HINT)
-class PostDomTests(unittest.TestCase):
+class PostDomTests(EmptyDomCases, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = TemporaryDirectory()
@@ -77,10 +83,10 @@ class PostDomTests(unittest.TestCase):
         cls.addClassCleanup(cls.page.__exit__, None, None, None)
         cls.page.open_page('about:blank')
 
-    def load(self, html):
+    def load(self, html, route='/Example/status/123'):
         marker = str(time.monotonic_ns())
         self.server.html = f'<meta name="fixture-version" content="{marker}">' + html
-        self.page.goto(f'http://127.0.0.1:{self.server.server_port}/Example/status/123')
+        self.page.goto(f'http://127.0.0.1:{self.server.server_port}{route}')
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if self.page.eval('document.querySelector("meta[name=fixture-version]")?.content === '
@@ -528,18 +534,97 @@ class PostDomTests(unittest.TestCase):
                 self.assertNotIsInstance(caught.exception, x_post.PostRequestFailed)
                 self.assertNotIsInstance(caught.exception, x_post.PostGone)
 
-    def test_real_dom_terminal_evidence_is_not_erased_by_current_http_errors(self):
+    def test_real_dom_empty_evidence_cannot_override_core_http_errors(self):
         for status in [404, 429, 503]:
             for operation in ['UserByScreenName', 'UserTweets']:
                 with self.subTest(status=status, operation=operation):
-                    self.http_page(status, operation, '<main>Account suspended</main>')
+                    self.http_page(status, operation,
+                        '<main><div data-testid=primaryColumn><div data-testid=emptyState>'
+                        '<div data-testid=empty_state_header_text>Account suspended</div>'
+                        '<a href="https://help.x.com/en/rules-and-policies/x-rules">Help</a>'
+                        '</div></div></main>')
                     snap = x_page_state.read(self.page, x_browser._STATE_JS)
                     self.assertTrue(snap['empty'])
-                    self.assertEqual('', x_page_state.problem(snap))
+                    problem = ('' if operation == 'UserByScreenName' else
+                               'limited' if status == 429 else 'failed')
+                    self.assertEqual(problem, x_page_state.problem(snap))
+                    self.assertEqual(not problem, x_page_state.unavailable(snap))
                     started = time.monotonic()
-                    with self.assertRaisesRegex(x_browser.XBrowserError, '账号在 X 上打不开'):
+                    reason = ('账号已被冻结' if not problem else
+                              '限制了访问频率' if status == 429 else '页面请求出错')
+                    with self.assertRaisesRegex(x_browser.XBrowserError, reason) as caught:
                         x_browser._wait_state(self.page, 'Example', started + 3)
+                    self.assertEqual(problem == 'limited', isinstance(
+                        caught.exception, x_page_state.XRateLimited))
                     self.assertLess(time.monotonic() - started, 2.5)
+                    self.http_page(200, 'UserTweets', article())
+                    recovered = x_browser._wait_state(self.page, 'Example', time.monotonic() + 3)
+                    self.assertEqual('', x_page_state.problem(recovered))
+                    self.assertFalse(recovered.get('incomplete'))
+
+    def test_real_detail_http_empty_conflicts_stay_retryable_and_recover_next_navigation(self):
+        route = '/Example/status/123'
+        url = f'http://127.0.0.1:{self.server.server_port}' + route
+        for status in [404, 429, 503]:
+            with (
+                self.subTest(status=status),
+                patch.object(x_post, '_STATUS', re.compile(r'^http://[^/]+/[^/]+/status/(\d+)')),
+                patch.object(x_post, 'STEP', 0.01), patch.object(x_post, 'SECONDS', 0.4)
+            ):
+                self.http_page(status, 'TweetDetail', '<main>This page doesn’t exist</main>', route)
+                expected = x_page_state.XRateLimited if status == 429 else x_post.PostRequestFailed
+                with self.assertRaises(expected) as caught:
+                    x_post.fetch(url, self.page)
+                self.assertNotIsInstance(caught.exception, x_post.PostGone)
+                self.http_page(200, 'TweetDetail', article(text='Recovered complete body'), route)
+                self.assertEqual('Recovered complete body', x_post.fetch(url, self.page))
+
+    def test_real_late_core_responses_are_consumed_during_collection(self):
+        original_eval = self.page.eval
+        original_navigate = x_page_state.navigate
+        url = f'http://127.0.0.1:{self.server.server_port}/Example'
+        for status in [429, 503]:
+            with self.subTest(status=status):
+                self.server.api_status = status
+                marker = str(time.monotonic_ns())
+                self.server.html = (f'<meta name="late-fixture" content="{marker}">'
+                                    + article(text='Complete cached body'))
+                fired = []
+
+                def navigate(page, target):
+                    original_navigate(page, url + '?late=' + marker)
+                    deadline = time.monotonic() + 3
+                    while not original_eval('document.querySelector("meta[name=late-fixture]")?.content === '
+                                            + json.dumps(marker)):
+                        if time.monotonic() > deadline:
+                            self.fail('real timeline fixture did not render')
+                        time.sleep(0.01)
+
+                def evaluate(script):
+                    if script == x_browser._COLLECT_JS and not fired:
+                        fired.append(status)
+                        original_eval('fetch("/i/api/graphql/hash/UserTweets")'
+                                      '.finally(() => window.lateFinished = true)')
+                        deadline = time.monotonic() + 3
+                        while not original_eval('window.lateFinished === true'):
+                            if time.monotonic() > deadline:
+                                self.fail('real late HTTP request did not finish')
+                            time.sleep(0.01)
+                    return original_eval(script)
+
+                try:
+                    with (patch.object(x_browser, 'navigate', side_effect=navigate),
+                          patch.object(self.page, 'eval', side_effect=evaluate)):
+                        if status == 429:
+                            with self.assertRaises(x_page_state.XRateLimited):
+                                x_browser._harvest_one(self.page, 'Example', None)
+                        else:
+                            entries, incomplete = x_browser._harvest_one(self.page, 'Example', None)
+                            self.assertTrue(entries)
+                            self.assertIn('请求出错', incomplete)
+                    self.assertEqual([status], fired)
+                finally:
+                    self.page._x_timeline = None
 
     def test_error_words_in_a_real_post_cannot_make_it_absent_or_rate_limited(self):
         text = '有人说「该页面不存在」或「请稍后再试」，但这是一条正常推文。'
@@ -548,3 +633,61 @@ class PostDomTests(unittest.TestCase):
             snap = json.loads(self.page.eval(script))
             self.assertIs(False, snap.get('empty'))
             self.assertIs(False, snap.get('limited'))
+
+    def test_real_profile_terminal_shapes_are_independent_of_body_wide_regexes(self):
+        fixtures = json.loads((Path(__file__).parent / 'fixtures/x_account_states.json').read_text())
+        for sample in fixtures:
+            with self.subTest(state=sample['state']):
+                route = sample.get('landed', '/' + sample['source'].rsplit('/', 1)[1])
+                self.load(sample['html'], route)
+                snap = json.loads(self.page.eval(x_browser._STATE_JS))
+                self.assertEqual(sample['state'], snap['account']['state'])
+                self.assertTrue(snap['account']['evidence'])
+
+    def test_unknown_profile_structure_is_not_positive_evidence_of_account_absence(self):
+        for profile in ['', '<div data-testid=ProfileHeaderVNext>Healthy account</div>']:
+            self.load('<main><div data-testid=primaryColumn>' + profile + '<div data-testid=emptyState>'
+                      '<div data-testid=empty_state_header_text>Unbekannt</div></div></div></main>',
+                      '/old_handle')
+            snap = json.loads(self.page.eval(x_browser._STATE_JS))
+            self.assertEqual('unknown', snap['account']['state'])
+            self.assertEqual('old_handle', snap['account']['handle'])
+
+    def test_protected_profile_uses_its_help_link_not_translated_words(self):
+        self.load('<main><div data-testid=primaryColumn><div data-testid=UserName>Example</div>'
+                  '<div data-testid=emptyState><div data-testid=empty_state_header_text>非英文</div>'
+                  '<a href="https://help.x.com/en/safety-and-security/public-and-protected-posts">'
+                  'Help</a></div></div></main>', '/Example')
+        snap = json.loads(self.page.eval(x_browser._STATE_JS))
+        self.assertEqual('protected', snap['account']['state'])
+
+    def test_sidebar_bio_empty_profile_and_loading_do_not_prove_account_absence(self):
+        missing = ('<div data-testid=emptyState><div data-testid=empty_state_header_text>'
+                   '此账号不存在</div></div>')
+        for html in ['<div data-testid=sidebarColumn>' + missing + '</div>',
+                     '<div data-testid=primaryColumn><div data-testid=UserName>正常账号</div>'
+                     + missing + '</div>',
+                     '<div data-testid=primaryColumn><div role=progressbar></div>' + missing + '</div>',
+                     '<div data-testid=primaryColumn>' + article(text='此账号不存在') + missing + '</div>']:
+            with self.subTest(html=html):
+                self.load('<main>' + html + '</main>', '/Example')
+                self.assertEqual('', json.loads(self.page.eval(x_browser._STATE_JS))['account']['state'])
+
+    def media(self, content):
+        return article(text='').replace('<div data-testid="tweetText"></div>', content)
+
+    def bind_payload(self, kind='photo', *, text='', identity='123', tweet=None):
+        link = 'https://t.co/fixture'
+        data = dict(id_str=identity, full_text=text + (' ' if text else '') + link,
+                    display_text_range=[0, len(text)], entities={})
+        entity = dict(url=link, indices=[len(data['full_text']) - len(link), len(data['full_text'])])
+        if kind in {'photo', 'video'}:
+            data['entities']['media'] = [dict(entity, type=kind)]
+        else:
+            data['entities']['urls'] = [entity]
+            if kind == 'link':
+                data['card'] = dict(url=link)
+            elif kind == 'quote':
+                data.update(quoted_status_id_str='456', quoted_status_permalink=dict(url=link))
+        self.page.eval('document.querySelector("article").__reactFiber$fixture = '
+                       + json.dumps(dict(memoizedProps=dict(tweet=tweet or data))) + '; true')

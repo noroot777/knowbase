@@ -39,7 +39,7 @@ from datetime import datetime
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from kb.feeds import grab_page, readable, registry as reg, x_article
+from kb.feeds import grab_page, readable, registry as reg, x_article, x_body
 # 「库里那一条」那一族拆到了 grab_store(见那份模块说明)。**原样再导出**:
 # `grab.known` / `grab.owing` / `grab.replace` / `grab.reclaim_export` / `grab.KIND`
 # 是所有调用方和决策文档引用的那几个名字。
@@ -201,28 +201,7 @@ def _media_lines(media) -> str:
     之下永久补不回来(模块注释那一条)。地址是 X 自己的 CDN,markdown 的图片语法
     让 vault 里那一篇点开就看得见。
     """
-    if not isinstance(media, dict):
-        return ''
-    lines = []
-    # **容器自己的形状也要验**:第三方回包里 `photos` 是个 dict 或数字时,
-    # `(… or [])[:8]` 对前者切出一堆键名、对后者直接 TypeError —— 那会把一条
-    # 文字完好的推文带成 500(端点只翻 `GrabError`)。口径同下面那两个
-    # `isinstance`:**形状不对就当它没有媒体**,文字那一半照旧收得下。
-    photos = media.get('photos') if isinstance(media.get('photos'), list) else []
-    videos = media.get('videos') if isinstance(media.get('videos'), list) else []
-    for photo in photos[:8]:
-        if isinstance(photo, dict) and isinstance(photo.get('url'), str):
-            lines.append(f"![图片]({photo['url']})")
-    for video in videos[:4]:
-        if not isinstance(video, dict):
-            continue
-        link = video.get('url') if isinstance(video.get('url'), str) else ''
-        thumb = video.get('thumbnail_url') if isinstance(video.get('thumbnail_url'), str) else ''
-        if thumb:
-            lines.append(f'![视频封面]({thumb})')
-        if link:
-            lines.append(f'[视频]({link})')
-    return '\n'.join(lines)
+    return x_body.media_lines(media)
 
 
 def _quote_line(quote) -> str:
@@ -294,16 +273,16 @@ def _grab_x(url: str, deadline: float) -> dict:
     # `_plain_lines`,不碰 BeautifulSoup)。标题那一头反过来必须是单行。
     raw = str(tweet.get('text')) if isinstance(tweet.get('text'), str) else ''
     text = body_text(raw, 'text').strip()
-    context = _quote_line(tweet.get('quote'))
-    pieces = [p for p in (context, text,
-                          _media_lines(tweet.get('media'))) if p]
-    entry = {'url': url, 'title': (oneline(text, 'text') or f'{name} 的动态')[:500],
+    context, media = _quote_line(tweet.get('quote')), _media_lines(tweet.get('media'))
+    pieces = [part for part in (context, text, media) if part]
+    entry = {'url': url, 'title': (oneline(text, 'text') or x_body.placeholder(name))[:500],
              'body': '\n\n'.join(pieces), 'author': name,
              'published': _as_published(tweet.get('created_timestamp')),
              'content_kind': 'post'}
     from kb.feeds.x_post_meta import AuthorText, context_prefix, stamp
     entry = stamp(entry, 'post', context_prefix(entry['body'], context),
                   author_text=AuthorText(text, 'tweet.text'))
+    entry = x_body.record(entry, text, prefix=context + '\n\n' if context else '', media=media)
     # **回包里那个结构化的长文信号先收下,不许先丢掉、再凭展示文本去推断。**
     # `tweet.article` 是生产者自己的签名「这条推文是一篇长文」,而
     # `needs_article` 的三条判据全是**间接**信号(正文里写着文章地址 / 时间线上

@@ -34,10 +34,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from kb.feeds import x_article, x_page_state, x_post, x_post_meta
+from kb.feeds import x_account, x_article, x_body, x_page_state, x_post, x_post_meta
 from kb.feeds.x_cdp import Chrome, CdpError, has_login_footprint, profile_busy
 from kb.feeds.x_page_state import (
     STATE_JS, ProblemConfirmation, XAccessBlocked, XBrowserError, XRateLimited, navigate, read)
+from kb.feeds.x_timeline_state import TimelineState, wait_state
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 # 连续多少条老推文算"翻到底了"。1 不够:转推带的是原推时间,单条老的很常见。
@@ -131,8 +132,8 @@ _SCROLL_JS = r'''
 # 登录态失效的几种落地页。X 会跳 /i/flow/login,也会在原地渲染登录按钮。
 _STATE_JS = r'''
 (() => {
-''' + STATE_JS + r'''
-  return JSON.stringify(xPageState());
+''' + STATE_JS + x_account.ACCOUNT_JS + r'''
+  return JSON.stringify({...xPageState(), account: xAccountState()});
 })()
 '''
 
@@ -235,8 +236,8 @@ def _entry(item: dict) -> dict | None:
     name = item.get('name') or item.get('author') or ''
     context = (item.get('context') or '').strip()
     context = f'> {context}' if context and not _is_pinned(context) else ''
-    body = f'{context}\n\n{text}' if context else text
-    out = {'url': item['url'], 'title': (text or f"{name} 的动态")[:500],
+    body = x_body.context_body(context[2:] if context else '', text)
+    out = {'url': item['url'], 'title': (text or x_body.placeholder(name))[:500],
            'body': body, 'author': name, 'published': published,
            'content_kind': 'post'}
     # 「这条带着长文卡片」的信号,只在采集期间有意义:`x_article.fill` 用完就把
@@ -246,35 +247,12 @@ def _entry(item: dict) -> dict | None:
     prefix = x_post_meta.context_prefix(body, context)
     if item.get('truncated'):
         out[x_post.HINT] = prefix
-    return x_post_meta.stamp(out, 'post', prefix, author_text=x_post_meta.AuthorText(text, 'tweetText'))
+    out = x_post_meta.stamp(out, 'post', prefix, author_text=x_post_meta.AuthorText(text, 'tweetText'))
+    return x_body.record(out, text, prefix=prefix)
 
 
 def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
-    """等页面落定,顺带认出登录失效/不存在/限流这三种不该当成"没有推文"的情况。"""
-    last = {}
-    errors = ProblemConfirmation()
-    confirmed_problem = ''
-    failure = XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
-    while time.monotonic() < deadline:
-        last = read(page, _STATE_JS)
-        if last['login']:
-            # **两条自救路都要说。** 这句话出现在每条失败订阅的旁边,而「重新登录」
-            # 只是其中一条:登录态是导进来的那些人要的是再导一次(见
-            # `x_login_import`),把他推去无头壳里登一次正是他想免掉的那一步。
-            raise XBrowserError('X 登录态已失效,请在浏览器通道设置里重新登录,'
-                                '或从日常浏览器再导入一次')
-        confirmed_problem = errors.check(last)
-        if x_page_state.terminal(last, confirmed_problem) == 'ok':
-            return last
-        if error := x_page_state.escalate(last, confirmed_problem, failure):
-            raise error
-        if last['empty']:
-            raise XBrowserError(f'@{handle} 这个账号在 X 上打不开(可能已改名、注销或被冻结)')
-        time.sleep(0.3)
-    if error := x_page_state.escalate(last, confirmed_problem, failure, expired=True):
-        raise error
-    observed = '页面没有加载完' if last.get('ready') != 'complete' else '时间线上没有读到推文'
-    raise XBrowserError(f'@{handle} 的{observed};未能判出原因,请稍后重试或点「检查连接」')
+    return wait_state(page, handle, deadline, _STATE_JS)
 
 
 def _harvest_one(page: Chrome, handle: str,
@@ -289,7 +267,8 @@ def _harvest_one(page: Chrome, handle: str,
     """
     navigate(page, f'https://x.com/{handle}')
     deadline = time.monotonic() + ACCOUNT_SECONDS
-    _wait_state(page, handle, deadline)
+    state = _wait_state(page, handle, deadline)
+    page = TimelineState(page, handle, state, _STATE_JS)
     page.eval(_RESET_JS)
     seen_articles = parsed = 0
     items: list[dict] = []
@@ -298,6 +277,9 @@ def _harvest_one(page: Chrome, handle: str,
     for _ in range(MAX_SCROLLS):
         snap = json.loads(page.eval(_COLLECT_JS))
         seen_articles, parsed, items = snap['articles'], snap['parsed'], snap['items']
+        if page.incomplete:
+            incomplete = page.incomplete
+            break
         if floor and _old_enough(items, floor, handle):
             incomplete = ''
             break
@@ -307,7 +289,11 @@ def _harvest_one(page: Chrome, handle: str,
             break
         before = len(items)
         bottom = json.loads(page.eval(_SCROLL_JS))['bottom']
-        if _settle(page, before, deadline):
+        grew = False if page.incomplete else _settle(page, before, deadline)
+        if page.incomplete:
+            incomplete = page.incomplete
+            break
+        if grew:
             dry = 0
             continue
         # 滚完没长出新东西。**一次不算**:慢网络下的一次懒加载空窗和"到底了"
@@ -333,7 +319,8 @@ def _harvest_one(page: Chrome, handle: str,
                 f'本轮已跳过(如 {rejected[0]});其余推文照常收录,'
                 '同步位置保持不变,下次同步重试')
         incomplete = f'{incomplete};{note}' if incomplete else note
-    return entries, incomplete
+    page.check()
+    return entries, ';'.join(dict.fromkeys(filter(None, [page.incomplete, incomplete])))
 
 
 def _old_enough(items: list[dict], floor: datetime, handle: str = '') -> bool:
@@ -374,7 +361,10 @@ def _settle(page: Chrome, before: int, deadline: float) -> bool:
     end = min(time.monotonic() + _SETTLE_SECONDS, deadline)
     while time.monotonic() < end:
         time.sleep(_SETTLE_STEP)
-        if len(json.loads(page.eval(_COLLECT_JS))['items']) > before:
+        count = len(json.loads(page.eval(_COLLECT_JS))['items'])
+        if getattr(page, 'incomplete', ''):
+            return False
+        if count > before:
             return True
     return False
 
@@ -482,6 +472,7 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 # 实测与理由记在 `x_feedgrab.harvest` 那条注释里(两条通道同一个
                 # 缺口);`_select` 两轮都按同一个**排他**下界筛,窗口逐字相同。
                 started = water or floor.isoformat()
+                unavailable = []
                 try:
                     entries, incomplete = _harvest_one(page, handle, floor)
                     skipped_quotes = getattr(entries, 'skipped_quotes', 0)
@@ -508,7 +499,7 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # 8 条全留下、`incomplete` 空、水位照常前进)。
                     entries, missing = x_post.complete(
                         entries, session=page,
-                        deadline=deadline, should_stop=should_stop)
+                        deadline=deadline, should_stop=should_stop, unavailable=unavailable)
                     if missing:
                         incomplete = f'{incomplete};{missing}' if incomplete else missing
                     # **没读完就不推进水位**:这一轮停在时间线半中间,下面那一段
@@ -518,12 +509,23 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # `put_items` 按 URL 去重,一条都不会重复入库。
                     results[handle] = {
                         'entries': entries, 'error': '', 'incomplete': incomplete,
-                        'skipped_quotes': skipped_quotes, 'note': note,
+                        **x_post.unavailable_report(unavailable),
+                        'skipped_quotes': skipped_quotes,
+                        'note': ';'.join(filter(None, [note, x_post.unavailable_note(unavailable)])),
                         'watermark': started if incomplete else observed_watermark}
-                except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable):
+                    if timeline := getattr(page, '_x_timeline', None):
+                        timeline.finalize(results[handle], started)
+                except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable) as e:
+                    if unavailable:
+                        results[handle] = {'entries': [], 'error': str(e),
+                                           **x_post.unavailable_report(unavailable)}
                     raise
+                except x_account.XAccountUnavailable as e:
+                    results[handle] = {'entries': [], 'error': str(e),
+                                       'account_state': e.state, 'account_evidence': e.evidence}
                 except (XBrowserError, CdpError, x_post.PostUnavailable) as e:
-                    results[handle] = {'entries': [], 'error': str(e)}
+                    results[handle] = {'entries': [], 'error': str(e),
+                                       **x_post.unavailable_report(unavailable)}
     except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable, CdpError, EOFError, OSError) as e:
         # 浏览器整个起不来/中途死了:剩下的账号统一记成同一个原因,
         # 而不是逐个报一条看不出共同根因的错。
@@ -655,12 +657,17 @@ def probe(profile: str, chrome_path: str = '', *,
                                if attach else
                                'X 登录态已失效:点「打开登录窗口」重新登录一次,'
                                '或者再点一次「从日常浏览器导入登录态」')
+            if verdict == 'challenge':
+                # **不许说成登录失效,也不许说成限流。** 这张页要先有登录态才会
+                # 出现,把人推去重新登录是白跑一趟 —— 该做的是去他自己那个浏览器
+                # 里把验证过完(文案和采集那一侧同一个口径,见 `x_page_state`)。
+                return False, ('X 要求先过一次安全验证（账号访问受限）:请在对应通道的'
+                               '浏览器里打开 x.com/account/access，完成验证后重试，'
+                               '不必因此重新登录')
             if verdict == 'limited':
                 return False, 'X 暂时限制了访问频率,稍后再试'
             if verdict == 'failed':
                 return False, 'X 页面请求出错,暂时无法验证登录态;稍后点「检查连接」重试,不必因此重新登录'
-            if verdict == 'challenge':
-                return False, str(x_page_state.access_blocked())
             if verdict == 'ok':
                 return True, f'登录态有效,首页读到 {last["articles"]} 条推文'
             observed = '没有加载完' if verdict == 'not-loaded' else '一条推文都没读到'

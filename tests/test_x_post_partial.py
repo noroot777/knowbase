@@ -3,7 +3,7 @@ import contextlib
 import io
 from unittest.mock import patch
 
-from kb.feeds import grab_store, registry as reg, x_post, x_post_meta
+from kb.feeds import grab_store, registry as reg, x_body, x_post, x_post_meta
 from scripts import x_post_backfill as backfill
 from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import tweet
@@ -110,6 +110,7 @@ class PartialRepairTests(ChannelBase):
         self.assertEqual(detail, self.saved()['body'])
         stale = self.saved()
         replacement = dict(backfill.entry_of(stale), title='newer', body=STORED)
+        replacement = x_body.record(replacement, STORED)
         replacement.pop(x_post.HINT)
         replacement = x_post_meta.stamp(replacement, 'post', '')
         self.assertTrue(grab_store.replace(stale, replacement))

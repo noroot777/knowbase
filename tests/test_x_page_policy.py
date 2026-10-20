@@ -77,16 +77,15 @@ class PolicyTests(unittest.TestCase):
         x_page_state.navigate(session, 'https://x.com/Example')
         return session
 
-    def test_persistent_core_errors_expire_as_account_failures_not_batch_limits(self):
+    def test_persistent_core_errors_return_partial_cards_without_spending_the_account_budget(self):
         for status in [400, 403, 404, 503]:
             with self.subTest(status=status):
                 session = self.timeline([response(status, operation='UserTweets')])
                 started = self.clock.now
-                with self.assertRaisesRegex(x_browser.XBrowserError, '页面请求出错') as caught:
-                    x_browser._wait_state(session, 'Example', started + 1)
-                self.assertNotIsInstance(caught.exception, x_browser.XRateLimited)
-                self.assertGreaterEqual(self.clock.now - started, 1)
-                self.assertGreaterEqual(session.reads, 2)
+                state = x_browser._wait_state(session, 'Example', started + 1)
+                self.assertIn('页面请求出错', state['incomplete'])
+                self.assertLess(self.clock.now - started, 1)
+                self.assertEqual(2, session.reads)
 
     def test_auxiliary_errors_do_not_veto_ready_timeline_content(self):
         for operation in ['UserByScreenName', 'UserTweetsAndReplies']:
@@ -127,16 +126,21 @@ class PolicyTests(unittest.TestCase):
                 self.assertIn('没有读到推文', str(caught.exception))
                 self.assertGreaterEqual(self.clock.now - started, 1)
 
-    def test_known_terminal_dom_wins_over_http_errors_without_waiting_the_account_budget(self):
+    def test_only_auxiliary_errors_leave_terminal_dom_eligible(self):
         for operation in ['UserByScreenName', 'UserTweets']:
             for status in [429, 403, 404, 503]:
                 with self.subTest(operation=operation, status=status):
                     session = self.timeline([response(status, operation=operation)],
-                                            dict(empty=True, articles=0))
+                                            dict(empty=True, articles=0, account=dict(
+                                                state='missing', handle='example',
+                                                evidence='missing_account_header')))
                     started = self.clock.now
-                    with self.assertRaisesRegex(x_browser.XBrowserError, '账号在 X 上打不开'):
+                    expected = ('账号不存在' if operation == 'UserByScreenName' else
+                                '限制了访问频率' if status == 429 else '页面请求出错')
+                    with self.assertRaisesRegex(x_browser.XBrowserError, expected):
                         x_browser._wait_state(session, 'Example', started + 1)
                     self.assertLess(self.clock.now - started, 1)
+                    self.assertEqual(2, session.reads)
 
     def test_auxiliary_429_cannot_turn_a_dom_request_error_into_a_batch_limit(self):
         session = self.timeline([response(operation='UserByScreenName')],
@@ -182,11 +186,16 @@ class PolicyTests(unittest.TestCase):
                     self.assertGreaterEqual(self.clock.now - started, 1)
 
     def test_detail_terminal_dom_requires_two_matching_complete_observations(self):
-        for status in [404, 429, 503]:
-            for dom, expected in [(dict(empty=True), x_post.PostGone),
+        for status in [200, 404, 429, 503]:
+            expected_failure = (x_post.PostGone if status == 200 else
+                                x_page_state.XRateLimited if status == 429 else
+                                x_post.PostRequestFailed)
+            for dom, expected in [(dict(empty=True), expected_failure),
                                   (dict(empty=True, at='999'), x_post.PostUnavailable),
-                                  (dict(empty=True, ready='loading'), x_post.PostUnavailable),
-                                  (dict(empty=True, id='123'), x_post.PostUnavailable)]:
+                                  (dict(empty=True, ready='loading'), x_page_state.XRateLimited
+                                   if status == 429 else x_post.PostUnavailable),
+                                  (dict(empty=True, id='123'), expected_failure if status != 200
+                                   else x_post.PostUnavailable)]:
                 with self.subTest(status=status, dom=dom):
                     session = PolicySession({'Example': ([response(status)], dom)}, detail=True)
                     with self.assertRaises((x_post.PostUnavailable, x_page_state.XBrowserError)) as caught:
@@ -209,6 +218,7 @@ class PolicyTests(unittest.TestCase):
                             x_post.fetch(URL, session)
                         self.assertIsInstance(caught.exception, x_post.PostRequestFailed)
                     else:
+                        session.cases['example'][1]['articles'] = 0
                         x_page_state.navigate(session, 'https://x.com/Example')
                         with self.assertRaises(x_browser.XBrowserError):
                             x_browser._wait_state(session, 'Example', self.clock.now + 1)
@@ -287,7 +297,7 @@ class StoredPolicyTests(ChannelBase):
                         self.assertEqual({'https://x.com/example/status/123',
                                           'https://x.com/other/status/123'}, urls)
                         self.assertEqual(['https://x.com/example', 'https://x.com/other'], session.urls)
-                        self.assertEqual(1, session.state_reads['example'])
+                        self.assertGreater(session.state_reads['example'], 1)
                         self.assertEqual(0, session.elapsed)
 
     def test_global_auxiliary_errors_do_not_exhaust_the_batch_budget(self):
@@ -309,14 +319,16 @@ class StoredPolicyTests(ChannelBase):
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:
             with self.subTest(channel=channel):
                 cases = {'Example': ([response(404, operation='UserByScreenName')],
-                                     dict(empty=True, articles=0))}
+                                     dict(empty=True, articles=0, account=dict(
+                                         state='missing', handle='example',
+                                         evidence='missing_account_header')))}
                 saved, urls, session = self.run_batch(channel, cases)
-                self.assertIn('账号在 X 上打不开', saved[0]['last_error'])
+                self.assertIn('账号不存在', saved[0]['last_error'])
                 self.assertEqual(OLD, x_channels.watermark(saved[0], channel))
                 self.assertEqual('', saved[1]['last_error'])
                 self.assertNotEqual(OLD, x_channels.watermark(saved[1], channel))
                 self.assertEqual({'https://x.com/other/status/123'}, urls)
-                self.assertEqual(1, session.state_reads['example'])
+                self.assertEqual(2, session.state_reads['example'])
 
     def test_core_limits_still_keep_the_remaining_batch_unwritten(self):
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:
@@ -333,10 +345,38 @@ class StoredPolicyTests(ChannelBase):
         channel = x_channels.BROWSER
         cases = {'Example': ([response(503, operation='UserTweets')], {})}
         saved, urls, session = self.run_batch(channel, cases)
-        self.assertIn('页面请求出错', saved[0]['last_error'])
-        self.assertNotIn('https://x.com/example/status/123', urls)
+        self.assertEqual('', saved[0]['last_error'])
+        self.assertIn('页面请求出错', saved[0]['last_note'])
+        self.assertEqual(OLD, x_channels.watermark(saved[0], channel))
+        self.assertIn('https://x.com/example/status/123', urls)
         saved, urls, session = self.run_batch(channel, {})
         self.assertEqual({'https://x.com/example/status/123', 'https://x.com/other/status/123'}, urls)
         for source in saved:
             self.assertEqual('', source['last_error'])
+            self.assertEqual('', source['last_note'])
             self.assertNotEqual(OLD, x_channels.watermark(source, channel))
+
+    def test_core_partial_cards_leave_budget_for_later_accounts_in_both_channels(self):
+        for channel in [x_channels.BROWSER, x_channels.ATTACH]:
+            with self.subTest(channel=channel):
+                cases = {'Example': ([response(503, operation='UserTweets')], {})}
+                saved, urls, session = self.run_batch(channel, cases, budget=1, account_seconds=50)
+                self.assertEqual({'https://x.com/example/status/123',
+                                  'https://x.com/other/status/123'}, urls)
+                self.assertEqual(2, len(session.urls))
+                self.assertLess(session.elapsed, 1)
+                self.assertEqual(OLD, x_channels.watermark(saved[0], channel))
+                self.assertIn('页面请求出错', saved[0]['last_note'])
+                self.assertNotEqual(OLD, x_channels.watermark(saved[1], channel))
+
+    def test_conflicting_empty_core_responses_remain_retryable_and_recover(self):
+        for status in [429, 403, 404, 503]:
+            with self.subTest(status=status):
+                cases = {'Example': ([response(status, operation='UserTweets')],
+                                     dict(empty=True, articles=0))}
+                saved, urls, session = self.run_batch(x_channels.BROWSER, cases)
+                self.assertNotIn('账号在 X 上打不开', saved[0]['last_error'])
+                self.assertEqual(OLD, x_channels.watermark(saved[0], x_channels.BROWSER))
+                saved, urls, session = self.run_batch(x_channels.BROWSER, {})
+                self.assertIn('https://x.com/example/status/123', urls)
+                self.assertEqual('', saved[0]['last_error'])

@@ -1,4 +1,5 @@
 """HTTP status evidence is scoped to the current page's own core X requests."""
+import copy
 import json
 import unittest
 from collections import deque
@@ -31,12 +32,18 @@ class EventSession(Session):
         self.events = events
         self.reads = 0
         self.available = available
+        self._navigation_count = 0
 
     def _post(self, message, deadline):
         result = {}
         if message['method'] == 'Page.navigate':
-            self.incoming.extend(self.events)
-            result = dict(loaderId='current')
+            self._navigation_count += 1
+            loader = 'current' if self._navigation_count == 1 else f'page-{self._navigation_count}'
+            for event in copy.deepcopy(self.events):
+                if event.get('params', {}).get('loaderId') == 'current':
+                    event['params']['loaderId'] = loader
+                self.incoming.append(event)
+            result = dict(loaderId=loader)
         if message['method'] == 'Runtime.evaluate':
             self.reads += 1
             result = dict(result=dict(value=json.dumps(dict(
@@ -112,14 +119,15 @@ class ResponseTests(unittest.TestCase):
                 self.assertFalse(snap['limited'])
                 self.assertEqual('failed', x_page_state.problem(snap))
 
-    def test_http_errors_preserve_a_terminal_state_already_recognized_in_the_dom(self):
+    def test_http_errors_preserve_dom_evidence_but_veto_an_unavailable_conclusion(self):
         for status in [400, 403, 404, 429, 500, 503]:
             with self.subTest(status=status):
                 state = self.state()
                 state.receive(response(status))
                 snap = state.apply(dict(ready='complete', empty=True, limited=False))
                 self.assertTrue(snap['empty'])
-                self.assertEqual('', x_page_state.problem(snap))
+                self.assertEqual('limited' if status == 429 else 'failed', x_page_state.problem(snap))
+                self.assertFalse(x_page_state.unavailable(snap))
 
     def test_unrelated_origins_operations_sessions_loaders_and_resource_types_do_not_count(self):
         events = [response(url='https://unrelated.invalid/i/api/graphql/hash/TweetDetail'),

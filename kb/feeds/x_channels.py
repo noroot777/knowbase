@@ -305,6 +305,13 @@ def prefetch(sources: list[dict], settings: dict, *, since: str = '',
     return result
 
 
+class XCollectionError(ValueError):
+    def __init__(self, result: dict):
+        self.unavailable = result.get('unavailable', [])
+        self.notice = result.get('note', '')
+        super().__init__(';'.join(filter(None, [result['error'], self.notice])))
+
+
 def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
     """取这条订阅在本轮预取里的那一份,形状和 `fetch_source` 的返回值一致。
 
@@ -318,7 +325,7 @@ def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
     if got is None:
         raise LookupError(f'{label(channel)} 这一轮没有抓到 @{handle}')
     if got.get('error'):
-        raise ValueError(got['error'])
+        raise XCollectionError(got)
     if note := got.get('skipped'):
         from kb.feeds.fetching import CollectionBudgetExceeded
         raise CollectionBudgetExceeded(note)
@@ -336,8 +343,13 @@ def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
     # 「滚不到上次的位置」(`x_browser.harvest`),feedgrab 那边是「翻页中途失败」
     # 或者「这一批有几条没抓下来」(`x_feedgrab._incomplete` —— 这两种它的退出码
     # 照样是 0)。
-    if note := ';'.join(filter(None, [got.get('incomplete'), got.get('note')])):
+    if note := got.get('incomplete'):
         meta['note'] = note
+    if notice := got.get('note'):
+        meta.update(notice=notice,
+                    unavailable=got.get('unavailable', []),
+                    unavailable_count=got.get('unavailable_count', 0),
+                    notice_count=got.get('unavailable_count', 0) + got.get('skipped_quotes', 0))
     return got['entries'], meta
 
 

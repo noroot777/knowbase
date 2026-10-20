@@ -29,7 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb.feeds import grab_store, registry as reg, x_browser, x_channels, x_post, x_post_meta
+from kb.feeds import grab_store, registry as reg, x_body, x_browser, x_channels, x_post, x_post_meta
 from kb.feeds import x_post_provenance
 from kb.feeds.x_cdp import CdpError
 from kb.feeds.x_page_state import XAccessBlocked, XRateLimited
@@ -178,29 +178,42 @@ def aligned_preview(preview: str, detail: str, evidence=None) -> bool:
     return _alignment(preview, detail, evidence) == 'matched'
 
 
-def proposal(entry: dict, text: str, evidence=None) -> tuple[str, dict | None, dict]:
-    """Require coverage and paragraph preservation before any stored-body replacement."""
+def proposal(entry: dict, text: str, evidence=None, *,
+             empty: x_post.PostEmpty | None = None) -> tuple[str, dict | None, dict]:
+    """Require known fragments and source alignment before any stored-body replacement."""
     if skipped := exclusion(entry):
         return skipped['state'], None, dict(reason=skipped['reason'])
-    prefix = entry[x_post.HINT]
-    preview = entry['body'].removeprefix(prefix).strip()
-    canonical = canonical_preview(preview)
-    info = dict(artifacts=canonical != preview, after=len(prefix + text))
+    entry = x_post.detail_entry(entry, text)
+    body = x_body.parts(entry)
+    info = dict(after=len(entry['body']), artifacts=canonical_preview(body.text) != body.text)
+    if empty is not None:
+        info.update(empty_kind=empty.kind, detail=str(empty))
+        if entry['body'] == '' or (body.source_known and not body.text):
+            return 'empty', None, dict(info, reason='confirmed_empty')
+    elif text == entry['body'] or text == body.text:
+        return 'identical', None, dict(info, reason='detail_matches_stored')
+    if not body.source_known:
+        return 'unknown_provenance', None, dict(info, reason='body_provenance_unknown',
+                                               detail=str(x_body.SourceUnknown()))
+    if empty is not None:
+        return 'blocked_length', None, dict(info, reason='remote_empty_stored_text')
+    preview = body.text.strip()
+    info.update(artifacts=canonical_preview(preview) != preview, after=len(body.render(text)))
     if text == preview:
         return 'identical', None, dict(info, reason='detail_matches_stored')
     alignment = _alignment(preview, text, evidence)
     if alignment in {'whitespace', 'evidence'}:
         fixed = _covered_preview(preview, text, keep_tail=True)
         if fixed is not None and fixed != preview:
-            original = entry['body'].removeprefix(prefix)
+            original = body.text
             start = len(original) - len(original.lstrip())
             end = len(original.rstrip())
-            complete = dict(entry)
+            complete = x_body.with_text(entry, original[:start] + fixed + original[end:])
+            complete['body'] += entry['body'][len(entry['body'].rstrip()):]
             complete.pop(x_post.HINT)
-            complete.update(title=fixed.splitlines()[0][:500],
-                            body=prefix + original[:start] + fixed + original[end:])
+            complete.update(title=fixed.splitlines()[0][:500])
             return 'normalized', x_post_meta.stamp(
-                complete, 'post', prefix, author_text=x_post_meta.AuthorText(text, 'detail')), dict(
+                complete, 'post', body.prefix, author_text=x_post_meta.AuthorText(text, 'detail')), dict(
                 info, after=len(complete['body']), reason='confirmed_link_ranges',
                 remaining='blocked_' + alignment)
     if alignment == 'evidence':
@@ -212,12 +225,12 @@ def proposal(entry: dict, text: str, evidence=None) -> tuple[str, dict | None, d
     if x_post.expanded(text, preview):
         return 'expanded', x_post.merge(entry, text), dict(info, reason='longer_detail')
     if alignment == 'matched':
-        complete = dict(entry)
+        complete = x_body.with_text(entry, text)
         complete.pop(x_post.HINT)
-        complete.update(title=text.splitlines()[0][:500], body=prefix + text)
+        complete.update(title=text.splitlines()[0][:500])
         return 'normalized', x_post_meta.stamp(
-            complete, 'post', prefix, author_text=x_post_meta.AuthorText(text, 'detail')), dict(
-            info, reason='legacy_link_artifacts' if info['artifacts'] else 'legacy_whitespace')
+                complete, 'post', body.prefix, author_text=x_post_meta.AuthorText(text, 'detail')), dict(info, reason='legacy_link_artifacts'
+                                           if info['artifacts'] else 'legacy_whitespace')
     state = 'blocked_artifacts' if info['artifacts'] else 'blocked_length'
     return state, None, dict(info, reason='legacy_link_artifacts_not_reconciled'
                             if info['artifacts'] else 'detail_not_longer')
@@ -281,14 +294,16 @@ def entry_of(row: dict) -> dict:
         raise ValueError(f'X post is not eligible for detail audit: {reason}')
     return {**{key: row[key] for key in
                ('url', 'title', 'body', 'author', 'published', 'content_kind')},
-            x_post.HINT: prefix, x_post_meta.FIELD: row.get(x_post_meta.FIELD, '')}
+            x_post.HINT: prefix, x_post_meta.FIELD: row.get(x_post_meta.FIELD, ''),
+            x_body.PROVENANCE: row.get(x_body.PROVENANCE, '')}
 
 
 def _stats(rows, excluded, omitted=None) -> dict:
     stats = dict(candidates=len(rows), total=len(rows) + len(excluded), checked=0,
                  omitted=dict(omitted or {}),
                  expanded=0, normalized=0, updated=0,
-                 identical=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
+                 identical=0, empty=0, unknown_structure=0, unknown_provenance=0,
+                 blocked_length=0, blocked_artifacts=0, unavailable=0,
                  failed=0, stale=0, deferred=0, skipped_article=0, skipped_ambiguous=0,
                  provenance_resolved=0, provenance_saved=0, partial=0,
                  blocked_whitespace=0, blocked_content=0, blocked_evidence=0, results=list(excluded))
@@ -304,7 +319,7 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
                 deadline is not None and time.monotonic() >= deadline):
-            stats['deferred'] = len(rows) - index
+            stats['deferred'] += len(rows) - index
             break
         skipped = exclusion(row)
         resolving = resolve_legacy and skipped and skipped['reason'] in x_post_meta.RECOVERABLE
@@ -313,6 +328,12 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
             stats['results'].append(skipped)
             if progress:
                 progress(skipped, stats)
+            continue
+        origin = row
+        generation = audit.begin(row, apply=apply,
+                                 provenance_pending=bool(apply and resolving)) if remember else None
+        if remember and generation is None:
+            stats['deferred'] += 1
             continue
         result = dict(url=row['url'], before=len(row['body']))
         evidence = {}
@@ -338,6 +359,8 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
             if not result.get('state') and text is None:
                 text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop,
                                     evidence=evidence)
+            if isinstance(text, x_post.PostEmpty):
+                raise text
             if not result.get('state'):
                 state, complete, info = proposal(entry_of(row), text, evidence)
                 stats['checked'] += 1
@@ -349,24 +372,37 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
                     result['state'] = state
                     if state == 'updated' and info.get('remaining'):
                         stats['partial'] += 1
+        except x_post.PostEmpty as exc:
+            state, complete, info = proposal(entry_of(row), '', empty=exc)
+            stats['checked'] += 1
+            stats[state] += 1
+            result.update(state=state, **info)
         except x_post.PostGone as exc:
             stats['checked'] += 1
             stats['unavailable'] += 1
             result.update(state='unavailable', error=str(exc))
         except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable) as exc:
             stats['failed'] += 1
-            stats['deferred'] = len(rows) - index - 1
+            stats['deferred'] += len(rows) - index - 1
             stats['stop_reason'] = str(exc)
             result.update(state='failed', error=str(exc), scope='batch')
         except x_post.PostHalted as exc:
-            stats['deferred'] = len(rows) - index
+            stats['deferred'] += len(rows) - index
             stats['stop_reason'] = str(exc)
             result.update(state='deferred', error=str(exc), scope='batch')
         except x_post.PostUnavailable as exc:
             stats['failed'] += 1
             result.update(state='failed', error=str(exc))
+            if isinstance(exc, x_post.PostStructureUnknown):
+                stats['unknown_structure'] += 1
+                result['reason'] = 'unknown_structure'
+                if stats['unknown_structure'] >= 3 and stats['unknown_structure'] / (index + 1) >= 0.5:
+                    stats['deferred'] = len(rows) - index - 1
+                    stats['stop_reason'] = '多条已加载详情的正文结构无法识别,疑似 X 结构变化;停止本批并保留原行'
+                    result['scope'] = 'batch'
         if remember:
-            audit.record(row, result, complete=complete)
+            audit.record(origin, result, complete=complete, generation=generation,
+                         resolved=row if apply and row is not origin else None)
         stats['results'].append(result)
         if progress:
             progress(result, stats)
@@ -425,7 +461,9 @@ def main(argv=None) -> int:
         for row in rows:
             prior = receipts.get((row['key'], audit.version(row)))
             outcome = prior[1] if prior else dict(state='unaudited')
-            label = ('仍需补查' if outcome.get('remaining') else
+            label = ('不可用结论待复核' if outcome['state'] == 'unavailable' and
+                     outcome.get('availability_policy') != audit.AVAILABILITY_POLICY else
+                     '仍需补查' if outcome.get('remaining') else
                      '可写回' if outcome['state'] in audit.REPAIRABLE else
                      '已扣留' if outcome['state'].startswith('blocked_') else
                      '失败待重试' if outcome['state'] in audit.RETRY else
@@ -464,6 +502,8 @@ def main(argv=None) -> int:
     _coverage(stats)
     print(f'可扩写 {stats["expanded"]} 条,可清理旧链接产物 {stats["normalized"]} 条,'
           f'实际写入 {stats["updated"]} 条,'
+          f'正文结构尚未确认 {stats["unknown_structure"]} 条,'
+          f'原正文来源待核 {stats["unknown_provenance"]} 条(保留原行,需重新采集补证),'
           f'并发换版跳过 {stats["stale"]} 条,失败 {stats["failed"]} 条,'
           f'预算/停止/限流扣留 {stats["deferred"]} 条。')
     print(f'其中仅作局部修复 {stats.get("partial", 0)} 条,未确认的空白和截断标记仍保留。')
@@ -473,13 +513,16 @@ def main(argv=None) -> int:
           f'空白改动缺少证据 {stats["blocked_whitespace"]} 条,'
           f'来源读数证据不一致 {stats["blocked_evidence"]} 条,'
           f'正文内容无法对齐 {stats["blocked_content"]} 条,'
-          f'远端明确不可用 {stats["unavailable"]} 条(保留原存量)。')
+          f'远端明确不可用 {stats["unavailable"]} 条(保留原存量),'
+          f'已确认无自写文字 {stats["empty"]} 条(保留原行,无需回填)。')
     if stats.get('stop_reason'):
         print(f'整轮已停止:{stats["stop_reason"]}')
     print('已写入的条目会在正常同步中重新翻译、导出、索引和提取;本脚本不直接改 vault。')
     return 1 if stats['omitted'] or any(stats[key] for key in
                     ('failed', 'deferred', 'stale',
-                     'skipped_article', 'skipped_ambiguous')) else 0
+                     'skipped_article', 'skipped_ambiguous', 'unknown_provenance')) or any(
+                         result.get('reason') == 'remote_empty_stored_text'
+                         for result in stats['results']) else 0
 
 
 if __name__ == '__main__':

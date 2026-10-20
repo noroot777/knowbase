@@ -26,6 +26,7 @@ from kb.feeds import cdp_attach, x_browser, x_channels, x_login_import
 from kb.feeds.x_cdp import CdpError
 # 摆盘在 `x_login_fixture`(三组用例共用,单拆只因为 700 行上限)。
 from tests.x_login_fixture import (ATTACH, BROWSER, ImportBase, cookie, logged_in)
+from tests.x_state_fixture import page_state
 
 
 class ScopeTests(unittest.TestCase):
@@ -404,13 +405,11 @@ class FakePage:
     def eval(self, _expr, timeout=0.0):
         state = self.states[min(self.seen, len(self.states) - 1)]
         self.seen += 1
-        return json.dumps({'url': 'https://x.com/home', 'ready': 'complete',
-                           'articles': 0, 'login': False, 'empty': False,
-                           'limited': False} | state)
+        return json.dumps(page_state(url='https://x.com/home') | state)
 
 
 class ProbeWordingTests(unittest.TestCase):
-    """`verify_timeline` 是从 `probe` 里抽出来的 —— **抽完五档文案一个字都不许变。**
+    """`verify_timeline` 是从 `probe` 里抽出来的 —— **抽完每一档文案一个字都不许变。**
 
     所以这一组驱动的是**真的** `verify_timeline`(只打桩浏览器会话),而不是把它
     也打掉:打掉的话这一组就只在验打桩本身,而「搬代码要逐符号对过原文」那条元规则
