@@ -87,13 +87,18 @@ def _one_channel(stage: str, scope: dict, run, collector) -> None:
     每个来源各记一条**自己的**结论(结果账,见 `kb/pipeline_results.py` 模块头:
     分段那一份只够展示,拿它回答「谁还欠着」会把成功的来源也记成失败)。
 
+    **执行器交回来的那份覆盖范围要原样递进账里**(`results.cover`):请求的范围不是
+    执行的范围 —— 退避期内那一轮一次取文都没发,却以绿色收尾,拿请求范围当覆盖范围
+    就会把今天早些时候那笔真失败结清(审查 R1,口径在 `kb.collectors.Coverage`)。
+    `run` 报不出来(返回 `None`、或者返回的不是 `Coverage`)照旧按计划范围记。
+
     **采集器由调用方取好传进来,这里不自己取** —— 取它是隔离要包住的那几步之一,
     而且**整条路上只许取一次**:打桩是按调用次数发实例的(既有回归就这么摆),
     多取一次会让后面那个来源拿到串位的采集器(实测 `StopIteration`,而且一个来源
     的结论写到了另一个来源那一段上)。
     """
     with results.channel_run(stage, scope["channel"], collector, scope["accounts"]):
-        run(collector, scope)
+        results.cover(stage, collector, run(collector, scope))
 
 
 def _per_channel(stage: str, crawl_filter: dict | str | None, run) -> None:
@@ -103,7 +108,7 @@ def _per_channel(stage: str, crawl_filter: dict | str | None, run) -> None:
     把前一个整个盖掉,面板上只剩最后那个来源的成败。
 
     **隔离要包住这个来源的准备、执行和汇报,一步都不许露在外面。** 只包执行那
-    一句的话,建账时算覆盖范围要读一次订阅库(`pipeline_results.covered_targets`
+    一句的话,建账时算计划范围要读一次订阅库(`pipeline_results.planned_targets`
     → `FeedCollector.stable_targets`),这次读失败时异常是从 `with` 那一行抛的
     —— 连这个来源自己的 try 都还没进去,整个来源循环当场跳出:勾了订阅源和公众号
     两个来源、订阅库临时读不出来,**公众号一次都不跑**(第 4 轮审查 R1 实测
@@ -191,9 +196,10 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
         key, seg=seg,
         materializes="export" in planned if isinstance(planned, list) else True)
 
-    def _fetch(collector, scope: dict) -> None:
+    def _fetch(collector, scope: dict):
+        """**采集器报的覆盖范围要原样交上去**(见 `_one_channel`)。"""
         _log(f"采集通道: {_channel_label(collector)}")
-        collector.fetch(FetchScope(
+        return collector.fetch(FetchScope(
             targets=tuple(scope["accounts"]),
             since=filters.get("since_date", ""),
             until=filters.get("until_date", ""),

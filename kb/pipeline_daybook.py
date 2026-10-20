@@ -19,11 +19,15 @@
 RSS 那一格整个换成 B 的成功 —— A 的失败从此不在计划里,而它的 `last_error` 还在
 (第 2 轮审查实测)。所以:
 
-- 这一轮点名了几个目标(`accounts`)⇒ 只写那几格,**不碰整通道那一格、也不碰别的
-  目标**;
-- 这一轮跑的是整通道(`accounts` 空)⇒ 它确实把这个通道跑了一遍,所以**先清掉这个
-  通道这一步的全部旧账**,再写结论:成功写整通道那一格,失败而**采集器留下了失败
-  名单**时只写名单里那几个目标(B/C 这一轮明明成功了),没留下名单才写整通道那一格。
+- **结清只认执行事实**:采集器交回来的那份「真跑成了哪几个」(`covered`)写成功,
+  它说「整条来源跑完而且全成了」(`whole`)才清掉这个来源这一步的全部旧账。
+  一个都没跑成就**一格都不动** —— 退避期内再跑一次同样范围的普通同步,那一轮一次
+  取文都没发,却以「检查 0/1 个来源」绿色收尾(审查 R1 实测)。
+- **红记在计划范围上**:阶段结论在段合并之后不带来源归属,所以这一轮点名了谁就记
+  给谁(宁可多记一格失败);留下了失败名单时收窄到名单里那几个,名单之外、而且
+  真跑成了的那几个照旧记成功(B/C 这一轮明明成功了)。
+- 两份范围的分工和事故形态在 `kb/pipeline_results.py` 模块头,契约在
+  `kb.collectors.Coverage`。
 
 **抓取和导出各读自己的有效范围。** 导出范围是单独一份(`export_filter`:抓取收窄
 了、导出照旧走全部来源,见 `pipeline_retry.start_retry_failed`),拿抓取范围给导出
@@ -280,37 +284,66 @@ def _fold_into(book: dict, run: dict, now: datetime | None = None) -> None:
             # **读进来那几格的键也要归一到稳定 id**,不只是这一轮新写的那几个:
             # 旧账里那条订阅记的是显示名,这一轮按 id 写,两格并存时成功清不掉失败
             # (`_restable` 的 docstring 里是实测形态)。
+            planned, covered, whole = _coverage(mine, scope)
+            if not (failed or covered or whole):
+                # **零覆盖,又没有红要记:这一格一个字都不许动。** 这一轮一个目标都
+                # 没真跑成(全被退避/缺配置/预算挡在外面、被停掉了、或者采集器压根
+                # 没装好),而它照旧以绿色或者 skipped 收尾 —— 写进去就是拿「没跑」
+                # 盖掉「今天早些时候它失败了」,而那正是这份账要挡住的事(审查 R1
+                # 实测:退避期内再跑一次同样范围的普通同步,一次取文都没发,
+                # 「重试失败项」当场消失,而订阅的 `last_error` 还在原处)。
+                continue
             owned = _restable(channel, cells.setdefault(channel, {}))
-            # 记账的键是**实际覆盖的那几个目标、归一到稳定 id**(结果账里那份
-            # `covered`),不是请求里写的那几个字:同一条订阅在「请求里叫 A」和
-            # 「失败名单里叫 63」两种写法下会记成两格,清掉一格、另一格永远红着
-            # (第 3 轮审查 R3)。拿不到结果账才退回请求范围(存量记录那一档)。
-            wanted = ([str(t) for t in (mine.get('covered') or [])] if mine
-                      else [str(a) for a in (scope.get('accounts') or [])])
-            if not wanted:
-                # **这一轮真把整条通道跑了一遍** —— 它覆盖这个通道这一步的每一个
-                # 目标,所以先把旧账清空,再按结论写:
-                owned.clear()
-                # 整通道失败、而采集器留下了失败名单 ⇒ 欠的只是名单里那几个
-                # (这一轮里 B/C 明明成功了)。名单跟着那几格走,下一次重试照旧
-                # 由它收窄(`retry_crawl_scopes`)。
-                wanted = [str(t) for t in (note or {}).get('targets') or []] \
-                    if failed and note else []
-            elif failed and note and name == 'crawl':
-                # 点名跑了几个目标、而且留下了失败名单 ⇒ **名单之外那几个这一轮是
-                # 成功的**,不许一起记成失败。记成失败的后果是下一次重试又去抓它们
-                # (名单恰恰是采集器说「只有这几个还要重抓」)。
-                still = [t for t in wanted if t in {str(x) for x in (note.get('targets') or [])}]
-                for ok_target in [t for t in wanted if t not in still]:
+            done = {str(t) for t in (note or {}).get('targets') or ()}
+            if not failed:
+                # 没有红要记 ⇒ **只有真跑成的那几格写进去**,它们的旧红就此结清。
+                # 记账的键是归一到稳定 id 的那一份(结果账两边同一道口径):同一条
+                # 订阅在「请求里叫 A」和「失败名单里叫 63」两种写法下会记成两格,
+                # 清掉一格、另一格永远红着(第 3 轮审查 R3)。
+                if whole:
+                    # **这一轮真把整条来源跑完了、而且全成了** —— 它覆盖这个来源
+                    # 这一步的每一个目标,所以先把旧账清空再写。
+                    owned.clear()
+                wanted = list(covered)
+            else:
+                # 有红要记 ⇒ **记在计划范围上**(模块头那条「宁可多记一格失败」:
+                # 阶段结论在段合并之后不带来源归属,漏记是静默丢数据)。
+                # 名单之外、而且**这一轮真跑成了**的那几个照旧记成功:一轮里只有
+                # A 失败时 B/C 明明抓成了,把它们一起记成失败的后果是下一次重试又
+                # 去抓它们(名单恰恰是采集器说「只有这几个还要重抓」)。
+                for ok_target in [t for t in covered if t not in done]:
                     # **这一格的说明要自己写,不许抄整步那一条。** 整步那条带着
                     # 「失败 N 个」,而 `stage_failed` 认的正是这几个字 —— 抄过来
                     # 的「成功」格会被当成失败,这一整段等于没做(实测:账本里那
                     # 条好着的订阅照旧出现在「今天还欠什么」的范围里)。
                     owned[ok_target] = _cell({'status': 'ok', 'detail': '这一轮已抓成'},
                                              run, at, ok_target, None)
-                wanted = still or wanted
+                # 收窄顺序:计划范围 ∩ 名单 → 整个计划范围 → 名单(整条来源那一轮
+                # 计划范围是空的,欠的就是名单里那几个)→ 都说不出来就记整条来源。
+                wanted = [t for t in planned if t in done] or planned or sorted(done)
             for target in (wanted or [_WHOLE]):
                 owned[target] = _cell(here, run, at, target, note)
+
+
+def _coverage(mine: dict | None, scope: dict) -> tuple[list[str], list[str], bool]:
+    """这一轮在这个来源上:**计划**作用于谁、**真跑成了**谁、是不是整条跑完了。
+
+    - 有结果账那一条 ⇒ 按它(执行事实,口径在 `kb.collectors.Coverage`);
+    - 没有 ⇒ 退回这一轮**计划过**的范围,空 = 整条来源。两档都算「覆盖」:全库那几
+      步和升级前的存量留档压根没有这份账,退成零覆盖的话它们的红一格都记不下来
+      (漏报是静默丢数据);
+    - 升级前那份结果账只有 `covered` 一格,含义是**计划范围**(空 = 整条来源),
+      按老口径读 —— 不认的话那几轮重启恢复之后会被当成零覆盖。
+    """
+    accounts = [str(a) for a in (scope.get('accounts') or [])]
+    if mine is None:
+        return accounts, accounts, not accounts
+    covered = [str(t) for t in (mine.get('covered') or [])]
+    if 'whole' not in mine:
+        return (covered or accounts), covered, not covered
+    planned = ([str(t) for t in (mine.get('planned') or [])]
+               if 'planned' in mine else accounts)
+    return planned, covered, bool(mine.get('whole'))
 
 
 def _restable(channel: str, owned: dict) -> dict:

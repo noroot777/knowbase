@@ -137,6 +137,37 @@ class ChannelDispatchTests(unittest.TestCase):
              patch("kb.store.connect"), patch("kb.extract.pending_docs", return_value=[]):
             self.assertEqual([], pipeline_retry.retry_failed_plan())
 
+    def test_a_crawl_that_never_ran_reports_zero_coverage(self):
+        """**审查 R1 的另一半**:采集器没装好/起不来那一轮,覆盖范围是空的。
+
+        这两档的阶段结论是 `skipped`,而 skipped 不算失败 —— 按请求范围记账的话,
+        一句「跳过抓取」会去结清今天早些时候那笔真失败(当日账本那一层的后果和退避
+        那一档一模一样,见 `tests/test_retry_daybook.py`)。
+
+        **反过来钉一边**:真跑完的那一轮照旧按请求范围报 —— 公众号的失败是文章级
+        的,摊不到号上,账号那一层这一轮确实都跑过。
+        """
+        from kb.collectors import Coverage, wechat_local
+
+        scope = FetchScope(("甲",))
+        with patch.object(wechat_local, "_stage"):
+            with patch.object(wechat_local, "_backend_problem", return_value="没装"):
+                self.assertEqual(Coverage(),
+                                 wechat_local.WeChatLocalCollector().fetch(scope))
+            with patch.object(wechat_local, "_backend_problem", return_value=""), \
+                 patch.object(wechat_local.WeChatLocalCollector, "_stream",
+                              side_effect=OSError("起不来")):
+                self.assertEqual(Coverage(),
+                                 wechat_local.WeChatLocalCollector().fetch(scope))
+            with patch.object(wechat_local, "_backend_problem", return_value=""), \
+                 patch.object(wechat_local.WeChatLocalCollector, "_stream",
+                              return_value=(0, {})), \
+                 patch.object(wechat_local.WeChatLocalCollector, "_report"):
+                self.assertEqual(Coverage(targets=("甲",)),
+                                 wechat_local.WeChatLocalCollector().fetch(scope))
+                self.assertEqual(Coverage(whole=True),
+                                 wechat_local.WeChatLocalCollector().fetch(FetchScope()))
+
     def test_export_missing_bodies_reach_panel_as_pending_details(self):
         import subprocess
         from kb.collectors import wechat_local

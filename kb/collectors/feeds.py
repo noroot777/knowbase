@@ -32,8 +32,22 @@ class FeedCollector:
                             targets=tuple(s['name'] for s in active))
 
     def fetch(self, scope):
+        """见 `kb.collectors.SourceCollector.fetch`。返回这一轮真跑成了哪几条。
+
+        **成功的那几条是 `collect` 自己攒的,不在这里按计数反推**(`checked` 把失败
+        的也算进去了)。`whole` 要四件事同时成立:请求没点名(整条来源)、一条都没
+        失败、一条都没被退避/缺配置/预算/改指落在外面、而且没被停。少一件就不是
+        「整条来源跑了一遍」—— 清空旧账的资格只给这一档(见 `Coverage`)。
+        """
+        from kb.collectors import Coverage
         from kb.feeds.sync import collect
-        collect(self.name, scope)
+        summary = collect(self.name, scope) or {}
+        done = [str(t) for t in (summary.get('succeeded_ids') or [])]
+        left = sum(int(summary.get(k) or 0)
+                   for k in ('deferred', 'unconfigured', 'skipped', 'repointed'))
+        whole = (not scope.targets and not summary.get('failed_ids')
+                 and not left and not summary.get('stopped'))
+        return Coverage(targets=tuple(done), whole=whole)
 
     def stable_targets(self, targets):
         """见 `kb.collectors.TargetIdentity`。名字和编号都归到订阅 id 上。

@@ -21,9 +21,14 @@
   带着红,退回去只读账本就是漏报),而**整批汇总那一份不许盖回去**(它的来源清单
   是全批的),**账本比它新也不盖**(跨天那一档走的就是这条);
 ⑦**那颗按钮露不露脸**也得按「今天」判 —— 后端补得再对,按钮藏掉就没人点得到;
-⑧**结清的判据是「这一次真跑过的范围覆盖了这一格」**:同一条通道里只跑了订阅 B 的
-  那一轮,不许把 A 的失败也结清;反过来整条通道真跑了一遍就该把这一步的旧账清空。
-  导出那一步照它自己那份范围记账(`export_filter`),不是抓取那一份;
+⑧**结清的判据是「这一次真跑成了的那几个」**(执行事实,不是请求范围):同一条通道
+  里只跑了订阅 B 的那一轮,不许把 A 的失败也结清;**一轮什么都没取的同步(退避、
+  中途停掉)一格都不许动** —— 它照旧以绿色收尾;反过来整条通道真跑了一遍、而且都
+  成了,就该把这一步的旧账清空。导出那一步照它自己那份范围记账(`export_filter`),
+  不是抓取那一份;
+⑨**页面说欠着的那几步,和那颗按钮真补得到的那几步必须是同一份**:当天成功过之后
+  又失败、随后被停用、随后被删掉的那几条,执行端是跳过它们的 —— 两处各判一遍就是
+  「说没补完 + 点了又没有可补」那个死局;
 
 **缺口与降级那一族在 `tests/test_daybook_gaps.py`**(写不上账本的那一轮、账本读不出来、
 合不成、旧日那些内存欠账)。摆盘共用 `tests/daybook_case.py`。
@@ -39,6 +44,7 @@ from unittest.mock import patch
 
 from kb import (pipeline_daybook as daybook, pipeline_retry, pipeline_stages,
                 pipeline_state)
+from kb.feeds import registry as reg, sync
 from tests.daybook_case import DaybookCase
 
 
@@ -80,12 +86,57 @@ class DaybookRetryTests(DaybookCase):
 
         逐订阅那几格照旧留着的话,这颗按钮每次都去重抓一遍已经好了的订阅;而它们
         确实被覆盖过了(整通道那一轮把每一条都抓了)。
+
+        **第二轮要带 `force`**:A 刚失败过,它正在退避里(`sync._save_failure` 压
+        最短 1800 秒)—— 不带的话那一轮压根不会去取 A,而「整条通道都跑成了」这个
+        前提就是假的(那正是审查 R1 那一档:没跑过的不许结清)。所以这一局先断言
+        A 真的被重抓了。
         """
         self.crawl({'channel': 'rss', 'accounts': [self.a['name']]}, broken=[self.a])
-        self.crawl({'channel': 'rss'})                  # 整条通道,这次全成了
-        self.assertEqual([''], list(daybook.read()['stages']['crawl']['rss']),
-                         '整通道那一轮没把逐订阅那几格清掉')
+        got, _ = self.crawl({'channel': 'rss', 'force': True})   # 整条通道,这次全成了
+        self.assertIn(self.a['id'], got, '这一局的前提:A 这一轮真的被重抓了')
+        self.assertNotIn('error', self.book_cells('crawl', 'rss').values(),
+                         '整通道那一轮没把逐订阅那几格的红清掉')
         self.assertNotIn('crawl', self.plan(), '它今天已经整条抓成过了,不该再抓')
+
+    def test_a_round_that_fetched_nothing_does_not_clear_this_mornings_failure(self):
+        """**审查 R1 那一档**:失败之后半小时内再跑一次同样范围的普通同步。
+
+        A 还在失败退避里(`sync._save_failure` 压最短 1800 秒),这一轮**一次取文都
+        没发** —— 而它以「检查 0/1 个来源,1 个等待重试」绿色收尾。拿请求范围当覆盖
+        范围的话,这份绿色会把 A 今天早些时候那笔失败结清:面板上「重试失败项」当场
+        消失,而 A 的 `last_error` 还在原处,再也没人去补它。
+
+        判据落在**后果**上:这一轮一条都没取(前提)、A 还坏着、今天照旧欠着抓取、
+        而且点下去真的回到 A 那一条。
+        """
+        scope = {'channel': 'rss', 'accounts': [self.a['name']]}
+        self.crawl(scope, broken=[self.a])
+        got, stage = self.crawl(scope)                  # 退避里,这一轮什么都没取
+        self.assertEqual(set(), got, '这一局的前提:这一轮一次取文都没发')
+        self.assertNotEqual('error', stage['status'],
+                            '这一局的前提:这一轮自己是绿色收尾的')
+        self.assertTrue(self.last_error(self.a), 'A 其实还坏着')
+        self.assertEqual(['crawl'], pipeline_retry.today_failed(),
+                         '一轮什么都没抓的同步把今天早些时候那笔失败结清了')
+        got, _ = self.retry()
+        self.assertEqual({self.a['id']}, got, '重试没回到 A 那一条')
+
+    def test_a_round_that_was_stopped_keeps_what_it_never_got_to(self):
+        """**同一条的另一种没跑**:整条通道那一轮被中途停掉。
+
+        停掉的那一轮是 `stopped` 收尾 —— 不算失败。按请求范围记账的话「整条通道」
+        这一笔会把这一步的旧账整个清空,而它压根没轮到后面那几条。
+        """
+        self.crawl({'channel': 'rss', 'accounts': [self.a['name']]}, broken=[self.a])
+        self._begin({'channel': 'rss'}, stages=('crawl',))
+        pipeline_state._state['stop_requested'] = True
+        with patch.object(sync, 'fetch_source', side_effect=AssertionError('不该取文')):
+            pipeline_stages._run_crawl({'channel': 'rss'})
+        pipeline_state._end_run()
+        self.assertTrue(self.last_error(self.a), 'A 其实还坏着')
+        self.assertEqual(['crawl'], pipeline_retry.today_failed(),
+                         '一轮被停掉的同步把今天早些时候那笔失败结清了')
 
     def test_a_failed_whole_channel_round_only_owes_the_names_it_listed(self):
         """整条通道失败、而采集器留下了失败名单 ⇒ 欠的只是名单里那几个。
@@ -94,8 +145,9 @@ class DaybookRetryTests(DaybookCase):
         一旦读不出来(采集器报不出账号级名单)就退回去重抓整条通道。
         """
         self.crawl({'channel': 'rss'}, broken=[self.a])
-        self.assertEqual([str(self.a['id'])],
-                         list(daybook.read()['stages']['crawl']['rss']),
+        self.assertEqual({str(self.a['id'])},
+                         {t for t, st in self.book_cells('crawl', 'rss').items()
+                          if st == 'error'},
                          '欠的那一格该是失败名单里那一条')
         got, _ = self.retry()
         self.assertEqual({self.a['id']}, got, '重试没收窄到名单里那一条')
@@ -352,7 +404,9 @@ class DaybookRetryTests(DaybookCase):
         self.crawl({'channel': 'rss'}, broken=[self.a])
         stale = deepcopy(pipeline_state.last_result())
         stale['finished_at'] = f'{today} 09:00:00'
-        self.crawl({'channel': 'rss'})                  # 同一个来源,后来抓成了
+        # `force`:同上,A 还在退避里 —— 不带的话它这一轮没被取过,账本里那一格
+        # 照旧欠着,这一局验的就不是「旧那一轮盖不盖得回去」了。
+        self.crawl({'channel': 'rss', 'force': True})   # 同一个来源,后来抓成了
         self.bump_book('crawl', f'{today} 10:20:00')
         pending, _ = daybook.unfinished(stale)
         self.assertNotEqual('error', pending['stages']['crawl']['status'],
@@ -386,7 +440,10 @@ class DaybookRetryTests(DaybookCase):
         今天之内它再也变不回绿色,这颗按钮每次都去重抓一遍已经好了的来源。
         """
         self.crawl({'channel': 'rss'}, broken=[self.a])
-        self.crawl({'channel': 'rss'})                  # 同一个来源,这次全成了
+        # **带 `force`**:A 还在失败退避里,不带的话这一轮压根不会去取它 —— 而
+        # 「后来真抓成了」这个前提就是假的(审查 R1:没跑过的不许结清)。
+        got, _ = self.crawl({'channel': 'rss', 'force': True})
+        self.assertIn(self.a['id'], got, '这一局的前提:A 这一轮真的被重抓了')
         self.wechat_round()
         self.assertNotIn('crawl', self.plan(), '它今天已经抓成过了,不该再抓')
 
@@ -507,6 +564,91 @@ class LegacyBookKeyTests(DaybookCase):
         self.assertIn('早就删掉的那条', cells,
                       f'翻不出身份的旧键被摘掉了:{list(cells)}')
         self.assertIn('crawl', self.plan(), '它那一笔欠账也跟着没了')
+
+
+class OwedMatchesWhatTheButtonCanDoTests(DaybookCase):
+    """**审查 R2**:页面说欠着的那几步,得正好是那颗按钮真补得到的那几步。
+
+    三种形态都让执行端把抓取的目标过滤成空(`sync.still_failing`):当天成功过之后
+    又失败、随后被停用、随后被删掉。状态端和起跑端各判一遍的后果是页面一直说「今天
+    还有 1 个步骤没补上」,点下去回一句「没有要补的来源」,刷新也还是那样 —— 一个
+    点不动、也消不掉的死局。
+
+    **判据是「两处是同一份」**:所以每一局都同时问页面那一份和点一次的回答,而不是
+    只验其中一侧。
+    """
+
+    def failed_after_succeeding(self):
+        """A 今天先成功、后失败(三种形态共用的前提)。"""
+        scope = {'channel': 'rss', 'accounts': [str(self.a['id'])]}
+        self.crawl(scope)
+        self.crawl(scope, broken=[self.a])
+        self.assertTrue(self.last_error(self.a), '这一局的前提:A 真的还坏着')
+
+    def clicked(self):
+        """点一次「重试失败项」的回答 —— 这几局要的就是那句拒绝。
+
+        **每一步都打桩,连抓取也打。** 判据是「它起没起跑」,而不打桩的代价全落在
+        写错的那一版上:它会真起一轮线程,范围放开成整库 —— 本机的公众号采集器
+        被拉起来跑真的子进程,用例挂在那儿不动(实测),而要的那个红压根报不出来。
+        起跑了也等它收尾,不把线程漏给下一局。
+        """
+        with self.no_backlog(), \
+             patch.object(pipeline_retry, '_run_crawl'), \
+             patch.object(pipeline_retry, '_run_export'), \
+             patch.object(pipeline_retry, '_run_index'), \
+             patch.object(pipeline_retry, '_run_extract'), \
+             patch.object(pipeline_retry, '_run_projects'), \
+             patch.object(pipeline_retry, '_run_wiki'):
+            started, msg = pipeline_retry.start_retry_failed()
+            if started:
+                self._wait_idle('这一局摆出来的那一轮没有收尾')
+        return started, msg
+
+    def test_a_target_that_already_succeeded_today_is_not_owed_anymore(self):
+        """当天成功过之后又失败:执行端按「当日继承」跳过它,页面也不该再说欠着。"""
+        self.failed_after_succeeding()
+        started, msg = self.clicked()
+        self.assertFalse(started, '执行端其实没有可补的')
+        self.assertEqual([], pipeline_retry.today_failed(),
+                         f'页面说还欠着,而点下去是:{msg}')
+
+    def test_a_target_that_got_disabled_is_not_owed_anymore(self):
+        """失败之后被停用:它压根不会再被抓,页面上那一步也就补不动了。"""
+        self.crawl({'channel': 'rss', 'accounts': [str(self.a['id'])]},
+                   broken=[self.a])
+        reg.save_subscription('rss', {'enabled': False}, self.a['id'])
+        started, msg = self.clicked()
+        self.assertFalse(started, '执行端其实没有可补的')
+        self.assertEqual([], pipeline_retry.today_failed(),
+                         f'页面说还欠着,而点下去是:{msg}')
+
+    def test_a_target_that_got_deleted_is_not_owed_anymore(self):
+        """失败之后被删掉:同上 —— 没有可抓的东西了。"""
+        self.crawl({'channel': 'rss', 'accounts': [str(self.a['id'])]},
+                   broken=[self.a])
+        reg.delete_subscription('rss', self.a['id'])
+        started, msg = self.clicked()
+        self.assertFalse(started, '执行端其实没有可补的')
+        self.assertEqual([], pipeline_retry.today_failed(),
+                         f'页面说还欠着,而点下去是:{msg}')
+
+    def test_other_steps_survive_the_crawl_scope_going_empty(self):
+        """**反过来钉一边**:抓取补不动了,不许把整张问题卡一起抹掉。
+
+        同一轮里红掉的 index 跟那条订阅毫无关系,它照旧补得到 —— 连它一起摘掉的
+        后果是用户一个入口都没有,而真有一步欠着。
+
+        **判据写成等值的,而且排在起跑前面。** 两个坏法靠上面那三局的颜色分辨:
+        「收窄过头」(把整张卡抹掉)只红这一局,「压根没收窄」四局全红。等值还顺手
+        挡住后一种的连带伤害 —— 那时抓取范围放开成整库,起跑那一行会真去跑别的来源。
+        """
+        scope = {'channel': 'rss', 'accounts': [str(self.a['id'])]}
+        self.crawl(scope)
+        self.crawl(scope, broken=[self.a], also_red=['index'])
+        self.assertEqual(['index'], pipeline_retry.today_failed(),
+                         '抓取过滤空了,把 index 那一笔也抹掉了')
+        self.retry()                         # 真起跑:它有正事要做
 
 
 if __name__ == '__main__':

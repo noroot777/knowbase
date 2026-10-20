@@ -121,6 +121,31 @@ class FetchScope:
         return bool(self.since and self.until)
 
 
+@dataclass(frozen=True)
+class Coverage:
+    """一次采集**真跑成了哪几个目标** —— 结清旧失败的唯一依据。
+
+    请求的范围不是执行的范围:退避期内的那几条压根不取文、缺配置的那几条不执行、
+    预算用尽的那几条留到下一轮、采集期间被改指的那一条结果作废。**拿请求范围当
+    覆盖范围的后果是静默丢数据**:订阅 A 抓取失败后半小时内再跑一次同样范围的普通
+    同步,它一次都没被取文(`deferred`),而那一轮以「检查 0/1 个来源」绿色收尾 ——
+    这份绿色会把 A 今天早些时候那笔失败结清,面板上「重试失败项」当场消失,A 的
+    `last_error` 却还在原处(审查 R1 实测)。
+
+    - `targets`:这一轮**真跑过而且成了**的那几个目标身份(失败的不算 —— 它要留在
+      账上等重试;没轮到的更不算)。
+    - `whole`:这一步把这条来源**整个**跑了一遍、而且一个目标都没剩下。只有这一档
+      才敢把这个来源这一步的旧账清空。
+    - 两样都空/假 = **零覆盖**:这一轮一个目标都没真跑成,旧账一格都不许动。
+
+    **报不出来(返回 `None`)就退回请求范围**(存量行为):这是可选能力,不实现它
+    的采集器照旧按「这一轮计划了谁」记账。消费方在 `kb/pipeline_results.py`。
+    """
+
+    targets: tuple[str, ...] = ()
+    whole: bool = False
+
+
 @runtime_checkable
 class SourceCollector(Protocol):
     """采集器契约。实现见 kb.collectors.wechat_local。"""
@@ -148,7 +173,13 @@ class SourceCollector(Protocol):
         """
         ...
 
-    def fetch(self, scope: FetchScope) -> None: ...
+    def fetch(self, scope: FetchScope) -> Coverage | None:
+        """把远端内容拉到本地。
+
+        返回**这一轮真跑成了哪几个目标**(`Coverage`),说不出来返回 `None` ——
+        那一档按请求范围记账(存量行为,理由和事故形态在 `Coverage` 里)。
+        """
+        ...
 
     def materialize(self) -> frozenset[Fetched] | None:
         """落 md。返回这一轮新写的那几篇(见 `Fetched`),说不出来返回 None。

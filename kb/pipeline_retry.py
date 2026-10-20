@@ -190,8 +190,39 @@ def unfinished_today() -> dict:
     return daybook.unfinished(last_result())[0]
 
 
+def owed_now(pending: dict) -> tuple[list[str], list[dict]]:
+    """今天还欠、而且**现在真补得到**的那几步,外加抓取这一次的范围。
+
+    **状态端和起跑端读同一份。** 两处各判一遍的后果是页面上一句「今天还有 1 个步骤
+    没补上」配一句「这颗按钮没有要补的」:账本记着抓取欠着,而执行端按当日继承、
+    停用、删除把目标过滤空了(`sync.still_failing`),刷新也不会变 —— 一个点不动、
+    也消不掉的死局(审查 R2 实测三种形态:当天成功过之后又失败、随后停用、随后删除)。
+
+    **只摘得掉抓取那一步。** 别的几步各有自己的可补性,不能因为抓取过滤空了就把整张
+    问题卡抹掉(index / extract 真失败时照旧要补)。
+
+    **不改账本,只改这一次派生出来的那一份。** 账本记的是「今天真失败过」,那是事实;
+    改写它等于把历史改了,而下一次就再也说不清当时发生过什么。
+
+    **问范围要读那个来源自己的订阅库,所以只在抓取真欠着的时候问**(顺序同
+    `start_retry_failed`:只有 index 失败、而订阅库恰好打不开的那一轮,不该被一个
+    跟它毫无关系的故障拖住)。读不出来一律**照抛**,由调用方决定降级 —— 状态端兜住
+    它、宁可多显示一次(点下去照旧按真实范围跑),起跑端照旧让它说出原因。
+    """
+    stages = pending.get("stages") or {}
+    owed = [name for name in STAGES if stage_failed(stages.get(name))]
+    if "crawl" not in owed:
+        return owed, []
+    scopes = retry_crawl_scopes(pending)
+    if scopes:
+        return owed, scopes
+    # 抓取那几个目标现在一个都不用重抓了(后来成功过、停用、或者删掉了):**它不再
+    # 是「今天还欠的一步」** —— 留着它,页面就会说还欠一步而点下去没有可补的。
+    return [name for name in owed if name != "crawl"], []
+
+
 def today_failed() -> list[str]:
-    """**今天**还欠着的那几步(面板拿它决定「重试失败项」露不露脸)。
+    """**今天**还欠着、而且**现在真补得到**的那几步(面板拿它决定按钮露不露脸)。
 
     **不许只看最近一次运行。** 那颗按钮原来是「最近一轮有没有红」才显示,而这颗
     按钮要补的是今天还欠的那些:09:12 抓 RSS 失败、10:20 一轮公众号全绿收尾之后,
@@ -200,6 +231,11 @@ def today_failed() -> list[str]:
 
     账本空着时它退回最近一次运行,所以这一份只会**多**显示、不会少显示:多显示的
     那一档点下去照旧按真实计划跑,少显示那一档是用户再也碰不到的红。
+
+    **「还欠着」不等于「补得到」。** 当天成功过之后又失败的那条订阅、随后被停用或
+    删掉的那几条,执行端是跳过它们的(`sync.still_failing`),所以这里要和起跑端读
+    **同一份**派生(`owed_now`)—— 两处各判一遍就是「说没补完 + 点了又没有可补」那
+    个死局(审查 R2)。
 
     **合成那一步炸了也只退回存量行为,不许把整条状态接口带下去。** 它只是面板上一
     颗按钮的显示判据,而 `/api/pipeline/status` 是面板的命脉 —— 连「管道在不在跑」
@@ -210,8 +246,14 @@ def today_failed() -> list[str]:
         pending, _ = daybook.unfinished(latest)
     except Exception:                              # noqa: BLE001 - 见 docstring
         pending = latest
-    stages = pending.get('stages') or {}
-    return [name for name in STAGES if stage_failed(stages.get(name))]
+    try:
+        return owed_now(pending)[0]
+    except Exception:                              # noqa: BLE001 - 见 docstring
+        # 范围问不出来(那个来源的订阅库打不开)就退回只按账本答。**宁可多显示
+        # 一次** —— 点下去照旧按真实范围跑,而把今天欠的东西从面板上抹掉,用户
+        # 再也碰不到它。
+        stages = pending.get('stages') or {}
+        return [name for name in STAGES if stage_failed(stages.get(name))]
 
 
 def retry_failed_plan(nothing_to_crawl: bool = False, run: dict | None = None) -> list[str]:
@@ -466,14 +508,21 @@ def start_retry_failed() -> tuple[bool, str]:
     # **身份核对照旧认 `prev`**:那一问是「这期间又跑完了一轮吗」,答它的只能是
     # 真实的那一轮,合成快照没有可信身份。
     pending, degraded = daybook.unfinished(prev)
-    plan = retry_failed_plan(run=pending)
-    # **先定计划,只有真要重抓才去问各来源的失败名单。** 问名单要读那个来源自己
-    # 的订阅库,而这颗按钮的射程远不止抓取:上一轮只有 index 失败、这会儿订阅库
-    # 又恰好打不开(锁着、权限、路径没挂上)时,无条件先问一遍等于让一个跟 index
-    # 毫无关系的故障把整次重试顶成 HTTP 500 —— 索引和后面的提取一步都没起跑
-    # (2026-10-09 第 2 轮审查实测)。顺序反过来就没有这条路:crawl 不在计划里
-    # 时压根不碰订阅库。
-    scopes = retry_crawl_scopes(pending) if "crawl" in plan else []
+    # **「今天还欠什么」和「现在真补得到什么」只派生一次**(`owed_now`),面板上那颗
+    # 按钮读的是同一份 —— 两处各判一遍就是「页面说还欠一步、点下去又说没有可补」那个
+    # 死局(审查 R2)。
+    owed, scopes = owed_now(pending)
+    # 上一轮 crawl 确实失败过,可那几个目标现在一个都不用重抓了(后来成功过、停用、
+    # 或者删掉了):把 crawl 摘出计划 —— 范围是空的,真让它跑会按「没指定来源」回落
+    # 到默认采集器,抓的是另一个来源。
+    crawl_resolved = ("crawl" not in owed
+                      and stage_failed((pending.get("stages") or {}).get("crawl")))
+    plan = retry_failed_plan(nothing_to_crawl=crawl_resolved, run=pending)
+    # **只有真要重抓才去问各来源的失败名单**(那一道在 `owed_now` 里,按「抓取欠不
+    # 欠着」判)。问名单要读那个来源自己的订阅库,而这颗按钮的射程远不止抓取:上一轮
+    # 只有 index 失败、这会儿订阅库又恰好打不开(锁着、权限、路径没挂上)时,无条件
+    # 先问一遍等于让一个跟 index 毫无关系的故障把整次重试顶成 HTTP 500 —— 索引和后面
+    # 的提取一步都没起跑(2026-10-09 第 2 轮审查实测)。
     # **拦路的东西还拦着就别起跑。** 这道闸要在一切状态改动之前(理由在
     # `_BLOCKED_PREFIX` 那段):拒绝 = 上一轮的结论、失败名单、导出范围一字未动。
     # **它只是早一道,不是互斥**(元规则那条):探测完到真起跑之间那个窗口里拦路
@@ -493,13 +542,6 @@ def start_retry_failed() -> tuple[bool, str]:
         if not rest:
             return False, _BLOCKED_PREFIX + blocked
         plan, scopes, blocked_note = rest, [], _BLOCKED_SKIPPED + blocked
-    # 上一轮 crawl 确实失败过,可那几个目标现在一个都不用重抓了:把 crawl 摘出
-    # 计划(范围是空的,真让它跑会按"没指定来源"回落到默认采集器),并在它那张
-    # 卡片上说清为什么 —— 一张绿色的「检查 0/0 个来源」和"这个按钮坏了"长得
-    # 一模一样。
-    crawl_resolved = "crawl" in plan and not scopes
-    if crawl_resolved:
-        plan = retry_failed_plan(nothing_to_crawl=True, run=pending)
     # **导出范围从上一轮的导出范围恢复,不是从它的抓取范围派生。** 两者在重试轮
     # 里本来就不一样(crawl 收窄、export 照旧走全部来源),而落盘只存一份收窄后
     # 的抓取范围的话,第二次重试就从那份收窄范围再派生一次导出范围 —— 第一次

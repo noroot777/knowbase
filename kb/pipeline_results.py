@@ -18,14 +18,21 @@
   成功清掉其中一格、另一格的红永远留着:页面说 4/4 完成,又说今天还有 1 步没补上,
   点下去后端回一句「没有要补的来源」—— 一个点不动也消不掉的死局(第 3 轮审查 R3
   实测,证据 `name-id-success.json`)。
-- **实际覆盖范围**。导出走 `materialize()`,它压根不收目标、扫的是整条来源
-  (契约在 `kb.collectors.SourceCollector`),所以导出的覆盖就是**整条通道**。按请求
-  那几条订阅给它记账的话,「A 的范围跑了一次导出」清不掉「B 的导出失败」,下一次
-  重试照旧派生出 export/index/extract,补好的导出被反复重跑。
+- **实际覆盖范围**。一格里**计划范围和执行事实各记一份**:
+  - `planned` = 这一轮点名了谁(空 = 不限定)。**红记在它头上** —— 阶段结论不带来源
+    归属,所以宁可多记一格失败(漏记是静默丢数据,多记顶多重抓一次)。
+  - `covered` / `whole` = 采集器交回来的执行事实(`kb.collectors.Coverage`):**只有
+    真跑成了的那几个才敢去结清旧失败**,`whole` 才敢清空这个来源这一步的旧账。
+  两份合不成一份:请求的范围不是执行的范围。退避期内再跑一次同样范围的普通同步,
+  那一轮一次取文都没发,却以「检查 0/1 个来源」绿色收尾 —— 拿请求范围当覆盖范围的
+  话,这份绿色会把今天早些时候那笔真失败结清,面板上「重试失败项」当场消失,而订阅
+  的 `last_error` 还在原处(审查 R1 实测)。导出那一步不用采集器报:它的契约就是
+  扫整条来源(`materialize()` 压根不收目标),所以建账时就算整条覆盖。
 
 **说不出来就记窄的那一档。** 覆盖范围报宽了会把没真跑过的旧失败一起清掉(静默丢
 数据),报窄了顶多多重跑一次(元规则那条)。所以:只有执行契约明说「这一步扫整条
-来源」才算整条通道;翻不出稳定 id 的目标**原样留着**,不许从账上摘掉。
+来源」、或者采集器自己报了整条跑完,才算整条通道;翻不出稳定 id 的目标**原样留着**,
+不许从账上摘掉。
 
 **这份账只补充、不替代计划范围。** 折账照旧按这一轮**计划过**的来源摊开
 (`pipeline_daybook._owners`),账上没有自己结论的来源退回「这一步整体那个结论」——
@@ -37,8 +44,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 
-# {步骤: {来源: 一格}}。一格 = {'covered': [...], 'status', 'detail', ...}。
-# `covered` 空列表 = **整条通道**(这一步扫的是整个来源);非空 = 只覆盖这几个稳定 id。
+# {步骤: {来源: 一格}}。一格 = {'planned', 'covered', 'whole', 'status', 'detail', ...}。
+# `planned` = 这一轮点名了哪几个稳定 id(空 = 不限定);`covered` = **真跑成了**那几个;
+# `whole` = 整条来源这一步都跑完了(只有这一档敢清空旧账)。两份的分工见模块头。
 _cells: dict[str, dict[str, dict]] = {}
 # {步骤: 这一刻正在跑的来源}。`_stage` 据它知道该把结论记到哪一格
 # (**唯一的归属判据**:「`_stage` 写的那一条就是当前这个来源这一步的结论」)。
@@ -52,24 +60,45 @@ SOURCE_STAGES = ('crawl', 'export')
 WHOLE_SOURCE_STAGES = ('export',)
 
 
-def covered_targets(collector, stage: str, requested) -> list[str]:
-    """这一步在这个来源上**实际覆盖**哪些目标:`[]` = 整条通道。
+def planned_targets(collector, stage: str, requested) -> list[str]:
+    """这一步在这个来源上**计划**作用于哪几个目标:`[]` = 不限定(整条来源)。
+
+    **这是「红记在谁头上」那一份,不是「谁真跑成了」那一份**(后者由采集器交回来,
+    见 `cover`)。两份分开记的理由和事故形态在模块头。
 
     三档,顺序就是优先级:
 
     1. 这一步扫整条来源(`WHOLE_SOURCE_STAGES`)⇒ `[]`,不管请求点了谁;
-    2. 请求没点名 ⇒ `[]`(整条通道);
+    2. 请求没点名 ⇒ `[]`(整条来源);
     3. 点名了 ⇒ 归一到采集器认的稳定 id(`TargetIdentity`)。**采集器报不出来就
        原样留着**(公众号那条路的目标就是账号名,它本身已经是稳定身份)。
     """
     if stage in WHOLE_SOURCE_STAGES:
         return []
-    wanted = [str(t) for t in (requested or [])]
+    return _stable(collector, requested)
+
+
+def _stable(collector, targets) -> list[str]:
+    """这几个目标归一到采集器认的稳定 id。**身份口径只有这一份。**
+
+    计划范围和执行事实都过它:两边用不同口径的后果是同一条订阅记成两格,一格的 ok
+    清不掉另一格的 error(`stable_keys` 的 docstring 里是实测形态)。
+    """
+    wanted = [str(t) for t in (targets or [])]
     if not wanted:
         return []
     from kb.collectors import target_identity
     naming = target_identity(collector)
-    return naming.stable_targets(wanted) if naming else wanted
+    if naming is None:
+        return wanted
+    hit = naming.stable_targets(wanted)
+    # **答不出一份名单就用原样那几个。** 这一道不是为了容错好看:`stable_targets`
+    # 是可选能力,而 `runtime_checkable` 的协议只看方法名在不在 —— 认错了的话这一格
+    # 的键会变成一个没法比较的东西,而账上那几格从此谁也清不掉谁。**退回去只会更宽**
+    # (原样那几个就是这一轮点名的),不会把谁从账上摘掉。
+    if not isinstance(hit, (list, tuple, set, frozenset)):
+        return wanted
+    return [str(t) for t in hit]
 
 
 def stable_keys(channel: str, keys) -> dict[str, str]:
@@ -126,7 +155,11 @@ def channel_run(stage: str, channel: str, collector, requested):
     `_stage(...)`,留着的话那一笔会记到最后那个来源头上 —— 而它多半不是没跑完的
     那一个。摘掉之后那一笔谁也不挂,折账自然退回「这一步整体那个结论」(保守档)。
     """
-    cell = {'covered': covered_targets(collector, stage, requested),
+    planned = planned_targets(collector, stage, requested)
+    # **执行事实从「按计划算」起步**:采集器报不出覆盖范围的那一档照旧按这一轮点名
+    # 的范围记账(存量行为,见 `kb.collectors.Coverage`)。报得出来的在 `cover` 里
+    # 原地换成真事实 —— 起步就写零覆盖的话,不实现这个可选能力的来源连失败都记不下。
+    cell = {'planned': planned, 'covered': list(planned), 'whole': not planned,
             'status': 'running', 'detail': ''}
     _cells.setdefault(stage, {})[channel] = cell
     _current[stage] = channel
@@ -147,6 +180,30 @@ def channel_run(stage: str, channel: str, collector, requested):
         _current.pop(stage, None)
 
 
+def cover(stage: str, collector, report) -> None:
+    """采集器交回来的**执行事实**:这一轮在当前这个来源上真跑成了哪几个目标。
+
+    `report` 不是 `Coverage` 就一个字都不改(「报不出来」那一档退回按计划范围记账,
+    理由在 `kb.collectors.Coverage`)。导出压根不用报 —— 它的契约就是扫整条来源,
+    建账那一下就写成整条覆盖了。
+
+    **身份过同一道归一**(`_stable`):采集器报的是它自己那套 id,而账上的键是稳定
+    id,两边不是同一个键空间的话这一笔谁也清不掉。**归一失败就用它原样报的那几个**
+    —— 这一步已经跑完了,不该让一次订阅库读失败把一轮成功的抓取翻成失败;键对不上
+    顶多多抓一次(元规则那条)。
+    """
+    from kb.collectors import Coverage
+    cell = (_cells.get(stage) or {}).get(_current.get(stage) or '\x00')
+    if cell is None or not isinstance(report, Coverage):
+        return
+    try:
+        done = _stable(collector, report.targets)
+    except Exception:                              # noqa: BLE001 - 见 docstring
+        done = [str(t) for t in report.targets]
+    cell['covered'] = done
+    cell['whole'] = bool(report.whole)
+
+
 def note(stage: str, entry: dict) -> None:
     """`_stage` 写了一条结论:记进**当前这个来源**那一格。没有当前来源就不记。
 
@@ -156,9 +213,11 @@ def note(stage: str, entry: dict) -> None:
     cell = (_cells.get(stage) or {}).get(_current.get(stage) or '\x00')
     if cell is None:
         return
-    covered = cell['covered']
+    # **记账那三样要留住**:`_stage` 交来的是阶段结论,它不知道这一格的范围 ——
+    # 冲掉的话这一格就既不知道红该记给谁、也不知道谁真跑成了。
+    keep = {k: cell[k] for k in ('planned', 'covered', 'whole') if k in cell}
     cell.clear()
-    cell.update(deepcopy(entry), covered=covered)
+    cell.update(deepcopy(entry), **keep)
 
 
 def snapshot() -> dict:

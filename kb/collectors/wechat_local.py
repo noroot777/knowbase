@@ -23,8 +23,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from kb.collectors import (CollectorError, Fetched, FetchScope, SourceStatus,
-                           Target)
+from kb.collectors import (CollectorError, Coverage, Fetched, FetchScope,
+                           SourceStatus, Target)
 from kb.pipeline_state import _log, _stage
 
 # 采集器在本仓库内(<repo>/collector)。刻意用相对于本文件的路径而不是绝对路径:
@@ -198,12 +198,20 @@ class WeChatLocalCollector:
 
     # ── 采集:远端 → 采集器本地库 ─────────────────────────────────────────────
 
-    def fetch(self, scope: FetchScope) -> None:
-        """跑采集子进程,把它 stdout 的进度事件转成管道的阶段状态。"""
+    def fetch(self, scope: FetchScope) -> Coverage:
+        """跑采集子进程,把它 stdout 的进度事件转成管道的阶段状态。
+
+        返回这一轮**真跑到了哪几个号**(见 `kb.collectors.Coverage`)。**没起跑的
+        那三档一律是零覆盖** —— 采集器没装好、起不来这两档的阶段结论是
+        `skipped`,而 `skipped` 不算失败:按请求范围记账的话,这一句「跳过抓取」
+        会去结清今天早些时候那笔真失败,面板上「重试失败项」当场消失(同 `Coverage`
+        里那条,只是触发的是另一种没跑)。超时那一档的结论是失败、照旧记在账上,
+        而它跑到哪儿说不清,所以也不拿它结清谁。
+        """
         problem = _backend_problem()
         if problem:
             _stage("crawl", "skipped", f"采集器还没装好,跳过抓取:{problem}")
-            return
+            return Coverage()
         # 把这一次业务抓取的身份带进子进程:它新发现的文章各记一笔,导出时原样
         # 交回来当回执里的抓取身份。不带的话只能事后按时间窗口反猜归属,而那正是
         # 「别处同期落下的内容被算进这一轮」的来源(口径见 `kb.fetch_rounds`)。
@@ -225,15 +233,20 @@ class WeChatLocalCollector:
             code, last = self._stream(argv, timeout_min * 60)
         except subprocess.TimeoutExpired:
             _stage("crawl", "error", f"采集超时({timeout_min}分钟)")
-            return
+            return Coverage()
         except OSError as e:
             _stage("crawl", "skipped", f"采集器起不来,跳过抓取: {e}")
-            return
+            return Coverage()
         finally:
             # 这一轮多半改了"最近采集时间"、也可能让读取器掉线,
             # 面板别再拿开跑前的旧结论
             self._cache = None
         self._report(code, last)
+        # 子进程跑完了:这一轮真跑的就是请求点名的那几个号(没点名 = 整条来源)。
+        # **它的失败是文章级的,摊不到号上** —— 账号那一层这一轮确实都跑过,所以
+        # 覆盖范围照请求算;「这一格算不算失败」另有一份口径(`stage_failed` 认
+        # `_report` 写下的那句话),两件事互不代替。
+        return Coverage(targets=tuple(scope.targets), whole=not scope.targets)
 
     def _stream(self, argv: list[str], timeout: int) -> tuple[int, dict]:
         """边跑边读。返回 (退出码, 最后一个事件)。"""

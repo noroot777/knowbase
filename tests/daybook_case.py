@@ -71,6 +71,15 @@ class DaybookCase(RetryScopeBase):
         daybook._book_file().write_text(json.dumps(raw, ensure_ascii=False),
                                         encoding='utf-8')
 
+    def book_cells(self, stage, channel):
+        """账本里这一步这个来源那几格:`{目标: 状态}`(判据留给用例自己写)。
+
+        **读的是落盘那一份**,不是进程内的 —— 折账走的就是写盘那条路。
+        """
+        return {target: cell.get('status')
+                for target, cell in ((daybook.read().get('stages') or {})
+                                     .get(stage, {}).get(channel, {})).items()}
+
     def export_round(self, accounts, broken=False):
         """真走 `_run_export` 摆一轮导出(`materialize` 打桩,不真落盘)。
 
