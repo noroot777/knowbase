@@ -54,6 +54,18 @@
   (`_newest_round` / `same_event`)。批次层改了「一轮结果」的含义(状态文件里是整批
   汇总,而汇总继承最后那个子轮的身份),所以它**必须把两份落盘接到同一个业务结果
   上**:口径和事故形态在 `sync-schedule.md` 的硬约束一节。
+- **三份留档读的那份终态,要在它们开跑之前就齐全。** 历史那一份走的是
+  `_run_record()` → `run_record(ps._state)`(它**不走** `run_payload()`:那一份没有
+  `log`),所以凡是收尾时才往 `_state` 里补的字段,都必须补在三份留档**之前**。
+  结果账(`results`,逐来源的结论,见 `retry-scope.md`)原来补在 `_end_run` 那个
+  `finally` 里 —— 于是状态文件里写着 `results.crawl.wechat_local=ok`、同一个
+  `run_id` 的历史里却是 `results={}`(第 1 轮自由审查 N2 实测)。**状态文件写不上那
+  一档正是靠历史恢复的**,而恢复回来那一轮少了这份账就退回「整步那张合并卡片」,
+  一轮里只有 RSS 失败时公众号跟着被算成欠着,点一次重试又把它抓一遍。
+  **两个起跑入口要清掉同一样东西**(`pipeline.start_pipeline` 与
+  `pipeline_retry.start_retry_failed` 各写一份 `_state.update`):上一轮的结果账留在
+  内存里跨过来,这一轮就会声称自己覆盖了一个它压根没碰的来源。
+  回归 `tests/test_channel_attribution.py` 的 `HistoryProjectionTests`。
 - **留档失败不许把一轮已经做完的同步变成「永远进行中」。** `_end_run()` 里那两份落盘
   (`_save_last_run` / `_save_history`)是**旁路** —— 状态文件喂「重试失败项」的范围派生
   (重启之后才用得上),历史文件只给人翻;而发布终态(`_finished`)和放下 `running` 是

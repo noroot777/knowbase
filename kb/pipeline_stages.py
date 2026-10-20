@@ -12,13 +12,7 @@
 
 from __future__ import annotations
 
-import re
-import subprocess
-from datetime import datetime
-from pathlib import Path
-
 from kb.collectors import FetchScope, active_collector, document_failure
-from kb.config import VIDEOS_ROOT
 from kb.pipeline_batch import round_key
 from kb import pipeline_results as results
 from kb.pipeline_segments import stage_segment

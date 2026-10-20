@@ -13,7 +13,9 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb import deployment, pipeline_stages, wechat_setup
+# `pipeline_stages` 只在下面那段**跑在子进程里**的代码串里出现(它自己 import
+# 一次),本模块这一侧用不上它。
+from kb import deployment, pipeline_wiki_stages, wechat_setup
 from kb.web import wechat_api
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,8 +84,14 @@ pipeline_stages.VIDEOS_DIR,taxonomy.CACHE_DIR]]))
             self.assertEqual(paths[8], paths[9])
 
     def test_pipeline_child_uses_installed_python_without_runtime_resolution(self):
-        with patch.object(pipeline_stages.subprocess, 'run') as run:
-            pipeline_stages._run_export_script('gzh_projects_export.py', 'scan', timeout_min=1)
+        # **打桩打在真去起子进程那个模块上**:`_run_export_script` 住在
+        # `pipeline_wiki_stages`(`pipeline_stages` 顶着 700 行上限时搬过去的,那边
+        # 按旧名字再导出一次)。原来写的是 `pipeline_stages.subprocess` —— 它能过
+        # 只是因为那边当时还留着一句用不上的 `import subprocess`,而 `patch.object`
+        # 改的是**共享的那个 subprocess 模块**。那句导入一删就 AttributeError。
+        with patch.object(pipeline_wiki_stages.subprocess, 'run') as run:
+            pipeline_wiki_stages._run_export_script(
+                'gzh_projects_export.py', 'scan', timeout_min=1)
         self.assertEqual(sys.executable, run.call_args.args[0][0])
         self.assertNotIn('uv', run.call_args.args[0])
 

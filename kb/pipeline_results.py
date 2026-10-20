@@ -23,6 +23,10 @@
     归属,所以宁可多记一格失败(漏记是静默丢数据,多记顶多重抓一次)。
   - `covered` / `whole` = 采集器交回来的执行事实(`kb.collectors.Coverage`):**只有
     真跑成了的那几个才敢去结清旧失败**,`whole` 才敢清空这个来源这一步的旧账。
+  - `reported` = 上面那两样**是采集器交回来的事实,还是我们按计划范围推断的**。
+    推断那一档只有在这一步**真执行过**时才算成功证据(`pipeline_daybook._coverage`
+    过一道 `pipeline_retry.stage_ran`):导出跳过、整理被锁、某一步压根没轮到的那
+    几轮都带着「整条覆盖」的推断值收尾,拿它去清旧账就是审查 R1 那条静默丢数据。
   两份合不成一份:请求的范围不是执行的范围。退避期内再跑一次同样范围的普通同步,
   那一轮一次取文都没发,却以「检查 0/1 个来源」绿色收尾 —— 拿请求范围当覆盖范围的
   话,这份绿色会把今天早些时候那笔真失败结清,面板上「重试失败项」当场消失,而订阅
@@ -46,7 +50,8 @@ from copy import deepcopy
 
 # {步骤: {来源: 一格}}。一格 = {'planned', 'covered', 'whole', 'status', 'detail', ...}。
 # `planned` = 这一轮点名了哪几个稳定 id(空 = 不限定);`covered` = **真跑成了**那几个;
-# `whole` = 整条来源这一步都跑完了(只有这一档敢清空旧账)。两份的分工见模块头。
+# `whole` = 整条来源这一步都跑完了(只有这一档敢清空旧账);`reported` = 后两样是
+# 采集器报的事实还是按计划推断的。几份的分工见模块头。
 _cells: dict[str, dict[str, dict]] = {}
 # {步骤: 这一刻正在跑的来源}。`_stage` 据它知道该把结论记到哪一格
 # (**唯一的归属判据**:「`_stage` 写的那一条就是当前这个来源这一步的结论」)。
@@ -160,7 +165,9 @@ def channel_run(stage: str, channel: str, collector, requested):
     # 的范围记账(存量行为,见 `kb.collectors.Coverage`)。报得出来的在 `cover` 里
     # 原地换成真事实 —— 起步就写零覆盖的话,不实现这个可选能力的来源连失败都记不下。
     cell = {'planned': planned, 'covered': list(planned), 'whole': not planned,
-            'status': 'running', 'detail': ''}
+            # **推断出来的就要说是推断的**:`cover` 收到真 `Coverage` 时才翻成
+            # True。少了这一格,一步压根没跑的 skipped 也带着「整条覆盖」去清旧账。
+            'reported': False, 'status': 'running', 'detail': ''}
     _cells.setdefault(stage, {})[channel] = cell
     _current[stage] = channel
     try:
@@ -202,6 +209,10 @@ def cover(stage: str, collector, report) -> None:
         done = [str(t) for t in report.targets]
     cell['covered'] = done
     cell['whole'] = bool(report.whole)
+    # **这两样现在是执行事实了。** 翻了这一格之后它不再过「这一步执行过没有」那一道
+    # (`pipeline_daybook._coverage`)—— 中途被停掉的那一轮里真抓成了的那几条照旧
+    # 结清,不能为了挡住跳过那一档把它们一起重新标红。
+    cell['reported'] = True
 
 
 def note(stage: str, entry: dict) -> None:
@@ -215,7 +226,8 @@ def note(stage: str, entry: dict) -> None:
         return
     # **记账那三样要留住**:`_stage` 交来的是阶段结论,它不知道这一格的范围 ——
     # 冲掉的话这一格就既不知道红该记给谁、也不知道谁真跑成了。
-    keep = {k: cell[k] for k in ('planned', 'covered', 'whole') if k in cell}
+    keep = {k: cell[k] for k in ('planned', 'covered', 'whole', 'reported')
+            if k in cell}
     cell.clear()
     cell.update(deepcopy(entry), **keep)
 

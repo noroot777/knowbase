@@ -114,6 +114,28 @@ def stage_failed(stage: dict | None) -> bool:
             or bool(_FAIL_DETAIL_RE.search(stage.get("detail") or "")))
 
 
+#: 这几种状态算**真执行过**。整张词表在 `pipeline_segments._MERGE_ORDER` /
+#: `pipeline_merge._MERGE_RANK`,余下那几种都是「没执行」:`skipped`(跳过)、
+#: `stopped`(用户停了)、`pending`(排着没轮到)、`running`(中途没了)。
+_RAN_STATUS = ("ok", "error")
+
+
+def stage_ran(stage: dict | None) -> bool:
+    """这一格阶段结果算不算**真执行过**(有执行事实可言)。
+
+    **「执行过没有」的判据只有这一份**,和 `stage_failed` 是一对:那一份答「这一步
+    红没红」,这一份答「这一步跑没跑」。只有一处消费 —— 当日账本折账时判「**推断
+    出来的**那份覆盖范围算不算成功证据」(`pipeline_daybook._coverage`)。采集器
+    自己交回来的覆盖范围(`kb.collectors.Coverage`)**不过这一道**:它是执行事实,
+    中途被停掉的那一轮里真抓成了的那几条照旧结清。
+
+    **白名单,不是黑名单。** 认不出来的状态一律算没执行:算错成「执行过」是拿一步
+    压根没跑的绿色清掉今天早些时候那笔真失败(静默丢数据),算错成「没执行」顶多
+    把补好的那一步再跑一次(元规则那条)。
+    """
+    return ((stage or {}).get("status") or "") in _RAN_STATUS
+
+
 def _run_refill() -> None:
     """子进程跑配置好的回填脚本:找 dr-gzh 树里正文为空的 md,重抓原文回填
     (转载 stub 会走平台列表 API 定位原文短链)。占用 export 卡片展示进度。
@@ -644,6 +666,15 @@ def start_retry_failed() -> tuple[bool, str]:
             "stages": {s: {"status": "pending" if card[s] else "skipped",
                            "detail": detail[s]}
                        for s in STAGES},
+            # 上一轮的结果账不许留在内存里跨到这一轮 —— **口径同
+            # `pipeline.start_pipeline` 那一处,两个起跑入口要清同一样东西**
+            # (元规则「两份实现」那条:这两条路一直是各写一份 `_state.update`)。
+            # **这是冗余带,眼下没有自己的红**:收尾现在在三份留档**之前**就把这
+            # 一轮的账搬进 `_state`(见 `pipeline_state._end_run`),而折账只读这
+            # 一轮范围里那几个来源(`pipeline_daybook._owners`),所以上一轮留下的
+            # 那几格现在读不到。别删:它挡的是「收尾那个顺序又被挪回去」和「折账
+            # 哪天开始按账上有哪几格来摊」,而那两种改动都看不出自己踩了什么。
+            "results": {},
         })
     # 账本降级、抓取被摘掉这两档**都要跟着起跑消息一起说出去**:一句
     # 「index → extract」看不出今天还有没补上的东西(见 `daybook.unfinished`)。

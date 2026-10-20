@@ -8,7 +8,9 @@
 ①一轮同时抓几个来源、只有一个失败时,别的来源不许跟着被记成欠着(折账要读执行器
   逐来源交回来的结果账,不是合并之后那张阶段卡片);
 ②这份事实**跨得过重启**:它写在状态文件里,恢复不许把它丢掉;
-③同一条订阅在「请求里写名字」和「失败名单里写编号」两种写法下必须是同一格。
+③**两份落盘是同一个业务结果的两个投影** —— 历史那一份也是恢复入口(状态文件写不上
+  那一档就靠它),它存下来的结果账必须是**这一轮自己**那份,不是空的、也不是上一轮的;
+④同一条订阅在「请求里写名字」和「失败名单里写编号」两种写法下必须是同一格。
 
 判据一律落在**哪个来源的 `fetch` 被叫了几次**、**今天还欠不欠**,不落在账本里
 哪一格什么颜色 —— 后者换个写法也能对上,前者是用户真正付代价的地方。
@@ -137,6 +139,74 @@ class ChannelAttributionTests(RetryScopeBase):
         with self.ready_wechat(), self.wechat_round(again):
             self.retry()
         self.assertEqual(['wechat_local'], again, '失败的那个来源必须补得到')
+
+
+class HistoryProjectionTests(ChannelAttributionTests):
+    """历史那一份存的结果账,必须是**这一轮自己**那份。
+
+    第 1 轮自由审查 N2 实测:普通同步收尾时先存状态、折日账、写历史,**之后**才把
+    结果账搬进 `_state` —— 而历史那一份读的正是 `_state`
+    (`pipeline_history._run_record` → `run_record(ps._state)`,它不走 `run_payload()`:
+    那一份没有 `log`)。于是状态文件里写着 `results.crawl.wechat_local=ok`、历史里
+    是 `results={}`(同一个 `run_id`)。重试那条入口从前连开跑清零都没有,存进历史的
+    是**上一轮**那份账 —— 这一轮于是声称自己覆盖了一个它压根没碰过的来源,而「报宽
+    了就是把没真跑过的旧失败一起清掉」。
+
+    两份落盘不是冗余:状态文件写不上那一档(满盘、目录没了)恢复就从历史走。
+    """
+
+    def history_record(self):
+        """历史里最新那一条(倒序清单的第一行)。"""
+        runs = pipeline_state.load_history()
+        self.assertTrue(runs, '这一局的前提:历史里有记录')
+        return runs[0]
+
+    def test_the_history_copy_carries_this_rounds_result_ledger(self):
+        """同一轮的两份落盘,结果账必须**一模一样**。
+
+        判据落在「库里那条是什么」:历史是恢复的另一个入口,而恢复回来那一轮少了
+        这份账就退回「整步那张合并卡片」—— 一轮里只有 RSS 失败,公众号跟着被算成
+        欠着,点一次重试又把它抓一遍(②那一条的同一个后果,换了个落盘)。
+        """
+        seen = []
+        with self.wechat_round(seen):
+            self.crawl(self.both_channels(), broken=[self.a])
+        self.assertEqual(['wechat_local'], seen, '这一局的前提:公众号抓过一遍')
+        disk = pipeline_state.load_last_run() or {}
+        self.assertEqual('ok', (((disk.get('results') or {}).get('crawl') or {})
+                                .get('wechat_local') or {}).get('status'),
+                         '这一局的前提:状态文件里写着公众号这一步成了')
+        record = self.history_record()
+        self.assertEqual(disk.get('run_id'), record.get('run_id'),
+                         '这一局的前提:两份落盘说的是同一轮')
+        self.assertEqual(disk.get('results'), record.get('results'),
+                         '历史那一份的结果账跟状态那一份不是同一个投影')
+
+    def test_a_retry_round_does_not_claim_a_source_it_never_touched(self):
+        """**反过来钉一边**:上一轮的结果账不许跨到这一轮的历史副本里。
+
+        重试那一轮的范围只剩 RSS(公众号今天已经抓成了,`retry_crawl_scopes` 把它
+        摘掉了),所以它的结果账里**不该有公众号那一格**。留着就是这一轮声称覆盖了
+        一个它压根没碰的来源 —— 从这份历史恢复回来之后,公众号那一步的旧失败会被
+        一轮没碰过它的运行结清。
+        """
+        seen = []
+        with self.wechat_round(seen):
+            self.crawl(self.both_channels(), broken=[self.a])
+        first = self.history_record()
+        self.assertIn('wechat_local', (first.get('results') or {}).get('crawl') or {},
+                      '这一局的前提:第一轮的历史副本里有公众号那一格')
+        again = []
+        with self.ready_wechat(), self.wechat_round(again):
+            self.retry()
+        self.assertEqual([], again, '这一局的前提:重试压根没碰公众号')
+        record = self.history_record()
+        self.assertNotEqual(first.get('run_id'), record.get('run_id'),
+                            '这一局的前提:历史里换成重试那一轮了')
+        self.assertNotIn('wechat_local',
+                         (record.get('results') or {}).get('crawl') or {},
+                         f'重试那一轮的账里混进了上一轮的公众号那一格:'
+                         f'{record.get("results")}')
 
 
 class TargetIdentityTests(RetryScopeBase):

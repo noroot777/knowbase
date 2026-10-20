@@ -162,6 +162,13 @@ seen = await now();
 check("这一轮之外那几步照旧要说出来",
       /上次有 1 个步骤失败/.test(seen.hint), seen.hint);
 check("按钮照旧点得到", seen.clickable, JSON.stringify(seen));
+// 这一轮红了 1 步、今天欠着 2 步。「需处理」只许有一处念,不然同一屏上两个数字
+// 配同一句话:收尾那句说 1、那个区说 2(第 1 轮自由审查 N1)。
+check("那个区按当日待补念 2 步", /2 个步骤需处理/.test(seen.title),
+      JSON.stringify(seen));
+check("收尾那句话只讲这一轮,不许也写「需处理」",
+      !/需处理/.test(seen.stateTitle) && /1 个步骤失败/.test(seen.stateTitle),
+      seen.stateTitle);
 
 // ⑤ 这一轮红过,而今天已经没有可补的了(后端把它从待补里摘掉了)
 owed = [];
@@ -201,6 +208,12 @@ check("翻历史时按钮点不到", !seen.clickable, JSON.stringify(seen));
 check("翻历史时那一轮自己的红照旧念得出来",
       !seen.issuesHidden && /1 个步骤需处理/.test(seen.title) && !seen.jumpHidden,
       JSON.stringify(seen));
+// 翻历史时 `owed` 是被主动置空的(它说的是此刻这一天,而屏幕上是上午那一轮)——
+// 拿它去念「已不用补」就是在一份没有今天信息的视图里替今天下结论,而那一轮今天
+// 很可能还欠着(第 1 轮自由审查 N1 的另一半)。
+check("翻历史时收尾那句话不许替今天下结论",
+      !/不用补/.test(seen.stateTitle) && /1 个步骤失败/.test(seen.stateTitle),
+      seen.stateTitle);
 await evalJs(`exitPipeHistory()`);
 await sleep(250);
 

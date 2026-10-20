@@ -35,14 +35,11 @@ from kb import pipeline_results as _results
 from kb.pipeline_persist import (
     _SEQ_GEN,
     _dump_bytes,
-    _history_runs,
-    _history_shape_ok,
     _load_json,
     _state_shape_ok,
     _load_json_strict,
     _newest_round,
     _seq_of,
-    run_record,
     _write_atomic,
     result_version as _version_of,
     retry_notes as retry_notes,  # 失败名单那本账的读法:判据层一份,这里只是过一道
@@ -601,6 +598,18 @@ def _end_run() -> None:
         # 的是「开工时的出处」,这边署的是「定稿时的出处」,两件事。
         _state["seq_gen"] = _SEQ_GEN
         _state["run_seq"] = _next_seq()
+        # **结果账搬进 `_state` 要在三份留档之前。** 两处消费它:①`last_result()` 在
+        # 活进程里返回的是 `_state`(不是落盘那份),而降级规划从它派生 —— 不存一份
+        # 的话这份账只在落盘和按 id 那两份里有,日账一写不上就退回「整步那张合并
+        # 卡片」,这一轮成功的来源当场又被算成欠着;②**历史那一份读的就是它**
+        # (`pipeline_history._run_record` → `run_record(ps._state)`,它不走
+        # `run_payload()`:那一份没有 `log`)。原来这一笔落在下面的 `finally` 里,
+        # 于是历史存进去的 `results` 是**这一轮开跑时清零的那个空字典**(重试那条
+        # 入口从前连清零都没有,存的是**上一轮**的账)—— 状态文件写不上那一档正是
+        # 靠历史恢复的,恢复回来的那一轮于是又退回合并卡片,已经抓成的来源跟着被
+        # 算成欠着(第 1 轮自由审查 N2 实测:状态里 `results.crawl.wechat_local=ok`,
+        # 历史里 `results={}`)。落盘那几份和这里同一刻、同一个源。
+        _state["results"] = _results.snapshot()
         _log("同步已停止，已完成的结果保留" if stopped else "管道结束")
         # **留档失败不许把一轮已经做完的正文工作变成「永远进行中」。** 这三份落盘
         # 都是旁路:状态文件喂「重试失败项」的范围派生(重启之后才用得上),当日账本
@@ -649,12 +658,6 @@ def _end_run() -> None:
                 _finished[run_id] = run_payload()
                 for old_id in list(_finished)[:-_FINISHED_KEEP]:
                     del _finished[old_id]
-            # **内存里这份终态也要带上结果账。** `last_result()` 在活进程里返回的
-            # 是 `_state`(不是落盘那份),而降级规划就从它派生 —— 不往这里存一份的
-            # 话,这份账只在落盘和按 id 那两份里有,日账一写不上就退回「整步那张
-            # 合并卡片」,这一轮成功的来源当场又被算成欠着。落盘那份走的是
-            # `run_payload()`,同一刻、同一个源,所以两边说的是同一件事。
-            _state["results"] = _results.snapshot()
             # 结果账清在**三份留档和按 id 那一份都取完之后**:它们都靠
             # `run_payload()` 把它带出去。早清一步,当日账本折到的就是空账 ——
             # 退回「整步那张合并卡片」,R2 当场复发。下一轮要是接着用上一轮这份账,

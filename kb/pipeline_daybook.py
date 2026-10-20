@@ -23,6 +23,13 @@ RSS 那一格整个换成 B 的成功 —— A 的失败从此不在计划里,�
   它说「整条来源跑完而且全成了」(`whole`)才清掉这个来源这一步的全部旧账。
   一个都没跑成就**一格都不动** —— 退避期内再跑一次同样范围的普通同步,那一轮一次
   取文都没发,却以「检查 0/1 个来源」绿色收尾(审查 R1 实测)。
+- **采集器报不出来那一档按计划范围推断,而推断值只在这一步真执行过时才算成功证据**
+  (`_coverage` 那道 `pipeline_retry.stage_ran`)。导出压根不用采集器报(它扫整条
+  来源)、全库那几步连来源都没有,所以它们一律是推断值:采集器没装好跳过一次导出、
+  整理工具被另一个实例占着跳过一次、某一步排着没轮到就被停了 —— 这几轮都带着
+  「整条覆盖」收尾,照它结清就是拿一步**压根没跑**盖掉今天早些时候那笔真失败
+  (第 1 轮自由审查 R1 实测:刷新也回不来)。**跳过不许清旧失败,也不许凭空新建
+  失败**;而真报过覆盖范围的那一档不过这一道,混合结果里真成了的那几个照旧结清。
 - **红记在计划范围上**:阶段结论在段合并之后不带来源归属,所以这一轮点名了谁就记
   给谁(宁可多记一格失败);留下了失败名单时收窄到名单里那几个,名单之外、而且
   真跑成了的那几个照旧记成功(B/C 这一轮明明成功了)。
@@ -284,11 +291,12 @@ def _fold_into(book: dict, run: dict, now: datetime | None = None) -> None:
             # **读进来那几格的键也要归一到稳定 id**,不只是这一轮新写的那几个:
             # 旧账里那条订阅记的是显示名,这一轮按 id 写,两格并存时成功清不掉失败
             # (`_restable` 的 docstring 里是实测形态)。
-            planned, covered, whole = _coverage(mine, scope)
+            aimed, covered, whole = _coverage(mine, scope, here)
             if not (failed or covered or whole):
                 # **零覆盖,又没有红要记:这一格一个字都不许动。** 这一轮一个目标都
-                # 没真跑成(全被退避/缺配置/预算挡在外面、被停掉了、或者采集器压根
-                # 没装好),而它照旧以绿色或者 skipped 收尾 —— 写进去就是拿「没跑」
+                # 没真跑成(全被退避/缺配置/预算挡在外面、被停掉了、采集器压根没装
+                # 好、或者这一步压根没执行过 —— 见 `_coverage` 那道 `stage_ran`),
+                # 而它照旧以绿色或者 skipped 收尾 —— 写进去就是拿「没跑」
                 # 盖掉「今天早些时候它失败了」,而那正是这份账要挡住的事(审查 R1
                 # 实测:退避期内再跑一次同样范围的普通同步,一次取文都没发,
                 # 「重试失败项」当场消失,而订阅的 `last_error` 还在原处)。
@@ -306,7 +314,7 @@ def _fold_into(book: dict, run: dict, now: datetime | None = None) -> None:
                     owned.clear()
                 wanted = list(covered)
             else:
-                # 有红要记 ⇒ **记在计划范围上**(模块头那条「宁可多记一格失败」:
+                # 有红要记 ⇒ **记在计划范围上**(`aimed`;模块头那条「宁可多记一格失败」:
                 # 阶段结论在段合并之后不带来源归属,漏记是静默丢数据)。
                 # 名单之外、而且**这一轮真跑成了**的那几个照旧记成功:一轮里只有
                 # A 失败时 B/C 明明抓成了,把它们一起记成失败的后果是下一次重试又
@@ -320,12 +328,13 @@ def _fold_into(book: dict, run: dict, now: datetime | None = None) -> None:
                                              run, at, ok_target, None)
                 # 收窄顺序:计划范围 ∩ 名单 → 整个计划范围 → 名单(整条来源那一轮
                 # 计划范围是空的,欠的就是名单里那几个)→ 都说不出来就记整条来源。
-                wanted = [t for t in planned if t in done] or planned or sorted(done)
+                wanted = [t for t in aimed if t in done] or aimed or sorted(done)
             for target in (wanted or [_WHOLE]):
                 owned[target] = _cell(here, run, at, target, note)
 
 
-def _coverage(mine: dict | None, scope: dict) -> tuple[list[str], list[str], bool]:
+def _coverage(mine: dict | None, scope: dict,
+              here: dict) -> tuple[list[str], list[str], bool]:
     """这一轮在这个来源上:**计划**作用于谁、**真跑成了**谁、是不是整条跑完了。
 
     - 有结果账那一条 ⇒ 按它(执行事实,口径在 `kb.collectors.Coverage`);
@@ -334,16 +343,34 @@ def _coverage(mine: dict | None, scope: dict) -> tuple[list[str], list[str], boo
       (漏报是静默丢数据);
     - 升级前那份结果账只有 `covered` 一格,含义是**计划范围**(空 = 整条来源),
       按老口径读 —— 不认的话那几轮重启恢复之后会被当成零覆盖。
+
+    **推断出来的那两档还要过「这一步执行过没有」一道**(`pipeline_retry.stage_ran`,
+    判的是 `here` —— 这个来源自己那条结论,拿不到才是整步那张卡片)。跳过、被停、
+    排着没轮到的那几步照旧带着「整条覆盖」的推断值收尾,拿它当成功证据就是审查 R1
+    那条静默丢数据:导出没装好跳过一次(或者整理工具被另一个实例占着跳过一次),
+    今天早些时候那笔失败就从「重试失败项」里消失,刷新也回不来。
+    **采集器自己报过的那一档不过这一道**(`reported`):它是执行事实,中途被停掉的
+    那一轮里真抓成了的那几条照旧结清 —— 不许为了挡住跳过那一档把整个来源重新标红。
     """
+    from kb.pipeline_retry import stage_ran        # 延迟,同 `_fold_into`
     accounts = [str(a) for a in (scope.get('accounts') or [])]
     if mine is None:
-        return accounts, accounts, not accounts
-    covered = [str(t) for t in (mine.get('covered') or [])]
-    if 'whole' not in mine:
-        return (covered or accounts), covered, not covered
-    planned = ([str(t) for t in (mine.get('planned') or [])]
-               if 'planned' in mine else accounts)
-    return planned, covered, bool(mine.get('whole'))
+        aimed, covered = accounts, list(accounts)
+        whole, reported = not accounts, False
+    elif 'whole' not in mine:
+        covered = [str(t) for t in (mine.get('covered') or [])]
+        aimed, whole, reported = (covered or accounts), not covered, False
+    else:
+        covered = [str(t) for t in (mine.get('covered') or [])]
+        aimed = ([str(t) for t in (mine.get('planned') or [])]
+                 if 'planned' in mine else accounts)
+        whole, reported = bool(mine.get('whole')), bool(mine.get('reported'))
+    if not reported and not stage_ran(here):
+        # **没执行过的那一步,推断出来的覆盖范围一个字都不算成功证据。** 交回去的是
+        # 零覆盖:有红照旧按 `aimed` 记下来,没红就连这一格都不动(旧失败留在原处,
+        # 也不凭空新建失败)。
+        return aimed, [], False
+    return aimed, covered, whole
 
 
 def _restable(channel: str, owned: dict) -> dict:

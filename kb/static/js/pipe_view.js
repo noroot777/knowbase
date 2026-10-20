@@ -207,11 +207,17 @@ function renderPipeState(s) {
   let title = '准备好收录新内容';
   if (s.running) title = s.stop_requested ? '正在收尾，随后停止' : active.length ? (label === '重试' ? '正在重试：' : '') + active.join(' + ') : `${label}正在启动`;
   else if (result.stopped) title = `${label}已停止`;
-  // **「需处理」是一句催人动手的话,所以它要和「现在真补得到」对齐。** 这一轮
-  // 红过、而今天已经不用补了(后来抓成了、或者那几条订阅停用/删掉了),照旧写
-  // 「需处理」就是指着一个按下去会被拒绝的动作。这一轮的红本身照旧说出来。
-  else if (failed) title = owed ? `${label}结束，${failed} 个步骤需处理`
-                                : `${label}结束，${failed} 个步骤失败（已不用补）`;
+  // **这一句只讲这一轮**(「N 个步骤失败」),「需处理」那句催人动手的话归那个区
+  // 自己念(`pipe-issues-title`,按 `shown` 算)。两处都写「需处理」的后果是同一屏
+  // 上两个数字配同一句话:这一轮红了 1 步、今天另外还欠着抓取时,这里写「1 个步骤
+  // 需处理」而那个区写「2 个步骤需处理」(第 1 轮自由审查 N1)。**「需处理」这个词
+  // 只许有一处**,而它要跟那颗按钮对齐到「现在真补得到」。
+  // **「已不用补」只在真答得出来的时候说。** 翻历史时 `owed` 是被主动置空的(它说
+  // 的是此刻这一天,而屏幕上是上午那一轮),拿它去念「已不用补」就是在一份没有今天
+  // 信息的视图里替今天下结论 —— 而那一轮今天很可能还欠着。
+  else if (failed) title = viewing || owed
+    ? `${label}结束，${failed} 个步骤失败`
+    : `${label}结束，${failed} 个步骤失败（已不用补）`;
   else if (result.finished_at) title = skipped ? `${label}结束，部分步骤已跳过` : planned.length && completed === planned.length ? `${label}已完成` : `${label}结束，本次步骤未全部完成`;
   if ($('pipe-state-title').textContent !== title) $('pipe-state-title').textContent = title;
   // 这一轮的结论没写进磁盘(满盘、目录没了):本进程内照常可查,重启就退回上一次
