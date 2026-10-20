@@ -13,8 +13,8 @@ from contextlib import closing
 
 from kb.feeds import grab_store, registry as reg
 
-POLICY = 'confirmed-ranges-1'
-RETRY = {'failed', 'stale', 'deferred'}
+POLICY = 'source-bound-confirmed-ranges-2'
+RETRY = {'failed', 'stale', 'deferred', 'unknown_provenance'}
 REPAIRABLE = {'expanded', 'normalized'}
 SCHEMA = '''CREATE TABLE IF NOT EXISTS audits (
  item_key TEXT NOT NULL, version TEXT NOT NULL, checked REAL NOT NULL,
@@ -27,7 +27,8 @@ def path():
 
 
 def version(row: dict) -> str:
-    payload = [POLICY, *grab_store.work_version(row), row['url'], grab_store.item_version(row)]
+    payload = [POLICY, *grab_store.work_version(row), row['url'], grab_store.item_version(row),
+               row.get('body_provenance', '')]
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode()).hexdigest()
 
 

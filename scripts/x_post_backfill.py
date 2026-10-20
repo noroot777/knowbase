@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb.feeds import grab_store, registry as reg, x_browser, x_channels, x_post
+from kb.feeds import grab_store, registry as reg, x_body, x_browser, x_channels, x_post
 from kb.feeds.x_cdp import CdpError
 from kb.feeds.x_page_state import XAccessBlocked, XRateLimited
 from scripts import x_post_audit as audit
@@ -172,25 +172,37 @@ def aligned_preview(preview: str, detail: str, evidence=None) -> bool:
     return _alignment(preview, detail, evidence) == 'matched'
 
 
-def proposal(entry: dict, text: str, evidence=None) -> tuple[str, dict | None, dict]:
-    """Require coverage and paragraph preservation before any stored-body replacement."""
-    prefix = entry[x_post.HINT]
-    preview = entry['body'].removeprefix(prefix).strip()
-    canonical = canonical_preview(preview)
-    info = dict(artifacts=canonical != preview, after=len(prefix + text))
+def proposal(entry: dict, text: str, evidence=None, *,
+             empty: x_post.PostEmpty | None = None) -> tuple[str, dict | None, dict]:
+    """Require known fragments and source alignment before any stored-body replacement."""
+    body = x_body.parts(entry)
+    info = dict(after=len(entry['body']), artifacts=canonical_preview(body.text) != body.text)
+    if empty is not None:
+        info.update(empty_kind=empty.kind, detail=str(empty))
+        if entry['body'] == '' or (body.source_known and not body.text):
+            return 'empty', None, dict(info, reason='confirmed_empty')
+    elif text == entry['body'] or text == body.text:
+        return 'identical', None, dict(info, reason='detail_matches_stored')
+    if not body.source_known:
+        return 'unknown_provenance', None, dict(info, reason='body_provenance_unknown',
+                                               detail=str(x_body.SourceUnknown()))
+    if empty is not None:
+        return 'blocked_length', None, dict(info, reason='remote_empty_stored_text')
+    preview = body.text.strip()
+    info.update(artifacts=canonical_preview(preview) != preview, after=len(body.render(text)))
     if text == preview:
         return 'identical', None, dict(info, reason='detail_matches_stored')
     alignment = _alignment(preview, text, evidence)
     if alignment in {'whitespace', 'evidence'}:
         fixed = _covered_preview(preview, text, keep_tail=True)
         if fixed is not None and fixed != preview:
-            original = entry['body'].removeprefix(prefix)
+            original = body.text
             start = len(original) - len(original.lstrip())
             end = len(original.rstrip())
-            complete = dict(entry)
+            complete = x_body.with_text(entry, original[:start] + fixed + original[end:])
+            complete['body'] += entry['body'][len(entry['body'].rstrip()):]
             complete.pop(x_post.HINT)
-            complete.update(title=fixed.splitlines()[0][:500],
-                            body=prefix + original[:start] + fixed + original[end:])
+            complete.update(title=fixed.splitlines()[0][:500])
             return 'normalized', complete, dict(
                 info, after=len(complete['body']), reason='confirmed_link_ranges',
                 remaining='blocked_' + alignment)
@@ -203,9 +215,9 @@ def proposal(entry: dict, text: str, evidence=None) -> tuple[str, dict | None, d
     if x_post.expanded(text, preview):
         return 'expanded', x_post.merge(entry, text), dict(info, reason='longer_detail')
     if alignment == 'matched':
-        complete = dict(entry)
+        complete = x_body.with_text(entry, text)
         complete.pop(x_post.HINT)
-        complete.update(title=text.splitlines()[0][:500], body=prefix + text)
+        complete.update(title=text.splitlines()[0][:500])
         return 'normalized', complete, dict(info, reason='legacy_link_artifacts'
                                            if info['artifacts'] else 'legacy_whitespace')
     state = 'blocked_artifacts' if info['artifacts'] else 'blocked_length'
@@ -235,23 +247,19 @@ def candidates(conn, *, urls=(), limit=0, all_posts=False, apply=False, recheck=
 
 
 def entry_of(row: dict) -> dict:
-    body = row['body']
-    head, separator, tail = body.partition('\n\n')
-    prefix = ''
-    if separator and all(line.startswith('> ') for line in head.splitlines()) and (
-            row['title'] and tail.startswith(row['title'])):
-        prefix = head + separator
     return {**{key: row[key] for key in
                ('url', 'title', 'body', 'author', 'published', 'content_kind')},
-            x_post.HINT: prefix}
+            x_body.PROVENANCE: row.get(x_body.PROVENANCE, ''),
+            x_post.HINT: x_body.parts(row).prefix}
 
 
 def repair(rows: list[dict], session, *, apply=False, deadline=None,
            should_stop=None, progress=None, remember=False) -> dict:
     stats = dict(candidates=len(rows), expanded=0, normalized=0, updated=0,
-                 identical=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
+                 identical=0, empty=0, blocked_length=0, blocked_artifacts=0, unavailable=0,
                  blocked_whitespace=0, blocked_content=0, blocked_evidence=0,
-                 failed=0, stale=0, deferred=0, partial=0, results=[])
+                 failed=0, unknown_structure=0, unknown_provenance=0,
+                 stale=0, deferred=0, partial=0, results=[])
     for index, row in enumerate(rows):
         if (should_stop and should_stop()) or (
                 deadline is not None and time.monotonic() >= deadline):
@@ -263,6 +271,10 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
         try:
             text = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop,
                                 evidence=evidence)
+        except x_post.PostEmpty as exc:
+            state, complete, info = proposal(entry_of(row), '', empty=exc)
+            stats[state] += 1
+            result.update(state=state, **info)
         except x_post.PostGone as exc:
             stats['unavailable'] += 1
             result.update(state='unavailable', error=str(exc))
@@ -278,6 +290,13 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
         except x_post.PostUnavailable as exc:
             stats['failed'] += 1
             result.update(state='failed', error=str(exc))
+            if isinstance(exc, x_post.PostStructureUnknown):
+                stats['unknown_structure'] += 1
+                result['reason'] = 'unknown_structure'
+                if stats['unknown_structure'] >= 3 and stats['unknown_structure'] / (index + 1) >= 0.5:
+                    stats['deferred'] = len(rows) - index - 1
+                    stats['stop_reason'] = '多条已加载详情的正文结构无法识别,疑似 X 结构变化;停止本批并保留原行'
+                    result['scope'] = 'batch'
         else:
             state, complete, info = proposal(entry_of(row), text, evidence)
             stats[state] += 1
@@ -367,6 +386,8 @@ def main(argv=None) -> int:
         args.report.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
     print(f'可扩写 {stats["expanded"]} 条,可清理旧链接产物 {stats["normalized"]} 条,'
           f'实际写入 {stats["updated"]} 条,'
+          f'正文结构尚未确认 {stats["unknown_structure"]} 条,'
+          f'原正文来源待核 {stats["unknown_provenance"]} 条(保留原行,需重新采集补证),'
           f'并发换版跳过 {stats["stale"]} 条,失败 {stats["failed"]} 条,'
           f'预算/停止/限流扣留 {stats["deferred"]} 条。')
     print(f'其中仅作局部修复 {stats.get("partial", 0)} 条,未确认的空白和截断标记仍保留。')
@@ -376,11 +397,15 @@ def main(argv=None) -> int:
           f'空白改动缺少证据 {stats["blocked_whitespace"]} 条,'
           f'来源读数证据不一致 {stats["blocked_evidence"]} 条,'
           f'正文内容无法对齐 {stats["blocked_content"]} 条,'
-          f'远端明确不可用 {stats["unavailable"]} 条(保留原存量)。')
+          f'远端明确不可用 {stats["unavailable"]} 条(保留原存量),'
+          f'已确认无自写文字 {stats["empty"]} 条(保留原行,无需回填)。')
     if stats.get('stop_reason'):
         print(f'整轮已停止:{stats["stop_reason"]}')
     print('已写入的条目会在正常同步中重新翻译、导出、索引和提取;本脚本不直接改 vault。')
-    return 1 if stats['failed'] or stats['deferred'] else 0
+    empty_conflict = any(result.get('reason') == 'remote_empty_stored_text'
+                         for result in stats['results'])
+    return int(empty_conflict or any(stats[key] for key in
+                                   ('failed', 'deferred', 'unknown_provenance')))
 
 
 if __name__ == '__main__':

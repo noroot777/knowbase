@@ -132,9 +132,11 @@ class PolicyTests(unittest.TestCase):
             for status in [429, 403, 404, 503]:
                 with self.subTest(operation=operation, status=status):
                     session = self.timeline([response(status, operation=operation)],
-                                            dict(empty=True, articles=0))
+                                            dict(empty=True, articles=0, account=dict(
+                                                state='missing', handle='example',
+                                                evidence='missing_account_header')))
                     started = self.clock.now
-                    with self.assertRaisesRegex(x_browser.XBrowserError, '账号在 X 上打不开'):
+                    with self.assertRaisesRegex(x_browser.XBrowserError, '账号不存在'):
                         x_browser._wait_state(session, 'Example', started + 1)
                     self.assertLess(self.clock.now - started, 1)
 
@@ -308,14 +310,16 @@ class StoredPolicyTests(ChannelBase):
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:
             with self.subTest(channel=channel):
                 cases = {'Example': ([response(404, operation='UserByScreenName')],
-                                     dict(empty=True, articles=0))}
+                                     dict(empty=True, articles=0, account=dict(
+                                         state='missing', handle='example',
+                                         evidence='missing_account_header')))}
                 saved, urls, session = self.run_batch(channel, cases)
-                self.assertIn('账号在 X 上打不开', saved[0]['last_error'])
+                self.assertIn('账号不存在', saved[0]['last_error'])
                 self.assertEqual(OLD, x_channels.watermark(saved[0], channel))
                 self.assertEqual('', saved[1]['last_error'])
                 self.assertNotEqual(OLD, x_channels.watermark(saved[1], channel))
                 self.assertEqual({'https://x.com/other/status/123'}, urls)
-                self.assertEqual(1, session.state_reads['example'])
+                self.assertEqual(2, session.state_reads['example'])
 
     def test_core_limits_still_keep_the_remaining_batch_unwritten(self):
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:

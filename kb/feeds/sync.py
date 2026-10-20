@@ -150,12 +150,13 @@ def _save_result(source, result, scope):
             added = reg.put_items(source, entries, conn=c)
             reg.merge_config(source['id'], validators.get('config_patch') or {}, conn=c)
             c.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
-                failures=0,retry_at=0,etag=?,modified=?,resolved_url=?,last_note=? WHERE id=?''',
+                failures=0,retry_at=0,etag=?,modified=?,resolved_url=?,last_note=?,last_notice=? WHERE id=?''',
                 (reg.now(),reg.now(),validators['etag'],validators['modified'],
                  validators['resolved_url'],
                  # 区间补抓不改日常增量的任何状态,这条提示也算 —— 清掉它等于替
                  # 日常同步宣布"读完了",而那一边的进度一点没动。
                  source.get('last_note','') if scope.ranged else validators.get('note',''),
+                 source.get('last_notice','') if scope.ranged else validators.get('notice',''),
                  source['id']))
     return added
 
@@ -170,6 +171,10 @@ def _save_failure(source, error, summary) -> bool:
     with reg.db() as c:
         if not _claim_write(c, source):
             return False
+        if unavailable := getattr(error, 'unavailable', None):
+            summary.setdefault('notices', []).append({
+                'title': source['name'], 'reason': error.notice,
+                'count': len(unavailable), 'items': unavailable})
         summary['errors'].append({'title': source['name'], 'reason': reason, 'url': source['url']})
         # 「重试失败项」靠这份身份收窄下一轮的范围(见 `note_retry_targets`)。
         # 记 id 而不是名字:名字会被改,而改完之后这条订阅还是同一条。
@@ -277,14 +282,14 @@ def collect(kind, scope):
                               f'（内容在收录那一刻已经抓好）')
         return {'sources': 0, 'checked': 0, 'added': 0, 'deferred': 0,
                 'unconfigured': 0, 'skipped': 0, 'message': '', 'skip_reasons': [],
-                'errors': [],
-                'partial': [], 'repointed': 0, 'stopped': False, 'failed_ids': []}
+                'errors': [], 'partial': [], 'notices': [], 'repointed': 0,
+                'stopped': False, 'failed_ids': []}
     sources = [s for s in reg.subscriptions(kind) if s['enabled'] and
                (not scope.targets or str(s['id']) in scope.targets or s['name'] in scope.targets)]
     summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0,
                'unconfigured': 0, 'skipped': 0, 'message': '', 'skip_reasons': [],
-               'errors': [],
-               'partial': [], 'repointed': 0, 'stopped': False,
+               'errors': [], 'partial': [], 'notices': [], 'repointed': 0,
+               'stopped': False,
                # 这一轮失败的那几条订阅的稳定身份,留给「重试失败项」收窄范围
                'failed_ids': []}
     settings = reg.get_settings(kind)
@@ -341,6 +346,11 @@ def collect(kind, scope):
                     # "连接失败"并让这条订阅进退避重试,而连接好得很。
                     if note := result[1].get('note'):
                         summary['partial'].append({'title': source['name'], 'reason': note})
+                    if notice := result[1].get('notice'):
+                        summary['notices'].append({
+                            'title': source['name'], 'reason': notice,
+                            'count': result[1].get('notice_count', result[1].get('unavailable_count', 0)),
+                            'items': result[1].get('unavailable', [])})
                 except CollectionBudgetExceeded as e:
                     # **跳过的理由由抛出那一侧说**:HTTP 那条路上它是光秃秃抛的
                     # (`_fetch_with_budget`),那时才回落到"预算不足"。登录态通道
@@ -379,6 +389,8 @@ def collect(kind, scope):
         label += f"，失败 {len(summary['errors'])} 个"
     if summary['partial']:
         label += f"，{len(summary['partial'])} 个没读完（{summary['partial'][0]['reason']}）"
+    if summary['notices']:
+        label += f"，{len(summary['notices'])} 个来源有跳过说明（{summary['notices'][0]['reason']}）"
     if summary['repointed']:
         label += f"，{summary['repointed']} 个采集期间改了订阅链接（这一轮的结果已丢弃）"
     if summary['unconfigured']:

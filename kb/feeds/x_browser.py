@@ -34,7 +34,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from kb.feeds import x_article, x_page_state, x_post
+from kb.feeds import x_account, x_article, x_body, x_page_state, x_post
 from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
 from kb.feeds.x_page_state import (
     STATE_JS, XAccessBlocked, XBrowserError, XRateLimited, navigate, read)
@@ -132,8 +132,8 @@ _SCROLL_JS = r'''
 # 登录态失效的几种落地页。X 会跳 /i/flow/login,也会在原地渲染登录按钮。
 _STATE_JS = r'''
 (() => {
-''' + STATE_JS + r'''
-  return JSON.stringify(xPageState());
+''' + STATE_JS + x_account.ACCOUNT_JS + r'''
+  return JSON.stringify({...xPageState(), account: xAccountState()});
 })()
 '''
 
@@ -237,8 +237,8 @@ def _entry(item: dict) -> dict | None:
     context = (item.get('context') or '').strip()
     # 转推/引用的上下文留在正文开头一行:它决定了这条是不是本人的观点,
     # 而 feed_items 里没有地方放这个标记。
-    body = f'> {context}\n\n{text}' if context and not _is_pinned(context) else text
-    out = {'url': item['url'], 'title': (text or f"{name} 的动态")[:500],
+    body = x_body.context_body(context if not _is_pinned(context) else '', text)
+    out = {'url': item['url'], 'title': (text or x_body.placeholder(name))[:500],
            'body': body, 'author': name, 'published': published,
            'content_kind': 'post'}
     # 「这条带着长文卡片」的信号,只在采集期间有意义:`x_article.fill` 用完就把
@@ -247,12 +247,13 @@ def _entry(item: dict) -> dict | None:
         out[x_article.HINT] = str(item['article'])
     if item.get('truncated'):
         out[x_post.HINT] = body[:-len(text)] if text else body
-    return out
+    return x_body.record(out, text, prefix=body[:-len(text)] if text else body)
 
 
 def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
     """等页面落定,顺带认出登录失效/不存在/限流这三种不该当成"没有推文"的情况。"""
     last = {}
+    previous = None
     previous_problem = ''
     confirmed_problem = ''
     failure = XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
@@ -262,22 +263,27 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
             # **两条自救路都要说。** 这句话出现在每条失败订阅的旁边,而「重新登录」
             # 只是其中一条:登录态是导进来的那些人要的是再导一次(见
             # `x_login_import`),把他推去无头壳里登一次正是他想免掉的那一步。
-            raise XBrowserError('X 登录态已失效,请在浏览器通道设置里重新登录,'
-                                '或从日常浏览器再导入一次')
+            raise x_account.XAccountUnavailable(handle, 'login', 'login_control_or_route')
+        terminal = x_account.terminal(last, handle)
+        if terminal and terminal == previous:
+            raise x_account.XAccountUnavailable(handle, *terminal)
+        previous = terminal
+        matching = 'account' not in last or last['account'].get('handle') == handle.lower()
         current_problem = page_problem(last)
-        if last['articles'] and last['ready'] == 'complete' and not current_problem:
+        if (matching and not terminal and last['articles'] and last['ready'] == 'complete'
+                and not current_problem):
             return last
         confirmed_problem = current_problem if current_problem == previous_problem else ''
         if error := x_page_state.escalate(last, confirmed_problem, failure):
             raise error
         previous_problem = current_problem
-        if last['empty']:
-            raise XBrowserError(f'@{handle} 这个账号在 X 上打不开(可能已改名、注销或被冻结)')
         time.sleep(0.3)
     if error := x_page_state.escalate(last, confirmed_problem, failure, expired=True):
         raise error
     if last.get('ready') != 'complete':
         raise XBrowserError(f'@{handle} 的页面没有加载完')
+    if (last.get('account') or {}).get('state') == 'unknown':
+        raise XBrowserError(f'@{handle} 的个人页结构无法识别,尚未确认账号状态,留待下次同步重试')
     raise XBrowserError(f'@{handle} 的时间线上没有读到推文')
 
 
@@ -470,6 +476,7 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 # 实测与理由记在 `x_feedgrab.harvest` 那条注释里(两条通道同一个
                 # 缺口);`_select` 两轮都按同一个**排他**下界筛,窗口逐字相同。
                 started = water or floor.isoformat()
+                unavailable = []
                 try:
                     entries, incomplete = _harvest_one(page, handle, floor)
                     skipped_quotes = getattr(entries, 'skipped_quotes', 0)
@@ -496,7 +503,7 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # 8 条全留下、`incomplete` 空、水位照常前进)。
                     entries, missing = x_post.complete(
                         entries, session=page,
-                        deadline=deadline, should_stop=should_stop)
+                        deadline=deadline, should_stop=should_stop, unavailable=unavailable)
                     if missing:
                         incomplete = f'{incomplete};{missing}' if incomplete else missing
                     # **没读完就不推进水位**:这一轮停在时间线半中间,下面那一段
@@ -506,12 +513,21 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # `put_items` 按 URL 去重,一条都不会重复入库。
                     results[handle] = {
                         'entries': entries, 'error': '', 'incomplete': incomplete,
-                        'skipped_quotes': skipped_quotes, 'note': note,
+                        **x_post.unavailable_report(unavailable),
+                        'skipped_quotes': skipped_quotes,
+                        'note': ';'.join(filter(None, [note, x_post.unavailable_note(unavailable)])),
                         'watermark': started if incomplete else observed_watermark}
-                except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable):
+                except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable) as e:
+                    if unavailable:
+                        results[handle] = {'entries': [], 'error': str(e),
+                                           **x_post.unavailable_report(unavailable)}
                     raise
+                except x_account.XAccountUnavailable as e:
+                    results[handle] = {'entries': [], 'error': str(e),
+                                       'account_state': e.state, 'account_evidence': e.evidence}
                 except (XBrowserError, CdpError) as e:
-                    results[handle] = {'entries': [], 'error': str(e)}
+                    results[handle] = {'entries': [], 'error': str(e),
+                                       **x_post.unavailable_report(unavailable)}
     except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable, CdpError, EOFError, OSError) as e:
         # 浏览器整个起不来/中途死了:剩下的账号统一记成同一个原因,
         # 而不是逐个报一条看不出共同根因的错。

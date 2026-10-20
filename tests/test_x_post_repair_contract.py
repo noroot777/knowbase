@@ -119,7 +119,8 @@ class RepairContractTests(ChannelBase):
                 saved = reg.subscription('social', source['id'])
                 self.assertEqual(OLD, x_channels.watermark(saved, channel))
                 self.assertIn('滚动次数用完', saved['last_note'])
-                self.assertIn('跳过 1 条本人无正文的引用推文', saved['last_note'])
+                self.assertIn('跳过 1 条本人无正文的引用推文', saved['last_notice'])
+                self.assertNotIn('跳过 1 条本人无正文的引用推文', saved['last_note'])
                 with reg.db() as conn:
                     self.assertEqual(['a thought'], [row['body'] for row in conn.execute(
                         'SELECT body FROM feed_items WHERE key IN '

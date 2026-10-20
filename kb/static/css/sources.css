@@ -91,6 +91,7 @@
 .source-state.failed,.source-delete { color:var(--danger); }
 .source-url { display:block; font:11px/1.8 var(--font-mono); color:var(--muted); overflow-wrap:anywhere; margin:4px 0; }
 .source-row-meta { color:var(--muted); font-size:11px; }
+.source-skip-notice { overflow-wrap:anywhere; }
 .source-row-actions { display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; max-width:94px; flex:none; }
 .source-row-actions button { font-size:12px; }
 .source-failure { font-size:12px; margin-top:7px; color:var(--danger); overflow-wrap:anywhere; }
