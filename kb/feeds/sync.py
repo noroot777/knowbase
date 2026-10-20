@@ -58,11 +58,11 @@ def _fetch_with_budget(source, settings, scope, collect_deadline):
 def _note_skip(summary, why: str) -> None:
     """记一条「这一轮有订阅被跳过」的理由。**三个写入口都过这里。**
 
-    **理由不许互相覆盖。** 同一轮里完全可以既有浏览器通道因人机验证整批中止
-    (`x_browser.VERIFY_SKIPPED`)、又有 HTTP 那几条耗尽采集预算:只留最后写进去
-    的那一句的话,面板给出的解释由线程池的完成顺序决定 —— 验证那一句可能被说成
-    预算不足,反过来也一样(审查第 1 轮非阻塞 C)。`skipped` 是各种原因**之和**,
-    那句解释也得是。按出现顺序去重,同一个原因跳过几十条也只说一遍。
+    **理由不许互相覆盖。** 同一轮里完全可以既有浏览器通道按了停止、又有它的时间
+    预算用完、又有 HTTP 那几条耗尽采集预算:只留最后写进去的那一句的话,面板给出
+    的解释由线程池的完成顺序决定 —— 按了停止可能被说成预算不足,反过来也一样
+    (审查第 1 轮非阻塞 C)。`skipped` 是各种原因**之和**,那句解释也得是。按出现
+    顺序去重,同一个原因跳过几十条也只说一遍。
     """
     if why not in summary['skip_reasons']:
         summary['skip_reasons'].append(why)
@@ -345,9 +345,8 @@ def collect(kind, scope):
                     # **跳过的理由由抛出那一侧说**:HTTP 那条路上它是光秃秃抛的
                     # (`_fetch_with_budget`),那时才回落到"预算不足"。登录态通道
                     # 带着自己那句话过来(`x_channels.take` 把 `skipped` 原样转成
-                    # 这个异常):可能是预算用完、可能是按了停止、也可能是整批撞上
-                    # 人机验证就此中止(`x_browser.VERIFY_SKIPPED`)。一律写成
-                    # "预算不足"会把人引去调大预算,而那三件事里只有一件是预算。
+                    # 这个异常):可能是这一轮的时间预算用完,也可能是按了停止。
+                    # 一律写成"预算不足"会把人引去调大预算,而那改不了按停止那件事。
                     summary['skipped'] += 1
                     _note_skip(summary, str(e) or BUDGET_MESSAGE)
                     continue

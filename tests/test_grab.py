@@ -445,6 +445,28 @@ class PageTests(GrabCase):
         with self.assertRaises(grab.GrabError):
             self.page(html_resp(hooked))
 
+    def test_shared_gate_components_do_not_store_real_gates_or_refuse_inert_examples(self):
+        for extra in [
+                '<script src="/CDN-CGI/Challenge-Platform/h/flow"></script>',
+                '<script type="TEXT/JAVASCRIPT">window._CF_CHL_OPT = {};</script>',
+                '<form action="/CDN-CGI/CHALLENGE-PLATFORM/H/flow"></form>']:
+            with self.subTest(extra=extra), self.assertRaises(grab.GrabError):
+                self.save_page(html_resp(page_html(extra=extra)))
+            self.assertEqual([], self.items())
+        for index, extra in enumerate([
+                '<script type="application/json">{"endpoint":"/cdn-cgi/challenge-platform/h/b/"}'
+                '</script>',
+                '<script type="application/json" src="/cdn-cgi/challenge-platform/h/flow"></script>',
+                '<script src="" type="module">window._CF_CHL_OPT = {};</script>',
+                '<template><script src="/cdn-cgi/challenge-platform/h/flow"></script></template>']):
+            with self.subTest(extra=extra):
+                try:
+                    self.save_page(html_resp(page_html(extra=extra)), PAGE + f'?example={index}')
+                except grab.GrabError as exc:
+                    self.fail(f'inert example incorrectly refused: {exc}')
+                self.assertEqual(index + 1, len(self.items()))
+                self.assertTrue(all('这是正文第一段' in item['body'] for item in self.items()))
+
     def test_a_login_box_in_the_page_furniture_is_not_a_wall(self):
         """**反过来钉一边。** 页眉里常驻一个登录框的站点多得是 —— 那不是拦在正文
         上的墙。位置判据借正文提取自己那一份(`readable.in_furniture`),不另写一张

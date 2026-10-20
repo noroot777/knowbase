@@ -19,7 +19,7 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from kb.feeds import x_browser, x_channels, x_feedgrab
-from tests.x_page_state import page_state
+from tests.x_state_fixture import page_state
 
 # 样本时间跟着今天走,理由同 test_x_channels:新订阅只收最近几天,写死一个日期
 # 的话过几天红的是一堆跟通道毫无关系的用例。

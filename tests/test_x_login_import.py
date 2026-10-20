@@ -27,7 +27,7 @@ from kb.feeds import cdp_attach, x_browser, x_channels, x_login_import
 from kb.feeds.x_cdp import CdpError
 # 摆盘在 `x_login_fixture`(三组用例共用,单拆只因为 700 行上限)。
 from tests.x_login_fixture import (ATTACH, BROWSER, ImportBase, cookie, logged_in)
-from tests.x_page_state import page_state
+from tests.x_state_fixture import page_state
 
 
 class ScopeTests(unittest.TestCase):

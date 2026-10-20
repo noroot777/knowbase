@@ -34,8 +34,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from kb.feeds import x_article
+from kb.feeds import x_article, x_page_state, x_post
 from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
+from kb.feeds.x_page_state import (
+    STATE_JS, XAccessBlocked, XBrowserError, XRateLimited, navigate, read)
+from kb.feeds.x_page_state import problem as page_problem
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 # 连续多少条老推文算"翻到底了"。1 不够:转推带的是原推时间,单条老的很常见。
@@ -47,9 +50,6 @@ FIRST_DAYS = 14
 # (盘点号一天几十条),时间防"每次滚都等满超时"。
 MAX_SCROLLS = 40
 ACCOUNT_SECONDS = 50.0
-# 整批撞上人机验证时,没轮到的那些账号留下的话。**它要走"跳过"那条路**(见
-# `harvest` 的熔断),所以措辞得说清"没尝试过",别让人读成"抓过了但是空的"。
-VERIFY_SKIPPED = 'X 要求人机验证,本轮剩余账号没有尝试（避免反复触发风控）'
 # 每次滚动后等新节点出现的上限。X 的懒加载实测 0.3~1.5 秒。
 _SETTLE_SECONDS = 2.5
 _SETTLE_STEP = 0.25
@@ -67,6 +67,7 @@ _BOTTOM_TRIES = 3
 # 按时间排序的话,三条不相邻的旧转推会被拼成一条"连续的老尾巴"。
 _COLLECT_JS = r'''
 (() => {
+''' + x_post.TEXT_JS + r'''
   const S = window.__kbX = window.__kbX || {seen: new Map()};
   const norm = s => (s || '').replace(/ /g, ' ').trim();
   let parsed = 0, articles = 0;
@@ -79,7 +80,8 @@ _COLLECT_JS = r'''
     if (!m) continue;
     parsed++;
     const ctx = norm(art.querySelector('[data-testid="socialContext"]')?.innerText);
-    const text = norm(art.querySelector('[data-testid="tweetText"]')?.innerText);
+    const text = postText(ownNode(art, '[data-testid="tweetText"]'));
+    const truncated = postMore(art);
     // 作者块的第一行是显示名,后面跟着 @handle 和时间,只取第一行。
     const who = norm(art.querySelector('[data-testid="User-Name"]')?.innerText).split('\n')[0];
     // **长文卡片**:X 把推文里那条 `/i/article/<id>` 链接藏起来、改渲染成一张
@@ -91,6 +93,7 @@ _COLLECT_JS = r'''
     // 文章,按它去补就是把别人的正文记成这条推文的内容。排错了也只是回到漏掉
     // 的现状,而收错了是污染 —— 这个方向上宁可多排。
     const quote = art.querySelector('div[role="link"]');
+    const quoted = !!art.querySelector('[data-testid="quoteTweet"], div[role="link"] [data-testid="tweetText"]');
     const card = [...art.querySelectorAll('a[href*="/article/"]')]
                    .find(a => !(quote && quote.contains(a)));
     const art_url = card ? card.href : '';
@@ -102,10 +105,14 @@ _COLLECT_JS = r'''
     if (!prev || (text && text.length > (prev.text || '').length)) {
       S.seen.set(id, {id, author: m[1], name: who, datetime: time.getAttribute('datetime'),
                       text, context: ctx, url: `https://x.com/${m[1]}/status/${id}`,
-                      article: art_url || (prev && prev.article) || ''});
+                      article: art_url || (prev && prev.article) || '',
+                      quoted: quoted || !!prev?.quoted,
+                      truncated: truncated || !!prev?.truncated});
     } else if (art_url && prev && !prev.article) {
       prev.article = art_url;
     }
+    if (truncated) S.seen.get(id).truncated = true;
+    if (quoted) S.seen.get(id).quoted = true;
   }
   return JSON.stringify({articles, parsed, items: [...S.seen.values()]});
 })()
@@ -125,55 +132,10 @@ _SCROLL_JS = r'''
 # 登录态失效的几种落地页。X 会跳 /i/flow/login,也会在原地渲染登录按钮。
 _STATE_JS = r'''
 (() => {
-  const txt = (document.body?.innerText || '').slice(0, 4000);
-  const tweets = document.querySelectorAll('article[data-testid="tweet"]').length;
-  // **X 自己那套应用骨架在不在。** 这是下面那道结构门唯一的判据:时间线、个人
-  // 简介、引用卡片这些**用户写的东西**全都由这套骨架渲染出来,而 Cloudflare 的
-  // 挑战页是一张独立 HTML,一个 `data-testid` 都没有。空账号(零条推文)照样有
-  // 骨架,所以这道门不会把"没发过推的号"错当成挑战页。
-  const app = !!document.querySelector('#react-root, [data-testid="primaryColumn"]');
-  return JSON.stringify({
-    url: location.href,
-    ready: document.readyState,
-    articles: tweets,
-    login: !!document.querySelector('[data-testid="loginButton"], [data-testid="login"]')
-           || /^\/i\/flow\/login/.test(location.pathname),
-    // **人机验证页**:X 把请求重定向到 `/account/access`,那张页上套着
-    // Cloudflare 的挑战。它既没有推文卡片、也没有登录按钮,上下这三道一道都不
-    // 命中 —— 认不出来的后果不是报错文案难看,是**每个账号白等满
-    // `ACCOUNT_SECONDS`**(见 `_wait_state`),一整轮预算就这么烧完。
-    //
-    // **两条路各自成立,而且文案那条必须先过结构门**:
-    // ①**路由**:`/account/access`,带结尾边界 —— 挡它自己的**前缀延伸**
-    //   (`/account/accessibility` 那类正常页),否则会被判成受限、中止整批。
-    // ②**文案 + 结构门**:挑战页也可能落在别的路径上,所以文案那几句还要留着
-    //   —— 但**正文是用户能写的东西**:一条讨论 Cloudflare 的推文、一段引用、
-    //   个人简介里原样抄下这几句,光凭正文就会把一个**读得好好的**账号判成受限,
-    //   进而让 `harvest` 把整批后续账号全部中止(审查第 1 轮实测)。所以文案那
-    //   条必须同时满足「没有 X 的应用骨架」和「一张推文卡片都没有」——
-    //   **用户内容证明不了会话状态,只有页面级证据可以。**
-    verify: /^\/account\/access(?:[\/?#]|$)/.test(location.pathname)
-            || (!app && !tweets
-                && /本网站使用安全服务防护恶意自动程序|Verifying you are human|needs to review the security of your connection/i.test(txt)),
-    empty: /Hmm\.\.\.this page doesn|这个页面不存在|Account suspended|账号已被冻结|doesn’t exist|does not exist/i.test(txt),
-    limited: /Rate limit exceeded|Something went wrong\. Try reloading|请稍后再试/i.test(txt),
-  });
+''' + STATE_JS + r'''
+  return JSON.stringify(xPageState());
 })()
 '''
-
-
-class XBrowserError(RuntimeError):
-    """浏览器通道的失败。message 是成品文案。"""
-
-
-class XVerifyRequired(XBrowserError):
-    """X 要求先过一次人机验证 —— **账号级**拦截,不是这一个账号这一次的问题。
-
-    整批用的是同一个账号、同一个 profile,所以第一个被挡就意味着其余每一个都会
-    被挡:继续逐个撞只是拿同一个信号再敲几十次风控。`harvest` 据此整批中止
-    (见那里的熔断),而且重试一次也救不回来 —— 出路只有人去浏览器里把那次验证
-    过完。所以它必须和别的失败分得开。
-    """
 
 
 def _as_published(iso: str) -> str:
@@ -258,11 +220,18 @@ def _own_tweet(item: dict, handle: str) -> bool:
     return (item.get('author') or '').lower() == handle.lower()
 
 
+def _quote_only(item: dict) -> bool:
+    return bool(item.get('quoted') and not (item.get('text') or '').strip()
+                and not item.get('article') and not item.get('truncated'))
+
+
 def _entry(item: dict) -> dict | None:
     """一条推文 → feed_items 的条目形状。没正文也没链接的不要。"""
     published = _as_published(item.get('datetime', ''))
     text = (item.get('text') or '').strip()
     if not item.get('url') or not (text or published):
+        return None
+    if _quote_only(item):
         return None
     name = item.get('name') or item.get('author') or ''
     context = (item.get('context') or '').strip()
@@ -276,39 +245,37 @@ def _entry(item: dict) -> dict | None:
     # 它摘掉(`_strip_hint`),不会进 `feed_items`。
     if item.get('article'):
         out[x_article.HINT] = str(item['article'])
+    if item.get('truncated'):
+        out[x_post.HINT] = body[:-len(text)] if text else body
     return out
 
 
 def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
-    """等页面落定,顺带认出登录失效/人机验证/限流/账号打不开这四种不该当成
-    "没有推文"的情况 —— 它们都能让页面加载完却一条推文都没有,折叠掉任何一种,
-    那一种就会变成"白等满 `ACCOUNT_SECONDS` 再报一句看不出根因的话"。
-    """
+    """等页面落定,顺带认出登录失效/不存在/限流这三种不该当成"没有推文"的情况。"""
     last = {}
+    previous_problem = ''
+    confirmed_problem = ''
+    failure = XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
     while time.monotonic() < deadline:
-        last = json.loads(page.eval(_STATE_JS))
+        last = read(page, _STATE_JS)
         if last['login']:
             # **两条自救路都要说。** 这句话出现在每条失败订阅的旁边,而「重新登录」
             # 只是其中一条:登录态是导进来的那些人要的是再导一次(见
             # `x_login_import`),把他推去无头壳里登一次正是他想免掉的那一步。
             raise XBrowserError('X 登录态已失效,请在浏览器通道设置里重新登录,'
                                 '或从日常浏览器再导入一次')
-        if last['verify']:
-            # **要排在限流之后判断吗 —— 不,排在它前面。** 这张页讲的是"证明你
-            # 不是机器人",不是"你太快了":报成限流会把人引去"稍后重试/降低频率",
-            # 而稍后重试一万次都不会让它过去。登录那一道留在前面:这张页要先有
-            # 登录态才会出现,登录态真掉了该先说那句。
-            raise XVerifyRequired(
-                'X 要求先过一次人机验证（账号访问受限）。请在日常浏览器里登录'
-                '同一个账号、打开 x.com/account/access 把验证做完,确认能正常刷'
-                '时间线之后再同步 —— 这一关换浏览器或者重试都绕不过去')
-        if last['limited']:
-            raise XBrowserError('X 暂时限制了访问频率,请稍后重试或降低同步频率')
+        current_problem = page_problem(last)
+        if last['articles'] and last['ready'] == 'complete' and not current_problem:
+            return last
+        confirmed_problem = current_problem if current_problem == previous_problem else ''
+        if error := x_page_state.escalate(last, confirmed_problem, failure):
+            raise error
+        previous_problem = current_problem
         if last['empty']:
             raise XBrowserError(f'@{handle} 这个账号在 X 上打不开(可能已改名、注销或被冻结)')
-        if last['articles'] and last['ready'] == 'complete':
-            return last
         time.sleep(0.3)
+    if error := x_page_state.escalate(last, confirmed_problem, failure, expired=True):
+        raise error
     if last.get('ready') != 'complete':
         raise XBrowserError(f'@{handle} 的页面没有加载完')
     raise XBrowserError(f'@{handle} 的时间线上没有读到推文')
@@ -323,7 +290,7 @@ def _harvest_one(page: Chrome, handle: str,
     不在底部(懒加载卡住/被限流)。没有下界(floor 为空)时无从谈起"读到水位",
     那是新订阅的首轮,按读到的为准。
     """
-    page.goto(f'https://x.com/{handle}')
+    navigate(page, f'https://x.com/{handle}')
     deadline = time.monotonic() + ACCOUNT_SECONDS
     _wait_state(page, handle, deadline)
     page.eval(_RESET_JS)
@@ -408,7 +375,16 @@ def _settle(page: Chrome, before: int, deadline: float) -> bool:
     return False
 
 
-def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list[dict]:
+class TimelineEntries(list):
+    """Selected entries plus informational skips and their observed timestamps."""
+
+    def __init__(self):
+        super().__init__()
+        self.skipped_quotes = 0
+        self.skipped_newest = None
+
+
+def _select(items: list[dict], floor: datetime | None, handle: str = '') -> TimelineEntries:
     """落到 feed_items 之前的最后一道:去掉不属于这条时间线的和过老的,转成条目形状。
 
     哪些不属于见 `_in_timeline`(推广位、推荐位)—— 入库口径只有那一份,两处各判
@@ -416,7 +392,7 @@ def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list
     翻到底的证明(`_own_tweet`),但刚发出来就被钉上去的推文在 X 上看得见,不收
     就是永久丢掉一条真内容。
     """
-    out = []
+    out = TimelineEntries()
     for item in sorted(items, key=lambda i: i.get('datetime') or ''):
         if not _in_timeline(item, handle):
             continue
@@ -425,6 +401,9 @@ def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list
             continue
         if entry := _entry(item):
             out.append(entry)
+        elif _quote_only(item) and item.get('url') and when:
+            out.skipped_quotes += 1
+            out.skipped_newest = max(out.skipped_newest, when) if out.skipped_newest else when
     return out
 
 
@@ -452,8 +431,8 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
     jobs:  [(handle, 水位 ISO 或空串)]
     返回:  {handle: {'entries': [...], 'error': '', 'watermark': ISO}}
 
-    整批共用一个浏览器会话;任何一个账号的失败只落在它自己那一项上,不影响其余
-    ——这条通道一轮跑几十个账号,一个改名的号不该把整轮带掉。
+    整批共用一个浏览器会话;普通账号失败只落在它自己那一项上,不影响其余。
+    明确限流则停止余批,保留已完成账号的结果,未完成账号报同一原因且不推进水位。
 
     `attach` 决定浏览器从哪儿来(见 `browser_session`)。整批共用一个会话这件事
     两条路都成立,只是理由不同:独立 profile 那条是因为起一个 Chrome 要两三秒、
@@ -493,6 +472,10 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 started = water or floor.isoformat()
                 try:
                     entries, incomplete = _harvest_one(page, handle, floor)
+                    skipped_quotes = getattr(entries, 'skipped_quotes', 0)
+                    observed_watermark = _newest(entries, water)
+                    note = (f'跳过 {skipped_quotes} 条本人无正文的引用推文,未冒充本人观点入库'
+                            if skipped_quotes else '')
                     # 长文(Article)推文在时间线上一个字都没有,正文要单独取一次。
                     # 取不到的那几条本轮不入库、并按"没读完"办 —— 空正文一旦落库
                     # 就再也更新不了(`put_items` 是 DO NOTHING),见 `x_article`。
@@ -511,7 +494,7 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # (2026-10-09 第 1 轮审查实测:预算 0.020 秒的一轮,停止在
                     # 第一条之后就置位了,后面照样新发 7 次请求、耗时 0.323 秒,
                     # 8 条全留下、`incomplete` 空、水位照常前进)。
-                    entries, missing = x_article.fill(
+                    entries, missing = x_post.complete(
                         entries, session=page,
                         deadline=deadline, should_stop=should_stop)
                     if missing:
@@ -523,29 +506,16 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # `put_items` 按 URL 去重,一条都不会重复入库。
                     results[handle] = {
                         'entries': entries, 'error': '', 'incomplete': incomplete,
-                        'watermark': started if incomplete else _newest(entries, water)}
-                except XVerifyRequired as e:
-                    # **账号级拦截就此整批中止。** 下一个账号用的是同一个账号、
-                    # 同一个 profile,必然撞同一张页,所以继续走下去只有两个后果:
-                    # 把同一个信号再敲几十次风控,外加烧光整轮预算。
-                    #
-                    # **剩下的记"跳过"而不是"失败"**,这一步是故意的:它们压根
-                    # 没被尝试过,水位一个字没动;记成失败会让它们进「重试失败项」
-                    # 的名单(见 `docs/decisions/retry-scope.md` 那条「预算跳过和
-                    # 退避中不进名单」),换来的正是下一轮整批重撞 —— 而那是这道
-                    # 熔断要防的事。命中的那一个照旧记失败:它是这一轮唯一真正
-                    # 被拦住的证据,面板要显示它、人要照它那句话去过验证。
-                    results[handle] = {'entries': [], 'error': str(e)}
-                    for rest, _ in jobs[index:]:
-                        results.setdefault(rest, {'entries': [], 'error': '',
-                                                  'skipped': VERIFY_SKIPPED})
-                    break
+                        'skipped_quotes': skipped_quotes, 'note': note,
+                        'watermark': started if incomplete else observed_watermark}
+                except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable):
+                    raise
                 except (XBrowserError, CdpError) as e:
                     results[handle] = {'entries': [], 'error': str(e)}
-    except (CdpError, EOFError, OSError) as e:
+    except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable, CdpError, EOFError, OSError) as e:
         # 浏览器整个起不来/中途死了:剩下的账号统一记成同一个原因,
         # 而不是逐个报一条看不出共同根因的错。
-        reason = str(e) if isinstance(e, CdpError) else f'浏览器会话中断:{e}'
+        reason = str(e) if isinstance(e, (XBrowserError, x_post.PostSessionUnavailable, CdpError)) else f'浏览器会话中断:{e}'
         for handle, _ in jobs:
             results.setdefault(handle, {'entries': [], 'error': reason})
     return results
@@ -557,15 +527,10 @@ def _newest(entries: list[dict], fallback: str) -> str:
     **一条都没抓到时沿用旧水位**,不要改成"现在":那等于把这段时间宣布为已抓过,
     而这一轮可能只是没滚到(预算用完、X 限流)。水位只前进到确实见过的那条推文。
     """
-    stamps = [e['published'] for e in entries if e.get('published')]
-    if not stamps:
-        return fallback
-    newest = max(stamps)
-    try:
-        local = datetime.strptime(newest, '%Y-%m-%d %H:%M').replace(tzinfo=SHANGHAI)
-    except ValueError:
-        return fallback
-    return local.astimezone(timezone.utc).isoformat()
+    stamps = [_utc(entry['published']) for entry in entries if entry.get('published')]
+    stamps.append(getattr(entries, 'skipped_newest', None))
+    newest = max((stamp for stamp in stamps if stamp is not None), default=None)
+    return newest.isoformat() if newest else fallback
 
 
 def open_login_window(profile: str, chrome_path: str = '') -> str:
@@ -601,13 +566,14 @@ def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
     """在一个已经导航到 `x.com/home` 的会话上,把落地状态判成一个结论码。
 
     返回 `(结论码, 最后那份状态)`,码有六个:`ok`(读到推文了)、`login`(掉回
-    登录页)、`verify`(X 要求过一次人机验证)、`limited`(限流)、`not-loaded`
+    登录页)、`challenge`(X 要求先过一次安全验证)、`limited`(限流)、`not-loaded`
     (首页压根没加载完)、`no-tweets`(加载完了却一条推文都没有)。
 
-    **`verify` 这一档和 `_wait_state` 用同一个判据,不许只有采集那一侧认它。**
+    **`challenge` 读 `x_page_state` 那份共享判据,不许只有采集那一侧认它。**
     不认的后果是「检查连接」和导入登录态在验证页上**各自白等满超时**,然后报
     `no-tweets` —— 面板上那句话会说成「登录态可能刚刚失效」,把人推去重新登录,
-    而登录一万次也过不了那张页(口径同元规则「口径只有一份」)。
+    而那张页要先有登录态才会出现,登录一万次也过不了(口径同元规则「口径只有
+    一份」)。
 
     **只判、不写文案。** 同一个状态在不同入口下该说的下一步完全不同:「检查连接」
     要指向**这一档自己**的登录办法(独立 profile 点按钮 / 日常浏览器里自己登),
@@ -628,8 +594,10 @@ def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
         last = json.loads(page.eval(_STATE_JS))
         if last['login']:
             return 'login', last
-        if last['verify']:
-            return 'verify', last
+        if last['challenge']:
+            # 排在限流前面:这张页讲的是"证明你不是机器人",不是"你太快了"。
+            # 报成限流会把人引去"稍后重试/降低频率",而那改不了任何事。
+            return 'challenge', last
         if last['limited']:
             return 'limited', last
         if last['articles'] and last['ready'] == 'complete':
@@ -678,11 +646,11 @@ def probe(profile: str, chrome_path: str = '', *,
                                if attach else
                                'X 登录态已失效:点「打开登录窗口」重新登录一次,'
                                '或者再点一次「从日常浏览器导入登录态」')
-            if verdict == 'verify':
-                # **不许说成登录失效。** 这张页要先有登录态才会出现,把人推去
-                # 重新登录是白跑一趟 —— 该做的是去他自己那个浏览器里把验证过完
-                # (文案和采集那一侧同一个口径,见 `_wait_state`)。
-                return False, ('X 要求先过一次人机验证（账号访问受限）:请在日常'
+            if verdict == 'challenge':
+                # **不许说成登录失效,也不许说成限流。** 这张页要先有登录态才会
+                # 出现,把人推去重新登录是白跑一趟 —— 该做的是去他自己那个浏览器
+                # 里把验证过完(文案和采集那一侧同一个口径,见 `x_page_state`)。
+                return False, ('X 要求先过一次安全验证（账号访问受限）:请在日常'
                                '浏览器里登录同一个账号、打开 x.com/account/access '
                                '把验证做完,确认能正常刷时间线之后再回来检查')
             if verdict == 'limited':
