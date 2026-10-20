@@ -126,21 +126,35 @@ _SCROLL_JS = r'''
 _STATE_JS = r'''
 (() => {
   const txt = (document.body?.innerText || '').slice(0, 4000);
+  const tweets = document.querySelectorAll('article[data-testid="tweet"]').length;
+  // **X 自己那套应用骨架在不在。** 这是下面那道结构门唯一的判据:时间线、个人
+  // 简介、引用卡片这些**用户写的东西**全都由这套骨架渲染出来,而 Cloudflare 的
+  // 挑战页是一张独立 HTML,一个 `data-testid` 都没有。空账号(零条推文)照样有
+  // 骨架,所以这道门不会把"没发过推的号"错当成挑战页。
+  const app = !!document.querySelector('#react-root, [data-testid="primaryColumn"]');
   return JSON.stringify({
     url: location.href,
     ready: document.readyState,
-    articles: document.querySelectorAll('article[data-testid="tweet"]').length,
+    articles: tweets,
     login: !!document.querySelector('[data-testid="loginButton"], [data-testid="login"]')
            || /^\/i\/flow\/login/.test(location.pathname),
     // **人机验证页**:X 把请求重定向到 `/account/access`,那张页上套着
     // Cloudflare 的挑战。它既没有推文卡片、也没有登录按钮,上下这三道一道都不
     // 命中 —— 认不出来的后果不是报错文案难看,是**每个账号白等满
     // `ACCOUNT_SECONDS`**(见 `_wait_state`),一整轮预算就这么烧完。
-    // **判据刻意窄**(URL 精确匹配 + 只会出现在挑战页上的那两句):这个方向上
-    // 误报比漏报贵 —— 误报会让整批就此中止(`harvest` 里那道熔断),而漏报只是
-    // 退回"白等 50 秒"的现状。
-    verify: /^\/account\/access/.test(location.pathname)
-            || /本网站使用安全服务防护恶意自动程序|Verifying you are human|needs to review the security of your connection/i.test(txt),
+    //
+    // **两条路各自成立,而且文案那条必须先过结构门**:
+    // ①**路由**:`/account/access`,带结尾边界 —— 挡它自己的**前缀延伸**
+    //   (`/account/accessibility` 那类正常页),否则会被判成受限、中止整批。
+    // ②**文案 + 结构门**:挑战页也可能落在别的路径上,所以文案那几句还要留着
+    //   —— 但**正文是用户能写的东西**:一条讨论 Cloudflare 的推文、一段引用、
+    //   个人简介里原样抄下这几句,光凭正文就会把一个**读得好好的**账号判成受限,
+    //   进而让 `harvest` 把整批后续账号全部中止(审查第 1 轮实测)。所以文案那
+    //   条必须同时满足「没有 X 的应用骨架」和「一张推文卡片都没有」——
+    //   **用户内容证明不了会话状态,只有页面级证据可以。**
+    verify: /^\/account\/access(?:[\/?#]|$)/.test(location.pathname)
+            || (!app && !tweets
+                && /本网站使用安全服务防护恶意自动程序|Verifying you are human|needs to review the security of your connection/i.test(txt)),
     empty: /Hmm\.\.\.this page doesn|这个页面不存在|Account suspended|账号已被冻结|doesn’t exist|does not exist/i.test(txt),
     limited: /Rate limit exceeded|Something went wrong\. Try reloading|请稍后再试/i.test(txt),
   });
@@ -586,9 +600,14 @@ def open_login_window(profile: str, chrome_path: str = '') -> str:
 def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
     """在一个已经导航到 `x.com/home` 的会话上,把落地状态判成一个结论码。
 
-    返回 `(结论码, 最后那份状态)`,码有五个:`ok`(读到推文了)、`login`(掉回
-    登录页)、`limited`(限流)、`not-loaded`(首页压根没加载完)、`no-tweets`
-    (加载完了却一条推文都没有)。
+    返回 `(结论码, 最后那份状态)`,码有六个:`ok`(读到推文了)、`login`(掉回
+    登录页)、`verify`(X 要求过一次人机验证)、`limited`(限流)、`not-loaded`
+    (首页压根没加载完)、`no-tweets`(加载完了却一条推文都没有)。
+
+    **`verify` 这一档和 `_wait_state` 用同一个判据,不许只有采集那一侧认它。**
+    不认的后果是「检查连接」和导入登录态在验证页上**各自白等满超时**,然后报
+    `no-tweets` —— 面板上那句话会说成「登录态可能刚刚失效」,把人推去重新登录,
+    而登录一万次也过不了那张页(口径同元规则「口径只有一份」)。
 
     **只判、不写文案。** 同一个状态在不同入口下该说的下一步完全不同:「检查连接」
     要指向**这一档自己**的登录办法(独立 profile 点按钮 / 日常浏览器里自己登),
@@ -609,6 +628,8 @@ def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
         last = json.loads(page.eval(_STATE_JS))
         if last['login']:
             return 'login', last
+        if last['verify']:
+            return 'verify', last
         if last['limited']:
             return 'limited', last
         if last['articles'] and last['ready'] == 'complete':
@@ -657,6 +678,13 @@ def probe(profile: str, chrome_path: str = '', *,
                                if attach else
                                'X 登录态已失效:点「打开登录窗口」重新登录一次,'
                                '或者再点一次「从日常浏览器导入登录态」')
+            if verdict == 'verify':
+                # **不许说成登录失效。** 这张页要先有登录态才会出现,把人推去
+                # 重新登录是白跑一趟 —— 该做的是去他自己那个浏览器里把验证过完
+                # (文案和采集那一侧同一个口径,见 `_wait_state`)。
+                return False, ('X 要求先过一次人机验证（账号访问受限）:请在日常'
+                               '浏览器里登录同一个账号、打开 x.com/account/access '
+                               '把验证做完,确认能正常刷时间线之后再回来检查')
             if verdict == 'limited':
                 return False, 'X 暂时限制了访问频率,稍后再试'
             if verdict == 'ok':

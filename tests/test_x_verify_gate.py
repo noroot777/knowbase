@@ -35,15 +35,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kb import maintenance, pipeline_state
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg, sync, x_browser, x_channels
+from tests.x_page_state import page_state
 
 FRESH = datetime.now(timezone.utc) - timedelta(hours=3)
 OLD = datetime.now(timezone.utc) - timedelta(days=9)
 FLOOR = datetime.now(timezone.utc) - timedelta(days=4)
 FLOOR_ISO = FLOOR.isoformat()
 
-_VERIFY_STATE = {'url': 'https://x.com/account/access', 'ready': 'complete',
-                 'articles': 0, 'login': False, 'verify': True,
-                 'empty': False, 'limited': False}
+_VERIFY_STATE = page_state(url='https://x.com/account/access', verify=True)
 
 
 def _tweet(handle, id_, when, context=''):
@@ -85,9 +84,8 @@ class FakePage:
             self.state_evals[self.handle] += 1
             if self.verdicts.get(self.handle) == 'verify':
                 return json.dumps(_VERIFY_STATE)
-            return json.dumps({'url': f'https://x.com/{self.handle}', 'ready': 'complete',
-                               'articles': 4, 'login': False, 'verify': False,
-                               'empty': False, 'limited': False})
+            return json.dumps(page_state(url=f'https://x.com/{self.handle}',
+                                         articles=4))
         if js == x_browser._COLLECT_JS:
             items = self._items()
             return json.dumps({'articles': len(items), 'parsed': len(items), 'items': items})
@@ -230,33 +228,161 @@ class RetryListTests(unittest.TestCase):
         self.assertEqual(3, summary['added'])
 
 
+class VerifyTimelineTests(unittest.TestCase):
+    """同一份判据的**另外两个消费口径**:「检查连接」和导入登录态那条链。
+
+    不认 `verify` 的后果不是文案难看:它们会在验证页上**各自白等满超时**、然后
+    报 `no-tweets`,而那一档的面板文案把人推去重新登录 —— 登录一万次也过不了那
+    张页。所以判据只有一份,三个消费者都得认(元规则「口径只有一份」)。
+    """
+
+    class Page:
+        def __init__(self, state):
+            self.state, self.evals = state, 0
+
+        def eval(self, js, **kw):
+            self.evals += 1
+            return json.dumps(self.state)
+
+        def open_page(self, url):
+            pass
+
+        def goto(self, url):
+            pass
+
+    def test_it_reports_verification_instead_of_waiting_out_the_timeout(self):
+        """**判据是问了几次**:不认它的话要问满 timeout 才返回 `no-tweets`。"""
+        page = self.Page(_VERIFY_STATE)
+        verdict, _ = x_browser.verify_timeline(page, timeout=30)
+        self.assertEqual('verify', verdict)
+        self.assertEqual(1, page.evals)
+
+    def test_a_normal_timeline_is_still_ok(self):
+        """反过来钉一边:正常首页照旧 `ok`,没被新判据抢走。"""
+        page = self.Page(page_state(url='https://x.com/home', articles=5))
+        self.assertEqual('ok', x_browser.verify_timeline(page, timeout=30)[0])
+
+    def test_the_connection_check_does_not_blame_the_login(self):
+        """「检查连接」那句话要指到过验证,不是指到重新登录。"""
+        page = self.Page(_VERIFY_STATE)
+        with patch.object(x_browser, 'profile_busy', lambda *a, **k: False), \
+                patch.object(x_browser, 'browser_session',
+                             lambda *a, **k: _session(page)):
+            ok, detail = x_browser.probe('/tmp/unused')
+        self.assertFalse(ok)
+        self.assertIn('人机验证', detail)
+        self.assertIn('x.com/account/access', detail)
+        self.assertNotIn('打开登录窗口', detail)
+
+    def test_the_import_wording_has_its_own_line_for_it(self):
+        """导入登录态那条链的结论码 → 人话,也要有这一档。"""
+        from kb.feeds import x_login_words
+        tail = x_login_words._VERDICT_TAIL['verify']
+        self.assertIn('人机验证', tail)
+        self.assertNotIn('打开登录窗口', tail)
+        # 反过来钉一边:原来那几档一个字都没被动。
+        self.assertIn('打开登录窗口', x_login_words._VERDICT_TAIL['login'])
+
+
+class SkipReasonTests(unittest.TestCase):
+    """一轮里有几种跳过原因,面板那句话要**全说出来**,不是只剩最后写进去的那个。
+
+    `skipped` 是各种原因之和,解释也得是:只留一个全局字符串的话,浏览器通道因
+    验证中止、HTTP 那几条又耗尽预算的那一轮,给出的解释由线程池完成顺序决定。
+    **这里直测 `_note_skip`**,因为端到端要让两种原因在同一轮里同时发生,得靠
+    线程调度时序去卡预算边界 —— 那样的用例钉不住口径,只会偶发。原因到面板行文
+    的那一段由 `RetryListTests` 端到端覆盖。
+    """
+
+    def _summary(self):
+        return {'skipped': 0, 'message': '', 'skip_reasons': []}
+
+    def test_both_reasons_survive(self):
+        s = self._summary()
+        sync._note_skip(s, x_browser.VERIFY_SKIPPED)
+        sync._note_skip(s, sync.BUDGET_MESSAGE)
+        self.assertIn(x_browser.VERIFY_SKIPPED, s['message'])
+        self.assertIn(sync.BUDGET_MESSAGE, s['message'])
+        self.assertEqual(2, len(s['skip_reasons']))
+
+    def test_the_same_reason_is_said_once(self):
+        """同一个原因跳过几十条,也只说一遍。"""
+        s = self._summary()
+        for _ in range(30):
+            sync._note_skip(s, x_browser.VERIFY_SKIPPED)
+        self.assertEqual([x_browser.VERIFY_SKIPPED], s['skip_reasons'])
+        self.assertEqual(x_browser.VERIFY_SKIPPED, s['message'])
+
+    def test_the_order_is_the_order_they_happened(self):
+        s = self._summary()
+        sync._note_skip(s, 'A')
+        sync._note_skip(s, 'B')
+        sync._note_skip(s, 'A')
+        self.assertEqual('A；B', s['message'])
+
+
 class StatePageTests(unittest.TestCase):
     """`_STATE_JS` 那段判据本身:把**生产那个常量**丢给 node 求值。
 
     在 Python 里复述那几条正则是证明不了任何事的 —— 复述版和真代码改坏成不一样
     的两种,用例照样全绿。这里 import 来的 `x_browser._STATE_JS` 就是采集时真用
-    的那一段,连同 `body` 和用例一起从 stdin 交给 node(避开 argv 的引号语义)。
+    的那一段,连同 `body`、页面结构和用例一起从 stdin 交给 node(避开 argv 的引号
+    语义)。
+
+    **每个输入都要给页面结构**(`app` = X 的应用骨架在不在、`tweets` = 有几张推文
+    卡片),因为文案那条判据必须先过这道结构门 —— 审查第 1 轮实测:只凭正文搜索,
+    一条**讨论** Cloudflare 的正常推文就能把整批采集停掉。所以这组用例里"文案命中
+    但页面是正常的"那几条,红的方向和"挑战页认不出来"正好相反,两边都得钉住。
     """
 
+    CHALLENGE = ('x.com\n正在进行安全验证\n\n本网站使用安全服务防护恶意自动程序。'
+                 '在验证您不是自动程序期间，将显示此页面。\n\nRay ID: a4d43d6e9b2ace7a\n'
+                 '由 Cloudflare 提供的性能和安全服务\n隐私')
+
+    # (说明, pathname, 正文, 有 X 骨架吗, 几张推文卡片, 该不该判成"要验证")
     CASES = [
         # 这一条的输入是 2026-10-20 真抓到的那张页(url + body 原文,见
         # `docs/decisions/x-channels.md` 那一节),不是照着判据反写的样本。
-        ('实测那张账号受限页', '/account/access',
-         'x.com\n正在进行安全验证\n\n本网站使用安全服务防护恶意自动程序。'
-         '在验证您不是自动程序期间，将显示此页面。\n\nRay ID: a4d43d6e9b2ace7a\n'
-         '由 Cloudflare 提供的性能和安全服务\n隐私', True),
+        ('实测那张账号受限页', '/account/access', CHALLENGE, False, 0, True),
         ('只凭地址也要认出来（挑战文案还没渲染出来那一瞬）',
-         '/account/access', 'x.com\n请稍候…', True),
-        ('Cloudflare 中文挑战页', '/karpathy',
-         '正在进行安全验证\n本网站使用安全服务防护恶意自动程序。', True),
-        ('Cloudflare 英文挑战页', '/karpathy',
-         'Verifying you are human. This may take a few seconds.', True),
-        ('连接复核那一句', '/karpathy',
-         'x.com needs to review the security of your connection before proceeding.', True),
-        ('正常时间线不许命中', '/karpathy',
-         '首页\n探索\n通知\nAndrej Karpathy\n关注\n一条正经的推文,顺便提一句安全。', False),
-        ('只是正文里提到"验证"也不许命中', '/karpathy',
-         '我们给登录加了二步验证,安全多了。', False),
+         '/account/access', 'x.com\n请稍候…', False, 0, True),
+        ('挑战页落在别的路径上时,文案那条顶上',
+         '/karpathy', 'Verifying you are human. This may take a few seconds.',
+         False, 0, True),
+        ('连接复核那一句同理', '/karpathy',
+         'x.com needs to review the security of your connection before proceeding.',
+         False, 0, True),
+        # 下面这几条是**误报方向**:页面读得好好的,不许因为正文里有那几句就中止整批。
+        ('正常推文原样引用挑战提示 —— 不许命中', '/simonw',
+         '首页\n探索\nSimon Willison\n关注\n顺手记一下:Cloudflare 那张页上写的是'
+         '“Verifying you are human”,挺眼熟。', True, 12, False),
+        ('整段挑战文案被当成推文内容转述 —— 不许命中', '/karpathy',
+         '有人给我发了这个:' + CHALLENGE, True, 8, False),
+        ('一条推文都没有的号,简介里引用提示 —— 不许命中', '/freshacct',
+         '首页\n探索\nFresh Account\n简介:本网站使用安全服务防护恶意自动程序。',
+         True, 0, False),
+        ('正常时间线本来就不该命中', '/karpathy',
+         '首页\n探索\n通知\nAndrej Karpathy\n关注\n一条正经的推文,顺便提一句安全。',
+         True, 20, False),
+        ('只是正文里提到"二步验证"也不许命中', '/karpathy',
+         '我们给登录加了二步验证,安全多了。', True, 5, False),
+        # **结构门那两道各自成立,各自有自己的红。** 骨架选择器(`#react-root` /
+        # `primaryColumn`)是 X 自己的 DOM 约定,它改名的那天 `!app` 会在**正常
+        # 页面上**成立 —— 那时候"一张推文卡片都没有"是最后一道。反过来,页面没
+        # 加载完时 `tweets` 为 0 而骨架已经在了,靠的是 `!app` 那一道。少任何一
+        # 道,一条转述挑战文案的正常推文就能把整批采集停掉。
+        ('骨架认不出来、但读到了推文 —— 不许命中', '/karpathy',
+         '有人给我发了这个:' + CHALLENGE, False, 9, False),
+        # 路由那条要有结尾边界:挡的是 `/account/access` 自己的**前缀延伸**
+        # (`accessibility` 那类),不是 `/account/` 下面的别的页 —— 正则钉的是
+        # `^/account/access`,`/account/settings` 在带不带边界两种写法下都不命中,
+        # 拿它当反例是测不到边界的(本轮定点注入实测红 0,用例不敏感)。
+        ('账号设置页不是受限页', '/account/settings',
+         '首页\n账号设置\n修改密码', True, 0, False),
+        ('受限页地址的前缀延伸页不是受限页', '/account/accessibility',
+         '首页\n辅助功能\n减少动画', True, 3, False),
+        ('带查询串的受限页照旧命中', '/account/access?lang=zh',
+         'x.com\n请稍候…', False, 0, True),
     ]
 
     NODE = """
@@ -265,28 +391,37 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data', d => { input += d; });
 process.stdin.on('end', () => {
   const {body, cases} = JSON.parse(input);
-  const out = cases.map(([name, pathname, text]) => {
-    global.location = {pathname, href: 'https://x.com' + pathname};
-    global.document = {readyState: 'complete', body: {innerText: text},
-                       querySelector: () => null, querySelectorAll: () => []};
+  const out = cases.map(([name, url, text, app, tweets]) => {
+    const [pathname, search] = url.split('?');
+    global.location = {pathname, search: search ? '?' + search : '',
+                       href: 'https://x.com' + url};
+    global.document = {
+      readyState: 'complete',
+      body: {innerText: text},
+      // 只认得出两类选择器:X 的应用骨架、推文卡片。别的(登录按钮)一律没有。
+      querySelector: sel => (app && /react-root|primaryColumn/.test(sel)) ? {} : null,
+      querySelectorAll: sel => /article\[data-testid="tweet"\]/.test(sel)
+                               ? new Array(tweets).fill({}) : [],
+    };
     return JSON.parse(eval(body)).verify;
   });
   process.stdout.write(JSON.stringify(out));
 });
 """
 
-    def test_the_verification_judgement_matches_only_the_challenge_pages(self):
+    def test_the_verification_judgement_needs_page_level_evidence(self):
         node = shutil.which('node')
         if not node:
             self.skipTest('没有 node')
         payload = json.dumps({'body': x_browser._STATE_JS,
-                              'cases': [[n, p, t] for n, p, t, _ in self.CASES]})
+                              'cases': [[n, p, t, a, w]
+                                        for n, p, t, a, w, _ in self.CASES]})
         r = subprocess.run([node, '-e', self.NODE], input=payload,
                            capture_output=True, text=True, timeout=60)
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         got = json.loads(r.stdout)
         self.assertEqual(len(self.CASES), len(got))
-        for (name, _, _, want), real in zip(self.CASES, got):
+        for (name, _, _, _, _, want), real in zip(self.CASES, got):
             self.assertEqual(want, real, name)
 
 

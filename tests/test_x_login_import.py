@@ -12,7 +12,7 @@
 - 把「写进去了」当成「可以用了」,下一个发现真相的时刻是第二天早上那一轮同步;
 - cookie 值落进明文 JSON,等于把这个功能防的事自己做一遍。
 
-`probe` 那一组钉的是另一件事:`verify_timeline` 是从它里面抽出来的,**抽完五档文案
+`probe` 那一组钉的是另一件事:`verify_timeline` 是从它里面抽出来的,**抽完每一档文案
 一个字都不许变**(元规则「搬代码要逐符号对过原文」)—— 所以那一组驱动的是真的
 `verify_timeline`,不是打桩的。
 """
@@ -27,6 +27,7 @@ from kb.feeds import cdp_attach, x_browser, x_channels, x_login_import
 from kb.feeds.x_cdp import CdpError
 # 摆盘在 `x_login_fixture`(三组用例共用,单拆只因为 700 行上限)。
 from tests.x_login_fixture import (ATTACH, BROWSER, ImportBase, cookie, logged_in)
+from tests.x_page_state import page_state
 
 
 class ScopeTests(unittest.TestCase):
@@ -405,13 +406,11 @@ class FakePage:
     def eval(self, _expr, timeout=0.0):
         state = self.states[min(self.seen, len(self.states) - 1)]
         self.seen += 1
-        return json.dumps({'url': 'https://x.com/home', 'ready': 'complete',
-                           'articles': 0, 'login': False, 'empty': False,
-                           'limited': False} | state)
+        return json.dumps(page_state(url='https://x.com/home') | state)
 
 
 class ProbeWordingTests(unittest.TestCase):
-    """`verify_timeline` 是从 `probe` 里抽出来的 —— **抽完五档文案一个字都不许变。**
+    """`verify_timeline` 是从 `probe` 里抽出来的 —— **抽完每一档文案一个字都不许变。**
 
     所以这一组驱动的是**真的** `verify_timeline`(只打桩浏览器会话),而不是把它
     也打掉:打掉的话这一组就只在验打桩本身,而「搬代码要逐符号对过原文」那条元规则

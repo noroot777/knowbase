@@ -55,6 +55,20 @@ def _fetch_with_budget(source, settings, scope, collect_deadline):
     return enrich(source, entries, deadline=deadline, collect_deadline=collect_deadline), validators
 
 
+def _note_skip(summary, why: str) -> None:
+    """记一条「这一轮有订阅被跳过」的理由。**三个写入口都过这里。**
+
+    **理由不许互相覆盖。** 同一轮里完全可以既有浏览器通道因人机验证整批中止
+    (`x_browser.VERIFY_SKIPPED`)、又有 HTTP 那几条耗尽采集预算:只留最后写进去
+    的那一句的话,面板给出的解释由线程池的完成顺序决定 —— 验证那一句可能被说成
+    预算不足,反过来也一样(审查第 1 轮非阻塞 C)。`skipped` 是各种原因**之和**,
+    那句解释也得是。按出现顺序去重,同一个原因跳过几十条也只说一遍。
+    """
+    if why not in summary['skip_reasons']:
+        summary['skip_reasons'].append(why)
+    summary['message'] = '；'.join(summary['skip_reasons'])
+
+
 def _repointed(c, source) -> bool:
     """手里这份结果还属于这条订阅吗? —— 存盘那个事务里现读一次身份再答。
 
@@ -262,12 +276,14 @@ def collect(kind, scope):
         _stage('crawl', 'ok', f'{reg.KINDS[kind]} · 没有要轮询的来源'
                               f'（内容在收录那一刻已经抓好）')
         return {'sources': 0, 'checked': 0, 'added': 0, 'deferred': 0,
-                'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [],
+                'unconfigured': 0, 'skipped': 0, 'message': '', 'skip_reasons': [],
+                'errors': [],
                 'partial': [], 'repointed': 0, 'stopped': False, 'failed_ids': []}
     sources = [s for s in reg.subscriptions(kind) if s['enabled'] and
                (not scope.targets or str(s['id']) in scope.targets or s['name'] in scope.targets)]
     summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0,
-               'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [],
+               'unconfigured': 0, 'skipped': 0, 'message': '', 'skip_reasons': [],
+               'errors': [],
                'partial': [], 'repointed': 0, 'stopped': False,
                # 这一轮失败的那几条订阅的稳定身份,留给「重试失败项」收窄范围
                'failed_ids': []}
@@ -300,7 +316,7 @@ def collect(kind, scope):
                 break
             if deadline - time.monotonic() < SOURCE_SECONDS:
                 summary['skipped'] += len(pending)
-                summary['message'] = BUDGET_MESSAGE
+                _note_skip(summary, BUDGET_MESSAGE)
                 break
             batch, pending = pending[:FETCH_WORKERS], pending[FETCH_WORKERS:]
             if not batch:
@@ -333,7 +349,7 @@ def collect(kind, scope):
                     # 人机验证就此中止(`x_browser.VERIFY_SKIPPED`)。一律写成
                     # "预算不足"会把人引去调大预算,而那三件事里只有一件是预算。
                     summary['skipped'] += 1
-                    summary['message'] = str(e) or BUDGET_MESSAGE
+                    _note_skip(summary, str(e) or BUDGET_MESSAGE)
                     continue
                 except Exception as e:
                     if not _save_failure(source, e, summary):
