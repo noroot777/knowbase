@@ -47,6 +47,9 @@ FIRST_DAYS = 14
 # (盘点号一天几十条),时间防"每次滚都等满超时"。
 MAX_SCROLLS = 40
 ACCOUNT_SECONDS = 50.0
+# 整批撞上人机验证时,没轮到的那些账号留下的话。**它要走"跳过"那条路**(见
+# `harvest` 的熔断),所以措辞得说清"没尝试过",别让人读成"抓过了但是空的"。
+VERIFY_SKIPPED = 'X 要求人机验证,本轮剩余账号没有尝试（避免反复触发风控）'
 # 每次滚动后等新节点出现的上限。X 的懒加载实测 0.3~1.5 秒。
 _SETTLE_SECONDS = 2.5
 _SETTLE_STEP = 0.25
@@ -129,6 +132,15 @@ _STATE_JS = r'''
     articles: document.querySelectorAll('article[data-testid="tweet"]').length,
     login: !!document.querySelector('[data-testid="loginButton"], [data-testid="login"]')
            || /^\/i\/flow\/login/.test(location.pathname),
+    // **人机验证页**:X 把请求重定向到 `/account/access`,那张页上套着
+    // Cloudflare 的挑战。它既没有推文卡片、也没有登录按钮,上下这三道一道都不
+    // 命中 —— 认不出来的后果不是报错文案难看,是**每个账号白等满
+    // `ACCOUNT_SECONDS`**(见 `_wait_state`),一整轮预算就这么烧完。
+    // **判据刻意窄**(URL 精确匹配 + 只会出现在挑战页上的那两句):这个方向上
+    // 误报比漏报贵 —— 误报会让整批就此中止(`harvest` 里那道熔断),而漏报只是
+    // 退回"白等 50 秒"的现状。
+    verify: /^\/account\/access/.test(location.pathname)
+            || /本网站使用安全服务防护恶意自动程序|Verifying you are human|needs to review the security of your connection/i.test(txt),
     empty: /Hmm\.\.\.this page doesn|这个页面不存在|Account suspended|账号已被冻结|doesn’t exist|does not exist/i.test(txt),
     limited: /Rate limit exceeded|Something went wrong\. Try reloading|请稍后再试/i.test(txt),
   });
@@ -138,6 +150,16 @@ _STATE_JS = r'''
 
 class XBrowserError(RuntimeError):
     """浏览器通道的失败。message 是成品文案。"""
+
+
+class XVerifyRequired(XBrowserError):
+    """X 要求先过一次人机验证 —— **账号级**拦截,不是这一个账号这一次的问题。
+
+    整批用的是同一个账号、同一个 profile,所以第一个被挡就意味着其余每一个都会
+    被挡:继续逐个撞只是拿同一个信号再敲几十次风控。`harvest` 据此整批中止
+    (见那里的熔断),而且重试一次也救不回来 —— 出路只有人去浏览器里把那次验证
+    过完。所以它必须和别的失败分得开。
+    """
 
 
 def _as_published(iso: str) -> str:
@@ -244,7 +266,10 @@ def _entry(item: dict) -> dict | None:
 
 
 def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
-    """等页面落定,顺带认出登录失效/不存在/限流这三种不该当成"没有推文"的情况。"""
+    """等页面落定,顺带认出登录失效/人机验证/限流/账号打不开这四种不该当成
+    "没有推文"的情况 —— 它们都能让页面加载完却一条推文都没有,折叠掉任何一种,
+    那一种就会变成"白等满 `ACCOUNT_SECONDS` 再报一句看不出根因的话"。
+    """
     last = {}
     while time.monotonic() < deadline:
         last = json.loads(page.eval(_STATE_JS))
@@ -254,6 +279,15 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
             # `x_login_import`),把他推去无头壳里登一次正是他想免掉的那一步。
             raise XBrowserError('X 登录态已失效,请在浏览器通道设置里重新登录,'
                                 '或从日常浏览器再导入一次')
+        if last['verify']:
+            # **要排在限流之后判断吗 —— 不,排在它前面。** 这张页讲的是"证明你
+            # 不是机器人",不是"你太快了":报成限流会把人引去"稍后重试/降低频率",
+            # 而稍后重试一万次都不会让它过去。登录那一道留在前面:这张页要先有
+            # 登录态才会出现,登录态真掉了该先说那句。
+            raise XVerifyRequired(
+                'X 要求先过一次人机验证（账号访问受限）。请在日常浏览器里登录'
+                '同一个账号、打开 x.com/account/access 把验证做完,确认能正常刷'
+                '时间线之后再同步 —— 这一关换浏览器或者重试都绕不过去')
         if last['limited']:
             raise XBrowserError('X 暂时限制了访问频率,请稍后重试或降低同步频率')
         if last['empty']:
@@ -476,6 +510,22 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     results[handle] = {
                         'entries': entries, 'error': '', 'incomplete': incomplete,
                         'watermark': started if incomplete else _newest(entries, water)}
+                except XVerifyRequired as e:
+                    # **账号级拦截就此整批中止。** 下一个账号用的是同一个账号、
+                    # 同一个 profile,必然撞同一张页,所以继续走下去只有两个后果:
+                    # 把同一个信号再敲几十次风控,外加烧光整轮预算。
+                    #
+                    # **剩下的记"跳过"而不是"失败"**,这一步是故意的:它们压根
+                    # 没被尝试过,水位一个字没动;记成失败会让它们进「重试失败项」
+                    # 的名单(见 `docs/decisions/retry-scope.md` 那条「预算跳过和
+                    # 退避中不进名单」),换来的正是下一轮整批重撞 —— 而那是这道
+                    # 熔断要防的事。命中的那一个照旧记失败:它是这一轮唯一真正
+                    # 被拦住的证据,面板要显示它、人要照它那句话去过验证。
+                    results[handle] = {'entries': [], 'error': str(e)}
+                    for rest, _ in jobs[index:]:
+                        results.setdefault(rest, {'entries': [], 'error': '',
+                                                  'skipped': VERIFY_SKIPPED})
+                    break
                 except (XBrowserError, CdpError) as e:
                     results[handle] = {'entries': [], 'error': str(e)}
     except (CdpError, EOFError, OSError) as e:

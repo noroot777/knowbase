@@ -325,9 +325,15 @@ def collect(kind, scope):
                     # "连接失败"并让这条订阅进退避重试,而连接好得很。
                     if note := result[1].get('note'):
                         summary['partial'].append({'title': source['name'], 'reason': note})
-                except CollectionBudgetExceeded:
+                except CollectionBudgetExceeded as e:
+                    # **跳过的理由由抛出那一侧说**:HTTP 那条路上它是光秃秃抛的
+                    # (`_fetch_with_budget`),那时才回落到"预算不足"。登录态通道
+                    # 带着自己那句话过来(`x_channels.take` 把 `skipped` 原样转成
+                    # 这个异常):可能是预算用完、可能是按了停止、也可能是整批撞上
+                    # 人机验证就此中止(`x_browser.VERIFY_SKIPPED`)。一律写成
+                    # "预算不足"会把人引去调大预算,而那三件事里只有一件是预算。
                     summary['skipped'] += 1
-                    summary['message'] = BUDGET_MESSAGE
+                    summary['message'] = str(e) or BUDGET_MESSAGE
                     continue
                 except Exception as e:
                     if not _save_failure(source, e, summary):
