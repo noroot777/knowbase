@@ -131,14 +131,16 @@ class PolicyTests(unittest.TestCase):
             for status in [429, 403, 404, 503]:
                 with self.subTest(operation=operation, status=status):
                     session = self.timeline([response(status, operation=operation)],
-                                            dict(empty=True, articles=0))
+                                            dict(empty=True, articles=0, account=dict(
+                                                state='missing', handle='example',
+                                                evidence='missing_account_header')))
                     started = self.clock.now
-                    expected = ('账号在 X 上打不开' if operation == 'UserByScreenName' else
+                    expected = ('账号不存在' if operation == 'UserByScreenName' else
                                 '限制了访问频率' if status == 429 else '页面请求出错')
                     with self.assertRaisesRegex(x_browser.XBrowserError, expected):
                         x_browser._wait_state(session, 'Example', started + 1)
                     self.assertLess(self.clock.now - started, 1)
-                    self.assertEqual(1 if operation == 'UserByScreenName' else 2, session.reads)
+                    self.assertEqual(2, session.reads)
 
     def test_auxiliary_429_cannot_turn_a_dom_request_error_into_a_batch_limit(self):
         session = self.timeline([response(operation='UserByScreenName')],
@@ -315,14 +317,16 @@ class StoredPolicyTests(ChannelBase):
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:
             with self.subTest(channel=channel):
                 cases = {'Example': ([response(404, operation='UserByScreenName')],
-                                     dict(empty=True, articles=0))}
+                                     dict(empty=True, articles=0, account=dict(
+                                         state='missing', handle='example',
+                                         evidence='missing_account_header')))}
                 saved, urls, session = self.run_batch(channel, cases)
-                self.assertIn('账号在 X 上打不开', saved[0]['last_error'])
+                self.assertIn('账号不存在', saved[0]['last_error'])
                 self.assertEqual(OLD, x_channels.watermark(saved[0], channel))
                 self.assertEqual('', saved[1]['last_error'])
                 self.assertNotEqual(OLD, x_channels.watermark(saved[1], channel))
                 self.assertEqual({'https://x.com/other/status/123'}, urls)
-                self.assertEqual(1, session.state_reads['example'])
+                self.assertEqual(2, session.state_reads['example'])
 
     def test_core_limits_still_keep_the_remaining_batch_unwritten(self):
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:

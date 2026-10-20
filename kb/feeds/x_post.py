@@ -4,14 +4,16 @@ from __future__ import annotations
 import re
 import time
 
-from kb.feeds import x_article, x_page_state
+from kb.feeds import x_article, x_body, x_page_state
 from kb.feeds.x_cdp import CdpError, CdpTransportError
 from kb.feeds.x_page_state import STATE_JS, navigate, problem, read
 from kb.feeds.x_page_state import XRateLimited as XRateLimited
+from kb.feeds.x_post_empty import EMPTY_JS
 
 HINT = '_x_post_prefix'
 SECONDS = 25.0
 STEP = 0.25
+STRUCTURE_SECONDS = 3.0
 _STATUS = re.compile(r'^https://(?:x|twitter)\.com/[^/?#]+/status/(\d+)(?:[/?#]|$)')
 
 TEXT_JS = r'''
@@ -93,9 +95,10 @@ TEXT_JS = r'''
 '''
 
 READ_JS = r'''(() => {
-''' + TEXT_JS + STATE_JS + r'''
+''' + TEXT_JS + EMPTY_JS + STATE_JS + r'''
   const at = location.pathname.match(/^\/[^/]+\/status\/(\d+)(?:\/|$)/);
-  const result = {...xPageState(), at: at ? at[1] : '', id: '', text: '', truncated: true};
+  const result = {...xPageState(), at: at ? at[1] : '', id: '', text: '', truncated: true,
+                  empty_kind: '', unknown_structure: false};
   for (const art of document.querySelectorAll('article[data-testid="tweet"]')) {
     const clock = ownNode(art, 'time[datetime]');
     const href = clock?.closest('a[href*="/status/"]')?.getAttribute('href') || '';
@@ -108,6 +111,8 @@ READ_JS = r'''(() => {
     result.inline_plain = result.text.replace(/\s/g, '');
     result.inline_legacy = postText(body, true);
     result.truncated = postMore(art);
+    result.empty_kind = emptyPostKind(art, identity[1]);
+    result.unknown_structure = emptyPostReady(art) && !result.empty_kind;
     break;
   }
   return JSON.stringify(result);
@@ -120,6 +125,16 @@ class PostUnavailable(RuntimeError):
 
 class PostGone(PostUnavailable):
     """The requested, fully loaded page explicitly says the post is unavailable."""
+
+
+class PostStructureUnknown(PostUnavailable):
+    """A loaded matching post has no readable body or positive empty-text proof."""
+
+
+class PostEmpty(PostUnavailable):
+    def __init__(self, kind: str):
+        self.kind = kind
+        super().__init__(f'详情页已确认无自写文字({kind})')
 
 
 class PostRequestFailed(PostUnavailable):
@@ -156,6 +171,8 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
     _check(deadline, should_stop)
     previous = None
     absent = False
+    empty = None
+    unknown_since = None
     previous_problem = ''
     confirmed_problem = ''
     snap = {}
@@ -169,6 +186,8 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
             if time.monotonic() >= until:
                 if error := x_page_state.escalate(snap, confirmed_problem, failure, expired=True):
                     raise error
+                if unknown_since is not None:
+                    raise PostStructureUnknown('详情页正文结构尚未确认,未把选择器缺失当作无自写文字')
                 raise PostUnavailable('推文正文补全时间用完')
             snap = read(session, READ_JS)
             if snap.get('login'):
@@ -185,7 +204,15 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
                                     inline_legacy=current[3])
                 return text
             previous = current
-            current_problem = problem(snap) if not valid and (
+            kind = snap.get('empty_kind')
+            confirmed_empty = (snap.get('at') == match[1] == snap.get('id')
+                               and snap.get('ready') == 'complete' and snap.get('text') == ''
+                               and snap.get('truncated') is False
+                               and kind in {'photo', 'video', 'quote', 'link', 'unspecified'})
+            if confirmed_empty and empty == kind:
+                raise PostEmpty(kind)
+            empty = kind if confirmed_empty else None
+            current_problem = problem(snap) if not (valid or confirmed_empty) and (
                 snap.get('challenge') or snap.get('at') == match[1]) else ''
             confirmed_problem = current_problem if current_problem == previous_problem else ''
             if error := x_page_state.escalate(snap, confirmed_problem, failure):
@@ -196,6 +223,13 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
             if missing and absent:
                 raise PostGone('X 明确答复该推文页面不存在或已不可用')
             absent = missing
+            unknown = (snap.get('at') == match[1] == snap.get('id') and
+                       snap.get('ready') == 'complete' and snap.get('text') == '' and
+                       snap.get('truncated') is False and snap.get('unknown_structure') is True)
+            unknown_since = (unknown_since if unknown_since is not None else time.monotonic()
+                             ) if unknown else None
+            if unknown_since is not None and time.monotonic() - unknown_since >= STRUCTURE_SECONDS:
+                raise PostStructureUnknown('详情页正文结构尚未确认,未把选择器缺失当作无自写文字')
             time.sleep(min(STEP, max(0.0, until - time.monotonic())))
     except (CdpTransportError, OSError, EOFError) as exc:
         raise PostSessionUnavailable(f'浏览器会话中断:{exc}') from exc
@@ -206,16 +240,19 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
 
 
 def merge(entry: dict, text: str) -> dict:
-    prefix = entry[HINT]
-    if not expanded(text, entry['body'].removeprefix(prefix)):
+    try:
+        body = x_body.parts(entry).require_source()
+    except x_body.SourceUnknown as exc:
+        raise PostUnavailable(str(exc)) from exc
+    if not expanded(text, body.text):
         raise PostUnavailable('详情页正文没有长于时间线预览')
-    complete = dict(entry)
+    complete = x_body.with_text(entry, text)
     complete.pop(HINT)
-    complete.update(title=text.splitlines()[0][:500], body=prefix + text)
+    complete.update(title=text.splitlines()[0][:500])
     return complete
 
 
-def fill(entries: list[dict], *, session, deadline=None, should_stop=None):
+def fill(entries: list[dict], *, session, deadline=None, should_stop=None, unavailable=None):
     kept, missed, request_failed = [], 0, 0
     deferred, halt = 0, ''
     for entry in entries:
@@ -228,7 +265,15 @@ def fill(entries: list[dict], *, session, deadline=None, should_stop=None):
         try:
             text = fetch(entry['url'], session, deadline=deadline, should_stop=should_stop)
             complete = merge(entry, text)
-        except PostGone:
+        except (PostGone, PostEmpty) as exc:
+            if isinstance(exc, PostEmpty) and entry.get(x_article.HINT):
+                kept.append(entry)
+                continue
+            if unavailable is not None:
+                evidence = dict(url=entry['url'], reason=str(exc))
+                if isinstance(exc, PostEmpty):
+                    evidence['empty_kind'] = exc.kind
+                unavailable.append(evidence)
             continue
         except PostSessionUnavailable:
             raise
@@ -253,8 +298,22 @@ def fill(entries: list[dict], *, session, deadline=None, should_stop=None):
     return kept, note
 
 
-def complete(entries: list[dict], *, session, deadline=None, should_stop=None):
-    entries, post_note = fill(entries, session=session, deadline=deadline, should_stop=should_stop)
+def unavailable_note(unavailable: list[dict]) -> str:
+    if not unavailable:
+        return ''
+    details = ';'.join(f'{item["url"]} ({item["reason"]})' for item in unavailable)
+    label = '推文' if any(item.get('empty_kind') for item in unavailable) else '远端明确不可用推文'
+    return f'跳过 {len(unavailable)} 条{label}(跳过本身不冻结水位):{details}'
+
+
+def unavailable_report(unavailable: list[dict]) -> dict:
+    return dict(unavailable=unavailable, unavailable_count=len(unavailable),
+                note=unavailable_note(unavailable))
+
+
+def complete(entries: list[dict], *, session, deadline=None, should_stop=None, unavailable=None):
+    entries, post_note = fill(entries, session=session, deadline=deadline,
+                              should_stop=should_stop, unavailable=unavailable)
     entries, article_note = x_article.fill(
         entries, session=session, deadline=deadline, should_stop=should_stop)
     unresolved = sum(HINT in entry for entry in entries)

@@ -112,7 +112,10 @@ docker compose up -d --build    # http://127.0.0.1:8787
 管理知识库的所有信息来源，按来源类型分栏显示。每个来源下有两个视图：
 
 - **最新内容**：时间线展示已抓取的条目，点击在右侧阅读器中打开全文
+- **文章排版**：正文与译文支持 Markdown 标题、列表、引用、代码和表格；长文提供可折叠目录，宽表格与长代码可单独横向滚动。短社交观点保留原始换行，文章原始文件不变。
 - **订阅管理**：增删改订阅，支持单源同步、停用/启用
+
+**Markdown 优先采集**：GitHub 仓库 README、GitHub 的 Markdown 文件页和直接的 `.md` 链接优先取 Markdown 原文；普通网页若明确返回 `text/markdown` 也直接保留，否则仍走网页正文提取。新订阅条目、手动抓取与正文重抓共用这套能力，失败时保留原有网页提取回退。翻译时隔离并原样还原代码块和其中的字符图，避免模型改乱缩进。已收录条目不会自动覆盖或重译，需要时从阅读区重新抓取。
 
 支持的来源类型：
 
@@ -130,16 +133,21 @@ docker compose up -d --build    # http://127.0.0.1:8787
 
 #### 绿泡泡接入（首次）
 
-首页引导、设置菜单「绿泡泡接入」和同步中心均可进入。
+<details>
+<summary><strong>首次接入绿泡泡并采集公众号（点击展开）</strong></summary>
 
-1. **已有配置时直接复用**——如果你之前用过 Rion Reader，不需要重新获取 key
-2. **没有 Reader 时自动准备**——项目下载固定版本源码，安装隔离的 SQLCipher 环境
-3. **获取 key**——页面说明影响（绿泡泡可能退出/重启），勾选确认后点「自动获取 key 并验证」
-4. **验证完成**——成功后点「去同步」
+1. 在 **Mac 本机**运行本项目，登录本人的绿泡泡，并同步想采集的公众号推送。
+2. 打开 **设置 → 绿泡泡接入**，点击 **「检查并接入绿泡泡」**（已接入时显示为 **「重新检查连接」**）。已有可用配置会直接复用，缺少读取工具时由系统自动准备。
+3. 如果提示缺少 key，阅读影响说明并确认，再点击 **「自动获取 key 并验证」**，按提示完成系统授权；期间绿泡泡可能退出或重启。
+4. 显示 **「已验证」** 后，点击 **「去同步公众号」**，选择公众号并开始同步。
 
-要求：macOS 本机、已登录自己的绿泡泡、uv、Go、Apple Command Line Tools。获取 key 是独立的本机步骤，不使用供应商 API，也不向模型发送密钥。
+也可以展开 **「方式二：让你的智能体协助接入」**，点击 **「复制接入提示词」**，交给 Mac 本机上能访问本项目和终端的智能体。处理完成后回到页面 **「刷新状态」**；获取 key 前仍需本人确认并完成系统授权。
 
-请先在 Mac 绿泡泡里订阅并同步你要采集的号——本机没有推送的号不会出现在采集范围中。
+首页引导和同步中心也可进入接入页面。无需额外安装 `wechat-intelligence-hub` 或其他 Skill；获取 key 和验证不使用大模型 API，也不向模型发送密钥。首次准备需要 `uv`、Go 和 Apple Command Line Tools。
+
+> 仅采集本机已同步推送中的文章，正文需仍可访问；不代表能获取公众号全部历史。
+
+</details>
 
 <details>
 <summary><strong>绿泡泡采集做了些什么</strong></summary>
@@ -203,6 +211,29 @@ claude mcp add kb --scope user -- uv run --directory ~/code/knowbase kb-mcp
 
 注册后可用工具：`kb_search`（混合检索）、`kb_enumerate`（全量枚举，穷举问题用这个）、`kb_read`（读全文）、`kb_entities`（列实体）。
 
+### Skill：在对话里收录链接
+
+仓库自带 skill `kb-grab`（`.claude/skills/kb-grab/`），和面板上「存入知识库」按钮走同一个接口。
+
+**安装**：在仓库目录里的 Claude Code 会话天然可用，不需要装。要在其他项目里也能用，让 Claude 帮你装：
+
+```
+帮我把 ~/code/knowbase/.claude/skills/kb-grab 链接到全局 skill 目录
+```
+
+或者自己来：`ln -s ~/code/knowbase/.claude/skills/kb-grab ~/.claude/skills/kb-grab`。检出不在 `~/code/knowbase` 时设 `KB_HOME` 环境变量指向仓库根目录。
+
+**使用**：用自然语言说一句就行，不需要记命令——
+
+```
+这篇存一下 https://example.com/post
+把这几条收进知识库 https://a.com https://b.com
+这篇我存过吗 https://example.com/post
+刚存那篇不对，重新抓一次 https://example.com/post
+```
+
+Claude 看到你要往知识库存东西，会自动调这个 skill。
+
 ## CLI 用法
 
 面板能做的事 CLI 也能做：
@@ -227,6 +258,15 @@ uv run kb stats
 ./kb.sh sync --channel rss        # 只跑某一个来源
 ./kb.sh status                    # 一屏看全
 ./kb.sh graph                     # 重建三张图谱
+
+# 手动收录（粘一条链接，内容抓进知识库）
+./kb.sh grab https://example.com/post        # 收下来，并等它真写进知识库
+./kb.sh grab --state https://example.com/p   # 只查这一条此刻的状态（只读）
+./kb.sh grab --refetch https://example.com/p # 库里那一份不对时重抓、确认得了就换掉
+pbpaste | ./kb.sh grab -                     # 从剪贴板那段文字里挑出链接收录
+./kb.sh grab - < links.txt                   # 一行一条的清单：整行原样收，不做抽取
+echo '见 <https://example.com/p;> 这篇' | ./kb.sh grab -   # 行文里圈出来的也原样收
+echo '见 [原文](https://example.com/a_(b)) 这篇' | ./kb.sh grab -  # Markdown 按语法取目标
 
 # 订阅管理
 ./kb.sh accounts list | discover | add | remove | enable | disable [名字]

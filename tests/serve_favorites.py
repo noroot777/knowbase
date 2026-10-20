@@ -14,6 +14,8 @@ import sys
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=18881)
+    parser.add_argument('--detached', action='store_true')
+    parser.add_argument('--legacy-detached', action='store_true')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root))
@@ -72,6 +74,14 @@ def main():
             conn.execute('INSERT INTO favorites(path,quote,note,status,action_json,created_at,updated_at)'
                          ' VALUES(?,?,?,?,?,?,?)',
                          (path, quote, note, status, json.dumps(action) if action else '', created, created))
+        if args.detached:
+            conn.execute("UPDATE documents SET url='' WHERE path='source/rss/favorite-6.md'")
+            store.remove_documents(conn, [
+                'source/rss/favorite-1.md', 'source/dr-gzh/favorite-4.md',
+                'source/rss/favorite-6.md'])
+        if args.legacy_detached:
+            conn.execute("UPDATE favorites SET origin_source='',origin_account='',"
+                         " origin_published='',origin_summary='' WHERE id=6")
         conn.commit()
         conn.close()
         triage = {'running': False, 'fresh': True, 'error': '', 'model': 'fixture:model',
@@ -79,6 +89,8 @@ def main():
                       'hero': {'id': 1, 'why': '只需要五分钟，就能用上你的第一份干净网页。'},
                       'quick': [{'id': 1}, {'id': 2}, {'id': 8}], 'deep': [{'id': 3}, {'id': 5}, {'id': 7}],
                       'quotes': [4], 'dup': [], 'cold': [{'id': 6, 'why': '收藏已久，可以暂存，想用时再找回来。'}]}}
+        if args.legacy_detached:
+            triage['data']['hero'] = {'id': 6, 'why': ''}
         favbrain.triage_status = lambda: triage
         favbrain.run_triage_async = lambda: True
         app = FastAPI()

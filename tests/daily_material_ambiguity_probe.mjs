@@ -11,7 +11,7 @@ const cases = [
   ['2026-10-11', '标题链接后还有说明', 'https://example.org/info'],
   ['2026-10-12', '带链接多段作者', 'https://example.org/real'],
   ['2026-10-13', '无链接多段作者', null],
-  ['2026-10-14', '无法独立确认的清单后注', 'https://example.org/real'],
+  ['2026-10-14', '引用块式多段作者', 'https://example.org/real'],
 ];
 
 try {
@@ -41,8 +41,8 @@ try {
           && $('daily-reader-body').innerText.includes('第二行')`), `${name} 作者没有被截断`);
       }
       if (date === '2026-10-14') {
-        assert.ok(await evalJs(`$('daily-reader-body').innerText.includes('没列出的留在队列里')`),
-          '队列说明仍完整可见');
+        assert.ok(await evalJs(`$('daily-reader-body').innerText.includes('作者第一行')
+          && $('daily-reader-body').innerText.includes('作者继续说明')`), '作者续行仍完整可见');
       }
       passed.push(`${width}px ${name} 与原版完全一致`);
       const directory = process.env.KB_MATERIAL_SCREENSHOTS;

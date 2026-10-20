@@ -157,6 +157,14 @@ class CollectorError(RuntimeError):
     """
 
 
+class DropIncomplete(CollectorError):
+    """永久排除已提交，但已导出内容还需要重试清理。"""
+
+
+class CollectorTimeout(CollectorError):
+    """采集器调用超时，不能据此断言操作没有生效。"""
+
+
 @dataclass(frozen=True)
 class Target:
     """来源里的一个采集目标:一个公众号、一个 RSS 源、一个频道…"""
@@ -272,6 +280,48 @@ class ItemDropping(Protocol):
 def item_dropper(collector: SourceCollector) -> ItemDropping | None:
     """这个采集器能不能把单条内容永久排除;不能返回 None。"""
     return collector if isinstance(collector, ItemDropping) else None
+
+
+@runtime_checkable
+class ItemAliases(Protocol):
+    """同一篇内容的其他可靠身份；不能依赖仍存在的暂存行。"""
+
+    def item_aliases(self, ref: dict) -> tuple[str, ...]: ...
+
+
+def item_aliases(collector: SourceCollector, ref: dict) -> tuple[str, ...]:
+    identities = [str(ref.get('id') or '')]
+    if isinstance(collector, ItemAliases):
+        identities.extend(collector.item_aliases(ref))
+    return tuple(dict.fromkeys(value for value in identities if value))
+
+
+@runtime_checkable
+class DocumentFailures(Protocol):
+    """从已入库文档核实失败条目的采集身份；不属于自己的文档返回 None。"""
+
+    def document_failure(self, document: dict, reason: str) -> dict | None:
+        ...
+
+
+def document_failure(document, reason: str) -> dict:
+    """提取阶段保留原文；采集器核实身份后才附上永久排除入口。
+
+    身份查询失败不能盖掉原始故障，也不能据标题或路径猜出可删除的身份。
+    """
+    document = dict(document)
+    result = {"title": document.get("title") or "未命名内容", "reason": reason}
+    if document.get("url"):
+        result["url"] = document["url"]
+    for channel in _REGISTRY:
+        try:
+            collector = get_collector(channel)
+            if isinstance(collector, DocumentFailures):
+                if detail := collector.document_failure(document, reason):
+                    return detail
+        except Exception:
+            continue
+    return result
 
 
 # ── 注册表 ──────────────────────────────────────────────────────────────────────

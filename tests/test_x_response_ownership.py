@@ -163,9 +163,10 @@ class OwnershipTests(unittest.TestCase):
                 with self.subTest(channel=channel, status=status):
                     session = OwnershipSession(status)
                     events, _ = session.cases['example']
-                    session.cases['example'] = (events, dict(articles=0, empty=True))
+                    session.cases['example'] = (events, dict(articles=0, empty=True, account=dict(
+                        state='missing', handle='example', evidence='missing_account_header')))
                     results = harvest(session, channel)
-                    self.assertIn('打不开', results['Example']['error'])
+                    self.assertIn('账号不存在', results['Example']['error'])
                     self.assertNotIn('watermark', results['Example'])
                     if status == 429:
                         self.assertEqual(2, len(session.urls))

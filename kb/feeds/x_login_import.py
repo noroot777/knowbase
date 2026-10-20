@@ -284,7 +284,7 @@ def install(cookies: list[dict], profile: str,
 
     返回 (结论码, 最后那份状态)。三个是这一步自己的:`unsaved`(写进去了但下次
     启动时不在)、`relogin`(重开之后 X 又判未登录)、`unconfirmed`(重开那一次没
-    验成,判不准);其余沿用 `verify_timeline` 那五档。**这三个只从 `ok` 来** ——
+    验成,判不准);其余沿用 `verify_timeline` 那六档。**这三个只从 `ok` 来** ——
     验证本来就没过时那才是主结论,保存差异接在后面(理由见下面那段注释)。
 
     **写和当场验在同一个会话里。** 起一个 Chrome 要两三秒,但更要紧的是这两件事

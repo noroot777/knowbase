@@ -18,11 +18,13 @@ from kb.feeds import digest, fulltext, translate, x_channels
 # 这里原地再导出:`_save_result` 调的是本模块这个名字,全仓注释和回归里那些
 # `sync._within_history` 的指向也照旧成立。
 from kb.feeds.exported import item_body_md
+from kb.feeds.exclusion import failure
 # 导出那一步的两个零件(frontmatter 归属、本轮新失败怎么数)在 `export_meta` 里
 # (本文件越过 700 行硬上限时拆出去的,口径没动)。这里原地再导出:本模块调的是
 # 这两个名字,全仓注释和回归里那些 `sync._kept_meta` 的指向也照旧成立。
 from kb.feeds.export_meta import _kept_meta, _new_failures, _OWNED_META  # noqa: F401
 from kb.feeds.history import _within_history
+from kb.feeds.paths import export_path
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_segments import note_retry_targets
 from kb.source_types import SOURCE_TYPES
@@ -47,8 +49,24 @@ def _fetch_with_budget(source, settings, scope, collect_deadline):
     deadline = time.monotonic() + SOURCE_SECONDS
     if deadline > collect_deadline:
         raise CollectionBudgetExceeded
-    return fetch_source(source, settings, unconditional=scope.ranged,
-                        deadline=deadline, collect_deadline=collect_deadline)
+    entries, validators = fetch_source(source, settings, unconditional=scope.ranged,
+                                       deadline=deadline, collect_deadline=collect_deadline)
+    from kb.feeds.markdown_source import enrich
+    return enrich(source, entries, deadline=deadline, collect_deadline=collect_deadline), validators
+
+
+def _note_skip(summary, why: str) -> None:
+    """记一条「这一轮有订阅被跳过」的理由。**三个写入口都过这里。**
+
+    **理由不许互相覆盖。** 同一轮里完全可以既有浏览器通道按了停止、又有它的时间
+    预算用完、又有 HTTP 那几条耗尽采集预算:只留最后写进去的那一句的话,面板给出
+    的解释由线程池的完成顺序决定 —— 按了停止可能被说成预算不足,反过来也一样
+    (审查第 1 轮非阻塞 C)。`skipped` 是各种原因**之和**,那句解释也得是。按出现
+    顺序去重,同一个原因跳过几十条也只说一遍。
+    """
+    if why not in summary['skip_reasons']:
+        summary['skip_reasons'].append(why)
+    summary['message'] = '；'.join(summary['skip_reasons'])
 
 
 def _repointed(c, source) -> bool:
@@ -153,7 +171,11 @@ def _save_failure(source, error, summary) -> bool:
     with reg.db() as c:
         if not _claim_write(c, source):
             return False
-        summary['errors'].append({'title': source['name'], 'reason': reason})
+        if unavailable := getattr(error, 'unavailable', None):
+            summary.setdefault('notices', []).append({
+                'title': source['name'], 'reason': error.notice,
+                'count': len(unavailable), 'items': unavailable})
+        summary['errors'].append({'title': source['name'], 'reason': reason, 'url': source['url']})
         # 「重试失败项」靠这份身份收窄下一轮的范围(见 `note_retry_targets`)。
         # 记 id 而不是名字:名字会被改,而改完之后这条订阅还是同一条。
         summary['failed_ids'].append(str(source['id']))
@@ -259,13 +281,15 @@ def collect(kind, scope):
         _stage('crawl', 'ok', f'{reg.KINDS[kind]} · 没有要轮询的来源'
                               f'（内容在收录那一刻已经抓好）')
         return {'sources': 0, 'checked': 0, 'added': 0, 'deferred': 0,
-                'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [],
-                'partial': [], 'notices': [], 'repointed': 0, 'stopped': False, 'failed_ids': []}
+                'unconfigured': 0, 'skipped': 0, 'message': '', 'skip_reasons': [],
+                'errors': [], 'partial': [], 'notices': [], 'repointed': 0,
+                'stopped': False, 'failed_ids': []}
     sources = [s for s in reg.subscriptions(kind) if s['enabled'] and
                (not scope.targets or str(s['id']) in scope.targets or s['name'] in scope.targets)]
     summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0,
-               'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [],
-               'partial': [], 'notices': [], 'repointed': 0, 'stopped': False,
+               'unconfigured': 0, 'skipped': 0, 'message': '', 'skip_reasons': [],
+               'errors': [], 'partial': [], 'notices': [], 'repointed': 0,
+               'stopped': False,
                # 这一轮失败的那几条订阅的稳定身份,留给「重试失败项」收窄范围
                'failed_ids': []}
     settings = reg.get_settings(kind)
@@ -297,7 +321,7 @@ def collect(kind, scope):
                 break
             if deadline - time.monotonic() < SOURCE_SECONDS:
                 summary['skipped'] += len(pending)
-                summary['message'] = BUDGET_MESSAGE
+                _note_skip(summary, BUDGET_MESSAGE)
                 break
             batch, pending = pending[:FETCH_WORKERS], pending[FETCH_WORKERS:]
             if not batch:
@@ -323,10 +347,18 @@ def collect(kind, scope):
                     if note := result[1].get('note'):
                         summary['partial'].append({'title': source['name'], 'reason': note})
                     if notice := result[1].get('notice'):
-                        summary['notices'].append({'title': source['name'], 'reason': notice})
-                except CollectionBudgetExceeded:
+                        summary['notices'].append({
+                            'title': source['name'], 'reason': notice,
+                            'count': result[1].get('notice_count', result[1].get('unavailable_count', 0)),
+                            'items': result[1].get('unavailable', [])})
+                except CollectionBudgetExceeded as e:
+                    # **跳过的理由由抛出那一侧说**:HTTP 那条路上它是光秃秃抛的
+                    # (`_fetch_with_budget`),那时才回落到"预算不足"。登录态通道
+                    # 带着自己那句话过来(`x_channels.take` 把 `skipped` 原样转成
+                    # 这个异常):可能是这一轮的时间预算用完,也可能是按了停止。
+                    # 一律写成"预算不足"会把人引去调大预算,而那改不了按停止那件事。
                     summary['skipped'] += 1
-                    summary['message'] = BUDGET_MESSAGE
+                    _note_skip(summary, str(e) or BUDGET_MESSAGE)
                     continue
                 except Exception as e:
                     if not _save_failure(source, e, summary):
@@ -357,6 +389,8 @@ def collect(kind, scope):
         label += f"，失败 {len(summary['errors'])} 个"
     if summary['partial']:
         label += f"，{len(summary['partial'])} 个没读完（{summary['partial'][0]['reason']}）"
+    if summary['notices']:
+        label += f"，{len(summary['notices'])} 个来源有跳过说明（{summary['notices'][0]['reason']}）"
     if summary['repointed']:
         label += f"，{summary['repointed']} 个采集期间改了订阅链接（这一轮的结果已丢弃）"
     if summary['unconfigured']:
@@ -508,7 +542,7 @@ def _export(kind: str, hold_untranslated: bool = False,
     for item in rows:
         if _state.get('stop_requested'):
             break
-        path = root / (item['key'] + '.md')
+        path = VAULT_ROOT / export_path(kind, item['key'])
         rel = str(path.relative_to(VAULT_ROOT))
         title, body = translate.display(item)
         # 标题被译了也算"这一篇是译文":只有一行标题的短动态(正文为空)整条
@@ -585,7 +619,7 @@ def _export(kind: str, hold_untranslated: bool = False,
             # 那条同理);确认没成只是说「它已经不是最新那一版了」。
             done += 1
         except Exception as e:
-            errors.append({'title': item['title'], 'reason': str(e)[:300]})
+            errors.append(failure(item, e, kind))
         finally:
             if temp:
                 temp.unlink(missing_ok=True)

@@ -9,12 +9,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from kb.feeds import x_browser, x_page_state, x_post
+from kb.feeds import x_body, x_browser, x_page_state, x_post
 from kb.feeds.x_cdp import Chrome
 from scripts import x_post_backfill as backfill
 from tests.headless import INSTALL_HINT, SHELL
+from tests.x_empty_dom import MORE, EmptyDomCases
 
-MORE = '<button data-testid="tweet-text-show-more-link">显示更多</button>'
 LINK = ('<a href="https://t.co/example"><span aria-hidden="true">https://</span>'
         'example.com/<span aria-hidden="true">connections</span>'
         '<span aria-hidden="true">…</span></a>')
@@ -32,6 +32,10 @@ def article(identity='123', text='short', more='', quoted=''):
             f'<a href="/Example/status/{identity}">'
             '<time datetime="2026-10-18T00:00:00Z">now</time></a>'
             f'<div data-testid="tweetText">{text}</div>{more}{quoted}</article>')
+
+
+def stored_entry(text):
+    return x_body.record(dict(body=text, **{x_post.HINT: ''}), text)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -55,7 +59,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 @unittest.skipUnless(SHELL is not None, '缺 chrome-headless-shell —— ' + INSTALL_HINT)
-class PostDomTests(unittest.TestCase):
+class PostDomTests(EmptyDomCases, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = TemporaryDirectory()
@@ -71,10 +75,10 @@ class PostDomTests(unittest.TestCase):
         cls.addClassCleanup(cls.page.__exit__, None, None, None)
         cls.page.open_page('about:blank')
 
-    def load(self, html):
+    def load(self, html, route='/Example/status/123'):
         marker = str(time.monotonic_ns())
         self.server.html = f'<meta name="fixture-version" content="{marker}">' + html
-        self.page.goto(f'http://127.0.0.1:{self.server.server_port}/Example/status/123')
+        self.page.goto(f'http://127.0.0.1:{self.server.server_port}{route}')
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if self.page.eval('document.querySelector("meta[name=fixture-version]")?.content === '
@@ -111,7 +115,7 @@ class PostDomTests(unittest.TestCase):
         snap = json.loads(self.page.eval(x_post.READ_JS))
         self.assertIn('\n@AsideAI\n', legacy)
         self.assertIn('\n\nKeep this paragraph.', snap['text'])
-        entry = dict(body=legacy, **{x_post.HINT: ''})
+        entry = stored_entry(legacy)
         state, complete, _ = backfill.proposal(entry, snap['text'], snap)
         self.assertEqual('normalized', state)
         self.assertEqual(snap['text'], complete['body'])
@@ -125,7 +129,7 @@ class PostDomTests(unittest.TestCase):
                 legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
                 snap = json.loads(self.page.eval(x_post.READ_JS))
                 self.assertIn('\n', legacy)
-                entry = dict(body=legacy, **{x_post.HINT: ''})
+                entry = stored_entry(legacy)
                 self.assertEqual('blocked_whitespace', backfill.proposal(entry, snap['text'], snap)[0])
 
     def test_actual_x_mention_wrappers_repair_legacy_text_and_longer_details(self):
@@ -139,7 +143,7 @@ class PostDomTests(unittest.TestCase):
         self.assertIn('\n@AsideAI\n', legacy)
         for preview, expected in [(legacy, 'normalized'), (legacy.split(' with agents.')[0], 'expanded')]:
             with self.subTest(preview=preview):
-                state, complete, _ = backfill.proposal(dict(body=preview, **{x_post.HINT: ''}),
+                state, complete, _ = backfill.proposal(stored_entry(preview),
                                                       snap['text'], snap)
                 self.assertEqual(expected, state)
                 self.assertEqual(snap['text'], complete['body'])
@@ -158,13 +162,13 @@ class PostDomTests(unittest.TestCase):
                 self.assertIn('\n@AsideAI\n', snap['inline_legacy'])
                 self.assertIn('https://example.com/connections', snap['inline_legacy'])
                 state, complete, _ = backfill.proposal(
-                    dict(body=snap['inline_legacy'], **{x_post.HINT: ''}), snap['text'], snap)
+                    stored_entry(snap['inline_legacy']), snap['text'], snap)
                 self.assertEqual('normalized', state)
                 self.assertEqual(snap['text'], complete['body'])
                 self.assertIn('\n\nKeep this paragraph.', complete['body'])
                 raw = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
                 state, complete, info = backfill.proposal(
-                    dict(body=raw, **{x_post.HINT: ''}), snap['text'], snap)
+                    stored_entry(raw), snap['text'], snap)
                 self.assertEqual('blocked_content', state)
                 self.assertIsNone(complete)
                 self.assertEqual('detail_does_not_cover_stored', info['reason'])
@@ -176,7 +180,7 @@ class PostDomTests(unittest.TestCase):
         legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
         snap = json.loads(self.page.eval(x_post.READ_JS))
         preview = legacy.split(' today')[0]
-        state, complete, _ = backfill.proposal(dict(body=preview, **{x_post.HINT: ''}),
+        state, complete, _ = backfill.proposal(stored_entry(preview),
                                               snap['text'], snap)
         self.assertEqual('expanded', state)
         self.assertEqual(snap['text'], complete['body'])
@@ -188,7 +192,7 @@ class PostDomTests(unittest.TestCase):
         snap = json.loads(self.page.eval(x_post.READ_JS))
         self.assertEqual(snap['text'], snap['inline_legacy'])
         self.assertEqual('blocked_whitespace', backfill.proposal(
-            dict(body='Read \n@AsideAI\n today', **{x_post.HINT: ''}), snap['text'], snap)[0])
+            stored_entry('Read \n@AsideAI\n today'), snap['text'], snap)[0])
 
     def test_out_of_flow_wrappers_cannot_authorize_deleting_paragraphs(self):
         for style in ['position:absolute', 'position:fixed', 'float:left', 'visibility:hidden']:
@@ -198,7 +202,7 @@ class PostDomTests(unittest.TestCase):
                 snap = json.loads(self.page.eval(x_post.READ_JS))
                 self.assertEqual(snap['text'], snap['inline_legacy'])
                 self.assertEqual('blocked_whitespace', backfill.proposal(
-                    dict(body='Read \n@AsideAI\n today', **{x_post.HINT: ''}), snap['text'], snap)[0])
+                    stored_entry('Read \n@AsideAI\n today'), snap['text'], snap)[0])
 
     def test_proven_multiple_layout_breaks_can_be_removed_without_removing_source_paragraphs(self):
         anchors = ['<a style="display:block" href="https://example.org">https://example.org</a>',
@@ -213,7 +217,7 @@ class PostDomTests(unittest.TestCase):
                 snap = json.loads(self.page.eval(x_post.READ_JS))
                 self.assertIn('\n\nhttps://', legacy)
                 self.assertIn('Read\nhttps://', snap['text'])
-                state, complete, _ = backfill.proposal(dict(body=legacy, **{x_post.HINT: ''}),
+                state, complete, _ = backfill.proposal(stored_entry(legacy),
                                                       snap['text'], snap)
                 self.assertEqual('normalized', state)
                 self.assertEqual(snap['text'], complete['body'])
@@ -226,13 +230,13 @@ class PostDomTests(unittest.TestCase):
         snap = json.loads(self.page.eval(x_post.READ_JS))
         preview = legacy.replace('\n@AsideAI', '\n\n@AsideAI')
         self.assertEqual('blocked_whitespace', backfill.proposal(
-            dict(body=preview, **{x_post.HINT: ''}), snap['text'], snap)[0])
+            stored_entry(preview), snap['text'], snap)[0])
 
     def test_inline_anchor_without_a_layout_break_cannot_authorize_removing_one(self):
         self.load(article(text='Read <a href="/AsideAI">@AsideAI</a> today'))
         snap = json.loads(self.page.eval(x_post.READ_JS))
         self.assertEqual('blocked_whitespace', backfill.proposal(
-            dict(body='Read\n@AsideAI\ntoday', **{x_post.HINT: ''}), snap['text'], snap)[0])
+            stored_entry('Read\n@AsideAI\ntoday'), snap['text'], snap)[0])
 
     def test_real_protocol_split_is_repaired_but_url_following_paragraphs_survive(self):
         self.load(article(text='Read <a href="https://t.co/example">'
@@ -242,7 +246,7 @@ class PostDomTests(unittest.TestCase):
         legacy = self.page.eval('document.querySelector("[data-testid=tweetText]").innerText')
         snap = json.loads(self.page.eval(x_post.READ_JS))
         self.assertIn('https://\nexample.org/path', legacy)
-        state, complete, _ = backfill.proposal(dict(body=legacy, **{x_post.HINT: ''}),
+        state, complete, _ = backfill.proposal(stored_entry(legacy),
                                               snap['text'], snap)
         self.assertEqual('normalized', state)
         self.assertEqual('Read https://example.org/path\n\nKeep this paragraph.', complete['body'])
@@ -251,7 +255,7 @@ class PostDomTests(unittest.TestCase):
         self.load(article(text='🙂 Read <a style="display:block" href="/AsideAI">@AsideAI</a> today'))
         snap = json.loads(self.page.eval(x_post.READ_JS))
         self.assertEqual([5, 13], snap['inline_breaks'])
-        entry = dict(body='🙂 Read \n@AsideAI\n today', **{x_post.HINT: ''})
+        entry = stored_entry('🙂 Read \n@AsideAI\n today')
         self.assertEqual('normalized', backfill.proposal(entry, snap['text'], snap)[0])
         self.load(article(text='🙂 Read @AsideAI today'))
         snap = json.loads(self.page.eval(x_post.READ_JS))
@@ -464,7 +468,11 @@ class PostDomTests(unittest.TestCase):
         for status in [404, 429, 503]:
             for operation in ['UserByScreenName', 'UserTweets']:
                 with self.subTest(status=status, operation=operation):
-                    self.http_page(status, operation, '<main>Account suspended</main>')
+                    self.http_page(status, operation,
+                        '<main><div data-testid=primaryColumn><div data-testid=emptyState>'
+                        '<div data-testid=empty_state_header_text>Account suspended</div>'
+                        '<a href="https://help.x.com/en/rules-and-policies/x-rules">Help</a>'
+                        '</div></div></main>')
                     snap = x_page_state.read(self.page, x_browser._STATE_JS)
                     self.assertTrue(snap['empty'])
                     problem = ('' if operation == 'UserByScreenName' else
@@ -472,7 +480,7 @@ class PostDomTests(unittest.TestCase):
                     self.assertEqual(problem, x_page_state.problem(snap))
                     self.assertEqual(not problem, x_page_state.unavailable(snap))
                     started = time.monotonic()
-                    reason = ('账号在 X 上打不开' if not problem else
+                    reason = ('账号已被冻结' if not problem else
                               '限制了访问频率' if status == 429 else '页面请求出错')
                     with self.assertRaisesRegex(x_browser.XBrowserError, reason) as caught:
                         x_browser._wait_state(self.page, 'Example', started + 3)
@@ -555,3 +563,61 @@ class PostDomTests(unittest.TestCase):
             snap = json.loads(self.page.eval(script))
             self.assertIs(False, snap.get('empty'))
             self.assertIs(False, snap.get('limited'))
+
+    def test_real_profile_terminal_shapes_are_independent_of_body_wide_regexes(self):
+        fixtures = json.loads((Path(__file__).parent / 'fixtures/x_account_states.json').read_text())
+        for sample in fixtures:
+            with self.subTest(state=sample['state']):
+                route = sample.get('landed', '/' + sample['source'].rsplit('/', 1)[1])
+                self.load(sample['html'], route)
+                snap = json.loads(self.page.eval(x_browser._STATE_JS))
+                self.assertEqual(sample['state'], snap['account']['state'])
+                self.assertTrue(snap['account']['evidence'])
+
+    def test_unknown_profile_structure_is_not_positive_evidence_of_account_absence(self):
+        for profile in ['', '<div data-testid=ProfileHeaderVNext>Healthy account</div>']:
+            self.load('<main><div data-testid=primaryColumn>' + profile + '<div data-testid=emptyState>'
+                      '<div data-testid=empty_state_header_text>Unbekannt</div></div></div></main>',
+                      '/old_handle')
+            snap = json.loads(self.page.eval(x_browser._STATE_JS))
+            self.assertEqual('unknown', snap['account']['state'])
+            self.assertEqual('old_handle', snap['account']['handle'])
+
+    def test_protected_profile_uses_its_help_link_not_translated_words(self):
+        self.load('<main><div data-testid=primaryColumn><div data-testid=UserName>Example</div>'
+                  '<div data-testid=emptyState><div data-testid=empty_state_header_text>非英文</div>'
+                  '<a href="https://help.x.com/en/safety-and-security/public-and-protected-posts">'
+                  'Help</a></div></div></main>', '/Example')
+        snap = json.loads(self.page.eval(x_browser._STATE_JS))
+        self.assertEqual('protected', snap['account']['state'])
+
+    def test_sidebar_bio_empty_profile_and_loading_do_not_prove_account_absence(self):
+        missing = ('<div data-testid=emptyState><div data-testid=empty_state_header_text>'
+                   '此账号不存在</div></div>')
+        for html in ['<div data-testid=sidebarColumn>' + missing + '</div>',
+                     '<div data-testid=primaryColumn><div data-testid=UserName>正常账号</div>'
+                     + missing + '</div>',
+                     '<div data-testid=primaryColumn><div role=progressbar></div>' + missing + '</div>',
+                     '<div data-testid=primaryColumn>' + article(text='此账号不存在') + missing + '</div>']:
+            with self.subTest(html=html):
+                self.load('<main>' + html + '</main>', '/Example')
+                self.assertEqual('', json.loads(self.page.eval(x_browser._STATE_JS))['account']['state'])
+
+    def media(self, content):
+        return article(text='').replace('<div data-testid="tweetText"></div>', content)
+
+    def bind_payload(self, kind='photo', *, text='', identity='123', tweet=None):
+        link = 'https://t.co/fixture'
+        data = dict(id_str=identity, full_text=text + (' ' if text else '') + link,
+                    display_text_range=[0, len(text)], entities={})
+        entity = dict(url=link, indices=[len(data['full_text']) - len(link), len(data['full_text'])])
+        if kind in {'photo', 'video'}:
+            data['entities']['media'] = [dict(entity, type=kind)]
+        else:
+            data['entities']['urls'] = [entity]
+            if kind == 'link':
+                data['card'] = dict(url=link)
+            elif kind == 'quote':
+                data.update(quoted_status_id_str='456', quoted_status_permalink=dict(url=link))
+        self.page.eval('document.querySelector("article").__reactFiber$fixture = '
+                       + json.dumps(dict(memoizedProps=dict(tweet=tweet or data))) + '; true')

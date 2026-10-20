@@ -304,6 +304,13 @@ def prefetch(sources: list[dict], settings: dict, *, since: str = '',
     return result
 
 
+class XCollectionError(ValueError):
+    def __init__(self, result: dict):
+        self.unavailable = result.get('unavailable', [])
+        self.notice = result.get('note', '')
+        super().__init__(';'.join(filter(None, [result['error'], self.notice])))
+
+
 def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
     """取这条订阅在本轮预取里的那一份,形状和 `fetch_source` 的返回值一致。
 
@@ -317,7 +324,7 @@ def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
     if got is None:
         raise LookupError(f'{label(channel)} 这一轮没有抓到 @{handle}')
     if got.get('error'):
-        raise ValueError(got['error'])
+        raise XCollectionError(got)
     if note := got.get('skipped'):
         from kb.feeds.fetching import CollectionBudgetExceeded
         raise CollectionBudgetExceeded(note)
@@ -338,7 +345,10 @@ def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
     if note := got.get('incomplete'):
         meta['note'] = note
     if notice := got.get('note'):
-        meta['notice'] = notice
+        meta.update(notice=notice,
+                    unavailable=got.get('unavailable', []),
+                    unavailable_count=got.get('unavailable_count', 0),
+                    notice_count=got.get('unavailable_count', 0) + got.get('skipped_quotes', 0))
     return got['entries'], meta
 
 

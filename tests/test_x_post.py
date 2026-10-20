@@ -195,6 +195,10 @@ class PostTests(unittest.TestCase):
                 result = x_browser.harvest([('Example', OLD)], profile='', attach=attach)['Example']
             self.assertEqual([], result['entries'])
             self.assertEqual('', result['incomplete'])
+            self.assertEqual(1, result['unavailable_count'])
+            self.assertEqual(URL, result['unavailable'][0]['url'])
+            self.assertIn('不存在', result['unavailable'][0]['reason'])
+            self.assertIn('跳过 1 条', result['note'])
             self.assertEqual(x_browser._utc(x_browser._as_published(FRESH_ISO)),
                              x_browser._utc(result['watermark']))
             self.assertEqual(2, page.reads)
@@ -211,6 +215,8 @@ class PostTests(unittest.TestCase):
         self.assertEqual([], result['entries'])
         self.assertEqual(OLD, result['watermark'])
         self.assertTrue(result['incomplete'])
+        self.assertEqual(1, result['unavailable_count'])
+        self.assertIn('跳过 1 条', result['note'])
 
     def test_detail_rate_limit_aborts_remaining_accounts_in_both_channels(self):
         short = x_browser._entry(tweet('124', text='short'))
@@ -364,6 +370,9 @@ class StoredPostTests(ChannelBase):
             self.assertEqual(x_browser._utc(x_browser._as_published(FRESH_ISO)),
                              x_browser._utc(x_channels.watermark(saved, channel)))
             self.assertEqual('', saved['last_note'])
+            self.assertIn('跳过 1 条远端明确不可用推文', saved['last_notice'])
+            self.assertIn(URL, saved['last_notice'])
+            self.assertIn('不存在', saved['last_notice'])
             with reg.db() as conn:
                 self.assertEqual(0, conn.execute('SELECT count(*) FROM feed_items').fetchone()[0])
 

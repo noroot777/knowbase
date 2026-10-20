@@ -118,13 +118,22 @@ def _key(channel: str, item_id: str) -> str:
     return f"{channel}:{item_id}"
 
 
-def _item_key(item) -> str:
-    """一条失败明细的身份,没有身份(来源没给 `drop`)返回空串。"""
+def _item_keys(item) -> set[str]:
+    """包含采集器核实的同文别名；旧账本的原档案身份也继续有效。"""
     drop = item.get("drop") if isinstance(item, dict) else None
     if not isinstance(drop, dict):
-        return ""
+        return set()
     channel, item_id = str(drop.get("channel") or ""), str(drop.get("id") or "")
-    return _key(channel, item_id) if channel and item_id else ""
+    if not channel or not item_id:
+        return set()
+    identities = (item_id,)
+    try:
+        from kb.collectors import get_collector, item_aliases
+
+        identities = item_aliases(get_collector(channel), drop)
+    except Exception:
+        pass
+    return {_key(channel, identity) for identity in identities}
 
 
 def dropped_keys() -> set[str]:
@@ -177,9 +186,7 @@ def _visible():
             for stage in (stages or {}).values() if isinstance(stages, dict) else ():
                 items = stage.get("failures") if isinstance(stage, dict) else None
                 for item in items if isinstance(items, list) else ():
-                    key = _item_key(item)
-                    if key:
-                        used.add(key)
+                    used.update(_item_keys(item))
         stamps = [t for t in (run_stamp(r) for r in rounds) if t is not None]
     except Exception:
         return None
@@ -278,7 +285,7 @@ def strip(run, keys: set[str] | None = None) -> int:
         items = stage.get("failures")
         if not isinstance(items, list):
             continue
-        kept = [f for f in items if _item_key(f) not in keys]
+        kept = [f for f in items if _item_keys(f).isdisjoint(keys)]
         n = len(items) - len(kept)
         if not n:
             continue

@@ -38,8 +38,10 @@ class TimelineState:
         error = x_page_state.escalate(state, confirmed, self.failure, content_pending=False)
         if isinstance(error, (x_page_state.XRateLimited, x_page_state.XAccessBlocked)):
             if self.result is not None:
+                evidence = {key: self.result[key] for key in (
+                    'unavailable', 'unavailable_count', 'note', 'skipped_quotes') if key in self.result}
                 self.result.clear()
-                self.result.update(entries=[], error=str(error))
+                self.result.update(entries=[], error=str(error), **evidence)
             raise error
         if error:
             self.incomplete = str(error)

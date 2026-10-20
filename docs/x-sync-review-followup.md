@@ -231,3 +231,43 @@ headless shell、全新临时 profile 和 localhost 夹具；不接用户 Chrome
 日志在 `/tmp/kb-x-fix-AACErx-ownership/`。本轮没有界面改动，不重复截图或操作生产订阅页面。
 扩展自建标签已关闭，独立浏览器和本地 HTTP 测试服务已清理；未接管、导航或切换用户已有标签，
 也没有修改生产数据库、真实 vault 或登录态。
+
+## 验收冲突合并自查（2026-10-20）
+
+仅在任务分支 `ash/AACErxUc` 合入目标快照 `main@c9b8223`，没有切换或写入目标分支。
+逐一解决 10 个冲突文件，保留主线新增的账号分类、合法空正文、正文来源约束及跳过证据，
+同时保留本任务的有界欠账重查、HTTP/DOM 冲突保护、部分同步和跨导航响应归属。
+同步持久化、通道元数据和前端沿用主线的 `notice_count/skip_reasons` 契约，
+不将提示性说明重新混入未完成状态。结构化账号终态只在没有核心 HTTP 冲突时生效；
+迟到 429 清空尚未入库条目时仍保留引用推跳过说明与不可用 URL 证据。
+
+### 合并验证的浏览器通道
+
+先命名 Chrome 扩展会话 `🔎 X 合并冲突验证` 并新建分组后台标签，用隔离临时库启动本地界面。
+已核对三种状态：纯提示为“已同步（有跳过）”且不提示接着读；未读完为“部分同步”并独立展示
+跳过说明；正常完成为“已同步”且没有跳过说明。控制台错误为空，截图已在执行轨迹展示，
+并保存为 `/tmp/kb-x-merge-AACErx/ui-notices.png`。
+浏览器只暴露 `viewport/management`，标签只暴露 `pageAssets`；公共接口缺少原始 CDP 传输、
+`Network` 事件订阅及受控事件交付，不能完成必须的产品协议链验证。因此仅协议/DOM 测试
+降级到独立 headless shell、临时 profile 和 localhost 夹具。扩展本身没有断连或登录墙，
+不启动有头浏览器，不直连用户 Chrome 的 CDP，不访问线上 X 或读取 cookie。
+
+### 合并自查结果
+
+- 定点回归：235 tests, OK (skipped=4)，7.552 秒；4 个真实浏览器测试留待独立无头通道执行。
+- 新增合并兼容回归覆盖两个通道的跳过说明、不可用证据、旧水位及迟到 429/503 的实际入库，
+  并覆盖 missing/suspended/protected 与核心 404/429/503 的冲突，不把它们误判为账号永久终态。
+- `HEADLESS_SHELL=/nonexistent uv run --offline python -m unittest discover -s tests -t . -q`
+  → **3106 tests, OK (skipped=139)**，168.232 秒，退出码 0；实际执行 2967 项，跳过不计为通过。
+- `HEADLESS_SHELL=<本机 chrome-headless-shell> uv run --offline python -m unittest
+  tests.test_x_response_dom tests.test_x_post_dom tests.test_x_access_gate
+  tests.test_x_challenge_verdict -q` → **66 tests, OK，无跳过**，10.478 秒。
+  覆盖真实临时浏览器中的 DOM、HTTP 状态与受控迟到协议交付及相邻策略回归；不声称实测线上 X。
+  定点和无头测试与全仓集合存在交集，不将各次执行数相加当作独立覆盖数。
+- 本任务相对主线的所有 Python 文件通过 `uvx --offline ruff check`；
+  `node --check kb/static/js/sources.js`、索引与工作区 `git diff --check` 均通过。
+  冲突代码文件及本任务差异代码均不超过 700 行，`x_browser.py` 为 700 行。
+- 自建扩展标签已关闭；自建界面服务进程退出，55998 端口不再监听，临时数据根已删除。
+  协议测试断言自有浏览器优雅退出；其 HTTP 服务和临时 profile 由测试清理。
+
+本轮日志目录：`/tmp/kb-x-merge-AACErx/`。没有修改生产数据库、真实 vault 或登录态。

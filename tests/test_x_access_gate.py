@@ -190,7 +190,8 @@ class AccessGateDomTests(unittest.TestCase):
         stored = 'Read this:\nhttps://\nexample.org/path\n…'
         entry = dict(url='https://x.com/Example/status/123', body=stored,
                      title='Read this:', **{x_post.HINT: ''})
-        state, complete, info = backfill.proposal(entry, evidence['text'], evidence)
+        from kb.feeds import x_body
+        state, complete, info = backfill.proposal(x_body.record(entry, stored), evidence['text'], evidence)
         self.assertEqual('normalized', state)
         self.assertEqual('Read this:\nhttps://example.org/path', complete['body'])
         self.assertEqual('blocked_whitespace', info['remaining'])

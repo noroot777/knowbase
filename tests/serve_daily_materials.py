@@ -77,7 +77,7 @@ def build(vault, base='http://127.0.0.1'):
         ('[介绍](https://example.org/info) — 使用说明', '正常作者', '', 1),
         ('正常标题', '作者第一行\n\n第二行', 'https://example.org/real', 1),
         ('正常标题', '作者第一行\n\n第二行', '', 1),
-        ('正常标题', '正常作者', 'https://example.org/real', 9),
+        ('正常标题', '作者第一行\n\n> 作者继续说明', 'https://example.org/real', 1),
     ]
     for day, (title, account, url, total) in enumerate(cases, 9):
         entry = dict(path='source/one.md', title=title, source='rss', account=account,
@@ -104,6 +104,9 @@ def build(vault, base='http://127.0.0.1'):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=8876)
+    parser.add_argument('--report-fixture', type=Path)
+    parser.add_argument('--snapshot-fixtures', action='store_true')
+    parser.add_argument('--queue-fixtures', action='store_true')
     args = parser.parse_args()
     with contextlib.ExitStack() as stack:
         root = Path(fixture_root(stack, 'kb-material-qa-'))
@@ -113,6 +116,17 @@ def main():
         from kb import pipeline
         pipeline.start_scheduler = lambda: None
         build(vault, f'http://127.0.0.1:{args.port}')
+        if args.queue_fixtures:
+            from tests.daily_material_queue_fixtures import queue_report
+
+            (vault / 'daily' / '2026-10-03.md').write_text(queue_report(), encoding='utf-8')
+        if args.snapshot_fixtures:
+            from tests.daily_material_snapshot_fixtures import snapshot_documents
+
+            for date, text in snapshot_documents().items():
+                (vault / 'daily' / f'{date}.md').write_text(text, encoding='utf-8')
+        if args.report_fixture:
+            (vault / 'daily' / args.report_fixture.name).write_bytes(args.report_fixture.read_bytes())
         import uvicorn
         from kb.server import app
         uvicorn.run(app, host='127.0.0.1', port=args.port, log_level='warning')
