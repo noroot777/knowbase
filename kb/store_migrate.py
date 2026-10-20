@@ -15,7 +15,7 @@ from __future__ import annotations
 import sqlite3
 
 # 收藏(web UI;整篇或片段,语义是"待试备忘"而非典藏,所以带状态流转。
-# 文档从索引移除时级联清掉,重索引 upsert 不影响)。
+# 文档从索引移除时只解除关联,收藏内容独立保留,重索引 upsert 不影响)。
 # 单独抽出来:favorites 的几次迁移都要独立重建这张表。
 #
 # **`path` 可空**(v4)。「收藏此段」原来只长在 `/doc/…` 阅读页上,片段必然对应
@@ -23,11 +23,11 @@ import sqlite3
 # 这三样**在 documents 里没有行**(日报写在 `daily/`,不在任何 `SOURCES.root`
 # 底下;回答压根不是文件)。拿空串占位会被这条外键当场拒掉 —— 空串不是 NULL,
 # 外键照查。所以把非空约束去掉,由 `origin` 这一族列说明它来自哪里。
-# **只增不减**:`path` 非空时外键和级联语义一个字没变。
+# v5:删除文档不再级联删除收藏,由外键将 path 置 NULL。
 FAVORITES_TABLE = """
 CREATE TABLE IF NOT EXISTS favorites (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  path        TEXT REFERENCES documents(path) ON DELETE CASCADE,  -- NULL = 没有对应的 vault 文档
+  path        TEXT REFERENCES documents(path) ON DELETE SET NULL,  -- NULL = 没有对应的 vault 文档
   quote       TEXT NOT NULL DEFAULT '',      -- 片段原文;'' = 整篇收藏
   prefix      TEXT NOT NULL DEFAULT '',      -- 片段定位锚:前文
   suffix      TEXT NOT NULL DEFAULT '',      -- 片段定位锚:后文
@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS favorites (
   origin_ref  TEXT NOT NULL DEFAULT '',      -- origin 内部的定位键(日报日期 / 会话:消息 id / 条目 key)
   origin_title TEXT NOT NULL DEFAULT '',     -- 收藏那一刻的标题快照,path 为空时列表只靠它
   origin_url  TEXT NOT NULL DEFAULT '',      -- 站外原文地址(可空)
+  origin_source TEXT NOT NULL DEFAULT '',
+  origin_account TEXT NOT NULL DEFAULT '',
+  origin_published TEXT NOT NULL DEFAULT '',
+  origin_summary TEXT NOT NULL DEFAULT '',
   -- **采集那一刻这段引文在那一篇里是不是只有一处。** 回跳时两侧上下文都失配、
   -- 退到「只找引文」那一档时按它决定能不能采信:当时就有两处、收的是第二处,
   -- 后来第二处被删掉,剩下的第一处按裸引文找正好唯一 —— 采信它等于把另一处同
@@ -55,7 +59,7 @@ CREATE TABLE IF NOT EXISTS favorites (
   -- 一侧失配只能是两种渲染摊出来的文本不一样,可以只听另一侧、必要时退到裸引文;
   -- **不等(或者老数据为空)= 这一篇改过/说不清**,那时一侧的「唯一命中」证明
   -- 不了它就是原处,一律如实说位置说不清(见 `snip_text.js` 的 `snipSeek`)。
-  -- 只对绑了文档的收藏有意义;path 为空时为 NULL。
+  -- 只对曾绑文档的收藏有意义;未绑定过时为 NULL,解除关联后保留原值。
   doc_version TEXT,
   -- **问答片段出自哪一条已经落库的消息。** 会话号非空只说明那个对话存在;这一
   -- 列是后端真正核验过的消息身份(见 favorites_api 的问答归属核验)。0/NULL =
@@ -72,11 +76,28 @@ CREATE TABLE IF NOT EXISTS favorites (
 # 回归都红 0 条 —— 那是夹在两道带中间的死代码,而它的注释会让下一个人以为它顶事。
 FAVORITES_INDEX = (
     "CREATE INDEX IF NOT EXISTS idx_favorites_path ON favorites(path)")
-FAVORITES_DDL = FAVORITES_TABLE + FAVORITES_INDEX + ";\n"
+FAVORITES_SNAPSHOT = """
+CREATE TRIGGER IF NOT EXISTS favorites_document_snapshot
+BEFORE DELETE ON documents
+BEGIN
+  UPDATE favorites
+  SET origin_title = CASE WHEN origin_title = '' THEN OLD.title ELSE origin_title END,
+      origin_url = CASE WHEN origin_url = '' THEN OLD.url ELSE origin_url END,
+      origin_source = CASE WHEN origin_source = '' THEN OLD.source ELSE origin_source END,
+      origin_account = CASE WHEN origin_account = '' THEN OLD.account ELSE origin_account END,
+      origin_published = CASE WHEN origin_published = '' THEN OLD.published ELSE origin_published END,
+      origin_summary = CASE WHEN origin_summary = '' THEN OLD.summary ELSE origin_summary END
+  WHERE path = OLD.path AND (origin_title = '' OR origin_url = '' OR origin_source = ''
+    OR origin_account = '' OR origin_published = '' OR origin_summary = '');
+END;
+"""
+FAVORITES_DDL = FAVORITES_TABLE + FAVORITES_INDEX + ";\n" + FAVORITES_SNAPSHOT
+_FAV_METADATA = ("origin_source", "origin_account", "origin_published", "origin_summary")
 
-# v2/v3 带过来的列。重建时按**老表实际有的**那几列拼 INSERT:v2 没有
+# 历史版本带过来的列。重建时按**老表实际有的**那几列拼 INSERT:v2 没有
 # action_json,写死一份列名会让它在 `no such column` 上翻车。
-_FAV_CARRIED = ("quote", "prefix", "suffix", "note", "status", "action_json",
+_FAV_CARRIED = ("id", "quote", "prefix", "suffix", "note", "status", "action_json",
+                "origin", "origin_ref", "origin_title", "origin_url", *_FAV_METADATA,
                 "quote_unique", "anchor_exact", "origin_msg", "doc_version",
                 "created_at", "updated_at")
 
@@ -113,66 +134,89 @@ def migrate_favorites(conn: sqlite3.Connection) -> None:
     """favorites 结构升级,幂等。
 
     v1(path 主键、仅整篇星标)→ v2(id 主键 + 片段/状态)→ v3(+action_json)
-    → v4(path 可空 + origin 一族:片段可以来自日报/问答/未导出的订阅条目)。
+    → v4(path 可空 + origin 一族)→ v5(文档删除只解除关联,收藏独立保留)。
     """
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(favorites)").fetchall()}
-    if not cols:
+    if _favorites_need_rebuild(conn):
+        _rebuild_favorites(conn)
+    _migrate_favorite_metadata(conn)
+
+
+def _migrate_favorite_metadata(conn: sqlite3.Connection) -> None:
+    """原子补齐显示快照列并替换旧触发器,当前结构只读不取写锁。"""
+    def needs_update():
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(favorites)")}
+        if not columns:
+            return False
+        trigger = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger'"
+                               " AND name='favorites_document_snapshot'").fetchone()
+        expected = " ".join(FAVORITES_SNAPSHOT.replace("IF NOT EXISTS ", "").strip().rstrip(";").split())
+        actual = " ".join((trigger["sql"] if trigger else "").strip().rstrip(";").split())
+        return not set(_FAV_METADATA).issubset(columns) or actual != expected
+
+    if not needs_update():
         return
-    if "id" not in cols:  # v1 → 重建(新 DDL 已经是 v4,origin 默认 doc 正合 v1 语义)
-        conn.execute("ALTER TABLE favorites RENAME TO favorites_v1")
-        conn.executescript(FAVORITES_DDL)
-        conn.execute(
-            "INSERT INTO favorites (path, created_at, updated_at)"
-            " SELECT path, created_at, created_at FROM favorites_v1"
-        )
-        _carry_sequence(conn, "favorites_v1", "favorites")
-        conn.execute("DROP TABLE favorites_v1")
+    if conn.in_transaction:
         conn.commit()
-    elif "origin" not in cols:  # v2/v3 → 重建
-        _rebuild_favorites_v4(conn)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if needs_update():
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(favorites)")}
+            for column in _FAV_METADATA:
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE favorites ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            conn.execute("DROP TRIGGER IF EXISTS favorites_document_snapshot")
+            conn.execute(FAVORITES_SNAPSHOT)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
-def _rebuild_favorites_v4(conn: sqlite3.Connection) -> None:
-    """把 `path` 的非空约束去掉并补上 origin 一族。幂等。
+def _favorites_need_rebuild(conn: sqlite3.Connection) -> bool:
+    columns = {row["name"]: row for row in conn.execute("PRAGMA table_info(favorites)")}
+    if not columns:
+        return False
+    if "id" not in columns or "origin" not in columns or columns["path"]["notnull"]:
+        return True
+    return not any(row["from"] == "path" and row["table"] == "documents"
+                   and row["to"] == "path" and row["on_delete"] == "SET NULL"
+                   for row in conn.execute("PRAGMA foreign_key_list(favorites)"))
 
-    **只能重建**:加列 ALTER 办得到,去掉 NOT NULL 办不到(SQLite 没有
-    `ALTER COLUMN`)。
 
-    **整段在一个写事务里,并在锁里重新读一次列集合** —— 口径同 `add_columns`:
-    `connect()` 是页面 API、提取 worker、CLI 共用的入口,升级后第一次并发使用
-    会有一批连接同时跑到这里,判据和重建分在两个不持锁的语句里就是两个连接各
-    重建一次,后一个撞 `table favorites_v3 already exists`、那个请求当场 500。
-    常态(已经是 v4)在上面那句 PRAGMA 就返回了,一次锁都不取。
+def _rebuild_favorites(conn: sqlite3.Connection) -> None:
+    """在同一个写事务里将 v1-v4 升级到保留收藏的外键,失败完整回滚。
 
-    **孤儿行的 path 落 NULL,不让它把整次迁移带崩。** 外键是 ON 的,INSERT 回去
-    每行都查一次 documents —— 历史上留下的、文档已经不在索引里的收藏(原来
-    INNER JOIN 下就看不见、却仍占着计数)会让这一句整条失败,于是 `connect()`
-    本身再也成功不了。置空之后它们按"没有对应文档"显示,比打不开库好。
-    `executescript` 在执行前会隐式提交,所以这里逐条 execute。
+    取锁后重新判断版本,避免首次并发连接重复重建。保留编号、自增高水位、
+    全部快照与锚点;历史孤儿只把 path 置 NULL。逐条 execute 避免隐式提交。
     """
     if conn.in_transaction:
         conn.commit()
     conn.execute("BEGIN IMMEDIATE")
     try:
-        cols = {r["name"] for r in
-                conn.execute("PRAGMA table_info(favorites)").fetchall()}
-        if not cols or "origin" in cols:   # 别人刚重建完
+        if not _favorites_need_rebuild(conn):
             conn.commit()
             return
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(favorites)")}
         carried = [c for c in _FAV_CARRIED if c in cols]
         names = ", ".join(carried)
-        conn.execute("ALTER TABLE favorites RENAME TO favorites_v3")
+        values = names
+        if "updated_at" not in cols:
+            names += ", updated_at"
+            values += ", created_at"
+        conn.execute("DROP TRIGGER IF EXISTS favorites_document_snapshot")
+        conn.execute("ALTER TABLE favorites RENAME TO favorites_v4")
         conn.execute(FAVORITES_TABLE)
         conn.execute(
-            f"INSERT INTO favorites (id, path, {names})"
-            " SELECT id, CASE WHEN EXISTS (SELECT 1 FROM documents d"
-            "   WHERE d.path = favorites_v3.path) THEN path ELSE NULL END,"
-            f" {names} FROM favorites_v3"
+            f"INSERT INTO favorites (path, {names})"
+            " SELECT CASE WHEN EXISTS (SELECT 1 FROM documents d"
+            "   WHERE d.path = favorites_v4.path) THEN path ELSE NULL END,"
+            f" {values} FROM favorites_v4"
         )
-        # 搬完行再搬高水位,都在同一个写事务里 —— DROP 之后 `favorites_v3`
+        # 搬完行再搬高水位,都在同一个写事务里 —— DROP 之后 `favorites_v4`
         # 那行 sqlite_sequence 就跟着没了,顺序不能反。
-        _carry_sequence(conn, "favorites_v3", "favorites")
-        conn.execute("DROP TABLE favorites_v3")
+        _carry_sequence(conn, "favorites_v4", "favorites")
+        conn.execute("DROP TABLE favorites_v4")
+        conn.execute(FAVORITES_SNAPSHOT)
         conn.commit()
     except Exception:
         conn.rollback()

@@ -21,6 +21,7 @@ from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR
+from kb.feeds.exclusion import SCHEMA as EXCLUSION_SCHEMA, item_key
 from kb.source_types import feed_types
 
 DB_PATH = DATA_DIR / 'feeds.db'
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
  -- 排在最后,和老库 ALTER 补出来的列序一致(见 _ADDED_COLUMNS)。
  history_floor TEXT NOT NULL DEFAULT '', last_note TEXT NOT NULL DEFAULT '',
  fulltext INTEGER NOT NULL DEFAULT 0, extract INTEGER NOT NULL DEFAULT 0,
+ last_notice TEXT NOT NULL DEFAULT '',
  UNIQUE(kind, url)
 );
 CREATE TABLE IF NOT EXISTS feed_items (
@@ -48,7 +50,7 @@ CREATE TABLE IF NOT EXISTS feed_items (
  content_hash TEXT NOT NULL, exported_hash TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '',
  -- 排在最后,和老库 ALTER 补出来的列序一致(见 _ADDED_COLUMNS)。
  extract_stale INTEGER NOT NULL DEFAULT 0, fetch_round TEXT NOT NULL DEFAULT '',
- content_rev INTEGER NOT NULL DEFAULT 0
+ content_rev INTEGER NOT NULL DEFAULT 0, body_provenance TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS feed_items_recent ON feed_items(kind, published DESC, fetched_at DESC);
 CREATE TABLE IF NOT EXISTS subscription_items (
@@ -65,7 +67,7 @@ CREATE TABLE IF NOT EXISTS feed_runs (
  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, started_at TEXT NOT NULL,
  finished_at TEXT NOT NULL, summary TEXT NOT NULL
 );
-'''
+''' + EXCLUSION_SCHEMA
 
 # 译文列是后加的(见 kb/feeds/translate.py)。老库里已有几千条英文条目,建表语句
 # 的 IF NOT EXISTS 对它们不生效,只能逐列 ALTER 补——补不上就不是"少个字段",
@@ -94,6 +96,7 @@ _ADDED_COLUMNS = {
         # 存量已经提取过的不回滚:钱已经付过,标签也已经在图谱和检索里。
         # **独立一列、不放 `config`**,理由同 `fulltext`。
         ('extract', 'INTEGER NOT NULL DEFAULT 0'),
+        ('last_notice', "TEXT NOT NULL DEFAULT ''"),
     ),
     'feed_items': (
         ('lang', "TEXT NOT NULL DEFAULT ''"),              # '' 未判 / zh 无需翻译 / en 待翻译
@@ -132,6 +135,7 @@ _ADDED_COLUMNS = {
         # `fulltext.work_version`。老库补成 0 = 都算第 0 版,行为逐字不变 —— 判据比
         # 的是**取样那一刻的值**,起点是几无关。
         ('content_rev', 'INTEGER NOT NULL DEFAULT 0'),
+        ('body_provenance', "TEXT NOT NULL DEFAULT ''"),
     ),
 }
 
@@ -481,7 +485,7 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
                     # 被清掉的都是采集进度 —— 指向新的源之后它们本来就不作数。
                     c.execute("""UPDATE subscriptions SET etag='',modified='',resolved_url='',
                         last_error='',last_success='',last_attempt='',failures=0,retry_at=0,config='{}',
-                        last_note='',history_floor=? WHERE id=?""", (history_floor(), source_id))
+                        last_note='',last_notice='',history_floor=? WHERE id=?""", (history_floor(), source_id))
                     c.execute('DELETE FROM subscription_items WHERE subscription_id=?', (source_id,))
             else:
                 source_id = c.execute('''INSERT INTO subscriptions
@@ -547,21 +551,22 @@ def put_items(source: dict, entries: list[dict], conn=None) -> int:
     added = 0
     with _writing(conn) as c:
         for e in entries:
-            key = hashlib.sha256((source['kind'] + ':' + e['url']).encode()).hexdigest()[:32]
+            key = item_key(source['kind'], e['url'])
             digest = hashlib.sha256(json.dumps(e, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-            exists = c.execute('SELECT key FROM feed_items WHERE key=?', (key,)).fetchone()
-            added += int(not exists)
             # First provenance remains stable when an aggregate also contains this URL.
             # `DO NOTHING` 顺手把 fetch_round 钉成**首次发现**那一轮:聚合源里
             # 同一个 URL 后面还会再出现,重抓也按 URL 去重,改写它等于把首次发现
             # 的事实改成最后一次看见的时刻。
-            c.execute('''INSERT INTO feed_items
-                (key,kind,url,title,author,published,body,content_kind,fetched_at,content_hash,lang,fetch_round)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO NOTHING''',
+            inserted = c.execute('''INSERT INTO feed_items
+                (key,kind,url,title,author,published,body,content_kind,fetched_at,content_hash,lang,
+                 fetch_round,body_provenance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(key) DO NOTHING''',
                 (key,source['kind'],e['url'],e['title'],e.get('author') or source['name'],
                  e.get('published',''),e['body'],e.get('content_kind','feed'),now(),digest,
-                 text_language(e['title'], e['body']),round_id))
-            c.execute('INSERT OR IGNORE INTO subscription_items VALUES(?,?)', (source['id'],key))
+                 text_language(e['title'], e['body']),round_id,e.get('body_provenance', '')))
+            added += inserted.rowcount
+            c.execute('INSERT OR IGNORE INTO subscription_items SELECT ?,? '
+                      'WHERE EXISTS (SELECT 1 FROM feed_items WHERE key=?)', (source['id'],key,key))
     return added
 
 

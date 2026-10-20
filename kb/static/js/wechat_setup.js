@@ -1,10 +1,42 @@
 // Local onboarding stays independent of cloud models and of the active sync channel.
 let wechatSetup = null, wechatPoll = null, wechatRequest = false;
 let wechatStatusVersion = 0;
+const WECHAT_AGENT_PROMPT = `请在本项目目录中，根据 README 协助接入这台 Mac 上我自己的绿泡泡，目标是采集我选择的公众号文章。
+
+1. 先检查 macOS、uv、Go、Apple Command Line Tools，以及本人账号是否登录、目标公众号推送是否已同步。Docker 或远程服务器不能获取这台 Mac 的 key，请在 Mac 本机运行本项目。
+2. 检查已有 Reader、配置和数据库读取能力；有可用配置或密钥就复用，不覆盖、不重复获取。已有接入任务运行时先等待，不要并行获取。缺少工具时使用本项目固定版本的 Reader、SQLCipher 和 wxkey，无需额外安装整个 wechat-intelligence-hub 或其他 Skill。
+3. 优先使用本项目「设置 → 绿泡泡接入」的检查与接入流程，不绕过确认校验，不用通知预览代替数据库读取。没有浏览器操作能力时，引导我完成必要的页面点击。
+4. 只有确实缺少可用 key 时，说明管理员授权、访问绿泡泡进程、可能退出或重启绿泡泡并创建重签名副本等影响，经我明确确认后，使用项目的备份和获取流程。不要擅自关闭 SIP 或修改绿泡泡原程序。
+5. 我负责登录绿泡泡和完成系统授权。不要让我在对话中提供密码或 key，不要打印、上传或提交密钥、原始聊天及私有配置到 Git。
+6. 获取后验证 live_database_read_ok=true，再让我选择一个公众号做小范围采集，确认正文成功保存。验证仅限公众号，不读取私聊或群聊；不能把拿到 key 当作接入成功。
+7. 失败时先定位原因，不反复扫描、重启或无限重试。完成后报告验证结果、实际支持范围、系统或绿泡泡改动和未解决的问题，并提醒我回接入页面「刷新状态」，已验证后再去同步公众号。
+
+仅处理本机已同步推送中的文章，正文需仍可访问；不承诺获取公众号全部历史。`;
+
 function openWechatSetup() {
   $('wechat-modal').style.display = '';
   $('wechat-error').textContent = '';
+  $('wechat-agent-prompt').value = WECHAT_AGENT_PROMPT;
+  $('wechat-agent-copy-status').textContent = '';
   refreshWechatSetup();
+}
+
+async function copyWechatAgentPrompt() {
+  const button = $('wechat-agent-copy'), field = $('wechat-agent-prompt');
+  const status = $('wechat-agent-copy-status');
+  if (button.disabled) return;
+  button.disabled = true;
+  status.textContent = '';
+  try {
+    await navigator.clipboard.writeText(field.value);
+    status.textContent = '已复制，粘贴给你的本机智能体即可。';
+  } catch {
+    field.focus();
+    field.select();
+    status.textContent = '无法自动复制，已选中提示词，请按 ⌘C 或 Ctrl+C 复制。';
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function closeWechatSetup() { $('wechat-modal').style.display = 'none'; }
@@ -32,6 +64,7 @@ function wechatConfigured(open, id) {
 function renderWechatSetup() {
   const s = wechatSetup || {}, busy = !!s.running || wechatRequest;
   const docker = s.deployment === 'docker';
+  $('wechat-method-title').textContent = docker ? '请在 Mac 本机完成绿泡泡接入' : '方式一：在此页面接入';
   $('wechat-title').textContent = docker ? '配置 Docker 知识库' : '接入你的绿泡泡';
   $('wechat-welcome-title').textContent = docker ? '让文章进入你的知识库' : '让知识库接上你的绿泡泡';
   $('wechat-intro').textContent = docker ? '在 Mac 采集文章，在容器中索引、检索和分析。' : '从本机已同步的公众号推送中发现文章，收进知识库。';

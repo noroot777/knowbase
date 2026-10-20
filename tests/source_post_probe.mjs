@@ -17,7 +17,7 @@
 //
 //   HEADLESS_SHELL=<bin> node tests/source_post_probe.mjs
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, normalize } from "node:path";
 import { launchShell } from "./probe_shell.mjs";
@@ -60,7 +60,10 @@ const overview = kind => ({
   sources: [{ id: 1, name: kind === "social" ? "向阳乔木" : "测试订阅",
               url: "https://example.org/" + kind, group_name: "测试", enabled: 1,
               item_count: ITEMS[kind].total, last_success: "2026-10-09 14:00",
-              last_error: "", last_note: "", configuration_error: "", retry_at: 0 }],
+              last_error: "", last_note: "", configuration_error: "", retry_at: 0,
+              last_notice: kind === "social"
+                ? "跳过 1 条远端明确不可用推文(跳过本身不冻结水位):https://x.com/Example/status/123 (页面不存在)"
+                : "" }],
   settings: { enabled: false, interval_minutes: 1440, next_run: 0 },
   last_run: null, total: ITEMS[kind].total, enabled: 1, ready: 1, unconfigured: 0, errors: 0,
 });
@@ -269,6 +272,43 @@ check("RSS:点标题打得开阅读弹窗",
 check("RSS:弹窗照旧显示标题",
       await evalJs(`!document.getElementById('source-reader-title').hidden`)
       && await evalJs(`document.getElementById('source-reader-title').textContent`) === LONG_TITLE);
+
+await evalJs(`document.getElementById('source-reader').style.display = 'none'`);
+await clickAt("#subs-switch-social");
+await until(`sourceKind === 'social' && sourceData?.sources[0]?.last_notice`);
+await clickAt("#source-view-manage");
+await until(`document.querySelector('#source-list .source-subscription')`);
+check("不可用条目:管理页显示已同步有跳过,而非部分同步",
+      await evalJs(`document.querySelector('#source-list .source-state')?.textContent`) === "已同步（有跳过）");
+const noticeText = await evalJs(`document.querySelector('#source-list').innerText`);
+check("不可用条目:计数、URL、原因可见,不谎称从旧水位继续",
+      noticeText.includes("跳过 1 条") && noticeText.includes("https://x.com/Example/status/123")
+      && noticeText.includes("页面不存在") && !noticeText.includes("从上次的位置接着读"));
+if (process.env.X_SKIP_SCREENSHOT) {
+  const screenshot = await send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(process.env.X_SKIP_SCREENSHOT, Buffer.from(screenshot.result.data, "base64"));
+}
+check("不可用条目:混合失败仍独立显示部分同步和跳过说明",
+      await evalJs(`(() => { const row = {...sourceData.sources[0], last_note:'折叠推文完整正文没取到'};
+        const host = document.createElement('div'); host.innerHTML = renderSubscription(row);
+        return host.querySelector('.source-state').textContent === '部分同步'
+          && host.textContent.includes('下次同步从上次的位置接着读')
+          && host.textContent.includes(row.last_notice); })()`));
+check("不可用条目:跳过说明中的 HTML 只显示文本",
+      await evalJs(`(() => { const host = document.createElement('div');
+        host.innerHTML = renderSubscription({...sourceData.sources[0],last_notice:'<img src=x onerror=alert(1)>'});
+        return !host.querySelector('img') && host.textContent.includes('<img src=x onerror=alert(1)>'); })()`));
+await send("Emulation.setDeviceMetricsOverride", {
+  width: 390, height: 844, deviceScaleFactor: 1, mobile: false,
+});
+check("不可用条目:窄屏 URL 不撑出说明文字栏",
+      await evalJs(`(() => { const note = document.querySelector('.source-skip-notice');
+        return note.scrollWidth <= note.clientWidth + 1; })()`));
+if (process.env.X_SKIP_SCREENSHOT) {
+  const screenshot = await send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(process.env.X_SKIP_SCREENSHOT.replace(/\.png$/, "-mobile.png"),
+               Buffer.from(screenshot.result.data, "base64"));
+}
 
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 

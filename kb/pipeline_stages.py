@@ -17,7 +17,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from kb.collectors import FetchScope, active_collector
+from kb.collectors import FetchScope, active_collector, document_failure
 from kb.config import VIDEOS_ROOT
 from kb.pipeline_batch import round_key
 from kb import pipeline_results as results
@@ -299,16 +299,15 @@ def _index_pass() -> None:
     from kb import store
     from kb.chunker import split_chunks
     from kb.extract import parse_pretagged, save_extraction
-    from kb.scanner import scan_all
+    from kb.scanner import ScanReport, scan_all
 
     conn = store.connect()
     try:
         now = _now()
-        seen: set[str] = set()
+        report = ScanReport()
         new = 0
-        for doc in scan_all():
-            seen.add(doc.path)
-            if not store.doc_needs_reindex(conn, doc.path, doc.content_hash):
+        for doc in scan_all(report=report):
+            if store.observed_document_is_current(conn, doc):
                 continue
             store.upsert_document(conn, doc, split_chunks(doc.body), now)
             pre = parse_pretagged(doc)
@@ -318,7 +317,7 @@ def _index_pass() -> None:
             if new % 25 == 0:
                 conn.commit()
                 _stage("index", "running", f"已索引 {new} 篇")
-        removed = store.remove_missing_documents(conn, seen)
+        removed = store.remove_missing_documents(conn, report)
         conn.commit()
         # **这里不替抓取记账。**「今天抓了多少」是物化那一步的产出,记在
         # `_run_export`;索引看到的"头一回进库"混着上一轮抓回来还没索引的、手工
@@ -333,7 +332,8 @@ def _index_pass() -> None:
         # 行,谁也不会再来收(见 `kb.maintenance`)。
         from kb.embedder import embed_pending_chunks
         n = embed_pending_chunks(conn, _report)
-        _stage("index", "ok", f"新增/更新 {new},移除 {removed},新向量 {n}")
+        _stage("index", "error" if report.errors else "ok",
+               f"新增/更新 {new},移除 {removed},新向量 {n}{report.warning}")
     finally:
         conn.close()
 
@@ -511,8 +511,7 @@ def _extract_pass(label: str, stats: dict) -> None:
                                  f"{row['title'][:24]}")
                     elif data is None:
                         stats["empty_paths"].add(row["path"])
-                        stats["failures"][row["path"]] = {
-                            "title": row["title"], "reason": "正文为空,需回填"}
+                        stats["failures"][row["path"]] = document_failure(row, "正文为空,需回填")
                         _log(f"extract: SKIP 正文为空 {row['title'][:24]}")
                     else:
                         # 校验 → 落库 → 提交 → tag 回写 frontmatter(决策:自动
@@ -542,8 +541,7 @@ def _extract_pass(label: str, stats: dict) -> None:
                     _log(f"extract: SKIP 正文已更新 {row['title'][:24]}")
                 except Exception as e:
                     stats["failed_paths"].add(row["path"])
-                    stats["failures"][row["path"]] = {
-                        "title": row["title"], "reason": str(e)[:160]}
+                    stats["failures"][row["path"]] = document_failure(row, str(e)[:160])
                     _log(f"extract: FAIL {row['title'][:24]}: {e}")
                 _stage("extract", "running",
                        f"{label}提取 {done}/{len(todo)} — {row['title'][:24]}")

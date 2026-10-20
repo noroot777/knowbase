@@ -56,8 +56,8 @@ from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
-from kb.feeds.x_cdp import CdpError, Session
-from kb.feeds.ws_client import WebSocket, WsError
+from kb.feeds.x_cdp import CdpError, CdpTransportError, Session
+from kb.feeds.ws_client import WebSocket, WsError, WsTimeoutError
 
 #: 用户自己去开那个开关的办法。三处文案(面板就绪说明、检查连接、登录端点的
 #: 拒绝)共用这一份 —— 各写一遍必然漂。
@@ -340,16 +340,18 @@ class Attached(Session):
 
     def _post(self, msg: dict, deadline: float) -> None:
         if self._ws is None:
-            raise CdpError('浏览器连接已经关掉了')
+            raise CdpTransportError('浏览器连接已经关掉了')
         try:
             self._ws.send(json.dumps(msg), deadline)
         except WsError as e:
-            raise CdpError(str(e)) from None
+            raise CdpTransportError(str(e)) from None
 
     def _take(self, deadline: float) -> dict:
         if self._ws is None:
-            raise CdpError('浏览器连接已经关掉了')
+            raise CdpTransportError('浏览器连接已经关掉了')
         try:
             return json.loads(self._ws.recv(deadline))
-        except WsError as e:
+        except WsTimeoutError as e:
             raise CdpError(str(e)) from None
+        except WsError as e:
+            raise CdpTransportError(str(e)) from None

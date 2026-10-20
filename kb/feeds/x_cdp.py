@@ -69,6 +69,10 @@ class CdpError(RuntimeError):
     """浏览器侧的失败。message 是成品文案,直接给用户看。"""
 
 
+class CdpTransportError(CdpError):
+    """The shared transport cannot safely send or receive another command."""
+
+
 def find_chrome(explicit: str = '') -> str:
     """定位 Chrome 可执行文件。找不到时的文案要能指到下一步。"""
     if explicit:
@@ -104,6 +108,13 @@ class Session:
 
     def __init__(self) -> None:
         self._seq, self._sid, self._target = 0, '', ''
+        self._event_observers = []
+        self._call_observers = []
+
+    def observe_events(self, observer, *, after_call=None) -> None:
+        self._event_observers.append(observer)
+        if after_call is not None:
+            self._call_observers.append(after_call)
 
     # ── 传输(子类实现)──────────────────────────────────────────────────────
 
@@ -127,7 +138,7 @@ class Session:
 
     def call(self, method: str, params: dict | None = None, sid: str = '',
              timeout: float = CALL_TIMEOUT) -> dict:
-        """发一条命令,等它自己那条回复。期间的事件一律丢掉(我们不订阅事件)。
+        """发一条命令,等它自己那条回复。期间的事件交给已登记的观察者,其余丢掉。
 
         **deadline 要在发出去之前就算出来,而且发送也受它约束。** 原来是先
         `_send` 再算 deadline,于是 `timeout` 只管收、不管发 —— 对端卡住不读
@@ -137,14 +148,21 @@ class Session:
         deadline,写不动就报错,而不是替调用方把时间花在那儿。
         """
         deadline = time.monotonic() + timeout
-        want = self._send(method, params, sid, deadline)
-        while True:
-            msg = self._take(deadline)
-            if msg.get('id') != want:
-                continue                              # 别人的回复,或是事件
-            if 'error' in msg:
-                raise CdpError(f"{method} 失败:{msg['error'].get('message', '')}")
-            return msg.get('result', {})
+        try:
+            want = self._send(method, params, sid, deadline)
+            while True:
+                msg = self._take(deadline)
+                if msg.get('method'):
+                    for observer in self._event_observers:
+                        observer(msg)
+                if msg.get('id') != want:
+                    continue
+                if 'error' in msg:
+                    raise CdpError(f"{method} 失败:{msg['error'].get('message', '')}")
+                return msg.get('result', {})
+        finally:
+            for observer in self._call_observers:
+                observer(method)
 
     # ── 页面 ────────────────────────────────────────────────────────────────
 
@@ -361,13 +379,13 @@ class Chrome(Session):
         while view:
             left = limit - time.monotonic()
             if left <= 0 or not select.select([], [self._w], [], left)[1]:
-                raise CdpError('浏览器没有在预期时间内收下命令')
+                raise CdpTransportError('浏览器没有在预期时间内收下命令')
             try:
                 sent = os.write(self._w, view)
             except BlockingIOError:
                 continue                  # select 说可写、内核又改主意了
             except OSError as e:
-                raise CdpError(f'写浏览器连接出错:{e}') from None
+                raise CdpTransportError(f'写浏览器连接出错:{e}') from None
             view = view[sent:]
 
     def _take(self, deadline: float) -> dict:

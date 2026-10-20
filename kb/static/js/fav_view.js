@@ -59,7 +59,7 @@ function favCardHtml(item) {
   const category = favCategory(item);
   const action = item.action || {};
   const title = action.name || item.title;
-  const description = item.quote || action.what || item.summary || '打开原文，重新发现这条收藏。';
+  const description = favDescription(item);
   const [label, glyph] = FAV_FILTERS[category];
   return `<article class="fv-card fv-${category}${favActive === item.id ? ' is-active' : ''}${favSelected.has(item.id) ? ' is-selected' : ''}" data-fav-card="${item.id}">
     <div class="fv-card-top"><span class="fv-kind">${icon(glyph)}${label}</span>
@@ -71,7 +71,7 @@ function favCardHtml(item) {
     ${item.note ? `<button class="fv-card-note" onclick="openFavDetail(${item.id})" aria-label="编辑 ${esc(title)} 的笔记">${icon('paper')}<span>${esc(item.note)}</span></button>` : ''}
     <div class="fv-card-meta"><span>${esc(favWhere(item))}</span><time datetime="${esc(item.created_at)}">${favDate(item.created_at).slice(5)}</time></div>
     <div class="fv-card-footer"><span class="fv-card-eta">${item.status !== 'inbox' ? `<span class="fv-state-${item.status}">${item.status === 'done' ? '✓ 已完成' : '已暂存'}</span>` : esc(action.eta || (item.quote ? '随时回看' : '按自己的节奏'))}</span>
-      ${favDocA(item, `${esc(favOpenLabel(item))}${arrow('right')}`, 'fv-read-link', true)}</div>
+      ${favDocA(item, `${esc(favOriginal(item).label)}${arrow('right')}`, 'fv-read-link', true)}</div>
   </article>`;
 }
 
@@ -96,11 +96,6 @@ function favEmptyHtml() {
 // `docs/decisions/fav-snippets.md`)。
 function favDocA(item, label, cls = '', html = false) {
   return favDocAHtml(item, html ? label : esc(label), cls);
-}
-
-/** 那颗按钮上的字:有文档的是去读原文,没有的是回到它自己那一处。 */
-function favOpenLabel(item) {
-  return item.path ? '打开阅读' : '回到' + (SNIP_LABEL[item.origin] || '原处');
 }
 
 function openFavDetail(id) {
@@ -160,10 +155,11 @@ function renderFavInspector() {
 
 function favDetailHtml(item) {
   const action = item.action || {};
+  const originalUrl = safeUrl(item.url);
   const note = favDrafts.has(item.id) ? favDrafts.get(item.id) : item.note;
   const disabled = favBusy ? ' disabled' : '';
   const category = favCategory(item);
-  const description = action.what || item.summary || '这条收藏的更多内容，藏在原文里。';
+  const description = favDescription(item, true);
   return `<div class="fv-detail">
     <div class="fv-aside-heading scroll-away"><span>收藏详情</span><button class="fv-icon-button fv-detail-back" onclick="closeFavDetail()" aria-label="关闭收藏详情">${icon('close')}<span>返回收藏架</span></button></div>
     <button class="away-exit fv-detail-exit" onclick="closeFavDetail()" aria-label="关闭收藏详情">${icon('close')}</button>
@@ -172,7 +168,7 @@ function favDetailHtml(item) {
       ${description !== item.quote ? `<p class="fv-detail-description">${esc(description)}</p>` : ''}
       ${item.quote ? `<blockquote>${esc(item.quote)}</blockquote>` : ''}
       <dl class="fv-detail-meta">${action.name && action.name !== item.title ? `<div><dt>原文</dt><dd>${esc(item.title)}</dd></div>` : ''}<div><dt>来源</dt><dd>${esc(favWhere(item))}</dd></div><div><dt>收藏于</dt><dd>${favDate(item.created_at)}</dd></div><div><dt>状态</dt><dd>${FAV_STATUSES[item.status]}</dd></div>${action.eta ? `<div><dt>预计用时</dt><dd>${esc(action.eta)}</dd></div>` : ''}</dl>
-      <div class="fv-detail-links">${favDocA(item, `${esc(favOpenLabel(item))}${arrow('right')}`, 'fv-primary-link', true)}${item.url ? `<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener">原文${arrow('ext')}</a>` : ''}${item.path ? `<a href="${esc(obsLink(item))}">Obsidian${arrow('ext')}</a>` : ''}</div>
+      <div class="fv-detail-links">${favDocA(item, `${esc(favOriginal(item).label)}${arrow('right')}`, 'fv-primary-link', true)}${originalUrl !== '#' ? `<a href="${esc(originalUrl)}" target="_blank" rel="noopener">原文${arrow('ext')}</a>` : ''}${favOriginal(item).indexed ? `<a href="${esc(obsLink(item))}">Obsidian${arrow('ext')}</a>` : ''}</div>
       ${action.cmd ? `<div class="fv-command"><div><span>${icon('code')}上手命令</span><button class="text-button" data-cmd="${esc(action.cmd)}" onclick="copyFavCmd(this)">复制</button></div><code>${esc(action.cmd)}</code><small>来自行动卡，请确认内容后再执行。</small></div>` : ''}
       ${!item.action && item.status === 'inbox' && !item.quote ? `<div class="fv-extract"><p>还没有行动卡？让 AI 提炼用途、上手命令和预计用时。</p><button class="text-button" data-fav-mutation onclick="extractFavAction(${item.id})"${disabled}>${icon('spark')}生成行动卡</button></div>` : ''}
       <section class="fv-note-editor"><div><label for="fav-note">我的随手记</label><span>为什么收藏它？</span></div><textarea id="fav-note" rows="4" placeholder="想到的用法、想解决的问题，或试过后的心得…" oninput="draftFavNote(this.value)">${esc(note || '')}</textarea><div class="fv-note-footer"><span id="fav-note-state" role="status">${favDrafts.has(item.id) ? '有未保存的草稿' : '给未来的自己留个线索'}</span><button class="ghost" data-fav-mutation onclick="saveFavNote(${item.id})"${disabled}>保存笔记</button></div></section>
@@ -193,7 +189,7 @@ function favStartHtml() {
   const pool = favRecommendations();
   const item = pool[favHeroIndex % (pool.length || 1)];
   const aiRecommended = item && favTri?.fresh && favTri.data?.hero?.id === item.id;
-  const why = item ? (aiRecommended ? favTri.data.hero.why : '') || item.action?.what || item.summary : '';
+  const why = item ? (aiRecommended ? favTri.data.hero.why : '') || favDescription(item) : '';
   return `<div class="fv-start"><div class="fv-aside-heading"><span>${icon('spark')}灵感起步</span><span class="fv-tiny-dot" aria-hidden="true"></span></div>
     <div class="fv-start-intro"><span class="fv-start-mark" aria-hidden="true">${icon('bookmark')}</span><h2>先从一条开始<span>不急着全部做完。</span></h2><p>收藏不是待办清单。今天有空，就捡一个好奇的想法试试。</p></div>
     ${item ? `<div class="fv-recommendation"><div class="fv-rec-label"><span>${aiRecommended ? 'AI 推荐' : '从你的待探索中挑选'}</span>${item.action?.eta ? `<span>${esc(item.action.eta)}</span>` : ''}</div><h3>${esc(item.action?.name || item.title)}</h3><p>${esc(why)}</p><div class="fv-rec-actions"><button onclick="openFavDetail(${item.id})">就看这个${arrow('right')}</button>${pool.length > 1 ? '<button class="text-button" onclick="swapHero()">换一条</button>' : ''}</div></div>` : '<div class="fv-aside-tip">点选左侧的任意收藏，在这里查看详情、记录想法，或整理状态。</div>'}

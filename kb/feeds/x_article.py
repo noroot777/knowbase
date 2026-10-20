@@ -441,10 +441,14 @@ def merge(entry: dict, got: dict) -> dict:
     同一篇长文从两条路进来会长出两种正文 —— 而先到的那一份被 `put_items` 的
     `DO NOTHING` 钉死,另一条路再也覆盖不了它。
     """
+    from kb.feeds.x_post import HINT as POST_HINT
+
     src = entry.get('body') or ''
     parts = (quote_lines(src), lead_text(src), got['body'])
-    return {**entry, 'title': (got['title'] or entry.get('title') or '')[:500],
-            'body': '\n\n'.join(p for p in parts if p)}
+    complete = {**entry, 'title': (got['title'] or entry.get('title') or '')[:500],
+                'body': '\n\n'.join(p for p in parts if p)}
+    complete.pop(POST_HINT, None)
+    return complete
 
 
 def fill(entries: list[dict], *, session=None,

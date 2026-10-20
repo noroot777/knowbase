@@ -18,9 +18,12 @@ from pydantic import BaseModel
 from kb import pipeline as pl
 from kb.collectors import (
     CollectorError,
+    CollectorTimeout,
+    DropIncomplete,
     active_collector,
     channel_labels,
     collection_channels,
+    item_aliases,
     item_dropper,
     retired_channels,
 )
@@ -281,15 +284,20 @@ def pipeline_drop_failure(body: FailureDropRequest):
     item_id = (body.id or "").strip()
     if not item_id:
         raise HTTPException(400, "这一条没有可用的标识，无法移除")
+    ref = {"id": item_id, "account": body.account or "", "link": (body.link or "").strip()}
     try:
-        detail = dropper.drop_item({"id": item_id, "account": body.account or "",
-                                    "link": (body.link or "").strip()})
+        detail = dropper.drop_item(ref)
+    except DropIncomplete as e:
+        raise HTTPException(409, str(e)) from None
+    except CollectorTimeout as e:
+        raise HTTPException(504, str(e)) from None
     except CollectorError as e:
         raise HTTPException(400, str(e)) from None
     # **账本写不上不许把整件事报成失败。** 不可逆的那一步已经成了,报红会让用户
     # 以为没删掉而反复重试;如实在文案里说一句,那几条下一轮同步后自然消失。
     try:
-        pl.drop_failure(name, item_id)
+        for identity in item_aliases(dropper, ref):
+            pl.drop_failure(name, identity)
     except Exception as e:  # noqa: BLE001 - 理由就在上面
         detail += f"（面板记录没写成：{type(e).__name__}，这一条下次同步后不再出现）"
     return {"ok": True, "detail": detail}

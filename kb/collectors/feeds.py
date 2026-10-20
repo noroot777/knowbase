@@ -71,6 +71,31 @@ class FeedCollector:
         from kb.feeds.sync import still_failing
         return still_failing(self.name, note)
 
+    def drop_item(self, ref):
+        from kb.feeds.exclusion import drop_item
+        return drop_item(self.name, ref)
+
+    def document_failure(self, document, reason):
+        from kb.feeds.exclusion import failure
+        from kb.feeds.paths import document_key, item_key
+
+        document = dict(document)
+        if document.get('source') != self.name:
+            return None
+        relative, url = document.get('path') or '', document.get('url') or ''
+        key = document_key(self.name, relative, url)
+        if not key and relative and url:
+            with reg.db() as conn:
+                identity = (item_key(self.name, url), self.name, relative, url)
+                item = conn.execute(
+                    'SELECT key FROM feed_items WHERE key=? AND kind=? AND path=? AND url=? '
+                    'UNION ALL SELECT key FROM feed_item_exclusions '
+                    'WHERE key=? AND kind=? AND path=? AND url=? LIMIT 1',
+                    identity + identity).fetchone()
+            key = item['key'] if item else ''
+        snapshot = document | {'key': key}
+        return failure(snapshot, reason, self.name)
+
     def _manual_retry(self):
         """这一轮是不是用户点的「重新翻译」,以及他点的是哪一条订阅的范围。
 

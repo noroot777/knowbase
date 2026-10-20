@@ -123,11 +123,10 @@ async function dropPipeFailure(btn) {
     await refreshPipe(true);
     if (typeof loadPipeHistory === 'function') loadPipeHistory();
   } catch (e) {
-    // **超时/断线不等于「没删掉」。** 不可逆的那一步可能已经在后端做完了,断言
-    // 「未完成」会让用户以为可以当没发生过。如实说一句「结果未确认」,顺手重读
-    // 一次状态 —— 真删成了,那一条当场就从明细里消失,用户不必自己判断。
     btn.disabled = false;
-    toast('结果未确认', { detail: e.message + '。这一条可能已经移除，正在重新读取。' });
+    if (e.status === 409) toast('清理未完成', { detail: e.message });
+    else if (e.status >= 400 && e.status < 500) toast('没有移除', { detail: e.message });
+    else toast('结果未确认', { detail: e.message + '。这一条可能已经移除，正在重新读取。' });
     invalidatePipeStatus();
     invalidatePipePending();
     refreshPipe(true);

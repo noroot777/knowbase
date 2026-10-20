@@ -107,7 +107,7 @@ class CallSiteRosterTests(unittest.TestCase):
         """索引自己的 upsert,和那道带两样证明的登记。再多一处就得重新想一次。"""
         self.assertEqual({"kb/store.py": 1, "kb/doc_rewrite.py": 1},
                          self.sql(r"documents SET content_hash"
-                                  r"|content_hash=excluded\.content_hash"),
+                                  r"|INSERT INTO documents[\s\S]*content_hash=excluded\.content_hash"),
                          "多了一处写 documents.content_hash 的语句 —— 它凭什么"
                          "说得出「磁盘上这一份已经索引过了」")
 
@@ -209,7 +209,7 @@ class CallSiteRosterTests(unittest.TestCase):
         会来提醒 `index_projection_matches` 跟着知道它 —— 那一句一个字不改的话,
         症状只有「那一样永远是旧值」。
         """
-        base = {"connect", "close", "scan_all", "doc_needs_reindex",
+        base = {"connect", "close", "scan_all", "observed_document_is_current",
                 "split_chunks", "upsert_document",
                 "parse_pretagged", "save_extraction", "embed_pending_chunks"}
         # 当日抓取账本(`kb.fetch_rounds`)**一步都不在这条名单上**:它数的是

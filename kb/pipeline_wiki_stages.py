@@ -158,7 +158,7 @@ def _ingest_pass() -> tuple[int, int]:
         for doc in scan_all():
             if doc.source not in targets:
                 continue
-            if not store.doc_needs_reindex(conn, doc.path, doc.content_hash):
+            if store.observed_document_is_current(conn, doc):
                 continue
             store.upsert_document(conn, doc, split_chunks(doc.body), now)
             pre = parse_pretagged(doc)

@@ -26,6 +26,14 @@
 .wechat-consent { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; margin-bottom: 14px; }
 .wechat-consent input { flex-shrink: 0; margin-top: 4px; }
 .wechat-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0 12px; }
+.wechat-method-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.wechat-agent { border-top: 1px solid var(--line); margin-top: 18px; padding: 14px 0; }
+.wechat-agent summary { cursor: pointer; font-size: 14px; font-weight: 600; color: var(--brand); }
+.wechat-agent p { margin-top: 10px; }
+.wechat-agent label { display: block; font-size: 12px; color: var(--muted); margin: 14px 0 6px; }
+.wechat-agent textarea { display: block; width: 100%; min-width: 0; max-width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink-2); font: 12px/1.7 var(--font-body); resize: vertical; }
+.wechat-agent .wechat-actions { align-items: center; }
+.wechat-agent .wechat-actions button { flex-shrink: 0; }
 .wechat-explanation { border-top: 1px solid var(--line); padding-top: 14px; }
 .wechat-explanation p { margin: 8px 0; }
 #wechat-error { color: var(--danger); font-size: 13px; margin-top: 8px; overflow-wrap: anywhere; }

@@ -10,7 +10,8 @@
 转推显示的又是**原推**的时间 —— 两者都会在新推文中间插进一条很老的时间。所以
 判据是「**按页面出现顺序**连续 `_OLD_STREAK` 条**自己发的**推都老于水位」:置顶和
 转推身上那个时间跟"读到哪儿了"没有关系,不参与这个证明(但它们照旧入库,
-见 `_in_timeline` / `_own_tweet`)。
+见 `_in_timeline` / `_own_tweet` —— 这一族纯判据的定义在 `x_timeline_pick`,
+本模块按旧位置再导出,见下面那个 import 上的注释)。
 
 **没证明到就不推进水位**(`harvest` 里那句 `water if incomplete else ...`)。滚动
 次数用完、单个账号的时间预算用完、页面不再长出新内容而又不在底部 —— 这三种都是
@@ -32,16 +33,24 @@ import os
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
-from kb.feeds import x_article
+from kb.feeds import x_account, x_article, x_body, x_page_state, x_post
 from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
 # 登录窗口的生死搬去了 `x_login_window`(x_cdp 顶着 700 行上限)
 from kb.feeds.x_login_window import login_window_left, release_login_window
+from kb.feeds.x_page_state import (
+    STATE_JS, XAccessBlocked, XBrowserError, XRateLimited, navigate, read)
+from kb.feeds.x_page_state import problem as page_problem
+from kb.feeds.x_timeline_state import TimelineState
+# 「这一条算不算该收、它折成什么形状」那一族纯判据搬去了 `x_timeline_pick`
+# (本文件顶着 700 行硬上限)。**按旧位置再导出一次**:本模块调的是这几个名字,
+# 全仓回归里那些 `x_browser._entry` / `_select` / `_utc` / `_old_enough` 的指向
+# 也照旧成立。**要给它们打桩得打在那边**(名字带的是绑定不是引用)。
+from kb.feeds.x_timeline_pick import (  # noqa: F401 - 再导出,见上
+    SHANGHAI, TimelineEntries, _as_published, _entry, _in_timeline,
+    _is_pinned, _is_promoted, _old_enough, _own_tweet, _quote_only,
+    _select, _utc)
 
-SHANGHAI = ZoneInfo('Asia/Shanghai')
-# 连续多少条老推文算"翻到底了"。1 不够:转推带的是原推时间,单条老的很常见。
-_OLD_STREAK = 3
 # 没有水位时(新订阅)最多往回翻多少天。真正的历史下界由 `sync._within_history`
 # 按订阅创建时间钉死,这里只是"别无限滚"的兜底。
 FIRST_DAYS = 14
@@ -66,6 +75,7 @@ _BOTTOM_TRIES = 3
 # 按时间排序的话,三条不相邻的旧转推会被拼成一条"连续的老尾巴"。
 _COLLECT_JS = r'''
 (() => {
+''' + x_post.TEXT_JS + r'''
   const S = window.__kbX = window.__kbX || {seen: new Map()};
   const norm = s => (s || '').replace(/ /g, ' ').trim();
   let parsed = 0, articles = 0;
@@ -78,7 +88,8 @@ _COLLECT_JS = r'''
     if (!m) continue;
     parsed++;
     const ctx = norm(art.querySelector('[data-testid="socialContext"]')?.innerText);
-    const text = norm(art.querySelector('[data-testid="tweetText"]')?.innerText);
+    const text = postText(ownNode(art, '[data-testid="tweetText"]'));
+    const truncated = postMore(art);
     // 作者块的第一行是显示名,后面跟着 @handle 和时间,只取第一行。
     const who = norm(art.querySelector('[data-testid="User-Name"]')?.innerText).split('\n')[0];
     // **长文卡片**:X 把推文里那条 `/i/article/<id>` 链接藏起来、改渲染成一张
@@ -90,6 +101,7 @@ _COLLECT_JS = r'''
     // 文章,按它去补就是把别人的正文记成这条推文的内容。排错了也只是回到漏掉
     // 的现状,而收错了是污染 —— 这个方向上宁可多排。
     const quote = art.querySelector('div[role="link"]');
+    const quoted = !!art.querySelector('[data-testid="quoteTweet"], div[role="link"] [data-testid="tweetText"]');
     const card = [...art.querySelectorAll('a[href*="/article/"]')]
                    .find(a => !(quote && quote.contains(a)));
     const art_url = card ? card.href : '';
@@ -101,10 +113,14 @@ _COLLECT_JS = r'''
     if (!prev || (text && text.length > (prev.text || '').length)) {
       S.seen.set(id, {id, author: m[1], name: who, datetime: time.getAttribute('datetime'),
                       text, context: ctx, url: `https://x.com/${m[1]}/status/${id}`,
-                      article: art_url || (prev && prev.article) || ''});
+                      article: art_url || (prev && prev.article) || '',
+                      quoted: quoted || !!prev?.quoted,
+                      truncated: truncated || !!prev?.truncated});
     } else if (art_url && prev && !prev.article) {
       prev.article = art_url;
     }
+    if (truncated) S.seen.get(id).truncated = true;
+    if (quoted) S.seen.get(id).quoted = true;
   }
   return JSON.stringify({articles, parsed, items: [...S.seen.values()]});
 })()
@@ -124,147 +140,48 @@ _SCROLL_JS = r'''
 # 登录态失效的几种落地页。X 会跳 /i/flow/login,也会在原地渲染登录按钮。
 _STATE_JS = r'''
 (() => {
-  const txt = (document.body?.innerText || '').slice(0, 4000);
-  return JSON.stringify({
-    url: location.href,
-    ready: document.readyState,
-    articles: document.querySelectorAll('article[data-testid="tweet"]').length,
-    login: !!document.querySelector('[data-testid="loginButton"], [data-testid="login"]')
-           || /^\/i\/flow\/login/.test(location.pathname),
-    empty: /Hmm\.\.\.this page doesn|这个页面不存在|Account suspended|账号已被冻结|doesn’t exist|does not exist/i.test(txt),
-    limited: /Rate limit exceeded|Something went wrong\. Try reloading|请稍后再试/i.test(txt),
-  });
+''' + STATE_JS + x_account.ACCOUNT_JS + r'''
+  return JSON.stringify({...xPageState(), account: xAccountState()});
 })()
 '''
-
-
-class XBrowserError(RuntimeError):
-    """浏览器通道的失败。message 是成品文案。"""
-
-
-def _as_published(iso: str) -> str:
-    """ISO UTC → 项目里 published 的统一写法(Asia/Shanghai,分钟精度)。
-
-    和 `fetching.parse_feed` 一个口径:日报按 `published` 筛窗口,两处格式不一样
-    的话同一天的内容会被算进不同的窗口(见 `kb/daily.py` 里字符串比较那条)。
-    """
-    try:
-        dt = datetime.fromisoformat(iso.replace('Z', '+00:00'))
-    except (ValueError, AttributeError):
-        return ''
-    return dt.astimezone(SHANGHAI).strftime('%Y-%m-%d %H:%M')
-
-
-def _utc(iso: str) -> datetime | None:
-    """任意 ISO 写法 → UTC。**不带时区的那种按项目时区(Asia/Shanghai)补齐。**
-
-    `astimezone` 对 naive 的默认是拿**宿主机器**的时区补 —— 于是同一个
-    `2026-10-05` 在 UTC 机器上是上海时间 08:00,那一天凌晨 0 点到 7 点 59 的
-    推文一条也翻不到,还不报任何错(2026-10-08 审查实测 `TZ=UTC`:四条里只
-    收进 08:01 那一条)。而这条通道里被比较的另一头(`_as_published`)固定按
-    上海算,两头必须是同一个口径,不能由部署机器决定用户勾的日期是什么意思。
-
-    区间补抓那个日期在 `x_channels.since_floor` 就已经转成带时区的下界了;
-    这里是第二道 —— 以后谁再把一个裸日期交进来,含义也不会跟着机器漂。
-    """
-    try:
-        dt = datetime.fromisoformat(iso.replace('Z', '+00:00'))
-    except (ValueError, AttributeError):
-        return None
-    return dt.replace(tzinfo=dt.tzinfo or SHANGHAI).astimezone(timezone.utc)
-
-
-def _is_pinned(context: str) -> bool:
-    return any(k in context for k in ('Pinned', '置顶'))
-
-
-def _is_promoted(context: str) -> bool:
-    return any(k in context for k in ('Promoted', '推广', '赞助'))
-
-
-def _in_timeline(item: dict, handle: str) -> bool:
-    """这一条是不是从**这个账号的时间线**里长出来的 —— 入库资格就是它。
-
-    两种不算:
-    ①**推广位** —— 它是广告,不是这个人的观点。
-    ②**作者不是这个号、又没有转推那一行上下文** —— 推荐位、"你可能喜欢"。按这个
-      订阅记进去就是把别人的推文当成这个大V的观点,和 feedgrab 那一侧按
-      `/<handle>/status/` 过滤是同一条规矩。转推一定带着一行 socialContext,
-      所以这么判不会把转推丢掉 —— 而转推正是"他此刻在想什么"的一部分,正文里
-      保留那行上下文(见 `_entry`)。
-
-    **置顶算**。它不参与"翻到底"的计数(见 `_own_tweet`),但那是另一个问题:
-    刚发出来就被钉上去的推文在 X 上看得见,不入库就是永久丢掉一条真内容。
-    "旧置顶每天都在、会反复入库"不成立 —— `put_items` 按 `sha256(kind:url)`
-    去重,而且它的时间低于水位,下一轮 `_select` 自己就筛掉了。
-    """
-    context = (item.get('context') or '').strip()
-    if _is_promoted(context):
-        return False
-    foreign = handle and (item.get('author') or '').lower() != handle.lower()
-    return not (foreign and not context)
-
-
-def _own_tweet(item: dict, handle: str) -> bool:
-    """这一条身上那个时间能不能当成「读到时间线哪儿了」的证据。
-
-    只有**这个号自己发的原创推**算得上。profile 时间线按"活动时间"倒序排,而
-    `<time datetime>` 给的是**原推**发布时间:
-    - 置顶:位置在最上面,时间却可能是几年前 —— 一条都不该算。
-    - 转推:位置按转推时刻排,显示的是原推时间(必然 ≤ 转推时刻)。所以"它很老"
-      证明不了我们已经翻过水位(可能是刚刚转的一条老推);反过来"它很新"倒是
-      能证明还没翻过去(活动时间比它更新),那一档由 `_old_enough` 里的"重置"
-      分支接住。
-    只有原创推的 `datetime` 等于它的活动时间,才能当位置用。
-    """
-    if (item.get('context') or '').strip():          # 置顶、转推、推荐位都带它
-        return False
-    if not handle:
-        return True
-    return (item.get('author') or '').lower() == handle.lower()
-
-
-def _entry(item: dict) -> dict | None:
-    """一条推文 → feed_items 的条目形状。没正文也没链接的不要。"""
-    published = _as_published(item.get('datetime', ''))
-    text = (item.get('text') or '').strip()
-    if not item.get('url') or not (text or published):
-        return None
-    name = item.get('name') or item.get('author') or ''
-    context = (item.get('context') or '').strip()
-    # 转推/引用的上下文留在正文开头一行:它决定了这条是不是本人的观点,
-    # 而 feed_items 里没有地方放这个标记。
-    body = f'> {context}\n\n{text}' if context and not _is_pinned(context) else text
-    out = {'url': item['url'], 'title': (text or f"{name} 的动态")[:500],
-           'body': body, 'author': name, 'published': published,
-           'content_kind': 'post'}
-    # 「这条带着长文卡片」的信号,只在采集期间有意义:`x_article.fill` 用完就把
-    # 它摘掉(`_strip_hint`),不会进 `feed_items`。
-    if item.get('article'):
-        out[x_article.HINT] = str(item['article'])
-    return out
 
 
 def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
     """等页面落定,顺带认出登录失效/不存在/限流这三种不该当成"没有推文"的情况。"""
     last = {}
+    previous = None
+    previous_problem = ''
+    confirmed_problem = ''
+    failure = XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
     while time.monotonic() < deadline:
-        last = json.loads(page.eval(_STATE_JS))
+        last = read(page, _STATE_JS)
         if last['login']:
             # **两条自救路都要说。** 这句话出现在每条失败订阅的旁边,而「重新登录」
             # 只是其中一条:登录态是导进来的那些人要的是再导一次(见
             # `x_login_import`),把他推去无头壳里登一次正是他想免掉的那一步。
-            raise XBrowserError('X 登录态已失效,请在浏览器通道设置里重新登录,'
-                                '或从日常浏览器再导入一次')
-        if last['limited']:
-            raise XBrowserError('X 暂时限制了访问频率,请稍后重试或降低同步频率')
-        if last['empty']:
-            raise XBrowserError(f'@{handle} 这个账号在 X 上打不开(可能已改名、注销或被冻结)')
-        if last['articles'] and last['ready'] == 'complete':
+            raise x_account.XAccountUnavailable(handle, 'login', 'login_control_or_route')
+        current_problem = page_problem(last)
+        terminal = x_account.terminal(last, handle) if not current_problem else None
+        if terminal and terminal == previous:
+            raise x_account.XAccountUnavailable(handle, *terminal)
+        previous = terminal
+        matching = 'account' not in last or last['account'].get('handle') == handle.lower()
+        if (matching and not terminal and last['articles'] and last['ready'] == 'complete'
+                and not current_problem):
             return last
+        confirmed_problem = current_problem if current_problem == previous_problem else ''
+        if x_page_state.partial_content(last, confirmed_problem):
+            return dict(last, incomplete=str(failure))
+        if error := x_page_state.escalate(last, confirmed_problem, failure, content_pending=False):
+            raise error
+        previous_problem = current_problem
         time.sleep(0.3)
+    if error := x_page_state.escalate(last, confirmed_problem, failure, expired=True):
+        raise error
     if last.get('ready') != 'complete':
         raise XBrowserError(f'@{handle} 的页面没有加载完')
+    if (last.get('account') or {}).get('state') == 'unknown':
+        raise XBrowserError(f'@{handle} 的个人页结构无法识别,尚未确认账号状态,留待下次同步重试')
     raise XBrowserError(f'@{handle} 的时间线上没有读到推文')
 
 
@@ -277,9 +194,10 @@ def _harvest_one(page: Chrome, handle: str,
     不在底部(懒加载卡住/被限流)。没有下界(floor 为空)时无从谈起"读到水位",
     那是新订阅的首轮,按读到的为准。
     """
-    page.goto(f'https://x.com/{handle}')
+    navigate(page, f'https://x.com/{handle}')
     deadline = time.monotonic() + ACCOUNT_SECONDS
-    _wait_state(page, handle, deadline)
+    state = _wait_state(page, handle, deadline)
+    page = TimelineState(page, handle, state, _STATE_JS)
     page.eval(_RESET_JS)
     seen_articles = parsed = 0
     items: list[dict] = []
@@ -288,6 +206,9 @@ def _harvest_one(page: Chrome, handle: str,
     for _ in range(MAX_SCROLLS):
         snap = json.loads(page.eval(_COLLECT_JS))
         seen_articles, parsed, items = snap['articles'], snap['parsed'], snap['items']
+        if page.incomplete:
+            incomplete = page.incomplete
+            break
         if floor and _old_enough(items, floor, handle):
             incomplete = ''
             break
@@ -297,7 +218,11 @@ def _harvest_one(page: Chrome, handle: str,
             break
         before = len(items)
         bottom = json.loads(page.eval(_SCROLL_JS))['bottom']
-        if _settle(page, before, deadline):
+        grew = False if page.incomplete else _settle(page, before, deadline)
+        if page.incomplete:
+            incomplete = page.incomplete
+            break
+        if grew:
             dry = 0
             continue
         # 滚完没长出新东西。**一次不算**:慢网络下的一次懒加载空窗和"到底了"
@@ -316,40 +241,9 @@ def _harvest_one(page: Chrome, handle: str,
         # 永远返回空,而面板上一切正常。
         raise XBrowserError(f'@{handle} 的页面结构看不懂了(读到 {seen_articles} 条卡片,'
                             '一条都解析不出来),X 可能改版了')
-    return _select(items, floor, handle), incomplete
-
-
-def _old_enough(items: list[dict], floor: datetime, handle: str = '') -> bool:
-    """**按页面出现顺序**连续 `_OLD_STREAK` 条「自己发的推」都老于 floor 才算翻到底。
-
-    两件事各有理由:
-
-    **为什么按页面顺序,不按时间排序**:时间排序会把三条互不相邻的旧推(散落在
-    新推之间的老转推、几年前的置顶)拼成一条"连续的老尾巴",第一屏就判翻到底、
-    下面的新推全漏(`items` 的顺序由 `_COLLECT_JS` 那个 Map 的插入顺序保证,
-    就是它们在 DOM 里第一次出现的顺序)。
-
-    **为什么只有原创推算证据**(`_own_tweet`):profile 时间线按活动时间倒序,而
-    `<time datetime>` 给的是原推时间 —— 置顶和转推身上那个时间说明不了"读到哪儿
-    了"。但它们照旧入库(`_in_timeline`),只是不参与这个证明。
-
-    **反过来,任何一条新于 floor 的时间线条目都重置计数**:转推显示的原推时间
-    必然 ≤ 它的活动时间,所以"它很新"足以证明这个位置还没翻过水位。
-    """
-    streak = 0
-    for item in items:                             # 页面出现顺序
-        if not _in_timeline(item, handle):
-            continue                               # 推广位、推荐位:不是这条时间线
-        when = _utc(item.get('datetime', ''))
-        if not when:
-            continue
-        if when > floor:
-            streak = 0
-        elif _own_tweet(item, handle):
-            streak += 1
-            if streak >= _OLD_STREAK:
-                return True
-    return False
+    selected = _select(items, floor, handle)
+    page.check()
+    return selected, page.incomplete or incomplete
 
 
 def _settle(page: Chrome, before: int, deadline: float) -> bool:
@@ -357,29 +251,12 @@ def _settle(page: Chrome, before: int, deadline: float) -> bool:
     end = min(time.monotonic() + _SETTLE_SECONDS, deadline)
     while time.monotonic() < end:
         time.sleep(_SETTLE_STEP)
-        if len(json.loads(page.eval(_COLLECT_JS))['items']) > before:
+        count = len(json.loads(page.eval(_COLLECT_JS))['items'])
+        if getattr(page, 'incomplete', ''):
+            return False
+        if count > before:
             return True
     return False
-
-
-def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list[dict]:
-    """落到 feed_items 之前的最后一道:去掉不属于这条时间线的和过老的,转成条目形状。
-
-    哪些不属于见 `_in_timeline`(推广位、推荐位)—— 入库口径只有那一份,两处各判
-    各的话,被这里丢掉的条目还在"翻到底"那边顶着计数。**置顶照收**:它不参与
-    翻到底的证明(`_own_tweet`),但刚发出来就被钉上去的推文在 X 上看得见,不收
-    就是永久丢掉一条真内容。
-    """
-    out = []
-    for item in sorted(items, key=lambda i: i.get('datetime') or ''):
-        if not _in_timeline(item, handle):
-            continue
-        when = _utc(item.get('datetime', ''))
-        if floor and when and when <= floor:
-            continue
-        if entry := _entry(item):
-            out.append(entry)
-    return out
 
 
 def browser_session(profile: str, chrome_path: str = '', *, attach: bool = False):
@@ -406,8 +283,8 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
     jobs:  [(handle, 水位 ISO 或空串)]
     返回:  {handle: {'entries': [...], 'error': '', 'watermark': ISO}}
 
-    整批共用一个浏览器会话;任何一个账号的失败只落在它自己那一项上,不影响其余
-    ——这条通道一轮跑几十个账号,一个改名的号不该把整轮带掉。
+    整批共用一个浏览器会话;普通账号失败只落在它自己那一项上,不影响其余。
+    明确限流则停止余批,保留已完成账号的结果,未完成账号报同一原因且不推进水位。
 
     `attach` 决定浏览器从哪儿来(见 `browser_session`)。整批共用一个会话这件事
     两条路都成立,只是理由不同:独立 profile 那条是因为起一个 Chrome 要两三秒、
@@ -454,8 +331,13 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 # 实测与理由记在 `x_feedgrab.harvest` 那条注释里(两条通道同一个
                 # 缺口);`_select` 两轮都按同一个**排他**下界筛,窗口逐字相同。
                 started = water or floor.isoformat()
+                unavailable = []
                 try:
                     entries, incomplete = _harvest_one(page, handle, floor)
+                    skipped_quotes = getattr(entries, 'skipped_quotes', 0)
+                    observed_watermark = _newest(entries, water)
+                    note = (f'跳过 {skipped_quotes} 条本人无正文的引用推文,未冒充本人观点入库'
+                            if skipped_quotes else '')
                     # 长文(Article)推文在时间线上一个字都没有,正文要单独取一次。
                     # 取不到的那几条本轮不入库、并按"没读完"办 —— 空正文一旦落库
                     # 就再也更新不了(`put_items` 是 DO NOTHING),见 `x_article`。
@@ -474,9 +356,9 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # (2026-10-09 第 1 轮审查实测:预算 0.020 秒的一轮,停止在
                     # 第一条之后就置位了,后面照样新发 7 次请求、耗时 0.323 秒,
                     # 8 条全留下、`incomplete` 空、水位照常前进)。
-                    entries, missing = x_article.fill(
+                    entries, missing = x_post.complete(
                         entries, session=page,
-                        deadline=deadline, should_stop=should_stop)
+                        deadline=deadline, should_stop=should_stop, unavailable=unavailable)
                     if missing:
                         incomplete = f'{incomplete};{missing}' if incomplete else missing
                     # **没读完就不推进水位**:这一轮停在时间线半中间,下面那一段
@@ -486,13 +368,27 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # `put_items` 按 URL 去重,一条都不会重复入库。
                     results[handle] = {
                         'entries': entries, 'error': '', 'incomplete': incomplete,
-                        'watermark': started if incomplete else _newest(entries, water)}
+                        **x_post.unavailable_report(unavailable),
+                        'skipped_quotes': skipped_quotes,
+                        'note': ';'.join(filter(None, [note, x_post.unavailable_note(unavailable)])),
+                        'watermark': started if incomplete else observed_watermark}
+                    if timeline := getattr(page, '_x_timeline', None):
+                        timeline.finalize(results[handle], started)
+                except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable) as e:
+                    if unavailable:
+                        results[handle] = {'entries': [], 'error': str(e),
+                                           **x_post.unavailable_report(unavailable)}
+                    raise
+                except x_account.XAccountUnavailable as e:
+                    results[handle] = {'entries': [], 'error': str(e),
+                                       'account_state': e.state, 'account_evidence': e.evidence}
                 except (XBrowserError, CdpError) as e:
-                    results[handle] = {'entries': [], 'error': str(e)}
-    except (CdpError, EOFError, OSError) as e:
+                    results[handle] = {'entries': [], 'error': str(e),
+                                       **x_post.unavailable_report(unavailable)}
+    except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable, CdpError, EOFError, OSError) as e:
         # 浏览器整个起不来/中途死了:剩下的账号统一记成同一个原因,
         # 而不是逐个报一条看不出共同根因的错。
-        reason = str(e) if isinstance(e, CdpError) else f'浏览器会话中断:{e}'
+        reason = str(e) if isinstance(e, (XBrowserError, x_post.PostSessionUnavailable, CdpError)) else f'浏览器会话中断:{e}'
         for handle, _ in jobs:
             results.setdefault(handle, {'entries': [], 'error': reason})
     return results
@@ -504,15 +400,10 @@ def _newest(entries: list[dict], fallback: str) -> str:
     **一条都没抓到时沿用旧水位**,不要改成"现在":那等于把这段时间宣布为已抓过,
     而这一轮可能只是没滚到(预算用完、X 限流)。水位只前进到确实见过的那条推文。
     """
-    stamps = [e['published'] for e in entries if e.get('published')]
-    if not stamps:
-        return fallback
-    newest = max(stamps)
-    try:
-        local = datetime.strptime(newest, '%Y-%m-%d %H:%M').replace(tzinfo=SHANGHAI)
-    except ValueError:
-        return fallback
-    return local.astimezone(timezone.utc).isoformat()
+    stamps = [_utc(entry['published']) for entry in entries if entry.get('published')]
+    stamps.append(getattr(entries, 'skipped_newest', None))
+    newest = max((stamp for stamp in stamps if stamp is not None), default=None)
+    return newest.isoformat() if newest else fallback
 
 
 def open_login_window(profile: str, chrome_path: str = '') -> str:
@@ -564,9 +455,15 @@ def open_login_window(profile: str, chrome_path: str = '') -> str:
 def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
     """在一个已经导航到 `x.com/home` 的会话上,把落地状态判成一个结论码。
 
-    返回 `(结论码, 最后那份状态)`,码有五个:`ok`(读到推文了)、`login`(掉回
-    登录页)、`limited`(限流)、`not-loaded`(首页压根没加载完)、`no-tweets`
-    (加载完了却一条推文都没有)。
+    返回 `(结论码, 最后那份状态)`,码有六个:`ok`(读到推文了)、`login`(掉回
+    登录页)、`challenge`(X 要求先过一次安全验证)、`limited`(限流)、`not-loaded`
+    (首页压根没加载完)、`no-tweets`(加载完了却一条推文都没有)。
+
+    **`challenge` 读 `x_page_state` 那份共享判据,不许只有采集那一侧认它。**
+    不认的后果是「检查连接」和导入登录态在验证页上**各自白等满超时**,然后报
+    `no-tweets` —— 面板上那句话会说成「登录态可能刚刚失效」,把人推去重新登录,
+    而那张页要先有登录态才会出现,登录一万次也过不了(口径同元规则「口径只有
+    一份」)。
 
     **只判、不写文案。** 同一个状态在不同入口下该说的下一步完全不同:「检查连接」
     要指向**这一档自己**的登录办法(独立 profile 点按钮 / 日常浏览器里自己登),
@@ -587,6 +484,10 @@ def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
         last = json.loads(page.eval(_STATE_JS))
         if last['login']:
             return 'login', last
+        if last['challenge']:
+            # 排在限流前面:这张页讲的是"证明你不是机器人",不是"你太快了"。
+            # 报成限流会把人引去"稍后重试/降低频率",而那改不了任何事。
+            return 'challenge', last
         if last['limited']:
             return 'limited', last
         if last['articles'] and last['ready'] == 'complete':
@@ -644,6 +545,13 @@ def probe(profile: str, chrome_path: str = '', *,
                                if attach else
                                'X 登录态已失效:点「打开登录窗口」重新登录一次,'
                                '或者再点一次「从日常浏览器导入登录态」')
+            if verdict == 'challenge':
+                # **不许说成登录失效,也不许说成限流。** 这张页要先有登录态才会
+                # 出现,把人推去重新登录是白跑一趟 —— 该做的是去他自己那个浏览器
+                # 里把验证过完(文案和采集那一侧同一个口径,见 `x_page_state`)。
+                return False, ('X 要求先过一次安全验证（账号访问受限）:请在日常'
+                               '浏览器里登录同一个账号、打开 x.com/account/access '
+                               '把验证做完,确认能正常刷时间线之后再回来检查')
             if verdict == 'limited':
                 return False, 'X 暂时限制了访问频率,稍后再试'
             if verdict == 'ok':
