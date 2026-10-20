@@ -5,6 +5,10 @@ from urllib.parse import urlsplit
 from kb.feeds.page_gate import ASSETS_JS
 from kb.feeds.x_cdp import Session
 
+_CONTENT_REQUESTS = {'timeline': frozenset({'UserTweets'}), 'detail': frozenset({'TweetDetail'})}
+_AUXILIARY_REQUESTS = {'timeline': frozenset({'UserByScreenName', 'UserTweetsAndReplies'}),
+                       'detail': frozenset({'TweetResultByRestId'})}
+
 STATE_JS = r'''
   const xPageState = () => {
     const text = (document.body?.innerText || '').slice(0, 4000);
@@ -39,14 +43,16 @@ class Responses:
         self.session_id = session_id
         self.origin = ''
         self.operations = set()
+        self.content_operations = frozenset()
         self.loader = ''
         self.statuses = {}
 
     def reset(self, url: str) -> None:
         parsed = urlsplit(url)
         self.origin = (parsed.scheme, parsed.netloc)
-        self.operations = ({'TweetDetail', 'TweetResultByRestId'} if '/status/' in parsed.path
-                           else {'UserTweets', 'UserTweetsAndReplies', 'UserByScreenName'})
+        kind = 'detail' if '/status/' in parsed.path else 'timeline'
+        self.content_operations = _CONTENT_REQUESTS[kind]
+        self.operations = self.content_operations | _AUXILIARY_REQUESTS[kind]
         self.loader = ''
         self.statuses.clear()
 
@@ -65,8 +71,17 @@ class Responses:
         self.statuses[(params.get('loaderId'), operation)] = response.get('status', 0)
 
     def apply(self, snapshot: dict) -> dict:
-        statuses = [status for (loader, _operation), status in self.statuses.items()
-                    if self.loader and loader == self.loader]
+        current = {operation: status for (loader, operation), status in self.statuses.items()
+                   if self.loader and loader == self.loader}
+        content = {operation: status for operation, status in current.items()
+                   if operation in self.content_operations}
+        auxiliary = {operation: status for operation, status in current.items()
+                     if operation not in self.content_operations}
+        if content:
+            snapshot['http_content'] = content
+        if auxiliary:
+            snapshot['http_auxiliary'] = auxiliary
+        statuses = list(content.values())
         http_problem = ('limited' if any(status == 429 for status in statuses) else
                         'failed' if any(400 <= status < 600 for status in statuses) else '')
         if http_problem:
@@ -75,9 +90,6 @@ class Responses:
                 snapshot['http_only'] = True
         if any(status == 429 for status in statuses):
             snapshot['limited'] = True
-        if any(status == 429 and operation != 'UserByScreenName'
-               for (loader, operation), status in self.statuses.items()
-               if self.loader and loader == self.loader):
             snapshot['http_content_limited'] = True
         if any(400 <= status < 600 for status in statuses):
             snapshot['failed'] = True

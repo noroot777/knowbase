@@ -70,14 +70,45 @@ class ResponseTests(unittest.TestCase):
         self.assertTrue(state['limited'])
         self.assertEqual('limited', x_page_state.problem(state))
 
+    def test_content_and_auxiliary_statuses_are_separate_and_only_content_can_veto(self):
+        routes = [('https://x.com/Example', 'UserTweets', 'UserByScreenName'),
+                  ('https://x.com/Example', 'UserTweets', 'UserTweetsAndReplies'),
+                  (URL, 'TweetDetail', 'TweetResultByRestId')]
+        for url, content, auxiliary in routes:
+            for content_status, auxiliary_status, expected in [
+                    (200, 429, ''), (200, 503, ''), (503, 429, 'failed'),
+                    (503, 200, 'failed'), (429, 200, 'limited'), (429, 503, 'limited')]:
+                with self.subTest(content=content, auxiliary=auxiliary,
+                                  statuses=(content_status, auxiliary_status)):
+                    state = self.state(url)
+                    state.receive(response(content_status, operation=content))
+                    state.receive(response(auxiliary_status, operation=auxiliary))
+                    snap = state.apply(dict(ready='complete', articles=1))
+                    self.assertEqual({content: content_status}, snap.get('http_content'))
+                    self.assertEqual({auxiliary: auxiliary_status}, snap.get('http_auxiliary'))
+                    self.assertEqual(expected, x_page_state.problem(snap))
+                    self.assertIs(content_status == 429, snap.get('http_content_limited', False))
+                    self.assertIs(content_status == 429, snap.get('limited', False))
+                    self.assertNotIn('empty', snap)
+
+    def test_auxiliary_evidence_alone_does_not_create_any_error_or_terminal_flag(self):
+        for url, operation in [('https://x.com/Example', 'UserByScreenName'),
+                               ('https://x.com/Example', 'UserTweetsAndReplies'),
+                               (URL, 'TweetResultByRestId')]:
+            for status in [429, 403, 404, 503]:
+                with self.subTest(operation=operation, status=status):
+                    state = self.state(url)
+                    state.receive(response(status, operation=operation))
+                    self.assertEqual({'http_auxiliary': {operation: status}}, state.apply({}))
+
     def test_http_errors_are_not_permanent_absence_or_necessarily_rate_limits(self):
         for status in [400, 403, 404, 500, 503]:
             with self.subTest(status=status):
                 state = self.state()
                 state.receive(response(status))
-                snap = state.apply(dict(ready='complete', empty=False, limited=False))
+                snap = state.apply(dict(ready='complete', limited=False))
                 self.assertTrue(snap['failed'])
-                self.assertFalse(snap['empty'])
+                self.assertNotIn('empty', snap)
                 self.assertFalse(snap['limited'])
                 self.assertEqual('failed', x_page_state.problem(snap))
 
@@ -105,7 +136,7 @@ class ResponseTests(unittest.TestCase):
         state = self.state()
         state.receive(response())
         state.receive(response(200))
-        self.assertEqual({}, state.apply({}))
+        self.assertEqual({'http_content': {'TweetDetail': 200}}, state.apply({}))
         state.receive(response())
         state.reset('https://x.com/Other/status/456')
         state.loader = 'next'

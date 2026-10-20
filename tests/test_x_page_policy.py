@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg, sync, x_browser, x_channels, x_page_state, x_post
+from kb.feeds.fetching import CollectionBudgetExceeded
 from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import tweet
 from tests.test_x_page_state import EventSession, response
@@ -76,16 +77,55 @@ class PolicyTests(unittest.TestCase):
         x_page_state.navigate(session, 'https://x.com/Example')
         return session
 
-    def test_persistent_auxiliary_errors_expire_as_account_failures_not_batch_limits(self):
-        for status in [429, 403, 404, 503]:
+    def test_persistent_core_errors_expire_as_account_failures_not_batch_limits(self):
+        for status in [400, 403, 404, 503]:
             with self.subTest(status=status):
-                session = self.timeline([response(status, operation='UserByScreenName')])
+                session = self.timeline([response(status, operation='UserTweets')])
                 started = self.clock.now
                 with self.assertRaisesRegex(x_browser.XBrowserError, '页面请求出错') as caught:
                     x_browser._wait_state(session, 'Example', started + 1)
                 self.assertNotIsInstance(caught.exception, x_browser.XRateLimited)
                 self.assertGreaterEqual(self.clock.now - started, 1)
                 self.assertGreaterEqual(session.reads, 2)
+
+    def test_auxiliary_errors_do_not_veto_ready_timeline_content(self):
+        for operation in ['UserByScreenName', 'UserTweetsAndReplies']:
+            for status in [429, 403, 404, 503]:
+                with self.subTest(operation=operation, status=status):
+                    session = self.timeline([response(status, operation=operation)])
+                    started = self.clock.now
+                    try:
+                        state = x_browser._wait_state(session, 'Example', started + 1)
+                    except x_browser.XBrowserError as exc:
+                        self.fail(f'An auxiliary response discarded the ready timeline: {exc}')
+                    self.assertEqual(1, state['articles'])
+                    self.assertEqual('', x_page_state.problem(state))
+                    self.assertEqual({operation: status}, state.get('http_auxiliary'))
+                    self.assertEqual(1, session.reads)
+                    self.assertEqual(started, self.clock.now)
+
+    def test_auxiliary_detail_errors_neither_prove_a_target_failure_nor_terminate_the_batch(self):
+        for status in [429, 403, 404, 503]:
+            with self.subTest(status=status):
+                session = PolicySession({'Example': (
+                    [response(status, operation='TweetResultByRestId')], {})}, detail=True)
+                with self.assertRaises((x_post.PostUnavailable, x_page_state.XBrowserError)) as caught:
+                    x_post.fetch(URL, session)
+                self.assertIsInstance(caught.exception, x_post.PostUnavailable)
+                self.assertNotIsInstance(caught.exception, x_post.PostRequestFailed)
+                self.assertNotIsInstance(caught.exception, x_post.PostGone)
+                self.assertIn('补全时间用完', str(caught.exception))
+
+    def test_auxiliary_errors_cannot_declare_a_blank_timeline_complete_or_absent(self):
+        for operation in ['UserByScreenName', 'UserTweetsAndReplies']:
+            with self.subTest(operation=operation):
+                session = self.timeline([response(429, operation=operation)], dict(articles=0))
+                started = self.clock.now
+                with self.assertRaises(x_browser.XBrowserError) as caught:
+                    x_browser._wait_state(session, 'Example', started + 1)
+                self.assertNotIsInstance(caught.exception, x_browser.XRateLimited)
+                self.assertIn('没有读到推文', str(caught.exception))
+                self.assertGreaterEqual(self.clock.now - started, 1)
 
     def test_known_terminal_dom_wins_over_http_errors_without_waiting_the_account_budget(self):
         for operation in ['UserByScreenName', 'UserTweets']:
@@ -124,16 +164,22 @@ class PolicyTests(unittest.TestCase):
                 self.assertEqual(2, session.reads)
                 self.assertLess(self.clock.now - started, 1)
 
-    def test_http_only_ordinary_detail_failure_waits_then_withholds_without_claiming_absence(self):
-        for status in [403, 404, 503]:
+    def test_core_detail_errors_keep_their_own_failure_scope_and_timing(self):
+        for status in [429, 403, 404, 503]:
             with self.subTest(status=status):
-                session = PolicySession({'Example': ([response(status)], {})}, detail=True)
+                session = PolicySession({'Example': ([response(status),
+                    response(200, operation='TweetResultByRestId')], {})}, detail=True)
                 started = self.clock.now
                 with self.assertRaises((x_post.PostUnavailable, x_page_state.XBrowserError)) as caught:
                     x_post.fetch(URL, session)
-                self.assertIsInstance(caught.exception, x_post.PostRequestFailed)
-                self.assertIn('不能据此确认限流或推文不存在', str(caught.exception))
-                self.assertGreaterEqual(self.clock.now - started, 1)
+                if status == 429:
+                    self.assertIsInstance(caught.exception, x_page_state.XRateLimited)
+                    self.assertEqual(2, session.reads)
+                    self.assertLess(self.clock.now - started, 1)
+                else:
+                    self.assertIsInstance(caught.exception, x_post.PostRequestFailed)
+                    self.assertIn('不能据此确认限流或推文不存在', str(caught.exception))
+                    self.assertGreaterEqual(self.clock.now - started, 1)
 
     def test_detail_terminal_dom_requires_two_matching_complete_observations(self):
         for status in [404, 429, 503]:
@@ -154,7 +200,7 @@ class PolicyTests(unittest.TestCase):
     def test_both_readers_use_the_shared_escalation_for_polling_and_timeout(self):
         for detail in [False, True]:
             with self.subTest(detail=detail):
-                operation = 'TweetDetail' if detail else 'UserByScreenName'
+                operation = 'TweetDetail' if detail else 'UserTweets'
                 session = PolicySession({'Example': ([response(503, operation=operation)], {})},
                                         detail=detail)
                 with patch.object(x_page_state, 'escalate', wraps=x_page_state.escalate) as policy:
@@ -198,8 +244,8 @@ class StoredPolicyTests(ChannelBase):
         super().setUp()
         self.sources = [self.sub('Example'), self.sub('Other')]
 
-    def run_batch(self, channel, cases):
-        sources = self.sources
+    def run_batch(self, channel, cases, *, sources=None, budget=None, account_seconds=1.0):
+        sources = self.sources if sources is None else sources
         for source in sources:
             x_channels.save_watermark(source['id'], channel, OLD)
         sources = [reg.subscription('social', source['id']) for source in sources]
@@ -208,15 +254,18 @@ class StoredPolicyTests(ChannelBase):
         settings = self.settings(channel)
         with patch.object(x_browser, 'browser_session',
                           return_value=contextlib.nullcontext(session)), \
-             patch.object(x_browser, 'ACCOUNT_SECONDS', 1.0), \
+             patch.object(x_browser, 'ACCOUNT_SECONDS', account_seconds), \
              patch.object(time, 'monotonic', clock.monotonic), \
              patch.object(time, 'sleep', clock.sleep):
-            x_channels.prefetch(sources, settings)
+            x_channels.prefetch(sources, settings, budget=budget)
+        session.elapsed = clock.now
         for source in sources:
             try:
                 result = x_channels.take(source, settings)
             except ValueError as exc:
                 sync._save_failure(source, exc, dict(errors=[], failed_ids=[]))
+            except CollectionBudgetExceeded as exc:
+                self.fail(f'Auxiliary requests consumed the remaining batch budget: {exc}')
             else:
                 sync._save_result(source, result, FetchScope())
         saved = [reg.subscription('social', source['id']) for source in sources]
@@ -224,19 +273,36 @@ class StoredPolicyTests(ChannelBase):
             urls = {row['url'] for row in conn.execute('SELECT url FROM feed_items')}
         return saved, urls, session
 
-    def test_account_failure_keeps_its_watermark_but_later_account_is_saved_and_advances(self):
+    def test_auxiliary_errors_preserve_both_accounts_and_advance_their_watermarks(self):
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:
-            for status in [429, 503]:
-                with self.subTest(channel=channel, status=status):
-                    cases = {'Example': ([response(status, operation='UserByScreenName')], {})}
-                    saved, urls, session = self.run_batch(channel, cases)
-                    self.assertIn('页面请求出错', saved[0]['last_error'])
-                    self.assertNotIn('限制', saved[0]['last_error'])
-                    self.assertEqual(OLD, x_channels.watermark(saved[0], channel))
-                    self.assertEqual('', saved[1]['last_error'])
-                    self.assertNotEqual(OLD, x_channels.watermark(saved[1], channel))
-                    self.assertEqual({'https://x.com/other/status/123'}, urls)
-                    self.assertEqual(['https://x.com/example', 'https://x.com/other'], session.urls)
+            for operation in ['UserByScreenName', 'UserTweetsAndReplies']:
+                for status in [429, 403, 404, 503]:
+                    with self.subTest(channel=channel, operation=operation, status=status):
+                        cases = {'Example': ([response(status, operation=operation)], {})}
+                        saved, urls, session = self.run_batch(channel, cases)
+                        for source in saved:
+                            self.assertEqual('', source['last_error'])
+                            self.assertNotEqual(OLD, x_channels.watermark(source, channel))
+                        self.assertEqual({'https://x.com/example/status/123',
+                                          'https://x.com/other/status/123'}, urls)
+                        self.assertEqual(['https://x.com/example', 'https://x.com/other'], session.urls)
+                        self.assertEqual(1, session.state_reads['example'])
+                        self.assertEqual(0, session.elapsed)
+
+    def test_global_auxiliary_errors_do_not_exhaust_the_batch_budget(self):
+        sources = [self.sub(f'h{identity:02d}') for identity in range(12)]
+        for channel in [x_channels.BROWSER, x_channels.ATTACH]:
+            with self.subTest(channel=channel):
+                cases = {source['name']: ([response(503, operation='UserByScreenName')], {})
+                         for source in sources}
+                saved, urls, session = self.run_batch(channel, cases, sources=sources,
+                                                      budget=300, account_seconds=50)
+                self.assertEqual(12, len(urls))
+                self.assertEqual(12, len(session.urls))
+                self.assertEqual(0, session.elapsed)
+                for source in saved:
+                    self.assertEqual('', source['last_error'])
+                    self.assertNotEqual(OLD, x_channels.watermark(source, channel))
 
     def test_dom_terminal_reason_survives_http_while_the_next_account_still_saves(self):
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:
@@ -262,9 +328,9 @@ class StoredPolicyTests(ChannelBase):
                     self.assertIn('限制了访问频率', source['last_error'])
                     self.assertEqual(OLD, x_channels.watermark(source, channel))
 
-    def test_retry_after_an_auxiliary_error_recovers_the_withheld_account(self):
+    def test_retry_after_a_core_error_recovers_the_withheld_account(self):
         channel = x_channels.BROWSER
-        cases = {'Example': ([response(operation='UserByScreenName')], {})}
+        cases = {'Example': ([response(503, operation='UserTweets')], {})}
         saved, urls, session = self.run_batch(channel, cases)
         self.assertIn('页面请求出错', saved[0]['last_error'])
         self.assertNotIn('https://x.com/example/status/123', urls)

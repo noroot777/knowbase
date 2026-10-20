@@ -93,7 +93,7 @@ class ResultPrecedenceTests(unittest.TestCase):
     def test_full_stable_text_wins_over_every_http_failure(self):
         for status in [429, 503, 404]:
             with self.subTest(status=status), patch.object(x_post, 'STEP', 0):
-                session = EventSession([response(status, operation='TweetResultByRestId')],
+                session = EventSession([response(status, operation='TweetDetail')],
                                        available=True)
                 self.assertEqual(BODY, x_post.fetch(URL, session))
                 self.assertEqual(2, session.reads)
