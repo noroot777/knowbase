@@ -2,10 +2,12 @@
 import contextlib
 import io
 import json
+import re
 import time
 from unittest.mock import patch
 
 from kb.feeds import grab_store, registry as reg, sync, translate, x_post
+from kb.feeds.x_cdp import CdpTransportError
 from scripts import x_post_backfill as backfill
 from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import tweet
@@ -15,6 +17,17 @@ SHORT = 'Review every app…'
 FULL = SHORT[:-1] + ' and ask before disconnecting anything.\n\nThe full ending.'
 LEGACY = 'Read this:\n@Example\n\nhttps://\nexample.org/long/\npath\n…'
 CLEAN = 'Read this:@Example\n\nhttps://example.org/long/path'
+
+
+def linked_snapshot(text):
+    """Model anchor-boundary evidence produced by the real-DOM reader tests."""
+    offsets = set()
+    for anchor in re.finditer(r'https?://\S+|[@#]\w+', text):
+        offsets.update(len(re.sub(r'\s+', '', text[:position]))
+                       for position in anchor.span())
+    legacy = re.sub(r'(https?://\S+|[@#]\w+)', r'\n\1\n', text)
+    return dict(snapshot(text), inline_breaks=sorted(offsets),
+                inline_plain=re.sub(r'\s+', '', text), inline_legacy=legacy)
 
 
 class BackfillTests(ChannelBase):
@@ -119,7 +132,7 @@ class BackfillTests(ChannelBase):
                  patch.object(x_post, 'SECONDS', 0.02), \
                  patch.object(backfill.x_browser, 'browser_session',
                               return_value=contextlib.nullcontext(page)):
-                self.assertEqual(code, backfill.main(['run', '--yes', '--report', str(report)]))
+                self.assertEqual(code, backfill.main(['run', '--yes', '--recheck', '--report', str(report)]))
             stats = json.loads(report.read_text())
             self.assertEqual(state, stats['results'][0]['state'])
             self.assertEqual(row, self.row(row['key']))
@@ -176,7 +189,7 @@ class BackfillTests(ChannelBase):
         for text in [SHORT, 'shorter']:
             with self.subTest(text=text):
                 stats = backfill.repair([row], Page(snapshot(text)), apply=True)
-                state = 'identical' if text == SHORT else 'blocked_length'
+                state = 'identical' if text == SHORT else 'blocked_content'
                 self.assertEqual(1, stats[state])
                 self.assertEqual(state, stats['results'][0]['state'])
                 self.assertEqual(0, stats['updated'])
@@ -190,7 +203,7 @@ class BackfillTests(ChannelBase):
             conn.execute("UPDATE feed_items SET body_zh='旧译文',translated_at='old'")
             row = dict(conn.execute('SELECT * FROM feed_items').fetchone())
         self.assertLess(len(CLEAN), len(LEGACY))
-        stats = backfill.repair([row], Page(snapshot(CLEAN)), apply=True)
+        stats = backfill.repair([row], Page(linked_snapshot(CLEAN)), apply=True)
         updated = self.row(row['key'])
         self.assertEqual(1, stats['normalized'])
         self.assertEqual(1, stats['updated'])
@@ -209,19 +222,19 @@ class BackfillTests(ChannelBase):
 
     def test_link_cleanup_probe_is_read_only_and_keeps_repost_context(self):
         row = self.seed(LEGACY, context='Someone reposted')
-        stats = backfill.repair([row], Page(snapshot(CLEAN)))
+        stats = backfill.repair([row], Page(linked_snapshot(CLEAN)))
         self.assertEqual(1, stats['normalized'])
         self.assertEqual(0, stats['updated'])
         self.assertEqual(row, self.row(row['key']))
-        stats = backfill.repair([row], Page(snapshot(CLEAN)), apply=True)
+        stats = backfill.repair([row], Page(linked_snapshot(CLEAN)), apply=True)
         self.assertEqual(1, stats['updated'])
         self.assertEqual('> Someone reposted\n\n' + CLEAN, self.row(row['key'])['body'])
 
     def test_known_artifacts_do_not_allow_arbitrary_shorter_text(self):
         row = self.seed(LEGACY)
         stats = backfill.repair([row], Page(snapshot('Read this: https://example.org')), apply=True)
-        self.assertEqual(1, stats['blocked_artifacts'])
-        self.assertEqual('blocked_artifacts', stats['results'][0]['state'])
+        self.assertEqual(1, stats['blocked_content'])
+        self.assertEqual('blocked_content', stats['results'][0]['state'])
         self.assertEqual(0, stats['updated'])
         self.assertEqual(row, self.row(row['key']))
 
@@ -238,7 +251,7 @@ class BackfillTests(ChannelBase):
         row = self.seed(LEGACY.replace('…', '...'))
         text = CLEAN + '\nNew'
         self.assertLess(len(text), len(row['body']))
-        stats = backfill.repair([row], Page(snapshot(text)), apply=True)
+        stats = backfill.repair([row], Page(linked_snapshot(text)), apply=True)
         self.assertEqual(1, stats['normalized'])
         self.assertEqual(text, self.row(row['key'])['body'])
 
@@ -255,7 +268,7 @@ class BackfillTests(ChannelBase):
             with self.subTest(stored=stored):
                 identity = str(150 + index)
                 row = self.seed(stored, identity, context='Someone reposted')
-                detail = dict(snapshot(clean), at=identity, id=identity)
+                detail = dict(linked_snapshot(clean), at=identity, id=identity)
                 self.assertLess(len(clean), len(stored))
                 probe = backfill.repair([row], Page(detail))
                 self.assertEqual(1, probe['normalized'])
@@ -272,16 +285,102 @@ class BackfillTests(ChannelBase):
                       'Read this: https://example.org/case\nKeep this ending.']:
             with self.subTest(clean=clean):
                 stats = backfill.repair([row], Page(snapshot(clean)), apply=True)
-                self.assertEqual(1, stats['blocked_artifacts'])
+                self.assertEqual(1, stats['blocked_content'])
                 self.assertEqual(0, stats['updated'])
                 self.assertEqual(row, self.row(row['key']))
 
-    def test_normal_paragraph_breaks_are_not_cleaned_as_link_artifacts(self):
+    def test_confirmed_detail_cannot_erase_unproven_non_url_line_breaks(self):
         row = self.seed('Read this: https://example.org/guide\nKeep this ending.')
-        stats = backfill.repair([row], Page(snapshot(row['body'].replace('\n', ' '))), apply=True)
-        self.assertEqual(0, stats['normalized'])
+        clean = row['body'].replace('\n', ' ')
+        stats = backfill.repair([row], Page(snapshot(clean)), apply=True)
+        self.assertEqual(1, stats['blocked_whitespace'])
         self.assertEqual(0, stats['updated'])
+        self.assertEqual([], backfill.link_artifacts(row['body'], clean))
         self.assertEqual(row, self.row(row['key']))
+
+    def test_inline_mentions_and_hashtags_are_repaired_without_a_url(self):
+        for index, (stored, clean) in enumerate([
+            ('Prediction: you’re all going to be using \n@AsideAI\n with your agents in a year or so',
+             'Prediction: you’re all going to be using @AsideAI with your agents in a year or so'),
+            ('Read\n@AsideAI\ntoday', 'Read @AsideAI today'),
+            ('Try \n#AI\n and \r\n@AsideAI\r\n today…', 'Try #AI and @AsideAI today…'),
+            ('Read \n@AsideAI\n today', 'Read @AsideAI today!'),
+            ('Read \n@AsideAI\n today\n\nNext paragraph.',
+             'Read @AsideAI today\n\nNext paragraph.'),
+        ]):
+            with self.subTest(stored=stored):
+                identity = str(400 + index)
+                row = self.seed(stored, identity, context='Someone reposted')
+                detail = dict(linked_snapshot(clean), at=identity, id=identity)
+                self.assertLessEqual(len(clean), len(stored))
+                self.assertEqual([], backfill.link_artifacts(stored, clean))
+                probe = backfill.repair([row], Page(detail))
+                self.assertEqual(1, probe['normalized'])
+                self.assertEqual(0, probe['updated'])
+                self.assertEqual(row, self.row(row['key']))
+                stats = backfill.repair([row], Page(detail), apply=True)
+                updated = self.row(row['key'])
+                self.assertEqual(1, stats['updated'])
+                self.assertFalse(stats['results'][0]['artifacts'])
+                self.assertEqual('legacy_whitespace', stats['results'][0]['reason'])
+                self.assertEqual('> Someone reposted\n\n' + clean, updated['body'])
+                self.assertEqual(clean.splitlines()[0], updated['title'])
+                self.assertEqual(row['content_rev'] + 1, updated['content_rev'])
+
+    def test_inline_cleanup_cli_uses_versioned_replacement_and_reexports(self):
+        stored, clean = 'Read \n@AsideAI\n today', 'Read @AsideAI today'
+        row = self.seed(stored, context='Someone reposted')
+        sync.export('social')
+        with reg.db() as conn:
+            conn.execute("UPDATE feed_items SET body_zh='旧译文',translated_at='old'")
+            row = dict(conn.execute('SELECT * FROM feed_items').fetchone())
+        report = self.root / 'report.json'
+        with contextlib.redirect_stdout(io.StringIO()), \
+             patch.object(backfill.x_browser, 'browser_session',
+                          return_value=contextlib.nullcontext(Page(linked_snapshot(clean)))):
+            self.assertEqual(0, backfill.main(['run', '--yes', '--report', str(report)]))
+        self.assertEqual(1, json.loads(report.read_text())['normalized'])
+        updated = self.row(row['key'])
+        self.assertEqual('> Someone reposted\n\n' + clean, updated['body'])
+        self.assertEqual(row['content_rev'] + 1, updated['content_rev'])
+        self.assertEqual('', updated['body_zh'])
+        self.assertEqual('', updated['translated_at'])
+        self.assertEqual(1, updated['extract_stale'])
+        self.assertEqual(row['exported_hash'], updated['exported_hash'])
+        sync.export('social')
+        exported = (sync.VAULT_ROOT / row['path']).read_text()
+        self.assertIn(updated['body'], exported)
+        self.assertNotIn(stored, exported)
+
+    def test_whitespace_alignment_does_not_allow_nonwhitespace_loss_or_edits(self):
+        row = self.seed('Keep \n@AsideAI\n and \n#AI\n today…')
+        for text in ['Keep @AsideAI and #AI', 'Keep @OtherAI and #AI today…',
+                     'Keep @AsideAI and #AI today', 'Keep #AI and @AsideAI today…']:
+            with self.subTest(text=text):
+                stats = backfill.repair([row], Page(snapshot(text)), apply=True)
+                self.assertEqual(1, stats['blocked_content'])
+                self.assertEqual(0, stats['updated'])
+                self.assertEqual(row, self.row(row['key']))
+
+    def test_inline_cleanup_still_requires_the_matching_unfolded_detail(self):
+        stored, clean = 'Read \n@AsideAI\n today', 'Read @AsideAI today'
+        row = self.seed(stored)
+        for detail in [dict(snapshot(clean), at='999'), dict(snapshot(clean), id='999'),
+                       dict(snapshot(clean), truncated=True)]:
+            with self.subTest(detail=detail), patch.object(x_post, 'SECONDS', 0.002):
+                stats = backfill.repair([row], Page(detail), apply=True)
+                self.assertEqual(1, stats['failed'])
+                self.assertEqual(0, stats['updated'])
+                self.assertEqual(row, self.row(row['key']))
+
+    def test_inline_cleanup_preserves_concurrent_replacements(self):
+        row = self.seed('Read \n@AsideAI\n today')
+        self.assertTrue(grab_store.replace(row, {'title': 'New title', 'body': BODY}))
+        current = self.row(row['key'])
+        stats = backfill.repair([row], Page(linked_snapshot('Read @AsideAI today')), apply=True)
+        self.assertEqual(1, stats['stale'])
+        self.assertEqual(0, stats['updated'])
+        self.assertEqual(current, self.row(row['key']))
 
     def test_any_url_character_can_be_split_without_an_ellipsis(self):
         url = 'https://example.org/a-long-path?one=two%20three#section'
@@ -312,7 +411,7 @@ class BackfillTests(ChannelBase):
             with self.subTest(stored=stored):
                 identity = str(300 + index)
                 row = self.seed(stored, identity, context='Someone reposted')
-                detail = dict(snapshot(clean), at=identity, id=identity)
+                detail = dict(linked_snapshot(clean), at=identity, id=identity)
                 stats = backfill.repair([row], Page(detail), apply=True)
                 self.assertEqual(1, stats['normalized'])
                 self.assertEqual(1, stats['updated'])
@@ -373,11 +472,13 @@ class BackfillTests(ChannelBase):
         self.assertEqual(current, self.row(row['key']))
 
     def test_legacy_cleanup_does_not_weaken_live_collection(self):
-        for index, stored in enumerate([LEGACY, LEGACY.removesuffix('\n…')]):
+        for index, stored in enumerate([LEGACY, LEGACY.removesuffix('\n…'),
+                                        'Read \n@AsideAI\n today']):
             with self.subTest(stored=stored):
                 identity = str(160 + index)
                 row = self.seed(stored, identity)
-                detail = dict(snapshot(CLEAN), at=identity, id=identity)
+                clean = 'Read @AsideAI today' if '@AsideAI' in stored else CLEAN
+                detail = dict(snapshot(clean), at=identity, id=identity)
                 entries, note = x_post.complete([backfill.entry_of(row)], session=Page(detail))
                 self.assertEqual([], entries)
                 self.assertIn('下次同步', note)
@@ -385,12 +486,12 @@ class BackfillTests(ChannelBase):
     def test_cli_reports_blocked_identical_and_cleanable_artifacts_separately(self):
         row = self.seed(LEGACY)
         report = self.root / 'report.json'
-        for text, state, code in [('shorter', 'blocked_artifacts', 1),
+        for text, state, code in [('shorter', 'blocked_content', 0),
                                   (LEGACY, 'identical', 0), (CLEAN, 'normalized', 0)]:
             with self.subTest(state=state), contextlib.redirect_stdout(io.StringIO()), \
                  patch.object(backfill.x_browser, 'browser_session',
-                              return_value=contextlib.nullcontext(Page(snapshot(text)))):
-                self.assertEqual(code, backfill.main(['run', '--report', str(report)]))
+                              return_value=contextlib.nullcontext(Page(linked_snapshot(text)))):
+                self.assertEqual(code, backfill.main(['run', '--recheck', '--report', str(report)]))
             recorded = json.loads(report.read_text())
             self.assertEqual(state, recorded['results'][0]['state'])
             self.assertTrue(recorded['results'][0]['artifacts'])
@@ -455,6 +556,20 @@ class BackfillTests(ChannelBase):
         self.assertEqual(1, stats['failed'])
         self.assertEqual(row, self.row(row['key']))
         self.assertIn('登录', stats['results'][0]['error'])
+
+    def test_session_failure_stops_the_audit_without_reopening_later_posts(self):
+        for snap, reason in [(dict(snapshot(), login=True), '重新登录'),
+                             (CdpTransportError('disconnected'), '会话中断')]:
+            with self.subTest(reason=reason):
+                rows = [self.seed(), self.seed(identity='124')]
+                page = Page(snap)
+                stats = backfill.repair(rows, page, apply=True)
+                self.assertEqual([rows[0]['url']], page.urls)
+                self.assertEqual(1, stats['failed'])
+                self.assertEqual(1, stats['deferred'])
+                self.assertEqual('batch', stats['results'][0]['scope'])
+                self.assertIn(reason, stats['stop_reason'])
+                self.assertEqual(rows, [self.row(row['key']) for row in rows])
 
     def test_request_error_is_reported_without_replacing_the_row_or_stopping_other_repairs(self):
         row = self.seed()

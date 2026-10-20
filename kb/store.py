@@ -21,6 +21,8 @@ from kb.config import DATA_DIR, DB_PATH, EMBEDDING_DIM, SOURCES
 # 老库升级那一块搬去了 kb/store_migrate.py(收藏表 DDL 也在那儿 ——
 # 重建 v4 时要用它,留在这儿两头就得互相 import)
 from kb import store_migrate as mig
+from kb import favorite_recovery, scan_evidence
+from kb.scan_status import ScanReport
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -42,6 +44,16 @@ CREATE TABLE IF NOT EXISTS documents (
   -- 存的是当时那份 content_hash,不是一个布尔:正文哪天被补回来、或者 md 以
   -- 任何方式变了,hash 就对不上,这一篇自动回到提取队列。
   no_body_hash  TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS index_scan_roots (
+  root TEXT PRIMARY KEY,
+  device INTEGER NOT NULL,
+  inode INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS index_scan_directories (
+  path TEXT PRIMARY KEY,
+  device INTEGER NOT NULL,
+  inode INTEGER NOT NULL
 );
 -- idx_documents_promo 在 store_migrate.migrate_promo 里建(老库先补列才能建索引)
 
@@ -235,6 +247,8 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     mig.migrate_favorites(conn)
     conn.executescript(_SCHEMA)
     conn.executescript(mig.FAVORITES_DDL)
+    conn.executescript(favorite_recovery.DDL)
+    conn.executescript(scan_evidence.DDL)
     conn.executescript(_VEC_SCHEMA)
     mig.migrate_entities(conn)
     mig.migrate_promo(conn)
@@ -251,6 +265,14 @@ def doc_needs_reindex(conn: sqlite3.Connection, path: str, content_hash: str) ->
         "SELECT content_hash FROM documents WHERE path=?", (path,)
     ).fetchone()
     return row is None or row["content_hash"] != content_hash
+
+
+def observed_document_is_current(conn: sqlite3.Connection, doc) -> bool:
+    """相同原文无需重建索引;精确匹配已提交版本时可更新目录凭据。"""
+    if doc_needs_reindex(conn, doc.path, doc.content_hash):
+        return False
+    scan_evidence.remember(conn, doc)
+    return True
 
 
 def promo_tag_wanted(level: str, in_file: bool) -> bool:
@@ -313,6 +335,13 @@ def _align_promo_tag(conn: sqlite3.Connection, path: str) -> None:
 
 
 def upsert_document(conn: sqlite3.Connection, doc, chunks, now: str) -> None:
+    """文档、派生索引与该版本的目录凭据同事务交付,任一步失败都撤回本篇。"""
+    with scan_evidence.document_write(conn):
+        _upsert_document(conn, doc, chunks, now)
+        scan_evidence.remember(conn, doc, replace=True)
+
+
+def _upsert_document(conn: sqlite3.Connection, doc, chunks, now: str) -> None:
     """写入/更新一篇文档及其 chunk 与 FTS。旧 chunk(含向量)全部删除重建。"""
     # 老 chunk 的向量一并清掉(chunk_id 会变)
     old_ids = [r["id"] for r in conn.execute(
@@ -337,6 +366,7 @@ def upsert_document(conn: sqlite3.Connection, doc, chunks, now: str) -> None:
         (doc.path, doc.source, doc.title, doc.account, doc.published,
          doc.url, doc.content_hash, now),
     )
+    favorite_recovery.restore(conn, doc)
 
     conn.execute("DELETE FROM doc_tags WHERE path=?", (doc.path,))
     conn.executemany(
@@ -357,30 +387,42 @@ def upsert_document(conn: sqlite3.Connection, doc, chunks, now: str) -> None:
         )
 
 
-def remove_missing_documents(conn: sqlite3.Connection, alive_paths: set[str]) -> int:
-    """删掉 vault 里已不存在的文档(含级联的 chunk/tag/entity 和向量)。
+def remove_missing_documents(conn: sqlite3.Connection, report: ScanReport) -> int:
+    """只清理完整扫描已证明缺失的文档,并保留同一原文的可撤销关联。
 
-    **停用来源(`config.Source.enabled=False`)的文档一律算存活。** 它们的树已经
-    不再被 `scanner.scan_all` 遍历,所以 `alive_paths` 里必然一条都没有 —— 不豁免
-    的话"停止收新内容"会在下一轮索引里顺手把库里那一批连 chunk、向量、标签一起
-    删掉,而面板上只多一个 removed 计数。停用是「不再往里加」,不是「把存量清掉」。
-    判据落在这里而不是三个调用方各写一遍(`pipeline_stages` / `cli` /
-    `scripts/feed_trim_history`):这是唯一的删除口,口径只该有一份。
+    普通路径集合、未消费完的扫描都没有删除授权。异常/停用/排除/未覆盖的
+    范围全部保留;显式永久删除与历史清理应直接调用 remove_documents。
     """
+    if not isinstance(report, ScanReport):
+        raise TypeError("清理缺失文档需要 ScanReport,路径集合不是删除授权")
+    report.validate()
     off = {s.name for s in SOURCES if not s.enabled}
-    rows = conn.execute("SELECT path, source FROM documents").fetchall()
-    dead = [r["path"] for r in rows
-            if r["path"] not in alive_paths and r["source"] not in off]
-    for p in dead:
-        ids = [r["id"] for r in conn.execute(
-            "SELECT id FROM chunks WHERE path=?", (p,)
+    rows = conn.execute("SELECT path, source, content_hash FROM documents").fetchall()
+    report.check_history(conn, rows)
+    report.check_document_evidence(conn, rows)
+    candidates = [row for row in rows if row['source'] not in off
+                  and report.allows_missing(row['path'], row['source'])]
+    missing = [row for row in candidates if report.probe_missing(row['path'])]
+    report.validate()
+    dead = tuple(row['path'] for row in missing
+                 if report.allows_missing(row['path'], row['source']))
+    report.remember_directories(conn)
+    return remove_documents(conn, dead, recoverable=True)
+
+
+def remove_documents(conn: sqlite3.Connection, paths, *, recoverable: bool = False) -> int:
+    removed = 0
+    for path in paths:
+        favorite_recovery.remember(conn, path, recoverable=recoverable)
+        ids = [row["id"] for row in conn.execute(
+            "SELECT id FROM chunks WHERE path=?", (path,)
         ).fetchall()]
         if ids:
             ph = ",".join("?" * len(ids))
             conn.execute(f"DELETE FROM chunk_vec WHERE chunk_id IN ({ph})", ids)
             conn.execute(f"DELETE FROM chunks_fts WHERE chunk_id IN ({ph})", ids)
-        conn.execute("DELETE FROM documents WHERE path=?", (p,))
-    return len(dead)
+        removed += conn.execute("DELETE FROM documents WHERE path=?", (path,)).rowcount
+    return removed
 
 
 def chunks_without_vectors(conn: sqlite3.Connection) -> list[sqlite3.Row]:

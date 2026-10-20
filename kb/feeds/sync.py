@@ -18,11 +18,13 @@ from kb.feeds import digest, fulltext, translate, x_channels
 # 这里原地再导出:`_save_result` 调的是本模块这个名字,全仓注释和回归里那些
 # `sync._within_history` 的指向也照旧成立。
 from kb.feeds.exported import item_body_md
+from kb.feeds.exclusion import failure
 # 导出那一步的两个零件(frontmatter 归属、本轮新失败怎么数)在 `export_meta` 里
 # (本文件越过 700 行硬上限时拆出去的,口径没动)。这里原地再导出:本模块调的是
 # 这两个名字,全仓注释和回归里那些 `sync._kept_meta` 的指向也照旧成立。
 from kb.feeds.export_meta import _kept_meta, _new_failures, _OWNED_META  # noqa: F401
 from kb.feeds.history import _within_history
+from kb.feeds.paths import export_path
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
 from kb.pipeline_segments import note_retry_targets
 from kb.source_types import SOURCE_TYPES
@@ -47,8 +49,10 @@ def _fetch_with_budget(source, settings, scope, collect_deadline):
     deadline = time.monotonic() + SOURCE_SECONDS
     if deadline > collect_deadline:
         raise CollectionBudgetExceeded
-    return fetch_source(source, settings, unconditional=scope.ranged,
-                        deadline=deadline, collect_deadline=collect_deadline)
+    entries, validators = fetch_source(source, settings, unconditional=scope.ranged,
+                                       deadline=deadline, collect_deadline=collect_deadline)
+    from kb.feeds.markdown_source import enrich
+    return enrich(source, entries, deadline=deadline, collect_deadline=collect_deadline), validators
 
 
 def _repointed(c, source) -> bool:
@@ -152,7 +156,7 @@ def _save_failure(source, error, summary) -> bool:
     with reg.db() as c:
         if not _claim_write(c, source):
             return False
-        summary['errors'].append({'title': source['name'], 'reason': reason})
+        summary['errors'].append({'title': source['name'], 'reason': reason, 'url': source['url']})
         # 「重试失败项」靠这份身份收窄下一轮的范围(见 `note_retry_targets`)。
         # 记 id 而不是名字:名字会被改,而改完之后这条订阅还是同一条。
         summary['failed_ids'].append(str(source['id']))
@@ -505,7 +509,7 @@ def _export(kind: str, hold_untranslated: bool = False,
     for item in rows:
         if _state.get('stop_requested'):
             break
-        path = root / (item['key'] + '.md')
+        path = VAULT_ROOT / export_path(kind, item['key'])
         rel = str(path.relative_to(VAULT_ROOT))
         title, body = translate.display(item)
         # 标题被译了也算"这一篇是译文":只有一行标题的短动态(正文为空)整条
@@ -582,7 +586,7 @@ def _export(kind: str, hold_untranslated: bool = False,
             # 那条同理);确认没成只是说「它已经不是最新那一版了」。
             done += 1
         except Exception as e:
-            errors.append({'title': item['title'], 'reason': str(e)[:300]})
+            errors.append(failure(item, e, kind))
         finally:
             if temp:
                 temp.unlink(missing_ok=True)

@@ -35,13 +35,17 @@
 - **备份目录要原子地占一个唯一名字**(`tempfile.mkdtemp`,前缀带订阅 id)。
 - **续跑不是「接着执行上次批准的那件事」,收藏那道护栏要按此刻的事实再查一遍**,而且**必须和删除在同一个写事务里**
   (`_apply` 在 kb.db 上 `BEGIN IMMEDIATE`,最终复查、unlink、`remove_missing_documents` 全在这一个事务里)——
-  **索引能从 vault 重建,收藏和备注不能**。配套:**删索引必须用持锁那条连接**;`--allow-favorites` 放行时把要毁掉的那
-  几行另存 `favorites.json` 进备份。
+  默认保留被收藏的原文,避免失去本地阅读入口。配套:**删索引必须用持锁那条连接**;
+  **`--allow-favorites` 只授权清理原文,不授权删除收藏和备注**。放行后 favorites 的外键只将 path 置 NULL,
+  标题/链接兜底、引文、备注、状态和行动卡仍保留,另存 `favorites.json` 作为额外备份。
 - **没有旧文可清 ≠ 不用钉下界**;**没带 `--yes` 一个设置都不改**。
 - **测试样本的发布日期必须跟着今天走**(`_FRESH`/`DAY`),写死日期过几天就被这道闸挡住。
 - 详细见 `docs/decisions/history-depth.md`。
 
 ## 事故形态与实测证据
+
+下文提及的收藏级联丢失是旧策略的事故记录。当前统一采用
+`docs/decisions/fav-snippets.md` 的独立收藏生命周期,不再级联删除收藏。
 
 - **新订阅只收最近 `reg.HISTORY_DAYS`(5)天的内容**(`sync._within_history`)。一个刚
   添加的源常常把自己的整个存档一次交出来:实测 `Hugging Face Blog` 的 feed 一口气给了

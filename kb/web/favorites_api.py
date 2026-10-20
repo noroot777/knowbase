@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from kb import favbrain, llm, store
+from kb.favorite_metadata import FAVORITE_DOCUMENT_COLUMNS, FAVORITE_DOCUMENT_JOIN
 from kb.maintenance import LockBusy, maintenance_lock
 from kb.scanner import body_version
 from kb.web.common import VAULT_NAME, read_doc_text, now as _now
@@ -281,13 +282,7 @@ _FAV_SELECT = (
     # 和「版本号读不出来」撞在一起 —— 两种都该按「证明不了」办,可前者是历史
     # 遗留、后者是这一刻的故障,混在一起就没法再分。
     " f.doc_version,"
-    " d.source,"
-    " COALESCE(NULLIF(d.title, ''), f.origin_title) AS title,"
-    " COALESCE(d.account, '') AS account,"
-    " COALESCE(d.published, '') AS published,"
-    " COALESCE(NULLIF(d.url, ''), f.origin_url) AS url,"
-    " COALESCE(d.summary, '') AS summary"
-    " FROM favorites f LEFT JOIN documents d ON d.path = f.path"
+    + FAVORITE_DOCUMENT_COLUMNS + FAVORITE_DOCUMENT_JOIN
 )
 
 # path 为空、`origin_title` 也空(只可能来自 v4 迁移时置空的孤儿行)时列表总得
@@ -322,6 +317,7 @@ def api_favorites(status: str = "inbox"):
             # path 为空时前端那套 docLink/obsLink 会拼出 `/doc/undefined`,
             # 一律给空串,由前端按 origin 走自己那条回跳。
             item["path"] = item["path"] or ""
+            item["document_available"] = bool(item["document_available"])
             item["title"] = item["title"] or _FAV_NO_TITLE
             aj = item.pop("action_json", "")
             if aj:

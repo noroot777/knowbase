@@ -17,7 +17,7 @@ def _covers(preview: str, detail: str, aligned_preview=None) -> bool:
 
 
 def resolve(row: dict, session, *, deadline=None, should_stop=None,
-            aligned_preview=None) -> tuple[dict, str | None]:
+            aligned_preview=None, evidence=None) -> tuple[dict, str | None]:
     """Prove a stored Article suffix or match stored text against a verified post detail."""
     x_post._check(deadline, should_stop)
     if not x_article.API and (session is None or not x_article.BROWSER_FALLBACK):
@@ -32,7 +32,8 @@ def resolve(row: dict, session, *, deadline=None, should_stop=None,
         if article_body and (row['body'] == article_body or row['body'].endswith('\n\n' + article_body)):
             return x_post_meta.stamp(row, 'article', ''), None
         raise x_post.PostUnavailable('远端存在长文，但存量正文不能与整篇文章精确对齐；来源仍未核实')
-    detail = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop)
+    detail = x_post.fetch(row['url'], session, deadline=deadline, should_stop=should_stop,
+                          evidence=evidence)
     if _covers(row['body'], detail, aligned_preview):
         return x_post_meta.stamp(row, 'post', '', author_text=x_post_meta.AuthorText(detail, 'detail')), detail
     head, separator, tail = row['body'].partition('\n\n')

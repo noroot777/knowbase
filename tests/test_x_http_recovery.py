@@ -36,10 +36,10 @@ class HttpRecoveryTests(unittest.TestCase):
         responses.loader = 'current'
         return responses
 
-    def test_a_later_tracked_sibling_success_cannot_retire_failures_in_any_page_family(self):
-        for url, failed, succeeded in [(URL, 'TweetResultByRestId', 'TweetDetail'),
+    def test_a_later_sibling_success_cannot_retire_core_failures_in_any_page_family(self):
+        for url, failed, succeeded in [(URL, 'TweetDetail', 'TweetResultByRestId'),
                 ('https://x.com/home', 'HomeTimeline', 'HomeLatestTimeline'),
-                ('https://x.com/Example', 'UserByScreenName', 'UserTweets')]:
+                ('https://x.com/Example', 'UserTweets', 'UserByScreenName')]:
             for code in (404, 429, 503):
                 for success in (200, 206, 299):
                     with self.subTest(url=url, code=code, success=success):
@@ -65,9 +65,9 @@ class HttpRecoveryTests(unittest.TestCase):
     def test_a_new_failure_still_counts_until_a_later_success_or_navigation(self):
         responses = self.responses()
         responses.receive(response(200))
-        responses.receive(response(429, operation='TweetResultByRestId'))
+        responses.receive(response(429))
         self.assertEqual('limited', x_page_state.problem(responses.apply(state())))
-        responses.receive(response(200, operation='TweetResultByRestId'))
+        responses.receive(response(200))
         self.assertEqual('', x_page_state.problem(responses.apply(state())))
         responses.receive(response(503))
         responses.reset(URL)
@@ -85,13 +85,17 @@ class HttpRecoveryTests(unittest.TestCase):
         for code, exception in [(429, x_post.XRateLimited), (503, x_post.PostRequestFailed)]:
             page = StateSession([response(code), response(200, operation='TweetResultByRestId')],
                                 text='', id='', ready='loading')
-            with self.subTest(code=code), patch.object(x_post, 'STEP', 0), self.assertRaises(exception):
+            with self.subTest(code=code), patch.object(x_post, 'STEP', 0), \
+                    patch.object(x_post, 'SECONDS', 0.01), self.assertRaises(exception):
                 x_post.fetch(URL, page, deadline=time.monotonic() + 1)
-            self.assertEqual(2, page.reads)
+            if code == 429:
+                self.assertEqual(2, page.reads)
+            else:
+                self.assertGreaterEqual(page.reads, 2)
 
-    def test_rendered_timeline_wins_over_http_failure_after_the_login_check(self):
+    def test_rendered_home_or_auxiliary_timeline_failure_loses_after_the_login_check(self):
         for home in (False, True):
-            page = StateSession([response(503, operation='HomeTimeline' if home else 'UserTweets')],
+            page = StateSession([response(503, operation='HomeTimeline' if home else 'UserByScreenName')],
                                 articles=18)
             x_page_state.navigate(page, 'https://x.com/home' if home else 'https://x.com/Example')
             with self.subTest(home=home), patch.object(x_browser.time, 'sleep',

@@ -242,9 +242,12 @@ class Vault(unittest.TestCase):
 
     def reindex(self) -> str:
         """真跑一趟 `kb index`(不编码向量),返回它打印的那几行。"""
-        def scan():
-            for full in sorted(self.vault.rglob("*.md")):
-                yield self.doc_of(str(full.relative_to(self.vault)))
+        def scan(**kwargs):
+            sources = [Source(name, self.vault / 'source' / name)
+                       for name in self.SOURCES.values()
+                       if (self.vault / 'source' / name).is_dir()]
+            with mock.patch.object(scanner, 'SOURCES', sources):
+                yield from scanner.scan_all(**kwargs)
 
         out = io.StringIO()
         with mock.patch.object(cli, "scan_all", scan), \

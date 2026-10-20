@@ -51,23 +51,30 @@ class HttpEvidenceTests(unittest.TestCase):
             self.assertEqual(2, page.reads)
             sleep.assert_called_once()
 
-    def test_timeline_retains_two_observations_but_does_not_wait_for_complete(self):
+    def test_timeline_confirms_http_evidence_without_waiting_for_dom_completion(self):
         for status, kind, message in [(429, x_browser.XRateLimited, '访问频率'),
                                       (503, x_browser.XBrowserError, '请求出错')]:
             page = LoadingSession([response(status, operation='UserTweets')])
             x_page_state.navigate(page, 'https://x.com/Example')
             with self.subTest(status=status), patch.object(x_browser.time, 'sleep'), \
                     self.assertRaisesRegex(kind, message):
-                x_browser._wait_state(page, 'Example', time.monotonic() + 0.1)
-            self.assertEqual(2, page.reads)
+                x_browser._wait_state(page, 'Example', time.monotonic() + 0.01)
+            if status == 429:
+                self.assertEqual(2, page.reads)
+            else:
+                self.assertGreaterEqual(page.reads, 2)
 
     def test_detail_retains_two_observations_and_page_identity_with_http_failures(self):
         for status, kind in [(429, x_post.XRateLimited), (503, x_post.PostRequestFailed)]:
             page = LoadingSession([response(status)])
             with self.subTest(status=status), patch.object(x_post, 'STEP', 0), \
+                    patch.object(x_post, 'SECONDS', 0.01), \
                     self.assertRaises(kind):
                 x_post.fetch(URL, page, deadline=time.monotonic() + 0.1)
-            self.assertEqual(2, page.reads)
+            if status == 429:
+                self.assertEqual(2, page.reads)
+            else:
+                self.assertGreaterEqual(page.reads, 2)
 
     def test_http_retry_and_new_loader_clear_the_authoritative_source(self):
         page = LoadingSession([response(429), response(200)])

@@ -21,6 +21,7 @@ from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR
+from kb.feeds.exclusion import SCHEMA as EXCLUSION_SCHEMA, item_key
 from kb.source_types import feed_types
 
 DB_PATH = DATA_DIR / 'feeds.db'
@@ -65,7 +66,7 @@ CREATE TABLE IF NOT EXISTS feed_runs (
  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, started_at TEXT NOT NULL,
  finished_at TEXT NOT NULL, summary TEXT NOT NULL
 );
-'''
+''' + EXCLUSION_SCHEMA
 
 # 译文列是后加的(见 kb/feeds/translate.py)。老库里已有几千条英文条目,建表语句
 # 的 IF NOT EXISTS 对它们不生效,只能逐列 ALTER 补——补不上就不是"少个字段",
@@ -565,21 +566,21 @@ def put_items(source: dict, entries: list[dict], conn=None) -> int:
     added = 0
     with _writing(conn) as c:
         for e in entries:
-            key = hashlib.sha256((source['kind'] + ':' + e['url']).encode()).hexdigest()[:32]
+            key = item_key(source['kind'], e['url'])
             digest = hashlib.sha256(json.dumps(e, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-            exists = c.execute('SELECT key FROM feed_items WHERE key=?', (key,)).fetchone()
-            added += int(not exists)
             # First provenance remains stable when an aggregate also contains this URL.
             # `DO NOTHING` 顺手把 fetch_round 钉成**首次发现**那一轮:聚合源里
             # 同一个 URL 后面还会再出现,重抓也按 URL 去重,改写它等于把首次发现
             # 的事实改成最后一次看见的时刻。
-            c.execute('''INSERT INTO feed_items
+            inserted = c.execute('''INSERT INTO feed_items
                 (key,kind,url,title,author,published,body,content_kind,fetched_at,content_hash,lang,fetch_round,x_post_meta)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO NOTHING''',
                 (key,source['kind'],e['url'],e['title'],e.get('author') or source['name'],
                  e.get('published',''),e['body'],e.get('content_kind','feed'),now(),digest,
                  text_language(e['title'], e['body']),round_id,e.get('x_post_meta', '')))
-            c.execute('INSERT OR IGNORE INTO subscription_items VALUES(?,?)', (source['id'],key))
+            added += inserted.rowcount
+            c.execute('INSERT OR IGNORE INTO subscription_items SELECT ?,? '
+                      'WHERE EXISTS (SELECT 1 FROM feed_items WHERE key=?)', (source['id'],key,key))
     return added
 
 

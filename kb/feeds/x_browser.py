@@ -34,9 +34,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from kb.feeds import x_article, x_post, x_post_meta
+from kb.feeds import x_article, x_page_state, x_post, x_post_meta
 from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
-from kb.feeds.x_page_state import STATE_JS, ProblemConfirmation, XBrowserError, XRateLimited, navigate, read
+from kb.feeds.x_page_state import (
+    STATE_JS, ProblemConfirmation, XAccessBlocked, XBrowserError, XRateLimited, navigate, read)
+from kb.feeds.x_page_state import problem as page_problem
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 # 连续多少条老推文算"翻到底了"。1 不够:转推带的是原推时间,单条老的很常见。
@@ -91,6 +93,7 @@ _COLLECT_JS = r'''
     // 文章,按它去补就是把别人的正文记成这条推文的内容。排错了也只是回到漏掉
     // 的现状,而收错了是污染 —— 这个方向上宁可多排。
     const quote = art.querySelector('div[role="link"]');
+    const quoted = !!art.querySelector('[data-testid="quoteTweet"], div[role="link"] [data-testid="tweetText"]');
     const card = [...art.querySelectorAll('a[href*="/article/"]')]
                    .find(a => !(quote && quote.contains(a)));
     const art_url = card ? card.href : '';
@@ -103,11 +106,13 @@ _COLLECT_JS = r'''
       S.seen.set(id, {id, author: m[1], name: who, datetime: time.getAttribute('datetime'),
                       text, context: ctx, url: `https://x.com/${m[1]}/status/${id}`,
                       article: art_url || (prev && prev.article) || '',
+                      quoted: quoted || !!prev?.quoted,
                       truncated: truncated || !!prev?.truncated});
     } else if (art_url && prev && !prev.article) {
       prev.article = art_url;
     }
     if (truncated) S.seen.get(id).truncated = true;
+    if (quoted) S.seen.get(id).quoted = true;
   }
   return JSON.stringify({articles, parsed, items: [...S.seen.values()]});
 })()
@@ -215,11 +220,18 @@ def _own_tweet(item: dict, handle: str) -> bool:
     return (item.get('author') or '').lower() == handle.lower()
 
 
+def _quote_only(item: dict) -> bool:
+    return bool(item.get('quoted') and not (item.get('text') or '').strip()
+                and not item.get('article') and not item.get('truncated'))
+
+
 def _entry(item: dict) -> dict | None:
     """一条推文 → feed_items 的条目形状。没正文也没链接的不要。"""
     published = _as_published(item.get('datetime', ''))
     text = (item.get('text') or '').strip()
     if not item.get('url') or not (text or published):
+        return None
+    if _quote_only(item):
         return None
     name = item.get('name') or item.get('author') or ''
     context = (item.get('context') or '').strip()
@@ -242,6 +254,8 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
     """等页面落定,顺带认出登录失效/不存在/限流这三种不该当成"没有推文"的情况。"""
     last = {}
     errors = ProblemConfirmation()
+    confirmed_problem = ''
+    failure = XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
     while time.monotonic() < deadline:
         last = read(page, _STATE_JS)
         if last['login']:
@@ -250,15 +264,17 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
             # `x_login_import`),把他推去无头壳里登一次正是他想免掉的那一步。
             raise XBrowserError('X 登录态已失效,请在浏览器通道设置里重新登录,'
                                 '或从日常浏览器再导入一次')
-        if last['articles'] and last['ready'] == 'complete':
+        current_problem = page_problem(last)
+        if last['articles'] and last['ready'] == 'complete' and not current_problem:
             return last
-        if current_problem := errors.check(last):
-            if current_problem == 'limited':
-                raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
-            raise XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
+        confirmed_problem = errors.check(last)
+        if error := x_page_state.escalate(last, confirmed_problem, failure):
+            raise error
         if last['empty']:
             raise XBrowserError(f'@{handle} 这个账号在 X 上打不开(可能已改名、注销或被冻结)')
         time.sleep(0.3)
+    if error := x_page_state.escalate(last, confirmed_problem, failure, expired=True):
+        raise error
     observed = '页面没有加载完' if last.get('ready') != 'complete' else '时间线上没有读到推文'
     raise XBrowserError(f'@{handle} 的{observed};未能判出原因,请稍后重试或点「检查连接」')
 
@@ -365,8 +381,17 @@ def _settle(page: Chrome, before: int, deadline: float) -> bool:
     return False
 
 
+class TimelineEntries(list):
+    """Selected entries plus informational skips and their observed timestamps."""
+
+    def __init__(self):
+        super().__init__()
+        self.skipped_quotes = 0
+        self.skipped_newest = None
+
+
 def _select(items: list[dict], floor: datetime | None, handle: str = '', *,
-            rejected: list[str] | None = None) -> list[dict]:
+            rejected: list[str] | None = None) -> TimelineEntries:
     """落到 feed_items 之前的最后一道:去掉不属于这条时间线的和过老的,转成条目形状。
 
     哪些不属于见 `_in_timeline`(推广位、推荐位)—— 入库口径只有那一份,两处各判
@@ -375,7 +400,7 @@ def _select(items: list[dict], floor: datetime | None, handle: str = '', *,
     就是永久丢掉一条真内容。来源证据不足只跳过该条,URL 交给 rejected 供调用方
     提示没读完并保留水位。
     """
-    out = []
+    out = TimelineEntries()
     for item in sorted(items, key=lambda i: i.get('datetime') or ''):
         if not _in_timeline(item, handle):
             continue
@@ -390,6 +415,9 @@ def _select(items: list[dict], floor: datetime | None, handle: str = '', *,
             continue
         if entry:
             out.append(entry)
+        elif _quote_only(item) and item.get('url') and when:
+            out.skipped_quotes += 1
+            out.skipped_newest = max(out.skipped_newest, when) if out.skipped_newest else when
     return out
 
 
@@ -458,7 +486,10 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 started = water or floor.isoformat()
                 try:
                     entries, incomplete = _harvest_one(page, handle, floor)
+                    skipped_quotes = getattr(entries, 'skipped_quotes', 0)
                     observed_watermark = _newest(entries, water)
+                    note = (f'跳过 {skipped_quotes} 条本人无正文的引用推文,未冒充本人观点入库'
+                            if skipped_quotes else '')
                     # 长文(Article)推文在时间线上一个字都没有,正文要单独取一次。
                     # 取不到的那几条本轮不入库、并按"没读完"办 —— 空正文一旦落库
                     # 就再也更新不了(`put_items` 是 DO NOTHING),见 `x_article`。
@@ -489,15 +520,16 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     # `put_items` 按 URL 去重,一条都不会重复入库。
                     results[handle] = {
                         'entries': entries, 'error': '', 'incomplete': incomplete,
+                        'skipped_quotes': skipped_quotes, 'note': note,
                         'watermark': started if incomplete else observed_watermark}
-                except XRateLimited:
+                except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable):
                     raise
                 except (XBrowserError, CdpError, x_post.PostUnavailable) as e:
                     results[handle] = {'entries': [], 'error': str(e)}
-    except (XRateLimited, CdpError, EOFError, OSError) as e:
+    except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable, CdpError, EOFError, OSError) as e:
         # 浏览器整个起不来/中途死了:剩下的账号统一记成同一个原因,
         # 而不是逐个报一条看不出共同根因的错。
-        reason = str(e) if isinstance(e, (XRateLimited, CdpError)) else f'浏览器会话中断:{e}'
+        reason = str(e) if isinstance(e, (XBrowserError, x_post.PostSessionUnavailable, CdpError)) else f'浏览器会话中断:{e}'
         for handle, _ in jobs:
             results.setdefault(handle, {'entries': [], 'error': reason})
     return results
@@ -509,15 +541,10 @@ def _newest(entries: list[dict], fallback: str) -> str:
     **一条都没抓到时沿用旧水位**,不要改成"现在":那等于把这段时间宣布为已抓过,
     而这一轮可能只是没滚到(预算用完、X 限流)。水位只前进到确实见过的那条推文。
     """
-    stamps = [e['published'] for e in entries if e.get('published')]
-    if not stamps:
-        return fallback
-    newest = max(stamps)
-    try:
-        local = datetime.strptime(newest, '%Y-%m-%d %H:%M').replace(tzinfo=SHANGHAI)
-    except ValueError:
-        return fallback
-    return local.astimezone(timezone.utc).isoformat()
+    stamps = [_utc(entry['published']) for entry in entries if entry.get('published')]
+    stamps.append(getattr(entries, 'skipped_newest', None))
+    newest = max((stamp for stamp in stamps if stamp is not None), default=None)
+    return newest.isoformat() if newest else fallback
 
 
 def open_login_window(profile: str, chrome_path: str = '') -> str:
@@ -552,8 +579,9 @@ def open_login_window(profile: str, chrome_path: str = '') -> str:
 def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
     """在一个已经导航到 `x.com/home` 的会话上,把落地状态判成一个结论码。
 
-    返回 `(结论码, 最后那份状态)`,码有六个:`ok`(读到推文了)、`login`(掉回
-    登录页)、`limited`(限流)、`failed`(请求出错)、`not-loaded`(首页压根没加载完)、`no-tweets`
+    返回 `(结论码, 最后那份状态)`,码有七个:`ok`(读到推文了)、`login`(掉回
+    登录页)、`limited`(限流)、`failed`(请求出错)、`challenge`(安全验证)、
+    `not-loaded`(首页压根没加载完)、`no-tweets`
     (加载完了却一条推文都没有)。
 
     **只判、不写文案。** 同一个状态在不同入口下该说的下一步完全不同:「检查连接」
@@ -628,6 +656,8 @@ def probe(profile: str, chrome_path: str = '', *,
                 return False, 'X 暂时限制了访问频率,稍后再试'
             if verdict == 'failed':
                 return False, 'X 页面请求出错,暂时无法验证登录态;稍后点「检查连接」重试,不必因此重新登录'
+            if verdict == 'challenge':
+                return False, str(x_page_state.access_blocked())
             if verdict == 'ok':
                 return True, f'登录态有效,首页读到 {last["articles"]} 条推文'
             if verdict == 'not-loaded':

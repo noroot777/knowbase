@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,8 @@ from typing import Iterator
 import yaml
 
 from kb.config import SOURCES, VAULT_ROOT, Source
+from kb.scan_evidence import DocumentEvidence, capture
+from kb.scan_status import ScanReport, stat_signature
 
 
 @dataclass
@@ -30,6 +33,8 @@ class Doc:
     body: str = ""           # 去 frontmatter 后的正文
     content_hash: str = ""
     meta: dict = field(default_factory=dict)  # 完整 frontmatter(project/kind/summary 等)
+    body_version: str = ""
+    scan_evidence: DocumentEvidence | None = None
 
 
 _FM_RE = re.compile(r"\A---\n(.*?)\n---\n?", re.S)
@@ -179,7 +184,7 @@ def doc_from_text(text: str, md_path: Path, src: Source,
 
     return Doc(
         path=rel_path if rel_path is not None
-        else str(md_path.relative_to(VAULT_ROOT)),
+        else str(Path(os.path.abspath(md_path)).relative_to(Path(os.path.abspath(VAULT_ROOT)))),
         source=str(fm.get("source") or src.name),
         title=title,
         account=account,
@@ -189,43 +194,58 @@ def doc_from_text(text: str, md_path: Path, src: Source,
         body=normalize_body(body),
         content_hash=file_hash(text),
         meta=fm,
+        body_version=body_version(text),
     )
 
 
-def _doc_from_file(md_path: Path, src: Source) -> Doc | None:
-    try:
-        text = md_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    return doc_from_text(text, md_path, src)
+def _doc_from_file(md_path: Path, src: Source) -> Doc:
+    lineage = capture(md_path, src.root, VAULT_ROOT)
+    before = stat_signature(md_path.stat())
+    text = md_path.read_text(encoding="utf-8")
+    if before != stat_signature(md_path.stat()):
+        raise ValueError("扫描期间文件发生变化")
+    if not text.strip():
+        raise ValueError("文件为空,可能尚未写完")
+    if text.startswith('---\n'):
+        match = _FM_RE.match(text)
+        if match is None:
+            raise ValueError("frontmatter 尚未写完")
+        metadata = yaml.safe_load(match.group(1))
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("frontmatter 不是映射")
+    if lineage != capture(md_path, src.root, VAULT_ROOT):
+        raise ValueError('读取原文期间目录身份发生变化')
+    doc = doc_from_text(text, md_path, src)
+    doc.scan_evidence = DocumentEvidence(
+        doc.path, doc.source, doc.content_hash, *lineage)
+    return doc
 
 
-def iter_md(sources: list[Source] | None = None) -> Iterator[tuple[Source, Path]]:
+def iter_md(sources: list[Source] | None = None, *,
+            report: ScanReport | None = None) -> Iterator[tuple[Source, Path]]:
     """遍历该扫的那些 md 文件,**只给路径,不读正文**。
 
     「哪些树要扫、树里跳过哪些子目录」只有这一份实现。拆出来是因为"枚举该扫
     哪些文件"和"把文件读成 Document"是两件事:要枚举的人(本函数)不该为了拿
     一个路径清单去读上万篇正文。目前只有 `scan_all` 过它。
     """
-    for src in sources if sources is not None else SOURCES:
-        if not src.enabled or not src.root.is_dir():
-            continue
-        for md_path in sorted(src.root.rglob("*.md")):
-            rel_parts = md_path.relative_to(src.root).parts
-            if rel_parts and rel_parts[0] in src.skip_dirs:
-                continue
-            yield src, md_path
+    report = report if report is not None else ScanReport()
+    report.start(sources if sources is not None else SOURCES, VAULT_ROOT)
+    yield from report.iter_md()
 
 
-def scan_all() -> Iterator[Doc]:
-    """遍历所有来源,产出 Doc。停用的来源(`Source.enabled=False`)整棵跳过。
+def scan_all(*, report: ScanReport | None = None) -> Iterator[Doc]:
+    """流式读文档,在 report 中如实记录完成状态、覆盖范围及读失败。
 
-    **跳过的代价要由 `store.remove_missing_documents` 接住**:这个函数的产出
-    同时是"哪些文件还活着"的唯一依据,不豁免的话停用一棵树等于宣布它底下的
-    文件全没了,库里那一批连 chunk、向量、标签一起被删掉(见 `config.Source`
-    的 `enabled` 那段)。
+    文件读坏、来源不可达和目录变化都不是删除证明。清理只消费完整的凭据,
+    且只授权无异常、未停用、未排除范围中经再次核验确实不存在的路径。
     """
-    for src, md_path in iter_md():
-        doc = _doc_from_file(md_path, src)
-        if doc is not None:
+    report = report if report is not None else ScanReport()
+    for src, md_path in iter_md(report=report):
+        try:
+            doc = _doc_from_file(md_path, src)
+        except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
+            report.fail(src, md_path, error)
+        else:
             yield doc
+    report.complete = True

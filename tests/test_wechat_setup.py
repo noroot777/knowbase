@@ -4,6 +4,8 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -16,6 +18,15 @@ from fastapi.testclient import TestClient
 
 from kb import wechat_access_adapter as adapter, wechat_runtime as runtime, wechat_setup as setup
 from kb.web import wechat_api
+
+
+@unittest.skipUnless(shutil.which('node'), '需要 node 执行接入提示词回归')
+class AgentPromptTests(unittest.TestCase):
+    def test_frontend_prompt_contract(self):
+        probe = Path(__file__).with_name('wechat_agent_test.mjs')
+        result = subprocess.run([shutil.which('node'), '--test', str(probe)],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
 
 class SetupTests(unittest.TestCase):

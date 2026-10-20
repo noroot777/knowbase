@@ -5,6 +5,8 @@ async page => {
     checks.push(name);
   };
   const onError = error => errors.push(error.message);
+  const readerShows = text => page.evaluate(expected => snipCollapse(snipFragText(document.getElementById('source-reader-body')))
+    === snipRenderedText(expected), text);
   page.on('pageerror', onError);
   const base = new URL(page.url()).origin;
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -68,7 +70,7 @@ async page => {
     await page.goto(base + '/?reading-qa=' + Date.now() + '#rss');
     await page.waitForFunction(() => sourceReaderItem?.key === 'reading-1' && !!document.querySelector('.source-entry.is-selected'));
     check('自动选中第一篇可阅读内容', await page.locator('.source-entry.is-selected').count() === 1);
-    check('默认显示中文译文和原文标题', await page.locator('#source-reader-body').textContent() === first.body_zh
+    check('默认显示中文译文和原文标题', await readerShows(first.body_zh)
       && await page.locator('#source-reader-subtitle').textContent() === first.title);
     check('阅读区常驻且不锁住页面', !await page.locator('#source-reader').evaluate(node => node.classList.contains('modal-mask'))
       && !await page.locator('#main-content').evaluate(node => node.inert));
@@ -83,9 +85,9 @@ async page => {
       && await page.locator('.source-entry').count() === 30);
     await page.screenshot({ path: 'output/playwright/subscription-reader-desktop.png' });
     await page.locator('#source-reader-original').click();
-    check('切换原文不丢失正文', await page.locator('#source-reader-body').textContent() === first.body);
+    check('切换原文不丢失正文', await readerShows(first.body));
     await page.locator('#source-reader-translated').click();
-    check('可切回中文译文', await page.locator('#source-reader-body').textContent() === first.body_zh);
+    check('可切回中文译文', await readerShows(first.body_zh));
     const independent = await page.evaluate(() => {
       const list = document.getElementById('source-list-pane'), reader = document.getElementById('source-reader-scroll');
       reader.scrollTop = 180;
@@ -110,7 +112,7 @@ async page => {
     await page.locator('#source-reader-next').click();
     check('半译文保留真实状态', (await page.locator('#source-reader-note').textContent()).includes('标题还是原文'));
     await page.locator('#source-reader-next').click();
-    check('HTML 标签按纯文本安全展示', await page.locator('#source-reader-body').textContent() === rss[9].body
+    check('HTML 标签按纯文本安全展示', await readerShows(rss[9].body)
       && await page.locator('#source-reader-body img').count() === 0 && !await page.evaluate(() => window.__readerXSS));
     await page.locator('#source-more').click();
     await page.waitForFunction(() => sourceRows.length === 34);

@@ -83,12 +83,13 @@ class LegacyRecoveryTests(ProvenanceBase):
         self.assertEqual('> Someone reposted\n\n' + full, saved['body'])
         self.assertEqual(('', '> Someone reposted\n\n'), x_post_meta.eligibility(saved))
 
-    def test_resolving_legacy_source_reuses_the_existing_confirmed_url_artifact_alignment(self):
+    def test_resolving_legacy_source_repairs_confirmed_urls_but_preserves_unproven_whitespace(self):
         row = self.seed(LEGACY, legacy=True)
         stats, _api, _fetch = self.run_recovery(row, detail=CLEAN)
         self.assertEqual(1, stats['normalized'])
         self.assertEqual(1, stats['updated'])
-        self.assertEqual(CLEAN, self.current(row)['body'])
+        self.assertEqual(CLEAN.replace(':@', ':\n@'), self.current(row)['body'])
+        self.assertEqual(1, stats['partial'])
 
     def test_a_concurrent_replacement_rejects_provenance_without_rewriting_content(self):
         row = self.seed(legacy=True)

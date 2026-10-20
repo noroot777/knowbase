@@ -5,7 +5,7 @@ from unittest.mock import patch
 from kb.feeds import grab, registry as reg, x_article, x_post, x_post_meta
 from scripts import x_post_backfill as backfill
 from tests.test_x_post_provenance import ProvenanceBase
-from tests.test_x_post_backfill import CLEAN, LEGACY
+from tests.test_x_post_backfill import CLEAN, LEGACY, linked_snapshot
 
 
 class PrefixSeparationTests(ProvenanceBase):
@@ -50,7 +50,9 @@ class PrefixSeparationTests(ProvenanceBase):
         self.assertIsNone(normalized)
         source = x_post_meta.stamp(dict(title='A post', body=prefix + LEGACY, content_kind='post'),
                                    'post', prefix)
-        state, normalized, _info = backfill.proposal(source | {x_post.HINT: prefix}, CLEAN)
+        evidence = linked_snapshot(CLEAN)
+        evidence['text'] = CLEAN
+        state, normalized, _info = backfill.proposal(source | {x_post.HINT: prefix}, CLEAN, evidence)
         self.assertEqual('normalized', state)
         self.assertEqual(prefix + CLEAN, normalized['body'])
         self.assertEqual(('', prefix), x_post_meta.eligibility(normalized))
