@@ -271,6 +271,17 @@ def release_login_window(profile: str, *, ttl: float = LOGIN_WINDOW_TTL) -> str:
         # (审查 R5)。
         if _starting(at):
             return ''
+        # **「认不出来」和「已经退出」是两件事,而它们的结论正好相反。**
+        # 记录还指着一个活着的、而且确实还占着这个 profile 的进程时,清掉记录就等于
+        # 把唯一的诊断依据删了:面板那段「不会自动关闭,请手动把那个窗口关掉」靠的
+        # 就是这份记录(`x_channels.readiness` 读 `login_window_stuck`)。删掉之后
+        # readiness 一路走到「Cookies 在,就绪」—— 窗口明明占着浏览器,而面板说一切
+        # 正常,每一轮同步照旧全红(审查 N2:抓取和「检查连接」各会先释放一次,
+        # 所以这条路一天里走好几遍)。
+        # **保留记录不等于放宽身份判据**:这一档照旧不发任何信号(认不出身份就不许
+        # 杀进程),只是把「它还占着」这件事留着让人看见。
+        if login_window_stuck(profile):
+            return ''
         # 窗口已经不在了(用户自己关的,或者上一次就被我们关掉):顺手把陈旧记录
         # 清掉。留着它的话,下一次同一个 pid 被系统分配给别的进程时,上面那道
         # 「pid 对得上」就会把一个无辜的进程认成我们的窗口。
@@ -280,14 +291,37 @@ def release_login_window(profile: str, *, ttl: float = LOGIN_WINDOW_TTL) -> str:
     waited = time.time() - at
     if waited < ttl:
         return ''
-    _close_login_window(pid, ident)
+    opened = int(waited // 60)
+    if not _close_login_window(pid, ident):
+        # **没确认它退出,就不许说已经关掉,也不许删记录。** 删了的话:面板上那一行
+        # 没了、守望和下一次释放都读不到它,而那个窗口还占着 profile —— 用户照着
+        # 「已自动关掉」去抓,下一轮照旧起不来,而一个线索都没有(第 3 轮审查 N2)。
+        # **留着记录不放宽身份判据**:`login_window_pid` 照旧要身份对得上,所以 pid
+        # 复用骗不到它;而它这会儿确实还活着,那个号也就不会被分给别人。
+        # 口径同上面「认不出那个窗口」那一档:**改口,不代劳**。
+        return (f'关不掉那个开了 {opened} 分钟的 X 登录窗口'
+                f'(上限 {int(ttl // 60)} 分钟),它还占着抓取要用的浏览器，'
+                '请手动关掉它')
     forget_login_window(profile)
-    return (f'已自动关掉开了 {int(waited // 60)} 分钟的 X 登录窗口'
+    return (f'已自动关掉开了 {opened} 分钟的 X 登录窗口'
             f'(上限 {int(ttl // 60)} 分钟),它占着抓取要用的浏览器')
 
 
-def _close_login_window(pid: int, ident: tuple[str, str]) -> None:
+#: 两步关闭各等多久(秒):先 SIGTERM 等 6 秒让 Chrome 把 profile 存盘,再 SIGKILL
+#: 等 3 秒。**抽成常量是为了给回归一个旋钮** —— 「连 SIGKILL 都没送走」那一档只有
+#: 真把两段宽限期走满才复现得出来,照原值跑一次要 9 秒。句柄那条路同样两步
+#: (`_close_by_handle`),它那边等的是 `proc.wait`。
+_CLOSE_GRACE = (6.0, 3.0)
+
+
+def _close_login_window(pid: int, ident: tuple[str, str]) -> bool:
     """先好好说一次,不行就 kill。**两步都有界,而且都不往外抛。**
+
+    返回**确认它退出了没有**。「关的动作做完了」不等于「它已经退出」:两段宽限期
+    都走满而它还活着、或者发信号时收到一个 `OSError`(可能是 EPERM —— 它活着、
+    只是不归我们这个用户管),这两档都是**状态未知**。报成功的代价是调用方把诊断
+    记录删掉、面板上写一句「已自动关掉」,而那个窗口还占着 profile —— 用户照着
+    那句话去抓,下一轮照旧起不来,而面板上一个线索都没有(第 3 轮审查 N2)。
 
     **每发一次信号之前重新核对身份**(`ident` 是记录里那一份)。归属在
     `login_window_pid` 里已经判过一次,可两刀之间隔着 6 秒宽限期 —— 它在这中间
@@ -302,15 +336,32 @@ def _close_login_window(pid: int, ident: tuple[str, str]) -> None:
     窗口,所以这里一个异常都不许漏出去。
     """
     import signal
-    for sig, grace in ((signal.SIGTERM, 6.0), (signal.SIGKILL, 3.0)):
-        if _proc_identity(pid) != ident:
+    for sig, grace in zip((signal.SIGTERM, signal.SIGKILL), _CLOSE_GRACE):
+        now = _proc_identity(pid)
+        if not any(now):
+            # **问不出来不等于它走了。** `_proc_identity` 在 `ps` 超时或读失败时
+            # 返回 `('', '')`,而那一刻窗口多半还活着。把它算进下面那条「身份核不
+            # 上」里的话:收个尸、报确认退出,调用方跟着删掉诊断记录、面板上写一句
+            # 「已自动关掉」—— 而那个窗口还占着抓取要用的 profile,用户照着那句话
+            # 去抓,下一轮照旧起不来,一个线索都没有(第 4 轮审查 N1)。
+            # **这一档也不许发信号**:身份不明的那个号可能已经被系统分给别人了,
+            # 而这里下一句就是 SIGTERM/SIGKILL。状态未知时唯一诚实的动作是什么都
+            # 不做、如实报「没确认」,让上层保留记录并改口。
+            return False
+        if now != ident:
+            # 身份核不上 = 这个号上已经不是我们那个窗口了。收个尸、收工,**而且这
+            # 算确认退出**:要关的那个进程确实不在了(它自己走掉了,或者上一刀已经
+            # 生效)。这和「问不出来」以及下面那两档「状态未知」都不是一回事。
             _reap(pid)
-            return
+            return True
         try:
             os.kill(pid, sig)
         except OSError:
+            # 它自己先走了,或者不归我们这个用户管 —— **这两档在这里分不开**
+            # (ESRCH vs EPERM),所以一律报「没确认」:多留一份诊断顶多让人多看
+            # 一眼,报成功是把一个还占着 profile 的窗口说成已经关了。
             _reap(pid)
-            return                       # 它自己先走了,或者不归我们这个用户管
+            return not _alive(pid)
         deadline = time.monotonic() + grace
         while time.monotonic() < deadline:
             # **先收尸再问死活**:它是我们 `Popen` 起的子进程,SIGTERM 之后会在
@@ -318,8 +369,11 @@ def _close_login_window(pid: int, ident: tuple[str, str]) -> None:
             # 这个循环会把两段宽限期走满(实测 9 秒)、还对一个死了的进程补一刀。
             _reap(pid)
             if not _alive(pid):
-                return
+                return True
             time.sleep(0.1)
+    # 两段宽限期都走满了,它还在。**连 SIGKILL 都没送走**(内核态卡死、或者信号
+    # 压根没到),这时唯一诚实的答复是「没关掉」。
+    return False
 
 
 def _relearn_identity(profile: str, proc) -> bool:
@@ -350,8 +404,11 @@ def _relearn_identity(profile: str, proc) -> bool:
     return True
 
 
-def _close_by_handle(proc) -> None:
+def _close_by_handle(proc) -> bool:
     """用手里那个 `Popen` 句柄关掉它。**句柄是精确身份,摆不到别的进程上。**
+
+    返回**确认它退出了没有**,口径同 `_close_login_window`:两段宽限期都超时、
+    或者 `terminate()` 抛了 `OSError`,都是状态未知,一律报「没确认」。
 
     认不出身份的那一档只剩这一条路:`ps` 坏了、或者启动脚本 exec 换掉了可执行
     文件,`login_window_pid` 恒为 0,而窗口开着、占着整条采集通道。这里不用 pid
@@ -362,17 +419,18 @@ def _close_by_handle(proc) -> None:
     两步同 `_close_login_window`:先 SIGTERM 让 Chrome 把 profile 存盘(登录态就
     在里面),卡住不动才 SIGKILL。一个异常都不往外抛 —— 抛出去就是记录不被清掉。
     """
-    for stop, grace in ((proc.terminate, 6.0), (proc.kill, 3.0)):
+    for stop, grace in zip((proc.terminate, proc.kill), _CLOSE_GRACE):
         if proc.poll() is not None:
-            return
+            return True                  # 已经退了,句柄说的就是确凭
         try:
             stop()
             proc.wait(timeout=grace)     # wait 顺带收尸
-            return
+            return True
         except subprocess.TimeoutExpired:
             continue
         except OSError:
-            return
+            return proc.poll() is not None
+    return False
 
 
 def watch_login_window(profile: str, *, proc=None,
@@ -423,8 +481,10 @@ def watch_login_window(profile: str, *, proc=None,
                 # 身份,没有误杀的余地),而不是把记录一删了之、留一个开着的窗口
                 # 挡住每一轮同步。
                 if proc is not None and proc.poll() is None:
-                    _close_by_handle(proc)
-                    forget_login_window(profile)
+                    # **确认退出了才删记录**(口径同 `release_login_window`):关不掉
+                    # 的那一档记录留着,面板和下一次释放才看得见它还占着。
+                    if _close_by_handle(proc):
+                        forget_login_window(profile)
                     return
                 release_login_window(profile, ttl=ttl)   # 清陈旧记录
                 return

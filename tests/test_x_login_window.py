@@ -95,6 +95,116 @@ class ReleaseTests(LoginWindowBase):
         self.assertIn('自动关掉', note)
         self.assertFalse(self._note_exists(), '关掉之后记录该一起清掉')
 
+    def test_a_window_that_will_not_die_is_not_reported_as_closed(self):
+        """**审查 N2**:关不掉的那一档不许说「已自动关掉」,也不许删记录。
+
+        两段宽限期都走满而它还活着(内核态卡死、信号压根没到),原来照旧返回那句
+        「已自动关掉…」并把记录删掉 —— 面板上那一行没了、守望和下一次释放都读不到
+        它,而那个窗口还占着 profile。用户照着那句话去抓,下一轮照旧起不来,而一个
+        线索都没有。
+
+        判据落在**面板那句话和记录还在不在**,不落在「调了几次 kill」。注入的是
+        「它死不掉」这件事本身(`_alive` 恒真),不是把关闭函数整个换掉 —— 后者证明
+        不了调用方会不会据它改口。
+        """
+        pid = self._hold()
+        self._note(pid, age=20 * 60)
+        # 注入的是「信号压根没到」这件事本身(`os.kill` 吞掉它),所以那个进程原封
+        # 不动地活着、身份一路核得上 —— 两段宽限期真被走满。宽限期调短只是为了别
+        # 让这一局跑 9 秒(`_CLOSE_GRACE` 存在的全部理由)。
+        with patch.object(xlw.os, 'kill', lambda *a: None), \
+             patch.object(xlw, '_CLOSE_GRACE', (0.05, 0.05)):
+            note = xlw.release_login_window(self.profile, ttl=10 * 60)
+        self.assertTrue(_alive(pid), '这一局的前提:那个进程还活着')
+        self.assertIn('关不掉', note, f'关不掉却照旧报成已关掉:{note}')
+        self.assertIn('手动', note, '没告诉人下一步该干什么')
+        self.assertNotIn('已自动关掉', note)
+        self.assertTrue(self._note_exists(), '关不掉却把那份诊断记录删了')
+
+    def test_an_identity_that_cannot_be_read_is_not_taken_for_a_clean_exit(self):
+        """**身份问不出来 ≠ 它已经走了**:这一档不许报已关掉,也不许发信号。
+
+        `_proc_identity` 问的是 `ps`,它超时或读失败时返回 `('', '')`。原来「任何
+        对不上原身份」都算确认退出:收个尸、报成功,调用方跟着删掉诊断记录、面板上
+        写一句「已自动关掉」—— 而那个窗口还活着、还占着抓取要用的 profile,用户照着
+        那句话去抓,下一轮照旧起不来(第 4 轮审查 N1)。而且这一档**下一句就是
+        SIGTERM/SIGKILL**:身份不明的那个号可能已经被系统分给别人了,这一刀落下去
+        就是误杀。
+
+        触发形态照报告摆:**归属检查刚通过,关闭前再查一次时临时失败**(所以第一问
+        给真身份、之后才答不出来)。判据落在面板那句话、记录还在不在、以及**一个
+        信号都没发**。
+        """
+        pid = self._hold()
+        self._note(pid, age=20 * 60)
+        real, asked, sent = xlw._proc_identity(pid), [], []
+        real_kill = xlw.os.kill
+
+        def identity(p):
+            asked.append(p)
+            return real if len(asked) == 1 else ('', '')
+
+        def kill(p, sig):
+            # **0 号不是信号,是 `_alive` 的探活** —— 那一问照旧真做(不然这一局的
+            # 「它还活着」就成了打桩打出来的)。真信号只记下来、不发出去。
+            if sig == 0:
+                return real_kill(p, sig)
+            sent.append(sig)
+
+        with patch.object(xlw, '_proc_identity', side_effect=identity), \
+             patch.object(xlw.os, 'kill', kill), \
+             patch.object(xlw, '_CLOSE_GRACE', (0.05, 0.05)):
+            note = xlw.release_login_window(self.profile, ttl=10 * 60)
+        self.assertGreater(len(asked), 1, '这一局的前提:关闭前确实又查了一次身份')
+        self.assertEqual([], sent, '身份都问不出来,却照旧对那个号发了信号')
+        self.assertIn('关不掉', note, f'状态未知却报成已关掉:{note}')
+        self.assertNotIn('已自动关掉', note)
+        self.assertTrue(self._note_exists(), '状态未知却把那份诊断记录删了')
+
+    def test_a_handle_that_will_not_die_keeps_the_note_too(self):
+        """**两份实现各有自己的红**:句柄那条路同口径(`_close_by_handle`)。
+
+        守望线程在「认不出身份、句柄还活着」那一档走它。关不掉就不许删记录 ——
+        理由同上一局。
+        """
+        proc = _sleeper()
+        self.procs.append(proc)
+        self._hold(proc.pid)
+        self._note(proc.pid, age=20 * 60, ident=('对不上的时刻', '/对不上的程序'))
+
+        class Stubborn:
+            """关不掉的句柄:信号发得出去,它就是不退。"""
+
+            pid = proc.pid
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            kill = terminate
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired('chrome', timeout or 0)
+
+        self.assertFalse(xlw._close_by_handle(Stubborn()),
+                         '关不掉却报成确认退出')
+        self.assertTrue(self._note_exists())
+
+    def test_a_window_that_does_die_is_still_reported_closed(self):
+        """**反过来钉一边**:真关掉了照旧说「已自动关掉」、照旧清记录。
+
+        光验「关不掉时改口」的话,一个「永远说关不掉」的实现也全绿 —— 而那会让
+        每一轮抓取都念一句假的告警,记录也永远留着。
+        """
+        pid = self._hold()
+        self._note(pid, age=20 * 60)
+        note = xlw.release_login_window(self.profile, ttl=10 * 60)
+        self.assertIn('已自动关掉', note)
+        self.assertFalse(_alive(pid))
+        self.assertFalse(self._note_exists())
+
     def test_window_within_its_ttl_is_left_alone(self):
         """反过来钉一边:用户可能正在输密码、过两步验证,那几分钟缩不短。"""
         pid = self._hold()
@@ -472,6 +582,29 @@ class PanelCopyTests(LoginWindowBase):
         self.assertIn('手动', nxt, '没说"得自己关"')
         self.assertIn('不会自动关闭', nxt, '没把那句承诺收回去')
         self.assertNotIn('分钟后', nxt, '认不出它,却还给了一个自动关闭的倒计时')
+
+    def test_a_release_does_not_erase_the_manual_close_hint(self):
+        """**审查 N2**:抓取和「检查连接」各会先释放一次 —— 那一下不许把记录删掉。
+
+        上面那一局的前提是记录还在。而「认不出身份」在释放那条路上原来和「窗口已经
+        退出」走的是同一档:过了启动宽限就清记录。于是服务重启之后(守望线程没了、
+        身份对不上)面板第一次说得出「请手动关掉」,一次抓取或一次「检查连接」之后
+        记录就没了 —— readiness 一路走到「Cookies 在,就绪」,窗口还占着浏览器。
+        这两条路一天里走好几遍,所以那句提示活不过几分钟。
+
+        **保留记录不许放宽安全边界**:这一档照旧一个信号都不发。
+        """
+        (Path(self.profile) / 'Default').mkdir(parents=True)
+        (Path(self.profile) / 'Default' / 'Cookies').write_text('x', encoding='utf-8')
+        pid = self._hold()
+        self._note(pid, age=20 * 60, ident=('对不上的时刻', '/对不上的程序'))
+        self.assertEqual('', xlw.release_login_window(self.profile, ttl=1),
+                         '认不出身份却声称关掉了它')
+        self.assertTrue(self._note_exists(), '释放把那份诊断记录删掉了')
+        self.assertTrue(_alive(pid), '认不出身份却还是发了信号')
+        ready, why, nxt = self.x_channels.readiness({'x_channel': 'browser'})
+        self.assertFalse(ready, '释放过一次之后,窗口占着浏览器而面板说就绪')
+        self.assertIn('手动', nxt, '那句「得自己关」没了')
 
     def test_a_closed_window_restores_the_normal_verdict(self):
         """反过来钉一边:窗口关掉之后,面板立刻回到原来那套判断。"""
