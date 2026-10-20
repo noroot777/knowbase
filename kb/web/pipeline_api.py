@@ -185,9 +185,25 @@ def _accounts(names: list[str] | None) -> list[str]:
     return list(names or [])
 
 
+#: 按来源跑的那几步。口径只有一份:`pipeline_stages.run_scopes` 判的是同一件事
+#: (那边读 `planned_stages`),前端那一份是 `kb/static/js/pipe_stages.js` 的
+#: `PIPE_SOURCE_STAGES`。
+_SOURCE_STAGES = frozenset({"crawl", "export"})
+
+
 @router.post("/api/pipeline/run")
 def pipeline_run(body: PipelineRunRequest | None = None):
     stages = body.stages if body else None
+    # **点名了来源敏感的步骤、却一个来源都没给:拒,不许替他挑一个。**
+    # `_scopes` 的兜底会把「没说」整理成默认采集器(实测 `wechat_local`),那在
+    # 「什么都没点名」的老契约下是对的(整库同步照默认来源跑,`test_sync_channels`
+    # 钉着);可一旦请求**显式**写明了要跑抓取/导出,它就是一个来源敏感的请求 ——
+    # 默默换成另一个来源等于拿用户没选的来源去落盘,而面板上一句话都不说
+    # (第 3 轮审查 R1:只勾「导出文章」时选的订阅源被换成公众号)。
+    # 判不准一律拒(元规则那条):多一次报错顶多再点一下,静默跑错来源救不回来。
+    if (isinstance(stages, list) and _SOURCE_STAGES & set(stages)
+            and not (body and (body.channels is not None or body.channel))):
+        raise HTTPException(400, "这一次要跑抓取或导出，请至少选择一个来源")
     scopes = _scopes(body)
     crawl_filter: dict = {"channel": scopes[0]["channel"]}
     # 只有一个来源时仍写成老样子的 channel + accounts:存量状态文件、重试记录

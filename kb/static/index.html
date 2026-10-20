@@ -400,6 +400,10 @@
     <div class="pipe-setup-heading"><div><h2>新建同步</h2><p class="hint">勾要抓的来源和时间范围，再勾这一次跑哪几步。</p></div><button class="icon-button" onclick="closePipeModal()" aria-label="关闭同步配置">×</button></div>
     <div id="pipe-setup-connection" class="pipe-notice" hidden role="status"><span></span><button class="ghost" onclick="refreshPipe()">重新连接</button></div>
     <div id="pipe-setup-error" class="pipe-notice" hidden role="alert"></div>
+    <!-- 滚动盒是这个 div,不是里面那个 fieldset(理由在 pipeline.css 的
+         `.pipe-setup-body`):fieldset 当滚动容器裁不住内容,步骤那几行会绘到
+         操作条底下、甚至弹窗外面去。fieldset 只管「起跑中整组禁用」。 -->
+    <div class="pipe-setup-body">
     <fieldset id="pipe-fields">
       <fieldset id="pipe-source-fields">
       <div class="row"><div class="pipe-acct-heading"><label id="pipe-channel-label">同步来源 <b id="pipe-channel-count"></b></label></div>
@@ -422,6 +426,7 @@
         <p id="pipe-stage-hint" class="hint"></p>
       </div>
     </fieldset>
+    </div>
     <div class="pipe-setup-footer"><div id="pipe-est" class="hint" role="status"></div><div><button class="ghost" onclick="closePipeModal()">暂不执行</button><button id="pipe-start" onclick="startPipeFromModal()" disabled>开始同步</button></div></div>
   </div>
 </div>

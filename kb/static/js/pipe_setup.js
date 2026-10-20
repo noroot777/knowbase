@@ -211,8 +211,8 @@ function pipeSelectNone() {
 function pipeEstText() {
   if (!pipeStageList().length) return '一步都没勾，这次什么也不会发生。';
   const plan = pipeStagePlan(), tail = pipeStageTail();
-  if (!pipeStageOn('crawl'))
-    return `${plan}。不抓新内容，上面的来源、时间范围和订阅这次都不作数。` + tail;
+  if (!pipeNeedsSource())
+    return `${plan}。这几步都是全库的，上面的来源、时间范围和订阅这次都不作数。` + tail;
   const n = pipeSelCount(), failed = pipeFailedChannels().length;
   if (!pipeRunSel.length) return '请至少选择一个来源。';
   if (pipeLoadingChannels().length) return '订阅读取完成后即可开始。';
@@ -221,6 +221,11 @@ function pipeEstText() {
   // 一句假话 —— 那两样它根本不收)。
   if (pipeDailyOn())
     return `${plan}。来源 ${pipeReadyChannels().map(channelLabel).join(' · ')}。` + tail;
+  // 不抓取、只导出:**念来源,不念订阅数和日期段** —— 导出是按来源扫的(它那一步
+  // 压根不收订阅和日期),念了就是一句假话。
+  if (!pipeNeedsTargets())
+    return `${plan}。来源 ${pipeReadyChannels().map(channelLabel).join(' · ')}`
+      + '，时间范围和订阅这次不作数。' + tail;
   if (!n) return '请至少选择一个订阅。';
   const sources = pipeReadyChannels().filter(id => pipeSelected(id).size)
     .map(id => `${channelLabel(id)} ${pipeSelected(id).size} 个`).join(' · ');
@@ -251,13 +256,21 @@ function renderPipeEst() {
 }
 function pipeRunBody() {
   const body = { stages: pipeStageList() };
-  // **不抓取就一个来源字段都不带**:带上去的话后端照旧按它整理 crawl_filter,而
-  // 这一次压根不跑 crawl —— 留在请求里只会让留档上那一轮看着像是按来源抓过。
-  if (!pipeStageOn('crawl')) return body;
+  // **按步骤的实际依赖决定带不带来源**(`pipeNeedsSource` / `pipeNeedsTargets`,
+  // 口径和后端 `run_scopes` 同一份):
+  // - 全库那几步(索引/提取/整理/Wiki)一个来源字段都不带 —— 带上去只会让留档上
+  //   那一轮看着像是按来源跑过;
+  // - 抓取**或**导出只要有一个在跑就必须带来源:导出也是按来源跑的,不带的话后端
+  //   回落到默认采集器,用户选的订阅源被静默换成公众号(第 3 轮审查 R1);
+  // - 订阅名单和日期段只有抓取收,所以只导出那一轮**把来源整条带上、accounts 留空**
+  //   (那就是「这个来源整条导出一遍」,也正是 `materialize()` 实际覆盖的范围)。
+  if (!pipeNeedsSource()) return body;
+  const targets = pipeNeedsTargets();
   body.channels = pipeReadyChannels()
-    .filter(id => pipeSelected(id).size)
-    .map(id => ({ channel: id, accounts: [...pipeSelected(id)] }));
-  if (pipeRange.from) Object.assign(body, { since_date: pipeRange.from, until_date: pipeRange.to });
+    .filter(id => !targets || pipeSelected(id).size)
+    .map(id => ({ channel: id, accounts: targets ? [...pipeSelected(id)] : [] }));
+  if (targets && pipeRange.from)
+    Object.assign(body, { since_date: pipeRange.from, until_date: pipeRange.to });
   return body;
 }
 async function startPipeFromModal() {

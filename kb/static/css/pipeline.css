@@ -131,7 +131,15 @@
 .pipe-setup-heading h2 { margin-bottom: 6px; }
 .pipe-setup-heading > button { font-size: 23px; flex-shrink: 0; }
 .pipe-setup .pipe-notice { margin: 0 24px 12px; flex-shrink: 0; }
-#pipe-fields { flex: 1; overflow-y: auto; min-height: 0; padding: 0 24px; }
+/* **正文的滚动盒必须是这个 div,不许让 fieldset 兼任。** `<fieldset>` 当滚动容器
+   在 Chrome 上裁不住自己的内容:`overflow-y: auto` 不生效、`scrollTop` 也设不上,
+   于是弹窗变高之后步骤那几行照旧往下绘 —— 实测 1452×806 下正文可视区到 656,而
+   「抓取内容 / 导出文章」那两行绘在 737~802、正好压在操作条(656~764)底下点不动,
+   「重建索引」往后几行干脆跑到弹窗(底 765)外面去了(第 4 轮审查 N2)。
+   fieldset 只留一个职责:起跑中整组禁用(`pipe_setup.js`)。回归在
+   `tests/pipe_stages_probe.mjs` 最后那一节(真按一次鼠标 + 每行都落在可视区内)。 */
+.pipe-setup-body { flex: 1; overflow-y: auto; min-height: 0; padding: 0 24px;
+  overscroll-behavior: contain; }
 .pipe-setup fieldset { border: 0; margin-inline: 0; min-width: 0; }
 .pipe-setup .row { margin-bottom: 20px; }
 .pipe-setup .hint { font-size: 13px; }

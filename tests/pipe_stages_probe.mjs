@@ -154,20 +154,66 @@ check("取消两段慢活之后不再说有慢活",
       !/慢活/.test(s.est) && /4 步/.test(s.btn) && s.stages.join() === 'crawl,export,index,extract',
       JSON.stringify(s));
 
-// ── 3. 不勾「抓取内容」:三块范围一起禁掉,请求里一个来源字段都不带 ──────────
+// ── 3. 不勾「抓取内容」、导出还在:**来源照旧带着**,只禁订阅和日期 ───────────
+// 导出也是按来源跑的(`_run_export` 走 `_per_channel`),所以这一档**不许**把来源
+// 一起禁掉、更不许把来源字段从请求里拿掉 —— 后端收到一个没有来源的来源敏感请求
+// 会回落到默认采集器,用户选的订阅源被静默换成公众号(第 3 轮审查 R1 实页实测)。
 await setStage('crawl', false);
 s = await snap();
-check("不抓取:来源、时间范围、订阅三块一起禁掉", s.srcOff && s.scopeOff, JSON.stringify(s));
-check("不抓取:就地说清上面那三块这次不作数",
-      /不抓新内容，上面的来源、时间范围和订阅这次都不作数/.test(s.est)
-      && /没勾「抓取内容」/.test(s.hint), `${s.est} // ${s.hint}`);
-check("不抓取:照旧起得了跑(那三块本来就不参与)", !s.off, JSON.stringify(s));
+check("只导出:来源那块照旧能点,只有时间范围和订阅被禁掉",
+      !s.srcOff && s.scopeOff, JSON.stringify(s));
+check("只导出:就地说清订阅和日期不作数,而导出仍按选的来源跑",
+      /时间范围和订阅这次不作数/.test(s.est) && /导出仍按上面选的来源跑/.test(s.hint),
+      `${s.est} // ${s.hint}`);
+check("只导出:照旧起得了跑", !s.off, JSON.stringify(s));
 posted.length = 0;
 await evalJs(`startPipeFromModal()`);
-await setup("不抓取那一档发出了请求", until(`true`, 100).then(() => sleep(400).then(() => posted.length > 0)));
-check("不抓取:走的是管道通道,只带这三段,一个来源字段都没有",
+await setup("只导出那一档发出了请求", until(`true`, 100).then(() => sleep(400).then(() => posted.length > 0)));
+check("只导出:来源整条带上、accounts 留空(那正是导出实际覆盖的范围),不带日期",
       posted[0]?.path === '/api/pipeline/run'
       && posted[0].body?.stages?.join() === 'export,index,extract'
+      && JSON.stringify(posted[0].body?.channels)
+         === JSON.stringify([{ channel: 'wechat_local', accounts: [] },
+                             { channel: 'rss', accounts: [] }])
+      && !('since_date' in posted[0].body),
+      JSON.stringify(posted[0]));
+
+// ── 3a. 只导出、而且一个订阅都没勾:**照旧起得了跑** ─────────────────────────
+// 导出是按来源扫的、压根不收订阅,所以拿「一个订阅都没勾」把它拦住就等于:用户
+// 没有任何办法只补一次导出(订阅那一块这会儿还是禁用的,他连勾都勾不上)。
+await evalJs(`pipeSelectNone(); renderPipeEst(); 0`);
+await sleep(100);
+s = await snap();
+check("只导出、一个订阅都没勾:照旧起得了跑",
+      !s.off && /导出仍按上面选的来源跑/.test(s.hint), JSON.stringify(s));
+posted.length = 0;
+await evalJs(`startPipeFromModal()`);
+await setup("那一档也发出了请求", until(`true`, 100).then(() => sleep(400).then(() => posted.length > 0)));
+check("只导出、没勾订阅:来源照旧整条带上",
+      JSON.stringify(posted[0]?.body?.channels)
+      === JSON.stringify([{ channel: 'wechat_local', accounts: [] },
+                          { channel: 'rss', accounts: [] }]),
+      JSON.stringify(posted[0]));
+// **把订阅勾回去**:后面那几局(尤其「正常那一档」)的前提是勾着的,
+// `pipeSelectNone()` 是全局的,不还回去会让它们红在一个跟自己无关的地方。
+await evalJs(`pipeSelectAll(); renderPipeEst(); 0`);
+await setup("订阅勾回来了", until(`pipeSelCount() === 3`, 4000));
+
+// ── 3b. **反过来钉一边**:只剩全库那几步时来源才真的不参与 ───────────────────
+await evalJs(`openPipeModal()`);
+await setup("弹窗又开回来了", until(`document.querySelectorAll('#pipe-stage-list input').length === 6`, 4000));
+await setStage('crawl', false);
+await setStage('export', false);
+s = await snap();
+check("全库那几步:来源、时间范围、订阅三块一起禁掉", s.srcOff && s.scopeOff, JSON.stringify(s));
+check("全库那几步:就地说清上面那三块这次不作数",
+      /这几步都是全库的，上面的来源、时间范围和订阅这次都不作数/.test(s.est)
+      && /这几步都是全库的/.test(s.hint), `${s.est} // ${s.hint}`);
+posted.length = 0;
+await evalJs(`startPipeFromModal()`);
+await setup("全库那一档发出了请求", until(`true`, 100).then(() => sleep(400).then(() => posted.length > 0)));
+check("全库那几步:一个来源字段都没有",
+      posted[0]?.body?.stages?.join() === 'index,extract'
       && !('channels' in posted[0].body) && !('since_date' in posted[0].body),
       JSON.stringify(posted[0]));
 
@@ -240,7 +286,10 @@ check("没问过那一档:请求带着今天这一天 + 空版本",
 // 日报页那颗按钮一直是先问的，这条路漏掉这一道就是静悄悄盖掉一份日报。后端在落盘
 // 之前还会按这份批准核对一次（`kb/daily_overwrite.py`）：那一道管「问的是不是真正
 // 要写的那一份」，这一道管「问没问过」，两道都要。
-REPORTS = [{ date: today, docs: 12, generated: "2026-10-20 07:31" }];
+// `version` 是**整份文件的内容身份**(清单里那一格,口径在 kb/daily_overwrite.py);
+// `generated` 只给人看 —— 拿它当版本的话同一分钟内换过正文的那一份会被静默盖掉。
+REPORTS = [{ date: today, docs: 12, generated: "2026-10-20 07:31",
+             version: "9f1c2b3d4e5f6071" }];
 await evalJs(`openPipeModal()`);
 await setup("弹窗再开一次", until(`document.querySelectorAll('#pipe-stage-list input').length === 6`, 4000));
 await setDaily(true);
@@ -267,8 +316,28 @@ check("确认之后走的还是日报通道",
 // 所以"问过了"必须带着它问的是哪一天哪一版下去,由后端在落盘之前核对(审查 R4)。
 check("批准跟着请求下去:哪一天 + 哪一版",
       posted[0]?.body.overwrite_day === today
-      && posted[0]?.body.overwrite_version === "2026-10-20 07:31",
+      && posted[0]?.body.overwrite_version === "9f1c2b3d4e5f6071",
       JSON.stringify(posted[0]?.body));
+
+// ── 5c. 那一天有日报、而清单给不出它是哪一版 ──────────────────────────────
+// 这一档要**说出「有」**(不是「查不到有没有」),而批准送 '*'(含义相同:那一天
+// 不管哪一版都盖)。两档合成一句的后果是用户以为自己在生成头一份(审查 R1)。
+REPORTS = [{ date: today, docs: 12, generated: "2026-10-20 07:31" }];
+await evalJs(`openPipeModal()`);
+await setup("弹窗第四次开回来", until(`document.querySelectorAll('#pipe-stage-list input').length === 6`, 4000));
+await setDaily(true);
+posted.length = 0;
+await evalJs(`void startPipeFromModal(); 0`);
+await setup("查不到版本时照旧弹确认", until(`document.querySelectorAll('.confirm-mask').length === 1`, 3000));
+check("说的是「已经有一份、但查不到是哪一版」",
+      /已经有一份日报/.test(await evalJs(`document.querySelector('.confirm-body').textContent`))
+      && /查不到它是哪一版/.test(await evalJs(`document.querySelector('.confirm-body').textContent`)),
+      await evalJs(`document.querySelector('.confirm-body').textContent`));
+await evalJs(`document.querySelector('.confirm-mask [data-act=ok]').click()`);
+await setup("确认之后才发出请求", until(`true`, 100).then(() => sleep(500).then(() => posted.length > 0)));
+check("批准送的是「那一天不管哪一版」",
+      posted[0]?.body.overwrite_day === today
+      && posted[0]?.body.overwrite_version === "*", JSON.stringify(posted[0]?.body));
 REPORTS = [];
 
 // ── 6. 取消那个勾:还回用户自己那一份,不是重置成全选 ────────────────────────
@@ -292,6 +361,47 @@ check("正常那一档照旧带来源、订阅和日期段",
       posted[0]?.path === '/api/pipeline/run' && b.stages?.length === 6
       && b.channels?.length === 2 && b.channels[0].accounts.length === 2
       && !!b.since_date && !!b.until_date, JSON.stringify(posted[0]));
+
+// ── 8. **每一行步骤都点得到**:操作条不许盖在它们上面 ──────────────────────
+// 判据落在「真按一次鼠标,这一行有没有反应」,不落在截图上:弹窗正文原来是
+// fieldset 自己滚、而操作条又提了一层叠层(两条都是为别的事加的),内容于是绘到
+// 了操作条底下 —— 1452×806 这一档清空步骤之后点「抓取内容」「重建索引」都不
+// 改变选择,而那两行正好在操作条的覆盖区里(第 4 轮审查 N2 现场观察)。
+await send("Emulation.setDeviceMetricsOverride",
+           { width: 1452, height: 806, deviceScaleFactor: 1, mobile: false });
+await evalJs(`openPipeModal()`);
+await setup("弹窗第五次开回来", until(`document.querySelectorAll('#pipe-stage-list input').length === 6`, 4000));
+await evalJs(`pipeStageToggleAll()`);   // 清空:审查现场就是这一步之后点不动的
+await sleep(200);
+// 每一行滚进来之后问两件事:**它在不在正文那个滚动盒里**(溢出到操作条底下或
+// 弹窗外面的那几行,在页面上反倒"点得到",所以光做命中测试会漏),以及那个点上
+// 是谁(被盖住时命中的是操作条)。
+const reach = await evalJs(`JSON.stringify([...document.querySelectorAll('#pipe-stage-list .pipe-channel')].map(l => {
+  l.scrollIntoView({ block: 'center' });
+  const b = document.querySelector('.pipe-setup-body, #pipe-fields').getBoundingClientRect();
+  const r = l.getBoundingClientRect(), x = Math.round(r.left + 18), y = Math.round(r.top + r.height / 2);
+  const hit = document.elementFromPoint(x, y);
+  return { stage: l.querySelector('input')?.dataset.stage,
+           inBox: r.top >= b.top - 1 && r.bottom <= b.bottom + 1,
+           reachable: !!hit && l.contains(hit),
+           by: !hit ? 'none' : hit.closest('.pipe-setup-footer') ? 'footer'
+               : (hit.className || hit.tagName) }; }))`).then(JSON.parse);
+check("六行步骤都待在正文的滚动盒里,也没有被别的东西盖住",
+      reach.length === 6 && reach.every(r => r.inBox && r.reachable),
+      JSON.stringify(reach.filter(r => !(r.inBox && r.reachable))));
+// **真按一次鼠标**:命中测试说得通,还要让这一下确实改变选择(程序化 click
+// 无视遮挡,证明不了这件事)。挑「重建索引」那一行 —— 现场点不动的正是它。
+const spot = await evalJs(`(() => {
+  const l = document.querySelector('#pipe-stage-list input[data-stage=index]').closest('.pipe-channel');
+  l.scrollIntoView({ block: 'center' });
+  const r = l.getBoundingClientRect();
+  return JSON.stringify({ x: Math.round(r.left + 18), y: Math.round(r.top + r.height / 2) }); })()`).then(JSON.parse);
+for (const type of ["mousePressed", "mouseReleased"])
+  await send("Input.dispatchMouseEvent", { type, x: spot.x, y: spot.y, button: "left", clickCount: 1 });
+await sleep(200);
+s = await snap();
+check("真按一次鼠标,「重建索引」那一行就勾上了", s.stages.join() === 'index',
+      `${JSON.stringify(s.stages)} @ ${JSON.stringify(spot)}`);
 
 check("页面没有脚本报错", pageErrors.length === 0, pageErrors.join(" | "));
 } catch (e) {
