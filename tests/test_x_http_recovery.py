@@ -133,10 +133,10 @@ class CheckConnectionRecoveryTests(ChannelBase):
             with self.subTest(changes=changes, events=events), \
                     patch.object(x_browser, 'profile_busy', return_value=False), \
                     patch.object(x_browser, 'browser_session', return_value=contextlib.nullcontext(page)), \
-                    patch.object(x_browser.time, 'sleep', side_effect=AssertionError('waited')):
+                    patch.object(x_browser.time, 'sleep'):
                 result = self.x_act('/api/intake/social/x-channel/check')
             self.assertEqual(200, result.status_code)
             self.assertEqual(ready, result.json()['ready'])
             self.assertIn(phrase, result.json()['detail'])
             self.assertNotIn('网络不通', result.json()['detail'])
-            self.assertEqual(1, page.reads)
+            self.assertEqual(1 if ready else 2, page.reads)

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-import time
 
 from kb.feeds import registry as reg, x_article, x_post, x_post_meta
 
@@ -21,11 +20,10 @@ def resolve(row: dict, session, *, deadline=None, should_stop=None,
             aligned_preview=None) -> tuple[dict, str | None]:
     """Prove a stored Article suffix or match stored text against a verified post detail."""
     x_post._check(deadline, should_stop)
-    if not x_article.API:
-        raise x_post.PostUnavailable('长文接口已关闭，无法核实旧行来源；原行保持来源不明')
-    timeout = min(x_article.TIMEOUT, deadline - time.monotonic()) if deadline else x_article.TIMEOUT
+    if not x_article.API and (session is None or not x_article.BROWSER_FALLBACK):
+        raise x_post.PostUnavailable('长文接口和浏览器后路均不可用，无法核实旧行来源；原行保持来源不明')
     try:
-        article = x_article.fetch(row['url'], timeout=max(0.001, timeout))
+        article = x_article._one(row, session, deadline=deadline, should_stop=should_stop)
     except x_article.ArticleUnavailable as exc:
         raise x_post.PostUnavailable(f'旧行来源未核实:{exc}') from exc
     x_post._check(deadline, should_stop)

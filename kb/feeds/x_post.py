@@ -7,7 +7,7 @@ import time
 from kb.feeds import x_article, x_post_meta
 from kb.feeds.x_cdp import CdpError
 from kb.feeds.x_errors import PostUnavailable
-from kb.feeds.x_page_state import STATE_JS, XRateLimited, navigate, problem, read
+from kb.feeds.x_page_state import STATE_JS, ProblemConfirmation, XRateLimited, navigate, read
 
 HINT = '_x_post_prefix'
 SECONDS = 25.0
@@ -79,7 +79,7 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
     _check(until, should_stop)
     previous = None
     absent = False
-    previous_problem = ''
+    errors = ProblemConfirmation()
     try:
         navigation = navigate(session, url)
         if isinstance(navigation, dict) and navigation.get('errorText'):
@@ -93,12 +93,11 @@ def fetch(url: str, session, *, deadline=None, should_stop=None) -> str:
                      and isinstance(snap.get('text'), str) and snap['text'].strip()
                      and snap.get('truncated') is False)
             text = snap['text'].strip() if valid else None
-            current_problem = problem(snap) if snap.get('at') == match[1] and text is None else ''
-            if current_problem and current_problem == previous_problem:
+            current_problem = errors.check(snap if snap.get('at') == match[1] and text is None else {})
+            if current_problem:
                 if current_problem == 'limited':
                     raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
                 raise PostRequestFailed('X 页面请求出错,请稍后重试(不能据此确认限流或推文不存在)')
-            previous_problem = current_problem
             missing = (snap.get('at') == match[1] and not snap.get('id')
                        and snap.get('ready') == 'complete' and snap.get('empty') is True)
             if missing and absent:

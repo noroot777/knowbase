@@ -118,9 +118,20 @@ def problem(state: dict) -> str:
     explicit = state.get('dom_problem', '')
     if explicit in ('limited', 'failed'):
         return explicit
-    if state.get('ready') != 'complete':
-        return ''
-    return next((kind for kind in ('limited', 'failed') if state.get(kind)), '')
+    return ''
+
+
+class ProblemConfirmation:
+    """Only two consecutive observations of the same authoritative error are terminal."""
+
+    def __init__(self):
+        self.previous = ''
+
+    def check(self, state: dict) -> str:
+        current = problem(state)
+        confirmed = current if current == self.previous else ''
+        self.previous = current
+        return confirmed
 
 
 class XBrowserError(RuntimeError):

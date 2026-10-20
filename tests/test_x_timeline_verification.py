@@ -39,7 +39,7 @@ class TimelineVerificationTests(unittest.TestCase):
             with self.subTest(verdict=verdict), patch.object(x_browser.time, 'sleep'):
                 page = FakePage(snap)
                 self.assertEqual(verdict, x_browser.verify_timeline(page, timeout=0.02)[0])
-                self.assertEqual(1, page.seen)
+                self.assertEqual(2, page.seen)
                 page = FakePage(snap)
                 error = x_browser.XRateLimited if verdict == 'limited' else x_browser.XBrowserError
                 with self.assertRaises(error):
@@ -70,16 +70,17 @@ class TimelineVerificationTests(unittest.TestCase):
                     self.assertNotIn('请求出错', detail)
                     self.assertNotIn('限流', detail)
 
-    def test_error_limit_and_expired_login_return_without_sleep_or_budget_exhaustion(self):
-        for flags, expected in [({'failed': True}, 'failed'), ({'limited': True}, 'limited'),
-                                ({'failed': True, 'limited': True}, 'limited'),
+    def test_error_and_limit_confirm_twice_but_expired_login_is_immediate(self):
+        for flags, expected in [({'failed': True, 'dom_problem': 'failed'}, 'failed'),
+                                ({'limited': True, 'dom_problem': 'limited'}, 'limited'),
+                                ({'failed': True, 'limited': True, 'dom_problem': 'limited'}, 'limited'),
                                 ({'login': True, 'failed': True}, 'login')]:
-            with self.subTest(expected=expected), patch.object(
-                    x_browser.time, 'sleep', side_effect=AssertionError('waited on a terminal state')):
+            with self.subTest(expected=expected), patch.object(x_browser.time, 'sleep') as sleep:
                 page = FakePage(flags)
                 verdict, last = x_browser.verify_timeline(page, timeout=50)
                 self.assertEqual(expected, verdict)
-                self.assertEqual(1, page.seen)
+                self.assertEqual(1 if expected == 'login' else 2, page.seen)
+                self.assertEqual(0 if expected == 'login' else 1, sleep.call_count)
                 self.assertEqual('complete', last['ready'])
 
     def test_unsettled_text_flags_do_not_preempt_a_successful_render(self):
@@ -94,12 +95,12 @@ class TimelineVerificationTests(unittest.TestCase):
                 page = HomeSession([response(code, operation='HomeTimeline')])
                 with patch.object(x_browser, 'profile_busy', return_value=False), patch.object(
                         x_browser, 'browser_session', return_value=contextlib.nullcontext(page)), \
-                        patch.object(x_browser.time, 'sleep', side_effect=AssertionError('waited')):
+                        patch.object(x_browser.time, 'sleep'):
                     ok, detail = x_browser.probe('/unused')
                 self.assertFalse(ok)
                 self.assertIn(phrase, detail)
                 self.assertNotIn('登录态已失效', detail)
-                self.assertEqual(1, page.reads)
+                self.assertEqual(2, page.reads)
 
     def test_home_observation_ignores_noncore_foreign_and_old_navigation_responses(self):
         events = [response(operation='UserTweets'), response(operation='HomeTimeline', loaderId='old'),
@@ -117,7 +118,7 @@ class TimelineVerificationTests(unittest.TestCase):
 
     def test_failed_probe_has_the_same_retry_advice_in_both_browser_channels(self):
         for attach in (False, True):
-            page = FakePage({'failed': True})
+            page = FakePage({'failed': True, 'dom_problem': 'failed'})
             with self.subTest(attach=attach), patch.object(x_browser, 'profile_busy', return_value=False), \
                     patch.object(x_browser, 'browser_session', return_value=contextlib.nullcontext(page)), \
                     patch('kb.feeds.cdp_attach.discover', return_value=object()):
@@ -141,15 +142,16 @@ class TimelineVerificationTests(unittest.TestCase):
                         boot = len(chrome.opens)
                         reads.append(boot)
                         return json.dumps(state() | ({'articles': 2} if first_ok and boot == 1
-                                                     else {flag: True}))
+                                                     else {flag: True, 'dom_problem': flag if flag != 'login' else ''}))
 
                     chrome.eval = evaluate
                     with patch.object(x_cdp, 'Chrome', chrome), patch.object(
-                            x_browser.time, 'sleep', side_effect=AssertionError('waited')):
+                            x_browser.time, 'sleep'):
                         result, last = x_login_import.install(logged_in(), profile)
                     expected = ('relogin' if verdict == 'login' else 'unconfirmed') if first_ok else verdict
                     self.assertEqual(expected, result)
-                    self.assertEqual([1, 2], reads)
+                    self.assertEqual(([1] if first_ok or flag == 'login' else [1, 1])
+                                     + ([2] if flag == 'login' else [2, 2]), reads)
                     detail = x_login_words._detail(result, 2, last, '')
                     self.assertIn(phrase, detail)
                     self.assertNotIn('重新打开之后它们还留在', detail)

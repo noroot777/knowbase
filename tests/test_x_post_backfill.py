@@ -100,7 +100,7 @@ class BackfillTests(ChannelBase):
 
     def test_rate_limit_stops_the_whole_audit_without_probing_or_writing_later_rows(self):
         rows = [self.seed(), self.seed(identity='124')]
-        page = Page(dict(snapshot(''), id='', ready='complete', limited=True))
+        page = Page(dict(snapshot(''), id='', ready='complete', limited=True, dom_problem='limited'))
         with patch.object(x_post, 'SECONDS', 0.02):
             stats = backfill.repair(rows, page, apply=True)
         self.assertEqual([rows[0]['url']], page.urls)
@@ -113,7 +113,8 @@ class BackfillTests(ChannelBase):
         row = self.seed()
         report = self.root / 'terminal-report.json'
         for flag, state, code in [('empty', 'unavailable', 0), ('limited', 'failed', 1)]:
-            page = Page(dict(snapshot(''), id='', ready='complete', **{flag: True}))
+            page = Page(dict(snapshot(''), id='', ready='complete',
+                             dom_problem='limited' if flag == 'limited' else '', **{flag: True}))
             with self.subTest(flag=flag), contextlib.redirect_stdout(io.StringIO()) as output, \
                  patch.object(x_post, 'SECONDS', 0.02), \
                  patch.object(backfill.x_browser, 'browser_session',
@@ -458,7 +459,7 @@ class BackfillTests(ChannelBase):
     def test_request_error_is_reported_without_replacing_the_row_or_stopping_other_repairs(self):
         row = self.seed()
         other = self.seed(identity='124')
-        failed = dict(snapshot(''), id='', ready='complete', failed=True)
+        failed = dict(snapshot(''), id='', ready='complete', failed=True, dom_problem='failed')
         complete = dict(snapshot(FULL), at='124', id='124')
         page = Page(failed, failed, complete, complete)
         stats = backfill.repair([row, other], page, apply=True)

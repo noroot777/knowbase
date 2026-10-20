@@ -28,21 +28,29 @@ def context_prefix(body: str, context: str) -> str:
     """Use only source-declared context, never an author's own quoted text."""
     if not context:
         return ''
-    prefix = context if body == context else context + '\n\n'
-    if quote_lines(context) != context or not body.startswith(prefix):
+    prefix = context + '\n\n'
+    if quote_lines(context) != context or (body != context and not body.startswith(prefix)):
         raise PostUnavailable('X 上下文必须是正文开头的完整引用块')
     return prefix
+
+
+def _valid_prefix(body: str, prefix) -> bool:
+    return (isinstance(prefix, str) and (not prefix or prefix.endswith('\n\n'))
+            and body.startswith(prefix))
 
 
 def stamp(entry: dict, kind: str, prefix: str, *, author_text: AuthorText | None = None) -> dict:
     """Require an explicit boundary; leading authored quotes need source-text evidence."""
     body = entry['body']
+    if kind == 'post' and isinstance(prefix, str) and prefix.endswith('\n\n') and body == prefix[:-2]:
+        body = prefix
+        entry = dict(entry, body=body)
     if author_text is not None and (not isinstance(author_text, AuthorText) or (
             author_text.source not in _AUTHOR_SOURCES or not isinstance(author_text.text, str))):
         raise PostUnavailable('X 作者证据必须来自独立的 DOM、推文接口或详情原文字段')
     authored_quote = (not prefix and body.startswith('> ') and author_text is not None
                       and author_text.text.startswith(body.partition('\n\n')[0]))
-    if kind == 'post' and (not isinstance(prefix, str) or not body.startswith(prefix) or (
+    if kind == 'post' and (not _valid_prefix(body, prefix) or (
             not prefix and body.startswith('> ') and not authored_quote)):
         raise PostUnavailable('X 正文的引用块必须有明确上下文边界或作者原文证据')
     meta = dict(version=1, kind=kind, prefix=prefix, fingerprint=_fingerprint(entry))
@@ -66,8 +74,7 @@ def eligibility(entry: dict) -> tuple[str, str]:
         if meta.get('kind') == 'article':
             return 'article_merged', ''
         prefix = meta.get('prefix')
-        if meta.get('kind') != 'post' or not isinstance(prefix, str) or (
-                not entry['body'].startswith(prefix)) or (
+        if meta.get('kind') != 'post' or not _valid_prefix(entry['body'], prefix) or (
                 not prefix and entry['body'].startswith('> ') and (
                     meta.get('authored_quote') is not True or meta.get('author_source') not in _AUTHOR_SOURCES)):
             return 'invalid_provenance', ''

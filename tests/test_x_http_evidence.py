@@ -39,16 +39,17 @@ class HttpEvidenceTests(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.assertEqual('', x_page_state.problem(dict(ready='loading', **{kind: True})))
                 self.assertEqual(kind, x_page_state.problem(dict(ready='loading', dom_problem=kind)))
-                self.assertEqual(kind, x_page_state.problem(dict(ready='complete', **{kind: True})))
+                self.assertEqual('', x_page_state.problem(dict(ready='complete', **{kind: True})))
+                self.assertEqual('', x_page_state.problem(dict(ready='complete', dom_problem='', **{kind: True})))
 
-    def test_connection_check_does_not_sleep_on_loading_http_failures(self):
+    def test_connection_check_confirms_loading_http_failures_twice(self):
         for status, verdict in [(429, 'limited'), (503, 'failed')]:
             page = LoadingSession([response(status, operation='HomeTimeline')])
             x_page_state.navigate(page, 'https://x.com/home')
-            with self.subTest(status=status), patch.object(x_browser.time, 'sleep',
-                    side_effect=AssertionError('HTTP verdict consumed the polling budget')):
+            with self.subTest(status=status), patch.object(x_browser.time, 'sleep') as sleep:
                 self.assertEqual(verdict, x_browser.verify_timeline(page)[0])
-            self.assertEqual(1, page.reads)
+            self.assertEqual(2, page.reads)
+            sleep.assert_called_once()
 
     def test_timeline_retains_two_observations_but_does_not_wait_for_complete(self):
         for status, kind, message in [(429, x_browser.XRateLimited, '访问频率'),

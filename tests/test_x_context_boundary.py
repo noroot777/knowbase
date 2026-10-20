@@ -33,7 +33,7 @@ class ContextBoundaryTests(unittest.TestCase):
         context = '> Context first\n> Context second'
         for suffix in ['', '\n\n', '\n\n> Authored quote\n\nAuthor text']:
             body = context + suffix
-            expected = context + ('\n\n' if suffix else '')
+            expected = context + '\n\n'
             with self.subTest(suffix=suffix):
                 self.assertEqual(expected, x_post_meta.context_prefix(body, context))
                 self.assertEqual('', x_post_meta.context_prefix(body, ''))

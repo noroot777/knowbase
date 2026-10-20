@@ -452,7 +452,7 @@ class ProbeWordingTests(unittest.TestCase):
                          '请在它里面打开 x.com 登录一次,再回来检查', detail)
 
     def test_rate_limiting_keeps_its_own_sentence(self):
-        ok, detail = self.run_probe({'limited': True})
+        ok, detail = self.run_probe({'limited': True, 'dom_problem': 'limited'})
         self.assertFalse(ok)
         self.assertEqual('X 暂时限制了访问频率,稍后再试', detail)
 

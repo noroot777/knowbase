@@ -6,6 +6,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from kb.feeds import x_browser, x_page_state, x_post
 from kb.feeds.x_cdp import Chrome
@@ -168,6 +169,44 @@ class PostDomTests(unittest.TestCase):
             self.assertIs(False, snap.get('empty'))
             self.assertIs(False, snap.get('limited'))
 
+    def test_document_complete_does_not_make_a_busy_main_error_terminal(self):
+        for text in ('Rate limit exceeded', 'Something went wrong. Try reloading'):
+            with self.subTest(text=text):
+                self.load('<main data-testid="primaryColumn"><div role="progressbar"></div>'
+                          '<div role="alert">' + text + '</div></main>')
+                for script in (x_post.READ_JS, x_browser._STATE_JS):
+                    snap = json.loads(self.page.eval(script))
+                    self.assertEqual('complete', snap['ready'])
+                    self.assertEqual('', snap['dom_problem'])
+                    self.assertEqual('', x_page_state.problem(snap))
+
+    def test_connection_check_waits_for_a_second_terminal_frame_in_a_real_page(self):
+        for text, expected in [('Rate limit exceeded', 'limited'),
+                               ('Something went wrong. Try reloading', 'failed')]:
+            with self.subTest(expected=expected):
+                self.load('<main data-testid="primaryColumn"><div role="alert">' + text + '</div></main>')
+                with patch.object(x_browser, 'read', wraps=x_browser.read) as read, \
+                        patch.object(time, 'sleep'):
+                    self.assertEqual(expected, x_browser.verify_timeline(self.page, timeout=1)[0])
+                self.assertEqual(2, read.call_count)
+
+    def test_connection_check_allows_a_transient_error_to_render_tweets(self):
+        self.load('<main data-testid="primaryColumn"><div role="alert">'
+                  'Something went wrong. Try reloading</div></main>')
+        read = x_browser.read
+        reads = []
+
+        def recover(page, script):
+            snap = read(page, script)
+            reads.append(snap)
+            if len(reads) == 1:
+                page.eval('document.querySelector("main").innerHTML = ' + json.dumps(article()) + '; true')
+            return snap
+
+        with patch.object(x_browser, 'read', side_effect=recover), patch.object(time, 'sleep'):
+            self.assertEqual('ok', x_browser.verify_timeline(self.page, timeout=1)[0])
+        self.assertEqual(['failed', ''], [snap['dom_problem'] for snap in reads])
+
     def test_missing_shell_gateway_copy_is_only_error_evidence_for_both_readers(self):
         for text, verdict in [('Rate limit exceeded', 'limited'),
                               ('Something went wrong. Try reloading.', 'failed')]:
@@ -178,7 +217,7 @@ class PostDomTests(unittest.TestCase):
                     self.assertEqual(verdict, x_page_state.problem(snap))
                     self.assertEqual(0, snap['articles'])
                     self.assertFalse(snap.get('valid', False))
-                self.assertEqual(verdict, x_browser.verify_timeline(self.page, timeout=0.2)[0])
+                self.assertEqual(verdict, x_browser.verify_timeline(self.page, timeout=1)[0])
 
     def test_sidebar_words_or_missing_primary_cannot_classify_the_main_page(self):
         for text in ['该页面不存在', 'Hmm...this page doesn’t exist.', 'Rate limit exceeded',

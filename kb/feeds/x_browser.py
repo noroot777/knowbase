@@ -36,8 +36,7 @@ from zoneinfo import ZoneInfo
 
 from kb.feeds import x_article, x_post, x_post_meta
 from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
-from kb.feeds.x_page_state import STATE_JS, XBrowserError, XRateLimited, navigate, read
-from kb.feeds.x_page_state import problem as page_problem
+from kb.feeds.x_page_state import STATE_JS, ProblemConfirmation, XBrowserError, XRateLimited, navigate, read
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 # 连续多少条老推文算"翻到底了"。1 不够:转推带的是原推时间,单条老的很常见。
@@ -242,7 +241,7 @@ def _entry(item: dict) -> dict | None:
 def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
     """等页面落定,顺带认出登录失效/不存在/限流这三种不该当成"没有推文"的情况。"""
     last = {}
-    previous_problem = ''
+    errors = ProblemConfirmation()
     while time.monotonic() < deadline:
         last = read(page, _STATE_JS)
         if last['login']:
@@ -253,12 +252,10 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
                                 '或从日常浏览器再导入一次')
         if last['articles'] and last['ready'] == 'complete':
             return last
-        current_problem = page_problem(last)
-        if current_problem and current_problem == previous_problem:
+        if current_problem := errors.check(last):
             if current_problem == 'limited':
                 raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
             raise XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
-        previous_problem = current_problem
         if last['empty']:
             raise XBrowserError(f'@{handle} 这个账号在 X 上打不开(可能已改名、注销或被冻结)')
         time.sleep(0.3)
@@ -574,13 +571,14 @@ def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
     """
     deadline = time.monotonic() + (timeout or ACCOUNT_SECONDS)
     last: dict = {}
+    errors = ProblemConfirmation()
     while time.monotonic() < deadline:
         last = read(page, _STATE_JS)
         if last['login']:
             return 'login', last
         if last['articles'] and last['ready'] == 'complete':
             return 'ok', last
-        if problem := page_problem(last):
+        if problem := errors.check(last):
             return problem, last
         time.sleep(_SETTLE_STEP)
     return ('no-tweets' if last.get('ready') == 'complete' else 'not-loaded'), last

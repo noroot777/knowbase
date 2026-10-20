@@ -58,7 +58,7 @@ class DomEvidenceTests(unittest.TestCase):
                 self.assertTrue(snap['failed'])
                 self.assertEqual('', x_page_state.problem(snap))
         settled = self.snapshot(ready='complete', main='Something went wrong. Try reloading')
-        self.assertEqual('failed', x_page_state.problem(settled))
+        self.assertEqual('', x_page_state.problem(settled))
 
     def test_a_terminal_main_error_or_rate_limit_does_not_wait_for_global_ready(self):
         for text, changes, verdict in [('Rate limit exceeded', {}, 'limited'),
