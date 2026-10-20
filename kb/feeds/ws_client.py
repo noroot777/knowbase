@@ -67,6 +67,10 @@ class WsError(RuntimeError):
     """协议层或连接层的失败。message 是成品文案,直接给用户看。"""
 
 
+class WsTimeoutError(WsError):
+    """A response deadline elapsed without evidence that the transport closed."""
+
+
 def _mask(payload: bytes, key: bytes) -> bytes:
     """按 4 字节 key 异或 —— 客户端发出去的帧必须掩码(RFC 6455 §5.3)。
 
@@ -108,6 +112,8 @@ class WebSocket:
         self._buf = bytearray()
         self._closed = False
         self._broken = False
+        self._parts = []
+        self._kind = OP_TEXT
 
     # ── 建立 ────────────────────────────────────────────────────────────────
 
@@ -170,8 +176,6 @@ class WebSocket:
         ping 自动回 pong:Chrome 平时不 ping,但它要是 ping 了而我们不回,
         对端有权直接断开 —— 那会表现成抓取中途一次莫名的连接中断。
         """
-        parts: list[bytes] = []
-        kind = OP_TEXT
         while True:
             fin, opcode, payload = self._read_frame(deadline)
             if opcode == OP_PING:
@@ -188,36 +192,51 @@ class WebSocket:
                     pass                  # 对端已经走了,回不回都一样
                 raise EOFError('浏览器关闭了 WebSocket 连接')
             if opcode in (OP_TEXT, OP_BINARY):
-                if parts:
+                if self._parts:
                     raise WsError('上一条 WebSocket 消息的分片还没结束')
-                kind, parts = opcode, [payload]
+                self._kind, self._parts = opcode, [payload]
             elif opcode == OP_CONT:
-                if not parts:
+                if not self._parts:
                     raise WsError('收到一个没有开头的 WebSocket 分片')
-                parts.append(payload)
+                self._parts.append(payload)
             else:
                 raise WsError(f'不认识的 WebSocket 帧类型(opcode={opcode})')
             if fin:
-                if kind == OP_BINARY:
+                if self._kind == OP_BINARY:
                     raise WsError('CDP 不该发二进制帧,连接可能已经错位')
-                return b''.join(parts).decode('utf-8')
+                message = b''.join(self._parts).decode('utf-8')
+                self._parts = []
+                return message
 
     def _read_frame(self, deadline: float) -> tuple[bool, int, bytes]:
-        head = self._read_exact(2, deadline)
+        def require(size):
+            while len(self._buf) < size:
+                self._fill(deadline)
+
+        require(2)
+        head = self._buf
         if head[0] & 0x70:
             raise WsError('浏览器用了没协商过的 WebSocket 扩展(RSV 位非零)')
         fin, opcode = bool(head[0] & 0x80), head[0] & 0x0F
         masked, n = bool(head[1] & 0x80), head[1] & 0x7F
+        cursor = 2
         if n == 126:
-            n = int.from_bytes(self._read_exact(2, deadline), 'big')
+            require(4)
+            n = int.from_bytes(head[2:4], 'big')
+            cursor = 4
         elif n == 127:
-            n = int.from_bytes(self._read_exact(8, deadline), 'big')
+            require(10)
+            n = int.from_bytes(head[2:10], 'big')
+            cursor = 10
         if n > MAX_PAYLOAD:
             raise WsError(f'WebSocket 帧超长({n} 字节),连接可能已经错位')
         if opcode >= 0x8 and (not fin or n > 125):
             raise WsError('WebSocket 控制帧不许分片、也不许超过 125 字节')
-        key = self._read_exact(4, deadline) if masked else b''
-        payload = self._read_exact(n, deadline)
+        require(cursor + (4 if masked else 0) + n)
+        key = bytes(head[cursor:cursor + 4]) if masked else b''
+        cursor += len(key)
+        payload = bytes(head[cursor:cursor + n])
+        del self._buf[:cursor + n]
         return fin, opcode, _mask(payload, key) if key else payload
 
     # ── 字节层 ──────────────────────────────────────────────────────────────
@@ -252,7 +271,7 @@ class WebSocket:
     def _fill(self, deadline: float) -> None:
         left = deadline - time.monotonic()
         if left <= 0:
-            raise WsError('浏览器没有在预期时间内响应')
+            raise WsTimeoutError('浏览器没有在预期时间内响应')
         if not select.select([self._sock], [], [], left)[0]:
             return                         # 超时由上面那句判,这里只管有没有数据
         try:

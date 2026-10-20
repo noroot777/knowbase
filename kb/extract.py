@@ -521,7 +521,7 @@ def pending_docs(conn, limit: int = 0) -> list:
                 WHERE s.extract = 1))
         """
         args = args + feed_kinds
-    sql = f"SELECT path, source, title, account {base} {gate} ORDER BY published DESC"
+    sql = f"SELECT path, source, title, account, url {base} {gate} ORDER BY published DESC"
     if not has_feed:
         rows = conn.execute(sql, args).fetchall()
     else:

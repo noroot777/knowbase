@@ -55,6 +55,7 @@ from kb.config import PRIMARY_SOURCE_NAMES, VAULT_ROOT
 from kb.daily_carry import STAMP, commit_lock, mark_carried, parse_ts, release
 from kb.daily_gain import material_sig, pending  # noqa: F401  (搬出去的两个口径,
 # `daily.pending` / `daily.material_sig` 这类既有写法照旧可用;见 daily_gain 的说明)
+from kb.daily_materials import material_view
 from kb.daily_prompt import PROMPT, late_section
 from kb.daily_carry import UNCARRIED as _UNCARRIED
 # 账本那半拆到 daily_carry 了,这个名字这边自己不用、只为让 `daily.SEED_DAY`
@@ -70,6 +71,7 @@ from kb.daily_page import doc_key as _doc_key
 from kb.daily_page import md_dest as _md_dest
 from kb.daily_page import md_text as _md_text
 from kb.daily_page import md_title as _md_title
+from kb.daily_page import queue_tail as _queue_tail
 from kb.scanner import parse_frontmatter
 from kb.source_types import SOURCE_TYPES
 from kb.store import promo_exclude_sql
@@ -414,17 +416,8 @@ def _page(since: datetime, until: datetime, mat: Material, body: str,
         f"{i}. {d['title']}{_REF_SEP}{_label(d['source'])}·{d['account'] or '未署名'}"
         f"{' · 补录' if d['late'] else ''}"
         for i, d in enumerate(shown, 1))
-    more = []
-    if mat.total > len(mat.items):
-        more.append(f'窗口内共 {mat.total} 条,以上列出最新的 {len(mat.items)} 条。')
-    if mat.late_total > len(mat.late):
-        more.append(f'补录共 {mat.late_total} 条,以上列出 {len(mat.late)} 条。')
-    # 说清"没列出的去哪了"。条数上限是**限流**而不是丢弃线:没带走的条目留在
-    # 账本外面,下一份日报接着带。不写这一句的话,"共 679 条、列出 30 条"读起来
-    # 就是"另外 649 条你再也见不到了"—— 那正是旧实现的真实行为。
-    if more:
-        more.append('没列出的留在队列里,下一份日报接着带。')
-    tail = ('\n\n> ' + ' '.join(more)) if more else ''
+    tail = _queue_tail(docs=len(mat.items), total=mat.total,
+                       late=len(mat.late), late_total=mat.late_total)
     head = (f'# 日报 · {until:%Y-%m-%d}\n\n'
             f'> 覆盖 {_label_window(since, until)} 发布的内容(按发布时间,不是抓取时间)。\n\n')
     # **说「项」不说「来源」**:同步分两段,抓取那一段按来源一项,入库那一段
@@ -571,6 +564,8 @@ def _entry(path: Path, with_body: bool = False) -> dict:
            'sync_failed': [str(t) for t in issues] if isinstance(issues, list) else []}
     if with_body:
         out['body'] = body
+        out['late_total'] = meta.get('late_total') if type(meta.get('late_total')) is int else None
+        out['material_view'] = material_view(body, meta)
     return out
 
 

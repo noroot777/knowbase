@@ -91,9 +91,10 @@ class BodyContractTests(ChannelBase):
                 entry = self.manual(text=text, media={'photos': [{'url': 'https://pbs.twimg.com/a.jpg'}]},
                                     quote={'author': {'screen_name': 'Other'}, 'text': 'quoted'})
                 stored = self.seed(entry)
-                stats = backfill.repair([stored], Page(snapshot(BODY)), apply=True)
+                detail = text + '\n\n' + BODY
+                stats = backfill.repair([stored], Page(snapshot(detail)), apply=True)
                 self.assertEqual(1, stats['updated'])
-                self.assertEqual('> 引用 @Other：quoted\n\n' + BODY + '\n\n![图片](https://pbs.twimg.com/a.jpg)',
+                self.assertEqual('> 引用 @Other：quoted\n\n' + detail + '\n\n![图片](https://pbs.twimg.com/a.jpg)',
                                  self.row()['body'])
 
     def test_loaded_unknown_structure_is_not_empty_and_has_a_short_retryable_budget(self):

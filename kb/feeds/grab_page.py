@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 
-from kb.feeds import readable
+from kb.feeds import page_gate, readable
 from kb.feeds.fetching import oneline, plain
 
 # 抓网页不是抓 feed,`fetching.request` 的默认 Accept 是 RSS 优先 —— 有些站会
@@ -63,11 +63,7 @@ _GATE_ROUTES = ('appmsgcaptcha', 'wappoc_', '/cdn-cgi/l/chk', '/sorry/index',
 #: `api.js`):正常文章页的评论框就挂着它们,进表等于按「这站评论要过验证码」拒稿。
 #: Cloudflare 那一条也只收**编排**路径(`challenge-platform/h/`)而不是整个
 #: `challenge-platform/` —— 后者的 `jsd/main.js` 在普通页面上也会被注入。
-_GATE_ASSETS = ('/cdn-cgi/challenge-platform/h/', '_cf_chl_opt',
-                'captcha-delivery.com/captcha')
-#: 去哪几个属性里找它们。**只收会让浏览器真去加载/提交的那些**。
-_ASSET_ATTRS = (('script', 'src'), ('iframe', 'src'), ('link', 'href'),
-                ('form', 'action'), ('img', 'src'))
+#: 标记表和生效性共用 page_gate;浏览器侧 x_page_state 通过 ASSETS_JS 消费同一口径。
 #: ③**标题自己就是一句关卡提示**。全是**祈使句或状态播报** —— 正经文章的标题不
 #: 这么写,所以「人机验证是怎么坏掉的」这种不在射程内。反过来说:`验证码`、
 #: `captcha`、`challenge` 这类**话题词**一个都不许进这张表。
@@ -184,8 +180,6 @@ def _gate_share(body: str) -> float:
 #: **数据和模板**:里面出现 `_cf_chl_opt` 只是一个示例参数,不是这一页挂着关卡。
 #: 事故形态(2026-10-16 审查实测):一篇讲参数解析的 650 字教程,正文里带一段
 #: `<script type="application/json">{"sample":"_cf_chl_opt"}</script>` —— 整篇被拒。
-_EXEC_TYPES = ('', 'text/javascript', 'application/javascript', 'module',
-               'text/ecmascript', 'application/ecmascript', 'text/jscript')
 
 
 def _live(node) -> bool:
@@ -203,11 +197,7 @@ def _live(node) -> bool:
     只有内联那一支核对了 `type`、带 `src` 的那一支漏着 —— 同一道判据分两处写,
     其中一处迟早漏掉(第 3 轮审查点的正是这处对称缺口)。
     """
-    if node.find_parent('template') is not None:
-        return False
-    if node.name == 'script':
-        return str(node.get('type') or '').strip().lower() in _EXEC_TYPES
-    return True
+    return page_gate.live(node)
 
 
 def body_confirmed(body: str) -> bool:
@@ -234,25 +224,13 @@ def body_confirmed(body: str) -> bool:
 
 
 def _gate_assets(soup) -> bool:
-    """这一页**真挂着**某家关卡自己的组件吗(见 `_GATE_ASSETS`)。
+    """这一页**真挂着**某家关卡自己的组件吗(见 `page_gate.ASSETS`)。
 
     只看会让浏览器真去加载或提交的那几个属性,外加 `<script>` 自己的内联代码 ——
     **页面上的文字一个字都不算**:一篇讲关卡的教程会把那段 `<script src=…>` 原样
     转义印在 `<pre>` 里,而那是内容,不是身份(第 3 轮审查实测的误拒正是它)。
     """
-    for tag, attr in _ASSET_ATTRS:
-        for node in soup.find_all(tag):
-            value = str(node.get(attr) or '').lower()
-            if value and any(mark in value for mark in _GATE_ASSETS) and _live(node):
-                return True
-    for node in soup.find_all('script'):
-        # **只有会被执行的那些才算挂着**(`_live`):数据块和模板块里出现那几个
-        # 串是内容,不是身份 —— 带 `src` 的那一支在上面同一道判据里过过了。
-        if node.get('src') or not _live(node):
-            continue
-        if any(mark in (node.string or '').lower() for mark in _GATE_ASSETS):
-            return True
-    return False
+    return page_gate.has_assets(soup)
 
 
 def _wall_reason(soup) -> str:

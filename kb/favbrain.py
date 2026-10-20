@@ -21,6 +21,7 @@ import threading
 
 from kb import llm, store
 from kb.config import DATA_DIR, VAULT_ROOT
+from kb.favorite_metadata import FAVORITE_DOCUMENT_COLUMNS, FAVORITE_DOCUMENT_JOIN
 
 _TRIAGE_PATH = DATA_DIR / "fav_triage.json"
 
@@ -104,12 +105,8 @@ def extract_action(fav_id: int) -> dict | None:
         # 元数据回落到收藏那一刻的快照。
         row = conn.execute(
             "SELECT f.id, f.path, f.quote, f.note, f.origin, f.created_at,"
-            " COALESCE(NULLIF(d.title, ''), f.origin_title) AS title,"
-            " COALESCE(d.account, '') AS account,"
-            " COALESCE(d.published, '') AS published,"
-            " COALESCE(d.summary, '') AS summary"
-            " FROM favorites f LEFT JOIN documents d ON d.path = f.path"
-            " WHERE f.id=?",
+            + FAVORITE_DOCUMENT_COLUMNS + FAVORITE_DOCUMENT_JOIN
+            + " WHERE f.id=?",
             (fav_id,),
         ).fetchone()
     finally:
@@ -202,12 +199,8 @@ def _inbox_rows():
         # 片段时缓存仍判"新鲜"。
         return conn.execute(
             "SELECT f.id, f.quote, f.note, f.action_json, f.created_at, f.updated_at,"
-            " COALESCE(NULLIF(d.title, ''), f.origin_title) AS title,"
-            " COALESCE(d.account, '') AS account,"
-            " COALESCE(d.published, '') AS published,"
-            " COALESCE(d.summary, '') AS summary"
-            " FROM favorites f LEFT JOIN documents d ON d.path = f.path"
-            " WHERE f.status='inbox' ORDER BY f.id",
+            + FAVORITE_DOCUMENT_COLUMNS + FAVORITE_DOCUMENT_JOIN
+            + " WHERE f.status='inbox' ORDER BY f.id",
         ).fetchall()
     finally:
         conn.close()

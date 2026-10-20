@@ -347,7 +347,8 @@ def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
     if notice := got.get('note'):
         meta.update(notice=notice,
                     unavailable=got.get('unavailable', []),
-                    unavailable_count=got.get('unavailable_count', 0))
+                    unavailable_count=got.get('unavailable_count', 0),
+                    notice_count=got.get('unavailable_count', 0) + got.get('skipped_quotes', 0))
     return got['entries'], meta
 
 

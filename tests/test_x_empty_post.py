@@ -110,7 +110,7 @@ class EmptyPostTests(ChannelBase):
                  patch.object(backfill.x_browser, 'browser_session',
                               return_value=contextlib.nullcontext(Page(snap))), \
                  contextlib.redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(code, backfill.main(['run', '--yes']))
+                self.assertEqual(code, backfill.main(['run', '--yes', '--recheck']))
             self.assertIn(phrase, output.getvalue())
             self.assertEqual(row, self.row(row['key']))
 

@@ -73,7 +73,8 @@ class ProvenanceTests(ChannelBase):
                     self.assertEqual(row['body'], x_body.parts(row).text)
                     for detail in [None, '短']:
                         stats = self.audit(row, detail)
-                        state = 'unknown_provenance' if legacy else 'blocked_length'
+                        state = ('unknown_provenance' if legacy else
+                                 'blocked_length' if detail is None else 'blocked_content')
                         self.assertEqual(1, stats[state])
                         self.assertEqual(0, stats['empty'])
                         self.assertEqual(0, stats['updated'])
@@ -115,14 +116,15 @@ class ProvenanceTests(ChannelBase):
         entry = self.manual('own', media={'photos': [{'url': 'https://pbs.twimg.com/a.jpg'}]},
                             quote={'author': {'screen_name': 'Other'}, 'text': 'quoted'})
         row = self.seed(entry)
+        detail = 'own\n\n' + BODY
         self.assertEqual(entry[x_body.PROVENANCE], row[x_body.PROVENANCE])
-        self.assertEqual(1, self.audit(row, BODY)['updated'])
+        self.assertEqual(1, self.audit(row, detail)['updated'])
         fresh = self.row(row)
         self.assertNotEqual(row[x_body.PROVENANCE], fresh[x_body.PROVENANCE])
-        self.assertEqual(BODY, x_body.parts(fresh).text)
-        self.assertEqual('> 引用 @Other：quoted\n\n' + BODY + '\n\n![图片](https://pbs.twimg.com/a.jpg)',
+        self.assertEqual(detail, x_body.parts(fresh).text)
+        self.assertEqual('> 引用 @Other：quoted\n\n' + detail + '\n\n![图片](https://pbs.twimg.com/a.jpg)',
                          fresh['body'])
-        self.assertEqual(1, self.audit(fresh, BODY)['identical'])
+        self.assertEqual(1, self.audit(fresh, detail)['identical'])
         same_raw = self.audit(fresh, fresh['body'])
         self.assertEqual(1, same_raw['identical'])
         self.assertEqual(len(fresh['body']), same_raw['results'][0]['after'])

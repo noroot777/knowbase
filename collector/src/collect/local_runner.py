@@ -30,7 +30,8 @@ def collect(emit, *, targets=None, since="", until="", reader=None,
               "matched_articles": 0, "download_done": 0, "download_total": 0,
               "download_succeeded": 0, "download_failed": 0, "existing_articles": 0,
               "excluded_articles": 0,
-              "body_failures": [], "unreadable_messages": 0, "unreadable_accounts": [],
+              "body_failures": [], "article_failures": [],
+              "unreadable_messages": 0, "unreadable_accounts": [],
               "unattributed_messages": 0, "coverage_unknown_accounts": []}
     reader = reader or LocalReader()
 
@@ -99,6 +100,8 @@ def _download(repo, articles, result, progress, round_key=""):
     pacer = RequestPacer()
     for owner, article, is_new in queue:
         current = f"{owner} · {article['title']}"
+        item = {"name": current, "id": article["id"], "account": owner,
+                "title": article["title"], "link": article["link"]}
         progress({"phase": "download", "current": current})
         succeeded = excluded = False
         try:
@@ -125,10 +128,13 @@ def _download(repo, articles, result, progress, round_key=""):
                 if state and state["reason"] == "unavailable":
                     result["unavailable_articles"] += 1
                 else:
-                    result["body_failures"].append({"title": current,
+                    result["body_failures"].append({**item,
                         "reason": "正文暂未获取，已安排自动重试"})
         except Exception as exc:
-            result["errors"].append(f"{current}: {exc}")
+            message = f"{current}: {exc}"
+            result["errors"].append(message)
+            result["article_failures"].append({**item, "error": message,
+                                              "reason": f"文章发现或入库失败：{exc}"})
         finally:
             # **一篇一个事务单元,出口一定要把它收掉。** 那几句受限写入即使影响 0 行
             # 也已经开着一个 SQLite 写事务(实测 `rowcount=0` 时 `in_transaction`

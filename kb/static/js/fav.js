@@ -95,8 +95,30 @@ async function saveFavModel() {
   } catch (error) { $('fav-model-state').textContent = '保存失败：' + error.message; }
 }
 
+function favOriginal(item) {
+  const indexed = item.document_available === true;
+  const detached = item.origin === 'doc' && !indexed;
+  const url = safeUrl(item.url);
+  const label = indexed ? '打开阅读' : detached
+    ? (url !== '#' ? '打开站外原文' : '原文已不在索引里')
+    : '回到' + (SNIP_LABEL[item.origin] || '原处');
+  return { indexed, detached, url, label };
+}
+
+function favDescription(item, detail = false) {
+  return (!detail && item.quote) || item.action?.what || item.summary || item.quote
+    || (favOriginal(item).detached ? '原文已不在索引里,可继续整理已保存的收藏内容。'
+      : detail ? '这条收藏的更多内容，藏在原文里。' : '打开原文，重新发现这条收藏。');
+}
+
 function favDocAHtml(f, labelHtml, cls = '') {
-  if (!f.path) return favJumpHtml(f, labelHtml, cls);
+  const original = favOriginal(f);
+  if (original.detached) {
+    return original.url !== '#'
+      ? `<a href="${esc(original.url)}" target="_blank" rel="noopener" class="${esc(cls)}" title="原文已不在索引里，打开站外原文">${labelHtml}</a>`
+      : `<span class="fv-original-missing" title="原文已不在索引里,收藏内容仍保留">${esc(original.label)}</span>`;
+  }
+  if (!original.indexed) return favJumpHtml(f, labelHtml, cls);
   // **`u`、`e`、`v` 三个都要一起带过去。**
   // `u` = 采集那一刻这段引文在那一篇里只有一处吗:阅读页的裸引文退路按它决定能
   // 不能采信(采集那一刻只有一处 ≠ 现在只剩一处,见 `kb/web/pages.py` 的 `seek`)。
@@ -439,14 +461,14 @@ async function undoFavChange() {
 
 async function favDel(id) {
   if (favBusy) return;
-  if (!await confirmBox({ title: '删除这条收藏？', body: '只删除这条收藏及其笔记，不会删除原文。也可以先移至暂存。', ok: '删除收藏', danger: true })) return;
+  if (!await confirmBox({ title: '删除这条收藏？', body: '只删除这条收藏及其笔记。也可以先移至暂存。', ok: '删除收藏', danger: true })) return;
   setFavBusy(true);
   try {
     await favJson('/api/favorites/' + id, { method: 'DELETE' });
     favDrafts.delete(id);
     favUndo = favUndo.filter(item => item.id !== id);
     favActive = null;
-    favFeedback('收藏已删除，原文仍在知识库中。', false);
+    favFeedback('收藏及其笔记已删除。', false);
     await loadFavPanel();
   } catch (error) { showFavError('删除失败：' + error.message); }
   finally { setFavBusy(false); }

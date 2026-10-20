@@ -35,6 +35,29 @@ class ExpansionTests(unittest.TestCase):
             self.assertEqual(OLD, result['watermark'])
             self.assertTrue(result['incomplete'])
 
+    def test_two_complete_empty_reads_can_still_be_followed_by_the_full_body(self):
+        empty = dict(snapshot(''), ready='complete', articles=1)
+        with patch.object(x_post, 'STEP', 0.0):
+            page = Page(empty, empty, snapshot(BODY), snapshot(BODY))
+            kept, note = x_post.complete([preview()], session=page)
+        self.assertEqual(4, page.reads)
+        self.assertEqual('', note)
+        self.assertEqual(BODY, kept[0]['body'])
+
+    def test_a_stable_preview_on_one_round_can_be_completed_on_the_next(self):
+        for attach in [False, True]:
+            for text, expected in [(PREVIEW, []), (BODY, [BODY])]:
+                page = Page(dict(snapshot(text), ready='complete', articles=1))
+                with self.subTest(attach=attach, text=text), patch.object(x_post, 'STEP', 0.0), \
+                     patch.object(x_browser, 'browser_session', return_value=nullcontext(page)), \
+                     patch.object(x_browser, '_harvest_one', return_value=([preview()], '')):
+                    result = x_browser.harvest([('Example', OLD)], profile='', attach=attach)['Example']
+                self.assertEqual(expected, [entry['body'] for entry in result['entries']])
+                if expected:
+                    self.assertNotEqual(OLD, result['watermark'])
+                else:
+                    self.assertEqual(OLD, result['watermark'])
+
 
 class ArticleHandoffTests(unittest.TestCase):
     def entry(self):
@@ -71,6 +94,16 @@ class ArticleHandoffTests(unittest.TestCase):
         self.assertNotIn(x_post.HINT, kept[0])
         self.assertNotIn(x_article.HINT, kept[0])
         request.assert_called_once()
+
+    def test_request_error_still_allows_article_recovery_without_freezing_a_recovered_post(self):
+        with patch.object(x_post, 'fetch', side_effect=x_post.PostRequestFailed('X 页面请求出错')), \
+             patch.object(x_article, 'API', 'https://article.test'), \
+             patch.object(x_article, 'fetch', return_value=ARTICLE):
+            kept, note = x_post.complete([self.entry()], session=Page())
+        self.assertEqual('', note)
+        self.assertEqual(1, len(kept))
+        self.assertIn(ARTICLE['body'], kept[0]['body'])
+        self.assertNotIn(x_post.HINT, kept[0])
 
     def test_the_article_browser_fallback_is_reachable_too(self):
         with patch.object(x_post, 'fetch', side_effect=x_post.PostUnavailable('no detail')), \

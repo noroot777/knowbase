@@ -34,9 +34,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from kb.feeds import x_account, x_article, x_body, x_post
+from kb.feeds import x_account, x_article, x_body, x_page_state, x_post
 from kb.feeds.x_cdp import Chrome, CdpError, profile_busy
-from kb.feeds.x_page_state import STATE_JS, XBrowserError, XRateLimited
+from kb.feeds.x_page_state import (
+    STATE_JS, XAccessBlocked, XBrowserError, XRateLimited, navigate, read)
+from kb.feeds.x_page_state import problem as page_problem
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 # 连续多少条老推文算"翻到底了"。1 不够:转推带的是原推时间,单条老的很常见。
@@ -91,6 +93,7 @@ _COLLECT_JS = r'''
     // 文章,按它去补就是把别人的正文记成这条推文的内容。排错了也只是回到漏掉
     // 的现状,而收错了是污染 —— 这个方向上宁可多排。
     const quote = art.querySelector('div[role="link"]');
+    const quoted = !!art.querySelector('[data-testid="quoteTweet"], div[role="link"] [data-testid="tweetText"]');
     const card = [...art.querySelectorAll('a[href*="/article/"]')]
                    .find(a => !(quote && quote.contains(a)));
     const art_url = card ? card.href : '';
@@ -103,11 +106,13 @@ _COLLECT_JS = r'''
       S.seen.set(id, {id, author: m[1], name: who, datetime: time.getAttribute('datetime'),
                       text, context: ctx, url: `https://x.com/${m[1]}/status/${id}`,
                       article: art_url || (prev && prev.article) || '',
+                      quoted: quoted || !!prev?.quoted,
                       truncated: truncated || !!prev?.truncated});
     } else if (art_url && prev && !prev.article) {
       prev.article = art_url;
     }
     if (truncated) S.seen.get(id).truncated = true;
+    if (quoted) S.seen.get(id).quoted = true;
   }
   return JSON.stringify({articles, parsed, items: [...S.seen.values()]});
 })()
@@ -215,11 +220,18 @@ def _own_tweet(item: dict, handle: str) -> bool:
     return (item.get('author') or '').lower() == handle.lower()
 
 
+def _quote_only(item: dict) -> bool:
+    return bool(item.get('quoted') and not (item.get('text') or '').strip()
+                and not item.get('article') and not item.get('truncated'))
+
+
 def _entry(item: dict) -> dict | None:
     """一条推文 → feed_items 的条目形状。没正文也没链接的不要。"""
     published = _as_published(item.get('datetime', ''))
     text = (item.get('text') or '').strip()
     if not item.get('url') or not (text or published):
+        return None
+    if _quote_only(item):
         return None
     name = item.get('name') or item.get('author') or ''
     context = (item.get('context') or '').strip()
@@ -242,23 +254,32 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
     """等页面落定,顺带认出登录失效/不存在/限流这三种不该当成"没有推文"的情况。"""
     last = {}
     previous = None
+    previous_problem = ''
+    confirmed_problem = ''
+    failure = XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
     while time.monotonic() < deadline:
-        last = json.loads(page.eval(_STATE_JS))
+        last = read(page, _STATE_JS)
         if last['login']:
             # **两条自救路都要说。** 这句话出现在每条失败订阅的旁边,而「重新登录」
             # 只是其中一条:登录态是导进来的那些人要的是再导一次(见
             # `x_login_import`),把他推去无头壳里登一次正是他想免掉的那一步。
             raise x_account.XAccountUnavailable(handle, 'login', 'login_control_or_route')
-        if last['limited']:
-            raise XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
         terminal = x_account.terminal(last, handle)
         if terminal and terminal == previous:
             raise x_account.XAccountUnavailable(handle, *terminal)
         previous = terminal
         matching = 'account' not in last or last['account'].get('handle') == handle.lower()
-        if matching and not terminal and last['articles'] and last['ready'] == 'complete':
+        current_problem = page_problem(last)
+        if (matching and not terminal and last['articles'] and last['ready'] == 'complete'
+                and not current_problem):
             return last
+        confirmed_problem = current_problem if current_problem == previous_problem else ''
+        if error := x_page_state.escalate(last, confirmed_problem, failure):
+            raise error
+        previous_problem = current_problem
         time.sleep(0.3)
+    if error := x_page_state.escalate(last, confirmed_problem, failure, expired=True):
+        raise error
     if last.get('ready') != 'complete':
         raise XBrowserError(f'@{handle} 的页面没有加载完')
     if (last.get('account') or {}).get('state') == 'unknown':
@@ -275,7 +296,7 @@ def _harvest_one(page: Chrome, handle: str,
     不在底部(懒加载卡住/被限流)。没有下界(floor 为空)时无从谈起"读到水位",
     那是新订阅的首轮,按读到的为准。
     """
-    page.goto(f'https://x.com/{handle}')
+    navigate(page, f'https://x.com/{handle}')
     deadline = time.monotonic() + ACCOUNT_SECONDS
     _wait_state(page, handle, deadline)
     page.eval(_RESET_JS)
@@ -360,7 +381,16 @@ def _settle(page: Chrome, before: int, deadline: float) -> bool:
     return False
 
 
-def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list[dict]:
+class TimelineEntries(list):
+    """Selected entries plus informational skips and their observed timestamps."""
+
+    def __init__(self):
+        super().__init__()
+        self.skipped_quotes = 0
+        self.skipped_newest = None
+
+
+def _select(items: list[dict], floor: datetime | None, handle: str = '') -> TimelineEntries:
     """落到 feed_items 之前的最后一道:去掉不属于这条时间线的和过老的,转成条目形状。
 
     哪些不属于见 `_in_timeline`(推广位、推荐位)—— 入库口径只有那一份,两处各判
@@ -368,7 +398,7 @@ def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list
     翻到底的证明(`_own_tweet`),但刚发出来就被钉上去的推文在 X 上看得见,不收
     就是永久丢掉一条真内容。
     """
-    out = []
+    out = TimelineEntries()
     for item in sorted(items, key=lambda i: i.get('datetime') or ''):
         if not _in_timeline(item, handle):
             continue
@@ -377,6 +407,9 @@ def _select(items: list[dict], floor: datetime | None, handle: str = '') -> list
             continue
         if entry := _entry(item):
             out.append(entry)
+        elif _quote_only(item) and item.get('url') and when:
+            out.skipped_quotes += 1
+            out.skipped_newest = max(out.skipped_newest, when) if out.skipped_newest else when
     return out
 
 
@@ -446,7 +479,10 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 unavailable = []
                 try:
                     entries, incomplete = _harvest_one(page, handle, floor)
+                    skipped_quotes = getattr(entries, 'skipped_quotes', 0)
                     observed_watermark = _newest(entries, water)
+                    note = (f'跳过 {skipped_quotes} 条本人无正文的引用推文,未冒充本人观点入库'
+                            if skipped_quotes else '')
                     # 长文(Article)推文在时间线上一个字都没有,正文要单独取一次。
                     # 取不到的那几条本轮不入库、并按"没读完"办 —— 空正文一旦落库
                     # 就再也更新不了(`put_items` 是 DO NOTHING),见 `x_article`。
@@ -478,8 +514,10 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                     results[handle] = {
                         'entries': entries, 'error': '', 'incomplete': incomplete,
                         **x_post.unavailable_report(unavailable),
+                        'skipped_quotes': skipped_quotes,
+                        'note': ';'.join(filter(None, [note, x_post.unavailable_note(unavailable)])),
                         'watermark': started if incomplete else observed_watermark}
-                except XRateLimited as e:
+                except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable) as e:
                     if unavailable:
                         results[handle] = {'entries': [], 'error': str(e),
                                            **x_post.unavailable_report(unavailable)}
@@ -490,10 +528,10 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 except (XBrowserError, CdpError) as e:
                     results[handle] = {'entries': [], 'error': str(e),
                                        **x_post.unavailable_report(unavailable)}
-    except (XRateLimited, CdpError, EOFError, OSError) as e:
+    except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable, CdpError, EOFError, OSError) as e:
         # 浏览器整个起不来/中途死了:剩下的账号统一记成同一个原因,
         # 而不是逐个报一条看不出共同根因的错。
-        reason = str(e) if isinstance(e, (XRateLimited, CdpError)) else f'浏览器会话中断:{e}'
+        reason = str(e) if isinstance(e, (XBrowserError, x_post.PostSessionUnavailable, CdpError)) else f'浏览器会话中断:{e}'
         for handle, _ in jobs:
             results.setdefault(handle, {'entries': [], 'error': reason})
     return results
@@ -505,15 +543,10 @@ def _newest(entries: list[dict], fallback: str) -> str:
     **一条都没抓到时沿用旧水位**,不要改成"现在":那等于把这段时间宣布为已抓过,
     而这一轮可能只是没滚到(预算用完、X 限流)。水位只前进到确实见过的那条推文。
     """
-    stamps = [e['published'] for e in entries if e.get('published')]
-    if not stamps:
-        return fallback
-    newest = max(stamps)
-    try:
-        local = datetime.strptime(newest, '%Y-%m-%d %H:%M').replace(tzinfo=SHANGHAI)
-    except ValueError:
-        return fallback
-    return local.astimezone(timezone.utc).isoformat()
+    stamps = [_utc(entry['published']) for entry in entries if entry.get('published')]
+    stamps.append(getattr(entries, 'skipped_newest', None))
+    newest = max((stamp for stamp in stamps if stamp is not None), default=None)
+    return newest.isoformat() if newest else fallback
 
 
 def open_login_window(profile: str, chrome_path: str = '') -> str:

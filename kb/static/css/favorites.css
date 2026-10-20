@@ -75,6 +75,7 @@
 .fv-card-eta { color: var(--muted); font-size: 11px; }
 .fv-read-link { display: inline-flex; align-items: center; gap: 9px; font-size: 12px; color: var(--brand); text-decoration: none; font-weight: 550; white-space: nowrap; min-height: 28px; }
 .fv-read-link:hover { text-decoration: underline; }
+.fv-original-missing { color: var(--muted); font-size: 12px; cursor: default; }
 .fv-state-done { color: var(--brand); }
 .fv-state-archived { color: var(--muted); }
 .fv-inspector { position: sticky; top: 24px; min-width: 0; scroll-margin-top: 20px; }

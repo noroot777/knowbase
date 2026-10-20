@@ -37,7 +37,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from kb.feeds import readable, registry as reg
-from kb.feeds.fetching import FeedError, request
+from kb.feeds.exclusion import failure
+from kb.feeds.fetching import FeedError, SOURCE_SECONDS, request
 # 「这一行此刻是哪一版」那份口径摆在 `grab_store` 里(两个版本身份 ——
 # 内容身份 `item_version` 和工作身份 `work_version` —— 要摆在一起对照着读),
 # 本模块和手动重抓那条链共用它。再导出一次,让 `fulltext.work_version` 照旧能用。
@@ -101,7 +102,13 @@ def fetch_one(url: str) -> tuple[str, str]:
     空串,是因为空串那条路的提示写的是"可能需要登录或由脚本渲染",而这里的
     原因明确得多 —— 面板上要说得出是哪一类。
     """
-    response = request(url, _HEADERS)
+    from kb.feeds.markdown_source import accept, fetch, from_response, target
+    deadline = time.monotonic() + SOURCE_SECONDS if target(url) else None
+    if markdown := fetch(url, transport=request, deadline=deadline):
+        return markdown, ''
+    response = request(url, accept(_HEADERS), **({'deadline':deadline} if deadline is not None else {}))
+    if markdown := from_response(response):
+        return markdown, ''
     if problem := readable.html_problem(response.body, response.headers):
         raise FeedError(problem)
     return readable.extract_or_reason(readable.decode(response.body, response.headers))
@@ -243,8 +250,7 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
                 else:
                     summary['failed'] += 1
                     summary['failed_keys'].append(item['key'])
-                    summary['errors'].append({'title': item['title'][:120],
-                                              'reason': str(error)[:300]})
+                    summary['errors'].append(failure(item, error, kind))
             elif body is None:               # 停止请求 / 预算用完,留给下一轮
                 summary['left'] += 1
                 summary['stopped'] = True
@@ -268,8 +274,7 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
                 else:
                     summary['empty'] += 1
                     summary['failed_keys'].append(item['key'])
-                    summary['errors'].append({'title': item['title'][:120],
-                                              'reason': said[:300]})
+                    summary['errors'].append(failure(item, said, kind))
             if progress:
                 # 作废那几条也算「处理过了」:不算的话进度条到不了头(面板上那一行
                 # 会永远停在 N-1/N)。
