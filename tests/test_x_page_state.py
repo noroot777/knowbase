@@ -1,4 +1,5 @@
 """HTTP status evidence is scoped to the current page's own core X requests."""
+import copy
 import json
 import unittest
 from collections import deque
@@ -31,12 +32,18 @@ class EventSession(Session):
         self.events = events
         self.reads = 0
         self.available = available
+        self._navigation_count = 0
 
     def _post(self, message, deadline):
         result = {}
         if message['method'] == 'Page.navigate':
-            self.incoming.extend(self.events)
-            result = dict(loaderId='current')
+            self._navigation_count += 1
+            loader = 'current' if self._navigation_count == 1 else f'page-{self._navigation_count}'
+            for event in copy.deepcopy(self.events):
+                if event.get('params', {}).get('loaderId') == 'current':
+                    event['params']['loaderId'] = loader
+                self.incoming.append(event)
+            result = dict(loaderId=loader)
         if message['method'] == 'Runtime.evaluate':
             self.reads += 1
             result = dict(result=dict(value=json.dumps(dict(

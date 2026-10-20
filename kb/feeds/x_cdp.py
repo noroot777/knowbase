@@ -109,9 +109,12 @@ class Session:
     def __init__(self) -> None:
         self._seq, self._sid, self._target = 0, '', ''
         self._event_observers = []
+        self._call_observers = []
 
-    def observe_events(self, observer) -> None:
+    def observe_events(self, observer, *, after_call=None) -> None:
         self._event_observers.append(observer)
+        if after_call is not None:
+            self._call_observers.append(after_call)
 
     # ── 传输(子类实现)──────────────────────────────────────────────────────
 
@@ -145,17 +148,21 @@ class Session:
         deadline,写不动就报错,而不是替调用方把时间花在那儿。
         """
         deadline = time.monotonic() + timeout
-        want = self._send(method, params, sid, deadline)
-        while True:
-            msg = self._take(deadline)
-            if msg.get('method'):
-                for observer in self._event_observers:
-                    observer(msg)
-            if msg.get('id') != want:
-                continue                              # 别人的回复,或是事件
-            if 'error' in msg:
-                raise CdpError(f"{method} 失败:{msg['error'].get('message', '')}")
-            return msg.get('result', {})
+        try:
+            want = self._send(method, params, sid, deadline)
+            while True:
+                msg = self._take(deadline)
+                if msg.get('method'):
+                    for observer in self._event_observers:
+                        observer(msg)
+                if msg.get('id') != want:
+                    continue
+                if 'error' in msg:
+                    raise CdpError(f"{method} 失败:{msg['error'].get('message', '')}")
+                return msg.get('result', {})
+        finally:
+            for observer in self._call_observers:
+                observer(method)
 
     # ── 页面 ────────────────────────────────────────────────────────────────
 

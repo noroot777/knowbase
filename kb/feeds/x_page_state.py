@@ -1,5 +1,4 @@
 """Shared X page states and errors for timeline and post-detail readers."""
-import copy
 import json
 from urllib.parse import urlsplit
 
@@ -47,7 +46,7 @@ class Responses:
         self.content_operations = frozenset()
         self.loader = ''
         self.statuses = {}
-        self.previous = None
+        self.consumer = None
 
     def reset(self, url: str) -> None:
         parsed = urlsplit(url)
@@ -59,8 +58,6 @@ class Responses:
         self.statuses = {}
 
     def receive(self, event: dict) -> None:
-        if self.previous is not None:
-            self.previous.receive(event)
         if event.get('method') != 'Network.responseReceived' or (
                 event.get('sessionId') != self.session_id):
             return
@@ -107,26 +104,21 @@ def navigate(session, url: str):
         timeline.before_navigation()
     if not isinstance(session, Session):
         return session.goto(url)
+    from kb.feeds.x_response_scope import ResponseScopes
+
+    scopes = getattr(session, '_x_response_scopes', None)
     responses = getattr(session, '_x_responses', None)
-    if responses is None:
+    if scopes is None:
         session.call('Network.enable', {}, session._sid)
-        responses = Responses(session._sid)
-        session.observe_events(responses.receive)
-        session._x_responses = responses
+        scopes = ResponseScopes(session)
+        session.observe_events(scopes.receive, after_call=scopes.check)
+        session._x_response_scopes = scopes
     elif responses.session_id != session._sid:
         session.call('Network.enable', {}, session._sid)
-        responses.session_id = session._sid
-    previous = copy.copy(responses) if tracking else None
-    responses.reset(url)
-    responses.previous = previous
-    try:
-        navigation = session.goto(url)
-        responses.loader = navigation.get('loaderId', '')
-        if previous is not None:
-            timeline.drain(previous)
-        return navigation
-    finally:
-        responses.previous = None
+    scopes.start(url)
+    navigation = session.goto(url)
+    scopes.navigated(navigation)
+    return navigation
 
 
 def read(session, script: str) -> dict:

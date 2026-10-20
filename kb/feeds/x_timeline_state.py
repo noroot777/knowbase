@@ -1,4 +1,4 @@
-"""Consume timeline errors through collection, finalization and the next navigation."""
+"""Consume timeline errors through collection and any later response from its requests."""
 from kb.feeds import x_page_state
 
 
@@ -13,6 +13,8 @@ class TimelineState:
         self.watermark = ''
         self.state = state
         page._x_timeline = self
+        if responses := getattr(page, '_x_responses', None):
+            responses.consumer = self
 
     def eval(self, script):
         result = self.page.eval(script)

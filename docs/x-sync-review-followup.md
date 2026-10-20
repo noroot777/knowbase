@@ -176,3 +176,58 @@ headless shell、全新临时 profile 和 localhost 夹具；不接用户 Chrome
 自建扩展标签已关闭，隔离服务已停止、58137 无监听、临时数据目录已删除；
 真实协议测试的独立浏览器、HTTP 线程和临时 profile 已由测试清理。
 没有读写生产库、真实 vault、cookie 或 X 在线页面，也未接管用户标签。
+
+## 跨导航响应归属补修（2026-10-20，iZhou9byo3Uc 第 1 轮）
+
+仅承接本轮唯一必修项，不重新修改已通过的审计、提示字段、HTTP/DOM 空态契约。
+`Page.navigate` 回复不是旧请求终结：共享接收层分别保留页面 loader 归属和未结束请求的
+`sessionId/requestId` 归属。请求收到 `loadingFinished/loadingFailed` 后移除在途记录；
+紧凑的 loader/消费者索引保留到本轮会话结束，兼容没有先观测到请求起始的迟到响应。
+新页面只使用自己的 HTTP 状态；旧页面核心错误仍交回原账号，不能顺手扣给当前账号。
+旧账号的普通失败修正尚未入库的结果并冻结原下界；429 停止余批。已失败、尚未建立
+时间线消费者的页面也不能吞掉自己的迟到核心 429。
+
+事件观察者只登记错误和修正归属结果；批次停止在协议命令回复消费完之后抛出，失败命令也经过
+相同交接，不因观察者抢先抛错而遗留未消费的命令回复。关闭自有标签/浏览器时不打断清理命令。
+
+### 本轮浏览器通道选择
+
+先用 Chrome 扩展命名 `🔎 X 响应归属修复验证`，新建分组后台标签并重新检查能力。
+浏览器仅暴露 `viewport/management`，标签仅 `pageAssets`；公共接口没有原始 CDP 传输、
+`Network` 事件订阅或受控事件交付，无法验证本轮必须覆盖的产品协议接收链。
+这不是扩展断连、页面打不开或登录墙。自建标签已关闭；仅协议/DOM 回归降级到第 2 档
+独立 headless shell、全新临时 profile 与 localhost 夹具，不接用户 Chrome 的 CDP，
+不启动有头浏览器，也不访问线上 X 或读取 cookie。
+
+### 本轮验证结果与限制
+
+- 11 个新增内存协议/业务测试覆盖两通道、导航回复后的旧 429/503、有无请求起始事件、
+  跨两个新 loader、时间线切详情、导航失败、辅助错误、请求完成/取消、其它 session 的终结事件、
+  未建立时间线的失败页面及最终关闭时收到错误。三订阅真实 `prefetch → take → _save_result`
+  验证 429 不写新条目、不读 Last、旧水位保留；503 的原账号条目仍入库但留旧水位和未完成说明，
+  其余账号正常前进；下一轮成功清空说明并继续推进。新账号首次 evaluate 已发出后才收到旧 429
+  时不能撤回该命令，但回复消费完即停止，不再读取该账号或打开后续账号。
+- `HEADLESS_SHELL=/nonexistent uv run --offline python -m unittest
+  tests.test_x_response_ownership tests.test_x_late_timeline tests.test_x_audit_epochs
+  tests.test_x_audit_retention tests.test_x_post_audit tests.test_x_page_policy
+  tests.test_x_review_contracts tests.test_x_page_state tests.test_x_post_repair_contract
+  tests.test_x_collectors tests.test_x_watermark -q` → **152 tests, OK，无跳过**，5.004 秒。
+- `HEADLESS_SHELL=<本机 chrome-headless-shell> uv run --offline python -m unittest
+  tests.test_x_response_dom tests.test_x_post_dom -q` → **33 tests, OK，无跳过**，5.010 秒。
+  新协议测试在真实临时浏览器中请求 localhost 的 UserTweets 429/503，保留 Chrome 实际产生的
+  requestId、loaderId 和事件，工装仅延迟 response/终结事件交付到下一账号或详情导航回复之后。
+  不伪造 HTTP/协议载荷，不替换消费者或结果；这证明受控交付时序下的真实协议集成，
+  **不声称 Chrome 或线上 X 自然产生过这一时序，也不测线上发生频率**。
+  四个子场景均断言自有浏览器进程退出且优雅关闭成功，HTTP 服务和临时 profile 由测试清理。
+- `HEADLESS_SHELL=/nonexistent uv run --offline python -m unittest discover -s tests -t . -q`
+  → **2753 tests, OK (skipped=113)**，115.249 秒，退出码 0。
+  本次实际执行 2640 项；113 个跳过中另行执行上述 33 项，仍有 80 项未执行，不计为通过。
+  定向回归是全仓子集，不重复累计。
+- 内存变异仅在导航回复处丢弃旧页面/请求索引，新增账号和详情回归捕获 **12 个失败子用例**，
+  无异常子用例；原产品文件未为变异验证改写。
+- 所有本轮变更 Python 文件通过 `uvx --offline ruff check`，`git diff --check` 通过；
+  变更代码文件最长 452 行，均不超过 700 行。
+
+日志在 `/tmp/kb-x-fix-AACErx-ownership/`。本轮没有界面改动，不重复截图或操作生产订阅页面。
+扩展自建标签已关闭，独立浏览器和本地 HTTP 测试服务已清理；未接管、导航或切换用户已有标签，
+也没有修改生产数据库、真实 vault 或登录态。
