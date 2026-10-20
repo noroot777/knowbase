@@ -589,10 +589,14 @@ def start_retry_failed() -> tuple[bool, str]:
                            "detail": detail[s]}
                        for s in STAGES},
         })
-    _log("重试失败项: " + " → ".join(plan))
+    # 账本降级、抓取被摘掉这两档**都要跟着起跑消息一起说出去**:一句
+    # 「index → extract」看不出今天还有没补上的东西(见 `daybook.unfinished`)。
+    # **而且要进运行日志**:起跑那句话是一次性的(面板上那条 toast 一会儿就没了),
+    # 而「今天早些时候那几笔这次补不到」是事后回头查才想得起来的事 —— 日志跟着
+    # 这一轮落盘、也进历史记录,那才是它该待的地方(审查 N1)。
+    notes = [n for n in (blocked_note, degraded) if n]
+    line = " → ".join(plan) + (f"（{'；'.join(notes)}）" if notes else "")
+    _log("重试失败项: " + line)
     threading.Thread(target=_run_retry_failed,
                      args=(plan, crawl_filter, export_filter), daemon=True).start()
-    # 账本读不出来、抓取被摘掉这两档**都要跟着起跑消息一起说出去**:一句
-    # 「index → extract」看不出今天还有没补上的东西(见 `daybook.unfinished`)。
-    notes = [n for n in (blocked_note, degraded) if n]
-    return True, " → ".join(plan) + (f"（{'；'.join(notes)}）" if notes else "")
+    return True, line

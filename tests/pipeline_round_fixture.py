@@ -13,6 +13,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from kb import pipeline_batch as pb
+from kb import pipeline_daybook as daybook
+from kb import pipeline_results as results
 from kb import pipeline_state as ps
 
 # 进程内常驻、会在用例之间互相渗的那几格(理由见 `isolate_pipeline_state`)。
@@ -67,6 +69,13 @@ def isolate_pipeline_state(case: unittest.TestCase) -> Path:
         ps._finished.clear(); ps._finished.update(before_done)
         for mod, name, value in keep:
             setattr(mod, name, value)
+        # 当日账本那两格是字典,整个换掉会把别人持有的引用换丢 —— 清空就够
+        # (键带着账本文件路径,见 `pipeline_daybook._pending`)。
+        daybook._pending.clear()
+        daybook._lost.clear()
+        # 结果账同理(`kb/pipeline_results.py`):正常收尾会清,没走到收尾的那几局
+        # 会把它漏给下一条。
+        results.clear()
         pb.close_batch()
 
     case.addCleanup(restore)

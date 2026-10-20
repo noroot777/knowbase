@@ -11,7 +11,9 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
-from kb import pipeline, pipeline_persist as persist, pipeline_state as state
+from kb import pipeline, pipeline_daybook as daybook
+from kb import pipeline_results as results
+from kb import pipeline_persist as persist, pipeline_state as state
 
 
 class HistoryCase(TestCase):
@@ -34,6 +36,13 @@ class HistoryCase(TestCase):
         # 完整同步」顶回去,而它单跑永远是绿的。
         state._restored, state._restore_gap, state._seq_hwm = '', '', 0
         state._persist_error = ''
+        # 当日账本那两格同理(`pipeline_daybook._pending` / `_lost`):落盘失败的那几局
+        # 会往里留一笔,而这一族里好几条就是专门注入落盘失败的。
+        daybook._pending.clear()
+        daybook._lost.clear()
+        # 结果账也是模块级的(`kb/pipeline_results.py`):正常收尾会清,而没走到
+        # 收尾的那几局会把它漏给下一条 —— 那是「同跑时红、单跑永远绿」那一类。
+        results.clear()
 
     def reset(self, run_id=''):
         # 「刚启动,还没从磁盘恢复过」。`running=True` 让恢复短路,所以这一句对自己

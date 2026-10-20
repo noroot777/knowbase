@@ -35,6 +35,23 @@ class FeedCollector:
         from kb.feeds.sync import collect
         collect(self.name, scope)
 
+    def stable_targets(self, targets):
+        """见 `kb.collectors.TargetIdentity`。名字和编号都归到订阅 id 上。
+
+        匹配走 `reg.in_scope`(唯一一份口径,`status` 和 `sync.collect` 同款),
+        所以这里认的和真正去抓的那一批**必定是同一批**。**一个都没匹配上的那几个
+        原样留着** —— 它可能刚被删掉或改了名,从账上摘掉就是漏记。
+        """
+        sources = reg.subscriptions(self.name)
+        out, matched = [], set()
+        for want in targets:
+            hit = [str(s['id']) for s in sources if reg.in_scope(s, (want,))]
+            out.extend(hit)
+            if hit:
+                matched.add(want)
+        out.extend(str(t) for t in targets if t not in matched)
+        return list(dict.fromkeys(out))
+
     def retry_targets(self, note):
         """「重试失败项」要重抓的订阅(见 `kb.collectors.RetryNarrowing`)。"""
         from kb.feeds.sync import still_failing

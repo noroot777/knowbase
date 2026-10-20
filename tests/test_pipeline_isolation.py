@@ -63,6 +63,12 @@ def _classes(tree: ast.AST) -> set[str]:
     return {n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
 
 
+def _class_bases(tree: ast.AST) -> dict[str, set[str]]:
+    """这份文件里 `{类名: {基类的末段名}}` —— 给「圈地可继承」那一步建图用。"""
+    return {n.name: {b.id if isinstance(b, ast.Name) else _name_of(b) for b in n.bases}
+            for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
+
+
 def _base_names(tree: ast.AST) -> set[str]:
     """这份文件的那些类是从哪些名字继承下来的(末段名字)。"""
     out = set()
@@ -132,7 +138,8 @@ class PipelinePersistenceFenceTests(unittest.TestCase):
 
         三种合法形状:①就地调 `isolate_pipeline_state(...)`;②就地 patch 掉
         `_STATE_FILE`(三份落盘都从它派生,圈一个就够);③**继承**一个定义在
-        「自己满足前两条」的模块里的基类(它的 `setUp` 替它圈)。
+        「自己满足前两条」的模块里的基类(它的 `setUp` 替它圈),**或者继承那种基类的
+        子类** —— 第三条认**整条基类链**,不只认一层。
         第三条认的是**继承**,不是"import 过那个夹具" —— 只 import 一个函数
         (`finish_round`)并不会让谁替你圈地,而按 import 放行会把那一档静默漏掉。
         按 AST 认而不是照文本 grep:`_end_run` 这个名字在 mock 里也出现
@@ -142,6 +149,18 @@ class PipelinePersistenceFenceTests(unittest.TestCase):
         trees = _parsed()
         fenced = {name for name, tree in trees.items() if _fences_itself(tree)}
         inheritable = set().union(*(_classes(trees[name]) for name in fenced))
+        # 圈地**沿基类链传递**:链上只要有一处圈住,继承下来的就都被圈住。只认一层的
+        # 后果是一个**只放基类的模块**(自己不圈,圈的活在它父类的 `setUp` 里)会把继承
+        # 它的那几份静默报成「没圈落盘」—— 而那几份其实一直是隔离的,红的是判据自己。
+        # 按名字闭包看不出「子类覆盖了 setUp 又不调 super()」,但只认一层时也看不出,
+        # 所以这不是放宽带来的新洞。
+        bases_by_class = [_class_bases(tree) for tree in trees.values()]
+        while True:
+            grown = {cls for in_file in bases_by_class for cls, parents in in_file.items()
+                     if parents & inheritable} - inheritable
+            if not grown:
+                break
+            inheritable |= grown
         offenders = [name for name, tree in sorted(trees.items())
                      if _finishes_a_round(tree) and name not in fenced
                      and not (_base_names(tree) & inheritable)]
@@ -151,6 +170,7 @@ class PipelinePersistenceFenceTests(unittest.TestCase):
         self.assertTrue(_finishes_a_round(trees['pipeline_round_fixture']))
         self.assertIn('pipeline_round_fixture', fenced)
         self.assertIn('RoundStore', inheritable, '夹具那个圈地基类得被认出来')
+        self.assertIn('DaybookCase', inheritable, '圈地基类的子类也得算圈住了')
 
 
 if __name__ == '__main__':

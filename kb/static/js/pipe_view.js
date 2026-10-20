@@ -234,21 +234,37 @@ function renderPipeState(s) {
   // 需处理的问题在整轮结束后统一收进总览卡片:哪几步、各自卡在什么,配一颗重试按钮,
   // 不用去每个步骤卡片里找「需处理」。运行中不出现(失败项不阻止本轮继续)。
   const failedStages = planned.filter(k => pipeHasFailure(stages[k]));
-  const owed = (s.today_failed || []).length;
+  // **「今天还欠哪几步」这一份,整个问题区和那颗按钮共用。** 翻历史时不算:
+  // 它说的是此刻这一天,而屏幕上是上午那一轮(同下面那颗按钮的 `viewing` 那道)。
+  const owedStages = s.running || viewing ? [] : (s.today_failed || []);
+  const owed = owedStages.length;
   $('pipe-state-hint').textContent = pipeStateHint(s, result, failed, skipped, { label, completed, total: planned.length }, owed);
   const backlog = !s.running && !viewing && pipePending.extract > 0;
   const issues = $('pipe-issues');
-  issues.hidden = s.running || !(failedStages.length || backlog);
+  // **三样(标题、说明、重试按钮)共用这一份判据。** 按钮自己解除隐藏是不够的:
+  // 它在这个区**里面**(`index.html` 的 `#pipe-issues`),祖先藏着的话它的
+  // `hidden` 是 false、高度却是 0 —— 页面上明说「今天早些时候还有 1 个步骤没补
+  // 上」,而那颗按钮一个像素都没有(第 2 轮审查实页实测)。可操作性取决于整条
+  // 祖先链,不是控件自己那一格属性。
+  issues.hidden = s.running || !(failedStages.length || owed || backlog);
   if (!issues.hidden) {
     $('pipe-issues-title').textContent = failedStages.length
       ? `${failedStages.length} 个步骤需处理`
+      : owed
+      ? `今天还有 ${owed} 个步骤没补上`
       : `还有 ${pipePending.extract} 项内容待提取`;
     // **只写哪几步,不抄它们的 detail。** 同一个字符串在下面那几行步骤的
     // `.pipe-stage-detail` 里已经有一份(存量实测有 200 字的),一屏上出现两遍 ——
     // 同元规则「口径只有一份」。这里的职责收敛成「哪几步 + 去哪看」。
-    const where = failedStages.map(k => `<b>${esc(STAGE_META[k].name)}</b>`).join('、');
+    const names = keys => keys.map(k => `<b>${esc(STAGE_META[k]?.name || k)}</b>`).join('、');
+    // 这一轮全绿、今天还欠着那一档:**哪几步要写出来,而且不许说「明细在下面」**
+    // —— 下面那几张卡片讲的是这一轮(它们全是绿的),欠的那几步在屏幕上压根没有
+    // 自己的卡片。
     $('pipe-issues-list').innerHTML = failedStages.length
-      ? `${where} · 各自的明细在下面那一步里`
+      ? `${names(failedStages)} · 各自的明细在下面那一步里`
+        + (backlog ? `；另有 ${pipePending.extract} 项内容待提取` : '')
+      : owed
+      ? `${names(owedStages)} · 今天早些时候没做完，可按它们各自的范围重试`
         + (backlog ? `；另有 ${pipePending.extract} 项内容待提取` : '')
       : '在下面的「提取知识」里重试，或新建一次同步。';
   }
@@ -266,7 +282,7 @@ function renderPipeState(s) {
   // 按钮当场藏掉,那几笔连点的机会都没有(后端口径 `pipeline_retry.today_failed`,
   // 账本空着时它退回最近一次运行,所以只会多显示、不会少显示)。
   $('pipe-retry').hidden = s.running || !!viewing
-    || !(failed || (s.today_failed || []).length || pipePending.extract > 0);
+    || !(failed || owed || pipePending.extract > 0);
   renderPipeLog((s.log?.length ? s.log : result.log) || [], result.finished_at);
   syncPipeLogPanel(s.running && !viewing, pipeVersion(s));
   // 轮次列那一行「正在运行」跟着此刻的快照走(口径在 `pipe_history.js`)

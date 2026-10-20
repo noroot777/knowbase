@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from kb.pipeline_results import merge as results_merge
 from kb.pipeline_state import STAGES, _cap_failures, _now, new_run_id
 
 # ── 一次业务轮里的几轮管道,合并成一份结果 ──────────────────────────────────────
@@ -169,6 +170,11 @@ def _merge_runs(records: list[dict], events: list[str] | None = None,
         "stages": stages,
         "crawl_filter": _merge_scopes(records, "crawl_filter"),
         "export_filter": _merge_scopes(records, "export_filter"),
+        # 结果账按 `(步骤, 来源)` 并起来,**后面那一轮说了算**(口径在
+        # `pipeline_results.merge`)。不并的话整批那一份就是「没有结果账」,折账
+        # 只能退回「把整步那张合并卡片摊到每个来源上」—— 而整批那张卡片恰恰是
+        # 一批里 RSS 失败 + 公众号成功合成的一个 error。
+        "results": results_merge(records),
         "run_id": run_id,
         # 顺序凭据沿用**最后那一轮**的(身份也是它的):合并不是新发生的一轮,
         # 而恢复要靠这两格分出谁更新(见 `pipeline_persist._seq_of`)。缺了它们

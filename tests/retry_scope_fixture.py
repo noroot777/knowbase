@@ -9,14 +9,16 @@ from __future__ import annotations
 import tempfile
 import time
 import unittest
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from kb import maintenance, pipeline_retry, pipeline_stages, pipeline_state
+from kb import pipeline_results as results
+from kb import (maintenance, pipeline_daybook as daybook, pipeline_retry,
+                pipeline_stages, pipeline_state)
 from kb.feeds import registry as reg, sync
 # 直接从它自己的模块导:`sync.fetching` 这个属性压根不存在(sync 是
 # `from kb.feeds.fetching import ...`),写成那样抛的是 AttributeError ——
@@ -55,6 +57,14 @@ class RoundBase(unittest.TestCase):
         pipeline_state._state.update(running=False, stop_requested=False,
                                      crawl_retry={})
         self.addCleanup(lambda: pipeline_state._state.update(self.saved))
+        # 当日账本里「写不上就留在内存里」那两格是**模块级**的(见
+        # `pipeline_daybook._pending`)。键带着账本文件路径,所以漏不到别的用例头上,
+        # 但同一个文件里后面那几局会多出一笔欠账、以及一句「丢了几轮」的降级说明。
+        self.addCleanup(daybook._pending.clear)
+        self.addCleanup(daybook._lost.clear)
+        # 结果账也是模块级的(`kb/pipeline_results.py`):正常收尾会清,而没走到
+        # 收尾的那几局会把它漏给下一条 —— 「同跑时红、单跑永远绿」那一类。
+        self.addCleanup(results.clear)
 
     def _begin(self, crawl_filter, kind='manual', stages=('crawl',)):
         """照 `pipeline.start_pipeline` 的样子摆一轮运行的骨架。"""
@@ -148,6 +158,30 @@ class RetryScopeBase(RoundBase):
              patch.object(pipeline_retry, '_run_extract'), \
              patch.object(pipeline_retry, '_run_projects'), \
              patch.object(pipeline_retry, '_run_wiki'):
+            ok, msg = pipeline_retry.start_retry_failed()
+            self.assertTrue(ok, msg)
+            self._wait_idle('重试那一轮没有收尾')
+        return got, self.stage()
+
+    def retry_settled(self, broken=()):
+        """同 `retry()`,但后面那几步**照实报成功**,所以末态就是真正的末态。
+
+        `retry()` 里那几个替身一声不响,于是收尾把它们从 `pending` 改写成
+        `error`(「流程中断,未完成」)—— 那是摆盘的产物,不是被测行为。要断言
+        「这一轮之后今天还欠不欠」就必须用这一份:不然 `today_failed()` 里永远
+        躺着 export/index/extract 三条,真正要看的那一条被埋掉。
+
+        **crawl 这条链照旧一行不打桩**(理由同 `retry()`)。
+        """
+        got: set[int] = set()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(
+                sync, 'fetch_source', side_effect=self._fetcher(got, broken, 'p3')))
+            for name in ('export', 'index', 'extract', 'projects', 'wiki'):
+                stack.enter_context(patch.object(
+                    pipeline_retry, '_run_' + name,
+                    side_effect=lambda *a, stage=name:
+                        pipeline_state._stage(stage, 'ok', '完成')))
             ok, msg = pipeline_retry.start_retry_failed()
             self.assertTrue(ok, msg)
             self._wait_idle('重试那一轮没有收尾')

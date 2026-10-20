@@ -348,6 +348,13 @@ def _publish_merged(*, archive: bool) -> Exception | None:
         _publish_right(_batch_round_ids())
     except PublishRefused as e:
         _batch_issue = e.reason
+        # **没资格当「最近一次运行」,不等于没资格补全自己那条历史。** 两件事是两种
+        # 权限(口径在 `ps.update_history_round`):这一批自己那条历史还是自己的,
+        # 这次的结论得补得进去 —— 不补的话翻那一轮的同步历史永远查不到日报成没成
+        # (审查 R4)。`archive=False` 的调用方(子轮收尾)不走这里:紧接着
+        # `_end_run` 自己那一笔会写,而那一笔走的是 `_save_own` 的局部结果。
+        if archive:
+            _archive_refused()
         return e
     merged = _merge_runs(_batch_runs, _batch_notes, _batch_kind)
     try:
@@ -378,6 +385,33 @@ def _publish_merged(*, archive: bool) -> Exception | None:
     return None
 
 
+def _archive_refused() -> None:
+    """发布被拒那一档:把这次的结论**原位**补进这一批自己那条历史。**永不抛。**
+
+    走 `ps.update_history_round`(按身份原位替换、不插队、没有那一条就什么都不做)
+    —— `ps._save_history()` 在这里是不能用的:它会把记录插到清单最前面,而那张清单
+    是倒序的,于是一批更早的运行看着像是最后跑的那一轮。
+
+    **记录自己拼,不走 `_run_record()`**:那一份读的是内存里那格权威汇总
+    (`_batch_aggregate()`),而被拒这一档我们压根没动它(动了就等于声称自己是最新
+    的那一轮)。所以这里就地合一份出来 —— 合并的口径照旧只有 `_merge_runs` 那一份。
+
+    没有那一条(这一批一轮历史都没写上)时**不新增**,但要说出来:原因并进
+    `_batch_issue`,由 `close_batch` 的调用方报给用户。
+    """
+    global _batch_issue
+    try:
+        from kb.pipeline_persist import run_record   # 延迟:同 `_run_record` 那条
+        if ps.update_history_round(run_record(_merge_runs(_batch_runs, _batch_notes,
+                                                          _batch_kind))):
+            return
+        why = ('这一批在同步历史里还没有自己那一条,这次的结论没能补进去')
+    except Exception as e:                         # noqa: BLE001 - 见 docstring
+        why = (f'这一批的结论没能补进同步历史({e}),'
+               '翻那一轮的历史记录看不到这一次的结论')
+    _batch_issue = f'{_batch_issue};{why}' if _batch_issue else why
+
+
 def _archive_merged() -> None:
     """把刚记下的那一版也写进**历史副本**。已持 `ps._lock`。**永不抛。**
 
@@ -385,9 +419,10 @@ def _archive_merged() -> None:
     汇总(`_batch_aggregate()`),所以必须排在 `_remember_aggregate` **之后**:排前面
     存进历史的是上一版,这行字照旧不在。按 run id 幂等,重复写只是替换同一条。
 
-    **没资格发布那一档不走这里。** 那时期间已经有更新的一轮收尾了,而历史那张清单是
-    倒序的 —— 把这一批补写进去就是插到最前面,于是一批更早的运行看着像是最后跑的
-    那一轮。两份副本一起停在上一版、原因进 `_batch_issue`,这才是一致的。
+    **没资格发布那一档不走这里**,走 `_archive_refused`:那时期间已经有更新的一轮
+    收尾了,而历史那张清单是倒序的 —— 从这里补写进去就是插到最前面,于是一批更早的
+    运行看着像是最后跑的那一轮。那一档要的是**按身份原位更新**(不插队、不改排序),
+    那是另一个出口。
 
     写不上只少一条历史记录(那份是只读展示),但**要说出来**:原因并进 `_batch_issue`,
     由 `close_batch` 的调用方报给用户。

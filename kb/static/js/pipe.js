@@ -275,8 +275,16 @@ async function retryFailed() {
   if (pipeAction || pipeSnapshot?.running) return;
   pipeAction = 'retry'; invalidatePipeStatus(); renderPipeButtons();
   try {
-    await pipePost('/api/pipeline/retry-failed');
-    toast('已开始重试', { key: 'pipeline', type: 'ok', detail: '将处理失败阶段及必要的后续步骤，已完成内容按现有规则去重。' });
+    // **后端那句话要念出来,不许丢。** 它带着这一轮真会跑哪几步,以及两档降级:
+    // 当日账本读不出来时「今天早些时候那几笔这次可能补不到」、抓取暂时不可用时
+    // 「这一步留着下次补」(口径在 `pipeline_retry.start_retry_failed`)。丢掉之后
+    // 页面上只有一句一成不变的「将处理失败阶段」,而这一次的射程其实窄了一截
+    // （审查 N1）。同一句话另有一份落在运行日志里（toast 是一次性的）。
+    const started = await pipePost('/api/pipeline/retry-failed');
+    const plan = String(started?.plan || '');
+    toast('已开始重试', { key: 'pipeline', type: 'ok',
+      detail: (plan ? `本次：${plan}。` : '')
+        + '将处理失败阶段及必要的后续步骤，已完成内容按现有规则去重。' });
   } catch (e) { toast('重试未能启动', { key: 'pipeline', detail: e.message }); }
   finally { await refreshPipe(); pipeAction = ''; renderPipeButtons(); }
 }

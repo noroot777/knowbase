@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 
+from copy import deepcopy
+
 from kb.pipeline_persist import (
     _dump_bytes,
     _history_runs,
@@ -117,6 +119,38 @@ def _save_history() -> None:
     # 都还查得到它的结果和它的红,代价是病态那一档里老轮次的日志正文和明细长清单。
     runs = shed_bulk(prune_history(runs))
     _write_atomic(_history_file(), _dump_bytes({"runs": runs}))
+
+
+def update_history_round(record: dict) -> bool:
+    """按身份**原位**更新历史里已有的那一条。有就替换并返回 True,没有就什么都不做。
+
+    **「能不能替换『最近一次运行』」和「能不能补全自己已有的那条历史」是两种权限。**
+    发布被拒那一档(期间另有一轮更新的运行收尾了)只失去前一种:日报那一批自己
+    那条历史还是自己的,这次的结论得补得进去 —— 不然翻那一轮的同步历史永远查不到
+    日报到底成没成、为什么没成(「最近一次运行」那一格已经被别人接替,而日报自己
+    那份 `daily_last_run.json` 下一轮就被下一份日报换掉了,审查 R4)。
+
+    **不插队、不改排序。** 那张清单是倒序的,`_save_history` 会把记录插到最前面 ——
+    被拒那一档走它就等于让一批更早的运行看着像是最后跑的那一轮。所以这里只认
+    「已经有那一条」:没有就返回 False 让调用方说出来,**绝不新增一行**。
+
+    **空身份一律不认**(同 `_save_history` 那条):空串不是身份,拿它去匹配会把另一
+    轮没有身份的运行原地改写成我们这一批。
+
+    `shed_bulk` / `prune_history` 照旧过一遍(口径同 `_save_history`):换上去那一份
+    是整批合并出来的,带着几轮接起来的日志,比它顶掉的那一条大得多。
+    """
+    rid = record.get("run_id") or ""
+    if not rid:
+        return False
+    runs = _history_rounds_strict()
+    hit = [i for i, r in enumerate(runs) if r.get("run_id") == rid]
+    if not hit:
+        return False
+    for i in hit:
+        runs[i] = deepcopy(record)
+    _write_atomic(_history_file(), _dump_bytes({"runs": shed_bulk(prune_history(runs))}))
+    return True
 
 
 def load_history() -> list[dict]:

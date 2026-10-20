@@ -29,7 +29,9 @@ from kb.pipeline_history import (
     _run_record as _run_record,
     _save_history as _save_history,
     load_history as load_history,
+    update_history_round as update_history_round,
 )
+from kb import pipeline_results as _results
 from kb.pipeline_persist import (
     _SEQ_GEN,
     _dump_bytes,
@@ -215,7 +217,12 @@ def _stage(name: str, status: str, detail: str = "",
     # 用它只能在函数里 import;理由写在那个模块的头上)。这一阶段没在分段时
     # `fold` 返回 None,照原样写 —— 只更新当前那一段、再合成一条对外结论的判据
     # 全在那边,这里不许再判一次。
+    from kb.pipeline_results import note
     from kb.pipeline_segments import fold
+    # **两份账,各答一个问题。** 分段那一份答「面板上这张卡片怎么写」(各段扁平合并,
+    # 不带来源归属);结果账答「哪个来源这一步什么结论、实际覆盖了什么」—— 当日欠账
+    # 按它算。**记的是合并之前这一条**,合并之后就分不出是谁的了(第 3 轮审查 R2)。
+    note(name, entry)
     folded = fold(name, entry, detail)
     if folded:
         entry, detail = folded
@@ -290,6 +297,10 @@ def run_payload() -> dict:
         "run_seq": _state.get("run_seq", 0),
         "seq_gen": _state.get("seq_gen"),
         "crawl_retry": deepcopy(_state.get("crawl_retry") or {}),
+        # 结果账:逐来源的结论和它实际覆盖的范围(`kb/pipeline_results.py`)。
+        # **跟着这份契约走**,当日账本折的就是它 —— 落不下来的话折账只能退回
+        # 「把整步那张合并卡片摊到每个来源上」,一轮里成功的来源也被记成欠着。
+        "results": _results.snapshot(),
         "log": list(_state["log"]),
     }
 
@@ -472,10 +483,17 @@ def _restore_once() -> None:
         # 发号读的是磁盘不是内存,所以它们眼下改变不了任何可观测行为。
         _seq_hwm = max(_seq_hwm, _seq_of(pick))
         _state["stopped"] = bool(pick.get("stopped", False))
-        for key in ("stages", "crawl_filter", "export_filter", "crawl_retry"):
+        # **结果账也要恢复**(`results`):重启之后那颗按钮照旧要知道「这一轮里公众号
+        # 已经成功了」。丢掉它的后果是降级规划退回「整步那张合并卡片」,把成功的
+        # 来源也算成欠着 —— 状态文件里明明写着 `results.crawl.wechat_local=ok`,
+        # 恢复后自己把这份事实扔了,点一次重试又把公众号抓一遍(第 4 轮审查 R2
+        # 实测 `restored.results=<字段缺失>`、`retry_wechat=['wechat_local']`)。
+        for key in ("stages", "crawl_filter", "export_filter", "crawl_retry",
+                    "results"):
             got = pick.get(key)
             # 取历史那份时 `export_filter` / `crawl_retry` 本来就没有:**留空而不是
-            # 沿用上一轮的**,那两个字段错一个就是静默不抓。
+            # 沿用上一轮的**,那两个字段错一个就是静默不抓。存量记录没有 `results`
+            # 也走这一档 —— 空账等于「说不出来」,折账自然退回保守档。
             _state[key] = deepcopy(got) if isinstance(got, dict) else {}
         _restore_gap = gap
         _restored = 'ok'
@@ -631,6 +649,17 @@ def _end_run() -> None:
                 _finished[run_id] = run_payload()
                 for old_id in list(_finished)[:-_FINISHED_KEEP]:
                     del _finished[old_id]
+            # **内存里这份终态也要带上结果账。** `last_result()` 在活进程里返回的
+            # 是 `_state`(不是落盘那份),而降级规划就从它派生 —— 不往这里存一份的
+            # 话,这份账只在落盘和按 id 那两份里有,日账一写不上就退回「整步那张
+            # 合并卡片」,这一轮成功的来源当场又被算成欠着。落盘那份走的是
+            # `run_payload()`,同一刻、同一个源,所以两边说的是同一件事。
+            _state["results"] = _results.snapshot()
+            # 结果账清在**三份留档和按 id 那一份都取完之后**:它们都靠
+            # `run_payload()` 把它带出去。早清一步,当日账本折到的就是空账 ——
+            # 退回「整步那张合并卡片」,R2 当场复发。下一轮要是接着用上一轮这份账,
+            # 就等于拿昨天的结论清今天的欠账,所以也不许不清。
+            _results.clear()
             # **「上一轮收尾是谁」在这里记**(批次资格判据读的就是它):记在收尾处,
             # 所以上面 `pipeline_batch._publish_in_batch` 读到的是我们这一轮**之前**那一轮。
             _remember_settled(run_id)

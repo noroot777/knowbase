@@ -260,6 +260,37 @@ def retry_narrower(collector: SourceCollector) -> RetryNarrowing | None:
     return collector if isinstance(collector, RetryNarrowing) else None
 
 
+# ── 目标的稳定身份(可选能力)────────────────────────────────────────────────
+
+
+@runtime_checkable
+class TargetIdentity(Protocol):
+    """能把一次请求里的目标**归一到稳定身份**的采集器。
+
+    一次请求里的目标可以写名字也可以写编号(`FetchScope.targets` 的口径就是两种都
+    收),而**记账只能有一种键**:同一条订阅在「请求里叫 A」和「失败名单里叫 63」
+    两种写法下记成两格,后来成功清掉其中一格、另一格的红就永远留着 —— 页面说这一
+    步做完了,又说今天还有一步没补上,点下去后端回一句「没有要补的来源」
+    (第 3 轮审查 R3 实测)。所以记账之前先过这一道。
+
+    **不支持这个能力不是缺陷**:公众号那条路的目标就是账号名,它本身已经是稳定
+    身份,没有第二种写法。没有这个方法的来源一律把请求里那几个原样记下来。
+    """
+
+    def stable_targets(self, targets) -> list[str]:
+        """`targets` 是请求里那几个(名字或编号都可能),返回稳定身份。
+
+        **一个都匹配不上的那几个要原样留着**(可能刚被删掉或改了名)—— 丢掉等于把
+        那一格的欠账从账上摘掉,而漏记是静默丢数据。
+        """
+        ...
+
+
+def target_identity(collector: SourceCollector) -> TargetIdentity | None:
+    """这个采集器能不能把目标归一到稳定身份;不能返回 None。"""
+    return collector if isinstance(collector, TargetIdentity) else None
+
+
 # ── 单条内容的「别再抓了」(可选能力)─────────────────────────────────────────
 
 

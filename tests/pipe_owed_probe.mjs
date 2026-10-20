@@ -12,6 +12,12 @@
 // ③ 这一轮自己报了红、今天欠的也是它 → **不许数两遍**(上面那句话已经念过它了);
 // ④ 这一轮自己报了红、今天另外还欠着别的 → 两句话各说各的,按钮当然在。
 //
+// **判据是「真的看得见、点得到」,不是它自己那一格 `hidden`。** 那颗按钮在
+// `#pipe-issues` **里面**,而那个区原来只按最近一轮的红和提取积压决定藏不藏 ——
+// 于是 `pipe-retry.hidden=false`、`pipe-issues.hidden=true`、按钮高度 0:页面明说
+// 「今天早些时候还有 1 个步骤没补上」,却没有任何可点的东西(第 2 轮审查实页实测)。
+// 所以这里量的是整条祖先链 + 外接矩形 + 命中测试(`elementFromPoint`)。
+//
 // 自带只读 mock 后端,CDP 直连缓存里的 chrome-headless-shell(不装 playwright、不连网、
 // 始终无头、临时 profile)。摆盘共用 `pipe_history_fixture.mjs` 那几轮。
 //
@@ -25,6 +31,7 @@ import { MORNING, EVENING, MIME, FIXTURES } from "./pipe_history_fixture.mjs";
 
 const STATIC = join(dirname(fileURLToPath(import.meta.url)), "..", "kb", "static");
 let current = EVENING;          // 屏幕上这一轮
+const posted = [];              // 真被点到的那几个请求
 let owed = [];                  // 今天还欠的那几步(回包的 today_failed)
 
 const server = createServer((req, res) => {
@@ -44,6 +51,12 @@ const server = createServer((req, res) => {
     return json({ runs: [{ ...current, version: current.run_id, key: current.run_id,
                            invalid: false, is_current: true }],
                   error: "", version: current.run_id, keep_days: 3 });
+  }
+  if (path === "/api/pipeline/retry-failed") {
+    posted.push(path);
+    // 后端那句话带着这一次真会跑哪几步,以及当日账本的降级说明
+    // (口径在 `pipeline_retry.start_retry_failed`)。
+    return json({ ok: true, plan: "抓取文章 → 导出文章（今天的账本读不出来，这一次只按最近一次运行补）" });
   }
   if (FIXTURES[path]) return json(FIXTURES[path]);
   if (path.startsWith("/api/")) return json({});
@@ -66,8 +79,28 @@ const reload = async () => {
   await evalJs(`refreshPipe()`);
   await sleep(250);
 };
-const now = () => evalJs(`({ hidden: $('pipe-retry').hidden,
-                             hint: $('pipe-state-hint').textContent })`);
+// 「真的点得到」:自己没藏、祖先链上一个藏着的都没有、占着一块地方、而且那一点
+// 上命中的就是它自己(被别的东西盖住也算点不到)。
+const now = () => evalJs(`(() => {
+  const btn = $('pipe-retry'), issues = $('pipe-issues');
+  let blockedBy = '';
+  for (let el = btn; el && el !== document.documentElement; el = el.parentElement) {
+    const cs = getComputedStyle(el);
+    if (el.hidden || cs.display === 'none' || cs.visibility === 'hidden'
+        || cs.opacity === '0') { blockedBy = el.id || el.className || el.tagName; break; }
+  }
+  if (!blockedBy) btn.scrollIntoView({ block: 'center' });
+  const box = btn.getBoundingClientRect();
+  const hit = box.height > 0 && box.width > 0
+    ? document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) : null;
+  return { hidden: btn.hidden, blockedBy, height: Math.round(box.height),
+           clickable: !blockedBy && box.height > 0 && hit === btn,
+           hitId: hit ? (hit.id || hit.tagName) : '',
+           issuesHidden: issues.hidden, title: $('pipe-issues-title').textContent,
+           where: $('pipe-issues-list').textContent,
+           jumpHidden: $('pipe-issues-jump').hidden,
+           hint: $('pipe-state-hint').textContent };
+})()`);
 
 try {
 await send("Page.navigate", { url: `${base}/#pipe` });
@@ -82,14 +115,22 @@ if (!await until(
 
 // ② 先钉反面:这一轮全绿、今天什么都不欠
 let seen = await now();
-check("今天什么都不欠时按钮照旧藏着", seen.hidden, JSON.stringify(seen));
+check("今天什么都不欠时按钮真的不在", seen.hidden && !seen.clickable, JSON.stringify(seen));
+check("那整个「需处理」区也不在", seen.issuesHidden, JSON.stringify(seen));
 check("那句话也不提「今天早些时候」", !/今天早些时候/.test(seen.hint), seen.hint);
 
 // ① 这一轮全绿、今天早些时候那条抓取还欠着
 owed = ["crawl"];
 await reload();
 seen = await now();
-check("这一轮全绿、今天还欠着时按钮照旧露脸", !seen.hidden, JSON.stringify(seen));
+check("这一轮全绿、今天还欠着时那颗按钮真的点得到",
+      seen.clickable, JSON.stringify(seen));
+check("它那个区跟着露出来了", !seen.issuesHidden, JSON.stringify(seen));
+check("区里的标题和说明也按当日待补说话",
+      /今天还有 1 个步骤/.test(seen.title) && /抓取/.test(seen.where)
+      && !/明细在下面/.test(seen.where), JSON.stringify(seen));
+check("「看第一个」照旧不在:这一轮一个红都没有,下面没有可跳的卡片",
+      seen.jumpHidden, JSON.stringify(seen));
 check("那句话说清了它为什么在",
       /今天早些时候/.test(seen.hint) && /1 个步骤/.test(seen.hint), seen.hint);
 
@@ -100,7 +141,10 @@ await reload();
 seen = await now();
 check("这一轮自己报的那条不再数一遍",
       /上次有 1 个步骤失败/.test(seen.hint) && !/今天早些时候/.test(seen.hint), seen.hint);
-check("按钮当然在", !seen.hidden, JSON.stringify(seen));
+check("按钮当然点得到", seen.clickable, JSON.stringify(seen));
+check("这一轮自己有红时,区里念的还是这一轮那几步",
+      /1 个步骤需处理/.test(seen.title) && /明细在下面/.test(seen.where),
+      JSON.stringify(seen));
 
 // ④ 这一轮红的是导出,今天另外还欠着抓取
 owed = ["export", "crawl"];
@@ -108,6 +152,33 @@ await reload();
 seen = await now();
 check("这一轮之外那几步照旧要说出来",
       /上次有 1 个步骤失败/.test(seen.hint), seen.hint);
+check("按钮照旧点得到", seen.clickable, JSON.stringify(seen));
+
+// ⑤ 翻历史时整段都是只读的:那颗按钮不许点得到(它重试的是最新那一轮)。
+// 点的是**屏幕上这一刻那张清单里**那一行(此刻 `current` 是 MORNING)—— 认不出
+// 身份的话 `viewPipeRun` 整个是空操作,这一局就不管对错都绿。
+await evalJs(`viewPipeRun(${JSON.stringify('run-morning')})`);
+await sleep(250);
+if (!await evalJs(`!$('pipe-viewing').hidden`)) fails.push("摆局没成:没翻到那一轮");
+await sleep(250);
+seen = await now();
+check("翻历史时按钮点不到", !seen.clickable, JSON.stringify(seen));
+await evalJs(`exitPipeHistory()`);
+await sleep(250);
+
+// ⑥ 真点一下:请求发得出去,而后端那句话(含降级说明)要念出来,不许丢
+owed = ["crawl"];
+await reload();
+posted.length = 0;
+await evalJs(`void retryFailed(); 0`);
+if (!await until(`/账本读不出来/.test($('toast-host')?.textContent || '')`, 4000)) {
+  check("点下去之后后端那句话念出来了", false,
+        await evalJs(`JSON.stringify({ posted: ${posted.length},
+                       toast: $('toast-host')?.textContent || '' })`));
+} else {
+  check("点下去之后后端那句话念出来了", posted.length === 1,
+        `posted=${posted.length}`);
+}
 
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 

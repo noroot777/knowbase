@@ -264,6 +264,10 @@ def start_pipeline(stages: list[str] | None = None,
             "planned_stages": planned,
             "stages": {s: {"status": "pending" if s in wanted else "skipped",
                            "detail": ""} for s in STAGES},
+            # 上一轮的结果账不许留在内存里跨到这一轮(`_end_run` 收尾时往 `_state`
+            # 存了一份,见那边)。显式清空、不靠"没设过"兜底:留着就是拿上一轮
+            # 「公众号已经成了」去抵这一轮的欠账。
+            "results": {},
         })
     threading.Thread(target=_run_pipeline, args=(wanted, crawl_filter),
                      daemon=True).start()

@@ -490,6 +490,13 @@ def run_record(state: dict) -> dict:
         "planned_stages": state.get("planned_stages"),
         "stages": deepcopy(state["stages"]),
         "crawl_filter": deepcopy(state["crawl_filter"]),
+        # **结果账要带上**(`results`):历史是恢复的另一个入口(状态文件写失败那一
+        # 档就靠它),而这份账回答的是「这一轮里哪个来源这一步已经成了」。从这里漏
+        # 掉的话,从历史恢复回来的那一轮又退回「整步那张合并卡片」,成功的来源跟着
+        # 一起被算成欠着 —— 口径只有一份:已有的来源结论不因存在哪份落盘里、从哪个
+        # 入口恢复而丢失(第 4 轮审查 R2)。它跟 `export_filter` / `crawl_retry`
+        # 不同,那两份是「只有最新那一轮才有意义」的派生范围,这一份是**事实**。
+        "results": deepcopy(state.get("results") or {}),
         "log": list(state["log"]),
     }
 
