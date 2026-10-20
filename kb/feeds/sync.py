@@ -132,12 +132,13 @@ def _save_result(source, result, scope):
             added = reg.put_items(source, entries, conn=c)
             reg.merge_config(source['id'], validators.get('config_patch') or {}, conn=c)
             c.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
-                failures=0,retry_at=0,etag=?,modified=?,resolved_url=?,last_note=? WHERE id=?''',
+                failures=0,retry_at=0,etag=?,modified=?,resolved_url=?,last_note=?,last_notice=? WHERE id=?''',
                 (reg.now(),reg.now(),validators['etag'],validators['modified'],
                  validators['resolved_url'],
                  # 区间补抓不改日常增量的任何状态,这条提示也算 —— 清掉它等于替
                  # 日常同步宣布"读完了",而那一边的进度一点没动。
                  source.get('last_note','') if scope.ranged else validators.get('note',''),
+                 source.get('last_notice','') if scope.ranged else validators.get('notice',''),
                  source['id']))
     return added
 
@@ -259,12 +260,12 @@ def collect(kind, scope):
                               f'（内容在收录那一刻已经抓好）')
         return {'sources': 0, 'checked': 0, 'added': 0, 'deferred': 0,
                 'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [],
-                'partial': [], 'repointed': 0, 'stopped': False, 'failed_ids': []}
+                'partial': [], 'notices': [], 'repointed': 0, 'stopped': False, 'failed_ids': []}
     sources = [s for s in reg.subscriptions(kind) if s['enabled'] and
                (not scope.targets or str(s['id']) in scope.targets or s['name'] in scope.targets)]
     summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0,
                'unconfigured': 0, 'skipped': 0, 'message': '', 'errors': [],
-               'partial': [], 'repointed': 0, 'stopped': False,
+               'partial': [], 'notices': [], 'repointed': 0, 'stopped': False,
                # 这一轮失败的那几条订阅的稳定身份,留给「重试失败项」收窄范围
                'failed_ids': []}
     settings = reg.get_settings(kind)
@@ -321,6 +322,8 @@ def collect(kind, scope):
                     # "连接失败"并让这条订阅进退避重试,而连接好得很。
                     if note := result[1].get('note'):
                         summary['partial'].append({'title': source['name'], 'reason': note})
+                    if notice := result[1].get('notice'):
+                        summary['notices'].append({'title': source['name'], 'reason': notice})
                 except CollectionBudgetExceeded:
                     summary['skipped'] += 1
                     summary['message'] = BUDGET_MESSAGE

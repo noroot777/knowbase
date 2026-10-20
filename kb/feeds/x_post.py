@@ -192,7 +192,7 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
                 raise error
             previous_problem = current_problem
             missing = (snap.get('at') == match[1] and not snap.get('id')
-                       and snap.get('ready') == 'complete' and snap.get('empty') is True)
+                       and x_page_state.unavailable(snap))
             if missing and absent:
                 raise PostGone('X 明确答复该推文页面不存在或已不可用')
             absent = missing

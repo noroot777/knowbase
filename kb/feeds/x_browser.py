@@ -268,10 +268,12 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
         if last['articles'] and last['ready'] == 'complete' and not current_problem:
             return last
         confirmed_problem = current_problem if current_problem == previous_problem else ''
-        if error := x_page_state.escalate(last, confirmed_problem, failure):
+        if x_page_state.partial_content(last, confirmed_problem):
+            return dict(last, incomplete=str(failure))
+        if error := x_page_state.escalate(last, confirmed_problem, failure, content_pending=False):
             raise error
         previous_problem = current_problem
-        if last['empty']:
+        if x_page_state.unavailable(last):
             raise XBrowserError(f'@{handle} 这个账号在 X 上打不开(可能已改名、注销或被冻结)')
         time.sleep(0.3)
     if error := x_page_state.escalate(last, confirmed_problem, failure, expired=True):
@@ -292,7 +294,7 @@ def _harvest_one(page: Chrome, handle: str,
     """
     navigate(page, f'https://x.com/{handle}')
     deadline = time.monotonic() + ACCOUNT_SECONDS
-    _wait_state(page, handle, deadline)
+    state = _wait_state(page, handle, deadline)
     page.eval(_RESET_JS)
     seen_articles = parsed = 0
     items: list[dict] = []
@@ -301,6 +303,9 @@ def _harvest_one(page: Chrome, handle: str,
     for _ in range(MAX_SCROLLS):
         snap = json.loads(page.eval(_COLLECT_JS))
         seen_articles, parsed, items = snap['articles'], snap['parsed'], snap['items']
+        if state.get('incomplete'):
+            incomplete = state['incomplete']
+            break
         if floor and _old_enough(items, floor, handle):
             incomplete = ''
             break

@@ -328,7 +328,9 @@ def main(argv=None) -> int:
         for row in rows:
             prior = receipts.get((row['key'], audit.version(row)))
             outcome = prior[1] if prior else dict(state='unaudited')
-            label = ('仍需补查' if outcome.get('remaining') else
+            label = ('不可用结论待复核' if outcome['state'] == 'unavailable' and
+                     outcome.get('availability_policy') != audit.AVAILABILITY_POLICY else
+                     '仍需补查' if outcome.get('remaining') else
                      '可写回' if outcome['state'] in audit.REPAIRABLE else
                      '已扣留' if outcome['state'].startswith('blocked_') else
                      '失败待重试' if outcome['state'] in audit.RETRY else

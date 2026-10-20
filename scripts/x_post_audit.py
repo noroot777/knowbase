@@ -1,7 +1,7 @@
 """Versioned audit receipts, separate from feeds.db even in read-only probe mode.
 
 Change POLICY when the content-comparison contract changes, not for queue/display fixes.
-Remaining debt survives inconclusive rereads until a full repair proposal supersedes it.
+Remaining debt retries after failures; a matching safe withholding settles that version.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from contextlib import closing
 from kb.feeds import grab_store, registry as reg
 
 POLICY = 'confirmed-ranges-1'
+AVAILABILITY_POLICY = 'content-http-conflict-1'
 RETRY = {'failed', 'stale', 'deferred'}
 REPAIRABLE = {'expanded', 'normalized'}
 SCHEMA = '''CREATE TABLE IF NOT EXISTS audits (
@@ -50,7 +51,9 @@ def select(rows: list[dict], *, apply=False, recheck=False) -> list[dict]:
         prior = receipts.get((row['key'], version(row)))
         if prior and not recheck:
             checked, result = prior
-            if result.get('remaining') or result['state'] in RETRY:
+            if result.get('remaining') or result['state'] in RETRY or (
+                    result['state'] == 'unavailable'
+                    and result.get('availability_policy') != AVAILABILITY_POLICY):
                 selected.append(((1, checked, index), row))
             elif apply and result['state'] in REPAIRABLE:
                 selected.append(((0, 0, index), row))
@@ -62,6 +65,8 @@ def select(rows: list[dict], *, apply=False, recheck=False) -> list[dict]:
 def record(row: dict, result: dict, *, complete=None) -> None:
     if result['state'] == 'deferred':
         return
+    if result['state'] == 'unavailable':
+        result = dict(result, availability_policy=AVAILABILITY_POLICY)
     receipts = [(row, result)]
     if result['state'] == 'updated' and complete is not None:
         with reg.db() as conn:
@@ -79,9 +84,18 @@ def record(row: dict, result: dict, *, complete=None) -> None:
             prior = conn.execute('SELECT result FROM audits WHERE item_key=? AND version=?',
                                  (seen['key'], revision)).fetchone()
             if prior and outcome['state'] not in {'updated', 'expanded', 'normalized', 'unavailable'}:
-                remaining = json.loads(prior[0]).get('remaining')
+                previous = json.loads(prior[0])
+                remaining = previous.get('remaining')
                 if remaining:
-                    outcome = dict(outcome, remaining=remaining)
+                    state = outcome['state']
+                    settled = ((state.startswith('blocked_') and state == remaining) or
+                               (state == previous['state'] and
+                                (state == 'identical' or state.startswith('blocked_'))))
+                    if settled:
+                        outcome = dict(outcome, retained=remaining)
+                        outcome.pop('remaining', None)
+                    else:
+                        outcome = dict(outcome, remaining=remaining)
             conn.execute('INSERT INTO audits VALUES (?,?,?,?) ON CONFLICT(item_key,version) '
                          'DO UPDATE SET checked=excluded.checked,result=excluded.result',
                          (seen['key'], revision, time.time(), json.dumps(outcome, ensure_ascii=False)))

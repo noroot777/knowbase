@@ -126,8 +126,6 @@ def problem(state: dict) -> str:
     dom_problem = state.get('dom_problem')
     if state.get('challenge'):
         return 'challenge'
-    if dom_problem == '' and state.get('empty'):
-        return ''
     if state.get('http_content_limited'):
         return 'limited'
     if dom_problem:
@@ -135,15 +133,24 @@ def problem(state: dict) -> str:
     return next((kind for kind in ('challenge', 'limited', 'failed') if state.get(kind)), '')
 
 
-def escalate(state: dict, confirmed: str, failure: Exception, *, expired=False) -> Exception | None:
-    """Use one scope policy during polling and timeout; only local failures wait for expiry."""
+def unavailable(state: dict) -> bool:
+    return bool(state.get('ready') == 'complete' and state.get('empty') and not problem(state))
+
+
+def partial_content(state: dict, confirmed: str) -> bool:
+    return bool(confirmed == 'failed' and state.get('ready') == 'complete' and state.get('articles'))
+
+
+def escalate(state: dict, confirmed: str, failure: Exception, *, expired=False,
+             content_pending=True) -> Exception | None:
+    """Keep batch scope consistent; pending full content may wait after an HTTP-only failure."""
     if not confirmed:
         return None
     if confirmed == 'challenge':
         return access_blocked()
     if confirmed == 'limited' and (not state.get('http_only') or state.get('http_content_limited')):
         return XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
-    if expired or not state.get('http_only'):
+    if expired or not content_pending or not state.get('http_only'):
         return failure
     return None
 

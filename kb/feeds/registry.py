@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
  -- 排在最后,和老库 ALTER 补出来的列序一致(见 _ADDED_COLUMNS)。
  history_floor TEXT NOT NULL DEFAULT '', last_note TEXT NOT NULL DEFAULT '',
  fulltext INTEGER NOT NULL DEFAULT 0, extract INTEGER NOT NULL DEFAULT 0,
+ last_notice TEXT NOT NULL DEFAULT '',
  UNIQUE(kind, url)
 );
 CREATE TABLE IF NOT EXISTS feed_items (
@@ -94,6 +95,7 @@ _ADDED_COLUMNS = {
         # 存量已经提取过的不回滚:钱已经付过,标签也已经在图谱和检索里。
         # **独立一列、不放 `config`**,理由同 `fulltext`。
         ('extract', 'INTEGER NOT NULL DEFAULT 0'),
+        ('last_notice', "TEXT NOT NULL DEFAULT ''"),
     ),
     'feed_items': (
         ('lang', "TEXT NOT NULL DEFAULT ''"),              # '' 未判 / zh 无需翻译 / en 待翻译
@@ -498,7 +500,7 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
                     # 被清掉的都是采集进度 —— 指向新的源之后它们本来就不作数。
                     c.execute("""UPDATE subscriptions SET etag='',modified='',resolved_url='',
                         last_error='',last_success='',last_attempt='',failures=0,retry_at=0,config='{}',
-                        last_note='',history_floor=? WHERE id=?""", (history_floor(), source_id))
+                        last_note='',last_notice='',history_floor=? WHERE id=?""", (history_floor(), source_id))
                     c.execute('DELETE FROM subscription_items WHERE subscription_id=?', (source_id,))
             else:
                 source_id = c.execute('''INSERT INTO subscriptions

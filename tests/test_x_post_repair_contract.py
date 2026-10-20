@@ -72,14 +72,13 @@ class RepairContractTests(ChannelBase):
             self.assertIn('频率', result['Example']['error'])
             self.assertEqual(result['Example']['error'], result['Other']['error'])
 
-    def test_timeline_503_with_cards_is_not_success_or_a_rate_limit(self):
+    def test_timeline_503_with_cards_returns_an_incomplete_result_not_a_rate_limit(self):
         page = ReplySession('UserTweets', 503)
         x_page_state.navigate(page, 'https://x.com/Example')
-        with patch.object(x_browser.time, 'sleep'), \
-             self.assertRaises(x_page_state.XBrowserError) as caught:
-            x_browser._wait_state(page, 'Example', time.monotonic() + 0.005)
-        self.assertNotIsInstance(caught.exception, x_page_state.XRateLimited)
-        self.assertIn('请求出错', str(caught.exception))
+        with patch.object(x_browser.time, 'sleep'):
+            state = x_browser._wait_state(page, 'Example', time.monotonic() + 1)
+        self.assertIn('请求出错', state['incomplete'])
+        self.assertEqual(2, page.reads)
 
     def test_timeline_limit_with_cached_cards_cannot_return_success(self):
         page = ReplySession('UserTweets')
@@ -119,7 +118,7 @@ class RepairContractTests(ChannelBase):
                 saved = reg.subscription('social', source['id'])
                 self.assertEqual(OLD, x_channels.watermark(saved, channel))
                 self.assertIn('滚动次数用完', saved['last_note'])
-                self.assertIn('跳过 1 条本人无正文的引用推文', saved['last_note'])
+                self.assertIn('跳过 1 条本人无正文的引用推文', saved['last_notice'])
                 with reg.db() as conn:
                     self.assertEqual(['a thought'], [row['body'] for row in conn.execute(
                         'SELECT body FROM feed_items WHERE key IN '
