@@ -20,6 +20,7 @@ from pathlib import Path
 from kb.collectors import FetchScope, active_collector
 from kb.config import VIDEOS_ROOT
 from kb.pipeline_batch import round_key
+from kb import pipeline_results as results
 from kb.pipeline_segments import stage_segment
 from kb.pipeline_state import _log, _now, _stage, _state
 
@@ -70,26 +71,69 @@ def _channel_label(collector) -> str:
     return getattr(collector, "channel_label", collector.label)
 
 
+def _scope_label(scope: dict) -> str:
+    """连采集器都没取到那一档,这个来源那一段挂什么名。
+
+    **不许在这里再问一次 `active_collector`** —— 它正是可能炸的那一步;而且打桩
+    是按调用次数发实例的(既有回归就这么摆),多问一次会让后面那个来源拿到串位的
+    采集器(实测 `StopIteration` + 另一个来源的结论写到了这一段上)。
+    """
+    return scope.get("channel") or "未知来源"
+
+
+def _one_channel(stage: str, scope: dict, run, collector) -> None:
+    """一个来源跑一遍这个阶段:给它建自己那一格账,然后跑。
+
+    每个来源各记一条**自己的**结论(结果账,见 `kb/pipeline_results.py` 模块头:
+    分段那一份只够展示,拿它回答「谁还欠着」会把成功的来源也记成失败)。
+
+    **采集器由调用方取好传进来,这里不自己取** —— 取它是隔离要包住的那几步之一,
+    而且**整条路上只许取一次**:打桩是按调用次数发实例的(既有回归就这么摆),
+    多取一次会让后面那个来源拿到串位的采集器(实测 `StopIteration`,而且一个来源
+    的结论写到了另一个来源那一段上)。
+    """
+    with results.channel_run(stage, scope["channel"], collector, scope["accounts"]):
+        run(collector, scope)
+
+
 def _per_channel(stage: str, crawl_filter: dict | str | None, run) -> None:
     """让每个选中的来源各跑一遍这个阶段。
 
     多来源时每个来源的汇报各记一段(stage_segment),否则后一个来源的结论会
     把前一个整个盖掉,面板上只剩最后那个来源的成败。
+
+    **隔离要包住这个来源的准备、执行和汇报,一步都不许露在外面。** 只包执行那
+    一句的话,建账时算覆盖范围要读一次订阅库(`pipeline_results.covered_targets`
+    → `FeedCollector.stable_targets`),这次读失败时异常是从 `with` 那一行抛的
+    —— 连这个来源自己的 try 都还没进去,整个来源循环当场跳出:勾了订阅源和公众号
+    两个来源、订阅库临时读不出来,**公众号一次都不跑**(第 4 轮审查 R1 实测
+    `wechat_calls=[]`)。
     """
     scopes = crawl_channels(crawl_filter)
     for scope in scopes:
-        collector = active_collector(scope["channel"])
-        if len(scopes) == 1:
-            run(collector, scope)
-            continue
-        if _state.get("stop_requested"):
+        # **停止这一道在建账之前**:建了账等于说「这个来源这一步有结论」,而它压根没
+        # 起跑(理由在 `pipeline_results.channel_run`)。
+        if len(scopes) > 1 and _state.get("stop_requested"):
             break            # 停止是对整次同步说的,别再起下一个来源
-        with stage_segment(stage, _channel_label(collector)):
-            try:
-                run(collector, scope)
-            except Exception as e:
-                # 勾了好几个来源:这一个炸了不该把剩下的一起带走。记成它自己那一段的
-                # 失败,面板上照样看得见是谁挂的,后面的来源继续跑。
+        if len(scopes) == 1:
+            # 只有一个来源:异常照旧**穿出去**,由 `_run_pipeline` 记成这一步失败
+            # (存量行为)。在这里吞掉的话这一步看着像跑完了,后面几步照旧往下跑。
+            _one_channel(stage, scope, run, active_collector(scope["channel"]))
+            continue
+        try:
+            collector = active_collector(scope["channel"])
+            with stage_segment(stage, _channel_label(collector)):
+                try:
+                    _one_channel(stage, scope, run, collector)
+                except Exception as e:
+                    # 勾了好几个来源:这一个炸了不该把剩下的一起带走。记成它自己那一段
+                    # 的失败,面板上照样看得见是谁挂的,后面的来源继续跑。
+                    _stage(stage, "error", f"{type(e).__name__}: {e}")
+        except Exception as e:
+            # 准备或汇报自己炸了(取采集器、算覆盖范围要读一次订阅库、分段收尾)。
+            # 它还没来得及记下自己那一段,**这里补一段** —— 不补的话这一笔会落成
+            # 「整步 error」,把这一轮里别的来源也一起染红(那正是结果账要避免的事)。
+            with stage_segment(stage, _scope_label(scope)):
                 _stage(stage, "error", f"{type(e).__name__}: {e}")
 
 
@@ -501,197 +545,17 @@ def _extract_pass(label: str, stats: dict) -> None:
         conn.close()
 
 
-# ── wiki 层同步 ─────────────────────────────────────────────────────────────────
-
-WIKI_DAILY = Path(__file__).resolve().parent.parent / "scripts" / "wiki" / "wiki_daily.py"
-_ERR_KEEP = 1500          # 失败时保留的 stderr 尾部长度(日志只留 80 条,别让一条撑爆)
-
-
-def _run_wiki() -> None:
-    """extract 之后跑 wiki 层:双链化 → 实体/主题页 → index → digest/synthesis → graph。
-
-    子进程用当前 venv 的 python(wiki_daily 里 linkify 要 import kb.store)。
-    digest/synthesis 有日期门(只看最近 2 天且 >= EPOCH),历史批量导入只会触发
-    机械的双链化和页面重渲染,不烧 LLM。"""
-    import sys as _sys
-
-    _stage("wiki", "running", "同步 wiki 层(双链/页面/摘要)")
-    try:
-        proc = subprocess.run(
-            [_sys.executable, str(WIKI_DAILY), "--recent-days", "2"],
-            cwd=WIKI_DAILY.parent, capture_output=True, text=True, timeout=45 * 60,
-        )
-    except subprocess.TimeoutExpired:
-        _stage("wiki", "error", "wiki 同步超时(45 分钟)")
-        return
-    tail = [l for l in proc.stdout.splitlines()
-            if l.startswith(("linkify:", "digest:", "synthesis:",
-                             "graph:", "catgraph:"))]
-    detail = ";".join(t.strip() for t in tail) or proc.stdout.strip()[-160:]
-    # 面板卡片空间有限,压成一行短语;完整输出看日志
-    m1 = re.search(r"新双链化 (\d+)", proc.stdout)
-    m2 = re.search(r"digest: 生成 (\d+) 天", proc.stdout)
-    m3 = re.search(r"synthesis: 更新 (\d+) 个实体", proc.stdout)
-    if m1 or m2 or m3:
-        detail = (f"双链化 {m1.group(1) if m1 else 0} 篇 · "
-                  f"日摘要 {m2.group(1) if m2 else 0} 天 · "
-                  f"综合 {m3.group(1) if m3 else 0} 实体")
-    # 图谱子步骤自己会让 wiki_daily 非零退出,但那三项摘要一重建就把它盖没了,
-    # 面板上只剩「失败: 」一句空话。图谱那几行单拎出来,附在详情后面。
-    graph = [l.strip() for l in proc.stdout.splitlines()
-             if l.startswith(("graph:", "catgraph:"))]
-    bad = [l for l in graph if ": FAIL" in l]
-    if m1 or m2 or m3:
-        note = ";".join(bad) if bad else ("图谱 ok" if graph else "")
-        if note:
-            detail = f"{detail} · {note}"
-    if proc.returncode != 0:
-        _fail_wiki(proc, bad, detail)
-    else:
-        _stage("wiki", "ok", detail[:200] or "完成")
-
-
-def _fail_wiki(proc, bad: list[str], detail: str) -> None:
-    """wiki 阶段标红:标签(哪张图)、根因(一句话)、完整 stderr(可展开+进日志)。
-
-    三样都得留住,少一样面板上就不够诊断(2026-09-22 第 9 轮审查发现):
-
-    - **标签单独留出来,只截错误正文**。整句一起 `[-200:]` 的话,稍长一点的
-      报错就把开头的 `graph:`/`catgraph:` 截没了,红态里连是哪张图挂的都看不出来。
-    - **摘要优先取 stderr 里最后一条真正的错误行**。多行 traceback 在 stdout
-      那边只留一句「Traceback (most recent call last):」,根因在 stderr 末行;
-      `wiki_daily:` 开头那句是它自己的汇总(只说哪张图挂了),跳过去继续往上找。
-    - **完整 stderr 进日志、也进失败明细**。子进程是 `capture_output=True` 抓的,
-      不主动写出来的话它哪儿都不会出现,用户只能手工重跑一次才能看到根因。
-    """
-    err = (proc.stderr or "").strip()
-    lines = [x.strip() for x in err.splitlines() if x.strip()]
-    root = next((x for x in reversed(lines) if not x.startswith("wiki_daily:")), "")
-    tags = "/".join(dict.fromkeys(l.split(":", 1)[0] for l in bad))
-    body = root or ";".join(l.partition(": FAIL")[2].strip() or l
-                            for l in bad) or detail.strip()
-    fails = None
-    if err:
-        _log(f"wiki 子进程 stderr:\n{err[-_ERR_KEEP:]}")
-        fails = [{"title": f"{tags or 'wiki_daily'} 子进程报错",
-                  "reason": err[-_ERR_KEEP:]}]
-    _stage("wiki", "error", f"{tags or 'wiki'} 失败: {body[-160:]}", failures=fails)
-
-
-# ── 条目化阶段:工具/项目拆条目(dr-gzh-projects / dr-video-projects)─────────────
-
-KB_DIR = Path(__file__).resolve().parent.parent
-VIDEOS_DIR = VIDEOS_ROOT
-
-
-def _run_export_script(script: str, *argv: str, timeout_min: int):
-    import sys
-    return subprocess.run(
-        [sys.executable, f"scripts/{script}", *argv],
-        cwd=KB_DIR, capture_output=True, text=True, timeout=timeout_min * 60,
-    )
-
-
-def _ingest_pretagged_sources() -> tuple[int, int]:
-    """把条目化脚本新产出的 md 就地入库(只增不删;删除留给下轮 index 阶段)。
-
-    **整趟在维护锁里**,理由和 index 阶段逐字相同(见 `kb.maintenance`):这条
-    路也是「scan 读一份磁盘快照 → upsert → 补向量」,而 `embed_pending_chunks`
-    补的是**全库**待编码的 chunk、不限于条目来源。不取锁的话,一轮并发的存量
-    清理删掉的那些 chunk 会被这里按旧快照插回 `chunk_vec` —— 那张虚表没有外键
-    级联,孤儿行谁也不会再来收,还照样占着语义检索的候选名额:清理之后仍然留着
-    的文章从此召不回来,重跑索引也不恢复(2026-10-01 审查实测 151 行孤儿向量、
-    语义检索返回空)。「只增不删」防不住这件事 —— 要删的是另一个进程。
-    """
-    from kb.maintenance import maintenance_lock
-
-    waited, on_poll, on_wait = _lock_waiter("projects")
-    with maintenance_lock(on_wait=on_wait, on_poll=on_poll):
-        if waited["on"] and _state.get("stop_requested"):
-            raise _StopWhileWaiting()
-        return _ingest_pass()
-
-
-def _ingest_pass() -> tuple[int, int]:
-    from kb import store
-    from kb.chunker import split_chunks
-    from kb.extract import parse_pretagged, save_extraction
-    from kb.scanner import scan_all
-
-    targets = {"dr-video-projects", "dr-gzh-projects"}
-    conn = store.connect()
-    try:
-        now = _now()
-        new = 0
-        for doc in scan_all():
-            if doc.source not in targets:
-                continue
-            if not store.doc_needs_reindex(conn, doc.path, doc.content_hash):
-                continue
-            store.upsert_document(conn, doc, split_chunks(doc.body), now)
-            pre = parse_pretagged(doc)
-            if pre is not None:
-                save_extraction(conn, doc.path, pre)
-            new += 1
-        conn.commit()
-        # 同 `_index_pass`:条目化入库也不替抓取记账(这两棵还都是衍生树,
-        # 日报取材和抓取账本都把它们排除在外)。
-        from kb.embedder import embed_pending_chunks
-        return new, embed_pending_chunks(conn)
-    finally:
-        conn.close()
-
-
-def _run_projects() -> None:
-    """条目化:gate 判「工具/项目介绍型」→ transcribe 按工具拆条目。
-    两步各用哪个模型看设置面板的「模型分配」(kb.llm_stages 的 gate / transcribe)。
-
-    公众号侧 transcribe 只处理最近 3 天发布的文章——存量积压(数千篇)由用户
-    手动分批消化(scripts/gzh_projects_export.py transcribe --limit N),
-    避免定时同步悄悄烧大额度。脚本自带文件锁:手动实例在跑时本阶段跳过。"""
-    from datetime import timedelta
-
-    from kb.maintenance import LockBusy
-    since = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
-    steps = [
-        ("gzh gate", "gzh_projects_export.py", ["gate"], 30),
-        ("gzh 条目化", "gzh_projects_export.py",
-         ["transcribe", "--since", since], 60),
-    ]
-    if VIDEOS_DIR.is_dir():
-        steps += [
-            ("视频 gate", "video_projects_export.py", ["gate"], 20),
-            ("视频转写", "video_projects_export.py", ["transcribe"], 90),
-        ]
-    summaries = []
-    for label, script, argv, tmo in steps:
-        _stage("projects", "running", f"{label}…")
-        try:
-            proc = _run_export_script(script, *argv, timeout_min=tmo)
-        except subprocess.TimeoutExpired:
-            _stage("projects", "error", f"{label} 超时({tmo}分钟)")
-            return
-        if proc.returncode == 3:
-            _stage("projects", "skipped", f"{label}: 有手动实例在跑,本轮跳过")
-            return
-        if proc.returncode != 0:
-            _stage("projects", "error",
-                   f"{label} 失败: {(proc.stderr or proc.stdout)[-200:]}")
-            return
-        tail = [l for l in proc.stdout.splitlines() if "完成:" in l]
-        if tail:
-            summaries.append(f"{label} {tail[-1].split('完成:')[-1].strip()}")
-    _stage("projects", "running", "新条目入库")
-    try:
-        n_new, n_vec = _ingest_pretagged_sources()
-    except _StopWhileWaiting:
-        _stage("projects", "stopped", "已请求停止:等维护锁时放弃了新条目入库")
-        return
-    except LockBusy as e:
-        _stage("projects", "error", f"新条目没入库: {e}")
-        return
-    except Exception as e:
-        _stage("projects", "error", f"入库失败: {e}")
-        return
-    summaries.append(f"入库 {n_new} 条目")
-    _stage("projects", "ok", " · ".join(summaries)[:200] or "无新增")
+# ── wiki 层与条目化两段搬去了 `kb/pipeline_wiki_stages.py`(行数,见那边模块头)──
+# **按旧位置再导出一次**:`pipeline.py` / `pipeline_retry.py` 的 import 块、以及
+# `tests/test_index_lock.py` 都按这里取。**打桩要打在那边**(那几个函数查的是它自己
+# 的全局名字,在这里 patch 拦不住 —— 名字带的是绑定不是引用)。
+from kb.pipeline_wiki_stages import (        # noqa: E402 - 再导出,见上
+    VIDEOS_DIR as VIDEOS_DIR,
+    WIKI_DAILY as WIKI_DAILY,
+    _fail_wiki as _fail_wiki,
+    _ingest_pass as _ingest_pass,
+    _ingest_pretagged_sources as _ingest_pretagged_sources,
+    _run_export_script as _run_export_script,
+    _run_projects as _run_projects,
+    _run_wiki as _run_wiki,
+)

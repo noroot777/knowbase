@@ -26,6 +26,9 @@
 所以下面每一条的判据都是**哪些订阅真的被抓了**(数 `fetch_source` 收到的订阅 id、
 以及浏览器预取收到的账号名单),不是"有没有打上标志"—— 只验标志的话,一个把标志
 传下去却没人认它的实现也能全绿。
+
+**逐来源归因和目标稳定身份那两族在 `tests/test_channel_attribution.py`**(这一份
+到了 700 行上限):那边问的是「这一轮的结论记在谁头上、记成哪一格」。
 """
 from __future__ import annotations
 
@@ -35,6 +38,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from kb import pipeline_daybook as daybook
 from kb import pipeline_retry, pipeline_segments, pipeline_stages
 from kb import pipeline_state
 from kb.feeds import registry as reg, sync
@@ -118,11 +122,16 @@ class RetryScopeTests(RetryScopeBase):
         self.assertNotIn('等待重试', stage['detail'])
 
     def test_retry_does_not_widen_beyond_last_rounds_targets(self):
-        """上一轮只同步了 a,另有一条历史失败的 c —— 重试不许把 c 一起拖进来。
+        """上一轮只同步了 a,另有一条**别的日子**失败的 c —— 不许把 c 拖进来。
 
-        「重试失败项」重试的是**上一轮**的失败,不是把库里所有失败订阅扫一遍。
+        「重试失败项」重试的是**今天还欠的**那些,不是把库里所有失败订阅扫一遍。
+        c 今天也失败过的话它就该补(当日继承,那几局在 `tests/test_retry_daybook.py`)
+        —— 所以这一局要把 c 那一笔挪出今天,否则验的是另一件事。
         """
         self.crawl({'channel': 'rss'}, broken=[self.c])          # c 留下历史失败
+        # 把 c 那一笔挪出今天的账本(等于「那是昨天的事」):这一局钉的是
+        # 「上一轮点名了谁」那道边界,当日继承另有一组管。
+        daybook._book_file().unlink(missing_ok=True)
         # a 在第一轮成功过,把那一次挪到昨天 —— 否则当日继承(`_succeeded_today`)
         # 会把它也摘掉,这一局就不是在验「c 有没有被拖进来」了。
         self.succeeded_on(self.a, 1)
@@ -525,10 +534,14 @@ class StartupIsolationTests(RetryScopeBase):
                                                             'at': reg.now()}))
 
     def test_a_broken_db_falls_back_to_the_original_range_for_that_source(self):
-        """名单问不出来 = 这个来源收窄不了,按原范围重跑,**别把整次重试带走**。
+        """名单问不出来 = 这个来源收窄不了,按**手上那份范围**重跑,别收成空集。
 
         故障只圈在这一个来源里:认名字和问名单两件事都在那道 try 里面
         (问名单要读这个来源自己的订阅库)。
+
+        手上那份范围来自当日账本 —— 整条通道失败而采集器留下了名单时,它已经是
+        「名单里那几条」了(`pipeline_daybook`)。问不出来的是**那之后**那一问
+        (「它后来成功过没有」,要读订阅库),所以这一档重跑的就是名单里那几条。
         """
         self.crawl({'channel': 'rss', 'accounts': []}, broken=[self.a])
         note = pipeline_state.retry_notes(pipeline_state.load_last_run() or {})
@@ -548,9 +561,9 @@ class StartupIsolationTests(RetryScopeBase):
             self.assertTrue(ok, msg)
             self._wait_idle('重试那一轮没有收尾')
         self.assertEqual(1, len(seen), '抓取这一步没起跑')
-        self.assertEqual([{'channel': 'rss', 'accounts': []}],
+        self.assertEqual([{'channel': 'rss', 'accounts': [str(self.a['id'])]}],
                          pipeline_stages.crawl_channels(seen[0]),
-                         '收窄不了就该按原范围重跑,不是收成空集')
+                         '收窄不了就该按手上那份范围重跑,不是收成空集')
 
 
 if __name__ == '__main__':

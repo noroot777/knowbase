@@ -223,7 +223,8 @@ class CallSiteRosterTests(unittest.TestCase):
                 base | {"remove_missing_documents", "now"},
             ("kb/pipeline_stages.py", "_index_pass"):
                 base | {"remove_missing_documents", "_now", "_stage"},
-            ("kb/pipeline_stages.py", "_ingest_pass"): base | {"_now"},
+            # 条目化那一段搬去了 `kb/pipeline_wiki_stages.py`(行数上限)
+            ("kb/pipeline_wiki_stages.py", "_ingest_pass"): base | {"_now"},
         }
         kb_defs = self.kb_defs()
         for (rel, fn), want in expected.items():

@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from kb import cli, embedder, maintenance, pipeline_stages, scanner, store
+from kb import pipeline_wiki_stages as wiki_stages
 from kb.config import EMBEDDING_DIM, Source
 from kb.feeds import sync
 from kb.pipeline_state import _state
@@ -55,8 +56,16 @@ class IndexLockTests(TrimFixture, unittest.TestCase):
                   patch.object(embedder, 'embed_pending_chunks', lambda *a: 0)):
             p.start(); self.addCleanup(p.stop)
         self.stages = []
+        # 两个模块各有一份 `_stage` 绑定(`from kb.pipeline_state import _stage`):
+        # 索引那几段在 `pipeline_stages`,条目化和 wiki 搬去了 `pipeline_wiki_stages`
+        # (行数,见那边模块头)。**两处都要打** —— 名字带的是绑定不是引用,只打一处
+        # 的话另一处的汇报一条都收不到,而用例红在「什么都没落下」上。
         p = patch.object(pipeline_stages, '_stage',
                          side_effect=lambda *a, **k: self.stages.append(a))
+        p2 = patch.object(wiki_stages, '_stage',
+                          side_effect=lambda *a, **k: self.stages.append(a))
+        p2.start()
+        self.addCleanup(p2.stop)
         p.start(); self.addCleanup(p.stop)
         was = _state.get('stop_requested')
         self.addCleanup(lambda: _state.__setitem__('stop_requested', was))
@@ -349,9 +358,13 @@ class IndexLockTests(TrimFixture, unittest.TestCase):
                 (LockBusy('占着呢'), 'error', '新条目没入库'),
                 (pipeline_stages._StopWhileWaiting(), 'stopped', '已请求停止')):
             self.stages.clear()
-            with patch.object(pipeline_stages, '_run_export_script',
+            # **打桩打在 `pipeline_wiki_stages` 上**:这两段搬去了那边(行数,见它
+            # 的模块头),而 `_run_projects` 查的是**它自己那个模块**的全局名字 ——
+            # 打在 `pipeline_stages` 的再导出名字上拦不住它(名字带的是绑定不是
+            # 引用,同 `tests/pipeline_case.py` 里那条),于是这一局会去真的起子进程。
+            with patch.object(wiki_stages, '_run_export_script',
                               return_value=done), \
-                 patch.object(pipeline_stages, '_ingest_pretagged_sources',
+                 patch.object(wiki_stages, '_ingest_pretagged_sources',
                               side_effect=boom):
                 pipeline_stages._run_projects()
             said = [s for s in self.stages if s[0] == 'projects' and s[1] == status]

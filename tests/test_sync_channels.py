@@ -37,6 +37,34 @@ class ChannelAPITests(unittest.TestCase):
             self.assertEqual(200, self.client.post("/api/pipeline/run", json=body).status_code)
             self.assertEqual(body, start.call_args.kwargs["crawl_filter"])
 
+    def test_a_source_sensitive_request_without_a_source_is_refused(self):
+        """**点名了抓取/导出、却一个来源都没给:拒,不许替他挑一个。**
+
+        没有这一道时兜底会把「没说」整理成默认采集器(实测 `wechat_local`):只勾
+        「导出文章」的那一轮于是导出了公众号,而用户选的是订阅源 —— 面板上一个字
+        都不说(第 3 轮审查 R1,前端那一侧在 `tests/pipe_stages_probe.mjs`)。
+        导出也是按来源跑的(`_run_export` 走 `_per_channel`),所以 `export` 自己
+        就够格要求来源,不必和 `crawl` 一起出现。
+        """
+        with patch.object(pipeline, "start_pipeline", return_value=True) as start:
+            for stages in (["export"], ["crawl"], ["export", "index"]):
+                r = self.client.post("/api/pipeline/run", json={"stages": stages})
+                self.assertEqual(400, r.status_code, stages)
+                self.assertIn("请至少选择一个来源", r.json()["detail"])
+            self.assertFalse(start.called, "拒掉的那一次压根不许起跑")
+
+    def test_whole_library_stages_still_run_without_a_source(self):
+        """**反过来钉一边**:只剩全库那几步时没有来源照旧放行。
+
+        `index` 扫整个 vault、`extract` 扫全库待提取队列,它们连通道参数都不收 ——
+        按「缺来源一律拒」去拦,只勾这几步的那一轮压根起不了跑。
+        """
+        with patch.object(pipeline, "start_pipeline", return_value=True) as start:
+            r = self.client.post("/api/pipeline/run",
+                                 json={"stages": ["index", "extract"]})
+            self.assertEqual(200, r.status_code, r.text)
+            self.assertTrue(start.called)
+
     def test_a_retired_channel_name_runs_as_the_one_that_replaced_it(self):
         """老页面/老脚本里写着的 `wechat_oa` 不该变成 400。
 
@@ -348,6 +376,51 @@ class ChannelDispatchTests(unittest.TestCase):
             self.assertEqual("error", entry["status"])
             self.assertIn("本机库：RuntimeError: 读取器没装", entry["detail"])
             self.assertIn("RSS：新增 3 篇", entry["detail"])
+        finally:
+            pipeline_segments.clear_segments()
+            pipeline_state._state.clear()
+            pipeline_state._state.update(saved)
+
+    def test_a_source_whose_prep_blows_up_does_not_cancel_the_rest(self):
+        """**建账那一步也在隔离里面**:它炸了也只终结这一个来源。
+
+        建账要先算「这一步在这个来源上实际覆盖哪几个目标」,点名了目标就要**读一次
+        订阅库**(`pipeline_results.covered_targets` → `FeedCollector.stable_targets`)
+        —— 这一步在 fetch **之前**。隔离原来只包 fetch 那一句,于是这次读失败时异常
+        是从 `with` 那一行抛的:连这个来源自己的 try 都还没进去,整个来源循环当场
+        跳出。勾了订阅源和公众号两个来源、订阅库临时读不出来,**公众号一次都不跑**
+        (第 4 轮审查 R1 实测 `wechat_calls=[]`)。
+
+        判据落在**后面那个健康来源的 `fetch` 被叫了没有**,外加面板上这一步写的是
+        谁挂的 —— 不然「整步记成 error」照样能把这一局糊过去,而那恰恰会把这一轮里
+        别的来源也一起染红。
+        """
+        saved = deepcopy(pipeline_state._state)
+        try:
+            pipeline_segments.clear_segments()
+            pipeline_state._state["stages"] = {s: {"status": "", "detail": ""}
+                                               for s in pipeline_state.STAGES}
+            broken, healthy = Mock(), Mock()
+            broken.channel_label, healthy.channel_label = "RSS", "本机库"
+            # 注入的是**建账那一步**要读的那次库(不是 fetch):`stable_targets` 正是
+            # 结果账算覆盖范围时问的那一下。
+            broken.stable_targets.side_effect = OSError("订阅库暂时读不出来")
+            healthy.fetch.side_effect = lambda scope: pipeline_state._stage(
+                "crawl", "ok", "新增 3 篇")
+            filt = {"channel": "rss",
+                    "channels": [{"channel": "rss", "accounts": ["A"]},
+                                 {"channel": "wechat_local", "accounts": []}]}
+            with patch.object(pipeline_stages, "active_collector",
+                              side_effect=[broken, healthy]):
+                pipeline_stages._run_crawl(filt)
+            healthy.fetch.assert_called_once()
+            broken.fetch.assert_not_called()      # 它压根没走到 fetch 那一步
+            entry = pipeline_state._state["stages"]["crawl"]
+            self.assertEqual("error", entry["status"])
+            self.assertIn("RSS：OSError: 订阅库暂时读不出来", entry["detail"],
+                          "面板上看不出是谁挂的")
+            self.assertIn("本机库：新增 3 篇", entry["detail"],
+                          "健康来源的结论被那个失败盖掉了")
         finally:
             pipeline_segments.clear_segments()
             pipeline_state._state.clear()

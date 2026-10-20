@@ -438,8 +438,10 @@ class CallSiteTests(unittest.TestCase):
     # 按**文件**比,所以 `kb/cli.py` / `kb/pipeline_stages.py` 两边都在
     # (它们各有一条 LLM 路径和一条条目化路径);「LLM 那三条真的走了协调入口」
     # 由上面那张字面量锚点的表钉住。
+    # `kb/pipeline_wiki_stages.py` 是从 `pipeline_stages` 拆出去的那一半(条目化
+    # 那一段),不是新开的调用点 —— 搬家会让按文件名记的这类名单静默变红。
     PLAIN_PATHS = {'kb/cli.py', 'kb/extract.py', 'kb/pipeline_stages.py',
-                   'scripts/pretagged_refresh.py'}
+                   'kb/pipeline_wiki_stages.py', 'scripts/pretagged_refresh.py'}
 
     def grep(self, needle):
         """全仓(kb/ 和 scripts/,递归)含 `needle` 的文件 —— **注释行不算**。

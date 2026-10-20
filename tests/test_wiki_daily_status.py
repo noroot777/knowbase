@@ -32,7 +32,11 @@ sys.path.insert(0, str(REPO / "scripts" / "wiki"))
 
 import wiki_daily as WD  # noqa: E402
 
-from kb import pipeline_stages as PS  # noqa: E402
+# **打桩打在 wiki 阶段自己那个模块上**(`_run_wiki` 搬去了那边):那几个函数查
+# 的是它自己的全局名字,在 `pipeline_stages` 上 patch 拦不住 —— 那边只是按旧位置
+# 再导出一次,名字带的是绑定不是引用。实测形态:三处 patch 一个都没生效,
+# `calls` 空着,用例红在 `calls[-1]` 的 IndexError 上、指不到真原因。
+from kb import pipeline_wiki_stages as PS  # noqa: E402
 
 OK = "import sys\nsys.exit(0)\n"
 BAD = "import sys\nsys.stderr.write('QUALITY_GATE_REJECTED\\n')\nsys.exit(1)\n"
