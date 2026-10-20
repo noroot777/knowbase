@@ -11,10 +11,24 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from kb import pipeline_batch as pb
+from kb import pipeline_retry as pr
 from kb import pipeline_segments as seg
 from kb import pipeline_state as ps
 from tests.pipeline_round_fixture import (RoundStore, finish_round,
                                           no_extract_backlog)
+
+
+def owed_on_the_book():
+    """账本上今天还欠哪几步。**不问「现在抓不抓得到」** —— 那是另一层。
+
+    这几局钉的是「合并没把那条红抹掉」,而「那几条失败的订阅现在还在不在」跟它毫无
+    关系。拿 `retry_failed_plan()` 当判据就把那一层也拖进来了:摆盘里那份失败名单
+    点的是一条压根不存在的订阅,于是这一局的颜色跟着**共用那个库里恰好有没有这条
+    订阅**变(单跑一个答案、同跑可能另一个),而要验的那件事压根没被验到。
+    """
+    pending = pr.unfinished_today()
+    return [name for name in pr.STAGES
+            if pr.stage_failed((pending.get('stages') or {}).get(name))]
 
 
 class DailyBatchResultTests(RoundStore):
@@ -54,9 +68,11 @@ class DailyBatchResultTests(RoundStore):
         # 失败名单跟着合并后的身份走,重试才收窄得到那几条订阅
         self.assertEqual({'rss'}, set(last['crawl_retry']['channels']))
         self.assertEqual(last['run_id'], last['crawl_retry']['run'])
-        # 后果:重试计划排得出来(修之前是 [],按钮灰着、点下去 409)
+        # 后果:那条红进了今天的账本,而且**链排得出来**(修之前是 [],按钮灰着、
+        # 点下去 409)。链按合并后那一轮派生 —— 它正是这一局产出的东西。
+        self.assertEqual(['crawl'], owed_on_the_book())
         self.assertEqual(['crawl', 'export', 'index', 'extract'],
-                         pipeline.retry_failed_plan())
+                         pipeline.retry_failed_plan(run=last))
 
     def test_a_round_that_did_not_plan_a_stage_cannot_grey_it_out(self):
         # 反过来钉一边:入库轮没计划 crawl(落的是 skipped/未选择),不许拿它把
@@ -114,8 +130,10 @@ class DailyBatchResultTests(RoundStore):
         self.assertEqual('error', fetched['stages']['crawl']['status'])
         last = pipeline.last_result()
         self.assertEqual('error', last['stages']['crawl']['status'])
+        # 账本确实收到了这一轮(这一局要钉的就是它),链照旧按那一轮派生得出来。
+        self.assertEqual(['crawl'], owed_on_the_book())
         self.assertEqual(['crawl', 'export', 'index', 'extract'],
-                         pipeline.retry_failed_plan())
+                         pipeline.retry_failed_plan(run=last))
 
     def test_every_failing_source_keeps_its_own_detail(self):
         """同一个阶段在几个来源都失败时,合并不许只留一个。

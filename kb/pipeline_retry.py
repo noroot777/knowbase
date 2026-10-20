@@ -282,7 +282,21 @@ def retry_failed_plan(nothing_to_crawl: bool = False, run: dict | None = None) -
     # **缺省读的是「今天还欠什么」,不是「最近一次运行」**(`pipeline_daybook`):
     # 这颗按钮会跑哪几步只许有一个答案 —— 两处各判一次的话,单独问一句的人看到
     # 「要补 export」,真点下去却按最近那一轮重跑整条链(2026-10-19 10:34 那一次)。
-    prev = ((unfinished_today() if run is None else run).get("stages") or {})
+    pending = unfinished_today() if run is None else run
+    if run is None and not nothing_to_crawl:
+        # **单独问一句的人,要得到那颗按钮真会给他的那个答案**(元规则「口径只有一
+        # 份」)。缺省这一档原来只读账本:今天先抓成、后来又失败的那条订阅(或者
+        # 失败之后被停用、删掉的)在账上还欠着,于是这里答「要补 crawl」,而同一
+        # 刻真点下去是「没有要补的」。起跑端自己算过就按它传进来的那个走,不在这
+        # 儿覆盖它。**问不出来(那个来源的订阅库打不开)就退回只按账本答** ——
+        # 多排一步顶多白跑一次,少排一步是用户再也补不上的那几笔。
+        try:
+            owed, _ = owed_now(pending)
+        except Exception:                          # noqa: BLE001 - 见上
+            owed = None
+        nothing_to_crawl = (owed is not None and "crawl" not in owed
+                            and stage_failed((pending.get("stages") or {}).get("crawl")))
+    prev = (pending.get("stages") or {})
 
     def _detail(name: str) -> str:
         return (prev.get(name) or {}).get("detail") or ""

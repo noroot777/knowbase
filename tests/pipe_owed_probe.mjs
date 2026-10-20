@@ -5,12 +5,19 @@
 // **连点的机会都没有**,后端那一侧补得再对也到不了(审查 R1 的同一条路)。后端口径是
 // `pipeline_retry.today_failed`(当日账本),回包字段 `today_failed`。
 //
-// 四档,两正两反:
+// 六档:
 // ① 这一轮全绿、今天还欠着 → 按钮照旧露脸,**而且那句话说清它为什么在**(按钮冒出来
 //    却没有任何一句话解释,和「这个按钮坏了」长得一模一样);
 // ② **反过来钉一边**:今天什么都不欠 → 按钮照旧藏着,那句话也不许提「今天早些时候」;
 // ③ 这一轮自己报了红、今天欠的也是它 → **不许数两遍**(上面那句话已经念过它了);
 // ④ 这一轮自己报了红、今天另外还欠着别的 → 两句话各说各的,按钮当然在。
+// ⑤ **这一轮红过、而今天已经没有可补的了**(今天先抓成后来又失败、失败之后被停用或
+//    删掉)→ 整个「需处理」区和那颗按钮都不许在,收尾那句话也不许推荐重试。这一档
+//    原来是拿「这一轮红不红」跟后端那份待补做 OR 的,于是页面说「1 个步骤需处理」、
+//    点下去回一句「没有要补的」、刷新还是那样:一个点不动也消不掉的死局(第 2 轮审查
+//    实页实测)。**空集是答案,不是「没答」。**
+// ⑥ **旧服务那一档是显式降级**:回包里压根没有这个字段时退回这一轮自己的红(`kb/static`
+//    每次请求从磁盘读、而 Python 模块要重启才换,所以「新页面 + 旧进程」真会出现)。
 //
 // **判据是「真的看得见、点得到」,不是它自己那一格 `hidden`。** 那颗按钮在
 // `#pipe-issues` **里面**,而那个区原来只按最近一轮的红和提取积压决定藏不藏 ——
@@ -33,6 +40,7 @@ const STATIC = join(dirname(fileURLToPath(import.meta.url)), "..", "kb", "static
 let current = EVENING;          // 屏幕上这一轮
 const posted = [];              // 真被点到的那几个请求
 let owed = [];                  // 今天还欠的那几步(回包的 today_failed)
+let owedField = true;           // 回包里带不带这个字段(旧服务那一档)
 
 const server = createServer((req, res) => {
   const path = req.url.split("?")[0];
@@ -44,7 +52,7 @@ const server = createServer((req, res) => {
   if (path === "/api/pipeline/status") {
     return json({ running: false, stop_requested: false, stopped: false,
                   stop_supported: true, last_run: current, log: [],
-                  today_failed: owed,
+                  ...(owedField ? { today_failed: owed } : {}),
                   result_version: current.run_id });
   }
   if (path === "/api/pipeline/runs") {
@@ -97,6 +105,7 @@ const now = () => evalJs(`(() => {
            clickable: !blockedBy && box.height > 0 && hit === btn,
            hitId: hit ? (hit.id || hit.tagName) : '',
            issuesHidden: issues.hidden, title: $('pipe-issues-title').textContent,
+           stateTitle: $('pipe-state-title').textContent,
            where: $('pipe-issues-list').textContent,
            jumpHidden: $('pipe-issues-jump').hidden,
            hint: $('pipe-state-hint').textContent };
@@ -154,7 +163,30 @@ check("这一轮之外那几步照旧要说出来",
       /上次有 1 个步骤失败/.test(seen.hint), seen.hint);
 check("按钮照旧点得到", seen.clickable, JSON.stringify(seen));
 
-// ⑤ 翻历史时整段都是只读的:那颗按钮不许点得到(它重试的是最新那一轮)。
+// ⑤ 这一轮红过,而今天已经没有可补的了(后端把它从待补里摘掉了)
+owed = [];
+await reload();
+seen = await now();
+check("今天没有可补的了,那颗按钮就不许在", !seen.clickable && seen.hidden,
+      JSON.stringify(seen));
+check("那整个「需处理」区也不许在", seen.issuesHidden, JSON.stringify(seen));
+check("收尾那句话不许写「需处理」",
+      !/需处理/.test(seen.stateTitle) && /1 个步骤失败/.test(seen.stateTitle),
+      seen.stateTitle);
+check("那句话也不许推荐重试,而要说清为什么不用补",
+      !/重试失败项/.test(seen.hint) && /不用补/.test(seen.hint), seen.hint);
+
+// ⑥ 旧服务:回包里压根没有这个字段 → 显式退回这一轮自己的红
+owedField = false;
+await reload();
+seen = await now();
+check("旧服务那一档照旧按这一轮的红放行", seen.clickable, JSON.stringify(seen));
+check("旧服务那一档区里念的也还是这一轮那几步",
+      /1 个步骤需处理/.test(seen.title) && /明细在下面/.test(seen.where),
+      JSON.stringify(seen));
+owedField = true;
+
+// ⑦ 翻历史时整段都是只读的:那颗按钮不许点得到(它重试的是最新那一轮)。
 // 点的是**屏幕上这一刻那张清单里**那一行(此刻 `current` 是 MORNING)—— 认不出
 // 身份的话 `viewPipeRun` 整个是空操作,这一局就不管对错都绿。
 await evalJs(`viewPipeRun(${JSON.stringify('run-morning')})`);
@@ -163,10 +195,16 @@ if (!await evalJs(`!$('pipe-viewing').hidden`)) fails.push("摆局没成:没翻�
 await sleep(250);
 seen = await now();
 check("翻历史时按钮点不到", !seen.clickable, JSON.stringify(seen));
+// **反过来钉一边**:只读不等于什么都不显示 —— 翻到一轮红的记录,那一轮自己那几步
+// 照旧要念得出来、「看第一个」照旧跳得过去(那颗按钮另有自己的 viewing 守卫)。
+// 把这个区一并按「现在还补得到什么」来判的话,翻历史就看不到那一轮红在哪一步了。
+check("翻历史时那一轮自己的红照旧念得出来",
+      !seen.issuesHidden && /1 个步骤需处理/.test(seen.title) && !seen.jumpHidden,
+      JSON.stringify(seen));
 await evalJs(`exitPipeHistory()`);
 await sleep(250);
 
-// ⑥ 真点一下:请求发得出去,而后端那句话(含降级说明)要念出来,不许丢
+// ⑧ 真点一下:请求发得出去,而后端那句话(含降级说明)要念出来,不许丢
 owed = ["crawl"];
 await reload();
 posted.length = 0;

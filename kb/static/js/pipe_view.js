@@ -38,6 +38,11 @@ function pipeStateHint(s, result, failed, skipped, progress, owed = 0) {
     if (failed) return `已有 ${failed} 个步骤失败，本轮仍在执行。请等全部步骤结束后再新建同步；失败项不会阻止下一轮。`;
     return `本轮${progress.label}尚未结束，暂不能新建同步。任务在后台执行，切换页面不会中断。`;
   }
+  // **这一轮红过、而今天已经没有可补的了**:那句「或按上次抓取范围重试失败项」
+  // 指的是一个按下去必定被拒绝的动作(今天先抓成后来又失败的那条订阅、失败之后
+  // 被停用或删掉的那几条,后端已经把它们从待补里摘掉了)。这一轮的红照旧说出来,
+  // 顺手指一句去哪看 —— 那个区这时是藏着的(它只讲现在要做的事)。
+  if (failed && !owed) return `${result.stopped ? '本轮已停止，结果已保留。' : ''}上次有 ${failed} 个步骤失败，但今天这几步已经不用补了（后来抓成了，或者那几条订阅已停用、删除）。明细在下面那一步里。`;
   if (failed) return `${result.stopped ? '本轮已停止，结果已保留。' : ''}上次有 ${failed} 个步骤失败，不影响新建同步。可重新配置一次同步，或按上次抓取范围重试失败项。`;
   // **这一轮全绿不等于今天没欠账。** 一天里会跑好几轮,而上面那句话只念得出最后
   // 一轮:今天早些时候失败的那几步在一轮全绿收尾之后就不在它里面了,而「重试失败
@@ -174,6 +179,23 @@ function renderPipeState(s) {
     }
   }
   const values = planned.map(k => stages[k] || {}), failed = values.filter(pipeHasFailure).length;
+  // **这一轮自己那几个红**:整张卡转不转红、「看第一个」往哪跳、问题区写不写
+  // 「明细在下面」都按它算 —— 它讲的是**这一轮发生了什么**。
+  const failedStages = planned.filter(k => pipeHasFailure(stages[k]));
+  // **「现在还补得到哪几步」只认后端那一份**(`today_failed`,和真正起跑那一侧
+  // 同一个派生 `pipeline_retry.owed_now`)。**不许再和这一轮的红做 OR** —— 今天
+  // 先抓成、后来又失败的那条订阅(或者失败之后被停用、删掉的),后端已经把它从
+  // 待补里摘掉了,而 OR 会让它重新放行:页面说「1 个步骤需处理」、点下去回一句
+  // 「这颗按钮没有要补的」、刷新还是那样,一个点不动也消不掉的死局(第 2 轮审查
+  // 实页实测)。**空集是答案,不是「没答」** —— 不能拿历史失败去兜底。
+  // **翻历史时它是空的**:那时屏幕上是上午那一轮,而这一份说的是此刻这一天。
+  // **字段不在才退回这一轮自己的红**,而且是显式的一档:`kb/static` 每次请求从
+  // 磁盘读、Python 模块要重启才换(CLAUDE.md「服务与运行时」),所以「新页面 +
+  // 旧进程」是真会出现的状态,那时这一份压根没有。
+  const legacyStatus = !Object.prototype.hasOwnProperty.call(s, 'today_failed');
+  const owedStages = s.running || viewing ? []
+    : legacyStatus ? failedStages : (s.today_failed || []);
+  const owed = owedStages.length;
   const card = $('pipe-overview');
   if (card) {
     card.classList.toggle('viewing', !!viewing);
@@ -186,7 +208,11 @@ function renderPipeState(s) {
   let title = '准备好收录新内容';
   if (s.running) title = s.stop_requested ? '正在收尾，随后停止' : active.length ? (label === '重试' ? '正在重试：' : '') + active.join(' + ') : `${label}正在启动`;
   else if (result.stopped) title = `${label}已停止`;
-  else if (failed) title = `${label}结束，${failed} 个步骤需处理`;
+  // **「需处理」是一句催人动手的话,所以它要和「现在真补得到」对齐。** 这一轮
+  // 红过、而今天已经不用补了(后来抓成了、或者那几条订阅停用/删掉了),照旧写
+  // 「需处理」就是指着一个按下去会被拒绝的动作。这一轮的红本身照旧说出来。
+  else if (failed) title = owed ? `${label}结束，${failed} 个步骤需处理`
+                                : `${label}结束，${failed} 个步骤失败（已不用补）`;
   else if (result.finished_at) title = skipped ? `${label}结束，部分步骤已跳过` : planned.length && completed === planned.length ? `${label}已完成` : `${label}结束，本次步骤未全部完成`;
   if ($('pipe-state-title').textContent !== title) $('pipe-state-title').textContent = title;
   // 这一轮的结论没写进磁盘(满盘、目录没了):本进程内照常可查,重启就退回上一次
@@ -233,11 +259,15 @@ function renderPipeState(s) {
   $('pipe-progress-fill').style.width = (planned.length ? Math.round(completed / planned.length * 100) : 0) + '%';
   // 需处理的问题在整轮结束后统一收进总览卡片:哪几步、各自卡在什么,配一颗重试按钮,
   // 不用去每个步骤卡片里找「需处理」。运行中不出现(失败项不阻止本轮继续)。
-  const failedStages = planned.filter(k => pipeHasFailure(stages[k]));
-  // **「今天还欠哪几步」这一份,整个问题区和那颗按钮共用。** 翻历史时不算:
-  // 它说的是此刻这一天,而屏幕上是上午那一轮(同下面那颗按钮的 `viewing` 那道)。
-  const owedStages = s.running || viewing ? [] : (s.today_failed || []);
-  const owed = owedStages.length;
+  // **这个区念的是哪几步**:平时就是「现在还补得到的」那一份(和那颗按钮、和真正
+  // 起跑的那一侧同一份);**翻历史时念屏幕上那一轮自己的红** —— 那时它是一块只读的
+  // 导航(按钮另有自己的 `viewing` 守卫),不然翻到一轮红的记录连「看第一个」都没了。
+  const shownStages = viewing ? failedStages : owedStages;
+  const shown = shownStages.length;
+  // 其中**这一轮自己也红着的**那几步在屏幕上有自己的卡片(所以写「明细在下面」、
+  // 「看第一个」跳得过去);其余是今天早些时候欠下的,屏幕上压根没有卡片。
+  const shownHere = shownStages.filter(k => failedStages.includes(k));
+  const shownEarlier = shownStages.filter(k => !failedStages.includes(k));
   $('pipe-state-hint').textContent = pipeStateHint(s, result, failed, skipped, { label, completed, total: planned.length }, owed);
   const backlog = !s.running && !viewing && pipePending.extract > 0;
   const issues = $('pipe-issues');
@@ -246,12 +276,12 @@ function renderPipeState(s) {
   // `hidden` 是 false、高度却是 0 —— 页面上明说「今天早些时候还有 1 个步骤没补
   // 上」,而那颗按钮一个像素都没有(第 2 轮审查实页实测)。可操作性取决于整条
   // 祖先链,不是控件自己那一格属性。
-  issues.hidden = s.running || !(failedStages.length || owed || backlog);
+  issues.hidden = s.running || !(shown || backlog);
   if (!issues.hidden) {
-    $('pipe-issues-title').textContent = failedStages.length
-      ? `${failedStages.length} 个步骤需处理`
-      : owed
-      ? `今天还有 ${owed} 个步骤没补上`
+    $('pipe-issues-title').textContent = shownHere.length
+      ? `${shown} 个步骤需处理`
+      : shown
+      ? `今天还有 ${shown} 个步骤没补上`
       : `还有 ${pipePending.extract} 项内容待提取`;
     // **只写哪几步,不抄它们的 detail。** 同一个字符串在下面那几行步骤的
     // `.pipe-stage-detail` 里已经有一份(存量实测有 200 字的),一屏上出现两遍 ——
@@ -260,18 +290,19 @@ function renderPipeState(s) {
     // 这一轮全绿、今天还欠着那一档:**哪几步要写出来,而且不许说「明细在下面」**
     // —— 下面那几张卡片讲的是这一轮(它们全是绿的),欠的那几步在屏幕上压根没有
     // 自己的卡片。
-    $('pipe-issues-list').innerHTML = failedStages.length
-      ? `${names(failedStages)} · 各自的明细在下面那一步里`
+    $('pipe-issues-list').innerHTML = shownHere.length
+      ? `${names(shownHere)} · 各自的明细在下面那一步里`
+        + (shownEarlier.length ? `；${names(shownEarlier)} 是今天早些时候没补上的` : '')
         + (backlog ? `；另有 ${pipePending.extract} 项内容待提取` : '')
-      : owed
-      ? `${names(owedStages)} · 今天早些时候没做完，可按它们各自的范围重试`
+      : shown
+      ? `${names(shownStages)} · 今天早些时候没做完，可按它们各自的范围重试`
         + (backlog ? `；另有 ${pipePending.extract} 项内容待提取` : '')
       : '在下面的「提取知识」里重试，或新建一次同步。';
   }
   // 「看第一个」:把屏幕带到第一个红的那一步并展开它的明细。**翻历史时照旧给** ——
   // 它只是滚动和展开,不动任何东西(那颗重试按钮才是「会动」的,它另有两道守卫)。
-  $('pipe-issues-jump').hidden = issues.hidden || !failedStages.length;
-  pipeFirstIssue = failedStages[0] || '';
+  $('pipe-issues-jump').hidden = issues.hidden || !shownHere.length;
+  pipeFirstIssue = shownHere[0] || '';
   // **翻历史时这颗按钮一律藏掉。** 它重试的永远是**最后一轮**的范围
   // (`pipeline_retry.retry_crawl_scopes` 读的是 `load_last_run()`),而屏幕上显示
   // 的是上午那一轮 —— 「看到的那一轮」和「按下去会动的那一轮」必须是同一轮。
@@ -281,8 +312,10 @@ function renderPipeState(s) {
   // 一轮全绿收尾之后最近那一轮一个红都没有,而今天早些时候那几笔还欠着 —— 按旧判据
   // 按钮当场藏掉,那几笔连点的机会都没有(后端口径 `pipeline_retry.today_failed`,
   // 账本空着时它退回最近一次运行,所以只会多显示、不会少显示)。
+  // **「这一轮红没红」在这儿不作数**:它是历史,而这颗按钮是现在的动作。拿它兜底
+  // 的后果就是上面那段注释里的死局 —— 按钮露着、点下去永远被拒绝。
   $('pipe-retry').hidden = s.running || !!viewing
-    || !(failed || owed || pipePending.extract > 0);
+    || !(owed || pipePending.extract > 0);
   renderPipeLog((s.log?.length ? s.log : result.log) || [], result.finished_at);
   syncPipeLogPanel(s.running && !viewing, pipeVersion(s));
   // 轮次列那一行「正在运行」跟着此刻的快照走(口径在 `pipe_history.js`)

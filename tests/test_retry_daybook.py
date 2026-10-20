@@ -613,6 +613,17 @@ class OwedMatchesWhatTheButtonCanDoTests(DaybookCase):
         self.assertEqual([], pipeline_retry.today_failed(),
                          f'页面说还欠着,而点下去是:{msg}')
 
+    def test_asking_the_plan_on_its_own_gets_the_same_answer(self):
+        """**单独问一句「会跑哪几步」的人,拿到的也得是按钮真会给的那个答案。**
+
+        缺省那一档原来只读账本:账上还欠着抓取,于是它答出整条链,而同一刻真点下去
+        是「没有要补的」。口径只有一份 —— 下一个调用方不该再继承旧那一份。
+        """
+        self.failed_after_succeeding()
+        with self.no_backlog():
+            self.assertEqual([], pipeline_retry.retry_failed_plan(),
+                             '单独问一句还答着整条链,而点下去没有可补的')
+
     def test_a_target_that_got_disabled_is_not_owed_anymore(self):
         """失败之后被停用:它压根不会再被抓,页面上那一步也就补不动了。"""
         self.crawl({'channel': 'rss', 'accounts': [str(self.a['id'])]},
