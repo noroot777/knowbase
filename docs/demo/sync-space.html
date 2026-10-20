@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>同步弹窗挤不下 · 四个方案 · demo</title>
+<style>
+/* 色板与字体逐值抄自 kb/static/css/base.css 的 :root —— 这是独立产物，不能 import */
+:root{
+  --paper:#F3F5F4; --paper-2:#ECF0EE; --card:#FFFFFF;
+  --ink:#14202B; --ink-2:#3A4750; --muted:#66727C;
+  --line:#DCE3E0; --line-soft:#E9EDEB;
+  --brand:#17604F; --brand-deep:#0E4A3B; --brand-soft:#DFF0E9; --brand-tint:#F0F7F4;
+  --ok:#2E7D57; --danger:#B3402F; --warn:#8A5A22; --warn-soft:#F6EBDC;
+  --font-display:"Songti SC","STSong","Source Han Serif SC","Noto Serif CJK SC",serif;
+  --font-mono:ui-monospace,"SF Mono","SFMono-Regular",Menlo,Consolas,monospace;
+  --font-body:-apple-system,"PingFang SC","Noto Sans SC",sans-serif;
+}
+*{box-sizing:border-box;margin:0}
+body{font:15px/1.7 var(--font-body);background:var(--paper);color:var(--ink);padding:30px 24px 70px}
+.wrap{max-width:1180px;margin:0 auto}
+h1{font-family:var(--font-display);font-weight:900;font-size:25px;letter-spacing:.5px}
+.head{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.head .fact{font-family:var(--font-mono);font-size:12.5px;color:var(--muted)}
+.lede{color:var(--ink-2);font-size:14px;margin:6px 0 22px}
+.ia{display:inline-block;vertical-align:-.1em}
+
+/* 工具条：方案 / 入口 / 窗口高度 */
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.bar>b{font-size:12.5px;font-weight:600;color:var(--muted);min-width:62px}
+.chip{font:13px/1 var(--font-body);color:var(--ink-2);background:var(--card);
+  border:1px solid var(--line);border-radius:999px;padding:8px 14px;cursor:pointer}
+.chip:hover{background:var(--brand-tint);border-color:var(--brand-soft)}
+.chip[aria-pressed="true"]{background:var(--brand);border-color:var(--brand);color:#fff}
+
+/* 视口框：模拟一扇真实的浏览器窗口，弹窗按 90dvh 封顶 */
+.stage{margin-top:16px;background:rgba(20,32,43,.30);border-radius:14px;padding:14px;
+  display:flex;align-items:center;justify-content:center}
+.vp{height:var(--vph);width:100%;display:flex;align-items:center;justify-content:center;
+  background:rgba(20,32,43,.06);border-radius:8px;overflow:hidden}
+.readout{margin-top:10px;font-family:var(--font-mono);font-size:12.5px;color:var(--muted)}
+.readout b{font-weight:600}
+.readout.bad b{color:var(--danger)}
+.readout.good b{color:var(--ok)}
+.note{margin-top:14px;padding:14px 16px;background:var(--card);border:1px solid var(--line);
+  border-radius:12px;font-size:13.5px;color:var(--ink-2);line-height:1.75}
+.note b{color:var(--ink)}
+.note .cut{color:var(--brand-deep)}
+
+/* ── 弹窗本体（尺寸逐值对齐 kb/static/css/pipeline.css） ── */
+.modal{background:var(--card);border-radius:16px;box-shadow:0 20px 60px rgba(20,32,43,.2);
+  width:min(620px,100%);max-height:90%;display:flex;flex-direction:column;overflow:hidden}
+.modal.wide{width:min(880px,100%)}
+.m-hd{flex-shrink:0;padding:22px 24px 16px;display:flex;gap:20px;justify-content:space-between}
+.m-hd h3{font-size:17px;font-weight:600;margin-bottom:6px}
+.m-hd p{color:var(--muted);font-size:13px}
+.m-hd .x{font-size:23px;color:var(--muted);background:none;border:0;cursor:pointer;line-height:1}
+.m-bd{flex:1;overflow-y:auto;min-height:0;padding:0 24px;overscroll-behavior:contain}
+.m-bd.cols{display:grid;grid-template-columns:1fr 1fr;gap:0 22px;align-items:start}
+.m-ft{flex-shrink:0;padding:16px 24px 20px;border-top:1px solid var(--line);background:var(--card)}
+.m-ft .row2{display:flex;justify-content:flex-end;gap:10px;margin-top:14px}
+.m-ft.thin{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.m-ft.thin .row2{margin-top:0;margin-left:auto}
+.est{font-size:13px;color:var(--muted);line-height:1.6}
+.est .warn{color:var(--warn)}
+button.go{background:var(--brand);color:#fff;border:0;border-radius:9px;padding:10px 18px;
+  font:14px/1 var(--font-body);cursor:pointer}
+button.ghost{background:var(--card);color:var(--ink-2);border:1px solid var(--line);
+  border-radius:9px;padding:10px 18px;font:14px/1 var(--font-body);cursor:pointer}
+
+.row{margin-bottom:20px}
+.lb{display:flex;align-items:baseline;justify-content:space-between;gap:10px;font-size:14px}
+.lb b{font-weight:600}
+.lb .n{font-family:var(--font-mono);font-size:11.5px;color:var(--muted);font-weight:400}
+.lb .txt{font:12.5px/1 var(--font-body);color:var(--brand-deep);background:none;border:0;cursor:pointer}
+.hint{font-size:13px;color:var(--muted);margin-top:6px}
+
+/* 来源 / 步骤：现状那套大卡 */
+.cards{display:grid;gap:8px;margin:8px 0;grid-template-columns:repeat(auto-fit,minmax(230px,1fr))}
+.card{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;cursor:pointer;
+  border:1px solid var(--line);border-radius:10px;background:var(--card)}
+.card input{flex-shrink:0;width:16px;height:16px;margin-top:2px;accent-color:var(--brand)}
+.card b{display:block;font-size:13.5px;font-weight:600}
+.card small{display:block;margin-top:3px;font-size:12px;color:var(--muted);line-height:1.5}
+.card.on{border-color:var(--brand);background:var(--brand-tint)}
+.card.off{opacity:.45;cursor:not-allowed}
+.chipmark{margin-left:6px;padding:1px 6px;border-radius:6px;font-style:normal;font-size:11px;
+  font-weight:500;color:var(--warn);border:1px solid var(--warn)}
+
+/* 来源：紧凑行 */
+.rows{display:grid;gap:4px;margin:8px 0;grid-template-columns:1fr 1fr}
+.srow{display:flex;gap:9px;align-items:center;padding:7px 10px;cursor:pointer;
+  border:1px solid transparent;border-radius:8px}
+.srow:hover{background:var(--paper)}
+.srow input{flex-shrink:0;width:15px;height:15px;accent-color:var(--brand)}
+.srow .nm{font-size:13.5px}
+.srow .ct{margin-left:auto;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.srow.on{border-color:var(--brand-soft);background:var(--brand-tint)}
+.srow.off{opacity:.38;cursor:not-allowed}
+.locked{display:flex;align-items:center;gap:10px;padding:10px 12px;margin:8px 0;
+  border:1px solid var(--brand-soft);background:var(--brand-tint);border-radius:10px;font-size:13.5px}
+.locked .ct{margin-left:auto;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+
+/* 订阅：折叠成一行 */
+.fold{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid var(--line);
+  border-radius:9px;font-size:13px;color:var(--ink-2)}
+.fold .ct{font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.fold button{margin-left:auto;font:12.5px/1 var(--font-body);color:var(--brand-deep);
+  background:none;border:0;cursor:pointer}
+.acct{max-height:230px;overflow-y:auto;border:1px solid var(--line);border-radius:9px;margin-top:7px}
+.acct div{padding:7px 11px;font-size:13px;border-bottom:1px solid var(--line-soft);
+  display:flex;gap:9px;align-items:center}
+.acct div:last-child{border-bottom:0}
+.acct input{width:15px;height:15px;accent-color:var(--brand)}
+.search{display:block;width:100%;margin:7px 0;padding:8px 11px;font:13px var(--font-body);
+  border:1px solid var(--line);border-radius:9px}
+
+/* 步骤：横向流水线 */
+.rail{display:flex;align-items:stretch;gap:3px;margin:8px 0}
+.cell{flex:1;min-width:0;padding:8px 4px 7px;border:1px solid var(--line);border-radius:9px;
+  background:var(--card);cursor:pointer;text-align:center}
+.cell .nm{font-size:12.5px;line-height:1.35;white-space:nowrap}
+.cell .mk{display:block;margin-top:3px;font-size:10px;color:var(--warn)}
+.cell.on{border-color:var(--brand);background:var(--brand-tint);color:var(--brand-deep)}
+.cell.on .nm{font-weight:600}
+.cell.off{color:var(--muted);background:var(--paper)}
+.cell.lock{opacity:.5;cursor:not-allowed}
+.sep{align-self:center;color:var(--muted);flex-shrink:0}
+.railhint{font-size:12.5px;color:var(--muted);margin-top:7px;min-height:20px}
+
+.daily{display:flex;gap:10px;align-items:flex-start;margin-top:10px;padding:10px 12px;
+  border:1px solid var(--line);border-radius:10px;background:var(--paper);cursor:pointer}
+.daily input{width:16px;height:16px;margin-top:2px;accent-color:var(--brand)}
+.daily b{display:block;font-size:13.5px;font-weight:600}
+.daily small{display:block;margin-top:3px;font-size:12px;color:var(--muted)}
+.rg{display:inline-flex;align-items:center;gap:6px;padding:8px 13px;border:1px solid var(--line);
+  border-radius:9px;background:var(--card);font-size:13px;cursor:pointer}
+.steps{display:flex;gap:7px;align-items:center;font-size:12.5px;color:var(--muted);margin-bottom:12px}
+.steps .cur{color:var(--brand-deep);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head"><h1>同步弹窗挤不下</h1>
+    <span class="fact">6 来源 · 6 步骤 · 弹窗 620 宽 · 封顶 90dvh</span></div>
+  <p class="lede">同一个弹窗，四种排法。切窗口高度看它在你那块屏上到底要不要滚；下面那行读数是真量出来的。</p>
+
+  <div class="bar"><b>排法</b><span id="schemes"></span></div>
+  <div class="bar"><b>从哪进来</b><span id="entries"></span></div>
+  <div class="bar"><b>窗口高</b><span id="heights"></span></div>
+
+  <div class="stage"><div class="vp" id="vp"></div></div>
+  <p class="readout" id="readout"></p>
+  <div class="note" id="note"></div>
+</div>
+
+<script>
+// 六类来源。说明逐字抄自 kb/source_types.py 的 note（现在弹窗卡片上念的就是它，
+// 经 kb/collectors/feeds.py 的 channel_hint = spec.note）；短的那句是同一处的 desc。
+// 订阅条数：公众号 43、大V 51 来自实页截图，其余是演示数字。
+const SRC = [
+  {id:'wechat', label:'公众号', n:43, desc:'关注的公众号文章',
+   note:'读取本机已同步的公众号推送，再获取原文。'},
+  {id:'social', label:'大V观点', n:51, desc:'关注的人，此刻的想法。',
+   note:'X 的取法在下面的「取法」那一块里选，每一档要准备的东西不同。也可以为单个账号填写专用订阅链接，它优先于任何通道。'},
+  {id:'rss', label:'RSS', n:38, desc:'让值得读的文章，自己来到这里。',
+   note:'读取订阅中当前提供的内容；不能保证补齐订阅之前的全部历史。'},
+  {id:'digest', label:'邮件简报', n:3, desc:'每期一个汇总页，里面是几十条带外链的简讯。',
+   note:'给 TLDR 这类"一期一封"的简报用：RSS 本身不带正文，我们按它给的期号去每期页面把每条简讯拆出来，标着「赞助」的那些不收。正文就是简报自己写的摘要，不要再开「补抓原文」——那个外链指向的是别人家的文章，抓回来就不是这条简讯了。'},
+  {id:'web', label:'网页专栏', n:6, desc:'没有订阅源的站点，靠解析列表页跟踪。',
+   note:'给没有 RSS / Atom 的站点用：按「每条带发布时间的链接」认出列表，正文建议打开「补抓原文」去文章页取。站点改版时这条订阅会报错，而不是静静地变成「今天没有新文章」。'},
+  {id:'inbox', label:'手动收录', n:12, desc:'看到就存：给一个链接，内容抓进知识库。',
+   note:'这一类不轮询：你给一个链接，正文当场抓好写进知识库。X 的单条推文走公开接口（长文连正文一起取），其他站点按文章正文提取。按站点自动归到一个收件桶里，抓不到正文的不会入库——重试一次的代价只是再抓一遍。'},
+];
+// 六个步骤，逐字抄自 kb/static/js/pipe_stages.js 的 PIPE_STAGE_DEFS
+const STG = [
+  {k:'crawl',    name:'抓取内容', d:'从所选来源收集文章'},
+  {k:'export',   name:'导出文章', d:'保存到本地知识库'},
+  {k:'index',    name:'建立索引', d:'让新内容能被搜到'},
+  {k:'extract',  name:'提取要点', d:'模型读一遍，写摘要和标签', cost:1},
+  {k:'projects', name:'整理工具', d:'把文章里提到的工具拆成图鉴条目', cost:1, slow:1},
+  {k:'wiki',     name:'更新 Wiki', d:'双链、汇总页、三张关系图谱', cost:1, slow:1},
+];
+const ACCT = ['机器之心','量子位','新智元','APPSO','Founder Park','特工宇宙','硅星人','差评'];
+
+const SCHEMES = [
+  {k:'now',  label:'现状'},
+  {k:'thin', label:'A 瘦身'},
+  {k:'cols', label:'B 两栏'},
+  {k:'wiz',  label:'C 分两步'},
+];
+const ENTRIES = [
+  {k:'center', label:'同步中心 · 新建同步'},
+  {k:'tab',    label:'我的订阅 · 大V观点那一页'},
+  {k:'one',    label:'我的订阅 · 单独一条订阅'},
+];
+const HEIGHTS = [{v:900,label:'900（常见笔记本）'},{v:800,label:'800'},{v:720,label:'720（13 寸）'}];
+
+let scheme='now', entry='center', vph=900, step=1, acctOpen=false;
+let sel=new Set(['wechat','social']), stg=new Set(STG.map(s=>s.k)), daily=false;
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const arrow = () => '<svg class="ia" width="1em" height="1em" viewBox="0 0 12 12" fill="none" '
+  + 'stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" '
+  + 'aria-hidden="true"><path d="M2.5 6h7M6.7 3.3 9.4 6 6.7 8.7"/></svg>';
+// 锁定入口：来源定死成一个，其余灰掉（「我的订阅」里点哪个 tab 就只能同步哪个）
+const lockedTo = () => entry === 'center' ? null : 'social';
+const onSrc = id => lockedTo() ? id === lockedTo() : sel.has(id);
+const picked = () => SRC.filter(s => onSrc(s.id));
+const stages = () => STG.filter(s => stg.has(s.k));
+const slowN = () => stages().filter(s => s.slow).length;
+
+/* ── 可复用的几块 ───────────────────────────────────────────────────────── */
+function srcCards(){            // 现状：六张带整段说明的大卡
+  return `<div class="row"><div class="lb"><b>同步来源 <span class="n">已选 ${picked().length} / 6</span></b></div>
+    <div class="cards">${SRC.map(s => {
+      const on = onSrc(s.id), dead = lockedTo() && !on;
+      return `<label class="card ${dead?'off':on?'on':''}"><input type="checkbox" ${on?'checked':''} ${dead?'disabled':''} data-src="${s.id}">
+        <span><b>${esc(s.label)}</b><small>${esc(s.note)}</small></span></label>`;
+    }).join('')}</div></div>`;
+}
+function srcRows(){             // 瘦身：一行一个，长说明整段拿掉，留条数
+  if (lockedTo()) return srcLocked();
+  return `<div class="row"><div class="lb"><b>同步来源 <span class="n">已选 ${picked().length} / 6</span></b>
+      <button class="txt">全选</button></div>
+    <div class="rows">${SRC.map(s => `<label class="srow ${onSrc(s.id)?'on':''}">
+      <input type="checkbox" ${onSrc(s.id)?'checked':''} data-src="${s.id}">
+      <span class="nm">${esc(s.label)}</span><span class="ct">${s.n}</span></label>`).join('')}</div></div>`;
+}
+function srcLocked(){           // 从「我的订阅」某一页进来：一行交代，不给六选一
+  const s = SRC.find(x => x.id === lockedTo());
+  return `<div class="row"><div class="lb"><b>同步来源</b></div>
+    <div class="locked"><span>只同步<b> ${esc(s.label)} </b>——${entry==='one'?'你点的那一条订阅':'你正在看的这一页'}</span>
+      <span class="ct">${entry==='one'?'1':s.n} 个订阅</span></div>
+    <p class="hint">要同时跑别的来源，去同步中心新建一次。</p></div>`;
+}
+function rangeRow(){
+  return `<div class="row"><div class="lb"><b>时间范围</b></div>
+    <div style="margin-top:7px"><span class="rg">不限时间 <svg class="ia" width="1em" height="1em" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="m2.9 4.7 3.1 3.1 3.1-3.1"/></svg></span></div></div>`;
+}
+function acctFull(){            // 现状：搜索框 + 230px 高的列表
+  if (entry === 'one') return '';
+  return `<div class="row"><div class="lb"><b>订阅 <span class="n">已选 ${picked().reduce((a,s)=>a+s.n,0)}</span></b>
+      <span><button class="txt">全选</button> <button class="txt">清空选择</button></span></div>
+    <input class="search" placeholder="搜索订阅名称…">
+    <div class="acct">${ACCT.map(a => `<div><input type="checkbox" checked>${esc(a)}</div>`).join('')}</div></div>`;
+}
+function acctFold(){            // 瘦身：默认折起来，九成情况就是「全部」
+  if (entry === 'one') return '';
+  const total = picked().reduce((a,s)=>a+s.n,0);
+  return `<div class="row"><div class="lb"><b>订阅</b></div>
+    <div style="margin-top:7px"><div class="fold"><span>${picked().map(s=>`${esc(s.label)} 全部`).join(' · ') || '未选来源'}</span>
+      <span class="ct">${total}</span><button data-fold="1">${acctOpen?'收起':'挑几个'}</button></div>
+      ${acctOpen ? `<div class="acct">${ACCT.map(a=>`<div><input type="checkbox" checked>${esc(a)}</div>`).join('')}</div>` : ''}</div></div>`;
+}
+function stgCards(){            // 现状：六张大卡，两列
+  return `<div class="row"><div class="lb"><b>跑哪些步骤 <span class="n">已选 ${stages().length} / 6</span></b>
+      <button class="txt">清空选择</button></div>
+    <div class="cards">${STG.map(s => `<label class="card ${stg.has(s.k)?'on':''}">
+      <input type="checkbox" ${stg.has(s.k)?'checked':''} data-stg="${s.k}">
+      <span><b>${esc(s.name)}${s.cost?'<i class="chipmark">烧额度</i>':''}${s.slow?'<i class="chipmark">几十分钟</i>':''}</b>
+      <small>${esc(s.d)}</small></span></label>`).join('')}</div>${dailyRow()}</div>`;
+}
+function stgRail(){             // 瘦身：一条横向流水线，慢活标记留在格子里
+  const cells = STG.map(s => `<div class="cell ${stg.has(s.k)?'on':'off'}" data-stg="${s.k}" title="${esc(s.d)}">
+      <span class="nm">${esc(s.name)}</span>${s.slow?'<span class="mk">几十分钟</span>':s.cost?'<span class="mk">烧额度</span>':''}</div>`);
+  return `<div class="row"><div class="lb"><b>跑哪些步骤 <span class="n">已选 ${stages().length} / 6</span></b>
+      <button class="txt">清空选择</button></div>
+    <div class="rail">${cells.join(`<span class="sep">${arrow()}</span>`)}</div>
+    <p class="railhint" id="railhint">点一下开关这一步。${slowN()?`含 ${slowN()} 段全库慢活。`:''}</p>${dailyRow()}</div>`;
+}
+function dailyRow(){
+  return `<label class="daily"><input type="checkbox" ${daily?'checked':''} data-daily="1">
+    <span><b>跑完出日报</b><small>用这一轮之后的库存生成今天的日报</small></span></label>`;
+}
+function estText(){
+  const names = stages().map(s=>s.name).join(' → ') || '（没勾步骤）';
+  const who = picked().map(s=>`${s.label} ${entry==='one'?1:s.n} 个`).join(' · ');
+  return {names, who, slow:slowN()};
+}
+function ftFull(){              // 现状：整段话 + 另起一行的按钮
+  const e = estText();
+  return `<div class="m-ft"><div class="est">这次会跑：${esc(e.names)}。${esc(e.who)} · 不限时间。执行中可离开本页，稍后回来查看。${e.slow?`<span class="warn"> 含 ${e.slow} 段全库的慢活，一次要跑几十分钟。</span>`:''}</div>
+    <div class="row2"><button class="ghost">暂不执行</button><button class="go">开始同步 · ${stages().length} 步</button></div></div>`;
+}
+function ftThin(){              // 瘦身：步骤名上面那条流水线已经写着了，这里只留事实
+  const e = estText();
+  return `<div class="m-ft thin"><div class="est">${esc(e.who)} · 不限时间${e.slow?`<span class="warn"> · ${e.slow} 段慢活</span>`:''}</div>
+    <div class="row2"><button class="ghost">暂不执行</button><button class="go">开始同步 · ${stages().length} 步</button></div></div>`;
+}
+function hd(sub){
+  return `<div class="m-hd"><div><h3>新建同步</h3><p>${esc(sub)}</p></div><button class="x">×</button></div>`;
+}
+
+/* ── 四种排法 ───────────────────────────────────────────────────────────── */
+function viewNow(){
+  return `<div class="modal">${hd('勾要抓的来源和时间范围，再勾这一次跑哪几步。')}
+    <div class="m-bd">${srcCards()}${rangeRow()}${acctFull()}${stgCards()}</div>${ftFull()}</div>`;
+}
+function viewThin(){
+  return `<div class="modal">${hd('勾来源和范围，再点这一次跑哪几步。')}
+    <div class="m-bd">${srcRows()}${rangeRow()}${acctFold()}${stgRail()}</div>${ftThin()}</div>`;
+}
+function viewCols(){
+  return `<div class="modal wide">${hd('左边抓什么，右边跑哪几步。')}
+    <div class="m-bd cols"><div>${srcRows()}${rangeRow()}${acctFold()}</div><div>${stgRail()}</div></div>${ftThin()}</div>`;
+}
+function viewWiz(){
+  const nav = `<div class="steps"><span class="${step===1?'cur':''}">1 抓什么</span>${arrow()}<span class="${step===2?'cur':''}">2 跑哪几步</span></div>`;
+  const body = step===1 ? `${srcRows()}${rangeRow()}${acctFull()}` : stgRail();
+  const ft = step===1
+    ? `<div class="m-ft thin"><div class="est">${esc(estText().who)} · 不限时间</div>
+        <div class="row2"><button class="ghost">暂不执行</button><button class="go" data-step="2">下一步 ${arrow()}</button></div></div>`
+    : ftThin().replace('<div class="row2">', '<div class="row2"><button class="ghost" data-step="1">上一步</button>');
+  return `<div class="modal">${hd(step===1?'先说这一次抓什么。':'再说这一次跑哪几步。')}
+    <div class="m-bd">${nav}${body}</div>${ft}</div>`;
+}
+
+const NOTES = {
+  now:`<b>现状。</b>六张来源卡片各带一整段说明——那段话是「我的订阅」页上<b>解释这类来源是什么</b>的
+    文案（<span class="cut">kb/source_types.py 的 note</span>），在「这次跑哪几个」的选择器里是纯占地；
+    真正有用的「这个来源有多少条订阅」反而没显示。底部那段又把上面勾好的步骤名<b>重念了一遍</b>。`,
+  thin:`<b>A 瘦身：把重复的信息删掉，而不是把字调小。</b>三刀：来源改成一行一个、只留名字和订阅数
+    （长说明回「我的订阅」页，那里本来就有）；订阅名单默认折起来，九成情况就是「全部」，要挑再展开；
+    步骤改成一条<b>横向流水线</b>，勾中高亮、慢活标记留在格子里。底部那句「这次会跑：A → B → C」
+    就跟流水线重复了，整句删掉只留事实数字。<br><span class="cut">代价：</span>来源那段解释在弹窗里看不到了，
+    步骤的一句话说明退到悬停（格子上还留着慢活/烧额度标记，那两个不能藏）。`,
+  cols:`<b>B 两栏：弹窗加宽到 880，左边抓什么、右边跑哪几步。</b>一屏全见，而且「来源」和「步骤」
+    一眼能同时看到，不用记着上面勾了什么再往下滚。<br><span class="cut">代价：</span>窄屏要回落成单列，
+    等于还得养 A 那套紧凑排法；弹窗变宽之后在小屏上压迫感更强。`,
+  wiz:`<b>C 分两步：第 1 屏抓什么，第 2 屏跑哪几步。</b>每屏都松快，订阅名单能摊开给足高度。
+    <br><span class="cut">代价：</span>多一次点击，而且「这一次总共会发生什么」要到第 2 屏才看得全——
+    慢活偷袭正是之前要治的毛病，分屏会把它又藏起来半屏。`,
+};
+
+/* ── 渲染与读数 ─────────────────────────────────────────────────────────── */
+function chips(box, list, cur, attr){
+  box.innerHTML = list.map(o => `<button class="chip" data-${attr}="${o.k ?? o.v}" `
+    + `aria-pressed="${(o.k ?? o.v) === cur}">${esc(o.label)}</button>`).join(' ');
+}
+function render(){
+  chips(document.getElementById('schemes'), SCHEMES, scheme, 'scheme');
+  chips(document.getElementById('entries'), ENTRIES, entry, 'entry');
+  chips(document.getElementById('heights'), HEIGHTS, vph, 'h');
+  const vp = document.getElementById('vp');
+  vp.style.setProperty('--vph', vph + 'px');
+  vp.innerHTML = {now:viewNow, thin:viewThin, cols:viewCols, wiz:viewWiz}[scheme]();
+  document.getElementById('note').innerHTML = NOTES[scheme];
+  // 读数：真量这一屏还差多少。滚不滚得动是 CSS 自己算的，不是我说了算。
+  const bd = vp.querySelector('.m-bd');
+  const over = Math.max(0, bd.scrollHeight - bd.clientHeight);
+  const out = document.getElementById('readout');
+  out.className = 'readout ' + (over ? 'bad' : 'good');
+  out.innerHTML = over
+    ? `窗口 ${vph} → 弹窗可视区 ${bd.clientHeight}，内容 ${bd.scrollHeight}：<b>还要滚 ${over}px 才看得全</b>`
+    : `窗口 ${vph} → 弹窗可视区 ${bd.clientHeight}，内容 ${bd.scrollHeight}：<b>一屏全见，不用滚</b>`;
+}
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-scheme],[data-entry],[data-h],[data-src],[data-stg],[data-fold],[data-daily],[data-step]');
+  if (!t) return;
+  const d = t.dataset;
+  if (d.scheme) { scheme = d.scheme; step = 1; }
+  else if (d.entry) entry = d.entry;
+  else if (d.h) vph = +d.h;
+  else if (d.src) { sel.has(d.src) ? sel.delete(d.src) : sel.add(d.src); }
+  else if (d.stg) { stg.has(d.stg) ? stg.delete(d.stg) : stg.add(d.stg); }
+  else if (d.fold) acctOpen = !acctOpen;
+  else if (d.daily) daily = !daily;
+  else if (d.step) step = +d.step;
+  render();
+});
+// 流水线格子悬停时，那一步是干什么的就地说一句（标记不靠悬停，一直在格子里）
+document.addEventListener('mouseover', e => {
+  const c = e.target.closest('.cell'), h = document.getElementById('railhint');
+  if (!h) return;
+  const s = c && STG.find(x => x.k === c.dataset.stg);
+  h.textContent = s ? `${s.name}：${s.d}` : `点一下开关这一步。${slowN()?`含 ${slowN()} 段全库慢活。`:''}`;
+});
+render();
+</script>
+</body>
+</html>
