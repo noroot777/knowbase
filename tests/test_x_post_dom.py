@@ -36,7 +36,7 @@ def article(identity='123', text='short', more='', quoted=''):
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path.startswith('/cdn-cgi/'):
+        if self.path.lower().startswith('/cdn-cgi/'):
             self.send_response(200)
             self.end_headers()
             return

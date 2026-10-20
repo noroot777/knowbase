@@ -2,7 +2,7 @@
 import json
 from urllib.parse import urlsplit
 
-from kb.feeds.grab_page import _ASSET_ATTRS, _GATE_ASSETS
+from kb.feeds.page_gate import ASSETS_JS
 from kb.feeds.x_cdp import Session
 
 STATE_JS = r'''
@@ -17,12 +17,7 @@ STATE_JS = r'''
       .some(node => node.getAttribute('d') === retryPath);
     const failed = articles === 0 && (retry
       || /Something went wrong\. Try reloading|出错了。请尝试重新加载。|请稍后再试/i.test(text));
-    const assets = __GATE_ASSETS__;
-    const gate = __ASSET_ATTRS__.some(([tag, attr]) =>
-      [...document.querySelectorAll(`${tag}[${attr}]`)].some(node =>
-        assets.some(marker => node.getAttribute(attr).includes(marker))))
-      || [...document.querySelectorAll('script:not([src])')].some(node =>
-        assets.some(marker => node.textContent.includes(marker)));
+    const gate = __GATE_COMPONENTS__;
     return {
       url: location.href,
       ready: document.readyState,
@@ -36,8 +31,7 @@ STATE_JS = r'''
       failed,
     };
   };
-'''.replace('__GATE_ASSETS__', json.dumps(_GATE_ASSETS)).replace(
-    '__ASSET_ATTRS__', json.dumps(_ASSET_ATTRS))
+'''.replace('__GATE_COMPONENTS__', ASSETS_JS)
 
 
 class Responses:

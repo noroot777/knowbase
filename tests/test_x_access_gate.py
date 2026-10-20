@@ -158,6 +158,30 @@ class AccessGateDomTests(unittest.TestCase):
                 for script in [x_post.READ_JS, x_browser._STATE_JS]:
                     self.assertFalse(json.loads(self.page.eval(script))['challenge'])
 
+    def test_real_dom_uses_executable_script_types_and_case_insensitive_component_markers(self):
+        for html, blocked in [
+                ('<script type="application/json">{"endpoint":"/cdn-cgi/challenge-platform/h/b/"}'
+                 '</script>', False),
+                ('<script type="application/ld+json">{"sample":"_cf_chl_opt"}</script>', False),
+                ('<script type="application/json" src="/cdn-cgi/challenge-platform/h/flow"></script>',
+                 False),
+                ('<template><script src="/cdn-cgi/challenge-platform/h/flow"></script></template>',
+                 False),
+                ('<script src="/CDN-CGI/Challenge-Platform/h/flow"></script>', True),
+                ('<form action="/CDN-CGI/CHALLENGE-PLATFORM/H/flow"></form>', True),
+                ('<script type="TEXT/JAVASCRIPT">window._CF_CHL_OPT = {};</script>', True),
+                ('<script type="module">window._CF_CHL_OPT = {};</script>', True),
+                ('<script src="" type="module">window._CF_CHL_OPT = {};</script>', False)]:
+            with self.subTest(html=html):
+                self.load(html)
+                for script in [x_post.READ_JS, x_browser._STATE_JS]:
+                    snap = json.loads(self.page.eval(script))
+                    self.assertEqual(blocked, snap['challenge'])
+                    self.assertEqual('challenge' if blocked else '', x_page_state.problem(snap))
+                if blocked:
+                    with self.assertRaises(x_page_state.XAccessBlocked):
+                        x_browser._wait_state(self.page, 'Example', time.monotonic() + 3)
+
     def test_proven_url_repair_survives_real_inline_dom_without_legacy_break_evidence(self):
         self.load(dom.article(text='Read this:<a href="https://example.org/path">'
                               '<span aria-hidden="true">https://</span>example.org/path</a>'))

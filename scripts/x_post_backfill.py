@@ -5,7 +5,8 @@
     python scripts/x_post_backfill.py run --limit 10
     python scripts/x_post_backfill.py run --yes --channel browser --report /tmp/x-post.json
 
-scan is local and read-only. run probes candidates; only --yes writes feeds.db.
+scan lists all stored X posts and their current audit results, locally and read-only.
+run probes candidates; only --yes writes feeds.db.
 Every unaudited or changed X post is selected by default; failures remain retryable.
 Audit receipts are saved beside feeds.db, without changing feed content in probe mode.
 --recheck repeats completed audits; ellipses and wrapped URLs only affect priority.
@@ -212,7 +213,8 @@ def proposal(entry: dict, text: str, evidence=None) -> tuple[str, dict | None, d
                             if info['artifacts'] else 'detail_not_longer')
 
 
-def candidates(conn, *, urls=(), limit=0, all_posts=False, apply=False, recheck=False) -> list[dict]:
+def candidates(conn, *, urls=(), limit=0, all_posts=False, apply=False, recheck=False,
+               scan=False) -> list[dict]:
     """Audit all X posts; all_posts remains accepted for existing callers."""
     rows = conn.execute("SELECT * FROM feed_items WHERE kind='social' AND content_kind='post'"
                         " ORDER BY published DESC,key").fetchall()
@@ -227,7 +229,8 @@ def candidates(conn, *, urls=(), limit=0, all_posts=False, apply=False, recheck=
         selected.append(dict(row))
     selected.sort(key=lambda row: not (row['body'].rstrip().endswith(('…', '...')) or
                                       canonical_preview(row['body']) != row['body']))
-    selected = audit.select(selected, apply=apply, recheck=recheck or bool(wanted))
+    if not scan:
+        selected = audit.select(selected, apply=apply, recheck=recheck or bool(wanted))
     return selected[:limit] if limit else selected
 
 
@@ -278,13 +281,13 @@ def repair(rows: list[dict], session, *, apply=False, deadline=None,
         else:
             state, complete, info = proposal(entry_of(row), text, evidence)
             stats[state] += 1
-            if info.get('remaining'):
-                stats['partial'] += 1
             result.update(state=state, **info)
             if complete and apply:
                 state = 'updated' if grab_store.replace(row, complete) else 'stale'
                 stats[state] += 1
                 result['state'] = state
+                if state == 'updated' and info.get('remaining'):
+                    stats['partial'] += 1
         if remember:
             audit.record(row, result, complete=complete)
         stats['results'].append(result)
@@ -313,14 +316,25 @@ def main(argv=None) -> int:
         parser.error('--url 只接受 X 推文的完整地址')
     with reg.db() as conn:
         rows = candidates(conn, urls=args.url, limit=args.limit, all_posts=args.all,
-                          apply=args.yes, recheck=args.recheck)
-    print(f'找到 {len(rows)} 条候选;默认续查未核对或正文已变的存量 X 推文,失败项排在新项之后重试。')
+                          apply=args.yes, recheck=args.recheck, scan=args.cmd == 'scan')
+    scope = ('列出存量 X 推文及当前版本的核对结论,不隐藏已核对项。' if args.cmd == 'scan' else
+             '默认续查未核对或正文已变的存量 X 推文,失败与局部修复欠账排在新项之后重试。')
+    print(f'找到 {len(rows)} 条候选;' + scope)
     print('核对记录:' + str(audit.path()) + ';--recheck 或 --url 可重查已有结论。')
     if args.limit:
         print('已按 limit 限制本批数量,不代表其余存量已核对;截断与否须逐条核对详情页。')
     if args.cmd == 'scan':
+        receipts = audit.load()
         for row in rows:
-            print(f'{len(row["body"]):>6} 字符  {row["url"]}')
+            prior = receipts.get((row['key'], audit.version(row)))
+            outcome = prior[1] if prior else dict(state='unaudited')
+            label = ('仍需补查' if outcome.get('remaining') else
+                     '可写回' if outcome['state'] in audit.REPAIRABLE else
+                     '已扣留' if outcome['state'].startswith('blocked_') else
+                     '失败待重试' if outcome['state'] in audit.RETRY else
+                     '未核对' if not prior else '已有结论(不保证完整)')
+            print(f'{len(row["body"]):>6} 字符  {row["url"]}  [{label}] '
+                  + json.dumps(outcome, ensure_ascii=False))
         return 0
     if not rows:
         if args.report:

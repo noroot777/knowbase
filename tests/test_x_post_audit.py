@@ -189,3 +189,96 @@ class AuditProgressTests(ChannelBase):
         self.assertEqual([row], self.pending())
         self.assertEqual(0, self.run_cli()[0])
         self.assertEqual([], self.pending())
+
+    def test_partial_write_remains_retryable_across_failures_and_blocked_reruns_until_resolved(self):
+        row = self.seed(body='Read\n\nhttps://\nexample.org/path')
+        with reg.db() as conn:
+            conn.execute("UPDATE feed_items SET body_zh='旧译文',translated_at='old',"
+                         "path='social/old.md',exported_hash=content_hash")
+            row = dict(conn.execute('SELECT * FROM feed_items').fetchone())
+        detail = 'Read https://example.org/path with ending'
+        self.assertEqual(0, self.run_cli(detail, '--yes')[0])
+        pending = self.pending(apply=True)
+        self.assertEqual(1, len(pending))
+        current = pending[0]
+        self.assertEqual('Read\n\nhttps://example.org/path', current['body'])
+        self.assertEqual(row['content_rev'] + 1, current['content_rev'])
+        self.assertEqual('', current['body_zh'])
+        self.assertEqual('', current['translated_at'])
+        self.assertEqual(row['path'], current['path'])
+        self.assertEqual(row['exported_hash'], current['exported_hash'])
+        self.assertEqual('blocked_whitespace', audit.load()[
+            (row['key'], audit.version(current))][1]['remaining'])
+        fresh = self.seed('124')
+        self.assertEqual([fresh, current], self.pending())
+        audit.record(fresh, dict(state='identical'))
+        audit.record(current, dict(state='identical'))
+        self.assertEqual([current], self.pending())
+        with patch.object(x_post, 'fetch', side_effect=x_post.PostUnavailable('temporary')):
+            backfill.repair([current], None, remember=True)
+        for _ in range(2):
+            self.assertEqual(0, self.run_cli(detail, '--yes')[0])
+            self.assertEqual([current], self.pending())
+            self.assertEqual([current], self.pending(apply=True))
+            receipt = audit.load()[(row['key'], audit.version(current))][1]
+            self.assertEqual('blocked_whitespace', receipt['state'])
+            self.assertEqual('blocked_whitespace', receipt['remaining'])
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(0, backfill.main(['scan', '--url', row['url']]))
+        self.assertIn('仍需补查', output.getvalue())
+        self.assertIn('remaining', output.getvalue())
+        self.assertEqual(0, self.run_cli('Read\n\nhttps://example.org/path with ending', '--yes')[0])
+        self.assertEqual([], self.pending(apply=True))
+        with reg.db() as conn:
+            saved = dict(conn.execute('SELECT * FROM feed_items WHERE key=?', (row['key'],)).fetchone())
+        self.assertEqual('Read\n\nhttps://example.org/path with ending', saved['body'])
+        self.assertEqual(row['content_rev'] + 2, saved['content_rev'])
+        self.assertNotIn('remaining', audit.load()[(row['key'], audit.version(saved))][1])
+
+    def test_partial_probe_retries_after_fresh_rows_without_changing_the_content(self):
+        row = self.seed(body='Read\n\nhttps://\nexample.org/path')
+        self.assertEqual(0, self.run_cli('Read https://example.org/path with ending')[0])
+        fresh = self.seed('124')
+        self.assertEqual([fresh, row], self.pending())
+        self.assertEqual([fresh, row], self.pending(apply=True))
+        with reg.db() as conn:
+            self.assertEqual(row, dict(conn.execute('SELECT * FROM feed_items WHERE key=?',
+                                                   (row['key'],)).fetchone()))
+
+    def test_scan_exposes_current_receipts_after_probe_without_filtering_or_writing(self):
+        rows = [self.seed('123', 'Read https://\nexample.org/path'),
+                self.seed('124', 'First\n\nSecond'), self.seed('125'), self.seed('126')]
+        for row, detail in zip(rows[:3], ['Read https://example.org/path', 'First Second',
+                                          'A complete sentence.']):
+            with patch.object(x_post, 'fetch', return_value=detail):
+                backfill.repair([row], None, remember=True)
+        audit.record(rows[3], dict(state='failed', error='temporary failure'))
+        receipt_bytes = audit.path().read_bytes()
+        for flags in [[], ['--recheck']]:
+            with contextlib.redirect_stdout(io.StringIO()) as output, patch.object(
+                    backfill.x_browser, 'browser_session') as browser:
+                self.assertEqual(0, backfill.main(['scan', *flags]))
+            browser.assert_not_called()
+            for row in rows:
+                self.assertIn(row['url'], output.getvalue())
+            for label in ['可写回', 'normalized', '已扣留', 'blocked_whitespace', 'identical',
+                          '失败待重试', 'temporary failure']:
+                self.assertIn(label, output.getvalue())
+        self.assertEqual(receipt_bytes, audit.path().read_bytes())
+        with reg.db() as conn:
+            self.assertEqual(rows, [dict(conn.execute('SELECT * FROM feed_items WHERE key=?',
+                                                    (row['key'],)).fetchone()) for row in rows])
+        self.assertEqual([rows[0], rows[3]], self.pending(apply=True))
+
+    def test_scan_keeps_url_and_limit_scope_and_does_not_reuse_a_changed_versions_receipt(self):
+        row = self.seed()
+        other = self.seed('124')
+        audit.record(row, dict(state='blocked_content', reason='old conclusion'))
+        with reg.db() as conn:
+            conn.execute('UPDATE feed_items SET content_rev=content_rev+1 WHERE key=?', (row['key'],))
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(0, backfill.main(['scan', '--url', row['url'], '--limit', '1']))
+        self.assertIn(row['url'], output.getvalue())
+        self.assertIn('未核对', output.getvalue())
+        self.assertNotIn(other['url'], output.getvalue())
+        self.assertNotIn('old conclusion', output.getvalue())

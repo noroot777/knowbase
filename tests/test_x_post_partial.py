@@ -119,7 +119,16 @@ class PartialRepairTests(ChannelBase):
         stats = backfill.repair([current], Page(snapshot(DETAIL)), apply=True)
         self.assertEqual(1, stats['stale'])
         self.assertEqual(0, stats['updated'])
+        self.assertEqual(0, stats['partial'])
         self.assertEqual(newest, self.saved())
+
+    def test_probe_does_not_count_a_partial_proposal_as_a_completed_repair(self):
+        row = self.seed(STORED)
+        stats = backfill.repair([row], Page(snapshot(DETAIL)))
+        self.assertEqual(1, stats['normalized'])
+        self.assertEqual(0, stats['partial'])
+        self.assertEqual(0, stats['updated'])
+        self.assertEqual(row, self.saved())
 
     def test_cli_reports_partial_not_full_expansion(self):
         self.seed(STORED)
