@@ -35,10 +35,11 @@ from kb.feeds import cdp_attach as A
 from kb.feeds import ws_client, x_browser, x_cdp
 from kb.feeds.x_cdp import CdpError
 from tests import ws_stub
-from tests.headless import INSTALL_HINT, SHELL
+from tests.headless import SHELL, requires_shell
 
-_NEEDS_SHELL = unittest.skipUnless(
-    SHELL is not None, '缺 chrome-headless-shell —— ' + INSTALL_HINT)
+# 这一道闸的口径只有一份(`tests/headless.requires_shell`)—— 原来这里自己写
+# 一份 `skipUnless(SHELL is not None, ...)`,`KB_SKIP_BROWSER_TESTS` 关不住它。
+_NEEDS_SHELL = requires_shell
 
 
 @contextmanager

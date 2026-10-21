@@ -33,13 +33,14 @@ from unittest.mock import patch
 from kb.feeds import registry as reg, sync, x_article, x_browser
 from kb.feeds.x_cdp import Chrome
 from kb.web import pages
-from tests.headless import INSTALL_HINT, SHELL
+from tests.headless import SHELL, requires_shell
 from tests.test_x_article import FRESH, answering, article_payload
 from tests.test_x_channels import ChannelBase
 
 REPO = Path(__file__).resolve().parents[1]
-_NEEDS_SHELL = unittest.skipUnless(
-    SHELL is not None, '缺 chrome-headless-shell —— ' + INSTALL_HINT)
+# 这一道闸的口径只有一份(`tests/headless.requires_shell`)—— 原来这里自己写
+# 一份 `skipUnless(SHELL is not None, ...)`,`KB_SKIP_BROWSER_TESTS` 关不住它。
+_NEEDS_SHELL = requires_shell
 
 CODE = 'def answer():\n    if True:\n        return 42'
 REPOST = 'Example reposted'

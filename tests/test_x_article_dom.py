@@ -20,12 +20,13 @@ from tempfile import TemporaryDirectory
 
 from kb.feeds import x_article, x_browser
 from kb.feeds.x_cdp import Chrome
-from tests.headless import INSTALL_HINT, SHELL
+from tests.headless import SHELL, requires_shell
 from tests.test_x_article_fidelity import DATA_CODE, _SP as SP
 from tests.test_x_article import _FakeChrome, snapshot
 
-_NEEDS_SHELL = unittest.skipUnless(
-    SHELL is not None, '缺 chrome-headless-shell —— ' + INSTALL_HINT)
+# 这一道闸的口径只有一份(`tests/headless.requires_shell`)—— 原来这里自己写
+# 一份 `skipUnless(SHELL is not None, ...)`,`KB_SKIP_BROWSER_TESTS` 关不住它。
+_NEEDS_SHELL = requires_shell
 
 EMOJI = 'https://abs-0.twimg.com/emoji/v2/svg/1f642.svg'
 PHOTO = 'https://pbs.twimg.com/media/HUIE7DSbEAEJXcR.jpg'
