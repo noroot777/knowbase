@@ -143,7 +143,10 @@ class MixedRangeRoundTests(RoundSourcesCase):
         # 同一个来源两步都在时取**抓取**那一份:它是收窄过的那一份,而面板那行
         # 「本次范围」念的正是它(写成导出那份整条通道 = 「全部订阅」,那句话承诺
         # 了这一轮并没有发生的放宽)。
-        self.assertEqual([str(self.a['id'])], mine['accounts'],
+        # 收窄发出去的是「明确点名编号」(`id:63` 这种形态,口径
+        # `kb/feeds/targets.py`):裸着发的那串数字同时也可能是另一条订阅的名字。
+        from kb.feeds import registry as reg
+        self.assertEqual([reg.id_target(self.a['id'])], mine['accounts'],
                          '抓取那一份收窄范围被导出那份整条通道盖掉了')
         self.assertEqual('targets', mine['retry'], 'retry 没透传,那行文案会念错')
 

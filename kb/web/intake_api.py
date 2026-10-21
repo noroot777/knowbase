@@ -455,12 +455,15 @@ def sync(kind: str,body: SyncRequest):
     # 订阅开了提取,它同步完也不会提取,得等绿泡泡那轮全流程定时同步顺手捎上。
     why: list[str] = []
     # 人按的那一轮跳过来源退避(判据只有一份:`kb.run_trigger`)。
-    # **accounts 发的是订阅 id**,不是名字:名字不唯一(唯一约束是 `(kind,url)`),
-    # 按名字发会把同名的另一条也抓上(见 `docs/decisions/sync-entry.md`)。
+    # **accounts 发的是订阅 id,而且写成「明确点名编号」的形态**(`reg.id_target`):
+    # 名字不唯一(唯一约束是 `(kind,url)`),按名字发会把同名的另一条也抓上;而只发
+    # 裸 id 还不够 —— 裸字符串在范围匹配里 id 和 name 两种都认,某条订阅的名字正好
+    # 是另一条的编号时(名字叫「11」)照旧会被一起抓走(见
+    # `docs/decisions/sync-entry.md`)。
     if not pipeline.start_pipeline(
             ['crawl','export','index','extract'], refused=why,
             crawl_filter=run_trigger.apply_force(
-                {'channel':kind,'accounts':[str(s['id']) for s in selected]},
+                {'channel':kind,'accounts':[reg.id_target(s['id']) for s in selected]},
                 run_trigger.MANUAL)):
         raise HTTPException(409, why[0] if why
                             else '其他同步正在运行，请结束后重试；自动同步会顺延')

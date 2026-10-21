@@ -22,6 +22,11 @@ from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR
 from kb.feeds.exclusion import SCHEMA as EXCLUSION_SCHEMA, item_key
+# 范围目标的身份口径整组搬去了 `kb/feeds/targets.py`(这边到了 700 行上限),
+# 这里**原地再导出**:`reg.in_scope` / `reg.id_target` 那些调用一个字都没改,
+# 实现仍然只有一份。
+from kb.feeds.targets import (ID_PREFIX, id_target, in_scope,   # noqa: F401 - 再导出
+                              target_source_id)
 from kb.source_types import feed_types
 
 DB_PATH = DATA_DIR / 'feeds.db'
@@ -414,21 +419,6 @@ def configuration_error(source: dict, settings: dict) -> str:
     from kb.feeds import x_channels
     ready, why, _hint = x_channels.readiness(settings)
     return '' if ready else f'待配置：{why}'
-
-
-def in_scope(source: dict, targets) -> bool:
-    """这条订阅在不在这一次的范围里。空范围 = 全都在。
-
-    **这是范围匹配的唯一一份口径**,`sync.collect`(真去抓哪几条)和
-    `FeedCollector.status(targets=...)`(这几条现在抓不抓得动)都过它 —— 两边
-    岔开的后果是**用一批订阅的就绪去替另一批放行**:名字匹配那一半认不出来的话,
-    「重试这一条」会拿整条通道的就绪当答案,而那一条必定再失败一次。
-
-    id 和 name 两种都认:名单由各处自己产出(`still_failing` 给的是 id 的字符串,
-    面板上点的是名字),而"这条订阅"在库里的稳定身份是 id、在档案里是 name。
-    """
-    return (not targets or str(source['id']) in targets
-            or source['name'] in targets)
 
 
 def subscriptions(kind: str) -> list[dict]:

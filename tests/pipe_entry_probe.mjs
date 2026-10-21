@@ -194,10 +194,13 @@ posted.length = 0;
 await evalJs(`startPipeFromModal()`);
 await setup("那一档也发出了请求", sleep(500).then(() => posted.length > 0));
 p = posted[0];
-// **发出去的是稳定 id,不是名字**:名字不唯一,后端那道范围匹配「id 相等**或**
-// name 相等」会把同名的另一条也带上(下面第 2b 节定点钉它)
-check("请求里的订阅只有点的那一条,而且是按稳定 id 发的",
-      p.body.channels[0].accounts.join() === '12', JSON.stringify(p.body.channels));
+// **发出去的是「明确点名编号」,不是名字、也不是裸 id**:名字不唯一,后端那道范围
+// 匹配「id 相等**或** name 相等」会把同名的另一条带上(下面第 2b 节定点钉它);而裸
+// 着发一串数字,那串数字同时也可能是**另一条订阅的名字** —— 前缀就是为了分开这两种
+// (后端口径 `kb/feeds/targets.py`)。**真去抓哪几条**在
+// `tests/test_feed_targets.py` 钉;这边的后端是夹具,只能钉发出去的那一份长什么样。
+check("请求里的订阅只有点的那一条,而且写成了明确点名编号",
+      p.body.channels[0].accounts.join() === 'id:12', JSON.stringify(p.body.channels));
 
 // **反过来钉一边**:锁到单条那一次不许改写同步中心记着的订阅选择
 await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
@@ -224,8 +227,8 @@ posted.length = 0;
 await evalJs(`startPipeFromModal()`);
 await setup("同名那一条发出了请求", sleep(500).then(() => posted.length > 0));
 p = posted[0];
-check("两条同名订阅只点了一条:请求里是那一条的 id,不是它们共用的名字",
-      p.body.channels[0].accounts.join() === '13', JSON.stringify(p.body.channels));
+check("两条同名订阅只点了一条:请求里是那一条的编号,不是它们共用的名字",
+      p.body.channels[0].accounts.join() === 'id:13', JSON.stringify(p.body.channels));
 
 // ── 2c. 「同步全部」就是全部,不看同步中心收窄过的那一份 ─────────────────────
 // 锁定「整条来源」那一档原来也会去读 `pipeDrafts`:同步中心上次只勾了两个,

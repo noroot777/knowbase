@@ -412,11 +412,17 @@ function renderPipeEst() {
 // 过的(`/api/pipeline/accounts` 只给名字),列表里「同名博客」那一行**代表的就是
 // 两条**,勾它的意思就是两条都跑;换成某一条的 id 反而会漏掉另一条。所以:入口
 // 点名「这一条」⇒ 发 id;在名单里勾一个名字 ⇒ 发名字。
+// **而且要写成「明确点名编号」的形态**(`id:12`,后端那份口径在
+// `kb/feeds/targets.py`):只发裸 id 还不够 —— 裸字符串在范围匹配里 id 和 name
+// 两种都认,某条订阅的名字正好是另一条的编号时(名字叫「11」),点第一条的「同步」
+// 实测两条都被抓(第 1 轮审查 R1)。前缀不许在这儿拼第二份:两边各写一次就是两份
+// 口径,`tests/test_feed_targets.py` 钉着这个字面量和后端常量一致。
+const PIPE_ID_TARGET = 'id:';
 function pipeStableTargets(channel, names) {
   const accts = pipeLock?.channel === channel ? pipeLock.accounts : null;
   if (!accts?.length) return names;
   const byName = new Map(accts.map(a => [a.name, a.id]));
-  return names.map(n => byName.get(n) ?? n);
+  return names.map(n => (byName.has(n) ? PIPE_ID_TARGET + byName.get(n) : n));
 }
 function pipeRunBody() {
   // **声明这一轮是人按的**(`trigger`)。后端据此跳过来源退避 —— 退避是给自动
