@@ -61,6 +61,12 @@ function stashPipeOwn() {
     stageKept: pipeStageKept ? new Set(pipeStageKept) : null,
     daily: $('pipe-daily').checked,
     sel: new Map([...pipeSel].map(([k, v]) => [k, new Set(v)])),
+    // **缓存要和选择成对存**:只存 `sel` 的那一版会把 ready 缓存留在原地,而
+    // 「ready 却一条都没选」正是 `savePipeDraft` 用来表示"用户明确清空"的状态。
+    // 冷态实测(第 1 轮审查 R2):刷新后先从订阅页打开 RSS 的「同步全部」再取消,
+    // 回同步中心新建同步,三条订阅一条都不勾、「开始同步」点不动 —— 因为
+    // 快照里 `sel` 本来是空的(那时还没读过订阅),还回去之后缓存却还是 ready。
+    accounts: new Map([...pipeAccounts].map(([k, v]) => [k, { ...v }])),
   };
 }
 // **上锁要等通道目录落地之后**:`loadPipeChannels()` 头一回会跑 `applyChannelData`,
@@ -87,6 +93,12 @@ function releasePipeLock() {
   // `pipeSel` 是 const Map:清掉再填,不能整个换掉
   pipeSel.clear();
   for (const [k, v] of pipeOwn.sel) pipeSel.set(k, v);
+  // **和选择一起还**(理由在 `stashPipeOwn`):锁定那一次读到的名单一并丢掉 ——
+  // 下一次打开本来就带 force 重读,这份缓存唯一的作用是让
+  // `loadPipeAccounts` 开头那句 `savePipeDraft()` 知道「这个来源到底初始化过没有」。
+  // `loading` 的不还:它等的那次读取已经被关窗时中止了,还回去就永远结束不了。
+  pipeAccounts.clear();
+  for (const [k, v] of pipeOwn.accounts) if (v.state !== 'loading') pipeAccounts.set(k, v);
   pipeOwn = null;
 }
 async function openPipeModal(lock = null) {

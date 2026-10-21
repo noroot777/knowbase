@@ -357,6 +357,55 @@ check("放不下的时候内容没被裁掉:正文滚得动", tight > 0 && scrol
       `溢出 ${tight}px、滚到 ${scrolled}`);
 await send("Emulation.clearDeviceMetricsOverride");
 
+// ── 5. **冷态**:刷新之后第一下就是订阅页那个弹窗 ─────────────────────────────
+// 2d 那一节是**热态**(同步中心已经初始化过),钉的是「配置原样还在」。冷态是另一
+// 条路:刷新之后同步中心还没读过 rss 的订阅,而锁定那一次会把它读成 ready。只还原
+// `pipeSel`、把 ready 缓存留在原地的那一版,会让下一次打开时 `loadPipeAccounts`
+// 开头那句 `savePipeDraft()` 把「ready 却一条都没选」当成「用户明确清空」存成空草稿:
+// 三条订阅一条都不勾、「开始同步」点不动,而同一个刷新后直接进同步中心是全选的
+// (第 1 轮审查 R2)。所以这一节**必须自己刷新一次**,热态那一节替不了它。
+await evalJs(`localStorage.setItem('kb-sync-channels', JSON.stringify(['rss'])); true`);
+// **必须是真刷新**(`Page.reload`,不是 navigate 到同一个地址):同一个 URL 只换
+// hash 不重新加载文档,内存里的 `pipeAccounts` / `pipeSel` / `pipeDrafts` 一个都不
+// 会清掉 —— 那就还是热态,这一节压根验不到东西(实测 navigate 那一版:刷新前后
+// 两份现场逐字节相同,注入掉修复也照旧全绿)。
+// 换页标记:旧文档里埋一个,等它不见了才算真换过去 —— 刷新刚发出的那一瞬间
+// 旧上下文还在答话,`pipeConnected` 那一问会被它答成 true,于是下一句判据落在
+// 正在换页的空档里直接抛(实测 `Uncaught :: pipeAccounts.size === 0`)。
+// 判据一律带 `typeof` 守卫:新文档里脚本还没跑完时问什么都是 ReferenceError。
+await evalJs(`window.__coldMark = 1; true`);
+await send("Page.reload", { ignoreCache: true });
+await setup("刷新后重新连上后端(真换过文档了)",
+            until(`typeof window.__coldMark === 'undefined'
+                   && typeof pipeConnected !== 'undefined' && pipeConnected`, 10000));
+await setup("刷新后内存是空的(冷态摆成了)",
+            until(`typeof pipeAccounts !== 'undefined'
+                   && pipeAccounts.size === 0 && pipeDrafts.size === 0`, 8000));
+await openSubs("rss");
+await setup("刷新后 RSS 那一页摆出来了", until(`document.getElementById('source-sync')
+  && !document.getElementById('source-sync').disabled`, 8000));
+await evalJs(`document.getElementById('source-sync').click()`);
+await setup("冷态下锁定弹窗开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
+  && pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+await evalJs(`closePipeModal()`);          // 暂不执行
+await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
+await setup("冷态下同步中心开了", until(`pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+const cold = () => evalJs(`JSON.stringify({ sel: [...pipeSelected('rss')].sort(),
+  draft: pipeDrafts.get('rss') || null, off: document.getElementById('pipe-start').disabled })`);
+let c = JSON.parse(await cold());
+check("刷新后先从订阅页打开再取消:同步中心照旧全选、「开始同步」点得动",
+      c.sel.length === 3 && c.off === false, await cold());
+// **反过来钉一边**:自己清空的那一份照旧算数 —— 不能为了修上面那条,把「一条都
+// 不勾」一概当成没初始化、再给补回全选(那三种状态必须分得开)。
+await evalJs(`pipeSelectNone()`);
+await evalJs(`closePipeModal()`);
+await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
+await setup("清空之后又开了一次", until(`pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+c = JSON.parse(await cold());
+check("明确清空过的那一份照旧是空的(没被当成未初始化补成全选)",
+      c.sel.length === 0 && c.off === true, await cold());
+await evalJs(`closePipeModal()`);
+
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 } catch (e) {
   if (e.message !== "stop") fails.push(`探针中断 — ${e.message}`);
