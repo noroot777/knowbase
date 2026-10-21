@@ -55,19 +55,19 @@ Anthropic 当前页面上 `Introducing Claude Haiku 5.5` / `Sonnet 5.5` /
 
 from __future__ import annotations
 
-import re
+from bisect import bisect_left
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urljoin, urlsplit
-from zoneinfo import ZoneInfo
 
 import feedparser
 from bs4 import BeautifulSoup, NavigableString
 
 from kb.feeds import readable
 from kb.feeds.fetching import FeedError, canonical_url, discover_feed
-
-TZ = ZoneInfo('Asia/Shanghai')
+# 日期怎么读、以及整页一次把它们索引起来,都在 `page_date` —— 这一份已经顶到
+# 行数上限,而"日期怎么读"不认识链接、分组和记录容器,是条独立职责。
+# `read_published` / `item_published` 在这里转出一次,老调用方照旧能用。
+from kb.feeds.page_date import DateIndex, item_published, read_published  # noqa: F401
 
 # 一组里至少几条带日期才算"文章列表"。1 条太容易是巧合,而**宁可报错也不要
 # 把导航当列表**:误报用户看得见、改一下就好,漏报是往知识库里灌垃圾。
@@ -76,158 +76,6 @@ MIN_DATED = 2
 MAX_TITLE, MIN_TITLE = 300, 4
 MAX_ITEMS = 500                     # 同 `fetching.parse_feed`
 HEADINGS = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
-
-_MONTH = {m: i for i, m in enumerate(
-    ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
-     'jul', 'aug', 'sep', 'oct', 'nov', 'dec'], 1)}
-_ISO = re.compile(r'\b(\d{4})-(\d{1,2})-(\d{1,2})'
-                  r'(?:[T ](\d{1,2}):(\d{2})(?::\d{2})?(?:\.\d+)?'
-                  r'(Z|z|[+-]\d{2}:?\d{2})?)?')
-_CN = re.compile(r'\b(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日')
-_MDY = re.compile(r'\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b')
-_DMY = re.compile(r'\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})\b')
-
-
-def _day(y: int, m: int, d: int) -> str:
-    """`YYYY-MM-DD`,算不成一个真实日期就返回空串(挡住 2 月 30 日那类)。"""
-    try:
-        return date(y, m, d).isoformat()
-    except ValueError:
-        return ''
-
-
-def read_published(text: str) -> str:
-    """一段文字里的发布时间 → `YYYY-MM-DD HH:MM` / `YYYY-MM-DD` / 空串。
-
-    精度**如实保留**:列表页给到日就只给到日,不补一个 00:00 假装知道几点
-    (`sync._within_history` 和 `daily.parse_ts` 对只有日期的写法都成立,
-    库里本来就有 92 篇是这种)。
-
-    不带时区的写法一律按**项目时区**补齐,不按部署机器的 —— 口径同
-    `x_browser._utc`:被比较的那一头(`parse_feed` 的 `published`)固定按
-    Asia/Shanghai 格式化,两头不同时区的话每天有 8 小时窗口会差一整天。
-    """
-    t = ' '.join((text or '').split())
-    if not t:
-        return ''
-    if m := _ISO.search(t):
-        day = _day(int(m[1]), int(m[2]), int(m[3]))
-        if not day or not m[4]:
-            return day
-        hour, minute = int(m[4]), int(m[5])
-        if hour > 23 or minute > 59:
-            return day
-        stamp = datetime.fromisoformat(f'{day}T{hour:02d}:{minute:02d}')
-        if zone := m[6]:
-            if zone in ('Z', 'z'):
-                offset = timezone.utc
-            else:
-                sign = -1 if zone[0] == '-' else 1
-                raw = zone[1:].replace(':', '')
-                offset = timezone(sign * timedelta(hours=int(raw[:2]), minutes=int(raw[2:])))
-            stamp = stamp.replace(tzinfo=offset).astimezone(TZ)
-        return stamp.strftime('%Y-%m-%d %H:%M')
-    if m := _CN.search(t):
-        return _day(int(m[1]), int(m[2]), int(m[3]))
-    if m := _MDY.search(t):
-        if month := _MONTH.get(m[1][:3].lower()):
-            return _day(int(m[3]), month, int(m[2]))
-    if m := _DMY.search(t):
-        if month := _MONTH.get(m[2][:3].lower()):
-            return _day(int(m[3]), month, int(m[1]))
-    return ''
-
-
-def item_published(node, memo: dict | None = None) -> str:
-    """这条记录的发布时间。`<time>` 优先,它是"这是个时间"的标准语义。
-
-    这一步要把 `node` **整片子树**的文字拼起来,所以同一个大祖先被反复问就是
-    `O(链接数 × 子树)`:一个导航区里几百条同址标题链接各自往上走、都走到同
-    一个 `<nav>`/`<body>`,实测 500/1000/2000 条分别要 0.55/2.19/8.51 秒,而
-    单来源采集预算只有 20 秒。`memo` 按节点**身份**记住算过的答案,让同一片
-    子树在一次解析里只被遍历固定次数。
-
-    **`memo` 的寿命必须跟那棵 soup 一样长,一天都不许多。** 键是 `id(node)`,
-    而 CPython 的 id 在对象被回收之后**会被下一个对象复用** —— 做成模块级缓存
-    的话,上一页某个 `<div>` 的日期就会发给这一页某条毫不相干的记录,而且只在
-    内存碰巧撞上时才出现。所以它由 `parse_page_list` 当场建、随调用结束一起
-    丢;并发跑的几次解析各有一份,互不相干(`soup` 在整个调用期间一直被引用,
-    期间 id 不会被复用)。
-    """
-    key = id(node)
-    if memo is not None and key in memo:
-        return memo[key]
-    stamp = ''
-    for tag in node.find_all('time'):
-        if stamp := (read_published(tag.get('datetime') or '')
-                     or read_published(tag.get_text(' '))):
-            break
-    stamp = stamp or read_published(node.get_text(' '))
-    if memo is not None:
-        memo[key] = stamp
-    return stamp
-
-
-def _date_shaped(node) -> bool:
-    """这片子树里有没有**像日期**的文字 —— 只问形状,不问合不合法。
-
-    `item_published` 读不出日期有两种原因:**压根没有日期**,或者**有、但第一
-    个日期形状是非法的**(它把整片子树的文字拼成一串、只认第一个匹配)。两者
-    对"能不能跳过这片子树"的答案正相反:前者跳了也不会错过什么,后者里面的
-    小容器往往正常读得出来 —— 实测父容器带一个 `2026-02-30` 编号时,跳过内部
-    会把那两篇真文章一起漏掉。所以 `_dated_boxes` 用这个谓词当闸,不拿"解析
-    失败"当"没有日期"。
-    """
-    if node.find('time') is not None:
-        return True
-    text = ' '.join(node.get_text(' ').split())
-    return any(pattern.search(text) for pattern in (_ISO, _CN, _MDY, _DMY))
-
-
-def _date_hosts(box, rank: dict) -> list:
-    """`box` 里面那几个**可能**读出日期的祖先,从深到浅。
-
-    **逐层问每个祖先是 `O(深度²)`** —— 每一层都把同一片子树重扫一遍,而
-    `_date_shaped` 为真(有日期形状、但 `item_published` 读不出来)时正好要往
-    里面找。实测 16000 层嵌套、里面只有一个非法编号的页面要 29 秒,而单来源
-    采集预算只有 20 秒。
-
-    换个问法就不用逐层:**只有子树里有日期形状文字的祖先才可能读出日期**,
-    而日期形状通常只出现在一两个地方。所以反过来从那几处文字出发,各自往上
-    走到第一个"是这条链接的祖先"的节点(`rank` 里有的就是),那几个节点就是
-    全部候选 —— 别的祖先一个日期形状都不含,`item_published` 必然是空。
-
-    **等价性**:`item_published(node)` 非空 ⇒ node 子树里有能解析的日期形状
-    文字 t,而包着 t 和本链接的最内层祖先 `L ⊆ node` 也含 t;`L` 的文字是
-    node 文字的连续一段,所以 node 文字里 t 之前没有同类形状时 `L` 里也没有
-    —— `L` 同样读得出来,原来那套"从内往外第一个读出日期的"也会先返回 `L`。
-    两边给的都是 `L`,没有哪个祖先被漏掉。
-
-    **一个形状跨了两个文本节点时这里看不出来**(`<span>Oct 18,</span>
-    `<span>2026</span>` 拼起来才是日期),所以调用方拿到空候选、而
-    `_date_shaped` 又说有形状时**退回逐层问** —— 慢,但不会漏。
-    """
-    hosts = {}
-    for shaped in _shaped_nodes(box):
-        host = shaped
-        while host is not None and id(host) not in rank:
-            host = host.parent
-        if host is not None:
-            hosts[id(host)] = host
-    return sorted(hosts.values(), key=lambda node: rank[id(node)])
-
-
-def _shaped_nodes(box) -> list:
-    """`box` 里带日期形状的那几处 —— `<time>` 标签,和含日期形状文字的元素。"""
-    out = list(box.find_all('time'))
-    for raw in box.descendants:
-        if type(raw) is not NavigableString:
-            continue
-        if text := ' '.join(raw.split()):
-            if any(pattern.search(text) for pattern in (_ISO, _CN, _MDY, _DMY)):
-                out.append(raw.parent)
-    return out
-
 
 def _blocks(node, skip=frozenset()) -> list[str]:
     """这条记录里的文本块,按出现顺序、已归一空白;`skip` 里那些容器不算。"""
@@ -302,14 +150,14 @@ def shell_body(subject: str, published: str, url: str) -> str:
     return f'{head}\n{url}' if head else url
 
 
-def _list_group(soup: BeautifulSoup, base_url: str, memo: dict | None = None):
+def _list_group(soup: BeautifulSoup, base_url: str, index: DateIndex | None = None):
     """页面上的文章区 → `[(容器, 绝对地址)]`,真列表排在单独的头条卡片前面。
 
-    `memo` 是这一次解析的日期备忘(见 `item_published`):它要跨分组活着 ——
-    各组的链接常常共享同一批外层祖先。缺省自己建一个,寿命仍只有这一次调用。
+    `index` 是整页的日期索引(见 `page_date.DateIndex`)。缺省自己建一个 ——
+    它必须**整页**建一次、跨分组用,各组的链接常常共享同一批外层祖先。
     """
-    if memo is None:
-        memo = {}
+    if index is None:
+        index = DateIndex(soup)
     pairs = []
     for anchor in soup.find_all('a', href=True):
         href = (anchor.get('href') or '').strip()
@@ -332,16 +180,27 @@ def _list_group(soup: BeautifulSoup, base_url: str, memo: dict | None = None):
     # 的孤立噪音(页头 logo、`Newsroom` 这种栏目名)容器跟着收缩之后读不到
     # 日期,自己就落选了 —— 实测 Anthropic 那一页上 3 条这样的噪音因此消失。
     boxes = _containers([a for a, _ in pairs])
-    # 上移的定界同样按**整页**算,理由和上面那段一样,见 `_title_bounds`。
-    bounds = _title_bounds(pairs)
+    # 整页"原生容器就读得出日期"的那些链接,按前序编号排好 —— 上移要靠它
+    # 判断"这一层是不是装着一个列表"(见 `_dated_boxes` 第三道闸)。
+    lists = _dated_spots([(box, url) for (_, url), box in zip(pairs, boxes)
+                          if item_published(box, index)], index)
     buckets: dict[tuple, list] = {}
     for (anchor, url), box in zip(pairs, boxes):
         buckets.setdefault(_record_path(anchor), []).append((anchor, box, url))
     groups, reach = [], Counter()
     for key, items in buckets.items():
         fixed = [(anchor, box, url) for (anchor, _, url), box
-                 in zip(items, _dated_boxes(items, bounds, memo))]
-        dated = sum(1 for _, box, _ in fixed if item_published(box, memo))
+                 in zip(items, _dated_boxes(items, index, lists))]
+        # **数的是"几条**记录**带日期",按去重后的地址算,不按链接条数。**
+        # 一个导航区里几百条**同址**的标题链接,上移时在组内看上去"这一层只
+        # 属于我"(都是同一个地址),于是一路走到 `<body>`、把别处真文章的
+        # 日期借过来,这一组于是"几百条都带日期"、排在真列表前面,再靠"文字
+        # 最长者当宿主"把真文章剔成自己的字段 —— 实测基线收 2 篇真文章、按
+        # 链接条数记的那版只收 1 条导航链接,`errors` 为空、同步显示成功。
+        # 按地址数记时这一组只有 1 条记录,够不着 `MIN_DATED`、也不满足"每条
+        # 都带日期",自己就落选了。**同一篇文章在一张卡片里被链两次**(改版
+        # 后那一页的常见形态)时去重也正是想要的:那本来就是一条记录。
+        dated = len({url for _, box, url in fixed if item_published(box, index)})
         # **整页这道闸按结构路径数,不按分组数。** 签名里那个"是不是标题链接"
         # 是**卡片里的分工**,它该管的是上移资格和选主;拿它来数"这一页算不算
         # 列表"就会把同一个列表拆散 —— 一行标题写 `<h3>`、另一行写 `<span>`
@@ -355,7 +214,7 @@ def _list_group(soup: BeautifulSoup, base_url: str, memo: dict | None = None):
         # 都进不来,基线收 3 条、丢掉候选的那版收 2 条,而且 `errors` 为空、
         # 来源记成功。`published` 为空是**合法条目**(历史下限对未知日期照收),
         # 不该因为"这一组里没人带日期"就把它判出去。
-        groups.append((dated, fixed, key[0]))
+        groups.append((dated, fixed, key[0], len({url for _, _, url in fixed})))
     if not groups or max(reach.values()) < MIN_DATED:
         # 整页一条结构路径都不够 `MIN_DATED` = 这压根不是列表页。这道闸只问
         # 一次,不逐组问 —— 逐组问就把单条头条卡片永久关在门外。
@@ -373,8 +232,11 @@ def _list_group(soup: BeautifulSoup, base_url: str, memo: dict | None = None):
     # 带日期**的真文章跟着没日期的那条一起落选。实测基线收 3 篇、只改整页计数
     # 的那版收 1 篇,而且 `errors` 为空、同步显示成功 —— 静默漏收,比报错坏。
     # 展示分工该管的是上移资格和选主,不该两次否决同一个列表。
-    picked = [(d, items) for d, items, path in groups
-              if d >= MIN_DATED or d == len(items) or reach[path] >= MIN_DATED]
+    # 三道入选条件里的"每条都带日期"同样按**记录**算(`d == urls`),理由同
+    # 上面那条:按链接条数算的话,几百条同址导航链接会因为"每条都借到了日期"
+    # 整组入选。
+    picked = [(d, items) for d, items, path, urls in groups
+              if d >= MIN_DATED or d == urls or reach[path] >= MIN_DATED]
     # 带日期的条目越多越像"主列表",排在前面:`parse_page_list` 按地址先到
     # 先得去重,而 featured 卡片的容器里连摘要一起,标题判定不如列表里那份准。
     picked.sort(key=lambda g: (-g[0], len(g[1])))
@@ -486,38 +348,7 @@ def _record_path(anchor) -> tuple:
     return _tag_path(anchor), titled(anchor)
 
 
-def _title_bounds(pairs: list) -> dict:
-    """每个节点下,**整页**的标题链接指向哪个地址;不止一个地址记 `''`。
-
-    这是上移的定界。**它必须在整页尺度上算,不在组内算** —— 跟记录容器那条
-    是同一句话(见 `_list_group`)。组内算的话,别的分组的记录在 DOM 上就在
-    那儿、却看不见:实测一个导航区里几百条同址标题链接,组内看上去"这一层
-    只属于我",于是一路上移穿过 `<nav>` 走到 `<body>`,把 `<main>` 里真文章
-    的日期借了过来;再靠"文字最长者当宿主"把那两篇真文章剔成自己的字段 ——
-    基线收 2 篇真文章,那一版只收 1 条导航链接,而且 `errors` 为空、同步显示
-    成功。那是静默漏收。
-
-    **只数标题链接,不数全部链接。** 这和上移的第一道闸是同一句话的两个方向:
-    日期是**记录**的属性,所以只有标题链接够资格上移;反过来,**别人的标题
-    链接就标出了别人的记录边界**,上移不许跨过去。数全部链接会把同一张卡片
-    里的角标、摘要、`Read more` 当成"别人",上移在读到日期之前就停手 ——
-    那正是用户报的那个故障的形态。
-    """
-    bounds: dict[int, str] = {}
-    for anchor, url in pairs:
-        if not titled(anchor):
-            continue
-        node = anchor
-        while node is not None and getattr(node, 'name', None):
-            if id(node) not in bounds:
-                bounds[id(node)] = url
-            elif bounds[id(node)] != url:
-                bounds[id(node)] = ''  # 这一层下不止一条记录
-            node = node.parent
-    return bounds
-
-
-def _dated_boxes(items: list, bounds: dict, memo: dict | None = None):
+def _dated_boxes(items: list, index: DateIndex, lists: tuple):
     """一组同构链接各自的记录容器;容器里读不到日期就上移到读得到的那一层。
 
     **日期跟链接是兄弟而不是祖孙,这是改版后的常见形态。** Anthropic 现在
@@ -536,12 +367,21 @@ def _dated_boxes(items: list, bounds: dict, memo: dict | None = None):
     和日期。角标**原生**就带日期时(改版后那一页上 24 条角标都如此)它压根
     不需要上移,所以这道闸不会挡掉任何本来读得到的日期。
 
-    **二、走到第一个"下面不止我这一条**记录**"的祖先就停手**,所以最多长到
-    自己那一行,不会把下一条记录的日期抢过来。边界按**整页的标题链接地址**算
-    (`_title_bounds`):按链接条数记会在读到日期之前就停手(同一篇文章在一张
-    卡片里被同签名链两次,改版后那一页就是这个形态),只在组内算则看不见别的
-    分组的记录、会一路上移到半个页面那么大 —— 两种都实测过,各自的代价写在
-    `_title_bounds` 的说明里。
+    **二、走到第一个"同组里不止我一条**记录**"的祖先就停手**,所以最多长到
+    自己那一行,不会把下一条记录的日期抢过来。**按地址定界,不按链接条数** ——
+    同一篇文章在一张卡片里被同签名链两次(改版后那一页就是这个形态)时,按
+    条数记会在读到日期之前就停手,整组 0 条带日期、整页报"找不到文章列表",
+    这条源从此一条都收不到。那是漏报方向,比多收一条坏得多。
+
+    **定界只问同组,不许扩到整页。** 扩到整页(数全页的标题链接地址)看着
+    更严、实际上把**同一张卡片里的字段**也算成了"别人":一行里分类角标写成
+    `<h4><a>Announcements</a></h4>` 时它也是"标题链接",于是真文章在读到本
+    卡片的日期之前就被挡住,日期归了那条分类链接 —— 实测基线和组内定界都收
+    2 篇真文章,整页定界那版只收 1 条 `/news/announcements`,`errors` 为空、
+    同步显示成功。`titled`(链接内外有 heading)标的是"够不够资格上移",不
+    等于"这是一条独立记录",这两件事不许合并。**同址导航链接一路上移到半个
+    页面那么大**那个形态由选组那道闸按**记录数**挡住(见 `_list_group`),
+    不在这里按"别人的标题链接"去猜。
 
     **没有第三道:"不许跨过另一条自带日期的异址链接"这条加不上去。** 它想
     挡的是"无日期的标题链接吞掉并排那条带日期的记录",但那个形态跟改版后那
@@ -560,64 +400,108 @@ def _dated_boxes(items: list, bounds: dict, memo: dict | None = None):
     就靠整页尺度的 `_containers` 正确停在自己那张卡片上 —— 对它不动,正是
     不把那个坑重新挖开。
     """
-    if memo is None:
-        memo = {}
     if len(items) < MIN_DATED:
         return [box for _, box, _ in items]
-    chains = []
-    for anchor, _, _ in items:
+    chains, owner = [], {}
+    for anchor, _, url in items:
         chain, node = [], anchor
         while node is not None and getattr(node, 'name', None):
             chain.append(node)
             node = node.parent
         chains.append(chain)
+        for node in chain:
+            if id(node) not in owner:
+                owner[id(node)] = url
+            elif owner[id(node)] != url:
+                owner[id(node)] = ''  # 这一层下不止一条记录
     out = []
     for (anchor, box, url), chain in zip(items, chains):
-        if item_published(box, memo) or not titled(anchor):
+        if item_published(box, index) or not titled(anchor):
             out.append(box)
             continue
-        # **从原容器之外接着往上走,不从 `<a>` 重新开始。** 原容器刚刚被判过
-        # 没有日期,而 `<a>` 到原容器之间那些祖先的子树都在原容器**里面** ——
-        # 从 `<a>` 起逐层重扫等于把同一片已排除的子树按深度扫了一遍又一遍,
-        # `O(深度²)`:3200 层嵌套的无日期页面实测 1.83 秒,改成这样 0.125 秒。
-        # 这一段祖先只属于本链接,所以跳过它们不会错过"这一层是不是别人的"。
+        # **从内往外逐层问,原容器里面那一段也要问。** "大的解析不出来、里面
+        # 的小的也不会有"这个推理**不成立**:日期提取器把整片子树的文字拼成一
+        # 串、只认其中第一个日期形状,所以父容器里一个非法编号(`2026-02-30`
+        # 这种)就能让它返回空,而里面某个小容器的正常日期本来读得出来 —— 跳过
+        # 原容器内部会把那两篇真文章一起漏掉。
         #
-        # **但"压根没有日期形状的文字"才敢整段跳**(`_date_shaped`)。"大的解析
-        # 不出来、里面的小的也不会有"这个推理**不成立**:`item_published` 把整
-        # 片子树的文字拼成一串、只认其中第一个日期形状,所以父容器里一个非法
-        # 编号(`2026-02-30` 这种)就能让它返回空,而里面某个小容器的正常日期
-        # 本来读得出来。按"解析失败"去跳会把那两篇真文章一起漏掉。
-        #
-        # **里面有形状时也不逐层问,只问那几处形状所在的祖先**(`_date_hosts`)。
-        # 逐层问同样是 `O(深度²)`:16000 层里一个非法编号实测 29 秒,而单来源
-        # 采集预算只有 20 秒。拿到空候选说明那个形状跨了两个文本节点,这时才
-        # 退回逐层。
+        # **逐层问不再是二次的**:日期查询走整页那一份索引,一次 `O(log n)`
+        # (见 `page_date.DateIndex`)。上一版为了躲开二次在这里加了两道剪枝
+        # (先问"有没有日期形状"、再"只问形状所在的那几个祖先"),两道都是按
+        # **单个文本节点**看形状,而提取按**拼接后的子树文字** —— `<span>Oct
+        # 20,</span><span>2026</span>` 拼起来才是日期,于是那一层压根不进候选、
+        # 读得出日期的容器一个都没被问到,整页报"找不到带发布时间的文章列表"。
+        # 剪枝连同那道语义裂缝一起撤掉了,**别再按形状猜该问谁**。
         #
         # **走 parent 链,不在 chain 里找下标。** `box in chain` / `chain.index`
         # 用的是 bs4 的 `Tag.__eq__` —— 那是**内容相等**,会递归比较名字、属性
         # 和整棵子树;深层同名 `<div>` 容器上实测直接 `RecursionError`,整页报错、
         # 一篇都收不到。这个模块里认节点一律按**身份**(别处都是 `id(node)`)。
-        outward = []
+        rank = {id(node): i for i, node in enumerate(chain)}
+        above = chain[:rank.get(id(box), 0)]
         node = box.parent
         while node is not None and getattr(node, 'name', None):
-            outward.append(node)
+            above.append(node)
             node = node.parent
-        if not _date_shaped(box):
-            above = outward
-        else:
-            rank = {id(node): i for i, node in enumerate(chain)}
-            inside = _date_hosts(box, rank)
-            above = (inside or chain[:rank.get(id(box), 0)]) + outward
         for node in above:
             # 先问"这一层是不是别人的"再问日期:共享那一层上的日期属于
             # 下一条记录,取过来就是整组抄同一个日期。
-            if bounds[id(node)] != url:
+            if owner[id(node)] != url:
                 break
-            if item_published(node, memo):
+            if _holds_a_list(node, url, index, lists):
+                break
+            if item_published(node, index):
                 box = node
                 break
         out.append(box)
     return out
+
+
+def _dated_spots(dated: list, index: DateIndex) -> tuple:
+    """`(全部位置, 按地址分开的位置)` —— 原生就带日期的那些链接在哪。
+
+    位置用**前序编号**,于是"某片子树里有几条"是两次二分(见
+    `DateIndex.subtree`)。
+    """
+    spots, by_url = [], {}
+    for box, url in sorted(dated, key=lambda pair: index.subtree(pair[0])[0]):
+        at = index.subtree(box)[0]
+        spots.append(at)
+        by_url.setdefault(url, []).append(at)
+    return spots, by_url
+
+
+def _holds_a_list(node, url: str, index: DateIndex, lists: tuple) -> bool:
+    """这个容器里装着一个**列表**,所以它不是哪一条记录的容器。
+
+    判据是 `MIN_DATED`:子树里有**不止一条**异址、而且**原生**就读得出日期
+    的链接 —— 那是一组记录,不是一张卡片的几个字段。
+
+    **这一条和"只挡一条带日期的异址链接"差的就是那个 1。** 后者试过五遍
+    (异址自带日期即停 / 自带日期者豁免被剔 / 兄弟容器即停 / 宿主只认原生
+    容器 / 上移得来的日期不计入选组),再加上"压根没有独占祖先的链接不许
+    上移",六种一律让用户报的那个故障当场复发:改版后那一页上的**精选卡片**
+    正是"卡片里有一条自带日期的分类角标",一刀切会把 4 篇真文章的日期挡掉、
+    把 `/news/safeguards` 等 8 个分类索引页重新收进库。一张卡片里只会有一
+    两个这样的字段,一个列表里却有一整排记录,`MIN_DATED` 正好落在中间。
+
+    **它挡住的是另一侧**:一个导航区里几百条**同址**的标题链接,按地址定界
+    时组内看上去"这一层只属于我",于是一路上移到 `<body>`、把 `<main>` 里
+    真文章的日期借过来,再靠"文字最长者当宿主"把真文章剔成自己的字段 ——
+    基线收 2 篇真文章,没有这道闸只收 1 条导航链接,`errors` 为空、同步
+    显示成功。`<body>` 下装着两条原生带日期的异址记录,这道闸认得出来。
+
+    **代价**:真·嵌套列表(一张卡片里再嵌一个"相关文章",而且嵌的那几条
+    原生带日期)会让外层卡片不再被当成记录容器,卡片本身那条记录读不到
+    日期。那和已经披露的"嵌套相关文章会被当成字段"是同一处既有取舍。
+    """
+    spots, by_url = lists
+    lo, hi = index.subtree(node)
+    total = bisect_left(spots, hi) - bisect_left(spots, lo)
+    same = by_url.get(url, ())
+    if same:
+        total -= bisect_left(same, hi) - bisect_left(same, lo)
+    return total >= MIN_DATED
 
 
 def _containers(anchors: list):
@@ -654,9 +538,10 @@ def parse_page_list(body: bytes, base_url: str, headers: dict | None = None) -> 
     if feedparser.parse(body).get('version'):
         raise FeedError('这个地址返回的是 RSS / Atom，请改用「RSS」来源添加它')
     soup = BeautifulSoup(readable.decode(body, headers), 'html.parser')
-    # 这一次解析的日期备忘,随 `soup` 一起活、一起丢(寿命那条见 `item_published`)。
-    memo: dict[int, str] = {}
-    found = _list_group(soup, base_url, memo)
+    # 整页的日期索引,建一次、全程共用(为什么不能"每问一次扫一遍子树",见
+    # `page_date` 开头那段)。它只读 soup、不改 DOM,随这次调用一起丢。
+    index = DateIndex(soup)
+    found = _list_group(soup, base_url, index)
     if not found:
         if feed := discover_feed(body, base_url):
             raise FeedError('这一页上找不到带发布时间的文章列表，但它声明了一个订阅'
@@ -671,7 +556,7 @@ def parse_page_list(body: bytes, base_url: str, headers: dict | None = None) -> 
         if not title:
             continue
         seen.add(url)
-        published = item_published(box, memo)
+        published = item_published(box, index)
         entries.append({'url': url, 'title': title,
                         'body': shell_body(item_subject(box, title), published, url),
                         'author': '', 'published': published, 'content_kind': 'summary'})

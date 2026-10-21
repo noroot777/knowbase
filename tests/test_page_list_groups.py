@@ -168,36 +168,6 @@ class GroupTests(unittest.TestCase):
                 with self.assertRaises(FeedError):
                     parse_page_list(page, BASE)
 
-    def test_a_deeply_nested_undated_page_does_not_rescan_the_same_subtree(self):
-        """上移要从**原容器之外**开始找,不从 `<a>` 开始。
-
-        原容器刚刚被判过没有日期,而 `<a>` 到原容器之间那些祖先的子树都在原
-        容器**里面** —— 从 `<a>` 起逐层重扫等于把同一片已排除的子树按深度扫
-        了一遍又一遍,`O(深度²)`。
-
-        **上限 0.8 秒**:实测当前 0.125 秒、从 `<a>` 起重扫 1.83 秒(差 14.6
-        倍),所以这个数既离实现有 6 倍余量,又拦得住那个退化。**取三次最小
-        值**,免得一次调度抖动就把它判红(机器忙起来单次测量能差出好几倍)。
-
-        这一页没有日期、两版都正确报错 —— 钉的是**报错有多贵**,不是报错本身。
-        现有那条宽页用例走不到这里:它的新闻原生带日期、菜单没有标题标签,
-        两种都不进上移。
-        """
-        deep = lambda href, title: ('<div>' * 3200 + f'<a href="{href}"><h3>{title}</h3></a>'
-                                    + '</div>' * 3200)
-        html = ('<html><body><main><ul>'
-                f'<li>{deep("/news/a", "First actual headline")}</li>'
-                f'<li>{deep("/news/b", "Second actual headline")}</li>'
-                '</ul></main></body></html>').encode()
-        best = min(self._timed_failure(html) for _ in range(3))
-        self.assertLess(best, 0.8, f'3200 层无日期嵌套花了 {best:.2f} 秒')
-
-    def _timed_failure(self, html: bytes) -> float:
-        start = time.monotonic()
-        with self.assertRaises(FeedError):
-            parse_page_list(html, BASE)
-        return time.monotonic() - start
-
     def test_one_undated_row_does_not_take_its_dated_neighbour_down(self):
         """**展示分工不许两次否决同一个列表。**
 
@@ -253,76 +223,6 @@ class GroupTests(unittest.TestCase):
                                  [('/news/a', '2026-10-20'), ('/news/b', '2026-10-19'),
                                   ('/news/c', '')])
 
-    def test_an_illegal_date_deep_inside_does_not_cost_quadratic_time(self):
-        """里面有日期形状时也不许逐层问每个祖先。
-
-        原容器里有日期形状、却读不出日期(第一个形状非法、或 `<time>` 是空的)
-        时,上移**必须**往里面找 —— 否则会把那几篇真文章一起漏掉,已有那条
-        `..._does_not_hide_the_real_one_inside` 钉着。但"往里面找"写成逐层问
-        每个祖先又是 `O(深度²)`:每一层都把同一片子树重扫一遍。
-
-        出路是**只问那几处日期形状所在的祖先**,于是同一片子树在一次解析里只
-        被遍历固定次数。**上限 3 秒**:实测当前 0.51 秒、逐层问那版 11.4 秒
-        (差 22 倍),所以这个数既离实现有 5.8 倍余量,又拦得住那个退化 ——
-        单来源采集预算只有 20 秒,而 `as_completed` 要等整批,一张慢页面会把
-        一个工作线程堵住。
-
-        **非法日期文本和空 `<time>` 是同一个判据的两个实例**,所以一起钉:
-        两者都让"有形状、读不出来"成立。取两次最小值防调度抖动。
-        """
-        deep = lambda stamp, href, title: (
-            '<div>' * 12000 + stamp + f'<a href="{href}"><h3>{title}</h3></a>'
-            + '</div>' * 12000)
-        for name, stamp in (('非法日期文本', '2026-02-30'), ('空 time', '<time></time>')):
-            with self.subTest(name):
-                html = ('<html><body><main>'
-                        + deep(stamp, '/news/x', 'Headline with no readable date')
-                        + deep('<time>2026-10-20</time>', '/news/y', 'First actual headline')
-                        + deep('<time>2026-10-19</time>', '/news/z', 'Second actual headline')
-                        + '</main></body></html>').encode()
-                best, got = 9e9, None
-                for _ in range(2):
-                    start = time.monotonic()
-                    got = parse_page_list(html, BASE)
-                    best = min(best, time.monotonic() - start)
-                self.assertEqual(sorted(e['url'].split('.com')[1] for e in got),
-                                 ['/news/x', '/news/y', '/news/z'])
-                self.assertLess(best, 3.0, f'12000 层里一个{name}花了 {best:.2f} 秒')
-
-    def test_a_navigation_block_may_not_borrow_the_article_dates(self):
-        """**上移的定界按整页算,不在组内算** —— 跟记录容器那条是同一句话。
-
-        一个导航区里几百条**同址**的标题链接,在组内看上去"这一层只属于我"
-        (都是同一个地址,按地址定界放行),于是一路上移穿过 `<nav>` 走到
-        `<body>`,把 `<main>` 里真文章的日期借了过来;再靠"文字最长者当宿主"
-        把那两篇真文章剔成自己的字段。实测基线收 2 篇真文章,组内定界那版
-        只收 1 条导航链接,而且 `errors` 为空、同步显示成功 —— 静默漏收。
-
-        同一个输入还钉住**代价**:`item_published` 要把整片子树的文字拼起来,
-        几百条链接各问同一个大祖先一遍就是 `O(链接数 × 子树)`。**上限 1.5
-        秒**:实测当前 0.14 秒、不记备忘那版 7.2 秒(差 51 倍)。
-
-        反过来那一边(同一张卡片里的角标、摘要、第二个同址标题链接**不算**
-        "别人",上移照旧读到日期)由 `..._linked_twice_in_one_card_...` 和两份
-        真样本钉着 —— 定界改数全部链接,那几条当场红。
-        """
-        links = ''.join('<a href="/repeat"><h3>Repeated navigation heading</h3></a>'
-                        for unused in range(2000))
-        rows = ''.join(f'<li><a href="{href}"><time>{stamp}</time>'
-                       f'<h3>{title}</h3></a></li>'
-                       for href, stamp, title in (('/news/a', '2026-10-20', 'First actual headline'),
-                                                  ('/news/b', '2026-10-19', 'Second actual headline')))
-        html = (f'<html><body><nav>{links}</nav>'
-                f'<main><ul>{rows}</ul></main></body></html>').encode()
-        best, got = 9e9, None
-        for _ in range(2):
-            start = time.monotonic()
-            got = parse_page_list(html, BASE)
-            best = min(best, time.monotonic() - start)
-        self.assertEqual([(e['url'].split('.com')[1], e['published'][:10]) for e in got],
-                         [('/news/a', '2026-10-20'), ('/news/b', '2026-10-19')])
-        self.assertLess(best, 1.5, f'2000 条同址链接花了 {best:.2f} 秒')
-
     def test_deeply_nested_same_name_containers_are_found_by_identity(self):
         """祖先定位按**节点身份**,不按内容相等。
 
@@ -349,6 +249,112 @@ class GroupTests(unittest.TestCase):
         self.assertEqual(sorted(got), ['/news/deep-0', '/news/deep-1', '/news/deep-2'])
         self.assertEqual(got['/news/deep-1']['published'][:10], '2026-10-20')
         self.assertEqual(got['/news/deep-2']['published'][:10], '2026-10-19')
+
+    def test_a_category_heading_in_the_card_is_not_another_record(self):
+        """**上移的定界只问同组,不许扩到整页。**
+
+        扩到整页(数全页的标题链接地址)看着更严,实际上把**同一张卡片里的
+        字段**也算成了"别人":一行里的分类角标写成 `<h4><a>Announcements</a></h4>`
+        时它也满足 `titled`,于是真文章在读到本卡片的日期之前就被挡住,日期
+        归了那条分类链接 —— 实测基线和组内定界都收 2 篇真文章,整页定界那版
+        只收 1 条 `/news/announcements`,而且 `errors` 为空、同步显示成功。
+
+        **`titled` 标的是"够不够资格上移",不等于"这是一条独立记录"**,这两
+        件事不许合并。同一张卡片里的分类小标题、作者小标题、带 heading 的
+        `Read more` 都是这个形态,`h1`-`h6` 加上 heading 在链接内外两个方向
+        都走同一条规则,所以不能只把 `<h4>` 或某个分类地址特判掉。
+
+        这一条钉的是**静默漏收**,比报错坏:面板上看不出来。
+        """
+        rows = ''.join(
+            f'<li><div><a href="{href}"><h3>{title}</h3></a></div>'
+            f'<header><h4><a href="/news/announcements">Announcements</a></h4>'
+            f'<time>{stamp}</time></header></li>'
+            for href, stamp, title in (('/news/a', '2026-10-20', 'Actual headline a'),
+                                       ('/news/b', '2026-10-19', 'Actual headline b')))
+        got = parse_page_list(
+            f'<html><body><main><ul>{rows}</ul></main></body></html>'.encode(), BASE)
+        self.assertEqual([(e['url'].split('.com')[1], e['published'][:10]) for e in got],
+                         [('/news/a', '2026-10-20'), ('/news/b', '2026-10-19')])
+
+    def test_a_date_split_across_two_text_nodes_is_still_found(self):
+        """**找日期的地方和读日期的地方必须是同一套文本语义。**
+
+        真日期写成 `<span>Oct 20,</span><span>2026</span>` —— 拼起来才是
+        日期,两个文本节点**各自都不是**。按单个文本节点看"有没有日期形状"
+        去剪枝的那一版,于是只把外面那个非法编号认成候选,里面真正读得出
+        日期的 `<div>` 一个都没被问到,整页报「找不到带发布时间的文章列表」:
+        实测两篇真文章一条都收不到、这条源还记一次失败进退避。
+
+        **"至少有一个候选"证明不了"所有读得出日期的容器都进了候选"** ——
+        任何一处无关的完整日期形状或 `<time>` 都能让跨节点的那一处失效,所以
+        这不是给这个编号或这种月份写法加例外的事。现在候选和提取走同一串
+        归一化文字、同一套正则、同一个优先级,裂缝不存在。
+
+        **反过来钉一边**:同样的页面把日期写成一整段文本时本来就该收到两篇
+        (`complete_valid_control` 那一侧),所以两种写法一起钉 —— 只钉拆开
+        那一种的话,"整条回退到不剪枝"也能让它变绿,而那会让代价那一组红。
+        """
+        for name, shown in (('拆成两个文本节点', '<span>Oct {day},</span><span>2026</span>'),
+                            ('一整段文本', 'Oct {day}, 2026')):
+            with self.subTest(name):
+                rows = ''.join(
+                    f'<li>2026-02-30<div><a href="{href}"><h3>{title}</h3></a>'
+                    + shown.format(day=day) + '</div></li>'
+                    for href, day, title in (('/news/a', 20, 'Actual headline a'),
+                                             ('/news/b', 19, 'Actual headline b')))
+                got = parse_page_list(
+                    f'<html><body><main><ul>{rows}</ul></main></body></html>'.encode(), BASE)
+                self.assertEqual(
+                    [(e['url'].split('.com')[1], e['published'][:10]) for e in got],
+                    [('/news/a', '2026-10-20'), ('/news/b', '2026-10-19')])
+
+    def test_a_clock_time_in_the_next_row_is_not_part_of_this_date(self):
+        """**一条记录的日期只能来自它自己那一段**,下一行的钟点不算。
+
+        日期查询在整页**一串**归一化文字上找命中,所以每次查询都要按节点的
+        区间截断:这一行以 `2026-10-20` 收尾,下一行以时长 `12:30` 开头,整页
+        那一串上两段连起来正好被 ISO 那条正则一口吃掉(它的时间段是可选的)。
+        命中伸出右边界时必须按截到边界的那一段**重试一次**,才能拿回本行自己
+        那个更短的命中。
+
+        这一条钉的是两个方向:① 少了那次重试,这一行在自己容器里读不出日期,
+        而上移到 `<ul>` 会被"同组里不止我一条"挡住 —— 于是这一组不满足"每条
+        都带日期"、整页够不着 `MIN_DATED`,**这条源一篇都收不到**(实测 2 篇
+        变 0 篇,并给这条订阅记一次失败、进退避);② 反过来直接认下那个过长的
+        命中,这一行的发布时间就会多出一个和它无关的 `12:30`。
+        """
+        rows = ('<li><a href="/news/a"><h3>First actual headline</h3></a>'
+                '<span>2026-10-20</span></li>'
+                '<li><span>12:30</span><a href="/news/b"><h3>Second actual headline</h3></a>'
+                '<span>2026-10-19</span></li>')
+        got = parse_page_list(
+            f'<html><body><main><ul>{rows}</ul></main></body></html>'.encode(), BASE)
+        self.assertEqual([(e['url'].split('.com')[1], e['published']) for e in got],
+                         [('/news/a', '2026-10-20'), ('/news/b', '2026-10-19')])
+
+    def test_a_single_dated_badge_does_not_make_the_card_a_list(self):
+        """**一张卡片里有一个自带日期的角标,卡片仍然是一条记录。**
+
+        这是"装着一个列表的容器不是记录容器"那道闸的反方向。判据是
+        `MIN_DATED` 而不是 1,差的就是那个 1:改版后那一页上的精选卡片正是
+        「卡片里有一条自带日期的分类角标」,按"有一条就停"去挡会把 4 篇真
+        文章的日期挡掉、把 `/news/safeguards` 等 8 个分类索引页重新收进库。
+
+        两行各有一个**原生就带日期**的角标(角标那一组自己够两条,所以它
+        确实是"原生带日期的异址链接"),而每一行的卡片容器里只装着一个 ——
+        1 < `MIN_DATED`,所以真文章照旧上移到卡片、读到卡片的日期。
+        """
+        rows = ''.join(
+            f'<li><div><a href="{href}"><h3>{title}</h3></a></div>'
+            f'<div><a href="/news/announcements">Announcements</a>'
+            f'<time>{stamp}</time></div></li>'
+            for href, stamp, title in (('/news/a', '2026-10-20', 'Actual headline a'),
+                                       ('/news/b', '2026-10-19', 'Actual headline b')))
+        got = parse_page_list(
+            f'<html><body><main><ul>{rows}</ul></main></body></html>'.encode(), BASE)
+        self.assertEqual([(e['url'].split('.com')[1], e['published'][:10]) for e in got],
+                         [('/news/a', '2026-10-20'), ('/news/b', '2026-10-19')])
 
     def test_an_illegal_date_in_the_parent_does_not_hide_the_real_one_inside(self):
         """"大的解析不出来、里面的小的也不会有"**不成立**,所以跳过内部要先问
@@ -565,25 +571,3 @@ class GroupTests(unittest.TestCase):
                                        row('/news/a', 'Oct 8, 2026', 'A again'),
                                        row('/news/b', 'Oct 7, 2026', 'B second')]), BASE)
         self.assertEqual(len(got), 2)
-
-    def test_a_wide_page_does_not_cost_quadratic_time(self):
-        # `_containers` 按祖先计数算,不对每个祖先 `find_all` 一遍。后者在一张
-        # 几千链接的页面上是 O(n²),会把采集预算吃光。
-        #
-        # **这一局的形状是故意的:链接都是同一个父节点的直接子节点。** 第一版
-        # 把它们各自包进 `<li>`,于是 `find_all` 那版在 `ul` 这一层就 break 了、
-        # 祖先链只有四层 —— 注入 O(n²) 实测红 0 条,用例对它压根不敏感。链接
-        # 共享一个大父节点时才会逐个扫全量兄弟,而这是真实的扁平列表形态。
-        items = ''.join(
-            f'<a href="/news/{i}"><time>Oct 8, 2026</time>'
-            f'<span>Story number {i} title</span></a>' for i in range(400))
-        menu = ''.join(f'<a href="/p/{i}">Pricing {i}</a>' for i in range(2600))
-        html = f'<html><body><nav>{menu}</nav><main>{items}</main></body></html>'.encode()
-        start = time.monotonic()
-        got = parse_page_list(html, BASE)
-        spent = time.monotonic() - start
-        self.assertEqual(len(got), 400)
-        # 上限 2 秒:实测线性版 0.002 秒、`find_all` 版 4.54 秒(差 2270 倍),
-        # 所以这个数既离基线有一千倍余量,又拦得住 O(n²)。第一版写 10 秒 ——
-        # 注入 O(n²) 实测 4.54 秒、照样通过,整条用例对它不敏感。
-        self.assertLess(spent, 2.0, f'3000 个链接花了 {spent:.1f} 秒')

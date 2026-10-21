@@ -82,6 +82,23 @@ class DateTests(unittest.TestCase):
         # `<time datetime>` 是"这是个时间"的标准语义,排在正文里的数字前面。
         self.assertEqual(item_published(node), '2026-10-09 03:00')
 
+    def test_a_time_tag_does_not_read_its_own_datetime_attribute(self):
+        """问一个 `<time>` 节点自己,`datetime` 属性**不算** —— 既有口径。
+
+        原实现问的是 `node.find_all('time')`,而 bs4 的 `find_all` 只找
+        **后代**。所以对一个文字为空、日期全在属性里的 `<time>` 节点,答案是
+        空串,不是那个属性值。
+
+        **这一条是冗余带**:`item_published` 在解析里只被用来问"记录容器"和
+        它的祖先,而容器是链接的独占祖先或链接自己,永远不会是 `<time>`。
+        留着是因为它是公开函数(别处可以拿任意节点来问),而把节点自己算进去
+        这个差错在改日期查询实现时真的犯过一次 —— 逐节点差分在 400 份随机
+        输入上逮到 81 处,全是这一类。
+        """
+        from bs4 import BeautifulSoup
+        node = BeautifulSoup('<time datetime="2026-10-20"></time>', 'html.parser').find('time')
+        self.assertEqual(item_published(node), '')
+
 
 class FieldTests(unittest.TestCase):
     """标题、角标、壳正文。"""
