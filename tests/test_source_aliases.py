@@ -22,6 +22,12 @@ from kb.search import Filters, _filter_sql
 # 用户/模型在问答里给公众号这批内容时可能写的几种写法,全都得指向同一批文章
 GZH_SPELLINGS = ["公众号", "绿泡泡", "微信", "wechat", "公众号系"]
 
+# 「简报」这一类改过名(原来叫「邮件简报」—— 那个「邮件」说的是发行方怎么发给它
+# 自己的订阅者,而这条通道只读 RSS 的期号清单和每期落地页,压根不碰邮箱)。别名表
+# 里有一行是从 `label` **派生**的,所以改标签这个动作**天然就把老键删掉了**:
+# 下面这几种写法必须都还认得出来,否则老写法走的正是那条静默空集的路。
+DIGEST_SPELLINGS = ["简报", "邮件简报", "newsletter"]
+
 
 class SourceAliasTests(unittest.TestCase):
     def setUp(self):
@@ -32,6 +38,10 @@ class SourceAliasTests(unittest.TestCase):
         self.conn.execute(
             "INSERT INTO documents(path, source, title) VALUES (?,?,?)",
             ("article.md", "dr-gzh", "别名回归用文章"),
+        )
+        self.conn.execute(
+            "INSERT INTO documents(path, source, title) VALUES (?,?,?)",
+            ("issue.md", "digest", "别名回归用简讯"),
         )
         self.addCleanup(self.conn.close)
 
@@ -70,6 +80,18 @@ class SourceAliasTests(unittest.TestCase):
         """反面:认不出的名字确实静默得到空集 —— 这就是删掉一个键的后果。"""
         self.assertEqual(["不存在的来源"], expand_sources("不存在的来源"))
         self.assertEqual([], self._enumerated("不存在的来源"))
+
+    def test_renamed_type_keeps_its_old_spelling(self):
+        """改过名的那一类:新名字和老名字都得查回同一条。
+
+        反面是 `test_unknown_source_really_is_an_empty_set` —— 改名时漏留老键,
+        老写法走的就是那条路:不报错,静默零条。
+        """
+        for spelling in DIGEST_SPELLINGS:
+            with self.subTest(spelling=spelling):
+                self.assertEqual(["别名回归用简讯"], self._enumerated(spelling))
+                self.assertEqual(1, self._filtered(spelling))
+                self.assertEqual(["digest"], expand_sources(spelling))
 
     def test_no_alias_points_at_nothing(self):
         """每个别名都得指到一个真实的组上,不许留下指空的键。"""

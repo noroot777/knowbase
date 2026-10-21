@@ -30,7 +30,7 @@
   (`fetching.parse_feed` 的 `parsed.entries and not entries`、`x_browser` 的
   `seen_articles and not parsed`)—— 安静返回空会让这条订阅从某天起永远「今天没有新内容」,而面板上
   一切正常。**反过来钉一边:合法的空源照旧返回空集**(空 RSS 就是 `[]`,`tests/test_feed_sources.py`
-  钉着)。「这一类来源零条就算故障」是**某些来源自己**的更严口径(网页专栏、邮件简报),写在它们各自
+  钉着)。「这一类来源零条就算故障」是**某些来源自己**的更严口径(网页专栏、简报),写在它们各自
   那份决策文档里,不是通用规则。
 - **口径只有一份。** 同一个问题别在两处各判一遍 —— 抽成函数,所有消费方都过它。
 - **主干的迁移只增不减**(表和列一视同仁)。判据是「另一条分支**不重启**会不会当场坏」,不是「它
@@ -169,7 +169,7 @@
 | **任何写 kb.db 或 vault 文件的入口**(索引、导出、提取回写、条目化、清理脚本) | `maintenance-lock.md` |
 | 没有 feed 的站点、网页专栏解析(`kb/feeds/page_list.py`) | `page-list.md` |
 | 手动收录(粘一条链接抓进知识库:`kb/feeds/grab.py`、`grab_store.py`、`grab_page.py`、`kb/web/grab_api.py`、`kb/static/js/grab.js`) | `link-grab.md` |
-| 邮件简报 / TLDR(`kb/feeds/digest.py`) | `digest.md` |
+| 简报 / TLDR(`kb/feeds/digest.py`) | `digest.md` |
 | 往 `defaults.json` 加来源、存量库补种(`kb/feeds/registry.py` 的 `DEFAULTS_REV`) | `defaults-backfill.md` |
 | 英文内容翻译、译文显示口径(`kb/feeds/translate.py`) | `translate.md` |
 | 每日日报、素材账本、出处编号、覆盖确认(`kb/daily*.py`、`kb/daily_refs.py`、`kb/daily_overwrite.py`) | `daily.md` |

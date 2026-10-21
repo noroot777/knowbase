@@ -18,7 +18,7 @@
   <img src="docs/screenshots/outline.png" width="680" />
 </p>
 
-把绿泡泡、X 大V观点、RSS 订阅、网页专栏、邮件简报、YouTube 视频摘要统一索引，支持关键词 + 语义混合检索、意图问答、每日日报、工具图鉴、收藏此段与 AI 分诊。
+把绿泡泡、X 大V观点、RSS 订阅、网页专栏、简报、YouTube 视频摘要统一索引，支持关键词 + 语义混合检索、意图问答、每日日报、工具图鉴、收藏此段与 AI 分诊。
 
 所有内容以 Obsidian vault 里的 Markdown 为事实来源，SQLite 只是索引（随时可删可重建）。
 
@@ -125,7 +125,7 @@ docker compose up -d --build    # http://127.0.0.1:8787
 | **大V观点（X）** | 首次导入 51 个 X 账号，走登录态浏览器（独立 profile 或日常浏览器）或 feedgrab 取，也可给单账号填专用 feed 地址 |
 | **RSS 订阅** | 首次导入 9 个订阅，标准 RSS/Atom |
 | **网页专栏** | 给没有 RSS 的站点用（如 Anthropic news），自动识别文章列表页 |
-| **邮件简报** | TLDR AI 等汇总式简报，自动抓每期落地页的每条简讯正文 |
+| **简报** | TLDR AI 等汇总式简报，自动抓每期落地页的每条简讯正文 |
 
 **英文自动翻译**：订阅类来源抓到的英文条目，在写入知识库前先整篇翻译成中文（标题和正文都译，专有名词保留原文）。中文内容直接跳过不花钱。每轮同步处理当前来源范围内全部待译条目，不设条数上限；保留 3 条并发与失败重试保护。尚未译完的内容不会以英文落盘，来源页面上会标注翻译状态。翻译模型在「模型配置」→「来源 · 英文内容翻译」里选。
 
@@ -307,7 +307,7 @@ obs vault (事实来源, Markdown + frontmatter)
   ├── source/social/          X 大V观点
   ├── source/rss/             RSS 订阅
   ├── source/web/             网页专栏
-  ├── source/digest/          邮件简报
+  ├── source/digest/          简报
   └── daily/                  每日日报 (不回索引)
         ↓ kb index                      ↓ kb extract
   SQLite (data/kb.db)           LLM (按阶段选模型)
