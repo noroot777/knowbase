@@ -12,7 +12,7 @@ from unittest.mock import patch
 from kb.feeds import x_body, x_browser, x_page_state, x_post, x_post_meta
 from kb.feeds.x_cdp import Chrome
 from scripts import x_post_backfill as backfill
-from tests.headless import INSTALL_HINT, SHELL
+from tests.headless import SHELL, requires_shell
 from tests.x_empty_dom import MORE, EmptyDomCases
 
 LINK = ('<a href="https://t.co/example"><span aria-hidden="true">https://</span>'
@@ -66,7 +66,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-@unittest.skipUnless(SHELL is not None, '缺 chrome-headless-shell —— ' + INSTALL_HINT)
+@requires_shell
 class PostDomTests(EmptyDomCases, unittest.TestCase):
     @classmethod
     def setUpClass(cls):

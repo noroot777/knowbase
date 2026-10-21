@@ -10,6 +10,7 @@ from kb.collectors import FetchScope
 from kb.feeds import registry as reg, sync, x_browser, x_channels, x_page_state, x_post
 from scripts import x_post_backfill as backfill
 from tests import test_x_post_dom as dom
+from tests.headless import requires_shell
 from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import Quick, tweet
 from tests.test_x_post import BODY, OLD, Page, preview, snapshot
@@ -110,7 +111,7 @@ class AccessGateTests(ChannelBase):
                             (source['id'],)).fetchone()[0])
 
 
-@unittest.skipUnless(dom.SHELL is not None, dom.INSTALL_HINT)
+@requires_shell
 class AccessGateDomTests(unittest.TestCase):
     def load(self, html):
         dom.PostDomTests.load(self, html)

@@ -12,12 +12,12 @@ from unittest.mock import patch
 from kb.feeds import x_browser, x_page_state
 from kb.feeds.x_cdp import Chrome
 from kb.feeds.x_timeline_state import TimelineState
-from tests.headless import INSTALL_HINT, SHELL
+from tests.headless import SHELL, requires_shell
 from tests.test_x_post import OLD
 from tests.test_x_post_dom import Handler, article
 
 
-@unittest.skipUnless(SHELL is not None, '缺 chrome-headless-shell —— ' + INSTALL_HINT)
+@requires_shell
 class ResponseDomTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

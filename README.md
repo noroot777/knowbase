@@ -289,8 +289,8 @@ docker compose logs -f --tail 100
 ## 跑测试
 
 ```bash
-./kb.sh test             # 提交前的快速层:纯逻辑全量,浏览器回归显式拦下(约 4 分钟)
-./kb.sh test probes      # 只跑浏览器回归 —— 改了 kb/static/ 或阅读页之后(约 8 分钟)
+./kb.sh test             # 提交前的快速层:纯逻辑全量,浏览器回归显式拦下(约 3 分钟)
+./kb.sh test probes      # 只跑浏览器回归 —— 改了 kb/static/ 或阅读页之后(约 10 分钟)
 ./kb.sh test full        # 真全量,push 前至少一次(约 12 分钟)
 ```
 

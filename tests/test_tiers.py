@@ -1,19 +1,27 @@
 # -*- coding: utf-8 -*-
 """回归分层入口的回归(tests/tiers.py + tests/headless.py 的浏览器闸门)。
 
-两条口径,各钉两面(完整语境 docs/decisions/test-tiers.md):
+四条口径,各钉两面(完整语境 docs/decisions/test-tiers.md):
 
-- **闸门只有 requires_headless 一处**:设了 `KB_TEST_NO_BROWSER` 就整类拦下,
-  而且 skip 消息必须写清这批测试还能怎么跑起来 —— 「静默跳过」是这套机制当年
-  要修的事故形态,不许在这里复活。反过来钉:没设变量时放不放行只取决于
-  node/无头壳,闸门不许顺手把本来能跑的也拦了。
-- **probes 名单现算,不许手工维护**:口径是「文件源码引用 tests.headless」。
-  手工列表会静默过期 —— 新探针文件没人登记,就落进 fast 层,快速层又慢回去,
-  而且没有任何一处会红。这里钉住:最重的探针在册、纯逻辑文件不在册、名单上的
-  名字个个真有其文件。
+- **闸门与标记只有 browser_gate 一处**(requires_headless / requires_shell 是它
+  的包装):设了 `KB_TEST_NO_BROWSER` 就整类拦下,skip 消息写清出路;缺工具按调
+  用点自己的说法 skip,但 **kb_browser 标记无论如何都得带着** —— probes 层的覆盖
+  账全靠它。反过来钉:没设变量、工具齐备就放行,requires_shell 不许强加 node。
+- **层对开关的态度必须显式**:fast 设上,probes/full 清掉继承值 —— 不清的话,
+  外头 export 过一次的壳里,工具齐备、显式全量照样把浏览器回归整层拦掉。
+- **纯逻辑邻居的通过不许充当浏览器覆盖**:probes 按 kb_browser 标记记账,浏览器
+  用例零真跑要当失败;账要在 run 之前收集(unittest 跑完会释放 suite 条目)。
+- **浏览器工具可用性的门不许在测试文件里自己写**(结构守卫,AST 判据):事故形态
+  是七组共 90 条真实浏览器用例各自 `skipUnless(SHELL/_REAL_CHROME...)`,不认快速
+  层开关 —— fast 照样起浏览器;其中两组不引用 tests.headless,又漏出 probes 名单。
+- **probes 名单现算,不许手工维护**:口径是「文件源码引用 tests.headless」,
+  配合上一条(起浏览器的类必须挂共享闸门 → 必然 import tests.headless)圈全。
 """
 
+import ast
+import io
 import os
+import re
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -37,10 +45,12 @@ class BrowserGateTests(unittest.TestCase):
         self.assertIn(headless.NO_BROWSER_ENV, reason)
         # skip 消息要写清出路,不许只说「跳过了」
         self.assertIn("./kb.sh test", reason)
+        # 被拦的也得带标记:分层统计按它数「浏览器用例该有几条」
+        self.assertTrue(Probe.kb_browser)
 
     def test_without_the_gate_nothing_extra_is_blocked(self):
-        # 反过来钉一边:没设变量时,放不放行只取决于 node 和无头壳。两个都在
-        # (打桩成在)就必须放行 —— 闸门不许把本来能跑的也拦了。
+        # 反过来钉一边:没设变量时,放不放行只取决于工具。齐备(打桩成在)就必须
+        # 放行 —— 闸门不许把本来能跑的也拦了;标记照样要带。
         with mock.patch.dict(os.environ), \
                 mock.patch.object(headless, "NODE", "node"), \
                 mock.patch.object(headless, "SHELL", Path("/stub/shell")):
@@ -53,6 +63,7 @@ class BrowserGateTests(unittest.TestCase):
 
         self.assertFalse(getattr(Probe, "__unittest_skip__", False),
                          "没设快速层变量,类却被拦下了")
+        self.assertTrue(Probe.kb_browser)
 
     def test_a_blank_value_means_off(self):
         # 口径与其它 KB_* 开关一致:空白串算没设。
@@ -67,6 +78,202 @@ class BrowserGateTests(unittest.TestCase):
 
         self.assertFalse(getattr(Probe, "__unittest_skip__", False))
 
+    def test_missing_tools_still_leave_the_mark(self):
+        # 缺工具被 skip 的类也得带 kb_browser:不带的话,probes 的覆盖账少记它,
+        # 「浏览器零覆盖」恰好在最需要报警的那台机器上看不出来。
+        with mock.patch.dict(os.environ):
+            os.environ.pop(headless.NO_BROWSER_ENV, None)
+
+            @headless.browser_gate(["原生 Chrome(这一组验 SingletonLock)"])
+            class Probe(unittest.TestCase):
+                def test_anything(self):
+                    pass
+
+        self.assertTrue(Probe.kb_browser)
+        self.assertTrue(getattr(Probe, "__unittest_skip__", False))
+        self.assertIn("原生 Chrome", Probe.__unittest_skip_why__)
+
+    def test_requires_shell_does_not_demand_node(self):
+        # DOM 那几组是 Python 直驱 CDP,跟 node 无关 —— 共享闸门不许强加统一依赖。
+        with mock.patch.dict(os.environ), \
+                mock.patch.object(headless, "NODE", None), \
+                mock.patch.object(headless, "SHELL", Path("/stub/shell")):
+            os.environ.pop(headless.NO_BROWSER_ENV, None)
+
+            @headless.requires_shell
+            class Probe(unittest.TestCase):
+                def test_anything(self):
+                    pass
+
+        self.assertFalse(getattr(Probe, "__unittest_skip__", False),
+                         "只要壳的类被 node 缺席拦下了")
+        self.assertTrue(Probe.kb_browser)
+
+
+class TierEnvTests(unittest.TestCase):
+
+    def test_fast_sets_and_other_tiers_clear_the_inherited_gate(self):
+        # probes/full 必须把继承值清掉:不清的话,外头 export 过一次的壳里,
+        # 工具齐备、显式全量照样把浏览器回归整层拦掉,而且一切显示正常。
+        with mock.patch.dict(os.environ, {headless.NO_BROWSER_ENV: "1"}):
+            tiers._apply_tier_env("probes")
+            self.assertNotIn(headless.NO_BROWSER_ENV, os.environ)
+            os.environ[headless.NO_BROWSER_ENV] = "1"
+            tiers._apply_tier_env("full")
+            self.assertNotIn(headless.NO_BROWSER_ENV, os.environ)
+            tiers._apply_tier_env("fast")
+            self.assertEqual("1", os.environ[headless.NO_BROWSER_ENV])
+
+
+class BrowserCoverageTests(unittest.TestCase):
+    """覆盖账按 kb_browser 标记记,纯逻辑邻居的通过不作数。
+
+    事故形态(审查实测):缺壳时浏览器用例全 skip、几百条纯逻辑邻居通过,
+    probes 照样报成功 —— 「有别的测试在跑」被当成了「浏览器验过了」。
+    """
+
+    def _run(self, suite):
+        ids = tiers.browser_case_ids(suite)   # run 之前收账:跑完条目就被释放了
+        result = unittest.TextTestRunner(
+            stream=io.StringIO(), verbosity=0).run(suite)
+        return ids, result
+
+    def test_skipped_browser_cases_do_not_count_as_coverage(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop(headless.NO_BROWSER_ENV, None)
+
+            @headless.browser_gate(["根本不存在的工具"])
+            class Browserish(unittest.TestCase):
+                def test_browser(self):
+                    pass
+
+        class Neighbour(unittest.TestCase):
+            def test_logic(self):
+                pass
+
+        suite = unittest.TestSuite([
+            unittest.defaultTestLoader.loadTestsFromTestCase(Browserish),
+            unittest.defaultTestLoader.loadTestsFromTestCase(Neighbour)])
+        ids, result = self._run(suite)
+        total, ran = tiers.browser_coverage(ids, result)
+        self.assertTrue(result.wasSuccessful(), "邻居通过,unittest 本身是绿的")
+        self.assertEqual((1, 0), (total, ran),
+                         "浏览器用例全 skip 时覆盖必须是 0,邻居的通过不作数")
+
+    def test_an_executed_browser_case_counts(self):
+        # 反过来钉:真跑了的要记上,别把部分覆盖误报成零覆盖。
+        with mock.patch.dict(os.environ):
+            os.environ.pop(headless.NO_BROWSER_ENV, None)
+
+            @headless.browser_gate([])
+            class Browserish(unittest.TestCase):
+                def test_browser(self):
+                    pass
+
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(Browserish)
+        ids, result = self._run(suite)
+        self.assertEqual((1, 1), tiers.browser_coverage(ids, result))
+
+
+class TierVerdictTests(unittest.TestCase):
+    """main 的层判定,三面各钉一边:probes 没验全必败(零覆盖是它的特例)、
+    fast 有浏览器用例真跑即失败(闸门失效的运行时信号)、full 沿用 README/CI
+    那条 discover 的「缺工具自然 skip」政策不因部分跳过翻红。"""
+
+    def _browser_class(self, missing, name):
+        # 账本按 test id(模块.类.方法)记,两个临时类不许同名 —— 同名会在
+        # set 里合并成一条,账目失真。
+        with mock.patch.dict(os.environ):
+            os.environ.pop(headless.NO_BROWSER_ENV, None)
+
+            @headless.browser_gate(missing)
+            class Browserish(unittest.TestCase):
+                def test_browser(self):
+                    pass
+
+        Browserish.__name__ = Browserish.__qualname__ = name
+        return Browserish
+
+    def _main(self, tier, make_suite):
+        import contextlib
+        with mock.patch.object(tiers, "build_suite", lambda t: make_suite()), \
+                mock.patch.dict(os.environ), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = tiers.main([tier])
+        return rc, err.getvalue()
+
+    def _partial_suite(self):
+        load = unittest.defaultTestLoader.loadTestsFromTestCase
+        return unittest.TestSuite([
+            load(self._browser_class(["根本不存在的工具"], "SkippedBrowserish")),
+            load(self._browser_class([], "RanBrowserish")),
+            load(type("Neighbour", (unittest.TestCase,),
+                      {"test_logic": lambda self: None}))])
+
+    def test_probes_fails_when_browser_cases_are_left_unrun(self):
+        rc, err = self._main("probes", self._partial_suite)
+        self.assertEqual(1, rc, err)
+        self.assertIn("没真跑", err)
+        self.assertIn("根本不存在的工具", err)   # 缺什么要在默认输出里看得到
+
+    def test_probes_passes_when_all_browser_cases_ran(self):
+        load = unittest.defaultTestLoader.loadTestsFromTestCase
+        rc, err = self._main(
+            "probes", lambda: load(self._browser_class([], "RanBrowserish")))
+        self.assertEqual(0, rc, err)
+
+    def test_full_keeps_the_natural_skip_policy(self):
+        rc, err = self._main("full", self._partial_suite)
+        self.assertEqual(0, rc, err)
+        self.assertIn("真跑 1/2", err)   # 但覆盖数要如实打出来
+
+    def test_fast_fails_if_a_browser_case_actually_ran(self):
+        # 套件里有一个没被拦住的浏览器类(模拟闸门/层表态坏了):fast 必须翻红。
+        load = unittest.defaultTestLoader.loadTestsFromTestCase
+        rc, err = self._main(
+            "fast", lambda: load(self._browser_class([], "RanBrowserish")))
+        self.assertEqual(1, rc, err)
+        self.assertIn("闸门失效", err)
+
+
+class AvailabilityGateGuardTests(unittest.TestCase):
+    """浏览器工具可用性的门只许走 tests.headless 的共享闸门(结构守卫)。
+
+    判据走 AST 的 skipUnless/skipIf **条件源码**(docstring 和注释不进射程,
+    口径同 tests/test_probe_contract.py 的结构守卫):条件里出现 shell/chrome
+    一族的,就是在自己做浏览器门 —— 它不认快速层开关,fast 层照样起浏览器;
+    也不带 kb_browser 标记,probes 层数不到它。
+    """
+
+    _BROWSERISH = re.compile(r"shell|chrome", re.I)
+
+    def test_no_private_browser_availability_gates(self):
+        bad = []
+        for path in sorted(tiers.TESTS_DIR.glob("test_*.py")):
+            src = path.read_text(encoding="utf-8")
+            for node in ast.walk(ast.parse(src)):
+                if not isinstance(node, ast.Call) or not node.args:
+                    continue
+                func = node.func
+                name = func.attr if isinstance(func, ast.Attribute) \
+                    else getattr(func, "id", "")
+                if name not in ("skipUnless", "skipIf"):
+                    continue
+                cond = ast.get_source_segment(src, node.args[0]) or ""
+                if self._BROWSERISH.search(cond):
+                    bad.append(f"{path.name}:{node.lineno} 条件 {cond!r}")
+        self.assertEqual([], bad,
+                         "浏览器工具的门必须走 tests.headless 的"
+                         " browser_gate/requires_headless/requires_shell:\n"
+                         + "\n".join(bad))
+
+    def test_the_shared_gates_are_actually_in_use(self):
+        # 反过来钉:守卫保护的东西得真实存在 —— 共享闸门在测试树里被广泛使用。
+        users = [p.name for p in sorted(tiers.TESTS_DIR.glob("test_*.py"))
+                 if re.search(r"requires_shell|requires_headless|browser_gate",
+                              p.read_text(encoding="utf-8"))]
+        self.assertGreaterEqual(len(users), 25, users)
+
 
 class ProbeRosterTests(unittest.TestCase):
 
@@ -76,6 +283,9 @@ class ProbeRosterTests(unittest.TestCase):
         self.assertIn("tests.test_subs_layout", names)
         self.assertIn("tests.test_probe_leak", names)
         self.assertIn("tests.test_x_channels", names)
+        # 审查抓到的那两个漏网文件:原生 Chrome 那组、借 dom.SHELL 的那组。
+        self.assertIn("tests.test_chrome_shutdown", names)
+        self.assertIn("tests.test_x_access_gate", names)
         self.assertGreaterEqual(len(names), 20, names)
 
     def test_pure_logic_files_stay_out(self):

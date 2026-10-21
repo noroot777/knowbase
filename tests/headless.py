@@ -111,26 +111,51 @@ SHELL = headless_shell()
 NODE = shutil.which("node")
 
 
-def requires_headless(cls):
-    """给浏览器回归用的装饰器:node 和无头壳缺哪个都说清楚,外加怎么补。
+def browser_gate(missing=()):
+    """真实浏览器测试类的统一闸门:**会起浏览器的类一律挂它**(或下面两个现成
+    包装),不许在测试文件里自己写 `skipUnless` 按工具可用性做门 —— 自己写的那份
+    不认快速层开关(`KB_TEST_NO_BROWSER`),fast 层照样起浏览器;也不带
+    `kb_browser` 标记,probes 层统计不到它,「浏览器零覆盖」就看不出来。结构守卫
+    在 `tests/test_tiers.py`,完整语境见 docs/decisions/test-tiers.md。
 
-    快速层(`./kb.sh test`)靠 `KB_TEST_NO_BROWSER` 在这里把整类拦下 —— 拦的是
-    「起浏览器」这一档,同文件里的纯逻辑用例照常跑。skip 消息必须写清这批测试
-    还能怎么跑起来:静默跳过(或只说「跳过了」不说出路)正是这套口径当年要修的
-    事故形态。
+    `missing` 由调用点按**自己**的工具要求算:.mjs 探针要 node+壳
+    (`requires_headless`),Python 直驱 CDP 的 DOM 组只要壳(`requires_shell`),
+    SingletonLock 那组要原生 Chrome(无头壳压根不建那把锁)。这里不强加统一依赖。
+
+    做三件事,顺序有含义:先打 `kb_browser` 标记(分层统计的唯一口径,**缺工具
+    被 skip 的也得带着**,不然 probes 层的覆盖账少记它);再按快速层开关整类拦下
+    (skip 消息写清出路 —— 「静默跳过」是这套口径当年要修的事故形态);最后才轮
+    到缺工具,按调用点给的说法 skip。
     """
-    if os.environ.get(NO_BROWSER_ENV, "").strip():
-        return unittest.skip(
-            f"浏览器回归被 {NO_BROWSER_ENV} 拦下(快速层)——"
-            "跑它们:./kb.sh test probes 或 ./kb.sh test full")(cls)
+    missing = [m for m in missing if m]
+
+    def mark(cls):
+        cls.kb_browser = True
+        if os.environ.get(NO_BROWSER_ENV, "").strip():
+            return unittest.skip(
+                f"浏览器回归被 {NO_BROWSER_ENV} 拦下(快速层)——"
+                "跑它们:./kb.sh test probes 或 ./kb.sh test full")(cls)
+        if missing:
+            return unittest.skip("缺 " + ";".join(missing))(cls)
+        return cls
+
+    return mark
+
+
+def requires_headless(cls):
+    """node 驱动的浏览器回归(.mjs 探针)用这个:node 和无头壳缺哪个都说清楚。"""
     missing = []
     if NODE is None:
         missing.append("node(驱动 CDP 的那一侧)")
     if SHELL is None:
         missing.append(f"chrome-headless-shell —— {INSTALL_HINT}")
-    if missing:
-        return unittest.skip("缺 " + ";".join(missing))(cls)
-    return cls
+    return browser_gate(missing)(cls)
+
+
+def requires_shell(cls):
+    """Python 直驱 CDP 的浏览器回归用这个:只要无头壳,不额外强加 node。"""
+    missing = [] if SHELL is not None else [f"chrome-headless-shell —— {INSTALL_HINT}"]
+    return browser_gate(missing)(cls)
 
 
 def run_probe(argv, *, timeout: int = 300, env=None, cwd=None,
