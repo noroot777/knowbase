@@ -120,6 +120,20 @@
     **两道闸各用一个新类**:`unittest.skip` 是就地往类上写标记的,共用一个类时
     第一道留下的痕迹会被第二道认成自己的(定点注入实测:只给其中一道挂开关,
     共用类那一版照旧全绿)。
+  - **开关打开之后,剩下的那些必须照旧全绿** —— 「省时间」不等于「少几条红」。
+    `_skip_reason` 把「人显式关了」排在缺件之前,于是**断言缺件提示**的那一组
+    (`tests/test_headless_shell.py`,它一个浏览器都不起)在开关落进环境时拿到的是
+    开关那句话:实测 `KB_SKIP_BROWSER_TESTS=1` 跑全量 3471 条,红
+    `test_skip_message_says_how_to_install` 和 `test_missing_node_is_named_too`
+    两条 —— 人按说明关掉浏览器回归,反而拿不到通过结果,还会以为是自己机器的问题。
+    出路是**把开关从那一组的「干净环境」里清掉**(它问的是「找得到吗、找不到时
+    怎么说」,开关是不相干的输入),**不是把这两条也跳过去**。回归两条:一条按
+    **后果**判 —— 子进程里把那一组按开/关两种模式各跑一次,判据是退出码(定点注入
+    把 `pop` 改成 `get` 实测只红 `switch=True` 那一半);一条是**类守卫** ——
+    凡是真去读跳过理由(属性 `INSTALL_HINT`、或 `getattr` 那个
+    `__unittest_skip_why__`)的 test 文件都得显式处理这个开关,**走 AST 不按文本**
+    (按文本那一版当场咬住只在注释里讨论旧写法的 `test_x_access_gate`;定点注入
+    新写一个读理由却不管开关的模块,实测红并点名到它)。
   - **`skipUnless(shutil.which('node'), ...)` 那几处不在这个开关的射程里**
     (`test_catgraph_window`、`test_daily_refs`、`test_fav_snippet_anchor`、
     `test_favorites`、`test_wechat_setup`):它们用 node 跑页面脚本、一个浏览器都不起,

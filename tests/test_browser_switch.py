@@ -26,6 +26,9 @@
 from __future__ import annotations
 
 import ast
+import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -33,6 +36,7 @@ from unittest.mock import patch
 from tests import headless
 
 TESTS = Path(__file__).resolve().parent
+ROOT = TESTS.parent
 
 #: 从 `tests.headless` 导入这几个名字 = 这一组要起真浏览器,必须挂闸。
 BROWSER_NAMES = frozenset({'run_probe', 'fixture_server', 'SHELL'})
@@ -40,6 +44,10 @@ BROWSER_NAMES = frozenset({'run_probe', 'fixture_server', 'SHELL'})
 GATES = frozenset({'requires_headless', 'requires_shell'})
 #: 闸件:只许从 `tests.headless` 取,隔着别的测试模块拿到的不算。
 GATE_PARTS = frozenset({'SHELL', 'NODE', 'INSTALL_HINT'})
+#: 断言「跳过理由」的用例:开关排在缺件之前,所以它们必须自己把开关清掉。
+#: 一个是属性(`headless.INSTALL_HINT`),一个是 `getattr` 的那个字符串字面量。
+REASON_ATTRS = frozenset({'INSTALL_HINT'})
+REASON_KEYS = frozenset({'__unittest_skip_why__'})
 
 
 class SwitchTests(unittest.TestCase):
@@ -132,6 +140,67 @@ class SwitchTests(unittest.TestCase):
         self.assertEqual([], offenders,
                          '闸件要走 tests.headless 的出口:被借的那个模块一改导入,'
                          '这里就是导入期 AttributeError,整个模块 load 不起来')
+
+
+    def _run(self, module, *, switch):
+        """子进程里跑一组用例,返回 (returncode, 尾部输出)。"""
+        env = {**os.environ, 'PYTHONPATH': f'{ROOT}{os.pathsep}{TESTS}'}
+        if switch:
+            env[headless.SKIP_ENV] = '1'
+        else:
+            env.pop(headless.SKIP_ENV, None)
+        done = subprocess.run([sys.executable, '-m', 'unittest', module],
+                              cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
+        return done.returncode, (done.stderr or done.stdout)[-1200:]
+
+    def test_turning_the_switch_on_does_not_fail_the_tests_that_still_run(self):
+        """**后果**:按说明关掉浏览器回归再跑,剩下的必须照旧全绿 —— 不是「少几条红」。
+
+        开关只该让起浏览器的那些跳过。而 `_skip_reason` 把「人显式关了」排在缺件
+        之前,于是**断言缺件提示**的那一组(`tests/test_headless_shell.py`,它一个
+        浏览器都不起)在开关落进环境时拿到的是开关那句话:实测 `KB_SKIP_BROWSER_TESTS=1`
+        跑全量 3471 条,红 `test_skip_message_says_how_to_install` 和
+        `test_missing_node_is_named_too` 两条 —— 「省时间」变成「拿不到通过结果」,
+        而人会以为是自己机器的问题。
+
+        **两种模式各跑一次**(反过来钉一边):开着要绿,关着也要绿。判据落在
+        子进程的退出码上,因为这正是人在命令行里看到的那个结果。
+        """
+        for switch in (True, False):
+            with self.subTest(switch=switch):
+                code, tail = self._run('tests.test_headless_shell', switch=switch)
+                self.assertEqual(0, code, tail)
+
+    def test_modules_that_assert_a_skip_reason_deal_with_the_switch(self):
+        """上面那条按后果判、只盯现有这一组;这条是**类守卫**,拦住以后新写的。
+
+        判据:真去读「跳过理由」的 test 文件(属性 `INSTALL_HINT`,或 `getattr`
+        那个 `__unittest_skip_why__`),都必须显式处理这个开关 —— 要么清掉它(缺件
+        提示那一组),要么本来就在验它(本文件)。
+
+        **走 AST,不按文本**:注释和 docstring 里要能照常讨论这些名字 ——
+        按文本判的那一版当场咬住了 `test_x_access_gate.py`,而它只是在注释里讲
+        「原来隔着 `dom.INSTALL_HINT` 借」这段历史,一行代码都没读过跳过理由。
+        这条只当早一道提醒,真正的闸是上面那条跑出来的退出码。
+        """
+        offenders = []
+        for path in sorted(TESTS.glob('test_*.py')):
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            reads = any(
+                (isinstance(node, ast.Attribute) and node.attr in REASON_ATTRS)
+                or (isinstance(node, ast.Constant) and node.value in REASON_KEYS)
+                for node in ast.walk(tree))
+            if not reads:
+                continue
+            names = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+            names |= {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+            names |= {node.value for node in ast.walk(tree)
+                      if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+            if 'SKIP_ENV' not in names and headless.SKIP_ENV not in names:
+                offenders.append(path.name)
+        self.assertEqual([], offenders,
+                         f'这几组断言跳过理由却没管 {headless.SKIP_ENV}:'
+                         '开关一开,它们拿到的是开关那句话')
 
 
 if __name__ == '__main__':
