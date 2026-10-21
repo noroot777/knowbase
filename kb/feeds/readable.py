@@ -38,12 +38,27 @@ MAX_HTML = 3 * 1024 * 1024
 # 真标记只有 0.17 MB。提取器在**解析之前**就 `return '', ''`,于是手动收录对着一篇
 # 完完整整读得到的文章说「这一页没找到正文」—— 而它和真正读不到的那一档
 # (登录墙、纯 JS 渲染)在界面上长得一模一样。
-# 成本实测(同一台机器):解析 8 MB 全脚本 0.92s、2.7 MB 真标记 1.06s,而下面
-# 这条正则扫 10 MB 只要 0.037s —— 卡住真标记那一头就够了,也只有那一头值得卡。
-# **替换保留两头的标签**:`<script>x</script>` 重复几十万次的那种页面,内容虽短
-# 但节点数真实存在,整段抹成空串会让它从这条线底下溜过去。
-# **只在整份超线时才扫这一趟**(见 `extract_or_reason`):正常页面一个字节都不多花。
-_RAW_TEXT = re.compile(r'<(script|style)\b[^>]*>.*?</\1\s*>', re.I | re.S)
+#
+# **量它要用带状态的线性扫描,不许用一条无上下文的正则**(`<(script|style)…>.*?</\1>`
+# 那一版,审查第一轮两头都踩了):
+# ①**没有闭合标签时它退化成平方级**。每个 `<script` 开头都要把剩下整份重找一遍
+#   `</script>`,找不到再挪一格重来 —— 实测 `'<script>' * 16000`(128 KB,远在网络
+#   那道 8 MB 之下)`markup_size` 要 3.7 秒,`'<script>' * 64000`(512 KB)42 秒还
+#   没回来。`GRAB_SECONDS` 只随 HTTP 请求走,拦不住一次本地正则。
+# ②**它认不出注释,于是把真标记算成脚本**。`'<!-- <script> -->' + '<p>x</p>' * 400000
+#   + '<!-- </script> -->'`:3.2 MB 真标记、40 万个 `<p>` 节点,那一版报 **26 字节**,
+#   这条线形同虚设。注释里的 `<script>` 按 HTML 规范压根不开原始文本模式。
+# 下面这个扫描两样一起解决:认注释、认原始文本,**每一段最多被扫两趟**(一趟找开
+# 标签、一趟找闭标签,游标只进不退),所以成本是 O(len)。
+#
+# 判不准的几处一律偏向**多算真标记**(= 更容易拒稿):注释没收口、`<script` 贴在
+# 结尾、闭标签认早了,算出来的都是偏大的那个数。口径同元规则 —— 误拒顶多重抓一次,
+# 放行一份超大页是真花掉的解析时间。
+#: 原始文本元素的开标签 + 注释开头。**注释要一起认**(见上面 ②)。
+_RAW_OPEN = re.compile(r'<!--|<(script|style)(?=[\s/>])', re.I)
+#: 对应的闭标签。**宽着收**:早一点认出结束 = 少算一点原始文本 = 多算一点真标记。
+_RAW_CLOSE = {'script': re.compile(r'</\s*script', re.I),
+              'style': re.compile(r'</\s*style', re.I)}
 MAX_CANDIDATES = 4000
 # 提取结果短于这个数就当没提取到。一篇正文再短也有几百字;比这还短多半是
 # 命中了摘要块、版权行或者一句"请开启 JavaScript"。
@@ -303,12 +318,31 @@ def substance(text: str) -> int:
 
 
 def markup_size(html: str) -> int:
-    """这份 HTML 里**要建成树**的那部分有多大(扣掉脚本和样式的正文)。
+    """这份 HTML 里**要建成树**的那部分有多大(扣掉脚本和样式的内容)。
 
-    判据和代价写在 `_RAW_TEXT` 的注释里。两头都要钉:脚本撑大的页面照旧解析,
-    真标记超线的页面照旧拒。
+    判据、两次事故形态和「为什么不能用一条正则」都写在 `_RAW_OPEN` 上面那段。
+    成本 O(len):游标 `at` 只进不退,每一段最多被扫两趟。三头都要钉 —— 脚本撑大
+    的页面照旧解析、真标记超线的页面照旧拒、而这一趟自己不许成为新的开销。
     """
-    return len(_RAW_TEXT.sub(lambda m: f'<{m.group(1)}></{m.group(1)}>', html))
+    total, raw, at = len(html), 0, 0
+    while (opened := _RAW_OPEN.search(html, at)) is not None:
+        if opened.group(1) is None:
+            # 注释:整段跳过,**但它的字节照旧算真标记** —— 少算一点的代价是放行,
+            # 多算一点的代价只是拒稿。没收口的注释同理,直接收工。
+            if (end := html.find('-->', opened.end())) < 0:
+                break
+            at = end + 3
+            continue
+        body = opened.end()
+        if (closed := _RAW_CLOSE[opened.group(1).lower()].search(html, body)) is None:
+            # 没有闭合标签 = 剩下的整份都是这一段的内容。**这不是将就,是照着
+            # html.parser 的收场写的**:实测 `'<body><script>' + '<p>x</p>' * 200000`
+            # 建出 0 个 `<p>`、解析 0.005 秒 —— 树确实没建起来。
+            raw += total - body
+            break
+        raw += closed.start() - body
+        at = closed.end()
+    return total - raw
 
 
 def _gone(node) -> bool:
