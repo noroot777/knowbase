@@ -15,6 +15,7 @@ from unittest import main
 from unittest.mock import patch
 
 from kb import pipeline_persist as persist, pipeline_retry, pipeline_state as state
+from kb.pipeline_stages import run_scopes
 from tests.pipeline_case import HistoryCase
 
 
@@ -564,6 +565,98 @@ class RestoreTests(HistoryCase):
                          '展示的是同一轮的历史副本')
         self.assertEqual('scope', state.restore_gap(),
                          '同一轮的副本 —— 报「范围没留档」,不是「更早一轮」')
+
+class RestoredScopeTests(HistoryCase):
+    """恢复那一轮带回它历史里那份**来源摘要**:已有的展示事实不许在恢复后变少。
+
+    给人翻的那份历史故意不存导出范围(`export_filter` 是重试私有的,不许喂给
+    重试派生),所以它改为直接存**结论**(`scopes`)。而「只补导出」那一轮作用在
+    哪几个来源上恰恰只写在导出范围里 —— 恢复回来的内存自己派生不出来,它那一行
+    会念成另一个来源(抓取范围里剩的那个默认采集器),开着的来源页也认不出这次
+    完成通知跟自己有关、那几条就不刷新。
+    """
+
+    def export_only_round(self, run_id, channel='rss'):
+        """摆一轮「只补导出、范围只写在导出那一侧」的运行,并让状态文件写失败。
+
+        状态文件写成功的那一档恢复得出来(它有 `export_filter`),所以要钉的那一档
+        只能是「最新那一轮只在历史里」。
+        """
+        self.reset(run_id)
+        state._state.update(
+            planned_stages=['export'], run_kind='retry',
+            crawl_filter={'force': True},            # 重试轮的抓取范围可能只剩这个
+            export_filter={'channel': channel},
+            stages={name: {'status': 'skipped', 'detail': ''} for name in state.STAGES})
+        state.mark_open(state._state)
+        state._stage('export', 'ok', '已保存 2 条到知识库')
+        with self.only_state_write_fails():
+            state._end_run()
+
+    def channels_now(self):
+        """面板那行「本次范围」此刻念得出哪几个来源(它读的就是这一份口径)。"""
+        return [s['channel'] for s in run_scopes(state.last_result())]
+
+    def test_a_restored_round_still_names_the_source_the_history_recorded(self):
+        """只补导出那一轮恢复回来,照旧说得出是 RSS。"""
+        self.export_only_round('run-b')
+        self.assertEqual([{'channel': 'rss', 'accounts': [], 'retry': ''}],
+                         state.load_history()[0]['scopes'],
+                         '这一局的前提:历史那份记录里写着 RSS')
+        self.restart()
+
+        self.assertEqual('run-b', state.get_state()['run_id'], '前提:恢复到了那一轮')
+        self.assertEqual({}, state.get_state()['export_filter'],
+                         '前提:导出范围本来就没留档,派生不出来源')
+        self.assertEqual(['rss'], self.channels_now())
+
+    def test_a_new_round_does_not_inherit_the_restored_summary(self):
+        """**反过来钉一边**:换了一轮就不许再念上一轮的来源。
+
+        旁路按 run_id 认人 —— 认不住的话常驻内存里那份摘要会跟着往后漏,而
+        「本次范围」那一行和订阅的写保护都念它(订阅会被错标成「正在同步」)。
+
+        这一局**不走夹具的 `run_round`**:`reset()` 会顺手把旁路清掉(测试间的
+        卫生),于是那把锁压根没被执行到 —— 生产里清它的只有进程退出。所以这里
+        直接摆出「又有一轮收了尾」的内存现场。
+        """
+        self.export_only_round('run-b')
+        self.restart()
+        self.assertEqual(['rss'], self.channels_now(), '前提:这一刻确实念得出 RSS')
+
+        state._state.update(run_id='run-c', planned_stages=None, crawl_filter={},
+                            export_filter={}, finished_at='2026-10-14 11:00:00')
+        self.assertEqual('run-c', state.last_result()['run_id'], '前提:换了一轮')
+        self.assertNotIn('rss', self.channels_now(), '上一轮的来源不许漏进这一轮')
+
+    def test_the_restored_summary_does_not_leak_into_the_memory_state(self):
+        """它只附在**递出去的那份副本**上,`_state` 一格都没多。
+
+        常驻内存里多一格就要在每条起跑路径上各清一次(`batch` 那一格的教训),
+        漏清一次就是上一条钉的那种漏。
+        """
+        self.export_only_round('run-b')
+        self.restart()
+        self.assertEqual(['rss'], self.channels_now(), '前提:这一刻念得出 RSS')
+        self.assertIsNone(state._state.get('scopes'), '内存里不许多出这一格')
+
+    def test_restoring_a_complete_state_file_needs_no_summary(self):
+        """**反过来钉一边**:状态文件就是最新那一轮时,范围自己派生得出来。
+
+        那一档不走旁路(记录里压根没有 `scopes` 这一格),而它照旧说得出 RSS。
+        """
+        self.reset('run-b')
+        state._state.update(
+            planned_stages=['export'], run_kind='retry',
+            crawl_filter={'force': True}, export_filter={'channel': 'rss'},
+            stages={name: {'status': 'skipped', 'detail': ''} for name in state.STAGES})
+        state.mark_open(state._state)
+        state._stage('export', 'ok', '已保存 2 条到知识库')
+        state._end_run()
+        self.restart()
+
+        self.assertIsNone(state._restored_scopes, '前提:这一档没走旁路')
+        self.assertEqual(['rss'], self.channels_now())
 
 if __name__ == '__main__':
     main()

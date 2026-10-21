@@ -35,6 +35,9 @@ class HistoryCase(TestCase):
         # 一条用例的欠账会漏进**别的文件** —— 那边每次重试都被「留档损坏,跑一次
         # 完整同步」顶回去,而它单跑永远是绿的。
         state._restored, state._restore_gap, state._seq_hwm = '', '', 0
+        # 恢复那一轮带回来的来源摘要也是模块级的(`_with_restored_scopes` 读它):
+        # 留着的话下一条用例的某一轮会凭 run_id 相同捡到上一条的来源清单。
+        state._restored_scopes = None
         state._persist_error = ''
         # 当日账本那两格同理(`pipeline_daybook._pending` / `_lost`):落盘失败的那几局
         # 会往里留一笔,而这一族里好几条就是专门注入落盘失败的。
@@ -49,6 +52,7 @@ class HistoryCase(TestCase):
         # 摆 `_state` 的用例没有影响;要试重启那一档的用例把 running 改成 False。
         state._restored = ''
         state._restore_gap = ''
+        state._restored_scopes = None
         # 完成序号的进程内高水位是模块级的,**跨用例会泄漏**:生产里它该跨轮累积,
         # 测试里不清的话「磁盘上发到第几号」这个前提当场不成立
         state._seq_hwm = 0
@@ -61,8 +65,18 @@ class HistoryCase(TestCase):
             stages={name: {'status': 'pending', 'detail': ''} for name in state.STAGES})
 
     def restart(self):
-        """模拟重启:内存清空、没跑过任何一轮,磁盘那份还在。"""
+        """模拟重启:内存清空、没跑过任何一轮,磁盘那份还在。
+
+        **进程内那几格权威也要一起清掉,不然这不叫重启。** 状态文件写失败那一档
+        `pipeline_batch._save_own` 会把这一轮快照放进内存权威位(有意的:面板那句
+        收尾文案要看得出这一轮是降级完成的),而 `last_result()` 优先念它 —— 留着
+        的话「重启之后拿不到的东西」在用例里照旧拿得到,于是恢复那条路整段没被
+        执行到,而用例是绿的(本轮 R4 的回归一度就这样:定点拆掉修复仍然全绿)。
+        """
+        from kb import pipeline_batch as pb
         self.reset()
+        pb._remember_aggregate(None)
+        pb._remember_settled('')
         state._state.update(
             running=False, run_id='', started_at='', finished_at='', crawl_filter={},
             export_filter={}, crawl_retry={}, log=[],

@@ -25,7 +25,8 @@ from kb import pipeline_state as ps
 _PROCESS_GLOBALS = (
     (pb, ('_aggregate', '_aggregate_file', '_covered',
           '_last_settled', '_last_settled_file')),
-    (ps, ('_persist_error', '_restore_gap', '_restored', '_seq_hwm')),
+    (ps, ('_persist_error', '_restore_gap', '_restored', '_restored_scopes',
+          '_seq_hwm')),
 )
 
 

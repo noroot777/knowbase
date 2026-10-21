@@ -206,6 +206,19 @@ class HistoryProjectionTests(RoundSourcesCase):
             pipeline_state._state, started_at='2026-10-20 09:00:00',
             finished_at='2026-10-20 09:10:00')), scopes=[None])),
             '元素验到被取用的那一层:历史那行逐条读 channel')
+        for bad in ({'channel': 'rss', 'accounts': 7},
+                    {'channel': 'rss', 'accounts': [{'id': 1}]},
+                    {'channel': ['rss'], 'accounts': []},
+                    {'channel': 'rss', 'accounts': [], 'retry': 7}):
+            self.assertFalse(valid_round(dict(run_record(dict(
+                pipeline_state._state, started_at='2026-10-20 09:00:00',
+                finished_at='2026-10-20 09:10:00')), scopes=[bad])),
+                f'逐字段验,和来源范围同一道:{bad}')
+        self.assertTrue(valid_round(dict(run_record(dict(
+            pipeline_state._state, started_at='2026-10-20 09:00:00',
+            finished_at='2026-10-20 09:10:00')),
+            scopes=[{'channel': 'rss', 'accounts': ['3'], 'retry': 'targets'}])),
+            '**反过来钉一边**:正常那一份照旧过门')
 
 
 class PanelSourceContractTests(unittest.TestCase):
