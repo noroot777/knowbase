@@ -9,8 +9,12 @@
   账全靠它。反过来钉:没设变量、工具齐备就放行,requires_shell 不许强加 node。
 - **层对开关的态度必须显式**:fast 设上,probes/full 清掉继承值 —— 不清的话,
   外头 export 过一次的壳里,工具齐备、显式全量照样把浏览器回归整层拦掉。
-- **纯逻辑邻居的通过不许充当浏览器覆盖**:probes 按 kb_browser 标记记账,浏览器
-  用例零真跑要当失败;账要在 run 之前收集(unittest 跑完会释放 suite 条目)。
+- **纯逻辑邻居的通过不许充当浏览器覆盖**:probes 按 kb_browser 标记记账,账要在
+  run 之前收集(unittest 跑完会释放 suite 条目);**覆盖只认 TierResult 的正向
+  执行事件,不许用「计划减 skip」反推** —— setUpClass/setUpModule 抛 SkipTest 时
+  unittest 记的是 holder 不是方法 id,subTest 的 skip 记的是带参数的子例 id,
+  反推会把一条都没开始的整组算成全跑了;空集合(一条浏览器用例都没发现)在
+  probes 同样按失败。
 - **浏览器工具可用性的门不许在测试文件里自己写**(结构守卫,AST 判据):事故形态
   是七组共 90 条真实浏览器用例各自 `skipUnless(SHELL/_REAL_CHROME...)`,不认快速
   层开关 —— fast 照样起浏览器;其中两组不引用 tests.headless,又漏出 probes 名单。
@@ -22,6 +26,8 @@ import ast
 import io
 import os
 import re
+import sys
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -126,16 +132,20 @@ class TierEnvTests(unittest.TestCase):
 
 
 class BrowserCoverageTests(unittest.TestCase):
-    """覆盖账按 kb_browser 标记记,纯逻辑邻居的通过不作数。
+    """覆盖账只认 TierResult 的正向执行事件,纯逻辑邻居的通过不作数。
 
-    事故形态(审查实测):缺壳时浏览器用例全 skip、几百条纯逻辑邻居通过,
-    probes 照样报成功 —— 「有别的测试在跑」被当成了「浏览器验过了」。
+    事故形态有两代(都是审查实测):缺壳时浏览器用例全 skip、几百条邻居通过,
+    probes 照样报成功;修掉它的第一版用「计划 id 减 skipped id」反推,而
+    setUpClass/setUpModule 抛 SkipTest 时 unittest 记的是 `setUpClass (模块.类)`
+    这种 holder、subTest 的 skip 记的是带参数的子例 id —— 都对不上方法 id,
+    一条没开始的整组照样被算成「全跑了」(Ran 0 tests + OK + 真跑 2/2)。
     """
 
     def _run(self, suite):
         ids = tiers.browser_case_ids(suite)   # run 之前收账:跑完条目就被释放了
         result = unittest.TextTestRunner(
-            stream=io.StringIO(), verbosity=0).run(suite)
+            stream=io.StringIO(), verbosity=0,
+            resultclass=tiers.TierResult).run(suite)
         return ids, result
 
     def test_skipped_browser_cases_do_not_count_as_coverage(self):
@@ -174,11 +184,77 @@ class BrowserCoverageTests(unittest.TestCase):
         ids, result = self._run(suite)
         self.assertEqual((1, 1), tiers.browser_coverage(ids, result))
 
+    def test_a_class_level_fixture_skip_counts_nothing_as_ran(self):
+        # setUpClass 抛 SkipTest:两条方法一条都没开始,skipped 里只有 holder。
+        with mock.patch.dict(os.environ):
+            os.environ.pop(headless.NO_BROWSER_ENV, None)
+
+            @headless.browser_gate([])
+            class ClassSkipBrowserish(unittest.TestCase):
+                @classmethod
+                def setUpClass(cls):
+                    raise unittest.SkipTest("夹具不可用")
+
+                def test_one(self):
+                    pass
+
+                def test_two(self):
+                    pass
+
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(
+            ClassSkipBrowserish)
+        ids, result = self._run(suite)
+        self.assertEqual((2, 0), tiers.browser_coverage(ids, result),
+                         "类级 skip 的组一条都没开始,不许算成跑了")
+
+    def test_a_module_level_fixture_skip_counts_nothing_as_ran(self):
+        # setUpModule 抛 SkipTest:同理,skipped 里只有 `setUpModule (模块)`。
+        fake = types.ModuleType("kb_tiers_module_skip_probe")
+
+        def setUpModule():
+            raise unittest.SkipTest("模块夹具不可用")
+
+        fake.setUpModule = setUpModule
+        with mock.patch.dict(os.environ), \
+                mock.patch.dict(sys.modules, {fake.__name__: fake}):
+            os.environ.pop(headless.NO_BROWSER_ENV, None)
+
+            @headless.browser_gate([])
+            class ModuleSkipBrowserish(unittest.TestCase):
+                def test_one(self):
+                    pass
+
+            ModuleSkipBrowserish.__module__ = fake.__name__
+            suite = unittest.defaultTestLoader.loadTestsFromTestCase(
+                ModuleSkipBrowserish)
+            ids, result = self._run(suite)
+        self.assertEqual((1, 0), tiers.browser_coverage(ids, result),
+                         "模块级 skip 的组一条都没开始,不许算成跑了")
+
+    def test_skipped_subtests_do_not_count_as_full_coverage(self):
+        # 子例 skip 记的是带参数的子例 id,对不上方法 id —— 正向口径按
+        # 「跑了一半不算验全」记:方法开始了,但该验的那部分没验。
+        with mock.patch.dict(os.environ):
+            os.environ.pop(headless.NO_BROWSER_ENV, None)
+
+            @headless.browser_gate([])
+            class SubtestSkipBrowserish(unittest.TestCase):
+                def test_parts(self):
+                    with self.subTest(part=1):
+                        self.skipTest("这一半没跑")
+
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(
+            SubtestSkipBrowserish)
+        ids, result = self._run(suite)
+        self.assertEqual((1, 0), tiers.browser_coverage(ids, result),
+                         "子例被 skip 的方法不算验全")
+
 
 class TierVerdictTests(unittest.TestCase):
-    """main 的层判定,三面各钉一边:probes 没验全必败(零覆盖是它的特例)、
-    fast 有浏览器用例真跑即失败(闸门失效的运行时信号)、full 沿用 README/CI
-    那条 discover 的「缺工具自然 skip」政策不因部分跳过翻红。"""
+    """main 的层判定,各钉一边:probes 没验全必败(零覆盖、空集合、类级 skip
+    都是它的形态)、fast 有浏览器用例真跑即失败(闸门失效的运行时信号)、full
+    沿用 README/CI 那条 discover 的「缺工具自然 skip」政策不因部分跳过翻红,
+    但覆盖数要如实;汇总的执行条数不许出现负数。"""
 
     def _browser_class(self, missing, name):
         # 账本按 test id(模块.类.方法)记,两个临时类不许同名 —— 同名会在
@@ -189,6 +265,26 @@ class TierVerdictTests(unittest.TestCase):
             @headless.browser_gate(missing)
             class Browserish(unittest.TestCase):
                 def test_browser(self):
+                    pass
+
+        Browserish.__name__ = Browserish.__qualname__ = name
+        return Browserish
+
+    def _fixture_broken_class(self, exc, name):
+        # setUpClass 一上来就抛:两条方法一条都不会开始。
+        with mock.patch.dict(os.environ):
+            os.environ.pop(headless.NO_BROWSER_ENV, None)
+
+            @headless.browser_gate([])
+            class Browserish(unittest.TestCase):
+                @classmethod
+                def setUpClass(cls):
+                    raise exc
+
+                def test_one(self):
+                    pass
+
+                def test_two(self):
                     pass
 
         Browserish.__name__ = Browserish.__qualname__ = name
@@ -234,6 +330,42 @@ class TierVerdictTests(unittest.TestCase):
             "fast", lambda: load(self._browser_class([], "RanBrowserish")))
         self.assertEqual(1, rc, err)
         self.assertIn("闸门失效", err)
+
+    def test_probes_rejects_an_empty_browser_set(self):
+        # 空集合不是「没什么可验」,是「这层什么都没验」:名单口径或标记坏了时
+        # 恰好表现为 0 条浏览器用例,不许借「0 < 0 为假」混成成功。
+        rc, err = self._main("probes", unittest.TestSuite)
+        self.assertEqual(1, rc, err)
+        self.assertIn("一条浏览器用例都没发现", err)
+
+    def test_probes_rejects_a_logic_only_suite(self):
+        # 同一面的另一形态:只有纯逻辑邻居时 total == ran == 0,同样不许绿。
+        load = unittest.defaultTestLoader.loadTestsFromTestCase
+        rc, err = self._main("probes", lambda: load(
+            type("LogicOnlyNeighbour", (unittest.TestCase,),
+                 {"test_logic": lambda self: None})))
+        self.assertEqual(1, rc, err)
+        self.assertIn("一条浏览器用例都没发现", err)
+
+    def test_a_class_level_skip_fails_probes_with_sane_counts(self):
+        # 类级 SkipTest 走完 main 全链路:必须红,且汇总里的执行条数是 0 ——
+        # 旧算法(testsRun 减 skipped 条数)在这里打出 -1。
+        load = unittest.defaultTestLoader.loadTestsFromTestCase
+        rc, err = self._main("probes", lambda: load(self._fixture_broken_class(
+            unittest.SkipTest("夹具不可用"), "ClassSkipViaMain")))
+        self.assertEqual(1, rc, err)
+        self.assertIn("真跑 0/2", err)
+        self.assertIn("跑了 0 条", err)
+        self.assertNotIn("跑了 -", err)
+
+    def test_a_class_fixture_error_reports_honest_coverage(self):
+        # setUpClass 抛普通异常:rc 本来就红(wasSuccessful 为假),但覆盖数
+        # 也得如实 —— 一条都没开始就是 0/2,不许打成 2/2。
+        load = unittest.defaultTestLoader.loadTestsFromTestCase
+        rc, err = self._main("full", lambda: load(self._fixture_broken_class(
+            RuntimeError("夹具坏了"), "ClassErrorViaMain")))
+        self.assertEqual(1, rc, err)
+        self.assertIn("真跑 0/2", err)
 
 
 class AvailabilityGateGuardTests(unittest.TestCase):

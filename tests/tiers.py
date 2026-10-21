@@ -8,8 +8,9 @@
   出路),同文件里的纯逻辑用例照常跑。这是提交前的门禁层。
 - **probes**:只跑引用 `tests.headless` 的那些测试文件(浏览器回归和它们的邻居)。
   改了 `kb/static/`、`kb/web/pages.py` 这类前端产物之后跑这层。**浏览器用例没验全
-  (有被工具缺席拦下的)就按失败退出** —— 纯逻辑邻居的通过不许充当浏览器覆盖
-  (实测事故形态:缺壳时浏览器用例全 skip、几百条邻居通过,命令照样报成功)。
+  (有被工具缺席拦下的,或一条都没发现)就按失败退出** —— 纯逻辑邻居的通过不许
+  充当浏览器覆盖(实测事故形态:缺壳时浏览器用例全 skip、几百条邻居通过,命令照
+  样报成功)。
 - **full**:全部,等同 README 里那条 discover 命令(缺工具自然 skip,跟 CI 同一
   态度,但把浏览器覆盖数打出来)。push 前至少跑一次 —— 共享 `KB_DATA_DIR` 的
   「只在同跑时红、单跑永远绿」那类问题,只有全量同跑看得见。
@@ -88,10 +89,46 @@ def browser_case_ids(suite) -> set[str]:
     return {t.id() for t in _iter_tests(suite) if getattr(t, "kb_browser", False)}
 
 
-def browser_coverage(browser_ids: set[str], result) -> tuple[int, int]:
-    """(浏览器用例总数, 真跑了几条)。skip 的不算跑;红的算跑(它起码验了)。"""
-    skipped = {t.id() for t, _ in result.skipped}
-    return len(browser_ids), len(browser_ids) - len(browser_ids & skipped)
+class TierResult(unittest.TextTestResult):
+    """给覆盖账记真实执行事件的 result。
+
+    「真跑了没有」只能从**正向事件**建账:哪条 `startTest` 了、哪条被整条 skip、
+    哪条的子例 skip 了。不许用「计划的 id 集合减 skipped 的 id 集合」反推 ——
+    `setUpClass`/`setUpModule` 抛 `SkipTest` 时 unittest 记的是
+    `setUpClass (模块.类)` 这种 holder,逐条方法的 id 根本不出现在 skipped 里,
+    反推会把一条都没开始的整组算成「全跑了」;`subTest` 里的 skip 记的是带参数
+    的子例 id,同样对不上方法 id。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.kb_started: set[str] = set()        # 真正开始过的方法 id
+        self.kb_whole_skips: set[str] = set()    # 整条 skip(方法级 + holder)
+        self.kb_partial_skips: set[str] = set()  # 子例 skip 的**父方法** id
+
+    def startTest(self, test):
+        self.kb_started.add(test.id())
+        super().startTest(test)
+
+    def addSkip(self, test, reason):
+        super().addSkip(test, reason)
+        parent = getattr(test, "test_case", None)   # _SubTest 才有这个指回父方法
+        if parent is not None:
+            self.kb_partial_skips.add(parent.id())
+        else:
+            self.kb_whole_skips.add(test.id())
+
+
+def browser_coverage(browser_ids: set[str], result: TierResult) -> tuple[int, int]:
+    """(浏览器用例总数, 真跑了几条)。
+
+    「真跑」= 这条方法真的开始了,整条没被 skip,子例也一个都没 skip ——
+    **没开始的和跑了一半的都不算验全**;红的算跑(它起码验了)。判据全部来自
+    TierResult 的正向事件,理由见它的 docstring。
+    """
+    ran = (result.kb_started & browser_ids) \
+        - result.kb_whole_skips - result.kb_partial_skips
+    return len(browser_ids), len(ran)
 
 
 def main(argv: list[str]) -> int:
@@ -108,10 +145,13 @@ def main(argv: list[str]) -> int:
     suite = build_suite(tier)
     browser_ids = browser_case_ids(suite)
     t0 = time.monotonic()
-    result = unittest.TextTestRunner(verbosity=1).run(suite)
+    result = unittest.TextTestRunner(verbosity=1, resultclass=TierResult).run(suite)
     wall = time.monotonic() - t0
 
-    executed = result.testsRun - len(result.skipped)
+    # 执行条数同样从正向事件算:开始了且整条没被 skip 的才算。testsRun 减
+    # len(skipped) 在 setUpClass/setUpModule skip 时会出负数(holder 记进了
+    # skipped,方法却一条没开始、testsRun 为 0)。
+    executed = len(result.kb_started - result.kb_whole_skips)
     total, ran = browser_coverage(browser_ids, result)
     line = f"[{tier}] 跑了 {executed} 条,用时 {wall:.0f} 秒"
     if tier == "fast":
@@ -124,15 +164,22 @@ def main(argv: list[str]) -> int:
     # 得看得到装哪个、怎么装,不能让「安装提示写在装饰器里」停在装饰器里。
     for reason, n in Counter(r for _, r in result.skipped).most_common():
         print(f"  skip ×{n}:{reason}", file=status, flush=True)
-    if tier == "probes" and ran < total:
+    if tier == "probes":
         # 这一层的意义就是「现在就验浏览器」,没验全不许绿:缺壳时浏览器用例全
-        # skip、几百条纯逻辑邻居通过、命令报成功 —— 那正是要修的事故形态。full
-        # 不在此列(它沿用 README/CI 那条 discover 的「缺工具自然 skip」政策,
-        # 覆盖数如实打印)。
-        print(f"[probes] 浏览器用例 {total - ran} 条没真跑 —— 这层等于没验全,"
-              "按失败算(纯逻辑邻居的通过不作数);缺什么看上面的 skip 分类",
-              file=status, flush=True)
-        return 1
+        # skip、几百条纯逻辑邻居通过、命令报成功 —— 那正是要修的事故形态。空集
+        # 合同罪:一条浏览器用例都没发现(名单口径坏了、标记丢了),这层就什么
+        # 都没验,不许报成功。full 不在此列(它沿用 README/CI 那条 discover 的
+        # 「缺工具自然 skip」政策,覆盖数如实打印)。
+        if not total:
+            print("[probes] 一条浏览器用例都没发现 —— 这层等于什么都没验,"
+                  "按失败算(名单或 kb_browser 标记的口径坏了)",
+                  file=status, flush=True)
+            return 1
+        if ran < total:
+            print(f"[probes] 浏览器用例 {total - ran} 条没真跑 —— 这层等于没验全,"
+                  "按失败算(纯逻辑邻居的通过不作数);缺什么看上面的 skip 分类",
+                  file=status, flush=True)
+            return 1
     if tier == "fast" and ran:
         # 快速层不许起任何真实浏览器。标记类真跑了,说明闸门/层表态坏了。
         print(f"[fast] 有 {ran} 条浏览器用例真跑了 —— 快速层的闸门失效,按失败算",
