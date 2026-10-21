@@ -301,7 +301,12 @@ function sourceActive() { return activeTab === 'subs' && subsKind === sourceKind
 let sourceSeenRun = '';
 function sourceRunFinished(reset) {
   const snap = pipeSnapshot;
-  const id = (snap && !snap.running && snap.run_id) || '';
+  // **身份和来源都从同一份终态上读**(`pipeResult`,同步中心和历史清单同一份)。
+  // 顶层那几格是进程内状态:重启之后只从历史恢复的那一轮里没有来源结论,这一页
+  // 就永远认不出它跟自己有关(两种漏法和实测形态在 `docs/decisions/retry-scope.md`
+  // 的「消费方一律从同一份终态上读」)。
+  const run = snap ? pipeResult(snap) : null;
+  const id = (snap && !snap.running && run && run.run_id) || '';
   // **头一次进来(或换来源)看到的那一轮是历史记录,不是"刚刚跑完"** —— 那时
   // 本来就会整份重渲染。**吸收它的时点是 `reset` 自己,不是「至今见过 run_id
   // 没有」**:面板打开时管道多半正空转,状态里压根没有 run_id,那个问法会让守卫
@@ -310,7 +315,7 @@ function sourceRunFinished(reset) {
   if (reset) { sourceSeenRun = id; return false; }
   if (!id || id === sourceSeenRun) return false;
   sourceSeenRun = id;
-  return pipeRunScopes(snap).some(s => s.channel === sourceKind);
+  return pipeRunScopes(run).some(s => s.channel === sourceKind);
 }
 
 async function loadSourceModule(reset = false, selectedId = null) {

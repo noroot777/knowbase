@@ -232,6 +232,9 @@ class PanelSourceContractTests(unittest.TestCase):
     SCOPES = r'function pipeRunScopes\(\w+\) \{.*?\n\}'
     FINISHED = (r"let sourceSeenRun = '';\nfunction sourceRunFinished"
                 r'\(\w+\) \{.*?\n\}')
+    #: 「此刻该念哪一份终态」只有这一份口径,订阅页那条判据也从它取 —— 所以这里
+    #: 要把它一起抠进来(漏了它的后果是 `ReferenceError`,而不是一条假绿)。
+    RESULT = r'function pipeResult\(\w+\) \{[^\n]*\}'
 
     def node(self, script):
         done = subprocess.run(['node', '-e', script], capture_output=True, text=True)
@@ -283,6 +286,12 @@ class PanelSourceContractTests(unittest.TestCase):
         **不认 running→idle 那个跳变**:这条路一次模型都不调,整轮可能几百毫秒,
         面板一次都没见过 `running=true`(所以这里压根不摆那个中间态)。
         **反过来钉一边**:同一轮再问一次不许重复报,别人那一轮也不许认成自己的。
+
+        后半截摆的是**重启之后**那一形:身份和来源都只在 `last_run` 里(顶层那几格
+        是进程内状态,新进程里是空的),而恢复回来的那一轮**派生不出来源** —— 历史
+        故意不存导出范围,来源只写在那一格结论里。这一页原来读的是顶层,于是永远
+        认不出「刚跑完那一轮跟我有关」:提示不消失、新抓的条目也不重读,只有整页
+        刷新才回来。口径是**身份和来源都从同一份终态上读**(`pipeResult`)。
         """
         retried = {'running': False, 'run_id': 'run-retry-1',
                    'planned_stages': ['export', 'index', 'extract'],
@@ -291,8 +300,16 @@ class PanelSourceContractTests(unittest.TestCase):
         morning = dict(retried, run_id='run-morning')
         other = dict(retried, run_id='run-other',
                      export_filter={'channel': 'social', 'accounts': []})
+        # 重启之后:顶层没有身份,终态和来源结论都只在 `last_run` 里。
+        def restored(run_id, channel):
+            return {'running': False, 'crawl_filter': {'force': True},
+                    'last_run': {'run_id': run_id, 'crawl_filter': {'force': True},
+                                 'planned_stages': ['export', 'index', 'extract'],
+                                 'scopes': [{'channel': channel, 'accounts': [],
+                                             'retry': ''}]}}
         script = '\n'.join([
             self.pick('pipe_channels.js', self.SCOPES),
+            self.pick('pipe_view.js', self.RESULT),
             self.pick('sources.js', self.FINISHED),
             "let sourceKind = 'rss';",
             'let pipeSnapshot = ' + json.dumps(morning) + ';',
@@ -301,9 +318,14 @@ class PanelSourceContractTests(unittest.TestCase):
             'out.push(sourceRunFinished(false), sourceRunFinished(false));',
             'pipeSnapshot = ' + json.dumps(other) + ';',
             'out.push(sourceRunFinished(false));',
+            'pipeSnapshot = ' + json.dumps(restored('run-restored', 'rss')) + ';',
+            'out.push(sourceRunFinished(false), sourceRunFinished(false));',
+            'pipeSnapshot = ' + json.dumps(restored('run-restored-2', 'social')) + ';',
+            'out.push(sourceRunFinished(false));',
             'console.log(JSON.stringify(out));',
         ])
-        self.assertEqual([False, True, False, False], self.node(script),
+        self.assertEqual([False, True, False, False, True, False, False],
+                         self.node(script),
                          '只补导出那一轮认不出本来源,这一页就一直显示旧的失败')
 
 
