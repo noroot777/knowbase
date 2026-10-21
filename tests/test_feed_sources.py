@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from kb import maintenance, pipeline, pipeline_state
 from kb.collectors import FetchScope, get_collector
 from kb.feeds import registry as reg, fetching, sync, x_channels
-from kb.source_types import feed_types
+from kb.source_types import SOURCE_TYPES, feed_types
 from kb.web import intake_api
 
 # 固定日期会让这套测试在几天后自己变红:新订阅只收最近 `reg.HISTORY_DAYS` 天
@@ -609,6 +609,42 @@ class DefaultsUpgradeTests(unittest.TestCase):
         names = self._names()
         self.assertTrue(self.fresh <= names)
         self.assertEqual(len(names), len({s['name'] for s in self._defaults()}))
+
+
+class SourceCopyTests(unittest.TestCase):
+    """来源类型那几个人读字段**全部经 `textContent` 落地**,写 markdown 就是把符号显示给人看。
+
+    面板上的标签和那段说明走 `sources.js` 的 `textContent = spec.label` /
+    `spec.note`,「添加订阅」弹窗里「链接」下面那一行走 `source_forms.js` 的
+    `textContent = ...url_hint` —— 一处都不过 markdown。简报那条 note 里曾经写着
+    `**不要再开「补抓原文」**`,于是面板上就显示着两对星号。
+
+    所以这里不验文案长什么样(那是文案,改一个字就红一条没有意义),只验
+    「没有只在 markdown 里才有意义的符号」;`test_the_check_is_not_vacuous`
+    钉住判据本身还抓得到东西。
+    """
+
+    MARKUP = ('**', '__', '`')
+    FIELDS = ('label', 'description', 'url_hint', 'note')
+
+    def _markup_in(self, value: str) -> list[str]:
+        return [m for m in self.MARKUP if m in value]
+
+    def test_no_markdown_in_anything_a_person_reads(self):
+        for kind, spec in SOURCE_TYPES.items():
+            for field in self.FIELDS:
+                value = getattr(spec, field)
+                with self.subTest(kind=kind, field=field):
+                    self.assertEqual([], self._markup_in(value),
+                                     f'{kind}.{field} 带着 markdown 标记,它会原样显示给人看')
+
+    def test_the_check_is_not_vacuous(self):
+        """反面:判据真抓得到东西 —— 否则上面那条永远绿,而绿的原因是用例不敏感。"""
+        for bad in ('**粗体**', '__也是粗体__', '`等宽`'):
+            with self.subTest(bad=bad):
+                self.assertNotEqual([], self._markup_in(bad))
+        # 正常的中文标点不许被误判:这几个符号在文案里天天用
+        self.assertEqual([], self._markup_in('正文就是简报自己写的摘要，不要再开「补抓原文」——那个外链指向别人家的文章。'))
 
 
 if __name__ == '__main__':
