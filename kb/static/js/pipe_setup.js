@@ -415,26 +415,24 @@ function renderPipeEst() {
   $('pipe-start').textContent = pipeAction === 'start' ? '正在启动…'
     : steps ? `开始同步 · ${steps} 步` : '开始同步';
 }
-// **锁到具体几条订阅时,请求里发的是稳定 id,不是名字。** 名字不唯一:两条地址
-// 不同、名字相同的订阅,后端那道范围匹配(`reg.in_scope`「id 相等**或** name
-// 相等」)会把同名的全部带上 —— 实测点第一条的「同步」,两条都被抓了
-// (第 1 轮审查 R2)。显示仍用名字(勾选框、折起来那一行都按名字渲染),只有发
-// 出去的那一份换成 id。
-// **只换入口点名的那几条,别的照旧发名字,这不是将就** —— 那份名单是按名字去重
-// 过的(`/api/pipeline/accounts` 只给名字),列表里「同名博客」那一行**代表的就是
-// 两条**,勾它的意思就是两条都跑;换成某一条的 id 反而会漏掉另一条。所以:入口
-// 点名「这一条」⇒ 发 id;在名单里勾一个名字 ⇒ 发名字。
-// **而且要写成「明确点名编号」的形态**(`id:12`,后端那份口径在
-// `kb/feeds/targets.py`):只发裸 id 还不够 —— 裸字符串在范围匹配里 id 和 name
-// 两种都认,某条订阅的名字正好是另一条的编号时(名字叫「11」),点第一条的「同步」
-// 实测两条都被抓(第 1 轮审查 R1)。前缀不许在这儿拼第二份:两边各写一次就是两份
-// 口径,`tests/test_feed_targets.py` 钉着这个字面量和后端常量一致。
-const PIPE_ID_TARGET = 'id:';
-function pipeStableTargets(channel, names) {
+// **名字和编号是两种身份,请求里分两个字段发**(`names` / `ids`)。混在一个无类型
+// 名单里的后果两个方向都实测过:名单上只勾了名字叫「63」那一行,编号 63 的另一条
+// 也被抓了(第 1 轮自由审查 R1);点某一行那颗「同步」只发名字,同名的另一条也被
+// 抓了(第 1 轮审查 R2)。
+// **哪个字段由入口决定,不是将就** —— 名单那份是按名字去重过的
+// (`/api/pipeline/accounts` 只给名字),列表里「同名博客」那一行**代表的就是两条**,
+// 勾它的意思就是两条都跑;而入口点名「这一条」(每行那颗「同步」)说的是**那一条**,
+// 它带着 id 进来(`pipeLock.accounts`)。
+// **前缀不在这儿拼**:两种写法的字面量只有后端一份(`kb/feeds/targets.py`),这边
+// 只负责把目标放进哪个字段(`tests/test_feed_targets.py` 钉着前端不出现那两个前缀)。
+function pipeTargetFields(channel, names) {
   const accts = pipeLock?.channel === channel ? pipeLock.accounts : null;
-  if (!accts?.length) return names;
-  const byName = new Map(accts.map(a => [a.name, a.id]));
-  return names.map(n => (byName.has(n) ? PIPE_ID_TARGET + byName.get(n) : n));
+  const byName = new Map((accts || []).map(a => [a.name, a.id]));
+  const ids = [], rest = [];
+  for (const n of names) {
+    if (byName.has(n)) ids.push(String(byName.get(n))); else rest.push(n);
+  }
+  return { names: rest, ids };
 }
 function pipeRunBody() {
   // **声明这一轮是人按的**(`trigger`)。后端据此跳过来源退避 —— 退避是给自动
@@ -449,13 +447,14 @@ function pipeRunBody() {
   //   那一轮看着像是按来源跑过;
   // - 抓取**或**导出只要有一个在跑就必须带来源:导出也是按来源跑的,不带的话后端
   //   回落到默认采集器,用户选的订阅源被静默换成公众号(第 3 轮审查 R1);
-  // - 订阅名单和日期段只有抓取收,所以只导出那一轮**把来源整条带上、accounts 留空**
+  // - 订阅名单和日期段只有抓取收,所以只导出那一轮**把来源整条带上、名单留空**
   //   (那就是「这个来源整条导出一遍」,也正是 `materialize()` 实际覆盖的范围)。
   if (!pipeNeedsSource()) return body;
   const targets = pipeNeedsTargets();
   body.channels = pipeReadyChannels()
     .filter(id => !targets || pipeSelected(id).size)
-    .map(id => ({ channel: id, accounts: targets ? pipeStableTargets(id, [...pipeSelected(id)]) : [] }));
+    .map(id => (targets ? { channel: id, ...pipeTargetFields(id, [...pipeSelected(id)]) }
+                        : { channel: id, names: [] }));
   if (targets && pipeRange.from)
     Object.assign(body, { since_date: pipeRange.from, until_date: pipeRange.to });
   return body;

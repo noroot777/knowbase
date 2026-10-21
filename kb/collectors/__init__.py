@@ -333,6 +333,47 @@ def target_identity(collector: SourceCollector) -> TargetIdentity | None:
     return collector if isinstance(collector, TargetIdentity) else None
 
 
+# ── 新请求里那几个目标是什么身份(可选能力)──────────────────────────────────
+
+
+@runtime_checkable
+class TargetTyping(Protocol):
+    """能把一次**新请求**里的目标写成**带类型的身份**的采集器。
+
+    范围目标是一个字符串空间,而同一个 `"63"` 既可能是某条订阅的编号、也可能是另一条
+    订阅的**名字** —— 无类型地发出去,两个方向都实测被一起抓走:面板名单上只勾了名字
+    叫「63」那一行,编号 63 的另一条也跑了(第 1 轮自由审查 R1);点某一行那颗「同步」
+    只发裸 id,名字叫「11」的另一条也跑了(第 1 轮审查 R1/R2)。**用户已经做出的精确
+    选择不该被「选源宽一点顶多多抓一次」盖掉**,所以请求入口必须说清每个目标是哪一种,
+    匹配那一侧(`kb.feeds.targets.in_scope`)据此只按那一种比。
+
+    **不支持这个能力不是缺陷**:公众号那条路的目标就是账号名,它**原样**传给采集器
+    自己的命令行(那边按 `a["name"] in targets` 匹配),在这儿打前缀等于发一个它不
+    认识的名字 —— 请求照旧起跑、而一个号都不抓。没有这个能力的来源一律原样传下去。
+
+    和 `TargetIdentity` **方向相反,别合成一个**:这一组管**选源**(人点的是谁),
+    那一组管**记账**(这一轮真跑成了谁)。两边的安全侧是反的 —— 选源宽一点是多抓
+    一次,记账宽一点是拿一次没发生的成功清掉另一条订阅的真失败(`pipeline_results.cover`)。
+    """
+
+    def id_targets(self, ids) -> list[str]:
+        """`ids` 是入口点名的那几个**订阅编号**,写成明确的编号目标。"""
+        ...
+
+    def name_targets(self, names) -> list[str]:
+        """`names` 是面板名单上勾的那几个**显示名**,写成明确的名称目标。
+
+        名单是按名字去重过的,一行代表**同名的那几条** —— 所以这一侧照旧可能展开成
+        多条订阅,这是契约不是缺陷(勾那一行的意思就是它们都跑)。
+        """
+        ...
+
+
+def target_typing(collector: SourceCollector) -> TargetTyping | None:
+    """这个采集器认不认目标的类型;不认返回 None(目标原样传下去)。"""
+    return collector if isinstance(collector, TargetTyping) else None
+
+
 # ── 单条内容的「别再抓了」(可选能力)─────────────────────────────────────────
 
 

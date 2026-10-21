@@ -435,7 +435,7 @@ for (const legacy of ["rss", "social", "没这个来源"]) {
   check(`存量 ${legacy}:「同步全部」提交的是公众号`,
         await waitFor(() => runs.length === before + 1)
         && JSON.stringify(runs[runs.length - 1]?.channels)
-           === '[{"channel":"wechat_local","accounts":["测试公众号甲","测试公众号乙"]}]',
+           === '[{"channel":"wechat_local","names":["测试公众号甲","测试公众号乙"],"ids":[]}]',
         JSON.stringify(runs[runs.length - 1]));
   // **锁定一个字都不许往草稿里写**:`kb-sync-channels` 是同步中心那一份多来源
   // 选择,从「我的订阅」点一次就把它改写成单来源的话,下次新建同步少了几个来源

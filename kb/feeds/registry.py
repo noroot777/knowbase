@@ -25,8 +25,9 @@ from kb.feeds.exclusion import SCHEMA as EXCLUSION_SCHEMA, item_key
 # 范围目标的身份口径整组搬去了 `kb/feeds/targets.py`(这边到了 700 行上限),
 # 这里**原地再导出**:`reg.in_scope` / `reg.id_target` 那些调用一个字都没改,
 # 实现仍然只有一份。
-from kb.feeds.targets import (ID_PREFIX, id_target, in_scope,   # noqa: F401 - 再导出
-                              target_source_id)
+from kb.feeds.targets import (ID_PREFIX, NAME_PREFIX,   # noqa: F401 - 再导出
+                              bare_target, id_target, in_scope, name_target,
+                              target_source_id, target_source_name)
 from kb.source_types import feed_types
 
 DB_PATH = DATA_DIR / 'feeds.db'

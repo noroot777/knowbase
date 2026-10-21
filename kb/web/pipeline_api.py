@@ -27,6 +27,7 @@ from kb.collectors import (
     item_aliases,
     item_dropper,
     retired_channels,
+    target_typing,
 )
 
 router = APIRouter()
@@ -148,9 +149,23 @@ def pipeline_runs():
 
 
 class ChannelScope(BaseModel):
-    """一次同步里的一个来源:抓它的哪些订阅。accounts 空 = 该来源的全部订阅。"""
+    """一次同步里的一个来源:抓它的哪些订阅。三个名单是**三种身份写法**。
+
+    - `names`:面板名单上勾的那几个**显示名**。名单是按名字去重过的
+      (`/api/pipeline/accounts` 只给名字),一行代表**同名的那几条**,勾它的意思
+      就是它们都跑。
+    - `ids`:入口点名的那几个**订阅编号**(每行那颗「同步」)。
+    - `accounts`:**老形态**,无类型字符串 —— 只有缓存着的旧页面和脚本直调还在发
+      它,照旧按「编号或名字都认」解(`kb/feeds/targets.py` 的第三档)。新页面一个
+      字都不发这儿:名字和编号混在一个名单里,后端就只能靠猜,而猜错的两种后果都
+      实测过(见 `_targets`)。
+
+    三个都空 = 这个来源的全部订阅。
+    """
 
     channel: str
+    names: list[str] | None = None
+    ids: list[str] | None = None
     accounts: list[str] | None = None
 
 
@@ -158,6 +173,8 @@ class PipelineRunRequest(BaseModel):
     stages: list[str] | None = None  # None = 全部
     # 以下几个用于范围抓取(只影响 crawl 阶段):
     # 填了日期区间则按 [since_date, until_date] 补抓;accounts 空/None = 来源的全部目标
+    #: 单来源的**老形态**,无类型名单(口径同 `ChannelScope.accounts`)。新页面发的
+    #: 是 `channels`,一个字都不发这儿。
     accounts: list[str] | None = None
     since_date: str | None = None   # "YYYY-MM-DD"
     until_date: str | None = None   # "YYYY-MM-DD"
@@ -183,16 +200,45 @@ def _scopes(body: PipelineRunRequest | None) -> list[dict]:
             if name in seen:
                 raise HTTPException(400, "同一个来源只能选一次")
             seen.add(name)
-            scopes.append({"channel": name, "accounts": _accounts(item.accounts)})
+            scopes.append({"channel": name,
+                           "accounts": _targets(name, item.names, item.ids,
+                                                item.accounts)})
         return scopes
-    return [{"channel": _channel(body.channel if body else None),
-             "accounts": _accounts(body.accounts if body else None)}]
+    name = _channel(body.channel if body else None)
+    return [{"channel": name,
+             "accounts": _targets(name, None, None,
+                                  body.accounts if body else None)}]
 
 
 def _accounts(names: list[str] | None) -> list[str]:
     if names and any(not name.strip() for name in names):
         raise HTTPException(400, "订阅名称不能为空")
     return list(names or [])
+
+
+def _targets(channel: str, names, ids, legacy) -> list[str]:
+    """把请求里那几个目标整理成**带类型的身份**(`ChannelScope` 那三个字段)。
+
+    **类型由字段位置决定,不由字符串长相决定。** 混在一个无类型名单里发的话后端只能
+    靠猜,而两种猜法都实测错过:名单上只勾了名字叫「63」那一行,按「也可能是编号」
+    猜,编号 63 的另一条也跑了(第 1 轮自由审查 R1);反过来按「名字优先」猜,点某
+    一行那颗「同步」会把同名的另一条也抓上(第 1 轮审查 R2)。**用户已经做出的精确
+    选择不该被「选源宽一点顶多多抓一次」盖掉。**
+
+    打前缀那一步交给采集器(`TargetTyping`):主干不认识任何具体来源的目标词汇,而
+    公众号那条路的目标**原样**就是账号名(传给它自己的命令行,那边按账号名匹配),
+    在这儿打前缀等于发一个它不认识的名字 —— 请求照旧起跑、而一个号都不抓。
+    """
+    typing = target_typing(active_collector(channel))
+    named, numbered, old = _accounts(names), _accounts(ids), _accounts(legacy)
+    if typing is None:
+        # **按编号点名要拒,不许静默当成名字。** 这条来源没有编号这回事(公众号的
+        # 目标就是账号名),当成名字发下去就是拿一个不存在的名字去抓:一个号都不抓,
+        # 而面板上说「同步已开始」。
+        if numbered:
+            raise HTTPException(400, "这个来源不按编号点名，请按名称选择")
+        return named + old
+    return typing.id_targets(numbered) + typing.name_targets(named) + old
 
 
 #: 按来源跑的那几步。口径只有一份:`pipeline_stages.run_scopes` 判的是同一件事

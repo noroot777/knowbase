@@ -10,7 +10,7 @@
 //    自己那一份并禁掉,时间范围和订阅也禁掉(那条通道不收这两样),请求体是
 //    `{sync, channels}` 而不是 `{stages, ...}`;
 // ④ **取消那个勾要把用户自己那一份还回去**,不是重置成全选;
-// ⑤ 反过来钉一边:正常那一档(勾着抓取 + 勾着订阅)照旧带 `channels`/`accounts`/日期。
+// ⑤ 反过来钉一边:正常那一档(勾着抓取 + 勾着订阅)照旧带 `channels`/订阅名单/日期。
 //
 // 自带只读 mock 后端(两个来源、各两条订阅,状态恒为空闲),CDP 直连
 // chrome-headless-shell(不装 playwright、不连网、始终无头、临时 profile)。
@@ -176,12 +176,12 @@ check("只导出:照旧起得了跑", !s.off, JSON.stringify(s));
 posted.length = 0;
 await evalJs(`startPipeFromModal()`);
 await setup("只导出那一档发出了请求", until(`true`, 100).then(() => sleep(400).then(() => posted.length > 0)));
-check("只导出:来源整条带上、accounts 留空(那正是导出实际覆盖的范围),不带日期",
+check("只导出:来源整条带上、订阅名单留空(那正是导出实际覆盖的范围),不带日期",
       posted[0]?.path === '/api/pipeline/run'
       && posted[0].body?.stages?.join() === 'export,index,extract'
       && JSON.stringify(posted[0].body?.channels)
-         === JSON.stringify([{ channel: 'wechat_local', accounts: [] },
-                             { channel: 'rss', accounts: [] }])
+         === JSON.stringify([{ channel: 'wechat_local', names: [] },
+                             { channel: 'rss', names: [] }])
       && !('since_date' in posted[0].body),
       JSON.stringify(posted[0]));
 
@@ -198,8 +198,8 @@ await evalJs(`startPipeFromModal()`);
 await setup("那一档也发出了请求", until(`true`, 100).then(() => sleep(400).then(() => posted.length > 0)));
 check("只导出、没勾订阅:来源照旧整条带上",
       JSON.stringify(posted[0]?.body?.channels)
-      === JSON.stringify([{ channel: 'wechat_local', accounts: [] },
-                          { channel: 'rss', accounts: [] }]),
+      === JSON.stringify([{ channel: 'wechat_local', names: [] },
+                          { channel: 'rss', names: [] }]),
       JSON.stringify(posted[0]));
 // **把订阅勾回去**:后面那几局(尤其「正常那一档」)的前提是勾着的,
 // `pipeSelectNone()` 是全局的,不还回去会让它们红在一个跟自己无关的地方。
@@ -366,7 +366,7 @@ await sleep(400);
 const b = posted[0]?.body || {};
 check("正常那一档照旧带来源、订阅和日期段",
       posted[0]?.path === '/api/pipeline/run' && b.stages?.length === 6
-      && b.channels?.length === 2 && b.channels[0].accounts.length === 2
+      && b.channels?.length === 2 && b.channels[0].names.length === 2
       && !!b.since_date && !!b.until_date, JSON.stringify(posted[0]));
 
 // ── 8. **每一行步骤都点得到**:操作条不许盖在它们上面 ──────────────────────

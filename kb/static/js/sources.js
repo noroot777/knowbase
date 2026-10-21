@@ -601,10 +601,10 @@ async function syncSource(ids = []) {
   // 手动收录没有可轮询的源,弹窗里来源/时间范围/订阅三块对它全是空的,照旧直接起跑
   if (sourceModules.get(sourceKind)?.pollable !== false) {
     // 订阅身份传 `{id, name}`:**id 是这一条的稳定身份,名字只给弹窗显示**。
-    // 只传名字的后果是后端那道范围匹配(`reg.in_scope`「id 相等**或** name
-    // 相等」)把同名的另一条也抓了 —— 两条地址不同、名字相同的 RSS,点第一条的
-    // 「同步」实测两条都被抓(第 1 轮审查 R2)。这颗按钮改走弹窗之前传的是
-    // `source_ids`(精确),所以那是这次改动带进来的回归。
+    // 只传名字的后果是请求走到名称那个字段上去,而名称目标代表的是**同名的那几条**
+    // —— 两条地址不同、名字相同的 RSS,点第一条的「同步」实测两条都被抓(第 1 轮
+    // 审查 R2)。这颗按钮改走弹窗之前传的是 `source_ids`(精确),所以那是这次改动
+    // 带进来的回归。两种写法怎么分字段发在 `pipe_setup.js` 的 `pipeTargetFields`。
     const picks = ids.map(id => sourceData?.sources.find(s => s.id === id))
       .filter(Boolean).map(s => ({ id: String(s.id), name: s.name }));
     return openPipeModal({ channel: sourceKind, accounts: picks, stages: PIPE_INTAKE_STAGES });

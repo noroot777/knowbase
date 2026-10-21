@@ -146,11 +146,46 @@ class ChannelAPITests(unittest.TestCase):
         # 单来源的老字段仍然填着第一个来源,旧的读取方不用改
         self.assertEqual(("wechat_local", ["甲"]), (crawl_filter["channel"], crawl_filter["accounts"]))
 
+    def test_names_and_ids_are_two_fields_and_each_keeps_its_own_type(self):
+        """**身份由字段位置决定,不由字符串长相决定。**
+
+        名单上勾的是显示名、入口点名的是编号,混在一个无类型名单里发的话后端只能靠
+        猜,两种猜法都实测错过(见 `pipeline_api._targets`)。打前缀那一步由采集器
+        做 —— 所以这里钉的是「`rss` 那一侧两种写法各自带上类型」,而**公众号那一侧
+        原样不动**:它的目标就是账号名,直接传给采集器自己的命令行,打了前缀等于发
+        一个它不认识的名字(请求照旧起跑、一个号都不抓)。
+
+        后果那一半(照这份范围真跑一轮会抓谁)在 `tests/test_target_selection.py`。
+        """
+        body = {"channels": [{"channel": "rss", "names": ["某博客"], "ids": ["12"]},
+                             {"channel": "wechat_local", "names": ["某公众号"]}]}
+        with patch.object(pipeline, "start_pipeline", return_value=True) as start:
+            self.assertEqual(200, self.client.post("/api/pipeline/run", json=body).status_code)
+        self.assertEqual([{"channel": "rss", "accounts": ["id:12", "name:某博客"]},
+                          {"channel": "wechat_local", "accounts": ["某公众号"]}],
+                         start.call_args.kwargs["crawl_filter"]["channels"])
+
+    def test_pointing_at_a_number_on_a_source_without_numbers_is_refused(self):
+        """公众号那条路没有「编号」这回事:按编号点名要**拒**,不许静默当成名字。
+
+        当成名字发下去就是拿一个不存在的名字去抓 —— 一个号都不抓,而面板上说
+        「同步已开始」。判不准一律拒(元规则):多一次报错顶多再点一下。
+        """
+        with patch.object(pipeline, "start_pipeline") as start:
+            r = self.client.post("/api/pipeline/run",
+                                 json={"channels": [{"channel": "wechat_local",
+                                                     "ids": ["12"]}]})
+            self.assertEqual(400, r.status_code, r.text)
+            self.assertIn("不按编号点名", r.json()["detail"])
+            start.assert_not_called()
+
     def test_repeated_empty_or_unknown_sources_are_rejected_before_run(self):
         bodies = [{"channels": []},
                   {"channels": [{"channel": "rss"}, {"channel": "rss"}]},
                   {"channels": [{"channel": "bad"}]},
-                  {"channels": [{"channel": "rss", "accounts": [" "]}]}]
+                  {"channels": [{"channel": "rss", "accounts": [" "]}]},
+                  {"channels": [{"channel": "rss", "names": [" "]}]},
+                  {"channels": [{"channel": "rss", "ids": [" "]}]}]
         with patch.object(pipeline, "start_pipeline") as start:
             for body in bodies:
                 self.assertEqual(400, self.client.post("/api/pipeline/run", json=body).status_code, body)

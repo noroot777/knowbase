@@ -172,10 +172,12 @@ posted.length = 0;
 await evalJs(`startPipeFromModal()`);
 await setup("起跑请求发出去了", sleep(500).then(() => posted.length > 0));
 let p = posted[0];
-check("起跑走的是管道通道,来源只有 rss、整条全选",
+check("起跑走的是管道通道,来源只有 rss、整条全选(名单那一侧发的是名字)",
       p.path === '/api/pipeline/run' && p.body.channels.length === 1
       && p.body.channels[0].channel === 'rss'
-      && p.body.channels[0].accounts.sort().join() === '另一个博客,同名博客,某博客', JSON.stringify(p));
+      && (p.body.channels[0].ids || []).length === 0
+      && (p.body.channels[0].names || []).sort().join() === '另一个博客,同名博客,某博客',
+      JSON.stringify(p));
 check("步骤按入口那四段发下去", p.body.stages.join() === 'crawl,export,index,extract', JSON.stringify(p.body.stages));
 check("声明了这一下是人按的(退避由后端照此跳过)", p.body.trigger === 'manual', JSON.stringify(p.body));
 
@@ -194,13 +196,18 @@ posted.length = 0;
 await evalJs(`startPipeFromModal()`);
 await setup("那一档也发出了请求", sleep(500).then(() => posted.length > 0));
 p = posted[0];
-// **发出去的是「明确点名编号」,不是名字、也不是裸 id**:名字不唯一,后端那道范围
-// 匹配「id 相等**或** name 相等」会把同名的另一条带上(下面第 2b 节定点钉它);而裸
-// 着发一串数字,那串数字同时也可能是**另一条订阅的名字** —— 前缀就是为了分开这两种
-// (后端口径 `kb/feeds/targets.py`)。**真去抓哪几条**在
-// `tests/test_feed_targets.py` 钉;这边的后端是夹具,只能钉发出去的那一份长什么样。
-check("请求里的订阅只有点的那一条,而且写成了明确点名编号",
-      p.body.channels[0].accounts.join() === 'id:12', JSON.stringify(p.body.channels));
+// **发出去的是编号那个字段,不是名字那个字段**:名字不唯一,后端那道范围匹配按名字
+// 会把同名的另一条带上(下面第 2b 节定点钉它);而混在一个无类型名单里发一串数字,
+// 那串数字同时也可能是**另一条订阅的名字** —— 分两个字段就是为了分开这两种
+// (后端口径 `kb/feeds/targets.py`,打前缀是后端采集器的事)。**真去抓哪几条**在
+// `tests/test_target_selection.py` 钉;这边的后端是夹具,只能钉发出去的那一份长什么样。
+// 判据写成「取得到 && 等于」(而不是直接 `.join()`):混回一个名单那种坏法会让这几个
+// 字段压根不存在,直取就是整条探针当场中断 —— 后面十几条检查一条都跑不到,而红在哪
+// 看不出来。
+check("请求里的订阅只有点的那一条,而且走的是编号那个字段",
+      (p.body.channels[0].ids || []).join() === '12'
+      && (p.body.channels[0].names || ['有']).length === 0,
+      JSON.stringify(p.body.channels));
 
 // **反过来钉一边**:锁到单条那一次不许改写同步中心记着的订阅选择
 await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
@@ -214,10 +221,10 @@ check("同步中心那边 rss 照旧整条全选(单条同步没改写它记着�
 await evalJs(`closePipeModal()`);
 
 // ── 2b. 同名订阅:只跑点的那一条 ─────────────────────────────────────────────
-// 夹具里 13 和 14 都叫「同名博客」,地址不同。后端那道范围匹配是「id 相等**或**
-// name 相等」(`kb/feeds/registry.py` 的 `in_scope`),所以**按名字发出去等于把
-// 同名的全部带上** —— 实测点第一条的「同步」两条都被抓(第 1 轮审查 R2)。
-// 这一条判的就是「发出去的那一份能不能只认出一条」。
+// 夹具里 13 和 14 都叫「同名博客」,地址不同。名称目标代表的是**同名的那几条**
+// (`kb/feeds/targets.py`),所以**按名字发出去等于把同名的全部带上** —— 实测点第一
+// 条的「同步」两条都被抓(第 1 轮审查 R2)。这一条判的就是「发出去的那一份能不能
+// 只认出一条」。
 await openSubs("rss");
 await setup("又回到 RSS 那一页", until(`document.getElementById('source-sync') !== null`, 6000));
 await evalJs(`syncSource([13])`);
@@ -228,7 +235,9 @@ await evalJs(`startPipeFromModal()`);
 await setup("同名那一条发出了请求", sleep(500).then(() => posted.length > 0));
 p = posted[0];
 check("两条同名订阅只点了一条:请求里是那一条的编号,不是它们共用的名字",
-      p.body.channels[0].accounts.join() === 'id:13', JSON.stringify(p.body.channels));
+      (p.body.channels[0].ids || []).join() === '13'
+      && (p.body.channels[0].names || ['有']).length === 0,
+      JSON.stringify(p.body.channels));
 
 // ── 2c. 「同步全部」就是全部,不看同步中心收窄过的那一份 ─────────────────────
 // 锁定「整条来源」那一档原来也会去读 `pipeDrafts`:同步中心上次只勾了两个,
