@@ -16,7 +16,9 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import errno
 import http.server
 import os
 import socket
@@ -27,7 +29,7 @@ import unittest
 
 from tests import fixture_life
 from tests.fixture_life_probe import (   # noqa: F401 - 见那边的说明
-    _shut_fds, _stat_of, _open_fds, _free_port, _alive, _wait_gone, _ping, _wait_listening, _owner_pipe, _identity, _reset_state, _age, _closed,
+    _shut_fds, _stat_of, _open_fds, _free_port, _alive, _wait_gone, _ping, _wait_listening, _owner_pipe, _identity, _hold_high_fds, _reset_state, _age, _closed,
     ROOT,
 )
 
@@ -70,29 +72,41 @@ class 判据(unittest.TestCase):
         self.assertEqual(fixture_life.should_exit(60, False, 0, 0.5), "")
 
 
-class 登记回收的写法(unittest.TestCase):
-    """**「身份记早了」那一条的表示级一边。**
+class 身份判据(unittest.TestCase):
+    """**「身份只能是不可变的那部分」那一条的表示级一边。**
 
-    `tests/test_fixture_life_outcome.py` 里有好几处要「起一个进程、回头按身份收掉它」。
-    后果那一份只钉得住**一处**写对了;而这个错一旦再犯一次,漏下的夹具没有任何别的东西
-    会来收它,还得等某台机器忙到让 exec 落在 pid 那一行后面才看得见。所以这里不验某一处,
-    验**没有一处**把身份固定在登记那一刻。
+    后果那一份钉的是「换过命令行照旧收得掉」,只盖得住**一处**写对了。而判据一旦在别处
+    再被掺进会变的东西,漏下的夹具没有任何别的东西会来收它,还得等某台机器忙到让 exec
+    落在 pid 那一行后面才看得见。所以这里验的是**判据只有一份、而且那一份只认启动时刻**。
     """
 
-    def test_登记回收时不许就地记身份(self):
-        """`addCleanup(self._reap_pid, pid, _identity(pid))` 这个写法本身就是错的。
-
-        `Popen` 一返回就能拿到 pid,但那一刻子进程可能还是父进程的一份副本、命令行还没
-        换 —— 记下这个转瞬即逝的样子,回收时一比对不上,保守分支一个字都不碰。身份要走
-        `_settled_identity`(等它换完命令行),登记却要早(号一到手就登记),两件事只能分开
-        写,所以这一行上不该同时出现 `addCleanup` 和就地的 `_identity(`。
+    def test_身份判据只认启动时刻(self):
+        """`execv` 一跑命令行就换一副样子;把它算进身份,记在 exec 之前的那一份就永远对
+        不上,回收时一个字都不敢碰。所以 `_identity` 只许取启动时刻 —— 想看命令行变没变
+        是用例自己的观察,不是判据。
         """
-        src = (ROOT / "tests" / "test_fixture_life_outcome.py").read_text(
-            encoding="utf-8")
-        bad = [(n, line.strip()) for n, line in enumerate(src.splitlines(), 1)
-               if "addCleanup" in line and "_identity(" in line
-               and "_settled_identity(" not in line]
-        self.assertFalse(bad, f"登记回收要记 `_settled_identity` 的结果:{bad}")
+        probe = (ROOT / "tests" / "fixture_life_probe.py").read_text(encoding="utf-8")
+        body = ast.get_source_segment(
+            probe, next(n for n in ast.walk(ast.parse(probe))
+                        if isinstance(n, ast.FunctionDef) and n.name == "_identity"))
+        code = body.replace(ast.get_docstring(
+            ast.parse(body).body[0]) or "", "")      # 去掉说明,只看代码
+        self.assertIn("lstart=", code, "身份要取启动时刻")
+        self.assertNotIn("command=", code, "`command=` 会变,不许进身份判据")
+
+    def test_取身份只有这一个出口(self):
+        """判据只有一份:两份用例里谁都不许自己拼一份身份出来。
+
+        扫的是「有没有别处也去 `ps` 里捞启动时刻」—— 有的话就是第二份判据,两份迟早会
+        不一致(`command=` 不在此列:那是观察,见上一条)。
+        """
+        needle = "ls" + "tart"   # 拼出来,否则这一行自己就被扫中
+        for name in ("test_fixture_life.py", "test_fixture_life_outcome.py",
+                     "test_fixture_life_identity.py"):
+            src = (ROOT / "tests" / name).read_text(encoding="utf-8")
+            hits = [(n, line.strip()) for n, line in enumerate(src.splitlines(), 1)
+                    if needle in line and "ps" in line]
+            self.assertFalse(hits, f"{name} 里不该另取启动时刻:{hits}")
 
 
 class 一致的那道边界(unittest.TestCase):
@@ -287,8 +301,8 @@ class 所有权凭据(unittest.TestCase):
         `select.select()` 等它可读,而那个函数在 `FD_SETSIZE` 以上抛 `ValueError`,
         被当成「从来没有 owner」:调用方取消之后页面照旧 200、进程还是同一个。
         """
-        hold = [os.open(os.devnull, os.O_RDONLY) for _ in range(1100)]
-        self.addCleanup(_shut_fds, *hold)
+        hold = _hold_high_fds(self)   # 一成功一登记、上限不够就跳过(见那边的说明)
+        self.assertEqual(len(hold), 1100, "没占满低号这条用例就没验到东西")
         r, w, spec = _owner_pipe()
         self.addCleanup(_shut_fds, r, w)
         self.assertGreater(r, 1023, f"没把凭据挤到高位去(fd={r}),这条用例没验到东西")
@@ -320,6 +334,46 @@ class 所有权凭据(unittest.TestCase):
                 fixture_life._arm_owner()      # 装防线那一步也得抛
         finally:
             fixture_life.selectors.DefaultSelector = real
+
+    def test_本地资源不够不算凭据无效(self):
+        """**`OSError` 不等于「fd 坏了」。**
+
+        建等待器自己要申请内核资源,`EMFILE` / `ENFILE` / `ENOMEM` 都能让它失败 —— 那些
+        说的是「我们这边没资源了」,跟远端那个调用方在不在毫无关系。上一版按**异常类型**
+        分(凡 `OSError` 一律原样重抛、上面再吞成 -1),于是资源紧张时静默退回无主:实测
+        在建等待器那一刻把子进程软上限压到 96 占满 fd,内核真给出 `OSError(24)`,资源恢
+        复之后调用方取消,页面照旧 200、还是同一个进程。
+
+        所以分类只认 errno:只有 `EBADF`(这个号压根没打开)算陈旧凭据,其余一律
+        `OwnerUnusable`。两边都钉:资源失败要抛,`EBADF` 照旧安静。
+        """
+        real = fixture_life.selectors.DefaultSelector
+        self.addCleanup(setattr, fixture_life.selectors, "DefaultSelector", real)
+
+        def make(code):
+            def boom(*a, **k):
+                raise OSError(code, os.strerror(code))
+            return boom
+
+        for code in (errno.EMFILE, errno.ENFILE, errno.ENOMEM):
+            r, w, spec = _owner_pipe()
+            self.addCleanup(_shut_fds, r, w)
+            os.environ[fixture_life.OWNER_ENV] = spec
+            fixture_life.selectors.DefaultSelector = make(code)
+            with self.assertRaises(fixture_life.OwnerUnusable,
+                                   msg=f"errno {code} 不证明凭据无效"):
+                fixture_life.claim_owner()
+            with self.assertRaises(fixture_life.OwnerUnusable,
+                                   msg=f"errno {code}:装防线那一步也得抛"):
+                fixture_life._arm_owner()
+
+        # 反过来钉一边:`EBADF` 说的就是「这个号压根没打开」—— 陈旧值,安静退回无主
+        r, w, spec = _owner_pipe()
+        self.addCleanup(_shut_fds, r, w)
+        os.environ[fixture_life.OWNER_ENV] = spec
+        fixture_life.selectors.DefaultSelector = make(errno.EBADF)
+        self.assertEqual(fixture_life.claim_owner(), -1, "`EBADF` 才算陈旧凭据")
+        fixture_life._arm_owner()        # 这一类不许抛,手起那条路靠它
 
     def test_验不过还是安静地退回无主(self):
         """反过来钉一边:**「凭据验不过」跟「盯不住」是两件事。**

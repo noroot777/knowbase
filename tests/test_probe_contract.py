@@ -33,7 +33,8 @@ LEAK_TESTS = "test_probe_leak.py"
 
 # `test_no_test_launches_a_sandbox_server_itself` 唯一的例外对象(同上,理由在那条用例里)
 #: 夹具自退那一块的测试(拆成单元/后果两份);开例外的理由在守卫那一条里。
-LIFE_TESTS = {"test_fixture_life.py", "test_fixture_life_outcome.py"}
+LIFE_TESTS = {"test_fixture_life.py", "test_fixture_life_outcome.py",
+              "test_fixture_life_identity.py"}
 
 
 # 类级 fixture 会建出来的那几种东西,和"收尾"长什么样
@@ -244,7 +245,10 @@ class ProbeSourceContractTests(unittest.TestCase):
                   if "fixture_root(" in f.read_text(encoding="utf-8")}
         self.assertTrue(owning, "一个自带沙箱根的服务都没找到,这条用例已经失效")
         offenders = []
-        for f in sorted(HERE.glob("test_*.py")):
+        # **`fixture_life_cases.py` 也要扫。** 夹具自退那一块的 bare `Popen` 搬进了那个
+        # 共用基类,而这里原先只扫 `test_*.py` —— 不带上它就等于把那两处移出了射程。
+        scanned = [*HERE.glob("test_*.py"), HERE / "fixture_life_cases.py"]
+        for f in sorted(scanned):
             if f.name == Path(__file__).name:
                 continue
             # `test_fixture_life.py` 是唯一的例外,而且必须是:它那条验的正是
@@ -258,6 +262,24 @@ class ProbeSourceContractTests(unittest.TestCase):
         self.assertEqual([], offenders,
                          "这些地方又自己起沙箱服务了 —— 那份临时库会留在盘上,"
                          "要走 tests.headless.fixture_server(script=...)")
+
+    def test_裸起夹具的那个基类只给那一块用(self):
+        """**上面那条按「文件里有没有 bare `Popen`」判,继承过去就绕开了。**
+
+        `tests/fixture_life_cases.py` 的 `起与收` 把那两处 bare `Popen` 收在一个基类里
+        (那一块必须裸起,理由在上面那条注释里)。别的测试文件只要继承它,就能一行
+        `Popen` 都不写地自己起沙箱服务,而上面那条一个字都看不见。所以这里按**继承**判:
+        用这个基类的,只许是夹具自退那一块自己的那几份。
+        """
+        users = []
+        for f in sorted(HERE.glob("test_*.py")):
+            if f.name == Path(__file__).name:
+                continue             # 这条守卫自己也写着那个名字
+            if "fixture_life_cases" in f.read_text(encoding="utf-8"):
+                users.append(f.name)
+        self.assertTrue(users, "一个都没有,这条用例已经失效")
+        self.assertEqual(sorted(set(users) - LIFE_TESTS), [],
+                         "裸起夹具的基类只给夹具自退那一块用,别处要走 fixture_server")
 
 
     def test_class_fixtures_register_their_cleanup_when_they_build_it(self):

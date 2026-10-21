@@ -59,14 +59,19 @@ init,而这些脚本本身是裸的 `serve_forever()` / `uvicorn.run()`,**没有
 from __future__ import annotations
 
 import contextlib
+import errno
 import math
 import os
-import queue
 import selectors
 import signal
 import stat
 import threading
 import time
+
+# 说话那一侧整块在隔壁(有界队列 + 摆盘输出边界),**依赖是单向的**:它不认识这个模块。
+from tests.fixture_voice import (     # noqa: F401 - `_LOGS` 供回归直接看队列
+    _LOGS, _begin_staging, _drain_logs, _end_staging, _say,
+)
 
 #: 所有权凭据:`"<fd>:<token>"`。fd 是一根**继承来的** pipe 读端(`pass_fds`),
 #: token 是父进程在起我们之前就写进那根 pipe 的随机串。唯一的写入方是
@@ -96,10 +101,6 @@ _LIMIT = IDLE_DEFAULT
 _IDLE_ARMED = False
 _BAILING = threading.Lock()
 
-#: 要说的话先进这里,由 `_log_pump` 一个线程写出去。满了就丢。
-_LOGS: queue.Queue = queue.Queue(maxsize=256)
-
-
 class OwnerUnusable(RuntimeError):
     """父进程交了个有效凭据,但我们在这台机器上**盯不住**它。
 
@@ -110,11 +111,37 @@ class OwnerUnusable(RuntimeError):
     文件,凭据就落在高位上,接收端把 `ValueError` 当成「从来没有 owner」—— 取消之后
     页面照旧 200,进程还是同一个。
 
+    **第二个形态是本地资源失败**:建等待器自己要申请内核资源,`EMFILE` / `ENFILE` /
+    `ENOMEM` 都能让它失败,而这些跟远端那个调用方在不在毫无关系。实测在建等待器那一刻
+    把子进程的软上限压到 96 占满 fd,内核真的给出 `OSError(24)`,凭据照旧被吞成
+    「没有 owner」—— 资源恢复之后页面能开、调用方取消之后还是同一个进程。所以**不许
+    按异常类型分**(`OSError` 不等于「fd 坏了」),分类口径只有一份:`_is_stale`。
+
     所以机制失败一律抛出去:模块加载失败 → 夹具起不来 → `fixture_server` 当场报
     「启动失败」。**「少一道防线」必须是响的,不能是静的。** 注意这跟「凭据验不过」
-    是两件事:token 对不上、不是 FIFO、号已经坏了,那些说的是「继承来的陈旧值」,
-    照旧安静地退回无主(手起那条合法的路要靠它)。
+    是两件事:token 对不上、不是 FIFO、号压根没打开(`EBADF`),那些说的是「继承来的
+    陈旧值」,照旧安静地退回无主(手起那条合法的路要靠它)。
     """
+
+
+#: **只有这一个 errno 能证明「这个号不是一根打开着的凭据」。** 其余一律是机制/资源失败。
+_STALE_ERRNOS = frozenset({errno.EBADF})
+
+
+def _is_stale(exc: OSError) -> bool:
+    """这个 `OSError` 证明凭据无效了吗?**默认不算。**
+
+    `EMFILE` / `ENFILE` / `ENOMEM` 说的是「**我们这边**没资源了」,跟远端那个调用方还在
+    不在毫无关系。把它们算成「验不过」就等于在资源紧张时**静默**退回无主:实测在建等待
+    器那一刻把子进程的软上限压到 96、占满可用 fd,内核真的给出
+    `OSError(24, 'Too many open files')`,于是资源恢复之后调用方取消,页面照旧 200、
+    还是同一个进程。
+
+    所以只有 `EBADF`(这个号压根没打开)算陈旧凭据 —— 那是**继承来的旧值**这件事的
+    证据;其余一概 `OwnerUnusable`(抛)。认领、注册、读取、后续监测四处共用这一份口径,
+    别在某一处单独给某个 errno 开特例。
+    """
+    return exc.errno in _STALE_ERRNOS
 
 
 def _owner_selector(fd: int) -> selectors.BaseSelector:
@@ -132,46 +159,12 @@ def _owner_selector(fd: int) -> selectors.BaseSelector:
         if sel is not None:
             with contextlib.suppress(Exception):
                 sel.close()
-        if isinstance(exc, OSError):
-            raise                    # fd 本身坏了,交给上面按「验不过」处理
+        if isinstance(exc, OSError) and _is_stale(exc):
+            raise                    # 号压根没打开:交给上面按「验不过」处理
+        # 建等待器本身要申请内核资源 —— 申请不到不证明凭据无效(见 `_is_stale`)
         raise OwnerUnusable(f'这个等待机制盯不住 fd {fd}:{exc!r}') from exc
     return sel
 
-
-def _log_pump() -> None:
-    """唯一一个真正写 stderr 的线程 —— **它卡住是允许的,没有人等它**。
-
-    所以这里就用普通的阻塞 `os.write`:**不许**把 fd 2 设成非阻塞来让它不卡。那个标志
-    挂在 open-file-description 上,手起夹具继承的 stderr 跟调用方是同一份,改了它调用
-    方的 `write` 会跟着开始抛 `BlockingIOError`(实测过,调用方自己什么都没做)。借来的
-    fd 不是我们的,状态一个比特都不动。
-    """
-    while True:
-        stream, text = _LOGS.get()
-        with contextlib.suppress(Exception):
-            os.write(stream, text.encode('utf-8', 'replace'))
-
-
-def _say(text: str, *, stream: int = 2) -> None:
-    """说一句话 —— **只往队列里丢,满了就丢掉,绝不等**。
-
-    防线上的每一处输出都走这里:退出理由、访问日志、启动那行提示。队列是有界的,所以
-    就算 stderr 彻底不动,这个函数的耗时也不随之变化 —— 这正是上一版用「把 fd 2 切成
-    非阻塞」换来的东西,只是这一版没有碰调用方的任何状态。
-    """
-    with contextlib.suppress(Exception):
-        _LOGS.put_nowait((stream, text))
-
-
-def _drain_logs(budget: float) -> None:
-    """给日志线程一点时间把话说完,**最多等 budget 秒**。
-
-    只在 `_bail` 里用:收场理由能打出来最好,但它绝不许拖住收场。队列空了只说明话已经
-    交给那个线程,不保证已经落到 stderr —— 真卡在满管道上时谁也救不了它,那就丢掉。
-    """
-    deadline = time.monotonic() + budget
-    while not _LOGS.empty() and time.monotonic() < deadline:
-        time.sleep(0.01)
 
 
 def claim_owner() -> int:
@@ -228,8 +221,12 @@ def claim_owner() -> int:
                 break
             try:
                 chunk = os.read(fd, len(want) - len(got))
-            except OSError:
-                return -1
+            except (InterruptedError, BlockingIOError):
+                continue             # 信号打断 / 非阻塞下的假醒:接着等,上面那道超时兜着
+            except OSError as exc:
+                if _is_stale(exc):
+                    return -1        # 号坏了,按陈旧值办
+                raise OwnerUnusable(f'读凭据时这台机器出了状况:{exc!r}') from exc
             if not chunk:
                 break                # 写端已经关了,凭据不完整
             got += chunk
@@ -261,10 +258,17 @@ def _watch_owner(fd: int, sel: selectors.BaseSelector) -> None:
     try:
         while True:
             sel.select()             # 没有超时:就在这儿等着
-            if not os.read(fd, 1):
-                break                # EOF —— 写端关了,调用方没了
-    except (OSError, ValueError):
-        pass
+            try:
+                if not os.read(fd, 1):
+                    break            # EOF —— 写端关了,调用方没了
+            except (InterruptedError, BlockingIOError):
+                continue             # 信号打断 / 非阻塞下的假醒:接着等
+    except (OSError, ValueError) as exc:
+        # **盯不住了不等于「还盯着」。** 这一刻我们再也回答不了「调用方还在吗」,而两种
+        # 错法的代价不对称:当成「还在」是**静悄悄**永久留着一个没人要的进程;当成
+        # 「没了」顶多把一轮还活着的验证打断 —— 那是**响的**,调用方当场看到夹具没了。
+        # 所以照旧按「没了」收场,但**要说一句为什么**,不许冒充正常的 EOF。
+        _say(f'tests/fixture_life.py: 盯不住原调用方了({exc!r}),按它没了收场\n')
     finally:
         with contextlib.suppress(Exception):
             sel.close()
@@ -446,6 +450,7 @@ def install(*, limit: float | None = None) -> None:
     (对应 `probe_shell.mjs` 那个 interval 的 `unref()`)。
     """
     global _LIMIT, _IDLE_ARMED
+    _end_staging()                   # 摆盘结束:stdout 换回真身(见 `_begin_staging`)
     _LIMIT = idle_limit() if limit is None else limit
     touch()
     _say(f'tests/fixture_life.py: {banner(_LIMIT)}\n')
@@ -535,18 +540,6 @@ class TouchingHandlerMixin:
                 _leave()
 
 
-def _arm_logs() -> None:
-    """写 stderr 的那个线程**在模块加载时就起**。
-
-    `_say` 从那一刻起就只是「往队列里丢」,所以所有权看门狗、空闲看门狗、访问日志、
-    收场理由没有一处会因为 stderr 不动而变慢 —— 而且谁都不用去碰 fd 2 的状态。
-    """
-    threading.Thread(target=_log_pump, daemon=True, name='fixture-log').start()
-
-
-_arm_logs()
-
-
 def _arm_owner() -> None:
     """所有权那道防线**在模块加载时就装**,不等 `install()`。
 
@@ -560,7 +553,10 @@ def _arm_owner() -> None:
     fd = claim_owner()               # 机制失败会抛 OwnerUnusable
     if fd < 0:
         return
-    sel = _owner_selector(fd)        # 同样,抛出去 = 启动失败,不静默降级
+    try:
+        sel = _owner_selector(fd)    # 同样,抛出去 = 启动失败,不静默降级
+    except OSError as exc:           # token 刚验过,这会儿却盯不住 —— 不是「没有 owner」
+        raise OwnerUnusable(f'凭据刚验过就盯不住了:{exc!r}') from exc
     try:
         threading.Thread(target=_watch_owner, args=(fd, sel), daemon=True,
                          name='fixture-owner').start()
