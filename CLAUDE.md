@@ -180,6 +180,7 @@
 | 条目化提取的开关(`kb/extract_optin.py`) | `extract-optin.md` |
 | wiki 层、三张图谱、归类缓存与发布(`scripts/wiki/`) | `catgraph.md` |
 | 测试探针起无头浏览器(`tests/probe_shell.mjs`、`tests/headless.py`) | `probe-shell.md` |
+| 本地回归怎么分层跑、浏览器闸门(`./kb.sh test`、`tests/tiers.py`、`tests/headless.py` 的 `requires_headless`) | `test-tiers.md` |
 | 向量子进程与帧协议(`kb/embed_worker.py`、`embed_pool.py`、`embedder.py`) | `embedding.md` |
 | 问答面板布局、聊天区留白、页面探针收尾(`kb/static/js/chat.js`) | `frontend-feedback.md` |
 | 「我的订阅」页布局(`kb/static/js/sources.js`、`targets.js`) | `subs-layout.md` |

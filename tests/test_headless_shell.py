@@ -44,6 +44,10 @@ class HeadlessShellTests(unittest.TestCase):
         which = patch.object(headless.shutil, "which", return_value=None)
         which.start()
         self.addCleanup(which.stop)
+        # 这一组验的都是「没设快速层闸门」那条路(找不到工具时怎么提示)。闸门变量
+        # 是 ./kb.sh test 在整个进程上设的,先摘掉,不然 requires_headless 在闸门处
+        # 就返回了,下面两条看 skip 消息的用例读到的是闸门的话。
+        os.environ.pop(headless.NO_BROWSER_ENV, None)
 
     def test_env_var_wins(self):
         """自己装的 / CI 下的那一份:HEADLESS_SHELL 说了算,不去探缓存。"""

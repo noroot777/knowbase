@@ -50,6 +50,10 @@ PARENT_ENV = "KB_PROBE_PARENT"
 # 临时 profile 建在这个**父进程拥有**的根里面(见 run_probe 的 docstring)。
 # 跟沙箱那份库同一条口径(`tests/fixture_root.py`):建在起它的这一侧、这一侧删。
 PROFILE_ROOT_ENV = "KB_PROBE_PROFILE_ROOT"
+#: 快速层(./kb.sh test)用它拦下全部浏览器回归。闸门只有 requires_headless 这一处:
+#: 浏览器回归一律走那个装饰器,别在测试文件里自己写 skipUnless —— 自己写的那份
+#: 不认这个变量,快速层就又慢回去了。完整语境见 docs/decisions/test-tiers.md。
+NO_BROWSER_ENV = "KB_TEST_NO_BROWSER"
 
 
 def _cache_roots() -> list[Path]:
@@ -108,7 +112,17 @@ NODE = shutil.which("node")
 
 
 def requires_headless(cls):
-    """给浏览器回归用的装饰器:node 和无头壳缺哪个都说清楚,外加怎么补。"""
+    """给浏览器回归用的装饰器:node 和无头壳缺哪个都说清楚,外加怎么补。
+
+    快速层(`./kb.sh test`)靠 `KB_TEST_NO_BROWSER` 在这里把整类拦下 —— 拦的是
+    「起浏览器」这一档,同文件里的纯逻辑用例照常跑。skip 消息必须写清这批测试
+    还能怎么跑起来:静默跳过(或只说「跳过了」不说出路)正是这套口径当年要修的
+    事故形态。
+    """
+    if os.environ.get(NO_BROWSER_ENV, "").strip():
+        return unittest.skip(
+            f"浏览器回归被 {NO_BROWSER_ENV} 拦下(快速层)——"
+            "跑它们:./kb.sh test probes 或 ./kb.sh test full")(cls)
     missing = []
     if NODE is None:
         missing.append("node(驱动 CDP 的那一侧)")
