@@ -370,6 +370,11 @@ _restored = ''
 # (`export_filter` / `crawl_retry`)只存在于那份没写上的状态文件里。空串 = 完整。
 _restore_gap = ''
 
+# 从历史恢复那一轮时,它记录里那份**来源摘要**:`(run_id, scopes)`,None = 没有。
+# **故意不进 `_state`**(理由在 `pipeline_persist.run_record`):常驻内存里多一格就
+# 要在每条起跑路径上各清一次。只在展示口径上附回(`_with_restored_scopes`)、认 id。
+_restored_scopes: tuple[str, list] | None = None
+
 
 def restore_gap() -> str:
     """手上这一份终态**可信到什么程度**。空串 = 可信的最新,且完整。
@@ -418,7 +423,7 @@ def _restore_once() -> None:
     范围」要如实说出来并拦住,不许静默退回上一轮的范围**(那一档的后果是导出摘掉
     失败那个来源、面板报「已保存 0 条」,见 `retry-scope.md`)。
     """
-    global _restored, _restore_gap, _seq_hwm
+    global _restored, _restore_gap, _seq_hwm, _restored_scopes
     if _restored:
         return
     with _lock:
@@ -492,8 +497,30 @@ def _restore_once() -> None:
             # 沿用上一轮的**,那两个字段错一个就是静默不抓。存量记录没有 `results`
             # 也走这一档 —— 空账等于「说不出来」,折账自然退回保守档。
             _state[key] = deepcopy(got) if isinstance(got, dict) else {}
+        # **历史那份记录里的来源摘要,不许因为「恢复成了当前结果」就消失。** 历史
+        # 故意不存 `export_filter`(重试私有,见 `run_record`),而「只补导出」那一轮
+        # 作用在哪几个来源上**恰恰只写在导出范围里** —— 恢复回来的内存于是派生不出
+        # 来源。那一格是**结论**、是给人看的事实,这里接着带上它。形态与回归在
+        # `docs/decisions/pipeline-history.md`。
+        told = pick.get("scopes")
+        _restored_scopes = ((_state.get("run_id", ""), deepcopy(told))
+                            if isinstance(told, list) and told else None)
         _restore_gap = gap
         _restored = 'ok'
+
+
+def _with_restored_scopes(run: dict) -> dict:
+    """给恢复那一轮附回它历史记录里的来源摘要(理由在 `_restore_once` 那一段)。
+
+    **只认同一轮**:run_id 对不上就不附 —— 新一轮起跑之后这份旁路立刻过期,附上去
+    等于拿上一轮的来源冒充这一轮(面板那行「本次范围」和订阅写保护都念它)。
+    """
+    if not _restored_scopes or run.get("scopes") is not None:
+        return run
+    run_id, scopes = _restored_scopes
+    if run.get("run_id", "") == run_id:
+        run["scopes"] = deepcopy(scopes)
+    return run
 
 
 def result_version(run: dict | None = None) -> str:
@@ -537,7 +564,11 @@ def _latest_locked() -> dict:
         # 它已经被清掉(见 `pipeline_batch._remember_aggregate`),所以这里不会读到更旧的东西。
         from kb.pipeline_batch import _batch_aggregate    # 延迟 import,同上
         batch = _batch_aggregate()
-        return deepcopy(batch if batch is not None else _state)
+        if batch is not None:
+            return deepcopy(batch)
+        # 恢复那一轮带回它历史里那份来源摘要(见 `_with_restored_scopes`)。
+        # 附在**副本**上,所以 `_state` 自己一格都没多。
+        return _with_restored_scopes(deepcopy(_state))
     # 回落到磁盘那份时**要过同一道形状判据**。这一档走的是「恢复还没成功 / 恢复
     # 拒了磁盘那份」,而拒的理由多半正是形状不对(`valid_round`)——
     # `load_last_run()` 是宽口径的「磁盘那份原样」(还有只取失败名单的消费者在用

@@ -187,27 +187,37 @@ def channel_run(stage: str, channel: str, collector, requested):
         _current.pop(stage, None)
 
 
-def cover(stage: str, collector, report) -> None:
+def cover(stage: str, report) -> None:
     """采集器交回来的**执行事实**:这一轮在当前这个来源上真跑成了哪几个目标。
 
     `report` 不是 `Coverage` 就一个字都不改(「报不出来」那一档退回按计划范围记账,
     理由在 `kb.collectors.Coverage`)。导出压根不用报 —— 它的契约就是扫整条来源,
     建账那一下就写成整条覆盖了。
 
-    **身份过同一道归一**(`_stable`):采集器报的是它自己那套 id,而账上的键是稳定
-    id,两边不是同一个键空间的话这一笔谁也清不掉。**归一失败就用它原样报的那几个**
-    —— 这一步已经跑完了,不该让一次订阅库读失败把一轮成功的抓取翻成失败;键对不上
-    顶多多抓一次(元规则那条)。
+    **身份不在这儿再归一一次。** 采集器交回来的就是**稳定身份**(`Coverage` 的契约:
+    「真跑过而且成了的那几个目标身份」)—— 订阅源报的是订阅 id,公众号报的是账号名,
+    那本身就是它的稳定身份。原来这里又把它丢回范围匹配(`_stable` → `in_scope`)走了
+    一遍,而那份匹配是**选源方向**的口径:「id 相等**或** name 相等」。
+    **两个方向的安全侧是反的**,这是这一处的全部要害:
+    - 选源方向宽一点 = 多抓一条,代价是重抓一次;
+    - **记账方向宽一点 = 拿没发生的成功清掉另一条订阅的真实失败**,而那条订阅从此
+      不再出现在重试计划里 —— 静默丢数据,重试救不回来。
+    实测形态:A 编号 63 名字「A」、B 编号 64 名字「63」;先只同步 B 并让取文失败
+    (账上 `{"64":"error"}`),再只同步 A 且真的只抓成了 63 —— 回执裸着的 `63` 经那份
+    宽匹配扩成了 `["63","64"]`,账本变成 `{"64":"ok","63":"ok"}`,B 的 `last_error`
+    还在原处而重试计划已经是 `[]`。
+    **反过来不归一的代价只有安全那一侧**:键对不上就是「这一笔谁也清不掉」= 多抓
+    一次。所以这一侧**宁可不认**。
+
+    所以这个函数**不收采集器**:归一要先有采集器(`_stable` 第一件事就是去取它的
+    `TargetIdentity`),拿不到它就无从再做一次名字匹配 —— 这条路上不许有模糊匹配是
+    靠签名钉住的,不是靠这段话。
     """
     from kb.collectors import Coverage
     cell = (_cells.get(stage) or {}).get(_current.get(stage) or '\x00')
     if cell is None or not isinstance(report, Coverage):
         return
-    try:
-        done = _stable(collector, report.targets)
-    except Exception:                              # noqa: BLE001 - 见 docstring
-        done = [str(t) for t in report.targets]
-    cell['covered'] = done
+    cell['covered'] = [str(t) for t in report.targets]
     cell['whole'] = bool(report.whole)
     # **这两样现在是执行事实了。** 翻了这一格之后它不再过「这一步执行过没有」那一道
     # (`pipeline_daybook._coverage`)—— 中途被停掉的那一轮里真抓成了的那几条照旧

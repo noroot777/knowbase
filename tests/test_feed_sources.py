@@ -314,7 +314,15 @@ class FeedTests(unittest.TestCase):
             # 不是靠把这一步排除在计划外 —— 那样用户给某条订阅开了提取,它
             # 同步完也不会提取,得等绿泡泡那轮全流程定时同步顺手捎上。
             self.assertEqual(['crawl','export','index','extract'],start.call_args.args[0])
-            self.assertEqual([str(s['id'])],start.call_args.kwargs['crawl_filter']['accounts'])
+            # **「明确点名编号」的形态**,不是裸 id:裸字符串在范围匹配里 id 和 name
+            # 两种都认,某条订阅的名字正好是另一条的编号时会被一起抓走
+            # (整条链的红在 `tests/test_feed_targets.py`)。
+            self.assertEqual([reg.id_target(s['id'])],
+                             start.call_args.kwargs['crawl_filter']['accounts'])
+            # 这颗按钮是人按的,所以这一轮跳过来源退避(判据只有一份:`kb.run_trigger`,
+            # 四个入口的那组红在 `tests/test_run_trigger.py`)。不带的后果是刚失败的
+            # 那条订阅在半小时里点不动 —— 而那半小时正是用户改完地址就点它的时候。
+            self.assertIs(True,start.call_args.kwargs['crawl_filter'].get('force'))
         with patch.object(pipeline,'start_pipeline',return_value=False):
             self.assertEqual(409,self.client.post('/api/intake/rss/sync',json={}).status_code)
         self.assertEqual(404,self.client.get('/api/intake/missing').status_code)

@@ -17,6 +17,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from kb import pipeline_daybook as daybook
+from kb import run_trigger
 from kb.collectors import active_collector, channel_labels, retry_narrower
 from kb.pipeline_state import (
     _SEQ_GEN,
@@ -590,7 +591,8 @@ def start_retry_failed() -> tuple[bool, str]:
     # 退避是失败自己留下的(最短 1800 秒,见 `sync._save_failure`),手动重试必须
     # 跳过它 —— 不跳的话失败后半小时内点这颗按钮,唯一该抓的那条被记成
     # `deferred` 跳过:该抓的不抓,正好和上面那个"不该抓的全抓"凑成一对。
-    crawl_filter["force"] = True
+    # 「是不是人按的」判据只有一份(`kb.run_trigger`):这颗按钮按定义就是人按的。
+    crawl_filter = run_trigger.apply_force(crawl_filter, run_trigger.MANUAL)
     if scopes:
         crawl_filter["channels"] = scopes
         crawl_filter["channel"] = scopes[0]["channel"]

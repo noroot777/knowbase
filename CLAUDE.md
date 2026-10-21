@@ -111,6 +111,10 @@
   别删** —— 「服务没跑」该由我们自己回答,不该押在某个 find 实现对缺失参照物的处理上。
 - **地址栏的 `#tab` 被读走之前,谁都不许写它**(`workspace.js` 的 `workspaceLocated`)—— `restoreWorkspaceLocation()` 在
   `initWorkspace` 收尾时才读 hash,而 `loadGallery()` 是和它并排起跑的,图鉴接口先回来时 `applyGalleryFilter()` 会把 `#daily` 覆盖成 `#gallery`。
+- **反过来的那一半:人在首次定位之前点过导航,那一下就不许被定位换走**(`workspaceNavigated`)。他点的那一下比地址栏里那一份**新**,
+  而上面那条正让它写不进地址栏;换走之后来源面板那道 `sourceActive()` 直接 return、**数据请求一次都没发**:投递栏露着、按钮停在
+  「同步全部」、页面零报错 —— 像卡死,其实是被顶掉了(真机形态:刷新后立刻点侧栏)。口径是**人点的那一下赢**,地址栏里的图鉴筛选
+  照旧读。形态与回归见 `docs/decisions/link-grab.md`。
 - 向量子进程、帧协议见 `docs/decisions/embedding.md`;模块混跑那条的完整形态见 `code-stale.md`。
 
 ## 视觉语言(硬性)

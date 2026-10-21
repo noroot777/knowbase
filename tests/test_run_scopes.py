@@ -143,7 +143,10 @@ class MixedRangeRoundTests(RoundSourcesCase):
         # 同一个来源两步都在时取**抓取**那一份:它是收窄过的那一份,而面板那行
         # 「本次范围」念的正是它(写成导出那份整条通道 = 「全部订阅」,那句话承诺
         # 了这一轮并没有发生的放宽)。
-        self.assertEqual([str(self.a['id'])], mine['accounts'],
+        # 收窄发出去的是「明确点名编号」(`id:63` 这种形态,口径
+        # `kb/feeds/targets.py`):裸着发的那串数字同时也可能是另一条订阅的名字。
+        from kb.feeds import registry as reg
+        self.assertEqual([reg.id_target(self.a['id'])], mine['accounts'],
                          '抓取那一份收窄范围被导出那份整条通道盖掉了')
         self.assertEqual('targets', mine['retry'], 'retry 没透传,那行文案会念错')
 
@@ -203,6 +206,19 @@ class HistoryProjectionTests(RoundSourcesCase):
             pipeline_state._state, started_at='2026-10-20 09:00:00',
             finished_at='2026-10-20 09:10:00')), scopes=[None])),
             '元素验到被取用的那一层:历史那行逐条读 channel')
+        for bad in ({'channel': 'rss', 'accounts': 7},
+                    {'channel': 'rss', 'accounts': [{'id': 1}]},
+                    {'channel': ['rss'], 'accounts': []},
+                    {'channel': 'rss', 'accounts': [], 'retry': 7}):
+            self.assertFalse(valid_round(dict(run_record(dict(
+                pipeline_state._state, started_at='2026-10-20 09:00:00',
+                finished_at='2026-10-20 09:10:00')), scopes=[bad])),
+                f'逐字段验,和来源范围同一道:{bad}')
+        self.assertTrue(valid_round(dict(run_record(dict(
+            pipeline_state._state, started_at='2026-10-20 09:00:00',
+            finished_at='2026-10-20 09:10:00')),
+            scopes=[{'channel': 'rss', 'accounts': ['3'], 'retry': 'targets'}])),
+            '**反过来钉一边**:正常那一份照旧过门')
 
 
 class PanelSourceContractTests(unittest.TestCase):
@@ -216,6 +232,9 @@ class PanelSourceContractTests(unittest.TestCase):
     SCOPES = r'function pipeRunScopes\(\w+\) \{.*?\n\}'
     FINISHED = (r"let sourceSeenRun = '';\nfunction sourceRunFinished"
                 r'\(\w+\) \{.*?\n\}')
+    #: 「此刻该念哪一份终态」只有这一份口径,订阅页那条判据也从它取 —— 所以这里
+    #: 要把它一起抠进来(漏了它的后果是 `ReferenceError`,而不是一条假绿)。
+    RESULT = r'function pipeResult\(\w+\) \{[^\n]*\}'
 
     def node(self, script):
         done = subprocess.run(['node', '-e', script], capture_output=True, text=True)
@@ -267,6 +286,15 @@ class PanelSourceContractTests(unittest.TestCase):
         **不认 running→idle 那个跳变**:这条路一次模型都不调,整轮可能几百毫秒,
         面板一次都没见过 `running=true`(所以这里压根不摆那个中间态)。
         **反过来钉一边**:同一轮再问一次不许重复报,别人那一轮也不许认成自己的。
+
+        后两截摆的是「顶层答不出来源」那两档真实形态 —— **身份两档都在顶层**
+        (恢复会把它搬进内存状态,合并记录也沿用最后那一轮的身份),差的只有范围:
+        ①**恢复回来的那一轮**:来源只写在那一格结论里,顶层的抓取范围是
+        `{force: true}`、导出范围空着(历史故意不存它),派生出来的是空集;
+        ②**整批汇总那一轮**:范围在合并记录里按来源并过,而顶层只剩批次里最后
+        那一小轮的范围,前几轮碰过的来源一个都报不出来。
+        两档的后果一样:这一页认不出刚跑完那一轮跟自己有关,提示不消失、新抓的
+        条目也不重读。口径是**身份和范围取自同一份记录**(`pipeResult`)。
         """
         retried = {'running': False, 'run_id': 'run-retry-1',
                    'planned_stages': ['export', 'index', 'extract'],
@@ -275,8 +303,30 @@ class PanelSourceContractTests(unittest.TestCase):
         morning = dict(retried, run_id='run-morning')
         other = dict(retried, run_id='run-other',
                      export_filter={'channel': 'social', 'accounts': []})
+
+        def restored(run_id, channel):
+            """重启之后:身份在顶层,来源只在那一格结论里。"""
+            return {'running': False, 'run_id': run_id,
+                    'planned_stages': ['export', 'index', 'extract'],
+                    'crawl_filter': {'force': True}, 'export_filter': {},
+                    'last_run': {'run_id': run_id, 'crawl_filter': {'force': True},
+                                 'planned_stages': ['export', 'index', 'extract'],
+                                 'scopes': [{'channel': channel, 'accounts': [],
+                                             'retry': ''}]}}
+
+        def batched(run_id, *channels):
+            """整批汇总:顶层只剩最后那一小轮,合并记录里才是并过的那几个。"""
+            last = channels[-1]
+            return {'running': False, 'run_id': run_id,
+                    'planned_stages': ['crawl', 'export'],
+                    'crawl_filter': {'channel': last, 'accounts': []},
+                    'export_filter': {'channel': last, 'accounts': []},
+                    'last_run': {'run_id': run_id, 'planned_stages': ['crawl', 'export'],
+                                 'crawl_filter': {'channels': [
+                                     {'channel': c, 'accounts': []} for c in channels]}}}
         script = '\n'.join([
             self.pick('pipe_channels.js', self.SCOPES),
+            self.pick('pipe_view.js', self.RESULT),
             self.pick('sources.js', self.FINISHED),
             "let sourceKind = 'rss';",
             'let pipeSnapshot = ' + json.dumps(morning) + ';',
@@ -285,11 +335,17 @@ class PanelSourceContractTests(unittest.TestCase):
             'out.push(sourceRunFinished(false), sourceRunFinished(false));',
             'pipeSnapshot = ' + json.dumps(other) + ';',
             'out.push(sourceRunFinished(false));',
+            'pipeSnapshot = ' + json.dumps(restored('run-restored', 'rss')) + ';',
+            'out.push(sourceRunFinished(false), sourceRunFinished(false));',
+            'pipeSnapshot = ' + json.dumps(restored('run-restored-2', 'social')) + ';',
+            'out.push(sourceRunFinished(false));',
+            'pipeSnapshot = ' + json.dumps(batched('run-batch', 'rss', 'wechat_local')) + ';',
+            'out.push(sourceRunFinished(false));',
             'console.log(JSON.stringify(out));',
         ])
-        self.assertEqual([False, True, False, False], self.node(script),
-                         '只补导出那一轮认不出本来源,这一页就一直显示旧的失败')
-
+        self.assertEqual([False, True, False, False, True, False, False, True],
+                         self.node(script),
+                         '顶层答不出来源的那几档,这一页就一直显示旧的失败')
 
 if __name__ == '__main__':
     unittest.main()

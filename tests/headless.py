@@ -107,16 +107,52 @@ SHELL = headless_shell()
 NODE = shutil.which("node")
 
 
-def requires_headless(cls):
-    """给浏览器回归用的装饰器:node 和无头壳缺哪个都说清楚,外加怎么补。"""
+#: 显式关掉浏览器回归那一组(本机跑全量时想省下它那十几分钟)。
+#:
+#: **为什么要一个专门的开关**:不给 `HEADLESS_SHELL` 并**不**等于不跑 —— 上面那条
+#: 口径会自己去 playwright 缓存里找一份(本机实测就找到了),所以「我没给路径」
+#: 关不掉它。认 `1/true/yes/on`(不分大小写、容前后空白),其余一律当没关。
+SKIP_ENV = "KB_SKIP_BROWSER_TESTS"
+_ON = frozenset({"1", "true", "yes", "on"})
+
+
+def browser_tests_off() -> bool:
+    """这一轮是不是被人显式关掉了浏览器回归。"""
+    return os.environ.get(SKIP_ENV, "").strip().lower() in _ON
+
+
+def _skip_reason(need_node: bool) -> str:
+    """该不该跳过这一组,以及跳过的理由(空串 = 照旧跑)。**口径只有一份。**
+
+    **「人关的」和「这台机器缺东西」必须说成两句话**:一句 `OK (skipped=30)` 在
+    两种情形下长得一模一样,而含义差很远 —— 后者是环境缺件、前者是**这一轮没有
+    验过界面**。静默跳过正是本模块开头那段要避的坑。
+    """
+    if browser_tests_off():
+        return f"{SKIP_ENV} 已显式关掉浏览器回归：这一轮没有验过界面"
     missing = []
-    if NODE is None:
+    if need_node and NODE is None:
         missing.append("node(驱动 CDP 的那一侧)")
     if SHELL is None:
         missing.append(f"chrome-headless-shell —— {INSTALL_HINT}")
-    if missing:
-        return unittest.skip("缺 " + ";".join(missing))(cls)
-    return cls
+    return "缺 " + ";".join(missing) if missing else ""
+
+
+def requires_headless(cls):
+    """给浏览器回归用的装饰器:node 和无头壳缺哪个都说清楚,外加怎么补。"""
+    reason = _skip_reason(True)
+    return unittest.skip(reason)(cls) if reason else cls
+
+
+def requires_shell(cls):
+    """只要无头壳、不要 node 的那几组(自己拿 CDP 连,不跑 `.mjs` 探针)。
+
+    原来三处各写一份 `skipUnless(SHELL is not None, ...)`(`test_cdp_attach`、
+    `test_x_article_dom`、`test_x_article_fidelity`)—— 那个写法让上面那个开关
+    **关不住它们**:开关只认得过这里的那几组,而它们起的也是真浏览器。
+    """
+    reason = _skip_reason(False)
+    return unittest.skip(reason)(cls) if reason else cls
 
 
 def run_probe(argv, *, timeout: int = 300, env=None, cwd=None,
