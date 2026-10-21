@@ -9,8 +9,9 @@
 // 勾选快照 —— 前者才是这一块唯一会出事的地方(口径同 `pipe_stages_probe.mjs`)。
 // 另外钉三件事:
 // - **锁定要说清为什么和出路**:一片灰色不说话,用户只会以为坏了;
-// - **force 一档都不许丢**:按下按钮的是人,而退避是给自动轮次用的 —— 不带的后果
-//   是退避中的那几条被静默跳过(只记一笔 `deferred`),而页面说「同步已开始」;
+// - **要声明自己是人按的**:退避是给自动轮次用的,判和盖在 `kb/run_trigger.py` 一处,
+//   页面只负责声明 —— 丢了这句声明的后果是退避中的那几条被静默跳过(只记一笔
+//   `deferred`),而页面说「同步已开始」;
 // - **反过来钉一边**:同步中心那颗「新建同步」照旧六个来源随便勾、步骤不被入口改。
 //
 // 硬约束在 `docs/decisions/sync-entry.md` 第一节。自带只读 mock 后端,CDP 直连
@@ -176,7 +177,7 @@ check("起跑走的是管道通道,来源只有 rss、整条全选",
       && p.body.channels[0].channel === 'rss'
       && p.body.channels[0].accounts.sort().join() === '另一个博客,同名博客,某博客', JSON.stringify(p));
 check("步骤按入口那四段发下去", p.body.stages.join() === 'crawl,export,index,extract', JSON.stringify(p.body.stages));
-check("带着 force:人按的那一下要跳过来源退避", p.body.force === true, JSON.stringify(p.body));
+check("声明了这一下是人按的(退避由后端照此跳过)", p.body.trigger === 'manual', JSON.stringify(p.body));
 
 // ── 2. 行内那颗「同步」:连订阅也锁死 ────────────────────────────────────────
 await openSubs("rss");

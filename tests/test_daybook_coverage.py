@@ -220,8 +220,9 @@ class SettledOnlyWhenItRanTests(DaybookCase):
         with patch.object(reg, 'configuration_error',
                           lambda s, settings: ('待配置：摆盘'
                                                if s['id'] == self.c['id'] else '')):
-            # `force` 是「重试失败项」自己写进范围里的那一个(`start_retry_failed`),
-            # 不带它的话 A 还在失败退避里、这一轮压根不会取它。
+            # `force` 是人按的那一轮才有的那一档(判在 `kb/run_trigger.py`,
+            # 「重试失败项」声明自己是手动),不带它的话 A 还在失败退避里、
+            # 这一轮压根不会取它。
             got, stage = self.crawl({'channel': 'rss', 'force': True})
         self.assertIn(self.a['id'], got, '这一局的前提:这一轮真去取了 A')
         self.assertEqual('skipped', stage['status'],

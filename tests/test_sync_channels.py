@@ -35,7 +35,10 @@ class ChannelAPITests(unittest.TestCase):
             body = {"channel": "wechat_local", "accounts": ["指定号"],
                     "since_date": "2026-09-15", "until_date": "2026-09-15"}
             self.assertEqual(200, self.client.post("/api/pipeline/run", json=body).status_code)
-            self.assertEqual(body, start.call_args.kwargs["crawl_filter"])
+            # 多出来的 force 是「人按的那一轮跳过退避」,见
+            # test_a_run_through_this_api_is_a_hand_press_and_skips_the_backoff
+            self.assertEqual({**body, "force": True},
+                             start.call_args.kwargs["crawl_filter"])
 
     def test_a_source_sensitive_request_without_a_source_is_refused(self):
         """**点名了抓取/导出、却一个来源都没给:拒,不许替他挑一个。**
@@ -65,8 +68,8 @@ class ChannelAPITests(unittest.TestCase):
             self.assertEqual(200, r.status_code, r.text)
             self.assertTrue(start.called)
 
-    def test_a_hand_pressed_run_skips_the_source_backoff(self):
-        """按下按钮的是人,所以这一轮得**跳过来源退避**(`FetchScope.force`)。
+    def test_a_run_through_this_api_is_a_hand_press_and_skips_the_backoff(self):
+        """走到这个接口的都是**人按的**,所以这一轮得**跳过来源退避**。
 
         红的是 `crawl_filter` 里有没有 `force` —— 从那儿往下
         (`pipeline_stages._fetch` → `sync.collect` 那道 `retry_at`)另有自己的红
@@ -74,16 +77,32 @@ class ChannelAPITests(unittest.TestCase):
         静默跳过(只记一笔 `deferred`),而页面说「同步已开始」—— 而「失败之后手动点
         一次同步」恰恰是退避唯一的出路(CLAUDE.md「服务与运行时」)。
 
-        **反过来钉一边**:没点名要 force 的请求(定时轮次、老脚本)照旧不带 ——
-        退避本来就是给自动轮次用的。
+        **判在 `kb.run_trigger` 一处**:入口只声明自己怎么被触发的,所以这里钉的是
+        「**什么都不声明**也算人按的」—— 定时那一条压根不走 HTTP(`kb.daily_run.tick`
+        直接进管道),将来谁忘了声明,落在「多抓一次」那一侧而不是「静默不同步」。
+
+        **反过来钉一边**:明说了是定时轮次的那一轮照旧不带 —— 退避本来就是给它用的。
+        """
+        with patch.object(pipeline, "start_pipeline", return_value=True) as start:
+            r = self.client.post("/api/pipeline/run", json={"channel": "rss"})
+            self.assertEqual(200, r.status_code, r.text)
+            self.assertIs(True, start.call_args.kwargs["crawl_filter"].get("force"))
+            self.client.post("/api/pipeline/run",
+                             json={"channel": "rss", "trigger": "schedule"})
+            self.assertNotIn("force", start.call_args.kwargs["crawl_filter"])
+
+    def test_an_old_tab_still_sending_force_gets_the_same_round(self):
+        """浏览器里缓存着的老页面发的是 `force: true` —— 那个字段现在没人读了。
+
+        钉的是「老页面不会因此换一种行为」:它要的就是跳过退避,而现在默认就跳。
+        后果不对称 —— 若把未知字段当成「按定时跑」,老页面点一次同步会静默跳过刚
+        失败的那几条。
         """
         with patch.object(pipeline, "start_pipeline", return_value=True) as start:
             r = self.client.post("/api/pipeline/run",
                                  json={"channel": "rss", "force": True})
             self.assertEqual(200, r.status_code, r.text)
             self.assertIs(True, start.call_args.kwargs["crawl_filter"].get("force"))
-            self.client.post("/api/pipeline/run", json={"channel": "rss"})
-            self.assertNotIn("force", start.call_args.kwargs["crawl_filter"])
 
     def test_a_retired_channel_name_runs_as_the_one_that_replaced_it(self):
         """老页面/老脚本里写着的 `wechat_oa` 不该变成 400。

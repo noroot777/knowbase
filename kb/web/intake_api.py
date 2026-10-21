@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from kb import pipeline
+from kb import run_trigger
 from kb.feeds import registry as reg
 from kb.feeds import x_channels
 from kb.scanner import body_version_of
@@ -453,9 +454,14 @@ def sync(kind: str,body: SyncRequest):
     # 文档」,一次模型都不调。把它排除在计划外才是错的 —— 那样用户给某条
     # 订阅开了提取,它同步完也不会提取,得等绿泡泡那轮全流程定时同步顺手捎上。
     why: list[str] = []
-    if not pipeline.start_pipeline(['crawl','export','index','extract'], refused=why,
-            crawl_filter={
-            'channel':kind,'accounts':[str(s['id']) for s in selected], 'force':True}):
+    # 人按的那一轮跳过来源退避(判据只有一份:`kb.run_trigger`)。
+    # **accounts 发的是订阅 id**,不是名字:名字不唯一(唯一约束是 `(kind,url)`),
+    # 按名字发会把同名的另一条也抓上(见 `docs/decisions/sync-entry.md`)。
+    if not pipeline.start_pipeline(
+            ['crawl','export','index','extract'], refused=why,
+            crawl_filter=run_trigger.apply_force(
+                {'channel':kind,'accounts':[str(s['id']) for s in selected]},
+                run_trigger.MANUAL)):
         raise HTTPException(409, why[0] if why
                             else '其他同步正在运行，请结束后重试；自动同步会顺延')
     return {'ok':True,'detail':'同步已开始，完成后可在全文检索中查找'}

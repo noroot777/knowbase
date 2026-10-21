@@ -419,10 +419,12 @@ function pipeStableTargets(channel, names) {
   return names.map(n => byName.get(n) ?? n);
 }
 function pipeRunBody() {
-  // **force:按下这颗按钮的是人,退避是给自动轮次用的。** 不带的后果是退避中的
-  // 那几条被静默跳过(只记一笔 `deferred`),而面板上说「同步已开始」——
-  // 「失败之后手动点一次同步」这条唯一出路要绕开的正是那道闸。
-  const body = { stages: pipeStageList(), force: true };
+  // **声明这一轮是人按的**(`trigger`)。后端据此跳过来源退避 —— 退避是给自动
+  // 轮次用的,不跳的后果是退避中的那几条被静默跳过(只记一笔 `deferred`),而
+  // 面板上说「同步已开始」,「失败之后手动点一次同步」这条唯一出路正是要绕开它。
+  // **这里只声明、不判**:判据在后端一处(`kb/run_trigger.py`,「重试失败项」、
+  // 手动收录和日报那三条入口过的是同一份)。
+  const body = { stages: pipeStageList(), trigger: 'manual' };
   // **按步骤的实际依赖决定带不带来源**(`pipeNeedsSource` / `pipeNeedsTargets`,
   // 口径和后端 `run_scopes` 同一份):
   // - 全库那几步(索引/提取/整理/Wiki)一个来源字段都不带 —— 带上去只会让留档上

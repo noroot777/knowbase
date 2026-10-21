@@ -22,6 +22,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from kb import daily
+from kb import run_trigger
 from kb.config import (DATA_DIR, ScheduleUnreadable, announce_config_issue,
                        config_clock, config_day, config_flag, config_names, config_stamp,
                        derive_config, read_config_file, write_config_file)
@@ -353,14 +354,12 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
          channels: list[str], first_days: int,
          approval: daily.Approval | None = None) -> None:
     sched_day, retry, batch = _state['sched_day'], False, ''
-    # **手动起的那一轮跳过来源退避,定时那一轮照旧遵守它**(`FetchScope.force` →
-    # `kb.feeds.sync.collect` 那道 `retry_at`)。手动/自动这个事实本来就在契约里
-    # (`start(trigger=...)`:界面那条是 'manual',`tick()` 那条是 'schedule'),
-    # 原来只是没传到抓取参数上 —— 后果是勾了「跑完出日报」的那一次同步,刚失败
-    # 的订阅仍然被静默跳过(只记一笔 `deferred`),而同一颗按钮不勾日报却抓得到
-    # (第 1 轮审查 R3)。**判据写成"不是定时就算手动"**:方向上误放行顶多重抓
-    # 一次,漏放行是静默不同步(元规则那条)。
-    force = {} if _state.get('trigger') == 'schedule' else {'force': True}
+    # **手动起的那一轮跳过来源退避,定时那一轮照旧遵守它。** 手动/自动这个事实本来
+    # 就在契约里(`start(trigger=...)`:界面那条是 manual,`tick()` 那条是 schedule),
+    # 原来只是没传到抓取参数上 —— 后果是勾了「跑完出日报」的那一次同步,刚失败的
+    # 订阅仍然被静默跳过(只记一笔 `deferred`),而同一颗按钮不勾日报却抓得到。
+    # 判据和"没说算手动"那条方向都在 `kb.run_trigger`(四个入口一份口径)。
+    trigger = _state.get('trigger')
     try:
         if sync:
             from kb import pipeline as pl     # 延迟:它反过来 import 本模块
@@ -381,7 +380,8 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                                    else '超出时间预算,未同步'})
                     continue
                 _state['channels'].append(
-                    _sync_round(FETCH_STAGES, {'channel': channel, **force},
+                    _sync_round(FETCH_STAGES,
+                                run_trigger.apply_force({'channel': channel}, trigger),
                                 labels.get(channel, channel), budget_end, channel,
                                 batch=batch))
             # 入库那一段:等所有通道都抓完才跑,跑一次 —— 这时待索引的文件和
@@ -495,7 +495,7 @@ def _release_round(sched_day: str, retry: bool) -> None:
 
 def start(since: datetime | None = None, until: datetime | None = None,
           sync: bool = True, channels: list[str] | None = None,
-          first_days: int | None = None, trigger: str = 'manual',
+          first_days: int | None = None, trigger: str = run_trigger.MANUAL,
           sched_day: str = '', approval: daily.Approval | None = None) -> bool:
     """起一轮日报。已经在跑返回 False。
 
@@ -599,7 +599,7 @@ def tick() -> bool:
         # 定时这一轮不指定窗口:起点接上一份日报的截止时刻,终点是同步跑完的那一刻。
         started = start(sync=settings['sync'], channels=settings['channels'],
                         first_days=settings['first_days'],
-                        trigger='schedule', sched_day=today)
+                        trigger=run_trigger.SCHEDULE, sched_day=today)
         if started:
             _mark_attempt(now, today)      # 受理了才记
         return started
