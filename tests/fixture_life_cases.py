@@ -28,6 +28,39 @@ from tests.fixture_life_probe import (
 )
 
 
+def _mine(pid: int, started: str | None,
+          holder: subprocess.Popen | None) -> bool:
+    """这个号上现在还是不是**我们起的那个**进程?发信号的每一条分支都只经过这里。
+
+    两条证明,哪条用得上用哪条:
+
+    1. **身份**(`_identity`:pid + 启动时刻)。对不上就一个字都不碰 —— 要么它已经退
+       了,要么这个号上现在是别人。只比脚本名不够(另一轮的同型夹具也叫这个名字),
+       只比 pid 不够(号会被回收)。
+    2. **谁还握着这个号**。`holder` 是这个 pid 的父进程、而且永远不 `wait()`,所以它
+       活着的时候这个号即使已经退了也还只是僵尸,不可能落到别人手上。这条**不用取
+       样**,所以身份还没量出来(`_claim_pid` 把登记排在取样之前)、或者这会儿量不出
+       来的时候,创建者靠它照样收得掉自己起的那个东西。
+
+    两条都用不上就**抛**:凭一个号就动手会杀掉别人的进程(实测过),安静地放过它则是
+    静默漏一个还在服务的夹具 —— 测试里抛出去是响的,那是这两者之外唯一诚实的出口。
+    """
+    if started is not None:
+        if not started:
+            return False             # 起它那会儿 `ps` 就说没有这个号 —— 本来没得收
+        try:
+            now = _identity(pid)
+        except AssertionError:
+            pass                     # 量不出来 → 落到下面那条不靠取样的证明上
+        else:
+            return now == started    # 空串 = `ps` 说没有这个进程 → 不碰
+    if holder is not None and holder.poll() is None:
+        return True
+    raise AssertionError(
+        f"认不出 pid {pid} 还是不是我们起的那个(记下的身份 {started!r}),"
+        "也没有别的所有权证明 —— 不许凭一个号就动手,也不许当成没事")
+
+
 class 起与收(unittest.TestCase):
     """真起一个夹具,断言的是「那个进程还在不在」。本身不含用例。"""
 
@@ -113,9 +146,10 @@ class 起与收(unittest.TestCase):
                 continue
             grandchild = int(line)
             break
-        # 身份就地记即可 —— 它是**不可变**的那部分(启动时刻),exec 换掉命令行也不变,
-        # 所以不必等它「安定下来」,也不会留下一个空身份的登记(见 `_identity`)。
-        self.addCleanup(self._reap_pid, grandchild, _identity(grandchild))
+        # **拿到 pid 这一刻就立回收责任,身份随后再填**(见 `_claim_pid`):取样会抛,
+        # 抛在登记前面的话这个刚起来的夹具就谁都不认领了。身份本身只记**不可变**的那部
+        # 分(启动时刻),exec 换掉命令行也不变,所以不必等它「安定下来」。
+        self._claim_pid(grandchild, middle)
         _wait_listening(port, middle)
         return port, middle, grandchild
 
@@ -129,16 +163,46 @@ class 起与收(unittest.TestCase):
             proc.kill()
             proc.wait(timeout=5)
 
-    def _reap_pid(self, pid: int, started: str) -> None:
+    def _reap_pid(self, pid: int, started: str | None,
+                  holder: subprocess.Popen | None = None) -> None:
         """按**这一轮那个进程的身份**收 —— `started` 是起它的时候记下的 `_identity`。
 
-        身份对不上就一个字都不碰:要么它已经退了,要么这个号上现在是别人。只比脚本名
-        不够(另一轮的同型夹具也叫这个名字),只比 pid 不够(号会被回收)。
+        判据只有一份,在 `_mine` 里(身份、或者「谁还握着这个号」);这里只负责动手。
+        `holder` 给得出来就一定要给:回收时再取样一次也会抛,抛在这儿等于把一个还在服
+        务的夹具丢在后台。
         """
-        if not started or _identity(pid) != started:
+        if not _mine(pid, started, holder):
             return
         with contextlib.suppress(OSError):
             os.kill(pid, signal.SIGKILL)
+
+    def _claim_pid(self, pid: int, holder: subprocess.Popen | None = None, *,
+                   stopped: bool = False) -> str:
+        """**一个裸 pid 一拿到手就立回收责任,不等身份量得出来。** 返回量到的身份。
+
+        `addCleanup(self._reap_pid, pid, _identity(pid))` 是**先求实参、再登记**:
+        `_identity` 量不出来时一律抛(它接口里就这么定的),抛在那一行登记就压根没发
+        生 —— 用例当场红,而刚起来的那个夹具谁都不认领了。实测:在取样处定点注入它自
+        己声明会抛的 `AssertionError`,已有清理(收中间进程、关 stdout)全部执行成功,
+        留下的还是那个真夹具,ppid 已经是 1、页面照样 200。**让用例报红不等于把它创建
+        的进程收回了。**
+
+        所以顺序倒过来:先登记,再把身份填进那个盒子。身份还没填上就被收的那一刻,
+        `_mine` 走的是 `holder` 那条不靠取样的证明。
+
+        **`holder` 自己的清理要登记在这一行之前**(清理是后进先出,于是这一条排在它前
+        面收,那会儿 holder 还活着)。反了的话 `_mine` 当场抛 —— 是个响的红,不会变成
+        静默漏一个进程。
+        """
+        box: list[str | None] = [None]
+        reaper = self._reap_stopped if stopped else self._reap_pid
+
+        def _collect() -> None:
+            reaper(pid, box[0], holder)
+
+        self.addCleanup(_collect)
+        box[0] = _identity(pid)      # 量不出来照旧抛 —— 但回收责任已经立好了
+        return box[0]
 
     def _wait_dead(self, pid: int, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
@@ -153,14 +217,15 @@ class 起与收(unittest.TestCase):
     # ---- 空闲那一道 ----
 
 
-    def _reap_stopped(self, pid: int, started: str) -> None:
-        """被 SIGSTOP 按住的那个:**先核验身份,再 SIGCONT**。
+    def _reap_stopped(self, pid: int, started: str | None,
+                      holder: subprocess.Popen | None = None) -> None:
+        """被 SIGSTOP 按住的那个:**先核验,再 SIGCONT**。
 
         SIGCONT 也是信号。上一版为了「先放它走才收得动」把它发在核验之前,那等于对一个
         还没认过的 pid 动手 —— 号被回收之后唤醒的是别人的进程。发信号的每一条分支都只
-        许作用在核验过的那个身份上,一条都不例外。
+        许作用在核验过的那个号上,一条都不例外(判据同样在 `_mine`)。
         """
-        if not started or _identity(pid) != started:
+        if not _mine(pid, started, holder):
             return
         with contextlib.suppress(OSError):
             os.kill(pid, signal.SIGCONT)

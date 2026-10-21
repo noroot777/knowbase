@@ -518,7 +518,7 @@ class http那条路(unittest.TestCase):
     def test_空闲的keepalive连接不算在途(self):
         """**反过来钉在途那一边**:keep-alive 连接等下一个请求时阻塞在读请求行上,把那
         一段算成在途的话,浏览器挂着一条连接就能让夹具永不退出 —— 空闲超时还是等于没装,
-        只是换了个失守的方向。所以在途从**请求行已经读到**开始算。
+        只是换了个失守的方向。所以在途从**请求头整份读完、而且解析成功**那一刻才开始算。
         """
         srv = self._serve()
         before = fixture_life.inflight()

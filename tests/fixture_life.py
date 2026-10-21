@@ -450,7 +450,7 @@ def install(*, limit: float | None = None) -> None:
     (对应 `probe_shell.mjs` 那个 interval 的 `unref()`)。
     """
     global _LIMIT, _IDLE_ARMED
-    _end_staging()                   # 摆盘结束:stdout 换回真身(见 `_begin_staging`)
+    _end_staging()                   # 摆盘结束:两条通道换回真身(见 `_begin_staging`)
     _LIMIT = idle_limit() if limit is None else limit
     touch()
     _say(f'tests/fixture_life.py: {banner(_LIMIT)}\n')
@@ -511,9 +511,16 @@ class guard:
 class TouchingHandlerMixin:
     """给 `http.server` 那一侧的适配:每个请求记一次在途。
 
-    **在途从「请求行已经读到」开始算,不从 `handle_one_request` 进门算**:keep-alive
-    连接空闲等下一个请求时就阻塞在读请求行上,把那一段算成在途的话,浏览器挂着一条
-    连接就能让夹具永不退出 —— 空闲超时还是等于没装,只是换了个失守的方向。
+    **在途从「请求头整份读完、而且解析成功」开始算,不从 `handle_one_request` 进门
+    算**:keep-alive 连接空闲等下一个请求时就阻塞在读请求行上,把那一段算成在途的话,
+    浏览器挂着一条连接就能让夹具永不退出 —— 空闲超时还是等于没装,只是换了个失守的
+    方向。
+
+    **代价写在这儿**:请求头发到一半的连接也还不算在途,所以极慢地送请求头时夹具可能
+    在这一份请求提交完之前按空闲退掉(实测 idle=1、发完请求行和半截 Host 再等 2.5 秒,
+    进程已经 rc=0)。两边只能选一边 —— 把没发完的连接算成在途,等于把空闲退出这件事
+    交给对端,而那是上面说的那个失守方向。真要兼顾得在 HTTP 解析层把「空连接」和「已
+    经开始的请求」分开、再给半截请求一个自己的时限,那是另一件事。
     """
 
     def log_message(self, fmt, *args):  # noqa: D102 - 见类 docstring

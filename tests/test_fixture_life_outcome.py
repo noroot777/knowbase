@@ -25,10 +25,10 @@ import unittest
 import urllib.error
 import urllib.request
 
-from tests import fixture_life
+from tests import fixture_life, fixture_voice
 from tests.fixture_life_cases import 起与收
 from tests.fixture_life_probe import (   # noqa: F401 - 见那边的说明
-    _shut_fds, _stat_of, _open_fds, _free_port, _alive, _wait_gone, _ping, _wait_listening, _owner_pipe, _identity, _reset_state, _age, _closed,
+    _shut_fds, _stat_of, _open_fds, _free_port, _alive, _wait_gone, _ping, _wait_listening, _owner_pipe, _reset_state, _age, _closed,
     ROOT,
 )
 
@@ -183,7 +183,7 @@ class 后果(起与收):
         self.addCleanup(self._reap, middle)
         self.addCleanup(middle.stdout.close)
         child = int(middle.stdout.readline().strip())
-        self.addCleanup(self._reap_stopped, child, _identity(child))
+        self._claim_pid(child, middle, stopped=True)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             state = subprocess.run(["ps", "-o", "stat=", "-p", str(child)],
@@ -351,6 +351,64 @@ class 后果(起与收):
         self.assertTrue(_wait_gone(proc, 30), "空闲那道防线必须已经装上了")
         self.assertFalse(self._port_open(port), "退了就不该再占着这个端口")
 
+    def test_摆盘阶段写stderr堵住也堵不住防线(self):
+        """**上面那条只圈住了 stdout,摆盘期的另一条通道一样堵得死防线。**
+
+        七个 ASGI 入口导入 `kb.server` 那一路会发弃用警告,`kb/store.py` 导入的 jieba 还
+        会按 `logging.StreamHandler(sys.stderr)` 把初始化日志**同步**写 stderr —— 两者都
+        不经过 `_say`,也就都不在那个有界队列里面。实测给真阅读入口一根填满的 stderr、
+        `-u` 关掉缓冲:过了三倍空闲上限进程还在、HTTP 不响应、沙箱根还在;一开始读那根
+        管子,它八秒内就起来服务、随后按空闲正常退掉 rc=0。手起这条路没有 owner,空闲那
+        道又必须等摆盘结束才装,所以堵在那儿的时候**两个自退条件都没在跑**,
+        `KB_FIXTURE_IDLE` 设成多小都没用。
+
+        断言的是后果:**照旧起得来服务,空闲到点照旧自己退**。
+        """
+        _, w = self._plug()
+        port = _free_port()
+        env = {**os.environ, fixture_life.IDLE_ENV: "1", "PYTHONUNBUFFERED": "1"}
+        env.pop(fixture_life.OWNER_ENV, None)
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "tests/serve_reading.py", "--port", str(port)],
+            cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=w)
+        self.addCleanup(self._reap, proc)
+        _wait_listening(port, proc, timeout=120)
+        self.assertTrue(self._port_open(port),
+                        "摆盘阶段写 stderr 写不出去也必须照旧起来服务")
+        self.assertTrue(_wait_gone(proc, 30), "空闲那道防线必须已经装上了")
+        self.assertFalse(self._port_open(port), "退了就不该再占着这个端口")
+
+    def test_摆盘边界立不起来就不许接着开服务(self):
+        """**立不起那道边界的时候不许「就这样算了」继续跑。**
+
+        `dup` / `pipe` / 搬运线程任意一步失败,上一版都是直接 `return`:接下来**可能**一
+        切正常,也可能在摆盘途中某一次别人的同步输出上永久阻塞 —— 而那正是「一道防线都
+        没装、进程永久留着」那个形态(手起没有 owner,空闲那道要等摆盘结束才装)。
+
+        这里在真入口上定点注入 `os.pipe` 的 `EMFILE`(它自己声明会抛的那个),断言后果:
+        **它当场退、退出码是认得出来的那一个,一个端口都没开出来**,而不是安静地跑进一
+        个没有防线的运行态。
+        """
+        port = _free_port()
+        code = "\n".join([
+            "import os, runpy, sys",
+            "def boom():",
+            "    raise OSError(24, 'injected EMFILE')",
+            "os.pipe = boom",
+            "sys.argv = sys.argv[1:]",            # argv[0] 得是那个入口自己
+            "runpy.run_path(sys.argv[0], run_name='__main__')",
+        ])
+        env = {**os.environ, fixture_life.IDLE_ENV: "1"}
+        env.pop(fixture_life.OWNER_ENV, None)
+        done = subprocess.run(
+            [sys.executable, "-c", code, "tests/serve_workspace.py",
+             "--port", str(port)],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, fixture_voice.NO_BOUNDARY_RC,
+                         f"立不起边界就该当场退:{done.stdout[-400:]!r} "
+                         f"{done.stderr[-400:]!r}")
+        self.assertFalse(self._port_open(port), "一个端口都不该开出来")
+
     def test_低上限下高位用例不许污染整轮(self):
         """**准备阶段失败只该让这一条跳过,不该把整个测试进程推到 `EMFILE`。**
 
@@ -419,7 +477,7 @@ class 后果(起与收):
             "from tests import headless",
             "with headless.fixture_server(script='serve_workspace.py',"
             " timeout=60) as base:",
-            "    print(base, base.pid, flush=True)",
+            "    print(base, base.pid, base.root, flush=True)",
             "    time.sleep(600)",
         ])
         env = {**os.environ, fixture_life.IDLE_ENV: "0"}   # 单验 owner 这一道
@@ -429,12 +487,19 @@ class 后果(起与收):
         self.addCleanup(self._reap, middle)
         self.addCleanup(middle.stdout.close)
         line = middle.stdout.readline().strip()
-        base, _, raw_pid = line.partition(" ")
+        base, raw_pid, raw_root = (line.split(" ") + ["", ""])[:3]
         self.assertTrue(base.startswith("http://"), f"没拿到 base URL:{line!r}")
         port = int(base.rsplit(":", 1)[1])
+        # **中间进程是被 SIGKILL 收掉的**,它 `fixture_server` 的 `finally` 一行都不跑,
+        # 那份临时根就留在盘上(实测这一条每跑一次留一个空的 `kb-fixture-*`)。所以这一
+        # 轮的根由我们收,而且只收**前缀对得上、又正好在临时目录底下**的那一个 —— 路径
+        # 是从子进程的输出里读来的,不核一遍不许往 `rmtree` 上送。
+        self.assertEqual(tempfile.gettempdir(), os.path.dirname(raw_root), line)
+        self.assertTrue(os.path.basename(raw_root).startswith("kb-fixture-"), line)
+        self.addCleanup(shutil.rmtree, raw_root, ignore_errors=True)
         # **按它交回来的 pid 收,不按端口找。** 端口不是所有权凭据(见 `_identity`)。
         grandchild = int(raw_pid)
-        self.addCleanup(self._reap_pid, grandchild, _identity(grandchild))
+        self._claim_pid(grandchild, middle)
         middle.kill()
         middle.wait(timeout=5)
         deadline = time.monotonic() + 15
