@@ -198,6 +198,79 @@ class GroupTests(unittest.TestCase):
             parse_page_list(html, BASE)
         return time.monotonic() - start
 
+    def test_one_undated_row_does_not_take_its_dated_neighbour_down(self):
+        """**展示分工不许两次否决同一个列表。**
+
+        整页那道闸认定这条结构路径是个列表之后,**组入选**还是按分组各自问的,
+        于是同一个"分工"在第二道闸上又把列表切断一次:`<h3>` 那组 1 条 1 带
+        日期(入选),`<span>` 那组 2 条 1 带日期(两道都不满足),于是那篇**原生
+        带日期**的真文章跟着没日期的那条一起落选。
+
+        **这一条钉的是静默漏收**:实测基线收 3 篇,只改整页计数的那版收 1 篇,
+        而且 `errors` 为空、同步显示成功 —— 比报错坏,面板上看不出来。
+        """
+        page = ('<html><body><main><ul>'
+                '<li><a href="/news/a"><time>2026-10-20</time>'
+                '<h3>First dated article</h3></a></li>'
+                '<li><a href="/news/b"><time>2026-10-19</time>'
+                '<span>Second dated article</span></a></li>'
+                '<li><a href="/news/c"><span>Third undated article</span></a></li>'
+                '</ul></main></body></html>').encode()
+        got = parse_page_list(page, BASE)
+        self.assertEqual([e['url'].split('.com')[1] for e in got],
+                         ['/news/a', '/news/b', '/news/c'])
+        self.assertEqual([e['published'][:10] for e in got[:2]],
+                         ['2026-10-20', '2026-10-19'])
+
+    def test_deeply_nested_same_name_containers_are_found_by_identity(self):
+        """祖先定位按**节点身份**,不按内容相等。
+
+        `box in chain` / `chain.index(box)` 走的是 bs4 的 `Tag.__eq__` —— 那是
+        **内容相等**,会递归比较名字、属性和整棵子树。原容器本身也是无属性
+        `<div>`、里面还包着几百层同样的 `<div>` 时,它在找到真正那个节点之前
+        就把栈耗光:实测整页 `RecursionError`,三条记录(其中两条本来好好带着
+        日期)一条都收不到。这个模块认节点一律按身份(别处都是 `id(node)`)。
+
+        **原容器必须也是 `<div>`**:那条 3200 层的性能用例原容器是 `<li>`,
+        比较时遇到内部 `<div>` 立刻因标签名不同返回 False,压根进不到递归比较
+        里 —— 它本轮全程是绿的,证明不了这件事。**断言的是三条都在**,不是
+        "没抛某一类异常"。
+        """
+        def record(href, title, stamp):
+            return ('<div>' * 600 + stamp
+                    + f'<a href="{href}"><h3>{title}</h3></a>' + '</div>' * 600)
+        page = ('<html><body><main>'
+                + record('/news/deep-0', 'Undated deep record', '')
+                + record('/news/deep-1', 'First dated deep', '<time>2026-10-20</time>')
+                + record('/news/deep-2', 'Second dated deep', '<time>2026-10-19</time>')
+                + '</main></body></html>').encode()
+        got = {e['url'].split('.com')[1]: e for e in parse_page_list(page, BASE)}
+        self.assertEqual(sorted(got), ['/news/deep-0', '/news/deep-1', '/news/deep-2'])
+        self.assertEqual(got['/news/deep-1']['published'][:10], '2026-10-20')
+        self.assertEqual(got['/news/deep-2']['published'][:10], '2026-10-19')
+
+    def test_an_illegal_date_in_the_parent_does_not_hide_the_real_one_inside(self):
+        """"大的解析不出来、里面的小的也不会有"**不成立**,所以跳过内部要先问
+        清楚是哪一种读不出来。
+
+        `item_published` 把整片子树的文字拼成一串、只认其中**第一个**日期形状,
+        所以父容器里一个非法编号(`2026-02-30`)就让它返回空,而里面那个小容器
+        的 `2026-10-20` 本来读得出来。按"解析失败"去跳过内部会把这两篇真文章
+        一起漏掉;按"压根没有日期形状"去跳才安全。
+
+        (日期提取器"只试第一个匹配"这件事本身是既有边界,原始基线在这一页上
+        也收不到 —— 这里钉的是**跳过的闸**别把它放大成漏收。)
+        """
+        page = ('<html><body><main><ul>'
+                '<li>2026-02-30<div><a href="/news/a"><h3>First headline</h3></a>'
+                ' 2026-10-20</div></li>'
+                '<li>2026-02-30<div><a href="/news/b"><h3>Second headline</h3></a>'
+                ' 2026-10-19</div></li>'
+                '</ul></main></body></html>').encode()
+        got = parse_page_list(page, BASE)
+        self.assertEqual([(e['url'].split('.com')[1], e['published'][:10]) for e in got],
+                         [('/news/a', '2026-10-20'), ('/news/b', '2026-10-19')])
+
     def test_the_real_anthropic_page(self):
         got = parse_page_list(SAMPLE, BASE)
         titles = [e['title'] for e in got]

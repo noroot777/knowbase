@@ -147,6 +147,22 @@ def item_published(node) -> str:
     return read_published(node.get_text(' '))
 
 
+def _date_shaped(node) -> bool:
+    """这片子树里有没有**像日期**的文字 —— 只问形状,不问合不合法。
+
+    `item_published` 读不出日期有两种原因:**压根没有日期**,或者**有、但第一
+    个日期形状是非法的**(它把整片子树的文字拼成一串、只认第一个匹配)。两者
+    对"能不能跳过这片子树"的答案正相反:前者跳了也不会错过什么,后者里面的
+    小容器往往正常读得出来 —— 实测父容器带一个 `2026-02-30` 编号时,跳过内部
+    会把那两篇真文章一起漏掉。所以 `_dated_boxes` 用这个谓词当闸,不拿"解析
+    失败"当"没有日期"。
+    """
+    if node.find('time') is not None:
+        return True
+    text = ' '.join(node.get_text(' ').split())
+    return any(pattern.search(text) for pattern in (_ISO, _CN, _MDY, _DMY))
+
+
 def _blocks(node, skip=frozenset()) -> list[str]:
     """这条记录里的文本块,按出现顺序、已归一空白;`skip` 里那些容器不算。"""
     out = []
@@ -260,7 +276,7 @@ def _list_group(soup: BeautifulSoup, base_url: str):
         # 那一版收 0 篇并给这条订阅记一次失败、进退避。
         reach[key[0]] += dated
         if dated:
-            groups.append((dated, fixed))
+            groups.append((dated, fixed, key[0]))
     if not groups or max(reach.values()) < MIN_DATED:
         # 整页一条结构路径都不够 `MIN_DATED` = 这压根不是列表页。这道闸只问
         # 一次,不逐组问 —— 逐组问就把单条头条卡片永久关在门外。
@@ -270,7 +286,16 @@ def _list_group(soup: BeautifulSoup, base_url: str):
     # 本身就是"这是文章区"的证据)。代价是导航里一个孤立的、容器里又恰好有
     # 日期的链接会被收进来 —— 那顶多多一条条目,而漏掉头条是静默丢数据,
     # 两个方向差着一个量级。
-    picked = [(d, items) for d, items in groups if d >= MIN_DATED or d == len(items)]
+    #
+    # **第三种入选:整页那道闸已经认定这条结构路径是个列表**(`reach` 够数)。
+    # 这一条是必须的 —— 上面两道都是**按分组**问的,于是同一个"分工"会在这里
+    # 第二次把列表切断:一行标题写 `<h3>`、另两行写 `<span>`(其中一行没日期)
+    # 时,`<h3>` 那组 1/1 入选,`<span>` 那组 1/2 两道都不满足,于是那篇**原生
+    # 带日期**的真文章跟着没日期的那条一起落选。实测基线收 3 篇、只改整页计数
+    # 的那版收 1 篇,而且 `errors` 为空、同步显示成功 —— 静默漏收,比报错坏。
+    # 展示分工该管的是上移资格和选主,不该两次否决同一个列表。
+    picked = [(d, items) for d, items, path in groups
+              if d >= MIN_DATED or d == len(items) or reach[path] >= MIN_DATED]
     # 带日期的条目越多越像"主列表",排在前面:`parse_page_list` 按地址先到
     # 先得去重,而 featured 卡片的容器里连摘要一起,标题判定不如列表里那份准。
     picked.sort(key=lambda g: (-g[0], len(g[1])))
@@ -447,14 +472,30 @@ def _dated_boxes(items: list):
         if item_published(box) or not titled(anchor):
             out.append(box)
             continue
-        # **从原容器之外开始找,不从 `<a>` 开始。** 原容器刚刚被判过没有日期,
-        # 而 `<a>` 到原容器之间那些祖先的子树**都在原容器里面**(容器的定义
-        # 就是"最后一个只属于这条链接的祖先"),既然大的那个没有日期,里面的
-        # 小的也不会有 —— 从 `<a>` 起逐层重扫等于把同一片已排除的子树按深度
-        # 扫了一遍又一遍,`O(深度²)`。实测 1600 层嵌套的无日期页面上这一段从
-        # 0.49 秒回到 0.06 秒(基线 0.057 秒)。这一段祖先只属于本链接,所以
-        # 跳过它们也不会错过下面那道"这一层是不是别人的"。
-        above = chain[chain.index(box) + 1:] if box in chain else chain
+        # **从原容器之外接着往上走,不从 `<a>` 重新开始。** 原容器刚刚被判过
+        # 没有日期,而 `<a>` 到原容器之间那些祖先的子树都在原容器**里面** ——
+        # 从 `<a>` 起逐层重扫等于把同一片已排除的子树按深度扫了一遍又一遍,
+        # `O(深度²)`:3200 层嵌套的无日期页面实测 1.83 秒,改成这样 0.125 秒。
+        # 这一段祖先只属于本链接,所以跳过它们不会错过"这一层是不是别人的"。
+        #
+        # **但只有"压根没有日期形状的文本"才敢跳**(`_date_shaped`)。"大的解析
+        # 不出来、里面的小的也不会有"这个推理**不成立**:`item_published` 把整
+        # 片子树的文字拼成一串、只认其中第一个日期形状,所以父容器里一个非法
+        # 编号(`2026-02-30` 这种)就能让它返回空,而里面某个小容器的正常日期
+        # 本来读得出来。按"解析失败"去跳会把那两篇真文章一起漏掉。
+        #
+        # **走 parent 链,不在 chain 里找下标。** `box in chain` / `chain.index`
+        # 用的是 bs4 的 `Tag.__eq__` —— 那是**内容相等**,会递归比较名字、属性
+        # 和整棵子树;深层同名 `<div>` 容器上实测直接 `RecursionError`,整页报错、
+        # 一篇都收不到。这个模块里认节点一律按**身份**(别处都是 `id(node)`)。
+        if _date_shaped(box):
+            above = chain
+        else:
+            above = []
+            node = box.parent
+            while node is not None and getattr(node, 'name', None):
+                above.append(node)
+                node = node.parent
         for node in above:
             # 先问"这一层是不是别人的"再问日期:共享那一层上的日期属于
             # 下一条记录,取过来就是整组抄同一个日期。
