@@ -413,9 +413,20 @@ def _valid_round(run) -> bool:
     # 来源清单**验到元素**:历史那行和主视图逐条读 `s.channel`,混进一个 `null`
     # 就在那一下抛(口径同上面 `failures` 那一段)。老记录没有这一格,照旧有效。
     told = run.get("scopes")
-    if not (told is None or (isinstance(told, list)
-                             and all(isinstance(one, dict) for one in told))):
-        return False
+    if told is not None:
+        if not isinstance(told, list):
+            return False
+        for one in told:
+            if not isinstance(one, dict):
+                return False
+            # **逐字段验,和来源范围过同两道**(`_filter_ok` 用的就是它们):
+            # `accounts` 落成一个数字时只验到"是个字典"照旧过门,而消费方把它当
+            # 可迭代的摊开(`pipeline_stages.run_scopes`),那一下抛 TypeError;
+            # 前端那份同口径的则显示成 undefined 条。恢复现在还会把这一格带上
+            # 展示副本(`pipeline_state._with_restored_scopes`),它传得比以前远。
+            if not (_names_ok(one.get("accounts")) and _channel_ok(one.get("channel"))
+                    and _channel_ok(one.get("retry"))):
+                return False
     notes = run.get("crawl_retry")
     if not (notes is None or isinstance(notes, dict)):
         return False

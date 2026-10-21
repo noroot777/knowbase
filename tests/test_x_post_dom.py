@@ -66,7 +66,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-@requires_shell
+@requires_shell   # 这一道闸的口径只有一份(见 tests/headless.requires_shell)
 class PostDomTests(EmptyDomCases, unittest.TestCase):
     @classmethod
     def setUpClass(cls):

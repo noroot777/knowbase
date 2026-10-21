@@ -17,7 +17,7 @@ from tests.test_x_post import OLD
 from tests.test_x_post_dom import Handler, article
 
 
-@requires_shell
+@requires_shell   # 这一道闸的口径只有一份(见 tests/headless.requires_shell)
 class ResponseDomTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

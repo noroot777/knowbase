@@ -290,6 +290,45 @@ try {
         swapped.stage === 'writing' && /换掉/.test(swapped.hint)
           && swapped.run === 'r-swap', JSON.stringify(swapped));
 
+  // ── 13. 刷新之后立刻点侧栏:首次定位不许把人点的那一下扔掉 ────────────────
+  // 这一局是**摆出来的**,不靠抢时机:把页面还回「地址还没被读走」那一刻
+  // (`workspaceLocated = false`),再按真实顺序走一遍 —— 人先点,定位后到。
+  // 真机上那一刻就是「刷新后立刻点侧栏」,机器忙的时候几乎必中(满载实测第 1 次
+  // 就红),空载约 40 次红 1 次 —— 所以靠抢时机的写法会变成一条看运气的用例。
+  //
+  // 判据是**人眼看得见的那件事**:点了「存链接」,眼前就该是「我的订阅」那一屏、
+  // 投递栏露着,而不是被弹回图鉴。真机上跟着来的还有一截:来源面板的装载有一道
+  // `sourceActive()`(判据含 `activeTab === 'subs'`),被切走之后它直接 return,
+  // 面板的数据请求一次都没发、那颗按钮停在「同步全部」。
+  //
+  // **那两样在这个摆局里都当不了判据**(注入实测,如实记着):`sourceData` 在 8 秒
+  // 窗口里被别的路重填;按钮那行字被页面上那条还在跑的轮询重画了 —— 它只看
+  // `sourceKind`,不看面板装没装完。真机上它们之所以卡着,是因为页面刚打开、
+  // 那两条路一次都还没跑过。所以这里钉的是「哪一屏在眼前」,它由 `switchTab`
+  // 直接写,谁也盖不掉。
+  await evalJs(`history.replaceState(null, '', '#gallery');
+    switchTab('gallery'); workspaceLocated = false; workspaceNavigated = false; true`);
+  await evalJs(`grabFromNav(); true`);              // 人点的那一下(此刻还写不进地址栏)
+  await evalJs(`restoreWorkspaceLocation(); true`); // 页面装完才跑的那一步
+  check("刷新后立刻点侧栏:那一下没被首次定位扔掉,眼前就是手动收录那一屏",
+        await until(`activeTab === 'subs' && sourceKind === 'inbox'
+                     && $('subspanel').style.display !== 'none'
+                     && $('gallerypanel').style.display === 'none'
+                     && !$('grab-bar').hidden`, 8000),
+        await evalJs(`JSON.stringify({activeTab, sourceKind, 地址: location.hash,
+          订阅屏: $('subspanel').style.display, 图鉴屏: $('gallerypanel').style.display,
+          投递栏隐藏: $('grab-bar').hidden})`));
+  check("人点的那一下也落进了地址栏(定位期间写被挡着,定位完要补上)",
+        await evalJs(`location.hash === '#subs'`), await evalJs(`location.hash`));
+  // **反过来钉一边**:没人点过的时候,地址栏照旧说话 —— 否则深链就全失效了。
+  // 用「全文检索」而不是日报:这个沙箱摆得出它要的那两个接口,不会带出别的红。
+  await evalJs(`history.replaceState(null, '', '#search');
+    workspaceLocated = false; workspaceNavigated = false;
+    restoreWorkspaceLocation(); true`);
+  check("没人点过的时候照旧按地址栏定位",
+        await evalJs(`activeTab === 'search' && location.hash === '#search'`),
+        await evalJs(`JSON.stringify([activeTab, location.hash])`));
+
 } catch (err) {
   check("探针跑完", false, err.message);
 } finally {

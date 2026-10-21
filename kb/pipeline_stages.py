@@ -169,7 +169,7 @@ def _one_channel(stage: str, scope: dict, run, collector) -> None:
     的结论写到了另一个来源那一段上)。
     """
     with results.channel_run(stage, scope["channel"], collector, scope["accounts"]):
-        results.cover(stage, collector, run(collector, scope))
+        results.cover(stage, run(collector, scope))
 
 
 def _per_channel(stage: str, crawl_filter: dict | str | None, run) -> None:

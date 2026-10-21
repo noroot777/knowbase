@@ -3,7 +3,7 @@
 
 三层的分工(完整语境、实测耗时见 docs/decisions/test-tiers.md):
 
-- **fast(缺省)**:discover 全部,但先设 `KB_TEST_NO_BROWSER` —— 所有真实浏览器
+- **fast(缺省)**:discover 全部,但先设 `KB_SKIP_BROWSER_TESTS` —— 所有真实浏览器
   测试类在 `tests.headless.browser_gate` 那一个闸门上被显式拦下(skip 消息写清
   出路),同文件里的纯逻辑用例照常跑。这是提交前的门禁层。
 - **probes**:只跑引用 `tests.headless` 的那些测试文件(浏览器回归和它们的邻居)。
@@ -34,7 +34,7 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
-from tests.headless import NO_BROWSER_ENV
+from tests.headless import SKIP_ENV
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS_DIR = ROOT / "tests"
@@ -69,9 +69,9 @@ def _apply_tier_env(tier: str) -> None:
     一次(或嵌套跑过 fast)的壳里,工具齐备、显式全量照样把浏览器回归整层拦掉,
     而且一切显示正常。"""
     if tier == "fast":
-        os.environ[NO_BROWSER_ENV] = "1"
+        os.environ[SKIP_ENV] = "1"
     else:
-        os.environ.pop(NO_BROWSER_ENV, None)
+        os.environ.pop(SKIP_ENV, None)
 
 
 def _iter_tests(suite):

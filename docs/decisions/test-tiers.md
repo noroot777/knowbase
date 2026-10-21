@@ -20,7 +20,7 @@
   probes 名单)。工具要求按组自定(node+壳 / 只要壳 / 原生 Chrome),闸门不强加
   统一依赖。结构守卫走 AST 的 skipUnless/skipIf 条件源码(docstring 和注释不进
   射程),在 `tests/test_tiers.py`。
-- **所选层对快速层开关的态度必须显式**:fast 设 `KB_TEST_NO_BROWSER`,probes/full
+- **所选层对快速层开关的态度必须显式**:fast 设 `KB_SKIP_BROWSER_TESTS`,probes/full
   **清掉继承值**,都在 discover 之前(闸门是类装饰器,import 那一刻就定了)。不清
   的话,外头 export 过一次的壳里,工具齐备、显式全量照样把浏览器回归整层拦掉,
   而且一切显示正常。

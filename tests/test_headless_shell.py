@@ -38,16 +38,19 @@ class HeadlessShellTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("HEADLESS_SHELL", None)
+        # **那个开关也算环境,得一并清掉**:这一组问的是「找得到吗、找不到时怎么说」,
+        # 而 `browser_gate` 把「人显式关了浏览器回归」排在缺件之前 —— 开关落在环境里时
+        # 下面两条断言拿到的是开关那句话,于是「按说明关掉浏览器回归再跑」反而收到两条
+        # 失败(实测 `KB_SKIP_BROWSER_TESTS=1` 跑全量:3471 条里红这两条)。
+        # 清掉是**隔离**、不是跳过:缺件那句话照旧要验。开关自己的口径在
+        # tests/test_browser_switch.py,那边也钉着「开关开着时这一组仍须全绿」。
+        os.environ.pop(headless.SKIP_ENV, None)
         home = patch.object(Path, "home", staticmethod(lambda: self.root / "home"))
         home.start()
         self.addCleanup(home.stop)
         which = patch.object(headless.shutil, "which", return_value=None)
         which.start()
         self.addCleanup(which.stop)
-        # 这一组验的都是「没设快速层闸门」那条路(找不到工具时怎么提示)。闸门变量
-        # 是 ./kb.sh test 在整个进程上设的,先摘掉,不然 requires_headless 在闸门处
-        # 就返回了,下面两条看 skip 消息的用例读到的是闸门的话。
-        os.environ.pop(headless.NO_BROWSER_ENV, None)
 
     def test_env_var_wins(self):
         """自己装的 / CI 下的那一份:HEADLESS_SHELL 说了算,不去探缓存。"""

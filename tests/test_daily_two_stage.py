@@ -105,13 +105,33 @@ class DailyTwoStageSyncTests(unittest.TestCase):
             daily_run._run(None, None, True, list(channels), daily.FIRST_DAYS)
         return calls
 
+    def test_a_hand_started_report_skips_the_backoff_but_the_timer_does_not(self):
+        """手动起的那一轮**跳过来源退避**,定时那一轮照旧遵守它。
+
+        红的是抓取参数里有没有 `force` —— 从那儿往下
+        (`pipeline_stages._fetch` → `sync.collect` 那道 `retry_at`)另有自己的红
+        (`tests/test_retry_scope.py`),这里补的是中间一直断着的那一节:勾了
+        「跑完出日报」的那一次同步走的是本模块,而它原来一律不带 force,于是刚
+        失败的订阅被静默跳过(只记一笔 `deferred`),同一颗按钮不勾日报却抓得到。
+
+        **反过来钉一边**:`trigger='schedule'` 那一轮一个 force 都不许带 ——
+        退避本来就是给自动轮次用的,定时轮绕开它等于每 30 秒重试一次失败源。
+        """
+        self.assertEqual([True, True],
+                         [f.get('force') for _, f in self.sync_run(channels=('rss', 'social'))[:2]])
+        self.assertEqual([None, None],
+                         [f.get('force') for _, f
+                          in self.sync_run(channels=('rss', 'social'), trigger='schedule')[:2]])
+
     def test_fetch_is_per_channel_and_the_digest_stages_run_once(self):
         calls = self.sync_run()
         self.assertEqual([daily_run.FETCH_STAGES] * 3 + [daily_run.DIGEST_STAGES,
                                                          daily_library.LIBRARY_STAGES],
                          [stages for stages, _ in calls])
-        self.assertEqual([{'channel': 'wechat_local'}, {'channel': 'social'},
-                          {'channel': 'rss'}, None, None], [f for _, f in calls])
+        self.assertEqual([{'channel': 'wechat_local', 'force': True},
+                          {'channel': 'social', 'force': True},
+                          {'channel': 'rss', 'force': True}, None, None],
+                         [f for _, f in calls])
         # 反过来钉一边:抓取那几轮一次都没要过 index/extract(那正是原来被重做
         # N 遍的两段),后面那两轮全库的活也一次都没要过 crawl/export(不会顺手重抓)。
         self.assertEqual([], [c for c in calls[:3] if {'index', 'extract'} & set(c[0])])

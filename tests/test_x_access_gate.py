@@ -111,6 +111,11 @@ class AccessGateTests(ChannelBase):
                             (source['id'],)).fetchone()[0])
 
 
+# 闸走 `tests.headless` 的统一出口,**不从 `dom` 的命名空间里借**:这一组自己不导入
+# 无头壳,原来是隔着 `test_x_post_dom` 取 `dom.SHELL`/`dom.INSTALL_HINT` 的。那边改用
+# 统一闸、不再导入 `INSTALL_HINT` 之后,这一行在**导入期**就 AttributeError,整个模块
+# 连同 `from tests.test_x_access_gate import gate` 的 test_x_provenance_merge_contract
+# 一起 load 失败(两条 ERROR、少跑 16 条用例)。回归见 tests/test_browser_switch.py。
 @requires_shell
 class AccessGateDomTests(unittest.TestCase):
     def load(self, html):

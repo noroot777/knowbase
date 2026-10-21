@@ -4,7 +4,7 @@
 四条口径,各钉两面(完整语境 docs/decisions/test-tiers.md):
 
 - **闸门与标记只有 browser_gate 一处**(requires_headless / requires_shell 是它
-  的包装):设了 `KB_TEST_NO_BROWSER` 就整类拦下,skip 消息写清出路;缺工具按调
+  的包装):设了 `KB_SKIP_BROWSER_TESTS` 就整类拦下,skip 消息写清出路;缺工具按调
   用点自己的说法 skip,但 **kb_browser 标记无论如何都得带着** —— probes 层的覆盖
   账全靠它。反过来钉:没设变量、工具齐备就放行,requires_shell 不许强加 node。
 - **层对开关的态度必须显式**:fast 设上,probes/full 清掉继承值 —— 不清的话,
@@ -38,7 +38,7 @@ from tests import headless, tiers
 class BrowserGateTests(unittest.TestCase):
 
     def test_the_gate_blocks_browser_classes_and_names_the_way_out(self):
-        with mock.patch.dict(os.environ, {headless.NO_BROWSER_ENV: "1"}):
+        with mock.patch.dict(os.environ, {headless.SKIP_ENV: "1"}):
 
             @headless.requires_headless
             class Probe(unittest.TestCase):
@@ -48,7 +48,7 @@ class BrowserGateTests(unittest.TestCase):
         self.assertTrue(getattr(Probe, "__unittest_skip__", False),
                         "设了快速层变量,浏览器类却没有被拦下")
         reason = Probe.__unittest_skip_why__
-        self.assertIn(headless.NO_BROWSER_ENV, reason)
+        self.assertIn(headless.SKIP_ENV, reason)
         # skip 消息要写清出路,不许只说「跳过了」
         self.assertIn("./kb.sh test", reason)
         # 被拦的也得带标记:分层统计按它数「浏览器用例该有几条」
@@ -60,7 +60,7 @@ class BrowserGateTests(unittest.TestCase):
         with mock.patch.dict(os.environ), \
                 mock.patch.object(headless, "NODE", "node"), \
                 mock.patch.object(headless, "SHELL", Path("/stub/shell")):
-            os.environ.pop(headless.NO_BROWSER_ENV, None)
+            os.environ.pop(headless.SKIP_ENV, None)
 
             @headless.requires_headless
             class Probe(unittest.TestCase):
@@ -73,7 +73,7 @@ class BrowserGateTests(unittest.TestCase):
 
     def test_a_blank_value_means_off(self):
         # 口径与其它 KB_* 开关一致:空白串算没设。
-        with mock.patch.dict(os.environ, {headless.NO_BROWSER_ENV: "  "}), \
+        with mock.patch.dict(os.environ, {headless.SKIP_ENV: "  "}), \
                 mock.patch.object(headless, "NODE", "node"), \
                 mock.patch.object(headless, "SHELL", Path("/stub/shell")):
 
@@ -88,7 +88,7 @@ class BrowserGateTests(unittest.TestCase):
         # 缺工具被 skip 的类也得带 kb_browser:不带的话,probes 的覆盖账少记它,
         # 「浏览器零覆盖」恰好在最需要报警的那台机器上看不出来。
         with mock.patch.dict(os.environ):
-            os.environ.pop(headless.NO_BROWSER_ENV, None)
+            os.environ.pop(headless.SKIP_ENV, None)
 
             @headless.browser_gate(["原生 Chrome(这一组验 SingletonLock)"])
             class Probe(unittest.TestCase):
@@ -104,7 +104,7 @@ class BrowserGateTests(unittest.TestCase):
         with mock.patch.dict(os.environ), \
                 mock.patch.object(headless, "NODE", None), \
                 mock.patch.object(headless, "SHELL", Path("/stub/shell")):
-            os.environ.pop(headless.NO_BROWSER_ENV, None)
+            os.environ.pop(headless.SKIP_ENV, None)
 
             @headless.requires_shell
             class Probe(unittest.TestCase):
@@ -121,14 +121,14 @@ class TierEnvTests(unittest.TestCase):
     def test_fast_sets_and_other_tiers_clear_the_inherited_gate(self):
         # probes/full 必须把继承值清掉:不清的话,外头 export 过一次的壳里,
         # 工具齐备、显式全量照样把浏览器回归整层拦掉,而且一切显示正常。
-        with mock.patch.dict(os.environ, {headless.NO_BROWSER_ENV: "1"}):
+        with mock.patch.dict(os.environ, {headless.SKIP_ENV: "1"}):
             tiers._apply_tier_env("probes")
-            self.assertNotIn(headless.NO_BROWSER_ENV, os.environ)
-            os.environ[headless.NO_BROWSER_ENV] = "1"
+            self.assertNotIn(headless.SKIP_ENV, os.environ)
+            os.environ[headless.SKIP_ENV] = "1"
             tiers._apply_tier_env("full")
-            self.assertNotIn(headless.NO_BROWSER_ENV, os.environ)
+            self.assertNotIn(headless.SKIP_ENV, os.environ)
             tiers._apply_tier_env("fast")
-            self.assertEqual("1", os.environ[headless.NO_BROWSER_ENV])
+            self.assertEqual("1", os.environ[headless.SKIP_ENV])
 
 
 class BrowserCoverageTests(unittest.TestCase):
@@ -150,7 +150,7 @@ class BrowserCoverageTests(unittest.TestCase):
 
     def test_skipped_browser_cases_do_not_count_as_coverage(self):
         with mock.patch.dict(os.environ):
-            os.environ.pop(headless.NO_BROWSER_ENV, None)
+            os.environ.pop(headless.SKIP_ENV, None)
 
             @headless.browser_gate(["根本不存在的工具"])
             class Browserish(unittest.TestCase):
@@ -173,7 +173,7 @@ class BrowserCoverageTests(unittest.TestCase):
     def test_an_executed_browser_case_counts(self):
         # 反过来钉:真跑了的要记上,别把部分覆盖误报成零覆盖。
         with mock.patch.dict(os.environ):
-            os.environ.pop(headless.NO_BROWSER_ENV, None)
+            os.environ.pop(headless.SKIP_ENV, None)
 
             @headless.browser_gate([])
             class Browserish(unittest.TestCase):
@@ -187,7 +187,7 @@ class BrowserCoverageTests(unittest.TestCase):
     def test_a_class_level_fixture_skip_counts_nothing_as_ran(self):
         # setUpClass 抛 SkipTest:两条方法一条都没开始,skipped 里只有 holder。
         with mock.patch.dict(os.environ):
-            os.environ.pop(headless.NO_BROWSER_ENV, None)
+            os.environ.pop(headless.SKIP_ENV, None)
 
             @headless.browser_gate([])
             class ClassSkipBrowserish(unittest.TestCase):
@@ -217,7 +217,7 @@ class BrowserCoverageTests(unittest.TestCase):
         fake.setUpModule = setUpModule
         with mock.patch.dict(os.environ), \
                 mock.patch.dict(sys.modules, {fake.__name__: fake}):
-            os.environ.pop(headless.NO_BROWSER_ENV, None)
+            os.environ.pop(headless.SKIP_ENV, None)
 
             @headless.browser_gate([])
             class ModuleSkipBrowserish(unittest.TestCase):
@@ -235,7 +235,7 @@ class BrowserCoverageTests(unittest.TestCase):
         # 子例 skip 记的是带参数的子例 id,对不上方法 id —— 正向口径按
         # 「跑了一半不算验全」记:方法开始了,但该验的那部分没验。
         with mock.patch.dict(os.environ):
-            os.environ.pop(headless.NO_BROWSER_ENV, None)
+            os.environ.pop(headless.SKIP_ENV, None)
 
             @headless.browser_gate([])
             class SubtestSkipBrowserish(unittest.TestCase):
@@ -260,7 +260,7 @@ class TierVerdictTests(unittest.TestCase):
         # 账本按 test id(模块.类.方法)记,两个临时类不许同名 —— 同名会在
         # set 里合并成一条,账目失真。
         with mock.patch.dict(os.environ):
-            os.environ.pop(headless.NO_BROWSER_ENV, None)
+            os.environ.pop(headless.SKIP_ENV, None)
 
             @headless.browser_gate(missing)
             class Browserish(unittest.TestCase):
@@ -273,7 +273,7 @@ class TierVerdictTests(unittest.TestCase):
     def _fixture_broken_class(self, exc, name):
         # setUpClass 一上来就抛:两条方法一条都不会开始。
         with mock.patch.dict(os.environ):
-            os.environ.pop(headless.NO_BROWSER_ENV, None)
+            os.environ.pop(headless.SKIP_ENV, None)
 
             @headless.browser_gate([])
             class Browserish(unittest.TestCase):
