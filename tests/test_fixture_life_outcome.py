@@ -499,8 +499,7 @@ class 后果(起与收):
             "if still:",
             "    os.kill(box['pid'], 9)",          # 兜底:断言红了也不许留在后台
         ])
-        done = subprocess.run([sys.executable, "-c", code], cwd=ROOT,
-                              capture_output=True, text=True, timeout=180)
+        done = self._run_nested([sys.executable, "-c", code], timeout=180)
         line = next((ln for ln in done.stdout.splitlines()
                      if ln.startswith("alive=")), "")
         self.assertTrue(line, f"子进程没报出结果:{done.stdout[-300:]!r} "
@@ -523,10 +522,10 @@ class 后果(起与收):
         with tempfile.TemporaryDirectory(prefix="kb fixture space-") as tmp:
             env = {**os.environ, "TMPDIR": tmp}
             env.pop(fixture_life.OWNER_ENV, None)
-            done = subprocess.run(
+            done = self._run_nested(
                 [sys.executable, "-m", "unittest", "tests.test_fixture_life_outcome."
                  "后果.test_真的fixture_server给得出可用的凭据"],
-                cwd=ROOT, env=env, capture_output=True, text=True, timeout=180)
+                timeout=180, env=env)
             self.assertEqual(done.returncode, 0,
                              f"带空格的临时目录下也该绿:{done.stderr[-600:]!r}")
             self.assertEqual([], os.listdir(tmp),
@@ -568,8 +567,7 @@ class 后果(起与收):
             "    left, len(res.skipped), len(res.errors) + len(res.failures), ok),",
             "    flush=True)",
         ])
-        done = subprocess.run([sys.executable, "-c", code], cwd=ROOT,
-                              capture_output=True, text=True, timeout=180)
+        done = self._run_nested([sys.executable, "-c", code], timeout=180)
         line = next((l for l in done.stdout.splitlines() if l.startswith("left=")), "")
         self.assertTrue(line, f"子进程没报出结果:{done.stdout!r} {done.stderr[-400:]!r}")
         got = dict(part.split("=", 1) for part in line.split())

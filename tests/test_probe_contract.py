@@ -34,7 +34,7 @@ LEAK_TESTS = "test_probe_leak.py"
 # `test_no_test_launches_a_sandbox_server_itself` 唯一的例外对象(同上,理由在那条用例里)
 #: 夹具自退那一块的测试(拆成单元/后果两份);开例外的理由在守卫那一条里。
 LIFE_TESTS = {"test_fixture_life.py", "test_fixture_life_outcome.py",
-              "test_fixture_life_identity.py"}
+              "test_fixture_life_identity.py", "test_fixture_life_nested.py"}
 
 
 # 类级 fixture 会建出来的那几种东西,和"收尾"长什么样
@@ -318,6 +318,39 @@ class ProbeSourceContractTests(unittest.TestCase):
         self.assertEqual([], offenders,
                          "这些地方建了一个独立的测试壳却没把它的清理交给外层 —— "
                          "中途红一下,它起的进程就没人收了")
+
+    def test_内层再跑一轮的那种子进程不许用裸的超时(self):
+        """**`subprocess.run(..., timeout=...)` 只杀直接那个子进程。**
+
+        夹具自退那一块有几条用例要在子进程里再跑一轮 unittest,而内层那一轮自己还会起中间
+        进程和真夹具。外层 deadline 到了时被强杀的是那个运行器,它一条 `addCleanup` 都跑
+        不了 —— 两层后代都没人收,夹具的 owner 写端还攥在活着的中间进程手里,EOF 那道也
+        不响。后果那一边在 `tests/test_fixture_life_nested.py` 钉着;这里钉的是**全仓有没有
+        漏掉的位置**:凡起一个「内层还要再跑一轮 unittest」的子进程,都得过
+        `_run_nested`(它给内层独立会话和隔离 `TMPDIR`,并在超时那条路上按组回收)。
+
+        判据是「这个函数起了子进程,而且交给它的代码里要再跑一轮 unittest」。只跑单个入口
+        的那几条(注入启动边界、注入线程起不来)压根没有后代,不在射程内;**按字面判,所以
+        把那段代码拼进一个变量再传进去不在射程内** —— 今天的形态都是就地写出来的,而守卫
+        误报一次,下一个人就会去给一个不起后代的调用套上进程组。
+        """
+        shell = "起" + "与收"            # 同上:拼出来,否则这一行自己就被扫中
+        offenders = []
+        for f in sorted(HERE.glob("test_fixture_life*.py")):
+            for fn in [n for n in ast.walk(ast.parse(f.read_text(encoding="utf-8")))
+                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+                calls = _calls(fn)
+                if not any(c in ("run", "Popen", "_run_nested") for c in calls):
+                    continue         # 这个函数压根不起子进程
+                texts = [n.value for n in ast.walk(fn)
+                         if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+                nested = any(t == "unittest" or "unittest.main" in t or shell in t
+                             for t in texts)
+                if nested and "_run_nested" not in calls:
+                    offenders.append(f"{f.name}:{fn.name}")
+        self.assertEqual([], offenders,
+                         "这些地方在子进程里又跑了一轮 unittest,却没把那棵树的回收"
+                         "责任拿在外层 —— 外层超时一到,内层起的夹具就没人收了")
 
     def test_class_fixtures_register_their_cleanup_when_they_build_it(self):
         """类级 fixture 必须**建完就登记** `addClassCleanup`,不许只写 `tearDownClass`。

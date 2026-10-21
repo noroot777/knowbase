@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
@@ -157,6 +159,67 @@ class 起与收(unittest.TestCase):
         self._claim_pid(grandchild, middle)
         _wait_listening(port, middle)
         return port, middle, grandchild
+
+    def _run_nested(self, argv: list[str], *, timeout: float,
+                    env: dict[str, str] | None = None,
+                    ) -> subprocess.CompletedProcess:
+        """起一个**内层验证运行器**,整棵树的最终回收责任留在我们这一层。
+
+        几条用例要在子进程里再跑一轮 unittest(低上限、资源紧张、带空格的 `TMPDIR`),
+        而内层那一轮自己还会起中间进程和真夹具。**`subprocess.run(..., timeout=...)` 在
+        这儿不够**:它超时只 SIGKILL 直接那个子进程,被强杀的运行器一条 `addCleanup` 都
+        跑不了 —— 它起的那两层就没人收了。实测把一个内层运行器在起好夹具之后按住到外层
+        deadline:运行器没了,中间进程和夹具都还活着、页面 200、那份根也还在;夹具的
+        owner 写端攥在**活着的**中间进程手里,所以连 EOF 那道防线都不会响,而
+        `idle='0'` 那一档连空闲防线都没有。
+
+        所以这一层做两件事:给内层一个**独立会话**(它的 pid 就是那个新组的 pgid,收的
+        时候按组收,不按端口或脚本名去猜别人的进程),再给它一份**隔离的 `TMPDIR`**
+        (里面留下的根由我们删,同样不按名字猜别人的目录)。调用方给了 `TMPDIR` 的话就
+        建在它底下,所以「那个目录底下什么都不剩」这类断言照旧成立。
+
+        超时返回的 `returncode` 是 `None` —— 调用方照旧断言自己那件事,**没有一条路会把
+        后代留在后台**。
+        """
+        env = dict(os.environ if env is None else env)
+        box = tempfile.mkdtemp(prefix="nested-", dir=env.get("TMPDIR") or None)
+        self.addCleanup(shutil.rmtree, box, ignore_errors=True)
+        env["TMPDIR"] = box
+        proc = subprocess.Popen(argv, cwd=ROOT, env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                start_new_session=True)
+        self.addCleanup(self._sweep_session, proc)   # 进程一建出来就立回收责任
+        try:
+            try:
+                out, err = proc.communicate(timeout=timeout)
+                rc = proc.returncode
+            except subprocess.TimeoutExpired:
+                self._sweep_session(proc)   # 这一刻还没 wait 过 → 那个组是我们的
+                out, err = proc.communicate()   # 组已经收干净,这一次读得到 EOF
+                rc = None
+        finally:
+            # **删在组收干净之后、返回之前**:上面那条 `addCleanup` 只是兜底(走到那儿
+            # 已经太晚 —— 调用方「那个目录底下什么都不剩」的断言排在清理前面)。
+            shutil.rmtree(box, ignore_errors=True)
+        return subprocess.CompletedProcess(argv, rc, out, err)
+
+    def _sweep_session(self, proc: subprocess.Popen) -> None:
+        """把那个内层运行器**整组**收掉。
+
+        **归属证明是「我们还没 wait 过它」**:组首还没被收尸(活着、或者已经是僵尸)的
+        时候这个 pgid 就被它占着,内核不可能把同一个号分给别人的组。所以 `returncode`
+        一旦有值就**什么都不做** —— 那一刻证明已经没了,凭一个号对整组动手,杀掉的可能
+        是别人那一轮的验证。口径同 `_mine` 的 holder 那条:两条都用不上就不动手。
+
+        正常跑完那条路上内层自己的 `addCleanup` 已经收过一遍(那是另一套保证,各条用例
+        的断言钉着它的后果),所以这里不动手**不是漏了**,是没有可用的所有权证明。
+        """
+        if proc.returncode is not None:
+            return
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5)
 
     def _port_open(self, port: int) -> bool:
         with socket.socket() as s:

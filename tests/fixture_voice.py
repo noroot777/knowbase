@@ -87,7 +87,12 @@ def _running_as_entry() -> bool:
 
 
 def _flush(fd: int) -> None:
-    """把 Python 层那点缓冲先倒出去,免得它在换号之后才落到另一头。"""
+    """把 Python 层那点缓冲倒出去。**只许在这个号已经指着一根有人读的管子时调。**
+
+    `suppress(Exception)` 只接得住异常,接不住**阻塞**:满管道上的同步 `flush()` 不抛
+    任何东西,它就停在那儿。所以这个函数自己不安全 —— 安全由调用点的顺序保证,两处
+    调用点各写了为什么(`_begin_staging` 换完号才调、`_end_staging` 换回真身之前调)。
+    """
     with contextlib.suppress(Exception):
         (sys.stdout if fd == 1 else sys.stderr).flush()
 
@@ -175,12 +180,21 @@ def _begin_staging() -> None:
     except Exception as exc:         # dup / pipe / 线程都在这儿:一个都不许静默跳过
         no_defense(f'摆盘期的输出边界立不起来({exc!r})')
     for fd, (real, _read_fd, write_fd) in plumbing.items():
-        _flush(fd)
+        # **先换号,再倒缓冲 —— 这个顺序本身就是那道边界的一部分。** 反过来的话,倒缓冲
+        # 那一下是对**还没换掉**的真 fd 做同步 `flush()`:真管道满了又没人消费时它永久
+        # 停在那儿,而此刻 owner 和空闲两道看门狗都还没装(这个模块是 `fixture_life` 在
+        # 自己模块体里 import 进来的),没有任何更晚的硬退出能打断它。实测给一根预填满
+        # 的真管道、在 import 入口之前往 Python 缓冲里写一段不带换行的字:两条通道各自
+        # 都是进程活着、首页不监听,线程栈停在 `_flush`;一开始消费那根管子它才继续往下
+        # 跑、按空闲正常退掉。换完号之后再倒,倒进的是那根**一直有搬运线程读着**的管子,
+        # 那点旧内容照旧出得去(经队列写回真身,同一条通道上先后不乱),堵也只堵搬运
+        # 线程,主线程照旧把余下的防线装完。
         try:
             os.dup2(write_fd, fd)
         except (OSError, ValueError) as exc:
             no_defense(f'{fd} 号换不成那根管子({exc!r})')
         _STAGED[fd] = real
+        _flush(fd)
     for _fd, (_real, _read_fd, write_fd) in plumbing.items():
         with contextlib.suppress(OSError):
             os.close(write_fd)       # fd 1 / fd 2 自己握着写端了
@@ -194,7 +208,7 @@ def _end_staging() -> None:
     划得来。
     """
     for fd, real in list(_STAGED.items()):
-        _flush(fd)                   # Python 层缓冲里的先落进管子
+        _flush(fd)                   # 这一刻号还指着那根管子(有人读)→ 倒它是安全的
         with contextlib.suppress(OSError):
             os.dup2(real, fd)        # 写端最后一个引用没了 → 搬运线程读到 EOF 自己退
         del _STAGED[fd]
