@@ -179,6 +179,9 @@ function renderWechatSubsStatus() {
     : '其他来源正在同步，新任务会顺延。';
   updateWechatNotices();
 }
+// 公众号那一页的「同步全部」:**也走起跑弹窗**,锁定在本机绿泡泡那条通道上。
+// 改之前它直接起跑而**不带步骤清单**,被后端兜底成六段全跑 —— 顺手跑掉几十分钟的
+// 全库整理和 Wiki,页面上一个字都不说(`docs/decisions/sync-entry.md`)。
 async function syncWechatSubs() {
   if (subsWechatBusy || pipeSnapshot?.running) return;
   subsWechatBusy = true; renderWechatSubsStatus();
@@ -188,11 +191,8 @@ async function syncWechatSubs() {
     const channel = wechatSubsChannel();
     if (!channel) throw new Error('这个来源的采集通道暂不可用，请确认采集器配置后重试');
     setPipeChannel(channel);
-    // accounts 空 = 该来源的全部订阅(kb/web/pipeline_api.py 的 ChannelScope)
-    await pipePost('/api/pipeline/run', { channels: [{ channel, accounts: [] }] });
-    toast('同步已开始', { type: 'ok', detail: '进度在同步中心实时显示，离开页面不影响同步。' });
-    await refreshPipe();
-  } catch (e) { toast('未能开始同步', { detail: e.message }); }
+    await openPipeModal({ channel, accounts: [], stages: PIPE_INTAKE_STAGES });
+  } catch (e) { toast('未能打开同步', { detail: e.message }); }
   finally { subsWechatBusy = false; renderWechatSubsStatus(); }
 }
 
@@ -359,6 +359,13 @@ async function loadSourceModule(reset = false, selectedId = null) {
   } finally {
     if (sourceActive()) queueSourcePoll();
   }
+}
+// 起跑弹窗起完一次跑会叫它(`pipe_setup.js` 的 `startPipeFromModal`)。
+// 不在「我的订阅」那几页时是空操作。
+function onPipeStarted() {
+  if (typeof renderWechatSubsStatus === 'function') renderWechatSubsStatus();
+  if (!sourceActive()) return;
+  updateSourceRunStatus(); queueSourcePoll();
 }
 function queueSourcePoll() {
   clearTimeout(sourcePoll);
@@ -580,15 +587,25 @@ async function moreSourceItems() {
   } catch(e) { if (currentSourceItems(kind, version, q, id)) sourceError(e.message); }
   finally { if (version === sourceItemsVersion) $('source-more').disabled = false; }
 }
+// 「我的订阅」里点同步 = 打开起跑弹窗,**锁定在你正在看的这一页**。硬约束(含
+// 「手动收录为什么不走这条路」)在 `docs/decisions/sync-entry.md` 第一节。
+const PIPE_INTAKE_STAGES = ['crawl', 'export', 'index', 'extract'];
 async function syncSource(ids = []) {
   if (sourceBusy) return;
+  // 手动收录没有可轮询的源,弹窗里来源/时间范围/订阅三块对它全是空的,照旧直接起跑
+  if (sourceModules.get(sourceKind)?.pollable !== false) {
+    // 订阅身份传**名字**:弹窗的名单来自 `/api/pipeline/accounts`(那是名字),对不上
+    // 会被滤成空、退回"整条全选"。后端两种都认(`registry.in_scope`)。
+    const names = ids.map(id => sourceData?.sources.find(s => s.id === id)?.name).filter(Boolean);
+    return openPipeModal({ channel: sourceKind, accounts: names, stages: PIPE_INTAKE_STAGES });
+  }
   sourceBusy = true; updateSourceRunStatus();
   try {
     await pipePost(`/api/intake/${sourceKind}/sync`, { source_ids:ids });
     await refreshPipe(); updateSourceRunStatus();
-    toast('同步已开始', { type:'ok', detail:'内容会先保存，再建立检索索引。离开页面不影响同步。' });
+    toast('已开始写入知识库', { type:'ok', detail:'内容会先保存，再建立检索索引。离开页面不影响同步。' });
     queueSourcePoll();
-  } catch(e) { toast('未能开始同步', { detail:e.message }); }
+  } catch(e) { toast('未能开始', { detail:e.message }); }
   finally { sourceBusy=false; updateSourceRunStatus(); }
 }
 $('source-list').addEventListener('click', e => {

@@ -23,13 +23,79 @@ function pipeFailedChannels() { return pipeRunSel.filter(id => pipeAccounts.get(
 function pipeSelected(channel) { return pipeSel.get(channel) || new Set(); }
 function pipeSelCount() { return pipeReadyChannels().reduce((n, id) => n + pipeSelected(id).size, 0); }
 function savePipeDraft() {
+  // **锁定那一次一个字都不往同步中心那份记忆里写**(理由同 `applyPipeLock`)。
+  // 不挡的话,点一次某条订阅的「同步」,这个来源记着的"上次勾了哪几个"就被改写成
+  // 那一条 —— 下次从同步中心进来,这个来源只剩那一条还勾着,而没人说一声。
+  if (pipeLock) return;
   for (const id of pipeReadyChannels()) pipeDrafts.set(id, [...pipeSelected(id)]);
 }
 function pipeSetupError(message = '') {
   $('pipe-setup-error').hidden = !message; $('pipe-setup-error').textContent = message;
 }
-async function openPipeModal() {
-  if (pipeAction || pipeSnapshot?.running) return;
+// ── 锁定入口 ────────────────────────────────────────────────────────────────
+// 「我的订阅」里点同步,弹的是同一个弹窗,但**这一次只跑你正在看的那一页**:
+// 来源定死成它、其余灰掉点不动。两条理由:
+// - 那一页的按钮本来就只管那一类来源,弹窗里却能勾别的,等于给了一个它从来没有
+//   过的能力,而用户按"我点的是公众号那一页"理解这一轮;
+// - 起跑请求里那个来源不是从弹窗勾选里来的,而是入口定的 —— 两边各判一遍就会岔。
+// `{ channel, accounts }`:accounts 非空 = 连订阅也定死(每行那颗「同步」)。
+// null = 同步中心的「新建同步」,六个来源随便勾。
+let pipeLock = null;
+// 同步中心那一份自己的勾选,被入口默认顶掉时存这儿,关窗时原样还回去。
+// **不能靠"下次打开再读一遍草稿"**:那份草稿的口径在 `applyChannelData` 里
+// (退役名映射 + 认不出来的过滤 + 一个都没剩时补默认),在这儿再写一遍就是两份。
+let pipeStageOwn = null, pipeRunSelOwn = null;
+function pipeLocked() { return pipeLock?.channel || ''; }
+// **上锁要等通道目录落地之后**:`loadPipeChannels()` 头一回会跑 `applyChannelData`,
+// 那一步按 localStorage 里的草稿重建 `pipeRunSel` —— 在它之前上锁会被它盖掉,
+// 实测点公众号那一页的「同步全部」提交的是「公众号 + RSS」两个来源
+// (`tests/retired_channel_probe.mjs` 那三条)。
+// **而且一个字都不许往草稿里写**:`kb-sync-channels` 是同步中心那一份多来源选择,
+// 从「我的订阅」点一次就把它改写成单来源的话,下次新建同步少了几个来源,没人说。
+function applyPipeLock() {
+  if (!pipeLock) return;
+  if (!pipeRunSelOwn) pipeRunSelOwn = [...pipeRunSel];
+  pipeRunSel = [pipeLock.channel];
+}
+function releasePipeLock() {
+  if (pipeRunSelOwn) { pipeRunSel = pipeRunSelOwn; pipeRunSelOwn = null; }
+  if (pipeStageOwn) {
+    $('pipe-daily').checked = false;
+    pipeStageKept = null;
+    pipeStageSel = pipeStageOwn; pipeStageOwn = null;
+  }
+  pipeLock = null;
+}
+async function openPipeModal(lock = null) {
+  // **不开也要说一声。** 原来这里是静默 return:同步中心那颗按钮在跑着时是禁用的,
+  // 所以这条路走不到;而「我的订阅」那几颗现在也开这个弹窗,它们要等下一次轮询
+  // 才知道"正在同步" —— 中间那段时间按下去什么也不发生,看着就像坏了。
+  if (pipeAction || pipeSnapshot?.running) {
+    toast('已有同步在跑', { key: 'pipeline', detail: '等它结束再开始下一次，进度在同步中心。' });
+    return;
+  }
+  pipeLock = lock && lock.channel
+    ? { channel: lock.channel, accounts: [...(lock.accounts || [])], stages: [...(lock.stages || [])] }
+    : null;
+  if (pipeLock) {
+    // **入口定默认步骤**:从「我的订阅」进来默认跑入库那四段,不带整理工具和
+    // 更新 Wiki —— 那两段是全库的、一跑几十分钟,而这个入口要的是「把我这一类
+    // 的新内容收进来」。改之前公众号那颗按钮不带步骤清单,后端兜底成六段全跑,
+    // 顺手跑掉几十分钟而页面上一个字都不说。默认归默认,**弹窗里照旧改得动**。
+    if (pipeLock.stages?.length) {
+      // **入口的默认只管入口自己**:同步中心那一份勾选先存起来,下次从那儿进来
+      // 原样还回去 —— 不存的话从「我的订阅」点一次,同步中心的「新建同步」就
+      // 永远变成四段了,而那是用户自己挑的一份(探针反过来钉着这一条)。
+      // 存的是**用户自己那一份**:勾着「跑完出日报」时 `pipeStageSel` 是日报那条
+      // 通道排的,用户自己的在 `pipeStageKept` 里。
+      if (!pipeStageOwn) pipeStageOwn = new Set(pipeStageKept || pipeStageSel);
+      $('pipe-daily').checked = false;   // 日报是同步中心那一档的事
+      pipeStageKept = null;
+      pipeStageSel = new Set(pipeLock.stages);
+    }
+  }
+  // 锁到具体几条订阅时名单必须摊开 —— 折着的那一行写的是「全部」,而这一次不是
+  pipeAcctOpen = !!pipeLock?.accounts.length;
   dismissToastGroup('pipeline');
   $('pipe-modal').style.display = ''; $('pipe-fields').disabled = false;
   pipeSetupError(); $('pipe-acct-search').value = '';
@@ -44,11 +110,12 @@ async function openPipeModal() {
   try {
     await loadPipeChannels();
     if (!pipeModalOpen()) return;
+    applyPipeLock();
     // 每次打开都重读一遍订阅:上次看到的那份可能已经过期(期间添加/停用/移除过号)
     renderPipeChannel(); await loadPipeAccounts(true);
   } catch (e) {
     if (!pipeModalOpen()) return;
-    $('pipe-acct-list').innerHTML = '<div class="pipe-acct-empty">同步来源暂不可用。<br><button class="ghost" onclick="openPipeModal()">重新读取来源</button></div>';
+    $('pipe-acct-list').innerHTML = '<div class="pipe-acct-empty">同步来源暂不可用。<br><button class="ghost" onclick="openPipeModal(pipeLock)">重新读取来源</button></div>';
     pipeSetupError(e.message);
     renderPipeEst();
   }
@@ -63,6 +130,7 @@ function closePipeModal() {
     pipeAccounts.delete(id);
   }
   pipeAcctAborts.clear();
+  releasePipeLock();
   $('pipe-modal').style.display = 'none'; closePipeRange();
 }
 // 勾掉的来源不再占列表，但它的选择留在草稿里：再勾回来时还是上次那几个订阅。
@@ -90,8 +158,13 @@ async function loadChannelAccounts(channel, force = false) {
     if (!pipeRunSel.includes(channel) || pipeAcctAborts.get(channel) !== controller) return;
     const list = [...new Set((data.accounts || []).filter(n => typeof n === 'string'))];
     const draft = pipeDrafts.get(channel);
+    // 锁到具体几条订阅那一档(每行那颗「同步」):选择照它摆,**不沿用上次的草稿**
+    // —— 沿用的话点「同步这一条」跑的是上次勾的那一批。`in_scope` 两种都认(id
+    // 的字符串和名字),所以这里拿到哪一种都对得上(`kb/feeds/registry.py`)。
+    const want = pipeLock?.channel === channel && pipeLock.accounts.length
+      ? pipeLock.accounts.filter(n => list.includes(n)) : null;
     pipeAccounts.set(channel, { state: 'ready', list, error: '' });
-    pipeSel.set(channel, new Set(draft ? draft.filter(n => list.includes(n)) : list));
+    pipeSel.set(channel, new Set(want || (draft ? draft.filter(n => list.includes(n)) : list)));
     savePipeDraft();
   } catch (e) {
     if (!pipeRunSel.includes(channel) || pipeAcctAborts.get(channel) !== controller) return;
@@ -167,10 +240,48 @@ function renderPipeAcctList() {
   const box = $('pipe-acct-list'), scroll = box.scrollTop;
   box.setAttribute('aria-busy', String(!!pipeLoadingChannels().length));
   box.innerHTML = pipeRunSel.length ? pipeRunSel.map(pipeChannelBlock).join('')
-    : '<div class="pipe-acct-empty">先在上面勾选至少一个来源。</div>';
+    : '<div class="pipe-acct-empty">请先勾选至少一个来源。</div>';
   box.scrollTop = scroll;
   updatePipeSelection();
 }
+// ── 订阅名单折叠 ────────────────────────────────────────────────────────────
+// 摊开的搜索框 + 列表占 280px,而九成情况这里就是「全部」。所以默认折成一行,
+// **但收窄过的选择不许折** —— 折起来等于把「这次只跑其中几个」藏了,用户会按
+// 「全部」理解这一轮,而面板上一个字都不说。用户自己点开的也记着(`pipeAcctOpen`)。
+let pipeAcctOpen = false;
+function togglePipeAcctFold() {
+  pipeAcctOpen = !pipeAcctOpen;
+  renderPipeAcctFold();
+  if (pipeAcctOpen) $('pipe-acct-search').focus();
+}
+// 这一刻折不折得起来。**三种情况一律摊开**,各有各的理由:
+// - **收窄过**(有来源没整条全选):折起来等于把「这次只跑其中几个」藏了,用户
+//   会按「全部」理解这一轮,而面板上一个字都不说;
+// - **有来源读失败**:「重新读取订阅」那颗按钮在列表里面,折着就没有出路;
+// - **用户自己点开过**(`pipeAcctOpen`)。
+// 正在读取**不算**摊开的理由 —— 那一下折着的行里就写着「正在读取订阅」,
+// 摊开只会让弹窗先高一截、读完再塌回去。
+function pipeAcctFoldable() {
+  if (pipeFailedChannels().length) return false;
+  return pipeReadyChannels().every(id =>
+    pipeSelected(id).size === (pipeAccounts.get(id)?.list.length || 0));
+}
+function renderPipeAcctFold() {
+  const block = $('pipe-acct-block'), canFold = pipeAcctFoldable();
+  block.classList.toggle('open', pipeAcctOpen || !canFold);
+  // 折不起来的那几档(收窄过、有来源读失败)连按钮都不摆:摆一颗按下去没反应的
+  // 按钮,比没有更糟
+  block.classList.toggle('stuck-open', !canFold);
+  $('pipe-acct-fold').textContent = pipeAcctOpen ? '收起' : '挑几个';
+  const ready = pipeReadyChannels(), loading = pipeLoadingChannels().length;
+  $('pipe-acct-folded').innerHTML =
+    !pipeRunSel.length ? '<span>请先勾选至少一个来源。</span>'
+    : loading ? '<span>正在读取订阅…</span>'
+    : ready.length ? `<span>${ready.map(id => `${esc(channelLabel(id))} 全部`).join(' · ')}</span>`
+        + `<span class="n">${pipeSelCount()}</span>`
+    : '<span>订阅还没读出来。</span>';
+}
+
 function updatePipeSelection() {
   const total = pipeReadyChannels().reduce((n, id) => n + (pipeAccounts.get(id)?.list.length || 0), 0);
   const filtered = !!pipeQuery();
@@ -180,6 +291,7 @@ function updatePipeSelection() {
   const visible = pipeReadyChannels().reduce((n, id) => n + filteredPipeAccounts(id).length, 0);
   $('pipe-select-all').disabled = !visible;
   $('pipe-select-none').disabled = !pipeSelCount();
+  renderPipeAcctFold();
   renderPipeEst(); savePipeDraft();
 }
 $('pipe-acct-list').addEventListener('change', e => {
@@ -206,13 +318,19 @@ function pipeSelectNone() {
   }
   renderPipeAcctList();
 }
-// 汇总那一句。**第一件事是念这次跑哪几段** —— 原来它只说来源和订阅,而步骤
-// 是固定的六段,现在步骤可勾,「这次到底会发生什么」就得从这里读出来。
+// 汇总那一句。**这里只念这一次的事实,不再复述跑哪几段** —— 步骤就在右栏勾着,
+// 同一份信息在一个弹窗里念两遍正是操作条占掉三行的由来(改之前整条 160px)。
+// 两处例外,都不是复述:
+// - **日报那一档照旧整句念**(`pipeStagePlan`):它的顺序是「出报插在中间」,而
+//   右栏那一组是按 `PIPE_STAGE_DEFS` 平铺的,表达不了插在哪儿;少念了,用户就会
+//   被出报之后那两段几十分钟的慢活偷袭。
+// - **「含 N 段全库的慢活」那句(`pipeStageTail`)一档都不许省**:慢活标记在右栏
+//   每个格子上,但"这一次一共有几段"只有这里数得出来。
 function pipeEstText() {
   if (!pipeStageList().length) return '一步都没勾，这次什么也不会发生。';
-  const plan = pipeStagePlan(), tail = pipeStageTail();
+  const tail = pipeStageTail();
   if (!pipeNeedsSource())
-    return `${plan}。这几步都是全库的，上面的来源、时间范围和订阅这次都不作数。` + tail;
+    return '这几步都是全库的，来源、时间范围和订阅这次都不作数。' + tail;
   const n = pipeSelCount(), failed = pipeFailedChannels().length;
   if (!pipeRunSel.length) return '请至少选择一个来源。';
   if (pipeLoadingChannels().length) return '订阅读取完成后即可开始。';
@@ -220,16 +338,16 @@ function pipeEstText() {
   // 日报那条通道只认来源,所以这一档念的是来源名,不念订阅数和日期段(念了就是
   // 一句假话 —— 那两样它根本不收)。
   if (pipeDailyOn())
-    return `${plan}。来源 ${pipeReadyChannels().map(channelLabel).join(' · ')}。` + tail;
+    return `${pipeStagePlan()}。来源 ${pipeReadyChannels().map(channelLabel).join(' · ')}。` + tail;
   // 不抓取、只导出:**念来源,不念订阅数和日期段** —— 导出是按来源扫的(它那一步
   // 压根不收订阅和日期),念了就是一句假话。
   if (!pipeNeedsTargets())
-    return `${plan}。来源 ${pipeReadyChannels().map(channelLabel).join(' · ')}`
+    return `来源 ${pipeReadyChannels().map(channelLabel).join(' · ')}`
       + '，时间范围和订阅这次不作数。' + tail;
   if (!n) return '请至少选择一个订阅。';
   const sources = pipeReadyChannels().filter(id => pipeSelected(id).size)
     .map(id => `${channelLabel(id)} ${pipeSelected(id).size} 个`).join(' · ');
-  return `${plan}。${sources} · ${pipeRange.label}。执行中可离开本页，稍后回来查看。`
+  return `${sources} · ${pipeRange.label}。执行中可离开本页，稍后回来查看。`
     + (failed ? `另有 ${failed} 个来源读取失败，本次不会同步它们。` : '') + tail;
 }
 function renderPipeEst() {
@@ -255,7 +373,10 @@ function renderPipeEst() {
     : steps ? `开始同步 · ${steps} 步` : '开始同步';
 }
 function pipeRunBody() {
-  const body = { stages: pipeStageList() };
+  // **force:按下这颗按钮的是人,退避是给自动轮次用的。** 不带的后果是退避中的
+  // 那几条被静默跳过(只记一笔 `deferred`),而面板上说「同步已开始」——
+  // 「失败之后手动点一次同步」这条唯一出路要绕开的正是那道闸。
+  const body = { stages: pipeStageList(), force: true };
   // **按步骤的实际依赖决定带不带来源**(`pipeNeedsSource` / `pipeNeedsTargets`,
   // 口径和后端 `run_scopes` 同一份):
   // - 全库那几步(索引/提取/整理/Wiki)一个来源字段都不带 —— 带上去只会让留档上
@@ -309,6 +430,9 @@ async function startPipeFromModal() {
     if (!pipeModalOpen()) toast('启动未确认', { key: 'pipeline', detail: e.message + '，请查看当前运行状态。' });
   } finally {
     await refreshPipe(); pipeAction = ''; $('pipe-fields').disabled = false;
+    // 「我的订阅」那几颗按钮是从这个弹窗起跑的,起完要让那一页就地改口(否则它
+    // 要等下一次轮询才显示「同步中…」,中间按钮看着还能点)。没在那一页时是空操作。
+    if (typeof onPipeStarted === 'function') onPipeStarted();
     if (pipeSnapshot?.running) {
       if (pipeModalOpen()) closePipeModal();
       if (activeTab === 'pipe') $('pipe-state-title').focus({ preventScroll: true });

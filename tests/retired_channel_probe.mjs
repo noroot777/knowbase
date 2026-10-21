@@ -419,13 +419,26 @@ for (const legacy of ["rss", "social", "没这个来源"]) {
         gets.some(u => u.startsWith("/api/sources/targets"))
         && gets.some(u => u.startsWith("/api/pipeline/status")) && wrong.length === 0,
         JSON.stringify(gets));
+  // 「同步全部」现在打开的是起跑弹窗(锁定在这一页那条通道上,见
+  // `docs/decisions/sync-entry.md`),所以这里分两步:先看它锁对了没有,再从弹窗
+  // 起跑、看提交的是不是公众号。**判据照旧落在后端收到的是什么。**
   const before = runs.length;
   await clickAt("#subs-wechat-sync");
+  await until(`document.getElementById('pipe-modal').style.display !== 'none'
+               && pipeReadyChannels().length === 1`);
+  check(`存量 ${legacy}:「同步全部」弹出的弹窗锁在公众号上`,
+        await evalJs(`JSON.stringify([...document.querySelectorAll('#pipe-channel-list input:checked')]
+          .map(i => i.dataset.runChannel))`) === '["wechat_local"]',
+        await evalJs(`JSON.stringify([...document.querySelectorAll('#pipe-channel-list input:checked')]
+          .map(i => i.dataset.runChannel))`));
+  await evalJs(`startPipeFromModal()`);
   check(`存量 ${legacy}:「同步全部」提交的是公众号`,
         await waitFor(() => runs.length === before + 1)
         && JSON.stringify(runs[runs.length - 1]?.channels)
-           === '[{"channel":"wechat_local","accounts":[]}]',
+           === '[{"channel":"wechat_local","accounts":["测试公众号甲","测试公众号乙"]}]',
         JSON.stringify(runs[runs.length - 1]));
+  // **锁定一个字都不许往草稿里写**:`kb-sync-channels` 是同步中心那一份多来源
+  // 选择,从「我的订阅」点一次就把它改写成单来源的话,下次新建同步少了几个来源
   check(`存量 ${legacy}:新建同步的多来源草稿没被改写`,
         await evalJs(`localStorage.getItem('kb-sync-channels')`) === '["rss"]',
         await evalJs(`localStorage.getItem('kb-sync-channels')`));

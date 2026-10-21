@@ -163,6 +163,12 @@ class PipelineRunRequest(BaseModel):
     channel: str | None = None
     # 多来源一起抓:每个来源各带自己的订阅。给了它就不看上面的 channel/accounts
     channels: list[ChannelScope] | None = None
+    # **跳过来源退避**(`FetchScope.force` → `kb.feeds.sync.collect` 那道 `retry_at`)。
+    # 起跑弹窗一律带 true:按下「开始同步」的是人,而退避是给自动轮次用的 —— 不带的
+    # 后果是用户点了同步、退避中的那几条被静默跳过(只记一笔 `deferred`),而这正是
+    # 「失败之后手动点一次同步」这条唯一出路要绕开的那道闸(CLAUDE.md「服务与运行时」)。
+    # 方向也是安全的那一侧:误报顶多重抓一次,漏报是静默不同步。
+    force: bool = False
 
 
 def _scopes(body: PipelineRunRequest | None) -> list[dict]:
@@ -209,6 +215,9 @@ def pipeline_run(body: PipelineRunRequest | None = None):
         raise HTTPException(400, "这一次要跑抓取或导出，请至少选择一个来源")
     scopes = _scopes(body)
     crawl_filter: dict = {"channel": scopes[0]["channel"]}
+    # force 是整轮一份的(`pipeline_stages._fetch` 从 `filters` 顶层读),不按来源分
+    if body and body.force:
+        crawl_filter["force"] = True
     # 只有一个来源时仍写成老样子的 channel + accounts:存量状态文件、重试记录
     # 和还没升级的读取方因此一行都不用改
     if len(scopes) > 1:

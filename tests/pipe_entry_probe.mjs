@@ -1,0 +1,288 @@
+// 「我的订阅」里的同步按钮 = 打开起跑弹窗，**锁定在你正在看的那一页**。
+//
+// 改之前这三颗按钮各走各的路、跑哪几步谁也说不出来:订阅源那一侧直接
+// `POST /api/intake/{kind}/sync` 固定四段;公众号那一侧 `POST /api/pipeline/run`
+// **不带步骤清单**,后端 `start_pipeline` 兜底成 `STAGES` 全跑 —— 于是点一下
+// 「同步全部」会顺手跑一遍全库条目化和更新 Wiki(几十分钟),页面上一个字都不说。
+//
+// 判据全部落在「**后端收到的是什么**」(起跑请求原样留下来比对),不落在页面上的
+// 勾选快照 —— 前者才是这一块唯一会出事的地方(口径同 `pipe_stages_probe.mjs`)。
+// 另外钉三件事:
+// - **锁定要说清为什么和出路**:一片灰色不说话,用户只会以为坏了;
+// - **force 一档都不许丢**:按下按钮的是人,而退避是给自动轮次用的 —— 不带的后果
+//   是退避中的那几条被静默跳过(只记一笔 `deferred`),而页面说「同步已开始」;
+// - **反过来钉一边**:同步中心那颗「新建同步」照旧六个来源随便勾、步骤不被入口改。
+//
+// 硬约束在 `docs/decisions/sync-entry.md` 第一节。自带只读 mock 后端,CDP 直连
+// chrome-headless-shell(不装 playwright、不连网、始终无头、临时 profile)。
+//
+//   HEADLESS_SHELL=<bin> node tests/pipe_entry_probe.mjs
+import { createServer } from "node:http";
+import { readFileSync, writeSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join, normalize } from "node:path";
+import { attachCdp, sleep } from "./pipe_history_cdp.mjs";
+import { MIME } from "./pipe_history_fixture.mjs";
+
+const STATIC = join(dirname(fileURLToPath(import.meta.url)), "..", "kb", "static");
+const MODULES = [
+  { id: "wechat", label: "公众号", description: "关注的公众号文章", channels: ["wechat_local"],
+    manager: "wechat", icon: "chat", interval_minutes: 360, url_hint: "", note: "",
+    adapter: "wechat", pollable: true },
+  { id: "rss", label: "RSS", description: "让值得读的文章，自己来到这里。", channels: ["rss"],
+    manager: "feeds", icon: "rss", interval_minutes: 360, url_hint: "", note: "RSS 那段说明",
+    adapter: "rss", pollable: true },
+  // 手动收录**没有可轮询的源**:它照旧直接起跑，不进这个弹窗
+  { id: "inbox", label: "手动收录", description: "看到就存", channels: ["inbox"],
+    manager: "feeds", icon: "box", interval_minutes: 1440, url_hint: "", note: "",
+    adapter: "manual", pollable: false },
+];
+const SOURCES = {
+  rss: [{ id: 11, name: "某博客", url: "https://a.example/feed", group_name: "", enabled: 1,
+          last_error: "", last_success: "", last_attempt: "", failures: 0, configuration_error: "" },
+        { id: 12, name: "另一个博客", url: "https://b.example/feed", group_name: "", enabled: 1,
+          last_error: "", last_success: "", last_attempt: "", failures: 0, configuration_error: "" }],
+  inbox: [{ id: 21, name: "收件桶", url: "", group_name: "", enabled: 1, last_error: "",
+            last_success: "", last_attempt: "", failures: 0, configuration_error: "" }],
+};
+const ACCOUNTS = { wechat_local: ["公众号甲", "公众号乙"], rss: ["某博客", "另一个博客"],
+                   inbox: ["收件桶"] };
+const CHANNELS = {
+  channels: [{ id: "wechat_local", label: "公众号", hint: "本机绿泡泡库" },
+             { id: "rss", label: "RSS", hint: "RSS / Atom" },
+             { id: "inbox", label: "手动收录", hint: "粘链接" }],
+  default: "wechat_local", labels: {}, aliases: {},
+};
+const FIXTURES = {
+  "/api/stats": { documents: 100 },
+  "/api/intake/modules": { modules: MODULES },
+  "/api/pipeline/channels": CHANNELS,
+  "/api/facets": { tags: [], entities: [], accounts: [] },
+  "/api/projects": { tools: [], kinds: {}, total_entries: 0 },
+  "/api/sources/catalog": { modules: [] },
+  "/api/daily/list": { days: [] },
+  "/api/daily/reports": { reports: [] },
+  "/api/pipeline/runs": { runs: [], error: "", version: "none", keep_days: 3 },
+  "/api/daily/settings": { settings: { enabled: true, time: "07:30", sync: true, library: true,
+                                       first_days: 1, channels: [], next_run: "" },
+                           channels: [], default_channels: [] },
+  "/api/pipeline/status": { running: false, stop_requested: false, stopped: false,
+                            stop_supported: true, last_run: null, log: [], result_version: "none" },
+  "/api/source": { ready: true, label: "公众号", status: "ok", message: "", hint: "", targets: 2 },
+};
+const posted = [];
+
+const server = createServer((req, res) => {
+  const path = req.url.split("?")[0];
+  const json = data => {
+    const body = Buffer.from(JSON.stringify(data));
+    res.writeHead(200, { "Content-Type": "application/json", "Content-Length": body.length });
+    res.end(body);
+  };
+  if (req.method === "POST") {
+    let raw = "";
+    req.on("data", c => { raw += c; });
+    req.on("end", () => { posted.push({ path, body: raw ? JSON.parse(raw) : null }); json({ ok: true }); });
+    return;
+  }
+  if (path === "/api/pipeline/accounts") {
+    const ch = new URLSearchParams(req.url.split("?")[1] || "").get("channel") || "wechat_local";
+    return json({ accounts: ACCOUNTS[ch] || [] });
+  }
+  const overview = path.match(/^\/api\/intake\/(rss|inbox)$/);
+  if (overview) {
+    const list = SOURCES[overview[1]];
+    return json({ sources: list, settings: {}, last_run: null, total: 0,
+                  enabled: list.length, ready: list.length, unconfigured: 0, errors: 0 });
+  }
+  if (/^\/api\/intake\/\w+\/items$/.test(path))
+    return json({ items: [], total: 0, translating: 0, fetching: 0, stuck: null, translate_ready: true });
+  if (FIXTURES[path]) return json(FIXTURES[path]);
+  if (path.startsWith("/api/")) return json({});
+  const file = normalize(join(STATIC, path === "/" ? "index.html" : path.replace(/^\/static/, "")));
+  if (!file.startsWith(STATIC)) { res.writeHead(403); return res.end(); }
+  try {
+    const body = readFileSync(file);
+    res.writeHead(200, { "Content-Type": MIME[file.split(".").pop()] || "application/octet-stream",
+                         "Content-Length": body.length });
+    res.end(body);
+  } catch { res.writeHead(404); res.end(); }
+});
+await new Promise(r => server.listen(0, "127.0.0.1", r));
+const base = `http://127.0.0.1:${server.address().port}`;
+
+const { proc, ws, send, evalJs, until, pageErrors } = await attachCdp();
+const oks = [], fails = [];
+const check = (name, pass, info = "") => (pass ? oks : fails).push(pass ? name : `${name} — ${info}`);
+const setup = async (name, promise) => {
+  if (await promise) return;
+  fails.push(`摆局没成:${name}`);
+  throw new Error("stop");
+};
+// 弹窗这一刻的样子。**锁定与否只看 input 的 disabled**(那是真点不动的那一下)
+const snap = () => evalJs(`JSON.stringify({
+  open: document.getElementById('pipe-modal').style.display !== 'none',
+  on: [...document.querySelectorAll('#pipe-channel-list input:checked')].map(i => i.dataset.runChannel),
+  off: [...document.querySelectorAll('#pipe-channel-list input:disabled')].map(i => i.dataset.runChannel),
+  stages: [...document.querySelectorAll('#pipe-stage-list input:checked')].map(i => i.dataset.stage),
+  hint: document.getElementById('pipe-channel-hint').textContent,
+  accts: [...document.querySelectorAll('#pipe-acct-list input:checked')].map(i => i.dataset.acct),
+  folded: !document.getElementById('pipe-acct-block').classList.contains('open'),
+  foldBtn: getComputedStyle(document.getElementById('pipe-acct-fold')).display === 'none'
+    ? '' : document.getElementById('pipe-acct-fold').textContent })`).then(JSON.parse);
+const setDaily = on => evalJs(`(() => {
+  const i = document.getElementById('pipe-daily');
+  i.checked = ${on}; onPipeDailyToggle(); return true; })()`);
+const openSubs = kind => evalJs(`(async () => { switchTab('subs'); await openSubsPanel('${kind}'); return true; })()`);
+
+try {
+await send("Page.navigate", { url: `${base}/#pipe` });
+await setup("面板连上后端", until(`typeof pipeConnected !== 'undefined' && pipeConnected`, 8000));
+
+// ── 1. RSS 那一页的「同步全部」:弹窗锁在 rss ────────────────────────────────
+await openSubs("rss");
+await setup("RSS 那一页摆出来了", until(`document.getElementById('source-sync') && !document.getElementById('source-sync').disabled`, 8000));
+await evalJs(`document.getElementById('source-sync').click()`);
+await setup("弹窗开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
+  && pipeReadyChannels().length === 1`, 8000));
+let s = await snap();
+check("从 RSS 那一页进来:只勾着 rss,整组灰掉点不动",
+      s.on.join() === 'rss' && s.off.sort().join() === 'inbox,rss,wechat_local', JSON.stringify(s));
+check("锁着的时候说清为什么、也给出路",
+      /只同步「RSS」/.test(s.hint) && /同步中心/.test(s.hint), s.hint);
+check("默认跑入库那四段,不带整理工具和更新 Wiki",
+      s.stages.join() === 'crawl,export,index,extract', JSON.stringify(s.stages));
+// 整条全选那一档订阅名单折着,而**折了就要能再摊开**:摊开之后按钮得还在、
+// 文案换成「收起」 —— 藏了它就只能关掉弹窗重来
+check("整条全选时订阅名单折着,按钮写「挑几个」", s.folded && s.foldBtn === '挑几个', JSON.stringify(s));
+await evalJs(`togglePipeAcctFold()`);
+let f = await snap();
+check("点开之后名单摊开,而且收得回去(按钮还在,写「收起」)",
+      !f.folded && f.foldBtn === '收起', JSON.stringify(f));
+await evalJs(`togglePipeAcctFold()`);
+f = await snap();
+check("再点一下真的折回去了", f.folded && f.foldBtn === '挑几个', JSON.stringify(f));
+posted.length = 0;
+await evalJs(`startPipeFromModal()`);
+await setup("起跑请求发出去了", sleep(500).then(() => posted.length > 0));
+let p = posted[0];
+check("起跑走的是管道通道,来源只有 rss、整条全选",
+      p.path === '/api/pipeline/run' && p.body.channels.length === 1
+      && p.body.channels[0].channel === 'rss'
+      && p.body.channels[0].accounts.sort().join() === '另一个博客,某博客', JSON.stringify(p));
+check("步骤按入口那四段发下去", p.body.stages.join() === 'crawl,export,index,extract', JSON.stringify(p.body.stages));
+check("带着 force:人按的那一下要跳过来源退避", p.body.force === true, JSON.stringify(p.body));
+
+// ── 2. 行内那颗「同步」:连订阅也锁死 ────────────────────────────────────────
+await openSubs("rss");
+await setup("回到 RSS 那一页", until(`document.getElementById('source-sync') !== null`, 6000));
+await evalJs(`syncSource([12])`);
+await setup("弹窗又开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
+  && pipeReadyChannels().length === 1`, 8000));
+s = await snap();
+// 锁到具体几条时名单**必须摊开、而且折不起来**(折着的那一行写的是「全部」,
+// 而这一次不是)—— 所以那一档连折叠按钮都不摆
+check("点某一条的「同步」:订阅名单摊开、只勾着那一条,而且折不起来",
+      !s.folded && s.accts.join() === '另一个博客' && s.foldBtn === '', JSON.stringify(s));
+posted.length = 0;
+await evalJs(`startPipeFromModal()`);
+await setup("那一档也发出了请求", sleep(500).then(() => posted.length > 0));
+p = posted[0];
+check("请求里的订阅只有点的那一条",
+      p.body.channels[0].accounts.join() === '另一个博客', JSON.stringify(p.body.channels));
+
+// **反过来钉一边**:锁到单条那一次不许改写同步中心记着的订阅选择
+await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
+await setup("同步中心的弹窗开了(查订阅记忆)", until(`document.getElementById('pipe-modal').style.display !== 'none'
+  && pipeReadyChannels().length >= 1`, 8000));
+await evalJs(`(() => { const i = document.querySelector('#pipe-channel-list input[data-run-channel=rss]');
+  if (!i.checked) { i.checked = true; i.dispatchEvent(new Event('change', { bubbles: true })); } return true; })()`);
+await setup("rss 的订阅读出来了", until(`pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+check("同步中心那边 rss 照旧整条全选(单条同步没改写它记着的那一份)",
+      await evalJs(`pipeSelected('rss').size`) === 2, await evalJs(`JSON.stringify([...pipeSelected('rss')])`));
+await evalJs(`closePipeModal()`);
+
+// ── 3. 公众号那一页的「同步全部」 ───────────────────────────────────────────
+await openSubs("wechat");
+await setup("公众号那一页摆出来了", until(`!document.getElementById('subs-wechat').hidden
+  && !document.getElementById('subs-wechat-sync').disabled`, 8000));
+await evalJs(`document.getElementById('subs-wechat-sync').click()`);
+await setup("弹窗第三次开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
+  && pipeReadyChannels().length === 1`, 8000));
+s = await snap();
+check("公众号那一页进来:锁在本机绿泡泡那条通道上",
+      s.on.join() === 'wechat_local' && s.off.sort().join() === 'inbox,rss,wechat_local', JSON.stringify(s));
+check("公众号那一次也只跑入库四段,不再顺手跑全库那两段慢活",
+      s.stages.join() === 'crawl,export,index,extract', JSON.stringify(s.stages));
+posted.length = 0;
+await evalJs(`startPipeFromModal()`);
+await setup("公众号那一次也发出了请求", sleep(500).then(() => posted.length > 0));
+p = posted[0];
+check("请求里带着步骤清单(缺了它后端会兜底成六段全跑)",
+      p.body.stages?.join() === 'crawl,export,index,extract'
+      && p.body.channels[0].channel === 'wechat_local', JSON.stringify(p.body));
+
+// ── 4. 手动收录照旧直接起跑,不进这个弹窗 ───────────────────────────────────
+await openSubs("inbox");
+await setup("手动收录那一页摆出来了", until(`document.getElementById('source-sync') !== null
+  && !document.getElementById('source-sync').disabled`, 8000));
+posted.length = 0;
+await evalJs(`document.getElementById('source-sync').click()`);
+await setup("它自己发了请求", sleep(600).then(() => posted.length > 0));
+check("手动收录没有可轮询的源:照旧直接走 intake,不开弹窗",
+      posted[0].path === '/api/intake/inbox/sync'
+      && await evalJs(`document.getElementById('pipe-modal').style.display === 'none'`),
+      JSON.stringify(posted[0]));
+
+// ── 5. **反过来钉一边**:同步中心那颗「新建同步」没被入口改掉 ────────────────
+await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
+await setup("同步中心的弹窗开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
+  && document.querySelectorAll('#pipe-channel-list input').length === 3`, 8000));
+s = await snap();
+check("同步中心进来:三个来源都点得动,一个都没灰",
+      s.off.length === 0 && !/只同步/.test(s.hint), JSON.stringify(s));
+check("同步中心那次步骤不被入口定死(默认六段全勾)",
+      s.stages.length === 6, JSON.stringify(s.stages));
+
+// ── 6. 几何:720 高的窗口里弹窗一屏放得下 ───────────────────────────────────
+// **判据落在「还要不要滚」上,不落在「用了几栏」** —— 换个排法而没解决同屏,这一条
+// 照旧该红。两档都量:默认那一档,以及**勾了「跑完出日报」**那一档(右栏那段说明会
+// 长出两行,是最挤的一局,收 `.row` 间距和抬头内边距就是为了它)。
+const over = () => evalJs(`(() => { const b = document.querySelector('.pipe-setup-body');
+  return b.scrollHeight - b.clientHeight; })()`).then(Number);
+const resize = h => send("Emulation.setDeviceMetricsOverride",
+                         { width: 1280, height: h, deviceScaleFactor: 1, mobile: false });
+await resize(720);
+await sleep(200);
+check("1280×720:默认那一档一屏全见,不用滚", await over() <= 0, `还要滚 ${await over()}px`);
+await setDaily(true);
+await sleep(200);
+check("1280×720:勾了「跑完出日报」也一屏全见", await over() <= 0, `还要滚 ${await over()}px`);
+await setDaily(false);
+// **反过来钉一边**:再矮的窗口照旧滚得动 —— 滚不动就是内容被裁在弹窗外面点不着
+// (`.pipe-setup-body` 得是个真能裁剪的 div,`fieldset` 兼任不了)。
+await resize(420);
+await sleep(200);
+const tight = await over();
+const scrolled = await evalJs(`(() => { const b = document.querySelector('.pipe-setup-body');
+  b.scrollTop = 9999; return b.scrollTop > 0; })()`);
+check("放不下的时候内容没被裁掉:正文滚得动", tight > 0 && scrolled === true,
+      `溢出 ${tight}px、滚到 ${scrolled}`);
+await send("Emulation.clearDeviceMetricsOverride");
+
+check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
+} catch (e) {
+  if (e.message !== "stop") fails.push(`探针中断 — ${e.message}`);
+}
+
+const out = [...oks.map(n => `  ✓ ${n}`), ...fails.map(n => `  ✗ ${n}`)].join("\n");
+const text = `${out}\n${fails.length ? "FAIL" : "PASS"} ${oks.length}/${oks.length + fails.length}\n`;
+let off = 0;
+while (off < Buffer.byteLength(text)) {
+  try { off += writeSync(1, text.slice(off)); }
+  catch (e) { if (e.code !== "EAGAIN") throw e; }
+}
+ws.close();
+proc.kill();
+server.close();
+process.exitCode = fails.length ? 1 : 0;

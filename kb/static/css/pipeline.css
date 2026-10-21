@@ -126,8 +126,17 @@
 #pipe-history-live .pipe-history-row { border-bottom: 1px solid var(--line); }
 
 
-.pipe-setup { width: min(620px,94vw); display: flex; flex-direction: column; padding: 0; overflow: hidden; }
-.pipe-setup-heading { display: flex; flex-shrink: 0; gap: 20px; justify-content: space-between; padding: 22px 24px 16px; }
+/* **两栏，880 宽。** 一栏排下来正文内容 1240px，而弹窗可视区在 900/800/720 三种
+   窗口高下只有 566/476/404 —— 要滚 674~836px 才看得全，「跑哪些步骤」那一组永远
+   在屏幕外。两栏之后内容压到 360px，三种高度都一屏全见（可点对比稿
+   docs/demo/sync-space.html，那页底下那行读数是页面自己量 scrollHeight 得来的）。 */
+.pipe-setup { width: min(880px,94vw); display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.pipe-setup-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 26px; align-items: start; }
+/* 左右两栏各自的最后一块不再往下垫一截 —— 两栏不等高，垫出来的是空白 */
+.pipe-col > fieldset:last-child > .row:last-child, .pipe-col > .row:last-child { margin-bottom: 4px; }
+/* 抬头收一档:勾「跑完出日报」那一局右栏那段说明会长到 476px,而原来的内边距
+   只留得下 475 —— 为一行像素冒一条滚动条。 */
+.pipe-setup-heading { display: flex; flex-shrink: 0; gap: 20px; justify-content: space-between; padding: 18px 24px 12px; }
 .pipe-setup-heading h2 { margin-bottom: 6px; }
 .pipe-setup-heading > button { font-size: 23px; flex-shrink: 0; }
 .pipe-setup .pipe-notice { margin: 0 24px 12px; flex-shrink: 0; }
@@ -141,12 +150,32 @@
 .pipe-setup-body { flex: 1; overflow-y: auto; min-height: 0; padding: 0 24px;
   overscroll-behavior: contain; }
 .pipe-setup fieldset { border: 0; margin-inline: 0; min-width: 0; }
-.pipe-setup .row { margin-bottom: 20px; }
+/* 两栏之后各块之间收一档:勾「跑完出日报」时右栏那段说明会长出两行,20px 的间距
+   正好让内容比可视区高 1px —— 为一行像素冒一条滚动条。 */
+.pipe-setup .row { margin-bottom: 16px; }
 .pipe-setup .hint { font-size: 13px; }
 .pipe-setup label { font-size: 14px; }
 #pipe-acct-search { display: block; width: 100%; max-width: 100%; margin: 7px 0; }
 /* 来源多选:一次同步可以勾好几个来源,所以这里是一组勾选块而不是一个下拉 */
 .pipe-channel-list { display: grid; gap: 8px; margin: 8px 0; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+/* **来源那一组是紧凑行,不带整段说明。** 原来每张卡片念的是 `source_types.py` 的
+   `note` —— 那是「我的订阅」页上解释**这类来源是什么**的文案(邮件简报那段六行),
+   在「这次跑哪几个」的选择器里是纯占地:六张卡片实测 450px,比整个弹窗的可视区还高。
+   说明退到 `title`(渲染在 `pipe_channels.js`),要读它的地方是「我的订阅」。 */
+.pipe-srcs { display: grid; gap: 4px; margin: 8px 0; grid-template-columns: 1fr 1fr; }
+/* **步骤那一组在右栏里排两列。** 竖着一列六张卡实测 558px,右栏整个 562 —— 它一个
+   人就比 720 高窗口的可视区(475)还高,两栏也救不回来。排两列之后右栏 ~390,跟左栏
+   基本齐平,720 下一屏全见。**写死两列不用 auto-fit**:回落成一列时弹窗按 94vw
+   铺开,auto-fit 会在那儿摊成三四列,一行一个格子反而更挤。 */
+#pipe-stage-list { grid-template-columns: 1fr 1fr; }
+.pipe-srcs .pipe-channel { align-items: center; gap: 9px; padding: 7px 10px; border-color: transparent; }
+.pipe-srcs .pipe-channel:hover { background: var(--paper); }
+.pipe-srcs .pipe-channel b { font-size: 13.5px; font-weight: 500; }
+.pipe-srcs .pipe-channel input { margin-top: 0; width: 15px; height: 15px; }
+.pipe-srcs .pipe-channel:has(input:checked) { border-color: var(--brand-soft); }
+.pipe-srcs .pipe-channel:has(input:checked) b { font-weight: 600; }
+/* 锁定入口(从「我的订阅」某一页点进来):这一次只跑它,其余灰掉、点不动 */
+.pipe-srcs .pipe-channel:has(input:disabled) { opacity: .38; cursor: not-allowed; }
 .pipe-channel {
   display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; cursor: pointer;
   border: 1px solid var(--line); border-radius: 10px; background: var(--card);
@@ -178,6 +207,19 @@
 .pipe-acct-heading > span { display: flex; gap: 12px; }
 #pipe-acct-count { color: var(--muted); font-size: 13px; font-weight: 400; }
 #pipe-acct-list { max-height: 230px; overflow-y: auto; border: 1px solid var(--line); border-radius: 9px; overscroll-behavior: contain; }
+/* **订阅名单默认折起来**:九成情况就是「全部」,而摊开的搜索框 + 列表占 280px。
+   **收窄过的选择不许折**(`renderPipeAcctFold` 自己开) —— 折起来等于把「这次只跑
+   其中几个」藏了,用户按「全部」理解这一轮。 */
+.pipe-acct-folded { display: none; align-items: center; gap: 8px; margin-top: 7px; padding: 8px 11px;
+  border: 1px solid var(--line); border-radius: 9px; font-size: 13px; color: var(--ink-2); }
+#pipe-acct-block:not(.open) .pipe-acct-folded { display: flex; }
+#pipe-acct-block:not(.open) #pipe-acct-open,
+#pipe-acct-block:not(.open) #pipe-select-all,
+#pipe-acct-block:not(.open) #pipe-select-none { display: none; }
+/* 这颗按钮两档都在(文案由 `renderPipeAcctFold` 换成「挑几个 / 收起」);**只有
+   "折不起来"那几档才藏它** —— 收窄过的选择、有来源读失败,折起来会把要紧的事藏掉 */
+#pipe-acct-block.stuck-open #pipe-acct-fold { display: none; }
+.pipe-acct-folded .n { margin-left: auto; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
 .pipe-acct { display: flex; gap: 10px; align-items: center; padding: 10px 12px; cursor: pointer; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 .pipe-acct:last-child { border: 0; }
 .pipe-acct:hover { background: var(--paper); }
@@ -186,8 +228,14 @@
 .pipe-acct-empty button { margin-top: 8px; }
 /* footer 是常驻操作条,任何情况下都得点得到:fieldset 当滚动容器时不裁剪
    sticky 的分区头(实测手机上第二个分区头正好压在「暂不执行」上),所以这里提一层。 */
-.pipe-setup-footer { position: relative; z-index: 1; padding: 16px 24px 20px; border-top: 1px solid var(--line); background: var(--card); flex-shrink: 0; }
-.pipe-setup-footer > div:last-child { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+/* **事实和按钮同一行。** 原来那段话另起一行、三行高(连同按钮 160px),而它念的
+   「这次会跑：A → B → C」跟右栏勾好的步骤是同一份信息念两遍 —— 步骤名归步骤那一组,
+   这里只留这一次的事实(来源各几个、时间范围、有没有慢活)。日报那一档是例外:
+   出报插在中间的顺序只有这句话说得出来,所以那一档照旧整句念(`pipeEstText`)。 */
+.pipe-setup-footer { position: relative; z-index: 1; padding: 14px 24px 16px; border-top: 1px solid var(--line);
+  background: var(--card); flex-shrink: 0; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.pipe-setup-footer > div:last-child { display: flex; justify-content: flex-end; gap: 10px; margin-left: auto; }
+.pipe-setup-footer #pipe-est { flex: 1 1 260px; min-width: 0; }
 /* **窄屏那一档只有这一个断点。** 原来这里只塌列,而「轮次列排到步骤上面、钉住关掉」
    写在另一个更窄的断点里 —— 两条都命中时后者赢,于是 1000~1180 这一段列塌成了单列、
    而选择器还钉着、还排在它改写的内容后面,正是「单列下它反过来挡住内容」那一档。
@@ -199,7 +247,16 @@
   #pipe-history-list { max-height: 260px; }
   #pipe-log-box { height: 280px; }
 }
+/* **两栏回落成一列。** 断点按弹窗自己的宽度定(880 + 两边留白),不蹭手机断点:
+   窗口 820 以下弹窗按 94vw 缩到 770 以内,每栏不足 360px,来源那两列会挤成一行
+   一个字。回落之后排法就是原来那一列,照旧要滚 —— 但窄屏本来就在滚。 */
+@media (max-width: 820px) {
+  .pipe-setup-cols { grid-template-columns: 1fr; gap: 0; }
+  .pipe-srcs { grid-template-columns: 1fr 1fr; }
+}
 @media (max-width: 600px) {
+  .pipe-srcs { grid-template-columns: 1fr; }
+  #pipe-stage-list { grid-template-columns: 1fr; }
   .pipe-page-heading { align-items: flex-start; flex-direction: column; gap: 16px; }
   .pipe-page-heading p { font-size: 13px; }
   .pipe-overview { padding: 16px; }

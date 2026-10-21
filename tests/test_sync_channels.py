@@ -65,6 +65,26 @@ class ChannelAPITests(unittest.TestCase):
             self.assertEqual(200, r.status_code, r.text)
             self.assertTrue(start.called)
 
+    def test_a_hand_pressed_run_skips_the_source_backoff(self):
+        """按下按钮的是人,所以这一轮得**跳过来源退避**(`FetchScope.force`)。
+
+        红的是 `crawl_filter` 里有没有 `force` —— 从那儿往下
+        (`pipeline_stages._fetch` → `sync.collect` 那道 `retry_at`)另有自己的红
+        (`tests/test_retry_scope.py`)。不带的后果是:用户点了同步,退避中的那几条被
+        静默跳过(只记一笔 `deferred`),而页面说「同步已开始」—— 而「失败之后手动点
+        一次同步」恰恰是退避唯一的出路(CLAUDE.md「服务与运行时」)。
+
+        **反过来钉一边**:没点名要 force 的请求(定时轮次、老脚本)照旧不带 ——
+        退避本来就是给自动轮次用的。
+        """
+        with patch.object(pipeline, "start_pipeline", return_value=True) as start:
+            r = self.client.post("/api/pipeline/run",
+                                 json={"channel": "rss", "force": True})
+            self.assertEqual(200, r.status_code, r.text)
+            self.assertIs(True, start.call_args.kwargs["crawl_filter"].get("force"))
+            self.client.post("/api/pipeline/run", json={"channel": "rss"})
+            self.assertNotIn("force", start.call_args.kwargs["crawl_filter"])
+
     def test_a_retired_channel_name_runs_as_the_one_that_replaced_it(self):
         """老页面/老脚本里写着的 `wechat_oa` 不该变成 400。
 

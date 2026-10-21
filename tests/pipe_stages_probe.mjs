@@ -140,9 +140,16 @@ let s = await snap();
 check("默认六段全勾,按钮写几步",
       s.stages.join() === 'crawl,export,index,extract,projects,wiki'
       && /6 步/.test(s.btn) && /已选 6 \/ 6/.test(s.count), JSON.stringify(s));
-check("默认那一档汇总先念这次跑哪几段,并说清含几段慢活",
-      /^这次会跑：抓取内容 → 导出文章 → 建立索引 → 提取要点 → 整理工具 → 更新 Wiki/.test(s.est)
+// 操作条念的是**这一次的事实**,不复述跑哪几段 —— 步骤就在右栏勾着,同一份信息
+// 念两遍正是操作条占掉三行的由来(弹窗改两栏时一起收的,见 pipeline.css)。
+// **「含 N 段全库的慢活」一档都不许省**:慢活标记在右栏每个格子上,但"这一次一共
+// 有几段"只有这里数得出来 —— 少了它,用户就会被一段几十分钟的活偷袭。
+check("默认那一档汇总念这次的事实,并说清含几段慢活",
+      /公众号 2 个 · 订阅源 1 个 · 不限时间/.test(s.est)
       && /含 2 段全库的慢活/.test(s.est), s.est);
+// **反过来钉一边**:步骤名不再在操作条上复述一遍
+check("操作条不复述步骤名",
+      !/这次会跑/.test(s.est) && !/抓取内容 → 导出文章/.test(s.est), s.est);
 
 check("两个来源的订阅都勾上之后起得了跑", !s.off, JSON.stringify(s));
 
@@ -163,7 +170,7 @@ s = await snap();
 check("只导出:来源那块照旧能点,只有时间范围和订阅被禁掉",
       !s.srcOff && s.scopeOff, JSON.stringify(s));
 check("只导出:就地说清订阅和日期不作数,而导出仍按选的来源跑",
-      /时间范围和订阅这次不作数/.test(s.est) && /导出仍按上面选的来源跑/.test(s.hint),
+      /时间范围和订阅这次不作数/.test(s.est) && /导出仍按所选来源跑/.test(s.hint),
       `${s.est} // ${s.hint}`);
 check("只导出:照旧起得了跑", !s.off, JSON.stringify(s));
 posted.length = 0;
@@ -185,7 +192,7 @@ await evalJs(`pipeSelectNone(); renderPipeEst(); 0`);
 await sleep(100);
 s = await snap();
 check("只导出、一个订阅都没勾:照旧起得了跑",
-      !s.off && /导出仍按上面选的来源跑/.test(s.hint), JSON.stringify(s));
+      !s.off && /导出仍按所选来源跑/.test(s.hint), JSON.stringify(s));
 posted.length = 0;
 await evalJs(`startPipeFromModal()`);
 await setup("那一档也发出了请求", until(`true`, 100).then(() => sleep(400).then(() => posted.length > 0)));
@@ -206,8 +213,8 @@ await setStage('crawl', false);
 await setStage('export', false);
 s = await snap();
 check("全库那几步:来源、时间范围、订阅三块一起禁掉", s.srcOff && s.scopeOff, JSON.stringify(s));
-check("全库那几步:就地说清上面那三块这次不作数",
-      /这几步都是全库的，上面的来源、时间范围和订阅这次都不作数/.test(s.est)
+check("全库那几步:就地说清那三块这次不作数",
+      /这几步都是全库的，来源、时间范围和订阅这次都不作数/.test(s.est)
       && /这几步都是全库的/.test(s.hint), `${s.est} // ${s.hint}`);
 posted.length = 0;
 await evalJs(`startPipeFromModal()`);
