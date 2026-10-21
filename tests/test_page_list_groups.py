@@ -114,6 +114,90 @@ class GroupTests(unittest.TestCase):
         self.assertEqual([(e['url'].split('.com')[1], e['published'][:10]) for e in got],
                          [('/news/a', '2026-10-18'), ('/news/b', '2026-10-17')])
 
+    def test_two_dated_articles_with_different_heading_styles_stay_one_list(self):
+        """**整页那道闸按结构路径数,不按分组数。**
+
+        签名里"是不是标题链接"管的是上移资格和选主 —— 拿它来数"这一页算不算
+        列表"就会把同一个列表拆散:一行标题写 `<h3>`、另一行写 `<span>`(两条
+        都**原生带日期**、都是实打实的文章)时,两条各成一个单条分组、一起够
+        不着 `MIN_DATED`,整页当场拒收。实测到的后果不止是解析返回空:这条
+        订阅会记一次失败、进退避。
+
+        `<span>` 和 `<strong>` 是同一个判据的两个实例,所以一起钉。
+        """
+        first = ('<li><a href="/news/a"><time>2026-10-20</time>'
+                 '<h3>First actual headline</h3></a></li>')
+        for tag in ('span', 'strong', 'h3'):
+            with self.subTest(tag):
+                second = (f'<li><a href="/news/b"><time>2026-10-19</time>'
+                          f'<{tag}>Second actual headline</{tag}></a></li>')
+                got = parse_page_list(
+                    f'<html><body><main><ul>{first}{second}</ul></main></body></html>'.encode(),
+                    BASE)
+                self.assertEqual(
+                    [(e['url'].split('.com')[1], e['title'], e['published'][:10]) for e in got],
+                    [('/news/a', 'First actual headline', '2026-10-20'),
+                     ('/news/b', 'Second actual headline', '2026-10-19')])
+
+    def test_widening_that_gate_did_not_lower_the_floor(self):
+        """**反过来钉一边。** 整页那道闸从"按分组数"改成"按结构路径数"是
+        **放宽**,所以得同时钉住它没把下限一起放掉。两个方向都要钉:
+
+        - **带日期的只有一条** —— 页面上链接很多,但只有一条容器里有日期。
+          (跟 `test_one_dated_link_is_not_a_list` 不重复:那条验的是"整页只有
+          一条链接"。)
+        - **两条带日期、但结构路径各不相同** —— 这一条才分得出"按结构路径
+          数"和"按全页总数":散落在页头和页脚的两条带日期链接加起来够 2 条,
+          但它们压根不在同一个列表里。**改成数全页总数就会把它们收进来**,
+          而只看第一个形态的用例对那个放宽毫无反应。
+        """
+        menu = ''.join(f'<li><a href="/p/{i}">Pricing {i}</a></li>' for i in range(30))
+        one_dated = ('<html><body><footer><ul>' + menu + '</ul></footer><main><ul>'
+                     '<li><a href="/news/a"><time>2026-10-20</time>'
+                     '<h3>The only dated link</h3></a></li>'
+                     '</ul></main></body></html>').encode()
+        scattered = ('<html><body>'
+                     '<nav><div><a href="/news/x"><time>2026-10-20</time>'
+                     '<h3>A dated link in the nav</h3></a></div></nav>'
+                     '<footer><p><a href="/news/y"><time>2026-10-19</time>'
+                     '<h3>A dated link in the footer</h3></a></p></footer>'
+                     '</body></html>').encode()
+        for name, page in (('only one dated link', one_dated),
+                           ('two dated links on different paths', scattered)):
+            with self.subTest(name):
+                with self.assertRaises(FeedError):
+                    parse_page_list(page, BASE)
+
+    def test_a_deeply_nested_undated_page_does_not_rescan_the_same_subtree(self):
+        """上移要从**原容器之外**开始找,不从 `<a>` 开始。
+
+        原容器刚刚被判过没有日期,而 `<a>` 到原容器之间那些祖先的子树都在原
+        容器**里面** —— 从 `<a>` 起逐层重扫等于把同一片已排除的子树按深度扫
+        了一遍又一遍,`O(深度²)`。
+
+        **上限 0.8 秒**:实测当前 0.125 秒、从 `<a>` 起重扫 1.83 秒(差 14.6
+        倍),所以这个数既离实现有 6 倍余量,又拦得住那个退化。**取三次最小
+        值**,免得一次调度抖动就把它判红(机器忙起来单次测量能差出好几倍)。
+
+        这一页没有日期、两版都正确报错 —— 钉的是**报错有多贵**,不是报错本身。
+        现有那条宽页用例走不到这里:它的新闻原生带日期、菜单没有标题标签,
+        两种都不进上移。
+        """
+        deep = lambda href, title: ('<div>' * 3200 + f'<a href="{href}"><h3>{title}</h3></a>'
+                                    + '</div>' * 3200)
+        html = ('<html><body><main><ul>'
+                f'<li>{deep("/news/a", "First actual headline")}</li>'
+                f'<li>{deep("/news/b", "Second actual headline")}</li>'
+                '</ul></main></body></html>').encode()
+        best = min(self._timed_failure(html) for _ in range(3))
+        self.assertLess(best, 0.8, f'3200 层无日期嵌套花了 {best:.2f} 秒')
+
+    def _timed_failure(self, html: bytes) -> float:
+        start = time.monotonic()
+        with self.assertRaises(FeedError):
+            parse_page_list(html, BASE)
+        return time.monotonic() - start
+
     def test_the_real_anthropic_page(self):
         got = parse_page_list(SAMPLE, BASE)
         titles = [e['title'] for e in got]
