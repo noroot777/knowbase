@@ -287,11 +287,14 @@ class PanelSourceContractTests(unittest.TestCase):
         面板一次都没见过 `running=true`(所以这里压根不摆那个中间态)。
         **反过来钉一边**:同一轮再问一次不许重复报,别人那一轮也不许认成自己的。
 
-        后半截摆的是**重启之后**那一形:身份和来源都只在 `last_run` 里(顶层那几格
-        是进程内状态,新进程里是空的),而恢复回来的那一轮**派生不出来源** —— 历史
-        故意不存导出范围,来源只写在那一格结论里。这一页原来读的是顶层,于是永远
-        认不出「刚跑完那一轮跟我有关」:提示不消失、新抓的条目也不重读,只有整页
-        刷新才回来。口径是**身份和来源都从同一份终态上读**(`pipeResult`)。
+        后两截摆的是「顶层答不出来源」那两档真实形态 —— **身份两档都在顶层**
+        (恢复会把它搬进内存状态,合并记录也沿用最后那一轮的身份),差的只有范围:
+        ①**恢复回来的那一轮**:来源只写在那一格结论里,顶层的抓取范围是
+        `{force: true}`、导出范围空着(历史故意不存它),派生出来的是空集;
+        ②**整批汇总那一轮**:范围在合并记录里按来源并过,而顶层只剩批次里最后
+        那一小轮的范围,前几轮碰过的来源一个都报不出来。
+        两档的后果一样:这一页认不出刚跑完那一轮跟自己有关,提示不消失、新抓的
+        条目也不重读。口径是**身份和范围取自同一份记录**(`pipeResult`)。
         """
         retried = {'running': False, 'run_id': 'run-retry-1',
                    'planned_stages': ['export', 'index', 'extract'],
@@ -300,13 +303,27 @@ class PanelSourceContractTests(unittest.TestCase):
         morning = dict(retried, run_id='run-morning')
         other = dict(retried, run_id='run-other',
                      export_filter={'channel': 'social', 'accounts': []})
-        # 重启之后:顶层没有身份,终态和来源结论都只在 `last_run` 里。
+
         def restored(run_id, channel):
-            return {'running': False, 'crawl_filter': {'force': True},
+            """重启之后:身份在顶层,来源只在那一格结论里。"""
+            return {'running': False, 'run_id': run_id,
+                    'planned_stages': ['export', 'index', 'extract'],
+                    'crawl_filter': {'force': True}, 'export_filter': {},
                     'last_run': {'run_id': run_id, 'crawl_filter': {'force': True},
                                  'planned_stages': ['export', 'index', 'extract'],
                                  'scopes': [{'channel': channel, 'accounts': [],
                                              'retry': ''}]}}
+
+        def batched(run_id, *channels):
+            """整批汇总:顶层只剩最后那一小轮,合并记录里才是并过的那几个。"""
+            last = channels[-1]
+            return {'running': False, 'run_id': run_id,
+                    'planned_stages': ['crawl', 'export'],
+                    'crawl_filter': {'channel': last, 'accounts': []},
+                    'export_filter': {'channel': last, 'accounts': []},
+                    'last_run': {'run_id': run_id, 'planned_stages': ['crawl', 'export'],
+                                 'crawl_filter': {'channels': [
+                                     {'channel': c, 'accounts': []} for c in channels]}}}
         script = '\n'.join([
             self.pick('pipe_channels.js', self.SCOPES),
             self.pick('pipe_view.js', self.RESULT),
@@ -322,12 +339,13 @@ class PanelSourceContractTests(unittest.TestCase):
             'out.push(sourceRunFinished(false), sourceRunFinished(false));',
             'pipeSnapshot = ' + json.dumps(restored('run-restored-2', 'social')) + ';',
             'out.push(sourceRunFinished(false));',
+            'pipeSnapshot = ' + json.dumps(batched('run-batch', 'rss', 'wechat_local')) + ';',
+            'out.push(sourceRunFinished(false));',
             'console.log(JSON.stringify(out));',
         ])
-        self.assertEqual([False, True, False, False, True, False, False],
+        self.assertEqual([False, True, False, False, True, False, False, True],
                          self.node(script),
-                         '只补导出那一轮认不出本来源,这一页就一直显示旧的失败')
-
+                         '顶层答不出来源的那几档,这一页就一直显示旧的失败')
 
 if __name__ == '__main__':
     unittest.main()

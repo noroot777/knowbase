@@ -301,10 +301,11 @@ function sourceActive() { return activeTab === 'subs' && subsKind === sourceKind
 let sourceSeenRun = '';
 function sourceRunFinished(reset) {
   const snap = pipeSnapshot;
-  // **身份和来源都从同一份终态上读**(`pipeResult`,同步中心和历史清单同一份)。
-  // 顶层那几格是进程内状态:重启之后只从历史恢复的那一轮里没有来源结论,这一页
-  // 就永远认不出它跟自己有关(两种漏法和实测形态在 `docs/decisions/retry-scope.md`
-  // 的「消费方一律从同一份终态上读」)。
+  // **来源要从同一份终态上问**(`pipeResult`,同步中心和历史清单读的就是它)。
+  // 顶层那几格只是「这个进程此刻的状态」:恢复回来的那一轮里没有来源结论(历史
+  // 故意不存导出范围),整批汇总那一轮里顶层又只剩最后那一小轮的范围 —— 两档都
+  // 让这一页认不出「刚跑完那一轮跟我有关」(形态在
+  // `docs/decisions/retry-scope.md` 的「消费方一律从同一份终态上问」)。
   const run = snap ? pipeResult(snap) : null;
   const id = (snap && !snap.running && run && run.run_id) || '';
   // **头一次进来(或换来源)看到的那一轮是历史记录,不是"刚刚跑完"** —— 那时

@@ -128,9 +128,10 @@ check("全库那一轮写「全库」,不许认成某个来源",
       /全库/.test(await whereLine()) && !/公众号|wechat/.test(await whereLine()),
       await whereLine());
 
-// ④ **同一份终态要一路到订阅页**:它那颗「跑完了自动重读」认的是同一轮、同一份来源。
-// 身份读顶层、来源读结论的那一版在这儿红:恢复回来的那一轮顶层压根没有身份,
-// 这一页于是永远认不出「刚才那一轮跟我有关」(提示不消失、新条目也不重读)。
+// ④ **同一份终态要一路到订阅页**:它那颗「跑完了自动重读」问的来源和同步中心是同一份。
+// 顶层那几格只是「此刻的进程状态」:恢复回来的那一轮里没有来源结论、抓取范围是
+// `{force:true}`,从顶层派生出来的是空集 —— 这一页于是永远认不出「刚才那一轮跟我
+// 有关」(提示不消失、新条目也不重读)。身份是对的,错的只有范围。
 const noticed = await evalJs(`(() => {
   const saved = [pipeSnapshot, sourceKind, sourceSeenRun];
   const only = ${JSON.stringify(EXPORT_ONLY)};
@@ -139,11 +140,16 @@ const noticed = await evalJs(`(() => {
     sourceKind = 'rss';
     pipeSnapshot = idle({ run_id: 'run-earlier', scopes: [{ channel: 'rss' }] });
     sourceRunFinished(true);
-    pipeSnapshot = idle(only);
+    // 恢复那一形:身份在顶层,来源只在那一格结论里(顶层的导出范围是空的)。
+    pipeSnapshot = { ...idle(only), run_id: only.run_id,
+                     planned_stages: only.planned_stages,
+                     crawl_filter: only.crawl_filter, export_filter: {} };
     const first = sourceRunFinished(false);
     const again = sourceRunFinished(false);
-    pipeSnapshot = idle({ ...only, run_id: 'run-wechat',
-                          scopes: [{ channel: 'wechat_local' }] });
+    pipeSnapshot = { ...idle({ ...only, run_id: 'run-wechat',
+                               scopes: [{ channel: 'wechat_local' }] }),
+                     run_id: 'run-wechat', planned_stages: only.planned_stages,
+                     crawl_filter: only.crawl_filter, export_filter: {} };
     const other = sourceRunFinished(false);
     return JSON.stringify({ first, again, other });
   } finally { [pipeSnapshot, sourceKind, sourceSeenRun] = saved; }
