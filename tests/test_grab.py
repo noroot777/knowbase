@@ -362,7 +362,7 @@ class PageTests(GrabCase):
             '请完成验证。Checking your browser before accessing the site. '
             '您需要启用 JavaScript 和 Cookie 后重试。在通过验证前文章内容不可见。' * 18])
         # 先钉住它确实落在旧判据的放行区里(否则这条用例测不到那个洞)
-        self.assertGreater(len(grab_page.page_body(gate)), 1200)
+        self.assertGreater(len(readable.extract(gate)), 1200)
         with self.assertRaises(grab.GrabError) as caught:
             self.save_page(html_resp(gate, url='https://example.org/article'))
         self.assertIn('验证', str(caught.exception))
@@ -446,8 +446,8 @@ class PageTests(GrabCase):
                 'subscription. Members have access to the full archive and may manage their '
                 'account and password. New readers can subscribe to unlock this story. ')
         bare = page_html(title='Sign in to read Example Journal', body=[said] * 7)
-        self.assertGreater(len(grab_page.page_body(bare)), 1500)   # 提取器交得出一大段
-        self.assertLess(readable.substance(grab_page.page_body(bare)), readable.MIN_CHARS)
+        self.assertGreater(len(readable.extract(bare)), 1500)   # 提取器交得出一大段
+        self.assertLess(readable.substance(readable.extract(bare)), readable.MIN_CHARS)
         # 三种形态同一句话:原始那张(一个表单都没有)、补一个邮箱表单的、补一个
         # 密码表单的。前两档靠内容质量那一道,第三档靠结构那一道 —— 两道都要在。
         for form in ('',
@@ -478,8 +478,8 @@ class PageTests(GrabCase):
             self.save_page(html_resp(once))
         self.assertIn('复读', str(caught.exception))
         self.assertEqual(self.items(), [])
-        self.assertGreater(len(grab_page.page_body(once)),
-                           len(grab_page.page_body(page_html())))   # 它更长,却该被拒
+        self.assertGreater(len(readable.extract(once)),
+                           len(readable.extract(page_html())))   # 它更长,却该被拒
         entry = self.page(html_resp(page_html()))                   # 两段不同的照旧收下
         self.assertIn('这是正文第一段', entry['body'])
 
@@ -563,7 +563,7 @@ class PageTests(GrabCase):
         """
         body = ['请完成验证后才能看到这篇文章。',
                 '这里是一段足够长的正文，讲的是别的事情，长度要过得了提取器那道门槛。' * 14]
-        self.assertLess(grab_page._gate_share(grab_page.page_body(
+        self.assertLess(grab_page._gate_share(readable.extract(
             page_html(title='x', body=body))), grab_page._GATE_SHARE)   # ④ 这一道不成立
         with self.assertRaises(grab.GrabError) as caught:
             self.page(html_resp(page_html(title='Just a moment…', body=body)))
@@ -576,7 +576,7 @@ class PageTests(GrabCase):
         那个洞(页面长一点就一路放行)。标题人畜无害时这一道单独成立。"""
         say = '请完成验证之后才能继续访问这篇文章的正文内容，这是站点的防护要求。'
         html = page_html(title='站点公告', body=[say * 16 + '本页由系统生成。' * 4])
-        self.assertGreaterEqual(grab_page._gate_share(grab_page.page_body(html)),
+        self.assertGreaterEqual(grab_page._gate_share(readable.extract(html)),
                                 grab_page._GATE_SHARE)
         with self.assertRaises(grab.GrabError) as caught:
             self.save_page(html_resp(html))

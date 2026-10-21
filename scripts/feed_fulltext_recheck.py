@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 """存量复查:把「补抓报了成功、而抓回来的其实不是文章正文」的条目收拾干净。
 
-`kb.feeds.readable.boilerplate_reason` 这道判据是 2026-10-09 审查之后才加的,
+这几道判据都是事后才加的(样板区那道在 2026-10-09 审查之后、关卡那两道更晚),
 而它要挡的东西**已经在库里了** —— 补抓一旦报成功,`fulltext_at` 落下、条目
 离开重试队列,后面任何一轮同步都不会再碰它(见 `fulltext.queued_sql`)。所以
 光修判据只管未来,存量得单独走一趟。
 
-**判据直接取 `readable.boilerplate_reason`,不在这里另写一遍。** 两处各判一遍
-的话,收拾掉的和以后会被挡掉的不是同一批。它是个纯文本判据,所以这里拿库里
-那份 `body` 就能问 —— 不必把 441 个原文链接重新请求一遍。
+**判据直接取现成的那两份,不在这里另写一遍**:`readable.boilerplate_reason`
+(版权区、作者简介)和 `grab_page.body_gate_reason`(关卡那六道里只认正文的
+两道 —— 通篇就是那几句提示、内容质量)。两处各判一遍的话,收拾掉的和以后会被
+挡掉的不是同一批。都是纯文本判据,所以这里拿库里那份 `body` 就能问 —— 不必把
+几百个原文链接重新请求一遍。**两道判据的射程不一样**(关卡那一道只用在报过
+补抓成功的条目上),理由和生产实测的数字在 `_suspect` 自己头上。
 
 **「放回队列」不够,必须连那份 body 一起换掉。** 第 1 轮只清了三个标记
 (`fulltext_at` / `fulltext_error` / `fulltext_tries`)和译文,body 原样留着 ——
@@ -63,11 +66,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb.feeds import fulltext, readable, registry as reg       # noqa: E402
+from kb.feeds import fulltext, grab_page, readable, registry as reg       # noqa: E402
 
 
 def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
-    """开了补抓的订阅里,`body` 过不了 `boilerplate_reason` 的那些。
+    """开了补抓的订阅里,`body` 过不了纯文本判据的那些。
 
     **射程是"开了补抓的订阅",不是"报过补抓成功"**(`fulltext_at<>''`)。后者
     漏掉的恰恰是这个脚本自己制造出来的中间态:第 1 轮版本只清标记不换 body,
@@ -79,6 +82,18 @@ def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
     feed 原本给的是跳转壳(标题 + 域名 + HN 得分),过得了判据;真正文同理。
     一条 body 是版权声明或作者简介的,只能是补抓这条路写进去的。**没开补抓的
     订阅一个都不碰** —— 它们的正文是 feed 自己给的,不在这个脚本的射程里。
+
+    **关卡那道判据(`grab_page.body_gate_reason`)只问「报过补抓成功」的那些,
+    射程比样板区那道窄一档。** 它问的是「这份正文,补抓那道准入会不会拒掉它」——
+    而那只对**补抓自己写进去的**正文是个有意义的问题:feed 原本给的那份壳、和这个
+    脚本重建出来的那份壳,从来没过那道准入,也不该按它评判(判据自己还有一道长度
+    守卫,见 `body_gate_reason`;两道都在,是因为它们挡的是两件事 —— 那边挡「这一问
+    对这种内容不成立」,这边挡「这不是补抓的写入」)。
+    生产实测(2026-10-21,`data/feeds.db`):开了补抓的订阅名下 1021 条,其中 352 条
+    还没补抓过(壳,`substance` 全落在 37~133)、669 条报过成功;那 669 条里关卡句
+    份额最高的是 **0.0**(一条正常文章都没碰到这道判据),质量那一道挑出 **2 条** ——
+    一张 Meta 产品落地页复读两遍订阅表单(934 字 / 不重复 393)、一张英国地方报的
+    面包屑加标题(473 字 / 不重复 392),两条都确实不是文章正文。
     """
     where = ["EXISTS(SELECT 1 FROM subscription_items x JOIN subscriptions s"
              ' ON s.id=x.subscription_id WHERE x.item_key=fi.key AND s.fulltext=1)']
@@ -92,13 +107,17 @@ def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
         where.append('si.subscription_id=?')
         args.append(source)
     sql = (f'SELECT DISTINCT fi.key,fi.kind,fi.title,fi.url,fi.body,fi.path,'
+           f"fi.fulltext_at<>'' AS fetched,"
            f"fi.exported_hash<>'' AS shipped FROM feed_items fi{join}"
            f' WHERE {" AND ".join(where)}')
     with reg.db() as c:
         rows = [dict(r) for r in c.execute(sql, args).fetchall()]
     out = []
     for row in rows:
-        if why := readable.boilerplate_reason(row['body']):
+        why = readable.boilerplate_reason(row['body'])
+        if not why and row['fetched']:
+            why = grab_page.body_gate_reason(row['body'])
+        if why:
             out.append({**row, 'why': why})
     return out
 

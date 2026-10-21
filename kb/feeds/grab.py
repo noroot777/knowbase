@@ -48,7 +48,6 @@ from kb.feeds import grab_page, readable, registry as reg, x_article, x_body
 from kb.feeds.grab_store import (KIND, known, owing,  # noqa: F401
                                  reclaim_export, replace)
 from kb.feeds.fetching import FeedError, body_text, canonical_url, oneline, request
-from kb.feeds.grab_page import PageUnavailable
 
 #: 整条收录的墙钟上限。X 那边最多两次接口请求(推文 + 长文),网页那边一次 HTTP;
 #: 用户正盯着这颗按钮等,所以比采集那一侧(`SOURCE_SECONDS`)给得紧一些。
@@ -370,12 +369,14 @@ def _grab_web(url: str, deadline: float) -> dict:
     """一个网页 → 待入库的条目。正文口径只有 `readable` 那一份。
 
     **「提取成功」证明不了「拿到了那篇文章」。** 所以关卡判据排在**所有出路的
-    前面,成功和失败共用一道**(`grab_page.gate_reason`,判据和那条不变量都在它
+    前面,成功和失败共用一道**(`grab_page.admit`,判据和那条不变量都在它
     自己头上):一张验证页提取得出一段文字、长度轻松过关,随后被 `put_items` 的
     `DO NOTHING` 永久钉成这一篇的正文,再投一次同一条链接也换不回真文章(两轮
     审查各实测到一例:683 字那张落在 `/challenge` 上,1782 字那张谁都没拦住)。
     **这里只有一个调用点** —— 成功路和失败路各问一次的话,同一张验证页会得到
-    两句不同的话,而其中一条迟早漏掉一个判据。
+    两句不同的话,而其中一条迟早漏掉一个判据。**「先提取、后问关卡」那个顺序也在
+    `admit` 里**,和订阅正文补抓那条链路共用:各自拼一遍的话,其中一头迟早漏掉
+    一道(那正是 `admit` 的来历,见它自己的说明)。
     """
     from kb.feeds.markdown_source import accept, entry, fetch, from_response
     if markdown := fetch(url, transport=request, deadline=deadline):
@@ -392,21 +393,17 @@ def _grab_web(url: str, deadline: float) -> dict:
         raise GrabError(f'{problem}')
     html = readable.decode(resp.body, dict(resp.headers))
     final = resp.url or url
-    # **先把提取的结果收在手里,别急着用它答任何话。** 关卡那一问要先过:
-    # 「提取失败」也不许抢在它前面答 —— 「这一页没找到正文」指不出下一步,而这
-    # 一页明摆着是一道验证页。
-    body, unavailable = '', ''
-    try:
-        body = grab_page.page_body(html)
-    except PageUnavailable as e:
-        unavailable = f'{e}'
-    if reason := grab_page.gate_reason(final, html, body):
-        raise _gate(reason, final)
-    if unavailable:
+    body, gate, why = grab_page.admit(final, html)
+    if gate:
+        raise _gate(gate, final)
+    if not body:
         # 读不到正文这一档也要带上下一步(口径同 `_gate`:同一个 `_next_step`)。
         # 「这一页没找到正文」自己指不出任何事 —— 折叠成一句抓取失败就是把人留在
-        # 原地(模块注释那一条)。
-        raise GrabError(f'{unavailable}。{_next_step(final)}')
+        # 原地(模块注释那一条)。**而 `why` 只当日志级的补充附在后面**:
+        # 「命中版权区」「作者简介」是面向开发的说法,对着用户再说一遍没有意义 ——
+        # 他能做的只有「换个地址」或者「这篇就是读不到」。
+        raise GrabError(f'这一页没找到正文{f"（{why}）" if why else ""}。{_next_step(final)}')
+    body = body[:grab_page.MAX_CHARS]
     meta = grab_page.page_meta(html, final)
     host = (urlsplit(final).hostname or '').lower().removeprefix('www.')
     return {'url': url, 'title': grab_page.title_fallback(meta['title'], body, host),
