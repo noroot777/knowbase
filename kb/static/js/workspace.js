@@ -8,6 +8,15 @@ let restoringLocation = false;
 // 深链当场失效、落到图鉴上。两条路都是网络往返,谁先回来纯看运气(无头浏览器里
 // 实测四次红一次)。首次定位完成之前一律不写地址栏:那时候地址栏才是权威。
 let workspaceLocated = false;
+// **首次定位之前人就点了导航**(刷新后立刻点侧栏那一下):那一下比地址栏里这一份
+// **新**,所以定位不许把它顶掉 —— 而它偏偏写不进地址栏(上面那条:定位完成前谁都
+// 不许写),于是定位读到的还是旧地址,`switchTab` 当场把人点的那一下换走。
+// 后果不是「慢」而是**卡住**:来源面板的装载有一道 `sourceActive()`
+// (`sources.js`,判据含 `activeTab === 'subs'`),切走之后它直接 return,
+// 面板的数据请求**一次都没发出去** —— 投递栏已经显示了、按钮还停在「同步全部」,
+// 页面一个报错都没有。实测:满载下点一次「存链接」就复现(无头探针里第 1 次就红),
+// 空载约 40 次红 1 次。事故形态和回归见 `docs/decisions/link-grab.md`。
+let workspaceNavigated = false;
 const tabScroll = new Map();
 const compactNavigation = matchMedia('(max-width:900px)');
 
@@ -25,6 +34,8 @@ function saveWorkspaceLocation(push = false) {
 
 function updateWorkspaceTab(tab, previousScroll = window.scrollY) {
   const changed = tab !== activeTab;
+  // 人自己点的那一下才算(定位自己走到这儿不算,否则它永远是"人点过的")
+  if (!workspaceLocated && !restoringLocation) workspaceNavigated = true;
   tabScroll.set(activeTab, previousScroll);
   activeTab = tab;
   $('page-crumb').textContent = WORKSPACE_TITLES[tab];
@@ -43,7 +54,10 @@ function restoreWorkspaceLocation() {
   // 老深链 #wechat/#social/#rss 仍然认:switchTab 会把它落到「我的订阅」的对应视图
   const known = Object.hasOwn(WORKSPACE_TITLES, tabName)
     || (typeof subsCatalog !== 'undefined' && subsCatalog.some(m => m.id === tabName));
-  const tab = known ? tabName : 'gallery';
+  // **人已经点过的那一下赢**(见 `workspaceNavigated`):只认他选的那个标签页,
+  // 地址栏里的图鉴筛选照旧读 —— 他点的正是图鉴时,深链上那几个筛选不该丢。
+  const chosen = workspaceNavigated && !workspaceLocated;
+  const tab = chosen ? activeTab : (known ? tabName : 'gallery');
   restoringLocation = true;
   workspaceLocated = true;   // 地址已经读完,之后各面板再存位置就不会盖掉它
   if (tab === 'gallery') {
@@ -55,8 +69,12 @@ function restoreWorkspaceLocation() {
     syncGalleryControls();
     applyGalleryFilter();
   }
-  switchTab(tab);
+  // 人点的那一下已经把标签页切好了,不必再切一遍(再切会让来源面板重装一轮)
+  if (!chosen) switchTab(tab);
   restoringLocation = false;
+  // 定位期间写地址栏被挡着(`saveWorkspaceLocation` 开头那道),这里把末态落进去。
+  // 正常那条路上地址栏本来就等于末态,那一句自带「不一样才写」,是个空操作。
+  saveWorkspaceLocation();
 }
 
 function toggleNavigation(open) {
