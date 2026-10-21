@@ -74,8 +74,10 @@ export const PARENT_ENV = "KB_PROBE_PARENT";
  * 回退那一支在模块加载那一刻取一次(越早越好),`<= 1` 时按「没有调用方」办 ——
  * 手动 `node tests/x_probe.mjs &` 之后关掉终端就是这一档,没有谁在等结果。
  *
- * **`tests/serve_*.py` 读同一个变量,但读法相反(没拿到就不盯)**:夹具的生命周期本来
- * 就跨多个 shell,现读 ppid 会让它一起跑就自杀。理由在 docs/decisions/fixture-life.md。
+ * **`tests/serve_*.py` 不读这个变量**:pid 区分不了「调用方死在我起身途中」和「这是
+ * 继承来的陈旧值」,它认的是 `KB_FIXTURE_OWNER` 那根继承来的管道,而且没拿到就不盯
+ * —— 夹具的生命周期本来就跨多个 shell,现读 ppid 会让它一起跑就自杀。理由在
+ * docs/decisions/fixture-life.md。
  */
 const CALLER = (() => {
   const want = Number.parseInt(process.env[PARENT_ENV] || "", 10);

@@ -18,69 +18,185 @@ init,而这些脚本本身是裸的 `serve_forever()` / `uvicorn.run()`,**没有
 拿「ppid 变了」当判据的话,夹具一起跑就自杀,这条合法的路直接断掉。
 
 所以这边反过来排:
-- **主防线是空闲超时**(`KB_FIXTURE_IDLE` 秒,默认 15 分钟,`0` 关闭)。每个请求续一次
-  命,够久没人来就自己退。它不关心谁是父进程,因此**手起这条路也盖得住** —— 那正是
-  实测泄漏的全部 9 个。
-- **副防线才是原调用方看门狗**,而且**只在调用方显式告知时启用**(`KB_PROBE_PARENT`,
-  `fixture_server()` 写自己的 pid)。它盖的是「pytest 被 SIGKILL,`finally` 里的
-  `reap()` 一行不跑」那一档 —— 空闲超时也兜得住,只是要等满 15 分钟,这一道把它缩到
-  一次轮询。**没有 ppid 回退**:现读 ppid 正是上面那条自杀路径。
+- **主防线是空闲超时**(`KB_FIXTURE_IDLE` 秒,默认 15 分钟,`0` 关闭)。**在途的请求不算
+  空闲** —— 只在进门时续一次命的话,一个慢请求跑到一半夹具就退了,客户端拿到 502。
+- **副防线是所有权凭据**(`KB_FIXTURE_OWNER`),只有 `fixture_server()` 给得出。它盖的是
+  「跑测试那个进程被 SIGKILL,`finally` 里的 `reap()` 一行不跑」那一档。
 
-两道都不依赖调用方临死前跑任何代码,这是它们和 `reap()` 的分工所在。
+凭据为什么是一根 pipe,不是一个 pid
+----------------------------------
+第一版传的是调用方的 pid,夹具拿「现在的 ppid 还等于它吗」判这个值可不可信。**那是错
+的**:七个 ASGI 夹具在开服务之前要建库、导出、建索引,调用方死在这几十秒里时 ppid 早
+变成 1 了,于是**正确的 pid 被当成继承来的陈旧值丢掉**,副防线整个不装。实测:真调用方
+被 SIGKILL,夹具照样从暂停点继续开服务、还能访问。把检查前移也只是把窗口改小。
+
+现在传的是一根**继承来的** pipe 读端,外加父进程预先写进去的随机 token:
+- **没有窗口**:fd 在 `exec` 那一刻就在了,调用方死在哪一步都立刻 EOF;
+- **可验证**:陈旧的环境变量带不来那根 pipe,token 对不上就不认;
+- **手起这条路照旧没有 owner**,只受空闲超时管 —— 那条合法的路不受影响。
+
+日志不许挡住任何一道防线
+------------------------
+stderr 一律走 `_say`(非阻塞、写不下就丢),fd 2 在装防线时就被切成非阻塞。没人消费
+stderr 时那根管道会满,而满管道上的 `write` 是**阻塞**不是异常,`try/except` 一个字
+都挡不住。实测这一下能把整条防线堵死,而且堵法有两种:
+- `_bail` 自己卡在发信号之前,连后面 `os._exit` 那道硬退都执行不到(第一版就是这样);
+- 访问日志卡住请求线程,`handle_one_request` 永远不返回,那个请求就永远算「在途」,
+  空闲超时看见还有在途便不退 —— 加了在途计数之后,这条反而成了新的堵法。
+
+**日志是可丢弃的,防线不是。**
 
 回归 `tests/test_fixture_life.py`。
 """
 
 from __future__ import annotations
 
+import contextlib
+import math
 import os
 import signal
+import stat
 import sys
 import threading
 import time
 
-#: `fixture_server()` 把自己的 pid 放这儿;跟 `tests/headless.py` 认同一个变量名。
-PARENT_ENV = 'KB_PROBE_PARENT'
+#: 所有权凭据:`"<fd>:<token>"`。fd 是一根**继承来的** pipe 读端(`pass_fds`),
+#: token 是父进程在起我们之前就写进那根 pipe 的随机串。唯一的写入方是
+#: `tests/headless.py` 的 `fixture_server()`。
+OWNER_ENV = 'KB_FIXTURE_OWNER'
 
 #: 多久没人来就自己退(秒)。`0` = 关掉这道防线,留给手动调试页面的人。
 IDLE_ENV = 'KB_FIXTURE_IDLE'
 IDLE_DEFAULT = 900.0
 
-#: 问一次「该退了吗」的间隔。空闲超时按分钟算,这个值只决定副防线有多快。
+#: 问一次「该退了吗」的间隔。空闲超时按分钟算,这个值只决定判出来之后多快动手。
 POLL_SECONDS = 0.4
 
-#: SIGTERM 发给自己之后再等这么久;还没退就硬退(见 `_bail`)。
+#: 每一级收场信号之间等多久(见 `_bail`)。
 GRACE_SECONDS = 10.0
 
 _LAST = time.monotonic()
+_INFLIGHT = 0
+_COUNT = threading.Lock()
+_OWNER_GONE = False
+_LIMIT = IDLE_DEFAULT
+_BAILING = threading.Lock()
 
 
-def caller() -> int:
-    """原调用方的 pid,`0` = 没有谁在等这一轮的结果。
+def _unblock_stderr() -> None:
+    """把 fd 2 切成非阻塞,**一次,不恢复**。
 
-    **启动这一刻它必须正是我们的父进程**,否则这个值是从环境里继承来的陈旧 pid
-    (说的是别人的调用方),一律不认 —— 认了的话夹具会凭一个无关进程的死活自杀。
+    没人消费 stderr 时那根管道会满,而满管道上的一次 `write` 是**阻塞**不是异常 ——
+    `try/except` 一个字都挡不住。实测这一下能堵死整条防线,而且堵法有两种:
+    ①`_bail` 自己卡在发信号之前,连后面那道硬退都执行不到;②访问日志卡住请求线程,
+    `handle_one_request` 永远不返回,于是那个请求永远算「在途」,空闲超时看见还有在途
+    就不退。**日志是可丢弃的,防线不是** —— 所以这里宁可丢日志。
     """
+    with contextlib.suppress(OSError):
+        os.set_blocking(2, False)
+
+
+def _say(text: str) -> None:
+    """写一行给 stderr —— 写不下就丢。
+
+    直接 `os.write(2, ...)`:绕过 `sys.stderr` 的缓冲、也绕过它那把锁(某个请求线程
+    可能正攥着它)。配合 `_unblock_stderr`,管道满时拿到的是 EAGAIN 而不是一次长眠。
+    """
+    with contextlib.suppress(BlockingIOError, OSError):
+        os.write(2, text.encode('utf-8', 'replace'))
+
+
+def claim_owner() -> int:
+    """认领所有权凭据,返回那根 pipe 的读端;没有、或者验不过,返回 `-1`。
+
+    **token 是「这根 pipe 确实是起我们那一位给的」的证据**。只看 fd 号的话,一个从环境
+    里继承下来的陈旧号可能在当前进程里指着别的东西。所以先要求它是个 FIFO、不是 stdio,
+    再把父进程预先写好的 token 读出来比对 —— 父进程在 `Popen` **之前**就写完了,所以
+    这一下读得到,哪怕它在我们起身的途中已经被杀。
+    """
+    spec = os.environ.get(OWNER_ENV, '').strip()
+    raw, _, token = spec.partition(':')
+    if not raw or not token:
+        return -1
     try:
-        want = int(os.environ.get(PARENT_ENV, '') or 0)
+        fd = int(raw)
     except ValueError:
-        return 0
-    return want if want > 1 and os.getppid() == want else 0
+        return -1
+    if fd <= 2:                      # 0/1/2 是 stdio,不可能是凭据
+        return -1
+    try:
+        if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+            return -1                # 陈旧的号指到了别的东西
+    except OSError:
+        return -1
+    want = token.encode()
+    # **这一下读绝不许阻塞。** 父进程在 `Popen` 之前就把 token 写进去了,所以正常情况
+    # 一次就读全(远小于 PIPE_BUF,写是原子的)。但凭据可能是畸形的 —— 比如环境里那个
+    # token 比管道里的长 —— 阻塞读会在读完已有数据之后**永远等下去**,而这一段跑在
+    # 模块加载里:夹具会卡死在 import,一个字的日志都没有。宁可认不出(只丢掉副防线,
+    # 空闲超时还在),也不能卡住。
+    got = b''
+    try:
+        os.set_blocking(fd, False)
+        deadline = time.monotonic() + 1.0
+        while len(got) < len(want) and time.monotonic() < deadline:
+            try:
+                chunk = os.read(fd, len(want) - len(got))
+            except BlockingIOError:
+                time.sleep(0.01)
+                continue
+            if not chunk:
+                break                # 写端已经关了,凭据不完整
+            got += chunk
+    except OSError:
+        return -1
+    finally:
+        with contextlib.suppress(OSError):
+            os.set_blocking(fd, True)   # 还回去:`_watch_owner` 要阻塞着等 EOF
+    return fd if got == want else -1
+
+
+def owner_gone() -> bool:
+    """原调用方没了吗(没有 owner 时恒为 False)。"""
+    return _OWNER_GONE
+
+
+def _watch_owner(fd: int) -> None:
+    """盯着那根 pipe:调用方一死,写端被内核关掉,我们这边立刻读到 EOF。
+
+    **这是唯一不依赖调用方临死前跑任何代码的信号** —— 它被 SIGKILL 那一档也盖得住,
+    而写在它那边的 `finally` / handler 一行都不会跑。
+    """
+    global _OWNER_GONE
+    try:
+        while os.read(fd, 1):
+            pass                     # 正常情况下一直阻塞在这;父进程不再写东西
+    except OSError:
+        pass
+    _OWNER_GONE = True
+    _check()
 
 
 def idle_limit() -> float:
-    """这次的空闲上限(秒);给不出数就用默认值,负数按关掉办。"""
+    """这次的空闲上限(秒);给不出有效数字就回那个保守的默认值。
+
+    `nan` / `inf` 按**无效配置**办:前者任何比较都是假、后者永远不到点,照单全收的话
+    手起且没有 owner 的夹具会悄悄失去唯一那道防线。有意写 `0` 的出口照旧保留。
+    """
     raw = os.environ.get(IDLE_ENV, '').strip()
     if not raw:
         return IDLE_DEFAULT
     try:
-        return max(0.0, float(raw))
+        value = float(raw)
     except ValueError:
         return IDLE_DEFAULT
+    if not math.isfinite(value):
+        return IDLE_DEFAULT
+    return max(0.0, value)
 
 
 def touch() -> None:
-    """有人来过 —— 续一次命。两个适配层都只经过这一个出口。"""
+    """有人来过 —— 续一次命。"""
     global _LAST
     _LAST = time.monotonic()
 
@@ -90,25 +206,59 @@ def idle_seconds() -> float:
     return time.monotonic() - _LAST
 
 
-def should_exit(limit: float, origin: int) -> str:
+def inflight() -> int:
+    """手上还有几个请求没回完。"""
+    return _INFLIGHT
+
+
+def _enter() -> None:
+    global _INFLIGHT
+    with _COUNT:
+        _INFLIGHT += 1
+
+
+def _leave() -> None:
+    global _INFLIGHT
+    with _COUNT:
+        _INFLIGHT -= 1
+    touch()                          # 回完那一刻才开始计空闲
+
+
+@contextlib.contextmanager
+def active():
+    """一次请求从进门到回完的整段 —— 这期间不算空闲。
+
+    只在进门时 `touch()` 一次是不够的:读上游、发响应、等流式数据那几秒全被算成空闲,
+    实测一个 4 秒的慢请求在 1 秒空闲上限下会被拦腰砍断,客户端拿到 502。
+    """
+    _enter()
+    try:
+        yield
+    finally:
+        _leave()
+
+
+def should_exit(limit: float, gone: bool, busy: int) -> str:
     """该退就返回退的理由,不该退返回空串 —— **判据只有这一份**,回归直接打它。
 
-    `limit <= 0` 关掉空闲那一道;`origin <= 0` 关掉看门狗那一道。两道都关就永远不退
+    `limit <= 0` 关掉空闲那一道;`gone` 为假时不看 owner。两道都不成立就永远不退
     (那是手动调试页面时想要的)。
+
+    **丢了 owner 要立刻退,不等在途请求回完**:那一刻已经没人在等这个结果了。
     """
-    if origin > 0 and os.getppid() != origin:
-        return f'原调用方 {origin} 已经退出'
-    if limit > 0 and idle_seconds() >= limit:
+    if gone:
+        return '原调用方已经退出'
+    if limit > 0 and busy == 0 and idle_seconds() >= limit:
         return f'已经 {limit:.0f} 秒没有请求'
     return ''
 
 
 def _bail(why: str) -> None:
-    """打一行再优雅收场。
+    """打一行再优雅收场。重入只有第一个管用。
 
-    **发的是 SIGINT 不是 SIGTERM。** Python 对 SIGINT 的默认行为是抛
+    **发的是 SIGINT,不是 SIGTERM。** Python 对 SIGINT 的默认行为是抛
     `KeyboardInterrupt`,`main()` 里那个 `with contextlib.ExitStack()` 退得了栈 ——
-    手动跑这一档那份临时根归我们自己删(见 `tests/fixture_root.py`)。SIGTERM 没有
+    手动跑这一档那份临时根归夹具自己删(见 `tests/fixture_root.py`)。SIGTERM 没有
     handler 时是**直接结束**,清理一行都不跑:第一版就是发的 SIGTERM,实测退出码
     -15、盘上留下一份完整的 `kb-source-qa-*` 沙箱库 —— 跟 `fixture_root.py` 记载的
     那个事故形态一模一样,等于把它又犯了一遍。
@@ -118,11 +268,10 @@ def _bail(why: str) -> None:
     **后面两道是兜底**:SIGINT 要对端配合(收不到,或者卡在清理里),所以再给一次
     SIGTERM,还不走就硬退 —— 一道自己卡住的防线比没有更糟。
     """
-    try:
-        sys.stderr.write(f'tests/fixture_life.py: {why},自行退出\n')
-        sys.stderr.flush()
-    except Exception:                # stderr 多半通向一个已经没了的调用方
-        pass
+    if not _BAILING.acquire(blocking=False):
+        return                       # 两条看门狗同时判出来,收一次就够
+    _unblock_stderr()            # 退出路径不许再被日志挡住
+    _say(f'tests/fixture_life.py: {why},自行退出\n')
     os.kill(os.getpid(), signal.SIGINT)
     time.sleep(GRACE_SECONDS)
     os.kill(os.getpid(), signal.SIGTERM)
@@ -130,33 +279,36 @@ def _bail(why: str) -> None:
     os._exit(143)                    # 143 = 被信号收场的惯例
 
 
-def _watch(limit: float, origin: int) -> None:
+def _check() -> None:
+    """过一遍那份唯一的判据,该退就退。两条看门狗都只经过它。"""
+    why = should_exit(_LIMIT, owner_gone(), inflight())
+    if why:
+        _bail(why)
+
+
+def _watch_idle() -> None:
     while True:
-        why = should_exit(limit, origin)
-        if why:
-            _bail(why)
-            return
+        _check()
         time.sleep(POLL_SECONDS)
 
 
-def install(*, limit: float | None = None, origin: int | None = None) -> None:
-    """装上两道防线。两道都关就什么也不起,免得白留一个线程。
+def install(*, limit: float | None = None) -> None:
+    """装上空闲那一道。所有权那一道在模块加载时就装好了(见文件末尾)。
+
+    **要装在摆盘之后**(就在 `uvicorn.run` / `serve_forever` 那一下):装早了的话建库、
+    导出、建索引那几十秒本身就是「没有请求」,夹具会在起身途中被自己的空闲超时收掉。
 
     线程是 `daemon`:它只是「夹具还活着的时候顺便盯一眼」,不该自己把进程留住
     (对应 `probe_shell.mjs` 那个 interval 的 `unref()`)。
     """
-    limit = idle_limit() if limit is None else limit
-    origin = caller() if origin is None else origin
+    global _LIMIT
+    _LIMIT = idle_limit() if limit is None else limit
     touch()
-    if limit <= 0 and origin <= 0:
+    _unblock_stderr()
+    _say(f'tests/fixture_life.py: {banner(_LIMIT)}\n')
+    if _LIMIT <= 0:
         return
-    try:
-        sys.stderr.write(f'tests/fixture_life.py: {banner(limit)}\n')
-        sys.stderr.flush()
-    except Exception:
-        pass
-    threading.Thread(target=_watch, args=(limit, origin),
-                     daemon=True, name='fixture-life').start()
+    threading.Thread(target=_watch_idle, daemon=True, name='fixture-idle').start()
 
 
 def banner(limit: float | None = None) -> str:
@@ -168,28 +320,68 @@ def banner(limit: float | None = None) -> str:
 
 
 class guard:
-    """包住 ASGI app:每个请求续一次命,同时把防线装上。
+    """包住 ASGI app:每个请求记一次在途,同时把空闲那道防线装上。
 
     用法 `uvicorn.run(fixture_life.guard(app), ...)`。uvicorn 认的是「这东西是不是
     async callable」,类实例的 `__call__` 是 async,会被判成 asgi3。
     """
 
-    def __init__(self, app, *, limit: float | None = None, origin: int | None = None):
+    def __init__(self, app, *, limit: float | None = None):
         self._app = app
-        install(limit=limit, origin=origin)
+        install(limit=limit)
 
     async def __call__(self, scope, receive, send):
-        touch()
-        await self._app(scope, receive, send)
+        # lifespan 从起到停贯穿整个进程,它**不是**一次请求 —— 算进在途的话空闲
+        # 超时永远不会到点,这道防线就等于没装。
+        if scope.get('type') == 'lifespan':
+            await self._app(scope, receive, send)
+            return
+        with active():
+            await self._app(scope, receive, send)
 
 
 class TouchingHandlerMixin:
-    """给 `http.server` 那一侧的适配:每个请求续一次命。
+    """给 `http.server` 那一侧的适配:每个请求记一次在途。
 
-    挂在 `handle_one_request` 上而不是各个 `do_*`:keep-alive 连接上的每一个请求都
-    走它,而 `do_*` 得一个个记得加。
+    **在途从「请求行已经读到」开始算,不从 `handle_one_request` 进门算**:keep-alive
+    连接空闲等下一个请求时就阻塞在读请求行上,把那一段算成在途的话,浏览器挂着一条
+    连接就能让夹具永不退出 —— 空闲超时还是等于没装,只是换了个失守的方向。
     """
 
-    def handle_one_request(self):           # noqa: D102 - 见类 docstring
-        touch()
-        super().handle_one_request()
+    def log_message(self, fmt, *args):  # noqa: D102 - 见类 docstring
+        # 访问日志必须走那条不阻塞的路:`http.server` 原来的实现写 `sys.stderr`,
+        # 管道一满这个请求就永远停在「在途」上,把空闲超时那道防线一起堵死。
+        _say(f'{self.address_string()} - - [{self.log_date_time_string()}] '
+             f'{fmt % args}\n')
+
+    def parse_request(self):            # noqa: D102 - 见类 docstring
+        ok = super().parse_request()
+        if ok and not getattr(self, '_fixture_active', False):
+            self._fixture_active = True
+            _enter()
+        return ok
+
+    def handle_one_request(self):       # noqa: D102 - 见类 docstring
+        self._fixture_active = False
+        try:
+            super().handle_one_request()
+        finally:
+            if getattr(self, '_fixture_active', False):
+                self._fixture_active = False
+                _leave()
+
+
+def _arm_owner() -> None:
+    """所有权那道防线**在模块加载时就装**,不等 `install()`。
+
+    七个 ASGI 夹具在 `install()` 之前要建库、导出、建索引 —— 那几十秒正是调用方最可能
+    被取消的窗口,等到那时候再装就晚了。没有凭据(手起这条路)就什么也不起。
+    """
+    fd = claim_owner()
+    if fd < 0:
+        return
+    threading.Thread(target=_watch_owner, args=(fd,), daemon=True,
+                     name='fixture-owner').start()
+
+
+_arm_owner()

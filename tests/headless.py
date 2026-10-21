@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -37,6 +38,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from tests import fixture_life
+
 #: 装一份无头壳的办法,skip 消息里原样带给用户。
 INSTALL_HINT = ("装一份:`npx playwright install chromium-headless-shell`,"
                 "或自己准备一个 chrome-headless-shell 并用 "
@@ -44,11 +47,10 @@ INSTALL_HINT = ("装一份:`npx playwright install chromium-headless-shell`,"
 
 _GLOB = "chromium_headless_shell-*/*/chrome-headless-shell*"
 
-#: 把「原调用方是谁」告诉子进程的环境变量;两个写入方,别在调用点自己设:
-#: `run_probe` 告诉 .mjs 探针(口径在 `tests/probe_shell.mjs` 的 CALLER),
-#: `fixture_server` 告诉 `tests/serve_*.py` 夹具(口径在 `tests/fixture_life.py`)。
-#: 两边读法不同 —— 探针**没拿到就现读 ppid**,夹具**没拿到就不盯**(手起的夹具跨
-#: 多个 shell 共用是合法用法,现读 ppid 会让它一起跑就自杀)。理由见那两份文件。
+#: 把「原调用方是谁」告诉探针的环境变量;口径在 `tests/probe_shell.mjs` 的 CALLER。
+#: 唯一的写入方是 `run_probe`,别在调用点自己设。
+#: **夹具那边不用这个** —— pid 区分不了「调用方死在我起身途中」和「这是继承来的陈旧
+#: 值」,它认的是 `fixture_life.OWNER_ENV` 那根继承来的 pipe,见 `fixture_server`。
 PARENT_ENV = "KB_PROBE_PARENT"
 # 临时 profile 建在这个**父进程拥有**的根里面(见 run_probe 的 docstring)。
 # 跟沙箱那份库同一条口径(`tests/fixture_root.py`):建在起它的这一侧、这一侧删。
@@ -272,14 +274,23 @@ def fixture_server(*extra_args: str, script: str = "serve_sources.py",
         port = listener.getsockname()[1]
     root = tempfile.TemporaryDirectory(prefix="kb-fixture-")
     base = f"http://127.0.0.1:{port}"
-    # 夹具那边拿它当副防线:我们被 SIGKILL 时 `finally` 里的 reap 一行不跑,
-    # 它自己看得出「原调用方没了」。口径在 `tests/fixture_life.py`。
+    # 夹具那边拿这根 pipe 当副防线:我们被 SIGKILL 时 `finally` 里的 reap 一行不跑,
+    # 而内核会关掉写端,它那边立刻读到 EOF。**凭据必须是继承来的 fd 而不是我们的
+    # pid** —— 夹具要先建库、导出、建索引才开服务,我们死在那几十秒里时它读到的
+    # ppid 已经是 1,拿 pid 判「这个值可不可信」会把正确的值当陈旧值丢掉。
+    # token 预先写进去,好让它认得出这根 pipe 确实是我们给的。口径在
+    # `tests/fixture_life.py` 的 `claim_owner`。
+    owner_r, owner_w = os.pipe()
+    owner_token = secrets.token_hex(8)
+    os.write(owner_w, owner_token.encode())
     env = {**os.environ, "KB_FIXTURE_ROOT": root.name,
-           PARENT_ENV: str(os.getpid())}
+           fixture_life.OWNER_ENV: f"{owner_r}:{owner_token}"}
     server = subprocess.Popen(
         [sys.executable, f"tests/{script}", "--port", str(port), *extra_args],
         cwd=Path(__file__).resolve().parents[1], env=env,
+        pass_fds=(owner_r,),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.close(owner_r)                # 读端归子进程;我们留着的话它永远等不到 EOF
     try:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -294,6 +305,8 @@ def fixture_server(*extra_args: str, script: str = "serve_sources.py",
             raise AssertionError("隔离沙箱服务没有响应")
         yield SandboxBase(base, root.name)
     finally:
+        with contextlib.suppress(OSError):
+            os.close(owner_w)        # 写端一关,子进程立刻知道我们走了
         reap(server)                 # 收子进程的口径只有一份(见 reap)
         root.cleanup()
 

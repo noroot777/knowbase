@@ -5,7 +5,8 @@
 > 硬约束和下面的展开**说的是同一条口径,要改规则两边一起改**。
 >
 > 这一份管**探针起的 chrome**;夹具那个 Python 服务进程自己什么时候退在 `fixture-life.md`,
-> 两份读同一个 `KB_PROBE_PARENT` 而**读法故意相反**,动其中一边先把另一边读了。
+> 两份的凭据和判据**都不一样**(探针读 `KB_PROBE_PARENT` 这个 pid、没拿到就现读 ppid;夹具读
+> `KB_FIXTURE_OWNER` 那根继承来的管道、没拿到就不装这道防线),动其中一边先把另一边读了。
 
 ## 硬约束(原 CLAUDE.md「浏览器探针起的无头壳(tests/probe_shell.mjs + headless.py 的 run_probe)」)
 

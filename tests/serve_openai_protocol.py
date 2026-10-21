@@ -6,6 +6,13 @@ import os
 from pathlib import Path
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# 起了不关就是孤儿:什么时候自行退出,口径和理由都在 tests/fixture_life.py。
+# **必须在模块加载时就 import** —— 所有权看门狗装在它的模块级,而摆盘(建库、
+# 导出、建索引)那几十秒正是调用方最可能被取消的窗口,等到 main() 里再 import
+# 就晚了,那一段整个在射程之外。
+from tests import fixture_life  # noqa: E402
+
 
 def main():
     parser = ArgumentParser(description=__doc__)
@@ -67,8 +74,6 @@ def main():
 
         print("Isolated OpenAI protocol QA: temporary settings, no external requests", flush=True)
         try:
-            # 起了不关就是孤儿:什么时候自行退出,口径和理由都在 tests/fixture_life.py
-            from tests import fixture_life
             uvicorn.run(fixture_life.guard(app), host="127.0.0.1", port=args.port, log_level="warning")
         finally:
             sdk.close()

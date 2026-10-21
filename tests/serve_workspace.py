@@ -12,7 +12,8 @@ from urllib.error import HTTPError
 from urllib.request import urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-# 起了不关就是孤儿:什么时候自行退出,口径和理由都在 tests/fixture_life.py
+# 起了不关就是孤儿:什么时候自行退出,口径和理由都在 tests/fixture_life.py。
+# **必须在模块加载时就 import** —— 所有权看门狗装在它的模块级。
 from tests import fixture_life  # noqa: E402
 
 STATIC = Path(__file__).resolve().parents[1] / "kb" / "static"

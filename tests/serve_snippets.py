@@ -43,6 +43,13 @@ sys.path.insert(0, str(ROOT))
 # 两份 md 正文模板(图鉴条目、日报)搬去了 `tests/snip_fixture_md.py`(行数上限)
 from tests.snip_fixture_md import _DAILY_MD, _TOOL_MD  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# 起了不关就是孤儿:什么时候自行退出,口径和理由都在 tests/fixture_life.py。
+# **必须在模块加载时就 import** —— 所有权看门狗装在它的模块级,而摆盘(建库、
+# 导出、建索引)那几十秒正是调用方最可能被取消的窗口,等到 main() 里再 import
+# 就晚了,那一段整个在射程之外。
+from tests import fixture_life  # noqa: E402
+
 # 订阅条目。正文里那句 SNIP_FEED 是探针去选的那一段 —— 要够长(过 SNIP_MIN)、
 # 在正文里只出现一次(锚点回跳按 prefix+quote+suffix 找,重复出现就说不清定位
 # 到的是哪一处了)。
@@ -667,8 +674,6 @@ def main() -> None:
         # **得在 uvicorn 起之前挂**:Starlette 的中间件栈一启动就定型了
         install_test_routes(app, vault)
         print('Isolated snippet-favorite QA: no real data or external requests', flush=True)
-        # 起了不关就是孤儿:什么时候自行退出,口径和理由都在 tests/fixture_life.py
-        from tests import fixture_life
         uvicorn.run(fixture_life.guard(app), host='127.0.0.1', port=args.port, log_level='warning')
 
 
