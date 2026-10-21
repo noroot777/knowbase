@@ -7,11 +7,18 @@
 光修判据只管未来,存量得单独走一趟。
 
 **判据直接取现成的那两份,不在这里另写一遍**:`readable.boilerplate_reason`
-(版权区、作者简介)和 `grab_page.body_gate_reason`(关卡那六道里只认正文的
-两道 —— 通篇就是那几句提示、内容质量)。两处各判一遍的话,收拾掉的和以后会被
-挡掉的不是同一批。都是纯文本判据,所以这里拿库里那份 `body` 就能问 —— 不必把
-几百个原文链接重新请求一遍。**两道判据的射程不一样**(关卡那一道只用在报过
-补抓成功的条目上),理由和生产实测的数字在 `_suspect` 自己头上。
+(版权区、作者简介)和 `grab_page.gate_text_reason`(关卡那六道里**与内容格式
+无关**的那一道 —— 通篇就是那几句提示,按份额)。两处各判一遍的话,收拾掉的和
+以后会被挡掉的不是同一批。都是纯文本判据,所以这里拿库里那份 `body` 就能问 ——
+不必把几百个原文链接重新请求一遍。**库里那份正文没有来源凭据,所以 HTML 准入
+专属的那一问(⑥「我确认不了」)不许拿来问它**,理由和生产实测的数字在
+`grab_page.gate_text_reason` 与 `_not_article` 头上。
+
+**这两道在本脚本里是同一份,两处消费:挑哪几行要收拾(`_suspect`)、以及从备份里
+挑哪一份内容当壳(`_from_backup`)。** 只在前一处更新不合格标准、后一处留着旧
+标准的后果实测过(审查第 1 轮):一份同样被污染的较新备份被当成有效原摘要装回
+来,`_downgrade` 紧接着把 `fulltext_at` 清空 —— 这一条从此连扫描都选不中,而
+正确的较旧备份明明还在。所以**那份标准抽成 `_not_article`,两处都过它**。
 
 **「放回队列」不够,必须连那份 body 一起换掉。** 第 1 轮只清了三个标记
 (`fulltext_at` / `fulltext_error` / `fulltext_tries`)和译文,body 原样留着 ——
@@ -69,6 +76,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kb.feeds import fulltext, grab_page, readable, registry as reg       # noqa: E402
 
 
+def _not_article(body: str) -> str:
+    """这段文字**自己**有没有把「这不是文章正文」写在脸上。空串 = 没有。
+
+    **本脚本的那份标准只有这一处,两边消费**:扫描挑哪几行要收拾(`_suspect`)、
+    以及从备份里挑哪一份内容当壳(`_from_backup`)。只在前一处更新标准的后果见
+    模块说明那一段 —— 污染的备份被当成有效原摘要装回来,而 `_downgrade` 紧接着
+    清掉 `fulltext_at`,这一条从此连扫描都选不中(元规则:口径只有一份)。
+
+    两道都**与内容格式无关**,所以对库里任何一份文字都成立 —— 库里那份正文没有
+    来源凭据,HTML 准入专属的 ⑥ 不许拿来问它(理由在 `grab_page.gate_text_reason`
+    头上)。
+    """
+    return readable.boilerplate_reason(body) or grab_page.gate_text_reason(body)
+
+
 def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
     """开了补抓的订阅里,`body` 过不了纯文本判据的那些。
 
@@ -83,17 +105,22 @@ def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
     一条 body 是版权声明或作者简介的,只能是补抓这条路写进去的。**没开补抓的
     订阅一个都不碰** —— 它们的正文是 feed 自己给的,不在这个脚本的射程里。
 
-    **关卡那道判据(`grab_page.body_gate_reason`)只问「报过补抓成功」的那些,
-    射程比样板区那道窄一档。** 它问的是「这份正文,补抓那道准入会不会拒掉它」——
-    而那只对**补抓自己写进去的**正文是个有意义的问题:feed 原本给的那份壳、和这个
-    脚本重建出来的那份壳,从来没过那道准入,也不该按它评判(判据自己还有一道长度
-    守卫,见 `body_gate_reason`;两道都在,是因为它们挡的是两件事 —— 那边挡「这一问
-    对这种内容不成立」,这边挡「这不是补抓的写入」)。
+    **关卡那道判据只取 ④(`gate_text_reason`),不问 ⑥。** ④ 问的是「这段话自己是不是
+    一张验证提示」—— 与内容格式无关,库里任何一份文字都答得出。⑥(「不重复的字数过不了
+    提取器那道门槛」)是 HTML 准入**专属**的一问,而库里那份正文没有来源凭据:
+    `fulltext.fetch_one` 另有两条正常出口压根不过 `admit`(`.md`/GitHub 地址、
+    `text/markdown` 响应),交出来的是 Markdown 原文,安装命令、围栏和表格行本来就
+    重复。拿 ⑥ 问它们的后果实测过(审查第 1 轮):一份 646 字、按行去重 254 字的正常
+    quick-start README 被判坏、正文换成「标题 + 链接」、译文作废,而重抓会把同一份
+    内容再写回来 —— 下一轮又选中,没有终点。**补一列来源凭据也救不回存量**:这次之后
+    ⑥ 判坏的 HTML 正文压根写不进来(`admit` 当场拒掉),凭据只会盖在「⑥ 永远不会成立」
+    的那些行上(完整论证在 `grab_page.gate_text_reason` 头上)。
     生产实测(2026-10-21,`data/feeds.db`):开了补抓的订阅名下 1021 条,其中 352 条
     还没补抓过(壳,`substance` 全落在 37~133)、669 条报过成功;那 669 条里关卡句
-    份额最高的是 **0.0**(一条正常文章都没碰到这道判据),质量那一道挑出 **2 条** ——
-    一张 Meta 产品落地页复读两遍订阅表单(934 字 / 不重复 393)、一张英国地方报的
-    面包屑加标题(473 字 / 不重复 392),两条都确实不是文章正文。
+    份额最高的是 **0.0** —— 换句话说**存量里一条关卡页都没有**,④ 这一道是给以后留的
+    (而以后 `admit` 会先拦住它们)。⑥ 那一档当时挑出 2 条(Meta 产品落地页、英国
+    地方报的面包屑),按上面的理由**不动它们**:认不出来的代价是库里留着两条瘦正文,
+    认错的代价是把正常 README 写死。
     """
     where = ["EXISTS(SELECT 1 FROM subscription_items x JOIN subscriptions s"
              ' ON s.id=x.subscription_id WHERE x.item_key=fi.key AND s.fulltext=1)']
@@ -107,19 +134,11 @@ def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
         where.append('si.subscription_id=?')
         args.append(source)
     sql = (f'SELECT DISTINCT fi.key,fi.kind,fi.title,fi.url,fi.body,fi.path,'
-           f"fi.fulltext_at<>'' AS fetched,"
            f"fi.exported_hash<>'' AS shipped FROM feed_items fi{join}"
            f' WHERE {" AND ".join(where)}')
     with reg.db() as c:
         rows = [dict(r) for r in c.execute(sql, args).fetchall()]
-    out = []
-    for row in rows:
-        why = readable.boilerplate_reason(row['body'])
-        if not why and row['fetched']:
-            why = grab_page.body_gate_reason(row['body'])
-        if why:
-            out.append({**row, 'why': why})
-    return out
+    return [{**row, 'why': why} for row in rows if (why := _not_article(row['body']))]
 
 
 def _backups(explicit: str | None) -> list[Path]:
@@ -137,8 +156,17 @@ def _backups(explicit: str | None) -> list[Path]:
 def _from_backup(paths: list[Path], key: str) -> tuple[str, str]:
     """备份里那份原始 body。返回 `(壳, 来自哪个备份)`,没有就两个空串。
 
-    **恢复回来的要再过一遍判据**:备份可能是在某一轮错误补抓之后做的,里面
-    那份同样是样板文字 —— 那就不算有效壳,继续往更早的备份找。
+    **恢复回来的要再过一遍判据,而且过的是和扫描同一道那份**(`_not_article`):
+    备份可能是在某一轮错误补抓之后做的,里面那份同样不是文章正文 —— 那就不算有效
+    壳,继续往更早的备份找。实测过只更新扫描那一侧的后果(审查第 1 轮):一份同样
+    印着「请完成验证」的较新备份被当成有效原摘要装回来,`_downgrade` 紧接着清掉
+    `fulltext_at`,这一条从此连扫描都选不中,而正确的较旧备份明明还在 —— 三轮同步
+    之后那段验证提示仍旧导出到了 vault。
+
+    **宁可多拒一份备份。** 误拒的代价是回落到「标题与链接」那份重建壳、下一轮重抓
+    一次(`_downgrade` 会把它放回队列、额度给满);漏放的代价是把已经认出来的坏正文
+    重新当成这一篇的摘要,而清掉成功时间之后再也没人会来问它(元规则:漏报是静默
+    丢数据,误报顶多重抓一次)。
     """
     for path in paths:
         try:
@@ -154,7 +182,7 @@ def _from_backup(paths: list[Path], key: str) -> tuple[str, str]:
             except (sqlite3.Error, NameError, UnboundLocalError):
                 pass
         body = (row['body'] if row else '') or ''
-        if body.strip() and not readable.boilerplate_reason(body):
+        if body.strip() and not _not_article(body):
             return body, path.parent.name
     return '', ''
 

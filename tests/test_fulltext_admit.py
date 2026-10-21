@@ -26,21 +26,25 @@ Cloudflare 关卡页跑 `fetch_pending('rss')`:`done=1`、库里正文被换成
 
 **存量那一半在 `RecheckTests`**:判据只管未来,已经写进去的那些只有
 `scripts/feed_fulltext_recheck.py` 一条出路(面板那颗「重试失败项」是订阅级的,
-不碰 `fulltext_at`)。那个脚本的射程里**还躺着几百条正常的壳**,所以它那两道判据
-的射程不一样 —— 正反两侧都在这里钉着。
+不碰 `fulltext_at`)。那个脚本的射程里**还躺着几百条正常的壳、以及走
+`markdown_source` 写进来的 Markdown 原文**,所以它只问关卡那道**与内容格式无关**的
+判据(④),不问 HTML 准入专属的 ⑥ —— 正反两侧和那条边界都在这里钉着。审查第 1 轮
+在这上面实测到两处:一份正常 README 被判坏换成壳,以及一份同样被污染的较新备份
+被当成有效原摘要装回来。
 
 **按形状单独一个文件**:`tests/test_feed_fulltext.py` 已经 501 行、
 `tests/test_fulltext_failures.py` 576 行,这一组挤进去会越过 700 行上限。脚手架
 (`FullTextCase` / `SHELL` / `PAGE`、复查那一组的 `RecheckCase`)和页面夹具
 (`page_html`)一律复用现成的 —— 各写一份的话两边的前提会各漂各的。
 """
+import os
 from unittest.mock import Mock, patch
 
 from kb import llm
 from kb.collectors.feeds import FeedCollector
-from kb.feeds import fulltext, readable, registry as reg, translate
+from kb.feeds import fulltext, grab, grab_page, readable, registry as reg, translate
 from kb.feeds.fetching import Response
-from tests.grab_fixtures import page_html
+from tests.grab_fixtures import PAGE as PAGE_URL, GrabCase, html_resp, page_html
 from tests.test_feed_fulltext import PAGE, SHELL, FullTextCase
 from tests.test_fulltext_failures import RecheckCase
 
@@ -65,6 +69,25 @@ WALL_IN_ARTICLE = page_html().replace('</article>', LOGIN_FORM + '</article>')
 SAY_SIGN_IN = ('Sign in to continue reading. Enter the email address associated with your '
                'subscription. Members have access to the full archive and the weekly letter. ')
 TEXT_WALL = page_html(title='Sign in to read Example Journal', body=[SAY_SIGN_IN] * 7)
+#: **开头把同一段铺满、真内容排在 `MAX_CHARS` 之后**的那一页。每一段是一个独立的
+#: `<p>`(= 独立的行),所以按行去重之后那个前缀只剩一段的长度 —— 真内容被截掉之后
+#: ⑥ 当场成立。审查第 1 轮实测的那一张提取出 69133 字、落库 60000 字而不重复的只有
+#: 202 字(基线那一版先截后判,这一页是直接拒掉的)。
+_FILLER = '这一段在开头反复出现，它自己说不出任何新东西。' * 5
+_REAL = ['真正的内容排在后面：运行时按同一份确定性日志重放每一次调用。' * 4,
+         '第二段讲的是崩溃之后怎么从那份日志继续，而不是从头再来一遍。' * 4,
+         '第三段换个角度说明同一份日志为什么必须是只增不改的。' * 4,
+         '第四段把前面几段的结论收一下，这几段彼此都不一样。' * 4]
+LONG_FILLED = page_html(body=[_FILLER] * 560 + _REAL)
+
+#: 一份**正常**的 quick-start README,走 `markdown_source` 那条路入库(Markdown 原文,
+#: 不过 `admit`)。几个平台各一段同样的安装命令 —— 550 字、按行去重只剩 215 字,
+#: 所以 ⑥ 对它成立而它完全正常(审查第 1 轮实测的那份是 646 / 254)。
+_INSTALL = '```sh\ncurl -fsSL https://tool.example.org/install.sh | sh\ntool init --yes\n```\n\n'
+README_MD = ('# quick start\n\nInstall the toolchain, then run `tool init` once per repository.\n\n'
+             + ''.join(f'## {name}\n\n{_INSTALL}' for name in
+                       ('macOS', 'Debian / Ubuntu', 'Fedora', 'Arch Linux', 'Windows (WSL)')))
+
 #: 评论区那个通用验证码小组件。正常文章页上常态挂着,进判据表等于按「这站评论
 #: 要过验证码」拒稿。
 RECAPTCHA = '<script src="https://www.google.com/recaptcha/api.js" async defer></script>'
@@ -275,12 +298,49 @@ class RecheckTests(RecheckCase):
         self.assertEqual((0, '', ''), (row['fulltext_tries'], row['fulltext_at'],
                                        row['translated_at']))
 
-    def test_a_text_only_wall_already_in_the_library_is_swapped_back(self):
-        """⑥ 那一档同样要收拾得掉:它在手动收录那一侧也是靠内容自己认出来的。"""
+    def test_a_text_only_wall_already_in_the_library_is_out_of_reach(self):
+        """**这是这个脚本明确的能力边界,不是漏掉的一道。** ⑥(「不重复的字数过不了
+        提取器那道门槛」)是 HTML 准入专属的一问:准入手里那份是提取器从一棵 DOM 上
+        赢出来的,而库里这份**没有来源凭据** —— 同一列 `fulltext_at` 底下还躺着走
+        `markdown_source` 写进来的 Markdown 原文(见下一条)。拿 ⑥ 去问它们,收拾掉
+        一条瘦正文的同时会把正常 README 写死,而后者不可逆地更贵。
+
+        **补一列凭据也救不回这一条**:这次之后 ⑥ 判坏的 HTML 正文压根写不进来
+        (`admit` 当场拒掉),凭据只会盖在「⑥ 永远不会成立」的那些行上。所以这一档
+        的出路是**人说「重新抓一次」**,不是让脚本去猜。
+        """
         key = self._already_wrong(readable.extract(TEXT_WALL))
+        # 两头先钉住:它确实过不了 ⑥,而 ④ 对它压根不成立(那一页话很多)。
+        self.assertFalse(grab_page.body_confirmed(self.row(key)['body']))
+        self.assertEqual('', grab_page.gate_text_reason(self.row(key)['body']))
+        self.assertEqual(0, self._recheck('scan'))
         self.assertEqual(0, self._recheck('run', '--yes'))
-        self.assertNotIn('Sign in to continue reading', self.row(key)['body'])
-        self.assertEqual(1, fulltext.pending('rss'))
+        self.assertIn('Sign in to continue reading', self.row(key)['body'])
+
+    def test_a_normal_readme_fetched_as_markdown_is_never_touched(self):
+        """**`fulltext_at` 非空只说明「某条补抓路径成功过」,不说明「过了 HTML 准入」。**
+        `fetch_one` 有两条正常出口压根不过 `admit`:`.md`/GitHub 地址走
+        `markdown_source.fetch`,任意地址声明 `text/markdown` 走 `from_response`。
+        交出来的是 Markdown 原文 —— 三个平台各一段安装命令、围栏、表格行本来就重复,
+        按行去重之后过不了那道 400。
+
+        审查第 1 轮实测的后果:这份 README 被判坏、正文换成「标题 + 链接」、`fulltext_at`
+        清空、译文作废;而重抓会把同一份内容再写回来,下一轮又选中它 —— 没有终点。
+        所以这里**走真的补抓**把它写进去(不是手填一行),连 `fetch_one` 的出口一起钉。
+        """
+        readme = README_MD
+        self.assertGreater(len(readme), readable.MIN_CHARS)
+        self.assertLess(readable.substance(readme), readable.MIN_CHARS)   # 它确实过不了 ⑥
+        key = self.put(url='https://e.org/doc')
+        with patch.object(fulltext, 'request', Mock(return_value=Response(
+                200, 'https://e.org/doc', readme.encode(),
+                {'content-type': 'text/markdown; charset=utf-8'}))):
+            self.assertEqual(1, fulltext.fetch_pending('rss')['done'])
+        self.assertNotEqual('', self.row(key)['fulltext_at'])   # 它确实报了成功
+        self.assertEqual(0, self._recheck('scan'))
+        self.assertEqual(0, self._recheck('run', '--yes'))
+        self.assertEqual(readme, self.row(key)['body'])
+        self.assertEqual('content', self.row(key)['content_kind'])
 
     def test_a_shell_waiting_for_its_body_is_never_touched(self):
         """**这一条是那 352 条的代表。** feed 原本那份壳(标题 + 域名 + HN 得分)
@@ -300,9 +360,9 @@ class RecheckTests(RecheckCase):
     def test_a_rebuilt_shell_is_never_judged_again(self):
         """**不许变成一个没有终点的循环。** 复查自己按标题与链接重建出来的那份壳
         同样说不出多少不重复的东西 —— 再判它一次坏,每跑一次就「收拾」同一条,
-        译文作废和重导出跟着一轮一轮重做。判据里那道 `MIN_CHARS` 正是为它留的
-        (成功时间人为填回去也一样,口径同 `tests/test_fulltext_failures.py` 那条
-        「已经干净 ≠ 只是选不中」)。
+        译文作废和重导出跟着一轮一轮重做。挡住它的是「⑥ 压根不在这个脚本的射程里」
+        (成功时间人为填回去也一样 —— 口径和 `tests/test_fulltext_failures.py` 那条
+        「已经干净 ≠ 只是选不中」是同一件事)。
         """
         key = self._already_wrong(readable.extract(SAY_VERIFY))
         self.assertEqual(0, self._recheck('run', '--yes'))
@@ -313,10 +373,9 @@ class RecheckTests(RecheckCase):
         self.assertEqual('Yes, and\nhttps://e.org/post', self.row(key)['body'])
 
     def test_a_repetitive_feed_summary_is_not_this_scripts_business(self):
-        """**「报过补抓成功」那道守卫自己的红。** feed 给的正文可以又长又重复
-        (同一段铺满的摘要),而它从来没过补抓那道准入 —— 补抓这条路一个字都没
-        写过它,换掉它就是拿掉用户订阅到的内容(口径同「没开补抓的订阅一个都
-        不碰」)。
+        """反过来再钉一遍同一条边界:feed 自己给的正文也可以又长又重复(同一段铺满
+        的摘要)。它和上面那份 README 一样没过 HTML 准入,换掉它就是拿掉用户订阅到的
+        内容(口径同「没开补抓的订阅一个都不碰」)。
         """
         key = self.put(body=readable.extract(TEXT_WALL))
         self.assertEqual(0, self._recheck('scan'))
@@ -332,3 +391,112 @@ class RecheckTests(RecheckCase):
                       (readable.extract(PAGE), key))
         self.assertEqual(0, self._recheck('scan'))
         self.assertIn('The runtime schedules tools', self.row(key)['body'])
+
+
+class BackupRestoreTests(RecheckCase):
+    """从备份里挑哪一份内容当壳 —— **过的判据必须和扫描那一侧是同一道**。
+
+    审查第 1 轮实测的事故形态:扫描那一侧认得出「请完成验证」了,恢复那一侧还只问
+    版权区/作者简介,于是一份同样被污染的较新备份被当成有效原摘要装回来;
+    `_downgrade` 紧接着把 `fulltext_at` 清空 —— 这一条从此连扫描都选不中,而正确的
+    较旧备份明明还在。三轮同步之后那段验证提示仍旧导出到了 vault。
+    """
+
+    def _aged(self, name, key, body, when):
+        """摆一个备份并钉住它的新旧 —— `_backups` 按 mtime 排序,而同一秒里建出来的
+        两个文件谁新谁旧不该由用例来猜。"""
+        path = self._backup(name, key, body)
+        os.utime(path, (when, when))
+        os.utime(path.parent, (when, when))
+        return path
+
+    def test_a_contaminated_newer_backup_is_skipped_for_the_correct_older_one(self):
+        """后果要落在「库里那条是什么」上:验证提示没了、换回的是较旧那份真壳。"""
+        gate_body = readable.extract(SAY_VERIFY)
+        key = self._already_wrong(gate_body)
+        self._aged('older-good', key, SHELL, 1_700_000_000)
+        self._aged('newer-bad', key, gate_body, 1_800_000_000)
+        self.assertEqual(1, self._recheck('scan'))
+        self.assertEqual(0, self._recheck('run', '--yes'))
+        row = self.row(key)
+        self.assertEqual(SHELL, row['body'])              # 较旧那份真壳
+        self.assertNotIn('请完成验证', row['body'])
+        self.assertEqual('summary', row['content_kind'])
+        self.assertEqual((0, '', ''), (row['fulltext_tries'], row['fulltext_at'],
+                                       row['translated_at']))
+        self.assertEqual(1, fulltext.pending('rss'))      # 放回队列、额度给满
+
+    def test_when_every_backup_is_contaminated_the_shell_is_rebuilt(self):
+        """**不许「只清标记、留着已经认出来的坏正文」。** 一份有效备份都没有时回落到
+        按标题与链接重建 —— 那条路本来就在,缺的是「这一份不算有效」这个判断。
+        """
+        gate_body = readable.extract(SAY_VERIFY)
+        key = self._already_wrong(gate_body)
+        self._aged('only-bad', key, gate_body, 1_800_000_000)
+        self.assertEqual(0, self._recheck('run', '--yes'))
+        row = self.row(key)
+        self.assertNotIn('请完成验证', row['body'])
+        self.assertEqual('Yes, and\nhttps://e.org/post', row['body'])
+        self.assertEqual(1, fulltext.pending('rss'))
+
+    def test_a_normal_shell_in_a_backup_is_still_accepted(self):
+        """反过来钉一边:**正常的壳照旧恢复得回来**。恢复那一侧的判据宁可多拒,但
+        「短」本身不是拒的理由 —— feed 原本那份壳(生产实测 `substance` 落在 37~133)
+        正是这个脚本要换回去的东西。
+        """
+        key = self._already_wrong(readable.extract(SAY_VERIFY))
+        self._aged('good', key, SHELL, 1_800_000_000)
+        self.assertEqual(0, self._recheck('run', '--yes'))
+        self.assertEqual(SHELL, self.row(key)['body'])
+
+
+class StoredBodyTests(GrabCase):
+    """**准入那个结论必须落在最后真写进库的那一份正文上。**
+
+    `admit` 之后还改正文,原来那个「这是正文」就不再是对最终内容的保证。审查第 1 轮
+    实测的事故形态:手动收录把截断放在准入之后,于是一张开头铺满同一段、真内容排在
+    6 万字之后的页面全文过关,落库那 60000 字**不重复的只有 202 字** —— 收录当场
+    完成、页面紧接着提示「这一篇收下的内容看不出是正文」(阅读时后面的真内容也没了),
+    而重抓只会截出同一个前缀。**基线那一版是先截后判、直接拒掉这一页的**,所以这是
+    重构带出来的回退:判据下沉之后顺序被颠倒了。
+
+    出路是把调用方那道上限交给 `admit`(`limit=`),不是在它外面补一道事后检查 ——
+    两处各判一遍的话,哪天上限改了另一头不会跟着变(元规则:口径只有一份)。
+    """
+
+    def test_the_gate_judges_the_truncated_body_the_caller_will_store(self):
+        full = readable.extract(LONG_FILLED)
+        # 两头先钉住:全文过得了 ⑥(后面那两段各不相同),截到上限之后过不了。
+        self.assertGreater(len(full), grab_page.MAX_CHARS)
+        self.assertTrue(grab_page.body_confirmed(full))
+        self.assertFalse(grab_page.body_confirmed(full[:grab_page.MAX_CHARS]))
+        body, gate, _ = grab_page.admit(PAGE_URL, LONG_FILLED, limit=grab_page.MAX_CHARS)
+        self.assertEqual('', body)
+        self.assertIn('复读同一段', gate)
+
+    def test_the_subscription_side_keeps_its_own_reach(self):
+        """**不许顺手给补抓那一侧加一道 60000 字截断。** 那一侧原样入库,而写进去的
+        是终态 —— 悄悄截一刀是另一件事,不在这次的射程里(`limit=None`)。
+        """
+        body, gate, _ = grab_page.admit(PAGE_URL, LONG_FILLED)
+        self.assertEqual('', gate)
+        self.assertGreater(len(body), grab_page.MAX_CHARS)
+
+    def test_a_long_filled_page_is_refused_and_nothing_is_stored(self):
+        """先验后果:这一条抛出来、**库里一行都没有**(`DO NOTHING` 之下存进去就改不回)。"""
+        with patch.object(grab, 'request', return_value=html_resp(LONG_FILLED)):
+            with self.assertRaises(grab.GrabError) as caught:
+                grab.save(grab.grab(PAGE_URL))
+        self.assertIn('复读同一段', str(caught.exception))
+        self.assertEqual([], self.items())
+
+    def test_what_admit_handed_over_is_byte_for_byte_what_gets_stored(self):
+        """反过来钉一边:正常文章照旧收得进来,而且**存进去的就是准入放行的那一份**。"""
+        page = page_html()
+        admitted, gate, _ = grab_page.admit(PAGE_URL, page, limit=grab_page.MAX_CHARS)
+        self.assertEqual('', gate)
+        with patch.object(grab, 'request', return_value=html_resp(page)):
+            grab.save(grab.grab(PAGE_URL))
+        rows = self.items()
+        self.assertEqual(1, len(rows))
+        self.assertEqual(admitted, rows[0]['body'])

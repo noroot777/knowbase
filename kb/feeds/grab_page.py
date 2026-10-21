@@ -243,34 +243,35 @@ def body_confirmed(body: str) -> bool:
     return readable.substance(body or '') >= readable.MIN_CHARS
 
 
-def body_gate_reason(body: str) -> str:
-    """手里**只有正文**时,它自己有没有把「这不是文章正文」写在脸上。空串 = 没有。
-
-    `gate_reason` 那六道里只认正文、不碰 DOM 也不碰地址的那两道:④ 通篇就是那几句
-    提示(`_GATE_SHARE`,按份额),⑥ 内容本身确认不了(`body_confirmed`)。**顺序照旧
-    ④ 在前**:它说得出「对方拦着你」,⑥ 只说得出「我确认不了」——能说清的那句话优先。
+def gate_text_reason(body: str) -> str:
+    """只看这段文字**自己**就能认出的那一道:④ 通篇就是那几句关卡提示
+    (`_GATE_SHARE`,按份额)。空串 = 认不出。
 
     **单开一个口子是因为存量复查手里只有库里那份 `body`**
     (`scripts/feed_fulltext_recheck.py`:几百条已经写进去的正文,不把原文链接重新
     请求一遍)—— 口径同 `readable.boilerplate_reason` 在那个脚本里的用法。两处各写
     一遍的话,收拾掉的和以后会被挡掉的不是同一批(元规则:口径只有一份)。
 
-    **⑥ 前面那道 `len(body) >= MIN_CHARS` 在准入路径上恒真,它是给存量那一侧留
-    的。** 准入只会拿到提取器交出来的东西,而提取器自己那道门槛就是 `MIN_CHARS`
-    (`extract_or_reason`)—— 所以「原始长度过了线、不重复的字数没过」**正是「准入
-    会拒掉它」的那个形状**,而这一问对库里短的那些**压根不成立**:feed 原本那份
-    跳转壳(标题 + 域名 + HN 得分;生产实测 352 条的 `substance` 落在 37~133)、复查
-    自己按标题与链接重建的壳、以及走 `markdown_source` 时**不过 `admit`** 的
-    Markdown 原文,都答不出「说了足够多不重复的东西吗」,而它们都是正常内容。
-    漏掉这道守卫的后果当场实测到:`tests/test_fulltext_failures.py` 那条「已经干净
-    ≠ 只是选不中」变红 —— 复查把自己重建出来的壳又判成坏的,每跑一次都「收拾」
-    同一条,译文和导出跟着一轮一轮重做,没有终点。
+    **这一道与内容格式无关,所以它对库里任何一份文字都成立** —— 它问的是「这段话
+    自己是不是一张验证提示」,而不是「HTML 提取器交出这段话算不算成功」。
+
+    **⑥(`body_confirmed`)刻意**不**在这里。** 它是 HTML 准入专属的一问:准入手里
+    那份是提取器从一棵 DOM 上赢出来的东西,「不重复的字数过不了提取器自己那道
+    `MIN_CHARS`」才等于「我确认不了拿到的是正文」。库里那份正文**没有来源凭据**,
+    而 `fulltext.fetch_one` 另有两条正常出口压根不过 `admit`
+    (`markdown_source.fetch` 的 `.md`/GitHub 地址、`from_response` 的 `text/markdown`
+    响应),它们交出来的是 **Markdown 原文**:三个平台各一段安装命令、围栏、表格行
+    本来就重复。审查第 1 轮实测:一份 646 字、按行去重 254 字的正常 quick-start
+    README 被判坏、正文被换成「标题 + 链接」、译文作废,而重抓会把同一份内容再写
+    回来 —— 下一轮又选中它,没有终点。
+
+    **而给存量补一列来源凭据是死重:** 这次之后,⑥ 判坏的 HTML 正文**压根写不进来**
+    (`admit` 当场拒掉),所以 ⑥ 在复查侧只可能对**这次之前**写进去的那些成立 ——
+    恰恰是没有凭据的那些。生产只读实测(2026-10-21,开了补抓的 1021 条)给的也是
+    同一个答案:④ 这一档**一条都没有**(关卡句份额最高 0.0),⑥ 那一档的 2 条
+    (Meta 产品落地页、英国地方报的面包屑)靠一列新凭据同样救不回来。
     """
-    if _gate_share(body) >= _GATE_SHARE:
-        return _SAY_PAGE
-    if len(body) >= readable.MIN_CHARS and not body_confirmed(body):
-        return _SAY_THIN
-    return ''
+    return _SAY_PAGE if _gate_share(body) >= _GATE_SHARE else ''
 
 
 def _gate_assets(soup) -> bool:
@@ -325,9 +326,10 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
     证明不了「拿到了正文」—— 三轮审查各实测到至少一例漏放,最后那一例
     (1832 字、一个表单都没有的登录提示页)把前五道全绕过去了。
 
-    **④ 和 ⑥ 住在 `body_gate_reason`**:它们只认正文自己,而存量复查手里只有
-    库里那份正文 —— 同一个问题不许在两处各判一遍。那两道在**这条路上**什么时候
-    成立一个字没变(⑥ 前面多出来的那道长度守卫在这里恒真,理由见它自己头上)。
+    **④ 住在 `gate_text_reason`**:它只认正文自己、与内容格式无关,而存量复查手里
+    只有库里那份正文 —— 同一个问题不许在两处各判一遍。**⑥ 不跟它搬**:那一问只对
+    提取器交出来的东西成立(理由在 `gate_text_reason` 头上),所以它留在这条路上。
+    两道在**这条路上**什么时候成立都一个字没变。
 
     **生效性和位置要分开各判一次**:`<template>` 里的密码框、
     `type="application/json"` 里的示例参数都**不算**这一页挂着什么
@@ -362,11 +364,21 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
         return _SAY_PAGE
     if not body and any(word in (html or '')[:200000].lower() for word in _GATE_WORDS):
         return _SAY_PAGE
-    # ④ 和 ⑥ 只认正文自己,所以它们住在 `body_gate_reason` —— **存量复查手里只有
-    # 那份正文**,而同一个问题不许在两处各判一遍(元规则)。⑥ 为什么必须排在最后
-    # (「对方拦着你」优先于「我确认不了」)也写在那儿。
+    # ④ 只认正文自己、与内容格式无关,所以它住在 `gate_text_reason` —— **存量复查
+    # 手里只有库里那份正文**,而同一个问题不许在两处各判一遍(元规则)。
     # ③ 挪到 ④ 前面不改变任何结论:③④ 给的是同一句话(`_SAY_PAGE`)。
-    return body_gate_reason(body)
+    if reason := gate_text_reason(body):
+        return reason
+    # ⑥ 排在最后:「对方拦着你」说得出下一步,「我确认不了」只说得出一半。
+    # **它留在这儿、不进 `gate_text_reason`**:这一问只对提取器交出来的东西成立
+    # (理由写在那个函数头上)。
+    # **`body` 空的时候这一问压根不成立** —— 那时提取器自己给得出原因(版权区、
+    # 作者简介),而「通篇在复读同一段」对着一份空正文是在说一件没发生的事。
+    # 漏掉这道守卫当场实测到 `tests/test_fulltext_failures.py` 5 条变红:样板区那
+    # 两档的理由被这句话顶掉,面板上说不出是哪一类。
+    if body and not body_confirmed(body):
+        return _SAY_THIN
+    return ''
 
 
 def _first_meta(soup, selectors) -> str:
@@ -496,7 +508,7 @@ def page_meta(html: str, final_url: str) -> dict:
     return {'title': title[:500], 'author': author[:120], 'published': as_published(when)}
 
 
-def admit(final_url: str, html: str) -> tuple[str, str, str]:
+def admit(final_url: str, html: str, limit: int | None = None) -> tuple[str, str, str]:
     """这一页**能不能被确认为这一篇的正文、写进库里**。
 
     `(正文, 关卡原因, 读不懂的原因)`。正文非空时另两个必为空;三个都空 = 读不懂
@@ -516,11 +528,21 @@ def admit(final_url: str, html: str) -> tuple[str, str, str]:
     里打开一次)。所以这里**先把提取结果收在手里**、让 `gate_reason` 先答,关卡
     成立就把那段文字丢掉,哪怕它长达几千字。
 
-    **判据看的是提取器交出来的全文,截断和话术都留给调用方**:手动收录按
-    `MAX_CHARS` 截、每一档配一句下一步(`grab._next_step`);补抓那一侧原样入库、
-    按 `fulltext.MAX_TRIES` 计次。两头的落地不同,**准入相同**。
+    **调用方那道长度上限在这里面生效(`limit`),不许拿到正文之后再截。**
+    判据要落在**最后真写进库的那一份**上:准入之后还改正文,原来那个结论就不再是
+    对最终内容的保证。事故形态(审查第 1 轮实测):一张开头把同一段复读了几万字、
+    真内容排在 6 万字之后的页面,全文过得了 ⑥(后面那段内容各不相同),手动收录
+    随后截到 `MAX_CHARS` —— 落库那 60000 字**不重复的只有 202 字**,收录当场完成、
+    页面紧接着提示「这一篇收下的内容看不出是正文」,而重抓只会截出同一个前缀。
+    基线那一版是先截后判、这一页直接拒掉的,所以这是重构带出来的回退。
+    `limit=None` = 不截(补抓那一侧原样入库,按 `fulltext.MAX_TRIES` 计次)。
+
+    **话术仍然留给调用方**:手动收录每一档配一句下一步(`grab._next_step`),
+    补抓那一侧进面板失败明细。两头的落地不同,**准入相同**。
     """
     body, reason = readable.extract_or_reason(html)
+    if limit is not None:
+        body = body[:limit]
     if gate := gate_reason(final_url, html, body):
         return '', gate, ''
     return body, '', reason

@@ -393,7 +393,9 @@ def _grab_web(url: str, deadline: float) -> dict:
         raise GrabError(f'{problem}')
     html = readable.decode(resp.body, dict(resp.headers))
     final = resp.url or url
-    body, gate, why = grab_page.admit(final, html)
+    # **截断交给 `admit`,不许在这之后再截** —— 判据要落在真写进库的那一份上
+    # (理由和事故形态写在 `admit` 头上)。
+    body, gate, why = grab_page.admit(final, html, limit=grab_page.MAX_CHARS)
     if gate:
         raise _gate(gate, final)
     if not body:
@@ -403,7 +405,6 @@ def _grab_web(url: str, deadline: float) -> dict:
         # 「命中版权区」「作者简介」是面向开发的说法,对着用户再说一遍没有意义 ——
         # 他能做的只有「换个地址」或者「这篇就是读不到」。
         raise GrabError(f'这一页没找到正文{f"（{why}）" if why else ""}。{_next_step(final)}')
-    body = body[:grab_page.MAX_CHARS]
     meta = grab_page.page_meta(html, final)
     host = (urlsplit(final).hostname or '').lower().removeprefix('www.')
     return {'url': url, 'title': grab_page.title_fallback(meta['title'], body, host),

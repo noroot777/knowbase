@@ -29,7 +29,9 @@ Lilian Weng、Karpathy 那类 feed 本来就给全文,对它们再抓一次是�
 退出重试队列,`put_items` 的 `DO NOTHING` 之下再也换不回来)。拒绝的那一下
 **一个字节都不改**:壳留着、`fulltext_at` 不写、`fulltext_tries` 照旧计次。
 存量里已经被写死的那些只有一条出路(`scripts/feed_fulltext_recheck.py`),
-它和准入**共用那两道只认正文的判据**(`grab_page.body_gate_reason`)。
+它和准入**共用关卡那一道与格式无关的判据**(`grab_page.gate_text_reason`)——
+库里那份正文没有来源凭据,所以 HTML 准入专属的「我确认不了」那一问不许拿去问它
+(`fetch_one` 另有两条走 `markdown_source`、压根不过 `admit` 的正常出口)。
 
 **正文从壳换成全文之后,知识库里那份按旧壳算出来的提取结果要跟着作废**
 (`retire_stale`,由 `sync._export` 在导出之后调一次)。`documents.extracted_at`
