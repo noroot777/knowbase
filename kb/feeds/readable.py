@@ -30,6 +30,20 @@ from kb.feeds.fetching import plain
 # 正常文章页几百 KB,而 `fetching.MAX_BYTES` 放到 8 MB —— 真遇到那种页面宁可
 # 直接说"读不懂"也不要把一轮同步卡在一次提取上。
 MAX_HTML = 3 * 1024 * 1024
+# **这条线量的是「要建成树的那部分」,不是整份文件有多长。** `<script>`/`<style>`
+# 的内容按 HTML 规范是原始文本(html.parser 把这两个列在 CDATA_CONTENT_ELEMENTS
+# 里,整段只落一个文本节点),建树成本和它多长基本无关,而 `_strip` 第一件事就是
+# 把它们整块扔掉 —— 把它们算进这条线,等于拿一笔根本不会花的钱去拒稿。
+# 事故形态(2026-10-21 实测):绿泡泡的文章页 3.74 MB,其中 3.57 MB 是内联脚本,
+# 真标记只有 0.17 MB。提取器在**解析之前**就 `return '', ''`,于是手动收录对着一篇
+# 完完整整读得到的文章说「这一页没找到正文」—— 而它和真正读不到的那一档
+# (登录墙、纯 JS 渲染)在界面上长得一模一样。
+# 成本实测(同一台机器):解析 8 MB 全脚本 0.92s、2.7 MB 真标记 1.06s,而下面
+# 这条正则扫 10 MB 只要 0.037s —— 卡住真标记那一头就够了,也只有那一头值得卡。
+# **替换保留两头的标签**:`<script>x</script>` 重复几十万次的那种页面,内容虽短
+# 但节点数真实存在,整段抹成空串会让它从这条线底下溜过去。
+# **只在整份超线时才扫这一趟**(见 `extract_or_reason`):正常页面一个字节都不多花。
+_RAW_TEXT = re.compile(r'<(script|style)\b[^>]*>.*?</\1\s*>', re.I | re.S)
 MAX_CANDIDATES = 4000
 # 提取结果短于这个数就当没提取到。一篇正文再短也有几百字;比这还短多半是
 # 命中了摘要块、版权行或者一句"请开启 JavaScript"。
@@ -288,6 +302,15 @@ def substance(text: str) -> int:
     return total
 
 
+def markup_size(html: str) -> int:
+    """这份 HTML 里**要建成树**的那部分有多大(扣掉脚本和样式的正文)。
+
+    判据和代价写在 `_RAW_TEXT` 的注释里。两头都要钉:脚本撑大的页面照旧解析,
+    真标记超线的页面照旧拒。
+    """
+    return len(_RAW_TEXT.sub(lambda m: f'<{m.group(1)}></{m.group(1)}>', html))
+
+
 def _gone(node) -> bool:
     """这个节点已经被别人连根拔掉了吗。
 
@@ -418,7 +441,7 @@ def extract_or_reason(html: str) -> tuple[str, str]:
     文字(Fortune 那页的次优是 `<body>` 自己,481 字里 455 字正是那段版权声明),
     挑它只是把同一个错误换个来源。
     """
-    if not html or len(html) > MAX_HTML:
+    if not html or (len(html) > MAX_HTML and markup_size(html) > MAX_HTML):
         return '', ''
     soup = BeautifulSoup(html, 'html.parser')
     _strip(soup)

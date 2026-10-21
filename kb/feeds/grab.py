@@ -25,10 +25,12 @@
 
 **绿泡泡的文章和别的站点走同一条路**(②):发一次请求,读到正文就收下,**实际
 撞上验证页才拒**,那一句指向真正管这件事的那条通道(读本机绿泡泡数据库,见
-`kb/collectors/wechat_local.py`)。实测多数 `mp.weixin.qq.com/s/<slug>` 确实会
-302 到 `/mp/wappoc_appmsgcaptcha`(og 元信息和 `#js_content` 全没有)—— 那不是
-bug,是对方的反自动化关卡,我们**不绕**它;但那是**那个响应**的结论,不是这个
-域名的结论(按域名先拒的代价见 `classify`)。
+`kb/collectors/wechat_local.py`)。2026-10-21 复测推翻了「这条路走不通」那个结论:
+`mp.weixin.qq.com/s/<slug>` 那道 `/mp/wappoc_appmsgcaptcha` **是我们自报
+`KnowledgeBaseFeedReader/1.0` 招来的**,换成浏览器身份(`grab_page.BROWSER_UA`)
+同一条地址 3/3 直接 200 拿到整篇文章。**我们照旧不绕那道关卡** —— 一个 token 都
+没解、一个 cookie 都没带,真回了验证页照旧拒;变的只是不再主动触发它。那终究是
+**那个响应**的结论,不是这个域名的结论(按域名先拒的代价见 `classify`)。
 """
 from __future__ import annotations
 
@@ -344,12 +346,13 @@ def _grab_x(url: str, deadline: float) -> dict:
 def _next_step(final_url: str) -> str:
     """没收下之后那半句「下一步」。**按站点分,而且只有这一份口径。**
 
-    绿泡泡的文章这条路确实走不通(实测 302 到 `/mp/wappoc_appmsgcaptcha`,og 和
-    `#js_content` 全无),而它有一条自己的通道:把人指过去。照通用那句说「在浏览
-    器里打开、把正文复制出来」等于让他对着一道过不去的验证页发呆。
+    走到这儿 = 这一条确实没收下(撞上关卡,或者读不到正文)。绿泡泡有一条自己的
+    通道:把人指过去。照通用那句说「在浏览器里打开、把正文复制出来」等于让他对着
+    一道过不去的验证页发呆。
 
     **判据是实际响应,域名只决定这半句话怎么说** —— 按域名先拒掉那一版的代价写在
-    `classify` 的注释里。
+    `classify` 的注释里。平时这条路**是通的**(见模块说明那条 2026-10-21 的复测),
+    所以这半句话现在是少数情况下才说得出口的那一句,不是对这个域名的判决。
     """
     host = (urlsplit(final_url).hostname or '').lower()
     if host in _WECHAT_HOSTS:

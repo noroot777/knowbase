@@ -27,8 +27,23 @@ from kb.feeds.fetching import oneline, plain
 
 # 抓网页不是抓 feed,`fetching.request` 的默认 Accept 是 RSS 优先 —— 有些站会
 # 据此回一份 XML 或者干脆 406。口径同 `fulltext._HEADERS`,多一条中文优先。
+#
+# **手动收录这一条路自报浏览器身份,和采集那一侧分开。** 采集是我们定时去敲
+# 别人的门,自报 `KnowledgeBaseFeedReader/1.0`(`fetching.request` 的默认)是
+# 该有的礼貌;手动收录是人粘了一条链接正盯着按钮等,要的就是「我在浏览器里打开
+# 它会看到什么」。实测证据(2026-10-21,`mp.weixin.qq.com/s/XQq1iCBn1cUhR3SLOOKBMA`,
+# 其余请求头一字不改、各 3 次):自报爬虫 3/3 被 302 到
+# `/mp/wappoc_appmsgcaptcha`,拿到 18 KB 的验证页;换这个 UA 3/3 直接 200 在原
+# 地址上,3.74 MB 的文章页、`#js_content` 4004 字。**那道验证页是我们自报身份
+# 招来的,不是这个地址本身挡着** —— 所以这不是「绕过验证」:我们一个
+# token 都没解、一个 cookie 都没带,只是不再主动触发它。
+# **关卡判据一个字都没松**(`gate_reason`):真回了验证页照旧拒,`_GATE_ROUTES`
+# 里 `appmsgcaptcha` / `wappoc_` 那两条正是为它留的。
+BROWSER_UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+              '(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36')
 HEADERS = {'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-           'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,*;q=0.5'}
+           'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,*;q=0.5',
+           'User-Agent': BROWSER_UA}
 # 正文最多留多长。口径同 `x_article.MAX_CHARS`。
 MAX_CHARS = 60000
 
@@ -44,7 +59,10 @@ MAX_CHARS = 60000
 #: 重定向之后那一个)的 path + query 比,和提取器交得出什么无关。
 #: 绿泡泡实测(2026-10-16,`mp.weixin.qq.com/s/<slug>`):302 到
 #: `/mp/wappoc_appmsgcaptcha?poc_token=…&target_url=…`,18 KB 的验证页,
-#: og 元信息和 `#js_content` 全都没有。
+#: og 元信息和 `#js_content` 全都没有。**这一条照旧留着,但它不再是常态** ——
+#: 2026-10-21 复测:那道关卡是自报爬虫身份招来的,换 `BROWSER_UA` 之后同一条地址
+#: 直接给整篇文章(见模块顶上 `BROWSER_UA` 的注释)。对方哪天收紧风控它就回来了,
+#: 而漏一道关卡的代价是把验证页永久钉成正文。
 #: **一个通用英文词都不许进这张表**(`challenge`、`checkpoint`、`verify` 这些):
 #: 正常文章的路径里就带着它们 —— 实测 developers.cloudflare.com 那篇 1277 字的
 #: 正经文档落在 `/waf/reference/cloudflare-challenges/`、审查那篇落在
@@ -289,7 +307,15 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
         return _SAY_ROUTE
     # **一份 soup 走完所有 DOM 判据**:这一页最多解析一次(标题、组件、登录墙
     # 问的是同一棵树),别为每个判据各解析一遍。
-    soup = BeautifulSoup((html or '')[:readable.MAX_HTML], 'html.parser')
+    # **要不要截断按「真标记」算,不按整份长度**(口径同 `readable.markup_size`):
+    # 按整份长度截的那一版里,一张内联脚本 3.57 MB 打头的页面(绿泡泡的文章页就是
+    # 这个形状)会让组件和登录墙这两道只看到开头那一截 —— 而这两道**漏一次就是把
+    # 一道墙当正文永久钉进库里**(`put_items` 的 `DO NOTHING`),代价和误拒差着一个
+    # 量级。真标记自己就超线的那种页面提取器反正交不出正文,截断只是别在它身上耗
+    # 时间。
+    text = html or ''
+    soup = BeautifulSoup(text if readable.markup_size(text) <= readable.MAX_HTML
+                         else text[:readable.MAX_HTML], 'html.parser')
     if _gate_assets(soup):
         return _SAY_ROUTE
     if reason := _wall_reason(soup):

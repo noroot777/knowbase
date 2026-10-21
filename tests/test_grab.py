@@ -253,6 +253,11 @@ class PageTests(GrabCase):
         `/mp/wappoc_appmsgcaptcha`,18 KB 的验证页、og 和 `#js_content` 全无、
         提取 0 字。这一档要拒,而且下一步要指向「公众号」那一类 —— 照通用那句
         「在浏览器里打开、把正文复制出来」说,等于让人对着一道过不去的验证页发呆。
+
+        **这一档现在是少数情况,但判据一个字都不许松**:2026-10-21 复测证明那道
+        关卡是自报爬虫身份招来的(见 `test_the_web_path_asks_like_a_browser`),
+        换身份之后同一条地址直接给整篇文章。对方哪天收紧风控它就回来,而漏一次
+        就是把验证页永久钉成这一篇的正文。
         """
         gate = ('https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha?poc_token=x'
                 '&target_url=https%3A%2F%2Fmp.weixin.qq.com%2Fs%2Fabc')
@@ -277,6 +282,73 @@ class PageTests(GrabCase):
         self.assertEqual(saved['added'], 1)
         self.assertEqual(saved['source']['name'], '绿泡泡公众号')
         self.assertIn('这是正文第一段', self.items()[0]['body'])
+
+    def test_the_web_path_asks_like_a_browser(self):
+        """**不自报爬虫身份这一条是承重的。**
+
+        实测(2026-10-21,`mp.weixin.qq.com/s/XQq1iCBn1cUhR3SLOOKBMA`,其余请求头
+        一字不改、两边各 3 次):自报 `KnowledgeBaseFeedReader/1.0` 3/3 被 302 到
+        `/mp/wappoc_appmsgcaptcha`、拿到 18 KB 的验证页;换成浏览器 UA 3/3 直接
+        200 在原地址上、拿到 3.74 MB 的文章页。**那道验证页是自报身份招来的,
+        不是这个地址本身挡着** —— 这个键掉了,用户看到的是一句「对方把这个地址挡
+        在了一道验证页后面」,而文章本身好好的,他也没有别的出路。
+
+        判据落在**真发出去的那份请求头**上:`grab_page.HEADERS` 里有这个键不算数,
+        `accept()` 要把它带过去、`request` 的位置参数要接得住。
+        """
+        sent = {}
+
+        def capture(url, headers=None, **kwargs):
+            sent.update(headers or {})
+            return html_resp(page_html())
+
+        with patch.object(grab, 'request', side_effect=capture):
+            grab.grab(PAGE)
+        self.assertIn('Chrome/', sent.get('User-Agent', ''))
+        self.assertNotIn('KnowledgeBaseFeedReader', sent.get('User-Agent', ''))
+        # 反过来钉一边:换身份没把别的请求头挤掉(少了 Accept 有些站回 XML 或 406)。
+        self.assertIn('text/html', sent.get('Accept', ''))
+        self.assertIn('zh-CN', sent.get('Accept-Language', ''))
+
+    def test_a_page_padded_with_inline_script_is_still_read(self):
+        """**事故形态(2026-10-21 实测)。** 绿泡泡的文章页 3.74 MB,其中 3.57 MB
+        是内联脚本,真标记只有 0.17 MB。`extract_or_reason` 按**整份长度**卡
+        `MAX_HTML`,于是在解析之前就交白卷 —— 手动收录对着一篇完完整整读得到的
+        文章说「这一页没找到正文」,而它和真正读不到的那一档(登录墙、纯 JS 渲染)
+        在界面上长得一模一样。`_strip` 第一件事就是把脚本整块扔掉,这笔钱根本不会花。
+        """
+        page = page_html(extra='<script>var x = "%s";</script>' % ('a' * readable.MAX_HTML))
+        self.assertGreater(len(page), readable.MAX_HTML)          # 整份确实超线
+        self.assertLess(readable.markup_size(page), readable.MAX_HTML)  # 真标记没有
+        self.assertIn('这是正文第一段', self.page(html_resp(page))['body'])
+
+    def test_a_page_whose_real_markup_is_too_big_is_still_refused(self):
+        """**反过来钉一边。** 那条线量的是「要建成树的那部分」,不是「扣掉脚本就
+        放行」:真标记自己超线的照旧交白卷,而 `<script>x</script>` 重复几十万次的
+        那种页面(内容短、节点多)也不许从底下溜过去 —— 替换保留两头的标签正是
+        为它留的。
+        """
+        self.assertEqual('', readable.extract(page_html() + '<p>x</p>' * 400000))
+        self.assertEqual('', readable.extract(page_html() + '<script>x</script>' * 200000))
+
+    def test_a_gate_component_past_the_old_truncation_point_is_still_caught(self):
+        """**漏一道关卡就是把一道墙当正文永久钉进库里**(`put_items` 的
+        `DO NOTHING`),代价和误拒差着一个量级。
+
+        `gate_reason` 原先把 HTML 截到 `MAX_HTML` 再解析,于是组件和登录墙那两道
+        在一张内联脚本打头的页面上只看得到开头那一截。上一条让这种页面**反而**
+        交得出正文了,这道截断跟着从「反正也存不进去」变成真的放行口。
+        """
+        padding = '<script>var x = "%s";</script>' % ('a' * readable.MAX_HTML)
+        orchestrate = ('<script src="https://t.test/cdn-cgi/challenge-platform'
+                       '/h/b/orchestrate/chl_page/v1"></script>')
+        page = page_html(extra=padding + orchestrate)
+        # 先钉住这道关卡确实落在旧截断点之后(否则这条用例测不到那个洞)
+        self.assertGreater(page.index('orchestrate'), readable.MAX_HTML)
+        with self.assertRaises(grab.GrabError) as caught:
+            self.save_page(html_resp(page))
+        self.assertIn('验证', str(caught.exception))
+        self.assertEqual(self.items(), [])
 
     def test_a_long_gate_page_on_an_ordinary_address_is_refused(self):
         """**上一轮漏掉的那一张**(第二轮审查实测 `SAVED added=1`)。
