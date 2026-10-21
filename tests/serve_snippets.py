@@ -673,7 +673,7 @@ def main() -> None:
         chat_api.run_ask_stream = _stub_stream   # 见 `_stub_stream` 上面那段
         # **得在 uvicorn 起之前挂**:Starlette 的中间件栈一启动就定型了
         install_test_routes(app, vault)
-        print('Isolated snippet-favorite QA: no real data or external requests', flush=True)
+        fixture_life.announce('Isolated snippet-favorite QA: no real data or external requests')
         uvicorn.run(fixture_life.guard(app), host='127.0.0.1', port=args.port, log_level='warning')
 
 

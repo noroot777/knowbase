@@ -92,7 +92,7 @@ def main():
         pipeline.pending_counts=lambda *a,**k: {}
         from kb.server import app
         import uvicorn
-        print('Isolated source browser QA: no real data or external requests',flush=True)
+        fixture_life.announce('Isolated source browser QA: no real data or external requests')
         uvicorn.run(fixture_life.guard(app),host='127.0.0.1',port=args.port,log_level='warning')
 
 

@@ -63,8 +63,8 @@ def main():
         do_PUT = do_PATCH = do_DELETE = do_POST
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    fixture_life.install()
-    print(f"Read-only preview: http://127.0.0.1:{args.port}", flush=True)
+    # 先装防线再说话,顺序由 `announce` 这一个出口保证(见那边的说明)。
+    fixture_life.announce(f"Read-only preview: http://127.0.0.1:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

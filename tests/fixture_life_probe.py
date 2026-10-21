@@ -112,6 +112,30 @@ def _identity(pid: int) -> str:
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
+def _settled_identity(pid: int, needle: str, budget: float = 5.0) -> str:
+    """等这个号上的命令行真的变成**我们起的那一个**,再把身份记下来。
+
+    `subprocess.Popen` 一返回就能拿到 pid,但那一刻子进程可能还没 exec 完 —— `ps` 给出
+    的命令行还是父进程的一份副本。把这个**转瞬即逝**的样子记成「这一轮的身份」,回收时
+    一比就对不上,于是一个字都不敢碰(`_reap_pid` 的保守分支)。实测:整套一起跑时稳定
+    漏下一个手起的夹具,而单条跑机器闲、exec 抢在 pid 那一行前面,一次都看不见。
+
+    漏在手起那条用例上不是巧合:它的立意正是「没有 owner、空闲防线也关了,所以它不该
+    自己退」—— **没有任何别的东西会来收它**,只要这一次回收不动手就是永久留着。
+
+    `needle` 是「它变成了自己」的标志(脚本名加端口)。拿不到身份说明它已经没了,返回空;
+    等不到也照旧返回当下这个 —— 它仍然是我们起的那个进程,收得动。
+    """
+    deadline = time.monotonic() + budget
+    while True:
+        got = _identity(pid)
+        if not got or needle in got:
+            return got
+        if time.monotonic() >= deadline:
+            return got
+        time.sleep(0.05)
+
+
 def _reset_state() -> None:
     """把那份共享状态复位 —— **每条用例开头都要**。
 
@@ -137,4 +161,3 @@ def _closed(fd: int) -> bool:
         return False
     except OSError:
         return True
-

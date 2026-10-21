@@ -150,7 +150,7 @@ def main() -> None:
                                            encoding='utf-8')
         import uvicorn
         from kb.server import app
-        print('Isolated reading-page QA: no real data or external requests', flush=True)
+        fixture_life.announce('Isolated reading-page QA: no real data or external requests')
         uvicorn.run(fixture_life.guard(app), host='127.0.0.1', port=args.port, log_level='warning')
 
 

@@ -9,8 +9,9 @@
 丢了 owner 要退 / 没有 owner(手起、跨 shell 共用)不许退。后面那半边是这套设计的核心
 —— 它一旦失守,会话就没法再手起夹具跑探针了。
 
-**收尾只认有所有权证据的进程**:端口不是凭据(另一个本地服务可能正好占着这个号),
-所以孙进程的 pid 由中间进程交回,按端口兜底那一道也要核验命令行连端口号一起对上。
+**收尾只认有所有权证据的进程**:端口和脚本名都不是凭据(另一轮的同型夹具可能正好接手
+那个号),所以孙进程的 pid 由中间进程交回,动手前再核一次它的启动时刻。按端口找的那条路
+已经整个删掉了。
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ import unittest
 from tests import fixture_life
 from tests.fixture_life_probe import (   # noqa: F401 - 见那边的说明
     _shut_fds, _stat_of, _open_fds, _free_port, _alive, _wait_gone, _ping, _wait_listening, _owner_pipe, _identity, _reset_state, _age, _closed,
+    ROOT,
 )
 
 
@@ -66,6 +68,31 @@ class 判据(unittest.TestCase):
     def test_没有owner就不看它(self):
         """反过来钉一边:手起的夹具没有 owner,父 shell 退掉也不许自杀。"""
         self.assertEqual(fixture_life.should_exit(60, False, 0, 0.5), "")
+
+
+class 登记回收的写法(unittest.TestCase):
+    """**「身份记早了」那一条的表示级一边。**
+
+    `tests/test_fixture_life_outcome.py` 里有好几处要「起一个进程、回头按身份收掉它」。
+    后果那一份只钉得住**一处**写对了;而这个错一旦再犯一次,漏下的夹具没有任何别的东西
+    会来收它,还得等某台机器忙到让 exec 落在 pid 那一行后面才看得见。所以这里不验某一处,
+    验**没有一处**把身份固定在登记那一刻。
+    """
+
+    def test_登记回收时不许就地记身份(self):
+        """`addCleanup(self._reap_pid, pid, _identity(pid))` 这个写法本身就是错的。
+
+        `Popen` 一返回就能拿到 pid,但那一刻子进程可能还是父进程的一份副本、命令行还没
+        换 —— 记下这个转瞬即逝的样子,回收时一比对不上,保守分支一个字都不碰。身份要走
+        `_settled_identity`(等它换完命令行),登记却要早(号一到手就登记),两件事只能分开
+        写,所以这一行上不该同时出现 `addCleanup` 和就地的 `_identity(`。
+        """
+        src = (ROOT / "tests" / "test_fixture_life_outcome.py").read_text(
+            encoding="utf-8")
+        bad = [(n, line.strip()) for n, line in enumerate(src.splitlines(), 1)
+               if "addCleanup" in line and "_identity(" in line
+               and "_settled_identity(" not in line]
+        self.assertFalse(bad, f"登记回收要记 `_settled_identity` 的结果:{bad}")
 
 
 class 一致的那道边界(unittest.TestCase):
@@ -253,6 +280,59 @@ class 所有权凭据(unittest.TestCase):
         self.assertEqual(fixture_life.claim_owner(), r, "凭据是对的,该认")
         self.assertFalse(os.get_blocking(r), "认下来也不许改它的模式")
 
+    def test_高位的凭据照样认得出来(self):
+        """**`os.pipe()` 不保证给低号,`pass_fds` 又原号传下来。**
+
+        调用方只要先开着一千来个文件,凭据就落在 fd 1024 以上 —— 上一版用
+        `select.select()` 等它可读,而那个函数在 `FD_SETSIZE` 以上抛 `ValueError`,
+        被当成「从来没有 owner」:调用方取消之后页面照旧 200、进程还是同一个。
+        """
+        hold = [os.open(os.devnull, os.O_RDONLY) for _ in range(1100)]
+        self.addCleanup(_shut_fds, *hold)
+        r, w, spec = _owner_pipe()
+        self.addCleanup(_shut_fds, r, w)
+        self.assertGreater(r, 1023, f"没把凭据挤到高位去(fd={r}),这条用例没验到东西")
+        os.environ[fixture_life.OWNER_ENV] = spec
+        self.assertEqual(fixture_life.claim_owner(), r,
+                         "高位的 fd 一样是有效凭据")
+
+    def test_盯不住就抛不许静默退回无主(self):
+        """**「少一道防线」必须是响的,不能是静的。**
+
+        等待机制建不出来时退回 `-1` 的话,夹具会当成「手起、本来就没有 owner」接着
+        跑 —— 而调用方以为副防线在,它取消之后页面还开着、进程还留着。所以这一类
+        抛 `OwnerUnusable`:模块加载失败,夹具起不来,启动那一侧当场看得见。
+        """
+        r, w, spec = _owner_pipe()
+        self.addCleanup(_shut_fds, r, w)
+        os.environ[fixture_life.OWNER_ENV] = spec
+        real = fixture_life.selectors.DefaultSelector
+
+        def boom():
+            raise ValueError("filedescriptor out of range in select()")
+
+        fixture_life.selectors.DefaultSelector = boom
+        self.addCleanup(setattr, fixture_life.selectors, "DefaultSelector", real)
+        try:
+            with self.assertRaises(fixture_life.OwnerUnusable):
+                fixture_life.claim_owner()
+            with self.assertRaises(fixture_life.OwnerUnusable):
+                fixture_life._arm_owner()      # 装防线那一步也得抛
+        finally:
+            fixture_life.selectors.DefaultSelector = real
+
+    def test_验不过还是安静地退回无主(self):
+        """反过来钉一边:**「凭据验不过」跟「盯不住」是两件事。**
+
+        token 对不上说的是「继承来的陈旧值」—— 手起那条合法的路就靠它安静地退回无主,
+        这一类绝不许抛,否则夹具手起就起不来了。
+        """
+        r, w, _ = _owner_pipe("tok0123456789abcd")
+        self.addCleanup(_shut_fds, r, w)
+        os.environ[fixture_life.OWNER_ENV] = f"{r}:对不上的token"
+        self.assertEqual(fixture_life.claim_owner(), -1, "陈旧值就该安静地不认")
+        fixture_life._arm_owner()              # 不许抛
+
     def test_不是管道就不认(self):
         """陈旧的 fd 号在当前进程里可能指着一个普通文件。"""
         handle = tempfile.NamedTemporaryFile(delete=False)
@@ -318,7 +398,6 @@ class ASGI那条路(unittest.TestCase):
         self.addCleanup(_reset_state)
 
     def test_请求期间算在途回完才续命(self):
-        import asyncio
         seen, busy = [], []
 
         async def app(scope, receive, send):
@@ -335,7 +414,6 @@ class ASGI那条路(unittest.TestCase):
 
     def test_lifespan不算在途(self):
         """它从起到停贯穿整个进程 —— 算进在途的话空闲超时永远不会到点。"""
-        import asyncio
         busy = []
 
         async def app(scope, receive, send):

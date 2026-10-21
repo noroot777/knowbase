@@ -78,7 +78,7 @@ def main():
         from kb.server import app
         import uvicorn
 
-        print('Reader membership isolated database: ' + temp, flush=True)
+        fixture_life.announce('Reader membership isolated database: ' + temp)
         uvicorn.run(fixture_life.guard(app), host='127.0.0.1', port=args.port, log_level='warning')
 
 

@@ -27,7 +27,7 @@ import urllib.request
 
 from tests import fixture_life
 from tests.fixture_life_probe import (   # noqa: F401 - 见那边的说明
-    _shut_fds, _stat_of, _open_fds, _free_port, _alive, _wait_gone, _ping, _wait_listening, _owner_pipe, _identity, _reset_state, _age, _closed,
+    _shut_fds, _stat_of, _open_fds, _free_port, _alive, _wait_gone, _ping, _wait_listening, _owner_pipe, _identity, _settled_identity, _reset_state, _age, _closed,
     ROOT,
 )
 
@@ -35,7 +35,8 @@ from tests.fixture_life_probe import (   # noqa: F401 - 见那边的说明
 class 后果(unittest.TestCase):
     """真起一个夹具,断言的是「那个进程还在不在」。"""
 
-    def _spawn(self, *, idle: str, upstream: str = "", stderr=subprocess.DEVNULL):
+    def _spawn(self, *, idle: str, upstream: str = "", stderr=subprocess.DEVNULL,
+               stdout=subprocess.DEVNULL):
         """直接起一个 `serve_workspace.py`(手起这一档:没有 owner 凭据)。"""
         port = _free_port()
         env = {**os.environ, fixture_life.IDLE_ENV: idle}
@@ -44,13 +45,13 @@ class 后果(unittest.TestCase):
         if upstream:
             argv += ["--upstream", upstream]
         proc = subprocess.Popen(argv, cwd=ROOT, env=env,
-                                stdout=subprocess.DEVNULL, stderr=stderr)
+                                stdout=stdout, stderr=stderr)
         self.addCleanup(self._reap, proc)
         _wait_listening(port, proc)
         return port, proc
 
     def _spawn_via_middle(self, *, idle: str, owned: bool,
-                          nonblocking: bool = False):
+                          nonblocking: bool = False, highfd: bool = False):
         """让一个中间进程去起夹具,好让我们杀掉它来模拟调用方没了。
 
         `owned=True` 时中间进程按 `fixture_server()` 的协议给出所有权凭据。
@@ -63,6 +64,10 @@ class 后果(unittest.TestCase):
             f"key = {fixture_life.OWNER_ENV!r}",
             f"owned = {owned!r}",
             f"nonblocking = {nonblocking!r}",
+            f"highfd = {highfd!r}",
+            "hold = []",
+            "if highfd:",            # 先把低号占满,凭据就落到 1024 以上
+            "    hold = [os.open(os.devnull, os.O_RDONLY) for _ in range(1100)]",
             "pass_fds = ()",
             "if owned:",
             "    r, w = os.pipe()",
@@ -71,6 +76,7 @@ class 后果(unittest.TestCase):
             "        os.set_blocking(r, False)",
             "    env[key] = '%d:tok0123456789abcd' % r",
             "    pass_fds = (r,)",
+            "    print('ownerfd=%d' % r, flush=True)",
             "else:",
             "    env.pop(key, None)",
             f"p = subprocess.Popen([sys.executable, 'tests/serve_workspace.py',"
@@ -86,8 +92,22 @@ class 后果(unittest.TestCase):
                                   stderr=subprocess.DEVNULL, text=True)
         self.addCleanup(self._reap, middle)
         self.addCleanup(middle.stdout.close)
-        grandchild = int(middle.stdout.readline().strip())
-        self.addCleanup(self._reap_pid, grandchild, _identity(grandchild))
+        # 有凭据时中间进程先吐一行 `ownerfd=N`(好让用例断言它确实落在高位),再吐 pid
+        self._owner_fd = -1
+        while True:
+            line = middle.stdout.readline().strip()
+            self.assertTrue(line, "中间进程什么都没吐出来")
+            if line.startswith("ownerfd="):
+                self._owner_fd = int(line.partition("=")[2])
+                continue
+            grandchild = int(line)
+            break
+        # **登记回收要早、记身份要晚。** 号一到手就得登记,等身份那几十毫秒里抛出去也
+        # 不许漏掉它;身份则要等它 exec 完才记得准(见 `_settled_identity`)。所以收的是
+        # 这个盒子里的身份,不是登记那一刻的。
+        born = [""]
+        self.addCleanup(lambda: self._reap_pid(grandchild, born[0]))
+        born[0] = _settled_identity(grandchild, f"serve_workspace.py --port {port}")
         _wait_listening(port, middle)
         return port, middle, grandchild
 
@@ -271,7 +291,9 @@ class 后果(unittest.TestCase):
         self.addCleanup(self._reap, middle)
         self.addCleanup(middle.stdout.close)
         child = int(middle.stdout.readline().strip())
-        self.addCleanup(self._reap_stopped, child, _identity(child))
+        born = [""]                  # 同上:先登记,身份等它 exec 完再记
+        self.addCleanup(lambda: self._reap_stopped(child, born[0]))
+        born[0] = _settled_identity(child, f"serve_workspace.py --port {port}")
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             state = subprocess.run(["ps", "-o", "stat=", "-p", str(child)],
@@ -393,6 +415,60 @@ class 后果(unittest.TestCase):
         self._reap_pid(proc.pid, _identity(proc.pid))
         self.assertEqual(proc.wait(timeout=5), -signal.SIGKILL, "身份对上就该收掉")
 
+    def test_身份记早了就收不动它(self):
+        """**漏掉一个夹具的根因:身份记在它 exec 完之前。**
+
+        `Popen` 一返回就能拿到 pid,但那一刻子进程可能还是父进程的一份副本,`ps` 给出
+        的命令行还没换。把这个**转瞬即逝**的样子记成「这一轮的身份」,回收时一比就对不
+        上,`_reap_pid` 的保守分支一个字都不碰 —— 而「手起的夹具父进程退了也不退」那条
+        用例的立意正是没有 owner、空闲防线也关了,**没有任何别的东西会来收它**。实测:
+        整套一起跑稳定留下一个手起的夹具,单条跑机器闲、exec 抢在 pid 那一行前面,一次
+        都看不见。
+
+        这里用 fork 之后先睡一会儿再 `execv` 把那个窗口撑开,不靠机器忙 —— 两边都钉:
+        早记的身份收不动(就是漏的那一步),`_settled_identity` 记的收得掉。
+        """
+        port = _free_port()
+        needle = f"serve_workspace.py --port {port}"
+        # 脚本名和端口走 argv,不写进 `-c` 的正文 —— 否则 `ps` 里连父进程都「像」夹具了
+        code = "\n".join([
+            "import os, sys, time",
+            "script, port = sys.argv[1], sys.argv[2]",
+            "pid = os.fork()",
+            "if pid == 0:",
+            "    time.sleep(2.0)",     # exec 推后,把那个窗口撑开
+            "    os.execv(sys.executable, [sys.executable, script, '--port', port])",
+            "print(pid, flush=True)",
+            "time.sleep(600)",
+        ])
+        env = {**os.environ, fixture_life.IDLE_ENV: "0"}   # 它不该自己退,才看得出收没收
+        env.pop(fixture_life.OWNER_ENV, None)
+        middle = subprocess.Popen(
+            [sys.executable, "-c", code, "tests/serve_workspace.py", str(port)],
+            cwd=ROOT, env=env, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True)
+        self.addCleanup(self._reap, middle)
+        self.addCleanup(middle.stdout.close)
+        child = int(middle.stdout.readline().strip())
+        born = [""]
+        self.addCleanup(lambda: self._reap_pid(child, born[0]))
+        early = _identity(child)
+        self.assertNotIn(needle, early,
+                         "这条用例要的是 exec 之前那一刻,没撑开就什么也没验到")
+        born[0] = _settled_identity(child, needle)
+        self.assertIn(needle, born[0], "等到它换完命令行才算记下了身份")
+        _wait_listening(port, middle)
+        self._reap_pid(child, early)
+        self.assertFalse(self._wait_dead(child, 1.0),
+                         "早记的身份对不上,保守分支一个字都不碰 —— 这正是漏的那一步")
+        # **先收掉中间进程再验「收得掉」。** 它是孙进程的父亲、又永远不会 `wait()`,
+        # 孙进程被收掉之后会以僵尸的身份一直列在 `ps` 里(口径同 `test_身份对上就真收掉`)。
+        middle.kill()
+        middle.wait(timeout=5)
+        self._reap_pid(child, born[0])
+        self.assertTrue(self._wait_dead(child, 5), "记对了身份就该收得掉")
+        self.assertFalse(self._port_open(port), "收掉了就不该再有人占着这个端口")
+
     def test_被按住的进程身份对不上连唤醒都不许(self):
         """**SIGCONT 也是信号。** 上一版为了「先放它走才收得动」把它发在核验之前,
         那等于对一个还没认过的 pid 动手 —— 号被回收之后唤醒的是别人的进程。
@@ -435,6 +511,47 @@ class 后果(unittest.TestCase):
         self.assertLessEqual(leaked, 1,
                              f"起了 8 次都失败,漏了 {leaked} 个 fd(每次两个就是 16)")
 
+    def test_高位凭据下调用方取消照样带走夹具(self):
+        """**第 1 条的后果。** 调用方先开着一千来个文件时,凭据落在 fd 1024 以上。
+
+        上一版用 `select.select()` 等它可读,高位号抛 `ValueError` 被当成「从来没有
+        owner」—— 实测:调用方被 SIGKILL 之后页面照旧返回 200、进程还是同一个,而默认
+        900 秒的空闲那一道救不了它(页面还在轮询就一直续命)。
+        """
+        port, middle, grandchild = self._spawn_via_middle(idle="0", owned=True,
+                                                          highfd=True)
+        self.assertGreater(self._owner_fd, 1023,
+                           f"没把凭据挤到高位去(fd={self._owner_fd}),没验到东西")
+        self.assertTrue(self._port_open(port), "先确认它真的起来了")
+        middle.kill()
+        middle.wait(timeout=5)
+        self.assertTrue(self._wait_dead(grandchild, 15),
+                        "高位的凭据一样得认出调用方没了")
+        self.assertFalse(self._port_open(port), "页面不该还开着")
+
+    def test_启动提示堵住也装得上防线(self):
+        """**第 2 条的后果。** 预先把夹具的 stdout 填满,它那行启动提示就写不出去。
+
+        上一版六个入口都先 `print(..., flush=True)` 再 `guard(app)`,而 `install()` 在
+        `guard` 里面 —— 那次 print 阻塞在满管道上,`install()` 永远执行不到。手起这条
+        路本来就没有 owner,于是一道防线都没装:实测过了空闲上限进程还在、端口根本不
+        响应,而 print 阻塞不抛异常,外面什么都看不到。
+        """
+        r, w = os.pipe()
+        self.addCleanup(_shut_fds, r, w)
+        filled = 0
+        os.set_blocking(w, False)         # 只有灌的这一下用非阻塞:这是**我们自己**的 fd
+        with contextlib.suppress(BlockingIOError):
+            while filled < 1 << 20:
+                filled += os.write(w, b"x" * 4096)
+        os.set_blocking(w, True)          # 交给子进程之前还成阻塞,逼它走丢提示那条路
+        self.assertGreater(filled, 0, "没把管道灌住,这条用例没验到东西")
+        port, proc = self._spawn(idle="1", stdout=w)
+        self.assertTrue(self._port_open(port),
+                        "提示写不出去也必须照旧起来服务 —— 提示丢得起")
+        self.assertTrue(_wait_gone(proc, 25),
+                        "空闲那道防线必须已经装上了")
+
     def test_手起的夹具父进程退了也不退(self):
         """**这条是整套设计的核心**:会话手起夹具、起它那个 shell 当场就退,随后另
         一个 shell 才跑探针。拿「父进程没了」当判据的话,夹具一起跑就自杀。
@@ -471,7 +588,9 @@ class 后果(unittest.TestCase):
         port = int(base.rsplit(":", 1)[1])
         # **按它交回来的 pid 收,不按端口找。** 端口不是所有权凭据(见 `_identity`)。
         grandchild = int(raw_pid)
-        self.addCleanup(self._reap_pid, grandchild, _identity(grandchild))
+        born = [""]                  # 同上
+        self.addCleanup(lambda: self._reap_pid(grandchild, born[0]))
+        born[0] = _settled_identity(grandchild, f"serve_workspace.py --port {port}")
         middle.kill()
         middle.wait(timeout=5)
         deadline = time.monotonic() + 15

@@ -72,7 +72,7 @@ def main():
                                   "message": "隔离验证环境", "provider_ready": True},
             }.get(path, {})
 
-        print("Isolated OpenAI protocol QA: temporary settings, no external requests", flush=True)
+        fixture_life.announce("Isolated OpenAI protocol QA: temporary settings, no external requests")
         try:
             uvicorn.run(fixture_life.guard(app), host="127.0.0.1", port=args.port, log_level="warning")
         finally:

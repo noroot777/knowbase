@@ -119,7 +119,7 @@ def main():
                 'daily/reports': {'reports': []},
             }.get(path, {})
 
-        print('Favorites QA: real API, temporary database, no external requests', flush=True)
+        fixture_life.announce('Favorites QA: real API, temporary database, no external requests')
         uvicorn.run(fixture_life.guard(app), host='127.0.0.1', port=args.port, log_level='warning')
 
 
