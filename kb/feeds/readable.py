@@ -39,24 +39,30 @@ MAX_HTML = 3 * 1024 * 1024
 # 完完整整读得到的文章说「这一页没找到正文」—— 而它和真正读不到的那一档
 # (登录墙、纯 JS 渲染)在界面上长得一模一样。
 #
-# **量它要用带状态的线性扫描,不许用一条无上下文的正则**(`<(script|style)…>.*?</\1>`
-# 那一版,审查第一轮两头都踩了):
-# ①**没有闭合标签时它退化成平方级**。每个 `<script` 开头都要把剩下整份重找一遍
-#   `</script>`,找不到再挪一格重来 —— 实测 `'<script>' * 16000`(128 KB,远在网络
-#   那道 8 MB 之下)`markup_size` 要 3.7 秒,`'<script>' * 64000`(512 KB)42 秒还
-#   没回来。`GRAB_SECONDS` 只随 HTTP 请求走,拦不住一次本地正则。
-# ②**它认不出注释,于是把真标记算成脚本**。`'<!-- <script> -->' + '<p>x</p>' * 400000
-#   + '<!-- </script> -->'`:3.2 MB 真标记、40 万个 `<p>` 节点,那一版报 **26 字节**,
-#   这条线形同虚设。注释里的 `<script>` 按 HTML 规范压根不开原始文本模式。
-# 下面这个扫描两样一起解决:认注释、认原始文本,**每一段最多被扫两趟**(一趟找开
-# 标签、一趟找闭标签,游标只进不退),所以成本是 O(len)。
+# **这条线的不变量只有一句:扣掉的那部分不许超过真解析器会当成原始文本的范围;
+# 判不准只许多算,不许少算。** 少算 = 预算形同虚设,该拒的大页一路走到建树和打分;
+# 多算顶多是拒掉一篇、让人重抓一次。**两轮审查各逮到一批反例,都是「少算」那一头**:
+# ①首版用一条无上下文的正则 `<(script|style)…>.*?</\1>`:没有闭合标签时退化成平方级
+#   (`'<script>' * 64000`,512 KB,42 秒没回来;定点注入复测 60~72 秒),而 `GRAB_SECONDS`
+#   只随 HTTP 请求走、拦不住一次本地正则;它还认不出注释,把
+#   `'<!-- <script> -->' + '<p>x</p>' * 400000 + '<!-- </script> -->'` 这 3.2 MB 真标记报成 26 字节。
+# ②第二版加了注释状态,但仍然把**任意位置**的 `<script` 当开标签、把标签名结束处当原始文本
+#   起点。五种形状各把 3.2 MB、40 万个 `<p>` 的页面报成个位数字节:属性值里的字面量
+#   `<div title="<script>">`、`<script/>` 和 `<style/>` 这种自闭合、以及引号没收口的
+#   `<script data-x="`。两个消费方于是都把整整 3.2 MB 交给了建树。
+# **所以这里不许再靠「多排除几个子串」去修** —— 要的是真的走一遍标签流:认注释、认
+# 声明、按 html.parser 自己的规矩确认开标签收口,拿不准就不扣。
 #
-# 判不准的几处一律偏向**多算真标记**(= 更容易拒稿):注释没收口、`<script` 贴在
-# 结尾、闭标签认早了,算出来的都是偏大的那个数。口径同元规则 —— 误拒顶多重抓一次,
-# 放行一份超大页是真花掉的解析时间。
-#: 原始文本元素的开标签 + 注释开头。**注释要一起认**(见上面 ②)。
-_RAW_OPEN = re.compile(r'<!--|<(script|style)(?=[\s/>])', re.I)
-#: 对应的闭标签。**宽着收**:早一点认出结束 = 少算一点原始文本 = 多算一点真标记。
+# 成本:游标只进不退,每一段最多被扫两趟,所以是 O(len);而且**只在整份超线时才扫**
+# (两个消费方的短路顺序见 `extract_or_reason` 和 `grab_page.gate_reason`)。实测 ——
+# 绿泡泡那张真实页 0.002 秒,上面那几种病态输入 0.001~0.4 秒,而同样那份 3.2 MB
+# 真标记交给 BeautifulSoup 要 2.5 秒,后面还有打分。
+#: 标签里「值的界符或标签收口」那几个字符。**`=` 也要认**:引号只有紧跟在 `=` 后面
+#: 才是值的界符 —— `<div don't>` 里那个撇号是属性名的一部分,真解析器在 `>` 处收口。
+_ATTR_OR_END = re.compile(r'[>"\'=]')
+#: 标签名。字符集照 html.parser 的 `tagfind_tolerant`。
+_TAG_NAME = re.compile(r'[a-zA-Z][^\s/>\x00]*')
+#: 原始文本元素的闭标签。**宽着收**:早一点认出结束 = 少扣一点 = 偏向拒稿那一头。
 _RAW_CLOSE = {'script': re.compile(r'</\s*script', re.I),
               'style': re.compile(r'</\s*style', re.I)}
 MAX_CANDIDATES = 4000
@@ -317,31 +323,75 @@ def substance(text: str) -> int:
     return total
 
 
+def _tag_end(html: str, lt: int) -> tuple[int, bool] | None:
+    """这个开标签收口在哪:`(">" 的下标, 是不是自闭合)`。**拿不准返回 None。**
+
+    按 html.parser 的起始标签文法走,不按直觉:
+    - **引号只有紧跟 `=` 才是值的界符**(`<div don't>` 的撇号在属性名里);
+    - **引号没收口、或者收口之后紧跟着不该跟的东西,整个标签就不算标签** —— 真解析器
+      那时把这一段当文本发出去、**不进 cdata**(`parse_starttag` 里 `end not in ('>','/>')`
+      那一支)。我们跟着不认:返回 None,调用方一个字节都不扣。
+    """
+    at, after_equals = lt + 1, False
+    while (hit := _ATTR_OR_END.search(html, at)) is not None:
+        char = hit.group()
+        if char == '>':
+            return hit.start(), html[hit.start() - 1] == '/'
+        if char == '=':
+            after_equals, at = True, hit.end()
+            continue
+        if not after_equals:
+            at = hit.end()
+            continue
+        quoted = html.find(char, hit.end())
+        if quoted < 0 or html[quoted + 1:quoted + 2] not in ('', ' ', '\t', '\n', '\r',
+                                                            '\x0c', '/', '>'):
+            return None
+        at, after_equals = quoted + 1, False
+    return None
+
+
 def markup_size(html: str) -> int:
     """这份 HTML 里**要建成树**的那部分有多大(扣掉脚本和样式的内容)。
 
-    判据、两次事故形态和「为什么不能用一条正则」都写在 `_RAW_OPEN` 上面那段。
-    成本 O(len):游标 `at` 只进不退,每一段最多被扫两趟。三头都要钉 —— 脚本撑大
-    的页面照旧解析、真标记超线的页面照旧拒、而这一趟自己不许成为新的开销。
+    不变量、两轮审查的反例和成本都写在 `_ATTR_OR_END` 上面那段。这里只重复一句:
+    **拿不准一律不扣** —— 认不出的标签直接收工(剩下的全算真标记),而不是猜一个。
     """
     total, raw, at = len(html), 0, 0
-    while (opened := _RAW_OPEN.search(html, at)) is not None:
-        if opened.group(1) is None:
-            # 注释:整段跳过,**但它的字节照旧算真标记** —— 少算一点的代价是放行,
-            # 多算一点的代价只是拒稿。没收口的注释同理,直接收工。
-            if (end := html.find('-->', opened.end())) < 0:
+    while (lt := html.find('<', at)) >= 0:
+        if html.startswith('<!--', lt):
+            # 注释:整段跳过,**但它的字节照旧算真标记**。注释里的 `<script>` 按 HTML
+            # 规范压根不开原始文本模式(第一轮审查那个 26 字节的洞)。
+            if (end := html.find('-->', lt + 4)) < 0:
                 break
             at = end + 3
             continue
-        body = opened.end()
-        if (closed := _RAW_CLOSE[opened.group(1).lower()].search(html, body)) is None:
+        if html.startswith('<!', lt) or html.startswith('<?', lt):
+            if (end := html.find('>', lt + 2)) < 0:
+                break
+            at = end + 1
+            continue
+        closing = html.startswith('</', lt)
+        name = _TAG_NAME.match(html, lt + 2 if closing else lt + 1)
+        if name is None:
+            at = lt + 1                  # `<` 后面不是标签名 = 这就是正文里的一个尖括号
+            continue
+        if (closed := _tag_end(html, lt)) is None:
+            break
+        gt, selfclosing = closed
+        at = gt + 1
+        # **自闭合的 `<script/>` 不开原始文本模式**:html.parser 走的是
+        # `handle_startendtag`,后面的 `<p>` 照旧建成节点(第二轮审查那两种形状)。
+        if closing or selfclosing or name.group().lower() not in _RAW_CLOSE:
+            continue
+        if (end := _RAW_CLOSE[name.group().lower()].search(html, at)) is None:
             # 没有闭合标签 = 剩下的整份都是这一段的内容。**这不是将就,是照着
             # html.parser 的收场写的**:实测 `'<body><script>' + '<p>x</p>' * 200000`
             # 建出 0 个 `<p>`、解析 0.005 秒 —— 树确实没建起来。
-            raw += total - body
+            raw += total - at
             break
-        raw += closed.start() - body
-        at = closed.end()
+        raw += end.start() - at
+        at = end.end()
     return total - raw
 
 
