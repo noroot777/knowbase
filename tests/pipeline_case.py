@@ -71,12 +71,18 @@ class HistoryCase(TestCase):
         `pipeline_batch._save_own` 会把这一轮快照放进内存权威位(有意的:面板那句
         收尾文案要看得出这一轮是降级完成的),而 `last_result()` 优先念它 —— 留着
         的话「重启之后拿不到的东西」在用例里照旧拿得到,于是恢复那条路整段没被
-        执行到,而用例是绿的(本轮 R4 的回归一度就这样:定点拆掉修复仍然全绿)。
+        执行到,而用例是绿的(定点拆掉修复仍然全绿)。
+
+        **新进程的 `_state` 里压根没有的键要删掉,不是改成空值**:`results` 不在
+        那份字面量里(`pipeline_state._state`),它只能由恢复那一步填进来。留着
+        上一轮那一份的话,「恢复漏了这一格」在用例里看起来和修好了一模一样
+        (实测:定点把 `results` 从恢复里摘掉,后果那一半照旧全绿)。
         """
         from kb import pipeline_batch as pb
         self.reset()
         pb._remember_aggregate(None)
         pb._remember_settled('')
+        state._state.pop('results', None)
         state._state.update(
             running=False, run_id='', started_at='', finished_at='', crawl_filter={},
             export_filter={}, crawl_retry={}, log=[],
