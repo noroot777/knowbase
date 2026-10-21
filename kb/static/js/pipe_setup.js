@@ -41,11 +41,28 @@ function pipeSetupError(message = '') {
 // `{ channel, accounts }`:accounts 非空 = 连订阅也定死(每行那颗「同步」)。
 // null = 同步中心的「新建同步」,六个来源随便勾。
 let pipeLock = null;
-// 同步中心那一份自己的勾选,被入口默认顶掉时存这儿,关窗时原样还回去。
+// 同步中心那一份自己的配置,被锁定入口顶掉时**整份**存这儿,关窗时整份还回去。
+// **必须整份,不许逐字段挑**:只还原「来源 + 步骤」的那一版漏掉了日报开关和
+// `pipeSel`,而 `pipeSel` 的残留会在**下一次打开普通弹窗**时被 `loadPipeAccounts`
+// 开头那句 `savePipeDraft()` 存进 `pipeDrafts`(那时锁已经解了,挡不住) ——
+// 实测:同步中心勾好「博客甲、乙」,去订阅页点一下「博客丙」的同步再取消,
+// 回同步中心只剩博客丙,点开始发出去的也只有博客丙(第 1 轮审查 R1)。
 // **不能靠"下次打开再读一遍草稿"**:那份草稿的口径在 `applyChannelData` 里
 // (退役名映射 + 认不出来的过滤 + 一个都没剩时补默认),在这儿再写一遍就是两份。
-let pipeStageOwn = null, pipeRunSelOwn = null;
+let pipeOwn = null;
 function pipeLocked() { return pipeLock?.channel || ''; }
+// 整份快照。`runSel` 这一格留到 `applyPipeLock()` 再填 —— 它要等通道目录落地、
+// `applyChannelData` 按草稿重建完才算「同步中心那一份」(见下面那段)。
+function stashPipeOwn() {
+  if (pipeOwn) return;
+  pipeOwn = {
+    runSel: null,
+    stageSel: new Set(pipeStageSel),
+    stageKept: pipeStageKept ? new Set(pipeStageKept) : null,
+    daily: $('pipe-daily').checked,
+    sel: new Map([...pipeSel].map(([k, v]) => [k, new Set(v)])),
+  };
+}
 // **上锁要等通道目录落地之后**:`loadPipeChannels()` 头一回会跑 `applyChannelData`,
 // 那一步按 localStorage 里的草稿重建 `pipeRunSel` —— 在它之前上锁会被它盖掉,
 // 实测点公众号那一页的「同步全部」提交的是「公众号 + RSS」两个来源
@@ -54,17 +71,23 @@ function pipeLocked() { return pipeLock?.channel || ''; }
 // 从「我的订阅」点一次就把它改写成单来源的话,下次新建同步少了几个来源,没人说。
 function applyPipeLock() {
   if (!pipeLock) return;
-  if (!pipeRunSelOwn) pipeRunSelOwn = [...pipeRunSel];
+  if (pipeOwn && pipeOwn.runSel === null) pipeOwn.runSel = [...pipeRunSel];
   pipeRunSel = [pipeLock.channel];
 }
+// 整份还回去。**日报开关也要还**:原来这里无条件置 false,于是「同步中心勾好
+// 跑完出日报 → 去订阅页打开看一眼 → 关掉」就把那个勾取消了,连 `pipeStageKept`
+// 里用户自选的那几段也一起清掉(第 1 轮审查 R1 实测 B)。
 function releasePipeLock() {
-  if (pipeRunSelOwn) { pipeRunSel = pipeRunSelOwn; pipeRunSelOwn = null; }
-  if (pipeStageOwn) {
-    $('pipe-daily').checked = false;
-    pipeStageKept = null;
-    pipeStageSel = pipeStageOwn; pipeStageOwn = null;
-  }
   pipeLock = null;
+  if (!pipeOwn) return;
+  if (pipeOwn.runSel) pipeRunSel = pipeOwn.runSel;
+  pipeStageSel = pipeOwn.stageSel;
+  pipeStageKept = pipeOwn.stageKept;
+  $('pipe-daily').checked = pipeOwn.daily;
+  // `pipeSel` 是 const Map:清掉再填,不能整个换掉
+  pipeSel.clear();
+  for (const [k, v] of pipeOwn.sel) pipeSel.set(k, v);
+  pipeOwn = null;
 }
 async function openPipeModal(lock = null) {
   // **不开也要说一声。** 原来这里是静默 return:同步中心那颗按钮在跑着时是禁用的,
@@ -74,21 +97,25 @@ async function openPipeModal(lock = null) {
     toast('已有同步在跑', { key: 'pipeline', detail: '等它结束再开始下一次，进度在同步中心。' });
     return;
   }
+  // 入口给的订阅归一成 `{id, name}`:**id 决定抓谁、name 只负责显示**(理由在
+  // `loadChannelAccounts` 那段)。写字符串的老形态按「两者相同」收下。
   pipeLock = lock && lock.channel
-    ? { channel: lock.channel, accounts: [...(lock.accounts || [])], stages: [...(lock.stages || [])] }
+    ? { channel: lock.channel, stages: [...(lock.stages || [])],
+        accounts: (lock.accounts || []).map(a => typeof a === 'string'
+          ? { id: a, name: a } : { id: String(a.id), name: a.name || String(a.id) }) }
     : null;
   if (pipeLock) {
+    // **整份存下来再动**:下面要改的不只是步骤(还有日报开关、订阅勾选),
+    // 关窗时整份还回去(`releasePipeLock`)。
+    stashPipeOwn();
     // **入口定默认步骤**:从「我的订阅」进来默认跑入库那四段,不带整理工具和
     // 更新 Wiki —— 那两段是全库的、一跑几十分钟,而这个入口要的是「把我这一类
     // 的新内容收进来」。改之前公众号那颗按钮不带步骤清单,后端兜底成六段全跑,
     // 顺手跑掉几十分钟而页面上一个字都不说。默认归默认,**弹窗里照旧改得动**。
     if (pipeLock.stages?.length) {
-      // **入口的默认只管入口自己**:同步中心那一份勾选先存起来,下次从那儿进来
+      // **入口的默认只管入口自己**:同步中心那一份已经在 `pipeOwn` 里了,关窗
       // 原样还回去 —— 不存的话从「我的订阅」点一次,同步中心的「新建同步」就
       // 永远变成四段了,而那是用户自己挑的一份(探针反过来钉着这一条)。
-      // 存的是**用户自己那一份**:勾着「跑完出日报」时 `pipeStageSel` 是日报那条
-      // 通道排的,用户自己的在 `pipeStageKept` 里。
-      if (!pipeStageOwn) pipeStageOwn = new Set(pipeStageKept || pipeStageSel);
       $('pipe-daily').checked = false;   // 日报是同步中心那一档的事
       pipeStageKept = null;
       pipeStageSel = new Set(pipeLock.stages);
@@ -158,13 +185,17 @@ async function loadChannelAccounts(channel, force = false) {
     if (!pipeRunSel.includes(channel) || pipeAcctAborts.get(channel) !== controller) return;
     const list = [...new Set((data.accounts || []).filter(n => typeof n === 'string'))];
     const draft = pipeDrafts.get(channel);
-    // 锁到具体几条订阅那一档(每行那颗「同步」):选择照它摆,**不沿用上次的草稿**
-    // —— 沿用的话点「同步这一条」跑的是上次勾的那一批。`in_scope` 两种都认(id
-    // 的字符串和名字),所以这里拿到哪一种都对得上(`kb/feeds/registry.py`)。
-    const want = pipeLock?.channel === channel && pipeLock.accounts.length
-      ? pipeLock.accounts.filter(n => list.includes(n)) : null;
+    const lockAccts = pipeLock?.channel === channel ? pipeLock.accounts : null;
+    // 锁到具体几条订阅那一档(每行那颗「同步」):选择照入口摆,**不沿用上次的
+    // 草稿** —— 沿用的话点「同步这一条」跑的是上次勾的那一批。名字还在这份名单
+    // 里 = 这条订阅还在(都没了就一个都不勾,起跑那一关会拦住,不会静默跑成别的)。
+    // 锁定「整条来源」那一档(accounts 空)**也不许看草稿**:它说的就是全部,
+    // 读草稿会让「同步全部」实际只跑同步中心上次收窄过的那几个(第 1 轮审查 R1)。
+    const want = lockAccts
+      ? (lockAccts.length ? lockAccts.filter(a => list.includes(a.name)).map(a => a.name) : list)
+      : (draft ? draft.filter(n => list.includes(n)) : list);
     pipeAccounts.set(channel, { state: 'ready', list, error: '' });
-    pipeSel.set(channel, new Set(want || (draft ? draft.filter(n => list.includes(n)) : list)));
+    pipeSel.set(channel, new Set(want));
     savePipeDraft();
   } catch (e) {
     if (!pipeRunSel.includes(channel) || pipeAcctAborts.get(channel) !== controller) return;
@@ -372,6 +403,21 @@ function renderPipeEst() {
   $('pipe-start').textContent = pipeAction === 'start' ? '正在启动…'
     : steps ? `开始同步 · ${steps} 步` : '开始同步';
 }
+// **锁到具体几条订阅时,请求里发的是稳定 id,不是名字。** 名字不唯一:两条地址
+// 不同、名字相同的订阅,后端那道范围匹配(`reg.in_scope`「id 相等**或** name
+// 相等」)会把同名的全部带上 —— 实测点第一条的「同步」,两条都被抓了
+// (第 1 轮审查 R2)。显示仍用名字(勾选框、折起来那一行都按名字渲染),只有发
+// 出去的那一份换成 id。
+// **只换入口点名的那几条,别的照旧发名字,这不是将就** —— 那份名单是按名字去重
+// 过的(`/api/pipeline/accounts` 只给名字),列表里「同名博客」那一行**代表的就是
+// 两条**,勾它的意思就是两条都跑;换成某一条的 id 反而会漏掉另一条。所以:入口
+// 点名「这一条」⇒ 发 id;在名单里勾一个名字 ⇒ 发名字。
+function pipeStableTargets(channel, names) {
+  const accts = pipeLock?.channel === channel ? pipeLock.accounts : null;
+  if (!accts?.length) return names;
+  const byName = new Map(accts.map(a => [a.name, a.id]));
+  return names.map(n => byName.get(n) ?? n);
+}
 function pipeRunBody() {
   // **force:按下这颗按钮的是人,退避是给自动轮次用的。** 不带的后果是退避中的
   // 那几条被静默跳过(只记一笔 `deferred`),而面板上说「同步已开始」——
@@ -389,7 +435,7 @@ function pipeRunBody() {
   const targets = pipeNeedsTargets();
   body.channels = pipeReadyChannels()
     .filter(id => !targets || pipeSelected(id).size)
-    .map(id => ({ channel: id, accounts: targets ? [...pipeSelected(id)] : [] }));
+    .map(id => ({ channel: id, accounts: targets ? pipeStableTargets(id, [...pipeSelected(id)]) : [] }));
   if (targets && pipeRange.from)
     Object.assign(body, { since_date: pipeRange.from, until_date: pipeRange.to });
   return body;

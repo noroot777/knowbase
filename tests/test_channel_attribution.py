@@ -23,6 +23,7 @@ from unittest.mock import patch
 
 from kb import pipeline_daybook as daybook, pipeline_results as results
 from kb import pipeline_retry, pipeline_state
+from kb.feeds import registry as reg
 from tests.retry_scope_fixture import RetryScopeBase
 
 
@@ -239,6 +240,29 @@ class TargetIdentityTests(RetryScopeBase):
         with self.no_backlog():
             said = self.refuse()
         self.assertIn('没有失败项', said, said)
+
+    def test_an_id_names_one_subscription_even_when_two_share_a_name(self):
+        """**名字不是身份:同名两条时,按 id 发下来的那一轮只许抓那一条。**
+
+        范围匹配是「id 相等**或** name 相等」(`reg.in_scope`),所以名字一旦重复,
+        按名字发下来的一轮会把同名的全都抓一遍。「我的订阅」里每行那颗「同步」
+        正是「只跑这一条」的意思,改走起跑弹窗之后一度退化成按名字发
+        (第 1 轮审查 R2 实测:点第一条,两条都被抓)。前端那一半的红在
+        `tests/pipe_entry_probe.mjs`(请求里发的是 id 不是名字),这一条钉的是
+        **后端收到 id 之后真抓了谁**。
+
+        **反过来钉一边**:按名字发下来的照旧两条都抓 —— 那是面板筛选和公众号那条
+        路在用的口径(`source_targets` 只给名字),不许为了这一条把它收掉。
+        """
+        twin = reg.save_subscription('rss', {'name': 'A', 'url': 'https://twin.org/feed'})
+        self.assertNotEqual(self.a['id'], twin['id'], '前提:同名的是两条独立订阅')
+
+        by_id, _ = self.crawl({'channel': 'rss', 'accounts': [str(self.a['id'])]})
+        self.assertEqual({self.a['id']}, by_id, '按 id 发的一轮把同名的那条也抓了')
+
+        by_name, _ = self.crawl({'channel': 'rss', 'accounts': ['A']})
+        self.assertEqual({self.a['id'], twin['id']}, by_name,
+                         '按名字发的照旧是"所有叫这个名字的"')
 
     def test_a_subscription_that_is_still_broken_stays_owed(self):
         """**反过来钉一边**:没修好的那条照旧欠着,照旧补得到。"""

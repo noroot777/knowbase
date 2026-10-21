@@ -37,16 +37,21 @@ const MODULES = [
     manager: "feeds", icon: "box", interval_minutes: 1440, url_hint: "", note: "",
     adapter: "manual", pollable: false },
 ];
+const rssSource = (id, name, host) => ({
+  id, name, url: `https://${host}.example/feed`, group_name: "", enabled: 1,
+  last_error: "", last_success: "", last_attempt: "", failures: 0, configuration_error: "",
+});
 const SOURCES = {
-  rss: [{ id: 11, name: "某博客", url: "https://a.example/feed", group_name: "", enabled: 1,
-          last_error: "", last_success: "", last_attempt: "", failures: 0, configuration_error: "" },
-        { id: 12, name: "另一个博客", url: "https://b.example/feed", group_name: "", enabled: 1,
-          last_error: "", last_success: "", last_attempt: "", failures: 0, configuration_error: "" }],
+  // **13 和 14 名字一样、地址不同**:名字不是唯一的,所以「只同步这一条」只能按
+  // id 发出去(第 1 轮审查 R2)。`/api/pipeline/accounts` 给的是名字,它俩在那份
+  // 名单里只占一格。
+  rss: [rssSource(11, "某博客", "a"), rssSource(12, "另一个博客", "b"),
+        rssSource(13, "同名博客", "c"), rssSource(14, "同名博客", "d")],
   inbox: [{ id: 21, name: "收件桶", url: "", group_name: "", enabled: 1, last_error: "",
             last_success: "", last_attempt: "", failures: 0, configuration_error: "" }],
 };
-const ACCOUNTS = { wechat_local: ["公众号甲", "公众号乙"], rss: ["某博客", "另一个博客"],
-                   inbox: ["收件桶"] };
+const ACCOUNTS = { wechat_local: ["公众号甲", "公众号乙"],
+                   rss: ["某博客", "另一个博客", "同名博客"], inbox: ["收件桶"] };
 const CHANNELS = {
   channels: [{ id: "wechat_local", label: "公众号", hint: "本机绿泡泡库" },
              { id: "rss", label: "RSS", hint: "RSS / Atom" },
@@ -169,7 +174,7 @@ let p = posted[0];
 check("起跑走的是管道通道,来源只有 rss、整条全选",
       p.path === '/api/pipeline/run' && p.body.channels.length === 1
       && p.body.channels[0].channel === 'rss'
-      && p.body.channels[0].accounts.sort().join() === '另一个博客,某博客', JSON.stringify(p));
+      && p.body.channels[0].accounts.sort().join() === '另一个博客,同名博客,某博客', JSON.stringify(p));
 check("步骤按入口那四段发下去", p.body.stages.join() === 'crawl,export,index,extract', JSON.stringify(p.body.stages));
 check("带着 force:人按的那一下要跳过来源退避", p.body.force === true, JSON.stringify(p.body));
 
@@ -188,8 +193,10 @@ posted.length = 0;
 await evalJs(`startPipeFromModal()`);
 await setup("那一档也发出了请求", sleep(500).then(() => posted.length > 0));
 p = posted[0];
-check("请求里的订阅只有点的那一条",
-      p.body.channels[0].accounts.join() === '另一个博客', JSON.stringify(p.body.channels));
+// **发出去的是稳定 id,不是名字**:名字不唯一,后端那道范围匹配「id 相等**或**
+// name 相等」会把同名的另一条也带上(下面第 2b 节定点钉它)
+check("请求里的订阅只有点的那一条,而且是按稳定 id 发的",
+      p.body.channels[0].accounts.join() === '12', JSON.stringify(p.body.channels));
 
 // **反过来钉一边**:锁到单条那一次不许改写同步中心记着的订阅选择
 await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
@@ -199,7 +206,79 @@ await evalJs(`(() => { const i = document.querySelector('#pipe-channel-list inpu
   if (!i.checked) { i.checked = true; i.dispatchEvent(new Event('change', { bubbles: true })); } return true; })()`);
 await setup("rss 的订阅读出来了", until(`pipeAccounts.get('rss')?.state === 'ready'`, 8000));
 check("同步中心那边 rss 照旧整条全选(单条同步没改写它记着的那一份)",
-      await evalJs(`pipeSelected('rss').size`) === 2, await evalJs(`JSON.stringify([...pipeSelected('rss')])`));
+      await evalJs(`pipeSelected('rss').size`) === 3, await evalJs(`JSON.stringify([...pipeSelected('rss')])`));
+await evalJs(`closePipeModal()`);
+
+// ── 2b. 同名订阅:只跑点的那一条 ─────────────────────────────────────────────
+// 夹具里 13 和 14 都叫「同名博客」,地址不同。后端那道范围匹配是「id 相等**或**
+// name 相等」(`kb/feeds/registry.py` 的 `in_scope`),所以**按名字发出去等于把
+// 同名的全部带上** —— 实测点第一条的「同步」两条都被抓(第 1 轮审查 R2)。
+// 这一条判的就是「发出去的那一份能不能只认出一条」。
+await openSubs("rss");
+await setup("又回到 RSS 那一页", until(`document.getElementById('source-sync') !== null`, 6000));
+await evalJs(`syncSource([13])`);
+await setup("同名那一条的弹窗开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
+  && pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+posted.length = 0;
+await evalJs(`startPipeFromModal()`);
+await setup("同名那一条发出了请求", sleep(500).then(() => posted.length > 0));
+p = posted[0];
+check("两条同名订阅只点了一条:请求里是那一条的 id,不是它们共用的名字",
+      p.body.channels[0].accounts.join() === '13', JSON.stringify(p.body.channels));
+
+// ── 2c. 「同步全部」就是全部,不看同步中心收窄过的那一份 ─────────────────────
+// 锁定「整条来源」那一档原来也会去读 `pipeDrafts`:同步中心上次只勾了两个,
+// 从订阅页点「同步全部」就只跑那两个,而按钮上写着「全部」(第 1 轮审查 R1)。
+await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
+await setup("同步中心的弹窗开了(准备收窄)", until(`pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+// **先摆回全选再收窄**:摆局不许依赖前面几节留下的勾选 —— 依赖了的话,这一节会
+// 在「摆局没成」上中断,把后面几条都带着跳过,而红在哪一条看不出来。
+await evalJs(`pipeSelectAll()`);
+// 名单里可能同时摆着几个来源的分组,要点名 rss 那一组里的那一行
+await evalJs(`(() => { const i = document.querySelector('#pipe-acct-list input[data-channel=rss]');
+  i.checked = false; i.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
+const narrowed = await evalJs(`pipeSelected('rss').size`);
+await evalJs(`closePipeModal()`);
+await setup("收窄生效了", Promise.resolve(narrowed === 2));
+await openSubs("rss");
+await setup("再回 RSS 那一页", until(`document.getElementById('source-sync') !== null
+  && !document.getElementById('source-sync').disabled`, 8000));
+await evalJs(`document.getElementById('source-sync').click()`);
+await setup("「同步全部」的弹窗开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
+  && pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+check("订阅页的「同步全部」真的是全部(没沿用同步中心收窄过的那一份)",
+      await evalJs(`pipeSelected('rss').size`) === 3, await evalJs(`JSON.stringify([...pipeSelected('rss')])`));
+await evalJs(`closePipeModal()`);
+
+// ── 2d. **取消也不许改同步中心那一份**(第 1 轮审查 R1 实测 A/B)───────────────
+// 关窗时锁解了,但残留的 `pipeSel` 会在**下一次打开普通弹窗**时被
+// `loadPipeAccounts` 开头那句 `savePipeDraft()` 存进草稿 —— 所以判据必须落在
+// 「再打开一次之后库里那份是什么」和「点开始真正发出去的是什么」上。
+const centerState = () => evalJs(`JSON.stringify({
+  sel: [...pipeSelected('rss')].sort(),
+  daily: document.getElementById('pipe-daily').checked,
+  draft: (pipeDrafts.get('rss') || []).slice().sort() })`);
+await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
+await setup("同步中心又开了(摆原始配置)", until(`pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+await setDaily(true);
+// 判据是「跟进去之前**一模一样**」,不是某个写死的名单 —— 这一刻同步中心正好是
+// 上一节收窄过的那两条,而「锁定一次之后它还剩几条」正是出事的地方
+const before = await centerState();
+await evalJs(`closePipeModal()`);
+await openSubs("rss");
+await setup("第三次回 RSS 那一页", until(`document.getElementById('source-sync') !== null`, 6000));
+await evalJs(`syncSource([11])`);
+await setup("单条的弹窗开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
+  && pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+await evalJs(`closePipeModal()`);          // 不执行,直接取消
+await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
+await setup("同步中心最后一次开", until(`pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+const after = await centerState();
+const back = JSON.parse(after);
+check("打开再取消一条订阅的同步:同步中心那一份原样还在(订阅选择 + 草稿)",
+      after === before && back.sel.length > 0, `之前 ${before} / 之后 ${after}`);
+check("打开再取消也没把「跑完出日报」那个勾取消掉", back.daily === true, after);
+await setDaily(false);
 await evalJs(`closePipeModal()`);
 
 // ── 3. 公众号那一页的「同步全部」 ───────────────────────────────────────────
@@ -252,6 +331,10 @@ const over = () => evalJs(`(() => { const b = document.querySelector('.pipe-setu
   return b.scrollHeight - b.clientHeight; })()`).then(Number);
 const resize = h => send("Emulation.setDeviceMetricsOverride",
                          { width: 1280, height: h, deviceScaleFactor: 1, mobile: false });
+// **量的是默认那一档**:订阅名单折着(整条全选)。收窄过的选择会强制摊开名单
+// (那正是 `pipeAcctFoldable` 的本意:折起来等于把「只跑其中几个」藏了),那一档
+// 本来就更高 —— 先摆回全选,别把上一节留下的收窄算进默认布局。
+await evalJs(`pipeSelectAll()`);
 await resize(720);
 await sleep(200);
 check("1280×720:默认那一档一屏全见,不用滚", await over() <= 0, `还要滚 ${await over()}px`);

@@ -353,6 +353,14 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
          channels: list[str], first_days: int,
          approval: daily.Approval | None = None) -> None:
     sched_day, retry, batch = _state['sched_day'], False, ''
+    # **手动起的那一轮跳过来源退避,定时那一轮照旧遵守它**(`FetchScope.force` →
+    # `kb.feeds.sync.collect` 那道 `retry_at`)。手动/自动这个事实本来就在契约里
+    # (`start(trigger=...)`:界面那条是 'manual',`tick()` 那条是 'schedule'),
+    # 原来只是没传到抓取参数上 —— 后果是勾了「跑完出日报」的那一次同步,刚失败
+    # 的订阅仍然被静默跳过(只记一笔 `deferred`),而同一颗按钮不勾日报却抓得到
+    # (第 1 轮审查 R3)。**判据写成"不是定时就算手动"**:方向上误放行顶多重抓
+    # 一次,漏放行是静默不同步(元规则那条)。
+    force = {} if _state.get('trigger') == 'schedule' else {'force': True}
     try:
         if sync:
             from kb import pipeline as pl     # 延迟:它反过来 import 本模块
@@ -373,7 +381,7 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                                    else '超出时间预算,未同步'})
                     continue
                 _state['channels'].append(
-                    _sync_round(FETCH_STAGES, {'channel': channel},
+                    _sync_round(FETCH_STAGES, {'channel': channel, **force},
                                 labels.get(channel, channel), budget_end, channel,
                                 batch=batch))
             # 入库那一段:等所有通道都抓完才跑,跑一次 —— 这时待索引的文件和
