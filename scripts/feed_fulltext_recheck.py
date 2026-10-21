@@ -6,19 +6,25 @@
 离开重试队列,后面任何一轮同步都不会再碰它(见 `fulltext.queued_sql`)。所以
 光修判据只管未来,存量得单独走一趟。
 
-**判据直接取现成的那两份,不在这里另写一遍**:`readable.boilerplate_reason`
-(版权区、作者简介)和 `grab_page.gate_text_reason`(关卡那六道里**与内容格式
-无关**的那一道 —— 通篇就是那几句提示,按份额)。两处各判一遍的话,收拾掉的和
-以后会被挡掉的不是同一批。都是纯文本判据,所以这里拿库里那份 `body` 就能问 ——
-不必把几百个原文链接重新请求一遍。**库里那份正文没有来源凭据,所以 HTML 准入
-专属的那一问(⑥「我确认不了」)不许拿来问它**,理由和生产实测的数字在
-`grab_page.gate_text_reason` 与 `_not_article` 头上。
+**判据只有一份,而且只取 `readable.boilerplate_reason`(版权区、作者简介)** ——
+写库准入那六道**一道都不借**。那几道是给「刚抓回来的一页」用的,误拒在那条路上
+代价是一次重抓、用户当场还看得见;**在这里代价是把正常正文换成壳、译文作废、
+重导出一轮,不可逆**。同一个启发式担不起两种后果。两次借过来都当场借出了事故
+(都在审查里实测到,数字和夹具见 `_not_article`):借 ⑥「不重复的字数不够」判坏了
+正常的 Markdown 原文(它本来就允许重复),借 ④「通篇就是那几句提示」判坏了正常的
+英文教程(`_gate_share` 不按 `. ` 分句,一整段只算一句 —— 正文里提一次
+「enable JavaScript」就是 100%)。
 
-**这两道在本脚本里是同一份,两处消费:挑哪几行要收拾(`_suspect`)、以及从备份里
-挑哪一份内容当壳(`_from_backup`)。** 只在前一处更新不合格标准、后一处留着旧
-标准的后果实测过(审查第 1 轮):一份同样被污染的较新备份被当成有效原摘要装回
-来,`_downgrade` 紧接着把 `fulltext_at` 清空 —— 这一条从此连扫描都选不中,而
-正确的较旧备份明明还在。所以**那份标准抽成 `_not_article`,两处都过它**。
+**所以「关卡页被写成正文」这一类存量,这个脚本收拾不了**(能力边界,不是漏掉的
+一道):库里只剩那份纯文字,认出它要的 DOM、最终地址和响应头当时就没存。出路是
+人点「重新抓一次」(`grab.replace`)。生产只读实测说这不是损失 —— 存量里**一条
+关卡页都没有**(数字在 `_suspect` 头上),而以后 `admit` 会先把它们拦住。
+
+**那一份标准抽成 `_not_article`,两处消费:挑哪几行要收拾(`_suspect`)、以及从
+备份里挑哪一份内容当壳(`_from_backup`)。** 两处各写一遍的后果实测过(审查第 1
+轮):扫描那一侧认得出、恢复那一侧还按旧标准放行,于是一份同样不合格的较新备份
+被当成有效原摘要装回来,`_downgrade` 紧接着清掉 `fulltext_at` —— 这一条从此连扫描
+都选不中,而正确的较旧备份明明还在。
 
 **「放回队列」不够,必须连那份 body 一起换掉。** 第 1 轮只清了三个标记
 (`fulltext_at` / `fulltext_error` / `fulltext_tries`)和译文,body 原样留着 ——
@@ -73,7 +79,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb.feeds import fulltext, grab_page, readable, registry as reg       # noqa: E402
+from kb.feeds import fulltext, readable, registry as reg       # noqa: E402
 
 
 def _not_article(body: str) -> str:
@@ -81,14 +87,26 @@ def _not_article(body: str) -> str:
 
     **本脚本的那份标准只有这一处,两边消费**:扫描挑哪几行要收拾(`_suspect`)、
     以及从备份里挑哪一份内容当壳(`_from_backup`)。只在前一处更新标准的后果见
-    模块说明那一段 —— 污染的备份被当成有效原摘要装回来,而 `_downgrade` 紧接着
+    模块说明那一段 —— 不合格的备份被当成有效原摘要装回来,而 `_downgrade` 紧接着
     清掉 `fulltext_at`,这一条从此连扫描都选不中(元规则:口径只有一份)。
 
-    两道都**与内容格式无关**,所以对库里任何一份文字都成立 —— 库里那份正文没有
-    来源凭据,HTML 准入专属的 ⑥ 不许拿来问它(理由在 `grab_page.gate_text_reason`
-    头上)。
+    **就是 `boilerplate_reason` 一道,写库准入那六道一道都不借。** 这条路上的误判
+    是**不可逆**的(正文换成壳、译文作废、重导出),而那六道是按「误拒一次重抓一次」
+    的代价调的。两次借过来都当场实测到误删正常内容:
+    - 借 ⑥(`body_confirmed`,不重复的字数要过 `MIN_CHARS`):一份 646 字、按行去重
+      254 字的正常 quick-start README 被判坏(几个平台各一段同样的安装命令)。它本来
+      就不走 `admit` —— `fetch_one` 有两条出口交出 **Markdown 原文**(`.md`/GitHub
+      地址、`text/markdown` 响应),Markdown 允许重复。
+    - 借 ④(`_gate_share`,关卡句的份额):一篇正常的英文设置教程被判坏 ——
+      `_gate_share` 刻意不按 `. ` 分句(域名和缩写会把份额抖散),于是一整段英文只算
+      **一句**,正文里提一次「enable JavaScript」就是 **100%**;而 Markdown 那份教程
+      连标题带正文两行都提到它,同样 100%。连 feed 自己给的、**还没补抓过**的 158 字
+      摘要都会被选中。
+
+    这两样都不是「再调一调就能用」:③④ 那套措辞/份额判据判的是「这一页在拦正文」,
+    而库里那份文字答得出的只有「它提到过那几个词」。所以这里**宁可认不出**。
     """
-    return readable.boilerplate_reason(body) or grab_page.gate_text_reason(body)
+    return readable.boilerplate_reason(body)
 
 
 def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
@@ -105,22 +123,14 @@ def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
     一条 body 是版权声明或作者简介的,只能是补抓这条路写进去的。**没开补抓的
     订阅一个都不碰** —— 它们的正文是 feed 自己给的,不在这个脚本的射程里。
 
-    **关卡那道判据只取 ④(`gate_text_reason`),不问 ⑥。** ④ 问的是「这段话自己是不是
-    一张验证提示」—— 与内容格式无关,库里任何一份文字都答得出。⑥(「不重复的字数过不了
-    提取器那道门槛」)是 HTML 准入**专属**的一问,而库里那份正文没有来源凭据:
-    `fulltext.fetch_one` 另有两条正常出口压根不过 `admit`(`.md`/GitHub 地址、
-    `text/markdown` 响应),交出来的是 Markdown 原文,安装命令、围栏和表格行本来就
-    重复。拿 ⑥ 问它们的后果实测过(审查第 1 轮):一份 646 字、按行去重 254 字的正常
-    quick-start README 被判坏、正文换成「标题 + 链接」、译文作废,而重抓会把同一份
-    内容再写回来 —— 下一轮又选中,没有终点。**补一列来源凭据也救不回存量**:这次之后
-    ⑥ 判坏的 HTML 正文压根写不进来(`admit` 当场拒掉),凭据只会盖在「⑥ 永远不会成立」
-    的那些行上(完整论证在 `grab_page.gate_text_reason` 头上)。
-    生产实测(2026-10-21,`data/feeds.db`):开了补抓的订阅名下 1021 条,其中 352 条
-    还没补抓过(壳,`substance` 全落在 37~133)、669 条报过成功;那 669 条里关卡句
-    份额最高的是 **0.0** —— 换句话说**存量里一条关卡页都没有**,④ 这一道是给以后留的
-    (而以后 `admit` 会先拦住它们)。⑥ 那一档当时挑出 2 条(Meta 产品落地页、英国
-    地方报的面包屑),按上面的理由**不动它们**:认不出来的代价是库里留着两条瘦正文,
-    认错的代价是把正常 README 写死。
+    **写库准入那六道一道都不借**,理由和两次借出来的事故在模块说明那一段。
+    生产只读实测(2026-10-21,`data/feeds.db`)是这个决定的底:开了补抓的订阅名下
+    1021 条,其中 352 条还没补抓过(壳,`substance` 全落在 37~133)、669 条报过成功。
+    那 669 条里**关卡句份额最高的是 0.0** —— 存量里一条关卡页都没有,借 ④ 过来一条也
+    收拾不到,只会误伤;「内容质量」那一道当时挑出 2 条(Meta 产品落地页 934 字 /
+    不重复 393、英国地方报的面包屑 473 / 392),它判坏正常 Markdown 的那次实测就在
+    同一轮里。**认不出来的代价是库里留着两条瘦正文,认错的代价是把正常正文写死** ——
+    后者不可逆地更贵。
     """
     where = ["EXISTS(SELECT 1 FROM subscription_items x JOIN subscriptions s"
              ' ON s.id=x.subscription_id WHERE x.item_key=fi.key AND s.fulltext=1)']

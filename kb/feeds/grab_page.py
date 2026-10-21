@@ -243,37 +243,6 @@ def body_confirmed(body: str) -> bool:
     return readable.substance(body or '') >= readable.MIN_CHARS
 
 
-def gate_text_reason(body: str) -> str:
-    """只看这段文字**自己**就能认出的那一道:④ 通篇就是那几句关卡提示
-    (`_GATE_SHARE`,按份额)。空串 = 认不出。
-
-    **单开一个口子是因为存量复查手里只有库里那份 `body`**
-    (`scripts/feed_fulltext_recheck.py`:几百条已经写进去的正文,不把原文链接重新
-    请求一遍)—— 口径同 `readable.boilerplate_reason` 在那个脚本里的用法。两处各写
-    一遍的话,收拾掉的和以后会被挡掉的不是同一批(元规则:口径只有一份)。
-
-    **这一道与内容格式无关,所以它对库里任何一份文字都成立** —— 它问的是「这段话
-    自己是不是一张验证提示」,而不是「HTML 提取器交出这段话算不算成功」。
-
-    **⑥(`body_confirmed`)刻意**不**在这里。** 它是 HTML 准入专属的一问:准入手里
-    那份是提取器从一棵 DOM 上赢出来的东西,「不重复的字数过不了提取器自己那道
-    `MIN_CHARS`」才等于「我确认不了拿到的是正文」。库里那份正文**没有来源凭据**,
-    而 `fulltext.fetch_one` 另有两条正常出口压根不过 `admit`
-    (`markdown_source.fetch` 的 `.md`/GitHub 地址、`from_response` 的 `text/markdown`
-    响应),它们交出来的是 **Markdown 原文**:三个平台各一段安装命令、围栏、表格行
-    本来就重复。审查第 1 轮实测:一份 646 字、按行去重 254 字的正常 quick-start
-    README 被判坏、正文被换成「标题 + 链接」、译文作废,而重抓会把同一份内容再写
-    回来 —— 下一轮又选中它,没有终点。
-
-    **而给存量补一列来源凭据是死重:** 这次之后,⑥ 判坏的 HTML 正文**压根写不进来**
-    (`admit` 当场拒掉),所以 ⑥ 在复查侧只可能对**这次之前**写进去的那些成立 ——
-    恰恰是没有凭据的那些。生产只读实测(2026-10-21,开了补抓的 1021 条)给的也是
-    同一个答案:④ 这一档**一条都没有**(关卡句份额最高 0.0),⑥ 那一档的 2 条
-    (Meta 产品落地页、英国地方报的面包屑)靠一列新凭据同样救不回来。
-    """
-    return _SAY_PAGE if _gate_share(body) >= _GATE_SHARE else ''
-
-
 def _gate_assets(soup) -> bool:
     """这一页**真挂着**某家关卡自己的组件吗(见 `page_gate.ASSETS`)。
 
@@ -326,10 +295,13 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
     证明不了「拿到了正文」—— 三轮审查各实测到至少一例漏放,最后那一例
     (1832 字、一个表单都没有的登录提示页)把前五道全绕过去了。
 
-    **④ 住在 `gate_text_reason`**:它只认正文自己、与内容格式无关,而存量复查手里
-    只有库里那份正文 —— 同一个问题不许在两处各判一遍。**⑥ 不跟它搬**:那一问只对
-    提取器交出来的东西成立(理由在 `gate_text_reason` 头上),所以它留在这条路上。
-    两道在**这条路上**什么时候成立都一个字没变。
+    **这六道一道都不往外搬,存量复查只取 `readable.boilerplate_reason`。** 两次搬
+    过去都搬出了事故:⑥ 判坏了正常的 Markdown 原文(它允许重复),④ 判坏了正常的
+    英文教程(`_gate_share` 不按 `. ` 分句,一整段只算一句 —— 正文里提一次
+    「enable JavaScript」就是 100%)。这两道的误拒在**这条路上**代价是一次重抓、
+    而且用户当场看得见;在存量复查那条路上代价是把正常正文换成壳、译文作废,
+    **不可逆**。同一个启发式担不起两种后果,所以不共用 —— 完整论证在
+    `docs/decisions/fulltext.md` 第一节。
 
     **生效性和位置要分开各判一次**:`<template>` 里的密码框、
     `type="application/json"` 里的示例参数都**不算**这一页挂着什么
@@ -360,22 +332,18 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
     if reason := _wall_reason(soup):
         return reason
     titled = any(word in _page_title(soup).lower() for word in _GATE_TITLES)
-    if titled and (_gate_share(body) > 0 or not body):
+    share = _gate_share(body)
+    if share >= _GATE_SHARE:
+        return _SAY_PAGE
+    if titled and (share > 0 or not body):
         return _SAY_PAGE
     if not body and any(word in (html or '')[:200000].lower() for word in _GATE_WORDS):
         return _SAY_PAGE
-    # ④ 只认正文自己、与内容格式无关,所以它住在 `gate_text_reason` —— **存量复查
-    # 手里只有库里那份正文**,而同一个问题不许在两处各判一遍(元规则)。
-    # ③ 挪到 ④ 前面不改变任何结论:③④ 给的是同一句话(`_SAY_PAGE`)。
-    if reason := gate_text_reason(body):
-        return reason
-    # ⑥ 排在最后:「对方拦着你」说得出下一步,「我确认不了」只说得出一半。
-    # **它留在这儿、不进 `gate_text_reason`**:这一问只对提取器交出来的东西成立
-    # (理由写在那个函数头上)。
-    # **`body` 空的时候这一问压根不成立** —— 那时提取器自己给得出原因(版权区、
-    # 作者简介),而「通篇在复读同一段」对着一份空正文是在说一件没发生的事。
-    # 漏掉这道守卫当场实测到 `tests/test_fulltext_failures.py` 5 条变红:样板区那
-    # 两档的理由被这句话顶掉,面板上说不出是哪一类。
+    # ⑥**最后一道:没命中前面那五道,不等于手里这篇就是目标正文。** 放在最后是
+    # 因为前五道说得出「对方拦着你」,这一道只说得出「我确认不了」—— 能说清的
+    # 那句话优先。**`body` 空的时候它压根不成立**:那时提取器自己给得出原因
+    # (版权区、作者简介),而「通篇在复读同一段」对着一份空正文是在说一件没发生
+    # 的事(漏掉这道守卫当场实测到 `tests/test_fulltext_failures.py` 5 条变红)。
     if body and not body_confirmed(body):
         return _SAY_THIN
     return ''

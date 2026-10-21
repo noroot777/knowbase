@@ -37,7 +37,6 @@ Cloudflare 关卡页跑 `fetch_pending('rss')`:`done=1`、库里正文被换成
 (`FullTextCase` / `SHELL` / `PAGE`、复查那一组的 `RecheckCase`)和页面夹具
 (`page_html`)一律复用现成的 —— 各写一份的话两边的前提会各漂各的。
 """
-import os
 from unittest.mock import Mock, patch
 
 from kb import llm
@@ -69,6 +68,22 @@ WALL_IN_ARTICLE = page_html().replace('</article>', LOGIN_FORM + '</article>')
 SAY_SIGN_IN = ('Sign in to continue reading. Enter the email address associated with your '
                'subscription. Members have access to the full archive and the weekly letter. ')
 TEXT_WALL = page_html(title='Sign in to read Example Journal', body=[SAY_SIGN_IN] * 7)
+#: 一篇**正常的英文设置教程**,走 `markdown_source` 那条路入库。`_gate_share` 刻意不按
+#: `. ` 分句(域名、缩写、小数点会把份额抖散),于是这一整段只算**一句** —— 正文里提
+#: 一次「enable JavaScript」份额就是 1.0,连标题那行也提到它。正文逐字取自审查第 2 轮
+#: 的夹具(683 字、按行去重 683 字:⑥ 对它压根不成立,所以它单钉 ④ 那一侧)。
+_TUTORIAL = (
+    'To enable JavaScript for the local reader, open the site settings for localhost and '
+    'allow scripts for this origin. Reload the preview after changing the permission. '
+    'The reader builds its article list in the browser and keeps the original Markdown '
+    'files on disk. If the list is still empty, open the developer console and check '
+    'whether the assets returned an HTTP error. A blocked content security policy can '
+    'also prevent the preview bundle from loading. Inspect the response headers before '
+    'changing the policy and avoid permitting scripts from unrelated origins. '
+    'This setting affects only the local preview and does not require an account or '
+    'change the contents of any saved article.')
+TUTORIAL_MD = '# Enable JavaScript for the local reader\n\n' + _TUTORIAL
+
 #: **开头把同一段铺满、真内容排在 `MAX_CHARS` 之后**的那一页。每一段是一个独立的
 #: `<p>`(= 独立的行),所以按行去重之后那个前缀只剩一段的长度 —— 真内容被截掉之后
 #: ⑥ 当场成立。审查第 1 轮实测的那一张提取出 69133 字、落库 60000 字而不重复的只有
@@ -276,80 +291,102 @@ class NotAGateTests(AdmitCase):
 
 
 class RecheckTests(RecheckCase):
-    """存量复查:已经被写死的那些要能换回壳,**而正常的壳一条都不许动**。
+    """存量复查:**写库准入那六道一道都不借** —— 这个脚本只认 `boilerplate_reason`。
 
-    射程两侧都钉。`_suspect` 的射程里躺着两类东西:补抓写进去的正文,和 feed
-    原本那份壳(生产实测 2026-10-21:开了补抓的订阅名下 1021 条,352 条是壳)。
-    「内容质量」那一道**壳天然过不了** —— 不分射程地扫一遍就是把那 352 条正常的
-    壳判坏、换成按标题与链接重建的那一份、译文一并作废、再整批重导出一轮。
+    那六道是按「误拒一次重抓一次、用户当场看得见」的代价调的;**这条路上误判一次是
+    把正常正文换成壳、译文作废、重导出一轮,不可逆**。同一个启发式担不起两种后果。
+    两次借过来都当场借出了事故(两轮审查各一次,都在下面钉着):⑥ 判坏了正常的
+    Markdown 原文(它本来就允许重复),④ 判坏了正常的英文设置教程
+    (`_gate_share` 刻意不按 `. ` 分句,一整段英文只算一句)。
+
+    所以这一组钉的是**两侧**:射程之外的那些一个字节都不许动(正常 README、正常教程、
+    feed 自己给的摘要、还没补抓的壳、补抓成功的真正文),以及那条**能力边界**本身 ——
+    关卡页/登录墙被写成正文这一类,库里只剩那份纯文字,这个脚本收拾不了。
+
+    样板区那一档的正反两侧(含备份恢复那四条)在 `tests/test_fulltext_failures.py` 的
+    `StaleRecheckTests` 里,基线就钉着,这里不重复一遍。
     """
 
-    def test_a_gate_body_already_in_the_library_is_swapped_back_to_a_shell(self):
-        """后果:那段验证提示没了,这一条回到补抓队列、额度重新给满。"""
-        gate_body = readable.extract(SAY_VERIFY)
-        key = self._already_wrong(gate_body)
-        self.assertEqual(1, self._recheck('scan'))        # 只读那一趟先认得出
-        self.assertEqual(gate_body, self.row(key)['body'])   # scan 一个字节不动
-        self.assertEqual(0, self._recheck('run', '--yes'))
-        row = self.row(key)
-        self.assertNotIn('请完成验证', row['body'])
-        self.assertEqual('summary', row['content_kind'])
-        self.assertEqual(1, fulltext.pending('rss'))
-        self.assertEqual((0, '', ''), (row['fulltext_tries'], row['fulltext_at'],
-                                       row['translated_at']))
+    def _survives(self, body, label):
+        """一条「报过补抓成功、正文是这一份」的条目,scan 不选它、run 不动它。"""
+        with self.subTest(form=label):
+            key = self._already_wrong(body)
+            self.assertEqual(0, self._recheck('scan'))
+            self.assertEqual(0, self._recheck('run', '--yes'))
+            self.assertEqual(body, self.row(key)['body'])
+            return key
 
-    def test_a_text_only_wall_already_in_the_library_is_out_of_reach(self):
-        """**这是这个脚本明确的能力边界,不是漏掉的一道。** ⑥(「不重复的字数过不了
-        提取器那道门槛」)是 HTML 准入专属的一问:准入手里那份是提取器从一棵 DOM 上
-        赢出来的,而库里这份**没有来源凭据** —— 同一列 `fulltext_at` 底下还躺着走
-        `markdown_source` 写进来的 Markdown 原文(见下一条)。拿 ⑥ 去问它们,收拾掉
-        一条瘦正文的同时会把正常 README 写死,而后者不可逆地更贵。
+    def test_a_gate_body_already_in_the_library_is_out_of_reach(self):
+        """**这是明确的能力边界,不是漏掉的一道。** 认出一张关卡页要的是最终地址、
+        DOM 里那几个组件、响应头 —— 落库之后这些全没了,库里只剩那份纯文字。拿纯文本
+        启发式去补这一刀,两轮审查各实测到一次误删正常内容(见类说明)。
 
-        **补一列凭据也救不回这一条**:这次之后 ⑥ 判坏的 HTML 正文压根写不进来
-        (`admit` 当场拒掉),凭据只会盖在「⑥ 永远不会成立」的那些行上。所以这一档
-        的出路是**人说「重新抓一次」**,不是让脚本去猜。
+        出路是**人点「重新抓一次」**(`grab.replace`),不是让脚本去猜。生产只读实测说
+        这不是损失:存量里关卡句份额最高的是 0.0 —— **一条关卡页都没有**,而以后
+        `admit` 会先把它们拦住。
         """
-        key = self._already_wrong(readable.extract(TEXT_WALL))
-        # 两头先钉住:它确实过不了 ⑥,而 ④ 对它压根不成立(那一页话很多)。
-        self.assertFalse(grab_page.body_confirmed(self.row(key)['body']))
-        self.assertEqual('', grab_page.gate_text_reason(self.row(key)['body']))
-        self.assertEqual(0, self._recheck('scan'))
-        self.assertEqual(0, self._recheck('run', '--yes'))
-        self.assertIn('Sign in to continue reading', self.row(key)['body'])
+        for body, label in ((readable.extract(SAY_VERIFY), '关卡提示页'),
+                            (readable.extract(TEXT_WALL), '纯文字登录墙')):
+            self.setUp()
+            key = self._survives(body, label)
+            self.assertNotEqual('', self.row(key)['fulltext_at'])   # 它确实报过成功
 
     def test_a_normal_readme_fetched_as_markdown_is_never_touched(self):
-        """**`fulltext_at` 非空只说明「某条补抓路径成功过」,不说明「过了 HTML 准入」。**
-        `fetch_one` 有两条正常出口压根不过 `admit`:`.md`/GitHub 地址走
-        `markdown_source.fetch`,任意地址声明 `text/markdown` 走 `from_response`。
-        交出来的是 Markdown 原文 —— 三个平台各一段安装命令、围栏、表格行本来就重复,
-        按行去重之后过不了那道 400。
+        """**借 ⑥ 的那次事故(审查第 1 轮)。** `fulltext_at` 非空只说明「某条补抓路径
+        成功过」,不说明「过了 HTML 准入」:`fetch_one` 有两条出口交出 **Markdown 原文**
+        (`.md`/GitHub 地址走 `markdown_source.fetch`,任意地址声明 `text/markdown` 走
+        `from_response`)—— 几个平台各一段同样的安装命令,按行去重之后过不了那道 400。
 
-        审查第 1 轮实测的后果:这份 README 被判坏、正文换成「标题 + 链接」、`fulltext_at`
-        清空、译文作废;而重抓会把同一份内容再写回来,下一轮又选中它 —— 没有终点。
-        所以这里**走真的补抓**把它写进去(不是手填一行),连 `fetch_one` 的出口一起钉。
+        后果实测:这份 README 被判坏、正文换成「标题 + 链接」、`fulltext_at` 清空、
+        译文作废;而重抓把同一份内容再写回来,下一轮又选中 —— 没有终点。所以这里
+        **走真的补抓**把它写进去,连 `fetch_one` 的出口一起钉。
         """
-        readme = README_MD
-        self.assertGreater(len(readme), readable.MIN_CHARS)
-        self.assertLess(readable.substance(readme), readable.MIN_CHARS)   # 它确实过不了 ⑥
-        key = self.put(url='https://e.org/doc')
+        self.assertGreater(len(README_MD), readable.MIN_CHARS)
+        self.assertLess(readable.substance(README_MD), readable.MIN_CHARS)   # 它确实过不了 ⑥
+        self._fetched_then_rechecked(README_MD, 'text/markdown; charset=utf-8')
+
+    def test_a_normal_english_tutorial_is_never_touched(self):
+        """**借 ④ 的那次事故(审查第 2 轮)。** `_gate_share` 刻意不按 `. ` 分句(域名、
+        缩写、小数点会把份额抖散),于是**一整段英文只算一句** —— 正文里提一次
+        「enable JavaScript」就是 **100%**;这份教程连标题带正文两行都提到它,同样 100%。
+
+        这一条和上面那条的根因是同一个:库里那份文字答得出的只有「它提到过那几个词」,
+        答不出「这一页在拦正文」。**把同样这些字分成段落,份额就降到 1/7** —— 一个随
+        排版翻转的判据担不起「销毁这份正文」。
+        """
+        self.assertGreaterEqual(grab_page._gate_share(TUTORIAL_MD), grab_page._GATE_SHARE)
+        self._fetched_then_rechecked(TUTORIAL_MD, 'text/plain; charset=utf-8',
+                                     url='https://e.org/setup.md')
+
+    def _fetched_then_rechecked(self, text, mime, url='https://e.org/doc'):
+        """走真的补抓写进去(两条 Markdown 出口各一条路),再跑一趟复查。
+
+        **译文也摆上**:这条路会连 `title_zh`/`body_zh`/`translated_at` 一起清掉,
+        而「钱已经付过的那份译文没了」是这个误删最贵的一半。
+        """
+        key = self.put(url=url)
         with patch.object(fulltext, 'request', Mock(return_value=Response(
-                200, 'https://e.org/doc', readme.encode(),
-                {'content-type': 'text/markdown; charset=utf-8'}))):
+                200, url, text.encode(), {'content-type': mime}))):
             self.assertEqual(1, fulltext.fetch_pending('rss')['done'])
+        with reg.db() as c:
+            c.execute("UPDATE feed_items SET title_zh='标题译文',body_zh='正文译文',"
+                      "translated_at='2026-10-21T00:00:00+00:00' WHERE key=?", (key,))
         self.assertNotEqual('', self.row(key)['fulltext_at'])   # 它确实报了成功
         self.assertEqual(0, self._recheck('scan'))
         self.assertEqual(0, self._recheck('run', '--yes'))
-        self.assertEqual(readme, self.row(key)['body'])
-        self.assertEqual('content', self.row(key)['content_kind'])
+        row = self.row(key)
+        self.assertEqual(text, row['body'])
+        self.assertEqual('content', row['content_kind'])
+        self.assertEqual('正文译文', row['body_zh'])            # 译文没被作废
 
     def test_a_shell_waiting_for_its_body_is_never_touched(self):
-        """**这一条是那 352 条的代表。** feed 原本那份壳(标题 + 域名 + HN 得分)
-        说的东西本来就少,拿「内容质量」问它必然判坏 —— 而它正是补抓还没轮到的
-        正常状态。选中它的后果不是「多抓一次」:壳会被换成按标题与链接重建的
-        那一份、译文作废、整批重导出。
+        """**这一条是那 352 条的代表。** feed 原本那份壳(标题 + 域名 + HN 得分)说的
+        东西本来就少,拿准入那几道问它必然判坏 —— 而它正是补抓还没轮到的正常状态。
+        选中它的后果不是「多抓一次」:壳会被换成按标题与链接重建的那一份、译文作废、
+        整批重导出。
         """
         key = self.put()
-        self.assertLess(readable.substance(SHELL), readable.MIN_CHARS)   # 它确实过不了
+        self.assertLess(readable.substance(SHELL), readable.MIN_CHARS)   # 它确实过不了 ⑥
         self.assertEqual(0, self._recheck('scan'))        # 一条都不该选中
         self.assertEqual(0, self._recheck('run', '--yes'))
         row = self.row(key)
@@ -357,25 +394,10 @@ class RecheckTests(RecheckCase):
         self.assertEqual('summary', row['content_kind'])
         self.assertEqual(1, fulltext.pending('rss'))      # 照旧排在队列里等补抓
 
-    def test_a_rebuilt_shell_is_never_judged_again(self):
-        """**不许变成一个没有终点的循环。** 复查自己按标题与链接重建出来的那份壳
-        同样说不出多少不重复的东西 —— 再判它一次坏,每跑一次就「收拾」同一条,
-        译文作废和重导出跟着一轮一轮重做。挡住它的是「⑥ 压根不在这个脚本的射程里」
-        (成功时间人为填回去也一样 —— 口径和 `tests/test_fulltext_failures.py` 那条
-        「已经干净 ≠ 只是选不中」是同一件事)。
-        """
-        key = self._already_wrong(readable.extract(SAY_VERIFY))
-        self.assertEqual(0, self._recheck('run', '--yes'))
-        with reg.db() as c:
-            c.execute("UPDATE feed_items SET fulltext_at='2026-10-21T02:00:00+00:00'"
-                      ' WHERE key=?', (key,))
-        self.assertEqual(0, self._recheck('scan'))
-        self.assertEqual('Yes, and\nhttps://e.org/post', self.row(key)['body'])
-
     def test_a_repetitive_feed_summary_is_not_this_scripts_business(self):
-        """反过来再钉一遍同一条边界:feed 自己给的正文也可以又长又重复(同一段铺满
-        的摘要)。它和上面那份 README 一样没过 HTML 准入,换掉它就是拿掉用户订阅到的
-        内容(口径同「没开补抓的订阅一个都不碰」)。
+        """再钉一遍同一条边界,这次落在**还没补抓过**的那一侧:feed 自己给的正文可以
+        又长又重复(同一段铺满的摘要),`fulltext_at` 本来就是空。把它换掉就是拿掉
+        用户订阅到的内容(口径同「没开补抓的订阅一个都不碰」)。
         """
         key = self.put(body=readable.extract(TEXT_WALL))
         self.assertEqual(0, self._recheck('scan'))
@@ -391,63 +413,6 @@ class RecheckTests(RecheckCase):
                       (readable.extract(PAGE), key))
         self.assertEqual(0, self._recheck('scan'))
         self.assertIn('The runtime schedules tools', self.row(key)['body'])
-
-
-class BackupRestoreTests(RecheckCase):
-    """从备份里挑哪一份内容当壳 —— **过的判据必须和扫描那一侧是同一道**。
-
-    审查第 1 轮实测的事故形态:扫描那一侧认得出「请完成验证」了,恢复那一侧还只问
-    版权区/作者简介,于是一份同样被污染的较新备份被当成有效原摘要装回来;
-    `_downgrade` 紧接着把 `fulltext_at` 清空 —— 这一条从此连扫描都选不中,而正确的
-    较旧备份明明还在。三轮同步之后那段验证提示仍旧导出到了 vault。
-    """
-
-    def _aged(self, name, key, body, when):
-        """摆一个备份并钉住它的新旧 —— `_backups` 按 mtime 排序,而同一秒里建出来的
-        两个文件谁新谁旧不该由用例来猜。"""
-        path = self._backup(name, key, body)
-        os.utime(path, (when, when))
-        os.utime(path.parent, (when, when))
-        return path
-
-    def test_a_contaminated_newer_backup_is_skipped_for_the_correct_older_one(self):
-        """后果要落在「库里那条是什么」上:验证提示没了、换回的是较旧那份真壳。"""
-        gate_body = readable.extract(SAY_VERIFY)
-        key = self._already_wrong(gate_body)
-        self._aged('older-good', key, SHELL, 1_700_000_000)
-        self._aged('newer-bad', key, gate_body, 1_800_000_000)
-        self.assertEqual(1, self._recheck('scan'))
-        self.assertEqual(0, self._recheck('run', '--yes'))
-        row = self.row(key)
-        self.assertEqual(SHELL, row['body'])              # 较旧那份真壳
-        self.assertNotIn('请完成验证', row['body'])
-        self.assertEqual('summary', row['content_kind'])
-        self.assertEqual((0, '', ''), (row['fulltext_tries'], row['fulltext_at'],
-                                       row['translated_at']))
-        self.assertEqual(1, fulltext.pending('rss'))      # 放回队列、额度给满
-
-    def test_when_every_backup_is_contaminated_the_shell_is_rebuilt(self):
-        """**不许「只清标记、留着已经认出来的坏正文」。** 一份有效备份都没有时回落到
-        按标题与链接重建 —— 那条路本来就在,缺的是「这一份不算有效」这个判断。
-        """
-        gate_body = readable.extract(SAY_VERIFY)
-        key = self._already_wrong(gate_body)
-        self._aged('only-bad', key, gate_body, 1_800_000_000)
-        self.assertEqual(0, self._recheck('run', '--yes'))
-        row = self.row(key)
-        self.assertNotIn('请完成验证', row['body'])
-        self.assertEqual('Yes, and\nhttps://e.org/post', row['body'])
-        self.assertEqual(1, fulltext.pending('rss'))
-
-    def test_a_normal_shell_in_a_backup_is_still_accepted(self):
-        """反过来钉一边:**正常的壳照旧恢复得回来**。恢复那一侧的判据宁可多拒,但
-        「短」本身不是拒的理由 —— feed 原本那份壳(生产实测 `substance` 落在 37~133)
-        正是这个脚本要换回去的东西。
-        """
-        key = self._already_wrong(readable.extract(SAY_VERIFY))
-        self._aged('good', key, SHELL, 1_800_000_000)
-        self.assertEqual(0, self._recheck('run', '--yes'))
-        self.assertEqual(SHELL, self.row(key)['body'])
 
 
 class StoredBodyTests(GrabCase):
