@@ -107,10 +107,21 @@ _GATE_PHRASES = ('环境异常', '完成验证', '请在微信客户端打开', 
 #: 实测两侧(2026-10-16):审查那张 1782 字的验证页 67%;而一篇正经讲拦截页的
 #: 文章反复引那几句也只到 50%(`tests/test_grab.py` 拿它钉着这条线的另一侧),
 #: 真实的 Cloudflare 文档是 0%。
+#: **份额单独不是身份** —— 它成立的前提是「句子是正文的自然单元」,前提不成立
+#: 的那一档由 `_mention_only` 兜(事故形态写在那儿)。
 _GATE_SHARE = 0.66
 #: 句界只按 CJK 标点和换行切。**`. ` 不算**:域名、缩写、小数点会把一句话切成好
-#: 几截,份额跟着抖。
+#: 几截,份额跟着抖。代价是**一整段英文只算一句**,所以 ④ 还要过 `_mention_only`。
 _SENTENCE = re.compile(r'[^\n。！？!?；;]+')
+#: `_mention_only` 的第一问:最长的那一句占到正文这个比例,就说明这一段压根没被
+#: 切开。线放在**一半**:切得开的页面里最长那句远在它下面(那张 1782 字的验证页
+#: 是 0.047),而没切开的那一档必然是 1.0 —— 中间没有要分的东西。
+_UNSPLIT_SHARE = 0.5
+#: 只在那一档里用的细句界:**英文句号也算**。切碎域名、缩写、小数点在这里是安全
+#: 的 —— 它只用来按细句去重、问「剔掉复读之后还剩多少」,切碎只会让剩下的偏少、
+#: 偏向拒。**不拿它去算份额**:那正是 `_SENTENCE` 躲开的那个洞(一张英文验证页
+#: 按 `. ` 切完,只有两句命中强措辞,份额从 1.0 掉到 0.29 —— 整页就漏放了)。
+_FINE_SENTENCE = re.compile(r'[^\n。！？!?；;.]+')
 #: 提取不出正文时才用的宽词表:那时已经没有正文可言,宁可多认一道关卡 ——
 #: 这一档多拒的代价是一句话,而错存的代价不可恢复。
 _GATE_WORDS = _GATE_PHRASES + ('captcha', '滑块验证', 'cf-browser-verification')
@@ -193,6 +204,62 @@ def _gate_share(body: str) -> float:
         return 0.0
     hits = sum(1 for s in sentences if any(p in s.lower() for p in _GATE_PHRASES))
     return hits / len(sentences)
+
+
+def _fine_substance(body: str) -> int:
+    """按**细句**去重之后,这段正文还说得出多少字。
+
+    **这一问不能交给 `body_confirmed`**:那一道按**行**去重
+    (`readable.substance`,口径跟 `plain` 的分段绑在一起),而这里讨论的正是
+    「整段只有一行」—— `'Please enable JavaScript. ' * 50` 在它眼里是 1300 字
+    实打实的内容,而细句去重之后只剩 25 字。
+    """
+    seen: set[str] = set()
+    total = 0
+    for piece in _FINE_SENTENCE.findall(body or ''):
+        piece = piece.strip()
+        if piece and piece not in seen:
+            seen.add(piece)
+            total += len(piece)
+    return total
+
+
+def _mention_only(body: str) -> bool:
+    """④ 的份额达线了,但它说的只是「正文里提到过」,不是「通篇就是那几句提示」。
+
+    **份额不能单独充当身份。** 它成立的前提是「句子是正文的自然单元」,而
+    `_SENTENCE` 刻意不按 `. ` 分句 —— 代价是一整段英文只算**一句**:683 字的正常
+    设置教程里提一次 `enable JavaScript`,份额就是 100%。事故形态(审查实测):那
+    一篇在手动收录那一侧提示「这一页要求先完成验证或登录」,在订阅补正文那一侧
+    连抓三轮各扣一次额度,第三轮之后退出补抓队列(`fulltext_at` 始终空),库里和
+    vault 里永久只剩 feed 给的那段摘要、还按摘要翻译导出 —— **误拒在那条路上也
+    是不可逆的**,没有人在旁边看着它。
+
+    两个条件一起成立才算「只是提到过」:
+    ①这一段**压根没被切开**:最长的那一句占了正文一半以上(`_UNSPLIT_SHARE`)。
+    ②把它按**细句**去重之后,仍然说得出 `readable.MIN_CHARS` 那么多不重复的东西
+      —— 也就是剔掉复读之后这一页还剩一篇文章。
+
+    **第二问是这一道的闸**:只问第一问的话,`'Please enable JavaScript. ' * 50`
+    那种一整段的英文验证页也会被当成「提到过」放行,而基线靠份额 1.0 拒得掉它。
+    真正的关卡页没有内容可言 —— 它要么切得开(③④ 照旧答)、要么复读(这一问
+    答)、要么短(⑥ 答)。
+
+    **知情放掉的那一档如实记着**:一张**长、句句不同、纯文字**的英文关卡说明页
+    (「Access denied… Please enable JavaScript and cookies…」那种,491 字、细句去重
+    480)在这一道上过得去 —— 文字上它和一篇正常英文长文**不可区分**,这正是上面那
+    件事的另一面。那一类交给页面身份:①路由、②组件、③标题,实测这三样各自接得住
+    它。不拿措辞去补这一刀:放宽那一侧的误判(真关卡页写死进库)和收紧那一侧的误判
+    (正常文章永久退回摘要)**现在两头都不可逆**,而措辞表治不了「每家写法都不同」。
+
+    两侧的回归在 `tests/test_fulltext_admit.py` 与 `tests/test_grab.py`。
+    """
+    sentences = [s.strip() for s in _SENTENCE.findall(body or '') if s.strip()]
+    if not sentences:
+        return False
+    if len(max(sentences, key=len)) < _UNSPLIT_SHARE * sum(len(s) for s in sentences):
+        return False
+    return _fine_substance(body) >= readable.MIN_CHARS
 
 
 #: 只有这几种 `type` 的 `<script>` 才会被浏览器**执行**(缺省也算)。
@@ -298,9 +365,11 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
     **这六道一道都不往外搬,存量复查只取 `readable.boilerplate_reason`。** 两次搬
     过去都搬出了事故:⑥ 判坏了正常的 Markdown 原文(它允许重复),④ 判坏了正常的
     英文教程(`_gate_share` 不按 `. ` 分句,一整段只算一句 —— 正文里提一次
-    「enable JavaScript」就是 100%)。这两道的误拒在**这条路上**代价是一次重抓、
-    而且用户当场看得见;在存量复查那条路上代价是把正常正文换成壳、译文作废,
-    **不可逆**。同一个启发式担不起两种后果,所以不共用 —— 完整论证在
+    「enable JavaScript」就是 100%;④ 现在要先过 `_mention_only` 那道前提才成立)。
+    **误拒的代价按路分三档,一档都不轻**:手动收录那边用户当场看得见、能点「重新抓
+    一次」;补抓那边没人在看、三次额度用完就永久退回摘要;存量复查那边是把已经在
+    库里的正文换成壳、译文作废。前两条是「这一次没拿到」,第三条是「把拿到的毁掉」
+    —— 同一个启发式担不起这三种后果,所以不共用。完整论证在
     `docs/decisions/fulltext.md` 第一节。
 
     **生效性和位置要分开各判一次**:`<template>` 里的密码框、
@@ -333,7 +402,7 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
         return reason
     titled = any(word in _page_title(soup).lower() for word in _GATE_TITLES)
     share = _gate_share(body)
-    if share >= _GATE_SHARE:
+    if share >= _GATE_SHARE and not _mention_only(body):
         return _SAY_PAGE
     if titled and (share > 0 or not body):
         return _SAY_PAGE

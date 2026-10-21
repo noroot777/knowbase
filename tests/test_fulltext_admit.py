@@ -27,10 +27,9 @@ Cloudflare 关卡页跑 `fetch_pending('rss')`:`done=1`、库里正文被换成
 **存量那一半在 `RecheckTests`**:判据只管未来,已经写进去的那些只有
 `scripts/feed_fulltext_recheck.py` 一条出路(面板那颗「重试失败项」是订阅级的,
 不碰 `fulltext_at`)。那个脚本的射程里**还躺着几百条正常的壳、以及走
-`markdown_source` 写进来的 Markdown 原文**,所以它只问关卡那道**与内容格式无关**的
-判据(④),不问 HTML 准入专属的 ⑥ —— 正反两侧和那条边界都在这里钉着。审查第 1 轮
-在这上面实测到两处:一份正常 README 被判坏换成壳,以及一份同样被污染的较新备份
-被当成有效原摘要装回来。
+`markdown_source` 写进来的 Markdown 原文**,所以它**只认 `readable.boilerplate_reason`
+那一道 —— 写库准入那六道一道都不借**:⑥ 判坏过正常的 Markdown 原文(它允许重复)、
+④ 判坏过正常的英文设置教程。正反两侧和那条能力边界都在这里钉着。
 
 **按形状单独一个文件**:`tests/test_feed_fulltext.py` 已经 501 行、
 `tests/test_fulltext_failures.py` 576 行,这一组挤进去会越过 700 行上限。脚手架
@@ -83,6 +82,28 @@ _TUTORIAL = (
     'This setting affects only the local preview and does not require an account or '
     'change the contents of any saved article.')
 TUTORIAL_MD = '# Enable JavaScript for the local reader\n\n' + _TUTORIAL
+#: 同一篇教程的 **HTML** 身子 —— 走共用准入(`admit`)那条路。审查第 1 轮实测它在
+#: 这条路上被拒:补抓侧连抓三轮各扣一次额度,第三轮之后退出补抓队列
+#: (`fulltext_at` 始终空),库里和 vault 里永久只剩 feed 那段摘要、还按摘要翻译
+#: 导出;手动收录侧当场提示「这一页要求先完成验证或登录」。**误拒在补抓这条路上
+#: 和错存一样不可逆**:没有人在旁边看着,重试额度自己会用完。
+TUTORIAL_PAGE = page_html(title='Local reader setup', body=[_TUTORIAL])
+#: 反过来钉一边的那一张:同样一整段英文、份额同样 1.0,但它通篇在复读同一句。
+#: `body_confirmed` 对它**成立** —— `readable.substance` 按**行**去重,而这里只有
+#: 一行,1300 字实打实。所以这一侧只有按细句去重才答得出来。
+ENGLISH_GATE = page_html(title='站点公告', body=['Please enable JavaScript. ' * 50])
+#: 一张**长、句句不同、纯文字**的英文关卡说明页(491 字,细句去重 480)。④ 对这一类
+#: 答不出身份:份额 1.0 只因为一整段算一句,而「剔掉复读还剩多少」也拦不住它 ——
+#: 这几句各不相同。**文字上它和一篇正常英文长文不可区分**,所以这一类交给页面身份
+#: 那几道(①路由 ②组件 ③标题)。知情的代价写在 `grab_page._mention_only` 头上。
+DENIED_TEXT = (
+    'Access to this page has been denied because we believe you are using automation tools. '
+    'Please enable JavaScript and cookies in your browser before trying again. '
+    'Your request was blocked by the security policy configured for this website. '
+    'The owner of this site has set up a rule that stops requests from unknown clients. '
+    'If you think this is a mistake, contact the site administrator with the reference below. '
+    'Repeated attempts from the same address may extend the block for a longer period. ')
+DENIED_PAGE = page_html(title='站点公告', body=[DENIED_TEXT])
 
 #: **开头把同一段铺满、真内容排在 `MAX_CHARS` 之后**的那一页。每一段是一个独立的
 #: `<p>`(= 独立的行),所以按行去重之后那个前缀只剩一段的长度 —— 真内容被截掉之后
@@ -171,6 +192,39 @@ class AdmitTests(AdmitCase):
 
     def test_a_page_that_only_says_verify_is_refused(self):
         self.refused(SAY_VERIFY, says='验证')
+
+    def test_an_english_gate_that_is_one_repeated_line_is_refused(self):
+        """④ 那道「前提不成立」的闸:同样一整段英文、份额同样 1.0,通篇在复读同一句。
+
+        真正的关卡页**没有内容可言**。这一张要么被份额拦住(基线那一版),要么被
+        「剔掉复读还剩多少」拦住 —— 两条都松掉的话它会被当成正文永久写进库。
+        `body_confirmed` 在这里答不出来:它按**行**去重,而这一页只有一行。
+        """
+        body = readable.extract(ENGLISH_GATE)
+        self.assertGreaterEqual(grab_page._gate_share(body), grab_page._GATE_SHARE)
+        self.assertTrue(grab_page.body_confirmed(body))      # 按行去重答不出来
+        self.refused(ENGLISH_GATE, says='验证')
+
+    def test_a_wordy_english_gate_is_caught_by_the_page_identity_instead(self):
+        """④ 对「长、句句不同、纯文字」的那一类答不出身份 —— **这一档是知情放掉的**,
+        由页面身份那几道接住。
+
+        先钉住 ④ 确实不答(份额 1.0,但 `_mention_only` 两问都成立),再钉住 ②③ 各自
+        接得住它;最后**如实钉下那个代价**:三样身份证据都没有的时候它会被当成正文
+        收下。文字上它和一篇正常英文长文不可区分 —— 这正是「正文提到验证不等于这一页
+        在拦正文」的另一面,而放宽那一侧的误判不可逆,所以不拿措辞去补。
+        """
+        body = readable.extract(DENIED_PAGE)
+        self.assertGreaterEqual(grab_page._gate_share(body), grab_page._GATE_SHARE)
+        self.assertTrue(grab_page._mention_only(body))
+        for name, html in (
+                ('标题也是关卡提示', page_html(title='Attention Required!', body=[DENIED_TEXT])),
+                ('挂着编排组件', page_html(body=[DENIED_TEXT], extra=ORCHESTRATE))):
+            with self.subTest(identity=name):
+                self.setUp()                 # 每一档要一条干净的壳条目
+                self.refused(html, says='验证')
+        self.setUp()
+        self.fetched(DENIED_PAGE)            # 知情的代价,如实钉着
 
     def test_a_login_wall_in_the_article_is_refused(self):
         self.refused(WALL_IN_ARTICLE, says='登录')
@@ -279,6 +333,21 @@ class NotAGateTests(AdmitCase):
                 self.setUp()                 # 每一档要一条干净的壳条目
                 self.fetched(html)
 
+    def test_a_normal_english_tutorial_is_still_fetched(self):
+        """**份额单独不是身份。** `_SENTENCE` 刻意不按 `. ` 分句(域名、缩写、小数点
+        会把份额抖散),代价是一整段英文只算**一句**:683 字的正常设置教程里提一次
+        「enable JavaScript」,④ 的份额就是 1.0。
+
+        先钉住份额照旧达线(否则这条用例测不到那道闸),再验后果:这一轮就补抓成功、
+        正文真的换了、不再排队重试。审查第 1 轮实测的另一头是连抓三轮之后永久退回
+        摘要 —— 所以这里的断言落在「它第一轮就拿到了正文」上。
+        """
+        body = readable.extract(TUTORIAL_PAGE)
+        self.assertGreaterEqual(grab_page._gate_share(body), grab_page._GATE_SHARE)
+        self.assertTrue(grab_page._mention_only(body))        # 份额说的只是「提到过」
+        got = self.fetched(TUTORIAL_PAGE)
+        self.assertIn('keeps the original Markdown', got['row']['body'])
+
     def test_a_quoted_gate_sentence_is_not_a_gate(self):
         """④ 按**份额**算、不设字数上限:一篇正常文章引一句那种提示照旧放行
         (手动收录那一侧实测:反复引那几句的正经文章也只到 50%)。
@@ -293,8 +362,9 @@ class NotAGateTests(AdmitCase):
 class RecheckTests(RecheckCase):
     """存量复查:**写库准入那六道一道都不借** —— 这个脚本只认 `boilerplate_reason`。
 
-    那六道是按「误拒一次重抓一次、用户当场看得见」的代价调的;**这条路上误判一次是
-    把正常正文换成壳、译文作废、重导出一轮,不可逆**。同一个启发式担不起两种后果。
+    **误拒的代价按路分三档**:手动收录那边用户当场看得见、能点「重新抓一次」;补抓那边
+    没人在看、三次额度用完就永久退回摘要;**这条路上是把已经在库里的正文换成壳、译文
+    作废、重导出一轮,不可逆**。同一个启发式担不起这三种后果。
     两次借过来都当场借出了事故(两轮审查各一次,都在下面钉着):⑥ 判坏了正常的
     Markdown 原文(它本来就允许重复),④ 判坏了正常的英文设置教程
     (`_gate_share` 刻意不按 `. ` 分句,一整段英文只算一句)。
@@ -322,8 +392,10 @@ class RecheckTests(RecheckCase):
         启发式去补这一刀,两轮审查各实测到一次误删正常内容(见类说明)。
 
         出路是**人点「重新抓一次」**(`grab.replace`),不是让脚本去猜。生产只读实测说
-        这不是损失:存量里关卡句份额最高的是 0.0 —— **一条关卡页都没有**,而以后
-        `admit` 会先把它们拦住。
+        存量的**文字里**找不出一条可识别的关卡提示(份额最高 0.0)——**但那推不出「存量里
+        没有关卡页」**:身份证据多半在 DOM 上,而库里只剩文字(`COMPONENT_ONLY` 那张只靠
+        编排脚本认出来的,正文和普通文章逐字相同、份额同样是 0)。已经丢掉的身份追认不
+        回来;以后那些由 `admit` 先拦住。
         """
         for body, label in ((readable.extract(SAY_VERIFY), '关卡提示页'),
                             (readable.extract(TEXT_WALL), '纯文字登录墙')):
@@ -454,6 +526,21 @@ class StoredBodyTests(GrabCase):
                 grab.save(grab.grab(PAGE_URL))
         self.assertIn('复读同一段', str(caught.exception))
         self.assertEqual([], self.items())
+
+    def test_the_manual_side_stores_the_same_english_tutorial(self):
+        """**两端共用一份准入,所以两端都要钉。** 同一篇教程在手动收录这一侧也收得下
+        (审查第 1 轮实测:页面上提示「这条没收下:这一页要求先完成验证或登录」,地址
+        原样留在输入框里,库里一条都没有)。只在补抓那一侧放行等于两条路又不是同一
+        份口径 —— 那正是这次要建的那条不变量要防的。
+        """
+        admitted, gate, _ = grab_page.admit(PAGE_URL, TUTORIAL_PAGE, limit=grab_page.MAX_CHARS)
+        self.assertEqual('', gate)
+        with patch.object(grab, 'request', return_value=html_resp(TUTORIAL_PAGE)):
+            grab.save(grab.grab(PAGE_URL))
+        rows = self.items()
+        self.assertEqual(1, len(rows))
+        self.assertEqual(admitted, rows[0]['body'])
+        self.assertIn('keeps the original Markdown', rows[0]['body'])
 
     def test_what_admit_handed_over_is_byte_for_byte_what_gets_stored(self):
         """反过来钉一边:正常文章照旧收得进来,而且**存进去的就是准入放行的那一份**。"""
