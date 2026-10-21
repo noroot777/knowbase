@@ -180,10 +180,9 @@ def _list_group(soup: BeautifulSoup, base_url: str, index: DateIndex | None = No
     # 的孤立噪音(页头 logo、`Newsroom` 这种栏目名)容器跟着收缩之后读不到
     # 日期,自己就落选了 —— 实测 Anthropic 那一页上 3 条这样的噪音因此消失。
     boxes = _containers([a for a, _ in pairs])
-    # 整页"原生容器就读得出日期"的那些链接,按前序编号排好 —— 上移要靠它
-    # 判断"这一层是不是装着一个列表"(见 `_dated_boxes` 第三道闸)。
-    lists = _dated_spots([(box, url) for (_, url), box in zip(pairs, boxes)
-                          if item_published(box, index)], index)
+    # 整页"够资格当一条记录"的那些链接在哪 —— 上移要靠它判断"这一层是不是
+    # 已经装着不止我一条记录"(见 `_dated_boxes`)。
+    lists = _dated_spots(pairs, boxes, index)
     buckets: dict[tuple, list] = {}
     for (anchor, url), box in zip(pairs, boxes):
         buckets.setdefault(_record_path(anchor), []).append((anchor, box, url))
@@ -402,18 +401,14 @@ def _dated_boxes(items: list, index: DateIndex, lists: tuple):
     """
     if len(items) < MIN_DATED:
         return [box for _, box, _ in items]
-    chains, owner = [], {}
-    for anchor, _, url in items:
+    chains = []
+    for anchor, _, _ in items:
         chain, node = [], anchor
         while node is not None and getattr(node, 'name', None):
             chain.append(node)
             node = node.parent
         chains.append(chain)
-        for node in chain:
-            if id(node) not in owner:
-                owner[id(node)] = url
-            elif owner[id(node)] != url:
-                owner[id(node)] = ''  # 这一层下不止一条记录
+    owner = _group_owners(items, index)
     out = []
     for (anchor, box, url), chain in zip(items, chains):
         if item_published(box, index) or not titled(anchor):
@@ -444,9 +439,9 @@ def _dated_boxes(items: list, index: DateIndex, lists: tuple):
             above.append(node)
             node = node.parent
         for node in above:
-            # 先问"这一层是不是别人的"再问日期:共享那一层上的日期属于
-            # 下一条记录,取过来就是整组抄同一个日期。
-            if owner[id(node)] != url:
+            # 先问"这一层是不是已经装着别人的记录"再问日期:共享那一层上的
+            # 日期属于下一条记录,取过来就是整组抄同一个日期。
+            if owner.get(id(node), url) != url:
                 break
             if _holds_a_list(node, url, index, lists):
                 break
@@ -457,25 +452,75 @@ def _dated_boxes(items: list, index: DateIndex, lists: tuple):
     return out
 
 
-def _dated_spots(dated: list, index: DateIndex) -> tuple:
-    """`(全部位置, 按地址分开的位置)` —— 原生就带日期的那些链接在哪。
+def _group_owners(items: list, index: DateIndex) -> dict:
+    """组内定界:`{节点: 这一层下面只有谁}`,有第二个地址就记成空串。
 
-    位置用**前序编号**,于是"某片子树里有几条"是两次二分(见
-    `DateIndex.subtree`)。
+    上移走到第一个"同组里不止我一条记录"的祖先就停手,所以最多长到自己那
+    一行、不会把下一条记录的日期抢过来 —— 少了这道闸,一个两行的列表里没
+    标日期的那行会借到另一行的日期,再靠"文字最长者当宿主"把那一行真记录
+    剔成自己的字段(实测 2 篇真文章变 1 篇,`errors` 为空、同步显示成功)。
+
+    **一个地址只在"它的全部副本都在这一层里面"时才算这一层的一条记录**,
+    所以从那几份副本的**最近共同祖先**开始往上标,不从每个链接自己往上标。
+    两个方向各踩过一次:
+
+    - **按链接条数记**(同一个地址的两份副本算两条记录)时,同一篇文章在
+      一张卡片里被同签名链两次 —— 改版后那一页的常见形态 —— 会让上移在读到
+      日期之前就停手,整组 0 条带日期、整页报"找不到文章列表"。所以按地址。
+    - **只按地址、不问副本在哪**时,一行里的分类角标和文章标题同签名
+      (`<a><h4>分类</h4></a>` 和 `<a><h3>标题</h3></a>` 到 `<a>` 的路径逐字
+      相同、`titled` 都为真)的页面上,角标成了"同组另一条记录",真文章在
+      读到本卡片的日期之前就被它挡住,整页拒收 —— 实测前一版收 2 篇真文章
+      + 1 条分类页,这一版 0 篇、给这条订阅记一次失败。而**同一个分类角标
+      会出现在好几张卡片上**:它的副本跨出了任何一张卡片,所以它不是哪一张
+      卡片里的记录,是整页共享的一个字段。只出现在一张卡片里的角标仍然挡着
+      (DOM 上它和"并排的另一条记录"不可区分,按元规则留在漏报更轻的那侧)。
     """
-    spots, by_url = [], {}
-    for box, url in sorted(dated, key=lambda pair: index.subtree(pair[0])[0]):
-        at = index.subtree(box)[0]
-        spots.append(at)
-        by_url.setdefault(url, []).append(at)
-    return spots, by_url
+    spread: dict[str, list] = {}
+    for anchor, _, url in items:
+        spread.setdefault(url, []).append(anchor)
+    owner: dict[int, str] = {}
+    for url, anchors in spread.items():
+        # 从**最靠前**那份副本往上走,走到这一段也盖住最靠后那份为止 ——
+        # 换成别的起点会走到根之上去(`parent` 成 None),所以别省这次排序。
+        spread[url] = anchors = sorted(anchors, key=lambda a: index.subtree(a)[0])
+        last = index.subtree(anchors[-1])[0]
+        node = anchors[0]
+        while index.subtree(node)[1] <= last:  # 还没盖住最后那份副本
+            node = node.parent
+        while node is not None and getattr(node, 'name', None):
+            if owner.setdefault(id(node), url) != url:
+                owner[id(node)] = ''  # 这一层下不止一条记录
+            node = node.parent
+    return owner
+
+
+def _dated_spots(pairs: list, boxes: list, index: DateIndex) -> tuple:
+    """整页**原生容器就读得出日期**的链接在哪:`(每层几条, 按地址分开)`。
+
+    **一个地址算一条记录**,它那几份副本只算这一次 —— `subtree_tally` 按标签
+    去重,所以每份副本各挂一个标记就够,不必先求它们的共同祖先(求了实测红
+    0 条:两种写法在任何用例上产出一致,**没人钉得住的改动不如不做**)。
+    """
+    by_url: dict[str, list] = {}
+    for (anchor, url), box in zip(pairs, boxes):
+        if item_published(box, index):
+            by_url.setdefault(url, []).append(index.subtree(anchor)[0])
+    for spots in by_url.values():
+        spots.sort()
+    marks = [(at, url) for url, spots in by_url.items() for at in spots]
+    return index.subtree_tally(marks), by_url
 
 
 def _holds_a_list(node, url: str, index: DateIndex, lists: tuple) -> bool:
     """这个容器里装着一个**列表**,所以它不是哪一条记录的容器。
 
     判据是 `MIN_DATED`:子树里有**不止一条**异址、而且**原生**就读得出日期
-    的链接 —— 那是一组记录,不是一张卡片的几个字段。
+    的记录 —— 那是一组记录,不是一张卡片的几个字段。**按地址数,不按链接
+    条数**:一张卡片里同一个分类角标被渲染两份(收起态/展开态)时,按条数
+    记就把这张卡片判成了"装着一个列表",上移在读到本卡片的日期之前停手,
+    整组 0 条带日期、整页报"找不到文章列表" —— 实测前两版都收 2 篇真文章,
+    按条数记的那版 0 篇、给这条订阅记一次失败、进退避。
 
     **这一条和"只挡一条带日期的异址链接"差的就是那个 1。** 后者试过五遍
     (异址自带日期即停 / 自带日期者豁免被剔 / 兄弟容器即停 / 宿主只认原生
@@ -484,6 +529,9 @@ def _holds_a_list(node, url: str, index: DateIndex, lists: tuple) -> bool:
     正是"卡片里有一条自带日期的分类角标",一刀切会把 4 篇真文章的日期挡掉、
     把 `/news/safeguards` 等 8 个分类索引页重新收进库。一张卡片里只会有一
     两个这样的字段,一个列表里却有一整排记录,`MIN_DATED` 正好落在中间。
+    **把这道闸的人群和组内那道合并、一起降到 1 也不行**:实测改版后那一页
+    上多收 `/news/security`、`/news/product` 两个分类索引页,还丢掉一篇真
+    文章的日期。两道闸人群不同、阈值不同,各自管一侧。
 
     **它挡住的是另一侧**:一个导航区里几百条**同址**的标题链接,按地址定界
     时组内看上去"这一层只属于我",于是一路上移到 `<body>`、把 `<main>` 里
@@ -495,12 +543,12 @@ def _holds_a_list(node, url: str, index: DateIndex, lists: tuple) -> bool:
     原生带日期)会让外层卡片不再被当成记录容器,卡片本身那条记录读不到
     日期。那和已经披露的"嵌套相关文章会被当成字段"是同一处既有取舍。
     """
-    spots, by_url = lists
+    tally, by_url = lists
     lo, hi = index.subtree(node)
-    total = bisect_left(spots, hi) - bisect_left(spots, lo)
+    total = tally[lo]
     same = by_url.get(url, ())
-    if same:
-        total -= bisect_left(same, hi) - bisect_left(same, lo)
+    if same and lo <= same[0] and same[-1] < hi:
+        total -= 1  # 自己那个地址不算,它的几份显示副本也只算这一次
     return total >= MIN_DATED
 
 

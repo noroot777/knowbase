@@ -432,6 +432,92 @@ class GroupTests(unittest.TestCase):
         self.assertEqual(got[0]['url'], 'https://www.anthropic.com/latest')
         self.assertEqual(got[0]['published'], '2026-10-10')
 
+    def test_a_badge_rendered_twice_does_not_make_the_card_a_list(self):
+        """**同一个角标渲染两份,还是一个字段,不是一个列表。**
+
+        "这一层装着一个列表"那道闸按**地址**数,不按链接条数:一张卡片里同
+        一个分类角标被渲染两份(收起态/展开态各一个,改版后那一页的常见形态)
+        时,按条数记就把这张卡片判成了"装着两条记录",上移在读到本卡片的日期
+        之前停手 —— 整组 0 条带日期、整页报"找不到文章列表",**这条源从此一条
+        都收不到**(实测前两版都收 2 篇真文章,按条数记的那版 0 篇、给这条
+        订阅记一次失败、进退避)。
+        """
+        cards = ''.join(
+            f'<article><div><a href="{href}"><h3>{title}</h3></a></div>'
+            + f'<aside><a href="/news/announcements">Announcements</a>'
+              f'<time>{stamp}</time></aside>' * 2 + '</article>'
+            for href, stamp, title in (('/news/alpha', '2026-10-20', 'Actual alpha headline'),
+                                       ('/news/beta', '2026-10-19', 'Actual beta headline')))
+        got = parse_page_list(f'<html><body><main>{cards}</main></body></html>'.encode(), BASE)
+        self.assertEqual([(e['url'].split('.com')[1], e['published']) for e in got],
+                         [('/news/alpha', '2026-10-20'), ('/news/beta', '2026-10-19')])
+
+    def test_a_category_badge_sharing_the_signature_is_still_a_field(self):
+        """**角标和标题同签名时,角标也不是"同组的另一条记录"。**
+
+        `<a><h4>Announcements</h4></a>` 和 `<a><h3>标题</h3></a>` 到 `<a>` 的
+        结构路径逐字相同、`titled` 都为真,于是它们落在同一组里。组内定界只按
+        地址算的话,角标就成了"同组另一条记录",真文章在读到本卡片的日期之前
+        被它挡住 —— 实测前一版收 2 篇真文章 + 1 条分类页,那一版 0 篇、给这条
+        订阅记一次失败。
+
+        分开它们的不是标签层级(`h3`/`h4` 是**显示变体**),是**副本的落点**:
+        同一个分类角标出现在好几张卡片上,它的副本跨出了任何一张卡片,所以它
+        不是哪一张卡片里的记录。定界因此从"那几份副本的最近共同祖先"往上标。
+        """
+        cards = ''.join(
+            f'<article><div><a href="{href}"><h3>{title}</h3></a></div>'
+            f'<div><a href="/news/announcements"><h4>Announcements</h4></a>'
+            f'<time>{stamp}</time></div></article>'
+            for href, stamp, title in (('/news/alpha', '2026-10-20', 'Actual alpha headline'),
+                                       ('/news/beta', '2026-10-19', 'Actual beta headline')))
+        got = parse_page_list(f'<html><body><main>{cards}</main></body></html>'.encode(), BASE)
+        self.assertEqual([(e['url'].split('.com')[1], e['published']) for e in got],
+                         [('/news/alpha', '2026-10-20'), ('/news/beta', '2026-10-19')])
+
+    def test_a_row_may_not_borrow_the_only_neighbour_date(self):
+        """反过来钉一边:**只出现在这一层里的那条记录照旧挡着上移。**
+
+        两行的列表、其中一行没标日期时,那一行不许借到隔壁那行的日期 ——
+        借到的话它的容器就长到了整个 `<ul>`、把隔壁那条真记录**套在里面**,
+        再按"容器互相嵌套时外层是记录"把那一行真记录剔成自己的一个字段:
+        实测 2 篇真文章变 1 篇,`published` 还是借来的,而且 `errors` 为空、
+        同步显示成功 —— 静默丢一半。
+
+        代价是这一页按"找不到带发布时间的文章列表"拒收(两行里只有一行带
+        日期,够不着 `MIN_DATED`、也不满足"每条都带日期")。**那是报错、
+        面板上看得见、重试还在**,比静默丢掉一篇轻。
+        """
+        rows = ''.join(f'<li><a href="{href}"><h3>{title}</h3></a>{stamp}</li>'
+                       for href, stamp, title in
+                       (('/news/alpha', '<time>2026-10-20</time>', 'Actual alpha headline'),
+                        ('/news/beta', '', 'Actual beta headline')))
+        with self.assertRaises(FeedError):
+            parse_page_list(f'<html><body><main><ul>{rows}</ul></main></body></html>'.encode(),
+                            BASE)
+
+    def test_a_broken_clock_in_the_footer_does_not_fail_the_page(self):
+        """**无关节点上的坏时间不许让整页失败。**
+
+        整页一次的日期索引会把页脚那个纯展示用的 `<time>` 也解析一遍 ——
+        而过去它压根不会被读到。非法时区(`+25:00`)和换算溢出
+        (`9999-12-31T23:00Z`)两族异常都要挡在"这一处读不出钟点"上:不然
+        两篇真文章一条都收不到,这条订阅记一次失败、进退避(实测 added=2
+        变 added=0,库里一条都没有)。
+        """
+        for clock in ('2026-10-20T12:00+25:00', '9999-12-31T23:00Z'):
+            with self.subTest(clock):
+                rows = ''.join(
+                    f'<li><a href="{href}"><h3>{title}</h3><time>{stamp}</time></a></li>'
+                    for href, stamp, title in
+                    (('/news/alpha', '2026-10-20', 'Actual alpha headline'),
+                     ('/news/beta', '2026-10-19', 'Actual beta headline')))
+                html = (f'<html><body><footer><time datetime="{clock}">Display clock'
+                        f'</time></footer><main><ul>{rows}</ul></main></body></html>')
+                got = parse_page_list(html.encode(), BASE)
+                self.assertEqual([(e['url'].split('.com')[1], e['published']) for e in got],
+                                 [('/news/alpha', '2026-10-20'), ('/news/beta', '2026-10-19')])
+
     def test_the_redesigned_rows_page_finds_the_articles_not_the_categories(self):
         """**同一个站点改版之后的那一份。** 这是 2026-10-21 真实抓到的形态:
         每行把标题、摘要、分类角标写成三个平级的 `<a>`,日期是第四个兄弟。

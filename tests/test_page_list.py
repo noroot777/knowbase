@@ -74,6 +74,25 @@ class DateTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(read_published(text), '')
 
+    def test_an_unusable_clock_still_gives_the_day(self):
+        """**钟点读不出来只丢钟点,不许往外抛。**
+
+        `+25:00` 会让 `timezone()` 抛 `ValueError`、`9999-12-31T23:00Z` 换算
+        到项目时区会抛 `OverflowError`。整页一次的日期索引会把**页脚一个无关
+        的坏时间**变成整条订阅同步失败(实测两篇真文章 added=2 变 added=0、
+        给这条订阅记一次失败进退避),而这两段文字的**日子**都是读得出来的。
+
+        口径跟"小时写成 99"那一条完全一样:日子读得出来就如实给到日。判空和
+        报错在上一层(整页一条都解析不出来才是故障),不在这里。
+        """
+        for text, want in (('2026-10-20T12:00+25:00', '2026-10-20'),
+                           ('2026-10-20T12:00-99:99', '2026-10-20'),
+                           ('9999-12-31T23:00Z', '9999-12-31'),
+                           ('0001-01-01T00:30+08:00', '0001-01-01'),
+                           ('2026-10-20T99:00Z', '2026-10-20')):
+            with self.subTest(text):
+                self.assertEqual(read_published(text), want)
+
     def test_time_tag_beats_prose(self):
         html = ('<li><time datetime="2026-10-08T19:00:00Z">yesterday</time>'
                 '<span>filed 2026-01-01</span></li>')

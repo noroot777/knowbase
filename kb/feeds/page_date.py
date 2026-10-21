@@ -17,9 +17,15 @@
 
 **所以这里换成"整页一次、之后按区间查"**:
 - 把整页所有文本节点按文档顺序归一化空白、用单空格连成一串 `text`,每个
-  节点记下自己那段的 `[lo, hi)`。这一串和 `' '.join(node.get_text(' ')
-  .split())` **逐字相同**(两边都是"所有非空白 token 按序、单空格分隔"),
-  在两份真实样本的 1418 个标签上逐字对过。
+  节点记下自己那段的 `[lo, hi)`。**对正常的记录容器**,这一串和
+  `' '.join(node.get_text(' ').split())` 逐字相同(两边都是"所有非空白
+  token 按序、单空格分隔"),在两份真实样本的 1418 个标签上逐字对过。
+  **不保证"任意节点都逐字相同"**:`get_text` 会读 `CData`,也会读
+  `script`/`style`/`template`/`rt` 这类标签自己那种特殊文本,这里的
+  `type(...) is NavigableString` 把它们一概排除 —— 随机 800 份输入、
+  9650 次逐节点比较里 1273 处差异全是**直接问这几种标签自己**。那几种节点
+  不是记录容器(容器是链接的独占祖先或链接自己),而"脚本里的文字算发布
+  时间"本来也不是这个模块想要的。
 - 四个日期正则各在 `text` 上 `finditer` 一次,命中位置排好序。
 - 查一个节点 = 在它区间里二分找第一个命中。
 
@@ -89,13 +95,24 @@ def _stamp(pattern, m) -> tuple[bool, str]:
             return True, day
         stamp = datetime.fromisoformat(f'{day}T{hour:02d}:{minute:02d}')
         if zone := m[6]:
-            if zone in ('Z', 'z'):
-                offset = timezone.utc
-            else:
-                sign = -1 if zone[0] == '-' else 1
-                raw = zone[1:].replace(':', '')
-                offset = timezone(sign * timedelta(hours=int(raw[:2]), minutes=int(raw[2:])))
-            stamp = stamp.replace(tzinfo=offset).astimezone(TZ)
+            # **非法的时区写法只让这一处"读不出钟点",不许往外抛。** 口径同
+            # 上面那行 `hour > 23`:日子读得出来就如实给到日。`+25:00` 会让
+            # `timezone()` 抛 `ValueError`、`9999-12-31T23:00Z` 换算到项目
+            # 时区会抛 `OverflowError` —— 整页一次的索引会把**页脚一个无关
+            # 的坏时间**变成整条订阅同步失败(实测两篇真文章 added=2 变
+            # added=0、记一次失败进退避)。判空和报错的口径在
+            # `page_list.parse_page_list` 那一层:一条都解析不出来才是故障。
+            try:
+                if zone in ('Z', 'z'):
+                    offset = timezone.utc
+                else:
+                    sign = -1 if zone[0] == '-' else 1
+                    raw = zone[1:].replace(':', '')
+                    offset = timezone(
+                        sign * timedelta(hours=int(raw[:2]), minutes=int(raw[2:])))
+                stamp = stamp.replace(tzinfo=offset).astimezone(TZ)
+            except (ValueError, OverflowError):
+                return True, day
         return True, stamp.strftime('%Y-%m-%d %H:%M')
     if pattern is _CN:
         return True, _day(int(m[1]), int(m[2]), int(m[3]))
@@ -153,25 +170,88 @@ class DateIndex:
     def __init__(self, root):
         order = [root] + list(root.descendants)
         self._pre = {id(node): i for i, node in enumerate(order)}
+        parent = [-1] * len(order)
         size = [1] * len(order)
         for i in range(len(order) - 1, 0, -1):
-            size[self._pre[id(order[i].parent)]] += size[i]
-        self._size = size
+            parent[i] = self._pre[id(order[i].parent)]
+            size[parent[i]] += size[i]
+        self._parent, self._size = parent, size
         self.text, spans = _flatten(order)
         self._spans = spans
         self._first_text = _scan_forward(spans)
         self._last_text = _scan_backward(spans)
-        self._times, self._time_at = _time_stamps(order)
+        # **正则要先于 `<time>` 那一遍** —— 后者读自己那段文字也走区间查询。
+        self._hits, self._starts = {}, {}
+        for pattern in _PATTERNS:
+            self._hits[pattern] = list(pattern.finditer(self.text))
+            self._starts[pattern] = [m.start() for m in self._hits[pattern]]
+        self._times, self._time_at = self._time_stamps(order)
         self._first_time = _scan_forward(self._time_at)
         # 从第 j 个 `<time>` 起,第一个**读得出**日期的是第几个。`<time>` 优先
         # 这条语义是"子树里第一个读得出日期的 time",不是"第一个 time"。
         self._next_read = [len(self._times)] * (len(self._times) + 1)
         for j in range(len(self._times) - 1, -1, -1):
             self._next_read[j] = j if self._times[j][1] else self._next_read[j + 1]
-        self._hits, self._starts = {}, {}
-        for pattern in _PATTERNS:
-            self._hits[pattern] = list(pattern.finditer(self.text))
-            self._starts[pattern] = [m.start() for m in self._hits[pattern]]
+
+    def _time_stamps(self, order: list) -> tuple[list, list]:
+        """整页每个 `<time>` 读出来的时间(可能是空),以及它排第几。
+
+        **文字那一路也走区间查询,不许 `get_text` 自己那片子树。** 后者在
+        `<time>` 嵌套时是二次的:外层读一遍、把所有内层又遍历一遍,空标签
+        也照样付代价 —— 实测 1000/2000 层各遍历 49.9 万 / 199.9 万个后代
+        (`n(n-1)/2`),32000 层一次解析 37 秒,而单来源采集预算只有 20 秒。
+        **"每个节点只处理一次"证明不了它的后代只被访问固定次数**,那正是
+        上一版把二次从查询搬到建索引的那条路。
+        """
+        times, at = [], [None] * len(order)
+        for i, node in enumerate(order):
+            if getattr(node, 'name', None) != 'time':
+                continue
+            stamp = (read_published(node.get('datetime') or '')
+                     or self._from_text(i, i + self._size[i]))
+            at[i] = (len(times), stamp)
+            times.append((i, stamp))
+        return times, at
+
+    def subtree_tally(self, marks) -> list:
+        """`out[i]` = 第 i 号节点那片子树里有几个**不同**的标签值。
+
+        `marks` 是 `(前序位置, 标签)` 的序列;同一个位置挂几个标签也可以 ——
+        给"这一层里有几条**记录**"那种计数用的,按位置数会把同一个地址的
+        几份显示副本算成几条记录(见 `page_list._holds_records`)。
+
+        **按逆前序"小的并进大的"合并,不逐个查询重扫子树。** 总代价是
+        `O(标签数 × log 标签数)` 次集合插入加一遍节点,查一次是 `O(1)`;
+        而"每问一个祖先就数一遍它子树里的标签"是 `O(祖先数 × 标签数)`,
+        几百条记录 × 几百条待上移链接的页面上又是二次。
+        """
+        at: dict = {}
+        for pos, label in marks:
+            at.setdefault(pos, []).append(label)
+        out = [0] * len(self._parent)
+        if not at:
+            return out
+        sets: list = [None] * len(self._parent)
+        for i in range(len(self._parent) - 1, -1, -1):
+            cur, sets[i] = sets[i], None
+            if (labels := at.get(i)) is not None:
+                if cur is None:
+                    cur = set(labels)
+                else:
+                    cur.update(labels)
+            if cur is None:
+                continue
+            out[i] = len(cur)
+            if (up := self._parent[i]) < 0:
+                continue
+            if (big := sets[up]) is None:
+                sets[up] = cur
+            elif len(big) >= len(cur):
+                big |= cur
+            else:
+                cur |= big
+                sets[up] = cur
+        return out
 
     def subtree(self, node) -> tuple[int, int]:
         """这个节点的子树在前序编号上的那一段 `[start, end)`。
@@ -240,10 +320,12 @@ class DateIndex:
 def _flatten(order: list) -> tuple[str, list]:
     """整页文字归一化拼成一串;顺带记下每个文本节点占这串的哪一段。
 
-    和 `' '.join(node.get_text(' ').split())` **逐字相同**:两边都是"所有
-    非空白 token 按文档顺序、单空格分隔"。`type(...) is NavigableString`
-    而不是 `isinstance`,是为了把 `Comment` / `CData` 排除掉 —— `get_text`
-    也不要它们,口径得一致。
+    对正常的记录容器,和 `' '.join(node.get_text(' ').split())` 逐字相同:
+    两边都是"所有非空白 token 按文档顺序、单空格分隔"。`type(...) is
+    NavigableString` 而不是 `isinstance`,是为了把 `Comment` 排除掉 ——
+    `get_text` 也不要它。**`CData` 和 `script`/`style`/`template`/`rt` 自己
+    那种特殊文本这里一概不读,`get_text` 读**:差异只在"直接问这几种标签
+    自己"时出现(模块开头记了实测数),它们不是记录容器。
     """
     parts, spans, off = [], [None] * len(order), 0
     for i, node in enumerate(order):
@@ -254,19 +336,6 @@ def _flatten(order: list) -> tuple[str, list]:
             parts.append(norm)
             off += len(norm) + 1
     return ' '.join(parts), spans
-
-
-def _time_stamps(order: list) -> tuple[list, list]:
-    """整页每个 `<time>` 读出来的时间(可能是空),以及它排第几。"""
-    times, at = [], [None] * len(order)
-    for i, node in enumerate(order):
-        if getattr(node, 'name', None) != 'time':
-            continue
-        stamp = (read_published(node.get('datetime') or '')
-                 or read_published(node.get_text(' ')))
-        at[i] = (len(times), stamp)
-        times.append((i, stamp))
-    return times, at
 
 
 def _scan_forward(marks: list) -> list:

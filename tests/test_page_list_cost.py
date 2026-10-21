@@ -213,6 +213,46 @@ class CostTests(unittest.TestCase):
         self.assertLess(spent[3200], spent[800] * 8,
                         f'800→3200 层涨了 {spent[3200] / max(spent[800], 1e-6):.1f} 倍')
 
+    def test_nested_time_tags_do_not_cost_quadratic_time_to_index(self):
+        """**建索引这一步的工作量也要有界,不是只有查询有界。**
+
+        整页那一遍要把每个 `<time>` 读出来(它排在正文日期前面),文字那一路
+        写成 `node.get_text(' ')` 的话,`<time>` 嵌套时外层会把所有内层又遍历
+        一遍 —— 空标签也照样付代价。实测 1000/2000 层各遍历 49.9 万 / 199.9
+        万个后代(`n(n-1)/2`),32000 层一次解析 37 秒,而单来源采集预算只有
+        20 秒、`as_completed` 还要等整批,一张慢页面就堵住一个工作线程。
+
+        **"每个节点只处理一次"证明不了它的后代只被访问固定次数** —— 上一版
+        正是这样把二次从查询路径搬到了建索引路径。出路是文字那一路也走整页
+        一次生成的区间索引。
+
+        **上限 1 秒**:实测当前 0.45 秒、`get_text` 那版 37.3 秒(差 83 倍);
+        同样钉住线性增长 —— 层数翻两番,那一版实测涨约 16 倍。
+        """
+        def page(depth: int) -> bytes:
+            inner = '<time></time>'
+            for unused in range(depth):
+                inner = f'<time>{inner}</time>'
+            rows = ''.join(
+                f'<li><a href="{href}"><h3>{title}</h3><time>{stamp}</time></a></li>'
+                for href, stamp, title in (('/news/a', '2026-10-20', 'First actual headline'),
+                                           ('/news/b', '2026-10-19', 'Second actual headline')))
+            return (f'<html><body><main><ul>{rows}</ul></main>'
+                    f'<footer>{inner}</footer></body></html>').encode()
+        spent = {}
+        for depth in (8000, 32000):
+            best, got = 9e9, None
+            for unused in range(2):
+                start = time.monotonic()
+                got = parse_page_list(page(depth), BASE)
+                best = min(best, time.monotonic() - start)
+            spent[depth] = best
+            self.assertEqual([(e['url'].split('.com')[1], e['published']) for e in got],
+                             [('/news/a', '2026-10-20'), ('/news/b', '2026-10-19')])
+        self.assertLess(spent[32000], 1.0, f'32000 层嵌套 time 花了 {spent[32000]:.2f} 秒')
+        self.assertLess(spent[32000], spent[8000] * 8,
+                        f'8000→32000 层涨了 {spent[32000] / max(spent[8000], 1e-6):.1f} 倍')
+
     def test_a_wide_page_does_not_cost_quadratic_time(self):
         # `_containers` 按祖先计数算,不对每个祖先 `find_all` 一遍。后者在一张
         # 几千链接的页面上是 O(n²),会把采集预算吃光。
