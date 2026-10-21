@@ -28,6 +28,10 @@ from kb.feeds.page_list import (item_published, item_subject, parse_page_list,
 from kb.source_types import feed_types
 
 SAMPLE = (Path(__file__).parent / 'page_list_sample.html').read_bytes()
+# 改版之后的同一张页面(2026-10-21 抓的)。**两份都留着**:旧版是「日期嵌在
+# 链接里」,新版是「日期和链接是兄弟、同一篇文章被链四次」—— 判据得同时接住
+# 两种,只留新的那份就没人钉住旧形态还走得通(见 GroupTests 两条真实页面用例)。
+ROWS = (Path(__file__).parent / 'page_list_rows_sample.html').read_bytes()
 BASE = 'https://www.anthropic.com/news'
 ARTICLE = ('<html><body><nav><a href="/">Home</a><a href="/news">News</a></nav>'
            '<article><h1>Introducing the Anthropic Cyber Mission</h1>'
@@ -69,6 +73,39 @@ def today(offset: int = 0) -> str:
     """样本日期跟着今天走:写死的日期过几天就被 history_floor 挡住,而红的会是
     一堆跟它毫无关系的用例(口径同 `test_feed_sources` 的 `_FRESH`)。"""
     return time.strftime('%Y-%m-%d', time.localtime(time.time() - offset * 86400))
+
+
+def rows_listing(rows, *, badge_first: bool = False) -> bytes:
+    """改版后那种行:**标题链接、分类角标、日期三者是平级的兄弟**。
+
+    形态照抄 Anthropic 现在的 `<li data-listing-row>`:同一篇文章在一行里被
+    链两次(标题一次、摘要一次),分类角标自己一个 `<p>`,日期在第四个兄弟
+    节点上。于是"只属于标题链接的最后一个祖先"读不到日期,而角标吸上来的
+    容器跟标题链接是同一个 —— 两道判定各管一头。
+    """
+    out = []
+    for href, shown, subject, title, _ in rows:
+        badge = f'<p><a href="/news/{subject.lower()}">{subject}</a></p>'
+        body = (f'<div><a href="{href}"><span><h3>{title}</h3></span></a></div>'
+                f'<div><a href="{href}"><span><p>A blurb for {title}.</p></span></a></div>')
+        parts = (badge + body) if badge_first else (body + badge)
+        out.append(f'<li><div>{parts}<div><time>{shown}</time></div></div></li>')
+    return (f'<html><body><main><ul>{"".join(out)}</ul></main></body></html>').encode()
+
+
+def card_listing(rows, *, header_first: bool = True) -> bytes:
+    """featured 卡片那种形态:角标**自己那一小块里就带着日期**。
+
+    `<header>` 里是「分类链接 + 日期」,文章链接是 `<header>` 的兄弟。角标
+    因此够不着"同一个容器"那一道 —— 靠的是"容器互相嵌套时外层才是记录"。
+    """
+    out = []
+    for href, shown, subject, title, _ in rows:
+        head = (f'<header><p><a href="/news/{subject.lower()}">{subject}</a></p>'
+                f'<time>{shown}</time></header>')
+        link = f'<a href="{href}"><h2>{title}</h2></a>'
+        out.append(f'<article>{head + link if header_first else link + head}</article>')
+    return (f'<html><body><main>{"".join(out)}</main></body></html>').encode()
 
 
 class DateTests(unittest.TestCase):
@@ -192,6 +229,121 @@ class GroupTests(unittest.TestCase):
                          ['Newest announcement', 'Older announcement', 'Oldest announcement'])
         self.assertEqual(got[0]['url'], 'https://www.anthropic.com/latest')
         self.assertEqual(got[0]['published'], '2026-10-10')
+
+    def test_the_redesigned_rows_page_finds_the_articles_not_the_categories(self):
+        """**同一个站点改版之后的那一份。** 这是 2026-10-21 真实抓到的形态:
+        每行把标题、摘要、分类角标写成三个平级的 `<a>`,日期是第四个兄弟。
+
+        旧实现在这一页上收到的是 9 条**分类索引页**(`/news/safeguards` 那种,
+        标题就一个词、压根没有正文),真文章一条都没有 —— 而同步照常报成功、
+        面板上一切正常。这条用例点名两头:真文章在,分类页不在。
+        """
+        got = parse_page_list(ROWS, BASE)
+        titles = {e['title']: e['url'] for e in got}
+        for name, slug in (('Investing in the public benefit', '/news/public-benefit-fund'),
+                           ('An update on independent evaluators',
+                            '/news/an-update-on-independent-evaluators'),
+                           ('Preparing for the 2026 US midterms', '/news/2026-us-midterms'),
+                           ('How Claude’s text watermark works', '/news/claude-text-watermark')):
+            with self.subTest(name):
+                self.assertEqual(titles.get(name), f'https://www.anthropic.com{slug}')
+        # 分类索引页一条都不许进来。单独列出来而不是只数条数 —— 数条数的话
+        # 一个"把分类页换成别的噪音"的实现也能凑够数。
+        for slug in ('policy', 'safeguards', 'security', 'partnerships', 'product'):
+            with self.subTest(slug):
+                self.assertNotIn(f'https://www.anthropic.com/news/{slug}',
+                                 set(titles.values()))
+        self.assertGreaterEqual(len(got), 25, '这一页上有 20 篇新闻 + 几张 featured 卡片')
+        for e in got:
+            self.assertTrue(e['published'], f'{e["title"]} 没有日期')
+
+    def test_the_one_leftover_on_the_redesigned_page_is_named(self):
+        """**如实钉住还漏着的那一条,别假装干净。**
+
+        这一页的 featured 轮播里有一张卡片,它的 `<header>` 自己带着日期、而
+        文章链接在 `<header>` 外面又恰好自成一组(组内只有它一条,所以不许
+        上移找日期 —— 那条禁令是为了不把"容器一路长到根"的坑重新挖开)。于是
+        这张卡片的 `<header>` 成了一条记录,收进来一个 `Announcements`。
+
+        按这个模块既有的取舍,这是可接受的那一边:多一条导航链接看得见、
+        删得掉,而漏掉一篇文章是静默丢数据。**但它只许是这一条** —— 这里
+        把数量钉成 1,变多了就是上面某一道判定松了。
+        """
+        got = parse_page_list(ROWS, BASE)
+        leftover = [e['url'] for e in got
+                    if e['url'].rsplit('/', 1)[-1] in
+                    ('announcements', 'policy', 'safeguards', 'security',
+                     'partnerships', 'features', 'product')]
+        self.assertEqual(leftover, ['https://www.anthropic.com/news/announcements'])
+
+    def test_a_badge_sharing_the_cards_container_is_not_a_record(self):
+        # 第一道:标题链接和分类角标吸到同一个容器时,装着标题标签的那条才是
+        # 记录。不判的话库里会多出 `/news/announcements` 这种条目,而且它顶着
+        # 真文章的标题和日期(实测如此)。
+        got = parse_page_list(rows_listing(
+            [row('/news/a', 'Oct 8, 2026', 'First real headline'),
+             row('/news/b', 'Oct 7, 2026', 'Second real headline'),
+             row('/news/c', 'Oct 6, 2026', 'Third real headline')]), BASE)
+        self.assertEqual([e['title'] for e in got],
+                         ['First real headline', 'Second real headline',
+                          'Third real headline'])
+        self.assertEqual([e['published'] for e in got],
+                         ['2026-10-08', '2026-10-07', '2026-10-06'])
+        for e in got:
+            self.assertNotIn('/news/announcements', e['url'])
+
+    def test_a_badge_in_its_own_dated_block_loses_to_the_card(self):
+        # 第二道:角标自己那一小块里带着日期(featured 卡片的形态),靠嵌套
+        # 关系判 —— 它落在卡片容器里面,所以它是卡片的一个字段。
+        got = parse_page_list(card_listing(
+            [row('/news/a', 'Oct 8, 2026', 'First real headline', subject='Policy'),
+             row('/news/b', 'Oct 7, 2026', 'Second real headline', subject='Policy')]), BASE)
+        self.assertEqual([e['url'] for e in got],
+                         ['https://www.anthropic.com/news/a',
+                          'https://www.anthropic.com/news/b'])
+
+    def test_which_one_is_the_record_does_not_depend_on_document_order(self):
+        """**反过来钉一边。** 两道判定都不许看"谁在文档里排前面"。
+
+        实测:角标那一组和文章那一组在三个排序键上完全并列(都是 5 条、5 个
+        地址、5 条带日期),于是谁先谁后只取决于文档顺序 —— 角标写在卡片头部
+        所以它赢,5 个分类页照旧进库。
+        """
+        for name, page in (('角标在前', rows_listing(
+                                [row('/news/a', 'Oct 8, 2026', 'First real headline'),
+                                 row('/news/b', 'Oct 7, 2026', 'Second real headline'),
+                                 row('/news/c', 'Oct 6, 2026', 'Third real headline')],
+                                badge_first=True)),
+                           ('角标在后', card_listing(
+                                [row('/news/a', 'Oct 8, 2026', 'First real headline'),
+                                 row('/news/b', 'Oct 7, 2026', 'Second real headline')],
+                                header_first=False))):
+            with self.subTest(name):
+                got = parse_page_list(page, BASE)
+                self.assertTrue(got)
+                for e in got:
+                    self.assertNotIn('/news/announcements', e['url'])
+                    self.assertTrue(e['published'])
+
+    def test_rows_that_differ_in_furniture_stay_in_one_list(self):
+        """分组签名只看"`<a>` 里装的是标题还是图",不比内部 tag 整串。
+
+        整串比的话,"这一行多个角标、那一行少一段摘要"就被拆成两组、各自够
+        不着 `MIN_DATED`,整页当场报"找不到文章列表" —— 第一版实测把
+        `test_heading_tag_wins` 和 `test_a_blurb_is_not_a_title` 打红。
+        """
+        html = ('<html><body><main><ul>'
+                '<li><a href="/news/a"><time>Oct 8, 2026</time><img src="/a.png"/>'
+                '<h3>With a thumbnail</h3><p>and a blurb</p></a></li>'
+                '<li><a href="/news/b"><time>Oct 7, 2026</time>'
+                '<h3>Without either one</h3></a></li>'
+                '<li><a href="/news/c"><time>Oct 6, 2026</time><img src="/c.png"/>'
+                '<h3>With a thumbnail again</h3></a></li>'
+                '</ul></main></body></html>').encode()
+        got = parse_page_list(html, BASE)
+        self.assertEqual([e['title'] for e in got],
+                         ['With a thumbnail', 'Without either one',
+                          'With a thumbnail again'])
 
     def test_newest_first(self):
         got = parse_page_list(listing([row('/news/old', 'Sep 1, 2026', 'Older one'),
@@ -449,6 +601,36 @@ class EndToEndTests(unittest.TestCase):
             self.assertNotIn(furniture, after['body'])
         self.assertEqual(after['content_kind'], 'content')
         self.assertTrue(after['fulltext_at'])
+
+    def test_a_redesigned_row_lands_the_article_not_its_category_badge(self):
+        """**先断言后果:库里那条是什么。**
+
+        只验解析结果的话,"分类角标不是记录"这件事还可能在落库那一圈被别的
+        东西带回来(壳正文里带着角标地址、补抓顺着它去读)。这里真跑一轮
+        采集 + 补抓,断言库里那条是文章、而角标那个地址压根没有行。
+        """
+        page = rows_listing([row('/news/cyber', today(1), 'Introducing the Anthropic Cyber Mission'),
+                             row('/news/midterms', today(2), 'Preparing for the midterms')])
+        with patch.object(fetching, 'request', Mock(return_value=resp(page))):
+            summary = sync.collect('web', FetchScope())
+        self.assertEqual(summary['errors'], [])
+        self.assertEqual(summary['added'], 2, '两篇文章,角标不算一条')
+
+        with reg.db() as c:
+            urls = [r['url'] for r in c.execute(
+                'SELECT url FROM feed_items WHERE kind=?', ('web',)).fetchall()]
+        self.assertEqual(sorted(urls), ['https://www.anthropic.com/news/cyber',
+                                        'https://www.anthropic.com/news/midterms'])
+
+        key = self.key('https://www.anthropic.com/news/cyber')
+        before = self.row(key)
+        self.assertEqual(before['title'], 'Introducing the Anthropic Cyber Mission')
+        self.assertIn('Announcements', before['body'])     # 角标是个字段,写进壳里
+        with patch.object(fulltext, 'request', Mock(return_value=resp(ARTICLE))):
+            done = fulltext.fetch_pending('web')
+        self.assertEqual(done['failed'], 0)
+        self.assertIn('frontier models in the hands of cyber defenders',
+                      self.row(key)['body'])
 
     def test_history_floor_applies_to_this_kind_too(self):
         page = listing([row('/news/fresh', today(1), 'Fresh enough'),

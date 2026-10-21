@@ -14,10 +14,22 @@ Anthropic 的 news 是典型形态 —— 整站一处 feed 都没有(五个常�
 是文章列表的本质特征(导航、页脚、推荐位都没有),而且它本来就是我们必须
 拿到的字段(`sync._within_history` 要用),所以这条判据不额外欠任何东西。
 
-分组按**结构路径**(从根到 `<a>` 的 tag 序列)而不是按父节点:同一个列表里
-的链接路径逐字相同,而 featured 大卡、导航、页脚各在自己的路径上,自动分
-开 —— 实测 Anthropic 那张页面上 featured 那条正因此落在另一组里,不会把
-它那段摘要当成标题。
+分组按**结构路径**(从根到 `<a>` 的 tag 序列,**再加上 `<a>` 里装的是标题
+还是图**)而不是按父节点:同一个列表里的链接路径逐字相同,而 featured 大
+卡、导航、页脚各在自己的路径上,自动分开 —— 实测 Anthropic 那张页面上
+featured 那条正因此落在另一组里,不会把它那段摘要当成标题。
+
+**日期不一定在链接的祖先上。** 改版后的列表把一行写成「标题链接 / 摘要
+链接 / 分类角标 / 日期」四个平级的兄弟,同一篇文章被链四次(收起态、展开
+态各两条),于是"只属于这条链接的最后一个祖先"停在包着 `<a>` 的那个
+`<div>` 上、`<time>` 在它外面,整组 0 条带日期 —— 20 篇文章的标题和日期都
+明明在那儿,却被判成"这不是文章区"。所以容器读不到日期时**允许上移到读得
+到的那一层**,边界是同组的下一条链接(`_dated_boxes`)。
+
+**卡片里的字段链接不是记录。** 分类角标、作者页、`Read more` 各自成组,又
+跟日期包在同一层,于是分类索引页顶着真文章的日期进了库 —— 而它们压根没有
+正文。两道判定按**从属关系**剔(`_drop_subordinate`),都不看谁在文档里排
+前面。
 
 **但分开之后要全都收下,不是只取胜出那一组。** 只留带日期条目最多的那一
 组,等于把"单独展示的头条"整组丢掉,而漏掉的恰恰是最新那几条 —— 实测
@@ -234,12 +246,14 @@ def _list_group(soup: BeautifulSoup, base_url: str):
     boxes = _containers([a for a, _ in pairs])
     buckets: dict[tuple, list] = {}
     for (anchor, url), box in zip(pairs, boxes):
-        buckets.setdefault(_tag_path(anchor), []).append((box, url))
+        buckets.setdefault(_record_path(anchor), []).append((anchor, box, url))
     groups = []
     for items in buckets.values():
-        dated = sum(1 for box, _ in items if item_published(box))
+        fixed = [(anchor, box, url) for (anchor, _, url), box
+                 in zip(items, _dated_boxes(items))]
+        dated = sum(1 for _, box, _ in fixed if item_published(box))
         if dated:
-            groups.append((dated, items))
+            groups.append((dated, fixed))
     if not groups or max(d for d, _ in groups) < MIN_DATED:
         # 整页一组都不够 `MIN_DATED` = 这压根不是列表页。这道闸只问一次,
         # 不逐组问 —— 逐组问就把单条头条卡片永久关在门外。
@@ -253,7 +267,64 @@ def _list_group(soup: BeautifulSoup, base_url: str):
     # 带日期的条目越多越像"主列表",排在前面:`parse_page_list` 按地址先到
     # 先得去重,而 featured 卡片的容器里连摘要一起,标题判定不如列表里那份准。
     picked.sort(key=lambda g: (-g[0], len(g[1])))
-    return [item for _, items in picked for item in items]
+    return _drop_subordinate(picked)
+
+
+def _drop_subordinate(picked: list):
+    """收下所有入选记录,把**卡片里的字段链接**剔出去。
+
+    一张卡片里除了文章本身,常常还挂着指向别处的链接:分类标签、作者页、
+    `Read more`。它们各自成组(`<a>` 内部结构不同),又跟日期包在同一层 ——
+    改版后的 Anthropic 就是这个形态,每行写着
+
+        <div><a><h3>标题</h3></a></div><div><a>Announcements</a></div>
+        <div><time>Oct 18, 2026</time></div>
+
+    于是 9 个分类索引页顶着真文章的日期被当成了文章列表(越过历史下限的
+    那 5 条真进了库),而它们压根没有正文。
+
+    **判据是从属关系,不是"像不像文章"**,两道:
+
+    1. **一个记录容器只能属于一条记录。** 上面那一行里标题链接和分类链接
+       吸到的是同一个容器,谁是记录用的就是 `item_title` 那条判据(`<a>` 里
+       装着标题标签的优先,都没有就取文字最长的那条)—— 口径只有一份。
+    2. **容器互相嵌套时,外层的是记录、内层的是它的一个字段。** featured
+       那几张卡片是这个形态:分类链接自己那一小块里就带着日期,够不着第一
+       道,但它落在卡片容器里面。
+
+    **这两道都不许依赖组的先后。** 实测 featured 卡片上,分类链接和文章链接
+    的组在两个排序键上完全并列,谁先谁后只取决于它俩在文档里谁排前面(分类
+    链接在卡片头部,所以它赢),于是 5 个分类页照旧进库。
+
+    代价是真·嵌套列表(卡片里再嵌一个"相关文章")会被当成字段漏掉 —— 换来
+    的是不必去猜哪种地址长得像分类页。
+    """
+    items = [triple for _, group in picked for triple in group]
+    owners: dict[int, str] = {}
+    ranks: dict[int, tuple] = {}
+    for anchor, box, url in items:
+        rank = (1 if anchor.find(HEADINGS) else 0,
+                len(' '.join(anchor.get_text(' ').split())))
+        if id(box) not in ranks or rank > ranks[id(box)]:
+            ranks[id(box)], owners[id(box)] = rank, url
+    out = []
+    for _, box, url in items:
+        if owners[id(box)] != url:
+            continue
+        # 从 `box.parent` 起走,不从 box 自己起 —— 否则每条记录都是自己的宿主。
+        host = _host_url(box.parent, owners)
+        if host is None or host == url:
+            out.append((box, url))
+    return out
+
+
+def _host_url(node, owners: dict):
+    """这条链接落在谁的记录容器里面;没有宿主返回 None(它自己就是一条记录)。"""
+    while node is not None and getattr(node, 'name', None):
+        if (url := owners.get(id(node))) is not None:
+            return url
+        node = node.parent
+    return None
 
 
 def _tag_path(node) -> tuple:
@@ -263,6 +334,72 @@ def _tag_path(node) -> tuple:
         parts.append(node.name)
         node = node.parent
     return tuple(reversed(parts))
+
+
+def _record_path(anchor) -> tuple:
+    """这条链接的结构签名 = 从根到 `<a>` 的路径 + `<a>` 里装的是标题还是图。
+
+    **必须算进 `<a>` 内部。** 改版后的 Anthropic 把一行写成三个平级的 `<a>`
+    (标题 / 摘要 / 分类),到 `<a>` 为止的路径逐字相同 —— 只算到 `<a>` 的话
+    这三者落进同一组,于是组内混着两个不同地址,下面那两道(同组定界、字段
+    链接剔除)就都失效了。
+
+    **但只能算这两个特征,不能把内部 tag 整串拿来比。** 整串比的话,真列表
+    里"这一行有角标、那一行没有"就被拆成两组,各自够不着 `MIN_DATED`,整页
+    当场报"找不到文章列表"(回归 `test_heading_tag_wins` 与
+    `test_a_blurb_is_not_a_title` 实测红)。标题标签和图片是**卡片里那几个
+    `<a>` 的分工**(标题链接 / 缩略图链接 / 角标链接),同一个列表的同一个
+    分工在每一行上都一样,而行与行之间的差异(多一个角标、少一段摘要)不落
+    在这两个特征上。
+    """
+    return (_tag_path(anchor), anchor.find(HEADINGS) is not None,
+            anchor.find('img') is not None)
+
+
+def _dated_boxes(items: list):
+    """一组同构链接各自的记录容器;容器里读不到日期就上移到读得到的那一层。
+
+    **日期跟链接是兄弟而不是祖孙,这是改版后的常见形态。** Anthropic 现在
+    一行是 `<div><a>标题</a></div><div><a>摘要</a></div><div><time>日期</time></div>`
+    —— 同一篇文章被链了四次(收起态/展开态各两条),`_containers` 那条"只属于
+    这条链接的最后一个祖先"于是停在包着 `<a>` 的那个 `<div>` 上,`<time>` 在
+    它外面。整组因此 0 条带日期、被判为不是文章区,而页面上 20 篇文章的标题
+    和日期都明明在那儿。
+
+    上移的边界是**同组的下一条链接**:走到第一个"同组里不止我一条"的祖先就
+    停手,所以最多长到自己那一行,不会把下一条记录的日期抢过来。
+
+    只有组内 ≥ `MIN_DATED` 条才允许上移。单独展示的头条那一组常常只有一条
+    链接,同组定界对它形同虚设(每个祖先都只属于它,一路长到根),而它本来
+    就靠整页尺度的 `_containers` 正确停在自己那张卡片上 —— 对它不动,正是
+    不把那个坑重新挖开。
+    """
+    if len(items) < MIN_DATED:
+        return [box for _, box, _ in items]
+    chains, seen = [], Counter()
+    for anchor, _, _ in items:
+        chain, node = [], anchor
+        while node is not None and getattr(node, 'name', None):
+            chain.append(node)
+            node = node.parent
+        chains.append(chain)
+        for node in chain:
+            seen[id(node)] += 1
+    out = []
+    for (_, box, _), chain in zip(items, chains):
+        if item_published(box):
+            out.append(box)
+            continue
+        for node in chain:
+            # 先问"是不是同组共享的祖先"再问日期:共享那一层上的日期属于
+            # 下一条记录,取过来就是整组抄同一个日期。
+            if seen[id(node)] > 1:
+                break
+            if item_published(node):
+                box = node
+                break
+        out.append(box)
+    return out
 
 
 def _containers(anchors: list):
