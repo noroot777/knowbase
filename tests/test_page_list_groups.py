@@ -222,6 +222,107 @@ class GroupTests(unittest.TestCase):
         self.assertEqual([e['published'][:10] for e in got[:2]],
                          ['2026-10-20', '2026-10-19'])
 
+    def test_a_group_with_no_dates_at_all_is_still_a_candidate(self):
+        """**零日期的分组也要留着当候选。**
+
+        整页那道闸认定一条结构路径是个列表之后,组入选还有第三种方式:
+        "这条结构路径已经是个列表"。那条补救**只在候选里找** —— 收集候选时
+        把 0 条带日期的分组顺手丢掉,它就压根补不回来。
+
+        形态:一个列表里两篇带日期的写 `<h3>`、第三篇没标日期的写 `<span>`。
+        `<span>` 那组**整组零日期**,和已有那条(组里还有一条带日期)不是同一
+        道闸。`published` 为空是**合法条目** —— 历史下限对未知日期照收,不该
+        因为"这一组里没人带日期"就判出去。
+
+        **这一条钉的是静默漏收**:实测基线收 3 篇,丢掉候选的那版收 2 篇,
+        而且 `errors` 为空、来源记成功。**两个写法反过来也钉**:哪种标签带
+        日期不该影响结论。
+        """
+        for dated_tag, undated_tag in (('h3', 'span'), ('span', 'h3')):
+            with self.subTest(f'{dated_tag} 带日期 / {undated_tag} 无日期'):
+                rows = ''.join(
+                    f'<li><a href="{href}"><time>{stamp}</time>'
+                    f'<{dated_tag}>{title}</{dated_tag}></a></li>'
+                    for href, stamp, title in (('/news/a', '2026-10-20', 'First actual headline'),
+                                               ('/news/b', '2026-10-19', 'Second actual headline')))
+                rows += (f'<li><a href="/news/c">'
+                         f'<{undated_tag}>Third headline with no date</{undated_tag}></a></li>')
+                got = parse_page_list(
+                    f'<html><body><main><ul>{rows}</ul></main></body></html>'.encode(), BASE)
+                self.assertEqual([(e['url'].split('.com')[1], e['published'][:10]) for e in got],
+                                 [('/news/a', '2026-10-20'), ('/news/b', '2026-10-19'),
+                                  ('/news/c', '')])
+
+    def test_an_illegal_date_deep_inside_does_not_cost_quadratic_time(self):
+        """里面有日期形状时也不许逐层问每个祖先。
+
+        原容器里有日期形状、却读不出日期(第一个形状非法、或 `<time>` 是空的)
+        时,上移**必须**往里面找 —— 否则会把那几篇真文章一起漏掉,已有那条
+        `..._does_not_hide_the_real_one_inside` 钉着。但"往里面找"写成逐层问
+        每个祖先又是 `O(深度²)`:每一层都把同一片子树重扫一遍。
+
+        出路是**只问那几处日期形状所在的祖先**,于是同一片子树在一次解析里只
+        被遍历固定次数。**上限 3 秒**:实测当前 0.51 秒、逐层问那版 11.4 秒
+        (差 22 倍),所以这个数既离实现有 5.8 倍余量,又拦得住那个退化 ——
+        单来源采集预算只有 20 秒,而 `as_completed` 要等整批,一张慢页面会把
+        一个工作线程堵住。
+
+        **非法日期文本和空 `<time>` 是同一个判据的两个实例**,所以一起钉:
+        两者都让"有形状、读不出来"成立。取两次最小值防调度抖动。
+        """
+        deep = lambda stamp, href, title: (
+            '<div>' * 12000 + stamp + f'<a href="{href}"><h3>{title}</h3></a>'
+            + '</div>' * 12000)
+        for name, stamp in (('非法日期文本', '2026-02-30'), ('空 time', '<time></time>')):
+            with self.subTest(name):
+                html = ('<html><body><main>'
+                        + deep(stamp, '/news/x', 'Headline with no readable date')
+                        + deep('<time>2026-10-20</time>', '/news/y', 'First actual headline')
+                        + deep('<time>2026-10-19</time>', '/news/z', 'Second actual headline')
+                        + '</main></body></html>').encode()
+                best, got = 9e9, None
+                for _ in range(2):
+                    start = time.monotonic()
+                    got = parse_page_list(html, BASE)
+                    best = min(best, time.monotonic() - start)
+                self.assertEqual(sorted(e['url'].split('.com')[1] for e in got),
+                                 ['/news/x', '/news/y', '/news/z'])
+                self.assertLess(best, 3.0, f'12000 层里一个{name}花了 {best:.2f} 秒')
+
+    def test_a_navigation_block_may_not_borrow_the_article_dates(self):
+        """**上移的定界按整页算,不在组内算** —— 跟记录容器那条是同一句话。
+
+        一个导航区里几百条**同址**的标题链接,在组内看上去"这一层只属于我"
+        (都是同一个地址,按地址定界放行),于是一路上移穿过 `<nav>` 走到
+        `<body>`,把 `<main>` 里真文章的日期借了过来;再靠"文字最长者当宿主"
+        把那两篇真文章剔成自己的字段。实测基线收 2 篇真文章,组内定界那版
+        只收 1 条导航链接,而且 `errors` 为空、同步显示成功 —— 静默漏收。
+
+        同一个输入还钉住**代价**:`item_published` 要把整片子树的文字拼起来,
+        几百条链接各问同一个大祖先一遍就是 `O(链接数 × 子树)`。**上限 1.5
+        秒**:实测当前 0.14 秒、不记备忘那版 7.2 秒(差 51 倍)。
+
+        反过来那一边(同一张卡片里的角标、摘要、第二个同址标题链接**不算**
+        "别人",上移照旧读到日期)由 `..._linked_twice_in_one_card_...` 和两份
+        真样本钉着 —— 定界改数全部链接,那几条当场红。
+        """
+        links = ''.join('<a href="/repeat"><h3>Repeated navigation heading</h3></a>'
+                        for unused in range(2000))
+        rows = ''.join(f'<li><a href="{href}"><time>{stamp}</time>'
+                       f'<h3>{title}</h3></a></li>'
+                       for href, stamp, title in (('/news/a', '2026-10-20', 'First actual headline'),
+                                                  ('/news/b', '2026-10-19', 'Second actual headline')))
+        html = (f'<html><body><nav>{links}</nav>'
+                f'<main><ul>{rows}</ul></main></body></html>').encode()
+        best, got = 9e9, None
+        for _ in range(2):
+            start = time.monotonic()
+            got = parse_page_list(html, BASE)
+            best = min(best, time.monotonic() - start)
+        self.assertEqual([(e['url'].split('.com')[1], e['published'][:10]) for e in got],
+                         [('/news/a', '2026-10-20'), ('/news/b', '2026-10-19')])
+        self.assertLess(best, 1.5, f'2000 条同址链接花了 {best:.2f} 秒')
+
     def test_deeply_nested_same_name_containers_are_found_by_identity(self):
         """祖先定位按**节点身份**,不按内容相等。
 
