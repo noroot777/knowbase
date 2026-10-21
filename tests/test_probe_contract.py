@@ -32,7 +32,8 @@ HERE = Path(__file__).resolve().parent
 LEAK_TESTS = "test_probe_leak.py"
 
 # `test_no_test_launches_a_sandbox_server_itself` 唯一的例外对象(同上,理由在那条用例里)
-LIFE_TESTS = "test_fixture_life.py"
+#: 夹具自退那一块的测试(拆成单元/后果两份);开例外的理由在守卫那一条里。
+LIFE_TESTS = {"test_fixture_life.py", "test_fixture_life_outcome.py"}
 
 
 # 类级 fixture 会建出来的那几种东西,和"收尾"长什么样
@@ -250,7 +251,7 @@ class ProbeSourceContractTests(unittest.TestCase):
             # **夹具自己**退出时删不删得掉那份根,所以不能给 `KB_FIXTURE_ROOT`
             # ——走 fixture_server 的话根归父进程,它的 finally 会把结论盖掉,
             # 被测的实现(收场发哪个信号)坏掉了也照样全绿。
-            if f.name == LIFE_TESTS:
+            if f.name in LIFE_TESTS:
                 continue
             offenders += [f"{f.name}:{line}"
                           for line in _server_names_in_code(f, owning)]

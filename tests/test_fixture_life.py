@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """夹具自己什么时候退 —— 判据一组,后果一组。
 
-**后果是「那个进程还在不在」**,所以这里不满足于打 `should_exit` 的返回值:真起一个
+**后果那一半在 `test_fixture_life_outcome.py`**;这一份只打进程内那几层,所以这里不满足于打 `should_exit` 的返回值:真起一个
 `tests/serve_workspace.py`,等它自己退(或者钉住它不该退时确实还在)。判据那一组是
 为了把边界铺开,后果那一组才是这件事本身。
 
@@ -15,112 +15,181 @@
 
 from __future__ import annotations
 
-import contextlib
+import asyncio
 import http.server
 import os
-import shutil
-import signal
 import socket
-import subprocess
-import sys
 import tempfile
 import threading
 import time
 import unittest
-import urllib.error
-import urllib.request
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from tests import fixture_life  # noqa: E402
-
-
-def _free_port() -> int:
-    """挑一个空闲端口(口径同 `headless.fixture_server`:绑 0 让内核给)。"""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _alive(proc: subprocess.Popen) -> bool:
-    return proc.poll() is None
-
-
-def _wait_gone(proc: subprocess.Popen, timeout: float) -> bool:
-    try:
-        proc.wait(timeout=timeout)
-        return True
-    except subprocess.TimeoutExpired:
-        return False
-
-
-def _ping(port: int, path: str = "/", timeout: float = 2) -> bool:
-    try:
-        urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout).read()
-        return True
-    except urllib.error.HTTPError:
-        return True                       # 有回应就算起来了,状态码不重要
-    except (urllib.error.URLError, OSError):
-        return False
-
-
-def _wait_listening(port: int, proc: subprocess.Popen | None = None,
-                    timeout: float = 30) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if proc is not None and proc.poll() is not None:
-            raise AssertionError(f"夹具还没监听就退了(rc={proc.returncode})")
-        if _ping(port, timeout=1):
-            return
-        time.sleep(0.1)
-    raise AssertionError("夹具没有在限时内监听")
-
-
-def _owner_pipe(token: str = "tok0123456789abcd") -> tuple[int, int, str]:
-    """造一份跟 `fixture_server()` 同形的凭据:(读端, 写端, 环境变量值)。"""
-    r, w = os.pipe()
-    os.write(w, token.encode())
-    return r, w, f"{r}:{token}"
+from tests import fixture_life
+from tests.fixture_life_probe import (   # noqa: F401 - 见那边的说明
+    _shut_fds, _stat_of, _open_fds, _free_port, _alive, _wait_gone, _ping, _wait_listening, _owner_pipe, _identity, _reset_state, _age, _closed,
+)
 
 
 class 判据(unittest.TestCase):
-    """`should_exit` 是唯一那份判据,边界都打在它身上。"""
+    """`should_exit` 是唯一那份判据,边界都打在它身上。
+
+    它是**纯函数**:`busy` 和 `idle` 都由调用方给。以前它自己去读 `_LAST`,用例只能
+    拨模块全局来表达「空闲很久了」—— 那既让用例对实现的内部名字敏感,也把「两个值
+    不是同一瞬取的」这个真问题藏了起来(见 `_decide` 那一组)。
+    """
 
     def setUp(self):
-        fixture_life.touch()
+        _reset_state()
 
     def test_空闲没到不退(self):
-        self.assertEqual(fixture_life.should_exit(60, False, 0), "")
+        self.assertEqual(fixture_life.should_exit(60, False, 0, 0.5), "")
 
     def test_空闲到点要退(self):
-        # 把时钟往回拨,别靠「门槛小到比两行代码还短」—— 那样用例对实现不敏感
-        fixture_life._LAST = time.monotonic() - 10
-        self.assertIn("没有请求", fixture_life.should_exit(1, False, 0))
+        self.assertIn("没有请求", fixture_life.should_exit(1, False, 0, 10))
 
     def test_空闲上限为零就永不因空闲退(self):
         """反过来钉一边:手动调试页面的人把它关掉之后,放着一天也不许自己退。"""
-        fixture_life._LAST = time.monotonic() - 86400
-        self.assertEqual(fixture_life.should_exit(0, False, 0), "")
+        self.assertEqual(fixture_life.should_exit(0, False, 0, 86400), "")
 
     def test_有在途请求就不按空闲退(self):
         """只在进门时续一次命的话,一个慢请求跑到一半夹具就退了,客户端拿到 502。"""
-        fixture_life._LAST = time.monotonic() - 86400
-        self.assertEqual(fixture_life.should_exit(1, False, 1), "")
+        self.assertEqual(fixture_life.should_exit(1, False, 1, 86400), "")
 
     def test_在途回完之后照旧会退(self):
         """反过来钉一边:在途归零就不该再拦着,否则这道防线等于没装。"""
-        fixture_life._LAST = time.monotonic() - 86400
-        self.assertIn("没有请求", fixture_life.should_exit(1, False, 0))
+        self.assertIn("没有请求", fixture_life.should_exit(1, False, 0, 86400))
 
     def test_丢了owner立刻退且不等在途(self):
         """那一刻已经没人在等这个结果了,在途请求不该再拖着。"""
-        self.assertIn("原调用方", fixture_life.should_exit(0, True, 7))
+        self.assertIn("原调用方", fixture_life.should_exit(0, True, 7, 0))
 
     def test_没有owner就不看它(self):
         """反过来钉一边:手起的夹具没有 owner,父 shell 退掉也不许自杀。"""
-        self.assertEqual(fixture_life.should_exit(60, False, 0), "")
+        self.assertEqual(fixture_life.should_exit(60, False, 0, 0.5), "")
+
+
+class 一致的那道边界(unittest.TestCase):
+    """`_decide`:取状态、下判断、落闸门,**三件事在同一把锁里**。
+
+    这一组钉的是上一版的竞争:`_leave` 在锁里把在途减到 0、**放了锁**才刷新完成时刻,
+    中间那一瞬是「没有在途,而完成时刻还是上一个请求的」,看门狗正好在这里醒来便把刚
+    回完的请求判成空闲很久 —— 实测(确定性线程注入)一个 4 秒的慢请求正常返回之后 19
+    毫秒夹具就退了。
+    """
+
+    def setUp(self):
+        _reset_state()
+        self.addCleanup(_reset_state)
+
+    def test_回完那一瞬在锁外看不到(self):
+        """**攥着锁就能证明中间状态不存在**:`_leave` 要改的两样都在锁里面,所以它
+        撞上锁的时候一样都没动;锁一放,两样一起到位。
+        """
+        _age(100)
+        self.assertTrue(fixture_life._enter())
+        with fixture_life._COUNT:
+            worker = threading.Thread(target=fixture_life._leave)
+            worker.start()
+            time.sleep(0.3)           # 让它确实撞在锁上
+            self.assertEqual(fixture_life._INFLIGHT, 1,
+                             "锁没放之前,在途一个都不许减")
+            self.assertGreater(time.monotonic() - fixture_life._LAST, 99,
+                               "完成时刻也还没动 —— 两样要么都没动,要么都动了")
+        worker.join(5)
+        self.assertEqual(fixture_life._INFLIGHT, 0)
+        self.assertLess(fixture_life.idle_seconds(), 1, "锁一放,两样一起到位")
+
+    def test_每一次放锁时那份状态都是自洽的(self):
+        """**这份状态只在放锁那一刻对外可见,所以每一个放锁点都必须自洽。**
+
+        换掉 `_COUNT`,在每次放锁时记一笔 `(在途, 完成时刻有多旧)`,然后跑一遍「进门 →
+        把完成时刻拨旧 → 回完」。判据只会在这些点上看到状态,所以**不许有任何一笔是
+        「在途 0 + 完成时刻很旧」** —— 那正是看门狗会判退的组合,而这一刻其实有个请求
+        刚刚回完。
+        - 现在这样(两样在一个临界区里落):放锁点只有「在途 1」和「在途 0 + 刚刚」。
+        - 上一版(锁里减到 0、放了锁再 `touch()`):多出一个「在途 0 + 100 秒前」。
+
+        **这样写才确定**:靠两个线程去抢那个窗口是抢不到的 —— 放锁的那个线程还攥着
+        GIL,它在别人被调度起来之前就把 `touch()` 里的锁又拿回去了。实测过:分两步落
+        的版本在 2000 轮抢锁里一次都没被抓到。
+        """
+        real = fixture_life._COUNT
+        snaps = []
+
+        class 记一笔:
+            def __enter__(self):
+                real.acquire()
+                return self
+
+            def __exit__(self, *exc):
+                snaps.append((fixture_life._INFLIGHT,
+                              time.monotonic() - fixture_life._LAST))
+                real.release()
+                return False
+
+        fixture_life._COUNT = 记一笔()
+        self.addCleanup(setattr, fixture_life, "_COUNT", real)
+        try:
+            self.assertTrue(fixture_life._enter())
+            _age(100)                     # 这一刻的旧时刻是「上一个请求留下的」
+            fixture_life._leave()
+        finally:
+            fixture_life._COUNT = real
+        self.assertTrue(snaps, "一次锁都没放,这条用例没验到东西")
+        bad = [(busy, round(age)) for busy, age in snaps if busy == 0 and age > 5]
+        self.assertEqual(bad, [], "放锁时不许出现「没有在途 + 完成时刻很旧」")
+        self.assertEqual(snaps[-1][0], 0, "最后一笔该是回完了")
+        self.assertLess(snaps[-1][1], 5, "而且完成时刻是刚刚")
+
+    def test_判据只取一次锁(self):
+        """**取状态和下判断必须在同一个临界区里。**
+
+        分两次取(`should_exit(..., inflight(), idle_seconds())`)的话,两个值不是同一瞬
+        的 —— 中间进来或回完一个请求,判据用的就是过期的那个。这里直接数 `_check` 走
+        一遍取了几次锁:**一次**。
+        """
+        real = fixture_life._COUNT
+        taken = [0]
+
+        class 数一次:
+            def __enter__(self):
+                taken[0] += 1
+                real.acquire()
+                return self
+
+            def __exit__(self, *exc):
+                real.release()
+                return False
+
+        saved_limit = fixture_life._LIMIT
+        fixture_life._LIMIT = 0           # 关掉空闲,别让它真去收场
+        fixture_life._COUNT = 数一次()
+        self.addCleanup(setattr, fixture_life, "_COUNT", real)
+        self.addCleanup(setattr, fixture_life, "_LIMIT", saved_limit)
+        try:
+            fixture_life._check()
+        finally:
+            fixture_life._COUNT = real
+            fixture_life._LIMIT = saved_limit
+        self.assertEqual(taken[0], 1,
+                         "判据取了多次锁 —— 那几个值就不是同一瞬的了")
+
+    def test_决定收场之后不再接纳新请求(self):
+        """判定和接纳共用一把锁,所以不存在「读到 busy=0 之后、动手之前又进来一个」
+        那个缝 —— 那个请求只能被拒。
+        """
+        _age(100)
+        self.assertIn("没有请求", fixture_life._decide(1, False))
+        self.assertFalse(fixture_life._enter(), "已经在收场了,不许再接纳")
+        self.assertEqual(fixture_life._decide(1, False), "",
+                         "闸门落下之后重复判出来只给空串,收场只走一次")
+
+    def test_没在收场就照旧接纳(self):
+        """反过来钉一边:这道闸门一旦误落,夹具会对所有请求装死而面板上看不出来。"""
+        _age(100)
+        self.assertEqual(fixture_life._decide(0, False), "")   # 关掉空闲,不该判退
+        self.assertTrue(fixture_life._enter(), "没在收场就该照旧接纳")
+        fixture_life._leave()
 
 
 class 所有权凭据(unittest.TestCase):
@@ -160,6 +229,30 @@ class 所有权凭据(unittest.TestCase):
         os.environ[fixture_life.OWNER_ENV] = f"{r}:别的token0000000"
         self.assertEqual(fixture_life.claim_owner(), -1)
 
+    def test_凭据被拒时不改借来fd的模式(self):
+        """**借来的 fd 不是我们的私有对象。**
+
+        上一版读 token 之前把它设成非阻塞、`finally` 里再**无条件**设成阻塞 —— 那不是
+        恢复原状,是按我们的猜测改了别人的东西。实测:给一个原本非阻塞的 pipe、token
+        故意写错,凭据被拒,而它被留成了阻塞的。现在用 `select` 问「可读了吗」,一个比特
+        都不动。
+        """
+        r, w, _ = _owner_pipe("tok0123456789abcd")
+        self.addCleanup(_shut_fds, r, w)
+        os.set_blocking(r, False)         # 调用方那边本来就是非阻塞的
+        os.environ[fixture_life.OWNER_ENV] = f"{r}:这个token对不上"
+        self.assertEqual(fixture_life.claim_owner(), -1, "token 对不上就不该认")
+        self.assertFalse(os.get_blocking(r), "凭据被拒也不许改它的模式")
+
+    def test_认下来的也不改模式(self):
+        """反过来钉一边:认下来了也不动它 —— 认了不等于它就归我们处置。"""
+        r, w, spec = _owner_pipe()
+        self.addCleanup(_shut_fds, r, w)
+        os.set_blocking(r, False)
+        os.environ[fixture_life.OWNER_ENV] = spec
+        self.assertEqual(fixture_life.claim_owner(), r, "凭据是对的,该认")
+        self.assertFalse(os.get_blocking(r), "认下来也不许改它的模式")
+
     def test_不是管道就不认(self):
         """陈旧的 fd 号在当前进程里可能指着一个普通文件。"""
         handle = tempfile.NamedTemporaryFile(delete=False)
@@ -176,14 +269,6 @@ class 所有权凭据(unittest.TestCase):
         for bad in ("", "不是数字:tok", "7", ":tok", "7:"):
             os.environ[fixture_life.OWNER_ENV] = bad
             self.assertEqual(fixture_life.claim_owner(), -1, bad)
-
-
-def _closed(fd: int) -> bool:
-    try:
-        os.fstat(fd)
-        return False
-    except OSError:
-        return True
 
 
 class 空闲上限的读法(unittest.TestCase):
@@ -229,7 +314,8 @@ class ASGI那条路(unittest.TestCase):
     """
 
     def setUp(self):
-        fixture_life.touch()
+        _reset_state()
+        self.addCleanup(_reset_state)
 
     def test_请求期间算在途回完才续命(self):
         import asyncio
@@ -240,7 +326,7 @@ class ASGI那条路(unittest.TestCase):
             busy.append(fixture_life.inflight())
 
         wrapped = fixture_life.guard(app, limit=0)
-        fixture_life._LAST = time.monotonic() - 100
+        _age(100)
         asyncio.run(wrapped({"type": "http"}, None, None))
         self.assertEqual(busy, [1], "请求还在跑的时候就该算在途")
         self.assertEqual(fixture_life.inflight(), 0, "回完了要还回去")
@@ -269,6 +355,10 @@ class http那条路(unittest.TestCase):
     服务端把连接关了,跟在途怎么算一点关系都没有。要钉就得自己搭一个 `HTTP/1.1` 的。
     """
 
+    def setUp(self):
+        _reset_state()                # 收场闸门一旦落下,请求就都不被接纳了
+        self.addCleanup(_reset_state)
+
     def _serve(self):
         class Handler(fixture_life.TouchingHandlerMixin,
                       http.server.BaseHTTPRequestHandler):
@@ -280,7 +370,12 @@ class http那条路(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(b"ok")
 
-        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class Quiet(http.server.ThreadingHTTPServer):
+            def handle_error(self, request, client_address):
+                pass                  # 收尾时直接关掉挂着的连接,那个
+                                      # ConnectionResetError 不是被验的东西
+
+        srv = Quiet(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(thread.join, 2)
@@ -306,354 +401,6 @@ class http那条路(unittest.TestCase):
                          "连接挂着等下一个请求,那一段不算在途")
 
 
-class 后果(unittest.TestCase):
-    """真起一个夹具,断言的是「那个进程还在不在」。"""
-
-    def _spawn(self, *, idle: str, upstream: str = "", stderr=subprocess.DEVNULL):
-        """直接起一个 `serve_workspace.py`(手起这一档:没有 owner 凭据)。"""
-        port = _free_port()
-        env = {**os.environ, fixture_life.IDLE_ENV: idle}
-        env.pop(fixture_life.OWNER_ENV, None)
-        argv = [sys.executable, "tests/serve_workspace.py", "--port", str(port)]
-        if upstream:
-            argv += ["--upstream", upstream]
-        proc = subprocess.Popen(argv, cwd=ROOT, env=env,
-                                stdout=subprocess.DEVNULL, stderr=stderr)
-        self.addCleanup(self._reap, proc)
-        _wait_listening(port, proc)
-        return port, proc
-
-    def _spawn_via_middle(self, *, idle: str, owned: bool):
-        """让一个中间进程去起夹具,好让我们杀掉它来模拟调用方没了。
-
-        `owned=True` 时中间进程按 `fixture_server()` 的协议给出所有权凭据。
-        **孙进程的 pid 由中间进程交回**(stdout 第一行)—— 按端口猜所有权会误杀。
-        """
-        port = _free_port()
-        code = "\n".join([
-            "import os, subprocess, sys, time",
-            "env = dict(os.environ)",
-            f"key = {fixture_life.OWNER_ENV!r}",
-            f"owned = {owned!r}",
-            "pass_fds = ()",
-            "if owned:",
-            "    r, w = os.pipe()",
-            "    os.write(w, b'tok0123456789abcd')",
-            "    env[key] = '%d:tok0123456789abcd' % r",
-            "    pass_fds = (r,)",
-            "else:",
-            "    env.pop(key, None)",
-            f"p = subprocess.Popen([sys.executable, 'tests/serve_workspace.py',"
-            f" '--port', '{port}'], env=env, pass_fds=pass_fds,"
-            " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
-            "print(p.pid, flush=True)",
-            "time.sleep(600)",
-        ])
-        env = {**os.environ, fixture_life.IDLE_ENV: idle}
-        env.pop(fixture_life.OWNER_ENV, None)
-        middle = subprocess.Popen([sys.executable, "-c", code], cwd=ROOT, env=env,
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.DEVNULL, text=True)
-        self.addCleanup(self._reap, middle)
-        self.addCleanup(middle.stdout.close)
-        grandchild = int(middle.stdout.readline().strip())
-        self.addCleanup(self._reap_pid, grandchild)
-        _wait_listening(port, middle)
-        return port, middle, grandchild
-
-    def _port_open(self, port: int) -> bool:
-        with socket.socket() as s:
-            s.settimeout(0.5)
-            return s.connect_ex(("127.0.0.1", port)) == 0
-
-    def _reap(self, proc: subprocess.Popen) -> None:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=5)
-
-    def _reap_pid(self, pid: int) -> None:
-        """按**交回来的真实 pid** 收,动手前还要核验它确实是那个夹具。
-
-        端口不是所有权凭据:孙进程早退之后那个号可能被另一个本地服务复用,照着端口
-        发 SIGKILL 就杀错了人。pid 也可能被回收,所以再比一次命令行。
-        """
-        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
-                             capture_output=True, text=True).stdout
-        if "serve_workspace.py" not in cmd:
-            return                        # 已经退了,或者号被别人复用 —— 都不该动
-        with contextlib.suppress(OSError):
-            os.kill(pid, signal.SIGKILL)
-
-    def _wait_dead(self, pid: int, timeout: float) -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            out = subprocess.run(["ps", "-o", "pid=", "-p", str(pid)],
-                                 capture_output=True, text=True).stdout.strip()
-            if not out:
-                return True
-            time.sleep(0.2)
-        return False
-
-    # ---- 空闲那一道 ----
-
-    def test_空闲到点真的会退(self):
-        port, proc = self._spawn(idle="2")
-        self.assertTrue(_wait_gone(proc, 25), "空闲够久了,夹具应该自己退掉")
-        self.assertFalse(self._port_open(port), "退了就不该还占着端口")
-
-    def test_一直有请求就不退(self):
-        """反过来钉一边 —— 顺带钉住在途计数真的接在请求上了。"""
-        port, proc = self._spawn(idle="2")
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            _ping(port)
-            time.sleep(0.4)
-        self.assertTrue(_alive(proc), "一直有人用,不该被空闲超时收掉")
-
-    def test_关掉之后放着也不退(self):
-        """`KB_FIXTURE_IDLE=0` 是手动调试页面的人的出口,必须真的关得掉。"""
-        _, proc = self._spawn(idle="0")
-        self.assertFalse(_wait_gone(proc, 4), "关掉了空闲超时就不该自己退")
-
-    def test_在途的慢请求不会被砍断(self):
-        """**这条钉的是「空闲」的定义**:只在进门时续一次命的话,读上游那几秒全被
-        算成空闲,一个合法的慢请求会被拦腰砍断、客户端拿到 502。
-        """
-        import http.server
-        import threading
-
-        class Slow(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                time.sleep(4)
-                self.send_response(200)
-                self.end_headers()
-                with contextlib.suppress(BrokenPipeError):
-                    self.wfile.write(b"finished")
-
-            def log_message(self, *a):
-                pass
-
-        up = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Slow)
-        threading.Thread(target=up.serve_forever, daemon=True).start()
-        self.addCleanup(up.server_close)
-        self.addCleanup(up.shutdown)
-        port, proc = self._spawn(
-            idle="1", upstream=f"http://127.0.0.1:{up.server_port}")
-        began = time.monotonic()
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/slow",
-                                    timeout=15) as r:
-            body = r.read()
-        self.assertEqual(body, b"finished", "在途的慢请求不该被砍断")
-        self.assertGreater(time.monotonic() - began, 3, "这一条要真的等满上游那几秒")
-        self.assertTrue(_alive(proc), "请求刚回完,不该已经退了")
-
-    def test_日志堵住也照退(self):
-        """**日志不许挡住防线。** 没人消费 stderr 时那根管道会满,而满管道上的 write
-        是阻塞不是异常:实测它能让退出路径卡在发信号之前(连硬退都到不了),也能让
-        请求线程永远停在「在途」上,把空闲超时一并堵死。
-        """
-        port, proc = self._spawn(idle="1", stderr=subprocess.PIPE)
-        clients = []
-        try:
-            for n in range(6):           # 灌满 stderr:长地址 → 长访问日志
-                c = socket.create_connection(("127.0.0.1", port), timeout=2)
-                c.sendall((f"GET /missing-{n}-" + "x" * 60000
-                           + " HTTP/1.0\r\nHost: l\r\n\r\n").encode())
-                clients.append(c)
-            self.assertTrue(_wait_gone(proc, 20),
-                            "stderr 堵着也必须退得掉 —— 日志是可丢弃的,防线不是")
-        finally:
-            for c in clients:
-                with contextlib.suppress(OSError):
-                    c.close()
-            with contextlib.suppress(Exception):
-                proc.stderr.close()
-
-    def test_自己退的时候把临时根删掉(self):
-        """**这条钉的是收场信号选得对不对。**
-
-        发 SIGTERM 的话 Python 没有 handler 就直接结束进程,`main()` 里那个
-        `with contextlib.ExitStack()` 一行不跑,盘上留下一份完整的沙箱库 —— 那正是
-        `tests/fixture_root.py` 记载的事故形态。手动跑这一档根归夹具自己删。
-
-        **用自己独占的 TMPDIR**:拿全局前缀做差集的话,并行跑的别的测试新建同前缀
-        目录就会让这条误报。
-        """
-        sandbox = tempfile.mkdtemp(prefix="kb-life-tmp-")
-        self.addCleanup(shutil.rmtree, sandbox, ignore_errors=True)
-        port = _free_port()
-        env = {**os.environ, fixture_life.IDLE_ENV: "3", "TMPDIR": sandbox}
-        env.pop(fixture_life.OWNER_ENV, None)
-        env.pop("KB_FIXTURE_ROOT", None)          # 手动跑:根归它自己
-        proc = subprocess.Popen(
-            [sys.executable, "tests/serve_sources.py", "--port", str(port)],
-            cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.addCleanup(self._reap, proc)
-        _wait_listening(port, proc, timeout=120)
-        self.assertTrue(os.listdir(sandbox), "这一轮的根本来就该建在我们给的 TMPDIR 里")
-        self.assertTrue(_wait_gone(proc, 40), "空闲够久了,夹具应该自己退掉")
-        time.sleep(1)
-        self.assertEqual(os.listdir(sandbox), [],
-                         "自己退的时候得把临时根删掉,不能留一份沙箱库在盘上")
-
-    # ---- 所有权那一道 ----
-
-    def test_调用方被强杀夹具自己退(self):
-        """`finally` 里的 reap 一行不跑那一档 —— 全靠夹具自己读到那根 pipe 的 EOF。"""
-        _, middle, grandchild = self._spawn_via_middle(idle="0", owned=True)
-        middle.kill()
-        middle.wait(timeout=5)
-        self.assertTrue(self._wait_dead(grandchild, 15),
-                        "调用方没了,夹具应该认出 EOF 自己退")
-
-    def test_调用方死在摆盘途中夹具也不开服务(self):
-        """**这条是凭据从 pid 换成 pipe 的理由。**
-
-        夹具要先建库、导出、建索引才开服务,调用方死在那几十秒里时它读到的 ppid 已经
-        是 1 —— 拿「现在的 ppid 还等于环境里那个 pid 吗」判凭据可不可信,会把**正确
-        的**凭据当成继承来的陈旧值丢掉,副防线整个不装。实测过:真调用方被 SIGKILL,
-        夹具照样从暂停点继续开服务、还能访问。
-
-        这里用 SIGSTOP 把夹具按在模块加载**之前**(那是最早的时刻),杀掉中间进程,再
-        放它走 —— 它应该一加载就发现 EOF,一个端口都不开。
-        """
-        port = _free_port()
-        wrapper = ("import os,runpy,signal,sys;os.kill(os.getpid(),signal.SIGSTOP);"
-                   "sys.argv=sys.argv[1:];"
-                   "runpy.run_path(sys.argv[0],run_name='__main__')")
-        code = "\n".join([
-            "import os, subprocess, sys, time",
-            "env = dict(os.environ)",
-            f"key = {fixture_life.OWNER_ENV!r}",
-            "r, w = os.pipe()",
-            "os.write(w, b'tok0123456789abcd')",
-            "env[key] = '%d:tok0123456789abcd' % r",
-            f"p = subprocess.Popen([sys.executable, '-c', {wrapper!r},"
-            f" 'tests/serve_workspace.py', '--port', '{port}'],"
-            " env=env, pass_fds=(r,),"
-            " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
-            "print(p.pid, flush=True)",
-            "time.sleep(600)",
-        ])
-        env = {**os.environ, fixture_life.IDLE_ENV: "0"}   # 单验 owner 这一道
-        env.pop(fixture_life.OWNER_ENV, None)
-        middle = subprocess.Popen([sys.executable, "-c", code], cwd=ROOT, env=env,
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.DEVNULL, text=True)
-        self.addCleanup(self._reap, middle)
-        self.addCleanup(middle.stdout.close)
-        child = int(middle.stdout.readline().strip())
-        self.addCleanup(self._reap_stopped, child)
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            state = subprocess.run(["ps", "-o", "stat=", "-p", str(child)],
-                                   capture_output=True, text=True).stdout
-            if "T" in state:
-                break
-            time.sleep(0.1)
-        else:
-            self.fail("夹具没有在加载之前被按住,这条用例没验到那个窗口")
-        middle.kill()
-        middle.wait(timeout=5)
-        os.kill(child, signal.SIGCONT)
-        self.assertTrue(self._wait_dead(child, 15),
-                        "调用方已经没了,放它走之后不该再开服务")
-        self.assertFalse(self._port_open(port), "一个端口都不该开出来")
-
-    def _reap_stopped(self, pid: int) -> None:
-        """被 SIGSTOP 按住的进程收不动,先放它走再收(核验同 `_reap_pid`)。"""
-        with contextlib.suppress(OSError):
-            os.kill(pid, signal.SIGCONT)
-        self._reap_pid(pid)
-
-    def test_日志堵住时正常请求照旧拿得到响应(self):
-        """**上面那条只验了「退得掉」,这条验「别的请求没被它带走」。**
-
-        把访问日志交还给 `http.server` 原来的实现(写 `sys.stderr`)之后,fd 2 已经被设成
-        非阻塞,于是那次 write 不再是卡住而是抛 `BlockingIOError` —— 异常把请求线程打断,
-        实测一个毫无关系的正常请求**连响应行都收不到,对端直接把连接关了**。
-        退得掉和回得出是两件事,少钉一边就看不出这个差别。
-        """
-        port, proc = self._spawn(idle="0", stderr=subprocess.PIPE)
-        clients = []
-        try:
-            for n in range(6):
-                c = socket.create_connection(("127.0.0.1", port), timeout=2)
-                c.sendall((f"GET /missing-{n}-" + "x" * 60000
-                           + " HTTP/1.0\r\nHost: l\r\n\r\n").encode())
-                clients.append(c)
-            time.sleep(2)                 # 等那几条把管道灌满
-            c = socket.create_connection(("127.0.0.1", port), timeout=5)
-            clients.append(c)
-            c.sendall(b"GET / HTTP/1.0\r\nHost: l\r\n\r\n")
-            self.assertIn(b"200", c.recv(200).split(b"\r\n")[0],
-                          "日志丢得起,正在服务的请求丢不起")
-        finally:
-            for c in clients:
-                with contextlib.suppress(OSError):
-                    c.close()
-            with contextlib.suppress(Exception):
-                proc.stderr.close()
-
-    def test_手起的夹具父进程退了也不退(self):
-        """**这条是整套设计的核心**:会话手起夹具、起它那个 shell 当场就退,随后另
-        一个 shell 才跑探针。拿「父进程没了」当判据的话,夹具一起跑就自杀。
-        """
-        port, middle, grandchild = self._spawn_via_middle(idle="0", owned=False)
-        middle.kill()
-        middle.wait(timeout=5)
-        time.sleep(3)                     # 远超 POLL_SECONDS,真要自杀早该退了
-        self.assertFalse(self._wait_dead(grandchild, 0.1),
-                         "没有 owner 时不该凭父进程的死活自杀")
-        self.assertTrue(self._port_open(port), "它还该好好地服务着")
-
-    def test_真的fixture_server给得出可用的凭据(self):
-        """**两侧各有自己的红**:上面那条验夹具认不认 EOF,这条验起它的那一侧确实
-        把凭据发了出来 —— 中间那个进程用的是真的 `fixture_server()`。
-        """
-        code = "\n".join([
-            "import time",
-            "from tests import headless",
-            "with headless.fixture_server(script='serve_workspace.py',"
-            " timeout=60) as base:",
-            "    print(base, flush=True)",
-            "    time.sleep(600)",
-        ])
-        env = {**os.environ, fixture_life.IDLE_ENV: "0"}   # 单验 owner 这一道
-        middle = subprocess.Popen([sys.executable, "-c", code], cwd=ROOT, env=env,
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.DEVNULL, text=True)
-        self.addCleanup(self._reap, middle)
-        self.addCleanup(middle.stdout.close)
-        base = middle.stdout.readline().strip()
-        self.assertTrue(base.startswith("http://"), f"没拿到 base URL:{base!r}")
-        port = int(base.rsplit(":", 1)[1])
-        self.addCleanup(self._reap_listener, port)
-        middle.kill()
-        middle.wait(timeout=5)
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline and self._port_open(port):
-            time.sleep(0.2)
-        self.assertFalse(self._port_open(port),
-                         "真 fixture_server 起的夹具也该认出调用方没了")
-
-    def _reap_listener(self, port: int) -> None:
-        """兜底:这条用例拿不到孙进程句柄,只能按端口找 —— **但必须核验命令行连端口
-        号一起对上**,否则另一个本地服务正好占着这个号就被误杀了。
-        """
-        out = subprocess.run(["lsof", "-nP", f"-tiTCP:{port}", "-sTCP:LISTEN"],
-                             capture_output=True, text=True).stdout
-        for raw in out.split():
-            try:
-                pid = int(raw)
-            except ValueError:
-                continue
-            cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
-                                 capture_output=True, text=True).stdout
-            if "serve_workspace.py" not in cmd or f"--port {port}" not in cmd:
-                continue                  # 不是我们起的那一个,一个字都不碰
-            with contextlib.suppress(OSError):
-                os.kill(pid, signal.SIGKILL)
 
 
 if __name__ == "__main__":

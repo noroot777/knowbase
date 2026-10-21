@@ -240,11 +240,16 @@ class SandboxBase(str):
     不用改)。多出来的 `.root` 给要**查盘**的用例:界面上说「已经写进知识库了」
     而 vault 里什么都没有,是这条链最难看出来的一种谎报 —— 验它只能去看文件
     (见 `tests/test_grab_probe.py`)。
+
+    `.pid` 给**要自己收这个进程**的用例:端口和脚本名都不是所有权凭据,照着它们
+    发信号会杀到另一轮复用同一个端口的同型夹具(实测过)。要收就按这个 pid,再核
+    一次它的启动时刻(`tests/test_fixture_life.py` 的 `_identity`)。
     """
 
-    def __new__(cls, base: str, root: str):
+    def __new__(cls, base: str, root: str, pid: int = -1):
         self = super().__new__(cls, base)
         self.root = root
+        self.pid = pid
         return self
 
 
@@ -281,16 +286,36 @@ def fixture_server(*extra_args: str, script: str = "serve_sources.py",
     # token 预先写进去,好让它认得出这根 pipe 确实是我们给的。口径在
     # `tests/fixture_life.py` 的 `claim_owner`。
     owner_r, owner_w = os.pipe()
-    owner_token = secrets.token_hex(8)
-    os.write(owner_w, owner_token.encode())
-    env = {**os.environ, "KB_FIXTURE_ROOT": root.name,
-           fixture_life.OWNER_ENV: f"{owner_r}:{owner_token}"}
-    server = subprocess.Popen(
-        [sys.executable, f"tests/{script}", "--port", str(port), *extra_args],
-        cwd=Path(__file__).resolve().parents[1], env=env,
-        pass_fds=(owner_r,),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    os.close(owner_r)                # 读端归子进程;我们留着的话它永远等不到 EOF
+    # **裸 fd 一建出来就登记回收。** 写 token、拼 env、`Popen` 这几步都可能抛(解释器
+    # 不在、工作目录没了、权限不足、fd 用光),抛在这里就到不了下面那个 `finally`,
+    # 而裸 fd 没有 Python 对象替它收 —— 两个号就永久泄漏。最难受的是「快到打开文件
+    # 上限了」这种失败:失败本身还在继续吃掉本该释放的资源,重试越多越快撞墙。
+    # 用一个待关集合而不是 `suppress(OSError)` 双关:号被关掉之后可能立刻被别处复用,
+    # 对着一个已经不是我们的号再 `close` 一次,关掉的是别人的东西。
+    pending = {owner_r, owner_w}
+
+    def shut(fd: int) -> None:
+        if fd in pending:
+            pending.discard(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+    try:
+        owner_token = secrets.token_hex(8)
+        os.write(owner_w, owner_token.encode())
+        env = {**os.environ, "KB_FIXTURE_ROOT": root.name,
+               fixture_life.OWNER_ENV: f"{owner_r}:{owner_token}"}
+        server = subprocess.Popen(
+            [sys.executable, f"tests/{script}", "--port", str(port), *extra_args],
+            cwd=Path(__file__).resolve().parents[1], env=env,
+            pass_fds=(owner_r,),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except BaseException:
+        shut(owner_r)
+        shut(owner_w)
+        root.cleanup()
+        raise
+    shut(owner_r)                    # 读端归子进程;我们留着的话它永远等不到 EOF
     try:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -303,10 +328,9 @@ def fixture_server(*extra_args: str, script: str = "serve_sources.py",
                 time.sleep(0.2)
         else:
             raise AssertionError("隔离沙箱服务没有响应")
-        yield SandboxBase(base, root.name)
+        yield SandboxBase(base, root.name, server.pid)
     finally:
-        with contextlib.suppress(OSError):
-            os.close(owner_w)        # 写端一关,子进程立刻知道我们走了
+        shut(owner_w)                # 写端一关,子进程立刻知道我们走了
         reap(server)                 # 收子进程的口径只有一份(见 reap)
         root.cleanup()
 
