@@ -16,11 +16,19 @@
    等于换了个键,那一格的欠账就永远清不掉);
 5. 前端那份字面量和后端常量一致 —— 前缀在两种语言里各写一次,是两份口径里最容易
    悄悄岔开的那种。
+
+**这几条全在「选源」方向上。** 另一侧(「这一轮真跑成了谁」那份成功回执)的安全侧是
+**反的**:宽一点就是拿一次没发生的成功清掉另一条订阅的真失败,它从此不进重试计划。
+所以那一侧不许用这份匹配 —— 这里只钉「它拿不到采集器、也就做不成匹配」这一道结构,
+后果那一半在 `tests/test_daybook_coverage.py`,口径在 `pipeline_results.cover`。
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import re
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -76,10 +84,39 @@ class TargetIdentityTests(unittest.TestCase):
             self.assertTrue(reg.in_scope(source, ()), '空范围就是全都在')
 
     def test_a_subscription_literally_named_like_a_token_stays_on_the_safe_side(self):
-        """真有订阅叫 `id:9` 时两边都算:多抓一条顶多重抓一次,漏抓是静默丢数据。"""
+        """真有订阅叫 `id:9` 时两边都算 —— **而「安全侧」是分方向的**。
+
+        这一侧是**选源**:宽一点 = 多抓一条,代价是重抓一次,而漏抓是静默丢数据,
+        所以这儿宁可宽。**记账方向反过来**:成功回执宽一点 = 拿一次没发生的成功
+        清掉另一条订阅的真失败,它从此不进重试计划 —— 救不回来。
+        所以这条「宁可宽」**只在这一个方向上成立**,下一条钉的就是另一侧。
+        """
         odd = reg.save_subscription('rss', {'name': reg.id_target(9),
                                             'url': 'https://odd.example/feed'})
         self.assertTrue(reg.in_scope(odd, (reg.id_target(9),)))
+
+    def test_the_accounting_side_cannot_run_this_matcher_at_all(self):
+        """**另一侧是结构钉住的**:记账那一步拿不到采集器,也就做不成名字匹配。
+
+        归一要先有采集器(`pipeline_results._stable` 第一件事就是取它的
+        `TargetIdentity`),所以「这条路上不许有模糊匹配」靠的是**签名里没有它**,
+        不是靠谁记得别写。拿掉这一道之后的实测形态:A 编号 63 名字「A」、B 编号 64
+        名字「63」,先只同步 B 并让取文失败、再只同步 A 并成功,账本从
+        `{"64":"error"}` 变成 `{"64":"ok","63":"ok"}`,B 的 `last_error` 还在原处而
+        重试计划已经空了(后果那一半钉在 `tests/test_daybook_coverage.py`)。
+
+        **读的是 AST 不是正文**:`cover` 的 docstring 里就写着这两个名字(它讲的正是
+        为什么不许用),按字符串找会永远红。
+        """
+        from kb import pipeline_results
+        self.assertNotIn('collector',
+                         inspect.signature(pipeline_results.cover).parameters,
+                         '记账那一步又收上采集器了,模糊匹配就又做得成了')
+        tree = ast.parse(textwrap.dedent(inspect.getsource(pipeline_results.cover)))
+        used = ({n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+                | {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)})
+        self.assertEqual(set(), used & {'_stable', 'in_scope', 'stable_targets'},
+                         '成功回执这条路上又出现了范围匹配')
 
     # ── 2. 后果:真去抓的是哪几条 ───────────────────────────────────────────────
     def touched(self, targets):

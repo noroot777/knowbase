@@ -455,7 +455,7 @@ class ChannelDispatchTests(unittest.TestCase):
         """**建账那一步也在隔离里面**:它炸了也只终结这一个来源。
 
         建账要先算「这一步在这个来源上实际覆盖哪几个目标」,点名了目标就要**读一次
-        订阅库**(`pipeline_results.covered_targets` → `FeedCollector.stable_targets`)
+        订阅库**(`pipeline_results.planned_targets` → `FeedCollector.stable_targets`)
         —— 这一步在 fetch **之前**。隔离原来只包 fetch 那一句,于是这次读失败时异常
         是从 `with` 那一行抛的:连这个来源自己的 try 都还没进去,整个来源循环当场
         跳出。勾了订阅源和公众号两个来源、订阅库临时读不出来,**公众号一次都不跑**
