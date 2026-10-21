@@ -113,7 +113,9 @@ def main():
             }.get(path, {})
 
         print('Favorites QA: real API, temporary database, no external requests', flush=True)
-        uvicorn.run(app, host='127.0.0.1', port=args.port, log_level='warning')
+        # 起了不关就是孤儿:什么时候自行退出,口径和理由都在 tests/fixture_life.py
+        from tests import fixture_life
+        uvicorn.run(fixture_life.guard(app), host='127.0.0.1', port=args.port, log_level='warning')
 
 
 if __name__ == '__main__':

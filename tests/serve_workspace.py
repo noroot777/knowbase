@@ -4,11 +4,16 @@ python3 tests/serve_workspace.py --upstream http://127.0.0.1:8787
 Omit --upstream when running the fully mocked workspace_probe.js checks.
 """
 
+import sys
 from argparse import ArgumentParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import urlopen
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# 起了不关就是孤儿:什么时候自行退出,口径和理由都在 tests/fixture_life.py
+from tests import fixture_life  # noqa: E402
 
 STATIC = Path(__file__).resolve().parents[1] / "kb" / "static"
 
@@ -19,7 +24,7 @@ def main():
     parser.add_argument("--upstream", default="", help="Optional read-only backend URL")
     args = parser.parse_args()
 
-    class Handler(SimpleHTTPRequestHandler):
+    class Handler(fixture_life.TouchingHandlerMixin, SimpleHTTPRequestHandler):
         def send_content(self, data, content_type, status=200):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -57,6 +62,7 @@ def main():
         do_PUT = do_PATCH = do_DELETE = do_POST
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    fixture_life.install()
     print(f"Read-only preview: http://127.0.0.1:{args.port}", flush=True)
     try:
         server.serve_forever()

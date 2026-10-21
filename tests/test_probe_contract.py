@@ -31,6 +31,9 @@ HERE = Path(__file__).resolve().parent
 # `test_no_test_runs_a_browser_probe_bare` 唯一的例外对象(理由见那条用例的注释)
 LEAK_TESTS = "test_probe_leak.py"
 
+# `test_no_test_launches_a_sandbox_server_itself` 唯一的例外对象(同上,理由在那条用例里)
+LIFE_TESTS = "test_fixture_life.py"
+
 
 # 类级 fixture 会建出来的那几种东西,和"收尾"长什么样
 _MAKERS = ('TemporaryDirectory', 'mkdtemp', 'Popen', 'fixture_server', 'ExitStack')
@@ -242,6 +245,12 @@ class ProbeSourceContractTests(unittest.TestCase):
         offenders = []
         for f in sorted(HERE.glob("test_*.py")):
             if f.name == Path(__file__).name:
+                continue
+            # `test_fixture_life.py` 是唯一的例外,而且必须是:它那条验的正是
+            # **夹具自己**退出时删不删得掉那份根,所以不能给 `KB_FIXTURE_ROOT`
+            # ——走 fixture_server 的话根归父进程,它的 finally 会把结论盖掉,
+            # 被测的实现(收场发哪个信号)坏掉了也照样全绿。
+            if f.name == LIFE_TESTS:
                 continue
             offenders += [f"{f.name}:{line}"
                           for line in _server_names_in_code(f, owning)]

@@ -73,6 +73,9 @@ export const PARENT_ENV = "KB_PROBE_PARENT";
  * 还是它原来那个 pid,于是「我已经不是它的子进程了」这件事看得出来。
  * 回退那一支在模块加载那一刻取一次(越早越好),`<= 1` 时按「没有调用方」办 ——
  * 手动 `node tests/x_probe.mjs &` 之后关掉终端就是这一档,没有谁在等结果。
+ *
+ * **`tests/serve_*.py` 读同一个变量,但读法相反(没拿到就不盯)**:夹具的生命周期本来
+ * 就跨多个 shell,现读 ppid 会让它一起跑就自杀。理由在 docs/decisions/fixture-life.md。
  */
 const CALLER = (() => {
   const want = Number.parseInt(process.env[PARENT_ENV] || "", 10);

@@ -67,7 +67,9 @@ def main():
 
         print("Isolated OpenAI protocol QA: temporary settings, no external requests", flush=True)
         try:
-            uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+            # 起了不关就是孤儿:什么时候自行退出,口径和理由都在 tests/fixture_life.py
+            from tests import fixture_life
+            uvicorn.run(fixture_life.guard(app), host="127.0.0.1", port=args.port, log_level="warning")
         finally:
             sdk.close()
 

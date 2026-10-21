@@ -44,8 +44,11 @@ INSTALL_HINT = ("装一份:`npx playwright install chromium-headless-shell`,"
 
 _GLOB = "chromium_headless_shell-*/*/chrome-headless-shell*"
 
-#: 把「原调用方是谁」告诉探针的环境变量;口径在 `tests/probe_shell.mjs` 的 CALLER。
-#: 唯一的写入方是 `run_probe`,别在调用点自己设。
+#: 把「原调用方是谁」告诉子进程的环境变量;两个写入方,别在调用点自己设:
+#: `run_probe` 告诉 .mjs 探针(口径在 `tests/probe_shell.mjs` 的 CALLER),
+#: `fixture_server` 告诉 `tests/serve_*.py` 夹具(口径在 `tests/fixture_life.py`)。
+#: 两边读法不同 —— 探针**没拿到就现读 ppid**,夹具**没拿到就不盯**(手起的夹具跨
+#: 多个 shell 共用是合法用法,现读 ppid 会让它一起跑就自杀)。理由见那两份文件。
 PARENT_ENV = "KB_PROBE_PARENT"
 # 临时 profile 建在这个**父进程拥有**的根里面(见 run_probe 的 docstring)。
 # 跟沙箱那份库同一条口径(`tests/fixture_root.py`):建在起它的这一侧、这一侧删。
@@ -269,7 +272,10 @@ def fixture_server(*extra_args: str, script: str = "serve_sources.py",
         port = listener.getsockname()[1]
     root = tempfile.TemporaryDirectory(prefix="kb-fixture-")
     base = f"http://127.0.0.1:{port}"
-    env = {**os.environ, "KB_FIXTURE_ROOT": root.name}
+    # 夹具那边拿它当副防线:我们被 SIGKILL 时 `finally` 里的 reap 一行不跑,
+    # 它自己看得出「原调用方没了」。口径在 `tests/fixture_life.py`。
+    env = {**os.environ, "KB_FIXTURE_ROOT": root.name,
+           PARENT_ENV: str(os.getpid())}
     server = subprocess.Popen(
         [sys.executable, f"tests/{script}", "--port", str(port), *extra_args],
         cwd=Path(__file__).resolve().parents[1], env=env,
@@ -297,7 +303,7 @@ def probe_env() -> dict[str, str]:
     assert SHELL is not None, "没有无头壳就不该走到这里,用 @requires_headless 拦住"
     out = {**os.environ, "HEADLESS_SHELL": str(SHELL)}
     # 继承来的旧值一律摘掉:那个 pid 说的是别人的调用方,留着会让探针一启动就
-    # 判成「我已经没有调用方了」当场退出。唯一的写入方是 run_probe。
+    # 判成「我已经没有调用方了」当场退出。这条路上唯一的写入方是 run_probe。
     out.pop(PARENT_ENV, None)
     return out
 
