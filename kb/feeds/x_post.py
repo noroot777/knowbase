@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import time
 
-from kb.feeds import x_article, x_body, x_page_state, x_post_meta
+from kb.feeds import x_article, x_body, x_cooldown, x_page_state, x_post_meta
 from kb.feeds.x_cdp import CdpError, CdpTransportError
 from kb.feeds.x_errors import PostUnavailable
 from kb.feeds.x_page_state import STATE_JS, ProblemConfirmation, navigate, read
@@ -287,6 +287,18 @@ def fill(entries: list[dict], *, session, deadline=None, should_stop=None, unava
             continue
         except PostSessionUnavailable:
             raise
+        except x_page_state.XSessionThrottled as exc:
+            # 应用启动请求被限流。**已经抓到的时间线条目要留住** —— 让它穿到
+            # `harvest` 的 `except XBrowserError` 去,这个账号整轮的收获会连同
+            # 那一句话一起被丢掉,而这一档实测几分钟就自己恢复。并进"暂缓补全"
+            # 那条路:本轮不推进水位,下一轮重抓(口径同 `PostHalted`)。
+            #
+            # **但要把它记到会话上**:这条路是暂缓、不抛,外层换下一个账号时
+            # 看不见刚撞过限流,于是会不冷却就接着导航(见 `x_cooldown`)。
+            x_cooldown.of(session).throttled()
+            deferred += 1
+            halt = str(exc)
+            continue
         except PostHalted as exc:
             deferred += 1
             halt = str(exc)

@@ -9,6 +9,12 @@ _CONTENT_REQUESTS = {'timeline': frozenset({'UserTweets'}), 'detail': frozenset(
                      'home': frozenset({'HomeTimeline', 'HomeLatestTimeline'})}
 _AUXILIARY_REQUESTS = {'timeline': frozenset({'UserByScreenName', 'UserTweetsAndReplies'}),
                        'detail': frozenset({'TweetResultByRestId'}), 'home': frozenset()}
+# Boot requests the web app issues before it renders anything, on every route.
+# Throttling these strands the page on the splash screen: no shell, no text, no
+# content request ever leaves the browser, so every DOM and content-HTTP verdict
+# below stays blank and the reader can only burn its whole per-account budget.
+# Watched for all kinds because the app boots once per navigation, not per route.
+_SESSION_REQUESTS = frozenset({'Viewer'})
 
 STATE_JS = r'''
   const xPageState = () => {
@@ -63,7 +69,8 @@ class Responses:
         kind = ('detail' if '/status/' in parsed.path else
                 'home' if parsed.path == '/home' else 'timeline')
         self.content_operations = _CONTENT_REQUESTS[kind]
-        self.operations = self.content_operations | _AUXILIARY_REQUESTS[kind]
+        self.operations = (self.content_operations | _AUXILIARY_REQUESTS[kind]
+                           | _SESSION_REQUESTS)
         self.loader = ''
         self.statuses = {}
 
@@ -88,8 +95,11 @@ class Responses:
                    if self.loader and loader == self.loader}
         content = {operation: status for operation, status in current.items()
                    if operation in self.content_operations}
+        session = {operation: status for operation, status in current.items()
+                   if operation in _SESSION_REQUESTS}
         auxiliary = {operation: status for operation, status in current.items()
-                     if operation not in self.content_operations}
+                     if operation not in self.content_operations
+                     and operation not in _SESSION_REQUESTS}
         if content:
             snapshot['http_content'] = content
         if auxiliary:
@@ -108,6 +118,14 @@ class Responses:
             snapshot['failed'] = True
         if http_problem:
             snapshot['http_problem'] = http_problem
+        # Recorded last and kept out of `limited`/`failed`: a throttled boot request is
+        # weaker evidence than anything the page or its content requests said outright,
+        # and it means something different — the app never started, so this account was
+        # not read rather than refused. `problem` ranks it below every other verdict.
+        if session:
+            snapshot['http_session'] = session
+        if any(status == 429 for status in session.values()):
+            snapshot['session_limited'] = True
         return snapshot
 
 
@@ -141,6 +159,25 @@ def read(session, script: str) -> dict:
     return responses.apply(snapshot) if responses else snapshot
 
 
+def booted(state: dict) -> bool:
+    """这一次导航里,有没有证据说明页面应用**确实启动起来了**。
+
+    一条就够,因为每一条都只可能在应用跑起来之后才成立:时间线渲染出了推文、
+    站点自己答复了「这个账号不存在/已冻结」、详情页读到了正文、或者这条路线
+    自己的内容请求已经答复过(到得了这个判断的地方,内容请求的状态码一定是
+    2xx —— 429 和 4xx/5xx 在 `problem` 里更早就返回了)。
+
+    **它是 `session_limited` 的否决条件。** 启动请求被限流这件事在一次导航里
+    是**粘的**(`statuses` 整段保留),所以光凭「这次导航见过一个 429」就宣布
+    「应用没启动」会把已经可用的页面判成失败:同一次导航里 `Viewer` 被限流
+    一次、而内容接口 200 且页面已经有推文,是能同时成立的。那种页面该走 `ok`,
+    不该被这一档否决,也不该因此冻结水位(`x_timeline_state.drain` 那条迟到
+    响应的路同走这里,口径只有一份)。
+    """
+    return bool(state.get('articles') or state.get('http_content')
+                or state.get('empty') or state.get('text'))
+
+
 def problem(state: dict) -> str:
     if state.get('challenge') and state.get('ready') == 'complete':
         return 'challenge'
@@ -152,6 +189,14 @@ def problem(state: dict) -> str:
         return explicit
     if http in ('limited', 'failed'):
         return http
+    # Ranked last on purpose: every verdict above is about what this page or its own
+    # content request answered, and any of them outranks "the app could not boot".
+    # Gated on a finished load so a boot request still in flight is not terminal, and
+    # on `booted` so one sticky 429 cannot veto a page that is already usable —
+    # "ranked last among the errors" is not the same as "ranked after success".
+    if (state.get('session_limited') and state.get('ready') == 'complete'
+            and not booted(state)):
+        return 'session_limited'
     return ''
 
 
@@ -186,6 +231,11 @@ def terminal(state: dict, confirmed: str, *, expired=False, content_pending=True
         return 'challenge'
     if confirmed == 'limited' and (not state.get('http_only') or state.get('http_content_limited')):
         return 'limited'
+    # Must precede the `failed` fallback below. A throttled boot leaves `http_only`
+    # unset (no content request ever went out), so that fallback would otherwise
+    # report a request failure for a page whose requests were never made.
+    if confirmed == 'session_limited':
+        return 'session_limited'
     if expired or not content_pending or not state.get('http_only'):
         return 'failed'
     return ''
@@ -199,6 +249,8 @@ def escalate(state: dict, confirmed: str, failure: Exception, *, expired=False,
         return access_blocked()
     if verdict == 'limited':
         return XRateLimited('X 暂时限制了访问频率,请稍后重试或降低同步频率')
+    if verdict == 'session_limited':
+        return session_throttled()
     if verdict == 'failed':
         return failure
     return None
@@ -216,5 +268,23 @@ class XAccessBlocked(XBrowserError):
     """A verified access gate stops this session without declaring content absent."""
 
 
+class XSessionThrottled(XBrowserError):
+    """X throttled the web app's boot request, so this account was never read.
+
+    Deliberately **not** an `XRateLimited`: that one aborts the rest of the batch
+    because a throttled content request means every later account meets the same
+    refusal. This one is observed to clear within the same run (2026-10-21: eleven
+    consecutive accounts stranded, then thirty-nine read normally), so aborting
+    would throw away the accounts that are about to succeed. It stays a plain
+    browser error — one failed account, the batch continues, the watermark holds.
+    """
+
+
 def access_blocked():
     return XAccessBlocked('X 要求安全验证,本轮已停止;请在对应通道的浏览器中完成验证后重试,不要反复同步')
+
+
+def session_throttled():
+    return XSessionThrottled(
+        'X 限制了访问频率,页面应用没能启动(本轮没读到这个账号的时间线)。'
+        '不必重新登录、也不是安全验证;稍后它自己会恢复,下一轮同步会重抓')

@@ -208,7 +208,14 @@ def _prefetch_x(kind, sources, settings, scope):
     name = x_channels.label(x_channels.channel_of(settings))
     _stage('crawl', 'running', f'{reg.KINDS[kind]} · {name}:准备读取 {len(picked)} 个账号')
 
-    def progress(done, count, handle):
+    def progress(done, count='', handle=''):
+        # **两种形状都要接**:逐账号那条是 `(第几个, 共几个, handle)`,而整批里
+        # 还有几处要报的是一句话(关掉到点的登录窗口、等限流冷却过去)。只写三参
+        # 的话那几处单参调用当场 TypeError 把整条大V采集带掉,而面板上只会看到
+        # 采集失败、指不到任何跟业务有关的东西。
+        if not count:
+            _stage('crawl', 'running', f'{reg.KINDS[kind]} · {name}:{done}')
+            return
         _stage('crawl', 'running', f'{reg.KINDS[kind]} · {name} {done}/{count} · @{handle}')
 
     # 区间补抓把它那段日期的起点交给采集器当下界:日常水位可能已经停在那段

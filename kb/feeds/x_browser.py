@@ -34,7 +34,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from kb.feeds import x_account, x_article, x_body, x_page_state, x_post, x_post_meta
+from kb.feeds import x_account, x_article, x_body, x_cooldown, x_page_state, x_post, x_post_meta
 from kb.feeds.x_cdp import Chrome, CdpError, has_login_footprint, profile_busy
 # 登录窗口的生死搬去了 `x_login_window`(x_cdp 顶着 700 行上限)
 from kb.feeds.x_login_window import login_window_left, release_login_window
@@ -396,16 +396,29 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
     try:
         with browser_session(profile, chrome_path, attach=attach) as page:
             page.open_page('about:blank')
-            for index, (handle, water) in enumerate(jobs, 1):
+            cool = x_cooldown.of(page)
+            # 待重试队列:启动限流过去之后,先前被它挡掉的账号排到队尾再试一次
+            # (每个号只排一次,余下由预算闸和停止请求兜住)。限流只持续几分钟,
+            # 不重排等于把本轮本可以读到的那几个号白丢掉。
+            queue, retried = list(enumerate(jobs, 1)), set()
+            while queue:
+                index, (handle, water) = queue.pop(0)
+                # **换下一个账号之前先走完冷却。** 不等的话整批会以每个不到一秒
+                # 的速度向同一个受限接口连发几十次(见 `x_cooldown` 的开头)。
+                # `announce` 在第一次 sleep **之前**说那句话 —— 等完再说的话这
+                # 几十秒里面板停在上一个账号上,看起来正是「又卡住了」。
+                cool.wait(deadline=deadline, should_stop=should_stop, announce=on_progress)
                 stopping = should_stop() if should_stop else False
                 if stopping or (deadline and time.monotonic() > deadline):
-                    results[handle] = {
+                    # 重排过的号第一遍已经记下了限流那句话,别用「预算用完」顶掉它。
+                    results.setdefault(handle, {
                         'entries': [], 'error': '',
                         'skipped': '已按停止请求中断' if stopping
-                                   else '本轮时间预算用完,留待下次同步'}
+                                   else '本轮时间预算用完,留待下次同步'})
                     continue
                 if on_progress:
                     on_progress(index, len(jobs), handle)
+                hits = cool.hits
                 floor = _utc(water) if water else (
                     datetime.now(timezone.utc) - timedelta(days=FIRST_DAYS))
                 # 这一轮真正用过的下界。没读完时存回**它**而不是存 `water`:新订阅
@@ -458,6 +471,10 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                         'watermark': started if incomplete else observed_watermark}
                     if timeline := getattr(page, '_x_timeline', None):
                         timeline.finalize(results[handle], started)
+                    if cool.hits == hits:
+                        # 这个号整条读下来、期间没再撞上:退避回到起点,免得早先
+                        # 那一次把后面无关的一次限流直接罚成封顶那么久。
+                        cool.cleared()
                 except (XRateLimited, XAccessBlocked, x_post.PostSessionUnavailable) as e:
                     if unavailable:
                         results[handle] = {'entries': [], 'error': str(e),
@@ -466,6 +483,17 @@ def harvest(jobs: list[tuple[str, str]], *, profile: str, chrome_path: str = '',
                 except x_account.XAccountUnavailable as e:
                     results[handle] = {'entries': [], 'error': str(e),
                                        'account_state': e.state, 'account_evidence': e.evidence}
+                except x_page_state.XSessionThrottled as e:
+                    # 启动接口被限流:**这个号本轮没读到,但不停整批** —— 这一档
+                    # 实测几分钟就自己过去,停等于把紧接着就能读到的那几十个号
+                    # 一起丢掉。代价是必须显式冷却并把它排到队尾重试一次,否则
+                    # 「少白等」就变成「更快地向同一个受限接口连发」。
+                    results[handle] = {'entries': [], 'error': str(e),
+                                       **x_post.unavailable_report(unavailable)}
+                    cool.throttled()
+                    if handle not in retried:
+                        retried.add(handle)
+                        queue.append((index, (handle, water)))
                 except (XBrowserError, CdpError, x_post.PostUnavailable) as e:
                     results[handle] = {'entries': [], 'error': str(e),
                                        **x_post.unavailable_report(unavailable)}
@@ -539,8 +567,9 @@ def open_login_window(profile: str, chrome_path: str = '') -> str:
 def verify_timeline(page, timeout: float = 0.0) -> tuple[str, dict]:
     """在一个已经导航到 `x.com/home` 的会话上,把落地状态判成一个结论码。
 
-    返回 `(结论码, 最后那份状态)`,码有七个:`ok`(读到推文了)、`login`(掉回
-    登录页)、`limited`(限流)、`failed`(请求出错)、`challenge`(安全验证)、
+    返回 `(结论码, 最后那份状态)`,码有八个:`ok`(读到推文了)、`login`(掉回
+    登录页)、`limited`(限流)、`session_limited`(应用启动请求被限流,页面停在
+    启动闪屏)、`failed`(请求出错)、`challenge`(安全验证)、
     `not-loaded`(首页压根没加载完)、`no-tweets`
     (加载完了却一条推文都没有)。
 
@@ -642,6 +671,12 @@ def probe(profile: str, chrome_path: str = '', *,
                                '不必因此重新登录')
             if verdict == 'limited':
                 return False, 'X 暂时限制了访问频率,稍后再试'
+            if verdict == 'session_limited':
+                # **不许说成登录失效、也不许说成"一条推文都没读到"。** 应用压根没
+                # 启动,所以页面上没有任何可读的字 —— 落到那句兜底文案会把人推去
+                # 重新登录,而登录态是好的(口径同 `challenge` 那一档)。
+                return False, ('X 限制了访问频率,页面应用没能启动,这一次没能验证登录态;'
+                               '稍后点「检查连接」重试,不必因此重新登录')
             if verdict == 'failed':
                 return False, 'X 页面请求出错,暂时无法验证登录态;稍后点「检查连接」重试,不必因此重新登录'
             if verdict == 'ok':

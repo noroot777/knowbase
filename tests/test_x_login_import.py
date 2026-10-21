@@ -456,6 +456,16 @@ class ProbeWordingTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual('X 暂时限制了访问频率,稍后再试', detail)
 
+    def test_a_throttled_app_boot_keeps_its_own_sentence_and_sends_nobody_to_log_in(self):
+        """**启动请求被限流时页面上一个字都没有**,所以它最容易落回最后那句兜底
+        文案 —— 而那句把人推去「打开登录窗口」,登录态却是好的(判据和事故形态见
+        `docs/decisions/x-channels.md`)。
+        """
+        ok, detail = self.run_probe({'session_limited': True})
+        self.assertFalse(ok)
+        self.assertEqual('X 限制了访问频率,页面应用没能启动,这一次没能验证登录态;'
+                         '稍后点「检查连接」重试,不必因此重新登录', detail)
+
     def test_a_page_that_never_loads_does_not_guess_the_cause(self):
         ok, detail = self.run_probe({'ready': 'loading'})
         self.assertFalse(ok)

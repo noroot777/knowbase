@@ -72,6 +72,7 @@ from kb.feeds.x_article_links import (  # noqa: F401  (re-export)
 from kb.feeds.x_article_shape import (
     ArticleUnavailable, _code_body, _entities, _entity_image, _fence,
     _media_urls, _must_block, _must_text, _rows)
+from kb.feeds import x_cooldown
 from kb.feeds.x_cdp import CdpError
 from kb.feeds.x_post_meta import stamp
 
@@ -423,11 +424,18 @@ def _one(entry: dict, session, *, deadline: float | None = None,
             # 别再启动它 —— 那一条照旧扣留,下一轮重试。
             if _over(deadline, should_stop):
                 raise
+            # **刚撞上启动限流也一样不开新页**(口径同上一道:扣留、下一轮重试)。
+            # 调度层那道冷却只拦在**换下一个账号之前**,拦不住同一个账号里的这
+            # 几十次导航 —— 账号边界不等于导航边界(见 `x_cooldown.cooling`)。
+            if why := x_cooldown.cooling(session):
+                raise ArticleUnavailable(why) from None
         return browser_fetch(session, entry['url'], deadline=deadline)
     # 接口被整个关掉(`KB_X_ARTICLE_API=''`):手里有浏览器就只走后路,没有就
     # 什么都不做 —— 后者的行为逐字退回这一步出现之前。
     if session is None or not BROWSER_FALLBACK:
         return None
+    if why := x_cooldown.cooling(session):
+        raise ArticleUnavailable(why)
     return browser_fetch(session, entry['url'], deadline=deadline)
 
 

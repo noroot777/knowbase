@@ -29,6 +29,8 @@ _VERDICT_TAIL = {
     'challenge': 'X 要求先过一次安全验证（账号访问受限）—— 这一关重新登录也绕不过'
                  '去，请在对应通道的浏览器里打开 x.com/account/access，完成验证后重试',
     'limited': 'X 当时在限流，没验证成；点「检查连接」再确认',
+    'session_limited': 'X 限制了访问频率，页面应用没能启动，所以这一次没验证成 ——'
+                       '不是安全验证，也不必只因为这个就重新登录；稍后点「检查连接」再确认',
     'failed': 'X 页面请求出错，暂时无法验证登录态；稍后点「检查连接」重试，不必因此重新登录',
     'not-loaded': 'X 首页当时没加载完，未能判出原因；点「检查连接」再确认',
     'no-tweets': '首页当时一条推文都没读到，未能判出原因；点「检查连接」再确认',
@@ -93,7 +95,7 @@ def _detail(verdict: str, count: int, last: dict, note: str) -> str:
         # 站点拒绝登录时它多半顺手清掉了凭证,于是盘上确实也对不上(第 4 轮审查
         # 实测:回调明确返回 `login`,产品却报 `unsaved` 并声称「当场也能用」)。
         reopened_failure = verdict == 'unconfirmed' and last.get('again') in (
-            'failed', 'limited', 'challenge', 'not-loaded', 'no-tweets')
+            'failed', 'limited', 'session_limited', 'challenge', 'not-loaded', 'no-tweets')
         reason = last['again'] if reopened_failure else verdict
         tail = _VERDICT_TAIL.get(reason, _VERDICT_TAIL.get(verdict, '没验证成'))
         stage = '重新打开之后那一次验证没跑成：' if reopened_failure else ''
