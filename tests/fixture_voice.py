@@ -63,7 +63,7 @@ def _say(text: str, *, stream: int = 2) -> None:
 def _drain_logs(budget: float) -> None:
     """给日志线程一点时间把话说完,**最多等 budget 秒**。
 
-    只在 `_bail` 和 `_no_boundary` 里用:收场理由能打出来最好,但它绝不许拖住收场。队列
+    只在 `_bail` 和 `no_defense` 里用:收场理由能打出来最好,但它绝不许拖住收场。队列
     空了只说明话已经交给那个线程,不保证已经落到 stderr —— 真卡在满管道上时谁也救不了
     它,那就丢掉。
     """
@@ -80,8 +80,8 @@ def _running_as_entry() -> bool:
     """这个进程是不是某个 `tests/serve_*.py` 自己在跑?
 
     摆盘边界只能在**夹具进程**里立 —— 被 `tests/test_fixture_life*.py` import 进来时,
-    这个进程是测试运行器,换掉它的 fd 1 / fd 2 会把别人的输出一起吞掉,`_no_boundary`
-    那条「当场退」更是会把整轮测试带走。
+    这个进程是测试运行器,换掉它的 fd 1 / fd 2 会把别人的输出一起吞掉;`no_defense`
+    那条「当场退」也按这个判,被 import 进来时改成抛而不是 `os._exit`。
     """
     return os.path.basename(sys.argv[0] or '').startswith('serve_')
 
@@ -106,22 +106,30 @@ def _forward_staging(read_fd: int, target: int) -> None:
         os.close(read_fd)
 
 
-def _no_boundary(why: str) -> NoReturn:
-    """**输出边界立不起来就当场退**,不许继续到一道防线都没有的运行状态。
+def no_defense(why: str) -> NoReturn:
+    """**一道必须有的东西装不上,就当场退**,不许继续到一道防线都没有的运行状态。
 
-    立不起来之后这个进程接下来**可能**一切正常,也可能在摆盘途中某一次别人的同步输出上
-    永久阻塞 —— 而那正是「一道防线都没装、进程永久留着」那个形态:手起这条路没有
-    owner,空闲那道又必须等摆盘结束才装。拿不准就别固化终态:这里退掉只是一次看得见的
-    启动失败(`_wait_listening` 当场报 `rc`、`fixture_server` 报启动失败),安静地留下来
-    才是静默漏一个永久夹具。
+    三处共用这一个出口:摆盘期的输出边界(这个文件)、写日志那个线程(`_arm_logs`)、
+    空闲那道的看门狗(`fixture_life.install`)。少任何一样,这个进程接下来**可能**一切
+    正常,也可能在某一次别人的同步输出上永久阻塞、或者根本没有谁来收它 —— 而那正是「一
+    道防线都没装、进程永久留着」那个形态:手起这条路没有 owner,空闲那道又必须等摆盘结束
+    才装。拿不准就别固化终态:退掉只是一次看得见的启动失败(`_wait_listening` 当场报
+    `rc`、`fixture_server` 报启动失败),安静地留下来才是静默漏一个永久夹具。
 
-    **用 `os._exit`,不抛异常。** 抛出去 Python 要把 traceback 写到 stderr 上,而「stderr
-    现在写不写得动」正是我们判不准的那件事,一写就可能永久卡在这儿 —— 那就从「漏一个在
-    服务的夹具」换成「挂一个什么都不干的进程」,没换好。理由走那个有界队列,给它半秒说
-    得出来最好,说不出来也照样退。
+    **夹具进程里用 `os._exit`,不抛异常。** 抛出去 Python 要把 traceback 写到 stderr 上,
+    而「stderr 现在写不写得动」正是我们判不准的那件事,一写就可能永久卡在这儿 —— 那就从
+    「漏一个在服务的夹具」换成「挂一个什么都不干的进程」,没换好(实测:让那两个线程起不
+    来,进程在填满的输出上挂着、首页不响应;一开始读那根管子它才把 traceback 吐完 rc=1)。
+    **诊断是有界的、而且不是退出的前提**:理由走那个有界队列、给它半秒,说不出来也照样退。
+
+    **被测试 import 进来时改成抛。** 那种进程不是会永久留着的夹具,而 `os._exit` 会把整轮
+    测试连它自己的清理一起带走 —— 抛出去就是 import / `install()` 当场失败,用例红,口径同
+    `fixture_life._arm_owner` 那条「少一道防线必须是响的」。
     """
-    _say(f'tests/fixture_voice.py: {why},夹具不起 —— 立不起输出边界就没有防线\n')
+    _say(f'tests/fixture_voice.py: {why},夹具不起 —— 少一道防线就等于没有防线\n')
     _drain_logs(0.5)
+    if not _running_as_entry():
+        raise RuntimeError(f'tests/fixture_voice.py: {why}')
     os._exit(NO_BOUNDARY_RC)
 
 
@@ -144,7 +152,7 @@ def _begin_staging() -> None:
     消费就按老规矩丢掉 —— **提示丢得起,防线丢不起**。
 
     **先起搬运线程、再换号。** 反过来的话线程起不来那一瞬间 fd 1/2 已经指着一根没人读的
-    管子,下一次输出就是永久阻塞,比不圈还糟。中途哪一步失败都走 `_no_boundary`,**一律
+    管子,下一次输出就是永久阻塞,比不圈还糟。中途哪一步失败都走 `no_defense`,**一律
     不许「就这样算了」继续跑**。
 
     **`dup2` 改的是我们自己这张 fd 表,不是那个共享的 open-file-description** —— 所以它跟
@@ -165,13 +173,13 @@ def _begin_staging() -> None:
             threading.Thread(target=_forward_staging, args=(read_fd, real),
                              daemon=True, name=f'fixture-staging-{fd}').start()
     except Exception as exc:         # dup / pipe / 线程都在这儿:一个都不许静默跳过
-        _no_boundary(f'摆盘期的输出边界立不起来({exc!r})')
+        no_defense(f'摆盘期的输出边界立不起来({exc!r})')
     for fd, (real, _read_fd, write_fd) in plumbing.items():
         _flush(fd)
         try:
             os.dup2(write_fd, fd)
         except (OSError, ValueError) as exc:
-            _no_boundary(f'{fd} 号换不成那根管子({exc!r})')
+            no_defense(f'{fd} 号换不成那根管子({exc!r})')
         _STAGED[fd] = real
     for _fd, (_real, _read_fd, write_fd) in plumbing.items():
         with contextlib.suppress(OSError):
@@ -197,8 +205,17 @@ def _arm_logs() -> None:
 
     `_say` 从那一刻起就只是「往队列里丢」,所以所有权看门狗、空闲看门狗、访问日志、
     收场理由没有一处会因为 stderr 不动而变慢 —— 而且谁都不用去碰 fd 2 的状态。
+
+    **它起不来也走那个 fail-closed 的出口。** 上一版这一行是裸的:`start()` 抛
+    `RuntimeError("can't start new thread")` 的时候异常一路向上,Python 把 traceback 写回
+    那根没人读的 stderr,进程就挂在那儿 —— 一道防线都没装,首页也不响应。这一步在
+    `_begin_staging` **之前**,所以此刻说的话只能走队列、而队列没有搬运线程了:`no_defense`
+    的 `_say` 照旧不阻塞,`_drain_logs` 等满那半秒就退,退出码本身就是诊断。
     """
-    threading.Thread(target=_log_pump, daemon=True, name='fixture-log').start()
+    try:
+        threading.Thread(target=_log_pump, daemon=True, name='fixture-log').start()
+    except Exception as exc:
+        no_defense(f'写日志那个线程起不来({exc!r})')
     _begin_staging()                 # 紧接着就把摆盘那两条通道圈起来
 
 

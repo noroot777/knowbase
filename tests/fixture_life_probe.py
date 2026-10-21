@@ -128,6 +128,23 @@ def _hold_high_fds(case, count: int = 1100) -> list[int]:
     return hold
 
 
+class IdentityUnknown(AssertionError):
+    """**量不出这个号的身份** —— 跟「它已经没了」是两件事,见 `_identity`。
+
+    继承 `AssertionError`:测试里抛出去是**响的**,用例当场红。单独给它一个类型,是为了
+    让回收那边那条「量不出来就换另一条证明」**只认它**:
+    - 认「凡 `AssertionError`」不够 —— 取样那一步真正的失败来自 `ps` 这个**子进程起不来**
+      (fd 不够时建管道/fork 就失败),内核给的是 `OSError`,它不是 `AssertionError`。实测
+      把软上限压到 64 占满 fd 之后跑整轮清理:`OSError(24)` 从判据里漏出去,holder 那条还
+      能用的证明压根没机会用,清理全跑完而那个夹具还在、页面照样 200。
+    - 认「凡 `OSError`」更不行:那是按异常类型分类,口径同 `fixture_life._is_stale` 那条
+      ——「这个号坏了」和「我们这边没资源了」得分开。
+
+    所以统一在 `_identity` 这一层把三种结果定清楚:**量到了**(非空串)、**确实没有这个
+    进程**(空串)、**判不出来**(抛这个)。上面那两种宽判都会把第三种吞成第二种。
+    """
+
+
 def _identity(pid: int) -> str:
     """一个进程的**不可变**身份:它的启动时刻。
 
@@ -144,20 +161,33 @@ def _identity(pid: int) -> str:
 
     **「量不出来」和「它已经没了」是两件事。** `ps` 起不来、被权限或资源挡住的时候返回
     空串就等于告诉回收方「没什么要收的」,而那正是静默漏一个进程的形态。所以只有 `ps`
-    明确说「没有这个进程」才回空串,量不出来一律抛 —— 测试里抛出去是**响的**,用例当场
-    红,不会把一个活着的夹具留在后台。
+    明确说「没有这个进程」才回空串,量不出来一律抛 `IdentityUnknown` —— 测试里抛出去是
+    **响的**,用例当场红,不会把一个活着的夹具留在后台。
+
+    **失败契约只有一种形状。** 起 `ps` 这个子进程本身会抛 `OSError`(fd 不够时建管道/fork
+    就失败),那也是「判不出来」,得在这里就转成 `IdentityUnknown` —— 让它按原样漏出去,
+    下游那条「量不出来就换另一条证明」就认不出它(实测后果见 `IdentityUnknown`)。
+
+    **「没有诊断文本」不等于「没有这个进程」。** 退回 absent 的判据要收到平台确实这么说的
+    那一种:`ps` 查不到进程时 `rc == 1` 且两个流都空。拿「非零退出码 + stderr 是空的」当
+    absent 太宽 —— `ps` 自己被信号打死(`rc` 是负数)、或者以别的码失败而什么都没说时也满足
+    它,于是一个还活着的进程被判成「没什么要收的」。宁可判不出来:那一边有 holder 兜着,
+    两条都没有时会抛,都是响的。
     """
-    out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
-                         capture_output=True, text=True)
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
+                             capture_output=True, text=True)
+    except OSError as exc:            # `ps` 这个子进程起不来:判不出来,不是「它没了」
+        raise IdentityUnknown(f"起不来 `ps`(要量 pid {pid}):{exc!r}") from exc
     got = out.stdout.strip()
     if got:
         # **pid 要绑进这个串里。** 启动时刻只精确到秒,同一秒里起来的两个进程读出来一模
         # 一样 —— 而回收那两个出口只比这个串,pid 是另一个参数。实测:杀掉本轮的 A、紧接
         # 着起另一轮的 B,拿 A 的身份去收 B,串对上了,活着的 B 被杀掉。
         return f"{pid}@{got}"
-    if out.returncode != 0 and not out.stderr.strip():
+    if out.returncode == 1 and not out.stderr.strip():
         return ""                    # `ps` 的「没有这个进程」
-    raise AssertionError(
+    raise IdentityUnknown(
         f"量不出 pid {pid} 的启动时刻(rc={out.returncode},"
         f" stderr={out.stderr.strip()!r}) —— 不许当成「它已经没了」")
 

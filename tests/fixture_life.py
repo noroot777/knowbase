@@ -70,7 +70,7 @@ import time
 
 # 说话那一侧整块在隔壁(有界队列 + 摆盘输出边界),**依赖是单向的**:它不认识这个模块。
 from tests.fixture_voice import (     # noqa: F401 - `_LOGS` 供回归直接看队列
-    _LOGS, _begin_staging, _drain_logs, _end_staging, _say,
+    _LOGS, _begin_staging, _drain_logs, _end_staging, _say, no_defense,
 )
 
 #: 所有权凭据:`"<fd>:<token>"`。fd 是一根**继承来的** pipe 读端(`pass_fds`),
@@ -448,16 +448,28 @@ def install(*, limit: float | None = None) -> None:
 
     线程是 `daemon`:它只是「夹具还活着的时候顺便盯一眼」,不该自己把进程留住
     (对应 `probe_shell.mjs` 那个 interval 的 `unref()`)。
+
+    **顺序是硬的:先把看门狗装上,再撤摆盘那道输出边界。** 反过来的话(上一版就是)
+    `_end_staging()` 已经把 fd 1/2 换回那两个可能没人读的真号,而紧接着这一行
+    `start()` 抛 `RuntimeError("can't start new thread")` 时,Python 要把 traceback 写
+    回去 —— 进程就挂在那儿:既没有 idle 线程,也不响应首页(实测:在填满的输出上挂着,
+    一开始读那根管子它才把 traceback 吐完 rc=1)。所以**最后一道防线装好之后才撤边界**,
+    而且 `start()` 失败一律走那个 fail-closed 的出口(`no_defense`,夹具进程里当场退、
+    被测试 import 进来时抛)。`_IDLE_ARMED` 也只在真起起来之后才落下:提前落下的话这个
+    幂等标志会把后面每一次 `install()` 都挡掉,而那道防线一个都没装上。
     """
     global _LIMIT, _IDLE_ARMED
-    _end_staging()                   # 摆盘结束:两条通道换回真身(见 `_begin_staging`)
     _LIMIT = idle_limit() if limit is None else limit
     touch()
+    if _LIMIT > 0 and not _IDLE_ARMED:   # 幂等:`announce()` 和 `guard()` 都会叫它
+        try:
+            threading.Thread(target=_watch_idle, daemon=True,
+                             name='fixture-idle').start()
+        except Exception as exc:
+            no_defense(f'空闲那道的看门狗起不来({exc!r})')
+        _IDLE_ARMED = True
+    _end_staging()                   # 防线都装好了,摆盘那道边界才撤(见 `_begin_staging`)
     _say(f'tests/fixture_life.py: {banner(_LIMIT)}\n')
-    if _LIMIT <= 0 or _IDLE_ARMED:
-        return                       # 幂等:`announce()` 和 `guard()` 都会叫它
-    _IDLE_ARMED = True
-    threading.Thread(target=_watch_idle, daemon=True, name='fixture-idle').start()
 
 
 def announce(text: str) -> None:

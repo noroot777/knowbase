@@ -27,7 +27,7 @@ import threading
 import time
 import unittest
 
-from tests import fixture_life
+from tests import fixture_life, fixture_voice
 from tests.fixture_life_probe import (   # noqa: F401 - 见那边的说明
     _shut_fds, _stat_of, _open_fds, _free_port, _alive, _wait_gone, _ping, _wait_listening, _owner_pipe, _identity, _hold_high_fds, _reset_state, _age, _closed,
     ROOT,
@@ -93,6 +93,19 @@ class 身份判据(unittest.TestCase):
             ast.parse(body).body[0]) or "", "")      # 去掉说明,只看代码
         self.assertIn("lstart=", code, "身份要取启动时刻")
         self.assertNotIn("command=", code, "`command=` 会变,不许进身份判据")
+
+    def test_防线装不上那个出口分两档(self):
+        """**夹具进程里当场退,被测试 import 进来时改成抛。**
+
+        那个出口(`no_defense`)的立意是「少一道防线就等于没有防线,拿不准就别固化终
+        态」—— 在夹具进程里它 `os._exit`,因为那个进程正是会永久留着的那一个。可**跑测试
+        的这个进程不是**:在这里 `os._exit` 会把整轮测试连它自己的清理一起带走(包括那些
+        负责收夹具的清理),比它要防的那件事更糟。所以这一档抛出去,用例当场红。
+        """
+        self.assertFalse(fixture_voice._running_as_entry(),
+                         "跑测试的这个进程不该被当成夹具入口")
+        with self.assertRaises(RuntimeError):
+            fixture_voice.no_defense("这是用例在验那一档")
 
     def test_取身份只有这一个出口(self):
         """判据只有一份:两份用例里谁都不许自己拼一份身份出来。

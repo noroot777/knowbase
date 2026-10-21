@@ -24,7 +24,7 @@ import unittest
 
 from tests import fixture_life
 from tests.fixture_life_probe import (
-    _shut_fds, _free_port, _identity, _wait_listening, ROOT,
+    IdentityUnknown, _shut_fds, _free_port, _identity, _wait_listening, ROOT,
 )
 
 
@@ -36,7 +36,12 @@ def _mine(pid: int, started: str | None,
 
     1. **身份**(`_identity`:pid + 启动时刻)。对不上就一个字都不碰 —— 要么它已经退
        了,要么这个号上现在是别人。只比脚本名不够(另一轮的同型夹具也叫这个名字),
-       只比 pid 不够(号会被回收)。
+       只比 pid 不够(号会被回收)。**「判不出来」只认 `IdentityUnknown` 这一种形状**:
+       上一版写的是 `except AssertionError`,而真实失败来自起 `ps` 那个子进程本身
+       (fd 不够时建管道/fork 就失败),内核给的是 `OSError` —— 它从判据里漏出去,下面
+       那条还能用的证明压根没机会用。实测把软上限压到 64 占满 fd 再跑整轮清理:清理全
+       部跑完、中间进程也收掉了,而那个夹具还在、页面照样 200。失败契约统一在
+       `_identity` 那一层(见 `IdentityUnknown`),这里只消费它。
     2. **谁还握着这个号**。`holder` 是这个 pid 的父进程、而且永远不 `wait()`,所以它
        活着的时候这个号即使已经退了也还只是僵尸,不可能落到别人手上。这条**不用取
        样**,所以身份还没量出来(`_claim_pid` 把登记排在取样之前)、或者这会儿量不出
@@ -50,7 +55,7 @@ def _mine(pid: int, started: str | None,
             return False             # 起它那会儿 `ps` 就说没有这个号 —— 本来没得收
         try:
             now = _identity(pid)
-        except AssertionError:
+        except IdentityUnknown:
             pass                     # 量不出来 → 落到下面那条不靠取样的证明上
         else:
             return now == started    # 空串 = `ps` 说没有这个进程 → 不碰

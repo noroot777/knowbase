@@ -20,6 +20,7 @@ import signal
 import subprocess
 import sys
 import time
+import unittest
 from unittest import mock
 
 from tests import fixture_life
@@ -27,7 +28,7 @@ from tests import fixture_life_cases
 from tests import fixture_life_probe
 from tests.fixture_life_cases import 起与收
 from tests.fixture_life_probe import (
-    _free_port, _identity, _stat_of, _wait_listening, ROOT,
+    IdentityUnknown, _free_port, _identity, _stat_of, _wait_listening, ROOT,
 )
 
 
@@ -133,6 +134,51 @@ class 身份与回收(起与收):
         dead.wait(timeout=10)
         self.assertEqual(_identity(dead.pid), "", "真没有这个进程就该安静地回空串")
 
+    def test_判不出身份的那几种形状都是同一种(self):
+        """**失败契约只有一种形状,下游才认得出它。**
+
+        回收那边那条「量不出来就换另一条证明」只认 `IdentityUnknown`。所以凡是「判不出
+        来」都得在 `_identity` 这一层收成它:
+        - **起 `ps` 这个子进程本身失败**(fd 不够时建管道/fork 就失败)—— 内核给的是
+          `OSError`,照原样漏出去的话下游认不出,那条还能用的证明压根没机会用;
+        - **`ps` 自己被信号打死、而且什么都没说** —— 上一版的 absent 判据是「非零退出码 +
+          stderr 是空的」,这一种正好满足它,于是一个活着的进程被判成「没什么要收的」。
+
+        反过来钉一边:平台确实说「没有这个进程」的那一种(`rc == 1`、两个流都空)照旧安静
+        地回空串,上一条用真退掉的进程钉着。
+        """
+        _, proc = self._spawn(idle="0")
+        with mock.patch.object(fixture_life_probe.subprocess, "run",
+                               side_effect=OSError(24, "Too many open files")):
+            with self.assertRaises(IdentityUnknown):
+                _identity(proc.pid)
+        with mock.patch.object(fixture_life_probe.subprocess, "run",
+                               return_value=subprocess.CompletedProcess(
+                                   [], -9, "", "")):
+            with self.assertRaises(IdentityUnknown):
+                _identity(proc.pid)
+
+    def test_取样抛的是资源错也照样收得掉(self):
+        """**上一版这条判据写的是 `except AssertionError`。**
+
+        而真实的取样失败来自起 `ps` 那个子进程本身,内核给的是 `OSError` —— 它从判据里漏
+        出去,`holder` 那条还能用的证明压根没机会用,清理当场中断。实测把软上限压到 64 占
+        满 fd 再跑整轮清理(那一条在隔壁,后果落在「夹具还在不在」上):清理全部跑完、中
+        间进程也收掉了,而那个夹具还在、页面照样 200。
+
+        这里只钉判据这一层:取样抛的是**资源错**时,照旧按 holder 那条证明收得掉。
+        """
+        port, middle, grandchild = self._spawn_via_middle(idle="0", owned=False)
+        born = _identity(grandchild)
+        with mock.patch.object(fixture_life_probe.subprocess, "run",
+                               side_effect=OSError(24, "Too many open files")):
+            self._reap_pid(grandchild, born, holder=middle)
+        middle.kill()                     # 先收掉它的父亲,否则孙进程是僵尸(见上面那条)
+        middle.wait(timeout=5)
+        self.assertTrue(self._wait_dead(grandchild, 10),
+                        "取样抛的是资源错也不许放过它")
+        self.assertFalse(self._port_open(port), "页面不该还开着")
+
     def test_被按住的进程身份对不上连唤醒都不许(self):
         """**SIGCONT 也是信号。** 上一版为了「先放它走才收得动」把它发在核验之前,
         那等于对一个还没认过的 pid 动手 —— 号被回收之后唤醒的是别人的进程。
@@ -205,6 +251,13 @@ class 身份与回收(起与收):
             return caught["port"]
 
         shell = fixture_life_cases.起与收()   # 一个独立的壳,好让我们自己跑它的清理
+        # **清理栈本身也是「一拿到手就登记」的那种东西。** 它自己的 `_claim_pid` 登记在它
+        # 自己那本账上,而外层 unittest 不会去跑另一个 TestCase 的账 —— 下面任何一步红了
+        # (抛的不是预期那个、断言不过、等不到就绪),那本账就没人翻,中间进程和孙进程
+        # 一起留在后台。实测在取样处制造真实 fd 紧张:外层红了、清理也跑完了,内层还欠
+        # 着三条,中间进程活着、孙进程的端口照旧 200。`doCleanups` 是幂等的(弹空就空
+        # 转),所以这里登记一次、下面照旧显式跑一次。
+        self.addCleanup(shell.doCleanups)
         with mock.patch.object(fixture_life_cases, "_identity", _boom), \
                 mock.patch.object(fixture_life_cases, "_free_port", _grab_port):
             with self.assertRaises(AssertionError):
@@ -230,8 +283,10 @@ class 身份与回收(起与收):
         """
         port, middle, grandchild = self._spawn_via_middle(idle="0", owned=False)
         born = _identity(grandchild)
+        # 注入的是它**接口里真会抛的那个类型**(`IdentityUnknown`),不是更宽的
+        # `AssertionError` —— 判据只认那一种形状,注入得比契约宽等于没按契约验
         with mock.patch.object(fixture_life_cases, "_identity",
-                               mock.Mock(side_effect=AssertionError("injected"))):
+                               mock.Mock(side_effect=IdentityUnknown("injected"))):
             self._reap_pid(grandchild, born, holder=middle)
         # 先收掉中间进程再看「收没收掉」:它是孙进程的父亲又永远不 `wait()`,孙进程被收
         # 掉之后会以僵尸的身份一直列在 `ps` 里(口径同 `test_身份对上就真收掉`)。
@@ -254,3 +309,52 @@ class 身份与回收(起与收):
             self._reap_pid(proc.pid, None)     # 身份还没量出来,又没有 holder
         time.sleep(0.3)
         self.assertIsNone(proc.poll(), "认不出是不是我们的,一个字都不碰")
+
+    def test_不是量不出身份的那种错不许被吞掉(self):
+        """**判据只认那一种形状。**
+
+        `IdentityUnknown` 是 `AssertionError` 的子类(为了「测试里抛出去是响的」),所以
+        把捕获写宽成 `except AssertionError` 时,**别处的** `AssertionError` —— 另一个 bug、
+        或者用例自己注入的断言 —— 会被一起当成「量不出身份」,静默换去走另一条证明。上一
+        轮的反向验证就是这么变成假绿的:注入 `AssertionError` 的那一版照旧被判据吞掉。
+
+        所以这里钉的是:不是那一种形状的错**必须抛出去**,而那个夹具由它自己的清理去收。
+        """
+        _, middle, kid = self._spawn_via_middle(idle="0", owned=False)
+        born = _identity(kid)
+        with mock.patch.object(fixture_life_cases, "_identity",
+                               mock.Mock(side_effect=AssertionError("别处的 bug"))):
+            with self.assertRaises(AssertionError):
+                self._reap_pid(kid, born, holder=middle)
+
+    def test_嵌套的清理栈要立刻交给外层(self):
+        """**清理栈本身也是「一拿到手就登记」的那种东西。**
+
+        内层那个壳自己的 `_claim_pid` 记在**它自己**那本账上,而外层 unittest 不会去跑另一
+        个 `TestCase` 的账 —— 创建它之后任何一步红了(抛的不是预期那个、断言不过、等不到
+        就绪),那本账就没人翻,它起的中间进程和夹具一起留在后台。实测在就绪等待那一处注
+        入失败:外层红了、外层的清理也跑完了,内层还欠着三条,中间进程活着、孙进程的端口
+        照旧 200。
+
+        这里把那个形态原样搭出来(外层壳 → 内层壳 → 起一个真夹具 → 中途抛),断言后果:
+        **外层 `run()` 回来之后,内层起的那个夹具没了、端口也不响应**。全仓有没有漏掉的同
+        类位置,由 `tests/test_probe_contract.py` 那条按结构判的守卫盯着。
+        """
+        box: dict = {}
+        outer = self
+
+        class 外层(fixture_life_cases.起与收):
+            def runTest(self):                       # noqa: D102 - 见外面那条 docstring
+                shell = fixture_life_cases.起与收()
+                self.addCleanup(shell.doCleanups)    # ← 被钉的就是这一行
+                port, middle, kid = shell._spawn_via_middle(idle="0", owned=False)
+                box.update(port=port, kid=kid, born=_identity(kid))
+                # 兜底:下面抛出去之后万一没人收,也别留在后台
+                outer.addCleanup(outer._reap_pid, kid, box["born"])
+                raise AssertionError("injected:壳建出来之后任何一步红了")
+
+        外层().run(unittest.TestResult())
+        self.assertIn("kid", box, "没走到起夹具那一步,这条用例没验到东西")
+        self.assertTrue(self._wait_dead(box["kid"], 10),
+                        "内层那本账没人翻 —— 它起的夹具留在后台了")
+        self.assertFalse(self._port_open(box["port"]), "页面不该还开着")

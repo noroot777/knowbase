@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import signal
@@ -409,6 +410,128 @@ class 后果(起与收):
                          f"{done.stderr[-400:]!r}")
         self.assertFalse(self._port_open(port), "一个端口都不该开出来")
 
+    def test_必需的线程起不来也不许挂在那儿(self):
+        """**fail-closed 要盖住每一道必需的东西,不只是那几根管子。**
+
+        写日志那个线程、空闲那道的看门狗,上一版两处 `start()` 都是裸的:抛
+        `RuntimeError("can't start new thread")` 时异常一路向上,Python 把 traceback 写回
+        那两个**可能没人读**的真号,于是进程挂在那儿 —— 既没有防线,首页也不响应,而且
+        `_end_staging()` 已经把边界撤了,连那段诊断都出不来(实测:在填满的输出上挂着,
+        一开始读那根管子它才把 traceback 吐完 rc=1)。
+
+        所以①看门狗装好之后才撤边界;②两处 `start()` 都走那个 fail-closed 的出口。这里给
+        真入口两条都填满的输出、再分别注入那两个线程的 `start`,断言后果:**它在限时内自
+        己退掉、退出码是认得出来的那个、一个端口都没开出来** —— 诊断说不出来也照样退。
+        """
+        for name in ("fixture-log", "fixture-idle"):
+            with self.subTest(thread=name):
+                _, out_w = self._plug()
+                _, err_w = self._plug()
+                port = _free_port()
+                code = "\n".join([
+                    "import runpy, sys, threading",
+                    "bad = sys.argv[1]",
+                    "real = threading.Thread.start",
+                    "def start(self):",
+                    "    if self.name == bad:",
+                    "        raise RuntimeError(\"can't start new thread\")",
+                    "    return real(self)",
+                    "threading.Thread.start = start",
+                    "sys.argv = sys.argv[2:]",         # argv[0] 得是那个入口自己
+                    "runpy.run_path(sys.argv[0], run_name='__main__')",
+                ])
+                env = {**os.environ, fixture_life.IDLE_ENV: "1",
+                       "PYTHONUNBUFFERED": "1"}
+                env.pop(fixture_life.OWNER_ENV, None)
+                done = subprocess.run(
+                    [sys.executable, "-u", "-c", code, name,
+                     "tests/serve_workspace.py", "--port", str(port)],
+                    cwd=ROOT, env=env, stdout=out_w, stderr=err_w, timeout=60)
+                self.assertEqual(done.returncode, fixture_voice.NO_BOUNDARY_RC,
+                                 f"{name} 起不来就该当场退,不许挂着")
+                self.assertFalse(self._port_open(port), "一个端口都不该开出来")
+
+    def test_资源紧张时清理照旧收得掉夹具(self):
+        """**第 1 条的后果,而且是真资源故障,不是注入的异常值。**
+
+        回收判据上一版写的是 `except AssertionError`,而真实的取样失败来自起 `ps` 那个子
+        进程本身 —— fd 不够时建管道/fork 就失败,内核给的是 `OSError`。它从判据里漏出
+        去,`holder` 那条还能用的证明压根没机会用:清理当场中断,而那条用例起的正是「没
+        有 owner、空闲也关掉」那一档,没有任何别的东西会来收它。
+
+        这里在**一个独立子进程**里跑整条:真起一个夹具,然后把软上限压到 64 占满 fd,让
+        普通 unittest 的清理(后进先出)**在真紧张里**跑完 —— 释放 fd 那两条登记得最早,
+        所以跑得最晚。断言的是后果:清理跑完之后**那个进程没了、端口也不响应**。
+
+        压上限这件事只在那个子进程里发生:在本进程里做会把后面每一条用例都推到 `EMFILE`
+        (口径同 `_hold_high_fds` 和「低上限下高位用例不许污染整轮」那条)。
+        """
+        code = "\n".join([
+            "import os, resource, socket, sys, unittest",
+            f"sys.path.insert(0, {str(ROOT)!r})",
+            "from tests.fixture_life_cases import 起与收",
+            "from tests.fixture_life_probe import _identity",
+            "box = {}",
+            "class 一次(起与收):",
+            "    def runTest(self):",
+            "        hold = []",
+            "        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)",
+            # 这两条登记得最早 → 跑得最晚,所以收夹具那几步真的落在紧张里
+            "        self.addCleanup(resource.setrlimit, resource.RLIMIT_NOFILE,"
+            " (soft, hard))",
+            "        self.addCleanup(lambda: [os.close(fd) for fd in hold])",
+            "        port, middle, kid = self._spawn_via_middle(idle='0', owned=False)",
+            "        box.update(port=port, pid=kid, born=_identity(kid))",
+            "        resource.setrlimit(resource.RLIMIT_NOFILE, (64, hard))",
+            "        try:",
+            "            while True:",
+            "                hold.append(os.open(os.devnull, os.O_RDONLY))",
+            "        except OSError:",
+            "            pass",
+            "case = 一次()",
+            "case.run(unittest.TestResult())",
+            "def listening(port):",
+            "    with socket.socket() as s:",
+            "        s.settimeout(0.5)",
+            "        return s.connect_ex(('127.0.0.1', port)) == 0",
+            "still = _identity(box['pid']) == box['born']",
+            "print('alive=%s port=%s' % (still, listening(box['port'])), flush=True)",
+            "if still:",
+            "    os.kill(box['pid'], 9)",          # 兜底:断言红了也不许留在后台
+        ])
+        done = subprocess.run([sys.executable, "-c", code], cwd=ROOT,
+                              capture_output=True, text=True, timeout=180)
+        line = next((ln for ln in done.stdout.splitlines()
+                     if ln.startswith("alive=")), "")
+        self.assertTrue(line, f"子进程没报出结果:{done.stdout[-300:]!r} "
+                              f"{done.stderr[-500:]!r}")
+        got = dict(part.split("=", 1) for part in line.split())
+        self.assertEqual(got["alive"], "False",
+                         f"资源紧张也不许把起好的夹具丢在后台:{line}")
+        self.assertEqual(got["port"], "False", f"页面不该还开着:{line}")
+
+    def test_临时目录名带空格也解析得对(self):
+        """**那条用例要把一份临时根的路径从子进程里取回来,路径里合法地可能有空格。**
+
+        上一版是「空格分隔的第三个字段」,实测把 `TMPDIR` 设成一个名字里带空格的真目录
+        再跑它:路径被截断,前缀核验当场误报红,而那份根还留在盘上。合法的空白字符不止
+        空格一种,所以这不是「换个分隔符」的事 —— 换成带 framing 的消息(JSON)。
+
+        这里在一个名字带空格的真 `TMPDIR` 底下跑那条真用例,断言后果:**它照旧绿,而且
+        那个目录底下什么都不剩**。
+        """
+        with tempfile.TemporaryDirectory(prefix="kb fixture space-") as tmp:
+            env = {**os.environ, "TMPDIR": tmp}
+            env.pop(fixture_life.OWNER_ENV, None)
+            done = subprocess.run(
+                [sys.executable, "-m", "unittest", "tests.test_fixture_life_outcome."
+                 "后果.test_真的fixture_server给得出可用的凭据"],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=180)
+            self.assertEqual(done.returncode, 0,
+                             f"带空格的临时目录下也该绿:{done.stderr[-600:]!r}")
+            self.assertEqual([], os.listdir(tmp),
+                             "带空格的临时根下不该留东西")
+
     def test_低上限下高位用例不许污染整轮(self):
         """**准备阶段失败只该让这一条跳过,不该把整个测试进程推到 `EMFILE`。**
 
@@ -472,12 +595,17 @@ class 后果(起与收):
         """**两侧各有自己的红**:上面那条验夹具认不认 EOF,这条验起它的那一侧确实
         把凭据发了出来 —— 中间那个进程用的是真的 `fixture_server()`。
         """
+        # **交回来的那几样走一条无损的消息**(JSON),不是空格分隔:临时目录的名字里合法
+        # 地带空格(实测 `TMPDIR` 带一个空格,按空格切开之后路径被截断,前缀核验当场误报
+        # 红、那份根还留在盘上)。合法的空白字符不止空格一种,所以不是「把分隔符换一个」
+        # 的问题 —— 要的是带 framing 的消息。
         code = "\n".join([
-            "import time",
+            "import json, time",
             "from tests import headless",
             "with headless.fixture_server(script='serve_workspace.py',"
             " timeout=60) as base:",
-            "    print(base, base.pid, base.root, flush=True)",
+            "    print(json.dumps({'base': str(base), 'pid': base.pid,"
+            " 'root': base.root}), flush=True)",
             "    time.sleep(600)",
         ])
         env = {**os.environ, fixture_life.IDLE_ENV: "0"}   # 单验 owner 这一道
@@ -487,7 +615,9 @@ class 后果(起与收):
         self.addCleanup(self._reap, middle)
         self.addCleanup(middle.stdout.close)
         line = middle.stdout.readline().strip()
-        base, raw_pid, raw_root = (line.split(" ") + ["", ""])[:3]
+        self.assertTrue(line, "中间进程什么都没吐出来")
+        got = json.loads(line)
+        base, raw_pid, raw_root = got["base"], got["pid"], got["root"]
         self.assertTrue(base.startswith("http://"), f"没拿到 base URL:{line!r}")
         port = int(base.rsplit(":", 1)[1])
         # **中间进程是被 SIGKILL 收掉的**,它 `fixture_server` 的 `finally` 一行都不跑,

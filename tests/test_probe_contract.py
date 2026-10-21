@@ -282,6 +282,43 @@ class ProbeSourceContractTests(unittest.TestCase):
                          "裸起夹具的基类只给夹具自退那一块用,别处要走 fixture_server")
 
 
+    def test_嵌套的测试壳一建出来就要把清理交给外层(self):
+        """**另一个 `TestCase` 的清理栈不会有人替你跑。**
+
+        夹具自退那一块有几条用例要在一个独立的壳(`起与收()`)里跑一遍失败路径。那个壳自
+        己的 `addCleanup` 记在**它自己**那本账上,外层 unittest 不认 —— 创建它之后任何一步
+        红了(抛的不是预期那个、断言不过、等不到就绪),那本账就没人翻,它起的中间进程和夹
+        具一起留在后台。后果那一边在 `tests/test_fixture_life_identity.py` 钉着,这里钉的是
+        **全仓有没有漏掉的位置**:凡实例化那个壳的函数,必须在同一个函数里把它的
+        `doCleanups` 交给外层。
+
+        **按名字判,所以派生一层再实例化不在射程内** —— 今天两处实际形态都是直接实例化它,
+        而那条守卫一旦误报,下一个人就会去给一个压根不起进程的类挂清理。
+        """
+        shell = "起" + "与收"            # 拼出来,否则这一行自己就被扫中
+        offenders = []
+        for f in sorted(HERE.glob("test_*.py")):
+            if f.name == Path(__file__).name:
+                continue             # 这条守卫自己也写着那个名字
+            for fn in [n for n in ast.walk(ast.parse(f.read_text(encoding="utf-8")))
+                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+                built = [n for n in ast.walk(fn)
+                         if isinstance(n, ast.Call)
+                         and (getattr(n.func, "id", "") == shell
+                              or getattr(n.func, "attr", "") == shell)]
+                if not built:
+                    continue
+                handed = [n for n in ast.walk(fn)
+                          if isinstance(n, ast.Call)
+                          and getattr(n.func, "attr", "") == "addCleanup"
+                          and any(getattr(a, "attr", "") == "doCleanups"
+                                  for a in ast.walk(n))]
+                if not handed:
+                    offenders.append(f"{f.name}:{fn.name}")
+        self.assertEqual([], offenders,
+                         "这些地方建了一个独立的测试壳却没把它的清理交给外层 —— "
+                         "中途红一下,它起的进程就没人收了")
+
     def test_class_fixtures_register_their_cleanup_when_they_build_it(self):
         """类级 fixture 必须**建完就登记** `addClassCleanup`,不许只写 `tearDownClass`。
 
