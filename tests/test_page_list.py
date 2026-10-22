@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -22,53 +21,13 @@ from unittest.mock import Mock, patch
 from kb import config, maintenance
 from kb.collectors import FetchScope
 from kb.feeds import fetching, fulltext, page_list, registry as reg, sync, translate
-from kb.feeds.fetching import FeedError, Response
+from kb.feeds.fetching import FeedError
 from kb.feeds.page_list import (item_published, item_subject, parse_page_list,
                                 read_published, shell_body)
 from kb.source_types import feed_types
 
-SAMPLE = (Path(__file__).parent / 'page_list_sample.html').read_bytes()
-BASE = 'https://www.anthropic.com/news'
-ARTICLE = ('<html><body><nav><a href="/">Home</a><a href="/news">News</a></nav>'
-           '<article><h1>Introducing the Anthropic Cyber Mission</h1>'
-           '<p>We are launching a program to put frontier models in the hands of '
-           'cyber defenders, because defense is where the asymmetry can be flipped. '
-           'The gap between attacker and defender tooling has widened for a decade.</p>'
-           '<p>The first cohort covers critical infrastructure operators and the '
-           'open-source maintainers who carry a disproportionate share of the load. '
-           'Each participant gets model access plus a dedicated review channel.</p>'
-           '</article><footer>© 2026 Anthropic</footer></body></html>')
-
-
-def resp(body: str | bytes, url: str = BASE, status: int = 200) -> Response:
-    raw = body.encode() if isinstance(body, str) else body
-    return Response(status, url, raw, {'content-type': 'text/html; charset=utf-8'})
-
-
-def listing(rows, *, noise: int = 20, head: str = '') -> bytes:
-    """一张最小列表页。
-
-    `noise` 条**不带日期**的页脚链接刻意排在前面、而且数量远多于正文列表 ——
-    这正是 Anthropic 那一页的真实形态(90 条页脚菜单 vs 10 条新闻),用来钉住
-    判据是"带日期",不是"哪一组链接最多"。
-    """
-    menu = ''.join(f'<li><a href="/p/{i}">Pricing {i}</a></li>' for i in range(noise))
-    items = ''.join(
-        f'<li><a href="{href}"><div><time{datetime_attr}>{shown}</time>'
-        f'<span>{subject}</span></div><span>{title}</span></a></li>'
-        for href, shown, subject, title, datetime_attr in rows)
-    return (f'<html><body>{head}<footer><ul>{menu}</ul></footer>'
-            f'<main><ul>{items}</ul></main></body></html>').encode()
-
-
-def row(href, shown, title, *, subject='Announcements', attr=''):
-    return (href, shown, subject, title, f' datetime="{attr}"' if attr else '')
-
-
-def today(offset: int = 0) -> str:
-    """样本日期跟着今天走:写死的日期过几天就被 history_floor 挡住,而红的会是
-    一堆跟它毫无关系的用例(口径同 `test_feed_sources` 的 `_FRESH`)。"""
-    return time.strftime('%Y-%m-%d', time.localtime(time.time() - offset * 86400))
+from tests.page_list_fixtures import (ARTICLE, BASE, SAMPLE, listing, resp,
+                                      row, rows_listing, today)
 
 
 class DateTests(unittest.TestCase):
@@ -115,6 +74,25 @@ class DateTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(read_published(text), '')
 
+    def test_an_unusable_clock_still_gives_the_day(self):
+        """**钟点读不出来只丢钟点,不许往外抛。**
+
+        `+25:00` 会让 `timezone()` 抛 `ValueError`、`9999-12-31T23:00Z` 换算
+        到项目时区会抛 `OverflowError`。整页一次的日期索引会把**页脚一个无关
+        的坏时间**变成整条订阅同步失败(实测两篇真文章 added=2 变 added=0、
+        给这条订阅记一次失败进退避),而这两段文字的**日子**都是读得出来的。
+
+        口径跟"小时写成 99"那一条完全一样:日子读得出来就如实给到日。判空和
+        报错在上一层(整页一条都解析不出来才是故障),不在这里。
+        """
+        for text, want in (('2026-10-20T12:00+25:00', '2026-10-20'),
+                           ('2026-10-20T12:00-99:99', '2026-10-20'),
+                           ('9999-12-31T23:00Z', '9999-12-31'),
+                           ('0001-01-01T00:30+08:00', '0001-01-01'),
+                           ('2026-10-20T99:00Z', '2026-10-20')):
+            with self.subTest(text):
+                self.assertEqual(read_published(text), want)
+
     def test_time_tag_beats_prose(self):
         html = ('<li><time datetime="2026-10-08T19:00:00Z">yesterday</time>'
                 '<span>filed 2026-01-01</span></li>')
@@ -123,122 +101,22 @@ class DateTests(unittest.TestCase):
         # `<time datetime>` 是"这是个时间"的标准语义,排在正文里的数字前面。
         self.assertEqual(item_published(node), '2026-10-09 03:00')
 
+    def test_a_time_tag_does_not_read_its_own_datetime_attribute(self):
+        """问一个 `<time>` 节点自己,`datetime` 属性**不算** —— 既有口径。
 
-class GroupTests(unittest.TestCase):
-    """定位判据:带发布时间的那一组链接就是文章列表。"""
+        原实现问的是 `node.find_all('time')`,而 bs4 的 `find_all` 只找
+        **后代**。所以对一个文字为空、日期全在属性里的 `<time>` 节点,答案是
+        空串,不是那个属性值。
 
-    def test_the_dated_group_wins_not_the_biggest_one(self):
-        # **这是整个模块的承重判据。** 实测 Anthropic 那一页上最大的链接组是
-        # 90 条页脚菜单,真正的新闻列表只有 10 条。
-        got = parse_page_list(listing([row('/news/a', 'Oct 8, 2026', 'First thing'),
-                                       row('/news/b', 'Oct 7, 2026', 'Second thing'),
-                                       row('/news/c', 'Oct 6, 2026', 'Third thing')],
-                                      noise=90), BASE)
-        self.assertEqual([e['title'] for e in got],
-                         ['First thing', 'Second thing', 'Third thing'])
-        for e in got:
-            self.assertNotIn('Pricing', e['body'])
-
-    def test_the_real_anthropic_page(self):
-        got = parse_page_list(SAMPLE, BASE)
-        titles = [e['title'] for e in got]
-        self.assertIn('2026 Usage Policy update', titles)
-        self.assertIn('Introducing the Anthropic Cyber Mission', titles)
-        # 页脚菜单、导航、以及那三条标题是 `Newsroom`、地址指向首页的噪音,
-        # 一条都没混进来。
-        self.assertNotIn('Newsroom', titles)
-        for e in got:
-            self.assertTrue(e['published'], f'{e["title"]} 没有日期')
-            self.assertTrue(e['url'].startswith('https://www.anthropic.com/'))
-        self.assertEqual(got[0]['published'][:10], '2026-10-08')
-
-    def test_the_featured_cards_on_the_real_page_are_not_dropped(self):
-        """**先验后果**:只断言"收了几条"的话,一个把 featured 换成别的噪音
-        的实现也能凑够数 —— 这里点名那三条真文章。
-
-        它们是 Anthropic 当前页面上单独展示的发布公告,地址**不在** `/news/`
-        下,所以旧版那句"只留胜出组"一条都收不到,而同步照常报成功(审查第 2
-        条,边界说明里写的"当前页面没发现漏掉"只比了 `/news/` 下的链接)。
+        **这一条是冗余带**:`item_published` 在解析里只被用来问"记录容器"和
+        它的祖先,而容器是链接的独占祖先或链接自己,永远不会是 `<time>`。
+        留着是因为它是公开函数(别处可以拿任意节点来问),而把节点自己算进去
+        这个差错在改日期查询实现时真的犯过一次 —— 逐节点差分在 400 份随机
+        输入上逮到 81 处,全是这一类。
         """
-        got = {e['title']: e for e in parse_page_list(SAMPLE, BASE)}
-        for name, slug in (('Introducing Claude Haiku 5.5', 'claude-haiku-5-5'),
-                           ('Introducing Claude Sonnet 5.5', 'claude-sonnet-5-5'),
-                           ('Introducing Claude Opus 5.5', 'claude-opus-5-5')):
-            with self.subTest(name):
-                self.assertIn(name, got)
-                self.assertEqual(got[name]['url'], f'https://www.anthropic.com/{slug}')
-                self.assertTrue(got[name]['published'])
-        # 真列表那 10 条一条没少 —— 多收不等于换了一批。
-        news = [e for e in got.values() if '/news/' in e['url']]
-        self.assertEqual(len(news), 10)
-
-    def test_a_single_featured_card_above_the_list_is_kept(self):
-        """审查那份最小样本的形状:顶部 `<section>` 里 1 条头条 + 下面 2 条列表。
-
-        1 条够不着 `MIN_DATED`,靠的是"这一组里每条都带日期"那半句判据;而它
-        能认出自己那张卡片,靠的是容器在**整页**尺度上算 —— 组内算的话它的
-        容器是整份文档。
-        """
-        page = (b'<html><body><main>'
-                b'<section><a href="/latest"><time datetime="2026-10-10">2026-10-10</time>'
-                b'<h2>Newest announcement</h2></a></section>'
-                b'<ul><li><a href="/older"><time datetime="2026-10-09">2026-10-09</time>'
-                b'<h3>Older announcement</h3></a></li>'
-                b'<li><a href="/oldest"><time datetime="2026-10-08">2026-10-08</time>'
-                b'<h3>Oldest announcement</h3></a></li></ul>'
-                b'</main></body></html>')
-        got = parse_page_list(page, BASE)
-        self.assertEqual([e['title'] for e in got],
-                         ['Newest announcement', 'Older announcement', 'Oldest announcement'])
-        self.assertEqual(got[0]['url'], 'https://www.anthropic.com/latest')
-        self.assertEqual(got[0]['published'], '2026-10-10')
-
-    def test_newest_first(self):
-        got = parse_page_list(listing([row('/news/old', 'Sep 1, 2026', 'Older one'),
-                                       row('/news/new', 'Oct 8, 2026', 'Newer one'),
-                                       row('/news/mid', 'Oct 1, 2026', 'Middle one')]), BASE)
-        self.assertEqual([e['title'] for e in got],
-                         ['Newer one', 'Middle one', 'Older one'])
-
-    def test_one_dated_link_is_not_a_list(self):
-        # 1 条太容易是巧合,而**宁可报错也不要把导航当列表**:误报用户看得见,
-        # 漏报是往知识库里灌垃圾。
-        with self.assertRaises(FeedError):
-            parse_page_list(listing([row('/news/a', 'Oct 8, 2026', 'Only one')]), BASE)
-
-    def test_tracking_parameters_are_stripped(self):
-        got = parse_page_list(listing([row('/news/a?utm_source=x', 'Oct 8, 2026', 'Tracked one'),
-                                       row('/news/b?utm_medium=y', 'Oct 7, 2026', 'Tracked two')]), BASE)
-        for e in got:
-            self.assertNotIn('utm_', e['url'])
-
-    def test_same_url_twice_lands_once(self):
-        got = parse_page_list(listing([row('/news/a', 'Oct 8, 2026', 'A once'),
-                                       row('/news/a', 'Oct 8, 2026', 'A again'),
-                                       row('/news/b', 'Oct 7, 2026', 'B second')]), BASE)
-        self.assertEqual(len(got), 2)
-
-    def test_a_wide_page_does_not_cost_quadratic_time(self):
-        # `_containers` 按祖先计数算,不对每个祖先 `find_all` 一遍。后者在一张
-        # 几千链接的页面上是 O(n²),会把采集预算吃光。
-        #
-        # **这一局的形状是故意的:链接都是同一个父节点的直接子节点。** 第一版
-        # 把它们各自包进 `<li>`,于是 `find_all` 那版在 `ul` 这一层就 break 了、
-        # 祖先链只有四层 —— 注入 O(n²) 实测红 0 条,用例对它压根不敏感。链接
-        # 共享一个大父节点时才会逐个扫全量兄弟,而这是真实的扁平列表形态。
-        items = ''.join(
-            f'<a href="/news/{i}"><time>Oct 8, 2026</time>'
-            f'<span>Story number {i} title</span></a>' for i in range(400))
-        menu = ''.join(f'<a href="/p/{i}">Pricing {i}</a>' for i in range(2600))
-        html = f'<html><body><nav>{menu}</nav><main>{items}</main></body></html>'.encode()
-        start = time.monotonic()
-        got = parse_page_list(html, BASE)
-        spent = time.monotonic() - start
-        self.assertEqual(len(got), 400)
-        # 上限 2 秒:实测线性版 0.002 秒、`find_all` 版 4.54 秒(差 2270 倍),
-        # 所以这个数既离基线有一千倍余量,又拦得住 O(n²)。第一版写 10 秒 ——
-        # 注入 O(n²) 实测 4.54 秒、照样通过,整条用例对它不敏感。
-        self.assertLess(spent, 2.0, f'3000 个链接花了 {spent:.1f} 秒')
+        from bs4 import BeautifulSoup
+        node = BeautifulSoup('<time datetime="2026-10-20"></time>', 'html.parser').find('time')
+        self.assertEqual(item_published(node), '')
 
 
 class FieldTests(unittest.TestCase):
@@ -449,6 +327,36 @@ class EndToEndTests(unittest.TestCase):
             self.assertNotIn(furniture, after['body'])
         self.assertEqual(after['content_kind'], 'content')
         self.assertTrue(after['fulltext_at'])
+
+    def test_a_redesigned_row_lands_the_article_not_its_category_badge(self):
+        """**先断言后果:库里那条是什么。**
+
+        只验解析结果的话,"分类角标不是记录"这件事还可能在落库那一圈被别的
+        东西带回来(壳正文里带着角标地址、补抓顺着它去读)。这里真跑一轮
+        采集 + 补抓,断言库里那条是文章、而角标那个地址压根没有行。
+        """
+        page = rows_listing([row('/news/cyber', today(1), 'Introducing the Anthropic Cyber Mission'),
+                             row('/news/midterms', today(2), 'Preparing for the midterms')])
+        with patch.object(fetching, 'request', Mock(return_value=resp(page))):
+            summary = sync.collect('web', FetchScope())
+        self.assertEqual(summary['errors'], [])
+        self.assertEqual(summary['added'], 2, '两篇文章,角标不算一条')
+
+        with reg.db() as c:
+            urls = [r['url'] for r in c.execute(
+                'SELECT url FROM feed_items WHERE kind=?', ('web',)).fetchall()]
+        self.assertEqual(sorted(urls), ['https://www.anthropic.com/news/cyber',
+                                        'https://www.anthropic.com/news/midterms'])
+
+        key = self.key('https://www.anthropic.com/news/cyber')
+        before = self.row(key)
+        self.assertEqual(before['title'], 'Introducing the Anthropic Cyber Mission')
+        self.assertIn('Announcements', before['body'])     # 角标是个字段,写进壳里
+        with patch.object(fulltext, 'request', Mock(return_value=resp(ARTICLE))):
+            done = fulltext.fetch_pending('web')
+        self.assertEqual(done['failed'], 0)
+        self.assertIn('frontier models in the hands of cyber defenders',
+                      self.row(key)['body'])
 
     def test_history_floor_applies_to_this_kind_too(self):
         page = listing([row('/news/fresh', today(1), 'Fresh enough'),
