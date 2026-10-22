@@ -82,20 +82,39 @@ _TUTORIAL = (
     'This setting affects only the local preview and does not require an account or '
     'change the contents of any saved article.')
 TUTORIAL_MD = '# Enable JavaScript for the local reader\n\n' + _TUTORIAL
-#: 同一篇教程的 **HTML** 身子 —— 走共用准入(`admit`)那条路。审查第 1 轮实测它在
-#: 这条路上被拒:补抓侧连抓三轮各扣一次额度,第三轮之后退出补抓队列
-#: (`fulltext_at` 始终空),库里和 vault 里永久只剩 feed 那段摘要、还按摘要翻译
-#: 导出;手动收录侧当场提示「这一页要求先完成验证或登录」。**误拒在补抓这条路上
-#: 和错存一样不可逆**:没有人在旁边看着,重试额度自己会用完。
+#: 同一篇教程的 **HTML** 身子 —— 走共用准入(`admit`)那条路,而 ④ 对它成立(整段
+#: 算一句、份额 1.0),所以**它在两端都被拒**。这是 ④ 的已知误拒面,`ShareFollowsThe
+#: LayoutTests` 把同一批文字的三种排版连同各自的结论一起钉着。
 TUTORIAL_PAGE = page_html(title='Local reader setup', body=[_TUTORIAL])
+#: 同一批文字**按英文句号分成七段**:只有第一段提到那个短语 → 份额 1/7,照旧放行。
+TUTORIAL_SPLIT = page_html(title='Local reader setup',
+                           body=_TUTORIAL.replace('. ', '.\n\n').split('\n\n'))
+#: 另一篇正常教程:**三个自然段各提一次**那个短语(逐字取自审查第 2 轮的夹具,
+#: 954 字 / 306+310+334)。份额同样 1.0 —— 分段分得再开也救不回来,只要**每一段**都
+#: 提到一次。它和上面那张连成一段的是同一类误拒,不是另一个洞。
+_PARAGRAPHS = [
+    'To enable JavaScript for the development preview, open the site settings for '
+    'localhost and allow scripts only for that origin. Keep the original security '
+    'policy in place for unrelated websites. Reload the page once after changing the '
+    'permission, then inspect the browser console for blocked asset requests.',
+    'When you enable JavaScript for a staging environment, confirm that the built '
+    'bundle matches the deployment version. The asset paths should point to the same '
+    'host as the preview document. A cached worker can continue serving older files, '
+    "so clear only that application's cache before comparing the new response.",
+    'If you cannot enable JavaScript on a managed device, ask the administrator '
+    'whether the local preview origin can be approved. Record the exact console error '
+    'and attach the response headers from the blocked script. Do not disable browser '
+    'protection globally, because the rest of the browsing profile does not need '
+    'access to the preview.']
+MULTI_TUTORIAL = page_html(title='Local preview setup guide', body=_PARAGRAPHS)
 #: 反过来钉一边的那一张:同样一整段英文、份额同样 1.0,但它通篇在复读同一句。
 #: `body_confirmed` 对它**成立** —— `readable.substance` 按**行**去重,而这里只有
 #: 一行,1300 字实打实。所以这一侧只有按细句去重才答得出来。
 ENGLISH_GATE = page_html(title='站点公告', body=['Please enable JavaScript. ' * 50])
-#: 一张**长、句句不同、纯文字**的英文关卡说明页(491 字,细句去重 480)。④ 对这一类
-#: 答不出身份:份额 1.0 只因为一整段算一句,而「剔掉复读还剩多少」也拦不住它 ——
-#: 这几句各不相同。**文字上它和一篇正常英文长文不可区分**,所以这一类交给页面身份
-#: 那几道(①路由 ②组件 ③标题)。知情的代价写在 `grab_page._mention_only` 头上。
+#: 一张**长、句句不同、纯文字**的拒绝说明页(491 字:访问被拒、请启用脚本和 Cookie、
+#: 被安全策略屏蔽、联系管理员)。它**没有**关卡路由、编排组件或关卡标题 —— 身份只写
+#: 在那段文字里,而那正是 ④ 答得出的那一问。给 ④ 开「够长、不复读就放行」的豁免之后
+#: 它当场被收成正文、送去翻译、按文章导出(审查第 2 轮实测),所以那道豁免撤了。
 DENIED_TEXT = (
     'Access to this page has been denied because we believe you are using automation tools. '
     'Please enable JavaScript and cookies in your browser before trying again. '
@@ -193,38 +212,26 @@ class AdmitTests(AdmitCase):
     def test_a_page_that_only_says_verify_is_refused(self):
         self.refused(SAY_VERIFY, says='验证')
 
-    def test_an_english_gate_that_is_one_repeated_line_is_refused(self):
-        """④ 那道「前提不成立」的闸:同样一整段英文、份额同样 1.0,通篇在复读同一句。
+    def test_a_plain_text_refusal_notice_is_never_stored_as_the_body(self):
+        """**纯文字的拒绝说明页照旧拒,一个字节都不许写进去。**
 
-        真正的关卡页**没有内容可言**。这一张要么被份额拦住(基线那一版),要么被
-        「剔掉复读还剩多少」拦住 —— 两条都松掉的话它会被当成正文永久写进库。
-        `body_confirmed` 在这里答不出来:它按**行**去重,而这一页只有一行。
+        两张形态:一整段复读同一句的(`ENGLISH_GATE`)、以及 491 字句句不同的那种
+        (`DENIED_PAGE`:访问被拒、请启用脚本和 Cookie、被安全策略屏蔽、联系管理员)。
+        **第二张没有关卡路由、没有编排组件、标题也人畜无害** —— 它的身份只写在那段
+        文字里,而那正是 ④ 答得出的那一问。
+
+        事故形态:给 ④ 开一道「够长、不复读就放行」的豁免之后,这一张当场被收成正文、
+        写上 `fulltext_at`、退出补抓队列、整段拒绝说明送进翻译并按文章导出(审查实测:
+        `request_calls=1`、第二轮不再补抓、`exported_as_content=True`)。**文字量和去重
+        长度只证明得了「这里有多少字」,证明不了「这一页没在拦正文」。**
         """
-        body = readable.extract(ENGLISH_GATE)
-        self.assertGreaterEqual(grab_page._gate_share(body), grab_page._GATE_SHARE)
-        self.assertTrue(grab_page.body_confirmed(body))      # 按行去重答不出来
-        self.refused(ENGLISH_GATE, says='验证')
-
-    def test_a_wordy_english_gate_is_caught_by_the_page_identity_instead(self):
-        """④ 对「长、句句不同、纯文字」的那一类答不出身份 —— **这一档是知情放掉的**,
-        由页面身份那几道接住。
-
-        先钉住 ④ 确实不答(份额 1.0,但 `_mention_only` 两问都成立),再钉住 ②③ 各自
-        接得住它;最后**如实钉下那个代价**:三样身份证据都没有的时候它会被当成正文
-        收下。文字上它和一篇正常英文长文不可区分 —— 这正是「正文提到验证不等于这一页
-        在拦正文」的另一面,而放宽那一侧的误判不可逆,所以不拿措辞去补。
-        """
-        body = readable.extract(DENIED_PAGE)
-        self.assertGreaterEqual(grab_page._gate_share(body), grab_page._GATE_SHARE)
-        self.assertTrue(grab_page._mention_only(body))
-        for name, html in (
-                ('标题也是关卡提示', page_html(title='Attention Required!', body=[DENIED_TEXT])),
-                ('挂着编排组件', page_html(body=[DENIED_TEXT], extra=ORCHESTRATE))):
-            with self.subTest(identity=name):
+        for name, html in (('一整段复读', ENGLISH_GATE), ('句句不同的拒绝说明', DENIED_PAGE)):
+            with self.subTest(page=name):
                 self.setUp()                 # 每一档要一条干净的壳条目
+                body = readable.extract(html)
+                # 先钉住份额确实达线(否则这条用例测不到 ④ 那一道)
+                self.assertGreaterEqual(grab_page._gate_share(body), grab_page._GATE_SHARE)
                 self.refused(html, says='验证')
-        self.setUp()
-        self.fetched(DENIED_PAGE)            # 知情的代价,如实钉着
 
     def test_a_login_wall_in_the_article_is_refused(self):
         self.refused(WALL_IN_ARTICLE, says='登录')
@@ -293,6 +300,47 @@ class AdmitTests(AdmitCase):
         self.assertIn('HN Points', asked)
 
 
+class ShareFollowsTheLayoutTests(AdmitCase):
+    """**④ 的结论随排版翻转 —— 这个形状本身钉在这里,不是漏了一条用例。**
+
+    同一批文字三种排版,三个结论:连成一段(份额 1.0,拒)、三个自然段各提一次那个
+    短语(仍是 1.0,拒)、按英文句号分成七段(1/7,放行)。「命中句占比」问的是「这一页
+    **有没有别的内容**」,而它拿句读当正文的自然单元 —— 一段英文里提一次,就等于
+    「这一句整句都在说这件事」。
+
+    **两次都有人想拿文字量、去重长度或段落形态去给它开豁免,两次都当场漏放**:
+    491 字句句不同的纯文字拒绝说明页在那种豁免下被收成正文、送去翻译、按文章导出
+    (`DENIED_PAGE`)。那三样只证明得了「这里有多少字」,证明不了「这一页没在拦正文」。
+    **方向上取保守**:错存是把已有正文换成关卡文字、一路污染检索/提取/日报/导出,
+    `DO NOTHING` 之下连重投链接都换不回来;误拒是这一条暂时没有全文,摘要还在、
+    面板上看得见。
+
+    要让它不随排版翻转,得引入**文字之外**的身份证据(响应状态码、关卡响应头)——
+    那是另一件事,不在这一道判据里。
+    """
+
+    def test_the_same_words_get_two_different_verdicts_by_layout(self):
+        for name, html, refused in (('连成一段', TUTORIAL_PAGE, True),
+                                    ('三个自然段各提一次', MULTI_TUTORIAL, True),
+                                    ('按英文句号分成七段', TUTORIAL_SPLIT, False)):
+            with self.subTest(layout=name):
+                self.setUp()                 # 每一档要一条干净的壳条目
+                body = readable.extract(html)
+                share = grab_page._gate_share(body)
+                if refused:
+                    self.assertGreaterEqual(share, grab_page._GATE_SHARE)
+                    self.refused(html, says='验证')
+                else:
+                    self.assertLess(share, grab_page._GATE_SHARE)
+                    self.fetched(html)
+
+    def test_the_words_themselves_are_the_same(self):
+        """**先钉住三张页面的字真的一样**(否则上面那条测的是三篇不同的文章)。"""
+        one = ' '.join(readable.extract(TUTORIAL_PAGE).split())
+        split = ' '.join(readable.extract(TUTORIAL_SPLIT).split())
+        self.assertEqual(one, split)
+
+
 class NotAGateTests(AdmitCase):
     """反过来钉一边:该放行的照旧补抓成功。
 
@@ -332,21 +380,6 @@ class NotAGateTests(AdmitCase):
             with self.subTest(form=name):
                 self.setUp()                 # 每一档要一条干净的壳条目
                 self.fetched(html)
-
-    def test_a_normal_english_tutorial_is_still_fetched(self):
-        """**份额单独不是身份。** `_SENTENCE` 刻意不按 `. ` 分句(域名、缩写、小数点
-        会把份额抖散),代价是一整段英文只算**一句**:683 字的正常设置教程里提一次
-        「enable JavaScript」,④ 的份额就是 1.0。
-
-        先钉住份额照旧达线(否则这条用例测不到那道闸),再验后果:这一轮就补抓成功、
-        正文真的换了、不再排队重试。审查第 1 轮实测的另一头是连抓三轮之后永久退回
-        摘要 —— 所以这里的断言落在「它第一轮就拿到了正文」上。
-        """
-        body = readable.extract(TUTORIAL_PAGE)
-        self.assertGreaterEqual(grab_page._gate_share(body), grab_page._GATE_SHARE)
-        self.assertTrue(grab_page._mention_only(body))        # 份额说的只是「提到过」
-        got = self.fetched(TUTORIAL_PAGE)
-        self.assertIn('keeps the original Markdown', got['row']['body'])
 
     def test_a_quoted_gate_sentence_is_not_a_gate(self):
         """④ 按**份额**算、不设字数上限:一篇正常文章引一句那种提示照旧放行
@@ -527,20 +560,29 @@ class StoredBodyTests(GrabCase):
         self.assertIn('复读同一段', str(caught.exception))
         self.assertEqual([], self.items())
 
-    def test_the_manual_side_stores_the_same_english_tutorial(self):
-        """**两端共用一份准入,所以两端都要钉。** 同一篇教程在手动收录这一侧也收得下
-        (审查第 1 轮实测:页面上提示「这条没收下:这一页要求先完成验证或登录」,地址
-        原样留在输入框里,库里一条都没有)。只在补抓那一侧放行等于两条路又不是同一
-        份口径 —— 那正是这次要建的那条不变量要防的。
+    def test_both_ends_agree_on_the_same_page(self):
+        """**两端共用一份准入,所以结论必须一样** —— 一端放行另一端拒就是两份口径了。
+
+        三张各走一遍:拒绝说明页(两端都拒、库里一行都没有)、份额达线的那篇教程
+        (两端都拒,④ 的已知误拒面)、按句分段的同一批文字(两端都收)。
         """
-        admitted, gate, _ = grab_page.admit(PAGE_URL, TUTORIAL_PAGE, limit=grab_page.MAX_CHARS)
-        self.assertEqual('', gate)
-        with patch.object(grab, 'request', return_value=html_resp(TUTORIAL_PAGE)):
-            grab.save(grab.grab(PAGE_URL))
-        rows = self.items()
-        self.assertEqual(1, len(rows))
-        self.assertEqual(admitted, rows[0]['body'])
-        self.assertIn('keeps the original Markdown', rows[0]['body'])
+        for name, html, refused in (('拒绝说明页', DENIED_PAGE, True),
+                                    ('整段算一句的教程', TUTORIAL_PAGE, True),
+                                    ('按句分段的同一批文字', TUTORIAL_SPLIT, False)):
+            with self.subTest(page=name):
+                admitted, gate, _ = grab_page.admit(PAGE_URL, html, limit=grab_page.MAX_CHARS)
+                self.assertEqual(refused, bool(gate))
+                with patch.object(grab, 'request', return_value=html_resp(html)):
+                    if refused:
+                        with self.assertRaises(grab.GrabError):
+                            grab.save(grab.grab(PAGE_URL))
+                        self.assertEqual([], self.items())
+                    else:
+                        grab.save(grab.grab(PAGE_URL))
+                        rows = self.items()
+                        self.assertEqual(1, len(rows))
+                        self.assertEqual(admitted, rows[0]['body'])
+                        self.setUp()         # 下一档要一张干净的库
 
     def test_what_admit_handed_over_is_byte_for_byte_what_gets_stored(self):
         """反过来钉一边:正常文章照旧收得进来,而且**存进去的就是准入放行的那一份**。"""
