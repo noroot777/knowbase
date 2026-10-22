@@ -376,8 +376,9 @@ def _coverage(mine: dict | None, scope: dict,
 def _restable(channel: str, owned: dict) -> dict:
     """把这一格里**读进来的旧键**归一到稳定 id;**就地改**,返回同一个字典。
 
-    身份口径只有一份(`pipeline_results.stable_keys`)—— 这一轮新写的那几个键过的
-    是同一道(`covered_targets`)。只归一新写入那一侧的后果是同一条订阅同时留下
+    身份口径只有一份(`pipeline_results.stable_keys`)—— 这一轮新写的那几个键也落在
+    稳定 id 上(计划那一侧过 `pipeline_results.planned_targets`,执行那一侧由采集器
+    直接交回稳定身份)。只归一新写入那一侧的后果是同一条订阅同时留下
     `A:error` 和 `63:ok`:今天还欠抓取的结论来自旧的 A,而真去重试又被「这条订阅
     后来成功过」挡住,页面于是卡在「说没补完 + 又说没有可补」的死局(第 4 轮审查
     R3,证据 `legacy-name.json`)。

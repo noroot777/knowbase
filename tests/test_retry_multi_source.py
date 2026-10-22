@@ -162,7 +162,10 @@ class MixedFailureTests(MultiSourceBase):
                       ('2999-01-01T00:00:00+00:00', self.x[1]['id']))
 
         scopes = pipeline_retry.retry_crawl_scopes(pipeline_state.load_last_run() or {})
-        self.assertEqual([{'channel': 'rss', 'accounts': [str(self.rss[0]['id'])],
+        # **收窄发出去的是「明确点名编号」**(`id:63` 这种形态):裸着发一串数字时,
+        # 那串数字同时也可能是**另一条订阅的名字**,范围匹配两种都认,于是重试会把
+        # 名字碰巧等于这个编号的订阅一起抓走(口径 `kb/feeds/targets.py`)。
+        self.assertEqual([{'channel': 'rss', 'accounts': [reg.id_target(self.rss[0]['id'])],
                            'retry': 'targets'}], scopes)
         got = {}
         self.retry(got)

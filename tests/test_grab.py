@@ -315,20 +315,14 @@ class PageTests(GrabCase):
         `MAX_HTML`,于是在解析之前就交白卷 —— 手动收录对着一篇完完整整读得到的
         文章说「这一页没找到正文」,而它和真正读不到的那一档(登录墙、纯 JS 渲染)
         在界面上长得一模一样。`_strip` 第一件事就是把脚本整块扔掉,这笔钱根本不会花。
+
+        **这条线自己的判据(量对了吗、花多少钱量)在 `tests/test_readable_budget.py`**
+        —— 那一层被手动收录和订阅补全文两头用着,用例不该挂在其中一头底下。
         """
         page = page_html(extra='<script>var x = "%s";</script>' % ('a' * readable.MAX_HTML))
         self.assertGreater(len(page), readable.MAX_HTML)          # 整份确实超线
         self.assertLess(readable.markup_size(page), readable.MAX_HTML)  # 真标记没有
         self.assertIn('这是正文第一段', self.page(html_resp(page))['body'])
-
-    def test_a_page_whose_real_markup_is_too_big_is_still_refused(self):
-        """**反过来钉一边。** 那条线量的是「要建成树的那部分」,不是「扣掉脚本就
-        放行」:真标记自己超线的照旧交白卷,而 `<script>x</script>` 重复几十万次的
-        那种页面(内容短、节点多)也不许从底下溜过去 —— 替换保留两头的标签正是
-        为它留的。
-        """
-        self.assertEqual('', readable.extract(page_html() + '<p>x</p>' * 400000))
-        self.assertEqual('', readable.extract(page_html() + '<script>x</script>' * 200000))
 
     def test_a_gate_component_past_the_old_truncation_point_is_still_caught(self):
         """**漏一道关卡就是把一道墙当正文永久钉进库里**(`put_items` 的

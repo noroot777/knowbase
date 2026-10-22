@@ -537,6 +537,38 @@ cmd_logs() {
   tail -n "${2:-40}" "$LOG_DIR/$f.log" 2>/dev/null || say "还没有 $f 的日志"
 }
 
+# ── 回归 ──────────────────────────────────────────────────────────────────────
+
+# 分层口径在 tests/tiers.py,这里只做两件事:给一个**全新的临时数据目录**
+# (打桩范围泄漏那类事故写的就是 $KB_DATA_DIR/kb.db —— 不隔离,一次全量就可能把
+# 夹具文档写进真实库,实测发生过),以及把 TZ / 离线口径钉成和 CI 一致
+# (.github/workflows/ci.yml:runner 默认 UTC 会让日历日差 8 小时;HF 离线是为了
+# 真有测试去拉模型时当场红,而不是安静下 2GB)。
+# 临时目录的所有权在这个子 shell:取消(INT/TERM)也要把它收走 —— 长回归常被中断,
+# 残留会在 /tmp 里越积越多。先收测试进程再删目录,反过来删的是正在被写的目录。
+cmd_test() {
+  local tier="${1:-fast}"
+  (
+    tmpdata="$(mktemp -d "${TMPDIR:-/tmp}/kb-test-data-XXXXXX")"
+    child=""
+    cleanup() {
+      if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+        kill "$child" 2>/dev/null || true
+        wait "$child" 2>/dev/null || true
+      fi
+      rm -rf "$tmpdata"
+    }
+    trap 'cleanup; exit 130' INT
+    trap 'cleanup; exit 143' TERM
+    trap cleanup EXIT
+    cd "$ROOT"
+    KB_DATA_DIR="$tmpdata" TZ=Asia/Shanghai HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+      uv run --offline python -m tests.tiers "$tier" &
+    child=$!
+    wait "$child"
+  )
+}
+
 usage() {
   cat >&2 <<'EOF'
 Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
@@ -570,6 +602,11 @@ Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
                    ./kb.sh grab - < links.txt 从标准输入读,一行一条地址
                    --json 一行一条 JSON(给程序读)、--no-wait 投完就返回
                    Claude Code 里说「把这条存进知识库」走 skill kb-grab,同一条路。
+
+  回归(前台跑,数据目录自动换成全新临时目录,不碰真实库)
+    ./kb.sh test                    提交前的快速层:纯逻辑全量,浏览器回归显式拦下(约 3 分钟)
+    ./kb.sh test probes             只跑浏览器回归 —— 改了 kb/static/ 或阅读页之后(约 10 分钟)
+    ./kb.sh test full               真全量,push 前至少一次(约 12 分钟;分层见 docs/decisions/test-tiers.md)
 
   订阅(瞬间返回)
     ./kb.sh accounts list|discover|add|remove|enable|disable [名字]
@@ -618,6 +655,7 @@ case "$ACTION" in
   extract) pipeline_run '["extract"]' ;;
   graph)   cmd_graph "$@" ;;
   grab)    cmd_grab "$@" ;;
+  test)    cmd_test "$@" ;;
 
   accounts) cli accounts "$@" ;;
   setup)   "$COLLECTOR/setup.sh" ;;

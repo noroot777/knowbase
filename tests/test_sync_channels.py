@@ -35,7 +35,10 @@ class ChannelAPITests(unittest.TestCase):
             body = {"channel": "wechat_local", "accounts": ["指定号"],
                     "since_date": "2026-09-15", "until_date": "2026-09-15"}
             self.assertEqual(200, self.client.post("/api/pipeline/run", json=body).status_code)
-            self.assertEqual(body, start.call_args.kwargs["crawl_filter"])
+            # 多出来的 force 是「人按的那一轮跳过退避」,见
+            # test_a_run_through_this_api_is_a_hand_press_and_skips_the_backoff
+            self.assertEqual({**body, "force": True},
+                             start.call_args.kwargs["crawl_filter"])
 
     def test_a_source_sensitive_request_without_a_source_is_refused(self):
         """**点名了抓取/导出、却一个来源都没给:拒,不许替他挑一个。**
@@ -64,6 +67,42 @@ class ChannelAPITests(unittest.TestCase):
                                  json={"stages": ["index", "extract"]})
             self.assertEqual(200, r.status_code, r.text)
             self.assertTrue(start.called)
+
+    def test_a_run_through_this_api_is_a_hand_press_and_skips_the_backoff(self):
+        """走到这个接口的都是**人按的**,所以这一轮得**跳过来源退避**。
+
+        红的是 `crawl_filter` 里有没有 `force` —— 从那儿往下
+        (`pipeline_stages._fetch` → `sync.collect` 那道 `retry_at`)另有自己的红
+        (`tests/test_retry_scope.py`)。不带的后果是:用户点了同步,退避中的那几条被
+        静默跳过(只记一笔 `deferred`),而页面说「同步已开始」—— 而「失败之后手动点
+        一次同步」恰恰是退避唯一的出路(CLAUDE.md「服务与运行时」)。
+
+        **判在 `kb.run_trigger` 一处**:入口只声明自己怎么被触发的,所以这里钉的是
+        「**什么都不声明**也算人按的」—— 定时那一条压根不走 HTTP(`kb.daily_run.tick`
+        直接进管道),将来谁忘了声明,落在「多抓一次」那一侧而不是「静默不同步」。
+
+        **反过来钉一边**:明说了是定时轮次的那一轮照旧不带 —— 退避本来就是给它用的。
+        """
+        with patch.object(pipeline, "start_pipeline", return_value=True) as start:
+            r = self.client.post("/api/pipeline/run", json={"channel": "rss"})
+            self.assertEqual(200, r.status_code, r.text)
+            self.assertIs(True, start.call_args.kwargs["crawl_filter"].get("force"))
+            self.client.post("/api/pipeline/run",
+                             json={"channel": "rss", "trigger": "schedule"})
+            self.assertNotIn("force", start.call_args.kwargs["crawl_filter"])
+
+    def test_an_old_tab_still_sending_force_gets_the_same_round(self):
+        """浏览器里缓存着的老页面发的是 `force: true` —— 那个字段现在没人读了。
+
+        钉的是「老页面不会因此换一种行为」:它要的就是跳过退避,而现在默认就跳。
+        后果不对称 —— 若把未知字段当成「按定时跑」,老页面点一次同步会静默跳过刚
+        失败的那几条。
+        """
+        with patch.object(pipeline, "start_pipeline", return_value=True) as start:
+            r = self.client.post("/api/pipeline/run",
+                                 json={"channel": "rss", "force": True})
+            self.assertEqual(200, r.status_code, r.text)
+            self.assertIs(True, start.call_args.kwargs["crawl_filter"].get("force"))
 
     def test_a_retired_channel_name_runs_as_the_one_that_replaced_it(self):
         """老页面/老脚本里写着的 `wechat_oa` 不该变成 400。
@@ -107,11 +146,46 @@ class ChannelAPITests(unittest.TestCase):
         # 单来源的老字段仍然填着第一个来源,旧的读取方不用改
         self.assertEqual(("wechat_local", ["甲"]), (crawl_filter["channel"], crawl_filter["accounts"]))
 
+    def test_names_and_ids_are_two_fields_and_each_keeps_its_own_type(self):
+        """**身份由字段位置决定,不由字符串长相决定。**
+
+        名单上勾的是显示名、入口点名的是编号,混在一个无类型名单里发的话后端只能靠
+        猜,两种猜法都实测错过(见 `pipeline_api._targets`)。打前缀那一步由采集器
+        做 —— 所以这里钉的是「`rss` 那一侧两种写法各自带上类型」,而**公众号那一侧
+        原样不动**:它的目标就是账号名,直接传给采集器自己的命令行,打了前缀等于发
+        一个它不认识的名字(请求照旧起跑、一个号都不抓)。
+
+        后果那一半(照这份范围真跑一轮会抓谁)在 `tests/test_target_selection.py`。
+        """
+        body = {"channels": [{"channel": "rss", "names": ["某博客"], "ids": ["12"]},
+                             {"channel": "wechat_local", "names": ["某公众号"]}]}
+        with patch.object(pipeline, "start_pipeline", return_value=True) as start:
+            self.assertEqual(200, self.client.post("/api/pipeline/run", json=body).status_code)
+        self.assertEqual([{"channel": "rss", "accounts": ["id:12", "name:某博客"]},
+                          {"channel": "wechat_local", "accounts": ["某公众号"]}],
+                         start.call_args.kwargs["crawl_filter"]["channels"])
+
+    def test_pointing_at_a_number_on_a_source_without_numbers_is_refused(self):
+        """公众号那条路没有「编号」这回事:按编号点名要**拒**,不许静默当成名字。
+
+        当成名字发下去就是拿一个不存在的名字去抓 —— 一个号都不抓,而面板上说
+        「同步已开始」。判不准一律拒(元规则):多一次报错顶多再点一下。
+        """
+        with patch.object(pipeline, "start_pipeline") as start:
+            r = self.client.post("/api/pipeline/run",
+                                 json={"channels": [{"channel": "wechat_local",
+                                                     "ids": ["12"]}]})
+            self.assertEqual(400, r.status_code, r.text)
+            self.assertIn("不按编号点名", r.json()["detail"])
+            start.assert_not_called()
+
     def test_repeated_empty_or_unknown_sources_are_rejected_before_run(self):
         bodies = [{"channels": []},
                   {"channels": [{"channel": "rss"}, {"channel": "rss"}]},
                   {"channels": [{"channel": "bad"}]},
-                  {"channels": [{"channel": "rss", "accounts": [" "]}]}]
+                  {"channels": [{"channel": "rss", "accounts": [" "]}]},
+                  {"channels": [{"channel": "rss", "names": [" "]}]},
+                  {"channels": [{"channel": "rss", "ids": [" "]}]}]
         with patch.object(pipeline, "start_pipeline") as start:
             for body in bodies:
                 self.assertEqual(400, self.client.post("/api/pipeline/run", json=body).status_code, body)
@@ -416,7 +490,7 @@ class ChannelDispatchTests(unittest.TestCase):
         """**建账那一步也在隔离里面**:它炸了也只终结这一个来源。
 
         建账要先算「这一步在这个来源上实际覆盖哪几个目标」,点名了目标就要**读一次
-        订阅库**(`pipeline_results.covered_targets` → `FeedCollector.stable_targets`)
+        订阅库**(`pipeline_results.planned_targets` → `FeedCollector.stable_targets`)
         —— 这一步在 fetch **之前**。隔离原来只包 fetch 那一句,于是这次读失败时异常
         是从 `with` 那一行抛的:连这个来源自己的 try 都还没进去,整个来源循环当场
         跳出。勾了订阅源和公众号两个来源、订阅库临时读不出来,**公众号一次都不跑**

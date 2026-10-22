@@ -405,9 +405,15 @@
          操作条底下、甚至弹窗外面去。fieldset 只管「起跑中整组禁用」。 -->
     <div class="pipe-setup-body">
     <fieldset id="pipe-fields">
+      <!-- **两栏**:左边「这次抓什么」,右边「跑哪几步」。一栏排下来实测要滚
+           674~836px 才看得全(900/800/720 三种窗口高),步骤那一组永远在屏幕外;
+           两栏之后 720 高的窗口也一屏全见。窄屏回落成一列,见 pipeline.css。
+           可点对比稿 docs/demo/sync-space.html。 -->
+      <div class="pipe-setup-cols">
+      <div class="pipe-col">
       <fieldset id="pipe-source-fields">
       <div class="row"><div class="pipe-acct-heading"><label id="pipe-channel-label">同步来源 <b id="pipe-channel-count"></b></label></div>
-        <div id="pipe-channel-list" class="pipe-channel-list" role="group" aria-labelledby="pipe-channel-label"></div>
+        <div id="pipe-channel-list" class="pipe-srcs" role="group" aria-labelledby="pipe-channel-label"></div>
         <p id="pipe-channel-hint" class="hint"></p>
       </div>
       </fieldset>
@@ -416,14 +422,21 @@
         <div id="pipe-range-pop" style="display:none"><div id="pipe-range-presets"></div><div class="pipe-custom-range"><label>开始日期<input type="date" id="pipe-custom-from"></label><label>结束日期<input type="date" id="pipe-custom-to"></label><button onclick="applyPipeCustomRange()">应用日期</button><div id="pipe-custom-err" class="field-err" role="alert"></div></div></div>
         <p id="pipe-range-hint" class="hint"></p>
       </div>
-      <div class="row" id="pipe-acct-block"><div class="pipe-acct-heading"><label for="pipe-acct-search">订阅 <b id="pipe-acct-count"></b></label><span><button class="text-button" id="pipe-select-all" onclick="pipeSelectAll()">全选</button><button class="text-button" id="pipe-select-none" onclick="pipeSelectNone()">清空选择</button></span></div>
+      <div class="row" id="pipe-acct-block"><div class="pipe-acct-heading"><label for="pipe-acct-search">订阅 <b id="pipe-acct-count"></b></label><span><button class="text-button" id="pipe-select-all" onclick="pipeSelectAll()">全选</button><button class="text-button" id="pipe-select-none" onclick="pipeSelectNone()">清空选择</button><button class="text-button" id="pipe-acct-fold" onclick="togglePipeAcctFold()">挑几个</button></span></div>
+        <div id="pipe-acct-folded" class="pipe-acct-folded"></div>
+        <div id="pipe-acct-open">
         <input id="pipe-acct-search" placeholder="搜索订阅名称…" oninput="renderPipeAcctList()"><div id="pipe-acct-list" aria-busy="false"></div>
+        </div>
       </div>
       </fieldset>
+      </div>
+      <div class="pipe-col">
       <div class="row"><div class="pipe-acct-heading"><label id="pipe-stage-label">跑哪些步骤 <b id="pipe-stage-count"></b></label><button class="text-button" id="pipe-stage-all" onclick="pipeStageToggleAll()">清空选择</button></div>
         <div id="pipe-stage-list" class="pipe-channel-list" role="group" aria-labelledby="pipe-stage-label"></div>
         <label class="pipe-daily-row"><input type="checkbox" id="pipe-daily" onchange="onPipeDailyToggle()"><span><b>跑完出日报</b><small>用这一轮之后的库存生成今天的日报</small></span></label>
         <p id="pipe-stage-hint" class="hint"></p>
+      </div>
+      </div>
       </div>
     </fieldset>
     </div>

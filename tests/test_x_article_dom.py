@@ -20,12 +20,9 @@ from tempfile import TemporaryDirectory
 
 from kb.feeds import x_article, x_browser
 from kb.feeds.x_cdp import Chrome
-from tests.headless import INSTALL_HINT, SHELL
+from tests.headless import SHELL, requires_shell
 from tests.test_x_article_fidelity import DATA_CODE, _SP as SP
 from tests.test_x_article import _FakeChrome, snapshot
-
-_NEEDS_SHELL = unittest.skipUnless(
-    SHELL is not None, '缺 chrome-headless-shell —— ' + INSTALL_HINT)
 
 EMOJI = 'https://abs-0.twimg.com/emoji/v2/svg/1f642.svg'
 PHOTO = 'https://pbs.twimg.com/media/HUIE7DSbEAEJXcR.jpg'
@@ -159,7 +156,7 @@ TIMELINE_HTML = '''<!doctype html><meta charset="utf-8"><title>Timeline</title>
 </article>'''
 
 
-@_NEEDS_SHELL
+@requires_shell
 class DomTests(unittest.TestCase):
     """一次浏览器启动跑完两段 JS(起一个壳要两三秒)。"""
 
