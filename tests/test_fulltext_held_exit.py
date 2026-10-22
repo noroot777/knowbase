@@ -11,6 +11,7 @@
 
 硬约束在 `docs/decisions/fulltext.md` 第一节。
 """
+import hashlib
 import subprocess
 import sys
 import unittest
@@ -20,10 +21,10 @@ from unittest.mock import Mock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb.feeds import fulltext
+from kb.feeds import fulltext, registry as reg
 from kb.web import intake_api
 from tests.test_fulltext_admit import DENIED_SPLIT, resp
-from tests.test_feed_fulltext import FullTextCase, PAGE
+from tests.test_feed_fulltext import FullTextCase, PAGE, SHELL
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -43,6 +44,21 @@ class HeldExitCase(FullTextCase):
         self.assertEqual(1, summary['held'])          # 前提:它真挂起了
         return key
 
+    def hold_one_in_web(self):
+        """**另一个真实来源**里也挂一条(网页专栏)。给「恢复的范围」那条用。
+
+        不用一个不存在的 kind 名冒充:那只能钉住「查无此来源」,而要钉的是「那一条
+        真的挂着、也真的属于别人」。
+        """
+        src = reg.save_subscription('web', {'name': '网页专栏', 'fulltext': True,
+                                            'url': 'https://col.example.org/'})
+        url = 'https://col.example.org/a'
+        reg.put_items(src, [{'url': url, 'title': 'A', 'body': SHELL,
+                             'published': '2026-10-08 09:00', 'content_kind': 'summary'}])
+        with patch.object(fulltext, 'request', Mock(return_value=resp(DENIED_SPLIT))):
+            self.assertEqual(1, fulltext.fetch_pending('web')['held'])
+        return hashlib.sha256(b'web:' + url.encode()).hexdigest()[:32]
+
 
 class HeldEndpointTests(HeldExitCase):
     """网页那两个端点。"""
@@ -58,6 +74,29 @@ class HeldEndpointTests(HeldExitCase):
         self.assertEqual(key, row['key'])
         self.assertEqual('https://e.org/post', row['url'])
         self.assertIn('访问被拒绝', row['fulltext_hold'])
+
+    def test_a_key_from_another_kind_is_not_released_through_this_one(self):
+        """**路由上那个 `kind` 过了合法性校验,不等于请求体里每个 key 都属于它。**
+
+        实测的后果:把网页专栏那一条挂起文章的 key 提给 RSS 这个端点,它照样被恢复
+        (`released=1`)、网页专栏那边的待办被清空,而 RSS 自己那条还挂着。
+
+        **这一条必须走端点**:判据在 `fulltext.release` 上,但漏掉的是**端点有没有
+        把 `kind` 传下去**。只钉那个函数的话,把端点那一行的 `kind=kind` 删掉照样
+        全绿(实测红 0 条),缺陷原样在。
+        """
+        other = self.hold_one_in_web()
+        mine = self.hold_one()
+        got = self.client.post('/api/intake/rss/held/release',
+                               json={'keys': [other]}).json()
+        self.assertEqual(0, got['released'])
+        self.assertNotEqual('', self.row(other)['fulltext_hold'])   # 别人那条还挂着
+        self.assertEqual(0, fulltext.pending('web'))
+        self.assertEqual(1, len(self.client.get('/api/intake/web/held').json()['items']))
+        # 反过来钉一边:自己这条照旧恢复得了
+        back = self.client.post('/api/intake/rss/held/release',
+                                json={'keys': [mine]}).json()
+        self.assertEqual(1, back['released'])
 
     def test_releasing_through_the_endpoint_really_puts_it_back_in_the_queue(self):
         """**恢复那一下要真的改变下一轮会不会抓它。** 断言落在「下一轮抓到了正文」
@@ -162,3 +201,66 @@ class HeldCommandTests(HeldExitCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ShellEntryTests(HeldExitCase):
+    """`./kb.sh held` **真经过那个 shell** —— 上面那组用 `sys.executable` 直接跑脚本,
+    测不到 `kb.sh` 替用户挑了哪个解释器。
+
+    漏掉的后果实测到过:`held` 原先用 `BOOT_PY`,而那是给**只用标准库**的引导脚本
+    准备的,指向采集器那个 venv(只声明 lxml / requests / zstandard)。于是在正常的
+    双环境安装上 `./kb.sh held rss` 直接 `ModuleNotFoundError: No module named 'bs4'`
+    —— 帮助里承诺的命令在用户那儿压根跑不起来,而开发机的 worktree 恰好没有
+    `collector/.venv`、系统 python 恰好装着那几个包,所以单跑脚本的回归全绿。
+    """
+
+    #: 冒充采集器 venv 的那个解释器:**被选中就一定看得出来**。真造一个缺 bs4 的
+    #: 环境要装包、要联网;而这里要钉的是「选没选它」,所以让它一开口就自报身份。
+    FAKE_PY = '#!/bin/sh\necho COLLECTOR-PY-WAS-PICKED >&2\nexit 1\n'
+
+    def layout(self):
+        """临时项目根:真的 `kb.sh`,真的脚本和包,假的采集器环境。"""
+        root = self.root / 'proj'
+        (root / 'collector/.venv/bin').mkdir(parents=True)
+        (root / 'kb.sh').write_bytes((ROOT / 'kb.sh').read_bytes())
+        (root / 'kb.sh').chmod(0o755)
+        for name in ('kb', 'scripts', '.venv'):
+            (root / name).symlink_to(ROOT / name)
+        fake = root / 'collector/.venv/bin/python'
+        fake.write_text(self.FAKE_PY)
+        fake.chmod(0o755)
+        return root
+
+    def run_sh(self, root, *args):
+        return subprocess.run(['bash', str(root / 'kb.sh'), 'held', *args],
+                              capture_output=True, text=True, cwd=root,
+                              env={'KB_DATA_DIR': str(self.root), 'HOME': str(self.root),
+                                   'PATH': '/usr/bin:/bin', 'TZ': 'Asia/Shanghai'})
+
+    def test_the_documented_command_runs_in_the_project_environment(self):
+        """**两件事一起钉**:没挑采集器那个解释器,而且认 `KB_DATA_DIR`。
+
+        后半条同样是实测出来的风险:起服务那一族命令套着 `env -i`(为了不继承
+        嵌套 claude 的环境变量),而那会把 `KB_DATA_DIR` 一起清掉 —— 这条命令就会
+        **静默**去读仓库内的 `data/`,显式隔离过数据目录的人看到一句「没有挂起」,
+        而他那个库里躺着一堆。所以判据落在「列出来的是我这份临时库里那一条」。
+        """
+        key = self.hold_one()
+        got = self.run_sh(self.layout(), 'rss')
+        self.assertEqual(0, got.returncode, got.stdout + got.stderr)
+        self.assertNotIn('COLLECTOR-PY-WAS-PICKED', got.stderr)
+        self.assertIn(key, got.stdout)
+        self.assertIn('访问被拒绝', got.stdout)
+
+    def test_the_shell_entry_can_also_put_it_back(self):
+        """`--release` 那一下也过同一个解释器 —— 看的那条路对了、改的那条路错了
+        更糟:用户以为恢复过了。断言落在「下一轮真抓到了正文」。
+        """
+        key = self.hold_one()
+        root = self.layout()
+        got = self.run_sh(root, 'rss', '--release', key)
+        self.assertEqual(0, got.returncode, got.stdout + got.stderr)
+        self.assertNotIn('COLLECTOR-PY-WAS-PICKED', got.stderr)
+        self.assertEqual(1, fulltext.pending('rss'))
+        with patch.object(fulltext, 'request', Mock(return_value=resp(PAGE))):
+            self.assertEqual(1, fulltext.fetch_pending('rss')['done'])

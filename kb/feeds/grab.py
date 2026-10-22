@@ -47,7 +47,7 @@ from kb.feeds import grab_page, readable, registry as reg, x_article, x_body
 # 是所有调用方和决策文档引用的那几个名字。
 from kb.feeds.grab_store import (KIND, known, owing,  # noqa: F401
                                  reclaim_export, replace)
-from kb.feeds.fetching import FeedError, body_text, canonical_url, oneline, request
+from kb.feeds.fetching import FeedError, Gated, body_text, canonical_url, oneline, request
 
 #: 整条收录的墙钟上限。X 那边最多两次接口请求(推文 + 长文),网页那边一次 HTTP;
 #: 用户正盯着这颗按钮等,所以比采集那一侧(`SOURCE_SECONDS`)给得紧一些。
@@ -396,6 +396,12 @@ def _grab_web(url: str, deadline: float) -> dict:
         if markdown := fetch(url, transport=request, deadline=deadline):
             return entry(url, markdown)
         resp = request(url, accept(grab_page.HEADERS), deadline=deadline)
+    except Gated as e:
+        # **关卡这一档配得上下一步**,口径同 `admit` 判出关卡那条路(同一个 `_gate`:
+        # 用户能做的事一模一样 —— 在浏览器里打开它)。只给这一档配:限流、连不上、
+        # 4xx 该说的是「稍后重试」或者「换个地址」,照「在浏览器里打开一次」说等于
+        # 把人指向一件没用的事(那也是 `page_gate` 不收状态码的同一个理由)。
+        raise _gate(re.split(r'[;；]', str(e))[0].strip(), url) from None
     except FeedError as e:
         raise GrabError(f'{re.split(r"[;；]", str(e))[0].strip()}') from None
     if markdown := from_response(resp):

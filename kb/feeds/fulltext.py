@@ -94,6 +94,27 @@ class Unconfirmed(FeedError):
     """
 
 
+def _eligible(ref: str = 'feed_items.key') -> str:
+    """**「这一条现在还属于某条开着补抓的订阅」—— 补抓这一族判据只有这一份。**
+
+    一条内容可能同时属于聚合源和单号源,**任意一条开着就算有资格**(补到的正文对
+    另一条同样有用);反过来,关掉最后一条开着补抓的归属、或者把订阅整条删掉
+    (`registry` 删订阅时刻意保留已收录的条目),这一条就再也不该等全文了。
+
+    **抽成函数是因为它曾经只补在三个消费方身上、漏掉了第四个。** 先补的是
+    `held()` / `release()`,后来实测到的是 `unsettled_sql()` 的挂起那半边没有:
+    于是关掉补抓之后那一条落进一个**没有出口的夹缝** —— 翻译那边当它「正文还没
+    定下来」永久排除(英文摘要永远不译成中文),待办那边当它「没资格」不列出,
+    人工恢复也以 `released=0` 拒绝。三处各判一遍就会这样,所以元规则那条「口径
+    只有一份」在这里不是风格问题。
+
+    `ref` 只有两个取值、全写死在本模块里(`feed_items.key` 给拼进别人 WHERE 的那
+    几段,`fi.key` 给 `held()` 自己那条带别名的 SELECT)—— **不接外部输入**。
+    """
+    return ("EXISTS(SELECT 1 FROM subscription_items si JOIN subscriptions s"
+            f" ON s.id=si.subscription_id WHERE si.item_key={ref} AND s.fulltext=1)")
+
+
 def queued_sql() -> tuple[str, list]:
     """"还排在正文补抓队列里"的判据,只有这一份。
 
@@ -114,9 +135,8 @@ def queued_sql() -> tuple[str, list]:
     `feed_items.key` 写全名是因为这段会被拼进别人的 WHERE 里(`registry.items`、
     `sync._export`),那些语句的 FROM 子句就是 feed_items,不带别名。
     """
-    return ("EXISTS(SELECT 1 FROM subscription_items si JOIN subscriptions s"
-            " ON s.id=si.subscription_id WHERE si.item_key=feed_items.key AND s.fulltext=1)"
-            " AND fulltext_at='' AND fulltext_hold='' AND fulltext_tries<?"), [MAX_TRIES]
+    return (f"{_eligible()} AND fulltext_at='' AND fulltext_hold=''"
+            " AND fulltext_tries<?"), [MAX_TRIES]
 
 
 def unsettled_sql() -> tuple[str, list]:
@@ -132,9 +152,16 @@ def unsettled_sql() -> tuple[str, list]:
     **导出那一侧刻意不用它**:挂起的条目照旧按壳导出,和「试满额度降级出队」完全
     一样的待遇 —— 留着原文比把它永远挡在知识库外面强,而正文后来真补上时
     `content_rev` / `extract_stale` 会让它重新导出。
+
+    **资格那一道排在整个并集外面,不是只排在「还排着队」那半边。** 写成
+    `queued_sql() OR (at='' AND hold<>'')` 的后果实测过:关掉补抓(或者删掉最后一条
+    开着补抓的归属)之后,左半边因为没资格变假、右半边只看 hold 仍然为真,于是这一条
+    **永久**被判成「正文还没定下来」—— 英文摘要再也不译成中文,而 `held()` /
+    `release()` 那两道已经按资格把它排除了,面板上看不到、人点恢复也拒绝。一条
+    答不出任何出口的夹缝。判据同源见 `_eligible`。
     """
-    cond, args = queued_sql()
-    return f"(({cond}) OR (fulltext_at='' AND fulltext_hold<>''))", args
+    return (f"{_eligible()} AND fulltext_at=''"
+            " AND (fulltext_hold<>'' OR fulltext_tries<?)"), [MAX_TRIES]
 
 
 def pending(kind: str) -> int:
@@ -351,13 +378,11 @@ def held(kind: str) -> list[dict]:
     with reg.db() as c:
         return [dict(r) for r in c.execute(
             "SELECT key,url,title,fulltext_hold,fulltext_tries FROM feed_items fi"
-            " WHERE kind=? AND fulltext_hold<>'' AND fulltext_at=''"
-            " AND EXISTS(SELECT 1 FROM subscription_items si JOIN subscriptions s"
-            " ON s.id=si.subscription_id WHERE si.item_key=fi.key AND s.fulltext=1)"
+            f" WHERE kind=? AND fulltext_hold<>'' AND fulltext_at='' AND {_eligible('fi.key')}"
             " ORDER BY fetched_at DESC, key", (kind,)).fetchall()]
 
 
-def release(keys) -> int:
+def release(keys, kind: str | None = None) -> int:
     """**人工出口**:把补抓额度还给这几条,放回队列。返回真放回去了几条。
 
     **判据待在 UPDATE 自己的 WHERE 里**(元规则):`fulltext_at=''` —— 这一下和
@@ -382,16 +407,30 @@ def release(keys) -> int:
     重新写上(证据不足)或者扣一次额度(确定失败)。**这是知情的取舍**:要挡住它
     得给「人发起的这一轮」一个不可复用的代次,而那是一列新字段加一道新不变量;
     而它的后果只是「那一条又挂回去了,人再点一次」,不丢任何数据。
+
+    **`fulltext_hold<>''` 也在 WHERE 里,否则返回的那个数是句谎话。** 元规则:统计按
+    **实际写入结果**报。不带这一条时同一个 key 给三次会报 `released=3`(三次 UPDATE
+    都匹配得上,因为那几列已经是目标值了,SQLite 照样算 1 行),已经恢复过的、压根
+    没挂起过的也一样报「恢复成功」—— 而真放回队列的只有一条。**同一个 key 在一次
+    调用里重复出现由同一条判据覆盖**(第一次把 hold 清掉,后面几次就不匹配了),所以
+    这里不另做一次去重 —— 加过,反向验证红 0 条,两段代码做的是同一件事。
+
+    **`kind` 是可选的来源范围,给 HTTP 那个调用点用。** 路由上的 `kind` 过了合法性
+    校验,不等于请求体里每个 key 都属于它:实测把网页专栏那一条挂起文章的 key 提给
+    RSS 的恢复端点,它照样被恢复、而 RSS 自己那条还挂着。范围要约束**写入本身**
+    (元规则:判据待在写语句自己的 WHERE 里)。CLI 那一侧刻意不传 —— 它的
+    `--release <key>` 文档写明按 key 跨来源,那是有意的契约。
     """
     done = 0
     with reg.db() as c:
         for key in keys:
-            cur = c.execute(
-                "UPDATE feed_items SET fulltext_tries=0,fulltext_hold='',fulltext_error=''"
-                " WHERE key=? AND fulltext_at='' AND EXISTS(SELECT 1 FROM subscription_items si"
-                " JOIN subscriptions s ON s.id=si.subscription_id"
-                " WHERE si.item_key=feed_items.key AND s.fulltext=1)", (key,))
-            done += cur.rowcount
+            sql = ("UPDATE feed_items SET fulltext_tries=0,fulltext_hold='',fulltext_error=''"
+                   f" WHERE key=? AND fulltext_at='' AND fulltext_hold<>'' AND {_eligible()}")
+            args: list = [key]
+            if kind is not None:
+                sql += ' AND kind=?'
+                args.append(kind)
+            done += c.execute(sql, args).rowcount
     return done
 
 

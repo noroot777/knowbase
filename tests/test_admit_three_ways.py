@@ -27,7 +27,7 @@ from unittest.mock import Mock, patch
 
 import httpx
 
-from kb.feeds import fetching, fulltext, grab, grab_page, page_gate, readable
+from kb.feeds import fetching, fulltext, grab, grab_page, page_gate, readable, translate
 from kb.feeds import registry as reg
 from kb.feeds.fetching import FeedError, Response
 from tests.test_feed_fulltext import PAGE, SHELL
@@ -469,6 +469,10 @@ class ResponseGateBeatsFormatDispatchTests(AdmitCase):
                 with self.assertRaises(grab.GrabError) as caught:
                     grab.grab(url)
                 self.assertIn('验证', str(caught.exception))
+                # **拒对了还得说得出下一步。** 传输层那一支原先只把原因转过来,
+                # 用户看到的是一句「对方拦在了一道验证上」然后没有然后 —— 而
+                # `admit` 判出关卡那条路一直带着这半句(口径同 `_gate`)。
+                self.assertIn('在浏览器里打开', str(caught.exception))
 
     def test_an_innocent_markdown_response_still_goes_through(self):
         """**反过来钉一边。** 没有关卡头的 Markdown 照旧两个出口都收得进来 ——
@@ -540,3 +544,92 @@ class ResponseGateBeatsFormatDispatchTests(AdmitCase):
         self.assertEqual('', row['fulltext_at'])
         self.assertIn('验证', row['fulltext_error'])
         self.assertEqual('', row['fulltext_hold'])        # 确定关卡,不是「等人看一眼」
+
+
+class EligibilityIsOneQuestionTests(AdmitCase):
+    """**「这一条现在还该不该等全文」只有一份判据**(`fulltext._eligible`)。
+
+    这件事曾经被分别回答过四遍,于是漏了第四处。补抓队列、挂起待办、人工恢复三处
+    都问了「这条订阅还开着补抓吗」,而翻译那道闸门(`unsettled_sql`)只在「还排着
+    队」那半边问、挂起那半边没问 —— 后果实测过:关掉补抓(或者删掉最后一条开着
+    补抓的归属)之后,那一条落进一个**没有出口的夹缝**:翻译那边永久当它「正文还没
+    定下来」,英文摘要再也不译成中文;待办那边按资格把它排除,面板上看不到;人点
+    恢复也以 `released=0` 拒绝。
+
+    **所以这一组的判据落在「摘要到底译不译」上**,不是「那个 SQL 片段长什么样」。
+    """
+
+    def held_item(self, source=None, url='https://e.org/post'):
+        """摆一条、抓一轮把它挂起,返回 key。"""
+        key = self.put(source or self.source, url=url)
+        with patch.object(fulltext, 'request', Mock(return_value=resp(DENIED_SPLIT))):
+            fulltext.fetch_pending('rss')
+        self.assertNotEqual('', self.row(key)['fulltext_hold'])   # 摆盘自检
+        return key
+
+    def test_turning_fulltext_off_hands_the_summary_back_to_translation(self):
+        """**关掉补抓 = 「这条订阅的正文我不要了」,摘要就是终稿。**
+
+        反过来钉一边同时在这条里:开着补抓时它**不该**进翻译队列(壳马上要被整条
+        换掉,译一遍是白买一次模型调用),关掉之后才该进。
+        """
+        key = self.held_item()
+        self.assertEqual(0, translate.pending('rss'))       # 开着:先等正文
+        with reg.db() as c:
+            c.execute('UPDATE subscriptions SET fulltext=0 WHERE id=?',
+                      (self.source['id'],))
+        self.assertEqual(1, translate.pending('rss'))       # 关掉:摘要就是终稿
+        self.assertEqual([], fulltext.held('rss'))          # 待办跟着消失
+        self.assertEqual(0, fulltext.release([key]))        # 也不假装恢复得了
+        self.assertEqual(0, fulltext.pending('rss'))
+
+    def test_deleting_the_last_subscription_that_wanted_it_does_the_same(self):
+        """**删订阅是另一条通往同一个末态的路。** 删订阅刻意保留已收录的条目
+        (产品承诺),于是归属没了、资格也没了 —— 只在某个 PATCH 路径里清那一列
+        的话,这条路照旧把条目留在夹缝里。
+        """
+        self.held_item()
+        reg.delete_subscription('rss', self.source['id'])
+        self.assertEqual(1, translate.pending('rss'))
+        self.assertEqual([], fulltext.held('rss'))
+
+    def test_one_source_switched_off_is_not_all_of_them(self):
+        """**反过来钉一边:还有别的归属开着补抓,就照旧等全文。**
+
+        一条内容可能同时属于聚合源和单号源,任意一条开着就该抓(补到的正文对另一条
+        同样有用)。所以修法不能是「关掉开关就把整条状态清掉」。
+        """
+        with reg.db() as c:
+            c.execute('UPDATE subscriptions SET fulltext=1 WHERE id=?', (self.plain['id'],))
+        key = self.held_item()
+        self.put(self.plain)                                 # 同一条内容的第二条归属
+        with reg.db() as c:
+            c.execute('UPDATE subscriptions SET fulltext=0 WHERE id=?',
+                      (self.source['id'],))
+        self.assertEqual(0, translate.pending('rss'))        # 另一条还要正文
+        self.assertEqual([key], [r['key'] for r in fulltext.held('rss')])
+        self.assertEqual(1, fulltext.release([key]))         # 恢复也照旧算数
+
+    def test_a_key_from_another_kind_is_not_released_by_this_kind(self):
+        """**范围要约束写入本身**(元规则:判据待在写语句自己的 WHERE 里)。
+
+        **用的是另一个真实来源**(`web`,网页专栏),不是一个不存在的名字 —— 后者
+        只能钉住「查无此来源」,而这里要钉的是「那一条真的挂着、也真的属于别人」。
+        CLI 那一侧刻意不传 `kind`:它的 `--release <key>` 文档写明按 key 跨来源,
+        那是有意的契约,不该反过来把 CLI 也锁死在一个来源上。
+        """
+        key = self.held_item()
+        self.assertEqual(0, fulltext.release([key], kind='web'))    # 别人的来源管不着
+        self.assertNotEqual('', self.row(key)['fulltext_hold'])
+        self.assertEqual(1, fulltext.release([key], kind='rss'))    # 自己的来源照旧
+        self.assertEqual(1, fulltext.pending('rss'))
+
+    def test_the_same_key_three_times_is_still_one_release(self):
+        """**统计按实际写入结果报**(元规则)。不带「现在还挂着吗」那一条时,同一个
+        key 给三次会报 `released=3`:那几列已经是目标值了,UPDATE 照样算 1 行。于是
+        「恢复了 3 条」而库里只有一条,已经恢复过的、压根没挂起过的也一律报成功。
+        """
+        key = self.held_item()
+        self.assertEqual(1, fulltext.release([key, key, key]))
+        self.assertEqual(0, fulltext.release([key]))        # 已经不挂着了,不再算
+        self.assertEqual(1, fulltext.pending('rss'))        # 真放回去的只有这一条

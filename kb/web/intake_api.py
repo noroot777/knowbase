@@ -462,8 +462,10 @@ def sync(kind: str,body: SyncRequest):
 
 
 class HeldReleaseRequest(BaseModel):
-    #: 要放回队列的那几条。空列表 = 「这个来源里挂起的全放回去」(面板那颗
-    #: 「全部恢复」按钮),判据照旧在 `fulltext.release` 自己的 WHERE 里。
+    #: 要放回队列的那几条。空列表 = 「这个来源里挂起的全放回去」,判据照旧在
+    #: `fulltext.release` 自己的 WHERE 里。**面板上还没有对应的按钮**:挂起这一档
+    #: 现在的出口是这个端点和 `./kb.sh held`,界面接线另算一件事(结构性的界面改动
+    #: 先给可点的 demo 再定夺)。所以这里不要写成「那颗按钮」。
     keys: list[str] = Field(default_factory=list, max_length=500)
 
 
@@ -497,12 +499,19 @@ def held_release(kind: str, body: HeldReleaseRequest):
 
     **一个字节的正文都不碰**(`fulltext.release`):清的是额度、待办和那条已经
     作废的失败原因。**报实际写入结果**(元规则):给了 5 个 key 只放回 3 条时
-    就说 3 —— 少的那几条是已经补到全文、key 不存在,或者那条订阅关掉了补抓,
-    而「关掉补抓之后放行」是句空话(`queued_sql` 第一条会把它挡在队列外面)。
+    就说 3 —— 少的那几条是已经补到全文、key 不存在、已经被恢复过(不再挂起),
+    或者那条订阅关掉了补抓,而「关掉补抓之后放行」是句空话(`queued_sql` 的资格
+    那一道会把它挡在队列外面)。
+
+    **`kind=` 要传下去:路由上那个 `kind` 过了合法性校验,不等于请求体里每个 key
+    都属于它。** 实测把网页专栏那一条挂起文章的 key 提给 RSS 这个端点,它照样被
+    恢复、而 RSS 自己那条还挂着 —— 范围得约束**写入本身**(元规则:判据待在写语句
+    自己的 WHERE 里),不能靠「路由名对了」推断。CLI 那一侧刻意不传,它的
+    `--release <key>` 文档写明按 key 跨来源。
     """
     kind_checked(kind)
     from kb.feeds import fulltext
     keys = body.keys or [r['key'] for r in fulltext.held(kind)]
-    released = fulltext.release(keys)
+    released = fulltext.release(keys, kind=kind)
     return {'released': released, 'asked': len(keys),
             'left': len(fulltext.held(kind)), 'pending': fulltext.pending(kind)}
