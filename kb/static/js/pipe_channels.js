@@ -146,13 +146,23 @@ function saveRunChannels() {
 function renderPipeChannelList() {
   const box = $('pipe-channel-list');
   if (!box) return;
-  box.innerHTML = pipeChannels.map(c => `<label class="pipe-channel">
-    <input type="checkbox" data-run-channel="${esc(c.id)}"${pipeRunSel.includes(c.id) ? ' checked' : ''}>
-    <span><b>${esc(c.label)}</b>${c.hint ? `<small>${esc(c.hint)}</small>` : ''}</span></label>`).join('');
-  $('pipe-channel-count').textContent = `已选 ${pipeRunSel.length} / ${pipeChannels.length}`;
-  // 每张卡片上已经写着自己的说明,底下再复述一遍勾中那个就是噪音;这行只用来说「一个都没勾」
+  // **这一组是紧凑行,整段说明不进来。** `c.hint` 是 `source_types.py` 的 `note`
+  // —— 那是「我的订阅」页上解释**这类来源是什么**的文案(邮件简报那段六行),
+  // 在「这次跑哪几个」的选择器里是纯占地:六张带说明的卡片实测 450px,比弹窗
+  // 可视区还高,「跑哪些步骤」那一组因此永远在屏幕外。说明退到 `title`。
+  // 锁定入口(从「我的订阅」某一页点进来):这一次只跑它,其余灰掉点不动。
+  // 理由在 `pipe_setup.js` 的 `pipeLock`。
+  const locked = typeof pipeLocked === 'function' ? pipeLocked() : '';
+  box.innerHTML = pipeChannels.map(c => `<label class="pipe-channel"${c.hint ? ` title="${esc(c.hint)}"` : ''}>
+    <input type="checkbox" data-run-channel="${esc(c.id)}"${pipeRunSel.includes(c.id) ? ' checked' : ''}${locked ? ' disabled' : ''}>
+    <span><b>${esc(c.label)}</b></span></label>`).join('');
+  $('pipe-channel-count').textContent = locked
+    ? '只跑这一个' : `已选 ${pipeRunSel.length} / ${pipeChannels.length}`;
   const hint = $('pipe-channel-hint');
-  hint.textContent = pipeRunSel.length ? '' : '请至少选择一个来源。';
+  // 锁着的时候**要说清为什么和出路** —— 一片灰色不说话,用户只会以为坏了
+  hint.textContent = locked
+    ? `这一次只同步「${channelLabel(locked)}」，因为你是从它那一页点进来的。要同时跑别的来源，去同步中心新建一次。`
+    : pipeRunSel.length ? '' : '请至少选择一个来源。';
   hint.hidden = !hint.textContent;
 }
 

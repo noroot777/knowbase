@@ -289,7 +289,16 @@ docker compose logs -f --tail 100
 ## 跑测试
 
 ```bash
-# 知识库侧（约 530 条）
+./kb.sh test             # 提交前的快速层:纯逻辑全量,浏览器回归显式拦下(约 3 分钟)
+./kb.sh test probes      # 只跑浏览器回归 —— 改了 kb/static/ 或阅读页之后(约 10 分钟)
+./kb.sh test full        # 真全量,push 前至少一次(约 12 分钟)
+```
+
+三层都把数据目录换成全新临时目录,不碰真实库;分层口径见
+`docs/decisions/test-tiers.md`。等价的原始命令(CI 跑的就是这条):
+
+```bash
+# 知识库侧(约 3500 条)
 uv run python -m unittest discover -s tests -t . -q
 
 # 采集器侧（约 160 条）

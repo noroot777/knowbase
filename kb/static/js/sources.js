@@ -179,6 +179,9 @@ function renderWechatSubsStatus() {
     : '其他来源正在同步，新任务会顺延。';
   updateWechatNotices();
 }
+// 公众号那一页的「同步全部」:**也走起跑弹窗**,锁定在本机绿泡泡那条通道上。
+// 改之前它直接起跑而**不带步骤清单**,被后端兜底成六段全跑 —— 顺手跑掉几十分钟的
+// 全库整理和 Wiki,页面上一个字都不说(`docs/decisions/sync-entry.md`)。
 async function syncWechatSubs() {
   if (subsWechatBusy || pipeSnapshot?.running) return;
   subsWechatBusy = true; renderWechatSubsStatus();
@@ -188,11 +191,8 @@ async function syncWechatSubs() {
     const channel = wechatSubsChannel();
     if (!channel) throw new Error('这个来源的采集通道暂不可用，请确认采集器配置后重试');
     setPipeChannel(channel);
-    // accounts 空 = 该来源的全部订阅(kb/web/pipeline_api.py 的 ChannelScope)
-    await pipePost('/api/pipeline/run', { channels: [{ channel, accounts: [] }] });
-    toast('同步已开始', { type: 'ok', detail: '进度在同步中心实时显示，离开页面不影响同步。' });
-    await refreshPipe();
-  } catch (e) { toast('未能开始同步', { detail: e.message }); }
+    await openPipeModal({ channel, accounts: [], stages: PIPE_INTAKE_STAGES });
+  } catch (e) { toast('未能打开同步', { detail: e.message }); }
   finally { subsWechatBusy = false; renderWechatSubsStatus(); }
 }
 
@@ -301,7 +301,13 @@ function sourceActive() { return activeTab === 'subs' && subsKind === sourceKind
 let sourceSeenRun = '';
 function sourceRunFinished(reset) {
   const snap = pipeSnapshot;
-  const id = (snap && !snap.running && snap.run_id) || '';
+  // **来源要从同一份终态上问**(`pipeResult`,同步中心和历史清单读的就是它)。
+  // 顶层那几格只是「这个进程此刻的状态」:恢复回来的那一轮里没有来源结论(历史
+  // 故意不存导出范围),整批汇总那一轮里顶层又只剩最后那一小轮的范围 —— 两档都
+  // 让这一页认不出「刚跑完那一轮跟我有关」(形态在
+  // `docs/decisions/retry-scope.md` 的「消费方一律从同一份终态上问」)。
+  const run = snap ? pipeResult(snap) : null;
+  const id = (snap && !snap.running && run && run.run_id) || '';
   // **头一次进来(或换来源)看到的那一轮是历史记录,不是"刚刚跑完"** —— 那时
   // 本来就会整份重渲染。**吸收它的时点是 `reset` 自己,不是「至今见过 run_id
   // 没有」**:面板打开时管道多半正空转,状态里压根没有 run_id,那个问法会让守卫
@@ -310,7 +316,7 @@ function sourceRunFinished(reset) {
   if (reset) { sourceSeenRun = id; return false; }
   if (!id || id === sourceSeenRun) return false;
   sourceSeenRun = id;
-  return pipeRunScopes(snap).some(s => s.channel === sourceKind);
+  return pipeRunScopes(run).some(s => s.channel === sourceKind);
 }
 
 async function loadSourceModule(reset = false, selectedId = null) {
@@ -359,6 +365,13 @@ async function loadSourceModule(reset = false, selectedId = null) {
   } finally {
     if (sourceActive()) queueSourcePoll();
   }
+}
+// 起跑弹窗起完一次跑会叫它(`pipe_setup.js` 的 `startPipeFromModal`)。
+// 不在「我的订阅」那几页时是空操作。
+function onPipeStarted() {
+  if (typeof renderWechatSubsStatus === 'function') renderWechatSubsStatus();
+  if (!sourceActive()) return;
+  updateSourceRunStatus(); queueSourcePoll();
 }
 function queueSourcePoll() {
   clearTimeout(sourcePoll);
@@ -580,15 +593,29 @@ async function moreSourceItems() {
   } catch(e) { if (currentSourceItems(kind, version, q, id)) sourceError(e.message); }
   finally { if (version === sourceItemsVersion) $('source-more').disabled = false; }
 }
+// 「我的订阅」里点同步 = 打开起跑弹窗,**锁定在你正在看的这一页**。硬约束(含
+// 「手动收录为什么不走这条路」)在 `docs/decisions/sync-entry.md` 第一节。
+const PIPE_INTAKE_STAGES = ['crawl', 'export', 'index', 'extract'];
 async function syncSource(ids = []) {
   if (sourceBusy) return;
+  // 手动收录没有可轮询的源,弹窗里来源/时间范围/订阅三块对它全是空的,照旧直接起跑
+  if (sourceModules.get(sourceKind)?.pollable !== false) {
+    // 订阅身份传 `{id, name}`:**id 是这一条的稳定身份,名字只给弹窗显示**。
+    // 只传名字的后果是请求走到名称那个字段上去,而名称目标代表的是**同名的那几条**
+    // —— 两条地址不同、名字相同的 RSS,点第一条的「同步」实测两条都被抓(第 1 轮
+    // 审查 R2)。这颗按钮改走弹窗之前传的是 `source_ids`(精确),所以那是这次改动
+    // 带进来的回归。两种写法怎么分字段发在 `pipe_setup.js` 的 `pipeTargetFields`。
+    const picks = ids.map(id => sourceData?.sources.find(s => s.id === id))
+      .filter(Boolean).map(s => ({ id: String(s.id), name: s.name }));
+    return openPipeModal({ channel: sourceKind, accounts: picks, stages: PIPE_INTAKE_STAGES });
+  }
   sourceBusy = true; updateSourceRunStatus();
   try {
     await pipePost(`/api/intake/${sourceKind}/sync`, { source_ids:ids });
     await refreshPipe(); updateSourceRunStatus();
-    toast('同步已开始', { type:'ok', detail:'内容会先保存，再建立检索索引。离开页面不影响同步。' });
+    toast('已开始写入知识库', { type:'ok', detail:'内容会先保存，再建立检索索引。离开页面不影响同步。' });
     queueSourcePoll();
-  } catch(e) { toast('未能开始同步', { detail:e.message }); }
+  } catch(e) { toast('未能开始', { detail:e.message }); }
   finally { sourceBusy=false; updateSourceRunStatus(); }
 }
 $('source-list').addEventListener('click', e => {

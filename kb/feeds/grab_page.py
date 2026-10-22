@@ -443,9 +443,12 @@ def verdict(final_url: str, html: str, body: str = '', *,
     # 一道墙当正文永久钉进库里**(`put_items` 的 `DO NOTHING`),代价和误拒差着一个
     # 量级。真标记自己就超线的那种页面提取器反正交不出正文,截断只是别在它身上耗
     # 时间。
+    # **也只在整份超线时才去量**(短路顺序同 `extract_or_reason`):审查第一轮
+    # 这里是无条件调用的,于是每一份小页面都白扫一趟,而那一版的扫描还是平方级的。
     text = html or ''
-    soup = BeautifulSoup(text if readable.markup_size(text) <= readable.MAX_HTML
-                         else text[:readable.MAX_HTML], 'html.parser')
+    if len(text) > readable.MAX_HTML and readable.markup_size(text) > readable.MAX_HTML:
+        text = text[:readable.MAX_HTML]
+    soup = BeautifulSoup(text, 'html.parser')
     if _gate_assets(soup):
         return _SAY_ROUTE, ''
     if reason := _wall_reason(soup):

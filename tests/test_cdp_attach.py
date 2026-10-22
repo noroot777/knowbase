@@ -35,10 +35,7 @@ from kb.feeds import cdp_attach as A
 from kb.feeds import ws_client, x_browser, x_cdp
 from kb.feeds.x_cdp import CdpError
 from tests import ws_stub
-from tests.headless import INSTALL_HINT, SHELL
-
-_NEEDS_SHELL = unittest.skipUnless(
-    SHELL is not None, '缺 chrome-headless-shell —— ' + INSTALL_HINT)
+from tests.headless import SHELL, requires_shell
 
 
 @contextmanager
@@ -511,7 +508,7 @@ def _live_browser():
         rmtree(tmp, ignore_errors=True)
 
 
-@_NEEDS_SHELL
+@requires_shell
 class LiveBrowserTests(unittest.TestCase):
     """真连一次。这一组验的是「在别人的浏览器里干活」那几条规矩的后果。"""
 
