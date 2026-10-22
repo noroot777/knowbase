@@ -1,19 +1,26 @@
 # -*- coding: utf-8 -*-
-"""**防线还没生效的那段窗口里,谁来兜底。**
+"""**一轮验证不管从哪个出口结束,它起的东西都不许留在后台。**
 
-两条用例各打这段窗口的一头,共用的立意是:夹具的三道防线(owner、空闲、收场)都要先
-装上才算数,**而装上之前、以及装它的那个进程自己被掐掉之后,后台不许留下在服务的东西**。
+共用的立意是:夹具的三道防线(owner、空闲、收场)都要先装上才算数,**而装上之前、以及
+装它的那个进程自己没走到收场的时候,后台不许留下在服务的东西**。几条用例各打一个出口:
 
-- 一头是**外层**:内层那一轮 unittest 自己还会起中间进程和真夹具,它被外层 deadline 掐掉
-  时一条 `addCleanup` 都跑不了,所以整棵树的最终所有权必须在外层(`_run_nested`)。
-- 另一头是**里层**:摆盘那道输出边界**建立的过程本身**不许依赖旧输出写得动,否则三道防线
-  一道都装不上,而这一刻没有任何更晚的硬退出能打断它。
+- **被取消**:`unittest` 遇到 `KeyboardInterrupt` 压根不跑 `doCleanups()`,所以「进程一
+  建出来就 `addCleanup`」在这条终态上一个字都不算 —— 补在基类的 `run()` 里,所有创建点
+  一起管。
+- **被 deadline 掐掉**:内层那一轮 unittest 自己还会起中间进程和真夹具,它被掐掉时一条
+  清理都跑不了,所以整棵树的最终所有权在外层(`_run_nested`)。
+- **拥有它的进程自己被强杀**:它那条收场路一行都跑不了,而内层在**另一个会话**里、按组
+  收到不了 —— 由立下的那本账按身份兜底。
+- **摆盘那道边界建立的过程本身**:不许依赖旧输出写得动,否则三道防线一道都装不上,而这
+  一刻没有任何更晚的硬退出能打断它。
 
-硬约束与事故形态在 `docs/decisions/fixture-life.md`。
+反过来也钉着一边:按组动手不许碰别人那一组。硬约束与事故形态在
+`docs/decisions/fixture-life.md`。
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -74,21 +81,21 @@ class 没装上防线的那段窗口(起与收):
                          "内层被掐掉之后那份根也不该留在盘上")
 
     def _outer(self, book: Path) -> subprocess.Popen:
-        """起一个**外层**:它自己调那个助手,内层起好夹具后把几个号写进账本再睡。
+        """起一个**外层**:它自己调那个助手,内层起好夹具后立账再睡。
 
-        账本里按序是:端口、内层运行器的 pid、中间进程的 pid、夹具的 pid。写之前先落
-        `.part` 再改名,所以读到的一定是整份。
+        账里有那一棵树的四个号(锚点、内层运行器、中间进程、夹具)连各自的身份 —— 锚点
+        在它自己的会话里,外层那一组的 `killpg` 到不了,所以外层自己没走到收场的时候只
+        能按这份账逐个收(见 `立账`)。
         """
         inner = "\n".join([
             "import os, sys, time, unittest",
             f"sys.path.insert(0, {str(ROOT)!r})",
-            "from tests.fixture_life_cases import 起与收",
+            "from tests.fixture_life_cases import 起与收, 立账",
             "class 一次(起与收):",
             "    def runTest(self):",
             "        port, middle, kid = self._spawn_via_middle(idle='0', owned=False)",
-            f"        open({str(book)!r} + '.part', 'w').write("
-            "'%d %d %d %d' % (port, os.getpid(), middle.pid, kid))",
-            f"        os.replace({str(book)!r} + '.part', {str(book)!r})",
+            f"        立账({str(book)!r}, port, anchor=os.getppid(),"
+            " inner=os.getpid(), middle=middle.pid, kid=kid)",
             "        time.sleep(600)",      # 睡着:它再也走不到自己的清理
             "case = 一次()",
             "case.run(unittest.TestResult())",
@@ -112,13 +119,14 @@ class 没装上防线的那段窗口(起与收):
         self.addCleanup(self._sweep_session, proc)
         return proc
 
-    def _wait_book(self, book: Path, timeout: float) -> tuple[int, int, int, int]:
+    def _wait_book(self, book: Path, timeout: float, *, keys=None) -> dict:
+        want = keys or {"anchor", "inner", "middle", "kid"}
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if book.exists():
-                got = [int(x) for x in book.read_text().split()]
-                self.assertEqual(4, len(got), f"账本不完整:{got!r}")
-                return tuple(got)                              # type: ignore[return-value]
+                rec = json.loads(book.read_text())
+                self.assertEqual(want, set(rec["pids"]), f"账不完整:{rec!r}")
+                return rec
             time.sleep(0.1)
         self.fail("内层没能在限时内起好夹具,这条用例没验到东西")
 
@@ -133,10 +141,11 @@ class 没装上防线的那段窗口(起与收):
 
         所以收场那一下必须在那个助手**自己的 `finally`** 里。这里断言的就是这条路的后果。
         """
-        work = Path(tempfile.mkdtemp(prefix="nested-cancel-"))
-        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
-        proc = self._outer(work / "book")
-        port, _inner, middle, kid = self._wait_book(work / "book", 90)
+        book = self._开账()
+        work = book.parent
+        proc = self._outer(book)
+        rec = self._wait_book(book, 90)
+        port, middle, kid = rec["port"], rec["pids"]["middle"], rec["pids"]["kid"]
         proc.send_signal(signal.SIGINT)
         rc = proc.wait(timeout=90)
         said = (work / "outer.err").read_text(errors="replace")
@@ -157,10 +166,11 @@ class 没装上防线的那段窗口(起与收):
         这里定点制造那条路:等内层起好夹具,**从外面**把内层运行器 SIGKILL 掉,然后等外层
         自己走完。断言的是它的后代都没了 —— 判据不是「外层红没红」。
         """
-        work = Path(tempfile.mkdtemp(prefix="nested-innerkill-"))
-        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
-        proc = self._outer(work / "book")
-        port, inner, middle, kid = self._wait_book(work / "book", 90)
+        book = self._开账()
+        proc = self._outer(book)
+        rec = self._wait_book(book, 90)
+        port, middle, kid = rec["port"], rec["pids"]["middle"], rec["pids"]["kid"]
+        inner = rec["pids"]["inner"]
         os.kill(inner, signal.SIGKILL)       # 它一条自己的清理都跑不了
         proc.wait(timeout=90)
         self.assertTrue(self._wait_dead(inner, 15),
@@ -168,6 +178,123 @@ class 没装上防线的那段窗口(起与收):
         self.assertTrue(self._wait_dead(kid, 15), f"夹具 {kid} 还在后台")
         self.assertTrue(self._wait_dead(middle, 15), f"中间进程 {middle} 还在后台")
         self.assertFalse(self._port_open(port), "页面不该还开着")
+
+    def _runner(self, book: Path, 起法: str) -> subprocess.Popen:
+        """起一个**顶层运行器**:它自己就是那一轮验证,我们给它发 SIGINT。
+
+        `起法` 是内层那条创建语句,留下 `port` 和一个 `pids` 字典就行。
+
+        **SIGINT 只许发给运行器那一个号,不许按组发。** 它起的夹具跟它同在一组(我们给
+        运行器开了新会话),按组发等于我们自己把夹具杀了,用例会假绿 —— 它要验的恰恰是
+        「运行器自己收掉了它」。
+        """
+        code = "\n".join([
+            "import os, sys, time, unittest",
+            f"sys.path.insert(0, {str(ROOT)!r})",
+            "from tests.fixture_life_cases import 起与收, 立账",
+            "class 一次(起与收):",
+            "    def runTest(self):",
+            f"        {起法}",
+            f"        立账({str(book)!r}, port, **pids)",
+            "        time.sleep(600)",      # 睡着:让 SIGINT 落在用例体里
+            "case = 一次()",
+            "case.run(unittest.TestResult())",
+        ])
+        with open(book.parent / "runner.err", "w") as ef:
+            proc = subprocess.Popen([sys.executable, "-c", code], cwd=ROOT,
+                                    stdout=subprocess.DEVNULL, stderr=ef,
+                                    start_new_session=True)
+        self.addCleanup(self._sweep_session, proc)
+        return proc
+
+    def _取消它(self, proc: subprocess.Popen, work: Path) -> None:
+        """发 SIGINT 并确认它真走的是「被取消」那条终态,而不是自己跑完了。"""
+        proc.send_signal(signal.SIGINT)
+        rc = proc.wait(timeout=90)
+        said = (work / "runner.err").read_text(errors="replace")
+        self.assertNotEqual(0, rc, f"该是被取消掉的:{said[-400:]!r}")
+        self.assertIn("KeyboardInterrupt", said, f"没走到那条终态:{said[-400:]!r}")
+
+    def test_取消一轮验证时它起的夹具也得收掉(self):
+        """**取消是一个验证出口,清理在这条路上也得跑完。**
+
+        这一条打的是最朴素的那个创建点:一条用例直接起一个手起档的夹具。实测没补之前:
+        运行器 rc=-2,而那个夹具还在、页面 200 —— `unittest` 遇到 `KeyboardInterrupt`
+        不跑 `doCleanups()`,而这一档是 `idle='0'` 又没有 owner,三道自退防线全关着,它
+        会一直在后台服务下去。
+
+        断言排在清理之前,所以防线没生效时这里就是红的;随后那条按账的兜底照旧会把它收
+        掉 —— **用例报红不等于把它创建的进程留在了后台**。
+        """
+        book = self._开账()
+        work = book.parent
+        proc = self._runner(
+            book,
+            "port, kid = self._spawn(idle='0'); pids = dict(kid=kid.pid)")
+        rec = self._wait_book(book, 90, keys={"kid"})
+        self._取消它(proc, work)
+        kid = rec["pids"]["kid"]
+        self.assertTrue(self._wait_dead(kid, 15), f"夹具 {kid} 还在后台")
+        self.assertFalse(self._port_open(rec["port"]), "页面不该还开着")
+
+    def test_取消时中间进程和它背后那个夹具一起收掉(self):
+        """**同一条出口上的另一个创建点:隔着一个中间进程的那个夹具。**
+
+        这一档的 owner 写端攥在**中间进程**手里,中间进程活着 EOF 那道就不会响;空闲那道
+        又是 `idle='0'`。实测没补之前:运行器 rc=-2,中间进程和夹具两个都活着、页面 200。
+        这里断言的是两个都收掉了,不是只收了直接那一个。
+        """
+        book = self._开账()
+        work = book.parent
+        proc = self._runner(
+            book,
+            "port, middle, kid = self._spawn_via_middle(idle='0', owned=False);"
+            " pids = dict(middle=middle.pid, kid=kid)")
+        rec = self._wait_book(book, 90, keys={"middle", "kid"})
+        self._取消它(proc, work)
+        kid, middle = rec["pids"]["kid"], rec["pids"]["middle"]
+        self.assertTrue(self._wait_dead(kid, 15), f"夹具 {kid} 还在后台")
+        self.assertTrue(self._wait_dead(middle, 15), f"中间进程 {middle} 还在后台")
+        self.assertFalse(self._port_open(rec["port"]), "页面不该还开着")
+
+    def test_拥有它的进程没走到收场时那棵树按账收(self):
+        """**普通一条红也会走到这儿:被收掉的只有外层那一组。**
+
+        实测:让用例在它的断言之前先抛个 `AssertionError`,登记的清理**全部正常执行**,
+        而锚点、内层运行器、中间进程、夹具四个全活着、页面 200 —— 外层被杀掉就跑不了
+        `_run_nested` 的 `finally`,而那四个在**另一个会话**里,外层那一组的 `killpg`
+        到不了。
+
+        这里定点制造那条路:把外层 SIGKILL 掉(它一行收场都跑不了),先确认那四个号确实
+        还活着(否则这条用例没验到东西),再走那条按账回收,断言后果。
+        """
+        book = self._开账()
+        outer = self._outer(book)
+        rec = self._wait_book(book, 90)
+        os.kill(outer.pid, signal.SIGKILL)
+        outer.wait(timeout=30)
+        for name, pid in rec["pids"].items():
+            self.assertFalse(self._wait_dead(pid, 1),
+                             f"{name} {pid} 本该还活着,这条用例没验到东西")
+        self.assertTrue(self._port_open(rec["port"]), "页面本该还开着")
+        # **跑这一轮自己的清理栈,而不是直接调那条兜底** —— 要钉的后果包括「它确实被登记
+        # 上了」。只验那个函数管用的话,`_开账` 漏登记这一种漏法不会在任何用例上报红。
+        self.doCleanups()
+        for name, pid in rec["pids"].items():
+            self.assertTrue(self._wait_dead(pid, 15), f"{name} {pid} 还在后台")
+        self.assertFalse(self._port_open(rec["port"]), "页面不该还开着")
+
+    def test_那一组里还剩谁要认得出来(self):
+        """**按组收完就要去删目录了,所以「组里还剩谁」这个判据得认得准。**
+
+        `SIGKILL` 不可阻塞,于是「等整组走掉」这一步在正常机器上几乎不占时间,也造不出
+        可稳定复现的红 —— 要让它可观察地延迟,目标得卡在不可中断睡眠里。能钉住的是那个
+        判据本身:后代还在的时候它必须报出来,一个都不许漏;被跳过的那个号不许算进去。
+        """
+        _port, middle, kid = self._spawn_via_middle(idle="0", owned=False)
+        left = self._group_left(os.getpgid(middle.pid), middle.pid)
+        self.assertIn(kid, left, f"组里那个夹具 {kid} 没被认出来")
+        self.assertNotIn(middle.pid, left, "被跳过的那个号不该算在里面")
 
     def test_按组收的时候不许碰别人那一组(self):
         """**反过来钉一边:该收的收掉,不该碰的一个字都不许碰。**

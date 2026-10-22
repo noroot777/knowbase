@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import signal
@@ -23,6 +24,7 @@ import sys
 import tempfile
 import time
 import unittest
+from pathlib import Path
 
 from tests import fixture_life
 from tests.fixture_life_probe import (
@@ -77,8 +79,53 @@ def _slurp(path: str) -> str:
         return ""
 
 
+def 立账(path: str, port: int, **pids: int) -> None:
+    """**内层把它那一棵树的号连身份一起交出来** —— 外层的兜底只认这一份。
+
+    为什么要有这份账:`_run_nested` 的锚点必须 `setsid` 成自己那一组(否则按组收会打
+    到调用方自己那一组),于是**外层那一组的 `killpg` 到不了它**。平时这不是问题——整
+    棵树的所有权在 `_run_nested` 的 `finally` 里;可外层进程被 SIGKILL 的时候那条
+    `finally` 一行都不跑,跨会话又没有「按会话杀」这种系统调用,只能逐个号来。而逐个
+    号就要有归属证明,所以**号和身份必须在同一刻一起记下**(判据仍在 `_mine`)。
+
+    身份串里有空格(`lstart` 的格式),所以这份账走 JSON 不走空格分隔;先落 `.part` 再
+    改名,读到的一定是整份。`_identity` 量不出来照旧抛 —— 那会儿账还没立,读账那边看到
+    的是「压根没有这份账」,用例当场红,不会变成静默漏一棵树。
+    """
+    rec = {"port": port, "pids": pids,
+           "ids": {k: _identity(v) for k, v in pids.items()}}
+    with open(path + ".part", "w", encoding="utf-8") as f:
+        json.dump(rec, f)
+    os.replace(path + ".part", path)
+
+
 class 起与收(unittest.TestCase):
     """真起一个夹具,断言的是「那个进程还在不在」。本身不含用例。"""
+
+    def run(self, result=None):
+        """**取消也是一个验证出口,它一样要走完清理。**
+
+        `unittest` 在这条路上不跑 `doCleanups()`:`_Outcome.testPartExecutor` 对
+        `KeyboardInterrupt` 一路往上抛,而 `TestCase.run()` 里那行 `self.doCleanups()`
+        排在那几个 `testPartExecutor` 块**之后** —— 压根执行不到。于是「进程一建出来就
+        `addCleanup`」这条口径在取消这个终态上一个字都不算。实测:直接跑一条真用例再给
+        它 SIGINT,运行器 rc=-2,而它起的那个夹具还在、页面照样 200;那一档正是
+        `idle='0'` 又没有 owner,三道自退防线全关着,它会一直在后台服务下去。
+
+        所以在这一层补上,**所有创建点一起管**:`_spawn`、`_spawn_via_middle` 的中间进
+        程、`_claim_pid` 认领的孙进程、`_outer` 起的独立会话,它们的回收全登记在同一个
+        清理栈上,这里跑一次就都收了。
+
+        `doCleanups` 自己抛什么都不许盖掉取消那个异常 —— 它只是收场,这一轮真正的结论
+        是「被取消了」。而 `KeyboardInterrupt` 不是 `Exception` 的子类,所以第二次
+        Ctrl-C 照旧打得断这段收场。
+        """
+        try:
+            return super().run(result)
+        except KeyboardInterrupt:
+            with contextlib.suppress(Exception):
+                self.doCleanups()
+            raise
 
     def _spawn(self, *, idle: str, upstream: str = "", stderr=subprocess.DEVNULL,
                stdout=subprocess.DEVNULL):
@@ -265,8 +312,76 @@ class 起与收(unittest.TestCase):
             return
         with contextlib.suppress(OSError):
             os.killpg(proc.pid, signal.SIGKILL)
+        # **「调用过 `killpg`」不等于「整棵树已经退出」。** 信号是异步投递的,而调用方
+        # 回来之后下一件事就是读输出、删那两份目录 —— 删早了等于把一个还在服务的夹具的
+        # cwd 抽掉。所以在这儿等那一组里除了组首之外都走掉。**探测必须排在收尸之前**:
+        # 组首的尸还占着这个 pgid,内核就不会把它分给别人,这一轮探测问的才是我们那一组。
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and self._group_left(proc.pid, proc.pid):
+            time.sleep(0.05)
         with contextlib.suppress(Exception):
             proc.wait(timeout=5)
+
+    def _开账(self) -> Path:
+        """要一个账本路径,**顺手把按账的兜底和那份工作目录一起登记上**。
+
+        路径和登记从同一个出口出来,调用点就没有「拿了路径、忘了登记兜底」这种漏法 ——
+        这一类漏不会在任何一条用例上报红,只会在后台留下一棵还在服务的树。
+
+        登记顺序也在这儿定死:先登记删目录、再登记按账收,于是**按账收先跑、删目录后跑**
+        (清理是后进先出)。反了的话删掉的是一个还在服务的夹具的 cwd。
+        """
+        work = Path(tempfile.mkdtemp(prefix="book-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        self.addCleanup(self._reap_book, str(work / "book"))
+        return work / "book"
+
+    def _reap_book(self, book) -> None:
+        """**另一个会话里那棵树的兜底:按账本里记下的身份逐个收。**
+
+        这条路专治「拥有它的那个进程自己没走到收场」:实测让一条用例在它的断言之前先红
+        (普通 `AssertionError`,登记的清理**全部正常执行**),被收掉的只有外层那一组,
+        而锚点、内层运行器、中间进程、夹具四个全活着、页面照样 200 —— 外层被杀掉就跑不
+        了 `_run_nested` 的 `finally`,而那四个不在外层那一组里。
+
+        没有这份账就什么都不做:那是「内层还没起到有东西要收」,不是漏。判据和动手都复
+        用 `_reap_pid`,所以外层已经自己收干净的正常路径上,这里量到的身份是空串(`ps`
+        说没有这个号)→ 一个字都不碰。
+        """
+        if not os.path.exists(book):
+            return
+        with open(book, encoding="utf-8") as f:
+            rec = json.load(f)
+        for name, pid in rec["pids"].items():
+            self._reap_pid(pid, rec["ids"][name])
+
+    def _group_left(self, pgid: int, skip: int) -> list[int]:
+        """那一组里除了 `skip` 还剩哪些进程。量不出来一律当「还剩着」。
+
+        用 `ps -eo pid=,pgid=` 自己过滤,不用 `ps -g`:后者在各家 BSD/Linux 上的语义
+        不一样(有的按会话首解释)。`ps` 起不来或者输出读不成时返回一个占位的号 ——
+        **判不出来不许当成「都走了」**,那正是「等了 0 毫秒就去删目录」的形态;等满上限
+        顶多慢 5 秒。
+        """
+        try:
+            out = subprocess.run(["ps", "-eo", "pid=,pgid="],
+                                 capture_output=True, text=True)
+        except OSError:
+            return [-1]                                   # 判不出来 → 当还剩着
+        if out.returncode != 0:
+            return [-1]
+        left = []
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            try:
+                pid, got = int(parts[0]), int(parts[1])
+            except ValueError:
+                continue
+            if got == pgid and pid != skip:
+                left.append(pid)
+        return left
 
     def _port_open(self, port: int) -> bool:
         with socket.socket() as s:
