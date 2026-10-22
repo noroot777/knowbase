@@ -388,9 +388,13 @@ def _grab_web(url: str, deadline: float) -> dict:
     一道(那正是 `admit` 的来历,见它自己的说明)。
     """
     from kb.feeds.markdown_source import accept, entry, fetch, from_response
-    if markdown := fetch(url, transport=request, deadline=deadline):
-        return entry(url, markdown)
+    # **专用原文抓取和通用抓取共用同一道错误转换。** `fetch` 把普通失败吞成
+    # `None`(「换条路试试」),但关卡会原样抛出来(`markdown_source.fetch` 里那
+    # 条 `except Gated: raise`)—— 它原先落在 try 外面,于是一个 `Gated` 会**直接
+    # 逃出 `grab()`**,前端收到的是 500 纯文本而不是那句「在浏览器里打开一次」。
     try:
+        if markdown := fetch(url, transport=request, deadline=deadline):
+            return entry(url, markdown)
         resp = request(url, accept(grab_page.HEADERS), deadline=deadline)
     except FeedError as e:
         raise GrabError(f'{re.split(r"[;；]", str(e))[0].strip()}') from None
@@ -405,7 +409,7 @@ def _grab_web(url: str, deadline: float) -> dict:
     # **截断交给 `admit`,不许在这之后再截** —— 判据要落在真写进库的那一份上
     # (理由和事故形态写在 `admit` 头上)。
     seen = grab_page.admit(final, html, limit=grab_page.MAX_CHARS,
-                           status=resp.status, headers=dict(resp.headers))
+                           headers=dict(resp.headers))
     if seen.gate or seen.unsure:
         # **两档都在这里一次拦掉,而且排在「拿 body 做任何事」之前。** 哪一档由
         # `admit` 判,这里只负责配上下一步(`_gate` 的说明)。

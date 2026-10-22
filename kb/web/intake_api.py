@@ -459,3 +459,50 @@ def sync(kind: str,body: SyncRequest):
         raise HTTPException(409, why[0] if why
                             else '其他同步正在运行，请结束后重试；自动同步会顺延')
     return {'ok':True,'detail':'同步已开始，完成后可在全文检索中查找'}
+
+
+class HeldReleaseRequest(BaseModel):
+    #: 要放回队列的那几条。空列表 = 「这个来源里挂起的全放回去」(面板那颗
+    #: 「全部恢复」按钮),判据照旧在 `fulltext.release` 自己的 WHERE 里。
+    keys: list[str] = Field(default_factory=list, max_length=500)
+
+
+@router.get('/{kind}/held')
+def held(kind: str):
+    """**挂起等人看一眼的那几条** —— 「证据不足」那一档的查看入口。
+
+    准入判出「我没能确认这一页哪一段是这一篇的正文」时(份额、拒绝说明样板、
+    内容确认不了这三道),补抓既不写库、也不扣「对方真拦着/真连不上」那份重试
+    预算:它一次就挂起,把那半句话记在 `feed_items.fulltext_hold` 上。**没有这
+    个端点那一列就是摆设** —— 审查第 1 轮点的就是这一条(状态落了盘,而人既看不
+    到也恢复不了,面板上只剩一句「订阅摘要」)。
+
+    和「还排在补抓队列里」是两件事,所以单独一个端点而不是往
+    `/{kind}/items` 的状态里塞:那边答的是「它在流水线哪一步」,这边答的是「有
+    几件事等着人做」。判据只有一份(`fulltext.held`),`./kb.sh held` 过的是同一份。
+    """
+    kind_checked(kind)
+    from kb.feeds import fulltext
+    rows = fulltext.held(kind)
+    return {'items': rows, 'total': len(rows)}
+
+
+@router.post('/{kind}/held/release')
+def held_release(kind: str, body: HeldReleaseRequest):
+    """把挂起的那几条放回补抓队列。**这一下不抓,下一轮同步才抓。**
+
+    分开是刻意的:立刻跑一轮管道要占住 `pipeline`,而这颗按钮承诺的只是「再给它
+    一次机会」—— 用户接着点同步、或者等定时那一轮都行。立刻跑的那条路已经有了
+    (`/{kind}/sync`),把两件事绑在一起只会让 409 把恢复一起拒掉。
+
+    **一个字节的正文都不碰**(`fulltext.release`):清的是额度、待办和那条已经
+    作废的失败原因。**报实际写入结果**(元规则):给了 5 个 key 只放回 3 条时
+    就说 3 —— 少的那几条是已经补到全文、key 不存在,或者那条订阅关掉了补抓,
+    而「关掉补抓之后放行」是句空话(`queued_sql` 第一条会把它挡在队列外面)。
+    """
+    kind_checked(kind)
+    from kb.feeds import fulltext
+    keys = body.keys or [r['key'] for r in fulltext.held(kind)]
+    released = fulltext.release(keys)
+    return {'released': released, 'asked': len(keys),
+            'left': len(fulltext.held(kind)), 'pending': fulltext.pending(kind)}

@@ -41,13 +41,15 @@ def queued_sql() -> tuple[str, list]:
     ——只有标题的短动态译完之后 body_zh 仍然是空串,拿它判的话这一条译完了
     还赖在队列里,每轮重译一遍。
 
-    **还排在正文补抓队列里的条目不算待翻译**(见 `kb.feeds.fulltext`):它们
-    此刻手里那份正文是 feed 给的跳转壳,正文马上要被整条换掉。不排掉的话同一
-    条内容买两次模型调用 —— 先按壳译一遍,补上正文再译一遍,而第一份译文随后
-    就被 `fulltext._save` 丢掉。翻译是这条链上最贵的一步,顺序不能反。
+    **正文还没定下来的条目不算待翻译**(`fulltext.unsettled_sql`,**不是**
+    `queued_sql`):它们此刻手里那份正文是 feed 给的跳转壳,正文马上要被整条换掉。
+    不排掉的话同一条内容买两次模型调用 —— 先按壳译一遍,补上正文再译一遍,而第
+    一份译文随后就被 `fulltext._save` 丢掉。翻译是这条链上最贵的一步,顺序不能反。
+    **挂起态(等人看一眼)也算「还没定下来」**,那一档压根不在补抓队列里,所以这
+    里问的必须是 `unsettled_sql` —— 用 `queued_sql` 的后果实测过,见它自己的说明。
     """
     from kb.feeds import fulltext      # 函数内 import:两个模块互相认识对方的口径
-    cond, args = fulltext.queued_sql()
+    cond, args = fulltext.unsettled_sql()
     return (f"lang='en' AND translated_at='' AND translate_tries<? AND NOT ({cond})",
             [MAX_TRIES, *args])
 
@@ -135,7 +137,7 @@ def stuck(kind: str, source_id: int | None = None) -> dict:
     # 批」:排除补抓队列而确认里算了它,就会少译一条(如实,但数字不准);反过来
     # 算了而不排除,就是多花一笔用户没确认的钱。
     from kb.feeds import fulltext
-    body_cond, body_args = fulltext.queued_sql()
+    body_cond, body_args = fulltext.unsettled_sql()
     with reg.db() as c:
         # **四样东西必须出自同一个数据库快照:两个数字、那句原因、那份指纹。**
         # 「同一个连接」给不了这个保证 —— `sqlite3` 在 legacy `isolation_level`
@@ -200,7 +202,7 @@ def manual_sql() -> tuple[str, list]:
     就是 1 条),多译一条是花用户没确认过的钱。
     """
     from kb.feeds import fulltext      # 函数内 import:两个模块互相认识对方的口径
-    cond, args = fulltext.queued_sql()
+    cond, args = fulltext.unsettled_sql()
     return f"lang='en' AND translated_at='' AND NOT ({cond})", list(args)
 
 

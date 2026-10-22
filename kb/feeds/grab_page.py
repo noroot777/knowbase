@@ -365,7 +365,7 @@ def _wall_reason(soup) -> str:
 
 
 def verdict(final_url: str, html: str, body: str = '', *,
-            status: int | None = None, headers: dict | None = None) -> tuple[str, str]:
+            headers: dict | None = None) -> tuple[str, str]:
     """这一次响应能不能被确认为正文 —— 返回 `(确定关卡那半句, 证据不足那半句)`,
     最多一个非空;两个都空 = 没有任何一道判据拦着它。
 
@@ -383,8 +383,8 @@ def verdict(final_url: str, html: str, body: str = '', *,
     两侧俱在)。
 
     **A. 确定关卡**(说得出「对方拦着你」,也说得出下一步):
-    ①**这一次响应自己的身份** —— 关卡决策响应头或「你过不去」那几个状态码
-    (`page_gate.response_reason`;**这是唯一一道不靠页面文字的判据**);
+    ①**这一次响应自己的身份** —— 关卡**决策**响应头(`page_gate.response_reason`;
+    **这是唯一一道不靠页面文字的判据**。状态码一个都不算,理由在它自己头上);
     ②路由 `_GATE_ROUTES`(按最终地址比);③DOM 里**真挂着且已生效**的关卡组件
     `_gate_assets`;④一道**生效且拦在正文上**的登录/订阅墙 `_wall_reason`
     (**结构,不是措辞**);⑤标题自己是一句关卡提示 `_GATE_TITLES` **且**正文里
@@ -419,11 +419,17 @@ def verdict(final_url: str, html: str, body: str = '', *,
     (`_live`);`nav`/页眉页脚侧栏里的登录框不算拦在正文上
     (`readable.in_furniture`)。DOM 里有某个片段 ≠ 它在阻挡正文。
 
-    `status` / `headers` 缺省 `None` = 调用方没有这次响应(只有一份 HTML)。
+    `headers` 缺省 `None` = 调用方没有这次响应(只有一份 HTML)。
     **那时 ① 整道不成立,而且不许拿「没有响应证据」当成「这不是关卡」** ——
     它只是少了一道判据,余下七道照旧问。
+
+    **这一道在这里是冗余带,不是唯一一道。** 真正拦住带关卡头的响应是
+    `fetching.request`(认出来抛 `Gated`,排在任何格式分派之前)—— 那一层才覆盖
+    得到协商 Markdown 和专用原文抓取那两个成功出口。这里留着是因为「谁交进来一份
+    HTML 加一份响应头」这件事不该假设它一定经过了那一层(浏览器通道、测试夹具、
+    将来的别的传输)。**两处同一张表、同一句话**(`page_gate`),不是两份判据。
     """
-    if reason := page_gate.response_reason(status, headers):
+    if reason := page_gate.response_reason(headers):
         return reason, ''
     parts = urlsplit((final_url or '').lower())
     route = parts.path + (f'?{parts.query}' if parts.query else '')
@@ -614,7 +620,7 @@ class Admission(NamedTuple):
 
 
 def admit(final_url: str, html: str, limit: int | None = None, *,
-          status: int | None = None, headers: dict | None = None) -> Admission:
+          headers: dict | None = None) -> Admission:
     """这一页**能不能被确认为这一篇的正文、写进库里**。见 `Admission`。
 
     **两条写库链路共用这一道**:手动收录(`grab._grab_web`)和订阅正文补抓
@@ -652,7 +658,7 @@ def admit(final_url: str, html: str, limit: int | None = None, *,
     body, reason = readable.extract_or_reason(html)
     if limit is not None:
         body = body[:limit]
-    gate, unsure = verdict(final_url, html, body, status=status, headers=headers)
+    gate, unsure = verdict(final_url, html, body, headers=headers)
     if gate or unsure:
         return Admission('', gate, unsure, '')
     return Admission(body, '', '', reason)

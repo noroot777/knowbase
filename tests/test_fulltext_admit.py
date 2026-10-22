@@ -209,6 +209,34 @@ class AdmitCase(FullTextCase):
             self.assertIn(says, row['fulltext_error'])
         return got
 
+    def withheld(self, html, url='https://e.org/post', says=''):
+        """这一页被**扣留**了(证据不足那一档)—— 和 `refused` 的区别只在落地。
+
+        `refused` 那五件后果这里一件不少(壳还在、`content_kind` 还是 `summary`、
+        `fulltext_at` 没写、没进翻译队列),另外四件是这一档自己的:
+        **确定失败那份预算一次都没扣**、**它已经离开队列**(自己不会再抓了)、
+        那半句话留在 `fulltext_hold` 上、而且它出现在 `held()` 里等人看一眼。
+
+        为什么不合并成一个助手:`fulltext_tries` 和 `fulltext_hold` 是两件不同的
+        事(`fulltext.queued_sql` 的 ③④),而上一版正是把它们当成一件 —— 扣预算
+        的后果是三轮之后静默退回摘要,审查第 1 轮实测到了那个末态。
+        """
+        got = self._round(html, url)
+        row, summary = got['row'], got['summary']
+        self.assertEqual((0, 1, 1), (summary['done'], summary['failed'], summary['held']))
+        self.assertEqual(SHELL, row['body'])
+        self.assertEqual('summary', row['content_kind'])
+        self.assertEqual('', row['fulltext_at'])
+        self.assertEqual(0, row['fulltext_tries'])        # 确定失败的预算一次没扣
+        self.assertEqual(0, fulltext.pending('rss'))      # 已经挂起,自己不再抓
+        self.assertNotEqual('', row['fulltext_hold'])
+        self.assertEqual([got['key']], [r['key'] for r in fulltext.held('rss')])
+        self.assertEqual(0, translate.pending('rss'))
+        if says:
+            self.assertIn(says, row['fulltext_error'])
+            self.assertIn(says, row['fulltext_hold'])
+        return got
+
     def fetched(self, html, url='https://e.org/post'):
         """反过来这一页照旧补抓成功,**而且正文真的换了**。"""
         got = self._round(html, url)
@@ -264,7 +292,9 @@ class AdmitTests(AdmitCase):
                                  grab_page._gate_share(body) >= grab_page._GATE_SHARE)
                 self.assertEqual(refusal,
                                  grab_page._refusal_share(body) >= grab_page._REFUSAL_SHARE)
-                self.refused(html, says=says)
+                # 两张都是**证据不足**那一档(⑥ 和 ⑦ 都在 B 组),所以走
+                # `withheld`:不扣确定失败的预算、挂起等人看。
+                self.withheld(html, says=says)
 
     def test_a_login_wall_in_the_article_is_refused(self):
         self.refused(WALL_IN_ARTICLE, says='登录')
@@ -274,7 +304,8 @@ class AdmitTests(AdmitCase):
         # 两头都先钉住:提取器交得出一大段,而按行去重之后过不了那道 400。
         self.assertGreater(len(readable.extract(TEXT_WALL)), readable.MIN_CHARS)
         self.assertLess(readable.substance(readable.extract(TEXT_WALL)), readable.MIN_CHARS)
-        self.refused(TEXT_WALL, says='正文')
+        # ⑧ 也在 B 组(证据不足):「这一页我没能确认是正文」,不是「对方拦着你」。
+        self.withheld(TEXT_WALL, says='正文')
 
     def test_a_challenge_route_is_refused_even_if_the_page_looks_fine(self):
         """路由那一道比的是**最终地址**,和提取器交得出什么无关。"""

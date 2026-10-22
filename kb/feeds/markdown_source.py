@@ -8,7 +8,7 @@ import time
 from urllib.parse import quote, unquote, urlsplit
 
 from kb.feeds import readable, registry as reg
-from kb.feeds.fetching import FeedError
+from kb.feeds.fetching import FeedError, Gated
 
 _SUFFIXES = ('.md', '.markdown', '.mdown', '.mkdn')
 _COMPONENT = re.compile(r'[A-Za-z0-9_.-]+\Z')
@@ -109,6 +109,12 @@ def fetch(url: str, *, transport=None, deadline=None, collect_deadline=None) -> 
         if isinstance(download, str) and urlsplit(download).hostname == 'raw.githubusercontent.com':
             raw = transport(download, {'Accept':'text/plain'}, **options)
             return _text(raw.body, raw.headers)
+    except Gated:
+        # **关卡不是「换条路试试」能解决的,所以它必须穿透出去。** 别的失败吞成
+        # `None` 是对的(专用原文抓不到就走通用 HTML 那条路),但对方明说拦了这一
+        # 次请求时,吞掉只会让主路拿同一个站点再敲一次门、照样被拦 —— 而那两次之
+        # 间任何一次「恰好没带关卡头」都会把拒绝说明收成正文(`Gated` 的说明)。
+        raise
     except (FeedError, OSError, ValueError, TypeError):
         return None
     return None

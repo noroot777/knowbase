@@ -571,6 +571,11 @@ Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
                    --json 一行一条 JSON(给程序读)、--no-wait 投完就返回
                    Claude Code 里说「把这条存进知识库」走 skill kb-grab,同一条路。
 
+  原文补抓里「看不出是不是正文」的那几条(挂起等人看一眼;只读库,不起服务)
+    ./kb.sh held [来源]              列出挂起的:每条带着「上一次为什么没收下」
+    ./kb.sh held --release <key>...  把这几条放回队列,下一轮 sync 再抓
+    ./kb.sh held [来源] --release-all 列出来的全部放回队列
+
   订阅(瞬间返回)
     ./kb.sh accounts list|discover|add|remove|enable|disable [名字]
                    discover 从本机绿泡泡的会话列表里找候选:不登录、不走网络。
@@ -618,6 +623,10 @@ case "$ACTION" in
   extract) pipeline_run '["extract"]' ;;
   graph)   cmd_graph "$@" ;;
   grab)    cmd_grab "$@" ;;
+  # **只读库、不起服务、不发请求**,所以直接跑脚本(口径同 `accounts`:
+  # 瞬间返回的那一类不该把 kb-web 拽起来)。判据只有一份,在 `fulltext.held`
+  # / `fulltext.release` 上 —— 网页那两个端点过的是同一份。
+  held)    "$BOOT_PY" "$ROOT/scripts/feed_held_cli.py" "$@" ;;
 
   accounts) cli accounts "$@" ;;
   setup)   "$COLLECTOR/setup.sh" ;;

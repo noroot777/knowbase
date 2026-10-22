@@ -22,14 +22,23 @@
 前提会各漂各的(口径同那一份自己对 `FullTextCase` / `RecheckCase` 的复用)。
 硬约束在 `docs/decisions/fulltext.md` 第一节。
 """
+import socket
 from unittest.mock import Mock, patch
 
-from kb.feeds import fulltext, grab_page, page_gate, readable
-from kb.feeds.fetching import Response
+import httpx
+
+from kb.feeds import fetching, fulltext, grab, grab_page, page_gate, readable
+from kb.feeds import registry as reg
+from kb.feeds.fetching import FeedError, Response
 from tests.test_feed_fulltext import PAGE, SHELL
 from tests.test_fulltext_admit import (AdmitCase, BLOCK_PAGE_ARTICLE, COMPONENT_ONLY,
-                                       DENIED_PAGE, DENIED_SPLIT, MULTI_TUTORIAL,
+                                       DENIED_PAGE, DENIED_SPLIT, DENIED_TEXT, MULTI_TUTORIAL,
                                        TUTORIAL_PAGE, TUTORIAL_SPLIT, resp)
+
+#: 见 `ResponseGateBeatsFormatDispatchTests.transport` —— **必须在任何 patch 之前
+#: 取**:`patch.object(fetching.httpx, 'Client')` 改的就是 `httpx.Client` 本身
+#: (同一个模块对象),到那时候再取拿到的是上一轮留下的 Mock。
+_REAL_CLIENT = httpx.Client
 
 
 class LayoutDoesNotChangeTheVerdictTests(AdmitCase):
@@ -63,7 +72,10 @@ class LayoutDoesNotChangeTheVerdictTests(AdmitCase):
                                     ('拒绝说明·六句各自成段', DENIED_SPLIT, True)):
             with self.subTest(layout=name):
                 self.setUp()                 # 每一档要一条干净的壳条目
-                self.refused(html, says='正文') if refused else self.fetched(html)
+                # 拒绝说明页落在**证据不足**那一档(⑥⑦ 读的都是正文里的字),
+                # 所以这里问的是 `withheld` 而不是 `refused` —— 结论不随排版变,
+                # 落地那一档也不随排版变。
+                self.withheld(html, says='正文') if refused else self.fetched(html)
 
     def test_the_share_itself_no_longer_moves_with_the_layout(self):
         """**判据那一层也要钉,不只是结论。** 只验结论的话,哪天份额又开始随排版
@@ -140,19 +152,23 @@ class ResponseIdentityTests(AdmitCase):
                 self.assertEqual(1, summary['done'])
                 self.assertIn('The runtime schedules tools', row['body'])
 
-    def test_the_transport_says_what_a_gated_4xx_actually_is(self):
-        """**4xx/5xx 那一类在传输层就被拦下,话术也要跟着对。** `fetching.request`
-        对 `>= 400` 一律抛,原先一句「请检查来源或填写专用订阅链接」—— 而对着一张
-        `403 + cf-mitigated: challenge`,用户改不出任何东西,因为挡着的不是地址。
-        **表和话术只有一份**(`page_gate`),写库准入那道 ① 问的是同一组头。
+    def test_a_status_code_on_its_own_is_never_a_gate(self):
+        """**状态码一个都不算关卡身份,这一条是审查第 1 轮点出来的。**
+
+        上一版把 `401/403/429/503/511` 也当成「这个状态码本身就是一句你过不去」,
+        后果有两头:没有关卡头的 429 是限流、503 是对方不可用,它们**说得出下一步**
+        (稍后重试),而说成「要过一道验证」把人指向一件他做不了也不需要做的事;
+        顺带还让 `fetching.request` 原来那句准确的「服务限流,请稍后重试」变成不
+        可达。所以 `response_reason` 只问响应头,状态码的分类留在传输层自己那段
+        话术里(`test_the_transport_keeps_saying_which_kind_of_failure_it_was`)。
         """
-        self.assertEqual(page_gate.SAY_REPLY, page_gate.response_reason(403, {}))
         self.assertEqual(page_gate.SAY_REPLY,
-                         page_gate.response_reason(200, {'cf-mitigated': 'challenge'}))
-        # 普通的 404 / 500 不是关卡:那是「换个地址」而不是「在浏览器里打开一次」
-        self.assertEqual('', page_gate.response_reason(404, {}))
-        self.assertEqual('', page_gate.response_reason(500, {}))
-        self.assertEqual('', page_gate.response_reason(304, {}))
+                         page_gate.response_reason({'cf-mitigated': 'challenge'}))
+        for name, headers in (('什么头都没有', {}),
+                              ('只有 CDN 在场的指纹', {'cf-ray': '8a1b-SJC'}),
+                              ('关卡头的值是空的', {'cf-mitigated': '  '})):
+            with self.subTest(headers=name):
+                self.assertEqual('', page_gate.response_reason(headers))
 
 
 class EvidenceTooThinTests(AdmitCase):
@@ -169,9 +185,7 @@ class EvidenceTooThinTests(AdmitCase):
         """**那张分段拒绝说明页** —— 审查第 1 轮漏放的那一例。先验后果:库里一个
         字节没动,而这一次的结论**记成了「我没能判断」**而不是「对方拦着你」。
         """
-        got = self.refused(DENIED_SPLIT, says='访问被拒绝')
-        self.assertEqual(1, got['summary']['held'])
-        self.assertIn('访问被拒绝', got['row']['fulltext_hold'])
+        got = self.withheld(DENIED_SPLIT, says='访问被拒绝')
         self.assertEqual(1, len(got['summary']['errors']))   # 面板明细照旧列出它
 
     def test_an_article_about_block_pages_is_still_stored(self):
@@ -198,8 +212,8 @@ class EvidenceTooThinTests(AdmitCase):
 
     def test_the_round_says_how_many_it_could_not_judge(self):
         """面板那句汇报要说得出「其中几条我没能判断」—— 这几条的下一步和别的失败
-        不同(别的下一轮自己重试,这几条试满额度要人看一眼)。"""
-        got = self.refused(DENIED_SPLIT)
+        不同(别的下一轮自己重试,这几条已经挂起、等人看一眼)。"""
+        got = self.withheld(DENIED_SPLIT)
         said = fulltext.summarize(got['summary'])
         self.assertIn('1 条抓取失败', said)
         self.assertIn('看不出是不是正文', said)
@@ -211,16 +225,22 @@ class EvidenceTooThinTests(AdmitCase):
         离开队列、按壳入库,面板上再也没有任何痕迹 —— 而它和真关卡的区别恰恰是
         **我们并不知道**那一页是什么。
 
-        四段一起钉:①额度照旧计次(不计次它就永远排在队首、每轮重抓同一页);
-        ②额度用完之后它**出现在 `held()` 里**、带着那半句话;③人点一次
-        `release()` 就回到队列;④放回去之后**真的会再抓一次**。
+        四段一起钉:①**一次就挂起,而且确定失败那份预算一次都没扣** —— 再敲同一
+        扇门不会让我们知道得更多,而扣掉预算的后果正是上一版那个静默末态;
+        ②它**出现在 `held()` 里**、带着那半句话;③人点一次 `release()` 就回到
+        队列;④放回去之后**真的会再抓一次**。
+
+        **「不再敲对方」这件事按请求次数钉,不按轮数。** 连跑 `MAX_TRIES + 1` 轮
+        同步,原文只该被请求 **1** 次:上一版是 3 次(扣满额度才出队),那三次里后
+        两次是明知故问 —— 同一张页面、同一套判据,答案不会变。
         """
         key = self.put()
         with patch.object(fulltext, 'request',
                           Mock(return_value=resp(DENIED_SPLIT))) as req:
             for _ in range(fulltext.MAX_TRIES + 1):
                 fulltext.fetch_pending('rss')
-        self.assertEqual(fulltext.MAX_TRIES, req.call_count)   # 出队之后不再敲对方
+        self.assertEqual(1, req.call_count)                    # 挂起之后不再敲对方
+        self.assertEqual(0, row_tries := self.row(key)['fulltext_tries'], row_tries)
         self.assertEqual(0, fulltext.pending('rss'))
         self.assertEqual(SHELL, self.row(key)['body'])         # 正确的降级:壳还在
         waiting = fulltext.held('rss')
@@ -235,26 +255,129 @@ class EvidenceTooThinTests(AdmitCase):
         self.assertEqual(1, again.call_count)
         self.assertIn('The runtime schedules tools', self.row(key)['body'])
 
-    def test_a_budget_that_is_not_used_up_is_not_a_human_todo(self):
-        """**额度还没用完的不算待办。** 它们还排在队列里、下一轮同步自己会再试 ——
-        这时候喊人等于把正常的重试说成要人工处理。
+    def test_a_plain_failure_is_not_a_human_todo(self):
+        """**反过来钉一边:普通失败不是待办。** 超时、连不上这一类下一轮自己会
+        重试,这时候喊人等于把正常的重试说成要人工处理 —— 而待办列表里混进不需要
+        人做的行,人就不再看它了。
         """
-        self.refused(DENIED_SPLIT)
+        self.put()
+        with patch.object(fulltext, 'request',
+                          Mock(side_effect=FeedError('订阅连接超时，请稍后重试'))):
+            summary = fulltext.fetch_pending('rss')
+        self.assertEqual((1, 0), (summary['failed'], summary['held']))
         self.assertEqual([], fulltext.held('rss'))
-        self.assertEqual(1, fulltext.pending('rss'))
+        self.assertEqual(1, fulltext.pending('rss'))           # 还排着队,自己会再试
 
     def test_a_held_item_that_gets_its_body_after_all_is_no_longer_a_todo(self):
         """**补到全文之后那个待办要消失。** 留着它的话 `held()` 会把一条已经补好
         的条目列成待办,人点一次 `release()` 还会把它推回队列白抓一轮。
+
+        走的是完整的那条路:挂起 → 人点恢复 → 这一轮真抓到了正文。
         """
         key = self.put()
         with patch.object(fulltext, 'request', Mock(return_value=resp(DENIED_SPLIT))):
             fulltext.fetch_pending('rss')
         self.assertNotEqual('', self.row(key)['fulltext_hold'])
+        self.assertEqual(1, fulltext.release([key]))
         with patch.object(fulltext, 'request', Mock(return_value=resp(PAGE))):
             self.assertEqual(1, fulltext.fetch_pending('rss')['done'])
         self.assertEqual('', self.row(key)['fulltext_hold'])
         self.assertEqual([], fulltext.held('rss'))
+
+    def test_storing_a_body_clears_a_hold_that_a_crossing_round_wrote_back(self):
+        """**`_save` 里那句 `fulltext_hold=''` 不是死代码,这一条钉住它。**
+
+        正常那条路上 `release()` 已经先把 hold 清了,于是 `_save` 看到的行本来就
+        没有待办 —— 光走正常路证明不了这一句有用,而删掉它之后交错那一侧会留下
+        一条「已经补到全文、却还列在待办里」的行(`release` 的说明里那个取舍:人
+        发起恢复之前就发出去的那一轮回来之后照旧写得进去,它会把 hold 写回来)。
+
+        所以这里直接把那个交错的末态摆出来:hold 非空、正文这一轮拿到了。
+        """
+        key = self.put()
+        with patch.object(fulltext, 'request', Mock(return_value=resp(DENIED_SPLIT))):
+            fulltext.fetch_pending('rss')
+        row = self.row(key)
+        self.assertNotEqual('', row['fulltext_hold'])
+        self.assertTrue(fulltext._save(key, 'A real body.' * 60,
+                                       (row['content_hash'], row['content_rev'])))
+        self.assertEqual('', self.row(key)['fulltext_hold'])
+        self.assertEqual([], fulltext.held('rss'))
+
+    def test_an_unresolved_hold_survives_a_result_that_settled_nothing(self):
+        """**一次尝试的结果不能充当正文身份的最终结论 —— 审查第 1 轮的第 3 条。**
+
+        上一版 `_fail` 每次都写 `fulltext_hold`,空串也写,理由写的是「它记的是最后
+        一次的结论」。那个判据是错的:超时、连不上、对方 500、提取器交白卷,这几样
+        **什么都没查清**,而把它们当成「先前那个问题已经判清」的后果实测过 —— 待办
+        被抹掉、`held()` 变空列表,人再也看不到这一条,站点恢复之后也不会再抓它。
+
+        **报告里那个「前两轮说看不出正文、第三轮刚好超时」的序列,在挂起语义下已经
+        不存在了**:判出证据不足就离开队列,不会有第二、第三轮自动抓。但根因没变,
+        它现在的形态是**交错**那一侧(`release` 的说明):人点恢复之前就发出去的那
+        一轮回来了,它手里那份 `work_version` 照旧有效、照旧写得进去。所以这里直接
+        把那一下摆出来 —— 挂着一个没答案的问题,然后来一个什么都没查清的结果。
+
+        **只有两件事有资格清掉那个待办**:真拿到了正文(`_save`),或者对方自己说
+        它拦了这一次请求(`Gated`,那是查清了,下一条钉它)。
+        """
+        for name, failure in (('超时', FeedError('订阅连接超时，请稍后重试')),
+                              ('拿到一页但认不出正文',
+                               '页面上没有识别出正文，可能需要登录或由脚本渲染')):
+            with self.subTest(settled_nothing=name):
+                self.setUp()
+                key = self.put()
+                with patch.object(fulltext, 'request',
+                                  Mock(return_value=resp(DENIED_SPLIT))):
+                    fulltext.fetch_pending('rss')
+                row = self.row(key)
+                said = row['fulltext_hold']
+                self.assertNotEqual('', said)
+                # 这一轮是在 `release` 之前就发出去的,所以它那份取样仍然有效
+                self.assertTrue(fulltext._fail(key, failure,
+                                               (row['content_hash'], row['content_rev'])))
+                after = self.row(key)
+                self.assertEqual(SHELL, after['body'])            # 正文一个字节没动
+                self.assertEqual('', after['fulltext_at'])
+                # **这一次什么都没查清,所以那个待办原样留着**
+                self.assertEqual(said, after['fulltext_hold'])
+                self.assertEqual([key], [r['key'] for r in fulltext.held('rss')])
+                self.assertEqual(1, after['fulltext_tries'])      # 它是一次确定失败
+
+    def test_a_definite_gate_does_clear_an_earlier_hold(self):
+        """**反过来钉一边:查清了的就该清掉。** 先判出证据不足、下一轮对方自己说
+        它拦了这一次请求 —— 那个悬着的问题有答案了,待办跟着消失。留着它的后果是
+        `held()` 攒满「其实已经查清是对方拦着」的行,人从此不再看那个列表。
+        """
+        key = self.put()
+        with patch.object(fulltext, 'request', Mock(return_value=resp(DENIED_SPLIT))):
+            fulltext.fetch_pending('rss')
+        self.assertNotEqual('', self.row(key)['fulltext_hold'])
+        self.assertEqual(1, fulltext.release([key]))
+        with patch.object(fulltext, 'request', Mock(return_value=resp(COMPONENT_ONLY))):
+            fulltext.fetch_pending('rss')
+        row = self.row(key)
+        self.assertEqual('', row['fulltext_hold'])
+        self.assertEqual(1, row['fulltext_tries'])       # 确定关卡照旧计次
+        self.assertEqual([], fulltext.held('rss'))
+
+    def test_turning_fulltext_off_takes_the_item_off_the_human_todo_list(self):
+        """**关掉补抓就是「这条订阅的正文我不要了」,待办要跟着消失。**
+
+        `release()` 放行它是句空话:`queued_sql` 第一条会把它挡在队列外面,而面板
+        上却显示「已恢复 1 条」—— 答不上「那它什么时候再抓」的承诺不如不给。**也
+        不许反过来替用户把那个开关打开。**
+        """
+        key = self.put()
+        with patch.object(fulltext, 'request', Mock(return_value=resp(DENIED_SPLIT))):
+            fulltext.fetch_pending('rss')
+        self.assertEqual([key], [r['key'] for r in fulltext.held('rss')])
+        with reg.db() as c:
+            c.execute('UPDATE subscriptions SET fulltext=0 WHERE id=?',
+                      (self.source['id'],))
+        self.assertEqual([], fulltext.held('rss'))
+        self.assertEqual(0, fulltext.release([key]))     # 也不假装恢复得了
+        self.assertNotEqual('', self.row(key)['fulltext_hold'])   # 那一列原样留着
 
     def test_releasing_never_touches_a_row_that_already_has_its_full_text(self):
         """**人工出口那一下的判据待在 UPDATE 自己的 WHERE 里**(元规则):这一下
@@ -268,3 +391,152 @@ class EvidenceTooThinTests(AdmitCase):
         self.assertEqual(0, fulltext.release([key, 'no-such-key']))
         self.assertEqual(row['body'], self.row(key)['body'])
         self.assertNotEqual('', self.row(key)['fulltext_at'])
+
+
+class ResponseGateBeatsFormatDispatchTests(AdmitCase):
+    """**响应身份排在「这是什么格式」的分派之前,两个收录入口都是。**
+
+    审查第 1 轮实测的那个洞:① 原先只接在 HTML 那条路上,而两条链路各有**两个更
+    早的成功出口** —— 专用原文抓取(`.md` / GitHub 地址)和 `Content-Type` 协商
+    (`text/markdown`)。于是一个 status=200、带着 `cf-mitigated: challenge`、正文
+    就是那段「访问被拒绝、请启用脚本和 Cookie」的响应,在两个入口都被收成了正文:
+    补抓那边 `done=1`、492 字拒绝说明写进 body、`fulltext_at` 写上、`pending` 归零;
+    手动收录那边返回成功条目、阅读区完整展示那段拒绝说明。
+
+    **出路不是在那四个出口各补一次判断**(那就是「两头各拼一遍,其中一头迟早漏
+    掉」的同一个形状),而是把它放到**传输层**:`fetching.request` 一拿到响应就问,
+    认出来抛 `Gated`。响应身份与正文是什么格式无关 —— 格式声明不该撤销更硬的证据。
+
+    **这一组必须真跑 `fetching.request`**,所以打桩打在 httpx 那一层。打桩
+    `fulltext.request` / `grab.request` 的话这道判据整个被绕过去,用例看着绿而缺陷
+    原样在(那正是上一版的 `_with_response` 测不到这一条的原因)。
+    """
+
+    def transport(self, handler):
+        """让真 `fetching.request` 跑起来,只把 socket 和 httpx 换成桩。
+
+        口径同 `tests/test_feed_transport.py` 的同名助手 —— DNS 固定解析到一个
+        公网地址(SSRF 那道守卫要的),传输层换成 `MockTransport`。
+
+        **真的那个 `httpx.Client` 要在模块导入时就存下来**(`_REAL_CLIENT`):
+        `patch.object(fetching.httpx, 'Client')` 改的就是 `httpx.Client` 本身
+        (同一个模块对象),所以在这里现取的话,`subTest` 循环第二次拿到的是上一
+        轮那个 Mock,factory 调用它就炸在 `_mock_call` 上 —— 而那个红看着像产品
+        代码坏了。
+        """
+        def factory(**kwargs):
+            return _REAL_CLIENT(**kwargs, transport=httpx.MockTransport(handler))
+        for mock in (patch.object(fetching.httpx, 'Client', side_effect=factory),
+                     patch.object(fetching.socket, 'getaddrinfo',
+                                  return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, '',
+                                                 ('93.184.216.34', 443))])):
+            mock.start(); self.addCleanup(mock.stop)
+
+    #: 四个出口两两成对:地址决定走不走专用抓取,`Content-Type` 决定走不走协商。
+    EXITS = (('协商 Markdown', 'https://e.org/post', 'text/markdown'),
+             ('专用原文抓取', 'https://e.org/post.md', 'text/plain'))
+
+    def test_a_gated_response_is_refused_before_any_format_dispatch(self):
+        """**补抓这一端**:四个出口里任何一个都不许把它交付成正文。"""
+        for name, url, mime in self.EXITS:
+            with self.subTest(exit=name):
+                self.setUp()
+                key = self.put(url=url)
+                self.transport(lambda r: httpx.Response(
+                    200, content=DENIED_TEXT.encode(),
+                    headers={'content-type': f'{mime}; charset=utf-8',
+                             'cf-mitigated': 'challenge'}))
+                summary = fulltext.fetch_pending('rss')
+                row = self.row(key)
+                self.assertEqual((0, 1), (summary['done'], summary['failed']))
+                self.assertEqual(SHELL, row['body'])          # 一个字节都没动
+                self.assertEqual('', row['fulltext_at'])
+                self.assertIn('验证', row['fulltext_error'])
+                # 确定关卡:查清了,所以不留「等人看一眼」的待办
+                self.assertEqual('', row['fulltext_hold'])
+                self.assertEqual([], fulltext.held('rss'))
+
+    def test_manual_grab_refuses_the_same_response_at_the_same_four_exits(self):
+        """**手动收录这一端**:同一个响应、同一个结论。两端各拼一遍的话,其中一头
+        迟早漏掉一道 —— 那正是把判据收进 `admit` / 传输层的来历。
+        """
+        for name, url, mime in self.EXITS:
+            with self.subTest(exit=name):
+                self.transport(lambda r: httpx.Response(
+                    200, content=DENIED_TEXT.encode(),
+                    headers={'content-type': f'{mime}; charset=utf-8',
+                             'x-amzn-waf-action': 'captcha'}))
+                with self.assertRaises(grab.GrabError) as caught:
+                    grab.grab(url)
+                self.assertIn('验证', str(caught.exception))
+
+    def test_an_innocent_markdown_response_still_goes_through(self):
+        """**反过来钉一边。** 没有关卡头的 Markdown 照旧两个出口都收得进来 ——
+        否则这道判据就成了「凡是 Markdown 一律拒」。
+        """
+        for name, url, mime in self.EXITS:
+            with self.subTest(exit=name):
+                self.setUp()
+                key = self.put(url=url)
+                self.transport(lambda r: httpx.Response(
+                    200, content=b'# Title\n\nA perfectly ordinary README body.\n',
+                    headers={'content-type': f'{mime}; charset=utf-8',
+                             'cf-ray': '8a1b2c3d4e5f-SJC'}))
+                self.assertEqual(1, fulltext.fetch_pending('rss')['done'])
+                self.assertIn('perfectly ordinary', self.row(key)['body'])
+
+    def test_the_transport_keeps_saying_which_kind_of_failure_it_was(self):
+        """**没有关卡头的 4xx/5xx 不许说成「要过一道验证」。** 429 是限流、503 是
+        对方不可用,它们说得出下一步;而关卡那句话指向的是「在浏览器里打开一次」。
+        上一版把这几个状态码也算进关卡表,于是这句准确的限流提示变成不可达。
+        """
+        for status, says, kind in ((429, '服务限流', fetching.FeedError),
+                                   (503, 'HTTP 503', fetching.FeedError),
+                                   (403, 'HTTP 403', fetching.FeedError)):
+            with self.subTest(status=status):
+                self.transport(lambda r: httpx.Response(status, content=b''))
+                with self.assertRaises(kind) as caught:
+                    fetching.request('https://e.org/post', {})
+                self.assertIn(says, str(caught.exception))
+                self.assertNotIn('验证', str(caught.exception))
+        # 带着关卡头的那一张换成 `Gated`,话术也跟着换
+        self.transport(lambda r: httpx.Response(403, content=b'',
+                                                headers={'cf-mitigated': 'challenge'}))
+        with self.assertRaises(fetching.Gated) as caught:
+            fetching.request('https://e.org/post', {})
+        self.assertIn('验证', str(caught.exception))
+        self.assertIn('HTTP 403', str(caught.exception))
+
+    def test_a_refused_request_is_not_retried_behind_another_accept_header(self):
+        """**关卡必须穿透专用原文抓取那条路,不许被吞成「这条路走不通,换主路」。**
+
+        `markdown_source.fetch` 把失败吞成 `None` 是对的 —— 抓不到 `.md` 就走通用
+        HTML 那条路。但对方**明说拦了这一次请求**时吞掉就不是降级而是重试:换一个
+        `Accept` 对同一扇门再敲一次,而这一次「恰好没带关卡头」的响应会被整条收下。
+
+        所以这里钉的后果是**敲门次数**:穿透时只敲一次就停,吞掉时第二次响应(这
+        里故意给一篇读起来完全正常的文章)会被写进 `body`、写上 `fulltext_at`、
+        条目离开重试队列 —— 而我们手里唯一的硬证据说的是「这一次被拦住了」。
+        """
+        self.setUp()
+        key = self.put(url='https://e.org/post.md')
+        knocks: list[str] = []
+
+        def handler(request):
+            knocks.append(str(request.url))
+            if len(knocks) == 1:   # 专用原文抓取那一次:对方拦着
+                return httpx.Response(200, content=DENIED_TEXT.encode(),
+                                      headers={'content-type': 'text/plain; charset=utf-8',
+                                               'cf-mitigated': 'challenge'})
+            return httpx.Response(200, content=PAGE.encode(),   # 第二次:干净得看不出问题
+                                  headers={'content-type': 'text/html; charset=utf-8'})
+
+        self.transport(handler)
+        summary = fulltext.fetch_pending('rss')
+        row = self.row(key)
+        self.assertEqual(1, len(knocks))                  # 只敲了一次门
+        self.assertEqual((0, 1), (summary['done'], summary['failed']))
+        self.assertEqual(SHELL, row['body'])
+        self.assertEqual('', row['fulltext_at'])
+        self.assertIn('验证', row['fulltext_error'])
+        self.assertEqual('', row['fulltext_hold'])        # 确定关卡,不是「等人看一眼」

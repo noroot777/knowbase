@@ -52,6 +52,24 @@ class FeedError(ValueError):
     pass
 
 
+class Gated(FeedError):
+    """**这一次响应自己说它是一道关卡**(`page_gate.response_reason` 认出来的)。
+
+    和普通抓取失败分开成一个类型,不是为了好看,是两处要据此分流:
+    - `markdown_source.fetch` 把普通失败吞成 `None`「换条路试试」,而关卡不是
+      换条路能解决的 —— 吞掉之后主路会拿同一个站点再抓一次,照样被拦,只是白敲
+      一次门;
+    - `fulltext._fail` 据此决定 `fulltext_hold` 那一列怎么动:关卡是**已经查清**
+      (清掉待办),而超时、连接失败这些**什么都没查清**(那一列原样不动,见
+      `_fail` 自己的说明)。
+
+    **判据住在传输层**:`request` 一拿到响应就问,所以它排在任何「这是什么格式」
+    的分派**之前** —— 响应身份与正文格式无关。审查第 1 轮实测过放在分派之后的
+    后果:带 `cf-mitigated` 的 `text/markdown` 响应,订阅补抓和手动收录两个入口
+    都把 492 字拒绝说明收成了正文、写上 `fulltext_at`、退出重试队列。
+    """
+
+
 class CollectionBudgetExceeded(Exception):
     """The run stopped this fetch; the source has not failed."""
 
@@ -142,16 +160,21 @@ def request(url: str, headers: dict | None = None, *, deadline: float | None = N
                                 break  # Re-resolve and validate every redirect.
                             if r.status_code == 304:
                                 return Response(304, url, b'', dict(r.headers))
+                            if gate := page_gate.response_reason(dict(r.headers)):
+                                # **关卡身份排在这一层,而且排在状态码分类和任何
+                                # 格式分派之前。** 它问的是「对方这一次拦了没有」,
+                                # 和状态码是什么、正文是什么格式都无关:放到下游
+                                # 去问,`text/markdown` 和专用原文抓取那两个成功
+                                # 出口就会绕过它(`Gated` 的说明里有实测后果)。
+                                detail = f'（HTTP {r.status_code}）' if r.status_code >= 400 else ''
+                                raise Gated(f'{gate}{detail}')
                             if r.status_code >= 400:
-                                # **响应自己带着关卡标记时换那半句话。** 通用提示
-                                # 写的是「请检查来源或填写专用订阅链接」,而对着一张
-                                # `403 + cf-mitigated: challenge` 那是把人指去改订阅
-                                # 地址 —— 他改不出任何东西,因为挡着的不是地址。
-                                # 表和话术都在 `page_gate`(口径只有一份:写库准入
-                                # 那一道 ① 问的是同一组头,见 `page_gate.SAY_REPLY`)。
-                                if gate := page_gate.response_reason(r.status_code,
-                                                                     dict(r.headers)):
-                                    raise FeedError(f'{gate}（HTTP {r.status_code}）')
+                                # **没有关卡头的 4xx/5xx 不许说成「要过一道验证」。**
+                                # 429 是限流、503 是对方不可用,它们说得出下一步
+                                # (稍后重试);说成验证会把人指向一件他做不了也不
+                                # 需要做的事(审查第 1 轮点出的就是这一处:关卡那
+                                # 张表原先把 429/503 也算进去,这句准确的限流提示
+                                # 从此不可达)。
                                 hint = '；服务限流，请稍后重试' if r.status_code == 429 else '；请检查来源或填写专用订阅链接'
                                 raise FeedError(f'订阅服务返回 HTTP {r.status_code}{hint}')
                             content = bytearray()
