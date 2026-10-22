@@ -13,8 +13,7 @@ from urllib.parse import urlsplit
 
 from kb.feeds import grab, grab_page, readable, x_article
 from kb.feeds.fetching import Response
-from tests.grab_fixtures import (GrabCase, PAGE, TWEET, html_resp, page_html,
-                                 tweet_payload)
+from tests.grab_fixtures import GrabCase, PAGE, TWEET, html_resp, page_html
 
 
 class AddressTests(GrabCase):

@@ -36,6 +36,7 @@ Cloudflare 关卡页跑 `fetch_pending('rss')`:`done=1`、库里正文被换成
 (`FullTextCase` / `SHELL` / `PAGE`、复查那一组的 `RecheckCase`)和页面夹具
 (`page_html`)一律复用现成的 —— 各写一份的话两边的前提会各漂各的。
 """
+import unittest
 from unittest.mock import Mock, patch
 
 from kb import llm
@@ -123,6 +124,11 @@ DENIED_TEXT = (
     'If you think this is a mistake, contact the site administrator with the reference below. '
     'Repeated attempts from the same address may extend the block for a longer period. ')
 DENIED_PAGE = page_html(title='站点公告', body=[DENIED_TEXT])
+#: 同一张拒绝说明页,**六句话各自成段**(每个 `<p>` 一行)。一个字都没增删 —— 提取
+#: 之后去掉空白与原样那张逐字相同(`WhatTheSharedGateStillCannotTell` 先钉这个
+#: 前提)。份额从 1.0 掉到 1/6,于是六道准入一道都不命中、496 字当正文入库。
+DENIED_SPLIT = page_html(title='站点公告',
+                         body=[f'{s}.' for s in DENIED_TEXT.split('. ') if s.strip()])
 
 #: **开头把同一段铺满、真内容排在 `MAX_CHARS` 之后**的那一页。每一段是一个独立的
 #: `<p>`(= 独立的行),所以按行去重之后那个前缀只剩一段的长度 —— 真内容被截掉之后
@@ -301,22 +307,33 @@ class AdmitTests(AdmitCase):
 
 
 class ShareFollowsTheLayoutTests(AdmitCase):
-    """**④ 的结论随排版翻转 —— 这个形状本身钉在这里,不是漏了一条用例。**
+    """**④ 的结论随排版翻转 —— 这一组是那个缺陷的形状快照,不是「期望这样」。**
 
     同一批文字三种排版,三个结论:连成一段(份额 1.0,拒)、三个自然段各提一次那个
     短语(仍是 1.0,拒)、按英文句号分成七段(1/7,放行)。「命中句占比」问的是「这一页
     **有没有别的内容**」,而它拿句读当正文的自然单元 —— 一段英文里提一次,就等于
     「这一句整句都在说这件事」。
 
-    **两次都有人想拿文字量、去重长度或段落形态去给它开豁免,两次都当场漏放**:
-    491 字句句不同的纯文字拒绝说明页在那种豁免下被收成正文、送去翻译、按文章导出
-    (`DENIED_PAGE`)。那三样只证明得了「这里有多少字」,证明不了「这一页没在拦正文」。
-    **方向上取保守**:错存是把已有正文换成关卡文字、一路污染检索/提取/日报/导出,
-    `DO NOTHING` 之下连重投链接都换不回来;误拒是这一条暂时没有全文,摘要还在、
-    面板上看得见。
+    **别把这几条读成验收通过**:正确的结果是三种排版同一个结论,而它现在给不出。
+    期望值连同两侧的后果钉在 `WhatTheSharedGateStillCannotTell` 那两条
+    `expectedFailure` 上 —— 判据一旦换成响应身份,那两条会报 unexpected success,
+    这一组则会红,两边一起提醒来改这里。
 
-    要让它不随排版翻转,得引入**文字之外**的身份证据(响应状态码、关卡响应头)——
-    那是另一件事,不在这一道判据里。
+    **这个缺陷两侧都漏:** 既会误拒(提到一次强措辞的正常英文教程),也会漏放
+    (同一张拒绝说明页分段之后 496 字当正文入库 —— `DENIED_SPLIT`,审查实证)。
+    所以「方向上取保守」只在份额**达线**那一侧成立,份额未达线那一侧压根没有保守
+    可言:它把「没识别到关卡措辞」直接当成了「已经拿到正文」。
+
+    **两次有人想拿文字量、去重长度或段落形态给它开豁免,两次都当场漏放**:491 字
+    句句不同的纯文字拒绝说明页在那种豁免下被收成正文、送去翻译、按文章导出
+    (`DENIED_PAGE`)。那三样只证明得了「这里有多少字」,证明不了「这一页没在拦正文」。
+
+    要让它不随排版翻转,得引入**文字之外**的身份证据(这一次响应的状态码、关卡
+    响应头)—— 强措辞表补不出来:`DENIED_TEXT` 六句里只有一句含表里的词,其余五句
+    (「blocked by the security policy」「contact the site administrator」)和一篇讲
+    网站安全配置的正常文章逐字同类,而基线钉着的那篇正经讲拦截页的文章份额是
+    0.50(`tests/test_grab.py`),比这张拒绝页的 0.17 **高**一倍 —— 单调阈值两头
+    不可兼得,这不是调参能解决的。
     """
 
     def test_the_same_words_get_two_different_verdicts_by_layout(self):
@@ -339,6 +356,55 @@ class ShareFollowsTheLayoutTests(AdmitCase):
         one = ' '.join(readable.extract(TUTORIAL_PAGE).split())
         split = ' '.join(readable.extract(TUTORIAL_SPLIT).split())
         self.assertEqual(one, split)
+
+
+class WhatTheSharedGateStillCannotTell(AdmitCase):
+    """**这一份准入现在判不出来的那两件事,按「期望正确的结果」写在这里。**
+
+    两条都标 `expectedFailure`:它们断言的是**应该发生**的事,而当前判据给不出。
+    这样绿灯不会冒充「这一块验收通过了」—— 跑起来显示的是 expected failures,
+    而判据一旦换成响应身份,它们会报 **unexpected success**,当场提醒回来删掉标记
+    (`ShareFollowsTheLayoutTests` 那一组同时会红,两边一起指向同一处)。
+
+    **为什么不是直接改判据**:两侧要的方向正相反,而它们在纯文字上不可分离 ——
+    这张拒绝页分段后份额 0.17,基线钉着必须放行的那篇正经讲拦截页的文章是 0.50
+    (`tests/test_grab.py` 的 `test_an_article_that_merely_talks_about_captchas_is_still_stored`)。
+    收紧到能拦住 0.17 就必然拦掉 0.50 那一篇;补强措辞表也补不到:这张页面六句里
+    只有「enable JavaScript」那一句在表内,其余五句是普通英文陈述句。要分开它们得
+    有文字之外的证据(这一次响应的状态码、`cf-mitigated` 那类关卡响应头)。
+    """
+
+    def test_the_segmented_notice_is_the_very_same_words(self):
+        """**先钉前提**:分段那张和原样那张逐字相同,份额却落在阈值两侧。
+
+        没有这一条,下面那条 `expectedFailure` 可能只是在说「两篇不同的页面结论
+        不同」—— 那什么也证明不了。
+        """
+        one = ' '.join(readable.extract(DENIED_PAGE).split())
+        split = ' '.join(readable.extract(DENIED_SPLIT).split())
+        self.assertEqual(one, split)
+        self.assertGreaterEqual(grab_page._gate_share(readable.extract(DENIED_PAGE)),
+                                grab_page._GATE_SHARE)
+        self.assertLess(grab_page._gate_share(readable.extract(DENIED_SPLIT)),
+                        grab_page._GATE_SHARE)
+
+    @unittest.expectedFailure
+    def test_a_refusal_notice_should_not_become_an_article_just_by_being_split(self):
+        """期望:同一张拒绝说明页,分段之后照旧不许写进库。
+
+        现状(审查第 1 轮实测,本轮独立复现):份额 1.0 → 1/6,六道一道都不命中,
+        496 字当正文入库、`fulltext_at` 写上、退出重试队列、按文章导出。
+        """
+        self.refused(DENIED_SPLIT)
+
+    @unittest.expectedFailure
+    def test_a_normal_tutorial_that_mentions_a_gate_phrase_should_still_be_fetched(self):
+        """期望:一篇正常的设置教程提到一次「enable JavaScript」,照旧补抓得到全文。
+
+        现状:整段算一句 → 份额 1.0 → 当成关卡拒掉,三轮之后退出队列、永久停在
+        订阅源那份摘要上。
+        """
+        self.fetched(TUTORIAL_PAGE)
 
 
 class NotAGateTests(AdmitCase):
@@ -564,7 +630,9 @@ class StoredBodyTests(GrabCase):
         """**两端共用一份准入,所以结论必须一样** —— 一端放行另一端拒就是两份口径了。
 
         三张各走一遍:拒绝说明页(两端都拒、库里一行都没有)、份额达线的那篇教程
-        (两端都拒,④ 的已知误拒面)、按句分段的同一批文字(两端都收)。
+        (两端都拒)、按句分段的同一批文字(两端都收)。**这一条钉的是两端一致,不是
+        这三个结论本身对**:后两档正是 ④ 随排版翻转的两侧,该得到的结果写在
+        `WhatTheSharedGateStillCannotTell` 那两条 `expectedFailure` 上。
         """
         for name, html, refused in (('拒绝说明页', DENIED_PAGE, True),
                                     ('整段算一句的教程', TUTORIAL_PAGE, True),
