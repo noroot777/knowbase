@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import resource
 import shutil
@@ -33,7 +34,7 @@ from pathlib import Path
 
 from tests import fixture_life
 from tests.fixture_life_cases import 起与收, 开工, 记一笔, 记端口, 读账
-from tests.fixture_life_probe import _free_port, _wait_listening, ROOT
+from tests.fixture_life_probe import _free_port, _identity, _wait_listening, ROOT
 
 
 def _已关(fd: int) -> bool:
@@ -88,26 +89,30 @@ class 没装上防线的那段窗口(起与收):
         self.assertEqual([], os.listdir(box),
                          "内层被掐掉之后那份根也不该留在盘上")
 
-    def _outer(self, book: Path) -> subprocess.Popen:
+    def _outer(self, book: Path, *, 内层前言: str = "") -> subprocess.Popen:
         """起一个**外层**:它自己调那个助手,内层起好夹具后立账再睡。
 
         账里有那一棵树的四个号(锚点、内层运行器、中间进程、夹具)连各自的身份 —— 锚点
         在它自己的会话里,外层那一组的 `killpg` 到不了,所以外层自己没走到收场的时候只
         能按这份账逐个收(见 `立账`)。
+
+        `内层前言` 插在内层脚本的 import 之后:要把注入点放进某个助手**内部**时用它
+        (那时助手还没返回,后面那几行压根不会执行)。不传就是原来那条路,一字不差。
         """
         inner = "\n".join([
             "import os, sys, time, unittest",
             f"sys.path.insert(0, {str(ROOT)!r})",
+            "import tests.fixture_life_cases as C",
             "from tests.fixture_life_cases import 起与收, 开工, 记一笔, 记端口",
+            *([内层前言] if 内层前言 else []),
             "class 一次(起与收):",
+            f"    _账 = {str(book)!r}",      # 创建点自己就会逐笔交接(见 `_记`)
             "    def runTest(self):",
             # 这两个号在这一行之前就已经存在了 —— 所以先把它们记上,再去创建别的
             f"        开工({str(book)!r})",
             f"        记一笔({str(book)!r}, 'anchor', os.getppid())",
             f"        记一笔({str(book)!r}, 'inner', os.getpid())",
             "        port, middle, kid = self._spawn_via_middle(idle='0', owned=False)",
-            f"        记一笔({str(book)!r}, 'middle', middle.pid)",
-            f"        记一笔({str(book)!r}, 'kid', kid)",
             f"        记端口({str(book)!r}, port)",
             "        time.sleep(600)",      # 睡着:它再也走不到自己的清理
             "case = 一次()",
@@ -208,11 +213,11 @@ class 没装上防线的那段窗口(起与收):
             f"sys.path.insert(0, {str(ROOT)!r})",
             "from tests.fixture_life_cases import 起与收, 开工, 记一笔, 记端口",
             "class 一次(起与收):",
+            f"    _账 = {str(book)!r}",      # 同上:创建点逐笔交接,这儿不再手记
             "    def runTest(self):",
             f"        开工({str(book)!r})",
             f"        记一笔({str(book)!r}, 'self', os.getpid())",
             f"        {起法}",
-            f"        [记一笔({str(book)!r}, k, v) for k, v in pids.items()]",
             f"        记端口({str(book)!r}, port)",
             "        time.sleep(600)",      # 睡着:让 SIGINT 落在用例体里
             "case = 一次()",
@@ -427,6 +432,113 @@ class 没装上防线的那段窗口(起与收):
         self.assertTrue(self._wait_dead(kid, 15),
                         f"夹具 {kid} 还在后台 —— 被打断那一项的责任丢了")
         self.assertFalse(self._port_open(rec["port"]), "页面不该还开着")
+
+    def test_取消打断按账回收时那本账不许被别人先删掉(self):
+        """**重试要有依据可用:回收和它依赖的那份证据是同一个责任单元。**
+
+        上一版把「删这份目录」单独登记在清理栈上,而取消那条路上是「先跑剩下的清理、再补
+        跑被打断的那一项」。于是剩下的清理先把目录连账本一起删了,补跑那一下读到的是「没
+        开工、没有账」—— 待办被划掉,而整棵树留在后台。实测:补跑时账本和开工标记都已经
+        消失,四个号全在、页面 200。
+
+        这里在**同一个进程里**走一遍真实的那条路:一条真用例自己开账、起一棵跨会话的树、
+        把拥有它的那个进程强杀掉(它的收场跑不了,树就只能靠按账兜底),然后普通地红一条
+        走进真实清理,并让按账回收那一下**第一次被取消打断**(定点 `KeyboardInterrupt`
+        —— 那正是 SIGINT 在 Python 里的样子,落点和真信号一致)。断言落在它 `run()` 回来
+        之后:那四个号都得没了。
+
+        **两道防线各能救它**(责任单元、以及取消路上先补跑),所以反向验证要把两处一起
+        注回去才看得到红 —— 单注一处会被另一处接住。
+        """
+        box: dict = {}
+        打断过: list[int] = []
+        外 = self
+
+        class 半路被取消的一轮(没装上防线的那段窗口):
+            def _reap_book(self, b):                 # noqa: D102
+                打断过.append(1)
+                if len(打断过) == 1:
+                    raise KeyboardInterrupt("injected:取消落在按账回收里")
+                return super()._reap_book(b)
+
+            def runTest(self):                       # noqa: D102
+                book = self._开账()
+                proc = self._outer(book)
+                box.update(self._wait_book(book, 90))
+                box["book"] = str(book)
+                os.kill(proc.pid, signal.SIGKILL)    # 它自己的收场一行都跑不了
+                proc.wait(timeout=30)
+                # 兜底:下面抛出去之后万一没人收,也别留在后台
+                for name, pid in box["pids"].items():
+                    外._担上(外._reap_pid, pid, _identity(pid))
+                raise AssertionError("injected:普通一条红,照常跑清理")
+
+        with contextlib.suppress(KeyboardInterrupt):
+            半路被取消的一轮("runTest").run(unittest.TestResult())
+        self.assertIn("pids", box, "没走到起树那一步,这条用例没验到东西")
+        self.assertEqual(2, len(打断过), "按账回收没被补跑过,这条用例没验到东西")
+        for name, pid in box["pids"].items():
+            self.assertTrue(self._wait_dead(pid, 20),
+                            f"{name} {pid} 还在后台 —— 补跑那一下没了依据")
+        self.assertFalse(self._port_open(box["port"]), "页面不该还开着")
+
+    def test_助手内部起好的那两个也得交接到账上(self):
+        """**「账上有几笔」不等于「这几笔覆盖了全部已创建的后代」。**
+
+        上一版在那个助手**返回之后**才记它内部起的中间进程和夹具。可它内部就已经把两个
+        都起起来、还在等页面就绪 —— 那段时间里树是活的,账上却只有先记下的 anchor/inner。
+        于是拥有它的那个进程没走到收场时,按账兜底只收得到先记下的两个,中间进程和夹具
+        被漏在账外。
+
+        这里把注入点放在助手**内部**:把「等页面就绪」那一步换成「把两个号写进一份**账本
+        之外**的见证、然后挂住」。挂住 = 拥有者再也走不到自己的清理,而整棵树在它自己的
+        会话里、外层那一组的 `killpg` 到不了 —— **按账收是唯一的出路**(同
+        `test_拥有它的进程没走到收场时那棵树按账收`)。
+
+        **判据落在那两个号还在不在,不落在端口上。** 中间进程睡着、夹具 `idle=0` 不自退,
+        所以这个判据跟机器快慢无关。反过来写成「端口还通不通」就不成立:那一刻夹具刚被
+        起起来、还没 listen(中间进程吐 pid 不等它就绪),端口对好坏两版都是关着的,只在
+        机器被拖慢时才偶然红一次。
+
+        号由见证文件给出而**不从账本读** —— 被漏下的那一版账上压根没有这两笔,从账本读
+        的话那一版只会红在「前提立不起来」上,而不是红在后果上。
+        """
+        book = self._开账()
+        见证 = book.parent / "witness"
+        前言 = "\n".join([
+            "真认领 = 起与收._claim_pid",
+            "def 认领并见证(self, pid, holder=None, **kw):",
+            f"    open({str(见证)!r}, 'a').write('kid %d\\n' % pid)",
+            "    return 真认领(self, pid, holder, **kw)",
+            "起与收._claim_pid = 认领并见证",
+            "def 停在助手内部(port, proc=None, timeout=30):",
+            f"    open({str(见证)!r}, 'a').write('middle %d\\n' % proc.pid)",
+            "    time.sleep(600)",          # 挂住:拥有者再也走不到收场
+            "C._wait_listening = 停在助手内部",
+        ])
+        outer = self._outer(book, 内层前言=前言)
+        号: dict[str, int] = {}
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and len(号) < 2:
+            if 见证.exists():
+                for line in 见证.read_text(errors="replace").splitlines():
+                    name, _, pid = line.partition(" ")
+                    if pid.strip().isdigit():
+                        号[name] = int(pid)
+            if len(号) < 2:
+                time.sleep(0.1)
+        self.assertEqual({"kid", "middle"}, set(号),
+                         "没走到助手内部那一刻,这条用例没验到东西")
+        # 拥有者挂在助手里面:把外层强杀掉,它一行收场都跑不了
+        os.kill(outer.pid, signal.SIGKILL)
+        outer.wait(timeout=30)
+        for name, pid in 号.items():
+            self.assertFalse(self._wait_dead(pid, 1),
+                             f"{name} {pid} 本该还活着,这条用例没验到东西")
+        self.doCleanups()
+        for name, pid in 号.items():
+            self.assertTrue(self._wait_dead(pid, 20),
+                            f"{name} {pid} 还在后台 —— 助手内部起好的那个被漏在账外了")
 
     def test_那一组里还剩谁要认得出来(self):
         """**按组收完就要去删目录了,所以「组里还剩谁」这个判据得认得准。**

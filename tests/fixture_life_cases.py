@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import os
 import shutil
 import signal
@@ -27,8 +26,9 @@ import unittest
 from pathlib import Path
 
 from tests import fixture_life
-from tests.fixture_life_probe import (
+from tests.fixture_life_probe import (   # noqa: F401 - 账本那几个由这儿转出去给内层用
     IdentityUnknown, _shut_fds, _free_port, _identity, _wait_listening, ROOT,
+    开工, 记一笔, 记端口, 记目录, 读账,
 )
 
 
@@ -79,57 +79,6 @@ def _slurp(path: str) -> str:
         return ""
 
 
-def 开工(path: str) -> None:
-    """**创建任何东西之前先立个标记。** 之后账上一笔都没有,也不等于后台没东西。
-
-    上一版把「账本文件不存在」读成「它还没起到有东西要收」。那不成立:账是整棵树起齐之后
-    才一次性发布的,于是从第一个进程跑起来到发布完成之间,**整棵树和页面都已经可用,而正式
-    账还不存在**。实测在发布前取消:基类的取消收场确实跑了,`_reap_book` 因为文件不在直接
-    返回,锚点、内层、中间进程、夹具四个全在、页面 200。
-
-    所以判据换成这个标记:**有标记而账上一条都没有 = 判不出来,一律抛**(响的红),不许
-    返回「确定没有」。口径同 `_identity` 的三种结果。
-    """
-    open(path + ".starting", "w").close()
-
-
-def 记一笔(path: str, name: str, pid: int) -> None:
-    """**一个号一拿到手就记一笔**,不等整棵树起齐。
-
-    一行一条 JSON、`O_APPEND` 追加写:半截只可能出现在**最后一行**(写到一半就被掐掉),
-    读的时候丢掉没有换行结尾的那一行就行 —— 不需要「先写 `.part` 再改名」那种整份发布,
-    而整份发布正是上一版那个窗口的来源。
-
-    号和身份仍然在**同一刻**一起记下(判据仍在 `_mine`)。身份这一问现在走内核那条不用
-    fork、不用 fd 的路(见 `_identity`),所以这一笔的代价是几微秒,窗口小到只剩「进程刚
-    建出来、这一行还没写完」。
-    """
-    line = json.dumps({"name": name, "pid": pid, "id": _identity(pid)},
-                      ensure_ascii=False) + "\n"
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(line)
-
-
-def 记端口(path: str, port: int) -> None:
-    """把页面那个号也记在同一本账上(给断言用,不参与回收)。"""
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps({"port": port}) + "\n")
-
-
-def 读账(path: str) -> tuple[bool, list[dict]]:
-    """返回(开工了没有, 记下来的那几笔)。**半截的最后一行丢掉。**"""
-    started = os.path.exists(path + ".starting")
-    rows: list[dict] = []
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            for line in f.read().splitlines(keepends=True):
-                if not line.endswith("\n"):
-                    continue                      # 写到一半:这一行不算
-                with contextlib.suppress(ValueError):
-                    rows.append(json.loads(line))
-    return started, rows
-
-
 class 起与收(unittest.TestCase):
     """真起一个夹具,断言的是「那个进程还在不在」。本身不含用例。"""
 
@@ -157,11 +106,36 @@ class 起与收(unittest.TestCase):
             try:
                 return super().run(result)
             except KeyboardInterrupt:
+                # **先补完被打断那一项,再跑剩下的清理。** 反过来的话,剩下的清理里那些
+                # 「释放依赖」的步骤(删目录、关 fd)会先跑掉,补跑就没有依据了。
+                with contextlib.suppress(Exception):
+                    self._补完()
                 with contextlib.suppress(Exception):
                     self.doCleanups()
                 raise
         finally:
             self._补完()
+
+    _账: str | None = None           # 设了就表示「这一轮的创建要跨进程交接归属」
+
+    def _记目录(self, root) -> None:
+        """把一份目录交给外层(没设账本就什么都不做,口径同 `_记`)。"""
+        if self._账:
+            记目录(self._账, root)
+
+    def _记(self, name: str, pid: int) -> None:
+        """**一个号拿到手就交接,不等创建它的那个助手返回。**
+
+        上一版是在 `_spawn_via_middle()` 返回之后才记 middle/kid 两笔。可那个助手**内部**
+        就已经把中间进程和夹具起起来、还等了页面就绪 —— 那几百毫秒里树和页面都能用,账上
+        却只有先记下的 anchor/inner。实测:在那一刻让外层普通地红一条,照常跑完全部清理,
+        anchor/inner 被收掉而 middle/kid 仍在、页面 200。**「账上有几笔」不等于「这几笔
+        覆盖了全部已创建的后代」**,所以交接要挪到创建点自己里面。
+
+        没设账本就什么都不做 —— 本进程自己的 `_担上` 已经担着,跨进程那一份只有内层需要。
+        """
+        if self._账:
+            记一笔(self._账, name, pid)
 
     def _担上(self, fn, *a, **kw) -> None:
         """登记一项回收,并且**在它真跑完之前不许从责任里消失**。
@@ -193,6 +167,7 @@ class 起与收(unittest.TestCase):
         「第二次 Ctrl-C 打得断这段收场」仍然成立,这里只是不把「被打断」算成「做完了」。
         """
         pending = self.__dict__.setdefault("_未了", [])
+        tried: dict[int, int] = {}
         while pending:
             fn, a, kw = pending[0]
             try:
@@ -202,8 +177,16 @@ class 起与收(unittest.TestCase):
                     raise
                 self._已让过 = True
                 continue
-            except Exception:
-                pass                     # 它的红第一次执行时已经报出去了
+            except Exception as exc:                        # noqa: BLE001
+                # **「已经试过一次」不等于可以放手。** 第一次失败多半是依赖还没就位
+                # (证据被别人删了、holder 还活着),所以原地再试一次;两次都不成才划
+                # 掉,并且把它说出来 —— 静静划掉就是把一个可能还在服务的后代丢在后台。
+                n = tried.get(id(fn), 0) + 1
+                tried[id(fn)] = n
+                if n < 2:
+                    continue
+                print(f"[收场] {getattr(fn, '__name__', fn)} 补跑两次都没成:{exc}",
+                      file=sys.stderr)
             pending.pop(0)
 
     def _spawn(self, *, idle: str, upstream: str = "", stderr=subprocess.DEVNULL,
@@ -218,6 +201,7 @@ class 起与收(unittest.TestCase):
         proc = subprocess.Popen(argv, cwd=ROOT, env=env,
                                 stdout=stdout, stderr=stderr)
         self._担上(self._reap, proc)
+        self._记("kid", proc.pid)        # 交接排在「等页面就绪」之前
         _wait_listening(port, proc)
         return port, proc
 
@@ -274,6 +258,7 @@ class 起与收(unittest.TestCase):
                                   stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, text=True)
         self._担上(self._reap, middle)
+        self._记("middle", middle.pid)   # 同上:不等它把孙进程的号吐回来
         self.addCleanup(middle.stdout.close)
         # 有凭据时中间进程先吐一行 `ownerfd=N`(好让用例断言它确实落在高位),再吐 pid
         self._owner_fd = -1
@@ -349,7 +334,11 @@ class 起与收(unittest.TestCase):
                  paths["rc"], str(ROOT), *argv],
                 cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=anchor_err,
                 start_new_session=True)
-        self._担上(self._sweep_session, proc)       # 冗余带:正常路径上已经是空操作
+        self._担上(self._sweep_session, proc)
+        # 这两份目录是**这个进程**建的,它被上层强杀时自己删不掉 —— 所以也交给外层那本账
+        # (实测的反面:原样跑一条用例,拥有者没走到自己的 `finally`,留下两份空目录)。
+        self._记目录(box)
+        self._记目录(work)       # 冗余带:正常路径上已经是空操作
         out = err = ""
         rc: int | None = None
         try:
@@ -369,8 +358,12 @@ class 起与收(unittest.TestCase):
             if raw:
                 with contextlib.suppress(ValueError):   # 在 finally 里不许抛
                     rc = int(raw)
-            shutil.rmtree(box, ignore_errors=True)
-            shutil.rmtree(work, ignore_errors=True)
+            if getattr(self, "_未确认退出", None):
+                print(f"[收场] 还有成员没确认退出,{box} / {work} 留着不删",
+                      file=sys.stderr)
+            else:
+                shutil.rmtree(box, ignore_errors=True)
+                shutil.rmtree(work, ignore_errors=True)
         # `rc` 为 `None` = 没拿到内层的退出码,也就是超时那条路(锚点是 `os.replace` 原子
         # 写的,读到半份写不出来;真写坏了的话诊断在 `err` 里)。
         return subprocess.CompletedProcess(argv, rc, out, err)
@@ -407,9 +400,12 @@ class 起与收(unittest.TestCase):
         # 删那两份目录。只报不抛:抛在这儿会盖掉调用方真正的结论,而那份目录留着比删掉
         # 一个还在服务的夹具的 cwd 安全。
         if left:
+            # **未确认退出就不许释放依赖。** 这个标志由收场那一处读:它还立着的时候那两
+            # 份目录一个字都不动 —— 删早了抽掉的是一个可能还在服务的夹具的 cwd,而「已经
+            # 尝试过按组收」不是安全释放的依据。
             self._未确认退出 = sorted(left)
             print(f"[收场] pgid {proc.pid} 等满 5 秒仍有成员 {sorted(left)} —— "
-                  "未确认退出", file=sys.stderr)
+                  "未确认退出,那两份目录留着", file=sys.stderr)
 
     def _开账(self) -> Path:
         """要一个账本路径,**顺手把按账的兜底和那份工作目录一起登记上**。
@@ -421,9 +417,23 @@ class 起与收(unittest.TestCase):
         (清理是后进先出)。反了的话删掉的是一个还在服务的夹具的 cwd。
         """
         work = Path(tempfile.mkdtemp(prefix="book-"))
-        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
-        self._担上(self._reap_book, str(work / "book"))
+        self._担上(self._收账与目录, work)
+        self._账 = str(work / "book")
         return work / "book"
+
+    def _收账与目录(self, work: Path) -> None:
+        """**回收和它依赖的那份证据是同一个责任单元 —— 一起成,或者一起留着。**
+
+        上一版把「删这份目录」单独登记在清理栈上。于是第一次取消打断按账回收之后,剩下
+        的 `doCleanups()` 先把目录(连账本)删了,补跑那一下读到的是「没开工、没有账」,
+        待办被划掉而整棵树留在后台 —— 实测:补跑时账本和开工标记都已经消失,四个号全在、
+        页面 200。**账本是重试唯一的依据,不许排在重试前面被别人删掉。**
+
+        所以删目录这一步挪进来,排在回收**之后**:上一步抛出去(或者被取消打断),这一项
+        整体留在待办上,目录一个字都不动,补跑时账还在。
+        """
+        self._reap_book(str(work / "book"))
+        shutil.rmtree(work, ignore_errors=True)
 
     def _reap_book(self, book) -> None:
         """**另一个会话里那棵树的兜底:按账本里记下的身份逐个收。**
@@ -455,6 +465,11 @@ class 起与收(unittest.TestCase):
                 errs.append(f'{row.get("name")}/{row["pid"]}: {exc}')
         if errs:
             raise AssertionError("这几个号判不出归属,一个都没敢动:" + "; ".join(errs))
+        # **进程全收干净了才动它交出来的目录。** 顺序跟上面那条一样的理由:建目录的那个
+        # 进程被强杀时自己删不掉它,而删早了抽掉的是一个可能还在服务的夹具的 cwd。
+        for row in rows:
+            if "dir" in row:
+                shutil.rmtree(row["dir"], ignore_errors=True)
 
     def _group_left(self, pgid: int, skip: int) -> list[int]:
         """那一组里除了 `skip` 还剩哪些进程。量不出来一律当「还剩着」。
@@ -508,7 +523,7 @@ class 起与收(unittest.TestCase):
             os.kill(pid, signal.SIGKILL)
 
     def _claim_pid(self, pid: int, holder: subprocess.Popen | None = None, *,
-                   stopped: bool = False) -> str:
+                   stopped: bool = False, name: str = "kid") -> str:
         """**一个裸 pid 一拿到手就立回收责任,不等身份量得出来。** 返回量到的身份。
 
         `addCleanup(self._reap_pid, pid, _identity(pid))` 是**先求实参、再登记**:
@@ -532,6 +547,7 @@ class 起与收(unittest.TestCase):
             reaper(pid, box[0], holder)
 
         self._担上(_collect)
+        self._记(name, pid)          # 跨进程那一份同样「拿到手就交接」
         box[0] = _identity(pid)      # 量不出来照旧抛 —— 但回收责任已经立好了
         return box[0]
 

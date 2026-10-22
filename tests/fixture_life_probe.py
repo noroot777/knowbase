@@ -11,6 +11,7 @@ import contextlib
 import ctypes
 import ctypes.util
 import errno
+import json
 import os
 import resource
 import struct
@@ -165,8 +166,47 @@ def _sysctl_probe():
 
 
 _SYSCTL = _sysctl_probe() if sys.platform == "darwin" else None
+_PROC_STAT = sys.platform.startswith("linux")
 _CTL_KERN, _KERN_PROC, _KERN_PROC_PID = 1, 14, 1
 _KINFO_CAP = 4096                  # 实测一条 `kinfo_proc` 是 648 字节
+
+
+def _starttime_from_stat(blob: str, pid: int) -> int:
+    """从 `/proc/<pid>/stat` 的一行里取第 22 个字段(starttime,单位是时钟节拍)。
+
+    **进程名在第 2 个字段里、而且带括号,里面什么字符都可能有**(空格、右括号都见过)。
+    所以不能按空格切整行 —— 从**最后一个** `)` 之后开始数,那之后的字段才是定长的。
+    第 1 个字段也要核:它必须等于问的那个号,对不上说明这一行不是它(抛,口径同主路的
+    回声自校验)。
+    """
+    cut = blob.rfind(")")
+    if cut < 0 or not blob[:cut].startswith(f"{pid} ("):
+        raise IdentityUnknown(f"/proc/{pid}/stat 这一行认不出来:{blob[:60]!r}")
+    rest = blob[cut + 2:].split()
+    if len(rest) < 20:
+        raise IdentityUnknown(f"/proc/{pid}/stat 字段不够({len(rest)} 个)")
+    try:
+        return int(rest[19])             # 从 state(第 3 个字段)起数到第 22 个
+    except ValueError as exc:
+        raise IdentityUnknown(f"/proc/{pid}/stat 的 starttime 不是数:{exc}") from exc
+
+
+def _identity_proc(pid: int) -> str:
+    """Linux 那条**不 fork** 的路:读 `/proc/<pid>/stat`。
+
+    比起 `ps` 便宜一个量级(一次 open/read,不建管道也不建进程),所以 fd 紧张时它还站得
+    住的概率高得多 —— 但它**仍然要一个 fd**,真的一个都不剩时照旧判不出来(那一刻会落到
+    `ps` 后路、两条都不成就抛,仍然是响的)。**这条路没有在 Linux 实机上验过**:这里只钉
+    住它的解析和三种结果的形状,平台覆盖如实记在决策文档里。
+    """
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            blob = f.read()
+    except FileNotFoundError:
+        return ""                        # `/proc` 的「没有这个进程」
+    except OSError as exc:
+        raise IdentityUnknown(f"读不了 /proc/{pid}/stat:{exc!r}") from exc
+    return f"{pid}@{_starttime_from_stat(blob, pid)}"
 
 
 def _identity_sysctl(pid: int) -> str:
@@ -230,6 +270,8 @@ def _identity(pid: int) -> str:
     它,于是一个还活着的进程被判成「没什么要收的」。宁可判不出来:那一边有 holder 兜着,
     两条都没有时会抛,都是响的。
     """
+    if _PROC_STAT:
+        return _identity_proc(pid)
     if _SYSCTL is not None:
         # **一条路走到底,不混用。** 两条路量出来的串形状不同(内核给到微秒,`ps` 只到
         # 秒),记的时候用一条、收的时候用另一条就一定对不上。所以这个选择在模块加载时
@@ -251,6 +293,77 @@ def _identity(pid: int) -> str:
     raise IdentityUnknown(
         f"量不出 pid {pid} 的启动时刻(rc={out.returncode},"
         f" stderr={out.stderr.strip()!r}) —— 不许当成「它已经没了」")
+
+
+def 开工(path: str) -> None:
+    """**创建任何东西之前先立个标记。** 之后账上一笔都没有,也不等于后台没东西。
+
+    上一版把「账本文件不存在」读成「它还没起到有东西要收」。那不成立:账是整棵树起齐之后
+    才一次性发布的,于是从第一个进程跑起来到发布完成之间,**整棵树和页面都已经可用,而正式
+    账还不存在**。实测在发布前取消:基类的取消收场确实跑了,`_reap_book` 因为文件不在直接
+    返回,锚点、内层、中间进程、夹具四个全在、页面 200。
+
+    所以判据换成这个标记:**有标记而账上一条都没有 = 判不出来,一律抛**(响的红),不许
+    返回「确定没有」。口径同 `_identity` 的三种结果。
+    """
+    open(path + ".starting", "w").close()
+
+
+def 记一笔(path: str, name: str, pid: int) -> None:
+    """**一个号一拿到手就记一笔**,不等整棵树起齐。
+
+    一行一条 JSON、`O_APPEND` 追加写:半截只可能出现在**最后一行**(写到一半就被掐掉),
+    读的时候丢掉没有换行结尾的那一行就行 —— 不需要「先写 `.part` 再改名」那种整份发布,
+    而整份发布正是上一版那个窗口的来源。
+
+    号和身份仍然在**同一刻**一起记下(判据仍在 `_mine`)。身份这一问现在走内核那条不用
+    fork、不用 fd 的路(见 `_identity`),所以这一笔的代价是几微秒,窗口小到只剩「进程刚
+    建出来、这一行还没写完」。
+    """
+    try:
+        ident = _identity(pid)
+    except IdentityUnknown:
+        # **身份量不出来也要把这个号记下来(`id` 置空)。** 这一笔要是干脆不记,外层只会
+        # 读到「账上没有这个号」,于是一个还在服务的后代被静默漏掉;记成「有号、身份未
+        # 知」的话,外层按它去收会在 `_mine` 那儿抛 —— 响的红,不是静默漏。口径同
+        # `_identity` 的三种结果:判不准一律扣留,不许返回「确定没有」。
+        ident = None
+    line = json.dumps({"name": name, "pid": pid, "id": ident},
+                      ensure_ascii=False) + "\n"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line)
+
+
+def 记目录(path: str, root) -> None:
+    """**把一份目录也交给外层。** 建它的那个进程被强杀时自己删不掉它。
+
+    记录和删除分在两个进程里:建它的那一侧只负责交出路径,真正确认全树退出之后由外层
+    删。实测过它的反面 —— 原样跑一条用例(不注入任何故障),拥有者没走到自己的 `finally`
+    时留下两份空的验证目录。
+    """
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"dir": str(root)}) + "\n")
+
+
+def 记端口(path: str, port: int) -> None:
+    """把页面那个号也记在同一本账上(给断言用,不参与回收)。"""
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"port": port}) + "\n")
+
+
+def 读账(path: str) -> tuple[bool, list[dict]]:
+    """返回(开工了没有, 记下来的那几笔)。**半截的最后一行丢掉。**"""
+    started = os.path.exists(path + ".starting")
+    rows: list[dict] = []
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f.read().splitlines(keepends=True):
+                if not line.endswith("\n"):
+                    continue                      # 写到一半:这一行不算
+                with contextlib.suppress(ValueError):
+                    rows.append(json.loads(line))
+    return started, rows
+
 
 
 def _reset_state() -> None:
