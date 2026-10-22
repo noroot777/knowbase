@@ -185,6 +185,9 @@ WEB_PAT="kb-web"
 # env -i 干净环境:继承外层(尤其是嵌套 claude)的环境变量会导致 Not logged in
 CLEAN_ENV=(env -i HOME="$HOME" PATH="$PATH")
 
+# 服务进程的那份环境(出口变量的透传名单 + build_web_env)单独一份,见那个文件的头。
+. "$ROOT/scripts/web_env.sh"
+
 # **起服务那条命令一律 --offline。** `uv run` 每次都要先确认一遍项目环境,而
 # pyproject.toml 一动(改依赖、改注释都算)它就要重建那个 editable 包 —— 重建要解析
 # `build-system.requires` 里的 hatchling,不带 --offline 时**即使 uv 缓存里已经有**
@@ -208,11 +211,8 @@ web_prepare_env() {
     return 0
   fi
   say "[web] 环境要补一下(依赖有变动,或 uv 缓存不全),联网装一次"
-  local with_proxy=("${CLEAN_ENV[@]}") v
-  for v in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do
-    if [ -n "${!v:-}" ]; then with_proxy+=("$v=${!v}"); fi
-  done
-  ( cd "$ROOT" && "${with_proxy[@]}" uv run python -c "" ) \
+  build_web_env
+  ( cd "$ROOT" && "${WEB_ENV[@]}" uv run python -c "" ) \
     || die "依赖装不上,kb-web 起不来。网络通了再跑一次 ./kb.sh web start"
 }
 
@@ -273,8 +273,10 @@ web_start() {
      换个端口:KB_WEB_PORT=8788 ./kb.sh web start"
   fi
   web_prepare_env
+  build_web_env
+  warn_egress_gap
   daemonize "$WEB_PID" "$LOG_DIR/web.log" "$ROOT" \
-    "${CLEAN_ENV[@]}" PORT="$WEB_PORT" uv run --offline kb-web
+    "${WEB_ENV[@]}" PORT="$WEB_PORT" uv run --offline kb-web
   local n=0
   while ! port_busy "$WEB_PORT" && [ "$n" -lt 40 ]; do sleep 0.5; n=$((n+1)); done
   port_busy "$WEB_PORT" || die "kb-web 起不来,看 $LOG_DIR/web.log"

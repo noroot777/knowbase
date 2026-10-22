@@ -22,11 +22,14 @@ import feedparser
 import httpx
 from bs4 import BeautifulSoup, NavigableString
 
-from kb.feeds import page_gate, x_channels
+from kb.feeds import page_gate, resolve, x_channels
 from kb.feeds.registry import normalize_url, uses_channel, x_handle
 from kb.source_types import feed_types
 
 MAX_BYTES = 8 * 1024 * 1024
+# 「压根没解析到」这一句两条解析路都要用(系统解析器报错 / DoH 说没有这个域名),
+# 写两遍就会有一天只改了一处。「解析到了但全是内网」是另一句,在 public_addresses 里。
+_UNRESOLVED = '无法解析订阅服务器地址'
 SOURCE_SECONDS = 20
 _WS = re.compile(r'\s+')
 _CTRL = re.compile(r'[\x00\x02\x03]')
@@ -74,15 +77,39 @@ class CollectionBudgetExceeded(Exception):
     """The run stopped this fetch; the source has not failed."""
 
 
-def public_addresses(url: str) -> tuple[str, list[str]]:
+def public_addresses(url: str, *, deadline: float | None = None,
+                     collect_deadline: float | None = None) -> tuple[str, list[str]]:
+    """「这个域名能连哪几个地址」—— 这一族的口径只有这一份,`request` 每跳都过它。
+
+    **换解析器换的只是「地址从哪来」**(`resolve`:配了 `KB_FEED_DOH` 就改问一台可信的
+    DoH 解析器,默认关着走系统解析)。下面那两道判据、去重顺序、以及调用方钉数字 IP
+    的写法都没动 —— 本机解析被污染时 SSRF 这一道**还是对的**,它正是把
+    `buy-european.net` 那条指向 127.0.0.1 的假答案拒掉的东西。形态见
+    `docs/decisions/dns-egress.md`。
+
+    **DoH 的预算从这一次的 deadline 里扣,不另开一份**:`remaining()` 这一下还顺带
+    让整轮采集的 `collect_deadline` 继续管得住它(超了照旧抛
+    `CollectionBudgetExceeded`,不会被包成一次订阅失败)。
+    """
     url = normalize_url(url)
     host = urlsplit(url).hostname
-    try:
-        addresses = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except OSError:
-        raise FeedError('无法解析订阅服务器地址') from None
-    public = list(dict.fromkeys(a[4][0] for a in addresses
-                               if ipaddress.ip_address(a[4][0]).is_global))
+    if resolve.configured():
+        seconds = (remaining(deadline, collect_deadline) if deadline is not None
+                   else resolve.BUDGET)
+        try:
+            found = resolve.addresses(host, seconds=seconds)
+        except resolve.Unknown:
+            raise FeedError(_UNRESOLVED) from None
+        except resolve.Unavailable:
+            # **和「对方拦着你」分开说。** 这一句说的是我们这一侧没出口,人要去看的是
+            # KB_FEED_DOH 和代理,不是改订阅链接。
+            raise FeedError('域名解析服务不可用，请检查 KB_FEED_DOH 与代理设置') from None
+    else:
+        try:
+            found = [a[4][0] for a in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)]
+        except OSError:
+            raise FeedError(_UNRESOLVED) from None
+    public = list(dict.fromkeys(a for a in found if ipaddress.ip_address(a).is_global))
     if not public:
         raise FeedError('订阅域名未解析到公网地址，已拒绝连接')
     return url, public
@@ -134,7 +161,8 @@ def request(url: str, headers: dict | None = None, *, deadline: float | None = N
     try:
         for _ in range(6):
             remaining(deadline, collect_deadline)
-            url, addresses = public_addresses(url)
+            url, addresses = public_addresses(
+                url, deadline=deadline, collect_deadline=collect_deadline)
             original = httpx.URL(url)
             # Direct sockets and proxy CONNECT targets use validated numeric IPs.
             # A separate origin context preserves Host/SNI/cert verification and
