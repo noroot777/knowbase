@@ -22,6 +22,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests import kb_sh_fixture
+
 ROOT = Path(__file__).resolve().parent.parent
 KB_SH = ROOT / 'kb.sh'
 # 522 行那句 `[ $# -gt 0 ] || { usage; exit 0; }` 之后是 case 分发:source 函数段
@@ -45,7 +47,7 @@ class CodeStaleCase(unittest.TestCase):
         (self.dir / 'kb' / 'static' / 'base.css').write_text('/* css */\n')
         self.pid = self.dir / '.run' / 'web-8787.pid'
         self.pid.write_text('4242')
-        shutil.copy2(KB_SH, self.dir / 'kb.sh')
+        kb_sh_fixture.install(self.dir)
         self.funcs = self.dir / 'funcs.sh'
         text = (KB_SH).read_text()
         self.assertIn(_CUT, text)

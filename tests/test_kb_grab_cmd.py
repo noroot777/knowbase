@@ -24,6 +24,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests import kb_sh_fixture
+
 REPO = Path(__file__).resolve().parent.parent
 
 #: uv 的桩:记一笔调用;收到起服务那条命令时占住端口(`web_start` 要等到有人听),
@@ -62,16 +64,14 @@ class GrabCommandTest(unittest.TestCase):
         self.root = base / "repo"
         self.vault = base / "vault"       # graph_stale 别去读用户真 vault
         self.bin = base / "bin"
-        for d in (self.root / "scripts", self.vault, self.bin):
+        for d in (self.vault, self.bin):
             d.mkdir(parents=True)
-        shutil.copy2(REPO / "kb.sh", self.root / "kb.sh")
-        (self.root / "kb.sh").chmod(0o755)
         # **四个文件一套**(入口 + 通道层 + 输入层 + 输出层):单文件 700 行的上限
         # 之下按职责拆的,少拷一个,隔离环境里那条命令一 import 就炸,而红出来的话
-        # 指不到「夹具没拷全」这件事。
-        for name in ("grab_cli.py", "grab_http.py",
-                     "grab_input.py", "grab_say.py"):
-            shutil.copy2(REPO / "scripts" / name, self.root / "scripts")
+        # 指不到「夹具没拷全」这件事。`kb.sh` 自己 source 的那些由夹具现算补齐
+        # (同一个形态在它身上也发生过,见 tests/kb_sh_fixture.py)。
+        kb_sh_fixture.install(self.root, *(f"scripts/{name}" for name in (
+            "grab_cli.py", "grab_http.py", "grab_input.py", "grab_say.py")))
         self.log = base / "uv.log"
         self.port = _free_port()
         stub = self.bin / "uv"

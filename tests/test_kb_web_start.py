@@ -23,8 +23,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests import kb_sh_fixture
+
 REPO = Path(__file__).resolve().parent.parent
-KB_SH = REPO / "kb.sh"
 
 PROXY = "http://127.0.0.1:59999"
 
@@ -69,8 +70,7 @@ class WebStartOfflineTest(unittest.TestCase):
         self.bin = base / "bin"
         for d in (self.root, self.vault, self.bin):
             d.mkdir(parents=True)
-        shutil.copy2(KB_SH, self.root / "kb.sh")
-        (self.root / "kb.sh").chmod(0o755)
+        kb_sh_fixture.install(self.root)
         self.log = base / "uv.log"
         self.port = _free_port()
 

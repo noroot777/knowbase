@@ -18,8 +18,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests import kb_sh_fixture
+
 REPO = Path(__file__).resolve().parent.parent
-KB_SH = REPO / "kb.sh"
 
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
@@ -71,8 +72,7 @@ class GraphGuardTest(unittest.TestCase):
         # 两个检出各放一份 kb.sh,和各自的 data/(里面备齐归类缓存 —— 这样
         # 「没被拦下」一定是闸门放行,而不是撞上了后面那道缺缓存检查)。
         for root in (cls.main, cls.wt):
-            shutil.copy2(KB_SH, root / "kb.sh")
-            (root / "kb.sh").chmod(0o755)
+            kb_sh_fixture.install(root)
             cls._seed_cache(root / "data")
         cls._seed_cache(cls.外置)
         (cls.wt / "alias").symlink_to(cls.wt / "data")   # 同一个目录的第三种写法
