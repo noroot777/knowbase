@@ -45,6 +45,11 @@ def _已关(fd: int) -> bool:
     return False
 
 
+#: 等「被取消的那一个最终退掉」的上限。**这是防挂死的上限,不是判据** —— 它退之前要把
+#: 整棵树收干净(逐个发信号、等整组确认退出),机器一忙这件事本身就要几十秒。判据是「它
+#: 退了而且走的是被取消那条终态」,所以这个数只要够宽;写窄了就是拿墙钟当判据,忙起来随机红。
+_收完上限 = 300
+
 class 没装上防线的那段窗口(起与收):
 
     def test_内层那一轮被掐掉时整棵树都得收掉(self):
@@ -120,6 +125,8 @@ class 没装上防线的那段窗口(起与收):
         ])
         outer = "\n".join([
             "import sys, unittest",
+            "import signal",
+            "signal.signal(signal.SIGINT, signal.default_int_handler)",
             f"sys.path.insert(0, {str(ROOT)!r})",
             "from tests.fixture_life_cases import 起与收",
             "class 外层(起与收):",
@@ -167,7 +174,7 @@ class 没装上防线的那段窗口(起与收):
         rec = self._wait_book(book, 90)
         port, middle, kid = rec["port"], rec["pids"]["middle"], rec["pids"]["kid"]
         proc.send_signal(signal.SIGINT)
-        rc = proc.wait(timeout=90)
+        rc = proc.wait(timeout=_收完上限)
         said = (work / "outer.err").read_text(errors="replace")
         # 前提确认:走的真是「被取消」那条终态,不是它自己正常跑完了
         self.assertNotEqual(0, rc, f"外层该是被取消掉的:{said[-400:]!r}")
@@ -210,6 +217,8 @@ class 没装上防线的那段窗口(起与收):
         """
         code = "\n".join([
             "import os, sys, time, unittest",
+            "import signal",
+            "signal.signal(signal.SIGINT, signal.default_int_handler)",
             f"sys.path.insert(0, {str(ROOT)!r})",
             "from tests.fixture_life_cases import 起与收, 开工, 记一笔, 记端口",
             "class 一次(起与收):",
@@ -231,9 +240,18 @@ class 没装上防线的那段窗口(起与收):
         return proc
 
     def _取消它(self, proc: subprocess.Popen, work: Path) -> None:
-        """发 SIGINT 并确认它真走的是「被取消」那条终态,而不是自己跑完了。"""
+        """发 SIGINT 并确认它真走的是「被取消」那条终态,而不是自己跑完了。
+
+        **被发信号的那几个脚本开头都把 `SIGINT` 复位成默认处置。** 后台起的那条链
+        (CI、哨兵、`nohup`)整条继承「被忽略」,于是这一下一点动静都没有:它照旧睡着,
+        我们等到上限超时;或者它自己正常跑完 —— 退出码 0、stderr 一个字都没有。**那
+        不是「取消路径坏了」,是这条用例在那种起法下压根没验到东西**(实测:同一组用例
+        前台单跑全绿、把 SIGINT 设成 SIG_IGN 再跑就是同样那几条红)。复位之后它跟交互
+        式 shell 里按 Ctrl-C 是同一个处置。夹具自己那一侧的同一个坑见
+        `fixture_life._rearm_sigint()`。
+        """
         proc.send_signal(signal.SIGINT)
-        rc = proc.wait(timeout=90)
+        rc = proc.wait(timeout=_收完上限)
         said = (work / "runner.err").read_text(errors="replace")
         self.assertNotEqual(0, rc, f"该是被取消掉的:{said[-400:]!r}")
         self.assertIn("KeyboardInterrupt", said, f"没走到那条终态:{said[-400:]!r}")
@@ -389,14 +407,18 @@ class 没装上防线的那段窗口(起与收):
         """
         book = self._开账()
         work = book.parent
+        见证 = work / "进了那一项"
         code = "\n".join([
             "import os, subprocess, sys, time, unittest",
+            "import signal",
+            "signal.signal(signal.SIGINT, signal.default_int_handler)",
             f"sys.path.insert(0, {str(ROOT)!r})",
             "from tests.fixture_life_cases import 起与收, 开工, 记一笔, 记端口",
             "from tests.fixture_life_probe import _free_port, _wait_listening, ROOT",
             "from tests import fixture_life",
             "class 一次(起与收):",
             "    def _慢着收(self, proc):",
+            f"        open({str(见证)!r}, 'w').close()",   # 进来了,外层据此动手
             "        time.sleep(4)",          # 取消的落点就留在这一项里面
             "        self._reap(proc)",
             "    def runTest(self):",
@@ -422,9 +444,14 @@ class 没装上防线的那段窗口(起与收):
                                     start_new_session=True)
         self._担上(self._sweep_session, proc)
         rec = self._wait_book(book, 90, keys={"kid"})
-        time.sleep(1.0)                      # 让它走进那一项里面再动手
+        # **等它真走进那一项,不是盲等一个固定时长。** 机器一忙那一秒根本不够(它还在等
+        # 夹具就绪),信号落在别处就被吞掉、脚本正常退出,这条用例当场变成验了个空窗口。
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and not 见证.exists():
+            time.sleep(0.05)
+        self.assertTrue(见证.exists(), "没走进那一项,这条用例没验到东西")
         proc.send_signal(signal.SIGINT)
-        rc = proc.wait(timeout=90)
+        rc = proc.wait(timeout=_收完上限)
         said = (work / "runner.err").read_text(errors="replace")
         self.assertNotEqual(0, rc, f"该是被取消掉的:{said[-400:]!r}")
         self.assertIn("KeyboardInterrupt", said, f"没走到那条终态:{said[-400:]!r}")
@@ -603,8 +630,15 @@ class 没装上防线的那段窗口(起与收):
                 self._担上(self._reap, proc)
                 # 那根管子**一直不消费**:边界立对了的话,它照旧起得来
                 _wait_listening(port, proc, timeout=60)
-                self.assertEqual(proc.wait(timeout=60), 0,
-                                 f"{fd} 号堵着也该按空闲正常退掉")
+                # **退出码钉死 0 —— 不许放宽成「反正它退了」。** 自退是三道梯度(先
+                # SIGINT 好让清理跑完,收不到或卡在清理里才兜底 SIGTERM,还不走硬退
+                # 143),所以 -15 的含义是「第一道没生效、清理一行没跑」。放宽成这三道
+                # 任一,就等于把那种失守唯一的外在迹象放过去 —— 实测这里拿到 -15 的真
+                # 因不是「机器忙来不及」,而是整条进程链继承了 `SIGINT=SIG_IGN`(后台起
+                # 法),裸 server 不像 uvicorn 那样自己装 handler,于是第一道被架空。根子
+                # 在 `fixture_life._rearm_sigint()`,后果回归在 `_outcome` 那份。
+                rc = proc.wait(timeout=120)
+                self.assertEqual(0, rc, f"{fd} 号堵着也该走完第一道正常退掉,拿到 {rc}")
                 self.assertFalse(self._port_open(port), "退了就不该还监听")
 
 

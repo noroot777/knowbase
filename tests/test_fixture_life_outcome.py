@@ -137,6 +137,38 @@ class 后果(起与收):
         self.assertEqual(os.listdir(sandbox), [],
                          "自己退的时候得把临时根删掉,不能留一份沙箱库在盘上")
 
+    def test_后台起法下自退照旧走完第一道(self):
+        """**反过来钉一边:继承来的 `SIGINT=SIG_IGN` 不许把第一道架空。**
+
+        上一条钉的是「收场信号选得对」。可那一道只在 SIGINT 变得成 `KeyboardInterrupt`
+        时才成立 —— 后台起的进程(shell 的作业控制、`nohup`、CI 里那条非交互的链)把
+        SIGINT 设成 SIG_IGN,而 `exec` 之后「被忽略」这个处置是**继承**的。于是第一道
+        一点动静都没有,兜底 SIGTERM 直接结束进程、清理一行都不跑 —— 上一条要防的那个
+        事故形态,换一种起法又犯了一遍,而且**不报错**。
+
+        **必须用裸 server 这一档。** ASGI 那几个走 uvicorn,它自己装 SIGINT handler,
+        把继承来的 SIG_IGN 覆盖掉了,那一格压根不失守 —— 拿它来验这条会永远绿(实测
+        四格:只有「裸 server + 继承 SIG_IGN」这一格退出码是 -15)。
+
+        **判据是退出码,而且钉死 0。** -15 正是「第一道被架空、清理没跑」的样子;把它
+        当成「也算自己退掉了」,就等于把这个缺陷唯一的外在迹象放过去。
+        """
+        port = _free_port()
+        env = {**os.environ, fixture_life.IDLE_ENV: "2"}
+        env.pop(fixture_life.OWNER_ENV, None)
+        proc = subprocess.Popen(
+            [sys.executable, "tests/serve_workspace.py", "--port", str(port)],
+            cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            # 后台作业的样子。**不要在父进程里改自己的处置** —— 那会把这一轮 unittest
+            # 自己的 Ctrl-C 一起关掉,留给后面的用例一个被忽略的 SIGINT。
+            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
+        self.addCleanup(self._reap, proc)
+        _wait_listening(port, proc, timeout=120)
+        self.assertTrue(_wait_gone(proc, 60), "空闲够久了,夹具应该自己退掉")
+        self.assertEqual(0, proc.returncode,
+                         f"该走完第一道(SIGINT→清理)才退,拿到 {proc.returncode}"
+                         " —— -15 就是继承来的 SIG_IGN 把它架空了")
+
     # ---- 所有权那一道 ----
 
     def test_调用方被强杀夹具自己退(self):

@@ -394,6 +394,30 @@ def _decide(limit: float, gone: bool) -> str:
         return why
 
 
+def _rearm_sigint() -> None:
+    """**把继承来的 `SIGINT=SIG_IGN` 复位**,否则自退的第一道当场失效。
+
+    后台起的进程(shell 的作业控制、`nohup`、CI 里那条非交互的链)把 SIGINT 设成
+    SIG_IGN,而 `exec` 之后「被忽略」这个处置是**继承**的(被捕获的那种才复位成默认)。
+    于是 `_bail` 的第一道 SIGINT 一点动静都没有,`GRACE_SECONDS` 之后走兜底 SIGTERM
+    —— 没有 handler 时那是**直接结束、清理一行都不跑**,盘上留下一份完整的沙箱库。那
+    正是 `tests/fixture_root.py` 记着的事故形态,也正是 CLAUDE.md 要求「服务一律用
+    `daemonize()` 起、不用 `nohup ... &`」的同一个坑。**它不报错,只是安静地少跑一遍
+    清理** —— 退出码从 0 变成 -15 是唯一的外在迹象。
+
+    **只在它正被忽略时动手。** 调用方自己装过 handler 的要尊重:那是它自己的收场路径,
+    替它换掉等于把它的清理也拆了。
+
+    `signal.signal` 只能在主线程调用,而 `_bail` 跑在看门狗线程里 —— 所以这件事必须在
+    **装防线的时候**做,不能挪到发信号那一刻。不在主线程就什么都不做。
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return
+    with contextlib.suppress(ValueError, OSError):
+        if signal.getsignal(signal.SIGINT) is signal.SIG_IGN:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+
+
 def _bail(why: str) -> None:
     """打一行再优雅收场。重入只有第一个管用。
 
@@ -461,6 +485,7 @@ def install(*, limit: float | None = None) -> None:
     global _LIMIT, _IDLE_ARMED
     _LIMIT = idle_limit() if limit is None else limit
     touch()
+    _rearm_sigint()                  # 看门狗一装上就可能叫 `_bail`,先把第一道救回来
     if _LIMIT > 0 and not _IDLE_ARMED:   # 幂等:`announce()` 和 `guard()` 都会叫它
         try:
             threading.Thread(target=_watch_idle, daemon=True,
@@ -572,6 +597,9 @@ def _arm_owner() -> None:
     fd = claim_owner()               # 机制失败会抛 OwnerUnusable
     if fd < 0:
         return
+    # 有凭据 = 这确实是个夹具进程(手起那条路到这儿就返回了),这一刻才该碰它的信号处置。
+    # 放在这里还顺带覆盖了 `install()` 之前那个窗口 —— 建库那几十秒里调用方也可能走掉。
+    _rearm_sigint()
     try:
         sel = _owner_selector(fd)    # 同样,抛出去 = 启动失败,不静默降级
     except OSError as exc:           # token 刚验过,这会儿却盯不住 —— 不是「没有 owner」
