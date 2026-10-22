@@ -29,7 +29,7 @@ Lilian Weng、Karpathy 那类 feed 本来就给全文,对它们再抓一次是�
 退出重试队列,`put_items` 的 `DO NOTHING` 之下再也换不回来)。拒绝的那一下
 **一个字节都不改**:壳留着、`fulltext_at` 不写、`fulltext_tries` 照旧计次。
 **而存量里已经被写死的那些,这条准入救不回来**:复查脚本
-(`scripts/feed_fulltext_recheck.py`)只认 `readable.boilerplate_reason`,**这六道一道
+(`scripts/feed_fulltext_recheck.py`)只认 `readable.boilerplate_reason`,**这八道一道
 都不借** —— 库里只剩那份纯文字,认出一张关卡页要的地址、DOM 和响应头当时就没存,拿
 纯文本启发式去补那一刀,两轮审查各实测到一次误删正常内容(⑥ 判坏 Markdown 原文、
 ④ 判坏英文教程)。那一类的出路是人点「重新抓一次」。生产只读实测说**存量的文字里
@@ -52,7 +52,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from kb.feeds import grab_page, readable, registry as reg
 from kb.feeds.exclusion import failure
-from kb.feeds.fetching import FeedError, SOURCE_SECONDS, request
+from kb.feeds.fetching import FeedError, Gated, SOURCE_SECONDS, request
 # 「这一行此刻是哪一版」那份口径摆在 `grab_store` 里(两个版本身份 ——
 # 内容身份 `item_version` 和工作身份 `work_version` —— 要摆在一起对照着读),
 # 本模块和手动重抓那条链共用它。再导出一次,让 `fulltext.work_version` 照旧能用。
@@ -74,22 +74,94 @@ _HEADERS = {'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*
             'Accept-Language': 'en;q=0.9,zh-CN;q=0.8,*;q=0.5'}
 
 
+class Unconfirmed(FeedError):
+    """**证据不足**:这一页既没认出谁在拦、也确认不了它就是这一篇的正文。
+
+    分档在 `fetch_pending`:它额外把这半句话记进 `fulltext_hold`,让额度用完之后
+    这一条**留得下痕迹**(`held()`),而不是和「对方真拦着」一样静默退回摘要。
+
+    **做成 `FeedError` 的子类是给将来的消费方留的安全默认,当前没有可观测后果** ——
+    `fetch_one` 眼下唯一的生产消费方就是 `fetch_pending`,那里捕的是
+    `except Exception`,所以子类与否都走同一条 `_fail`。如实记着这一点是因为反过来
+    也有诱惑:将来谁 `except FeedError` 地消费它,漏掉这一档就该退化成「当成普通
+    失败」(不写库、计次,安全的那一侧),而不是让异常逃出去带掉整轮。
+
+    **为什么它不能和「确定关卡」合成一档**:后者是一句关于别人的事实断言(「对方
+    拦着你」),而这一档的全部证据只是正文里那段字的形状 —— 一篇**真·讲拦截页**的
+    技术文章在文字上和一张真的拒绝说明页不可分离(`grab_page.verdict` 的 B 档)。
+    把「我确认不了」说成「对方拦着你」,面板上那句话就是在替用户下一个我们并不
+    知道的判断,而他照着去「在浏览器里打开一次」只会发现那一页好得很。
+    """
+
+
+def _eligible(ref: str = 'feed_items.key') -> str:
+    """**「这一条现在还属于某条开着补抓的订阅」—— 补抓这一族判据只有这一份。**
+
+    一条内容可能同时属于聚合源和单号源,**任意一条开着就算有资格**(补到的正文对
+    另一条同样有用);反过来,关掉最后一条开着补抓的归属、或者把订阅整条删掉
+    (`registry` 删订阅时刻意保留已收录的条目),这一条就再也不该等全文了。
+
+    **抽成函数是因为它曾经只补在三个消费方身上、漏掉了第四个。** 先补的是
+    `held()` / `release()`,后来实测到的是 `unsettled_sql()` 的挂起那半边没有:
+    于是关掉补抓之后那一条落进一个**没有出口的夹缝** —— 翻译那边当它「正文还没
+    定下来」永久排除(英文摘要永远不译成中文),待办那边当它「没资格」不列出,
+    人工恢复也以 `released=0` 拒绝。三处各判一遍就会这样,所以元规则那条「口径
+    只有一份」在这里不是风格问题。
+
+    `ref` 只有两个取值、全写死在本模块里(`feed_items.key` 给拼进别人 WHERE 的那
+    几段,`fi.key` 给 `held()` 自己那条带别名的 SELECT)—— **不接外部输入**。
+    """
+    return ("EXISTS(SELECT 1 FROM subscription_items si JOIN subscriptions s"
+            f" ON s.id=si.subscription_id WHERE si.item_key={ref} AND s.fulltext=1)")
+
+
 def queued_sql() -> tuple[str, list]:
     """"还排在正文补抓队列里"的判据,只有这一份。
 
-    三个条件:①它属于某条开了补抓的订阅(一条内容可能同时属于聚合源和单号源,
+    四个条件:①它属于某条开了补抓的订阅(一条内容可能同时属于聚合源和单号源,
     任意一条开了就抓 —— 补到的正文对另一条同样有用);②还没抓到过
-    (`fulltext_at` 空);③重试额度没用完。
+    (`fulltext_at` 空);③**没有挂起**(`fulltext_hold` 空);④确定失败的重试
+    额度没用完。
 
-    队列的出口就是第三条:试满 `MAX_TRIES` 仍然抓不动的条目离开队列,按 feed
-    原本那份壳走完翻译和导出。留着原文比把它永远挡在知识库外面强。
+    **③ 和 ④ 是两件不同的事,这是审查第 1 轮点出来的那条。** ④ 是「对方真的
+    拦着/真的连不上,试到第三次就认了」的预算;③ 是「我**没能判断**这一页是不
+    是正文」—— 后者一次就挂起、不扣 ④ 的预算,因为再敲同一扇门不会让我们
+    知道得更多,而扣掉预算的后果是它三轮之后**静默**退回摘要、面板上再没有任何
+    痕迹。挂起的出路是人看一眼(`held()` / `release()`),不是再试两次。
+
+    队列的出口因此有两个:挂起(等人)和 ④ 试满 `MAX_TRIES`(按 feed 原本那份壳
+    走完翻译和导出 —— 留着原文比把它永远挡在知识库外面强)。
 
     `feed_items.key` 写全名是因为这段会被拼进别人的 WHERE 里(`registry.items`、
     `sync._export`),那些语句的 FROM 子句就是 feed_items,不带别名。
     """
-    return ("EXISTS(SELECT 1 FROM subscription_items si JOIN subscriptions s"
-            " ON s.id=si.subscription_id WHERE si.item_key=feed_items.key AND s.fulltext=1)"
-            " AND fulltext_at='' AND fulltext_tries<?"), [MAX_TRIES]
+    return (f"{_eligible()} AND fulltext_at='' AND fulltext_hold=''"
+            " AND fulltext_tries<?"), [MAX_TRIES]
+
+
+def unsettled_sql() -> tuple[str, list]:
+    """"这一条的正文还没定下来" —— **翻译那道闸门问的是这个,不是「还排着队吗」**。
+
+    两者差一个挂起态:挂起的条目**不在**补抓队列里(它等的是人,不是下一轮同步),
+    但它手里那份正文仍然是 feed 给的跳转壳,人点一次 `release()` 就可能被整条换
+    掉。拿 `queued_sql` 当翻译闸门的后果实测到过(就在把挂起做出来的那一轮):那
+    一条一挂起就当场进了翻译队列,壳被译一遍、按文章导出,而人点一次恢复、正文真
+    补上之后 `_save` 把那份译文丢掉重译 —— **同一条内容买两次模型调用**,翻译是
+    这条链上最贵的一步。
+
+    **导出那一侧刻意不用它**:挂起的条目照旧按壳导出,和「试满额度降级出队」完全
+    一样的待遇 —— 留着原文比把它永远挡在知识库外面强,而正文后来真补上时
+    `content_rev` / `extract_stale` 会让它重新导出。
+
+    **资格那一道排在整个并集外面,不是只排在「还排着队」那半边。** 写成
+    `queued_sql() OR (at='' AND hold<>'')` 的后果实测过:关掉补抓(或者删掉最后一条
+    开着补抓的归属)之后,左半边因为没资格变假、右半边只看 hold 仍然为真,于是这一条
+    **永久**被判成「正文还没定下来」—— 英文摘要再也不译成中文,而 `held()` /
+    `release()` 那两道已经按资格把它排除了,面板上看不到、人点恢复也拒绝。一条
+    答不出任何出口的夹缝。判据同源见 `_eligible`。
+    """
+    return (f"{_eligible()} AND fulltext_at=''"
+            " AND (fulltext_hold<>'' OR fulltext_tries<?)"), [MAX_TRIES]
 
 
 def pending(kind: str) -> int:
@@ -117,16 +189,34 @@ def fetch_one(url: str) -> tuple[str, str]:
     原因明确得多 —— 面板上要说得出是哪一类。
 
     **「拿到一页东西」不等于「拿到了这一篇的正文」,所以写库那道准入和手动收录
-    共用一份**(`grab_page.admit`:提取 + 关卡,连先后顺序一起)。原先这里直接
-    拿 `extract_or_reason` 的结果当正文,**六道准入一道都不过** —— 后果是一张
+    共用一份**(`grab_page.admit`:提取 + 判据,连先后顺序一起)。原先这里直接
+    拿 `extract_or_reason` 的结果当正文,**八道准入一道都不过** —— 后果是一张
     关卡页/登录墙被 `_save` 写进 `feed_items.body`、写上 `fulltext_at`、**退出
     重试队列**,而 `put_items` 的 `DO NOTHING` 之下再也换不回来(审查实测:
     1453 字节、一行脚本都没有的 Cloudflare 关卡页,`done=1`、正文被换成
-    「Verify you are human…」、`pending` 归零)。**关卡一律抛**,理由同上面
-    `html_problem` 那一档:那半句话明确得多,而「抛」这条路保证了
-    `fetch_pending` 走 `_fail` —— 壳一个字节不动、`fulltext_at` 不写、
-    `fulltext_tries` 照旧计次(留在原重试语义里:不计次它就永远排在队首,
-    试满 `MAX_TRIES` 按壳入库,口径同「读不懂」那一档)。
+    「Verify you are human…」、`pending` 归零)。
+
+    **这一次响应的响应头要原样交给准入**(`headers=`):① 那一道
+    (`page_gate.response_reason`)是唯一一道不靠页面文字的判据,而这个函数手里就有
+    整个 `Response` —— 不传等于在两个调用方之间留一道各自实现的缝。**不传状态码**:
+    关卡身份只认关卡决策头,429 / 503 / 403 说的是别的事(见下面那条和
+    `page_gate.HEADERS`)。
+
+    **两档拒绝都抛,但抛的不是同一个异常**,理由同上面 `html_problem` 那一档
+    (那半句话明确得多,而「抛」这条路保证了 `fetch_pending` 走 `_fail` —— 壳一个
+    字节不动、`fulltext_at` 不写):
+    - **确定关卡**(对方拦着你)抛 `Gated`,留在原重试语义里 ——
+      `fulltext_tries` 照旧计次(不计次它就永远排在队首、每轮重抓同一张关卡页),
+      试满 `MAX_TRIES` 按壳入库,口径同「读不懂」那一档。
+    - **证据不足**(我没能确认哪一段是正文)抛 `Unconfirmed`。它**不计次、一次就
+      挂起**:那半句话记进 `fulltext_hold`,`queued_sql` 把它排除,等人看一眼
+      (`held()`),人点一次 `release()` 放回队列。再敲同一扇门不会让我们知道得
+      更多,而扣掉确定失败那份预算的后果是三轮之后**静默**退回摘要(审查第 1 轮
+      实测:四轮 materialize,第三轮之后 `pending` 归零、面板上再没有任何痕迹)。
+
+    **响应身份那一道不在这里**(`fetching.request` 认出来就抛 `Gated`,排在任何
+    格式分派之前)。放在这里问的后果实测过:上面那两个 Markdown 早返回会绕过它,
+    带 `cf-mitigated` 的 `text/markdown` 响应把 492 字拒绝说明收成了正文。
     """
     from kb.feeds.markdown_source import accept, fetch, from_response, target
     deadline = time.monotonic() + SOURCE_SECONDS if target(url) else None
@@ -137,11 +227,14 @@ def fetch_one(url: str) -> tuple[str, str]:
         return markdown, ''
     if problem := readable.html_problem(response.body, response.headers):
         raise FeedError(problem)
-    body, gate, why = grab_page.admit(response.url or url,
-                                      readable.decode(response.body, response.headers))
-    if gate:
-        raise FeedError(gate)
-    return body, why
+    seen = grab_page.admit(response.url or url,
+                           readable.decode(response.body, response.headers),
+                           headers=response.headers)
+    if seen.gate:
+        raise Gated(seen.gate)
+    if seen.unsure:
+        raise Unconfirmed(seen.unsure)
+    return seen.body, seen.why
 
 
 def body_hash(body: str) -> str:
@@ -193,6 +286,10 @@ def _save(key: str, body: str, seen: tuple[str, int]) -> bool:
     `content_kind` 从 `summary` 改成 `content`:导出那边据它决定要不要写
     「以下为订阅源提供的摘要」那句注记,而现在这就是全文了。
 
+    **`fulltext_hold` 一起清掉**:那一列是「上一次的结论是证据不足,等人看一眼」
+    这个待办,而现在正文已经确认到手了 —— 留着它会让 `held()` 把一条**已经补到
+    全文**的条目列成待办,人点一次 `release()` 还会把它推回补抓队列白抓一轮。
+
     **重导出靠 `content_hash` 变了,不许清 `exported_hash`。** 导出闸门是
     `exported_hash<>content_hash`,正文一换前者就自然成立 —— 而 `exported_hash`
     同时是「这一篇入没入过库」的事实来源(`registry.items` 的两态、`sync._export`
@@ -210,14 +307,16 @@ def _save(key: str, body: str, seen: tuple[str, int]) -> bool:
         if not row:                      # 这期间被存量清理删掉了,没什么可写的
             return False
         cur = c.execute("""UPDATE feed_items SET body=?,content_kind='content',content_hash=?,lang=?,
-            fulltext_at=?,fulltext_error='',extract_stale=1,content_rev=content_rev+1,
+            fulltext_at=?,fulltext_error='',fulltext_hold='',extract_stale=1,
+            content_rev=content_rev+1,
             title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
             WHERE key=? AND content_hash=? AND content_rev=?""",
             (body, digest, reg.text_language(row['title'], body), reg.now(), key, *seen))
         return cur.rowcount > 0
 
 
-def _fail(key: str, error: Exception | str, seen: tuple[str, int]) -> bool:
+def _fail(key: str, error: Exception | str, seen: tuple[str, int],
+          hold: str | None = None, *, count: bool = True) -> bool:
     """这一条补抓失败了。返回「记上了没有」。
 
     **判据同 `_save`,理由也同**:这次失败说的是**取样那一版**(`seen`)去原文
@@ -225,12 +324,114 @@ def _fail(key: str, error: Exception | str, seen: tuple[str, int]) -> bool:
     使得内容逐字复原 —— 把错误记在新那一版头上、还扣掉一次重试额度,是在给一件
     已经不存在的事记账。**这里不碰 `content_rev`**:记一笔失败不是换内容,别人
     手上的工作资格不该因此作废。
+
+    `hold` 三个值,对应三件不同的事 —— **「这一次的结果」和「那个悬着的问题」
+    是两回事,这是审查第 1 轮点出来的那条**:
+    - **非空** = 这一次判出**证据不足**(`Unconfirmed`):那半句话写进
+      `fulltext_hold`,这一条就此挂起(`queued_sql` 把它排除),等人看一眼;
+    - **`''`** = 这一次**查清了**(`Gated`:对方自己说它拦了这一次请求)。悬着的
+      问题有答案了,待办跟着清掉 —— 否则 `held()` 里会攒下一堆「其实已经查清是
+      对方拦着」的行,而那正是让人不再去看那个列表的东西;
+    - **`None`(缺省)** = 这一次**什么都没查清**:超时、连不上、对方 500、
+      拿到一页但提取器交了白卷。那一列**原样不动**。上一版这一档也写空串,于是
+      「前两轮说看不出是不是正文、第三轮刚好超时」的条目待办被抹掉、人再也看不到
+      它(审查实测:超时和空页面两种第三次,hold 都归空、`held()` 变空列表、站点
+      恢复之后第四轮一次请求都不发)。**一次尝试的结果不能充当正文身份的最终
+      结论** —— 超时只说明这一次没拿到。
+
+    `count=False` 只给挂起那一档用:它不扣确定失败的预算(理由在 `queued_sql`)。
+    """
+    sets = ['fulltext_error=?']
+    args: list = [str(error)[:600] or type(error).__name__]
+    if hold is not None:
+        sets.append('fulltext_hold=?')
+        args.append(hold[:600])
+    if count:
+        sets.append('fulltext_tries=fulltext_tries+1')
+    with reg.db() as c:
+        cur = c.execute(f'UPDATE feed_items SET {",".join(sets)}'
+                        ' WHERE key=? AND content_hash=? AND content_rev=?',
+                        (*args, key, *seen))
+        return cur.rowcount > 0
+
+
+def held(kind: str) -> list[dict]:
+    """**挂起等人看一眼**的那几条:判出了证据不足,所以自己不会再抓了。
+
+    这是「可恢复状态」那一半:上一版里这一类和「对方真拦着」走同一个出口,试满
+    `MAX_TRIES` 之后**静默**离开队列、按壳入库,面板上再也没有任何痕迹 —— 而它和
+    真关卡的区别恰恰是**我们并不知道**那一页是什么。所以这一列留着:这一条答得出
+    「上一次为什么没收下」,人点一次 `release()` 就放回队列。
+
+    **判据三条都要,而且和 `queued_sql` 第一条同源**:
+    - `fulltext_hold<>''` —— 挂着一个没答案的问题;
+    - `fulltext_at=''` —— 还没补到全文。`_save` 成功时会把 hold 清掉,这一条是
+      冗余带:两处口径不一致时宁可少列一条,列出一条已经补好的只会让人白点一次;
+    - **这条订阅现在还开着补抓** —— 不然 `release()` 把它放回队列是句空话
+      (`queued_sql` 第一条会把它挡在外面),而面板上却显示「已恢复 1 条」。
+      关掉补抓就是「这条订阅的正文我不要了」,待办跟着消失才是诚实的;**也不许
+      反过来替用户把那个开关打开**。
+
+    **不再要求额度用完。** 挂起这一档压根不扣额度(`_fail` 的 `count=False`):它
+    一次就离开队列,等的就是人 —— 要求「试满三次才算待办」会让它永远不出现。
     """
     with reg.db() as c:
-        cur = c.execute('UPDATE feed_items SET fulltext_error=?,fulltext_tries=fulltext_tries+1'
-                        ' WHERE key=? AND content_hash=? AND content_rev=?',
-                        (str(error)[:600] or type(error).__name__, key, *seen))
-        return cur.rowcount > 0
+        return [dict(r) for r in c.execute(
+            "SELECT key,url,title,fulltext_hold,fulltext_tries FROM feed_items fi"
+            f" WHERE kind=? AND fulltext_hold<>'' AND fulltext_at='' AND {_eligible('fi.key')}"
+            " ORDER BY fetched_at DESC, key", (kind,)).fetchall()]
+
+
+def release(keys, kind: str | None = None) -> int:
+    """**人工出口**:把补抓额度还给这几条,放回队列。返回真放回去了几条。
+
+    **判据待在 UPDATE 自己的 WHERE 里**(元规则):`fulltext_at=''` —— 这一下和
+    kb-web 那边正在跑的补抓 worker 是两个写入方,先 SELECT 再 UPDATE 在
+    legacy `isolation_level` 下压根不持锁。这期间那一条已经补到全文时放行不了,
+    `rowcount==0` 就是「不用管了」(元规则:0 行不是失败,多半正是想要的末态)。
+
+    **「这条订阅还开着补抓」也在同一个 WHERE 里,判据和 `held()` 同源。** 关掉补抓
+    之后放行是句空话:`queued_sql` 第一条会把它挡在队列外面,而这里却报了「已恢复
+    1 条」 —— 答不上「那它什么时候再抓」的承诺不如不给。**不许替用户把那个开关
+    打开**:关掉补抓就是「这条订阅的正文我不要了」。
+
+    **清的是额度和待办,一个字节的正文都不碰。** 这一列底下躺的是「壳还在、全文
+    没拿到」的条目 —— 要换的只是「还能不能再试一次」。`fulltext_tries` 一起清 0:
+    一条可能先网络失败两次、再判出证据不足挂起,只清 hold 的话它回到队列立刻就撞
+    上满额度、又一次静默退回摘要。`fulltext_error` 一起清掉:留着它面板上会显示
+    一条已经作废的失败原因。
+
+    **已经在路上的那一轮补抓不受这一下影响,交错的后果就是人可能要再点一次。**
+    `_fail` 比的是内容身份(`work_version`:hash + rev),而 `release` 不碰内容,
+    所以一个在 `release` 之前就发出去的请求回来之后照旧写得进去 —— 它会把 hold
+    重新写上(证据不足)或者扣一次额度(确定失败)。**这是知情的取舍**:要挡住它
+    得给「人发起的这一轮」一个不可复用的代次,而那是一列新字段加一道新不变量;
+    而它的后果只是「那一条又挂回去了,人再点一次」,不丢任何数据。
+
+    **`fulltext_hold<>''` 也在 WHERE 里,否则返回的那个数是句谎话。** 元规则:统计按
+    **实际写入结果**报。不带这一条时同一个 key 给三次会报 `released=3`(三次 UPDATE
+    都匹配得上,因为那几列已经是目标值了,SQLite 照样算 1 行),已经恢复过的、压根
+    没挂起过的也一样报「恢复成功」—— 而真放回队列的只有一条。**同一个 key 在一次
+    调用里重复出现由同一条判据覆盖**(第一次把 hold 清掉,后面几次就不匹配了),所以
+    这里不另做一次去重 —— 加过,反向验证红 0 条,两段代码做的是同一件事。
+
+    **`kind` 是可选的来源范围,给 HTTP 那个调用点用。** 路由上的 `kind` 过了合法性
+    校验,不等于请求体里每个 key 都属于它:实测把网页专栏那一条挂起文章的 key 提给
+    RSS 的恢复端点,它照样被恢复、而 RSS 自己那条还挂着。范围要约束**写入本身**
+    (元规则:判据待在写语句自己的 WHERE 里)。CLI 那一侧刻意不传 —— 它的
+    `--release <key>` 文档写明按 key 跨来源,那是有意的契约。
+    """
+    done = 0
+    with reg.db() as c:
+        for key in keys:
+            sql = ("UPDATE feed_items SET fulltext_tries=0,fulltext_hold='',fulltext_error=''"
+                   f" WHERE key=? AND fulltext_at='' AND fulltext_hold<>'' AND {_eligible()}")
+            args: list = [key]
+            if kind is not None:
+                sql += ' AND kind=?'
+                args.append(kind)
+            done += c.execute(sql, args).rowcount
+    return done
 
 
 def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
@@ -242,7 +443,7 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
     `key` 收尾是为了定序 —— `fetched_at` 只精确到秒,一批抓回来的条目时间戳
     一模一样。
     """
-    summary = {'done': 0, 'failed': 0, 'empty': 0, 'left': 0, 'stale': 0,
+    summary = {'done': 0, 'failed': 0, 'empty': 0, 'left': 0, 'stale': 0, 'held': 0,
                'errors': [], 'failed_keys': [], 'stopped': False}
     cond, cargs = queued_sql()
     with reg.db() as c:
@@ -275,10 +476,24 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
                 # **记账排在这里而不是线程里**:要按「记上了没有」统计,而
                 # `_fail` 现在会在那一行已经被换掉时拒绝记(元规则:统计按实际
                 # 写入结果报、跳过的如实列出)。
-                if not _fail(item['key'], error, work_version(item)):
+                # **「证据不足」照旧计进 `failed`,另外多记一笔 `held`。** 不另立
+                # 一个 bucket 把它从 `failed` 里挪走:这一条确实没补到正文,面板
+                # 那句「N 条抓取失败」要如实含着它,而失败明细也照旧要列出它(人
+                # 要看的就是那半句话)。`held` 是**加一个说明**,不是换一种分类。
+                # **三类结果对 `fulltext_hold` 做三件不同的事**(判据和实测后果在
+                # `_fail` 头上):证据不足 → 写那半句话、挂起、**不扣确定失败的
+                # 预算**;`Gated`(对方自己说它拦了)→ 查清了,清掉待办、照旧计次;
+                # 其余(超时、连不上、对方 500)→ **什么都没查清,那一列原样不动**。
+                held_say = str(error)[:600] if isinstance(error, Unconfirmed) else None
+                if isinstance(error, Gated):
+                    held_say = ''
+                if not _fail(item['key'], error, work_version(item), held_say,
+                             count=held_say in (None, '')):
                     summary['stale'] += 1
                 else:
                     summary['failed'] += 1
+                    if held_say:
+                        summary['held'] += 1
                     summary['failed_keys'].append(item['key'])
                     summary['errors'].append(failure(item, error, kind))
             elif body is None:               # 停止请求 / 预算用完,留给下一轮
@@ -321,6 +536,12 @@ def summarize(summary: dict) -> str:
         text += f",{summary['failed']} 条抓取失败"
     if summary['empty']:
         text += f",{summary['empty']} 条没能识别出正文"
+    if summary.get('held'):
+        # **「证据不足」要在这句话里露面。** 它是 `failed` 的一个子集,所以不另报
+        # 一个数 —— 报的是「其中几条我没能判断」,因为它们的下一步和别的失败不同:
+        # 别的失败下一轮自己会重试,这几条**已经挂起、自己不会再抓了**,要人看一
+        # 眼(`held()`,面板和 `./kb.sh held` 都从那儿读)。
+        text += f"（其中 {summary['held']} 条看不出是不是正文，已挂起等人看一眼）"
     if summary.get('stale'):
         # **跳过的如实列出**(元规则):这几条在补抓期间被换成了别的内容,这次
         # 结果作废 —— 说成「失败」会让人去查对方站点,说成「成功」更糟。

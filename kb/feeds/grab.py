@@ -47,7 +47,7 @@ from kb.feeds import grab_page, readable, registry as reg, x_article, x_body
 # 是所有调用方和决策文档引用的那几个名字。
 from kb.feeds.grab_store import (KIND, known, owing,  # noqa: F401
                                  reclaim_export, replace)
-from kb.feeds.fetching import FeedError, body_text, canonical_url, oneline, request
+from kb.feeds.fetching import FeedError, Gated, body_text, canonical_url, oneline, request
 
 #: 整条收录的墙钟上限。X 那边最多两次接口请求(推文 + 长文),网页那边一次 HTTP;
 #: 用户正盯着这颗按钮等,所以比采集那一侧(`SOURCE_SECONDS`)给得紧一些。
@@ -361,16 +361,25 @@ def _next_step(final_url: str) -> str:
 
 
 def _gate(reason: str, final_url: str = '') -> GrabError:
-    """被关卡挡住那一句:**为什么没收下**(判据给的那半句)**+ 下一步**。"""
+    """没收下那一句:**为什么没收下**(判据给的那半句)**+ 下一步**。
+
+    **确定关卡和证据不足两档共用这一句,因为用户能做的事一模一样** —— 在浏览器里
+    打开它、把正文复制出来,或者换一个地址。两档的区别在**话术本身**(`verdict`
+    给的那半句:一个说「对方拦着你」,一个说「我没能确认哪一段是正文」),不在
+    下一步。再往下给手动收录这一侧分出两种出路是在造一个用户分不出的差别 ——
+    而两档的落地**真的不同**的那一侧是补抓(`fulltext.held`:那边没人在旁边看,
+    所以「我没能判断」得留下一个待办;这边人就在屏幕前,他自己就是那个出口)。
+    """
     return GrabError(f'{reason}，所以正文抓不到。{_next_step(final_url)}')
 
 
 def _grab_web(url: str, deadline: float) -> dict:
     """一个网页 → 待入库的条目。正文口径只有 `readable` 那一份。
 
-    **「提取成功」证明不了「拿到了那篇文章」。** 所以关卡判据排在**所有出路的
+    **「提取成功」证明不了「拿到了那篇文章」。** 所以准入排在**所有出路的
     前面,成功和失败共用一道**(`grab_page.admit`,判据和那条不变量都在它
-    自己头上):一张验证页提取得出一段文字、长度轻松过关,随后被 `put_items` 的
+    自己头上;**这一次响应的状态码和响应头一并交进去** —— ① 那道判据是唯一一道
+    不靠页面文字的,留在这里自己判就又变成两头各拼一遍):一张验证页提取得出一段文字、长度轻松过关,随后被 `put_items` 的
     `DO NOTHING` 永久钉成这一篇的正文,再投一次同一条链接也换不回真文章(两轮
     审查各实测到一例:683 字那张落在 `/challenge` 上,1782 字那张谁都没拦住)。
     **这里只有一个调用点** —— 成功路和失败路各问一次的话,同一张验证页会得到
@@ -379,10 +388,20 @@ def _grab_web(url: str, deadline: float) -> dict:
     一道(那正是 `admit` 的来历,见它自己的说明)。
     """
     from kb.feeds.markdown_source import accept, entry, fetch, from_response
-    if markdown := fetch(url, transport=request, deadline=deadline):
-        return entry(url, markdown)
+    # **专用原文抓取和通用抓取共用同一道错误转换。** `fetch` 把普通失败吞成
+    # `None`(「换条路试试」),但关卡会原样抛出来(`markdown_source.fetch` 里那
+    # 条 `except Gated: raise`)—— 它原先落在 try 外面,于是一个 `Gated` 会**直接
+    # 逃出 `grab()`**,前端收到的是 500 纯文本而不是那句「在浏览器里打开一次」。
     try:
+        if markdown := fetch(url, transport=request, deadline=deadline):
+            return entry(url, markdown)
         resp = request(url, accept(grab_page.HEADERS), deadline=deadline)
+    except Gated as e:
+        # **关卡这一档配得上下一步**,口径同 `admit` 判出关卡那条路(同一个 `_gate`:
+        # 用户能做的事一模一样 —— 在浏览器里打开它)。只给这一档配:限流、连不上、
+        # 4xx 该说的是「稍后重试」或者「换个地址」,照「在浏览器里打开一次」说等于
+        # 把人指向一件没用的事(那也是 `page_gate` 不收状态码的同一个理由)。
+        raise _gate(re.split(r'[;；]', str(e))[0].strip(), url) from None
     except FeedError as e:
         raise GrabError(f'{re.split(r"[;；]", str(e))[0].strip()}') from None
     if markdown := from_response(resp):
@@ -395,9 +414,13 @@ def _grab_web(url: str, deadline: float) -> dict:
     final = resp.url or url
     # **截断交给 `admit`,不许在这之后再截** —— 判据要落在真写进库的那一份上
     # (理由和事故形态写在 `admit` 头上)。
-    body, gate, why = grab_page.admit(final, html, limit=grab_page.MAX_CHARS)
-    if gate:
-        raise _gate(gate, final)
+    seen = grab_page.admit(final, html, limit=grab_page.MAX_CHARS,
+                           headers=dict(resp.headers))
+    if seen.gate or seen.unsure:
+        # **两档都在这里一次拦掉,而且排在「拿 body 做任何事」之前。** 哪一档由
+        # `admit` 判,这里只负责配上下一步(`_gate` 的说明)。
+        raise _gate(seen.gate or seen.unsure, final)
+    body, why = seen.body, seen.why
     if not body:
         # 读不到正文这一档也要带上下一步(口径同 `_gate`:同一个 `_next_step`)。
         # 「这一页没找到正文」自己指不出任何事 —— 折叠成一句抓取失败就是把人留在

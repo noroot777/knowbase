@@ -164,15 +164,20 @@ class MarkupBudgetTests(unittest.TestCase):
 
     def test_a_small_page_is_never_scanned_twice(self):
         """**量这一下自己不许变成新的开销。** 两个消费方的短路顺序要一致:整份没
-        超线就压根不去量 —— 第一轮审查里 `gate_reason` 是无条件调用的,于是每一份
-        小页面都白扫一趟(而那一版的扫描还是平方级的)。
+        超线就压根不去量 —— 首版那一处是无条件调用的,于是每一份小页面都白扫一趟
+        (而那一版的扫描还是平方级的)。
+
+        **这一头现在叫 `grab_page.verdict`**:同一道判据后来从「返回一句拒绝的话」
+        改成了返回三档(确认为正文 / 确定关卡 / 证据不足),短路那一下跟着搬进了新
+        函数。改名的时候这条用例一起改,不留 `gate_reason` 当别名 —— 那等于给同一道
+        判据留两个入口(元规则:口径只有一份)。
         """
         small = '<html><body><article><p>' + '正文' * 400 + '</p></article></body></html>'
         self.assertLess(len(small), readable.MAX_HTML)
         with patch.object(readable, 'markup_size',
                           side_effect=AssertionError('小页面不该去量真标记')):
             readable.extract(small)
-            grab_page.gate_reason('https://example.org/a', small, '正文' * 400)
+            grab_page.verdict('https://example.org/a', small, '正文' * 400)
 
 
 if __name__ == '__main__':

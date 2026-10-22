@@ -54,7 +54,7 @@ MAX_HTML = 3 * 1024 * 1024
 # 声明、按 html.parser 自己的规矩确认开标签收口,拿不准就不扣。
 #
 # 成本:游标只进不退,每一段最多被扫两趟,所以是 O(len);而且**只在整份超线时才扫**
-# (两个消费方的短路顺序见 `extract_or_reason` 和 `grab_page.gate_reason`)。实测 ——
+# (两个消费方的短路顺序见 `extract_or_reason` 和 `grab_page.verdict`)。实测 ——
 # 绿泡泡那张真实页 0.002 秒,上面那几种病态输入 0.001~0.4 秒,而同样那份 3.2 MB
 # 真标记交给 BeautifulSoup 要 2.5 秒,后面还有打分。
 #: 标签里「值的界符或标签收口」那几个字符。**`=` 也要认**:引号只有紧跟在 `=` 后面
@@ -304,7 +304,7 @@ def substance(text: str) -> int:
     **这不是提取器自己的门槛**(`MIN_CHARS` 那一道照旧按原始长度算,
     `extract_or_reason` 的两档一个字都没改):它给的是手动收录那边
     「这一次响应能不能当成这一篇的正文落库」那一问的内容质量判据
-    (`grab_page.gate_reason` 的第六道)。放在这里是因为它和 `plain` 的输出格式
+    (`grab_page.verdict` 的 ⑧)。放在这里是因为它和 `plain` 的输出格式
     绑在一起 —— 换了分段方式这一问就得跟着改,两处各写一份迟早漂。
 
     事故形态(2026-10-16 审查实测):一张「Sign in to continue reading /

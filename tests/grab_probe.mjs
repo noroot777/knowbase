@@ -252,7 +252,7 @@ try {
   // 12. **错存的唯一出路是那颗「重新抓一次」。** 质量那一道只认得出我们认得出的
   //     坏内容(通篇复读那一类),「五段各不相同的会员说明」过得了关、从此
   //     `content_ok` 恒真 —— 恢复出口要是也架在它上面,这种错存一辈子换不回来。
-  //     所以只要库里有这一行,按钮就得在;换不换得成由后端的六道准入和 CAS 决定。
+  //     所以只要库里有这一行,按钮就得在;换不换得成由后端的八道准入和 CAS 决定。
   await evalJs(`$('grab-url').value = 'https://example.org/posts/manual-one'; true`);
   if (!await until(`!$('grab-go').disabled`, 10000) || !await clickAt("#grab-go"))
     throw new Error("点不到「存入知识库」");

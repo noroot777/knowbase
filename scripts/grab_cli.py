@@ -236,7 +236,7 @@ def verdict(res: dict, state: dict | None, *, refetch: bool = False,
             # 那一篇。只读那一问答不出这件事,所以如实停在不确定。
             return 'unknown', ('库里那一份是走完整条链的，但这次重抓换没换成核不'
                                '出来；再 --refetch 一次是安全的（换不换得成由后端'
-                               '那六道准入和 CAS 定）')
+                               '那八道准入和 CAS 定）')
         label = '已经按这次重抓到的内容换掉了；' if res.get('replaced') else ''
         return 'saved', label + '全文检索里搜得到了'
     if state is None:
@@ -408,7 +408,7 @@ def collect(api: str, it: dict) -> None:
         return
     except ApiRefused as e:
         # 4xx 那一句就是「为什么没收下 + 下一步」,原样交给用户。**这一档动作终结
-        # 了**:那六道准入排在写库之前,拒了就一个字节都没写。
+        # 了**:那八道准入排在写库之前,拒了就一个字节都没写。
         it['status'], it['detail'] = 'failed', str(e)
         it['acked'] = True
         return

@@ -216,6 +216,26 @@ web_prepare_env() {
     || die "依赖装不上,kb-web 起不来。网络通了再跑一次 ./kb.sh web start"
 }
 
+# **要 import kb.* 的脚本一律走这里,不许用 BOOT_PY。** `BOOT_PY` 是给**只用标准库**
+# 的引导脚本准备的(解析一段 JSON、`grab_cli.py` 的参数预解析),它指向的是采集器那个
+# venv(`collector/pyproject.toml` 只声明 lxml / requests / zstandard),取不到时退到
+# PATH 上的系统 python。而主项目的脚本要 bs4 / httpx / feedparser —— 实测在正常的双
+# 环境安装上 `./kb.sh held rss` 直接 `ModuleNotFoundError: No module named 'bs4'`,
+# 而开发机的 worktree 恰好没有 `collector/.venv`、系统 python 恰好装着那几个包,于是
+# 单跑脚本全绿、经过 kb.sh 的那条真实用户路径没人走过。
+#
+# **不套 `env -i`**(CLEAN_ENV 那一族是起服务用的):那会把 `KB_DATA_DIR` 一起清掉,
+# 于是这条命令**静默**去读仓库内的 `data/` —— 显式隔离过数据目录的人看到的是「没有
+# 挂起」,而他那个库里躺着一堆。口径同「前置检查按 KB_DATA_DIR 解析数据目录」。
+proj_py() {
+  if [ -x "$ROOT/.venv/bin/python" ]; then
+    "$ROOT/.venv/bin/python" "$@"
+  else
+    ( cd "$ROOT" && uv run --offline python "$@" ) \
+      || die "主项目环境还没装好(跑一次 ./kb.sh web start 会装)"
+  fi
+}
+
 # **跑着的进程端着的是它启动那一刻的代码,而 kb 里有一批模块是延迟 import 的。**
 # Python 不热加载,所以服务运行期间一次 git checkout 就能让同一个进程里**新旧两个
 # 版本的模块混跑**:2026-10-10 实测 —— kb-web 10-09 21:23 起(那时 `x_channels` 还
@@ -603,6 +623,11 @@ Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
                    --json 一行一条 JSON(给程序读)、--no-wait 投完就返回
                    Claude Code 里说「把这条存进知识库」走 skill kb-grab,同一条路。
 
+  原文补抓里「看不出是不是正文」的那几条(挂起等人看一眼;只读库,不起服务)
+    ./kb.sh held [来源]              列出挂起的:每条带着「上一次为什么没收下」
+    ./kb.sh held --release <key>...  把这几条放回队列,下一轮 sync 再抓
+    ./kb.sh held [来源] --release-all 列出来的全部放回队列
+
   回归(前台跑,数据目录自动换成全新临时目录,不碰真实库)
     ./kb.sh test                    提交前的快速层:纯逻辑全量,浏览器回归显式拦下(约 3 分钟)
     ./kb.sh test probes             只跑浏览器回归 —— 改了 kb/static/ 或阅读页之后(约 10 分钟)
@@ -655,6 +680,10 @@ case "$ACTION" in
   extract) pipeline_run '["extract"]' ;;
   graph)   cmd_graph "$@" ;;
   grab)    cmd_grab "$@" ;;
+  # **只读库、不起服务、不发请求**,所以直接跑脚本(口径同 `accounts`:
+  # 瞬间返回的那一类不该把 kb-web 拽起来)。判据只有一份,在 `fulltext.held`
+  # / `fulltext.release` 上 —— 网页那两个端点过的是同一份。
+  held)    proj_py "$ROOT/scripts/feed_held_cli.py" "$@" ;;
   test)    cmd_test "$@" ;;
 
   accounts) cli accounts "$@" ;;

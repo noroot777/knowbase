@@ -123,6 +123,14 @@ _ADDED_COLUMNS = {
         ('fulltext_at', "TEXT NOT NULL DEFAULT ''"),
         ('fulltext_error', "TEXT NOT NULL DEFAULT ''"),
         ('fulltext_tries', 'INTEGER NOT NULL DEFAULT 0'),
+        # 「**上一次**补抓的结论是『证据不足』,而且那半句话是这个」。老库里的条目
+        # 补成空串 = 没有这种待办,行为逐字不变。
+        # 它和 `fulltext_error` 分开是因为两列答的不是同一问:那一列记「上一次为什么
+        # 没成」(超时、HTTP 500、对方拦着,下一轮自己会重试),这一列记「上一次我们
+        # **没能判断**这一页是什么」—— 后者试满额度之后要人看一眼而不是静默退回摘要
+        # (`fulltext.held` / `fulltext.release`)。合成一列就得去匹配话术,那是第二
+        # 份口径。`_save` 成功时清掉,`_fail` 每次都按最后一次的结论重写。
+        ('fulltext_hold', "TEXT NOT NULL DEFAULT ''"),
         # 「这一条的正文被整篇换过,知识库里那份旧提取结果作废」。老库里的条目
         # 补成 0 = 没有待作废的东西,行为逐字不变。
         # 它是一个**待办**而不是历史:由 `fulltext._save` 置 1,等新正文真的落进

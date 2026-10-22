@@ -252,7 +252,7 @@ def replace(seen: dict, entry: dict) -> bool:
     就一辈子换不回来(第 3 轮审查实测)。
 
     **只在确认得了的内容上替换**(调用方保证:能走到这里的 `entry` 刚过完
-    `gate_reason` 那六道),而且**判据待在 UPDATE 自己的 WHERE 里** ——
+    `grab_page.verdict` 那八道),而且**判据待在 UPDATE 自己的 WHERE 里** ——
     `content_hash` 要还是我们读到的那一版;`rowcount == 0` 说明这期间别人已经
     动过它(一轮正文补抓、一次存量复查、另一条并发投递),那时不覆盖是对的,
     不是失败(元规则「0 行不是失败」)。

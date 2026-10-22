@@ -7,9 +7,13 @@
 (`readable.extract_or_reason`),这个文件一个字都不重写它。
 
 **「这一页能不能被确认为正文并写进库」那一道两条链路共用**(`admit`:提取 +
-关卡,连先后顺序一起)—— 补抓那一侧也 import 它。判据住在这个文件里只是因为
+判据,连先后顺序一起)—— 补抓那一侧也 import 它。判据住在这个文件里只是因为
 它的那几张表和 `_wall_reason`、`body_confirmed` 都在这儿;**它不是「手动收录
 专用」**,各自在自己那头拼一遍的后果见 `admit` 的说明。
+**结论分三档,不是「收 / 不收」两档**(`Admission`:确认为正文 / 确定关卡 /
+证据不足)。把后两档合成一档就是「没认出关卡 ⇒ 这就是正文」那个洞:一张分段
+的拒绝说明页因此被永久写成正文,而一篇提到一次强措辞的正常教程因此被当成
+「对方拦着你」耗尽重试额度(2026-10-22 审查第 1 轮两侧俱在)。
 
 **判不准一律拒,不许返回一个空壳**(元规则):`put_items` 是
 `ON CONFLICT DO NOTHING`,一条空正文落了库就再也改不回来,而重抓一次的代价
@@ -23,6 +27,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from typing import NamedTuple
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -43,7 +48,7 @@ from kb.feeds.fetching import oneline, plain
 # 地址上,3.74 MB 的文章页、`#js_content` 4004 字。**那道验证页是我们自报身份
 # 招来的,不是这个地址本身挡着** —— 所以这不是「绕过验证」:我们一个
 # token 都没解、一个 cookie 都没带,只是不再主动触发它。
-# **关卡判据一个字都没松**(`gate_reason`):真回了验证页照旧拒,`_GATE_ROUTES`
+# **关卡判据一个字都没松**(`verdict`):真回了验证页照旧拒,`_GATE_ROUTES`
 # 里 `appmsgcaptcha` / `wappoc_` 那两条正是为它留的。
 BROWSER_UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36')
@@ -59,9 +64,11 @@ MAX_CHARS = 60000
 # 一张 1782 字的验证页 —— 它被 `put_items` 的 `DO NOTHING` 永久钉成了那一篇的
 # 正文;按「路径里有 `challenge` 这一段」拒掉一篇正经文章 —— 这一道在成功路径上
 # 也生效,误拒就是这一篇再也收不进来。**所以别再靠调字数、堆关键词来修**:要加的
-# 是身份证据。身份证据四样,一条成立就算关卡,`gate_reason` 挨个问。
+# 是身份证据。**身份证据五样**(响应头/状态码、路由、页面真挂着的关卡组件、
+# 生效的登录墙、页面自己的标题),一条成立就算**确定关卡**,`verdict` 挨个问;
+# 正文里的字只答得出「证据不足」那一档,理由见 `verdict` 的 A/B 两档。
 
-#: ①**路由**:各家关卡自己的那几条路径/参数,按**最终地址**(`request` 跟完
+#: ②**路由**:各家关卡自己的那几条路径/参数,按**最终地址**(`request` 跟完
 #: 重定向之后那一个)的 path + query 比,和提取器交得出什么无关。
 #: 绿泡泡实测(2026-10-16,`mp.weixin.qq.com/s/<slug>`):302 到
 #: `/mp/wappoc_appmsgcaptcha?poc_token=…&target_url=…`,18 KB 的验证页,
@@ -75,7 +82,7 @@ MAX_CHARS = 60000
 #: `/blog/challenge/`,两篇都该收进来。
 _GATE_ROUTES = ('appmsgcaptcha', 'wappoc_', '/cdn-cgi/l/chk', '/sorry/index',
                 '__cf_chl_tk')
-#: ②**页面上真挂着的那套关卡组件**。这是页面身份:一篇讲 Cloudflare 的文章不会
+#: ③**页面上真挂着的那套关卡组件**。这是页面身份:一篇讲 Cloudflare 的文章不会
 #: 把关卡编排脚本挂在自己页上。
 #: **判据是 DOM 里真实的那几个属性**(`script[src]`、`iframe[src]`、`link[href]`、
 #: `form[action]`,外加 `<script>` 自己的内联代码),**不是在整份 HTML 上找子串** ——
@@ -88,55 +95,83 @@ _GATE_ROUTES = ('appmsgcaptcha', 'wappoc_', '/cdn-cgi/l/chk', '/sorry/index',
 #: Cloudflare 那一条也只收**编排**路径(`challenge-platform/h/`)而不是整个
 #: `challenge-platform/` —— 后者的 `jsd/main.js` 在普通页面上也会被注入。
 #: 标记表和生效性共用 page_gate;浏览器侧 x_page_state 通过 ASSETS_JS 消费同一口径。
-#: ③**标题自己就是一句关卡提示**。全是**祈使句或状态播报** —— 正经文章的标题不
+#: ⑤**标题自己就是一句关卡提示**。全是**祈使句或状态播报** —— 正经文章的标题不
 #: 这么写,所以「人机验证是怎么坏掉的」这种不在射程内。反过来说:`验证码`、
 #: `captcha`、`challenge` 这类**话题词**一个都不许进这张表。
-#: 标题单独不算数,要配上正文里也在说同一件事(见 `gate_reason` 的 ③)。
+#: 标题单独不算数,要配上正文里也在说同一件事(见 `verdict` 的 ⑤)。
 _GATE_TITLES = ('just a moment', 'attention required', 'access denied',
                 'checking your browser', 'verify you are human',
                 'are you a robot', 'security check', 'one more step',
                 '环境异常', '请完成验证', '完成验证后', '安全验证', '请稍候',
                 '请在微信客户端打开')
 #: 关卡措辞:**只收强措辞**(`captcha` 这类正常文章里会出现的词不在内)。
-#: ③ 用它确认「正文里也在说这件事」,④ 用它算份额。
+#: ⑤ 用它确认「正文里也在说这件事」,⑥ 用它算份额。
 _GATE_PHRASES = ('环境异常', '完成验证', '请在微信客户端打开', 'enable javascript',
                  'verify you are human', 'checking your browser',
                  'just a moment', 'attention required')
-#: ④**通篇就是那几句提示**:命中的句子占了正文三分之二以上。
+#: ⑥**通篇就是那几句提示**:命中的句子占了正文三分之二以上。**这一道的结论是
+#: 「证据不足」,不是「确定关卡」** —— 它读的是正文里的字,而字答得出的只有
+#: 「这一页在说什么」,答不出「对方有没有把请求拦下来」(那一问归 ①
+#: `page_gate.response_reason`)。一篇正经讲拦截页的文章就是靠这个区分活下来的。
 #: **按份额算、不设字数上限** —— 上限就是上一轮那个洞:页面长一点就一路放行。
-#: 实测(2026-10-16):审查那张 1782 字的验证页 67%;而一篇正经讲拦截页的
-#: 文章反复引那几句也只到 50%(`tests/test_grab.py` 拿它钉着这条线的另一侧),
-#: 真实的 Cloudflare 文档是 0%。
-#: **这一道随排版翻转,而那是它的固有缺陷,不是可调的阈值 —— 而且两侧都漏。**
-#: 同一批文字:连成一段 → 1.0(拒);每个自然段都提到一次 → 1.0(拒);按英文句号
-#: 分成七段 → 1/7(放行)。因为「命中句占比」问的是「这一页**有没有别的内容**」,
-#: 而它拿句读当正文的自然单元 —— 一段英文里提一次就等于「这一句全在说这件事」。
-#: **「方向上取保守」只在份额达线那一侧成立**:未达线那一侧压根没有保守可言 ——
-#: 它把「没识别到关卡措辞」直接当成「已经拿到正文」。实测(2026-10-22):同一张
-#: 纯文字拒绝说明页六句各自分段,份额 1.0 → **1/6**,六道一道都不命中,496 字
-#: 「访问被拒绝」当正文入库、写 `fulltext_at`、送翻译、按文章导出。
-#: **而这两侧在纯文字上不可分离,不是调参能解决的**:那张分段拒绝页 0.17,比上面
-#: 那条钉着必须放行的 50% 还低一倍;补强措辞表也补不到(六句里只有
-#: 「enable JavaScript」在表内,其余是「blocked by the security policy」这类普通
-#: 陈述句,而 `access denied` 不是「has been denied」的子串,往表里加 `denied`
-#: 这种弱词正是 ③ 明令禁止的话题词进表)。
+#: 实测(2026-10-16):审查那张 1782 字的验证页 0.50(它另有一句关卡标题);一篇
+#: 正经讲拦截页的文章反复引那几句也只到 0.50(`tests/test_grab.py` 拿它钉着这条
+#: 线的另一侧),真实的 Cloudflare 文档是 0。
 #: **不许用文字量、去重长度或段落形态去给它开豁免** —— 那三样只证明得了「这里有
 #: 多少字」,证明不了「这一页没在拦正文」:一张 491 字、句句不同的纯文字拒绝说明页
-#: 在那种豁免下会被当成正文写进库、送去翻译、导出成文章,而这一道本来认得出它。
-#: 真要让两侧都对,得引入**文字之外**的身份证据(这一次响应的状态码与关卡响应
-#: 头),那不在这一道里;两侧该得到的结果按 `expectedFailure` 钉在
-#: `tests/test_fulltext_admit.py` 的 `WhatTheSharedGateStillCannotTell`,完整形态
-#: 见 `docs/decisions/fulltext.md` 那条硬约束。
+#: 在那种豁免下会被当成正文写进库、送去翻译、导出成文章。那一类由 ⑦ `_REFUSAL`
+#: 认,也落在「证据不足」这一档。
 _GATE_SHARE = 0.66
-#: 句界只按 CJK 标点和换行切。**`. ` 不算**:域名、缩写、小数点会把一句话切成好
-#: 几截,份额跟着抖。**也别反过来把 `\n` 去掉**想让它「与排版无关」:英文正文没有
-#: CJK 句读,去掉换行之后整篇算一句、份额二值化,凡提到一次那几个强措辞的英文文章
-#: 就全被拒 —— 比现在的误拒面大得多。
-_SENTENCE = re.compile(r'[^\n。！？!?；;]+')
+#: 句界。**CJK 句读不要求后面跟空白**(中文正文的句子之间没有空格),**英文句末
+#: 标点要求后面跟空白** —— 后者是为了让域名、缩写和小数点(`example.org`、
+#: `v1.2`)不把一句话切成好几截。
+#: **这一道原先刻意不切 `. `,那是上一版那个缺陷的根**:英文正文没有 CJK 句读,
+#: 于是「一个自然段」被当成「一句」,正文里提一次「enable JavaScript」份额就是
+#: 1.0 —— 同一批文字连成一段是 1.0、每段各提一次仍是 1.0、按句号分成七段降到
+#: 1/7,**结论随排版翻转**。两侧都实测到过:683 字的正常设置教程被拒三轮、永久
+#: 退回摘要;而把一张纯文字拒绝说明页的六句各自分段,份额 1.0 → 1/6、当时那六道
+#: 一道都不命中,496 字「访问被拒绝」当正文入库(2026-10-22 审查第 1 轮)。
+#: **切了 `. ` 之后份额与排版无关**(实测:拒绝说明页原样/分段都是 0.167,设置
+#: 教程原样/分段都是 0.143),代价是那张英文验证页从 0.667 掉到 0.500 落到线下
+#: —— 它由 ③(标题「请完成验证后继续」)接住,而那本来就是比文字份额硬的一道。
+#: **也别反过来把 `\n` 去掉**:那会让整篇算一句、份额二值化,误拒面比原来更大。
+_SENTENCE = re.compile(r'(?<=[。！？；])\s*|(?<=[.!?;])\s+|\n+')
+#: ⑦**这一页是一张「访问被拒绝」的说明**。口径和理由同 `readable._LEGAL`(版权区
+#: 那张表):**小而极稳,而且按占比算不按命中次数** —— 一篇讲 WAF 的文章引一两句
+#: 这种话是常态,按次数算会把那一整类技术文章毙掉;而一张真的拒绝说明页**通篇**
+#: 就是这几句。
+#: **进这张表的必须是「这一次请求被拒了」那句状态播报本身,不是话题词。**
+#: `denied`、`security policy`、`captcha` 这类单词一个都不许进(⑤ 明令禁止的
+#: 「话题词进表」):讲这些事的正常文章里它们到处都是。整句的样板措辞不一样 ——
+#: 正常文章写的是「a managed rule can block requests」,拒绝页写的是
+#: 「your request was blocked by the security policy configured for this website」。
+#: **这一道单独不足以认定关卡,所以它的结论也是「证据不足」**:扣留,不写库,也
+#: 不说「对方拦着你」。误判一次的代价因此是一次重抓加一条待人看的记录,不是把
+#: 一篇正常正文永久换成一段拒绝说明。
+#: 实测两侧(2026-10-22,`tests/test_fulltext_admit.py` 钉着):那张纯文字拒绝
+#: 说明页原样和六句分段都是 **0.833**(与排版无关);而一篇**真·讲拦截页**、正文里
+#: 引了「your request was blocked」和「If you think this is a mistake, contact the
+#: site administrator」两整句的英文技术文章是 **0.322**,照旧收下。其余被钉住的
+#: 正常样本(两篇设置教程、讲 captcha 历史的长文、引一句提示的文章、普通文章、
+#: 两份 Markdown)**全部 0**。
+_REFUSAL = re.compile(
+    r'(?:access to (?:this|the) \S{0,24}\s*(?:has been|is|was) denied'
+    r'|(?:your |the )?(?:request|access) (?:was|has been|is) blocked'
+    r'|blocked by the security policy'
+    r'|enable javascript and cookies'
+    r'|owner of this (?:site|website|domain)'
+    r'|contact the (?:site |website )?(?:administrator|owner|admin)'
+    r"|if you (?:think|believe) (?:this is|you have been|you've been|there has been)"
+    r'|been blocked in error'
+    r'|ray id'
+    r'|访问(?:被|已被)(?:拒绝|拦截|限制)'
+    r'|您的(?:请求|访问)(?:被|已被)'
+    r')', re.I)
+_REFUSAL_SHARE = 0.5
 #: 提取不出正文时才用的宽词表:那时已经没有正文可言,宁可多认一道关卡 ——
 #: 这一档多拒的代价是一句话,而错存的代价不可恢复。
 _GATE_WORDS = _GATE_PHRASES + ('captcha', '滑块验证', 'cf-browser-verification')
-#: ⑤**正文挡在一道登录/订阅墙后面**。判据也是身份,两样:
+#: ④**正文挡在一道登录/订阅墙后面**。判据也是身份,两样:
 #: ①DOM 里有一道**拦在正文上**的登录表单(`form` 里有 `input[type=password]`,
 #:   而且它不待在页眉页脚侧栏那类外围部件里 —— 位置判据借正文提取自己那一份
 #:   `readable.in_furniture`,不另写一张噪声名单);
@@ -144,23 +179,32 @@ _GATE_WORDS = _GATE_PHRASES + ('captcha', '滑块验证', 'cf-browser-verificati
 #:   那是付费墙的标准产者签名,Google 的付费墙规范要求的就是它)。
 #: **不靠措辞。** 事故形态(2026-10-16 第 3 轮审查实测):一张普通的
 #: 「Sign in to continue reading / subscribe to unlock this story」登录页,提取器
-#: 交出 1832 字 —— 份额判据(④)对它压根不成立(那一页话很多),措辞也不在
+#: 交出 1832 字 —— 份额判据(⑥)对它压根不成立(那一页话很多),措辞也不在
 #: `_GATE_PHRASES` 里,于是它被当成正文落库,`DO NOTHING` 之下永久改不回来。
 #: 扩词表治不了这一类:墙前面那段话每家写法都不同。
 #: **但结构也不够**:复审拿原始证据又打回来一次 —— 那张页面**连 `<form>` 都没有**,
 #: 纯文字写着「登录后继续阅读」。所以这一道只管「认得出的墙」,认不出的那些交给
-#: 第六道(`body_confirmed`:内容自己说了多少不重复的东西)。
+#: ⑧(`body_confirmed`:内容自己说了多少不重复的东西)。
 #: 代价如实记着:一篇**在正文区渲染了真实、已生效的密码框**的文章(手把手教你写
 #: 登录表单、demo 不放在 `<template>` 里)会被误拒。两个方向差着一个量级 ——
 #: 误拒是这一篇得自己复制正文,错存是永久钉死一段不是正文的文字。
 _WALL_FREE_KEYS = ('isAccessibleForFree', 'isaccessibleforfree')
-#: 两句话,四个判据共用。地址/组件那一档和正文那一档对用户的意思不同(前者连页面
-#: 都不是我们要的,后者是这一页自己说要先过验证),所以分开写;**再往下分没有意义**
-#: —— 用户能做的事一模一样。
+#: **「确定关卡」那三句。** 地址/组件那一档和正文那一档对用户的意思不同(前者连
+#: 页面都不是我们要的,后者是这一页自己说要先过验证),所以分开写;**再往下分没有
+#: 意义** —— 用户能做的事一模一样。响应自己带着关卡标记那一档的话术住在
+#: `page_gate.SAY_REPLY`(`fetching.request` 对 4xx/5xx 那句话也用它,口径只有一份)。
 _SAY_ROUTE = '对方把这个地址挡在了一道验证页后面'
 _SAY_PAGE = '这一页要求先完成验证或登录'
 _SAY_WALL = '这一页的正文挡在登录或订阅后面'
-#: ⑥**内容本身确认不了**:交出来的文字通篇是同一段在复读。这一句和上面三句不同
+#: **「证据不足」那三句,一律以「看不出哪一段是正文」收尾。** 这一档说的不是
+#: 「对方拦着你」而是「我没能确认这一页哪一段是这一篇的正文」——「对方拦着」是
+#: 一句关于别人的事实断言,拿一段文字的形状去下那个判断就是在说一件自己并不知道
+#: 的事(那张讲拦截页的技术文章要的正是这个区分)。而**写库那一下两档一样严**:
+#: 都不写。差别在落地 —— 确定关卡沿用有限重试那套语义,证据不足另外留一个
+#: 「等人看一眼」的待办(`fulltext.held` / `fulltext.release`)。
+_SAY_SHARE = '这一页通篇在说「请先完成验证」那几句，看不出哪一段是正文'
+_SAY_DENIED = '这一页看着是一张「访问被拒绝」的说明，看不出哪一段是正文'
+#: ⑧**内容本身确认不了**:交出来的文字通篇是同一段在复读。这一句和上面几句不同
 #: ——它不说「对方拦着」,只说「我没能确认哪一段是这一篇的正文」,因为确实可能是
 #: 对方的模板怪、也可能是一道我们认不出的墙。**判不准一律扣留**(元规则)。
 _SAY_THIN = '这一页交出来的文字通篇在复读同一段，看不出哪一段是正文'
@@ -208,13 +252,40 @@ def _page_title(soup) -> str:
     return ' | '.join(part for part in parts if part)
 
 
+def _sentences(body: str) -> list[str]:
+    """按 `_SENTENCE` 把正文切成句子。**口径只有一份**,⑥⑦ 两道共用。"""
+    return [s.strip() for s in _SENTENCE.split(body or '') if s and s.strip()]
+
+
 def _gate_share(body: str) -> float:
-    """正文里「这一句就是关卡提示」的句子占多少。没正文算 0。"""
-    sentences = [s.strip() for s in _SENTENCE.findall(body or '') if s.strip()]
+    """⑥ 正文里「这一句就是关卡提示」的句子占多少(**按句数**)。没正文算 0。
+
+    **按句数而不是按字数,这一条是量过的。** 换成字数占比之后,基线钉着必须放行的
+    那篇「正经讲 captcha 的文章」从 0.50 涨到 **0.681** —— 它命中的那几句刚好比不
+    命中的长,越过 `_GATE_SHARE` 当场误拒。⑦ 那一道反过来按字数算,理由在它自己
+    头上(两道问的不是同一件事:这一道问「有几句在说别的」,那一道问「样板占了
+    多少篇幅」)。
+    """
+    sentences = _sentences(body)
     if not sentences:
         return 0.0
     hits = sum(1 for s in sentences if any(p in s.lower() for p in _GATE_PHRASES))
     return hits / len(sentences)
+
+
+def _refusal_share(body: str) -> float:
+    """⑦ 正文里「拒绝说明样板」占了多少篇幅(**按字数**)。没正文算 0。
+
+    **按字数占比,口径同 `readable.boilerplate_reason` 的版权区那一档** ——
+    两道问的是同一形状的问题:「这一页是不是通篇就是这类样板」。按**命中次数**算
+    会把一篇引过一两句的技术文章一起毙掉(那一篇实测 2 句命中、占比 0.322),而
+    一张真的拒绝说明页是 0.833。
+    """
+    sentences = _sentences(body)
+    total = sum(len(s) for s in sentences)
+    if not total:
+        return 0.0
+    return sum(len(s) for s in sentences if _REFUSAL.search(s)) / total
 
 
 
@@ -246,7 +317,7 @@ def _live(node) -> bool:
 def body_confirmed(body: str) -> bool:
     """这段正文**确认得了**吗 —— 「它说了足够多不重复的东西」。
 
-    **口径只有一份**,两处消费:抓到一份新正文时(`gate_reason` 的第六道)、
+    **口径只有一份**,两处消费:抓到一份新正文时(`verdict` 的 ⑧)、
     以及重复投递时拿**库里那一份**重算一次(`grab.content_owing` →
     受控重抓与条件替换)。各写一遍的话,入库那一侧挡住了的形状在恢复那一侧
     认不出来,错存的内容就永远没人去换。
@@ -257,7 +328,7 @@ def body_confirmed(body: str) -> bool:
     逐个堵组合;而「通篇复读同一段」是**内容自己的**事实。
 
     **它不保证这一篇就是目标文章**(结构上和文章不可分的纯文字提示页仍可能
-    过关 —— 五段各不相同的会员说明实测过得了全部六道),所以它不是「确认完成」,
+    过关 —— 五段各不相同的会员说明实测过得了全部八道),所以它不是「确认完成」,
     只是「这一次别固化终态」那一道的判据。**剩下那一半不许再押在这道判据上**:
     它认不出的东西恰恰最需要换,所以恢复另有一个与它无关的入口 —— 人说「重新
     抓一次」就重抓(`GrabRequest.refetch` → `grab.replace`,见 `grab_api._recover`
@@ -293,35 +364,50 @@ def _wall_reason(soup) -> str:
     return ''
 
 
-def gate_reason(final_url: str, html: str, body: str = '') -> str:
-    """这一次响应是不是一道关卡 —— 验证页、登录墙、付费墙。空串 = 不是,其余是
-    给用户的那半句话。
+def verdict(final_url: str, html: str, body: str = '', *,
+            headers: dict | None = None) -> tuple[str, str]:
+    """这一次响应能不能被确认为正文 —— 返回 `(确定关卡那半句, 证据不足那半句)`,
+    最多一个非空;两个都空 = 没有任何一道判据拦着它。
 
-    **不变量:已经认出是关卡的响应,既不许落库、也不许被说成「这一页没找到
+    **不变量:已经认出拦不住正文的响应,既不许落库、也不许被说成「这一页没找到
     正文」。** 所以成功和失败两条路共用这一道 —— 每条写库链路**只有一个调用点**,
     而且排在「拿 `body` 做任何事」之前;那个顺序本身也只有一份,在 `admit` 那儿
-    (手动收录和订阅正文补抓都过它)。「提取器交出了一段长文字」
-    证明不了手里这篇是目标文章:关卡页和登录墙自己也有文字,够长就一路过关,
-    然后被 `put_items` 的 `DO NOTHING` 永久钉成这一篇的正文(三轮审查各实测到
-    至少一例)。
+    (手动收录和订阅正文补抓都过它)。「提取器交出了一段长文字」证明不了手里这篇
+    是目标文章:关卡页和登录墙自己也有文字,够长就一路过关,然后被 `put_items` 的
+    `DO NOTHING` 永久钉成这一篇的正文(三轮审查各实测到至少一例)。
 
-    判据分两类,一条成立就算(每张表各自的理由和误拒代价写在它们自己头上):
+    **判据分三档,不是两档 —— 「没认出关卡」和「确认是正文」是两件事。**
+    把它们合成一件就是上一版那两个洞的共同根:份额未达线被直接当成「已经拿到
+    正文」,于是一张分段的拒绝说明页写进了库;而份额达线被直接当成「对方拦着
+    你」,于是一篇提到一次强措辞的正常教程被三轮耗尽额度(2026-10-22 审查第 1 轮
+    两侧俱在)。
 
-    **A. 对方拦着你**(说得出下一步):①路由 `_GATE_ROUTES`;②DOM 里**真挂着且
-    已生效**的关卡组件 `_gate_assets`;③标题是一句关卡提示 `_GATE_TITLES`
-    **且**正文里也在说同一件事;④正文通篇就是那几句提示(`_GATE_SHARE`,
-    **按份额、不按字数**;它**随排版翻转**,理由和那个取舍写在 `_GATE_SHARE` 头上);
-    ⑤一道**生效且拦在正文上**的登录/订阅墙 `_wall_reason`(**结构,不是措辞**)。
+    **A. 确定关卡**(说得出「对方拦着你」,也说得出下一步):
+    ①**这一次响应自己的身份** —— 关卡**决策**响应头(`page_gate.response_reason`;
+    **这是唯一一道不靠页面文字的判据**。状态码一个都不算,理由在它自己头上);
+    ②路由 `_GATE_ROUTES`(按最终地址比);③DOM 里**真挂着且已生效**的关卡组件
+    `_gate_assets`;④一道**生效且拦在正文上**的登录/订阅墙 `_wall_reason`
+    (**结构,不是措辞**);⑤标题自己是一句关卡提示 `_GATE_TITLES` **且**正文里
+    也在说同一件事(`body` 空时不要正文佐证,另加一道宽词表 `_GATE_WORDS`)。
+    这几道问的都是**这一次响应/这一页自己的身份**,不是正文里的字说了什么。
 
-    **B. 我确认不了**:⑥内容本身过不了质量那一道(`body_confirmed`)。
-    **这一类是本道判据的底**:前五道是「认出了对方的拦截」,而「没认出拦截」
-    证明不了「拿到了正文」—— 三轮审查各实测到至少一例漏放,最后那一例
-    (1832 字、一个表单都没有的登录提示页)把前五道全绕过去了。
+    **B. 证据不足**(只说得出「我没能确认这一页哪一段是这一篇的正文」):
+    ⑥正文通篇就是那几句提示(`_GATE_SHARE`,**按份额、不按字数**);⑦正文是一张
+    「访问被拒绝」的样板说明(`_REFUSAL`,**按占比、不按命中次数**);⑧内容本身
+    过不了质量那一道(`body_confirmed`)。
+    **这一档是整道判据的底**:没命中 A 证明不了「拿到了正文」—— 三轮审查各实测到
+    至少一例漏放,其中一例(1832 字、一个表单都没有的登录提示页)把 A 全绕过去了。
+    **而它一个字都不许冒充 A**:⑥⑦⑧ 读的都是正文里的字,而字答得出的只有「这一页
+    在说什么」。一篇**真·讲拦截页**的技术文章会把那几句样板原样引进正文(实测
+    `_REFUSAL` 占比 0.322、`_gate_share` 0.50),它和一张真的拒绝说明页在**文字上
+    不可分离** —— 分得开它们的只有 ① 那一道。所以这三道的结论是扣留而不是判决:
+    不写库(和 A 一样严),但不说「对方拦着你」,而且在补抓那一侧另留一个
+    「等人看一眼」的待办而不是静默退回摘要(`fulltext.held` / `fulltext.release`)。
 
-    **这六道一道都不往外搬,存量复查只取 `readable.boilerplate_reason`。** 两次搬
-    过去都搬出了事故:⑥ 判坏了正常的 Markdown 原文(它允许重复),④ 判坏了正常的
-    英文教程(`_gate_share` 不按 `. ` 分句,一整段只算一句 —— 正文里提一次
-    「enable JavaScript」就是 100%)。
+    **这八道一道都不往外搬,存量复查只取 `readable.boilerplate_reason`。** 两次搬
+    过去都搬出了事故:⑧ 判坏了正常的 Markdown 原文(它允许重复),⑥ 判坏了正常的
+    英文教程(那一版的句界不切 `. `,一整段只算一句)。更根本的理由是**落库之后
+    身份证据就没了**:① 要的响应头、②③④ 要的地址和 DOM,库里那一列一个都没存。
     **误拒的代价按路分三档,一档都不轻**:手动收录那边用户当场看得见、能点「重新抓
     一次」;补抓那边没人在看、三次额度用完就永久退回摘要;存量复查那边是把已经在
     库里的正文换成壳、译文作废。前两条是「这一次没拿到」,第三条是「把拿到的毁掉」
@@ -333,14 +419,22 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
     (`_live`);`nav`/页眉页脚侧栏里的登录框不算拦在正文上
     (`readable.in_furniture`)。DOM 里有某个片段 ≠ 它在阻挡正文。
 
-    `body` 空 = 提取器什么都没交出来。那时 ③ 不再要正文佐证,另外还加一道宽词
-    表(`_GATE_WORDS`):已经没有正文可言了,宁可多认一道关卡也别把人留在
-    「这一页没找到正文」上 —— 那句话指不出下一步。
+    `headers` 缺省 `None` = 调用方没有这次响应(只有一份 HTML)。
+    **那时 ① 整道不成立,而且不许拿「没有响应证据」当成「这不是关卡」** ——
+    它只是少了一道判据,余下七道照旧问。
+
+    **这一道在这里是冗余带,不是唯一一道。** 真正拦住带关卡头的响应是
+    `fetching.request`(认出来抛 `Gated`,排在任何格式分派之前)—— 那一层才覆盖
+    得到协商 Markdown 和专用原文抓取那两个成功出口。这里留着是因为「谁交进来一份
+    HTML 加一份响应头」这件事不该假设它一定经过了那一层(浏览器通道、测试夹具、
+    将来的别的传输)。**两处同一张表、同一句话**(`page_gate`),不是两份判据。
     """
+    if reason := page_gate.response_reason(headers):
+        return reason, ''
     parts = urlsplit((final_url or '').lower())
     route = parts.path + (f'?{parts.query}' if parts.query else '')
     if any(mark in route for mark in _GATE_ROUTES):
-        return _SAY_ROUTE
+        return _SAY_ROUTE, ''
     # **一份 soup 走完所有 DOM 判据**:这一页最多解析一次(标题、组件、登录墙
     # 问的是同一棵树),别为每个判据各解析一遍。
     # **要不要截断按「真标记」算,不按整份长度**(口径同 `readable.markup_size`):
@@ -356,25 +450,28 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
         text = text[:readable.MAX_HTML]
     soup = BeautifulSoup(text, 'html.parser')
     if _gate_assets(soup):
-        return _SAY_ROUTE
+        return _SAY_ROUTE, ''
     if reason := _wall_reason(soup):
-        return reason
+        return reason, ''
     titled = any(word in _page_title(soup).lower() for word in _GATE_TITLES)
     share = _gate_share(body)
-    if share >= _GATE_SHARE:
-        return _SAY_PAGE
     if titled and (share > 0 or not body):
-        return _SAY_PAGE
+        return _SAY_PAGE, ''
     if not body and any(word in (html or '')[:200000].lower() for word in _GATE_WORDS):
-        return _SAY_PAGE
-    # ⑥**最后一道:没命中前面那五道,不等于手里这篇就是目标正文。** 放在最后是
-    # 因为前五道说得出「对方拦着你」,这一道只说得出「我确认不了」—— 能说清的
-    # 那句话优先。**`body` 空的时候它压根不成立**:那时提取器自己给得出原因
-    # (版权区、作者简介),而「通篇在复读同一段」对着一份空正文是在说一件没发生
-    # 的事(漏掉这道守卫当场实测到 `tests/test_fulltext_failures.py` 5 条变红)。
+        return _SAY_PAGE, ''
+    # ── 以下三道只说得出「我确认不了」。**顺序:先说得出「它像什么」的,
+    # 再说「它什么都不像」。**
+    if share >= _GATE_SHARE:
+        return '', _SAY_SHARE
+    if _refusal_share(body) >= _REFUSAL_SHARE:
+        return '', _SAY_DENIED
+    # ⑧**最后一道:没命中前面那七道,不等于手里这篇就是目标正文。**
+    # **`body` 空的时候它压根不成立**:那时提取器自己给得出原因(版权区、作者
+    # 简介),而「通篇在复读同一段」对着一份空正文是在说一件没发生的事(漏掉这道
+    # 守卫当场实测到 `tests/test_fulltext_failures.py` 5 条变红)。
     if body and not body_confirmed(body):
-        return _SAY_THIN
-    return ''
+        return '', _SAY_THIN
+    return '', ''
 
 
 def _first_meta(soup, selectors) -> str:
@@ -504,11 +601,30 @@ def page_meta(html: str, final_url: str) -> dict:
     return {'title': title[:500], 'author': author[:120], 'published': as_published(when)}
 
 
-def admit(final_url: str, html: str, limit: int | None = None) -> tuple[str, str, str]:
-    """这一页**能不能被确认为这一篇的正文、写进库里**。
+class Admission(NamedTuple):
+    """`admit` 的结论。**四个字段里最多一个非空**(`why` 是 `unsure` 的附注)。
 
-    `(正文, 关卡原因, 读不懂的原因)`。正文非空时另两个必为空;三个都空 = 读不懂
-    而且没有判据可言(付费墙、纯 JS 渲染、整页一张图 —— 见 `extract_or_reason`)。
+    - `body` 非空 = **确认为正文**,可以写库(调用方那道 `limit` 已经生效)。
+    - `gate` 非空 = **确定关卡**:对方拦着你,说得出下一步。
+    - `unsure` 非空 = **证据不足**:没认出谁在拦,也确认不了这是正文 —— 一律不写
+      库。补抓那一侧另留一个「等人看一眼」的待办(`fulltext.held`),不静默退回摘要。
+    - `why` = 「读不懂」的那半句(样板区那一档,`readable.extract_or_reason` 给),
+      只在 `unsure` 也空、`body` 也空时才有意义。
+
+    **三个判决字段分开而不是一个「拒绝原因」**:两条链路的落地按档不同(见
+    `verdict` 的 A/B 两档),合成一个字段的话调用方只能去匹配话术 —— 那就是第二份
+    口径。四字段都空 = 这一页读不懂而且连判据都没有(付费墙、纯 JS 渲染、整页一张
+    图),调用方按通用文案处理。
+    """
+    body: str
+    gate: str
+    unsure: str
+    why: str
+
+
+def admit(final_url: str, html: str, limit: int | None = None, *,
+          headers: dict | None = None) -> Admission:
+    """这一页**能不能被确认为这一篇的正文、写进库里**。见 `Admission`。
 
     **两条写库链路共用这一道**:手动收录(`grab._grab_web`)和订阅正文补抓
     (`fulltext.fetch_one`)。各自在自己那头拼一遍的话,其中一头迟早漏掉一道 ——
@@ -518,16 +634,22 @@ def admit(final_url: str, html: str, limit: int | None = None) -> tuple[str, str
     1453 字节、一行脚本都没有的关卡页就够,`done=1`)。所以共用的不只是判据,
     **提取和关卡的先后顺序也只有一份**。
 
-    **顺序不许反:关卡那一问排在「拿 `body` 做任何事」之前。** 「提取器交出了一段
+    **`status` / `headers` 要一路传进来,不许在调用方自己判一遍。** 两个调用方手
+    里都有整个 `Response`,而 ① 那一道(响应自己带着关卡标记)是**唯一一道不靠
+    页面文字的判据** —— 把它留在调用方就又回到了「两头各拼一遍、其中一头迟早漏
+    掉」那个形状。缺省 `None` = 调用方确实没有响应(只有一份 HTML),那时少问一道
+    而不是多放一道。
+
+    **顺序不许反:判据那一问排在「拿 `body` 做任何事」之前。** 「提取器交出了一段
     长文字」证明不了手里这篇是目标文章,而「这一页没找到正文」对着一张明摆着的
     验证页是在少说一件已经知道的事 —— 两头的下一步完全不同(换个地址 / 在浏览器
-    里打开一次)。所以这里**先把提取结果收在手里**、让 `gate_reason` 先答,关卡
-    成立就把那段文字丢掉,哪怕它长达几千字。
+    里打开一次)。所以这里**先把提取结果收在手里**、让 `verdict` 先答,拦住了就把
+    那段文字丢掉,哪怕它长达几千字。
 
     **调用方那道长度上限在这里面生效(`limit`),不许拿到正文之后再截。**
     判据要落在**最后真写进库的那一份**上:准入之后还改正文,原来那个结论就不再是
     对最终内容的保证。事故形态(审查第 1 轮实测):一张开头把同一段复读了几万字、
-    真内容排在 6 万字之后的页面,全文过得了 ⑥(后面那段内容各不相同),手动收录
+    真内容排在 6 万字之后的页面,全文过得了 ⑧(后面那段内容各不相同),手动收录
     随后截到 `MAX_CHARS` —— 落库那 60000 字**不重复的只有 202 字**,收录当场完成、
     页面紧接着提示「这一篇收下的内容看不出是正文」,而重抓只会截出同一个前缀。
     基线那一版是先截后判、这一页直接拒掉的,所以这是重构带出来的回退。
@@ -539,9 +661,10 @@ def admit(final_url: str, html: str, limit: int | None = None) -> tuple[str, str
     body, reason = readable.extract_or_reason(html)
     if limit is not None:
         body = body[:limit]
-    if gate := gate_reason(final_url, html, body):
-        return '', gate, ''
-    return body, '', reason
+    gate, unsure = verdict(final_url, html, body, headers=headers)
+    if gate or unsure:
+        return Admission('', gate, unsure, '')
+    return Admission(body, '', '', reason)
 
 
 def title_fallback(soup_title: str, body: str, host: str) -> str:
