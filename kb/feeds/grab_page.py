@@ -6,11 +6,17 @@
 **什么都没有**,所以这里多出一层元信息解析。正文提取本身仍然只有一份口径
 (`readable.extract_or_reason`),这个文件一个字都不重写它。
 
-**抓不到就抛,不许返回一个空壳**(口径同元规则「判不准一律拒」):`put_items`
-是 `ON CONFLICT DO NOTHING`,一条空正文落了库就再也改不回来,而重抓一次的代价
+**「这一页能不能被确认为正文并写进库」那一道两条链路共用**(`admit`:提取 +
+关卡,连先后顺序一起)—— 补抓那一侧也 import 它。判据住在这个文件里只是因为
+它的那几张表和 `_wall_reason`、`body_confirmed` 都在这儿;**它不是「手动收录
+专用」**,各自在自己那头拼一遍的后果见 `admit` 的说明。
+
+**判不准一律拒,不许返回一个空壳**(元规则):`put_items` 是
+`ON CONFLICT DO NOTHING`,一条空正文落了库就再也改不回来,而重抓一次的代价
 只是再发一次 HTTP。登录墙、验证页、PDF 这几种**各给一句自己的话** —— 它们的
 下一步完全不同(换个地址 / 在浏览器里打开一次 / 这不是网页),折叠成「抓取失败」
-等于把人留在原地。
+等于把人留在原地。话术在调用方(`grab._grab_web` 的 `_next_step`、
+`fulltext.fetch_pending` 的失败明细),**准入在这里**。
 """
 from __future__ import annotations
 
@@ -27,8 +33,23 @@ from kb.feeds.fetching import oneline, plain
 
 # 抓网页不是抓 feed,`fetching.request` 的默认 Accept 是 RSS 优先 —— 有些站会
 # 据此回一份 XML 或者干脆 406。口径同 `fulltext._HEADERS`,多一条中文优先。
+#
+# **手动收录这一条路自报浏览器身份,和采集那一侧分开。** 采集是我们定时去敲
+# 别人的门,自报 `KnowledgeBaseFeedReader/1.0`(`fetching.request` 的默认)是
+# 该有的礼貌;手动收录是人粘了一条链接正盯着按钮等,要的就是「我在浏览器里打开
+# 它会看到什么」。实测证据(2026-10-21,`mp.weixin.qq.com/s/XQq1iCBn1cUhR3SLOOKBMA`,
+# 其余请求头一字不改、各 3 次):自报爬虫 3/3 被 302 到
+# `/mp/wappoc_appmsgcaptcha`,拿到 18 KB 的验证页;换这个 UA 3/3 直接 200 在原
+# 地址上,3.74 MB 的文章页、`#js_content` 4004 字。**那道验证页是我们自报身份
+# 招来的,不是这个地址本身挡着** —— 所以这不是「绕过验证」:我们一个
+# token 都没解、一个 cookie 都没带,只是不再主动触发它。
+# **关卡判据一个字都没松**(`gate_reason`):真回了验证页照旧拒,`_GATE_ROUTES`
+# 里 `appmsgcaptcha` / `wappoc_` 那两条正是为它留的。
+BROWSER_UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+              '(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36')
 HEADERS = {'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-           'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,*;q=0.5'}
+           'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,*;q=0.5',
+           'User-Agent': BROWSER_UA}
 # 正文最多留多长。口径同 `x_article.MAX_CHARS`。
 MAX_CHARS = 60000
 
@@ -44,7 +65,10 @@ MAX_CHARS = 60000
 #: 重定向之后那一个)的 path + query 比,和提取器交得出什么无关。
 #: 绿泡泡实测(2026-10-16,`mp.weixin.qq.com/s/<slug>`):302 到
 #: `/mp/wappoc_appmsgcaptcha?poc_token=…&target_url=…`,18 KB 的验证页,
-#: og 元信息和 `#js_content` 全都没有。
+#: og 元信息和 `#js_content` 全都没有。**这一条照旧留着,但它不再是常态** ——
+#: 2026-10-21 复测:那道关卡是自报爬虫身份招来的,换 `BROWSER_UA` 之后同一条地址
+#: 直接给整篇文章(见模块顶上 `BROWSER_UA` 的注释)。对方哪天收紧风控它就回来了,
+#: 而漏一道关卡的代价是把验证页永久钉成正文。
 #: **一个通用英文词都不许进这张表**(`challenge`、`checkpoint`、`verify` 这些):
 #: 正常文章的路径里就带着它们 —— 实测 developers.cloudflare.com 那篇 1277 字的
 #: 正经文档落在 `/waf/reference/cloudflare-challenges/`、审查那篇落在
@@ -80,12 +104,34 @@ _GATE_PHRASES = ('环境异常', '完成验证', '请在微信客户端打开', 
                  'just a moment', 'attention required')
 #: ④**通篇就是那几句提示**:命中的句子占了正文三分之二以上。
 #: **按份额算、不设字数上限** —— 上限就是上一轮那个洞:页面长一点就一路放行。
-#: 实测两侧(2026-10-16):审查那张 1782 字的验证页 67%;而一篇正经讲拦截页的
+#: 实测(2026-10-16):审查那张 1782 字的验证页 67%;而一篇正经讲拦截页的
 #: 文章反复引那几句也只到 50%(`tests/test_grab.py` 拿它钉着这条线的另一侧),
 #: 真实的 Cloudflare 文档是 0%。
+#: **这一道随排版翻转,而那是它的固有缺陷,不是可调的阈值 —— 而且两侧都漏。**
+#: 同一批文字:连成一段 → 1.0(拒);每个自然段都提到一次 → 1.0(拒);按英文句号
+#: 分成七段 → 1/7(放行)。因为「命中句占比」问的是「这一页**有没有别的内容**」,
+#: 而它拿句读当正文的自然单元 —— 一段英文里提一次就等于「这一句全在说这件事」。
+#: **「方向上取保守」只在份额达线那一侧成立**:未达线那一侧压根没有保守可言 ——
+#: 它把「没识别到关卡措辞」直接当成「已经拿到正文」。实测(2026-10-22):同一张
+#: 纯文字拒绝说明页六句各自分段,份额 1.0 → **1/6**,六道一道都不命中,496 字
+#: 「访问被拒绝」当正文入库、写 `fulltext_at`、送翻译、按文章导出。
+#: **而这两侧在纯文字上不可分离,不是调参能解决的**:那张分段拒绝页 0.17,比上面
+#: 那条钉着必须放行的 50% 还低一倍;补强措辞表也补不到(六句里只有
+#: 「enable JavaScript」在表内,其余是「blocked by the security policy」这类普通
+#: 陈述句,而 `access denied` 不是「has been denied」的子串,往表里加 `denied`
+#: 这种弱词正是 ③ 明令禁止的话题词进表)。
+#: **不许用文字量、去重长度或段落形态去给它开豁免** —— 那三样只证明得了「这里有
+#: 多少字」,证明不了「这一页没在拦正文」:一张 491 字、句句不同的纯文字拒绝说明页
+#: 在那种豁免下会被当成正文写进库、送去翻译、导出成文章,而这一道本来认得出它。
+#: 真要让两侧都对,得引入**文字之外**的身份证据(这一次响应的状态码与关卡响应
+#: 头),那不在这一道里;两侧该得到的结果按 `expectedFailure` 钉在
+#: `tests/test_fulltext_admit.py` 的 `WhatTheSharedGateStillCannotTell`,完整形态
+#: 见 `docs/decisions/fulltext.md` 那条硬约束。
 _GATE_SHARE = 0.66
 #: 句界只按 CJK 标点和换行切。**`. ` 不算**:域名、缩写、小数点会把一句话切成好
-#: 几截,份额跟着抖。
+#: 几截,份额跟着抖。**也别反过来把 `\n` 去掉**想让它「与排版无关」:英文正文没有
+#: CJK 句读,去掉换行之后整篇算一句、份额二值化,凡提到一次那几个强措辞的英文文章
+#: 就全被拒 —— 比现在的误拒面大得多。
 _SENTENCE = re.compile(r'[^\n。！？!?；;]+')
 #: 提取不出正文时才用的宽词表:那时已经没有正文可言,宁可多认一道关卡 ——
 #: 这一档多拒的代价是一句话,而错存的代价不可恢复。
@@ -147,10 +193,6 @@ _TITLE_META = ('meta[property="og:title"]', 'meta[name="twitter:title"]',
 _ISO = re.compile(r'(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?')
 
 
-class PageUnavailable(ValueError):
-    """这一页读不出可保存的内容。消息直接面向用户,说清下一步。"""
-
-
 def _page_title(soup) -> str:
     """这一页**自称**的标题:`<title>` 和 og/twitter 那几个一起算。
 
@@ -173,6 +215,7 @@ def _gate_share(body: str) -> float:
         return 0.0
     hits = sum(1 for s in sentences if any(p in s.lower() for p in _GATE_PHRASES))
     return hits / len(sentences)
+
 
 
 #: 只有这几种 `type` 的 `<script>` 才会被浏览器**执行**(缺省也算)。
@@ -255,8 +298,9 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
     给用户的那半句话。
 
     **不变量:已经认出是关卡的响应,既不许落库、也不许被说成「这一页没找到
-    正文」。** 所以成功和失败两条路共用这一道 —— 调用方只有一个调用点,而且排
-    在「拿 `body` 做任何事」之前(`grab._grab_web`)。「提取器交出了一段长文字」
+    正文」。** 所以成功和失败两条路共用这一道 —— 每条写库链路**只有一个调用点**,
+    而且排在「拿 `body` 做任何事」之前;那个顺序本身也只有一份,在 `admit` 那儿
+    (手动收录和订阅正文补抓都过它)。「提取器交出了一段长文字」
     证明不了手里这篇是目标文章:关卡页和登录墙自己也有文字,够长就一路过关,
     然后被 `put_items` 的 `DO NOTHING` 永久钉成这一篇的正文(三轮审查各实测到
     至少一例)。
@@ -266,13 +310,23 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
     **A. 对方拦着你**(说得出下一步):①路由 `_GATE_ROUTES`;②DOM 里**真挂着且
     已生效**的关卡组件 `_gate_assets`;③标题是一句关卡提示 `_GATE_TITLES`
     **且**正文里也在说同一件事;④正文通篇就是那几句提示(`_GATE_SHARE`,
-    **按份额、不按字数**);⑤一道**生效且拦在正文上**的登录/订阅墙
-    `_wall_reason`(**结构,不是措辞**)。
+    **按份额、不按字数**;它**随排版翻转**,理由和那个取舍写在 `_GATE_SHARE` 头上);
+    ⑤一道**生效且拦在正文上**的登录/订阅墙 `_wall_reason`(**结构,不是措辞**)。
 
     **B. 我确认不了**:⑥内容本身过不了质量那一道(`body_confirmed`)。
     **这一类是本道判据的底**:前五道是「认出了对方的拦截」,而「没认出拦截」
     证明不了「拿到了正文」—— 三轮审查各实测到至少一例漏放,最后那一例
     (1832 字、一个表单都没有的登录提示页)把前五道全绕过去了。
+
+    **这六道一道都不往外搬,存量复查只取 `readable.boilerplate_reason`。** 两次搬
+    过去都搬出了事故:⑥ 判坏了正常的 Markdown 原文(它允许重复),④ 判坏了正常的
+    英文教程(`_gate_share` 不按 `. ` 分句,一整段只算一句 —— 正文里提一次
+    「enable JavaScript」就是 100%)。
+    **误拒的代价按路分三档,一档都不轻**:手动收录那边用户当场看得见、能点「重新抓
+    一次」;补抓那边没人在看、三次额度用完就永久退回摘要;存量复查那边是把已经在
+    库里的正文换成壳、译文作废。前两条是「这一次没拿到」,第三条是「把拿到的毁掉」
+    —— 同一个启发式担不起这三种后果,所以不共用。完整论证在
+    `docs/decisions/fulltext.md` 第一节。
 
     **生效性和位置要分开各判一次**:`<template>` 里的密码框、
     `type="application/json"` 里的示例参数都**不算**这一页挂着什么
@@ -289,7 +343,18 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
         return _SAY_ROUTE
     # **一份 soup 走完所有 DOM 判据**:这一页最多解析一次(标题、组件、登录墙
     # 问的是同一棵树),别为每个判据各解析一遍。
-    soup = BeautifulSoup((html or '')[:readable.MAX_HTML], 'html.parser')
+    # **要不要截断按「真标记」算,不按整份长度**(口径同 `readable.markup_size`):
+    # 按整份长度截的那一版里,一张内联脚本 3.57 MB 打头的页面(绿泡泡的文章页就是
+    # 这个形状)会让组件和登录墙这两道只看到开头那一截 —— 而这两道**漏一次就是把
+    # 一道墙当正文永久钉进库里**(`put_items` 的 `DO NOTHING`),代价和误拒差着一个
+    # 量级。真标记自己就超线的那种页面提取器反正交不出正文,截断只是别在它身上耗
+    # 时间。
+    # **也只在整份超线时才去量**(短路顺序同 `extract_or_reason`):审查第一轮
+    # 这里是无条件调用的,于是每一份小页面都白扫一趟,而那一版的扫描还是平方级的。
+    text = html or ''
+    if len(text) > readable.MAX_HTML and readable.markup_size(text) > readable.MAX_HTML:
+        text = text[:readable.MAX_HTML]
+    soup = BeautifulSoup(text, 'html.parser')
     if _gate_assets(soup):
         return _SAY_ROUTE
     if reason := _wall_reason(soup):
@@ -304,7 +369,9 @@ def gate_reason(final_url: str, html: str, body: str = '') -> str:
         return _SAY_PAGE
     # ⑥**最后一道:没命中前面那五道,不等于手里这篇就是目标正文。** 放在最后是
     # 因为前五道说得出「对方拦着你」,这一道只说得出「我确认不了」—— 能说清的
-    # 那句话优先。
+    # 那句话优先。**`body` 空的时候它压根不成立**:那时提取器自己给得出原因
+    # (版权区、作者简介),而「通篇在复读同一段」对着一份空正文是在说一件没发生
+    # 的事(漏掉这道守卫当场实测到 `tests/test_fulltext_failures.py` 5 条变红)。
     if body and not body_confirmed(body):
         return _SAY_THIN
     return ''
@@ -437,17 +504,44 @@ def page_meta(html: str, final_url: str) -> dict:
     return {'title': title[:500], 'author': author[:120], 'published': as_published(when)}
 
 
-def page_body(html: str) -> str:
-    """这一页的正文纯文本。提取不出来就抛,**绝不返回一段短的凑数**。
+def admit(final_url: str, html: str, limit: int | None = None) -> tuple[str, str, str]:
+    """这一页**能不能被确认为这一篇的正文、写进库里**。
 
-    `extract_or_reason` 给的原因是面向开发的(「命中版权区」「作者简介」),
-    对着用户再说一遍没有意义 —— 他能做的只有「换个地址」或者「这篇就是读不
-    到」。所以这里只把它当日志级的补充附在后面。
+    `(正文, 关卡原因, 读不懂的原因)`。正文非空时另两个必为空;三个都空 = 读不懂
+    而且没有判据可言(付费墙、纯 JS 渲染、整页一张图 —— 见 `extract_or_reason`)。
+
+    **两条写库链路共用这一道**:手动收录(`grab._grab_web`)和订阅正文补抓
+    (`fulltext.fetch_one`)。各自在自己那头拼一遍的话,其中一头迟早漏掉一道 ——
+    这个函数就是那次事故的产物:关卡判据当初只接在手动收录那一头,于是同一张
+    Cloudflare 关卡页在手动收录被认了出来、在补抓那条定时链路上被当成正文写进
+    `feed_items.body`、写上 `fulltext_at`、**退出重试队列**(审查实测:一张
+    1453 字节、一行脚本都没有的关卡页就够,`done=1`)。所以共用的不只是判据,
+    **提取和关卡的先后顺序也只有一份**。
+
+    **顺序不许反:关卡那一问排在「拿 `body` 做任何事」之前。** 「提取器交出了一段
+    长文字」证明不了手里这篇是目标文章,而「这一页没找到正文」对着一张明摆着的
+    验证页是在少说一件已经知道的事 —— 两头的下一步完全不同(换个地址 / 在浏览器
+    里打开一次)。所以这里**先把提取结果收在手里**、让 `gate_reason` 先答,关卡
+    成立就把那段文字丢掉,哪怕它长达几千字。
+
+    **调用方那道长度上限在这里面生效(`limit`),不许拿到正文之后再截。**
+    判据要落在**最后真写进库的那一份**上:准入之后还改正文,原来那个结论就不再是
+    对最终内容的保证。事故形态(审查第 1 轮实测):一张开头把同一段复读了几万字、
+    真内容排在 6 万字之后的页面,全文过得了 ⑥(后面那段内容各不相同),手动收录
+    随后截到 `MAX_CHARS` —— 落库那 60000 字**不重复的只有 202 字**,收录当场完成、
+    页面紧接着提示「这一篇收下的内容看不出是正文」,而重抓只会截出同一个前缀。
+    基线那一版是先截后判、这一页直接拒掉的,所以这是重构带出来的回退。
+    `limit=None` = 不截(补抓那一侧原样入库,按 `fulltext.MAX_TRIES` 计次)。
+
+    **话术仍然留给调用方**:手动收录每一档配一句下一步(`grab._next_step`),
+    补抓那一侧进面板失败明细。两头的落地不同,**准入相同**。
     """
-    text, reason = readable.extract_or_reason(html)
-    if not text:
-        raise PageUnavailable('这一页没找到正文' + (f'（{reason}）' if reason else ''))
-    return text[:MAX_CHARS]
+    body, reason = readable.extract_or_reason(html)
+    if limit is not None:
+        body = body[:limit]
+    if gate := gate_reason(final_url, html, body):
+        return '', gate, ''
+    return body, '', reason
 
 
 def title_fallback(soup_title: str, body: str, host: str) -> str:

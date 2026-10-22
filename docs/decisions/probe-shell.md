@@ -88,6 +88,63 @@
   worktree 在跑各自的探针。别去动不归自己的那些。
 - 详细见 `docs/decisions/probe-shell.md`。
 
+- **「这一轮不跑浏览器回归」只有一个开关,而且所有起浏览器的组都得过同一道闸**
+  (`KB_SKIP_BROWSER_TESTS=1`,判据在 `tests/headless.py` 的 `browser_tests_off`,
+  闸在 `browser_gate`(同时给类打分层统计用的 `kb_browser` 标记),两个现成入口
+  `requires_headless`(要 node + 壳)和 `requires_shell`(只要壳);`./kb.sh test`
+  的 fast 层就是靠在进程上设这个开关把浏览器回归整层拦下的,见
+  docs/decisions/test-tiers.md)。整轮全量约 13 分钟,这一组占掉大半,所以日常改非界面的东西时关掉它
+  很划算 —— **但提交前那一次不许关**。
+  - **不给 `HEADLESS_SHELL` 并不等于不跑**:上面那条口径会自己去 playwright 缓存里
+    找一份(本机实测找到了),所以「我没给路径」关不掉它。这就是要有个显式开关的理由。
+  - **跳过的理由必须说清是人关的**:一句 `OK (skipped=30)` 在「人关了」和「这台机器
+    缺无头壳」两种情形下长得一模一样,而含义差很远 —— 后者是环境缺件,前者是**这一轮
+    没有验过界面**。静默跳过正是本文件开头那段要避的坑。
+  - **闸只能有这两个**。原先有六组自己写闸 —— 五组写 `skipUnless(SHELL is not None,
+    ...)`(`test_cdp_attach`、`test_x_article_dom`、`test_x_article_fidelity`、
+    `test_x_post_dom`、`test_x_response_dom`),它们起的也是真浏览器,而开关只认得过
+    那两个装饰器的组,**关不住它们**。后两组是写完结构红之后它自己报出来的,不是人
+    找出来的 —— 那条红的判据是「从 `tests.headless` 导入了 `run_probe` /
+    `fixture_server` / `SHELL` 的 test 文件,必须同时导入其中一道闸」(走 AST,
+    按导入名判,注释和 docstring 里照常讨论得动)。
+  - **第六组是隔着别的测试模块伸手拿的,上面那条红看不见它**:`test_x_access_gate`
+    自己不导入无头壳,写的是 `@unittest.skipUnless(dom.SHELL is not None,
+    dom.INSTALL_HINT)` —— 从 `test_x_post_dom` 的命名空间里借。把那边收进统一闸、
+    它不再导入 `INSTALL_HINT` 之后,这一行在**导入期**就 AttributeError:不是跳过、
+    也不是某条用例失败,而是**整个模块 load 不起来**,连带着
+    `from tests.test_x_access_gate import gate` 的 `test_x_provenance_merge_contract`
+    一起塌(实测两条 `unittest.loader._FailedTest` ERROR、`Ran 3454` 比上一轮少 16 条,
+    而收尾只写一句 `FAILED (errors=2)`)。**改一个模块的导入会从远处把第三个模块炸掉,
+    这是「搬代码要逐符号对过原文」的实例**。所以结构红另加一条、按**属性取用**判
+    (`<别的模块>.SHELL` / `.NODE` / `.INSTALL_HINT`,自己人 `headless.SHELL` 放行):
+    和按导入判的那条**判的不是同一件事**,少了它这一路在那条眼里是干净的。
+    定点注入(把那一行退回 `dom.SHELL` 那个写法)实测红,并点名到 `:119:dom.SHELL`。
+    收进统一闸之后这一组也跟着受开关管(实测 `OK (skipped=4)`)。
+  - 回归 `tests/test_browser_switch.py`:开关认哪些写法、**反过来**没写或写了别的
+    一律照旧跑(误判成关掉 = 一轮界面都没验而收尾写着 OK)、两道闸各自跳过且理由
+    点得出那个变量名、开关没开时两道闸都不许自己加 skip、外加上面那条结构红。
+    **两道闸各用一个新类**:`unittest.skip` 是就地往类上写标记的,共用一个类时
+    第一道留下的痕迹会被第二道认成自己的(定点注入实测:只给其中一道挂开关,
+    共用类那一版照旧全绿)。
+  - **开关打开之后,剩下的那些必须照旧全绿** —— 「省时间」不等于「少几条红」。
+    `browser_gate` 把「人显式关了」排在缺件之前,于是**断言缺件提示**的那一组
+    (`tests/test_headless_shell.py`,它一个浏览器都不起)在开关落进环境时拿到的是
+    开关那句话:实测 `KB_SKIP_BROWSER_TESTS=1` 跑全量 3471 条,红
+    `test_skip_message_says_how_to_install` 和 `test_missing_node_is_named_too`
+    两条 —— 人按说明关掉浏览器回归,反而拿不到通过结果,还会以为是自己机器的问题。
+    出路是**把开关从那一组的「干净环境」里清掉**(它问的是「找得到吗、找不到时
+    怎么说」,开关是不相干的输入),**不是把这两条也跳过去**。回归两条:一条按
+    **后果**判 —— 子进程里把那一组按开/关两种模式各跑一次,判据是退出码(定点注入
+    把 `pop` 改成 `get` 实测只红 `switch=True` 那一半);一条是**类守卫** ——
+    凡是真去读跳过理由(属性 `INSTALL_HINT`、或 `getattr` 那个
+    `__unittest_skip_why__`)的 test 文件都得显式处理这个开关,**走 AST 不按文本**
+    (按文本那一版当场咬住只在注释里讨论旧写法的 `test_x_access_gate`;定点注入
+    新写一个读理由却不管开关的模块,实测红并点名到它)。
+  - **`skipUnless(shutil.which('node'), ...)` 那几处不在这个开关的射程里**
+    (`test_catgraph_window`、`test_daily_refs`、`test_fav_snippet_anchor`、
+    `test_favorites`、`test_wechat_setup`):它们用 node 跑页面脚本、一个浏览器都不起,
+    也不是全量的时间大头。这个开关管的是**起真浏览器**那一类。
+
 ## 事故形态与实测证据
 
 - **探针起的 chrome-headless-shell,在任何一条退出路径上都必须被收掉。** 原来 12 个

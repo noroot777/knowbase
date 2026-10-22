@@ -23,6 +23,20 @@ Lilian Weng、Karpathy 那类 feed 本来就给全文,对它们再抓一次是�
 眼里它就是"整篇正文",长度还轻松过关 —— 不认的话补抓报成功、条目离开重试队列、
 接着拿这堆乱码去买一次翻译,而且再也不会重试。
 
+**「这一页能不能被确认为正文并写进库」那道准入和手动收录共用一份**
+(`grab_page.admit`:提取 + 关卡,连先后顺序一起)。一张关卡页/登录墙自己也有
+文字,够长就一路过关 —— 而这条链路写进去就是终态(`fulltext_at` 一落,条目
+退出重试队列,`put_items` 的 `DO NOTHING` 之下再也换不回来)。拒绝的那一下
+**一个字节都不改**:壳留着、`fulltext_at` 不写、`fulltext_tries` 照旧计次。
+**而存量里已经被写死的那些,这条准入救不回来**:复查脚本
+(`scripts/feed_fulltext_recheck.py`)只认 `readable.boilerplate_reason`,**这六道一道
+都不借** —— 库里只剩那份纯文字,认出一张关卡页要的地址、DOM 和响应头当时就没存,拿
+纯文本启发式去补那一刀,两轮审查各实测到一次误删正常内容(⑥ 判坏 Markdown 原文、
+④ 判坏英文教程)。那一类的出路是人点「重新抓一次」。生产只读实测说**存量的文字里
+找不出一条可识别的关卡提示**(份额最高 0.0)—— 但那推不出「存量里没有关卡页」:只靠
+DOM 组件认出来的那一类,正文和普通文章逐字相同、份额同样是 0。理由和数字在那个脚本的
+`_not_article` 头上。
+
 **正文从壳换成全文之后,知识库里那份按旧壳算出来的提取结果要跟着作废**
 (`retire_stale`,由 `sync._export` 在导出之后调一次)。`documents.extracted_at`
 非空意味着这一篇永远不进 `extract.pending_docs`,而重导出又会把旧 `tags` 原样
@@ -36,7 +50,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from kb.feeds import readable, registry as reg
+from kb.feeds import grab_page, readable, registry as reg
 from kb.feeds.exclusion import failure
 from kb.feeds.fetching import FeedError, SOURCE_SECONDS, request
 # 「这一行此刻是哪一版」那份口径摆在 `grab_store` 里(两个版本身份 ——
@@ -101,6 +115,18 @@ def fetch_one(url: str) -> tuple[str, str]:
     队列、还拿这堆乱码去买一次翻译(见 `html_problem` 的注释)。抛而不是返回
     空串,是因为空串那条路的提示写的是"可能需要登录或由脚本渲染",而这里的
     原因明确得多 —— 面板上要说得出是哪一类。
+
+    **「拿到一页东西」不等于「拿到了这一篇的正文」,所以写库那道准入和手动收录
+    共用一份**(`grab_page.admit`:提取 + 关卡,连先后顺序一起)。原先这里直接
+    拿 `extract_or_reason` 的结果当正文,**六道准入一道都不过** —— 后果是一张
+    关卡页/登录墙被 `_save` 写进 `feed_items.body`、写上 `fulltext_at`、**退出
+    重试队列**,而 `put_items` 的 `DO NOTHING` 之下再也换不回来(审查实测:
+    1453 字节、一行脚本都没有的 Cloudflare 关卡页,`done=1`、正文被换成
+    「Verify you are human…」、`pending` 归零)。**关卡一律抛**,理由同上面
+    `html_problem` 那一档:那半句话明确得多,而「抛」这条路保证了
+    `fetch_pending` 走 `_fail` —— 壳一个字节不动、`fulltext_at` 不写、
+    `fulltext_tries` 照旧计次(留在原重试语义里:不计次它就永远排在队首,
+    试满 `MAX_TRIES` 按壳入库,口径同「读不懂」那一档)。
     """
     from kb.feeds.markdown_source import accept, fetch, from_response, target
     deadline = time.monotonic() + SOURCE_SECONDS if target(url) else None
@@ -111,7 +137,11 @@ def fetch_one(url: str) -> tuple[str, str]:
         return markdown, ''
     if problem := readable.html_problem(response.body, response.headers):
         raise FeedError(problem)
-    return readable.extract_or_reason(readable.decode(response.body, response.headers))
+    body, gate, why = grab_page.admit(response.url or url,
+                                      readable.decode(response.body, response.headers))
+    if gate:
+        raise FeedError(gate)
+    return body, why
 
 
 def body_hash(body: str) -> str:

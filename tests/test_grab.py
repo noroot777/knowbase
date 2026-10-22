@@ -13,8 +13,7 @@ from urllib.parse import urlsplit
 
 from kb.feeds import grab, grab_page, readable, x_article
 from kb.feeds.fetching import Response
-from tests.grab_fixtures import (GrabCase, PAGE, TWEET, html_resp, page_html,
-                                 tweet_payload)
+from tests.grab_fixtures import GrabCase, PAGE, TWEET, html_resp, page_html
 
 
 class AddressTests(GrabCase):
@@ -253,6 +252,11 @@ class PageTests(GrabCase):
         `/mp/wappoc_appmsgcaptcha`,18 KB 的验证页、og 和 `#js_content` 全无、
         提取 0 字。这一档要拒,而且下一步要指向「公众号」那一类 —— 照通用那句
         「在浏览器里打开、把正文复制出来」说,等于让人对着一道过不去的验证页发呆。
+
+        **这一档现在是少数情况,但判据一个字都不许松**:2026-10-21 复测证明那道
+        关卡是自报爬虫身份招来的(见 `test_the_web_path_asks_like_a_browser`),
+        换身份之后同一条地址直接给整篇文章。对方哪天收紧风控它就回来,而漏一次
+        就是把验证页永久钉成这一篇的正文。
         """
         gate = ('https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha?poc_token=x'
                 '&target_url=https%3A%2F%2Fmp.weixin.qq.com%2Fs%2Fabc')
@@ -278,6 +282,67 @@ class PageTests(GrabCase):
         self.assertEqual(saved['source']['name'], '绿泡泡公众号')
         self.assertIn('这是正文第一段', self.items()[0]['body'])
 
+    def test_the_web_path_asks_like_a_browser(self):
+        """**不自报爬虫身份这一条是承重的。**
+
+        实测(2026-10-21,`mp.weixin.qq.com/s/XQq1iCBn1cUhR3SLOOKBMA`,其余请求头
+        一字不改、两边各 3 次):自报 `KnowledgeBaseFeedReader/1.0` 3/3 被 302 到
+        `/mp/wappoc_appmsgcaptcha`、拿到 18 KB 的验证页;换成浏览器 UA 3/3 直接
+        200 在原地址上、拿到 3.74 MB 的文章页。**那道验证页是自报身份招来的,
+        不是这个地址本身挡着** —— 这个键掉了,用户看到的是一句「对方把这个地址挡
+        在了一道验证页后面」,而文章本身好好的,他也没有别的出路。
+
+        判据落在**真发出去的那份请求头**上:`grab_page.HEADERS` 里有这个键不算数,
+        `accept()` 要把它带过去、`request` 的位置参数要接得住。
+        """
+        sent = {}
+
+        def capture(url, headers=None, **kwargs):
+            sent.update(headers or {})
+            return html_resp(page_html())
+
+        with patch.object(grab, 'request', side_effect=capture):
+            grab.grab(PAGE)
+        self.assertIn('Chrome/', sent.get('User-Agent', ''))
+        self.assertNotIn('KnowledgeBaseFeedReader', sent.get('User-Agent', ''))
+        # 反过来钉一边:换身份没把别的请求头挤掉(少了 Accept 有些站回 XML 或 406)。
+        self.assertIn('text/html', sent.get('Accept', ''))
+        self.assertIn('zh-CN', sent.get('Accept-Language', ''))
+
+    def test_a_page_padded_with_inline_script_is_still_read(self):
+        """**事故形态(2026-10-21 实测)。** 绿泡泡的文章页 3.74 MB,其中 3.57 MB
+        是内联脚本,真标记只有 0.17 MB。`extract_or_reason` 按**整份长度**卡
+        `MAX_HTML`,于是在解析之前就交白卷 —— 手动收录对着一篇完完整整读得到的
+        文章说「这一页没找到正文」,而它和真正读不到的那一档(登录墙、纯 JS 渲染)
+        在界面上长得一模一样。`_strip` 第一件事就是把脚本整块扔掉,这笔钱根本不会花。
+
+        **这条线自己的判据(量对了吗、花多少钱量)在 `tests/test_readable_budget.py`**
+        —— 那一层被手动收录和订阅补全文两头用着,用例不该挂在其中一头底下。
+        """
+        page = page_html(extra='<script>var x = "%s";</script>' % ('a' * readable.MAX_HTML))
+        self.assertGreater(len(page), readable.MAX_HTML)          # 整份确实超线
+        self.assertLess(readable.markup_size(page), readable.MAX_HTML)  # 真标记没有
+        self.assertIn('这是正文第一段', self.page(html_resp(page))['body'])
+
+    def test_a_gate_component_past_the_old_truncation_point_is_still_caught(self):
+        """**漏一道关卡就是把一道墙当正文永久钉进库里**(`put_items` 的
+        `DO NOTHING`),代价和误拒差着一个量级。
+
+        `gate_reason` 原先把 HTML 截到 `MAX_HTML` 再解析,于是组件和登录墙那两道
+        在一张内联脚本打头的页面上只看得到开头那一截。上一条让这种页面**反而**
+        交得出正文了,这道截断跟着从「反正也存不进去」变成真的放行口。
+        """
+        padding = '<script>var x = "%s";</script>' % ('a' * readable.MAX_HTML)
+        orchestrate = ('<script src="https://t.test/cdn-cgi/challenge-platform'
+                       '/h/b/orchestrate/chl_page/v1"></script>')
+        page = page_html(extra=padding + orchestrate)
+        # 先钉住这道关卡确实落在旧截断点之后(否则这条用例测不到那个洞)
+        self.assertGreater(page.index('orchestrate'), readable.MAX_HTML)
+        with self.assertRaises(grab.GrabError) as caught:
+            self.save_page(html_resp(page))
+        self.assertIn('验证', str(caught.exception))
+        self.assertEqual(self.items(), [])
+
     def test_a_long_gate_page_on_an_ordinary_address_is_refused(self):
         """**上一轮漏掉的那一张**(第二轮审查实测 `SAVED added=1`)。
 
@@ -290,7 +355,7 @@ class PageTests(GrabCase):
             '请完成验证。Checking your browser before accessing the site. '
             '您需要启用 JavaScript 和 Cookie 后重试。在通过验证前文章内容不可见。' * 18])
         # 先钉住它确实落在旧判据的放行区里(否则这条用例测不到那个洞)
-        self.assertGreater(len(grab_page.page_body(gate)), 1200)
+        self.assertGreater(len(readable.extract(gate)), 1200)
         with self.assertRaises(grab.GrabError) as caught:
             self.save_page(html_resp(gate, url='https://example.org/article'))
         self.assertIn('验证', str(caught.exception))
@@ -374,8 +439,8 @@ class PageTests(GrabCase):
                 'subscription. Members have access to the full archive and may manage their '
                 'account and password. New readers can subscribe to unlock this story. ')
         bare = page_html(title='Sign in to read Example Journal', body=[said] * 7)
-        self.assertGreater(len(grab_page.page_body(bare)), 1500)   # 提取器交得出一大段
-        self.assertLess(readable.substance(grab_page.page_body(bare)), readable.MIN_CHARS)
+        self.assertGreater(len(readable.extract(bare)), 1500)   # 提取器交得出一大段
+        self.assertLess(readable.substance(readable.extract(bare)), readable.MIN_CHARS)
         # 三种形态同一句话:原始那张(一个表单都没有)、补一个邮箱表单的、补一个
         # 密码表单的。前两档靠内容质量那一道,第三档靠结构那一道 —— 两道都要在。
         for form in ('',
@@ -406,8 +471,8 @@ class PageTests(GrabCase):
             self.save_page(html_resp(once))
         self.assertIn('复读', str(caught.exception))
         self.assertEqual(self.items(), [])
-        self.assertGreater(len(grab_page.page_body(once)),
-                           len(grab_page.page_body(page_html())))   # 它更长,却该被拒
+        self.assertGreater(len(readable.extract(once)),
+                           len(readable.extract(page_html())))   # 它更长,却该被拒
         entry = self.page(html_resp(page_html()))                   # 两段不同的照旧收下
         self.assertIn('这是正文第一段', entry['body'])
 
@@ -491,7 +556,7 @@ class PageTests(GrabCase):
         """
         body = ['请完成验证后才能看到这篇文章。',
                 '这里是一段足够长的正文，讲的是别的事情，长度要过得了提取器那道门槛。' * 14]
-        self.assertLess(grab_page._gate_share(grab_page.page_body(
+        self.assertLess(grab_page._gate_share(readable.extract(
             page_html(title='x', body=body))), grab_page._GATE_SHARE)   # ④ 这一道不成立
         with self.assertRaises(grab.GrabError) as caught:
             self.page(html_resp(page_html(title='Just a moment…', body=body)))
@@ -504,7 +569,7 @@ class PageTests(GrabCase):
         那个洞(页面长一点就一路放行)。标题人畜无害时这一道单独成立。"""
         say = '请完成验证之后才能继续访问这篇文章的正文内容，这是站点的防护要求。'
         html = page_html(title='站点公告', body=[say * 16 + '本页由系统生成。' * 4])
-        self.assertGreaterEqual(grab_page._gate_share(grab_page.page_body(html)),
+        self.assertGreaterEqual(grab_page._gate_share(readable.extract(html)),
                                 grab_page._GATE_SHARE)
         with self.assertRaises(grab.GrabError) as caught:
             self.save_page(html_resp(html))

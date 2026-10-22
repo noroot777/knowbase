@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 from kb.feeds import x_browser, x_cdp
 from kb.feeds.x_cdp import CdpError
+from tests.headless import browser_gate
 
 
 def _stuff(fd: int) -> None:
@@ -285,7 +286,8 @@ def _chrome() -> str:
 _REAL_CHROME = _chrome()
 
 
-@unittest.skipUnless(_REAL_CHROME, '本机没有 Google Chrome / Chromium')
+@browser_gate([] if _REAL_CHROME else
+              ['Google Chrome / Chromium(本机原生;这一组验 SingletonLock,无头壳建不出它)'])
 class LiveShutdownTests(unittest.TestCase):
     """**真浏览器那一半。** 走的是 `x_cdp.Chrome` 自己那条路:独立临时 profile、
     `--headless=new`,不碰用户日常那个浏览器、不开有头窗口。

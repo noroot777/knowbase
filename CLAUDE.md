@@ -30,7 +30,7 @@
   (`fetching.parse_feed` 的 `parsed.entries and not entries`、`x_browser` 的
   `seen_articles and not parsed`)—— 安静返回空会让这条订阅从某天起永远「今天没有新内容」,而面板上
   一切正常。**反过来钉一边:合法的空源照旧返回空集**(空 RSS 就是 `[]`,`tests/test_feed_sources.py`
-  钉着)。「这一类来源零条就算故障」是**某些来源自己**的更严口径(网页专栏、邮件简报),写在它们各自
+  钉着)。「这一类来源零条就算故障」是**某些来源自己**的更严口径(网页专栏、简报),写在它们各自
   那份决策文档里,不是通用规则。
 - **口径只有一份。** 同一个问题别在两处各判一遍 —— 抽成函数,所有消费方都过它。
 - **主干的迁移只增不减**(表和列一视同仁)。判据是「另一条分支**不重启**会不会当场坏」,不是「它
@@ -111,6 +111,10 @@
   别删** —— 「服务没跑」该由我们自己回答,不该押在某个 find 实现对缺失参照物的处理上。
 - **地址栏的 `#tab` 被读走之前,谁都不许写它**(`workspace.js` 的 `workspaceLocated`)—— `restoreWorkspaceLocation()` 在
   `initWorkspace` 收尾时才读 hash,而 `loadGallery()` 是和它并排起跑的,图鉴接口先回来时 `applyGalleryFilter()` 会把 `#daily` 覆盖成 `#gallery`。
+- **反过来的那一半:人在首次定位之前点过导航,那一下就不许被定位换走**(`workspaceNavigated`)。他点的那一下比地址栏里那一份**新**,
+  而上面那条正让它写不进地址栏;换走之后来源面板那道 `sourceActive()` 直接 return、**数据请求一次都没发**:投递栏露着、按钮停在
+  「同步全部」、页面零报错 —— 像卡死,其实是被顶掉了(真机形态:刷新后立刻点侧栏)。口径是**人点的那一下赢**,地址栏里的图鉴筛选
+  照旧读。形态与回归见 `docs/decisions/link-grab.md`。
 - 向量子进程、帧协议见 `docs/decisions/embedding.md`;模块混跑那条的完整形态见 `code-stale.md`。
 
 ## 视觉语言(硬性)
@@ -169,7 +173,7 @@
 | **任何写 kb.db 或 vault 文件的入口**(索引、导出、提取回写、条目化、清理脚本) | `maintenance-lock.md` |
 | 没有 feed 的站点、网页专栏解析(`kb/feeds/page_list.py`) | `page-list.md` |
 | 手动收录(粘一条链接抓进知识库:`kb/feeds/grab.py`、`grab_store.py`、`grab_page.py`、`kb/web/grab_api.py`、`kb/static/js/grab.js`) | `link-grab.md` |
-| 邮件简报 / TLDR(`kb/feeds/digest.py`) | `digest.md` |
+| 简报 / TLDR(`kb/feeds/digest.py`) | `digest.md` |
 | 往 `defaults.json` 加来源、存量库补种(`kb/feeds/registry.py` 的 `DEFAULTS_REV`) | `defaults-backfill.md` |
 | 英文内容翻译、译文显示口径(`kb/feeds/translate.py`) | `translate.md` |
 | 每日日报、素材账本、出处编号、覆盖确认(`kb/daily*.py`、`kb/daily_refs.py`、`kb/daily_overwrite.py`) | `daily.md` |
@@ -180,6 +184,7 @@
 | 条目化提取的开关(`kb/extract_optin.py`) | `extract-optin.md` |
 | wiki 层、三张图谱、归类缓存与发布(`scripts/wiki/`) | `catgraph.md` |
 | 测试探针起无头浏览器(`tests/probe_shell.mjs`、`tests/headless.py`) | `probe-shell.md` |
+| 本地回归怎么分层跑、浏览器闸门(`./kb.sh test`、`tests/tiers.py`、`tests/headless.py` 的 `requires_headless`) | `test-tiers.md` |
 | 夹具服务起了不关、自己什么时候退(`tests/fixture_life*.py`、`fixture_voice.py`、`tests/serve_*.py`) | `fixture-life.md` |
 | 向量子进程与帧协议(`kb/embed_worker.py`、`embed_pool.py`、`embedder.py`) | `embedding.md` |
 | 问答面板布局、聊天区留白、页面探针收尾(`kb/static/js/chat.js`) | `frontend-feedback.md` |

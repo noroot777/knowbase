@@ -38,6 +38,13 @@ class HeadlessShellTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("HEADLESS_SHELL", None)
+        # **那个开关也算环境,得一并清掉**:这一组问的是「找得到吗、找不到时怎么说」,
+        # 而 `browser_gate` 把「人显式关了浏览器回归」排在缺件之前 —— 开关落在环境里时
+        # 下面两条断言拿到的是开关那句话,于是「按说明关掉浏览器回归再跑」反而收到两条
+        # 失败(实测 `KB_SKIP_BROWSER_TESTS=1` 跑全量:3471 条里红这两条)。
+        # 清掉是**隔离**、不是跳过:缺件那句话照旧要验。开关自己的口径在
+        # tests/test_browser_switch.py,那边也钉着「开关开着时这一组仍须全绿」。
+        os.environ.pop(headless.SKIP_ENV, None)
         home = patch.object(Path, "home", staticmethod(lambda: self.root / "home"))
         home.start()
         self.addCleanup(home.stop)

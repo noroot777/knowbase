@@ -112,16 +112,75 @@ SHELL = headless_shell()
 NODE = shutil.which("node")
 
 
+#: 显式关掉浏览器回归那一组(fast 层设它;手动跑 README 那条 discover 想省时间
+#: 也可以自己设)。
+#:
+#: **为什么要一个专门的开关**:不给 `HEADLESS_SHELL` 并**不**等于不跑 —— 上面那条
+#: 口径会自己去 playwright 缓存里找一份(本机实测就找到了),所以「我没给路径」
+#: 关不掉它。认 `1/true/yes/on`(不分大小写、容前后空白),**其余一律当没关** ——
+#: 方向是不对称的:误判成「人关了」的后果是一轮界面都没验,而收尾那行照旧写 OK。
+SKIP_ENV = "KB_SKIP_BROWSER_TESTS"
+_ON = frozenset({"1", "true", "yes", "on"})
+
+
+def browser_tests_off() -> bool:
+    """这一轮是不是被显式关掉了浏览器回归(人手动设,或 fast 层替你设)。"""
+    return os.environ.get(SKIP_ENV, "").strip().lower() in _ON
+
+
+def browser_gate(missing=()):
+    """真实浏览器测试类的统一闸门:**会起浏览器的类一律挂它**(或下面两个现成
+    包装),不许在测试文件里自己写 `skipUnless` 按工具可用性做门 —— 自己写的那份
+    不认上面的开关(fast 层靠它拦,手动关也靠它),照样起浏览器;也不带
+    `kb_browser` 标记,probes 层统计不到它,「浏览器零覆盖」就看不出来。结构守卫
+    两处、判的不是同一件事:按 skipUnless/skipIf 条件源码判的在
+    `tests/test_tiers.py`,按「导入了哪些名字 / 隔着别的模块取闸件」判的在
+    `tests/test_browser_switch.py`。完整语境见 docs/decisions/test-tiers.md 与
+    probe-shell.md。
+
+    `missing` 由调用点按**自己**的工具要求算:.mjs 探针要 node+壳
+    (`requires_headless`),Python 直驱 CDP 的 DOM 组只要壳(`requires_shell`),
+    SingletonLock 那组要原生 Chrome(无头壳压根不建那把锁)。这里不强加统一依赖。
+
+    做三件事,顺序有含义:先打 `kb_browser` 标记(分层统计的唯一口径,**缺工具
+    被 skip 的也得带着**,不然 probes 层的覆盖账少记它);再按开关整类拦下 ——
+    **「人关的」和「这台机器缺东西」必须说成两句话**,一句 `OK (skipped=30)` 在
+    两种情形下长得一模一样,而含义差很远;最后才轮到缺工具,按调用点给的说法
+    skip(消息写清怎么补 —— 静默跳过是这套口径当年要修的事故形态)。
+    """
+    missing = [m for m in missing if m]
+
+    def mark(cls):
+        cls.kb_browser = True
+        if browser_tests_off():
+            return unittest.skip(
+                f"{SKIP_ENV} 已显式关掉浏览器回归:这一轮没有验过界面"
+                "(要验:./kb.sh test probes 或 ./kb.sh test full)")(cls)
+        if missing:
+            return unittest.skip("缺 " + ";".join(missing))(cls)
+        return cls
+
+    return mark
+
+
 def requires_headless(cls):
-    """给浏览器回归用的装饰器:node 和无头壳缺哪个都说清楚,外加怎么补。"""
+    """node 驱动的浏览器回归(.mjs 探针)用这个:node 和无头壳缺哪个都说清楚。"""
     missing = []
     if NODE is None:
         missing.append("node(驱动 CDP 的那一侧)")
     if SHELL is None:
         missing.append(f"chrome-headless-shell —— {INSTALL_HINT}")
-    if missing:
-        return unittest.skip("缺 " + ";".join(missing))(cls)
-    return cls
+    return browser_gate(missing)(cls)
+
+
+def requires_shell(cls):
+    """Python 直驱 CDP 的浏览器回归用这个:只要无头壳,不额外强加 node。
+
+    原来五处各写一份 `skipUnless(SHELL is not None, ...)` —— 那个写法让上面那个
+    开关**关不住它们**:开关只认得过这里的那几组,而它们起的也是真浏览器。
+    """
+    missing = [] if SHELL is not None else [f"chrome-headless-shell —— {INSTALL_HINT}"]
+    return browser_gate(missing)(cls)
 
 
 def run_probe(argv, *, timeout: int = 300, env=None, cwd=None,

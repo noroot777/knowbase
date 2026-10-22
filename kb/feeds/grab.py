@@ -25,10 +25,12 @@
 
 **绿泡泡的文章和别的站点走同一条路**(②):发一次请求,读到正文就收下,**实际
 撞上验证页才拒**,那一句指向真正管这件事的那条通道(读本机绿泡泡数据库,见
-`kb/collectors/wechat_local.py`)。实测多数 `mp.weixin.qq.com/s/<slug>` 确实会
-302 到 `/mp/wappoc_appmsgcaptcha`(og 元信息和 `#js_content` 全没有)—— 那不是
-bug,是对方的反自动化关卡,我们**不绕**它;但那是**那个响应**的结论,不是这个
-域名的结论(按域名先拒的代价见 `classify`)。
+`kb/collectors/wechat_local.py`)。2026-10-21 复测推翻了「这条路走不通」那个结论:
+`mp.weixin.qq.com/s/<slug>` 那道 `/mp/wappoc_appmsgcaptcha` **是我们自报
+`KnowledgeBaseFeedReader/1.0` 招来的**,换成浏览器身份(`grab_page.BROWSER_UA`)
+同一条地址 3/3 直接 200 拿到整篇文章。**我们照旧不绕那道关卡** —— 一个 token 都
+没解、一个 cookie 都没带,真回了验证页照旧拒;变的只是不再主动触发它。那终究是
+**那个响应**的结论,不是这个域名的结论(按域名先拒的代价见 `classify`)。
 """
 from __future__ import annotations
 
@@ -46,7 +48,6 @@ from kb.feeds import grab_page, readable, registry as reg, x_article, x_body
 from kb.feeds.grab_store import (KIND, known, owing,  # noqa: F401
                                  reclaim_export, replace)
 from kb.feeds.fetching import FeedError, body_text, canonical_url, oneline, request
-from kb.feeds.grab_page import PageUnavailable
 
 #: 整条收录的墙钟上限。X 那边最多两次接口请求(推文 + 长文),网页那边一次 HTTP;
 #: 用户正盯着这颗按钮等,所以比采集那一侧(`SOURCE_SECONDS`)给得紧一些。
@@ -344,12 +345,13 @@ def _grab_x(url: str, deadline: float) -> dict:
 def _next_step(final_url: str) -> str:
     """没收下之后那半句「下一步」。**按站点分,而且只有这一份口径。**
 
-    绿泡泡的文章这条路确实走不通(实测 302 到 `/mp/wappoc_appmsgcaptcha`,og 和
-    `#js_content` 全无),而它有一条自己的通道:把人指过去。照通用那句说「在浏览
-    器里打开、把正文复制出来」等于让他对着一道过不去的验证页发呆。
+    走到这儿 = 这一条确实没收下(撞上关卡,或者读不到正文)。绿泡泡有一条自己的
+    通道:把人指过去。照通用那句说「在浏览器里打开、把正文复制出来」等于让他对着
+    一道过不去的验证页发呆。
 
     **判据是实际响应,域名只决定这半句话怎么说** —— 按域名先拒掉那一版的代价写在
-    `classify` 的注释里。
+    `classify` 的注释里。平时这条路**是通的**(见模块说明那条 2026-10-21 的复测),
+    所以这半句话现在是少数情况下才说得出口的那一句,不是对这个域名的判决。
     """
     host = (urlsplit(final_url).hostname or '').lower()
     if host in _WECHAT_HOSTS:
@@ -367,12 +369,14 @@ def _grab_web(url: str, deadline: float) -> dict:
     """一个网页 → 待入库的条目。正文口径只有 `readable` 那一份。
 
     **「提取成功」证明不了「拿到了那篇文章」。** 所以关卡判据排在**所有出路的
-    前面,成功和失败共用一道**(`grab_page.gate_reason`,判据和那条不变量都在它
+    前面,成功和失败共用一道**(`grab_page.admit`,判据和那条不变量都在它
     自己头上):一张验证页提取得出一段文字、长度轻松过关,随后被 `put_items` 的
     `DO NOTHING` 永久钉成这一篇的正文,再投一次同一条链接也换不回真文章(两轮
     审查各实测到一例:683 字那张落在 `/challenge` 上,1782 字那张谁都没拦住)。
     **这里只有一个调用点** —— 成功路和失败路各问一次的话,同一张验证页会得到
-    两句不同的话,而其中一条迟早漏掉一个判据。
+    两句不同的话,而其中一条迟早漏掉一个判据。**「先提取、后问关卡」那个顺序也在
+    `admit` 里**,和订阅正文补抓那条链路共用:各自拼一遍的话,其中一头迟早漏掉
+    一道(那正是 `admit` 的来历,见它自己的说明)。
     """
     from kb.feeds.markdown_source import accept, entry, fetch, from_response
     if markdown := fetch(url, transport=request, deadline=deadline):
@@ -389,21 +393,18 @@ def _grab_web(url: str, deadline: float) -> dict:
         raise GrabError(f'{problem}')
     html = readable.decode(resp.body, dict(resp.headers))
     final = resp.url or url
-    # **先把提取的结果收在手里,别急着用它答任何话。** 关卡那一问要先过:
-    # 「提取失败」也不许抢在它前面答 —— 「这一页没找到正文」指不出下一步,而这
-    # 一页明摆着是一道验证页。
-    body, unavailable = '', ''
-    try:
-        body = grab_page.page_body(html)
-    except PageUnavailable as e:
-        unavailable = f'{e}'
-    if reason := grab_page.gate_reason(final, html, body):
-        raise _gate(reason, final)
-    if unavailable:
+    # **截断交给 `admit`,不许在这之后再截** —— 判据要落在真写进库的那一份上
+    # (理由和事故形态写在 `admit` 头上)。
+    body, gate, why = grab_page.admit(final, html, limit=grab_page.MAX_CHARS)
+    if gate:
+        raise _gate(gate, final)
+    if not body:
         # 读不到正文这一档也要带上下一步(口径同 `_gate`:同一个 `_next_step`)。
         # 「这一页没找到正文」自己指不出任何事 —— 折叠成一句抓取失败就是把人留在
-        # 原地(模块注释那一条)。
-        raise GrabError(f'{unavailable}。{_next_step(final)}')
+        # 原地(模块注释那一条)。**而 `why` 只当日志级的补充附在后面**:
+        # 「命中版权区」「作者简介」是面向开发的说法,对着用户再说一遍没有意义 ——
+        # 他能做的只有「换个地址」或者「这篇就是读不到」。
+        raise GrabError(f'这一页没找到正文{f"（{why}）" if why else ""}。{_next_step(final)}')
     meta = grab_page.page_meta(html, final)
     host = (urlsplit(final).hostname or '').lower().removeprefix('www.')
     return {'url': url, 'title': grab_page.title_fallback(meta['title'], body, host),

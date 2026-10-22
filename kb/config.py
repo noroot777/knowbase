@@ -145,6 +145,11 @@ SOURCE_ALIASES: dict[str, str] = {
     "日报": "dr", "daily": "dr", "ai日报": "dr",
     "大v观点": "social", "大v": "social", "推特": "social", "x": "social",
     "rss订阅": "rss",
+    # 「邮件简报」留着:界面上改叫「简报」了(原来那个「邮件」说的是发行方怎么发给
+    # 它自己的订阅者,我们这条通道压根不碰邮箱 —— 只读 RSS 的期号清单和每期落地
+    # 页)。而下面那一行是从 label **派生**的,改名等于把老键删掉,于是老写法被当
+    # 成具体来源名原样传进 SQL、**静默得到空集** —— 同「微信」那条的道理。
+    "邮件简报": "digest", "newsletter": "digest",
     **{spec.label.lower(): kind for kind, spec in feed_types().items()},
 }
 

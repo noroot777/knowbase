@@ -1,10 +1,10 @@
-# 邮件简报(kb/feeds/digest.py + source_types 的 `digest`)
+# 简报(kb/feeds/digest.py + source_types 的 `digest`)
 
 > **这一份的第一节就是这一块的硬约束(不许怎样)—— 动这块代码之前先读它**,后面是完整的事故形态、
 > 实测证据、回归清单和反向验证红数。CLAUDE.md 只留跨块的元规则和一张索引。
 > 硬约束和下面的展开**说的是同一条口径,要改规则两边一起改**。
 
-## 硬约束(原 CLAUDE.md「邮件简报(kb/feeds/digest.py + source_types 的 `digest`)」)
+## 硬约束(原 CLAUDE.md「简报(kb/feeds/digest.py + source_types 的 `digest`)」)
 
 - **TLDR AI 这类简报,一期一个汇总页,内容在页里并列排布。** 三条路实测都堵死了:官方 RSS **连 `description` 都没
   有**、没有「最新一期」的固定地址、**不能按日期猜地址**(未发布的日期返回 **200 + 营销页**)。于是「有哪些期」只能

@@ -55,6 +55,10 @@ class FeedCollector:
         匹配走 `reg.in_scope`(唯一一份口径,`status` 和 `sync.collect` 同款),
         所以这里认的和真正去抓的那一批**必定是同一批**。**一个都没匹配上的那几个
         原样留着** —— 它可能刚被删掉或改了名,从账上摘掉就是漏记。
+
+        **账上只记无类型的那一份**:没匹配上的那几个要把类型前缀摘掉再留
+        (`reg.bare_target`)—— 账本那一侧(`still_failing` 按 `str(source['id'])`
+        比)是个无类型字符串空间,带前缀存进去等于换了个键。
         """
         sources = reg.subscriptions(self.name)
         out, matched = [], set()
@@ -63,13 +67,32 @@ class FeedCollector:
             out.extend(hit)
             if hit:
                 matched.add(want)
-        out.extend(str(t) for t in targets if t not in matched)
+        out.extend(reg.bare_target(t) for t in targets if t not in matched)
         return list(dict.fromkeys(out))
 
+    def id_targets(self, ids):
+        """见 `kb.collectors.TargetTyping`。入口点名的是订阅编号。"""
+        return [reg.id_target(i) for i in ids]
+
+    def name_targets(self, names):
+        """见 `kb.collectors.TargetTyping`。面板名单上勾的是显示名。
+
+        **一个都不许跳过。** 「长得已经像带类型了就别再打一层」那种偷懒会让名字真叫
+        `id:63` 的那一行按编号去匹配 —— 用户勾的是这一行,跑的是编号 63 那一条。
+        名字本身长什么样在这儿不算信息:**这个字段里的每一个都是名字**,类型由
+        字段位置决定(`kb/web/pipeline_api.py` 的 `_targets`)。
+        """
+        return [reg.name_target(n) for n in names]
+
     def retry_targets(self, note):
-        """「重试失败项」要重抓的订阅(见 `kb.collectors.RetryNarrowing`)。"""
+        """「重试失败项」要重抓的订阅(见 `kb.collectors.RetryNarrowing`)。
+
+        **按编号点名**(`reg.id_target`):账本里存的是裸 id,而它接下来是当**范围
+        目标**用的 —— 裸着发出去,范围匹配会把「名字正好等于这个编号」的另一条订阅
+        一起抓上(第 1 轮审查 R1 的同一个类问题,这一侧的触发路径是重试)。
+        """
         from kb.feeds.sync import still_failing
-        return still_failing(self.name, note)
+        return [reg.id_target(t) for t in still_failing(self.name, note)]
 
     def drop_item(self, ref):
         from kb.feeds.exclusion import drop_item

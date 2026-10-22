@@ -220,8 +220,9 @@ class SettledOnlyWhenItRanTests(DaybookCase):
         with patch.object(reg, 'configuration_error',
                           lambda s, settings: ('待配置：摆盘'
                                                if s['id'] == self.c['id'] else '')):
-            # `force` 是「重试失败项」自己写进范围里的那一个(`start_retry_failed`),
-            # 不带它的话 A 还在失败退避里、这一轮压根不会取它。
+            # `force` 是人按的那一轮才有的那一档(判在 `kb/run_trigger.py`,
+            # 「重试失败项」声明自己是手动),不带它的话 A 还在失败退避里、
+            # 这一轮压根不会取它。
             got, stage = self.crawl({'channel': 'rss', 'force': True})
         self.assertIn(self.a['id'], got, '这一局的前提:这一轮真去取了 A')
         self.assertEqual('skipped', stage['status'],
@@ -253,6 +254,47 @@ class SettledOnlyWhenItRanTests(DaybookCase):
         self.assertEqual([], pipeline_retry.today_failed(),
                          '一次跳过凭空记出了一笔欠账')
         self.assertEqual([], self.plan(), '一次跳过凭空排出了一条重试链')
+
+    # ── 成功回执这一侧:身份只按编号对上,一个名字都不认 ────────────────────
+
+    def test_a_success_receipt_never_settles_the_subscription_merely_named_that_number(self):
+        """**记账方向不许放宽身份**:A 抓成了,不许连带把「名字正好是 A 的编号」
+        那条订阅的真失败一起结清。
+
+        `Coverage.targets` 交回来的已经是稳定身份(订阅源报订阅 id、公众号报账号名),
+        而那一侧原来又过了一遍**选源方向**的范围匹配(`reg.in_scope`:「id 相等**或**
+        name 相等」)。两个方向的安全侧是反的:
+        - 选源宽一点 = 多抓一条,代价是重抓一次(`in_scope` 的 docstring 就是按这一侧
+          写的,那一侧照旧宽);
+        - **记账宽一点 = 拿一次没发生的成功清掉另一条订阅的真失败**,而它从此不再
+          进重试计划 —— 静默丢数据,重试救不回来。
+
+        判据落在**下一轮还补不补得到**上:账上那一格、这颗按钮排不排得出抓取、以及
+        真点下去它去抓的是谁。只问账本不够 —— 账上记错那一格之后,面板和执行端是
+        **同一份派生**(`owed_now`),两边会一起消失、看起来一切正常。
+        """
+        d = reg.save_subscription('rss', {'name': str(self.a['id']),
+                                          'url': 'https://d.org/feed'})
+        # 第一轮只同步 D 并让它取文失败。**按编号点名**:D 的名字就是 A 的编号,
+        # 裸着写这一轮会把 A 一起抓走,这一局的前提就不是「只有 D 欠着」了。
+        self.crawl({'channel': 'rss', 'accounts': [reg.id_target(d['id'])]}, broken=[d])
+        self.assertEqual({str(d['id']): 'error'}, self.book_cells('crawl', 'rss'),
+                         '这一局的前提:账上只有 D 那一格,而且是红的')
+        # 第二轮只同步 A,它真抓成了。回执里是裸着的 A 编号 —— 那个字符串同时又是
+        # D 的名字。
+        got, stage = self.crawl({'channel': 'rss',
+                                 'accounts': [reg.id_target(self.a['id'])]})
+        self.assertEqual({self.a['id']}, got, '这一局的前提:这一轮只去取了 A')
+        self.assertEqual('ok', stage['status'], f'这一局的前提:A 这一轮抓成了({stage})')
+        cells = self.book_cells('crawl', 'rss')
+        self.assertEqual('error', cells.get(str(d['id'])),
+                         f'A 的成功把 D 那笔真失败结清了:{cells}')
+        self.assertEqual('ok', cells.get(str(self.a['id'])),
+                         f'A 自己这一笔反而没记上:{cells}')
+        self.assertIn('crawl', self.plan(), 'D 还欠着,这颗按钮却排不出抓取了')
+        again, _ = self.retry_settled()
+        self.assertEqual({d['id']}, again,
+                         '点下去该只去补 D 这一条(空集 = 它被当成已经补完了)')
 
 
 if __name__ == '__main__':
