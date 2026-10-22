@@ -8,8 +8,12 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
+import ctypes.util
+import errno
 import os
 import resource
+import struct
 import socket
 import subprocess
 import sys
@@ -145,6 +149,58 @@ class IdentityUnknown(AssertionError):
     """
 
 
+def _sysctl_probe():
+    """内核那条**不用 fork、不用 fd** 的问法 —— 问不出来就返回 None,由调用方降级。
+
+    为什么非要它:回收一个跨会话的后代时,判据得「届时还问得出来」。原先只有 `ps` 一条
+    路,而那是起一个子进程 —— fd 紧张时建管道/fork 当场失败,于是**已经创建好的那棵树在
+    最需要收的时候反而判不出归属**(实测:真把软上限压到 64,账本在、能读,外层也收掉了,
+    内层四个进程和页面照旧活着)。`sysctl` 是一次纯系统调用,不申请 fd、不建进程。
+    """
+    try:
+        lib = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        return lib.sysctl
+    except Exception:
+        return None
+
+
+_SYSCTL = _sysctl_probe() if sys.platform == "darwin" else None
+_CTL_KERN, _KERN_PROC, _KERN_PROC_PID = 1, 14, 1
+_KINFO_CAP = 4096                  # 实测一条 `kinfo_proc` 是 648 字节
+
+
+def _identity_sysctl(pid: int) -> str:
+    """`kinfo_proc` 开头那个 `struct timeval __p_starttime`,精度到微秒。
+
+    **结构解对了没有,自己核一遍**:偏移 40 处是 `p_pid`,它必须等于我们问的那个号 ——
+    对不上就说明这份偏移在当前内核上不成立,那是「判不出来」(抛,下游会降级到 `ps`),
+    **不许当成身份**。靠一组猜出来的偏移去回收进程会杀掉别人。
+
+    「没有这个进程」在这条路上有两种说法,都要认:`rc == 0` 而**一个字节都没返回**,或者
+    明确的 `ESRCH`。其余 errno 一律是判不出来。
+    """
+    mib = (ctypes.c_int * 4)(_CTL_KERN, _KERN_PROC, _KERN_PROC_PID, pid)
+    size = ctypes.c_size_t(_KINFO_CAP)
+    buf = ctypes.create_string_buffer(_KINFO_CAP)
+    ctypes.set_errno(0)
+    rc = _SYSCTL(mib, 4, buf, ctypes.byref(size), None, 0)
+    if rc != 0:
+        got = ctypes.get_errno()
+        if got == errno.ESRCH:
+            return ""
+        raise IdentityUnknown(f"sysctl 问不出 pid {pid}(errno={got})")
+    if size.value == 0:
+        return ""                  # 内核的「没有这个进程」
+    if size.value < 44:
+        raise IdentityUnknown(f"sysctl 给的 kinfo_proc 太短({size.value} 字节)")
+    sec, usec = struct.unpack_from("=qi", buf.raw, 0)
+    echo, = struct.unpack_from("=i", buf.raw, 40)
+    if echo != pid:
+        raise IdentityUnknown(
+            f"kinfo_proc 的偏移在这个内核上不成立(问 {pid},回声 {echo})")
+    return f"{pid}@{sec}.{usec:06d}"
+
+
 def _identity(pid: int) -> str:
     """一个进程的**不可变**身份:它的启动时刻。
 
@@ -174,6 +230,11 @@ def _identity(pid: int) -> str:
     它,于是一个还活着的进程被判成「没什么要收的」。宁可判不出来:那一边有 holder 兜着,
     两条都没有时会抛,都是响的。
     """
+    if _SYSCTL is not None:
+        # **一条路走到底,不混用。** 两条路量出来的串形状不同(内核给到微秒,`ps` 只到
+        # 秒),记的时候用一条、收的时候用另一条就一定对不上。所以这个选择在模块加载时
+        # 定下来,整轮(以及跨进程的内层/外层)都用同一条。
+        return _identity_sysctl(pid)
     try:
         out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
                              capture_output=True, text=True)

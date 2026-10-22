@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
 import signal
 import subprocess
@@ -30,6 +32,22 @@ from tests.fixture_life_cases import 起与收
 from tests.fixture_life_probe import (
     IdentityUnknown, _free_port, _identity, _stat_of, _wait_listening, ROOT,
 )
+
+
+def _拒绝(err: int) -> int:
+    """假装内核拒绝回答:返回 -1 并把 errno 设成 `err`。"""
+    ctypes.set_errno(err)
+    return -1
+
+
+def _回声错的内核(mib, n, buf, size, old, oldlen):
+    """假装偏移在这个内核上不成立:结构给满,但偏移 40 处那个 pid 是别人的号。"""
+    ctypes.memset(buf, 0, 648)
+    ctypes.memmove(buf, bytes(44), 44)
+    struct_pack = (12345).to_bytes(4, "little")
+    ctypes.memmove(ctypes.byref(buf, 40), struct_pack, 4)
+    size._obj.value = 648
+    return 0
 
 
 class 身份与回收(起与收):
@@ -123,9 +141,13 @@ class 身份与回收(起与收):
         测试里抛出去是**响的**。反过来钉一边:真的没有这个进程,照旧安静地回空串。
         """
         _, proc = self._spawn(idle="0")
-        with mock.patch.object(fixture_life_probe.subprocess, "run",
-                               return_value=subprocess.CompletedProcess(
-                                   [], 1, "", "ps: 起不来")):
+        # **注入要落在真正在跑的那条路上。** 身份主路已经是内核那条不用 fork 的问法,打
+        # `subprocess` 的桩压根打不中它 —— 所以这儿显式切到后路(`ps`)再注入,后路的这份
+        # 回归不丢;主路有它自己那条(`test_内核那条路的三种结果各有形状`)。
+        with mock.patch.object(fixture_life_probe, "_SYSCTL", None), \
+                mock.patch.object(fixture_life_probe.subprocess, "run",
+                                  return_value=subprocess.CompletedProcess(
+                                      [], 1, "", "ps: 起不来")):
             with self.assertRaises(AssertionError):
                 _identity(proc.pid)
         # 反过来钉一边:用一个**真的已经退了并且被 `wait` 收过**的号(不用随手编一个大
@@ -148,15 +170,48 @@ class 身份与回收(起与收):
         地回空串,上一条用真退掉的进程钉着。
         """
         _, proc = self._spawn(idle="0")
-        with mock.patch.object(fixture_life_probe.subprocess, "run",
-                               side_effect=OSError(24, "Too many open files")):
+        with mock.patch.object(fixture_life_probe, "_SYSCTL", None):   # 同上:切到后路
+            with mock.patch.object(fixture_life_probe.subprocess, "run",
+                                   side_effect=OSError(24, "Too many open files")):
+                with self.assertRaises(IdentityUnknown):
+                    _identity(proc.pid)
+            with mock.patch.object(fixture_life_probe.subprocess, "run",
+                                   return_value=subprocess.CompletedProcess(
+                                       [], -9, "", "")):
+                with self.assertRaises(IdentityUnknown):
+                    _identity(proc.pid)
+
+    def test_内核那条路的三种结果各有形状(self):
+        """**主路也要有自己的回归** —— 两条实现各钉一遍,口径是同一份。
+
+        身份这一问改走 `sysctl` 是为了「回收一棵已经创建好的树,不许依赖届时还 fork 得
+        动」(后果那一条在隔壁,落在「fd 占满时夹具收不收得掉」上)。这里钉的是它的三种
+        结果:**量到了**、**确实没有这个号**、**判不出来**,一种都不许混进另一种。
+
+        最要紧的是最后那条里的「回声」:我们是按一组偏移去读内核结构的,所以偏移处的
+        `p_pid` 必须等于问的那个号 —— 对不上就是「这份偏移在当前内核上不成立」,那是判不
+        出来(抛,下游还会降级到后路),**不许当成身份**。靠一组猜出来的偏移回收进程会
+        杀掉别人。
+        """
+        self.assertIsNotNone(fixture_life_probe._SYSCTL,
+                             "这台机器上主路没启用,这条用例没验到东西")
+        _, proc = self._spawn(idle="0")
+        got = _identity(proc.pid)
+        self.assertRegex(got, rf"^{proc.pid}@\d+\.\d{{6}}$", "量到的形状不对")
+        # 确实没有这个号:用一个真退掉并且被 `wait` 收过的
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait(timeout=10)
+        self.assertEqual("", _identity(dead.pid), "真没有这个号就该安静地回空串")
+        # 判不出来①:内核拒绝回答(非 ESRCH 的 errno)
+        with mock.patch.object(fixture_life_probe, "_SYSCTL",
+                               lambda *a: _拒绝(errno.EPERM)):
             with self.assertRaises(IdentityUnknown):
                 _identity(proc.pid)
-        with mock.patch.object(fixture_life_probe.subprocess, "run",
-                               return_value=subprocess.CompletedProcess(
-                                   [], -9, "", "")):
-            with self.assertRaises(IdentityUnknown):
+        # 判不出来②:回声对不上 —— 偏移在这个内核上不成立
+        with mock.patch.object(fixture_life_probe, "_SYSCTL", _回声错的内核):
+            with self.assertRaises(IdentityUnknown) as 抓:
                 _identity(proc.pid)
+        self.assertIn("回声", str(抓.exception))
 
     def test_取样抛的是资源错也照样收得掉(self):
         """**上一版这条判据写的是 `except AssertionError`。**

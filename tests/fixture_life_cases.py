@@ -79,24 +79,55 @@ def _slurp(path: str) -> str:
         return ""
 
 
-def 立账(path: str, port: int, **pids: int) -> None:
-    """**内层把它那一棵树的号连身份一起交出来** —— 外层的兜底只认这一份。
+def 开工(path: str) -> None:
+    """**创建任何东西之前先立个标记。** 之后账上一笔都没有,也不等于后台没东西。
 
-    为什么要有这份账:`_run_nested` 的锚点必须 `setsid` 成自己那一组(否则按组收会打
-    到调用方自己那一组),于是**外层那一组的 `killpg` 到不了它**。平时这不是问题——整
-    棵树的所有权在 `_run_nested` 的 `finally` 里;可外层进程被 SIGKILL 的时候那条
-    `finally` 一行都不跑,跨会话又没有「按会话杀」这种系统调用,只能逐个号来。而逐个
-    号就要有归属证明,所以**号和身份必须在同一刻一起记下**(判据仍在 `_mine`)。
+    上一版把「账本文件不存在」读成「它还没起到有东西要收」。那不成立:账是整棵树起齐之后
+    才一次性发布的,于是从第一个进程跑起来到发布完成之间,**整棵树和页面都已经可用,而正式
+    账还不存在**。实测在发布前取消:基类的取消收场确实跑了,`_reap_book` 因为文件不在直接
+    返回,锚点、内层、中间进程、夹具四个全在、页面 200。
 
-    身份串里有空格(`lstart` 的格式),所以这份账走 JSON 不走空格分隔;先落 `.part` 再
-    改名,读到的一定是整份。`_identity` 量不出来照旧抛 —— 那会儿账还没立,读账那边看到
-    的是「压根没有这份账」,用例当场红,不会变成静默漏一棵树。
+    所以判据换成这个标记:**有标记而账上一条都没有 = 判不出来,一律抛**(响的红),不许
+    返回「确定没有」。口径同 `_identity` 的三种结果。
     """
-    rec = {"port": port, "pids": pids,
-           "ids": {k: _identity(v) for k, v in pids.items()}}
-    with open(path + ".part", "w", encoding="utf-8") as f:
-        json.dump(rec, f)
-    os.replace(path + ".part", path)
+    open(path + ".starting", "w").close()
+
+
+def 记一笔(path: str, name: str, pid: int) -> None:
+    """**一个号一拿到手就记一笔**,不等整棵树起齐。
+
+    一行一条 JSON、`O_APPEND` 追加写:半截只可能出现在**最后一行**(写到一半就被掐掉),
+    读的时候丢掉没有换行结尾的那一行就行 —— 不需要「先写 `.part` 再改名」那种整份发布,
+    而整份发布正是上一版那个窗口的来源。
+
+    号和身份仍然在**同一刻**一起记下(判据仍在 `_mine`)。身份这一问现在走内核那条不用
+    fork、不用 fd 的路(见 `_identity`),所以这一笔的代价是几微秒,窗口小到只剩「进程刚
+    建出来、这一行还没写完」。
+    """
+    line = json.dumps({"name": name, "pid": pid, "id": _identity(pid)},
+                      ensure_ascii=False) + "\n"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line)
+
+
+def 记端口(path: str, port: int) -> None:
+    """把页面那个号也记在同一本账上(给断言用,不参与回收)。"""
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"port": port}) + "\n")
+
+
+def 读账(path: str) -> tuple[bool, list[dict]]:
+    """返回(开工了没有, 记下来的那几笔)。**半截的最后一行丢掉。**"""
+    started = os.path.exists(path + ".starting")
+    rows: list[dict] = []
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f.read().splitlines(keepends=True):
+                if not line.endswith("\n"):
+                    continue                      # 写到一半:这一行不算
+                with contextlib.suppress(ValueError):
+                    rows.append(json.loads(line))
+    return started, rows
 
 
 class 起与收(unittest.TestCase):
@@ -120,12 +151,60 @@ class 起与收(unittest.TestCase):
         是「被取消了」。而 `KeyboardInterrupt` 不是 `Exception` 的子类,所以第二次
         Ctrl-C 照旧打得断这段收场。
         """
+        self.__dict__.setdefault("_未了", [])
+        self._已让过 = False
         try:
-            return super().run(result)
-        except KeyboardInterrupt:
-            with contextlib.suppress(Exception):
-                self.doCleanups()
-            raise
+            try:
+                return super().run(result)
+            except KeyboardInterrupt:
+                with contextlib.suppress(Exception):
+                    self.doCleanups()
+                raise
+        finally:
+            self._补完()
+
+    def _担上(self, fn, *a, **kw) -> None:
+        """登记一项回收,并且**在它真跑完之前不许从责任里消失**。
+
+        `unittest` 执行一项 cleanup **之前**就把它从栈里弹掉了。于是第一次 SIGINT 正好落
+        在这一项里面时,它既没跑完、也不在栈上 —— 再跑一次 `doCleanups()` 也不会把它找
+        回来。实测:取消落在身份那一问上,外层已经退出,内层四个进程和页面照旧活着,而
+        账本反而被剩下的清理删掉了。**「回调开始执行」不等于「回收已经完成」。**
+
+        所以这儿留一份自己的账:进这一项之前记上,**跑完才划掉**,`run()` 收尾时把没划掉
+        的再跑一遍。顺序不变 —— 这只是在原来那个清理栈上包了一层。
+        """
+        # **懒取,不靠 `run()` 先跑过。** 有一类用例会直接实例化一个裸壳、自己跑它的
+        # `doCleanups()`(内层那本账交给外层的那条),那条路上 `run()` 压根不经过。
+        pending = self.__dict__.setdefault("_未了", [])
+
+        def _一项() -> None:
+            token = (fn, a, kw)
+            pending.append(token)
+            fn(*a, **kw)                 # 抛出去就留在账上,收尾时再补
+            pending.remove(token)
+
+        self.addCleanup(_一项)
+
+    def _补完(self) -> None:
+        """把没划掉的再跑一遍 —— 它们要么压根没进去过,要么被打断在半路。
+
+        第一次取消打断的那一项**原地再试一次**;**第二次取消照旧放手** —— 文档里那条
+        「第二次 Ctrl-C 打得断这段收场」仍然成立,这里只是不把「被打断」算成「做完了」。
+        """
+        pending = self.__dict__.setdefault("_未了", [])
+        while pending:
+            fn, a, kw = pending[0]
+            try:
+                fn(*a, **kw)
+            except KeyboardInterrupt:
+                if self._已让过:
+                    raise
+                self._已让过 = True
+                continue
+            except Exception:
+                pass                     # 它的红第一次执行时已经报出去了
+            pending.pop(0)
 
     def _spawn(self, *, idle: str, upstream: str = "", stderr=subprocess.DEVNULL,
                stdout=subprocess.DEVNULL):
@@ -138,7 +217,7 @@ class 起与收(unittest.TestCase):
             argv += ["--upstream", upstream]
         proc = subprocess.Popen(argv, cwd=ROOT, env=env,
                                 stdout=stdout, stderr=stderr)
-        self.addCleanup(self._reap, proc)
+        self._担上(self._reap, proc)
         _wait_listening(port, proc)
         return port, proc
 
@@ -194,7 +273,7 @@ class 起与收(unittest.TestCase):
         middle = subprocess.Popen([sys.executable, "-c", code], cwd=ROOT, env=env,
                                   stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, text=True)
-        self.addCleanup(self._reap, middle)
+        self._担上(self._reap, middle)
         self.addCleanup(middle.stdout.close)
         # 有凭据时中间进程先吐一行 `ownerfd=N`(好让用例断言它确实落在高位),再吐 pid
         self._owner_fd = -1
@@ -270,7 +349,7 @@ class 起与收(unittest.TestCase):
                  paths["rc"], str(ROOT), *argv],
                 cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=anchor_err,
                 start_new_session=True)
-        self.addCleanup(self._sweep_session, proc)   # 冗余带:正常路径上已经是空操作
+        self._担上(self._sweep_session, proc)       # 冗余带:正常路径上已经是空操作
         out = err = ""
         rc: int | None = None
         try:
@@ -317,10 +396,20 @@ class 起与收(unittest.TestCase):
         # cwd 抽掉。所以在这儿等那一组里除了组首之外都走掉。**探测必须排在收尸之前**:
         # 组首的尸还占着这个 pgid,内核就不会把它分给别人,这一轮探测问的才是我们那一组。
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and self._group_left(proc.pid, proc.pid):
+        left = self._group_left(proc.pid, proc.pid)
+        while time.monotonic() < deadline and left:
             time.sleep(0.05)
+            left = self._group_left(proc.pid, proc.pid)
         with contextlib.suppress(Exception):
             proc.wait(timeout=5)
+        # **到期不等于确认退出。** 这一问是尽力而为的(`ps` 自己也可能慢),所以等满上限
+        # 还有成员时要把这个事实说出来,不许静静往下走当成「整组都走了」—— 下一件事就是
+        # 删那两份目录。只报不抛:抛在这儿会盖掉调用方真正的结论,而那份目录留着比删掉
+        # 一个还在服务的夹具的 cwd 安全。
+        if left:
+            self._未确认退出 = sorted(left)
+            print(f"[收场] pgid {proc.pid} 等满 5 秒仍有成员 {sorted(left)} —— "
+                  "未确认退出", file=sys.stderr)
 
     def _开账(self) -> Path:
         """要一个账本路径,**顺手把按账的兜底和那份工作目录一起登记上**。
@@ -333,7 +422,7 @@ class 起与收(unittest.TestCase):
         """
         work = Path(tempfile.mkdtemp(prefix="book-"))
         self.addCleanup(shutil.rmtree, work, ignore_errors=True)
-        self.addCleanup(self._reap_book, str(work / "book"))
+        self._担上(self._reap_book, str(work / "book"))
         return work / "book"
 
     def _reap_book(self, book) -> None:
@@ -348,12 +437,24 @@ class 起与收(unittest.TestCase):
         用 `_reap_pid`,所以外层已经自己收干净的正常路径上,这里量到的身份是空串(`ps`
         说没有这个号)→ 一个字都不碰。
         """
-        if not os.path.exists(book):
-            return
-        with open(book, encoding="utf-8") as f:
-            rec = json.load(f)
-        for name, pid in rec["pids"].items():
-            self._reap_pid(pid, rec["ids"][name])
+        started, rows = 读账(str(book))
+        pids = [r for r in rows if "pid" in r]
+        if not pids:
+            if started:
+                raise AssertionError(
+                    f"{book} 立了开工标记、账上一条都没有 —— 那边可能已经起了东西,"
+                    "判不出来不许当成没得收")
+            return                       # 没开工:本来就没有什么要收的
+        errs = []
+        for row in pids:
+            # **一项判不出来不许放弃其余项。** 上一版是直接循环,第一个号抛出去之后剩下
+            # 三个连试都没试过 —— 实测 fd 紧张那一次漏的就是后面那三个加一个在服务的页面。
+            try:
+                self._reap_pid(row["pid"], row.get("id"))
+            except Exception as exc:                        # noqa: BLE001
+                errs.append(f'{row.get("name")}/{row["pid"]}: {exc}')
+        if errs:
+            raise AssertionError("这几个号判不出归属,一个都没敢动:" + "; ".join(errs))
 
     def _group_left(self, pgid: int, skip: int) -> list[int]:
         """那一组里除了 `skip` 还剩哪些进程。量不出来一律当「还剩着」。
@@ -365,8 +466,8 @@ class 起与收(unittest.TestCase):
         """
         try:
             out = subprocess.run(["ps", "-eo", "pid=,pgid="],
-                                 capture_output=True, text=True)
-        except OSError:
+                                 capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
             return [-1]                                   # 判不出来 → 当还剩着
         if out.returncode != 0:
             return [-1]
@@ -430,7 +531,7 @@ class 起与收(unittest.TestCase):
         def _collect() -> None:
             reaper(pid, box[0], holder)
 
-        self.addCleanup(_collect)
+        self._担上(_collect)
         box[0] = _identity(pid)      # 量不出来照旧抛 —— 但回收责任已经立好了
         return box[0]
 

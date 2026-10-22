@@ -20,8 +20,8 @@
 
 from __future__ import annotations
 
-import json
 import os
+import resource
 import shutil
 import signal
 import subprocess
@@ -32,8 +32,16 @@ import unittest
 from pathlib import Path
 
 from tests import fixture_life
-from tests.fixture_life_cases import 起与收
+from tests.fixture_life_cases import 起与收, 开工, 记一笔, 记端口, 读账
 from tests.fixture_life_probe import _free_port, _wait_listening, ROOT
+
+
+def _已关(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return True
+    return False
 
 
 class 没装上防线的那段窗口(起与收):
@@ -90,12 +98,17 @@ class 没装上防线的那段窗口(起与收):
         inner = "\n".join([
             "import os, sys, time, unittest",
             f"sys.path.insert(0, {str(ROOT)!r})",
-            "from tests.fixture_life_cases import 起与收, 立账",
+            "from tests.fixture_life_cases import 起与收, 开工, 记一笔, 记端口",
             "class 一次(起与收):",
             "    def runTest(self):",
+            # 这两个号在这一行之前就已经存在了 —— 所以先把它们记上,再去创建别的
+            f"        开工({str(book)!r})",
+            f"        记一笔({str(book)!r}, 'anchor', os.getppid())",
+            f"        记一笔({str(book)!r}, 'inner', os.getpid())",
             "        port, middle, kid = self._spawn_via_middle(idle='0', owned=False)",
-            f"        立账({str(book)!r}, port, anchor=os.getppid(),"
-            " inner=os.getpid(), middle=middle.pid, kid=kid)",
+            f"        记一笔({str(book)!r}, 'middle', middle.pid)",
+            f"        记一笔({str(book)!r}, 'kid', kid)",
+            f"        记端口({str(book)!r}, port)",
             "        time.sleep(600)",      # 睡着:它再也走不到自己的清理
             "case = 一次()",
             "case.run(unittest.TestResult())",
@@ -116,17 +129,19 @@ class 没装上防线的那段窗口(起与收):
                                     stdout=subprocess.DEVNULL, stderr=ef,
                                     start_new_session=True)
         # 它自己是一个新组的组首 → 兜底也走那条有归属证明的路
-        self.addCleanup(self._sweep_session, proc)
+        self._担上(self._sweep_session, proc)
         return proc
 
     def _wait_book(self, book: Path, timeout: float, *, keys=None) -> dict:
+        """等账上该有的那几笔都记齐,返回 `{"port": N, "pids": {name: pid}}`。"""
         want = keys or {"anchor", "inner", "middle", "kid"}
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if book.exists():
-                rec = json.loads(book.read_text())
-                self.assertEqual(want, set(rec["pids"]), f"账不完整:{rec!r}")
-                return rec
+            started, rows = 读账(str(book))
+            pids = {r["name"]: r["pid"] for r in rows if "pid" in r}
+            port = next((r["port"] for r in rows if "port" in r), None)
+            if want <= set(pids) and port is not None:
+                return {"port": port, "pids": {k: pids[k] for k in want}}
             time.sleep(0.1)
         self.fail("内层没能在限时内起好夹具,这条用例没验到东西")
 
@@ -191,11 +206,14 @@ class 没装上防线的那段窗口(起与收):
         code = "\n".join([
             "import os, sys, time, unittest",
             f"sys.path.insert(0, {str(ROOT)!r})",
-            "from tests.fixture_life_cases import 起与收, 立账",
+            "from tests.fixture_life_cases import 起与收, 开工, 记一笔, 记端口",
             "class 一次(起与收):",
             "    def runTest(self):",
+            f"        开工({str(book)!r})",
+            f"        记一笔({str(book)!r}, 'self', os.getpid())",
             f"        {起法}",
-            f"        立账({str(book)!r}, port, **pids)",
+            f"        [记一笔({str(book)!r}, k, v) for k, v in pids.items()]",
+            f"        记端口({str(book)!r}, port)",
             "        time.sleep(600)",      # 睡着:让 SIGINT 落在用例体里
             "case = 一次()",
             "case.run(unittest.TestResult())",
@@ -204,7 +222,7 @@ class 没装上防线的那段窗口(起与收):
             proc = subprocess.Popen([sys.executable, "-c", code], cwd=ROOT,
                                     stdout=subprocess.DEVNULL, stderr=ef,
                                     start_new_session=True)
-        self.addCleanup(self._sweep_session, proc)
+        self._担上(self._sweep_session, proc)
         return proc
 
     def _取消它(self, proc: subprocess.Popen, work: Path) -> None:
@@ -284,6 +302,132 @@ class 没装上防线的那段窗口(起与收):
             self.assertTrue(self._wait_dead(pid, 15), f"{name} {pid} 还在后台")
         self.assertFalse(self._port_open(rec["port"]), "页面不该还开着")
 
+    def _占满fd(self) -> list[int]:
+        """真把这一轮的 fd 占满(不是打桩),**留一个**给「读账本」用。"""
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (64, hard))
+        self.addCleanup(resource.setrlimit, resource.RLIMIT_NOFILE, (soft, hard))
+        held = []
+        while True:
+            try:
+                held.append(os.open(os.devnull, os.O_RDONLY))
+            except OSError:
+                break
+        self.addCleanup(lambda: [os.close(fd) for fd in held
+                                 if not _已关(fd)])
+        os.close(held.pop())            # 归还一个:账本还得读得出来
+        return held
+
+    def test_机器资源紧张时整棵树照旧收得掉(self):
+        """**回收一棵已经创建好的树,不许依赖「届时还申请得到新资源」。**
+
+        实测的形态:真把这一轮的 fd 上限压到 64 再占满,`ps` 这个子进程当场起不来 ——
+        于是身份判不出来、没有别的归属证明,回收当场抛,整棵树一个都没收,页面照旧 200。
+        那一刻账本在、也读得出来,**缺的只是「再 fork 一次」这件事**。
+
+        所以身份这一问改走内核那条不用 fork、不用 fd 的路。这里断言的是后果:fd 占满的
+        那一刻,回收照旧把账上记的号收干净。
+        """
+        book = self._开账()
+        开工(str(book))
+        port, proc = self._spawn(idle="0")
+        记一笔(str(book), "kid", proc.pid)
+        记端口(str(book), port)
+        self.assertTrue(self._port_open(port), "夹具没起来,这条用例没验到东西")
+        held = self._占满fd()
+        # 前提确认:此刻**起不了子进程**(建管道就不够 fd 了)—— 那正是原先判不出身份的
+        # 直接原因。只确认「申请不到一个 fd」不行:我们故意归还了一个给读账本用。
+        with self.assertRaises(OSError):
+            subprocess.run(["ps", "-o", "pid=", "-p", "1"], capture_output=True)
+        self._reap_book(str(book))
+        for fd in held:
+            os.close(fd)
+        held.clear()
+        # 判据落在退出码上,不用 `_wait_dead`:这个夹具是**我们自己的**子进程,收掉之后
+        # 在 `ps` 里还是一具没人收的僵尸,按「表里还有这个号」判会永远红。
+        self.assertEqual(-signal.SIGKILL, proc.wait(timeout=15),
+                         f"夹具 {proc.pid} 没被收掉")
+        self.assertFalse(self._port_open(port), "页面不该还开着")
+
+    def test_账上一笔都没有也不许当成没得收(self):
+        """**「没有账」不能证明「那边没起东西」。**
+
+        账原先是整棵树起齐之后一次性发布的,于是从第一个进程跑起来到发布完成之间,整棵
+        树和页面都已经可用而正式账还不存在 —— 实测在那个窗口里取消:取消收场确实跑了,
+        回收因为文件不在直接返回,四个进程全在、页面 200。
+
+        所以立开工标记,并且**有标记而账上一条都没有时一律抛**(判不出来不许返回「确定
+        没有」)。反过来钉一边:**压根没开工就安静放过**,否则每条不用账本的用例都会红。
+        """
+        book = self._开账()
+        self._reap_book(str(book))              # 没开工:安静,什么都不做
+        开工(str(book))
+        # 这条用例故意只开工、不记笔,所以验完要把标记撤掉 —— 否则 `_开账` 登记的那条
+        # 兜底在清理时也会(正确地)抛,把这条用例自己带红。
+        self.addCleanup(os.unlink, str(book) + ".starting")
+        with self.assertRaises(AssertionError) as 抓:
+            self._reap_book(str(book))
+        self.assertIn("判不出来", str(抓.exception))
+
+    def test_取消落在清理当中那一项也不许丢(self):
+        """**「回调开始执行」不等于「回收已经完成」。**
+
+        `unittest` 执行一项 cleanup **之前**就把它从栈里弹掉了。第一次取消正好落在那一项
+        里面时,它既没跑完、也不在栈上,再跑一次 `doCleanups()` 也找不回来 —— 实测:取消
+        落在身份那一问上,外层已经退出,内层四个进程和页面照旧活着,账本反而被剩下的清理
+        删掉了。
+
+        这里定点造那条路:运行器登记一项「先停一会儿、再收夹具」的回收(收那个夹具的责任
+        **只在这一项上**),让它普通地红一条走进真实清理,然后在它停着的时候发一次 SIGINT。
+        断言落在**运行器退出那一刻**夹具还在不在 —— 本轮自己那条按账兜底排在用例体之后,
+        不会替它把结论擦掉。
+        """
+        book = self._开账()
+        work = book.parent
+        code = "\n".join([
+            "import os, subprocess, sys, time, unittest",
+            f"sys.path.insert(0, {str(ROOT)!r})",
+            "from tests.fixture_life_cases import 起与收, 开工, 记一笔, 记端口",
+            "from tests.fixture_life_probe import _free_port, _wait_listening, ROOT",
+            "from tests import fixture_life",
+            "class 一次(起与收):",
+            "    def _慢着收(self, proc):",
+            "        time.sleep(4)",          # 取消的落点就留在这一项里面
+            "        self._reap(proc)",
+            "    def runTest(self):",
+            f"        开工({str(book)!r})",
+            "        port = _free_port()",
+            "        env = {**os.environ, fixture_life.IDLE_ENV: '0'}",
+            "        env.pop(fixture_life.OWNER_ENV, None)",
+            "        proc = subprocess.Popen([sys.executable, 'tests/serve_workspace.py',"
+            " '--port', str(port)], cwd=ROOT, env=env,"
+            " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+            # 只登记这一项:收它的责任没有第二个承接者
+            "        self._担上(self._慢着收, proc)",
+            "        _wait_listening(port, proc)",
+            f"        记一笔({str(book)!r}, 'kid', proc.pid)",
+            f"        记端口({str(book)!r}, port)",
+            "        self.fail('定点制造一条普通红,好让它走进真实清理')",
+            "case = 一次()",
+            "case.run(unittest.TestResult())",
+        ])
+        with open(work / "runner.err", "w") as ef:
+            proc = subprocess.Popen([sys.executable, "-c", code], cwd=ROOT,
+                                    stdout=subprocess.DEVNULL, stderr=ef,
+                                    start_new_session=True)
+        self._担上(self._sweep_session, proc)
+        rec = self._wait_book(book, 90, keys={"kid"})
+        time.sleep(1.0)                      # 让它走进那一项里面再动手
+        proc.send_signal(signal.SIGINT)
+        rc = proc.wait(timeout=90)
+        said = (work / "runner.err").read_text(errors="replace")
+        self.assertNotEqual(0, rc, f"该是被取消掉的:{said[-400:]!r}")
+        self.assertIn("KeyboardInterrupt", said, f"没走到那条终态:{said[-400:]!r}")
+        kid = rec["pids"]["kid"]
+        self.assertTrue(self._wait_dead(kid, 15),
+                        f"夹具 {kid} 还在后台 —— 被打断那一项的责任丢了")
+        self.assertFalse(self._port_open(rec["port"]), "页面不该还开着")
+
     def test_那一组里还剩谁要认得出来(self):
         """**按组收完就要去删目录了,所以「组里还剩谁」这个判据得认得准。**
 
@@ -344,7 +488,7 @@ class 没装上防线的那段窗口(起与收):
                     cwd=ROOT, env=env,
                     stdout=write_fd if fd == 1 else subprocess.DEVNULL,
                     stderr=write_fd if fd == 2 else subprocess.DEVNULL)
-                self.addCleanup(self._reap, proc)
+                self._担上(self._reap, proc)
                 # 那根管子**一直不消费**:边界立对了的话,它照旧起得来
                 _wait_listening(port, proc, timeout=60)
                 self.assertEqual(proc.wait(timeout=60), 0,
