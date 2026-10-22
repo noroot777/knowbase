@@ -68,6 +68,15 @@ def _mine(pid: int, started: str | None,
         "也没有别的所有权证明 —— 不许凭一个号就动手,也不许当成没事")
 
 
+def _slurp(path: str) -> str:
+    """读一个可能压根没写出来的文件 —— 超时那条路上内层正在写就被收掉了。"""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
 class 起与收(unittest.TestCase):
     """真起一个夹具,断言的是「那个进程还在不在」。本身不含用例。"""
 
@@ -160,6 +169,18 @@ class 起与收(unittest.TestCase):
         _wait_listening(port, middle)
         return port, middle, grandchild
 
+    #: 那个**锚点**:它是新会话的组首,只做一件事 —— 替我们把「收尸」这件事接过去。
+    #: 它起内层运行器(于是内层和它的全部后代都落在这个组里),等内层退出,把退出码**原子
+    #: 地**落到一个文件上,然后自己退掉。它的尸只由我们收,所以那个 pgid 一直被它占着。
+    _ANCHOR = "\n".join([
+        "import os, subprocess, sys",
+        "out, err, rc, root = sys.argv[1:5]",
+        "with open(out, 'w') as o, open(err, 'w') as e:",
+        "    code = subprocess.call(sys.argv[5:], cwd=root, stdout=o, stderr=e)",
+        "open(rc + '.part', 'w').write(str(code))",
+        "os.replace(rc + '.part', rc)",      # 先写再改名:我们不会读到半份
+    ])
+
     def _run_nested(self, argv: list[str], *, timeout: float,
                     env: dict[str, str] | None = None,
                     ) -> subprocess.CompletedProcess:
@@ -173,46 +194,72 @@ class 起与收(unittest.TestCase):
         owner 写端攥在**活着的**中间进程手里,所以连 EOF 那道防线都不会响,而
         `idle='0'` 那一档连空闲防线都没有。
 
-        所以这一层做两件事:给内层一个**独立会话**(它的 pid 就是那个新组的 pgid,收的
-        时候按组收,不按端口或脚本名去猜别人的进程),再给它一份**隔离的 `TMPDIR`**
-        (里面留下的根由我们删,同样不按名字猜别人的目录)。调用方给了 `TMPDIR` 的话就
-        建在它底下,所以「那个目录底下什么都不剩」这类断言照旧成立。
+        **「等到它退出」和「可以不管它的后代了」是两件事。** 上一版把内层直接起成组首,
+        于是拿退出码这件事本身就把尸收了 —— 而那一刻 pgid 的归属证明跟着消失,后代却可能
+        还活着:内层被外部杀掉时它压根没跑自己的清理。实测两条出口各留下一个在服务的夹具
+        (中间进程也在,页面 200),而外层一切正常、清理全跑完。所以中间加一个**锚点**:
+        内层是它的子进程、同组,内层的退出码由锚点写到文件上,**锚点的尸只由我们收** ——
+        于是从起跑到我们自己放手,那个 pgid 一直被它占着,按组动手的证明始终成立。
 
-        超时返回的 `returncode` 是 `None` —— 调用方照旧断言自己那件事,**没有一条路会把
-        后代留在后台**。
+        另外两件事:给内层一份**隔离的 `TMPDIR`**(里面留下的根由我们删,不按名字去猜别人
+        的目录;调用方给了 `TMPDIR` 就建在它底下,所以「那个目录底下什么都不剩」这类断言
+        照旧成立),以及**所有终态走同一条收场路** —— 正常退、超时、内层被外部杀掉、外层
+        自己被 `KeyboardInterrupt` 打断,都从这个函数的 `finally` 过一遍。**不能只靠
+        `addCleanup`**:`unittest` 遇到 `KeyboardInterrupt` 会把它一路往上抛,`doCleanups()`
+        那一行压根不执行。
+
+        超时返回的 `returncode` 是 `None`。
         """
         env = dict(os.environ if env is None else env)
         box = tempfile.mkdtemp(prefix="nested-", dir=env.get("TMPDIR") or None)
         self.addCleanup(shutil.rmtree, box, ignore_errors=True)
         env["TMPDIR"] = box
-        proc = subprocess.Popen(argv, cwd=ROOT, env=env, text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                start_new_session=True)
-        self.addCleanup(self._sweep_session, proc)   # 进程一建出来就立回收责任
+        work = tempfile.mkdtemp(prefix="nested-work-")
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        paths = {k: os.path.join(work, k) for k in ("out", "err", "rc", "anchor")}
+        with open(paths["anchor"], "w") as anchor_err:
+            proc = subprocess.Popen(
+                [sys.executable, "-c", self._ANCHOR, paths["out"], paths["err"],
+                 paths["rc"], str(ROOT), *argv],
+                cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=anchor_err,
+                start_new_session=True)
+        self.addCleanup(self._sweep_session, proc)   # 冗余带:正常路径上已经是空操作
+        out = err = ""
+        rc: int | None = None
         try:
-            try:
-                out, err = proc.communicate(timeout=timeout)
-                rc = proc.returncode
-            except subprocess.TimeoutExpired:
-                self._sweep_session(proc)   # 这一刻还没 wait 过 → 那个组是我们的
-                out, err = proc.communicate()   # 组已经收干净,这一次读得到 EOF
-                rc = None
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and not os.path.exists(paths["rc"]):
+                time.sleep(0.05)
         finally:
-            # **删在组收干净之后、返回之前**:上面那条 `addCleanup` 只是兜底(走到那儿
-            # 已经太晚 —— 调用方「那个目录底下什么都不剩」的断言排在清理前面)。
+            # **所有终态同一条路**(正常退、超时、内层被外部杀掉、外层自己被取消):先按组
+            # 收(锚点钉着那个 pgid),再收尸,**读完那几份输出**,最后两份目录都删掉。
+            # 顺序不许反:根删在前面的话,服务还活着时它的工作目录就没了;读排在删后面的
+            # 话什么都读不到。**两份都得在这儿删** —— 取消那条路上 `doCleanups()` 压根不跑,
+            # 只挂在那上面的目录就留在盘上了(实测每次取消留一份)。
+            self._sweep_session(proc)
+            out = _slurp(paths["out"])
+            err = _slurp(paths["err"]) + _slurp(paths["anchor"])
+            raw = _slurp(paths["rc"]).strip()
+            if raw:
+                with contextlib.suppress(ValueError):   # 在 finally 里不许抛
+                    rc = int(raw)
             shutil.rmtree(box, ignore_errors=True)
+            shutil.rmtree(work, ignore_errors=True)
+        # `rc` 为 `None` = 没拿到内层的退出码,也就是超时那条路(锚点是 `os.replace` 原子
+        # 写的,读到半份写不出来;真写坏了的话诊断在 `err` 里)。
         return subprocess.CompletedProcess(argv, rc, out, err)
 
     def _sweep_session(self, proc: subprocess.Popen) -> None:
-        """把那个内层运行器**整组**收掉。
+        """把那棵树**整组**收掉 —— `proc` 是那个锚点。
 
-        **归属证明是「我们还没 wait 过它」**:组首还没被收尸(活着、或者已经是僵尸)的
-        时候这个 pgid 就被它占着,内核不可能把同一个号分给别人的组。所以 `returncode`
-        一旦有值就**什么都不做** —— 那一刻证明已经没了,凭一个号对整组动手,杀掉的可能
-        是别人那一轮的验证。口径同 `_mine` 的 holder 那条:两条都用不上就不动手。
+        **归属证明是「那个锚点还没被收尸」**:组里只要还有成员(**僵尸也算**),内核就不会
+        把这个 pgid 分给别人。锚点的尸只在这个函数里收,所以从它起跑到这一刻,证明一直
+        成立。`returncode` 一旦有值就什么都不做 —— 那是**这个函数自己**收过尸了,再对那个
+        号动手,杀掉的可能是别人那一轮的验证。口径同 `_mine` 的 holder 那条:证明用不上就
+        不动手。
 
-        正常跑完那条路上内层自己的 `addCleanup` 已经收过一遍(那是另一套保证,各条用例
-        的断言钉着它的后果),所以这里不动手**不是漏了**,是没有可用的所有权证明。
+        **拿到内层的退出码不等于可以放手**:内层退了,它起的中间进程和夹具可能还在。所以
+        收场这一下在每条路上都要走,不是只在超时那条。
         """
         if proc.returncode is not None:
             return

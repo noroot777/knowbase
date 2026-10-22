@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -70,6 +72,117 @@ class 没装上防线的那段窗口(起与收):
         self.assertFalse(self._port_open(port), "页面不该还开着")
         self.assertEqual([], os.listdir(box),
                          "内层被掐掉之后那份根也不该留在盘上")
+
+    def _outer(self, book: Path) -> subprocess.Popen:
+        """起一个**外层**:它自己调那个助手,内层起好夹具后把几个号写进账本再睡。
+
+        账本里按序是:端口、内层运行器的 pid、中间进程的 pid、夹具的 pid。写之前先落
+        `.part` 再改名,所以读到的一定是整份。
+        """
+        inner = "\n".join([
+            "import os, sys, time, unittest",
+            f"sys.path.insert(0, {str(ROOT)!r})",
+            "from tests.fixture_life_cases import 起与收",
+            "class 一次(起与收):",
+            "    def runTest(self):",
+            "        port, middle, kid = self._spawn_via_middle(idle='0', owned=False)",
+            f"        open({str(book)!r} + '.part', 'w').write("
+            "'%d %d %d %d' % (port, os.getpid(), middle.pid, kid))",
+            f"        os.replace({str(book)!r} + '.part', {str(book)!r})",
+            "        time.sleep(600)",      # 睡着:它再也走不到自己的清理
+            "case = 一次()",
+            "case.run(unittest.TestResult())",
+        ])
+        outer = "\n".join([
+            "import sys, unittest",
+            f"sys.path.insert(0, {str(ROOT)!r})",
+            "from tests.fixture_life_cases import 起与收",
+            "class 外层(起与收):",
+            "    def runTest(self):",
+            f"        self._run_nested([sys.executable, '-c', {inner!r}], timeout=300)",
+            "case = 外层()",
+            "case.run(unittest.TestResult())",
+        ])
+        # stderr 落文件而不是 PIPE:没人读的管道既会攒出 ResourceWarning,也可能堵住它
+        with open(book.parent / "outer.err", "w") as ef:
+            proc = subprocess.Popen([sys.executable, "-c", outer], cwd=ROOT,
+                                    stdout=subprocess.DEVNULL, stderr=ef,
+                                    start_new_session=True)
+        # 它自己是一个新组的组首 → 兜底也走那条有归属证明的路
+        self.addCleanup(self._sweep_session, proc)
+        return proc
+
+    def _wait_book(self, book: Path, timeout: float) -> tuple[int, int, int, int]:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if book.exists():
+                got = [int(x) for x in book.read_text().split()]
+                self.assertEqual(4, len(got), f"账本不完整:{got!r}")
+                return tuple(got)                              # type: ignore[return-value]
+            time.sleep(0.1)
+        self.fail("内层没能在限时内起好夹具,这条用例没验到东西")
+
+    def test_外层被取消时整棵树也得收掉(self):
+        """**`unittest` 遇到 `KeyboardInterrupt` 不跑 `doCleanups()`。**
+
+        它在 `_Outcome.testPartExecutor` 里把这个异常一路往上抛,`run()` 里那行
+        `self.doCleanups()` 压根不执行 —— 所以「进程一建出来就 `addCleanup`」在这条终态上
+        一个字都不算。而内层自己在独立会话里,不跟着外层所在的终端进程组收信号。实测:
+        外层 rc=-2、日志是 KeyboardInterrupt,内层运行器、中间进程、夹具三个全活着,页面
+        200。
+
+        所以收场那一下必须在那个助手**自己的 `finally`** 里。这里断言的就是这条路的后果。
+        """
+        work = Path(tempfile.mkdtemp(prefix="nested-cancel-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        proc = self._outer(work / "book")
+        port, _inner, middle, kid = self._wait_book(work / "book", 90)
+        proc.send_signal(signal.SIGINT)
+        rc = proc.wait(timeout=90)
+        said = (work / "outer.err").read_text(errors="replace")
+        # 前提确认:走的真是「被取消」那条终态,不是它自己正常跑完了
+        self.assertNotEqual(0, rc, f"外层该是被取消掉的:{said[-400:]!r}")
+        self.assertIn("KeyboardInterrupt", said, f"没走到那条终态:{said[-400:]!r}")
+        self.assertTrue(self._wait_dead(kid, 15), f"夹具 {kid} 还在后台")
+        self.assertTrue(self._wait_dead(middle, 15), f"中间进程 {middle} 还在后台")
+        self.assertFalse(self._port_open(port), "页面不该还开着")
+
+    def test_内层先退掉也不许把它的后代留下(self):
+        """**拿到内层的退出码,不等于可以放手。**
+
+        上一版把内层直接起成组首,于是「等它退出」这件事本身就把尸收了 —— 那一刻 pgid 的
+        归属证明消失,而后代可能还活着:内层被外部杀掉时它压根没跑自己的清理。实测外层
+        一切正常、清理全跑完,中间进程和夹具照旧活着、页面 200。
+
+        这里定点制造那条路:等内层起好夹具,**从外面**把内层运行器 SIGKILL 掉,然后等外层
+        自己走完。断言的是它的后代都没了 —— 判据不是「外层红没红」。
+        """
+        work = Path(tempfile.mkdtemp(prefix="nested-innerkill-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        proc = self._outer(work / "book")
+        port, inner, middle, kid = self._wait_book(work / "book", 90)
+        os.kill(inner, signal.SIGKILL)       # 它一条自己的清理都跑不了
+        proc.wait(timeout=90)
+        self.assertTrue(self._wait_dead(inner, 15),
+                        "内层没被杀掉,这条用例没验到东西")
+        self.assertTrue(self._wait_dead(kid, 15), f"夹具 {kid} 还在后台")
+        self.assertTrue(self._wait_dead(middle, 15), f"中间进程 {middle} 还在后台")
+        self.assertFalse(self._port_open(port), "页面不该还开着")
+
+    def test_按组收的时候不许碰别人那一组(self):
+        """**反过来钉一边:该收的收掉,不该碰的一个字都不许碰。**
+
+        按组动手最怕的就是打到别人那一轮的验证上。这里让一个无关的夹具跟它并存 —— 那个
+        夹具在**我们自己**的进程组里,不在锚点那一组 —— 然后真触发一次按组回收,断言它
+        照旧活着、页面照旧开着。
+        """
+        port, bystander = self._spawn(idle="0")
+        self.assertTrue(self._port_open(port), "旁边那个夹具没起来,这条用例没验到东西")
+        done = self._run_nested(
+            [sys.executable, "-c", "import time; time.sleep(600)"], timeout=3)
+        self.assertIsNone(done.returncode, "这条用例要的就是走一遍按组回收")
+        self.assertIsNone(bystander.poll(), "别人那一组的夹具不许被收掉")
+        self.assertTrue(self._port_open(port), "它的页面该照旧开着")
 
     def test_边界建起来之前不许倒那点缓冲(self):
         """**立那道边界的过程本身,也不许依赖旧输出写得动。**

@@ -333,6 +333,12 @@ class ProbeSourceContractTests(unittest.TestCase):
         的那几条(注入启动边界、注入线程起不来)压根没有后代,不在射程内;**按字面判,所以
         把那段代码拼进一个变量再传进去不在射程内** —— 今天的形态都是就地写出来的,而守卫
         误报一次,下一个人就会去给一个不起后代的调用套上进程组。
+
+        **要钉住的不变量是「有按组回收的归属证明」,`_run_nested` 只是实现它的一种方式。**
+        所以自己把那两个必要件都写齐的也放行:`start_new_session=True`(于是那个子进程是
+        一个新组的组首)加上 `_sweep_session`(按组收,而且只在还没收尸时动手)。少写一件
+        就不算 —— 没有独立会话时按组收会打到自己这一组,而没有 `_sweep_session` 就等于把
+        整组的回收押在「调用方记得自己收」上。
         """
         shell = "起" + "与收"            # 同上:拼出来,否则这一行自己就被扫中
         offenders = []
@@ -346,7 +352,16 @@ class ProbeSourceContractTests(unittest.TestCase):
                          if isinstance(n, ast.Constant) and isinstance(n.value, str)]
                 nested = any(t == "unittest" or "unittest.main" in t or shell in t
                              for t in texts)
-                if nested and "_run_nested" not in calls:
+                # `_sweep_session` 多半是**交给** `addCleanup` 的,不是就地调的 ——
+                # 按「提到了没有」判,不按「调了没有」
+                swept = any(getattr(n, "attr", "") == "_sweep_session"
+                            or getattr(n, "id", "") == "_sweep_session"
+                            for n in ast.walk(fn))
+                owned = "_run_nested" in calls or (
+                    swept and any(k.arg == "start_new_session"
+                                  for n in ast.walk(fn) if isinstance(n, ast.Call)
+                                  for k in n.keywords))
+                if nested and not owned:
                     offenders.append(f"{f.name}:{fn.name}")
         self.assertEqual([], offenders,
                          "这些地方在子进程里又跑了一轮 unittest,却没把那棵树的回收"
