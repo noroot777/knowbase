@@ -361,16 +361,25 @@ def _next_step(final_url: str) -> str:
 
 
 def _gate(reason: str, final_url: str = '') -> GrabError:
-    """被关卡挡住那一句:**为什么没收下**(判据给的那半句)**+ 下一步**。"""
+    """没收下那一句:**为什么没收下**(判据给的那半句)**+ 下一步**。
+
+    **确定关卡和证据不足两档共用这一句,因为用户能做的事一模一样** —— 在浏览器里
+    打开它、把正文复制出来,或者换一个地址。两档的区别在**话术本身**(`verdict`
+    给的那半句:一个说「对方拦着你」,一个说「我没能确认哪一段是正文」),不在
+    下一步。再往下给手动收录这一侧分出两种出路是在造一个用户分不出的差别 ——
+    而两档的落地**真的不同**的那一侧是补抓(`fulltext.held`:那边没人在旁边看,
+    所以「我没能判断」得留下一个待办;这边人就在屏幕前,他自己就是那个出口)。
+    """
     return GrabError(f'{reason}，所以正文抓不到。{_next_step(final_url)}')
 
 
 def _grab_web(url: str, deadline: float) -> dict:
     """一个网页 → 待入库的条目。正文口径只有 `readable` 那一份。
 
-    **「提取成功」证明不了「拿到了那篇文章」。** 所以关卡判据排在**所有出路的
+    **「提取成功」证明不了「拿到了那篇文章」。** 所以准入排在**所有出路的
     前面,成功和失败共用一道**(`grab_page.admit`,判据和那条不变量都在它
-    自己头上):一张验证页提取得出一段文字、长度轻松过关,随后被 `put_items` 的
+    自己头上;**这一次响应的状态码和响应头一并交进去** —— ① 那道判据是唯一一道
+    不靠页面文字的,留在这里自己判就又变成两头各拼一遍):一张验证页提取得出一段文字、长度轻松过关,随后被 `put_items` 的
     `DO NOTHING` 永久钉成这一篇的正文,再投一次同一条链接也换不回真文章(两轮
     审查各实测到一例:683 字那张落在 `/challenge` 上,1782 字那张谁都没拦住)。
     **这里只有一个调用点** —— 成功路和失败路各问一次的话,同一张验证页会得到
@@ -395,9 +404,13 @@ def _grab_web(url: str, deadline: float) -> dict:
     final = resp.url or url
     # **截断交给 `admit`,不许在这之后再截** —— 判据要落在真写进库的那一份上
     # (理由和事故形态写在 `admit` 头上)。
-    body, gate, why = grab_page.admit(final, html, limit=grab_page.MAX_CHARS)
-    if gate:
-        raise _gate(gate, final)
+    seen = grab_page.admit(final, html, limit=grab_page.MAX_CHARS,
+                           status=resp.status, headers=dict(resp.headers))
+    if seen.gate or seen.unsure:
+        # **两档都在这里一次拦掉,而且排在「拿 body 做任何事」之前。** 哪一档由
+        # `admit` 判,这里只负责配上下一步(`_gate` 的说明)。
+        raise _gate(seen.gate or seen.unsure, final)
+    body, why = seen.body, seen.why
     if not body:
         # 读不到正文这一档也要带上下一步(口径同 `_gate`:同一个 `_next_step`)。
         # 「这一页没找到正文」自己指不出任何事 —— 折叠成一句抓取失败就是把人留在

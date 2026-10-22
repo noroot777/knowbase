@@ -29,7 +29,7 @@ Lilian Weng、Karpathy 那类 feed 本来就给全文,对它们再抓一次是�
 退出重试队列,`put_items` 的 `DO NOTHING` 之下再也换不回来)。拒绝的那一下
 **一个字节都不改**:壳留着、`fulltext_at` 不写、`fulltext_tries` 照旧计次。
 **而存量里已经被写死的那些,这条准入救不回来**:复查脚本
-(`scripts/feed_fulltext_recheck.py`)只认 `readable.boilerplate_reason`,**这六道一道
+(`scripts/feed_fulltext_recheck.py`)只认 `readable.boilerplate_reason`,**这八道一道
 都不借** —— 库里只剩那份纯文字,认出一张关卡页要的地址、DOM 和响应头当时就没存,拿
 纯文本启发式去补那一刀,两轮审查各实测到一次误删正常内容(⑥ 判坏 Markdown 原文、
 ④ 判坏英文教程)。那一类的出路是人点「重新抓一次」。生产只读实测说**存量的文字里
@@ -72,6 +72,26 @@ MAX_TRIES = 3
 # 有些站会据此回一份 XML 或者干脆 406。
 _HEADERS = {'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en;q=0.9,zh-CN;q=0.8,*;q=0.5'}
+
+
+class Unconfirmed(FeedError):
+    """**证据不足**:这一页既没认出谁在拦、也确认不了它就是这一篇的正文。
+
+    分档在 `fetch_pending`:它额外把这半句话记进 `fulltext_hold`,让额度用完之后
+    这一条**留得下痕迹**(`held()`),而不是和「对方真拦着」一样静默退回摘要。
+
+    **做成 `FeedError` 的子类是给将来的消费方留的安全默认,当前没有可观测后果** ——
+    `fetch_one` 眼下唯一的生产消费方就是 `fetch_pending`,那里捕的是
+    `except Exception`,所以子类与否都走同一条 `_fail`。如实记着这一点是因为反过来
+    也有诱惑:将来谁 `except FeedError` 地消费它,漏掉这一档就该退化成「当成普通
+    失败」(不写库、计次,安全的那一侧),而不是让异常逃出去带掉整轮。
+
+    **为什么它不能和「确定关卡」合成一档**:后者是一句关于别人的事实断言(「对方
+    拦着你」),而这一档的全部证据只是正文里那段字的形状 —— 一篇**真·讲拦截页**的
+    技术文章在文字上和一张真的拒绝说明页不可分离(`grab_page.verdict` 的 B 档)。
+    把「我确认不了」说成「对方拦着你」,面板上那句话就是在替用户下一个我们并不
+    知道的判断,而他照着去「在浏览器里打开一次」只会发现那一页好得很。
+    """
 
 
 def queued_sql() -> tuple[str, list]:
@@ -117,16 +137,27 @@ def fetch_one(url: str) -> tuple[str, str]:
     原因明确得多 —— 面板上要说得出是哪一类。
 
     **「拿到一页东西」不等于「拿到了这一篇的正文」,所以写库那道准入和手动收录
-    共用一份**(`grab_page.admit`:提取 + 关卡,连先后顺序一起)。原先这里直接
-    拿 `extract_or_reason` 的结果当正文,**六道准入一道都不过** —— 后果是一张
+    共用一份**(`grab_page.admit`:提取 + 判据,连先后顺序一起)。原先这里直接
+    拿 `extract_or_reason` 的结果当正文,**八道准入一道都不过** —— 后果是一张
     关卡页/登录墙被 `_save` 写进 `feed_items.body`、写上 `fulltext_at`、**退出
     重试队列**,而 `put_items` 的 `DO NOTHING` 之下再也换不回来(审查实测:
     1453 字节、一行脚本都没有的 Cloudflare 关卡页,`done=1`、正文被换成
-    「Verify you are human…」、`pending` 归零)。**关卡一律抛**,理由同上面
-    `html_problem` 那一档:那半句话明确得多,而「抛」这条路保证了
-    `fetch_pending` 走 `_fail` —— 壳一个字节不动、`fulltext_at` 不写、
-    `fulltext_tries` 照旧计次(留在原重试语义里:不计次它就永远排在队首,
-    试满 `MAX_TRIES` 按壳入库,口径同「读不懂」那一档)。
+    「Verify you are human…」、`pending` 归零)。
+
+    **这一次响应的状态码和响应头要原样交给准入**(`status=` / `headers=`):① 那
+    一道(`page_gate.response_reason`)是唯一一道不靠页面文字的判据,而这个函数
+    手里就有整个 `Response` —— 不传等于在两个调用方之间留一道各自实现的缝。
+
+    **两档拒绝都抛,但抛的不是同一个异常**,理由同上面 `html_problem` 那一档
+    (那半句话明确得多,而「抛」这条路保证了 `fetch_pending` 走 `_fail` —— 壳一个
+    字节不动、`fulltext_at` 不写):
+    - **确定关卡**(对方拦着你)抛 `FeedError`,留在原重试语义里 ——
+      `fulltext_tries` 照旧计次(不计次它就永远排在队首、每轮重抓同一张关卡页),
+      试满 `MAX_TRIES` 按壳入库,口径同「读不懂」那一档。
+    - **证据不足**(我没能确认哪一段是正文)抛 `Unconfirmed`。它**同样计次**
+      (同样的理由:不计次就是每轮重抓同一页),但 `_fail` 会额外把那半句话记进
+      `fulltext_hold` —— 于是额度用完之后它**不是静默退回摘要**,而是留在
+      `held()` 里等人看一眼,人点一下由 `release()` 把额度还给它。
     """
     from kb.feeds.markdown_source import accept, fetch, from_response, target
     deadline = time.monotonic() + SOURCE_SECONDS if target(url) else None
@@ -137,11 +168,14 @@ def fetch_one(url: str) -> tuple[str, str]:
         return markdown, ''
     if problem := readable.html_problem(response.body, response.headers):
         raise FeedError(problem)
-    body, gate, why = grab_page.admit(response.url or url,
-                                      readable.decode(response.body, response.headers))
-    if gate:
-        raise FeedError(gate)
-    return body, why
+    seen = grab_page.admit(response.url or url,
+                           readable.decode(response.body, response.headers),
+                           status=response.status, headers=response.headers)
+    if seen.gate:
+        raise FeedError(seen.gate)
+    if seen.unsure:
+        raise Unconfirmed(seen.unsure)
+    return seen.body, seen.why
 
 
 def body_hash(body: str) -> str:
@@ -193,6 +227,10 @@ def _save(key: str, body: str, seen: tuple[str, int]) -> bool:
     `content_kind` 从 `summary` 改成 `content`:导出那边据它决定要不要写
     「以下为订阅源提供的摘要」那句注记,而现在这就是全文了。
 
+    **`fulltext_hold` 一起清掉**:那一列是「上一次的结论是证据不足,等人看一眼」
+    这个待办,而现在正文已经确认到手了 —— 留着它会让 `held()` 把一条**已经补到
+    全文**的条目列成待办,人点一次 `release()` 还会把它推回补抓队列白抓一轮。
+
     **重导出靠 `content_hash` 变了,不许清 `exported_hash`。** 导出闸门是
     `exported_hash<>content_hash`,正文一换前者就自然成立 —— 而 `exported_hash`
     同时是「这一篇入没入过库」的事实来源(`registry.items` 的两态、`sync._export`
@@ -210,14 +248,15 @@ def _save(key: str, body: str, seen: tuple[str, int]) -> bool:
         if not row:                      # 这期间被存量清理删掉了,没什么可写的
             return False
         cur = c.execute("""UPDATE feed_items SET body=?,content_kind='content',content_hash=?,lang=?,
-            fulltext_at=?,fulltext_error='',extract_stale=1,content_rev=content_rev+1,
+            fulltext_at=?,fulltext_error='',fulltext_hold='',extract_stale=1,
+            content_rev=content_rev+1,
             title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
             WHERE key=? AND content_hash=? AND content_rev=?""",
             (body, digest, reg.text_language(row['title'], body), reg.now(), key, *seen))
         return cur.rowcount > 0
 
 
-def _fail(key: str, error: Exception | str, seen: tuple[str, int]) -> bool:
+def _fail(key: str, error: Exception | str, seen: tuple[str, int], hold: str = '') -> bool:
     """这一条补抓失败了。返回「记上了没有」。
 
     **判据同 `_save`,理由也同**:这次失败说的是**取样那一版**(`seen`)去原文
@@ -225,12 +264,62 @@ def _fail(key: str, error: Exception | str, seen: tuple[str, int]) -> bool:
     使得内容逐字复原 —— 把错误记在新那一版头上、还扣掉一次重试额度,是在给一件
     已经不存在的事记账。**这里不碰 `content_rev`**:记一笔失败不是换内容,别人
     手上的工作资格不该因此作废。
+
+    `hold` 非空 = 这一次的结论是**证据不足**(`Unconfirmed`),那半句话一起留在
+    `fulltext_hold` 上。**`hold` 每次都写,空串也写** —— 它记的是「**最后一次**的
+    结论是什么」而不是历史:一条先被判证据不足、再一轮撞上真关卡(或者对方干脆
+    超时)的条目,待办应该跟着消失,否则 `held()` 里会攒下一堆「其实已经查清是
+    对方拦着」的行,而那正是让人不再去看那个列表的东西。
     """
     with reg.db() as c:
-        cur = c.execute('UPDATE feed_items SET fulltext_error=?,fulltext_tries=fulltext_tries+1'
+        cur = c.execute('UPDATE feed_items SET fulltext_error=?,fulltext_hold=?,'
+                        'fulltext_tries=fulltext_tries+1'
                         ' WHERE key=? AND content_hash=? AND content_rev=?',
-                        (str(error)[:600] or type(error).__name__, key, *seen))
+                        (str(error)[:600] or type(error).__name__, hold[:600], key, *seen))
         return cur.rowcount > 0
+
+
+def held(kind: str) -> list[dict]:
+    """**证据不足、而且补抓额度已经用完**的那几条 —— 等人看一眼的待办。
+
+    这是审查要的那个「可恢复状态」:上一版里这一类和「对方真拦着」走同一个出口,
+    试满 `MAX_TRIES` 之后**静默**离开队列、按壳入库,面板上再也没有任何痕迹 ——
+    而它和真关卡的区别恰恰是**我们并不知道**那一页是什么。所以这一列留着:额度
+    用完之后这一条还答得出「上一次为什么没收下」,人点一次 `release()` 就能再给
+    它一轮。
+
+    **判据三条都要**:`fulltext_hold<>''`(最后一次的结论是证据不足)、
+    `fulltext_at=''`(还没补到全文 —— `_save` 成功时会把 hold 清掉,这一条是
+    冗余带:两处口径不一致时宁可少列一条,列出一条已经补好的只会让人白点一次)、
+    `fulltext_tries>=MAX_TRIES`(**额度没用完的那些不算待办**:它们还排在队列里,
+    下一轮同步自己会再试,这时候喊人等于把正常的重试说成要人工处理)。
+    """
+    with reg.db() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT key,url,title,fulltext_hold,fulltext_tries FROM feed_items"
+            " WHERE kind=? AND fulltext_hold<>'' AND fulltext_at=''"
+            " AND fulltext_tries>=? ORDER BY fetched_at DESC, key", (kind, MAX_TRIES)).fetchall()]
+
+
+def release(keys) -> int:
+    """**人工出口**:把补抓额度还给这几条,放回队列。返回真放回去了几条。
+
+    **判据待在 UPDATE 自己的 WHERE 里**(元规则):`fulltext_at=''` —— 这一下和
+    kb-web 那边正在跑的补抓 worker 是两个写入方,先 SELECT 再 UPDATE 在
+    legacy `isolation_level` 下压根不持锁。这期间那一条已经补到全文时放行不了,
+    `rowcount==0` 就是「不用管了」(元规则:0 行不是失败,多半正是想要的末态)。
+
+    **清的是额度和待办,一个字节的正文都不碰。** 这一列底下躺的是「壳还在、全文
+    没拿到」的条目 —— 要换的只是「还能不能再试一次」。`fulltext_error` 一起清掉:
+    留着它面板上会显示一条已经作废的失败原因。
+    """
+    done = 0
+    with reg.db() as c:
+        for key in keys:
+            cur = c.execute("UPDATE feed_items SET fulltext_tries=0,fulltext_hold='',"
+                            "fulltext_error='' WHERE key=? AND fulltext_at=''", (key,))
+            done += cur.rowcount
+    return done
 
 
 def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
@@ -242,7 +331,7 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
     `key` 收尾是为了定序 —— `fetched_at` 只精确到秒,一批抓回来的条目时间戳
     一模一样。
     """
-    summary = {'done': 0, 'failed': 0, 'empty': 0, 'left': 0, 'stale': 0,
+    summary = {'done': 0, 'failed': 0, 'empty': 0, 'left': 0, 'stale': 0, 'held': 0,
                'errors': [], 'failed_keys': [], 'stopped': False}
     cond, cargs = queued_sql()
     with reg.db() as c:
@@ -275,10 +364,17 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None) -> dict:
                 # **记账排在这里而不是线程里**:要按「记上了没有」统计,而
                 # `_fail` 现在会在那一行已经被换掉时拒绝记(元规则:统计按实际
                 # 写入结果报、跳过的如实列出)。
-                if not _fail(item['key'], error, work_version(item)):
+                # **「证据不足」照旧计进 `failed`,另外多记一笔 `held`。** 不另立
+                # 一个 bucket 把它从 `failed` 里挪走:这一条确实没补到正文,面板
+                # 那句「N 条抓取失败」要如实含着它,而失败明细也照旧要列出它(人
+                # 要看的就是那半句话)。`held` 是**加一个说明**,不是换一种分类。
+                held_say = str(error)[:600] if isinstance(error, Unconfirmed) else ''
+                if not _fail(item['key'], error, work_version(item), held_say):
                     summary['stale'] += 1
                 else:
                     summary['failed'] += 1
+                    if held_say:
+                        summary['held'] += 1
                     summary['failed_keys'].append(item['key'])
                     summary['errors'].append(failure(item, error, kind))
             elif body is None:               # 停止请求 / 预算用完,留给下一轮
@@ -321,6 +417,11 @@ def summarize(summary: dict) -> str:
         text += f",{summary['failed']} 条抓取失败"
     if summary['empty']:
         text += f",{summary['empty']} 条没能识别出正文"
+    if summary.get('held'):
+        # **「证据不足」要在这句话里露面。** 它是 `failed` 的一个子集,所以不另报
+        # 一个数 —— 报的是「其中几条我没能判断」,因为它们的下一步和别的失败不同:
+        # 别的失败下一轮自己会重试,这几条试满额度之后要人看一眼(`held()`)。
+        text += f"（其中 {summary['held']} 条看不出是不是正文，等人看一眼）"
     if summary.get('stale'):
         # **跳过的如实列出**(元规则):这几条在补抓期间被换成了别的内容,这次
         # 结果作废 —— 说成「失败」会让人去查对方站点,说成「成功」更糟。

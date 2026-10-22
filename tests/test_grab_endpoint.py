@@ -342,7 +342,7 @@ class EndpointTests(GrabCase):
     def test_an_explicit_refetch_recovers_what_the_gate_cannot_see(self):
         """**恢复出口不许架在那道会误判的质量判据上。**
 
-        这里种进去的是一张**六道全过**的墙(`SOFT_WALL`:五段各不相同的会员说明,
+        这里种进去的是一张**八道全过**的墙(`SOFT_WALL`:五段各不相同的会员说明,
         一个表单都没有),它从此 `content_ok` 恒真、`done` 也为真 —— 只开给
         「看不出是正文」那一档的恢复出口认不出它,于是原站后来恢复可读、用户一遍
         遍重投,得到的始终是同一句「已经在知识库里了」,HTTP 发出 0 次

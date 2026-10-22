@@ -267,7 +267,8 @@ class FetchTests(FullTextCase):
             summary = fulltext.fetch_pending('rss')
         self.assertEqual(0, req.call_count)
         self.assertEqual({'done': 0, 'failed': 0, 'empty': 0, 'left': 0, 'stale': 0,
-                          'errors': [], 'failed_keys': [], 'stopped': False}, summary)
+                          'held': 0, 'errors': [], 'failed_keys': [],
+                          'stopped': False}, summary)
 
 
 class ReadingStateTests(FullTextCase):

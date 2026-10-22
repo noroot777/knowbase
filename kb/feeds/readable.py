@@ -283,7 +283,7 @@ def substance(text: str) -> int:
     **这不是提取器自己的门槛**(`MIN_CHARS` 那一道照旧按原始长度算,
     `extract_or_reason` 的两档一个字都没改):它给的是手动收录那边
     「这一次响应能不能当成这一篇的正文落库」那一问的内容质量判据
-    (`grab_page.gate_reason` 的第六道)。放在这里是因为它和 `plain` 的输出格式
+    (`grab_page.verdict` 的 ⑧)。放在这里是因为它和 `plain` 的输出格式
     绑在一起 —— 换了分段方式这一问就得跟着改,两处各写一份迟早漂。
 
     事故形态(2026-10-16 审查实测):一张「Sign in to continue reading /

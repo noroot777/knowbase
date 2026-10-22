@@ -22,7 +22,7 @@ import feedparser
 import httpx
 from bs4 import BeautifulSoup, NavigableString
 
-from kb.feeds import x_channels
+from kb.feeds import page_gate, x_channels
 from kb.feeds.registry import normalize_url, uses_channel, x_handle
 from kb.source_types import feed_types
 
@@ -143,6 +143,15 @@ def request(url: str, headers: dict | None = None, *, deadline: float | None = N
                             if r.status_code == 304:
                                 return Response(304, url, b'', dict(r.headers))
                             if r.status_code >= 400:
+                                # **响应自己带着关卡标记时换那半句话。** 通用提示
+                                # 写的是「请检查来源或填写专用订阅链接」,而对着一张
+                                # `403 + cf-mitigated: challenge` 那是把人指去改订阅
+                                # 地址 —— 他改不出任何东西,因为挡着的不是地址。
+                                # 表和话术都在 `page_gate`(口径只有一份:写库准入
+                                # 那一道 ① 问的是同一组头,见 `page_gate.SAY_REPLY`)。
+                                if gate := page_gate.response_reason(r.status_code,
+                                                                     dict(r.headers)):
+                                    raise FeedError(f'{gate}（HTTP {r.status_code}）')
                                 hint = '；服务限流，请稍后重试' if r.status_code == 429 else '；请检查来源或填写专用订阅链接'
                                 raise FeedError(f'订阅服务返回 HTTP {r.status_code}{hint}')
                             content = bytearray()

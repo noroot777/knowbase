@@ -264,8 +264,8 @@ def grab_link(body: GrabRequest):
                           {'title': entry['title'], 'kind': grab.KIND,
                            'path': '', 'done': False})
     # 已经入库的事实先定下来,再谈写不写得进知识库这一轮。
-    # `content_ok` 恒真:它的含义就是「这份内容过完了准入那六道」,而新收的这一条
-    # 刚过完(`gate_reason` 的第六道)。两端字段对齐,界面不必按「有没有这个键」猜。
+    # `content_ok` 恒真:它的含义就是「这份内容过完了准入那八道」,而新收的这一条
+    # 刚过完(`grab_page.verdict` 的 ⑧)。两端字段对齐,界面不必按「有没有这个键」猜。
     out = {'ok': True, 'added': saved['added'], 'duplicate': False, 'done': False,
            'content_ok': True,
            'url': url, 'title': entry['title'], 'kind': grab.KIND,
