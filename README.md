@@ -274,6 +274,29 @@ echo '见 [原文](https://example.com/a_(b)) 这篇' | ./kb.sh grab -  # Markdo
 
 `./kb.sh` 不带参数打印全部命令。每条命令跑完就还你终端，服务起成后台守护进程。
 
+### 抓取老超时、或者报「无法解析订阅服务器地址」
+
+先看一眼是不是**本机 DNS 给了假地址**——被污染时同一个域名会解析到完全无关的网段
+（实测把 `mistral.ai` 解析成 Meta 的地址），而抓取为了防 SSRF 会钉着解析出来的那个
+数字 IP 发请求，于是敲的是别人家的门，面板上只显示一句超时：
+
+```bash
+# 它住在哪？答案落在别人家的网段里就是被污染了
+python3 -c "import socket;print({a[4][0] for a in socket.getaddrinfo('mistral.ai',None)})"
+
+# 改问一台可信的 DoH 解析器（默认关；关着时一次 DoH 请求都不发，走系统解析）
+export KB_FEED_DOH=https://cloudflare-dns.com/dns-query
+export KB_FEED_DOH_SECONDS=8        # 可选，单次查询上限，默认 8 秒
+./kb.sh restart                     # 开关要透传进服务进程，必须重启才生效
+./kb.sh status                      # 会打一行「可信解析:开/关」
+```
+
+**端点自己要连得上**：它在墙外的话，这个 shell 得有代理（`HTTPS_PROXY` 之类），
+`./kb.sh start` 会把出口那一族变量一起带进服务进程；探不到出口时它会提示一句。
+容器部署走 `compose.yaml` 的 `environment`（那条路不经过 `kb.sh`）。
+**已知限制**：没有代理时端点域名本身仍走本机解析，本机被污染得够狠时它也可能被带偏。
+完整形态见 [域名解析与出口](docs/decisions/dns-egress.md)。
+
 ## Docker 部署
 
 ```bash

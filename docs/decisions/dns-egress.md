@@ -74,6 +74,37 @@
   - **配了 `KB_FEED_DOH` 却一个代理变量都没有时打一行提示,提示而不代劳**(口径同 `code_stale`
     / `graph_stale`)—— 那种配法下端点多半也连不上,而后果是每条订阅都报「解析服务不可用」。
 
+### 本轮(审查第 1 轮)补进来的硬约束
+
+- **主机名规范化在进查询之前一次做完**(`fetching.host_for_lookup`),两条路共用那一份。
+  **地址字面量一个解析器都不许问**(DoH 会答 NXDOMAIN),**非 ASCII 先 IDNA**(端点回
+  HTTP 400),**纯 ASCII 原样放过**(idna codec 会拒掉 `getaddrinfo` 本来认得的东西,
+  实测 63 字符以上的标签)。判据是**翻开关不改变结果** —— 从「能」变成「不能」是回归。
+  字面量照旧过 `is_global`,SSRF 一分不少。
+- **「答得不对」绝不许说成「确定没有」。** 这几种一律 `Unavailable`:`Answer` 不是列表、
+  有地址记录但每条 data 都解析不动、任一族预算没跑完、任一族答不上。
+  **只有「两个族都拿到明确答案、里面确实没有地址」才是 `Unknown`。** 顺序是**先看有没有
+  拿到地址**:拿到了就用(哪怕只问到一个族),一个都没有时才谈够不够格说「没有」。
+  反过来钉一边:**只有 CNAME 没有 A/AAAA 是正常答案**,不是故障。
+- **缓存的是调用方留下来的那些,不是端点给的原样**(`keep`)。顺序反过来实测过:先答
+  `127.0.0.1`(被 SSRF 正确拒掉)、再改答公网地址,第二次照旧报「未解析到公网地址」——
+  被拒的答案进了缓存,把域名钉死最少 60 秒(TTL 上限 600)。
+- **具体原因要带回面板。** HTTP 400 / HTTP 301(端点写成了 http://)/ 响应超限 / 超时 /
+  预算用尽长同一句话的话,指不到该改什么。响应体有 `MAX_BYTES` 闸。
+- **`KB_FEED_DOH_SECONDS` 配错在用到它的时候报,不在 import 的时候崩。** 写成模块级
+  `float(os.environ.get(...))` 的后果:`=abc` 让 `import kb.feeds.fetching` 直接抛
+  ValueError,开关压根没开也进不去。
+- **测试进程里继承来的功能开关要在 `tests/__init__.py` 清掉**(`FEATURE_ENV`),不是只在
+  `tests.tiers`:`python -m unittest tests.xxx` 那条路不经过 tiers。不清的后果实测是
+  101 条既有传输/预算/准入用例红 27 条,红的全是跟 DNS 无关的东西 ——
+  **看起来像这一版把整条抓取链改坏了**。名单显式,`KB_DATA_DIR` 必须留着。
+- **出口告警的判据是真探测**(`urllib.request.getproxies()`,httpx 的 trust_env 走的那一份),
+  不是「环境变量里有没有」:后者在 macOS 上是误报。
+- **`code_stale` 要把被 source 的 `.sh` 也算进去。** 「`scripts/` 每次都是新起的子进程」
+  那条只对 `.py` 成立 —— 被 source 的 shell 文件决定服务进程拿到哪一份环境。
+- **容器那条路不经过 `kb.sh`**(`docker/entrypoint.py` 直接起 `kb-web`),所以透传在那里
+  等于没有:出口变量要写进 `compose.yaml` 的 `environment`。
+
 ## 事故形态与实测证据
 
 一条 HN Buzzing 带出来的 `https://mistral.ai/news/voxtral-3/` 在面板上显示「订阅连接超时」、
@@ -128,6 +159,13 @@ HTTP 200**,余下 7 条变成有信息的真失败(付费墙 401、拒代理 IP 
 行为上」变成确定的那一半;`kb.sh` 的透传在 macOS 上对代理而言基本是冗余的(但对
 `KB_FEED_DOH` 是硬需求),它的价值在没有系统代理概念的机器上 —— 容器和 CI。
 
+### 第二条曾经写错的理由
+
+第一版在 `web_env.sh` 和它的回归里写过「空值不透传,因为 httpx 读到空字符串的 proxy 会
+当成配了一个空代理」。**实测不成立**:urllib 的 `getproxies_environment()` 跳过空值
+(`HTTPS_PROXY=''` → `{}`)。不透传空值这个做法留着,但理由换成真的那一条 —— 服务进程的
+环境里只该有配过的东西,空壳变量让「到底配没配」在排查时多一层噪声。
+
 ## 知情的取舍
 
 - **`Unavailable` 照旧扣 `fulltext_tries`。** 更对的做法是不扣(「我这边的解析器坏了」不该消耗
@@ -149,6 +187,15 @@ HTTP 200**,余下 7 条变成有信息的真失败(付费墙 401、拒代理 IP 
   一起改)跑一遍 `build_web_env`,顺带验 bash 3.2 兼容;外加两道文本守卫:起服务那一行用的是
   `WEB_ENV`、名单在 `kb.sh` 加 `web_env.sh` 两份里合起来只出现一次。行为测试起不了真服务,
   而那一行恰恰就是漏掉的那一处。
+- `tests/test_feed_resolve.py` 的后几组(本轮)—— 主机名规范化在开关两侧结果一致(含
+  字面量、IDN、私有字面量照旧拒);「答得不对」与「确定没有」的边界(全畸形记录、只有
+  CNAME 的那一族、NXDOMAIN + 另一族没答上);被拒答案不进缓存而可用答案照旧复用;
+  端点 3xx / 超限 / HTTP 400 的原因进得了面板;`KB_FEED_DOH_SECONDS` 坏值不崩 import。
+- `tests/test_tiers.py` 的 `TierEnvTests`(本轮)—— **子进程**跑既有传输与准入用例,
+  带着 export 过的 `KB_FEED_DOH` 仍然全绿;反过来钉一边:显式设开关的那一组照旧验得到
+  DoH 那条路(否则「每次取值前都清一遍」也全绿,而那会让这一层再也没有回归)。
+- `tests/test_egress_env.py` 的 `EgressWarningTests`(本轮)—— 探测到 / 探不到各走哪条路,
+  以及状态行把端点的 path/query 脱敏(NextDNS 那类端点把 token 写在 path 里)。
 - **两份实现各有自己的红**:`request` 和 `public_url` 两个调用方各一条。
 - 定点注入(各自该打中的那一条):这一层没接上 / CNAME 当地址 / 两种答不上合成一档 /
   缓存按 URL / DoH 自带预算 / 失败也写缓存 / `Answer` 不是列表时按「确定没有」处理 /

@@ -18,8 +18,10 @@
 #
 # **名单只有一份**:谁再手写第二遍循环,这件事就又变成两处各判一遍(那正是本轮的形态)。
 # **只透传出口这一族,不是整份 KB_ 开头的变量**:`KB_DATA_DIR` 跟进去会静默换掉服务读的
-# 那个库,是另一件事。**空值不透传**(`NO_PROXY=''` 和「没设」不是一回事;httpx 读到空
-# 代理会当成配了一个)。完整形态与实测见 docs/decisions/dns-egress.md。
+# 那个库,是另一件事。**空值不透传**:理由不是「httpx 会把空值当成配了一个代理」——
+# 那一条实测**不成立**(urllib 的 getproxies_environment() 跳过空值);理由是服务进程
+# 的环境该只有真正配过的东西,空壳变量会让「到底配没配」这个问题在排查时多一层噪声。
+# 完整形态与实测见 docs/decisions/dns-egress.md。
 EGRESS_VARS=(HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
              http_proxy https_proxy all_proxy no_proxy
              KB_FEED_DOH KB_FEED_DOH_SECONDS)
@@ -34,11 +36,33 @@ build_web_env() {
   done
 }
 
-# 配了 DoH 却一个代理变量都没有时提一句。**提示而不代劳**(口径同 code_stale /
-# graph_stale):那种配法下端点多半也连不上,而后果是每条订阅都报「域名解析服务不可用」。
+# 配了 DoH 却看不到出口时提一句。**提示而不代劳**(口径同 code_stale / graph_stale)。
+#
+# **判据是真探测,不是「环境变量里有没有」。** 第一版按变量判,在 macOS 上是**误报**:
+# 那里 `getproxies()` 读的是系统代理设置,一个 *_proxy 都没 export 也照样有出口(实测
+# `env -i` 下 DoH 解析成功,而告警照样打「多半连不上」)。所以直接问一次
+# `urllib.request.getproxies()` —— 那正是 httpx 的 trust_env 走的那一份,口径只有一份,
+# 而且跨平台自动对:Linux / 容器 / CI 上它只看环境变量,该报的时候就会报。
+#
+# 文案也跟着改成**陈述**:说清「我们这边探到什么」,不断言对方连不上。
 warn_egress_gap() {
-  if [ -n "${KB_FEED_DOH:-}" ] \
-     && [ -z "${HTTPS_PROXY:-}${https_proxy:-}${ALL_PROXY:-}${all_proxy:-}" ]; then
-    say "[web] KB_FEED_DOH 配着,但这个 shell 里没有代理变量 —— DoH 端点多半连不上"
+  [ -n "${KB_FEED_DOH:-}" ] || return 0
+  if "${WEB_ENV[@]}" uv run --offline python -c \
+      'import sys, urllib.request; sys.exit(0 if urllib.request.getproxies() else 1)' \
+      >/dev/null 2>&1; then
+    return 0
+  fi
+  say "[web] KB_FEED_DOH 配着,但服务那份环境里探不到代理(环境变量和系统代理都没有)
+     —— DoH 端点要是在墙外,解析会报「域名解析服务不可用」"
+}
+
+# 启动/状态各打一行:DoH 开没开、端点是什么。**端点脱敏到主机名** —— 有人把 token 写在
+# path 或 query 里(NextDNS、AdGuard 那类带 profile id 的端点),日志不该留。
+# 少了这一行的后果本轮实测过:服务重启了却没生效,只能靠手工比 pid 和进程环境才看出来。
+doh_line() {
+  if [ -n "${KB_FEED_DOH:-}" ]; then
+    say "[web] 可信解析:开(端点 $(printf '%s' "$KB_FEED_DOH" | sed -E 's#^([a-z]+://[^/?]+).*#\1#'))"
+  else
+    say "[web] 可信解析:关(走系统解析;要开:export KB_FEED_DOH=…)"
   fi
 }

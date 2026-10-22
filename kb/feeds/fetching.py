@@ -14,6 +14,7 @@ import re
 import socket
 import time
 from dataclasses import dataclass
+from typing import Iterable
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
@@ -77,6 +78,46 @@ class CollectionBudgetExceeded(Exception):
     """The run stopped this fetch; the source has not failed."""
 
 
+def host_for_lookup(host: str | None) -> tuple[str, str | None]:
+    """主机名规范化:**两条路共用这一份**,所以翻开关不改变结果。
+
+    - `('literal', '1.1.1.1')` —— 地址字面量(含 `[::1]` 那种方括号形式去过壳的)。
+      **它不是 DNS 名字,一个解析器都不该问**:实测 DoH 把 `1.1.1.1` 答成 NXDOMAIN,
+      于是一条本来抓得到的订阅报「无法解析订阅服务器地址」。字面量照旧要过下面那道
+      `is_global`,所以 `127.0.0.1`、内网地址仍然被拒 —— SSRF 这道一分不少。
+    - `('name', 'xn--mnchen-3ya.de')` —— DNS 名字。**非 ASCII 先 IDNA**:DoH 端点对
+      `münchen.de` 直接回 HTTP 400,而 `getaddrinfo` 自己会编码,于是开关一翻结果就
+      不一样。**纯 ASCII 原样放过**(不走 idna codec):它会拒掉 `getaddrinfo` 本来
+      认得的东西(实测 63 字符以上的标签),那种收紧不属于这一层的事。
+    - `('name', None)` —— 编不出来,等同解析失败(原来 `getaddrinfo` 也失败)。
+    """
+    if not host:
+        return 'name', None
+    bare = host.strip('[]')
+    try:
+        return 'literal', str(ipaddress.ip_address(bare))
+    except ValueError:
+        pass
+    if host.isascii():
+        return 'name', host
+    try:
+        return 'name', host.encode('idna').decode('ascii')
+    except (UnicodeError, UnicodeDecodeError):
+        return 'name', None
+
+
+def _public_only(found: Iterable[str]) -> list[str]:
+    """公网地址、去重、保序。**这一族的 SSRF 判据只有这一份**,两条路和 DoH 的缓存
+    (`resolve.addresses` 的 `keep`)都过它。"""
+    return list(dict.fromkeys(a for a in found if ipaddress.ip_address(a).is_global))
+
+
+def _require_public(public: list[str]) -> list[str]:
+    if not public:
+        raise FeedError('订阅域名未解析到公网地址，已拒绝连接')
+    return public
+
+
 def public_addresses(url: str, *, deadline: float | None = None,
                      collect_deadline: float | None = None) -> tuple[str, list[str]]:
     """「这个域名能连哪几个地址」—— 这一族的口径只有这一份,`request` 每跳都过它。
@@ -93,26 +134,30 @@ def public_addresses(url: str, *, deadline: float | None = None,
     """
     url = normalize_url(url)
     host = urlsplit(url).hostname
-    if resolve.configured():
+    kind, name = host_for_lookup(host)
+    if kind == 'literal':
+        found = [name]
+    elif name is None:
+        raise FeedError(_UNRESOLVED)
+    elif resolve.configured():
         seconds = (remaining(deadline, collect_deadline) if deadline is not None
-                   else resolve.BUDGET)
+                   else resolve.seconds_budget())
         try:
-            found = resolve.addresses(host, seconds=seconds)
+            return url, _require_public(resolve.addresses(
+                name, seconds=seconds, keep=_public_only))
         except resolve.Unknown:
             raise FeedError(_UNRESOLVED) from None
-        except resolve.Unavailable:
-            # **和「对方拦着你」分开说。** 这一句说的是我们这一侧没出口,人要去看的是
-            # KB_FEED_DOH 和代理,不是改订阅链接。
-            raise FeedError('域名解析服务不可用，请检查 KB_FEED_DOH 与代理设置') from None
+        except resolve.Unavailable as exc:
+            # **和「对方拦着你」分开说。** 这一句说的是我们这一侧没出口或者端点答得
+            # 不对,人要去看的是 KB_FEED_DOH 和代理,不是改订阅链接。**原因带上** ——
+            # HTTP 400、超时、非 JSON、预算用尽在面板上长一样的话,指不到该改什么。
+            raise FeedError(f'域名解析服务不可用（{exc}），请检查 KB_FEED_DOH 与代理设置') from None
     else:
         try:
-            found = [a[4][0] for a in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)]
+            found = [a[4][0] for a in socket.getaddrinfo(name, None, type=socket.SOCK_STREAM)]
         except OSError:
             raise FeedError(_UNRESOLVED) from None
-    public = list(dict.fromkeys(a for a in found if ipaddress.ip_address(a).is_global))
-    if not public:
-        raise FeedError('订阅域名未解析到公网地址，已拒绝连接')
-    return url, public
+    return url, _require_public(_public_only(found))
 
 
 def public_url(url: str) -> str:

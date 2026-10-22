@@ -58,6 +58,22 @@ class KbShFixtureTests(unittest.TestCase):
         kb_sh_fixture.install(self.dir, 'scripts/grab_cli.py')
         self.assertTrue((self.dir / 'scripts' / 'grab_cli.py').is_file())
 
+    def test_everything_sourced_lives_under_scripts(self):
+        """**第五处夹具靠这条守着。**
+
+        `tests/test_fulltext_held_exit.py` 也跑真 `kb.sh`,但它把整个 `scripts/` 软链到
+        仓库,所以构造上免疫、没有接 `install()` —— 也不该接:它那个 root 下的
+        `scripts` 是软链,`install()` 往里写就写进了真仓库。
+
+        免疫的前提是**被 source 的东西都在 `scripts/` 下**。哪天 source 到别处(比如
+        `lib/` 或仓库根),它就会断,而红出来的话照样指不到「夹具没拷全」。所以把那个
+        前提钉在这里:要么新文件放 `scripts/`,要么顺手把那一处夹具改掉。
+        """
+        outside = [rel for rel in kb_sh_fixture.sourced()
+                   if not rel.startswith('scripts/')]
+        self.assertEqual([], outside,
+                         '这些不在 scripts/ 下,test_fulltext_held_exit 的软链豁免不再成立')
+
     def test_every_top_level_source_line_is_recognized(self):
         """清单是正则扫出来的,**扫不到的写法要当场红**,不是静默漏掉一个文件。
 

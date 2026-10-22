@@ -98,6 +98,27 @@ class HintFiresTests(CodeStaleCase):
         self.assertIn(HINT, err, f'子目录里的模块没被算进来:\n{err}')
 
 
+    def test_a_sourced_shell_file_counts_too(self):
+        """**`scripts/` 下被 source 的 `.sh` 也算。**
+
+        「`scripts/` 每次都是新起的子进程」那条只对 `.py` 成立:`scripts/web_env.sh`
+        是 `kb.sh` 顶层 source 进来的,它决定服务进程拿到哪一份环境(出口变量、
+        DoH 开关)。改完不重启,跑着的进程端的还是旧那份 —— 而那正是「填了开关却
+        没生效」这件事的来源,本轮实测时只能靠手工比进程环境才看出来。
+        """
+        sh = self.dir / 'scripts' / 'web_env.sh'
+        self.assertTrue(sh.is_file(), '夹具没把被 source 的文件装进来')
+        self.touch(sh, 2000)
+        err = self.run_sh('code_stale')
+        self.assertIn(HINT, err, f'被 source 的 shell 文件没被算进来:\n{err}')
+
+    def test_kb_sh_itself_counts_too(self):
+        sh = self.dir / 'kb.sh'
+        self.touch(sh, 2000)
+        err = self.run_sh('code_stale')
+        self.assertIn(HINT, err, f'kb.sh 自己改了也不提示:\n{err}')
+
+
 class HintStaysQuietTests(CodeStaleCase):
     def test_right_after_a_restart_nothing_is_said(self):
         self.touch(self.dir / 'kb' / 'feeds' / 'sync.py', 2000)

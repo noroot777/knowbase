@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>可信解析入口 · demo</title>
+<style>
+/* 色板与字体逐值抄自 kb/static/css/base.css 的 :root —— 这是独立产物，不能 import */
+:root{
+  --paper:#F3F5F4; --paper-2:#ECF0EE; --card:#FFFFFF;
+  --ink:#14202B; --ink-2:#3A4750; --muted:#66727C;
+  --line:#DCE3E0; --line-soft:#E9EDEB;
+  --brand:#17604F; --brand-deep:#0E4A3B; --brand-soft:#DFF0E9; --brand-tint:#F0F7F4;
+  --ok:#2E7D57; --danger:#B3402F; --warn:#8A5A22; --warn-soft:#F6EBDC;
+  --font-display:"Songti SC","STSong","Source Han Serif SC","Noto Serif CJK SC",serif;
+  --font-mono:ui-monospace,"SF Mono","SFMono-Regular",Menlo,Consolas,monospace;
+  --font-body:-apple-system,"PingFang SC","Noto Sans SC",sans-serif;
+}
+*{box-sizing:border-box;margin:0}
+body{font:15px/1.7 var(--font-body);background:var(--paper);color:var(--ink);padding:32px 24px 72px}
+.wrap{max-width:860px;margin:0 auto}
+h1{font-family:var(--font-display);font-weight:900;font-size:26px;letter-spacing:.5px}
+.head{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:22px}
+.head .fact{font-family:var(--font-mono);font-size:12.5px;color:var(--muted)}
+
+section{margin-bottom:34px}
+.sec-head{display:flex;align-items:baseline;gap:12px;margin-bottom:4px}
+.sec-head h2{font-size:16px;font-weight:600}
+.sec-head .tag{font-family:var(--font-mono);font-size:11.5px;color:var(--brand-deep);
+  background:var(--brand-soft);border-radius:4px;padding:2px 7px}
+.sec-note{color:var(--muted);font-size:13px;margin-bottom:14px}
+
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px}
+.row{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--line-soft)}
+.row:last-child{border-bottom:0}
+.row .label{width:112px;flex:none;font-size:13.5px;color:var(--ink-2)}
+.row .hint{font-size:12.5px;color:var(--muted);margin-top:3px}
+input[type=text],input[type=number]{font:13.5px var(--font-mono);color:var(--ink);
+  background:var(--paper);border:1px solid var(--line);border-radius:7px;padding:7px 10px;flex:1;min-width:0}
+input:focus{outline:none;border-color:var(--brand);background:#fff}
+input[type=number]{flex:none;width:86px}
+.btn{font:13px var(--font-body);color:#fff;background:var(--brand);border:1px solid var(--brand);
+  border-radius:7px;padding:7px 15px;cursor:pointer;flex:none}
+.btn:hover{background:var(--brand-deep)}
+.btn.ghost{color:var(--ink-2);background:var(--card);border-color:var(--line)}
+.btn.ghost:hover{background:var(--brand-tint);border-color:var(--brand-soft)}
+.chips{display:flex;gap:7px;flex-wrap:wrap}
+.chip{font:12.5px var(--font-mono);color:var(--ink-2);background:var(--card);
+  border:1px solid var(--line);border-radius:999px;padding:5px 12px;cursor:pointer}
+.chip:hover{background:var(--brand-tint);border-color:var(--brand-soft)}
+.chip[aria-pressed=true]{background:var(--brand);border-color:var(--brand);color:#fff}
+.state{font:12.5px var(--font-mono);padding:3px 9px;border-radius:999px;flex:none}
+.state.on{color:var(--brand-deep);background:var(--brand-soft)}
+.state.off{color:var(--muted);background:var(--paper-2)}
+.probe{font:12.5px/1.6 var(--font-mono);color:var(--ink-2);background:var(--paper);
+  border:1px solid var(--line-soft);border-radius:7px;padding:10px 12px;margin-top:10px;white-space:pre-wrap}
+
+/* 要定夺的那几处:两套并排 */
+.pick{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.opt{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:15px 17px;cursor:pointer}
+.opt[aria-pressed=true]{border-color:var(--brand);box-shadow:0 0 0 1px var(--brand) inset}
+.opt h3{font-size:14px;font-weight:600;margin-bottom:5px}
+.opt p{font-size:12.5px;color:var(--muted)}
+.opt .cost{font:11.5px var(--font-mono);color:var(--warn);background:var(--warn-soft);
+  border-radius:4px;padding:2px 6px;display:inline-block;margin-top:8px}
+.q{font-size:13px;color:var(--ink-2);background:var(--warn-soft);border-left:3px solid var(--warn);
+  border-radius:0 7px 7px 0;padding:10px 14px;margin-bottom:12px}
+@media (max-width:720px){.pick{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="head">
+  <h1>可信解析</h1>
+  <span class="fact">设置 · 当前只有环境变量一条路</span>
+</div>
+
+<section>
+  <div class="sec-head"><h2>一、这一项长什么样</h2><span class="tag">不用定夺</span></div>
+  <p class="sec-note">放在「设置菜单」里,和模型配置 / API Key 并列的一项。页头一行,没有空态插画。</p>
+  <div class="card">
+    <div class="row">
+      <span class="label">状态</span>
+      <span class="state off" id="st">关 · 走系统解析</span>
+      <span style="flex:1"></span>
+      <button class="btn ghost" onclick="probe()">测一下</button>
+    </div>
+    <div class="row">
+      <span class="label">DoH 端点</span>
+      <input type="text" id="ep" placeholder="留空 = 关(走本机解析)"
+             oninput="sync()" value="">
+    </div>
+    <div class="row">
+      <span class="label"></span>
+      <div class="chips">
+        <button class="chip" onclick="pick(this,'https://cloudflare-dns.com/dns-query')">Cloudflare</button>
+        <button class="chip" onclick="pick(this,'https://dns.google/resolve')">Google</button>
+        <button class="chip" onclick="pick(this,'https://doh.opendns.com/dns-query')">OpenDNS</button>
+        <button class="chip" onclick="pick(this,'')">关掉</button>
+      </div>
+    </div>
+    <div class="row">
+      <span class="label">单次上限</span>
+      <input type="number" id="sec" value="8" min="1" max="60">
+      <div>
+        <div class="hint">秒。整次解析还受这一次抓取自己的截止时间管,取小的那个。</div>
+      </div>
+    </div>
+    <div class="probe" id="out">点「测一下」:会真发一次查询,报解析出来的地址和耗时 —— 不改任何配置。</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><h2>二、存在哪里</h2><span class="tag">要你定夺</span></div>
+  <p class="q">这一处定了之后不好改:它决定「环境变量」和「页面上填的」谁说话算数。</p>
+  <div class="pick">
+    <div class="opt" aria-pressed="true" onclick="only(this)">
+      <h3>A · 存进设置,环境变量仍然优先</h3>
+      <p>页面上填的存进 <code>secrets.json</code> 一类的地方,服务每次解析时读它;
+         但 <code>KB_FEED_DOH</code> 设了就压过页面 —— 容器和 CI 只有环境变量一条路,
+         那边不该被一份文件悄悄改掉。页面上会显示「这一项当前由环境变量接管」。</p>
+      <span class="cost">改动:加一个配置项 + 读取口径一份 + 页面提示一处</span>
+    </div>
+    <div class="opt" aria-pressed="false" onclick="only(this)">
+      <h3>B · 只存设置,环境变量退成兜底</h3>
+      <p>页面是唯一的正经入口,环境变量只在设置里没填时起作用。好处是「看得见的就是生效的」;
+         代价是容器里改配置要进页面点一次,<code>compose.yaml</code> 那套透传就只剩兜底意义。</p>
+      <span class="cost">改动:同上,外加 compose / README 的说法要跟着改</span>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><h2>三、改完要不要重启</h2><span class="tag">要你定夺</span></div>
+  <p class="q">现在是「必须重启」(开关从进程环境读)。存进设置之后可以不重启 —— 但那会多一条热读的路。</p>
+  <div class="pick">
+    <div class="opt" aria-pressed="true" onclick="only(this)">
+      <h3>C · 保存即生效</h3>
+      <p>每次解析时读当前配置,改完下一条抓取就用新端点。顺带清一次解析缓存
+         (不清的话旧答案最多还粘 10 分钟)。</p>
+      <span class="cost">改动:解析那一层多读一次配置 + 保存时清缓存</span>
+    </div>
+    <div class="opt" aria-pressed="false" onclick="only(this)">
+      <h3>D · 存下来,提示去重启</h3>
+      <p>和现在的 <code>code_stale</code> 一个调子:保存成功后页面上说一句「重启后生效」。
+         路最短,但「填了没生效」这件事会再出现一次。</p>
+      <span class="cost">改动:只加提示</span>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><h2>四、要不要连代理一起放进来</h2><span class="tag">要你定夺</span></div>
+  <p class="q">DoH 端点在墙外时要代理才连得上。现在代理只能来自起服务那个 shell。</p>
+  <div class="pick">
+    <div class="opt" aria-pressed="true" onclick="only(this)">
+      <h3>E · 不放。只在这里显示探到了什么</h3>
+      <p>代理归环境管(shell、compose、系统设置),页面只读地显示「服务那份环境里探到
+         http://127.0.0.1:7897」或者「探不到」。</p>
+      <span class="cost">改动:一个只读状态接口</span>
+    </div>
+    <div class="opt" aria-pressed="false" onclick="only(this)">
+      <h3>F · 放。代理也做成可配置</h3>
+      <p>页面上能填代理地址,存进设置、注入给抓取用的那个客户端。好处是开源交付后
+         不用懂 shell;代价是这台机器上的代理从此有两个来源。</p>
+      <span class="cost">改动:抓取那一层要接受外部代理配置,影响面比上面三项大</span>
+    </div>
+  </div>
+</section>
+
+<script>
+/* demo:没有后端,只演示交互 */
+function sync(){
+  const v = document.getElementById('ep').value.trim();
+  const st = document.getElementById('st');
+  st.className = 'state ' + (v ? 'on' : 'off');
+  st.textContent = v ? '开 · ' + (v.match(/^[a-z]+:\/\/[^\/?]+/) || [v])[0] : '关 · 走系统解析';
+  document.querySelectorAll('.chip').forEach(c => c.setAttribute('aria-pressed', 'false'));
+}
+function pick(el, url){
+  document.getElementById('ep').value = url;
+  sync();
+  el.setAttribute('aria-pressed', 'true');
+}
+function probe(){
+  const v = document.getElementById('ep').value.trim();
+  const out = document.getElementById('out');
+  out.textContent = v
+    ? 'mistral.ai  ->  162.159.142.207, 172.66.2.203   (0.21s)\n代理  ->  探到 http://127.0.0.1:7897\n结论  ->  这个端点可用'
+    : 'mistral.ai  ->  31.13.75.12   (本机解析)\n这个地址在 Meta 的网段里,和 mistral.ai 没关系 —— 本机解析被污染了。';
+}
+function only(el){
+  el.parentElement.querySelectorAll('.opt').forEach(o => o.setAttribute('aria-pressed', 'false'));
+  el.setAttribute('aria-pressed', 'true');
+}
+sync();
+</script>
+</div>
+</body>
+</html>

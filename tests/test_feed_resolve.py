@@ -18,8 +18,11 @@ Twitter / Dropbox / Meta 段的**公网**地址,`buy-european.net` 被解析成 
 import json
 import os
 import socket
+import subprocess
+import sys
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
@@ -189,7 +192,7 @@ class MalformedAnswerTests(ResolveBase):
 class BudgetTests(ResolveBase):
     def test_doh_timeout_is_capped_by_what_is_left_of_the_request_budget(self):
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED), \
-             patch.object(resolve, 'BUDGET', 99.0):
+             patch.dict(os.environ, {resolve.SECONDS_ENV: '99'}):
             fetching.request('https://example.org/rss', deadline=time.monotonic() + 2)
         spent = [o['timeout'] for o in self.options if isinstance(o.get('timeout'), float)]
         self.assertEqual(2, len(spent))                       # 两次查询各一个 client
@@ -198,7 +201,7 @@ class BudgetTests(ResolveBase):
     def test_exhausted_budget_asks_nothing_and_reports_the_read_timeout(self):
         self.arm(httpx.ConnectTimeout('doh is slow'))
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED), \
-             patch.object(resolve, 'BUDGET', 99.0):
+             patch.dict(os.environ, {resolve.SECONDS_ENV: '99'}):
             with self.assertRaisesRegex(fetching.FeedError, '超时'):
                 fetching.request('https://example.org/rss', deadline=time.monotonic() - 1)
         self.assertEqual([], self.asked)
@@ -211,7 +214,7 @@ class BudgetTests(ResolveBase):
         # 分支一条红都没有(反向验证实测:把它改成「照样去问」整组照旧全绿)。
         self.arm(answer())
         with self.assertRaises(resolve.Unavailable):
-            resolve.addresses('example.org', seconds=0)
+            resolve.addresses('example.org', seconds=0, keep=list)
         self.assertEqual([], self.asked)
 
     def test_collection_cutoff_still_outranks_the_resolver(self):
@@ -299,3 +302,176 @@ class BothCallersTests(ResolveBase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class HostnameTests(ResolveBase):
+    """**翻开关不许改变结果**:主机名规范化那一份两条路共用。
+
+    这几条是审查第 1 轮实测出来的真回归(从「能」变成「不能」):`https://1.1.1.1/rss`
+    被 DoH 答成 NXDOMAIN、报「无法解析订阅服务器地址」;`https://münchen.de/rss` 被
+    端点用 HTTP 400 拒掉、报「解析服务不可用」—— 而关着开关时两条都抓得到。连续失败
+    几次,这类条目会烧完补抓额度、按壳永久留在库里。
+    """
+
+    def both_ways(self, url: str):
+        """同一个 URL 在开关开 / 关两侧各解一次,返回两份地址。"""
+        out = []
+        for value in (DOH, ''):
+            resolve.forget()
+            with patch.dict(os.environ, {resolve.ENV: value}):
+                out.append(fetching.public_addresses(url)[1])
+        return out
+
+    def test_ip_literals_are_never_asked_about(self):
+        for url, expected in (('https://1.1.1.1/rss', ['1.1.1.1']),
+                              ('https://[2606:4700:4700::1111]/rss',
+                               ['2606:4700:4700::1111'])):
+            with self.subTest(url=url):
+                self.arm(answer(status=3))   # 真去问的话就是 NXDOMAIN
+                on, off = self.both_ways(url)
+                self.assertEqual(expected, on)
+                self.assertEqual(expected, off, '关着开关时的结果变了')
+                self.assertEqual([], self.asked, '地址字面量被当成域名去问了')
+
+    def test_a_private_literal_is_still_refused(self):
+        """**反过来钉一边**:字面量照旧过 `is_global` —— 放过它就等于开了 SSRF。"""
+        for url in ('https://127.0.0.1/rss', 'https://[::1]/rss',
+                    'https://10.0.0.1/rss'):
+            with self.subTest(url=url):
+                with self.assertRaises((fetching.FeedError, ValueError)):
+                    fetching.public_addresses(url)
+
+    def test_non_ascii_names_are_idna_encoded_before_asking(self):
+        self.arm(answer(rec('93.184.216.34')))
+        with patch.dict(os.environ, {resolve.ENV: DOH}):
+            _, found = fetching.public_addresses('https://münchen.de/rss')
+        self.assertEqual(['93.184.216.34'], found)
+        self.assertEqual({'xn--mnchen-3ya.de'}, set(self.names()),
+                         '非 ASCII 域名原样问出去了,端点会回 HTTP 400')
+
+    def test_ascii_names_are_passed_through_untouched(self):
+        """纯 ASCII 不走 idna codec:它会拒掉 `getaddrinfo` 本来认得的东西
+        (实测 63 字符以上的标签、以及 `a..b` 这种空标签),那种收紧不属于这一层。"""
+        self.arm(answer(rec('93.184.216.34')))
+        with patch.dict(os.environ, {resolve.ENV: DOH}):
+            fetching.public_addresses('https://_dmarc.example.org/rss')
+        self.assertEqual({'_dmarc.example.org'}, set(self.names()))
+
+
+class AnswerBoundaryTests(ResolveBase):
+    """**「答得不对」绝不许说成「确定没有」**(元规则:判不准一律抛)。
+
+    面板上这两句话指向完全不同的下一步:「无法解析订阅服务器地址」让人去改链接,
+    「解析服务不可用」让人去看 KB_FEED_DOH 和代理。把前者用在我们并不知道的事情上,
+    人就会去改一条本来没毛病的链接。
+    """
+
+    def test_unparsable_address_records_are_our_problem_not_a_missing_domain(self):
+        # 实测那一条:`data: nonsense`(type 1,所以确实是地址记录)原先一路报成
+        # 「无法解析订阅服务器地址」。
+        self.arm(answer(rec('nonsense')))
+        with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+            with self.assertRaisesRegex(fetching.FeedError, '解析服务不可用'):
+                fetching.request('https://example.org/rss')
+
+    def test_a_cname_only_family_is_a_normal_answer(self):
+        """**反过来钉一边**:只有 A 记录的域名查 AAAA 时常只回 CNAME —— 那一族空集是
+        正常的,不是故障。把它也算成「答得不对」会让整个双栈解析再也走不通。"""
+        self.arm([answer(rec('93.184.216.34')),                    # A 有
+                  answer(rec('example.org.', rtype=5))])            # AAAA 只有 CNAME
+        with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+            got = fetching.request('https://example.org/rss')
+        self.assertEqual(200, got.status)
+        self.assertEqual(['93.184.216.34'], self.hosts())
+
+    def test_nxdomain_on_one_family_with_no_budget_for_the_other_is_not_an_answer(self):
+        """NXDOMAIN + 另一族没问到 —— **没问到的那一半可能正好有地址**,不许断言没有。"""
+        self.arm([answer(status=3), answer(rec('93.184.216.34'))])
+        with patch.object(resolve, '_ask', side_effect=[([], []), resolve.Unavailable('x')]):
+            with self.assertRaises(resolve.Unavailable):
+                resolve.addresses('example.org', seconds=5, keep=list)
+
+    def test_a_redirecting_endpoint_says_to_fix_the_endpoint(self):
+        """`http://` 的端点 301 到 https 时,原先报的是「我们没出口」—— 指不到该改什么。"""
+        self.arm(httpx.Response(301, headers={'location': 'https://doh.example/dns-query'}))
+        with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+            with self.assertRaisesRegex(fetching.FeedError, 'https'):
+                fetching.request('https://example.org/rss')
+
+    def test_an_oversized_response_is_refused_instead_of_buffered(self):
+        """**超限的那一份必须是合法 JSON**,否则这一条验的是 json 解析而不是大小闸。
+
+        第一版写的是截断的半截 JSON:把大小闸整个去掉,`json.loads` 照样失败、末态
+        照样是「解析服务不可用」—— 定点注入**一条红都没有**(实测)。所以这里给一份
+        合法、超大、又不含地址的答案:没有闸时它会一路走到「这个域名没有地址」
+        (另一句话),有闸时在读取途中就被拦住。
+        """
+        payload = b'{"Status":0,"Answer":[],"pad":"' + b'0' * (300 * 1024) + b'"}'
+        self.arm(httpx.Response(200, content=payload,
+                                headers={'content-type': 'application/dns-json'}))
+        with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+            with self.assertRaisesRegex(fetching.FeedError, '字节'):
+                fetching.request('https://example.org/rss')
+
+    def test_the_reason_reaches_the_panel(self):
+        """**原因要指得到该改什么**:HTTP 400、超时、非 JSON、预算用尽在面板上长一样
+        的话,人只能去猜。"""
+        self.arm(httpx.Response(400, content=b'{"error":"Invalid query name"}'))
+        with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+            with self.assertRaisesRegex(fetching.FeedError, 'HTTP 400'):
+                fetching.request('https://example.org/rss')
+
+
+class CacheFilterOrderTests(ResolveBase):
+    """**缓存的是留下来的那些,不是端点给的原样。**
+
+    顺序反过来实测过:端点先答 `127.0.0.1`(被 SSRF 正确拒掉)、再改答公网地址,
+    第二次照旧报「未解析到公网地址」—— 那个被拒的答案进了缓存,把这个域名钉死
+    最少 60 秒。TTL 上限 600 秒,等于一次污染抖动让一条订阅停摆十分钟。
+    """
+
+    def test_a_refused_answer_never_sticks(self):
+        self.arm([answer(rec('127.0.0.1')), answer(rec('127.0.0.1')),
+                  answer(rec('93.184.216.34')), answer(rec('93.184.216.34'))])
+        with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+            with self.assertRaisesRegex(fetching.FeedError, '未解析到公网地址'):
+                fetching.request('https://example.org/rss')
+            got = fetching.request('https://example.org/rss')
+        self.assertEqual(200, got.status, '上一轮那个被拒的答案把域名钉死了')
+        self.assertEqual(['93.184.216.34'], self.hosts())
+
+    def test_a_usable_answer_is_still_reused(self):
+        """反过来钉一边:别把缓存一起关掉了 —— 那是每跳两次 HTTP 往返。"""
+        self.arm(answer(rec('93.184.216.34')))
+        with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+            fetching.request('https://example.org/rss')
+            asked = len(self.asked)
+            fetching.request('https://example.org/other')
+        self.assertEqual(asked, len(self.asked), '同一个域名又问了一遍')
+
+
+class SecondsBudgetTests(ResolveBase):
+    def test_a_bad_value_does_not_break_the_import(self):
+        """原先写成模块级 `float(os.environ.get(...))`:`KB_FEED_DOH_SECONDS=abc` 会让
+        `import kb.feeds.fetching` 直接抛 ValueError —— **开关压根没开也进不去**,
+        而报出来的话指不到那个环境变量。"""
+        done = subprocess.run(
+            [sys.executable, '-c', 'import kb.feeds.fetching; print("imported")'],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env={**os.environ, resolve.SECONDS_ENV: 'abc'},
+            capture_output=True, text=True)
+        self.assertEqual(0, done.returncode, done.stderr[-800:])
+        self.assertIn('imported', done.stdout)
+
+    def test_a_bad_value_is_reported_where_it_is_used(self):
+        for bad in ('abc', '0', '-3'):
+            with self.subTest(bad=bad):
+                with patch.dict(os.environ, {resolve.SECONDS_ENV: bad}):
+                    with self.assertRaisesRegex(resolve.Unavailable, resolve.SECONDS_ENV):
+                        resolve.seconds_budget()
+
+    def test_a_blank_value_falls_back_to_the_default(self):
+        for value in ('', '   '):
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {resolve.SECONDS_ENV: value}):
+                    self.assertEqual(resolve.DEFAULT_SECONDS, resolve.seconds_budget())

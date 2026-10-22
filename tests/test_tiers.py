@@ -26,13 +26,14 @@ import ast
 import io
 import os
 import re
+import subprocess
 import sys
 import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests import headless, tiers
+from tests import FEATURE_ENV, headless, tiers
 
 
 class BrowserGateTests(unittest.TestCase):
@@ -129,6 +130,36 @@ class TierEnvTests(unittest.TestCase):
             self.assertNotIn(headless.SKIP_ENV, os.environ)
             tiers._apply_tier_env("fast")
             self.assertEqual("1", os.environ[headless.SKIP_ENV])
+
+    def test_an_exported_feature_switch_does_not_redden_existing_suites(self):
+        """**后果判据**:shell 里 export 过 `KB_FEED_DOH`(按文档打开 DoH 的人就是
+        这么做的)时,既有的传输用例照旧全绿。
+
+        实测形态:不清这个变量时,101 条传输/预算/准入用例里 27 条变红 —— 红的全是
+        跟 DNS 无关的东西(连接失败换地址、重定向逐跳校验、8 MB 上限、截止时间、
+        响应关卡),因为它们默认「开关是关的」、打的是 `socket.getaddrinfo` 的桩,
+        而 DoH 分支抢在桩前面把请求接走了。**看起来像那一版把整条抓取链改坏了。**
+
+        子进程跑:这件事的全部风险就在「进程启动时继承到了什么」上,在本进程里
+        patch 环境变量验不到 —— `tests` 包早就 import 过了。
+        """
+        env = {**os.environ, 'KB_FEED_DOH': 'http://127.0.0.1:9/dns-query',
+               'KB_FEED_DOH_SECONDS': 'abc'}   # 坏值也不该让 import 崩
+        done = subprocess.run([sys.executable, '-m', 'unittest',
+                               'tests.test_feed_transport', 'tests.test_admit_three_ways'],
+                              cwd=tiers.ROOT, env=env, capture_output=True, text=True)
+        self.assertEqual(0, done.returncode,
+                         '继承来的开关把既有用例带红了:\n' + done.stderr[-2000:])
+
+    def test_the_switch_still_works_when_a_case_sets_it_itself(self):
+        """**反过来钉一边**:清的是「继承来的」,不是「这个开关」—— 显式打开它的那组
+        用例必须照旧能验到 DoH 那条路。少了这一条,把 `clear_feature_env()` 写成
+        「每次取值前都清一遍」也全绿,而那会让可信解析整层再也没有回归。"""
+        done = subprocess.run([sys.executable, '-m', 'unittest', 'tests.test_feed_resolve'],
+                              cwd=tiers.ROOT, env={**os.environ}, capture_output=True, text=True)
+        self.assertEqual(0, done.returncode, done.stderr[-2000:])
+        self.assertIn('KB_FEED_DOH', FEATURE_ENV,
+                      '开关不在清单里,上一条就什么都没在守')
 
 
 class BrowserCoverageTests(unittest.TestCase):

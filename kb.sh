@@ -187,6 +187,8 @@ CLEAN_ENV=(env -i HOME="$HOME" PATH="$PATH")
 
 # 服务进程的那份环境(出口变量的透传名单 + build_web_env)单独一份,见那个文件的头。
 . "$ROOT/scripts/web_env.sh"
+# 「代码/图谱比跑着的旧了」那两句提示(code_stale / graph_stale),同样见那个文件的头。
+. "$ROOT/scripts/stale.sh"
 
 # **起服务那条命令一律 --offline。** `uv run` 每次都要先确认一遍项目环境,而
 # pyproject.toml 一动(改依赖、改注释都算)它就要重建那个 editable 包 —— 重建要解析
@@ -255,13 +257,6 @@ proj_py() {
 # 口径同 `graph_stale`:**提示而不代劳**,也不拦。重启会把正在跑的同步断在半路,
 # 什么时候重启得由人定;而且新旧混跑未必每次都撞上(两个版本之间没有互相引用的
 # 新符号时一切照旧),拿它挡住命令比提示一句更坏。
-code_stale() {   # 永远返回 0:它只是提示,不能挡住任何命令
-  [ -s "$WEB_PID" ] || return 0
-  [ -n "$(find "$ROOT/kb" -name '*.py' -newer "$WEB_PID" -print -quit 2>/dev/null)" ] || return 0
-  say "[web] 代码比跑着的进程新(kb/ 下的 .py 改过)。Python 不热加载,而延迟 import
-     的模块会读到新版 —— 同一个进程里新旧混跑,报出来的是一句指不到真因的
-     AttributeError。要让它生效:./kb.sh restart"
-}
 
 web_start() {
   if [ -n "$(service_pids "$WEB_PID" "$WEB_PORT" "$WEB_PAT")" ]; then
@@ -281,6 +276,7 @@ web_start() {
   while ! port_busy "$WEB_PORT" && [ "$n" -lt 40 ]; do sleep 0.5; n=$((n+1)); done
   port_busy "$WEB_PORT" || die "kb-web 起不来,看 $LOG_DIR/web.log"
   say "[web] $API"
+  doh_line
   # 图谱页是 Vault 里的产物,不是 kb-web 现渲染的:样式改了得重新生成,提示一句
   graph_stale
 }
@@ -309,7 +305,7 @@ web_restart() { web_stop; web_start; }
 
 web_status() {
   local pids; pids="$(service_pids "$WEB_PID" "$WEB_PORT" "$WEB_PAT")"
-  if [ -n "$pids" ]; then echo "kb-web    运行中 ($API)"; code_stale
+  if [ -n "$pids" ]; then echo "kb-web    运行中 ($API)"; code_stale; build_web_env; doh_line
   elif port_busy "$WEB_PORT"; then echo "kb-web    未运行(端口 $WEB_PORT 被别的进程占着)"
   else echo "kb-web    未运行"; fi
 }
@@ -429,42 +425,6 @@ cmd_grab() {
     web_start
   fi
   "$BOOT_PY" "$ROOT/scripts/grab_cli.py" --api "$API" "$@"
-}
-
-# ── 图谱页 ────────────────────────────────────────────────────────────────────
-# 三张图谱是「CSS/JS 内联进单文件 HTML」的产物,住在 Vault 里,kb-web 只是把文件
-# 原样发出去。所以改了 catgraph.css/js 或那几个构建脚本,**重启不会让页面变样**,
-# 得重新生成。跑同步时 wiki 阶段会顺手带上;这条命令是「只想立刻看到新样式」时的
-# 快捷方式:--no-llm 只吃已有归类缓存,零模型调用,实测约 6 秒(其中 5.5 秒是读
-# 那棵 5530 组的条目树)。
-#
-# **故意没做成 restart 的一部分。** restart 现在是纯进程操作,失败了顶多服务没起来,
-# 磁盘上一个字节不动;塞进去之后每次重启都在**原子替换 Vault 里三张正式页面**,而
-# build_catgraph 里那一整套两阶段提交 / 发布 CAS / 质量验收,存在的理由就是这个动作
-# 有风险 —— 重启一天十次就是对正式产物发布十次,还会跟正在跑的 wiki 阶段抢发布锁
-# (--force 停服务时管道拦不住)。所以这里只在 web 起来之后**提示一句**,不代劳。
-GRAPH_SRC=(scripts/wiki/assets/catgraph.css scripts/wiki/assets/catgraph.js
-           scripts/wiki/catgraph_page.py scripts/wiki/build_catgraph.py
-           scripts/wiki/graph_data.py scripts/wiki/taxo_tables.py
-           scripts/wiki/build_graph_html.py)
-
-graph_stale() {   # 源文件比图谱页新就提示一句。永远返回 0:它只是提示,不能挡住启动
-  "$BOOT_PY" - "$ROOT" "${GRAPH_SRC[@]}" <<'PY' || true
-import os, pathlib, sys
-try:
-    root, srcs = pathlib.Path(sys.argv[1]), sys.argv[2:]
-    vault = pathlib.Path(os.environ.get("KB_VAULT_ROOT")
-                         or pathlib.Path.home() / "obs" / "new-start").expanduser()
-    pages = [vault / n for n in ("graph.html", "graph-projects.html", "graph-skills.html")]
-    if all(p.is_file() for p in pages):   # 还没生成过就不催:跑一次 wiki 阶段就有了
-        newest = max((root / s).stat().st_mtime for s in srcs if (root / s).is_file())
-        if newest > min(p.stat().st_mtime for p in pages):
-            print("[graph] 图谱页比样式/构建源旧了 —— ./kb.sh graph 重建"
-                  "(约 6 秒,零模型调用)", file=sys.stderr)
-except Exception:
-    pass                                  # 提示而已,读不到就算了,别把启动带崩
-PY
-  return 0
 }
 
 cmd_graph() {

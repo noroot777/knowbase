@@ -17,6 +17,7 @@
 
 **所选层对快速层开关的态度必须显式**(`_apply_tier_env`):fast 设上,probes/full
 把继承值清掉。不清的话,外头 export 过一次的壳里 full 就再也不是「一条不拦」。
+**功能开关**(`KB_FEED_DOH` 这类)同样清 —— 名单和理由在 `tests/__init__.py`。
 
 **probes 的名单是现算的,不许改成手工维护的文件列表**:列表会静默过期 —— 新探针
 文件没人记得登记,它就落进 fast 层,快速层又慢回去,而且没有任何一处会红。现算的
@@ -37,6 +38,8 @@ from pathlib import Path
 from tests.headless import SKIP_ENV
 
 ROOT = Path(__file__).resolve().parents[1]
+from tests import clear_feature_env
+
 TESTS_DIR = ROOT / "tests"
 TIERS = ("fast", "probes", "full")
 
@@ -72,6 +75,9 @@ def _apply_tier_env(tier: str) -> None:
         os.environ[SKIP_ENV] = "1"
     else:
         os.environ.pop(SKIP_ENV, None)
+    # 功能开关同一个道理,名单在 tests/__init__.py(那里是两条跑法的交汇点,
+    # 直接 `python -m unittest tests.xxx` 也会过)。这里再调一次是幂等的。
+    clear_feature_env()
 
 
 def _iter_tests(suite):

@@ -224,6 +224,10 @@ class ShellEntryTests(HeldExitCase):
         (root / 'collector/.venv/bin').mkdir(parents=True)
         (root / 'kb.sh').write_bytes((ROOT / 'kb.sh').read_bytes())
         (root / 'kb.sh').chmod(0o755)
+        # 整个目录软链过来(不是逐个拷):所以 `kb.sh` 顶层 source 的那些文件天然
+        # 都在,这一处**不需要** `tests/kb_sh_fixture.install()`,也不该用它 ——
+        # 往软链里写就写进了真仓库。前提是被 source 的东西都在 `scripts/` 下,
+        # 那条前提钉在 `tests/test_kb_sh_fixture.py`。
         for name in ('kb', 'scripts', '.venv'):
             (root / name).symlink_to(ROOT / name)
         fake = root / 'collector/.venv/bin/python'

@@ -18,6 +18,7 @@ bash 用 `/bin/bash`(macOS 自带的是 3.2):`WEB_ENV` 那段刻意不用 `mapfi
 """
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -64,8 +65,10 @@ class EgressEnvTests(unittest.TestCase):
                               if line.startswith(('KB_DATA_DIR=', 'ANTHROPIC_', 'GZH_'))])
 
     def test_unset_variables_are_not_passed_as_empty_strings(self):
-        # 空值透传过去不是没事:`NO_PROXY=''` 和「没设 NO_PROXY」在有些库里不是一回事,
-        # 而 httpx 读到空字符串的 proxy 会当成「配了一个空代理」。
+        # 钉住「只有真正配过的才进去」。**如实记一笔**:原先写的理由(httpx 会把空值
+        # 当成配了一个空代理)实测**不成立** —— urllib 的 getproxies_environment() 跳过
+        # 空值。留着这一条的理由是排查时的噪声:服务进程的环境里只该有配过的东西,
+        # 否则「到底配没配」要多看一眼。
         out = built(HTTPS_PROXY='http://127.0.0.1:7897')
         self.assertEqual([], [line for line in out if line.endswith('=')])
         self.assertEqual(['env', '-i', 'HOME=/tmp/home', 'PATH=/usr/bin:/bin',
@@ -82,10 +85,18 @@ class EgressEnvTests(unittest.TestCase):
         self.assertNotIn('"${CLEAN_ENV[@]}"', lines[0])
 
     def test_the_passthrough_list_exists_in_exactly_one_place(self):
-        # 第二份名单会静默过期 —— 本轮的形态就是两处各判一遍、只补了一处。
+        """第二份名单会静默过期 —— 本轮的形态就是两处各判一遍、只补了一处。
+
+        **大小写两套都数**:原先只数 `HTTP_PROXY`,于是另一处只写小写
+        (`http_proxy`、`all_proxy`)的第二份循环照样过得去 —— 而那正是这一族最可能
+        被重写的形态(小写名是 curl / requests 的习惯)。
+        """
         whole = '\n'.join(p.read_text(encoding='utf-8')
                           for p in (KB_SH, WEB_ENV_SH))
-        self.assertEqual(1, whole.count('HTTP_PROXY'))
+        for name in ('HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy',
+                     'KB_FEED_DOH_SECONDS'):
+            with self.subTest(name=name):
+                self.assertEqual(1, whole.count(name), f'{name} 出现了不止一次')
 
     def test_the_resolver_switch_is_passed_through_too(self):
         # 不透传它,可信解析那一层在服务里就永远读不到开关 —— 等于没做。
@@ -95,3 +106,64 @@ class EgressEnvTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class EgressWarningTests(unittest.TestCase):
+    """配了 DoH 却探不到出口时那一句提示。
+
+    **判据是真探测,不是环境变量。** 第一版按变量判,在 macOS 上是误报:那里
+    `getproxies()` 读系统代理设置,一个 `*_proxy` 都没 export 也照样有出口(实测
+    `env -i` 下 DoH 解析成功,而告警照样打「多半连不上」)。所以这几条把
+    `urllib.request.getproxies()` 这件外部事实替掉,只验「探到了 / 探不到」各走哪条路。
+    """
+
+    def warn(self, probe_rc: int, **env) -> str:
+        """跑真 `warn_egress_gap`,把它那次探测换成一个固定答案的 uv 桩。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / 'uv'
+            stub.write_text(f'#!/bin/sh\nexit {probe_rc}\n', encoding='utf-8')
+            stub.chmod(0o755)
+            script = ('set -uo pipefail\n'
+                      'say() { echo "$*" >&2; }\n'
+                      'CLEAN_ENV=(env -i HOME="$HOME" PATH="$PATH")\n'
+                      f'. "{WEB_ENV_SH}"\n'
+                      'build_web_env\n'
+                      'warn_egress_gap\n')
+            done = subprocess.run([BASH, '-c', script], capture_output=True, text=True,
+                                  env={'HOME': tmp, 'PATH': f'{tmp}:/usr/bin:/bin', **env})
+            return done.stderr
+
+    def test_no_egress_found_says_so(self):
+        out = self.warn(1, KB_FEED_DOH='https://doh.example/q')
+        self.assertIn('探不到代理', out)
+
+    def test_a_system_proxy_is_enough_to_stay_quiet(self):
+        """**反过来钉一边**:macOS 上那次误报就是这一格。探到了就什么都不说。"""
+        self.assertEqual('', self.warn(0, KB_FEED_DOH='https://doh.example/q').strip())
+
+    def test_nothing_is_said_when_the_switch_is_off(self):
+        self.assertEqual('', self.warn(1).strip())
+
+    def test_the_status_line_masks_the_endpoint_path(self):
+        """端点的 path / query 可能带 token(NextDNS、AdGuard 那类带 profile id 的),
+        日志里不该留。"""
+        script = ('set -uo pipefail\n'
+                  'say() { echo "$*" >&2; }\n'
+                  f'. "{WEB_ENV_SH}"\n'
+                  'doh_line\n')
+        done = subprocess.run([BASH, '-c', script], capture_output=True, text=True,
+                              env={'HOME': '/tmp', 'PATH': '/usr/bin:/bin',
+                                   'KB_FEED_DOH': 'https://dns.nextdns.io/abc123secret?x=1'})
+        self.assertIn('https://dns.nextdns.io', done.stderr)
+        self.assertNotIn('abc123secret', done.stderr, '端点里的 token 进了日志')
+        self.assertNotIn('x=1', done.stderr)
+
+    def test_the_status_line_says_off_and_how_to_turn_it_on(self):
+        script = ('set -uo pipefail\n'
+                  'say() { echo "$*" >&2; }\n'
+                  f'. "{WEB_ENV_SH}"\n'
+                  'doh_line\n')
+        done = subprocess.run([BASH, '-c', script], capture_output=True, text=True,
+                              env={'HOME': '/tmp', 'PATH': '/usr/bin:/bin'})
+        self.assertIn('关', done.stderr)
+        self.assertIn('KB_FEED_DOH', done.stderr, '没说怎么开')
