@@ -95,38 +95,45 @@ function Get-Setting {
 # ── kb-web:知识库面板(耗时的活都在它进程里跑)──────────────────────────────
 
 function Initialize-WebEnv {
-    <#  `web_prepare_env` 的对等物。
+    <#  `web_prepare_env` 的对等物。三条硬约束在 CLAUDE.md「操作入口」那节,
+        这里只记它们在这一侧的样子:
 
-        **起服务那条命令一律 --offline。** `uv run` 每次都要先确认一遍项目环境,而
-        pyproject.toml 一动(改依赖、改注释都算)它就要重建那个 editable 包 —— 重建要
-        解析 `build-system.requires` 里的 hatchling,不带 --offline 时**即使 uv 缓存里
-        已经有**也要去 pypi 问一次最新版。于是网络一抖启动就挂在
-        「No solution found when resolving: hatchling」上,而这事发生在 daemonize 之后
-        的后台进程里:用户看到的只有一句「kb-web 起不来,看 web.log」,而日志尾巴是
-        一段跟知识库毫无关系的 tls handshake eof。
+        **起服务那条命令一律 --offline。** pyproject.toml 一动,`uv run` 就要重建
+        editable 包、去 pypi 问一次 hatchling 的最新版;网络一抖就挂在
+        「No solution found when resolving: hatchling」上,而那发生在 daemonize
+        之后的后台进程里 —— 用户只看到「kb-web 起不来,看 web.log」,日志尾巴是
+        一段 tls handshake eof。
 
-        「要不要联网装东西」因此挪到前台来问:离线确认不成 —— 真的新增了依赖、或者
-        uv 缓存被清过 —— 才联网装一次。前台做有两个好处:失败当场说得清,而不是让人
-        去日志尾巴里猜;以及用得上当前 shell 的代理设置(清环境那一步把 `*_proxy`
-        一起清掉了,而这台机器上 pypi 常常得走代理)。
+        **所以「要不要联网装东西」挪到前台问**:离线确认不成才联网装一次。前台做
+        有两个好处:失败当场说得清;以及用得上当前 shell 的代理设置(清环境那一步
+        把 `*_proxy` 一起清掉了)。
 
-        **不用 `uv sync` 做这件事**:它默认 exact,会卸掉 venv 里那份旧项目名的
-        editable 残留,而两份 dist-info 的 RECORD 记着**同一组** kb / kb-web / kb-mcp
-        入口 —— 卸掉它就可能把启动入口一起删了。`uv run` 默认 inexact,压根不碰它。  #>
+        **不用 `uv sync`**:它默认 exact,会卸掉 venv 里旧项目名那份 editable
+        残留,而两份 dist-info 的 RECORD 记着**同一组** kb / kb-web / kb-mcp 入口。  #>
     $uv = Get-Uv
     Push-Location $script:Root
     try {
         # **探测用的那句写 `pass`,不许写空串。** kb.sh 那边是 `python -c ""`,而
         # PowerShell 调原生程序时会把 `''` 整个丢掉 —— python 于是收到一个光秃秃的
         # `-c`,报 `Argument expected for the -c option` 并以非 0 退出。后果不是
-        # 报错了事:这一步**永远失败**,于是每次起服务都当成「环境要补一下」去联网
-        # 装一次(没网就直接 Die),而那正是这一整段要避免的事。`pass` 同样是空操作。
-        $null = & $uv 'run' '--offline' 'python' '-c' 'pass' 2>&1
-        if ($LASTEXITCODE -eq 0) { return }
+        # 报错了事:这一步**永远失败**,于是每次起服务都去联网装一次。`pass` 同样是空操作。
+        # **两句都必须走 Invoke-Native**(理由见该函数):uv 把进度写在 stderr 上,
+        # 而顶上是 `Stop` —— 实测 `.\kb.ps1 start` 死在 `Using CPython 3.11.17`
+        # 这句**不是错误的进度信息**上。`2>$null` 也挡不住。
+        $probe = @('run', '--offline', 'python', '-c', 'pass')
+        if ((Invoke-Native $uv $probe).Code -eq 0) { return }
         Write-Note '[web] 环境要补一下(依赖有变动,或 uv 缓存不全),联网装一次'
-        $null = & $uv 'run' 'python' '-c' 'pass' 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Die '依赖装不上,kb-web 起不来。网络通了再跑一次 .\kb.ps1 web start'
+        $r = Invoke-Native $uv @('run', 'python', '-c', 'pass')
+        if ($r.Code -ne 0) {
+            # **把 uv 说的话原样带上** —— 这一段挪到前台的理由就是「失败当场说得
+            # 清」,只打一句「装不上」等于没说(实测真因是上一次被掀翻的运行留下
+            # 了一个空 .venv,而那句话会让人一直往网络上找)。
+            Die @"
+依赖装不上,kb-web 起不来。uv 说:
+$($r.Text)
+     上面要是提到 .venv 不是有效环境,把那个目录删掉再跑(半途被打断的首次
+     安装会留下一个空壳);否则等网络通了再跑一次 .\kb.ps1 web start
+"@
         }
     } finally { Pop-Location }
 }
@@ -237,8 +244,9 @@ function Invoke-Api {
                     '--data-binary', "@$payload")
         }
         # http_code 只有三位 ASCII,它走 stdout 是安全的;响应体走 -o
+        # `-StdoutOnly`:curl 把连不上那类话写在 stderr 上,并进来这个数字就解析不出。
         $a += @('-o', $out, '-w', '%{http_code}', "$($script:Api)$Path")
-        $codeText = ((& $script:Curl @a 2>$null) -join '').Trim()
+        $codeText = (Invoke-Native $script:Curl $a -StdoutOnly).Text.Trim()
         $code = 0
         $null = [int]::TryParse($codeText, [ref]$code)
         $body = ''
@@ -388,9 +396,11 @@ function Invoke-Grab {
 function Get-MainCheckout {
     <#  如果**当前是 worktree**,返回主检出的路径;否则返回 $null。
         判据用 git 的 common-dir:worktree 的 .git 是个文件,指向主检出那一份。  #>
-    $common = & git -C $script:Root rev-parse --path-format=absolute --git-common-dir 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $common) { return $null }
-    $common = ([string]($common | Select-Object -First 1)).Trim()
+    # `-StdoutOnly`:不是仓库时 git 把 fatal 写在 stderr 上,并进来会被当成路径。
+    $g = @('-C', $script:Root, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    $r = Invoke-Native 'git' $g -StdoutOnly
+    if ($r.Code -ne 0 -or -not $r.Text) { return $null }
+    $common = ([string](($r.Text -split "`n")[0])).Trim()
     if ($common -notmatch '[\\/]\.git[\\/]?$') { return $null }
     $full = [IO.Path]::GetFullPath($common).TrimEnd('\', '/')
     $here = [IO.Path]::GetFullPath((Join-Path $script:Root '.git')).TrimEnd('\', '/')
@@ -448,11 +458,14 @@ function Invoke-Graph {
     $uv = Get-Uv
     Push-Location $script:Root
     try {
-        & $uv 'run' 'python' 'scripts/wiki/build_graph_html.py' '--since' $since
+        Invoke-NativeLive $uv @('run', 'python', 'scripts/wiki/build_graph_html.py',
+                                '--since', $since)
         if ($LASTEXITCODE -ne 0) { Die '话题图谱没建成(原因在上面)' }
         # 分类图谱会在「新图明显不如旧图」时拒绝发布并非零退出 —— 那是保护不是故障,
         # 确实该缩的那次(比如故意收紧分类规则)加 --allow-shrink。
-        & $uv 'run' 'python' 'scripts/wiki/build_catgraph.py' '--kind' 'all' '--no-llm' @Arg
+        Invoke-NativeLive $uv (@('run', 'python', 'scripts/wiki/build_catgraph.py',
+                                 '--kind', 'all', '--no-llm') + $Arg)
+
         if ($LASTEXITCODE -ne 0) {
             Die '分类图谱没发布(原因在上面)。拒绝发布是保护:确实该缩就加 --allow-shrink'
         }
@@ -472,7 +485,7 @@ function Invoke-CollectorCli {
 "@
     }
     Push-Location $script:Collector
-    try { & $script:Py '-m' 'cli' @Arg } finally { Pop-Location }
+    try { Invoke-NativeLive $script:Py (@('-m', 'cli') + $Arg) } finally { Pop-Location }
 }
 
 function Get-Status {
@@ -556,7 +569,8 @@ function Invoke-Test {
         $env:TZ = 'Asia/Shanghai'
         $env:HF_HUB_OFFLINE = '1'
         $env:TRANSFORMERS_OFFLINE = '1'
-        & $uv 'run' '--offline' 'python' '-m' 'tests.tiers' $tier
+        # unittest 把进度和结果全写 stderr —— 必须走 Invoke-NativeLive。
+        Invoke-NativeLive $uv @('run', '--offline', 'python', '-m', 'tests.tiers', $tier)
         $rc = $LASTEXITCODE
     } finally {
         Pop-Location

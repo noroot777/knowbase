@@ -18,7 +18,6 @@ code,分区因此稳定,改类目时 bump `Taxonomy.sig()` 会自动触发全量
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -73,10 +72,18 @@ def _flock(name: str):
     (和 secrets.json 那把锁同一套理由)。"""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     p = CACHE_DIR / name
+    # **锁走 `kb.filelock`,不直接 `import fcntl`**(全局约定):后者在 Windows 上
+    # 是模块级 ImportError,而本模块被 build_catgraph 导入,于是整条图谱命令起不来。
+    # 这里用**函数内 import + sys.path 兜底**,跟同目录 `taxo_llm` / `graph_data`
+    # 一个写法 —— 本模块可以被单独 import(那时 REPO 还不在 sys.path 上)。
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    from kb import filelock
+
     with _io_lock:                       # 同进程内的并发先在这儿排队
         fh = p.open("a+")
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            filelock.flock(fh.fileno(), filelock.LOCK_EX)
             yield
         finally:
             fh.close()                   # 关闭即释放 flock

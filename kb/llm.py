@@ -25,12 +25,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from kb import filelock
 from kb.config import DATA_DIR
-
-try:                                     # POSIX 才有;非 POSIX 上退化成只有进程内锁
-    import fcntl
-except ImportError:                      # pragma: no cover - 本项目只跑 macOS
-    fcntl = None                         # type: ignore[assignment]
 
 
 @dataclass(frozen=True)
@@ -155,7 +151,7 @@ def _settings_guard() -> Iterator[None]:
     """
     global _lock_depth
     with _settings_lock:                  # 先把同进程的并发挡在外面
-        if _lock_depth or fcntl is None:  # 重入(外层已持锁)/ 无 flock:只靠进程内锁
+        if _lock_depth or not filelock.HAVE_FLOCK:   # 重入(外层已持锁)/ 无文件锁
             _lock_depth += 1
             try:
                 yield
@@ -166,7 +162,7 @@ def _settings_guard() -> Iterator[None]:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            filelock.flock(fd, filelock.LOCK_EX)
             _lock_depth += 1
             try:
                 yield

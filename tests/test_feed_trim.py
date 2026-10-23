@@ -433,23 +433,31 @@ class TrimTests(TrimFixture, unittest.TestCase):
             self.assertEqual(2, len(taken))
 
     def test_the_maintenance_lock_really_excludes_another_process(self):
-        """锁必须跨进程:CLI、kb-web 管道、手动重跑各是独立进程。"""
+        """锁必须跨进程:CLI、kb-web 管道、手动重跑各是独立进程。
+
+        探针走 `kb.filelock`(不是直接 `import fcntl`):被测那一侧取锁就是过这一层
+        的,两边用同一份后端才算真在验互斥 —— 各用一套的话,后端对不上时这条会绿着
+        骗人。`import fcntl` 还会让这条在 Windows 上直接报 ModuleNotFoundError。
+        """
         child = textwrap.dedent('''
-            import fcntl, sys
-            fh = open(sys.argv[1], 'a+')
+            import sys
+            sys.path.insert(0, sys.argv[1])
+            from kb import filelock
+            fh = open(sys.argv[2], 'a+')
             try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                filelock.flock(fh.fileno(), filelock.LOCK_EX | filelock.LOCK_NB)
                 print('free')
             except OSError:
                 print('busy')
         ''')
+        repo = str(Path(__file__).resolve().parent.parent)
         lock = self.root / 'feeds-trim.lock'
         with maintenance.maintenance_lock():
             self.assertTrue(lock.exists())
-            r = subprocess.run([sys.executable, '-c', child, str(lock)],
+            r = subprocess.run([sys.executable, '-c', child, repo, str(lock)],
                                capture_output=True, text=True, timeout=30)
             self.assertEqual('busy', r.stdout.strip())
-        r = subprocess.run([sys.executable, '-c', child, str(lock)],
+        r = subprocess.run([sys.executable, '-c', child, repo, str(lock)],
                            capture_output=True, text=True, timeout=30)
         self.assertEqual('free', r.stdout.strip())
 

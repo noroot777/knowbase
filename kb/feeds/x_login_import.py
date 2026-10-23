@@ -62,7 +62,6 @@ name+domain+path 覆盖),界面上那颗按钮按一次就重做一遍;什么时
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import os
 from contextlib import contextmanager
@@ -70,6 +69,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from kb import filelock
 from kb.config import (DATA_DIR, ScheduleUnreadable, read_config_file,
                        write_config_file)
 from kb.feeds.x_cdp import CdpError
@@ -505,7 +505,7 @@ def _installing(profile: str):
         return
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            filelock.flock(fd, filelock.LOCK_EX | filelock.LOCK_NB)
         except BlockingIOError:
             # 这一档才是真的「有人在跑」(`EWOULDBLOCK`/`EAGAIN`)。
             yield '另一次导入正在进行中 —— 等它结束再试'
@@ -525,7 +525,7 @@ def _installing(profile: str):
             # 一并收走,而这把锁的射程只到本次导入为止。所以照旧**都试一次**,
             # 失败咽下去(口径同 `x_cdp.Chrome._shutdown`「两步都有界、都不往外抛」)。
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                filelock.flock(fd, filelock.LOCK_UN)
             except OSError:
                 pass
     finally:

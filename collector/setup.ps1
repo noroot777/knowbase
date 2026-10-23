@@ -142,7 +142,15 @@ Write-Output "[setup] .venv -> $VenvHome"
 # `-m cli` 要在 collector 目录里跑才找得到模块
 Push-Location $HereDir
 try {
-    $null = & (Join-Path $HereDir '.venv\Scripts\python.exe') '-m' 'cli' 'status' 2>&1
+    # **这一句不许写 `2>&1`。** 本脚本既可以单跑(那时 $ErrorActionPreference 是
+    # 默认的 Continue),也会被 `.\kb.ps1 setup` 用 `& $ps1` 调起 —— 那条路上它
+    # **继承 kb.ps1 的 `Stop`**,而 `2>&1` 会把 cli 写在 stderr 上的话包成
+    # NativeCommandError 当场终止:于是「自检没通过就打一行警告」这段压根走不到,
+    # 报出来的是一句 PowerShell 内部错误。实测口径与出路见
+    # docs/decisions/windows-entry.md;这里就地降级,因为采集器这份脚本是独立的,
+    # 不 dot-source scripts/win_py.ps1(单跑时那条路径不一定在)。
+    $ErrorActionPreference = 'Continue'
+    $null = & (Join-Path $HereDir '.venv\Scripts\python.exe') '-m' 'cli' 'status'
     if ($LASTEXITCODE -eq 0) { Write-Output '[setup] 自检通过:python -m cli status 可用' }
     else { Note '[setup] 警告:cli status 跑不通,检查上面两个路径' }
 } finally { Pop-Location }

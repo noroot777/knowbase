@@ -206,6 +206,13 @@ def _powershell() -> str | None:
     return None
 
 
+def _project_python() -> str | None:
+    """项目 venv 里的 python。`NativeCallTest` 要一个**真会往 stderr 说话**的
+    原生程序,拿它当被试最省事(而且这几条用例只在 Windows 上有意义)。"""
+    exe = REPO / '.venv' / 'Scripts' / 'python.exe'
+    return str(exe) if exe.is_file() else None
+
+
 class _NeedsPowerShell(unittest.TestCase):
     """要真跑 PowerShell 的那几条共用这道闸门。"""
 
@@ -363,6 +370,144 @@ class EscapeTest(_NeedsPowerShell):
         self.assertEqual(hits, [],
                          '双引号串里有误生效的反引号转义 —— 打出来会少字符、'
                          f'还可能响一声,而解析期毫无提示:{pretty}')
+
+
+#: 原生程序往 stderr 写一行、退出码 0 —— uv 建 venv 时那句 `Using CPython 3.11.17`
+#: 就是这个形状。**不带引号**:PowerShell 5.1 传原生参数时会吃掉嵌入的双引号,
+#: 探针自己先踩进那个坑的话,红的原因就不是我们要验的那一条了。
+_STDERR_RC0 = 'import sys; sys.stderr.write(chr(88)); sys.exit(0)'
+
+#: 在 `$ErrorActionPreference = 'Stop'` 下跑一句「会往 stderr 说话」的原生命令。
+#: 判据是**它有没有抛**,不是输出长什么样。
+_NATIVE_PROBE = r'''
+param([string]$WinPy, [string]$Py)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'          # kb.ps1 顶上就是这个,照搬
+$script:Root = (Get-Location).Path
+function Die { param([string]$m) throw $m }
+. $WinPy
+
+$code = 'import sys; sys.stderr.write(chr(88)); sys.exit(0)'
+try {
+    $r = Invoke-Native $Py @('-c', $code)
+    "NATIVE_OK rc=$($r.Code)"
+} catch {
+    "NATIVE_THROW $($_.FullyQualifiedErrorId)"
+}
+try {
+    $null = Invoke-NativeLive $Py @('-c', $code)
+    "LIVE_OK rc=$LASTEXITCODE"
+} catch {
+    "LIVE_THROW $($_.FullyQualifiedErrorId)"
+}
+# 反过来钉一边:**降级不许外泄**。出了那两个函数,调用方的 Stop 还得管事 ——
+# 否则这道修复会顺手把整份脚本的报错纪律关掉,那比原来的 bug 更难查。
+try {
+    $null = & $Py '-c' $code 2>&1
+    'LEAK'
+} catch {
+    'CALLER_STILL_STRICT'
+}
+'''
+
+
+class NativeCallTest(_NeedsPowerShell):
+    """原生程序往 stderr 说一句话,不许把入口掀翻。
+
+    **这条是真进去过的,而且是「`.\\kb.ps1 start` 直接用不了」那一级。**
+    `kb.ps1` 顶上设 `$ErrorActionPreference = 'Stop'`(那是有意的:cmdlet 出错就
+    停,免得像 `status` 那样打一行红再接着给出一个错答案)。但 PowerShell 一看到
+    **原生程序**往 stderr 写了字,就把那几行包成 `NativeCommandError` 错误记录,
+    而在 `Stop` 下那是**终止性**的。
+
+    于是 uv 建 venv 时打的那句进度 `Using CPython 3.11.17` —— 一句**不是错误的
+    话** —— 让 `start` 当场死掉,报出来的是一段 PowerShell 内部机制的话,跟知识库
+    毫无关系。更坏的是它**留下半个 `.venv`**(只有 `CACHEDIR.TAG`),之后 uv 既
+    拒绝用它也不会自己修,于是**后面每一次重试都失败,而且换了个理由** ——
+    人完全看不出这几次失败是同一个根。
+
+    **`2>$null` 挡不住**(反直觉,所以这里连它一起钉):实测 `Stop` 下 `2>&1` 和
+    `2>$null` 都抛。所以口径是统一走 `Invoke-Native` / `Invoke-NativeLive`,它们
+    把 `$ErrorActionPreference` 降回 `Continue`、**只在自己的作用域里**。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.py = _project_python()
+        if not self.py:
+            self.skipTest('找不到项目 python(.venv) —— 这一条要一个真能往 stderr '
+                          '写字的原生程序才验得了')
+
+    def _run(self):
+        out = self.run_ps(_NATIVE_PROBE,
+                          str(REPO / 'scripts' / 'win_py.ps1'), self.py)
+        self.assertEqual(out.returncode, 0, f'探针本身失败了:{out.stderr}')
+        return out.stdout
+
+    def test_capturing_helper_survives_stderr(self) -> None:
+        text = self._run()
+        self.assertIn('NATIVE_OK rc=0', text,
+                      'Invoke-Native 被 stderr 掀翻了 —— `.\\kb.ps1 start` 会死在 '
+                      'uv 的进度信息上,还会留下半个 .venv 让后续重试全失败')
+
+    def test_streaming_helper_survives_stderr(self) -> None:
+        text = self._run()
+        self.assertIn('LIVE_OK rc=0', text,
+                      'Invoke-NativeLive 被 stderr 掀翻了 —— unittest 把全部输出都'
+                      '写 stderr,`.\\kb.ps1 test` 会一开跑就炸')
+
+    def test_the_relaxation_does_not_leak_to_the_caller(self) -> None:
+        """反过来钉一边:降级只在函数内,出来之后 `Stop` 照旧管事。"""
+        text = self._run()
+        self.assertIn('CALLER_STILL_STRICT', text,
+                      '两个 helper 把调用方的 $ErrorActionPreference 也改了 —— '
+                      '那等于顺手关掉整份脚本的报错纪律')
+
+
+class NoRawRedirectTest(unittest.TestCase):
+    """别处不许再写 `2>&1` / `2>$null` 直接套在原生命令上。
+
+    这是上面那条的**结构版**,不需要 PowerShell 就能跑(日常门禁在 macOS 上过)。
+    判据只盯「`&` 调用 + 重定向」这一种写法:套在 **PowerShell 函数**调用上的
+    `2>$null` 是另一件事(那是压这个函数的错误流),照旧放行。
+    """
+
+    #: `& $something … 2>&1` / `… 2>$null` —— 原生调用自带重定向。
+    _BAD = re.compile(r'^\s*(?:\$\w+\s*=\s*)?&\s*[\$(].*?2>(?:&1|\$null)', re.M)
+
+    #: **唯一允许写重定向的地方就是 `Invoke-Native` 自己的函数体** —— 口径只有
+    #: 一份,那一处就是这一份。整段挖掉再扫,所以这里不需要维护行号。
+    _OWNER = re.compile(r'(?ms)^function Invoke-Native \{.*?^\}\n')
+
+    def test_no_native_call_carries_its_own_redirect(self) -> None:
+        offenders = []
+        for rel in PS_FILES:
+            src = (REPO / rel).read_text(encoding='utf-8-sig')
+            # 挖掉时用等长的空行替换,行号才还对得上
+            def _blank(m):
+                return '\n' * m.group(0).count('\n')
+            src = self._OWNER.sub(_blank, src)
+            for m in self._BAD.finditer(src):
+                line = src[:m.start()].count('\n') + 1
+                offenders.append(f'{rel}:{line}')
+        self.assertEqual(offenders, [],
+                         '原生调用自带 2>&1 / 2>$null:在 $ErrorActionPreference='
+                         "'Stop' 下,对端往 stderr 写一个字就会终止整条命令。"
+                         '改走 Invoke-Native / Invoke-NativeLive')
+
+    def test_the_owner_really_was_exempted(self) -> None:
+        """反过来钉一边:那段豁免真的命中了 `Invoke-Native`。
+
+        正则哪天对不上(函数改名、括号换行),上面那条会**悄悄变回全文扫描**然后
+        永远红;或者更糟,`_BAD` 一起失效而它永远绿。所以这里确认两件事:
+        豁免段落存在,且它里面确实有那两句重定向。
+        """
+        src = (REPO / 'scripts/win_py.ps1').read_text(encoding='utf-8-sig')
+        m = self._OWNER.search(src)
+        self.assertIsNotNone(m, 'Invoke-Native 的函数体没匹配上 —— 先修这条正则')
+        self.assertTrue(self._BAD.search(m.group(0)),
+                        'Invoke-Native 里居然没有重定向了 —— 要么实现换了写法,'
+                        '要么这条豁免已经不需要了,两种都该把它删掉')
 
 
 if __name__ == '__main__':

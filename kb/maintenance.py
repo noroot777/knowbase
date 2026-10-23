@@ -64,12 +64,12 @@ flock 随进程退出自动释放,所以持锁者崩了也不会把别人堵死�
 
 from __future__ import annotations
 
-import fcntl
 import os
 import threading
 import time
 from contextlib import contextmanager
 
+from kb import filelock
 from kb.config import DATA_DIR
 
 LOCK_NAME = 'feeds-trim.lock'
@@ -105,7 +105,7 @@ def _acquire(fh, wait: float, on_wait, on_poll) -> None:
     told: float | None = None
     while True:
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            filelock.flock(fh.fileno(), filelock.LOCK_EX | filelock.LOCK_NB)
             return
         except OSError:
             pass

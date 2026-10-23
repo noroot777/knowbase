@@ -38,13 +38,25 @@ sqlite、httpx、uvicorn 的 socket 都在占 fd,写死一个编号就可能 dup
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import select
 import shutil
 import subprocess
 import time
+
+# **这条通道整条只能在 POSIX 上跑,所以 fcntl 包在 try 里。** 它要的是
+# `fcntl.F_DUPFD`(不是文件锁),`kb.filelock` 那一层只包 flock、帮不上忙 ——
+# 换句话说这里是「真的需要 fcntl 本身」,而不是没改过来。Windows 上 import 不能
+# 炸:`kb.feeds.x_cdp` 在 `kb.server` 的 import 链上(x_login_import 认它的
+# CdpError),一炸就是整个面板起不来、报一句指不到业务的 ModuleNotFoundError。
+# **包 try 只是一半**,另一半是 `Chrome.__enter__` 第一句的显式报错 —— 少了它
+# 会带着 `fcntl = None` 一路跑到 `None.fcntl`,报 AttributeError。
+# 两半都由 tests/test_filelock.py 的 POSIX_ONLY 那条用例钉着。
+try:
+    import fcntl
+except ImportError:                      # pragma: no cover - 只有 Windows 走这支
+    fcntl = None
 
 # 写超时的常量放在 `ws_client`(它谁都不依赖,判据也写在它的模块注释里)。
 # 两条传输共用一个值是有意的:「几 KB 写不进去就是对端卡住了」跟传输无关。
@@ -254,6 +266,11 @@ class Chrome(Session):
     # ── 生命周期 ────────────────────────────────────────────────────────────
 
     def __enter__(self) -> 'Chrome':
+        if fcntl is None:
+            raise CdpError(
+                '这条通道在 Windows 上不可用:它要把管道搬到 Chrome 写死的 fd 3/4,'
+                '靠的是 POSIX 的 fcntl(F_DUPFD),Windows 上没有对等物。'
+                '改用 RSS 通道,或者在 macOS/Linux 上导出登录态再导入。')
         binary = find_chrome(self.chrome_path)
         os.makedirs(self.profile, exist_ok=True)
         # pr/pw 是我们这头;cr(chrome 读)/cw(chrome 写)要落到子进程的 fd 3/4。

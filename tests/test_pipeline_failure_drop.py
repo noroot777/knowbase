@@ -12,7 +12,6 @@
 摆盘沿用 `tests/pipeline_case.HistoryCase`(账本文件从 `_STATE_FILE` 派生,所以
 那一处 patch 同时隔离了这一份)。
 """
-import fcntl
 import json
 import shutil
 import threading
@@ -25,6 +24,7 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from kb import filelock
 from kb import pipeline_failures as pf, pipeline_state as state
 from kb.collectors import CollectorError, item_dropper
 from kb.web import pipeline_api
@@ -318,17 +318,27 @@ class DropLedgerTests(HistoryCase):
         一条,而面板显示得像删掉了,下一轮同步它又回来了。
         flock 认的是 open file description,所以同进程换一个 fd 就挡得住自己 ——
         这也正是为什么一把 flock 同时管住了线程池里那两条请求,不用再叠一把
-        `threading.Lock`。
+        `threading.Lock`。**两个后端在这一点上同侧**:Windows 的字节段锁也是按
+        句柄算的,同进程另开一个句柄照样被挡住。
+
+        **句柄用 try/finally 关,不用 addCleanup。** `addCleanup` 的回调排在
+        `tearDown` **之后**,而夹具的 `tearDown` 要删那个临时目录 —— Windows 上
+        删不掉还开着的文件(WinError 32)。实测形态:这条用例的断言全过了,红出来
+        的却是一句临时目录清理失败的 PermissionError;**真断言要是哪天不过,也会被
+        那句盖掉**。关在 finally 里就是「先关句柄、再清目录」。
         """
         other = pf._lock_file().open('a+')
-        self.addCleanup(other.close)
-        fcntl.flock(other.fileno(), fcntl.LOCK_EX)
-        with patch.object(pf, '_WAIT', 0.2), self.assertRaises(TimeoutError):
+        try:
+            filelock.flock(other.fileno(), filelock.LOCK_EX)
+            with patch.object(pf, '_WAIT', 0.2), self.assertRaises(TimeoutError):
+                pf.remember('wechat_local', 'wx-1')
+            filelock.flock(other.fileno(), filelock.LOCK_UN)
+            self.assertEqual(set(), pf.dropped_keys(), '没写成就是没写成')
             pf.remember('wechat_local', 'wx-1')
-        fcntl.flock(other.fileno(), fcntl.LOCK_UN)
-        self.assertEqual(set(), pf.dropped_keys(), '没写成就是没写成')
-        pf.remember('wechat_local', 'wx-1')
-        self.assertEqual({'wechat_local:wx-1'}, pf.dropped_keys(), '让开之后照旧写得进')
+            self.assertEqual({'wechat_local:wx-1'}, pf.dropped_keys(),
+                             '让开之后照旧写得进')
+        finally:
+            other.close()
 
     def test_the_lock_file_travels_with_the_ledger(self):
         """锁文件从账本那个路径派生 —— 测试隔离落盘时它自动跟着搬走。

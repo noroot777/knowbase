@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -12,6 +11,7 @@ import shutil
 import threading
 import time
 
+from kb import filelock
 from kb import wechat_runtime as runtime
 
 MESSAGES = {
@@ -63,7 +63,7 @@ def _lock():
     path = runtime.private_dir(runtime.runtime_home()) / "setup.lock"
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        filelock.flock(fd, filelock.LOCK_EX | filelock.LOCK_NB)
     except BlockingIOError:
         os.close(fd)
         raise runtime.SetupError("已有绿泡泡接入任务正在执行，请等待当前任务结束。") from None

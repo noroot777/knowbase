@@ -22,6 +22,12 @@ dependencies = [
     # 和表格,少一样都会让"页面上被改坏的东西"在这里看着无害。
     # 原来只是 rich 的传递依赖,那条链断了这里就崩,所以显式列出来。
     "markdown-it-py[linkify]>=3.0",
+    # **Windows 没有系统 tz 数据库。** `ZoneInfo('Asia/Shanghai')` 在二十来个模块
+    # 的**顶层**求值(元规则:时间一律按项目时区),少了这份数据就是 import 期
+    # `ZoneInfoNotFoundError` —— kb-web 压根起不来,而报出来的话跟知识库无关。
+    # **标记不许去掉**:macOS/Linux 上读系统那一份才是对的,装个 PyPI 快照反而会
+    # 让时区数据停在装它的那一天。
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.scripts]
