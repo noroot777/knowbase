@@ -114,19 +114,20 @@ class QuotaCoversTheInflowTests(_Base):
 class OutputStaysBoundedTests(_Base):
     """出稿长度不许随素材条数线性增长。"""
 
-    def test_a_small_batch_is_still_written_one_line_each(self):
-        """少的时候照旧一条一行 —— 退化是为量大准备的,不该顺手把正常那一档
+    def test_a_small_batch_is_still_written_one_item_each(self):
+        """少的时候照旧每条一项 —— 退化是为量大准备的,不该顺手把正常那一档
         也改成归并(那会让每天的补录都读不出具体是什么)。"""
         got = daily_prompt.late_section(daily_prompt._LATE_CAP)
-        self.assertIn('每条一行', got)
+        self.assertIn('每条一个 "- " 列表项', got)
         self.assertNotIn('归并', got)
 
-    def test_a_big_batch_asks_for_a_bounded_number_of_lines(self):
-        """量大时许的是"最多 N 行、按来源和主题归并",而**不能**再出现「每条一行」
+    def test_a_big_batch_asks_for_a_bounded_number_of_items(self):
+        """量大时许的是"最多 N 项、按来源和主题归并",而**不能**再要求每条一项
         —— 后者正是让出稿从素材清单中间断掉的那句。"""
         got = daily_prompt.late_section(305)
-        self.assertNotIn('每条一行', got)
-        self.assertIn(f'最多 {daily_prompt._LATE_CAP} 行', got)
+        self.assertNotIn('每条一个 "- " 列表项', got)
+        self.assertIn(f'最多 {daily_prompt._LATE_CAP} 项', got)
+        self.assertIn('每类一个 "- " 列表项', got)
         self.assertIn('305 条', got)          # 告诉模型这一批有多少,它才好归并
 
     def test_the_instruction_does_not_grow_with_the_batch(self):
@@ -138,29 +139,30 @@ class OutputStaysBoundedTests(_Base):
 
     def test_generate_really_sends_the_degraded_instruction(self):
         """**接线**:`generate` 得按这一轮补录的实际条数挑指令。写死成一个常量的
-        话(旧实现就是),上面三条全绿而真发出去的还是「每条一行」。"""
+        话(旧实现就是),上面三条全绿而真发出去的还是逐条罗列。"""
         since, until = T('2026-09-30 00:00'), T('2026-09-30 12:00')
         self.seed()
         self.add(80, first=T('2026-09-20 01:00'), step_minutes=60)
         daily.generate(since=since, until=until)
         sent = self.prompt()
-        self.assertIn(f'最多 {daily_prompt._LATE_CAP} 行', sent)
-        self.assertNotIn('每条一行,写清它是什么', sent)
+        self.assertIn(f'最多 {daily_prompt._LATE_CAP} 项', sent)
+        self.assertIn('每类一个 "- " 列表项', sent)
+        self.assertNotIn('每条一个 "- " 列表项,写清它是什么', sent)
 
-    def test_a_small_batch_keeps_the_per_line_instruction_end_to_end(self):
-        """反过来钉一边:补录只有几条时真发出去的仍是「每条一行」。"""
+    def test_a_small_batch_keeps_the_per_item_instruction_end_to_end(self):
+        """反过来钉一边:补录只有几条时真发出去的仍是每条一项。"""
         since, until = T('2026-09-30 00:00'), T('2026-09-30 12:00')
         self.seed()
         self.add(3, first=T('2026-09-29 01:00'), step_minutes=60)
         daily.generate(since=since, until=until)
         sent = self.prompt()
-        self.assertIn('每条一行,写清它是什么', sent)
+        self.assertIn('每条一个 "- " 列表项,写清它是什么', sent)
         self.assertNotIn('按来源和主题归并', sent)
 
     def test_sections_that_grow_with_the_input_are_capped(self):
         """要点名额提到 260 之后,输入翻了一倍 —— 出稿里**每一节都得有上限**,
         否则换一节撑爆而已。工具那一节原来一条没有。"""
-        for want in ('3~6 条', '最多 20 行', '1~4 条', '最多 12 行'):
+        for want in ('3~6 条', '最多 20 项', '1~4 条', '最多 12 项'):
             self.assertIn(want, daily_prompt.PROMPT, want)
 
 
