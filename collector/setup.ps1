@@ -74,18 +74,21 @@ if (-not $VenvExplicit -and -not (Test-Path -LiteralPath (Join-Path $VenvHome 'S
 # 空目录也行:库和表由 src/db 在首次连接时建出来
 $null = New-Item -ItemType Directory -Force -Path $DataHome
 
-function Get-Uv {
-    $c = Get-Command 'uv' -ErrorAction SilentlyContinue
-    if ($c) { return $c.Source }
-    foreach ($p in @((Join-Path $env:USERPROFILE '.local\bin\uv.exe'),
-                     (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\uv.exe'))) {
-        if ($p -and (Test-Path -LiteralPath $p -PathType Leaf)) { return $p }
-    }
-    return $null
+# **「uv 在哪」的口径只有一份**,在 ../scripts/win_uv.ps1。这里原先自己写了一遍,
+# 而两份已经不一样了:那一份少了 `pip install --user` 装出来的位置
+# (%APPDATA%\Python\Python3XX\Scripts)。后果是这台机器上实测的那一种 ——
+# `.\kb.ps1 start` 找得到 uv,`collector\setup.ps1` 偏说「没有 venv 也没有 uv」,
+# 而人刚亲手装过 uv,只会认为这个脚本坏了。
+# `Find-UvPath` 只回答「在哪」,找不到时说哪句话还是下面自己决定(这里要提
+# KB_COLLECTOR_VENV_PATH,kb.ps1 那边不提)。
+$WinUv = Join-Path (Split-Path $HereDir -Parent) 'scripts\win_uv.ps1'
+if (-not (Test-Path -LiteralPath $WinUv -PathType Leaf)) {
+    Fail "缺 $WinUv —— 它和 kb.ps1 共用「uv 在哪」那一份判据,不在就没法找 uv"
 }
+. $WinUv
 
 if (-not (Test-Path -LiteralPath (Join-Path $VenvHome 'Scripts\python.exe') -PathType Leaf)) {
-    $uv = Get-Uv
+    $uv = Find-UvPath
     if (-not $uv) {
         Fail '没有 venv 也没有 uv。装一个 uv(winget install astral-sh.uv),或用 KB_COLLECTOR_VENV_PATH 指到现成的 venv'
     }

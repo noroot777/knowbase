@@ -26,8 +26,11 @@
   here-string 里一个转义都不需要(要换行直接按回车),所以那里只许 `` `$ ``(故意转义,让
   `$env:…` 原样印出来)和 `` `` ``;单行串里 `` `n `` / `` `t `` 这类正常写法放行,但
   `` `a `` / `` `b `` / `` `v `` / `` `f `` 一律算误生效。
-- **700 行上限照旧**(全局约定)。`kb.ps1` 按这条拆出了四份 dot-source 的文件,理由和
-  `kb.sh` 拆 `web_env.sh` / `stale.sh` 一字不差。**新拆一份要同时登记进
+- **700 行上限照旧**(全局约定)。`kb.ps1` 按这条拆出了七份 dot-source 的文件(`win_uv` / `win_py` /
+  `win_args` / `win_proc` / `win_web` / `win_env` / `win_stale`),理由和 `kb.sh` 拆 `web_env.sh` /
+  `stale.sh` 一字不差。**服务那一节(起/停/状态)在 `win_web.ps1`**:分界线是 `win_proc.ps1` 管
+  「进程和端口通用怎么问、怎么停」,`win_web.ps1` 管「我们这一个服务什么时候不许起、停之前
+  要先问谁」—— 后者全是业务判据,前者一条业务都不认识。**新拆一份要同时登记进
   `tests/test_win_entry.py` 的 `PS_FILES`** —— 漏登记的后果是它的 BOM 和转义没人看着。
 
 ### PowerShell 自己那几个坑
@@ -38,6 +41,17 @@
   预期之内的失败就地显式放行(`-ErrorAction SilentlyContinue` 或 try/catch)。
   **原生命令的非零退出不触发 `$ErrorActionPreference`**,所以那些 `$LASTEXITCODE` 的判断
   照旧有效、也照旧必须写。
+- **变量名大小写不敏感:局部名不许只靠大小写跟参数区分。** 函数里写 `$port` 拿到的就是
+  参数 `[int]$Port` —— 不是遮蔽,是同一个变量。于是
+  `$port = Get-PortState $Port` 是往一个 int 里塞 `'busy'`:**`stop` / `restart` 当场抛,
+  而退出码还是 0**(实测形态:打一句「无法将值 busy 转换为类型 System.Int32」,服务一动
+  没动、照旧跑着,外面看着像停成功了,下一条命令对着一个还活着的服务干活)。参数有类型时
+  炸在当场,**两边类型碰巧一样时(都是 `[string]`)就什么都不说**,悄悄把参数覆盖掉 ——
+  `Invoke-Api` 里响应体 `$body` 盖掉请求体 `$Body` 就是这一种,眼下不出错只因为请求体在那
+  之前已经用完了。同一条纪律也管自动变量(`$pid`、`$args`、`$error`)。
+  判据是**大小写不同**而不是「重名」:同样拼法的再赋值是正常写法,大小写不同才说明写的
+  人以为这是两个变量。结构守卫 `CaseCollisionTest`(它自己也有反向钉子 —— 一个什么都扫
+  不出来的守卫比没有守卫更坏)。
 - **跑原生程序一律走 `Invoke-Native` / `Invoke-NativeLive`,脚本里不许再出现
   `& $exe … 2>&1` 或 `2>$null`。** 上面那条「非零退出不触发」只说了一半,另一半是**原生程序
   往 stderr 写字会触发**:PowerShell 把那几行包成 `NativeCommandError`,而 `Stop` 下那是
@@ -80,6 +94,122 @@
   `--data-binary @file`(传给原生程序的**参数**用的是 ANSI 代码页,`--targets 某个中文号`
   直接写在命令行上会在半路被改写)。
 
+
+### 问系统:三态,不许塌成两态
+
+- **`确定没有` / `成功有结果` / `无法确定` 是三件事,接口上也必须是三件事。**
+  `scripts/win_proc.ps1` 里问端口、问进程表的那几个函数**不许返回布尔**,也不许用
+  `catch { return @() }` 收口:布尔和空集都只装得下两种答案,于是「问不出来」被静默记成
+  「确定没有」。能转成空集的**只有**「问到了、确实没有匹配」那一种 —— 判据是
+  `FullyQualifiedErrorId` 以 `CmdletizationQuery_NotFound` 开头、或
+  `CategoryInfo.Category -eq 'ObjectNotFound'`(实测 `Get-NetTCPConnection` 无匹配时就报这个;
+  它**不是**返回空,是抛)。权限不足、CIM 坏掉、被网络过滤驱动拦下,一律 `Known = $false`。
+- **三处消费方各自要有一档。** `start` 问不出来就不起(否则往一个已被占的端口上再起一份,
+  服务死在绑定上,而这边报的是启动超时);`status` 问不出来打「问不出来」**不许打「未运行」**;
+  `stop` 问不出来**什么都不做,连 pidfile 都不删**(删了之后服务还在后台跑着,而下一次连找
+  回它的线索都没有)。`Get-PipelineState` 的端口那一问落 `unknown`,**不是 `idle`** —— 那是
+  停机保护最要命的一处,塌成 idle 等于 `stop` 不问就砍掉正在跑的同步。
+- **`Get-ProcTable` 问不出来就抛。** 空表会让上面每条判断都答出「这个号不存在」,于是
+  stop 什么都没杀却报成功。外加一条反向钉:**查成了的话表里一定有本进程自己**(实测),
+  没有就说明这一份不完整,照样当「无法确定」—— 防的是「没报错、却答出一份残的」。
+
+### pid 是会被回收的号
+
+- **pidfile 那条路只核命令行不够,还要核身份。** 号被回收给另一份 kb-web 实例时命令行一模
+  一样(就是 `kb-web`),于是 stop 杀掉别人那一份 —— 跨端口误杀的同一个病根,换成了跨时间。
+  判据:**那个进程的起跑时间不晚于 pidfile 的写入时间**(守护进程先拉起服务、再写记录,
+  所以真身必然满足;回收后的新主必然破,它起跑在原主死掉之后)。宽 5 秒吸收文件时间戳
+  精度。**端口那条路不用核**:「正占着我们这个端口」是系统现在就答出来的事实。
+- **动手杀之前再核一遍**(`Test-SameProc`):收树和真正动手之间隔着一次 CTRL_BREAK 和最多
+  5 秒等待,这中间号完全可能已经被分给别人。CIM 的 `CreationDate` 只到微秒、
+  `Process.StartTime` 到 100ns(实测差 `5e-07` 秒),所以按 1 秒容差比,不按相等比。
+- **起跑时间问不出来就不动手。** 判不准一律拒 —— 认下来的后果是 TerminateProcess,不可挽回。
+- **pidfile 只认第一行,而且先 TryParse 再判范围。** 整份删非数字字符的写法(`-replace
+  '[^0-9]', ''`)在记录多出一行时会把两个号**接成一个**;直接 `[int]` / `[int64]` 转在记录
+  被写坏成满屏数字时抛(40 个 9 连 int64 都装不下,实测),而顶上是 `Stop` —— 一句 status
+  整条红掉,话里是「值对于 Int64 太大或太小」,指不到 pidfile。
+
+### 停树:根退干净了,后代照样要扫
+
+- **不许「根没了就 return」。** 那恰恰是最常见的那条路:uvicorn 收到 CTRL_BREAK 自己走
+  shutdown、退得很快。可它拉起的东西不跟着走 —— 向量子进程、CDP 起的
+  chrome-headless-shell、采集器子进程都是独立进程,**Windows 没有进程组连坐**,父进程退了
+  只是把它们挂到别的父亲下面。留下来的后果是 chrome 常驻吃内存、下一轮同步撞上一个还握着
+  kb.db 的残留,而 `status` 看着干干净净。kb.sh 那边是对整棵树逐个 `kill`,这一侧不该少做。
+- 所以顺序是:**趁根还活着收全树 + 记下每个号的起跑时间** → 送控制台事件 → 等 → **不管根
+  死没死都扫一遍后代**(后代先走,核过身份才杀)→ 根还在才杀根。
+
+### 取值参数在副作用之前校验完
+
+- **`--键 值` 这一族由 `Read-OptionMap` 一处校验**,四种写错法都当场拦住:不认识的键、
+  键在末尾没取值、取值是空串或全空白、取值其实是下一个参数。**拦在 `Start-Web` 之前** ——
+  `Start-Web` 是副作用(它在后台起一个服务,worktree 里还会先撞上那道闸门)。
+- **原先两种是静默变成全量同步**:`.\kb.ps1 sync --targets` 实测起了服务、还发出一次请求体
+  为 `{"stages":["crawl"]}` 的全量采集(几十分钟),而人以为自己限定了范围。
+- **这一侧比 bash 严,是知情的。** 实测 bash:取值缺失时 `shift 2` 失败 + `set -e` → 静默
+  exit 1(拦住了,但一个字都不说);**取值是空串时它照跑**,`targets=""` → `if targets:`
+  为假 → 全量(同一个洞);取值是下一个参数时它报「不认识的参数 x」,指的是后面那个无辜的
+  token。所以这边的差异都在「拦得更早、话说得更准」这一侧,没有哪条放得更宽。
+  `--targets` 的名字逐个 `Trim` 之后再筛空:`"a, b"` 里那个 ` b` 配不上任何来源名,它那一份
+  会静默什么都不同步;一个名字都没剩下(`--targets ,`)直接拒。
+
+### 参数模式下 `f @(a,b) + $c` 不是一次调用
+
+- **整个表达式必须用一对括号包起来:`f (@(a,b) + $c)`。** PowerShell 在参数模式下把数组绑给
+  第一个参数,再把 `+` 和 `$c` 当成**另外两个位置参数**(实测:函数里 `$Arg` 只收到
+  `[p|q]`,而 `$args` 里躺着 `[+|System.Object[]]`)。`kb.ps1` 的 `grab` 两处都踩了:后果是
+  **用户给的链接一条都没传进去**,argparse 看到一条没有 url 的命令行,而那时服务已经起起来
+  了。静态检查在 `tests/test_win_proc.py`,形态本身另有一条用例钉着。
+- **原生程序的输出要先收下、再判退出码、最后才解析那一行。** 先 `.Trim()` 的话,
+  `--parse-only` 失败时真因(argparse 写在 stderr 上的话)已经被「值是空的」顶掉了。
+
+### 路径:`Resolve-Path` 不是 `realpath` 的对等物
+
+- **要比两条路径是不是同一个目录,必须先 realpath,而这一侧只能转交给 python 的
+  `os.path.realpath`**(`scripts/win_args.ps1` 的 `Resolve-RealPath`)。实测 PS 5.1 下
+  `Resolve-Path` 对目录联接**原样返回链接自己那条路**(`…\link` → `…\link`),而 junction
+  正是 Windows 上建链接的默认手段 —— 符号链接要管理员或开发者模式,`collector/setup.ps1`
+  正因此一律用 junction。`[IO.Directory]::ResolveLinkTarget` 在 .NET Framework 4.x 上压根
+  不存在(实测 MethodNotFound)。于是元规则「realpath 之后再比」在这一侧**静默地没生效**:
+  把 `data\` 联接到别处的人,`graph` 那道 worktree 闸门当场被绕过去,后果是拿 0 节点的页面
+  原子替换掉 vault 里那张好的。python 那条走 GetFinalPathNameByHandle,`link\inner` →
+  `real\inner` 都解得开(实测),顺带口径和 `kb/config.py` 的 `Path.resolve` 合成一份。
+- **算不出来就拒绝往下判**(`Resolve-RealPath` 返回空串,`Invoke-Graph` 据此 Die)——
+  判不准一律拒,因为放过去的后果是覆盖掉好页面。
+
+### 「uv 在哪」「python 在哪」各只有一份
+
+- **`Find-UvPath`(`scripts/win_uv.ps1`)是唯一的 uv 搜索口径**,`kb.ps1` 和
+  `collector/setup.ps1` 两个入口共用。单独一份是因为后者要能在还没有任何 venv 的新工作树上
+  单跑(它就是去建那个 venv 的那一步),所以它不 source kb.ps1 那一族 —— 于是原先各写了
+  一遍,而两份**已经不一样了**:setup.ps1 那份少了 `pip install --user` 的位置
+  (`%APPDATA%\Python\Python3XX\Scripts`)。实测后果:`.\kb.ps1 start` 找得到 uv,
+  `collector\setup.ps1` 偏说「没有 venv 也没有 uv」,而人刚亲手装过。
+  **这一份不许 Die/Fail、也不许打字**:两个消费方找不到时要说的话不一样。
+- **`Get-BootPython` 的候选一条都不能少。** 顺序:采集器 venv → **项目自己的
+  `$ROOT\.venv`** → PATH 上的 `py -3` / `python3` / `python`(必须真跑一次 `--version`,
+  Store 占位程序在 PATH 上、Get-Command 找得到,一跑却只打印「去商店装」并以非 0 退出)→
+  **`uv python find`**(`uv python install` 装出来的解释器不进 PATH)。少了后两条的机器上
+  报的都是同一句「找不到可用的 python 3」—— 而那句话让人去装一个他已经有了的东西。
+  **这一处不许走 `Get-Uv`**(它找不到 uv 时自己 Die,于是一次「找 python」打出一句叫人去装
+  uv 的话),要用不说话的 `Find-UvPath`。
+
+### 调原生程序时还有两条,都是「静默」的
+
+- **传给原生程序的参数里,双引号会被吞掉。** 实测:`python -c 'open(f, "w", encoding="utf-8")'`
+  到了 python 手里成了 `open(f, w, encoding=utf-8)`,报一句 SyntaxError —— 而那种调用多半
+  带着 `2>$null`(stderr 里全是进度),于是**那一步一声不响地没做成**。所以**内联的 python
+  片段里一律不许出现双引号**:字符串用单引号(PowerShell 里写成两个单引号),换行用
+  `chr(10)` 而不是 `"\n"`。本仓库原有的几处内联片段恰好都没有引号,所以这条到本轮才踩上
+  (`Show-EgressLines` 的第一版)。
+- **`$LASTEXITCODE` 在「这个会话里还没成功跑过原生程序」时是未定义的**,而 StrictMode 下读
+  未定义变量会**抛**。要紧的是:解释器**压根启动不起来**时 PowerShell 连它都不设(不是设成
+  非 0)—— 实测把环境剥干净之后 `& .venv\Scripts\python.exe -c 'print(1)'` 既无输出、也不设
+  `$LASTEXITCODE`。于是一个半途建坏的 `.venv`(本任务里真遇到过)会让 `status` 死在一句指着
+  `$LASTEXITCODE` 的红上,跟它要做的事毫无关系。要判退出码的地方**先把它摆成 `$null`**,
+  再按「有没有被设上」判。`Invoke-Native` 的 `@{ Code = $LASTEXITCODE }` 同样在这条路上
+  (它紧挨着 `& $Exe` 所以绝大多数时候是定义好的),**下一轮该一起收进一个助手里**;本轮
+  只修了新写的那一处,没扩大边界。
 
 ### 跟 `kb.sh` 不一样、但必须一样的那几处
 
@@ -130,6 +260,16 @@
 - **PowerShell 侧:要解析的原生程序输出一律落文件、按 UTF-8 读回来**(见上面
   `Invoke-Api` 那条)。PowerShell 按 `[Console]::OutputEncoding`(默认 OEM 代码页)解码
   原生 stdout,UTF-8 的中文被按 GBK 拆错、**连 JSON 的引号一起吃掉**。
+- **第三侧:Python 捕获 PowerShell 的输出时,解码失败不抛异常 —— 它把那一股变成
+  `None`。** 这一条比上面两条更阴:Windows 上 `Popen._communicate` 的读管子是**两个
+  线程**,线程里抛出的 `UnicodeDecodeError` 被 threading 的 excepthook 打掉,
+  `communicate()` 于是把那一股原样返回 `None`。调用方拿到的是 **`rc=0` + `stdout=None`**
+  —— 看着像「命令成功了但什么都没说」,红会落在几帧之外一句 `TypeError: … 'NoneType'
+  and 'str'` 上,跟真正的原因毫无关系。**凡是要读 PowerShell 中文输出的地方,三道一起上**:
+  被跑的脚本**第一行**就把 `[Console]::OutputEncoding` 摆成 UTF-8;捕获侧显式
+  `encoding='utf-8', errors='replace'`(野字节该变成看得见的乱码,不该变成 `None`);
+  收口处断言两股都不是 `None`。`tests/test_win_proc.py` 的 `_PRELUDE` / `ps_run` /
+  `ps_lines` 就是这三道,**别为了「省一行」把第一行挪走**。
 - **残留(本轮没动,属别的块):`kb/` 下还有 16 处 `open()`/`read_text()`/`write_text()`
   不带 `encoding=`。** 其中锁文件那几处(`maintenance.py`、`pipeline_failures.py`、
   `fetch_rounds.py`、`llm.py`)只用来加锁、从不当文本读写,无所谓;要紧的是
@@ -293,12 +433,34 @@
   `test_llm_stages.test_write_is_atomic_and_private` 比的就是这个);还有一批写 `#!/bin/sh`
   桩、把 `PATH` 设成 `/usr/bin:/bin` 的。**本轮只修了锁这一族**(理由:那正是本轮替换掉的
   那一层,留着等于自己改的东西在这个平台上没有回归);其余按「不扩大边界」留着。
+- **读不到服务进程自己那份环境。** bash 的 `egress_lines "$pid"` 拿的是跑着那个进程的环境,
+  Windows 上要 NtQueryInformationProcess + ReadProcessMemory 才办得到(而且跨用户还要权限)。
+  所以 `status` 里那几行出口状态按**设置文件 + 当前 shell** 算 —— 跟 bash 读不到进程环境时
+  那条降级路径一个口径(它那时也只说「下面只按设置文件算」)。**后果**:起服务时临时设了
+  `$env:KB_FEED_DOH`、之后在一个新终端看 status,那一行会说「关」。配在设置里的那一种
+  两边都认得(端点、代理都走 `kb.feeds.egress`),所以这个缺口只剩「临时环境变量 + 换终端」
+  这一种形态。
 - **node/CDP 那套无头探针没有port过。** `tests/headless.py` 靠 `os.killpg` 整组杀
   (Windows 上要换成 job object 或 `taskkill /T`),而这台机器也没装
   chrome-headless-shell,所以本轮连验的条件都没有。它自己有一份 `probe-shell.md`,
   是独立的一块。
 
 ## 回归
+
+- `tests/test_win_proc.py` —— Windows 入口的**行为**判据,每条都真跑一次 PowerShell(验的就是
+  PowerShell 自己那几样:异常分类、参数绑定、进程起跑时间),没有 powershell 的机器上整份
+  skip。七组,每组都带反向的那一边:
+  端口三态(查询失败 → `unknown`;**真·无匹配 → `free`**;`Get-PipelineState` 把 `unknown`
+  原样往上递,**这一条按 AST 从 kb.ps1 里取真函数执行**,只替掉端口适配层);
+  pidfile 身份(记录早于起跑时间 → 不认领,**记录是新的 → 要认**,外加一条单独钉
+  「`Get-ServicePids` 真的用了那个判据」—— 判据自己对不等于有人用它);
+  取值参数四种写错法各一条 + **正常写法照旧放行且取值原样**;
+  `f @(a,b) + $c` 的形态本身 + 源码里不许再出现那种写法;
+  端点脱敏(主机名要在、token / `user:` / query 一个字都不许在);
+  `Get-BootPython` 退到项目 venv;
+  停树(造一棵真的父子进程,把「送 CTRL_BREAK」换成「根从容退出」,断言子进程被扫掉)。
+  **挑子进程必须按名字挑**:隐藏窗口的根会带一个 conhost.exe,而 conhost 跟着根一起走 ——
+  挑中它的话这一条在「不扫后代」的实现上也绿(本轮真飘过一次:同一条注入一次红一次绿)。
 
 - `tests/test_filelock.py` —— 结构:`kb/`、`scripts/`、`collector/`、**`tests/`** 四棵树下没有
   顶层 `import fcntl`,**而且探针串里也没有** `fcntl.flock(` / `fcntl.LOCK_`(例外名单连它的
@@ -356,6 +518,21 @@
 | `LOCK_UN` 不生效 | `UnlockTest` |
 | `LOCK_SH` 当独占实现 | `UnlockTest` |
 | `EgressVars` 里去掉 `KB_FEED_DOH` / 去掉 `HTTPS_PROXY` | `WebEnvTest`(两条) |
+| `Get-PortOwners` 的 catch 改回 `return @()` | `PortQueryIsThreeStateTest` |
+| 反过来:任何失败都算 `Known=$false` | `test_a_real_no_match_is_free` |
+| `Get-PipelineState` 把 `unknown` 翻成 `idle` | `test_pipeline_state_carries_the_unknown_up` |
+| `Test-RecordedProc` 永远返回 `$true` | `PidFileIdentityTest.test_identity` |
+| 拆掉 `Get-ServicePids` 里那句身份检查 | `test_get_service_pids_actually_uses_it` |
+| `Read-PidFile` 改回整份删非数字 | `PidFileIdentityTest` |
+| 取值缺失/空值不拦(改回 `${2:-}` 那种写法) | `OptionValidationTest` |
+| 「取值其实是下一个参数」那道闸拿掉 | `test_a_following_option_is_not_a_value` |
+| 不认识的键不拦 | `test_unknown_key_is_refused` |
+| 把 `$port = … $Port` 那一行放回去 | `CaseCollisionTest` |
+| 往源码里塞一个退格符 | `test_no_stray_control_bytes` |
+| `Invoke-BootPython @(…) + $Arg` 去掉括号 | `SplatIsOneCallTest` |
+| `Get-BootPython` 的候选只留采集器 venv | `BootPythonFindsProjectVenvTest` |
+| 端点改回用正则剪(凭证留在 netloc 里) | `EgressLineDoesNotLeakCredentialsTest` |
+| `Stop-ProcTree` 改回「根没了就 return」 | `StopTreeSweepsSurvivorsTest` |
 | `CleanEnvKeep` 里加上 `KB_DATA_DIR` | `WebEnvTest` |
 | 空值也透传 | `WebEnvTest` |
 | 白名单改成「全都继承」 | `WebEnvTest` |

@@ -15,7 +15,7 @@
    实测就是这么进去的。合法的只有 `` `$ ``(故意转义,让 $env:… 原样印出来)。
 3. **命令面不许单边漂移**。`kb.sh` 加了一条命令而 `kb.ps1` 没跟,Windows 上的人
    得到的是「不认识的命令」,而文档和同事都说有这条。两边的 dispatch 现算出来对比。
-4. **dot-source 的文件得在**。kb.ps1 按 700 行上限拆出了四份,少一份则一加载就炸,
+4. **dot-source 的文件得在**。kb.ps1 按 700 行上限拆出了好几份,少一份则一加载就炸,
    而报出来的是一句找不到某个函数 —— 指不到「少拷/少提交了一个文件」。
    (同一个形态在 bash 那边的留痕见 `tests/kb_sh_fixture.py` 的 docstring。)
 5. **700 行上限**(全局约定),顺手钉住。
@@ -23,6 +23,9 @@
 前三条里第 2 条要 PowerShell 的 AST 才判得准,所以它在没有 powershell 的机器上
 显式 skip;其余几条是纯字节/纯文本检查,**在哪台机器上都跑** —— 这很要紧,因为
 日常提交门禁是在 macOS 上过的。
+
+**行为上的那些判据(问不出来算哪一档、pid 怎么核身份、参数怎么校验)在
+`tests/test_win_proc.py`**,那一份全要真跑 PowerShell。
 """
 
 from __future__ import annotations
@@ -40,7 +43,8 @@ REPO = Path(__file__).resolve().parent.parent
 
 #: 这一套的全部 .ps1(仓库内相对路径)。新拆一份出来要加进这里 —— 漏登记的后果
 #: 是它的 BOM 和转义没人看着,而那两样坏起来都不像坏了。
-PS_FILES = ('kb.ps1', 'scripts/win_py.ps1', 'scripts/win_proc.ps1',
+PS_FILES = ('kb.ps1', 'scripts/win_uv.ps1', 'scripts/win_py.ps1',
+            'scripts/win_args.ps1', 'scripts/win_proc.ps1', 'scripts/win_web.ps1',
             'scripts/win_env.ps1', 'scripts/win_stale.ps1', 'collector/setup.ps1')
 
 BOM = b'\xef\xbb\xbf'
@@ -82,6 +86,28 @@ class EncodingTest(unittest.TestCase):
                                  f'{rel} 少了 UTF-8 BOM —— PowerShell 5.1 会按系统'
                                  f'代码页解码,里面每一句中文提示都变成乱码,'
                                  f'而脚本照常执行')
+
+    def test_no_stray_control_bytes(self) -> None:
+        """源码里不许夹着控制字符(除了 tab / 换行)。
+
+        **这一条防的是「守卫被悄悄关掉」。** 控制字符在编辑器和终端里都是看不见的
+        —— 退格符(0x08)还会把它前面那个字符一起吃掉显示。本轮真踩了一次:一条
+        `re.search(r'...param...')` 的开头混进一个退格符,于是那条正则永远不匹配,
+        依赖它的结构守卫**一条都扫不出来、却稳定显示绿色**。一个什么都扫不出来的
+        守卫比没有守卫更坏:它让人以为这件事有人看着。
+
+        (来路是把源码经由 shell here-doc 写进文件时 `\b` 被折成了真的 0x08。
+        所以判据落在**文件里有没有**,不管它是怎么进来的。)
+        """
+        for rel in PS_FILES + ('kb.cmd', 'tests/test_win_entry.py',
+                               'tests/test_win_proc.py'):
+            with self.subTest(rel):
+                txt = (REPO / rel).read_text(encoding='utf-8-sig', errors='replace')
+                found = [(n, repr(line))
+                         for n, line in enumerate(txt.splitlines(), 1)
+                         if any(ord(c) < 32 and ord(c) not in (9, 13)
+                                for c in line)]
+                self.assertEqual(found, [], f'{rel} 里有看不见的控制字符')
 
     def test_cmd_wrapper_stays_ascii(self) -> None:
         """`kb.cmd` 反过来:**不许有 BOM、不许有中文**。
@@ -508,6 +534,98 @@ class NoRawRedirectTest(unittest.TestCase):
         self.assertTrue(self._BAD.search(m.group(0)),
                         'Invoke-Native 里居然没有重定向了 —— 要么实现换了写法,'
                         '要么这条豁免已经不需要了,两种都该把它删掉')
+
+
+class CaseCollisionTest(unittest.TestCase):
+    """局部变量不许只靠**大小写**跟函数参数区分。
+
+    PowerShell 的变量名大小写不敏感:函数里写 `$port` 拿到的就是参数 `[int]$Port`。
+    于是 `$port = Get-PortState $Port` 是往一个 int 里塞 `'busy'` —— `stop` /
+    `restart` 当场抛,**而退出码还是 0**:外面看着像停成功了,服务其实一动没动,
+    下一条命令对着一个还活着的服务干活。参数有类型时炸在当场,类型碰巧一样时
+    (两个都是 `[string]`)就什么都不说,悄悄把参数覆盖掉。
+
+    **判据是「大小写不同」而不是「重名」**:同样拼法的再赋值是 PowerShell 里正常
+    的写法(就是要改那个参数),大小写不同才说明写的人以为这是两个变量。
+    顺带把写自动变量(`$pid`、`$args`、`$error` 这些)也圈进来,病根是同一个。
+    """
+
+    #: 这几个是语言给的,函数里赋值就等于把它顶掉。
+    _AUTO = frozenset({'pid', 'args', 'input', 'error', 'host', 'home',
+                       'matches', 'this', 'pwd', 'psitem', '_'})
+
+    @staticmethod
+    def _functions(txt: str):
+        """(函数名, 函数体) —— 按大括号配平切,别用正则去啃嵌套。"""
+        for m in re.finditer(r'function\s+([\w-]+)', txt, re.I):
+            i = txt.find('{', m.end())
+            if i < 0:
+                continue
+            depth = 0
+            for j in range(i, len(txt)):
+                if txt[j] == '{':
+                    depth += 1
+                elif txt[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        break
+            yield m.group(1), txt[i:j]
+
+    @staticmethod
+    def _params(body: str) -> list[str]:
+        m = re.search(r'param\s*\(', body, re.I)
+        if not m:
+            return []
+        i, depth = m.end() - 1, 0
+        for j in range(i, len(body)):
+            if body[j] == '(':
+                depth += 1
+            elif body[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+        names = re.findall(r'\$(\w+)', body[i:j])
+        return [n for n in names if n.lower() not in ('true', 'false', 'null')]
+
+    def _scan(self, files=PS_FILES) -> list[str]:
+        hits = []
+        for rel in files:
+            txt = (REPO / rel).read_text(encoding='utf-8-sig')
+            for name, body in self._functions(txt):
+                params = {p for p in self._params(body)}
+                for am in re.finditer(r'(?<![\w$:])\$(\w+)\s*=(?!=)', body):
+                    got = am.group(1)
+                    for p in params:
+                        if got.lower() == p.lower() and got != p:
+                            hits.append(f'{rel}: {name}(): 参数 ${p},函数体里却给 '
+                                        f'${got} 赋值 —— 这是同一个变量')
+                    if got.lower() in self._AUTO:
+                        hits.append(f'{rel}: {name}(): 给自动变量 ${got} 赋值')
+        return sorted(set(hits))
+
+    def test_no_local_differs_from_a_param_only_by_case(self) -> None:
+        self.assertEqual(self._scan(), [])
+
+    def test_the_scan_can_actually_see_one(self) -> None:
+        """反过来钉一边:把真出过事的那一行喂给它,必须抓到。
+
+        不钉这一边的话,一个「什么都扫不出来」的实现(括号配平切错、正则写歪)
+        也能让上面那条永远绿。
+        """
+        bad = REPO / 'tests' / '.case_collision_fixture.ps1'
+        bad.write_text('''function Stop-Service_ {
+    param([string]$Label, [int]$Port)
+    $port = if ($Port -gt 0) { Get-PortState $Port } else { 'free' }
+    if ($port -eq 'unknown') { return }
+}
+''', encoding='utf-8-sig')
+        try:
+            got = self._scan(files=('tests/.case_collision_fixture.ps1',))
+        finally:
+            bad.unlink()
+        self.assertEqual(len(got), 1, got)
+        self.assertIn('$Port', got[0])
+        self.assertIn('$port', got[0])
 
 
 if __name__ == '__main__':
