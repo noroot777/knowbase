@@ -1,6 +1,13 @@
 // Local onboarding stays independent of cloud models and of the active sync channel.
 let wechatSetup = null, wechatPoll = null, wechatRequest = false;
 let wechatStatusVersion = 0;
+const WECHAT_WINDOWS_AGENT_PROMPT = `请在本项目目录中协助接入这台 Windows x64 上我自己的绿泡泡 4.x，只采集我选择的公众号。
+先检查本人账号登录、公众号推送同步与数据库目录；自定义目录使用 KB_WECHAT_DATABASE_ROOT。已有可用 Reader 或材料优先复用，不覆盖、不重复获取。
+优先使用「设置 → 绿泡泡接入」的检查与接入流程，由项目准备固定版本的 Windows Reader、SQLCipher 与只读获取工具；不安装 Mac 的 wxkey、Go 或 LLDB。
+只有明确缺少材料时，说明将只读访问本机绿泡泡进程，经我明确确认后再获取；不要注入、重启、修改绿泡泡、自动提权或关闭安全软件。权限不一致或版本不兼容时停下来说明，不无限重试。
+我负责本人账号登录与确认；不要要求我提供密码或 key，不打印、上传或提交密钥、聊天内容或私有配置。
+获取后必须验证 live_database_read_ok=true，再选择一个公众号小范围采集；不能把拿到 key 当作接入成功，不读取私聊或群聊作为文章。
+完成后说明验证结果、版本边界与未解决问题，提醒我回接入页面「刷新状态」，验证后再同步公众号。`;
 const WECHAT_AGENT_PROMPT = `请在本项目目录中，根据 README 协助接入这台 Mac 上我自己的绿泡泡，目标是采集我选择的公众号文章。
 
 1. 先检查 macOS、uv、Go、Apple Command Line Tools，以及本人账号是否登录、目标公众号推送是否已同步。Docker 或远程服务器不能获取这台 Mac 的 key，请在 Mac 本机运行本项目。
@@ -64,12 +71,17 @@ function wechatConfigured(open, id) {
 function renderWechatSetup() {
   const s = wechatSetup || {}, busy = !!s.running || wechatRequest;
   const docker = s.deployment === 'docker';
+  const windows = s.platform === 'windows';
+  $('wechat-agent-prompt').value = windows ? WECHAT_WINDOWS_AGENT_PROMPT : WECHAT_AGENT_PROMPT;
+  $('wechat-authorization-hint').textContent = windows ?
+    '确认后，固定版本工具仅只读访问本人绿泡泡进程中的数据库访问材料，最多 3 分钟；不会注入、退出、重启或修改客户端，不会自动提权。若权限不足或版本不兼容会停止。页面不接收密码或明文 key，失败不会自动再次获取。' :
+    '固定版本 wxkey 会请求 macOS 管理员授权、访问绿泡泡进程，可能退出或重启绿泡泡并创建重签名副本。请先保存正在编辑的消息。密码仅在系统授权框输入，页面不接收密码或明文 key；失败不会自动再次获取。';
   $('wechat-method-title').textContent = docker ? '请在 Mac 本机完成绿泡泡接入' : '方式一：在此页面接入';
   $('wechat-title').textContent = docker ? '配置 Docker 知识库' : '接入你的绿泡泡';
   $('wechat-welcome-title').textContent = docker ? '让文章进入你的知识库' : '让知识库接上你的绿泡泡';
   $('wechat-intro').textContent = docker ? '在 Mac 采集文章，在容器中索引、检索和分析。' : '从本机已同步的公众号推送中发现文章，收进知识库。';
   $('wechat-source-title').textContent = docker ? '导入文章目录' : '接入本机绿泡泡';
-  $('wechat-source-hint').textContent = docker ? '挂载 Mac 导出的 vault，再运行知识库索引' : '已有配置直接复用，缺 key 时自动准备获取工具';
+  $('wechat-source-hint').textContent = docker ? '挂载 Mac 导出的 vault，再运行知识库索引' : windows ? 'Windows x64 · 绿泡泡 4.x；已有材料优先复用，获取前需本人确认' : '已有配置直接复用，缺 key 时自动准备获取工具';
   $('wechat-runtime-hint').textContent = docker ? '挂载与索引步骤见项目的 Docker 部署说明。' : '可以关闭窗口，任务继续在后台执行。获取和验证不需要大模型 API。';
   $('wechat-status').textContent = s.message || '正在读取绿泡泡接入状态…';
   $('wechat-status').setAttribute('aria-busy', String(busy));

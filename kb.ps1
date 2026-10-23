@@ -500,9 +500,6 @@ function Get-Status {
     }
     Write-Output ''
     Write-Output '── 公众号来源 ──'
-    # **这一条在 Windows 上注定报接不上,那是对的、不是故障。** 发现文章那一步要读
-    # Mac 绿泡泡客户端的库,Windows 上压根没有那个库。采集器自己会把这件事说清楚,
-    # 所以照原样问它一句、原样打出来,不在这儿替它编一句话。
     $ok = $false
     if (Test-Path -LiteralPath $script:Py -PathType Leaf) {
         $out = Invoke-CollectorCli @('status') 2>$null
@@ -619,8 +616,8 @@ Knowbase 操作入口(Windows)—— 每条命令跑完就还你终端,不用挂
     .\kb.ps1 accounts list|discover|add|remove|enable|disable [名字]
     .\kb.ps1 setup                  首次准备(装环境、链好采集器的 data 和 .venv)
 
-**公众号采集这一条在 Windows 上做不到**:发现文章那一步要读 Mac 绿泡泡客户端的库,
-Windows 上没有那个库,accounts discover 和 --channel wechat_local 会如实报接不上。
+公众号采集支持本机 Windows x64 的兼容绿泡泡 4.x:先运行 setup,
+再到面板「绿泡泡接入」检查并按本人确认流程接入。不会注入、重启或修改客户端。
 其余阶段(RSS / X / 手动收录 / 导出 / 索引 / 打标 / wiki / 问答)都照常。
 "@)
 }

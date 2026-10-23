@@ -36,7 +36,7 @@ from kb.pipeline_state import _log, _stage
 # collector/setup.sh 把它们链过去。
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 BACKEND_DIR = Path(os.getenv("KB_COLLECTOR_DIR", "").strip() or _REPO_ROOT / "collector")
-BACKEND_PY = BACKEND_DIR / ".venv" / "bin" / "python"
+BACKEND_PY = BACKEND_DIR / '.venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
 
 # 采集产物落在 vault 里的 source 名(历史上换过两次,一并认)
 VAULT_SOURCES = ("dr-gzh", "wechat", "gzh")
@@ -58,9 +58,12 @@ def _backend_problem() -> str:
     """
     if not BACKEND_DIR.is_dir():
         return f"找不到采集器目录,预期在 {BACKEND_DIR}"
-    missing = [shown for shown, probe in ((".venv", ".venv/bin/python"), ("data", "data"))
+    executable = '.venv/Scripts/python.exe' if os.name == 'nt' else '.venv/bin/python'
+    missing = [shown for shown, probe in ((".venv", executable), ("data", "data"))
                if not (BACKEND_DIR / probe).exists()]
     if missing:
+        if os.name == 'nt':
+            return f"缺 {'、'.join(missing)}——在仓库根目录运行 .\\kb.cmd setup 准备 Windows 采集器"
         return (f"缺 {'、'.join(missing)}——在仓库根目录跑一次 "
                 f"./collector/setup.sh 把它们链好")
     return ""
@@ -78,9 +81,14 @@ def _python() -> str:
 
 
 def _run_cli(*argv: str, timeout: int) -> subprocess.CompletedProcess:
+    options = {'text': True, 'timeout': timeout}
+    if os.name == 'nt':
+        options.update(encoding='utf-8', errors='replace',
+                       env={**os.environ, 'PYTHONIOENCODING': 'utf-8', 'PYTHONUTF8': '1'},
+                       creationflags=subprocess.CREATE_NO_WINDOW)
     return subprocess.run(
         [_python(), "-m", "cli", *argv],
-        cwd=BACKEND_DIR, capture_output=True, text=True, timeout=timeout,
+        cwd=BACKEND_DIR, capture_output=True, **options,
     )
 
 

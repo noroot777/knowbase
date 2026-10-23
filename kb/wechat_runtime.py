@@ -38,24 +38,47 @@ def private_dir(path: Path) -> Path:
         raise SetupError("接入目录不能是符号链接，请检查 KB_WECHAT_RUNTIME。")
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.chmod(0o700)
+    if os.name == 'nt':
+        from kb.wechat_windows_security import restrict
+        try:
+            restrict(path)
+        except OSError:
+            raise SetupError('无法保护 Windows 接入目录权限，已停止；请检查本机目录所有者和文件系统权限。') from None
     return path
 
 
 def run(argv, *, timeout=120, env=None, cwd=None):
     # Capture output only in memory; never include raw stderr in exceptions/logs.
     try:
+        child_env = dict(os.environ if env is None else env)
+        child_env.update(PYTHONIOENCODING='utf-8', PYTHONUTF8='1')
         proc = subprocess.Popen([str(a) for a in argv], stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                                text=True, env=env, cwd=cwd, start_new_session=True)
+                                text=True, encoding='utf-8', errors='replace', env=child_env,
+                                cwd=cwd, start_new_session=True,
+                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
         try:
             stdout, _ = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGTERM)
+            if os.name == "nt":
+                try:
+                    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    proc.kill()
+            else:
+                os.killpg(proc.pid, signal.SIGTERM)
             try:
                 proc.communicate(timeout=3)
             except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.communicate()
+                if os.name == "nt":
+                    proc.kill()
+                else:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                try:
+                    proc.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    pass
             raise SetupError("步骤超时，已停止本次命令；获取阶段请检查绿泡泡及系统授权状态后再处理。") from None
     except OSError:
         raise SetupError("所需命令无法启动，请检查运行环境和执行权限。") from None
@@ -102,8 +125,15 @@ def reader_command() -> list[str] | None:
                       codex / "skills/wechat-cli/scripts/reader.sh",
                       codex / "bin/rion-wechat-cli",
                       runtime_home() / "bin/rion-wechat-cli"):
+        if candidate and os.name == 'nt' and Path(candidate).suffix.lower() != '.exe':
+            continue
         if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
             return [str(candidate)]
+    if os.name == 'nt':
+        from kb.wechat_windows import reader_paths
+        _, python, launcher = reader_paths()
+        if python.is_file() and launcher.is_file():
+            return [str(python), str(launcher)]
     return None
 
 

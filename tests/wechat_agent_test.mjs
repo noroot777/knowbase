@@ -115,3 +115,20 @@ test('Docker keeps the prompt available without suggesting acquisition inside th
   assert.match(element('wechat-method-title').textContent, /Mac 本机/);
   assert.match(vm.runInContext('WECHAT_AGENT_PROMPT', context), /Docker 或远程服务器不能获取/);
 });
+
+test('Windows shows platform-specific consent and a safe native onboarding prompt', () => {
+  const {context, element} = fixture(undefined);
+  vm.runInContext('wechatSetup = {platform: "windows", state: "authorization_required", running: false}; renderWechatSetup()', context);
+  const consent = element('wechat-authorization-hint').textContent;
+  assert.match(consent, /只读.*最多 3 分钟/);
+  assert.ok(!consent.includes('重签名副本'));
+  assert.match(consent, /不会自动提权/);
+  assert.equal(element('wechat-acquire').disabled, true);
+  assert.equal(element('wechat-authorization').hidden, false);
+  assert.match(element('wechat-source-hint').textContent, /Windows x64/);
+  const prompt = element('wechat-agent-prompt').value;
+  assert.match(prompt, /Windows x64/);
+  assert.match(prompt, /不安装 Mac 的 wxkey/);
+  assert.match(prompt, /经我明确确认后/);
+  assert.match(prompt, /live_database_read_ok=true/);
+});

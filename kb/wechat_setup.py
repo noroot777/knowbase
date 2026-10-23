@@ -23,15 +23,20 @@ MESSAGES = {
     "verification_failed": "材料或数据库结构验证失败，请检查账号、密钥映射及绿泡泡版本。",
     "access_material_requires_review": "已有 wxkey 材料未通过验证，已保留，请先检查材料与账号是否匹配。",
     "filesystem_access_required": "数据库文件无法访问，请检查本项目的文件访问权限。",
-    "acquisition_platform_not_supported": "自动获取 key 目前仅支持 macOS。可复用其他系统上已配置的 Reader。",
+    "acquisition_platform_not_supported": "当前系统暂不支持自动接入绿泡泡。请在 Mac 本机完成首次接入并导出文章，再在此处导入索引；已有可用 Reader 可直接复用。",
     "database_layout_unsupported": "尚未识别到可用绿泡泡数据库结构，请检查登录、同步和绿泡泡版本。",
     "database_layout_ambiguous": "核心数据库候选不唯一，请检查是否混入其他账号。",
     "scan_incomplete": "数据库扫描达到上限，未声称完整可读。请缩小数据库范围。",
 }
 _mutex = threading.Lock()
+_state_mutex = threading.Lock()
+_ACTIVE_STATES = {"checking", "preparing", "verifying", "acquiring"}
 
 
 def account_roots() -> dict[str, Path]:
+    if runtime.platform.system() == 'Windows':
+        from kb.wechat_windows import account_roots as windows_roots
+        return windows_roots()
     base = Path.home() / "Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
     return {hashlib.sha256(str(p).encode()).hexdigest()[:16]: p
             for p in sorted(base.glob("*/db_storage")) if p.is_dir() and not p.is_symlink()}
@@ -43,7 +48,8 @@ def _state_file():
 
 def _read():
     try:
-        result = json.loads(_state_file().read_text())
+        with _state_mutex:
+            result = json.loads(_state_file().read_text())
         if isinstance(result, dict):
             return result
     except (OSError, ValueError):
@@ -52,11 +58,19 @@ def _read():
 
 
 def _write(state):
-    target = _state_file()
-    temporary = target.with_suffix(".tmp")
-    temporary.write_text(json.dumps(state, ensure_ascii=False))
-    temporary.chmod(0o600)
-    temporary.replace(target)
+    with _state_mutex:
+        target = _state_file()
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(json.dumps(state, ensure_ascii=False))
+        temporary.chmod(0o600)
+        for attempt in range(6):
+            try:
+                temporary.replace(target)
+                return
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(.02 * (attempt + 1))
 
 
 def _lock():
@@ -64,25 +78,27 @@ def _lock():
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         filelock.flock(fd, filelock.LOCK_EX | filelock.LOCK_NB)
-    except BlockingIOError:
+    except OSError as error:
         os.close(fd)
-        raise runtime.SetupError("已有绿泡泡接入任务正在执行，请等待当前任务结束。") from None
+        if isinstance(error, BlockingIOError) or getattr(error, "winerror", None) == 33:
+            raise runtime.SetupError("已有绿泡泡接入任务正在执行，请等待当前任务结束。") from None
+        raise
     return fd
 
 
 def snapshot():
     state = _read()
-    if state.get("running"):
+    if state.get("running") or state.get("state") in _ACTIVE_STATES:
         # A crashed server must not leave an eternal spinner or auto-resume acquisition.
         try:
             fd = _lock()
         except runtime.SetupError:
-            pass
+            state = {**state, "running": True}
         else:
             os.close(fd)
             state = {"state": "interrupted", "running": False,
                      "message": "上次接入已中断。请检查绿泡泡及系统授权状态，然后重新检查；不会自动重试获取。"}
-    return state
+    return {**state, 'platform': runtime.platform.system().lower()}
 
 
 def _reader_ready():
@@ -137,6 +153,11 @@ def _connect(progress, account_id, acquire=False):
         return _ready(progress)
     if _recovery_lock().exists():
         raise runtime.SetupError("上次获取需要恢复检查：请先确认绿泡泡和残留获取进程正常。不会自动清除恢复锁或再次获取。")
+    if runtime.platform.system() == 'Windows':
+        from kb.wechat_windows import connect
+        return connect(progress, account_id, acquire)
+    if runtime.platform.system() != "Darwin":
+        return progress("acquisition_platform_not_supported", MESSAGES["acquisition_platform_not_supported"])
     roots = account_roots()
     if not _config().exists():
         if not roots:
@@ -224,6 +245,10 @@ def start(action="connect", account_id="", confirmation_token="", confirmed=Fals
                         or not secrets.compare_digest(token, confirmation_token)
                         or previous.get("expires_at", 0) <= time.time()):
                     raise runtime.SetupError("获取授权已失效或未确认影响，请重新检查后再执行。")
+                if runtime.platform.system() == 'Windows':
+                    from kb.wechat_windows import KEY_REV
+                    if previous.get('platform') != 'windows' or previous.get('provider_revision') != KEY_REV:
+                        raise runtime.SetupError('Windows 获取工具或授权范围已变化，请重新检查并确认后再执行。')
                 account_id = previous.get("account_id", "")
             elif action != "connect":
                 raise runtime.SetupError("不支持的绿泡泡接入操作。")
