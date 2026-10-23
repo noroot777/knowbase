@@ -10,8 +10,9 @@
 `sni_hostname`。SSRF 防护因此一分不少 —— 实测「经代理 + 钉真实 IP + SNI」同样返回
 200,代理和钉 IP 不冲突,今天挡住抓取的只是解析那一步给错了答案。
 
-**默认关**(`KB_FEED_DOH` 空):关着的时候一次 DoH 请求都不发,走原来的
-`socket.getaddrinfo`,行为逐字不变。
+**默认关**(端点为空):关着的时候一次 DoH 请求都不发,走原来的
+`socket.getaddrinfo`,行为逐字不变。**端点、预算、代理一律问 `kb.feeds.egress`** ——
+那一份才知道「设置里填了什么、环境变量兜底是什么」,这里不许自己读环境变量。
 
 **不是 DNS 名字的东西不许送进来问。** 主机名规范化(IP 字面量直接放过、非 ASCII 先
 IDNA)在 `fetching.public_addresses` 里**一次做完**,两条路共用那一份 —— 不然开关一翻
@@ -66,18 +67,14 @@ IDNA)在 `fetching.public_addresses` 里**一次做完**,两条路共用那一�
 from __future__ import annotations
 
 import ipaddress
-import os
 import threading
 import time
 from typing import Callable, Iterable
 
 import httpx
 
-#: DoH 端点。空 = 关(走 `socket.getaddrinfo`)。
-ENV = 'KB_FEED_DOH'
-#: 单次查询的默认上限(秒)。整次解析的上限是它和调用方给的 `seconds` 取小。
-SECONDS_ENV = 'KB_FEED_DOH_SECONDS'
-DEFAULT_SECONDS = 8.0
+from kb.feeds import egress
+
 #: 响应体上限。DNS JSON 正常是几百字节;给够余量,又不让异常端点撑爆内存。
 MAX_BYTES = 256 * 1024
 #: 缓存按答案自己的 TTL 过期,夹在这两条线之间(对方给的极端值不照抄)。
@@ -95,34 +92,6 @@ class Unavailable(Exception):
 
 class Unknown(Exception):
     """**对方明确答了**:这个域名没有地址记录(NXDOMAIN,或两个族都只有 CNAME)。"""
-
-
-def endpoint() -> str:
-    """每次读环境变量,不在 import 那一刻固化 —— 测试要能翻开关,运维也才能重启生效。"""
-    return os.environ.get(ENV, '').strip()
-
-
-def configured() -> bool:
-    return bool(endpoint())
-
-
-def seconds_budget() -> float:
-    """单次查询等多久。**配错值在用到它的时候报,不在 import 的时候崩。**
-
-    原先写成模块级 `float(os.environ.get(...))`:`KB_FEED_DOH_SECONDS=abc` 会让
-    `import kb.feeds.fetching` 直接抛 ValueError —— 开关压根没开也进不去,而报出来的
-    话指不到那个环境变量。
-    """
-    raw = os.environ.get(SECONDS_ENV, '').strip()
-    if not raw:
-        return DEFAULT_SECONDS
-    try:
-        value = float(raw)
-    except ValueError:
-        raise Unavailable(f'{SECONDS_ENV} 不是数字:{raw!r}') from None
-    if not value > 0:
-        raise Unavailable(f'{SECONDS_ENV} 要是正数:{raw!r}')
-    return value
 
 
 def forget() -> None:
@@ -154,7 +123,8 @@ def _ask(url: str, host: str, rtype: int, seconds: float) -> tuple[list[str], li
     """问一次(一种记录类型),返回 `(地址串, 各条 TTL)`。答不上一律抛 `Unavailable`。"""
     import json
     try:
-        with httpx.Client(trust_env=True, follow_redirects=False, timeout=seconds) as client:
+        with httpx.Client(follow_redirects=False, timeout=seconds,
+                          **egress.client_kwargs()) as client:
             raw = _read(client, url, host, rtype)
         answer = json.loads(raw)
     except Unavailable:
@@ -201,7 +171,7 @@ def _ask(url: str, host: str, rtype: int, seconds: float) -> tuple[list[str], li
 def addresses(host: str, *, seconds: float,
               keep: Callable[[Iterable[str]], list[str]]) -> list[str]:
     """这个域名**留得下来**的地址(`keep` 就是调用方那道判据,见模块 docstring)。"""
-    url = endpoint()
+    url = egress.endpoint()
     key = (url, host)
     now = time.monotonic()
     with _lock:
@@ -209,7 +179,7 @@ def addresses(host: str, *, seconds: float,
     if hit is not None and hit[0] > now:
         return list(hit[1])
     stop = now + max(0.0, seconds)
-    single = seconds_budget()
+    single = egress.seconds()
     found: list[str] = []
     ttls: list[float] = []
     why: list[str] = []

@@ -15,6 +15,8 @@ services:
       # 不经过 kb.sh,所以 scripts/web_env.sh 那套透传在这条路上一点用都没有;而容器里
       # getproxies() 只看环境变量,没有系统代理设置可以兜。空值不会被 httpx 当成
       # 「配了一个空代理」——compose 的 ${VAR:-} 在变量没设时整条不注入。
+      # **这几个是兜底**:同样几项在「设置 → 出口与解析」里填过的话以页面为准(页面上
+      # 改完下一条抓取就生效,不用重建容器)。容器这条路上多半没人去点页面,所以这里留着。
       # 形态与理由见 docs/decisions/dns-egress.md。
       KB_FEED_DOH: ${KB_FEED_DOH:-}
       KB_FEED_DOH_SECONDS: ${KB_FEED_DOH_SECONDS:-}

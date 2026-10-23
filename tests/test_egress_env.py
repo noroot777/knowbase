@@ -16,6 +16,7 @@
 bash 用 `/bin/bash`(macOS 自带的是 3.2):`WEB_ENV` 那段刻意不用 `mapfile`,这一条
 顺带也验了它在 3.2 上跑得起来。
 """
+import re
 import shutil
 import subprocess
 import tempfile
@@ -91,12 +92,20 @@ class EgressEnvTests(unittest.TestCase):
         (`http_proxy`、`all_proxy`)的第二份循环照样过得去 —— 而那正是这一族最可能
         被重写的形态(小写名是 curl / requests 的习惯)。
         """
-        whole = '\n'.join(p.read_text(encoding='utf-8')
-                          for p in (KB_SH, WEB_ENV_SH))
+        # **只数代码行**:注释里提到变量名是说明(web_env.sh 的文件头就在逐条讲这一族
+        # 为什么要透传),不是第二份判据 —— 把注释也数进去的话,这条守卫会逼着人删掉
+        # 恰恰最该留的那段理由。
+        whole = '\n'.join(line for p in (KB_SH, WEB_ENV_SH)
+                           for line in p.read_text(encoding='utf-8').splitlines()
+                           if not line.lstrip().startswith('#'))
+        # `KB_FEED_DOH` 也收进来了:shell 不再自己判开关(那一句改成问
+        # `egress.summary()`),于是它在两份 shell 里只该出现在名单那一处。
+        # **按词边界数**,不然 `KB_FEED_DOH` 会把 `KB_FEED_DOH_SECONDS` 一起数进去。
         for name in ('HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy',
-                     'KB_FEED_DOH_SECONDS'):
+                     'KB_FEED_DOH', 'KB_FEED_DOH_SECONDS'):
             with self.subTest(name=name):
-                self.assertEqual(1, whole.count(name), f'{name} 出现了不止一次')
+                hits = re.findall(rf'\b{name}\b', whole)
+                self.assertEqual(1, len(hits), f'{name} 出现了不止一次')
 
     def test_the_resolver_switch_is_passed_through_too(self):
         # 不透传它,可信解析那一层在服务里就永远读不到开关 —— 等于没做。
@@ -104,66 +113,44 @@ class EgressEnvTests(unittest.TestCase):
                       built(KB_FEED_DOH='https://doh.example/q'))
 
 
-if __name__ == '__main__':
-    unittest.main()
+class EgressLineTests(unittest.TestCase):
+    """起服务/看状态时那两三行的**管道**:Python 说的话有没有原样打出来。
 
-
-class EgressWarningTests(unittest.TestCase):
-    """配了 DoH 却探不到出口时那一句提示。
-
-    **判据是真探测,不是环境变量。** 第一版按变量判,在 macOS 上是误报:那里
-    `getproxies()` 读系统代理设置,一个 `*_proxy` 都没 export 也照样有出口(实测
-    `env -i` 下 DoH 解析成功,而告警照样打「多半连不上」)。所以这几条把
-    `urllib.request.getproxies()` 这件外部事实替掉,只验「探到了 / 探不到」各走哪条路。
+    **内容判据不在这儿**(开没开、端点怎么脱敏、探不到代理要不要提):那些搬进了
+    `kb.feeds.egress.summary()`,回归在 `tests/test_feed_egress.py`。原先那一版在 shell 里
+    自己判 `[ -n "$KB_FEED_DOH" ]`,而端点和代理现在以设置页为主 —— 判第二遍的那一版
+    会在「设置里填了、环境变量没填」时打「关」,可服务是开着的。
     """
 
-    def warn(self, probe_rc: int, **env) -> str:
-        """跑真 `warn_egress_gap`,把它那次探测换成一个固定答案的 uv 桩。"""
+    def lines(self, stdout: str, rc: int = 0) -> str:
+        """跑真 `egress_lines`,把它问 Python 那一下换成一个固定答案的 uv 桩。"""
         with tempfile.TemporaryDirectory() as tmp:
             stub = Path(tmp) / 'uv'
-            stub.write_text(f'#!/bin/sh\nexit {probe_rc}\n', encoding='utf-8')
+            stub.write_text(f'#!/bin/sh\nprintf \'%s\' "{stdout}"\nexit {rc}\n',
+                            encoding='utf-8')
             stub.chmod(0o755)
             script = ('set -uo pipefail\n'
                       'say() { echo "$*" >&2; }\n'
+                      f'ROOT="{tmp}"\n'
                       'CLEAN_ENV=(env -i HOME="$HOME" PATH="$PATH")\n'
                       f'. "{WEB_ENV_SH}"\n'
                       'build_web_env\n'
-                      'warn_egress_gap\n')
+                      'egress_lines\n')
             done = subprocess.run([BASH, '-c', script], capture_output=True, text=True,
-                                  env={'HOME': tmp, 'PATH': f'{tmp}:/usr/bin:/bin', **env})
+                                  env={'HOME': tmp, 'PATH': f'{tmp}:/usr/bin:/bin'})
             return done.stderr
 
-    def test_no_egress_found_says_so(self):
-        out = self.warn(1, KB_FEED_DOH='https://doh.example/q')
-        self.assertIn('探不到代理', out)
+    def test_every_line_python_prints_reaches_the_terminal(self):
+        """两行都要出来 —— 只打第一行的话「探不到代理」那句提示就永远看不见。"""
+        out = self.lines('可信解析:开(端点 https://doh.example)\n出口代理:探不到\n')
+        self.assertIn('[web] 可信解析:开(端点 https://doh.example)', out)
+        self.assertIn('[web] 出口代理:探不到', out)
 
-    def test_a_system_proxy_is_enough_to_stay_quiet(self):
-        """**反过来钉一边**:macOS 上那次误报就是这一格。探到了就什么都不说。"""
-        self.assertEqual('', self.warn(0, KB_FEED_DOH='https://doh.example/q').strip())
+    def test_nothing_is_said_when_python_cannot_answer(self):
+        """**反过来钉一边**:venv 还没装好时什么都不打 —— 那一步自己会说,这里再喊一遍
+        只是噪声。而且 uv 的报错里有路径,原样打出来像是出口配置出了问题。"""
+        self.assertEqual('', self.lines('boom: no venv\n', rc=1).strip())
 
-    def test_nothing_is_said_when_the_switch_is_off(self):
-        self.assertEqual('', self.warn(1).strip())
 
-    def test_the_status_line_masks_the_endpoint_path(self):
-        """端点的 path / query 可能带 token(NextDNS、AdGuard 那类带 profile id 的),
-        日志里不该留。"""
-        script = ('set -uo pipefail\n'
-                  'say() { echo "$*" >&2; }\n'
-                  f'. "{WEB_ENV_SH}"\n'
-                  'doh_line\n')
-        done = subprocess.run([BASH, '-c', script], capture_output=True, text=True,
-                              env={'HOME': '/tmp', 'PATH': '/usr/bin:/bin',
-                                   'KB_FEED_DOH': 'https://dns.nextdns.io/abc123secret?x=1'})
-        self.assertIn('https://dns.nextdns.io', done.stderr)
-        self.assertNotIn('abc123secret', done.stderr, '端点里的 token 进了日志')
-        self.assertNotIn('x=1', done.stderr)
-
-    def test_the_status_line_says_off_and_how_to_turn_it_on(self):
-        script = ('set -uo pipefail\n'
-                  'say() { echo "$*" >&2; }\n'
-                  f'. "{WEB_ENV_SH}"\n'
-                  'doh_line\n')
-        done = subprocess.run([BASH, '-c', script], capture_output=True, text=True,
-                              env={'HOME': '/tmp', 'PATH': '/usr/bin:/bin'})
-        self.assertIn('关', done.stderr)
-        self.assertIn('KB_FEED_DOH', done.stderr, '没说怎么开')
+if __name__ == '__main__':
+    unittest.main()

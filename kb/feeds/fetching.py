@@ -23,7 +23,7 @@ import feedparser
 import httpx
 from bs4 import BeautifulSoup, NavigableString
 
-from kb.feeds import page_gate, resolve, x_channels
+from kb.feeds import egress, page_gate, resolve, x_channels
 from kb.feeds.registry import normalize_url, uses_channel, x_handle
 from kb.source_types import feed_types
 
@@ -139,19 +139,27 @@ def public_addresses(url: str, *, deadline: float | None = None,
         found = [name]
     elif name is None:
         raise FeedError(_UNRESOLVED)
-    elif resolve.configured():
-        seconds = (remaining(deadline, collect_deadline) if deadline is not None
-                   else resolve.seconds_budget())
+    elif egress.configured():
         try:
+            # `egress.seconds()` 也在 try 里 —— 坏值是从这儿抛的,搁在 try 外面
+            # 那条 `except BadValue` 就是死代码,存量坏值会一路冒成 500。
+            seconds = (remaining(deadline, collect_deadline) if deadline is not None
+                       else egress.seconds())
             return url, _require_public(resolve.addresses(
                 name, seconds=seconds, keep=_public_only))
         except resolve.Unknown:
             raise FeedError(_UNRESOLVED) from None
+        except egress.BadValue as exc:
+            # 配置本身写错了(端点不是 http(s)、秒数不是正数)—— 说清是配置的事,
+            # 别让人去查网络。
+            raise FeedError(f'出口配置写错了（{exc}）') from None
         except resolve.Unavailable as exc:
             # **和「对方拦着你」分开说。** 这一句说的是我们这一侧没出口或者端点答得
-            # 不对,人要去看的是 KB_FEED_DOH 和代理,不是改订阅链接。**原因带上** ——
+            # 不对,人要去看的是出口配置,不是改订阅链接。**原因带上** ——
             # HTTP 400、超时、非 JSON、预算用尽在面板上长一样的话,指不到该改什么。
-            raise FeedError(f'域名解析服务不可用（{exc}），请检查 KB_FEED_DOH 与代理设置') from None
+            # **指页面不指环境变量**:端点和代理现在以设置页为主(`egress` 的方向),
+            # 那里还有一颗「测一下」能当场看出是哪一步给错了。
+            raise FeedError(f'域名解析服务不可用（{exc}），请到设置里的「出口与解析」检查端点与代理') from None
     else:
         try:
             found = [a[4][0] for a in socket.getaddrinfo(name, None, type=socket.SOCK_STREAM)]
@@ -213,7 +221,7 @@ def request(url: str, headers: dict | None = None, *, deadline: float | None = N
             # A separate origin context preserves Host/SNI/cert verification and
             # prevents connection/cookie reuse across redirect origins.
             with httpx.Client(verify=tls_context(original.raw_host.decode('ascii')),
-                              trust_env=True, follow_redirects=False,
+                              follow_redirects=False, **egress.client_kwargs(),
                               limits=httpx.Limits(max_keepalive_connections=0),
                               headers={'User-Agent': 'KnowledgeBaseFeedReader/1.0',
                                        'Accept': 'application/atom+xml, application/rss+xml, application/xml, text/xml;q=0.9, text/html;q=0.5'}) as client:

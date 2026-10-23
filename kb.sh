@@ -269,14 +269,13 @@ web_start() {
   fi
   web_prepare_env
   build_web_env
-  warn_egress_gap
   daemonize "$WEB_PID" "$LOG_DIR/web.log" "$ROOT" \
     "${WEB_ENV[@]}" PORT="$WEB_PORT" uv run --offline kb-web
   local n=0
   while ! port_busy "$WEB_PORT" && [ "$n" -lt 40 ]; do sleep 0.5; n=$((n+1)); done
   port_busy "$WEB_PORT" || die "kb-web 起不来,看 $LOG_DIR/web.log"
   say "[web] $API"
-  doh_line
+  egress_lines
   # 图谱页是 Vault 里的产物,不是 kb-web 现渲染的:样式改了得重新生成,提示一句
   graph_stale
 }
@@ -305,7 +304,7 @@ web_restart() { web_stop; web_start; }
 
 web_status() {
   local pids; pids="$(service_pids "$WEB_PID" "$WEB_PORT" "$WEB_PAT")"
-  if [ -n "$pids" ]; then echo "kb-web    运行中 ($API)"; code_stale; build_web_env; doh_line
+  if [ -n "$pids" ]; then echo "kb-web    运行中 ($API)"; code_stale; build_web_env; egress_lines
   elif port_busy "$WEB_PORT"; then echo "kb-web    未运行(端口 $WEB_PORT 被别的进程占着)"
   else echo "kb-web    未运行"; fi
 }

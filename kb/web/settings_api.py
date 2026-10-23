@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""设置面板后端:各阶段的模型分配、各家 API key、MCP server 注册。
+"""设置面板后端:各阶段的模型分配、各家 API key、MCP server 注册、出口与解析。
 
 key 只落 kb.llm 的配置文件,读接口一律脱敏,绝不回传明文。
 """
@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, StrictBool
 
 from kb import llm, llm_stages
+from kb.feeds import egress
 
 router = APIRouter()
 
@@ -191,3 +194,80 @@ def mcp_unregister():
     if proc.returncode != 0:
         raise HTTPException(500, f"取消注册失败: {(proc.stderr or proc.stdout)[:300]}")
     return {"ok": True, "message": proc.stdout.strip()}
+
+
+# ── 出口与解析 ──────────────────────────────────────────────────────────────────
+# 这一块只做读写转发和「测一下」。**哪一项生效、来自哪里、坏值怎么判,全在
+# kb.feeds.egress**(动之前先读 docs/decisions/dns-egress.md):判第二遍的那一版会在
+# 页面上显示一套、抓取时用另一套。
+
+#: 「测一下」默认测哪个域名。本机解析被污染的实测案例就是它(见决策文档),
+#: 所以它比 example.com 有用:关着开关测一次就能看见假地址。
+PROBE_HOST = "mistral.ai"
+
+
+def _bad(e: egress.BadValue) -> JSONResponse:
+    """坏值回 400,**`detail` 保持是一句话**(ui.js 的 `apiFail` 只认字符串,给它一个
+    对象的话那句话会被静默换成「保存失败」),哪一项错了单独一个 `field` —— 面板按它
+    把红字写在对应输入框下面。"""
+    return JSONResponse({"detail": str(e), "field": e.field}, status_code=400)
+
+
+@router.get("/api/egress")
+def api_egress():
+    """当前生效值 + 各项出处(代理的密码位脱敏)。"""
+    return egress.view()
+
+
+class EgressRequest(BaseModel):
+    # 三项都是「原样回传」:空串 = 清掉这一项,于是环境变量重新成为兜底。
+    endpoint: str = ""
+    seconds: str = ""
+    proxy: str = ""
+
+
+@router.post("/api/egress")
+def api_egress_set(body: EgressRequest):
+    try:
+        egress.save(body.endpoint, body.seconds, body.proxy)
+    except egress.BadValue as e:
+        return _bad(e)
+    return egress.view()
+
+
+class EgressProbeRequest(EgressRequest):
+    host: str = ""
+
+
+@router.post("/api/egress/probe")
+def api_egress_probe(body: EgressProbeRequest):
+    """按页面上**还没保存**的那几项真解析一次,报地址和耗时。不写盘。
+
+    **走的是 `fetching.public_addresses`** —— 抓取每一跳问的是同一个函数,所以这里
+    报的就是抓取会看到的东西(含 `is_global` 那道过滤和那几句人话错误)。另写一份
+    探测实现的话,「测得通、抓不到」就会成为常态,而这个按钮存在的理由正好是回答
+    「到底哪一步给错了」。
+
+    端点留空也值得测:那一下走系统解析,**正好把本机被污染这件事摆出来**。
+    """
+    from kb.feeds import fetching   # 延迟:起服务不必为这一个按钮拉起整条采集栈
+    proxy_url = egress.merge_proxy(body.proxy)
+    try:
+        egress.check(body.endpoint, body.seconds, proxy_url)
+    except egress.BadValue as e:
+        return _bad(e)
+    # 人往域名框里粘整条链接是常事,顺手剥掉 scheme 和 path —— 这是输入形态,
+    # 不是第二份解析口径。
+    host = (body.host or PROBE_HOST).strip().split("//", 1)[-1].split("/")[0].strip()
+    if not host:
+        raise HTTPException(400, "要测哪个域名?")
+    started = time.monotonic()
+    with egress.using(endpoint=body.endpoint, seconds=body.seconds, proxy=proxy_url):
+        via = "doh" if egress.configured() else "system"
+        try:
+            _, found = fetching.public_addresses(f"https://{host}/")
+            out: dict = {"ok": True, "addresses": found}
+        except fetching.FeedError as e:
+            out = {"ok": False, "error": str(e)}
+    return {**out, "host": host, "via": via,
+            "ms": round((time.monotonic() - started) * 1000)}

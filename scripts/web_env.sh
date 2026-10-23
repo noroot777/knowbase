@@ -36,33 +36,32 @@ build_web_env() {
   done
 }
 
-# 配了 DoH 却看不到出口时提一句。**提示而不代劳**(口径同 code_stale / graph_stale)。
+# 起服务/看状态时打的那两三行:可信解析开没开、端点是什么、出口代理在哪。
 #
-# **判据是真探测,不是「环境变量里有没有」。** 第一版按变量判,在 macOS 上是**误报**:
-# 那里 `getproxies()` 读的是系统代理设置,一个 *_proxy 都没 export 也照样有出口(实测
-# `env -i` 下 DoH 解析成功,而告警照样打「多半连不上」)。所以直接问一次
-# `urllib.request.getproxies()` —— 那正是 httpx 的 trust_env 走的那一份,口径只有一份,
-# 而且跨平台自动对:Linux / 容器 / CI 上它只看环境变量,该报的时候就会报。
+# **内容一个字都不在这儿判,全问 `kb.feeds.egress.summary()`。** 理由是主次反过来了:
+# 端点和代理现在**以设置页为主、环境变量兜底**,shell 再自己 `[ -n "$KB_FEED_DOH" ]`
+# 判一遍的话,「设置里填了、环境变量没填」就会打「关」—— 而服务其实是开着的。那条
+# 「探不到代理」的提示同理(判据是真问一次 `urllib.request.getproxies()`,macOS 上它读
+# 系统代理设置,按环境变量判是误报),也一并搬进 Python 了。
 #
-# 文案也跟着改成**陈述**:说清「我们这边探到什么」,不断言对方连不上。
-warn_egress_gap() {
-  [ -n "${KB_FEED_DOH:-}" ] || return 0
-  if "${WEB_ENV[@]}" uv run --offline python -c \
-      'import sys, urllib.request; sys.exit(0 if urllib.request.getproxies() else 1)' \
-      >/dev/null 2>&1; then
-    return 0
-  fi
-  say "[web] KB_FEED_DOH 配着,但服务那份环境里探不到代理(环境变量和系统代理都没有)
-     —— DoH 端点要是在墙外,解析会报「域名解析服务不可用」"
-}
-
-# 启动/状态各打一行:DoH 开没开、端点是什么。**端点脱敏到主机名** —— 有人把 token 写在
-# path 或 query 里(NextDNS、AdGuard 那类带 profile id 的端点),日志不该留。
-# 少了这一行的后果本轮实测过:服务重启了却没生效,只能靠手工比 pid 和进程环境才看出来。
-doh_line() {
-  if [ -n "${KB_FEED_DOH:-}" ]; then
-    say "[web] 可信解析:开(端点 $(printf '%s' "$KB_FEED_DOH" | sed -E 's#^([a-z]+://[^/?]+).*#\1#'))"
-  else
-    say "[web] 可信解析:关(走系统解析;要开:export KB_FEED_DOH=…)"
-  fi
+# **跑在 WEB_ENV 里**:和服务同一份环境、同一个数据目录,否则报的是另一个进程的配置。
+# **取不到就什么都不打**:venv 还没装好时 uv 会失败,那一步自己会说 —— 这里再喊一遍
+# 只是噪声。口径同 code_stale / graph_stale:**提示而不代劳,也不拦**。
+# 端点脱敏(path / query 里可能有 token)也在 Python 那一侧,见 egress.mask_endpoint。
+egress_lines() {
+  local out line
+  # **先看退出码再决定要不要说话**:只挡 stderr 是不够的,一个半路失败的解释器照旧
+  # 可能在 stdout 上留下半行东西,原样打出来像是出口配置出了问题。
+  out="$(cd "$ROOT" && "${WEB_ENV[@]}" uv run --offline python -c \
+      'from kb.feeds import egress
+for line in egress.summary():
+    print(line)' 2>/dev/null)" || return 0
+  while IFS= read -r line; do
+    if [ -n "$line" ]; then say "[web] $line"; fi
+  done < <(printf '%s\n' "$out")
+  # **末尾这两处都不能省**:kb.sh 开着 `set -e`,而「一行都没打」是正常末态。
+  # 写成 `[ -n "$line" ] && say ...` 的话,空输出那一轮它返回 1、整个 while 跟着返回 1,
+  # `web_start` 当场被砍 —— 服务其实起来了,命令却报错退出(`tests/test_kb_web_start.py`
+  # 的离线那条实测红过)。显式 `return 0` 是同一件事的第二道。
+  return 0
 }

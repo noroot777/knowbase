@@ -27,7 +27,7 @@ from unittest.mock import patch
 
 import httpx
 
-from kb.feeds import fetching, resolve
+from kb.feeds import egress, fetching, resolve
 
 DOH = 'https://doh.example/dns-query'
 #: 真实污染形态:本机把域名指到别人家的公网地址上,连过去卡在 TLS 握手。
@@ -73,7 +73,7 @@ class ResolveBase(unittest.TestCase):
         mock = patch.object(fetching.httpx, 'Client', side_effect=factory)
         mock.start()
         self.addCleanup(mock.stop)
-        env = patch.dict(os.environ, {resolve.ENV: DOH})
+        env = patch.dict(os.environ, {egress.ENV_ENDPOINT: DOH})
         env.start()
         self.addCleanup(env.stop)
 
@@ -97,7 +97,7 @@ class ResolveBase(unittest.TestCase):
 
 class OffByDefaultTests(ResolveBase):
     def test_unset_endpoint_never_asks_doh_and_keeps_system_resolution(self):
-        with patch.dict(os.environ, {resolve.ENV: ''}), \
+        with patch.dict(os.environ, {egress.ENV_ENDPOINT: ''}), \
              patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED) as dns:
             response = fetching.request('https://example.org/rss')
         self.assertEqual(b'feed', response.body)
@@ -106,7 +106,7 @@ class OffByDefaultTests(ResolveBase):
         self.assertEqual(['108.160.173.207'], self.hosts())
 
     def test_blank_endpoint_counts_as_unset(self):
-        with patch.dict(os.environ, {resolve.ENV: '   '}), \
+        with patch.dict(os.environ, {egress.ENV_ENDPOINT: '   '}), \
              patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
             fetching.request('https://example.org/rss')
         self.assertEqual([], self.asked)
@@ -175,7 +175,7 @@ class MalformedAnswerTests(ResolveBase):
             with self.subTest(payload=payload):
                 self.arm(payload)
                 with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
-                    with self.assertRaisesRegex(fetching.FeedError, 'KB_FEED_DOH'):
+                    with self.assertRaisesRegex(fetching.FeedError, '出口与解析'):
                         fetching.request('https://example.org/rss')
                 self.assertEqual([], self.connected)
 
@@ -192,7 +192,7 @@ class MalformedAnswerTests(ResolveBase):
 class BudgetTests(ResolveBase):
     def test_doh_timeout_is_capped_by_what_is_left_of_the_request_budget(self):
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED), \
-             patch.dict(os.environ, {resolve.SECONDS_ENV: '99'}):
+             patch.dict(os.environ, {egress.ENV_SECONDS: '99'}):
             fetching.request('https://example.org/rss', deadline=time.monotonic() + 2)
         spent = [o['timeout'] for o in self.options if isinstance(o.get('timeout'), float)]
         self.assertEqual(2, len(spent))                       # 两次查询各一个 client
@@ -201,7 +201,7 @@ class BudgetTests(ResolveBase):
     def test_exhausted_budget_asks_nothing_and_reports_the_read_timeout(self):
         self.arm(httpx.ConnectTimeout('doh is slow'))
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED), \
-             patch.dict(os.environ, {resolve.SECONDS_ENV: '99'}):
+             patch.dict(os.environ, {egress.ENV_SECONDS: '99'}):
             with self.assertRaisesRegex(fetching.FeedError, '超时'):
                 fetching.request('https://example.org/rss', deadline=time.monotonic() - 1)
         self.assertEqual([], self.asked)
@@ -256,7 +256,7 @@ class CacheTests(ResolveBase):
         self.arm([{'Status': 2}, {'Status': 2},
                   answer(rec('1.1.1.1')), answer(rec('1.1.1.1'))])
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
-            with self.assertRaisesRegex(fetching.FeedError, 'KB_FEED_DOH'):
+            with self.assertRaisesRegex(fetching.FeedError, '出口与解析'):
                 fetching.request('https://example.org/rss')
             fetching.request('https://example.org/rss')
         self.assertEqual(['1.1.1.1'], self.hosts())
@@ -296,7 +296,7 @@ class BothCallersTests(ResolveBase):
     def test_public_url_reports_the_egress_failure_too(self):
         self.arm({'Status': 2})
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
-            with self.assertRaisesRegex(fetching.FeedError, 'KB_FEED_DOH'):
+            with self.assertRaisesRegex(fetching.FeedError, '出口与解析'):
                 fetching.public_url('https://example.org/rss')
 
 
@@ -318,7 +318,7 @@ class HostnameTests(ResolveBase):
         out = []
         for value in (DOH, ''):
             resolve.forget()
-            with patch.dict(os.environ, {resolve.ENV: value}):
+            with patch.dict(os.environ, {egress.ENV_ENDPOINT: value}):
                 out.append(fetching.public_addresses(url)[1])
         return out
 
@@ -343,7 +343,7 @@ class HostnameTests(ResolveBase):
 
     def test_non_ascii_names_are_idna_encoded_before_asking(self):
         self.arm(answer(rec('93.184.216.34')))
-        with patch.dict(os.environ, {resolve.ENV: DOH}):
+        with patch.dict(os.environ, {egress.ENV_ENDPOINT: DOH}):
             _, found = fetching.public_addresses('https://münchen.de/rss')
         self.assertEqual(['93.184.216.34'], found)
         self.assertEqual({'xn--mnchen-3ya.de'}, set(self.names()),
@@ -353,7 +353,7 @@ class HostnameTests(ResolveBase):
         """纯 ASCII 不走 idna codec:它会拒掉 `getaddrinfo` 本来认得的东西
         (实测 63 字符以上的标签、以及 `a..b` 这种空标签),那种收紧不属于这一层。"""
         self.arm(answer(rec('93.184.216.34')))
-        with patch.dict(os.environ, {resolve.ENV: DOH}):
+        with patch.dict(os.environ, {egress.ENV_ENDPOINT: DOH}):
             fetching.public_addresses('https://_dmarc.example.org/rss')
         self.assertEqual({'_dmarc.example.org'}, set(self.names()))
 
@@ -362,7 +362,7 @@ class AnswerBoundaryTests(ResolveBase):
     """**「答得不对」绝不许说成「确定没有」**(元规则:判不准一律抛)。
 
     面板上这两句话指向完全不同的下一步:「无法解析订阅服务器地址」让人去改链接,
-    「解析服务不可用」让人去看 KB_FEED_DOH 和代理。把前者用在我们并不知道的事情上,
+    「解析服务不可用」让人去看设置页上的端点和代理。把前者用在我们并不知道的事情上,
     人就会去改一条本来没毛病的链接。
     """
 
@@ -458,7 +458,7 @@ class SecondsBudgetTests(ResolveBase):
         done = subprocess.run(
             [sys.executable, '-c', 'import kb.feeds.fetching; print("imported")'],
             cwd=str(Path(__file__).resolve().parents[1]),
-            env={**os.environ, resolve.SECONDS_ENV: 'abc'},
+            env={**os.environ, egress.ENV_SECONDS: 'abc'},
             capture_output=True, text=True)
         self.assertEqual(0, done.returncode, done.stderr[-800:])
         self.assertIn('imported', done.stdout)
@@ -466,12 +466,12 @@ class SecondsBudgetTests(ResolveBase):
     def test_a_bad_value_is_reported_where_it_is_used(self):
         for bad in ('abc', '0', '-3'):
             with self.subTest(bad=bad):
-                with patch.dict(os.environ, {resolve.SECONDS_ENV: bad}):
-                    with self.assertRaisesRegex(resolve.Unavailable, resolve.SECONDS_ENV):
-                        resolve.seconds_budget()
+                with patch.dict(os.environ, {egress.ENV_SECONDS: bad}):
+                    with self.assertRaises(egress.BadValue):
+                        egress.seconds()
 
     def test_a_blank_value_falls_back_to_the_default(self):
         for value in ('', '   '):
             with self.subTest(value=value):
-                with patch.dict(os.environ, {resolve.SECONDS_ENV: value}):
-                    self.assertEqual(resolve.DEFAULT_SECONDS, resolve.seconds_budget())
+                with patch.dict(os.environ, {egress.ENV_SECONDS: value}):
+                    self.assertEqual(egress.DEFAULT_SECONDS, egress.seconds())

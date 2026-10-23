@@ -280,19 +280,27 @@ echo '见 [原文](https://example.com/a_(b)) 这篇' | ./kb.sh grab -  # Markdo
 （实测把 `mistral.ai` 解析成 Meta 的地址），而抓取为了防 SSRF 会钉着解析出来的那个
 数字 IP 发请求，于是敲的是别人家的门，面板上只显示一句超时：
 
+**在页面上改：设置 → 出口与解析。** 填一个可信的 DoH 端点（给了 Cloudflare / Google /
+OpenDNS 三个预设），**保存后下一条抓取就用新值，不用重启**。旁边那颗「测一下」会按框里
+还没保存的值真解析一次、报解析出来的地址和耗时——端点留空着测，看到的就是本机解析给的
+那一份，污染与否一眼能对出来。抓取走哪个代理也在同一块面板上配。
+
+命令行等价物（容器、CI 这类没人去点页面的地方；**页面上填了的项优先**）：
+
 ```bash
 # 它住在哪？答案落在别人家的网段里就是被污染了
 python3 -c "import socket;print({a[4][0] for a in socket.getaddrinfo('mistral.ai',None)})"
 
-# 改问一台可信的 DoH 解析器（默认关；关着时一次 DoH 请求都不发，走系统解析）
+# 默认关；关着时一次 DoH 请求都不发，走系统解析
 export KB_FEED_DOH=https://cloudflare-dns.com/dns-query
 export KB_FEED_DOH_SECONDS=8        # 可选，单次查询上限，默认 8 秒
-./kb.sh restart                     # 开关要透传进服务进程，必须重启才生效
-./kb.sh status                      # 会打一行「可信解析:开/关」
+./kb.sh restart                     # 环境变量要透传进服务进程，这条路得重启；页面上改不用
+./kb.sh status                      # 会打一行「可信解析:开/关」，带上这一项的出处
 ```
 
-**端点自己要连得上**：它在墙外的话，这个 shell 得有代理（`HTTPS_PROXY` 之类），
-`./kb.sh start` 会把出口那一族变量一起带进服务进程；探不到出口时它会提示一句。
+**端点自己要连得上**：它在墙外的话得有代理——页面上那一栏可以直接填，也可以用
+`HTTPS_PROXY` 之类的环境变量（`./kb.sh start` 会把出口那一族一起带进服务进程）；
+两处都探不到时 `./kb.sh status` 会提示一句。
 容器部署走 `compose.yaml` 的 `environment`（那条路不经过 `kb.sh`）。
 **已知限制**：没有代理时端点域名本身仍走本机解析，本机被污染得够狠时它也可能被带偏。
 完整形态见 [域名解析与出口](docs/decisions/dns-egress.md)。
