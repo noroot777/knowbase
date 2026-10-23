@@ -601,7 +601,7 @@ Knowbase 操作入口 —— 每条命令跑完就还你终端,不用挂着
   回归(前台跑,数据目录自动换成全新临时目录,不碰真实库)
     ./kb.sh test                    提交前的快速层:纯逻辑全量,浏览器回归显式拦下(约 3 分钟)
     ./kb.sh test probes             只跑浏览器回归 —— 改了 kb/static/ 或阅读页之后(约 10 分钟)
-    ./kb.sh test full               真全量,push 前至少一次(约 12 分钟;分层见 docs/decisions/test-tiers.md)
+    ./kb.sh test full               真全量(约 12 分钟;验收时 ash 闸门自动跑,分层见 docs/decisions/test-tiers.md)
 
   订阅(瞬间返回)
     ./kb.sh accounts list|discover|add|remove|enable|disable [名字]

@@ -93,8 +93,11 @@
   闸在 `browser_gate`(同时给类打分层统计用的 `kb_browser` 标记),两个现成入口
   `requires_headless`(要 node + 壳)和 `requires_shell`(只要壳);`./kb.sh test`
   的 fast 层就是靠在进程上设这个开关把浏览器回归整层拦下的,见
-  docs/decisions/test-tiers.md)。整轮全量约 13 分钟,这一组占掉大半,所以日常改非界面的东西时关掉它
-  很划算 —— **但提交前那一次不许关**。
+  docs/decisions/test-tiers.md)。整轮全量约 13 分钟,这一组占掉大半 —— 日常提交走
+  `./kb.sh test`(fast 层)就等于替你关了它;只有手动跑 README 那条 discover 想省
+  时间才需要自己设。**带浏览器的那一遍跑不掉**:验收时 ash 闸门跑
+  `./kb.sh test full`,而 probes/full 入口会把继承的开关清掉(层表态显式,见
+  test-tiers.md),人关不了那一遍。
   - **不给 `HEADLESS_SHELL` 并不等于不跑**:上面那条口径会自己去 playwright 缓存里
     找一份(本机实测找到了),所以「我没给路径」关不掉它。这就是要有个显式开关的理由。
   - **跳过的理由必须说清是人关的**:一句 `OK (skipped=30)` 在「人关了」和「这台机器
