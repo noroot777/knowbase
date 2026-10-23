@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 import unittest
@@ -55,6 +56,11 @@ class EgressApiBase(unittest.TestCase):
         app.include_router(settings_api.router)
         self.client = TestClient(app)
 
+    def loose(self) -> TestClient:
+        """未捕获的异常照 500 回,不往测试里抛 —— 判据是「面板收到了什么」,
+        而面板收到的就是一个 500(它只能显示成一句没有信息的「测试失败」)。"""
+        return TestClient(self.client.app, raise_server_exceptions=False)
+
     def stored(self, **fields):
         llm._SECRETS_PATH.write_text(json.dumps({egress.SECTION: fields}), encoding='utf-8')
 
@@ -82,6 +88,30 @@ class ReadWriteTests(EgressApiBase):
             body = self.client.get('/api/egress').json()
         self.assertEqual('来自环境变量 ALL_PROXY', body['where']['proxy'])
         self.assertEqual('', body['where']['endpoint'], '没配的项不该编一个出处出来')
+
+    def test_the_page_is_told_whether_clearing_a_box_really_turns_it_off(self):
+        """**「有没有兜底」不能从「现在谁生效」推出来。** 两层都有、设置那层生效时
+        `sources` 说 `'settings'`,而清空之后生效的是环境变量那一份 —— 页面那句
+        「留空 = 关(走系统解析)」照 `sources` 判出来是反话:实测人点完「关掉」保存,
+        端点立刻被环境变量那份回填、状态仍是「开」,他刚看到的那句话说的是反面。
+        所以 `view()` 另给一项 `fallbacks`,页面照它说话。
+        """
+        self.stored(endpoint='https://settings.example/q')
+        with patch.dict(os.environ, {egress.ENV_ENDPOINT: 'https://env.example/q'}):
+            body = self.client.get('/api/egress').json()
+        self.assertEqual('settings', body['sources']['endpoint'])
+        self.assertTrue(body['fallbacks']['endpoint'], '清空之后还有东西顶上,页面没被告知')
+        self.assertFalse(body['fallbacks']['proxy'], '没有兜底的那一项不许说有')
+
+    def test_the_seconds_box_shows_the_number_that_would_take_over(self):
+        """秒数那一格的框只放得下一个数(一句话实测被截成「留空 =」),所以它给的是
+        **清空之后真正会用的那个数** —— 有兜底时是环境变量那份,没有才是默认 8。
+        """
+        with patch.dict(os.environ, {egress.ENV_SECONDS: '12'}):
+            body = self.client.get('/api/egress').json()
+        self.assertEqual('12', body['seconds_when_cleared'])
+        self.assertEqual(egress.DEFAULT_SECONDS,
+                         self.client.get('/api/egress').json()['seconds_when_cleared'])
 
     def test_the_proxy_password_never_leaves_the_machine(self):
         self.stored(proxy='http://me:s3cret@127.0.0.1:7897')
@@ -165,6 +195,30 @@ class ProbeTests(EgressApiBase):
         self.assertEqual(200, r.status_code)
         self.assertFalse(r.json()['ok'])
         self.assertIn('公网', r.json()['error'])
+
+    def test_an_address_the_fetcher_would_refuse_is_a_result_not_a_500(self):
+        """**这颗按钮的说明就是「换成你抓不到的那个」**,所以本机/内网地址、粘错成
+        `mailto:` 的链接正是人最常填进去的那几种。它们在 `normalize_url` 那一道抛的是
+        `ValueError`,而这里原先只接 `FeedError` —— 实测六种一路冒成 500,面板上只剩
+        一句没有信息的「测试失败」,而那几句 ValueError 本来就是写给人看的。
+
+        `a * 300` 走的是另一条:`getaddrinfo` 在 C 那一层一律拿 idna 编主机名,单个标签
+        超过 63 字节时抛 `UnicodeError`(**不是** `OSError`),收在 `fetching` 那一道。
+
+        **反过来钉一边**在同一份里:`test_an_empty_endpoint_probes_the_system_resolver`
+        和 `test_it_answers_with_the_addresses_a_fetch_would_see` 钉着能用的那一格照旧
+        报地址 —— 这条把 except 收宽了,别把那一格也变成失败。
+        """
+        for host in ('localhost', 'http://localhost:8787/x', 'not a url', 'mailto:x@y',
+                     '192.168.1.1', '[::1]', 'a' * 300):
+            with self.subTest(host=host):
+                r = self.loose().post('/api/egress/probe', json={'host': host})
+                self.assertEqual(200, r.status_code, '这一格冒成了 500')
+                self.assertFalse(r.json()['ok'])
+                # 判据是**人话**:原样冒上来的 Python 异常串(`encoding with 'idna'
+                # codec failed`)在面板上和 500 一样指不到该改什么。
+                self.assertTrue(re.search(r'[\u4e00-\u9fff]', r.json()['error']),
+                                f"没给人一句话:{r.json()['error']!r}")
 
     def test_a_pasted_link_is_accepted_as_a_hostname(self):
         """人往域名框里粘整条链接是常事。"""

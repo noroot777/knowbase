@@ -167,7 +167,12 @@ def public_addresses(url: str, *, deadline: float | None = None,
     else:
         try:
             found = [a[4][0] for a in socket.getaddrinfo(name, None, type=socket.SOCK_STREAM)]
-        except OSError:
+        except (OSError, UnicodeError):
+            # **`UnicodeError` 也是「这个名字解析不了」。** `getaddrinfo` 在 C 那一层
+            # 一律拿 idna 编码主机名,单个标签超过 63 字节时它抛的是
+            # `UnicodeError: label too long` —— 不是 `OSError`。实测:面板上「测一下」
+            # 填一串 300 个 a,这一句一路冒成 500;抓取那一侧同样会把一条订阅的失败
+            # 变成整轮的崩溃。两处都该是「无法解析订阅服务器地址」这一句。
             raise FeedError(_UNRESOLVED) from None
     return url, _require_public(_public_only(found))
 

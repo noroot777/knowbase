@@ -186,6 +186,20 @@ class CredentialTests(EgressBase):
         egress.save('', '', f'http://me:{egress.MASK}@127.0.0.1:9999')
         self.assertEqual('http://me:s3cret@127.0.0.1:9999', egress.proxy())
 
+    def test_the_mask_is_never_what_gets_stored(self):
+        """**存量里那条解析不动时整段 userinfo 一起被盖**(`***@h`,见 `mask_proxy`),
+        于是人交回来的那一份里 `password` 是 `None` —— 只认「密码位是 MASK」的那一版
+        在这一格判成「这不是占位」,`http://***@h:7897` 一路过 `check_url` 存进
+        `secrets.json`,**密码真的变成了 `***` 三个字**,而面板上看着像刚把端口改好了,
+        要等下一次抓取连不上才知道。拼不出来就拒,别猜。
+        """
+        self.stored(proxy='http://me:s3cret@h:abc')      # 端口是垃圾 → 解析不动
+        shown = egress.mask_proxy(egress.proxy() or '')
+        self.assertNotIn('s3cret', shown, '面板上就泄漏了')
+        with self.assertRaises(egress.BadValue):
+            egress.save('', '', shown.replace(':abc', ':7897'))
+        self.assertEqual('http://me:s3cret@h:abc', egress.proxy(), '存着的密码被动过了')
+
     def test_a_real_new_password_replaces_it(self):
         """反过来钉一边:真改密码时不许把新的吃掉。"""
         self.stored(proxy='http://me:s3cret@127.0.0.1:7897')
@@ -337,6 +351,29 @@ class SummaryTests(EgressBase):
         设置,一个 `*_proxy` 都没 export 也照样有出口,那时不该提。"""
         self.stored(endpoint=DOH)
         self.assertNotIn('探不到', self.summary({'https': 'http://127.0.0.1:7897'}))
+
+    def test_only_a_no_proxy_setting_is_not_a_proxy(self):
+        """`getproxies()` 把 `NO_PROXY` 也当一项回来,照「非空就是有代理」判的话这句
+        提示被这一个键吃掉 —— 而「只设了 `NO_PROXY`、根本没有代理」的机器正是最该
+        看见它的那一台。"""
+        self.stored(endpoint=DOH)
+        self.assertIn('探不到', self.summary({'no': 'example.internal'}))
+
+    def test_a_proxy_we_do_not_read_is_still_said_out_loud(self):
+        """**探到了、但不在 `ENV_PROXY` 那份名单里**:`HTTP_PROXY`、或者 macOS 的系统
+        代理设置。名单只收 https/all 那几个是知情的(`HTTP_PROXY` 管不着 https 这一跳),
+        可一行都不打也不对 —— 这几行要回答的就是「跑着的那个进程在用什么出口」。"""
+        self.stored(endpoint=DOH)
+        out = self.summary({'http': 'http://127.0.0.1:7897'})
+        self.assertIn('http://127.0.0.1:7897', out)
+        self.assertNotIn('探不到', out, '探到了却说探不到')
+
+    def test_a_probed_proxy_is_masked_too(self):
+        """系统代理设置和 `*_PROXY` 里一样能带凭证,而这一行是要落盘的。"""
+        self.stored(endpoint=DOH)
+        out = self.summary({'https': 'http://me:s3cret@127.0.0.1:7897'})
+        self.assertNotIn('s3cret', out, '探到的那个代理把密码打进了日志')
+        self.assertIn('127.0.0.1:7897', out)
 
 
 #: 人在面板上敲得出来、`urlsplit` 却会抛的那几种。**端口那一条最阴**:`urlsplit` 当场
@@ -523,6 +560,10 @@ class MaskEndpointTests(EgressBase):
     profile id 放在 path 或 query 里。所以凡是它漏掉的形态,都等于这个函数在那一格
     没干活:实测漏了两种,**`user:pass@` 原样打出去**(它从 `netloc` 拼,而 netloc
     里就带着凭证),以及**没写协议头的地址整条原样返回**(`urlsplit` 认不出主机名)。
+
+    第三种是补这两种时留下的:从原串剪到**第一个 `/`** 为止的那一版,对
+    `doh.example?token=s3cret` 一个字都没剪 —— 它没有 `/`,而带 token 的端点恰恰常写成
+    这个形状。所以现在**一个字都不从原串上剪,只从解析结果重拼**(拼不出就只打 MASK)。
     """
 
     def test_credentials_and_tokens_never_reach_the_line(self):
@@ -532,6 +573,10 @@ class MaskEndpointTests(EgressBase):
                 ('https://doh.example:8443/abc/s3cret', 'https://doh.example:8443'),
                 ('doh.example/dns-query?token=s3cret', 'doh.example'),
                 ('user:s3cret@doh.example/q', 'doh.example'),
+                ('doh.example?token=s3cret', 'doh.example'),
+                ('doh.example:8443?token=s3cret', 'doh.example:8443'),
+                ('user:s3cret@doh.example?token=x', 'doh.example'),
+                ('u:s3cret@h://x', ''),
                 ('  https://doh.example/q?token=s3cret  ', 'https://doh.example'),
                 ('HTTPS://doh.example/q?token=s3cret', 'https://doh.example'),
                 ('http://[::1', '')):

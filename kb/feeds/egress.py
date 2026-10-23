@@ -99,6 +99,22 @@ def using(**fields: str):
         invalidate()
 
 
+def _env(name: str) -> tuple[str, str]:
+    """环境变量里这一项的值和它的变量名(都没有就两个空串)。
+
+    **「有没有兜底」和「现在谁说话算数」是两个问题。** 页面上那句「留空 = 关」只在
+    **环境变量里也没有**时才成立,而它不能从「当前生效的那一份来自哪」推出来 ——
+    实测过的反面:两层都有、设置那层生效时,占位符照 `sources` 判会写「留空 = 关(走
+    系统解析)」,人照着点完「关掉」保存,端点立刻被环境变量那份回填、状态仍是「开」,
+    那句话说的是反面。所以 `view()` 另给一项 `fallbacks`,口径就是这一份。
+    """
+    for env in ENV_NAMES.get(name, ()):
+        got = os.environ.get(env, '').strip()
+        if got:
+            return got, env
+    return '', ''
+
+
 def _effective(name: str) -> tuple[str, str]:
     """这一项**最终生效的值**,以及它的出处:`'settings'` / 环境变量名 / `''`(都没有)。
 
@@ -112,11 +128,7 @@ def _effective(name: str) -> tuple[str, str]:
     value = _stored(name)
     if value:
         return value, 'settings'
-    for env in ENV_NAMES.get(name, ()):
-        got = os.environ.get(env, '').strip()
-        if got:
-            return got, env
-    return '', ''
+    return _env(name)
 
 
 def endpoint() -> str:
@@ -305,11 +317,26 @@ def merge_proxy(incoming: str) -> str:
         # (脱敏值拆不动 → 原样送进 `check_url` → 报一句他根本没动过的代理有问题)。
         return kept
     old, new = _parsed(kept), _parsed(incoming)
-    if new is None or new.password != MASK:
-        return incoming  # MASK 出现在别处(主机名、路径),不是在替密码占位
-    if old is None or not old.password:
+    if new is None:
+        return incoming
+    # **我们盖出来的是两种形态**,两种都得认:正常那条盖掉密码位(`user:***@h`),
+    # 存着的那条解析不动时整段 userinfo 一起盖(`***@h`,见 `mask_proxy`)。
+    # 只认前一种的后果实测过:存量里 `http://u:p@h:abc`(端口是垃圾)显示成
+    # `http://***@h:abc`,人把端口改对交回来 —— 第二种形态的 `password` 是 `None`,
+    # 于是「这不是占位」,`http://***@h:7897` 一路过 `check_url` 存进 `secrets.json`,
+    # **密码真的变成了 `***` 三个字**,而面板上看着像修好了,要等下一次抓取连不上。
+    masked_password = new.password == MASK
+    masked_userinfo = new.password is None and new.username == MASK
+    if not (masked_password or masked_userinfo):
+        return incoming  # MASK 出现在别处(主机名、路径、或他自己输的用户名)
+    if old is None:
+        # 存着的那条解析不动,这儿既拼不出用户名也拼不出密码 —— **判不准一律拒**。
+        raise BadValue('存着的代理地址解析不动,请把完整地址(含密码)重输一遍', 'proxy')
+    if not old.password:
         raise BadValue('原来的代理密码已经不在了,请把完整地址重输一遍', 'proxy')
-    return urlunsplit(new._replace(netloc=f'{new.username}:{old.password}@{_netloc(new)}'))
+    # 整段被盖过的那一种,用户名也不是人输的,两位都从旧值来。
+    user = new.username if masked_password else old.username
+    return urlunsplit(new._replace(netloc=f'{user}:{old.password}@{_netloc(new)}'))
 
 
 def check(endpoint_url: str, seconds_raw: str, proxy_url: str) -> None:
@@ -395,6 +422,15 @@ def view() -> dict:
         # 出处**整句**给出去,不只给 'env' 这个分类:代理那一族有四个候选变量名,
         # 前端猜不出是哪个在兜底,而那正是人要去改的那一个。
         'where': {name: _where(name) for name in ('endpoint', 'seconds', 'proxy')},
+        # **「清空这一项之后还有东西接着生效吗」** —— 页面那句「留空 = 关」照这个判,
+        # 不照 `sources`(两层都有、设置那层生效时它说 'settings',而清空之后生效的是
+        # 环境变量那份;照它判出来的那句话是反的,见 `_env`)。
+        'fallbacks': {name: bool(_env(name)[0])
+                      for name in ('endpoint', 'seconds', 'proxy')},
+        # **秒数那一格给的是「清空之后真正会用的那个数」**,不是一句话:它的输入框只有
+        # 84px(放得下一个数),塞一句「留空 = 回落到环境变量」实测被截成「留空 =」,
+        # 比不说还糟。数字本身就把话说完了 —— 框里空着时你看到几,生效的就是几。
+        'seconds_when_cleared': _env('seconds')[0] or DEFAULT_SECONDS,
         'default_seconds': DEFAULT_SECONDS,
         'presets': presets(),
     }
@@ -406,19 +442,37 @@ def mask_endpoint(url: str) -> str:
     有人把 token 写在 path 或 query 里(NextDNS、AdGuard 那类带 profile id 的端点),
     终端输出和日志不该留。页面上**照旧完整回传**:那是人要对照着改的东西。
 
-    **从 hostname 拼,不拿 netloc。** `netloc` 里带着 `user:pass@`,原样打出去就是把
-    凭证写进日志 —— 而这个函数存在的全部理由就是别把凭证写进日志。
-    **没有协议头的也要剪**:`doh.example/q?token=x` 这种 `urlsplit` 认不出主机名,
-    早先那一版直接原样返回,于是最该剪的那一类一个字都没剪。
+    **一个字都不从原串上剪,只从解析结果重拼。** `netloc` 里带着 `user:pass@`、
+    path 和 query 里带着 token,原样打出去就是把凭证写进日志 —— 而这个函数存在的
+    全部理由就是别把凭证写进日志。**没有协议头的那一类也要剪**:`urlsplit` 认不出
+    它的主机名(整条落在 `path` 里),所以这儿一律补 `//` 按 netloc 读。从原串剪到
+    第一个 `/` 为止的那一版实测漏掉 `doh.example?token=s3cret` —— 它**没有 `/`**,
+    整串原样进了日志,而带 token 的端点恰恰常写成这个形状。拼不出主机名就只打 MASK。
     """
     url = (url or '').strip()
     if not url:
         return ''
-    parts = _parsed(url)
-    if parts is None or not parts.scheme:
-        # 剪到第一个 `/` 为止,再把 userinfo 去掉。拿不准结构就只保留最保守的那一段。
-        return url.split('/', 1)[0].rsplit('@', 1)[-1] or MASK
-    return f'{parts.scheme}://{_netloc(parts)}'
+    head, sep, rest = url.partition('://')
+    # **协议头只认不带凭证的那一种**:`@` 或 `:` 出现在 `://` 之前时它根本不是协议头
+    # (`u:p@h://x` 这种存量垃圾),整条当 netloc 读 —— 否则这一行就把凭证原样打出去。
+    scheme, body = (head.strip().lower(), rest) if sep and not set('@:') & set(head) else ('', url)
+    parts = _parsed('//' + body.lstrip('/'))
+    if parts is None:
+        return MASK
+    return f'{scheme}://{_netloc(parts)}' if scheme else _netloc(parts)
+
+
+def _system_proxies() -> dict:
+    """环境与系统代理设置里探得到的那几项(httpx 的 `trust_env` 读的就是这一份)。
+
+    **`no` 不是代理。** `getproxies()` 把 `NO_PROXY` 也当一项回来,于是「只设了
+    `NO_PROXY`、根本没有代理」的机器上,那句「探不到代理」的提示被这一个键吃掉 ——
+    而那正是最该看见这句提示的机器。
+    """
+    import urllib.request
+
+    return {scheme: value for scheme, value in urllib.request.getproxies().items()
+            if scheme != 'no'}
 
 
 def summary() -> list[str]:
@@ -428,8 +482,6 @@ def summary() -> list[str]:
     `secrets.json`、也不自己判环境变量 —— 判第二遍的那一版在「设置里填了、环境变量
     没填」时会打「关」,而服务其实是开着的。
     """
-    import urllib.request
-
     url = endpoint()
     if url:
         lines = [f'可信解析:开(端点 {mask_endpoint(url)},{_where("endpoint")})']
@@ -441,7 +493,16 @@ def summary() -> list[str]:
     configured_proxy = proxy()
     if configured_proxy:
         lines.append(f'出口代理:{mask_proxy(configured_proxy)}({_where("proxy")})')
-    elif url and not urllib.request.getproxies():
+    elif probed := _system_proxies():
+        # **探到了、但不在 `ENV_PROXY` 那份名单里**:`HTTP_PROXY`、或者 macOS 的系统
+        # 代理设置。名单只收 https/all 那几个是知情的(`HTTP_PROXY` 管不着 https 这一跳,
+        # 收进去等于在面板上报一个 DoH 压根用不上的代理),但一行都不打也不对 ——
+        # 这几行要回答的就是「跑着的那个进程在用什么出口」。**按协议逐项陈述**,不替
+        # httpx 断言哪一跳会走谁;值照旧脱敏(系统代理设置里也能带凭证)。
+        seen = ', '.join(f'{scheme} 走 {mask_proxy(value)}'
+                         for scheme, value in sorted(probed.items()))
+        lines.append(f'出口代理:设置里没配,抓取照环境与系统代理走({seen})')
+    elif url:
         # **这句警告仍然只在端点开着时打**:它说的是「DoH 要出得去」。端点关着时
         # 「没配代理」是默认状态,不是问题,喊一句只是噪声(口径同 code_stale:
         # 提示而不代劳,也不无中生有)。**陈述我们探到什么**,不断言对方连不上 ——

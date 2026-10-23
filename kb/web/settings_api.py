@@ -269,7 +269,13 @@ def api_egress_probe(body: EgressProbeRequest):
         try:
             _, found = fetching.public_addresses(f"https://{host}/")
             out: dict = {"ok": True, "addresses": found}
-        except fetching.FeedError as e:
+        except (fetching.FeedError, ValueError) as e:
+            # **`ValueError` 也是这颗按钮的正常输出。** `localhost`、内网地址、粘错的
+            # `mailto:`、带空格或超长的串在 `normalize_url` 那一道抛的是 `ValueError`,
+            # 而它接的只有 `FeedError` —— 实测那六种一路冒成 500,面板上只剩一句没有
+            # 信息的「测试失败」。偏偏这颗按钮的说明就是「换成你抓不到的那个」,
+            # 本机/内网地址正是人最常拿来对照的。那几句话本来就是写给人看的
+            # (`订阅链接须使用公开地址` / `链接过长或包含空格`),照原样摆出来。
             out = {"ok": False, "error": str(e)}
     return {**out, "host": host, "via": via,
             "ms": round((time.monotonic() - started) * 1000)}
