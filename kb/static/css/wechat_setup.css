@@ -17,7 +17,7 @@
 .wechat-steps strong { display: block; font-size: 14px; }
 .wechat-steps small { color: var(--muted); font-size: 12px; }
 .wechat-steps button, .wechat-steps .badge { font-size: 12px; }
-.wechat-progress { background: var(--paper); padding: 14px 16px; border-radius: 10px; font-size: 14px; }
+.wechat-progress { background: var(--paper); padding: 14px 16px; border-radius: 10px; font-size: 14px; overflow-wrap: anywhere; }
 .wechat-progress[aria-busy=true] { border-left: 3px solid var(--brand); }
 .wechat-account-row { margin: 15px 0; }
 .wechat-account-row select { display: block; width: 100%; margin-top: 6px; }

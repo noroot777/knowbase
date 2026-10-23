@@ -38,16 +38,35 @@ def reader_command() -> str:
                   Path(os.getenv("KB_WECHAT_RUNTIME") or Path.home() /
                        ".local/share/knowbase/wechat").expanduser() / "bin/rion-wechat-cli"]
     for candidate in candidates:
+        if candidate and os.name == 'nt' and Path(candidate).suffix.lower() != '.exe':
+            continue
         if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     raise LocalReaderError("未安装绿泡泡数据库读取器，请在知识库的「绿泡泡接入」中检查并接入")
 
 
+def reader_argv() -> list[str]:
+    try:
+        return [reader_command()]
+    except LocalReaderError:
+        if os.name == 'nt':
+            root = Path(os.getenv('KB_WECHAT_RUNTIME') or Path.home() /
+                        '.local/share/knowbase/wechat').expanduser() / 'windows-reader'
+            python, launcher = root / 'venv/Scripts/python.exe', root / 'reader_launcher.py'
+            if python.is_file() and launcher.is_file():
+                return [str(python), str(launcher)]
+        raise
+
+
 class LocalReader:
     def call(self, *args: str) -> dict:
         try:
-            proc = subprocess.run([reader_command(), *args], capture_output=True,
-                                  text=True, timeout=60)
+            options = {'text': True, 'timeout': 60}
+            if os.name == 'nt':
+                options.update(encoding='utf-8', errors='replace',
+                               env={**os.environ, 'PYTHONIOENCODING': 'utf-8', 'PYTHONUTF8': '1'},
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            proc = subprocess.run([*reader_argv(), *args], capture_output=True, **options)
         except subprocess.TimeoutExpired:
             raise LocalReaderError("绿泡泡数据库读取超时，请检查 wechat-cli doctor") from None
         except OSError:

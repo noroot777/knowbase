@@ -38,6 +38,9 @@ class SetupTests(unittest.TestCase):
         self.env.start()
         self.home_patch = patch.object(Path, 'home', return_value=self.home)
         self.home_patch.start()
+        self.platform_patch = patch.object(runtime.platform, 'system', return_value='Darwin')
+        self.platform_patch.start()
+        self.addCleanup(self.platform_patch.stop)
         self.addCleanup(self.home_patch.stop)
         self.addCleanup(self.env.stop)
         self.addCleanup(self.tmp.cleanup)
@@ -162,12 +165,135 @@ class SetupTests(unittest.TestCase):
                     break
                 time.sleep(.01)
         self.assertTrue(setup.snapshot()['ready'])
-        self.assertEqual(0o600, setup._state_file().stat().st_mode & 0o777)
+        if os.name == 'nt':
+            self.assertTrue(os.access(setup._state_file(), os.R_OK | os.W_OK))
+        else:
+            self.assertEqual(0o600, setup._state_file().stat().st_mode & 0o777)
 
     def test_crashed_job_shows_interrupted_without_auto_restart(self):
         runtime.private_dir(self.runtime)
         setup._write({'state': 'acquiring', 'running': True})
         self.assertEqual('interrupted', setup.snapshot()['state'])
+
+    def test_finished_job_cannot_keep_an_active_status(self):
+        runtime.private_dir(self.runtime)
+        for state in ('checking', 'preparing', 'verifying', 'backing_up', 'acquiring'):
+            with self.subTest(state=state), patch.object(setup, '_connect') as connect:
+                setup._write({'state': state, 'running': False, 'message': '正在检查绿泡泡接入…'})
+                result = setup.snapshot()
+                self.assertEqual('interrupted', result['state'])
+                self.assertFalse(result['running'])
+                self.assertNotIn('正在检查', result['message'])
+                connect.assert_not_called()
+
+    def test_state_replace_retries_windows_sharing_conflicts(self):
+        runtime.private_dir(self.runtime)
+        setup._write({'state': 'checking', 'running': True})
+        replace = Path.replace
+        attempts = []
+        def transient_conflict(source, target):
+            attempts.append(target)
+            if len(attempts) < 3:
+                raise PermissionError('sharing violation')
+            return replace(source, target)
+        with patch.object(Path, 'replace', transient_conflict), patch.object(setup.time, 'sleep'):
+            setup._write({'state': 'failed', 'running': False, 'message': '检查未完成'})
+        self.assertEqual(3, len(attempts))
+        self.assertEqual('failed', setup.snapshot()['state'])
+
+    def test_state_reader_cannot_overlap_atomic_replacement(self):
+        runtime.private_dir(self.runtime)
+        setup._write({'state': 'checking', 'running': True})
+        entered, release, writing, replaced = (threading.Event() for _ in range(4))
+        read_text, replace = Path.read_text, Path.replace
+        errors = []
+        def held_read(path, *args, **kwargs):
+            with path.open() as stream:
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError('reader not released')
+                return stream.read()
+        def observed_replace(source, target):
+            replaced.set()
+            return replace(source, target)
+        def write_status():
+            writing.set()
+            try:
+                setup._write({'state': 'failed', 'running': False})
+            except Exception as error:
+                errors.append(error)
+        with patch.object(Path, 'read_text', held_read), patch.object(Path, 'replace', observed_replace):
+            reader = threading.Thread(target=setup._read)
+            writer = threading.Thread(target=write_status)
+            reader.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                writer.start()
+                self.assertTrue(writing.wait(1))
+                self.assertFalse(replaced.wait(.1))
+            finally:
+                release.set()
+                reader.join(3)
+                if writer.ident is not None:
+                    writer.join(3)
+        self.assertFalse(reader.is_alive())
+        self.assertFalse(writer.is_alive())
+        self.assertEqual([], errors)
+        self.assertEqual('failed', json.loads(read_text(setup._state_file()))['state'])
+
+    def test_permanent_state_write_failure_is_bounded_and_preserves_previous_state(self):
+        runtime.private_dir(self.runtime)
+        setup._write({'state': 'ready', 'ready': True, 'running': False})
+        with patch.object(Path, 'replace', side_effect=PermissionError('denied')) as replace, \
+             patch.object(setup.time, 'sleep'):
+            with self.assertRaises(PermissionError):
+                setup._write({'state': 'checking', 'running': True})
+        self.assertEqual(6, replace.call_count)
+        self.assertTrue(setup.snapshot()['ready'])
+
+    def test_windows_lock_contention_is_reported_and_descriptor_closed(self):
+        error = BlockingIOError('lock violation')
+        with patch.object(setup.filelock, 'flock', side_effect=error), \
+             patch.object(setup.os, 'close', wraps=os.close) as close:
+            with self.assertRaisesRegex(runtime.SetupError, '正在执行'):
+                setup._lock()
+        close.assert_called_once()
+
+    def test_lock_io_error_is_not_misreported_as_a_running_job(self):
+        with patch.object(setup.filelock, 'flock', side_effect=PermissionError('denied')), \
+             patch.object(setup.os, 'close', wraps=os.close) as close:
+            with self.assertRaises(PermissionError):
+                setup._lock()
+        close.assert_called_once()
+
+    def test_other_systems_fail_fast_without_installing_mac_tools(self):
+        for system in ('Linux',):
+            with self.subTest(system=system), \
+                 patch.object(runtime.platform, 'system', return_value=system), \
+                 patch.object(setup, '_reader_ready', return_value=False), \
+                 patch.object(runtime, 'prepare_reader') as reader, \
+                 patch.object(runtime, 'prepare_provider') as provider:
+                setup._connect(self.progress, '')
+            self.assertEqual('acquisition_platform_not_supported', self.events[-1]['state'])
+            self.assertIn('Mac 本机', self.events[-1]['message'])
+            reader.assert_not_called()
+            provider.assert_not_called()
+
+    def test_other_systems_can_still_reuse_a_ready_reader(self):
+        with patch.object(runtime.platform, 'system', return_value='Windows'), \
+             patch.object(setup, '_reader_ready', return_value=True), \
+             patch.object(runtime, 'prepare_reader') as reader:
+            setup._connect(self.progress, '')
+        self.assertEqual('ready', self.events[-1]['state'])
+        reader.assert_not_called()
+
+    def test_windows_uses_its_own_onboarding_backend(self):
+        from kb import wechat_windows
+        with patch.object(runtime.platform, 'system', return_value='Windows'), \
+             patch.object(setup, '_reader_ready', return_value=False), \
+             patch.object(wechat_windows, 'connect') as connect:
+            setup._connect(self.progress, 'account-id')
+        connect.assert_called_once_with(self.progress, 'account-id', False)
 
     def test_raw_exceptions_never_enter_public_status(self):
         fd = setup._lock()
@@ -191,6 +317,35 @@ class SetupTests(unittest.TestCase):
         with self.assertRaises(runtime.SetupError) as error:
             runtime.run([sys.executable, '-c', 'import time; print("secret_key",flush=True); time.sleep(5)'], timeout=.05)
         self.assertNotIn('secret_key', str(error.exception))
+
+
+class RuntimeTimeoutTests(unittest.TestCase):
+    def test_timeout_uses_platform_specific_process_cleanup(self):
+        for system in ('nt', 'posix'):
+            proc = Mock(pid=4321)
+            proc.communicate.side_effect = [subprocess.TimeoutExpired('reader', .1), ('', '')]
+            with self.subTest(system=system), patch.object(runtime.os, 'name', system), \
+                 patch.object(runtime.subprocess, 'Popen', return_value=proc), \
+                 patch.object(runtime.subprocess, 'run') as taskkill, \
+                 patch.object(runtime.os, 'killpg', create=True) as killpg:
+                with self.assertRaises(runtime.SetupError):
+                    runtime.run(['reader'], timeout=.1)
+            if system == 'nt':
+                self.assertEqual(['taskkill', '/PID', '4321', '/T', '/F'], taskkill.call_args.args[0])
+                killpg.assert_not_called()
+            else:
+                killpg.assert_called_once_with(4321, runtime.signal.SIGTERM)
+                taskkill.assert_not_called()
+
+    def test_windows_timeout_falls_back_when_taskkill_is_unavailable(self):
+        proc = Mock(pid=4321)
+        proc.communicate.side_effect = [subprocess.TimeoutExpired('reader', .1), ('', '')]
+        with patch.object(runtime.os, 'name', 'nt'), \
+             patch.object(runtime.subprocess, 'Popen', return_value=proc), \
+             patch.object(runtime.subprocess, 'run', side_effect=FileNotFoundError):
+            with self.assertRaises(runtime.SetupError):
+                runtime.run(['reader'], timeout=.1)
+        proc.kill.assert_called_once()
 
 
 class DiscoveryFixTests(unittest.TestCase):

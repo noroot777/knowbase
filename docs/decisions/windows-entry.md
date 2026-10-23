@@ -126,8 +126,10 @@
   东西**。谁都不会从这句话想到「有一处为了互斥写了 flock」。而开发机是 macOS,所以写下这一句
   的那次改动**广域回归全绿**。
 - **`filelock` 的语义对等到哪为止,要记住**:真 `LOCK_SH`/`LOCK_EX`、`LOCK_NB` 竞争时抛
-  `OSError`、句柄关闭与进程退出自动释放,这几样都对;**同一个句柄上的锁转换没有对等物**,
+  `BlockingIOError(errno.EAGAIN)`（仍是 `OSError` 子类）、句柄关闭与进程退出自动释放,这几样都对;**同一个句柄上的锁转换没有对等物**,
   所以重入必须留在上层(`maintenance._held`、`llm._lock_depth`),别挪进 filelock。
+  Windows 的错误 33 只在非阻塞取锁时由共享层翻译；权限、解锁等失败仍报原始 `OSError`。
+  接入状态仅将锁竞争视为正在运行，不得把目录保护失败或其他 I/O 故障报成忙碌。
   Windows 的 byte-range 锁是**强制锁**(mandatory),这里安全只因为全系统的锁都加在专门的
   lockfile 上、没人读写那个文件的内容 —— **不许把锁加到 kb.db 或任何真数据文件上**。
 - **唯一的例外是 `kb/feeds/x_cdp.py`**:那条通道整条只能在 POSIX 上跑(它要把 `os.pipe` 搬到

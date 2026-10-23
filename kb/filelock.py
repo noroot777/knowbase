@@ -20,8 +20,8 @@
 对得上(这几条是现有调用方依赖的):
   - **LOCK_SH / LOCK_EX 都是真的**(LockFileEx 不带 `EXCLUSIVE` 就是共享锁),
     所以 `fetch_rounds` 那个「读用共享锁、写用独占锁」照旧成立。
-  - **LOCK_NB 拿不到锁时抛 `OSError`**(`ctypes.WinError` 造出来的就是 OSError),
-    所以一圈 `except OSError:` 的轮询和降级路径一个字都不用改。
+  - **LOCK_NB 撞锁时抛 `BlockingIOError`**,与 POSIX 一致；其他故障仍抛 `OSError`。
+    接入检查仅把前者解释为任务正在运行；宽 `except OSError:` 的调用方照旧有效。
   - **句柄关掉或进程死掉,锁自动释放。** 这是 `maintenance` 那句「持锁者崩了也不会把
     别人堵死」的前提,Windows 上同样成立。
 
@@ -41,6 +41,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 
 try:                                     # POSIX
@@ -114,7 +115,10 @@ elif os.name == 'nt':
                 flags |= _LOCKFILE_FAIL_IMMEDIATELY
             ok = _k32.LockFileEx(handle, flags, 0, _RANGE, 0, ctypes.byref(over))
         if not ok:
-            raise ctypes.WinError(ctypes.get_last_error())
+            error = ctypes.WinError(ctypes.get_last_error())
+            if error.winerror == 33 and operation & LOCK_NB and not operation & LOCK_UN:
+                raise BlockingIOError(errno.EAGAIN, error.strerror) from error
+            raise error
 
 else:                                    # pragma: no cover - 既不是 POSIX 也不是 NT
     LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN = 1, 2, 4, 8
