@@ -194,6 +194,38 @@ def _split(url: str):
     return parts
 
 
+def _parsed(url: str):
+    """解析得动、**而且真解析出了主机名**的那一份;否则 None。
+
+    **「`urlsplit` 没报错」不等于「这份结果能信」。** 不带协议头的
+    `me:s3cret@127.0.0.1:7897` 它一个字都不抱怨:把 `me` 当成 scheme、`netloc` 空、
+    整条 `s3cret@127.0.0.1:7897` 落在 `path` 里,于是 `parts.password` 是 `None` ——
+    「这条地址里没有密码」这个结论是**假的**,密码就在 path 里。实测后果:`view()`
+    和 `./kb.sh status` 两个出口都把 `me:s3cret@127.0.0.1:7897` 原样打出来,贴一张
+    截图就泄漏。所以**凡是要按结构取东西的地方都过这一份**,`_split` 只回答
+    「会不会抛」。
+    """
+    parts = _split(url)
+    return parts if parts is not None and parts.hostname else None
+
+
+def _netloc(parts) -> str:
+    """从解析结果拼回 `host[:port]`。**这一族只有这一份拼法。**
+
+    两处容易各写各的:**IPv6 要带方括号**(`parts.hostname` 给的是**去过壳**的
+    `::1`,直接拼成 `user:***@::1:7897` 不是合法地址 —— 实测页面显示成那样之后,
+    人只想改端点都保存不了,`check_url` 当场报「方括号没闭合」);**端口 0 要留着**
+    (`if parts.port:` 把 0 当成「没有端口」,于是脱敏之后那个不合法的端口凭空消失,
+    面板上看不出这条值哪里不对)。
+    """
+    host = parts.hostname or ''
+    if ':' in host:
+        host = f'[{host}]'
+    if parts.port is not None:
+        host = f'{host}:{parts.port}'
+    return host
+
+
 #: 各项允许的协议头。**端点只认 http(s)** —— DoH 是 HTTP 上的协议,socks5 端点连不出去;
 #: 代理那边 socks5 是正经选项。
 SCHEMES = {'endpoint': ('http', 'https'), 'proxy': ('http', 'https', 'socks5', 'socks5h')}
@@ -220,6 +252,12 @@ def check_url(field: str, url: str) -> None:
         raise BadValue(f'{label}要以 {heads} 开头', field)
     if not parts.hostname:
         raise BadValue(f'{label}里没有主机名', field)
+    if parts.port is not None and not 1 <= parts.port <= 65535:
+        # **0 要显式拒。** 上面那道只拦得住 `urlsplit` 自己会抛的(`abc`、`99999`),
+        # 而 0 是个合法整数,它一路存进 `secrets.json`、要等下一次抓取连接失败才暴露
+        # —— 而那时面板上看不出是这条值本身不合法。文案和 docstring 一直写着
+        # 「1-65535」,判据得跟上。
+        raise BadValue(f'{label}的端口要在 1-65535 之间:{parts.port}', field)
 
 
 def mask_proxy(url: str) -> str:
@@ -230,9 +268,11 @@ def mask_proxy(url: str) -> str:
     url = (url or '').strip()
     if not url:
         return ''
-    parts = _split(url)
+    parts = _parsed(url)
     if parts is None:
-        # 解析不动的值里**照样可能有密码**。整段 userinfo 一起盖掉,不猜它的结构。
+        # 解析不动、**或者解析出来信不过**的值里照样有密码(见 `_parsed`:不带协议头
+        # 那种 `password` 是 None,而密码就在 path 里)。整段 userinfo 一起盖掉,
+        # 不猜它的结构。
         head, sep, tail = url.rpartition('@')
         if not sep:
             return url
@@ -240,10 +280,7 @@ def mask_proxy(url: str) -> str:
         return f'{scheme}{MASK}@{tail}'
     if not parts.password:
         return url
-    host = parts.hostname or ''
-    if parts.port:
-        host = f'{host}:{parts.port}'
-    return urlunsplit(parts._replace(netloc=f'{parts.username}:{MASK}@{host}'))
+    return urlunsplit(parts._replace(netloc=f'{parts.username}:{MASK}@{_netloc(parts)}'))
 
 
 def merge_proxy(incoming: str) -> str:
@@ -261,15 +298,18 @@ def merge_proxy(incoming: str) -> str:
     if MASK not in incoming:
         return incoming
     kept = _effective('proxy')[0]
-    old, new = _split(kept), _split(incoming)
+    if kept and mask_proxy(kept) == incoming:
+        # **我们给它什么、它原样交回来,就是「这一位没改」。** 这条先判,因为脱敏值
+        # 未必拆得开:存量里的代理可以是不带协议头的、也可以是 IPv6 的,而人进面板
+        # 多半只是想改端点。不先认出「没改」的话,那些机器上**只改端点都保存不了**
+        # (脱敏值拆不动 → 原样送进 `check_url` → 报一句他根本没动过的代理有问题)。
+        return kept
+    old, new = _parsed(kept), _parsed(incoming)
     if new is None or new.password != MASK:
         return incoming  # MASK 出现在别处(主机名、路径),不是在替密码占位
     if old is None or not old.password:
         raise BadValue('原来的代理密码已经不在了,请把完整地址重输一遍', 'proxy')
-    host = new.hostname or ''
-    if new.port:
-        host = f'{host}:{new.port}'
-    return urlunsplit(new._replace(netloc=f'{new.username}:{old.password}@{host}'))
+    return urlunsplit(new._replace(netloc=f'{new.username}:{old.password}@{_netloc(new)}'))
 
 
 def check(endpoint_url: str, seconds_raw: str, proxy_url: str) -> None:
@@ -296,13 +336,17 @@ def save(endpoint_url: str, seconds_raw: str, proxy_url: str) -> None:
     从此运维改环境变量再也不生效,而面板上显示的值和之前一模一样,看不出发生过什么。
     """
     proxy_url = merge_proxy(proxy_url)
-    check(endpoint_url, seconds_raw, proxy_url)
     fields = {'endpoint': endpoint_url.strip(), 'seconds': seconds_raw.strip(),
               'proxy': proxy_url.strip()}
     for name, value in list(fields.items()):
         current, origin = _effective(name)
         if origin not in ('settings', '') and value == current:
             fields[name] = ''  # 维持「设置里没填、环境变量兜底」这个末态
+    # **先定下这次到底要写哪几项,再校验那几项。** 顺序反过来实测会卡死一类人:
+    # 环境变量里的代理按我们的标准本身就不合格(没写协议头),而人只是想改端点、
+    # 把那一格原样交了回来 —— 它压根不会落盘,却因为被一起校验而把整次保存挡掉,
+    # 错误还指着一个他根本没动过、也不在设置里的值。**判据只管这次真要写进去的。**
+    check(fields['endpoint'], fields['seconds'], fields['proxy'])
 
     def mutate(data: dict) -> None:
         section = data.get(SECTION)
@@ -370,14 +414,11 @@ def mask_endpoint(url: str) -> str:
     url = (url or '').strip()
     if not url:
         return ''
-    parts = _split(url)
-    if parts is None or not parts.scheme or not parts.hostname:
+    parts = _parsed(url)
+    if parts is None or not parts.scheme:
         # 剪到第一个 `/` 为止,再把 userinfo 去掉。拿不准结构就只保留最保守的那一段。
         return url.split('/', 1)[0].rsplit('@', 1)[-1] or MASK
-    host = parts.hostname
-    if parts.port:
-        host = f'{host}:{parts.port}'
-    return f'{parts.scheme}://{host}'
+    return f'{parts.scheme}://{_netloc(parts)}'
 
 
 def summary() -> list[str]:
@@ -390,15 +431,21 @@ def summary() -> list[str]:
     import urllib.request
 
     url = endpoint()
-    if not url:
-        return ['可信解析:关(走系统解析;要开:设置里的「出口与解析」)']
-    lines = [f'可信解析:开(端点 {mask_endpoint(url)},{_where("endpoint")})']
+    if url:
+        lines = [f'可信解析:开(端点 {mask_endpoint(url)},{_where("endpoint")})']
+    else:
+        lines = ['可信解析:关(走系统解析;要开:设置里的「出口与解析」)']
+    # **代理这一行和端点开没开无关。** 原先它整段写在「端点开着」那个分支里,于是
+    # 「端点关、代理在环境变量里」这种最常见的形态(用户那台机器此刻就是)一行代理
+    # 都不打 —— 而这几行存在的理由正是回答「跑着的那个进程在用什么出口」。
     configured_proxy = proxy()
     if configured_proxy:
         lines.append(f'出口代理:{mask_proxy(configured_proxy)}({_where("proxy")})')
-    elif not urllib.request.getproxies():
-        # 提示而不代劳(口径同 code_stale / graph_stale)。**陈述我们探到什么**,
-        # 不断言对方连不上 —— macOS 上 getproxies() 读系统代理设置,那里探到了就不打。
+    elif url and not urllib.request.getproxies():
+        # **这句警告仍然只在端点开着时打**:它说的是「DoH 要出得去」。端点关着时
+        # 「没配代理」是默认状态,不是问题,喊一句只是噪声(口径同 code_stale:
+        # 提示而不代劳,也不无中生有)。**陈述我们探到什么**,不断言对方连不上 ——
+        # macOS 上 getproxies() 读系统代理设置,那里探到了就不打。
         lines.append('出口代理:没配,环境变量和系统代理里也探不到'
                      ' —— DoH 端点在墙外时解析会报「域名解析服务不可用」')
     return lines

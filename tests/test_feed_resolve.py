@@ -418,6 +418,36 @@ class AnswerBoundaryTests(ResolveBase):
                     with self.assertRaisesRegex(fetching.FeedError, '解析服务不可用'):
                         fetching.request('https://example.org/rss')
 
+    def test_a_record_whose_type_is_not_an_integer_is_answered_badly(self):
+        """记录自己是个 dict、但 `type` 认不出来 —— 这还是「答得不对」,不是
+        「这个域名没有地址」。
+
+        两头都实测过,而且**错在相反的方向**:缺 `type` 和 `type: "1"` 被
+        `not in (_A, _AAAA)` 逐条跳过,`address_records` 一直是 0,末态报成
+        「无法解析订阅服务器地址」(人被指去改一条没毛病的链接);而 `type: true`
+        和 `type: 1.0` 因为 Python 里 `True == 1`、`1.0 == 1`,**反过来穿过那道判断
+        被当成 A 记录用了** —— 拿一条我们根本没认出类型的记录去连。
+        """
+        for bad in (None, '1', True, 1.0, [1], {'a': 1}):
+            with self.subTest(type=repr(bad)):
+                record = {'name': 'example.org', 'TTL': 300, 'data': '1.1.1.1'}
+                if bad is not None:
+                    record['type'] = bad
+                self.arm({'Status': 0, 'Answer': [record]})
+                with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+                    with self.assertRaisesRegex(fetching.FeedError, '解析服务不可用'):
+                        fetching.request('https://example.org/rss')
+
+    def test_a_legitimate_record_type_still_goes_through(self):
+        """**反过来钉一边**:A / AAAA 照旧收下,CNAME 照旧忽略 —— 把 type 判严了
+        之后最容易顺手把正常答案也拒掉。"""
+        self.arm([answer(rec('93.184.216.34'), {'name': 'x', 'type': 5, 'data': 'y.'}),
+                  answer(rec('2606:4700::1111', rtype=28))])
+        with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+            got = fetching.request('https://example.org/rss')
+        self.assertEqual(200, got.status)
+        self.assertEqual(['93.184.216.34'], self.hosts())
+
     def test_a_missing_answer_field_is_still_a_normal_empty(self):
         """**反过来钉一边**:这一栏**根本没出现**(或者是 null)才是合法的空答案 ——
         只有 A 记录的域名查 AAAA 时常如此。把它也算成故障,双栈解析就再也走不通。"""

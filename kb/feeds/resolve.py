@@ -178,7 +178,17 @@ def _ask(url: str, host: str, rtype: int, seconds: float) -> tuple[list[str], li
             # 「这里没有地址」,而我们并不知道那一条原本是什么(实测
             # `{"Status": 0, "Answer": ["x"]}` 一路报成「无法解析订阅服务器地址」)。
             raise Unavailable('Answer 里混着不是记录的东西')
-        if record.get('type') not in (_A, _AAAA):
+        rtype = record.get('type')
+        if not isinstance(rtype, int) or isinstance(rtype, bool):
+            # **记录自己的 type 认不出来,也是答得不对。** 这一条不能写成 `continue`:
+            # 那等于把「这条记录是什么我不知道」说成「这条记录不是地址」,而末态是
+            # 「这个域名没有地址」—— 人被指去改一条没毛病的链接(实测:`[{}]` 和
+            # `{"type": "1"}` 都报成「无法解析订阅服务器地址」)。
+            # **bool 要单独挡掉**:Python 里 `True == 1`、`1.0 == 1`,写成
+            # `rtype not in (_A, _AAAA)` 的话 `type: true` / `type: 1.0` 反而**穿过去
+            # 当成 A 记录用了**(同一处实测到的另一头)。
+            raise Unavailable(f'Answer 记录的 type 不是整数:{rtype!r}')
+        if rtype not in (_A, _AAAA):
             continue  # CNAME(5)、SOA 等一律忽略,不许当地址
         address_records += 1
         try:

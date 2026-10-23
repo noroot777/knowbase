@@ -193,6 +193,42 @@ class CredentialTests(EgressBase):
         self.assertEqual('http://me:brand-new@127.0.0.1:7897', egress.proxy())
 
 
+class SchemelessProxyTests(EgressBase):
+    """不带协议头的代理地址(`me:s3cret@h:7897`)。
+
+    **「`urlsplit` 没报错」不等于「这份结果能信」**:它把 `me` 当成 scheme、netloc 空、
+    整条 `s3cret@127.0.0.1:7897` 落进 path,于是 `parts.password` 是 `None` ——
+    「这里没有密码」这个结论是假的。实测后果:`view()` 和 `./kb.sh status` 两个出口
+    都把密码原样打出来,贴一张截图或一段日志就泄漏。这和端点那一轮是**同一类凭证
+    问题**,只是入口从端点换成了代理,所以两个出口都要钉。
+    """
+
+    def env_proxy(self, value: str):
+        patcher = patch.dict(os.environ, {'HTTPS_PROXY': value})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_neither_exit_prints_the_password(self):
+        self.env_proxy('me:s3cret@127.0.0.1:7897')
+        self.assertNotIn('s3cret', json.dumps(egress.view(), ensure_ascii=False))
+        self.assertNotIn('s3cret', '\n'.join(egress.summary()))
+
+    def test_the_host_is_still_legible(self):
+        """**反过来钉一边**:盖掉的是凭证那一段,主机端口照旧看得见 —— 否则这一行
+        就回答不了「服务在走哪个出口」。"""
+        self.env_proxy('me:s3cret@127.0.0.1:7897')
+        self.assertIn('127.0.0.1:7897', egress.view()['proxy'])
+
+    def test_changing_only_the_endpoint_still_saves(self):
+        """脱敏值拆不开的那几种(无协议头、IPv6)原样交回来 = 这一位没改。
+        不先认出这一点的话,人只想改端点,却被一句他根本没动过的代理挡住。"""
+        self.env_proxy('me:s3cret@127.0.0.1:7897')
+        egress.save(DOH, '', egress.view()['proxy'])
+        self.assertEqual(DOH, egress.endpoint())
+        self.assertEqual('me:s3cret@127.0.0.1:7897', egress.proxy())
+        self.assertEqual('env', egress.source('proxy'), '环境变量那份被复制进设置了')
+
+
 class ValidationTests(EgressBase):
     """**判不准一律拒**,别把坏值写进去等抓取时才炸。"""
 
@@ -272,6 +308,26 @@ class SummaryTests(EgressBase):
         self.assertIn('127.0.0.1:7897', out)
         self.assertNotIn('s3cret', out, '代理密码进了日志')
 
+    def test_the_proxy_line_does_not_depend_on_the_endpoint_being_on(self):
+        """**代理那一行和端点开没开无关。** 原先它整段写在「端点开着」那个分支里,
+        于是「端点关、代理在环境变量里」这种最常见的形态(用户那台机器此刻就是)
+        一行代理都不打 —— 而这几行存在的理由正是回答「跑着的那个进程在用什么出口」。
+        """
+        with patch.dict(os.environ, {'HTTPS_PROXY': 'http://127.0.0.1:7897'}):
+            out = self.summary().splitlines()
+        self.assertIn('关', out[0])
+        self.assertEqual(2, len(out), out)
+        self.assertIn('出口代理:http://127.0.0.1:7897', out[1])
+        self.assertIn('HTTPS_PROXY', out[1])
+
+    def test_endpoint_off_and_no_proxy_stays_quiet_about_doh(self):
+        """**反过来钉一边**:端点关着时「没配代理」是默认状态,不是问题 ——
+        那句「DoH 端点在墙外时…」在这儿是无中生有(口径同 code_stale:提示而不代劳)。
+        """
+        out = self.summary().splitlines()
+        self.assertEqual(1, len(out), out)
+        self.assertIn('关', out[0])
+
     def test_no_egress_anywhere_says_so(self):
         self.stored(endpoint=DOH)
         self.assertIn('探不到', self.summary())
@@ -336,6 +392,45 @@ class UrlShapeTests(EgressBase):
         egress.save('https://doh.example:8443/q', '', 'http://127.0.0.1:65535')
         self.assertEqual('https://doh.example:8443/q', egress.endpoint())
         self.assertEqual('http://127.0.0.1:65535', egress.proxy())
+
+    def test_the_port_range_is_judged_on_both_ends(self):
+        """端口的两头各钉一格。**0 是这一族最容易漏的那个**:它是合法整数,
+        `urlsplit` 读 `.port` 时一声不吭,于是只靠「解析会不会抛」判的那一版把它
+        放了进去 —— 存进盘、下一次抓取连接失败,而面板上看不出是这条值本身不合法。
+        文案和 docstring 一直写着「1-65535」,判据得跟上。"""
+        for port, ok in (('0', False), ('65536', False), ('1', True), ('65535', True)):
+            with self.subTest(port=port):
+                url = f'http://127.0.0.1:{port}'
+                if ok:
+                    egress.save('', '', url)
+                    self.assertEqual(url, egress.proxy())
+                else:
+                    with self.assertRaises(egress.BadValue) as caught:
+                        egress.save('', '', url)
+                    self.assertEqual('proxy', caught.exception.field)
+                    self.assertIn('1-65535', str(caught.exception))
+
+    def test_a_bad_port_stays_visible_in_what_the_panel_shows(self):
+        """存量里的端口 0 要**看得见**。`if parts.port:` 把 0 当成「没有端口」,于是
+        脱敏之后那个不合法的端口凭空消失 —— 面板和状态行上显示成一条看着正常的地址,
+        而人正是被叫来改它的(`check_url` 是这一轮才拒的 0,存量里有)。"""
+        self.stored(endpoint='https://doh.example:0/q', proxy='http://me:s3cret@127.0.0.1:0')
+        self.assertIn(':0', egress.view()['proxy'])
+        self.assertIn('doh.example:0', egress.summary()[0])
+
+    def test_a_real_ipv6_address_survives_the_round_trip(self):
+        """**合法的 IPv6 和坏括号是两件事。** `parts.hostname` 给的是**去过壳**的
+        `::1`,三处拼 host 的地方各写各的话就会拼出 `user:***@::1:7897` —— 那不是
+        一个合法地址。实测后果不是「显示得丑」:页面把这份回传之后 `check_url` 当场
+        报「方括号没闭合」,于是**这个代理底下连端点都改不了**。"""
+        egress.save('https://[::1]:8443/q', '', 'http://me:s3cret@[::1]:7897')
+        shown = egress.view()
+        self.assertEqual('http://me:***@[::1]:7897', shown['proxy'])
+        self.assertIn('[::1]:8443', egress.summary()[0])
+        # 人只改端点、把脱敏那份原样交回来 —— 这一下必须存得下去。
+        egress.save('https://[::1]:9443/q', '', shown['proxy'])
+        self.assertEqual('http://me:s3cret@[::1]:7897', egress.proxy())
+        self.assertEqual('https://[::1]:9443/q', egress.endpoint())
 
 
 class FallbackWriteBackTests(EgressBase):
