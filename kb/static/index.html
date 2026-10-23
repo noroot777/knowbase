@@ -25,6 +25,7 @@
 <link rel="stylesheet" href="/static/css/wechat_setup.css">
 <link rel="stylesheet" href="/static/css/favorites.css">
 <link rel="stylesheet" href="/static/css/snip.css">
+<link rel="stylesheet" href="/static/css/egress.css">
 </head>
 <body>
 
@@ -63,6 +64,7 @@
         <button id="keys-btn" onclick="toggleNavigation(false);openKeys()">API Key<span id="keys-dot">●</span></button>
         <button id="mcp-btn" onclick="toggleNavigation(false);openMcp()">MCP 连接<span id="mcp-dot">●</span></button>
         <button id="wechat-btn" onclick="toggleNavigation(false);openWechatSetup()">绿泡泡接入<span id="wechat-dot">●</span></button>
+        <button id="egress-btn" onclick="toggleNavigation(false);openEgress()">出口与解析<i data-icon="chevron"></i></button>
         <button onclick="toggleNavigation(false);openShortcuts()">键盘快捷键<i data-icon="keyboard"></i></button>
         <div class="library-status"><span id="stats">正在读取知识库…</span></div>
       </div>
@@ -625,6 +627,8 @@
 <script src="/static/js/fav_view.js"></script>
 <script src="/static/js/chat.js"></script>
 <script src="/static/js/settings.js"></script>
+<!-- 「出口与解析」弹窗的标记由它现建(本文件顶着 700 行上限),入口在设置菜单里 -->
+<script src="/static/js/egress.js"></script>
 <script src="/static/js/schedules.js"></script>
 <script src="/static/js/pipe_channels.js"></script>
 <script src="/static/js/pipe.js"></script>

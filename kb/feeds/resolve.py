@@ -10,8 +10,9 @@
 `sni_hostname`。SSRF 防护因此一分不少 —— 实测「经代理 + 钉真实 IP + SNI」同样返回
 200,代理和钉 IP 不冲突,今天挡住抓取的只是解析那一步给错了答案。
 
-**默认关**(`KB_FEED_DOH` 空):关着的时候一次 DoH 请求都不发,走原来的
-`socket.getaddrinfo`,行为逐字不变。
+**默认关**(端点为空):关着的时候一次 DoH 请求都不发,走原来的
+`socket.getaddrinfo`,行为逐字不变。**端点、预算、代理一律问 `kb.feeds.egress`** ——
+那一份才知道「设置里填了什么、环境变量兜底是什么」,这里不许自己读环境变量。
 
 **不是 DNS 名字的东西不许送进来问。** 主机名规范化(IP 字面量直接放过、非 ASCII 先
 IDNA)在 `fetching.public_addresses` 里**一次做完**,两条路共用那一份 —— 不然开关一翻
@@ -23,7 +24,8 @@ IDNA)在 `fetching.public_addresses` 里**一次做完**,两条路共用那一�
 「指向别人家的公网地址」和「指向 127.0.0.1」两种),维护名单正是会静默过期的那类
 东西 —— 漏一个域,症状就又变回一句看不出原因的超时。
 
-**这一跳刻意不过 `public_addresses`**:用主机名 + `trust_env=True` 让代理去解析
+**这一跳刻意不过 `public_addresses`**:用主机名 + 和抓取同一份出口配置
+(`egress.client_kwargs()`,配了代理就显式走它、没配才交给 `trust_env`)让代理去解析
 (CONNECT 带的是主机名),所以端点域名自己被污染也不受影响。放弃的那道 IP 校验在
 这里没有威胁模型可言 —— 端点是用户在环境变量里写死的一个常量,不是订阅内容带进来
 的地址。**反过来钉一边:订阅 URL 本身绝不许绕过 `public_addresses`。**
@@ -66,18 +68,14 @@ IDNA)在 `fetching.public_addresses` 里**一次做完**,两条路共用那一�
 from __future__ import annotations
 
 import ipaddress
-import os
 import threading
 import time
 from typing import Callable, Iterable
 
 import httpx
 
-#: DoH 端点。空 = 关(走 `socket.getaddrinfo`)。
-ENV = 'KB_FEED_DOH'
-#: 单次查询的默认上限(秒)。整次解析的上限是它和调用方给的 `seconds` 取小。
-SECONDS_ENV = 'KB_FEED_DOH_SECONDS'
-DEFAULT_SECONDS = 8.0
+from kb.feeds import egress
+
 #: 响应体上限。DNS JSON 正常是几百字节;给够余量,又不让异常端点撑爆内存。
 MAX_BYTES = 256 * 1024
 #: 缓存按答案自己的 TTL 过期,夹在这两条线之间(对方给的极端值不照抄)。
@@ -97,38 +95,28 @@ class Unknown(Exception):
     """**对方明确答了**:这个域名没有地址记录(NXDOMAIN,或两个族都只有 CNAME)。"""
 
 
-def endpoint() -> str:
-    """每次读环境变量,不在 import 那一刻固化 —— 测试要能翻开关,运维也才能重启生效。"""
-    return os.environ.get(ENV, '').strip()
-
-
-def configured() -> bool:
-    return bool(endpoint())
-
-
-def seconds_budget() -> float:
-    """单次查询等多久。**配错值在用到它的时候报,不在 import 的时候崩。**
-
-    原先写成模块级 `float(os.environ.get(...))`:`KB_FEED_DOH_SECONDS=abc` 会让
-    `import kb.feeds.fetching` 直接抛 ValueError —— 开关压根没开也进不去,而报出来的
-    话指不到那个环境变量。
-    """
-    raw = os.environ.get(SECONDS_ENV, '').strip()
-    if not raw:
-        return DEFAULT_SECONDS
-    try:
-        value = float(raw)
-    except ValueError:
-        raise Unavailable(f'{SECONDS_ENV} 不是数字:{raw!r}') from None
-    if not value > 0:
-        raise Unavailable(f'{SECONDS_ENV} 要是正数:{raw!r}')
-    return value
-
-
 def forget() -> None:
     """清缓存。给测试,也给「换了端点想立刻生效」留一个出口。"""
     with _lock:
         _cache.clear()
+
+
+#: 面板上那几颗一键填入的端点。**只许放「实测能用」的** —— 判据不是「这家有没有
+#: DoH」,是「它认不认下面 `_read` 发的这一种请求」:`?name=&type=` 的查询串 +
+#: `accept: application/dns-json`(Google 那边叫 JSON API)。DoH 还有另一种协议
+#: RFC8484 wireformat(`?dns=<base64 的 DNS 报文>`),**这一层一个字都不会说**。
+#: 两者走同一个 `/dns-query` 路径、长得一模一样,所以「看着像个 DoH 地址」不是判据:
+#: OpenDNS 的 `https://doh.opendns.com/dns-query` 只认 wireformat,被当成预设发出去
+#: 当场 HTTP 400,而面板上只剩一句「域名解析服务不可用」—— 人会以为是自己网络的事。
+#:
+#: **名单待在这儿、不在前端**:协议归这一份管(`_read` 就在下面),前端抄一份的话,
+#: 哪天这里换了请求形式,那边还按老样子推荐。页面通过 `egress.view()['presets']` 拿,
+#: 回归 `tests/test_feed_egress.py` 钉着「`egress.js` 里不许再出现写死的端点地址」。
+JSON_API_PRESETS = (
+    {'name': 'Cloudflare', 'url': 'https://cloudflare-dns.com/dns-query'},
+    {'name': 'Google', 'url': 'https://dns.google/resolve'},
+    {'name': '关掉', 'url': ''},
+)
 
 
 def _read(client: httpx.Client, url: str, host: str, rtype: int):
@@ -154,7 +142,8 @@ def _ask(url: str, host: str, rtype: int, seconds: float) -> tuple[list[str], li
     """问一次(一种记录类型),返回 `(地址串, 各条 TTL)`。答不上一律抛 `Unavailable`。"""
     import json
     try:
-        with httpx.Client(trust_env=True, follow_redirects=False, timeout=seconds) as client:
+        with httpx.Client(follow_redirects=False, timeout=seconds,
+                          **egress.client_kwargs()) as client:
             raw = _read(client, url, host, rtype)
         answer = json.loads(raw)
     except Unavailable:
@@ -168,7 +157,13 @@ def _ask(url: str, host: str, rtype: int, seconds: float) -> tuple[list[str], li
         return [], []
     if status != 0:  # SERVFAIL / REFUSED 这些说的是解析器自己的事
         raise Unavailable(f'DNS Status {status}')
-    records = answer.get('Answer') or []
+    records = answer.get('Answer')
+    if records is None:
+        # **只有「这一栏根本没出现」才是合法的空答案。** 不许写成 `or []` ——
+        # 那样 `{}`、`""`、`0` 这些**出现了、但不是列表**的值会一起被当成空,
+        # 直接绕过下面那道判断(实测:四种畸形值全都报成「无法解析订阅服务器
+        # 地址」,人被指去改订阅链接,而坏的是解析端点)。
+        records = []
     if not isinstance(records, list):
         # **「答案栏目不是个列表」是答得不对,不是「这个域名没有地址」。** 写这一份时
         # 实测到的那一条:`{"Status": 0, "Answer": "nonsense"}` 被 for 当成字符串逐字
@@ -178,7 +173,22 @@ def _ask(url: str, host: str, rtype: int, seconds: float) -> tuple[list[str], li
     ttls: list[float] = []
     address_records = 0
     for record in records:
-        if not isinstance(record, dict) or record.get('type') not in (_A, _AAAA):
+        if not isinstance(record, dict):
+            # **列表里混着不是记录的东西,同样是答得不对。** 跳过它等于替端点断言
+            # 「这里没有地址」,而我们并不知道那一条原本是什么(实测
+            # `{"Status": 0, "Answer": ["x"]}` 一路报成「无法解析订阅服务器地址」)。
+            raise Unavailable('Answer 里混着不是记录的东西')
+        rtype = record.get('type')
+        if not isinstance(rtype, int) or isinstance(rtype, bool):
+            # **记录自己的 type 认不出来,也是答得不对。** 这一条不能写成 `continue`:
+            # 那等于把「这条记录是什么我不知道」说成「这条记录不是地址」,而末态是
+            # 「这个域名没有地址」—— 人被指去改一条没毛病的链接(实测:`[{}]` 和
+            # `{"type": "1"}` 都报成「无法解析订阅服务器地址」)。
+            # **bool 要单独挡掉**:Python 里 `True == 1`、`1.0 == 1`,写成
+            # `rtype not in (_A, _AAAA)` 的话 `type: true` / `type: 1.0` 反而**穿过去
+            # 当成 A 记录用了**(同一处实测到的另一头)。
+            raise Unavailable(f'Answer 记录的 type 不是整数:{rtype!r}')
+        if rtype not in (_A, _AAAA):
             continue  # CNAME(5)、SOA 等一律忽略,不许当地址
         address_records += 1
         try:
@@ -201,7 +211,7 @@ def _ask(url: str, host: str, rtype: int, seconds: float) -> tuple[list[str], li
 def addresses(host: str, *, seconds: float,
               keep: Callable[[Iterable[str]], list[str]]) -> list[str]:
     """这个域名**留得下来**的地址(`keep` 就是调用方那道判据,见模块 docstring)。"""
-    url = endpoint()
+    url = egress.endpoint()
     key = (url, host)
     now = time.monotonic()
     with _lock:
@@ -209,7 +219,7 @@ def addresses(host: str, *, seconds: float,
     if hit is not None and hit[0] > now:
         return list(hit[1])
     stop = now + max(0.0, seconds)
-    single = seconds_budget()
+    single = egress.seconds()
     found: list[str] = []
     ttls: list[float] = []
     why: list[str] = []
