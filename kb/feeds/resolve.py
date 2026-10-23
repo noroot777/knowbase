@@ -24,7 +24,8 @@ IDNA)在 `fetching.public_addresses` 里**一次做完**,两条路共用那一�
 「指向别人家的公网地址」和「指向 127.0.0.1」两种),维护名单正是会静默过期的那类
 东西 —— 漏一个域,症状就又变回一句看不出原因的超时。
 
-**这一跳刻意不过 `public_addresses`**:用主机名 + `trust_env=True` 让代理去解析
+**这一跳刻意不过 `public_addresses`**:用主机名 + 和抓取同一份出口配置
+(`egress.client_kwargs()`,配了代理就显式走它、没配才交给 `trust_env`)让代理去解析
 (CONNECT 带的是主机名),所以端点域名自己被污染也不受影响。放弃的那道 IP 校验在
 这里没有威胁模型可言 —— 端点是用户在环境变量里写死的一个常量,不是订阅内容带进来
 的地址。**反过来钉一边:订阅 URL 本身绝不许绕过 `public_addresses`。**
@@ -100,6 +101,24 @@ def forget() -> None:
         _cache.clear()
 
 
+#: 面板上那几颗一键填入的端点。**只许放「实测能用」的** —— 判据不是「这家有没有
+#: DoH」,是「它认不认下面 `_read` 发的这一种请求」:`?name=&type=` 的查询串 +
+#: `accept: application/dns-json`(Google 那边叫 JSON API)。DoH 还有另一种协议
+#: RFC8484 wireformat(`?dns=<base64 的 DNS 报文>`),**这一层一个字都不会说**。
+#: 两者走同一个 `/dns-query` 路径、长得一模一样,所以「看着像个 DoH 地址」不是判据:
+#: OpenDNS 的 `https://doh.opendns.com/dns-query` 只认 wireformat,被当成预设发出去
+#: 当场 HTTP 400,而面板上只剩一句「域名解析服务不可用」—— 人会以为是自己网络的事。
+#:
+#: **名单待在这儿、不在前端**:协议归这一份管(`_read` 就在下面),前端抄一份的话,
+#: 哪天这里换了请求形式,那边还按老样子推荐。页面通过 `egress.view()['presets']` 拿,
+#: 回归 `tests/test_feed_egress.py` 钉着「`egress.js` 里不许再出现写死的端点地址」。
+JSON_API_PRESETS = (
+    {'name': 'Cloudflare', 'url': 'https://cloudflare-dns.com/dns-query'},
+    {'name': 'Google', 'url': 'https://dns.google/resolve'},
+    {'name': '关掉', 'url': ''},
+)
+
+
 def _read(client: httpx.Client, url: str, host: str, rtype: int):
     """发一次请求并读回响应体,**读到上限就停**。"""
     with client.stream('GET', url, params={'name': host, 'type': rtype},
@@ -138,7 +157,13 @@ def _ask(url: str, host: str, rtype: int, seconds: float) -> tuple[list[str], li
         return [], []
     if status != 0:  # SERVFAIL / REFUSED 这些说的是解析器自己的事
         raise Unavailable(f'DNS Status {status}')
-    records = answer.get('Answer') or []
+    records = answer.get('Answer')
+    if records is None:
+        # **只有「这一栏根本没出现」才是合法的空答案。** 不许写成 `or []` ——
+        # 那样 `{}`、`""`、`0` 这些**出现了、但不是列表**的值会一起被当成空,
+        # 直接绕过下面那道判断(实测:四种畸形值全都报成「无法解析订阅服务器
+        # 地址」,人被指去改订阅链接,而坏的是解析端点)。
+        records = []
     if not isinstance(records, list):
         # **「答案栏目不是个列表」是答得不对,不是「这个域名没有地址」。** 写这一份时
         # 实测到的那一条:`{"Status": 0, "Answer": "nonsense"}` 被 for 当成字符串逐字
@@ -148,7 +173,12 @@ def _ask(url: str, host: str, rtype: int, seconds: float) -> tuple[list[str], li
     ttls: list[float] = []
     address_records = 0
     for record in records:
-        if not isinstance(record, dict) or record.get('type') not in (_A, _AAAA):
+        if not isinstance(record, dict):
+            # **列表里混着不是记录的东西,同样是答得不对。** 跳过它等于替端点断言
+            # 「这里没有地址」,而我们并不知道那一条原本是什么(实测
+            # `{"Status": 0, "Answer": ["x"]}` 一路报成「无法解析订阅服务器地址」)。
+            raise Unavailable('Answer 里混着不是记录的东西')
+        if record.get('type') not in (_A, _AAAA):
             continue  # CNAME(5)、SOA 等一律忽略,不许当地址
         address_records += 1
         try:

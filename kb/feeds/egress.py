@@ -99,17 +99,29 @@ def using(**fields: str):
         invalidate()
 
 
-def _env(*names: str) -> str:
-    for name in names:
-        value = os.environ.get(name, '').strip()
-        if value:
-            return value
-    return ''
+def _effective(name: str) -> tuple[str, str]:
+    """这一项**最终生效的值**,以及它的出处:`'settings'` / 环境变量名 / `''`(都没有)。
+
+    **这一族「谁说了算」的口径只有这一份。** 取值、来源分类、出处文案、交给 httpx、
+    合并密码位,五处全问它 —— 各自再判一遍的后果不是「不一致」这么抽象,实测过两种:
+    一是出处判错(`source` 认 `KB_FEED_DOH`、`_where` 把代理也说成它);二是**丢密码**
+    —— 代理来自环境变量时 `merge_proxy` 只看设置里那份(空),于是页面原样回传的
+    `http://me:***@h:1` 被当成「没有旧值可沿用」,密码位被抹成空串写进 `secrets.json`,
+    把本来好用的环境变量那份顶掉,而面板上看着一切正常。
+    """
+    value = _stored(name)
+    if value:
+        return value, 'settings'
+    for env in ENV_NAMES.get(name, ()):
+        got = os.environ.get(env, '').strip()
+        if got:
+            return got, env
+    return '', ''
 
 
 def endpoint() -> str:
     """DoH 端点。空 = 关(走系统解析)。"""
-    return _stored('endpoint') or _env(ENV_ENDPOINT)
+    return _effective('endpoint')[0]
 
 
 def configured() -> bool:
@@ -118,7 +130,7 @@ def configured() -> bool:
 
 def seconds() -> float:
     """单次 DoH 查询等多久。**坏值在用到它的时候报**,不在 import 的时候崩。"""
-    raw = _stored('seconds') or _env(ENV_SECONDS)
+    raw = _effective('seconds')[0]
     if not raw:
         return DEFAULT_SECONDS
     try:
@@ -132,40 +144,100 @@ def seconds() -> float:
 
 def proxy() -> str | None:
     """抓取走的代理。None = 不显式指定(httpx 的 trust_env 照旧看环境和系统设置)。"""
-    return _stored('proxy') or _env(*ENV_PROXY) or None
+    return _effective('proxy')[0] or None
 
 
 def client_kwargs() -> dict:
-    """给 `httpx.Client(**...)`:配了代理就显式传,没配就逐字维持原样。"""
-    url = _stored('proxy')
-    if url:
+    """给 `httpx.Client(**...)`:**设置里填的**显式传,其余逐字维持原样。
+
+    **只有设置来的那一份显式传,环境变量来的那份照旧交给 `trust_env`。** 这不是漏改:
+    显式 `proxy=` 的语义是「所有主机都走它」,而 `trust_env` 会一并读 `NO_PROXY`。把
+    环境变量那份改成显式传,等于悄悄作废人家配的 `NO_PROXY` —— 内网订阅会突然开始
+    走代理,而面板上只会显示一句超时。设置页上没有 `NO_PROXY` 这一栏,所以从那边来的
+    值没有这个包袱。
+    """
+    url, origin = _effective('proxy')
+    if url and origin == 'settings':
         return {'proxy': url}
     return {'trust_env': True}
 
 
 def source(name: str) -> str:
     """这一项当前由谁说话算数 —— 页面要能说清「你看到的值从哪来」。"""
-    if _stored(name):
-        return 'settings'
-    return 'env' if _env(*ENV_NAMES.get(name, ())) else 'none'
+    origin = _effective(name)[1]
+    return 'settings' if origin == 'settings' else ('env' if origin else 'none')
 
 
 def _where(name: str) -> str:
     """这一项的出处,写给人看。环境变量**要带上到底是哪一个名字** —— 代理那一族有四个
     名字,只说「来自环境变量」的话人得把四个都 grep 一遍。"""
-    if _stored(name):
+    origin = _effective(name)[1]
+    if origin == 'settings':
         return '来自设置页'
-    for env in ENV_NAMES.get(name, ()):
-        if os.environ.get(env, '').strip():
-            return f'来自环境变量 {env}'
-    return ''
+    return f'来自环境变量 {origin}' if origin else ''
+
+
+def _split(url: str):
+    """宽松解析:**解析不动就返回 None,一个字都不抛。**
+
+    `urlsplit` 有两处会抛 `ValueError`,而两处都长得不像「会抛」:地址里有没闭合的
+    方括号时当场抛(`http://[::1`),端口不是 1..65535 的数字时要等**读 `.port` 那一下**
+    才抛(它是个 property)。这两种值都是人能在面板上敲出来的,而这一族函数有一半
+    跑在显示路径上 —— 抛出去就是设置页整个打不开,而人正要进去把它改掉。
+    所以:**判对错走 `check_url`(抛 `BadValue`,面板就地红字),显示一律走这一份。**
+    """
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018 —— property,不读它端口就没被校验过
+    except ValueError:
+        return None
+    return parts
+
+
+#: 各项允许的协议头。**端点只认 http(s)** —— DoH 是 HTTP 上的协议,socks5 端点连不出去;
+#: 代理那边 socks5 是正经选项。
+SCHEMES = {'endpoint': ('http', 'https'), 'proxy': ('http', 'https', 'socks5', 'socks5h')}
+LABELS = {'endpoint': 'DoH 端点', 'proxy': '代理地址'}
+
+
+def check_url(field: str, url: str) -> None:
+    """一个地址判完整:解析得动吗、协议对吗、有主机名吗、端口在范围里吗。
+
+    **两个地址共用这一份**(端点、代理),只有协议名单各自不同。分开写过一版,结果是
+    端口那一条谁都没判:`http://h:99999` 一路存进 `secrets.json`,下一次抓取在
+    `httpx.Client(proxy=...)` 那一行抛 `httpx.InvalidURL` —— 它**不是** `httpx.HTTPError`
+    的子类,于是没被 `fetching` 那道 except 接住,整轮同步 500,面板上一个字的原因都
+    没有。判在这里、拒在面板上,是这一族唯一拦得住的位置。
+    """
+    if not url:
+        return
+    label = LABELS[field]
+    parts = _split(url)
+    if parts is None:
+        raise BadValue(f'{label}不是个能用的地址(方括号没闭合,或者端口不是 1-65535)', field)
+    if parts.scheme not in SCHEMES[field]:
+        heads = ' '.join(f'{s}://' for s in SCHEMES[field])
+        raise BadValue(f'{label}要以 {heads} 开头', field)
+    if not parts.hostname:
+        raise BadValue(f'{label}里没有主机名', field)
 
 
 def mask_proxy(url: str) -> str:
-    """把 `user:pass@` 里的密码换成 MASK,主机端口照旧看得见。"""
+    """把 `user:pass@` 里的密码换成 MASK,主机端口照旧看得见。
+
+    **坏值不许抛**:存量里可能有手写进去的垃圾,而页面正要把它显示出来让人改。
+    """
+    url = (url or '').strip()
     if not url:
         return ''
-    parts = urlsplit(url)
+    parts = _split(url)
+    if parts is None:
+        # 解析不动的值里**照样可能有密码**。整段 userinfo 一起盖掉,不猜它的结构。
+        head, sep, tail = url.rpartition('@')
+        if not sep:
+            return url
+        scheme = head.split('://', 1)[0] + '://' if '://' in head else ''
+        return f'{scheme}{MASK}@{tail}'
     if not parts.password:
         return url
     host = parts.hostname or ''
@@ -175,20 +247,25 @@ def mask_proxy(url: str) -> str:
 
 
 def merge_proxy(incoming: str) -> str:
-    """页面传回来的代理:密码位还是 MASK 就沿用存着的那一份。
+    """页面传回来的代理:密码位还是 MASK 就沿用**当前生效**的那一份。
 
     不这么做的话,人改一次端口就得把密码重输一遍 —— 而「不回传就不会泄露」换来的是
     每次都得重输,那个代价全落在日常使用上。
+
+    **沿用的是 `_effective` 那一份,不是设置里那一份**:代理来自环境变量时设置里是空的,
+    照「设置里那份」判就会得出「没有旧值」,把密码抹掉存进去(见 `_effective`)。
+    **真的没有旧值可沿用就拒**,不许猜着把 MASK 抹成空串 —— 那存下去就是一条连不上的
+    代理,而人要到下一次抓取超时才发现。
     """
     incoming = (incoming or '').strip()
     if MASK not in incoming:
         return incoming
-    kept = _stored('proxy')
-    if not kept:
-        return incoming.replace(MASK, '')
-    old, new = urlsplit(kept), urlsplit(incoming)
-    if new.password != MASK or not old.password:
-        return incoming
+    kept = _effective('proxy')[0]
+    old, new = _split(kept), _split(incoming)
+    if new is None or new.password != MASK:
+        return incoming  # MASK 出现在别处(主机名、路径),不是在替密码占位
+    if old is None or not old.password:
+        raise BadValue('原来的代理密码已经不在了,请把完整地址重输一遍', 'proxy')
     host = new.hostname or ''
     if new.port:
         host = f'{host}:{new.port}'
@@ -197,12 +274,8 @@ def merge_proxy(incoming: str) -> str:
 
 def check(endpoint_url: str, seconds_raw: str, proxy_url: str) -> None:
     """保存之前过一遍。**判不准一律拒**,别把坏值写进去等抓取时才炸。"""
-    for field, label, url in (('endpoint', 'DoH 端点', endpoint_url),
-                              ('proxy', '代理地址', proxy_url)):
-        if url and urlsplit(url).scheme not in ('http', 'https', 'socks5', 'socks5h'):
-            raise BadValue(f'{label}要以 http:// https:// 或 socks5:// 开头', field)
-        if url and not urlsplit(url).hostname:
-            raise BadValue(f'{label}里没有主机名', field)
+    check_url('endpoint', endpoint_url)
+    check_url('proxy', proxy_url)
     if seconds_raw:
         try:
             value = float(seconds_raw)
@@ -217,11 +290,19 @@ def save(endpoint_url: str, seconds_raw: str, proxy_url: str) -> None:
 
     **代理先过 `merge_proxy` 再 `check`**:页面回传的是脱敏过的那一份,直接存下去
     的话密码就真的变成 `***` 了(人下次抓取才发现,而那时原密码已经没了)。
+
+    **原样回传的兜底值不落盘。** 页面显示的是**生效值**,人只改了端点、把另外两项原样
+    交回来是常态;照单全收的话,环境变量那份就被复制进 `secrets.json` 固化下来 ——
+    从此运维改环境变量再也不生效,而面板上显示的值和之前一模一样,看不出发生过什么。
     """
     proxy_url = merge_proxy(proxy_url)
     check(endpoint_url, seconds_raw, proxy_url)
     fields = {'endpoint': endpoint_url.strip(), 'seconds': seconds_raw.strip(),
               'proxy': proxy_url.strip()}
+    for name, value in list(fields.items()):
+        current, origin = _effective(name)
+        if origin not in ('settings', '') and value == current:
+            fields[name] = ''  # 维持「设置里没填、环境变量兜底」这个末态
 
     def mutate(data: dict) -> None:
         section = data.get(SECTION)
@@ -250,28 +331,53 @@ def invalidate() -> None:
     resolve.forget()
 
 
+def presets() -> list[dict]:
+    """面板上那几颗一键填入的端点。**名单归协议那一侧**,见 `resolve.JSON_API_PRESETS`。"""
+    from kb.feeds import resolve
+    return [dict(item) for item in resolve.JSON_API_PRESETS]
+
+
 def view() -> dict:
-    """给页面的那一份:有效值 + 各自来源,代理的密码位脱敏。"""
+    """给页面的那一份:有效值 + 各自来源,代理的密码位脱敏。
+
+    **一个字都不许抛。** 存量里的坏值(端口 99999、方括号没闭合)正是人打开这个面板
+    要来改的东西 —— 这儿抛一下,面板就只剩一句「读取失败」,那个值再也改不掉。
+    """
     return {
         'endpoint': endpoint(),
-        'seconds': _stored('seconds') or _env(ENV_SECONDS) or '',
+        'seconds': _effective('seconds')[0],
         'proxy': mask_proxy(proxy() or ''),
         'sources': {name: source(name) for name in ('endpoint', 'seconds', 'proxy')},
         # 出处**整句**给出去,不只给 'env' 这个分类:代理那一族有四个候选变量名,
         # 前端猜不出是哪个在兜底,而那正是人要去改的那一个。
         'where': {name: _where(name) for name in ('endpoint', 'seconds', 'proxy')},
         'default_seconds': DEFAULT_SECONDS,
+        'presets': presets(),
     }
 
 
 def mask_endpoint(url: str) -> str:
-    """端点脱敏到 `scheme://host` —— **只给要落盘的日志用**。
+    """端点脱敏到 `scheme://host[:port]` —— **只给要落盘的日志用**。
 
     有人把 token 写在 path 或 query 里(NextDNS、AdGuard 那类带 profile id 的端点),
     终端输出和日志不该留。页面上**照旧完整回传**:那是人要对照着改的东西。
+
+    **从 hostname 拼,不拿 netloc。** `netloc` 里带着 `user:pass@`,原样打出去就是把
+    凭证写进日志 —— 而这个函数存在的全部理由就是别把凭证写进日志。
+    **没有协议头的也要剪**:`doh.example/q?token=x` 这种 `urlsplit` 认不出主机名,
+    早先那一版直接原样返回,于是最该剪的那一类一个字都没剪。
     """
-    parts = urlsplit(url)
-    return f'{parts.scheme}://{parts.netloc}' if parts.scheme else url
+    url = (url or '').strip()
+    if not url:
+        return ''
+    parts = _split(url)
+    if parts is None or not parts.scheme or not parts.hostname:
+        # 剪到第一个 `/` 为止,再把 userinfo 去掉。拿不准结构就只保留最保守的那一段。
+        return url.split('/', 1)[0].rsplit('@', 1)[-1] or MASK
+    host = parts.hostname
+    if parts.port:
+        host = f'{host}:{parts.port}'
+    return f'{parts.scheme}://{host}'
 
 
 def summary() -> list[str]:

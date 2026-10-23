@@ -36,6 +36,34 @@ build_web_env() {
   done
 }
 
+# 服务进程**自己**那一份出口环境(`ps eww` 把目标进程的环境打在命令行后面)。
+# 填进全局 `SERVICE_ENV`;读不到返回 1。
+#
+# **为什么非得问进程、不能问当前 shell**:服务可能是几天前、在另一个终端里起的 —— 那时
+# 有没有 `HTTPS_PROXY`、`KB_FEED_DOH` 指到哪,和你现在这个 shell 没有关系。按当前 shell
+# 算出来的那两行会**精确地反掉**:你刚 export 了一个代理,状态里就显示「出口代理:…」,
+# 而真正在抓取的那个进程里一个代理都没有,面板上照旧超时。**这几行存在的全部理由就是
+# 回答「跑着的那个到底在用什么」**,按 shell 算等于把问题换成了「我现在这个 shell 会用
+# 什么」—— 而那个问题没人问。
+#
+# 名单仍然只有 `EGRESS_VARS` 一份(所以不会和透传那一侧错开)。按空格切:这一族的值
+# (代理地址、DoH 端点)里不会有空格。
+SERVICE_ENV=()
+service_env() {   # service_env <pid>
+  SERVICE_ENV=()
+  local pid="${1:-}" blob v hit
+  [ -n "$pid" ] || return 1
+  blob="$(ps eww -p "$pid" 2>/dev/null | tail -n +2)"
+  # pid 没了的时候 ps 只打一行表头,管道又把它的退出码吃掉了 —— 所以判据是**有没有
+  # 内容**,不是退出码。
+  [ -n "$blob" ] || return 1
+  for v in "${EGRESS_VARS[@]}"; do
+    hit="$(printf '%s\n' "$blob" | tr ' ' '\n' | grep -E "^${v}=." | tail -1 || true)"
+    if [ -n "$hit" ]; then SERVICE_ENV+=("$hit"); fi
+  done
+  return 0
+}
+
 # 起服务/看状态时打的那两三行:可信解析开没开、端点是什么、出口代理在哪。
 #
 # **内容一个字都不在这儿判,全问 `kb.feeds.egress.summary()`。** 理由是主次反过来了:
@@ -44,15 +72,29 @@ build_web_env() {
 # 「探不到代理」的提示同理(判据是真问一次 `urllib.request.getproxies()`,macOS 上它读
 # 系统代理设置,按环境变量判是误报),也一并搬进 Python 了。
 #
-# **跑在 WEB_ENV 里**:和服务同一份环境、同一个数据目录,否则报的是另一个进程的配置。
+# **带 pid 调 = 报那个进程在用什么**(`web_status`、`web_start` 的「已在」分支:服务是
+# 以前起的,环境得问它自己);**不带 pid = 刚用 `WEB_ENV` 把它起起来的那一下**,那份
+# 环境就是服务的环境,按构造成立,不必再 ps 一次去和一个刚 exec 的进程赛跑。
 # **取不到就什么都不打**:venv 还没装好时 uv 会失败,那一步自己会说 —— 这里再喊一遍
 # 只是噪声。口径同 code_stale / graph_stale:**提示而不代劳,也不拦**。
 # 端点脱敏(path / query 里可能有 token)也在 Python 那一侧,见 egress.mask_endpoint。
-egress_lines() {
-  local out line
+egress_lines() {   # egress_lines [服务 pid]
+  local out line pid="${1:-}"
+  local run_env  # 下面按数组赋值(bash 3.2 没有 local -a)
+  if [ -n "$pid" ]; then
+    if service_env "$pid"; then
+      run_env=("${CLEAN_ENV[@]}" ${SERVICE_ENV+"${SERVICE_ENV[@]}"})
+    else
+      # **不许退回当前 shell** —— 那正是这几行要避免的那个错答案。说清只按设置文件算。
+      say "[web] 读不到服务进程(pid $pid)的环境,下面只按设置文件算"
+      run_env=("${CLEAN_ENV[@]}")
+    fi
+  else
+    run_env=("${WEB_ENV[@]}")
+  fi
   # **先看退出码再决定要不要说话**:只挡 stderr 是不够的,一个半路失败的解释器照旧
   # 可能在 stdout 上留下半行东西,原样打出来像是出口配置出了问题。
-  out="$(cd "$ROOT" && "${WEB_ENV[@]}" uv run --offline python -c \
+  out="$(cd "$ROOT" && "${run_env[@]}" uv run --offline python -c \
       'from kb.feeds import egress
 for line in egress.summary():
     print(line)' 2>/dev/null)" || return 0

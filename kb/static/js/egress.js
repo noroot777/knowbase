@@ -11,13 +11,12 @@
 // 而 body 的 childList 它盯着,所以「建/删」这条路上 syncOverlays 照旧会跑
 // (焦点陷阱、inert、Esc 关闭链全靠它)。
 
-// 预设端点:点一下只填进输入框,不直接保存 —— 保存是另一下,人得先看清填了什么。
-const EGRESS_PRESETS = [
-  ['Cloudflare', 'https://cloudflare-dns.com/dns-query'],
-  ['Google', 'https://dns.google/resolve'],
-  ['OpenDNS', 'https://doh.opendns.com/dns-query'],
-  ['关掉', ''],
-];
+// 预设端点**由后端给**(/api/egress 的 presets),这儿一个地址都不许写死。
+// 理由不是洁癖:能不能用的判据是「它认不认我们发的那一种请求」,而发请求的那一份
+// 在 kb/feeds/resolve.py(`_read` + `JSON_API_PRESETS`)。前端自己列一份的下场实测
+// 过 —— 照着「这家有 DoH」列进去的 OpenDNS 只认 RFC8484 wireformat,点一下保存、
+// 下一次抓取当场 HTTP 400,面板上只剩一句「域名解析服务不可用」。
+// 点一下只填进输入框,不直接保存 —— 保存是另一下,人得先看清填了什么。
 
 function egressMarkup() {
   return `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="egress-title">
@@ -40,8 +39,7 @@ function egressMarkup() {
   </div>
   <div class="eg-row">
     <span class="eg-label"></span>
-    <div class="eg-chips">${EGRESS_PRESETS.map(([name, url]) =>
-      `<button type="button" onclick="egressPick('${url}')">${esc(name)}</button>`).join('')}</div>
+    <div class="eg-chips" id="egress-chips"></div>
   </div>
   <div class="field-err" id="egress-endpoint-err" role="alert"></div>
   <div class="eg-row">
@@ -101,8 +99,31 @@ function egressClearErrors() {
   for (const f of ['endpoint', 'seconds', 'proxy']) $('egress-' + f + '-err').textContent = '';
 }
 
+function egressChips(presets) {
+  const box = $('egress-chips');
+  if (!box) return;
+  box.textContent = '';
+  for (const item of (presets || [])) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = item.name || item.url || '';
+    // 地址进 DOM 走 value 赋值,不拼进 onclick 串:名单是后端给的,但拼串这条路上
+    // 一个引号就能把整段标记拆了。
+    b.addEventListener('click', () => egressPick(item.url || ''));
+    box.appendChild(b);
+  }
+}
+
 function egressApply(v) {
+  egressChips(v.presets);
   $('egress-endpoint').value = v.endpoint || '';
+  // **环境变量在兜底时,「留空」不是「关」** —— 它会回落到那一份,状态照旧是「开」。
+  // 这句话只在框空着的时候看得见,而那正好就是人刚点完「关掉」的那一下;不说的话
+  // 那颗预设在这种机器上是句假话(保存完状态又跳回「开」,看不出为什么)。
+  // 到底是哪个变量在兜底由旁边那行出处说(后端给的整句),这儿不复述变量名。
+  $('egress-endpoint').placeholder = (v.sources || {}).endpoint === 'env'
+    ? '留空 = 回落到环境变量,不是关'
+    : '留空 = 关(走系统解析)';
   $('egress-seconds').value = v.seconds || '';
   $('egress-proxy').value = v.proxy || '';
   // 出处那一句由后端给(含到底是哪个环境变量在兜底)—— 变量名在这儿再写一份

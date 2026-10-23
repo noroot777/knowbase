@@ -152,5 +152,79 @@ class EgressLineTests(unittest.TestCase):
         self.assertEqual('', self.lines('boom: no venv\n', rc=1).strip())
 
 
+class ServiceEnvTests(unittest.TestCase):
+    """那两三行报的是**跑着的那个进程**在用什么,不是「我这个 shell 会用什么」。
+
+    这是这几行存在的全部理由:服务可能是几天前、在另一个终端里起的。按当前 shell 算
+    出来的答案会**精确地反掉** —— 你刚 export 了一个代理,`./kb.sh status` 就显示
+    「出口代理:…」,而真正在抓取的那个进程里一个代理都没有,面板上照旧超时;反过来
+    (服务起的时候有、你现在这个 shell 没有)则是把一条好用的出口报成「探不到」。
+    两种都让人去查完全不相干的地方。
+
+    判据落在**最终跑起来的那个 python 收到了什么环境**(拿 uv 桩把它打回来),不是
+    「有没有调 ps」—— 后者换个实现就不敏感了。
+    """
+
+    def run_lines(self, arg: str, shell_env: dict) -> str:
+        """用一个会把自己看到的环境打回来的 uv 桩跑真 `egress_lines`。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / 'uv'
+            stub.write_text('#!/bin/sh\n'
+                            'printf \'可信解析:DOH=%s 代理=%s\\n\''
+                            ' "${KB_FEED_DOH:-无}" "${HTTPS_PROXY:-无}"\n',
+                            encoding='utf-8')
+            stub.chmod(0o755)
+            script = ('set -uo pipefail\n'
+                      'say() { echo "$*" >&2; }\n'
+                      f'ROOT="{tmp}"\n'
+                      'CLEAN_ENV=(env -i HOME="$HOME" PATH="$PATH")\n'
+                      f'. "{WEB_ENV_SH}"\n'
+                      'build_web_env\n'
+                      f'egress_lines {arg}\n')
+            done = subprocess.run([BASH, '-c', script], capture_output=True, text=True,
+                                  env={'HOME': tmp, 'PATH': f'{tmp}:/usr/bin:/bin',
+                                       **shell_env})
+            return done.stderr
+
+    def test_the_line_describes_the_running_service_not_this_shell(self):
+        proc = subprocess.Popen(['/bin/sleep', '30'],
+                                env={'PATH': '/usr/bin:/bin',
+                                     'KB_FEED_DOH': 'https://from-service/q',
+                                     'HTTPS_PROXY': 'http://service-proxy:1'})
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        out = self.run_lines(str(proc.pid),
+                             {'KB_FEED_DOH': 'https://from-shell/q',
+                              'HTTPS_PROXY': 'http://shell-proxy:2'})
+        self.assertIn('DOH=https://from-service/q', out)
+        self.assertIn('代理=http://service-proxy:1', out)
+        self.assertNotIn('from-shell', out, '报的是当前 shell 的配置,不是服务的')
+        self.assertNotIn('shell-proxy', out)
+
+    def test_a_service_started_without_them_is_not_given_the_shell_values(self):
+        """**反过来钉一边**,而且这一边才是真会误导人的那个:服务起的时候什么都没配,
+        你现在这个 shell 里 export 了 —— 这时候必须报「无」,否则人看到一行「代理:有」
+        就不会再去怀疑出口,而抓取正是因为没有出口在失败。"""
+        proc = subprocess.Popen(['/bin/sleep', '30'], env={'PATH': '/usr/bin:/bin'})
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        out = self.run_lines(str(proc.pid), {'KB_FEED_DOH': 'https://from-shell/q',
+                                             'HTTPS_PROXY': 'http://shell-proxy:2'})
+        self.assertIn('DOH=无', out)
+        self.assertIn('代理=无', out)
+
+    def test_an_unreadable_process_says_so_instead_of_guessing(self):
+        """进程没了(或者读不到它的环境)时**不许退回当前 shell** —— 那正是要避免的
+        那个错答案。说清这几行只按设置文件算,人就知道该不该信它。"""
+        out = self.run_lines('999999', {'KB_FEED_DOH': 'https://from-shell/q'})
+        self.assertIn('读不到服务进程', out)
+        self.assertNotIn('from-shell', out)
+
+    def test_starting_it_ourselves_needs_no_ps_round_trip(self):
+        """不带 pid = 刚用 `WEB_ENV` 把它起起来的那一下,那份环境按构造就是服务的。"""
+        out = self.run_lines('', {'KB_FEED_DOH': 'https://from-shell/q'})
+        self.assertIn('DOH=https://from-shell/q', out)
+
+
 if __name__ == '__main__':
     unittest.main()

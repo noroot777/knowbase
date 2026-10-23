@@ -259,8 +259,16 @@ proj_py() {
 # 新符号时一切照旧),拿它挡住命令比提示一句更坏。
 
 web_start() {
-  if [ -n "$(service_pids "$WEB_PID" "$WEB_PORT" "$WEB_PAT")" ]; then
-    say "[web] 已在 $API"; code_stale; graph_stale; return 0
+  # **第一个 pid 用参数展开取,不接 `head`**:`set -o pipefail` 之下,`head` 提前关掉
+  # 管道会让上游拿 141 退出,整条命令替换跟着非零,`set -e` 当场砍掉 start
+  # (口径同 cmd_graph 里那个 `${resolved%%...}`)。
+  local pids running; pids="$(service_pids "$WEB_PID" "$WEB_PORT" "$WEB_PAT")"
+  running="${pids%%$'\n'*}"
+  if [ -n "$running" ]; then
+    # **带着 pid 问**:这个服务是以前起的,出口配置得问它自己的环境,不是问我这个
+    # shell(理由见 scripts/web_env.sh 的 service_env)。
+    say "[web] 已在 $API"; code_stale; build_web_env; egress_lines "$running"; graph_stale
+    return 0
   fi
   # 端口有人占但不是 kb-web:说清楚,别等它"起完"再报一个莫名其妙的超时。
   if port_busy "$WEB_PORT"; then
@@ -304,7 +312,8 @@ web_restart() { web_stop; web_start; }
 
 web_status() {
   local pids; pids="$(service_pids "$WEB_PID" "$WEB_PORT" "$WEB_PAT")"
-  if [ -n "$pids" ]; then echo "kb-web    运行中 ($API)"; code_stale; build_web_env; egress_lines
+  if [ -n "$pids" ]; then echo "kb-web    运行中 ($API)"; code_stale; build_web_env
+    egress_lines "${pids%%$'\n'*}"
   elif port_busy "$WEB_PORT"; then echo "kb-web    未运行(端口 $WEB_PORT 被别的进程占着)"
   else echo "kb-web    未运行"; fi
 }

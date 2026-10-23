@@ -85,10 +85,16 @@ def host_for_lookup(host: str | None) -> tuple[str, str | None]:
       **它不是 DNS 名字,一个解析器都不该问**:实测 DoH 把 `1.1.1.1` 答成 NXDOMAIN,
       于是一条本来抓得到的订阅报「无法解析订阅服务器地址」。字面量照旧要过下面那道
       `is_global`,所以 `127.0.0.1`、内网地址仍然被拒 —— SSRF 这道一分不少。
-    - `('name', 'xn--mnchen-3ya.de')` —— DNS 名字。**非 ASCII 先 IDNA**:DoH 端点对
-      `münchen.de` 直接回 HTTP 400,而 `getaddrinfo` 自己会编码,于是开关一翻结果就
-      不一样。**纯 ASCII 原样放过**(不走 idna codec):它会拒掉 `getaddrinfo` 本来
-      认得的东西(实测 63 字符以上的标签),那种收紧不属于这一层的事。
+    - `('name', 'xn--mnchen-3ya.de')` —— DNS 名字。**编码问 httpx 要,不自己编**:
+      这个名字要去查地址,而随后 `request` 发出去的 `Host` 和 SNI 用的是 httpx 自己
+      编出来的那一份 —— 两边必须是同一个字符串,否则就是**查了 A 家的地址、敲 B 家的
+      门**。`str.encode('idna')` 是老的 IDNA2003,和 httpx 用的 UTS46/IDNA2008 在
+      德语 ß 这一族上**结果不同**:实测 `faß.de` 被编成 `fass.de`(IDNA2003 把 ß 映射
+      成 ss)、而 httpx 发的是 `xn--fa-hia.de`,两个是**不同的域名**,可以属于不同的人
+      —— 于是我们钉着 `fass.de` 的 IP、却带着 `faß.de` 的 Host 和 SNI 去连,证书对不上
+      报一句「无法连接订阅服务」,而域名本身好好的。`straße.de` / `strasse.de` 同理。
+      **既有的两条不变量照旧**(实测):IP 字面量在上面那一档就返回了,纯 ASCII 的
+      长标签 httpx 原样放过(它只在非 ASCII 时才调 idna),所以这一步不收紧任何东西。
     - `('name', None)` —— 编不出来,等同解析失败(原来 `getaddrinfo` 也失败)。
     """
     if not host:
@@ -98,11 +104,9 @@ def host_for_lookup(host: str | None) -> tuple[str, str | None]:
         return 'literal', str(ipaddress.ip_address(bare))
     except ValueError:
         pass
-    if host.isascii():
-        return 'name', host
     try:
-        return 'name', host.encode('idna').decode('ascii')
-    except (UnicodeError, UnicodeDecodeError):
+        return 'name', httpx.URL(f'https://{host}/').raw_host.decode('ascii')
+    except (httpx.InvalidURL, UnicodeError, ValueError):
         return 'name', None
 
 
@@ -208,6 +212,22 @@ def tls_context(hostname: str):
     return context
 
 
+def open_client(**kwargs) -> httpx.Client:
+    """按当前出口配置建一个 client。**坏代理值在这一行翻译成 `FeedError`。**
+
+    `httpx.Client(proxy=...)` 对坏值抛的是 `httpx.InvalidURL`(`http://[::1`、
+    `http://h:abc`)或者干脆是 `ValueError`(`abc`、`ftp://h`),而 **`InvalidURL` 不是
+    `httpx.HTTPError` 的子类** —— 下面 `request` 那两道 except 一个都接不住,整轮同步
+    报 500,面板上一个字的原因都没有。存量里是会有这种值的(`check_url` 是这一轮才
+    加的),所以这道翻译不能省:它把「配置写错了」说成配置的事,并指到改它的地方。
+    """
+    try:
+        return httpx.Client(**kwargs, **egress.client_kwargs())
+    except (httpx.InvalidURL, ValueError) as exc:
+        raise FeedError(
+            f'出口配置写错了（代理地址：{exc}），请到设置里的「出口与解析」改掉') from None
+
+
 def request(url: str, headers: dict | None = None, *, deadline: float | None = None,
             collect_deadline: float | None = None) -> Response:
     deadline = deadline if deadline is not None else time.monotonic() + SOURCE_SECONDS
@@ -220,11 +240,11 @@ def request(url: str, headers: dict | None = None, *, deadline: float | None = N
             # Direct sockets and proxy CONNECT targets use validated numeric IPs.
             # A separate origin context preserves Host/SNI/cert verification and
             # prevents connection/cookie reuse across redirect origins.
-            with httpx.Client(verify=tls_context(original.raw_host.decode('ascii')),
-                              follow_redirects=False, **egress.client_kwargs(),
-                              limits=httpx.Limits(max_keepalive_connections=0),
-                              headers={'User-Agent': 'KnowledgeBaseFeedReader/1.0',
-                                       'Accept': 'application/atom+xml, application/rss+xml, application/xml, text/xml;q=0.9, text/html;q=0.5'}) as client:
+            with open_client(verify=tls_context(original.raw_host.decode('ascii')),
+                             follow_redirects=False,
+                             limits=httpx.Limits(max_keepalive_connections=0),
+                             headers={'User-Agent': 'KnowledgeBaseFeedReader/1.0',
+                                      'Accept': 'application/atom+xml, application/rss+xml, application/xml, text/xml;q=0.9, text/html;q=0.5'}) as client:
                 for index, address in enumerate(addresses):
                     try:
                         budget = remaining(deadline, collect_deadline)

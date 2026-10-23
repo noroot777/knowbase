@@ -174,6 +174,18 @@ class ProbeTests(EgressApiBase):
                                     json={'host': 'https://example.org/news/x?a=1'}).json()
         self.assertEqual('example.org', body['host'])
 
+    def test_a_mask_with_nothing_behind_it_is_a_field_error_not_a_500(self):
+        """`merge_proxy` 在「没有旧密码可沿用」时自己就拒(判不准一律拒),所以它得和
+        `check` 一起待在 try 里 —— 搁在外面那一下就是没人接的 500,而它本该是框下面
+        一行红字。两个写入口各钉一条:保存和探测。"""
+        for path in ('/api/egress', '/api/egress/probe'):
+            with self.subTest(path=path):
+                r = self.client.post(path, json={
+                    'proxy': f'http://me:{egress.MASK}@127.0.0.1:7897'})
+                self.assertEqual(400, r.status_code)
+                self.assertEqual('proxy', r.json()['field'])
+                self.assertIsInstance(r.json()['detail'], str)
+
     def test_the_masked_password_is_not_what_gets_probed(self):
         """页面回传的是脱敏过的那一份;拿 `***` 去连代理的话,「测一下」会报一个
         跟真实配置无关的失败。"""

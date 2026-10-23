@@ -13,8 +13,13 @@ services:
       HF_HOME: /home/kb/.cache/huggingface
       # 出口那一族:**容器里这才是真出口**。入口是 docker/entrypoint.py 直接起 kb-web,
       # 不经过 kb.sh,所以 scripts/web_env.sh 那套透传在这条路上一点用都没有;而容器里
-      # getproxies() 只看环境变量,没有系统代理设置可以兜。空值不会被 httpx 当成
-      # 「配了一个空代理」——compose 的 ${VAR:-} 在变量没设时整条不注入。
+      # getproxies() 只看环境变量,没有系统代理设置可以兜。
+      # **大小写两套都写上**:curl / requests 那一族的习惯是小写,而 kb 认的名单
+      # (kb/feeds/egress.py 的 ENV_PROXY)两套都在 —— 只写大写的话,宿主上只 export 了
+      # 小写名字的人会得到一个「配了代理却没有出口」的容器。
+      # **宿主没设的那几项这里会变成空串**(mapping 形式的 ${VAR:-} 给的是空值,不是
+      # 「不注入」),这无害且是实测过的:kb 这边一律 strip 之后按「没配」处理,httpx 的
+      # trust_env 走 urllib 的 getproxies_environment(),它同样跳过空值。
       # **这几个是兜底**:同样几项在「设置 → 出口与解析」里填过的话以页面为准(页面上
       # 改完下一条抓取就生效,不用重建容器)。容器这条路上多半没人去点页面,所以这里留着。
       # 形态与理由见 docs/decisions/dns-egress.md。
@@ -24,6 +29,10 @@ services:
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       ALL_PROXY: ${ALL_PROXY:-}
       NO_PROXY: ${NO_PROXY:-}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      all_proxy: ${all_proxy:-}
+      no_proxy: ${no_proxy:-}
     volumes:
       - ${KB_DATA_PATH:-kb-data}:/app/data
       - ${KB_COLLECTOR_DATA_PATH:-collector-data}:/app/collector/data

@@ -251,8 +251,10 @@ def api_egress_probe(body: EgressProbeRequest):
     端点留空也值得测:那一下走系统解析,**正好把本机被污染这件事摆出来**。
     """
     from kb.feeds import fetching   # 延迟:起服务不必为这一个按钮拉起整条采集栈
-    proxy_url = egress.merge_proxy(body.proxy)
+    # **`merge_proxy` 也在 try 里**:没有旧密码可沿用时它自己就抛 `BadValue`
+    # (判不准一律拒),搁在外面那一下就是没人接的 500,而它本该是框下面一行红字。
     try:
+        proxy_url = egress.merge_proxy(body.proxy)
         egress.check(body.endpoint, body.seconds, proxy_url)
     except egress.BadValue as e:
         return _bad(e)

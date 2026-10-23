@@ -300,9 +300,6 @@ class BothCallersTests(ResolveBase):
                 fetching.public_url('https://example.org/rss')
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 class HostnameTests(ResolveBase):
     """**翻开关不许改变结果**:主机名规范化那一份两条路共用。
@@ -350,12 +347,42 @@ class HostnameTests(ResolveBase):
                          '非 ASCII 域名原样问出去了,端点会回 HTTP 400')
 
     def test_ascii_names_are_passed_through_untouched(self):
-        """纯 ASCII 不走 idna codec:它会拒掉 `getaddrinfo` 本来认得的东西
-        (实测 63 字符以上的标签、以及 `a..b` 这种空标签),那种收紧不属于这一层。"""
-        self.arm(answer(rec('93.184.216.34')))
-        with patch.dict(os.environ, {egress.ENV_ENDPOINT: DOH}):
-            fetching.public_addresses('https://_dmarc.example.org/rss')
-        self.assertEqual({'_dmarc.example.org'}, set(self.names()))
+        """纯 ASCII 不许被收紧:idna 那条路会拒掉 `getaddrinfo` 本来认得的东西
+        (实测 63 字符以上的标签、以及 `_dmarc` 这种带下划线的),那种收紧不属于这一层。
+
+        现在的实现是问 httpx 要它自己会用的那个名字,而 httpx 只在非 ASCII 时才调
+        idna —— 所以这条不变量照旧成立,但判据得真跑一遍,不能押在「实现里有个
+        isascii 分支」上(那个分支这一轮已经没有了)。
+        """
+        for host in ('_dmarc.example.org', 'a' * 70 + '.example.org'):
+            with self.subTest(host=host):
+                self.arm(answer(rec('93.184.216.34')))
+                with patch.dict(os.environ, {egress.ENV_ENDPOINT: DOH}):
+                    _, found = fetching.public_addresses(f'https://{host}/rss')
+                self.assertEqual(['93.184.216.34'], found)
+                self.assertEqual({host}, set(self.names()))
+
+    def test_the_name_we_ask_about_is_the_name_the_fetch_will_knock_on(self):
+        """**查 A 家的地址、敲 B 家的门。**
+
+        这一跳的全部设计是「解析出数字 IP,再钉着它 + 原主机名的 Host/SNI 去连」,
+        所以**问地址用的名字和连接用的名字必须是同一个字符串**。`str.encode('idna')`
+        是老的 IDNA2003,它把德语 ß 映射成 ss;httpx 走的是 UTS46/IDNA2008,保留 ß
+        的 punycode。于是 `faß.de` 一边编成 `fass.de`、一边编成 `xn--fa-hia.de` ——
+        **那是两个不同的域名,可以属于不同的人**。后果:拿 A 家的 IP 去连,带着 B 家的
+        Host 和 SNI,证书对不上,面板上报一句「无法连接订阅服务」,而域名本身没毛病。
+        """
+        for host, encoded in (('faß.de', 'xn--fa-hia.de'),
+                              ('straße.de', 'xn--strae-oqa.de'),
+                              ('münchen.de', 'xn--mnchen-3ya.de')):
+            with self.subTest(host=host):
+                self.arm(answer(rec('93.184.216.34')))
+                with patch.dict(os.environ, {egress.ENV_ENDPOINT: DOH}):
+                    got = fetching.request(f'https://{host}/rss')
+                self.assertEqual(200, got.status)
+                self.assertEqual({encoded}, set(self.names()), '问出去的名字不对')
+                self.assertEqual({encoded}, {r.headers['host'] for r in self.connected},
+                                 '问的和敲的不是同一个域名')
 
 
 class AnswerBoundaryTests(ResolveBase):
@@ -373,6 +400,34 @@ class AnswerBoundaryTests(ResolveBase):
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
             with self.assertRaisesRegex(fetching.FeedError, '解析服务不可用'):
                 fetching.request('https://example.org/rss')
+
+    def test_an_answer_field_that_is_not_a_list_is_never_a_legitimate_empty(self):
+        """`Answer` 这一栏**出现了、但不是列表**(或者列表里混着不是记录的东西)——
+        那是答得不对,不是「这个域名没有地址」。
+
+        原先写的是 `answer.get('Answer') or []`,于是 `{}`、`""`、`0` 这三种**假值**
+        在那一行就变成了空列表,根本走不到下面那道 `isinstance` 判断(实测:四种
+        畸形答案全都报成「无法解析订阅服务器地址」,人被指去改一条没毛病的链接,
+        而坏的是解析端点)。`["x"]` 则是另一头:列表是列表,元素不是记录,原先逐条
+        `continue` 跳过,末态同样是「确定没有」。
+        """
+        for bad in ({}, '', 0, 'nonsense', ['x'], [None], [['1.2.3.4']]):
+            with self.subTest(bad=repr(bad)):
+                self.arm({'Status': 0, 'Answer': bad})
+                with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+                    with self.assertRaisesRegex(fetching.FeedError, '解析服务不可用'):
+                        fetching.request('https://example.org/rss')
+
+    def test_a_missing_answer_field_is_still_a_normal_empty(self):
+        """**反过来钉一边**:这一栏**根本没出现**(或者是 null)才是合法的空答案 ——
+        只有 A 记录的域名查 AAAA 时常如此。把它也算成故障,双栈解析就再也走不通。"""
+        for empty in ({'Status': 0}, {'Status': 0, 'Answer': None}):
+            with self.subTest(empty=repr(empty)):
+                self.arm([answer(rec('93.184.216.34')), empty])
+                with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+                    got = fetching.request('https://example.org/rss')
+                self.assertEqual(200, got.status)
+                self.assertEqual(['93.184.216.34'], self.hosts())
 
     def test_a_cname_only_family_is_a_normal_answer(self):
         """**反过来钉一边**:只有 A 记录的域名查 AAAA 时常只回 CNAME —— 那一族空集是
@@ -475,3 +530,6 @@ class SecondsBudgetTests(ResolveBase):
             with self.subTest(value=value):
                 with patch.dict(os.environ, {egress.ENV_SECONDS: value}):
                     self.assertEqual(egress.DEFAULT_SECONDS, egress.seconds())
+
+if __name__ == '__main__':
+    unittest.main()

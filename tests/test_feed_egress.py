@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -222,9 +223,6 @@ class ValidationTests(EgressBase):
                 fetching.public_addresses('https://example.org/rss')
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 class SummaryTests(EgressBase):
     """起服务/看状态时打的那两三行(`summary()`)。
@@ -283,3 +281,179 @@ class SummaryTests(EgressBase):
         设置,一个 `*_proxy` 都没 export 也照样有出口,那时不该提。"""
         self.stored(endpoint=DOH)
         self.assertNotIn('探不到', self.summary({'https': 'http://127.0.0.1:7897'}))
+
+
+#: 人在面板上敲得出来、`urlsplit` 却会抛的那几种。**端口那一条最阴**:`urlsplit` 当场
+#: 不抛,要等读 `.port`(一个 property)才抛,所以「解析一下看看」是拦不住它的。
+JUNK = ('http://127.0.0.1:99999', 'http://[::1', 'http://h:abc', 'abc', 'ftp://h/q')
+
+
+class UrlShapeTests(EgressBase):
+    """坏地址:**保存那一关就拒掉**,而显示路径上**一个字都不许抛**。
+
+    这是一类问题,不是三个例子:判据分散在 `check` / `mask_proxy` / `mask_endpoint` /
+    `view` 四处各写一遍时,漏掉的那一处就是事故 —— 实测漏的是端口。`http://h:99999`
+    一路存进 `secrets.json`,下一次抓取在 `httpx.Client(proxy=...)` 那一行抛
+    `httpx.InvalidURL`,而**它不是 `httpx.HTTPError` 的子类**,`fetching.request` 那两道
+    except 一个都接不住,整轮同步 500、面板上一个字的原因都没有。
+    所以这一族现在只有一份判据(`egress.check_url`),下面三条分别钉它的三个后果。
+    """
+
+    def test_a_malformed_address_never_reaches_the_disk(self):
+        for bad in JUNK:
+            for field in ('endpoint', 'proxy'):
+                with self.subTest(bad=bad, field=field):
+                    args = {'endpoint': (bad, '', ''), 'proxy': ('', '', bad)}[field]
+                    with self.assertRaises(egress.BadValue) as caught:
+                        egress.save(*args)
+                    self.assertEqual(field, caught.exception.field,
+                                     '报错没说是哪个输入框,面板只能飘个 toast')
+                    self.assertFalse(llm._SECRETS_PATH.exists(), '坏值写进盘了')
+
+    def test_the_panel_can_still_be_opened_on_junk_that_is_already_stored(self):
+        """**反过来钉一边,而且是最要紧的那一边**:`check_url` 是这一轮才加的,存量里
+        (手改过文件、更早版本存进去的)就是会有这种值 —— 而人打开这个面板正是为了
+        把它改掉。这儿抛一下,面板就只剩一句「读取失败」,那个值再也改不掉。"""
+        for bad in JUNK:
+            with self.subTest(bad=bad):
+                self.stored(endpoint=bad, proxy=f'http://me:s3cret@{bad}')
+                shown = egress.view()          # 不抛就是通过
+                self.assertNotIn('s3cret', json.dumps(shown, ensure_ascii=False),
+                                 '解析不动的地址把密码原样显示出来了')
+                egress.summary()               # 起服务那两行同理不许抛
+
+    def test_junk_already_on_disk_is_reported_as_a_config_problem_not_a_500(self):
+        """末态判据:存量坏值撞上抓取时,面板上要是一句说得出下一步的话。"""
+        self.stored(proxy='http://h:abc')
+        # 解析那一步先打桩:这条要钉的是**建 client 那一行**,不是本机 DNS 能不能用。
+        with patch.object(fetching.socket, 'getaddrinfo',
+                          return_value=[(2, 1, 6, '', ('93.184.216.34', 443))]):
+            with self.assertRaisesRegex(fetching.FeedError, '出口配置写错了'):
+                fetching.request('https://example.org/rss')
+
+    def test_a_good_address_with_a_port_is_still_accepted(self):
+        """**反过来钉一边**:别把端口这一条写成「有端口就拒」。"""
+        egress.save('https://doh.example:8443/q', '', 'http://127.0.0.1:65535')
+        self.assertEqual('https://doh.example:8443/q', egress.endpoint())
+        self.assertEqual('http://127.0.0.1:65535', egress.proxy())
+
+
+class FallbackWriteBackTests(EgressBase):
+    """页面显示的是**生效值**,人原样交回来时不许把兜底值固化进设置。
+
+    形态:代理来自 `HTTPS_PROXY`,人只想改端点 —— 另外两格是页面填好的,他动都没动。
+    照单全收的话,`secrets.json` 里从此多出一份代理,**运维再改环境变量就不生效了**,
+    而面板上显示的值和之前一模一样,看不出发生过什么。密码那一位更糟:页面回传的是
+    脱敏过的 `***`,而「沿用旧值」原先只看设置里那一份(空的),于是存进去的是一条
+    **密码被抹成空串**的代理 —— 本来好用的出口当场坏掉,人要到下一次抓取超时才发现。
+    """
+
+    def env(self, **names):
+        patcher = patch.dict(os.environ, names)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_saving_only_the_endpoint_leaves_the_env_proxy_alone(self):
+        self.env(HTTPS_PROXY='http://me:s3cret@127.0.0.1:7897')
+        shown = egress.view()
+        self.assertEqual('env', shown['sources']['proxy'])
+        egress.save(DOH, shown['seconds'], shown['proxy'])   # 页面原样交回来
+        self.assertEqual('http://me:s3cret@127.0.0.1:7897', egress.proxy())
+        self.assertEqual('env', egress.source('proxy'), '环境变量那份被复制进设置了')
+        stored = json.loads(llm._SECRETS_PATH.read_text(encoding='utf-8'))
+        self.assertEqual({'endpoint': DOH}, stored[egress.SECTION])
+
+    def test_a_real_edit_of_an_env_proxy_does_land_in_settings(self):
+        """**反过来钉一边**:真动了那一格就得存下来,并且从此由设置说了算。"""
+        self.env(HTTPS_PROXY='http://me:s3cret@127.0.0.1:7897')
+        egress.save('', '', f'http://me:{egress.MASK}@127.0.0.1:9999')
+        self.assertEqual('http://me:s3cret@127.0.0.1:9999', egress.proxy())
+        self.assertEqual('settings', egress.source('proxy'))
+
+    def test_the_mask_is_refused_when_there_is_no_password_left_to_reuse(self):
+        """**判不准一律拒**:没有旧值可沿用时,不许把 `***` 猜成空串存下去 ——
+        那是一条连不上的代理,而人要到下一次抓取超时才发现。"""
+        with self.assertRaises(egress.BadValue) as caught:
+            egress.save('', '', f'http://me:{egress.MASK}@127.0.0.1:7897')
+        self.assertEqual('proxy', caught.exception.field)
+        self.assertFalse(llm._SECRETS_PATH.exists())
+
+    def test_an_env_proxy_is_left_to_trust_env_so_no_proxy_still_works(self):
+        """`client_kwargs` 对两个来源**刻意**不一样,这一条把理由钉住:显式 `proxy=`
+        的语义是「所有主机都走它」,而 `trust_env` 会一并读 `NO_PROXY`。把环境变量那份
+        改成显式传,等于悄悄作废人家配的 `NO_PROXY`,内网订阅会突然开始走代理。"""
+        self.env(HTTPS_PROXY='http://127.0.0.1:7897', NO_PROXY='example.internal')
+        self.assertEqual({'trust_env': True}, egress.client_kwargs())
+        self.stored(proxy='http://127.0.0.1:7897')
+        self.assertEqual({'proxy': 'http://127.0.0.1:7897'}, egress.client_kwargs())
+
+
+class PresetTests(EgressBase):
+    """面板上那几颗一键填入的端点:**名单归协议那一侧**。
+
+    判据不是「这家有没有 DoH」,是「它认不认 `resolve._read` 发的那一种请求」——
+    `?name=&type=` 加 `accept: application/dns-json`。另一种 DoH 协议(RFC8484
+    wireformat,`?dns=<base64>`)走同一个 `/dns-query` 路径、长得一模一样。实测:
+    前端照着「这家有 DoH」列进去的 OpenDNS 只认 wireformat,点一下保存、下一次抓取
+    当场 HTTP 400,面板上只剩一句「域名解析服务不可用」,人会以为是自己网络的事。
+    """
+
+    def test_the_page_gets_the_list_from_the_protocol_side(self):
+        self.assertEqual([dict(item) for item in resolve.JSON_API_PRESETS],
+                         egress.view()['presets'])
+
+    def test_the_front_end_has_no_endpoint_of_its_own(self):
+        """**第二份名单会静默过期**:哪天这里换了请求形式,前端那份还按老样子推荐。"""
+        js = (Path(__file__).resolve().parents[1] / 'kb' / 'static' / 'js' / 'egress.js')
+        code = '\n'.join(line for line in js.read_text(encoding='utf-8').splitlines()
+                          if not line.lstrip().startswith('//'))
+        self.assertEqual([], re.findall(r'https?://[^\s\'"`]+', code),
+                         'egress.js 里又写死了端点地址')
+
+    def test_every_preset_is_shaped_like_something_read_can_ask(self):
+        """**只许放实测能用的**。这条拦不住「协议不对」(那要真发一次请求),但拦得住
+        它的前提:端点必须是这一族自己的 `check_url` 认的 https 地址。"""
+        for item in resolve.JSON_API_PRESETS:
+            with self.subTest(name=item['name']):
+                self.assertTrue(item['name'])
+                if item['url']:                       # 「关掉」那一颗是空的
+                    egress.check_url('endpoint', item['url'])
+                    self.assertTrue(item['url'].startswith('https://'))
+
+
+class MaskEndpointTests(EgressBase):
+    """端点往日志里写之前的脱敏(`mask_endpoint`)。
+
+    它存在的全部理由是「别把 token 写进落盘的日志」—— NextDNS、AdGuard 那类端点把
+    profile id 放在 path 或 query 里。所以凡是它漏掉的形态,都等于这个函数在那一格
+    没干活:实测漏了两种,**`user:pass@` 原样打出去**(它从 `netloc` 拼,而 netloc
+    里就带着凭证),以及**没写协议头的地址整条原样返回**(`urlsplit` 认不出主机名)。
+    """
+
+    def test_credentials_and_tokens_never_reach_the_line(self):
+        for url, expected in (
+                ('https://doh.example/dns-query?token=s3cret', 'https://doh.example'),
+                ('https://user:s3cret@doh.example/q', 'https://doh.example'),
+                ('https://doh.example:8443/abc/s3cret', 'https://doh.example:8443'),
+                ('doh.example/dns-query?token=s3cret', 'doh.example'),
+                ('user:s3cret@doh.example/q', 'doh.example'),
+                ('  https://doh.example/q?token=s3cret  ', 'https://doh.example'),
+                ('HTTPS://doh.example/q?token=s3cret', 'https://doh.example'),
+                ('http://[::1', '')):
+            with self.subTest(url=url):
+                got = egress.mask_endpoint(url)
+                self.assertNotIn('s3cret', got)
+                if expected:
+                    self.assertEqual(expected, got)
+
+    def test_the_host_is_still_legible(self):
+        """**反过来钉一边**:整条藏掉的话这一行就没用了 —— 它正是让人一眼看出
+        「服务在问哪一台解析器」的那一行。"""
+        self.stored(endpoint='https://doh.example:8443/q?token=s3cret')
+        line = egress.summary()[0]
+        self.assertIn('doh.example:8443', line)
+        self.assertNotIn('s3cret', line)
+
+
+if __name__ == '__main__':
+    unittest.main()

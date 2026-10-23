@@ -34,6 +34,10 @@ const VIEW = {
   sources: { endpoint: "settings", seconds: "none", proxy: "env" },
   where: { endpoint: "来自设置页", seconds: "", proxy: "来自环境变量 HTTPS_PROXY" },
   default_seconds: 8,
+  // 预设端点由后端给(名单归 resolve.JSON_API_PRESETS)。这儿**刻意用一个真名单里
+  // 没有的地址**:页面要是自己写死了一份,下面那条就会拿到别的东西。
+  presets: [{ name: "测试端点", url: "https://from-backend.example/q" },
+            { name: "关掉", url: "" }],
 };
 const FIXTURES = {
   "/api/stats": { documents: 0 },
@@ -106,6 +110,8 @@ const snap = () => evalJs(`JSON.stringify({
   srcs: ['endpoint','seconds','proxy'].map(f => document.getElementById('egress-'+f+'-src')?.textContent),
   errs: ['endpoint','seconds','proxy'].map(f => document.getElementById('egress-'+f+'-err')?.textContent),
   state: document.getElementById('egress-state')?.textContent,
+  ph: document.getElementById('egress-endpoint')?.placeholder,
+  chips: [...document.querySelectorAll('#egress-chips button')].map(b => b.textContent),
   probe: document.getElementById('egress-probe')?.textContent,
   toasts: [...document.querySelectorAll('#toast-host .toast')].map(t => t.textContent),
 })`).then(JSON.parse);
@@ -126,6 +132,28 @@ check("每一项都说清出处,环境变量那一项还带上是哪个名字",
       s.srcs[0] === "来自设置页" && s.srcs[2] === "来自环境变量 HTTPS_PROXY" && s.srcs[1] === "",
       JSON.stringify(s.srcs));
 check("状态那一格说开着", /开/.test(s.state), s.state);
+// 预设:名单是后端给的,页面一个地址都不许自己写死 —— 判据是**点一下填进去的那个
+// 地址来自接口**。实测过的反面:前端自己列了 OpenDNS,而它只认另一种 DoH 协议,
+// 保存之后下一次抓取当场 HTTP 400。
+check("预设按钮是按接口给的名单画的",
+      s.chips.join("|") === "测试端点|关掉", JSON.stringify(s.chips));
+await setup("点得到第一颗预设", clickAt("#egress-chips button"));
+s = await snap();
+check("点一下填进去的是接口给的那个地址",
+      s.endpoint === VIEW.presets[0].url, s.endpoint);
+// 填回去:下面几步要拿它和接口回的那一份对。
+await evalJs(`document.getElementById('egress-endpoint').value = ${JSON.stringify(VIEW.endpoint)}`);
+// 「留空」到底是不是「关」,取决于环境变量有没有在兜底 —— 两个方向各钉一条。
+// 这句话只在框空着时看得见,而那正是人刚点完「关掉」的那一下。
+check("端点来自设置时,留空就是关", /留空 = 关/.test(s.ph), s.ph);
+await evalJs(`(() => { window.__v = ${JSON.stringify({ ...VIEW })};
+  window.__v.sources = { ...window.__v.sources, endpoint: 'env' };
+  window.__v.where = { ...window.__v.where, endpoint: '来自环境变量 KB_FEED_DOH' };
+  egressApply(window.__v); return true; })()`);
+s = await snap();
+check("环境变量在兜底时,留空不许说成关",
+      /回落到环境变量/.test(s.ph) && s.srcs[0] === "来自环境变量 KB_FEED_DOH", s.ph);
+await evalJs(`egressApply(${JSON.stringify(VIEW)})`);   // 换回去,下面几步按原夹具走
 
 // ── 2. 保存:三项原样发出去,脱敏那一位不许被动过 ────────────────────────────
 posted.length = 0;

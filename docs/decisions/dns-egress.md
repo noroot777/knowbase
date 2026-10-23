@@ -122,10 +122,9 @@
 ### 本轮(审查第 1 轮)补进来的硬约束
 
 - **主机名规范化在进查询之前一次做完**(`fetching.host_for_lookup`),两条路共用那一份。
-  **地址字面量一个解析器都不许问**(DoH 会答 NXDOMAIN),**非 ASCII 先 IDNA**(端点回
-  HTTP 400),**纯 ASCII 原样放过**(idna codec 会拒掉 `getaddrinfo` 本来认得的东西,
-  实测 63 字符以上的标签)。判据是**翻开关不改变结果** —— 从「能」变成「不能」是回归。
-  字面量照旧过 `is_global`,SSRF 一分不少。
+  **地址字面量一个解析器都不许问**(DoH 会答 NXDOMAIN)。**名字的编码问 httpx 要**
+  (`httpx.URL(...).raw_host`),不自己编 —— 详见下一节。判据是**翻开关不改变结果** ——
+  从「能」变成「不能」是回归。字面量照旧过 `is_global`,SSRF 一分不少。
 - **「答得不对」绝不许说成「确定没有」。** 这几种一律 `Unavailable`:`Answer` 不是列表、
   有地址记录但每条 data 都解析不动、任一族预算没跑完、任一族答不上。
   **只有「两个族都拿到明确答案、里面确实没有地址」才是 `Unknown`。** 顺序是**先看有没有
@@ -149,6 +148,57 @@
   那条只对 `.py` 成立 —— 被 source 的 shell 文件决定服务进程拿到哪一份环境。
 - **容器那条路不经过 `kb.sh`**(`docker/entrypoint.py` 直接起 `kb-web`),所以透传在那里
   等于没有:出口变量要写进 `compose.yaml` 的 `environment`。
+
+### 审查第 1 轮(自由工作流)打回来之后补的硬约束
+
+- **问地址用的名字,必须就是连接时敲的那个名字。** `host_for_lookup` 现在问
+  `httpx.URL(f'https://{host}/').raw_host` 要,不自己 `str.encode('idna')`:后者是老的
+  IDNA2003,把德语 ß 映射成 ss,而 httpx 走 UTS46/IDNA2008 —— 实测 `faß.de` 一边编成
+  `fass.de`、一边编成 `xn--fa-hia.de`,**那是两个不同的域名,可以属于不同的人**。这一层的
+  全部设计是「解析出数字 IP,再钉着它 + 原主机名的 Host/SNI 去连」,两个名字错开就是
+  **查 A 家的地址、敲 B 家的门**:证书对不上,面板上报「无法连接订阅服务」,而域名没毛病。
+  **既有的两条不变量照旧**(实测):IP 字面量在上一档就返回了;纯 ASCII 不被收紧
+  (httpx 只在非 ASCII 时才调 idna,63 字符以上的标签、`_dmarc` 这种都原样放过)。
+- **面板上的预设端点名单归协议那一侧**(`resolve.JSON_API_PRESETS`,就在 `_read` 旁边),
+  页面通过 `view()['presets']` 拿,**`egress.js` 里一个地址都不许写死**(回归按正则数)。
+  判据不是「这家有没有 DoH」,是**它认不认 `_read` 发的那一种请求**:`?name=&type=` 加
+  `accept: application/dns-json`。DoH 还有另一种协议(RFC8484 wireformat,`?dns=<base64>`),
+  走同一个 `/dns-query` 路径、长得一模一样。实测:前端照着「这家有 DoH」列进去的
+  `https://doh.opendns.com/dns-query` 只认 wireformat,点一下保存、下一次抓取当场 HTTP 400,
+  面板上只剩一句「域名解析服务不可用」,人会以为是自己网络的事。
+- **地址的形态判据只有一份**(`egress.check_url`),端点和代理共用,只有协议名单不同。
+  分开写的那一版谁都没判端口:`http://h:99999` 一路存进 `secrets.json`,下一次抓取在
+  `httpx.Client(proxy=...)` 那一行抛 `httpx.InvalidURL` —— **它不是 `httpx.HTTPError` 的
+  子类**,`fetching.request` 那两道 except 一个都接不住,整轮同步 500、面板上一个字的原因
+  都没有。注意 `urlsplit` 的两处坑:方括号没闭合时**当场**抛,端口越界要等读 `.port`
+  (一个 property)才抛。所以**判对错走 `check_url`(抛 `BadValue`,面板就地红字),
+  显示路径一律走宽松的 `_split`,一个字都不许抛** —— 存量里就是会有坏值,而人打开这个
+  面板正是为了把它改掉。另外 `fetching.open_client` 把建 client 那一行的 `InvalidURL` /
+  `ValueError` 翻译成 `FeedError`,给存量值兜底。
+- **「谁说了算」的口径只有一份**(`egress._effective`):取值、来源分类、出处文案、交给
+  httpx、合并密码位,五处全问它。各自判一遍实测出过两种后果 —— 出处判错(代理被说成
+  `KB_FEED_DOH` 在兜底),以及**丢密码**:代理来自环境变量时 `merge_proxy` 只看设置里那份
+  (空的),于是页面原样回传的 `http://me:***@h:1` 被当成「没有旧值可沿用」,密码位被抹成
+  空串写进 `secrets.json`,把本来好用的出口顶掉。
+- **页面回传的兜底值不落盘。** 页面显示的是**生效值**,人只改一格、把其余原样交回来是常态;
+  照单全收的话环境变量那份就被复制进 `secrets.json` 固化下来,**运维再改环境变量不生效**,
+  而面板上的值一模一样,看不出发生过什么。**真的没有旧密码可沿用时拒**(`BadValue`),
+  不许把 `***` 猜成空串。
+- **`mask_endpoint` 从 `hostname[:port]` 拼,不拿 `netloc`** —— netloc 里带着 `user:pass@`,
+  而这个函数存在的全部理由就是别把凭证写进日志。**没写协议头的地址也要剪**(剪到第一个
+  `/`,再去掉 userinfo):`urlsplit` 认不出那种地址的主机名,原样返回等于最该剪的一类一个字
+  都没剪。
+- **起服务/看状态那几行报的是「跑着的那个进程在用什么」**,不是当前 shell
+  (`scripts/web_env.sh` 的 `service_env`,拿 `ps eww -p <pid>` 读)。服务可能是几天前、在
+  另一个终端里起的,按当前 shell 算出来的答案会**精确地反掉**:你刚 export 了一个代理,
+  状态里就写「出口代理:…」,而真正在抓取的那个进程里一个都没有。**读不到那个进程的环境
+  时不许退回当前 shell**,打一行「只按设置文件算」。**不带 pid 调 = 刚用 `WEB_ENV` 把它起
+  起来的那一下**,那份环境按构造就是服务的。
+- **`Answer` 只有「根本没出现」才算合法的空答案。** 写成 `answer.get('Answer') or []` 的话,
+  `{}`、`""`、`0` 这些**出现了、但不是列表**的假值会在那一行就变成空列表,绕过下面那道
+  `isinstance` 判断 —— 实测四种畸形答案全报成「无法解析订阅服务器地址」,人被指去改一条
+  没毛病的链接。**列表里混着不是记录的东西**(`["x"]`)同理是答得不对,不许逐条跳过。
+  反过来钉一边:**缺这一栏 / 它是 null / 只有 CNAME,照旧是正常的空答案**。
 
 ## 事故形态与实测证据
 
@@ -242,8 +292,19 @@ HTTP 200**,余下 7 条变成有信息的真失败(付费墙 401、拒代理 IP 
 - `tests/test_egress_env.py` 的 `EgressWarningTests`(本轮)—— 探测到 / 探不到各走哪条路,
   以及状态行把端点的 path/query 脱敏(NextDNS 那类端点把 token 写在 path 里)。
 - **两份实现各有自己的红**:`request` 和 `public_url` 两个调用方各一条。
+- `tests/test_feed_egress.py` 的后四组(审查第 1 轮之后)—— 坏地址在保存那一关被拒、
+  而存量坏值照旧打得开面板(`UrlShapeTests`);页面原样回传时兜底值不落盘、`***` 没有旧值
+  可沿用时拒掉、环境变量来的代理照旧交给 `trust_env` 以免作废 `NO_PROXY`
+  (`FallbackWriteBackTests`);预设名单来自协议那一侧、前端没有第二份(`PresetTests`);
+  端点脱敏的四种漏法(`MaskEndpointTests`)。
+- `tests/test_egress_env.py` 的 `ServiceEnvTests`(审查第 1 轮之后)—— 起一个带着已知环境的
+  真进程当「服务」,判据落在**最终跑起来的那个 python 收到了什么**(用 uv 桩打回来),不是
+  「有没有调 ps」。两个方向各一条:服务配了 / 服务没配而当前 shell 配了。
 - 定点注入(各自该打中的那一条):这一层没接上 / CNAME 当地址 / 两种答不上合成一档 /
   缓存按 URL / DoH 自带预算 / 失败也写缓存 / `Answer` 不是列表时按「确定没有」处理 /
   预算耗尽也照样问 / 起服务退回裸 `CLEAN_ENV` / 空值也透传 / 把 `KB_DATA_DIR` 放进名单 /
-  `web_prepare_env` 又手写一遍名单 / `KB_FEED_DOH` 不透传。**撤回注入要用备份,不是 `git checkout`**(后者会把
+  `web_prepare_env` 又手写一遍名单 / `KB_FEED_DOH` 不透传 / 主机名改回 `str.encode('idna')` /
+  `Answer` 写回 `or []` / 列表里混着非记录时逐条跳过 / `mask_endpoint` 改回拿 `netloc` /
+  没有协议头时原样返回 / `merge_proxy` 只看设置里那一份 / `save` 把兜底值照单写盘 /
+  `check_url` 不判端口 / 状态行改回按当前 shell 算 / 预设名单搬回前端。**撤回注入要用备份,不是 `git checkout`**(后者会把
   本轮未提交的改动一起抹掉)。
