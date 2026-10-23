@@ -38,13 +38,24 @@ sqlite、httpx、uvicorn 的 socket 都在占 fd,写死一个编号就可能 dup
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import select
 import shutil
 import subprocess
 import time
+
+# **这条通道整条是 POSIX 专有的**,不只是 fcntl 这一处:`os.pipe` + `pass_fds`
+# 把 fd 搬到 3/4 要借 `/bin/sh`,收包那头 `select` 在 Windows 上也不认管道。
+# 所以这里只让**模块 import 得动**(它在 `kb.server` 的 import 链上 ——
+# `intake_api` → `x_channels` → 这里;顶层 import 一个缺失的模块会让整个面板起不来,
+# 而报出来的是一句 `No module named 'fcntl'`,指不到任何跟 X 有关的东西),
+# 真正的拦在 `Chrome.__enter__` 的第一句:那是本模块唯一会动这些东西的入口,
+# 在那儿拦才能给出一句人话。
+try:
+    import fcntl
+except ImportError:                      # pragma: no cover - Windows
+    fcntl = None                         # type: ignore[assignment]
 
 # 写超时的常量放在 `ws_client`(它谁都不依赖,判据也写在它的模块注释里)。
 # 两条传输共用一个值是有意的:「几 KB 写不进去就是对端卡住了」跟传输无关。
@@ -254,6 +265,14 @@ class Chrome(Session):
     # ── 生命周期 ────────────────────────────────────────────────────────────
 
     def __enter__(self) -> 'Chrome':
+        # CDP over pipe 这条路要 fd 重映射(fcntl.F_DUPFD + pass_fds + /bin/sh)和
+        # 对管道 select,三样 Windows 上都没有。**在这儿拦,而不是让它在
+        # `fcntl = None` 上抛 AttributeError** —— 那个异常会被上层当成「浏览器挂了」
+        # 一路重试,面板上只写「连接失败」。CdpError 的 message 是直接给用户看的。
+        if fcntl is None:
+            raise CdpError('X 的浏览器通道只能在 macOS / Linux 上跑(它要把管道搬到 '
+                           'Chrome 写死的 fd 3/4,Windows 没有这套机制)。'
+                           '在 Windows 上请用 RSS / 导入登录态那两条通道。')
         binary = find_chrome(self.chrome_path)
         os.makedirs(self.profile, exist_ok=True)
         # pr/pw 是我们这头;cr(chrome 读)/cw(chrome 写)要落到子进程的 fd 3/4。

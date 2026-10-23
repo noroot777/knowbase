@@ -74,7 +74,6 @@ materialize()`,见 `kb.collectors`)。错过的两版都是拿旁观者的视角
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import threading
@@ -84,6 +83,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from kb import fetch_pending, fetch_rotate
+from kb import filelock
 from kb.config import DATA_DIR
 from kb.fetch_fold import _LEGACY_SEG, _fold, answer
 from kb.fetch_gate import (NO_EVIDENCE, NoEvidence,  # noqa: F401 - 再导出
@@ -211,7 +211,7 @@ def _locked(exclusive: bool):
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         fh = open(DATA_DIR / LOCK_NAME, 'a+')
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        filelock.flock(fh.fileno(), filelock.LOCK_EX if exclusive else filelock.LOCK_SH)
     except OSError:
         if fh is not None:
             fh.close()
@@ -221,7 +221,7 @@ def _locked(exclusive: bool):
     finally:
         if fh is not None:
             try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                filelock.flock(fh.fileno(), filelock.LOCK_UN)
             except OSError:
                 pass
             fh.close()

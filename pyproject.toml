@@ -22,6 +22,14 @@ dependencies = [
     # 和表格,少一样都会让"页面上被改坏的东西"在这里看着无害。
     # 原来只是 rich 的传递依赖,那条链断了这里就崩,所以显式列出来。
     "markdown-it-py[linkify]>=3.0",
+    # **Windows 专用,别去掉那个平台标记。** `ZoneInfo('Asia/Shanghai')` 在十几个
+    # 模块的**顶层**就被求值(`fetch_rounds`、`pipeline_daybook`、`feeds/grab` …),
+    # 而 Windows 压根没有系统 tzdata(`/usr/share/zoneinfo` 是 POSIX 的东西)——
+    # 缺了它 kb-web 在 import 阶段就抛 `ZoneInfoNotFoundError: Asia/Shanghai`,
+    # 面板一个请求都接不到,而报出来的话跟时区看着无关。
+    # macOS / Linux / 容器上系统自带,装它只是多一份不会被用到的数据,所以带标记:
+    # 不带的话等于给那三个平台凭空加一个依赖,还可能盖掉系统那份更新的规则。
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.scripts]

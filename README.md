@@ -9,7 +9,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-%E2%89%A53.11-3776AB?logo=python&logoColor=white" alt="Python ≥3.11" />
   <img src="https://img.shields.io/badge/license-MIT-17604F" alt="MIT License" />
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Docker-14202B" alt="Platform" />
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Docker-14202B" alt="Platform" />
   <img src="https://img.shields.io/badge/UI-localhost:8787-F3F5F4?labelColor=14202B" alt="Web UI" />
 </p>
 
@@ -32,6 +32,16 @@
 # Docker（索引和检索，不含绿泡泡采集）
 docker compose up -d --build    # http://127.0.0.1:8787
 ```
+
+```powershell
+# Windows 本机（命令和 kb.sh 一一对应；绿泡泡采集与 X 浏览器通道这两条不可用）
+.\kb.cmd start                  # 起面板 http://127.0.0.1:8787
+.\kb.cmd sync                   # 跑全流程
+```
+
+`kb.ps1` 是 `kb.sh` 的对等物，`kb.cmd` 是推荐的调用口——Windows 默认的执行策略会拦住没签名
+的 `.ps1`，而报出来的话跟本项目无关。平台差异和约束见
+[Windows 操作入口](docs/decisions/windows-entry.md)。
 
 打开面板后，首页会引导你完成两步初始配置：
 

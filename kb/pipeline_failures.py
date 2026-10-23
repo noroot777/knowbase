@@ -32,11 +32,11 @@
 
 from __future__ import annotations
 
-import fcntl
 import time
 from contextlib import contextmanager
 from datetime import timedelta
 
+from kb import filelock
 from kb import pipeline_state as ps
 from kb.pipeline_persist import _dump_bytes, _load_json, _write_atomic
 from kb.pipeline_retention import parse_stamp, run_stamp
@@ -101,7 +101,7 @@ def _exclusive():
         deadline = time.monotonic() + _WAIT
         while True:
             try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                filelock.flock(fh.fileno(), filelock.LOCK_EX | filelock.LOCK_NB)
                 break
             except OSError:
                 if time.monotonic() >= deadline:

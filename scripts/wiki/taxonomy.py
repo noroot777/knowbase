@@ -18,7 +18,6 @@ code,分区因此稳定,改类目时 bump `Taxonomy.sig()` 会自动触发全量
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -31,6 +30,13 @@ from threading import RLock
 
 REPO = Path(__file__).resolve().parents[2]
 CACHE_DIR = Path(os.environ.get("KB_DATA_DIR") or REPO / "data").expanduser()
+
+# 文件锁走 kb.filelock(口径只有一份,见那个模块的头:Windows 上没有 fcntl)。
+# sys.path 的写法跟同目录的 graph_data / taxo_llm 一致 —— 这个包是按脚本跑的,
+# repo 根不一定在路径上。
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+from kb import filelock  # noqa: E402
 
 
 # 分类表(Cat / Taxonomy / PROJECTS / SKILLS)搬到了 taxo_tables.py:这个文件
@@ -76,7 +82,7 @@ def _flock(name: str):
     with _io_lock:                       # 同进程内的并发先在这儿排队
         fh = p.open("a+")
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            filelock.flock(fh.fileno(), filelock.LOCK_EX)
             yield
         finally:
             fh.close()                   # 关闭即释放 flock

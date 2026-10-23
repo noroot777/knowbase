@@ -96,12 +96,20 @@ def _load_json_strict(path: Path):
 
 
 def _dump_bytes(obj) -> bytes:
-    """序列化成要落盘的字节。**不可编码的字符就地替换,这一步不许抛。**
+    r"""序列化成要落盘的字节。**不可编码的字符就地替换,这一步不许抛。**
 
     `ensure_ascii=False` 是为了文件能给人读,代价是**编码**那一步会炸:某条记录里
     混进一个孤立代理字符(`\ud800` 一类 —— JSON 里合法、UTF-8 里不合法,旧文件里
     转义存着、读回来就是它),`UnicodeEncodeError` 就从写盘抛出来。按
     `errors='replace'` 落盘:坏掉的是那一个字符,其余内容和其他几轮一个字节不差。
+
+    **这段 docstring 必须是 raw 的(开头那个 `r` 前缀,别删)。** 少了它,`\ud800`
+    会被 Python 当成转义、在 docstring 里变成一个**真的**孤立代理字符;而 3.12 起的
+    新分词器要把源码整份转回 UTF-8,于是这个文件在 Python ≥3.12 上**压根编译不过**
+    (`UnicodeEncodeError: ... position 108`,而且报在 import 这一层、指不到这一行)。
+    本项目 `.python-version` 钉的是 3.11,所以一直没撞上;而
+    `requires-python = ">=3.11"` 是允许 3.13 的,Windows 上尤其容易撞 —— 那儿
+    `py -3` 默认就是最新那一版。
     """
     return json.dumps(obj, ensure_ascii=False, indent=1).encode("utf-8", "replace")
 

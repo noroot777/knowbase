@@ -13,12 +13,12 @@ import。
 
 from __future__ import annotations
 
-import fcntl
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import NamedTuple
 
+from kb import filelock
 from kb.config import DATA_DIR
 # 叶子模块(只认字符串),直接取口径不会绕回 `kb.daily`
 from kb.daily_page import flat as page_flat
@@ -151,7 +151,7 @@ def commit_lock():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     fh = (DATA_DIR / LOCK_NAME).open('a+')
     try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        filelock.flock(fh.fileno(), filelock.LOCK_EX)
         yield
     finally:
         fh.close()                       # 关闭即释放 flock

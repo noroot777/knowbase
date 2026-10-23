@@ -68,7 +68,8 @@
 
 ## 操作入口
 
-- **`./kb.sh` 是唯一的操作入口**(不带参数打印全部命令)。日常两条:`./kb.sh sync`、`./kb.sh status`。
+- **`./kb.sh` 是操作入口(Windows 上是 `.\kb.cmd` / `kb.ps1`,命令一一对应)**(不带参数打印全部命令)。
+  日常两条:`./kb.sh sync`、`./kb.sh status`。
   **没有「同步前的准备」这一步了**(`prep` 连同整条凭证通道搬去了 `wechat-oa`)。
 - **`restart` 只重启进程,不重建任何产物,尤其不重建三张图谱页**(改了 `catgraph.css/js` 重启看不出
   变化)。重建走 `./kb.sh graph`(`--no-llm`);同步时 wiki 阶段本来就带。`web_start` 之后比一次
@@ -192,6 +193,7 @@
 | 「我的订阅」页布局(`kb/static/js/sources.js`、`targets.js`) | `subs-layout.md` |
 | 四处阅读区往下滚时收起上面那条头(`kb/static/js/scrollaway.js`、`.scroll-away` / `.away-exit`,接入在 `source_reader.js`/`core.js`/`gallery.js`/`fav_view.js`) | `scroll-away.md` |
 | 「收藏此段」、`favorites` 的可空 path、片段回跳(`kb/static/js/snip.js`、`kb/web/favorites_api.py`、`kb/favbrain.py`、`store.py` 的 favorites 迁移) | `fav-snippets.md` |
+| Windows 入口、跨平台文件锁(`kb.ps1`、`kb.cmd`、`scripts/win_*`、`kb/filelock.py`;**谁都不许直接 `import fcntl`**) | `windows-entry.md` |
 
 ## 往本文件添加内容(硬性)
 

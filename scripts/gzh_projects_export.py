@@ -171,12 +171,12 @@ def _acquire_lock() -> None:
     """gate/transcribe 对 state 是全文件覆盖写,绝不能并发。
     拿不到锁退出码 3(管道据此把条目化阶段标为跳过)。"""
     global _LOCK_FILE
-    import fcntl
+    from kb import filelock
     lock_path = STATE_PATH.with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     _LOCK_FILE = open(lock_path, "w")
     try:
-        fcntl.flock(_LOCK_FILE, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        filelock.flock(_LOCK_FILE, filelock.LOCK_EX | filelock.LOCK_NB)
     except OSError:
         print("[lock] 已有 gate/transcribe 实例在跑,退出(state 不能并发写)", flush=True)
         sys.exit(3)

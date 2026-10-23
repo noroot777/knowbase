@@ -19,6 +19,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import patch
 
 from kb import cli, embedder, maintenance, pipeline_stages, scanner, store
@@ -36,13 +37,26 @@ from feed_trim_fixture import TrimFixture, trim  # noqa: E402
 
 # 另一个进程持着维护锁。flock 认的是 open file description,所以只有真子进程
 # 才证明得了跨进程互斥(同进程换个 fd 的话重入保护会直接放行)。
+#
+# **走 `kb.filelock` 而不是直接 `import fcntl`**(全局约定,见 CLAUDE.md 索引里
+# 的 windows-entry):①被测那一侧(`kb.maintenance`)取锁就是过这一层的,探针用
+# 同一份后端才算真的在验互斥 —— 各用一套的话,两套后端对不上时这条用例会**绿着
+# 骗人**;②`import fcntl` 在 Windows 上是模块级 ImportError,整份文件一条都收不
+# 上来,而红出来指不到「维护锁没验到」这件事。
+# 子进程要 import kb,所以把仓库根当第一个参数传进去(`-c` 只会把 cwd 放进
+# sys.path,而这几条用例的 cwd 是夹具的临时目录)。
 HOLDER = textwrap.dedent('''
-    import fcntl, sys, time
-    fh = open(sys.argv[1], 'a+')
-    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    import sys, time
+    sys.path.insert(0, sys.argv[1])
+    from kb import filelock
+    fh = open(sys.argv[2], 'a+')
+    filelock.flock(fh.fileno(), filelock.LOCK_EX)
     print('locked', flush=True)
     time.sleep(120)
 ''')
+
+#: 探针子进程的 sys.path[0]。
+REPO = str(Path(__file__).resolve().parent.parent)
 
 
 class IndexLockTests(TrimFixture, unittest.TestCase):
@@ -86,7 +100,7 @@ class IndexLockTests(TrimFixture, unittest.TestCase):
         return item
 
     def hold_the_lock_in_another_process(self):
-        child = subprocess.Popen([sys.executable, '-c', HOLDER,
+        child = subprocess.Popen([sys.executable, '-c', HOLDER, REPO,
                                   str(self.root / maintenance.LOCK_NAME)],
                                  stdout=subprocess.PIPE, text=True)
         self.addCleanup(child.wait)
