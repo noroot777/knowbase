@@ -14,10 +14,24 @@
 const dailyOriginalBodies = new WeakMap();
 const DAILY_LEGACY_SKIP = '.daily-legacy-context';
 
+function preserveDailyLineItems(el) {
+  let lineSection = false;
+  for (const block of el.children) {
+    if (/^H[12]$/.test(block.tagName)) {
+      lineSection = block.tagName === 'H2'
+        && /^(工具与项目|一句话速览|补录)$/.test(block.textContent.trim());
+    } else if (lineSection && block.tagName === 'P'
+      && block.textContent.includes('\n') && !block.querySelector('br, code')) {
+      block.classList.add('daily-line-items');
+    }
+  }
+}
+
 function setDailyBody(html, ref = '') {
   const el = $('daily-reader-body');
   dailyOriginalBodies.delete(el);
   el.innerHTML = html;
+  preserveDailyLineItems(el);
   if (ref) el.dataset.snipRef = ref;
   else delete el.dataset.snipRef;
   return el;

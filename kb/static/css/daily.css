@@ -64,6 +64,7 @@
 #daily-reader-body ul, #daily-reader-body ol { padding-left:22px; margin:10px 0; }
 #daily-reader-body li { margin:8px 0; }
 #daily-reader-body p { margin:10px 0; }
+#daily-reader-body p.daily-line-items { white-space:pre-line; }
 #daily-reader-body strong { color:var(--ink); }
 #daily-reader-body a { color:var(--brand); }
 #daily-reader-body .daily-materials { padding-left:25px; margin-top:15px; }
