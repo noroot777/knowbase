@@ -82,7 +82,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from kb import filelock
 from kb import fetch_pending, fetch_rotate
 from kb import filelock
 from kb.config import DATA_DIR
