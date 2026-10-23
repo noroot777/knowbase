@@ -1,0 +1,54 @@
+/* 「出口与解析」弹窗(DoH 端点 / 单次上限 / 出口代理)。
+   标记由 kb/static/js/egress.js 现建 —— 理由写在那个文件头上。
+   色值一律走 base.css 的 token,这里不出现十六进制。 */
+
+#egress-modal .modal { width: min(620px, 94vw); }
+
+/* 说明里那个路径是**行内**的。base.css 的 `.modal code { display: block }` 是给
+   「整块命令,点一下复制」用的,套到一句话里会把它切成三截 —— 而灰块在这个弹窗里
+   跟输入框长得一模一样,人分不清哪个能填(`#keys-modal` 已经踩过一次,见 panels.css)。 */
+#egress-modal .hint code {
+  display: inline; margin: 0; padding: 1px 6px; border-radius: 5px;
+  font-size: 12px; cursor: text; word-break: normal; overflow-wrap: anywhere;
+}
+
+/* 一行一项:左边固定宽的标签,右边输入框占满。和「API Key」那个弹窗的
+   .key-fields 不同 —— 那里是上下两个长 URL,这里是短值 + 出处标注。 */
+.eg-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 0; border-bottom: 1px solid var(--line-soft);
+}
+.eg-row:last-of-type { border-bottom: 0; }
+.eg-label { width: 92px; flex: none; font-size: 13.5px; color: var(--ink-2); }
+.eg-row input[type=text] { flex: 1; min-width: 0; }
+.eg-row input[type=number] { width: 84px; flex: none; }
+.eg-hint { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.eg-grow { flex: 1; }
+
+/* 出处标注:这一项现在是谁说话算数。看不见它的话,「页面上填了但没生效」
+   和「环境变量在兜底」这两件事长得一模一样。 */
+.eg-src { font: 11.5px var(--font-mono); color: var(--muted); flex: none; }
+
+.eg-state { font: 12.5px var(--font-mono); padding: 3px 9px; border-radius: 999px; flex: none; }
+.eg-state.on { color: var(--brand-deep); background: var(--brand-soft); }
+.eg-state.off { color: var(--muted); background: var(--paper-2); }
+
+/* 预设端点:点一下填进上面那个框,不直接保存 */
+.eg-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.eg-chips button {
+  background: var(--tag-bg); color: var(--ink-2); font-size: 12.5px;
+  padding: 3px 10px; min-height: 26px; border-radius: 999px;
+}
+.eg-chips button:hover { color: var(--brand-deep); background: var(--brand-soft); }
+
+/* 探测结果:等宽体,因为里面是地址和毫秒数 */
+.eg-probe {
+  font: 12.5px/1.7 var(--font-mono); color: var(--ink-2); background: var(--paper-2);
+  border-radius: 10px; padding: 10px 12px; margin-top: 12px;
+  white-space: pre-wrap; word-break: break-all;
+}
+.eg-probe.bad { color: var(--danger); }
+.eg-probe b { color: var(--ink); font-weight: 600; }
+
+.eg-foot { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+.eg-foot .hint { flex: 1; font-size: 12.5px; color: var(--muted); }

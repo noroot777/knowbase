@@ -151,7 +151,8 @@ def _settings_guard() -> Iterator[None]:
     """
     global _lock_depth
     with _settings_lock:                  # 先把同进程的并发挡在外面
-        if _lock_depth or not filelock.HAVE_FLOCK:   # 重入(外层已持锁)/ 无文件锁
+        # 重入(外层已持锁)/ 这个平台没有文件锁:只靠进程内锁
+        if _lock_depth or not filelock.HAVE_FLOCK:
             _lock_depth += 1
             try:
                 yield

@@ -84,6 +84,7 @@ from zoneinfo import ZoneInfo
 
 from kb import filelock
 from kb import fetch_pending, fetch_rotate
+from kb import filelock
 from kb.config import DATA_DIR
 from kb.fetch_fold import _LEGACY_SEG, _fold, answer
 from kb.fetch_gate import (NO_EVIDENCE, NoEvidence,  # noqa: F401 - 再导出

@@ -319,13 +319,14 @@ class DropLedgerTests(HistoryCase):
         flock 认的是 open file description,所以同进程换一个 fd 就挡得住自己 ——
         这也正是为什么一把 flock 同时管住了线程池里那两条请求,不用再叠一把
         `threading.Lock`。**两个后端在这一点上同侧**:Windows 的字节段锁也是按
-        句柄算的,同进程另开一个句柄照样被挡住。
+        句柄算的,同进程另开一个句柄照样被挡住(`kb.filelock` 的模块说明里记着,
+        所以上面那句推理在 Windows 上同样成立)。
 
         **句柄用 try/finally 关,不用 addCleanup。** `addCleanup` 的回调排在
         `tearDown` **之后**,而夹具的 `tearDown` 要删那个临时目录 —— Windows 上
-        删不掉还开着的文件(WinError 32)。实测形态:这条用例的断言全过了,红出来
-        的却是一句临时目录清理失败的 PermissionError;**真断言要是哪天不过,也会被
-        那句盖掉**。关在 finally 里就是「先关句柄、再清目录」。
+        删不掉还开着的文件(WinError 32)。于是这条用例的断言全过了,红出来的却是
+        一句临时目录清理失败的 PermissionError:**真断言要是哪天不过,也会被这句
+        盖掉**。关在 finally 里的话,不管走哪条路都是「先关句柄、再清目录」。
         """
         other = pf._lock_file().open('a+')
         try:

@@ -27,7 +27,7 @@ from unittest.mock import patch
 
 import httpx
 
-from kb.feeds import fetching, resolve
+from kb.feeds import egress, fetching, resolve
 
 DOH = 'https://doh.example/dns-query'
 #: 真实污染形态:本机把域名指到别人家的公网地址上,连过去卡在 TLS 握手。
@@ -73,7 +73,7 @@ class ResolveBase(unittest.TestCase):
         mock = patch.object(fetching.httpx, 'Client', side_effect=factory)
         mock.start()
         self.addCleanup(mock.stop)
-        env = patch.dict(os.environ, {resolve.ENV: DOH})
+        env = patch.dict(os.environ, {egress.ENV_ENDPOINT: DOH})
         env.start()
         self.addCleanup(env.stop)
 
@@ -97,7 +97,7 @@ class ResolveBase(unittest.TestCase):
 
 class OffByDefaultTests(ResolveBase):
     def test_unset_endpoint_never_asks_doh_and_keeps_system_resolution(self):
-        with patch.dict(os.environ, {resolve.ENV: ''}), \
+        with patch.dict(os.environ, {egress.ENV_ENDPOINT: ''}), \
              patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED) as dns:
             response = fetching.request('https://example.org/rss')
         self.assertEqual(b'feed', response.body)
@@ -106,7 +106,7 @@ class OffByDefaultTests(ResolveBase):
         self.assertEqual(['108.160.173.207'], self.hosts())
 
     def test_blank_endpoint_counts_as_unset(self):
-        with patch.dict(os.environ, {resolve.ENV: '   '}), \
+        with patch.dict(os.environ, {egress.ENV_ENDPOINT: '   '}), \
              patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
             fetching.request('https://example.org/rss')
         self.assertEqual([], self.asked)
@@ -175,7 +175,7 @@ class MalformedAnswerTests(ResolveBase):
             with self.subTest(payload=payload):
                 self.arm(payload)
                 with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
-                    with self.assertRaisesRegex(fetching.FeedError, 'KB_FEED_DOH'):
+                    with self.assertRaisesRegex(fetching.FeedError, '出口与解析'):
                         fetching.request('https://example.org/rss')
                 self.assertEqual([], self.connected)
 
@@ -192,7 +192,7 @@ class MalformedAnswerTests(ResolveBase):
 class BudgetTests(ResolveBase):
     def test_doh_timeout_is_capped_by_what_is_left_of_the_request_budget(self):
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED), \
-             patch.dict(os.environ, {resolve.SECONDS_ENV: '99'}):
+             patch.dict(os.environ, {egress.ENV_SECONDS: '99'}):
             fetching.request('https://example.org/rss', deadline=time.monotonic() + 2)
         spent = [o['timeout'] for o in self.options if isinstance(o.get('timeout'), float)]
         self.assertEqual(2, len(spent))                       # 两次查询各一个 client
@@ -201,7 +201,7 @@ class BudgetTests(ResolveBase):
     def test_exhausted_budget_asks_nothing_and_reports_the_read_timeout(self):
         self.arm(httpx.ConnectTimeout('doh is slow'))
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED), \
-             patch.dict(os.environ, {resolve.SECONDS_ENV: '99'}):
+             patch.dict(os.environ, {egress.ENV_SECONDS: '99'}):
             with self.assertRaisesRegex(fetching.FeedError, '超时'):
                 fetching.request('https://example.org/rss', deadline=time.monotonic() - 1)
         self.assertEqual([], self.asked)
@@ -256,7 +256,7 @@ class CacheTests(ResolveBase):
         self.arm([{'Status': 2}, {'Status': 2},
                   answer(rec('1.1.1.1')), answer(rec('1.1.1.1'))])
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
-            with self.assertRaisesRegex(fetching.FeedError, 'KB_FEED_DOH'):
+            with self.assertRaisesRegex(fetching.FeedError, '出口与解析'):
                 fetching.request('https://example.org/rss')
             fetching.request('https://example.org/rss')
         self.assertEqual(['1.1.1.1'], self.hosts())
@@ -296,12 +296,9 @@ class BothCallersTests(ResolveBase):
     def test_public_url_reports_the_egress_failure_too(self):
         self.arm({'Status': 2})
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
-            with self.assertRaisesRegex(fetching.FeedError, 'KB_FEED_DOH'):
+            with self.assertRaisesRegex(fetching.FeedError, '出口与解析'):
                 fetching.public_url('https://example.org/rss')
 
-
-if __name__ == '__main__':
-    unittest.main()
 
 
 class HostnameTests(ResolveBase):
@@ -318,7 +315,7 @@ class HostnameTests(ResolveBase):
         out = []
         for value in (DOH, ''):
             resolve.forget()
-            with patch.dict(os.environ, {resolve.ENV: value}):
+            with patch.dict(os.environ, {egress.ENV_ENDPOINT: value}):
                 out.append(fetching.public_addresses(url)[1])
         return out
 
@@ -343,26 +340,56 @@ class HostnameTests(ResolveBase):
 
     def test_non_ascii_names_are_idna_encoded_before_asking(self):
         self.arm(answer(rec('93.184.216.34')))
-        with patch.dict(os.environ, {resolve.ENV: DOH}):
+        with patch.dict(os.environ, {egress.ENV_ENDPOINT: DOH}):
             _, found = fetching.public_addresses('https://münchen.de/rss')
         self.assertEqual(['93.184.216.34'], found)
         self.assertEqual({'xn--mnchen-3ya.de'}, set(self.names()),
                          '非 ASCII 域名原样问出去了,端点会回 HTTP 400')
 
     def test_ascii_names_are_passed_through_untouched(self):
-        """纯 ASCII 不走 idna codec:它会拒掉 `getaddrinfo` 本来认得的东西
-        (实测 63 字符以上的标签、以及 `a..b` 这种空标签),那种收紧不属于这一层。"""
-        self.arm(answer(rec('93.184.216.34')))
-        with patch.dict(os.environ, {resolve.ENV: DOH}):
-            fetching.public_addresses('https://_dmarc.example.org/rss')
-        self.assertEqual({'_dmarc.example.org'}, set(self.names()))
+        """纯 ASCII 不许被收紧:idna 那条路会拒掉 `getaddrinfo` 本来认得的东西
+        (实测 63 字符以上的标签、以及 `_dmarc` 这种带下划线的),那种收紧不属于这一层。
+
+        现在的实现是问 httpx 要它自己会用的那个名字,而 httpx 只在非 ASCII 时才调
+        idna —— 所以这条不变量照旧成立,但判据得真跑一遍,不能押在「实现里有个
+        isascii 分支」上(那个分支这一轮已经没有了)。
+        """
+        for host in ('_dmarc.example.org', 'a' * 70 + '.example.org'):
+            with self.subTest(host=host):
+                self.arm(answer(rec('93.184.216.34')))
+                with patch.dict(os.environ, {egress.ENV_ENDPOINT: DOH}):
+                    _, found = fetching.public_addresses(f'https://{host}/rss')
+                self.assertEqual(['93.184.216.34'], found)
+                self.assertEqual({host}, set(self.names()))
+
+    def test_the_name_we_ask_about_is_the_name_the_fetch_will_knock_on(self):
+        """**查 A 家的地址、敲 B 家的门。**
+
+        这一跳的全部设计是「解析出数字 IP,再钉着它 + 原主机名的 Host/SNI 去连」,
+        所以**问地址用的名字和连接用的名字必须是同一个字符串**。`str.encode('idna')`
+        是老的 IDNA2003,它把德语 ß 映射成 ss;httpx 走的是 UTS46/IDNA2008,保留 ß
+        的 punycode。于是 `faß.de` 一边编成 `fass.de`、一边编成 `xn--fa-hia.de` ——
+        **那是两个不同的域名,可以属于不同的人**。后果:拿 A 家的 IP 去连,带着 B 家的
+        Host 和 SNI,证书对不上,面板上报一句「无法连接订阅服务」,而域名本身没毛病。
+        """
+        for host, encoded in (('faß.de', 'xn--fa-hia.de'),
+                              ('straße.de', 'xn--strae-oqa.de'),
+                              ('münchen.de', 'xn--mnchen-3ya.de')):
+            with self.subTest(host=host):
+                self.arm(answer(rec('93.184.216.34')))
+                with patch.dict(os.environ, {egress.ENV_ENDPOINT: DOH}):
+                    got = fetching.request(f'https://{host}/rss')
+                self.assertEqual(200, got.status)
+                self.assertEqual({encoded}, set(self.names()), '问出去的名字不对')
+                self.assertEqual({encoded}, {r.headers['host'] for r in self.connected},
+                                 '问的和敲的不是同一个域名')
 
 
 class AnswerBoundaryTests(ResolveBase):
     """**「答得不对」绝不许说成「确定没有」**(元规则:判不准一律抛)。
 
     面板上这两句话指向完全不同的下一步:「无法解析订阅服务器地址」让人去改链接,
-    「解析服务不可用」让人去看 KB_FEED_DOH 和代理。把前者用在我们并不知道的事情上,
+    「解析服务不可用」让人去看设置页上的端点和代理。把前者用在我们并不知道的事情上,
     人就会去改一条本来没毛病的链接。
     """
 
@@ -373,6 +400,64 @@ class AnswerBoundaryTests(ResolveBase):
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
             with self.assertRaisesRegex(fetching.FeedError, '解析服务不可用'):
                 fetching.request('https://example.org/rss')
+
+    def test_an_answer_field_that_is_not_a_list_is_never_a_legitimate_empty(self):
+        """`Answer` 这一栏**出现了、但不是列表**(或者列表里混着不是记录的东西)——
+        那是答得不对,不是「这个域名没有地址」。
+
+        原先写的是 `answer.get('Answer') or []`,于是 `{}`、`""`、`0` 这三种**假值**
+        在那一行就变成了空列表,根本走不到下面那道 `isinstance` 判断(实测:四种
+        畸形答案全都报成「无法解析订阅服务器地址」,人被指去改一条没毛病的链接,
+        而坏的是解析端点)。`["x"]` 则是另一头:列表是列表,元素不是记录,原先逐条
+        `continue` 跳过,末态同样是「确定没有」。
+        """
+        for bad in ({}, '', 0, 'nonsense', ['x'], [None], [['1.2.3.4']]):
+            with self.subTest(bad=repr(bad)):
+                self.arm({'Status': 0, 'Answer': bad})
+                with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+                    with self.assertRaisesRegex(fetching.FeedError, '解析服务不可用'):
+                        fetching.request('https://example.org/rss')
+
+    def test_a_record_whose_type_is_not_an_integer_is_answered_badly(self):
+        """记录自己是个 dict、但 `type` 认不出来 —— 这还是「答得不对」,不是
+        「这个域名没有地址」。
+
+        两头都实测过,而且**错在相反的方向**:缺 `type` 和 `type: "1"` 被
+        `not in (_A, _AAAA)` 逐条跳过,`address_records` 一直是 0,末态报成
+        「无法解析订阅服务器地址」(人被指去改一条没毛病的链接);而 `type: true`
+        和 `type: 1.0` 因为 Python 里 `True == 1`、`1.0 == 1`,**反过来穿过那道判断
+        被当成 A 记录用了** —— 拿一条我们根本没认出类型的记录去连。
+        """
+        for bad in (None, '1', True, 1.0, [1], {'a': 1}):
+            with self.subTest(type=repr(bad)):
+                record = {'name': 'example.org', 'TTL': 300, 'data': '1.1.1.1'}
+                if bad is not None:
+                    record['type'] = bad
+                self.arm({'Status': 0, 'Answer': [record]})
+                with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+                    with self.assertRaisesRegex(fetching.FeedError, '解析服务不可用'):
+                        fetching.request('https://example.org/rss')
+
+    def test_a_legitimate_record_type_still_goes_through(self):
+        """**反过来钉一边**:A / AAAA 照旧收下,CNAME 照旧忽略 —— 把 type 判严了
+        之后最容易顺手把正常答案也拒掉。"""
+        self.arm([answer(rec('93.184.216.34'), {'name': 'x', 'type': 5, 'data': 'y.'}),
+                  answer(rec('2606:4700::1111', rtype=28))])
+        with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+            got = fetching.request('https://example.org/rss')
+        self.assertEqual(200, got.status)
+        self.assertEqual(['93.184.216.34'], self.hosts())
+
+    def test_a_missing_answer_field_is_still_a_normal_empty(self):
+        """**反过来钉一边**:这一栏**根本没出现**(或者是 null)才是合法的空答案 ——
+        只有 A 记录的域名查 AAAA 时常如此。把它也算成故障,双栈解析就再也走不通。"""
+        for empty in ({'Status': 0}, {'Status': 0, 'Answer': None}):
+            with self.subTest(empty=repr(empty)):
+                self.arm([answer(rec('93.184.216.34')), empty])
+                with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
+                    got = fetching.request('https://example.org/rss')
+                self.assertEqual(200, got.status)
+                self.assertEqual(['93.184.216.34'], self.hosts())
 
     def test_a_cname_only_family_is_a_normal_answer(self):
         """**反过来钉一边**:只有 A 记录的域名查 AAAA 时常只回 CNAME —— 那一族空集是
@@ -458,7 +543,7 @@ class SecondsBudgetTests(ResolveBase):
         done = subprocess.run(
             [sys.executable, '-c', 'import kb.feeds.fetching; print("imported")'],
             cwd=str(Path(__file__).resolve().parents[1]),
-            env={**os.environ, resolve.SECONDS_ENV: 'abc'},
+            env={**os.environ, egress.ENV_SECONDS: 'abc'},
             capture_output=True, text=True)
         self.assertEqual(0, done.returncode, done.stderr[-800:])
         self.assertIn('imported', done.stdout)
@@ -466,12 +551,15 @@ class SecondsBudgetTests(ResolveBase):
     def test_a_bad_value_is_reported_where_it_is_used(self):
         for bad in ('abc', '0', '-3'):
             with self.subTest(bad=bad):
-                with patch.dict(os.environ, {resolve.SECONDS_ENV: bad}):
-                    with self.assertRaisesRegex(resolve.Unavailable, resolve.SECONDS_ENV):
-                        resolve.seconds_budget()
+                with patch.dict(os.environ, {egress.ENV_SECONDS: bad}):
+                    with self.assertRaises(egress.BadValue):
+                        egress.seconds()
 
     def test_a_blank_value_falls_back_to_the_default(self):
         for value in ('', '   '):
             with self.subTest(value=value):
-                with patch.dict(os.environ, {resolve.SECONDS_ENV: value}):
-                    self.assertEqual(resolve.DEFAULT_SECONDS, resolve.seconds_budget())
+                with patch.dict(os.environ, {egress.ENV_SECONDS: value}):
+                    self.assertEqual(egress.DEFAULT_SECONDS, egress.seconds())
+
+if __name__ == '__main__':
+    unittest.main()

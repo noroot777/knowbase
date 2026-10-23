@@ -9,7 +9,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-%E2%89%A53.11-3776AB?logo=python&logoColor=white" alt="Python ≥3.11" />
   <img src="https://img.shields.io/badge/license-MIT-17604F" alt="MIT License" />
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Docker-14202B" alt="Platform" />
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Docker-14202B" alt="Platform" />
   <img src="https://img.shields.io/badge/UI-localhost:8787-F3F5F4?labelColor=14202B" alt="Web UI" />
 </p>
 
@@ -32,6 +32,16 @@
 # Docker（索引和检索，不含绿泡泡采集）
 docker compose up -d --build    # http://127.0.0.1:8787
 ```
+
+```powershell
+# Windows 本机（命令和 kb.sh 一一对应；绿泡泡采集与 X 浏览器通道这两条不可用）
+.\kb.cmd start                  # 起面板 http://127.0.0.1:8787
+.\kb.cmd sync                   # 跑全流程
+```
+
+`kb.ps1` 是 `kb.sh` 的对等物，`kb.cmd` 是推荐的调用口——Windows 默认的执行策略会拦住没签名
+的 `.ps1`，而报出来的话跟本项目无关。平台差异和约束见
+[Windows 操作入口](docs/decisions/windows-entry.md)。
 
 打开面板后，首页会引导你完成两步初始配置：
 
@@ -280,19 +290,28 @@ echo '见 [原文](https://example.com/a_(b)) 这篇' | ./kb.sh grab -  # Markdo
 （实测把 `mistral.ai` 解析成 Meta 的地址），而抓取为了防 SSRF 会钉着解析出来的那个
 数字 IP 发请求，于是敲的是别人家的门，面板上只显示一句超时：
 
+**在页面上改：设置 → 出口与解析。** 填一个可信的 DoH 端点（预设给了 Cloudflare、Google
+和「关掉」——判据是**它认不认我们发的那一种 DoH 请求**，不是「这家有没有 DoH」：OpenDNS
+只认另一种协议，填进去下一次抓取当场 HTTP 400），**保存后下一条抓取就用新值，不用重启**。旁边那颗「测一下」会按框里
+还没保存的值真解析一次、报解析出来的地址和耗时——端点留空着测，看到的就是本机解析给的
+那一份，污染与否一眼能对出来。抓取走哪个代理也在同一块面板上配。
+
+命令行等价物（容器、CI 这类没人去点页面的地方；**页面上填了的项优先**）：
+
 ```bash
 # 它住在哪？答案落在别人家的网段里就是被污染了
 python3 -c "import socket;print({a[4][0] for a in socket.getaddrinfo('mistral.ai',None)})"
 
-# 改问一台可信的 DoH 解析器（默认关；关着时一次 DoH 请求都不发，走系统解析）
+# 默认关；关着时一次 DoH 请求都不发，走系统解析
 export KB_FEED_DOH=https://cloudflare-dns.com/dns-query
 export KB_FEED_DOH_SECONDS=8        # 可选，单次查询上限，默认 8 秒
-./kb.sh restart                     # 开关要透传进服务进程，必须重启才生效
-./kb.sh status                      # 会打一行「可信解析:开/关」
+./kb.sh restart                     # 环境变量要透传进服务进程，这条路得重启；页面上改不用
+./kb.sh status                      # 会打一行「可信解析:开/关」，带上这一项的出处
 ```
 
-**端点自己要连得上**：它在墙外的话，这个 shell 得有代理（`HTTPS_PROXY` 之类），
-`./kb.sh start` 会把出口那一族变量一起带进服务进程；探不到出口时它会提示一句。
+**端点自己要连得上**：它在墙外的话得有代理——页面上那一栏可以直接填，也可以用
+`HTTPS_PROXY` 之类的环境变量（`./kb.sh start` 会把出口那一族一起带进服务进程）；
+两处都探不到时 `./kb.sh status` 会提示一句。
 容器部署走 `compose.yaml` 的 `environment`（那条路不经过 `kb.sh`）。
 **已知限制**：没有代理时端点域名本身仍走本机解析，本机被污染得够狠时它也可能被带偏。
 完整形态见 [域名解析与出口](docs/decisions/dns-egress.md)。
@@ -314,7 +333,7 @@ docker compose logs -f --tail 100
 ```bash
 ./kb.sh test             # 提交前的快速层:纯逻辑全量,浏览器回归显式拦下(约 3 分钟)
 ./kb.sh test probes      # 只跑浏览器回归 —— 改了 kb/static/ 或阅读页之后(约 10 分钟)
-./kb.sh test full        # 真全量,push 前至少一次(约 12 分钟)
+./kb.sh test full        # 真全量(约 12 分钟);验收合并时 ash 闸门自动跑这条,手动跑用于排查
 ```
 
 三层都把数据目录换成全新临时目录,不碰真实库;分层口径见

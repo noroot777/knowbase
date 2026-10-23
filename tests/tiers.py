@@ -12,8 +12,9 @@
   充当浏览器覆盖(实测事故形态:缺壳时浏览器用例全 skip、几百条邻居通过,命令照
   样报成功)。
 - **full**:全部,等同 README 里那条 discover 命令(缺工具自然 skip,跟 CI 同一
-  态度,但把浏览器覆盖数打出来)。push 前至少跑一次 —— 共享 `KB_DATA_DIR` 的
-  「只在同跑时红、单跑永远绿」那类问题,只有全量同跑看得见。
+  态度,但把浏览器覆盖数打出来)。**验收合并前必须跑过一次,由 ash 的验收闸门在
+  点验收时自动跑**(手动跑用于排查;动了测试基建/共享夹具的那一轮当轮跑)——
+  共享 `KB_DATA_DIR` 的「只在同跑时红、单跑永远绿」那类问题,只有全量同跑看得见。
 
 **所选层对快速层开关的态度必须显式**(`_apply_tier_env`):fast 设上,probes/full
 把继承值清掉。不清的话,外头 export 过一次的壳里 full 就再也不是「一条不拦」。
@@ -162,7 +163,7 @@ def main(argv: list[str]) -> int:
     line = f"[{tier}] 跑了 {executed} 条,用时 {wall:.0f} 秒"
     if tier == "fast":
         line += (f";浏览器回归 {total - ran} 条被拦"
-                 "(改了前端就跑 ./kb.sh test probes,push 前跑一次 full)")
+                 "(改了前端就跑 ./kb.sh test probes;full 由验收闸门自动跑)")
     else:
         line += f";浏览器用例真跑 {ran}/{total} 条"
     print(line, file=status, flush=True)

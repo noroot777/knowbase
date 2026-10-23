@@ -38,11 +38,12 @@ from feed_trim_fixture import TrimFixture, trim  # noqa: E402
 # 另一个进程持着维护锁。flock 认的是 open file description,所以只有真子进程
 # 才证明得了跨进程互斥(同进程换个 fd 的话重入保护会直接放行)。
 #
-# **探针走 `kb.filelock`,不直接 `import fcntl`**(全局约定):①被测那一侧
-# (`kb.maintenance`)取锁就是过这一层的,探针用同一份后端才算真在验互斥 —— 各用
-# 一套的话,两套后端对不上时这条用例会**绿着骗人**;②`import fcntl` 在 Windows 上
-# 让这段探针直接 ModuleNotFoundError,而红出来只指向 `<string>`,看不出跟维护锁
-# 有关(实测形态:`'busy' != ''`,字面上像「锁没拦住」,其实是子进程没跑起来)。
+# **探针走 `kb.filelock`,不直接 `import fcntl`**(全局约定,见 CLAUDE.md 索引里
+# 的 windows-entry):①被测那一侧(`kb.maintenance`)取锁就是过这一层的,探针用
+# 同一份后端才算真在验互斥 —— 各用一套的话,两套后端对不上时这条用例会**绿着
+# 骗人**;②`import fcntl` 在 Windows 上让这段探针直接 ModuleNotFoundError,而红
+# 出来只指向 `<string>`,看不出跟维护锁有关(实测形态:`'busy' != ''`,字面上
+# 像「锁没拦住」,其实是子进程没跑起来)。
 # 子进程要 import kb,所以把仓库根当第一个参数传进去(`-c` 只把 cwd 放进
 # sys.path,而这几条用例的 cwd 是夹具的临时目录)。
 HOLDER = textwrap.dedent('''
