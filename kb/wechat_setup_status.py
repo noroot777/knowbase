@@ -51,12 +51,18 @@ def normalize(state):
         if not _timestamp(state["updated_at"]):
             raise SetupError(UNAVAILABLE)
         result["updated_at"] = state["updated_at"]
+    if "unresolved" in state:
+        if not isinstance(state["unresolved"], int) or not _timestamp(state["unresolved"]):
+            raise SetupError(UNAVAILABLE)
+        result["unresolved"] = state["unresolved"]
     if state["state"] == "account_selection_required":
         accounts = state.get("accounts")
         result["accounts"] = []
         if isinstance(accounts, list) and all(isinstance(account, dict)
                                             and _text(account.get("id")) for account in accounts):
-            result["accounts"] = [{"id": account["id"]} for account in accounts]
+            result["accounts"] = [{"id": account["id"],
+                                   **({"label": account["label"]} if _text(account.get("label")) else {})}
+                                  for account in accounts]
     elif state["state"] == "authorization_required":
         for field in ("confirmation_token", "account_id", "provider_revision"):
             if _text(state.get(field)):

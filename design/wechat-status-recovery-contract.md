@@ -109,3 +109,36 @@ browser_run.py、serve_scope.py、browser_probe.mjs 和 final_checks.py 保留�
 先尝试 Chrome 扩展具名后台会话「🔎 状态恢复复审修复」，visible=false，实际返回 Capability is not available: visibility；没有移除后台要求重试。随后按规范使用独立临时 profile 的 chrome-headless-shell，明确 --headless，只连接自建无头进程，未使用用户标签、窗口或登录态，未启动有头浏览器。
 
 两套服务 PID 17220/12804、端口 9385/2555，浏览器 PID 22812/7164 均已退出。每轮日志均有 SERVICE_STOPPED 与 TEMP_FIXTURE_REMOVED；cleanup-status.json 记录本轮验证进程与监听端口为 0，主工作区仍干净。未重启 8787、扫描真实客户端或执行首次材料获取；之前记录的策略拒删残余未尝试换通道清理。没有提交或合并。
+
+## 验收合并冲突处理（2026-10-24）
+
+以上冻结基线、叠加验证及未提交说明是各历史回合的记录。本轮按用户要求，仅在任务分支 ash/LKDdRwqG 的工作区执行 git merge main 并提交合并；没有切换、修改或合并到 main，没有删除分支或 worktree。合并前任务提交为 fec04189e61ba3716537841f30d63c0fe5cf0b77，合入的 main 为 27d5d3f787f3db88958f30fdb53d2a92c1130731。
+
+### 双方改动的保留
+
+- 两个冲突文件为 kb/wechat_setup.py 与 kb/static/js/wechat_setup.js。保留 main 的 Windows 接入、平台/版本授权限制、完整终态一次原子发布、worker 收尾只释放锁、仅恢复活动阶段和锁内二次读取；同时保留本任务的严格状态契约、显式备份重置、失效交互降级及前端请求恢复。
+- 作业锁沿用 main 的错误边界：只有文件锁层翻译出的 BlockingIOError 才是忙锁；原始 Windows error 33 不在接入层另行吞成忙碌。读取/锁失败仍失败关闭，不暴露原始系统错误、不获取材料。
+- 合并回归发现严格状态投影需兼容 main 的终态字段：保留合法非负整数 unresolved 和持久化账号标签，补上非法值矩阵与完整终态读回一致性回归。交互校验仍使用后端账号目录生成标签，不信任旧标签。
+- main 的终态/授权回归夹具补齐真实契约需要的临时账号目录、有效令牌、有效期和固定版本；原有断言未删减，版本拒绝测试仍故意使用错误版本。
+- 对比 main 的产品差异仅限本任务的 12 个文件。AST 检查确认 account_roots、_state_file、_lock、_reader_ready、_config、_recovery_lock、_ready、_backup、_connect、_work 与 main 完全一致，活动阶段恢复主体、平台返回、main 既有状态文案与活动枚举也保持一致。
+
+### 实际合并工作树验证
+
+本轮不再用叠加副本代替产品；以下成功结果均针对实际合并工作树。证据目录：D:/ai_workspace/ash/data/runs/LKDdRwqGKHw3/merge-main-verification。
+
+| 检查 | 真实结果 | 证据 |
+| --- | --- | --- |
+| 接入、状态契约、终态恢复、Windows、文件锁与适用 Docker 定向回归 | 124 项全部通过，无跳过 | final-regression.log |
+| 固定 Reader/SQLCipher 集成 | 6 项全部通过，只操作新建加密数据库 | encrypted-reader.log |
+| Node 前端回归 | 18 项全部通过 | initial-js.log |
+| 隔离真实页面 | 18 场景通过，0 脚本异常、0 acquire 请求；16 张截图逐张目检；未使用历史终态刷新兜底 | browser/browser-results.json、contact-1.png 至 contact-4.png |
+| 静态与保留性检查 | Python AST、700 行上限、JS 语法、无冲突标记/未合并索引、双份 diff --check、main AST 保留性对照通过 | final-static.json |
+| 验证清场 | 自建服务/浏览器进程及验证端口均为 0；main 引用未变，主工作区干净 | cleanup-status.json、before-merge.json |
+
+初次合并回归的真实失败保留在 initial-regression.log，包括上述已修兼容缺口。另有两项 Windows/POSIX Docker 基线失败：test_entrypoint_initializes_new_volume_and_preserves_it_on_restart、test_exports_wiki_and_pipeline_use_the_same_mounted_paths；用 git archive 导出的未修改 main 独立副本重跑，两项同样失败，见 main-baseline-docker.log。因此只报告定向回归通过，不宣称整仓全绿，也未扩大范围去修基线 Docker 问题。
+
+### 本轮浏览器通道与清场
+
+先尝试 Chrome 扩展具名后台会话「🔎 接入合并验证」，visible=false，返回 Capability is not available: visibility；没有放宽后台要求重试。按规范降级到独立临时 profile 的 chrome-headless-shell，明确 --headless，仅连接自建无头浏览器；没有接管用户标签、激活窗口、使用用户登录态或启动有头浏览器。
+
+浏览器 PID 26084、隔离服务 PID 27072 及端口 14832 均已关闭；browser-run.log 有 SERVICE_STOPPED、TEMP_FIXTURE_REMOVED，cleanup-status.json 记录进程与监听均为 0。未重启 8787，未扫描真实客户端或执行首次材料获取，未绕过此前临时残余的删除策略。

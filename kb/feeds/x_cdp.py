@@ -52,6 +52,10 @@ import time
 # 而报出来的是一句 `No module named 'fcntl'`,指不到任何跟 X 有关的东西),
 # 真正的拦在 `Chrome.__enter__` 的第一句:那是本模块唯一会动这些东西的入口,
 # 在那儿拦才能给出一句人话。
+# **它要的是 `fcntl.F_DUPFD`,不是文件锁** —— `kb.filelock` 那一层只包 flock,
+# 这里帮不上忙。换句话说这是「真的需要 fcntl 本身」,不是漏改了没过来,别顺手
+# 改成 filelock。包 try 和 `__enter__` 里那句显式报错**两半缺一不可**,都由
+# `tests/test_filelock.py` 的 `POSIX_ONLY` 那条用例钉着。
 try:
     import fcntl
 except ImportError:                      # pragma: no cover - Windows

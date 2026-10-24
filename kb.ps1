@@ -9,11 +9,11 @@ Knowbase 的 Windows 操作入口 —— `kb.sh` 的对等物,一条命令一条
 
   kb.sh                           kb.ps1
   ─────────────────────────────── ──────────────────────────────────────────────
-  daemonize()  fork + setsid      scripts/win_daemon.py spawn(自己的隐藏控制台)
+  daemonize()  fork + setsid      scripts/win_daemon.py spawn(隐藏控制台 + Job Object)
   lsof -ti tcp:N                  Get-NetTCPConnection -LocalPort N -State Listen
-  ps -o ppid=/command=  pgrep -P  Get-CimInstance Win32_Process(一次取全表)
-  kill -INT                       win_daemon.py ctrlbreak(CTRL_BREAK → SIGBREAK)
-  kill -TERM / -KILL              Stop-Process -Force(TerminateProcess)
+  ps -o ppid=/command=  pgrep -P  QueryInformationJobObject(实例成员)
+  kill -INT                       win_daemon.py stop(CTRL_BREAK → SIGBREAK)
+  kill -TERM / -KILL              TerminateJobObject(整个受管理实例)
   env -i HOME=… PATH=…            白名单拼环境,见 scripts/win_env.ps1
   collector/.venv/bin/python      collector\.venv\Scripts\python.exe
   . scripts/web_env.sh            . scripts/win_env.ps1
@@ -28,9 +28,12 @@ Windows 只有「送控制台事件」和「TerminateProcess」两级(没有 SIG
 Set-StrictMode -Version Latest
 # `set -euo pipefail` 的对等物里**最要紧的是这一条**。PowerShell 默认
 # `$ErrorActionPreference = 'Continue'`:cmdlet 报了错它打一行红、然后**接着往下走**
-# —— 于是一个读不出来的状态会被当成「确定没有」。实测形态:`Test-PortBusy` 里一处
+# —— 于是一个读不出来的状态会被当成「确定没有」。实测形态:问端口那一处的
 # StrictMode 报错让 `status` 打了一行红,紧接着照常输出「kb-web 未运行」,而真相是
 # 「没问出来」。这正是本项目最不能要的那一类(「判不准一律抛,不许返回确定没有」)。
+# **光靠这个开关还不够**:问系统的那几个函数自己也得答得出「无法确定」这一档,
+# 口径写在 scripts\win_proc.ps1 开头那节,本文件里 start / stop / status 三处都按
+# 三态分支走。
 # 预期之内的失败一律就地显式放行(`-ErrorAction SilentlyContinue` 或 try/catch),
 # 而不是把全局开关放松。
 #
@@ -66,15 +69,17 @@ $script:Curl = Join-Path $env:SystemRoot 'System32\curl.exe'
 $script:CurlArgs = @('-s', '--connect-timeout', '2', '--max-time', '5', '--noproxy', '*')
 
 $script:Force = $false
-$script:ProcTable = $null
 
 function Write-Note { param([string]$Text) [Console]::Error.WriteLine($Text) }
 function Die { param([string]$Text) [Console]::Error.WriteLine("错误:$Text"); exit 1 }
 
 $null = New-Item -ItemType Directory -Force -Path $script:RunDir, $script:LogDir -EA SilentlyContinue
 
+. (Join-Path $script:Root 'scripts\win_uv.ps1')
 . (Join-Path $script:Root 'scripts\win_py.ps1')
+. (Join-Path $script:Root 'scripts\win_args.ps1')
 . (Join-Path $script:Root 'scripts\win_proc.ps1')
+. (Join-Path $script:Root 'scripts\win_web.ps1')
 . (Join-Path $script:Root 'scripts\win_env.ps1')
 . (Join-Path $script:Root 'scripts\win_stale.ps1')
 
@@ -90,119 +95,6 @@ function Get-Setting {
     $v = [Environment]::GetEnvironmentVariable($Name)
     if ($v) { return $v }
     return ''
-}
-
-# ── kb-web:知识库面板(耗时的活都在它进程里跑)──────────────────────────────
-
-function Initialize-WebEnv {
-    <#  `web_prepare_env` 的对等物。
-
-        **起服务那条命令一律 --offline。** `uv run` 每次都要先确认一遍项目环境,而
-        pyproject.toml 一动(改依赖、改注释都算)它就要重建那个 editable 包 —— 重建要
-        解析 `build-system.requires` 里的 hatchling,不带 --offline 时**即使 uv 缓存里
-        已经有**也要去 pypi 问一次最新版。于是网络一抖启动就挂在
-        「No solution found when resolving: hatchling」上,而这事发生在 daemonize 之后
-        的后台进程里:用户看到的只有一句「kb-web 起不来,看 web.log」,而日志尾巴是
-        一段跟知识库毫无关系的 tls handshake eof。
-
-        「要不要联网装东西」因此挪到前台来问:离线确认不成 —— 真的新增了依赖、或者
-        uv 缓存被清过 —— 才联网装一次。前台做有两个好处:失败当场说得清,而不是让人
-        去日志尾巴里猜;以及用得上当前 shell 的代理设置(清环境那一步把 `*_proxy`
-        一起清掉了,而这台机器上 pypi 常常得走代理)。
-
-        **不用 `uv sync` 做这件事**:它默认 exact,会卸掉 venv 里那份旧项目名的
-        editable 残留,而两份 dist-info 的 RECORD 记着**同一组** kb / kb-web / kb-mcp
-        入口 —— 卸掉它就可能把启动入口一起删了。`uv run` 默认 inexact,压根不碰它。  #>
-    $uv = Get-Uv
-    Push-Location $script:Root
-    try {
-        # **探测用的那句写 `pass`,不许写空串。** kb.sh 那边是 `python -c ""`,而
-        # PowerShell 调原生程序时会把 `''` 整个丢掉 —— python 于是收到一个光秃秃的
-        # `-c`,报 `Argument expected for the -c option` 并以非 0 退出。后果不是
-        # 报错了事:这一步**永远失败**,于是每次起服务都当成「环境要补一下」去联网
-        # 装一次(没网就直接 Die),而那正是这一整段要避免的事。`pass` 同样是空操作。
-        $null = & $uv 'run' '--offline' 'python' '-c' 'pass' 2>&1
-        if ($LASTEXITCODE -eq 0) { return }
-        Write-Note '[web] 环境要补一下(依赖有变动,或 uv 缓存不全),联网装一次'
-        $null = & $uv 'run' 'python' '-c' 'pass' 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Die '依赖装不上,kb-web 起不来。网络通了再跑一次 .\kb.ps1 web start'
-        }
-    } finally { Pop-Location }
-}
-
-function Start-Web {
-    if (@(Get-ServicePids $script:WebPid $script:Port $script:WebPat).Count -gt 0) {
-        Write-Note "[web] 已在 $($script:Api)"
-        Show-CodeStale; Show-GraphStale
-        return
-    }
-    # 端口有人占但不是 kb-web:说清楚,别等它「起完」再报一个莫名其妙的超时
-    if (Test-PortBusy $script:Port) {
-        Die @"
-端口 $($script:Port) 被别的进程占着,kb-web 起不来。
-     换个端口:`$env:KB_WEB_PORT=8788; .\kb.ps1 web start
-"@
-    }
-    if (-not (Test-Path -LiteralPath $script:Curl -PathType Leaf)) {
-        Die "找不到 $($script:Curl) —— 这个入口靠系统自带的 curl 跟面板说话(Win10 1803+ 都有)"
-    }
-    Initialize-WebEnv
-    Show-EgressGap
-    $envPairs = @(Build-WebEnv) + @("PORT=$($script:Port)")
-    $spawn = @($script:WinDaemon, 'spawn', $script:WebPid,
-               (Join-Path $script:LogDir 'web.log'), $script:Root)
-    foreach ($e in $envPairs) { $spawn += @('--env', $e) }
-    $spawn += @('--', (Get-Uv), 'run', '--offline', 'kb-web')
-    $null = Invoke-BootPython $spawn
-    if ($LASTEXITCODE -ne 0) { Die 'win_daemon.py spawn 没起成(上面有原因)' }
-    $n = 0
-    while (-not (Test-PortBusy $script:Port) -and $n -lt 40) { Start-Sleep -Milliseconds 500; $n++ }
-    if (-not (Test-PortBusy $script:Port)) {
-        Die "kb-web 起不来,看 $(Join-Path $script:LogDir 'web.log')"
-    }
-    Write-Note "[web] $($script:Api)"
-    Show-DohLine
-    # 图谱页是 vault 里的产物,不是 kb-web 现渲染的:样式改了得重新生成,提示一句
-    Show-GraphStale
-}
-
-function Stop-Web {
-    <#  管道跑在 kb-web 进程里,杀了它这一轮同步就断在半路(采集到一半的文章要重抓)。
-        所以默认拦一下,给一句怎么强来 —— 而不是二话不说砍掉一个可能跑了半小时的活。
-
-        **这道保护在 Windows 上比在 macOS 上更要紧**:那边停机的第一下是 SIGINT,
-        uvicorn 收到之后会走正常 shutdown;这边第一下是 CTRL_BREAK(也能走 shutdown),
-        但万一它没收到,第二下就直接是 TerminateProcess —— 没有中间那一档可以缓。  #>
-    if (-not $script:Force) {
-        $state = Get-PipelineState
-        if ($state -eq 'running') {
-            Die @"
-同步正在跑,现在停会把它断在半路。
-     等它跑完(.\kb.ps1 status 看进度),或者确实要停就加 --force
-"@
-        }
-        if ($state -eq 'unknown') {
-            Die @"
-问不出同步在不在跑($($script:Api) 没应答),不敢就这么停 —— 它可能正跑到一半。
-     过一会儿再试,或者确实要停就加 --force
-"@
-        }
-    }
-    Stop-Service_ 'kb-web' $script:WebPid $script:Port $script:WebPat
-}
-
-function Get-WebStatus {
-    $pids = @(Get-ServicePids $script:WebPid $script:Port $script:WebPat)
-    if ($pids.Count -gt 0) {
-        Write-Output "kb-web    运行中 ($($script:Api))"
-        Show-CodeStale
-        Show-DohLine
-    } elseif (Test-PortBusy $script:Port) {
-        Write-Output "kb-web    未运行(端口 $($script:Port) 被别的进程占着)"
-    } else {
-        Write-Output 'kb-web    未运行'
-    }
 }
 
 # ── 管道:把耗时的活丢给 kb-web,命令立刻返回 ─────────────────────────────────
@@ -237,15 +129,19 @@ function Invoke-Api {
                     '--data-binary', "@$payload")
         }
         # http_code 只有三位 ASCII,它走 stdout 是安全的;响应体走 -o
+        # `-StdoutOnly`:curl 把连不上那类话写在 stderr 上,并进来这个数字就解析不出。
         $a += @('-o', $out, '-w', '%{http_code}', "$($script:Api)$Path")
-        $codeText = ((& $script:Curl @a 2>$null) -join '').Trim()
+        $codeText = (Invoke-Native $script:Curl $a -StdoutOnly).Text.Trim()
         $code = 0
         $null = [int]::TryParse($codeText, [ref]$code)
-        $body = ''
+        # 名字不许只靠大小写跟上面那个 `[string]$Body` 区分(变量名大小写不敏感,
+        # `$body` 就是它)。眼下不出错只因为请求体在这之前已经用完了 —— 哪天在这
+        # 后面加一次重试,重发的就是**响应**。
+        $respBody = ''
         if (Test-Path -LiteralPath $out -PathType Leaf) {
-            $body = [IO.File]::ReadAllText($out, $utf8)
+            $respBody = [IO.File]::ReadAllText($out, $utf8)
         }
-        return @{ Code = $code; Body = $body }
+        return @{ Code = $code; Body = $respBody }
     } finally {
         Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
         if ($payload) { Remove-Item -LiteralPath $payload -Force -ErrorAction SilentlyContinue }
@@ -276,8 +172,15 @@ function Get-PipelineState {
         空闲,于是状态接口慢一点,stop 就把正在跑的同步砍了 —— 而它天然就会慢,因为
         要顺带探采集器(冷缓存时几十秒),恰好超过 curl 那 5 秒。所以这里还要
         `source=false`:只问「在不在跑」,那是内存里现成的一个布尔值,不该被来源探测
-        拖下水。  #>
-    if (-not (Test-PortBusy $script:Port)) { return 'idle' }
+        拖下水。
+
+        **端口问不出来要落在 unknown,不是 idle** —— 这是停机保护最要命的那一处:
+        压成 idle 的话,`stop` 连问都不问就把正在跑的同步砍了,而「端口查不了」跟
+        「同步没在跑」之间没有任何关系。只有**确定没人监听**才能推出「没在跑」
+        (管道跑在 kb-web 进程里,服务不在就没有管道)。  #>
+    $port = Get-PortState $script:Port
+    if ($port -eq 'unknown') { return 'unknown' }
+    if ($port -eq 'free') { return 'idle' }
     $r = Invoke-Api -Path '/api/pipeline/status?source=false'
     if ($r.Code -ne 200 -or -not $r.Body) { return 'unknown' }
     try { $d = $r.Body | ConvertFrom-Json } catch { return 'unknown' }
@@ -287,32 +190,32 @@ function Get-PipelineState {
 }
 
 function Invoke-Pipeline {
-    <#  组装 /api/pipeline/run 的请求体。stages 为空 = 全流程。  #>
+    <#  组装 /api/pipeline/run 的请求体。stages 为空 = 全流程。
+
+        **全部取值参数在任何副作用之前校验完**(`Start-Web` 就是副作用:它在后台起
+        一个服务,worktree 里还会先撞上那道闸门)。四种写错法各自的后果写在
+        `Read-OptionMap` 上 —— 其中「键在末尾没取值」和「取值是空串」这两种,
+        原先都是**静默变成一次全量同步**。  #>
     param([string[]]$Stages, [string[]]$Arg)
-    $since = ''; $until = ''; $targets = ''; $channel = ''
-    $i = 0
-    while ($i -lt $Arg.Count) {
-        $k = [string]$Arg[$i]
-        $v = if ($i + 1 -lt $Arg.Count) { [string]$Arg[$i + 1] } else { '' }
-        switch ($k) {
-            '--since'   { $since = $v }
-            '--until'   { $until = $v }
-            '--targets' { $targets = $v }
-            '--channel' { $channel = $v }
-            default     { Die "不认识的参数 $k" }
-        }
-        $i += 2
-    }
+    $opt = Read-OptionMap $Arg @('--since', '--until', '--targets', '--channel')
     Start-Web
     if ((Get-PipelineState) -eq 'running') {
         Die "管道已经在跑了(看 $($script:Api) 管道 tab,或 .\kb.ps1 status)"
     }
     $b = @{}
     if ($Stages -and $Stages.Count -gt 0) { $b['stages'] = $Stages }
-    if ($since)   { $b['since_date'] = $since }
-    if ($until)   { $b['until_date'] = $until }
-    if ($targets) { $b['accounts'] = @($targets.Split(',') | Where-Object { $_ }) }
-    if ($channel) { $b['channel'] = $channel }
+    if ($opt.ContainsKey('--since')) { $b['since_date'] = $opt['--since'] }
+    if ($opt.ContainsKey('--until')) { $b['until_date'] = $opt['--until'] }
+    if ($opt.ContainsKey('--channel')) { $b['channel'] = $opt['--channel'] }
+    if ($opt.ContainsKey('--targets')) {
+        # 逐个 Trim 之后再筛空:`--targets "a, b"` 里那个 " b" 配不上任何来源名,
+        # 于是它那一份静默地什么都不同步。**一个名字都没剩下**(`--targets ,`)
+        # 同样要拦 —— 否则 accounts 为空,又回到「静默全量」那一档。
+        $names = @($opt['--targets'].Split(',') | ForEach-Object { $_.Trim() } |
+                   Where-Object { $_ })
+        if ($names.Count -eq 0) { Die '--targets 里一个名字都没有' }
+        $b['accounts'] = $names
+    }
     $r = Invoke-Api -Path '/api/pipeline/run' -Method POST -Body ($b | ConvertTo-Json -Compress)
     if ($r.Code -eq 200) {
         Write-Note "已在后台开始。进度看 $($script:Api) 管道 tab,或跑 .\kb.ps1 status"
@@ -357,15 +260,27 @@ function Invoke-Grab {
         $env:no_proxy = '127.0.0.1,localhost'
         # **余下的参数校验也排在任何副作用之前。** `--parse-only` 只解析就退出:不读
         # 标准输入、不发一个请求、不起服务。它顺带把最终生效的那个 kb-web 地址打回来。
-        $want = ([string](Invoke-BootPython @($cli, '--parse-only', '--api', $script:Api) + $Arg |
-                          Select-Object -First 1)).Trim()
+        #
+        # **`@(...) + $Arg` 必须整个括起来再传。** PowerShell 在参数模式下看到
+        # `f @(a,b) + $Arg`,是把数组绑给第一个参数、再把 `+` 和 `$Arg` **当成另外
+        # 两个位置参数**(实测:函数里 `$Arg` 只收到 `[p|q]`,而 `$args` 里躺着
+        # `[+|System.Object[]]`)。后果是**用户给的链接一条都没传进去** —— argparse
+        # 看到的是一条没有 url 的命令行,而那时服务已经起起来了。
+        # **先收下再判退出码,最后才解析那一行**:`--parse-only` 失败时 stdout 可能
+        # 是空的,先 `.Trim()` 的话真因(argparse 的话写在 stderr 上)已经被
+        # 「$want 是空的」顶掉了。
+        $lines = @(Invoke-BootPython (@($cli, '--parse-only', '--api', $script:Api) + $Arg))
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $want = ([string]($lines | Select-Object -First 1)).Trim()
         # **只有目标就是本机托管那份服务时,才替它起/拦。** `--api` 指到别处(另一台
         # 机器、自己另起的一份)时,下面那道闸门和 Start-Web 管的是**另一个**服务。
         # **明确认出「目标是另一个地址」才跳过** —— `$want` 空着一律照旧按本机走。
         $remote = ($want -match '^https?://') -and ($want -ne $script:Api.TrimEnd('/'))
         if (-not $remote) {
-            if (-not (Test-PortBusy $script:Port)) {
+            # 端口问不出来的那一档按「还没有服务」走:这儿唯一的后果是多问一句
+            # (worktree 里让你去主检出,主检出里接着 Start-Web,而**它自己**会在
+            # 问不出来时拦下来)—— 没有哪条路会因此在 worktree 里真起一份服务。
+            if ((Get-PortState $script:Port) -ne 'busy') {
                 $main = Get-MainCheckout
                 if ($main) {
                     Die @"
@@ -378,7 +293,7 @@ function Invoke-Grab {
             }
             Start-Web
         }
-        Invoke-BootPython @($cli, '--api', $script:Api) + $Arg
+        Invoke-BootPython (@($cli, '--api', $script:Api) + $Arg)
         exit $LASTEXITCODE
     } finally { $env:no_proxy = $saved }
 }
@@ -388,9 +303,11 @@ function Invoke-Grab {
 function Get-MainCheckout {
     <#  如果**当前是 worktree**,返回主检出的路径;否则返回 $null。
         判据用 git 的 common-dir:worktree 的 .git 是个文件,指向主检出那一份。  #>
-    $common = & git -C $script:Root rev-parse --path-format=absolute --git-common-dir 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $common) { return $null }
-    $common = ([string]($common | Select-Object -First 1)).Trim()
+    # `-StdoutOnly`:不是仓库时 git 把 fatal 写在 stderr 上,并进来会被当成路径。
+    $g = @('-C', $script:Root, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    $r = Invoke-Native 'git' $g -StdoutOnly
+    if ($r.Code -ne 0 -or -not $r.Text) { return $null }
+    $common = ([string](($r.Text -split "`n")[0])).Trim()
     if ($common -notmatch '[\\/]\.git[\\/]?$') { return $null }
     $full = [IO.Path]::GetFullPath($common).TrimEnd('\', '/')
     $here = [IO.Path]::GetFullPath((Join-Path $script:Root '.git')).TrimEnd('\', '/')
@@ -404,19 +321,21 @@ function Invoke-Graph {
     # 没设才回退仓库内的 data/。两个构建器本来就按这个环境变量找库和归类缓存,前置检查
     # 要是只认 $ROOT/data,外置数据目录下就会在进构建器之前误报「缺文件」。
     #
-    # **算出来的路径要规范化之后再跟仓库 data/ 比。** 拿原始字符串比的话,
-    # `data\..\data` 和一条指回 data\ 的链接都是同一个目录的另一种写法,却跟
-    # `$ROOT\data` 不相等,下面那道 worktree 闸门当场被绕过去。
-    # `GetFullPath` 去得掉 `..`;符号链接/junction 还要再 Resolve 一次。
+    # **算出来的路径要 realpath 之后再跟仓库 data/ 比。** `data\..\data` 和一条指回
+    # data\ 的目录联接都是同一个目录的另一种写法,却跟 `$ROOT\data` 不相等,下面那道
+    # worktree 闸门当场被绕过去。`Resolve-RealPath` 是这件事在这一侧的唯一做法 ——
+    # **`Resolve-Path` 不算**(它不解 junction,而 junction 正是 Windows 上建链接的
+    # 默认手段),为什么见它自己的说明。
     $raw = Get-Setting 'KB_DATA_DIR'
     if (-not $raw) { $raw = Join-Path $script:Root 'data' }
     if (-not [IO.Path]::IsPathRooted($raw)) { $raw = Join-Path $script:Root $raw }
-    $dataDir = [IO.Path]::GetFullPath($raw).TrimEnd('\', '/')
-    $repoData = [IO.Path]::GetFullPath((Join-Path $script:Root 'data')).TrimEnd('\', '/')
-    foreach ($v in @('dataDir', 'repoData')) {
-        $p = Get-Variable $v -ValueOnly
-        $r = (Resolve-Path -LiteralPath $p -ErrorAction SilentlyContinue)
-        if ($r) { Set-Variable $v -Value ($r.ProviderPath.TrimEnd('\', '/')) }
+    $dataDir = Resolve-RealPath $raw
+    $repoData = Resolve-RealPath (Join-Path $script:Root 'data')
+    if (-not $dataDir -or -not $repoData) {
+        Die @"
+算不出 $raw 的真实路径,于是判不出它是不是仓库内的 data\ —— 那道闸门正是防
+     「拿一个空库建出 0 节点的页面、原子替换掉 vault 里那张好的」。原因在上面那几行。
+"@
     }
     # **仓库内的 data/ 只许在主检出跑。** 它在 .gitignore 里、只有主检出有;worktree
     # 里要么没有、要么是跑测试留下的空壳 —— 照跑的后果实测过:话题图谱拿测试库建出一张
@@ -448,11 +367,14 @@ function Invoke-Graph {
     $uv = Get-Uv
     Push-Location $script:Root
     try {
-        & $uv 'run' 'python' 'scripts/wiki/build_graph_html.py' '--since' $since
+        Invoke-NativeLive $uv @('run', 'python', 'scripts/wiki/build_graph_html.py',
+                                '--since', $since)
         if ($LASTEXITCODE -ne 0) { Die '话题图谱没建成(原因在上面)' }
         # 分类图谱会在「新图明显不如旧图」时拒绝发布并非零退出 —— 那是保护不是故障,
         # 确实该缩的那次(比如故意收紧分类规则)加 --allow-shrink。
-        & $uv 'run' 'python' 'scripts/wiki/build_catgraph.py' '--kind' 'all' '--no-llm' @Arg
+        Invoke-NativeLive $uv (@('run', 'python', 'scripts/wiki/build_catgraph.py',
+                                 '--kind', 'all', '--no-llm') + $Arg)
+
         if ($LASTEXITCODE -ne 0) {
             Die '分类图谱没发布(原因在上面)。拒绝发布是保护:确实该缩就加 --allow-shrink'
         }
@@ -464,7 +386,7 @@ function Invoke-Graph {
 
 function Invoke-CollectorCli {
     <#  `cli()` 的对等物:`-m cli` 要在 collector 目录里跑才找得到模块。  #>
-    param([string[]]$Arg)
+    param([string[]]$Arg, [switch]$Capture)
     if (-not (Test-Path -LiteralPath $script:Py -PathType Leaf)) {
         Die @"
 采集器环境还没装好(找不到 $($script:Py))。
@@ -472,7 +394,10 @@ function Invoke-CollectorCli {
 "@
     }
     Push-Location $script:Collector
-    try { & $script:Py '-m' 'cli' @Arg } finally { Pop-Location }
+    try {
+        if ($Capture) { return (Invoke-Native $script:Py (@('-X', 'utf8', '-m', 'cli') + $Arg) -StdoutOnly) }
+        Invoke-NativeLive $script:Py (@('-m', 'cli') + $Arg)
+    } finally { Pop-Location }
 }
 
 function Get-Status {
@@ -480,7 +405,10 @@ function Get-Status {
     Get-WebStatus
     Write-Output ''
     Write-Output '── 同步进度 ──'
-    if (Test-PortBusy $script:Port) {
+    $port = Get-PortState $script:Port
+    if ($port -eq 'unknown') {
+        Write-Output '(问不出来)'
+    } elseif ($port -eq 'busy') {
         $r = Invoke-Api -Path '/api/pipeline/status'
         $d = $null
         if ($r.Code -eq 200 -and $r.Body) { try { $d = $r.Body | ConvertFrom-Json } catch { } }
@@ -500,13 +428,11 @@ function Get-Status {
     }
     Write-Output ''
     Write-Output '── 公众号来源 ──'
-    # **这一条在 Windows 上注定报接不上,那是对的、不是故障。** 发现文章那一步要读
-    # Mac 绿泡泡客户端的库,Windows 上压根没有那个库。采集器自己会把这件事说清楚,
-    # 所以照原样问它一句、原样打出来,不在这儿替它编一句话。
     $ok = $false
     if (Test-Path -LiteralPath $script:Py -PathType Leaf) {
-        $out = Invoke-CollectorCli @('status') 2>$null
-        $last = @($out | Where-Object { $_ }) | Select-Object -Last 1
+        $result = Invoke-CollectorCli @('status') -Capture
+        $last = @($result.Text -split "`n" | Where-Object { $_ }) | Select-Object -Last 1
+        if ($result.Code -ne 0) { $last = $null }
         if ($last) {
             try {
                 $d = $last | ConvertFrom-Json
@@ -556,7 +482,8 @@ function Invoke-Test {
         $env:TZ = 'Asia/Shanghai'
         $env:HF_HUB_OFFLINE = '1'
         $env:TRANSFORMERS_OFFLINE = '1'
-        & $uv 'run' '--offline' 'python' '-m' 'tests.tiers' $tier
+        # unittest 把进度和结果全写 stderr —— 必须走 Invoke-NativeLive。
+        Invoke-NativeLive $uv @('run', '--offline', 'python', '-m', 'tests.tiers', $tier)
         $rc = $LASTEXITCODE
     } finally {
         Pop-Location
@@ -585,7 +512,7 @@ Knowbase 操作入口(Windows)—— 每条命令跑完就还你终端,不用挂
     .\kb.ps1 sync --channel rss     只跑某一个来源(wechat_local|social|rss)
     .\kb.ps1 status                 服务 / 同步进度 / 来源 一屏看全
 
-  服务(后台守护进程;restart 会先杀掉在跑的那份,不管是谁起的)
+  服务(后台守护进程;restart 只停止本入口登记的当前端口实例)
     .\kb.ps1 start | stop | restart
     .\kb.ps1 web   start|stop|restart|status      面板 $($script:Port)
     .\kb.ps1 logs [行数]
@@ -619,8 +546,8 @@ Knowbase 操作入口(Windows)—— 每条命令跑完就还你终端,不用挂
     .\kb.ps1 accounts list|discover|add|remove|enable|disable [名字]
     .\kb.ps1 setup                  首次准备(装环境、链好采集器的 data 和 .venv)
 
-**公众号采集这一条在 Windows 上做不到**:发现文章那一步要读 Mac 绿泡泡客户端的库,
-Windows 上没有那个库,accounts discover 和 --channel wechat_local 会如实报接不上。
+公众号采集支持本机 Windows x64 的兼容绿泡泡 4.x:先运行 setup,
+再到面板「绿泡泡接入」检查并按本人确认流程接入。不会注入、重启或修改客户端。
 其余阶段(RSS / X / 手动收录 / 导出 / 索引 / 打标 / wiki / 问答)都照常。
 "@)
 }

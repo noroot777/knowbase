@@ -31,6 +31,17 @@ Copyright (c) Cure53 and other contributors
 License: Apache License 2.0 / Mozilla Public License 2.0(双许可)
 https://github.com/cure53/DOMPurify
 
+## 运行时下载的 Windows 接入组件
+
+Windows Reader 来自 iversonzhang50-gif/wechat-intelligence-hub-windows 的固定提交
+578dddde6db3f2466ac2b41ea67d5f993dc436f7，所用 Reader 与权限模块注明 AGPL-3.0-only。
+它们不并入本仓库的 MIT 源码；首次接入时下载到独立私有运行目录，逐文件校验 SHA256。
+再分发这些外部组件时，应同时保留其上游许可证与对应源码及修改说明。
+
+Windows 只读获取工具来自 TANGandXUE/wcdb-key-tool 的固定提交
+79f1b5b92e12c66aa281b4a60a3c478b5f547dfa（MIT License，Copyright (c) 2025 CloudDreamAI / TANGandXUE）。
+同样仅在运行时下载并校验；只调用 extract，不调用断点捕获或完整数据库导出功能。
+
 ## 不在 MIT 覆盖范围内:源自 ZejunCao/WeChatOA_Aggregation 的部分
 
 `collector/` 整体源自 [ZejunCao/WeChatOA_Aggregation](https://github.com/ZejunCao/WeChatOA_Aggregation)。

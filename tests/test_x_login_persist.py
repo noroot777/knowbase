@@ -578,7 +578,7 @@ class LockFailureTests(ImportBase):
         白弹一个授权窗。
         """
         _, chrome = self.wire()
-        with patch.object(x_login_import.fcntl, 'flock',
+        with patch.object(x_login_import.filelock, 'flock',
                           side_effect=OSError('Operation not supported')):
             ok, detail = x_login_import.import_login_state(self.profile)
         self.assertFalse(ok)
@@ -589,7 +589,7 @@ class LockFailureTests(ImportBase):
     def test_real_contention_still_says_someone_else_is_importing(self):
         """**反过来钉一边**:`BlockingIOError` 那一档照旧是那句话。"""
         _, chrome = self.wire()
-        with patch.object(x_login_import.fcntl, 'flock',
+        with patch.object(x_login_import.filelock, 'flock',
                           side_effect=BlockingIOError('已被占用')):
             ok, detail = x_login_import.import_login_state(self.profile)
         self.assertFalse(ok)
@@ -602,15 +602,15 @@ class LockFailureTests(ImportBase):
         于是在接口上变成一个没有原因的 500,用户看到的是「导入没跑完」,而登录态
         其实已经搬好了:他会再点一次,再弹一个授权窗。
         """
-        real = x_login_import.fcntl.flock
+        real = x_login_import.filelock.flock
 
         def flaky(fd, op):
             real(fd, op)
-            if op == x_login_import.fcntl.LOCK_UN:
+            if op == x_login_import.filelock.LOCK_UN:
                 raise OSError('解锁失败')
 
         self.wire()
-        with patch.object(x_login_import.fcntl, 'flock', flaky):
+        with patch.object(x_login_import.filelock, 'flock', flaky):
             ok, detail = x_login_import.import_login_state(self.profile)
         self.assertTrue(ok, detail)
         self.assertIn('还留在磁盘上、X 也还认这份登录态', detail)
@@ -645,9 +645,9 @@ class LockFailureTests(ImportBase):
         path = Path(str(self.ledger) + '.lock')
         fd = x_login_import.os.open(path, x_login_import.os.O_RDWR)
         try:
-            x_login_import.fcntl.flock(
-                fd, x_login_import.fcntl.LOCK_EX | x_login_import.fcntl.LOCK_NB)
-            x_login_import.fcntl.flock(fd, x_login_import.fcntl.LOCK_UN)
+            x_login_import.filelock.flock(
+                fd, x_login_import.filelock.LOCK_EX | x_login_import.filelock.LOCK_NB)
+            x_login_import.filelock.flock(fd, x_login_import.filelock.LOCK_UN)
         finally:
             x_login_import.os.close(fd)
 

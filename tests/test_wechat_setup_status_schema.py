@@ -88,7 +88,8 @@ class StateInterpretationTests(unittest.TestCase):
                    "platform": [None, {}, False], "deployment": [[], 1],
                    "running": [None, "false"], "ready": [1, []],
                    "can_connect": ["false"], "can_reset_status": [1],
-                   "retryable": [None], "provider_ready": [{}], "models_ready": [1]}
+                   "retryable": [None], "provider_ready": [{}], "models_ready": [1],
+                   "unresolved": [None, True, -1, 1.5, "2", 10 ** 400]}
         for kind in ("failed", "ready", "account_selection_required", "authorization_required"):
             for field, values in invalid.items():
                 for value in values:
@@ -188,6 +189,30 @@ class StateInterpretationTests(unittest.TestCase):
                 self.assertEqual(kind, self.reset().json()["state"])
                 self.assertEqual(original, self.path.read_bytes())
         self.assertEqual([], list(self.home.glob("*.bak")))
+
+    def test_main_terminal_fields_survive_normalization_and_republication(self):
+        for kind, fields in (("partial", {"unresolved": 2}),
+                             ("account_selection_required", {"accounts": [{"id": "account-one", "label": "one"}]})):
+            with self.subTest(kind=kind):
+                setup._write({**self.state(kind), **fields})
+                published = json.loads(self.path.read_text(encoding="utf-8"))
+                self.assertEqual(published, setup._read())
+                for field, value in fields.items():
+                    self.assertEqual(value, setup.snapshot()[field])
+
+    def test_raw_windows_lock_failure_does_not_bypass_main_error_translation(self):
+        self.write({"state": "checking", "running": True})
+        failure = OSError("synthetic private failure")
+        failure.winerror = 33
+        with patch.object(setup.filelock, "flock", side_effect=failure):
+            with self.assertRaises(OSError) as raised:
+                setup._lock()
+            self.assertIs(raised.exception, failure)
+            observed = setup.snapshot()
+        self.assertEqual("status_unavailable", observed["state"])
+        self.assertIsNone(observed["running"])
+        self.assertFalse(observed["can_reset_status"])
+        self.assertNotIn("synthetic private failure", observed["message"])
 
 
 if __name__ == "__main__":
