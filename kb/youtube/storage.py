@@ -72,6 +72,14 @@ def db():
         yield connection
 
 
+def permanently_excluded(row, connection=None):
+    if connection is None:
+        with db() as current:
+            return permanently_excluded(row, current)
+    return bool(connection.execute('SELECT 1 FROM feed_item_exclusions WHERE key=?',
+                (reg.item_key('youtube', row['entry']['url']),)).fetchone())
+
+
 def discover(source, entries):
     with maintenance_lock(), db() as connection:
         current = connection.execute('SELECT url,enabled FROM subscriptions WHERE id=?',
@@ -81,6 +89,8 @@ def discover(source, entries):
         connection.execute('DELETE FROM youtube_video_sources WHERE source_id=? AND source_url<>?',
                            (source['id'], source['url']))
         for entry in entries:
+            if permanently_excluded({'entry': entry}, connection):
+                continue
             connection.execute('''INSERT INTO youtube_videos
                 (video_id,entry,views,updated_at) VALUES(?,?,?,?)
                 ON CONFLICT(video_id) DO UPDATE SET entry=excluded.entry,

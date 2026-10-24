@@ -28,6 +28,8 @@ def process(rows, settings, scope, summary, deadline):
     attempts = 0
     probes = 0
     for position, row in enumerate(chosen):
+        if storage.permanently_excluded(row):
+            continue
         if stopped() or time.monotonic() >= deadline:
             summary['stopped'] = stopped()
             summary['message'] = '视频处理已停止或时间预算用尽，未完成的内容留待下轮'
@@ -46,6 +48,8 @@ def process(rows, settings, scope, summary, deadline):
                 continue
             duration = float(metadata['duration'])
             storage.update(row['video_id'], duration=duration)
+            if storage.permanently_excluded(row):
+                continue
             if spent + duration > policy['max_minutes'] * 60:
                 storage.update(row['video_id'], state='deferred', reason='超过本轮累计视频时长预算')
                 continue
@@ -54,6 +58,8 @@ def process(rows, settings, scope, summary, deadline):
             storage.update(row['video_id'], state='processing', gate_code='', reason='正在读取字幕或音频，随后翻译为中文')
             _stage('crawl', 'running', f"YouTube · 处理 {attempts}/{policy['max_videos']} · {row['entry']['title']}")
             transcript = media.obtain(row, metadata, settings, deadline, stopped)
+            if storage.permanently_excluded(row):
+                continue
             entry = notes.build(row, transcript, deadline, stopped)
             storage.update(row['video_id'], state='ready', note=json.dumps(entry, ensure_ascii=False),
                            validation=products.certify(row, metadata, transcript, entry), repair_pending=0,
@@ -147,7 +153,7 @@ def collect(scope):
     summary['ranked'] = len(ranked)
     failures = process(ranked, settings, scope, summary, time.monotonic() + of(settings)['run_seconds'])
     for source in succeeded:
-        outstanding = any(row['last_error'] or row['state'] in ('deferred', 'processing')
+        outstanding = any(not row['excluded'] and (row['last_error'] or row['state'] in ('deferred', 'processing'))
                           for row in storage.rows([source['id']]))
         completed = storage.ready(source)
         if scope.ranged:

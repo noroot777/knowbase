@@ -82,6 +82,9 @@ def quarantine(connection):
 
 
 def publish(connection, source, row):
+    from kb.youtube.storage import permanently_excluded
+    if permanently_excluded(row, connection):
+        return 0
     current = connection.execute('SELECT * FROM youtube_videos WHERE video_id=?', (row['video_id'],)).fetchone()
     if not current:
         raise ValueError('视频成品已不存在')

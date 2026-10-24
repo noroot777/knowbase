@@ -32,6 +32,8 @@ def stamp(value):
 def rejection(row, settings, scope, now, floor):
     policy, entry = config(row), row['entry']
     published = stamp(entry['published'])
+    if row.get('excluded'):
+        return '用户已永久移除此视频，不再处理'
     if not policy.get('ranking_enabled', True):
         return '观察或隔离名单，不自动进入排名'
     if row['state'] == 'excluded' and not scope.force:
@@ -55,6 +57,8 @@ def score(rows, settings, scope, now=None):
     floor = now - timedelta(days=settings['window_days'])
     baselines = {}
     for row in rows:
+        if row.get('excluded'):
+            continue
         for owner in row['owners']:
             baselines.setdefault(owner['source_id'], []).append(row['views'])
     ranked = []
@@ -100,7 +104,8 @@ def score(rows, settings, scope, now=None):
 
 
 def select(rows, settings, force=False):
-    eligible = [row for row in rows if row['state'] != 'ready' and (row['state'] != 'excluded' or force) and
+    eligible = [row for row in rows if not row.get('excluded') and row['state'] != 'ready' and
+                (row['state'] != 'excluded' or force) and
                 (force or row['retry_at'] <= time.time()) and
                 (row['heat_rank'] <= settings['heat_limit'] or row['value_rank'] <= settings['value_limit'])]
     return sorted(eligible, key=lambda row: (min(row['heat_rank'], row['value_rank']),

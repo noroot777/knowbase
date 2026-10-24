@@ -7,6 +7,61 @@
 - 测试使用临时数据库、vault、转录与模型替身，没有修改生产库，也没有调用真实媒体下载、ASR 或付费 LLM。
 - 浏览器夹具只替换远端发现、媒体获取与模型回复；真实执行排名准入、全文分块翻译编排、笔记构建、数据库提交、导出、索引、API 和 UI。
 
+## 追加审查第二轮：永久移除处理闸门（2026-10-24）
+
+对应 `lSOeb3YBCdN_/round-2`。三条意见的技术结论均认可，但本轮只修复原链路内的 F3。
+F1 的历史规模性能退化、F2 的极短归并尾块仍未解决，按用户明确的衍生问题边界提请转独立任务，等待用户裁定；不是三条审查意见全部通过。
+
+### F3 的不变量与执行证据
+
+永久移除以 `feed_item_exclusions` 的内容身份为准，独立于视频的 candidate/ready/failed 等处理状态，也不能由 force 撤销。
+发现阶段不再重新创建该身份或新的订阅归属，排名、频道热度基线和选择阶段均排除它；处理端在元数据前、媒体前、内容模型前重查当前排除记录，发布端在既有写事务中再次检查。
+永久移除项目的旧失败不再阻塞来源成功。Shorts 等可重探的类型排除仍允许显式重试，不与用户永久移除混淆。
+
+哨兵 `uoJuHCxu4_3g` 正常退出，退出码 0：172 项全部通过，无跳过，耗时 12.881 秒。
+其中 84 项为 YouTube 后端检查（含本轮新增 9 项），88 项为共享来源、永久移除、路径身份和预算契约。
+工作目录为 `/Users/fjh/code/knowledge-base/.worktrees/wnYGhulNzmEH`，原始命令：
+
+```sh
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin PYTHONPATH=/Users/fjh/code/knowledge-base/.worktrees/wnYGhulNzmEH/tests:/Users/fjh/code/knowledge-base/.worktrees/wnYGhulNzmEH TMPDIR=/private/tmp KB_DATA_DIR=/private/tmp/kb-youtube-permanent-r2 TZ=Asia/Shanghai HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_exclusions tests.test_youtube_admission tests.test_youtube_channels tests.test_youtube_collector tests.test_youtube_consumers tests.test_youtube_discovery tests.test_youtube_integrity tests.test_youtube_llm_request tests.test_youtube_media tests.test_youtube_notes tests.test_youtube_products tests.test_youtube_stage_cache tests.test_youtube_transcripts tests.test_failure_sources.FailureSourceTests tests.test_feed_drop.FeedDropTests tests.test_feed_drop_paths tests.test_feed_sources tests.test_source_aliases tests.test_feed_budget -v
+```
+
+完整日志：`/Users/fjh/code/harness/data/runs/wnYGhulNzmEH/regression/uoJuHCxu4_3g.log`。
+SHA-256：`b3403600ed3c69aef1f0eb34dbb7954d6fafa3d80d94309fb340c1121be5086e`。
+实际日志含上游 Starlette/pkg_resources 弃用警告，没有测试失败或模型请求管道 ResourceWarning。
+这是本次新版本的执行者回归记录，不复用历史记录，也不提供独立验收或全仓 fast/probes 通过结论。
+
+`tests/test_youtube_exclusions.py` 的 9 项新检查覆盖：
+
+- 已发布、永久移除、再清空资格证明的旧成品，普通同步及 force 均不进入元数据、媒体或模型，也不占榜单和处理额度。
+- candidate、filtered、deferred、processing、failed、ready、excluded 各状态及退避重试；永久移除事实保留，旧失败不阻塞来源成功。
+- 没有现存条目的永久移除身份，再被多个订阅发现也不重建候选或归属。
+- 排名及频道基线不受被移除视频影响，选择入口自身也拒绝 force 绕过。
+- 排名之后才发生移除的旧快照，在元数据之前重新检查。
+- 元数据执行期间移除，不再进入媒体或模型；媒体执行期间移除，不再进入后续内容模型。
+- 已取得的 ready 旧快照，在发布事务中遇到永久移除后不调用写入。
+
+### F1、F2 的边界与待裁定范围
+
+不质疑这两条报告的正确性，转出依据是上一轮修复引出的新根因，不是工作量：
+
+|意见|根因的引入证据|建议独立任务范围|
+|---|---|---|
+|F1：全量重验放大为平方级工作|`4cf56f5..f82cdd2` 将 registry.db 的频道补种改为 initialize，并把限定来源的 products.prepare 改成每次连接全局 quarantine；这是上一轮修复旧成品消费资格时新增的成本。报告亦明确记录“功能修复引入的成本”|按内容/策略版本增量维护资格，保留全存档防绕过，批量更新排名；覆盖 200 条旧视频、无新入选、跨来源读接口、写锁与工作量边界|
+|F2：一字或无语义尾块无法完成归并|同一提交新增 summary_output 的逐块 `len(output) < len(source)` 约束，并将它接入原有 12000 字切块；`4cf56f5` 只有整层缩短检查，无这个逐块不可满足条件。上轮坏缓存失效已经修复，本轮报告的尾块失败是该新约束与旧切块组合引出的另一根因|归并切块、短尾块合并或保留、整层进展不变量；覆盖 24001 及其它单字、标点、空白尾块和健康模型重试，并保留合格上游缓存|
+
+本轮没有修改 registry.db、notes 的归并实现或 quarantine 的全量校验方式，未重跑上述性能与尾块复现，也不声称它们已修好。
+F3 在上一版限定来源的 prepare 与处理链上已经缺少永久排除闸门，属于原 YouTube 处理链路，本轮按共享内容身份修复，不将其误当作仅本轮才出现的衍生问题。
+
+### 验证边界
+
+本轮没有 UI 改动，没有启动或操作浏览器，也没有重新生成或复用截图作为本轮证据。
+回归明确选择后端模块及非 UI 测试类，未运行 YouTube browser、公共布局或移除面板用例，不把历史页面结果算成本轮通过。
+测试只用临时库、替身媒体和模型；模型请求协议测试使用本地 HTTP 服务，未操作生产库、真实媒体、ASR 或付费 LLM。
+处理开始前已永久移除的视频不进入昂贵操作；已启动的单次媒体操作无法追回成本，若期间发生移除，只保证不再启动后续内容模型和发布。
+全局历史重验、极短尾块及此前披露的其它非阻断边界仍保留；新增处理边界核验本身不是历史规模性能优化。
+收尾检查覆盖共同起点以来的 45 个改动代码文件：Python AST/编译、Node 语法、diff 空白及 700 行约束全部通过，registry 仍为 699 行；未发现匹配本轮临时标识或模型请求入口的遗留进程。
+
 ## 追加审查四项修复验证（2026-10-24）
 
 对应审查 `lSOeb3YBCdN_/round-1`，F1–F4 均认可并按原 YouTube 链路修复。
