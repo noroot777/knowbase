@@ -49,6 +49,7 @@ def api_stages():
     return {
         "stages": stages,
         "presets": presets,
+        "preset_name_max_length": llm_presets.NAME_MAX_LENGTH,
         "providers": [{"key": p, "label": llm.PROVIDER_LABEL.get(p, p),
                        "has_key": llm.has_key(p),
                        "models": pool.get(p, [])} for p in llm.PROVIDERS],

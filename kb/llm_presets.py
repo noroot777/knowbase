@@ -5,6 +5,8 @@ from __future__ import annotations
 from kb import llm, llm_stages
 
 
+NAME_MAX_LENGTH = 40
+
 _PRESETS = {
     "claude": ("Claude 默认", "anthropic", "claude"),
     "gpt": ("GPT 默认", "openai", "gpt"),
@@ -15,8 +17,8 @@ def _clean_name(name: str) -> str:
     if not isinstance(name, str):
         raise ValueError("组名必须是文字")
     name = name.strip()
-    if not name or len(name) > 40:
-        raise ValueError("组名需为 1–40 个字符")
+    if not name or len(name) > NAME_MAX_LENGTH:
+        raise ValueError(f"组名需为 1–{NAME_MAX_LENGTH} 个字符")
     if any(ord(character) < 32 or ord(character) == 127 for character in name):
         raise ValueError("组名不能包含换行或控制字符")
     return name

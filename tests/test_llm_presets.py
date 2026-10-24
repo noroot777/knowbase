@@ -184,6 +184,7 @@ class ModelPresetTests(unittest.TestCase):
         response = self.api.get("/api/stages")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()["presets"]), 2)
+        self.assertEqual(response.json()["preset_name_max_length"], llm_presets.NAME_MAX_LENGTH)
         self.assertNotIn("sk-fake", response.text)
         response = self.api.post("/api/stages/preset", json={"preset": "gpt"})
         self.assertEqual(response.status_code, 200)

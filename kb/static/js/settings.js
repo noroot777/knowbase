@@ -194,17 +194,22 @@ function stagePresetCard(preset) {
     <span class="stage-preset-models">${esc(models)}</span>
     ${preset.reason ? `<span class="stage-preset-warning">${esc(preset.reason)}</span>` : ''}
     </button>
-    <div class="stage-preset-editor" data-preset="${esc(preset.key)}" data-name="${esc(preset.label)}">
+    <div class="stage-preset-editor" data-preset="${esc(preset.key)}" data-name="${esc(preset.label)}"
+         data-name-max-length="${esc(preset.name_max_length)}">
       ${stagePresetRenameButton()}
     </div></div>`;
 }
 
 function editStagePresetName(button) {
   const editor = button.closest('.stage-preset-editor');
+  const errorId = 'stage-preset-name-error-' + editor.dataset.preset;
   editor.innerHTML = `<form onsubmit="saveStagePresetName(event, this)">
-    <input name="name" aria-label="组名" value="${esc(editor.dataset.name)}" maxlength="40" required>
+    <input name="name" aria-label="组名" value="${esc(editor.dataset.name)}"
+           maxlength="${esc(editor.dataset.nameMaxLength)}" aria-describedby="${esc(errorId)}"
+           aria-invalid="false" required oninput="clearStagePresetNameError(this.form)">
     <button type="submit" class="text-button">保存组名</button>
     <button type="button" class="text-button" onclick="cancelStagePresetName(this)">取消</button>
+    <div id="${esc(errorId)}" class="field-err" role="alert"></div>
     </form>`;
   const input = editor.querySelector('input');
   input.focus();
@@ -219,31 +224,57 @@ function cancelStagePresetName(button) {
 
 function saveStagePresetName(event, form) {
   event.preventDefault();
+  clearStagePresetNameError(form);
+  const generation = stageSaveGeneration;
   const preset = form.closest('.stage-preset-editor').dataset.preset;
-  const name = form.elements.namedItem('name').value;
-  return queueStageSave(() => persistStages('/api/stages/preset/name', { preset, name }, false));
+  const input = form.elements.namedItem('name');
+  const name = input.value;
+  return queueStageSave(() => persistStages('/api/stages/preset/name', { preset, name }, false))
+    .then(() => {
+      if (generation === stageSaveGeneration && form.isConnected
+          && input.getAttribute('aria-invalid') === 'true') input.focus();
+    });
+}
+
+function clearStagePresetNameError(form) {
+  form.querySelector('.field-err').textContent = '';
+  form.elements.namedItem('name').setAttribute('aria-invalid', 'false');
 }
 
 function renderStages(data) {
-  $('stages-presets').innerHTML = (data.presets || []).map(stagePresetCard).join('');
+  $('stages-presets').innerHTML = (data.presets || []).map(preset => stagePresetCard({
+    ...preset, name_max_length: data.preset_name_max_length,
+  })).join('');
   $('stages-list').innerHTML = data.stages.map(stage => stageRow(stage, data.providers)).join('');
   setStageBusy();
 }
 
 async function refreshStages() {
+  const generation = stageSaveGeneration;
+  const readVersion = ++stageReadVersion;
   try {
     const response = await fetch('/api/stages');
     if (!response.ok) throw new Error(response.status);
-    renderStages(await response.json());
+    const data = await response.json();
+    if (generation !== stageSaveGeneration || readVersion !== stageReadVersion) return;
+    renderStages(data);
   } catch (e) {
+    if (generation !== stageSaveGeneration || readVersion !== stageReadVersion) return;
     $('stages-presets').innerHTML = '';
     $('stages-list').innerHTML = '<div class="empty">状态获取失败</div>';
   }
 }
 
 function openStages() {
+  const interrupted = stageSavePending > 0;
+  stageSaveGeneration++;
+  stageSaveController?.abort();
+  stageSaveController = null;
+  stageSavePending = 0;
+  stageSaveChain = Promise.resolve();
   $('stages-modal').style.display = '';
-  $('stages-msg').textContent = '';
+  $('stages-msg').textContent = interrupted ? '上次保存结果尚未确认,正在重新读取当前配置…' : '';
+  setStageBusy();
   refreshStages();
 }
 function closeStages() { $('stages-modal').style.display = 'none'; }
@@ -252,6 +283,10 @@ function closeStages() { $('stages-modal').style.display = 'none'; }
 // 这里只是免得两个请求的响应交错回来、把列表渲染成旧的那一份。
 let stageSaveChain = Promise.resolve();
 let stageSavePending = 0;
+let stageSaveGeneration = 0;
+let stageReadVersion = 0;
+let stageSaveController = null;
+const STAGE_SAVE_TIMEOUT_MS = 20000;
 
 function setStageBusy() {
   $('stages-content').setAttribute('aria-busy', String(stageSavePending > 0));
@@ -261,9 +296,13 @@ function setStageBusy() {
 }
 
 function queueStageSave(action) {
+  const generation = stageSaveGeneration;
   stageSavePending++;
   setStageBusy();
-  stageSaveChain = stageSaveChain.then(action).catch(() => {}).finally(() => {
+  stageSaveChain = stageSaveChain.then(() => {
+    if (generation === stageSaveGeneration) return action();
+  }).catch(() => {}).finally(() => {
+    if (generation !== stageSaveGeneration) return;
     stageSavePending--;
     setStageBusy();
   });
@@ -287,14 +326,42 @@ async function _saveStage(key, value) {
 }
 
 async function persistStages(url, body, refreshFavorites) {
+  const generation = stageSaveGeneration;
+  const controller = new AbortController();
+  stageSaveController = controller;
+  stageReadVersion++;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, STAGE_SAVE_TIMEOUT_MS);
   $('stages-msg').textContent = '保存中…';
   try {
     const r = await fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
-    if (await toastIfFail(r, '保存失败')) { $('stages-msg').textContent = ''; return; }
+    if (!r.ok) {
+      const detail = await apiFail(r, '保存失败');
+      if (timedOut) throw new Error('保存超时');
+      if (generation !== stageSaveGeneration) return;
+      $('stages-msg').textContent = '';
+      const editor = [...$('stages-presets').querySelectorAll('.stage-preset-editor')]
+        .find(element => element.dataset.preset === body.preset);
+      const fieldError = editor?.querySelector('.field-err');
+      if (r.status === 400 && body.name !== undefined && fieldError) {
+        fieldError.textContent = detail;
+        const input = editor.querySelector('input');
+        input.setAttribute('aria-invalid', 'true');
+        return;
+      }
+      toast('保存失败', { detail });
+      return;
+    }
     const d = await r.json();
+    if (timedOut) throw new Error('保存超时');
+    if (generation !== stageSaveGeneration) return;
     renderStages(d);
     if (d.renamed_preset) {
       $('stages-msg').textContent = '✓ 组名已保存：' + d.renamed_preset;
@@ -310,8 +377,13 @@ async function persistStages(url, body, refreshFavorites) {
       initFavTools();
     }
   } catch (e) {
-    $('stages-msg').textContent = '';
-    toast('保存失败', { detail: e.message });
+    if (generation !== stageSaveGeneration) return;
+    const detail = timedOut ? '保存超时,结果尚未确认。请重新打开面板核对后再试。' : e.message;
+    $('stages-msg').textContent = timedOut ? detail : '';
+    toast('保存失败', { detail });
+  } finally {
+    clearTimeout(timer);
+    if (stageSaveController === controller) stageSaveController = null;
   }
 }
 

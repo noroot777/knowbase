@@ -268,6 +268,7 @@ body.chat-mode { padding-bottom: 28px; }
 .stage-preset-editor form { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 7px; align-items: center; }
 .stage-preset-editor input { width: 100%; min-width: 0; font-size: 12px; }
 .stage-preset-editor .text-button { font-size: 12px; min-height: 32px; padding: 3px 0; }
+.stage-preset-editor .field-err { grid-column: 1 / -1; text-align: left; }
 .stage-preset {
   display: flex; flex: 1; flex-direction: column; gap: 7px; padding: 12px; min-width: 0; width: 100%;
   text-align: left; color: var(--ink); background: var(--card);
